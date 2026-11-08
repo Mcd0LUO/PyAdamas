@@ -15,22 +15,31 @@
 ## 对象布局
 
 ```c
+typedef struct {
+    int64_t rc;             /* INT64_MIN = 永生（字面量） */
+    void (*dtor)(void*);    /* rc 归零时回调，字符串为 NULL */
+} Py23Rc;                   /* 位于负载之前 16 字节，对象指针不指向它 */
+
 typedef struct { int64_t len; int64_t hash; const char* data; } Py23Str;
-typedef struct { int64_t len; int64_t cap; int64_t* data; } Py23List;
+typedef struct { int64_t len; int64_t cap; int64_t* data; int64_t elem_kind; } Py23List;
 /* 用户对象没有对应的 C struct：布局由编译器按类定义生成。
-   +0 是 vtable 指针，字段从 +8 起，每个 8 字节。 */
+   负载 +0 是 vtable 指针，字段从 +8 起，每个 8 字节；隐藏的 Py23Rc
+   头在负载前面，所以既有偏移一个都没变。 */
 ```
+
+分配统一走 `rc_alloc(size, dtor)`，返回负载指针；`py23_rc_inc` / `py23_rc_dec`
+从负载指针往前 16 字节找到头。`rc_dec` 归零时先调 `dtor`，再释放整块内存。
 
 ### 字符串
 
 `len` 放在**偏移 0**，这是刻意的：`len(s)` 编译成一条 `movq (%rax), %rax`，`if s:` 也只是读这个字段。`hash` 预留给字符串驻留，现在恒为 0。
 
-字符串有两种来源，布局完全一致，运行时函数不需要区分：
+字符串有两种来源，负载布局完全一致，运行时函数不需要区分：
 
 | 来源 | 分配方式 | 生命周期 |
 |---|---|---|
-| 字面量 | codegen 在 `.data.rel.ro` 里静态构造 | 与进程同寿，永不释放 |
-| 拼接 / 转换 | `malloc(sizeof(Py23Str) + len + 1)`，字符区紧跟结构体 | 永不释放（目前） |
+| 字面量 | codegen 在 `.data.rel.ro` 里静态构造，前置 `rc = INT64_MIN` | 与进程同寿，inc/dec 直接跳过 |
+| 拼接 / 转换 | `rc_alloc(sizeof(Py23Str) + len + 1, NULL)`，字符区紧跟结构体 | 引用计数归零时释放 |
 
 堆分配的字符串尾部补 `\0`，方便调试时直接当 C 字符串看；但长度以 `len` 为准，内嵌 `\0` 是合法的。
 
@@ -38,17 +47,31 @@ typedef struct { int64_t len; int64_t cap; int64_t* data; } Py23List;
 
 `cap` 是已分配容量，`len` 是有效元素数，`data` 是 8 字节槽数组。元素统一占 8 字节：整数直接放，浮点放位模式（`memcpy` 转换），指针放地址。**没有运行时类型标签**——取值时按什么类型解释由编译期决定。
 
-`py23_list_new(cap)` 最小容量 4；`append` 满了就翻倍。
+`elem_kind` 是元素所有权类别，由降级器按容器静态类型算好：
+
+| kind | 含义 | 写入时 | 覆盖 / 截断 / 销毁时 |
+|---|---|---|---|
+| 0 | 全部非堆类型 | 不 retain | 不 release |
+| 1 | 全部堆类型 | 生成代码 retain | 运行时 release |
+| 2 | unknown 或混合 | 已知堆类型才 retain | 不 release（看不见的类型不敢 dec） |
+
+`py23_list_new(cap, elem_kind)` 最小容量 4；`append` 满了就翻倍。
+`py23_list_set` 只在 kind 1 时 dec 旧元素；`py23_list_set_len` 只在 kind 1
+时 dec 被截掉的元素。kind 2 会泄漏元素引用，这是「宁可泄漏，不可误杀」的代价。
 
 ### 用户对象
 
-对象是编译器按类定义排出来的连续内存，运行时只知道「多大」：
+对象是编译器按类定义排出来的连续内存，运行时只知道「多大」和析构器：
 
 ```c
-void* py23_obj_new(int64_t size);   /* calloc(1, size)，size < 8 报错 */
+void* py23_obj_new(int64_t size, void (*dtor)(void*));
 ```
 
-调用方（生成代码）紧接着把 vtable 地址写到偏移 0。用 `calloc` 而不是 `malloc`：全零同时是 `0` / `None` / 假，和栈槽「未赋值就是 None」的约定一致。
+调用方（生成代码）紧接着把 vtable 地址写到偏移 0。分配全零：0 同时是
+`0` / `None` / 假，和栈槽「未赋值就是 None」的约定一致。
+
+析构器由 codegen 按类布局生成，只 `rc_dec` 堆类型字段；没有堆字段的类传
+`NULL`。子类析构器包含父类字段，顺序与对象布局一致。
 
 vtable 是静态数据，在 `.data.rel.ro` 里，由 codegen 按 `IRClass::vtable` 生成，运行时不需要知道它的存在。
 
@@ -60,17 +83,28 @@ vtable 是静态数据，在 `.data.rel.ro` 里，由 codegen 按 `IRClass::vtab
 
 | 函数 | 签名 | 语义 |
 |---|---|---|
-| `py23_list_new` | `(i64 cap) -> Py23List*` | 建空表，容量至少 4 |
-| `py23_list_append` | `(Py23List*, i64) -> void` | 追加，满则翻倍 `realloc` |
-| `py23_list_get` | `(Py23List*, i64) -> i64` | 负索引先加 `len`；越界 panic |
-| `py23_list_set` | `(Py23List*, i64, i64) -> void` | 同上，写入 |
-| `py23_list_set_len` | `(Py23List*, i64) -> void` | 直接改 `len`（`list.pop` 用） |
+| `py23_list_new` | `(i64 cap, i64 elem_kind) -> Py23List*` | 建空表，容量至少 4 |
+| `py23_list_append` | `(Py23List*, i64) -> void` | 追加，满则翻倍 `realloc`；不隐式 retain |
+| `py23_list_get` | `(Py23List*, i64) -> i64` | 负索引先加 `len`；越界 panic；返回借用 |
+| `py23_list_set` | `(Py23List*, i64, i64) -> void` | 同上，写入；kind 1 时 dec 旧元素 |
+| `py23_list_set_len` | `(Py23List*, i64) -> void` | 改 `len`；kind 1 时 dec 被截掉的元素 |
 
 ### 对象
 
 | 函数 | 签名 | 语义 |
 |---|---|---|
-| `py23_obj_new` | `(i64 size) -> void*` | `calloc(1, size)`，全零；`size < 8` panic |
+| `py23_obj_new` | `(i64 size, void (*dtor)(void*)) -> void*` | `rc_alloc`，全零；`size < 8` panic |
+
+### 引用计数
+
+| 函数 | 签名 | 语义 |
+|---|---|---|
+| `py23_rc_inc` | `(void*) -> void` | 引用 +1；空指针和永生字面量跳过 |
+| `py23_rc_dec` | `(void*) -> void` | 引用 -1；归零时调 `dtor` 并释放整块 |
+| `py23_rc_temp` | `(void*) -> void` | 表达式临时值入栈，接管产生者的引用 |
+| `py23_rc_mark` | `() -> i64` | 返回临时值栈当前水位 |
+| `py23_rc_cleanup` | `(i64 mark) -> void` | 释放到指定水位 |
+| `py23_rc_shutdown` | `() -> void` | 入口函数退出时释放临时栈自身存储 |
 
 ### 字符串
 
@@ -134,14 +168,30 @@ vtable 是静态数据，在 `.data.rel.ro` 里，由 codegen 按 `IRClass::vtab
 
 ## 内存模型
 
-**只分配，不释放。** 没有 GC、没有引用计数、没有 `free`。
+**引用计数。** 每个堆对象带隐藏的 `Py23Rc{rc, dtor}` 头；所有权约定：
 
-- 字面量和常量在只读段，不占堆。
-- 拼接、转换、列表扩容都走 `malloc` / `realloc`。
-- 对象走 `calloc`，生命周期由使用者决定（目前也是永不释放）。
-- 长生命周期的程序会稳定泄漏，现在只适合跑短程序或一次性计算。
+- 槽 / 全局 / 字段 / kind 1 列表元素持有引用；
+- `load` / `field.get` / `list.get` 只借用，不增加计数；
+- 函数形参在入口统一 retain 一份，出口释放；
+- 返回值在返回处 retain，调用方拿到的是新引用；
+- 每个新堆值带着 `rc=1` 进临时值栈，语句 / 循环 / 函数边界按 mark 清理。
 
-这是当前最大的技术债，见 [roadmap.md](roadmap.md)。静态类型的好处是插桩位置是确定的：每个赋值、每次传参、每个返回点都是明确的增减引用点，不需要保守扫描栈和寄存器。
+临时值栈让降级器不用做活跃性分析：就算某个分支、`continue`、`break`
+跳过一条清理路径，下一层边界也会兜底。代价是纯堆操作会多几条调用；
+完全不含临时堆值的语句、循环和函数会把 mark/cleanup 在降级期删掉，
+所以整数代码的生成结果与 0.6.1 完全相同。
+
+不是所有东西都会回收：
+
+- **循环引用没人收**：`a.next = a` 这种环会一直活着；还没有标记-清扫。
+- **unknown 类型不插桩**：机器表示可能是整数，按指针 dec 会崩。unknown
+  值以及 `list[unknown]` / 混合类型元组的元素会泄漏。
+- 进程退出时入口函数会释放全局变量并关掉临时栈，ASan 的泄漏检查
+  因此仍能保持零报告（有环的情况除外）。
+
+静态类型的好处是插桩位置是确定的：赋值、传参、返回、容器写入都是明确
+的增减引用点，不需要保守扫描栈和寄存器。后续做闭包和异常时，cell 与
+异常对象也要遵守同一套所有权约定。
 
 ## 加一个运行时函数
 
@@ -155,4 +205,9 @@ vtable 是静态数据，在 `.data.rel.ro` 里，由 codegen 按 `IRClass::vtab
 
 ## 未来
 
-引用计数会改 ABI：对象头要加 `refcount` 字段，且所有返回堆对象的运行时函数都隐含「返回一个引用」。这件事要和闭包（cell 也要引用计数）、异常（异常对象也要）一起设计，单独改运行时没有意义。
+- **循环收集**：现在只有引用计数，环永远不释放。要做得加一个试验性的
+  标记-清扫，至少覆盖列表和用户对象。
+- **闭包 / 异常接入**：cell 和异常对象也要遵守「存储持有、读取借用、
+  临时值入栈」的约定，直接复用 `rc_alloc` 与临时值栈。
+- **kind 2 元素**：`list[unknown]` 现在只 retain 不 release。要彻底解决，
+  得给容器元素加运行时类型标签，或者把 unknown 从语言里消掉。

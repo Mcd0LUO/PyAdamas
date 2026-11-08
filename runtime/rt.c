@@ -4,13 +4,15 @@
  * 值统一用 int64_t 传递：整数就是整数，浮点是它的位模式，指针是地址。
  *
  * 字符串有两种来源：
- *   1. 字面量 —— 由 codegen 在 .rodata 里静态构造（len/hash/data 三字段），
- *      永远不会被修改，也不需要释放；
- *   2. 拼接/转换 —— 在堆上一次分配 header + 字符数据。
- * 两者布局一致，所以运行时函数不需要区分。
+ *   1. 字面量 —— 由 codegen 在 .data.rel.ro 里静态构造（len/hash/data 三字段），
+ *      rc 头是 INT64_MIN，永不释放；
+ *   2. 拼接/转换 —— 在堆上用 rc_alloc 分配。
+ * 两者负载布局一致，所以运行时函数不需要区分。
  *
- * 内存目前只分配不释放。等 GC 或引用计数做好之前，编译器只适合跑
- * 短生命周期的程序 —— 这一点在 README 里写清楚了。
+ * 内存管理：引用计数。每个堆对象前面有一个隐藏的 Py23Rc 头（rc + dtor），
+ * 负载指针保持原布局不变。new 出来 rc = 1，所有者是产生它的表达式；
+ * 表达式临时值进入临时值栈，生成代码在语句/循环/函数边界按 mark 清理。
+ * 循环引用没有收集器，会泄漏；unknown 类型不参与计数（宁可泄漏）。
  */
 #include <math.h>
 #include <stdint.h>
@@ -24,23 +26,101 @@ typedef struct {
     const char* data;
 } Py23Str;
 
+/* elem_kind: 0 = 全部非堆类型，1 = 全部堆类型，2 = 有 unknown / 混合。
+   kind 1 的元素在写入时由生成代码 retain，销毁时由运行时 release；
+   kind 2 只 retain 不 release（看不见的类型不敢 dec），代价是泄漏。 */
 typedef struct {
     int64_t len;
     int64_t cap;
     int64_t* data;
+    int64_t elem_kind;
 } Py23List;
 
-/* ── 内部工具 ─────────────────────────────────────────────────── */
+/* ── 引用计数 ─────────────────────────────────────────────────── */
+
+/* 隐藏头放在负载前面，负载指针（字符串的 len、对象的 vtable）保持原样。
+   字面量在 .data.rel.ro 里静态构造，rc 是 INT64_MIN，inc/dec 直接跳过。 */
+typedef struct {
+    int64_t rc;
+    void (*dtor)(void*);
+} Py23Rc;
+
+#define PY23_RC_IMMORTAL INT64_MIN
 
 static void panic_c(const char* msg) {
     fprintf(stderr, "py23: runtime error: %s\n", msg);
     exit(1);
 }
 
+static void* rc_alloc(int64_t size, void (*dtor)(void*)) {
+    if (size < 0) panic_c("negative allocation size");
+    Py23Rc* h = (Py23Rc*)malloc(sizeof(Py23Rc) + (size_t)size);
+    if (!h) panic_c("out of memory");
+    h->rc = 1;
+    h->dtor = dtor;
+    void* p = (char*)h + sizeof(Py23Rc);
+    memset(p, 0, (size_t)size);
+    return p;
+}
+
+void py23_rc_inc(void* p) {
+    if (!p) return;
+    Py23Rc* h = (Py23Rc*)p - 1;
+    if (h->rc == PY23_RC_IMMORTAL) return;
+    if (h->rc <= 0) panic_c("refcount increment on a freed object");
+    h->rc++;
+}
+
+void py23_rc_dec(void* p) {
+    if (!p) return;
+    Py23Rc* h = (Py23Rc*)p - 1;
+    if (h->rc == PY23_RC_IMMORTAL) return;
+    if (h->rc <= 0) panic_c("refcount decrement on a freed object");
+    if (--h->rc == 0) {
+        if (h->dtor) h->dtor(p);
+        free(h);
+    }
+}
+
+/* 表达式临时值栈：每个新堆值在产生时带着 rc=1 入栈，语句/循环/函数
+   边界按 mark 统一释放。这样不需要做活跃性分析，也不会漏掉某条路径。
+   入栈不增加计数——栈接管的是「产生者」本来就持有的那一个引用。 */
+static void** temp_stack;
+static int64_t temp_len;
+static int64_t temp_cap;
+
+int64_t py23_rc_mark(void) { return temp_len; }
+
+void py23_rc_temp(void* p) {
+    if (!p) return;
+    Py23Rc* h = (Py23Rc*)p - 1;
+    if (h->rc == PY23_RC_IMMORTAL) return;
+    if (temp_len == temp_cap) {
+        int64_t ncap = temp_cap ? temp_cap * 2 : 64;
+        void** ns = (void**)realloc(temp_stack, sizeof(void*) * (size_t)ncap);
+        if (!ns) panic_c("out of memory");
+        temp_stack = ns;
+        temp_cap = ncap;
+    }
+    temp_stack[temp_len++] = p;
+}
+
+void py23_rc_cleanup(int64_t mark) {
+    if (mark < 0 || mark > temp_len) panic_c("invalid temporary stack mark");
+    while (temp_len > mark) py23_rc_dec(temp_stack[--temp_len]);
+}
+
+/* 程序退出前由入口函数调用：临时栈此时已经清空，把栈本身的存储还掉。 */
+void py23_rc_shutdown(void) {
+    free(temp_stack);
+    temp_stack = NULL;
+    temp_len = 0;
+    temp_cap = 0;
+}
+
 static Py23Str* str_alloc(int64_t len) {
     if (len < 0) panic_c("negative string length");
-    Py23Str* s = (Py23Str*)malloc(sizeof(Py23Str) + (size_t)len + 1);
-    if (!s) panic_c("out of memory");
+    Py23Str* s = (Py23Str*)rc_alloc((int64_t)sizeof(Py23Str) + len + 1, NULL);
     s->len = len;
     s->hash = 0;
     char* p = (char*)(s + 1);
@@ -182,18 +262,28 @@ int64_t py23_str_cmp(Py23Str* a, Py23Str* b) {
 
 /* ── 列表 ─────────────────────────────────────────────────────── */
 
-Py23List* py23_list_new(int64_t cap) {
+static void list_destroy(void* p) {
+    Py23List* l = (Py23List*)p;
+    if (l->elem_kind == 1)
+        for (int64_t i = 0; i < l->len; ++i) py23_rc_dec((void*)l->data[i]);
+    free(l->data);
+}
+
+Py23List* py23_list_new(int64_t cap, int64_t elem_kind) {
     if (cap < 0) panic_c("negative list capacity");
+    if (elem_kind < 0 || elem_kind > 2) panic_c("invalid list element kind");
     if (cap < 4) cap = 4;
-    Py23List* l = (Py23List*)malloc(sizeof(Py23List));
-    if (!l) panic_c("out of memory");
+    Py23List* l = (Py23List*)rc_alloc((int64_t)sizeof(Py23List), list_destroy);
     l->len = 0;
     l->cap = cap;
+    l->elem_kind = elem_kind;
     l->data = (int64_t*)malloc(sizeof(int64_t) * (size_t)cap);
     if (!l->data) panic_c("out of memory");
     return l;
 }
 
+/* 元素引用由生成代码在写入前 retain（kind 1/2 且源类型已知是堆），
+   运行时不再重复 inc；kind 1 覆盖/截断/销毁时负责 release。 */
 void py23_list_append(Py23List* l, int64_t v) {
     if (l->len == l->cap) {
         int64_t ncap = l->cap ? l->cap * 2 : 4;
@@ -214,11 +304,15 @@ int64_t py23_list_get(Py23List* l, int64_t i) {
 void py23_list_set(Py23List* l, int64_t i, int64_t v) {
     if (i < 0) i += l->len;
     if (i < 0 || i >= l->len) panic_c("list assignment index out of range");
+    int64_t old = l->data[i];
     l->data[i] = v;
+    if (l->elem_kind == 1) py23_rc_dec((void*)old);
 }
 
 void py23_list_set_len(Py23List* l, int64_t n) {
     if (n < 0 || n > l->len) panic_c("invalid list length");
+    if (l->elem_kind == 1)
+        for (int64_t i = n; i < l->len; ++i) py23_rc_dec((void*)l->data[i]);
     l->len = n;
 }
 
@@ -226,12 +320,11 @@ void py23_list_set_len(Py23List* l, int64_t n) {
 
 /* 对象 = [vtable 指针][字段 0][字段 1]…。分配时全部清零：0 同时是
    None / 0 / 假，和栈槽的约定一致，所以「声明了但没赋值的字段」
-   天然就是 None。vtable 指针由生成代码紧接着写入。 */
-void* py23_obj_new(int64_t size) {
+   天然就是 None。vtable 指针由生成代码紧接着写入。
+   dtor 由代码生成按类布局生成，只 dec 堆类型字段。 */
+void* py23_obj_new(int64_t size, void (*dtor)(void*)) {
     if (size < 8) panic_c("object size too small");
-    void* p = calloc(1, (size_t)size);
-    if (!p) panic_c("out of memory");
-    return p;
+    return rc_alloc(size, dtor);
 }
 
 /* ── 输出 ─────────────────────────────────────────────────────── */

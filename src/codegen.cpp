@@ -83,6 +83,10 @@ public:
             for (size_t i = 0; i < m.strings.size(); ++i) {
                 const std::string& s = m.strings[i];
                 out_ += "\t.align 8\n";
+                // 隐藏的 RC 头：rc = INT64_MIN 表示永生（字面量不参与回收），
+                // dtor = 0。负载仍然以 len 开头，布局和堆上的字符串一致。
+                out_ += "\t.quad 0x8000000000000000\n";
+                out_ += "\t.quad 0\n";
                 out_ += std::format(".Lstr{}:\n", i);
                 out_ += std::format("\t.quad {}\n", s.size());
                 out_ += "\t.quad 0\n";
@@ -114,6 +118,26 @@ public:
         }
 
         out_ += "\t.text\n";
+
+        // 每个有堆字段的类生成一个析构器，对象 rc 归零时由运行时回调。
+        // 只 dec 堆字段，字段偏移与对象布局一致（父类字段在前）。
+        for (size_t i = 0; i < m.classes.size(); ++i) {
+            const IRClass& c = m.classes[i];
+            bool has_heap = std::ranges::any_of(c.field_heap, [](uint8_t v) { return v != 0; });
+            if (!has_heap) continue;
+            out_ += "\n# ---- dtor class " + c.name + " ----\n";
+            out_ += "\t.align 8\n";
+            out_ += std::format(".Ldtor{}:\n", i);
+            out_ += "\tpushq %rbx\n";
+            out_ += "\tmovq %rdi, %rbx\n";
+            for (size_t f = 0; f < c.field_heap.size(); ++f) {
+                if (!c.field_heap[f]) continue;
+                out_ += std::format("\tmovq {}(%rbx), %rdi\n", 8 * (f + 1));
+                out_ += "\tcall py23_rc_dec\n";
+            }
+            out_ += "\tpopq %rbx\n";
+            out_ += "\tret\n";
+        }
 
         for (size_t i = 0; i < m.funcs.size(); ++i) emit_function(*m.funcs[i], static_cast<int>(i));
 
@@ -1127,7 +1151,10 @@ private:
     }
 
     void gen_make_list(const Inst& in) {
+        // imm 是元素所有权类别（0 非堆 / 1 堆 / 2 unknown 或混合），
+        // 由降级器按容器类型算好，运行时据此决定覆盖和销毁时是否 dec。
         line(std::format("movq ${}, %rdi", in.args.size()));
+        line(std::format("movq ${}, %rsi", in.imm));
         line("call py23_list_new");
         line(std::format("movq %rax, {}", dst_op(in.dst)));
         for (VReg a : in.args) {
@@ -1160,6 +1187,11 @@ private:
     void gen_obj_new(const Inst& in) {
         const IRClass& c = m_->classes[static_cast<size_t>(in.imm)];
         line(std::format("movq ${}, %rdi", 8 * (c.n_fields + 1)));
+        bool has_heap = std::ranges::any_of(c.field_heap, [](uint8_t v) { return v != 0; });
+        if (has_heap)
+            line(std::format("leaq .Ldtor{}(%rip), %rsi", in.imm));
+        else
+            line("xorl %esi, %esi");
         line("call py23_obj_new");
         line(std::format("leaq .Lvt{}(%rip), %rcx", in.imm));
         line("movq %rcx, (%rax)");
@@ -1323,6 +1355,10 @@ private:
             case RtFn::PrintI64:
             case RtFn::PrintBool:
             case RtFn::Panic:
+            case RtFn::RcInc:
+            case RtFn::RcDec:
+            case RtFn::RcTemp:
+            case RtFn::RcCleanup:
                 line(std::format("movq {}, %rdi", src_op(in.args[0])));
                 break;
             case RtFn::StrFromF64:
@@ -1338,6 +1374,8 @@ private:
             case RtFn::PrintNone:
             case RtFn::PrintSep:
             case RtFn::PrintEnd:
+            case RtFn::RcMark:
+            case RtFn::RcShutdown:
                 break;
         }
         line(std::format("call {}", rt_name(fn)));

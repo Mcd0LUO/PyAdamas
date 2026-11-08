@@ -102,6 +102,12 @@ enum class RtFn : uint8_t {
     Panic,       // (str*) -> noreturn
     PanicDiv0,   // () -> noreturn  整数除以零
     PanicOverflow, // () -> noreturn  INT64_MIN / -1
+    RcInc,       // (ptr) -> void
+    RcDec,       // (ptr) -> void
+    RcTemp,      // (ptr) -> void  表达式临时值入栈，接管产生者的引用
+    RcMark,      // () -> i64      临时值栈水位
+    RcCleanup,   // (i64) -> void  释放到指定水位
+    RcShutdown,  // () -> void     程序退出，释放临时栈自身的存储
 };
 
 inline const char* rt_name(RtFn f) {
@@ -127,6 +133,12 @@ inline const char* rt_name(RtFn f) {
         case RtFn::Panic: return "py23_panic";
         case RtFn::PanicDiv0: return "py23_panic_div0";
         case RtFn::PanicOverflow: return "py23_panic_overflow";
+        case RtFn::RcInc: return "py23_rc_inc";
+        case RtFn::RcDec: return "py23_rc_dec";
+        case RtFn::RcTemp: return "py23_rc_temp";
+        case RtFn::RcMark: return "py23_rc_mark";
+        case RtFn::RcCleanup: return "py23_rc_cleanup";
+        case RtFn::RcShutdown: return "py23_rc_shutdown";
     }
     return "?";
 }
@@ -281,6 +293,8 @@ struct IRClass {
     std::string name;
     std::vector<int> vtable;  // 槽 → 函数下标
     int n_fields = 0;
+    // 按字段偏移顺序（父类在前），1 表示该字段是堆类型，析构时要 dec。
+    std::vector<uint8_t> field_heap;
 };
 
 struct IRModule {
@@ -310,6 +324,23 @@ struct IRModule {
 // ── 类型到机器类的映射 ────────────────────────────────────────────
 
 inline bool ir_is_float(const TypePtr& t) { return t && t->kind == TyKind::Float; }
+
+// 引用计数管理的堆类型。unknown 故意不算：它的机器表示可能是整数，
+// 按指针 dec 会直接段错误。宁可泄漏，不可误杀。
+inline bool ir_is_heap(const TypePtr& t) {
+    if (!t) return false;
+    switch (t->kind) {
+        case TyKind::Str:
+        case TyKind::List:
+        case TyKind::Tuple:
+        case TyKind::Class:
+            return true;
+        case TyKind::Optional:
+            return !t->sub.empty() && ir_is_heap(t->sub[0]);
+        default:
+            return false;
+    }
+}
 
 // 指针类：需要按地址传递 / 取字段的类型
 inline bool ir_is_ref(const TypePtr& t) {

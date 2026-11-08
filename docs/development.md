@@ -81,6 +81,23 @@ python3 tests/diff/run_diff.py --only repr  # 只测浮点转字符串
 
 生成的程序必须两端都能跑通、输出一致；已知的语义分歧不要测（列在 [compatibility.md](compatibility.md)），否则只是制造噪音。
 
+### 内存验收
+
+`tests/run/10_rc.py` 覆盖别名、字段、列表、返回值和 `continue` 跳过清理；
+RSS 压力用受限地址空间跑长循环（命令见
+[compatibility.md](compatibility.md#内存验收)）。改 `lower.cpp` 的 RC 插桩后
+至少跑一遍：
+
+```bash
+./build/dev/py23 build stress.py -o stress
+python3 -c 'import resource,subprocess
+def lim(): resource.setrlimit(resource.RLIMIT_AS,(16<<20,16<<20))
+p=subprocess.run(["./stress"],preexec_fn=lim)
+print(p.returncode, resource.getrusage(resource.RUSAGE_CHILDREN).ru_maxrss)'   # KB
+```
+
+峰值 RSS 应稳定在 8MB 左右，不随循环次数增长。
+
 ### 前端基线
 
 改了类型检查之后，除了 `make test`，还应该重跑一次标准库基线，确认没有把真实代码判错。命令和数字见 [compatibility.md](compatibility.md#前端鲁棒性基线)。
@@ -111,6 +128,21 @@ g++ -std=c++23 -O0 -g -fsanitize=address,undefined -fno-omit-frame-pointer -Isrc
 ```
 
 注意 ASan 下每层递归帧约 4KB，8MB 栈撑不住几千层。所以语法层对表达式嵌套设了硬上限：`parser.h` 的 `kMaxExprDepth` / `kMaxUnaryDepth`（目前 200），超了报 `expression nested too deeply`。这类保护必须在解析器里，因为类型检查和降级都是照 AST 递归的，树有多深它们就有多深。
+
+上面的命令只给**编译器**插桩，生成代码和 `rt.o` 不受检查。要验证引用计数
+路径，`runtime/rt.c` 也要用同样的 sanitizer 编译，并在 `PATH` 前面放一个
+给链接加 `-fsanitize=address,undefined` 的 `cc` 包装脚本：
+
+```bash
+cc -O1 -g -fsanitize=address,undefined -c runtime/rt.c -o /tmp/rt_asan.o
+g++ -std=c++23 -O1 -g -fsanitize=address,undefined -Isrc \
+    -DPY23_RT_OBJ='"/tmp/rt_asan.o"' src/*.cpp -o /tmp/py23-asan
+mkdir -p /tmp/asancc
+printf '#!/bin/sh\nexec cc -fsanitize=address,undefined "$@"\n' > /tmp/asancc/cc
+chmod +x /tmp/asancc/cc
+PATH=/tmp/asancc:$PATH ASAN_OPTIONS=detect_leaks=1 \
+    /tmp/py23-asan run tests/run/10_rc.py
+```
 
 ### 严格警告
 

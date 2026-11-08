@@ -28,7 +28,7 @@ Python 语义里变量天生可变，循环里反复赋值是常态。一上来�
 | `Block` | 名字 + 指令序列，`terminated()` 判断末尾是不是跳转/分支/返回 |
 | `IRFunction` | 名字、形参、返回类型、`slot_ty`（局部槽类型）、`vreg_ty`（每个 vreg 的类型）、基本块 |
 | `IRGlobal` | 一个全局变量；数据段里就是一个 `.quad`，初值 0 同时也是 `None` |
-| `IRClass` | 名字、vtable（槽 → 函数下标）、字段数（含继承） |
+| `IRClass` | 名字、vtable（槽 → 函数下标）、字段数（含继承）、`field_heap`（每个字段是否堆类型，供析构器使用） |
 | `IRModule` | 函数表、全局表、字符串池、类表、`entry`（顶层代码编译成的函数下标） |
 
 `Inst` 里有个容易踩的点：**`idx` 的含义随 `op` 变**——`const.str` 是字符串池下标，`load.slot` 是槽号，`load.global` 是全局号，`func.addr` 是函数号。类型上看不出区别，读指令时要先看 `op`。
@@ -55,12 +55,12 @@ Python 语义里变量天生可变，循环里反复赋值是常态。一上来�
 | `store.slot idx, a` | — | 写局部槽 | `movq %rax, off(%rbp)` |
 | `load.global dst, idx` | `idx: 全局号` | 读全局 | `movq .LgN(%rip)` |
 | `store.global idx, a` | — | 写全局 | `movq %rax, .LgN(%rip)` |
-| `list.new dst, args...` | — | 按 `args` 构造列表 | 逐个 `py23_list_append` |
-| `tuple.new dst, args...` | — | 按 `args` 构造元组 | 同上（目前与 list 同表示） |
+| `list.new dst, args...` | `imm: 元素 kind` | 按 `args` 构造列表（0 非堆 / 1 堆 / 2 unknown 或混合） | 逐个 `py23_list_append` |
+| `tuple.new dst, args...` | `imm: 元素 kind` | 按 `args` 构造元组 | 同上（目前与 list 同表示） |
 | `index.get dst, a, b` | — | `dst = a[b]` | list 走运行时，str 走 `py23_str_char_at` |
 | `index.set a, b, c` | — | `a[b] = c` | `py23_list_set` |
 | `len dst, a` | — | `dst = len(a)` | 一条 `movq (%rax), %rax` |
-| `obj.new dst, imm` | `imm: 类下标` | 分配对象并写入 vtable 指针 | `call py23_obj_new` + `leaq .LvtN` |
+| `obj.new dst, imm` | `imm: 类下标` | 分配对象并写入 vtable 指针；析构器取自 `IRClass::field_heap` | `call py23_obj_new` + `leaq .LvtN` |
 | `field.get dst, a, imm` | `imm: 字节偏移` | `dst = a->field` | 一条 `movq off(%rax), %rax` |
 | `field.set a, imm, b` | `imm: 字节偏移` | `a->field = b` | `movq %rcx, off(%rax)` |
 | `vcall dst, a, args...` | `imm: vtable 槽` | `dst = a->vtable[imm](a, args...)` | 取表、取槽、间接跳转 |
@@ -73,6 +73,10 @@ Python 语义里变量天生可变，循环里反复赋值是常态。一上来�
 ### 运行时函数表
 
 `RtFn` 是**枚举**，后端按枚举直接生成调用，不经过符号查找，用户代码也不能引用。清单见 [runtime.md](runtime.md#函数表)。
+
+引用计数不走 IR 新指令，全部是 `call.rt`：`py23_rc_inc` / `py23_rc_dec`
+管堆值，`py23_rc_temp` / `py23_rc_mark` / `py23_rc_cleanup` 管表达式临时
+值栈，`py23_rc_shutdown` 在入口函数退出时收尾。
 
 另有三类符号不走 `RtFn`，由后端直接按名字调用：`py23_pow_i64`、`py23_str_eq`、`py23_str_cmp`（以及 libm 的 `floor` / `fmod` / `pow`）。这类是「参数形态固定、没有枚举必要」的辅助函数。
 
@@ -141,7 +145,17 @@ Python 语义里变量天生可变，循环里反复赋值是常态。一上来�
 
 **`coerce` 的边界**：只处理数值域之间的转换（int/bool ↔ float）。指针类之间的差异（`list[int]` → `list[float]`）需要逐元素转换并重新分配，现阶段直接报错，不允许静默产生错误的位模式。
 
-**类在降级前先建表**：`Lowerer::run` 里先扫一遍语句块（不进函数体）把每个 `ClassDef` 变成一条 `IRClass`，vtable 槽先填 -1。这样方法体里构造另一个类时，类下标和对象大小都已经确定。真正编译 `ClassDef` 时分两步：先从父类 vtable 抄一份前缀（父类一定在前，此时已填好），再编译本类方法覆盖对应槽。
+**类在降级前先建表**：`Lowerer::run` 里先扫一遍语句块（不进函数体）把每个 `ClassDef` 变成一条 `IRClass`，vtable 槽先填 -1。这样方法体里构造另一个类时，类下标和对象大小都已经确定。真正编译 `ClassDef` 时分两步：先从父类 vtable 抄一份前缀（父类一定在前，此时已填好），再编译本类方法覆盖对应槽。`field_heap` 也在这时按父类到子类的布局顺序填好，codegen 据此生成析构器。
+
+**引用计数插桩的边界**：
+
+- 新堆值由 `def_heap()` 统一登记，产生后立刻 `py23_rc_temp` 入栈；
+- 写入槽 / 全局 / 字段 / 容器前，源类型已知是堆才 `rc_inc`；
+- 覆盖旧值前先读出来，写完再 `rc_dec`；
+- 函数入口对堆形参 `rc_inc`，`return` 前对返回值 `rc_inc`，然后清理临时
+  栈并释放所有堆槽；
+- 语句、循环、函数都有 mark；完全没有临时堆值的层级会在降级期把
+  mark/cleanup 删掉，纯整数代码不产生任何 RC 指令。
 
 **字段初值放在构造点**：`x: int = 5` 不是类属性，而是「每次 `Cls(...)` 都求值一次并写进新对象」。这样父类字段的初值在子类覆盖 `__init__` 时也不会丢，且 `items: list[int] = []` 每个实例都是独立列表。
 

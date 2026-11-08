@@ -24,6 +24,7 @@ py23 不追求兼容 CPython：语义是按静态类型的需要重新定的。�
 | 类的属性 | 声明过的字段，或 `self.x = ...` 就地长出来的字段 | 可随时给实例挂任意属性 | 偏移是编译期常量，没有运行时 `__dict__` |
 | `print(obj)` | `<Point object>` | `<__main__.Point object at 0x...>` | 没有 `__str__` 协议，也不打地址 |
 | 方法调用 | 走 vtable，代价固定 | 走 `__dict__` / 描述符 | 没有去虚化，也不做内联 |
+| 内存回收 | 引用计数，环不回收 | 分代 GC | 环和 unknown 容器元素会泄漏；见 [runtime.md](runtime.md#内存模型) |
 
 字节串这条最容易被忽略：`len` 与索引都按字节，ASCII 之外的字符串会与 CPython 不一致。要不要改成码点语义（`len` 变成 O(n)、索引要解码）是个待定项，见 [roadmap.md](roadmap.md)。
 
@@ -45,7 +46,8 @@ py23 不追求兼容 CPython：语义是按静态类型的需要重新定的。�
 |---|---|---|---|
 | 正例 | `make test` 里 `tests/*.py` | 11 个文件 | 前端退回保守 |
 | 反例 | `make test` 里 `tests/fail/*.py` | 32 个文件 | 检查器为了过测而放水 |
-| 运行 | `make test` 里 `tests/run/*.py` | 9 个文件 | 后端烂掉没人知道 |
+| 运行 | `make test` 里 `tests/run/*.py` | 10 个文件 | 后端烂掉没人知道 |
+| 内存 | 16MB `RLIMIT_AS` 下跑压力程序 | 100 万次拼接 / 对象分配 | 引用计数漏插桩或重复释放 |
 | 未建模 | `make test` 里 `tests/unsupported/*.py` | 2 个文件 | 标了「没建模」却悄悄编译过去 |
 | 差分 | `python3 tests/diff/run_diff.py` | 随机程序 | 语义漂移、边界错误 |
 
@@ -77,6 +79,26 @@ python3 tests/diff/run_diff.py --only repr     # 只跑浮点格式化
 ```
 
 判定标准：py23 退出码必须为 0（编译期错误算失败），stdout 与 CPython **逐字节相同**，stderr 不比（panic 消息是我们自己的）。
+
+### 内存验收
+
+引用计数没有单测框架能直接断言的地方，用受限地址空间跑压力程序：
+
+```bash
+./build/dev/py23 build stress.py -o stress
+python3 - <<'PY'
+import resource, subprocess
+def lim():
+    resource.setrlimit(resource.RLIMIT_AS, (16 << 20, 16 << 20))
+p = subprocess.run(["./stress"], preexec_fn=lim)
+print(p.returncode)
+PY
+```
+
+`tests/run/10_rc.py` 负责别名、字段、列表、返回值、`continue` 跳过清理等
+正确性；RSS 压力程序负责「长循环里内存不随迭代数增长」。当前实测
+100 万次拼接 / 100 万次对象分配 / 30 万次带字符串字段的对象分配，
+峰值 RSS 约 8MB。
 
 生成器刻意避开第一节列出的语义差异——那些是已知的、有意的，测了只会制造噪音。差分测试抓的是**我们以为一致、实际不一致**的地方，历史上抓到过：浮点 `%` 的符号、`10.0` 打成 `1e+01`、`-0.0 % 3.0` 的零符号。
 
@@ -134,12 +156,14 @@ Python 2 的 long 后缀 1   旧式 except 参数 1
 
 ## 四、当前性能
 
-`-O0` 构建的 py23 生成 `-O0` 风格的代码，对手是 CPython 3.11（带它自己的 peephole 优化）：
+`-O0` 构建的 py23 生成 `-O0` 风格的代码，对手是同机容器内的 CPython 3.13.5：
 
-| 程序 | py23 | CPython 3.11 | 倍数 |
-|---|---|---|---|
-| `fib(35)`（递归 + 调用） | 0.06s | 1.00s | 17× |
-| 2 亿次 `while` 累加 | 0.06s | 7.00s | 116× |
-| 2000 万次方法调用 `a.add(1)` | 0.09s | 3.88s | 43× |
+| 程序 | 相对 CPython 3.13 |
+|---|---|
+| `fib(35)`（递归 + 调用） | 约 16× |
+| 2 亿次 `while` 累加 | 约 33× |
+| 2000 万次方法调用 `a.add(1)` | 约 19× |
 
 只看数量级就好：py23 没有任何优化遍，赢在「静态类型 + 直接出机器码」。
+0.7 加入引用计数后，整数路径与 0.6.1 持平（不含临时堆值的语句/循环/
+函数会把 RC 脚手架删掉）；方法调用因为 self 形参的 inc/dec 慢约 30%。

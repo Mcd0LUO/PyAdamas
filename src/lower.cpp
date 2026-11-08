@@ -104,6 +104,17 @@ struct FuncCtx {
     // {break 目标块, continue 目标块}
     std::vector<std::pair<int, int>> loops;
     int blk = 0;
+    // 函数入口的临时值栈水位；return 时清理到它。
+    VReg fn_mark = kNoReg;
+    // 模块顶层函数：退出前释放全局变量并关掉临时栈。
+    bool is_entry = false;
+    // 表达式内部槽（and/or、条件表达式、链式比较）只是借用临时值，
+    // 生命周期由临时栈负责；出口不能 dec，否则会重复释放。
+    std::unordered_set<int> borrow_slots;
+    // 本函数产生过多少个临时堆值。0 表示整条 RC 脚手架都可以省掉。
+    size_t rc_pushes = 0;
+    int fn_mark_block = -1;
+    size_t fn_mark_pos = 0;
 };
 
 class Lowerer {
@@ -209,6 +220,14 @@ private:
 
     int new_temp_slot(TypePtr ty) { return st_->fn->new_slot(std::move(ty)); }
 
+    int new_borrow_slot(TypePtr ty) {
+        int s = new_temp_slot(std::move(ty));
+        st_->borrow_slots.insert(s);
+        return s;
+    }
+
+    void store_borrow_slot(int slot, VReg v) { store_slot_raw(slot, v); }
+
     VReg load_slot(int slot, TypePtr ty) {
         Inst in;
         in.op = IrOp::LoadSlot;
@@ -217,10 +236,172 @@ private:
         return def(ty ? ty : t_unknown(), std::move(in));
     }
 
-    void store_slot(int slot, VReg v) {
+    VReg load_global(int gi, TypePtr ty) {
+        Inst in;
+        in.op = IrOp::LoadGlobal;
+        in.idx = gi;
+        in.ty = ty;
+        return def(ty ? ty : t_unknown(), std::move(in));
+    }
+
+    void store_slot_raw(int slot, VReg v) {
         Inst in;
         in.op = IrOp::StoreSlot;
         in.idx = slot;
+        in.a = v;
+        emit(std::move(in));
+    }
+
+    void store_global_raw(int gi, VReg v) {
+        Inst in;
+        in.op = IrOp::StoreGlobal;
+        in.idx = gi;
+        in.a = v;
+        emit(std::move(in));
+    }
+
+    // ── 引用计数 ────────────────────────────────────────────────
+    //
+    // 所有权约定：
+    //   槽 / 全局 / 字段 / 列表元素 持有引用；
+    //   load / field.get / list.get 只是借用，不增加计数；
+    //   每个新堆值产生时带 rc=1 进临时栈，语句边界统一清理。
+    // unknown 类型不插桩：机器表示可能是整数，按指针 dec 会崩。
+
+    void rc_inc(VReg v) { call_void(RtFn::RcInc, {v}); }
+    void rc_dec(VReg v) { call_void(RtFn::RcDec, {v}); }
+
+    VReg rc_mark() { return call_runtime(RtFn::RcMark, t_int(), {}); }
+    void rc_cleanup(VReg mark) { call_void(RtFn::RcCleanup, {mark}); }
+
+    VReg rc_mark_at(int& block, size_t& pos) {
+        VReg m = rc_mark();
+        block = st_->blk;
+        pos = cur().insts.size() - 1;
+        return m;
+    }
+
+    void push_temp(VReg v) {
+        ++st_->rc_pushes;
+        call_void(RtFn::RcTemp, {v});
+    }
+
+    void erase_mark(int block, size_t pos, VReg mark) {
+        auto& ins = st_->fn->blocks[block].insts;
+        if (pos < ins.size() && ins[pos].op == IrOp::CallRt &&
+            static_cast<RtFn>(ins[pos].imm) == RtFn::RcMark && ins[pos].dst == mark)
+            ins.erase(ins.begin() + static_cast<std::ptrdiff_t>(pos));
+    }
+
+    void erase_cleanup(int block, VReg mark) {
+        auto& ins = st_->fn->blocks[block].insts;
+        std::erase_if(ins, [&](const Inst& in) {
+            return in.op == IrOp::CallRt && static_cast<RtFn>(in.imm) == RtFn::RcCleanup &&
+                   in.args.size() == 1 && in.args[0] == mark;
+        });
+    }
+
+    // 产生一个堆值：把它交给临时栈，调用方不需要再管这个初始引用。
+    VReg def_heap(TypePtr ty, Inst in) {
+        VReg v = def(ty ? ty : t_unknown(), std::move(in));
+        if (ir_is_heap(ty)) push_temp(v);
+        return v;
+    }
+
+    // 列表元素所有权类别，必须和 codegen 传给 py23_list_new 的值一致。
+    static int list_kind(const TypePtr& t) {
+        auto one = [](const TypePtr& e) -> int {
+            if (!e || e->kind == TyKind::Unknown) return 2;
+            return ir_is_heap(e) ? 1 : 0;
+        };
+        if (!t) return 2;
+        if (t->kind == TyKind::List || t->kind == TyKind::Set || t->kind == TyKind::Dict)
+            return t->sub.empty() ? 2 : one(t->sub[0]);
+        if (t->kind == TyKind::Tuple) {
+            if (t->sub.empty()) return 2;
+            int k = one(t->sub[0]);
+            for (size_t i = 1; i < t->sub.size(); ++i)
+                if (one(t->sub[i]) != k) return 2;
+            return k;
+        }
+        return 2;
+    }
+
+    // kind 1/2 且源类型已知是堆，写入前 retain。kind 2 只 retain 不 release
+    //（类型看不见，销毁时不敢按元素 dec），代价是泄漏。
+    void retain_elem(VReg v, int kind) {
+        if (kind != 0 && ir_is_heap(vreg_ty(v))) rc_inc(v);
+    }
+
+    void store_slot(int slot, VReg v) {
+        TypePtr dst = st_->fn->slot_ty[slot];
+        if (ir_is_heap(vreg_ty(v))) rc_inc(v);
+        if (ir_is_heap(dst)) {
+            VReg old = load_slot(slot, dst);
+            store_slot_raw(slot, v);
+            rc_dec(old);
+        } else {
+            store_slot_raw(slot, v);
+        }
+    }
+
+    void store_global(int gi, VReg v) {
+        TypePtr dst = mod_.globals[gi].ty;
+        if (ir_is_heap(vreg_ty(v))) rc_inc(v);
+        if (ir_is_heap(dst)) {
+            VReg old = load_global(gi, dst);
+            store_global_raw(gi, v);
+            rc_dec(old);
+        } else {
+            store_global_raw(gi, v);
+        }
+    }
+
+    void store_field(TypePtr fty, VReg obj, int off, VReg v) {
+        if (ir_is_heap(vreg_ty(v))) rc_inc(v);
+        if (ir_is_heap(fty)) {
+            VReg old = field_load(obj, off, fty);
+            field_store(obj, off, v);
+            rc_dec(old);
+        } else {
+            field_store(obj, off, v);
+        }
+    }
+
+    void inc_params() {
+        for (auto& p : st_->fn->params)
+            if (ir_is_heap(p.ty)) rc_inc(load_slot(p.slot, p.ty));
+    }
+
+    // 函数出口释放所有堆槽：形参在入口 retain 过，局部变量在写入时 retain
+    // 过。返回值必须先 rc_inc，再走到这里，否则槽一释放就成悬空指针。
+    void release_slots() {
+        for (size_t s = 0; s < st_->fn->slot_ty.size(); ++s) {
+            if (st_->borrow_slots.count(static_cast<int>(s))) continue;
+            TypePtr ty = st_->fn->slot_ty[s];
+            if (!ir_is_heap(ty)) continue;
+            rc_dec(load_slot(static_cast<int>(s), ty));
+        }
+    }
+
+    void release_globals() {
+        for (size_t gi = 0; gi < mod_.globals.size(); ++gi) {
+            TypePtr ty = mod_.globals[gi].ty;
+            if (!ir_is_heap(ty)) continue;
+            rc_dec(load_global(static_cast<int>(gi), ty));
+        }
+    }
+
+    void emit_return(VReg v, TypePtr vty) {
+        if (v != kNoReg && ir_is_heap(vty)) rc_inc(v);
+        if (st_->fn_mark != kNoReg && st_->rc_pushes > 0) rc_cleanup(st_->fn_mark);
+        release_slots();
+        if (st_->is_entry) {
+            release_globals();
+            call_void(RtFn::RcShutdown, {});
+        }
+        Inst in;
+        in.op = IrOp::Return;
         in.a = v;
         emit(std::move(in));
     }
@@ -555,6 +736,14 @@ void Lowerer::collect_classes(std::vector<StmtPtr>& body) {
                 IRClass irc;
                 irc.name = c.name;
                 irc.n_fields = ci->n_fields();
+                // 字段偏移顺序 = 父类字段 + 本类字段；析构器按这个顺序 dec。
+                {
+                    std::vector<const ClassInfo*> chain;
+                    for (const ClassInfo* k = ci.get(); k; k = k->base) chain.push_back(k);
+                    for (auto kit = chain.rbegin(); kit != chain.rend(); ++kit)
+                        for (auto& f : (*kit)->fields)
+                            irc.field_heap.push_back(ir_is_heap(f.ty) ? 1 : 0);
+                }
                 irc.vtable.assign(static_cast<size_t>(ci->n_slots()), -1);
                 class_ids_[ci.get()] = static_cast<int>(mod_.classes.size());
                 mod_.classes.push_back(std::move(irc));
@@ -610,15 +799,14 @@ void Lowerer::run(Module& ast) {
     push_frame(entry, tc_.module_scope());
     int b = new_block("entry");
     switch_to(b);
+    st_->is_entry = true;
+    st_->fn_mark = rc_mark_at(st_->fn_mark_block, st_->fn_mark_pos);
 
     stmts(ast.body);
 
-    if (!terminated()) {
-        Inst in;
-        in.op = IrOp::Return;
-        in.a = const_int(0);
-        emit(std::move(in));
-    }
+    if (!terminated()) emit_return(const_int(0), t_int());
+    if (st_->rc_pushes == 0)
+        erase_mark(st_->fn_mark_block, st_->fn_mark_pos, st_->fn_mark);
 
     pop_frame();
 }
@@ -626,6 +814,14 @@ void Lowerer::run(Module& ast) {
 // ────────────────────────── 语句 ──────────────────────────
 
 void Lowerer::stmt(Stmt& s) {
+    // 每条语句一个临时值栈水位：表达式产生的堆值在语句结束时统一释放。
+    // 赋值/传参/返回已经各 retain 了一份，所以清理不会影响仍然存活的值。
+    // 语句完全没产生临时堆值时，把 mark/cleanup 一起删掉（纯整数代码
+    // 不该为 RC 付出任何运行时开销）。
+    int mark_block = -1;
+    size_t mark_pos = 0;
+    VReg stmt_mark = rc_mark_at(mark_block, mark_pos);
+    size_t pushes_before = st_->rc_pushes;
     switch (s.kind) {
         case StmtKind::Expr: {
             expr(*static_cast<ExprStmt&>(s).value);
@@ -654,7 +850,7 @@ void Lowerer::stmt(Stmt& s) {
             in.bop = map_bin(aug_to_bin(a.op));
             in.a = cur_v;
             in.b = rhs;
-            VReg r = def(ty, std::move(in));
+            VReg r = def_heap(ty, std::move(in));
             // 下标目标会重新求值一次下标；Python 只求一次。
             // 纯下标表达式没有副作用，先这样，等有优化遍再消。
             assign_to(*a.target, r, ty);
@@ -684,13 +880,10 @@ void Lowerer::stmt(Stmt& s) {
         }
         case StmtKind::Return: {
             auto& r = static_cast<Return&>(s);
-            Inst in;
-            in.op = IrOp::Return;
             VReg v = r.value ? expr(*r.value) : kNoReg;
             // `def f() -> float: return 1` 要在返回处转成 double
             if (v != kNoReg && st_->fn->ret) v = coerce(v, vreg_ty(v), st_->fn->ret);
-            in.a = v;
-            emit(std::move(in));
+            emit_return(v, v != kNoReg ? vreg_ty(v) : nullptr);
             break;
         }
         case StmtKind::Break: {
@@ -734,6 +927,17 @@ void Lowerer::stmt(Stmt& s) {
             break;
         }
         case StmtKind::Nonlocal: unsupported(s, "'nonlocal'"); break;
+    }
+    if (st_->rc_pushes != pushes_before) {
+        if (!terminated()) rc_cleanup(stmt_mark);
+    } else {
+        if (!terminated() && !cur().insts.empty()) {
+            const Inst& last = cur().insts.back();
+            if (last.op == IrOp::CallRt && static_cast<RtFn>(last.imm) == RtFn::RcCleanup &&
+                last.args.size() == 1 && last.args[0] == stmt_mark)
+                cur().insts.pop_back();
+        }
+        erase_mark(mark_block, mark_pos, stmt_mark);
     }
 }
 
@@ -786,12 +990,20 @@ void Lowerer::lower_while(While& f) {
     int end = new_block("while.end");
     int orelse = f.orelse.empty() ? end : new_block("while.else");
 
+    // 条件表达式每轮都会产生临时值；在 body 入口和退出路径清理到
+    // 循环水位，长循环的 RSS 才不会随迭代数增长。条件不产生堆值时
+    // 整条脚手架会被删掉。
+    int loop_mark_block = -1;
+    size_t loop_mark_pos = 0;
+    VReg loop_mark = rc_mark_at(loop_mark_block, loop_mark_pos);
+
     Inst j;
     j.op = IrOp::Jump;
     j.target = cond;
     emit(std::move(j));
 
     switch_to(cond);
+    size_t pushes_before_cond = st_->rc_pushes;
     VReg c = expr(*f.cond);
     Inst br;
     br.op = IrOp::Branch;
@@ -801,6 +1013,7 @@ void Lowerer::lower_while(While& f) {
     emit(std::move(br));
 
     switch_to(body);
+    rc_cleanup(loop_mark);
     st_->loops.push_back({end, cond});
     stmts(f.body);
     st_->loops.pop_back();
@@ -812,6 +1025,7 @@ void Lowerer::lower_while(While& f) {
     }
 
     switch_to(orelse);
+    rc_cleanup(loop_mark);
     if (!f.orelse.empty()) {
         stmts(f.orelse);
         if (!terminated()) {
@@ -822,6 +1036,15 @@ void Lowerer::lower_while(While& f) {
         }
     }
     switch_to(end);
+    // 循环内（条件或循环体）完全没有临时堆值时，把循环水位整条删掉。
+    // 注意不能只看条件：`continue`/`break` 会跳过语句级清理，循环体里
+    // 的临时值要靠循环水位兜底。
+    if (st_->rc_pushes == pushes_before_cond) {
+        erase_cleanup(body, loop_mark);
+        erase_cleanup(orelse, loop_mark);
+        erase_cleanup(end, loop_mark);
+        erase_mark(loop_mark_block, loop_mark_pos, loop_mark);
+    }
 }
 
 void Lowerer::lower_for(For& f) {
@@ -888,6 +1111,11 @@ void Lowerer::lower_for_range(For& f, Call& c) {
     int end = new_block("for.end");
     int orelse = f.orelse.empty() ? end : new_block("for.else");
 
+    int loop_mark_block = -1;
+    size_t loop_mark_pos = 0;
+    VReg loop_mark = rc_mark_at(loop_mark_block, loop_mark_pos);
+    size_t pushes_before_loop = st_->rc_pushes;
+
     Inst j;
     j.op = IrOp::Jump;
     j.target = cond;
@@ -909,6 +1137,7 @@ void Lowerer::lower_for_range(For& f, Call& c) {
     emit(std::move(br));
 
     switch_to(body);
+    rc_cleanup(loop_mark);
     VReg iv = load_slot(ctr, t_int());
     assign_to(*f.target, iv, t_int());
     st_->loops.push_back({end, incr});
@@ -922,6 +1151,7 @@ void Lowerer::lower_for_range(For& f, Call& c) {
     }
 
     switch_to(incr);
+    rc_cleanup(loop_mark);
     VReg iv2 = load_slot(ctr, t_int());
     Inst add;
     add.op = IrOp::Bin;
@@ -936,6 +1166,7 @@ void Lowerer::lower_for_range(For& f, Call& c) {
     emit(std::move(ji));
 
     switch_to(orelse);
+    rc_cleanup(loop_mark);
     if (!f.orelse.empty()) {
         stmts(f.orelse);
         if (!terminated()) {
@@ -946,6 +1177,14 @@ void Lowerer::lower_for_range(For& f, Call& c) {
         }
     }
     switch_to(end);
+    rc_cleanup(loop_mark);
+    if (st_->rc_pushes == pushes_before_loop) {
+        erase_cleanup(body, loop_mark);
+        erase_cleanup(incr, loop_mark);
+        erase_cleanup(orelse, loop_mark);
+        erase_cleanup(end, loop_mark);
+        erase_mark(loop_mark_block, loop_mark_pos, loop_mark);
+    }
 }
 
 void Lowerer::lower_for_seq(For& f) {
@@ -972,6 +1211,12 @@ void Lowerer::lower_for_seq(For& f) {
     int end = new_block("for.end");
     int orelse = f.orelse.empty() ? end : new_block("for.else");
 
+    // 水位取在序列求值之后：seq 本身可能是个临时列表，不能被每轮清掉。
+    int loop_mark_block = -1;
+    size_t loop_mark_pos = 0;
+    VReg loop_mark = rc_mark_at(loop_mark_block, loop_mark_pos);
+    size_t pushes_before_loop = st_->rc_pushes;
+
     Inst j;
     j.op = IrOp::Jump;
     j.target = cond;
@@ -993,6 +1238,7 @@ void Lowerer::lower_for_seq(For& f) {
     emit(std::move(br));
 
     switch_to(body);
+    rc_cleanup(loop_mark);
     VReg iv2 = load_slot(idx, t_int());
     TypePtr et = tc_.type_of(f.target.get());
     if (!et || et->kind == TyKind::Unknown) {
@@ -1005,7 +1251,10 @@ void Lowerer::lower_for_seq(For& f) {
     get.op = IrOp::IndexLoad;
     get.a = seq;
     get.b = iv2;
-    VReg ev = def(et, std::move(get));
+    // 遍历字符串时每个下标是 py23_str_char_at 新造的单字节串；
+    // 遍历列表/元组时是容器内部的借用引用。
+    VReg ev = seq_ty->kind == TyKind::Str ? def_heap(et, std::move(get))
+                                          : def(et, std::move(get));
     assign_to(*f.target, ev, et);
 
     st_->loops.push_back({end, incr});
@@ -1019,6 +1268,7 @@ void Lowerer::lower_for_seq(For& f) {
     }
 
     switch_to(incr);
+    rc_cleanup(loop_mark);
     VReg iv3 = load_slot(idx, t_int());
     Inst add;
     add.op = IrOp::Bin;
@@ -1033,6 +1283,7 @@ void Lowerer::lower_for_seq(For& f) {
     emit(std::move(ji));
 
     switch_to(orelse);
+    rc_cleanup(loop_mark);
     if (!f.orelse.empty()) {
         stmts(f.orelse);
         if (!terminated()) {
@@ -1043,6 +1294,14 @@ void Lowerer::lower_for_seq(For& f) {
         }
     }
     switch_to(end);
+    rc_cleanup(loop_mark);
+    if (st_->rc_pushes == pushes_before_loop) {
+        erase_cleanup(body, loop_mark);
+        erase_cleanup(incr, loop_mark);
+        erase_cleanup(orelse, loop_mark);
+        erase_cleanup(end, loop_mark);
+        erase_mark(loop_mark_block, loop_mark_pos, loop_mark);
+    }
 }
 
 int Lowerer::compile_function_body(FunctionDef& f, FuncInfoPtr info, const std::string& label) {
@@ -1081,13 +1340,15 @@ int Lowerer::compile_function_body(FunctionDef& f, FuncInfoPtr info, const std::
         }
     }
 
+    // 形参按值借用，入口统一 retain 一份归形参槽所有；出口 release_slots
+    // 负责释放。这样函数体内覆盖形参时也能按普通槽的规则 dec 旧值。
+    st_->fn_mark = rc_mark_at(st_->fn_mark_block, st_->fn_mark_pos);
+    inc_params();
+
     stmts(f.body);
-    if (!terminated()) {
-        Inst in;
-        in.op = IrOp::Return;
-        in.a = kNoReg;
-        emit(std::move(in));
-    }
+    if (!terminated()) emit_return(kNoReg, nullptr);
+    if (st_->rc_pushes == 0)
+        erase_mark(st_->fn_mark_block, st_->fn_mark_pos, st_->fn_mark);
 
     pop_frame();
     return fidx;
@@ -1121,11 +1382,7 @@ void Lowerer::lower_funcdef(FunctionDef& f) {
     if (is_local(f.name)) {
         store_slot(st_->slots[f.name], fv);
     } else {
-        Inst in;
-        in.op = IrOp::StoreGlobal;
-        in.idx = global_idx(f.name);
-        in.a = fv;
-        emit(std::move(in));
+        store_global(global_idx(f.name), fv);
     }
 }
 
@@ -1258,11 +1515,7 @@ void Lowerer::assign_to(Expr& target, VReg v, TypePtr vty) {
                                     "is not supported by the code generator yet",
                                     type_name(src_ty), type_name(want)));
                 v = coerce(v, src_ty, want);
-                Inst in;
-                in.op = IrOp::StoreGlobal;
-                in.idx = gi;
-                in.a = v;
-                emit(std::move(in));
+                store_global(gi, v);
             } else {
                 int slot = st_->slots[n.id];
                 TypePtr want = st_->fn->slot_ty[slot];
@@ -1292,7 +1545,10 @@ void Lowerer::assign_to(Expr& target, VReg v, TypePtr vty) {
                 in.op = IrOp::IndexLoad;
                 in.a = v;
                 in.b = const_int(static_cast<int64_t>(i));
-                VReg ev = def(et, std::move(in));
+                // 从字符串解包出的每个元素都是新串，必须入临时栈。
+                VReg ev = (src_ty && src_ty->kind == TyKind::Str)
+                              ? def_heap(et, std::move(in))
+                              : def(et, std::move(in));
                 assign_to(*elts[i], ev, et);
             }
             break;
@@ -1329,7 +1585,7 @@ void Lowerer::assign_to(Expr& target, VReg v, TypePtr vty) {
                 if (opt) obj = guard_not_none(obj, std::format("field '{}'", at.attr));
                 v = coerce(v, src_ty, f->ty);
                 int off = static_cast<int>(8 * (1 + ot->cls->field_index(at.attr)));
-                field_store(obj, off, v);
+                store_field(f->ty, obj, off, v);
                 break;
             }
             err(target.line, target.col, "unsupported assignment target");
@@ -1489,7 +1745,7 @@ VReg Lowerer::lower_binop(BinOp& b) {
     in.bop = map_bin(b.op);
     in.a = l;
     in.b = r;
-    return def(ty, std::move(in));
+    return def_heap(ty, std::move(in));
 }
 
 VReg Lowerer::lower_unary(UnaryOp& u) {
@@ -1513,13 +1769,13 @@ VReg Lowerer::lower_unary(UnaryOp& u) {
 
 VReg Lowerer::lower_boolop(BoolOp& b) {
     TypePtr ty = tc_.type_of(&b);
-    int tmp = new_temp_slot(ty);
+    int tmp = new_borrow_slot(ty);
 
     bool is_and = b.op == Tok::KW_AND;
     int end = new_block(is_and ? "and.end" : "or.end");
 
     VReg acc = expr(*b.values[0]);
-    store_slot(tmp, acc);
+    store_borrow_slot(tmp, acc);
 
     for (size_t i = 1; i < b.values.size(); ++i) {
         VReg cur_v = load_slot(tmp, ty);
@@ -1536,7 +1792,7 @@ VReg Lowerer::lower_boolop(BoolOp& b) {
 
         switch_to(rhs);
         VReg v = expr(*b.values[i]);
-        store_slot(tmp, v);
+        store_borrow_slot(tmp, v);
         Inst j;
         j.op = IrOp::Jump;
         j.target = next;
@@ -1575,9 +1831,11 @@ VReg Lowerer::lower_compare(Compare& c) {
 
     // 链式比较：需要短路，用槽保存中间值。
     int res = new_temp_slot(t_bool());
-    int cur_slot = new_temp_slot(t_unknown());
+    // 槽类型取左操作数：链式比较里存的是同一个值，类型决定真值判断。
+    // 它只是借用在表达式内传递，生命周期由临时栈负责。
+    int cur_slot = new_borrow_slot(tc_.type_of(c.left.get()));
     store_slot(res, const_bool(true));
-    store_slot(cur_slot, expr(*c.left));
+    store_borrow_slot(cur_slot, expr(*c.left));
 
     int fail = new_block("cmp.fail");
     int done = new_block("cmp.end");
@@ -1600,7 +1858,7 @@ VReg Lowerer::lower_compare(Compare& c) {
         emit(std::move(br));
 
         switch_to(cont);
-        store_slot(cur_slot, r);
+        store_borrow_slot(cur_slot, r);
         if (i + 1 == c.ops.size()) {
             Inst j;
             j.op = IrOp::Jump;
@@ -1628,16 +1886,24 @@ VReg Lowerer::lower_subscript(Subscript& s) {
     VReg obj = expr(*s.value);
     VReg idx = expr(*s.slice);
     TypePtr ty = tc_.type_of(&s);
+    TypePtr ot = tc_.type_of(s.value.get());
     Inst in;
     in.op = IrOp::IndexLoad;
     in.a = obj;
     in.b = idx;
+    // 只有「字符串下标」产生新串；list[str]/tuple[str] 返回的是容器内部的
+    // 借用引用，不能入临时栈，否则会比容器多减一次引用。
+    if (ty && ty->kind == TyKind::Str && ot && ot->kind == TyKind::Str)
+        return def_heap(ty, std::move(in));
     return def(ty, std::move(in));
 }
 
 VReg Lowerer::lower_list_like(std::vector<ExprPtr>& elts, TypePtr ty, bool is_tuple) {
     std::vector<VReg> args;
     args.reserve(elts.size());
+    // 元素所有权类别：0 非堆 / 1 堆 / 2 unknown 或混合。
+    // kind 1/2 的元素在写入前 retain；kind 1 的容器销毁时由运行时 release。
+    int kind = list_kind(ty);
     for (size_t i = 0; i < elts.size(); ++i) {
         auto& e = elts[i];
         if (e->kind == ExprKind::Starred) {
@@ -1653,17 +1919,20 @@ VReg Lowerer::lower_list_like(std::vector<ExprPtr>& elts, TypePtr ty, bool is_tu
             want = ty->sub[i];
         else if (ty && is_tuple && ty->variadic && !ty->sub.empty())
             want = ty->sub[0];
-        args.push_back(coerce(v, tc_.type_of(e.get()), want));
+        v = coerce(v, tc_.type_of(e.get()), want);
+        retain_elem(v, kind);
+        args.push_back(v);
     }
     Inst in;
     in.op = is_tuple ? IrOp::MakeTuple : IrOp::MakeList;
+    in.imm = kind;
     in.args = std::move(args);
-    return def(ty, std::move(in));
+    return def_heap(ty, std::move(in));
 }
 
 VReg Lowerer::lower_ifexp(IfExp& e) {
     TypePtr ty = tc_.type_of(&e);
-    int tmp = new_temp_slot(ty);
+    int tmp = new_borrow_slot(ty);
     VReg c = expr(*e.test);
     int then_b = new_block("ifexp.then");
     int else_b = new_block("ifexp.else");
@@ -1677,14 +1946,14 @@ VReg Lowerer::lower_ifexp(IfExp& e) {
     emit(std::move(br));
 
     switch_to(then_b);
-    store_slot(tmp, expr(*e.body));
+    store_borrow_slot(tmp, expr(*e.body));
     Inst j1;
     j1.op = IrOp::Jump;
     j1.target = end;
     emit(std::move(j1));
 
     switch_to(else_b);
-    store_slot(tmp, expr(*e.orelse));
+    store_borrow_slot(tmp, expr(*e.orelse));
     Inst j2;
     j2.op = IrOp::Jump;
     j2.target = end;
@@ -1700,7 +1969,11 @@ VReg Lowerer::convert_to(VReg v, TypePtr from, TypePtr to) {
     Inst in;
     in.op = IrOp::Convert;
     in.a = v;
-    return def(to, std::move(in));
+    VReg r = def(to, std::move(in));
+    // 数值转换产出标量；转成字符串才是一个新的堆对象。
+    if (to->kind == TyKind::Str && (!from || from->kind != TyKind::Str))
+        push_temp(r);
+    return r;
 }
 
 // 存储位置（槽 / 全局 / 形参 / 列表元素）有静态类型，值可能落在另一个
@@ -1761,6 +2034,7 @@ VReg Lowerer::lower_joined(JoinedStr& j) {
             first = false;
         } else {
             acc = call_runtime(RtFn::StrConcat, t_str(), {acc, piece});
+            push_temp(acc);
         }
     }
     return acc;
@@ -1905,7 +2179,7 @@ VReg Lowerer::lower_construct(Call& c, const ClassInfoPtr& cls) {
     Inst in;
     in.op = IrOp::ObjNew;
     in.imm = cid_it->second;
-    VReg obj = def(mk_class(cls.get()), std::move(in));
+    VReg obj = def_heap(mk_class(cls.get()), std::move(in));
 
     // 字段初值：从最根的类往下按布局顺序求值。放在构造点而不是
     // __init__ 里，是为了让「子类覆盖 __init__ 但父类有字段初值」
@@ -1924,7 +2198,7 @@ VReg Lowerer::lower_construct(Call& c, const ClassInfoPtr& cls) {
     for (auto& [off, fi] : defaults) {
         VReg v = expr(*fi->default_expr);
         v = coerce(v, vreg_ty(v), fi->ty);
-        field_store(obj, off, v);
+        store_field(fi->ty, obj, off, v);
     }
 
     if (cls->has_init) {
@@ -1936,7 +2210,7 @@ VReg Lowerer::lower_construct(Call& c, const ClassInfoPtr& cls) {
             vc.imm = im->slot;
             vc.args = std::move(args);
             TypePtr rt = im->call_sig->ret ? im->call_sig->ret : t_none();
-            def(rt, std::move(vc));
+            def_heap(rt, std::move(vc));
         }
     }
     return obj;
@@ -1988,7 +2262,7 @@ VReg Lowerer::lower_call(Call& c) {
     in.op = IrOp::Call;
     in.a = callee;
     in.args = std::move(args);
-    return def(tc_.type_of(&c), std::move(in));
+    return def_heap(tc_.type_of(&c), std::move(in));
 }
 
 VReg Lowerer::lower_builtin_call(const std::string& name, Call& c) {
@@ -2117,7 +2391,7 @@ VReg Lowerer::lower_method_call(Attribute& at, Call& c) {
         vc.imm = m->slot;
         vc.args = std::move(args);
         TypePtr rt = m->call_sig->ret ? m->call_sig->ret : t_none();
-        return def(rt, std::move(vc));
+        return def_heap(rt, std::move(vc));
     }
 
     // 内置类型的方法表是静态的，Optional 上没有；走到这里说明没做
@@ -2138,6 +2412,8 @@ VReg Lowerer::lower_method_call(Attribute& at, Call& c) {
             err(c.line, c.col, "list.append() does not take keyword arguments");
         }
         VReg v = expr(*c.args[0]);
+        // 运行时不再做隐式 retain：容器元素的所有权由降级器按静态类型决定。
+        retain_elem(v, list_kind(recv_ty));
         call_void(RtFn::ListAppend, {recv, v});
         return const_none();
     }
@@ -2162,6 +2438,12 @@ VReg Lowerer::lower_method_call(Attribute& at, Call& c) {
         get.a = recv;
         get.b = last;
         VReg v = def(et, std::move(get));
+        // kind 1 的列表持有元素引用，截断时会 dec；把返回值领出来，
+        // 作为新的临时值入栈，否则返回值会随截断变成悬空指针。
+        if (list_kind(recv_ty) == 1 && ir_is_heap(et)) {
+            rc_inc(v);
+            push_temp(v);
+        }
         Inst setlen;
         setlen.op = IrOp::CallRt;
         setlen.imm = static_cast<int64_t>(RtFn::ListSetLen);
