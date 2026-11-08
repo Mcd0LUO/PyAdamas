@@ -1,0 +1,199 @@
+# 开发
+
+## 环境
+
+| 依赖 | 版本 | 用途 |
+|---|---|---|
+| g++ | 13+ | `<format>`、`<expected>`、`std::unreachable` |
+| GNU make | 任意 | 构建 |
+| cc | 任意（gcc/clang） | 把生成的汇编汇编成可执行文件，链接运行时 |
+| python3 | 3.10+ | 只用于差分测试，编译本身不需要 |
+
+`std::print` 要 GCC 14 才有，所以输出统一走 `std::format` + `printf`。
+
+## 构建
+
+```bash
+make -j                 # 开发构建（-O0 -g）→ build/dev/py23
+make MODE=release -j    # 发布构建（-O2）   → build/release/py23
+make test               # 正例 + 反例 + 运行用例
+make info               # 打印当前 MODE/OPT/BUILD 和源文件列表
+make clean
+```
+
+### 为什么默认 -O0
+
+这个项目自己的运行时间只有十几毫秒，`-O0` 完全够用；`-O2` 下标准库模板的优化阶段会吃掉八成编译时间（实测 `-O0` 3.8s / `-O1` 5.6s / `-O2` 7.9s）。只有跑分时才需要 `MODE=release`。
+
+### 增量原理
+
+源码按翻译单元拆成 6 个 `.cpp`，`-MMD -MP` 把头文件依赖记在 `build/<mode>/*.d`，改哪个 `.cpp` 只重编哪个 `.o`，改 `.h` 只重编真正依赖它的单元。两个 MODE 用不同目录，避免 `-O` 级别不同的 `.o` 混在一起。
+
+| 场景 | 耗时 |
+|---|---|
+| 无改动 | 0.00s |
+| 改 `codegen.cpp` | 2.7s |
+| 改 `main.cpp` | 2.4s |
+| 改 `parser.cpp` | 3.4s |
+| 改 `typecheck.h`（触发 4 个单元） | 3.7s |
+| 全量 `make -j8` | 4.7s |
+
+拆 TU 只对「只改一个文件」有效：预处理后一共 10 万行，项目自身只有 1 万行，95% 是标准库模板展开，全量构建只能靠 `-j`。PCH 试过（84MB，只省 0.34s，且 `-O` 级别不匹配会静默失效），不划算。
+
+## 测试
+
+### 三类用例
+
+| 目录 | 要求 | 命名 |
+|---|---|---|
+| `tests/*.py` | `check` 必须通过 | 编号 + 主题，如 `09_types.py` |
+| `tests/fail/*.py` | `check` 必须报错，且第一行写 `# expect: <错误片段>` | `fNN_主题.py` |
+| `tests/run/*.py` | 必须编译运行成功，输出与末尾 `# --- expect ---` 逐行一致 | `NN_主题.py` |
+
+跑单个文件：
+
+```bash
+./build/dev/py23 check tests/09_types.py
+./build/dev/py23 check tests/fail/f17_len.py     # 期望报错
+./build/dev/py23 run   tests/run/06_operators.py
+```
+
+运行用例的期望输出这么写：
+
+```python
+print("hi")
+
+# --- expect ---
+# hi
+```
+
+`# --- expect ---` 之后每一行去掉 `# ` 就是期望输出，必须逐字节一致（包括空行）。
+
+### 差分测试
+
+```bash
+python3 tests/diff/run_diff.py              # 3 个种子 = 600 个程序
+python3 tests/diff/run_diff.py --seeds 20   # 更多随机性
+python3 tests/diff/run_diff.py --only repr  # 只测浮点转字符串
+```
+
+生成器在 `tests/diff/generators.py`，加新生成器就三步：写 `gen(rng, n)` 返回源码、在 `GENERATORS` 里登记、确认默认种子下零差异。
+
+生成的程序必须两端都能跑通、输出一致；已知的语义分歧不要测（列在 [compatibility.md](compatibility.md)），否则只是制造噪音。
+
+### 前端基线
+
+改了类型检查之后，除了 `make test`，还应该重跑一次标准库基线，确认没有把真实代码判错。命令和数字见 [compatibility.md](compatibility.md#前端鲁棒性基线)。
+
+## 调试
+
+| 想看什么 | 命令 |
+|---|---|
+| token 流 | `py23 tokens x.py` |
+| 语法树 | `py23 ast x.py` |
+| 推断出的顶层类型 | `py23 types x.py` |
+| 降级后的 IR | `py23 ir x.py` |
+| 生成的汇编 | `py23 asm x.py` |
+| 保留中间 `.s` | `PY23_KEEP_ASM=1 py23 run x.py` |
+| 单步调试生成程序 | `py23 build x.py -o x && gdb ./x` |
+
+汇编里每条指令前都有对应的 IR 注释，对照 `py23 ir` 的输出能定位到是哪条 IR 生成错了。
+
+### 内存 / UB 检查
+
+```bash
+g++ -std=c++23 -O0 -g -fsanitize=address,undefined -fno-omit-frame-pointer -Isrc \
+    -DPY23_RT_OBJ="\"$PWD/build/dev/rt.o\"" src/*.cpp -o /tmp/py23-asan
+
+/tmp/py23-asan check tests/09_types.py
+/tmp/py23-asan run   tests/run/04_containers.py
+/tmp/py23-asan run   tests/run/09_class.py   # 类：字段偏移 / vtable / 对象分配
+```
+
+注意 ASan 下每层递归帧约 4KB，8MB 栈撑不住几千层。所以语法层对表达式嵌套设了硬上限：`parser.h` 的 `kMaxExprDepth` / `kMaxUnaryDepth`（目前 200），超了报 `expression nested too deeply`。这类保护必须在解析器里，因为类型检查和降级都是照 AST 递归的，树有多深它们就有多深。
+
+### 严格警告
+
+```bash
+g++ -std=c++23 -O0 -g -Wall -Wextra -Wshadow -Wnon-virtual-dtor -Wold-style-cast -Wcast-qual \
+    -Isrc -DPY23_RT_OBJ="\"$PWD/build/dev/rt.o\"" src/*.cpp -o /tmp/py23-strict
+```
+
+不用 `make CXXFLAGS=...`：命令行变量会覆盖 Makefile 里的 `+=`，`PY23_RT_OBJ` 就丢了。
+
+当前零警告。新代码请保持。
+
+## 代码风格
+
+没有单独的格式文件，跟着周围的代码写。几条硬规矩：
+
+- **注释说「为什么」，不说「是什么」**。`// 取模结果与除数同号，补一个 |b|` 有价值；`// 调用 fmod` 没有。
+- **错误消息格式统一**：`py23 xxx.py:12:5: error: ...`，由 `report()` 负责排版，不要自己 `printf`。
+- **拒绝的东西要给出下一步**：`'*args' is not supported by the code generator yet` 比 `invalid syntax` 有用。
+- **枚举 switch 不留 `default`**：让 `-Wswitch` 在加新枚举项时报错，比运行时漏一个 `case` 强。
+- **死代码立刻删**：`IrOp::Print` 曾经是一个「谁发出来就会被静默丢掉」的空 `case`，这种比没实现更危险。
+
+## 扩展 checklist
+
+### 加一条语法
+
+1. `token.h`：需要新记号就加枚举 + `tok_name`
+2. `lexer.h`：产出它
+3. `ast.h`：加节点，实现 `dump`
+4. `parser.cpp`：解析它（注意 `parse_atom` / `parse_stmt` 的分派和优先级）
+5. `typecheck.cpp`：加类型规则；不确定就返回 `unknown` 放行
+6. `lower.cpp`：降级；做不到就 `err("... is not supported by the code generator yet")`
+7. `tests/`：正例 + 反例各一个
+
+### 加一条类型规则
+
+`typecheck.cpp` 里按语句/表达式分派。注意两条底线：
+
+- 遇到 `unknown` 一律放行（`is_unknown(t)` 提前 return）
+- 不确定的时候宁可漏报——把真实代码误判为错误，比漏掉一个错更糟
+
+改完重跑基线。
+
+### 加一个类特性
+
+类的真相在 `ClassInfo`（`typecheck.h`）：字段顺序决定 `field.get` 的偏移，`MethodInfo::slot` 决定 vtable 下标。加特性时按这条链走：
+
+1. `typecheck.h`：`ClassInfo` / `FieldInfo` / `MethodInfo` 加字段
+2. `typecheck.cpp` 的 `classdef()`：填进去（注意先绑类名、再解析字段、最后检查方法体）
+3. `lower.cpp` 的 `collect_classes()`（预扫描建 `IRClass`）与 `lower_classdef()`（填 vtable）
+4. `codegen.cpp`：只有对象布局变了才需要动（`field.get` 的偏移由 IR 携带）
+5. `tests/run/09_class.py`：钉住新行为
+
+两条不变量别破坏：**子类的字段前缀必须等于父类的全部字段**、**覆盖方法的槽号必须等于父类的槽号**。任何一条破了，「父类类型装子类实例」就会读错偏移或调到错的实现。
+
+放宽的边界也要守住：`ClassInfo::open`（基类在外部、类体里有语句）和骨架（`complete == false`）只影响**成员查找**，不能让它影响布局。`n_fields()` / `obj_size()` 必须只数真实字段——把 open 当成「字段数不定」就会让所有对象分配小一圈，运行时踩内存。
+
+新增的隐式字段（`self.x = ...`）在方法体检查过程中追加到 `fields`，顺序就是首次赋值顺序。这依赖一个前提：**类型检查阶段没有任何地方缓存 `n_fields()`**。目前只有 `lower.cpp` 的 `collect_classes()` 读它，那是类型检查全部结束之后。
+
+### 加一条 IR 指令
+
+见 [ir.md](ir.md#加一条新指令要动哪里)。要点：`IrOp` 枚举 → `irop_name` → `text()` → `lower` 产出 → `codegen` 消费（`-Wswitch` 会逼你补）。
+
+### 加一个内置函数
+
+1. `typecheck.cpp` 的 `builtin_call()`：加签名规则
+2. `typecheck.cpp` 的 `is_builtin_callable()`：登记名字
+3. `lower.cpp` 的 `lower_builtin_call()`：降级（可能展开成多条指令，也可能调运行时）
+4. `tests/`：正例 + 反例
+
+### 加一个运行时函数
+
+见 [runtime.md](runtime.md#加一个运行时函数)。
+
+## 踩过的坑（都写进了代码注释）
+
+| 坑 | 教训 |
+|---|---|
+| vreg 槽位按线性区间复用 | 跨块的值必须独占槽位，否则循环第二轮读到垃圾 |
+| 复合赋值 `*=` 被降成 `+=` | `Tok` 有两套记号，`STAREQUAL` 不等于 `STAR`，映射要写全 |
+| f-string 里的表达式从没被检查 | `return t_str()` 之前得先把 `values` 走一遍 |
+| `Constant::boolean/none` 没有行列号 | 静态工厂不设位置，诊断会指到 1:1 |
+| `%g` 直接当浮点格式化 | 最短数字串的精度太小，`10.0` 会变成 `1e+01` |
+| 字符串 `<` 什么指令都不生成 | 「留个注释明天再写」等于静默错误 |
+| 预扫描占位的符号吃掉标注 | `x: int = 1` 之后的 `x = "s"` 没人管，等于标注失效 |
+| 标注是 float 但存了整数位模式 | 赋值/传参/返回/字面量四处都要补 `convert`，否则打印出 `5e-324` |

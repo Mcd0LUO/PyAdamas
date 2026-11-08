@@ -1,0 +1,27 @@
+# 构建产物
+build/
+py23
+
+# 编译中间件
+*.o
+*.d
+*.s
+*.ii
+*.gch
+
+# 编译产物（tests/run 下的可执行文件、py23 build 的默认输出）
+tests/run/0[1-9]_*
+!tests/run/*.py
+
+# 编辑器
+.vscode/
+.idea/
+*.swp
+*~
+
+# Python
+__pycache__/
+*.py[cod]
+
+# 差分测试的临时目录
+.pytest_cache/

@@ -1,0 +1,183 @@
+# IR 参考
+
+形态：**函数 → 基本块 → 线性三地址码 + 虚拟寄存器**。每个值有编号，每个变量有固定槽位，指令自带类型。
+
+```
+%7  = load.global g1        ; int
+%8  = load.global g0        ; func(int) -> int
+%9  = load.global g2        ; int
+%10 = call %8(%9)           ; int
+%11 = bin.add %7, %10       ; int
+```
+
+## 为什么不是 SSA
+
+Python 语义里变量天生可变，循环里反复赋值是常态。一上来就构造 phi 会把 `for` / `while` / `break` 的降级搞得非常绕，而收益要等到真正的优化遍才兑现。
+
+现在用「可变槽位 + vreg」：中间值有编号（不可变），变量有固定槽（可变）。后端按槽分配栈帧，规则简单、不会错。要加 SSA 是在这层之上再构造一次，不必回头改前端。
+
+代价是同一个变量在循环里每轮走一次 `store.slot` / `load.slot`。等加了块内寄存器缓存，这些 load/store 大部分会被消掉。
+
+## 数据结构
+
+`src/ir.h`。
+
+| 结构 | 说明 |
+|---|---|
+| `Inst` | 一条指令。`op` + 至多三个源操作数 `a/b/c` + `dst` + `imm/fimm/idx/target/target2` + `args` + `ty` |
+| `Block` | 名字 + 指令序列，`terminated()` 判断末尾是不是跳转/分支/返回 |
+| `IRFunction` | 名字、形参、返回类型、`slot_ty`（局部槽类型）、`vreg_ty`（每个 vreg 的类型）、基本块 |
+| `IRGlobal` | 一个全局变量；数据段里就是一个 `.quad`，初值 0 同时也是 `None` |
+| `IRClass` | 名字、vtable（槽 → 函数下标）、字段数（含继承） |
+| `IRModule` | 函数表、全局表、字符串池、类表、`entry`（顶层代码编译成的函数下标） |
+
+`Inst` 里有个容易踩的点：**`idx` 的含义随 `op` 变**——`const.str` 是字符串池下标，`load.slot` 是槽号，`load.global` 是全局号，`func.addr` 是函数号。类型上看不出区别，读指令时要先看 `op`。
+
+`IRModule::add_func` 返回裸指针，函数表用 `vector<unique_ptr<IRFunction>>` 持有：降级过程中会不断新增函数（嵌套 `def`），`vector<IRFunction>` 扩容会让外部持有的指针失效。
+
+## 指令集
+
+`ty` 一律是结果类型；没有结果的指令（`store.*`、`call.rt` 到 void 函数、`jump`）`dst == kNoReg`。
+
+| 指令 | 操作数 | 语义 | 后端 |
+|---|---|---|---|
+| `const.int dst, imm` | `imm: i64` | `dst = imm` | `movq $imm` |
+| `const.float dst, fimm` | `fimm: double` | `dst = fimm` | `movabsq` + `movq` + `movsd` |
+| `const.str dst, idx` | `idx: 字符串池` | `dst = &str_obj[idx]` | `leaq .LstrN(%rip)` |
+| `const.none dst` | — | `dst = 0` | `xorl` 或直接存 0 |
+| `func.addr dst, idx` | `idx: 函数号` | `dst = &func` | `leaq .LfN(%rip)` |
+| `mov dst, a` | — | `dst = a` | 两条 `movq`。**当前没有降级路径产生它**，留着给后续优化遍用 |
+| `bin dst, a, b` | `bop` | 按 `bop` 做二元运算 | 整数 `addq` 系 / 浮点 `addsd` 系 |
+| `un dst, a` | `uop` | `neg/pos/bitnot/not` | `negq` / 空 / `notq` / 真值取反 |
+| `cmp dst, a, b` | `cop` | 比较，结果 bool | `cmpq`+`setcc` / `ucomisd`+`setcc` |
+| `convert dst, a` | `ty` 是目标类型 | 数值/字符串转换 | `cvtsi2sdq` / `cvttsd2siq` / `call py23_str_from_*` |
+| `load.slot dst, idx` | `idx: 槽号` | 读局部槽 | `movq off(%rbp)` |
+| `store.slot idx, a` | — | 写局部槽 | `movq %rax, off(%rbp)` |
+| `load.global dst, idx` | `idx: 全局号` | 读全局 | `movq .LgN(%rip)` |
+| `store.global idx, a` | — | 写全局 | `movq %rax, .LgN(%rip)` |
+| `list.new dst, args...` | — | 按 `args` 构造列表 | 逐个 `py23_list_append` |
+| `tuple.new dst, args...` | — | 按 `args` 构造元组 | 同上（目前与 list 同表示） |
+| `index.get dst, a, b` | — | `dst = a[b]` | list 走运行时，str 走 `py23_str_char_at` |
+| `index.set a, b, c` | — | `a[b] = c` | `py23_list_set` |
+| `len dst, a` | — | `dst = len(a)` | 一条 `movq (%rax), %rax` |
+| `obj.new dst, imm` | `imm: 类下标` | 分配对象并写入 vtable 指针 | `call py23_obj_new` + `leaq .LvtN` |
+| `field.get dst, a, imm` | `imm: 字节偏移` | `dst = a->field` | 一条 `movq off(%rax), %rax` |
+| `field.set a, imm, b` | `imm: 字节偏移` | `a->field = b` | `movq %rcx, off(%rax)` |
+| `vcall dst, a, args...` | `imm: vtable 槽` | `dst = a->vtable[imm](a, args...)` | 取表、取槽、间接跳转 |
+| `call dst, a, args...` | `a: 函数值` | 间接调用 | `call *%r11` |
+| `call.rt args..., imm` | `imm: RtFn` | 调运行时函数 | `call py23_xxx` |
+| `jump target` | — | 无条件跳转 | `jmp` |
+| `branch a, target, target2` | — | `a` 为真跳 `target` | 按类型测试真值 |
+| `return a` | `a == kNoReg` 表示 `None` | 返回 | `rax` / `xmm0` |
+
+### 运行时函数表
+
+`RtFn` 是**枚举**，后端按枚举直接生成调用，不经过符号查找，用户代码也不能引用。清单见 [runtime.md](runtime.md#函数表)。
+
+另有三类符号不走 `RtFn`，由后端直接按名字调用：`py23_pow_i64`、`py23_str_eq`、`py23_str_cmp`（以及 libm 的 `floor` / `fmod` / `pow`）。这类是「参数形态固定、没有枚举必要」的辅助函数。
+
+## 不变量
+
+降级器必须保证，后端可以依赖：
+
+1. 每个基本块以 `jump` / `branch` / `return` 结尾。（codegen 有兜底，但那条路径不该被触发。）
+2. 指令的 `dst` 类型等于 `vreg_ty[dst]`；`def()` 是唯一分配 vreg 的入口，会自动登记类型。
+3. `store.slot` / `store.global` 的值类型与目标槽类型一致——由 `coerce()` 在写入前补 `convert` 保证。
+4. 形参槽排在最前面，槽号等于形参下标（后端按这个顺序搬寄存器）。
+5. `entry` 一定指向「模块顶层代码」编译出的那个函数，名字是 `__py23_main`。
+6. 同一条指令的 `idx` 只有一个含义，但含义由 `op` 决定（见上表）。
+7. `vcall` 的 `a` 是接收者（self），`args` 里**不含** self——后端把它装进第一个整型参数位。
+8. 类表在降级开始时就按 AST 顺序建好（父类在前），`obj.new` 的 `imm` 是 `IRModule::classes` 的下标；vtable 里 `-1` 表示该槽没填上，正常不会出现（方法编译失败时整个编译已经报错）。
+
+## 降级规则
+
+`src/lower.cpp`。
+
+### 语句
+
+| AST | 降级 |
+|---|---|
+| `Expr` | 求值后丢弃结果 |
+| `Assign` | 求值右侧一次，按目标分配（名字 / 解包 / 下标） |
+| `AugAssign` | `target = target <op> value`，浮点目标先做统一提升 |
+| `AnnAssign` | 有初值时同 `Assign`；纯声明不生成代码（槽本来就是 0） |
+| `If` / `While` | `br cond, body, else`；`else` 块单独成块，`while` 的 `else` 在条件为假时进入 |
+| `For(range)` | 特化：独立的计数器槽 + 用户变量槽，每轮把计数器写进用户变量 |
+| `For(序列)` | 通用：`len` + 下标 + 计数器；元素类型来自序列的元素类型 |
+| `Return` | `return a`；有声明返回类型时先 `coerce` |
+| `Break` / `Continue` | 跳到循环的 `end` / `incr` 块 |
+| `Try(finally)` | 正常路径执行完 body 后跳 finally；`return` 前也要过一遍 finally |
+| `Global` | 只影响名字解析（该名字走全局读写） |
+| `Assert` | `br cond, ok, fail`；`fail` 里拼消息后 `panic` |
+| `ClassDef` | 类表在正式降级前预扫描建好；这里只编译本类方法并填 vtable |
+
+### 表达式
+
+| AST | 降级 |
+|---|---|
+| 常量 | 直接产出 `const.*`；字符串进池 |
+| `Name` | 局部 `load.slot`，否则 `load.global` |
+| `BinOp` | 字符串 `+` 走 `py23_str_concat`；数值走 `bin` |
+| `BoolOp` | 短路：先求左值，按真值分支，两条路径都把结果写进同一个临时槽 |
+| `Compare` | 单次比较一条 `cmp`；链式比较把中间值存槽，逐个比较并短路 |
+| `Call` | 内置特化（`print` / `len` / `int` / `float` / `str` / `bool`）→ 否则按 `FuncInfo` 重排实参 → `call` |
+| `Subscript` | `index.get`；切片报错 |
+| `Attribute` | 字段读 → `field.get`（偏移编译期确定）；方法名不加 `()` 报错 |
+| `Call(类名)` | `obj.new` → 逐个字段初值 `field.set` → 有 `__init__` 时 `vcall` |
+| `Call(对象方法)` | `vcall`，`self` 放在 `a`，`args` 只放其余实参 |
+| 列表/元组字面量 | `list.new` / `tuple.new`，元素按声明的元素类型 `coerce` |
+| `IfExp` | 三块 + 临时槽 |
+| `JoinedStr` | `str_concat` 链，每个 `{...}` 先 `convert` 到 `str` |
+| `NamedExpr` | 求值后 `assign_to`，结果就是该值 |
+| `Lambda` | 报错：还没有闭包表示 |
+
+### 几处细节
+
+**循环变量私有**：`for i in range(n)` 用独立计数器槽，每轮把计数器写进 `i`。Python 里在循环体给 `i` 重新赋值不影响迭代，两者必须分开。
+
+**参数重排**：按 `FuncInfo` 把位置参数和关键字参数绑到形参槽上，缺省的用字面量默认值填。签名不可知时（函数值调用）只接受纯位置参数。绑完之后按形参类型逐个 `coerce`。
+
+**`print` 不是函数**：就地展开成一串 `call.rt`，`sep` / `end` 求值后交给 `py23_print_str` 原样写出。
+
+**`coerce` 的边界**：只处理数值域之间的转换（int/bool ↔ float）。指针类之间的差异（`list[int]` → `list[float]`）需要逐元素转换并重新分配，现阶段直接报错，不允许静默产生错误的位模式。
+
+**类在降级前先建表**：`Lowerer::run` 里先扫一遍语句块（不进函数体）把每个 `ClassDef` 变成一条 `IRClass`，vtable 槽先填 -1。这样方法体里构造另一个类时，类下标和对象大小都已经确定。真正编译 `ClassDef` 时分两步：先从父类 vtable 抄一份前缀（父类一定在前，此时已填好），再编译本类方法覆盖对应槽。
+
+**字段初值放在构造点**：`x: int = 5` 不是类属性，而是「每次 `Cls(...)` 都求值一次并写进新对象」。这样父类字段的初值在子类覆盖 `__init__` 时也不会丢，且 `items: list[int] = []` 每个实例都是独立列表。
+
+## dump 怎么看
+
+```bash
+./build/dev/py23 ir script.py
+```
+
+```
+; globals: 3
+global g0 twice : func(int) -> int
+global g1 total : int
+class c0 Point (2 fields, vtable: f3)
+
+func f0 __py23_main() -> int {
+  slots: s0=int
+bb0 (entry):
+  %0 = func.addr f-1  ; func
+  store.global g0, %0
+  %1 = const.int 0  ; int
+  store.global g1, %1
+```
+
+- 头部：全局变量表（名字 + 类型）、字符串池、类表（字段数 + vtable 各槽的函数下标）
+- 每个函数：名字、返回类型、槽位表（含类型）
+- 基本块以 `bbN (名字)` 开头，块名是人可读的提示（`for.cond` / `for.body` / `if.then` …），不参与语义
+- 每条指令后面的 `; 类型` 是 `ty` 或操作数类型
+- `_ = ` 表示这条指令没有结果
+
+## 加一条新指令要动哪里
+
+1. `ir.h`：`IrOp` 加枚举 + `irop_name` 加名字
+2. `ir.cpp`：`Inst::text()` 加打印
+3. `lower.cpp`：产出这条指令（别忘了 `def()` 里登记类型）
+4. `codegen.cpp`：`gen_inst` 加 `case`（`-Wswitch` 会强制你加）
+5. `docs/ir.md`：指令表加一行，`docs/codegen.md` 说明生成策略
+
+漏掉第 4 步编译不过，这正是当初把 `op` 做成 `enum class` 而不是字符串的原因。

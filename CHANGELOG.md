@@ -1,0 +1,160 @@
+# 变更记录
+
+格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)。版本号是自己定的，规则：`0.x` 阶段每个「能跑通新一层」算一个次版本。
+
+早期阶段没有逐条留痕，按阶段归纳；0.4 之后逐条记录。
+
+## [0.6.1] - 2026-11-08
+
+对象模型落地后跑标准库基线，发现类的检查把真实代码判死了一大片（35693 个语法通过的文件里 19064 个类型报错）。这一版全是**放宽**：按「宁可漏报，不可误杀」把静态上看不见的东西降级成 unknown。
+
+### 修复
+
+- **`class A(object)` 被判死**：`object` 在内置表里是函数（`object()` 造实例），不是 `ClassInfo`。基类是内建类型名时按根类处理
+- **外部基类的方法全丢**：`class T(unittest.TestCase)` 之后 `self.assertEqual(...)` 报「没有此方法」。`ClassInfo` 新增 `open` 标记（整条继承链生效），查不到的成员按 unknown 放过
+- **`self.x = ...` 要求先写标注**：现在就地补成隐式字段，类型按首次赋值推断；`None` 与 unknown 不参与推断（否则后面每次 `self.x.foo()` 都被判死）
+- **类体里的普通语句被拒**：`x = 1` / `if` / `for` 改成标记「没建模」，并把类标成 open（类属性查不到）；`build` 时才拒绝
+- **多继承被拒**：改成标记「没建模」+ `build` 拒绝。标准库里的测试类大量是 `class T(Mixin, TestCase)`
+- **`self.method()` 拼错也报错 → 现在放过**（mixin 组合出来的成员静态看不见），类外的 `p.m()` 仍然检查
+- **骨架类被当成空类**：类定义在引用点之后时（`def f(): return C(1)` 写在 `class C` 前面），骨架的 `complete == false`，构造参数和成员查找一律放宽
+- **嵌套函数里的 `self`**：`def last(): self.x` 这类闭包捕获，之前因为 `cur_self_name_` 被 `std::move` 移空而失效
+- **隐式字段的类型被后来的赋值覆盖**：`self.x = f()` 后 `self.x = None` 把 unknown 改成了 None，`join` 语义修正为 unknown 吸收
+- **`@staticmethod` 的零参方法**报「缺 self」：带装饰器的方法不检查 self，也不给调用签名（实参不检查）
+- **`MyList[int]` 泛型下标**被报「不可下标」：类对象下标返回 unknown
+- **`duplicate method`**：`@property` 的 getter / setter 是同名两个 `def`，Python 里合法（后者覆盖）。现在两者都检查、共用一个槽，vtable 里后者胜出
+- **`self.x = v` 撞上同名方法**：可能是 `@property` 的 setter，静态分不清，放过并标记；类外的 `p.x = v` 仍然报错
+- **`c.__annotations__ = d`**：给 dunder 属性赋值不再报「不能给方法赋值」
+- **类实例的运算符 / 解包 / 比较 / `len()`**：`Fraction - Fraction`、`enum.FlagBoundary` 解包这类全被误判。类可能重载了 dunder 协议（重载还可能在外部基类里），我们没建模就一律放过
+- **`set[a] < set[b]`**：集合子集比较放行
+- `@property` 返回的数值参与一元运算（`bad operand type for unary operator`）同样放过
+
+### 新增
+
+- `tests/unsupported/` 测试类：`check` 必须打标记、`build` 必须拒绝，防止「标了没建模却悄悄编译过去」
+- `tests/run/09_class.py` 增加无标注字段的用例
+
+## [0.6] - 2026-11-08
+
+这一版加的是**对象模型**：类、字段、方法、单继承、虚调用。类在编译期定死布局，属性访问退化成一条固定偏移的读。
+
+### 新增
+
+- `class` 语句：方法定义 + 带标注的字段声明 + `pass` + 文档字符串
+- 字段偏移在编译期确定：对象 = `[vtable 指针][字段…]`，`p.x` 是 `movq 8(%rax), %rax`
+- 单继承：子类字段接在父类之后，vtable 槽位前缀与父类一致；覆盖沿用同一槽
+- 虚调用 `vcall`：从对象头取 vtable，按常量槽号间接跳转，父类类型能调到子类实现
+- 构造：`Cls(...)` = 分配 + 初始化带初值的字段 + 调 `__init__`；支持默认参数与关键字参数
+- 字段初值（`x: int = 0`）在每次构造时求值，实例之间互不影响
+- 类型系统新增 `TyKind::Class`：子类可赋给父类、`join` 取较浅的公共上界、`isinstance` 之外的多态检查
+- `Optional[Cls]` 上的字段访问与方法调用带运行时空指针检查
+- `print(obj)` 输出 `<Point object>`
+- IR 新指令：`obj.new` / `field.get` / `field.set` / `vcall`；`IRModule::classes`
+- 运行时 `py23_obj_new(size)`（`calloc`，全零）
+- `tests/09_class.py`（类型正例）、`tests/run/09_class.py`（运行用例）、6 个类相关反例
+
+### 修复
+
+- **类型系统与类信息的 shared_ptr 环**：`ClassInfo` 的字段类型指回 `Type`，`Type` 又指回 `ClassInfo`，ASan 报 2 万字节泄漏。`Type::cls` 与 `ClassInfo::base` 改成裸指针，所有权归 `TypeChecker::all_classes_`
+- 顶层函数签名引用「后面才定义的类」时解析成 `unknown`：`collect_toplevel` 现在先给每个类建骨架，`classdef` 再往同一个对象里填
+- `Optional[Cls]` 上的属性赋值（`n.next.next = x`）被误报成「没有可赋值的属性」
+
+### 验证
+
+- `make test`：11 正例 + 33 反例 + 9 个运行用例
+- 差分测试 8 个种子、1600 个程序，零差异
+- ASan + UBSan 零报告（含零泄漏）
+- 严格警告（`-Wshadow -Wnon-virtual-dtor -Wold-style-cast -Wcast-qual`）零报告
+- 性能：2000 万次方法调用 0.09s（CPython 3.88s）
+
+## [0.5] - 2026-11-08
+
+这一版只做一件事：**把值从栈上搬进寄存器**。IR 一行没改，全部在 `codegen.cpp`。
+
+### 新增
+
+- 变量提升：按 `load.slot` + `store.slot` 次数排序，最热的 5 个局部变量整函数常驻 `rbx` / `r12`–`r15`（callee-saved，跨调用不需要 spill）
+- 块内别名：`%v = load.slot x` 且 %v 只被读一次时，%v 直接指向 x 的寄存器，load 整条消失
+- 结果融合：`%v = ...` 紧跟 `store.slot x, %v` 时，%v 就地写进 x 的寄存器，store 整条消失
+- 常量延迟：`%v = const.int N` 只被读一次时不开指令，使用时直接当立即数
+- 比较连分支：`%v = cmp` 紧跟 `branch %v` 时直接发条件跳转，省掉 `setCC` + `movzbq` + 一次内存往返
+- 非参数变量在序言清零（`x: int` 这种纯声明原先会读到栈上的垃圾）
+- `tests/run/08_regalloc.py`：钉住 callee-saved 保护、多变量溢出、多参数、六种比较、嵌套循环
+
+### 修复
+
+- **局部区起点压住了 callee-saved 保存槽**：变量槽从 `-8(%rbp)` 开始，正好是被 `push` 下来的 `%rbx`；函数返回时把它弹回调用方，调用方的变量凭空变成被调函数的中间值。差分测试抓到的现象是「调完 `f0` 之后，`v3` 从 0 变成 -19」
+- **融合目标与 LoadSlot 别名冲突**：`store.slot s, %v` 被融合吞掉时，如果 %v 走别名路径，变量寄存器根本不会被写，赋值静默丢失。`gen_load_slot` 现在在 `dst_loc_` 非空时强制真的写过去
+- `cmp` 出现 mem-to-mem 操作数（x86 不允许），`cvtsi2sd` 拿到立即数（x86 不允许）
+- push 奇数个 callee-saved 时 `call` 前 `rsp` 不是 16 对齐
+
+### 性能
+
+| 程序 | 0.4 | 0.5 | CPython 3.11 |
+|---|---|---|---|
+| `fib(35)` | 0.08s | 0.06s | 1.00s |
+| 2 亿次 `while` 累加 | 0.34s | 0.06s | 7.00s |
+
+`fib` 只快 1.4 倍——它几乎全是函数调用，热变量本来就只有 `n` 一个。整数循环快 5.7 倍，因为循环变量和累加器现在整轮都待在寄存器里。
+
+### 验证
+
+- `make test`：10 正例 + 27 反例 + 8 个运行用例
+- 差分测试 10 个种子、2000 个程序，零差异
+- ASan + UBSan + `-Wshadow -Wnon-virtual-dtor -Wold-style-cast -Wcast-qual` 零报告
+
+## [0.4] - 2026-11-08
+
+这一版的主线是**把 IR 到可执行文件这条路走通并验证**，同时补齐文档体系。
+
+### 新增
+
+- IR 层：基本块 + 三地址码 + 虚拟寄存器，类型挂在指令上（`src/ir.h`、`src/ir.cpp`）
+- 降级器：`src/lower.cpp`，覆盖标量、字符串、列表、元组、函数、控制流、`print`、f-string
+- 代码生成：`src/codegen.cpp`，System V AMD64 调用约定，栈帧 + vreg 槽位线性扫描复用
+- 运行时：`runtime/rt.c`，字符串/列表/输出/panic，纯 C11
+- CLI：`ir` / `asm` / `build` / `run` 四个模式
+- `print` 的 `sep=` / `end=`（降级期展开，支持任意字符串表达式）
+- 字符串大小比较（`<` `<=` `>` `>=`，按 UTF-8 字节序，与码点序一致）
+- 标注的类型强制：`x: int = 1` 之后再 `x = "s"` 会报错
+- 数值隐式转换：int → float 在赋值、传参、返回、容器字面量四处生效
+- `tests/run/` 运行用例（7 个）、`tests/diff/` 差分测试（4 个生成器 + 统一 runner）
+- `docs/` 文档体系（架构、语言、IR、后端、运行时、兼容性、开发、路线图）
+
+### 修复
+
+- 浮点 `%` 的符号：`-7.5 % 2` 得到 `-1.5`（`fmod` 语义），应为 `0.5`；零的符号也要取除数的
+- 浮点转字符串：`10.0` 被排成 `1e+01`（`%g` 的切换阈值与 CPython 不同）
+- `"a" < "b"` 生成空指令、恒为 `False`
+- `x: float = 1` 把整数位模式当 double 读，打印出 `5e-324`
+- 预扫描先占位的符号吃掉标注标志，导致标注在后续赋值中失效
+- `Constant::boolean/none/ellipsis` 没有行列号，诊断指向 1:1
+- 内置调用的关键字值被求值两次，同一个未定义名报两遍
+- 复合赋值 `*=` 被降级成 `+=`（`Tok` 的两套记号没映射）
+- f-string 里的表达式从未被类型检查
+- vreg 槽位复用忽略控制流回边，循环第二轮读到垃圾（段错误）
+- 整数除零与 `INT64_MIN / -1` 触发 `SIGFPE`，改为带消息的 panic
+- `py23 run` 在源码旁边留下可执行文件，改为临时文件、跑完即删
+- 字符串常量放 `.rodata` 触发 PIE 重定位警告，改 `.data.rel.ro`
+
+### 移除
+
+- 死指令 `IrOp::Print`（降级器从不产出，codegen 里是空 `case`）
+- 无人调用的 `py23_pow_f64` / `py23_fmod_f64` 包装
+
+## [0.3] - 阶段
+
+- 增量构建：源码拆成 6 个翻译单元，`-MMD -MP` 依赖跟踪
+- 前端大规模质检：标准库 + site-packages 38582 个文件作为基线
+- 类型检查补强：分支合并、`is None` 收窄、`try` 体类型处理、容器元素扩宽
+
+## [0.2] - 阶段
+
+- 类型检查器：标注解析、推断、`unknown` 放行策略、内置函数与方法签名表
+- 反例测试集（`tests/fail/`）
+
+## [0.1] - 阶段
+
+- 缩进敏感的词法分析器，覆盖 Python 3 全部关键字与运算符
+- 递归下降解析器 + 完整 AST + 缩进式 dump
+- PEP 701 f-string 解析（同引号嵌套、自文档化、spec 嵌套）
+- 正例测试集（`tests/`）
