@@ -19,6 +19,8 @@
 | 循环收集 | 保守标记-清扫：堆注册表、全局/临时栈/真实栈/寄存器根、2MB 阈值、退出清空 |
 | 字典 / 集合 | 开放寻址哈希表 + 插入顺序；字面量、下标读写、`len`、`in`、`for`；RC/GC |
 | 容器方法与切片 | dict get/keys/values/items/update、set add/update；str/list/tuple 读切片（缺省/负数/步长） |
+| 构造补齐 | 删除类方法、切片赋值、`*args`/`**kwargs`、推导式、`with`、函数装饰器 |
+| 异常 | setjmp/longjmp handler 栈；try/except/else/finally、raise、with 异常路径；运行时错误可捕获 |
 | 运行时 | 字符串、列表、字典、集合、对象分配、输出、panic；浮点 repr 与 CPython 一致 |
 | 验证 | 四类用例（正例 / 反例 / 运行 / 未建模） + 差分测试 + 标准库基线 |
 
@@ -95,7 +97,7 @@ key/value 按静态类型接入 RC：str key 按字节哈希、逐字节判等�
 **已知边界**：空字典的 unknown key 按机器字比较；混合 value 类型退化成
 unknown；`==` 仍是指针比较。
 
-## 上一轮：容器方法 + 切片
+## 0.11：容器方法 + 切片
 
 0.11 补上 dict 的 `get`/`keys`/`values`/`items`/`update`、set 的
 `add`/`update`，以及 str/list/tuple 的读切片。切片边界在运行时按
@@ -106,25 +108,68 @@ Python `slice.indices` 归一化，缺省边界用 `INT64_MIN` 哨兵；结果�
 keys/values/items、5 万次 update 在 16MB 下峰值 RSS 约 8MB，
 ASan/LSan 干净。
 
-**遗留**：删除类方法（`pop`/`remove`/`discard`/`clear`/`popitem`）需要
-开放寻址表的墓碑或重哈希；切片赋值未实现。
+## 0.12：补齐构造（异常 / 生成器 / import 除外）
+
+这一轮把路线图里除 `try/except`、生成器 / `async`、`import` 之外的构造
+一次补齐：
+
+- **dict/set 删除**：`pop` / `popitem` / `remove` / `discard` / `clear` /
+  `set.pop`。开放寻址表没有墓碑，删除后按 `order` 剩余项整表重建，
+  单次 O(n)；`popitem` 固定 LIFO。
+- **切片赋值**：list 的替换 / 插入 / 删除和扩展切片；右侧可以是 str，
+  按字节拆成字符列表；tuple 目标和 `del l[a:b]` 仍拒绝。
+- **`*args` / `**kwargs`**：形参就是末尾的 list / dict 指针，调用点打包；
+  定长 tuple 的 `*` 静态展开；`inner(*args, **kw)` 转发可用。
+- **推导式**：list / set / dict 推导式和生成器表达式（立即求值），多
+  层 `for` + `if`，独立作用域；`range()` 变成可求值的一等列表。
+- **`with`**：类实例的 `__enter__` / `__exit__`；正常结束、`return`、
+  `break`、`continue` 退出都补调 `__exit__`；异常路径留给异常轮。
+- **函数装饰器**：按从下到上应用 `f = d1(d2(f))`，复用普通闭包调用；
+  类装饰器、方法装饰器仍被拒绝。
+
+验收：16–21 运行用例通过；10 万次删除 / 推导式 / 切片赋值 / `with` /
+装饰器 / 变长实参调用在 16MB 地址空间下峰值 RSS 约 8MB；ASan/UBSan/LSan
+零报告；600 个差分程序零差异。
+
+**已知边界**：通过 unknown 函数值的 `*` / `**` 展开无法绑定；`**mapping`
+与命名形参重名不报错；生成器表达式不惰性；方法/类装饰器未支持。
+（`with` 的异常路径在 0.13 补齐。）
+
+## 0.13：异常
+
+按 0.12 末尾定下的模型实现：**setjmp/longjmp + 运行时 handler 栈**，
+异常对象是 `{类型名, 消息}`。
+
+- `try` / `with` / `finally` 压入 `{jmp_buf, prev, temp_mark}`；`raise`
+  设置全局异常后 longjmp 到最内层 landing pad。
+- landing pad 清理临时值栈，再分派 `except` 匹配、`with.__exit__`、
+  `finally`；不匹配继续向外抛。
+- 含 handler 的函数关闭热变量寄存器提升；异常跳过的普通函数帧不执行
+  `release_slots`，局部引用交给保守 GC。
+- `except` 支持多个 handler、tuple 类型、bare except、`as e`（消息
+  字符串）和 `else`；`raise` 支持内置异常和 bare raise。
+- `with` 异常路径调用 `__exit__(type, message, None)`，返回真值抑制
+  异常；`__enter__` 抛异常时外层 `__exit__` 仍执行。
+- 运行时错误 `IndexError` / `KeyError` / `ZeroDivisionError` /
+  `OverflowError` / `ValueError` / `AssertionError` / `AttributeError`
+  改为可捕获 raise；未捕获异常打印类型和消息后 `exit(1)`。
+
+验收：`22_exception` 通过；10 万次跨帧异常 + 5 万次 handler 内重抛 +
+5 万次 with 异常 + 5 万次 finally 异常在 16MB 下峰值 RSS 约 7.8MB；
+ASan/UBSan/LSan 零报告；600 个差分程序零差异。
+
+**已知边界**：只支持内置异常名，`as e` 是消息字符串，没有 `args` /
+traceback / `raise ... from`；`finally` 体内跳出 finally 的
+`return` / `break` / `continue` 被后端拒绝；异常路径的局部变量回收
+依赖 GC 时机。
 
 ## 下一步
 
-### 1. 补齐构造
-
-优先级从高到低，每项独立，可以随时插入：
+### 1. 剩余构造
 
 | 构造 | 工作量 | 依赖 |
 |---|---|---|
-| dict/set 删除类方法（pop / remove / discard / clear） | 中 | 开放寻址表要加墓碑或重哈希 |
-| 切片赋值 | 中 | 复用切片归一化，处理长度变化 |
-| `*args` / `**kwargs` | 中 | 调用约定要支持变长实参 |
-| `try/except` | 大 | 展开（unwind）机制 + 异常对象（对象模型已有） |
-| 推导式 | 中 | 语法树已经在，降级要生成循环 |
-| `with` | 中 | 需要 `__enter__` / `__exit__` |
 | 生成器 / `async` | 大 | 协程状态机或独立栈 |
-| 装饰器 | 中 | 函数是一等值，主要是语法糖 |
 | `import` | 大 | 模块系统、符号解析 |
 
 ## 待决策
@@ -135,7 +180,6 @@ ASan/LSan 干净。
 |---|---|---|
 | 字符串语义 | 字节串（现状）/ UTF-8 码点 | 改码点则 `len` 变成 O(n)，索引要解码；不改则非 ASCII 的 `len` 与 CPython 不一致 |
 | 整数溢出 | 回绕（现状）/ 溢出检查 / 升格 bignum | 检查要每条算术加一条 `jo`；bignum 要一整套运行时 |
-| 异常模型 | `exit(1)`（现状）/ setjmp-longjmp / 表驱动 unwind | 影响 `try/except` 的实现方式和生成代码体积 |
 | `print` 求值顺序 | 边算边写（现状）/ 对齐 CPython | 只有副作用可见时才看得出来 |
 | 许可证 | 未定 | 发布前必须定 |
 
@@ -153,3 +197,7 @@ ASan/LSan 干净。
 6. **诊断不带列区间**：只指向起点，长表达式不好定位
 7. **没有增量重编 Python 源码**：每次 `build` 都是全量编译，没有缓存
 8. **浮点变量不进寄存器**：`xmm` 全是 caller-saved，跨调用要自己 save/restore，所以只提升了整数/指针变量。纯浮点循环（5000 万次累加）0.25s，整数同样次数 0.06s。可行的修法是「函数内没有任何调用时」才提升浮点变量，这样不需要保存；代价是 `load.slot` / `store.slot` 要按类型选 `movsd` 而不是 `movq`
+9. **dict/set 删除是 O(n)**：没有墓碑，每次删除按 `order` 整表重建；小表无所谓，大表高频删除会退化。后续可以换墓碑 + 定期重哈希，或惰性删除
+10. **异常路径的 RC 不精确**：longjmp 跳过普通函数帧时局部变量不执行 `release_slots`，要等 GC；如果要确定性回收，需要给每个函数登记展开清理回调
+11. **异常对象太轻**：只有类型名和消息，没有 `args`/traceback/异常链，也没有自定义异常类；`except ... as e` 的 `e` 是字符串，和 CPython 差异明显
+12. **含 handler 的函数没有寄存器提升**：longjmp 会回滚 callee-saved 寄存器，只能全走内存槽；异常密集且热点的函数会吃亏

@@ -459,6 +459,9 @@ private:
         slot_reg_.assign(ns, std::string());
         n_saved_regs_ = 0;
         if (ns == 0) return;
+        // 含 setjmp 的函数：longjmp 会把 callee-saved 寄存器恢复到 setjmp
+        // 时刻，寄存器里的变量会悄悄回退。这类函数全部走内存槽。
+        if (f_->has_handlers) return;
 
         std::vector<int> score(ns, 0);
         for (const auto& b : f_->blocks)
@@ -761,6 +764,7 @@ private:
             case IrOp::VCall: gen_vcall(in); break;
             case IrOp::Call: gen_call(in); break;
             case IrOp::CallRt: gen_call_rt(in); break;
+            case IrOp::Setjmp: gen_setjmp(in); break;
             case IrOp::Jump: line(std::format("jmp {}", block_label(in.target))); break;
             case IrOp::Branch: gen_branch(in); break;
             case IrOp::Return: gen_return(in); break;
@@ -1393,11 +1397,21 @@ private:
         }
     }
 
+    void gen_setjmp(const Inst& in) {
+        // handler 记录的第一个字段就是 jmp_buf，所以记录指针可以直接
+        // 作为 setjmp 的参数。longjmp 回来后 $rax 非 0。
+        line(std::format("movq {}, %rdi", src_op(in.a)));
+        line("call setjmp");
+        line("movslq %eax, %rax");
+        line(std::format("movq %rax, {}", dst_op(in.dst)));
+    }
+
     void gen_call_rt(const Inst& in) {
         auto fn = static_cast<RtFn>(in.imm);
         switch (fn) {
             case RtFn::ListNew:
                 line(std::format("movq {}, %rdi", src_op(in.args[0])));
+                line(std::format("movq {}, %rsi", src_op(in.args[1])));
                 break;
             case RtFn::ListAppend:
             case RtFn::ListGet:
@@ -1410,6 +1424,7 @@ private:
             case RtFn::DictKeyAt:
             case RtFn::StrContains:
             case RtFn::DictUpdate:
+            case RtFn::ListExtend:
                 line(std::format("movq {}, %rdi", src_op(in.args[0])));
                 line(std::format("movq {}, %rsi", src_op(in.args[1])));
                 break;
@@ -1418,6 +1433,8 @@ private:
             case RtFn::DictSet:
             case RtFn::ListContains:
             case RtFn::DictGetOr:
+            case RtFn::DictRemove:
+            case RtFn::RangeNew:
                 line(std::format("movq {}, %rdi", src_op(in.args[0])));
                 line(std::format("movq {}, %rsi", src_op(in.args[1])));
                 line(std::format("movq {}, %rdx", src_op(in.args[2])));
@@ -1429,6 +1446,19 @@ private:
                 line(std::format("movq {}, %rdx", src_op(in.args[2])));
                 line(std::format("movq {}, %rcx", src_op(in.args[3])));
                 break;
+            case RtFn::DictPop:
+            case RtFn::ListSliceAssign:
+                line(std::format("movq {}, %rdi", src_op(in.args[0])));
+                line(std::format("movq {}, %rsi", src_op(in.args[1])));
+                line(std::format("movq {}, %rdx", src_op(in.args[2])));
+                line(std::format("movq {}, %rcx", src_op(in.args[3])));
+                if (in.args.size() > 4)
+                    line(std::format("movq {}, %r8", src_op(in.args[4])));
+                break;
+            case RtFn::Raise:
+                line(std::format("movq {}, %rdi", src_op(in.args[0])));
+                line(std::format("movq {}, %rsi", src_op(in.args[1])));
+                break;
             case RtFn::StrFromI64:
             case RtFn::StrFromBool:
             case RtFn::PrintI64:
@@ -1438,9 +1468,17 @@ private:
             case RtFn::RcDec:
             case RtFn::RcTemp:
             case RtFn::RcCleanup:
+            case RtFn::RcIncUnknown:
             case RtFn::DictKeys:
             case RtFn::DictValues:
             case RtFn::DictItems:
+            case RtFn::DictPopItem:
+            case RtFn::DictPopLast:
+            case RtFn::DictClear:
+            case RtFn::StrToList:
+            case RtFn::HandlerLeave:
+            case RtFn::HandlerDiscard:
+            case RtFn::ExcMatches:
                 line(std::format("movq {}, %rdi", src_op(in.args[0])));
                 break;
             case RtFn::StrFromF64:
@@ -1459,6 +1497,14 @@ private:
             case RtFn::RcMark:
             case RtFn::RcShutdown:
             case RtFn::GcShutdown:
+            case RtFn::HandlerPush:
+            case RtFn::ExcAccept:
+            case RtFn::ExcDone:
+            case RtFn::ExcClear:
+            case RtFn::ExcReraise:
+            case RtFn::ExcTypeName:
+            case RtFn::ExcMessage:
+            case RtFn::Reraise:
                 break;
         }
         line(std::format("call {}", rt_name(fn)));

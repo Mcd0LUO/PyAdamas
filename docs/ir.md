@@ -67,6 +67,7 @@ Python 语义里变量天生可变，循环里反复赋值是常态。一上来�
 | `vcall dst, a, args...` | `imm: vtable 槽` | `dst = a->vtable[imm](a, args...)` | 取表、取槽、间接跳转 |
 | `call dst, a, args...` | `a: 函数值` | 间接调用 | `call *%r11` |
 | `call.rt args..., imm` | `imm: RtFn` | 调运行时函数 | `call py23_xxx` |
+| `setjmp dst, a` | `a: handler 记录` | `dst = setjmp(a)`；异常 longjmp 回来时为非 0 | `call setjmp` |
 | `jump target` | — | 无条件跳转 | `jmp` |
 | `branch a, target, target2` | — | `a` 为真跳 `target` | 按类型测试真值 |
 | `return a` | `a == kNoReg` 表示 `None` | 返回 | `rax` / `xmm0` |
@@ -76,14 +77,22 @@ Python 语义里变量天生可变，循环里反复赋值是常态。一上来�
 `RtFn` 是**枚举**，后端按枚举直接生成调用，不经过符号查找，用户代码也不能引用。清单见 [runtime.md](runtime.md#函数表)。
 
 引用计数不走 IR 新指令，全部是 `call.rt`：`py23_rc_inc` / `py23_rc_dec`
-管堆值，`py23_rc_temp` / `py23_rc_mark` / `py23_rc_cleanup` 管表达式临时
-值栈，`py23_rc_shutdown` 在入口函数退出时收尾。循环收集器也是 `call.rt`：
+管堆值，`py23_rc_inc_unknown` 对类型不可见的值按堆注册表保守 retain，
+`py23_rc_temp` / `py23_rc_mark` / `py23_rc_cleanup` 管表达式临时值栈，
+`py23_rc_shutdown` 在入口函数退出时收尾。循环收集器也是 `call.rt`：
 `py23_gc_shutdown` 在入口退出时清空剩余堆；周期性收集由 `rc_alloc` 在
 运行时内部按 2MB 阈值触发，IR 看不到。
 
 闭包对象用 `py23_closure_new(code, n_caps)` 分配，负载是
 `[code, n_caps, cell…]`；`Func` 是堆类型，静态闭包 rc 为永生。
 `func.code` 只在创建堆闭包时取裸代码地址，`func.addr` 一律指静态闭包。
+
+异常同样走 `call.rt` + 新指令 `setjmp`：`py23_handler_push` 压入
+`{jmp_buf, prev, temp_mark}`，`setjmp` 指令把 handler 记录交给 libc；
+`raise` 设置全局异常后 longjmp 回来，landing pad 用
+`py23_handler_leave` 清理临时栈，再用 `py23_exc_matches` /
+`py23_exc_accept` / `py23_exc_done` / `py23_exc_reraise` 分派。
+`has_handlers` 的函数关闭槽位寄存器提升，避免 longjmp 回滚变量。
 
 另有三类符号不走 `RtFn`，由后端直接按名字调用：`py23_pow_i64`、`py23_str_eq`、`py23_str_cmp`（以及 libm 的 `floor` / `fmod` / `pow`）。这类是「参数形态固定、没有枚举必要」的辅助函数。
 
@@ -116,10 +125,13 @@ Python 语义里变量天生可变，循环里反复赋值是常态。一上来�
 | `For(range)` | 特化：独立的计数器槽 + 用户变量槽，每轮把计数器写进用户变量 |
 | `For(序列)` | 通用：`len` + 下标 + 计数器；元素类型来自序列的元素类型 |
 | `Return` | `return a`；有声明返回类型时先 `coerce` |
-| `Break` / `Continue` | 跳到循环的 `end` / `incr` 块 |
-| `Try(finally)` | 正常路径执行完 body 后跳 finally；`return` 前也要过一遍 finally |
+| `Break` / `Continue` | 跳到循环的 `end` / `incr` 块；先按逆序发射跨过的 with / finally / handler 清理 |
+| `With` | 每个项求值一次，调 `__enter__` 并绑定 `as`；每层一个 handler + setjmp。正常/跳转路径按逆序调 `__exit__(None,None,None)`，异常 landing 调 `__exit__(type,message,None)`，返回真值则 `exc_clear` 抑制 |
+| `Try` | 外层 handler + setjmp；正常路径 `handler_leave` 后进 `else`；异常 landing 清理临时值栈，按 handler 顺序匹配，命中后 `exc_accept` 绑定 `as e`，处理完 `exc_done`；没有匹配则 `exc_reraise` |
+| `Try(finally)` | 再用一层 handler 包住核心 try；正常、异常和提前退出路径都执行 finalbody，异常路径最后 `exc_reraise` |
+| `Raise` | `raise X` / `raise X(msg)` 调 `py23_raise`；bare `raise` 调 `py23_reraise`；只接受内置异常名 |
 | `Global` | 只影响名字解析（该名字走全局读写） |
-| `Assert` | `br cond, ok, fail`；`fail` 里拼消息后 `panic` |
+| `Assert` | `br cond, ok, fail`；`fail` 里拼消息后 `raise AssertionError` |
 | `ClassDef` | 类表在正式降级前预扫描建好；这里只编译本类方法并填 vtable |
 
 ### 表达式
@@ -131,12 +143,13 @@ Python 语义里变量天生可变，循环里反复赋值是常态。一上来�
 | `BinOp` | 字符串 `+` 走 `py23_str_concat`；数值走 `bin` |
 | `BoolOp` | 短路：先求左值，按真值分支，两条路径都把结果写进同一个临时槽 |
 | `Compare` | 单次比较一条 `cmp`；链式比较把中间值存槽，逐个比较并短路 |
-| `Call` | 内置特化（`print` / `len` / `int` / `float` / `str` / `bool`）→ 否则按 `FuncInfo` 重排实参 → `call` |
-| `Subscript` | `index.get`；切片报错 |
+| `Call` | 内置特化（`print` / `len` / `int` / `float` / `str` / `bool` / `range`）→ 否则按 `FuncInfo` 重排实参 → `call`；`*` 打包成 list、`**` 打包成 dict 作为末尾形参传入 |
+| `Subscript` | `index.get`；切片读走 `list_slice` / `str_slice`；切片赋值走 `list_slice_assign` |
 | `Attribute` | 字段读 → `field.get`（偏移编译期确定）；方法名不加 `()` 报错 |
 | `Call(类名)` | `obj.new` → 逐个字段初值 `field.set` → 有 `__init__` 时 `vcall` |
 | `Call(对象方法)` | `vcall`，`self` 放在 `a`，`args` 只放其余实参 |
 | 列表/元组字面量 | `list.new` / `tuple.new`，元素按声明的元素类型 `coerce` |
+| 推导式 | 结果容器 + 逐层计数器循环 + 条件分支；循环变量放在降级器自己的作用域槽里 |
 | `IfExp` | 三块 + 临时槽 |
 | `JoinedStr` | `str_concat` 链，每个 `{...}` 先 `convert` 到 `str` |
 | `NamedExpr` | 求值后 `assign_to`，结果就是该值 |
@@ -146,7 +159,11 @@ Python 语义里变量天生可变，循环里反复赋值是常态。一上来�
 
 **循环变量私有**：`for i in range(n)` 用独立计数器槽，每轮把计数器写进 `i`。Python 里在循环体给 `i` 重新赋值不影响迭代，两者必须分开。
 
-**参数重排**：按 `FuncInfo` 把位置参数和关键字参数绑到形参槽上，缺省的用字面量默认值填。签名不可知时（函数值调用）只接受纯位置参数。绑完之后按形参类型逐个 `coerce`。
+**参数重排**：按 `FuncInfo` 把位置参数和关键字参数绑到形参槽上，缺省的用字面量默认值填。签名不可知时（函数值调用）只接受纯位置参数，且不能带 `*` / `**`。`*args` / `**kwargs` 形参接在普通形参之后，调用点把多出来的位置实参装进 `list.new`、关键字实参装进 `dict.new`，再按普通实参传入。`*` 右侧是定长 tuple 时静态展开成逐元素下标读。绑完之后按形参类型逐个 `coerce`。
+
+**函数装饰器**：`def f` 正常编译并把原始函数值绑定到 `f`，然后按逆序对每个装饰器发一次普通闭包调用 `d(f)`，结果重新绑定到 `f`；没有新增 IR 指令。
+
+**异常展开**：`try` / `with` / `finally` 各自发射 `handler_push` → `setjmp` → `branch`；landing pad 先 `handler_leave`（弹记录 + `rc_cleanup` 到记录水位），再运行 `except` 匹配 / `__exit__` / finalbody。`return` / `break` / `continue` 不经过 longjmp，而是由统一 cleanup 栈直接发射 `handler_discard`、`__exit__` 和 finalbody，因此正常退出路径仍然精确释放槽位。
 
 **`print` 不是函数**：就地展开成一串 `call.rt`，`sep` / `end` 求值后交给 `py23_print_str` 原样写出。
 

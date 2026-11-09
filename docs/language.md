@@ -26,17 +26,17 @@ py23 借 Python 的语法外壳，但**不是 CPython 的实现**：语义按静
 
 | 分类 | 支持 |
 |---|---|
-| 简单语句 | 表达式语句、赋值（含链式、多重解包）、增量赋值、标注赋值、`pass`、`return`、`break`、`continue`、`assert`、`global` |
-| 复合语句 | `if` / `elif` / `else`、`while`（含 `else`）、`for`（含 `else`）、`def`（含默认参数、`*`、`/`、仅限关键字参数）、`class`（单继承、方法与字段）、`try` **仅 `finally`** |
-| 能解析、不能生成 | `try/except`、`with`、`import`、`raise`、`del`、`async` / `await`、`yield`、装饰器、`match` 之外的软关键字写法 |
+| 简单语句 | 表达式语句、赋值（含链式、多重解包）、增量赋值、标注赋值、`pass`、`return`、`break`、`continue`、`raise`、`assert`、`global` |
+| 复合语句 | `if` / `elif` / `else`、`while`（含 `else`）、`for`（含 `else`）、`def`（含默认参数、`*`、`/`、仅限关键字参数、`*args` / `**kwargs`、装饰器）、`class`（单继承、方法与字段）、`with`（多个项、`as`）、`try` / `except` / `else` / `finally` |
+| 能解析、不能生成 | `import`、`del`、`async` / `await`、`yield`、带装饰器的方法/类、`match` 之外的软关键字写法 |
 
-`assert` 生成的是「条件为假就 panic」，消息是固定的 `assertion failed`（不带表达式文本）。
+`assert` 条件为假时抛出 `AssertionError`，第二个参数作为消息；没有消息时是 `assertion failed`。
 
 ### 表达式
 
-支持：常量、名字、二元/一元运算、布尔短路、链式比较、条件表达式、调用（位置 + 关键字）、下标（读与写）、切片（读）、列表/元组/字典/集合字面量、`in` / `not in`、f-string、`lambda`、海象运算符、用户类的属性读与写、用户类的方法调用。
+支持：常量、名字、二元/一元运算、布尔短路、链式比较、条件表达式、调用（位置 + 关键字 + `*` / `**` 展开）、下标（读与写）、切片（读与赋值）、列表/元组/字典/集合字面量、列表/集合/字典推导式、生成器表达式（按 list 立即求值）、`in` / `not in`、f-string、`lambda`、海象运算符、`range()`、用户类的属性读与写、用户类的方法调用。
 
-能解析但没有代码生成的：推导式、生成器表达式、`*args` / `**kwargs` 实参与形参、dict/set 的删除类方法（`pop` / `remove` / `discard` / `clear` / `popitem`）、切片赋值、内置类型上的属性访问（除 `list.append` / `list.pop` 两个特例）。
+没有代码生成的：内置类型上的属性访问（除 `list.append` / `list.pop` 两个特例）、`print(*args)` 的星号展开。
 
 ## 类型系统
 
@@ -147,7 +147,27 @@ str 切片一致（只是单位是字节）。方法（`upper()` 这类）还没
 - 结果总是新对象（str 新字节串，list/tuple 新列表）；list 切片按源
   元素的堆类别 retain 元素；
 - `step == 0` 运行时 panic；越界边界被夹到有效范围；
-- 切片赋值（`l[a:b] = ...`）和 del 暂不支持。
+- **切片赋值** `l[a:b:c] = value` 支持 list：`step == 1` 时可以改变长度
+  （替换 / 插入 / 删除），扩展切片要求右侧长度与切片长度一致，否则
+  panic；右侧可以是 list/tuple，也可以是 str（按字节拆成字符列表）；
+- 不支持 `del l[a:b]` 和 tuple 的切片赋值。
+
+### 推导式
+
+支持 list / set / dict 推导式与生成器表达式：多个 `for`、每个 `for` 的
+`if` 过滤、嵌套推导式，以及 `range()` 作为迭代源。
+
+```python
+sq = [x * x for x in range(5)]
+ev = [x for x in xs if x % 2 == 0]
+pairs = [(x, y) for x in [1, 2] for y in [3, 4]]
+index = {k: len(k) for k in ["a", "bb"]}
+mods = {x % 3 for x in range(10)}
+```
+
+推导式有独立的变量作用域：循环变量不会覆盖同名的外层变量。生成器
+表达式没有惰性求值，直接按 list 构造。推导式内部暂不支持 `lambda`
+捕获循环变量、`async for` 和海象运算符写回外层。
 
 ### 函数
 
@@ -176,7 +196,24 @@ print(f(), f(), g())    # 1 2 1
 
 支持 `lambda`：它会被脱糖成一个插在语句前的合成嵌套 `def`，因此捕获、
 默认参数和引用计数规则与普通函数完全一致。lambda 参数不能带标注；
-类体字段默认值里的 lambda 暂不支持。没有 `*args` / `**kwargs`。
+类体字段默认值里的 lambda 暂不支持。
+
+支持 `*args` / `**kwargs`：形参在 IR 里分别是 `list[T]` 和
+`dict[str, V]`（Python 里 `*args` 是 tuple，这里两者表示相同），调用点
+把多出来的实参打包成一个容器传进去。`f(1, *lst)`、`f(*t)`、`f(**d)`、
+`def wrapper(*args, **kw): inner(*args, **kw)` 这类转发都支持。限制：
+
+- `*` 位于固定形参之前时不能动态展开（编译期必须知道实参个数）；
+  右侧是定长 tuple 时例外，可以静态展开；
+- 通过 `unknown` 类型的函数值调用时不能带 `*` / `**`（没有运行时签名
+  信息，无法绑定）；
+- 同一个 `**mapping` 的键与显式命名形参重名时，不会像 CPython 那样报
+  `TypeError`，后者会静默留在 `**kwargs` 里。
+
+**装饰器**：`@d1` / `@d2` 按从下到上应用，等价于 `f = d1(d2(f))`；
+装饰器必须是签名已知的函数值。包装函数需要用与目标一致的固定形参来
+转发（不能依赖 `*args` 转发给 unknown 被装饰者）。类装饰器、方法装饰器
+（`@staticmethod` / `@property` 等）仍被后端拒绝。
 
 相互递归的嵌套闭包会形成 cell 环；这类环不是引用计数能处理的，由下面的
 循环收集器回收。
@@ -221,7 +258,16 @@ key 的哈希/判等按静态类型选：int/bool 用机器字、str 用字节�
 - `d.update(other)`；
 - `s.add(x)`、`s.update(other_set)`。
 
-删除类方法（`pop`/`remove`/`discard`/`clear`/`popitem`）仍未生成代码。
+删除类方法也支持：
+
+- `d.pop(k)` / `d.pop(k, default)`：返回值；缺失且没有默认值时 panic；
+- `d.popitem()`：按**后进先出**移除最后插入的项，返回 `(key, value)`；
+- `d.clear()` / `s.clear()`；
+- `s.remove(x)`：缺失 panic；`s.discard(x)`：缺失忽略；
+- `s.pop()`：移除最后插入的元素（CPython 是任意元素，这里选择确定性）。
+
+开放寻址表没有墓碑，删除后按 `order` 剩余项**整表重建**，单次删除是
+O(n)；删除不在热路径上，这个代价换的是实现简单和遍历顺序稳定。
 
 空字典的 key 类型是 `unknown`，不同对象但内容相同的动态字符串 key 可能
 按机器字比较不相等；写了标注或由字面量推出 `str` key 时没有这个问题。
@@ -278,6 +324,17 @@ class Connection:
 
 没有 `__init__` 时只能零参构造——基类在外部的类除外，`__init__` 可能在那边。`__init__` 的默认参数和关键字参数与普通函数规则相同。
 
+### with
+
+`with expr as name:` 要求 `expr` 是用户类实例，并定义 `__enter__` /
+`__exit__`：进入时调用 `__enter__`，返回值绑定到 `as` 目标；正常退出时
+调用 `__exit__(None, None, None)`，异常退出时调用
+`__exit__(type_name, message, None)`。正常结束、`return`、`break`、
+`continue` 都会执行 `__exit__`；`__exit__` 返回真值会抑制异常，否则异常
+继续向外抛。多个 `with` 项按嵌套处理，退出顺序相反；`__enter__` 抛异常
+时，外层已进入的 `__exit__` 仍会执行。没有内置 `open()`，也没有
+`contextlib`。
+
 ### print
 
 `print` 不是函数，是降级期展开的一串输出调用：
@@ -288,7 +345,22 @@ class Connection:
 
 ### 跳转与异常
 
-`break` / `continue` 只作用于字面最近的循环（`for ... else` 的 `else` 在被 `break` 跳过时执行）。`try/finally` 支持：`finally` 体在正常路径和 `return` 之前都会执行一遍。`except` 不支持。
+`break` / `continue` 只作用于字面最近的循环（`for ... else` 的 `else` 在被 `break` 跳过时执行）。
+
+`try/except/else/finally` 支持：多个 `except`、`except (A, B)`、bare
+`except:`、`as e` 和 `else`。异常按内置异常的继承关系匹配（`KeyError`
+能被 `LookupError` / `Exception` 捕获）；`as e` 绑定的是**消息字符串**。
+`else` 只在 try 体正常结束时执行；handler 体里再抛出的异常会继续向外
+展开。
+
+`raise` 支持 `raise ValueError`、`raise ValueError(message)` 和 bare
+`raise`（重抛当前异常）。只支持内置异常名；`raise ... from`、自定义
+异常类、traceback 和异常链暂不支持。`finally` 在正常、异常、`return`、
+`break`、`continue` 路径都会执行；但 `finally` 体内**跳出 finally** 的
+`return` / `break` / `continue` 会被后端拒绝（finally 里嵌套循环自己的
+跳转是允许的）。
+
+`with` 的 `__exit__` 在 `return` / `break` / `continue` 和异常路径都会执行。
 
 ## 会被拒绝的写法
 
@@ -299,7 +371,7 @@ class Connection:
 - Python 2 遗留写法（`0x1L`、`lambda (a, b):`、`except X, e`）
 - 类：方法缺 `self`、字段赋值类型不符、访问不存在的字段或方法（`self.xxx` 与外部基类的成员除外）
 
-**代码生成层**（`check` 通过，`build` 报错）：`try/except`、`with`、推导式、生成器、`async`、装饰器、`import`、`raise`、`del`、`*args` / `**kwargs`、dict/set 的删除类方法、切片赋值、`print(file=)`、把类名当值用（`f = Point`）、函数内定义类、多继承、类体里的非声明语句、带装饰器的方法。类体字段默认值里的 `lambda` 也在这一层拒绝。
+**代码生成层**（`check` 通过，`build` 报错）：生成器、`async`、`import`、`del`、带装饰器的方法/类、`print(*args)`、通过 unknown 函数值的 `*` / `**` 展开、`*` 位于固定形参之前且不是定长 tuple、`raise ... from`、非内置异常名、`finally` 体内跳出 finally 的控制流、把类名当值用（`f = Point`）、函数内定义类、多继承、类体里的非声明语句。类体字段默认值里的 `lambda` 也在这一层拒绝。
 
 为什么这么分层：前端宽、后端严。`check` 的定位是「语法和类型有没有明显毛病」，可以对任意 Python 文件跑；`build` 才是「这门语言现在能不能编译它」。
 

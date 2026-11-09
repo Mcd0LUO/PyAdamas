@@ -42,13 +42,14 @@ make clean
 
 ## 测试
 
-### 三类用例
+### 四类用例
 
 | 目录 | 要求 | 命名 |
 |---|---|---|
 | `tests/*.py` | `check` 必须通过 | 编号 + 主题，如 `09_types.py` |
 | `tests/fail/*.py` | `check` 必须报错，且第一行写 `# expect: <错误片段>` | `fNN_主题.py` |
 | `tests/run/*.py` | 必须编译运行成功，输出与末尾 `# --- expect ---` 逐行一致 | `NN_主题.py` |
+| `tests/unsupported/*.py` | `check -v` 必须打标记，`build` 必须拒绝 | `主题.py` |
 
 跑单个文件：
 
@@ -88,9 +89,14 @@ python3 tests/diff/run_diff.py --only repr  # 只测浮点转字符串
 `tests/run/12_lambda.py` 覆盖 lambda；`tests/run/13_gc.py` 会真正触发
 2MB 阈值后的标记-清扫（对象环、字典自环、闭包垃圾、unknown 容器）；
 `tests/run/14_dict.py` 覆盖字典/集合/`in`/方法；`tests/run/15_slice.py`
-覆盖切片（缺省、负边界、正负步长）。RSS 压力用受限地址空间跑长
-循环（命令见 [compatibility.md](compatibility.md#内存验收)）。
-改 `lower.cpp` 的 RC/闭包/容器插桩或 `runtime/rt.c` 的 GC/哈希表后至少
+覆盖切片（缺省、负边界、正负步长）；`tests/run/16_dict_del.py` 覆盖删除类
+方法；`tests/run/17_slice_assign.py` 覆盖切片赋值；`tests/run/18_starargs.py`
+覆盖 `*args` / `**kwargs` / 方法 / 闭包 / 转发；`tests/run/19_comprehension.py`
+覆盖推导式；`tests/run/20_with.py` 覆盖 `with` 的提前退出；`tests/run/21_decorator.py`
+覆盖装饰器；`tests/run/22_exception.py` 覆盖异常层级、bare raise、
+finally 的提前退出、with 异常路径和运行时错误转换。RSS 压力用受限地址
+空间跑长循环（命令见 [compatibility.md](compatibility.md#内存验收)）。
+改 `lower.cpp` 的 RC/闭包/容器/异常插桩或 `runtime/rt.c` 的 GC/哈希表后至少
 跑一遍：
 
 ```bash
@@ -146,10 +152,10 @@ mkdir -p /tmp/asancc
 printf '#!/bin/sh\nexec /usr/bin/cc -fsanitize=address,undefined "$@"\n' > /tmp/asancc/cc
 chmod +x /tmp/asancc/cc
 PATH=/tmp/asancc:$PATH ASAN_OPTIONS=detect_leaks=1 \
-    /tmp/py23-asan run tests/run/10_rc.py
-    /tmp/py23-asan run tests/run/13_gc.py
-    /tmp/py23-asan run tests/run/14_dict.py
-    /tmp/py23-asan run tests/run/15_slice.py
+    bash -c 'for t in 10_rc 11_closure 12_lambda 13_gc 14_dict 15_slice \
+        16_dict_del 17_slice_assign 18_starargs 19_comprehension 20_with 21_decorator \
+        22_exception; do \
+        /tmp/py23-asan run tests/run/$t.py || exit 1; done'
 ```
 
 ### 严格警告

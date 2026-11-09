@@ -87,23 +87,31 @@ typedef struct {
 - `key_own` / `val_own` 决定 RC：写入前生成代码 retain 一份，更新/销毁
   时运行时 dec；unknown 只 retain 不 dec，交给 GC；
 - 更新已有 key 时保留原来的 key 对象，释放调用方新传入的 key 引用；
-- 删除暂不支持；负载因子超过 0.7 时翻倍 rehash，`order` 重排后仍保持
-  插入顺序。
+- 删除没有墓碑：把项移出 `order` 后按剩余项**整表重建**，单次 O(n)，
+  换取线性探测链不被挖断；`pop` / `popitem` / `remove` / `discard` /
+  `clear` 都走这条路径，`popitem` 取 `order` 末尾（LIFO）；
+- 负载因子超过 0.7 时翻倍 rehash，`order` 重排后仍保持插入顺序。
 - set 就是 `val_own = 0`、值恒 0 的 dict，复用同一套函数和 GC。
 - 方法：`get` 走 get/get_or；`keys`/`values`/`items` 分配新 list（items
   的元素是二元组），元素按目标 list 的 kind retain；`update` 逐项复制，
   目标 unknown 时也会 retain 源引用，避免源临时字典释放后悬空；
-  `set.add/update` 复用 dict_set/update。
+  `set.add/update` 复用 dict_set/update；`set.pop` 取最后一个插入项。
 
 ### 切片
 
 `py23_list_slice` / `py23_str_slice` 接收 `(容器, start, stop, step)`，
 缺省边界用 `INT64_MIN` 哨兵，运行时按 Python `slice.indices` 归一化：
 
-- 正/负步长、负索引、越界夹取；`step == 0` panic；
+- 正/负步长、负索引、越界夹取；`step == 0` 抛 ValueError；
 - list/tuple 结果新建同 `elem_kind` 的列表，kind 1 元素逐个 retain；
 - str 结果新建字节串，按字节复制；
 - 结果是新堆对象，正常进入 RC/GC。
+
+`py23_list_slice_assign(dst, start, stop, step, src)` 处理写切片：
+`step == 1` 时用 `memmove` 支持长度变化（替换 / 插入 / 删除），扩展切片
+要求 `src->len` 与切片长度一致；写入时按 `dst->elem_kind` retain 新元素、
+dec 被覆盖的旧元素，`src == dst` 先做快照。`py23_list_extend(dst, src)`
+用于 `*args` 打包，按 `dst` 的 kind 接管元素引用。
 
 ### 用户对象
 
@@ -138,6 +146,23 @@ cell 不是新的运行时类型，就是一个**单元素列表** `list[T]`：�
 写 `l[0] = v`，元素所有权和析构完全复用列表规则。这样闭包不需要第二套
 引用计数实现。
 
+### 异常
+
+异常不参与 RC/GC：handler 记录和异常对象都是 `malloc` 的普通内存。
+
+- **handler 记录**：`{jmp_buf env; Py23Handler* prev; int64_t mark}`，
+  `env` 必须在开头，生成代码把记录指针直接交给 `setjmp`。全局
+  `handler_top` 维护 LIFO 链；`mark` 是压入时刻的临时值栈水位。
+- **异常对象**：`{char* type; char* message}`，只保存内置异常名和消息。
+  `pending_exc` 是待处理异常，`current_exc` 是当前 `except` 体正在处理
+  的异常；`py23_exc_accept` / `py23_exc_done` 维护这层上下文。
+- **匹配**：`py23_exc_matches` 按内置异常继承表（KeyError → LookupError
+  → Exception 等）判断；未知名字默认按 Exception 子类处理。
+- **展开**：landing pad 先 `py23_handler_leave` 弹出记录并
+  `py23_rc_cleanup(mark)`，再分派。异常路径不执行被跳过函数帧的
+  `release_slots`，那些局部引用由保守 GC 回收。
+- **未捕获**：打印 `py23: uncaught <type>: <message>` 后 `exit(1)`。
+
 ## 函数表
 
 `RtFn` 枚举见 `src/ir.h`，名字映射见 `rt_name()`。生成代码按枚举直接 `call py23_xxx`，不做符号查找。
@@ -148,9 +173,13 @@ cell 不是新的运行时类型，就是一个**单元素列表** `list[T]`：�
 |---|---|---|
 | `py23_list_new` | `(i64 cap, i64 elem_kind) -> Py23List*` | 建空表，容量至少 4 |
 | `py23_list_append` | `(Py23List*, i64) -> void` | 追加，满则翻倍 `realloc`；不隐式 retain |
-| `py23_list_get` | `(Py23List*, i64) -> i64` | 负索引先加 `len`；越界 panic；返回借用 |
+| `py23_list_get` | `(Py23List*, i64) -> i64` | 负索引先加 `len`；越界抛 IndexError；返回借用 |
 | `py23_list_set` | `(Py23List*, i64, i64) -> void` | 同上，写入；kind 1 时 dec 旧元素 |
 | `py23_list_set_len` | `(Py23List*, i64) -> void` | 改 `len`；kind 1 时 dec 被截掉的元素 |
+| `py23_list_extend` | `(Py23List* dst, Py23List* src) -> void` | 追加 src 全部元素；按 dst kind retain，`src == dst` 先快照 |
+| `py23_list_slice_assign` | `(Py23List*, i64, i64, i64, Py23List*) -> void` | 切片赋值；step 1 支持长度变化 |
+| `py23_str_to_list` | `(Py23Str*) -> Py23List*` | 按字节拆成 list[str]，每字符新串 |
+| `py23_range_new` | `(i64 start, i64 stop, i64 step) -> Py23List*` | range() 实体化成 list[int]；step 0 抛 ValueError |
 
 ### 字典 / 集合
 
@@ -158,7 +187,7 @@ cell 不是新的运行时类型，就是一个**单元素列表** `list[T]`：�
 |---|---|---|
 | `py23_dict_new` | `(i64 key_kind, i64 key_own, i64 val_own) -> Py23Dict*` | 空表，初始 8 槽；set 传 `val_own = 0` |
 | `py23_dict_set` | `(Py23Dict*, i64 key, i64 val) -> void` | 插入/更新；更新时释放新 key 引用并 dec 旧 value |
-| `py23_dict_get` | `(Py23Dict*, i64 key) -> i64` | 缺失 panic KeyError；返回借用 |
+| `py23_dict_get` | `(Py23Dict*, i64 key) -> i64` | 缺失抛 KeyError；返回借用 |
 | `py23_dict_contains` | `(Py23Dict*, i64 key) -> i64` | `in` 用，返回 0/1 |
 | `py23_dict_key_at` | `(Py23Dict*, i64 index) -> i64` | 按插入顺序取 key，遍历用 |
 | `py23_dict_get_or` | `(Py23Dict*, i64 key, i64 def) -> i64` | 缺失返回默认值 |
@@ -166,10 +195,33 @@ cell 不是新的运行时类型，就是一个**单元素列表** `list[T]`：�
 | `py23_dict_values` | `(Py23Dict*) -> Py23List*` | 新 list，按插入顺序装 value |
 | `py23_dict_items` | `(Py23Dict*) -> Py23List*` | 新 list，元素是 `(key, value)` 二元组 |
 | `py23_dict_update` | `(Py23Dict*, Py23Dict*) -> void` | 逐项复制；先 retain，再 dict_set |
+| `py23_dict_pop` | `(Py23Dict*, i64 key, i64 has_default, i64 def) -> i64` | 删除并返回值；缺失且有默认值返回默认值，否则抛 KeyError |
+| `py23_dict_popitem` | `(Py23Dict*) -> Py23List*` | 删除最后插入项，返回 `(key, value)` 二元组 |
+| `py23_dict_pop_last` | `(Py23Dict*) -> i64` | 删除最后插入项并返回 key（set.pop） |
+| `py23_dict_remove` | `(Py23Dict*, i64 key, i64 missing_ok) -> void` | remove/discard；缺失时抛 KeyError 或按 missing_ok 忽略 |
+| `py23_dict_clear` | `(Py23Dict*) -> void` | 释放全部 key/value 引用并清空表 |
 | `py23_list_contains` | `(Py23List*, i64 value, i64 cmp_kind) -> i64` | list/tuple 的 `in`；0 int / 1 str / 2 float / 3 raw |
 | `py23_str_contains` | `(Py23Str*, Py23Str*) -> i64` | 子串查找 |
 | `py23_list_slice` | `(Py23List*, i64 start, i64 stop, i64 step) -> Py23List*` | 新列表；kind 1 元素 retain |
 | `py23_str_slice` | `(Py23Str*, i64 start, i64 stop, i64 step) -> Py23Str*` | 新字节串 |
+
+### 异常
+
+| 函数 | 签名 | 语义 |
+|---|---|---|
+| `py23_handler_push` | `() -> handler*` | 压入 handler 记录，保存临时栈水位 |
+| `py23_handler_leave` | `(handler*) -> void` | 弹出记录并 `rc_cleanup` 到水位 |
+| `py23_handler_discard` | `(handler*) -> void` | 只弹出记录，不清临时值（提前退出用） |
+| `py23_exc_matches` | `(str* type) -> i64` | 当前异常是否属于该类型（含继承） |
+| `py23_exc_accept` | `() -> str*` | pending 转 current，返回消息新字符串 |
+| `py23_exc_done` | `() -> void` | 释放 current，恢复上一层异常上下文 |
+| `py23_exc_clear` | `() -> void` | 抑制并释放 pending |
+| `py23_exc_reraise` | `() -> void` | 继续向外交互展开（noreturn） |
+| `py23_exc_type_name` | `() -> str*` | pending 的类型名新字符串 |
+| `py23_exc_message` | `() -> str*` | pending 的消息新字符串 |
+| `py23_raise` | `(str* type, str* msg) -> void` | 设置 pending 并 longjmp（noreturn） |
+| `py23_reraise` | `() -> void` | bare raise：重抛 current（noreturn） |
+| `py23_raise_c` | `(const char*, const char*) -> void` | 运行时错误入口（noreturn） |
 
 ### 对象
 
@@ -182,6 +234,7 @@ cell 不是新的运行时类型，就是一个**单元素列表** `list[T]`：�
 | 函数 | 签名 | 语义 |
 |---|---|---|
 | `py23_rc_inc` | `(void*) -> void` | 引用 +1；空指针和永生字面量跳过 |
+| `py23_rc_inc_unknown` | `(i64) -> i64` | unknown 值按堆注册表保守 retain；不是堆指针就什么也不做 |
 | `py23_rc_dec` | `(void*) -> void` | 引用 -1；归零时调 `dtor` 并释放整块 |
 | `py23_rc_temp` | `(void*) -> void` | 表达式临时值入栈，接管产生者的引用 |
 | `py23_rc_mark` | `() -> i64` | 返回临时值栈当前水位 |
@@ -203,7 +256,7 @@ cell 不是新的运行时类型，就是一个**单元素列表** `list[T]`：�
 | 函数 | 签名 | 语义 |
 |---|---|---|
 | `py23_str_concat` | `(str*, str*) -> str*` | 新建对象，两次 `memcpy` |
-| `py23_str_char_at` | `(str*, i64) -> str*` | 负索引先加 `len`；越界 panic；返回单字节新串 |
+| `py23_str_char_at` | `(str*, i64) -> str*` | 负索引先加 `len`；越界抛 IndexError；返回单字节新串 |
 | `py23_str_from_i64` | `(i64) -> str*` | `%lld` |
 | `py23_str_from_f64` | `(double) -> str*` | CPython `repr` 规则，见下 |
 | `py23_str_from_bool` | `(i64) -> str*` | `"True"` / `"False"` |
@@ -231,11 +284,14 @@ cell 不是新的运行时类型，就是一个**单元素列表** `list[T]`：�
 
 | 函数 | 触发场景 | 输出 |
 |---|---|---|
-| `py23_panic` | `assert` 失败 | `py23: panic: <msg>` |
-| `py23_panic_div0` | 整数除以 / 模以 0 | `py23: ZeroDivisionError: ...` |
-| `py23_panic_overflow` | `INT64_MIN / -1` | `py23: OverflowError: ...` |
+| `py23_panic` | 用户级 panic / 剩余内部错误 | 抛 `RuntimeError`；未捕获时 `py23: uncaught ...` |
+| `py23_panic_div0` | 整数除以 / 模以 0 | 抛 `ZeroDivisionError` |
+| `py23_panic_overflow` | `INT64_MIN / -1` | 抛 `OverflowError` |
 
-全部 `exit(1)`，不打印栈回溯——现在没有调试信息，印出来的栈只会误导。
+这些错误在有 handler 时可以被 `except` 捕获；没有 handler 时打印
+`py23: uncaught <type>: <message>` 并 `exit(1)`，不打印栈回溯——现在没有
+调试信息，印出来的栈只会误导。内部不变量错误和 OOM 仍走 `panic_c`
+直接退出。
 
 ### 不走枚举的辅助函数
 
@@ -282,11 +338,21 @@ cell 不是新的运行时类型，就是一个**单元素列表** `list[T]`：�
 - `unknown` / `list[unknown]` / 混合元组：正常 RC 不精确 dec，但 GC 会
   保守扫描并回收不可达对象。若某个 unknown 元素指向「仍有其它根」的
   对象，它的计数可能虚高，要到后续轮次才回收。
+- unknown 值写入容器或 cell 前，生成代码调用 `py23_rc_inc_unknown`：
+  运行时按注册表判断它是不是堆指针，是则 +1。unknown 容器不会 dec，
+  这份引用最终由 GC 回收，但保证被引用者不会先于引用者释放。注册表
+  维护一份开放寻址索引（墓碑复用、按存活数决定扩容或原地压缩），
+  索引本身只随存活对象数增长。
 - 唯一的「回收静默性」：没有 `__del__`/弱引用，对象什么时候真正释放
   不可观察；GC 是 stop-the-world、全堆扫描，没有分代/增量。
 
 静态类型的好处是 RC 插桩位置是确定的：赋值、传参、返回、容器写入都是
 明确的增减引用点。GC 只是兜底，不替代 RC。
+
+**异常路径**：longjmp 跳过普通函数帧时不会执行 `release_slots`，这些帧
+里已经 retain 的局部引用会留在堆上，直到下一轮 GC 按不可达回收。handler
+记录本身保存了受保护区的临时值栈水位，landing pad 会把这段临时值精确
+清掉；所以异常路径只会延迟局部变量的回收，不会泄漏临时表达式。
 
 ## 循环收集器
 
@@ -327,8 +393,8 @@ ASan 下用内联汇编取真实 `%rsp`，避免扫描 ASan fake stack 的未映
 
 ## 未来
 
-- **异常接入**：异常对象也要遵守「存储持有、读取借用、临时值入栈」的
-  约定，直接复用 `rc_alloc`、临时值栈和 GC。
+- **异常对象接入 RC/GC**：现在是 malloc 的轻量对象；如果以后要支持
+  `args`、traceback 或自定义异常类，需要把异常对象改成正常的堆类型。
 - **精确根/分代**：现在是保守栈扫描 + 全堆 stop-the-world。要提速可以
   给生成代码加栈映射，或做分代/增量收集。
 - **kind 2 元素**：`list[unknown]` 的引用计数仍不精确，靠 GC 兜底。要

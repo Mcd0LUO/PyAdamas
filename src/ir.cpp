@@ -85,6 +85,8 @@ std::string Inst::text() const {
             }
             return s + ")";
         }
+        case IrOp::Setjmp:
+            return std::format("{} = setjmp {}", vreg_str(dst), vreg_str(a));
         case IrOp::Jump: return std::format("jump bb{}", target);
         case IrOp::Branch:
             return std::format("branch {}, bb{}, bb{}", vreg_str(a), target, target2);

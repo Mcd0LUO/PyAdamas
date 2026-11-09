@@ -95,6 +95,106 @@ static int64_t alloc_since_gc;
 static int gc_ready;
 static int gc_sweeping;
 
+static void panic_c(const char* msg);
+
+/* 存活堆对象索引：unknown 值的静态类型看不见，不能直接 rc_inc（可能
+   是整数），先按 payload 查注册表；查到才说明它真是堆对象。索引只用于
+   这条保守 retain 路径，开放寻址 + 墓碑。 */
+static Py23Rc** rc_index;
+static size_t rc_index_cap;
+static size_t rc_index_fill;  // 非空槽（存活 + 墓碑）
+static size_t rc_index_live;  // 存活对象数
+static Py23Rc* const RC_TOMB = (Py23Rc*)(intptr_t)-1;
+
+static size_t rc_index_slot(Py23Rc* h) {
+    uint64_t x = (uint64_t)(uintptr_t)h >> 4;
+    x *= 0x9e3779b97f4a7c15ull;
+    x ^= x >> 29;
+    return (size_t)x & (rc_index_cap - 1);
+}
+
+static void rc_index_rehash(size_t ncap) {
+    Py23Rc** old = rc_index;
+    size_t ocap = rc_index_cap;
+    rc_index = (Py23Rc**)calloc(ncap, sizeof(Py23Rc*));
+    if (!rc_index) panic_c("out of memory");
+    rc_index_cap = ncap;
+    rc_index_fill = 0;
+    for (size_t i = 0; i < ocap; ++i) {
+        Py23Rc* h = old[i];
+        if (!h || h == RC_TOMB) continue;
+        size_t s = rc_index_slot(h);
+        while (rc_index[s]) s = (s + 1) & (ncap - 1);
+        rc_index[s] = h;
+        rc_index_fill++;
+    }
+    free(old);
+}
+
+static void rc_index_put(Py23Rc* h) {
+    if (rc_index_cap == 0) {
+        rc_index_rehash(64);
+    } else if ((rc_index_fill + 1) * 10 >= rc_index_cap * 7) {
+        // 存活对象少、墓碑多时原地压缩，否则翻倍。
+        size_t ncap = (rc_index_live + 1) * 10 >= rc_index_cap * 4
+                          ? rc_index_cap * 2
+                          : rc_index_cap;
+        rc_index_rehash(ncap);
+    }
+    size_t s = rc_index_slot(h);
+    size_t tomb = (size_t)-1;
+    while (rc_index[s]) {
+        if (rc_index[s] == RC_TOMB && tomb == (size_t)-1) tomb = s;
+        s = (s + 1) & (rc_index_cap - 1);
+    }
+    if (tomb != (size_t)-1) {
+        rc_index[tomb] = h;  // 复用墓碑，不增加 fill
+    } else {
+        rc_index[s] = h;
+        rc_index_fill++;
+    }
+    rc_index_live++;
+}
+
+static void rc_index_del(Py23Rc* h) {
+    if (rc_index_cap == 0) return;
+    size_t s = rc_index_slot(h);
+    while (rc_index[s]) {
+        if (rc_index[s] == h) {
+            rc_index[s] = RC_TOMB;
+            rc_index_live--;
+            return;
+        }
+        s = (s + 1) & (rc_index_cap - 1);
+    }
+}
+
+static int rc_index_has(Py23Rc* h) {
+    if (rc_index_cap == 0) return 0;
+    size_t s = rc_index_slot(h);
+    while (rc_index[s]) {
+        if (rc_index[s] == h) return 1;
+        s = (s + 1) & (rc_index_cap - 1);
+    }
+    return 0;
+}
+
+/* 对 unknown 值做保守 retain：不是堆指针就什么也不做。查不到的对象
+   包括静态字面量（永生，不需要 inc）和整数。 */
+int64_t py23_rc_inc_unknown(int64_t v) {
+    if (!v) return 0;
+    Py23Rc* h = (Py23Rc*)(uintptr_t)((uint64_t)v - (uint64_t)PY23_RC_HDR);
+    if (!rc_index_has(h)) return 0;
+    if (h->rc == PY23_RC_IMMORTAL) return 1;
+    if (gc_sweeping) {
+        if (h->marked) h->rc++;
+        return 1;
+    }
+    if (h->rc <= 0) return 1;
+    h->rc++;
+    return 1;
+}
+
 void py23_gc_collect(void);
 void py23_gc_shutdown(void);
 void py23_gc_unref_child(void* p);
@@ -110,12 +210,14 @@ static void rc_link(Py23Rc* h) {
     h->next = heap_head;
     if (heap_head) heap_head->prev = h;
     heap_head = h;
+    rc_index_put(h);
 }
 
 static void rc_unlink(Py23Rc* h) {
     if (h->prev) h->prev->next = h->next;
     else heap_head = h->next;
     if (h->next) h->next->prev = h->prev;
+    rc_index_del(h);
 }
 
 static void* rc_alloc(int64_t size, void (*dtor)(void*), void (*release)(void*),
@@ -241,6 +343,274 @@ static Py23Str* str_new(const char* p, int64_t len) {
     return s;
 }
 
+/* ── 异常 ─────────────────────────────────────────────────────── */
+
+/* 展开机制：try/with/finally 在运行时压一条 handler 记录，raise 设置
+   全局异常后 longjmp 到最内层 setjmp 点。记录本身用 malloc，不参与
+   RC/GC；跳过的普通函数帧里的局部引用由保守 GC 回收。 */
+typedef struct Py23Handler {
+    jmp_buf env;  /* 必须放在开头：指针同时作为 setjmp 的参数 */
+    struct Py23Handler* prev;
+    int64_t mark;
+} Py23Handler;
+
+typedef struct Py23Exception {
+    char* type;     /* 内置异常名，如 "ValueError" */
+    char* message;  /* 可以为空串，不能为 NULL */
+} Py23Exception;
+
+typedef struct Py23ExcSave {
+    Py23Exception* prev;
+    struct Py23ExcSave* up;
+} Py23ExcSave;
+
+static Py23Handler* handler_top;
+static Py23Exception* pending_exc;
+static Py23Exception* current_exc;
+static Py23ExcSave* exc_save_top;
+
+static void exc_free(Py23Exception* e) {
+    if (!e) return;
+    free(e->type);
+    free(e->message);
+    free(e);
+}
+
+static Py23Exception* exc_new(const char* type, const char* msg) {
+    Py23Exception* e = (Py23Exception*)malloc(sizeof(Py23Exception));
+    if (!e) panic_c("out of memory");
+    e->type = (char*)malloc(strlen(type) + 1);
+    e->message = (char*)malloc(strlen(msg) + 1);
+    if (!e->type || !e->message) panic_c("out of memory");
+    strcpy(e->type, type);
+    strcpy(e->message, msg);
+    return e;
+}
+
+static const char* exc_parent(const char* name) {
+    static const struct {
+        const char* name;
+        const char* parent;
+    } table[] = {
+        {"Exception", "BaseException"},
+        {"SystemExit", "BaseException"},
+        {"KeyboardInterrupt", "BaseException"},
+        {"GeneratorExit", "BaseException"},
+        {"BaseExceptionGroup", "BaseException"},
+        {"ArithmeticError", "Exception"},
+        {"AssertionError", "Exception"},
+        {"AttributeError", "Exception"},
+        {"BufferError", "Exception"},
+        {"EOFError", "Exception"},
+        {"ImportError", "Exception"},
+        {"ModuleNotFoundError", "ImportError"},
+        {"LookupError", "Exception"},
+        {"IndexError", "LookupError"},
+        {"KeyError", "LookupError"},
+        {"MemoryError", "Exception"},
+        {"NameError", "Exception"},
+        {"OSError", "Exception"},
+        {"IOError", "OSError"},
+        {"EnvironmentError", "OSError"},
+        {"WindowsError", "OSError"},
+        {"FileNotFoundError", "OSError"},
+        {"FileExistsError", "OSError"},
+        {"IsADirectoryError", "OSError"},
+        {"NotADirectoryError", "OSError"},
+        {"PermissionError", "OSError"},
+        {"TimeoutError", "OSError"},
+        {"BlockingIOError", "OSError"},
+        {"ChildProcessError", "OSError"},
+        {"ConnectionError", "OSError"},
+        {"BrokenPipeError", "ConnectionError"},
+        {"ConnectionAbortedError", "ConnectionError"},
+        {"ConnectionRefusedError", "ConnectionError"},
+        {"ConnectionResetError", "ConnectionError"},
+        {"InterruptedError", "OSError"},
+        {"ProcessLookupError", "OSError"},
+        {"ReferenceError", "Exception"},
+        {"RuntimeError", "Exception"},
+        {"NotImplementedError", "RuntimeError"},
+        {"RecursionError", "RuntimeError"},
+        {"StopIteration", "Exception"},
+        {"StopAsyncIteration", "Exception"},
+        {"SyntaxError", "Exception"},
+        {"IndentationError", "SyntaxError"},
+        {"TabError", "IndentationError"},
+        {"SystemError", "Exception"},
+        {"TypeError", "Exception"},
+        {"ValueError", "Exception"},
+        {"UnicodeError", "ValueError"},
+        {"UnicodeDecodeError", "UnicodeError"},
+        {"UnicodeEncodeError", "UnicodeError"},
+        {"UnicodeTranslateError", "UnicodeError"},
+        {"FloatingPointError", "ArithmeticError"},
+        {"OverflowError", "ArithmeticError"},
+        {"ZeroDivisionError", "ArithmeticError"},
+        {"Warning", "Exception"},
+        {"DeprecationWarning", "Warning"},
+        {"UserWarning", "Warning"},
+        {"RuntimeWarning", "Warning"},
+        {"FutureWarning", "Warning"},
+        {"PendingDeprecationWarning", "Warning"},
+        {"ResourceWarning", "Warning"},
+        {"SyntaxWarning", "Warning"},
+        {"BytesWarning", "Warning"},
+        {"ImportWarning", "Warning"},
+        {"UnicodeWarning", "Warning"},
+        {"EncodingWarning", "Warning"},
+        {"ExceptionGroup", "Exception"},
+    };
+    for (size_t i = 0; i < sizeof(table) / sizeof(table[0]); ++i)
+        if (strcmp(table[i].name, name) == 0) return table[i].parent;
+    /* 不在表里的名字按 Exception 的子类处理：代码生成层只放行
+       内置异常名，这里主要是给别名和新增名字留一条保守路径。 */
+    if (strcmp(name, "BaseException") == 0) return NULL;
+    return "Exception";
+}
+
+static int exc_is_a(const char* child, const char* want) {
+    while (child) {
+        if (strcmp(child, want) == 0) return 1;
+        child = exc_parent(child);
+    }
+    return 0;
+}
+
+static void exc_print_uncaught(Py23Exception* e) {
+    fflush(stdout);
+    if (e->message[0])
+        fprintf(stderr, "py23: uncaught %s: %s\n", e->type, e->message);
+    else
+        fprintf(stderr, "py23: uncaught %s\n", e->type);
+}
+
+static void exc_longjmp(void) {
+    if (!handler_top) {
+        exc_print_uncaught(pending_exc);
+        exit(1);
+    }
+    longjmp(handler_top->env, 1);
+}
+
+void* py23_handler_push(void) {
+    Py23Handler* h = (Py23Handler*)malloc(sizeof(Py23Handler));
+    if (!h) panic_c("out of memory");
+    h->prev = handler_top;
+    h->mark = py23_rc_mark();
+    handler_top = h;
+    return h;
+}
+
+/* 正常/异常展开用：弹出记录并把受保护区产生的临时值释放掉。 */
+void py23_handler_leave(void* p) {
+    Py23Handler* h = (Py23Handler*)p;
+    if (handler_top != h) panic_c("handler stack corrupted on leave");
+    handler_top = h->prev;
+    py23_rc_cleanup(h->mark);
+    free(h);
+}
+
+/* 早期退出（return/break/continue）用：只弹记录，临时值留给外层
+   fn/loop 水位统一清理，避免把返回值临时值提前释放。 */
+void py23_handler_discard(void* p) {
+    Py23Handler* h = (Py23Handler*)p;
+    if (handler_top != h) panic_c("handler stack corrupted on discard");
+    handler_top = h->prev;
+    free(h);
+}
+
+int64_t py23_exc_matches(Py23Str* want) {
+    if (!pending_exc) return 0;
+    char name[128];
+    int64_t n = want->len;
+    if (n < 0 || n >= (int64_t)sizeof(name)) return 0;
+    memcpy(name, want->data, (size_t)n);
+    name[n] = '\0';
+    return exc_is_a(pending_exc->type, name) ? 1 : 0;
+}
+
+Py23Str* py23_exc_accept(void) {
+    Py23ExcSave* s = (Py23ExcSave*)malloc(sizeof(Py23ExcSave));
+    if (!s) panic_c("out of memory");
+    s->prev = current_exc;
+    s->up = exc_save_top;
+    exc_save_top = s;
+    current_exc = pending_exc;
+    pending_exc = NULL;
+    const char* msg = current_exc ? current_exc->message : "";
+    return str_new(msg, (int64_t)strlen(msg));
+}
+
+void py23_exc_done(void) {
+    exc_free(current_exc);
+    current_exc = NULL;
+    if (exc_save_top) {
+        Py23ExcSave* s = exc_save_top;
+        exc_save_top = s->up;
+        current_exc = s->prev;
+        free(s);
+    }
+}
+
+void py23_exc_clear(void) {
+    exc_free(pending_exc);
+    pending_exc = NULL;
+}
+
+Py23Str* py23_exc_type_name(void) {
+    const char* t = pending_exc ? pending_exc->type : "";
+    return str_new(t, (int64_t)strlen(t));
+}
+
+Py23Str* py23_exc_message(void) {
+    const char* m = pending_exc ? pending_exc->message : "";
+    return str_new(m, (int64_t)strlen(m));
+}
+
+void py23_raise(Py23Str* type, Py23Str* msg) {
+    char tn[128];
+    int64_t tn_len = type->len;
+    if (tn_len < 0 || tn_len >= (int64_t)sizeof(tn)) panic_c("exception type name too long");
+    memcpy(tn, type->data, (size_t)tn_len);
+    tn[tn_len] = '\0';
+    exc_free(pending_exc);
+    Py23Exception* e = (Py23Exception*)malloc(sizeof(Py23Exception));
+    if (!e) panic_c("out of memory");
+    e->type = (char*)malloc((size_t)tn_len + 1);
+    e->message = (char*)malloc((size_t)msg->len + 1);
+    if (!e->type || !e->message) panic_c("out of memory");
+    memcpy(e->type, tn, (size_t)tn_len + 1);
+    memcpy(e->message, msg->data, (size_t)msg->len);
+    e->message[msg->len] = '\0';
+    pending_exc = e;
+    exc_longjmp();
+}
+
+void py23_reraise(void) {
+    if (current_exc) {
+        exc_free(pending_exc);
+        pending_exc = current_exc;
+        current_exc = NULL;
+        exc_longjmp();
+    }
+    exc_free(pending_exc);
+    pending_exc = exc_new("RuntimeError", "No active exception to reraise");
+    exc_longjmp();
+}
+
+void py23_exc_reraise(void) {
+    if (!pending_exc) panic_c("reraise without a pending exception");
+    exc_longjmp();
+}
+
+/* 运行时错误入口：固定类型名 + C 字符串消息。 */
+void py23_raise_c(const char* type, const char* msg) {
+    exc_free(pending_exc);
+    pending_exc = exc_new(type, msg);
+    exc_longjmp();
+}
+
 /* Python 的 float 打印规则：最短的、能精确往返的十进制表示，整数值补 .0 */
 /* 按 CPython repr 的规则排版：先找最短的能原值读回的数字串，
    再决定用定点还是科学计数法。
@@ -328,7 +698,7 @@ Py23Str* py23_str_concat(Py23Str* a, Py23Str* b) {
 
 Py23Str* py23_str_char_at(Py23Str* s, int64_t i) {
     if (i < 0) i += s->len;
-    if (i < 0 || i >= s->len) panic_c("string index out of range");
+    if (i < 0 || i >= s->len) py23_raise_c("IndexError", "string index out of range");
     return str_new(s->data + i, 1);
 }
 
@@ -412,13 +782,13 @@ void py23_list_append(Py23List* l, int64_t v) {
 
 int64_t py23_list_get(Py23List* l, int64_t i) {
     if (i < 0) i += l->len;
-    if (i < 0 || i >= l->len) panic_c("list index out of range");
+    if (i < 0 || i >= l->len) py23_raise_c("IndexError", "list index out of range");
     return l->data[i];
 }
 
 void py23_list_set(Py23List* l, int64_t i, int64_t v) {
     if (i < 0) i += l->len;
-    if (i < 0 || i >= l->len) panic_c("list assignment index out of range");
+    if (i < 0 || i >= l->len) py23_raise_c("IndexError", "list assignment index out of range");
     int64_t old = l->data[i];
     l->data[i] = v;
     if (l->elem_kind == 1) py23_rc_dec((void*)old);
@@ -429,6 +799,29 @@ void py23_list_set_len(Py23List* l, int64_t n) {
     if (l->elem_kind == 1)
         for (int64_t i = n; i < l->len; ++i) py23_rc_dec((void*)l->data[i]);
     l->len = n;
+}
+
+/* 把 src 的元素接到 dst 末尾，供 *args 打包和切片拷贝使用。
+   元素的引用按 dst 的 elem_kind 处理：kind 1 正常 inc；kind 2 只对
+   已知是堆的源元素 inc（不 release，交给 GC）。 */
+void py23_list_extend(Py23List* dst, Py23List* src) {
+    int64_t slen = src->len;
+    int64_t* snap = NULL;
+    const int64_t* sv = src->data;
+    if (dst == src) {
+        snap = (int64_t*)malloc(sizeof(int64_t) * (size_t)(slen ? slen : 1));
+        if (!snap) panic_c("out of memory");
+        if (slen) memcpy(snap, src->data, sizeof(int64_t) * (size_t)slen);
+        sv = snap;
+    }
+    for (int64_t i = 0; i < slen; ++i) {
+        int64_t v = sv[i];
+        if (v && src->elem_kind == 1 &&
+            (dst->elem_kind == 1 || dst->elem_kind == 2))
+            py23_rc_inc((void*)v);
+        py23_list_append(dst, v);
+    }
+    free(snap);
 }
 
 /* ── 字典 / 集合 ─────────────────────────────────────────────── */
@@ -572,7 +965,7 @@ void py23_dict_set(Py23Dict* d, int64_t key, int64_t val) {
 int64_t py23_dict_get(Py23Dict* d, int64_t key) {
     int64_t h = dict_hash_value(d->key_kind, key);
     int64_t slot = dict_probe(d->entries, d->cap, d->key_kind, key, h);
-    if (slot < 0) panic_c("KeyError: key not found");
+    if (slot < 0) py23_raise_c("KeyError", "key not found");
     return d->entries[slot].val;
 }
 
@@ -651,6 +1044,103 @@ void py23_dict_update(Py23Dict* dst, Py23Dict* src) {
     }
 }
 
+/* 删除用「移出 order + 全表重建」：线性探查没有墓碑，直接挖空会截断
+   后续 key 的探查链。重建是 O(n)，删除本来也不在热路径上。 */
+static void dict_rebuild(Py23Dict* d) {
+    Py23DictEntry* old = d->entries;
+    Py23DictEntry* ne = (Py23DictEntry*)calloc((size_t)d->cap, sizeof(Py23DictEntry));
+    if (!ne) panic_c("out of memory");
+    int64_t mask = d->cap - 1;
+    for (int64_t i = 0; i < d->len; ++i) {
+        Py23DictEntry e = old[d->order[i]];
+        int64_t slot = (int64_t)((uint64_t)e.hash & (uint64_t)mask);
+        while (ne[slot].hash != 0) slot = (slot + 1) & mask;
+        ne[slot] = e;
+        d->order[i] = slot;
+    }
+    free(old);
+    d->entries = ne;
+}
+
+/* 找到并移除 key；返回 1 时 val_out 是原值。字典对 key/val 的引用：
+   key 立即释放（调用方传的是借用），value 的所有权转交给调用方
+   （pop 返回给 Python 层，由临时栈接管）。 */
+static int dict_take(Py23Dict* d, int64_t key, int64_t* val_out) {
+    int64_t h = dict_hash_value(d->key_kind, key);
+    int64_t slot = dict_probe(d->entries, d->cap, d->key_kind, key, h);
+    if (slot < 0) return 0;
+    *val_out = d->entries[slot].val;
+    int64_t oi = -1;
+    for (int64_t i = 0; i < d->len; ++i)
+        if (d->order[i] == slot) {
+            oi = i;
+            break;
+        }
+    if (oi < 0) panic_c("dict order corrupted");
+    if (d->key_own == 1) py23_rc_dec((void*)d->entries[slot].key);
+    for (int64_t i = oi; i + 1 < d->len; ++i) d->order[i] = d->order[i + 1];
+    --d->len;
+    dict_rebuild(d);
+    return 1;
+}
+
+int64_t py23_dict_pop(Py23Dict* d, int64_t key, int64_t has_default, int64_t def) {
+    int64_t v;
+    if (!dict_take(d, key, &v)) {
+        if (has_default) return def;
+        py23_raise_c("KeyError", "key not found");
+    }
+    return v;
+}
+
+Py23List* py23_dict_popitem(Py23Dict* d) {
+    if (d->len == 0) py23_raise_c("KeyError", "popitem(): dictionary is empty");
+    int64_t slot = d->order[d->len - 1];
+    Py23DictEntry e = d->entries[slot];
+    int tk = (d->key_own == 1 && d->val_own == 1)
+                 ? 1
+                 : ((d->key_own == 0 && d->val_own == 0) ? 0 : 2);
+    Py23List* tup = py23_list_new(2, tk);
+    if ((tk == 1 || d->key_own == 1) && e.key) py23_rc_inc((void*)e.key);
+    py23_list_append(tup, e.key);
+    if ((tk == 1 || d->val_own == 1) && e.val) py23_rc_inc((void*)e.val);
+    py23_list_append(tup, e.val);
+    d->len--;
+    if (d->key_own == 1) py23_rc_dec((void*)e.key);
+    if (d->val_own == 1) py23_rc_dec((void*)e.val);
+    dict_rebuild(d);
+    return tup;
+}
+
+/* set.pop()：移除并返回最后一个插入项（py23 的确定性选择）。 */
+int64_t py23_dict_pop_last(Py23Dict* d) {
+    if (d->len == 0) py23_raise_c("KeyError", "pop from an empty set");
+    int64_t slot = d->order[d->len - 1];
+    int64_t key = d->entries[slot].key;
+    d->len--;
+    dict_rebuild(d);
+    return key;  /* 所有权转交给调用方 */
+}
+
+void py23_dict_remove(Py23Dict* d, int64_t key, int64_t missing_ok) {
+    int64_t v;
+    if (!dict_take(d, key, &v)) {
+        if (!missing_ok) py23_raise_c("KeyError", "key not found");
+        return;
+    }
+    if (d->val_own == 1) py23_rc_dec((void*)v);
+}
+
+void py23_dict_clear(Py23Dict* d) {
+    for (int64_t i = 0; i < d->len; ++i) {
+        Py23DictEntry e = d->entries[d->order[i]];
+        if (d->key_own == 1) py23_rc_dec((void*)e.key);
+        if (d->val_own == 1) py23_rc_dec((void*)e.val);
+    }
+    d->len = 0;
+    memset(d->entries, 0, sizeof(Py23DictEntry) * (size_t)d->cap);
+}
+
 static int list_value_eq(int64_t kind, int64_t a, int64_t b) {
     if (kind == 1) return py23_str_eq((Py23Str*)a, (Py23Str*)b) != 0;
     if (kind == 2) {
@@ -685,7 +1175,7 @@ static void slice_bounds(int64_t len, int64_t start, int64_t stop, int64_t step,
     int has_stop = stop != INT64_MIN;
     int has_step = step != INT64_MIN;
     if (!has_step) step = 1;
-    if (step == 0) panic_c("slice step cannot be zero");
+    if (step == 0) py23_raise_c("ValueError", "slice step cannot be zero");
 
     if (step > 0) {
         if (!has_start) start = 0;
@@ -749,6 +1239,95 @@ Py23Str* py23_str_slice(Py23Str* src, int64_t start, int64_t stop, int64_t step)
     char* p = (char*)out->data;
     int64_t j = 0;
     for (int64_t i = lo; st > 0 ? i < hi : i > hi; i += st) p[j++] = src->data[i];
+    return out;
+}
+
+/* 切片赋值。src 的元素引用由本函数接管：kind 1 时对新元素 inc、
+   对被移除的旧元素 dec；src == dst 时先做快照，避免边读边写。 */
+void py23_list_slice_assign(Py23List* dst, int64_t start, int64_t stop, int64_t step,
+                            Py23List* src) {
+    int64_t lo, hi, st;
+    slice_bounds(dst->len, start, stop, step, &lo, &hi, &st);
+    int64_t n = slice_total(lo, hi, st);
+    int64_t* snap = NULL;
+    const int64_t* sv = src->data;
+    int64_t slen = src->len;
+    if (src == dst) {
+        snap = (int64_t*)malloc(sizeof(int64_t) * (size_t)(slen ? slen : 1));
+        if (!snap) panic_c("out of memory");
+        if (slen) memcpy(snap, src->data, sizeof(int64_t) * (size_t)slen);
+        sv = snap;
+    }
+    int kind = (int)dst->elem_kind;
+    if (st != 1) {
+        if (slen != n) py23_raise_c("ValueError", "cannot assign sequence of different size to extended slice");
+        for (int64_t i = 0; i < n; ++i) {
+            int64_t idx = lo + i * st;
+            int64_t v = sv[i];
+            int64_t old = dst->data[idx];
+            if (kind == 1 && v) py23_rc_inc((void*)v);
+            else if (kind == 2 && src->elem_kind == 1 && v) py23_rc_inc((void*)v);
+            dst->data[idx] = v;
+            if (kind == 1 && old) py23_rc_dec((void*)old);
+        }
+        free(snap);
+        return;
+    }
+    int64_t delta = slen - n;
+    if (delta > 0) {
+        if (dst->len + delta > dst->cap) {
+            int64_t ncap = dst->cap ? dst->cap : 4;
+            while (ncap < dst->len + delta) ncap *= 2;
+            int64_t* nd = (int64_t*)realloc(dst->data, sizeof(int64_t) * (size_t)ncap);
+            if (!nd) panic_c("out of memory");
+            dst->data = nd;
+            dst->cap = ncap;
+        }
+        memmove(&dst->data[hi + delta], &dst->data[hi],
+                sizeof(int64_t) * (size_t)(dst->len - hi));
+        dst->len += delta;
+    } else if (delta < 0) {
+        // [lo+slen, hi) 的旧元素会被下面的 memmove 覆盖，先释放。
+        if (kind == 1)
+            for (int64_t i = lo + slen; i < hi; ++i)
+                if (dst->data[i]) py23_rc_dec((void*)dst->data[i]);
+        memmove(&dst->data[lo + slen], &dst->data[hi],
+                sizeof(int64_t) * (size_t)(dst->len - hi));
+        dst->len += delta;
+    }
+    for (int64_t i = 0; i < slen; ++i) {
+        int64_t v = sv[i];
+        int64_t old = dst->data[lo + i];
+        if (kind == 1 && v) py23_rc_inc((void*)v);
+        else if (kind == 2 && src->elem_kind == 1 && v) py23_rc_inc((void*)v);
+        dst->data[lo + i] = v;
+        // 增长时 memmove 会把尾部元素复制到 [hi, hi+delta)，这些副本
+        // 没有独立的引用计数；只有原区间 [lo, hi) 的旧元素归本列表所有。
+        if (kind == 1 && old && (delta <= 0 || lo + i < hi))
+            py23_rc_dec((void*)old);
+    }
+    free(snap);
+}
+
+Py23List* py23_str_to_list(Py23Str* s) {
+    Py23List* out = py23_list_new(s->len, 1);
+    for (int64_t i = 0; i < s->len; ++i)
+        py23_list_append(out, (int64_t)py23_str_char_at(s, i));
+    return out;
+}
+
+/* range(...) 作为值使用时实体化成整数列表。for 循环走的是专门的
+   计数循环，不经过这里。 */
+Py23List* py23_range_new(int64_t start, int64_t stop, int64_t step) {
+    if (step == 0) py23_raise_c("ValueError", "range() arg 3 must not be zero");
+    int64_t n;
+    if (step > 0)
+        n = stop > start ? (stop - start + step - 1) / step : 0;
+    else
+        n = stop < start ? (start - stop + (-step) - 1) / (-step) : 0;
+    Py23List* out = py23_list_new(n, 0);
+    for (int64_t i = 0, v = start; i < n; ++i, v += step)
+        py23_list_append(out, v);
     return out;
 }
 
@@ -999,18 +1578,15 @@ void py23_print_sep(void) { fputc(' ', stdout); }
 void py23_print_end(void) { fputc('\n', stdout); }
 
 void py23_panic(Py23Str* msg) {
-    fprintf(stderr, "py23: panic: %.*s\n", (int)msg->len, msg->data);
-    exit(1);
+    py23_raise_c("RuntimeError", msg->data);
 }
 
 void py23_panic_div0(void) {
-    fprintf(stderr, "py23: ZeroDivisionError: integer division or modulo by zero\n");
-    exit(1);
+    py23_raise_c("ZeroDivisionError", "integer division or modulo by zero");
 }
 
 void py23_panic_overflow(void) {
-    fprintf(stderr, "py23: OverflowError: integer division result too large for int64\n");
-    exit(1);
+    py23_raise_c("OverflowError", "integer division result too large for int64");
 }
 
 /* ── 数学 ─────────────────────────────────────────────────────── */

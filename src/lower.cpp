@@ -11,6 +11,7 @@
 
 #include <algorithm>
 #include <format>
+#include <functional>
 #include <limits>
 #include <optional>
 #include <set>
@@ -130,6 +131,23 @@ struct FuncCtx {
     int self_idx = -1;
     // {break 目标块, continue 目标块}
     std::vector<std::pair<int, int>> loops;
+    // 每个循环入口处的 cleanup 嵌套深度：break/continue 要跨过的清理层数。
+    std::vector<size_t> loop_cleanup_depth;
+    // 词法上活跃的清理动作，按从外到内排列。return/break/continue 和
+    // 异常 landing 都从这里生成对应动作。
+    struct Cleanup {
+        enum class Kind { With, Finally, Handler, ExcDone } kind;
+        // With / Finally / Handler：handler 记录所在的槽
+        int handler_slot = -1;
+        // With
+        int mgr_slot = -1;
+        int exit_slot = -1;
+        int nargs = 0;
+        TypePtr ret;
+        // Finally
+        std::vector<StmtPtr>* body = nullptr;
+    };
+    std::vector<Cleanup> cleanups;
     int blk = 0;
     // 函数入口的临时值栈水位；return 时清理到它。
     VReg fn_mark = kNoReg;
@@ -161,6 +179,9 @@ private:
 
     std::vector<std::unique_ptr<FuncCtx>> frames_;
     FuncCtx* st_ = nullptr;
+    // 推导式的循环变量是独立作用域，不能污染函数槽表。这里按嵌套
+    // 层次保存「名字 → 槽」，查找时内层优先。
+    std::vector<std::unordered_map<std::string, int>> comp_slots_;
 
     std::unordered_map<std::string, int> global_ids_;
     std::unordered_map<std::string, FunctionDef*> func_defs_;
@@ -194,6 +215,15 @@ private:
     }
 
     void switch_to(int b) { st_->blk = b; }
+
+    // noreturn 调用之后把当前块收尾，避免后端把后续块当成顺序落下。
+    void end_unreachable() {
+        int dead = new_block("unreachable");
+        Inst j;
+        j.op = IrOp::Jump;
+        j.target = dead;
+        emit(std::move(j));
+    }
 
     VReg alloc(TypePtr ty) {
         VReg r = static_cast<VReg>(st_->fn->vreg_ty.size());
@@ -302,6 +332,8 @@ private:
 
     void rc_inc(VReg v) { call_void(RtFn::RcInc, {v}); }
     void rc_dec(VReg v) { call_void(RtFn::RcDec, {v}); }
+    // unknown 值可能是整数也可能是堆指针，交给运行时按注册表判断。
+    void rc_inc_unknown(VReg v) { call_void(RtFn::RcIncUnknown, {v}); }
 
     VReg rc_mark() { return call_runtime(RtFn::RcMark, t_int(), {}); }
     void rc_cleanup(VReg mark) { call_void(RtFn::RcCleanup, {mark}); }
@@ -360,9 +392,16 @@ private:
     }
 
     // kind 1/2 且源类型已知是堆，写入前 retain。kind 2 只 retain 不 release
-    //（类型看不见，销毁时不敢按元素 dec），代价是泄漏。
+    //（类型看不见，销毁时不敢按元素 dec），代价是泄漏。源类型是 unknown
+    // 时不能直接 rc_inc（可能是整数），走注册表保守判断。
     void retain_elem(VReg v, int kind) {
-        if (kind != 0 && ir_is_heap(vreg_ty(v))) rc_inc(v);
+        if (kind == 0) return;
+        TypePtr vt = vreg_ty(v);
+        if (ir_is_heap(vt)) {
+            rc_inc(v);
+            return;
+        }
+        if (!vt || vt->kind == TyKind::Unknown) rc_inc_unknown(v);
     }
 
     // 哈希/比较类别：0 int/bool，1 str，2 float，3 其他（按机器字比较）。
@@ -485,6 +524,14 @@ private:
 
     bool is_cell(const std::string& name) const {
         return st_ && st_->cell_slots.count(name) > 0;
+    }
+
+    int comp_slot(const std::string& name) const {
+        for (auto it = comp_slots_.rbegin(); it != comp_slots_.rend(); ++it) {
+            auto f = it->find(name);
+            if (f != it->end()) return f->second;
+        }
+        return -1;
     }
 
     bool is_env(const std::string& name) const {
@@ -614,6 +661,7 @@ private:
     }
 
     TypePtr name_ty(const std::string& name) {
+        if (int cs = comp_slot(name); cs >= 0) return st_->fn->slot_ty[cs];
         if (auto t = captured_ty(name)) return t;
         if (st_ && st_->scope) {
             auto it = st_->scope->vars.find(name);
@@ -628,6 +676,7 @@ private:
 
     bool is_local(const std::string& name) const {
         if (!st_) return false;
+        if (comp_slot(name) >= 0) return true;
         return st_->slots.count(name) > 0 || is_env(name);
     }
 
@@ -666,9 +715,20 @@ private:
     void lower_for(For& f);
     void lower_for_range(For& f, Call& c);
     void lower_for_seq(For& f);
+    void lower_with(With& w);
+    void lower_with_item(With& w, size_t idx);
+    void emit_cleanup_exits(size_t down_to);
+    int push_handler();
+    VReg setjmp_handler(int slot);
+    VReg emit_exit_call(const FuncCtx::Cleanup& c, bool exceptional);
+    void lower_try_core(Try& t);
+    void lower_finally(Try& t);
+    VReg lower_exc_match(Expr& type);
+    VReg raise_exception(const std::string& type, VReg msg);
     void lower_funcdef(FunctionDef& f);
     void lower_assert(Assert& a);
     void lower_try(Try& t);
+    void lower_raise(Raise& r);
 
     // ── 类 ──────────────────────────────────────────────────────
 
@@ -681,7 +741,7 @@ private:
     VReg lower_construct(Call& c, const ClassInfoPtr& cls);
 
     // 按签名重排实参：位置、关键字、默认值、数值转换。
-    std::vector<VReg> bind_args(Call& c, const FuncInfoPtr& info, FunctionDef* def);
+    std::vector<VReg> bind_args(Call& c, const FuncInfoPtr& info, FunctionDef* defn);
 
     void field_store(VReg obj, int off, VReg v) {
         Inst in;
@@ -713,7 +773,8 @@ private:
         br.target2 = bad;
         emit(std::move(br));
         switch_to(bad);
-        call_void(RtFn::Panic, {const_str("NoneType object has no " + what)});
+        call_void(RtFn::Raise,
+                  {const_str("AttributeError"), const_str("NoneType object has no " + what)});
         Inst j;
         j.op = IrOp::Jump;
         j.target = ok;
@@ -747,6 +808,7 @@ private:
     VReg lower_list_like(std::vector<ExprPtr>& elts, TypePtr ty, bool is_tuple);
     VReg lower_dict(DictExpr& d, TypePtr ty);
     VReg lower_set(SetExpr& s, TypePtr ty);
+    VReg lower_comp(Expr& e);
     VReg lower_ifexp(IfExp& e);
     VReg lower_joined(JoinedStr& j);
     VReg convert_to(VReg v, TypePtr from, TypePtr to);
@@ -1143,6 +1205,8 @@ void Lowerer::stmt(Stmt& s) {
             VReg v = r.value ? expr(*r.value) : kNoReg;
             // `def f() -> float: return 1` 要在返回处转成 double
             if (v != kNoReg && st_->fn->ret) v = coerce(v, vreg_ty(v), st_->fn->ret);
+            // return 也是退出路径：先跑完所有活跃清理动作。
+            emit_cleanup_exits(0);
             emit_return(v, v != kNoReg ? vreg_ty(v) : nullptr);
             break;
         }
@@ -1151,6 +1215,7 @@ void Lowerer::stmt(Stmt& s) {
                 unsupported(s, "'break'");
                 break;
             }
+            emit_cleanup_exits(st_->loop_cleanup_depth.back());
             Inst in;
             in.op = IrOp::Jump;
             in.target = st_->loops.back().first;
@@ -1162,6 +1227,7 @@ void Lowerer::stmt(Stmt& s) {
                 unsupported(s, "'continue'");
                 break;
             }
+            emit_cleanup_exits(st_->loop_cleanup_depth.back());
             Inst in;
             in.op = IrOp::Jump;
             in.target = st_->loops.back().second;
@@ -1177,8 +1243,8 @@ void Lowerer::stmt(Stmt& s) {
         case StmtKind::Assert: lower_assert(static_cast<Assert&>(s)); break;
         case StmtKind::Try: lower_try(static_cast<Try&>(s)); break;
         case StmtKind::Delete: unsupported(s, "'del'"); break;
-        case StmtKind::Raise: unsupported(s, "'raise'"); break;
-        case StmtKind::With: unsupported(s, "'with'"); break;
+        case StmtKind::Raise: lower_raise(static_cast<Raise&>(s)); break;
+        case StmtKind::With: lower_with(static_cast<With&>(s)); break;
         case StmtKind::ClassDef: lower_classdef(static_cast<ClassDef&>(s)); break;
         case StmtKind::Import: unsupported(s, "'import'"); break;
         case StmtKind::ImportFrom: unsupported(s, "'from ... import'"); break;
@@ -1275,8 +1341,10 @@ void Lowerer::lower_while(While& f) {
     switch_to(body);
     rc_cleanup(loop_mark);
     st_->loops.push_back({end, cond});
+    st_->loop_cleanup_depth.push_back(st_->cleanups.size());
     stmts(f.body);
     st_->loops.pop_back();
+    st_->loop_cleanup_depth.pop_back();
     if (!terminated()) {
         Inst jj;
         jj.op = IrOp::Jump;
@@ -1401,8 +1469,10 @@ void Lowerer::lower_for_range(For& f, Call& c) {
     VReg iv = load_slot(ctr, t_int());
     assign_to(*f.target, iv, t_int());
     st_->loops.push_back({end, incr});
+    st_->loop_cleanup_depth.push_back(st_->cleanups.size());
     stmts(f.body);
     st_->loops.pop_back();
+    st_->loop_cleanup_depth.pop_back();
     if (!terminated()) {
         Inst jj;
         jj.op = IrOp::Jump;
@@ -1525,8 +1595,10 @@ void Lowerer::lower_for_seq(For& f) {
     assign_to(*f.target, ev, et);
 
     st_->loops.push_back({end, incr});
+    st_->loop_cleanup_depth.push_back(st_->cleanups.size());
     stmts(f.body);
     st_->loops.pop_back();
+    st_->loop_cleanup_depth.pop_back();
     if (!terminated()) {
         Inst jj;
         jj.op = IrOp::Jump;
@@ -1571,6 +1643,508 @@ void Lowerer::lower_for_seq(For& f) {
     }
 }
 
+int Lowerer::push_handler() {
+    st_->fn->has_handlers = true;
+    VReg h = call_runtime(RtFn::HandlerPush, t_int(), {});
+    int slot = new_temp_slot(t_int());
+    store_slot(slot, h);
+    return slot;
+}
+
+VReg Lowerer::setjmp_handler(int slot) {
+    Inst in;
+    in.op = IrOp::Setjmp;
+    in.a = load_slot(slot, t_int());
+    return def(t_int(), std::move(in));
+}
+
+VReg Lowerer::emit_exit_call(const FuncCtx::Cleanup& c, bool exceptional) {
+    std::vector<VReg> args;
+    for (int i = 0; i < c.nargs; ++i) {
+        if (exceptional && i == 0) {
+            VReg t = call_runtime(RtFn::ExcTypeName, t_str(), {});
+            push_temp(t);
+            args.push_back(t);
+        } else if (exceptional && i == 1) {
+            VReg m = call_runtime(RtFn::ExcMessage, t_str(), {});
+            push_temp(m);
+            args.push_back(m);
+        } else {
+            args.push_back(const_none());
+        }
+    }
+    VReg mgr = load_slot(c.mgr_slot, t_unknown());
+    Inst vc;
+    vc.op = IrOp::VCall;
+    vc.a = mgr;
+    vc.imm = c.exit_slot;
+    vc.args = std::move(args);
+    TypePtr rt = c.ret ? c.ret : t_none();
+    return def_heap(rt, std::move(vc));
+}
+
+void Lowerer::emit_cleanup_exits(size_t down_to) {
+    // 只发射、不改编译期栈：break/continue/return 可能只在某个分支上，
+    // 其它路径的清理仍然有效。顺序必须从内到外。
+    for (size_t i = st_->cleanups.size(); i > down_to; --i) {
+        const auto& c = st_->cleanups[i - 1];
+        switch (c.kind) {
+            case FuncCtx::Cleanup::Kind::Handler:
+                call_void(RtFn::HandlerDiscard, {load_slot(c.handler_slot, t_int())});
+                break;
+            case FuncCtx::Cleanup::Kind::With:
+                // 先弹 handler 再调 __exit__：__exit__ 自己抛出的异常
+                // 应该由外层处理，不能被同一个 with 再抓一次。
+                call_void(RtFn::HandlerDiscard, {load_slot(c.handler_slot, t_int())});
+                emit_exit_call(c, false);
+                break;
+            case FuncCtx::Cleanup::Kind::Finally:
+                call_void(RtFn::HandlerDiscard, {load_slot(c.handler_slot, t_int())});
+                if (c.body) stmts(*c.body);
+                break;
+            case FuncCtx::Cleanup::Kind::ExcDone:
+                call_void(RtFn::ExcDone, {});
+                break;
+        }
+    }
+}
+
+void Lowerer::lower_with(With& w) {
+    if (w.is_async) {
+        unsupported(w, "'async with'");
+        return;
+    }
+    lower_with_item(w, 0);
+}
+
+void Lowerer::lower_with_item(With& w, size_t idx) {
+    if (idx >= w.items.size()) {
+        stmts(w.body);
+        return;
+    }
+    auto& item = w.items[idx];
+    TypePtr raw = tc_.type_of(item.context.get());
+    TypePtr ct = strip_optional(raw);
+    VReg mgr = expr(*item.context);
+    if (ct != raw && raw && raw->kind == TyKind::Optional)
+        mgr = guard_not_none(mgr, std::format("with item"));
+    if (!ct || ct->kind != TyKind::Class || !ct->cls) {
+        err(item.context->line, item.context->col,
+            "with requires a class instance with __enter__/__exit__");
+        lower_with_item(w, idx + 1);
+        return;
+    }
+    auto* en = ct->cls->method("__enter__");
+    auto* ex = ct->cls->method("__exit__");
+    if (!en || !ex || !en->call_sig || !ex->call_sig) {
+        err(item.context->line, item.context->col,
+            std::format("'{}' does not define __enter__/__exit__", ct->cls->name));
+        lower_with_item(w, idx + 1);
+        return;
+    }
+    int ms = new_temp_slot(ct);
+    store_slot(ms, mgr);
+
+    Call enter_call;
+    enter_call.line = w.line;
+    enter_call.col = w.col;
+    std::vector<VReg> eargs = bind_args(enter_call, en->call_sig, en->def);
+    Inst vc;
+    vc.op = IrOp::VCall;
+    vc.a = load_slot(ms, ct);
+    vc.imm = en->slot;
+    vc.args = std::move(eargs);
+    TypePtr ert = en->call_sig->ret ? en->call_sig->ret : t_none();
+    VReg ev = def_heap(ert, std::move(vc));
+    if (item.optional_vars) assign_to(*item.optional_vars, ev, ert);
+
+    int hs = push_handler();
+    VReg sj = setjmp_handler(hs);
+    int body = new_block("with.body");
+    int land = new_block("with.land");
+    int end = new_block("with.end");
+    Inst br;
+    br.op = IrOp::Branch;
+    br.a = sj;
+    br.target = land;
+    br.target2 = body;
+    emit(std::move(br));
+    switch_to(body);
+
+    FuncCtx::Cleanup cf;
+    cf.kind = FuncCtx::Cleanup::Kind::With;
+    cf.handler_slot = hs;
+    cf.mgr_slot = ms;
+    cf.exit_slot = ex->slot;
+    cf.nargs = static_cast<int>(ex->call_sig->pos.size());
+    cf.ret = ex->call_sig->ret ? ex->call_sig->ret : t_none();
+    st_->cleanups.push_back(cf);
+
+    lower_with_item(w, idx + 1);
+
+    if (!terminated()) {
+        call_void(RtFn::HandlerLeave, {load_slot(hs, t_int())});
+        emit_exit_call(cf, false);
+        Inst j;
+        j.op = IrOp::Jump;
+        j.target = end;
+        emit(std::move(j));
+    }
+    st_->cleanups.pop_back();
+
+    switch_to(land);
+    // 异常展开：先弹 handler（顺带释放受保护区临时值），再调 __exit__。
+    call_void(RtFn::HandlerLeave, {load_slot(hs, t_int())});
+    VReg keep = emit_exit_call(cf, true);
+    int suppress = new_block("with.suppress");
+    int rethrow = new_block("with.rethrow");
+    Inst cb;
+    cb.op = IrOp::Branch;
+    cb.a = keep;
+    cb.target = suppress;
+    cb.target2 = rethrow;
+    emit(std::move(cb));
+    switch_to(suppress);
+    call_void(RtFn::ExcClear, {});
+    Inst j2;
+    j2.op = IrOp::Jump;
+    j2.target = end;
+    emit(std::move(j2));
+    switch_to(rethrow);
+    call_void(RtFn::ExcReraise, {});
+    end_unreachable();
+    switch_to(end);
+}
+
+VReg Lowerer::lower_exc_match(Expr& type) {
+    auto one = [&](Expr& e) -> VReg {
+        if (e.kind == ExprKind::Name) {
+            auto& n = static_cast<Name&>(e);
+            if (TypeChecker::is_exception_type(n.id))
+                return call_runtime(RtFn::ExcMatches, t_bool(), {const_str(n.id)});
+        }
+        err(e.line, e.col, "except requires a built-in exception name");
+        return const_bool(false);
+    };
+    if (type.kind == ExprKind::Tuple) {
+        auto& t = static_cast<TupleExpr&>(type);
+        VReg acc = const_bool(false);
+        for (auto& el : t.elts) {
+            if (!el) continue;
+            VReg m = one(*el);
+            Inst in;
+            in.op = IrOp::Bin;
+            in.bop = BinKind::BitOr;
+            in.a = acc;
+            in.b = m;
+            acc = def(t_int(), std::move(in));
+        }
+        return acc;
+    }
+    return one(type);
+}
+
+void Lowerer::lower_raise(Raise& r) {
+    if (r.cause) {
+        err(r.line, r.col, "'raise ... from' is not supported by the code generator yet");
+        return;
+    }
+    if (!r.exc) {
+        call_void(RtFn::Reraise, {});
+        return;
+    }
+    std::string type;
+    VReg msg = kNoReg;
+    Expr& e = *r.exc;
+    if (e.kind == ExprKind::Name) {
+        auto& n = static_cast<Name&>(e);
+        if (!TypeChecker::is_exception_type(n.id)) {
+            err(e.line, e.col, "raise requires a built-in exception name");
+            return;
+        }
+        type = n.id;
+    } else if (e.kind == ExprKind::Call) {
+        auto& c = static_cast<Call&>(e);
+        if (c.func->kind != ExprKind::Name) {
+            err(e.line, e.col, "raise requires a built-in exception name");
+            return;
+        }
+        auto& n = static_cast<Name&>(*c.func);
+        if (!TypeChecker::is_exception_type(n.id)) {
+            err(e.line, e.col, "raise requires a built-in exception name");
+            return;
+        }
+        if (!c.keywords.empty()) {
+            err(e.line, e.col, "exception constructor does not take keyword arguments");
+            return;
+        }
+        if (c.args.size() > 1) {
+            err(e.line, e.col, "exception constructor takes at most one message argument");
+            return;
+        }
+        type = n.id;
+        if (!c.args.empty()) {
+            TypePtr mt = tc_.type_of(c.args[0].get());
+            if (mt && (mt->kind == TyKind::List || mt->kind == TyKind::Tuple ||
+                       mt->kind == TyKind::Dict || mt->kind == TyKind::Set ||
+                       mt->kind == TyKind::Class || mt->kind == TyKind::Func)) {
+                err(c.args[0]->line, c.args[0]->col,
+                    "exception message must be a string or scalar");
+                return;
+            }
+            VReg raw = expr(*c.args[0]);
+            msg = convert_to(raw, mt, t_str());
+        }
+    } else {
+        err(e.line, e.col, "raise requires a built-in exception name");
+        return;
+    }
+    if (msg == kNoReg) msg = const_str("");
+    call_void(RtFn::Raise, {const_str(type), msg});
+}
+
+void Lowerer::lower_try(Try& t) {
+    if (!t.finalbody.empty()) {
+        lower_finally(t);
+        return;
+    }
+    lower_try_core(t);
+}
+
+void Lowerer::lower_try_core(Try& t) {
+    if (t.handlers.empty()) {
+        stmts(t.body);
+        stmts(t.orelse);
+        return;
+    }
+
+    int hs = push_handler();
+    VReg sj = setjmp_handler(hs);
+    int body = new_block("try.body");
+    int land = new_block("try.land");
+    int end = new_block("try.end");
+    int else_b = t.orelse.empty() ? end : new_block("try.else");
+    Inst br;
+    br.op = IrOp::Branch;
+    br.a = sj;
+    br.target = land;
+    br.target2 = body;
+    emit(std::move(br));
+
+    switch_to(body);
+    FuncCtx::Cleanup cf;
+    cf.kind = FuncCtx::Cleanup::Kind::Handler;
+    cf.handler_slot = hs;
+    st_->cleanups.push_back(cf);
+    stmts(t.body);
+    st_->cleanups.pop_back();
+    if (!terminated()) {
+        call_void(RtFn::HandlerLeave, {load_slot(hs, t_int())});
+        Inst j;
+        j.op = IrOp::Jump;
+        j.target = else_b;
+        emit(std::move(j));
+    }
+
+    switch_to(land);
+    call_void(RtFn::HandlerLeave, {load_slot(hs, t_int())});
+    struct HBody {
+        ExceptHandler* h;
+        int block;
+    };
+    std::vector<HBody> bodies;
+    bool bare = false;
+    for (auto& h : t.handlers) {
+        int hb = new_block("except.body");
+        bodies.push_back({&h, hb});
+        if (bare) continue;
+        if (h.type) {
+            VReg m = lower_exc_match(*h.type);
+            int next = new_block("except.next");
+            Inst cb;
+            cb.op = IrOp::Branch;
+            cb.a = m;
+            cb.target = hb;
+            cb.target2 = next;
+            emit(std::move(cb));
+            switch_to(next);
+        } else {
+            bare = true;
+            Inst j;
+            j.op = IrOp::Jump;
+            j.target = hb;
+            emit(std::move(j));
+        }
+    }
+    if (!bare) {
+        call_void(RtFn::ExcReraise, {});
+        end_unreachable();
+    }
+
+    for (auto& hb : bodies) {
+        switch_to(hb.block);
+        VReg msg = call_runtime(RtFn::ExcAccept, t_str(), {});
+        push_temp(msg);
+        int shadow = -1;
+        if (!hb.h->name.empty()) {
+            shadow = st_->fn->new_slot(t_str());
+            comp_slots_.emplace_back();
+            comp_slots_.back()[hb.h->name] = shadow;
+            store_slot(shadow, msg);
+        }
+
+        // except 体再抛异常时，也要先 ExcDone 再继续展开，避免
+        // current 异常上下文和 save 节点累积。
+        int hh = push_handler();
+        VReg sj2 = setjmp_handler(hh);
+        int run = new_block("except.run");
+        int hland = new_block("except.land");
+        int hend = new_block("except.end");
+        Inst b2;
+        b2.op = IrOp::Branch;
+        b2.a = sj2;
+        b2.target = hland;
+        b2.target2 = run;
+        emit(std::move(b2));
+        switch_to(run);
+
+        FuncCtx::Cleanup hc;
+        hc.kind = FuncCtx::Cleanup::Kind::Handler;
+        hc.handler_slot = hh;
+        st_->cleanups.push_back(hc);
+        FuncCtx::Cleanup done;
+        done.kind = FuncCtx::Cleanup::Kind::ExcDone;
+        st_->cleanups.push_back(done);
+        stmts(hb.h->body);
+        st_->cleanups.pop_back();
+        st_->cleanups.pop_back();
+        if (shadow >= 0) comp_slots_.pop_back();
+        if (!terminated()) {
+            call_void(RtFn::HandlerLeave, {load_slot(hh, t_int())});
+            call_void(RtFn::ExcDone, {});
+            Inst j;
+            j.op = IrOp::Jump;
+            j.target = hend;
+            emit(std::move(j));
+        }
+
+        switch_to(hland);
+        call_void(RtFn::HandlerLeave, {load_slot(hh, t_int())});
+        call_void(RtFn::ExcDone, {});
+        call_void(RtFn::ExcReraise, {});
+        end_unreachable();
+        switch_to(hend);
+        if (!terminated()) {
+            Inst j;
+            j.op = IrOp::Jump;
+            j.target = end;
+            emit(std::move(j));
+        }
+    }
+
+    if (else_b != end) {
+        switch_to(else_b);
+        stmts(t.orelse);
+        if (!terminated()) {
+            Inst j;
+            j.op = IrOp::Jump;
+            j.target = end;
+            emit(std::move(j));
+        }
+    }
+    switch_to(end);
+}
+
+/* finally 体里如果含跳出这个 finally 的 return/break/continue，目前
+   没有复制控制流的机制，直接拒绝；循环内部的 break/continue 是合法的。 */
+static bool outer_control(const std::vector<StmtPtr>& body, int loop_depth) {
+    for (auto& s : body) {
+        switch (s->kind) {
+            case StmtKind::Return: return true;
+            case StmtKind::Break:
+            case StmtKind::Continue: return loop_depth == 0;
+            case StmtKind::If: {
+                auto& f = static_cast<If&>(*s);
+                for (auto& b : f.branches)
+                    if (outer_control(b.body, loop_depth)) return true;
+                if (outer_control(f.orelse, loop_depth)) return true;
+                break;
+            }
+            case StmtKind::While: {
+                auto& w = static_cast<While&>(*s);
+                if (outer_control(w.body, loop_depth + 1)) return true;
+                if (outer_control(w.orelse, loop_depth)) return true;
+                break;
+            }
+            case StmtKind::For: {
+                auto& f = static_cast<For&>(*s);
+                if (outer_control(f.body, loop_depth + 1)) return true;
+                if (outer_control(f.orelse, loop_depth)) return true;
+                break;
+            }
+            case StmtKind::With: {
+                auto& w = static_cast<With&>(*s);
+                if (outer_control(w.body, loop_depth)) return true;
+                break;
+            }
+            case StmtKind::Try: {
+                auto& t = static_cast<Try&>(*s);
+                if (outer_control(t.body, loop_depth)) return true;
+                for (auto& h : t.handlers)
+                    if (outer_control(h.body, loop_depth)) return true;
+                if (outer_control(t.orelse, loop_depth)) return true;
+                if (outer_control(t.finalbody, loop_depth)) return true;
+                break;
+            }
+            default: break;
+        }
+    }
+    return false;
+}
+
+void Lowerer::lower_finally(Try& t) {
+    if (outer_control(t.finalbody, 0)) {
+        err(t.line, t.col,
+            "return/break/continue inside finally is not supported by the code generator yet");
+        return;
+    }
+    int hs = push_handler();
+    VReg sj = setjmp_handler(hs);
+    int body = new_block("finally.body");
+    int land = new_block("finally.land");
+    int end = new_block("finally.end");
+    Inst br;
+    br.op = IrOp::Branch;
+    br.a = sj;
+    br.target = land;
+    br.target2 = body;
+    emit(std::move(br));
+
+    switch_to(body);
+    FuncCtx::Cleanup cf;
+    cf.kind = FuncCtx::Cleanup::Kind::Finally;
+    cf.handler_slot = hs;
+    cf.body = &t.finalbody;
+    st_->cleanups.push_back(cf);
+    lower_try_core(t);
+    st_->cleanups.pop_back();
+    if (!terminated()) {
+        call_void(RtFn::HandlerLeave, {load_slot(hs, t_int())});
+        stmts(t.finalbody);
+        Inst j;
+        j.op = IrOp::Jump;
+        j.target = end;
+        emit(std::move(j));
+    }
+
+    switch_to(land);
+    call_void(RtFn::HandlerLeave, {load_slot(hs, t_int())});
+    stmts(t.finalbody);
+    call_void(RtFn::ExcReraise, {});
+    end_unreachable();
+    switch_to(end);
+}
+
 int Lowerer::compile_function_body(FunctionDef& f, FuncInfoPtr info, const std::string& label) {
     IRFunction* irf = mod_.add_func(label);
     int fidx = static_cast<int>(mod_.funcs.size()) - 1;
@@ -1607,6 +2181,20 @@ int Lowerer::compile_function_body(FunctionDef& f, FuncInfoPtr info, const std::
     if (info) {
         for (auto& p : info->pos) add_param(p);
         for (auto& p : info->kwonly) add_param(p);
+        if (info->varargs) {
+            TypePtr et = info->vararg_ty ? info->vararg_ty : t_unknown();
+            Param p;
+            p.name = info->vararg_name;
+            p.ty = mk_list(et);
+            add_param(p);
+        }
+        if (info->kwargs) {
+            TypePtr vt = info->kwarg_ty ? info->kwarg_ty : t_unknown();
+            Param p;
+            p.name = info->kwarg_name;
+            p.ty = mk_dict(t_str(), vt);
+            add_param(p);
+        }
     }
 
     // 其余局部名按符号表分配。符号表是 typecheck 的最终结果，
@@ -1660,21 +2248,12 @@ int Lowerer::compile_function_body(FunctionDef& f, FuncInfoPtr info, const std::
 }
 
 void Lowerer::lower_funcdef(FunctionDef& f) {
-    if (!f.decorators.empty()) {
-        unsupported(f, "decorator");
-        return;
-    }
     if (f.is_async) {
         unsupported(f, "'async def'");
         return;
     }
 
     FuncInfoPtr info = tc_.func_info(&f);
-    if (info && (info->varargs || info->kwargs)) {
-        err(f.line, f.col, "*args / **kwargs parameters are not supported by the code generator yet");
-        return;
-    }
-
     TypePtr fty = new_ty(TyKind::Func);
     fty->fn = info;
 
@@ -1719,9 +2298,44 @@ void Lowerer::lower_funcdef(FunctionDef& f) {
             field_store(fv, 16 + 8 * static_cast<int>(i), cell);
         }
     }
+
+    // 装饰器按从下到上的顺序调用：f = d1(d2(f))。函数值已经绑定，
+    // 每一步都重新绑定同名，后一个装饰器拿到前一步的结果。
+    for (auto it = f.decorators.rbegin(); it != f.decorators.rend(); ++it) {
+        ExprPtr dec = std::move(*it);
+        int line = dec->line;
+        int col = dec->col;
+        VReg callee = expr(*dec);
+        TypePtr dt = tc_.type_of(dec.get());
+        FuncInfoPtr dinfo = (dt && dt->kind == TyKind::Func) ? dt->fn : nullptr;
+        if (!dinfo) {
+            err(line, col,
+                "decorator must be a function value with a known signature");
+            continue;
+        }
+        Call dc;
+        dc.line = line;
+        dc.col = col;
+        auto arg = std::make_unique<Name>(f.name);
+        arg->line = line;
+        arg->col = col;
+        dc.args.push_back(std::move(arg));
+        std::vector<VReg> dargs = bind_args(dc, dinfo, nullptr);
+        TypePtr rty = dinfo->ret ? dinfo->ret : t_unknown();
+        Inst in;
+        in.op = IrOp::Call;
+        in.a = callee;
+        in.args = std::move(dargs);
+        VReg dv = def_heap(rty, std::move(in));
+        bind_name_value(f.name, dv, rty);
+    }
 }
 
 void Lowerer::lower_classdef(ClassDef& c) {
+    if (!c.decorators.empty()) {
+        err(c.line, c.col, "class decorators are not supported by the code generator yet");
+        return;
+    }
     auto it = classes_.find(c.name);
     if (it == classes_.end()) return;
     const ClassInfoPtr& ci = it->second;
@@ -1772,11 +2386,6 @@ void Lowerer::lower_classdef(ClassDef& c) {
             err(m.def->line, m.def->col, "'async def' methods are not supported yet");
             continue;
         }
-        if (m.sig && (m.sig->varargs || m.sig->kwargs)) {
-            err(m.def->line, m.def->col,
-                "*args / **kwargs parameters are not supported by the code generator yet");
-            continue;
-        }
         std::string label = std::format("{}_{}_{}", c.name, m.name, mod_.funcs.size());
         int fidx = compile_function_body(*m.def, m.sig, label);
         if (m.slot >= 0 && m.slot < static_cast<int>(mod_.classes[cid].vtable.size()))
@@ -1804,24 +2413,13 @@ void Lowerer::lower_assert(Assert& a) {
     } else {
         msg = const_str("assertion failed");
     }
-    call_void(RtFn::Panic, {msg});
+    call_void(RtFn::Raise, {const_str("AssertionError"), msg});
     Inst jj;
     jj.op = IrOp::Jump;
     jj.target = ok;
     emit(std::move(jj));
 
     switch_to(ok);
-}
-
-void Lowerer::lower_try(Try& t) {
-    // 异常机制还没做。try/finally 在无异常时语义等价于顺序执行，
-    // 只有 finally 里的 return/break 会改变控制流，这里先只放行最简单的情形。
-    if (!t.handlers.empty()) {
-        unsupported(t, "'try/except'");
-        return;
-    }
-    stmts(t.body);
-    stmts(t.finalbody);
 }
 
 void Lowerer::assign_to(Expr& target, VReg v, TypePtr vty) {
@@ -1841,6 +2439,17 @@ void Lowerer::assign_to(Expr& target, VReg v, TypePtr vty) {
     switch (target.kind) {
         case ExprKind::Name: {
             auto& n = static_cast<Name&>(target);
+            if (int cs = comp_slot(n.id); cs >= 0) {
+                TypePtr want = st_->fn->slot_ty[cs];
+                if (bad_elem(src_ty, want))
+                    err(target.line, target.col,
+                        std::format("'{}' cannot be stored into '{}': element type conversion "
+                                    "is not supported by the code generator yet",
+                                    type_name(src_ty), type_name(want)));
+                v = coerce(v, src_ty, want);
+                store_slot(cs, v);
+                break;
+            }
             if (is_cell(n.id) || is_env(n.id)) {
                 write_cell(n.id, v, src_ty);
                 break;
@@ -1895,8 +2504,36 @@ void Lowerer::assign_to(Expr& target, VReg v, TypePtr vty) {
         case ExprKind::Subscript: {
             auto& s = static_cast<Subscript&>(target);
             if (s.slice->kind == ExprKind::Slice) {
-                err(target.line, target.col,
-                    "slice assignment is not supported by the code generator yet");
+                auto& sl = static_cast<SliceExpr&>(*s.slice);
+                TypePtr ot = tc_.type_of(s.value.get());
+                if (!ot || (ot->kind != TyKind::List && ot->kind != TyKind::Tuple &&
+                            ot->kind != TyKind::Unknown)) {
+                    err(target.line, target.col,
+                        std::format("'{}' does not support slice assignment", type_name(ot)));
+                    break;
+                }
+                if (src_ty && src_ty->kind != TyKind::List && src_ty->kind != TyKind::Tuple &&
+                    src_ty->kind != TyKind::Str && src_ty->kind != TyKind::Unknown) {
+                    err(target.line, target.col,
+                        std::format("cannot assign '{}' to a slice", type_name(src_ty)));
+                    break;
+                }
+                VReg obj = expr(*s.value);
+                constexpr int64_t kNone = std::numeric_limits<int64_t>::min();
+                auto bound = [&](ExprPtr& e) -> VReg {
+                    if (!e) return const_int(kNone);
+                    VReg b = expr(*e);
+                    return coerce(b, tc_.type_of(e.get()), t_int());
+                };
+                VReg start = bound(sl.lower);
+                VReg stop = bound(sl.upper);
+                VReg step = bound(sl.step);
+                VReg src = v;
+                if (src_ty && src_ty->kind == TyKind::Str) {
+                    src = call_runtime(RtFn::StrToList, mk_list(t_str()), {v});
+                    push_temp(src);
+                }
+                call_void(RtFn::ListSliceAssign, {obj, start, stop, step, src});
                 break;
             }
             VReg obj = expr(*s.value);
@@ -1964,6 +2601,8 @@ VReg Lowerer::expr(Expr& e) {
         case ExprKind::Constant: return lower_constant(static_cast<Constant&>(e));
         case ExprKind::Name: {
             auto& n = static_cast<Name&>(e);
+            if (int cs = comp_slot(n.id); cs >= 0)
+                return load_slot(cs, st_->fn->slot_ty[cs]);
             // 嵌套函数直接引用自己：取当前闭包，而不是外层绑定。
             if (st_->self_def && n.id == st_->self_def->name && !is_cell(n.id) &&
                 !is_env(n.id) && !st_->slots.count(n.id)) {
@@ -2010,6 +2649,11 @@ VReg Lowerer::expr(Expr& e) {
             return lower_set(static_cast<SetExpr&>(e), tc_.type_of(&e));
         case ExprKind::Dict:
             return lower_dict(static_cast<DictExpr&>(e), tc_.type_of(&e));
+        case ExprKind::ListComp:
+        case ExprKind::SetComp:
+        case ExprKind::DictComp:
+        case ExprKind::GeneratorExp:
+            return lower_comp(e);
         case ExprKind::IfExp: return lower_ifexp(static_cast<IfExp&>(e));
         case ExprKind::JoinedStr: return lower_joined(static_cast<JoinedStr&>(e));
         case ExprKind::NamedExpr: {
@@ -2422,6 +3066,228 @@ VReg Lowerer::lower_set(SetExpr& s, TypePtr ty) {
     return set;
 }
 
+VReg Lowerer::lower_comp(Expr& e) {
+    std::vector<ExprPtr>* gens = nullptr;
+    Expr* elt_expr = nullptr;
+    Expr* key_expr = nullptr;
+    Expr* val_expr = nullptr;
+    bool is_set = false;
+    bool is_dict = false;
+    switch (e.kind) {
+        case ExprKind::ListComp: {
+            auto& c = static_cast<ListComp&>(e);
+            gens = &c.generators;
+            elt_expr = c.elt.get();
+            break;
+        }
+        case ExprKind::GeneratorExp: {
+            auto& c = static_cast<GeneratorExp&>(e);
+            gens = &c.generators;
+            elt_expr = c.elt.get();
+            break;
+        }
+        case ExprKind::SetComp: {
+            auto& c = static_cast<SetComp&>(e);
+            gens = &c.generators;
+            elt_expr = c.elt.get();
+            is_set = true;
+            break;
+        }
+        case ExprKind::DictComp: {
+            auto& c = static_cast<DictComp&>(e);
+            gens = &c.generators;
+            key_expr = c.key.get();
+            val_expr = c.value.get();
+            is_dict = true;
+            break;
+        }
+        default: return const_none();
+    }
+
+    TypePtr rty = tc_.type_of(&e);
+    TypePtr elem_ty = t_unknown();
+    TypePtr val_ty = t_unknown();
+    VReg acc;
+    if (is_dict) {
+        if (!rty || rty->kind != TyKind::Dict) rty = mk_dict(t_unknown(), t_unknown());
+        if (!rty->sub.empty()) elem_ty = rty->sub[0];
+        if (rty->sub.size() > 1) val_ty = rty->sub[1];
+        acc = call_runtime(RtFn::DictNew, rty,
+                           {const_int(key_kind(elem_ty)), const_int(own_kind(elem_ty)),
+                            const_int(own_kind(val_ty))});
+        push_temp(acc);
+    } else if (is_set) {
+        if (!rty || rty->kind != TyKind::Set) rty = mk_set(t_unknown());
+        if (!rty->sub.empty()) elem_ty = rty->sub[0];
+        acc = call_runtime(RtFn::DictNew, rty,
+                           {const_int(key_kind(elem_ty)), const_int(own_kind(elem_ty)),
+                            const_int(0)});
+        push_temp(acc);
+    } else {
+        if (!rty || rty->kind != TyKind::List) rty = mk_list(t_unknown());
+        if (!rty->sub.empty()) elem_ty = rty->sub[0];
+        Inst mk;
+        mk.op = IrOp::MakeList;
+        mk.imm = list_kind(rty);
+        acc = def_heap(rty, std::move(mk));
+    }
+
+    auto emit_result = [&]() {
+        if (is_dict) {
+            VReg k = expr(*key_expr);
+            k = coerce(k, tc_.type_of(key_expr), elem_ty);
+            retain_elem(k, own_kind(elem_ty));
+            VReg v = expr(*val_expr);
+            v = coerce(v, tc_.type_of(val_expr), val_ty);
+            retain_elem(v, own_kind(val_ty));
+            call_void(RtFn::DictSet, {acc, k, v});
+            return;
+        }
+        VReg v = expr(*elt_expr);
+        v = coerce(v, tc_.type_of(elt_expr), elem_ty);
+        if (is_set) {
+            retain_elem(v, own_kind(elem_ty));
+            call_void(RtFn::DictSet, {acc, v, const_int(0)});
+        } else {
+            retain_elem(v, list_kind(rty));
+            call_void(RtFn::ListAppend, {acc, v});
+        }
+    };
+
+    comp_slots_.emplace_back();
+
+    std::function<void(size_t)> gen = [&](size_t gi) {
+        if (gi >= gens->size()) {
+            emit_result();
+            return;
+        }
+        auto& g = static_cast<Comprehension&>(*(*gens)[gi]);
+        if (g.is_async) {
+            err(g.line, g.col, "'async for' in a comprehension is not supported");
+            return;
+        }
+        VReg seq = expr(*g.iter);
+        TypePtr sty = tc_.type_of(g.iter.get());
+        bool ok = sty && (sty->kind == TyKind::List || sty->kind == TyKind::Tuple ||
+                          sty->kind == TyKind::Str || sty->kind == TyKind::Dict ||
+                          sty->kind == TyKind::Set);
+        if (!ok) {
+            err(g.iter->line, g.iter->col,
+                std::format("cannot iterate over '{}' in a comprehension", type_name(sty)));
+            return;
+        }
+        TypePtr ety = t_unknown();
+        if (sty->kind == TyKind::Str) ety = t_str();
+        else if (!sty->sub.empty()) ety = sty->sub[0];
+
+        Inst ln;
+        ln.op = IrOp::Len;
+        ln.a = seq;
+        VReg n = def(t_int(), std::move(ln));
+
+        int idx = new_temp_slot(t_int());
+        store_slot(idx, const_int(0));
+
+        int cond = new_block("comp.cond");
+        int body = new_block("comp.body");
+        int incr = new_block("comp.incr");
+        int end = new_block("comp.end");
+
+        // 水位取在序列求值之后：seq 本身可能是临时容器，不能被每轮清掉。
+        int mark_block = -1;
+        size_t mark_pos = 0;
+        VReg mark = rc_mark_at(mark_block, mark_pos);
+
+        Inst j;
+        j.op = IrOp::Jump;
+        j.target = cond;
+        emit(std::move(j));
+
+        switch_to(cond);
+        VReg iv = load_slot(idx, t_int());
+        Inst cmp;
+        cmp.op = IrOp::Cmp;
+        cmp.cop = CmpKind::Lt;
+        cmp.a = iv;
+        cmp.b = n;
+        VReg cc = def(t_bool(), std::move(cmp));
+        Inst br;
+        br.op = IrOp::Branch;
+        br.a = cc;
+        br.target = body;
+        br.target2 = end;
+        emit(std::move(br));
+
+        switch_to(body);
+        rc_cleanup(mark);
+        VReg iv2 = load_slot(idx, t_int());
+        VReg ev;
+        if (sty->kind == TyKind::Dict || sty->kind == TyKind::Set) {
+            ev = call_runtime(RtFn::DictKeyAt, ety, {seq, iv2});
+        } else {
+            Inst get;
+            get.op = IrOp::IndexLoad;
+            get.a = seq;
+            get.b = iv2;
+            ev = sty->kind == TyKind::Str ? def_heap(ety, std::move(get))
+                                          : def(ety, std::move(get));
+        }
+        if (auto* tn = dynamic_cast<Name*>(g.target.get())) {
+            int slot = comp_slot(tn->id);
+            if (slot < 0) {
+                slot = st_->fn->new_slot(ety);
+                comp_slots_.back()[tn->id] = slot;
+            }
+            store_slot(slot, ev);
+        } else {
+            assign_to(*g.target, ev, ety);
+        }
+
+        // 过滤器：任何一条不成立就跳到自增块。
+        for (auto& cond_expr : g.ifs) {
+            VReg c = expr(*cond_expr);
+            int ok_b = new_block("comp.if");
+            Inst cb;
+            cb.op = IrOp::Branch;
+            cb.a = c;
+            cb.target = ok_b;
+            cb.target2 = incr;
+            emit(std::move(cb));
+            switch_to(ok_b);
+        }
+
+        gen(gi + 1);
+        if (!terminated()) {
+            Inst jj;
+            jj.op = IrOp::Jump;
+            jj.target = incr;
+            emit(std::move(jj));
+        }
+
+        switch_to(incr);
+        rc_cleanup(mark);
+        VReg iv3 = load_slot(idx, t_int());
+        Inst add;
+        add.op = IrOp::Bin;
+        add.bop = BinKind::Add;
+        add.a = iv3;
+        add.b = const_int(1);
+        VReg iv4 = def(t_int(), std::move(add));
+        store_slot(idx, iv4);
+        Inst ji;
+        ji.op = IrOp::Jump;
+        ji.target = cond;
+        emit(std::move(ji));
+
+        switch_to(end);
+        rc_cleanup(mark);
+    };
+
+    gen(0);
+    comp_slots_.pop_back();
+    return acc;
+}
+
 VReg Lowerer::lower_ifexp(IfExp& e) {
     TypePtr ty = tc_.type_of(&e);
     int tmp = new_borrow_slot(ty);
@@ -2534,7 +3400,7 @@ VReg Lowerer::lower_joined(JoinedStr& j) {
 
 // 按签名重排实参：位置实参、关键字实参、缺省值、形参类型的数值转换。
 // info 为空（签名未知）时按源码顺序直传，关键字参数直接报错。
-std::vector<VReg> Lowerer::bind_args(Call& c, const FuncInfoPtr& info, FunctionDef* def) {
+std::vector<VReg> Lowerer::bind_args(Call& c, const FuncInfoPtr& info, FunctionDef* defn) {
     std::vector<VReg> args;
     if (!info) {
         if (!c.keywords.empty()) {
@@ -2555,19 +3421,135 @@ std::vector<VReg> Lowerer::bind_args(Call& c, const FuncInfoPtr& info, FunctionD
     size_t nkw = info->kwonly.size();
     std::vector<VReg> bound(npos + nkw, kNoReg);
 
-    if (c.args.size() > npos) {
-        err(c.line, c.col,
-            std::format("too many positional arguments (expected at most {})", npos));
-    }
-    for (size_t i = 0; i < c.args.size() && i < npos; ++i) {
-        if (c.args[i]->kind == ExprKind::Starred) {
-            err(c.args[i]->line, c.args[i]->col,
-                "'*args' is not supported by the code generator yet");
+    // ── *args ────────────────────────────────────────────────
+    // 变长实参在调用点打包成一个 list，作为最后一个（或倒数第二个）
+    // 形参传进去；callee 里它就是一个普通 list 形参。
+    TypePtr vty = info->varargs ? (info->vararg_ty ? info->vararg_ty : t_unknown()) : nullptr;
+    TypePtr lty = info->varargs ? mk_list(vty) : nullptr;
+    int vk = info->varargs ? list_kind(lty) : 0;
+    VReg vlist = kNoReg;
+    auto vararg_list = [&]() -> VReg {
+        if (vlist == kNoReg) {
+            vlist = call_runtime(RtFn::ListNew, lty, {const_int(0), const_int(vk)});
+            push_temp(vlist);
+        }
+        return vlist;
+    };
+    auto append_vararg = [&](VReg v, TypePtr vt) {
+        v = coerce(v, vt, vty);
+        retain_elem(v, vk);
+        call_void(RtFn::ListAppend, {vararg_list(), v});
+    };
+
+    // 已知长度的 tuple 可以静态展开，即使 callee 没有 *args。
+    auto is_fixed_tuple = [&](TypePtr t) {
+        return t && t->kind == TyKind::Tuple && !t->variadic;
+    };
+
+    size_t pos_i = 0;
+    for (auto& ap : c.args) {
+        Expr& a = *ap;
+        if (a.kind == ExprKind::Starred) {
+            Expr& inner = *static_cast<Starred&>(a).value;
+            TypePtr tt = tc_.type_of(&inner);
+            if (is_fixed_tuple(tt)) {
+                VReg tv = expr(inner);
+                for (size_t j = 0; j < tt->sub.size(); ++j) {
+                    TypePtr et = tt->sub[j];
+                    Inst in;
+                    in.op = IrOp::IndexLoad;
+                    in.a = tv;
+                    in.b = const_int(static_cast<int64_t>(j));
+                    VReg ev = def(et, std::move(in));
+                    if (pos_i < npos) {
+                        bound[pos_i++] = ev;
+                    } else if (info->varargs) {
+                        append_vararg(ev, et);
+                    } else {
+                        err(a.line, a.col,
+                            std::format("too many positional arguments (expected at most {})", npos));
+                        break;
+                    }
+                }
+                continue;
+            }
+            if (pos_i < npos) {
+                expr(inner);
+                err(a.line, a.col,
+                    "'*' cannot be expanded before the fixed positional parameters are filled; "
+                    "pass the iterable after them or make the parameter count static");
+                continue;
+            }
+            if (!info->varargs) {
+                expr(inner);
+                err(a.line, a.col,
+                    std::format("function '{}' does not accept a variable number of arguments",
+                                info->name));
+                continue;
+            }
+            VReg s = expr(inner);
+            TypePtr st = tc_.type_of(&inner);
+            if (st && st->kind == TyKind::Str) {
+                VReg l = call_runtime(RtFn::StrToList, mk_list(t_str()), {s});
+                push_temp(l);
+                s = l;
+            } else if (st && st->kind != TyKind::List && st->kind != TyKind::Tuple &&
+                       st->kind != TyKind::Unknown) {
+                err(a.line, a.col,
+                    std::format("cannot expand '{}' into '*args'", type_name(st)));
+                continue;
+            }
+            call_void(RtFn::ListExtend, {vararg_list(), s});
             continue;
         }
-        bound[i] = expr(*c.args[i]);
+        VReg v = expr(a);
+        if (pos_i < npos) {
+            bound[pos_i++] = v;
+        } else if (info->varargs) {
+            append_vararg(v, tc_.type_of(&a));
+        } else {
+            err(a.line, a.col,
+                std::format("too many positional arguments (expected at most {})", npos));
+        }
     }
+
+    // ── **kwargs ─────────────────────────────────────────────
+    TypePtr kwty = info->kwargs ? (info->kwarg_ty ? info->kwarg_ty : t_unknown()) : nullptr;
+    TypePtr kdty = info->kwargs ? mk_dict(t_str(), kwty) : nullptr;
+    int kown = info->kwargs ? own_kind(kwty) : 0;
+    VReg kwd = kNoReg;
+    auto kwarg_dict = [&]() -> VReg {
+        if (kwd == kNoReg) {
+            kwd = call_runtime(RtFn::DictNew, kdty,
+                               {const_int(1), const_int(1), const_int(kown)});
+            push_temp(kwd);
+        }
+        return kwd;
+    };
+
     for (auto& k : c.keywords) {
+        if (k.arg.empty()) {
+            if (!info->kwargs) {
+                expr(*k.value);
+                err(k.value->line, k.value->col,
+                    std::format("'{}' does not accept '**kwargs'", info->name));
+                continue;
+            }
+            VReg m = expr(*k.value);
+            TypePtr mt = tc_.type_of(k.value.get());
+            if (mt && mt->kind != TyKind::Dict && mt->kind != TyKind::Unknown) {
+                err(k.value->line, k.value->col,
+                    "cannot unpack a non-dict value into '**kwargs'");
+                continue;
+            }
+            if (mt && mt->kind == TyKind::Dict && !mt->sub.empty() &&
+                mt->sub[0]->kind != TyKind::Str && mt->sub[0]->kind != TyKind::Unknown) {
+                err(k.value->line, k.value->col, "'**kwargs' keys must be strings");
+                continue;
+            }
+            call_void(RtFn::DictUpdate, {kwarg_dict(), m});
+            continue;
+        }
         int idx = -1;
         for (size_t i = info->n_posonly; i < npos; ++i)
             if (info->pos[i].name == k.arg) idx = static_cast<int>(i);
@@ -2576,6 +3558,13 @@ std::vector<VReg> Lowerer::bind_args(Call& c, const FuncInfoPtr& info, FunctionD
                 if (info->kwonly[i].name == k.arg) idx = static_cast<int>(npos + i);
         }
         if (idx < 0) {
+            if (info->kwargs) {
+                VReg v = expr(*k.value);
+                v = coerce(v, tc_.type_of(k.value.get()), kwty);
+                retain_elem(v, kown);
+                call_void(RtFn::DictSet, {kwarg_dict(), const_str(k.arg), v});
+                continue;
+            }
             err(k.value->line, k.value->col,
                 std::format("unexpected keyword argument '{}'", k.arg));
             continue;
@@ -2594,12 +3583,12 @@ std::vector<VReg> Lowerer::bind_args(Call& c, const FuncInfoPtr& info, FunctionD
         // FunctionDef 可查，只能靠 FuncInfo 带着的 AST 指针。
         if (info && pos_index < info->pos.size() && info->pos[pos_index].default_expr)
             return as_const(info->pos[pos_index].default_expr);
-        if (!def) return std::nullopt;
-        size_t nd = def->args.defaults.size();
+        if (!defn) return std::nullopt;
+        size_t nd = defn->args.defaults.size();
         if (pos_index + nd < npos) return std::nullopt;
         size_t di = pos_index - (npos - nd);
         if (di >= nd) return std::nullopt;
-        return as_const(def->args.defaults[di].get());
+        return as_const(defn->args.defaults[di].get());
     };
     auto emit_const = [&](const ConstVal& cv) -> VReg {
         switch (cv.ty->kind) {
@@ -2644,8 +3633,8 @@ std::vector<VReg> Lowerer::bind_args(Call& c, const FuncInfoPtr& info, FunctionD
         std::optional<ConstVal> cv;
         if (info && i < info->kwonly.size() && info->kwonly[i].default_expr)
             cv = as_const(info->kwonly[i].default_expr);
-        if (!cv && def && i < def->args.kw_defaults.size() && def->args.kw_defaults[i])
-            cv = as_const(def->args.kw_defaults[i].get());
+        if (!cv && defn && i < defn->args.kw_defaults.size() && defn->args.kw_defaults[i])
+            cv = as_const(defn->args.kw_defaults[i].get());
         if (!cv) {
             err(c.line, c.col,
                 std::format("default value of '{}' is not a literal constant", info->kwonly[i].name));
@@ -2662,6 +3651,9 @@ std::vector<VReg> Lowerer::bind_args(Call& c, const FuncInfoPtr& info, FunctionD
         TypePtr want = i < npos ? info->pos[i].ty : info->kwonly[i - npos].ty;
         if (args[i] != kNoReg) args[i] = coerce(args[i], vreg_ty(args[i]), want);
     }
+    // 变长形参即使没收到实参也要传空容器：callee 的形参槽必须有值。
+    if (info->varargs) args.push_back(vararg_list());
+    if (info->kwargs) args.push_back(kwarg_dict());
     return args;
 }
 
@@ -2715,21 +3707,12 @@ VReg Lowerer::lower_construct(Call& c, const ClassInfoPtr& cls) {
 }
 
 VReg Lowerer::lower_call(Call& c) {
-    if (!c.keywords.empty()) {
-        for (auto& k : c.keywords) {
-            if (k.arg.empty()) {
-                err(c.line, c.col, "'**kwargs' is not supported by the code generator yet");
-                return const_none();
-            }
-        }
-    }
-
     // 内建函数
     if (c.func->kind == ExprKind::Name) {
         auto& n = static_cast<Name&>(*c.func);
         if (is_builtin(n.id)) {
             static const std::unordered_set<std::string> kBuiltins = {
-                "print", "len", "int", "float", "str", "bool",
+                "print", "len", "int", "float", "str", "bool", "range",
             };
             if (kBuiltins.count(n.id)) return lower_builtin_call(n.id, c);
         }
@@ -2781,6 +3764,28 @@ VReg Lowerer::lower_builtin_call(const std::string& name, Call& c) {
         in.op = IrOp::Len;
         in.a = v;
         return def(t_int(), std::move(in));
+    }
+
+    if (name == "range") {
+        if (c.args.empty() || c.args.size() > 3) {
+            err(c.line, c.col, "range() takes 1 to 3 arguments");
+            return const_none();
+        }
+        auto arg = [&](size_t i) {
+            VReg v = expr(*c.args[i]);
+            return coerce(v, tc_.type_of(c.args[i].get()), t_int());
+        };
+        VReg start = const_int(0);
+        VReg stop = arg(0);
+        VReg step = const_int(1);
+        if (c.args.size() >= 2) {
+            start = stop;
+            stop = arg(1);
+        }
+        if (c.args.size() == 3) step = arg(2);
+        VReg v = call_runtime(RtFn::RangeNew, mk_list(t_int()), {start, stop, step});
+        push_temp(v);
+        return v;
     }
 
     if (name == "int" || name == "float" || name == "str" || name == "bool") {
@@ -2960,6 +3965,46 @@ VReg Lowerer::lower_method_call(Attribute& at, Call& c) {
             call_void(RtFn::DictUpdate, {recv, other});
             return const_none();
         }
+        if (at.attr == "pop") {
+            if (c.args.size() != 1 && c.args.size() != 2) {
+                err(c.line, c.col, "dict.pop() takes 1 or 2 arguments");
+                return const_none();
+            }
+            VReg key = expr(*c.args[0]);
+            key = coerce(key, tc_.type_of(c.args[0].get()), kt);
+            VReg has = const_int(0);
+            VReg def = const_int(0);
+            if (c.args.size() == 2) {
+                has = const_int(1);
+                def = expr(*c.args[1]);
+                def = coerce(def, tc_.type_of(c.args[1].get()), vt);
+                // 运行时把默认值原样返回；补一份引用，让返回值统一按
+                // 「新引用」进临时栈。
+                retain_elem(def, own_kind(vt));
+            }
+            VReg v = call_runtime(RtFn::DictPop, vt, {recv, key, has, def});
+            if (ir_is_heap(vt)) push_temp(v);
+            return v;
+        }
+        if (at.attr == "popitem") {
+            if (!c.args.empty()) {
+                err(c.line, c.col, "dict.popitem() takes no arguments");
+                return const_none();
+            }
+            TypePtr rt = tc_.type_of(&c);
+            if (!rt || rt->kind != TyKind::Tuple) rt = mk_tuple({kt, vt});
+            VReg v = call_runtime(RtFn::DictPopItem, rt, {recv});
+            push_temp(v);
+            return v;
+        }
+        if (at.attr == "clear") {
+            if (!c.args.empty()) {
+                err(c.line, c.col, "dict.clear() takes no arguments");
+                return const_none();
+            }
+            call_void(RtFn::DictClear, {recv});
+            return const_none();
+        }
         err(c.line, c.col,
             std::format("dict method '{}' is not supported by the code generator yet", at.attr));
         return const_none();
@@ -2996,6 +4041,35 @@ VReg Lowerer::lower_method_call(Attribute& at, Call& c) {
                 return const_none();
             }
             call_void(RtFn::DictUpdate, {recv, other});
+            return const_none();
+        }
+        if (at.attr == "remove" || at.attr == "discard") {
+            if (c.args.size() != 1) {
+                err(c.line, c.col,
+                    std::format("set.{}() takes exactly one argument", at.attr));
+                return const_none();
+            }
+            VReg v = expr(*c.args[0]);
+            v = coerce(v, tc_.type_of(c.args[0].get()), et);
+            call_void(RtFn::DictRemove,
+                      {recv, v, const_int(at.attr == "discard" ? 1 : 0)});
+            return const_none();
+        }
+        if (at.attr == "pop") {
+            if (!c.args.empty()) {
+                err(c.line, c.col, "set.pop() takes no arguments");
+                return const_none();
+            }
+            VReg v = call_runtime(RtFn::DictPopLast, et, {recv});
+            if (ir_is_heap(et)) push_temp(v);
+            return v;
+        }
+        if (at.attr == "clear") {
+            if (!c.args.empty()) {
+                err(c.line, c.col, "set.clear() takes no arguments");
+                return const_none();
+            }
+            call_void(RtFn::DictClear, {recv});
             return const_none();
         }
         err(c.line, c.col,

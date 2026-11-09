@@ -719,7 +719,6 @@ void TypeChecker::stmt(Stmt& s) {
                 break;
             case StmtKind::Try: {
                 auto& t = static_cast<Try&>(s);
-                unsupported.push_back("try/except");
                 // 异常可能在任何一条语句上抛出，所以 except 分支看到的变量
                 // 类型是「try 入口」与「try 结束时」的公共上界。
                 // 不做这个回滚，`v = int(v)` 之后的 `except: v.replace(...)`
@@ -736,12 +735,12 @@ void TypeChecker::stmt(Stmt& s) {
                         sym.ty = join(sym.ty, it->second.ty);
                     }
                     if (!h.name.empty()) {
-                        // 异常对象的类型无法表达，用 Unknown 占位
+                        // py23 的异常对象就是消息字符串：as e 绑定 str
                         auto sc = std::make_unique<Scope>();
                         sc->parent = cur_;
                         cur_ = sc.get();
                         pool_.push_back(std::move(sc));
-                        cur_->vars[h.name] = Symbol{t_unknown(), t.line, false, false};
+                        cur_->vars[h.name] = Symbol{t_str(), t.line, false, false};
                         stmts(h.body);
                         cur_ = cur_->parent;
                     } else {
@@ -754,10 +753,20 @@ void TypeChecker::stmt(Stmt& s) {
             }
             case StmtKind::With: {
                 auto& w = static_cast<With&>(s);
-                unsupported.push_back("with statement");
                 for (auto& item : w.items) {
                     auto t = expr(*item.context);
-                    if (item.optional_vars) assign(*item.optional_vars, t_unknown(), w.line, w.col);
+                    // `with Ctx() as c` 的 c 是 __enter__ 的返回值；能查到
+                    // 方法签名就用它，查不到退回 unknown（with 本身不检查协议）。
+                    TypePtr vt = t_unknown();
+                    TypePtr ct = t;
+                    if (ct && ct->kind == TyKind::Optional && !ct->sub.empty()) ct = ct->sub[0];
+                    if (ct && ct->kind == TyKind::Class && ct->cls) {
+                        if (auto* m = ct->cls->method("__enter__");
+                            m && m->call_sig && m->call_sig->ret)
+                            vt = m->call_sig->ret;
+                    }
+                    if (item.optional_vars)
+                        assign(*item.optional_vars, vt, w.line, w.col);
                 }
                 stmts(w.body);
                 break;
@@ -938,6 +947,27 @@ void TypeChecker::funcdef_impl(FunctionDef& f, const ClassInfoPtr& owner) {
         for (auto& d : f.args.kw_defaults)
             if (d) expr(*d);
         for (auto& dec : f.decorators) expr(*dec);
+
+        // 装饰器的返回值常常就是包装函数：从下往上套，每一层用返回类型
+        // 替换当前类型。这样调用点能按包装签名检查实参并做数值转换，
+        // 而不是退化成 unknown 后按错误的调用约定传参。
+        if (!owner && !f.decorators.empty()) {
+            TypePtr cur = new_ty(TyKind::Func);
+            cur->fn = info;
+            bool known = true;
+            for (auto it = f.decorators.rbegin(); it != f.decorators.rend(); ++it) {
+                TypePtr dt = type_of(it->get());
+                if (dt && dt->kind == TyKind::Func && dt->fn && dt->fn->ret) {
+                    cur = dt->fn->ret;
+                } else {
+                    known = false;
+                    break;
+                }
+            }
+            if (known && cur && cur->kind == TyKind::Func) {
+                if (auto* sym = lookup(f.name)) sym->ty = cur;
+            }
+        }
 
         auto prev_fn = cur_fn_;
         bool prev_yield = saw_yield_;
@@ -1654,6 +1684,18 @@ TypePtr TypeChecker::expr(Expr& e) {
                     return t_unknown();
                 }
                 auto it = expr(*s.slice);
+                // 定长 tuple 的常量下标可以精确到具体元素；不做这一步，
+                // `d.popitem()[0]` 这种常见写法会退化成 unknown。
+                if (ot && ot->kind == TyKind::Tuple && !ot->variadic &&
+                    s.slice->kind == ExprKind::Constant) {
+                    auto& c = static_cast<Constant&>(*s.slice);
+                    if (c.ck == Constant::CK::Int || c.ck == Constant::CK::Bool) {
+                        int64_t i = c.ck == Constant::CK::Bool ? (c.b ? 1 : 0) : c.i;
+                        if (i < 0) i += static_cast<int64_t>(ot->sub.size());
+                        if (i >= 0 && i < static_cast<int64_t>(ot->sub.size()))
+                            return ot->sub[static_cast<size_t>(i)];
+                    }
+                }
                 return subscript_type(ot, it, s.line, s.col);
             }
             case ExprKind::Attribute: {
@@ -2158,6 +2200,10 @@ TypePtr TypeChecker::check_args(const FuncInfoPtr& fn, Call& c) {
         if (fn->ret) return fn->ret;
         return fn->ret_known ? t_none() : t_unknown();
     }
+
+bool TypeChecker::is_exception_type(const std::string& n) {
+        return is_exception_name(n);
+}
 
 bool TypeChecker::is_exception_name(const std::string& n) {
         static const std::unordered_set<std::string> names = {

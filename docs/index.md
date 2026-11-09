@@ -67,4 +67,4 @@
 
 ## 当前状态
 
-对应 CHANGELOG 的 0.11（容器方法 + 切片）：流水线 `源码 → 词法 → AST → lambda 脱糖 → 类型检查 → IR → x86-64 汇编 → 可执行文件` 已打通，支持标量、字符串、列表、元组、字典、集合、切片（读）、函数（默认参数、递归、闭包、`nonlocal`、`lambda`）、类（字段、方法、单继承、虚调用）、控制流、`print`。堆值用引用计数回收，环和 unknown 泄漏由保守 GC 兜底。异常、推导式、删除类方法、切片赋值等尚未生成代码；GC 的保守性和回收时机见 [compatibility.md](compatibility.md)。
+对应 CHANGELOG 的 0.13（异常）：流水线 `源码 → 词法 → AST → lambda 脱糖 → 类型检查 → IR → x86-64 汇编 → 可执行文件` 已打通，支持标量、字符串、列表、元组、字典、集合、切片（读与赋值）、删除类方法、函数（默认参数、递归、闭包、`nonlocal`、`lambda`、`*args`/`**kwargs`、装饰器）、推导式、`with`、`try/except/else/finally`、`raise`、类（字段、方法、单继承、虚调用）、控制流、`print`。异常用 setjmp/longjmp + handler 栈展开；堆值用引用计数回收，环和 unknown 泄漏由保守 GC 兜底。生成器和 `import` 尚未生成代码；GC 的保守性和回收时机见 [compatibility.md](compatibility.md)。

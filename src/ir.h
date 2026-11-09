@@ -104,6 +104,7 @@ enum class RtFn : uint8_t {
     PanicOverflow, // () -> noreturn  INT64_MIN / -1
     RcInc,       // (ptr) -> void
     RcDec,       // (ptr) -> void
+    RcIncUnknown,// (i64) -> i64  按堆注册表保守 retain（unknown 值）
     RcTemp,      // (ptr) -> void  表达式临时值入栈，接管产生者的引用
     RcMark,      // () -> i64      临时值栈水位
     RcCleanup,   // (i64) -> void  释放到指定水位
@@ -124,6 +125,27 @@ enum class RtFn : uint8_t {
     DictUpdate,   // (dict*, dict*) -> void
     ListSlice,    // (list*, i64 start, i64 stop, i64 step) -> list*
     StrSlice,     // (str*, i64 start, i64 stop, i64 step) -> str*
+    DictPop,      // (dict*, i64 key, i64 has_default, i64 def) -> i64
+    DictPopItem,  // (dict*) -> (i64, i64)
+    DictPopLast,  // (dict*) -> i64
+    DictRemove,   // (dict*, i64 key, i64 missing_ok) -> void
+    DictClear,    // (dict*) -> void
+    ListSliceAssign, // (list*, i64 start, i64 stop, i64 step, list*) -> void
+    StrToList,    // (str*) -> list*
+    ListExtend,   // (list* dst, list* src) -> void
+    RangeNew,     // (i64 start, i64 stop, i64 step) -> list*
+    HandlerPush,  // () -> handler*   压入异常 handler，记录临时栈水位
+    HandlerLeave, // (handler*) -> void 弹出并清理临时栈
+    HandlerDiscard, // (handler*) -> void 只弹出，不清理临时值
+    ExcMatches,   // (str* type) -> i64
+    ExcAccept,    // () -> str*       把 pending 转为 current，返回消息
+    ExcDone,      // () -> void
+    ExcClear,     // () -> void
+    ExcReraise,   // () -> void       noreturn
+    ExcTypeName,  // () -> str*
+    ExcMessage,   // () -> str*
+    Raise,        // (str* type, str* msg) -> void  noreturn
+    Reraise,      // () -> void       noreturn  裸 raise
 };
 
 inline const char* rt_name(RtFn f) {
@@ -151,6 +173,7 @@ inline const char* rt_name(RtFn f) {
         case RtFn::PanicOverflow: return "py23_panic_overflow";
         case RtFn::RcInc: return "py23_rc_inc";
         case RtFn::RcDec: return "py23_rc_dec";
+        case RtFn::RcIncUnknown: return "py23_rc_inc_unknown";
         case RtFn::RcTemp: return "py23_rc_temp";
         case RtFn::RcMark: return "py23_rc_mark";
         case RtFn::RcCleanup: return "py23_rc_cleanup";
@@ -171,6 +194,27 @@ inline const char* rt_name(RtFn f) {
         case RtFn::DictUpdate: return "py23_dict_update";
         case RtFn::ListSlice: return "py23_list_slice";
         case RtFn::StrSlice: return "py23_str_slice";
+        case RtFn::DictPop: return "py23_dict_pop";
+        case RtFn::DictPopItem: return "py23_dict_popitem";
+        case RtFn::DictPopLast: return "py23_dict_pop_last";
+        case RtFn::DictRemove: return "py23_dict_remove";
+        case RtFn::DictClear: return "py23_dict_clear";
+        case RtFn::ListSliceAssign: return "py23_list_slice_assign";
+        case RtFn::StrToList: return "py23_str_to_list";
+        case RtFn::ListExtend: return "py23_list_extend";
+        case RtFn::RangeNew: return "py23_range_new";
+        case RtFn::HandlerPush: return "py23_handler_push";
+        case RtFn::HandlerLeave: return "py23_handler_leave";
+        case RtFn::HandlerDiscard: return "py23_handler_discard";
+        case RtFn::ExcMatches: return "py23_exc_matches";
+        case RtFn::ExcAccept: return "py23_exc_accept";
+        case RtFn::ExcDone: return "py23_exc_done";
+        case RtFn::ExcClear: return "py23_exc_clear";
+        case RtFn::ExcReraise: return "py23_exc_reraise";
+        case RtFn::ExcTypeName: return "py23_exc_type_name";
+        case RtFn::ExcMessage: return "py23_exc_message";
+        case RtFn::Raise: return "py23_raise";
+        case RtFn::Reraise: return "py23_reraise";
     }
     return "?";
 }
@@ -215,6 +259,7 @@ enum class IrOp : uint8_t {
     // ── 调用 ──────────────────────────────────────────────
     Call,    // dst = a(args...)（a 是函数指针）
     CallRt,  // dst = <RtFn(imm)>(args...)
+    Setjmp,  // dst = setjmp(a)（a 是 handler 记录，异常跳回时返回非 0）
 
     // ── 控制流 ────────────────────────────────────────────
     Jump,    // -> target
@@ -250,6 +295,7 @@ inline const char* irop_name(IrOp op) {
         case IrOp::VCall: return "vcall";
         case IrOp::Call: return "call";
         case IrOp::CallRt: return "call.rt";
+        case IrOp::Setjmp: return "setjmp";
         case IrOp::Jump: return "jump";
         case IrOp::Branch: return "branch";
         case IrOp::Return: return "return";
@@ -315,6 +361,9 @@ struct IRFunction {
     std::vector<Block> blocks;
     // 有捕获的函数：入口把 %r10 里的闭包指针存进这个槽。
     int env_slot = -1;
+    // 含 setjmp 的函数关闭槽位寄存器提升：longjmp 会把 callee-saved
+    // 寄存器恢复成 setjmp 时刻的值，寄存器里的变量会回退。
+    bool has_handlers = false;
 
     int new_slot(TypePtr ty) {
         slot_ty.push_back(std::move(ty));

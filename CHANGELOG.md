@@ -4,6 +4,120 @@
 
 早期阶段没有逐条留痕，按阶段归纳；0.4 之后逐条记录。
 
+## [0.13] - 2026-11-09
+
+这一版实现异常：`try/except/else/finally`、`raise`，以及 `with` 的异常
+退出路径。模型按 0.12 末尾定下的方案：setjmp/longjmp + 运行时 handler
+栈，异常对象是 `{类型名, 消息}`。
+
+### 新增
+
+- **handler 栈**：`try` / `with` / `finally` 在运行时压入
+  `{jmp_buf, prev, temp_mark}`；`raise` 设置全局异常后 `longjmp` 到最内层
+  landing pad。landing pad 先清临时值栈到记录水位，再执行 `except` 匹配、
+  `with.__exit__` 或 `finally`。
+- **异常对象**：内置异常名 + 消息字符串。`except` 按名称和层级匹配
+  （`KeyError → LookupError → Exception` 等）；`as e` 绑定的是**消息
+  字符串**。未捕获异常打印 `py23: uncaught ValueError: msg` 后 `exit(1)`。
+- **try/except/else**：多个 handler、tuple 类型 `except (A, B)`、bare
+  `except:`、`else`；handler 体再次抛异常时先 `ExcDone` 再继续展开。
+- **try/finally**：正常、异常、`return`、`break`、`continue` 都会执行
+  finally；`try/except/finally` 组合按嵌套语义工作。
+- **raise**：`raise ValueError`、`raise ValueError(msg)`、bare `raise`
+  （重抛当前异常）。`raise ... from` 和自定义异常类暂不支持。
+- **with 异常路径**：异常时 `__exit__(type_name, message, None)`；返回真值
+  抑制异常，否则重新抛。多个 `with` 项按逆序退出；`__enter__` 抛异常时
+  外层 `__exit__` 仍会执行。
+- **运行时错误可捕获**：`IndexError`、`KeyError`、`ZeroDivisionError`、
+  `OverflowError`、`ValueError`、`AssertionError`、`AttributeError`
+  （None 属性访问）不再直接 `exit(1)`。
+- **寄存器安全**：含 handler 的函数关闭槽位寄存器提升，避免 longjmp 把
+  callee-saved 寄存器回滚到 setjmp 时刻。
+- 运行用例 `22_exception`；异常压力程序覆盖跨帧 raise、handler 内重抛、
+  with 异常与 finally 异常。
+
+### 验证
+
+- `make test`：11 正例 + 33 反例 + 22 运行用例 + 4 未建模
+- 差分测试 3 种子 600 个程序零差异
+- ASan + UBSan + LSan：全部 13 个内存相关运行用例零报告
+- 严格警告零报告；release 构建通过
+- 16MB `RLIMIT_AS`：10 万次跨帧异常、5 万次 handler 内重抛、5 万次
+  with 异常、5 万次 finally 异常，峰值 RSS 约 7.8MB
+
+### 已知限制
+
+- 异常对象只有类型名和消息；`as e` 是字符串，没有 `e.args`、traceback、
+  `raise ... from` 或异常链
+- 只支持内置异常名；自定义异常类和方法装饰器一样仍被后端拒绝
+- `finally` 体内如果含跳出 finally 的 `return` / `break` / `continue`
+  会直接报错；循环内部的跳转是允许的
+- 异常跳过普通函数帧时不执行 `release_slots`，局部引用交给保守 GC；
+  异常路径的回收时机不如正常路径精确
+- handler 记录和异常对象是 malloc 的，不参与 RC/GC；未捕获异常直接退出
+
+## [0.12] - 2026-11-09
+
+这一版补齐路线图里除 `try/except`、生成器 / `async`、`import` 之外的
+构造：删除类方法、切片赋值、变长实参、推导式、`with`、函数装饰器。
+
+### 新增
+
+- **dict/set 删除方法**：`pop(k[, default])`、`popitem()`、`remove(k)`、
+  `discard(k)`、`clear()`、`set.pop()`。开放寻址表没有墓碑，删除后按
+  `order` 剩余项整表重建（单次 O(n)）；`popitem` / `set.pop` 固定取最后
+  插入项，遍历顺序和 RC 归属保持稳定
+- **切片赋值**：`l[a:b:c] = value`。`step == 1` 支持替换 / 插入 / 删除
+  （`memmove` 处理长度变化），扩展切片要求右侧长度一致；右侧允许
+  list / tuple / str（str 按字节拆成字符列表）；写入按目标 `elem_kind`
+  retain 新元素、dec 旧元素，`src == dst` 先快照
+- **`*args` / `**kwargs` 形参与实参**：形参在 IR 里是末尾的 `list[T]` /
+  `dict[str, V]` 指针；调用点把多余位置实参打包进 list、关键字实参打包
+  进 dict。支持 `f(1, *lst)`、`f(*t)`、`f(**d)`、`inner(*args, **kw)`
+  转发；定长 tuple 的 `*` 静态展开；方法、构造器、闭包捕获同样可用
+- **推导式**：list / set / dict 推导式与生成器表达式（立即按 list 求值），
+  支持多层 `for`、每层 `if`、嵌套推导和独立变量作用域；`range()` 现在
+  可以作为值求值（实体化成 list[int]，步长可以是任意 int 表达式）
+- **`with`**：类实例的 `__enter__` / `__exit__`，支持 `as`、多个项、
+  嵌套；正常结束、`return`、`break`、`continue` 都会按逆序补调
+  `__exit__(None, None, None)`
+- **函数装饰器**：`@d1 @d2 def f` 按从下到上执行 `f = d1(d2(f))`，
+  复用普通闭包调用；装饰器必须是签名已知的函数值
+- **类型检查**：定长 tuple 的常量下标返回精确元素类型
+  （`d.popitem()[0]` 不再退化成 unknown）；装饰后的函数名绑定到装饰器
+  返回的函数签名，调用点可以正常做参数检查与数值转换
+- **unknown 保守 retain**：unknown 值写入 cell / 容器前调用
+  `py23_rc_inc_unknown`，运行时按堆注册表判断是否堆指针再 +1。修复了
+  装饰器参数 `f` 这类 unknown 捕获在源引用释放后悬空的 UAF；注册表索引
+  用墓碑复用 + 按存活数压缩，长循环下不膨胀
+- 运行时新增 `py23_dict_pop/popitem/pop_last/remove/clear`、
+  `py23_list_slice_assign`、`py23_list_extend`、`py23_str_to_list`、
+  `py23_range_new`、`py23_rc_inc_unknown`
+- 运行用例 `16_dict_del` ~ `21_decorator`；未建模用例
+  `decorated_method` / `class_decorator`
+
+### 验证
+
+- `make test`：11 正例 + 33 反例 + 21 运行用例 + 4 未建模
+- 差分测试 3 种子 600 个程序零差异
+- ASan + UBSan + LSan：全部 12 个内存相关运行用例零报告
+- 严格警告（`-Wshadow -Wnon-virtual-dtor -Wold-style-cast -Wcast-qual`）零报告
+- 16MB `RLIMIT_AS`：10 万次删除 / 推导式 / 切片赋值 / `with` /
+  装饰器 / 变长实参调用（共 50 万轮）峰值 RSS 约 7.8MB
+
+### 已知限制
+
+- 删除是 O(n) 整表重建；大表高频删除会退化，见 roadmap 技术债
+- 通过 unknown 类型函数值调用时不能带 `*` / `**`（没有运行时签名）；
+  `*` 位于固定形参之前时只支持定长 tuple 的静态展开
+- 同一个 `**mapping` 的键与命名形参重名时不会报 `TypeError`，会静默
+  留在 `**kwargs` 里
+- `print(*args)` 仍未展开；生成器表达式立即求值；推导式里的 `lambda`
+  暂不能捕获循环变量
+- 类装饰器、方法装饰器（`@staticmethod` / `@property` 等）仍被后端拒绝
+- `with` 的 `__exit__` 只在正常和 `return` / `break` / `continue` 路径
+  调用；异常路径要等 `try/except` 的展开机制
+
 ## [0.11] - 2026-11-09
 
 这一版补齐容器常用方法和**切片（读）**。
@@ -27,7 +141,7 @@
 
 ### 验证
 
-- `make test`：11 正例 + 34 反例 + 15 运行用例 + 2 未建模
+- `make test`：11 正例 + 33 反例 + 15 运行用例 + 2 未建模
 - 差分测试 3 种子 600 个程序零差异
 - ASan + UBSan + LSan：全部运行用例 + 方法/切片压力程序零报告
 - 严格警告零报告
@@ -79,7 +193,7 @@
 
 ### 验证
 
-- `make test`：11 正例 + 34 反例 + 14 运行用例 + 2 未建模
+- `make test`：11 正例 + 33 反例 + 14 运行用例 + 2 未建模
 - 差分测试 3 种子 600 个程序零差异
 - ASan + UBSan + LSan：全部运行用例 + 字典/集合压力程序零报告
 - 严格警告零报告
@@ -137,7 +251,7 @@
 
 ### 验证
 
-- `make test`：11 正例 + 34 反例 + 13 运行用例 + 2 未建模
+- `make test`：11 正例 + 33 反例 + 13 运行用例 + 2 未建模
 - 差分测试 3 种子 600 个程序零差异
 - ASan + UBSan + LSan：编译器全量、全部运行用例、GC 压力程序零报告
 - 严格警告零报告

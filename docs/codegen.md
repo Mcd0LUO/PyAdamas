@@ -76,6 +76,10 @@ IR 一行没改，全部优化都发生在这一层。五件事叠起来，把�
 | 常量延迟 | `%v = const.int N`，只被读一次、同块、在 32 位有符号范围内 | 一条 mov + 一次内存往返 |
 | 比较连分支 | `%v = cmp` 紧跟 `branch %v`，且 %v 只被读一次、同块 | setCC + movzbq + 槽往返 + cmpq |
 
+含 handler（`setjmp`）的函数关闭「变量提升」：longjmp 会把 callee-saved
+寄存器恢复成 setjmp 时刻的值，寄存器里的变量会悄悄回退。这类函数的所有
+变量走内存槽，其它函数完全不受影响。
+
 `while i < n: s += i * 2; i += 1` 的循环体，优化前后：
 
 ```asm
@@ -108,7 +112,6 @@ IR 一行没改，全部优化都发生在这一层。五件事叠起来，把�
 ```
 
 ### 为什么不做全局寄存器分配
-
 变量提升是**函数级、固定**的：一个变量要么整函数在寄存器里，要么整函数在栈上。不做活跃性分析，因此不产生 spill。
 
 代价是寄存器被长期占着。收益是分支汇合、循环回边、异常路径全都天然正确——不存在「这条边上值在寄存器、那条边上在栈里」这种需要插 phi 或 reload 的状态。Python 的局部变量本来就不多，五个够用。
@@ -195,6 +198,10 @@ IR 一行没改，全部优化都发生在这一层。五件事叠起来，把�
 被调用者只保存 `%rbx` / `%r12`–`%r15` 里**实际用到的那几个**，序言 push、尾声逆序 pop。
 其余寄存器（`%rax`、`%rsi`、`%rdi`、`%r8`–`%r11`、全部 `xmm`）是 caller-saved，可以随便写。
 
+`*args` / `**kwargs` 不引入新的调用约定：它们就是参数列表末尾的一个 list /
+dict 指针，调用点打包好按普通参数传；整数寄存器不够时照常压栈。装饰器
+调用、`with` 的 `__enter__` / `__exit__` 也都是普通的 `call` / `vcall`。
+
 调用一个函数值的序列：
 
 ```asm
@@ -248,6 +255,21 @@ IR 一行没改，全部优化都发生在这一层。五件事叠起来，把�
 
 被捕获变量是单元素 `list[T]`（cell），读写复用 `index.get/index.set` 和
 列表元素的引用计数；这样闭包、列表、RC 三套机制不需要各自实现一份。
+
+## 异常展开
+
+异常用 **setjmp/longjmp**，不占用返回值寄存器，也不改调用约定：
+
+- `py23_handler_push` 压入一条 `{jmp_buf, prev, temp_mark}` 记录，返回的
+  指针直接作为 `setjmp` 的参数（`jmp_buf` 是记录的第一个字段）。
+- 生成代码在 try/with/finally 入口 `call setjmp`，0 走正常体，非 0 走
+  landing pad；`raise` 在运行时设置全局异常后 `longjmp` 到最内层记录。
+- landing pad 先 `py23_handler_leave`：弹出记录并把临时值栈清理到
+  记录水位；然后分派 `except` / `__exit__` / finalbody。
+- 含 handler 的函数关闭槽位寄存器提升；被异常跳过的普通函数帧不执行
+  `release_slots`，局部引用交给保守 GC。
+- `return` / `break` / `continue` 不 longjmp，走编译期 cleanup 栈：
+  `handler_discard` + `__exit__` / finalbody 直接内联发射。
 
 ## 对象与虚调用
 

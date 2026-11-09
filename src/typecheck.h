@@ -637,6 +637,8 @@ public:
 
     // 顶层符号快照，供 `types` 子命令展示
     std::vector<std::pair<std::string, std::string>> top_symbols() const;
+    // 异常名判断，供降级阶段生成 except / raise 类型字符串
+    static bool is_exception_type(const std::string& n);
     std::vector<std::string> unsupported;
     size_t n_stmt = 0, n_expr = 0, n_func = 0;
 
