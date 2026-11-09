@@ -802,6 +802,8 @@ private:
     void lower_funcdef(FunctionDef& f);
     void lower_assert(Assert& a);
     void lower_delete(Delete& d);
+    void lower_match(Match& m);
+    void lower_pattern(Pattern& p, VReg value, TypePtr ty, int fail);
     void delete_target(Expr& target);
     void lower_try(Try& t);
     void lower_raise(Raise& r);

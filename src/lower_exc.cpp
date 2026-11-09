@@ -787,4 +787,252 @@ void Lowerer::lower_delete(Delete& d) {
 }
 
 
+void Lowerer::lower_match(Match& m) {
+    TypePtr sty = tc_.type_of(m.subject.get());
+    VReg sv = expr(*m.subject);
+    int subj = new_temp_slot(sty ? sty : t_unknown());
+    store_slot(subj, sv);
+    int end = new_block("match.end");
+
+    for (auto& c : m.cases) {
+        int fail = new_block("match.fail");
+        comp_slots_.emplace_back();
+        lower_pattern(*c.pattern, load_slot(subj, sty ? sty : t_unknown()), sty, fail);
+        if (c.guard) {
+            VReg g = expr(*c.guard);
+            int gok = new_block("match.guard");
+            Inst br;
+            br.op = IrOp::Branch;
+            br.a = g;
+            br.target = gok;
+            br.target2 = fail;
+            emit(std::move(br));
+            switch_to(gok);
+        }
+        stmts(c.body);
+        comp_slots_.pop_back();
+        if (!terminated()) {
+            Inst j;
+            j.op = IrOp::Jump;
+            j.target = end;
+            emit(std::move(j));
+        }
+        switch_to(fail);
+    }
+    Inst j;
+    j.op = IrOp::Jump;
+    j.target = end;
+    emit(std::move(j));
+    switch_to(end);
+}
+
+void Lowerer::lower_pattern(Pattern& p, VReg value, TypePtr ty, int fail) {
+    auto jump_fail = [&]() {
+        Inst j;
+        j.op = IrOp::Jump;
+        j.target = fail;
+        emit(std::move(j));
+    };
+    auto test = [&](VReg cond) {
+        int ok = new_block("pat.ok");
+        Inst br;
+        br.op = IrOp::Branch;
+        br.a = cond;
+        br.target = ok;
+        br.target2 = fail;
+        emit(std::move(br));
+        switch_to(ok);
+    };
+    TypePtr st = ty;
+    if (st && st->kind == TyKind::Optional && !st->sub.empty()) st = st->sub[0];
+
+    switch (p.kind) {
+        case PatternKind::Wildcard: return;
+        case PatternKind::Capture: {
+            if (p.name.empty() || p.name == "_") return;
+            auto& scope = comp_slots_.back();
+            if (auto it = scope.find(p.name); it != scope.end()) {
+                // 同一模式里重复捕获：Python 要求值相等。
+                VReg old = load_slot(it->second, st ? st : t_unknown());
+                Inst cmp;
+                cmp.op = IrOp::Cmp;
+                cmp.cop = CmpKind::Eq;
+                cmp.a = value;
+                cmp.b = old;
+                test(def(t_bool(), std::move(cmp)));
+                return;
+            }
+            int slot = st_->fn->new_slot(st ? st : t_unknown());
+            scope[p.name] = slot;
+            store_slot(slot, value);
+            return;
+        }
+        case PatternKind::Literal: {
+            TypePtr lt = tc_.type_of(p.lit.get());
+            if (lt && lt->kind == TyKind::None) {
+                if (st && st->kind != TyKind::None && st->kind != TyKind::Unknown) {
+                    jump_fail();
+                    return;
+                }
+                Inst cmp;
+                cmp.op = IrOp::Cmp;
+                cmp.cop = CmpKind::Eq;
+                cmp.a = value;
+                cmp.b = const_int(0);
+                test(def(t_bool(), std::move(cmp)));
+                return;
+            }
+            if (lt && lt->kind == TyKind::Complex) {
+                if (st && st->kind != TyKind::Complex && st->kind != TyKind::Unknown) {
+                    jump_fail();
+                    return;
+                }
+                VReg lv = expr(*p.lit);
+                if (st && st->kind != TyKind::Complex) lv = convert_to(lv, lt, t_complex());
+                test(call_runtime(RtFn::ComplexEq, t_bool(), {value, lv}));
+                return;
+            }
+            bool ln = lt && (lt->kind == TyKind::Int || lt->kind == TyKind::Bool ||
+                             lt->kind == TyKind::Float);
+            bool sn = st && (st->kind == TyKind::Int || st->kind == TyKind::Bool ||
+                             st->kind == TyKind::Float);
+            if (ln && st && !sn && st->kind != TyKind::Unknown) {
+                jump_fail();
+                return;
+            }
+            if (lt && lt->kind == TyKind::Str && st && st->kind != TyKind::Str &&
+                st->kind != TyKind::Unknown) {
+                jump_fail();
+                return;
+            }
+            VReg lv = expr(*p.lit);
+            Inst cmp;
+            cmp.op = IrOp::Cmp;
+            cmp.cop = CmpKind::Eq;
+            if (ln && sn) {
+                TypePtr cty = (lt->kind == TyKind::Float || st->kind == TyKind::Float)
+                                  ? t_float()
+                                  : t_int();
+                cmp.a = convert_to(value, st, cty);
+                cmp.b = convert_to(lv, lt, cty);
+            } else {
+                cmp.a = value;
+                cmp.b = lv;
+            }
+            test(def(t_bool(), std::move(cmp)));
+            return;
+        }
+        case PatternKind::Or: {
+            int done = new_block("pat.or.ok");
+            for (size_t i = 0; i < p.items.size(); ++i) {
+                bool last = i + 1 == p.items.size();
+                int nf = new_block("pat.or.next");
+                lower_pattern(*p.items[i], value, ty, last ? fail : nf);
+                Inst j;
+                j.op = IrOp::Jump;
+                j.target = done;
+                emit(std::move(j));
+                if (!last) switch_to(nf);
+            }
+            switch_to(done);
+            return;
+        }
+        case PatternKind::Sequence: {
+            if (!st || (st->kind != TyKind::List && st->kind != TyKind::Tuple &&
+                        st->kind != TyKind::Unknown) ||
+                (st && st->kind == TyKind::Str)) {
+                jump_fail();
+                return;
+            }
+            int fixed = static_cast<int>(p.items.size()) - (p.star >= 0 ? 1 : 0);
+            Inst ln;
+            ln.op = IrOp::Len;
+            ln.a = value;
+            VReg n = def(t_int(), std::move(ln));
+            if (p.star < 0) {
+                Inst cmp;
+                cmp.op = IrOp::Cmp;
+                cmp.cop = CmpKind::Eq;
+                cmp.a = n;
+                cmp.b = const_int(fixed);
+                test(def(t_bool(), std::move(cmp)));
+            } else {
+                Inst cmp;
+                cmp.op = IrOp::Cmp;
+                cmp.cop = CmpKind::Lt;
+                cmp.a = n;
+                cmp.b = const_int(fixed);
+                Inst br;
+                br.op = IrOp::Branch;
+                br.a = def(t_bool(), std::move(cmp));
+                int ok = new_block("pat.seq.ok");
+                br.target = fail;
+                br.target2 = ok;
+                emit(std::move(br));
+                switch_to(ok);
+            }
+            TypePtr elem = t_unknown();
+            if (st && st->kind == TyKind::List) elem = st->sub.empty() ? t_unknown() : st->sub[0];
+            int seen = 0;
+            for (size_t i = 0; i < p.items.size(); ++i) {
+                if (static_cast<int>(i) == p.star) {
+                    if (p.items[i]->kind == PatternKind::Capture && !p.items[i]->name.empty()) {
+                        int tail = static_cast<int>(p.items.size()) - p.star - 1;
+                        VReg stop = n;
+                        if (tail > 0) {
+                            Inst sub;
+                            sub.op = IrOp::Bin;
+                            sub.bop = BinKind::Sub;
+                            sub.a = n;
+                            sub.b = const_int(tail);
+                            stop = def(t_int(), std::move(sub));
+                        }
+                        VReg rest = call_runtime(RtFn::ListSlice, mk_list(elem),
+                                                 {value, const_int(fixed), stop, const_int(1)});
+                        push_temp(rest);
+                        int slot = st_->fn->new_slot(mk_list(elem));
+                        comp_slots_.back()[p.items[i]->name] = slot;
+                        store_slot(slot, rest);
+                    }
+                    continue;
+                }
+                TypePtr et = elem;
+                if (st && st->kind == TyKind::Tuple && i < st->sub.size()) et = st->sub[i];
+                Inst get;
+                get.op = IrOp::IndexLoad;
+                get.a = value;
+                get.b = const_int(seen);
+                VReg ev = def(et, std::move(get));
+                lower_pattern(*p.items[i], ev, et, fail);
+                ++seen;
+            }
+            return;
+        }
+        case PatternKind::Mapping: {
+            if (st && st->kind != TyKind::Dict && st->kind != TyKind::Unknown) {
+                jump_fail();
+                return;
+            }
+            TypePtr kt = t_unknown();
+            TypePtr vt = t_unknown();
+            if (st && st->kind == TyKind::Dict) {
+                if (!st->sub.empty()) kt = st->sub[0];
+                if (st->sub.size() > 1) vt = st->sub[1];
+            }
+            for (auto& kv : p.pairs) {
+                VReg key = expr(*kv.first);
+                key = coerce(key, tc_.type_of(kv.first.get()), kt);
+                test(call_runtime(RtFn::DictContains, t_bool(), {value, key}));
+                Inst get;
+                get.op = IrOp::CallRt;
+                get.imm = static_cast<int64_t>(RtFn::DictGet);
+                get.args = {value, key};
+                VReg ev = def(vt, std::move(get));
+                lower_pattern(*kv.second, ev, vt, fail);
+            }
+            return;
+        }
+    }
+}
+
 }  // namespace py23

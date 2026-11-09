@@ -521,7 +521,7 @@ enum class StmtKind : uint8_t {
     If, While, For,
     FunctionDef, ClassDef,
     Try, With, Raise, Assert,
-    Import, ImportFrom, Global, Nonlocal, Delete,
+    Import, ImportFrom, Global, Nonlocal, Delete, Match,
 };
 
 struct Stmt {
@@ -832,6 +832,46 @@ struct Nonlocal : Stmt {
         pad(os, ind); os << "Nonlocal";
         for (auto& n : names) os << " " << n;
         os << "\n";
+    }
+};
+
+enum class PatternKind : uint8_t {
+    Literal, Capture, Wildcard, Sequence, Or, Mapping,
+};
+
+struct Pattern;
+using PatternPtr = std::shared_ptr<Pattern>;
+
+struct Pattern {
+    PatternKind kind = PatternKind::Wildcard;
+    int line = 1;
+    int col = 1;
+    ExprPtr lit;                 // Literal
+    std::string name;            // Capture
+    std::vector<PatternPtr> items;  // Sequence / Or
+    int star = -1;               // Sequence：* 模式的下标
+    std::vector<std::pair<ExprPtr, PatternPtr>> pairs;  // Mapping：key → pattern
+};
+
+struct MatchCase {
+    PatternPtr pattern;
+    ExprPtr guard;
+    std::vector<StmtPtr> body;
+};
+
+struct Match : Stmt {
+    ExprPtr subject;
+    std::vector<MatchCase> cases;
+    Match() : Stmt(StmtKind::Match) {}
+    void dump(std::ostream& os, int ind) const override {
+        pad(os, ind);
+        os << "Match\n";
+        subject->dump(os, ind + 1);
+        for (auto& c : cases) {
+            pad(os, ind + 1);
+            os << "case guard=" << (c.guard ? "yes" : "no") << "\n";
+            for (auto& s : c.body) s->dump(os, ind + 2);
+        }
     }
 };
 

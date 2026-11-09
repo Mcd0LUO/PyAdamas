@@ -890,6 +890,9 @@ private:
 
     void stmt(Stmt& s);
 
+    // match/case 模式：在当前位置绑定捕获名。
+    void match_pattern(Pattern& p, TypePtr subject);
+
     // `if x is not None:` 这类守卫之后的简单类型收窄。
     // 不做完整的数据流分析，只处理 Name 与 None 的比较。
     struct Narrowing {

@@ -170,6 +170,7 @@ void Lowerer::stmt(Stmt& s) {
         case StmtKind::Assert: lower_assert(static_cast<Assert&>(s)); break;
         case StmtKind::Try: lower_try(static_cast<Try&>(s)); break;
         case StmtKind::Delete: lower_delete(static_cast<Delete&>(s)); break;
+        case StmtKind::Match: lower_match(static_cast<Match&>(s)); break;
         case StmtKind::Raise: lower_raise(static_cast<Raise&>(s)); break;
         case StmtKind::With: lower_with(static_cast<With&>(s)); break;
         case StmtKind::ClassDef: lower_classdef(static_cast<ClassDef&>(s)); break;

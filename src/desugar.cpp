@@ -331,6 +331,15 @@ private:
             case StmtKind::Delete:
                 desugar_exprs(static_cast<Delete&>(s).targets, pre);
                 break;
+            case StmtKind::Match: {
+                auto& m = static_cast<Match&>(s);
+                desugar_expr(m.subject, pre);
+                for (auto& c : m.cases) {
+                    if (c.guard) desugar_expr(c.guard, pre);
+                    desugar_body(c.body, class_body);
+                }
+                break;
+            }
             case StmtKind::Break:
             case StmtKind::Continue:
             case StmtKind::Pass:

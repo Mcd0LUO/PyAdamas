@@ -207,6 +207,14 @@ private:
 
     bool looks_like_match_stmt() const;
 
+    // match/case 模式
+    StmtPtr parse_match();
+    PatternPtr parse_pattern();
+    PatternPtr parse_or_pattern();
+    PatternPtr parse_closed_pattern();
+    PatternPtr parse_sequence_pattern(Tok close);
+    MatchCase parse_case();
+
     // ────────────────────────── 原子 ──────────────────────────
     ExprPtr parse_atom();
 

@@ -165,10 +165,8 @@ StmtPtr Parser::parse_simple_statement() {
 
         // match 是软关键字：只有 "match <subject>: NEWLINE INDENT case" 才是
         // match 语句。match[0]、match.attr、match, x = ... 都是普通标识符。
-        if (check(Tok::NAME) && cur().text == "match" && looks_like_match_stmt()) {
-            throw err_at("'match' statement is not supported yet (structural pattern matching)",
-                         ln, cl);
-        }
+        if (check(Tok::NAME) && cur().text == "match" && looks_like_match_stmt())
+            return parse_match();
 
         switch (cur().kind) {
             case Tok::KW_RETURN: {

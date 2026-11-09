@@ -441,6 +441,21 @@ void TypeChecker::stmt(Stmt& s) {
                 for (auto& t : static_cast<Delete&>(s).targets) expr(*t);
                 break;
             }
+            case StmtKind::Match: {
+                auto& m = static_cast<Match&>(s);
+                TypePtr st = expr(*m.subject);
+                for (auto& c : m.cases) {
+                    auto sc = std::make_unique<Scope>();
+                    sc->parent = cur_;
+                    cur_ = sc.get();
+                    pool_.push_back(std::move(sc));
+                    match_pattern(*c.pattern, st);
+                    if (c.guard) expr(*c.guard);
+                    stmts(c.body);
+                    cur_ = cur_->parent;
+                }
+                break;
+            }
             case StmtKind::Break:
             case StmtKind::Continue:
             case StmtKind::Pass:
@@ -735,5 +750,93 @@ void TypeChecker::unpack_assign(std::vector<ExprPtr>& targets, TypePtr value, in
         err(line, col, std::format("cannot unpack non-sequence '{}'", type_name(value)));
     }
 
+
+
+static bool pattern_binds(const Pattern& p) {
+    switch (p.kind) {
+        case PatternKind::Capture: return true;
+        case PatternKind::Sequence:
+        case PatternKind::Or:
+            for (auto& it : p.items)
+                if (pattern_binds(*it)) return true;
+            return false;
+        case PatternKind::Mapping:
+            for (auto& kv : p.pairs)
+                if (pattern_binds(*kv.second)) return true;
+            return false;
+        default: return false;
+    }
+}
+
+void TypeChecker::match_pattern(Pattern& p, TypePtr subject) {
+    switch (p.kind) {
+        case PatternKind::Literal:
+            expr(*p.lit);
+            return;
+        case PatternKind::Capture:
+            if (!p.name.empty() && p.name != "_") declare(p.name, subject, p.line, p.col);
+            return;
+        case PatternKind::Wildcard:
+            return;
+        case PatternKind::Or: {
+            if (pattern_binds(p)) {
+                err(p.line, p.col, "OR patterns with captures are not supported yet");
+                return;
+            }
+            for (auto& it : p.items) match_pattern(*it, subject);
+            return;
+        }
+        case PatternKind::Sequence: {
+            TypePtr t = subject;
+            if (t && t->kind == TyKind::Optional && !t->sub.empty()) t = t->sub[0];
+            if (t && t->kind == TyKind::Optional) {
+                err(p.line, p.col, "sequence pattern cannot match Optional");
+                return;
+            }
+            TypePtr elem = t_unknown();
+            bool str_seq = t && t->kind == TyKind::Str;
+            if (t && t->kind == TyKind::List) elem = t->sub.empty() ? t_unknown() : t->sub[0];
+            else if (t && t->kind == TyKind::Str) {
+                err(p.line, p.col, "sequence pattern cannot match str");
+                return;
+            } else if (t && t->kind == TyKind::Tuple) elem = t_unknown();
+            else if (t && t->kind != TyKind::Unknown) {
+                err(p.line, p.col,
+                    std::format("sequence pattern cannot match '{}'", type_name(t)));
+                return;
+            }
+            for (size_t i = 0; i < p.items.size(); ++i) {
+                if (static_cast<int>(i) == p.star) {
+                    if (p.items[i]->kind == PatternKind::Capture)
+                        declare(p.items[i]->name, mk_list(elem), p.line, p.col);
+                    continue;
+                }
+                TypePtr et = elem;
+                if (t && t->kind == TyKind::Tuple && !str_seq) {
+                    et = i < t->sub.size() ? t->sub[i] : t_unknown();
+                }
+                match_pattern(*p.items[i], et);
+            }
+            return;
+        }
+        case PatternKind::Mapping: {
+            TypePtr t = subject;
+            if (t && t->kind == TyKind::Optional && !t->sub.empty()) t = t->sub[0];
+            TypePtr val = t_unknown();
+            if (t && t->kind == TyKind::Dict)
+                val = t->sub.size() > 1 ? t->sub[1] : t_unknown();
+            else if (t && t->kind != TyKind::Unknown) {
+                err(p.line, p.col,
+                    std::format("mapping pattern cannot match '{}'", type_name(t)));
+                return;
+            }
+            for (auto& kv : p.pairs) {
+                expr(*kv.first);
+                match_pattern(*kv.second, val);
+            }
+            return;
+        }
+    }
+}
 
 }  // namespace py23
