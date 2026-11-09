@@ -4,6 +4,40 @@
 
 早期阶段没有逐条留痕，按阶段归纳；0.4 之后逐条记录。
 
+## [0.27] - 2026-11-09
+
+match 收尾：类模式、值模式、`as`、OR 捕获与映射 `**rest`。
+
+### 新增
+
+- 类模式：`case Point(x=0)` 关键字子模式、`Point(0, y)` 位置子模式
+  （类体 `__match_args__` 定义字段顺序，沿继承链查找）；子类实例按父类字段前缀匹配。
+- 值模式：`case Color.RED` / `case math.pi`，点分名字求值后按 `==` 比较。
+- `as` 捕获：`case Point(0, 0) as p`；`case [a, b] as pair`。
+- OR 模式支持捕获，要求每个分支绑定相同的名字；共享槽由 OR 统一分配。
+- 映射模式支持多 key 与 `**rest`（浅拷贝原字典后删掉已匹配 key）。
+- 内置/自定义异常类模式：`case ValueError():`，按运行时异常类型和父子关系匹配。
+- 内置类型模式（`case int():` 等）在 subject 静态类型已知时编译期判定。
+- 运行期安全检查：unknown 值上的序列模式先查 list/tuple 载体，映射模式先查
+  dict 载体；类模式用 `py23_isinstance` 查 RC 注册表和 vtable 祖先表，
+  原始整数等非堆值安全返回 false。
+- 运行时：新增 `PY23_RC_INSTANCE` 类实例 kind；vtable 前增加 16 字节元数据
+  （祖先编号表 + 类编号），对象布局与虚调用槽位不变。
+- 测试：`39_match_advanced.py`、`f35_match_no_match_args.py`、
+  `f36_match_or_names.py`。
+
+### 验证
+
+- `ctest --preset dev` 全绿（39 个运行用例）
+- 差分测试 810 个程序零差异
+
+### 已知限制
+
+- 捕获名仍是 case 作用域，case 结束后不可见
+- 点分类名（`module.Point(...)`）和导入类的类模式未支持
+- 映射模式不做重复 key 检查；unknown 值不能使用字符串/复数/内置类型模式
+- 多继承仍不做完整 C3 MRO
+
 ## [0.26] - 2026-11-09
 
 语法面补齐：del、print 展开、复数、f-string、match、多继承。

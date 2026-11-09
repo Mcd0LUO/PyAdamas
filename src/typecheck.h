@@ -207,6 +207,8 @@ struct ClassInfo {
     std::vector<ClassInfo*> extra_bases;
     std::vector<FieldInfo> fields;    // 只含本类声明的字段
     std::vector<MethodInfo> methods;  // 只含本类声明的方法
+    // class 体里的 `__match_args__ = ("x", "y")`，只服务类模式的位置子模式。
+    std::vector<std::string> match_args;
     int base_fields = 0;              // 继承来的字段数
     int base_slots = 0;               // 继承来的方法槽数
     int own_slots = 0;                // 本类新增的槽数（覆盖不算新增）
@@ -254,6 +256,16 @@ struct ClassInfo {
         for (auto& m : methods)
             if (m.name == n) return &m;
         return base ? base->method(n) : nullptr;
+    }
+    // __match_args__ 按普通类属性语义沿继承链查找。
+    const std::vector<std::string>* match_args_of() const {
+        if (!match_args.empty()) return &match_args;
+        if (base) {
+            if (auto* m = base->match_args_of()) return m;
+        }
+        for (const ClassInfo* e : extra_bases)
+            if (auto* m = e->match_args_of()) return m;
+        return nullptr;
     }
     int slot_of(const std::string& n) const {
         for (auto& m : methods)
@@ -900,7 +912,8 @@ private:
     void stmt(Stmt& s);
 
     // match/case 模式：在当前位置绑定捕获名。
-    void match_pattern(Pattern& p, TypePtr subject);
+    void match_pattern(Pattern& p, TypePtr subject,
+                       const std::unordered_set<std::string>* or_names = nullptr);
 
     // `if x is not None:` 这类守卫之后的简单类型收窄。
     // 不做完整的数据流分析，只处理 Name 与 None 的比较。

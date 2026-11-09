@@ -836,7 +836,7 @@ struct Nonlocal : Stmt {
 };
 
 enum class PatternKind : uint8_t {
-    Literal, Capture, Wildcard, Sequence, Or, Mapping,
+    Literal, Capture, Wildcard, Sequence, Or, Mapping, Class, Value, As,
 };
 
 struct Pattern;
@@ -846,11 +846,15 @@ struct Pattern {
     PatternKind kind = PatternKind::Wildcard;
     int line = 1;
     int col = 1;
-    ExprPtr lit;                 // Literal
-    std::string name;            // Capture
-    std::vector<PatternPtr> items;  // Sequence / Or
+    ExprPtr lit;                 // Literal / Value（点分名字）
+    std::string name;            // Capture / As
+    std::vector<PatternPtr> items;  // Sequence / Or / As（items[0]）
     int star = -1;               // Sequence：* 模式的下标
     std::vector<std::pair<ExprPtr, PatternPtr>> pairs;  // Mapping：key → pattern
+    std::string rest;            // Mapping：**rest 的绑定名（空 = 无）
+    std::string cls;             // Class：类名
+    std::vector<PatternPtr> positional;                    // Class：位置子模式
+    std::vector<std::pair<std::string, PatternPtr>> attrs; // Class：属性子模式
 };
 
 struct MatchCase {

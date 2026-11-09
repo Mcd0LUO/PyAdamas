@@ -22,7 +22,7 @@ typedef struct Py23Rc {
     void (*dtor)(void*);    /* rc 归零：正常释放路径 */
     void (*release)(void*); /* GC 清扫：只减掉指向可达对象的引用 */
     int64_t size;           /* 负载字节数，GC 扫描范围 */
-    int64_t kind;           /* STR / LIST / OBJ / CLOSURE */
+    int64_t kind;           /* STR / LIST / OBJ / CLOSURE / DICT / INSTANCE */
     int64_t marked;         /* 标记-清扫用 */
 } Py23Rc;                   /* 64 字节，位于负载之前，对象指针不指向它 */
 
@@ -127,7 +127,10 @@ void* py23_obj_new(int64_t size, void (*dtor)(void*), void (*gc_release)(void*))
 析构器由 codegen 按类布局生成，只 `rc_dec` 堆类型字段；没有堆字段的类传
 `NULL`。子类析构器包含父类字段，顺序与对象布局一致。
 
-vtable 是静态数据，在 `.data.rel.ro` 里，由 codegen 按 `IRClass::vtable` 生成，运行时不需要知道它的存在。
+vtable 是静态数据，在 `.data.rel.ro` 里，由 codegen 按 `IRClass::vtable` 生成。
+vtable 前面固定有 16 字节元数据：`.Lvtanc` 祖先编号表指针 + 类编号，对象仍指向
+槽数组本身。`py23_isinstance` 先查 RC 注册表确认是 `PY23_RC_INSTANCE`，再沿
+祖先表判断；因此 `case Point(...)` 对 unknown 值安全，子类和 mixin 基类都能匹配。
 
 ### 闭包
 
@@ -271,6 +274,7 @@ longjmp 回同步调用点。GC 清扫和进程退出不跑析构器，但会单
 | `py23_dict_values` | `(Py23Dict*) -> Py23List*` | 新 list，按插入顺序装 value |
 | `py23_dict_items` | `(Py23Dict*) -> Py23List*` | 新 list，元素是 `(key, value)` 二元组 |
 | `py23_dict_update` | `(Py23Dict*, Py23Dict*) -> void` | 逐项复制；先 retain，再 dict_set |
+| `py23_dict_copy` | `(Py23Dict*) -> Py23Dict*` | 同所有权类别的浅拷贝（match 的 `**rest`） |
 | `py23_dict_pop` | `(Py23Dict*, i64 key, i64 has_default, i64 def) -> i64` | 删除并返回值；缺失且有默认值返回默认值，否则抛 KeyError |
 | `py23_dict_popitem` | `(Py23Dict*) -> Py23List*` | 删除最后插入项，返回 `(key, value)` 二元组 |
 | `py23_dict_pop_last` | `(Py23Dict*) -> i64` | 删除最后插入项并返回 key（set.pop） |
@@ -280,6 +284,19 @@ longjmp 回同步调用点。GC 清扫和进程退出不跑析构器，但会单
 | `py23_str_contains` | `(Py23Str*, Py23Str*) -> i64` | 子串查找 |
 | `py23_list_slice` | `(Py23List*, i64 start, i64 stop, i64 step) -> Py23List*` | 新列表；kind 1 元素 retain |
 | `py23_str_slice` | `(Py23Str*, i64 start, i64 stop, i64 step) -> Py23Str*` | 新字节串 |
+
+### 模式匹配
+
+| 函数 | 签名 | 语义 |
+|---|---|---|
+| `py23_isinstance` | `(void*, i64 class_id) -> i64` | unknown 值是不是该类或子类；查 RC 注册表，原始整数安全返回 0 |
+| `py23_is_exc` | `(void*, str* type) -> i64` | unknown 值是不是异常值且类型匹配（含自定义异常父子关系） |
+| `py23_is_seq` | `(void*) -> i64` | 是不是 list/tuple 载体（序列模式的前置检查） |
+| `py23_is_dict` | `(void*) -> i64` | 是不是 dict/set 载体（映射模式的前置检查） |
+| `py23_dict_copy` | `(Py23Dict*) -> Py23Dict*` | `**rest` 的浅拷贝，随后用 `dict_remove` 删掉已匹配 key |
+
+类模式的字段仍按编译期偏移直接 `field.get`：子类沿用父类字段前缀，所以模式类
+自身的字段偏移对所有子类实例都成立。
 
 ### 异常
 

@@ -237,6 +237,8 @@ void AsmGen::gen_call_rt(const Inst& in) {
             case RtFn::DictUpdate:
             case RtFn::ListExtend:
             case RtFn::ListDelIndex:
+            case RtFn::IsInstance:
+            case RtFn::IsException:
                 line(std::format("movq {}, %rdi", src_op(in.args[0])));
                 line(std::format("movq {}, %rsi", src_op(in.args[1])));
                 break;
@@ -288,6 +290,9 @@ void AsmGen::gen_call_rt(const Inst& in) {
             case RtFn::DictPopItem:
             case RtFn::DictPopLast:
             case RtFn::DictClear:
+            case RtFn::DictCopy:
+            case RtFn::IsSeq:
+            case RtFn::IsDict:
             case RtFn::StrToList:
             case RtFn::HandlerLeave:
             case RtFn::HandlerDiscard:

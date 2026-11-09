@@ -57,14 +57,59 @@ PatternPtr Parser::parse_pattern() {
 PatternPtr Parser::parse_or_pattern() {
     int ln = cur().line, cl = cur().col;
     auto first = parse_closed_pattern();
-    if (!check(Tok::VBAR)) return first;
-    auto node = std::make_shared<Pattern>();
-    node->kind = PatternKind::Or;
-    node->line = ln;
-    node->col = cl;
-    node->items.push_back(std::move(first));
-    while (match(Tok::VBAR)) node->items.push_back(parse_closed_pattern());
-    return node;
+    PatternPtr pat = std::move(first);
+    if (check(Tok::VBAR)) {
+        auto node = std::make_shared<Pattern>();
+        node->kind = PatternKind::Or;
+        node->line = ln;
+        node->col = cl;
+        node->items.push_back(std::move(pat));
+        while (match(Tok::VBAR)) node->items.push_back(parse_closed_pattern());
+        pat = std::move(node);
+    }
+    if (check(Tok::KW_AS)) {
+        advance();
+        if (!check(Tok::NAME))
+            throw err("expected a capture name after 'as'");
+        auto text = advance().text;
+        if (text == "_") throw err_at("cannot use '_' as a capture name", ln, cl);
+        auto node = std::make_shared<Pattern>();
+        node->kind = PatternKind::As;
+        node->line = ln;
+        node->col = cl;
+        node->name = std::move(text);
+        node->items.push_back(std::move(pat));
+        return node;
+    }
+    return pat;
+}
+
+PatternPtr Parser::parse_class_pattern(std::string name, int ln, int cl) {
+    advance();  // (
+    auto p = std::make_shared<Pattern>();
+    p->kind = PatternKind::Class;
+    p->line = ln;
+    p->col = cl;
+    p->cls = std::move(name);
+    bool seen_kw = false;
+    if (!check(Tok::RPAREN)) {
+        while (true) {
+            if (check(Tok::NAME) && peek_tok().kind == Tok::EQUAL) {
+                std::string attr = advance().text;
+                advance();  // =
+                seen_kw = true;
+                p->attrs.emplace_back(std::move(attr), parse_or_pattern());
+            } else {
+                if (seen_kw)
+                    throw err("positional pattern follows keyword pattern");
+                p->positional.push_back(parse_or_pattern());
+            }
+            if (!match(Tok::COMMA)) break;
+            if (check(Tok::RPAREN)) break;
+        }
+    }
+    expect(Tok::RPAREN, "')'");
+    return p;
 }
 
 PatternPtr Parser::parse_sequence_pattern(Tok close) {
@@ -131,11 +176,21 @@ PatternPtr Parser::parse_closed_pattern() {
         node->col = cl;
         if (!check(Tok::RBRACE)) {
             while (true) {
-                if (check(Tok::DOUBLESTAR))
-                    throw err_at("'**rest' in mapping patterns is not supported yet", ln, cl);
+                if (check(Tok::DOUBLESTAR)) {
+                    advance();
+                    auto rest_tok = expect(Tok::NAME, "name after '**'");
+                    if (!node->rest.empty())
+                        throw err_at("multiple '**rest' in mapping pattern", ln, cl);
+                    node->rest = rest_tok.text;
+                    if (match(Tok::COMMA) && check(Tok::RBRACE)) break;
+                    if (!check(Tok::RBRACE))
+                        throw err_at("'**rest' must be the last entry in a mapping pattern",
+                                     ln, cl);
+                    break;
+                }
                 auto key = parse_namedexpr();
                 expect(Tok::COLON, "':' in mapping pattern");
-                node->pairs.emplace_back(std::move(key), parse_pattern());
+                node->pairs.emplace_back(std::move(key), parse_or_pattern());
                 if (!match(Tok::COMMA)) break;
                 if (check(Tok::RBRACE)) break;
             }
@@ -155,8 +210,30 @@ PatternPtr Parser::parse_closed_pattern() {
             return p;
         }
         advance();
-        if (check(Tok::LPAREN) || check(Tok::DOT))
-            throw err_at("class/value patterns are not supported yet", ln, cl);
+        if (check(Tok::LPAREN)) return parse_class_pattern(std::move(text), ln, cl);
+        if (check(Tok::DOT)) {
+            auto base = std::make_unique<Name>(std::move(text));
+            base->line = ln;
+            base->col = cl;
+            ExprPtr dotted = std::move(base);
+            while (match(Tok::DOT)) {
+                if (!check(Tok::NAME)) throw err("expected attribute name after '.'");
+                auto at = std::make_unique<Attribute>();
+                at->value = std::move(dotted);
+                at->attr = advance().text;
+                at->line = ln;
+                at->col = cl;
+                dotted = std::move(at);
+            }
+            if (check(Tok::LPAREN))
+                throw err_at("class patterns with dotted names are not supported yet", ln, cl);
+            auto p = std::make_shared<Pattern>();
+            p->kind = PatternKind::Value;
+            p->lit = std::move(dotted);
+            p->line = ln;
+            p->col = cl;
+            return p;
+        }
         auto p = std::make_shared<Pattern>();
         p->kind = PatternKind::Capture;
         p->name = std::move(text);

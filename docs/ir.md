@@ -28,7 +28,7 @@ Python 语义里变量天生可变，循环里反复赋值是常态。一上来�
 | `Block` | 名字 + 指令序列，`terminated()` 判断末尾是不是跳转/分支/返回 |
 | `IRFunction` | 名字、形参、返回类型、`slot_ty`（局部槽类型）、`vreg_ty`（每个 vreg 的类型）、基本块、`env_slot`（有捕获时存闭包指针的槽） |
 | `IRGlobal` | 一个全局变量；数据段里就是一个 `.quad`，初值 0 同时也是 `None` |
-| `IRClass` | 名字、vtable（槽 → 函数下标）、字段数（含继承）、`field_heap`（每个字段是否堆类型，供析构器使用） |
+| `IRClass` | 名字、vtable（槽 → 函数下标）、字段数（含继承）、`field_heap`（每个字段是否堆类型，供析构器使用）、`ancestors`（类模式 isinstance 用的本类 + 祖先编号） |
 | `IRModule` | 函数表、全局表、字符串池、类表、`entry`（顶层代码编译成的函数下标） |
 
 `Inst` 里有个容易踩的点：**`idx` 的含义随 `op` 变**——`const.str` 是字符串池下标，`load.slot` 是槽号，`load.global` 是全局号，`func.addr` 是函数号。类型上看不出区别，读指令时要先看 `op`。
@@ -61,7 +61,7 @@ Python 语义里变量天生可变，循环里反复赋值是常态。一上来�
 | `index.get dst, a, b` | — | `dst = a[b]` | list 走运行时，str 走 `py23_str_char_at` |
 | `index.set a, b, c` | — | `a[b] = c` | `py23_list_set` |
 | `len dst, a` | — | `dst = len(a)` | 一条 `movq (%rax), %rax` |
-| `obj.new dst, imm` | `imm: 类下标` | 分配对象并写入 vtable 指针；析构器取自 `IRClass::field_heap` | `call py23_obj_new` + `leaq .LvtN` |
+| `obj.new dst, imm` | `imm: 类下标` | 分配对象并写入 vtable 指针；析构器取自 `IRClass::field_heap` | `call py23_obj_new` + `leaq .LvtN`；`.LvtN` 前有 16 字节类元数据 |
 | `field.get dst, a, imm` | `imm: 字节偏移` | `dst = a->field` | 一条 `movq off(%rax), %rax` |
 | `field.set a, imm, b` | `imm: 字节偏移` | `a->field = b` | `movq %rcx, off(%rax)` |
 | `vcall dst, a, args...` | `imm: vtable 槽` | `dst = a->vtable[imm](a, args...)` | 取表、取槽、间接跳转 |

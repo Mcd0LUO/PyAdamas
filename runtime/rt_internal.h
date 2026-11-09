@@ -55,6 +55,9 @@ enum {
     PY23_RC_OBJ = 2,
     PY23_RC_CLOSURE = 3,
     PY23_RC_DICT = 4,
+    /* 用户类实例。和帧/await/异常值等 OBJ 负载分开，isinstance 才能
+       安全地把 payload 第一个字解释成 vtable 指针。 */
+    PY23_RC_INSTANCE = 5,
 };
 
 typedef struct Py23Rc {
@@ -354,6 +357,11 @@ Py23List* py23_dict_keys(Py23Dict* d);
 Py23List* py23_dict_values(Py23Dict* d);
 Py23List* py23_dict_items(Py23Dict* d);
 void py23_dict_update(Py23Dict* dst, Py23Dict* src);
+Py23Dict* py23_dict_copy(Py23Dict* src);
+int64_t py23_isinstance(void* obj, int64_t class_id);
+int64_t py23_is_exc(void* obj, Py23Str* type);
+int64_t py23_is_seq(void* obj);
+int64_t py23_is_dict(void* obj);
 void dict_rebuild(Py23Dict* d);
 int dict_take(Py23Dict* d, int64_t key, int64_t* val_out);
 int64_t py23_dict_pop(Py23Dict* d, int64_t key, int64_t has_default, int64_t def);

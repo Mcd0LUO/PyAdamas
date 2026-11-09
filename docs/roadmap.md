@@ -354,8 +354,21 @@ traceback / `raise ... from`；`finally` 体内跳出 finally 的
 - 复数字面量与 `complex()`：+ - * /、abs、eq、truth、print/f-string。
 - f-string：format spec（fill/align/sign/0/width/precision、d/b/o/x/X/f/e/g/%）、
   `!s/!r/!a`、嵌套字段。
-- `match/case`：字面量、捕获、序列（含 *rest）、OR、映射、守卫；无类/值模式。
+- `match/case`：字面量、捕获、序列（含 *rest）、OR（含捕获）、映射（含 `**rest`）、
+  类模式（`__match_args__` 位置 / 关键字）、值模式、`as`、守卫、异常类模式；
+  无点分类名和导入类模式。
 - 多继承（附加基类按 mixin，不能有字段）；类体非声明语句在定义点执行。
+
+## 0.27：match 收尾（已完成）
+
+- 类模式：关键字子模式、`__match_args__` 位置子模式（沿继承链查找）、子类实例。
+- 值模式（点分名字按 `==` 比较）、`as` 捕获、OR 分支捕获、映射 `**rest`。
+- 内置/自定义异常类模式；内置类型模式在静态类型已知时判定。
+- 运行期隔离：`PY23_RC_INSTANCE` + vtable 前类元数据，unknown 值上的
+  isinstance/序列/映射检查都先查 RC 注册表，原始值不会解引用。
+
+已知限制：捕获名仍是 case 作用域；点分类名与导入类模式未支持；
+unknown 值不能做字符串/复数/内置类型模式；映射模式不查重复 key。
 
 ## 下一步
 

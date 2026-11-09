@@ -578,9 +578,18 @@ raise MyError("bad")
 
 ## match / case
 
-支持结构化模式匹配的一个实用子集：
+支持结构化模式匹配的实用子集：
 
 ```python
+class Point:
+    x: int
+    y: int
+    __match_args__ = ("x", "y")
+
+    def __init__(self, x: int, y: int) -> None:
+        self.x = x
+        self.y = y
+
 match value:
     case 0:
         ...
@@ -590,17 +599,28 @@ match value:
         ...
     case [first, *rest]:
         ...
-    case {"key": v}:
+    case {"key": v, **rest}:
+        ...
+    case Point(0, y) as p:
+        ...
+    case Color.RED:
         ...
     case _:
         ...
 ```
 
-- 字面量（数字/字符串/True/False/None）、捕获名、`_`、序列（list/tuple，含 `*rest`）、
-  OR、映射（固定 key）和 `if` 守卫。
+- 字面量（数字/字符串/True/False/None/复数）、捕获名、`_`、序列（list/tuple，含 `*rest`）、
+  OR（各分支绑定相同的名字）、映射（固定 key + `**rest`）、`as`、`if` 守卫。
+- 类模式：位置子模式按类体里的 `__match_args__` 顺序映射到字段；关键字子模式
+  （`Point(x=0)`）按字段名。匹配子类时沿用父类字段偏移。异常类（内置或自定义）
+  写成 `case ValueError():`，按运行时异常类型判断。
+- 值模式：点分名字（`Color.RED`、`math.pi`）求值后用 `==` 与 subject 比较；
+  支持 None/数值/字符串/复数，要求 subject 的静态类型已知。
+- 内置类型模式（`case int():` 等）只在 subject 静态类型已知时做编译期判定；
+  unknown 值无法区分原始 int/float，直接报错。
 - 捕获名绑定在 case 作用域，case 结束后不可见；同一模式重复捕获要求值相等。
 - 没有穷尽性检查（Python 语义）；所有 case 不匹配时直接继续。
-- 类模式/值模式（`Point(x=0)`、`Color.RED`）和映射 `**rest` 暂不支持。
+- 未支持：点分类名（`module.Point(...)`）、导入类的类模式、映射重复 key 检查。
 
 ## 复数
 
@@ -617,7 +637,7 @@ match value:
 - Python 2 遗留写法（`0x1L`、`lambda (a, b):`、`except X, e`）
 - 类：方法缺 `self`、字段赋值类型不符、访问不存在的字段或方法（`self.xxx` 与外部基类的成员除外）
 
-**代码生成层**（`check` 通过，`build` 报错）：带装饰器的方法/类、通过 unknown 函数值的 `*` / `**` 展开、`*` 位于固定形参之前且不是定长 tuple、非异常类名当异常用、`finally` 体内跳出 finally 的控制流、跨模块继承、把类名当值用（`f = Point`）、函数内定义类、match 的类模式/值模式（`Point(x=...)`、`Color.RED`）、异步生成器表达式、嵌在其它表达式里的异步推导式。生成器的额外限制：`yield` / `yield from` 只能作为语句或赋值右值，不能出现在 `finally` / `except` 体内；协程的 `await` 同样。异步生成器有 `asend`/`athrow`/`__anext__`/`aclose`。自定义异常类目前只支持 `pass` 类体（字段/方法会被拒绝）。类体字段默认值里的 `lambda` 也在这一层拒绝。
+**代码生成层**（`check` 通过，`build` 报错）：带装饰器的方法/类、通过 unknown 函数值的 `*` / `**` 展开、`*` 位于固定形参之前且不是定长 tuple、非异常类名当异常用、`finally` 体内跳出 finally 的控制流、跨模块继承、把类名当值用（`f = Point`）、函数内定义类、异步生成器表达式、嵌在其它表达式里的异步推导式。生成器的额外限制：`yield` / `yield from` 只能作为语句或赋值右值，不能出现在 `finally` / `except` 体内；协程的 `await` 同样。异步生成器有 `asend`/`athrow`/`__anext__`/`aclose`。自定义异常类目前只支持 `pass` 类体（字段/方法会被拒绝）。类体字段默认值里的 `lambda` 也在这一层拒绝。match 额外拒绝：点分类名、导入类的类模式、unknown 值上的内置类型模式和 unknown 值上的字符串/复数模式。
 
 为什么这么分层：前端宽、后端严。`check` 的定位是「语法和类型有没有明显毛病」，可以对任意 Python 文件跑；`build` 才是「这门语言现在能不能编译它」。
 

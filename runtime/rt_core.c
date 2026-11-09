@@ -361,6 +361,7 @@ void gc_scan_object(Py23Rc* h) {
             break;
         }
         case PY23_RC_OBJ:
+        case PY23_RC_INSTANCE:
         case PY23_RC_CLOSURE: {
             for (int64_t off = 0; off + (int64_t)sizeof(uintptr_t) <= h->size;
                  off += (int64_t)sizeof(uintptr_t)) {

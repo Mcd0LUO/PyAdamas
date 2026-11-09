@@ -1,6 +1,8 @@
 // typecheck_stmt.cpp —— 语句类型检查：控制流、try/with、赋值与解包
 #include "typecheck.h"
 
+#include <set>
+
 #include "module.h"
 
 namespace py23 {
@@ -752,38 +754,75 @@ void TypeChecker::unpack_assign(std::vector<ExprPtr>& targets, TypePtr value, in
 
 
 
-static bool pattern_binds(const Pattern& p) {
+static void pattern_capture_names(const Pattern& p, std::vector<std::string>& out) {
     switch (p.kind) {
-        case PatternKind::Capture: return true;
+        case PatternKind::Capture:
+            if (!p.name.empty() && p.name != "_") out.push_back(p.name);
+            return;
+        case PatternKind::As:
+            if (!p.name.empty() && p.name != "_") out.push_back(p.name);
+            for (auto& it : p.items) pattern_capture_names(*it, out);
+            return;
         case PatternKind::Sequence:
         case PatternKind::Or:
-            for (auto& it : p.items)
-                if (pattern_binds(*it)) return true;
-            return false;
+            for (auto& it : p.items) pattern_capture_names(*it, out);
+            return;
         case PatternKind::Mapping:
-            for (auto& kv : p.pairs)
-                if (pattern_binds(*kv.second)) return true;
-            return false;
-        default: return false;
+            for (auto& kv : p.pairs) pattern_capture_names(*kv.second, out);
+            if (!p.rest.empty() && p.rest != "_") out.push_back(p.rest);
+            return;
+        case PatternKind::Class:
+            for (auto& it : p.positional) pattern_capture_names(*it, out);
+            for (auto& kv : p.attrs) pattern_capture_names(*kv.second, out);
+            return;
+        default:
+            return;
     }
 }
 
-void TypeChecker::match_pattern(Pattern& p, TypePtr subject) {
+void TypeChecker::match_pattern(Pattern& p, TypePtr subject,
+                                const std::unordered_set<std::string>* or_names) {
+    auto declare_capture = [&](const std::string& name, TypePtr ty) {
+        if (name.empty() || name == "_") return;
+        if (or_names && or_names->count(name)) return;  // 已由 OR 统一声明
+        if (cur_->vars.count(name)) return;             // 同一模式重复捕获
+        declare(name, std::move(ty), p.line, p.col);
+    };
     switch (p.kind) {
         case PatternKind::Literal:
             expr(*p.lit);
             return;
+        case PatternKind::Value:
+            expr(*p.lit);
+            return;
         case PatternKind::Capture:
-            if (!p.name.empty() && p.name != "_") declare(p.name, subject, p.line, p.col);
+            declare_capture(p.name, subject);
             return;
         case PatternKind::Wildcard:
             return;
+        case PatternKind::As: {
+            for (auto& it : p.items) match_pattern(*it, subject, or_names);
+            declare_capture(p.name, subject);
+            return;
+        }
         case PatternKind::Or: {
-            if (pattern_binds(p)) {
-                err(p.line, p.col, "OR patterns with captures are not supported yet");
-                return;
+            std::vector<std::set<std::string>> sets;
+            for (auto& it : p.items) {
+                std::vector<std::string> names;
+                pattern_capture_names(*it, names);
+                sets.emplace_back(names.begin(), names.end());
             }
-            for (auto& it : p.items) match_pattern(*it, subject);
+            for (size_t i = 1; i < sets.size(); ++i) {
+                if (sets[i] != sets[0]) {
+                    err(p.line, p.col,
+                        "alternative patterns bind different names");
+                    break;
+                }
+            }
+            std::unordered_set<std::string> names(sets[0].begin(), sets[0].end());
+            for (auto& n : names)
+                if (!cur_->vars.count(n)) declare(n, t_unknown(), p.line, p.col);
+            for (auto& it : p.items) match_pattern(*it, subject, &names);
             return;
         }
         case PatternKind::Sequence: {
@@ -808,31 +847,105 @@ void TypeChecker::match_pattern(Pattern& p, TypePtr subject) {
             for (size_t i = 0; i < p.items.size(); ++i) {
                 if (static_cast<int>(i) == p.star) {
                     if (p.items[i]->kind == PatternKind::Capture)
-                        declare(p.items[i]->name, mk_list(elem), p.line, p.col);
+                        declare_capture(p.items[i]->name, mk_list(elem));
                     continue;
                 }
                 TypePtr et = elem;
                 if (t && t->kind == TyKind::Tuple && !str_seq) {
                     et = i < t->sub.size() ? t->sub[i] : t_unknown();
                 }
-                match_pattern(*p.items[i], et);
+                match_pattern(*p.items[i], et, or_names);
             }
             return;
         }
         case PatternKind::Mapping: {
             TypePtr t = subject;
             if (t && t->kind == TyKind::Optional && !t->sub.empty()) t = t->sub[0];
+            TypePtr kt = t_unknown();
             TypePtr val = t_unknown();
-            if (t && t->kind == TyKind::Dict)
-                val = t->sub.size() > 1 ? t->sub[1] : t_unknown();
-            else if (t && t->kind != TyKind::Unknown) {
+            if (t && t->kind == TyKind::Dict) {
+                if (!t->sub.empty()) kt = t->sub[0];
+                if (t->sub.size() > 1) val = t->sub[1];
+            } else if (t && t->kind != TyKind::Unknown) {
                 err(p.line, p.col,
                     std::format("mapping pattern cannot match '{}'", type_name(t)));
                 return;
             }
             for (auto& kv : p.pairs) {
                 expr(*kv.first);
-                match_pattern(*kv.second, val);
+                match_pattern(*kv.second, val, or_names);
+            }
+            if (!p.rest.empty() && p.rest != "_")
+                declare_capture(p.rest, mk_dict(kt, val));
+            return;
+        }
+        case PatternKind::Class: {
+            auto it = classes_.find(p.cls);
+            if (it == classes_.end()) {
+                if (is_exception_name(p.cls)) {
+                    if (!p.positional.empty() || !p.attrs.empty())
+                        err(p.line, p.col,
+                            "exception class patterns cannot have sub-patterns");
+                    return;
+                }
+                if (is_type_name(p.cls)) {
+                    if (!p.positional.empty() || !p.attrs.empty())
+                        err(p.line, p.col,
+                            "builtin type patterns cannot have sub-patterns");
+                    return;
+                }
+                err(p.line, p.col,
+                    std::format("unknown class '{}' in class pattern", p.cls));
+                return;
+            }
+            ClassInfo* pc = it->second.get();
+            if (pc->is_exception_class) {
+                if (!p.positional.empty() || !p.attrs.empty())
+                    err(p.line, p.col,
+                        "exception class patterns cannot have sub-patterns");
+                return;
+            }
+            if (!pc->complete && pc != cur_class_ &&
+                (!p.positional.empty() || !p.attrs.empty())) {
+                err(p.line, p.col,
+                    std::format("class '{}' must be fully defined before a class pattern "
+                                "uses its fields", p.cls));
+                return;
+            }
+            if (!p.positional.empty()) {
+                const auto* margs = pc->match_args_of();
+                if (!margs) {
+                    err(p.line, p.col,
+                        std::format("'{}' has no __match_args__ for positional patterns",
+                                    pc->name));
+                } else {
+                    if (p.positional.size() > margs->size())
+                        err(p.line, p.col,
+                            std::format("'{}' accepts {} positional sub-pattern{}, got {}",
+                                        pc->name, margs->size(),
+                                        margs->size() == 1 ? "" : "s",
+                                        p.positional.size()));
+                    size_t n = std::min(p.positional.size(), margs->size());
+                    for (size_t i = 0; i < n; ++i) {
+                        const FieldInfo* f = pc->field((*margs)[i]);
+                        if (!f) {
+                            err(p.line, p.col,
+                                std::format("__match_args__ of '{}' names unknown field '{}'",
+                                            pc->name, (*margs)[i]));
+                            continue;
+                        }
+                        match_pattern(*p.positional[i], f->ty, or_names);
+                    }
+                }
+            }
+            for (auto& kv : p.attrs) {
+                const FieldInfo* f = pc->field(kv.first);
+                if (!f) {
+                    err(p.line, p.col,
+                        std::format("'{}' object has no field '{}'", pc->name, kv.first));
+                    continue;
+                }
+                match_pattern(*kv.second, f->ty, or_names);
             }
             return;
         }

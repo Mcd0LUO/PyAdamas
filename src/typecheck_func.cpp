@@ -358,6 +358,36 @@ void TypeChecker::classdef(ClassDef& c) {
             cls->fields.push_back(std::move(fi));
         }
 
+        // __match_args__：位置形式类模式的字段顺序。class 体里的赋值仍然
+        // 按模块全局执行（没有类命名空间），这里只额外抽一份编译期元数据。
+        for (auto& s : c.body) {
+            if (s->kind != StmtKind::Assign) continue;
+            auto& a = static_cast<Assign&>(*s);
+            if (a.targets.size() != 1 || a.targets[0]->kind != ExprKind::Name) continue;
+            if (static_cast<Name&>(*a.targets[0]).id != "__match_args__") continue;
+            std::vector<ExprPtr>* elts = nullptr;
+            if (a.value->kind == ExprKind::Tuple)
+                elts = &static_cast<TupleExpr&>(*a.value).elts;
+            else if (a.value->kind == ExprKind::List)
+                elts = &static_cast<ListExpr&>(*a.value).elts;
+            cls->match_args.clear();
+            bool ok = elts != nullptr;
+            if (ok) {
+                for (auto& e : *elts) {
+                    auto* cc = dynamic_cast<Constant*>(e.get());
+                    if (!cc || cc->ck != Constant::CK::Str) {
+                        ok = false;
+                        break;
+                    }
+                    cls->match_args.push_back(cc->s);
+                }
+            }
+            if (!ok) {
+                cls->match_args.clear();
+                unsupported.push_back("non-constant __match_args__");
+            }
+        }
+
         // 方法签名先全体登记，方法之间可以互相调用（包括调用本类的其他
         // 方法，以及被子类覆盖的方法名）。
         auto rebuild_call_sig = [](MethodInfo& m) {

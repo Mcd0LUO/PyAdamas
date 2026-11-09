@@ -212,6 +212,7 @@ private:
     PatternPtr parse_pattern();
     PatternPtr parse_or_pattern();
     PatternPtr parse_closed_pattern();
+    PatternPtr parse_class_pattern(std::string name, int ln, int cl);
     PatternPtr parse_sequence_pattern(Tok close);
     MatchCase parse_case();
 

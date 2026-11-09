@@ -359,6 +359,19 @@ void py23_dict_update(Py23Dict* dst, Py23Dict* src) {
     }
 }
 
+/* 同 kind 的浅拷贝：所有权类别也复制过去，键值按需 retain。
+   供 match 的 `**rest` 使用，随后再删掉显式匹配过的 key。 */
+Py23Dict* py23_dict_copy(Py23Dict* src) {
+    Py23Dict* out = py23_dict_new(src->key_kind, src->key_own, src->val_own);
+    for (int64_t i = 0; i < src->len; ++i) {
+        Py23DictEntry e = src->entries[src->order[i]];
+        if (src->key_own == 1 && e.key) py23_rc_inc((void*)e.key);
+        if (src->val_own == 1 && e.val) py23_rc_inc((void*)e.val);
+        py23_dict_set(out, e.key, e.val);
+    }
+    return out;
+}
+
 /* 删除用「移出 order + 全表重建」：线性探查没有墓碑，直接挖空会截断
    后续 key 的探查链。重建是 O(n)，删除本来也不在热路径上。 */
 void dict_rebuild(Py23Dict* d) {
@@ -654,7 +667,54 @@ Py23List* py23_range_new(int64_t start, int64_t stop, int64_t step) {
    dtor 由代码生成按类布局生成，只 dec 堆类型字段。 */
 void* py23_obj_new(int64_t size, void (*dtor)(void*), void (*release)(void*)) {
     if (size < 8) panic_c("object size too small");
-    return rc_alloc(size, dtor, release, PY23_RC_OBJ);
+    return rc_alloc(size, dtor, release, PY23_RC_INSTANCE);
+}
+
+/* 类模式的运行期类型检查。只认用户类实例；原始整数、str、list 等
+   都不是类实例。查注册表保证对任意 unknown 机器字都安全。 */
+int64_t py23_isinstance(void* obj, int64_t class_id) {
+    if (!obj) return 0;
+    Py23Rc* h = (Py23Rc*)obj - 1;
+    if (!rc_index_has(h)) return 0;
+    if (h->kind != PY23_RC_INSTANCE) return 0;
+    int64_t* vt = *(int64_t**)obj;
+    if (!vt) return 0;
+    const int64_t* meta = vt - 2;
+    const int64_t* anc = (const int64_t*)(uintptr_t)meta[0];
+    if (!anc) return 0;
+    int64_t n = anc[0];
+    for (int64_t i = 1; i <= n; ++i)
+        if (anc[i] == class_id) return 1;
+    return 0;
+}
+
+int64_t py23_is_exc(void* obj, Py23Str* type) {
+    if (!obj || !type) return 0;
+    Py23Rc* h = (Py23Rc*)obj - 1;
+    if (!rc_index_has(h)) return 0;
+    if (h->kind != PY23_RC_OBJ || h->size < (int64_t)sizeof(Py23ExcValue)) return 0;
+    Py23ExcValue* v = (Py23ExcValue*)obj;
+    if (v->magic != PY23_EXCVAL_MAGIC) return 0;
+    char want[128];
+    int64_t n = type->len;
+    if (n < 0 || n >= (int64_t)sizeof(want)) return 0;
+    memcpy(want, type->data, (size_t)n);
+    want[n] = '\0';
+    return exc_is_a(v->type, want) ? 1 : 0;
+}
+
+int64_t py23_is_seq(void* obj) {
+    if (!obj) return 0;
+    Py23Rc* h = (Py23Rc*)obj - 1;
+    if (!rc_index_has(h)) return 0;
+    return h->kind == PY23_RC_LIST ? 1 : 0;
+}
+
+int64_t py23_is_dict(void* obj) {
+    if (!obj) return 0;
+    Py23Rc* h = (Py23Rc*)obj - 1;
+    if (!rc_index_has(h)) return 0;
+    return h->kind == PY23_RC_DICT ? 1 : 0;
 }
 
 /* ── 数学 / 内置模块 ──────────────────────────────────────────── */

@@ -123,6 +123,11 @@ enum class RtFn : uint8_t {
     DictValues,   // (dict*) -> list*
     DictItems,    // (dict*) -> list*
     DictUpdate,   // (dict*, dict*) -> void
+    DictCopy,     // (dict*) -> dict*  浅拷贝（匹配 **rest）
+    IsInstance,   // (obj*, i64 class_id) -> i64
+    IsException,  // (obj*, str* type) -> i64
+    IsSeq,        // (i64) -> i64  运行期值是不是 list/tuple
+    IsDict,       // (i64) -> i64  运行期值是不是 dict/set 载体
     ListSlice,    // (list*, i64 start, i64 stop, i64 step) -> list*
     StrSlice,     // (str*, i64 start, i64 stop, i64 step) -> str*
     DictPop,      // (dict*, i64 key, i64 has_default, i64 def) -> i64
@@ -252,6 +257,11 @@ inline const char* rt_name(RtFn f) {
         case RtFn::DictValues: return "py23_dict_values";
         case RtFn::DictItems: return "py23_dict_items";
         case RtFn::DictUpdate: return "py23_dict_update";
+        case RtFn::DictCopy: return "py23_dict_copy";
+        case RtFn::IsInstance: return "py23_isinstance";
+        case RtFn::IsException: return "py23_is_exc";
+        case RtFn::IsSeq: return "py23_is_seq";
+        case RtFn::IsDict: return "py23_is_dict";
         case RtFn::ListSlice: return "py23_list_slice";
         case RtFn::StrSlice: return "py23_str_slice";
         case RtFn::DictPop: return "py23_dict_pop";
@@ -550,6 +560,8 @@ struct IRClass {
     int n_fields = 0;
     // 按字段偏移顺序（父类在前），1 表示该字段是堆类型，析构时要 dec。
     std::vector<uint8_t> field_heap;
+    // 类模式 isinstance 用：本类 + 所有祖先的类编号（含 mixin 基类）。
+    std::vector<int> ancestors;
 };
 
 // 一个生成器的运行时形态。帧负载布局与运行时 rt.c 一致：

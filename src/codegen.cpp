@@ -64,14 +64,23 @@ std::string AsmGen::gen(const IRModule& m) {
 
         // 每个类一张静态 vtable：槽里是方法代码地址。对象头第一个
         // 字段指向它，虚调用就是「取表、取槽、间接跳转」。
+        // vtable 前面固定两个字的元数据：祖先列表指针 + 类编号，
+        // 供类模式的运行期 isinstance 检查使用。
         if (!m.classes.empty()) {
             out_ += "\t.section .data.rel.ro,\"aw\",@progbits\n";
             for (size_t i = 0; i < m.classes.size(); ++i) {
                 out_ += "\t.align 8\n";
+                out_ += std::format(".Lvtmeta{}:\n", i);
+                out_ += std::format("\t.quad .Lvtanc{}\n", i);
+                out_ += std::format("\t.quad {}\n", i);
                 out_ += std::format(".Lvt{}:\n", i);
                 if (m.classes[i].vtable.empty()) out_ += "\t.quad 0\n";
                 for (int f : m.classes[i].vtable)
                     out_ += f < 0 ? "\t.quad 0\n" : std::format("\t.quad {}\n", func_label(f));
+                out_ += std::format(".Lvtanc{}:\n", i);
+                out_ += std::format("\t.quad {}\n", m.classes[i].ancestors.size());
+                for (int a : m.classes[i].ancestors)
+                    out_ += std::format("\t.quad {}\n", a);
             }
         }
 

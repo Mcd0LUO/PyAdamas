@@ -209,7 +209,24 @@ void Lowerer::collect_classes(std::vector<StmtPtr>& body) {
                             irc.field_heap.push_back(ir_is_heap(f.ty) ? 1 : 0);
                 }
                 irc.vtable.assign(static_cast<size_t>(ci->n_slots()), -1);
-                class_ids_[ci.get()] = static_cast<int>(mod_.classes.size());
+                int self_id = static_cast<int>(mod_.classes.size());
+                class_ids_[ci.get()] = self_id;
+                irc.ancestors.push_back(self_id);
+                auto contains = [&](int id) {
+                    for (int a : irc.ancestors)
+                        if (a == id) return true;
+                    return false;
+                };
+                auto add_anc = [&](auto&& self, const ClassInfo* k) -> void {
+                    if (!k) return;
+                    auto kit = class_ids_.find(k);
+                    if (kit != class_ids_.end() && !contains(kit->second))
+                        irc.ancestors.push_back(kit->second);
+                    self(self, k->base);
+                    for (const ClassInfo* e : k->extra_bases) self(self, e);
+                };
+                add_anc(add_anc, ci->base);
+                for (const ClassInfo* e : ci->extra_bases) add_anc(add_anc, e);
                 mod_.classes.push_back(std::move(irc));
                 break;
             }
