@@ -1409,6 +1409,7 @@ private:
             case RtFn::DictContains:
             case RtFn::DictKeyAt:
             case RtFn::StrContains:
+            case RtFn::DictUpdate:
                 line(std::format("movq {}, %rdi", src_op(in.args[0])));
                 line(std::format("movq {}, %rsi", src_op(in.args[1])));
                 break;
@@ -1416,9 +1417,17 @@ private:
             case RtFn::DictNew:
             case RtFn::DictSet:
             case RtFn::ListContains:
+            case RtFn::DictGetOr:
                 line(std::format("movq {}, %rdi", src_op(in.args[0])));
                 line(std::format("movq {}, %rsi", src_op(in.args[1])));
                 line(std::format("movq {}, %rdx", src_op(in.args[2])));
+                break;
+            case RtFn::ListSlice:
+            case RtFn::StrSlice:
+                line(std::format("movq {}, %rdi", src_op(in.args[0])));
+                line(std::format("movq {}, %rsi", src_op(in.args[1])));
+                line(std::format("movq {}, %rdx", src_op(in.args[2])));
+                line(std::format("movq {}, %rcx", src_op(in.args[3])));
                 break;
             case RtFn::StrFromI64:
             case RtFn::StrFromBool:
@@ -1429,6 +1438,9 @@ private:
             case RtFn::RcDec:
             case RtFn::RcTemp:
             case RtFn::RcCleanup:
+            case RtFn::DictKeys:
+            case RtFn::DictValues:
+            case RtFn::DictItems:
                 line(std::format("movq {}, %rdi", src_op(in.args[0])));
                 break;
             case RtFn::StrFromF64:

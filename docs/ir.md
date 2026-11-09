@@ -178,6 +178,11 @@ Python 语义里变量天生可变，循环里反复赋值是常态。一上来�
 - `k in d` / `k in s` → `py23_dict_contains`；list/tuple 用
   `py23_list_contains`，str 用 `py23_str_contains`；
 - `for k in d` / `for x in s` → `len` + `py23_dict_key_at`；
+- 方法：`get(k[,d])` → `py23_dict_get` / `py23_dict_get_or`；
+  `keys()/values()/items()` → `py23_dict_keys/values/items`（新 list）；
+  `update` → `py23_dict_update`；`set.add/update` 复用 dict_set/update；
+- 切片读 → `py23_list_slice` / `py23_str_slice`，缺省边界传 `INT64_MIN`
+  哨兵；结果是新堆对象，需要 `rc_temp` 入栈；
 - `len` 仍是一条 `Len`，真值判断仍走 `branch`（字典/集合的 `len` 在
   偏移 0）。
 

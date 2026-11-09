@@ -32,7 +32,9 @@ py23 不追求兼容 CPython：语义是按静态类型的需要重新定的。�
 | `d[k]` 缺失 | panic `KeyError: key not found` | 抛 `KeyError(key)` | 运行时错误消息不带 key 内容 |
 | `d == e` / `s == t` | 指针比较 | 深比较 | 没有运行时类型标签 |
 | `print(d)` / `print(s)` | `<dict object>` / `<set object>` | 打印内容 | 没有容器 repr |
-| dict/set 方法 | `get`/`keys`/`items`/`add`/`update` 等 `build` 拒绝 | 完整方法 | 当前只生成字面量、下标、`len`、`in`、`for` |
+| dict/set 方法 | `get`/`keys`/`values`/`items`/`update`/`add` 可用；删除类方法 `build` 拒绝 | 完整方法 | `keys()` 等返回 list 而不是视图；删除需要墓碑/重哈希 |
+| `d.get(k)` 缺失 | panic | 返回 `None` | 静态返回类型不是 Optional；用 `get(k, default)` 避免 |
+| 切片 | str 按字节；list/tuple 返回新容器，语义同 CPython | 同 Python | 切片赋值不支持；`step == 0` panic；未知元素类型只做保守 GC |
 
 字节串这条最容易被忽略：`len` 与索引都按字节，ASCII 之外的字符串会与 CPython 不一致。要不要改成码点语义（`len` 变成 O(n)、索引要解码）是个待定项，见 [roadmap.md](roadmap.md)。
 
@@ -42,7 +44,7 @@ py23 不追求兼容 CPython：语义是按静态类型的需要重新定的。�
 
 **语法层就拒**（`check` 报错）：`bytes` / `complex` 字面量、超出 int64 的整数、`match` 语句、Python 2 遗留写法、方法缺 `self`、字段赋值类型不符。
 
-**能解析、能过类型检查，但 `build` 报错**：`try/except`、`with`、切片、推导式、生成器、`async`/`await`、装饰器、`import`、`raise`、`del`、`*args`/`**kwargs`、dict/set 的方法、`print(file=)`、把类名当值用、函数内定义类、**多继承、类体里的非声明语句、带装饰器的方法、类体字段默认值里的 lambda**。
+**能解析、能过类型检查，但 `build` 报错**：`try/except`、`with`、推导式、生成器、`async`/`await`、装饰器、`import`、`raise`、`del`、`*args`/`**kwargs`、dict/set 的删除类方法、切片赋值、`print(file=)`、把类名当值用、函数内定义类、**多继承、类体里的非声明语句、带装饰器的方法、类体字段默认值里的 lambda**。
 
 清楚这个分层很重要：`py23 check` 尽量当通用 Python 语法/类型检查器用，检查器放宽的边界都记在 [CHANGELOG 0.6.1](../CHANGELOG.md)；`py23 build` 才是「能不能编译」的判据。
 
@@ -54,7 +56,7 @@ py23 不追求兼容 CPython：语义是按静态类型的需要重新定的。�
 |---|---|---|---|
 | 正例 | `make test` 里 `tests/*.py` | 11 个文件 | 前端退回保守 |
 | 反例 | `make test` 里 `tests/fail/*.py` | 34 个文件 | 检查器为了过测而放水 |
-| 运行 | `make test` 里 `tests/run/*.py` | 14 个文件 | 后端烂掉没人知道 |
+| 运行 | `make test` 里 `tests/run/*.py` | 15 个文件 | 后端烂掉没人知道 |
 | 内存 | 16MB `RLIMIT_AS` 下跑压力程序 | 拼接 / 对象 / 闭包 / 对象环 / unknown 泄漏 | 引用计数或 GC 漏插桩、重复释放、误回收 |
 | 未建模 | `make test` 里 `tests/unsupported/*.py` | 2 个文件 | 标了「没建模」却悄悄编译过去 |
 | 差分 | `python3 tests/diff/run_diff.py` | 随机程序 | 语义漂移、边界错误 |
@@ -106,11 +108,12 @@ PY
 `tests/run/10_rc.py` 负责别名、字段、列表、返回值、`continue` 跳过清理等
 正确性；`tests/run/11_closure.py` 覆盖闭包捕获、`nonlocal`、多实例、多层
 嵌套和自递归；`tests/run/12_lambda.py` 覆盖 lambda；`tests/run/14_dict.py`
-覆盖字典/集合/`in`。`tests/run/13_gc.py` 会真正触发收集器：对象环、
-字典自环、闭包垃圾和 unknown 容器。RSS 压力程序负责「长循环里内存不随
-迭代数增长」。当前实测 100 万次拼接 / 100 万次对象分配 / 30 万次带字符
-串字段的对象分配 / 20 万次闭包工厂 / 20 万次对象环 / 20 万次相互递归闭包 /
-10 万次字典/集合创建，峰值 RSS 约 8–9MB。
+覆盖字典/集合/`in`/方法；`tests/run/15_slice.py` 覆盖切片。
+`tests/run/13_gc.py` 会真正触发收集器：对象环、字典自环、闭包垃圾和
+unknown 容器。RSS 压力程序负责「长循环里内存不随迭代数增长」。当前实测
+100 万次拼接 / 100 万次对象分配 / 30 万次带字符串字段的对象分配 /
+20 万次闭包工厂 / 20 万次对象环 / 20 万次相互递归闭包 / 10 万次字典/集合
+创建 / 10 万次切片与容器方法，峰值 RSS 约 8–9MB。
 
 生成器刻意避开第一节列出的语义差异——那些是已知的、有意的，测了只会制造噪音。差分测试抓的是**我们以为一致、实际不一致**的地方，历史上抓到过：浮点 `%` 的符号、`10.0` 打成 `1e+01`、`-0.0 % 3.0` 的零符号。
 

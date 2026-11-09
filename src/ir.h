@@ -117,6 +117,13 @@ enum class RtFn : uint8_t {
     DictKeyAt,    // (dict*, i64 index) -> i64
     ListContains, // (list*, i64 value, i64 cmp_kind) -> i64
     StrContains,  // (str*, str*) -> i64
+    DictGetOr,    // (dict*, i64 key, i64 default) -> i64
+    DictKeys,     // (dict*) -> list*
+    DictValues,   // (dict*) -> list*
+    DictItems,    // (dict*) -> list*
+    DictUpdate,   // (dict*, dict*) -> void
+    ListSlice,    // (list*, i64 start, i64 stop, i64 step) -> list*
+    StrSlice,     // (str*, i64 start, i64 stop, i64 step) -> str*
 };
 
 inline const char* rt_name(RtFn f) {
@@ -157,6 +164,13 @@ inline const char* rt_name(RtFn f) {
         case RtFn::DictKeyAt: return "py23_dict_key_at";
         case RtFn::ListContains: return "py23_list_contains";
         case RtFn::StrContains: return "py23_str_contains";
+        case RtFn::DictGetOr: return "py23_dict_get_or";
+        case RtFn::DictKeys: return "py23_dict_keys";
+        case RtFn::DictValues: return "py23_dict_values";
+        case RtFn::DictItems: return "py23_dict_items";
+        case RtFn::DictUpdate: return "py23_dict_update";
+        case RtFn::ListSlice: return "py23_list_slice";
+        case RtFn::StrSlice: return "py23_str_slice";
     }
     return "?";
 }

@@ -373,9 +373,10 @@ done:
 
 `len` 在偏移 0 是刻意设计的：`len(x)` 一条指令，真值判断也是一条。
 
-字典/集合的构造、读写、`in` 和遍历都走 `call.rt`（`py23_dict_*` /
-`py23_list_contains` / `py23_str_contains`），没有新增汇编指令；它们的
-`len` 也放在偏移 0。
+字典/集合的构造、读写、`in`、遍历、方法和切片都走 `call.rt`
+（`py23_dict_*`、`py23_list_contains`、`py23_str_contains`、
+`py23_list_slice`、`py23_str_slice`），没有新增汇编指令；它们的
+`len` 也放在偏移 0。切片缺省边界编码成 `INT64_MIN` 立即数传给运行时。
 
 ### 字符串比较
 

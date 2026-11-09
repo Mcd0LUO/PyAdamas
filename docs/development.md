@@ -87,7 +87,8 @@ python3 tests/diff/run_diff.py --only repr  # 只测浮点转字符串
 `tests/run/11_closure.py` 覆盖闭包捕获、`nonlocal`、多层嵌套、自递归；
 `tests/run/12_lambda.py` 覆盖 lambda；`tests/run/13_gc.py` 会真正触发
 2MB 阈值后的标记-清扫（对象环、字典自环、闭包垃圾、unknown 容器）；
-`tests/run/14_dict.py` 覆盖字典/集合/`in`。RSS 压力用受限地址空间跑长
+`tests/run/14_dict.py` 覆盖字典/集合/`in`/方法；`tests/run/15_slice.py`
+覆盖切片（缺省、负边界、正负步长）。RSS 压力用受限地址空间跑长
 循环（命令见 [compatibility.md](compatibility.md#内存验收)）。
 改 `lower.cpp` 的 RC/闭包/容器插桩或 `runtime/rt.c` 的 GC/哈希表后至少
 跑一遍：
@@ -148,6 +149,7 @@ PATH=/tmp/asancc:$PATH ASAN_OPTIONS=detect_leaks=1 \
     /tmp/py23-asan run tests/run/10_rc.py
     /tmp/py23-asan run tests/run/13_gc.py
     /tmp/py23-asan run tests/run/14_dict.py
+    /tmp/py23-asan run tests/run/15_slice.py
 ```
 
 ### 严格警告

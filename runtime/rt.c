@@ -586,6 +586,71 @@ int64_t py23_dict_key_at(Py23Dict* d, int64_t i) {
     return d->entries[d->order[i]].key;
 }
 
+int64_t py23_dict_get_or(Py23Dict* d, int64_t key, int64_t def) {
+    int64_t h = dict_hash_value(d->key_kind, key);
+    int64_t slot = dict_probe(d->entries, d->cap, d->key_kind, key, h);
+    return slot >= 0 ? d->entries[slot].val : def;
+}
+
+static int own_to_list_kind(int64_t own) {
+    return own == 1 ? 1 : (own == 0 ? 0 : 2);
+}
+
+Py23List* py23_dict_keys(Py23Dict* d) {
+    int kind = own_to_list_kind(d->key_own);
+    Py23List* out = py23_list_new(d->len, kind);
+    for (int64_t i = 0; i < d->len; ++i) {
+        int64_t v = d->entries[d->order[i]].key;
+        if (kind == 1 && v) py23_rc_inc((void*)v);
+        py23_list_append(out, v);
+    }
+    return out;
+}
+
+Py23List* py23_dict_values(Py23Dict* d) {
+    int kind = own_to_list_kind(d->val_own);
+    Py23List* out = py23_list_new(d->len, kind);
+    for (int64_t i = 0; i < d->len; ++i) {
+        int64_t v = d->entries[d->order[i]].val;
+        if (kind == 1 && v) py23_rc_inc((void*)v);
+        py23_list_append(out, v);
+    }
+    return out;
+}
+
+Py23List* py23_dict_items(Py23Dict* d) {
+    // 单元素 kind 无法同时表达 key/value 两类所有权：都为堆用 1，
+    // 都非堆用 0，混合用 2（已知堆的元素 retain，销毁时不解引用，靠 GC）。
+    int tk = (d->key_own == 1 && d->val_own == 1)
+                 ? 1
+                 : ((d->key_own == 0 && d->val_own == 0) ? 0 : 2);
+    Py23List* out = py23_list_new(d->len, 1);
+    for (int64_t i = 0; i < d->len; ++i) {
+        Py23DictEntry e = d->entries[d->order[i]];
+        Py23List* tup = py23_list_new(2, tk);
+        if ((tk == 1 || d->key_own == 1) && e.key) py23_rc_inc((void*)e.key);
+        py23_list_append(tup, e.key);
+        if ((tk == 1 || d->val_own == 1) && e.val) py23_rc_inc((void*)e.val);
+        py23_list_append(tup, e.val);
+        py23_list_append(out, (int64_t)tup);  // tuple 的初始引用交给外层 list
+    }
+    return out;
+}
+
+void py23_dict_update(Py23Dict* dst, Py23Dict* src) {
+    if (dst == src) return;
+    for (int64_t i = 0; i < src->len; ++i) {
+        Py23DictEntry e = src->entries[src->order[i]];
+        // 目标类型未知时也要保证源销毁后指针不悬空：源自己是堆所有权
+        // 就 retain 一份。目标 own=2/0 不会 dec，这份引用会留给 GC。
+        if ((dst->key_own == 1 || src->key_own == 1) && e.key)
+            py23_rc_inc((void*)e.key);
+        if ((dst->val_own == 1 || src->val_own == 1) && e.val)
+            py23_rc_inc((void*)e.val);
+        py23_dict_set(dst, e.key, e.val);
+    }
+}
+
 static int list_value_eq(int64_t kind, int64_t a, int64_t b) {
     if (kind == 1) return py23_str_eq((Py23Str*)a, (Py23Str*)b) != 0;
     if (kind == 2) {
@@ -609,6 +674,82 @@ int64_t py23_str_contains(Py23Str* hay, Py23Str* needle) {
     for (int64_t i = 0; i + needle->len <= hay->len; ++i)
         if (memcmp(hay->data + i, needle->data, (size_t)needle->len) == 0) return 1;
     return 0;
+}
+
+/* ── 切片 ─────────────────────────────────────────────────────── */
+
+/* 缺省边界用 INT64_MIN 当哨兵；显式写 INT64_MIN 的极端索引会被当成缺省。 */
+static void slice_bounds(int64_t len, int64_t start, int64_t stop, int64_t step,
+                         int64_t* out_start, int64_t* out_stop, int64_t* out_step) {
+    int has_start = start != INT64_MIN;
+    int has_stop = stop != INT64_MIN;
+    int has_step = step != INT64_MIN;
+    if (!has_step) step = 1;
+    if (step == 0) panic_c("slice step cannot be zero");
+
+    if (step > 0) {
+        if (!has_start) start = 0;
+        else {
+            if (start < 0) start += len;
+            if (start < 0) start = 0;
+            if (start > len) start = len;
+        }
+        if (!has_stop) stop = len;
+        else {
+            if (stop < 0) stop += len;
+            if (stop < 0) stop = 0;
+            if (stop > len) stop = len;
+        }
+    } else {
+        if (!has_start) start = len - 1;
+        else {
+            if (start < 0) start += len;
+            if (start < 0) start = -1;
+            if (start >= len) start = len - 1;
+        }
+        if (!has_stop) stop = -1;
+        else {
+            if (stop < 0) stop += len;
+            if (stop < 0) stop = -1;
+            if (stop >= len) stop = len - 1;
+        }
+    }
+    *out_start = start;
+    *out_stop = stop;
+    *out_step = step;
+}
+
+static int64_t slice_total(int64_t start, int64_t stop, int64_t step) {
+    if (step > 0) {
+        if (start >= stop) return 0;
+        return (stop - start + step - 1) / step;
+    }
+    if (start <= stop) return 0;
+    return (start - stop + (-step) - 1) / (-step);
+}
+
+Py23List* py23_list_slice(Py23List* src, int64_t start, int64_t stop, int64_t step) {
+    int64_t lo, hi, st;
+    slice_bounds(src->len, start, stop, step, &lo, &hi, &st);
+    int64_t count = slice_total(lo, hi, st);
+    Py23List* out = py23_list_new(count, src->elem_kind);
+    for (int64_t i = lo; st > 0 ? i < hi : i > hi; i += st) {
+        int64_t v = src->data[i];
+        if (src->elem_kind == 1 && v) py23_rc_inc((void*)v);
+        py23_list_append(out, v);
+    }
+    return out;
+}
+
+Py23Str* py23_str_slice(Py23Str* src, int64_t start, int64_t stop, int64_t step) {
+    int64_t lo, hi, st;
+    slice_bounds(src->len, start, stop, step, &lo, &hi, &st);
+    int64_t count = slice_total(lo, hi, st);
+    Py23Str* out = str_alloc(count);
+    char* p = (char*)out->data;
+    int64_t j = 0;
+    for (int64_t i = lo; st > 0 ? i < hi : i > hi; i += st) p[j++] = src->data[i];
+    return out;
 }
 
 /* ── 对象 ─────────────────────────────────────────────────────── */

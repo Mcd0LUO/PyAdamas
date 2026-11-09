@@ -90,6 +90,20 @@ typedef struct {
 - 删除暂不支持；负载因子超过 0.7 时翻倍 rehash，`order` 重排后仍保持
   插入顺序。
 - set 就是 `val_own = 0`、值恒 0 的 dict，复用同一套函数和 GC。
+- 方法：`get` 走 get/get_or；`keys`/`values`/`items` 分配新 list（items
+  的元素是二元组），元素按目标 list 的 kind retain；`update` 逐项复制，
+  目标 unknown 时也会 retain 源引用，避免源临时字典释放后悬空；
+  `set.add/update` 复用 dict_set/update。
+
+### 切片
+
+`py23_list_slice` / `py23_str_slice` 接收 `(容器, start, stop, step)`，
+缺省边界用 `INT64_MIN` 哨兵，运行时按 Python `slice.indices` 归一化：
+
+- 正/负步长、负索引、越界夹取；`step == 0` panic；
+- list/tuple 结果新建同 `elem_kind` 的列表，kind 1 元素逐个 retain；
+- str 结果新建字节串，按字节复制；
+- 结果是新堆对象，正常进入 RC/GC。
 
 ### 用户对象
 
@@ -147,14 +161,21 @@ cell 不是新的运行时类型，就是一个**单元素列表** `list[T]`：�
 | `py23_dict_get` | `(Py23Dict*, i64 key) -> i64` | 缺失 panic KeyError；返回借用 |
 | `py23_dict_contains` | `(Py23Dict*, i64 key) -> i64` | `in` 用，返回 0/1 |
 | `py23_dict_key_at` | `(Py23Dict*, i64 index) -> i64` | 按插入顺序取 key，遍历用 |
+| `py23_dict_get_or` | `(Py23Dict*, i64 key, i64 def) -> i64` | 缺失返回默认值 |
+| `py23_dict_keys` | `(Py23Dict*) -> Py23List*` | 新 list，按插入顺序装 key |
+| `py23_dict_values` | `(Py23Dict*) -> Py23List*` | 新 list，按插入顺序装 value |
+| `py23_dict_items` | `(Py23Dict*) -> Py23List*` | 新 list，元素是 `(key, value)` 二元组 |
+| `py23_dict_update` | `(Py23Dict*, Py23Dict*) -> void` | 逐项复制；先 retain，再 dict_set |
 | `py23_list_contains` | `(Py23List*, i64 value, i64 cmp_kind) -> i64` | list/tuple 的 `in`；0 int / 1 str / 2 float / 3 raw |
 | `py23_str_contains` | `(Py23Str*, Py23Str*) -> i64` | 子串查找 |
+| `py23_list_slice` | `(Py23List*, i64 start, i64 stop, i64 step) -> Py23List*` | 新列表；kind 1 元素 retain |
+| `py23_str_slice` | `(Py23Str*, i64 start, i64 stop, i64 step) -> Py23Str*` | 新字节串 |
 
 ### 对象
 
 | 函数 | 签名 | 语义 |
 |---|---|---|
-| `py23_obj_new` | `(i64 size, void (*dtor)(void*)) -> void*` | `rc_alloc`，全零；`size < 8` panic |
+| `py23_obj_new` | `(i64 size, dtor, gc_release) -> void*` | `rc_alloc`，全零；`size < 8` panic |
 
 ### 引用计数
 

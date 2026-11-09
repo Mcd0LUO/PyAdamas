@@ -4,6 +4,46 @@
 
 早期阶段没有逐条留痕，按阶段归纳；0.4 之后逐条记录。
 
+## [0.11] - 2026-11-09
+
+这一版补齐容器常用方法和**切片（读）**。
+
+### 新增
+
+- **dict 方法**：
+  - `get(k[, default])`：有默认值走 `py23_dict_get_or`；没有默认值时
+    缺失像 `[]` 一样 panic（静态返回类型不是 Optional）
+  - `keys()` / `values()` / `items()`：返回新 list；`items()` 的元素是
+    `(key, value)` 元组，按插入顺序；元素按 key_own/val_own 接入 RC
+  - `update(other)`：逐项复制，保留目标字典的 key 所有权规则；目标
+    unknown 时会 retain 源引用，避免源临时字典销毁后悬空
+- **set 方法**：`add(x)`、`update(other_set)`（复用同一张 dict 表）
+- **切片（读）**：`s[a:b:c]` 支持 str / list / tuple，缺省边界、负索引、
+  正负步长都按 Python 语义；长度和边界在运行时归一化，结果列表按源
+  `elem_kind` 接管元素引用
+- `py23_list_slice` / `py23_str_slice`、`py23_dict_get_or/keys/values/
+  items/update`
+- `tests/run/15_slice.py`；`tests/run/14_dict.py` 扩展方法用例
+
+### 验证
+
+- `make test`：11 正例 + 34 反例 + 15 运行用例 + 2 未建模
+- 差分测试 3 种子 600 个程序零差异
+- ASan + UBSan + LSan：全部运行用例 + 方法/切片压力程序零报告
+- 严格警告零报告
+- 16MB `RLIMIT_AS`：10 万次列表/字符串切片、10 万次 keys/values/items、
+  5 万次 dict.update，峰值 RSS 约 8MB
+
+### 已知限制
+
+- 删除类方法（dict/set 的 `pop`、`remove`、`discard`、`clear`、
+  `popitem`）仍未生成代码；开放寻址表需要墓碑或重哈希
+- `keys()` / `values()` / `items()` 返回 list，不是 CPython 的视图；
+  修改原字典不会反映到已取出的列表
+- `get(k)` 缺省时 panic；带默认值的 `get(k, default)` 按默认值返回
+- 切片赋值未实现；`step == 0` 运行时 panic
+- 未知类型列表的切片元素只做保守 GC，不做精确所有权转移
+
 ## [0.10] - 2026-11-09
 
 这一版补上**字典 / 集合**和 `in` 运算符。类型检查层早就有 `dict`/`set`

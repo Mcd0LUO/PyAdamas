@@ -34,9 +34,9 @@ py23 借 Python 的语法外壳，但**不是 CPython 的实现**：语义按静
 
 ### 表达式
 
-支持：常量、名字、二元/一元运算、布尔短路、链式比较、条件表达式、调用（位置 + 关键字）、下标（读与写）、列表/元组/字典/集合字面量、`in` / `not in`、f-string、`lambda`、海象运算符、用户类的属性读与写、用户类的方法调用。
+支持：常量、名字、二元/一元运算、布尔短路、链式比较、条件表达式、调用（位置 + 关键字）、下标（读与写）、切片（读）、列表/元组/字典/集合字面量、`in` / `not in`、f-string、`lambda`、海象运算符、用户类的属性读与写、用户类的方法调用。
 
-能解析但没有代码生成的：切片、推导式、生成器表达式、`*args` / `**kwargs` 实参与形参、dict/set 的方法（`get` / `keys` / `items` / `add` / `update` 等）、内置类型上的属性访问（除 `list.append` / `list.pop` 两个特例）。
+能解析但没有代码生成的：推导式、生成器表达式、`*args` / `**kwargs` 实参与形参、dict/set 的删除类方法（`pop` / `remove` / `discard` / `clear` / `popitem`）、切片赋值、内置类型上的属性访问（除 `list.append` / `list.pop` 两个特例）。
 
 ## 类型系统
 
@@ -128,13 +128,26 @@ f(2)                # 2 变成 2.0
 
 ### 字符串
 
-不可变，`len` 为字节数（不是字符数）。索引支持负号，越界 panic。`+` 拼接分配新对象。没有切片、没有方法（`upper()` 这类还没实现）。
+不可变，`len` 为字节数（不是字符数）。索引支持负号，越界 panic。
+`+` 拼接分配新对象。切片 `s[a:b:c]` 按**字节**切，语义与 CPython 的
+str 切片一致（只是单位是字节）。方法（`upper()` 这类）还没实现。
 
 ### 列表
 
 `list[T]` 是动态数组，`append` 均摊 O(1)，索引支持负数，越界 panic。列表字面量的元素类型由所有元素的上界推出（`[1, 2.5]` 是 `list[float]`，整数元素在构造时就被转成 double）。
 
-`l[i] = v` 支持；`l[i:j] = ...` 不支持。
+`l[i] = v` 支持；切片读 `l[a:b:c]` 返回新列表并接管元素引用；
+`l[i:j] = ...` 切片赋值不支持。
+
+### 切片
+
+`str` / `list` / `tuple` 支持读切片 `x[a:b:c]`：
+
+- 缺省边界、负数边界、正负步长按 Python 语义在运行时归一化；
+- 结果总是新对象（str 新字节串，list/tuple 新列表）；list 切片按源
+  元素的堆类别 retain 元素；
+- `step == 0` 运行时 panic；越界边界被夹到有效范围；
+- 切片赋值（`l[a:b] = ...`）和 del 暂不支持。
 
 ### 函数
 
@@ -199,8 +212,16 @@ print(f(), f(), g())    # 1 2 1
 
 key 的哈希/判等按静态类型选：int/bool 用机器字、str 用字节（FNV-1a +
 逐字节比较）、float 用 IEEE 值（`0.0` 与 `-0.0` 同键）；其他类型按机器
-字比较。**dict/set 的方法**（`get`、`keys`、`items`、`add`、`update` 等）
-类型检查放行，但 `build` 仍拒绝。
+字比较。支持的方法：
+
+- `d.get(k)` / `d.get(k, default)`：有默认值时缺失返回默认值；没有默认值
+  时缺失像 `d[k]` 一样 panic（静态返回类型不是 Optional）；
+- `d.keys()` / `d.values()` / `d.items()`：返回新 list（不是视图），元素
+  按插入顺序；`items()` 的元素是 `(key, value)` 元组；
+- `d.update(other)`；
+- `s.add(x)`、`s.update(other_set)`。
+
+删除类方法（`pop`/`remove`/`discard`/`clear`/`popitem`）仍未生成代码。
 
 空字典的 key 类型是 `unknown`，不同对象但内容相同的动态字符串 key 可能
 按机器字比较不相等；写了标注或由字面量推出 `str` key 时没有这个问题。
@@ -278,7 +299,7 @@ class Connection:
 - Python 2 遗留写法（`0x1L`、`lambda (a, b):`、`except X, e`）
 - 类：方法缺 `self`、字段赋值类型不符、访问不存在的字段或方法（`self.xxx` 与外部基类的成员除外）
 
-**代码生成层**（`check` 通过，`build` 报错）：`try/except`、`with`、切片、推导式、生成器、`async`、装饰器、`import`、`raise`、`del`、`*args` / `**kwargs`、dict/set 的方法、`print(file=)`、把类名当值用（`f = Point`）、函数内定义类、多继承、类体里的非声明语句、带装饰器的方法。类体字段默认值里的 `lambda` 也在这一层拒绝。
+**代码生成层**（`check` 通过，`build` 报错）：`try/except`、`with`、推导式、生成器、`async`、装饰器、`import`、`raise`、`del`、`*args` / `**kwargs`、dict/set 的删除类方法、切片赋值、`print(file=)`、把类名当值用（`f = Point`）、函数内定义类、多继承、类体里的非声明语句、带装饰器的方法。类体字段默认值里的 `lambda` 也在这一层拒绝。
 
 为什么这么分层：前端宽、后端严。`check` 的定位是「语法和类型有没有明显毛病」，可以对任意 Python 文件跑；`build` 才是「这门语言现在能不能编译它」。
 

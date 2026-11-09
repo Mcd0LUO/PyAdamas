@@ -11,6 +11,7 @@
 
 #include <algorithm>
 #include <format>
+#include <limits>
 #include <optional>
 #include <set>
 #include <unordered_map>
@@ -1893,6 +1894,11 @@ void Lowerer::assign_to(Expr& target, VReg v, TypePtr vty) {
         }
         case ExprKind::Subscript: {
             auto& s = static_cast<Subscript&>(target);
+            if (s.slice->kind == ExprKind::Slice) {
+                err(target.line, target.col,
+                    "slice assignment is not supported by the code generator yet");
+                break;
+            }
             VReg obj = expr(*s.value);
             VReg idx = expr(*s.slice);
             TypePtr ot = tc_.type_of(s.value.get());
@@ -2285,14 +2291,36 @@ VReg Lowerer::lower_compare(Compare& c) {
 }
 
 VReg Lowerer::lower_subscript(Subscript& s) {
+    VReg obj = expr(*s.value);
+    TypePtr ot = tc_.type_of(s.value.get());
+    TypePtr ty = tc_.type_of(&s);
+
     if (s.slice->kind == ExprKind::Slice) {
-        err(s.line, s.col, "slicing is not supported by the code generator yet");
+        auto& sl = static_cast<SliceExpr&>(*s.slice);
+        constexpr int64_t kNone = std::numeric_limits<int64_t>::min();
+        auto bound = [&](ExprPtr& e) -> VReg {
+            if (!e) return const_int(kNone);
+            VReg v = expr(*e);
+            return coerce(v, tc_.type_of(e.get()), t_int());
+        };
+        VReg start = bound(sl.lower);
+        VReg stop = bound(sl.upper);
+        VReg step = bound(sl.step);
+        if (ot && ot->kind == TyKind::Str) {
+            VReg v = call_runtime(RtFn::StrSlice, ty, {obj, start, stop, step});
+            push_temp(v);
+            return v;
+        }
+        if (ot && (ot->kind == TyKind::List || ot->kind == TyKind::Tuple)) {
+            VReg v = call_runtime(RtFn::ListSlice, ty, {obj, start, stop, step});
+            push_temp(v);
+            return v;
+        }
+        err(s.line, s.col, std::format("'{}' is not sliceable", type_name(ot)));
         return const_none();
     }
-    VReg obj = expr(*s.value);
+
     VReg idx = expr(*s.slice);
-    TypePtr ty = tc_.type_of(&s);
-    TypePtr ot = tc_.type_of(s.value.get());
     if (ot && ot->kind == TyKind::Dict) {
         TypePtr kt = ot->sub.empty() ? t_unknown() : ot->sub[0];
         idx = coerce(idx, tc_.type_of(s.slice.get()), kt);
@@ -2870,6 +2898,108 @@ VReg Lowerer::lower_method_call(Attribute& at, Call& c) {
         err(c.line, c.col,
             std::format("method '{}' called on a maybe-None value; add a None check first",
                         at.attr));
+        return const_none();
+    }
+
+    if (recv_ty && recv_ty->kind == TyKind::Dict) {
+        TypePtr kt = recv_ty->sub.empty() ? t_unknown() : recv_ty->sub[0];
+        TypePtr vt = recv_ty->sub.size() > 1 ? recv_ty->sub[1] : t_unknown();
+        if (at.attr == "get") {
+            if (!c.keywords.empty()) {
+                err(c.line, c.col, "dict.get() does not take keyword arguments");
+                return const_none();
+            }
+            if (c.args.size() != 1 && c.args.size() != 2) {
+                err(c.line, c.col, "dict.get() takes 1 or 2 arguments");
+                return const_none();
+            }
+            VReg key = expr(*c.args[0]);
+            key = coerce(key, tc_.type_of(c.args[0].get()), kt);
+            if (c.args.size() == 1)
+                return call_runtime(RtFn::DictGet, vt, {recv, key});
+            VReg def = expr(*c.args[1]);
+            def = coerce(def, tc_.type_of(c.args[1].get()), vt);
+            return call_runtime(RtFn::DictGetOr, vt, {recv, key, def});
+        }
+        if (!c.keywords.empty()) {
+            err(c.line, c.col,
+                std::format("dict.{}() does not take keyword arguments", at.attr));
+            return const_none();
+        }
+        if (at.attr == "keys" || at.attr == "values" || at.attr == "items") {
+            if (!c.args.empty()) {
+                err(c.line, c.col, std::format("dict.{}() takes no arguments", at.attr));
+                return const_none();
+            }
+            TypePtr rt = tc_.type_of(&c);
+            if (!rt || rt->kind != TyKind::List) {
+                rt = at.attr == "keys" ? mk_list(kt)
+                     : at.attr == "values" ? mk_list(vt)
+                                           : mk_list(mk_tuple({kt, vt}));
+            }
+            RtFn fn = at.attr == "keys" ? RtFn::DictKeys
+                      : at.attr == "values" ? RtFn::DictValues
+                                            : RtFn::DictItems;
+            VReg v = call_runtime(fn, rt, {recv});
+            push_temp(v);
+            return v;
+        }
+        if (at.attr == "update") {
+            if (c.args.empty()) return const_none();
+            if (c.args.size() != 1) {
+                err(c.line, c.col, "dict.update() takes at most one argument");
+                return const_none();
+            }
+            VReg other = expr(*c.args[0]);
+            TypePtr ot = tc_.type_of(c.args[0].get());
+            if (!ot || (ot->kind != TyKind::Dict && ot->kind != TyKind::Unknown)) {
+                err(c.args[0]->line, c.args[0]->col,
+                    "dict.update() expects a dict argument");
+                return const_none();
+            }
+            call_void(RtFn::DictUpdate, {recv, other});
+            return const_none();
+        }
+        err(c.line, c.col,
+            std::format("dict method '{}' is not supported by the code generator yet", at.attr));
+        return const_none();
+    }
+
+    if (recv_ty && recv_ty->kind == TyKind::Set) {
+        TypePtr et = recv_ty->sub.empty() ? t_unknown() : recv_ty->sub[0];
+        if (!c.keywords.empty()) {
+            err(c.line, c.col,
+                std::format("set.{}() does not take keyword arguments", at.attr));
+            return const_none();
+        }
+        if (at.attr == "add") {
+            if (c.args.size() != 1) {
+                err(c.line, c.col, "set.add() takes exactly one argument");
+                return const_none();
+            }
+            VReg v = expr(*c.args[0]);
+            v = coerce(v, tc_.type_of(c.args[0].get()), et);
+            retain_elem(v, own_kind(et));
+            call_void(RtFn::DictSet, {recv, v, const_int(0)});
+            return const_none();
+        }
+        if (at.attr == "update") {
+            if (c.args.empty()) return const_none();
+            if (c.args.size() != 1) {
+                err(c.line, c.col, "set.update() takes at most one argument");
+                return const_none();
+            }
+            VReg other = expr(*c.args[0]);
+            TypePtr ot = tc_.type_of(c.args[0].get());
+            if (!ot || (ot->kind != TyKind::Set && ot->kind != TyKind::Unknown)) {
+                err(c.args[0]->line, c.args[0]->col, "set.update() expects a set argument");
+                return const_none();
+            }
+            call_void(RtFn::DictUpdate, {recv, other});
+            return const_none();
+        }
+        err(c.line, c.col,
+            std::format("set method '{}' is not supported by the code generator yet", at.attr));
         return const_none();
     }
 

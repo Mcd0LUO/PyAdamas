@@ -18,6 +18,7 @@
 | 匿名函数 | `lambda` 脱糖成合成嵌套 `def`，复用闭包/cell；函数值默认参数可用 |
 | 循环收集 | 保守标记-清扫：堆注册表、全局/临时栈/真实栈/寄存器根、2MB 阈值、退出清空 |
 | 字典 / 集合 | 开放寻址哈希表 + 插入顺序；字面量、下标读写、`len`、`in`、`for`；RC/GC |
+| 容器方法与切片 | dict get/keys/values/items/update、set add/update；str/list/tuple 读切片（缺省/负数/步长） |
 | 运行时 | 字符串、列表、字典、集合、对象分配、输出、panic；浮点 repr 与 CPython 一致 |
 | 验证 | 四类用例（正例 / 反例 / 运行 / 未建模） + 差分测试 + 标准库基线 |
 
@@ -81,7 +82,7 @@ env，否则静态闭包）后环消失。相互递归的嵌套闭包仍会成�
 **代价**：GC 是 stop-the-world 全堆扫描，且保守根可能延迟回收；没有
 `__del__`/弱引用/分代。
 
-## 上一轮：字典 / 集合 + in
+## 0.10：字典 / 集合 + in
 
 0.10 把类型层已有的 `dict`/`set` 接到运行时：开放寻址哈希表 + `order`
 数组保留插入顺序，set 复用 dict（值恒 0）。支持字面量、`d[k]` 读写、
@@ -91,9 +92,22 @@ key/value 按静态类型接入 RC：str key 按字节哈希、逐字节判等�
 按机器字，float 按 IEEE 值；unknown 交给 GC。10 万次字典/集合创建和
 字典自环在 16MB 下峰值 RSS 约 8–9MB，ASan/LSan 干净。
 
-**已知边界**：dict/set 方法（`get`/`keys`/`items`/`add`/`update`）尚未
-生成代码；空字典的 unknown key 按机器字比较；混合 value 类型退化成
+**已知边界**：空字典的 unknown key 按机器字比较；混合 value 类型退化成
 unknown；`==` 仍是指针比较。
+
+## 上一轮：容器方法 + 切片
+
+0.11 补上 dict 的 `get`/`keys`/`values`/`items`/`update`、set 的
+`add`/`update`，以及 str/list/tuple 的读切片。切片边界在运行时按
+Python `slice.indices` 归一化，缺省边界用 `INT64_MIN` 哨兵；结果列表
+按源 `elem_kind` 接管元素引用，str 切片按字节复制。
+
+验收：14_dict/15_slice 运行用例通过；10 万次切片、10 万次
+keys/values/items、5 万次 update 在 16MB 下峰值 RSS 约 8MB，
+ASan/LSan 干净。
+
+**遗留**：删除类方法（`pop`/`remove`/`discard`/`clear`/`popitem`）需要
+开放寻址表的墓碑或重哈希；切片赋值未实现。
 
 ## 下一步
 
@@ -103,8 +117,8 @@ unknown；`==` 仍是指针比较。
 
 | 构造 | 工作量 | 依赖 |
 |---|---|---|
-| dict/set 方法（get / keys / add / update 等） | 中 | 复用哈希表，补运行时与降级 |
-| 切片（读） | 小 | 需要新运行时函数 |
+| dict/set 删除类方法（pop / remove / discard / clear） | 中 | 开放寻址表要加墓碑或重哈希 |
+| 切片赋值 | 中 | 复用切片归一化，处理长度变化 |
 | `*args` / `**kwargs` | 中 | 调用约定要支持变长实参 |
 | `try/except` | 大 | 展开（unwind）机制 + 异常对象（对象模型已有） |
 | 推导式 | 中 | 语法树已经在，降级要生成循环 |

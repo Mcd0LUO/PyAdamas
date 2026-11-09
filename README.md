@@ -69,7 +69,7 @@ bad.py:1:7: error: expected parameter name, found ':'
 
 ## 现在能做什么
 
-标量、字符串、列表、元组、**字典 / 集合**（字面量、下标读写、`len`、`in`、`for`）、函数（默认参数、递归、一等值、闭包、`nonlocal`、`lambda`）、`class`（字段、方法、单继承、虚调用）、`if` / `while` / `for`（含循环 `else`）、`break` / `continue`、`assert`、`try/finally`、`global`、f-string、`print`（含 `sep=` / `end=`）。堆值用引用计数自动回收，循环收集器回收环和 unknown 容器泄漏；不含堆临时值的代码不会插入任何 RC 指令。
+标量、字符串、列表、元组、**字典 / 集合**（字面量、下标读写、`len`、`in`、`for`、`get`/`keys`/`values`/`items`/`update`/`add`）、**切片（读）**、函数（默认参数、递归、一等值、闭包、`nonlocal`、`lambda`）、`class`（字段、方法、单继承、虚调用）、`if` / `while` / `for`（含循环 `else`）、`break` / `continue`、`assert`、`try/finally`、`global`、f-string、`print`（含 `sep=` / `end=`）。堆值用引用计数自动回收，循环收集器回收环和 unknown 容器泄漏；不含堆临时值的代码不会插入任何 RC 指令。
 
 完整的支持清单和语义定义见 [docs/language.md](docs/language.md)。
 
@@ -109,7 +109,7 @@ tools/                    一次性脚本
 
 语法层明确拒绝：`bytes` / `complex` 字面量、超出 int64 的整数、`match` 语句。
 
-能解析、能检查，但 `build` 报错：`try/except`、`with`、切片、推导式、生成器、`async`、装饰器、`import`、`raise`、`del`、`*args`/`**kwargs`、dict/set 的方法（`get`/`keys`/`items`/`add`/`update` 等），以及类的多继承、类体里的非声明语句、带装饰器的方法。类只支持单继承，没有 `super()`、类属性、`@property`；字段可以不写标注，由 `self.x = ...` 推断。闭包、`lambda`、字典/集合和 `in` 已支持；循环收集器是保守的，可能延迟回收，但没有 `__del__`/弱引用。空字典的 key 类型是 unknown，内容相同的动态字符串 key 可能按机器字不等；混合 value 类型会退化成 unknown。
+能解析、能检查，但 `build` 报错：`try/except`、`with`、推导式、生成器、`async`、装饰器、`import`、`raise`、`del`、`*args`/`**kwargs`、dict/set 的删除类方法（`pop`/`remove`/`discard`/`clear`/`popitem`）、切片赋值，以及类的多继承、类体里的非声明语句、带装饰器的方法。类只支持单继承，没有 `super()`、类属性、`@property`；字段可以不写标注，由 `self.x = ...` 推断。闭包、`lambda`、字典/集合、`in`、容器常用方法和切片已支持；循环收集器是保守的，可能延迟回收，但没有 `__del__`/弱引用。空字典的 key 类型是 unknown，内容相同的动态字符串 key 可能按机器字不等；混合 value 类型会退化成 unknown；`keys()` / `values()` / `items()` 返回列表而不是视图。
 
 语义上有意与 CPython 不同：列表相等比指针、整数溢出回绕、字符串按字节（`len("中文") == 6`）、读未赋值局部变量得到 0。引用计数处理不了的环和 `unknown` / `list[unknown]` / 混合元组引用由保守 GC 兜底；误报只延迟回收，没有 `__del__`/弱引用。
 
@@ -121,10 +121,10 @@ tools/                    一次性脚本
 |---|---|---|
 | `tests/*.py` | 11 | 前端正例，267 条语句 / 29 个函数 / 1165 个表达式 |
 | `tests/fail/*.py` | 34 | 反例，必须报出首行 `# expect:` 指定的错 |
-| `tests/run/*.py` | 14 | 编译 + 运行，输出与文件末尾的 `# --- expect ---` 逐行比对 |
+| `tests/run/*.py` | 15 | 编译 + 运行，输出与文件末尾的 `# --- expect ---` 逐行比对 |
 | `tests/unsupported/*.py` | 2 | `check` 必须打「没建模」标记，且 `build` 必须拒绝 |
 | `tests/diff/` | 4 个生成器 | 随机程序与 CPython 比 stdout，默认 3 种子 600 个程序 |
-| 内存验收 | — | 16MB 地址空间限制下跑拼接 / 对象 / 闭包 / 对象环 / 字典环 / unknown 泄漏 |
+| 内存验收 | — | 16MB 地址空间限制下跑拼接 / 对象 / 闭包 / 容器方法 / 切片 / 对象环 / 字典环 / unknown 泄漏 |
 
 ```bash
 make test
@@ -133,7 +133,7 @@ python3 tests/diff/run_diff.py --seeds 5     # 1000 个程序，目前零差异
 
 前端鲁棒性基线（CPython 3.11 标准库 + site-packages，38582 个 `.py`）：语法通过 35693，其中类型通过 29143（81.6%）；标准库本体 1143 / 1289（88.7%）。0.6 引入类检查后口径变了——刚加上时失败 19064 个文件，逐条去误杀后降到 6550 个，明细见 [compatibility.md](docs/compatibility.md#前端鲁棒性基线)。
 
-ASan + UBSan + LSan 下跑全部用例零报告（含生成代码的 RC、闭包、GC 与字典路径），`-Wshadow -Wnon-virtual-dtor -Wold-style-cast -Wcast-qual` 零警告。内存验收在 16MB `RLIMIT_AS` 下完成，对象环 / 字典环 / unknown 泄漏 / 闭包垃圾的峰值 RSS 约 8–9MB。
+ASan + UBSan + LSan 下跑全部用例零报告（含生成代码的 RC、闭包、GC、字典与切片路径），`-Wshadow -Wnon-virtual-dtor -Wold-style-cast -Wcast-qual` 零警告。内存验收在 16MB `RLIMIT_AS` 下完成，对象环 / 字典环 / unknown 泄漏 / 闭包垃圾 / 容器方法与切片的峰值 RSS 约 8MB。
 
 ## 文档
 

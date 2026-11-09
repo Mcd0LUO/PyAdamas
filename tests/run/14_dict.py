@@ -42,6 +42,30 @@ if d:
 if s:
     print("s truthy")
 
+print(d.get("a", 0), d.get("z", -1))
+ks = d.keys()
+print(len(ks), "a" in ks)
+vs = d.values()
+print(len(vs), vs[0])
+its = d.items()
+print(len(its))
+
+sumv: int = 0
+for k, v in d.items():
+    sumv = sumv + v
+print(sumv)
+
+d.update({"d": 4, "a": 10})
+print(len(d), d["d"], d["a"])
+
+st = {1, 2}
+st.add(3)
+st.add(2)
+print(len(st), 3 in st)
+other = {4}
+st.update(other)
+print(len(st), 4 in st)
+
 # --- expect ---
 # 2
 # 1
@@ -57,3 +81,11 @@ if s:
 # one True False
 # d truthy
 # s truthy
+# 10 -1
+# 3 True
+# 3 10
+# 3
+# 15
+# 4 4 10
+# 3 True
+# 4 True
