@@ -146,6 +146,11 @@ enum class RtFn : uint8_t {
     ExcMessage,   // () -> str*
     Raise,        // (str* type, str* msg) -> void  noreturn
     Reraise,      // () -> void       noreturn  裸 raise
+    MathSqrt, MathFloor, MathCeil, MathFabs, MathSin, MathCos, MathTan,
+    MathLog, MathLog2, MathLog10, MathExp,
+    MathPow, MathFmod,
+    SysArgv,      // () -> list*
+    SysExit,      // (i64 code) -> noreturn
 };
 
 inline const char* rt_name(RtFn f) {
@@ -215,6 +220,21 @@ inline const char* rt_name(RtFn f) {
         case RtFn::ExcMessage: return "py23_exc_message";
         case RtFn::Raise: return "py23_raise";
         case RtFn::Reraise: return "py23_reraise";
+        case RtFn::MathSqrt: return "py23_math_sqrt";
+        case RtFn::MathFloor: return "py23_math_floor";
+        case RtFn::MathCeil: return "py23_math_ceil";
+        case RtFn::MathFabs: return "py23_math_fabs";
+        case RtFn::MathSin: return "py23_math_sin";
+        case RtFn::MathCos: return "py23_math_cos";
+        case RtFn::MathTan: return "py23_math_tan";
+        case RtFn::MathLog: return "py23_math_log";
+        case RtFn::MathLog2: return "py23_math_log2";
+        case RtFn::MathLog10: return "py23_math_log10";
+        case RtFn::MathExp: return "py23_math_exp";
+        case RtFn::MathPow: return "py23_math_pow";
+        case RtFn::MathFmod: return "py23_math_fmod";
+        case RtFn::SysArgv: return "py23_sys_argv";
+        case RtFn::SysExit: return "py23_sys_exit";
     }
     return "?";
 }
@@ -260,6 +280,7 @@ enum class IrOp : uint8_t {
     Call,    // dst = a(args...)（a 是函数指针）
     CallRt,  // dst = <RtFn(imm)>(args...)
     Setjmp,  // dst = setjmp(a)（a 是 handler 记录，异常跳回时返回非 0）
+    ImportModule, // imm 是 imports 下标：确保模块已初始化
 
     // ── 控制流 ────────────────────────────────────────────
     Jump,    // -> target
@@ -296,6 +317,7 @@ inline const char* irop_name(IrOp op) {
         case IrOp::Call: return "call";
         case IrOp::CallRt: return "call.rt";
         case IrOp::Setjmp: return "setjmp";
+        case IrOp::ImportModule: return "import.module";
         case IrOp::Jump: return "jump";
         case IrOp::Branch: return "branch";
         case IrOp::Return: return "return";
@@ -347,6 +369,10 @@ struct IRParam {
 struct IRGlobal {
     std::string name;
     TypePtr ty;
+    // 模块编译时的链接符号；为空表示本地 .LgN。
+    std::string symbol;
+    // 外部模块的全局：只引用符号，不在这里分配存储，也不进根表。
+    bool external = false;
 };
 
 struct IRFunction {
@@ -389,6 +415,13 @@ struct IRModule {
     std::vector<IRGlobal> globals;
     std::vector<std::string> strings;
     std::vector<IRClass> classes;
+    // 模块编译：符号前缀、运行期 __name__、源路径、是否入口。
+    std::string module_symbol;
+    std::string runtime_name = "__main__";
+    std::string source_path;
+    bool is_entry = true;
+    // import.module 指令引用的模块名（按出现顺序去重）。
+    std::vector<std::string> imports;
     int entry = -1;  // 模块顶层代码编译成的函数下标
 
     IRFunction* add_func(std::string name) {

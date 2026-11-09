@@ -5,7 +5,7 @@
 | 依赖 | 版本 | 用途 |
 |---|---|---|
 | g++ | 13+ | `<format>`、`<expected>`、`std::unreachable` |
-| GNU make | 任意 | 构建 |
+| CMake + Ninja | CMake 3.28+ | 构建与测试 |
 | cc | 任意（gcc/clang） | 把生成的汇编汇编成可执行文件，链接运行时 |
 | python3 | 3.10+ | 只用于差分测试，编译本身不需要 |
 
@@ -14,35 +14,44 @@
 ## 构建
 
 ```bash
-make -j                 # 开发构建（-O0 -g）→ build/dev/py23
-make MODE=release -j    # 发布构建（-O2）   → build/release/py23
-make test               # 正例 + 反例 + 运行用例
-make info               # 打印当前 MODE/OPT/BUILD 和源文件列表
-make clean
+cmake --preset dev                 # Debug + Ninja → build/dev/py23
+cmake --build --preset dev
+cmake --preset release             # Release → build/release/py23
+cmake --build --preset release
+ctest --preset dev                 # 正例/反例/运行/未建模/模块
+cmake --build build/dev --target clean-modcache
+rm -rf build/dev                   # 连 CMake 中间产物一起清
 ```
 
-### 为什么默认 -O0
+`build/dev/compile_commands.json` 由预设生成，clangd/IDE 直接可用。
 
-这个项目自己的运行时间只有十几毫秒，`-O0` 完全够用；`-O2` 下标准库模板的优化阶段会吃掉八成编译时间（实测 `-O0` 3.8s / `-O1` 5.6s / `-O2` 7.9s）。只有跑分时才需要 `MODE=release`。
+### 为什么默认 Debug
+
+这个项目自己的运行时间只有十几毫秒，`-O0` 完全够用；`-O2` 下标准库模板的优化阶段会吃掉八成编译时间。只有跑分时才用 release preset。
 
 ### 增量原理
 
-源码按翻译单元拆成 6 个 `.cpp`，`-MMD -MP` 把头文件依赖记在 `build/<mode>/*.d`，改哪个 `.cpp` 只重编哪个 `.o`，改 `.h` 只重编真正依赖它的单元。两个 MODE 用不同目录，避免 `-O` 级别不同的 `.o` 混在一起。
+源码按翻译单元拆成 8 个 `.cpp`，Ninja 根据编译器的 depfile 跟踪头文件，改哪个 `.cpp` 只重编哪个 `.o`，改 `.h` 只重编真正依赖它的单元。dev/release 是两个独立 build 目录，`-O` 级别不会混。
 
 | 场景 | 耗时 |
 |---|---|
 | 无改动 | 0.00s |
-| 改 `codegen.cpp` | 2.7s |
-| 改 `main.cpp` | 2.4s |
-| 改 `parser.cpp` | 3.4s |
-| 改 `typecheck.h`（触发 4 个单元） | 3.7s |
-| 全量 `make -j8` | 4.7s |
+| 改 `codegen.cpp` | 约 2.7s |
+| 改 `main.cpp` | 约 2.4s |
+| 改 `parser.cpp` | 约 3.4s |
+| 改 `typecheck.h`（触发多个单元） | 约 3.7s |
+| 全量 `cmake --build --preset dev` | 约 4.7s |
 
-拆 TU 只对「只改一个文件」有效：预处理后一共 10 万行，项目自身只有 1 万行，95% 是标准库模板展开，全量构建只能靠 `-j`。PCH 试过（84MB，只省 0.34s，且 `-O` 级别不匹配会静默失效），不划算。
+拆 TU 只对「只改一个文件」有效：预处理后一共 10 万行，项目自身只有 1 万行，95% 是标准库模板展开，全量构建只能靠并行。PCH 试过（84MB，只省 0.34s，且 `-O` 级别不匹配会静默失效），不划算。
 
 ## 测试
 
 ### 四类用例
+
+多模块用例放在 `tests/modules/<名字>/main.py`（旁边放被导入的 `.py`）：
+首轮 `--rebuild` 编译并比对 `# --- expect ---`，第二轮不带 `--rebuild`
+检查 stderr 出现 `cached module`，同时验证缓存命中。`ctest --preset dev` 会跑
+`tests/modules/*/`。
 
 | 目录 | 要求 | 命名 |
 |---|---|---|
@@ -94,9 +103,11 @@ python3 tests/diff/run_diff.py --only repr  # 只测浮点转字符串
 覆盖 `*args` / `**kwargs` / 方法 / 闭包 / 转发；`tests/run/19_comprehension.py`
 覆盖推导式；`tests/run/20_with.py` 覆盖 `with` 的提前退出；`tests/run/21_decorator.py`
 覆盖装饰器；`tests/run/22_exception.py` 覆盖异常层级、bare raise、
-finally 的提前退出、with 异常路径和运行时错误转换。RSS 压力用受限地址
-空间跑长循环（命令见 [compatibility.md](compatibility.md#内存验收)）。
-改 `lower.cpp` 的 RC/闭包/容器/异常插桩或 `runtime/rt.c` 的 GC/哈希表后至少
+finally 的提前退出、with 异常路径和运行时错误转换。`tests/modules/`
+覆盖 import 图、`from` 快照、惰性初始化、外部全局读写、GC 根和缓存
+失效。RSS 压力用受限地址空间跑长循环（命令见
+[compatibility.md](compatibility.md#内存验收)）。
+改 `lower.cpp` 的 RC/闭包/容器/异常插桩、模块 ABI 或 `runtime/rt.c` 的 GC/哈希表后至少
 跑一遍：
 
 ```bash
@@ -111,7 +122,7 @@ print(p.returncode, resource.getrusage(resource.RUSAGE_CHILDREN).ru_maxrss)'   #
 
 ### 前端基线
 
-改了类型检查之后，除了 `make test`，还应该重跑一次标准库基线，确认没有把真实代码判错。命令和数字见 [compatibility.md](compatibility.md#前端鲁棒性基线)。
+改了类型检查之后，除了 `ctest --preset dev`，还应该重跑一次标准库基线，确认没有把真实代码判错。命令和数字见 [compatibility.md](compatibility.md#前端鲁棒性基线)。
 
 ## 调试
 

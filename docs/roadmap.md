@@ -45,7 +45,7 @@
 
 验收结果：在 16MB 地址空间限制下，100 万次字符串拼接、100 万次对象
 分配、30 万次带字符串字段的对象分配和 30 万次列表构造都正常完成，
-峰值 RSS 约 8MB；`make test`、600 个差分程序、ASan/UBSan 全部通过。
+峰值 RSS 约 8MB；`ctest --preset dev`、600 个差分程序、ASan/UBSan 全部通过。
 不含临时堆值的语句 / 循环 / 函数会在降级期删掉 RC 脚手架，整数代码
 性能与 0.6.1 持平；方法调用因为 self 参数的 inc/dec 慢约 30%。
 
@@ -163,6 +163,43 @@ traceback / `raise ... from`；`finally` 体内跳出 finally 的
 `return` / `break` / `continue` 被后端拒绝；异常路径的局部变量回收
 依赖 GC 时机。
 
+## 0.14：import（单层模块已实现）
+
+按联调结论：**分模块编译 + 链接 + 二进制接口 + 增量缓存**。
+
+**已完成（0.14a）**
+- 模块图/搜索路径（入口目录 + `-I`）、循环导入检测、单层模块
+  `import` / `import as` / `from ... import ... as`。
+- 二进制 `.py23i`：全局/函数签名（含默认字面量）、FNV-1a 校验；
+  文本 manifest 记录源码哈希和依赖接口哈希。
+- 每模块独立 `.o`，入口 + 依赖 + `rt.o` 链接；入口也走缓存。
+- 模块符号 `py23$m$g$x` / `ready` / `init` / `roots`；惰性初始化，
+  模块 init 注册 GC 根；`__name__` / `__file__`。
+- `import m` 编译期别名，`m.x` 直接读写外部全局、`m.f()` 调用外部闭包；
+  `from m import x` 快照绑定。
+- 测试 `tests/modules/`：basic / builtins / lazy / chain / values / gcroot / classes，`ctest --preset dev`
+  验证输出和二次构建缓存命中。
+
+**已完成（0.14b）**
+- `.py23i` class 记录：扁平字段（根→派生）、方法名/槽号/调用签名、
+  `has_init`、构造签名和 `ctor_symbol`。
+- 定义模块为每个类生成隐藏构造包装 `py23$m$n$C`（ObjNew + 字段初值 +
+  `__init__`），模块 init 把它绑定到隐藏全局。
+- 导入方：`import m; m.C(...)` / `from m import C` 构造实例，字段读写和
+  方法调用走导出的偏移/槽位；`C` 本身仍不能当值。
+- 跨模块继承不支持；类类型出现在跨模块函数签名里降级成 unknown。
+- 用例 `tests/modules/classes` 覆盖构造、默认字段、关键字参数、继承拍平
+  后的字段/方法。
+
+**已完成（0.14c）**
+- 内置 `math` / `sys`（已完成）：`math` 常量与函数、`sys.argv`（`main(argc, argv)`）、
+  `sys.exit` / `maxsize`；原生函数 `from math import sqrt` 直接调用。
+
+**0.14 已知边界**：点号/相对/星号 import、跨模块继承被拒绝；
+类类型在跨模块签名里是 unknown；模块导出类的 `__init__` 带
+`*args`/`**kwargs` 会被拒；模块 init 失败不会重试；编译器 ABI 变化或
+缓存格式升级时用 `--rebuild` / 清理 `modcache`。
+
 ## 下一步
 
 ### 1. 剩余构造
@@ -170,7 +207,6 @@ traceback / `raise ... from`；`finally` 体内跳出 finally 的
 | 构造 | 工作量 | 依赖 |
 |---|---|---|
 | 生成器 / `async` | 大 | 协程状态机或独立栈 |
-| `import` | 大 | 模块系统、符号解析 |
 
 ## 待决策
 

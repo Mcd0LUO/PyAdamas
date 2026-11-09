@@ -4,7 +4,7 @@
 
 ## 底线
 
-1. **`make test` 必须全绿**再提交。三条链路（正例 / 反例 / 运行）缺一条都算没做完。
+1. **`ctest --preset dev` 必须全绿**再提交。三条链路（正例 / 反例 / 运行）缺一条都算没做完。
 2. **改了后端就跑差分测试**：`python3 tests/diff/run_diff.py`。后端 bug 不会让编译失败，只会让程序算错。
 3. **改了类型检查就跑一次标准库基线**，确认没把真实代码判错。命令在 [docs/compatibility.md](docs/compatibility.md#前端鲁棒性基线)。
 4. **不要为了过测试放松检查**。反例测试的存在意义就是防止这件事。
@@ -16,7 +16,7 @@
 没有 CI，全靠本地。推荐顺序：
 
 ```bash
-make -j && make test
+cmake --preset dev && cmake --build --preset dev && ctest --preset dev
 python3 tests/diff/run_diff.py --seeds 3
 # 如果动了类型检查：
 #   跑一次标准库基线（见 docs/compatibility.md）

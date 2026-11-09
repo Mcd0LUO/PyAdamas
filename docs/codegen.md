@@ -271,6 +271,26 @@ dict 指针，调用点打包好按普通参数传；整数寄存器不够时照
 - `return` / `break` / `continue` 不 longjmp，走编译期 cleanup 栈：
   `handler_discard` + `__exit__` / finalbody 直接内联发射。
 
+## 模块编译
+
+每个模块单独汇编成 `.o`，符号统一加前缀：
+
+- 全局槽 `py23$m$g$name`（非入口模块用 `.globl` 导出）；模块函数就是
+  这类全局槽里的闭包值。
+- 入口顶层函数 `py23$m$init`；`__entry__` 模块额外生成 `main`。
+  `main` 在栈上保存 `argc`/`argv`，`gc_init` 之后调用
+  `py23_sys_set_args` 初始化 `sys.argv`。
+- 模块初始化标志 `py23$m$ready`；根表 `py23$m$roots`。
+- 模块 init 开始先 `py23_gc_add_roots(roots, n)`，再执行顶层代码；
+  入口 `main` 用 `py23_gc_init` 注册入口模块的根表并调用顶层函数。
+- `import.module` 发射
+  `py23_import_module(&ready, init)`；`ready` 置位后函数直接返回。
+- 外部全局（`IRGlobal::external`）只引用符号，不分配存储、不进根表，
+  入口退出时也不释放；堆对象由 GC shutdown 统一回收。
+
+含 handler 的函数关闭变量提升；模块 init 也一样（它可能 import 别的模块，
+不直接含 handler，但仍走普通函数帧）。
+
 ## 对象与虚调用
 
 对象是一块连续内存，字段偏移在编译期就定了。对象指针指向负载，RC/GC 头

@@ -1,6 +1,8 @@
 // 由 src/typecheck.h 拆出的实现。声明见 /tmp/tc.h。
 #include "typecheck.h"
 
+#include "module.h"
+
 namespace py23 {
 
 void TypeChecker::check(Module& m) {
@@ -34,6 +36,17 @@ Symbol* TypeChecker::lookup(const std::string& name) {
             if (cur_fn_def_ && s->fn_owner && s->fn_owner != cur_fn_def_)
                 free_refs_[cur_fn_def_].insert(name);
             return &it->second;
+        }
+        return nullptr;
+    }
+
+ModuleInfoPtr TypeChecker::lookup_module_alias(const std::string& name) const {
+        for (Scope* s = cur_; s; s = s->parent) {
+            // 普通变量可以遮蔽同名的模块别名（Python 里 import 也只是
+            // 一次普通赋值）；先看 vars 再看 modules。
+            if (s->vars.count(name)) return nullptr;
+            auto it = s->modules.find(name);
+            if (it != s->modules.end()) return it->second;
         }
         return nullptr;
     }
@@ -396,7 +409,8 @@ void TypeChecker::bind_target(Expr& target, Scope* sc) {
                                          Symbol{t_unknown(), s->line, false, false});
                     break;
                 case StmtKind::Import:
-                    for (auto& al : static_cast<Import&>(*s).names) bind_alias(al);
+                    // import m 绑定的是模块别名，不进普通变量表；
+                    // 否则 lookup_module_alias 会被一个 unknown 变量抢先命中。
                     break;
                 case StmtKind::ImportFrom:
                     for (auto& al : static_cast<ImportFrom&>(*s).names) bind_alias(al);
@@ -464,6 +478,34 @@ FuncInfoPtr TypeChecker::build_sig(FunctionDef& f) {
         size_t total_pos = a.posonly.size() + a.args.size();
         size_t ndef = a.defaults.size();
 
+        // 默认参数只收字面量；接口序列化需要不依赖 AST 的表示。
+        auto literal_of = [](const Expr* e) -> std::optional<LiteralValue> {
+            if (!e || e->kind != ExprKind::Constant) return std::nullopt;
+            auto& c = static_cast<const Constant&>(*e);
+            LiteralValue v;
+            switch (c.ck) {
+                case Constant::CK::None: v.kind = LiteralValue::Kind::None; break;
+                case Constant::CK::Bool:
+                    v.kind = LiteralValue::Kind::Bool;
+                    v.b = c.b;
+                    break;
+                case Constant::CK::Int:
+                    v.kind = LiteralValue::Kind::Int;
+                    v.i = c.i;
+                    break;
+                case Constant::CK::Float:
+                    v.kind = LiteralValue::Kind::Float;
+                    v.f = c.f;
+                    break;
+                case Constant::CK::Str:
+                    v.kind = LiteralValue::Kind::Str;
+                    v.s = c.s;
+                    break;
+                default: return std::nullopt;
+            }
+            return v;
+        };
+
         // 默认值只作用于「最后 ndef 个位置参数」，与位置参数前缀无关
         auto add_pos = [&](Arg& arg, bool posonly) {
             Param p;
@@ -474,7 +516,10 @@ FuncInfoPtr TypeChecker::build_sig(FunctionDef& f) {
             p.kwonly = false;
             if (p.has_default) {
                 size_t di = idx - (total_pos - ndef);
-                if (di < a.defaults.size()) p.default_expr = a.defaults[di].get();
+                if (di < a.defaults.size()) {
+                    p.default_expr = a.defaults[di].get();
+                    p.default_lit = literal_of(p.default_expr);
+                }
             }
             info->pos.push_back(std::move(p));
             if (posonly) ++info->n_posonly;
@@ -488,7 +533,10 @@ FuncInfoPtr TypeChecker::build_sig(FunctionDef& f) {
             p.ty = parse_annotation(a.kwonly[i].annotation.get(), f.line);
             p.has_default = i < a.kw_defaults.size() && a.kw_defaults[i] != nullptr;
             p.kwonly = true;
-            if (i < a.kw_defaults.size()) p.default_expr = a.kw_defaults[i].get();
+            if (i < a.kw_defaults.size()) {
+                p.default_expr = a.kw_defaults[i].get();
+                p.default_lit = literal_of(p.default_expr);
+            }
             info->kwonly.push_back(std::move(p));
         }
         if (a.vararg) {
@@ -784,23 +832,73 @@ void TypeChecker::stmt(Stmt& s) {
                 break;
             }
             case StmtKind::Import: {
-                // 函数内的 import 只绑定在本地，不能污染模块作用域
-                for (auto& al : static_cast<Import&>(s).names) {
+                auto& im = static_cast<Import&>(s);
+                for (auto& al : im.names) {
                     std::string bind = al.asname.empty() ? al.name : al.asname;
                     if (auto pos = bind.find('.'); pos != std::string::npos) bind = bind.substr(0, pos);
-                    declare(bind, t_unknown(), s.line);
+                    if (!module_lookup_) {
+                        // 单文件 check：import 没建模，保持前端宽松。
+                        declare(bind, t_unknown(), s.line);
+                        unsupported.push_back("import");
+                        continue;
+                    }
+                    if (al.name.find('.') != std::string::npos) {
+                        err(s.line, s.col, "dotted module imports are not supported yet");
+                        continue;
+                    }
+                    ModuleInfoPtr info = module_lookup_(al.name);
+                    if (info) {
+                        cur_->modules[bind] = std::move(info);
+                    } else {
+                        declare(bind, t_unknown(), s.line);
+                        unsupported.push_back("import");
+                    }
                 }
-                unsupported.push_back("import");
                 break;
             }
             case StmtKind::ImportFrom: {
                 auto& im = static_cast<ImportFrom&>(s);
+                if (!module_lookup_) {
+                    for (auto& al : im.names) {
+                        std::string bind = al.asname.empty() ? al.name : al.asname;
+                        if (bind == "*") {
+                            star_import_ = true;
+                            continue;
+                        }
+                        declare(bind, t_unknown(), s.line);
+                    }
+                    unsupported.push_back("import");
+                    break;
+                }
+                if (im.level != 0 || im.module.empty()) {
+                    err(s.line, s.col, "relative imports are not supported yet");
+                    break;
+                }
+                if (im.names.size() == 1 && im.names[0].name == "*") {
+                    err(s.line, s.col, "'from ... import *' is not supported yet");
+                    break;
+                }
+                ModuleInfoPtr info = module_lookup_(im.module);
                 for (auto& al : im.names) {
                     std::string bind = al.asname.empty() ? al.name : al.asname;
-                    if (bind == "*") { star_import_ = true; continue; }
-                    declare(bind, t_unknown(), s.line);
+                    if (!info) {
+                        declare(bind, t_unknown(), s.line);
+                        unsupported.push_back("import");
+                        continue;
+                    }
+                    if (auto ci = info->classes.find(al.name); ci != info->classes.end()) {
+                        declare(bind, mk_class(ci->second.cls.get()), s.line);
+                        continue;
+                    }
+                    auto it = info->globals.find(al.name);
+                    if (it == info->globals.end()) {
+                        err(s.line, s.col,
+                            std::format("module '{}' has no attribute '{}'", im.module, al.name));
+                        declare(bind, t_unknown(), s.line);
+                        continue;
+                    }
+                    declare(bind, it->second, s.line);
                 }
-                unsupported.push_back("import");
                 break;
             }
             case StmtKind::Global: {
@@ -1365,6 +1463,22 @@ void TypeChecker::assign(Expr& target, TypePtr value, int line, int col) {
             return;
         }
         if (auto* at = dynamic_cast<Attribute*>(&target)) {
+            if (auto* vn = dynamic_cast<Name*>(at->value.get())) {
+                if (auto mod = lookup_module_alias(vn->id)) {
+                    auto it = mod->globals.find(at->attr);
+                    if (it == mod->globals.end()) {
+                        err(line, col,
+                            std::format("module '{}' has no attribute '{}'", vn->id, at->attr));
+                        return;
+                    }
+                    if (!assignable(it->second, value))
+                        err(line, col,
+                            std::format("module attribute '{}.{}' has type '{}', cannot assign '{}'",
+                                        vn->id, at->attr, type_name(it->second),
+                                        type_name(value)));
+                    return;
+                }
+            }
             auto ot = expr(*at->value);
             if (ot->kind == TyKind::Func) return;
             if (ot->kind == TyKind::Optional && !ot->sub.empty() &&
@@ -1519,6 +1633,11 @@ TypePtr TypeChecker::expr(Expr& e) {
             case ExprKind::Name: {
                 auto& n = static_cast<Name&>(e);
                 if (auto* sym = lookup(n.id)) return sym->ty;
+                if (lookup_module_alias(n.id)) {
+                    err(n.line, n.col,
+                        std::format("module '{}' cannot be used as a value", n.id));
+                    return t_unknown();
+                }
                 // 先看内置值（__name__ / __file__ / Ellipsis ...），再看可调用对象
                 if (auto vt = builtin_value_type(n.id)) return vt;
                 if (is_builtin_callable(n.id)) return builtin_type(n.id);
@@ -1700,6 +1819,19 @@ TypePtr TypeChecker::expr(Expr& e) {
             }
             case ExprKind::Attribute: {
                 auto& a = static_cast<Attribute&>(e);
+                if (auto* vn = dynamic_cast<Name*>(a.value.get())) {
+                    if (auto mod = lookup_module_alias(vn->id)) {
+                        if (auto ci = mod->classes.find(a.attr); ci != mod->classes.end())
+                            return mk_class(ci->second.cls.get());
+                        auto it = mod->globals.find(a.attr);
+                        if (it == mod->globals.end()) {
+                            err(a.line, a.col,
+                                std::format("module '{}' has no attribute '{}'", vn->id, a.attr));
+                            return t_unknown();
+                        }
+                        return it->second;
+                    }
+                }
                 // str.capitalize / int.bit_length 这类「类型上的未绑定方法」
                 if (auto* vn = dynamic_cast<Name*>(a.value.get()); vn && is_type_name(vn->id))
                     return t_unknown();
@@ -1767,13 +1899,13 @@ TypePtr TypeChecker::expr(Expr& e) {
                 auto info = std::make_shared<FuncInfo>();
                 info->name = "<lambda>";
                 for (auto& p : l.args.posonly) {
-                    info->pos.push_back(Param{p.name, t_unknown(), false, false});
+                    info->pos.push_back(Param{p.name, t_unknown(), false, false, nullptr, std::nullopt});
                     ++info->n_posonly;
                 }
                 for (auto& p : l.args.args)
-                    info->pos.push_back(Param{p.name, t_unknown(), false, false});
+                    info->pos.push_back(Param{p.name, t_unknown(), false, false, nullptr, std::nullopt});
                 for (auto& p : l.args.kwonly)
-                    info->kwonly.push_back(Param{p.name, t_unknown(), false, true});
+                    info->kwonly.push_back(Param{p.name, t_unknown(), false, true, nullptr, std::nullopt});
                 if (l.args.vararg) {
                     info->varargs = true;
                     info->vararg_name = l.args.vararg->name;
@@ -2022,6 +2154,34 @@ TypePtr TypeChecker::call(Call& c) {
             if (!lookup(n->id) && is_builtin_callable(n->id)) return builtin_call(n->id, c);
         }
         if (auto* a = dynamic_cast<Attribute*>(c.func.get())) {
+            if (auto* vn = dynamic_cast<Name*>(a->value.get())) {
+                if (auto mod = lookup_module_alias(vn->id)) {
+                    if (auto ci = mod->classes.find(a->attr); ci != mod->classes.end()) {
+                        auto cls = ci->second.cls;
+                        if (cls->has_init && ci->second.ctor_sig) {
+                            check_args(ci->second.ctor_sig, c);
+                        } else if (!c.args.empty() || !c.keywords.empty()) {
+                            err(c.line, c.col,
+                                std::format("'{}' takes no arguments", cls->name));
+                            for (auto& arg : c.args) expr(*arg);
+                            for (auto& kw : c.keywords) expr(*kw.value);
+                        }
+                        return mk_class(cls.get());
+                    }
+                    auto it = mod->globals.find(a->attr);
+                    if (it == mod->globals.end()) {
+                        err(c.line, c.col,
+                            std::format("module '{}' has no attribute '{}'", vn->id, a->attr));
+                        return t_unknown();
+                    }
+                    auto mt = it->second;
+                    if (mt && mt->kind == TyKind::Func) return check_args(mt->fn, c);
+                    for (auto& arg : c.args) expr(*arg);
+                    for (auto& kw : c.keywords) expr(*kw.value);
+                    err(c.line, c.col, "module attribute is not callable");
+                    return t_unknown();
+                }
+            }
             // int.bit_length / type.__new__ 这类「类型上的未绑定方法」：
             // 接收者不是值，没有可检查的方法表
             if (auto* vn = dynamic_cast<Name*>(a->value.get()); vn && is_type_name(vn->id)) {

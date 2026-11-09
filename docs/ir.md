@@ -68,6 +68,7 @@ Python 语义里变量天生可变，循环里反复赋值是常态。一上来�
 | `call dst, a, args...` | `a: 函数值` | 间接调用 | `call *%r11` |
 | `call.rt args..., imm` | `imm: RtFn` | 调运行时函数 | `call py23_xxx` |
 | `setjmp dst, a` | `a: handler 记录` | `dst = setjmp(a)`；异常 longjmp 回来时为非 0 | `call setjmp` |
+| `import.module imm` | `imm: imports 下标` | 确保模块已初始化 | `py23_import_module(ready, init)` |
 | `jump target` | — | 无条件跳转 | `jmp` |
 | `branch a, target, target2` | — | `a` 为真跳 `target` | 按类型测试真值 |
 | `return a` | `a == kNoReg` 表示 `None` | 返回 | `rax` / `xmm0` |
@@ -130,6 +131,7 @@ Python 语义里变量天生可变，循环里反复赋值是常态。一上来�
 | `Try` | 外层 handler + setjmp；正常路径 `handler_leave` 后进 `else`；异常 landing 清理临时值栈，按 handler 顺序匹配，命中后 `exc_accept` 绑定 `as e`，处理完 `exc_done`；没有匹配则 `exc_reraise` |
 | `Try(finally)` | 再用一层 handler 包住核心 try；正常、异常和提前退出路径都执行 finalbody，异常路径最后 `exc_reraise` |
 | `Raise` | `raise X` / `raise X(msg)` 调 `py23_raise`；bare `raise` 调 `py23_reraise`；只接受内置异常名 |
+| `Import` / `ImportFrom` | 发 `import.module` 确保模块初始化；`import m` 只登记编译期别名，`from m import x` 加载外部全局并快照到本地/全局槽 |
 | `Global` | 只影响名字解析（该名字走全局读写） |
 | `Assert` | `br cond, ok, fail`；`fail` 里拼消息后 `raise AssertionError` |
 | `ClassDef` | 类表在正式降级前预扫描建好；这里只编译本类方法并填 vtable |
@@ -164,6 +166,8 @@ Python 语义里变量天生可变，循环里反复赋值是常态。一上来�
 **函数装饰器**：`def f` 正常编译并把原始函数值绑定到 `f`，然后按逆序对每个装饰器发一次普通闭包调用 `d(f)`，结果重新绑定到 `f`；没有新增 IR 指令。
 
 **异常展开**：`try` / `with` / `finally` 各自发射 `handler_push` → `setjmp` → `branch`；landing pad 先 `handler_leave`（弹记录 + `rc_cleanup` 到记录水位），再运行 `except` 匹配 / `__exit__` / finalbody。`return` / `break` / `continue` 不经过 longjmp，而是由统一 cleanup 栈直接发射 `handler_discard`、`__exit__` 和 finalbody，因此正常退出路径仍然精确释放槽位。
+
+**模块**：模块全局带链接符号 `py23$m$g$x`；外部模块全局是 `external = true` 的 `IRGlobal`，不分配存储、不进根表、出口也不释放。`import.module` 只带模块下标，符号命名由后端按模块名推导。模块顶层函数成为导出符号 `py23$m$init`，返回 `None` 且不执行 `GcShutdown` / `RcShutdown`。
 
 **`print` 不是函数**：就地展开成一串 `call.rt`，`sep` / `end` 求值后交给 `py23_print_str` 原样写出。
 

@@ -223,6 +223,28 @@ cell 不是新的运行时类型，就是一个**单元素列表** `list[T]`：�
 | `py23_reraise` | `() -> void` | bare raise：重抛 current（noreturn） |
 | `py23_raise_c` | `(const char*, const char*) -> void` | 运行时错误入口（noreturn） |
 
+### 模块
+
+| 函数 | 签名 | 语义 |
+|---|---|---|
+| `py23_import_module` | `(i64* ready, void (*init)(void)) -> void` | 惰性初始化：ready 为 0 时置 1 并调用模块 init |
+| `py23_gc_add_roots` | `(void** roots, i64 n) -> void` | 追加根表；入口先 `gc_init`，被导入模块在 init 入口追加 |
+
+模块全局是普通静态槽，由生成代码导出；`init` 是模块顶层生成的
+`void(void)`，返回前不释放模块全局、不 shutdown。入口函数负责
+`GcShutdown` / `RcShutdown`。
+
+### 内置模块 math / sys
+
+| 函数 | 签名 | 语义 |
+|---|---|---|
+| `py23_math_sqrt` 等 | `(double) -> double` | sqrt/fabs/sin/cos/tan/log/log2/log10/exp；域错误抛 ValueError |
+| `py23_math_floor/ceil` | `(double) -> i64` | Python 的 floor/ceil 返回 int |
+| `py23_math_pow/fmod` | `(double, double) -> double` | libm 包装；fmod 除零抛 ValueError |
+| `py23_sys_set_args` | `(i64 argc, char** argv) -> void` | 生成 `main` 初始化 argv，列表立即可注册为 GC 根 |
+| `py23_sys_argv` | `() -> list*` | 借用全局 argv 列表 |
+| `py23_sys_exit` | `(i64 code) -> void` | 直接 `exit(code)`，noreturn |
+
 ### 对象
 
 | 函数 | 签名 | 语义 |

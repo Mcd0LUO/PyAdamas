@@ -12,14 +12,20 @@
 //   py23 run    <file.py>   编译、链接并运行
 //   py23        <file.py>   等价于 ast
 #include <algorithm>
+#include <cctype>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <expected>
+#include <filesystem>
 #include <format>
 #include <fstream>
+#include <functional>
 #include <iostream>
+#include <map>
+#include <memory>
 #include <optional>
+#include <set>
 #include <sstream>
 #include <string>
 #include <string_view>
@@ -33,11 +39,15 @@
 #include "ir.h"
 #include "lexer.h"
 #include "lower.h"
+#include "module.h"
 #include "parser.h"
 #include "typecheck.h"
 
 #ifndef PY23_RT_OBJ
 #define PY23_RT_OBJ "build/dev/rt.o"
+#endif
+#ifndef PY23_MODCACHE_DIR
+#define PY23_MODCACHE_DIR "build/dev/modcache"
 #endif
 
 namespace {
@@ -181,29 +191,606 @@ std::expected<std::string, std::string> make_temp(const char* suffix) {
     return std::string(buf.data());
 }
 
-// 生成汇编 → 写临时文件 → 交给 cc 汇编链接。
-std::expected<std::string, std::string> compile_to_binary(const std::string& asm_text,
-                                                          const std::string& output) {
-    auto tmp = make_temp(".s");
-    if (!tmp) return std::unexpected(tmp.error());
+// ── 多模块构建 ──────────────────────────────────────────────────
+//
+// 每个模块独立解析、类型检查、降级、汇编成 .o；接口写到 .py23i，
+// manifest 记录源码哈希和依赖接口哈希。链接时把入口和所有模块的 .o
+// 加上运行时一起交给 cc。
 
-    {
-        std::ofstream out(*tmp, std::ios::binary);
-        if (!out) return std::unexpected(std::format("cannot write '{}'", *tmp));
-        out << asm_text;
+struct ModuleUnit {
+    std::string key;           // 内部映射键；入口是 "@entry"
+    std::string name;          // 符号前缀；入口是 "__entry__"
+    std::string runtime_name;  // __name__
+    std::string path;
+    std::string source;
+    std::unique_ptr<py23::Module> ast;
+    py23::ModuleInfoPtr info;
+    std::shared_ptr<py23::TypeChecker> tc;
+    std::optional<py23::IRModule> ir;
+    std::vector<std::string> deps;
+    std::string cache_dir;
+    std::string asm_path;
+    std::string obj_path;
+    std::string iface_path;
+    std::string manifest_path;
+    std::string asm_text;
+    bool is_entry = false;
+    bool from_cache = false;
+    int state = 0;  // 0 未访问 / 1 正在访问 / 2 完成
+};
+
+struct Program {
+    std::map<std::string, std::unique_ptr<ModuleUnit>> units;
+    std::vector<ModuleUnit*> order;
+    ModuleUnit* entry = nullptr;
+    std::vector<std::string> include_dirs;
+    bool rebuild = false;
+    bool verbose = false;
+};
+
+std::string sanitize_symbol(const std::string& s) {
+    std::string out;
+    for (char c : s)
+        out.push_back((std::isalnum(static_cast<unsigned char>(c)) || c == '_') ? c : '_');
+    if (out.empty() || std::isdigit(static_cast<unsigned char>(out[0]))) out = "_" + out;
+    return out;
+}
+
+bool valid_module_name(const std::string& s) {
+    if (s.empty() || std::isdigit(static_cast<unsigned char>(s[0]))) return false;
+    for (char c : s)
+        if (!std::isalnum(static_cast<unsigned char>(c)) && c != '_') return false;
+    return true;
+}
+
+std::string canonical_path(const std::string& p) {
+    std::error_code ec;
+    auto c = std::filesystem::weakly_canonical(std::filesystem::path(p), ec);
+    return ec ? std::filesystem::absolute(p).lexically_normal().string() : c.string();
+}
+
+std::optional<std::string> resolve_module_file(const std::string& importer,
+                                               const std::string& name,
+                                               const std::vector<std::string>& include_dirs) {
+    std::vector<std::filesystem::path> dirs;
+    dirs.push_back(std::filesystem::path(importer).parent_path());
+    for (auto& d : include_dirs) dirs.emplace_back(d);
+    for (auto& d : dirs) {
+        auto candidate = d / (name + ".py");
+        std::error_code ec;
+        if (std::filesystem::is_regular_file(candidate, ec))
+            return canonical_path(candidate.string());
+    }
+    return std::nullopt;
+}
+
+struct ImportReq {
+    std::string name;
+    int line = 1;
+    int col = 1;
+};
+
+struct ImportIssue {
+    int line = 1;
+    int col = 1;
+    std::string msg;
+};
+
+void scan_imports_body(const std::vector<py23::StmtPtr>& body, std::vector<ImportReq>& reqs,
+                       std::vector<ImportIssue>& issues);
+
+void scan_imports_stmt(const py23::Stmt& s, std::vector<ImportReq>& reqs,
+                       std::vector<ImportIssue>& issues) {
+    using namespace py23;
+    switch (s.kind) {
+        case StmtKind::Import: {
+            auto& im = static_cast<const Import&>(s);
+            for (auto& a : im.names) {
+                if (a.name.find('.') != std::string::npos) {
+                    issues.push_back({s.line, s.col, "dotted module imports are not supported yet"});
+                    continue;
+                }
+                reqs.push_back({a.name, s.line, s.col});
+            }
+            break;
+        }
+        case StmtKind::ImportFrom: {
+            auto& im = static_cast<const ImportFrom&>(s);
+            if (im.level != 0 || im.module.empty()) {
+                issues.push_back({s.line, s.col, "relative imports are not supported yet"});
+                break;
+            }
+            if (im.names.size() == 1 && im.names[0].name == "*") {
+                issues.push_back({s.line, s.col, "'from ... import *' is not supported yet"});
+                break;
+            }
+            if (im.module.find('.') != std::string::npos) {
+                issues.push_back({s.line, s.col, "dotted module imports are not supported yet"});
+                break;
+            }
+            reqs.push_back({im.module, s.line, s.col});
+            break;
+        }
+        case StmtKind::If: {
+            auto& f = static_cast<const If&>(s);
+            for (auto& b : f.branches) scan_imports_body(b.body, reqs, issues);
+            scan_imports_body(f.orelse, reqs, issues);
+            break;
+        }
+        case StmtKind::While: {
+            auto& w = static_cast<const While&>(s);
+            scan_imports_body(w.body, reqs, issues);
+            scan_imports_body(w.orelse, reqs, issues);
+            break;
+        }
+        case StmtKind::For: {
+            auto& f = static_cast<const For&>(s);
+            scan_imports_body(f.body, reqs, issues);
+            scan_imports_body(f.orelse, reqs, issues);
+            break;
+        }
+        case StmtKind::With: {
+            auto& w = static_cast<const With&>(s);
+            scan_imports_body(w.body, reqs, issues);
+            break;
+        }
+        case StmtKind::Try: {
+            auto& t = static_cast<const Try&>(s);
+            scan_imports_body(t.body, reqs, issues);
+            for (auto& h : t.handlers) scan_imports_body(h.body, reqs, issues);
+            scan_imports_body(t.orelse, reqs, issues);
+            scan_imports_body(t.finalbody, reqs, issues);
+            break;
+        }
+        case StmtKind::FunctionDef: {
+            auto& f = static_cast<const FunctionDef&>(s);
+            scan_imports_body(f.body, reqs, issues);
+            break;
+        }
+        case StmtKind::ClassDef: {
+            auto& c = static_cast<const ClassDef&>(s);
+            scan_imports_body(c.body, reqs, issues);
+            break;
+        }
+        default: break;
+    }
+}
+
+void scan_imports_body(const std::vector<py23::StmtPtr>& body, std::vector<ImportReq>& reqs,
+                       std::vector<ImportIssue>& issues) {
+    for (auto& s : body) scan_imports_stmt(*s, reqs, issues);
+}
+
+bool parse_unit(ModuleUnit& u) {
+    try {
+        py23::Lexer lexer(u.source);
+        py23::Parser parser(lexer.run());
+        u.ast = parser.parse();
+        py23::desugar_lambdas(*u.ast);
+        return true;
+    } catch (const py23::LexError& e) {
+        report(u.path, u.source, e.line, e.col, e.what());
+    } catch (const py23::ParseError& e) {
+        report(u.path, u.source, e.line, e.col, e.what());
+    }
+    return false;
+}
+
+void set_cache_paths(ModuleUnit& u) {
+    std::string key = sanitize_symbol(u.name) + "-" + py23::hex64(py23::fnv1a64(u.path));
+    u.cache_dir = std::string(PY23_MODCACHE_DIR) + "/" + key;
+    u.asm_path = u.cache_dir + "/mod.s";
+    u.obj_path = u.cache_dir + "/mod.o";
+    u.iface_path = u.cache_dir + "/mod.py23i";
+    u.manifest_path = u.cache_dir + "/manifest";
+}
+
+std::optional<uint64_t> parse_u64(const std::string& s) {
+    try {
+        size_t pos = 0;
+        uint64_t v = std::stoull(s, &pos, 10);
+        if (pos != s.size()) return std::nullopt;
+        return v;
+    } catch (...) {
+        return std::nullopt;
+    }
+}
+
+struct Manifest {
+    uint64_t source_hash = 0;
+    std::map<std::string, std::string> deps;
+};
+
+std::optional<Manifest> read_manifest(const ModuleUnit& u) {
+    std::ifstream in(u.manifest_path, std::ios::binary);
+    if (!in) return std::nullopt;
+    std::string line;
+    if (!std::getline(in, line) || line != "py23manifest 1") return std::nullopt;
+    Manifest m;
+    bool abi_ok = false;
+    while (std::getline(in, line)) {
+        std::istringstream ss(line);
+        std::string tag;
+        ss >> tag;
+        if (tag == "abi") {
+            std::string v;
+            ss >> v;
+            abi_ok = v == std::to_string(py23::kModuleAbiVersion);
+        } else if (tag == "source") {
+            std::string v;
+            ss >> v;
+            auto h = parse_u64(v);
+            if (!h) return std::nullopt;
+            m.source_hash = *h;
+        } else if (tag == "dep") {
+            std::string name, hash;
+            ss >> name >> hash;
+            if (name.empty() || hash.empty()) return std::nullopt;
+            m.deps[name] = hash;
+        }
+    }
+    if (!abi_ok) return std::nullopt;
+    return m;
+}
+
+void write_manifest(const Program& p, const ModuleUnit& u) {
+    std::error_code ec;
+    std::filesystem::create_directories(u.cache_dir, ec);
+    std::ofstream out(u.manifest_path, std::ios::binary);
+    out << "py23manifest 1\n";
+    out << "abi " << py23::kModuleAbiVersion << "\n";
+    out << "source " << py23::fnv1a64(u.source) << "\n";
+    for (auto& d : u.deps) {
+        auto it = p.units.find(d);
+        std::string hash = (it != p.units.end() && it->second->info)
+                               ? it->second->info->interface_hash
+                               : "";
+        out << "dep " << d << " " << hash << "\n";
+    }
+}
+
+bool visit_unit(Program& p, ModuleUnit& u, std::vector<ModuleUnit*>& stack) {
+    if (u.state == 2) return true;
+    if (u.state == 1) {
+        std::string chain;
+        for (auto* x : stack) chain += x->name + " -> ";
+        chain += u.name;
+        std::fprintf(stderr, "%s: error: circular import: %s\n", u.path.c_str(), chain.c_str());
+        return false;
+    }
+    u.state = 1;
+    stack.push_back(&u);
+
+    std::vector<ImportReq> reqs;
+    std::vector<ImportIssue> issues;
+    scan_imports_body(u.ast->body, reqs, issues);
+    if (!issues.empty()) {
+        for (auto& i : issues) report(u.path, u.source, i.line, i.col, i.msg);
+        return false;
     }
 
-    std::string cmd = std::format("cc -o {} {} {} -lm", shell_quote(output), shell_quote(*tmp),
-                                  shell_quote(PY23_RT_OBJ));
-    int rc = std::system(cmd.c_str());
-    if (rc != 0) {
-        std::fprintf(stderr, "error: assembler/linker failed (runtime: %s)\n", PY23_RT_OBJ);
-        std::fprintf(stderr, "       command: %s\n", cmd.c_str());
-        return std::unexpected("cc failed");
+    std::set<std::string> seen;
+    for (auto& req : reqs) {
+        if (!seen.insert(req.name).second) continue;
+        if (!valid_module_name(req.name)) {
+            report(u.path, u.source, req.line, req.col, "invalid module name");
+            return false;
+        }
+        if (req.name == "__entry__") {
+            report(u.path, u.source, req.line, req.col,
+                   "'__entry__' is reserved for the entry module");
+            return false;
+        }
+        if (req.name == "math" || req.name == "sys") {
+            // 内置模块没有源文件/对象，只提供编译期接口。
+            continue;
+        }
+        auto found = resolve_module_file(u.path, req.name, p.include_dirs);
+        if (!found) {
+            report(u.path, u.source, req.line, req.col,
+                   std::format("cannot find module '{}'", req.name));
+            return false;
+        }
+        std::string canonical = canonical_path(*found);
+        auto it = p.units.find(req.name);
+        ModuleUnit* dep = nullptr;
+        if (it != p.units.end()) {
+            if (it->second->path != canonical) {
+                report(u.path, u.source, req.line, req.col,
+                       std::format("module '{}' resolves to two different files", req.name));
+                return false;
+            }
+            dep = it->second.get();
+        } else {
+            auto unit = std::make_unique<ModuleUnit>();
+            unit->key = req.name;
+            unit->name = req.name;
+            unit->runtime_name = req.name;
+            unit->path = canonical;
+            auto src = read_file(canonical);
+            if (!src) {
+                report(u.path, u.source, req.line, req.col, src.error());
+                return false;
+            }
+            unit->source = std::move(*src);
+            set_cache_paths(*unit);
+            if (!parse_unit(*unit)) return false;
+            dep = unit.get();
+            p.units[req.name] = std::move(unit);
+        }
+        if (!visit_unit(p, *dep, stack)) return false;
+        u.deps.push_back(req.name);
     }
-    if (std::getenv("PY23_KEEP_ASM")) std::fprintf(stderr, "note: assembly kept at %s\n", tmp->c_str());
-    else ::unlink(tmp->c_str());
-    return output;
+
+    stack.pop_back();
+    u.state = 2;
+    p.order.push_back(&u);
+    return true;
+}
+
+bool load_program(const std::string& entry_path, const std::vector<std::string>& include_dirs,
+                  Program& p) {
+    p.include_dirs = include_dirs;
+    auto unit = std::make_unique<ModuleUnit>();
+    unit->key = "@entry";
+    unit->name = "__entry__";
+    unit->runtime_name = "__main__";
+    unit->path = canonical_path(entry_path);
+    unit->is_entry = true;
+    auto src = read_file(unit->path);
+    if (!src) {
+        std::fprintf(stderr, "error: %s\n", src.error().c_str());
+        return false;
+    }
+    unit->source = std::move(*src);
+    set_cache_paths(*unit);
+    if (!parse_unit(*unit)) return false;
+    p.entry = unit.get();
+    p.units["@entry"] = std::move(unit);
+    std::vector<ModuleUnit*> stack;
+    return visit_unit(p, *p.entry, stack);
+}
+
+bool assemble_object(const ModuleUnit& u, std::string& err) {
+    std::error_code ec;
+    std::filesystem::create_directories(u.cache_dir, ec);
+    std::ofstream out(u.asm_path, std::ios::binary);
+    if (!out) {
+        err = std::format("cannot write '{}'", u.asm_path);
+        return false;
+    }
+    out << u.asm_text;
+    out.close();
+    std::string cmd = std::format("cc -c -o {} {}", shell_quote(u.obj_path), shell_quote(u.asm_path));
+    if (std::system(cmd.c_str()) != 0) {
+        err = "assembler failed";
+        return false;
+    }
+    return true;
+}
+
+bool try_cache(Program& p, ModuleUnit& u) {
+    if (p.rebuild) return false;
+    auto m = read_manifest(u);
+    if (!m) return false;
+    if (m->source_hash != py23::fnv1a64(u.source)) return false;
+    if (m->deps.size() != u.deps.size()) return false;
+    for (auto& d : u.deps) {
+        auto it = m->deps.find(d);
+        if (it == m->deps.end()) return false;
+        auto unit_it = p.units.find(d);
+        if (unit_it == p.units.end() || !unit_it->second->info) return false;
+        if (it->second != unit_it->second->info->interface_hash) return false;
+    }
+    std::error_code ec;
+    if (!std::filesystem::is_regular_file(u.obj_path, ec)) return false;
+    if (!u.is_entry) {
+        auto bytes = read_file(u.iface_path);
+        if (!bytes) return false;
+        auto info = py23::decode_module_interface(*bytes, u.path);
+        if (!info || (*info)->name != u.name) return false;
+        (*info)->interface_hash = py23::hex64(py23::fnv1a64(*bytes));
+        u.info = *info;
+    }
+    u.from_cache = true;
+    return true;
+}
+
+py23::ModuleInfoPtr builtin_module(const std::string& name);
+
+py23::ModuleInfoPtr program_module(Program& p, const std::string& name) {
+    if (name == "math" || name == "sys") return builtin_module(name);
+    auto it = p.units.find(name);
+    return it == p.units.end() ? nullptr : it->second->info;
+}
+
+py23::FuncInfoPtr builtin_fn(const std::string& name, const std::vector<py23::TypePtr>& args,
+                             py23::TypePtr ret) {
+    auto f = std::make_shared<py23::FuncInfo>();
+    f->name = name;
+    for (size_t i = 0; i < args.size(); ++i) {
+        py23::Param p;
+        p.name = std::format("x{}", i);
+        p.ty = args[i];
+        f->pos.push_back(std::move(p));
+    }
+    f->ret = ret;
+    f->ret_known = true;
+    return f;
+}
+
+py23::ModuleInfoPtr builtin_module(const std::string& name) {
+    static std::map<std::string, py23::ModuleInfoPtr> cache;
+    auto it = cache.find(name);
+    if (it != cache.end()) return it->second;
+    auto info = std::make_shared<py23::ModuleInfo>();
+    info->name = name;
+    info->builtin = true;
+    auto func = [&](const std::string& n, std::vector<py23::TypePtr> args, py23::TypePtr ret) {
+        auto t = py23::new_ty(py23::TyKind::Func);
+        t->fn = builtin_fn(n, args, ret);
+        info->globals[n] = t;
+    };
+    if (name == "math") {
+        info->globals["pi"] = py23::t_float();
+        info->globals["e"] = py23::t_float();
+        info->globals["tau"] = py23::t_float();
+        for (auto& n : {"sqrt", "fabs", "sin", "cos", "tan", "log", "log2", "log10", "exp"})
+            func(n, {py23::t_float()}, py23::t_float());
+        func("floor", {py23::t_float()}, py23::t_int());
+        func("ceil", {py23::t_float()}, py23::t_int());
+        func("pow", {py23::t_float(), py23::t_float()}, py23::t_float());
+        func("fmod", {py23::t_float(), py23::t_float()}, py23::t_float());
+    } else if (name == "sys") {
+        info->globals["argv"] = py23::mk_list(py23::t_str());
+        info->globals["maxsize"] = py23::t_int();
+        func("exit", {py23::t_int()}, py23::t_none());
+    }
+    cache[name] = info;
+    return info;
+}
+
+bool build_unit(Program& p, ModuleUnit& u, bool emit_object, bool entry_ir) {
+    auto tc = std::make_shared<py23::TypeChecker>(u.path);
+    tc->set_module_lookup([&p](const std::string& name) -> py23::ModuleInfoPtr {
+        return program_module(p, name);
+    });
+    tc->check(*u.ast);
+    if (!tc->diags().empty()) {
+        for (auto& d : tc->diags()) report(u.path, u.source, d.line, d.col, d.msg);
+        std::fprintf(stderr, "%zu error%s in %s\n", tc->diags().size(),
+                     tc->diags().size() == 1 ? "" : "s", u.path.c_str());
+        return false;
+    }
+    u.tc = tc;
+
+    auto info = std::make_shared<py23::ModuleInfo>();
+    info->name = u.name;
+    info->source_path = u.path;
+    if (auto* sc = tc->module_scope()) {
+        for (auto& [name, sym] : sc->vars) {
+            if (!u.is_entry && sym.ty && sym.ty->kind == py23::TyKind::Class && sym.ty->cls) {
+                // 扁平类接口：字段按根→派生顺序拍平，方法按最终槽位覆盖。
+                const py23::ClassInfo* cls = sym.ty->cls;
+                std::vector<const py23::ClassInfo*> chain;
+                for (auto* cp = cls; cp; cp = cp->base) chain.push_back(cp);
+                auto flat = std::make_shared<py23::ClassInfo>();
+                flat->name = name;
+                flat->complete = true;
+                flat->has_init = cls->has_init;
+                flat->open = cls->is_open();
+                for (auto it = chain.rbegin(); it != chain.rend(); ++it)
+                    for (auto& f : (*it)->fields) flat->fields.push_back(f);
+                std::map<int, py23::MethodInfo> by_slot;
+                for (auto it = chain.rbegin(); it != chain.rend(); ++it)
+                    for (auto& m : (*it)->methods)
+                        if (m.call_sig) by_slot[m.slot] = m;
+                for (auto& [slot, m] : by_slot) {
+                    py23::MethodInfo nm;
+                    nm.name = m.name;
+                    nm.slot = slot;
+                    nm.call_sig = m.call_sig;
+                    nm.sig = m.call_sig;
+                    flat->methods.push_back(std::move(nm));
+                }
+                py23::ImportedClass ic;
+                ic.cls = flat;
+                ic.ctor_symbol = py23::module_class_new_symbol(u.name, name);
+                if (cls->has_init) {
+                    if (auto* im = cls->method("__init__"); im && im->call_sig) {
+                        if (im->call_sig->varargs || im->call_sig->kwargs) {
+                            report(u.path, u.source, 1, 1,
+                                   "exported class __init__ with *args/**kwargs is not supported yet");
+                            return false;
+                        }
+                        ic.ctor_sig = im->call_sig;
+                    }
+                }
+                if (!ic.ctor_sig) ic.ctor_sig = std::make_shared<py23::FuncInfo>();
+                info->classes[name] = std::move(ic);
+                continue;
+            }
+            info->globals[name] = sym.ty;
+        }
+    }
+    info->globals["__name__"] = py23::t_str();
+    info->globals["__file__"] = py23::t_str();
+    u.info = info;
+
+    if (!emit_object && !entry_ir) return true;
+    if (entry_ir && !u.is_entry) return true;
+
+    py23::LowerOptions opt;
+    opt.module_symbol = u.name;
+    opt.runtime_name = u.runtime_name;
+    opt.source_path = u.path;
+    opt.is_entry = u.is_entry;
+    opt.module_lookup = [&p](const std::string& name) -> py23::ModuleInfoPtr {
+        return program_module(p, name);
+    };
+    auto lr = py23::lower_module(*u.ast, *tc, u.path, opt);
+    if (!lr.errors.empty()) {
+        for (auto& e : lr.errors) report(u.path, u.source, e.line, e.col, e.msg);
+        std::fprintf(stderr, "%zu error%s in code generation (%s)\n", lr.errors.size(),
+                     lr.errors.size() == 1 ? "" : "s", u.path.c_str());
+        return false;
+    }
+    if (entry_ir) {
+        u.ir = std::move(lr.mod);
+        return true;
+    }
+    if (!emit_object) return true;
+
+    u.asm_text = py23::generate_asm(lr.mod);
+    std::string err;
+    if (!assemble_object(u, err)) {
+        std::fprintf(stderr, "%s: error: %s\n", u.path.c_str(), err.c_str());
+        return false;
+    }
+    if (!u.is_entry) {
+        auto bytes = py23::encode_module_interface(*info);
+        if (!bytes) {
+            report(u.path, u.source, 1, 1,
+                   std::format("cannot export module interface: {}", bytes.error()));
+            return false;
+        }
+        info->interface_hash = py23::hex64(py23::fnv1a64(*bytes));
+        std::error_code ec;
+        std::filesystem::create_directories(u.cache_dir, ec);
+        std::ofstream out(u.iface_path, std::ios::binary);
+        out.write(bytes->data(), static_cast<std::streamsize>(bytes->size()));
+        if (!out) {
+            report(u.path, u.source, 1, 1, "cannot write module interface");
+            return false;
+        }
+    }
+    write_manifest(p, u);
+    return true;
+}
+
+bool prepare_program(Program& p, bool emit_objects, bool entry_ir) {
+    for (auto* u : p.order) {
+        if (emit_objects && try_cache(p, *u)) {
+            if (emit_objects && p.verbose)
+                std::fprintf(stderr, "note: cached module %s\n", u->name.c_str());
+            continue;
+        }
+        if (emit_objects && p.verbose)
+            std::fprintf(stderr, "note: building module %s\n", u->name.c_str());
+        if (!build_unit(p, *u, emit_objects, entry_ir)) return false;
+    }
+    return true;
+}
+
+bool link_program(Program& p, const std::string& output) {
+    std::string cmd = "cc -o " + shell_quote(output);
+    for (auto* u : p.order) cmd += " " + shell_quote(u->obj_path);
+    cmd += " " + shell_quote(PY23_RT_OBJ) + " -lm";
+    if (std::system(cmd.c_str()) != 0) {
+        std::fprintf(stderr, "error: link failed\n       command: %s\n", cmd.c_str());
+        return false;
+    }
+    return true;
 }
 
 }  // namespace
@@ -221,8 +808,10 @@ int main(int argc, char** argv) {
     std::string mode;
     std::string path;
     std::string output;
+    std::vector<std::string> include_dirs;
     bool syntax_only = false;
     bool verbose = false;
+    bool rebuild = false;
 
     static const std::vector<std::string> kModes = {"tokens", "ast",     "check", "types",
                                                     "ir",     "asm",     "build", "run"};
@@ -230,7 +819,10 @@ int main(int argc, char** argv) {
         std::string a = argv[i];
         if (a == "--syntax") syntax_only = true;
         else if (a == "-v" || a == "--verbose") verbose = true;
+        else if (a == "--rebuild") rebuild = true;
         else if (a == "-o" && i + 1 < argc) output = argv[++i];
+        else if (a == "-I" && i + 1 < argc) include_dirs.push_back(argv[++i]);
+        else if (a.starts_with("-I") && a.size() > 2) include_dirs.push_back(a.substr(2));
         else if (mode.empty() && std::ranges::find(kModes, a) != kModes.end()) mode = a;
         else path = a;
     }
@@ -253,30 +845,35 @@ int main(int argc, char** argv) {
             return 0;
         }
 
-        auto fe = run_frontend(path, *src, mode == "check" && syntax_only);
-        if (!fe) return 1;
-
-        if (mode == "ast") {
-            fe->mod->dump(std::cout);
-            return 0;
-        }
-        if (mode == "check" && syntax_only) {
+        if (mode == "ast" || (mode == "check" && syntax_only)) {
+            auto fe = run_frontend(path, *src, mode == "check");
+            if (!fe) return 1;
+            if (mode == "ast") {
+                fe->mod->dump(std::cout);
+                return 0;
+            }
             std::printf("ok: %s (%zu statements)\n", path.c_str(), fe->mod->body.size());
             return 0;
         }
-        if (mode == "types") {
-            for (auto& [name, ty] : fe->tc.top_symbols())
-                std::printf("%-24s %s\n", name.c_str(), ty.c_str());
-            return 0;
-        }
-        if (mode == "check") {
+
+        if (mode == "check" || mode == "types") {
+            // check/types 定位是通用前端：不解析 import 图，缺失/相对/
+            // 星号导入只记 unsupported，交给 build 阶段判死。
+            auto fe = run_frontend(path, *src, false);
+            if (!fe) return 1;
+            if (mode == "types") {
+                for (auto& [name, ty] : fe->tc.top_symbols())
+                    std::printf("%-24s %s\n", name.c_str(), ty.c_str());
+                return 0;
+            }
             if (verbose && !fe->tc.unsupported.empty()) {
-                std::ranges::sort(fe->tc.unsupported);
-                auto uniq = std::ranges::unique(fe->tc.unsupported);
-                fe->tc.unsupported.erase(uniq.begin(), uniq.end());
+                auto& uns = fe->tc.unsupported;
+                std::ranges::sort(uns);
+                auto uniq = std::ranges::unique(uns);
+                uns.erase(uniq.begin(), uniq.end());
                 std::fprintf(stderr, "note: %zu construct(s) parsed but not yet compiled:",
-                             fe->tc.unsupported.size());
-                for (auto& u : fe->tc.unsupported) std::fprintf(stderr, " %s", u.c_str());
+                             uns.size());
+                for (auto& u : uns) std::fprintf(stderr, " %s", u.c_str());
                 std::fprintf(stderr, "\n");
             }
             std::printf("ok: %s (%zu statements, %zu functions, %zu expressions)\n", path.c_str(),
@@ -284,33 +881,29 @@ int main(int argc, char** argv) {
             return 0;
         }
 
-        // ── IR 之后 ──────────────────────────────────────────
-        auto lr = py23::lower_module(*fe->mod, fe->tc, path);
-        if (!lr.errors.empty()) {
-            for (const auto& e : lr.errors) report(path, *src, e.line, e.col, e.msg);
-            std::fprintf(stderr, "%zu error%s in code generation\n", lr.errors.size(),
-                         lr.errors.size() == 1 ? "" : "s");
-            return 1;
-        }
+        Program prog;
+        prog.rebuild = rebuild;
+        prog.verbose = verbose;
+        if (!load_program(path, include_dirs, prog)) return 1;
 
-        if (mode == "ir") {
-            py23::dump_ir(lr.mod, std::cout);
+        if (mode == "ir" || mode == "asm") {
+            if (!prepare_program(prog, false, true)) return 1;
+            if (!prog.entry->ir) return 1;
+            if (mode == "ir") {
+                py23::dump_ir(*prog.entry->ir, std::cout);
+            } else {
+                std::cout << py23::generate_asm(*prog.entry->ir);
+            }
             return 0;
         }
 
-        std::string asm_text = py23::generate_asm(lr.mod);
-        if (mode == "asm") {
-            std::cout << asm_text;
-            return 0;
-        }
+        // build / run：模块各自汇编成 .o，再链接。
+        if (!prepare_program(prog, true, false)) return 1;
 
-        // build / run
         std::string out = output;
         bool ephemeral = false;
         if (out.empty()) {
             if (mode == "run") {
-                // run 就是「编译完立刻跑」，不该在源码旁边留下一个可执行文件。
-                // 临时名留给 cc 自己创建，先删掉空文件，否则 ld 会沿用它 0600 的权限。
                 auto tmp = make_temp("");
                 if (!tmp) {
                     std::fprintf(stderr, "error: %s\n", tmp.error().c_str());
@@ -324,12 +917,10 @@ int main(int argc, char** argv) {
                 if (out.ends_with(".py")) out.resize(out.size() - 3);
             }
         }
-        auto built = compile_to_binary(asm_text, out);
-        if (!built) return 1;
+        if (!link_program(prog, out)) return 1;
 
         if (mode == "run") {
-            // 相对路径要加 ./，否则 shell 只会在 PATH 里找
-            std::string run_path = *built;
+            std::string run_path = out;
             if (run_path.find('/') == std::string::npos) run_path = "./" + run_path;
             std::string cmd = shell_quote(run_path);
             int rc = std::system(cmd.c_str());

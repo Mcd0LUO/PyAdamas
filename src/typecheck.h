@@ -12,6 +12,8 @@
 //      这样 check 命令对真实代码仍然可用。
 #include <algorithm>
 #include <format>
+#include <functional>
+#include <optional>
 #include <ranges>
 #include <utility>
 #include <memory>
@@ -53,6 +55,19 @@ struct FuncInfo;
 using FuncInfoPtr = std::shared_ptr<FuncInfo>;
 struct ClassInfo;
 using ClassInfoPtr = std::shared_ptr<ClassInfo>;
+struct ModuleInfo;
+using ModuleInfoPtr = std::shared_ptr<ModuleInfo>;
+using ModuleLookup = std::function<ModuleInfoPtr(const std::string&)>;
+
+// 默认参数的可序列化字面量。跨模块接口不能带 AST 指针，
+// 只能保留这种最小的常量表示。
+struct LiteralValue {
+    enum class Kind : uint8_t { None, Bool, Int, Float, Str } kind = Kind::None;
+    bool b = false;
+    int64_t i = 0;
+    double f = 0.0;
+    std::string s;
+};
 
 struct Type {
     TyKind kind = TyKind::Unknown;
@@ -112,6 +127,8 @@ struct Param {
     // 默认值的 AST 节点。降级器在调用点内联填充；通过函数值调用时
     // 没有 FunctionDef 可查，只能靠签名里的这个指针。
     const Expr* default_expr = nullptr;
+    // 跨模块接口用的字面量形式；本地函数也会填，导入函数只有它。
+    std::optional<LiteralValue> default_lit;
 };
 
 struct FuncInfo {
@@ -588,6 +605,8 @@ struct Symbol {
 
 struct Scope {
     std::unordered_map<std::string, Symbol> vars;
+    // import m 绑定的模块别名；只用于属性/from 解析，不是运行时值。
+    std::unordered_map<std::string, ModuleInfoPtr> modules;
     Scope* parent = nullptr;
     bool is_module = false;
     // 这个作用域属于哪个函数；模块 / 推导式 / 类作用域为 nullptr。
@@ -600,6 +619,9 @@ public:
     explicit TypeChecker(std::string file) : file_(std::move(file)) {}
 
     void check(Module& m);
+
+    // 多模块编译时由驱动注入：按模块名取已经加载的接口。
+    void set_module_lookup(ModuleLookup lookup) { module_lookup_ = std::move(lookup); }
 
     const std::vector<Diag>& diags() const { return diags_; }
 
@@ -644,6 +666,7 @@ public:
 
 private:
     std::string file_;
+    ModuleLookup module_lookup_;
     std::vector<std::unique_ptr<Scope>> pool_;
     Scope* cur_ = nullptr;
     Scope* module_ = nullptr;
@@ -702,6 +725,7 @@ private:
     // ── 作用域 ──────────────────────────────────────────────────
 
     Symbol* lookup(const std::string& name);
+    ModuleInfoPtr lookup_module_alias(const std::string& name) const;
 
     Scope* assign_target_scope(const std::string& name);
 

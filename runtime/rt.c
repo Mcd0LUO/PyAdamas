@@ -1346,6 +1346,7 @@ void* py23_obj_new(int64_t size, void (*dtor)(void*), void (*release)(void*)) {
 
 static void** gc_globals;
 static int64_t gc_n_globals;
+static int64_t gc_globals_cap;
 static uintptr_t gc_stack_top;
 static Py23Rc** gc_table;
 static size_t gc_table_cap;
@@ -1450,9 +1451,25 @@ PY23_NO_ASAN static void gc_scan_registers(void) {
     if (setjmp(regs) == 0) gc_scan_range(&regs, (char*)&regs + sizeof regs);
 }
 
+void py23_gc_add_roots(void** roots, int64_t n_roots) {
+    if (!roots || n_roots <= 0) return;
+    if (gc_n_globals + n_roots > gc_globals_cap) {
+        int64_t ncap = gc_globals_cap ? gc_globals_cap : 64;
+        while (ncap < gc_n_globals + n_roots) ncap *= 2;
+        void** ns = (void**)realloc(gc_globals, sizeof(void*) * (size_t)ncap);
+        if (!ns) panic_c("out of memory");
+        gc_globals = ns;
+        gc_globals_cap = ncap;
+    }
+    // 根表本身是静态存储，这里只复制槽地址。
+    for (int64_t i = 0; i < n_roots; ++i) gc_globals[gc_n_globals++] = roots[i];
+}
+
 void py23_gc_init(void** roots, int64_t n_roots, void* stack_top) {
-    gc_globals = roots;
-    gc_n_globals = n_roots;
+    gc_globals = NULL;
+    gc_n_globals = 0;
+    gc_globals_cap = 0;
+    py23_gc_add_roots(roots, n_roots);
     gc_stack_top = (uintptr_t)stack_top;
     gc_ready = 1;
 }
@@ -1555,7 +1572,73 @@ void py23_gc_shutdown(void) {
     }
     gc_sweeping = 0;
     alloc_since_gc = 0;
+    free(gc_globals);
+    gc_globals = NULL;
+    gc_n_globals = 0;
+    gc_globals_cap = 0;
 }
+
+/* 分模块编译：init 是模块顶层生成的 void(void)，ready 是模块 .bss 里的
+   一次性标志。标志在调用前设置，初始化失败不会重试（与 Python 移除
+   失败模块的行为不同，但至少不会死循环）。 */
+void py23_import_module(int64_t* ready, void (*init)(void)) {
+    if (!ready || !init || *ready) return;
+    *ready = 1;
+    init();
+}
+
+/* ── 数学 / 内置模块 ──────────────────────────────────────────── */
+
+double py23_math_sqrt(double x) {
+    if (x < 0) py23_raise_c("ValueError", "math domain error");
+    return sqrt(x);
+}
+int64_t py23_math_floor(double x) { return (int64_t)floor(x); }
+int64_t py23_math_ceil(double x) { return (int64_t)ceil(x); }
+double py23_math_fabs(double x) { return fabs(x); }
+double py23_math_sin(double x) { return sin(x); }
+double py23_math_cos(double x) { return cos(x); }
+double py23_math_tan(double x) { return tan(x); }
+double py23_math_log(double x) {
+    if (x <= 0) py23_raise_c("ValueError", "math domain error");
+    return log(x);
+}
+double py23_math_log2(double x) {
+    if (x <= 0) py23_raise_c("ValueError", "math domain error");
+    return log2(x);
+}
+double py23_math_log10(double x) {
+    if (x <= 0) py23_raise_c("ValueError", "math domain error");
+    return log10(x);
+}
+double py23_math_exp(double x) { return exp(x); }
+double py23_math_pow(double x, double y) { return pow(x, y); }
+double py23_math_fmod(double x, double y) {
+    if (y == 0) py23_raise_c("ValueError", "math domain error");
+    return fmod(x, y);
+}
+
+static Py23List* sys_argv_list;
+
+void py23_sys_set_args(int64_t argc, char** argv) {
+    Py23List* out = py23_list_new(argc > 0 ? argc : 0, 1);
+    sys_argv_list = out;
+    // 列表要立刻成为 GC 根；根表元素是「槽的地址」，不是槽里的值。
+    void* root_slot[1] = {(void*)&sys_argv_list};
+    py23_gc_add_roots(root_slot, 1);
+    for (int64_t i = 0; i < argc; ++i) {
+        const char* s = argv[i] ? argv[i] : "";
+        Py23Str* str = str_new(s, (int64_t)strlen(s));
+        py23_list_append(out, (int64_t)str);
+    }
+}
+
+Py23List* py23_sys_argv(void) {
+    if (!sys_argv_list) sys_argv_list = py23_list_new(0, 1);
+    return sys_argv_list;
+}
+
+void py23_sys_exit(int64_t code) { exit((int)code); }
 
 /* ── 输出 ─────────────────────────────────────────────────────── */
 

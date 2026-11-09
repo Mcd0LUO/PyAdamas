@@ -18,6 +18,8 @@
 #include <unordered_map>
 #include <unordered_set>
 
+#include "module.h"
+
 namespace py23 {
 namespace {
 
@@ -132,8 +134,7 @@ struct FuncCtx {
     // {break 目标块, continue 目标块}
     std::vector<std::pair<int, int>> loops;
     // 每个循环入口处的 cleanup 嵌套深度：break/continue 要跨过的清理层数。
-    std::vector<size_t> loop_cleanup_depth;
-    // 词法上活跃的清理动作，按从外到内排列。return/break/continue 和
+    std::vector<size_t> loop_cleanup_depth;    // 词法上活跃的清理动作，按从外到内排列。return/break/continue 和
     // 异常 landing 都从这里生成对应动作。
     struct Cleanup {
         enum class Kind { With, Finally, Handler, ExcDone } kind;
@@ -148,6 +149,9 @@ struct FuncCtx {
         std::vector<StmtPtr>* body = nullptr;
     };
     std::vector<Cleanup> cleanups;
+    // 函数内 import 的模块别名；模块顶层的别名在 Lowerer::module_aliases_。
+    std::unordered_map<std::string, ModuleInfoPtr> modules;
+    bool is_module_top = false;
     int blk = 0;
     // 函数入口的临时值栈水位；return 时清理到它。
     VReg fn_mark = kNoReg;
@@ -164,8 +168,8 @@ struct FuncCtx {
 
 class Lowerer {
 public:
-    Lowerer(IRModule& m, TypeChecker& tc, std::string file)
-        : mod_(m), tc_(tc), file_(std::move(file)) {}
+    Lowerer(IRModule& m, TypeChecker& tc, std::string file, LowerOptions options = {})
+        : mod_(m), tc_(tc), file_(std::move(file)), opts_(std::move(options)) {}
 
     void run(Module& ast);
 
@@ -175,6 +179,7 @@ private:
     IRModule& mod_;
     TypeChecker& tc_;
     std::string file_;
+    LowerOptions opts_;
     std::vector<LowerError> errors_;
 
     std::vector<std::unique_ptr<FuncCtx>> frames_;
@@ -182,6 +187,18 @@ private:
     // 推导式的循环变量是独立作用域，不能污染函数槽表。这里按嵌套
     // 层次保存「名字 → 槽」，查找时内层优先。
     std::vector<std::unordered_map<std::string, int>> comp_slots_;
+
+    // 模块导入：顶层别名 + 已插入的外部全局（按链接符号去重）。
+    std::unordered_map<std::string, ModuleInfoPtr> module_aliases_;
+    std::unordered_map<std::string, int> extern_globals_;
+    // from m import C：类不是运行时值，只登记编译期元数据。
+    std::unordered_map<std::string, ImportedClass> imported_classes_;
+    // from math/sys import f：原生函数只能直接调用。
+    struct NativeRef {
+        std::string module;
+        std::string member;
+    };
+    std::unordered_map<std::string, NativeRef> native_aliases_;
 
     std::unordered_map<std::string, int> global_ids_;
     std::unordered_map<std::string, FunctionDef*> func_defs_;
@@ -481,6 +498,7 @@ private:
 
     void release_globals() {
         for (size_t gi = 0; gi < mod_.globals.size(); ++gi) {
+            if (mod_.globals[gi].external) continue;
             TypePtr ty = mod_.globals[gi].ty;
             if (!ir_is_heap(ty)) continue;
             rc_dec(load_global(static_cast<int>(gi), ty));
@@ -512,8 +530,24 @@ private:
             auto sit = ms->vars.find(name);
             if (sit != ms->vars.end()) ty = sit->second.ty;
         }
+        return global_idx_as(name, ty);
+    }
+
+    int global_idx_as(const std::string& name, TypePtr ty) {
+        auto it = global_ids_.find(name);
+        if (it != global_ids_.end()) {
+            if (ty && mod_.globals[it->second].ty &&
+                mod_.globals[it->second].ty->kind == TyKind::Unknown)
+                mod_.globals[it->second].ty = ty;
+            return it->second;
+        }
         int id = static_cast<int>(mod_.globals.size());
-        mod_.globals.push_back(IRGlobal{name, ty});
+        IRGlobal g;
+        g.name = name;
+        g.ty = ty ? ty : t_unknown();
+        if (!opts_.module_symbol.empty())
+            g.symbol = module_global_symbol(opts_.module_symbol, name);
+        mod_.globals.push_back(std::move(g));
         global_ids_[name] = id;
         return id;
     }
@@ -729,6 +763,21 @@ private:
     void lower_assert(Assert& a);
     void lower_try(Try& t);
     void lower_raise(Raise& r);
+    void lower_import(Import& im);
+    void lower_import_from(ImportFrom& im);
+    ModuleInfoPtr resolve_module_alias(const std::string& name) const;
+    void ensure_module_init(const ModuleInfoPtr& mod);
+    int extern_global(const std::string& symbol, const std::string& debug_name, TypePtr ty);
+
+    // 模块属性读取（m.x / m.f），返回外部全局槽；类导入留给 0.14b。
+    std::optional<int> module_member(Attribute& at, ModuleInfoPtr* owner = nullptr);
+    VReg construct_imported(const ImportedClass& ic, Call& c, TypePtr cls_ty);
+    VReg call_native(const std::string& module, const std::string& member, Call& c,
+                     const FuncInfoPtr& info);
+    bool builtin_value(const std::string& module, const std::string& member, VReg& out,
+                       TypePtr& ty);
+    static std::optional<RtFn> native_fn(const std::string& module, const std::string& member);
+    void compile_ctor_wrapper(ClassDef& clsdef, const ClassInfoPtr& ci, int cid);
 
     // ── 类 ──────────────────────────────────────────────────────
 
@@ -939,12 +988,11 @@ void Lowerer::scan_globals(Stmt& s, bool enter_functions) {
             global_idx(static_cast<ClassDef&>(s).name);
             break;
         case StmtKind::Import:
-            for (auto& a : static_cast<Import&>(s).names)
-                global_idx(a.asname.empty() ? a.name : a.asname);
+            // import m 只绑定编译期模块别名，不占运行时全局槽。
             break;
         case StmtKind::ImportFrom:
             for (auto& a : static_cast<ImportFrom&>(s).names)
-                global_idx(a.asname.empty() ? a.name : a.asname);
+                if (a.name != "*") global_idx(a.asname.empty() ? a.name : a.asname);
             break;
         default:
             break;
@@ -1108,25 +1156,39 @@ void Lowerer::collect_classes(std::vector<StmtPtr>& body) {
 // ────────────────────────── 入口 ──────────────────────────
 
 void Lowerer::run(Module& ast) {
+    mod_.module_symbol = opts_.module_symbol;
+    mod_.runtime_name = opts_.runtime_name;
+    mod_.source_path = opts_.source_path.empty() ? file_ : opts_.source_path;
+    mod_.is_entry = opts_.is_entry;
+
     hoist_globals(ast.body);
     collect_funcdefs(ast.body);
     for (auto* root : func_roots_) compute_closure_meta(root);
     classes_ = tc_.classes();
     collect_classes(ast.body);
 
-    IRFunction* entry = mod_.add_func("__py23_main");
-    entry->ret = t_int();
+    IRFunction* entry = mod_.add_func(opts_.is_entry ? "__py23_main" : "__py23_init");
+    entry->ret = opts_.is_entry ? t_int() : t_none();
     mod_.entry = static_cast<int>(mod_.funcs.size()) - 1;
 
     push_frame(entry, tc_.module_scope());
+    st_->is_module_top = true;
     int b = new_block("entry");
     switch_to(b);
-    st_->is_entry = true;
+    st_->is_entry = opts_.is_entry;
     st_->fn_mark = rc_mark_at(st_->fn_mark_block, st_->fn_mark_pos);
+
+    // __name__ / __file__：导入方也可能读它们，作为普通 str 全局存放。
+    int name_gi = global_idx_as("__name__", t_str());
+    store_global(name_gi, const_str(mod_.runtime_name));
+    int file_gi = global_idx_as("__file__", t_str());
+    store_global(file_gi, const_str(mod_.source_path));
 
     stmts(ast.body);
 
-    if (!terminated()) emit_return(const_int(0), t_int());
+    if (!terminated())
+        emit_return(opts_.is_entry ? const_int(0) : const_none(),
+                    opts_.is_entry ? t_int() : t_none());
     if (st_->rc_pushes == 0)
         erase_mark(st_->fn_mark_block, st_->fn_mark_pos, st_->fn_mark);
 
@@ -1246,8 +1308,8 @@ void Lowerer::stmt(Stmt& s) {
         case StmtKind::Raise: lower_raise(static_cast<Raise&>(s)); break;
         case StmtKind::With: lower_with(static_cast<With&>(s)); break;
         case StmtKind::ClassDef: lower_classdef(static_cast<ClassDef&>(s)); break;
-        case StmtKind::Import: unsupported(s, "'import'"); break;
-        case StmtKind::ImportFrom: unsupported(s, "'from ... import'"); break;
+        case StmtKind::Import: lower_import(static_cast<Import&>(s)); break;
+        case StmtKind::ImportFrom: lower_import_from(static_cast<ImportFrom&>(s)); break;
         case StmtKind::Global: {
             for (auto& n : static_cast<Global&>(s).names) st_->globals_decl.insert(n);
             break;
@@ -1903,6 +1965,239 @@ void Lowerer::lower_raise(Raise& r) {
     call_void(RtFn::Raise, {const_str(type), msg});
 }
 
+ModuleInfoPtr Lowerer::resolve_module_alias(const std::string& name) const {
+    // 局部变量 / 推导式变量 / 模块级普通变量都能遮蔽模块别名。
+    if (st_ && st_->slots.count(name)) return nullptr;
+    if (comp_slot(name) >= 0) return nullptr;
+    if (auto* ms = tc_.module_scope())
+        if (ms->vars.count(name)) return nullptr;
+    if (st_) {
+        auto it = st_->modules.find(name);
+        if (it != st_->modules.end()) return it->second;
+    }
+    auto it = module_aliases_.find(name);
+    return it == module_aliases_.end() ? nullptr : it->second;
+}
+
+void Lowerer::ensure_module_init(const ModuleInfoPtr& mod) {
+    if (!mod) return;
+    int idx = -1;
+    for (size_t i = 0; i < mod_.imports.size(); ++i)
+        if (mod_.imports[i] == mod->name) {
+            idx = static_cast<int>(i);
+            break;
+        }
+    if (idx < 0) {
+        idx = static_cast<int>(mod_.imports.size());
+        mod_.imports.push_back(mod->name);
+    }
+    Inst in;
+    in.op = IrOp::ImportModule;
+    in.imm = idx;
+    emit(std::move(in));
+}
+
+int Lowerer::extern_global(const std::string& symbol, const std::string& debug_name, TypePtr ty) {
+    auto it = extern_globals_.find(symbol);
+    if (it != extern_globals_.end()) {
+        auto& g = mod_.globals[it->second];
+        if (ty && g.ty && g.ty->kind == TyKind::Unknown) g.ty = ty;
+        return it->second;
+    }
+    IRGlobal g;
+    g.name = debug_name;
+    g.ty = ty ? ty : t_unknown();
+    g.symbol = symbol;
+    g.external = true;
+    int id = static_cast<int>(mod_.globals.size());
+    mod_.globals.push_back(std::move(g));
+    extern_globals_[symbol] = id;
+    return id;
+}
+
+std::optional<int> Lowerer::module_member(Attribute& at, ModuleInfoPtr* owner) {    auto* n = dynamic_cast<Name*>(at.value.get());
+    if (!n) return std::nullopt;
+    auto mod = resolve_module_alias(n->id);
+    if (!mod) return std::nullopt;
+    if (owner) *owner = mod;
+    auto it = mod->globals.find(at.attr);
+    if (it == mod->globals.end()) {
+        err(at.line, at.col,
+            std::format("module '{}' has no attribute '{}'", n->id, at.attr));
+        return std::nullopt;
+    }
+    if (it->second && it->second->kind == TyKind::Class) {
+        err(at.line, at.col, std::format("class '{}' cannot be used as a value", at.attr));
+        return std::nullopt;
+    }
+    return extern_global(module_global_symbol(mod->name, at.attr),
+                         std::format("{}.{}", mod->name, at.attr), it->second);
+}
+
+VReg Lowerer::construct_imported(const ImportedClass& ic, Call& c, TypePtr cls_ty) {
+    TypePtr fty = new_ty(TyKind::Func);
+    fty->fn = ic.ctor_sig;
+    int gi = extern_global(ic.ctor_symbol, ic.ctor_symbol, fty);
+    VReg callee = load_global(gi, fty);
+    std::vector<VReg> args = bind_args(c, ic.ctor_sig, nullptr);
+    Inst in;
+    in.op = IrOp::Call;
+    in.a = callee;
+    in.args = std::move(args);
+    return def_heap(cls_ty, std::move(in));
+}
+
+std::optional<RtFn> Lowerer::native_fn(const std::string& module, const std::string& member) {
+    if (module == "math") {
+        if (member == "sqrt") return RtFn::MathSqrt;
+        if (member == "floor") return RtFn::MathFloor;
+        if (member == "ceil") return RtFn::MathCeil;
+        if (member == "fabs") return RtFn::MathFabs;
+        if (member == "sin") return RtFn::MathSin;
+        if (member == "cos") return RtFn::MathCos;
+        if (member == "tan") return RtFn::MathTan;
+        if (member == "log") return RtFn::MathLog;
+        if (member == "log2") return RtFn::MathLog2;
+        if (member == "log10") return RtFn::MathLog10;
+        if (member == "exp") return RtFn::MathExp;
+        if (member == "pow") return RtFn::MathPow;
+        if (member == "fmod") return RtFn::MathFmod;
+    } else if (module == "sys" && member == "exit") {
+        return RtFn::SysExit;
+    }
+    return std::nullopt;
+}
+
+bool Lowerer::builtin_value(const std::string& module, const std::string& member, VReg& out,
+                            TypePtr& ty) {
+    if (module == "math") {
+        if (member == "pi") {
+            out = const_float(3.14159265358979323846);
+            ty = t_float();
+            return true;
+        }
+        if (member == "e") {
+            out = const_float(2.71828182845904523536);
+            ty = t_float();
+            return true;
+        }
+        if (member == "tau") {
+            out = const_float(6.28318530717958647692);
+            ty = t_float();
+            return true;
+        }
+    } else if (module == "sys") {
+        if (member == "maxsize") {
+            out = const_int(std::numeric_limits<int64_t>::max());
+            ty = t_int();
+            return true;
+        }
+        if (member == "argv") {
+            ty = mk_list(t_str());
+            out = call_runtime(RtFn::SysArgv, ty, {});
+            return true;
+        }
+    }
+    return false;
+}
+
+VReg Lowerer::call_native(const std::string& module, const std::string& member, Call& c,
+                          const FuncInfoPtr& info) {
+    auto fn = native_fn(module, member);
+    if (!fn) {
+        err(c.line, c.col, std::format("{}.{} is not a supported native function", module, member));
+        return const_none();
+    }
+    std::vector<VReg> args = bind_args(c, info, nullptr);
+    if (*fn == RtFn::SysExit) {
+        call_void(*fn, args);
+        return const_none();
+    }
+    TypePtr rt = info && info->ret ? info->ret : t_float();
+    return call_runtime(*fn, rt, std::move(args));
+}
+
+void Lowerer::lower_import(Import& im) {
+    for (auto& al : im.names) {
+        if (al.name.find('.') != std::string::npos) {
+            err(im.line, im.col, "dotted module imports are not supported yet");
+            continue;
+        }
+        std::string bind = al.asname.empty() ? al.name : al.asname;
+        if (!opts_.module_lookup) {
+            err(im.line, im.col, "import requires a multi-module build");
+            continue;
+        }
+        auto mod = opts_.module_lookup(al.name);
+        if (!mod) {
+            err(im.line, im.col, std::format("cannot resolve module '{}'", al.name));
+            continue;
+        }
+        if (!mod->builtin) ensure_module_init(mod);
+        if (st_->is_module_top) module_aliases_[bind] = mod;
+        else st_->modules[bind] = mod;
+    }
+}
+
+void Lowerer::lower_import_from(ImportFrom& im) {
+    if (im.level != 0 || im.module.empty()) {
+        err(im.line, im.col, "relative imports are not supported yet");
+        return;
+    }
+    if (im.names.size() == 1 && im.names[0].name == "*") {
+        err(im.line, im.col, "'from ... import *' is not supported yet");
+        return;
+    }
+    if (im.module.find('.') != std::string::npos) {
+        err(im.line, im.col, "dotted module imports are not supported yet");
+        return;
+    }
+    if (!opts_.module_lookup) {
+        err(im.line, im.col, "import requires a multi-module build");
+        return;
+    }
+    auto mod = opts_.module_lookup(im.module);
+    if (!mod) {
+        err(im.line, im.col, std::format("cannot resolve module '{}'", im.module));
+        return;
+    }
+    if (!mod->builtin) ensure_module_init(mod);
+    for (auto& al : im.names) {
+        std::string bind = al.asname.empty() ? al.name : al.asname;
+        if (mod->builtin) {
+            if (native_fn(mod->name, al.name)) {
+                native_aliases_[bind] = NativeRef{mod->name, al.name};
+                continue;
+            }
+            VReg bv;
+            TypePtr bty;
+            if (builtin_value(mod->name, al.name, bv, bty)) {
+                bind_name_value(bind, bv, bty);
+                continue;
+            }
+            err(im.line, im.col,
+                std::format("module '{}' has no attribute '{}'", im.module, al.name));
+            continue;
+        }
+        if (auto ci = mod->classes.find(al.name); ci != mod->classes.end()) {
+            imported_classes_[bind] = ci->second;
+            continue;
+        }
+        auto it = mod->globals.find(al.name);
+        if (it == mod->globals.end()) {
+            err(im.line, im.col,
+                std::format("module '{}' has no attribute '{}'", im.module, al.name));
+            continue;
+        }
+        int gi = extern_global(module_global_symbol(mod->name, al.name),
+                               std::format("{}.{}", mod->name, al.name), it->second);
+        VReg v = load_global(gi, it->second);
+        // 快照绑定：本地/全局槽持有一份引用。
+        if (!it->second || it->second->kind == TyKind::Unknown) rc_inc_unknown(v);
+        bind_name_value(bind, v, it->second);
+    }
+}
+
 void Lowerer::lower_try(Try& t) {
     if (!t.finalbody.empty()) {
         lower_finally(t);
@@ -2345,6 +2640,10 @@ void Lowerer::lower_classdef(ClassDef& c) {
         return;
     }
     int cid = cid_it->second;
+    if (ci->base && !class_ids_.count(ci->base)) {
+        err(c.line, c.col, "inheriting from an imported class is not supported yet");
+        return;
+    }
 
     // 类型检查阶段把这两类标成「没建模」而不是错误（标准库里太常见），
     // 到这儿必须拦住：布局只跟一个基类走、类体语句会被静默丢弃，
@@ -2391,6 +2690,100 @@ void Lowerer::lower_classdef(ClassDef& c) {
         if (m.slot >= 0 && m.slot < static_cast<int>(mod_.classes[cid].vtable.size()))
             mod_.classes[cid].vtable[static_cast<size_t>(m.slot)] = fidx;
     }
+
+    if (!opts_.module_symbol.empty() && !opts_.is_entry)
+        compile_ctor_wrapper(c, ci, cid);
+}
+
+void Lowerer::compile_ctor_wrapper(ClassDef& clsdef, const ClassInfoPtr& ci, int cid) {
+    (void)clsdef;
+    const MethodInfo* init = ci->method("__init__");
+    FuncInfoPtr sig;
+    if (init && init->call_sig) {
+        if (init->call_sig->varargs || init->call_sig->kwargs) return;
+        sig = init->call_sig;
+    }
+    auto ctor = std::make_shared<FuncInfo>();
+    ctor->name = "__new_" + ci->name;
+    if (sig) {
+        ctor->pos = sig->pos;
+        ctor->n_posonly = sig->n_posonly;
+        ctor->kwonly = sig->kwonly;
+    }
+    TypePtr cls_ty = mk_class(ci.get());
+    TypePtr fty = new_ty(TyKind::Func);
+    fty->fn = ctor;
+
+    std::string label = std::format("__py23_new_{}_{}", ci->name, mod_.funcs.size());
+    IRFunction* wf = mod_.add_func(label);
+    int widx = static_cast<int>(mod_.funcs.size()) - 1;
+    wf->ret = cls_ty;
+    push_frame(wf, nullptr);
+    int entry = new_block("entry");
+    switch_to(entry);
+    st_->fn_mark = rc_mark_at(st_->fn_mark_block, st_->fn_mark_pos);
+
+    std::vector<int> arg_slots;
+    auto add_param = [&](const Param& p) {
+        TypePtr T = p.ty ? p.ty : t_unknown();
+        int s = wf->new_slot(T);
+        wf->params.push_back(IRParam{p.name, T, s});
+        st_->slots[p.name] = s;
+        arg_slots.push_back(s);
+    };
+    if (sig) {
+        for (auto& p : sig->pos) add_param(p);
+        for (auto& p : sig->kwonly) add_param(p);
+    }
+    inc_params();
+
+    Inst on;
+    on.op = IrOp::ObjNew;
+    on.imm = cid;
+    VReg obj = def_heap(cls_ty, std::move(on));
+
+    std::vector<const ClassInfo*> chain;
+    for (auto* p = ci.get(); p; p = p->base) chain.push_back(p);
+    for (auto it = chain.rbegin(); it != chain.rend(); ++it) {
+        for (auto& f : (*it)->fields) {
+            if (!f.has_default || !f.default_expr) continue;
+            VReg v = expr(*f.default_expr);
+            v = coerce(v, vreg_ty(v), f.ty);
+            int off = static_cast<int>(8 * (1 + ci->field_index(f.name)));
+            store_field(f.ty, obj, off, v);
+        }
+    }
+
+    if (sig && init->slot >= 0) {
+        std::vector<VReg> args;
+        for (int s : arg_slots) args.push_back(load_slot(s, wf->slot_ty[s]));
+        Inst vc;
+        vc.op = IrOp::VCall;
+        vc.a = obj;
+        vc.imm = init->slot;
+        vc.args = std::move(args);
+        TypePtr rt = sig->ret ? sig->ret : t_none();
+        VReg r = def_heap(rt, std::move(vc));
+        (void)r;
+    }
+    emit_return(obj, cls_ty);
+    if (st_->rc_pushes == 0)
+        erase_mark(st_->fn_mark_block, st_->fn_mark_pos, st_->fn_mark);
+    pop_frame();
+
+    // 模块顶层绑定隐藏全局：导入方按 ctor_symbol 加载闭包。
+    IRGlobal g;
+    g.name = "__py23$new$" + ci->name;
+    g.symbol = module_class_new_symbol(opts_.module_symbol, ci->name);
+    g.ty = fty;
+    int gi = static_cast<int>(mod_.globals.size());
+    mod_.globals.push_back(std::move(g));
+    global_ids_["__py23$new$" + ci->name] = gi;
+    Inst fa;
+    fa.op = IrOp::FuncAddr;
+    fa.imm = widx;
+    VReg fv = def(fty, std::move(fa));
+    store_global(gi, fv);
 }
 
 void Lowerer::lower_assert(Assert& a) {
@@ -2568,6 +2961,20 @@ void Lowerer::assign_to(Expr& target, VReg v, TypePtr vty) {
         }
         case ExprKind::Attribute: {
             auto& at = static_cast<Attribute&>(target);
+            if (auto* n = dynamic_cast<Name*>(at.value.get())) {
+                if (auto mod = resolve_module_alias(n->id); mod && mod->builtin) {
+                    err(target.line, target.col,
+                        std::format("cannot assign to builtin module attribute '{}.{}'", n->id,
+                                    at.attr));
+                    break;
+                }
+            }
+            if (auto gi = module_member(at)) {
+                TypePtr mt = mod_.globals[*gi].ty;
+                v = coerce(v, src_ty, mt);
+                store_global(*gi, v);
+                break;
+            }
             TypePtr raw = tc_.type_of(at.value.get());
             TypePtr ot = strip_optional(raw);
             bool opt = ot != raw;
@@ -2614,6 +3021,20 @@ VReg Lowerer::expr(Expr& e) {
             }
             if (is_cell(n.id)) return read_cell(n.id);
             if (is_env(n.id)) return read_env(n.id);
+            if (imported_classes_.count(n.id)) {
+                err(e.line, e.col,
+                    std::format("class '{}' cannot be used as a value", n.id));
+                return const_none();
+            }
+            if (native_aliases_.count(n.id)) {
+                err(e.line, e.col,
+                    std::format("native function '{}' cannot be used as a value", n.id));
+                return const_none();
+            }
+            if (resolve_module_alias(n.id)) {
+                err(e.line, e.col, std::format("module '{}' cannot be used as a value", n.id));
+                return const_none();
+            }
             // 类名不是一个运行时可求值的值：没有类对象，构造必须在调用点
             // 直接展开。悄悄读一个空全局槽只会得到 0，比报错难查得多。
             if (!is_local(n.id) && classes_.count(n.id)) {
@@ -2670,6 +3091,27 @@ VReg Lowerer::expr(Expr& e) {
         }
         case ExprKind::Attribute: {
             auto& a = static_cast<Attribute&>(e);
+            if (auto* n = dynamic_cast<Name*>(a.value.get())) {
+                if (auto mod = resolve_module_alias(n->id); mod && mod->builtin) {
+                    VReg bv;
+                    TypePtr bty;
+                    if (builtin_value(mod->name, a.attr, bv, bty)) return bv;
+                    err(e.line, e.col,
+                        std::format("native function '{}.{}' must be called", n->id, a.attr));
+                    return const_none();
+                }
+            }
+            if (auto* n = dynamic_cast<Name*>(a.value.get())) {
+                if (auto mod = resolve_module_alias(n->id)) {
+                    if (mod->classes.count(a.attr)) {
+                        err(e.line, e.col,
+                            std::format("class '{}.{}' cannot be used as a value", n->id, a.attr));
+                        return const_none();
+                    }
+                }
+            }
+            if (auto gi = module_member(a))
+                return load_global(*gi, mod_.globals[*gi].ty);
             TypePtr raw = tc_.type_of(a.value.get());
             TypePtr ot = strip_optional(raw);
             bool opt = ot != raw;
@@ -3578,7 +4020,21 @@ std::vector<VReg> Lowerer::bind_args(Call& c, const FuncInfoPtr& info, FunctionD
     }
 
     // 缺省参数：只支持字面量常量默认值
+    auto lit_to_const = [](const LiteralValue& lv) {
+        ConstVal cv;
+        switch (lv.kind) {
+            case LiteralValue::Kind::None: cv.ty = t_none(); break;
+            case LiteralValue::Kind::Bool: cv.ty = t_bool(); cv.i = lv.b ? 1 : 0; break;
+            case LiteralValue::Kind::Int: cv.ty = t_int(); cv.i = lv.i; break;
+            case LiteralValue::Kind::Float: cv.ty = t_float(); cv.f = lv.f; break;
+            case LiteralValue::Kind::Str: cv.ty = t_str(); cv.s = lv.s; break;
+        }
+        return cv;
+    };
     auto default_of = [&](size_t pos_index) -> std::optional<ConstVal> {
+        // 跨模块接口只有 default_lit，没有 AST。
+        if (info && pos_index < info->pos.size() && info->pos[pos_index].default_lit)
+            return lit_to_const(*info->pos[pos_index].default_lit);
         // 签名里的默认表达式优先：通过函数值 / lambda 调用时没有
         // FunctionDef 可查，只能靠 FuncInfo 带着的 AST 指针。
         if (info && pos_index < info->pos.size() && info->pos[pos_index].default_expr)
@@ -3629,9 +4085,11 @@ std::vector<VReg> Lowerer::bind_args(Call& c, const FuncInfoPtr& info, FunctionD
             bound[bi] = const_none();
             continue;
         }
-        // kwonly 默认值：签名里带了默认表达式就直接用，否则回退到 def。
+        // kwonly 默认值：签名里带了默认值就直接用，否则回退到 def。
         std::optional<ConstVal> cv;
-        if (info && i < info->kwonly.size() && info->kwonly[i].default_expr)
+        if (info && i < info->kwonly.size() && info->kwonly[i].default_lit)
+            cv = lit_to_const(*info->kwonly[i].default_lit);
+        if (!cv && info && i < info->kwonly.size() && info->kwonly[i].default_expr)
             cv = as_const(info->kwonly[i].default_expr);
         if (!cv && defn && i < defn->args.kw_defaults.size() && defn->args.kw_defaults[i])
             cv = as_const(defn->args.kw_defaults[i].get());
@@ -3720,6 +4178,13 @@ VReg Lowerer::lower_call(Call& c) {
         // 否则会退化成 LoadGlobal 读到一个空槽。
         if (auto it = classes_.find(n.id); it != classes_.end())
             return lower_construct(c, it->second);
+        if (auto it = imported_classes_.find(n.id); it != imported_classes_.end())
+            return construct_imported(it->second, c, mk_class(it->second.cls.get()));
+        if (auto it = native_aliases_.find(n.id); it != native_aliases_.end()) {
+            TypePtr ft = tc_.type_of(c.func.get());
+            FuncInfoPtr info = (ft && ft->kind == TyKind::Func) ? ft->fn : nullptr;
+            return call_native(it->second.module, it->second.member, c, info);
+        }
     }
 
     // 方法调用
@@ -3871,6 +4336,41 @@ VReg Lowerer::lower_print(Call& c) {
 }
 
 VReg Lowerer::lower_method_call(Attribute& at, Call& c) {
+    // 内置模块的原生函数/常量。
+    if (auto* n = dynamic_cast<Name*>(at.value.get())) {
+        if (auto mod = resolve_module_alias(n->id); mod && mod->builtin) {
+            auto it = mod->globals.find(at.attr);
+            if (it != mod->globals.end() && it->second && it->second->kind == TyKind::Func)
+                return call_native(mod->name, at.attr, c, it->second->fn);
+            err(c.line, c.col,
+                std::format("module attribute '{}.{}' is not callable", n->id, at.attr));
+            return const_none();
+        }
+    }
+    // m.C()：导入类的构造包装。
+    if (auto* n = dynamic_cast<Name*>(at.value.get())) {
+        if (auto mod = resolve_module_alias(n->id)) {
+            if (auto ci = mod->classes.find(at.attr); ci != mod->classes.end())
+                return construct_imported(ci->second, c, mk_class(ci->second.cls.get()));
+        }
+    }
+    // m.f()：外部全局里存的是函数闭包，加载后按普通 call 调用。
+    if (auto gi = module_member(at)) {
+        TypePtr ft = mod_.globals[*gi].ty;
+        FuncInfoPtr info = (ft && ft->kind == TyKind::Func) ? ft->fn : nullptr;
+        if (!info) {
+            err(c.line, c.col, "module attribute is not callable");
+            return const_none();
+        }
+        VReg callee = load_global(*gi, ft);
+        std::vector<VReg> args = bind_args(c, info, nullptr);
+        Inst in;
+        in.op = IrOp::Call;
+        in.a = callee;
+        in.args = std::move(args);
+        TypePtr rt = info->ret ? info->ret : t_unknown();
+        return def_heap(rt, std::move(in));
+    }
     TypePtr raw = tc_.type_of(at.value.get());
     TypePtr recv_ty = strip_optional(raw);
     bool opt = recv_ty != raw;
@@ -4160,9 +4660,10 @@ void Lowerer::print_value(VReg v, TypePtr ty, int line, int col) {
 
 }  // namespace
 
-LowerResult lower_module(Module& ast, TypeChecker& tc, const std::string& file) {
+LowerResult lower_module(Module& ast, TypeChecker& tc, const std::string& file,
+                         const LowerOptions& options) {
     LowerResult res;
-    Lowerer lw(res.mod, tc, file);
+    Lowerer lw(res.mod, tc, file, options);
     lw.run(ast);
     res.errors = std::move(lw.errors());
     return res;

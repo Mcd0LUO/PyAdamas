@@ -29,6 +29,8 @@
 #include <queue>
 #include <unordered_map>
 
+#include "module.h"
+
 namespace py23 {
 namespace {
 
@@ -101,19 +103,32 @@ public:
         if (!m.globals.empty()) {
             out_ += "\t.bss\n";
             out_ += "\t.align 8\n";
-            for (size_t i = 0; i < m.globals.size(); ++i)
-                out_ += std::format(".Lg{}:\n\t.zero 8\n", i);
+            for (size_t i = 0; i < m.globals.size(); ++i) {
+                if (m.globals[i].external) continue;
+                if (!m.globals[i].symbol.empty())
+                    out_ += "\t.globl " + m.globals[i].symbol + "\n";
+                out_ += std::format("{}:\n\t.zero 8\n", global_label(static_cast<int>(i)));
+            }
 
-            // GC 根表：所有全局槽的地址。类型 unknown 的全局也可能存堆指针，
-            // 所以不做类型过滤，运行时会按地址查注册表。
+            // GC 根表：所有本模块全局槽的地址；外部全局的存储属于对方模块。
             out_ += "\t.section .data.rel.ro,\"aw\",@progbits\n";
             out_ += "\t.align 8\n";
-            out_ += ".Lgroots:\n";
-            for (size_t i = 0; i < m.globals.size(); ++i)
-                out_ += std::format("\t.quad .Lg{}\n", i);
+            out_ += std::format("{}:\n", roots_label());
+            for (size_t i = 0; i < m.globals.size(); ++i) {
+                if (m.globals[i].external) continue;
+                out_ += std::format("\t.quad {}\n", global_label(static_cast<int>(i)));
+            }
         } else {
             out_ += "\t.section .data.rel.ro,\"aw\",@progbits\n";
-            out_ += "\t.align 8\n.Lgroots:\n";
+            out_ += std::format("\t.align 8\n{}:\n", roots_label());
+        }
+
+        // 非入口模块的惰性初始化标志。
+        if (!m.is_entry && !m.module_symbol.empty()) {
+            out_ += "\t.bss\n\t.align 8\n";
+            out_ += std::format("\t.globl {}\n{}:\n\t.zero 8\n",
+                                module_ready_symbol(m.module_symbol),
+                                module_ready_symbol(m.module_symbol));
         }
 
         // 每个类一张静态 vtable：槽里是方法代码地址。对象头第一个
@@ -182,26 +197,55 @@ public:
 
         for (size_t i = 0; i < m.funcs.size(); ++i) emit_function(*m.funcs[i], static_cast<int>(i));
 
+        if (!m.is_entry && !m.module_symbol.empty() && m.entry >= 0) {
+            out_ += "\t.globl " + module_init_symbol(m.module_symbol) + "\n";
+            out_ += "\t.set " + module_init_symbol(m.module_symbol) + ", " +
+                    func_label(m.entry) + "\n";
+        }
+
         // 真正的入口：调用降级出来的 __py23_main，返回它的返回值
-        out_ += "\t.globl main\n";
-        out_ += "\t.type main, @function\n";
-        out_ += "main:\n";
-        out_ += "\tpushq %rbp\n";
-        out_ += "\tmovq %rsp, %rbp\n";
-        // GC 根表 + 栈顶。栈顶取 main 的 rsp，收集器向下扫描到当前帧。
-        out_ += "\tleaq .Lgroots(%rip), %rdi\n";
-        out_ += std::format("\tmovq ${}, %rsi\n", m.globals.size());
-        out_ += "\tmovq %rsp, %rdx\n";
-        out_ += "\tcall py23_gc_init\n";
-        if (m.entry >= 0) out_ += std::format("\tcall {}\n", func_label(m.entry));
-        out_ += "\tpopq %rbp\n";
-        out_ += "\tret\n";
+        if (m.is_entry) {
+            out_ += "\t.globl main\n";
+            out_ += "\t.type main, @function\n";
+            out_ += "main:\n";
+            out_ += "\tpushq %rbp\n";
+            out_ += "\tmovq %rsp, %rbp\n";
+            out_ += "\tsubq $16, %rsp\n";
+            out_ += "\tmovq %rdi, (%rsp)\n";
+            out_ += "\tmovq %rsi, 8(%rsp)\n";
+            // GC 根表 + 栈顶。栈顶取 main 的 rbp，收集器向下扫描。
+            out_ += std::format("\tleaq {}(%rip), %rdi\n", roots_label());
+            out_ += std::format("\tmovq ${}, %rsi\n", local_global_count());
+            out_ += "\tmovq %rbp, %rdx\n";
+            out_ += "\tcall py23_gc_init\n";
+            out_ += "\tmovslq (%rsp), %rdi\n";
+            out_ += "\tmovq 8(%rsp), %rsi\n";
+            out_ += "\tcall py23_sys_set_args\n";
+            out_ += "\taddq $16, %rsp\n";
+            if (m.entry >= 0) out_ += std::format("\tcall {}\n", func_label(m.entry));
+            out_ += "\tpopq %rbp\n";
+            out_ += "\tret\n";
+        }
         out_ += "\t.section .note.GNU-stack,\"\",@progbits\n";
 
         return std::move(out_);
     }
 
 private:
+    std::string global_label(int i) const {
+        const auto& g = m_->globals[static_cast<size_t>(i)];
+        return g.symbol.empty() ? std::format(".Lg{}", i) : g.symbol;
+    }
+    std::string roots_label() const {
+        return m_->module_symbol.empty() ? ".Lgroots"
+                                         : module_roots_symbol(m_->module_symbol);
+    }
+    size_t local_global_count() const {
+        size_t n = 0;
+        for (auto& g : m_->globals)
+            if (!g.external) ++n;
+        return n;
+    }
     const IRModule* m_ = nullptr;
     const IRFunction* f_ = nullptr;
     int fi_ = 0;
@@ -552,6 +596,13 @@ private:
         // 有捕获的函数从 %r10 拿闭包环境；调用方在 call 前设置。
         if (f.env_slot >= 0) line(std::format("movq %r10, {}", slot_op(f.env_slot)));
 
+        // 被导入模块的 init：先把自己的全局根表交给 GC，再跑顶层代码。
+        if (!m_->is_entry && fi == m_->entry) {
+            line(std::format("leaq {}(%rip), %rdi", roots_label()));
+            line(std::format("movq ${}, %rsi", local_global_count()));
+            line("call py23_gc_add_roots");
+        }
+
         for (size_t bi = 0; bi < f.blocks.size(); ++bi) {
             label(block_label(static_cast<int>(bi)));
             gen_block(f.blocks[bi]);
@@ -742,12 +793,12 @@ private:
                 invalidate_slot(in.idx);
                 break;
             case IrOp::LoadGlobal:
-                line(std::format("movq .Lg{}(%rip), %rax", in.idx));
+                line(std::format("movq {}(%rip), %rax", global_label(in.idx)));
                 move_to(dst_op(in.dst), "%rax");
                 break;
             case IrOp::StoreGlobal:
                 line(std::format("movq {}, %rax", src_op(in.a)));
-                line(std::format("movq %rax, .Lg{}(%rip)", in.idx));
+                line(std::format("movq %rax, {}(%rip)", global_label(in.idx)));
                 break;
             case IrOp::MakeList: gen_make_list(in); break;
             case IrOp::MakeTuple: gen_make_list(in); break;
@@ -765,6 +816,13 @@ private:
             case IrOp::Call: gen_call(in); break;
             case IrOp::CallRt: gen_call_rt(in); break;
             case IrOp::Setjmp: gen_setjmp(in); break;
+            case IrOp::ImportModule: {
+                const std::string& name = m_->imports[static_cast<size_t>(in.imm)];
+                line(std::format("leaq {}(%rip), %rdi", module_ready_symbol(name)));
+                line(std::format("leaq {}(%rip), %rsi", module_init_symbol(name)));
+                line("call py23_import_module");
+                break;
+            }
             case IrOp::Jump: line(std::format("jmp {}", block_label(in.target))); break;
             case IrOp::Branch: gen_branch(in); break;
             case IrOp::Return: gen_return(in); break;
@@ -1483,7 +1541,26 @@ private:
                 break;
             case RtFn::StrFromF64:
             case RtFn::PrintF64:
+            case RtFn::MathSqrt:
+            case RtFn::MathFloor:
+            case RtFn::MathCeil:
+            case RtFn::MathFabs:
+            case RtFn::MathSin:
+            case RtFn::MathCos:
+            case RtFn::MathTan:
+            case RtFn::MathLog:
+            case RtFn::MathLog2:
+            case RtFn::MathLog10:
+            case RtFn::MathExp:
                 line(std::format("movsd {}, %xmm0", src_op(in.args[0])));
+                break;
+            case RtFn::MathPow:
+            case RtFn::MathFmod:
+                line(std::format("movsd {}, %xmm0", src_op(in.args[0])));
+                line(std::format("movsd {}, %xmm1", src_op(in.args[1])));
+                break;
+            case RtFn::SysExit:
+                line(std::format("movq {}, %rdi", src_op(in.args[0])));
                 break;
             case RtFn::PrintStr:
                 line(std::format("movq {}, %rdi", src_op(in.args[0])));
@@ -1505,6 +1582,7 @@ private:
             case RtFn::ExcTypeName:
             case RtFn::ExcMessage:
             case RtFn::Reraise:
+            case RtFn::SysArgv:
                 break;
         }
         line(std::format("call {}", rt_name(fn)));

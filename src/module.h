@@ -1,0 +1,51 @@
+// module.h —— 跨模块接口与 .py23i
+//
+// 分模块编译时，导入方只依赖接口，不读对方的 AST。接口用二进制编码：
+// 头 + 模块名/源路径 + 全局名与类型，尾部 FNV-1a 校验。类型里暂时只
+// 支持 0.14a 需要的标量、容器、Func；Class 等 0.14b 再接。
+#pragma once
+
+#include <cstdint>
+#include <expected>
+#include <map>
+#include <memory>
+#include <string>
+
+#include "typecheck.h"
+
+namespace py23 {
+
+struct ImportedClass {
+    ClassInfoPtr cls;
+    FuncInfoPtr ctor_sig;
+    std::string ctor_symbol;
+};
+
+struct ModuleInfo {
+    std::string name;
+    std::string source_path;
+    bool builtin = false;
+    std::string interface_hash;  // 二进制接口的 FNV-1a 64（hex）
+    // 模块顶层名字 → 类型。函数本身就是 Func 类型的全局。
+    // 类名单独放在 classes 里，不重复出现在 globals。
+    std::map<std::string, TypePtr> globals;
+    std::map<std::string, ImportedClass> classes;
+};
+
+inline constexpr uint16_t kModuleFormatVersion = 2;
+inline constexpr uint16_t kModuleAbiVersion = 1;
+
+std::expected<std::string, std::string> encode_module_interface(const ModuleInfo& info);
+std::expected<ModuleInfoPtr, std::string> decode_module_interface(const std::string& bytes,
+                                                                  const std::string& source_path);
+
+uint64_t fnv1a64(const void* data, size_t n);
+inline uint64_t fnv1a64(const std::string& s) { return fnv1a64(s.data(), s.size()); }
+std::string hex64(uint64_t v);
+std::string module_global_symbol(const std::string& module, const std::string& name);
+std::string module_ready_symbol(const std::string& module);
+std::string module_init_symbol(const std::string& module);
+std::string module_roots_symbol(const std::string& module);
+std::string module_class_new_symbol(const std::string& module, const std::string& cls);
+
+}  // namespace py23

@@ -4,6 +4,105 @@
 
 早期阶段没有逐条留痕，按阶段归纳；0.4 之后逐条记录。
 
+## [0.14c] - 2026-11-09
+
+内置最小标准库：`math` / `sys`。
+
+### 新增
+
+- `math` 常量 `pi`/`e`/`tau` 编译期折叠；`sqrt/floor/ceil/fabs/sin/cos/
+  tan/log/log2/log10/exp/pow/fmod` 映射到运行时包装，`floor`/`ceil`
+  返回 int，`ValueError` 覆盖 sqrt/log*/fmod 的典型域错误。
+- `sys.argv`：生成的 `main(argc, argv)` 初始化字符串列表，并立即注册
+  为 GC 根；通过 `from sys import argv` 也能快照到本地。
+- `sys.exit(code)` 直接结束进程；`sys.maxsize` 是 int64 最大值。
+- `import math as m` / `from math import sqrt as s` 都支持；原生函数
+  只能直接调用，当值传递会报错。
+- 用例 `tests/modules/builtins`。
+
+### 验证
+
+- `make test`：11 正例 + 33 反例 + 22 运行 + 4 未建模 + 7 模块目录
+- 差分测试 600 个程序零差异；严格警告零报告；release 构建通过
+- 编译出的程序带参数运行，`sys.argv` 含程序名和实参；`sys.exit(3)`
+  退出码为 3
+
+### 构建迁移
+
+- 构建系统从 Makefile 迁到 **CMake 3.28 + Ninja**：`CMakePresets.json`
+  提供 dev/release 两个 preset，默认生成 `compile_commands.json`。
+- 运行时 `rt.o` 由 CMake 自定义命令生成，编译器宏里的绝对路径由
+  `CMAKE_BINARY_DIR` 注入；`clean-modcache` 目标清理模块缓存。
+- 原 Makefile 的测试 shell 逻辑抽到 `tests/run_tests.sh`，由 CTest
+  注册为 `py23_suite`：`ctest --preset dev`。
+
+## [0.14b] - 2026-11-09
+
+跨模块类：构造包装、扁平类接口、字段/方法跨模块访问。
+
+### 新增
+
+- `.py23i` class 记录：扁平字段（根→派生顺序）、方法名/槽号/调用签名、
+  `has_init`、构造签名、`ctor_symbol`；格式版本升到 2。
+- 定义模块为每个类生成构造包装 `py23$m$n$C`（ObjNew + 字段初值 +
+  `__init__`），模块 init 绑定到隐藏全局。
+- 导入方支持 `import m; m.C(...)`、`from m import C`，字段读写和方法
+  调用使用导出的偏移/槽位；继承类按最终布局拍平。
+- 构造函数支持默认参数和关键字参数；导出类 `__init__` 的
+  `*args`/`**kwargs` 暂不支持。
+- 类类型出现在跨模块函数签名里降级成 unknown；跨模块继承明确拒绝。
+- 用例 `tests/modules/classes`。
+
+### 验证
+
+- `make test`：11 正例 + 33 反例 + 22 运行 + 4 未建模 + 6 模块目录
+- 差分测试 600 个程序零差异
+- ASan/UBSan/LSan：6 个模块用例零报告
+- 严格警告零报告；release 构建通过
+
+## [0.14a] - 2026-11-09
+
+分模块 import 的第一阶段：模块图、二进制接口、独立 `.o` 与增量缓存。
+
+### 新增
+
+- **模块图**：入口目录 + `-I` 搜索路径；单层模块 `import m` /
+  `import m as n` / `from m import x as y`；点号/相对/星号 import
+  明确报错；循环导入编译期检测。
+- **二进制 `.py23i`**：模块全局名 + 递归类型编码 + 函数签名（含
+  `posonly`、`kwonly`、`*args`/`**kwargs`、字面量默认值）+ FNV-1a
+  校验；文本 manifest 记录源码哈希、依赖接口哈希和 ABI 版本。
+- **独立编译与链接**：每个模块汇编成独立 `.o`，入口、依赖和 `rt.o`
+  链接；入口也走缓存。模块符号 `py23$m$g$x` / `ready` / `init` /
+  `roots`。
+- **惰性初始化**：`import` 在语句点调用 `py23_import_module`，模块顶层
+  只执行一次；模块 init 先 `py23_gc_add_roots` 注册全局根表，不释放
+  全局也不 shutdown。
+- **跨模块名称**：`m.x` 直接读写外部全局，`m.f()` 调用外部闭包；
+  `from m import x` 在导入点做快照绑定；`__name__` / `__file__` 按模块
+  设置，入口是 `"__main__"`。
+- **缓存**：manifest 命中时复用 `.o` / `.py23i`；源码体变化但接口不变
+  只重编模块本身，接口变化才重编依赖方；`--rebuild` 强制全量。
+- 用例 `tests/modules/{basic,lazy,chain,values,gcroot}`；`make test`
+  同时验证运行输出和二次构建缓存命中。
+
+### 验证
+
+- `make test`：11 正例 + 33 反例 + 22 运行 + 4 未建模 + 5 模块目录
+- 差分测试 600 个程序零差异
+- ASan + UBSan + LSan：单文件运行用例 + 5 个模块用例零报告
+- 严格警告零报告；release 构建通过
+- 模块缓存：源码体变化不重编导入方，接口变化重编导入方
+
+### 已知限制
+
+- 只支持本地单层 `.py`；不支持点号模块、相对导入、`import *`
+- 跨模块类（0.14b）和内置 `math` / `sys`（0.14c）尚未接入
+- 模块导出类型含 class 时 `.py23i` 无法编码
+- 模块初始化失败后 ready 已置位，不会重试
+- 缓存不跟踪编译器版本；编译器 ABI 变化时需要 `--rebuild` 或清理
+  `modcache`
+
 ## [0.13] - 2026-11-09
 
 这一版实现异常：`try/except/else/finally`、`raise`，以及 `with` 的异常
