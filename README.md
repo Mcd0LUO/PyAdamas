@@ -84,7 +84,7 @@ src/
   desugar.cpp             lambda 脱糖成合成嵌套 def
   typecheck*.cpp          类型：规则、推断、内置函数表（按语句/表达式/调用拆分）
   ir.h     lower*.cpp     IR：三地址码、AST → IR 降级（按语句/表达式/调用/生成器拆分）
-  codegen.cpp             x86-64 指令选择、寄存器分配
+  codegen*.cpp            x86-64：寄存器分配、基本块、指令选择、调用
   main.cpp                CLI：把各阶段串起来
 runtime/
   rt_internal.h           运行时内部接口：类型、全局状态、内部函数声明

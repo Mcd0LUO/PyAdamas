@@ -1,6 +1,6 @@
 # 代码生成
 
-`src/codegen.cpp`：IR → AT&T 语法的 GNU as 汇编，调用约定是 System V AMD64。
+`src/codegen*.cpp`：IR → AT&T 语法的 GNU as 汇编，调用约定是 System V AMD64。
 
 ## 输出结构
 

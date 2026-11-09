@@ -36,7 +36,7 @@ rm -rf build/dev                   # 连 CMake 中间产物一起清
 | 场景 | 耗时 |
 |---|---|
 | 无改动 | 0.00s |
-| 改 `codegen.cpp` | 约 2.7s |
+| 改 `codegen*.cpp` | 约 2.7s |
 | 改 `main.cpp` | 约 2.4s |
 | 改 `parser.cpp` | 约 3.4s |
 | 改 `typecheck.h`（触发多个单元） | 约 3.7s |
@@ -225,7 +225,7 @@ g++ -std=c++23 -O0 -g -Wall -Wextra -Wshadow -Wnon-virtual-dtor -Wold-style-cast
 1. `typecheck.h`：`ClassInfo` / `FieldInfo` / `MethodInfo` 加字段
 2. `typecheck_func.cpp` 的 `classdef()`：填进去（注意先绑类名、再解析字段、最后检查方法体）
 3. `lower.cpp` 的 `collect_classes()`（预扫描建 `IRClass`）与 `lower_classdef()`（填 vtable）
-4. `codegen.cpp`：只有对象布局变了才需要动（`field.get` 的偏移由 IR 携带）
+4. `codegen*.cpp`：只有对象布局变了才需要动（`field.get` 的偏移由 IR 携带）
 5. `tests/run/09_class.py`：钉住新行为
 
 两条不变量别破坏：**子类的字段前缀必须等于父类的全部字段**、**覆盖方法的槽号必须等于父类的槽号**。任何一条破了，「父类类型装子类实例」就会读错偏移或调到错的实现。

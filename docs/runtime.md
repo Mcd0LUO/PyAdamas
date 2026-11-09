@@ -515,7 +515,7 @@ ASan 下用内联汇编取真实 `%rsp`，避免扫描 ASan fake stack 的未映
 
 1. `src/ir.h`：`RtFn` 加枚举项 + 注释写签名
 2. `src/ir.h` 的 `rt_name()`：加 `case` 返回符号名
-3. `src/codegen.cpp` 的 `gen_call_rt`：按参数形态把实参搬进 `%rdi/%rsi/%rdx/%xmm0`（`-Wswitch` 会强制你加）
+3. `src/codegen_call.cpp` 的 `gen_call_rt`：按参数形态把实参搬进 `%rdi/%rsi/%rdx/%xmm0`（`-Wswitch` 会强制你加）
 4. `runtime/rt_*.c`（先看 `rt_internal.h` 选文件）：实现，函数名与第 2 步一致，参数用 `int64_t` / `double`
 5. `docs/runtime.md`：函数表加一行
 

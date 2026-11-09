@@ -19,7 +19,7 @@ Lowerer（lower*.cpp）◄──── 类型查询接口（typecheck.h）
    │
    ▼
 IR（ir.h）：函数 → 基本块 → 三态指令
-   │  AsmGen（codegen.cpp）
+   │  AsmGen（codegen*.cpp）
    ▼
 GNU as 汇编（AT&T）
    │  cc + runtime/rt.o

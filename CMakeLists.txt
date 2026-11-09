@@ -30,6 +30,10 @@ set(PY23_SOURCES
   src/lower_call.cpp
   src/lower_gen.cpp
   src/codegen.cpp
+  src/codegen_regalloc.cpp
+  src/codegen_block.cpp
+  src/codegen_ops.cpp
+  src/codegen_call.cpp
   src/ir.cpp
   src/desugar.cpp
   src/module.cpp

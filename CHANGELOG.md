@@ -27,6 +27,8 @@ Future 完成回调与失败结果。
 - 类型检查按职责拆成 `typecheck*.cpp`：驱动与作用域、语句、表达式、
   调用与内置、函数与类。
 - 解析器按职责拆成 `parser*.cpp`：驱动、语句、函数与类、表达式。
+- 代码生成拆成 `codegen*.cpp`：驱动/数据段、寄存器分配、基本块、
+  指令选择、调用与对象；`AsmGen` 声明移入 `codegen_impl.h`。
 - 运行时拆成 `runtime/rt_*.c` + `rt_internal.h`（RC/GC、异常、生成器、
   异步、Task/Future、fd、异步生成器、容器与输出），各单元独立编译后
   由 CMake 用 `ld -r` 合成 `rt.o`，对外 ABI 不变。

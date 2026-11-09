@@ -274,7 +274,7 @@ bb0 (entry):
 1. `ir.h`：`IrOp` 加枚举 + `irop_name` 加名字
 2. `ir.cpp`：`Inst::text()` 加打印
 3. `lower*.cpp`：产出这条指令（别忘了 `def()` 里登记类型）
-4. `codegen.cpp`：`gen_inst` 加 `case`（`-Wswitch` 会强制你加）
+4. `codegen_ops.cpp`：`gen_inst` 加 `case`（`-Wswitch` 会强制你加）
 5. `docs/ir.md`：指令表加一行，`docs/codegen.md` 说明生成策略
 
 漏掉第 4 步编译不过，这正是当初把 `op` 做成 `enum class` 而不是字符串的原因。
