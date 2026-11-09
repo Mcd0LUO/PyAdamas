@@ -17,6 +17,7 @@ FILES=(
     tests/run/47_float_sum_order.py
     tests/run/48_branch_mnemonics.py
     tests/run/49_inline.py
+    tests/run/50_licm.py
 )
 
 fail=0
