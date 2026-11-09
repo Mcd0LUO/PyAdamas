@@ -125,9 +125,15 @@ enum class RtFn : uint8_t {
     DictUpdate,   // (dict*, dict*) -> void
     DictCopy,     // (dict*) -> dict*  浅拷贝（匹配 **rest）
     IsInstance,   // (obj*, i64 class_id) -> i64
+    IsNamedClass, // (obj*, str* qualname) -> i64  跨模块类模式按限定名匹配
+    SuperLookup,  // (obj*, i64 after_cid, i64 slot, str* name) -> fnptr
     IsException,  // (obj*, str* type) -> i64
     IsSeq,        // (i64) -> i64  运行期值是不是 list/tuple
     IsDict,       // (i64) -> i64  运行期值是不是 dict/set 载体
+    StrEqUnknown, // (i64, str*) -> i64  unknown 值上的字符串模式
+    ComplexEqUnknown, // (i64, c*) -> i64  unknown 值上的复数模式
+    IsStr,        // (i64) -> i64  unknown 值是不是 str
+    IsComplex,    // (i64) -> i64  unknown 值是不是复数对象
     ListSlice,    // (list*, i64 start, i64 stop, i64 step) -> list*
     StrSlice,     // (str*, i64 start, i64 stop, i64 step) -> str*
     DictPop,      // (dict*, i64 key, i64 has_default, i64 def) -> i64
@@ -259,9 +265,15 @@ inline const char* rt_name(RtFn f) {
         case RtFn::DictUpdate: return "py23_dict_update";
         case RtFn::DictCopy: return "py23_dict_copy";
         case RtFn::IsInstance: return "py23_isinstance";
+        case RtFn::IsNamedClass: return "py23_is_named_class";
+        case RtFn::SuperLookup: return "py23_super_lookup";
         case RtFn::IsException: return "py23_is_exc";
         case RtFn::IsSeq: return "py23_is_seq";
         case RtFn::IsDict: return "py23_is_dict";
+        case RtFn::StrEqUnknown: return "py23_str_eq_unknown";
+        case RtFn::ComplexEqUnknown: return "py23_complex_eq_unknown";
+        case RtFn::IsStr: return "py23_is_str";
+        case RtFn::IsComplex: return "py23_is_complex";
         case RtFn::ListSlice: return "py23_list_slice";
         case RtFn::StrSlice: return "py23_str_slice";
         case RtFn::DictPop: return "py23_dict_pop";
@@ -398,6 +410,9 @@ enum class IrOp : uint8_t {
     FieldLoad,  // dst = a->field[imm]（imm 是字节偏移）
     FieldStore, // a->field[imm] = b
     VCall,      // dst = a->vtable[imm](a, args...)  第一个实参固定是 self
+    VCallStatic,// dst = a->vtable[imm](args...)  静态方法不传 self
+    SuperVCall, // dst = super_lookup(a, idx, imm)(a, args...)  沿运行期 MRO
+    CallDirect, // dst = funcs[idx](args...)  直接调用裸函数（静态方法）
 
     // ── 调用 ──────────────────────────────────────────────
     Call,    // dst = a(args...)（a 是函数指针）
@@ -450,6 +465,9 @@ inline const char* irop_name(IrOp op) {
         case IrOp::FieldLoad: return "field.get";
         case IrOp::FieldStore: return "field.set";
         case IrOp::VCall: return "vcall";
+        case IrOp::VCallStatic: return "vcall.static";
+        case IrOp::SuperVCall: return "vcall.super";
+        case IrOp::CallDirect: return "call.direct";
         case IrOp::Call: return "call";
         case IrOp::CallRt: return "call.rt";
         case IrOp::Setjmp: return "setjmp";
@@ -560,8 +578,11 @@ struct IRClass {
     int n_fields = 0;
     // 按字段偏移顺序（父类在前），1 表示该字段是堆类型，析构时要 dec。
     std::vector<uint8_t> field_heap;
-    // 类模式 isinstance 用：本类 + 所有祖先的类编号（含 mixin 基类）。
-    std::vector<int> ancestors;
+    // 运行期类元数据：模块限定类名、C3 MRO（类下标，self 在前）和
+    // 本类自己声明的方法槽。isinstance / super() 都靠这张表。
+    std::string qualname;
+    std::vector<int> mro;
+    std::vector<int> own_slots;
 };
 
 // 一个生成器的运行时形态。帧负载布局与运行时 rt.c 一致：

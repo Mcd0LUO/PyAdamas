@@ -186,12 +186,34 @@ struct FieldInfo {
     bool implicit = false;
 };
 
+enum class MethodKind : uint8_t {
+    Normal,
+    Static,
+    PropertyGetter,
+    PropertySetter,
+    PropertyDeleter,
+};
+
 struct MethodInfo {
     std::string name;
+    MethodKind kind = MethodKind::Normal;
     FuncInfoPtr sig;          // 含 self 的完整签名（方法体内 self 的类型来自它）
     FuncInfoPtr call_sig;     // 去掉 self 的调用签名（外部 obj.m(...) 按它查）
     FunctionDef* def = nullptr;  // 供降级阶段编译方法体
     int slot = -1;
+    bool is_accessor() const {
+        return kind == MethodKind::PropertyGetter || kind == MethodKind::PropertySetter ||
+               kind == MethodKind::PropertyDeleter;
+    }
+};
+
+// 属性描述符：访问器方法在 owner->methods 里的下标。getter 是
+// @property，setter/deleter 由 @x.setter / @x.deleter 注册。
+struct PropertyInfo {
+    ClassInfo* owner = nullptr;
+    int getter = -1;
+    int setter = -1;
+    int deleter = -1;
 };
 
 struct ClassInfo {
@@ -203,15 +225,17 @@ struct ClassInfo {
     // TyKind::Exception 处理，不参与对象布局/vtable。
     bool is_exception_class = false;
     std::string exc_parent;
-    // 多重继承的附加基类（mixin）：不贡献字段，只贡献方法。
+    // 多重继承的附加基类：主基类提供字段布局，附加基类只能复用
+    // 已有字段；方法按 C3 MRO 解析。
     std::vector<ClassInfo*> extra_bases;
     std::vector<FieldInfo> fields;    // 只含本类声明的字段
-    std::vector<MethodInfo> methods;  // 只含本类声明的方法
+    std::vector<MethodInfo> methods;  // 只含本类声明的方法（含属性访问器）
     // class 体里的 `__match_args__ = ("x", "y")`，只服务类模式的位置子模式。
     std::vector<std::string> match_args;
+    // C3 线性化，self 在首位。跨模块导入的类没有运行期 MRO 表，留空。
+    std::vector<ClassInfo*> mro;
+    std::unordered_map<std::string, PropertyInfo> properties;
     int base_fields = 0;              // 继承来的字段数
-    int base_slots = 0;               // 继承来的方法槽数
-    int own_slots = 0;                // 本类新增的槽数（覆盖不算新增）
 
     // 构造签名就是 __init__ 的调用签名（已去掉 self）。没有 __init__ 时
     // 只允许零实参构造。
@@ -228,7 +252,6 @@ struct ClassInfo {
     bool complete = false;
 
     int n_fields() const { return base_fields + static_cast<int>(fields.size()); }
-    int n_slots() const { return base_slots + own_slots; }
     int64_t obj_size() const { return 8 * static_cast<int64_t>(n_fields() + 1); }
 
     // 整条继承链上只要有一层看不全，就都看不全
@@ -252,13 +275,61 @@ struct ClassInfo {
             if (f.name == n) return &f;
         return base ? base->field(n) : nullptr;
     }
-    const MethodInfo* method(const std::string& n) const {
-        for (auto& m : methods)
-            if (m.name == n) return &m;
-        return base ? base->method(n) : nullptr;
+    // 自己声明的方法；后定义的同名方法胜出。属性访问器默认不参与
+    // 普通方法查找（它们只通过属性语法触发）。
+    const MethodInfo* own_method(const std::string& n, bool accessors = false) const {
+        for (auto it = methods.rbegin(); it != methods.rend(); ++it) {
+            if (it->name != n) continue;
+            if (!accessors && it->is_accessor()) continue;
+            return &*it;
+        }
+        return nullptr;
     }
-    // __match_args__ 按普通类属性语义沿继承链查找。
+    const MethodInfo* method(const std::string& n) const {
+        for (const ClassInfo* c : mro)
+            if (auto* m = c->own_method(n)) return m;
+        if (!mro.empty()) return nullptr;
+        // 导入类/骨架没有 C3 表，退回逐层查找
+        if (auto* m = own_method(n)) return m;
+        if (base) {
+            if (auto* m = base->method(n)) return m;
+        }
+        for (const ClassInfo* e : extra_bases)
+            if (auto* m = e->method(n)) return m;
+        return nullptr;
+    }
+    const ClassInfo* method_owner(const std::string& n) const {
+        for (const ClassInfo* c : mro)
+            if (c->own_method(n)) return c;
+        if (!mro.empty()) return nullptr;
+        if (own_method(n)) return this;
+        if (base) {
+            if (auto* o = base->method_owner(n)) return o;
+        }
+        for (const ClassInfo* e : extra_bases)
+            if (auto* o = e->method_owner(n)) return o;
+        return nullptr;
+    }
+    const PropertyInfo* property(const std::string& n) const {
+        for (const ClassInfo* c : mro) {
+            auto it = c->properties.find(n);
+            if (it != c->properties.end()) return &it->second;
+        }
+        if (!mro.empty()) return nullptr;
+        auto it = properties.find(n);
+        if (it != properties.end()) return &it->second;
+        if (base) {
+            if (auto* p = base->property(n)) return p;
+        }
+        for (const ClassInfo* e : extra_bases)
+            if (auto* p = e->property(n)) return p;
+        return nullptr;
+    }
+    // __match_args__ 按普通类属性语义沿 MRO 查找。
     const std::vector<std::string>* match_args_of() const {
+        for (const ClassInfo* c : mro)
+            if (!c->match_args.empty()) return &c->match_args;
+        if (!mro.empty()) return nullptr;
         if (!match_args.empty()) return &match_args;
         if (base) {
             if (auto* m = base->match_args_of()) return m;
@@ -268,12 +339,16 @@ struct ClassInfo {
         return nullptr;
     }
     int slot_of(const std::string& n) const {
-        for (auto& m : methods)
-            if (m.name == n) return m.slot;
-        return base ? base->slot_of(n) : -1;
+        const MethodInfo* m = method(n);
+        return m ? m->slot : -1;
     }
     bool is_subclass_of(const ClassInfo* b) const {
         if (this == b) return true;
+        if (!mro.empty()) {
+            for (const ClassInfo* c : mro)
+                if (c == b) return true;
+            return false;
+        }
         for (const ClassInfo* p = this; p; p = p->base) {
             if (p == b) return true;
             for (const ClassInfo* e : p->extra_bases)
@@ -780,6 +855,15 @@ public:
     // 类表：名字 → 编译期布局。lower 靠它把属性访问变成固定偏移。
     const std::unordered_map<std::string, ClassInfoPtr>& classes() const { return classes_; }
 
+    // match 捕获名在 case 结束后的合并类型；lower 用它在函数帧里补局部槽。
+    const std::unordered_map<std::string, TypePtr>* match_captures(const Match* m) const {
+        auto it = match_capture_types_.find(m);
+        return it == match_capture_types_.end() ? nullptr : &it->second;
+    }
+
+    // 模块内方法槽总数。所有类的 vtable 等长，槽位按方法名/访问器全局分配。
+    int method_slot_count() const { return method_slot_count_; }
+
     // 函数体直接引用、且解析到外层函数作用域的名字。降级期用它算
     // cell / env；不含通过嵌套函数传递的引用（那部分由 lower 自底向上传播）。
     const std::unordered_set<std::string>& free_refs(const Stmt* fn) const {
@@ -835,6 +919,19 @@ private:
     // Python 的实例属性本来就是在 __init__ 里长出来的，要求先写标注会把
     // 标准库里绝大多数类挡在门外。
     ClassInfo* cur_class_ = nullptr;
+    // 方法槽按「名字」在模块内全局分配：多继承的两个无关基类可能给同名
+    // 方法分配过不同槽，全局唯一后 vtable 才能同时满足两边的调用点。
+    std::unordered_map<std::string, int> method_slots_;
+    int method_slot_count_ = 0;
+    std::unordered_map<const Match*, std::unordered_map<std::string, TypePtr>> match_capture_types_;
+
+    int intern_method_slot(const std::string& key) {
+        auto it = method_slots_.find(key);
+        if (it != method_slots_.end()) return it->second;
+        int s = method_slot_count_++;
+        method_slots_.emplace(key, s);
+        return s;
+    }
     // 当前方法第一个参数的名字（通常就是 self）。`self.x = 1` 只有认得出
     // 这里，才能把它当成字段声明而不是外部对象的属性写入。
     std::string cur_self_name_;
@@ -914,6 +1011,9 @@ private:
     // match/case 模式：在当前位置绑定捕获名。
     void match_pattern(Pattern& p, TypePtr subject,
                        const std::unordered_set<std::string>* or_names = nullptr);
+
+    // 当前方法里 zero-arg super() 的下一实现（按定义类的 C3 MRO）。
+    const MethodInfo* super_method(const std::string& name) const;
 
     // `if x is not None:` 这类守卫之后的简单类型收窄。
     // 不做完整的数据流分析，只处理 Name 与 None 的比较。

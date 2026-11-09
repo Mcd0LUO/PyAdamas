@@ -128,9 +128,11 @@ void* py23_obj_new(int64_t size, void (*dtor)(void*), void (*gc_release)(void*))
 `NULL`。子类析构器包含父类字段，顺序与对象布局一致。
 
 vtable 是静态数据，在 `.data.rel.ro` 里，由 codegen 按 `IRClass::vtable` 生成。
-vtable 前面固定有 16 字节元数据：`.Lvtanc` 祖先编号表指针 + 类编号，对象仍指向
-槽数组本身。`py23_isinstance` 先查 RC 注册表确认是 `PY23_RC_INSTANCE`，再沿
-祖先表判断；因此 `case Point(...)` 对 unknown 值安全，子类和 mixin 基类都能匹配。
+方法槽在模块内按名字全局分配，所有类的 vtable 等长，同名覆盖写同一个槽。
+vtable 前固定 5 个字：MRO 元数据指针表、类编号、vtable 自身、本类声明的槽表、
+模块限定类名。`py23_isinstance` / `py23_is_named_class` 先查 RC 注册表确认是
+`PY23_RC_INSTANCE`，再沿 MRO 判断；`py23_super_lookup` 用实例真实 MRO 找
+after 类之后第一个声明该槽的类，供零参 `super().m()` 动态分派。
 
 ### 闭包
 
@@ -290,10 +292,18 @@ longjmp 回同步调用点。GC 清扫和进程退出不跑析构器，但会单
 | 函数 | 签名 | 语义 |
 |---|---|---|
 | `py23_isinstance` | `(void*, i64 class_id) -> i64` | unknown 值是不是该类或子类；查 RC 注册表，原始整数安全返回 0 |
+| `py23_is_named_class` | `(void*, str* qualname) -> i64` | 按「模块.类」限定名沿 MRO 匹配，跨模块类模式用 |
+| `py23_super_lookup` | `(void*, after_cid, slot, str* name) -> fnptr` | 沿实例真实 MRO 找 after 类之后的下一实现 |
 | `py23_is_exc` | `(void*, str* type) -> i64` | unknown 值是不是异常值且类型匹配（含自定义异常父子关系） |
 | `py23_is_seq` | `(void*) -> i64` | 是不是 list/tuple 载体（序列模式的前置检查） |
 | `py23_is_dict` | `(void*) -> i64` | 是不是 dict/set 载体（映射模式的前置检查） |
+| `py23_is_str` / `py23_is_complex` | `(void*) -> i64` | unknown 值上的 `str()` / `complex()` 类型模式 |
+| `py23_str_eq_unknown` / `py23_complex_eq_unknown` | `(void*, lit*) -> i64` | unknown 值上的字符串/复数模式比较 |
 | `py23_dict_copy` | `(Py23Dict*) -> Py23Dict*` | `**rest` 的浅拷贝，随后用 `dict_remove` 删掉已匹配 key |
+
+静态字符串字面量 rc 为 `INT64_MIN`，不进 GC 堆链；模块入口先调用
+`py23_register_literals` 把它们登记进 RC 索引，unknown 类型检查才能安全
+确认「这个机器字确实指向 Py23Str」。
 
 类模式的字段仍按编译期偏移直接 `field.get`：子类沿用父类字段前缀，所以模式类
 自身的字段偏移对所有子类实例都成立。
@@ -401,6 +411,7 @@ longjmp 回同步调用点。GC 清扫和进程退出不跑析构器，但会单
 | `py23_rc_mark` | `() -> i64` | 返回临时值栈当前水位 |
 | `py23_rc_cleanup` | `(i64 mark) -> void` | 释放到指定水位 |
 | `py23_rc_shutdown` | `() -> void` | 入口函数退出时释放临时栈自身存储 |
+| `py23_register_literals` | `(void** objs, i64 n) -> void` | 把模块的静态字符串字面量登记进 RC 索引（只登记，不挂 GC 链） |
 | `py23_closure_new` | `(i64 code, i64 n_caps) -> closure*` | 分配闭包负载并挂 cell 析构器 |
 
 ### 循环收集

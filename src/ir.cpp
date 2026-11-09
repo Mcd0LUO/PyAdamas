@@ -68,6 +68,30 @@ std::string Inst::text() const {
             for (size_t i = 0; i < args.size(); ++i) s += ", " + vreg_str(args[i]);
             return s + ")";
         }
+        case IrOp::VCallStatic: {
+            std::string s = std::format("{} = vcall.static {}[{}](", vreg_str(dst), vreg_str(a),
+                                        imm);
+            for (size_t i = 0; i < args.size(); ++i) {
+                if (i) s += ", ";
+                s += vreg_str(args[i]);
+            }
+            return s + ")";
+        }
+        case IrOp::SuperVCall: {
+            std::string s = std::format("{} = super[{}] {}[{}]({}", vreg_str(dst), idx,
+                                        vreg_str(a), imm, vreg_str(a));
+            for (size_t i = 0; i < args.size(); ++i) s += ", " + vreg_str(args[i]);
+            return s + ")";
+        }
+        case IrOp::CallDirect: {
+            std::string s = std::format("{} = call.direct f{}({}", vreg_str(dst), idx,
+                                        "");
+            for (size_t i = 0; i < args.size(); ++i) {
+                if (i) s += ", ";
+                s += vreg_str(args[i]);
+            }
+            return s + ")";
+        }
         case IrOp::Call: {
             std::string s = std::format("{} = call {}(", vreg_str(dst), vreg_str(a));
             for (size_t i = 0; i < args.size(); ++i) {

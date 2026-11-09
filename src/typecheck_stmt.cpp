@@ -7,6 +7,8 @@
 
 namespace py23 {
 
+static void pattern_capture_names(const Pattern& p, std::vector<std::string>& out);
+
 bool TypeChecker::block_exits(const std::vector<StmtPtr>& body) {
     if (body.empty()) return false;
     auto& last = *body.back();
@@ -446,6 +448,7 @@ void TypeChecker::stmt(Stmt& s) {
             case StmtKind::Match: {
                 auto& m = static_cast<Match&>(s);
                 TypePtr st = expr(*m.subject);
+                std::unordered_map<std::string, TypePtr> merged;
                 for (auto& c : m.cases) {
                     auto sc = std::make_unique<Scope>();
                     sc->parent = cur_;
@@ -454,8 +457,22 @@ void TypeChecker::stmt(Stmt& s) {
                     match_pattern(*c.pattern, st);
                     if (c.guard) expr(*c.guard);
                     stmts(c.body);
+                    std::vector<std::string> names;
+                    pattern_capture_names(*c.pattern, names);
+                    for (auto& n : names) {
+                        auto vit = cur_->vars.find(n);
+                        if (vit == cur_->vars.end()) continue;
+                        TypePtr t = vit->second.ty;
+                        auto mit = merged.find(n);
+                        if (mit == merged.end()) merged.emplace(n, t);
+                        else mit->second = join(mit->second, t);
+                    }
                     cur_ = cur_->parent;
                 }
+                // Python 的 match 捕获就是普通赋值：case 结束后仍在当前
+                // 作用域可见。这里把各分支的类型 join 起来再声明一次。
+                for (auto& [name, ty] : merged) declare(name, ty, m.line, m.col);
+                match_capture_types_[&m] = std::move(merged);
                 break;
             }
             case StmtKind::Break:
@@ -642,6 +659,23 @@ void TypeChecker::assign(Expr& target, TypePtr value, int line, int col) {
             if (ot->kind == TyKind::Class) {
                 if (!ot->cls) return;
                 if (!ot->cls->complete && ot->cls != cur_class_) return;  // 骨架，无从判断
+                if (const PropertyInfo* p = ot->cls->property(at->attr)) {
+                    if (!p->owner || p->setter < 0 ||
+                        p->setter >= static_cast<int>(p->owner->methods.size())) {
+                        err(line, col,
+                            std::format("property '{}' has no setter", at->attr));
+                        return;
+                    }
+                    const MethodInfo& sm = p->owner->methods[p->setter];
+                    TypePtr vt = sm.call_sig && !sm.call_sig->pos.empty()
+                                     ? sm.call_sig->pos[0].ty
+                                     : t_unknown();
+                    if (!is_unknown(vt) && !assignable(vt, value))
+                        err(line, col,
+                            std::format("property '{}' setter cannot accept '{}'", at->attr,
+                                        type_name(value)));
+                    return;
+                }
                 // `self.x = ...` 且 x 没声明过：就地补成字段，类型不再苛求
                 if (add_implicit_field(*at, value)) return;
                 if (auto* f = ot->cls->field(at->attr)) {
@@ -880,6 +914,29 @@ void TypeChecker::match_pattern(Pattern& p, TypePtr subject,
             return;
         }
         case PatternKind::Class: {
+            if (p.cls.find('.') != std::string::npos) {
+                size_t dot = p.cls.rfind('.');
+                std::string mod_name = p.cls.substr(0, dot);
+                std::string cls_name = p.cls.substr(dot + 1);
+                auto mod = lookup_module_alias(mod_name);
+                if (!mod) {
+                    err(p.line, p.col,
+                        std::format("unknown module '{}' in class pattern", mod_name));
+                    return;
+                }
+                auto ci = mod->classes.find(cls_name);
+                if (ci == mod->classes.end()) {
+                    err(p.line, p.col,
+                        std::format("module '{}' has no class '{}'", mod_name, cls_name));
+                    return;
+                }
+                p.qualname = mod->name + "." + cls_name;
+                if (!p.positional.empty() || !p.attrs.empty())
+                    err(p.line, p.col,
+                        "imported class patterns support only the class check "
+                        "(field sub-patterns are not available)");
+                return;
+            }
             auto it = classes_.find(p.cls);
             if (it == classes_.end()) {
                 if (is_exception_name(p.cls)) {

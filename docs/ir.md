@@ -28,7 +28,7 @@ Python 语义里变量天生可变，循环里反复赋值是常态。一上来�
 | `Block` | 名字 + 指令序列，`terminated()` 判断末尾是不是跳转/分支/返回 |
 | `IRFunction` | 名字、形参、返回类型、`slot_ty`（局部槽类型）、`vreg_ty`（每个 vreg 的类型）、基本块、`env_slot`（有捕获时存闭包指针的槽） |
 | `IRGlobal` | 一个全局变量；数据段里就是一个 `.quad`，初值 0 同时也是 `None` |
-| `IRClass` | 名字、vtable（槽 → 函数下标）、字段数（含继承）、`field_heap`（每个字段是否堆类型，供析构器使用）、`ancestors`（类模式 isinstance 用的本类 + 祖先编号） |
+| `IRClass` | 名字、vtable（槽 → 函数下标）、字段数（含继承）、`field_heap`（每个字段是否堆类型，供析构器使用）、`qualname`（模块限定类名）、`mro`（C3 类下标，self 在前）、`own_slots`（本类声明的方法槽） |
 | `IRModule` | 函数表、全局表、字符串池、类表、`entry`（顶层代码编译成的函数下标） |
 
 `Inst` 里有个容易踩的点：**`idx` 的含义随 `op` 变**——`const.str` 是字符串池下标，`load.slot` 是槽号，`load.global` 是全局号，`func.addr` 是函数号。类型上看不出区别，读指令时要先看 `op`。
@@ -61,10 +61,13 @@ Python 语义里变量天生可变，循环里反复赋值是常态。一上来�
 | `index.get dst, a, b` | — | `dst = a[b]` | list 走运行时，str 走 `py23_str_char_at` |
 | `index.set a, b, c` | — | `a[b] = c` | `py23_list_set` |
 | `len dst, a` | — | `dst = len(a)` | 一条 `movq (%rax), %rax` |
-| `obj.new dst, imm` | `imm: 类下标` | 分配对象并写入 vtable 指针；析构器取自 `IRClass::field_heap` | `call py23_obj_new` + `leaq .LvtN`；`.LvtN` 前有 16 字节类元数据 |
+| `obj.new dst, imm` | `imm: 类下标` | 分配对象并写入 vtable 指针；析构器取自 `IRClass::field_heap` | `call py23_obj_new` + `leaq .LvtN`；`.LvtN` 前有 5 字类元数据 |
 | `field.get dst, a, imm` | `imm: 字节偏移` | `dst = a->field` | 一条 `movq off(%rax), %rax` |
 | `field.set a, imm, b` | `imm: 字节偏移` | `a->field = b` | `movq %rcx, off(%rax)` |
 | `vcall dst, a, args...` | `imm: vtable 槽` | `dst = a->vtable[imm](a, args...)` | 取表、取槽、间接跳转 |
+| `vcall.static dst, a, args...` | `imm: vtable 槽` | 静态方法：不传 self | 同 vcall，参数序列少一个 self |
+| `vcall.super dst, a, args...` | `imm: 槽`，`idx: after 类下标`，`b: 方法名` | 按运行期 MRO 找下一实现 | 先 `py23_super_lookup`，再照 vcall 传 self |
+| `call.direct dst, imm, args...` | `imm: 函数下标` | 直接调用裸函数（类名上的静态方法） | `leaq .LfN(%rip)` + `call` |
 | `call dst, a, args...` | `a: 函数值` | 间接调用 | `call *%r11` |
 | `call.rt args..., imm` | `imm: RtFn` | 调运行时函数 | `call py23_xxx` |
 | `setjmp dst, a` | `a: handler 记录` | `dst = setjmp(a)`；异常 longjmp 回来时为非 0 | `call setjmp` |
@@ -193,7 +196,7 @@ Python 语义里变量天生可变，循环里反复赋值是常态。一上来�
 
 **`coerce` 的边界**：只处理数值域之间的转换（int/bool ↔ float）。指针类之间的差异（`list[int]` → `list[float]`）需要逐元素转换并重新分配，现阶段直接报错，不允许静默产生错误的位模式。
 
-**类在降级前先建表**：`Lowerer::run` 里先扫一遍语句块（不进函数体）把每个 `ClassDef` 变成一条 `IRClass`，vtable 槽先填 -1。这样方法体里构造另一个类时，类下标和对象大小都已经确定。真正编译 `ClassDef` 时分两步：先从父类 vtable 抄一份前缀（父类一定在前，此时已填好），再编译本类方法覆盖对应槽。`field_heap` 也在这时按父类到子类的布局顺序填好，codegen 据此生成析构器。
+**类在降级前先建表**：`Lowerer::run` 里先扫一遍语句块（不进函数体）把每个 `ClassDef` 变成一条 `IRClass`，vtable 槽先填 -1。这样方法体里构造另一个类时，类下标和对象大小都已经确定。方法槽在模块内按名字全局分配，所有 vtable 等长。真正编译 `ClassDef` 时先按 C3 MRO 从前向后填继承来的槽（每个槽只由最先声明它的类占用），再编译本类方法覆盖对应槽。`field_heap` 也在这时按父类到子类的布局顺序填好，codegen 据此生成析构器。
 
 **lambda 的位置**：解析后、类型检查前，`lambda` 被展开成插在包含它的
 语句之前的合成 `def`，表达式位置换成名字。这样类型检查和降级只需要

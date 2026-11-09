@@ -27,8 +27,8 @@ py23 借 Python 的语法外壳，但**不是 CPython 的实现**：语义按静
 | 分类 | 支持 |
 |---|---|
 | 简单语句 | 表达式语句、赋值（含链式、多重解包）、增量赋值、标注赋值、`pass`、`return`、`break`、`continue`、`raise`、`assert`、`global`、`import` / `from ... import` |
-| 复合语句 | `if` / `elif` / `else`、`while`（含 `else`）、`for` / `async for`（含 `else`）、`def` / `async def`（含默认参数、`*`、`/`、仅限关键字参数、`*args` / `**kwargs`、装饰器、生成器/协程/异步生成器）、`class`（单继承、方法与字段）、`with` / `async with`（多个项、`as`）、`try` / `except` / `else` / `finally` |
-| 能解析、不能生成 | 带装饰器的方法/类、`match` 之外的软关键字写法 |
+| 复合语句 | `if` / `elif` / `else`、`while`（含 `else`）、`for` / `async for`（含 `else`）、`def` / `async def`（含默认参数、`*`、`/`、仅限关键字参数、`*args` / `**kwargs`、装饰器、生成器/协程/异步生成器）、`class`（多继承、C3 MRO、方法与字段）、`with` / `async with`（多个项、`as`）、`try` / `except` / `else` / `finally` |
+| 能解析、不能生成 | 类装饰器、非 `@staticmethod` / `@property` 的方法装饰器、`match` 之外的软关键字写法 |
 
 `assert` 条件为假时抛出 `AssertionError`，第二个参数作为消息；没有消息时是 `assertion failed`。
 
@@ -218,10 +218,12 @@ print(f(), f(), g())    # 1 2 1
 - 同一个 `**mapping` 的键与显式命名形参重名时，不会像 CPython 那样报
   `TypeError`，后者会静默留在 `**kwargs` 里。
 
-**装饰器**：`@d1` / `@d2` 按从下到上应用，等价于 `f = d1(d2(f))`；
+**装饰器**：函数装饰器 `@d1` / `@d2` 按从下到上应用，等价于 `f = d1(d2(f))`；
 装饰器必须是签名已知的函数值。包装函数需要用与目标一致的固定形参来
-转发（不能依赖 `*args` 转发给 unknown 被装饰者）。类装饰器、方法装饰器
-（`@staticmethod` / `@property` 等）仍被后端拒绝。
+转发（不能依赖 `*args` 转发给 unknown 被装饰者）。方法装饰器支持
+`@staticmethod`（实例和 `Class.method` 调用，不传 self）、`@property`、
+`@x.setter` 和 `@x.deleter`；属性访问编译成 getter/setter/deleter 的虚调用。
+`@classmethod`、自定义方法装饰器和类装饰器仍被后端拒绝。
 
 相互递归的嵌套闭包会形成 cell 环；这类环不是引用计数能处理的，由下面的
 循环收集器回收。
@@ -494,9 +496,17 @@ class Connection:
 
 **看不见的父类**。基类是外部导入的类型（`unittest.TestCase`、`OrderedDict`）时，它的字段和方法我们看不到，这个类就是「开放」的：查不到 `self.xxx` / `self.method()` 时按 unknown 放过，不报错。标准库里每个测试类都继承 `TestCase` 再调 `self.assertEqual`，不放过就是大面积误杀。
 
-**多继承**。`class C(A, B)` 接受：第一个基类提供字段布局，后续基类按 mixin 处理，只贡献方法（**附加基类不能有字段**）。方法解析按「本类 → 第一个基类链 → 附加基类链」的顺序，同名方法左优先；不做完整 C3 MRO。类体里的非声明语句在类定义点执行；赋值按模块全局处理，`C.x` / `self.x` 这类类属性访问仍未建模。
+**多继承**。`class C(A, B)` 用标准 C3 线性化算 MRO，方法查找、vtable 填充和
+`super()` 都沿这条链。第一个基类仍提供字段布局前缀；附加基类只能复用
+主基类布局里已有的字段（共享祖先的菱形可以，新增字段不行）。
+方法槽在模块内按名字全局分配，同名覆盖在任意 MRO 路径上写同一个槽。
+零参 `super().m(...)` 支持协作式调用：运行期按实例真实 MRO 找下一实现；
+显式 `super(C, self)` 尚未支持。类体里的非声明语句在类定义点执行；
+赋值按模块全局处理，`C.x` / `self.x` 这类类属性访问仍未建模。
 
-不支持：`super()`、`@classmethod` / `@staticmethod`（带装饰器的方法不检查实参，编译时拒绝）、`@property`、`__str__` / `__eq__` 等协议方法、`isinstance`、把类本身当值用（`f = Point`）。`__init__` 之外的构造协议（`__new__`）也没有。
+不支持：`@classmethod`、自定义方法装饰器、类装饰器、`super(C, self)`、
+`__str__` / `__eq__` 等协议方法、`isinstance`、把类本身当值用（`f = Point`）。
+`__init__` 之外的构造协议（`__new__`）也没有。
 
 没有 `__init__` 时只能零参构造——基类在外部的类除外，`__init__` 可能在那边。`__init__` 的默认参数和关键字参数与普通函数规则相同。
 
@@ -613,14 +623,17 @@ match value:
   OR（各分支绑定相同的名字）、映射（固定 key + `**rest`）、`as`、`if` 守卫。
 - 类模式：位置子模式按类体里的 `__match_args__` 顺序映射到字段；关键字子模式
   （`Point(x=0)`）按字段名。匹配子类时沿用父类字段偏移。异常类（内置或自定义）
-  写成 `case ValueError():`，按运行时异常类型判断。
+  写成 `case ValueError():`，按运行时异常类型判断。点分导入类（`shapes.Circle()`）
+  只做运行期类检查（按模块限定名匹配 MRO），暂不支持字段子模式。
 - 值模式：点分名字（`Color.RED`、`math.pi`）求值后用 `==` 与 subject 比较；
-  支持 None/数值/字符串/复数，要求 subject 的静态类型已知。
-- 内置类型模式（`case int():` 等）只在 subject 静态类型已知时做编译期判定；
-  unknown 值无法区分原始 int/float，直接报错。
-- 捕获名绑定在 case 作用域，case 结束后不可见；同一模式重复捕获要求值相等。
+  支持 None/数值/字符串/复数。unknown 值上的字符串/复数模式走运行期安全比较。
+- 内置类型模式（`case int():` 等）：静态类型已知时编译期判定；unknown 值上
+  `object()` / `str()` / `complex()` 可安全判定，原始 int/float 无法区分，
+  list/dict/tuple/set 的载体也没有标签，这些写法仍报错。
+- 捕获名在分支结束后仍可见（按各分支类型 join；未命中的分支近似读到 0/None）；
+  同一模式重复捕获要求值相等。
+- 映射模式的常量 key 做静态重复检查。
 - 没有穷尽性检查（Python 语义）；所有 case 不匹配时直接继续。
-- 未支持：点分类名（`module.Point(...)`）、导入类的类模式、映射重复 key 检查。
 
 ## 复数
 
@@ -637,7 +650,7 @@ match value:
 - Python 2 遗留写法（`0x1L`、`lambda (a, b):`、`except X, e`）
 - 类：方法缺 `self`、字段赋值类型不符、访问不存在的字段或方法（`self.xxx` 与外部基类的成员除外）
 
-**代码生成层**（`check` 通过，`build` 报错）：带装饰器的方法/类、通过 unknown 函数值的 `*` / `**` 展开、`*` 位于固定形参之前且不是定长 tuple、非异常类名当异常用、`finally` 体内跳出 finally 的控制流、跨模块继承、把类名当值用（`f = Point`）、函数内定义类、异步生成器表达式、嵌在其它表达式里的异步推导式。生成器的额外限制：`yield` / `yield from` 只能作为语句或赋值右值，不能出现在 `finally` / `except` 体内；协程的 `await` 同样。异步生成器有 `asend`/`athrow`/`__anext__`/`aclose`。自定义异常类目前只支持 `pass` 类体（字段/方法会被拒绝）。类体字段默认值里的 `lambda` 也在这一层拒绝。match 额外拒绝：点分类名、导入类的类模式、unknown 值上的内置类型模式和 unknown 值上的字符串/复数模式。
+**代码生成层**（`check` 通过，`build` 报错）：类装饰器、`@classmethod`、自定义方法装饰器、通过 unknown 函数值的 `*` / `**` 展开、`*` 位于固定形参之前且不是定长 tuple、非异常类名当异常用、`finally` 体内跳出 finally 的控制流、跨模块继承、把类名当值用（`f = Point`）、函数内定义类、异步生成器表达式、嵌在其它表达式里的异步推导式。生成器的额外限制：`yield` / `yield from` 只能作为语句或赋值右值，不能出现在 `finally` / `except` 体内；协程的 `await` 同样。异步生成器有 `asend`/`athrow`/`__anext__`/`aclose`。自定义异常类目前只支持 `pass` 类体（字段/方法会被拒绝）。类体字段默认值里的 `lambda` 也在这一层拒绝。match 额外拒绝：导入类模式的字段子模式、unknown 值上的数值/list/dict/tuple/set 内置类型模式。
 
 为什么这么分层：前端宽、后端严。`check` 的定位是「语法和类型有没有明显毛病」，可以对任意 Python 文件跑；`build` 才是「这门语言现在能不能编译它」。
 

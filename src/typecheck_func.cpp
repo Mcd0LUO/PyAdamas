@@ -5,6 +5,39 @@
 
 namespace py23 {
 
+// C3 线性化：反复取各序列中「不在任何序列尾部」的头部。失败说明
+// 继承关系自相矛盾（典型是菱形里父类顺序冲突）。
+static bool c3_merge(std::vector<std::vector<ClassInfo*>>& seqs,
+                     std::vector<ClassInfo*>& out) {
+    for (;;) {
+        bool any_left = false;
+        for (auto& s : seqs)
+            if (!s.empty()) any_left = true;
+        if (!any_left) return true;
+        bool picked = false;
+        for (auto& seq : seqs) {
+            if (seq.empty()) continue;
+            ClassInfo* cand = seq.front();
+            bool in_tail = false;
+            for (auto& other : seqs) {
+                for (size_t i = 1; i < other.size(); ++i)
+                    if (other[i] == cand) {
+                        in_tail = true;
+                        break;
+                    }
+                if (in_tail) break;
+            }
+            if (in_tail) continue;
+            out.push_back(cand);
+            for (auto& other : seqs)
+                if (!other.empty() && other.front() == cand) other.erase(other.begin());
+            picked = true;
+            break;
+        }
+        if (!picked) return false;
+    }
+}
+
 void TypeChecker::funcdef(FunctionDef& f) { funcdef_impl(f, nullptr); }
 
 void TypeChecker::funcdef_impl(FunctionDef& f, const ClassInfoPtr& owner) {
@@ -17,7 +50,11 @@ void TypeChecker::funcdef_impl(FunctionDef& f, const ClassInfoPtr& owner) {
                 info = fit->second;
             } else {
                 info = build_sig(f);
-                if (!info->pos.empty() && is_unknown(info->pos[0].ty))
+                bool is_static = false;
+                for (auto& d : f.decorators)
+                    if (auto* dn = dynamic_cast<Name*>(d.get()); dn && dn->id == "staticmethod")
+                        is_static = true;
+                if (!is_static && !info->pos.empty() && is_unknown(info->pos[0].ty))
                     info->pos[0].ty = mk_class(owner.get());
             }
         } else if (auto* sym = lookup(f.name); sym && sym->ty && sym->ty->kind == TyKind::Func &&
@@ -44,7 +81,8 @@ void TypeChecker::funcdef_impl(FunctionDef& f, const ClassInfoPtr& owner) {
         for (auto& d : f.args.defaults) expr(*d);
         for (auto& d : f.args.kw_defaults)
             if (d) expr(*d);
-        for (auto& dec : f.decorators) expr(*dec);
+        for (auto& dec : f.decorators)
+            if (!owner) expr(*dec);
 
         // 装饰器的返回值常常就是包装函数：从下往上套，每一层用返回类型
         // 替换当前类型。这样调用点能按包装签名检查实参并做数值转换，
@@ -114,7 +152,14 @@ void TypeChecker::funcdef_impl(FunctionDef& f, const ClassInfoPtr& owner) {
         for (auto& n : global_decl_) cur_->vars.erase(n);
         for (auto& n : nonlocal_decl_) cur_->vars.erase(n);
         auto saved_self_name = cur_self_name_;  // 拷贝：下面要让嵌套函数看见它
-        if (owner) cur_self_name_ = info->pos.empty() ? std::string() : info->pos[0].name;
+        bool owner_is_static = false;
+        if (owner) {
+            for (auto& d : f.decorators)
+                if (auto* dn = dynamic_cast<Name*>(d.get()); dn && dn->id == "staticmethod")
+                    owner_is_static = true;
+        }
+        if (owner && !owner_is_static)
+            cur_self_name_ = info->pos.empty() ? std::string() : info->pos[0].name;
         // 嵌套函数不改它：闭包捕获的 self 还是外层那个名字
         stmts(f.body);
         cur_self_name_ = std::move(saved_self_name);
@@ -264,6 +309,8 @@ void TypeChecker::classdef(ClassDef& c) {
             cls->fields.clear();
             cls->methods.clear();
             cls->extra_bases.clear();
+            cls->properties.clear();
+            cls->mro.clear();
         } else {
             cls = std::make_shared<ClassInfo>();
         }
@@ -274,16 +321,53 @@ void TypeChecker::classdef(ClassDef& c) {
         cls->exc_parent = exc_parent;
         cls->extra_bases = extra_bases;
         for (auto* eb : extra_bases) {
-            if (eb->n_fields() > 0)
-                err(c.line, c.col,
-                    std::format("multiple inheritance with fields is not supported "
-                                "(base '{}' has fields)", eb->name));
+            // 附加基类不能引入主基类布局里没有的字段；共享祖先（菱形
+            // 的 A）只要偏移一致就允许，否则继承方法里的字段偏移会错位。
+            for (const ClassInfo* k = eb; k; k = k->base) {
+                for (const FieldInfo& f : k->fields) {
+                    int eidx = eb->field_index(f.name);
+                    int pidx = base ? base->field_index(f.name) : -1;
+                    if (pidx != eidx)
+                        err(c.line, c.col,
+                            std::format("multiple inheritance base '{}' introduces field '{}' "
+                                        "that is not in the primary base layout", eb->name,
+                                        f.name));
+                }
+            }
             if (eb->is_open()) cls->open = true;
         }
         if (base) {
             cls->base_fields = base->n_fields();
-            cls->base_slots = base->n_slots();
             cls->has_field_defaults = base->has_field_defaults;
+        }
+
+        // C3 MRO。方法查找、super() 和 vtable 填充都按这条链走。
+        {
+            std::vector<ClassInfo*> known;
+            if (base) known.push_back(base);
+            for (ClassInfo* e : extra_bases) known.push_back(e);
+            for (size_t i = 0; i < known.size(); ++i)
+                for (size_t j = i + 1; j < known.size(); ++j)
+                    if (known[i] == known[j])
+                        err(c.line, c.col,
+                            std::format("duplicate base class '{}'", known[i]->name));
+            std::vector<std::vector<ClassInfo*>> seqs;
+            for (ClassInfo* b : known) {
+                if (b->mro.empty()) seqs.push_back({b});
+                else seqs.push_back(b->mro);
+            }
+            seqs.push_back(known);
+            std::vector<ClassInfo*> linear;
+            cls->mro.clear();
+            cls->mro.push_back(cls.get());
+            if (c3_merge(seqs, linear)) {
+                for (ClassInfo* b : linear) cls->mro.push_back(b);
+            } else {
+                err(c.line, c.col,
+                    std::format("cannot create a consistent method resolution order "
+                                "for class '{}'", c.name));
+                for (ClassInfo* b : known) cls->mro.push_back(b);
+            }
         }
 
         // 先把类名绑定好：字段标注和字符串注解可能引用类自身（`next: "Node"`）。
@@ -390,73 +474,146 @@ void TypeChecker::classdef(ClassDef& c) {
 
         // 方法签名先全体登记，方法之间可以互相调用（包括调用本类的其他
         // 方法，以及被子类覆盖的方法名）。
+        auto decor_kind = [](const FunctionDef& f, bool& ok) -> MethodKind {
+            ok = true;
+            if (f.decorators.empty()) return MethodKind::Normal;
+            if (f.decorators.size() != 1) {
+                ok = false;
+                return MethodKind::Normal;
+            }
+            Expr* d = f.decorators[0].get();
+            if (auto* n = dynamic_cast<Name*>(d)) {
+                if (n->id == "staticmethod") return MethodKind::Static;
+                if (n->id == "property") return MethodKind::PropertyGetter;
+                ok = false;
+                return MethodKind::Normal;
+            }
+            if (auto* a = dynamic_cast<Attribute*>(d)) {
+                if (auto* bn = dynamic_cast<Name*>(a->value.get()); bn && bn->id == f.name) {
+                    if (a->attr == "setter") return MethodKind::PropertySetter;
+                    if (a->attr == "deleter") return MethodKind::PropertyDeleter;
+                }
+            }
+            ok = false;
+            return MethodKind::Normal;
+        };
         auto rebuild_call_sig = [](MethodInfo& m) {
-            // 带装饰器的方法（@staticmethod / @classmethod / @property）语义
-            // 由装饰器决定，静态上不猜：不给调用签名，调用时也不检查实参
-            if (m.def && !m.def->decorators.empty()) {
+            if (!m.sig) return;
+            if (m.kind == MethodKind::Normal && m.def && !m.def->decorators.empty()) {
+                // 未识别的方法装饰器：语义不确定，调用点不检查实参。
                 m.call_sig = nullptr;
                 return;
             }
-            if (m.sig->pos.empty()) return;
             m.call_sig = std::make_shared<FuncInfo>(*m.sig);
             m.call_sig->name = m.name;
+            if (m.kind == MethodKind::Static) return;  // 静态方法没有隐式 self
+            if (m.call_sig->pos.empty()) {
+                m.call_sig = nullptr;
+                return;
+            }
             m.call_sig->pos.erase(m.call_sig->pos.begin());
             if (m.call_sig->n_posonly > 0) --m.call_sig->n_posonly;
         };
-        int next_slot = cls->base_slots;
         for (auto& s : c.body) {
             if (s->kind != StmtKind::FunctionDef) continue;
             auto& f = static_cast<FunctionDef&>(*s);
-            // 同名方法在 Python 里合法：后定义覆盖前一个（@property 的
-            // getter / setter 就是同名两个 def）。两个方法体都检查，vtable
-            // 里让后一个胜出；槽位沿用第一个的。
-            int dup_slot = -1;
-            for (auto& mm : cls->methods)
-                if (mm.name == f.name) dup_slot = mm.slot;
-            if (dup_slot >= 0) unsupported.push_back("duplicate method definition");
+            bool decor_ok = true;
+            MethodKind kind = decor_kind(f, decor_ok);
+            if (!decor_ok) unsupported.push_back("method decorator");
             MethodInfo m;
             m.name = f.name;
+            m.kind = kind;
             m.sig = build_sig(f);
-            if (!f.decorators.empty()) {
-                // @staticmethod 的零参方法是合法的，self 检查没意义
-                unsupported.push_back("method decorator");
-            } else if (m.sig->pos.empty()) {
-                err(f.line, f.col, std::format("method '{}' must take 'self' as first parameter",
-                                               f.name));
-            } else if (is_unknown(m.sig->pos[0].ty)) {
-                m.sig->pos[0].ty = mk_class(cls.get());
+            int midx = static_cast<int>(cls->methods.size());
+            if (kind == MethodKind::Normal || !decor_ok) {
+                if (m.sig->pos.empty()) {
+                    err(f.line, f.col,
+                        std::format("method '{}' must take 'self' as first parameter", f.name));
+                } else if (is_unknown(m.sig->pos[0].ty)) {
+                    m.sig->pos[0].ty = mk_class(cls.get());
+                }
+                m.slot = intern_method_slot(f.name);
+            } else if (kind == MethodKind::Static) {
+                // 静态方法按书写顺序接收实参，没有隐式 self。
+                m.slot = intern_method_slot(f.name);
+            } else {
+                if (m.sig->pos.empty()) {
+                    err(f.line, f.col,
+                        std::format("property '{}' must take 'self' as first parameter",
+                                    f.name));
+                } else if (is_unknown(m.sig->pos[0].ty)) {
+                    m.sig->pos[0].ty = mk_class(cls.get());
+                }
+                if (kind == MethodKind::PropertyGetter) {
+                    if (cls->field_index(f.name) >= 0)
+                        err(f.line, f.col,
+                            std::format("property '{}' conflicts with a field", f.name));
+                    m.slot = intern_method_slot("@get:" + f.name);
+                    PropertyInfo pi;
+                    pi.owner = cls.get();
+                    pi.getter = midx;
+                    cls->properties[f.name] = pi;
+                } else {
+                    auto pit = cls->properties.find(f.name);
+                    if (pit == cls->properties.end()) {
+                        err(f.line, f.col,
+                            std::format("@{} requires a @property getter named '{}' in the "
+                                        "same class",
+                                        kind == MethodKind::PropertySetter ? "setter" : "deleter",
+                                        f.name));
+                    } else if (kind == MethodKind::PropertySetter) {
+                        pit->second.setter = midx;
+                    } else {
+                        pit->second.deleter = midx;
+                    }
+                    if (kind == MethodKind::PropertySetter && m.sig->pos.size() < 2)
+                        err(f.line, f.col,
+                            std::format("property setter '{}' must take self and value", f.name));
+                    m.slot = intern_method_slot(
+                        (kind == MethodKind::PropertySetter ? "@set:" : "@del:") + f.name);
+                }
             }
+            if (f.name == "__init__" && kind != MethodKind::Normal)
+                err(f.line, f.col, "__init__ cannot be a static method or property");
             m.def = &f;
-            // 覆盖父类的方法沿用父类的槽位（vtable 前缀与父类一致），
-            // 只有真正新增的方法才占新槽。
-            int inherited = cls->base ? cls->base->slot_of(f.name) : -1;
-            if (dup_slot >= 0) m.slot = dup_slot;
-            else m.slot = inherited >= 0 ? inherited : next_slot++;
             rebuild_call_sig(m);
             // 方法体检查复用这份签名，返回类型才会回填到同一个对象上
             func_infos_[&f] = m.sig;
             cls->methods.push_back(std::move(m));
         }
-        // 多重继承：附加基类不贡献布局，只把方法复制进子类（第一个定义胜出）。
+        cls->has_init = cls->method("__init__") != nullptr;
+
+        // 沿 MRO 检查同名方法的种类是否一致。普通方法/静态方法的调用 ABI
+        // 不同，属性又走独立槽；混用会让基类静态类型上的调用点拿错约定。
         {
-            auto has_name = [&](const std::string& n) {
-                for (auto& mm : cls->methods)
-                    if (mm.name == n) return true;
-                return cls->base && cls->base->slot_of(n) >= 0;
-            };
-            for (ClassInfo* eb : extra_bases) {
-                for (ClassInfo* p = eb; p; p = p->base) {
-                    for (auto& bm : p->methods) {
-                        if (has_name(bm.name)) continue;
-                        MethodInfo m = bm;
-                        m.slot = next_slot++;
-                        cls->methods.push_back(std::move(m));
+            std::unordered_map<std::string, MethodKind> kinds;
+            std::unordered_set<std::string> prop_names;
+            for (const ClassInfo* k : cls->mro) {
+                for (const MethodInfo& m : k->methods) {
+                    if (m.is_accessor()) {
+                        prop_names.insert(m.name);
+                        continue;
                     }
+                    auto it = kinds.find(m.name);
+                    if (it == kinds.end()) kinds.emplace(m.name, m.kind);
+                    else if (it->second != m.kind)
+                        err(c.line, c.col,
+                            std::format("incompatible method kinds for '{}' in the MRO of "
+                                        "'{}'", m.name, c.name));
+                }
+                for (const auto& [pn, pi] : k->properties) {
+                    (void)pi;
+                    prop_names.insert(pn);
                 }
             }
+            for (const auto& [n, k] : kinds) {
+                (void)k;
+                if (prop_names.count(n))
+                    err(c.line, c.col,
+                        std::format("cannot mix property and method '{}' in the MRO of '{}'",
+                                    n, c.name));
+            }
         }
-        cls->own_slots = next_slot - cls->base_slots;
-        cls->has_init = cls->method("__init__") != nullptr;
 
         // 类体里的其他语句：在类定义点执行。py23 没有类命名空间，
         // 赋值按模块全局处理；成员表因此可能不全，类标记成 open。

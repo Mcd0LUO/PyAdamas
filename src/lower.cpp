@@ -208,25 +208,17 @@ void Lowerer::collect_classes(std::vector<StmtPtr>& body) {
                         for (auto& f : (*kit)->fields)
                             irc.field_heap.push_back(ir_is_heap(f.ty) ? 1 : 0);
                 }
-                irc.vtable.assign(static_cast<size_t>(ci->n_slots()), -1);
+                irc.vtable.assign(static_cast<size_t>(tc_.method_slot_count()), -1);
                 int self_id = static_cast<int>(mod_.classes.size());
                 class_ids_[ci.get()] = self_id;
-                irc.ancestors.push_back(self_id);
-                auto contains = [&](int id) {
-                    for (int a : irc.ancestors)
-                        if (a == id) return true;
-                    return false;
-                };
-                auto add_anc = [&](auto&& self, const ClassInfo* k) -> void {
-                    if (!k) return;
+                irc.qualname = mod_.runtime_name + "." + ci->name;
+                for (const ClassInfo* k : ci->mro) {
                     auto kit = class_ids_.find(k);
-                    if (kit != class_ids_.end() && !contains(kit->second))
-                        irc.ancestors.push_back(kit->second);
-                    self(self, k->base);
-                    for (const ClassInfo* e : k->extra_bases) self(self, e);
-                };
-                add_anc(add_anc, ci->base);
-                for (const ClassInfo* e : ci->extra_bases) add_anc(add_anc, e);
+                    if (kit != class_ids_.end()) irc.mro.push_back(kit->second);
+                }
+                if (irc.mro.empty()) irc.mro.push_back(self_id);
+                for (const MethodInfo& m : ci->methods)
+                    if (m.slot >= 0) irc.own_slots.push_back(m.slot);
                 mod_.classes.push_back(std::move(irc));
                 break;
             }
@@ -307,15 +299,17 @@ void Lowerer::run(Module& ast) {
     pop_frame();
 }
 
-int Lowerer::compile_function_body(FunctionDef& f, FuncInfoPtr info, const std::string& label) {
+int Lowerer::compile_function_body(FunctionDef& f, FuncInfoPtr info, const std::string& label,
+                                   const ClassInfo* owner) {
     if (f.is_async) {
         int kind = (info && info->is_async_generator) ? 2 : 1;
-        return compile_suspendable_function(f, info, label, kind);
+        return compile_suspendable_function(f, info, label, kind, owner);
     }
-    if (info && info->is_generator) return compile_suspendable_function(f, info, label, 0);
+    if (info && info->is_generator) return compile_suspendable_function(f, info, label, 0, owner);
 
     IRFunction* irf = mod_.add_func(label);
     int fidx = static_cast<int>(mod_.funcs.size()) - 1;
+    if (owner) fn_owner_class_[irf] = owner;
 
     TypePtr ret = t_none();
     if (info && info->ret) ret = info->ret;
@@ -526,26 +520,34 @@ void Lowerer::lower_classdef(ClassDef& c) {
 
     // 类体语句在下面按执行语义降级；类命名空间未建模，赋值走模块全局。
 
-    // 先把父类的 vtable 抄过来。父类一定在本类之前定义，此时它的槽
-    // 已经填好；子类覆盖同名方法只改自己那几个槽，前缀保持不变。
-    if (ci->base) {
-        auto bit = class_ids_.find(ci->base);
-        if (bit != class_ids_.end()) {
-            const auto& bv = mod_.classes[bit->second].vtable;
-            auto& cv = mod_.classes[cid].vtable;
-            for (size_t i = 0; i < bv.size() && i < cv.size(); ++i)
-                cv[i] = bv[i];
+    // 按 C3 MRO 从前向后填 vtable：MRO 中越靠前的类优先级越高，
+    // 每个槽只由最先声明它的类占用。本类自己的方法稍后编译时覆盖。
+    {
+        auto& cv = mod_.classes[cid].vtable;
+        for (size_t mi = 1; mi < ci->mro.size(); ++mi) {
+            const ClassInfo* k = ci->mro[mi];
+            auto kit = class_ids_.find(k);
+            if (kit == class_ids_.end()) continue;
+            const auto& kv = mod_.classes[kit->second].vtable;
+            for (const MethodInfo& km : k->methods) {
+                if (km.slot < 0 || km.slot >= static_cast<int>(cv.size())) continue;
+                if (cv[static_cast<size_t>(km.slot)] != -1) continue;
+                if (km.slot < static_cast<int>(kv.size()) &&
+                    kv[static_cast<size_t>(km.slot)] >= 0)
+                    cv[static_cast<size_t>(km.slot)] = kv[static_cast<size_t>(km.slot)];
+            }
         }
     }
 
     for (auto& m : ci->methods) {
         if (!m.def) continue;
-        if (!m.def->decorators.empty()) {
-            err(m.def->line, m.def->col, "decorators on methods are not supported yet");
+        if (!m.def->decorators.empty() && m.kind == MethodKind::Normal) {
+            err(m.def->line, m.def->col,
+                "only @staticmethod / @property method decorators are supported");
             continue;
         }
         std::string label = std::format("{}_{}_{}", c.name, m.name, mod_.funcs.size());
-        int fidx = compile_function_body(*m.def, m.sig, label);
+        int fidx = compile_function_body(*m.def, m.sig, label, ci.get());
         if (m.slot >= 0 && m.slot < static_cast<int>(mod_.classes[cid].vtable.size()))
             mod_.classes[cid].vtable[static_cast<size_t>(m.slot)] = fidx;
     }

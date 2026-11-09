@@ -49,7 +49,7 @@ AST 本身不带类型字段（`ast.h` 里没有 `TypePtr`）。类型单独存�
 
 - `expr_types_`：表达式节点 → 类型
 - `func_scopes_` / `func_infos_`：函数定义节点 → 作用域 / 签名
-- `classes_`：类名 → 编译期布局（字段表、方法表、vtable 槽位）
+- `classes_`：类名 → 编译期布局（字段表、方法表、C3 MRO、vtable 槽位）
 
 降级阶段通过 `TypeChecker` 的查询接口取值：`type_of(Expr*)`、`scope_of(Stmt*)`、`func_info(Stmt*)`、`module_scope()`、`classes()`。这样做的好处是 AST 保持纯语法结构、可以原样 dump；代价是降级器必须持有 `TypeChecker` 的引用，两者生命周期绑定（见 `lower_module` 的签名）。
 

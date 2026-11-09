@@ -17,7 +17,8 @@ std::string AsmGen::gen(const IRModule& m) {
                 const std::string& s = m.strings[i];
                 out_ += "\t.align 8\n";
                 // 隐藏 RC 头（64 字节）：next/prev/rc/dtor/release/size/kind/marked。
-                // 字面量 rc = INT64_MIN 永生，不进 GC 注册表。
+                // 字面量 rc = INT64_MIN 永生；启动时只登记进 RC 索引供
+                // unknown 类型检查使用，不进 GC 堆链。
                 out_ += "\t.quad 0\n\t.quad 0\n";
                 out_ += "\t.quad 0x8000000000000000\n";
                 out_ += "\t.quad 0\n\t.quad 0\n\t.quad 0\n\t.quad 0\n\t.quad 0\n";
@@ -29,7 +30,14 @@ std::string AsmGen::gen(const IRModule& m) {
                 out_ += std::format("\t.ascii \"{}\"\n", asm_escape(s));
                 out_ += "\t.byte 0\n";
             }
+            // 静态字面量虽然永生，但 unknown 值的运行期类型检查要靠 RC
+            // 注册表确认载荷类型。表在模块入口统一登记。
         }
+        out_ += "\t.section .data.rel.ro,\"aw\",@progbits\n";
+        out_ += "\t.align 8\n.Lstrtab:\n";
+        for (size_t i = 0; i < m.strings.size(); ++i)
+            out_ += std::format("\t.quad .Lstr{}\n", i);
+        if (m.strings.empty()) out_ += "\t.quad 0\n";
 
         if (!m.globals.empty()) {
             out_ += "\t.bss\n";
@@ -64,23 +72,32 @@ std::string AsmGen::gen(const IRModule& m) {
 
         // 每个类一张静态 vtable：槽里是方法代码地址。对象头第一个
         // 字段指向它，虚调用就是「取表、取槽、间接跳转」。
-        // vtable 前面固定两个字的元数据：祖先列表指针 + 类编号，
-        // 供类模式的运行期 isinstance 检查使用。
+        // vtable 前固定 5 个字的元数据：MRO 元数据指针表、类编号、
+        // vtable 自身、本类声明的槽表、模块限定类名。
         if (!m.classes.empty()) {
             out_ += "\t.section .data.rel.ro,\"aw\",@progbits\n";
             for (size_t i = 0; i < m.classes.size(); ++i) {
                 out_ += "\t.align 8\n";
                 out_ += std::format(".Lvtmeta{}:\n", i);
-                out_ += std::format("\t.quad .Lvtanc{}\n", i);
+                out_ += std::format("\t.quad .Lvtmro{}\n", i);
                 out_ += std::format("\t.quad {}\n", i);
+                out_ += std::format("\t.quad .Lvt{}\n", i);
+                out_ += std::format("\t.quad .Lvtown{}\n", i);
+                out_ += std::format("\t.quad .Lcname{}\n", i);
                 out_ += std::format(".Lvt{}:\n", i);
                 if (m.classes[i].vtable.empty()) out_ += "\t.quad 0\n";
                 for (int f : m.classes[i].vtable)
                     out_ += f < 0 ? "\t.quad 0\n" : std::format("\t.quad {}\n", func_label(f));
-                out_ += std::format(".Lvtanc{}:\n", i);
-                out_ += std::format("\t.quad {}\n", m.classes[i].ancestors.size());
-                for (int a : m.classes[i].ancestors)
-                    out_ += std::format("\t.quad {}\n", a);
+                out_ += std::format(".Lvtmro{}:\n", i);
+                out_ += std::format("\t.quad {}\n", m.classes[i].mro.size());
+                for (int a : m.classes[i].mro)
+                    out_ += std::format("\t.quad .Lvtmeta{}\n", a);
+                out_ += std::format(".Lvtown{}:\n", i);
+                out_ += std::format("\t.quad {}\n", m.classes[i].own_slots.size());
+                for (int s : m.classes[i].own_slots)
+                    out_ += std::format("\t.quad {}\n", s);
+                out_ += std::format(".Lcname{}:\n", i);
+                out_ += std::format("\t.asciz \"{}\"\n", asm_escape(m.classes[i].qualname));
             }
         }
 
@@ -161,8 +178,15 @@ std::string AsmGen::gen(const IRModule& m) {
 
         if (!m.is_entry && !m.module_symbol.empty() && m.entry >= 0) {
             out_ += "\t.globl " + module_init_symbol(m.module_symbol) + "\n";
-            out_ += "\t.set " + module_init_symbol(m.module_symbol) + ", " +
-                    func_label(m.entry) + "\n";
+            out_ += "\t.type " + module_init_symbol(m.module_symbol) + ", @function\n";
+            out_ += module_init_symbol(m.module_symbol) + ":\n";
+            out_ += "\tpushq %rbp\n";
+            out_ += "\tmovq %rsp, %rbp\n";
+            out_ += "\tleaq .Lstrtab(%rip), %rdi\n";
+            out_ += std::format("\tmovq ${}, %rsi\n", m.strings.size());
+            out_ += "\tcall py23_register_literals\n";
+            out_ += "\tpopq %rbp\n";
+            out_ += "\tjmp " + func_label(m.entry) + "\n";
         }
 
         // 真正的入口：调用降级出来的 __py23_main，返回它的返回值
@@ -180,6 +204,9 @@ std::string AsmGen::gen(const IRModule& m) {
             out_ += std::format("\tmovq ${}, %rsi\n", local_global_count());
             out_ += "\tmovq %rbp, %rdx\n";
             out_ += "\tcall py23_gc_init\n";
+            out_ += "\tleaq .Lstrtab(%rip), %rdi\n";
+            out_ += std::format("\tmovq ${}, %rsi\n", m.strings.size());
+            out_ += "\tcall py23_register_literals\n";
             out_ += "\tmovslq (%rsp), %rdi\n";
             out_ += "\tmovq 8(%rsp), %rsi\n";
             out_ += "\tcall py23_sys_set_args\n";

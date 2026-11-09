@@ -370,9 +370,21 @@ traceback / `raise ... from`；`finally` 体内跳出 finally 的
 已知限制：捕获名仍是 case 作用域；点分类名与导入类模式未支持；
 unknown 值不能做字符串/复数/内置类型模式；映射模式不查重复 key。
 
+## 0.28：C3 MRO、super 与方法装饰器（已完成）
+
+- C3 线性化 + 模块级方法槽；vtable 按 MRO 填充；菱形共享字段布局。
+- 零参 `super().m()` / `super().__init__()`：运行期 MRO 动态分派。
+- `@staticmethod`、`@property` / `@x.setter` / `@x.deleter`。
+- match 边角：捕获名赛后可见、unknown 字符串/复数、导入类点分类名、
+  重复映射 key、unknown 上的 object/str/complex 类型模式。
+- 运行期类元数据扩为 5 字；静态字符串字面量登记进 RC 索引。
+
+已知限制：`@classmethod`、自定义方法/类装饰器、`super(C, self)`、
+staticmethod/property 上的 super、导入类字段子模式、unknown 数值类型模式。
+
 ## 下一步
 
-- 语言面：方法/类装饰器的剩余形态、生成器 `throw()`、异步生成器 `athrow`
+- 语言面：`@classmethod`、自定义方法/类装饰器、生成器 `throw()`
 - 运行时：fd 读写/子进程、线程安全事件循环
 - 工程面：按 [技术债](#技术债) 顺序处理（优化遍、列表 repr、异常对象等）
 

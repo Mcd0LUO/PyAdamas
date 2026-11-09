@@ -122,6 +122,15 @@ struct FuncCtx {
     const Scope* scope = nullptr;
     std::unordered_map<std::string, int> slots;
     std::unordered_set<std::string> globals_decl;
+    // match 捕获要在 case 结束后继续可见：case 里绑定时同时写一份到
+    // 函数帧/全局。kind: 0 局部槽 / 1 cell / 2 全局。
+    struct MatchEscape {
+        int kind = 0;
+        int idx = -1;
+        TypePtr ty;
+    };
+    std::unordered_map<std::string, MatchEscape> match_escape;
+    std::unordered_map<std::string, TypePtr> extra_locals;
     // 闭包：本函数需要从外层拿的变量，以及被内层捕获、需要转成 cell 的局部名。
     const ClosureMeta* closure = nullptr;
     std::unordered_map<std::string, int> cell_slots;   // 名字 → 存 cell 指针的槽
@@ -240,6 +249,8 @@ private:
     // 用 ClassInfo 指针做键，同名类重定义时不会串。
     std::unordered_map<std::string, ClassInfoPtr> classes_;
     std::unordered_map<const ClassInfo*, int> class_ids_;
+    // 方法帧 → 运行时类。零参 super() 只在这个方法自己的帧里有效。
+    std::unordered_map<const IRFunction*, const ClassInfo*> fn_owner_class_;
 
     // ── 错误 ────────────────────────────────────────────────────
 
@@ -736,6 +747,8 @@ private:
 
     TypePtr name_ty(const std::string& name) {
         if (int cs = comp_slot(name); cs >= 0) return st_->fn->slot_ty[cs];
+        if (auto it = st_->extra_locals.find(name); it != st_->extra_locals.end())
+            return it->second;
         if (auto t = captured_ty(name)) return t;
         if (st_ && st_->scope) {
             auto it = st_->scope->vars.find(name);
@@ -830,11 +843,12 @@ private:
     void lower_classdef(ClassDef& c);
 
     // 把一个函数体编译成 IRFunction，返回它的下标。普通函数和方法共用。
-    int compile_function_body(FunctionDef& f, FuncInfoPtr info, const std::string& label);
+    int compile_function_body(FunctionDef& f, FuncInfoPtr info, const std::string& label,
+                              const ClassInfo* owner = nullptr);
     // 含 yield / await 的函数：编译 resume 状态机 + 创建包装，返回创建包装下标。
     // frame_kind: 0 生成器 / 1 协程 / 2 异步生成器
     int compile_suspendable_function(FunctionDef& f, FuncInfoPtr info, const std::string& label,
-                                     int frame_kind);
+                                     int frame_kind, const ClassInfo* owner = nullptr);
     VReg lower_yield(Expr& y);
     VReg lower_yield_from(YieldFrom& y);
     // 把 v 作为一次 yield 挂起，返回恢复后 send 进来的值。
@@ -920,6 +934,7 @@ private:
     VReg lower_anyall(Call& c, bool is_any);
     VReg lower_print(Call& c);
     VReg lower_method_call(Attribute& at, Call& c);
+    VReg lower_super_call(Attribute& at, Call& c);
     VReg lower_subscript(Subscript& s);
     VReg lower_list_like(std::vector<ExprPtr>& elts, TypePtr ty, bool is_tuple);
     VReg lower_dict(DictExpr& d, TypePtr ty);

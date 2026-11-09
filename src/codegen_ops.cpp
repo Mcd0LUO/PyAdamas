@@ -57,6 +57,9 @@ void AsmGen::gen_inst(const Inst& in) {
             case IrOp::FieldLoad: gen_field_load(in); break;
             case IrOp::FieldStore: gen_field_store(in); break;
             case IrOp::VCall: gen_vcall(in); break;
+            case IrOp::VCallStatic: gen_vcall_static(in); break;
+            case IrOp::SuperVCall: gen_super_vcall(in); break;
+            case IrOp::CallDirect: gen_call_direct(in); break;
             case IrOp::Call: gen_call(in); break;
             case IrOp::CallRt: gen_call_rt(in); break;
             case IrOp::Setjmp: gen_setjmp(in); break;

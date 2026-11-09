@@ -113,6 +113,128 @@ void AsmGen::gen_vcall(const Inst& in) {
         }
     }
 
+void AsmGen::gen_vcall_static(const Inst& in) {
+        std::vector<TypePtr> types;
+        types.reserve(in.args.size());
+        for (VReg a : in.args) types.push_back(ty_of(a));
+        auto locs = classify(types);
+        int stack_args = 0;
+        for (auto& l : locs)
+            if (l.stack_off >= 0) stack_args = (l.stack_off / 8) + 1;
+        int alloc = (stack_args * 8 + 15) & ~15;
+
+        line(std::format("movq {}, %r10", src_op(in.a)));
+        line("movq (%r10), %r11");
+        line(std::format("movq {}(%r11), %r11", in.imm * 8));
+
+        if (alloc) line(std::format("subq ${}, %rsp", alloc));
+        for (size_t i = 0; i < in.args.size(); ++i) {
+            const auto& l = locs[i];
+            if (l.stack_off < 0) continue;
+            line(std::format("movq {}, %r10", src_op(in.args[i])));
+            line(std::format("movq %r10, {}(%rsp)", l.stack_off));
+        }
+        for (size_t i = 0; i < in.args.size(); ++i) {
+            const auto& l = locs[i];
+            if (l.stack_off >= 0) continue;
+            if (l.fp)
+                line(std::format("movsd {}, %xmm{}", src_op(in.args[i]), l.reg));
+            else
+                line(std::format("movq {}, {}", src_op(in.args[i]), kIntArgRegs[l.reg]));
+        }
+        line("xorl %r10d, %r10d");
+        line("xorl %eax, %eax");
+        line("call *%r11");
+        if (alloc) line(std::format("addq ${}, %rsp", alloc));
+        if (in.dst != kNoReg) {
+            if (ir_is_float(in.ty)) line(std::format("movsd %xmm0, {}", dst_op(in.dst)));
+            else line(std::format("movq %rax, {}", dst_op(in.dst)));
+        }
+    }
+
+void AsmGen::gen_super_vcall(const Inst& in) {
+        // 运行期沿实例的动态 MRO 找 after 类之后的下一实现。查找要先做，
+        // 因为它会走一次普通调用；找到的函数地址放 %r11 再装实参。
+        line(std::format("movq {}, %rdi", src_op(in.a)));
+        line(std::format("movq ${}, %rsi", in.idx));
+        line(std::format("movq ${}, %rdx", in.imm));
+        line(std::format("movq {}, %rcx", src_op(in.b)));
+        line("call py23_super_lookup");
+        line("movq %rax, %r11");
+
+        std::vector<TypePtr> types;
+        types.reserve(in.args.size() + 1);
+        types.push_back(t_unknown());
+        for (VReg a : in.args) types.push_back(ty_of(a));
+        auto locs = classify(types);
+        int stack_args = 0;
+        for (auto& l : locs)
+            if (l.stack_off >= 0) stack_args = (l.stack_off / 8) + 1;
+        int alloc = (stack_args * 8 + 15) & ~15;
+
+        if (alloc) line(std::format("subq ${}, %rsp", alloc));
+        for (size_t i = 0; i < in.args.size(); ++i) {
+            const auto& l = locs[i + 1];
+            if (l.stack_off < 0) continue;
+            line(std::format("movq {}, %r10", src_op(in.args[i])));
+            line(std::format("movq %r10, {}(%rsp)", l.stack_off));
+        }
+        line(std::format("movq {}, %rdi", src_op(in.a)));
+        for (size_t i = 0; i < in.args.size(); ++i) {
+            const auto& l = locs[i + 1];
+            if (l.stack_off >= 0) continue;
+            if (l.fp)
+                line(std::format("movsd {}, %xmm{}", src_op(in.args[i]), l.reg));
+            else
+                line(std::format("movq {}, {}", src_op(in.args[i]), kIntArgRegs[l.reg]));
+        }
+        line("xorl %r10d, %r10d");
+        line("xorl %eax, %eax");
+        line("call *%r11");
+        if (alloc) line(std::format("addq ${}, %rsp", alloc));
+
+        if (in.dst != kNoReg) {
+            if (ir_is_float(in.ty)) line(std::format("movsd %xmm0, {}", dst_op(in.dst)));
+            else line(std::format("movq %rax, {}", dst_op(in.dst)));
+        }
+    }
+
+void AsmGen::gen_call_direct(const Inst& in) {
+        std::vector<TypePtr> types;
+        types.reserve(in.args.size());
+        for (VReg a : in.args) types.push_back(ty_of(a));
+        auto locs = classify(types);
+        int stack_args = 0;
+        for (auto& l : locs)
+            if (l.stack_off >= 0) stack_args = (l.stack_off / 8) + 1;
+        int alloc = (stack_args * 8 + 15) & ~15;
+
+        line(std::format("leaq {}(%rip), %r11", func_label(in.idx)));
+        if (alloc) line(std::format("subq ${}, %rsp", alloc));
+        for (size_t i = 0; i < in.args.size(); ++i) {
+            const auto& l = locs[i];
+            if (l.stack_off < 0) continue;
+            line(std::format("movq {}, %r10", src_op(in.args[i])));
+            line(std::format("movq %r10, {}(%rsp)", l.stack_off));
+        }
+        for (size_t i = 0; i < in.args.size(); ++i) {
+            const auto& l = locs[i];
+            if (l.stack_off >= 0) continue;
+            if (l.fp)
+                line(std::format("movsd {}, %xmm{}", src_op(in.args[i]), l.reg));
+            else
+                line(std::format("movq {}, {}", src_op(in.args[i]), kIntArgRegs[l.reg]));
+        }
+        line("xorl %r10d, %r10d");
+        line("xorl %eax, %eax");
+        line("call *%r11");
+        if (alloc) line(std::format("addq ${}, %rsp", alloc));
+        if (in.dst != kNoReg) {
+            if (ir_is_float(in.ty)) line(std::format("movsd %xmm0, {}", dst_op(in.dst)));
+            else line(std::format("movq %rax, {}", dst_op(in.dst)));
+        }
+    }
+
 void AsmGen::gen_branch(const Inst& in) {
         TypePtr ty = ty_of(in.a);
         if (ir_is_float(ty)) {
@@ -238,7 +360,10 @@ void AsmGen::gen_call_rt(const Inst& in) {
             case RtFn::ListExtend:
             case RtFn::ListDelIndex:
             case RtFn::IsInstance:
+            case RtFn::IsNamedClass:
             case RtFn::IsException:
+            case RtFn::StrEqUnknown:
+            case RtFn::ComplexEqUnknown:
                 line(std::format("movq {}, %rdi", src_op(in.args[0])));
                 line(std::format("movq {}, %rsi", src_op(in.args[1])));
                 break;
@@ -263,6 +388,7 @@ void AsmGen::gen_call_rt(const Inst& in) {
                 break;
             case RtFn::DictPop:
             case RtFn::ListSliceAssign:
+            case RtFn::SuperLookup:
                 line(std::format("movq {}, %rdi", src_op(in.args[0])));
                 line(std::format("movq {}, %rsi", src_op(in.args[1])));
                 line(std::format("movq {}, %rdx", src_op(in.args[2])));
@@ -293,6 +419,8 @@ void AsmGen::gen_call_rt(const Inst& in) {
             case RtFn::DictCopy:
             case RtFn::IsSeq:
             case RtFn::IsDict:
+            case RtFn::IsStr:
+            case RtFn::IsComplex:
             case RtFn::StrToList:
             case RtFn::HandlerLeave:
             case RtFn::HandlerDiscard:

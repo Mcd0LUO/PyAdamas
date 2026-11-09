@@ -760,6 +760,23 @@ void Lowerer::delete_target(Expr& target) {
             TypePtr ot = strip_optional(raw);
             bool opt = ot != raw;
             if (ot && ot->kind == TyKind::Class && ot->cls) {
+                if (const PropertyInfo* p = ot->cls->property(at.attr)) {
+                    if (!p->owner || p->deleter < 0 ||
+                        p->deleter >= static_cast<int>(p->owner->methods.size())) {
+                        err(target.line, target.col,
+                            std::format("property '{}' has no deleter", at.attr));
+                        return;
+                    }
+                    const MethodInfo& dm = p->owner->methods[p->deleter];
+                    VReg obj = expr(*at.value);
+                    if (opt) obj = guard_not_none(obj, std::format("property '{}'", at.attr));
+                    Inst vc;
+                    vc.op = IrOp::VCall;
+                    vc.a = obj;
+                    vc.imm = dm.slot;
+                    emit(std::move(vc));
+                    return;
+                }
                 auto* f = ot->cls->field(at.attr);
                 if (!f) {
                     err(target.line, target.col,
@@ -794,6 +811,37 @@ void Lowerer::lower_match(Match& m) {
     store_slot(subj, sv);
     int end = new_block("match.end");
 
+    // case 里的捕获同时写一份到 case 外的作用域：Python 里 match 捕获
+    // 就是普通赋值，分支结束后仍然可见。
+    auto saved_escape = std::move(st_->match_escape);
+    st_->match_escape.clear();
+    if (auto* caps = tc_.match_captures(&m)) {
+        bool module_level = st_->scope == tc_.module_scope();
+        for (auto& [name, ty] : *caps) {
+            FuncCtx::MatchEscape e;
+            e.ty = ty;
+            if (is_cell(name) || is_env(name)) {
+                e.kind = 1;
+                e.idx = 0;
+            } else if (st_->globals_decl.count(name) || module_level) {
+                int gi = global_idx_as(name, ty);
+                e.kind = 2;
+                e.idx = gi;
+            } else {
+                auto it = st_->slots.find(name);
+                if (it == st_->slots.end()) {
+                    int slot = st_->fn->new_slot(ty ? ty : t_unknown());
+                    st_->slots[name] = slot;
+                    it = st_->slots.find(name);
+                }
+                st_->extra_locals[name] = ty;
+                e.kind = 0;
+                e.idx = it->second;
+            }
+            st_->match_escape[name] = e;
+        }
+    }
+
     for (auto& c : m.cases) {
         int fail = new_block("match.fail");
         comp_slots_.emplace_back();
@@ -824,6 +872,7 @@ void Lowerer::lower_match(Match& m) {
     j.target = end;
     emit(std::move(j));
     switch_to(end);
+    st_->match_escape = std::move(saved_escape);
 }
 
 static void lower_pattern_names(const Pattern& p, std::vector<std::string>& out) {
@@ -890,6 +939,18 @@ void Lowerer::lower_pattern(Pattern& p, VReg value, TypePtr ty, int fail, bool i
 
     auto bind_name = [&](const std::string& name, VReg v, TypePtr vty) {
         if (name.empty() || name == "_") return;
+        auto bind_escape = [&]() {
+            auto eit = st_->match_escape.find(name);
+            if (eit == st_->match_escape.end()) return;
+            auto& e = eit->second;
+            if (e.kind == 1) {
+                write_cell(name, v, vty);
+                return;
+            }
+            VReg ev = coerce(v, vty, e.ty);
+            if (e.kind == 2) store_global(e.idx, ev);
+            else store_slot(e.idx, ev);
+        };
         auto& scope = comp_slots_.back();
         auto it = scope.find(name);
         bool duplicate =
@@ -910,12 +971,14 @@ void Lowerer::lower_pattern(Pattern& p, VReg value, TypePtr ty, int fail, bool i
             // OR 预声明的共享槽：哪个分支成功就写哪个。
             store_slot(it->second, v);
             if (or_local) or_local->insert(name);
+            bind_escape();
             return;
         }
         int slot = st_->fn->new_slot(vty ? vty : t_unknown());
         scope[name] = slot;
         store_slot(slot, v);
         if (or_local) or_local->insert(name);
+        bind_escape();
     };
 
     auto match_equal = [&](ExprPtr& lit) {
@@ -934,16 +997,15 @@ void Lowerer::lower_pattern(Pattern& p, VReg value, TypePtr ty, int fail, bool i
             return;
         }
         if (lt && lt->kind == TyKind::Complex) {
+            VReg lv = expr(*lit);
             if (st && st->kind == TyKind::Unknown) {
-                err(p.line, p.col,
-                    "complex pattern cannot match a value of unknown type");
+                test(call_runtime(RtFn::ComplexEqUnknown, t_bool(), {value, lv}));
                 return;
             }
-            if (st && st->kind != TyKind::Complex && st->kind != TyKind::Unknown) {
+            if (st && st->kind != TyKind::Complex) {
                 jump_fail();
                 return;
             }
-            VReg lv = expr(*lit);
             if (st && st->kind != TyKind::Complex) lv = convert_to(lv, lt, t_complex());
             test(call_runtime(RtFn::ComplexEq, t_bool(), {value, lv}));
             return;
@@ -958,11 +1020,11 @@ void Lowerer::lower_pattern(Pattern& p, VReg value, TypePtr ty, int fail, bool i
         }
         if (lt && lt->kind == TyKind::Str) {
             if (st && st->kind == TyKind::Unknown) {
-                err(p.line, p.col,
-                    "string pattern cannot match a value of unknown type");
+                VReg lv = expr(*lit);
+                test(call_runtime(RtFn::StrEqUnknown, t_bool(), {value, lv}));
                 return;
             }
-            if (st && st->kind != TyKind::Str && st->kind != TyKind::Unknown) {
+            if (st && st->kind != TyKind::Str) {
                 jump_fail();
                 return;
             }
@@ -1132,6 +1194,21 @@ void Lowerer::lower_pattern(Pattern& p, VReg value, TypePtr ty, int fail, bool i
             return;
         }
         case PatternKind::Class: {
+            if (!p.qualname.empty()) {
+                if (!p.positional.empty() || !p.attrs.empty()) {
+                    err(p.line, p.col,
+                        "imported class patterns support only the class check");
+                    return;
+                }
+                test(call_runtime(RtFn::IsNamedClass, t_bool(),
+                                  {value, const_str(p.qualname)}));
+                return;
+            }
+            if (p.cls.find('.') != std::string::npos) {
+                err(p.line, p.col,
+                    std::format("class pattern '{}' could not be resolved", p.cls));
+                return;
+            }
             auto cit = classes_.find(p.cls);
             if (cit != classes_.end() && cit->second) {
                 const ClassInfoPtr& pc = cit->second;
@@ -1209,6 +1286,17 @@ void Lowerer::lower_pattern(Pattern& p, VReg value, TypePtr ty, int fail, bool i
             };
             if (builtin_types.count(p.cls)) {
                 if (!st || st->kind == TyKind::Unknown) {
+                    // 原始 int/float 没有运行期标签，无法区分；堆类型
+                    // 可以做安全检查。
+                    if (p.cls == "object") return;
+                    if (p.cls == "str") {
+                        test(call_runtime(RtFn::IsStr, t_bool(), {value}));
+                        return;
+                    }
+                    if (p.cls == "complex") {
+                        test(call_runtime(RtFn::IsComplex, t_bool(), {value}));
+                        return;
+                    }
                     err(p.line, p.col,
                         std::format("cannot match builtin type pattern '{}()' against a "
                                     "value of unknown type", p.cls));

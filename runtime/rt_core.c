@@ -101,6 +101,17 @@ int rc_index_has(Py23Rc* h) {
     return 0;
 }
 
+/* 代码生成把静态字符串字面量指针列表放在 .Lstrtab，模块入口在跑用户
+   代码前调用这里登记。字面量 rc=INT64_MIN 永生，不进 GC 堆链，但
+   unknown 值的运行期类型检查要靠 RC 索引确认指针确实指向 Py23Str。 */
+void py23_register_literals(void** objs, int64_t n) {
+    for (int64_t i = 0; i < n; ++i) {
+        if (!objs[i]) continue;
+        Py23Rc* h = (Py23Rc*)(uintptr_t)objs[i] - 1;
+        if (!rc_index_has(h)) rc_index_put(h);
+    }
+}
+
 /* 对 unknown 值做保守 retain：不是堆指针就什么也不做。查不到的对象
    包括静态字面量（永生，不需要 inc）和整数。 */
 int64_t py23_rc_inc_unknown(int64_t v) {

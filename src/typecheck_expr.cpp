@@ -270,6 +270,14 @@ TypePtr TypeChecker::expr(Expr& e) {
                     // 骨架：类体还没检查到（类定义在引用点之后），成员表是空的。
                     // 正在检查本类方法时不算骨架——那时字段和方法都已登记完。
                     if (!ot->cls->complete && ot->cls != cur_class_) return t_unknown();
+                    if (const PropertyInfo* p = ot->cls->property(a.attr)) {
+                        if (!p->owner || p->getter < 0 ||
+                            p->getter >= static_cast<int>(p->owner->methods.size()))
+                            return t_unknown();
+                        const MethodInfo& gm = p->owner->methods[p->getter];
+                        return gm.call_sig && gm.call_sig->ret ? gm.call_sig->ret
+                                                               : t_unknown();
+                    }
                     if (auto* f = ot->cls->field(a.attr)) return f->ty;
                     if (ot->cls->method(a.attr)) return mk_bound(ot, a.attr);
                     // `self.x` 找不到：可能是 mixin 组合出来的成员，也可能

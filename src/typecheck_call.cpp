@@ -8,6 +8,20 @@ namespace py23 {
 TypePtr TypeChecker::call(Call& c) {
         // f(...) 里 f 是 Name：可能是异常构造器、内置函数，也可能是用户函数
         if (auto* n = dynamic_cast<Name*>(c.func.get())) {
+            if (n->id == "super" && !lookup("super")) {
+                if (!cur_class_) {
+                    err(c.line, c.col, "super() is only supported inside a class method");
+                    return t_unknown();
+                }
+                if (!c.args.empty() || !c.keywords.empty()) {
+                    err(c.line, c.col,
+                        "only zero-argument super() is supported inside a method");
+                    for (auto& arg : c.args) expr(*arg);
+                    for (auto& kw : c.keywords) expr(*kw.value);
+                    return t_unknown();
+                }
+                return t_unknown();
+            }
             if (!lookup(n->id) && is_exception_name(n->id)) {
                 if (!c.keywords.empty())
                     err(c.line, c.col, "exception constructor does not take keyword arguments");
@@ -60,6 +74,35 @@ TypePtr TypeChecker::call(Call& c) {
                     for (auto& kw : c.keywords) expr(*kw.value);
                     err(c.line, c.col, "module attribute is not callable");
                     return t_unknown();
+                }
+            }
+            // super().m(...)：按定义类的 MRO 找下一实现，至少能检查签名。
+            if (auto* sc = dynamic_cast<Call*>(a->value.get())) {
+                if (auto* sn = dynamic_cast<Name*>(sc->func.get());
+                    sn && sn->id == "super" && !lookup("super") && sc->args.empty() &&
+                    sc->keywords.empty()) {
+                    if (!cur_class_) {
+                        err(c.line, c.col,
+                            "super() is only supported inside a class method");
+                        return t_unknown();
+                    }
+                    const MethodInfo* m = super_method(a->attr);
+                    if (!m) {
+                        err(c.line, c.col,
+                            std::format("super() has no method '{}' after class '{}'",
+                                        a->attr, cur_class_->name));
+                        for (auto& arg : c.args) expr(*arg);
+                        for (auto& kw : c.keywords) expr(*kw.value);
+                        return t_unknown();
+                    }
+                    if (m->kind != MethodKind::Normal || !m->call_sig) {
+                        err(c.line, c.col,
+                            std::format("super().{} is not a plain method", a->attr));
+                        for (auto& arg : c.args) expr(*arg);
+                        for (auto& kw : c.keywords) expr(*kw.value);
+                        return t_unknown();
+                    }
+                    return check_args(m->call_sig, c);
                 }
             }
             // int.bit_length / type.__new__ 这类「类型上的未绑定方法」：
@@ -650,6 +693,19 @@ bool TypeChecker::has_method(const TypePtr& t, const std::string& m) {
             default:
                 return false;
         }
+    }
+
+const MethodInfo* TypeChecker::super_method(const std::string& name) const {
+        if (!cur_class_) return nullptr;
+        bool after = false;
+        for (const ClassInfo* k : cur_class_->mro) {
+            if (!after) {
+                if (k == cur_class_) after = true;
+                continue;
+            }
+            if (auto* m = k->own_method(name)) return m;
+        }
+        return nullptr;
     }
 
 TypePtr TypeChecker::method_call(TypePtr recv, const std::string& name, Call& c,

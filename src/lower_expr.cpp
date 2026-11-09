@@ -167,6 +167,28 @@ void Lowerer::assign_to(Expr& target, VReg v, TypePtr vty) {
             TypePtr ot = strip_optional(raw);
             bool opt = ot != raw;
             if (ot && ot->kind == TyKind::Class && ot->cls) {
+                if (const PropertyInfo* p = ot->cls->property(at.attr)) {
+                    if (!p->owner || p->setter < 0 ||
+                        p->setter >= static_cast<int>(p->owner->methods.size())) {
+                        err(target.line, target.col,
+                            std::format("property '{}' has no setter", at.attr));
+                        break;
+                    }
+                    const MethodInfo& sm = p->owner->methods[p->setter];
+                    VReg obj = expr(*at.value);
+                    if (opt) obj = guard_not_none(obj, std::format("property '{}'", at.attr));
+                    TypePtr vt = sm.call_sig && !sm.call_sig->pos.empty()
+                                     ? sm.call_sig->pos[0].ty
+                                     : t_unknown();
+                    v = coerce(v, src_ty, vt);
+                    Inst vc;
+                    vc.op = IrOp::VCall;
+                    vc.a = obj;
+                    vc.imm = sm.slot;
+                    vc.args = {v};
+                    emit(std::move(vc));
+                    break;
+                }
                 auto* f = ot->cls->field(at.attr);
                 if (!f) {
                     err(target.line, target.col,
@@ -319,6 +341,24 @@ VReg Lowerer::expr(Expr& e) {
                 return const_none();
             }
             if (ot && ot->kind == TyKind::Class && ot->cls) {
+                if (const PropertyInfo* p = ot->cls->property(a.attr)) {
+                    if (!p->owner || p->getter < 0 ||
+                        p->getter >= static_cast<int>(p->owner->methods.size())) {
+                        err(e.line, e.col,
+                            std::format("property '{}' has no getter", a.attr));
+                        return const_none();
+                    }
+                    const MethodInfo& gm = p->owner->methods[p->getter];
+                    VReg obj = expr(*a.value);
+                    if (opt) obj = guard_not_none(obj, std::format("property '{}'", a.attr));
+                    Inst vc;
+                    vc.op = IrOp::VCall;
+                    vc.a = obj;
+                    vc.imm = gm.slot;
+                    TypePtr rt = gm.call_sig && gm.call_sig->ret ? gm.call_sig->ret
+                                                                 : t_unknown();
+                    return def_heap(rt, std::move(vc));
+                }
                 if (auto* f = ot->cls->field(a.attr)) {
                     VReg obj = expr(*a.value);
                     if (opt) obj = guard_not_none(obj, std::format("attribute '{}'", a.attr));

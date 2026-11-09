@@ -852,7 +852,8 @@ struct Pattern {
     int star = -1;               // Sequence：* 模式的下标
     std::vector<std::pair<ExprPtr, PatternPtr>> pairs;  // Mapping：key → pattern
     std::string rest;            // Mapping：**rest 的绑定名（空 = 无）
-    std::string cls;             // Class：类名
+    std::string cls;             // Class：类名（可能带点）
+    std::string qualname;        // Class：解析后的模块限定名（跨模块模式用）
     std::vector<PatternPtr> positional;                    // Class：位置子模式
     std::vector<std::pair<std::string, PatternPtr>> attrs; // Class：属性子模式
 };

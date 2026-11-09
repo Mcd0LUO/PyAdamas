@@ -1186,7 +1186,75 @@ VReg Lowerer::lower_print(Call& c) {
     return const_none();
 }
 
+VReg Lowerer::lower_super_call(Attribute& at, Call& c) {
+    auto fit = fn_owner_class_.find(st_->fn);
+    const ClassInfo* owner = fit == fn_owner_class_.end() ? nullptr : fit->second;
+    if (!owner) {
+        err(c.line, c.col, "super() is only supported directly inside a method body");
+        return const_none();
+    }
+    if (st_->fn->params.empty()) {
+        err(c.line, c.col, "super() requires a method receiver");
+        return const_none();
+    }
+    const MethodInfo* m = nullptr;
+    bool after = false;
+    for (const ClassInfo* k : owner->mro) {
+        if (!after) {
+            if (k == owner) after = true;
+            continue;
+        }
+        if (auto* km = k->own_method(at.attr)) {
+            m = km;
+            break;
+        }
+    }
+    if (!m) {
+        err(c.line, c.col,
+            std::format("super() has no method '{}' after class '{}'", at.attr, owner->name));
+        return const_none();
+    }
+    if (m->kind != MethodKind::Normal) {
+        err(c.line, c.col,
+            std::format("super().{} is not a plain method (decorators on super targets are "
+                        "not supported yet)", at.attr));
+        return const_none();
+    }
+    if (!m->call_sig) {
+        err(c.line, c.col, std::format("super().{} has no known signature", at.attr));
+        return const_none();
+    }
+    auto cid = class_ids_.find(owner);
+    if (cid == class_ids_.end()) {
+        err(c.line, c.col, "super() is not available for this class");
+        return const_none();
+    }
+    std::vector<VReg> args = bind_args(c, m->call_sig, m->def);
+    const IRParam& selfp = st_->fn->params.front();
+    VReg self = load_slot(selfp.slot, selfp.ty);
+    Inst sv;
+    sv.op = IrOp::SuperVCall;
+    sv.a = self;
+    sv.idx = cid->second;
+    sv.imm = m->slot;
+    sv.b = const_str(at.attr);
+    sv.args = std::move(args);
+    TypePtr rt = m->call_sig->ret ? m->call_sig->ret : t_none();
+    return def_heap(rt, std::move(sv));
+}
+
 VReg Lowerer::lower_method_call(Attribute& at, Call& c) {
+    // super().m(...)：沿运行期 MRO 找下一个实现。
+    if (auto* sup = dynamic_cast<Call*>(at.value.get())) {
+        if (auto* sn = dynamic_cast<Name*>(sup->func.get());
+            sn && sn->id == "super" && !is_bound_here("super")) {
+            if (!sup->args.empty() || !sup->keywords.empty()) {
+                err(c.line, c.col, "only zero-argument super() is supported");
+                return const_none();
+            }
+            return lower_super_call(at, c);
+        }
+    }
     // 内置模块的原生函数/常量。
     if (auto* n = dynamic_cast<Name*>(at.value.get())) {
         if (auto mod = resolve_module_alias(n->id); mod && mod->builtin) {
@@ -1223,6 +1291,48 @@ VReg Lowerer::lower_method_call(Attribute& at, Call& c) {
         TypePtr rt = info->ret ? info->ret : t_unknown();
         return def_heap(rt, std::move(in));
     }
+    // C.f(...)：类名接收者的静态方法直接调用；普通方法需要实例。
+    if (auto* n = dynamic_cast<Name*>(at.value.get());
+        n && !is_bound_here(n->id) && !imported_classes_.count(n->id)) {
+        auto cit = classes_.find(n->id);
+        if (cit != classes_.end() && cit->second && !cit->second->is_exception_class) {
+            const ClassInfo* cls = cit->second.get();
+            const MethodInfo* m = cls->method(at.attr);
+            if (!m) {
+                err(c.line, c.col,
+                    std::format("'{}' has no method '{}'", cls->name, at.attr));
+                return const_none();
+            }
+            if (m->kind != MethodKind::Static) {
+                err(c.line, c.col,
+                    std::format("'{}.{}' is an instance method; call it on an instance",
+                                cls->name, at.attr));
+                return const_none();
+            }
+            if (!m->call_sig) return const_none();
+            const ClassInfo* owner = cls->method_owner(at.attr);
+            auto cid = owner ? class_ids_.find(owner) : class_ids_.end();
+            if (cid == class_ids_.end()) {
+                err(c.line, c.col,
+                    std::format("static method '{}.{}' is not available here", cls->name,
+                                at.attr));
+                return const_none();
+            }
+            const auto& vt = mod_.classes[cid->second].vtable;
+            if (m->slot < 0 || m->slot >= static_cast<int>(vt.size()) || vt[m->slot] < 0) {
+                err(c.line, c.col,
+                    std::format("static method '{}.{}' was not compiled", cls->name, at.attr));
+                return const_none();
+            }
+            std::vector<VReg> args = bind_args(c, m->call_sig, m->def);
+            Inst cd;
+            cd.op = IrOp::CallDirect;
+            cd.idx = vt[m->slot];
+            cd.args = std::move(args);
+            TypePtr rt = m->call_sig->ret ? m->call_sig->ret : t_none();
+            return def_heap(rt, std::move(cd));
+        }
+    }
     TypePtr raw = tc_.type_of(at.value.get());
     TypePtr recv_ty = strip_optional(raw);
     bool opt = recv_ty != raw;
@@ -1241,7 +1351,7 @@ VReg Lowerer::lower_method_call(Attribute& at, Call& c) {
         if (!m->call_sig) return const_none();
         std::vector<VReg> args = bind_args(c, m->call_sig, m->def);
         Inst vc;
-        vc.op = IrOp::VCall;
+        vc.op = m->kind == MethodKind::Static ? IrOp::VCallStatic : IrOp::VCall;
         vc.a = recv;
         vc.imm = m->slot;
         vc.args = std::move(args);

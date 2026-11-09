@@ -334,6 +334,12 @@ private:
     // 装参数的过程不会碰它。
     void gen_vcall(const Inst& in);
 
+    void gen_vcall_static(const Inst& in);
+
+    void gen_super_vcall(const Inst& in);
+
+    void gen_call_direct(const Inst& in);
+
         void gen_branch(const Inst& in);
 
         void gen_return(const Inst& in);

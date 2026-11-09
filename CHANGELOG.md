@@ -4,6 +4,45 @@
 
 早期阶段没有逐条留痕，按阶段归纳；0.4 之后逐条记录。
 
+## [0.28] - 2026-11-09
+
+C3 MRO、零参 super()、方法装饰器与 match 边角收尾。
+
+### 新增
+
+- C3 线性化：`ClassInfo::mro` 保存标准 C3 顺序；方法查找、vtable 填充和
+  `super()` 都沿 MRO。附加基类可以复用主基类布局里的已有字段（共享祖先的
+  菱形可行），新增字段仍拒绝；同名方法的种类（普通/静态/属性）冲突会报错。
+- 方法槽改为模块内按名字全局分配：多继承两个无关基类给同名方法分过不同
+  槽的问题消失，所有类 vtable 等长。
+- 零参 `super().m(...)` / `super().__init__(...)`：运行期按实例真实 MRO
+  找下一实现，支持协作式构造函数链；显式 `super(C, self)` 仍未支持。
+- `@staticmethod`：实例调用（vcall.static，不传 self）和 `Class.method`
+  直接调用（call.direct）都支持，按 MRO 覆盖。
+- `@property` + `@x.setter` + `@x.deleter`：属性读写删分别编译成
+  getter/setter/deleter 虚调用，沿 MRO 继承。
+- vtable 前元数据扩成 5 个字：MRO 元数据指针表、类编号、vtable、本类声明的
+  槽表、模块限定类名；新增 `py23_is_named_class` / `py23_super_lookup`。
+- 静态字符串字面量在模块入口通过 `py23_register_literals` 登记进 RC 索引，
+  unknown 值上的字符串模式可以安全比较字面量。
+- match 边角：捕获名在 case 结束后仍可见（各分支类型 join）；unknown 值上的
+  字符串/复数模式；导入类点分类名（按限定名检查 MRO，字段子模式仍不支持）；
+  映射常量 key 重复检查；unknown 值上的 `object()` / `str()` / `complex()`。
+- 测试：`40_mro_super.py`、`41_decorators.py`、`42_match_corners.py`、
+  `f37_match_dup_key.py`、模块用例 `tests/modules/matchclasses/`。
+
+### 验证
+
+- `ctest --preset dev` 全绿（42 个运行用例 + 新模块用例）
+- 差分测试 810 个程序零差异
+
+### 已知限制
+
+- `@classmethod`、自定义方法装饰器、类装饰器未支持
+- `super(C, self)` 与 staticmethod/property 上的 super 调用未支持
+- unknown 原始值无法区分 int/float；list/dict/tuple/set 的内置类型模式仍拒绝
+- 导入类模式只做类检查，不读取字段；额外基类仍不能新增字段
+
 ## [0.27] - 2026-11-09
 
 match 收尾：类模式、值模式、`as`、OR 捕获与映射 `**rest`。

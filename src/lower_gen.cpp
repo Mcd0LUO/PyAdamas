@@ -514,13 +514,15 @@ void Lowerer::lower_async_for(For& f, VReg seq, TypePtr seq_ty) {
 //   包装:   普通函数，按原签名收参，分配帧、把实参 retain 进帧槽、
 //           绑定闭包环境，返回生成器/协程对象。函数值指向包装。
 int Lowerer::compile_suspendable_function(FunctionDef& f, FuncInfoPtr info,
-                                          const std::string& label, int frame_kind) {
+                                          const std::string& label, int frame_kind,
+                                          const ClassInfo* owner) {
     bool is_coro = frame_kind != 0;   // 协程和异步生成器都能 await
     bool is_agen = frame_kind == 2;
     IRFunction* irf = mod_.add_func(label + "$resume");
     int ridx = static_cast<int>(mod_.funcs.size()) - 1;
     IRFunction* cw = mod_.add_func(label);
     int cidx = static_cast<int>(mod_.funcs.size()) - 1;
+    if (owner) fn_owner_class_[irf] = owner;
 
     irf->ret = t_none();
     irf->is_generator = true;

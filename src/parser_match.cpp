@@ -1,7 +1,38 @@
 // parser_match.cpp —— match / case 结构化模式匹配（语法层）
 #include "parser.h"
 
+#include <optional>
+#include <unordered_set>
+
 namespace py23 {
+
+// 映射模式里做静态重复 key 检查：只处理常量键（含 -1 这种一元负号）。
+static std::optional<std::string> pattern_key_id(Expr& e) {
+    bool neg = false;
+    Expr* base = &e;
+    if (base->kind == ExprKind::UnaryOp) {
+        auto& u = static_cast<UnaryOp&>(*base);
+        if (u.op != Tok::MINUS) return std::nullopt;
+        neg = true;
+        base = u.operand.get();
+    }
+    if (base->kind != ExprKind::Constant) return std::nullopt;
+    auto& c = static_cast<Constant&>(*base);
+    auto num = [&](double v) {
+        return std::format("n:{:.17g}", neg ? -v : v);
+    };
+    switch (c.ck) {
+        case Constant::CK::None: return neg ? std::nullopt : std::optional<std::string>("N");
+        case Constant::CK::Bool: return num(c.b ? 1.0 : 0.0);
+        case Constant::CK::Int: return num(static_cast<double>(c.i));
+        case Constant::CK::Float: return num(c.f);
+        case Constant::CK::Str: return neg ? std::nullopt : std::optional<std::string>("s:" + c.s);
+        case Constant::CK::Complex:
+            if (!neg) return std::format("c:{:.17g},{:.17g}", 0.0, c.im);
+            return std::format("c:{:.17g},{:.17g}", 0.0, -c.im);
+        default: return std::nullopt;
+    }
+}
 
 StmtPtr Parser::parse_match() {
     int ln = cur().line, cl = cur().col;
@@ -174,6 +205,7 @@ PatternPtr Parser::parse_closed_pattern() {
         node->kind = PatternKind::Mapping;
         node->line = ln;
         node->col = cl;
+        std::unordered_set<std::string> seen_keys;
         if (!check(Tok::RBRACE)) {
             while (true) {
                 if (check(Tok::DOUBLESTAR)) {
@@ -189,6 +221,11 @@ PatternPtr Parser::parse_closed_pattern() {
                     break;
                 }
                 auto key = parse_namedexpr();
+                if (auto id = pattern_key_id(*key)) {
+                    if (!seen_keys.insert(*id).second)
+                        throw err_at("mapping pattern checks duplicate key", key->line,
+                                     key->col);
+                }
                 expect(Tok::COLON, "':' in mapping pattern");
                 node->pairs.emplace_back(std::move(key), parse_or_pattern());
                 if (!match(Tok::COMMA)) break;
@@ -212,21 +249,24 @@ PatternPtr Parser::parse_closed_pattern() {
         advance();
         if (check(Tok::LPAREN)) return parse_class_pattern(std::move(text), ln, cl);
         if (check(Tok::DOT)) {
-            auto base = std::make_unique<Name>(std::move(text));
+            std::string path = std::move(text);
+            auto base = std::make_unique<Name>(path);
             base->line = ln;
             base->col = cl;
             ExprPtr dotted = std::move(base);
             while (match(Tok::DOT)) {
                 if (!check(Tok::NAME)) throw err("expected attribute name after '.'");
+                std::string attr = advance().text;
+                path += "." + attr;
                 auto at = std::make_unique<Attribute>();
                 at->value = std::move(dotted);
-                at->attr = advance().text;
+                at->attr = std::move(attr);
                 at->line = ln;
                 at->col = cl;
                 dotted = std::move(at);
             }
             if (check(Tok::LPAREN))
-                throw err_at("class patterns with dotted names are not supported yet", ln, cl);
+                return parse_class_pattern(std::move(path), ln, cl);
             auto p = std::make_shared<Pattern>();
             p->kind = PatternKind::Value;
             p->lit = std::move(dotted);
