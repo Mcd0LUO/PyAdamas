@@ -189,6 +189,150 @@ void AsmGen::assign_slot_regs() {
         }
     }
 
+// 块内临时寄存器：%r8–%r11 只在调用序列里被用到（参数/函数地址），
+// 所以「整块没有任何调用类指令」时可以把它们借给块内临时值。区间用
+// 线性扫描分配，定义/使用不重叠的临时值复用同一个寄存器；块结束时
+// 全部归还（值本身也不会跨块使用，候选要求 !cross_block_）。
+
+bool AsmGen::temp_reg_op_ok(const Inst& in) const {
+        switch (in.op) {
+            case IrOp::ConstInt:
+            case IrOp::ConstFloat:
+            case IrOp::ConstStr:
+            case IrOp::ConstNone:
+            case IrOp::FuncAddr:
+            case IrOp::FuncCode:
+            case IrOp::Mov:
+            case IrOp::Un:
+            case IrOp::Cmp:
+            case IrOp::LoadSlot:
+            case IrOp::StoreSlot:
+            case IrOp::LoadGlobal:
+            case IrOp::StoreGlobal:
+            case IrOp::Len:
+            case IrOp::IndexLoadUnchecked:
+            case IrOp::FieldLoad:
+            case IrOp::FieldStore:
+            case IrOp::SlotAddr:
+            case IrOp::Jump:
+            case IrOp::Branch:
+            case IrOp::Return:
+                return true;
+            case IrOp::IndexLoad: {
+                // 字符串下标会真的调 py23_str_char_at；列表下标只有不会
+                // 返回的越界慢路径，借用寄存器是安全的。
+                TypePtr bt = ty_of(in.a);
+                return !(bt && bt->kind == TyKind::Str);
+            }
+            case IrOp::Bin: {
+                TypePtr t = in.ty;
+                if (t && t->kind == TyKind::Str) return false;
+                switch (in.bop) {
+                    case BinKind::Add:
+                    case BinKind::Sub:
+                    case BinKind::Mul:
+                    case BinKind::BitAnd:
+                    case BinKind::BitOr:
+                    case BinKind::BitXor:
+                    case BinKind::Shl:
+                    case BinKind::Shr:
+                        return true;
+                    default:
+                        return false;  // div/mod/floordiv/pow 用 %r8 或调运行时
+                }
+            }
+            case IrOp::Convert: {
+                TypePtr t = in.ty;
+                return t && (t->kind == TyKind::Bool || t->kind == TyKind::Int ||
+                             t->kind == TyKind::Float);
+            }
+            default:
+                return false;
+        }
+    }
+
+void AsmGen::assign_block_temp_regs() {
+        vreg_reg_.assign(f_->vreg_ty.size(), std::string());
+        if (opt_ < 1 || gen_) return;
+
+        static const char* kPool[] = {"%r8", "%r9", "%r10", "%r11"};
+        constexpr int kPoolSize = 4;
+
+        for (const auto& b : f_->blocks) {
+            bool safe = true;
+            for (const auto& in : b.insts)
+                if (!temp_reg_op_ok(in)) {
+                    safe = false;
+                    break;
+                }
+            if (!safe) continue;
+
+            std::unordered_map<VReg, int> def_pos;
+            std::unordered_map<VReg, IrOp> def_op;
+            std::unordered_map<VReg, int> last_use;
+            int pos = 0;
+            for (const auto& in : b.insts) {
+                auto touch = [&](VReg r) {
+                    if (r != kNoReg) last_use[r] = pos;
+                };
+                touch(in.a);
+                touch(in.b);
+                touch(in.c);
+                for (VReg r : in.args) touch(r);
+                if (in.dst != kNoReg) {
+                    def_pos[in.dst] = pos;
+                    def_op[in.dst] = in.op;
+                }
+                ++pos;
+            }
+
+            struct Range {
+                int start;
+                int end;
+                VReg v;
+            };
+            std::vector<Range> ranges;
+            for (const auto& [v, d] : def_pos) {
+                if (v >= static_cast<VReg>(f_->vreg_ty.size())) continue;
+                if (cross_block_[v]) continue;
+                auto lu = last_use.find(v);
+                if (lu == last_use.end()) continue;
+                // unknown 的机器表示可能是浮点位模式（元素类型丢失的下标装载），
+                // 浮点/可选类型同理：只给「确定是整数/指针」的值分配 GPR。
+                TypePtr vt = f_->vreg_ty[v];
+                if (!vt) continue;
+                if (vt->kind == TyKind::Float || vt->kind == TyKind::Unknown ||
+                    vt->kind == TyKind::Optional)
+                    continue;
+                IrOp op = def_op[v];
+                // LoadSlot 有自己的别名机制；常量可以延迟成立即数，不用占寄存器。
+                if (op == IrOp::LoadSlot || op == IrOp::ConstInt || op == IrOp::ConstNone)
+                    continue;
+                ranges.push_back(Range{d, lu->second, v});
+            }
+            std::ranges::sort(ranges, [](const Range& x, const Range& y) {
+                return x.start != y.start ? x.start < y.start : x.end < y.end;
+            });
+
+            std::priority_queue<std::pair<int, std::string>, std::vector<std::pair<int, std::string>>,
+                                std::greater<>>
+                active;
+            std::vector<std::string> free;
+            for (int i = 0; i < kPoolSize; ++i) free.emplace_back(kPool[i]);
+            for (const auto& r : ranges) {
+                while (!active.empty() && active.top().first < r.start) {
+                    free.push_back(active.top().second);
+                    active.pop();
+                }
+                if (free.empty()) continue;  // 后面的区间更晚开始，仍可能排上
+                std::string reg = std::move(free.back());
+                free.pop_back();
+                vreg_reg_[r.v] = reg;
+                active.push({r.end, std::move(reg)});
+            }
+        }
+    }
+
 // ── 函数 ────────────────────────────────────────────────────
 std::vector<ArgLoc> AsmGen::classify(const std::vector<TypePtr>& types) const {
         std::vector<ArgLoc> locs(types.size());

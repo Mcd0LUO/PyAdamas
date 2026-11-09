@@ -95,6 +95,7 @@ void AsmGen::emit_function(const IRFunction& f, int fi) {
         } else {
             assign_slot_regs();
         }
+        assign_block_temp_regs();
 
         out_ += std::format("\n# ---- {} ({}) ----\n", f.name, type_name(f.ret));
         label(func_label(fi));

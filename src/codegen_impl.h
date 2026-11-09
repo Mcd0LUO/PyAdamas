@@ -131,6 +131,12 @@ private:
     std::vector<bool> cross_block_;
     std::vector<int> def_block_;
 
+    // 块内临时寄存器：整块没有会调用/占用 %r8–%r11 的指令时，块内定义、
+    // 块内用完的临时值直接住在寄存器里，mem(v) 返回它。块边界清空。
+    std::vector<std::string> vreg_reg_;
+    bool temp_reg_op_ok(const Inst& in) const;
+    void assign_block_temp_regs();
+
     // 当前块内的位置索引，gen_block 开头重建。
     std::unordered_map<int, std::vector<int>> block_stores_;
     std::unordered_map<VReg, int> block_first_use_;
@@ -169,7 +175,11 @@ private:
         return -8 * (n_saved_regs_ + n_slots_ + s + 1);
     }
 
-    std::string mem(VReg r) const { return std::format("{}(%rbp)", vreg_off(r)); }
+    std::string mem(VReg r) const {
+        if (r < static_cast<VReg>(vreg_reg_.size()) && !vreg_reg_[r].empty())
+            return vreg_reg_[r];
+        return std::format("{}(%rbp)", vreg_off(r));
+    }
 
     std::string smem(int slot) const { return std::format("{}(%rbp)", slot_off(slot)); }
 
