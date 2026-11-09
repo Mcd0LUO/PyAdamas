@@ -163,6 +163,12 @@ enum class RtFn : uint8_t {
     ComplexStr,   // (c*) -> str*
     ComplexEq,    // (c*,c*) -> bool
     ComplexTruth, // (c*) -> bool
+    FmtI64,       // (i64, str* spec) -> str*
+    FmtBool,      // (i64, str* spec) -> str*
+    FmtF64,       // (f64, str* spec) -> str*
+    FmtStr,       // (str*, str* spec) -> str*
+    FmtComplex,   // (c*, str* spec) -> str*
+    ReprStr,      // (str*) -> str*
     MathSqrt, MathFloor, MathCeil, MathFabs, MathSin, MathCos, MathTan,
     MathLog, MathLog2, MathLog10, MathExp,
     MathPow, MathFmod,
@@ -292,6 +298,12 @@ inline const char* rt_name(RtFn f) {
         case RtFn::ComplexStr: return "py23_complex_str";
         case RtFn::ComplexEq: return "py23_complex_eq";
         case RtFn::ComplexTruth: return "py23_complex_truth";
+        case RtFn::FmtI64: return "py23_fmt_i64";
+        case RtFn::FmtBool: return "py23_fmt_bool";
+        case RtFn::FmtF64: return "py23_fmt_f64";
+        case RtFn::FmtStr: return "py23_fmt_str";
+        case RtFn::FmtComplex: return "py23_fmt_complex";
+        case RtFn::ReprStr: return "py23_repr_str";
         case RtFn::MathFabs: return "py23_math_fabs";
         case RtFn::MathSin: return "py23_math_sin";
         case RtFn::MathCos: return "py23_math_cos";

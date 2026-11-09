@@ -301,6 +301,7 @@ void AsmGen::gen_call_rt(const Inst& in) {
             case RtFn::ComplexAbs:
             case RtFn::ComplexStr:
             case RtFn::ComplexTruth:
+            case RtFn::ReprStr:
             case RtFn::GenNext:
             case RtFn::GenClose:
             case RtFn::HandlerSuspend:
@@ -339,6 +340,10 @@ void AsmGen::gen_call_rt(const Inst& in) {
             case RtFn::FutureSetException:
             case RtFn::FutureSetExceptionValue:
             case RtFn::FutureAddCallback:
+            case RtFn::FmtI64:
+            case RtFn::FmtBool:
+            case RtFn::FmtStr:
+            case RtFn::FmtComplex:
             case RtFn::AsyncGenAthrow:
                 line(std::format("movq {}, %rdi", src_op(in.args[0])));
                 line(std::format("movq {}, %rsi", src_op(in.args[1])));
@@ -348,6 +353,10 @@ void AsmGen::gen_call_rt(const Inst& in) {
             case RtFn::AsyncGenAsend:
                 line(std::format("movq {}, %rdi", src_op(in.args[0])));
                 line(std::format("movq {}, %rsi", src_op(in.args[1])));
+                break;
+            case RtFn::FmtF64:
+                line(std::format("movsd {}, %xmm0", src_op(in.args[0])));
+                line(std::format("movq {}, %rdi", src_op(in.args[1])));
                 break;
             case RtFn::ComplexNew:
                 line(std::format("movsd {}, %xmm0", src_op(in.args[0])));

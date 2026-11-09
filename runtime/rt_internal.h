@@ -120,6 +120,12 @@ double py23_complex_abs(Py23Complex* a);
 Py23Str* py23_complex_str(Py23Complex* a);
 int64_t py23_complex_eq(Py23Complex* a, Py23Complex* b);
 int64_t py23_complex_truth(Py23Complex* a);
+Py23Str* py23_fmt_i64(int64_t v, Py23Str* spec);
+Py23Str* py23_fmt_bool(int64_t v, Py23Str* spec);
+Py23Str* py23_fmt_f64(double v, Py23Str* spec);
+Py23Str* py23_fmt_str(Py23Str* v, Py23Str* spec);
+Py23Str* py23_fmt_complex(Py23Complex* v, Py23Str* spec);
+Py23Str* py23_repr_str(Py23Str* v);
 
 
 typedef struct {

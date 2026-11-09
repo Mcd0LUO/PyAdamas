@@ -1264,24 +1264,65 @@ VReg Lowerer::lower_joined(JoinedStr& j) {
             piece = const_str(c.s);
         } else if (part->kind == ExprKind::FormattedValue) {
             auto& fv = static_cast<FormattedValue&>(*part);
-            if (fv.format_spec) {
-                bool empty_spec = false;
-                if (fv.format_spec->kind == ExprKind::JoinedStr) {
-                    auto& spec = static_cast<JoinedStr&>(*fv.format_spec);
-                    empty_spec = spec.values.empty() ||
-                                 (spec.values.size() == 1 &&
-                                  spec.values[0]->kind == ExprKind::Constant &&
-                                  static_cast<Constant&>(*spec.values[0]).s.empty());
-                }
-                if (!empty_spec) {
-                    err(part->line, part->col,
-                        "f-string format spec is not supported by the code generator yet");
-                    continue;
-                }
-            }
             TypePtr vt = tc_.type_of(fv.value.get());
             VReg raw = expr(*fv.value);
-            piece = convert_to(raw, vt, t_str());
+            if (fv.conversion == 's') {
+                if (!vt || vt->kind != TyKind::Str) raw = convert_to(raw, vt, t_str());
+            } else if (fv.conversion == 'r' || fv.conversion == 'a') {
+                if (vt && vt->kind == TyKind::Str) {
+                    Inst in;
+                    in.op = IrOp::CallRt;
+                    in.imm = static_cast<int64_t>(RtFn::ReprStr);
+                    in.args = {raw};
+                    raw = def_heap(t_str(), std::move(in));
+                } else {
+                    raw = convert_to(raw, vt, t_str());
+                }
+            }
+            VReg spec = const_str("");
+            if (fv.format_spec)
+                spec = lower_joined(static_cast<JoinedStr&>(*fv.format_spec));
+
+            auto fmt_call = [&](RtFn fn) {
+                Inst in;
+                in.op = IrOp::CallRt;
+                in.imm = static_cast<int64_t>(fn);
+                in.args = {raw, spec};
+                return def_heap(t_str(), std::move(in));
+            };
+            TypePtr ct = vt;
+            if (fv.conversion == 's' || fv.conversion == 'r' || fv.conversion == 'a')
+                ct = t_str();
+            if (!ct || ct->kind == TyKind::Unknown) {
+                VReg s = convert_to(raw, ct, t_str());
+                Inst in;
+                in.op = IrOp::CallRt;
+                in.imm = static_cast<int64_t>(RtFn::FmtStr);
+                in.args = {s, spec};
+                piece = def_heap(t_str(), std::move(in));
+            } else {
+                switch (ct->kind) {
+                    case TyKind::Bool: piece = fmt_call(RtFn::FmtBool); break;
+                    case TyKind::Int: piece = fmt_call(RtFn::FmtI64); break;
+                    case TyKind::Float: piece = fmt_call(RtFn::FmtF64); break;
+                    case TyKind::Str: piece = fmt_call(RtFn::FmtStr); break;
+                    case TyKind::Complex: piece = fmt_call(RtFn::FmtComplex); break;
+                    case TyKind::Exception: {
+                        VReg ev = call_runtime(RtFn::ExcValueStr, t_str(), {raw});
+                        push_temp(ev);
+                        Inst in;
+                        in.op = IrOp::CallRt;
+                        in.imm = static_cast<int64_t>(RtFn::FmtStr);
+                        in.args = {ev, spec};
+                        piece = def_heap(t_str(), std::move(in));
+                        break;
+                    }
+                    default:
+                        err(part->line, part->col,
+                            std::format("f-string cannot format '{}'", type_name(ct)));
+                        continue;
+                }
+            }
         } else {
             err(part->line, part->col, "unsupported f-string part");
             continue;
