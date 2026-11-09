@@ -251,6 +251,9 @@ private:
     std::unordered_map<const ClassInfo*, int> class_ids_;
     // 方法帧 → 运行时类。零参 super() 只在这个方法自己的帧里有效。
     std::unordered_map<const IRFunction*, const ClassInfo*> fn_owner_class_;
+    // 降级期副作用计数：调用、del、切片赋值等会自增。for/推导式用它
+    // 判断循环体是否可能改变容器长度，进而决定下标免检查是否安全。
+    int side_effect_seq_ = 0;
 
     // ── 错误 ────────────────────────────────────────────────────
 

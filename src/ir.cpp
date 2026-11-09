@@ -54,6 +54,9 @@ std::string Inst::text() const {
         }
         case IrOp::IndexLoad:
             return std::format("{} = index.get {}[{}]", vreg_str(dst), vreg_str(a), vreg_str(b));
+        case IrOp::IndexLoadUnchecked:
+            return std::format("{} = index.get.unchecked {}[{}]", vreg_str(dst), vreg_str(a),
+                               vreg_str(b));
         case IrOp::IndexStore:
             return std::format("index.set {}[{}] = {}", vreg_str(a), vreg_str(b), vreg_str(c));
         case IrOp::Len: return std::format("{} = len {}", vreg_str(dst), vreg_str(a));

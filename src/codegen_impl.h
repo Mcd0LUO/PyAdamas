@@ -333,6 +333,8 @@ private:
 
         void gen_index_load(const Inst& in);
 
+    void gen_index_unchecked_load(const Inst& in);
+
     void gen_index_store(const Inst& in);
 
     // ── 对象 ────────────────────────────────────────────────────

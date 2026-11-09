@@ -410,6 +410,8 @@ int Lowerer::compile_function_body(FunctionDef& f, FuncInfoPtr info, const std::
 }
 
 void Lowerer::lower_funcdef(FunctionDef& f) {
+    // 装饰器在 def 执行时立即调用，可能改动容器。
+    if (!f.decorators.empty()) ++side_effect_seq_;
     FuncInfoPtr info = tc_.func_info(&f);
     TypePtr fty = new_ty(TyKind::Func);
     fty->fn = info;

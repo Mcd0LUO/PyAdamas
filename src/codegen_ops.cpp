@@ -47,6 +47,7 @@ void AsmGen::gen_inst(const Inst& in) {
             case IrOp::MakeList: gen_make_list(in); break;
             case IrOp::MakeTuple: gen_make_list(in); break;
             case IrOp::IndexLoad: gen_index_load(in); break;
+            case IrOp::IndexLoadUnchecked: gen_index_unchecked_load(in); break;
             case IrOp::IndexStore: gen_index_store(in); break;
             case IrOp::Len:
                 line(std::format("movq {}, %rax", src_op(in.a)));

@@ -326,6 +326,7 @@ VReg Lowerer::lower_construct(Call& c, const ClassInfoPtr& cls) {
 }
 
 VReg Lowerer::lower_call(Call& c) {
+    ++side_effect_seq_;
     // 内建函数
     if (c.func->kind == ExprKind::Name) {
         auto& n = static_cast<Name&>(*c.func);
@@ -620,7 +621,9 @@ VReg Lowerer::lower_minmax(Call& c, bool is_min) {
             if (seq_ty->kind == TyKind::Dict || seq_ty->kind == TyKind::Set)
                 return call_runtime(RtFn::DictKeyAt, elem_ty, {sv, idx});
             Inst get;
-            get.op = IrOp::IndexLoad;
+            get.op = (seq_ty->kind == TyKind::List || seq_ty->kind == TyKind::Tuple)
+                         ? IrOp::IndexLoadUnchecked
+                         : IrOp::IndexLoad;
             get.a = sv;
             get.b = idx;
             return seq_ty->kind == TyKind::Str ? def_heap(elem_ty, std::move(get))
@@ -796,7 +799,9 @@ VReg Lowerer::lower_sum(Call& c) {
         ev = call_runtime(RtFn::DictKeyAt, elem_ty, {sv, iv});
     else {
         Inst get;
-        get.op = IrOp::IndexLoad;
+        get.op = (seq_ty->kind == TyKind::List || seq_ty->kind == TyKind::Tuple)
+                     ? IrOp::IndexLoadUnchecked
+                     : IrOp::IndexLoad;
         get.a = sv;
         get.b = iv;
         ev = seq_ty->kind == TyKind::Str ? def_heap(elem_ty, std::move(get))
@@ -898,7 +903,9 @@ VReg Lowerer::lower_anyall(Call& c, bool is_any) {
         ev = call_runtime(RtFn::DictKeyAt, elem_ty, {sv, iv});
     else {
         Inst get;
-        get.op = IrOp::IndexLoad;
+        get.op = (seq_ty->kind == TyKind::List || seq_ty->kind == TyKind::Tuple)
+                     ? IrOp::IndexLoadUnchecked
+                     : IrOp::IndexLoad;
         get.a = sv;
         get.b = iv;
         ev = seq_ty->kind == TyKind::Str ? def_heap(elem_ty, std::move(get))
@@ -1154,7 +1161,9 @@ VReg Lowerer::lower_print(Call& c) {
                 ev = call_runtime(RtFn::DictKeyAt, ety, {sv, iv});
             else {
                 Inst get;
-                get.op = IrOp::IndexLoad;
+                get.op = (sty->kind == TyKind::List || sty->kind == TyKind::Tuple)
+                             ? IrOp::IndexLoadUnchecked
+                             : IrOp::IndexLoad;
                 get.a = sv;
                 get.b = iv;
                 ev = sty->kind == TyKind::Str ? def_heap(ety, std::move(get))
@@ -1244,6 +1253,7 @@ VReg Lowerer::lower_super_call(Attribute& at, Call& c) {
 }
 
 VReg Lowerer::lower_method_call(Attribute& at, Call& c) {
+    ++side_effect_seq_;
     // super().m(...)：沿运行期 MRO 找下一个实现。
     if (auto* sup = dynamic_cast<Call*>(at.value.get())) {
         if (auto* sn = dynamic_cast<Name*>(sup->func.get());

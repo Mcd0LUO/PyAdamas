@@ -546,10 +546,14 @@ void Lowerer::lower_for_seq(For& f) {
     }
     VReg ev;
     VReg sv = seq_val();
+    int load_blk = -1;
+    size_t load_pos = 0;
     if (seq_ty->kind == TyKind::Dict || seq_ty->kind == TyKind::Set) {
         // 字典/集合按插入顺序按下标取 key；返回的是容器内部的借用引用。
         ev = call_runtime(RtFn::DictKeyAt, et, {sv, iv2});
     } else {
+        load_blk = st_->blk;
+        load_pos = st_->fn->blocks[load_blk].insts.size();
         Inst get;
         get.op = IrOp::IndexLoad;
         get.a = sv;
@@ -563,9 +567,19 @@ void Lowerer::lower_for_seq(For& f) {
 
     st_->loops.push_back({end, incr});
     st_->loop_cleanup_depth.push_back(st_->cleanups.size());
+    int se_before_body = side_effect_seq_;
     stmts(f.body);
     st_->loops.pop_back();
     st_->loop_cleanup_depth.pop_back();
+    // 列表/元组按 0..len-1 遍历；循环体没有调用/del/切片赋值时
+    // 长度不会变，元素下标可以免检查。生成器帧可能跨 yield 挂起，
+    // 直接跳过。
+    if (load_blk >= 0 && !st_->is_generator &&
+        (seq_ty->kind == TyKind::List || seq_ty->kind == TyKind::Tuple) &&
+        side_effect_seq_ == se_before_body) {
+        auto& insts = st_->fn->blocks[load_blk].insts;
+        if (load_pos < insts.size()) insts[load_pos].op = IrOp::IndexLoadUnchecked;
+    }
     if (!terminated()) {
         Inst jj;
         jj.op = IrOp::Jump;
@@ -684,6 +698,8 @@ void Lowerer::emit_cleanup_exits(size_t down_to) {
 }
 
 void Lowerer::lower_with(With& w) {
+    // __enter__/__exit__ 可能改动容器；保守关闭外层循环的免检查。
+    ++side_effect_seq_;
     if (w.is_async) {
         lower_async_with_item(w, 0);
         return;

@@ -58,7 +58,8 @@ Python 语义里变量天生可变，循环里反复赋值是常态。一上来�
 | `store.global idx, a` | — | 写全局 | `movq %rax, .LgN(%rip)` |
 | `list.new dst, args...` | `imm: 元素 kind` | 按 `args` 构造列表（0 非堆 / 1 堆 / 2 unknown 或混合） | 逐个 `py23_list_append` |
 | `tuple.new dst, args...` | `imm: 元素 kind` | 按 `args` 构造元组 | 同上（目前与 list 同表示） |
-| `index.get dst, a, b` | — | `dst = a[b]` | list 走运行时，str 走 `py23_str_char_at` |
+| `index.get dst, a, b` | — | `dst = a[b]` | list/tuple 内联快路径，str 走 `py23_str_char_at` |
+| `index.get.unchecked dst, a, b` | — | 同 `index.get`，但调用方已证明 `0 <= b < len(a)` | 直接读 `data`，无边界分支 |
 | `index.set a, b, c` | — | `a[b] = c` | `py23_list_set` |
 | `len dst, a` | — | `dst = len(a)` | 一条 `movq (%rax), %rax` |
 | `obj.new dst, imm` | `imm: 类下标` | 分配对象并写入 vtable 指针；析构器取自 `IRClass::field_heap` | `call py23_obj_new` + `leaq .LvtN`；`.LvtN` 前有 5 字类元数据 |
@@ -135,6 +136,11 @@ IR 保持三地址码，优化集中在 `AsmGen` 的基本块内，不改变语�
   （xmm0–7 留给参数和临时）。所有会正常返回的 call 前后统一
   `spill_fp_slots` / `reload_fp_slots`；含 handler 的函数、生成器帧
   不提升。
+- **免检查下标**：`for x in list/tuple`、推导式、`sum`/`min`/`max`/
+  `any`/`all`/`print(*seq)` 的元素装载在能证明 `0 <= i < len` 时改成
+  `index.get.unchecked`。普通 for/推导式用降级期副作用计数判断循环体
+  是否会调用、`del`、切片赋值或触发属性/with 等可能改变长度的操作；
+  生成器帧与异步推导式不参与。
 - **浮点结果就地算 / 临时融合**：目标已经是 xmm 时直接
   `addsd/sub/mul/div` 到目标；结果只被下一条浮点二元指令使用时先留在
   `%xmm1`，省一次临时槽写入和读回。

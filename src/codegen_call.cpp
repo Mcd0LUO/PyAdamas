@@ -65,6 +65,21 @@ void AsmGen::gen_index_load(const Inst& in) {
         }
     }
 
+void AsmGen::gen_index_unchecked_load(const Inst& in) {
+        // 调用方（for / 推导式 / sum 等）已经证明 0 <= idx < len，
+        // 这里只做一次 data 取址和元素装载。
+        line(std::format("movq {}, %rdi", src_op(in.a)));
+        line(std::format("movq {}, %rsi", src_op(in.b)));
+        line("movq 16(%rdi), %rdx");
+        if (ir_is_float(in.ty)) {
+            line("movsd (%rdx,%rsi,8), %xmm0");
+            line(std::format("movsd %xmm0, {}", dst_op(in.dst)));
+        } else {
+            line("movq (%rdx,%rsi,8), %rax");
+            move_to(dst_op(in.dst), "%rax");
+        }
+    }
+
 void AsmGen::gen_index_store(const Inst& in) {
         std::string fast = fresh_label("idxsf");
         std::string neg = fresh_label("idxsneg");

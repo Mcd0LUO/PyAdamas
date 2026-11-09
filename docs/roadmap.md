@@ -394,6 +394,17 @@ staticmethod/property 上的 super、导入类字段子模式、unknown 数值�
 下一步：P2 越界检查消除、P3/P4 循环旋转与 LICM、P5/P6 直接调用与
 序言清零裁剪。
 
+## 0.30：优化遍 P2（已完成）
+
+- `index.get.unchecked`：编译器生成的 `0..len-1` 循环（for/推导式/
+  sum/min/max/any/all/print(*seq)）对 list/tuple 免边界检查。
+- 普通 for/推导式用降级期副作用计数：循环体出现调用、del、切片赋值、
+  属性访问器、with、import、装饰器时不消除；生成器/异步推导式跳过。
+- 基准：sum ~1.08×，matmul/dot 持平——P0 快路径已把检查成本压低。
+
+已知限制：用户写的 `a[k]` 仍检查；跨块归纳变量证明未做；含任意用户调用
+的循环体一律保守放弃。
+
 ## 下一步
 
 - 语言面：`@classmethod`、自定义方法/类装饰器、生成器 `throw()`

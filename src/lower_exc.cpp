@@ -291,6 +291,8 @@ VReg Lowerer::call_native(const std::string& module, const std::string& member, 
 }
 
 void Lowerer::lower_import(Import& im) {
+    // 模块 init 会执行任意用户代码，可能改动容器。
+    ++side_effect_seq_;
     for (auto& al : im.names) {
         if (al.name.find('.') != std::string::npos && al.asname.empty()) {
             err(im.line, im.col, "dotted import needs 'as name' (or use from ... import)");
@@ -313,6 +315,7 @@ void Lowerer::lower_import(Import& im) {
 }
 
 void Lowerer::lower_import_from(ImportFrom& im) {
+    ++side_effect_seq_;
     if (im.level != 0 || im.module.empty()) {
         err(im.line, im.col, "relative imports are not supported yet");
         return;
@@ -799,6 +802,9 @@ void Lowerer::delete_target(Expr& target) {
 }
 
 void Lowerer::lower_delete(Delete& d) {
+    // del 可能改变列表长度（del xs[i] / del xs[a:b]），保守地算一次
+    // 副作用，让外层 for/推导式关闭下标免检查。
+    ++side_effect_seq_;
     for (auto& t : d.targets)
         if (t) delete_target(*t);
 }

@@ -85,6 +85,7 @@ void Lowerer::assign_to(Expr& target, VReg v, TypePtr vty) {
         case ExprKind::Subscript: {
             auto& s = static_cast<Subscript&>(target);
             if (s.slice->kind == ExprKind::Slice) {
+                ++side_effect_seq_;  // 切片赋值可能改变列表长度
                 auto& sl = static_cast<SliceExpr&>(*s.slice);
                 TypePtr ot = tc_.type_of(s.value.get());
                 if (!ot || (ot->kind != TyKind::List && ot->kind != TyKind::Tuple &&
@@ -168,6 +169,7 @@ void Lowerer::assign_to(Expr& target, VReg v, TypePtr vty) {
             bool opt = ot != raw;
             if (ot && ot->kind == TyKind::Class && ot->cls) {
                 if (const PropertyInfo* p = ot->cls->property(at.attr)) {
+                    ++side_effect_seq_;  // setter 可能改动容器
                     if (!p->owner || p->setter < 0 ||
                         p->setter >= static_cast<int>(p->owner->methods.size())) {
                         err(target.line, target.col,
@@ -342,6 +344,7 @@ VReg Lowerer::expr(Expr& e) {
             }
             if (ot && ot->kind == TyKind::Class && ot->cls) {
                 if (const PropertyInfo* p = ot->cls->property(a.attr)) {
+                    ++side_effect_seq_;  // getter 可能改动容器
                     if (!p->owner || p->getter < 0 ||
                         p->getter >= static_cast<int>(p->owner->methods.size())) {
                         err(e.line, e.col,
@@ -1067,6 +1070,11 @@ VReg Lowerer::lower_comp(Expr& e) {
         if (sty->kind == TyKind::Str) ety = t_str();
         else if (!sty->sub.empty()) ety = sty->sub[0];
 
+        // 本层元素装载的位置；循环体降级完、且期间没有用户副作用时，
+        // 把它改成免检查。必须在 erase_cleanup 之前打补丁。
+        int gen_load_blk = -1;
+        size_t gen_load_pos = 0;
+
         Inst ln;
         ln.op = IrOp::Len;
         ln.a = seq;
@@ -1129,6 +1137,10 @@ VReg Lowerer::lower_comp(Expr& e) {
         if (sty->kind == TyKind::Dict || sty->kind == TyKind::Set) {
             ev = call_runtime(RtFn::DictKeyAt, ety, {seq_val(), iv2});
         } else {
+            if (!async_mode && (sty->kind == TyKind::List || sty->kind == TyKind::Tuple)) {
+                gen_load_blk = st_->blk;
+                gen_load_pos = st_->fn->blocks[gen_load_blk].insts.size();
+            }
             Inst get;
             get.op = IrOp::IndexLoad;
             get.a = seq_val();
@@ -1147,6 +1159,8 @@ VReg Lowerer::lower_comp(Expr& e) {
             assign_to(*g.target, ev, ety);
         }
 
+        int se_gen_start = side_effect_seq_;
+
         // 过滤器：任何一条不成立就跳到自增块。
         for (auto& cond_expr : g.ifs) {
             VReg c = expr(*cond_expr);
@@ -1161,6 +1175,11 @@ VReg Lowerer::lower_comp(Expr& e) {
         }
 
         gen(gi + 1);
+        if (gen_load_blk >= 0 && side_effect_seq_ == se_gen_start) {
+            auto& insts = st_->fn->blocks[gen_load_blk].insts;
+            if (gen_load_pos < insts.size())
+                insts[gen_load_pos].op = IrOp::IndexLoadUnchecked;
+        }
         if (!terminated()) {
             Inst jj;
             jj.op = IrOp::Jump;

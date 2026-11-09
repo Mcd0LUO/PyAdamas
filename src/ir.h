@@ -402,6 +402,7 @@ enum class IrOp : uint8_t {
     MakeList,   // dst = <ty>[](args...)
     MakeTuple,  // dst = (args...)
     IndexLoad,  // dst = a[b]
+    IndexLoadUnchecked, // dst = a[b]，调用方已证明 0 <= b < len(a)，不检查
     IndexStore, // a[b] = c
     Len,        // dst = len(a)
 
@@ -459,6 +460,7 @@ inline const char* irop_name(IrOp op) {
         case IrOp::MakeList: return "list.new";
         case IrOp::MakeTuple: return "tuple.new";
         case IrOp::IndexLoad: return "index.get";
+        case IrOp::IndexLoadUnchecked: return "index.get.unchecked";
         case IrOp::IndexStore: return "index.set";
         case IrOp::Len: return "len";
         case IrOp::ObjNew: return "obj.new";
