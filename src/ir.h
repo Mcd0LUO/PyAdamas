@@ -100,6 +100,13 @@ enum class RtFn : uint8_t {
     RoundF64,    // (f64 x, i64 ndigits) -> f64
     RoundI64,    // (i64 v, i64 ndigits) -> i64
     StrMethod,   // (str* self, i64 op, i64 a0, i64 a1, i64 a2) -> i64
+    FileOpen,    // (str* path, str* mode|0) -> file*
+    FileRead,    // (file*, i64 n) -> str*   n < 0 读全部
+    FileReadLine,// (file*) -> str*           EOF 返回空串
+    FileReadLines,// (file*) -> list*
+    FileWrite,   // (file*, str*) -> i64
+    FileClose,   // (file*) -> void
+    FileFlush,   // (file*) -> void
     PrintI64,    // (i64) -> void
     PrintF64,    // (f64) -> void
     PrintBool,   // (i64) -> void
@@ -264,6 +271,13 @@ inline const char* rt_name(RtFn f) {
         case RtFn::RoundF64: return "py23_round_f64";
         case RtFn::RoundI64: return "py23_round_i64";
         case RtFn::StrMethod: return "py23_str_method";
+        case RtFn::FileOpen: return "py23_file_open";
+        case RtFn::FileRead: return "py23_file_read";
+        case RtFn::FileReadLine: return "py23_file_readline";
+        case RtFn::FileReadLines: return "py23_file_readlines";
+        case RtFn::FileWrite: return "py23_file_write";
+        case RtFn::FileClose: return "py23_file_close";
+        case RtFn::FileFlush: return "py23_file_flush";
         case RtFn::PrintI64: return "py23_print_i64";
         case RtFn::PrintF64: return "py23_print_f64";
         case RtFn::PrintBool: return "py23_print_bool";
@@ -713,6 +727,7 @@ inline bool ir_is_heap(const TypePtr& t) {
         case TyKind::Future:
         case TyKind::Exception:  // 异常值：堆对象，args 列表归它所有
         case TyKind::Complex:
+        case TyKind::File:
             return true;
         case TyKind::Optional:
             return !t->sub.empty() && ir_is_heap(t->sub[0]);
@@ -740,6 +755,7 @@ inline bool ir_is_ref(const TypePtr& t) {
         case TyKind::Future:
         case TyKind::Exception:
         case TyKind::Complex:
+        case TyKind::File:
             return true;
         default:
             return false;

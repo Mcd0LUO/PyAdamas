@@ -500,6 +500,9 @@ void AsmGen::gen_call_rt(const Inst& in) {
             case RtFn::ListSort:
             case RtFn::SortedList:
             case RtFn::Zip2List:
+            case RtFn::FileOpen:
+            case RtFn::FileRead:
+            case RtFn::FileWrite:
                 line(std::format("movq {}, %rdi", src_op(in.args[0])));
                 line(std::format("movq {}, %rsi", src_op(in.args[1])));
                 break;
@@ -576,6 +579,10 @@ void AsmGen::gen_call_rt(const Inst& in) {
             case RtFn::EnumerateList:
             case RtFn::ListReverse:
             case RtFn::IntBitLength:
+            case RtFn::FileReadLine:
+            case RtFn::FileReadLines:
+            case RtFn::FileClose:
+            case RtFn::FileFlush:
             case RtFn::HandlerLeave:
             case RtFn::HandlerDiscard:
             case RtFn::ExcMatches:

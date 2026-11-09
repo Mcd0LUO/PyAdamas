@@ -518,8 +518,19 @@ class Connection:
 `__exit__(type_name, message, None)`。正常结束、`return`、`break`、
 `continue` 都会执行 `__exit__`；`__exit__` 返回真值会抑制异常，否则异常
 继续向外抛。多个 `with` 项按嵌套处理，退出顺序相反；`__enter__` 抛异常
-时，外层已进入的 `__exit__` 仍会执行。没有内置 `open()`，也没有
-`contextlib`。
+时，外层已进入的 `__exit__` 仍会执行。
+`open(path[, mode])` 返回文件对象（独立的 `file` 类型），可以直接
+`with open(...) as f:`；正常、异常、`return`、`break`/`continue` 路径都会
+关闭文件（见下方「文件」）。
+
+### 文件
+
+`open(path[, mode])` 返回字节流文件对象：`read([n])`（无参读全部）、
+`readline()`（EOF 返回空串）、`readlines()`、`write(str)`（返回写入的
+字节数）、`flush()`、`close()`。打开失败抛 `OSError`，关闭后读写抛
+`ValueError`。路径/模式是字节串（没有 `encoding=` 文本模式参数）；没有
+`seek`/`tell`/`closed` 属性，也不支持 `for line in f`（可用 `readlines()`）。
+`print(..., file=f)` 尚未支持。
 
 ### print
 

@@ -54,6 +54,7 @@ enum class TyKind : uint8_t {
     AsyncGenerator, // async def + yield；sub[0] 是产出类型
     Future,       // asyncio.Future；sub[0] 是结果类型
     Exception,    // 异常值（type name 放在 Type::name）；args 是 message 列表
+    File,         // open() 返回的文件对象
 };
 
 struct Type;
@@ -394,6 +395,10 @@ inline const TypePtr& t_str() {
     static TypePtr v = new_ty(TyKind::Str);
     return v;
 }
+inline const TypePtr& t_file() {
+    static TypePtr v = new_ty(TyKind::File);
+    return v;
+}
 
 // 可变的类型洞：容器元素类型未知时用它占位，后续插入时原地填上
 inline TypePtr fresh_hole() { return new_ty(TyKind::Unknown); }
@@ -600,6 +605,7 @@ inline std::string type_name_impl(const TypePtr& t, int depth) {
                                   : std::format("future[{}]", type_name_impl(t->sub[0], depth + 1));
         case TyKind::Exception:
             return t->name.empty() ? "Exception" : t->name;
+        case TyKind::File: return "file";
     }
     return "?";
 }

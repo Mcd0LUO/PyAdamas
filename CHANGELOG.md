@@ -4,6 +4,35 @@
 
 早期阶段没有逐条留痕，按阶段归纳；0.4 之后逐条记录。
 
+## [0.43] - 2026-11-10
+
+文件输入输出。
+
+### 新增
+
+- `open(path[, mode])` 返回文件对象（新增 `file` 类型）：
+  `read([n])` / `readline()` / `readlines()` / `write(str)` / `close()` /
+  `flush()`；`with open(...) as f:` 在正常退出、异常展开、`return`、
+  `break`/`continue` 路径都会关闭文件。
+- 运行时 `Py23File` 由 RC/GC 管理，析构时兜底 `fclose`；打开失败抛
+  `OSError`，关闭后读写抛 `ValueError`。
+- 跨模块签名里的 `file` 类型暂时降级为 unknown。
+- 测试：`57_file_io.py`（写/读、readline/readlines、追加、按长度读、
+  缺失文件异常），另有 with 的 return/break/异常清理压测（O0/O1/O2 与
+  CPython 一致）。
+
+### 验证
+
+- `ctest --preset dev/release` 全绿；O0/O1 全量 57 个运行用例通过；
+  810 程序差分零失败
+
+### 已知限制
+
+- `print(..., file=f)`、`seek`/`tell`/`closed` 属性、`for line in f`、
+  `encoding=`/文本模式参数未支持（字节串模型）
+- 文件对象只能通过 `with` 使用其上下文协议；直接调 `__enter__`/`__exit__`
+  会明确报错
+
 ## [0.42] - 2026-11-10
 
 内置函数补齐（四）：字符串方法。

@@ -310,6 +310,9 @@ void TypeChecker::stmt(Stmt& s) {
                                     std::format("'{}' does not define async __aexit__",
                                                 ct->cls->name));
                         }
+                    } else if (ct && ct->kind == TyKind::File) {
+                        // with open(...) as f：f 就是文件对象本身。
+                        vt = ct;
                     } else if (w.is_async) {
                         err(item.context->line, item.context->col,
                             "async with requires a class instance with async "

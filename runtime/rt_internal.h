@@ -340,6 +340,16 @@ int64_t py23_str_eq(Py23Str* a, Py23Str* b);
 int64_t py23_str_cmp(Py23Str* a, Py23Str* b);
 /* 字符串方法派发：op 序号与 src/ir.h 的 StrOp 一致；未用的参数传 0。 */
 int64_t py23_str_method(Py23Str* s, int64_t op, int64_t a0, int64_t a1, int64_t a2);
+
+/* 文件对象（布局只在 rt_obj.c 里定义） */
+typedef struct Py23File Py23File;
+Py23File* py23_file_open(Py23Str* path, Py23Str* mode);
+Py23Str* py23_file_read(Py23File* f, int64_t n);
+Py23Str* py23_file_readline(Py23File* f);
+Py23List* py23_file_readlines(Py23File* f);
+int64_t py23_file_write(Py23File* f, Py23Str* s);
+void py23_file_close(Py23File* f);
+void py23_file_flush(Py23File* f);
 void list_destroy(void* p);
 void list_gc_release(void* p);
 Py23List* py23_list_new(int64_t cap, int64_t elem_kind);

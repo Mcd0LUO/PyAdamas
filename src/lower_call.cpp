@@ -366,6 +366,7 @@ VReg Lowerer::lower_call(Call& c) {
                 "abs", "min", "max", "sum", "pow", "any", "all", "complex",
                 "ord", "chr", "hex", "bin", "oct", "round", "divmod", "repr", "format",
                 "list", "tuple", "dict", "set", "sorted", "reversed", "enumerate", "zip",
+                "open",
             };
             if (kBuiltins.count(n.id)) return lower_builtin_call(n.id, c);
             // 名字能解析但语义没实现的内置：以前会退化成调用空指针直接
@@ -485,6 +486,23 @@ VReg Lowerer::lower_builtin_call(const std::string& name, Call& c) {
         v = retype(v, et);
         if (ir_is_heap(et)) push_temp(v);
         return v;
+    }
+
+    if (name == "open") {
+        if (c.args.empty() || c.args.size() > 2) {
+            err(c.line, c.col, "open() takes 1 or 2 arguments");
+            return const_none();
+        }
+        VReg path = expr(*c.args[0]);
+        VReg mode = c.args.size() == 2 ? expr(*c.args[1]) : kNoReg;
+        Inst in;
+        in.op = IrOp::CallRt;
+        in.imm = static_cast<int64_t>(RtFn::FileOpen);
+        in.args = {path, mode == kNoReg ? const_int(0) : mode};
+        in.ty = t_file();
+        VReg f = def(t_file(), std::move(in));
+        push_temp(f);
+        return f;
     }
 
     if (name == "abs") {
@@ -2220,6 +2238,72 @@ VReg Lowerer::lower_method_call(Attribute& at, Call& c) {
         }
         err(c.line, c.col,
             std::format("set method '{}' is not supported by the code generator yet", at.attr));
+        return const_none();
+    }
+
+    if (recv_ty && recv_ty->kind == TyKind::File) {
+        if (!c.keywords.empty()) {
+            err(c.line, c.col,
+                std::format("file.{}() does not take keyword arguments", at.attr));
+            return const_none();
+        }
+        if (at.attr == "read") {
+            if (c.args.size() > 1) {
+                err(c.line, c.col, "file.read() takes at most one argument");
+                return const_none();
+            }
+            VReg n = c.args.empty()
+                         ? const_int(-1)
+                         : coerce(expr(*c.args[0]), tc_.type_of(c.args[0].get()), t_int());
+            VReg s = call_runtime(RtFn::FileRead, t_str(), {recv, n});
+            push_temp(s);
+            return s;
+        }
+        if (at.attr == "readline" || at.attr == "readlines") {
+            if (!c.args.empty()) {
+                err(c.line, c.col, std::format("file.{}() takes no arguments", at.attr));
+                return const_none();
+            }
+            if (at.attr == "readline") {
+                VReg s = call_runtime(RtFn::FileReadLine, t_str(), {recv});
+                push_temp(s);
+                return s;
+            }
+            VReg l = call_runtime(RtFn::FileReadLines, mk_list(t_str()), {recv});
+            push_temp(l);
+            return l;
+        }
+        if (at.attr == "write") {
+            if (c.args.size() != 1) {
+                err(c.line, c.col, "file.write() takes exactly one argument");
+                return const_none();
+            }
+            TypePtr wt = tc_.type_of(c.args[0].get());
+            VReg v = expr(*c.args[0]);
+            if (wt && wt->kind != TyKind::Str && wt->kind != TyKind::Unknown) {
+                err(c.args[0]->line, c.args[0]->col, "file.write() expects a string");
+                return const_int(0);
+            }
+            return call_runtime(RtFn::FileWrite, t_int(), {recv, v});
+        }
+        if (at.attr == "close") {
+            if (!c.args.empty()) {
+                err(c.line, c.col, "file.close() takes no arguments");
+                return const_none();
+            }
+            call_void(RtFn::FileClose, {recv});
+            return const_none();
+        }
+        if (at.attr == "flush") {
+            if (!c.args.empty()) {
+                err(c.line, c.col, "file.flush() takes no arguments");
+                return const_none();
+            }
+            call_void(RtFn::FileFlush, {recv});
+            return const_none();
+        }
+        err(c.line, c.col,
+            std::format("file method '{}' is not supported (use 'with open(...)')", at.attr));
         return const_none();
     }
 

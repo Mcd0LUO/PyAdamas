@@ -609,7 +609,16 @@ TypePtr TypeChecker::builtin_call(const std::string& n, Call& c) {
                 err(c.line, c.col, std::format("complex() takes at most 2 arguments, got {}", a.size()));
             return t_complex();
         }
-        if (n == "open" || n == "getattr" || n == "setattr" ||
+        if (n == "open") {
+            if (a.empty() || a.size() > 2)
+                err(c.line, c.col, std::format("open() takes 1 or 2 arguments, got {}", a.size()));
+            for (auto& t : a)
+                if (!is_unknown(t) && (!t || t->kind != TyKind::Str))
+                    err(c.line, c.col,
+                        std::format("open() expects string arguments, got '{}'", type_name(t)));
+            return t_file();
+        }
+        if (n == "getattr" || n == "setattr" ||
             n == "hasattr" || n == "super" || n == "vars" || n == "dir" || n == "format" ||
             n == "id" || n == "hash" || n == "callable" || n == "slice" || n == "frozenset" ||
             n == "bytearray" || n == "object" || n == "complex" || n == "memoryview") {
@@ -689,6 +698,13 @@ bool TypeChecker::has_method(const TypePtr& t, const std::string& m) {
             }
             case TyKind::Tuple: {
                 static const std::unordered_set<std::string> ms = {"count", "index"};
+                return ms.count(m) > 0;
+            }
+            case TyKind::File: {
+                static const std::unordered_set<std::string> ms = {
+                    "read", "readline", "readlines", "write", "close", "flush",
+                    "__enter__", "__exit__",
+                };
                 return ms.count(m) > 0;
             }
             // 数值类型没有真正的「方法表」，但这些名字确实存在；
@@ -913,6 +929,31 @@ TypePtr TypeChecker::method_call(TypePtr recv, const std::string& name, Call& c,
             if (name == "partition" || name == "rpartition")
                 return mk_tuple({t_str(), t_str(), t_str()});
             if (name == "encode") return t_unknown();
+        }
+
+        if (recv->kind == TyKind::File) {
+            if (name == "read" || name == "readline") {
+                argc(0, 1);
+                return t_str();
+            }
+            if (name == "readlines") {
+                argc(0, 0);
+                return mk_list(t_str());
+            }
+            if (name == "write") {
+                argc(1, 1);
+                if (!a.empty() && !is_unknown(a[0]) && (!a[0] || a[0]->kind != TyKind::Str))
+                    err(c.line, c.col, "write() expects a string argument");
+                return t_int();
+            }
+            if (name == "close" || name == "flush" || name == "__exit__") {
+                argc(0, name == "__exit__" ? 3 : 0);
+                return t_none();
+            }
+            if (name == "__enter__") {
+                argc(0, 0);
+                return recv;
+            }
         }
 
         if (recv->kind == TyKind::Dict) {

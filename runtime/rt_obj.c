@@ -2051,3 +2051,123 @@ Py23Str* py23_repr_str(Py23Str* v) {
     free(out);
     return s;
 }
+
+/* ── 文件对象 ─────────────────────────────────────────────────── */
+
+struct Py23File {
+    FILE* fp;
+    int64_t closed;
+};
+
+static void file_destroy(void* p) {
+    Py23File* f = (Py23File*)p;
+    if (f->fp) {
+        fclose(f->fp);
+        f->fp = NULL;
+    }
+}
+
+static char* file_cstr(Py23Str* s) {
+    char* p = (char*)malloc((size_t)s->len + 1);
+    if (!p) panic_c("out of memory");
+    memcpy(p, s->data, (size_t)s->len);
+    p[s->len] = 0;
+    return p;
+}
+
+Py23File* py23_file_open(Py23Str* path, Py23Str* mode) {
+    char* p = file_cstr(path);
+    char* m = mode ? file_cstr(mode) : NULL;
+    FILE* fp = fopen(p, m ? m : "r");
+    free(p);
+    free(m);
+    if (!fp) py23_raise_c("OSError", "cannot open file");
+    Py23File* f =
+        (Py23File*)rc_alloc((int64_t)sizeof(Py23File), file_destroy, NULL, PY23_RC_OBJ);
+    f->fp = fp;
+    f->closed = 0;
+    return f;
+}
+
+static FILE* file_check(Py23File* f) {
+    if (!f || !f->fp || f->closed)
+        py23_raise_c("ValueError", "I/O operation on closed file");
+    return f->fp;
+}
+
+Py23Str* py23_file_read(Py23File* f, int64_t n) {
+    FILE* fp = file_check(f);
+    char* buf = NULL;
+    int64_t len = 0, cap = 0;
+    int64_t remain = n < 0 ? INT64_MAX : n;
+    char chunk[4096];
+    while (remain > 0) {
+        size_t want = remain < (int64_t)sizeof chunk ? (size_t)remain : sizeof chunk;
+        size_t got = fread(chunk, 1, want, fp);
+        if (got == 0) break;
+        if (len + (int64_t)got > cap) {
+            int64_t ncap = cap ? cap : 8192;
+            while (ncap < len + (int64_t)got) ncap *= 2;
+            char* nb = (char*)realloc(buf, (size_t)ncap);
+            if (!nb) panic_c("out of memory");
+            buf = nb;
+            cap = ncap;
+        }
+        memcpy(buf + len, chunk, got);
+        len += (int64_t)got;
+        if (n >= 0) remain -= (int64_t)got;
+        if (got < want) break;
+    }
+    Py23Str* s = str_new(buf ? buf : "", len);
+    free(buf);
+    return s;
+}
+
+Py23Str* py23_file_readline(Py23File* f) {
+    FILE* fp = file_check(f);
+    char* buf = NULL;
+    int64_t len = 0, cap = 0;
+    int c;
+    while ((c = fgetc(fp)) != EOF) {
+        if (len + 1 > cap) {
+            int64_t ncap = cap ? cap * 2 : 128;
+            char* nb = (char*)realloc(buf, (size_t)ncap);
+            if (!nb) panic_c("out of memory");
+            buf = nb;
+            cap = ncap;
+        }
+        buf[len++] = (char)c;
+        if (c == '\n') break;
+    }
+    Py23Str* s = str_new(buf ? buf : "", len);
+    free(buf);
+    return s;
+}
+
+Py23List* py23_file_readlines(Py23File* f) {
+    Py23List* out = py23_list_new(4, 1);
+    for (;;) {
+        Py23Str* line = py23_file_readline(f);
+        if (line->len == 0) break;
+        py23_rc_inc(line);
+        py23_list_append(out, (int64_t)line);
+    }
+    return out;
+}
+
+int64_t py23_file_write(Py23File* f, Py23Str* s) {
+    FILE* fp = file_check(f);
+    return (int64_t)fwrite(s->data, 1, (size_t)s->len, fp);
+}
+
+void py23_file_close(Py23File* f) {
+    if (!f || !f->fp) return;
+    fclose(f->fp);
+    f->fp = NULL;
+    f->closed = 1;
+}
+
+void py23_file_flush(Py23File* f) {
+    FILE* fp = file_check(f);
+    fflush(fp);
+}

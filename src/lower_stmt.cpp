@@ -687,6 +687,10 @@ VReg Lowerer::setjmp_handler(int slot) {
 }
 
 VReg Lowerer::emit_exit_call(const FuncCtx::Cleanup& c, bool exceptional) {
+    if (c.kind == FuncCtx::Cleanup::Kind::FileClose) {
+        call_void(RtFn::FileClose, {load_slot(c.mgr_slot, t_file())});
+        return const_bool(false);
+    }
     std::vector<VReg> args;
     for (int i = 0; i < c.nargs; ++i) {
         if (exceptional && i == 0) {
@@ -740,6 +744,10 @@ void Lowerer::emit_cleanup_exits(size_t down_to) {
             case FuncCtx::Cleanup::Kind::ExcDone:
                 call_void(RtFn::ExcDone, {});
                 break;
+            case FuncCtx::Cleanup::Kind::FileClose:
+                call_void(RtFn::HandlerDiscard, {load_slot(c.handler_slot, t_int())});
+                call_void(RtFn::FileClose, {load_slot(c.mgr_slot, t_file())});
+                break;
         }
     }
 }
@@ -765,6 +773,53 @@ void Lowerer::lower_with_item(With& w, size_t idx) {
     VReg mgr = expr(*item.context);
     if (ct != raw && raw && raw->kind == TyKind::Optional)
         mgr = guard_not_none(mgr, std::format("with item"));
+    if (ct && ct->kind == TyKind::File) {
+        // with open(...) as f：f 就是文件对象；退出时（正常/异常/跳出）
+        // 都走 FileClose。
+        int ms = new_temp_slot(ct);
+        store_slot(ms, mgr);
+        if (item.optional_vars) assign_to(*item.optional_vars, mgr, ct);
+
+        int hs = push_handler();
+        VReg sj = setjmp_handler(hs);
+        int body = new_block("with.body");
+        int land = new_block("with.land");
+        int end = new_block("with.end");
+        Inst br;
+        br.op = IrOp::Branch;
+        br.a = sj;
+        br.target = land;
+        br.target2 = body;
+        emit(std::move(br));
+        switch_to(body);
+
+        FuncCtx::Cleanup cf;
+        cf.kind = FuncCtx::Cleanup::Kind::FileClose;
+        cf.handler_slot = hs;
+        cf.land = land;
+        cf.mgr_slot = ms;
+        st_->cleanups.push_back(cf);
+
+        lower_with_item(w, idx + 1);
+
+        if (!terminated()) {
+            call_void(RtFn::HandlerLeave, {load_slot(hs, t_int())});
+            emit_exit_call(cf, false);
+            Inst j;
+            j.op = IrOp::Jump;
+            j.target = end;
+            emit(std::move(j));
+        }
+        st_->cleanups.pop_back();
+
+        switch_to(land);
+        call_void(RtFn::HandlerLeave, {load_slot(hs, t_int())});
+        emit_exit_call(cf, true);
+        call_void(RtFn::ExcReraise, {});
+        end_unreachable();
+        switch_to(end);
+        return;
+    }
     if (!ct || ct->kind != TyKind::Class || !ct->cls) {
         err(item.context->line, item.context->col,
             "with requires a class instance with __enter__/__exit__");
