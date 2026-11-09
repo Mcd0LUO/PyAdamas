@@ -369,9 +369,13 @@ done:
 |---|---|
 | int / bool | `cmpq $0` + `setne` |
 | float | `ucomisd 0` + `setne` + `setp`（NaN 算真） |
-| str / list / tuple | 读对象头的 `len`（偏移 0），`cmpq $0` + `setne` |
+| str / list / tuple / dict / set | 读对象头的 `len`（偏移 0），`cmpq $0` + `setne` |
 
 `len` 在偏移 0 是刻意设计的：`len(x)` 一条指令，真值判断也是一条。
+
+字典/集合的构造、读写、`in` 和遍历都走 `call.rt`（`py23_dict_*` /
+`py23_list_contains` / `py23_str_contains`），没有新增汇编指令；它们的
+`len` 也放在偏移 0。
 
 ### 字符串比较
 

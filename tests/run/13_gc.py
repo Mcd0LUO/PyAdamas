@@ -37,7 +37,16 @@ for s in l:
     total = total + len(s)
 print(total)
 
+# 字典自环：值类型是 unknown，正常 RC 不解引用，靠 GC 清扫
+j: int = 0
+while j < 20000:
+    dd = {}
+    dd["self"] = dd
+    j = j + 1
+print(j)
+
 # --- expect ---
 # 30000
 # 7
 # 38890
+# 20000

@@ -110,6 +110,13 @@ enum class RtFn : uint8_t {
     RcShutdown,  // () -> void     程序退出，释放临时栈自身的存储
     GcShutdown,  // () -> void     程序退出，释放所有剩余堆对象（含环）
     ClosureNew,  // (i64 code, i64 n_caps) -> closure*
+    DictNew,      // (i64 key_kind, i64 key_own, i64 val_own) -> dict*
+    DictSet,      // (dict*, i64 key, i64 val) -> void
+    DictGet,      // (dict*, i64 key) -> i64
+    DictContains, // (dict*, i64 key) -> i64
+    DictKeyAt,    // (dict*, i64 index) -> i64
+    ListContains, // (list*, i64 value, i64 cmp_kind) -> i64
+    StrContains,  // (str*, str*) -> i64
 };
 
 inline const char* rt_name(RtFn f) {
@@ -143,6 +150,13 @@ inline const char* rt_name(RtFn f) {
         case RtFn::RcShutdown: return "py23_rc_shutdown";
         case RtFn::GcShutdown: return "py23_gc_shutdown";
         case RtFn::ClosureNew: return "py23_closure_new";
+        case RtFn::DictNew: return "py23_dict_new";
+        case RtFn::DictSet: return "py23_dict_set";
+        case RtFn::DictGet: return "py23_dict_get";
+        case RtFn::DictContains: return "py23_dict_contains";
+        case RtFn::DictKeyAt: return "py23_dict_key_at";
+        case RtFn::ListContains: return "py23_list_contains";
+        case RtFn::StrContains: return "py23_str_contains";
     }
     return "?";
 }
@@ -343,6 +357,8 @@ inline bool ir_is_heap(const TypePtr& t) {
         case TyKind::Tuple:
         case TyKind::Class:
         case TyKind::Func:  // 静态闭包永生，堆闭包引用计数
+        case TyKind::Dict:
+        case TyKind::Set:
             return true;
         case TyKind::Optional:
             return !t->sub.empty() && ir_is_heap(t->sub[0]);

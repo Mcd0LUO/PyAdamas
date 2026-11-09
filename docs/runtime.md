@@ -28,6 +28,15 @@ typedef struct Py23Rc {
 
 typedef struct { int64_t len; int64_t hash; const char* data; } Py23Str;
 typedef struct { int64_t len; int64_t cap; int64_t* data; int64_t elem_kind; } Py23List;
+typedef struct { int64_t hash; int64_t key; int64_t val; } Py23DictEntry;
+typedef struct {
+    int64_t len; int64_t cap;      /* len 在偏移 0，len()/真值判断直接读 */
+    Py23DictEntry* entries;        /* 开放寻址表，hash == 0 为空槽 */
+    int64_t* order;                /* 插入顺序：order[i] = entries 槽号 */
+    int64_t key_kind;              /* 0 int/bool, 1 str, 2 float, 3 raw */
+    int64_t key_own;               /* 0 非堆, 1 堆, 2 unknown */
+    int64_t val_own;
+} Py23Dict;
 /* 用户对象没有对应的 C struct：布局由编译器按类定义生成。
    负载 +0 是 vtable 指针，字段从 +8 起，每个 8 字节；隐藏的 Py23Rc
    头在负载前面，所以既有偏移一个都没变。 */
@@ -67,12 +76,27 @@ typedef struct { int64_t len; int64_t cap; int64_t* data; int64_t elem_kind; } P
 时 dec 被截掉的元素。kind 2 不做精确 dec，靠循环收集器兜底——误报只会
 延迟回收，不会提前释放。
 
+### 字典 / 集合
+
+字典是**开放寻址哈希表 + 插入顺序数组**：
+
+- `entries` 容量为 2 的幂，线性探测；`order` 保留插入顺序，`for k in d`
+  和 `len` 都按它工作；
+- key 的哈希/判等类别放在 `key_kind`：int/bool 机器字、str 逐字节
+  （FNV-1a）、float IEEE 值（`0.0` / `-0.0` 同键）、其他按机器字；
+- `key_own` / `val_own` 决定 RC：写入前生成代码 retain 一份，更新/销毁
+  时运行时 dec；unknown 只 retain 不 dec，交给 GC；
+- 更新已有 key 时保留原来的 key 对象，释放调用方新传入的 key 引用；
+- 删除暂不支持；负载因子超过 0.7 时翻倍 rehash，`order` 重排后仍保持
+  插入顺序。
+- set 就是 `val_own = 0`、值恒 0 的 dict，复用同一套函数和 GC。
+
 ### 用户对象
 
 对象是编译器按类定义排出来的连续内存，运行时只知道「多大」和析构器：
 
 ```c
-void* py23_obj_new(int64_t size, void (*dtor)(void*));
+void* py23_obj_new(int64_t size, void (*dtor)(void*), void (*gc_release)(void*));
 ```
 
 调用方（生成代码）紧接着把 vtable 地址写到偏移 0。分配全零：0 同时是
@@ -113,6 +137,18 @@ cell 不是新的运行时类型，就是一个**单元素列表** `list[T]`：�
 | `py23_list_get` | `(Py23List*, i64) -> i64` | 负索引先加 `len`；越界 panic；返回借用 |
 | `py23_list_set` | `(Py23List*, i64, i64) -> void` | 同上，写入；kind 1 时 dec 旧元素 |
 | `py23_list_set_len` | `(Py23List*, i64) -> void` | 改 `len`；kind 1 时 dec 被截掉的元素 |
+
+### 字典 / 集合
+
+| 函数 | 签名 | 语义 |
+|---|---|---|
+| `py23_dict_new` | `(i64 key_kind, i64 key_own, i64 val_own) -> Py23Dict*` | 空表，初始 8 槽；set 传 `val_own = 0` |
+| `py23_dict_set` | `(Py23Dict*, i64 key, i64 val) -> void` | 插入/更新；更新时释放新 key 引用并 dec 旧 value |
+| `py23_dict_get` | `(Py23Dict*, i64 key) -> i64` | 缺失 panic KeyError；返回借用 |
+| `py23_dict_contains` | `(Py23Dict*, i64 key) -> i64` | `in` 用，返回 0/1 |
+| `py23_dict_key_at` | `(Py23Dict*, i64 index) -> i64` | 按插入顺序取 key，遍历用 |
+| `py23_list_contains` | `(Py23List*, i64 value, i64 cmp_kind) -> i64` | list/tuple 的 `in`；0 int / 1 str / 2 float / 3 raw |
+| `py23_str_contains` | `(Py23Str*, Py23Str*) -> i64` | 子串查找 |
 
 ### 对象
 
@@ -203,8 +239,8 @@ cell 不是新的运行时类型，就是一个**单元素列表** `list[T]`：�
 
 ## 内存模型
 
-**引用计数。** 每个堆对象（字符串、列表、元组、类实例、闭包）带隐藏的
-`Py23Rc{rc, dtor}` 头；所有权约定：
+**引用计数。** 每个堆对象（字符串、列表、元组、字典、集合、类实例、闭包）带隐藏的
+`Py23Rc` 头；所有权约定：
 
 - 槽 / 全局 / 字段 / kind 1 列表元素持有引用；
 - `load` / `field.get` / `list.get` 只借用，不增加计数；
@@ -241,16 +277,18 @@ cell 不是新的运行时类型，就是一个**单元素列表** `list[T]`：�
    真实栈扫描（从当前 `%rsp` 到 `main` 的栈顶）和 `setjmp` 捕获的
    callee-saved 寄存器。标记对象时保守扫描：
    - 列表：`data[0..len)` 每个 8 字节槽；
+   - 字典/集合：按 `order` 扫每个条目的 key/value；
    - 用户对象 / 闭包：整个负载按 8 字节扫；
    - 字符串：没有子指针，跳过。
 3. **释放引用**：对每个不可达对象调用它的 `release`：
    - 列表 kind 1 逐个 `gc_unref_child` 元素；
+   - 字典/集合按 `key_own` / `val_own` 对已知堆 key/value 做 unref；
    - 闭包逐个 cell；
    - 用户对象用 codegen 生成的 `.LgcrelN`，只处理堆字段；
    - `gc_unref_child` 只在子对象 **可达** 时 `rc--`，绝不释放。
    这一步在没有任何对象被 free 之前完成，避免释放顺序造成悬空读取。
-4. **清扫**：释放所有不可达对象（列表顺带 `free(data)`），清掉可达对象
-   的 mark 位，释放临时哈希表/工作栈。
+4. **清扫**：释放所有不可达对象（列表顺带 `free(data)`，字典释放
+   `entries` / `order`），清掉可达对象的 mark 位，释放临时哈希表/工作栈。
 
 保守扫描的代价是「误报只会延迟回收」：栈或寄存器里的整数如果恰好等于
 某个堆地址，会把它当根留下；不会把可达对象误判成垃圾。

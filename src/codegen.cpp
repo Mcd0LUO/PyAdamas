@@ -1039,7 +1039,8 @@ private:
             return;
         }
         if (ty && (ty->kind == TyKind::Str || ty->kind == TyKind::List ||
-                   ty->kind == TyKind::Tuple)) {
+                   ty->kind == TyKind::Tuple || ty->kind == TyKind::Dict ||
+                   ty->kind == TyKind::Set)) {
             line(std::format("movq {}, %rax", src_op(r)));
             line("cmpq $0, (%rax)");
             line("setne %al");
@@ -1325,7 +1326,8 @@ private:
             return;
         }
         if (ty && (ty->kind == TyKind::Str || ty->kind == TyKind::List ||
-                   ty->kind == TyKind::Tuple)) {
+                   ty->kind == TyKind::Tuple || ty->kind == TyKind::Dict ||
+                   ty->kind == TyKind::Set)) {
             line(std::format("movq {}, %rax", src_op(in.a)));
             line("cmpq $0, (%rax)");
             line(std::format("jne {}", block_label(in.target)));
@@ -1403,10 +1405,17 @@ private:
             case RtFn::StrConcat:
             case RtFn::StrCharAt:
             case RtFn::ClosureNew:
+            case RtFn::DictGet:
+            case RtFn::DictContains:
+            case RtFn::DictKeyAt:
+            case RtFn::StrContains:
                 line(std::format("movq {}, %rdi", src_op(in.args[0])));
                 line(std::format("movq {}, %rsi", src_op(in.args[1])));
                 break;
             case RtFn::ListSet:
+            case RtFn::DictNew:
+            case RtFn::DictSet:
+            case RtFn::ListContains:
                 line(std::format("movq {}, %rdi", src_op(in.args[0])));
                 line(std::format("movq {}, %rsi", src_op(in.args[1])));
                 line(std::format("movq {}, %rdx", src_op(in.args[2])));

@@ -4,6 +4,60 @@
 
 早期阶段没有逐条留痕，按阶段归纳；0.4 之后逐条记录。
 
+## [0.10] - 2026-11-09
+
+这一版补上**字典 / 集合**和 `in` 运算符。类型检查层早就有 `dict`/`set`
+类型，这一轮把运行时表示、降级和 GC 接上。
+
+### 新增
+
+- **开放寻址哈希表**：`Py23Dict {len, cap, entries, order, key_kind,
+  key_own, val_own}`，`order` 保留插入顺序；`len` 在偏移 0，`len()` 和
+  真值判断都是一条读
+- **key 类别**：int/bool、str（FNV-1a）、float（规范化 -0.0）、其他按
+  机器字比较；字符串 key 用 `py23_str_eq` 判等
+- **key/value 所有权**：`key_own` / `val_own` 区分非堆、堆、unknown；
+  插入时降级器 retain，更新/销毁时运行时 dec；unknown 靠 GC 兜底
+- **set 复用 dict**：`val_own = 0`、值恒 0；集合字面量、`in`、`for`
+  都走同一张表
+- **下标读写**：`d[k]` → `py23_dict_get`（缺失 panic KeyError），
+  `d[k] = v` → `py23_dict_set`；key 按字典声明类型做数值转换
+- **迭代**：`for k in d` / `for x in s` 按下标 `py23_dict_key_at` 取 key
+- **`in`**：dict/set 用 `py23_dict_contains`；list/tuple 用
+  `py23_list_contains`（int/str/float/raw 四种比较）；str 子串用
+  `py23_str_contains`；支持 `not in`
+- **GC**：`PY23_RC_DICT` 扫描条目 key/value，清扫时用 `dict_gc_release`
+  只减可达对象的引用；`entries` / `order` 在 dtor/GC/退出时释放
+- `tests/run/14_dict.py`；`tests/run/13_gc.py` 增加字典自环
+
+### 修复
+
+- **插入空槽的经典 bug**：`dict_probe` 查不到返回 -1，早期直接拿 -1
+  当插入槽，写坏 `entries[-1]`；增加 `dict_empty_slot` 专门找空槽
+- 字典/集合现在属于堆类型：槽、全局、字段、列表元素、闭包 cell 都按
+  引用计数管理，GC 也能扫描/释放
+
+### 验证
+
+- `make test`：11 正例 + 34 反例 + 14 运行用例 + 2 未建模
+- 差分测试 3 种子 600 个程序零差异
+- ASan + UBSan + LSan：全部运行用例 + 字典/集合压力程序零报告
+- 严格警告零报告
+- 16MB `RLIMIT_AS`：10 万次字典创建、10 万次字典自环、10 万次集合、
+  10 万次字典-列表创建，峰值 RSS 约 8–9MB
+
+### 已知限制
+
+- dict/set 的**方法**（`get`/`keys`/`items`/`add`/`update` 等）类型检查
+  放行，但 `build` 仍拒绝；当前支持的是字面量、下标、`len`、`in`、`for`
+- 空字典 `{}` 的 key 类型是 unknown；不同对象但内容相同的动态字符串
+  key 按 unknown 的机器字比较，可能不相等。标注/推出来的 str key 没有
+  这个问题
+- 混合 value 类型的字典值会退化成 unknown（类型系统限制），此时再嵌套
+  下标会按未知容器处理
+- dict/set 相等比较仍是指针比较；没有深比较
+- 键类型没有运行时标签，不能像 CPython 那样混用任意 hashable
+
 ## [0.9] - 2026-11-09
 
 这一版补上两件事：**lambda** 和**循环泄漏收集器**。闭包从「无环才能回收」

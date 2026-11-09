@@ -364,6 +364,30 @@ private:
         if (kind != 0 && ir_is_heap(vreg_ty(v))) rc_inc(v);
     }
 
+    // 哈希/比较类别：0 int/bool，1 str，2 float，3 其他（按机器字比较）。
+    static int key_kind(const TypePtr& t) {
+        if (!t) return 3;
+        switch (t->kind) {
+            case TyKind::Int:
+            case TyKind::Bool:
+            case TyKind::None:
+                return 0;
+            case TyKind::Str:
+                return 1;
+            case TyKind::Float:
+                return 2;
+            default:
+                return 3;
+        }
+    }
+
+    // 所有权类别：0 非堆，1 堆，2 unknown（只 retain，运行时不解引用）。
+    static int own_kind(const TypePtr& t) {
+        if (ir_is_heap(t)) return 1;
+        if (!t || t->kind == TyKind::Unknown) return 2;
+        return 0;
+    }
+
     void store_slot(int slot, VReg v) {
         TypePtr dst = st_->fn->slot_ty[slot];
         if (ir_is_heap(vreg_ty(v))) rc_inc(v);
@@ -720,6 +744,8 @@ private:
     VReg lower_method_call(Attribute& at, Call& c);
     VReg lower_subscript(Subscript& s);
     VReg lower_list_like(std::vector<ExprPtr>& elts, TypePtr ty, bool is_tuple);
+    VReg lower_dict(DictExpr& d, TypePtr ty);
+    VReg lower_set(SetExpr& s, TypePtr ty);
     VReg lower_ifexp(IfExp& e);
     VReg lower_joined(JoinedStr& j);
     VReg convert_to(VReg v, TypePtr from, TypePtr to);
@@ -1424,7 +1450,8 @@ void Lowerer::lower_for_seq(For& f) {
     VReg seq = expr(*f.iter);
     TypePtr seq_ty = tc_.type_of(f.iter.get());
     if (!seq_ty || (seq_ty->kind != TyKind::List && seq_ty->kind != TyKind::Tuple &&
-                    seq_ty->kind != TyKind::Str)) {
+                    seq_ty->kind != TyKind::Str && seq_ty->kind != TyKind::Dict &&
+                    seq_ty->kind != TyKind::Set)) {
         err(f.iter->line, f.iter->col,
             std::format("cannot iterate over '{}' in the code generator", type_name(seq_ty)));
         return;
@@ -1480,14 +1507,20 @@ void Lowerer::lower_for_seq(For& f) {
         else if (!seq_ty->sub.empty())
             et = seq_ty->sub[0];
     }
-    Inst get;
-    get.op = IrOp::IndexLoad;
-    get.a = seq;
-    get.b = iv2;
-    // 遍历字符串时每个下标是 py23_str_char_at 新造的单字节串；
-    // 遍历列表/元组时是容器内部的借用引用。
-    VReg ev = seq_ty->kind == TyKind::Str ? def_heap(et, std::move(get))
-                                          : def(et, std::move(get));
+    VReg ev;
+    if (seq_ty->kind == TyKind::Dict || seq_ty->kind == TyKind::Set) {
+        // 字典/集合按插入顺序按下标取 key；返回的是容器内部的借用引用。
+        ev = call_runtime(RtFn::DictKeyAt, et, {seq, iv2});
+    } else {
+        Inst get;
+        get.op = IrOp::IndexLoad;
+        get.a = seq;
+        get.b = iv2;
+        // 遍历字符串时每个下标是 py23_str_char_at 新造的单字节串；
+        // 遍历列表/元组时是容器内部的借用引用。
+        ev = seq_ty->kind == TyKind::Str ? def_heap(et, std::move(get))
+                                         : def(et, std::move(get));
+    }
     assign_to(*f.target, ev, et);
 
     st_->loops.push_back({end, incr});
@@ -1862,8 +1895,22 @@ void Lowerer::assign_to(Expr& target, VReg v, TypePtr vty) {
             auto& s = static_cast<Subscript&>(target);
             VReg obj = expr(*s.value);
             VReg idx = expr(*s.slice);
-            // 列表有元素类型，存进去的值要跟着转
             TypePtr ot = tc_.type_of(s.value.get());
+            if (ot && ot->kind == TyKind::Dict) {
+                TypePtr kt = ot->sub.empty() ? t_unknown() : ot->sub[0];
+                TypePtr vt = ot->sub.size() > 1 ? ot->sub[1] : t_unknown();
+                idx = coerce(idx, tc_.type_of(s.slice.get()), kt);
+                v = coerce(v, src_ty, vt);
+                retain_elem(idx, own_kind(kt));
+                retain_elem(v, own_kind(vt));
+                call_void(RtFn::DictSet, {obj, idx, v});
+                break;
+            }
+            if (ot && ot->kind == TyKind::Set) {
+                err(target.line, target.col, "set does not support item assignment");
+                break;
+            }
+            // 列表有元素类型，存进去的值要跟着转
             if (ot && ot->kind == TyKind::List && !ot->sub.empty())
                 v = coerce(v, src_ty, ot->sub[0]);
             // 运行时 list_set 只负责 dec 旧值；新值的 retain 在这里做。
@@ -1953,14 +2000,10 @@ VReg Lowerer::expr(Expr& e) {
             auto& t = static_cast<TupleExpr&>(e);
             return lower_list_like(t.elts, tc_.type_of(&e), true);
         }
-        case ExprKind::Set: {
-            err(e.line, e.col, "set literals are not supported by the code generator yet");
-            return const_none();
-        }
-        case ExprKind::Dict: {
-            err(e.line, e.col, "dict literals are not supported by the code generator yet");
-            return const_none();
-        }
+        case ExprKind::Set:
+            return lower_set(static_cast<SetExpr&>(e), tc_.type_of(&e));
+        case ExprKind::Dict:
+            return lower_dict(static_cast<DictExpr&>(e), tc_.type_of(&e));
         case ExprKind::IfExp: return lower_ifexp(static_cast<IfExp&>(e));
         case ExprKind::JoinedStr: return lower_joined(static_cast<JoinedStr&>(e));
         case ExprKind::NamedExpr: {
@@ -2132,23 +2175,64 @@ VReg Lowerer::lower_compare(Compare& c) {
     if (c.ops.size() == 1) {
         VReg l = expr(*c.left);
         VReg r = expr(*c.comparators[0]);
-        if (c.ops[0] == CmpOp::In || c.ops[0] == CmpOp::NotIn) {
-            err(c.line, c.col, "'in' is not supported by the code generator yet");
-            return const_bool(false);
-        }
-        // 混合数值比较统一到 float：codegen 按左操作数的类型选指令
+        CmpOp op = c.ops[0];
         TypePtr lt = tc_.type_of(c.left.get());
         TypePtr rt = tc_.type_of(c.comparators[0].get());
+        if (op == CmpOp::In || op == CmpOp::NotIn) {
+            VReg flag;
+            if (rt && (rt->kind == TyKind::Dict || rt->kind == TyKind::Set)) {
+                TypePtr kt = rt->sub.empty() ? t_unknown() : rt->sub[0];
+                l = coerce(l, lt, kt);
+                flag = call_runtime(RtFn::DictContains, t_bool(), {r, l});
+            } else if (rt && (rt->kind == TyKind::List || rt->kind == TyKind::Tuple)) {
+                TypePtr et = rt->sub.empty() ? t_unknown() : rt->sub[0];
+                l = coerce(l, lt, et);
+                int ck = key_kind(et);
+                if (rt->kind == TyKind::Tuple) {
+                    for (auto& sub : rt->sub)
+                        if (key_kind(sub) != ck) { ck = 3; break; }
+                }
+                flag = call_runtime(RtFn::ListContains, t_bool(), {r, l, const_int(ck)});
+            } else if (rt && rt->kind == TyKind::Str) {
+                if (lt && lt->kind != TyKind::Str && lt->kind != TyKind::Unknown) {
+                    err(c.line, c.col,
+                        std::format("'in <str>' requires a string, got '{}'", type_name(lt)));
+                    return const_bool(false);
+                }
+                flag = call_runtime(RtFn::StrContains, t_bool(), {r, l});
+            } else {
+                err(c.line, c.col,
+                    std::format("'in' on '{}' is not supported by the code generator yet",
+                                type_name(rt)));
+                return const_bool(false);
+            }
+            if (op == CmpOp::NotIn) {
+                Inst un;
+                un.op = IrOp::Un;
+                un.uop = UnKind::Not;
+                un.a = flag;
+                flag = def(t_bool(), std::move(un));
+            }
+            return flag;
+        }
+        // 混合数值比较统一到 float：codegen 按左操作数的类型选指令
         if ((ir_is_float(lt) || ir_is_float(rt)) && is_num(lt) && is_num(rt)) {
             if (!ir_is_float(lt)) l = convert_to(l, lt, t_float());
             if (!ir_is_float(rt)) r = convert_to(r, rt, t_float());
         }
         Inst in;
         in.op = IrOp::Cmp;
-        in.cop = map_cmp(c.ops[0]);
+        in.cop = map_cmp(op);
         in.a = l;
         in.b = r;
         return def(t_bool(), std::move(in));
+    }
+
+    for (auto op : c.ops) {
+        if (op == CmpOp::In || op == CmpOp::NotIn) {
+            err(c.line, c.col, "chained 'in' comparisons are not supported");
+            return const_bool(false);
+        }
     }
 
     // 链式比较：需要短路，用槽保存中间值。
@@ -2209,6 +2293,15 @@ VReg Lowerer::lower_subscript(Subscript& s) {
     VReg idx = expr(*s.slice);
     TypePtr ty = tc_.type_of(&s);
     TypePtr ot = tc_.type_of(s.value.get());
+    if (ot && ot->kind == TyKind::Dict) {
+        TypePtr kt = ot->sub.empty() ? t_unknown() : ot->sub[0];
+        idx = coerce(idx, tc_.type_of(s.slice.get()), kt);
+        return call_runtime(RtFn::DictGet, ty, {obj, idx});
+    }
+    if (ot && ot->kind == TyKind::Set) {
+        err(s.line, s.col, "set is not subscriptable");
+        return const_none();
+    }
     Inst in;
     in.op = IrOp::IndexLoad;
     in.a = obj;
@@ -2250,6 +2343,55 @@ VReg Lowerer::lower_list_like(std::vector<ExprPtr>& elts, TypePtr ty, bool is_tu
     in.imm = kind;
     in.args = std::move(args);
     return def_heap(ty, std::move(in));
+}
+
+VReg Lowerer::lower_dict(DictExpr& d, TypePtr ty) {
+    TypePtr kt = t_unknown(), vt = t_unknown();
+    if (ty && ty->kind == TyKind::Dict) {
+        if (!ty->sub.empty()) kt = ty->sub[0];
+        if (ty->sub.size() > 1) vt = ty->sub[1];
+    }
+    TypePtr dtype = (ty && ty->kind == TyKind::Dict) ? ty : mk_dict(kt, vt);
+    int kk = key_kind(kt);
+    int ko = own_kind(kt);
+    int vo = own_kind(vt);
+
+    VReg dict = call_runtime(RtFn::DictNew, dtype,
+                             {const_int(kk), const_int(ko), const_int(vo)});
+    push_temp(dict);
+    for (size_t i = 0; i < d.values.size(); ++i) {
+        if (!d.keys[i]) {
+            err(d.line, d.col, "'**' dict unpacking is not supported by the code generator yet");
+            continue;
+        }
+        VReg k = expr(*d.keys[i]);
+        k = coerce(k, tc_.type_of(d.keys[i].get()), kt);
+        retain_elem(k, ko);
+        VReg v = expr(*d.values[i]);
+        v = coerce(v, tc_.type_of(d.values[i].get()), vt);
+        retain_elem(v, vo);
+        call_void(RtFn::DictSet, {dict, k, v});
+    }
+    return dict;
+}
+
+VReg Lowerer::lower_set(SetExpr& s, TypePtr ty) {
+    TypePtr et = t_unknown();
+    if (ty && ty->kind == TyKind::Set && !ty->sub.empty()) et = ty->sub[0];
+    TypePtr stype = (ty && ty->kind == TyKind::Set) ? ty : mk_set(et);
+    int ek = key_kind(et);
+    int eo = own_kind(et);
+
+    VReg set = call_runtime(RtFn::DictNew, stype,
+                            {const_int(ek), const_int(eo), const_int(0)});
+    push_temp(set);
+    for (auto& e : s.elts) {
+        VReg v = expr(*e);
+        v = coerce(v, tc_.type_of(e.get()), et);
+        retain_elem(v, eo);
+        call_void(RtFn::DictSet, {set, v, const_int(0)});
+    }
+    return set;
 }
 
 VReg Lowerer::lower_ifexp(IfExp& e) {
@@ -2793,6 +2935,8 @@ void Lowerer::print_value(VReg v, TypePtr ty, int line, int col) {
         case TyKind::Float: call_void(RtFn::PrintF64, {v}); break;
         case TyKind::Str: call_void(RtFn::PrintStr, {v}); break;
         case TyKind::Int: call_void(RtFn::PrintI64, {v}); break;
+        case TyKind::Dict: call_void(RtFn::PrintStr, {const_str("<dict object>")}); break;
+        case TyKind::Set: call_void(RtFn::PrintStr, {const_str("<set object>")}); break;
         case TyKind::Class: {
             // 没有 __str__，就按 CPython 的形状打一个 `<Point object>`。
             // 类名进字符串池，和字面量走同一条路。

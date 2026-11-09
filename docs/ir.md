@@ -171,6 +171,19 @@ Python 语义里变量天生可变，循环里反复赋值是常态。一上来�
 - 嵌套函数直接引用自己的名字时走当前闭包（有 env 用 env，否则静态闭包），
   避免 self cell 环
 
+**字典 / 集合不新增 IR 指令**：
+
+- 字面量 → `py23_dict_new` + 逐对 `py23_dict_set`（set 用 `val_own = 0`）；
+- `d[k]` → `py23_dict_get`，`d[k] = v` → `py23_dict_set`；
+- `k in d` / `k in s` → `py23_dict_contains`；list/tuple 用
+  `py23_list_contains`，str 用 `py23_str_contains`；
+- `for k in d` / `for x in s` → `len` + `py23_dict_key_at`；
+- `len` 仍是一条 `Len`，真值判断仍走 `branch`（字典/集合的 `len` 在
+  偏移 0）。
+
+key/value 的 retain 在写入前由降级器发出；运行时负责更新/销毁时 dec，
+unknown 类别不 dec，由 GC 兜底。
+
 **引用计数插桩的边界**：
 
 - 新堆值由 `def_heap()` 统一登记，产生后立刻 `py23_rc_temp` 入栈；

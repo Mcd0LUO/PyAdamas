@@ -37,6 +37,24 @@ typedef struct {
     int64_t elem_kind;
 } Py23List;
 
+/* 字典 = 开放寻址哈希表 + 插入顺序 order 数组。set 复用同一结构，
+   val_own = 0、值恒为 0。len 在偏移 0，len() 和真值判断都只读它。 */
+typedef struct {
+    int64_t hash;  /* 0 表示空槽；真实 hash 强制非 0 */
+    int64_t key;
+    int64_t val;
+} Py23DictEntry;
+
+typedef struct {
+    int64_t len;
+    int64_t cap;
+    Py23DictEntry* entries;
+    int64_t* order;    /* order[i] = 第 i 个插入项在 entries 里的槽号 */
+    int64_t key_kind;  /* 0 int/bool, 1 str, 2 float, 3 raw */
+    int64_t key_own;   /* 0 非堆, 1 堆, 2 unknown */
+    int64_t val_own;   /* 0 非堆, 1 堆, 2 unknown */
+} Py23Dict;
+
 /* ── 引用计数 ─────────────────────────────────────────────────── */
 
 /* 隐藏头放在负载前面，负载指针（字符串的 len、对象的 vtable）保持原样。
@@ -52,6 +70,7 @@ enum {
     PY23_RC_LIST = 1,
     PY23_RC_OBJ = 2,
     PY23_RC_CLOSURE = 3,
+    PY23_RC_DICT = 4,
 };
 
 typedef struct Py23Rc {
@@ -79,6 +98,7 @@ static int gc_sweeping;
 void py23_gc_collect(void);
 void py23_gc_shutdown(void);
 void py23_gc_unref_child(void* p);
+static void dict_gc_release(void* p);
 
 static void panic_c(const char* msg) {
     fprintf(stderr, "py23: runtime error: %s\n", msg);
@@ -411,6 +431,186 @@ void py23_list_set_len(Py23List* l, int64_t n) {
     l->len = n;
 }
 
+/* ── 字典 / 集合 ─────────────────────────────────────────────── */
+
+static uint64_t mix64(uint64_t x) {
+    x ^= x >> 30;
+    x *= 0xbf58476d1ce4e5b9ull;
+    x ^= x >> 27;
+    x *= 0x94d049bb133111ebull;
+    x ^= x >> 31;
+    return x;
+}
+
+static int64_t dict_hash_value(int64_t kind, int64_t v) {
+    uint64_t h;
+    if (kind == 1) {
+        Py23Str* s = (Py23Str*)v;
+        h = 1469598103934665603ull;
+        for (int64_t i = 0; i < s->len; ++i) {
+            h ^= (unsigned char)s->data[i];
+            h *= 1099511628211ull;
+        }
+    } else if (kind == 2) {
+        double d;
+        memcpy(&d, &v, sizeof d);
+        if (d == 0.0) v = 0;  /* 0.0 与 -0.0 同槽 */
+        h = mix64((uint64_t)v);
+    } else {
+        h = mix64((uint64_t)v);
+    }
+    h = mix64(h);
+    return (int64_t)(h ? h : 1);
+}
+
+static int dict_key_eq(int64_t kind, int64_t a, int64_t b) {
+    if (kind == 1) return py23_str_eq((Py23Str*)a, (Py23Str*)b) != 0;
+    if (kind == 2) {
+        double x, y;
+        memcpy(&x, &a, sizeof x);
+        memcpy(&y, &b, sizeof y);
+        return x == y;
+    }
+    return a == b;
+}
+
+static int64_t dict_probe(Py23DictEntry* entries, int64_t cap, int64_t kind,
+                          int64_t key, int64_t hash) {
+    int64_t mask = cap - 1;
+    int64_t i = (int64_t)((uint64_t)hash & (uint64_t)mask);
+    while (entries[i].hash != 0) {
+        if (entries[i].hash == hash && dict_key_eq(kind, entries[i].key, key)) return i;
+        i = (i + 1) & mask;
+    }
+    return -1;
+}
+
+static int64_t dict_empty_slot(Py23DictEntry* entries, int64_t cap, int64_t hash) {
+    int64_t mask = cap - 1;
+    int64_t i = (int64_t)((uint64_t)hash & (uint64_t)mask);
+    while (entries[i].hash != 0) i = (i + 1) & mask;
+    return i;
+}
+
+static void dict_resize(Py23Dict* d, int64_t ncap) {
+    Py23DictEntry* ne = (Py23DictEntry*)calloc((size_t)ncap, sizeof(Py23DictEntry));
+    int64_t* no = (int64_t*)malloc(sizeof(int64_t) * (size_t)ncap);
+    if (!ne || !no) panic_c("out of memory");
+    for (int64_t i = 0; i < d->len; ++i) {
+        Py23DictEntry e = d->entries[d->order[i]];
+        int64_t mask = ncap - 1;
+        int64_t slot = (int64_t)((uint64_t)e.hash & (uint64_t)mask);
+        while (ne[slot].hash != 0) slot = (slot + 1) & mask;
+        ne[slot] = e;
+        no[i] = slot;
+    }
+    free(d->entries);
+    free(d->order);
+    d->entries = ne;
+    d->order = no;
+    d->cap = ncap;
+}
+
+static void dict_destroy(void* p) {
+    Py23Dict* d = (Py23Dict*)p;
+    for (int64_t i = 0; i < d->len; ++i) {
+        Py23DictEntry e = d->entries[d->order[i]];
+        if (d->key_own == 1) py23_rc_dec((void*)e.key);
+        if (d->val_own == 1) py23_rc_dec((void*)e.val);
+    }
+    free(d->entries);
+    free(d->order);
+}
+
+static void dict_gc_release(void* p) {
+    Py23Dict* d = (Py23Dict*)p;
+    for (int64_t i = 0; i < d->len; ++i) {
+        Py23DictEntry e = d->entries[d->order[i]];
+        if (d->key_own == 1) py23_gc_unref_child((void*)e.key);
+        if (d->val_own == 1) py23_gc_unref_child((void*)e.val);
+    }
+}
+
+Py23Dict* py23_dict_new(int64_t key_kind, int64_t key_own, int64_t val_own) {
+    if (key_kind < 0 || key_kind > 3) panic_c("invalid dict key kind");
+    if (key_own < 0 || key_own > 2 || val_own < 0 || val_own > 2)
+        panic_c("invalid dict ownership kind");
+    int64_t cap = 8;
+    Py23Dict* d =
+        (Py23Dict*)rc_alloc((int64_t)sizeof(Py23Dict), dict_destroy, dict_gc_release,
+                            PY23_RC_DICT);
+    d->len = 0;
+    d->cap = cap;
+    d->entries = (Py23DictEntry*)calloc((size_t)cap, sizeof(Py23DictEntry));
+    d->order = (int64_t*)malloc(sizeof(int64_t) * (size_t)cap);
+    if (!d->entries || !d->order) panic_c("out of memory");
+    d->key_kind = key_kind;
+    d->key_own = key_own;
+    d->val_own = val_own;
+    return d;
+}
+
+/* 调用方已经把 key/value 的「入表引用」retain 好；更新已有 key 时
+   释放这份多余的新 key 引用，字典继续保留原来的 key 对象。 */
+void py23_dict_set(Py23Dict* d, int64_t key, int64_t val) {
+    int64_t h = dict_hash_value(d->key_kind, key);
+    int64_t slot = dict_probe(d->entries, d->cap, d->key_kind, key, h);
+    if (slot >= 0) {
+        if (d->key_own == 1) py23_rc_dec((void*)key);
+        if (d->val_own == 1) py23_rc_dec((void*)d->entries[slot].val);
+        d->entries[slot].val = val;
+        return;
+    }
+    if ((d->len + 1) * 10 >= d->cap * 7) dict_resize(d, d->cap * 2);
+    slot = dict_empty_slot(d->entries, d->cap, h);
+    d->entries[slot].hash = h;
+    d->entries[slot].key = key;
+    d->entries[slot].val = val;
+    d->order[d->len++] = slot;
+}
+
+int64_t py23_dict_get(Py23Dict* d, int64_t key) {
+    int64_t h = dict_hash_value(d->key_kind, key);
+    int64_t slot = dict_probe(d->entries, d->cap, d->key_kind, key, h);
+    if (slot < 0) panic_c("KeyError: key not found");
+    return d->entries[slot].val;
+}
+
+int64_t py23_dict_contains(Py23Dict* d, int64_t key) {
+    int64_t h = dict_hash_value(d->key_kind, key);
+    return dict_probe(d->entries, d->cap, d->key_kind, key, h) >= 0 ? 1 : 0;
+}
+
+int64_t py23_dict_key_at(Py23Dict* d, int64_t i) {
+    if (i < 0 || i >= d->len) panic_c("dict iteration index out of range");
+    return d->entries[d->order[i]].key;
+}
+
+static int list_value_eq(int64_t kind, int64_t a, int64_t b) {
+    if (kind == 1) return py23_str_eq((Py23Str*)a, (Py23Str*)b) != 0;
+    if (kind == 2) {
+        double x, y;
+        memcpy(&x, &a, sizeof x);
+        memcpy(&y, &b, sizeof y);
+        return x == y;
+    }
+    return a == b;
+}
+
+int64_t py23_list_contains(Py23List* l, int64_t v, int64_t kind) {
+    for (int64_t i = 0; i < l->len; ++i)
+        if (list_value_eq(kind, l->data[i], v)) return 1;
+    return 0;
+}
+
+int64_t py23_str_contains(Py23Str* hay, Py23Str* needle) {
+    if (needle->len == 0) return 1;
+    if (needle->len > hay->len) return 0;
+    for (int64_t i = 0; i + needle->len <= hay->len; ++i)
+        if (memcmp(hay->data + i, needle->data, (size_t)needle->len) == 0) return 1;
+    return 0;
+}
+
 /* ── 对象 ─────────────────────────────────────────────────────── */
 
 /* 对象 = [vtable 指针][字段 0][字段 1]…。分配时全部清零：0 同时是
@@ -489,6 +689,15 @@ static void gc_scan_object(Py23Rc* h) {
             Py23List* l = (Py23List*)p;
             if (l->data)
                 for (int64_t i = 0; i < l->len; ++i) gc_mark((uintptr_t)l->data[i]);
+            break;
+        }
+        case PY23_RC_DICT: {
+            Py23Dict* d = (Py23Dict*)p;
+            for (int64_t i = 0; i < d->len; ++i) {
+                Py23DictEntry e = d->entries[d->order[i]];
+                gc_mark((uintptr_t)e.key);
+                gc_mark((uintptr_t)e.val);
+            }
             break;
         }
         case PY23_RC_OBJ:
@@ -588,6 +797,10 @@ void py23_gc_collect(void) {
             if (h->kind == PY23_RC_LIST) {
                 Py23List* l = (Py23List*)((char*)h + PY23_RC_HDR);
                 free(l->data);
+            } else if (h->kind == PY23_RC_DICT) {
+                Py23Dict* d = (Py23Dict*)((char*)h + PY23_RC_HDR);
+                free(d->entries);
+                free(d->order);
             }
             free(h);
         }
@@ -613,6 +826,10 @@ void py23_gc_shutdown(void) {
         if (h->kind == PY23_RC_LIST) {
             Py23List* l = (Py23List*)((char*)h + PY23_RC_HDR);
             free(l->data);
+        } else if (h->kind == PY23_RC_DICT) {
+            Py23Dict* d = (Py23Dict*)((char*)h + PY23_RC_HDR);
+            free(d->entries);
+            free(d->order);
         }
         free(h);
     }
