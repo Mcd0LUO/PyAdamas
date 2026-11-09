@@ -4,6 +4,30 @@
 
 早期阶段没有逐条留痕，按阶段归纳；0.4 之后逐条记录。
 
+## [0.23] - 2026-11-09
+
+异步生成器协议：`asend` / `__anext__` / `aclose`。
+
+### 新增
+
+- `agen.asend(v)`：把值送进 `x = yield ...` 并取下一个值；驱动对象
+  用 `driver_sent` 持有值到恢复，支持跨事件循环。
+- `agen.__anext__()`：等价于 `asend(None)`。
+- `agen.aclose()`：停在 `yield` 上时走 close 清理分发（finally / with）；
+  从未启动时不执行函数体；正在等内部 awaitable 时注入 `GeneratorExit`。
+- 用例 `tests/run/31_asyncgen_proto.py`。
+
+### 验证
+
+- `ctest --preset dev` / `release` 全绿（31 个运行用例）
+- 差分测试 810 个程序零差异；ASan/UBSan/LSan 零报告
+
+### 已知限制
+
+- 没有 `athrow`（异常不是一等值）
+- `aclose` 不会 await `async with` 的 `__aexit__`；同一生成器上并发的
+  asend 驱动在 aclose 后会挂起
+
 ## [0.22] - 2026-11-09
 
 Future 完成回调与失败结果。

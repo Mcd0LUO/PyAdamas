@@ -55,6 +55,7 @@ void await_destroy(void* p) {
     if (w->waiter) py23_rc_dec((void*)w->waiter);
     if (w->task_coro) py23_rc_dec((void*)w->task_coro);
     if (w->driver_gen) py23_rc_dec((void*)w->driver_gen);
+    if (w->driver_sent) py23_rc_dec_unknown(w->driver_sent);
     if (w->waiters) py23_rc_dec(w->waiters);
     if (w->results) py23_rc_dec(w->results);
     if (w->children) py23_rc_dec(w->children);
@@ -67,6 +68,7 @@ void await_gc_release(void* p) {
     if (w->waiter) py23_gc_unref_child((void*)w->waiter);
     if (w->task_coro) py23_gc_unref_child((void*)w->task_coro);
     if (w->driver_gen) py23_gc_unref_child((void*)w->driver_gen);
+    if (w->driver_sent) py23_gc_unref_child((void*)w->driver_sent);
     if (w->waiters) py23_gc_unref_child(w->waiters);
     if (w->results) py23_gc_unref_child(w->results);
     if (w->children) py23_gc_unref_child(w->children);

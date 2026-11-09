@@ -166,6 +166,8 @@ enum class RtFn : uint8_t {
     AsyncioTaskDone,   // (task*) -> bool
     AsyncioTaskCancel, // (task*) -> bool
     AsyncGenANext,     // (asyncgen*) -> awaitable*  __anext__ 的驱动对象
+    AsyncGenAsend,     // (asyncgen*, i64 sent) -> awaitable*  asend(v)
+    AsyncGenAClose,    // (asyncgen*) -> awaitable*  aclose()
     AsyncioFutureNew,  // () -> future*
     FutureSetResult,   // (future*, i64) -> void
     FutureSetException,// (future*, str*) -> void（失败消息）
@@ -278,6 +280,8 @@ inline const char* rt_name(RtFn f) {
         case RtFn::AsyncioTaskDone: return "py23_asyncio_task_done";
         case RtFn::AsyncioTaskCancel: return "py23_asyncio_task_cancel";
         case RtFn::AsyncGenANext: return "py23_asyncgen_anext";
+        case RtFn::AsyncGenAsend: return "py23_asyncgen_asend";
+        case RtFn::AsyncGenAClose: return "py23_asyncgen_aclose";
         case RtFn::AsyncioFutureNew: return "py23_asyncio_future_new";
         case RtFn::FutureSetResult: return "py23_future_set_result";
         case RtFn::FutureSetException: return "py23_future_set_exception";

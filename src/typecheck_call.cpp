@@ -565,6 +565,8 @@ bool TypeChecker::has_method(const TypePtr& t, const std::string& m) {
             }
             case TyKind::Generator:
                 return m == "send" || m == "close" || m == "__next__";
+            case TyKind::AsyncGenerator:
+                return m == "asend" || m == "aclose" || m == "__anext__";
             case TyKind::Task:
                 return m == "done" || m == "cancel" || m == "cancelled" ||
                        m == "result" || m == "exception";
@@ -671,6 +673,25 @@ TypePtr TypeChecker::method_call(TypePtr recv, const std::string& name, Call& c,
                 return name == "close" ? t_none() : elem();
             }
             err(c.line, c.col, std::format("'generator' object has no method '{}'", name));
+            return t_unknown();
+        }
+
+        if (recv->kind == TyKind::AsyncGenerator) {
+            TypePtr et = elem();
+            if (name == "asend") {
+                argc(1, 1);
+                return mk_coroutine(et);
+            }
+            if (name == "__anext__") {
+                argc(0, 0);
+                return mk_coroutine(et);
+            }
+            if (name == "aclose") {
+                argc(0, 0);
+                return mk_coroutine(t_none());
+            }
+            err(c.line, c.col,
+                std::format("'async generator' object has no method '{}'", name));
             return t_unknown();
         }
 

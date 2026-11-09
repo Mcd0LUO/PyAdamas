@@ -292,6 +292,7 @@ void AsmGen::gen_call_rt(const Inst& in) {
             case RtFn::AsyncioTaskDone:
             case RtFn::AsyncioTaskCancel:
             case RtFn::AsyncGenANext:
+            case RtFn::AsyncGenAClose:
             case RtFn::FutureDone:
             case RtFn::FutureCancel:
             case RtFn::FutureResult:
@@ -314,6 +315,7 @@ void AsmGen::gen_call_rt(const Inst& in) {
                 break;
             case RtFn::GenNextOpt:
             case RtFn::GenSend:
+            case RtFn::AsyncGenAsend:
                 line(std::format("movq {}, %rdi", src_op(in.args[0])));
                 line(std::format("movq {}, %rsi", src_op(in.args[1])));
                 break;

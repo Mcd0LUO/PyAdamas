@@ -104,6 +104,8 @@ typedef struct {
     int64_t task_coro; /* task：被包装的协程（owned） */
     int64_t cancelled;
     int64_t driver_gen; /* kind 4：被驱动的异步生成器（owned） */
+    int64_t driver_sent; /* kind 4：asend 传入值（owned） */
+    int64_t driver_close; /* kind 4：aclose 模式 */
     int64_t pending;    /* future/fd：已经挂进 loop_pending/loop_fds */
     int64_t fd;         /* kind 6：等待的 fd */
     int64_t write;      /* kind 6：0 读 / 1 写 */
@@ -262,6 +264,8 @@ int64_t py23_asyncio_task_cancelled(void* tp);
 void* py23_asyncio_wait_fd(int64_t fd, int64_t write);
 int poll_fds(int timeout_ms);
 void* py23_asyncgen_anext(void* gen);
+void* py23_asyncgen_asend(void* gen, int64_t sent);
+void* py23_asyncgen_aclose(void* gen);
 void driver_complete(Py23Await* d, int64_t value, Py23Exception* exc);
 void agen_drive(Py23Await* d);
 int64_t py23_asyncio_run(void* coro);

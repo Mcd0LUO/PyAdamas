@@ -56,7 +56,7 @@ py23 借 Python 的语法外壳，但**不是 CPython 的实现**：语义按静
 | `generator[T]` | 生成器对象；`for` / `next` 产出 `T`，`send` 送入的值是 `unknown` |
 | `coroutine[T]` | 协程对象；`await` / `asyncio.run` 得到 `T` |
 | `task[T]` | `asyncio.create_task` 调度的任务；`await` 得到 `T`，有 `done()` / `cancel()` |
-| `asyncgen[T]` | `async def` + `yield` 的异步生成器；只能用于 `async for` |
+| `asyncgen[T]` | `async def` + `yield` 的异步生成器；`async for` 或 `asend` / `__anext__` / `aclose` |
 | `future[T]` | `asyncio.Future`；可多等待，`set_result` 之后可 `await`/`result` |
 | `类名` | 类实例；字段布局与 vtable 在编译期确定 |
 | `set[T]` / `dict[K, V]` | 堆上的哈希表；`set` 复用 `dict`（值恒 0），保留插入顺序 |
@@ -335,7 +335,18 @@ async def main() -> int:
 
 生成器内部可以混用 `await` / `yield`；`return`、`break` 中断迭代后，
 生成器对象被回收时同步执行 `finally`（`finally` 里不能再 await）。
-没有 `asend` / `athrow` / `aclose` 方法。
+
+协议方法（都返回 coroutine，需要 `await`）：
+
+- `asend(v)`：把 `v` 送进 `x = yield ...` 的 `x` 并取下一个值；
+  非 None 值可以跳转生成器的内部状态（示例见 `tests/run/31_asyncgen_proto.py`）。
+- `__anext__()`：等价于 `asend(None)`。
+- `aclose()`：关闭生成器。停在 `yield` 上时走 close 清理分发，执行
+  `finally` / `with.__exit__`；从未启动时不执行函数体；正在等内部
+  awaitable 时注入 `GeneratorExit`，让 `finally` 在挂起点展开。
+  `async with` 的 `__aexit__` 目前不会在 aclose 里 await。
+
+没有 `athrow`（异常还不是一等值）。
 
 **异步上下文管理器**：类上定义 `async def __aenter__` /
 `async def __aexit__`，用 `async with` 进入；进入、正常退出、异常展开、
@@ -555,7 +566,7 @@ class Connection:
 - Python 2 遗留写法（`0x1L`、`lambda (a, b):`、`except X, e`）
 - 类：方法缺 `self`、字段赋值类型不符、访问不存在的字段或方法（`self.xxx` 与外部基类的成员除外）
 
-**代码生成层**（`check` 通过，`build` 报错）：`del`、带装饰器的方法/类、`print(*args)`、通过 unknown 函数值的 `*` / `**` 展开、`*` 位于固定形参之前且不是定长 tuple、`raise ... from`、非内置异常名、`finally` 体内跳出 finally 的控制流、跨模块继承、把类名当值用（`f = Point`）、函数内定义类、多继承、类体里的非声明语句、异步生成器表达式、嵌在其它表达式里的异步推导式。生成器的额外限制：`yield` / `yield from` 只能作为语句或赋值右值，不能出现在 `finally` / `except` 体内；协程的 `await` 同样。异步生成器没有 `asend`/`athrow`/`aclose`。类体字段默认值里的 `lambda` 也在这一层拒绝。
+**代码生成层**（`check` 通过，`build` 报错）：`del`、带装饰器的方法/类、`print(*args)`、通过 unknown 函数值的 `*` / `**` 展开、`*` 位于固定形参之前且不是定长 tuple、`raise ... from`、非内置异常名、`finally` 体内跳出 finally 的控制流、跨模块继承、把类名当值用（`f = Point`）、函数内定义类、多继承、类体里的非声明语句、异步生成器表达式、嵌在其它表达式里的异步推导式。生成器的额外限制：`yield` / `yield from` 只能作为语句或赋值右值，不能出现在 `finally` / `except` 体内；协程的 `await` 同样。异步生成器有 `asend`/`__anext__`/`aclose`，没有 `athrow`。类体字段默认值里的 `lambda` 也在这一层拒绝。
 
 为什么这么分层：前端宽、后端严。`check` 的定位是「语法和类型有没有明显毛病」，可以对任意 Python 文件跑；`build` 才是「这门语言现在能不能编译它」。
 

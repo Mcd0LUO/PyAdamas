@@ -195,8 +195,9 @@ void    py23_gen_close(void*);
 awaitable 有六类：协程帧、`Py23Await` 的 sleep(1)/gather(2)/task(3)、
 异步生成器驱动(4)、Future(5)、fd 等待(6)。每个对象只有一个 `waiter`，
 Future 用 `waiters` 列表支持多个等待者、用 `callbacks` 列表保存
-`add_done_callback` 注册的函数（完成时按注册顺序同步调用）；gather
-把自己的引用挂在每个
+`add_done_callback` 注册的函数（完成时按注册顺序同步调用）；异步生成器
+驱动对象用 `driver_sent`（asend 的值，跨事件循环持有引用）和
+`driver_close`（aclose 模式）标记；gather 把自己的引用挂在每个
 子 awaitable 上，最后一个子任务完成时汇总结果。task 由 `loop_pending`
 持有到完成，保存结果/异常供后续 await；`cancel()` 沿 `cur` 向下级联
 （协程链/task/gather/future/sleep/fd 各有取消路径），再注入
@@ -348,6 +349,8 @@ longjmp 回同步调用点。GC 清扫和进程退出不跑析构器，但会单
 | `py23_asyncio_task_done` | `(void*) -> i64` | 任务是否结束 |
 | `py23_asyncio_task_cancel` | `(void*) -> i64` | 请求取消；解绑当前 awaitable 并注入 CancelledError |
 | `py23_asyncgen_anext` | `(void*) -> void*` | 创建异步生成器的 `__anext__` 驱动对象 |
+| `py23_asyncgen_asend` | `(void*, i64) -> void*` | `asend(v)` 驱动对象，v 的引用转交驱动 |
+| `py23_asyncgen_aclose` | `(void*) -> void*` | `aclose()` 驱动对象，走 close 分发或注入 GeneratorExit |
 | `py23_asyncio_future_new` | `() -> void*` | 创建 Future（多等待者、回调列表） |
 | `py23_future_set_result` | `(void*, i64) -> void` | 设置结果并唤醒全部等待者 |
 | `py23_future_set_exception` | `(void*, str*) -> void` | 设置失败（类型 `Exception`、消息字符串），唤醒等待者并跑回调 |

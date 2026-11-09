@@ -309,10 +309,21 @@ traceback / `raise ... from`；`finally` 体内跳出 finally 的
 已知限制：回调同步执行（CPython 用 `call_soon`）；回调异常向外传播
 并跳过剩余回调；`set_exception` 接收消息字符串而不是异常对象。
 
+## 0.23：异步生成器协议（已完成）
+
+- `asend(v)`：向 `x = yield ...` 送值并取下一个值；驱动的 `driver_sent`
+  跨事件循环持有引用，恢复时写回帧并转发。
+- `__anext__()`：等价于 `asend(None)`。
+- `aclose()`：停在 `yield` 上走 close 清理分发；从未启动时不执行
+  函数体；正在等内部 awaitable 时注入 `GeneratorExit`。
+- 用例 `tests/run/31_asyncgen_proto.py`。
+
+已知限制：没有 `athrow`（异常不是一等值）；`aclose` 不 await
+`async with` 的 `__aexit__`；并发 asend + aclose 时另一个驱动对象会挂起。
+
 ## 下一步
 
-- 语言面：方法/类装饰器的剩余形态、生成器 `throw()`、异步生成器
-  `asend`/`athrow`/`aclose`
+- 语言面：方法/类装饰器的剩余形态、生成器 `throw()`、异步生成器 `athrow`
 - 运行时：fd 读写/子进程、线程安全事件循环
 - 工程面：按 [技术债](#技术债) 顺序处理（优化遍、列表 repr、异常对象等）
 
@@ -348,4 +359,4 @@ traceback / `raise ... from`；`finally` 体内跳出 finally 的
 13. **生成器/协程的表达式能力不全**：`yield`/`yield from`/`await` 只能作为语句或赋值右值，`yield`/`await` 位于 `finally`/`except` 体内都还没接；生成器表达式仍是立即求值的 list；`send`/await 跨挂起值的静态类型不精确；`yield from` 的值固定为 None，也不能 throw
 14. **生成器/协程异常逃出时槽位不精确释放**：异常从 resume longjmp 出去时只把帧标成 aborted，堆槽引用交给 GC 下一轮回收，不做确定性 `rc_dec`
 15. **跨模块生成器/协程不支持**：`.py23i` 里 `Generator[T]` / `Coroutine[T]` 降级成 unknown，导入模块的生成器/协程无法 `for` / `next` / `await`
-16. **asyncio 只是最小集合**：自定义 `__aiter__`、fd 读写/子进程/线程安全循环未支持；异步生成器没有 `asend`/`athrow`/`aclose`，停在 `async with` 里被直接回收时不等待退出；`wait_readable` 不是 CPython 标准 API；异常结果只有消息字符串（`set_exception` 也只收消息）；Future 回调同步执行；`gather` 结果按 unknown 容器处理；Task 只允许一个并发等待者；异步推导式只能出现在语句/赋值/return 的根位置
+16. **asyncio 只是最小集合**：自定义 `__aiter__`、fd 读写/子进程/线程安全循环未支持；异步生成器没有 `athrow`，`aclose` 不 await `async with` 的 `__aexit__`，停在 `async with` 里被直接回收时不等待退出；`wait_readable` 不是 CPython 标准 API；异常结果只有消息字符串（`set_exception` 也只收消息）；Future 回调同步执行；`gather` 结果按 unknown 容器处理；Task 只允许一个并发等待者；异步推导式只能出现在语句/赋值/return 的根位置

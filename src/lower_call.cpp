@@ -728,6 +728,46 @@ VReg Lowerer::lower_method_call(Attribute& at, Call& c) {
         return const_none();
     }
 
+    if (recv_ty && recv_ty->kind == TyKind::AsyncGenerator) {
+        TypePtr et = recv_ty->sub.empty() ? t_unknown() : recv_ty->sub[0];
+        if (at.attr == "__anext__") {
+            if (!c.args.empty())
+                err(c.line, c.col, "async generator.__anext__() takes no arguments");
+            Inst in;
+            in.op = IrOp::CallRt;
+            in.imm = static_cast<int64_t>(RtFn::AsyncGenANext);
+            in.args = {recv};
+            return def_heap(mk_coroutine(et), std::move(in));
+        }
+        if (at.attr == "asend") {
+            if (c.args.size() != 1) {
+                err(c.line, c.col, "async generator.asend() takes exactly one argument");
+                return const_none();
+            }
+            VReg sv = expr(*c.args[0]);
+            TypePtr vt = vreg_ty(sv);
+            if (ir_is_heap(vt)) rc_inc(sv);
+            else if (!vt || vt->kind == TyKind::Unknown) rc_inc_unknown(sv);
+            Inst in;
+            in.op = IrOp::CallRt;
+            in.imm = static_cast<int64_t>(RtFn::AsyncGenAsend);
+            in.args = {recv, sv};
+            return def_heap(mk_coroutine(et), std::move(in));
+        }
+        if (at.attr == "aclose") {
+            if (!c.args.empty())
+                err(c.line, c.col, "async generator.aclose() takes no arguments");
+            Inst in;
+            in.op = IrOp::CallRt;
+            in.imm = static_cast<int64_t>(RtFn::AsyncGenAClose);
+            in.args = {recv};
+            return def_heap(mk_coroutine(t_none()), std::move(in));
+        }
+        err(c.line, c.col,
+            std::format("'async generator' object has no method '{}'", at.attr));
+        return const_none();
+    }
+
     if (recv_ty && recv_ty->kind == TyKind::Task) {
         if (!c.args.empty()) {
             err(c.line, c.col, std::format("task.{}() takes no arguments", at.attr));
