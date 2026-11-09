@@ -500,24 +500,14 @@ void Lowerer::lower_classdef(ClassDef& c) {
         err(c.line, c.col, "inheriting from an imported class is not supported yet");
         return;
     }
-
-    // 类型检查阶段把这两类标成「没建模」而不是错误（标准库里太常见），
-    // 到这儿必须拦住：布局只跟一个基类走、类体语句会被静默丢弃，
-    // 放过去就是生成一个语义不对的二进制。
-    if (c.bases.size() > 1)
-        err(c.line, c.col, "multiple inheritance is not supported by the code generator yet");
-    for (auto& s : c.body) {
-        if (s->kind == StmtKind::FunctionDef || s->kind == StmtKind::AnnAssign ||
-            s->kind == StmtKind::Pass)
-            continue;
-        if (s->kind == StmtKind::Expr) {
-            auto& e = static_cast<ExprStmt&>(*s);
-            if (e.value->kind == ExprKind::Constant &&
-                static_cast<Constant&>(*e.value).ck == Constant::CK::Str)
-                continue;
+    for (auto* eb : ci->extra_bases) {
+        if (!class_ids_.count(eb)) {
+            err(c.line, c.col, "inheriting from an imported class is not supported yet");
+            return;
         }
-        err(s->line, s->col, "class body statements are not supported by the code generator yet");
     }
+
+    // 类体语句在下面按执行语义降级；类命名空间未建模，赋值走模块全局。
 
     // 先把父类的 vtable 抄过来。父类一定在本类之前定义，此时它的槽
     // 已经填好；子类覆盖同名方法只改自己那几个槽，前缀保持不变。
@@ -545,6 +535,20 @@ void Lowerer::lower_classdef(ClassDef& c) {
 
     if (!opts_.module_symbol.empty() && !opts_.is_entry)
         compile_ctor_wrapper(c, ci, cid);
+
+    // 类体里的非声明语句：在类定义点执行（赋值按模块全局处理）。
+    for (auto& s : c.body) {
+        if (s->kind == StmtKind::FunctionDef || s->kind == StmtKind::AnnAssign ||
+            s->kind == StmtKind::Pass)
+            continue;
+        if (s->kind == StmtKind::Expr) {
+            auto& e = static_cast<ExprStmt&>(*s);
+            if (e.value->kind == ExprKind::Constant &&
+                static_cast<Constant&>(*e.value).ck == Constant::CK::Str)
+                continue;
+        }
+        stmt(*s);
+    }
 }
 
 void Lowerer::compile_ctor_wrapper(ClassDef& clsdef, const ClassInfoPtr& ci, int cid) {

@@ -4,6 +4,38 @@
 
 早期阶段没有逐条留痕，按阶段归纳；0.4 之后逐条记录。
 
+## [0.26] - 2026-11-09
+
+语法面补齐：del、print 展开、复数、f-string、match、多继承。
+
+### 新增
+
+- `del`：删除局部/全局/cell、字典键、列表下标、step=1 列表切片和类字段。
+- `print(*iterable)`：支持 list/tuple/str/dict/set 动态展开，sep/end 正常。
+- 复数字面量（`3j`）与 `complex()`；`+ - * /`、`abs`、`==/!=`、真值、
+  print 和 f-string。
+- f-string 格式化：fill/align/sign/`0`/width/precision、`d b o x X f e E g G %`、
+  `!s/!r/!a` 和嵌套格式字段。
+- `match/case`：字面量、捕获、通配、序列（含 `*rest`）、OR、映射、守卫；
+  捕获绑定在 case 作用域；不做穷尽性检查（Python 语义）。
+- 多继承：第一个基类提供布局，附加基类按 mixin 提供方法（不能有字段）。
+- 类体非声明语句在类定义点执行（赋值按模块全局处理）。
+- 测试：`35_syntax_extras.py`、`36_fstring.py`、`37_mi_classbody.py`、
+  `38_match.py`。
+
+### 验证
+
+- `ctest --preset dev` 全绿（38 个运行用例）
+- 差分测试 810 个程序零差异
+- ASan/UBSan/LSan 目标用例零报告
+
+### 已知限制
+
+- match 的类模式/值模式与映射 `**rest` 未支持；没有穷尽性检查
+- 多继承不做完整 C3 MRO；附加基类不能有字段
+- 类体没有独立命名空间，类属性按模块全局处理
+- f-string 的浮点分组/`n` 等边角格式有限
+
 ## [0.25] - 2026-11-09
 
 异常模型收尾与 any/all。

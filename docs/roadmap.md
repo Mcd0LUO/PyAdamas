@@ -347,6 +347,16 @@ traceback / `raise ... from`；`finally` 体内跳出 finally 的
 
 已知限制：`args` 只保存消息；没有 traceback；自定义异常类不能带字段/方法。
 
+## 0.26：语法面补齐（已完成）
+
+- `del`：名字/全局/cell、字典键、列表下标、step=1 切片、类字段。
+- `print(*args)`：动态展开容器，sep/end 顺序保持。
+- 复数字面量与 `complex()`：+ - * /、abs、eq、truth、print/f-string。
+- f-string：format spec（fill/align/sign/0/width/precision、d/b/o/x/X/f/e/g/%）、
+  `!s/!r/!a`、嵌套字段。
+- `match/case`：字面量、捕获、序列（含 *rest）、OR、映射、守卫；无类/值模式。
+- 多继承（附加基类按 mixin，不能有字段）；类体非声明语句在定义点执行。
+
 ## 下一步
 
 - 语言面：方法/类装饰器的剩余形态、生成器 `throw()`、异步生成器 `athrow`

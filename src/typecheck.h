@@ -203,6 +203,8 @@ struct ClassInfo {
     // TyKind::Exception 处理，不参与对象布局/vtable。
     bool is_exception_class = false;
     std::string exc_parent;
+    // 多重继承的附加基类（mixin）：不贡献字段，只贡献方法。
+    std::vector<ClassInfo*> extra_bases;
     std::vector<FieldInfo> fields;    // 只含本类声明的字段
     std::vector<MethodInfo> methods;  // 只含本类声明的方法
     int base_fields = 0;              // 继承来的字段数
@@ -229,8 +231,11 @@ struct ClassInfo {
 
     // 整条继承链上只要有一层看不全，就都看不全
     bool is_open() const {
-        for (const ClassInfo* p = this; p; p = p->base)
+        for (const ClassInfo* p = this; p; p = p->base) {
             if (p->open) return true;
+            for (const ClassInfo* e : p->extra_bases)
+                if (e->is_open()) return true;
+        }
         return false;
     }
 
@@ -256,8 +261,12 @@ struct ClassInfo {
         return base ? base->slot_of(n) : -1;
     }
     bool is_subclass_of(const ClassInfo* b) const {
-        for (const ClassInfo* p = this; p; p = p->base)
+        if (this == b) return true;
+        for (const ClassInfo* p = this; p; p = p->base) {
             if (p == b) return true;
+            for (const ClassInfo* e : p->extra_bases)
+                if (e->is_subclass_of(b)) return true;
+        }
         return false;
     }
 };

@@ -14,7 +14,7 @@ py23 借 Python 的语法外壳，但**不是 CPython 的实现**：语义按静
 | 注释 | `#` 到行尾；`# type: ignore` 一类注释不特殊处理 |
 | 数字 | 十进制 / `0x` / `0o` / `0b`，支持 `_` 分隔；浮点支持 `.5`、`5.`、指数、`j` 后缀直接拒绝 |
 | 字符串 | 单/双/三引号，前缀 `r` `b` `f` `rf` 任意顺序组合；相邻字面量自动拼接 |
-| f-string | 按 PEP 701 解析：同引号嵌套、自文档化 `f"{x=}"`、spec 里再嵌 `{}` 都支持 |
+| f-string | 按 PEP 701 解析：同引号嵌套、自文档化 `f"{x=}"`、spec 里再嵌 `{}` 都支持；format spec 支持 fill/align/sign/`0`/width/precision/类型 `d,b,o,x,X,f,e,E,g,G,%` 与 `!s/!r/!a` |
 
 有几处词法层就拒绝，因为语义没有对应物：`bytes` 字面量、`complex` 字面量、超出 int64 的整数、`0x1L` 这类 Python 2 写法。
 
@@ -28,7 +28,7 @@ py23 借 Python 的语法外壳，但**不是 CPython 的实现**：语义按静
 |---|---|
 | 简单语句 | 表达式语句、赋值（含链式、多重解包）、增量赋值、标注赋值、`pass`、`return`、`break`、`continue`、`raise`、`assert`、`global`、`import` / `from ... import` |
 | 复合语句 | `if` / `elif` / `else`、`while`（含 `else`）、`for` / `async for`（含 `else`）、`def` / `async def`（含默认参数、`*`、`/`、仅限关键字参数、`*args` / `**kwargs`、装饰器、生成器/协程/异步生成器）、`class`（单继承、方法与字段）、`with` / `async with`（多个项、`as`）、`try` / `except` / `else` / `finally` |
-| 能解析、不能生成 | `del`、带装饰器的方法/类、`match` 之外的软关键字写法 |
+| 能解析、不能生成 | 带装饰器的方法/类、`match` 之外的软关键字写法 |
 
 `assert` 条件为假时抛出 `AssertionError`，第二个参数作为消息；没有消息时是 `assertion failed`。
 
@@ -36,7 +36,7 @@ py23 借 Python 的语法外壳，但**不是 CPython 的实现**：语义按静
 
 支持：常量、名字、二元/一元运算、布尔短路、链式比较、条件表达式、调用（位置 + 关键字 + `*` / `**` 展开）、下标（读与写）、切片（读与赋值）、列表/元组/字典/集合字面量、列表/集合/字典推导式（含 `async for`）、生成器表达式（按 list 立即求值）、`in` / `not in`、f-string、`lambda`、海象运算符、`range()`、`yield`、`yield from`、`await`、用户类的属性读与写、用户类的方法调用。
 
-没有代码生成的：内置类型上的属性访问（除 `list.append` / `list.pop` 两个特例）、`print(*args)` 的星号展开。
+没有代码生成的：内置类型上的属性访问（除 `list.append` / `list.pop` 两个特例）。
 
 ## 类型系统
 
@@ -155,7 +155,7 @@ str 切片一致（只是单位是字节）。方法（`upper()` 这类）还没
 - **切片赋值** `l[a:b:c] = value` 支持 list：`step == 1` 时可以改变长度
   （替换 / 插入 / 删除），扩展切片要求右侧长度与切片长度一致，否则
   panic；右侧可以是 list/tuple，也可以是 str（按字节拆成字符列表）；
-- 不支持 `del l[a:b]` 和 tuple 的切片赋值。
+- `del l[a:b]` 支持 step=1 的删除；扩展切片删除（step≠1）仍会报 ValueError。tuple 的切片赋值仍不支持。
 
 ### 推导式
 
@@ -468,7 +468,7 @@ class Point:
 
 | 项 | 约定 |
 |---|---|
-| 类体 | 方法定义、带标注的字段声明、`pass`、文档字符串；其它语句（类变量、`if`、`for`）**前端接受、后端拒绝** |
+| 类体 | 方法定义、带标注的字段声明、`pass`、文档字符串，以及其它语句（类变量赋值、`if`、`for`、`print` 等）在类定义点执行；类命名空间未建模，赋值按模块全局处理 |
 | 字段 | 标注可选：`x: int` 定死偏移；`self.x = ...` 也能长出字段 |
 | 字段初值 | `n: int = 0` 在**每次构造时**求值，不是 CPython 的类属性 |
 | 构造 | `Point(1, 2)` = 分配 + 初始化带初值的字段 + 调 `__init__` |
@@ -492,9 +492,9 @@ class Connection:
 
 初值是 `None` 的字段类型记 unknown 而不是 `None`——否则后面每一处 `self.sock.send(...)` 都会被判死。推断出来的字段赋值时不检查类型（`self.x = 1` 之后再 `self.x = "s"` 只是把类型放宽成 unknown），只有写了标注的字段才严格。
 
-**看不见的父类**。基类是外部导入的类型（`unittest.TestCase`、`OrderedDict`）时，它的字段和方法我们看不到，这个类就是「开放」的：查不到 `self.xxx` / `self.method()` 时按 unknown 放过，不报错。标准库里每个测试类都继承 `TestCase` 再调 `self.assertEqual`，不放过就是大面积误杀。同样地，类体里有语句（类变量赋值等）的类也标成开放，因为类属性我们没建模。
+**看不见的父类**。基类是外部导入的类型（`unittest.TestCase`、`OrderedDict`）时，它的字段和方法我们看不到，这个类就是「开放」的：查不到 `self.xxx` / `self.method()` 时按 unknown 放过，不报错。标准库里每个测试类都继承 `TestCase` 再调 `self.assertEqual`，不放过就是大面积误杀。
 
-**多继承**。`class C(A, B)` 语法接受，标记为「没建模」，`build` 时才拒绝——布局只可能跟一个基类走，硬生成会得到语义不对的二进制。多继承还会连带把类标成开放（成员表不全），所以 `self.xxx` 不会连环报错。
+**多继承**。`class C(A, B)` 接受：第一个基类提供字段布局，后续基类按 mixin 处理，只贡献方法（**附加基类不能有字段**）。方法解析按「本类 → 第一个基类链 → 附加基类链」的顺序，同名方法左优先；不做完整 C3 MRO。类体里的非声明语句在类定义点执行；赋值按模块全局处理，`C.x` / `self.x` 这类类属性访问仍未建模。
 
 不支持：`super()`、`@classmethod` / `@staticmethod`（带装饰器的方法不检查实参，编译时拒绝）、`@property`、`__str__` / `__eq__` 等协议方法、`isinstance`、把类本身当值用（`f = Point`）。`__init__` 之外的构造协议（`__new__`）也没有。
 
@@ -539,7 +539,7 @@ class Connection:
 ### 内置函数
 
 已生成代码：`print` / `len` / `int` / `float` / `str` / `bool` / `range` /
-`next` / `abs` / `min` / `max` / `sum` / `pow` / `any` / `all`。
+`next` / `abs` / `min` / `max` / `sum` / `pow` / `any` / `all` / `complex`。
 `min` / `max` 支持多实参和 list/tuple/str/dict/set 迭代，空序列抛
 `ValueError`；`sum` 支持可选的起始值；`any` / `all` 支持短路；`abs` /
 `pow` 支持 int 与 float。其余内置名（`sorted` / `map` / `filter` 等）
@@ -576,16 +576,48 @@ raise MyError("bad")
 
 `with` 的 `__exit__` 在 `return` / `break` / `continue` 和异常路径都会执行。
 
+## match / case
+
+支持结构化模式匹配的一个实用子集：
+
+```python
+match value:
+    case 0:
+        ...
+    case 1 | 2:
+        ...
+    case [a, b] if a == b:
+        ...
+    case [first, *rest]:
+        ...
+    case {"key": v}:
+        ...
+    case _:
+        ...
+```
+
+- 字面量（数字/字符串/True/False/None）、捕获名、`_`、序列（list/tuple，含 `*rest`）、
+  OR、映射（固定 key）和 `if` 守卫。
+- 捕获名绑定在 case 作用域，case 结束后不可见；同一模式重复捕获要求值相等。
+- 没有穷尽性检查（Python 语义）；所有 case 不匹配时直接继续。
+- 类模式/值模式（`Point(x=0)`、`Color.RED`）和映射 `**rest` 暂不支持。
+
+## 复数
+
+`3j` / `1.5j` 字面量、`complex(re, im)` 构造、`+ - * /`、`abs()`、
+`==` / `!=`、真值判断、`print` / f-string 已支持。复数是有 RC 头的堆对象；
+没有 `**`、排序或与 int/float 的隐式存储转换（运算时允许提升）。
+
 ## 会被拒绝的写法
 
 **语法层**（`check` 就报错）：
 
 - `bytes` / `complex` 字面量，超出 int64 的整数
-- `match` 语句、`await` 在函数外、`break` 在循环外
+- `await` 在函数外、`break` 在循环外
 - Python 2 遗留写法（`0x1L`、`lambda (a, b):`、`except X, e`）
 - 类：方法缺 `self`、字段赋值类型不符、访问不存在的字段或方法（`self.xxx` 与外部基类的成员除外）
 
-**代码生成层**（`check` 通过，`build` 报错）：`del`、带装饰器的方法/类、`print(*args)`、通过 unknown 函数值的 `*` / `**` 展开、`*` 位于固定形参之前且不是定长 tuple、非异常类名当异常用、`finally` 体内跳出 finally 的控制流、跨模块继承、把类名当值用（`f = Point`）、函数内定义类、多继承、类体里的非声明语句、异步生成器表达式、嵌在其它表达式里的异步推导式。生成器的额外限制：`yield` / `yield from` 只能作为语句或赋值右值，不能出现在 `finally` / `except` 体内；协程的 `await` 同样。异步生成器有 `asend`/`athrow`/`__anext__`/`aclose`。自定义异常类目前只支持 `pass` 类体（字段/方法会被拒绝）。类体字段默认值里的 `lambda` 也在这一层拒绝。
+**代码生成层**（`check` 通过，`build` 报错）：带装饰器的方法/类、通过 unknown 函数值的 `*` / `**` 展开、`*` 位于固定形参之前且不是定长 tuple、非异常类名当异常用、`finally` 体内跳出 finally 的控制流、跨模块继承、把类名当值用（`f = Point`）、函数内定义类、match 的类模式/值模式（`Point(x=...)`、`Color.RED`）、异步生成器表达式、嵌在其它表达式里的异步推导式。生成器的额外限制：`yield` / `yield from` 只能作为语句或赋值右值，不能出现在 `finally` / `except` 体内；协程的 `await` 同样。异步生成器有 `asend`/`athrow`/`__anext__`/`aclose`。自定义异常类目前只支持 `pass` 类体（字段/方法会被拒绝）。类体字段默认值里的 `lambda` 也在这一层拒绝。
 
 为什么这么分层：前端宽、后端严。`check` 的定位是「语法和类型有没有明显毛病」，可以对任意 Python 文件跑；`build` 才是「这门语言现在能不能编译它」。
 

@@ -217,43 +217,42 @@ void TypeChecker::classdef(ClassDef& c) {
                 if (kw.value) expr(*kw.value);
         }
         ClassInfo* base = nullptr;
+        std::vector<ClassInfo*> extra_bases;
         bool is_exc_class = false;
         std::string exc_parent;
-        // 多继承没建模：布局只可能跟一个基类走，成员表必然是不全的。
-        // 前端接受（标记成没建模），由后端拒绝生成——标准库里的测试类
-        // 大量是 `class T(Mixin, unittest.TestCase)`，在这里报错就是误杀。
-        bool open = c.bases.size() > 1;
-        if (c.bases.size() > 1) {
-            unsupported.push_back("multiple inheritance");
-            for (auto& b : c.bases) expr(*b);
-        } else if (c.bases.size() == 1) {
-            // 自定义异常类：基类是内置异常名，或另一个自定义异常类。
-            if (auto* bn = dynamic_cast<Name*>(c.bases[0].get())) {
-                if (!lookup(bn->id) && is_exception_name(bn->id)) {
-                    is_exc_class = true;
-                    exc_parent = bn->id;
-                } else if (auto it = classes_.find(bn->id);
-                           it != classes_.end() && it->second->is_exception_class) {
-                    is_exc_class = true;
-                    exc_parent = bn->id;
+        // 多继承：第一个基类提供布局，后续基类只贡献方法（字段必须为空）。
+        bool open = false;
+        if (!c.bases.empty()) {
+            // 自定义异常类：只有单基类且是内置异常名/自定义异常类时成立。
+            if (c.bases.size() == 1) {
+                if (auto* bn = dynamic_cast<Name*>(c.bases[0].get())) {
+                    if (!lookup(bn->id) && is_exception_name(bn->id)) {
+                        is_exc_class = true;
+                        exc_parent = bn->id;
+                    } else if (auto it = classes_.find(bn->id);
+                               it != classes_.end() && it->second->is_exception_class) {
+                        is_exc_class = true;
+                        exc_parent = bn->id;
+                    }
                 }
             }
-            TypePtr bt = is_exc_class ? t_unknown() : expr(*c.bases[0]);
-            if (is_exc_class) {
-                // 异常类不参与对象布局，基类表达式不求值也没有副作用。
-            } else if (bt && bt->kind == TyKind::Class) {
-                base = bt->cls;
-            } else if (is_unknown(bt)) {
-                // 外部导入的基类（unittest.TestCase、OrderedDict……）：我们
-                // 看不到它的字段和方法，只能把整条继承链标记成「看不全」。
-                open = true;
-            } else if (auto* bn = dynamic_cast<Name*>(c.bases[0].get()); bn && is_type_name(bn->id)) {
-                // `class A(object)`：内建类型当根类。它在内置表里是函数
-                // （object() 造一个实例），不是 ClassInfo；但常见到不能报错。
-                open = true;
-            } else {
-                err(c.bases[0]->line, c.bases[0]->col,
-                    std::format("base class must be a class, got '{}'", type_name(bt)));
+            if (!is_exc_class) {
+                for (auto& b : c.bases) {
+                    TypePtr bt = expr(*b);
+                    if (bt && bt->kind == TyKind::Class) {
+                        if (!base) base = bt->cls;
+                        else extra_bases.push_back(bt->cls);
+                    } else if (is_unknown(bt)) {
+                        open = true;
+                    } else if (auto* bn = dynamic_cast<Name*>(b.get());
+                               bn && is_type_name(bn->id)) {
+                        open = true;
+                    } else {
+                        err(b->line, b->col,
+                            std::format("base class must be a class, got '{}'",
+                                        type_name(bt)));
+                    }
+                }
             }
         }
 
@@ -264,6 +263,7 @@ void TypeChecker::classdef(ClassDef& c) {
             cls = it->second;
             cls->fields.clear();
             cls->methods.clear();
+            cls->extra_bases.clear();
         } else {
             cls = std::make_shared<ClassInfo>();
         }
@@ -272,6 +272,14 @@ void TypeChecker::classdef(ClassDef& c) {
         cls->open = open;
         cls->is_exception_class = is_exc_class;
         cls->exc_parent = exc_parent;
+        cls->extra_bases = extra_bases;
+        for (auto* eb : extra_bases) {
+            if (eb->n_fields() > 0)
+                err(c.line, c.col,
+                    std::format("multiple inheritance with fields is not supported "
+                                "(base '{}' has fields)", eb->name));
+            if (eb->is_open()) cls->open = true;
+        }
         if (base) {
             cls->base_fields = base->n_fields();
             cls->base_slots = base->n_slots();
@@ -399,8 +407,50 @@ void TypeChecker::classdef(ClassDef& c) {
             func_infos_[&f] = m.sig;
             cls->methods.push_back(std::move(m));
         }
+        // 多重继承：附加基类不贡献布局，只把方法复制进子类（第一个定义胜出）。
+        {
+            auto has_name = [&](const std::string& n) {
+                for (auto& mm : cls->methods)
+                    if (mm.name == n) return true;
+                return cls->base && cls->base->slot_of(n) >= 0;
+            };
+            for (ClassInfo* eb : extra_bases) {
+                for (ClassInfo* p = eb; p; p = p->base) {
+                    for (auto& bm : p->methods) {
+                        if (has_name(bm.name)) continue;
+                        MethodInfo m = bm;
+                        m.slot = next_slot++;
+                        cls->methods.push_back(std::move(m));
+                    }
+                }
+            }
+        }
         cls->own_slots = next_slot - cls->base_slots;
         cls->has_init = cls->method("__init__") != nullptr;
+
+        // 类体里的其他语句：在类定义点执行。py23 没有类命名空间，
+        // 赋值按模块全局处理；成员表因此可能不全，类标记成 open。
+        for (auto& s : c.body) {
+            switch (s->kind) {
+                case StmtKind::FunctionDef:
+                case StmtKind::AnnAssign:
+                case StmtKind::Pass:
+                    break;
+                case StmtKind::Expr: {
+                    auto& e = static_cast<ExprStmt&>(*s);
+                    if (e.value->kind == ExprKind::Constant &&
+                        static_cast<Constant&>(*e.value).ck == Constant::CK::Str)
+                        break;
+                    cls->open = true;
+                    stmt(*s);
+                    break;
+                }
+                default:
+                    cls->open = true;
+                    stmt(*s);
+                    break;
+            }
+        }
 
         // 方法体最后检查：签名、字段、self 类型都已就位。
         ClassInfo* saved_cls = cur_class_;
@@ -411,34 +461,7 @@ void TypeChecker::classdef(ClassDef& c) {
         for (auto& m : cls->methods) rebuild_call_sig(m);
         cls->complete = true;
 
-        // 类体里的其他语句
-        for (auto& s : c.body) {
-            switch (s->kind) {
-                case StmtKind::FunctionDef:
-                case StmtKind::AnnAssign:
-                case StmtKind::Pass:
-                    break;
-                case StmtKind::Expr: {
-                    // 文档字符串：唯一的合法表达式语句
-                    auto& e = static_cast<ExprStmt&>(*s);
-                    if (e.value->kind == ExprKind::Constant &&
-                        static_cast<Constant&>(*e.value).ck == Constant::CK::Str)
-                        break;
-                    unsupported.push_back("class body statement");
-                    cls->open = true;
-                    break;
-                }
-                default:
-                    // 类变量赋值、if、for…… 在 Python 里是「类体在独立命名
-                    // 空间里执行」。真实代码里太常见，硬拒会误杀一大片；
-                    // 按「解析了但没建模」处理，编译阶段自然会拒绝。
-                    // 成员表因此不全（self.debug 这类类属性查不到），
-                    // 整类标记成 open，别再连环报错。
-                    unsupported.push_back("class body statement");
-                    cls->open = true;
-                    break;
-            }
-        }
+
 
     }
 

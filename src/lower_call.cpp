@@ -1062,10 +1062,13 @@ VReg Lowerer::lower_print(Call& c) {
         (kw.arg == "sep" ? kw_sep : kw_end) = &kw;
     }
 
-    // 求值顺序按源码从左到右：sep 第一次用到时才求值，end 在参数都输出完才求值。
-    VReg sep = kNoReg;
-    bool sep_ready = false;
-    int sep_slot = kw_sep ? new_temp_slot(t_str()) : -1;
+    // sep 在参数前求值一次并落槽；end 在参数都输出完才求值。
+    int sep_slot = -1;
+    if (kw_sep) {
+        VReg s = expr(*kw_sep->value);
+        sep_slot = new_temp_slot(t_str());
+        store_slot(sep_slot, s);
+    }
     int first = new_temp_slot(t_int());
     store_slot(first, const_int(1));
 
@@ -1080,11 +1083,6 @@ VReg Lowerer::lower_print(Call& c) {
         emit(std::move(br));
         switch_to(need);
         if (kw_sep) {
-            if (!sep_ready) {
-                sep = expr(*kw_sep->value);
-                store_slot(sep_slot, sep);
-                sep_ready = true;
-            }
             call_void(RtFn::PrintStr, {load_slot(sep_slot, t_str())});
         } else {
             call_void(RtFn::PrintSep, {});

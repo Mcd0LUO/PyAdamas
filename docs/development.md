@@ -104,9 +104,9 @@ python3 tests/diff/run_diff.py --only repr  # 只测浮点转字符串
 覆盖推导式；`tests/run/20_with.py` 覆盖 `with` 的提前退出；`tests/run/21_decorator.py`
 覆盖装饰器；`tests/run/22_exception.py` 覆盖异常层级、bare raise、
 finally 的提前退出、with 异常路径和运行时错误转换；`tests/run/23_generator.py`
-~ `tests/run/34_exception_chain.py` 覆盖生成器、协程、Task、异步语言面、
+~ `tests/run/38_match.py` 覆盖生成器、协程、Task、异步语言面、
 Future/取消/fd/回调、`yield from`、异步推导式、异步生成器协议、
-异常值、内置函数、自定义异常与 `raise ... from`。
+异常值、内置函数、f-string、del/print(*args)/复数、match 与多继承。
 
 敏捷开发时只跑相关用例，不要每次全量：
 
