@@ -4,6 +4,35 @@
 
 早期阶段没有逐条留痕，按阶段归纳；0.4 之后逐条记录。
 
+## [0.41] - 2026-11-10
+
+内置函数补齐（三）：list / dict / tuple 方法。
+
+### 新增
+
+- list：`extend` / `insert` / `remove` / `pop(i)` / `clear` / `index` /
+  `count` / `copy` / `reverse` / `sort`（int/float/str 三种比较器）；
+  原有 `append` / `pop()` 保留。
+- dict：`setdefault` / `copy`。
+- set：`copy`。
+- tuple：`count` / `index`（tuple 与 list 表示相同，共用运行时）。
+- int / bool：`bit_length`。
+- 运行时新增 list_reverse / int_bit_length；ListIndex / ListCount /
+  ListInsert / ListSort 接入降级。
+- 测试：`55_container_methods.py`；另做 2000 轮字符串容器 RC 压测
+  （O0/O1/O2 与 CPython 输出一致）。
+
+### 验证
+
+- `ctest --preset dev/release` 全绿；O0/O1 全量 55 个运行用例通过；
+  810 程序差分零失败
+
+### 已知限制
+
+- `list.sort(key=..., reverse=...)`、set 的 union/intersection/difference/
+  issubset 等集合运算尚未实现（明确报错）
+- `dict.popitem` 固定 LIFO、`set.pop` 固定取最后插入项（既有语义）
+
 ## [0.40] - 2026-11-10
 
 内置函数补齐（二）：序列构造与排序/迭代辅助。

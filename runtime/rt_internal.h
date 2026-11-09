@@ -353,6 +353,8 @@ Py23List* py23_sorted_list(Py23List* src, int64_t kind);
 int64_t py23_list_index(Py23List* l, int64_t v, int64_t kind);
 int64_t py23_list_count(Py23List* l, int64_t v, int64_t kind);
 void py23_list_insert(Py23List* l, int64_t i, int64_t v);
+void py23_list_reverse(Py23List* l);
+int64_t py23_int_bit_length(int64_t v);
 Py23List* py23_enumerate_list(Py23List* seq);
 Py23List* py23_zip2_list(Py23List* a, Py23List* b);
 Py23Dict* py23_set_from_list(Py23List* src, int64_t key_kind, int64_t key_own);

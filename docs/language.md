@@ -566,6 +566,11 @@ class Connection:
 用字符串键；`sorted` 支持 int/float/str 元素（`key=` / `reverse=` 尚未
 支持）；`enumerate` 产出的元素是 `[下标, 值]` 对，`zip` 支持两个可迭代
 对象；这些迭代辅助都返回具体列表，与生成器表达式立即求值的模型一致。
+容器方法：list 有 `append` / `extend` / `insert` / `remove` / `pop(i)` /
+`clear` / `index` / `count` / `copy` / `reverse` / `sort`；dict 有 `get` /
+`keys` / `values` / `items` / `update` / `pop` / `popitem` / `setdefault` /
+`clear` / `copy`；set 有 `add` / `update` / `remove` / `discard` / `pop` /
+`clear` / `copy`；tuple 有 `count` / `index`；int 有 `bit_length`。
 其余内置名（`map` / `filter` / `isinstance` / `type` / `getattr` /
 `hash` / `iter` / `next(列表)` / `slice` / `callable` 等）类型层面放行，
 降级阶段报「not supported by the code generator yet」，不会再退化成

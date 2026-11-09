@@ -2101,6 +2101,45 @@ VReg Lowerer::lower_method_call(Attribute& at, Call& c) {
             call_void(RtFn::DictClear, {recv});
             return const_none();
         }
+        if (at.attr == "setdefault") {
+            if (c.args.size() != 2) {
+                err(c.line, c.col, "dict.setdefault() takes exactly two arguments");
+                return const_none();
+            }
+            VReg key = expr(*c.args[0]);
+            key = coerce(key, tc_.type_of(c.args[0].get()), kt);
+            VReg def = expr(*c.args[1]);
+            def = coerce(def, tc_.type_of(c.args[1].get()), vt);
+            int add_b = new_block("dict.setdefault.add");
+            int done_b = new_block("dict.setdefault.done");
+            VReg has = call_runtime(RtFn::DictContains, t_bool(), {recv, key});
+            Inst br;
+            br.op = IrOp::Branch;
+            br.a = has;
+            br.target = done_b;
+            br.target2 = add_b;
+            emit(std::move(br));
+            switch_to(add_b);
+            retain_elem(def, own_kind(vt));
+            call_void(RtFn::DictSet, {recv, key, def});
+            Inst j;
+            j.op = IrOp::Jump;
+            j.target = done_b;
+            emit(std::move(j));
+            switch_to(done_b);
+            VReg v = call_runtime(RtFn::DictGet, vt, {recv, key});
+            if (ir_is_heap(vt)) push_temp(v);
+            return v;
+        }
+        if (at.attr == "copy") {
+            if (!c.args.empty()) {
+                err(c.line, c.col, "dict.copy() takes no arguments");
+                return const_none();
+            }
+            VReg v = call_runtime(RtFn::DictCopy, recv_ty, {recv});
+            push_temp(v);
+            return v;
+        }
         err(c.line, c.col,
             std::format("dict method '{}' is not supported by the code generator yet", at.attr));
         return const_none();
@@ -2168,58 +2207,176 @@ VReg Lowerer::lower_method_call(Attribute& at, Call& c) {
             call_void(RtFn::DictClear, {recv});
             return const_none();
         }
+        if (at.attr == "copy") {
+            if (!c.args.empty()) {
+                err(c.line, c.col, "set.copy() takes no arguments");
+                return const_none();
+            }
+            VReg v = call_runtime(RtFn::DictCopy, recv_ty, {recv});
+            push_temp(v);
+            return v;
+        }
         err(c.line, c.col,
             std::format("set method '{}' is not supported by the code generator yet", at.attr));
         return const_none();
     }
 
-    if (recv_ty && recv_ty->kind == TyKind::List && at.attr == "append") {
-        if (c.args.size() != 1) {
-            err(c.line, c.col, "list.append() takes exactly one argument");
+    if (recv_ty && (recv_ty->kind == TyKind::List || recv_ty->kind == TyKind::Tuple)) {
+        TypePtr et = recv_ty->sub.empty() ? t_unknown() : recv_ty->sub[0];
+        int ek = key_kind(et);        // in/index/count 的比较种类
+        int lk = list_kind(recv_ty);  // 容器元素的堆种类
+        bool is_list = recv_ty->kind == TyKind::List;
+        if (!c.keywords.empty()) {
+            err(c.line, c.col,
+                std::format("{}.{}() does not take keyword arguments",
+                            is_list ? "list" : "tuple", at.attr));
             return const_none();
         }
-        if (!c.keywords.empty()) {
-            err(c.line, c.col, "list.append() does not take keyword arguments");
+        auto elem_arg = [&](size_t i) {
+            VReg v = expr(*c.args[i]);
+            return coerce(v, tc_.type_of(c.args[i].get()), et);
+        };
+        if (at.attr == "append" && is_list) {
+            if (c.args.size() != 1) {
+                err(c.line, c.col, "list.append() takes exactly one argument");
+                return const_none();
+            }
+            // 运行时不再做隐式 retain：容器元素的所有权由降级器按静态类型决定。
+            VReg v = expr(*c.args[0]);
+            retain_elem(v, lk);
+            call_void(RtFn::ListAppend, {recv, v});
+            return const_none();
         }
-        VReg v = expr(*c.args[0]);
-        // 运行时不再做隐式 retain：容器元素的所有权由降级器按静态类型决定。
-        retain_elem(v, list_kind(recv_ty));
-        call_void(RtFn::ListAppend, {recv, v});
+        if (at.attr == "extend" && is_list) {
+            if (c.args.size() != 1) {
+                err(c.line, c.col, "list.extend() takes exactly one argument");
+                return const_none();
+            }
+            VReg other = expr(*c.args[0]);
+            TypePtr ot = tc_.type_of(c.args[0].get());
+            if (!ot || (ot->kind != TyKind::List && ot->kind != TyKind::Tuple)) {
+                err(c.args[0]->line, c.args[0]->col, "list.extend() expects a list");
+                return const_none();
+            }
+            call_void(RtFn::ListExtend, {recv, other});
+            return const_none();
+        }
+        if (at.attr == "insert" && is_list) {
+            if (c.args.size() != 2) {
+                err(c.line, c.col, "list.insert() takes exactly two arguments");
+                return const_none();
+            }
+            VReg idx = coerce(expr(*c.args[0]), tc_.type_of(c.args[0].get()), t_int());
+            VReg v = elem_arg(1);
+            retain_elem(v, lk);
+            call_void(RtFn::ListInsert, {recv, idx, v});
+            return const_none();
+        }
+        if (at.attr == "remove" && is_list) {
+            if (c.args.size() != 1) {
+                err(c.line, c.col, "list.remove() takes exactly one argument");
+                return const_none();
+            }
+            VReg v = elem_arg(0);
+            VReg idx = call_runtime(RtFn::ListIndex, t_int(), {recv, v, const_int(ek)});
+            call_void(RtFn::ListDelIndex, {recv, idx});
+            return const_none();
+        }
+        if (at.attr == "pop" && is_list) {
+            if (c.args.size() > 1) {
+                err(c.line, c.col, "list.pop() takes at most one argument");
+                return const_none();
+            }
+            VReg idx;
+            if (c.args.empty()) {
+                Inst len;
+                len.op = IrOp::Len;
+                len.a = recv;
+                VReg n = def(t_int(), std::move(len));
+                Inst sub;
+                sub.op = IrOp::Bin;
+                sub.bop = BinKind::Sub;
+                sub.a = n;
+                sub.b = const_int(1);
+                idx = def(t_int(), std::move(sub));
+            } else {
+                idx = coerce(expr(*c.args[0]), tc_.type_of(c.args[0].get()), t_int());
+            }
+            Inst get;
+            get.op = IrOp::IndexLoad;
+            get.a = recv;
+            get.b = idx;
+            VReg v = def(et, std::move(get));
+            // kind 1 的列表持有元素引用，删除时会 dec；把返回值领出来，
+            // 否则返回值会随删除变成悬空指针。
+            if (lk == 1 && ir_is_heap(et)) {
+                rc_inc(v);
+                push_temp(v);
+            }
+            call_void(RtFn::ListDelIndex, {recv, idx});
+            return v;
+        }
+        if (at.attr == "clear" && is_list) {
+            if (!c.args.empty()) {
+                err(c.line, c.col, "list.clear() takes no arguments");
+                return const_none();
+            }
+            call_void(RtFn::ListSetLen, {recv, const_int(0)});
+            return const_none();
+        }
+        if (at.attr == "index") {
+            if (c.args.size() != 1) {
+                err(c.line, c.col, "index() takes exactly one argument");
+                return const_none();
+            }
+            VReg v = elem_arg(0);
+            return call_runtime(RtFn::ListIndex, t_int(), {recv, v, const_int(ek)});
+        }
+        if (at.attr == "count") {
+            if (c.args.size() != 1) {
+                err(c.line, c.col, "count() takes exactly one argument");
+                return const_none();
+            }
+            VReg v = elem_arg(0);
+            return call_runtime(RtFn::ListCount, t_int(), {recv, v, const_int(ek)});
+        }
+        if (at.attr == "copy" && is_list) {
+            if (!c.args.empty()) {
+                err(c.line, c.col, "list.copy() takes no arguments");
+                return const_none();
+            }
+            VReg v = call_runtime(RtFn::ListCopy, recv_ty, {recv});
+            push_temp(v);
+            return v;
+        }
+        if (at.attr == "reverse" && is_list) {
+            if (!c.args.empty()) {
+                err(c.line, c.col, "list.reverse() takes no arguments");
+                return const_none();
+            }
+            call_void(RtFn::ListReverse, {recv});
+            return const_none();
+        }
+        if (at.attr == "sort" && is_list) {
+            if (!c.args.empty() || !c.keywords.empty()) {
+                err(c.line, c.col, "list.sort() key=/reverse= are not supported yet");
+                return const_none();
+            }
+            call_void(RtFn::ListSort, {recv, const_int(sort_kind(et))});
+            return const_none();
+        }
+        err(c.line, c.col, std::format("method '{}' is not supported by the code generator yet",
+                                       at.attr));
         return const_none();
     }
-    if (recv_ty && recv_ty->kind == TyKind::List && at.attr == "pop") {
+
+    if (recv_ty && (recv_ty->kind == TyKind::Int || recv_ty->kind == TyKind::Bool) &&
+        at.attr == "bit_length") {
         if (!c.args.empty()) {
-            err(c.line, c.col, "list.pop(index) is not supported yet");
+            err(c.line, c.col, "bit_length() takes no arguments");
             return const_none();
         }
-        Inst len;
-        len.op = IrOp::Len;
-        len.a = recv;
-        VReg n = def(t_int(), std::move(len));
-        Inst sub;
-        sub.op = IrOp::Bin;
-        sub.bop = BinKind::Sub;
-        sub.a = n;
-        sub.b = const_int(1);
-        VReg last = def(t_int(), std::move(sub));
-        TypePtr et = recv_ty->sub.empty() ? t_unknown() : recv_ty->sub[0];
-        Inst get;
-        get.op = IrOp::IndexLoad;
-        get.a = recv;
-        get.b = last;
-        VReg v = def(et, std::move(get));
-        // kind 1 的列表持有元素引用，截断时会 dec；把返回值领出来，
-        // 作为新的临时值入栈，否则返回值会随截断变成悬空指针。
-        if (list_kind(recv_ty) == 1 && ir_is_heap(et)) {
-            rc_inc(v);
-            push_temp(v);
-        }
-        Inst setlen;
-        setlen.op = IrOp::CallRt;
-        setlen.imm = static_cast<int64_t>(RtFn::ListSetLen);
-        setlen.args = {recv, last};
-        emit(std::move(setlen));
-        return v;
+        return call_runtime(RtFn::IntBitLength, t_int(), {recv});
     }
 
     err(c.line, c.col, std::format("method '{}' is not supported by the code generator yet",

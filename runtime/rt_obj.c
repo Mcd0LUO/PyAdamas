@@ -316,6 +316,24 @@ void py23_list_insert(Py23List* l, int64_t i, int64_t v) {
     ++l->len;
 }
 
+void py23_list_reverse(Py23List* l) {
+    for (int64_t i = 0, j = l->len - 1; i < j; ++i, --j) {
+        int64_t t = l->data[i];
+        l->data[i] = l->data[j];
+        l->data[j] = t;
+    }
+}
+
+int64_t py23_int_bit_length(int64_t v) {
+    uint64_t x = v < 0 ? (uint64_t)(-(v + 1)) + 1 : (uint64_t)v;
+    int64_t n = 0;
+    while (x) {
+        ++n;
+        x >>= 1;
+    }
+    return n;
+}
+
 static int cmp_sort_i64(const void* a, const void* b) {
     int64_t x = *(const int64_t*)a, y = *(const int64_t*)b;
     return x < y ? -1 : x > y ? 1 : 0;

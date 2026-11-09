@@ -163,6 +163,8 @@ enum class RtFn : uint8_t {
     ListIndex,    // (list*, i64 v, i64 kind) -> i64  找不到抛 ValueError
     ListCount,    // (list*, i64 v, i64 kind) -> i64
     ListInsert,   // (list*, i64 idx, i64 v) -> void
+    ListReverse,  // (list*) -> void  原地反转
+    IntBitLength, // (i64) -> i64
     EnumerateList,// (list*) -> list*  元素是 [i, v] 对
     Zip2List,     // (list*, list*) -> list*
     SetFromList,  // (list*, i64 key_kind, i64 key_own) -> dict*
@@ -324,6 +326,8 @@ inline const char* rt_name(RtFn f) {
         case RtFn::ListIndex: return "py23_list_index";
         case RtFn::ListCount: return "py23_list_count";
         case RtFn::ListInsert: return "py23_list_insert";
+        case RtFn::ListReverse: return "py23_list_reverse";
+        case RtFn::IntBitLength: return "py23_int_bit_length";
         case RtFn::EnumerateList: return "py23_enumerate_list";
         case RtFn::Zip2List: return "py23_zip2_list";
         case RtFn::SetFromList: return "py23_set_from_list";

@@ -567,6 +567,8 @@ void AsmGen::gen_call_rt(const Inst& in) {
             case RtFn::ListCopy:
             case RtFn::ListReversed:
             case RtFn::EnumerateList:
+            case RtFn::ListReverse:
+            case RtFn::IntBitLength:
             case RtFn::HandlerLeave:
             case RtFn::HandlerDiscard:
             case RtFn::ExcMatches:
