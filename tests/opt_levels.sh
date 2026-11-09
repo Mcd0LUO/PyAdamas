@@ -18,6 +18,7 @@ FILES=(
     tests/run/48_branch_mnemonics.py
     tests/run/49_inline.py
     tests/run/50_licm.py
+    tests/run/51_bounds_versioning.py
 )
 
 fail=0
