@@ -384,6 +384,13 @@ ExprPtr Parser::parse_atom() {
                 n->f = t.fval;
                 return n;
             }
+            case Tok::COMPLEX: {
+                auto t = advance();
+                auto n = node_at<Constant>(ln, cl);
+                n->ck = Constant::CK::Complex;
+                n->im = t.fval;
+                return n;
+            }
             case Tok::STRING:
             case Tok::FSTRING: {
                 // Python 允许相邻字面量拼接，且 string 与 f-string 可混用：

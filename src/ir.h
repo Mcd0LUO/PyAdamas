@@ -131,6 +131,7 @@ enum class RtFn : uint8_t {
     DictRemove,   // (dict*, i64 key, i64 missing_ok) -> void
     DictClear,    // (dict*) -> void
     ListSliceAssign, // (list*, i64 start, i64 stop, i64 step, list*) -> void
+    ListDelIndex, // (list*, i64 index) -> void  del list[i]
     StrToList,    // (str*) -> list*
     ListExtend,   // (list* dst, list* src) -> void
     RangeNew,     // (i64 start, i64 stop, i64 step) -> list*
@@ -155,6 +156,13 @@ enum class RtFn : uint8_t {
     RaiseValueFrom, // (excval*, excval*|0) -> void noreturn
     Reraise,      // () -> void       noreturn  裸 raise
     AbsI64,       // (i64) -> i64
+    ComplexNew,   // (f64 re, f64 im) -> complex*
+    ComplexAdd, ComplexSub, ComplexMul, ComplexDiv, // (c*,c*) -> c*
+    ComplexNeg,   // (c*) -> c*
+    ComplexAbs,   // (c*) -> f64
+    ComplexStr,   // (c*) -> str*
+    ComplexEq,    // (c*,c*) -> bool
+    ComplexTruth, // (c*) -> bool
     MathSqrt, MathFloor, MathCeil, MathFabs, MathSin, MathCos, MathTan,
     MathLog, MathLog2, MathLog10, MathExp,
     MathPow, MathFmod,
@@ -246,6 +254,7 @@ inline const char* rt_name(RtFn f) {
         case RtFn::DictRemove: return "py23_dict_remove";
         case RtFn::DictClear: return "py23_dict_clear";
         case RtFn::ListSliceAssign: return "py23_list_slice_assign";
+        case RtFn::ListDelIndex: return "py23_list_del_index";
         case RtFn::StrToList: return "py23_str_to_list";
         case RtFn::ListExtend: return "py23_list_extend";
         case RtFn::RangeNew: return "py23_range_new";
@@ -273,6 +282,16 @@ inline const char* rt_name(RtFn f) {
         case RtFn::MathFloor: return "py23_math_floor";
         case RtFn::MathCeil: return "py23_math_ceil";
         case RtFn::AbsI64: return "py23_abs_i64";
+        case RtFn::ComplexNew: return "py23_complex_new";
+        case RtFn::ComplexAdd: return "py23_complex_add";
+        case RtFn::ComplexSub: return "py23_complex_sub";
+        case RtFn::ComplexMul: return "py23_complex_mul";
+        case RtFn::ComplexDiv: return "py23_complex_div";
+        case RtFn::ComplexNeg: return "py23_complex_neg";
+        case RtFn::ComplexAbs: return "py23_complex_abs";
+        case RtFn::ComplexStr: return "py23_complex_str";
+        case RtFn::ComplexEq: return "py23_complex_eq";
+        case RtFn::ComplexTruth: return "py23_complex_truth";
         case RtFn::MathFabs: return "py23_math_fabs";
         case RtFn::MathSin: return "py23_math_sin";
         case RtFn::MathCos: return "py23_math_cos";
@@ -586,6 +605,7 @@ inline bool ir_is_heap(const TypePtr& t) {
         case TyKind::AsyncGenerator:
         case TyKind::Future:
         case TyKind::Exception:  // 异常值：堆对象，args 列表归它所有
+        case TyKind::Complex:
             return true;
         case TyKind::Optional:
             return !t->sub.empty() && ir_is_heap(t->sub[0]);
@@ -612,6 +632,7 @@ inline bool ir_is_ref(const TypePtr& t) {
         case TyKind::AsyncGenerator:
         case TyKind::Future:
         case TyKind::Exception:
+        case TyKind::Complex:
             return true;
         default:
             return false;

@@ -360,6 +360,13 @@ VReg Lowerer::lower_constant(Constant& c) {
         case Constant::CK::Bool: return const_bool(c.b);
         case Constant::CK::Int: return const_int(c.i);
         case Constant::CK::Float: return const_float(c.f);
+        case Constant::CK::Complex: {
+            Inst in;
+            in.op = IrOp::CallRt;
+            in.imm = static_cast<int64_t>(RtFn::ComplexNew);
+            in.args = {const_float(0.0), const_float(c.im)};
+            return def_heap(t_complex(), std::move(in));
+        }
         case Constant::CK::Str: return const_str(c.s);
         case Constant::CK::Ellipsis:
             err(c.line, c.col, "Ellipsis is not supported by the code generator");
@@ -394,6 +401,31 @@ VReg Lowerer::lower_binop(BinOp& b) {
     }
     VReg l = expr(*b.left);
     VReg r = expr(*b.right);
+    if (ty && ty->kind == TyKind::Complex) {
+        auto as_complex = [&](VReg v, TypePtr from) {
+            return (from && from->kind == TyKind::Complex)
+                       ? v
+                       : convert_to(v, from, t_complex());
+        };
+        l = as_complex(l, lt);
+        r = as_complex(r, rt);
+        RtFn fn = RtFn::ComplexAdd;
+        switch (b.op) {
+            case Tok::PLUS: fn = RtFn::ComplexAdd; break;
+            case Tok::MINUS: fn = RtFn::ComplexSub; break;
+            case Tok::STAR: fn = RtFn::ComplexMul; break;
+            case Tok::SLASH: fn = RtFn::ComplexDiv; break;
+            default:
+                err(b.line, b.col,
+                    std::format("operator '{}' on complex is not supported", tok_name(b.op)));
+                return const_none();
+        }
+        Inst in;
+        in.op = IrOp::CallRt;
+        in.imm = static_cast<int64_t>(fn);
+        in.args = {l, r};
+        return def_heap(ty, std::move(in));
+    }
     if (ty && ty->kind == TyKind::Str) {
         if (lt && lt->kind == TyKind::Exception) l = convert_to(l, lt, t_str());
         if (rt && rt->kind == TyKind::Exception) r = convert_to(r, rt, t_str());
@@ -415,6 +447,16 @@ VReg Lowerer::lower_binop(BinOp& b) {
 VReg Lowerer::lower_unary(UnaryOp& u) {
     TypePtr ty = tc_.type_of(&u);
     VReg v = expr(*u.operand);
+    if (ty && ty->kind == TyKind::Complex) {
+        if (u.op == Tok::PLUS) return v;
+        if (u.op == Tok::MINUS) {
+            Inst in;
+            in.op = IrOp::CallRt;
+            in.imm = static_cast<int64_t>(RtFn::ComplexNeg);
+            in.args = {v};
+            return def_heap(ty, std::move(in));
+        }
+    }
     Inst in;
     in.op = IrOp::Un;
     switch (u.op) {
@@ -513,6 +555,30 @@ VReg Lowerer::lower_compare(Compare& c) {
                 flag = def(t_bool(), std::move(un));
             }
             return flag;
+        }
+        if ((lt && lt->kind == TyKind::Complex) || (rt && rt->kind == TyKind::Complex)) {
+            if (op != CmpOp::Eq && op != CmpOp::Ne) {
+                err(c.line, c.col, "complex values are not orderable");
+                return const_bool(false);
+            }
+            auto as_complex = [&](VReg v, TypePtr from) {
+                return (from && from->kind == TyKind::Complex)
+                           ? v
+                           : convert_to(v, from, t_complex());
+            };
+            l = as_complex(l, lt);
+            r = as_complex(r, rt);
+            Inst in;
+            in.op = IrOp::CallRt;
+            in.imm = static_cast<int64_t>(RtFn::ComplexEq);
+            in.args = {l, r};
+            VReg eq = def(t_bool(), std::move(in));
+            if (op == CmpOp::Eq) return eq;
+            Inst un;
+            un.op = IrOp::Un;
+            un.uop = UnKind::Not;
+            un.a = eq;
+            return def(t_bool(), std::move(un));
         }
         // 混合数值比较统一到 float：codegen 按左操作数的类型选指令
         if ((ir_is_float(lt) || ir_is_float(rt)) && is_num(lt) && is_num(rt)) {
@@ -1128,6 +1194,31 @@ VReg Lowerer::lower_ifexp(IfExp& e) {
 VReg Lowerer::convert_to(VReg v, TypePtr from, TypePtr to) {
     if (!to) return v;
     if (from && type_eq(from, to)) return v;
+    if (to->kind == TyKind::Bool && from && from->kind == TyKind::Complex) {
+        Inst in;
+        in.op = IrOp::CallRt;
+        in.imm = static_cast<int64_t>(RtFn::ComplexTruth);
+        in.args = {v};
+        return def(t_bool(), std::move(in));
+    }
+    if (to->kind == TyKind::Complex) {
+        if (from && from->kind == TyKind::Complex) return v;
+        VReg f = (from && from->kind == TyKind::Float) ? v
+                                                       : convert_to(v, from, t_float());
+        Inst in;
+        in.op = IrOp::CallRt;
+        in.imm = static_cast<int64_t>(RtFn::ComplexNew);
+        in.args = {f, const_float(0.0)};
+        return def_heap(t_complex(), std::move(in));
+    }
+    if (to->kind == TyKind::Str && from && from->kind == TyKind::Complex) {
+        Inst in;
+        in.op = IrOp::CallRt;
+        in.imm = static_cast<int64_t>(RtFn::ComplexStr);
+        in.args = {v};
+        VReg s = def_heap(t_str(), std::move(in));
+        return s;
+    }
     if (to->kind == TyKind::Str && from && from->kind == TyKind::Exception) {
         VReg s = call_runtime(RtFn::ExcValueStr, t_str(), {v});
         push_temp(s);
@@ -1221,6 +1312,12 @@ void Lowerer::print_value(VReg v, TypePtr ty, int line, int col) {
         case TyKind::Set: call_void(RtFn::PrintStr, {const_str("<set object>")}); break;
         case TyKind::Exception: {
             VReg s = call_runtime(RtFn::ExcValueStr, t_str(), {v});
+            push_temp(s);
+            call_void(RtFn::PrintStr, {s});
+            break;
+        }
+        case TyKind::Complex: {
+            VReg s = call_runtime(RtFn::ComplexStr, t_str(), {v});
             push_temp(s);
             call_void(RtFn::PrintStr, {s});
             break;

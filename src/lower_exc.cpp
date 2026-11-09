@@ -670,5 +670,121 @@ void Lowerer::lower_assert(Assert& a) {
     switch_to(ok);
 }
 
+void Lowerer::delete_target(Expr& target) {
+    switch (target.kind) {
+        case ExprKind::Name: {
+            auto& n = static_cast<Name&>(target);
+            if (int cs = comp_slot(n.id); cs >= 0) {
+                TypePtr T = st_->fn->slot_ty[cs];
+                VReg old = load_slot(cs, T);
+                store_slot_raw(cs, const_int(0));
+                if (ir_is_heap(T)) rc_dec(old);
+                return;
+            }
+            if (is_cell(n.id) || is_env(n.id)) {
+                TypePtr T = captured_ty(n.id);
+                write_cell(n.id, zero_value(T), T);
+                return;
+            }
+            if (st_->globals_decl.count(n.id) || !is_local(n.id)) {
+                int gi = global_idx(n.id);
+                TypePtr T = mod_.globals[gi].ty;
+                VReg old = load_global(gi, T);
+                store_global_raw(gi, const_int(0));
+                if (ir_is_heap(T)) rc_dec(old);
+                return;
+            }
+            int slot = st_->slots[n.id];
+            TypePtr T = st_->fn->slot_ty[slot];
+            VReg old = load_slot(slot, T);
+            store_slot_raw(slot, const_int(0));
+            if (ir_is_heap(T)) rc_dec(old);
+            return;
+        }
+        case ExprKind::Tuple:
+        case ExprKind::List: {
+            auto& elts = target.kind == ExprKind::Tuple
+                             ? static_cast<TupleExpr&>(target).elts
+                             : static_cast<ListExpr&>(target).elts;
+            for (auto& e : elts)
+                if (e) delete_target(*e);
+            return;
+        }
+        case ExprKind::Subscript: {
+            auto& s = static_cast<Subscript&>(target);
+            VReg obj = expr(*s.value);
+            TypePtr ot = tc_.type_of(s.value.get());
+            if (s.slice->kind == ExprKind::Slice) {
+                if (!ot || (ot->kind != TyKind::List && ot->kind != TyKind::Unknown)) {
+                    err(target.line, target.col,
+                        std::format("'{}' does not support slice deletion",
+                                    type_name(ot)));
+                    return;
+                }
+                auto& sl = static_cast<SliceExpr&>(*s.slice);
+                constexpr int64_t kNone = std::numeric_limits<int64_t>::min();
+                auto bound = [&](ExprPtr& e) -> VReg {
+                    if (!e) return const_int(kNone);
+                    VReg b = expr(*e);
+                    return coerce(b, tc_.type_of(e.get()), t_int());
+                };
+                VReg start = bound(sl.lower);
+                VReg stop = bound(sl.upper);
+                VReg step = bound(sl.step);
+                Inst mk;
+                mk.op = IrOp::MakeList;
+                mk.imm = 2;
+                VReg empty = def_heap(mk_list(t_unknown()), std::move(mk));
+                call_void(RtFn::ListSliceAssign, {obj, start, stop, step, empty});
+                return;
+            }
+            VReg idx = expr(*s.slice);
+            if (ot && ot->kind == TyKind::Dict) {
+                TypePtr kt = ot->sub.empty() ? t_unknown() : ot->sub[0];
+                idx = coerce(idx, tc_.type_of(s.slice.get()), kt);
+                call_void(RtFn::DictRemove, {obj, idx, const_int(0)});
+                return;
+            }
+            if (ot && ot->kind == TyKind::List) {
+                idx = coerce(idx, tc_.type_of(s.slice.get()), t_int());
+                call_void(RtFn::ListDelIndex, {obj, idx});
+                return;
+            }
+            err(target.line, target.col,
+                std::format("'{}' does not support item deletion", type_name(ot)));
+            return;
+        }
+        case ExprKind::Attribute: {
+            auto& at = static_cast<Attribute&>(target);
+            TypePtr raw = tc_.type_of(at.value.get());
+            TypePtr ot = strip_optional(raw);
+            bool opt = ot != raw;
+            if (ot && ot->kind == TyKind::Class && ot->cls) {
+                auto* f = ot->cls->field(at.attr);
+                if (!f) {
+                    err(target.line, target.col,
+                        std::format("'{}' object has no field '{}'", ot->cls->name, at.attr));
+                    return;
+                }
+                VReg obj = expr(*at.value);
+                if (opt) obj = guard_not_none(obj, std::format("field '{}'", at.attr));
+                int off = static_cast<int>(8 * (1 + ot->cls->field_index(at.attr)));
+                store_field(f->ty, obj, off, const_none());
+                return;
+            }
+            err(target.line, target.col, "unsupported del target");
+            return;
+        }
+        default:
+            err(target.line, target.col, "unsupported del target");
+            return;
+    }
+}
+
+void Lowerer::lower_delete(Delete& d) {
+    for (auto& t : d.targets)
+        if (t) delete_target(*t);
+}
+
 
 }  // namespace py23

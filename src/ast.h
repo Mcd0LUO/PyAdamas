@@ -68,10 +68,11 @@ inline void pad(std::ostream& os, int n) {
 }
 
 struct Constant : Expr {
-    enum class CK : uint8_t { None, Bool, Int, Float, Str, Ellipsis } ck = CK::None;
+    enum class CK : uint8_t { None, Bool, Int, Float, Str, Complex, Ellipsis } ck = CK::None;
     bool b = false;
     int64_t i = 0;
     double f = 0.0;
+    double im = 0.0;  // CK::Complex 的虚部，实部固定 0
     std::string s;
 
     Constant() : Expr(ExprKind::Constant) {}
@@ -116,6 +117,7 @@ struct Constant : Expr {
             case CK::Bool: os << "Constant(" << (b ? "True" : "False") << ")\n"; break;
             case CK::Int: os << "Constant(" << i << ")\n"; break;
             case CK::Float: os << "Constant(" << f << ")\n"; break;
+            case CK::Complex: os << "Constant(" << im << "j)\n"; break;
             case CK::Str: os << "Constant(" << quote(s) << ")\n"; break;
             case CK::Ellipsis: os << "Constant(Ellipsis)\n"; break;
         }

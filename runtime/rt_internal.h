@@ -102,6 +102,25 @@ typedef struct Py23ExcValue {
     struct Py23ExcValue* cause; /* __cause__，owned（RC 对象） */
 } Py23ExcValue;
 
+/* 复数：re/im 两个 double，RC 对象；magic 用于运行时判别。 */
+#define PY23_COMPLEX_MAGIC 0x434f4d5000000001LL
+typedef struct {
+    int64_t magic;
+    double re;
+    double im;
+} Py23Complex;
+
+Py23Complex* py23_complex_new(double re, double im);
+Py23Complex* py23_complex_add(Py23Complex* a, Py23Complex* b);
+Py23Complex* py23_complex_sub(Py23Complex* a, Py23Complex* b);
+Py23Complex* py23_complex_mul(Py23Complex* a, Py23Complex* b);
+Py23Complex* py23_complex_div(Py23Complex* a, Py23Complex* b);
+Py23Complex* py23_complex_neg(Py23Complex* a);
+double py23_complex_abs(Py23Complex* a);
+Py23Str* py23_complex_str(Py23Complex* a);
+int64_t py23_complex_eq(Py23Complex* a, Py23Complex* b);
+int64_t py23_complex_truth(Py23Complex* a);
+
 
 typedef struct {
     int64_t magic;

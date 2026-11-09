@@ -38,6 +38,7 @@ enum class TyKind : uint8_t {
     Bool,
     Int,
     Float,
+    Complex,
     Str,
     List,
     Set,
@@ -289,6 +290,10 @@ inline const TypePtr& t_float() {
     static TypePtr v = new_ty(TyKind::Float);
     return v;
 }
+inline const TypePtr& t_complex() {
+    static TypePtr v = new_ty(TyKind::Complex);
+    return v;
+}
 inline const TypePtr& t_str() {
     static TypePtr v = new_ty(TyKind::Str);
     return v;
@@ -413,6 +418,7 @@ inline std::string type_name_impl(const TypePtr& t, int depth) {
         case TyKind::Bool: return "bool";
         case TyKind::Int: return "int";
         case TyKind::Float: return "float";
+        case TyKind::Complex: return "complex";
         case TyKind::Str: return "str";
         case TyKind::List:
             return t->sub.empty() ? "list"
@@ -551,6 +557,7 @@ inline TypePtr join_into(const TypePtr& a, const TypePtr& b) {
         return mk_future(join(a->sub.empty() ? t_unknown() : a->sub[0],
                               b->sub.empty() ? t_unknown() : b->sub[0]));
     if (a->kind == TyKind::Exception && b->kind == TyKind::Exception) return a;
+    if (a->kind == TyKind::Complex && b->kind == TyKind::Complex) return a;
     if (a->kind == TyKind::Tuple && b->kind == TyKind::Tuple) {
         if (a->variadic || b->variadic) {
             // 有一边长度不定，结果也只能是长度不定：元素取公共上界
@@ -618,6 +625,9 @@ inline bool assignable(const TypePtr& dst, const TypePtr& src) {
     if (dst->kind == TyKind::Future && src->kind == TyKind::Future)
         return dst->sub.empty() || src->sub.empty() || assignable(dst->sub[0], src->sub[0]);
     if (dst->kind == TyKind::Exception && src->kind == TyKind::Exception) return true;
+    // int/float 可以隐式提升为 complex
+    if (dst->kind == TyKind::Complex && src->kind == TyKind::Complex) return true;
+    if (dst->kind == TyKind::Complex && is_num(src)) return true;
     if (dst->kind == TyKind::Set && src->kind == TyKind::Set)
         return assignable(dst->sub[0], src->sub[0]);
     if (dst->kind == TyKind::Dict && src->kind == TyKind::Dict)

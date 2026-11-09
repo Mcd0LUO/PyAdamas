@@ -360,7 +360,7 @@ VReg Lowerer::lower_call(Call& c) {
         if (is_builtin(n.id)) {
             static const std::unordered_set<std::string> kBuiltins = {
                 "print", "len", "int", "float", "str", "bool", "range", "next",
-                "abs", "min", "max", "sum", "pow", "any", "all",
+                "abs", "min", "max", "sum", "pow", "any", "all", "complex",
             };
             if (kBuiltins.count(n.id)) return lower_builtin_call(n.id, c);
         }
@@ -455,12 +455,38 @@ VReg Lowerer::lower_builtin_call(const std::string& name, Call& c) {
         VReg v = expr(*c.args[0]);
         if (t && t->kind == TyKind::Float)
             return call_runtime(RtFn::MathFabs, t_float(), {v});
+        if (t && t->kind == TyKind::Complex)
+            return call_runtime(RtFn::ComplexAbs, t_float(), {v});
         return call_runtime(RtFn::AbsI64, t_int(), {v});
     }
 
     if (name == "min" || name == "max") return lower_minmax(c, name == "min");
     if (name == "sum") return lower_sum(c);
     if (name == "any" || name == "all") return lower_anyall(c, name == "any");
+    if (name == "complex") {
+        if (c.args.size() > 2) {
+            err(c.line, c.col, "complex() takes at most two arguments");
+            return const_none();
+        }
+        VReg re = const_float(0.0);
+        VReg im = const_float(0.0);
+        if (!c.args.empty()) {
+            TypePtr t0 = tc_.type_of(c.args[0].get());
+            VReg v0 = expr(*c.args[0]);
+            if (t0 && t0->kind == TyKind::Complex && c.args.size() == 1) return v0;
+            re = (t0 && t0->kind == TyKind::Float) ? v0 : convert_to(v0, t0, t_float());
+        }
+        if (c.args.size() == 2) {
+            TypePtr t1 = tc_.type_of(c.args[1].get());
+            VReg v1 = expr(*c.args[1]);
+            im = (t1 && t1->kind == TyKind::Float) ? v1 : convert_to(v1, t1, t_float());
+        }
+        Inst in;
+        in.op = IrOp::CallRt;
+        in.imm = static_cast<int64_t>(RtFn::ComplexNew);
+        in.args = {re, im};
+        return def_heap(t_complex(), std::move(in));
+    }
     if (name == "pow") {
         if (c.args.size() != 2) {
             err(c.line, c.col, "pow() takes exactly two arguments");
@@ -1039,26 +1065,123 @@ VReg Lowerer::lower_print(Call& c) {
     // 求值顺序按源码从左到右：sep 第一次用到时才求值，end 在参数都输出完才求值。
     VReg sep = kNoReg;
     bool sep_ready = false;
-    for (size_t i = 0; i < c.args.size(); ++i) {
-        if (i) {
-            if (kw_sep) {
-                if (!sep_ready) {
-                    sep = expr(*kw_sep->value);
-                    sep_ready = true;
-                }
-                call_void(RtFn::PrintStr, {sep});
-            } else {
-                call_void(RtFn::PrintSep, {});
+    int sep_slot = kw_sep ? new_temp_slot(t_str()) : -1;
+    int first = new_temp_slot(t_int());
+    store_slot(first, const_int(1));
+
+    auto before_item = [&]() {
+        int need = new_block("print.sep");
+        int done = new_block("print.item");
+        Inst br;
+        br.op = IrOp::Branch;
+        br.a = load_slot(first, t_int());
+        br.target = done;
+        br.target2 = need;
+        emit(std::move(br));
+        switch_to(need);
+        if (kw_sep) {
+            if (!sep_ready) {
+                sep = expr(*kw_sep->value);
+                store_slot(sep_slot, sep);
+                sep_ready = true;
             }
+            call_void(RtFn::PrintStr, {load_slot(sep_slot, t_str())});
+        } else {
+            call_void(RtFn::PrintSep, {});
         }
-        if (c.args[i]->kind == ExprKind::Starred) {
-            err(c.args[i]->line, c.args[i]->col,
-                "'*args' is not supported by the code generator yet");
+        Inst j;
+        j.op = IrOp::Jump;
+        j.target = done;
+        emit(std::move(j));
+        switch_to(done);
+    };
+    auto after_item = [&]() { store_slot(first, const_int(0)); };
+
+    for (auto& arg : c.args) {
+        if (arg->kind == ExprKind::Starred) {
+            auto& st = static_cast<Starred&>(*arg);
+            TypePtr sty = tc_.type_of(st.value.get());
+            bool ok = sty && (sty->kind == TyKind::List || sty->kind == TyKind::Tuple ||
+                              sty->kind == TyKind::Str || sty->kind == TyKind::Dict ||
+                              sty->kind == TyKind::Set);
+            if (!ok) {
+                err(arg->line, arg->col,
+                    std::format("cannot expand '{}' in print()", type_name(sty)));
+                continue;
+            }
+            TypePtr ety = t_unknown();
+            if (sty->kind == TyKind::Str) ety = t_str();
+            else if (!sty->sub.empty()) ety = sty->sub[0];
+
+            VReg seq = expr(*st.value);
+            int seq_slot = new_temp_slot(sty);
+            store_slot(seq_slot, seq);
+            Inst ln;
+            ln.op = IrOp::Len;
+            ln.a = seq;
+            VReg n = def(t_int(), std::move(ln));
+            int n_slot = new_temp_slot(t_int());
+            store_slot(n_slot, n);
+            int idx = new_temp_slot(t_int());
+            store_slot(idx, const_int(0));
+
+            int cond = new_block("print.star.cond");
+            int body = new_block("print.star.body");
+            int end = new_block("print.star.end");
+            Inst j;
+            j.op = IrOp::Jump;
+            j.target = cond;
+            emit(std::move(j));
+
+            switch_to(cond);
+            Inst cmp;
+            cmp.op = IrOp::Cmp;
+            cmp.cop = CmpKind::Lt;
+            cmp.a = load_slot(idx, t_int());
+            cmp.b = load_slot(n_slot, t_int());
+            VReg cc = def(t_bool(), std::move(cmp));
+            Inst br;
+            br.op = IrOp::Branch;
+            br.a = cc;
+            br.target = body;
+            br.target2 = end;
+            emit(std::move(br));
+
+            switch_to(body);
+            before_item();
+            VReg sv = load_slot(seq_slot, sty);
+            VReg iv = load_slot(idx, t_int());
+            VReg ev;
+            if (sty->kind == TyKind::Dict || sty->kind == TyKind::Set)
+                ev = call_runtime(RtFn::DictKeyAt, ety, {sv, iv});
+            else {
+                Inst get;
+                get.op = IrOp::IndexLoad;
+                get.a = sv;
+                get.b = iv;
+                ev = sty->kind == TyKind::Str ? def_heap(ety, std::move(get))
+                                              : def(ety, std::move(get));
+            }
+            print_value(ev, ety, arg->line, arg->col);
+            after_item();
+            Inst add;
+            add.op = IrOp::Bin;
+            add.bop = BinKind::Add;
+            add.a = load_slot(idx, t_int());
+            add.b = const_int(1);
+            store_slot(idx, def(t_int(), std::move(add)));
+            Inst jb;
+            jb.op = IrOp::Jump;
+            jb.target = cond;
+            emit(std::move(jb));
+            switch_to(end);
             continue;
         }
-        TypePtr at = tc_.type_of(c.args[i].get());
-        VReg v = expr(*c.args[i]);
-        print_value(v, at, c.args[i]->line, c.args[i]->col);
+        before_item();
+        TypePtr at = tc_.type_of(arg.get());
+        VReg v = expr(*arg);
+        print_value(v, at, arg->line, arg->col);
+        after_item();
     }
     if (kw_end) call_void(RtFn::PrintStr, {expr(*kw_end->value)});
     else call_void(RtFn::PrintEnd, {});

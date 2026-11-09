@@ -467,9 +467,11 @@ TypePtr TypeChecker::builtin_call(const std::string& n, Call& c) {
         }
         if (n == "abs") {
             if (a.empty()) return t_unknown();
-            if (!is_unknown(a[0]) && !is_num(a[0]))
+            if (!is_unknown(a[0]) && !is_num(a[0]) &&
+                (!a[0] || a[0]->kind != TyKind::Complex))
                 err(c.line, c.col,
                     std::format("bad operand type for abs(): '{}'", type_name(a[0])));
+            if (a[0] && a[0]->kind == TyKind::Complex) return t_float();
             return a[0];
         }
         if (n == "min" || n == "max") {
@@ -545,6 +547,11 @@ TypePtr TypeChecker::builtin_call(const std::string& n, Call& c) {
         }
         if (n == "iter") {
             return a.empty() ? t_unknown() : a[0];
+        }
+        if (n == "complex") {
+            if (a.size() > 2)
+                err(c.line, c.col, std::format("complex() takes at most 2 arguments, got {}", a.size()));
+            return t_complex();
         }
         if (n == "open" || n == "getattr" || n == "setattr" ||
             n == "hasattr" || n == "super" || n == "vars" || n == "dir" || n == "format" ||

@@ -540,8 +540,11 @@ private:
                 throw LexError("invalid exponent in number literal", tok_line_, tok_col_);
             while (!at_end() && (is_digit(peek()) || peek() == '_')) advance();
         }
-        if (peek() == 'j' || peek() == 'J')
-            throw LexError("complex literals are not supported", tok_line_, tok_col_);
+        bool is_complex = false;
+        if (peek() == 'j' || peek() == 'J') {
+            is_complex = true;
+            advance();
+        }
 
         std::string text(src_.substr(start, pos_ - start));
         if (!valid_underscores(text, 10))
@@ -557,7 +560,12 @@ private:
         clean.reserve(text.size());
         for (char ch : text) if (ch != '_') clean.push_back(ch);
 
-        if (is_float) {
+        if (is_complex) {
+            t.kind = Tok::COMPLEX;
+            // 虚部；实部固定为 0（`1+2j` 由二元加法构造）。
+            clean.pop_back();
+            t.fval = std::strtod(clean.c_str(), nullptr);
+        } else if (is_float) {
             t.kind = Tok::FLOAT;
             // 不能用 std::stod：它在溢出时抛 out_of_range，1e400 这种
             // 合法字面量（Python 里就是 inf）会把编译器打成内部错误。

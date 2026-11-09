@@ -133,6 +133,16 @@ void AsmGen::gen_branch(const Inst& in) {
             line(std::format("jmp {}", block_label(in.target2)));
             return;
         }
+        if (ty && ty->kind == TyKind::Complex) {
+            line(std::format("movq {}, %rax", src_op(in.a)));
+            line("xorpd %xmm1, %xmm1");
+            line("ucomisd 8(%rax), %xmm1");
+            line(std::format("jne {}", block_label(in.target)));
+            line("ucomisd 16(%rax), %xmm1");
+            line(std::format("jne {}", block_label(in.target)));
+            line(std::format("jmp {}", block_label(in.target2)));
+            return;
+        }
         std::string sa = src_op(in.a);
         // 被折叠成常量的条件（如 while True 的 1）不能进 cmpq 的立即数位置。
         if (!sa.empty() && sa[0] == '$') {
@@ -231,6 +241,7 @@ void AsmGen::gen_call_rt(const Inst& in) {
                 break;
             case RtFn::GenSendOpt:
             case RtFn::ListSet:
+            case RtFn::ListDelIndex:
             case RtFn::DictNew:
             case RtFn::DictSet:
             case RtFn::ListContains:
@@ -286,6 +297,10 @@ void AsmGen::gen_call_rt(const Inst& in) {
             case RtFn::ExcValueCause:
             case RtFn::RaiseValue:
             case RtFn::AbsI64:
+            case RtFn::ComplexNeg:
+            case RtFn::ComplexAbs:
+            case RtFn::ComplexStr:
+            case RtFn::ComplexTruth:
             case RtFn::GenNext:
             case RtFn::GenClose:
             case RtFn::HandlerSuspend:
@@ -312,6 +327,11 @@ void AsmGen::gen_call_rt(const Inst& in) {
                 line(std::format("movq {}, %rdi", src_op(in.args[0])));
                 line(std::format("movq {}, %rsi", src_op(in.args[1])));
                 break;
+            case RtFn::ComplexAdd:
+            case RtFn::ComplexSub:
+            case RtFn::ComplexMul:
+            case RtFn::ComplexDiv:
+            case RtFn::ComplexEq:
             case RtFn::ExcValueNew:
             case RtFn::ExcRegister:
             case RtFn::RaiseValueFrom:
@@ -328,6 +348,10 @@ void AsmGen::gen_call_rt(const Inst& in) {
             case RtFn::AsyncGenAsend:
                 line(std::format("movq {}, %rdi", src_op(in.args[0])));
                 line(std::format("movq {}, %rsi", src_op(in.args[1])));
+                break;
+            case RtFn::ComplexNew:
+                line(std::format("movsd {}, %xmm0", src_op(in.args[0])));
+                line(std::format("movsd {}, %xmm1", src_op(in.args[1])));
                 break;
             case RtFn::AsyncioSleep:
                 line(std::format("movsd {}, %xmm0", src_op(in.args[0])));

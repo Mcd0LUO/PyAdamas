@@ -42,6 +42,7 @@ inline std::optional<ConstVal> as_const(const Expr* e) {
         case Constant::CK::Bool: v.ty = t_bool(); v.i = c.b ? 1 : 0; return v;
         case Constant::CK::Int: v.ty = t_int(); v.i = c.i; return v;
         case Constant::CK::Float: v.ty = t_float(); v.f = c.f; return v;
+        case Constant::CK::Complex: return std::nullopt;
         case Constant::CK::Str: v.ty = t_str(); v.s = c.s; return v;
         case Constant::CK::Ellipsis: return std::nullopt;
     }
@@ -800,6 +801,8 @@ private:
     VReg raise_exception(const std::string& type, VReg msg);
     void lower_funcdef(FunctionDef& f);
     void lower_assert(Assert& a);
+    void lower_delete(Delete& d);
+    void delete_target(Expr& target);
     void lower_try(Try& t);
     void lower_raise(Raise& r);
     void lower_import(Import& im);

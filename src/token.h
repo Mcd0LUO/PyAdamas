@@ -18,6 +18,7 @@ enum class Tok : uint8_t {
     // 字面量
     INT,
     FLOAT,
+    COMPLEX,
     STRING,    // 普通字符串（text 为反转义后的内容）
     BYTES,     // 字节串（lexer 只负责切分，语义层不支持）
     FSTRING,   // f-string（text 为引号内原文，反转义与插值由 parser 处理）
@@ -74,6 +75,7 @@ inline const char* tok_name(Tok t) {
         case Tok::DEDENT: return "DEDENT";
         case Tok::INT: return "INT";
         case Tok::FLOAT: return "FLOAT";
+        case Tok::COMPLEX: return "COMPLEX";
         case Tok::STRING: return "STRING";
         case Tok::BYTES: return "BYTES";
         case Tok::FSTRING: return "FSTRING";

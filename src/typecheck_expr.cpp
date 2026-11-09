@@ -33,6 +33,7 @@ TypePtr TypeChecker::expr(Expr& e) {
                     case Constant::CK::Bool: return t_bool();
                     case Constant::CK::Int: return t_int();
                     case Constant::CK::Float: return t_float();
+                    case Constant::CK::Complex: return t_complex();
                     case Constant::CK::Str: return t_str();
                     case Constant::CK::Ellipsis: return t_unknown();
                 }
@@ -141,8 +142,8 @@ TypePtr TypeChecker::expr(Expr& e) {
                     case Tok::PLUS:
                         // 类实例 / 绑定方法可能重载了一元运算符（@property
                         // 返回的数值最常见），静态上看不见
-                        if (is_unknown(t) || is_num(t) || t->kind == TyKind::Class ||
-                            t->kind == TyKind::BoundMethod)
+                        if (is_unknown(t) || is_num(t) || t->kind == TyKind::Complex ||
+                            t->kind == TyKind::Class || t->kind == TyKind::BoundMethod)
                             return t;
                         err(u.line, u.col,
                             std::format("bad operand type for unary operator: '{}'", type_name(t)));
@@ -495,6 +496,22 @@ TypePtr TypeChecker::binop_type(Tok op, TypePtr l, TypePtr r, int line, int col)
                             type_name(l), type_name(r)));
             return t_unknown();
         };
+
+        if (l->kind == TyKind::Complex || r->kind == TyKind::Complex) {
+            auto ok = [](const TypePtr& t) {
+                return t && (t->kind == TyKind::Complex || is_num(t));
+            };
+            switch (op) {
+                case Tok::PLUS:
+                case Tok::MINUS:
+                case Tok::STAR:
+                case Tok::SLASH:
+                    if (ok(l) && ok(r)) return t_complex();
+                    return bad();
+                default:
+                    return bad();
+            }
+        }
 
         switch (op) {
             case Tok::PLUS:

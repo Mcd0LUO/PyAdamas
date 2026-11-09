@@ -420,6 +420,26 @@ void AsmGen::emit_truth(VReg r, const char* byte_reg) {
             line("setne %al");
             return;
         }
+        if (ty && ty->kind == TyKind::Complex) {
+            line(std::format("movq {}, %rax", src_op(r)));
+            line("xorpd %xmm1, %xmm1");
+            line("ucomisd 8(%rax), %xmm1");
+            line("setne %al");
+            line("ucomisd 16(%rax), %xmm1");
+            line("setne %cl");
+            line("orb %cl, %al");
+            return;
+        }
+        if (ty && ty->kind == TyKind::Complex) {
+            line(std::format("movq {}, %rax", src_op(r)));
+            line("xorpd %xmm1, %xmm1");
+            line("ucomisd 8(%rax), %xmm1");
+            line("setne %al");
+            line("ucomisd 16(%rax), %xmm1");
+            line("setne %cl");
+            line("orb %cl, %al");
+            return;
+        }
         line(std::format("cmpq $0, {}", src_op(r)));
         line("setne %al");
     }
