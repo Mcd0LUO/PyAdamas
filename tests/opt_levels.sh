@@ -15,6 +15,8 @@ FILES=(
     tests/run/45_opt_semantics.py
     tests/run/46_simd_reduce.py
     tests/run/47_float_sum_order.py
+    tests/run/48_branch_mnemonics.py
+    tests/run/49_inline.py
 )
 
 fail=0

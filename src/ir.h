@@ -569,6 +569,8 @@ struct IRFunction {
     // 含 setjmp 的函数关闭槽位寄存器提升：longjmp 会把 callee-saved
     // 寄存器恢复成 setjmp 时刻的值，寄存器里的变量会回退。
     bool has_handlers = false;
+    // O2 内联候选：无捕获、无 handler、非生成器/异步、签名固定。
+    bool can_inline = false;
     // 生成器 resume：槽位不在栈上，而在堆帧里（%r15 指向帧负载）。
     // 入口按帧里的 state 分发到续跑块，参数已由创建包装写进帧。
     bool is_generator = false;

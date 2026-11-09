@@ -238,7 +238,7 @@ void AsmGen::gen_cmp_branch(const Inst& in, const Inst& br) {
         const char* inv = "jne";
         switch (in.cop) {
             case CmpKind::Lt: jcc = "jl"; inv = "jge"; break;
-            case CmpKind::Le: jcc = "jle"; inv = "jgt"; break;
+            case CmpKind::Le: jcc = "jle"; inv = "jg"; break;
             case CmpKind::Gt: jcc = "jg"; inv = "jle"; break;
             case CmpKind::Ge: jcc = "jge"; inv = "jl"; break;
             case CmpKind::Eq: jcc = "je"; inv = "jne"; break;

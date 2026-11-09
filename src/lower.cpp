@@ -409,6 +409,12 @@ int Lowerer::compile_function_body(FunctionDef& f, FuncInfoPtr info, const std::
         erase_mark(st_->fn_mark_block, st_->fn_mark_pos, st_->fn_mark);
 
     pop_frame();
+    auto cmit = closure_meta_.find(&f);
+    bool simple_closure =
+        cmit == closure_meta_.end() ||
+        (cmit->second.env.empty() && cmit->second.cells.empty());
+    irf->can_inline = simple_closure && !irf->has_handlers && f.decorators.empty() &&
+                      !(info && (info->varargs || info->kwargs));
     return fidx;
 }
 
