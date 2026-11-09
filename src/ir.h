@@ -611,6 +611,8 @@ struct IRModule {
     std::string runtime_name = "__main__";
     std::string source_path;
     bool is_entry = true;
+    // 生成代码优化等级（0/1/2），由 LowerOptions 传入 codegen。
+    int opt_level = 2;
     // import.module 指令引用的模块名（按出现顺序去重）。
     std::vector<std::string> imports;
     int entry = -1;  // 模块顶层代码编译成的函数下标

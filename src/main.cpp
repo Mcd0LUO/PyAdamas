@@ -228,6 +228,7 @@ struct Program {
     std::vector<std::string> include_dirs;
     bool rebuild = false;
     bool verbose = false;
+    int opt = 2;
 };
 
 std::string sanitize_symbol(const std::string& s) {
@@ -456,6 +457,7 @@ std::optional<uint64_t> parse_u64(const std::string& s) {
 
 struct Manifest {
     uint64_t source_hash = 0;
+    int opt = -1;
     std::map<std::string, std::string> deps;
 };
 
@@ -480,6 +482,12 @@ std::optional<Manifest> read_manifest(const ModuleUnit& u) {
             auto h = parse_u64(v);
             if (!h) return std::nullopt;
             m.source_hash = *h;
+        } else if (tag == "opt") {
+            std::string v;
+            ss >> v;
+            auto o = parse_u64(v);
+            if (!o) return std::nullopt;
+            m.opt = static_cast<int>(*o);
         } else if (tag == "dep") {
             std::string name, hash;
             ss >> name >> hash;
@@ -498,6 +506,7 @@ void write_manifest(const Program& p, const ModuleUnit& u) {
     out << "py23manifest 1\n";
     out << "abi " << py23::kModuleAbiVersion << "\n";
     out << "source " << py23::fnv1a64(u.source) << "\n";
+    out << "opt " << p.opt << "\n";
     for (auto& d : u.deps) {
         auto it = p.units.find(d);
         std::string hash = (it != p.units.end() && it->second->info)
@@ -666,6 +675,7 @@ bool try_cache(Program& p, ModuleUnit& u) {
     auto m = read_manifest(u);
     if (!m) return false;
     if (m->source_hash != py23::fnv1a64(u.source)) return false;
+    if (m->opt != p.opt) return false;
     if (m->deps.size() != u.deps.size()) return false;
     for (auto& d : u.deps) {
         auto it = m->deps.find(d);
@@ -837,6 +847,7 @@ bool build_unit(Program& p, ModuleUnit& u, bool emit_object, bool entry_ir) {
     opt.runtime_name = u.runtime_name;
     opt.source_path = u.path;
     opt.is_entry = u.is_entry;
+    opt.opt_level = p.opt;
     opt.module_lookup = [&p](const std::string& name) -> py23::ModuleInfoPtr {
         return program_module(p, name);
     };
@@ -912,7 +923,8 @@ int main(int argc, char** argv) {
         std::fprintf(stderr,
                      "py23 —— Python 语法外壳的编译器\n"
                      "\n"
-                     "usage: %s [tokens|ast|types|check|ir|asm|build|run] [--syntax] [-o out] <file.py>\n",
+                     "usage: %s [tokens|ast|types|check|ir|asm|build|run] [-O0|-O1|-O2] "
+                     "[--syntax] [-o out] <file.py>\n",
                      argv[0]);
         return 2;
     }
@@ -924,6 +936,7 @@ int main(int argc, char** argv) {
     bool syntax_only = false;
     bool verbose = false;
     bool rebuild = false;
+    int opt_level = 2;
 
     static const std::vector<std::string> kModes = {"tokens", "ast",     "check", "types",
                                                     "ir",     "asm",     "build", "run"};
@@ -932,6 +945,20 @@ int main(int argc, char** argv) {
         if (a == "--syntax") syntax_only = true;
         else if (a == "-v" || a == "--verbose") verbose = true;
         else if (a == "--rebuild") rebuild = true;
+        else if (a == "-O0") opt_level = 0;
+        else if (a == "-O1") opt_level = 1;
+        else if (a == "-O2") opt_level = 2;
+        else if (a.starts_with("--opt=")) {
+            std::string v = a.substr(6);
+            if (v == "0") opt_level = 0;
+            else if (v == "1") opt_level = 1;
+            else if (v == "2") opt_level = 2;
+            else {
+                std::fprintf(stderr, "error: invalid optimization level '%s' (expected 0,1,2)\n",
+                             v.c_str());
+                return 2;
+            }
+        }
         else if (a == "-o" && i + 1 < argc) output = argv[++i];
         else if (a == "-I" && i + 1 < argc) include_dirs.push_back(argv[++i]);
         else if (a.starts_with("-I") && a.size() > 2) include_dirs.push_back(a.substr(2));
@@ -996,6 +1023,7 @@ int main(int argc, char** argv) {
         Program prog;
         prog.rebuild = rebuild;
         prog.verbose = verbose;
+        prog.opt = opt_level;
         if (!load_program(path, include_dirs, prog)) return 1;
 
         if (mode == "ir" || mode == "asm") {

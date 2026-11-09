@@ -3,6 +3,86 @@
 
 namespace py23 {
 
+// O2：只清零「可能读到未赋值值」的槽。对每个块做 must 数据流：
+// in = 所有前驱 out 的交集；out = in ∪ 块内 store。LoadSlot 遇到
+// 不在 assigned 集合里的槽就需要序言清零；StoreSlot 标记已赋值。
+// 入口块的 in 固定为形参集合（加上 env 槽），不被回边影响。
+std::vector<bool> AsmGen::slots_needing_zero() const {
+    std::vector<bool> need(static_cast<size_t>(n_slots_), false);
+    int nb = static_cast<int>(f_->blocks.size());
+    if (n_slots_ <= 0 || nb == 0) return need;
+
+    std::vector<std::vector<int>> succ(static_cast<size_t>(nb));
+    for (int b = 0; b < nb; ++b) {
+        const auto& insts = f_->blocks[b].insts;
+        if (insts.empty()) {
+            if (b + 1 < nb) succ[b].push_back(b + 1);
+            continue;
+        }
+        const Inst& last = insts.back();
+        if (last.op == IrOp::Jump) {
+            succ[b].push_back(last.target);
+        } else if (last.op == IrOp::Branch) {
+            succ[b].push_back(last.target);
+            succ[b].push_back(last.target2);
+        } else if (last.op != IrOp::Return && last.op != IrOp::GenYield &&
+                   last.op != IrOp::GenAwait && last.op != IrOp::GenRethrow &&
+                   last.op != IrOp::GenDone) {
+            if (b + 1 < nb) succ[b].push_back(b + 1);
+        }
+    }
+
+    std::vector<bool> entry_assigned(static_cast<size_t>(n_slots_), false);
+    for (const auto& p : f_->params)
+        if (p.slot >= 0 && p.slot < n_slots_) entry_assigned[p.slot] = true;
+    if (f_->env_slot >= 0 && f_->env_slot < n_slots_) entry_assigned[f_->env_slot] = true;
+
+    std::vector<std::vector<bool>> in(static_cast<size_t>(nb),
+                                      std::vector<bool>(static_cast<size_t>(n_slots_), true));
+    std::vector<std::vector<bool>> out(static_cast<size_t>(nb),
+                                       std::vector<bool>(static_cast<size_t>(n_slots_), true));
+    in[0] = entry_assigned;
+    out[0] = entry_assigned;
+
+    bool changed = true;
+    while (changed) {
+        changed = false;
+        for (int b = 0; b < nb; ++b) {
+            std::vector<bool> o = in[b];
+            for (const auto& inst : f_->blocks[b].insts)
+                if (inst.op == IrOp::StoreSlot && inst.idx >= 0 && inst.idx < n_slots_)
+                    o[inst.idx] = true;
+            out[b] = std::move(o);
+            for (int s : succ[b]) {
+                if (s == 0 || s < 0 || s >= nb) continue;
+                for (int i = 0; i < n_slots_; ++i) {
+                    bool v = in[s][i] && out[b][i];
+                    if (v != in[s][i]) {
+                        in[s][i] = v;
+                        changed = true;
+                    }
+                }
+            }
+        }
+    }
+
+    for (int b = 0; b < nb; ++b) {
+        std::vector<bool> assigned = in[b];
+        for (const auto& inst : f_->blocks[b].insts) {
+            if (inst.op == IrOp::SlotAddr && inst.idx >= 0 && inst.idx < n_slots_) {
+                // 地址被取过：可能被间接读，保守清零。
+                need[inst.idx] = true;
+            } else if (inst.op == IrOp::LoadSlot && inst.idx >= 0 && inst.idx < n_slots_ &&
+                       !assigned[inst.idx]) {
+                need[inst.idx] = true;
+            } else if (inst.op == IrOp::StoreSlot && inst.idx >= 0 && inst.idx < n_slots_) {
+                assigned[inst.idx] = true;
+            }
+        }
+    }
+    return need;
+}
+
 void AsmGen::emit_function(const IRFunction& f, int fi) {
         f_ = &f;
         fi_ = fi;
@@ -35,8 +115,14 @@ void AsmGen::emit_function(const IRFunction& f, int fi) {
             std::vector<bool> is_param(static_cast<size_t>(n_slots_), false);
             for (const auto& p : f.params)
                 if (p.slot >= 0 && p.slot < n_slots_) is_param[p.slot] = true;
+            std::vector<bool> need_zero;
+            const std::vector<bool>* need = nullptr;
+            if (opt_ >= 2 && !f.has_handlers) {
+                need_zero = slots_needing_zero();
+                need = &need_zero;
+            }
             for (int s = 0; s < n_slots_; ++s)
-                if (!is_param[s]) {
+                if (!is_param[s] && (!need || (*need)[static_cast<size_t>(s)])) {
                     std::string loc = slot_op(s);
                     if (loc.starts_with("%xmm"))
                         line(std::format("xorpd {}, {}", loc, loc));
@@ -76,6 +162,7 @@ void AsmGen::emit_function(const IRFunction& f, int fi) {
         }
 
         for (size_t bi = 0; bi < f.blocks.size(); ++bi) {
+            cur_block_ = static_cast<int>(bi);
             label(block_label(static_cast<int>(bi)));
             gen_block(f.blocks[bi]);
         }
@@ -97,6 +184,8 @@ bool AsmGen::can_fuse(const Inst& in, const Inst& nx) const {
         if (in.op == IrOp::StoreSlot || in.op == IrOp::StoreGlobal) return false;
         if (nx.op != IrOp::StoreSlot || nx.a != in.dst) return false;
         if (nx.idx < 0 || nx.idx >= static_cast<int>(slot_reg_.size())) return false;
+        // O0 只融合到提升过的寄存器；O1 起允许直接写变量栈槽。
+        if (opt_ < 1 && slot_reg_[nx.idx].empty()) return false;
         if (in.dst >= use_count_.size()) return false;
         // 只有「定义后在本块里正好被用一次」才能就地写变量槽。
         // 用两次就不行了：第二次读到的会是新值。
@@ -104,6 +193,7 @@ bool AsmGen::can_fuse(const Inst& in, const Inst& nx) const {
     }
 
 bool AsmGen::can_fuse_fp_temp(const Inst& in, const Inst& nx) const {
+        if (opt_ < 1) return false;
         auto simple_bin = [](const Inst& x) {
             if (x.op != IrOp::Bin || !ir_is_float(x.ty)) return false;
             return x.bop == BinKind::Add || x.bop == BinKind::Sub ||
@@ -145,16 +235,24 @@ void AsmGen::gen_cmp_branch(const Inst& in, const Inst& br) {
             line(std::format("cmpq {}, %rax", sb));
         }
         const char* jcc = "je";
+        const char* inv = "jne";
         switch (in.cop) {
-            case CmpKind::Lt: jcc = "jl"; break;
-            case CmpKind::Le: jcc = "jle"; break;
-            case CmpKind::Gt: jcc = "jg"; break;
-            case CmpKind::Ge: jcc = "jge"; break;
-            case CmpKind::Eq: jcc = "je"; break;
-            case CmpKind::Ne: jcc = "jne"; break;
+            case CmpKind::Lt: jcc = "jl"; inv = "jge"; break;
+            case CmpKind::Le: jcc = "jle"; inv = "jgt"; break;
+            case CmpKind::Gt: jcc = "jg"; inv = "jle"; break;
+            case CmpKind::Ge: jcc = "jge"; inv = "jl"; break;
+            case CmpKind::Eq: jcc = "je"; inv = "jne"; break;
+            case CmpKind::Ne: jcc = "jne"; inv = "je"; break;
         }
-        line(std::format("{} {}", jcc, block_label(br.target)));
-        line(std::format("jmp {}", block_label(br.target2)));
+        // O2：一边就是下一个块时，用反向条件跳走另一边，省掉无条件跳。
+        if (opt_ >= 2 && br.target == cur_block_ + 1) {
+            line(std::format("{} {}", inv, block_label(br.target2)));
+        } else if (opt_ >= 2 && br.target2 == cur_block_ + 1) {
+            line(std::format("{} {}", jcc, block_label(br.target)));
+        } else {
+            line(std::format("{} {}", jcc, block_label(br.target)));
+            line(std::format("jmp {}", block_label(br.target2)));
+        }
     }
 
 void AsmGen::gen_block(const Block& b) {

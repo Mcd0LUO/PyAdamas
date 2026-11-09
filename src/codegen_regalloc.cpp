@@ -166,8 +166,11 @@ void AsmGen::assign_slot_regs() {
         std::vector<std::pair<int, int>> hot_int, hot_fp;
         for (int i = 0; i < ns; ++i) {
             if (score[i] <= 0) continue;
-            if (ir_is_float(f_->slot_ty[i])) hot_fp.push_back({score[i], i});
-            else hot_int.push_back({score[i], i});
+            if (ir_is_float(f_->slot_ty[i])) {
+                if (opt_ >= 1) hot_fp.push_back({score[i], i});
+            } else {
+                hot_int.push_back({score[i], i});
+            }
         }
         auto hotter = [](const auto& a, const auto& b) {
             return a.first != b.first ? a.first > b.first : a.second < b.second;

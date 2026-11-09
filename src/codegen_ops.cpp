@@ -73,7 +73,10 @@ void AsmGen::gen_inst(const Inst& in) {
                 reload_fp_slots();
                 break;
             }
-            case IrOp::Jump: line(std::format("jmp {}", block_label(in.target))); break;
+            case IrOp::Jump:
+                if (!(opt_ >= 2 && in.target == cur_block_ + 1))
+                    line(std::format("jmp {}", block_label(in.target)));
+                break;
             case IrOp::Branch: gen_branch(in); break;
             case IrOp::Return: gen_return(in); break;
             case IrOp::SlotAddr: {
@@ -157,10 +160,9 @@ void AsmGen::gen_load_slot(const Inst& in) {
         // 让 %v 指向变量的位置，而 `store.slot s, %v` 已经被吞掉，
         // 变量的位置不会有任何变化，值就悄悄丢了。
         if (dst_loc_.empty() && in.dst != kNoReg && in.dst < use_count_.size() &&
-            use_count_[in.dst] == 1 && !cross_block_[in.dst]) {
+            use_count_[in.dst] == 1 && !cross_block_[in.dst] &&
+            (opt_ >= 1 || sop[0] == '%')) {
             // 读之后、第一次真正使用之前不能有对该变量的赋值。
-            // 允许别名指向栈槽：后续使用者可以直接以内存操作数读它，
-            // 省掉「变量 → 临时 vreg 槽」的一次搬运。
             bool clobbered = false;
             auto stv = block_stores_.find(in.idx);
             auto us = block_first_use_.find(in.dst);
@@ -338,7 +340,7 @@ void AsmGen::gen_bin_fp(const Inst& in) {
                       in.bop == BinKind::Mul || in.bop == BinKind::Div;
         // 结果直接落在提升过的浮点寄存器时，把左操作数装进目标寄存器
         // 就地算。累加 `s = s + ...` 因此只剩一条 addsd。
-        if (simple && d.starts_with("%xmm")) {
+        if (opt_ >= 1 && simple && d.starts_with("%xmm")) {
             std::string sa = src_op(in.a);
             if (sa != d) line(std::format("movsd {}, {}", sa, d));
             switch (in.bop) {

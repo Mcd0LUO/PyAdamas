@@ -6,6 +6,7 @@ namespace py23 {
 
 std::string AsmGen::gen(const IRModule& m) {
         m_ = &m;
+        opt_ = m.opt_level;
         out_.clear();
 
         if (!m.strings.empty()) {

@@ -87,6 +87,9 @@ private:
     const IRModule* m_ = nullptr;
     const IRFunction* f_ = nullptr;
     int fi_ = 0;
+    // 生成代码优化等级：0 基础 / 1 常规 / 2 默认追加控制流与小函数优化。
+    int opt_ = 2;
+    int cur_block_ = -1;
     int n_slots_ = 0;
     int n_vreg_slots_ = 0;
     // 虚拟寄存器 → 栈槽下标。一个 vreg 的槽在它死后可以给别人复用，
@@ -260,7 +263,10 @@ private:
     // ── 函数 ────────────────────────────────────────────────────
     std::vector<ArgLoc> classify(const std::vector<TypePtr>& types) const;
 
-        void emit_function(const IRFunction& f, int fi);
+    void emit_function(const IRFunction& f, int fi);
+
+    // O2：只给可能「读在写之前」的槽做序言清零。
+    std::vector<bool> slots_needing_zero() const;
 
     // ── 基本块 ──────────────────────────────────────────────────
     //

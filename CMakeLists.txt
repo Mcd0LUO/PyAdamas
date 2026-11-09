@@ -95,6 +95,16 @@ set_tests_properties(py23_suite PROPERTIES
   TIMEOUT 900
 )
 
+add_test(
+  NAME py23_opt_levels
+  COMMAND "${BASH_EXECUTABLE}" "${CMAKE_SOURCE_DIR}/tests/opt_levels.sh"
+          "${CMAKE_BINARY_DIR}" "$<TARGET_FILE:py23>"
+)
+set_tests_properties(py23_opt_levels PROPERTIES
+  WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}"
+  TIMEOUT 600
+)
+
 add_custom_target(clean-modcache
   COMMAND ${CMAKE_COMMAND} -E remove_directory "${PY23_MODCACHE_DIR}"
   COMMENT "Removing py23 module cache"

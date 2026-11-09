@@ -574,7 +574,7 @@ void Lowerer::lower_for_seq(For& f) {
     // 列表/元组按 0..len-1 遍历；循环体没有调用/del/切片赋值时
     // 长度不会变，元素下标可以免检查。生成器帧可能跨 yield 挂起，
     // 直接跳过。
-    if (load_blk >= 0 && !st_->is_generator &&
+    if (opts_.opt_level >= 1 && load_blk >= 0 && !st_->is_generator &&
         (seq_ty->kind == TyKind::List || seq_ty->kind == TyKind::Tuple) &&
         side_effect_seq_ == se_before_body) {
         auto& insts = st_->fn->blocks[load_blk].insts;

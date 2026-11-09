@@ -1137,7 +1137,8 @@ VReg Lowerer::lower_comp(Expr& e) {
         if (sty->kind == TyKind::Dict || sty->kind == TyKind::Set) {
             ev = call_runtime(RtFn::DictKeyAt, ety, {seq_val(), iv2});
         } else {
-            if (!async_mode && (sty->kind == TyKind::List || sty->kind == TyKind::Tuple)) {
+            if (!async_mode && opts_.opt_level >= 1 &&
+                (sty->kind == TyKind::List || sty->kind == TyKind::Tuple)) {
                 gen_load_blk = st_->blk;
                 gen_load_pos = st_->fn->blocks[gen_load_blk].insts.size();
             }
@@ -1175,7 +1176,8 @@ VReg Lowerer::lower_comp(Expr& e) {
         }
 
         gen(gi + 1);
-        if (gen_load_blk >= 0 && side_effect_seq_ == se_gen_start) {
+        if (opts_.opt_level >= 1 && gen_load_blk >= 0 &&
+            side_effect_seq_ == se_gen_start) {
             auto& insts = st_->fn->blocks[gen_load_blk].insts;
             if (gen_load_pos < insts.size())
                 insts[gen_load_pos].op = IrOp::IndexLoadUnchecked;

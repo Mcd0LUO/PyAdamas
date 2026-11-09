@@ -25,6 +25,8 @@ struct LowerOptions {
     std::string runtime_name = "__main__";
     std::string source_path;
     bool is_entry = true;
+    // 0 基础 / 1 常规优化 / 2 默认（追加循环与控制流小优化）。
+    int opt_level = 2;
     ModuleLookup module_lookup;
 };
 

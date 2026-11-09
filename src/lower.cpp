@@ -264,6 +264,7 @@ void Lowerer::run(Module& ast) {
     mod_.runtime_name = opts_.runtime_name;
     mod_.source_path = opts_.source_path.empty() ? file_ : opts_.source_path;
     mod_.is_entry = opts_.is_entry;
+    mod_.opt_level = opts_.opt_level;
 
     hoist_globals(ast.body);
     collect_funcdefs(ast.body);

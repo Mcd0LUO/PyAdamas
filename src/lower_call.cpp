@@ -621,7 +621,8 @@ VReg Lowerer::lower_minmax(Call& c, bool is_min) {
             if (seq_ty->kind == TyKind::Dict || seq_ty->kind == TyKind::Set)
                 return call_runtime(RtFn::DictKeyAt, elem_ty, {sv, idx});
             Inst get;
-            get.op = (seq_ty->kind == TyKind::List || seq_ty->kind == TyKind::Tuple)
+            get.op = (opts_.opt_level >= 1 &&
+                      (seq_ty->kind == TyKind::List || seq_ty->kind == TyKind::Tuple))
                          ? IrOp::IndexLoadUnchecked
                          : IrOp::IndexLoad;
             get.a = sv;
@@ -799,7 +800,8 @@ VReg Lowerer::lower_sum(Call& c) {
         ev = call_runtime(RtFn::DictKeyAt, elem_ty, {sv, iv});
     else {
         Inst get;
-        get.op = (seq_ty->kind == TyKind::List || seq_ty->kind == TyKind::Tuple)
+        get.op = (opts_.opt_level >= 1 &&
+                  (seq_ty->kind == TyKind::List || seq_ty->kind == TyKind::Tuple))
                      ? IrOp::IndexLoadUnchecked
                      : IrOp::IndexLoad;
         get.a = sv;
@@ -903,7 +905,8 @@ VReg Lowerer::lower_anyall(Call& c, bool is_any) {
         ev = call_runtime(RtFn::DictKeyAt, elem_ty, {sv, iv});
     else {
         Inst get;
-        get.op = (seq_ty->kind == TyKind::List || seq_ty->kind == TyKind::Tuple)
+        get.op = (opts_.opt_level >= 1 &&
+                  (seq_ty->kind == TyKind::List || seq_ty->kind == TyKind::Tuple))
                      ? IrOp::IndexLoadUnchecked
                      : IrOp::IndexLoad;
         get.a = sv;
@@ -1161,7 +1164,8 @@ VReg Lowerer::lower_print(Call& c) {
                 ev = call_runtime(RtFn::DictKeyAt, ety, {sv, iv});
             else {
                 Inst get;
-                get.op = (sty->kind == TyKind::List || sty->kind == TyKind::Tuple)
+                get.op = (opts_.opt_level >= 1 &&
+                          (sty->kind == TyKind::List || sty->kind == TyKind::Tuple))
                              ? IrOp::IndexLoadUnchecked
                              : IrOp::IndexLoad;
                 get.a = sv;

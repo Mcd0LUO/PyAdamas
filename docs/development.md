@@ -68,6 +68,10 @@ rm -rf build/dev                   # 连 CMake 中间产物一起清
 ./build/dev/py23 run   tests/run/06_operators.py
 ```
 
+生成代码优化等级用 `-O0` / `-O1` / `-O2`（默认 `-O2`），和编译器自身的
+dev/release preset 无关。`ctest` 里的 `py23_opt_levels` 会用三档各跑一遍
+容器/推导式/免检查/序言回归。
+
 运行用例的期望输出这么写：
 
 ```python

@@ -32,6 +32,13 @@ void AsmGen::gen_index_load(const Inst& in) {
             line(std::format("movq %rax, {}", dst_op(in.dst)));
             return;
         }
+        if (opt_ < 1) {
+            line(std::format("movq {}, %rdi", src_op(in.a)));
+            line(std::format("movq {}, %rsi", src_op(in.b)));
+            line("call py23_list_get");
+            line(std::format("movq %rax, {}", dst_op(in.dst)));
+            return;
+        }
         // list/tuple 共用 Py23List 布局：+0 len，+16 data。
         // 快路径用无符号比较一次挡掉 0..len-1 之外的值；负索引归一化
         // 也在内联路径里完成。慢路径只处理越界，运行时直接抛异常且
@@ -81,6 +88,13 @@ void AsmGen::gen_index_unchecked_load(const Inst& in) {
     }
 
 void AsmGen::gen_index_store(const Inst& in) {
+        if (opt_ < 1) {
+            line(std::format("movq {}, %rdi", src_op(in.a)));
+            line(std::format("movq {}, %rsi", src_op(in.b)));
+            line(std::format("movq {}, %rdx", src_op(in.c)));
+            line("call py23_list_set");
+            return;
+        }
         std::string fast = fresh_label("idxsf");
         std::string neg = fresh_label("idxsneg");
         std::string done = fresh_label("idxsdone");
@@ -195,7 +209,7 @@ void AsmGen::gen_vcall(const Inst& in) {
                 line(std::format("movq {}, {}", src_op(in.args[i]), kIntArgRegs[l.reg]));
         }
         line("xorl %r10d, %r10d");
-        line("xorl %eax, %eax");
+        if (opt_ < 2) line("xorl %eax, %eax");
         spill_fp_slots();
         line("call *%r11");
         reload_fp_slots();
@@ -237,7 +251,7 @@ void AsmGen::gen_vcall_static(const Inst& in) {
                 line(std::format("movq {}, {}", src_op(in.args[i]), kIntArgRegs[l.reg]));
         }
         line("xorl %r10d, %r10d");
-        line("xorl %eax, %eax");
+        if (opt_ < 2) line("xorl %eax, %eax");
         spill_fp_slots();
         line("call *%r11");
         reload_fp_slots();
@@ -287,7 +301,7 @@ void AsmGen::gen_super_vcall(const Inst& in) {
                 line(std::format("movq {}, {}", src_op(in.args[i]), kIntArgRegs[l.reg]));
         }
         line("xorl %r10d, %r10d");
-        line("xorl %eax, %eax");
+        if (opt_ < 2) line("xorl %eax, %eax");
         spill_fp_slots();
         line("call *%r11");
         reload_fp_slots();
@@ -326,7 +340,7 @@ void AsmGen::gen_call_direct(const Inst& in) {
                 line(std::format("movq {}, {}", src_op(in.args[i]), kIntArgRegs[l.reg]));
         }
         line("xorl %r10d, %r10d");
-        line("xorl %eax, %eax");
+        if (opt_ < 2) line("xorl %eax, %eax");
         spill_fp_slots();
         line("call *%r11");
         reload_fp_slots();
@@ -371,12 +385,20 @@ void AsmGen::gen_branch(const Inst& in) {
         // 被折叠成常量的条件（如 while True 的 1）不能进 cmpq 的立即数位置。
         if (!sa.empty() && sa[0] == '$') {
             long long v = std::strtoll(sa.c_str() + 1, nullptr, 10);
-            line(std::format("jmp {}", block_label(v ? in.target : in.target2)));
+            int tgt = v ? in.target : in.target2;
+            if (!(opt_ >= 2 && tgt == cur_block_ + 1))
+                line(std::format("jmp {}", block_label(tgt)));
             return;
         }
         line(std::format("cmpq $0, {}", sa));
-        line(std::format("jne {}", block_label(in.target)));
-        line(std::format("jmp {}", block_label(in.target2)));
+        if (opt_ >= 2 && in.target2 == cur_block_ + 1) {
+            line(std::format("jne {}", block_label(in.target)));
+        } else if (opt_ >= 2 && in.target == cur_block_ + 1) {
+            line(std::format("je {}", block_label(in.target2)));
+        } else {
+            line(std::format("jne {}", block_label(in.target)));
+            line(std::format("jmp {}", block_label(in.target2)));
+        }
     }
 
 void AsmGen::gen_return(const Inst& in) {
@@ -422,7 +444,7 @@ void AsmGen::gen_call(const Inst& in) {
                 line(std::format("movq {}, {}", src_op(in.args[i]), kIntArgRegs[l.reg]));
         }
         line(std::format("movq {}, %r10", src_op(in.a)));
-        line("xorl %eax, %eax");
+        if (opt_ < 2) line("xorl %eax, %eax");
         spill_fp_slots();
         line("call *%r11");
         reload_fp_slots();
