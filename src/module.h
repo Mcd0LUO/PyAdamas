@@ -42,6 +42,7 @@ std::expected<ModuleInfoPtr, std::string> decode_module_interface(const std::str
 uint64_t fnv1a64(const void* data, size_t n);
 inline uint64_t fnv1a64(const std::string& s) { return fnv1a64(s.data(), s.size()); }
 std::string hex64(uint64_t v);
+std::string module_symbol_prefix(const std::string& module);
 std::string module_global_symbol(const std::string& module, const std::string& name);
 std::string module_ready_symbol(const std::string& module);
 std::string module_init_symbol(const std::string& module);

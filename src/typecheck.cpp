@@ -842,8 +842,9 @@ void TypeChecker::stmt(Stmt& s) {
                         unsupported.push_back("import");
                         continue;
                     }
-                    if (al.name.find('.') != std::string::npos) {
-                        err(s.line, s.col, "dotted module imports are not supported yet");
+                    if (al.name.find('.') != std::string::npos && al.asname.empty()) {
+                        err(s.line, s.col,
+                            "dotted import needs 'as name' (or use from ... import)");
                         continue;
                     }
                     ModuleInfoPtr info = module_lookup_(al.name);
@@ -875,7 +876,16 @@ void TypeChecker::stmt(Stmt& s) {
                     break;
                 }
                 if (im.names.size() == 1 && im.names[0].name == "*") {
-                    err(s.line, s.col, "'from ... import *' is not supported yet");
+                    ModuleInfoPtr info = module_lookup_(im.module);
+                    if (!info) {
+                        star_import_ = true;
+                        unsupported.push_back("import");
+                        break;
+                    }
+                    for (auto& [n, ty] : info->globals)
+                        if (!n.empty() && n[0] != '_') declare(n, ty, s.line);
+                    for (auto& [n, ic] : info->classes)
+                        if (!n.empty() && n[0] != '_') declare(n, mk_class(ic.cls.get()), s.line);
                     break;
                 }
                 ModuleInfoPtr info = module_lookup_(im.module);
@@ -892,6 +902,10 @@ void TypeChecker::stmt(Stmt& s) {
                     }
                     auto it = info->globals.find(al.name);
                     if (it == info->globals.end()) {
+                        if (auto child = module_lookup_(im.module + "." + al.name)) {
+                            cur_->modules[bind] = std::move(child);
+                            continue;
+                        }
                         err(s.line, s.col,
                             std::format("module '{}' has no attribute '{}'", im.module, al.name));
                         declare(bind, t_unknown(), s.line);

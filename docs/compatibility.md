@@ -25,7 +25,7 @@ py23 不追求兼容 CPython：语义是按静态类型的需要重新定的。�
 | `*args` | 形参是 `list[T]` | 形参是 tuple | 列表和元组在 py23 里表示相同；`len` / 下标 / 迭代一致 |
 | 函数装饰器 | `@dec` 在定义点立即执行，包装函数必须用固定形参转发 | 任意可调用 | 没有运行时签名信息，`*args` 转发给 unknown 被装饰者无法绑定 |
 | `with` | 只支持类实例的 `__enter__` / `__exit__`；正常、`return` / `break` / `continue` 和异常路径都调用 `__exit__` | 完整上下文管理协议 | `__exit__` 返回值只有真/假语义；异常路径传 `(type, message, None)` |
-| import | 本地单层 `.py`；`m.x` 直接读写模块全局；`from m import x` 是快照；模块别名不能当值 | 任意模块/包、运行时模块对象 | 点号/相对/星号导入和跨模块继承暂不支持；导入类可构造/字段/方法；内置 math/sys 由编译器提供 |
+| import | 本地单层 `.py`；`m.x` 直接读写模块全局；`from m import x` 是快照；模块别名不能当值 | 任意模块/包、运行时模块对象 | 支持包/相对导入/静态 `import *`（按非下划线导出）；跨模块继承暂不支持 |
 | 模块初始化 | 第一次执行 import 时惰性运行一次；循环导入编译期报错 | 支持循环导入和部分初始化 | 初始化失败的模块不会再重试；模块对象不可见 |
 | 推导式 | list/set/dict 推导式按循环展开；生成器表达式立即构造成 list | 生成器惰性求值 | 没有生成器/协程状态机 |
 | 递归深度 | 受栈大小限制（万级） | 默认 1000，可调 | 没有解释器递归检查 |
@@ -55,7 +55,7 @@ py23 不追求兼容 CPython：语义是按静态类型的需要重新定的。�
 
 **语法层就拒**（`check` 报错）：`bytes` / `complex` 字面量、超出 int64 的整数、`match` 语句、Python 2 遗留写法、方法缺 `self`、字段赋值类型不符。
 
-**能解析、能过类型检查，但 `build` 报错**：生成器、`async`/`await`、`del`、`print(*args)`、通过 unknown 函数值的 `*` / `**` 展开、`*` 位于固定形参之前且不是定长 tuple、`raise ... from`、非内置异常名、`finally` 体内跳出 finally 的 `return`/`break`/`continue`、点号/相对/星号 import、跨模块继承、带装饰器的方法、类装饰器、`print(file=)`、把类名当值用、函数内定义类、**多继承、类体里的非声明语句、类体字段默认值里的 lambda**。
+**能解析、能过类型检查，但 `build` 报错**：生成器、`async`/`await`、`del`、`print(*args)`、通过 unknown 函数值的 `*` / `**` 展开、`*` 位于固定形参之前且不是定长 tuple、`raise ... from`、非内置异常名、`finally` 体内跳出 finally 的 `return`/`break`/`continue`、跨模块继承、带装饰器的方法、类装饰器、`print(file=)`、把类名当值用、函数内定义类、**多继承、类体里的非声明语句、类体字段默认值里的 lambda**。
 
 清楚这个分层很重要：`py23 check` 尽量当通用 Python 语法/类型检查器用，检查器放宽的边界都记在 [CHANGELOG 0.6.1](../CHANGELOG.md)；`py23 build` 才是「能不能编译」的判据。
 
@@ -68,7 +68,7 @@ py23 不追求兼容 CPython：语义是按静态类型的需要重新定的。�
 | 正例 | `ctest --preset dev` 里 `tests/*.py` | 11 个文件 | 前端退回保守 |
 | 反例 | `ctest --preset dev` 里 `tests/fail/*.py` | 33 个文件 | 检查器为了过测而放水 |
 | 运行 | `ctest --preset dev` 里 `tests/run/*.py` | 22 个文件 | 后端烂掉没人知道 |
-| 模块 | `ctest --preset dev` 里 `tests/modules/*/` | 7 个目录 | 分模块编译/链接、惰性初始化、缓存失效 |
+| 模块 | `ctest --preset dev` 里 `tests/modules/*/` | 8 个目录 | 分模块编译/链接、惰性初始化、缓存失效 |
 | 未建模 | `ctest --preset dev` 里 `tests/unsupported/*.py` | 4 个文件 | 「标了没建模、实际却悄悄编译过去」 |
 | 内存 | 16MB `RLIMIT_AS` 下跑压力程序 | 拼接 / 对象 / 闭包 / 容器 / 切片 / 删除 / 推导式 / 变长实参 / `with` / 装饰器 / 异常展开 / 环 / unknown 泄漏 | 引用计数或 GC 漏插桩、重复释放、误回收 |
 | 差分 | `python3 tests/diff/run_diff.py` | 随机程序 | 语义漂移、边界错误 |

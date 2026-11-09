@@ -1,4 +1,5 @@
 #include "module.h"
+#include <cctype>
 
 #include <cstdio>
 #include <cstring>
@@ -311,20 +312,27 @@ uint64_t fnv1a64(const void* data, size_t n) {
 
 std::string hex64(uint64_t v) { return std::format("{}", v); }
 
+std::string module_symbol_prefix(const std::string& module) {
+    std::string out;
+    for (char c : module)
+        out.push_back((std::isalnum(static_cast<unsigned char>(c)) || c == '_') ? c : '_');
+    return out;
+}
+
 std::string module_global_symbol(const std::string& module, const std::string& name) {
-    return std::format("py23${}$g${}", module, name);
+    return std::format("py23${}$g${}", module_symbol_prefix(module), name);
 }
 std::string module_ready_symbol(const std::string& module) {
-    return std::format("py23${}$ready", module);
+    return std::format("py23${}$ready", module_symbol_prefix(module));
 }
 std::string module_init_symbol(const std::string& module) {
-    return std::format("py23${}$init", module);
+    return std::format("py23${}$init", module_symbol_prefix(module));
 }
 std::string module_roots_symbol(const std::string& module) {
-    return std::format("py23${}$roots", module);
+    return std::format("py23${}$roots", module_symbol_prefix(module));
 }
 std::string module_class_new_symbol(const std::string& module, const std::string& cls) {
-    return std::format("py23${}$n${}", module, cls);
+    return std::format("py23${}$n${}", module_symbol_prefix(module), cls);
 }
 
 std::expected<std::string, std::string> encode_module_interface(const ModuleInfo& info) {

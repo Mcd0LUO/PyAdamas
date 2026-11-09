@@ -215,6 +215,8 @@ struct ModuleUnit {
     std::string manifest_path;
     std::string asm_text;
     bool is_entry = false;
+    bool is_package = false;
+    std::string parent_name;
     bool from_cache = false;
     int state = 0;  // 0 未访问 / 1 正在访问 / 2 完成
 };
@@ -249,17 +251,51 @@ std::string canonical_path(const std::string& p) {
     return ec ? std::filesystem::absolute(p).lexically_normal().string() : c.string();
 }
 
-std::optional<std::string> resolve_module_file(const std::string& importer,
-                                               const std::string& name,
-                                               const std::vector<std::string>& include_dirs) {
-    std::vector<std::filesystem::path> dirs;
-    dirs.push_back(std::filesystem::path(importer).parent_path());
-    for (auto& d : include_dirs) dirs.emplace_back(d);
-    for (auto& d : dirs) {
-        auto candidate = d / (name + ".py");
-        std::error_code ec;
-        if (std::filesystem::is_regular_file(candidate, ec))
-            return canonical_path(candidate.string());
+struct ResolvedModule {
+    std::string path;
+    bool is_package = false;
+};
+
+std::optional<ResolvedModule> resolve_module_path(const std::string& importer,
+                                                  const std::string& full_name,
+                                                  const std::vector<std::string>& include_dirs) {
+    std::vector<std::string> parts;
+    size_t start = 0;
+    while (true) {
+        size_t dot = full_name.find('.', start);
+        parts.push_back(full_name.substr(start, dot == std::string::npos ? std::string::npos
+                                                                        : dot - start));
+        if (dot == std::string::npos) break;
+        start = dot + 1;
+    }
+    std::vector<std::filesystem::path> roots;
+    roots.push_back(std::filesystem::path(importer).parent_path());
+    for (auto& d : include_dirs) roots.emplace_back(d);
+    // 相对导入被改写成完整包名后，模块所在包可能比入口目录深；
+    // 从 importer 目录逐级向上找包根。
+    for (auto p = std::filesystem::path(importer).parent_path().parent_path();
+         !p.empty(); p = p.parent_path()) {
+        roots.push_back(p);
+        if (p == p.root_path()) break;
+    }
+    std::error_code ec;
+    for (auto& root : roots) {
+        std::filesystem::path dir = root;
+        bool ok = true;
+        for (size_t i = 0; i + 1 < parts.size(); ++i) {
+            dir /= parts[i];
+            if (!std::filesystem::is_regular_file(dir / "__init__.py", ec)) {
+                ok = false;
+                break;
+            }
+        }
+        if (!ok) continue;
+        auto file = dir / (parts.back() + ".py");
+        if (std::filesystem::is_regular_file(file, ec))
+            return ResolvedModule{canonical_path(file.string()), false};
+        auto pkg = dir / parts.back() / "__init__.py";
+        if (std::filesystem::is_regular_file(pkg, ec))
+            return ResolvedModule{canonical_path(pkg.string()), true};
     }
     return std::nullopt;
 }
@@ -268,6 +304,7 @@ struct ImportReq {
     std::string name;
     int line = 1;
     int col = 1;
+    std::vector<std::string> from_names;  // ImportFrom 的名字，可能是子模块
 };
 
 struct ImportIssue {
@@ -276,89 +313,110 @@ struct ImportIssue {
     std::string msg;
 };
 
-void scan_imports_body(const std::vector<py23::StmtPtr>& body, std::vector<ImportReq>& reqs,
-                       std::vector<ImportIssue>& issues);
+void scan_imports_body(std::vector<py23::StmtPtr>& body, std::vector<ImportReq>& reqs,
+                       std::vector<ImportIssue>& issues, const std::string& pkg);
 
-void scan_imports_stmt(const py23::Stmt& s, std::vector<ImportReq>& reqs,
-                       std::vector<ImportIssue>& issues) {
+void scan_imports_stmt(py23::Stmt& s, std::vector<ImportReq>& reqs,
+                       std::vector<ImportIssue>& issues, const std::string& pkg) {
     using namespace py23;
     switch (s.kind) {
         case StmtKind::Import: {
-            auto& im = static_cast<const Import&>(s);
+            auto& im = static_cast<Import&>(s);
             for (auto& a : im.names) {
-                if (a.name.find('.') != std::string::npos) {
-                    issues.push_back({s.line, s.col, "dotted module imports are not supported yet"});
+                if (a.name.find('.') != std::string::npos && a.asname.empty()) {
+                    issues.push_back({s.line, s.col,
+                                      "dotted import needs 'as name' (or use from ... import)"});
                     continue;
                 }
-                reqs.push_back({a.name, s.line, s.col});
+                reqs.push_back({a.name, s.line, s.col, {}});
             }
             break;
         }
         case StmtKind::ImportFrom: {
-            auto& im = static_cast<const ImportFrom&>(s);
-            if (im.level != 0 || im.module.empty()) {
-                issues.push_back({s.line, s.col, "relative imports are not supported yet"});
+            auto& im = static_cast<ImportFrom&>(s);
+            std::string module = im.module;
+            if (im.level > 0) {
+                std::string base = pkg;
+                for (int level = 1; level < im.level; ++level) {
+                    auto dot = base.rfind('.');
+                    if (dot == std::string::npos) {
+                        base.clear();
+                        break;
+                    }
+                    base.resize(dot);
+                }
+                if (base.empty() && im.level > 1) {
+                    issues.push_back({s.line, s.col, "relative import goes beyond top-level package"});
+                    break;
+                }
+                module = module.empty() ? base : (base.empty() ? module : base + "." + module);
+                im.module = module;
+                im.level = 0;
+            }
+            if (module.empty()) {
+                issues.push_back({s.line, s.col, "relative import outside a package"});
                 break;
             }
-            if (im.names.size() == 1 && im.names[0].name == "*") {
-                issues.push_back({s.line, s.col, "'from ... import *' is not supported yet"});
-                break;
-            }
-            if (im.module.find('.') != std::string::npos) {
-                issues.push_back({s.line, s.col, "dotted module imports are not supported yet"});
-                break;
-            }
-            reqs.push_back({im.module, s.line, s.col});
+            ImportReq req{module, s.line, s.col, {}};
+            for (auto& a : im.names)
+                if (a.name != "*") req.from_names.push_back(a.name);
+            reqs.push_back(std::move(req));
             break;
         }
         case StmtKind::If: {
-            auto& f = static_cast<const If&>(s);
-            for (auto& b : f.branches) scan_imports_body(b.body, reqs, issues);
-            scan_imports_body(f.orelse, reqs, issues);
+            auto& f = static_cast<If&>(s);
+            for (auto& b : f.branches) scan_imports_body(b.body, reqs, issues, pkg);
+            scan_imports_body(f.orelse, reqs, issues, pkg);
             break;
         }
         case StmtKind::While: {
-            auto& w = static_cast<const While&>(s);
-            scan_imports_body(w.body, reqs, issues);
-            scan_imports_body(w.orelse, reqs, issues);
+            auto& w = static_cast<While&>(s);
+            scan_imports_body(w.body, reqs, issues, pkg);
+            scan_imports_body(w.orelse, reqs, issues, pkg);
             break;
         }
         case StmtKind::For: {
-            auto& f = static_cast<const For&>(s);
-            scan_imports_body(f.body, reqs, issues);
-            scan_imports_body(f.orelse, reqs, issues);
+            auto& f = static_cast<For&>(s);
+            scan_imports_body(f.body, reqs, issues, pkg);
+            scan_imports_body(f.orelse, reqs, issues, pkg);
             break;
         }
         case StmtKind::With: {
-            auto& w = static_cast<const With&>(s);
-            scan_imports_body(w.body, reqs, issues);
+            auto& w = static_cast<With&>(s);
+            scan_imports_body(w.body, reqs, issues, pkg);
             break;
         }
         case StmtKind::Try: {
-            auto& t = static_cast<const Try&>(s);
-            scan_imports_body(t.body, reqs, issues);
-            for (auto& h : t.handlers) scan_imports_body(h.body, reqs, issues);
-            scan_imports_body(t.orelse, reqs, issues);
-            scan_imports_body(t.finalbody, reqs, issues);
+            auto& t = static_cast<Try&>(s);
+            scan_imports_body(t.body, reqs, issues, pkg);
+            for (auto& h : t.handlers) scan_imports_body(h.body, reqs, issues, pkg);
+            scan_imports_body(t.orelse, reqs, issues, pkg);
+            scan_imports_body(t.finalbody, reqs, issues, pkg);
             break;
         }
         case StmtKind::FunctionDef: {
-            auto& f = static_cast<const FunctionDef&>(s);
-            scan_imports_body(f.body, reqs, issues);
+            auto& f = static_cast<FunctionDef&>(s);
+            scan_imports_body(f.body, reqs, issues, pkg);
             break;
         }
         case StmtKind::ClassDef: {
-            auto& c = static_cast<const ClassDef&>(s);
-            scan_imports_body(c.body, reqs, issues);
+            auto& c = static_cast<ClassDef&>(s);
+            scan_imports_body(c.body, reqs, issues, pkg);
             break;
         }
         default: break;
     }
 }
 
-void scan_imports_body(const std::vector<py23::StmtPtr>& body, std::vector<ImportReq>& reqs,
-                       std::vector<ImportIssue>& issues) {
-    for (auto& s : body) scan_imports_stmt(*s, reqs, issues);
+void scan_imports_body(std::vector<py23::StmtPtr>& body, std::vector<ImportReq>& reqs,
+                       std::vector<ImportIssue>& issues, const std::string& pkg) {
+    for (auto& s : body) scan_imports_stmt(*s, reqs, issues, pkg);
+}
+
+std::string unit_package(const ModuleUnit& u) {
+    if (u.is_package) return u.name;
+    auto dot = u.name.rfind('.');
+    return dot == std::string::npos ? std::string() : u.name.substr(0, dot);
 }
 
 bool parse_unit(ModuleUnit& u) {
@@ -463,16 +521,40 @@ bool visit_unit(Program& p, ModuleUnit& u, std::vector<ModuleUnit*>& stack) {
 
     std::vector<ImportReq> reqs;
     std::vector<ImportIssue> issues;
-    scan_imports_body(u.ast->body, reqs, issues);
+    scan_imports_body(u.ast->body, reqs, issues, unit_package(u));
     if (!issues.empty()) {
         for (auto& i : issues) report(u.path, u.source, i.line, i.col, i.msg);
         return false;
     }
 
-    std::set<std::string> seen;
-    for (auto& req : reqs) {
-        if (!seen.insert(req.name).second) continue;
-        if (!valid_module_name(req.name)) {
+    // 合并同名依赖，保留 ImportFrom 的子模块候选名。
+    std::map<std::string, ImportReq> merged;
+    for (auto& r : reqs) {
+        auto it = merged.find(r.name);
+        if (it == merged.end()) merged[r.name] = r;
+        else
+            for (auto& n : r.from_names) it->second.from_names.push_back(n);
+    }
+    std::vector<ImportReq> queue;
+    for (auto& [n, r] : merged) queue.push_back(r);
+
+    for (size_t qi = 0; qi < queue.size(); ++qi) {
+        ImportReq req = queue[qi];
+        bool dotted = req.name.find('.') != std::string::npos;
+        bool name_ok = dotted ? [&] {
+            size_t s = 0;
+            while (s <= req.name.size()) {
+                size_t d = req.name.find('.', s);
+                std::string part = req.name.substr(s, d == std::string::npos ? std::string::npos
+                                                                             : d - s);
+                if (!valid_module_name(part)) return false;
+                if (d == std::string::npos) break;
+                s = d + 1;
+            }
+            return true;
+        }()
+                              : valid_module_name(req.name);
+        if (!name_ok) {
             report(u.path, u.source, req.line, req.col, "invalid module name");
             return false;
         }
@@ -485,13 +567,13 @@ bool visit_unit(Program& p, ModuleUnit& u, std::vector<ModuleUnit*>& stack) {
             // 内置模块没有源文件/对象，只提供编译期接口。
             continue;
         }
-        auto found = resolve_module_file(u.path, req.name, p.include_dirs);
+        auto found = resolve_module_path(u.path, req.name, p.include_dirs);
         if (!found) {
             report(u.path, u.source, req.line, req.col,
                    std::format("cannot find module '{}'", req.name));
             return false;
         }
-        std::string canonical = canonical_path(*found);
+        std::string canonical = canonical_path(found->path);
         auto it = p.units.find(req.name);
         ModuleUnit* dep = nullptr;
         if (it != p.units.end()) {
@@ -507,6 +589,9 @@ bool visit_unit(Program& p, ModuleUnit& u, std::vector<ModuleUnit*>& stack) {
             unit->name = req.name;
             unit->runtime_name = req.name;
             unit->path = canonical;
+            unit->is_package = found->is_package;
+            auto dot = req.name.rfind('.');
+            if (dot != std::string::npos) unit->parent_name = req.name.substr(0, dot);
             auto src = read_file(canonical);
             if (!src) {
                 report(u.path, u.source, req.line, req.col, src.error());
@@ -520,6 +605,13 @@ bool visit_unit(Program& p, ModuleUnit& u, std::vector<ModuleUnit*>& stack) {
         }
         if (!visit_unit(p, *dep, stack)) return false;
         u.deps.push_back(req.name);
+        // from pkg import mod：mod 可能是子模块，按完整名加载一份接口。
+        for (auto& n : req.from_names) {
+            std::string child = req.name + "." + n;
+            if (p.units.count(child)) continue;
+            if (resolve_module_path(u.path, child, p.include_dirs))
+                queue.push_back({child, req.line, req.col, {}});
+        }
     }
 
     stack.pop_back();

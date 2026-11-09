@@ -345,23 +345,20 @@ class Connection:
 
 ### import
 
-第一版只支持**本地单层 `.py` 模块**：
+支持本地包与相对导入（包目录必须有 `__init__.py`）：
 
-- `import m` / `import m as n`：`m` 是编译期模块别名，`m.x` 直接读写
-  模块全局，`m.f()` 调用模块函数。模块别名、导入的函数/类不能当值传递。
-- `from m import x as y`：在导入点把 `m.x` **快照**到本地/全局槽；以后
-  模块里再改 `x` 不会影响已导入的名字。函数默认值、关键字参数、`*args`
-  等签名从 `.py23i` 接口读取。
-- 模块搜索：入口文件目录 + `-I` 路径；`import a.b`、相对导入、
-  `from ... import *` 暂不支持。
-- 每个模块编译成独立 `.o` 和二进制 `.py23i` 接口；顶层代码在第一次执行
-  import 时惰性运行一次。循环导入在编译期报错。
+- `import m` / `import m as n` / `import pkg.mod as m`：`m` 是编译期模块别名。
+- `from m import x as y`：快照绑定；`x` 也可以是子模块，绑定为模块别名。
+- `from pkg.mod import x`、`from . import mod`、`from .mod import x`、
+  `from ..pkg import y`：相对层级按当前包解析。
+- `from m import *`：静态展开非下划线名字（暂不解析 `__all__`）。
+- 点号 import 不带 `as` 要求改用 `as` 或 `from ... import`；包初始化只在
+  显式 `import pkg`/`from pkg import ...` 时执行，不会因为导入子模块自动
+  先跑 `__init__.py`。
 - 每个模块有自己的 `__name__` / `__file__`；入口模块的 `__name__` 是
-  `"__main__"`，可以用 `if __name__ == "__main__":`。
-- 跨模块类：`import m; m.C(...)` / `from m import C` 可构造实例，字段读写
-  和方法调用正常；类本身不能当值，也不支持 `class D(imported.C)`。类类型
-  出现在跨模块函数签名里会退化成 unknown。
-- 内置 `math` / `sys`：`math` 常量/函数、`sys.argv` / `exit` / `maxsize`；原生函数只能直接调用。
+  `"__main__"`。
+- 内置 `math` / `sys`：`math` 常量/函数、`sys.argv` / `exit` / `maxsize`；
+  原生函数只能直接调用。
 
 ### 跳转与异常
 
@@ -391,7 +388,7 @@ class Connection:
 - Python 2 遗留写法（`0x1L`、`lambda (a, b):`、`except X, e`）
 - 类：方法缺 `self`、字段赋值类型不符、访问不存在的字段或方法（`self.xxx` 与外部基类的成员除外）
 
-**代码生成层**（`check` 通过，`build` 报错）：生成器、`async`、`del`、带装饰器的方法/类、`print(*args)`、通过 unknown 函数值的 `*` / `**` 展开、`*` 位于固定形参之前且不是定长 tuple、`raise ... from`、非内置异常名、`finally` 体内跳出 finally 的控制流、点号/相对/星号 import、跨模块继承、把类名当值用（`f = Point`）、函数内定义类、多继承、类体里的非声明语句。类体字段默认值里的 `lambda` 也在这一层拒绝。
+**代码生成层**（`check` 通过，`build` 报错）：生成器、`async`、`del`、带装饰器的方法/类、`print(*args)`、通过 unknown 函数值的 `*` / `**` 展开、`*` 位于固定形参之前且不是定长 tuple、`raise ... from`、非内置异常名、`finally` 体内跳出 finally 的控制流、跨模块继承、把类名当值用（`f = Point`）、函数内定义类、多继承、类体里的非声明语句。类体字段默认值里的 `lambda` 也在这一层拒绝。
 
 为什么这么分层：前端宽、后端严。`check` 的定位是「语法和类型有没有明显毛病」，可以对任意 Python 文件跑；`build` 才是「这门语言现在能不能编译它」。
 

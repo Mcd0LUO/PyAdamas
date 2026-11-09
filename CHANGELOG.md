@@ -4,6 +4,32 @@
 
 早期阶段没有逐条留痕，按阶段归纳；0.4 之后逐条记录。
 
+## [0.15] - 2026-11-09
+
+包、相对导入与静态 `from m import *`。
+
+### 新增
+
+- 包目录（必须带 `__init__.py`）和点号模块名解析：
+  `import pkg`、`import pkg.mod as m`、`from pkg.mod import x`。
+- 相对导入按当前包重写：`from . import mod`、`from .mod import x`、
+  `from ..pkg import y`。
+- `from pkg import mod` 中子模块绑定为模块别名；普通名字保持快照绑定。
+- `from m import *` 静态展开非下划线全局/类/原生符号。
+- 模块符号前缀统一转义点号；缓存路径按完整模块名 + 源路径哈希。
+- 用例 `tests/modules/packages`。
+
+### 验证
+
+- `ctest --preset dev` 全绿（8 个模块目录）
+- 差分测试 600 个程序零差异
+
+### 已知限制
+
+- 包 `__init__` 不会因为导入子模块自动执行，需要显式 `import pkg`
+- 点号 import 必须带 `as`
+- `__all__`、命名空间包、跨模块继承未支持
+
 ## [0.14c] - 2026-11-09
 
 内置最小标准库：`math` / `sys`。

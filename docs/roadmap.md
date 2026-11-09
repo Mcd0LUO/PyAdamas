@@ -163,7 +163,7 @@ traceback / `raise ... from`；`finally` 体内跳出 finally 的
 `return` / `break` / `continue` 被后端拒绝；异常路径的局部变量回收
 依赖 GC 时机。
 
-## 0.14：import（单层模块已实现）
+## 0.14：import（模块、类、内置库已实现）
 
 按联调结论：**分模块编译 + 链接 + 二进制接口 + 增量缓存**。
 
@@ -195,10 +195,23 @@ traceback / `raise ... from`；`finally` 体内跳出 finally 的
 - 内置 `math` / `sys`（已完成）：`math` 常量与函数、`sys.argv`（`main(argc, argv)`）、
   `sys.exit` / `maxsize`；原生函数 `from math import sqrt` 直接调用。
 
-**0.14 已知边界**：点号/相对/星号 import、跨模块继承被拒绝；
+**0.14 已知边界**：跨模块继承被拒绝；
 类类型在跨模块签名里是 unknown；模块导出类的 `__init__` 带
 `*args`/`**kwargs` 会被拒；模块 init 失败不会重试；编译器 ABI 变化或
 缓存格式升级时用 `--rebuild` / 清理 `modcache`。
+
+## 0.15：包、相对导入与 import *
+
+- 包目录带 `__init__.py`；点号模块路径逐级解析，`import pkg.mod as m`、
+  `from pkg.mod import x` 可用；点号 import 不带 `as` 要求改写。
+- 相对导入 `from . import mod`、`from .mod import x`、`from ..pkg import y`
+  在构建图阶段按当前包改写成完整模块名。
+- `from pkg import mod` 中 `mod` 是子模块时绑定模块别名；普通名字仍是
+  快照绑定。
+- `from m import *` 静态展开非下划线全局/类/原生符号；`__all__` 暂不解析。
+- 用例 `tests/modules/packages` 覆盖包、相对导入、子模块别名和星号导入。
+- 已知边界：包 `__init__` 不会因为导入子模块自动执行；点号 import 必须
+  带 `as`；`__all__`、命名空间包、跨模块继承未支持。
 
 ## 下一步
 

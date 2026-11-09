@@ -1966,17 +1966,18 @@ void Lowerer::lower_raise(Raise& r) {
 }
 
 ModuleInfoPtr Lowerer::resolve_module_alias(const std::string& name) const {
-    // 局部变量 / 推导式变量 / 模块级普通变量都能遮蔽模块别名。
-    if (st_ && st_->slots.count(name)) return nullptr;
-    if (comp_slot(name) >= 0) return nullptr;
-    if (auto* ms = tc_.module_scope())
-        if (ms->vars.count(name)) return nullptr;
+    // 显式登记的模块别名优先：from pkg import sub 会把 sub 放进别名表，
+    // 类型检查的 hoist 也可能留下同名 unknown 变量，不能让它遮住别名。
     if (st_) {
         auto it = st_->modules.find(name);
         if (it != st_->modules.end()) return it->second;
     }
     auto it = module_aliases_.find(name);
-    return it == module_aliases_.end() ? nullptr : it->second;
+    if (it != module_aliases_.end()) return it->second;
+    // 真正的局部变量 / 推导式变量仍然遮蔽模块别名。
+    if (st_ && st_->slots.count(name)) return nullptr;
+    if (comp_slot(name) >= 0) return nullptr;
+    return nullptr;
 }
 
 void Lowerer::ensure_module_init(const ModuleInfoPtr& mod) {
@@ -2119,8 +2120,8 @@ VReg Lowerer::call_native(const std::string& module, const std::string& member, 
 
 void Lowerer::lower_import(Import& im) {
     for (auto& al : im.names) {
-        if (al.name.find('.') != std::string::npos) {
-            err(im.line, im.col, "dotted module imports are not supported yet");
+        if (al.name.find('.') != std::string::npos && al.asname.empty()) {
+            err(im.line, im.col, "dotted import needs 'as name' (or use from ... import)");
             continue;
         }
         std::string bind = al.asname.empty() ? al.name : al.asname;
@@ -2144,14 +2145,6 @@ void Lowerer::lower_import_from(ImportFrom& im) {
         err(im.line, im.col, "relative imports are not supported yet");
         return;
     }
-    if (im.names.size() == 1 && im.names[0].name == "*") {
-        err(im.line, im.col, "'from ... import *' is not supported yet");
-        return;
-    }
-    if (im.module.find('.') != std::string::npos) {
-        err(im.line, im.col, "dotted module imports are not supported yet");
-        return;
-    }
     if (!opts_.module_lookup) {
         err(im.line, im.col, "import requires a multi-module build");
         return;
@@ -2162,6 +2155,29 @@ void Lowerer::lower_import_from(ImportFrom& im) {
         return;
     }
     if (!mod->builtin) ensure_module_init(mod);
+    if (im.names.size() == 1 && im.names[0].name == "*") {
+        for (auto& [name, ty] : mod->globals) {
+            if (name.empty() || name[0] == '_') continue;
+            if (mod->builtin && native_fn(mod->name, name)) {
+                native_aliases_[name] = NativeRef{mod->name, name};
+                continue;
+            }
+            VReg bv;
+            TypePtr bty;
+            if (mod->builtin && builtin_value(mod->name, name, bv, bty)) {
+                bind_name_value(name, bv, bty);
+                continue;
+            }
+            int gi = extern_global(module_global_symbol(mod->name, name),
+                                   std::format("{}.{}", mod->name, name), ty);
+            VReg v = load_global(gi, ty);
+            if (!ty || ty->kind == TyKind::Unknown) rc_inc_unknown(v);
+            bind_name_value(name, v, ty);
+        }
+        for (auto& [name, ic] : mod->classes)
+            if (!name.empty() && name[0] != '_') imported_classes_[name] = ic;
+        return;
+    }
     for (auto& al : im.names) {
         std::string bind = al.asname.empty() ? al.name : al.asname;
         if (mod->builtin) {
@@ -2185,6 +2201,11 @@ void Lowerer::lower_import_from(ImportFrom& im) {
         }
         auto it = mod->globals.find(al.name);
         if (it == mod->globals.end()) {
+            if (auto child = opts_.module_lookup(im.module + "." + al.name)) {
+                if (st_->is_module_top) module_aliases_[bind] = child;
+                else st_->modules[bind] = child;
+                continue;
+            }
             err(im.line, im.col,
                 std::format("module '{}' has no attribute '{}'", im.module, al.name));
             continue;

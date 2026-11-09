@@ -114,7 +114,7 @@ tools/                    一次性脚本
 
 语法层明确拒绝：`bytes` / `complex` 字面量、超出 int64 的整数、`match` 语句。
 
-能解析、能检查，但 `build` 报错：生成器、`async`、`del`、`print(*args)`、通过 unknown 函数值的 `*` / `**` 展开、`raise ... from`、自定义异常类，以及类的多继承、类体里的非声明语句、带装饰器的方法/类。`finally` 体里跳出 finally 的 `return` / `break` / `continue` 也会被拒。类只支持单继承，没有 `super()`、类属性、`@property`；字段可以不写标注，由 `self.x = ...` 推断。闭包、`lambda`、`*args`/`**kwargs`、推导式、`with`、函数装饰器、`try/except/else/finally`、`raise`、字典/集合、`in`、容器方法与删除、切片（读与赋值）已支持；循环收集器是保守的，可能延迟回收，但没有 `__del__`/弱引用。异常对象只有**类型名 + 消息**，`except ... as e` 里的 `e` 是消息字符串；没有 traceback/异常链。import 目前只支持**本地单层 `.py` 模块**（`import m` / `import m as n` / `from m import x as y`）；点号模块、相对导入、`import *`、跨模块继承还没接；已内置 `math`/`sys`；导入类可以构造、访问字段和调用方法，但类类型出现在跨模块函数签名里会降级成 unknown。空字典的 key 类型是 unknown，内容相同的动态字符串 key 可能按机器字不等；混合 value 类型会退化成 unknown；`keys()` / `values()` / `items()` 返回列表而不是视图。
+能解析、能检查，但 `build` 报错：生成器、`async`、`del`、`print(*args)`、通过 unknown 函数值的 `*` / `**` 展开、`raise ... from`、自定义异常类，以及类的多继承、类体里的非声明语句、带装饰器的方法/类。`finally` 体里跳出 finally 的 `return` / `break` / `continue` 也会被拒。类只支持单继承，没有 `super()`、类属性、`@property`；字段可以不写标注，由 `self.x = ...` 推断。闭包、`lambda`、`*args`/`**kwargs`、推导式、`with`、函数装饰器、`try/except/else/finally`、`raise`、字典/集合、`in`、容器方法与删除、切片（读与赋值）已支持；循环收集器是保守的，可能延迟回收，但没有 `__del__`/弱引用。异常对象只有**类型名 + 消息**，`except ... as e` 里的 `e` 是消息字符串；没有 traceback/异常链。import 支持本地包与相对导入（需要 `__init__.py`）：`import pkg`、`import pkg.mod as m`、`from pkg import mod`、`from .mod import x`、`from ..pkg import y`，以及静态展开的 `from m import *`（按非下划线名字导出，暂不解析 `__all__`）；跨模块继承还没接；已内置 `math`/`sys`；导入类可以构造、访问字段和调用方法，但类类型出现在跨模块函数签名里会降级成 unknown。空字典的 key 类型是 unknown，内容相同的动态字符串 key 可能按机器字不等；混合 value 类型会退化成 unknown；`keys()` / `values()` / `items()` 返回列表而不是视图。
 
 语义上有意与 CPython 不同：列表相等比指针、整数溢出回绕、字符串按字节（`len("中文") == 6`）、读未赋值局部变量得到 0。引用计数处理不了的环和 `unknown` / `list[unknown]` / 混合元组引用由保守 GC 兜底；误报只延迟回收，没有 `__del__`/弱引用。
 
@@ -129,7 +129,7 @@ tools/                    一次性脚本
 | `tests/run/*.py` | 22 | 编译 + 运行，输出与文件末尾的 `# --- expect ---` 逐行比对 |
 | `tests/unsupported/*.py` | 4 | `check` 必须打「没建模」标记，且 `build` 必须拒绝 |
 | `tests/diff/` | 4 个生成器 | 随机程序与 CPython 比 stdout，默认 3 种子 600 个程序 |
-| `tests/modules/` | 7 个目录 | 多模块编译 + 运行 + 二次构建缓存命中 |
+| `tests/modules/` | 8 个目录 | 多模块编译 + 运行 + 二次构建缓存命中 |
 | 内存验收 | — | 16MB 地址空间限制下跑拼接 / 对象 / 闭包 / 容器 / 切片 / 删除 / 推导式 / 变长实参 / `with` / 装饰器 / 异常展开 / 环 / unknown 泄漏 |
 
 ```bash
