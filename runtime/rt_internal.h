@@ -338,6 +338,8 @@ double py23_round_f64(double x, int64_t ndigits);
 int64_t py23_round_i64(int64_t v, int64_t ndigits);
 int64_t py23_str_eq(Py23Str* a, Py23Str* b);
 int64_t py23_str_cmp(Py23Str* a, Py23Str* b);
+/* 字符串方法派发：op 序号与 src/ir.h 的 StrOp 一致；未用的参数传 0。 */
+int64_t py23_str_method(Py23Str* s, int64_t op, int64_t a0, int64_t a1, int64_t a2);
 void list_destroy(void* p);
 void list_gc_release(void* p);
 Py23List* py23_list_new(int64_t cap, int64_t elem_kind);

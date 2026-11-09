@@ -571,6 +571,12 @@ class Connection:
 `keys` / `values` / `items` / `update` / `pop` / `popitem` / `setdefault` /
 `clear` / `copy`；set 有 `add` / `update` / `remove` / `discard` / `pop` /
 `clear` / `copy`；tuple 有 `count` / `index`；int 有 `bit_length`。
+字符串方法（字节串语义、ASCII 大小写）：`upper` / `lower` / `capitalize` /
+`title` / `strip` / `lstrip` / `rstrip` / `split` / `splitlines` / `join` /
+`replace` / `find` / `rfind` / `index` / `startswith` / `endswith` /
+`count` / `zfill` / `ljust` / `rjust` / `center` / `removeprefix` /
+`removesuffix` / `isdigit` / `isalpha` / `isspace` / `isupper` / `islower` /
+`isalnum`。
 其余内置名（`map` / `filter` / `isinstance` / `type` / `getattr` /
 `hash` / `iter` / `next(列表)` / `slice` / `callable` 等）类型层面放行，
 降级阶段报「not supported by the code generator yet」，不会再退化成

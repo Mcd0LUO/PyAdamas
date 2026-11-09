@@ -4,6 +4,36 @@
 
 早期阶段没有逐条留痕，按阶段归纳；0.4 之后逐条记录。
 
+## [0.42] - 2026-11-10
+
+内置函数补齐（四）：字符串方法。
+
+### 新增
+
+- 字符串方法（按字节串语义，ASCII 大小写）：
+  `upper` / `lower` / `casefold` / `capitalize` / `title`；
+  `strip` / `lstrip` / `rstrip`（可选字符集）；`split(sep[, maxsplit])`、
+  无参 `split()` 按空白、`splitlines`；`join`；`replace(old, new[, count])`；
+  `find` / `rfind` / `index`（带 start/end）；`startswith` / `endswith`；
+  `count`；`zfill`；`ljust` / `rjust` / `center`（可填充字符）；
+  `removeprefix` / `removesuffix`；
+  `isdigit` / `isalpha` / `isspace` / `isupper` / `islower` / `isalnum`。
+- 运行时不加几十个 RtFn，而是用一个派发入口
+  `py23_str_method(self, op, a0, a1, a2)`，操作码与 `StrOp` 枚举同序。
+- 测试：`56_str_methods.py`（18 行输出与 CPython 逐字节一致）。
+
+### 验证
+
+- `ctest --preset dev/release` 全绿；O0/O1 全量 56 个运行用例通过；
+  810 程序差分零失败
+
+### 已知限制
+
+- 非 ASCII 的大小写/字符类别判断按字节处理（语言整体是字节串）
+- `str.format`、`encode`、`partition/rpartition`、`expandtabs`、
+  `translate`、`isnumeric/isdecimal/isidentifier/isprintable/istitle`
+  未实现（降级阶段明确报错）
+
 ## [0.41] - 2026-11-10
 
 内置函数补齐（三）：list / dict / tuple 方法。

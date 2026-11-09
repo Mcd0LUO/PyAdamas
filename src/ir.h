@@ -99,6 +99,7 @@ enum class RtFn : uint8_t {
     IntToBase,   // (i64 v, i64 base) -> str*  hex/bin/oct 的格式
     RoundF64,    // (f64 x, i64 ndigits) -> f64
     RoundI64,    // (i64 v, i64 ndigits) -> i64
+    StrMethod,   // (str* self, i64 op, i64 a0, i64 a1, i64 a2) -> i64
     PrintI64,    // (i64) -> void
     PrintF64,    // (f64) -> void
     PrintBool,   // (i64) -> void
@@ -262,6 +263,7 @@ inline const char* rt_name(RtFn f) {
         case RtFn::IntToBase: return "py23_int_to_base";
         case RtFn::RoundF64: return "py23_round_f64";
         case RtFn::RoundI64: return "py23_round_i64";
+        case RtFn::StrMethod: return "py23_str_method";
         case RtFn::PrintI64: return "py23_print_i64";
         case RtFn::PrintF64: return "py23_print_f64";
         case RtFn::PrintBool: return "py23_print_bool";
@@ -419,6 +421,14 @@ inline const char* rt_name(RtFn f) {
     }
     return "?";
 }
+
+// 字符串方法的操作码，序号必须与 runtime/rt_obj.c 的 py23_str_method 一致。
+enum class StrOp : int64_t {
+    Upper, Lower, Strip, LStrip, RStrip, StripChars, LStripChars, RStripChars,
+    SplitWs, SplitSep, Join, Replace, Find, RFind, StartsWith, EndsWith, Count,
+    ZFill, LJust, RJust, Center, Capitalize, Title, IsDigit, IsAlpha, IsSpace,
+    IsUpper, IsLower, IsAlphaNum, RemovePrefix, RemoveSuffix, SplitLines,
+};
 
 enum class IrOp : uint8_t {
     // ── 常量 ──────────────────────────────────────────────

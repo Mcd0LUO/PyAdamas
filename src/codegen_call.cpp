@@ -536,6 +536,13 @@ void AsmGen::gen_call_rt(const Inst& in) {
                 if (in.args.size() > 4)
                     line(std::format("movq {}, %r8", src_op(in.args[4])));
                 break;
+            case RtFn::StrMethod:
+                line(std::format("movq {}, %rdi", src_op(in.args[0])));
+                line(std::format("movq {}, %rsi", src_op(in.args[1])));
+                line(std::format("movq {}, %rdx", src_op(in.args[2])));
+                line(std::format("movq {}, %rcx", src_op(in.args[3])));
+                line(std::format("movq {}, %r8", src_op(in.args[4])));
+                break;
             case RtFn::Raise:
                 line(std::format("movq {}, %rdi", src_op(in.args[0])));
                 line(std::format("movq {}, %rsi", src_op(in.args[1])));
