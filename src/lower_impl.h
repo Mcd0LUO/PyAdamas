@@ -909,6 +909,8 @@ private:
     VReg lower_compare(Compare& c);
     VReg lower_call(Call& c);
     VReg lower_builtin_call(const std::string& name, Call& c);
+    VReg lower_minmax(Call& c, bool is_min);
+    VReg lower_sum(Call& c);
     VReg lower_print(Call& c);
     VReg lower_method_call(Attribute& at, Call& c);
     VReg lower_subscript(Subscript& s);

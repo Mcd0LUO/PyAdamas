@@ -35,6 +35,17 @@ void* py23_asyncgen_aclose(void* gen) {
     return d;
 }
 
+void* py23_asyncgen_athrow(void* gen, Py23ExcValue* exc) {
+    if (!frame_is_agen(gen))
+        py23_raise_c("TypeError", "athrow() expects an async generator");
+    loop_ensure();
+    Py23Await* d = await_new(4);
+    d->driver_gen = (int64_t)gen;
+    py23_rc_inc(gen);
+    d->driver_throw = (int64_t)py23_exc_from_value(exc);
+    return d;
+}
+
 void driver_complete(Py23Await* d, int64_t value, Py23Exception* exc) {
     if (d->done) {
         if (exc) exc_free(exc);
@@ -70,6 +81,7 @@ void agen_drive(Py23Await* d) {
     }
     int64_t* p = (int64_t*)g;
     int closing = d->driver_close != 0;
+    int throwing = d->driver_throw != 0;
 
     if (closing) {
         if (p[1] == 1 || p[1] == 2) {
@@ -89,6 +101,18 @@ void agen_drive(Py23Await* d) {
         } else {
             p[5] = 1;  // 走生成代码的 close 清理分发
         }
+    } else if (throwing) {
+        if (p[1] == 1 || p[1] == 2) {
+            exc_free((Py23Exception*)d->driver_throw);
+            d->driver_throw = 0;
+            driver_complete(d, 0, exc_new("StopAsyncIteration", ""));
+            return;
+        }
+        // 把异常放到帧里，走到挂起点或未启动入口后由 throw 分发重新抛出。
+        if (p[8]) exc_free((Py23Exception*)p[8]);
+        p[8] = d->driver_throw;
+        d->driver_throw = 0;
+        p[1] = 0;
     } else {
         if (p[1] == 1) {
             driver_complete(d, 0, exc_new("StopAsyncIteration", ""));

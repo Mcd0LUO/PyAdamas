@@ -754,3 +754,6 @@ int64_t py23_pow_i64(int64_t base, int64_t exp) {
     }
     return r;
 }
+
+/* abs(int)：回绕语义和整数加减一致。 */
+int64_t py23_abs_i64(int64_t v) { return v < 0 ? -v : v; }

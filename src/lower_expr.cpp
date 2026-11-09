@@ -307,6 +307,14 @@ VReg Lowerer::expr(Expr& e) {
             TypePtr raw = tc_.type_of(a.value.get());
             TypePtr ot = strip_optional(raw);
             bool opt = ot != raw;
+            if (ot && ot->kind == TyKind::Exception) {
+                VReg ev = expr(*a.value);
+                if (a.attr == "args")
+                    return call_runtime(RtFn::ExcValueArgs, mk_tuple({t_unknown()}), {ev});
+                err(e.line, e.col,
+                    std::format("'exception' object has no attribute '{}'", a.attr));
+                return const_none();
+            }
             if (ot && ot->kind == TyKind::Class && ot->cls) {
                 if (auto* f = ot->cls->field(a.attr)) {
                     VReg obj = expr(*a.value);
@@ -383,6 +391,10 @@ VReg Lowerer::lower_binop(BinOp& b) {
     }
     VReg l = expr(*b.left);
     VReg r = expr(*b.right);
+    if (ty && ty->kind == TyKind::Str) {
+        if (lt && lt->kind == TyKind::Exception) l = convert_to(l, lt, t_str());
+        if (rt && rt->kind == TyKind::Exception) r = convert_to(r, rt, t_str());
+    }
     // int / int 的结果是 float，两个操作数都得先转；int + float 同理。
     // 放在这里做，codegen 就不用每条浮点指令都猜操作数是什么类型。
     if (ty && ty->kind == TyKind::Float) {
@@ -1113,6 +1125,11 @@ VReg Lowerer::lower_ifexp(IfExp& e) {
 VReg Lowerer::convert_to(VReg v, TypePtr from, TypePtr to) {
     if (!to) return v;
     if (from && type_eq(from, to)) return v;
+    if (to->kind == TyKind::Str && from && from->kind == TyKind::Exception) {
+        VReg s = call_runtime(RtFn::ExcValueStr, t_str(), {v});
+        push_temp(s);
+        return s;
+    }
     Inst in;
     in.op = IrOp::Convert;
     in.a = v;
@@ -1199,6 +1216,12 @@ void Lowerer::print_value(VReg v, TypePtr ty, int line, int col) {
         case TyKind::Int: call_void(RtFn::PrintI64, {v}); break;
         case TyKind::Dict: call_void(RtFn::PrintStr, {const_str("<dict object>")}); break;
         case TyKind::Set: call_void(RtFn::PrintStr, {const_str("<set object>")}); break;
+        case TyKind::Exception: {
+            VReg s = call_runtime(RtFn::ExcValueStr, t_str(), {v});
+            push_temp(s);
+            call_void(RtFn::PrintStr, {s});
+            break;
+        }
         case TyKind::Optional: {
             TypePtr inner = ty->sub.empty() ? t_unknown() : ty->sub[0];
             int some = new_block("print.opt.some");

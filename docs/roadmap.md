@@ -321,6 +321,20 @@ traceback / `raise ... from`；`finally` 体内跳出 finally 的
 已知限制：没有 `athrow`（异常不是一等值）；`aclose` 不 await
 `async with` 的 `__aexit__`；并发 asend + aclose 时另一个驱动对象会挂起。
 
+## 0.24：异常值模型与内置函数（已完成）
+
+- 异常值对象：`ValueError("msg")` 可作为表达式值，`raise e` 抛实例，
+  `except ... as e` 绑定带 `args` 的异常值；`str(e)`/`print(e)` 是消息，
+  `e` 参与字符串拼接按消息处理。
+- `Future.set_exception` 接受异常值；`Future/Task.exception()` 返回异常值；
+  异步生成器补 `athrow(exc)`。
+- 内置函数：`abs` / `min` / `max` / `sum` / `pow`，覆盖多实参、容器迭代、
+  空序列 ValueError 与 int/float 混合。
+- 用例 `tests/run/32_exception_value.py`、`tests/run/33_builtins.py`。
+
+已知限制：`args` 只保存消息；`raise ... from`、traceback、异常链和自定义
+异常类仍未支持。
+
 ## 下一步
 
 - 语言面：方法/类装饰器的剩余形态、生成器 `throw()`、异步生成器 `athrow`
@@ -354,9 +368,9 @@ traceback / `raise ... from`；`finally` 体内跳出 finally 的
 8. **浮点变量不进寄存器**：`xmm` 全是 caller-saved，跨调用要自己 save/restore，所以只提升了整数/指针变量。纯浮点循环（5000 万次累加）0.25s，整数同样次数 0.06s。可行的修法是「函数内没有任何调用时」才提升浮点变量，这样不需要保存；代价是 `load.slot` / `store.slot` 要按类型选 `movsd` 而不是 `movq`
 9. **dict/set 删除是 O(n)**：没有墓碑，每次删除按 `order` 整表重建；小表无所谓，大表高频删除会退化。后续可以换墓碑 + 定期重哈希，或惰性删除
 10. **异常路径的 RC 不精确**：longjmp 跳过普通函数帧时局部变量不执行 `release_slots`，要等 GC；如果要确定性回收，需要给每个函数登记展开清理回调
-11. **异常对象太轻**：只有类型名和消息，没有 `args`/traceback/异常链，也没有自定义异常类；`except ... as e` 的 `e` 是字符串，和 CPython 差异明显
+11. **异常对象仍偏轻**：现在有异常值和 `args`，但 `args` 只保存消息，没有 traceback/异常链，也没有自定义异常类和 `raise ... from`
 12. **含 handler 的函数没有寄存器提升**：longjmp 会回滚 callee-saved 寄存器，只能全走内存槽；异常密集且热点的函数会吃亏
 13. **生成器/协程的表达式能力不全**：`yield`/`yield from`/`await` 只能作为语句或赋值右值，`yield`/`await` 位于 `finally`/`except` 体内都还没接；生成器表达式仍是立即求值的 list；`send`/await 跨挂起值的静态类型不精确；`yield from` 的值固定为 None，也不能 throw
 14. **生成器/协程异常逃出时槽位不精确释放**：异常从 resume longjmp 出去时只把帧标成 aborted，堆槽引用交给 GC 下一轮回收，不做确定性 `rc_dec`
 15. **跨模块生成器/协程不支持**：`.py23i` 里 `Generator[T]` / `Coroutine[T]` 降级成 unknown，导入模块的生成器/协程无法 `for` / `next` / `await`
-16. **asyncio 只是最小集合**：自定义 `__aiter__`、fd 读写/子进程/线程安全循环未支持；异步生成器没有 `athrow`，`aclose` 不 await `async with` 的 `__aexit__`，停在 `async with` 里被直接回收时不等待退出；`wait_readable` 不是 CPython 标准 API；异常结果只有消息字符串（`set_exception` 也只收消息）；Future 回调同步执行；`gather` 结果按 unknown 容器处理；Task 只允许一个并发等待者；异步推导式只能出现在语句/赋值/return 的根位置
+16. **asyncio 只是最小集合**：自定义 `__aiter__`、fd 读写/子进程/线程安全循环未支持；`aclose` 不 await `async with` 的 `__aexit__`，停在 `async with` 里被直接回收时不等待退出；`wait_readable` 不是 CPython 标准 API；Future 回调同步执行；`gather` 结果按 unknown 容器处理；Task 只允许一个并发等待者；异步推导式只能出现在语句/赋值/return 的根位置

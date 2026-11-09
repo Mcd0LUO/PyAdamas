@@ -290,6 +290,13 @@ longjmp 回同步调用点。GC 清扫和进程退出不跑析构器，但会单
 | `py23_handler_discard` | `(handler*) -> void` | 只弹出记录，不清临时值（提前退出用） |
 | `py23_exc_matches` | `(str* type) -> i64` | 当前异常是否属于该类型（含继承） |
 | `py23_exc_accept` | `() -> str*` | pending 转 current，返回消息新字符串 |
+| `py23_exc_accept_value` | `() -> excval*` | pending 转 current，返回异常值（`except as e`） |
+| `py23_exc_value_new` | `(str* type, str* msg) -> excval*` | 构造异常值，msg 为 NULL 表示无参数 |
+| `py23_exc_value_from_exc` | `(Py23Exception*) -> excval*` | 从控制流异常复制一个值对象 |
+| `py23_exc_from_value` | `(excval*) -> Py23Exception*` | 转成 malloc 的 pending 异常 |
+| `py23_exc_value_args` | `(excval*) -> tuple*` | `e.args`（借用，args[0] 是消息） |
+| `py23_exc_value_str` | `(excval*) -> str*` | `str(e)` / `print(e)` 的消息字符串 |
+| `py23_raise_value` | `(excval*) -> void` | 抛异常值（noreturn） |
 | `py23_exc_done` | `() -> void` | 释放 current，恢复上一层异常上下文 |
 | `py23_exc_clear` | `() -> void` | 抑制并释放 pending |
 | `py23_exc_reraise` | `() -> void` | 继续向外交互展开（noreturn） |
@@ -351,6 +358,7 @@ longjmp 回同步调用点。GC 清扫和进程退出不跑析构器，但会单
 | `py23_asyncgen_anext` | `(void*) -> void*` | 创建异步生成器的 `__anext__` 驱动对象 |
 | `py23_asyncgen_asend` | `(void*, i64) -> void*` | `asend(v)` 驱动对象，v 的引用转交驱动 |
 | `py23_asyncgen_aclose` | `(void*) -> void*` | `aclose()` 驱动对象，走 close 分发或注入 GeneratorExit |
+| `py23_asyncgen_athrow` | `(void*, excval*) -> void*` | `athrow(exc)` 驱动对象，在挂起点注入异常 |
 | `py23_asyncio_future_new` | `() -> void*` | 创建 Future（多等待者、回调列表） |
 | `py23_future_set_result` | `(void*, i64) -> void` | 设置结果并唤醒全部等待者 |
 | `py23_future_set_exception` | `(void*, str*) -> void` | 设置失败（类型 `Exception`、消息字符串），唤醒等待者并跑回调 |
@@ -431,6 +439,7 @@ longjmp 回同步调用点。GC 清扫和进程退出不跑析构器，但会单
 | 函数 | 调用方 | 说明 |
 |---|---|---|
 | `py23_pow_i64` | `gen_bin_int` 的 `Pow` | 快速幂；**负指数返回 0**（CPython 返回 float） |
+| `py23_abs_i64` | `abs(int)` | 整数绝对值，回绕语义 |
 | `py23_str_eq` / `py23_str_cmp` | `gen_cmp` | 参数形态固定，没必要进枚举 |
 | `floor` / `fmod` / `pow` | libm | 浮点 `//`、`%`、`**` 直接用 libm |
 

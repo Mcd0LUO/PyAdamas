@@ -90,6 +90,16 @@ typedef struct Py23ExcSave {
     struct Py23ExcSave* up;
 } Py23ExcSave;
 
+/* 异常值对象：`raise ValueError("x")` 里的实例、`except as e` 绑定的 e。
+   控制流仍用 Py23Exception* + longjmp；这个对象只是值语义的外壳。 */
+#define PY23_EXCVAL_MAGIC 0x4558435600000001LL
+typedef struct {
+    int64_t magic;
+    char* type;
+    char* message;
+    Py23List* args;  /* owned：args[0] 是 message 字符串 */
+} Py23ExcValue;
+
 
 typedef struct {
     int64_t magic;
@@ -106,6 +116,7 @@ typedef struct {
     int64_t driver_gen; /* kind 4：被驱动的异步生成器（owned） */
     int64_t driver_sent; /* kind 4：asend 传入值（owned） */
     int64_t driver_close; /* kind 4：aclose 模式 */
+    int64_t driver_throw; /* kind 4：athrow 注入的异常（owned，Py23Exception*） */
     int64_t pending;    /* future/fd：已经挂进 loop_pending/loop_fds */
     int64_t fd;         /* kind 6：等待的 fd */
     int64_t write;      /* kind 6：0 读 / 1 写 */
@@ -193,6 +204,13 @@ void py23_handler_rearm(void* p);
 void py23_handler_free(void* p);
 int64_t py23_exc_matches(Py23Str* want);
 Py23Str* py23_exc_accept(void);
+Py23ExcValue* py23_exc_accept_value(void);
+Py23ExcValue* py23_exc_value_new(Py23Str* type, Py23Str* msg);
+Py23ExcValue* py23_exc_value_from_exc(Py23Exception* e);
+Py23Exception* py23_exc_from_value(Py23ExcValue* v);
+void py23_raise_value(Py23ExcValue* v);
+Py23List* py23_exc_value_args(Py23ExcValue* v);
+Py23Str* py23_exc_value_str(Py23ExcValue* v);
 void py23_exc_done(void);
 void py23_exc_clear(void);
 Py23Str* py23_exc_type_name(void);
@@ -257,15 +275,16 @@ int64_t py23_future_cancelled(void* fp);
 int64_t py23_future_cancel(void* fp);
 void raise_exception_copy(Py23Exception* e, const char* fallback);
 int64_t py23_future_result(void* fp);
-Py23Str* py23_future_exception(void* fp);
+Py23ExcValue* py23_future_exception(void* fp);
 int64_t py23_asyncio_task_result(void* tp);
-Py23Str* py23_asyncio_task_exception(void* tp);
+Py23ExcValue* py23_asyncio_task_exception(void* tp);
 int64_t py23_asyncio_task_cancelled(void* tp);
 void* py23_asyncio_wait_fd(int64_t fd, int64_t write);
 int poll_fds(int timeout_ms);
 void* py23_asyncgen_anext(void* gen);
 void* py23_asyncgen_asend(void* gen, int64_t sent);
 void* py23_asyncgen_aclose(void* gen);
+void* py23_asyncgen_athrow(void* gen, Py23ExcValue* exc);
 void driver_complete(Py23Await* d, int64_t value, Py23Exception* exc);
 void agen_drive(Py23Await* d);
 int64_t py23_asyncio_run(void* coro);

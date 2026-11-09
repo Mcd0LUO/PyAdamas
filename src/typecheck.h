@@ -52,6 +52,7 @@ enum class TyKind : uint8_t {
     Task,         // asyncio.create_task 返回的已调度协程；sub[0] 是结果类型
     AsyncGenerator, // async def + yield；sub[0] 是产出类型
     Future,       // asyncio.Future；sub[0] 是结果类型
+    Exception,    // 异常值（type name 放在 Type::name）；args 是 message 列表
 };
 
 struct Type;
@@ -361,6 +362,11 @@ inline TypePtr mk_future(TypePtr result) {
     t->sub.push_back(std::move(result));
     return t;
 }
+inline TypePtr mk_exception(const std::string& name) {
+    auto t = new_ty(TyKind::Exception);
+    t->name = name;
+    return t;
+}
 
 // ── 判定与显示 ────────────────────────────────────────────────────
 
@@ -386,6 +392,7 @@ inline bool type_eq(const TypePtr& a, const TypePtr& b) {
     }
     if (a->kind == TyKind::BoundMethod) return a->name == b->name && type_eq(a->sub[0], b->sub[0]);
     if (a->kind == TyKind::Class) return a->cls == b->cls;
+    if (a->kind == TyKind::Exception) return true;  // 异常值统一按 Exception 处理
     if (a->kind == TyKind::Tuple && a->variadic != b->variadic) return false;
     if (a->sub.size() != b->sub.size()) return false;
     for (size_t i = 0; i < a->sub.size(); ++i)
@@ -485,6 +492,8 @@ inline std::string type_name_impl(const TypePtr& t, int depth) {
         case TyKind::Future:
             return t->sub.empty() ? "future"
                                   : std::format("future[{}]", type_name_impl(t->sub[0], depth + 1));
+        case TyKind::Exception:
+            return t->name.empty() ? "Exception" : t->name;
     }
     return "?";
 }
@@ -537,6 +546,7 @@ inline TypePtr join_into(const TypePtr& a, const TypePtr& b) {
     if (a->kind == TyKind::Future && b->kind == TyKind::Future)
         return mk_future(join(a->sub.empty() ? t_unknown() : a->sub[0],
                               b->sub.empty() ? t_unknown() : b->sub[0]));
+    if (a->kind == TyKind::Exception && b->kind == TyKind::Exception) return a;
     if (a->kind == TyKind::Tuple && b->kind == TyKind::Tuple) {
         if (a->variadic || b->variadic) {
             // 有一边长度不定，结果也只能是长度不定：元素取公共上界
@@ -603,6 +613,7 @@ inline bool assignable(const TypePtr& dst, const TypePtr& src) {
         return dst->sub.empty() || src->sub.empty() || assignable(dst->sub[0], src->sub[0]);
     if (dst->kind == TyKind::Future && src->kind == TyKind::Future)
         return dst->sub.empty() || src->sub.empty() || assignable(dst->sub[0], src->sub[0]);
+    if (dst->kind == TyKind::Exception && src->kind == TyKind::Exception) return true;
     if (dst->kind == TyKind::Set && src->kind == TyKind::Set)
         return assignable(dst->sub[0], src->sub[0]);
     if (dst->kind == TyKind::Dict && src->kind == TyKind::Dict)

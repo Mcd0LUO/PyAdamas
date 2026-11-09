@@ -256,6 +256,12 @@ TypePtr TypeChecker::expr(Expr& e) {
                     return t_unknown();
                 // Python 里函数是普通对象，可以挂任意属性（functools.wraps 就这么做）
                 if (ot->kind == TyKind::Func) return t_unknown();
+                if (ot->kind == TyKind::Exception) {
+                    if (a.attr == "args") return mk_tuple({t_str()});
+                    err(a.line, a.col,
+                        std::format("'exception' object has no attribute '{}'", a.attr));
+                    return t_unknown();
+                }
                 if (ot->kind == TyKind::Class) {
                     if (!ot->cls) return t_unknown();
                     // 骨架：类体还没检查到（类定义在引用点之后），成员表是空的。
@@ -492,6 +498,9 @@ TypePtr TypeChecker::binop_type(Tok op, TypePtr l, TypePtr r, int line, int col)
             case Tok::PLUS:
                 if (is_num(l) && is_num(r)) return promote(l, r);
                 if (l->kind == TyKind::Str && r->kind == TyKind::Str) return t_str();
+                // 异常值参与字符串拼接时按消息处理，兼容旧代码 "msg:" + e
+                if (l->kind == TyKind::Str && r->kind == TyKind::Exception) return t_str();
+                if (l->kind == TyKind::Exception && r->kind == TyKind::Str) return t_str();
                 if (l->kind == TyKind::List && r->kind == TyKind::List)
                     return mk_list(join(l->sub[0], r->sub[0]));
                 if (l->kind == TyKind::Tuple && r->kind == TyKind::Tuple) {

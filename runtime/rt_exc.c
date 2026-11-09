@@ -278,3 +278,93 @@ void py23_raise_c(const char* type, const char* msg) {
     exc_longjmp();
 }
 
+
+/* ── 异常值对象 ───────────────────────────────────────────────── */
+
+static void exc_value_destroy(void* p) {
+    Py23ExcValue* v = (Py23ExcValue*)p;
+    free(v->type);
+    free(v->message);
+    if (v->args) py23_rc_dec(v->args);
+}
+
+static void exc_value_gc_release(void* p) {
+    Py23ExcValue* v = (Py23ExcValue*)p;
+    if (v->args) py23_gc_unref_child(v->args);
+}
+
+static Py23ExcValue* exc_value_alloc(const char* type, const char* msg) {
+    Py23ExcValue* v = (Py23ExcValue*)rc_alloc((int64_t)sizeof(Py23ExcValue),
+                                              exc_value_destroy, exc_value_gc_release,
+                                              PY23_RC_OBJ);
+    v->magic = PY23_EXCVAL_MAGIC;
+    size_t tn = strlen(type);
+    size_t mn = strlen(msg);
+    v->type = (char*)malloc(tn + 1);
+    v->message = (char*)malloc(mn + 1);
+    if (!v->type || !v->message) panic_c("out of memory");
+    memcpy(v->type, type, tn + 1);
+    memcpy(v->message, msg, mn + 1);
+    v->args = py23_list_new(2, 1);
+    return v;
+}
+
+Py23ExcValue* py23_exc_value_new(Py23Str* type, Py23Str* msg) {
+    if (!type) py23_raise_c("TypeError", "exception type must be a string");
+    char tn[128];
+    int64_t n = type->len;
+    if (n < 0 || n >= (int64_t)sizeof(tn)) py23_raise_c("ValueError", "exception type too long");
+    memcpy(tn, type->data, (size_t)n);
+    tn[n] = '\0';
+    Py23ExcValue* v = exc_value_alloc(tn, msg ? msg->data : "");
+    if (msg) {
+        // args 拥有一个引用；消息字符串本身由调用方/临时栈持有。
+        py23_rc_inc(msg);
+        py23_list_append(v->args, (int64_t)msg);
+    }
+    return v;
+}
+
+Py23ExcValue* py23_exc_value_from_exc(Py23Exception* e) {
+    if (!e) return NULL;
+    Py23ExcValue* v = exc_value_alloc(e->type, e->message);
+    Py23Str* msg = str_new(e->message, (int64_t)strlen(e->message));
+    py23_list_append(v->args, (int64_t)msg);
+    return v;
+}
+
+Py23Exception* py23_exc_from_value(Py23ExcValue* v) {
+    if (!v) py23_raise_c("TypeError", "expected an exception instance");
+    if (v->magic != PY23_EXCVAL_MAGIC) py23_raise_c("TypeError", "expected an exception instance");
+    return exc_new(v->type, v->message);
+}
+
+void py23_raise_value(Py23ExcValue* v) {
+    exc_free(pending_exc);
+    pending_exc = py23_exc_from_value(v);
+    exc_longjmp();
+}
+
+Py23ExcValue* py23_exc_accept_value(void) {
+    Py23ExcSave* s = (Py23ExcSave*)malloc(sizeof(Py23ExcSave));
+    if (!s) panic_c("out of memory");
+    s->prev = current_exc;
+    s->up = exc_save_top;
+    exc_save_top = s;
+    current_exc = pending_exc;
+    pending_exc = NULL;
+    if (!current_exc) return exc_value_alloc("Exception", "");
+    return py23_exc_value_from_exc(current_exc);
+}
+
+Py23List* py23_exc_value_args(Py23ExcValue* v) {
+    if (!v || v->magic != PY23_EXCVAL_MAGIC)
+        py23_raise_c("TypeError", "expected an exception instance");
+    return v->args;
+}
+
+Py23Str* py23_exc_value_str(Py23ExcValue* v) {
+    if (!v || v->magic != PY23_EXCVAL_MAGIC)
+        py23_raise_c("TypeError", "expected an exception instance");
+    return str_new(v->message, (int64_t)strlen(v->message));
+}

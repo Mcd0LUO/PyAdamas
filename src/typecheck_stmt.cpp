@@ -250,12 +250,17 @@ void TypeChecker::stmt(Stmt& s) {
                         sym.ty = join(sym.ty, it->second.ty);
                     }
                     if (!h.name.empty()) {
-                        // py23 的异常对象就是消息字符串：as e 绑定 str
+                        // as e 绑定异常值对象（args 里是消息）
+                        TypePtr et = mk_exception("Exception");
+                        if (h.type && h.type->kind == ExprKind::Name) {
+                            auto& hn = static_cast<Name&>(*h.type);
+                            if (is_exception_name(hn.id)) et = mk_exception(hn.id);
+                        }
                         auto sc = std::make_unique<Scope>();
                         sc->parent = cur_;
                         cur_ = sc.get();
                         pool_.push_back(std::move(sc));
-                        cur_->vars[h.name] = Symbol{t_str(), t.line, false, false};
+                        cur_->vars[h.name] = Symbol{et, t.line, false, false};
                         stmts(h.body);
                         cur_ = cur_->parent;
                     } else {

@@ -329,9 +329,33 @@ VReg Lowerer::lower_call(Call& c) {
     // 内建函数
     if (c.func->kind == ExprKind::Name) {
         auto& n = static_cast<Name&>(*c.func);
+        // 内置异常构造器：ValueError("x") 产生一个异常值
+        if (TypeChecker::is_exception_type(n.id) && is_builtin(n.id)) {
+            if (!c.keywords.empty())
+                err(c.line, c.col, "exception constructor does not take keyword arguments");
+            VReg type = const_str(n.id);
+            VReg msg = const_int(0);
+            if (!c.args.empty()) {
+                TypePtr mt = tc_.type_of(c.args[0].get());
+                if (mt && (mt->kind == TyKind::List || mt->kind == TyKind::Tuple ||
+                           mt->kind == TyKind::Dict || mt->kind == TyKind::Set ||
+                           mt->kind == TyKind::Class || mt->kind == TyKind::Func)) {
+                    err(c.args[0]->line, c.args[0]->col,
+                        "exception message must be a string or scalar");
+                }
+                VReg raw = expr(*c.args[0]);
+                msg = convert_to(raw, mt, t_str());
+            }
+            Inst in;
+            in.op = IrOp::CallRt;
+            in.imm = static_cast<int64_t>(RtFn::ExcValueNew);
+            in.args = {type, msg};
+            return def_heap(mk_exception(n.id), std::move(in));
+        }
         if (is_builtin(n.id)) {
             static const std::unordered_set<std::string> kBuiltins = {
                 "print", "len", "int", "float", "str", "bool", "range", "next",
+                "abs", "min", "max", "sum", "pow",
             };
             if (kBuiltins.count(n.id)) return lower_builtin_call(n.id, c);
         }
@@ -417,6 +441,37 @@ VReg Lowerer::lower_builtin_call(const std::string& name, Call& c) {
         return v;
     }
 
+    if (name == "abs") {
+        if (c.args.size() != 1) {
+            err(c.line, c.col, "abs() takes exactly one argument");
+            return const_none();
+        }
+        TypePtr t = tc_.type_of(c.args[0].get());
+        VReg v = expr(*c.args[0]);
+        if (t && t->kind == TyKind::Float)
+            return call_runtime(RtFn::MathFabs, t_float(), {v});
+        return call_runtime(RtFn::AbsI64, t_int(), {v});
+    }
+
+    if (name == "min" || name == "max") return lower_minmax(c, name == "min");
+    if (name == "sum") return lower_sum(c);
+    if (name == "pow") {
+        if (c.args.size() != 2) {
+            err(c.line, c.col, "pow() takes exactly two arguments");
+            return const_none();
+        }
+        TypePtr ty = tc_.type_of(&c);
+        if (!ty || ty->kind == TyKind::Unknown) ty = t_int();
+        VReg a = coerce(expr(*c.args[0]), tc_.type_of(c.args[0].get()), ty);
+        VReg b = coerce(expr(*c.args[1]), tc_.type_of(c.args[1].get()), ty);
+        Inst in;
+        in.op = IrOp::Bin;
+        in.bop = BinKind::Pow;
+        in.a = a;
+        in.b = b;
+        return def(ty, std::move(in));
+    }
+
     if (name == "range") {
         if (c.args.empty() || c.args.size() > 3) {
             err(c.line, c.col, "range() takes 1 to 3 arguments");
@@ -453,11 +508,294 @@ VReg Lowerer::lower_builtin_call(const std::string& name, Call& c) {
             return const_none();
         }
         VReg v = expr(*c.args[0]);
-        return convert_to(v, tc_.type_of(c.args[0].get()), to);
+        TypePtr from = tc_.type_of(c.args[0].get());
+        if (to->kind == TyKind::Str && from && from->kind == TyKind::Exception) {
+            VReg s = call_runtime(RtFn::ExcValueStr, t_str(), {v});
+            push_temp(s);
+            return s;
+        }
+        return convert_to(v, from, to);
     }
 
     err(c.line, c.col, std::format("builtin '{}' is not supported by the code generator yet", name));
     return const_none();
+}
+
+// min()/max()：多实参逐个比较；单实参按容器迭代。空序列抛 ValueError。
+VReg Lowerer::lower_minmax(Call& c, bool is_min) {
+    if (c.args.empty()) {
+        err(c.line, c.col,
+            std::format("{}() expects at least one argument", is_min ? "min" : "max"));
+        return const_none();
+    }
+    TypePtr acc_ty = tc_.type_of(&c);
+    if (!acc_ty || acc_ty->kind == TyKind::Unknown) acc_ty = t_unknown();
+    else if (!is_num(acc_ty) && acc_ty->kind != TyKind::Str) {
+        err(c.line, c.col,
+            std::format("{}() arguments must be numbers or strings", is_min ? "min" : "max"));
+        return const_none();
+    }
+    CmpKind cop = is_min ? CmpKind::Lt : CmpKind::Gt;
+    int best = new_temp_slot(acc_ty);
+
+    if (c.args.size() == 1) {
+        TypePtr seq_ty = tc_.type_of(c.args[0].get());
+        bool ok = seq_ty && (seq_ty->kind == TyKind::List || seq_ty->kind == TyKind::Tuple ||
+                             seq_ty->kind == TyKind::Str || seq_ty->kind == TyKind::Dict ||
+                             seq_ty->kind == TyKind::Set);
+        if (!ok) {
+            err(c.args[0]->line, c.args[0]->col,
+                std::format("cannot iterate over '{}' in {}()", type_name(seq_ty),
+                            is_min ? "min" : "max"));
+            return const_none();
+        }
+        TypePtr elem_ty = t_unknown();
+        if (seq_ty->kind == TyKind::Str) elem_ty = t_str();
+        else if (!seq_ty->sub.empty()) elem_ty = seq_ty->sub[0];
+
+        VReg seq = expr(*c.args[0]);
+        int seq_slot = new_temp_slot(seq_ty);
+        store_slot(seq_slot, seq);
+        Inst ln;
+        ln.op = IrOp::Len;
+        ln.a = seq;
+        VReg n = def(t_int(), std::move(ln));
+        int n_slot = new_temp_slot(t_int());
+        store_slot(n_slot, n);
+
+        int empty_b = new_block("minmax.empty");
+        int nonempty_b = new_block("minmax.nonempty");
+        Inst ce;
+        ce.op = IrOp::Cmp;
+        ce.cop = CmpKind::Eq;
+        ce.a = n;
+        ce.b = const_int(0);
+        VReg is_empty = def(t_bool(), std::move(ce));
+        Inst be;
+        be.op = IrOp::Branch;
+        be.a = is_empty;
+        be.target = empty_b;
+        be.target2 = nonempty_b;
+        emit(std::move(be));
+        switch_to(empty_b);
+        call_void(RtFn::Raise, {const_str("ValueError"),
+                                const_str(is_min ? "min() arg is an empty sequence"
+                                                 : "max() arg is an empty sequence")});
+        switch_to(nonempty_b);
+
+        auto elem_at = [&](VReg idx) -> VReg {
+            VReg sv = load_slot(seq_slot, seq_ty);
+            if (seq_ty->kind == TyKind::Dict || seq_ty->kind == TyKind::Set)
+                return call_runtime(RtFn::DictKeyAt, elem_ty, {sv, idx});
+            Inst get;
+            get.op = IrOp::IndexLoad;
+            get.a = sv;
+            get.b = idx;
+            return seq_ty->kind == TyKind::Str ? def_heap(elem_ty, std::move(get))
+                                               : def(elem_ty, std::move(get));
+        };
+
+        VReg first = coerce(elem_at(const_int(0)), elem_ty, acc_ty);
+        store_slot(best, first);
+        int idx = new_temp_slot(t_int());
+        store_slot(idx, const_int(1));
+
+        int cond = new_block("minmax.cond");
+        int body = new_block("minmax.body");
+        int choose = new_block("minmax.choose");
+        int next = new_block("minmax.next");
+        int end = new_block("minmax.end");
+        Inst j;
+        j.op = IrOp::Jump;
+        j.target = cond;
+        emit(std::move(j));
+
+        switch_to(cond);
+        Inst cmp;
+        cmp.op = IrOp::Cmp;
+        cmp.cop = CmpKind::Lt;
+        cmp.a = load_slot(idx, t_int());
+        cmp.b = load_slot(n_slot, t_int());
+        VReg cc = def(t_bool(), std::move(cmp));
+        Inst br;
+        br.op = IrOp::Branch;
+        br.a = cc;
+        br.target = body;
+        br.target2 = end;
+        emit(std::move(br));
+
+        switch_to(body);
+        VReg ev = coerce(elem_at(load_slot(idx, t_int())), elem_ty, acc_ty);
+        Inst cmpb;
+        cmpb.op = IrOp::Cmp;
+        cmpb.cop = cop;
+        cmpb.a = ev;
+        cmpb.b = load_slot(best, acc_ty);
+        VReg take = def(t_bool(), std::move(cmpb));
+        Inst bt;
+        bt.op = IrOp::Branch;
+        bt.a = take;
+        bt.target = choose;
+        bt.target2 = next;
+        emit(std::move(bt));
+        switch_to(choose);
+        store_slot(best, ev);
+        Inst jc;
+        jc.op = IrOp::Jump;
+        jc.target = next;
+        emit(std::move(jc));
+
+        switch_to(next);
+        Inst add;
+        add.op = IrOp::Bin;
+        add.bop = BinKind::Add;
+        add.a = load_slot(idx, t_int());
+        add.b = const_int(1);
+        store_slot(idx, def(t_int(), std::move(add)));
+        Inst jb;
+        jb.op = IrOp::Jump;
+        jb.target = cond;
+        emit(std::move(jb));
+
+        switch_to(end);
+        return load_slot(best, acc_ty);
+    }
+
+    VReg v0 = coerce(expr(*c.args[0]), tc_.type_of(c.args[0].get()), acc_ty);
+    store_slot(best, v0);
+    for (size_t i = 1; i < c.args.size(); ++i) {
+        VReg v = coerce(expr(*c.args[i]), tc_.type_of(c.args[i].get()), acc_ty);
+        Inst cmp;
+        cmp.op = IrOp::Cmp;
+        cmp.cop = cop;
+        cmp.a = v;
+        cmp.b = load_slot(best, acc_ty);
+        VReg take = def(t_bool(), std::move(cmp));
+        int choose = new_block("minmax.choose");
+        int next = new_block("minmax.next");
+        Inst br;
+        br.op = IrOp::Branch;
+        br.a = take;
+        br.target = choose;
+        br.target2 = next;
+        emit(std::move(br));
+        switch_to(choose);
+        store_slot(best, v);
+        Inst j;
+        j.op = IrOp::Jump;
+        j.target = next;
+        emit(std::move(j));
+        switch_to(next);
+    }
+    return load_slot(best, acc_ty);
+}
+
+// sum(iterable, start=0)：计数器循环 + 加法，累加器落槽。
+VReg Lowerer::lower_sum(Call& c) {
+    if (c.args.empty() || c.args.size() > 2) {
+        err(c.line, c.col, "sum() takes one or two arguments");
+        return const_none();
+    }
+    TypePtr acc_ty = tc_.type_of(&c);
+    if (!acc_ty || acc_ty->kind == TyKind::Unknown) acc_ty = t_unknown();
+    else if (!is_num(acc_ty)) {
+        err(c.line, c.col, std::format("sum() over non-numeric '{}'", type_name(acc_ty)));
+        return const_none();
+    }
+    TypePtr seq_ty = tc_.type_of(c.args[0].get());
+    bool ok = seq_ty && (seq_ty->kind == TyKind::List || seq_ty->kind == TyKind::Tuple ||
+                         seq_ty->kind == TyKind::Str || seq_ty->kind == TyKind::Dict ||
+                         seq_ty->kind == TyKind::Set);
+    if (!ok) {
+        err(c.args[0]->line, c.args[0]->col,
+            std::format("cannot iterate over '{}' in sum()", type_name(seq_ty)));
+        return const_none();
+    }
+    TypePtr elem_ty = t_unknown();
+    if (seq_ty->kind == TyKind::Str) elem_ty = t_str();
+    else if (!seq_ty->sub.empty()) elem_ty = seq_ty->sub[0];
+
+    VReg seq = expr(*c.args[0]);
+    int seq_slot = new_temp_slot(seq_ty);
+    store_slot(seq_slot, seq);
+    Inst ln;
+    ln.op = IrOp::Len;
+    ln.a = seq;
+    VReg n = def(t_int(), std::move(ln));
+    int n_slot = new_temp_slot(t_int());
+    store_slot(n_slot, n);
+    int idx = new_temp_slot(t_int());
+    store_slot(idx, const_int(0));
+
+    VReg start = acc_ty && acc_ty->kind == TyKind::Float ? const_float(0.0) : const_int(0);
+    if (c.args.size() == 2)
+        start = coerce(expr(*c.args[1]), tc_.type_of(c.args[1].get()), acc_ty);
+    int acc = new_temp_slot(acc_ty);
+    store_slot(acc, start);
+
+    int cond = new_block("sum.cond");
+    int body = new_block("sum.body");
+    int incr = new_block("sum.incr");
+    int end = new_block("sum.end");
+    Inst j;
+    j.op = IrOp::Jump;
+    j.target = cond;
+    emit(std::move(j));
+
+    switch_to(cond);
+    Inst cmp;
+    cmp.op = IrOp::Cmp;
+    cmp.cop = CmpKind::Lt;
+    cmp.a = load_slot(idx, t_int());
+    cmp.b = load_slot(n_slot, t_int());
+    VReg cc = def(t_bool(), std::move(cmp));
+    Inst br;
+    br.op = IrOp::Branch;
+    br.a = cc;
+    br.target = body;
+    br.target2 = end;
+    emit(std::move(br));
+
+    switch_to(body);
+    VReg sv = load_slot(seq_slot, seq_ty);
+    VReg iv = load_slot(idx, t_int());
+    VReg ev;
+    if (seq_ty->kind == TyKind::Dict || seq_ty->kind == TyKind::Set)
+        ev = call_runtime(RtFn::DictKeyAt, elem_ty, {sv, iv});
+    else {
+        Inst get;
+        get.op = IrOp::IndexLoad;
+        get.a = sv;
+        get.b = iv;
+        ev = seq_ty->kind == TyKind::Str ? def_heap(elem_ty, std::move(get))
+                                         : def(elem_ty, std::move(get));
+    }
+    ev = coerce(ev, elem_ty, acc_ty);
+    Inst add;
+    add.op = IrOp::Bin;
+    add.bop = BinKind::Add;
+    add.a = load_slot(acc, acc_ty);
+    add.b = ev;
+    store_slot(acc, def(acc_ty, std::move(add)));
+    Inst jin;
+    jin.op = IrOp::Jump;
+    jin.target = incr;
+    emit(std::move(jin));
+
+    switch_to(incr);
+    Inst add2;
+    add2.op = IrOp::Bin;
+    add2.bop = BinKind::Add;
+    add2.a = load_slot(idx, t_int());
+    add2.b = const_int(1);
+    store_slot(idx, def(t_int(), std::move(add2)));
+    Inst jb;
+    jb.op = IrOp::Jump;
+    jb.target = cond;
+    emit(std::move(jb));
+
+    switch_to(end);
+    return load_slot(acc, acc_ty);
 }
 
 VReg Lowerer::lower_asyncio(const std::string& member, Call& c) {
@@ -754,6 +1092,18 @@ VReg Lowerer::lower_method_call(Attribute& at, Call& c) {
             in.args = {recv, sv};
             return def_heap(mk_coroutine(et), std::move(in));
         }
+        if (at.attr == "athrow") {
+            if (c.args.size() != 1) {
+                err(c.line, c.col, "async generator.athrow() takes exactly one argument");
+                return const_none();
+            }
+            VReg ev = expr(*c.args[0]);
+            Inst in;
+            in.op = IrOp::CallRt;
+            in.imm = static_cast<int64_t>(RtFn::AsyncGenAthrow);
+            in.args = {recv, ev};
+            return def_heap(mk_coroutine(et), std::move(in));
+        }
         if (at.attr == "aclose") {
             if (!c.args.empty())
                 err(c.line, c.col, "async generator.aclose() takes no arguments");
@@ -789,7 +1139,8 @@ VReg Lowerer::lower_method_call(Attribute& at, Call& c) {
             return v;
         }
         if (at.attr == "exception") {
-            VReg v = call_runtime(RtFn::AsyncioTaskException, mk_optional(t_str()), {recv});
+            VReg v = call_runtime(RtFn::AsyncioTaskException,
+                                  mk_optional(mk_exception("Exception")), {recv});
             push_temp(v);
             return v;
         }
@@ -825,7 +1176,11 @@ VReg Lowerer::lower_method_call(Attribute& at, Call& c) {
                 return const_none();
             }
             VReg msg = expr(*c.args[0]);
-            call_void(RtFn::FutureSetException, {recv, msg});
+            TypePtr mt = vreg_ty(msg);
+            if (mt && mt->kind == TyKind::Exception)
+                call_void(RtFn::FutureSetExceptionValue, {recv, msg});
+            else
+                call_void(RtFn::FutureSetException, {recv, msg});
             return const_none();
         }
         if (at.attr == "add_done_callback") {
@@ -852,7 +1207,8 @@ VReg Lowerer::lower_method_call(Attribute& at, Call& c) {
         }
         if (at.attr == "exception") {
             if (!c.args.empty()) err(c.line, c.col, "future.exception() takes no arguments");
-            VReg v = call_runtime(RtFn::FutureException, mk_optional(t_str()), {recv});
+            VReg v = call_runtime(RtFn::FutureException,
+                                  mk_optional(mk_exception("Exception")), {recv});
             push_temp(v);
             return v;
         }

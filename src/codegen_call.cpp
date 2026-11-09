@@ -281,6 +281,10 @@ void AsmGen::gen_call_rt(const Inst& in) {
             case RtFn::HandlerLeave:
             case RtFn::HandlerDiscard:
             case RtFn::ExcMatches:
+            case RtFn::ExcValueArgs:
+            case RtFn::ExcValueStr:
+            case RtFn::RaiseValue:
+            case RtFn::AbsI64:
             case RtFn::GenNext:
             case RtFn::GenClose:
             case RtFn::HandlerSuspend:
@@ -307,9 +311,12 @@ void AsmGen::gen_call_rt(const Inst& in) {
                 line(std::format("movq {}, %rdi", src_op(in.args[0])));
                 line(std::format("movq {}, %rsi", src_op(in.args[1])));
                 break;
+            case RtFn::ExcValueNew:
             case RtFn::FutureSetResult:
             case RtFn::FutureSetException:
+            case RtFn::FutureSetExceptionValue:
             case RtFn::FutureAddCallback:
+            case RtFn::AsyncGenAthrow:
                 line(std::format("movq {}, %rdi", src_op(in.args[0])));
                 line(std::format("movq {}, %rsi", src_op(in.args[1])));
                 break;
@@ -360,6 +367,7 @@ void AsmGen::gen_call_rt(const Inst& in) {
             case RtFn::HandlerPush:
             case RtFn::AsyncioFutureNew:
             case RtFn::ExcAccept:
+            case RtFn::ExcAcceptValue:
             case RtFn::ExcDone:
             case RtFn::ExcClear:
             case RtFn::ExcReraise:

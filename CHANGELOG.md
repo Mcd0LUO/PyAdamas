@@ -4,6 +4,34 @@
 
 早期阶段没有逐条留痕，按阶段归纳；0.4 之后逐条记录。
 
+## [0.24] - 2026-11-09
+
+异常值模型与常用内置函数。
+
+### 新增
+
+- 异常值对象：`ValueError("msg")` 可作为表达式值；`raise e` 抛掷实例；
+  `except ... as e` 绑定带 `args` 的异常值，`str(e)` / `print(e)` 返回消息，
+  `e` 参与字符串拼接按消息处理（兼容旧代码）。
+- `Future.set_exception(exc)` 接受异常值（仍兼容消息字符串）；
+  `Future.exception()` / `Task.exception()` 返回异常值。
+- 异步生成器 `athrow(exc)`：在挂起点注入异常，捕获后可以继续产出。
+- 内置函数：`abs` / `min` / `max` / `sum` / `pow`。`min`/`max` 支持
+  多实参和 list/tuple/str/dict/set 迭代，空序列抛 `ValueError`；`sum`
+  支持起始值；int/float 混合按数值域提升。
+- 用例 `tests/run/32_exception_value.py`、`tests/run/33_builtins.py`。
+
+### 验证
+
+- `ctest --preset dev` / `release` 全绿（33 个运行用例）
+- 差分测试 810 个程序零差异；ASan/UBSan/LSan 零报告
+
+### 已知限制
+
+- 异常 `args` 只保存消息；没有 traceback、异常链、`raise ... from`
+  和自定义异常类
+- `min`/`max`/`sum` 只迭代 list/tuple/str/dict/set，不接受生成器
+
 ## [0.23] - 2026-11-09
 
 异步生成器协议：`asend` / `__anext__` / `aclose`。

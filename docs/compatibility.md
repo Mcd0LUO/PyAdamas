@@ -16,9 +16,9 @@ py23 不追求兼容 CPython：语义是按静态类型的需要重新定的。�
 | `x: float = 1; print(x)` | `1.0` | `1` | 标注决定存储类型，int 在 float 位置被真的转成 double |
 | `print(a, b, end=f())` 的求值时机 | 边算边写，`f()` 最后求值 | 先把参数和关键字全算完再写 | `print` 是降级期展开的，不是函数调用 |
 | `assert x, "msg"` | 抛 `AssertionError("msg")`；无消息时 `assertion failed` | 同 Python（消息文本一致） | 消息只保留字符串内容 |
-| `except ... as e` | `e` 是**消息字符串** | `e` 是异常对象，有 `args` / traceback | 异常对象只有类型名和消息；没有 traceback / 异常链 |
+| `except ... as e` | `e` 是异常值对象，`args` / `str(e)` 可用 | `e` 是异常对象，有完整 `args` / traceback | `args` 目前只保存消息；没有 traceback / 异常链 |
 | 未捕获异常 | `py23: uncaught ValueError: msg`，`exit(1)` | traceback + `ValueError: msg`，退出码 1 | 没有 traceback |
-| 异常类型 | 内置异常名 + 继承匹配 | 完整异常类层次、自定义异常 | 只支持内置名字；`raise ... from` 和自定义异常类被后端拒绝 |
+| 异常类型 | 内置异常名 + 继承匹配；`ValueError("msg")` 产生异常值，`raise e` 可用 | 完整异常类层次、自定义异常 | 只支持内置名字；`raise ... from` 和自定义异常类被后端拒绝 |
 | 运行时错误 | `IndexError` / `KeyError` / `ZeroDivisionError` / `OverflowError` / `ValueError` / `AssertionError` 可捕获 | 同类异常 | 内部不变量/OOM 仍然直接退出 |
 | `range(a, b, c)` 的 `c` | `for ... in range(...)` 里必须是整数字面量；作为值使用时可以是任意 int 表达式 | 任意表达式 | 循环步长在降级期就要定下来；`range()` 实体化成列表后没有这个限制 |
 | 默认参数不是字面量 | `build` 报错 | 运行时求值 | 默认值在调用点内联填充 |
@@ -29,7 +29,7 @@ py23 不追求兼容 CPython：语义是按静态类型的需要重新定的。�
 | 模块初始化 | 第一次执行 import 时惰性运行一次；循环导入编译期报错 | 支持循环导入和部分初始化 | 初始化失败的模块不会再重试；模块对象不可见 |
 | 推导式 | list/set/dict 推导式按循环展开；生成器表达式立即构造成 list；含 `async for` 的推导式在协程里可挂起 | 生成器惰性求值 | 异步推导式只能作为语句/赋值/`return` 的根表达式；生成器表达式仍立即求值 |
 | 生成器 | 状态机 + 堆帧；`for` / `next` / `send` / `close` / `yield from`；跨 `yield` 跑 `finally` / `__exit__` | 完整生成器协议 | `yield`/`yield from` 只能是语句或赋值右值，不能位于 `finally`/`except` 体内；`yield from` 的值固定为 None；`send` 值静态是 unknown；生成器类型跨模块降级为 unknown |
-| 协程 / Task / Future | `async def` / `await` 复用生成器帧；`asyncio.run`/`sleep`/`gather`/`create_task`；`done()`/`cancel()`/`result()`/`exception()`；Future 多等待者、`set_exception`、`add_done_callback`；取消级联；`wait_readable`/`wait_writable` + poll；异步生成器 + `async for` + `async with`；异步推导式 | 完整 asyncio（Task 组/Future 回调/I/O 流） | `await` 只能是语句、赋值右值或 `return` 值；异步生成器有 `asend`/`__anext__`/`aclose`，但没有 `athrow`，`aclose` 不会 await `async with` 的 `__aexit__`，停在 `async with` 里被直接回收时不 await 退出；自定义 `__aiter__` 未支持；Future 回调同步执行；`set_exception` 接收消息字符串，失败类型固定为 `Exception`；task 结果异常是消息字符串；`CancelledError` 是内置名；`wait_readable` 不是 CPython 标准 API；`gather` 结果元素是 unknown；Task 单等待者 |
+| 协程 / Task / Future | `async def` / `await` 复用生成器帧；`asyncio.run`/`sleep`/`gather`/`create_task`；`done()`/`cancel()`/`result()`/`exception()`；Future 多等待者、`set_exception`、`add_done_callback`；取消级联；`wait_readable`/`wait_writable` + poll；异步生成器 + `async for` + `async with`；异步推导式 | 完整 asyncio（Task 组/Future 回调/I/O 流） | `await` 只能是语句、赋值右值或 `return` 值；异步生成器有 `asend`/`athrow`/`__anext__`/`aclose`，`aclose` 不会 await `async with` 的 `__aexit__`，停在 `async with` 里被直接回收时不 await 退出；自定义 `__aiter__` 未支持；Future 回调同步执行；`set_exception` 接收异常值或消息；`exception()` 返回异常值；`CancelledError` 是内置名；`wait_readable` 不是 CPython 标准 API；`gather` 结果元素是 unknown；Task 单等待者 |
 | 递归深度 | 受栈大小限制（万级） | 默认 1000，可调 | 没有解释器递归检查 |
 | 字段初值 `x: int = []` | 每次构造重新求值，实例之间独立 | 类属性，所有实例共享 | 更安全；也避免可变默认值的经典 bug |
 | 类体里的非声明语句 | `check` 通过并标记「没建模」，`build` 报错 | 类体是独立命名空间，可执行任意语句 | 布局在编译期定死，没有类命名空间 |
@@ -69,7 +69,7 @@ py23 不追求兼容 CPython：语义是按静态类型的需要重新定的。�
 |---|---|---|---|
 | 正例 | `ctest --preset dev` 里 `tests/*.py` | 11 个文件 | 前端退回保守 |
 | 反例 | `ctest --preset dev` 里 `tests/fail/*.py` | 33 个文件 | 检查器为了过测而放水 |
-| 运行 | `ctest --preset dev` 里 `tests/run/*.py` | 31 个文件 | 后端烂掉没人知道 |
+| 运行 | `ctest --preset dev` 里 `tests/run/*.py` | 33 个文件 | 后端烂掉没人知道 |
 | 模块 | `ctest --preset dev` 里 `tests/modules/*/` | 8 个目录 | 分模块编译/链接、惰性初始化、缓存失效 |
 | 未建模 | `ctest --preset dev` 里 `tests/unsupported/*.py` | 4 个文件 | 「标了没建模、实际却悄悄编译过去」 |
 | 内存 | 16MB `RLIMIT_AS` 下跑压力程序 | 拼接 / 对象 / 闭包 / 容器 / 切片 / 删除 / 推导式 / 变长实参 / `with` / 装饰器 / 异常展开 / `yield from` / 异步推导式 / 环 / unknown 泄漏 | 引用计数或 GC 漏插桩、重复释放、误回收 |
@@ -129,7 +129,8 @@ PY
 方法、切片赋值、变长实参、推导式、`with` 和装饰器；
 `tests/run/22_exception.py` 覆盖 try/except/else/finally、raise、层级
 匹配、`with` 异常路径和运行时错误转换；`tests/run/23_generator.py` ~
-`tests/run/31_asyncgen_proto.py` 覆盖生成器、协程、Task、异步语言面、
+`tests/run/32_exception_value.py`、`tests/run/33_builtins.py` 覆盖异常值
+与内置函数，并连同前面的用例覆盖生成器、协程、Task、异步语言面、
 Future/取消/fd/回调、`yield from`、异步推导式与异步生成器协议。
 `tests/run/13_gc.py` 会真正触发收集器：对象环、字典自环、闭包垃圾和
 unknown 容器。RSS 压力程序负责「长循环里内存不随迭代数增长」。当前实测

@@ -56,7 +56,7 @@ py23 借 Python 的语法外壳，但**不是 CPython 的实现**：语义按静
 | `generator[T]` | 生成器对象；`for` / `next` 产出 `T`，`send` 送入的值是 `unknown` |
 | `coroutine[T]` | 协程对象；`await` / `asyncio.run` 得到 `T` |
 | `task[T]` | `asyncio.create_task` 调度的任务；`await` 得到 `T`，有 `done()` / `cancel()` |
-| `asyncgen[T]` | `async def` + `yield` 的异步生成器；`async for` 或 `asend` / `__anext__` / `aclose` |
+| `asyncgen[T]` | `async def` + `yield` 的异步生成器；`async for` 或 `asend` / `athrow` / `__anext__` / `aclose` |
 | `future[T]` | `asyncio.Future`；可多等待，`set_result` 之后可 `await`/`result` |
 | `类名` | 类实例；字段布局与 vtable 在编译期确定 |
 | `set[T]` / `dict[K, V]` | 堆上的哈希表；`set` 复用 `dict`（值恒 0），保留插入顺序 |
@@ -341,12 +341,12 @@ async def main() -> int:
 - `asend(v)`：把 `v` 送进 `x = yield ...` 的 `x` 并取下一个值；
   非 None 值可以跳转生成器的内部状态（示例见 `tests/run/31_asyncgen_proto.py`）。
 - `__anext__()`：等价于 `asend(None)`。
+- `athrow(exc)`：把异常值注入挂起点；生成器捕获后可以继续 `yield`，
+  没捕获则向外抛出，已结束的生成器抛 `StopAsyncIteration`。
 - `aclose()`：关闭生成器。停在 `yield` 上时走 close 清理分发，执行
   `finally` / `with.__exit__`；从未启动时不执行函数体；正在等内部
   awaitable 时注入 `GeneratorExit`，让 `finally` 在挂起点展开。
   `async with` 的 `__aexit__` 目前不会在 aclose 里 await。
-
-没有 `athrow`（异常还不是一等值）。
 
 **异步上下文管理器**：类上定义 `async def __aenter__` /
 `async def __aexit__`，用 `async with` 进入；进入、正常退出、异常展开、
@@ -370,13 +370,12 @@ async def main() -> int:
     return f.result()
 ```
 
-方法：`set_result(v)`、`set_exception(msg)`、`add_done_callback(fn)`、
+方法：`set_result(v)`、`set_exception(exc)`、`add_done_callback(fn)`、
 `cancel()`、`done()`、`cancelled()`、`result()`（未完成抛 RuntimeError，
-失败/取消抛原异常）、`exception()`（成功返回 None，失败返回消息字符串）。
+失败/取消抛原异常）、`exception()`（成功返回 None，失败返回异常值）。
 回调在完成时按注册顺序**同步**调用，参数是 future 本身；对已完成的
-Future 注册会立即调用。`set_exception` 接收消息字符串（py23 的异常不是
-一等值），失败类型记为 `Exception`。Task 也有
-`result()` / `exception()` / `cancelled()`。
+Future 注册会立即调用。`set_exception` 接收异常实例（也兼容消息字符串）。
+Task 也有 `result()` / `exception()` / `cancelled()`。
 
 **取消级联**：取消 Task 会沿它等待的对象向下传播：协程链继续注入
 `CancelledError`，被等待的 Task 递归取消，gather 取消全部子任务，
@@ -392,9 +391,8 @@ Future 被取消时，其他等待者也会收到 `CancelledError`。
 `finally` / `except` 体内；异步推导式只能作为语句、赋值或 `return` 的
 根表达式；不支持自定义 `__aiter__` 迭代器、fd 读写和线程安全的事件
 循环；Future 回调是同步调用（CPython 用 `call_soon` 排队），
-`set_exception` 接收消息字符串而不是异常对象；`gather` 的实参个数在
-源码里写死，结果元素类型按 unknown 处理；Task 只允许一个并发等待者，
-没有任务名字。
+`gather` 的实参个数在源码里写死，结果元素类型按 unknown 处理；
+Task 只允许一个并发等待者，没有任务名字。
 
 ### 内存与生命周期
 
@@ -538,22 +536,32 @@ class Connection:
 - 内置 `math` / `sys`：`math` 常量/函数、`sys.argv` / `exit` / `maxsize`；
   原生函数只能直接调用。
 
+### 内置函数
+
+已生成代码：`print` / `len` / `int` / `float` / `str` / `bool` / `range` /
+`next` / `abs` / `min` / `max` / `sum` / `pow`。`min` / `max` 支持多实参
+和 list/tuple/str/dict/set 迭代，空序列抛 `ValueError`；`sum` 支持可选的
+起始值；`abs` / `pow` 支持 int 与 float。其余内置名（`sorted` / `map` /
+`filter` / `any` / `all` 等）类型层面放行，但降级阶段会报「还没有生成
+代码」。
+
 ### 跳转与异常
 
 `break` / `continue` 只作用于字面最近的循环（`for ... else` 的 `else` 在被 `break` 跳过时执行）。
 
 `try/except/else/finally` 支持：多个 `except`、`except (A, B)`、bare
 `except:`、`as e` 和 `else`。异常按内置异常的继承关系匹配（`KeyError`
-能被 `LookupError` / `Exception` 捕获）；`as e` 绑定的是**消息字符串**。
-`else` 只在 try 体正常结束时执行；handler 体里再抛出的异常会继续向外
-展开。
+能被 `LookupError` / `Exception` 捕获）；`as e` 绑定一个**异常值对象**：
+`e.args` 是参数元组，`print(e)` / `str(e)` 是消息，`e` 也能直接拼进
+字符串（按消息处理）。`else` 只在 try 体正常结束时执行；handler 体里
+再抛出的异常会继续向外展开。
 
-`raise` 支持 `raise ValueError`、`raise ValueError(message)` 和 bare
-`raise`（重抛当前异常）。只支持内置异常名；`raise ... from`、自定义
-异常类、traceback 和异常链暂不支持。`finally` 在正常、异常、`return`、
-`break`、`continue` 路径都会执行；但 `finally` 体内**跳出 finally** 的
-`return` / `break` / `continue` 会被后端拒绝（finally 里嵌套循环自己的
-跳转是允许的）。
+异常构造器可以当值用：`e = ValueError("bad")`；`raise e` 抛这个实例，
+`raise ValueError("bad")` 等价。只支持内置异常名；`raise ... from`、
+自定义异常类、traceback 和异常链暂不支持（`args` 目前只保存消息）。
+`finally` 在正常、异常、`return`、`break`、`continue` 路径都会执行；
+但 `finally` 体内**跳出 finally** 的 `return` / `break` / `continue`
+会被后端拒绝（finally 里嵌套循环自己的跳转是允许的）。
 
 `with` 的 `__exit__` 在 `return` / `break` / `continue` 和异常路径都会执行。
 
@@ -566,7 +574,7 @@ class Connection:
 - Python 2 遗留写法（`0x1L`、`lambda (a, b):`、`except X, e`）
 - 类：方法缺 `self`、字段赋值类型不符、访问不存在的字段或方法（`self.xxx` 与外部基类的成员除外）
 
-**代码生成层**（`check` 通过，`build` 报错）：`del`、带装饰器的方法/类、`print(*args)`、通过 unknown 函数值的 `*` / `**` 展开、`*` 位于固定形参之前且不是定长 tuple、`raise ... from`、非内置异常名、`finally` 体内跳出 finally 的控制流、跨模块继承、把类名当值用（`f = Point`）、函数内定义类、多继承、类体里的非声明语句、异步生成器表达式、嵌在其它表达式里的异步推导式。生成器的额外限制：`yield` / `yield from` 只能作为语句或赋值右值，不能出现在 `finally` / `except` 体内；协程的 `await` 同样。异步生成器有 `asend`/`__anext__`/`aclose`，没有 `athrow`。类体字段默认值里的 `lambda` 也在这一层拒绝。
+**代码生成层**（`check` 通过，`build` 报错）：`del`、带装饰器的方法/类、`print(*args)`、通过 unknown 函数值的 `*` / `**` 展开、`*` 位于固定形参之前且不是定长 tuple、`raise ... from`、非内置异常名、`finally` 体内跳出 finally 的控制流、跨模块继承、把类名当值用（`f = Point`）、函数内定义类、多继承、类体里的非声明语句、异步生成器表达式、嵌在其它表达式里的异步推导式。生成器的额外限制：`yield` / `yield from` 只能作为语句或赋值右值，不能出现在 `finally` / `except` 体内；协程的 `await` 同样。异步生成器有 `asend`/`athrow`/`__anext__`/`aclose`。类体字段默认值里的 `lambda` 也在这一层拒绝。
 
 为什么这么分层：前端宽、后端严。`check` 的定位是「语法和类型有没有明显毛病」，可以对任意 Python 文件跑；`build` 才是「这门语言现在能不能编译它」。
 

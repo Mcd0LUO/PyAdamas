@@ -6,8 +6,17 @@
 namespace py23 {
 
 TypePtr TypeChecker::call(Call& c) {
-        // f(...) 里 f 是 Name：可能是内置函数，也可能是用户函数
+        // f(...) 里 f 是 Name：可能是异常构造器、内置函数，也可能是用户函数
         if (auto* n = dynamic_cast<Name*>(c.func.get())) {
+            if (!lookup(n->id) && is_exception_name(n->id)) {
+                if (!c.keywords.empty())
+                    err(c.line, c.col, "exception constructor does not take keyword arguments");
+                if (c.args.size() > 1)
+                    err(c.line, c.col,
+                        "exception constructor takes at most one message argument");
+                for (auto& arg : c.args) expr(*arg);
+                return mk_exception(n->id);
+            }
             if (!lookup(n->id) && is_builtin_callable(n->id)) return builtin_call(n->id, c);
         }
         if (auto* a = dynamic_cast<Attribute*>(c.func.get())) {
@@ -566,7 +575,7 @@ bool TypeChecker::has_method(const TypePtr& t, const std::string& m) {
             case TyKind::Generator:
                 return m == "send" || m == "close" || m == "__next__";
             case TyKind::AsyncGenerator:
-                return m == "asend" || m == "aclose" || m == "__anext__";
+                return m == "asend" || m == "athrow" || m == "aclose" || m == "__anext__";
             case TyKind::Task:
                 return m == "done" || m == "cancel" || m == "cancelled" ||
                        m == "result" || m == "exception";
@@ -682,6 +691,13 @@ TypePtr TypeChecker::method_call(TypePtr recv, const std::string& name, Call& c,
                 argc(1, 1);
                 return mk_coroutine(et);
             }
+            if (name == "athrow") {
+                argc(1, 1);
+                if (a.size() == 1 && !is_unknown(a[0]) &&
+                    a[0]->kind != TyKind::Exception)
+                    err(c.line, c.col, "athrow() expects an exception instance");
+                return mk_coroutine(et);
+            }
             if (name == "__anext__") {
                 argc(0, 0);
                 return mk_coroutine(et);
@@ -706,7 +722,7 @@ TypePtr TypeChecker::method_call(TypePtr recv, const std::string& name, Call& c,
             }
             if (name == "exception") {
                 argc(0, 0);
-                return mk_optional(t_str());
+                return mk_optional(mk_exception("Exception"));
             }
             err(c.line, c.col, std::format("'task' object has no method '{}'", name));
             return t_unknown();
@@ -723,10 +739,10 @@ TypePtr TypeChecker::method_call(TypePtr recv, const std::string& name, Call& c,
             }
             if (name == "set_exception") {
                 argc(1, 1);
-                if (a.size() == 1 && !is_unknown(a[0]) && a[0]->kind != TyKind::Str)
+                if (a.size() == 1 && !is_unknown(a[0]) && a[0]->kind != TyKind::Str &&
+                    a[0]->kind != TyKind::Exception)
                     err(c.line, c.col,
-                        "set_exception() expects a string message "
-                        "(py23 exceptions are type name + message)");
+                        "set_exception() expects an exception instance or message string");
                 return t_none();
             }
             if (name == "add_done_callback") {
@@ -742,7 +758,7 @@ TypePtr TypeChecker::method_call(TypePtr recv, const std::string& name, Call& c,
             }
             if (name == "exception") {
                 argc(0, 0);
-                return mk_optional(t_str());
+                return mk_optional(mk_exception("Exception"));
             }
             err(c.line, c.col, std::format("'future' object has no method '{}'", name));
             return t_unknown();

@@ -56,6 +56,7 @@ void await_destroy(void* p) {
     if (w->task_coro) py23_rc_dec((void*)w->task_coro);
     if (w->driver_gen) py23_rc_dec((void*)w->driver_gen);
     if (w->driver_sent) py23_rc_dec_unknown(w->driver_sent);
+    if (w->driver_throw) exc_free((Py23Exception*)w->driver_throw);
     if (w->waiters) py23_rc_dec(w->waiters);
     if (w->results) py23_rc_dec(w->results);
     if (w->children) py23_rc_dec(w->children);
@@ -80,8 +81,21 @@ void await_gc_release(void* p) {
 void free_attached_exception(void* payload, int64_t size) {
     if (!payload || size < 8) return;
     int64_t* p = (int64_t*)payload;
+    if (p[0] == PY23_EXCVAL_MAGIC && size >= (int64_t)sizeof(Py23ExcValue)) {
+        // 异常值对象：type/message 是 malloc 的，dtor 在 GC 路径不会跑。
+        Py23ExcValue* v = (Py23ExcValue*)payload;
+        free(v->type);
+        free(v->message);
+        v->type = NULL;
+        v->message = NULL;
+        return;
+    }
     if (p[0] == PY23_AWAIT_MAGIC && size >= (int64_t)sizeof(Py23Await)) {
         Py23Await* w = (Py23Await*)payload;
+        if (w->driver_throw) {
+            exc_free((Py23Exception*)w->driver_throw);
+            w->driver_throw = 0;
+        }
         if (w->exc) {
             exc_free((Py23Exception*)w->exc);
             w->exc = 0;

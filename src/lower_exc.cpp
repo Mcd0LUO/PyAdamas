@@ -40,6 +40,12 @@ void Lowerer::lower_raise(Raise& r) {
         call_void(RtFn::Reraise, {});
         return;
     }
+    TypePtr xt = tc_.type_of(r.exc.get());
+    if (xt && xt->kind == TyKind::Exception) {
+        VReg v = expr(*r.exc);
+        call_void(RtFn::RaiseValue, {v});
+        return;
+    }
     std::string type;
     VReg msg = kNoReg;
     Expr& e = *r.exc;
@@ -436,15 +442,17 @@ void Lowerer::lower_try_core(Try& t) {
 
     for (auto& hb : bodies) {
         switch_to(hb.block);
-        VReg msg = call_runtime(RtFn::ExcAccept, t_str(), {});
-        push_temp(msg);
+        VReg ev = call_runtime(RtFn::ExcAcceptValue, mk_exception("Exception"), {});
         int shadow = -1;
         if (!hb.h->name.empty()) {
-            shadow = st_->fn->new_slot(t_str());
+            shadow = st_->fn->new_slot(mk_exception("Exception"));
             comp_slots_.emplace_back();
             comp_slots_.back()[hb.h->name] = shadow;
-            store_slot(shadow, msg);
+            store_slot(shadow, ev);
         }
+        // 槽已经 retain 过；释放创建时的那一个引用。不能留在临时栈上：
+        // 协程里 except 体的 handler 水位在这之后，语句清理会越过它。
+        rc_dec(ev);
 
         // except 体再抛异常时，也要先 ExcDone 再继续展开，避免
         // current 异常上下文和 save 节点累积。

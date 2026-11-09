@@ -139,13 +139,19 @@ enum class RtFn : uint8_t {
     HandlerDiscard, // (handler*) -> void 只弹出，不清理临时值
     ExcMatches,   // (str* type) -> i64
     ExcAccept,    // () -> str*       把 pending 转为 current，返回消息
+    ExcAcceptValue, // () -> excval*   进入 except 体，返回异常对象
     ExcDone,      // () -> void
     ExcClear,     // () -> void
     ExcReraise,   // () -> void       noreturn
     ExcTypeName,  // () -> str*
     ExcMessage,   // () -> str*
+    ExcValueArgs, // (excval*) -> tuple*
+    ExcValueStr,  // (excval*) -> str*
+    ExcValueNew,  // (str* type, str* msg|0) -> excval*
     Raise,        // (str* type, str* msg) -> void  noreturn
+    RaiseValue,   // (excval*) -> void noreturn
     Reraise,      // () -> void       noreturn  裸 raise
+    AbsI64,       // (i64) -> i64
     MathSqrt, MathFloor, MathCeil, MathFabs, MathSin, MathCos, MathTan,
     MathLog, MathLog2, MathLog10, MathExp,
     MathPow, MathFmod,
@@ -168,9 +174,11 @@ enum class RtFn : uint8_t {
     AsyncGenANext,     // (asyncgen*) -> awaitable*  __anext__ 的驱动对象
     AsyncGenAsend,     // (asyncgen*, i64 sent) -> awaitable*  asend(v)
     AsyncGenAClose,    // (asyncgen*) -> awaitable*  aclose()
+    AsyncGenAthrow,    // (asyncgen*, excval*) -> awaitable*  athrow(exc)
     AsyncioFutureNew,  // () -> future*
     FutureSetResult,   // (future*, i64) -> void
     FutureSetException,// (future*, str*) -> void（失败消息）
+    FutureSetExceptionValue, // (future*, excval*) -> void（失败异常对象）
     FutureAddCallback, // (future*, fn) -> void  完成回调，参数是 future
     FutureDone,        // (future*) -> bool
     FutureCancel,      // (future*) -> bool
@@ -243,16 +251,22 @@ inline const char* rt_name(RtFn f) {
         case RtFn::HandlerDiscard: return "py23_handler_discard";
         case RtFn::ExcMatches: return "py23_exc_matches";
         case RtFn::ExcAccept: return "py23_exc_accept";
+        case RtFn::ExcAcceptValue: return "py23_exc_accept_value";
         case RtFn::ExcDone: return "py23_exc_done";
         case RtFn::ExcClear: return "py23_exc_clear";
         case RtFn::ExcReraise: return "py23_exc_reraise";
         case RtFn::ExcTypeName: return "py23_exc_type_name";
         case RtFn::ExcMessage: return "py23_exc_message";
+        case RtFn::ExcValueArgs: return "py23_exc_value_args";
+        case RtFn::ExcValueStr: return "py23_exc_value_str";
+        case RtFn::ExcValueNew: return "py23_exc_value_new";
         case RtFn::Raise: return "py23_raise";
+        case RtFn::RaiseValue: return "py23_raise_value";
         case RtFn::Reraise: return "py23_reraise";
         case RtFn::MathSqrt: return "py23_math_sqrt";
         case RtFn::MathFloor: return "py23_math_floor";
         case RtFn::MathCeil: return "py23_math_ceil";
+        case RtFn::AbsI64: return "py23_abs_i64";
         case RtFn::MathFabs: return "py23_math_fabs";
         case RtFn::MathSin: return "py23_math_sin";
         case RtFn::MathCos: return "py23_math_cos";
@@ -282,9 +296,11 @@ inline const char* rt_name(RtFn f) {
         case RtFn::AsyncGenANext: return "py23_asyncgen_anext";
         case RtFn::AsyncGenAsend: return "py23_asyncgen_asend";
         case RtFn::AsyncGenAClose: return "py23_asyncgen_aclose";
+        case RtFn::AsyncGenAthrow: return "py23_asyncgen_athrow";
         case RtFn::AsyncioFutureNew: return "py23_asyncio_future_new";
         case RtFn::FutureSetResult: return "py23_future_set_result";
         case RtFn::FutureSetException: return "py23_future_set_exception";
+        case RtFn::FutureSetExceptionValue: return "py23_future_set_exception_value";
         case RtFn::FutureAddCallback: return "py23_future_add_callback";
         case RtFn::FutureDone: return "py23_future_done";
         case RtFn::FutureCancel: return "py23_future_cancel";
@@ -563,6 +579,7 @@ inline bool ir_is_heap(const TypePtr& t) {
         case TyKind::Task:
         case TyKind::AsyncGenerator:
         case TyKind::Future:
+        case TyKind::Exception:  // 异常值：堆对象，args 列表归它所有
             return true;
         case TyKind::Optional:
             return !t->sub.empty() && ir_is_heap(t->sub[0]);
@@ -588,6 +605,7 @@ inline bool ir_is_ref(const TypePtr& t) {
         case TyKind::Task:
         case TyKind::AsyncGenerator:
         case TyKind::Future:
+        case TyKind::Exception:
             return true;
         default:
             return false;

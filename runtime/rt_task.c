@@ -230,6 +230,14 @@ void py23_future_set_exception(void* fp, Py23Str* msg) {
     future_settle(f, 0, e);
 }
 
+void py23_future_set_exception_value(void* fp, Py23ExcValue* exc) {
+    Py23Await* f = (Py23Await*)fp;
+    if (!is_await_obj(fp) || f->kind != 5)
+        py23_raise_c("TypeError", "set_exception() expects a Future");
+    if (f->done) py23_raise_c("RuntimeError", "future is already done");
+    future_settle(f, 0, py23_exc_from_value(exc));
+}
+
 void py23_future_add_callback(void* fp, int64_t cb) {
     Py23Await* f = (Py23Await*)fp;
     if (!is_await_obj(fp) || f->kind != 5)
@@ -281,15 +289,13 @@ int64_t py23_future_result(void* fp) {
     return v;
 }
 
-Py23Str* py23_future_exception(void* fp) {
+Py23ExcValue* py23_future_exception(void* fp) {
     if (!is_await_obj(fp) || ((Py23Await*)fp)->kind != 5)
         py23_raise_c("TypeError", "exception() expects a Future");
     Py23Await* f = (Py23Await*)fp;
     if (!f->done) py23_raise_c("RuntimeError", "future is not done");
     if (!f->exc) return NULL;
-    Py23Exception* e = (Py23Exception*)f->exc;
-    const char* msg = e->message[0] ? e->message : e->type;
-    return str_new(msg, (int64_t)strlen(msg));
+    return py23_exc_value_from_exc((Py23Exception*)f->exc);
 }
 
 int64_t py23_asyncio_task_result(void* tp) {
@@ -303,15 +309,13 @@ int64_t py23_asyncio_task_result(void* tp) {
     return v;
 }
 
-Py23Str* py23_asyncio_task_exception(void* tp) {
+Py23ExcValue* py23_asyncio_task_exception(void* tp) {
     if (!is_await_obj(tp) || ((Py23Await*)tp)->kind != 3)
         py23_raise_c("TypeError", "exception() expects a Task");
     Py23Await* t = (Py23Await*)tp;
     if (!t->done) py23_raise_c("RuntimeError", "task is not done");
     if (!t->exc) return NULL;
-    Py23Exception* e = (Py23Exception*)t->exc;
-    const char* msg = e->message[0] ? e->message : e->type;
-    return str_new(msg, (int64_t)strlen(msg));
+    return py23_exc_value_from_exc((Py23Exception*)t->exc);
 }
 
 int64_t py23_asyncio_task_cancelled(void* tp) {
