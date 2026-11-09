@@ -586,6 +586,17 @@ VReg Lowerer::lower_minmax(Call& c, bool is_min) {
         if (seq_ty->kind == TyKind::Str) elem_ty = t_str();
         else if (!seq_ty->sub.empty()) elem_ty = seq_ty->sub[0];
 
+        // SIMD min/max：int/bool 列表用 AVX2 归约；float 仍走标量以保持
+        // NaN 下的比较顺序语义。
+        if (opts_.opt_level >= 2 &&
+            (seq_ty->kind == TyKind::List || seq_ty->kind == TyKind::Tuple) &&
+            (elem_ty->kind == TyKind::Int || elem_ty->kind == TyKind::Bool) &&
+            (acc_ty->kind == TyKind::Int || acc_ty->kind == TyKind::Bool)) {
+            VReg seq = expr(*c.args[0]);
+            return call_runtime(is_min ? RtFn::ListMinI64 : RtFn::ListMaxI64, acc_ty,
+                                {seq});
+        }
+
         VReg seq = expr(*c.args[0]);
         int seq_slot = new_temp_slot(seq_ty);
         store_slot(seq_slot, seq);
@@ -750,6 +761,25 @@ VReg Lowerer::lower_sum(Call& c) {
     TypePtr elem_ty = t_unknown();
     if (seq_ty->kind == TyKind::Str) elem_ty = t_str();
     else if (!seq_ty->sub.empty()) elem_ty = seq_ty->sub[0];
+
+    // SIMD 归约：只覆盖同域 list/tuple[int|bool] 与 float；混合数值
+    // （如 int 列表 + float start）继续走标量循环保持转换语义。
+    if (opts_.opt_level >= 2 &&
+        (seq_ty->kind == TyKind::List || seq_ty->kind == TyKind::Tuple) &&
+        !seq_ty->sub.empty() && acc_ty) {
+        bool ints = (elem_ty->kind == TyKind::Int || elem_ty->kind == TyKind::Bool) &&
+                    (acc_ty->kind == TyKind::Int || acc_ty->kind == TyKind::Bool);
+        bool floats = opts_.fast_math && elem_ty->kind == TyKind::Float &&
+                      acc_ty->kind == TyKind::Float;
+        if (ints || floats) {
+            VReg seq = expr(*c.args[0]);
+            VReg start = floats ? const_float(0.0) : const_int(0);
+            if (c.args.size() == 2)
+                start = coerce(expr(*c.args[1]), tc_.type_of(c.args[1].get()), acc_ty);
+            return call_runtime(ints ? RtFn::ListSumI64 : RtFn::ListSumF64, acc_ty,
+                                {seq, start});
+        }
+    }
 
     VReg seq = expr(*c.args[0]);
     int seq_slot = new_temp_slot(seq_ty);

@@ -530,7 +530,10 @@ TypePtr TypeChecker::builtin_call(const std::string& n, Call& c) {
                 if (!is_unknown(e) && !is_num(e))
                     err(c.line, c.col,
                         std::format("sum() over non-numeric '{}'", type_name(e)));
-                return is_num(e) ? e : t_int();
+                TypePtr res = is_num(e) ? e : t_int();
+                // start 参数参与数值域提升：sum([], 0.5) 是 float。
+                if (a.size() > 1 && is_num(a[1])) res = promote(res, a[1]);
+                return res;
             }
             return t_int();
         }

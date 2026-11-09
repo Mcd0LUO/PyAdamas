@@ -229,6 +229,7 @@ struct Program {
     bool rebuild = false;
     bool verbose = false;
     int opt = 2;
+    bool fast_math = false;
 };
 
 std::string sanitize_symbol(const std::string& s) {
@@ -458,6 +459,7 @@ std::optional<uint64_t> parse_u64(const std::string& s) {
 struct Manifest {
     uint64_t source_hash = 0;
     int opt = -1;
+    int fast_math = -1;
     std::map<std::string, std::string> deps;
 };
 
@@ -488,6 +490,12 @@ std::optional<Manifest> read_manifest(const ModuleUnit& u) {
             auto o = parse_u64(v);
             if (!o) return std::nullopt;
             m.opt = static_cast<int>(*o);
+        } else if (tag == "fastmath") {
+            std::string v;
+            ss >> v;
+            auto o = parse_u64(v);
+            if (!o) return std::nullopt;
+            m.fast_math = static_cast<int>(*o);
         } else if (tag == "dep") {
             std::string name, hash;
             ss >> name >> hash;
@@ -507,6 +515,7 @@ void write_manifest(const Program& p, const ModuleUnit& u) {
     out << "abi " << py23::kModuleAbiVersion << "\n";
     out << "source " << py23::fnv1a64(u.source) << "\n";
     out << "opt " << p.opt << "\n";
+    out << "fastmath " << (p.fast_math ? 1 : 0) << "\n";
     for (auto& d : u.deps) {
         auto it = p.units.find(d);
         std::string hash = (it != p.units.end() && it->second->info)
@@ -676,6 +685,7 @@ bool try_cache(Program& p, ModuleUnit& u) {
     if (!m) return false;
     if (m->source_hash != py23::fnv1a64(u.source)) return false;
     if (m->opt != p.opt) return false;
+    if (m->fast_math != (p.fast_math ? 1 : 0)) return false;
     if (m->deps.size() != u.deps.size()) return false;
     for (auto& d : u.deps) {
         auto it = m->deps.find(d);
@@ -848,6 +858,7 @@ bool build_unit(Program& p, ModuleUnit& u, bool emit_object, bool entry_ir) {
     opt.source_path = u.path;
     opt.is_entry = u.is_entry;
     opt.opt_level = p.opt;
+    opt.fast_math = p.fast_math;
     opt.module_lookup = [&p](const std::string& name) -> py23::ModuleInfoPtr {
         return program_module(p, name);
     };
@@ -924,7 +935,7 @@ int main(int argc, char** argv) {
                      "py23 —— Python 语法外壳的编译器\n"
                      "\n"
                      "usage: %s [tokens|ast|types|check|ir|asm|build|run] [-O0|-O1|-O2] "
-                     "[--syntax] [-o out] <file.py>\n",
+                     "[--fast-math] [--syntax] [-o out] <file.py>\n",
                      argv[0]);
         return 2;
     }
@@ -937,6 +948,7 @@ int main(int argc, char** argv) {
     bool verbose = false;
     bool rebuild = false;
     int opt_level = 2;
+    bool fast_math = false;
 
     static const std::vector<std::string> kModes = {"tokens", "ast",     "check", "types",
                                                     "ir",     "asm",     "build", "run"};
@@ -945,6 +957,7 @@ int main(int argc, char** argv) {
         if (a == "--syntax") syntax_only = true;
         else if (a == "-v" || a == "--verbose") verbose = true;
         else if (a == "--rebuild") rebuild = true;
+        else if (a == "--fast-math") fast_math = true;
         else if (a == "-O0") opt_level = 0;
         else if (a == "-O1") opt_level = 1;
         else if (a == "-O2") opt_level = 2;
@@ -1024,6 +1037,7 @@ int main(int argc, char** argv) {
         prog.rebuild = rebuild;
         prog.verbose = verbose;
         prog.opt = opt_level;
+        prog.fast_math = fast_math;
         if (!load_program(path, include_dirs, prog)) return 1;
 
         if (mode == "ir" || mode == "asm") {

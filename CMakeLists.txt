@@ -30,6 +30,7 @@ set(PY23_SOURCES
   src/lower_expr.cpp
   src/lower_call.cpp
   src/lower_gen.cpp
+  src/opt.cpp
   src/codegen.cpp
   src/codegen_regalloc.cpp
   src/codegen_block.cpp

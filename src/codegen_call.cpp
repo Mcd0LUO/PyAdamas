@@ -485,6 +485,7 @@ void AsmGen::gen_call_rt(const Inst& in) {
             case RtFn::DictUpdate:
             case RtFn::ListExtend:
             case RtFn::ListDelIndex:
+            case RtFn::ListSumI64:
             case RtFn::IsInstance:
             case RtFn::IsNamedClass:
             case RtFn::IsException:
@@ -547,6 +548,8 @@ void AsmGen::gen_call_rt(const Inst& in) {
             case RtFn::IsDict:
             case RtFn::IsStr:
             case RtFn::IsComplex:
+            case RtFn::ListMinI64:
+            case RtFn::ListMaxI64:
             case RtFn::StrToList:
             case RtFn::HandlerLeave:
             case RtFn::HandlerDiscard:
@@ -616,6 +619,10 @@ void AsmGen::gen_call_rt(const Inst& in) {
             case RtFn::FmtF64:
                 line(std::format("movsd {}, %xmm0", src_op(in.args[0])));
                 line(std::format("movq {}, %rdi", src_op(in.args[1])));
+                break;
+            case RtFn::ListSumF64:
+                line(std::format("movq {}, %rdi", src_op(in.args[0])));
+                line(std::format("movsd {}, %xmm0", src_op(in.args[1])));
                 break;
             case RtFn::ComplexNew:
                 line(std::format("movsd {}, %xmm0", src_op(in.args[0])));

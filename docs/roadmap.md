@@ -415,6 +415,18 @@ staticmethod/property 上的 super、导入类字段子模式、unknown 数值�
 
 已知限制：还没有 C++ O1/O2 的 IR 优化遍；O2 只是后端局部优化。
 
+## 0.32：O2 深度优化与 SIMD（已完成）
+
+- IR 优化遍（O2）：常量折叠、常量分支化简、纯标量 DCE。
+- AVX2 归约：int 的 sum/min/max 默认启用；float sum 需 `--fast-math`
+  （分组求和舍入不同）。运行时 CPU 检测 + 标量回退。
+- `sum()` start 参数数值提升修正。
+- 基准：sum（float）O1 14.5 ms → O2 13.5 ms；`--fast-math` 7 ms；
+  dot 87→74 ms；matmul 持平。
+
+已知限制：没有通用循环自动向量化；float SIMD sum 有末位舍入差异；
+min/max SIMD 只覆盖 int；IR 遍没有 LICM/CSE/内联。
+
 ## 下一步
 
 - 语言面：`@classmethod`、自定义方法/类装饰器、生成器 `throw()`

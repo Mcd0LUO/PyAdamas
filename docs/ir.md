@@ -120,11 +120,26 @@ Python 语义里变量天生可变，循环里反复赋值是常态。一上来�
 
 另有三类符号不走 `RtFn`，由后端直接按名字调用：`py23_pow_i64`、`py23_str_eq`、`py23_str_cmp`（以及 libm 的 `floor` / `fmod` / `pow`）。这类是「参数形态固定、没有枚举必要」的辅助函数。
 
+## IR 优化遍
+
+O2 在降级完成后运行 `optimize_ir`（O0/O1 不运行）：
+
+- **常量折叠**：整数/浮点 Add/Sub/Mul、位运算、比较、一元 Neg/BitNot/Not、
+  数值 Convert 直接折成常量。Div/Mod/Pow、字符串/容器操作和可能抛异常的
+  指令不折叠。
+- **分支化简**：常量条件的 `branch` 改成 `jump`；不可达块保留但不再执行。
+- **DCE**：纯标量指令（常量、局部/全局 load、安全算术、比较、数值转换、
+  `len`、`index.get.unchecked` 等）在结果无人使用时删除，迭代到不动点。
+  可能抛异常的 checked index、容器分配和调用不删除。
+
 ## 后端的局部优化
 
 优化按 `-O0/-O1/-O2` 分档（默认 O2），O0 关闭下列大部分项目，O1 打开
 P0/P1/P2，O2 再加控制流与小函数优化：
 
+- **O2 SIMD 归约**：int/bool 的 `sum`、int 的 `min/max` 降级为运行时
+  AVX2 内核；float `sum` 只在 `--fast-math` 时使用 SIMD（分组求和会改
+  舍入）。
 - **O2 控制流**：跳到下一块的 `jmp` 省略；条件分支一边是 fallthrough 时
   发反向条件跳转；非变参调用不再清 `%eax`；序言用 must 数据流只清零
   可能读到未赋值值的槽（取地址槽、handler、生成器帧保守清零）。

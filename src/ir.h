@@ -145,6 +145,10 @@ enum class RtFn : uint8_t {
     ListDelIndex, // (list*, i64 index) -> void  del list[i]
     StrToList,    // (str*) -> list*
     ListExtend,   // (list* dst, list* src) -> void
+    ListSumI64,   // (list*, i64 start) -> i64
+    ListSumF64,   // (list*, f64 start) -> f64
+    ListMinI64,   // (list*) -> i64  空表抛 ValueError
+    ListMaxI64,   // (list*) -> i64
     RangeNew,     // (i64 start, i64 stop, i64 step) -> list*
     HandlerPush,  // () -> handler*   压入异常 handler，记录临时栈水位
     HandlerLeave, // (handler*) -> void 弹出并清理临时栈
@@ -285,6 +289,10 @@ inline const char* rt_name(RtFn f) {
         case RtFn::ListDelIndex: return "py23_list_del_index";
         case RtFn::StrToList: return "py23_str_to_list";
         case RtFn::ListExtend: return "py23_list_extend";
+        case RtFn::ListSumI64: return "py23_list_sum_i64";
+        case RtFn::ListSumF64: return "py23_list_sum_f64";
+        case RtFn::ListMinI64: return "py23_list_min_i64";
+        case RtFn::ListMaxI64: return "py23_list_max_i64";
         case RtFn::RangeNew: return "py23_range_new";
         case RtFn::HandlerPush: return "py23_handler_push";
         case RtFn::HandlerLeave: return "py23_handler_leave";

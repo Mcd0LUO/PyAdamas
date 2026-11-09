@@ -27,6 +27,8 @@ struct LowerOptions {
     bool is_entry = true;
     // 0 基础 / 1 常规优化 / 2 默认（追加循环与控制流小优化）。
     int opt_level = 2;
+    // 允许浮点归约用 SIMD 分组求和（会改变舍入顺序）。
+    bool fast_math = false;
     ModuleLookup module_lookup;
 };
 

@@ -4,6 +4,44 @@
 
 早期阶段没有逐条留痕，按阶段归纳；0.4 之后逐条记录。
 
+## [0.32] - 2026-11-09
+
+O2 深度优化：IR 常量折叠/DCE，以及 AVX2 归约内核。
+
+### 新增
+
+- IR 优化遍 `optimize_ir`（仅 O2）：常量折叠（整数/浮点算术、比较、
+  一元运算、数值转换）、常量条件分支化简为 jump、纯标量指令的死代码
+  消除（迭代到不动点）。Div/Mod/Pow、可能抛异常的 checked index、
+  容器分配和调用不参与 DCE。
+- AVX2 运行时归约：O2 下 `sum(list/tuple[int|bool])`、`min/max(list[int])`
+  直接调用运行时内核；`sum(list[float])` 只在显式 `--fast-math` 下走 SIMD
+  （分组求和会改变末位舍入），无 AVX2 时回退标量。模块缓存区分
+  `--fast-math`。
+- 修正 `sum()` 的 start 参数类型提升：`sum([], 0.5)` 现在是 float 0.5。
+- 测试：`46_simd_reduce.py`、`47_float_sum_order.py`，并加入
+  `py23_opt_levels` 三档回归（含 `--fast-math` 专项）。
+
+### 验证与基准
+
+- `ctest --preset dev` 两个测试全绿；O0/O1/O2 全量套件与 810 差分零失败
+- `--rebuild` 同机：
+  - sum 100 万×20（float）：O1 14.5 ms → O2 13 ms（IR 遍）；
+    加 `--fast-math` 后 7 ms（SIMD 分组求和，约 2×）
+  - sum 100 万×20（int）：O1 12.5 ms → O2 7.5 ms（AVX2 归约，约 1.7×）
+  - dot 10M：O2 约 87 ms → 74 ms（IR 遍约 1.18×）
+  - matmul 160³：O2 约 10 ms（持平，内核仍是标量用户代码）
+- `python3 tests/diff/run_diff.py --py23 /tmp/py23O0|O1|O2` 均 0 失败
+
+### 已知限制
+
+- SIMD 只覆盖内置 sum/min/max 归约，没有通用循环自动向量化；用户写的
+  matmul 内层循环仍是标量
+- AVX2 min/max 只支持 int64；float min/max 保持标量比较以维持 NaN/顺序语义
+- float SIMD sum 仅在 `--fast-math` 下启用，结果可能有末位差异；
+  默认 O2 保持从左到右的标量顺序
+- IR 遍没有跨块 LICM、CSE、内联和调度
+
 ## [0.31] - 2026-11-09
 
 生成代码优化等级 `-O0` / `-O1` / `-O2`，默认 `-O2`。

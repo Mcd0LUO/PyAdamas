@@ -1,6 +1,10 @@
 // rt_obj.c —— 字符串/列表/字典/切片/对象/输出/math
 #include "rt_internal.h"
 
+#if defined(__x86_64__) && defined(__GNUC__)
+#include <immintrin.h>
+#endif
+
 /* ── 字符串 ───────────────────────────────────────────────────── */
 
 Py23Str* py23_str_concat(Py23Str* a, Py23Str* b) {
@@ -137,6 +141,142 @@ void py23_list_extend(Py23List* dst, Py23List* src) {
         py23_list_append(dst, v);
     }
     free(snap);
+}
+
+/* ── 列表归约（AVX2 快路径 + 标量回退） ─────────────────────── */
+
+static int py23_has_avx2(void) {
+#if defined(__x86_64__) && defined(__GNUC__)
+    static int cached = -1;
+    if (cached < 0) {
+        __builtin_cpu_init();
+        cached = __builtin_cpu_supports("avx2") ? 1 : 0;
+    }
+    return cached;
+#else
+    return 0;
+#endif
+}
+
+#if defined(__x86_64__) && defined(__GNUC__)
+__attribute__((target("avx2")))
+static uint64_t list_sum_u64_avx2(const int64_t* d, int64_t n) {
+    __m256i acc = _mm256_setzero_si256();
+    int64_t i = 0;
+    for (; i + 4 <= n; i += 4)
+        acc = _mm256_add_epi64(acc, _mm256_loadu_si256((const __m256i*)(d + i)));
+    uint64_t lanes[4];
+    _mm256_storeu_si256((__m256i*)lanes, acc);
+    uint64_t s = lanes[0] + lanes[1] + lanes[2] + lanes[3];
+    for (; i < n; ++i) s += (uint64_t)d[i];
+    return s;
+}
+
+__attribute__((target("avx2")))
+static double list_sum_f64_avx2(const double* d, int64_t n) {
+    __m256d acc = _mm256_setzero_pd();
+    int64_t i = 0;
+    for (; i + 4 <= n; i += 4)
+        acc = _mm256_add_pd(acc, _mm256_loadu_pd(d + i));
+    double lanes[4];
+    _mm256_storeu_pd(lanes, acc);
+    double s = lanes[0] + lanes[1] + lanes[2] + lanes[3];
+    for (; i < n; ++i) s += d[i];
+    return s;
+}
+
+__attribute__((target("avx2")))
+static int64_t list_min_i64_avx2(const int64_t* d, int64_t n) {
+    int64_t i = 0;
+    int64_t m;
+    if (n >= 4) {
+        __m256i best = _mm256_loadu_si256((const __m256i*)d);
+        i = 4;
+        for (; i + 4 <= n; i += 4) {
+            __m256i v = _mm256_loadu_si256((const __m256i*)(d + i));
+            __m256i take = _mm256_cmpgt_epi64(best, v);
+            best = _mm256_blendv_epi8(best, v, take);
+        }
+        int64_t lanes[4];
+        _mm256_storeu_si256((__m256i*)lanes, best);
+        m = lanes[0];
+        for (int j = 1; j < 4; ++j)
+            if (lanes[j] < m) m = lanes[j];
+    } else {
+        m = d[0];
+    }
+    for (; i < n; ++i)
+        if (d[i] < m) m = d[i];
+    return m;
+}
+
+__attribute__((target("avx2")))
+static int64_t list_max_i64_avx2(const int64_t* d, int64_t n) {
+    int64_t i = 0;
+    int64_t m;
+    if (n >= 4) {
+        __m256i best = _mm256_loadu_si256((const __m256i*)d);
+        i = 4;
+        for (; i + 4 <= n; i += 4) {
+            __m256i v = _mm256_loadu_si256((const __m256i*)(d + i));
+            __m256i take = _mm256_cmpgt_epi64(v, best);
+            best = _mm256_blendv_epi8(best, v, take);
+        }
+        int64_t lanes[4];
+        _mm256_storeu_si256((__m256i*)lanes, best);
+        m = lanes[0];
+        for (int j = 1; j < 4; ++j)
+            if (lanes[j] > m) m = lanes[j];
+    } else {
+        m = d[0];
+    }
+    for (; i < n; ++i)
+        if (d[i] > m) m = d[i];
+    return m;
+}
+#endif
+
+int64_t py23_list_sum_i64(Py23List* l, int64_t start) {
+    uint64_t s = (uint64_t)start;
+#if defined(__x86_64__) && defined(__GNUC__)
+    if (py23_has_avx2()) s += list_sum_u64_avx2(l->data, l->len);
+    else
+#endif
+        for (int64_t i = 0; i < l->len; ++i) s += (uint64_t)l->data[i];
+    return (int64_t)s;
+}
+
+double py23_list_sum_f64(Py23List* l, double start) {
+#if defined(__x86_64__) && defined(__GNUC__)
+    if (py23_has_avx2())
+        return start + list_sum_f64_avx2((const double*)l->data, l->len);
+#endif
+    double s = start;
+    const double* d = (const double*)l->data;
+    for (int64_t i = 0; i < l->len; ++i) s += d[i];
+    return s;
+}
+
+int64_t py23_list_min_i64(Py23List* l) {
+    if (l->len <= 0) py23_raise_c("ValueError", "min() arg is an empty sequence");
+#if defined(__x86_64__) && defined(__GNUC__)
+    if (py23_has_avx2()) return list_min_i64_avx2(l->data, l->len);
+#endif
+    int64_t m = l->data[0];
+    for (int64_t i = 1; i < l->len; ++i)
+        if (l->data[i] < m) m = l->data[i];
+    return m;
+}
+
+int64_t py23_list_max_i64(Py23List* l) {
+    if (l->len <= 0) py23_raise_c("ValueError", "max() arg is an empty sequence");
+#if defined(__x86_64__) && defined(__GNUC__)
+    if (py23_has_avx2()) return list_max_i64_avx2(l->data, l->len);
+#endif
+    int64_t m = l->data[0];
+    for (int64_t i = 1; i < l->len; ++i)
+        if (l->data[i] > m) m = l->data[i];
+    return m;
 }
 
 /* ── 字典 / 集合 ─────────────────────────────────────────────── */

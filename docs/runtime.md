@@ -258,6 +258,9 @@ longjmp 回同步调用点。GC 清扫和进程退出不跑析构器，但会单
 | `py23_list_set` | `(Py23List*, i64, i64) -> void` | 同上，写入；kind 1 时 dec 旧元素。生成代码内联快路径，运行期 elem_kind 决定是否 dec |
 | `py23_list_set_len` | `(Py23List*, i64) -> void` | 改 `len`；kind 1 时 dec 被截掉的元素 |
 | `py23_list_extend` | `(Py23List* dst, Py23List* src) -> void` | 追加 src 全部元素；按 dst kind retain，`src == dst` 先快照 |
+| `py23_list_sum_i64` | `(Py23List*, i64 start) -> i64` | O2 归约；AVX2 4×int64 累加（按 uint64 回绕），否则标量 |
+| `py23_list_sum_f64` | `(Py23List*, f64 start) -> f64` | `--fast-math` + O2 时 AVX2 4 路 double 分组求和；否则标量顺序 |
+| `py23_list_min_i64` / `max_i64` | `(Py23List*) -> i64` | O2 归约；AVX2 compare+blend，空表抛 ValueError |
 | `py23_list_slice_assign` | `(Py23List*, i64, i64, i64, Py23List*) -> void` | 切片赋值；step 1 支持长度变化 |
 | `py23_str_to_list` | `(Py23Str*) -> Py23List*` | 按字节拆成 list[str]，每字符新串 |
 | `py23_range_new` | `(i64 start, i64 stop, i64 step) -> Py23List*` | range() 实体化成 list[int]；step 0 抛 ValueError |

@@ -1,6 +1,8 @@
 // lower.cpp —— 降级驱动：预扫描、入口、函数/类编译
 #include "lower_impl.h"
 
+#include "opt.h"
+
 namespace py23 {
 
 // ────────────────────────── 预扫描 ──────────────────────────
@@ -670,6 +672,7 @@ LowerResult lower_module(Module& ast, TypeChecker& tc, const std::string& file,
     Lowerer lw(res.mod, tc, file, options);
     lw.run(ast);
     res.errors = std::move(lw.errors());
+    if (res.errors.empty() && options.opt_level >= 2) optimize_ir(res.mod, options.opt_level);
     return res;
 }
 
