@@ -213,13 +213,38 @@ traceback / `raise ... from`；`finally` 体内跳出 finally 的
 - 已知边界：包 `__init__` 不会因为导入子模块自动执行；点号 import 必须
   带 `as`；`__all__`、命名空间包、跨模块继承未支持。
 
-## 下一步
+## 0.16 / 0.17：生成器与 async（模型已定）
 
-### 1. 剩余构造
+**结论：生成器与协程统一用状态机，不用独立栈。**
 
-| 构造 | 工作量 | 依赖 |
-|---|---|---|
-| 生成器 / `async` | 大 | 协程状态机或独立栈 |
+每个含 `yield` / `await` 的函数在降级阶段被拆成若干基本块，装进堆上的
+帧对象（布局和闭包类似，多一个 `code` / `state` / `resume` 指针）：
+
+```
+帧 = { rc, gc_link, dtor=None, code, state, resume, 槽位... }
+```
+
+- `resume(frame, sent)` 是按 `state` 分发的一次执行：跑到下一个
+  `yield` 就存回 `state` 并返回。`yield` 与 `await` 是同一种状态切换，
+  区别只在 `await` 要等一个 future 就绪后才被再次 resume。
+- 帧里的槽位是 GC 根：帧对象登记到动态根表，GC 扫描时按槽位类型
+  决定是否把内容当指针。
+- 跨 `yield` 的 `try` / `with` / `finally` 必须直接支持：状态机把
+  `try` 区间编译成「离开时需要执行的清理列表」，`close()` / 异常注入
+  时按栈序跑。这条不做，生成器里的 `with open(...)` 就无法正确关文件。
+- `for x in gen:` 走 `__next__`；`StopIteration` 用现有异常机制表达。
+- 类型：`Generator[T]`，`send` 可选；`yield` 表达式本身留作 0.16 的
+  收尾项（先支持 `yield` 语句和 `for`）。
+
+**0.17 async 复用同一套状态机**，新增：
+
+- `async def` 产出的帧和生成器帧同构，`await` 即「挂到 future 的
+  完成回调上」；恢复仍走 `resume`。
+- 完整事件循环：就绪队列 + 定时器堆 + I/O 轮询；`asyncio.run` /
+  `sleep` / `gather` 最小集合，不追 CPython 全套。
+- 选状态机的理由：帧一次分配、切换只改 `state` 并返回，内存和
+  切换成本都低于独立栈；代价是编译期要处理控制流拆分（`yield`
+  不能出现在 `try` 的 `finally` 语句块里这类限制先按 CPython 规则拒）。
 
 ## 待决策
 
