@@ -646,11 +646,50 @@ bool inline_calls_in_function(IRModule& m, IRFunction& fn, int fi,
     return any;
 }
 
+// 调用点的函数值能静态解析、且 callee 不读闭包环境时，把闭包间接调用
+// 改成直接调用：省掉一次全局装载和一次依赖装载。
+bool rewrite_direct_calls(IRModule& m, IRFunction& fn,
+                          const std::unordered_map<int, int>& gfunc) {
+    std::unordered_map<VReg, DefRef> defs;
+    for (const auto& b : fn.blocks)
+        for (const auto& in : b.insts)
+            if (in.dst != kNoReg) defs[in.dst] = DefRef{in.op, in.imm, in.idx};
+
+    bool changed = false;
+    for (auto& b : fn.blocks) {
+        for (auto& in : b.insts) {
+            if (in.op != IrOp::Call) continue;
+            int cidx = -1;
+            auto dit = defs.find(in.a);
+            if (dit != defs.end()) {
+                if (dit->second.op == IrOp::FuncAddr)
+                    cidx = static_cast<int>(dit->second.imm);
+                else if (dit->second.op == IrOp::LoadGlobal) {
+                    auto git = gfunc.find(static_cast<int>(dit->second.idx));
+                    if (git != gfunc.end()) cidx = git->second;
+                }
+            }
+            if (cidx < 0 || cidx == m.entry) continue;
+            const IRFunction& callee = *m.funcs[static_cast<size_t>(cidx)];
+            // 有闭包环境的 callee 需要 %r10 传环境，不能走直接调用。
+            if (callee.env_slot >= 0 || callee.params.size() != in.args.size()) continue;
+            in.op = IrOp::CallDirect;
+            in.idx = cidx;
+            in.a = kNoReg;
+            changed = true;
+        }
+    }
+    return changed;
+}
+
 }  // namespace
 
 void optimize_ir(IRModule& m, int opt_level) {
     if (opt_level < 2) return;
 
+    // 常量折叠 + 常量分支化简 + DCE。内联会引入新的常量操作数，
+    // 所以在内联前后各跑一遍。
+    auto fold_all = [&]() {
     for (auto& fptr : m.funcs) {
         IRFunction& fn = *fptr;
 
@@ -826,13 +865,19 @@ void optimize_ir(IRModule& m, int opt_level) {
         }
         dce_function(fn);
     }
+    };
 
-    // 先折叠/DCE，再内联静态小函数，最后再清一次无用代码。
+    fold_all();
+
+    // 再内联静态小函数，然后把剩余静态调用改成直接调用。
     auto gfunc = collect_static_func_globals(m);
     auto recursive = recursive_functions(m, gfunc);
     for (size_t i = 0; i < m.funcs.size(); ++i)
         inline_calls_in_function(m, *m.funcs[i], static_cast<int>(i), gfunc, recursive);
-    for (auto& fptr : m.funcs) dce_function(*fptr);
+    for (auto& fptr : m.funcs) rewrite_direct_calls(m, *fptr, gfunc);
+
+    // 内联带进来的实参常量继续折；顺带清掉失效的 load.global / func.addr。
+    fold_all();
 }
 
 }  // namespace py23

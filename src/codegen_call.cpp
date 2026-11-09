@@ -323,7 +323,6 @@ void AsmGen::gen_call_direct(const Inst& in) {
             if (l.stack_off >= 0) stack_args = (l.stack_off / 8) + 1;
         int alloc = (stack_args * 8 + 15) & ~15;
 
-        line(std::format("leaq {}(%rip), %r11", func_label(in.idx)));
         if (alloc) line(std::format("subq ${}, %rsp", alloc));
         for (size_t i = 0; i < in.args.size(); ++i) {
             const auto& l = locs[i];
@@ -339,10 +338,15 @@ void AsmGen::gen_call_direct(const Inst& in) {
             else
                 line(std::format("movq {}, {}", src_op(in.args[i]), kIntArgRegs[l.reg]));
         }
-        line("xorl %r10d, %r10d");
+        // 不读闭包环境的 callee 不需要 %r10；有 env 槽的才清零占位。
+        const IRFunction* callee =
+            (in.idx >= 0 && in.idx < static_cast<int>(m_->funcs.size()))
+                ? m_->funcs[static_cast<size_t>(in.idx)].get()
+                : nullptr;
+        if (!callee || callee->env_slot >= 0) line("xorl %r10d, %r10d");
         if (opt_ < 2) line("xorl %eax, %eax");
         spill_fp_slots();
-        line("call *%r11");
+        line(std::format("call {}", func_label(in.idx)));
         reload_fp_slots();
         if (alloc) line(std::format("addq ${}, %rsp", alloc));
         if (in.dst != kNoReg) {
@@ -425,10 +429,9 @@ void AsmGen::gen_call(const Inst& in) {
         int stack_bytes = stack_args * 8;
         int alloc = (stack_bytes + 15) & ~15;
 
-        // 函数值是闭包对象指针：+0 是代码地址。先取代码到 r11，
-        // 参数装完后再把闭包指针放进 r10 传给被调函数当环境。
+        // 函数值是闭包对象指针：+0 是代码地址。整个参数装配期间 %r11
+        // 一直握着闭包，最后既当环境指针传给被调函数，也从 +0 取地址调用。
         line(std::format("movq {}, %r11", src_op(in.a)));
-        line("movq (%r11), %r11");
         if (alloc) line(std::format("subq ${}, %rsp", alloc));
         for (size_t i = 0; i < in.args.size(); ++i) {
             if (locs[i].stack_off < 0) continue;
@@ -443,10 +446,10 @@ void AsmGen::gen_call(const Inst& in) {
             else
                 line(std::format("movq {}, {}", src_op(in.args[i]), kIntArgRegs[l.reg]));
         }
-        line(std::format("movq {}, %r10", src_op(in.a)));
+        line("movq %r11, %r10");
         if (opt_ < 2) line("xorl %eax, %eax");
         spill_fp_slots();
-        line("call *%r11");
+        line("call *(%r11)");
         reload_fp_slots();
         if (alloc) line(std::format("addq ${}, %rsp", alloc));
 
