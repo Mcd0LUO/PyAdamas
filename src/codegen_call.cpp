@@ -283,6 +283,7 @@ void AsmGen::gen_call_rt(const Inst& in) {
             case RtFn::ExcMatches:
             case RtFn::ExcValueArgs:
             case RtFn::ExcValueStr:
+            case RtFn::ExcValueCause:
             case RtFn::RaiseValue:
             case RtFn::AbsI64:
             case RtFn::GenNext:
@@ -312,6 +313,8 @@ void AsmGen::gen_call_rt(const Inst& in) {
                 line(std::format("movq {}, %rsi", src_op(in.args[1])));
                 break;
             case RtFn::ExcValueNew:
+            case RtFn::ExcRegister:
+            case RtFn::RaiseValueFrom:
             case RtFn::FutureSetResult:
             case RtFn::FutureSetException:
             case RtFn::FutureSetExceptionValue:

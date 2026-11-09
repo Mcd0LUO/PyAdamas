@@ -198,6 +198,10 @@ struct ClassInfo {
     // 基类用裸指针，所有权统一在 TypeChecker::all_classes_。
     // 类之间的继承是 DAG，但字段类型会指回类，用 shared_ptr 会成环。
     ClassInfo* base = nullptr;
+    // 自定义异常类：继承内置异常名或另一个自定义异常类。实例值按
+    // TyKind::Exception 处理，不参与对象布局/vtable。
+    bool is_exception_class = false;
+    std::string exc_parent;
     std::vector<FieldInfo> fields;    // 只含本类声明的字段
     std::vector<MethodInfo> methods;  // 只含本类声明的方法
     int base_fields = 0;              // 继承来的字段数

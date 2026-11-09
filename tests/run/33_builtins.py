@@ -24,6 +24,16 @@ try:
     max(())
 except ValueError as e:
     print("empty2", e)
+print(any([0, 1, 2]))
+print(any([]))
+print(all([1, 2, 3]))
+print(all([1, 0]))
+print(all([]))
+print(any(["", "a"]))
+print(all(["a", "b"]))
+print(any({"", "x"}))
+print(all([True, False]))
+print(any(["", ""]))
 
 # --- expect ---
 # 5
@@ -46,3 +56,13 @@ except ValueError as e:
 # 6.25
 # empty min() arg is an empty sequence
 # empty2 max() arg is an empty sequence
+# True
+# False
+# True
+# False
+# True
+# True
+# True
+# True
+# False
+# False

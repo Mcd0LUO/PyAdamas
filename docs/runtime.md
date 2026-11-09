@@ -297,6 +297,9 @@ longjmp 回同步调用点。GC 清扫和进程退出不跑析构器，但会单
 | `py23_exc_value_args` | `(excval*) -> tuple*` | `e.args`（借用，args[0] 是消息） |
 | `py23_exc_value_str` | `(excval*) -> str*` | `str(e)` / `print(e)` 的消息字符串 |
 | `py23_raise_value` | `(excval*) -> void` | 抛异常值（noreturn） |
+| `py23_raise_value_from` | `(excval*, excval*|0) -> void` | 抛异常值并设置 cause（noreturn） |
+| `py23_exc_value_cause` | `(excval*) -> excval*` | `e.__cause__`，没有返回 NULL |
+| `py23_exc_register` | `(str* child, str* parent) -> void` | 自定义异常类的父子关系注册 |
 | `py23_exc_done` | `() -> void` | 释放 current，恢复上一层异常上下文 |
 | `py23_exc_clear` | `() -> void` | 抑制并释放 pending |
 | `py23_exc_reraise` | `() -> void` | 继续向外交互展开（noreturn） |

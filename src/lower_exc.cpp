@@ -7,10 +7,14 @@ VReg Lowerer::lower_exc_match(Expr& type) {
     auto one = [&](Expr& e) -> VReg {
         if (e.kind == ExprKind::Name) {
             auto& n = static_cast<Name&>(e);
-            if (TypeChecker::is_exception_type(n.id))
+            bool builtin = TypeChecker::is_exception_type(n.id) && is_builtin(n.id);
+            bool custom = false;
+            if (auto it = classes_.find(n.id); it != classes_.end())
+                custom = it->second->is_exception_class;
+            if (builtin || custom)
                 return call_runtime(RtFn::ExcMatches, t_bool(), {const_str(n.id)});
         }
-        err(e.line, e.col, "except requires a built-in exception name");
+        err(e.line, e.col, "except requires an exception name");
         return const_bool(false);
     };
     if (type.kind == ExprKind::Tuple) {
@@ -32,18 +36,35 @@ VReg Lowerer::lower_exc_match(Expr& type) {
 }
 
 void Lowerer::lower_raise(Raise& r) {
-    if (r.cause) {
-        err(r.line, r.col, "'raise ... from' is not supported by the code generator yet");
-        return;
-    }
     if (!r.exc) {
+        if (r.cause) {
+            err(r.line, r.col, "'raise from' requires an exception");
+            return;
+        }
         call_void(RtFn::Reraise, {});
         return;
     }
+    VReg cause = kNoReg;
+    if (r.cause) {
+        TypePtr ct = tc_.type_of(r.cause.get());
+        if (ct && ct->kind == TyKind::None) {
+            cause = const_int(0);
+        } else {
+            cause = expr(*r.cause);
+            if (!ct || (ct->kind != TyKind::Exception && ct->kind != TyKind::Unknown))
+                err(r.cause->line, r.cause->col,
+                    "raise from requires an exception or None");
+        }
+    }
+    auto is_exc_name = [&](const std::string& n) {
+        if (TypeChecker::is_exception_type(n) && is_builtin(n)) return true;
+        auto it = classes_.find(n);
+        return it != classes_.end() && it->second->is_exception_class;
+    };
     TypePtr xt = tc_.type_of(r.exc.get());
     if (xt && xt->kind == TyKind::Exception) {
         VReg v = expr(*r.exc);
-        call_void(RtFn::RaiseValue, {v});
+        call_void(RtFn::RaiseValueFrom, {v, cause == kNoReg ? const_int(0) : cause});
         return;
     }
     std::string type;
@@ -51,8 +72,8 @@ void Lowerer::lower_raise(Raise& r) {
     Expr& e = *r.exc;
     if (e.kind == ExprKind::Name) {
         auto& n = static_cast<Name&>(e);
-        if (!TypeChecker::is_exception_type(n.id)) {
-            err(e.line, e.col, "raise requires a built-in exception name");
+        if (!is_exc_name(n.id)) {
+            err(e.line, e.col, "raise requires an exception name or instance");
             return;
         }
         type = n.id;
@@ -63,8 +84,8 @@ void Lowerer::lower_raise(Raise& r) {
             return;
         }
         auto& n = static_cast<Name&>(*c.func);
-        if (!TypeChecker::is_exception_type(n.id)) {
-            err(e.line, e.col, "raise requires a built-in exception name");
+        if (!is_exc_name(n.id)) {
+            err(e.line, e.col, "raise requires an exception name or instance");
             return;
         }
         if (!c.keywords.empty()) {
@@ -93,6 +114,15 @@ void Lowerer::lower_raise(Raise& r) {
         return;
     }
     if (msg == kNoReg) msg = const_str("");
+    if (cause != kNoReg) {
+        Inst in;
+        in.op = IrOp::CallRt;
+        in.imm = static_cast<int64_t>(RtFn::ExcValueNew);
+        in.args = {const_str(type), const_int(0)};
+        VReg v = def_heap(mk_exception(type), std::move(in));
+        call_void(RtFn::RaiseValueFrom, {v, cause});
+        return;
+    }
     call_void(RtFn::Raise, {const_str(type), msg});
 }
 

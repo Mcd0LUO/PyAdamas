@@ -310,7 +310,10 @@ VReg Lowerer::expr(Expr& e) {
             if (ot && ot->kind == TyKind::Exception) {
                 VReg ev = expr(*a.value);
                 if (a.attr == "args")
-                    return call_runtime(RtFn::ExcValueArgs, mk_tuple({t_unknown()}), {ev});
+                    return call_runtime(RtFn::ExcValueArgs, mk_tuple({t_str()}), {ev});
+                if (a.attr == "__cause__")
+                    return call_runtime(RtFn::ExcValueCause,
+                                        mk_optional(mk_exception("Exception")), {ev});
                 err(e.line, e.col,
                     std::format("'exception' object has no attribute '{}'", a.attr));
                 return const_none();

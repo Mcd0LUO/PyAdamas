@@ -491,6 +491,11 @@ void Lowerer::lower_classdef(ClassDef& c) {
         return;
     }
     int cid = cid_it->second;
+    if (ci->is_exception_class) {
+        // 自定义异常类不参与对象布局；注册父子关系供 except 匹配。
+        call_void(RtFn::ExcRegister, {const_str(ci->name), const_str(ci->exc_parent)});
+        return;
+    }
     if (ci->base && !class_ids_.count(ci->base)) {
         err(c.line, c.col, "inheriting from an imported class is not supported yet");
         return;

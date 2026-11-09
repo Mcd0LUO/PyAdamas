@@ -147,9 +147,12 @@ enum class RtFn : uint8_t {
     ExcMessage,   // () -> str*
     ExcValueArgs, // (excval*) -> tuple*
     ExcValueStr,  // (excval*) -> str*
+    ExcValueCause, // (excval*) -> excval*|0
     ExcValueNew,  // (str* type, str* msg|0) -> excval*
+    ExcRegister,  // (str* child, str* parent) -> void  自定义异常类注册
     Raise,        // (str* type, str* msg) -> void  noreturn
     RaiseValue,   // (excval*) -> void noreturn
+    RaiseValueFrom, // (excval*, excval*|0) -> void noreturn
     Reraise,      // () -> void       noreturn  裸 raise
     AbsI64,       // (i64) -> i64
     MathSqrt, MathFloor, MathCeil, MathFabs, MathSin, MathCos, MathTan,
@@ -259,9 +262,12 @@ inline const char* rt_name(RtFn f) {
         case RtFn::ExcMessage: return "py23_exc_message";
         case RtFn::ExcValueArgs: return "py23_exc_value_args";
         case RtFn::ExcValueStr: return "py23_exc_value_str";
+        case RtFn::ExcValueCause: return "py23_exc_value_cause";
         case RtFn::ExcValueNew: return "py23_exc_value_new";
+        case RtFn::ExcRegister: return "py23_exc_register";
         case RtFn::Raise: return "py23_raise";
         case RtFn::RaiseValue: return "py23_raise_value";
+        case RtFn::RaiseValueFrom: return "py23_raise_value_from";
         case RtFn::Reraise: return "py23_reraise";
         case RtFn::MathSqrt: return "py23_math_sqrt";
         case RtFn::MathFloor: return "py23_math_floor";

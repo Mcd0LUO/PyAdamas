@@ -251,17 +251,19 @@ TypePtr TypeChecker::expr(Expr& e) {
                     if (ot->sub.empty() || ot->sub[0]->kind != TyKind::Class) return t_unknown();
                     ot = ot->sub[0];
                 }
+                if (ot->kind == TyKind::Exception) {
+                    if (a.attr == "args") return mk_tuple({t_str()});
+                    if (a.attr == "__cause__")
+                        return mk_optional(mk_exception("Exception"));
+                    err(a.line, a.col,
+                        std::format("'exception' object has no attribute '{}'", a.attr));
+                    return t_unknown();
+                }
                 // 双下划线属性属于运行时的协议实现，静态上没有方法表
                 if (a.attr.size() > 4 && a.attr.starts_with("__") && a.attr.ends_with("__"))
                     return t_unknown();
                 // Python 里函数是普通对象，可以挂任意属性（functools.wraps 就这么做）
                 if (ot->kind == TyKind::Func) return t_unknown();
-                if (ot->kind == TyKind::Exception) {
-                    if (a.attr == "args") return mk_tuple({t_str()});
-                    err(a.line, a.col,
-                        std::format("'exception' object has no attribute '{}'", a.attr));
-                    return t_unknown();
-                }
                 if (ot->kind == TyKind::Class) {
                     if (!ot->cls) return t_unknown();
                     // 骨架：类体还没检查到（类定义在引用点之后），成员表是空的。

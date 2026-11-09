@@ -539,11 +539,11 @@ class Connection:
 ### 内置函数
 
 已生成代码：`print` / `len` / `int` / `float` / `str` / `bool` / `range` /
-`next` / `abs` / `min` / `max` / `sum` / `pow`。`min` / `max` 支持多实参
-和 list/tuple/str/dict/set 迭代，空序列抛 `ValueError`；`sum` 支持可选的
-起始值；`abs` / `pow` 支持 int 与 float。其余内置名（`sorted` / `map` /
-`filter` / `any` / `all` 等）类型层面放行，但降级阶段会报「还没有生成
-代码」。
+`next` / `abs` / `min` / `max` / `sum` / `pow` / `any` / `all`。
+`min` / `max` 支持多实参和 list/tuple/str/dict/set 迭代，空序列抛
+`ValueError`；`sum` 支持可选的起始值；`any` / `all` 支持短路；`abs` /
+`pow` 支持 int 与 float。其余内置名（`sorted` / `map` / `filter` 等）
+类型层面放行，但降级阶段会报「还没有生成代码」。
 
 ### 跳转与异常
 
@@ -557,8 +557,19 @@ class Connection:
 再抛出的异常会继续向外展开。
 
 异常构造器可以当值用：`e = ValueError("bad")`；`raise e` 抛这个实例，
-`raise ValueError("bad")` 等价。只支持内置异常名；`raise ... from`、
-自定义异常类、traceback 和异常链暂不支持（`args` 目前只保存消息）。
+`raise ValueError("bad")` 等价。自定义异常类支持继承内置异常或另一个
+自定义异常，类体目前只允许 `pass` / 文档字符串：
+
+```python
+class MyError(ValueError):
+    pass
+
+raise MyError("bad")
+```
+
+`raise X from cause` 记录 `__cause__`（`e.__cause__` 是异常值或 None）；
+`raise ... from None` 清空原因。traceback 仍未支持，`args` 目前只保存
+消息。
 `finally` 在正常、异常、`return`、`break`、`continue` 路径都会执行；
 但 `finally` 体内**跳出 finally** 的 `return` / `break` / `continue`
 会被后端拒绝（finally 里嵌套循环自己的跳转是允许的）。
@@ -574,7 +585,7 @@ class Connection:
 - Python 2 遗留写法（`0x1L`、`lambda (a, b):`、`except X, e`）
 - 类：方法缺 `self`、字段赋值类型不符、访问不存在的字段或方法（`self.xxx` 与外部基类的成员除外）
 
-**代码生成层**（`check` 通过，`build` 报错）：`del`、带装饰器的方法/类、`print(*args)`、通过 unknown 函数值的 `*` / `**` 展开、`*` 位于固定形参之前且不是定长 tuple、`raise ... from`、非内置异常名、`finally` 体内跳出 finally 的控制流、跨模块继承、把类名当值用（`f = Point`）、函数内定义类、多继承、类体里的非声明语句、异步生成器表达式、嵌在其它表达式里的异步推导式。生成器的额外限制：`yield` / `yield from` 只能作为语句或赋值右值，不能出现在 `finally` / `except` 体内；协程的 `await` 同样。异步生成器有 `asend`/`athrow`/`__anext__`/`aclose`。类体字段默认值里的 `lambda` 也在这一层拒绝。
+**代码生成层**（`check` 通过，`build` 报错）：`del`、带装饰器的方法/类、`print(*args)`、通过 unknown 函数值的 `*` / `**` 展开、`*` 位于固定形参之前且不是定长 tuple、非异常类名当异常用、`finally` 体内跳出 finally 的控制流、跨模块继承、把类名当值用（`f = Point`）、函数内定义类、多继承、类体里的非声明语句、异步生成器表达式、嵌在其它表达式里的异步推导式。生成器的额外限制：`yield` / `yield from` 只能作为语句或赋值右值，不能出现在 `finally` / `except` 体内；协程的 `await` 同样。异步生成器有 `asend`/`athrow`/`__anext__`/`aclose`。自定义异常类目前只支持 `pass` 类体（字段/方法会被拒绝）。类体字段默认值里的 `lambda` 也在这一层拒绝。
 
 为什么这么分层：前端宽、后端严。`check` 的定位是「语法和类型有没有明显毛病」，可以对任意 Python 文件跑；`build` 才是「这门语言现在能不能编译它」。
 

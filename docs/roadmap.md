@@ -335,6 +335,18 @@ traceback / `raise ... from`；`finally` 体内跳出 finally 的
 已知限制：`args` 只保存消息；`raise ... from`、traceback、异常链和自定义
 异常类仍未支持。
 
+## 0.25：异常收尾与 any/all（已完成）
+
+- 自定义异常类：`class MyError(ValueError): pass`，支持多级继承；
+  类体目前只允许 `pass`/文档字符串。
+- `raise ... from cause` 与 `e.__cause__`；`raise ... from None` 清空原因。
+- 内置函数 `any` / `all`，支持短路和 list/tuple/str/dict/set。
+- 测试脚本并行化：`tests/run_tests.sh` 支持 `PY23_TEST_FILTER` /
+  `PY23_TEST_JOBS`，`run_diff.py` 支持 `--jobs`；全量测试从约 9s 降到 3s，
+  810 程序差分约 8s。
+
+已知限制：`args` 只保存消息；没有 traceback；自定义异常类不能带字段/方法。
+
 ## 下一步
 
 - 语言面：方法/类装饰器的剩余形态、生成器 `throw()`、异步生成器 `athrow`
@@ -368,7 +380,7 @@ traceback / `raise ... from`；`finally` 体内跳出 finally 的
 8. **浮点变量不进寄存器**：`xmm` 全是 caller-saved，跨调用要自己 save/restore，所以只提升了整数/指针变量。纯浮点循环（5000 万次累加）0.25s，整数同样次数 0.06s。可行的修法是「函数内没有任何调用时」才提升浮点变量，这样不需要保存；代价是 `load.slot` / `store.slot` 要按类型选 `movsd` 而不是 `movq`
 9. **dict/set 删除是 O(n)**：没有墓碑，每次删除按 `order` 整表重建；小表无所谓，大表高频删除会退化。后续可以换墓碑 + 定期重哈希，或惰性删除
 10. **异常路径的 RC 不精确**：longjmp 跳过普通函数帧时局部变量不执行 `release_slots`，要等 GC；如果要确定性回收，需要给每个函数登记展开清理回调
-11. **异常对象仍偏轻**：现在有异常值和 `args`，但 `args` 只保存消息，没有 traceback/异常链，也没有自定义异常类和 `raise ... from`
+11. **异常对象仍偏轻**：现在有异常值、`args`、自定义异常类和 `raise ... from`，但 `args` 只保存消息，没有 traceback
 12. **含 handler 的函数没有寄存器提升**：longjmp 会回滚 callee-saved 寄存器，只能全走内存槽；异常密集且热点的函数会吃亏
 13. **生成器/协程的表达式能力不全**：`yield`/`yield from`/`await` 只能作为语句或赋值右值，`yield`/`await` 位于 `finally`/`except` 体内都还没接；生成器表达式仍是立即求值的 list；`send`/await 跨挂起值的静态类型不精确；`yield from` 的值固定为 None，也不能 throw
 14. **生成器/协程异常逃出时槽位不精确释放**：异常从 resume longjmp 出去时只把帧标成 aborted，堆槽引用交给 GC 下一轮回收，不做确定性 `rc_dec`

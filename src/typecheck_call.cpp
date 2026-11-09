@@ -17,6 +17,17 @@ TypePtr TypeChecker::call(Call& c) {
                 for (auto& arg : c.args) expr(*arg);
                 return mk_exception(n->id);
             }
+            if (auto* sym = lookup(n->id);
+                sym && sym->ty && sym->ty->kind == TyKind::Class && sym->ty->cls &&
+                sym->ty->cls->is_exception_class) {
+                if (!c.keywords.empty())
+                    err(c.line, c.col, "exception constructor does not take keyword arguments");
+                if (c.args.size() > 1)
+                    err(c.line, c.col,
+                        "exception constructor takes at most one message argument");
+                for (auto& arg : c.args) expr(*arg);
+                return mk_exception(sym->ty->cls->name);
+            }
             if (!lookup(n->id) && is_builtin_callable(n->id)) return builtin_call(n->id, c);
         }
         if (auto* a = dynamic_cast<Attribute*>(c.func.get())) {

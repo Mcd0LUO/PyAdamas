@@ -104,9 +104,19 @@ python3 tests/diff/run_diff.py --only repr  # 只测浮点转字符串
 覆盖推导式；`tests/run/20_with.py` 覆盖 `with` 的提前退出；`tests/run/21_decorator.py`
 覆盖装饰器；`tests/run/22_exception.py` 覆盖异常层级、bare raise、
 finally 的提前退出、with 异常路径和运行时错误转换；`tests/run/23_generator.py`
-~ `tests/run/33_builtins.py` 覆盖生成器、协程、Task、异步语言面、
+~ `tests/run/34_exception_chain.py` 覆盖生成器、协程、Task、异步语言面、
 Future/取消/fd/回调、`yield from`、异步推导式、异步生成器协议、
-异常值和内置函数。`tests/modules/`
+异常值、内置函数、自定义异常与 `raise ... from`。
+
+敏捷开发时只跑相关用例，不要每次全量：
+
+```bash
+PY23_TEST_FILTER='3[0-4]*' PY23_TEST_JOBS=16 bash tests/run_tests.sh build/dev build/dev/py23
+python3 tests/diff/run_diff.py --only async --seeds 1 --jobs 16
+```
+
+提交前再跑全量；`run_tests.sh` 和 `run_diff.py` 都默认并行（`PY23_TEST_JOBS` /
+`--jobs` 可调）。`tests/modules/`
 覆盖 import 图、`from` 快照、惰性初始化、外部全局读写、GC 根和缓存
 失效。RSS 压力用受限地址空间跑长循环（命令见
 [compatibility.md](compatibility.md#内存验收)）。

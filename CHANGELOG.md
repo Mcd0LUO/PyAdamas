@@ -4,6 +4,34 @@
 
 早期阶段没有逐条留痕，按阶段归纳；0.4 之后逐条记录。
 
+## [0.25] - 2026-11-09
+
+异常模型收尾与 any/all。
+
+### 新增
+
+- 自定义异常类：`class MyError(ValueError): pass`，支持多级继承；
+  `except MyError` 按运行时注册的父子关系匹配。类体目前只允许
+  `pass` / 文档字符串。
+- `raise X from cause` 和 `e.__cause__`；`raise ... from None` 清空原因。
+- 内置函数 `any` / `all`：短路，支持 list/tuple/str/dict/set。
+- 测试提速：`run_tests.sh` 支持 `PY23_TEST_FILTER` / `PY23_TEST_JOBS`
+  并并行跑运行/模块用例；`run_diff.py` 加 `--jobs`。全量套件约 3s，
+  810 程序差分约 8s。
+- 修复 `py23_raise` 手工构造异常时未初始化 `cause` 的崩溃。
+
+### 验证
+
+- 定向用例 22/32/33/34 + dev CTest；`ctest --preset release` 全绿
+- 差分测试 810 个程序零差异
+- ASan/UBSan/LSan：异常值、`raise ... from`、自定义异常路径零报告
+
+### 已知限制
+
+- 异常 `args` 只保存消息；没有 traceback
+- 自定义异常类不能定义字段或方法
+- `min`/`max`/`sum`/`any`/`all` 只迭代 list/tuple/str/dict/set
+
 ## [0.24] - 2026-11-09
 
 异常值模型与常用内置函数。

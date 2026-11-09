@@ -911,6 +911,7 @@ private:
     VReg lower_builtin_call(const std::string& name, Call& c);
     VReg lower_minmax(Call& c, bool is_min);
     VReg lower_sum(Call& c);
+    VReg lower_anyall(Call& c, bool is_any);
     VReg lower_print(Call& c);
     VReg lower_method_call(Attribute& at, Call& c);
     VReg lower_subscript(Subscript& s);

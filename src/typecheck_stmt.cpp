@@ -254,7 +254,13 @@ void TypeChecker::stmt(Stmt& s) {
                         TypePtr et = mk_exception("Exception");
                         if (h.type && h.type->kind == ExprKind::Name) {
                             auto& hn = static_cast<Name&>(*h.type);
-                            if (is_exception_name(hn.id)) et = mk_exception(hn.id);
+                            if (is_exception_name(hn.id)) {
+                                et = mk_exception(hn.id);
+                            } else if (auto* sym = lookup(hn.id);
+                                       sym && sym->ty && sym->ty->kind == TyKind::Class &&
+                                       sym->ty->cls && sym->ty->cls->is_exception_class) {
+                                et = mk_exception(sym->ty->cls->name);
+                            }
                         }
                         auto sc = std::make_unique<Scope>();
                         sc->parent = cur_;
@@ -314,7 +320,13 @@ void TypeChecker::stmt(Stmt& s) {
             case StmtKind::Raise: {
                 auto& r = static_cast<Raise&>(s);
                 if (r.exc) expr(*r.exc);
-                if (r.cause) expr(*r.cause);
+                if (r.cause) {
+                    auto ct = expr(*r.cause);
+                    if (!is_unknown(ct) && ct->kind != TyKind::None &&
+                        ct->kind != TyKind::Exception)
+                        err(r.cause->line, r.cause->col,
+                            "raise from requires an exception or None");
+                }
                 break;
             }
             case StmtKind::Assert: {

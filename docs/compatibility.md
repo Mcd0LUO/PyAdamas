@@ -18,7 +18,7 @@ py23 不追求兼容 CPython：语义是按静态类型的需要重新定的。�
 | `assert x, "msg"` | 抛 `AssertionError("msg")`；无消息时 `assertion failed` | 同 Python（消息文本一致） | 消息只保留字符串内容 |
 | `except ... as e` | `e` 是异常值对象，`args` / `str(e)` 可用 | `e` 是异常对象，有完整 `args` / traceback | `args` 目前只保存消息；没有 traceback / 异常链 |
 | 未捕获异常 | `py23: uncaught ValueError: msg`，`exit(1)` | traceback + `ValueError: msg`，退出码 1 | 没有 traceback |
-| 异常类型 | 内置异常名 + 继承匹配；`ValueError("msg")` 产生异常值，`raise e` 可用 | 完整异常类层次、自定义异常 | 只支持内置名字；`raise ... from` 和自定义异常类被后端拒绝 |
+| 异常类型 | 内置异常名 + 继承匹配；`ValueError("msg")` 产生异常值，`raise e`、`raise ... from`、自定义异常类（`class E(ValueError): pass`）可用 | 完整异常类层次、traceback | 自定义异常类类体只能是 `pass`/文档字符串；`args` 只保存消息；没有 traceback |
 | 运行时错误 | `IndexError` / `KeyError` / `ZeroDivisionError` / `OverflowError` / `ValueError` / `AssertionError` 可捕获 | 同类异常 | 内部不变量/OOM 仍然直接退出 |
 | `range(a, b, c)` 的 `c` | `for ... in range(...)` 里必须是整数字面量；作为值使用时可以是任意 int 表达式 | 任意表达式 | 循环步长在降级期就要定下来；`range()` 实体化成列表后没有这个限制 |
 | 默认参数不是字面量 | `build` 报错 | 运行时求值 | 默认值在调用点内联填充 |
@@ -57,7 +57,7 @@ py23 不追求兼容 CPython：语义是按静态类型的需要重新定的。�
 
 **语法层就拒**（`check` 报错）：`bytes` / `complex` 字面量、超出 int64 的整数、`match` 语句、Python 2 遗留写法、方法缺 `self`、字段赋值类型不符。
 
-**能解析、能过类型检查，但 `build` 报错**：`del`、`print(*args)`、通过 unknown 函数值的 `*` / `**` 展开、`*` 位于固定形参之前且不是定长 tuple、`raise ... from`、非内置异常名、`finally` 体内跳出 finally 的 `return`/`break`/`continue`、跨模块继承、带装饰器的方法、类装饰器、`print(file=)`、把类名当值用、函数内定义类、**多继承、类体里的非声明语句、类体字段默认值里的 lambda**，以及生成器的 `yield`/`yield from` 位于 `finally`/`except` 体内（协程的 `await` 同样）、异步生成器表达式、嵌在其它表达式里的异步推导式。
+**能解析、能过类型检查，但 `build` 报错**：`del`、`print(*args)`、通过 unknown 函数值的 `*` / `**` 展开、`*` 位于固定形参之前且不是定长 tuple、非异常类名当异常用、`finally` 体内跳出 finally 的 `return`/`break`/`continue`、跨模块继承、带装饰器的方法、类装饰器、`print(file=)`、把类名当值用、函数内定义类、**多继承、类体里的非声明语句、类体字段默认值里的 lambda**，以及生成器的 `yield`/`yield from` 位于 `finally`/`except` 体内（协程的 `await` 同样）、异步生成器表达式、嵌在其它表达式里的异步推导式。
 
 清楚这个分层很重要：`py23 check` 尽量当通用 Python 语法/类型检查器用，检查器放宽的边界都记在 [CHANGELOG 0.6.1](../CHANGELOG.md)；`py23 build` 才是「能不能编译」的判据。
 
@@ -69,7 +69,7 @@ py23 不追求兼容 CPython：语义是按静态类型的需要重新定的。�
 |---|---|---|---|
 | 正例 | `ctest --preset dev` 里 `tests/*.py` | 11 个文件 | 前端退回保守 |
 | 反例 | `ctest --preset dev` 里 `tests/fail/*.py` | 33 个文件 | 检查器为了过测而放水 |
-| 运行 | `ctest --preset dev` 里 `tests/run/*.py` | 33 个文件 | 后端烂掉没人知道 |
+| 运行 | `ctest --preset dev` 里 `tests/run/*.py` | 34 个文件 | 后端烂掉没人知道 |
 | 模块 | `ctest --preset dev` 里 `tests/modules/*/` | 8 个目录 | 分模块编译/链接、惰性初始化、缓存失效 |
 | 未建模 | `ctest --preset dev` 里 `tests/unsupported/*.py` | 4 个文件 | 「标了没建模、实际却悄悄编译过去」 |
 | 内存 | 16MB `RLIMIT_AS` 下跑压力程序 | 拼接 / 对象 / 闭包 / 容器 / 切片 / 删除 / 推导式 / 变长实参 / `with` / 装饰器 / 异常展开 / `yield from` / 异步推导式 / 环 / unknown 泄漏 | 引用计数或 GC 漏插桩、重复释放、误回收 |
@@ -129,9 +129,10 @@ PY
 方法、切片赋值、变长实参、推导式、`with` 和装饰器；
 `tests/run/22_exception.py` 覆盖 try/except/else/finally、raise、层级
 匹配、`with` 异常路径和运行时错误转换；`tests/run/23_generator.py` ~
-`tests/run/32_exception_value.py`、`tests/run/33_builtins.py` 覆盖异常值
-与内置函数，并连同前面的用例覆盖生成器、协程、Task、异步语言面、
-Future/取消/fd/回调、`yield from`、异步推导式与异步生成器协议。
+`tests/run/32_exception_value.py` ~ `tests/run/34_exception_chain.py` 覆盖
+异常值、内置函数、自定义异常与 `raise ... from`，并连同前面的用例覆盖
+生成器、协程、Task、异步语言面、Future/取消/fd/回调、`yield from`、
+异步推导式与异步生成器协议。
 `tests/run/13_gc.py` 会真正触发收集器：对象环、字典自环、闭包垃圾和
 unknown 容器。RSS 压力程序负责「长循环里内存不随迭代数增长」。当前实测
 100 万次拼接 / 100 万次对象分配 / 30 万次带字符串字段的对象分配 /

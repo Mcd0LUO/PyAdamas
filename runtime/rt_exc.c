@@ -13,6 +13,7 @@ Py23ExcSave* exc_save_top;
 
 void exc_free(Py23Exception* e) {
     if (!e) return;
+    exc_free(e->cause);
     free(e->type);
     free(e->message);
     free(e);
@@ -26,15 +27,45 @@ Py23Exception* exc_new(const char* type, const char* msg) {
     if (!e->type || !e->message) panic_c("out of memory");
     strcpy(e->type, type);
     strcpy(e->message, msg);
+    e->cause = NULL;
     return e;
 }
 
 Py23Exception* exc_clone(Py23Exception* e) {
     if (!e) return NULL;
-    return exc_new(e->type, e->message);
+    Py23Exception* c = exc_new(e->type, e->message);
+    c->cause = exc_clone(e->cause);
+    return c;
+}
+
+/* 自定义异常类的父类表：按模块初始化顺序注册。名字都是 malloc 的，
+   生命周期到进程结束。 */
+typedef struct ExcReg {
+    char* child;
+    char* parent;
+    struct ExcReg* next;
+} ExcReg;
+
+static ExcReg* exc_regs;
+
+void py23_exc_register(Py23Str* child, Py23Str* parent) {
+    if (!child || !parent) return;
+    ExcReg* r = (ExcReg*)malloc(sizeof(ExcReg));
+    if (!r) panic_c("out of memory");
+    r->child = (char*)malloc((size_t)child->len + 1);
+    r->parent = (char*)malloc((size_t)parent->len + 1);
+    if (!r->child || !r->parent) panic_c("out of memory");
+    memcpy(r->child, child->data, (size_t)child->len);
+    r->child[child->len] = '\0';
+    memcpy(r->parent, parent->data, (size_t)parent->len);
+    r->parent[parent->len] = '\0';
+    r->next = exc_regs;
+    exc_regs = r;
 }
 
 const char* exc_parent(const char* name) {
+    for (ExcReg* r = exc_regs; r; r = r->next)
+        if (strcmp(r->child, name) == 0) return r->parent;
     static const struct {
         const char* name;
         const char* parent;
@@ -250,6 +281,7 @@ void py23_raise(Py23Str* type, Py23Str* msg) {
     memcpy(e->type, tn, (size_t)tn_len + 1);
     memcpy(e->message, msg->data, (size_t)msg->len);
     e->message[msg->len] = '\0';
+    e->cause = NULL;
     pending_exc = e;
     exc_longjmp();
 }
@@ -286,11 +318,13 @@ static void exc_value_destroy(void* p) {
     free(v->type);
     free(v->message);
     if (v->args) py23_rc_dec(v->args);
+    if (v->cause) py23_rc_dec(v->cause);
 }
 
 static void exc_value_gc_release(void* p) {
     Py23ExcValue* v = (Py23ExcValue*)p;
     if (v->args) py23_gc_unref_child(v->args);
+    if (v->cause) py23_gc_unref_child(v->cause);
 }
 
 static Py23ExcValue* exc_value_alloc(const char* type, const char* msg) {
@@ -306,6 +340,7 @@ static Py23ExcValue* exc_value_alloc(const char* type, const char* msg) {
     memcpy(v->type, type, tn + 1);
     memcpy(v->message, msg, mn + 1);
     v->args = py23_list_new(2, 1);
+    v->cause = NULL;
     return v;
 }
 
@@ -330,19 +365,34 @@ Py23ExcValue* py23_exc_value_from_exc(Py23Exception* e) {
     Py23ExcValue* v = exc_value_alloc(e->type, e->message);
     Py23Str* msg = str_new(e->message, (int64_t)strlen(e->message));
     py23_list_append(v->args, (int64_t)msg);
+    if (e->cause) v->cause = py23_exc_value_from_exc(e->cause);
     return v;
 }
 
 Py23Exception* py23_exc_from_value(Py23ExcValue* v) {
     if (!v) py23_raise_c("TypeError", "expected an exception instance");
     if (v->magic != PY23_EXCVAL_MAGIC) py23_raise_c("TypeError", "expected an exception instance");
-    return exc_new(v->type, v->message);
+    Py23Exception* e = exc_new(v->type, v->message);
+    if (v->cause) e->cause = py23_exc_from_value(v->cause);
+    return e;
 }
 
-void py23_raise_value(Py23ExcValue* v) {
+void py23_raise_value_from(Py23ExcValue* v, Py23ExcValue* cause) {
     exc_free(pending_exc);
     pending_exc = py23_exc_from_value(v);
+    if (cause) {
+        exc_free(pending_exc->cause);
+        pending_exc->cause = py23_exc_from_value(cause);
+    }
     exc_longjmp();
+}
+
+void py23_raise_value(Py23ExcValue* v) { py23_raise_value_from(v, NULL); }
+
+Py23ExcValue* py23_exc_value_cause(Py23ExcValue* v) {
+    if (!v || v->magic != PY23_EXCVAL_MAGIC)
+        py23_raise_c("TypeError", "expected an exception instance");
+    return v->cause;
 }
 
 Py23ExcValue* py23_exc_accept_value(void) {

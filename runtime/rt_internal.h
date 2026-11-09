@@ -81,8 +81,9 @@ typedef struct Py23Handler {
 } Py23Handler;
 
 typedef struct Py23Exception {
-    char* type;     /* 内置异常名，如 "ValueError" */
+    char* type;     /* 异常名，如 "ValueError" / 自定义异常类名 */
     char* message;  /* 可以为空串，不能为 NULL */
+    struct Py23Exception* cause;  /* raise ... from，owned */
 } Py23Exception;
 
 typedef struct Py23ExcSave {
@@ -93,11 +94,12 @@ typedef struct Py23ExcSave {
 /* 异常值对象：`raise ValueError("x")` 里的实例、`except as e` 绑定的 e。
    控制流仍用 Py23Exception* + longjmp；这个对象只是值语义的外壳。 */
 #define PY23_EXCVAL_MAGIC 0x4558435600000001LL
-typedef struct {
+typedef struct Py23ExcValue {
     int64_t magic;
     char* type;
     char* message;
-    Py23List* args;  /* owned：args[0] 是 message 字符串 */
+    Py23List* args;             /* owned：args[0] 是 message 字符串 */
+    struct Py23ExcValue* cause; /* __cause__，owned（RC 对象） */
 } Py23ExcValue;
 
 
@@ -209,6 +211,9 @@ Py23ExcValue* py23_exc_value_new(Py23Str* type, Py23Str* msg);
 Py23ExcValue* py23_exc_value_from_exc(Py23Exception* e);
 Py23Exception* py23_exc_from_value(Py23ExcValue* v);
 void py23_raise_value(Py23ExcValue* v);
+void py23_raise_value_from(Py23ExcValue* v, Py23ExcValue* cause);
+Py23ExcValue* py23_exc_value_cause(Py23ExcValue* v);
+void py23_exc_register(Py23Str* child, Py23Str* parent);
 Py23List* py23_exc_value_args(Py23ExcValue* v);
 Py23Str* py23_exc_value_str(Py23ExcValue* v);
 void py23_exc_done(void);

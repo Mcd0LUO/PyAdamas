@@ -329,8 +329,13 @@ VReg Lowerer::lower_call(Call& c) {
     // 内建函数
     if (c.func->kind == ExprKind::Name) {
         auto& n = static_cast<Name&>(*c.func);
-        // 内置异常构造器：ValueError("x") 产生一个异常值
-        if (TypeChecker::is_exception_type(n.id) && is_builtin(n.id)) {
+        // 异常构造器：内置异常名和自定义异常类都产生异常值
+        bool exc_ctor = TypeChecker::is_exception_type(n.id) && is_builtin(n.id);
+        if (!exc_ctor) {
+            auto eit = classes_.find(n.id);
+            if (eit != classes_.end() && eit->second->is_exception_class) exc_ctor = true;
+        }
+        if (exc_ctor) {
             if (!c.keywords.empty())
                 err(c.line, c.col, "exception constructor does not take keyword arguments");
             VReg type = const_str(n.id);
@@ -355,7 +360,7 @@ VReg Lowerer::lower_call(Call& c) {
         if (is_builtin(n.id)) {
             static const std::unordered_set<std::string> kBuiltins = {
                 "print", "len", "int", "float", "str", "bool", "range", "next",
-                "abs", "min", "max", "sum", "pow",
+                "abs", "min", "max", "sum", "pow", "any", "all",
             };
             if (kBuiltins.count(n.id)) return lower_builtin_call(n.id, c);
         }
@@ -455,6 +460,7 @@ VReg Lowerer::lower_builtin_call(const std::string& name, Call& c) {
 
     if (name == "min" || name == "max") return lower_minmax(c, name == "min");
     if (name == "sum") return lower_sum(c);
+    if (name == "any" || name == "all") return lower_anyall(c, name == "any");
     if (name == "pow") {
         if (c.args.size() != 2) {
             err(c.line, c.col, "pow() takes exactly two arguments");
@@ -796,6 +802,110 @@ VReg Lowerer::lower_sum(Call& c) {
 
     switch_to(end);
     return load_slot(acc, acc_ty);
+}
+
+
+// any()/all()：短路迭代。any 遇到真值返回 True，all 遇到假值返回 False。
+VReg Lowerer::lower_anyall(Call& c, bool is_any) {
+    if (c.args.size() != 1) {
+        err(c.line, c.col,
+            std::format("{}() takes exactly one argument", is_any ? "any" : "all"));
+        return const_bool(false);
+    }
+    TypePtr seq_ty = tc_.type_of(c.args[0].get());
+    bool ok = seq_ty && (seq_ty->kind == TyKind::List || seq_ty->kind == TyKind::Tuple ||
+                         seq_ty->kind == TyKind::Str || seq_ty->kind == TyKind::Dict ||
+                         seq_ty->kind == TyKind::Set);
+    if (!ok) {
+        err(c.args[0]->line, c.args[0]->col,
+            std::format("cannot iterate over '{}' in {}()", type_name(seq_ty),
+                        is_any ? "any" : "all"));
+        return const_bool(false);
+    }
+    TypePtr elem_ty = t_unknown();
+    if (seq_ty->kind == TyKind::Str) elem_ty = t_str();
+    else if (!seq_ty->sub.empty()) elem_ty = seq_ty->sub[0];
+
+    VReg seq = expr(*c.args[0]);
+    int seq_slot = new_temp_slot(seq_ty);
+    store_slot(seq_slot, seq);
+    Inst ln;
+    ln.op = IrOp::Len;
+    ln.a = seq;
+    VReg n = def(t_int(), std::move(ln));
+    int n_slot = new_temp_slot(t_int());
+    store_slot(n_slot, n);
+    int idx = new_temp_slot(t_int());
+    store_slot(idx, const_int(0));
+    int result = new_temp_slot(t_bool());
+    store_slot(result, const_bool(!is_any));
+
+    int cond = new_block("anyall.cond");
+    int body = new_block("anyall.body");
+    int incr = new_block("anyall.incr");
+    int stop = new_block("anyall.stop");
+    int end = new_block("anyall.end");
+    Inst j;
+    j.op = IrOp::Jump;
+    j.target = cond;
+    emit(std::move(j));
+
+    switch_to(cond);
+    Inst cmp;
+    cmp.op = IrOp::Cmp;
+    cmp.cop = CmpKind::Lt;
+    cmp.a = load_slot(idx, t_int());
+    cmp.b = load_slot(n_slot, t_int());
+    VReg cc = def(t_bool(), std::move(cmp));
+    Inst br;
+    br.op = IrOp::Branch;
+    br.a = cc;
+    br.target = body;
+    br.target2 = end;
+    emit(std::move(br));
+
+    switch_to(body);
+    VReg sv = load_slot(seq_slot, seq_ty);
+    VReg iv = load_slot(idx, t_int());
+    VReg ev;
+    if (seq_ty->kind == TyKind::Dict || seq_ty->kind == TyKind::Set)
+        ev = call_runtime(RtFn::DictKeyAt, elem_ty, {sv, iv});
+    else {
+        Inst get;
+        get.op = IrOp::IndexLoad;
+        get.a = sv;
+        get.b = iv;
+        ev = seq_ty->kind == TyKind::Str ? def_heap(elem_ty, std::move(get))
+                                         : def(elem_ty, std::move(get));
+    }
+    Inst ib;
+    ib.op = IrOp::Branch;
+    ib.a = ev;
+    ib.target = is_any ? stop : incr;
+    ib.target2 = is_any ? incr : stop;
+    emit(std::move(ib));
+
+    switch_to(stop);
+    store_slot(result, const_bool(is_any));
+    Inst js;
+    js.op = IrOp::Jump;
+    js.target = end;
+    emit(std::move(js));
+
+    switch_to(incr);
+    Inst add;
+    add.op = IrOp::Bin;
+    add.bop = BinKind::Add;
+    add.a = load_slot(idx, t_int());
+    add.b = const_int(1);
+    store_slot(idx, def(t_int(), std::move(add)));
+    Inst jb;
+    jb.op = IrOp::Jump;
+    jb.target = cond;
+    emit(std::move(jb));
+
+    switch_to(end);
+    return load_slot(result, t_bool());
 }
 
 VReg Lowerer::lower_asyncio(const std::string& member, Call& c) {

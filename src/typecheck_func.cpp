@@ -217,6 +217,8 @@ void TypeChecker::classdef(ClassDef& c) {
                 if (kw.value) expr(*kw.value);
         }
         ClassInfo* base = nullptr;
+        bool is_exc_class = false;
+        std::string exc_parent;
         // 多继承没建模：布局只可能跟一个基类走，成员表必然是不全的。
         // 前端接受（标记成没建模），由后端拒绝生成——标准库里的测试类
         // 大量是 `class T(Mixin, unittest.TestCase)`，在这里报错就是误杀。
@@ -225,8 +227,21 @@ void TypeChecker::classdef(ClassDef& c) {
             unsupported.push_back("multiple inheritance");
             for (auto& b : c.bases) expr(*b);
         } else if (c.bases.size() == 1) {
-            auto bt = expr(*c.bases[0]);
-            if (bt && bt->kind == TyKind::Class) {
+            // 自定义异常类：基类是内置异常名，或另一个自定义异常类。
+            if (auto* bn = dynamic_cast<Name*>(c.bases[0].get())) {
+                if (!lookup(bn->id) && is_exception_name(bn->id)) {
+                    is_exc_class = true;
+                    exc_parent = bn->id;
+                } else if (auto it = classes_.find(bn->id);
+                           it != classes_.end() && it->second->is_exception_class) {
+                    is_exc_class = true;
+                    exc_parent = bn->id;
+                }
+            }
+            TypePtr bt = is_exc_class ? t_unknown() : expr(*c.bases[0]);
+            if (is_exc_class) {
+                // 异常类不参与对象布局，基类表达式不求值也没有副作用。
+            } else if (bt && bt->kind == TyKind::Class) {
                 base = bt->cls;
             } else if (is_unknown(bt)) {
                 // 外部导入的基类（unittest.TestCase、OrderedDict……）：我们
@@ -255,6 +270,8 @@ void TypeChecker::classdef(ClassDef& c) {
         cls->name = c.name;
         cls->base = base;
         cls->open = open;
+        cls->is_exception_class = is_exc_class;
+        cls->exc_parent = exc_parent;
         if (base) {
             cls->base_fields = base->n_fields();
             cls->base_slots = base->n_slots();
@@ -279,6 +296,22 @@ void TypeChecker::classdef(ClassDef& c) {
         all_classes_.push_back(cls);
         (void)prev;  // 同名类重定义：后面的引用拿新类，旧实例仍按旧布局走
         if (!cur_->is_module) unsupported.push_back("nested class definition");
+        if (is_exc_class) {
+            // 自定义异常类目前只支持继承 + pass/文档字符串。
+            for (auto& s : c.body) {
+                if (s->kind == StmtKind::Pass) continue;
+                if (s->kind == StmtKind::Expr) {
+                    auto& e = static_cast<ExprStmt&>(*s);
+                    if (e.value->kind == ExprKind::Constant &&
+                        static_cast<Constant&>(*e.value).ck == Constant::CK::Str)
+                        continue;
+                }
+                err(s->line, s->col,
+                    "custom exception classes cannot define fields or methods yet");
+            }
+            cls->complete = true;
+            return;
+        }
 
         // 字段先处理：方法体里 `self.x` 的类型要靠它。
         for (auto& s : c.body) {
