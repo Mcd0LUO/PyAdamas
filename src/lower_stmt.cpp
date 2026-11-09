@@ -411,15 +411,62 @@ void Lowerer::lower_for_range(For& f, Call& c) {
     br.target2 = orelse;
     emit(std::move(br));
 
+    // range(len(a)) 且 start=0/step=1：计数器贴出的 k 恰好是 0..len(a)-1。
+    // 循环体给 a/k 赋值（写槽）会作废提示；调用、del、切片赋值等副作用由
+    // side_effect_seq_ 统一挡（它们都可能改变 a 的长度）。
+    FuncCtx::BoundsHint bounds_hint;
+    bool have_bounds_hint = false;
+    if (opts_.opt_level >= 1 && !st_->is_generator) {
+        auto int_is = [](const Expr* e, int64_t v) {
+            if (!e || e->kind != ExprKind::Constant) return false;
+            const auto& ce = static_cast<const Constant&>(*e);
+            return ce.ck == Constant::CK::Int && ce.i == v;
+        };
+        bool zero_start =
+            c.args.size() == 1 || (c.args.size() >= 2 && int_is(c.args[0].get(), 0));
+        bool unit_step = c.args.size() < 3 || step == 1;
+        const Expr* stop_arg = c.args.size() == 1 ? c.args[0].get() : c.args[1].get();
+        if (zero_start && unit_step && stop_arg->kind == ExprKind::Call) {
+            const auto& lc = static_cast<const Call&>(*stop_arg);
+            if (lc.func->kind == ExprKind::Name &&
+                static_cast<Name&>(*lc.func).id == "len" && lc.args.size() == 1 &&
+                lc.args[0]->kind == ExprKind::Name) {
+                const std::string& seq_name = static_cast<Name&>(*lc.args[0]).id;
+                const std::string& idx_name = static_cast<Name&>(*f.target).id;
+                auto bit = st_->slots.find(seq_name);
+                auto sit = st_->slots.find(idx_name);
+                if (bit != st_->slots.end() && sit != st_->slots.end() &&
+                    !is_cell(seq_name) && !is_cell(idx_name)) {
+                    bounds_hint.seq_slot = bit->second;
+                    bounds_hint.idx_slot = sit->second;
+                    have_bounds_hint = true;
+                }
+            }
+        }
+    }
+
     switch_to(body);
     clean();
     VReg iv = load_slot(ctr, t_int());
     assign_to(*f.target, iv, t_int());
     st_->loops.push_back({end, incr});
     st_->loop_cleanup_depth.push_back(st_->cleanups.size());
+    int se_before_body = side_effect_seq_;
+    if (have_bounds_hint) st_->bounds_hints.push_back(&bounds_hint);
     stmts(f.body);
+    if (have_bounds_hint) st_->bounds_hints.pop_back();
     st_->loops.pop_back();
     st_->loop_cleanup_depth.pop_back();
+    if (have_bounds_hint && bounds_hint.valid && side_effect_seq_ == se_before_body) {
+        for (auto [b, v] : bounds_hint.patches) {
+            auto& insts = st_->fn->blocks[static_cast<size_t>(b)].insts;
+            for (auto& in : insts)
+                if (in.op == IrOp::IndexLoad && in.dst == v) {
+                    in.op = IrOp::IndexLoadUnchecked;
+                    break;
+                }
+        }
+    }
     if (!terminated()) {
         Inst jj;
         jj.op = IrOp::Jump;

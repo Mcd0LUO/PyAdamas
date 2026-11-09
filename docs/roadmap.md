@@ -475,6 +475,16 @@ min/max SIMD 只覆盖 int；IR 遍没有 LICM/CSE/内联。
 已知限制：循环变量下标的逐个检查仍在；守卫读 `len(base)` 对“意外为
 None 且零次循环”的畸形程序更早崩溃。
 
+## 0.37：range(len) 下标免检查（已完成）
+
+- 降级期识别 `for k in range(len(a))`，循环体无副作用、且没给 `a`/`k`
+  赋值时，体内 `a[k]` 直接生成 `index.get.unchecked`；写槽即作废。
+- 测试 `52_range_bounds.py` 纳入三档回归；越界/换序列/改 k 的负例仍抛
+  IndexError。
+- A/B：2000 万次内积 `range(len(a))` 21 ms vs 参数上界 22 ms（约 5%）。
+
+已知限制：只认 `len(局部变量)` 上界；`range(n)` 和全局序列拿不到证明。
+
 ## 下一步
 
 - 语言面：`@classmethod`、自定义方法/类装饰器、生成器 `throw()`

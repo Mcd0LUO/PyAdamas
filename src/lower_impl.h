@@ -136,6 +136,15 @@ struct FuncCtx {
     std::unordered_map<std::string, int> cell_slots;   // 名字 → 存 cell 指针的槽
     std::unordered_map<std::string, int> param_slots;  // 被捕获形参的原始值槽
     int env_slot = -1;                                 // 存闭包指针（%r10）的槽
+    // for k in range(len(a))：循环体里 a[k] 天然在界内。body 里一旦给 a/k
+    // 赋值（写槽）就作废；调用等副作用由 side_effect_seq_ 统一挡。
+    struct BoundsHint {
+        int seq_slot = -1;
+        int idx_slot = -1;
+        bool valid = true;
+        std::vector<std::pair<int, size_t>> patches;  // 待改成 unchecked 的位置
+    };
+    std::vector<BoundsHint*> bounds_hints;
     // 嵌套函数直接引用自己的名字：用当前闭包指针，不需要 self cell。
     const FunctionDef* self_def = nullptr;
     TypePtr self_type;
@@ -367,6 +376,8 @@ private:
     }
 
     void store_slot_raw(int slot, VReg v) {
+        for (auto* h : st_->bounds_hints)
+            if (h->seq_slot == slot || h->idx_slot == slot) h->valid = false;
         Inst in;
         in.op = IrOp::StoreSlot;
         in.idx = slot;

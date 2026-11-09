@@ -19,6 +19,7 @@ FILES=(
     tests/run/49_inline.py
     tests/run/50_licm.py
     tests/run/51_bounds_versioning.py
+    tests/run/52_range_bounds.py
 )
 
 fail=0

@@ -732,15 +732,38 @@ VReg Lowerer::lower_subscript(Subscript& s) {
         err(s.line, s.col, "set is not subscriptable");
         return const_none();
     }
+    // 外层是 for k in range(len(a)) 且提示仍然有效：记下这条 IndexLoad，
+    // 等循环体降级完、确认没有副作用后再改成免检查。
+    FuncCtx::BoundsHint* bounds_hit = nullptr;
+    if (!st_->bounds_hints.empty() && ot &&
+        (ot->kind == TyKind::List || ot->kind == TyKind::Tuple) &&
+        s.value->kind == ExprKind::Name && s.slice->kind == ExprKind::Name) {
+        const std::string& seq_name = static_cast<Name&>(*s.value).id;
+        const std::string& idx_name = static_cast<Name&>(*s.slice).id;
+        auto bit = st_->slots.find(seq_name);
+        auto sit = st_->slots.find(idx_name);
+        if (bit != st_->slots.end() && sit != st_->slots.end() && !is_cell(seq_name) &&
+            !is_cell(idx_name)) {
+            for (auto* h : st_->bounds_hints)
+                if (h->valid && h->seq_slot == bit->second && h->idx_slot == sit->second) {
+                    bounds_hit = h;
+                    break;
+                }
+        }
+    }
     Inst in;
     in.op = IrOp::IndexLoad;
     in.a = obj;
     in.b = idx;
     // 只有「字符串下标」产生新串；list[str]/tuple[str] 返回的是容器内部的
     // 借用引用，不能入临时栈，否则会比容器多减一次引用。
+    VReg r;
     if (ty && ty->kind == TyKind::Str && ot && ot->kind == TyKind::Str)
-        return def_heap(ty, std::move(in));
-    return def(ty, std::move(in));
+        r = def_heap(ty, std::move(in));
+    else
+        r = def(ty, std::move(in));
+    if (bounds_hit) bounds_hit->patches.push_back({st_->blk, r});
+    return r;
 }
 
 VReg Lowerer::lower_list_like(std::vector<ExprPtr>& elts, TypePtr ty, bool is_tuple) {
