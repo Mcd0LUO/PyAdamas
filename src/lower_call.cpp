@@ -366,7 +366,7 @@ VReg Lowerer::lower_call(Call& c) {
                 "abs", "min", "max", "sum", "pow", "any", "all", "complex",
                 "ord", "chr", "hex", "bin", "oct", "round", "divmod", "repr", "format",
                 "list", "tuple", "dict", "set", "sorted", "reversed", "enumerate", "zip",
-                "open",
+                "open", "input",
             };
             if (kBuiltins.count(n.id)) return lower_builtin_call(n.id, c);
             // 名字能解析但语义没实现的内置：以前会退化成调用空指针直接
@@ -503,6 +503,17 @@ VReg Lowerer::lower_builtin_call(const std::string& name, Call& c) {
         VReg f = def(t_file(), std::move(in));
         push_temp(f);
         return f;
+    }
+
+    if (name == "input") {
+        if (c.args.size() > 1) {
+            err(c.line, c.col, "input() takes at most one argument");
+            return const_str("");
+        }
+        VReg prompt = c.args.empty() ? const_int(0) : expr(*c.args[0]);
+        VReg s = call_runtime(RtFn::Input, t_str(), {prompt});
+        push_temp(s);
+        return s;
     }
 
     if (name == "abs") {

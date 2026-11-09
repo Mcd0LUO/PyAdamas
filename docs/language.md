@@ -563,7 +563,7 @@ class Connection:
 `next` / `abs` / `min` / `max` / `sum` / `pow` / `any` / `all` / `complex` /
 `ord` / `chr` / `hex` / `bin` / `oct` / `round` / `divmod` / `repr` /
 `format` / `list` / `tuple` / `dict` / `set` / `sorted` / `reversed` /
-`enumerate` / `zip`。
+`enumerate` / `zip` / `input`。
 `min` / `max` 支持多实参和 list/tuple/str/dict/set 迭代，空序列抛
 `ValueError`；`sum` 支持可选的起始值；`any` / `all` 支持短路；`abs` /
 `pow` 支持 int 与 float，`pow(x, y, m)` 是 `(x ** y) % m`；

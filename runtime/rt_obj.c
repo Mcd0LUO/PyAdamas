@@ -2171,3 +2171,28 @@ void py23_file_flush(Py23File* f) {
     FILE* fp = file_check(f);
     fflush(fp);
 }
+
+Py23Str* py23_input(Py23Str* prompt) {
+    if (prompt && prompt->len > 0) {
+        fwrite(prompt->data, 1, (size_t)prompt->len, stdout);
+        fflush(stdout);
+    }
+    char* buf = NULL;
+    int64_t len = 0, cap = 0;
+    int c;
+    while ((c = fgetc(stdin)) != EOF) {
+        if (c == '\n') break;
+        if (len + 1 > cap) {
+            int64_t ncap = cap ? cap * 2 : 128;
+            char* nb = (char*)realloc(buf, (size_t)ncap);
+            if (!nb) panic_c("out of memory");
+            buf = nb;
+            cap = ncap;
+        }
+        buf[len++] = (char)c;
+    }
+    if (len > 0 && buf[len - 1] == '\r') --len;
+    Py23Str* s = str_new(buf ? buf : "", len);
+    free(buf);
+    return s;
+}

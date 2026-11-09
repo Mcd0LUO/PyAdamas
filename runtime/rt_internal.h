@@ -350,6 +350,7 @@ Py23List* py23_file_readlines(Py23File* f);
 int64_t py23_file_write(Py23File* f, Py23Str* s);
 void py23_file_close(Py23File* f);
 void py23_file_flush(Py23File* f);
+Py23Str* py23_input(Py23Str* prompt);
 void list_destroy(void* p);
 void list_gc_release(void* p);
 Py23List* py23_list_new(int64_t cap, int64_t elem_kind);
