@@ -82,11 +82,16 @@ src/
   token.h  lexer.h        词法：记号定义、缩进敏感分析器
   ast.h    parser.cpp     语法：AST 节点、递归下降解析器
   desugar.cpp             lambda 脱糖成合成嵌套 def
-  typecheck.cpp           类型：规则、推断、内置函数表
-  ir.h     lower.cpp      IR：三地址码、AST → IR 降级
+  typecheck*.cpp          类型：规则、推断、内置函数表（按语句/表达式/调用拆分）
+  ir.h     lower*.cpp     IR：三地址码、AST → IR 降级（按语句/表达式/调用/生成器拆分）
   codegen.cpp             x86-64 指令选择、寄存器分配
   main.cpp                CLI：把各阶段串起来
-runtime/rt.c              运行时：引用计数、循环收集、字符串、列表、字典/集合、对象、输出、panic
+runtime/
+  rt_internal.h           运行时内部接口：类型、全局状态、内部函数声明
+  rt_core.c  rt_exc.c     引用计数/GC/闭包、异常与 handler 栈
+  rt_gen.c   rt_agen.c    生成器帧、异步生成器驱动
+  rt_async.c rt_task.c    事件循环/协程、Task 与 Future、fd 等待
+  rt_obj.c                字符串/列表/字典/切片/对象/输出/math
 tests/                    正例 / 反例 / 运行用例 / 差分测试
 docs/                     设计与参考文档
 tools/                    一次性脚本

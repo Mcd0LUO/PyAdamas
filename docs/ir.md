@@ -131,7 +131,7 @@ Python 语义里变量天生可变，循环里反复赋值是常态。一上来�
 
 ## 降级规则
 
-`src/lower.cpp`。
+`src/lower*.cpp`。
 
 ### 语句
 
@@ -273,7 +273,7 @@ bb0 (entry):
 
 1. `ir.h`：`IrOp` 加枚举 + `irop_name` 加名字
 2. `ir.cpp`：`Inst::text()` 加打印
-3. `lower.cpp`：产出这条指令（别忘了 `def()` 里登记类型）
+3. `lower*.cpp`：产出这条指令（别忘了 `def()` 里登记类型）
 4. `codegen.cpp`：`gen_inst` 加 `case`（`-Wswitch` 会强制你加）
 5. `docs/ir.md`：指令表加一行，`docs/codegen.md` 说明生成策略
 

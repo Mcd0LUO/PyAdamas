@@ -16,23 +16,47 @@ set(PY23_SOURCES
   src/main.cpp
   src/parser.cpp
   src/typecheck.cpp
+  src/typecheck_stmt.cpp
+  src/typecheck_expr.cpp
+  src/typecheck_call.cpp
+  src/typecheck_func.cpp
   src/lower.cpp
+  src/lower_stmt.cpp
+  src/lower_exc.cpp
+  src/lower_expr.cpp
+  src/lower_call.cpp
+  src/lower_gen.cpp
   src/codegen.cpp
   src/ir.cpp
   src/desugar.cpp
   src/module.cpp
 )
 
-# 编译器在运行时需要 rt.o 的绝对路径；用自定义命令生成一个稳定路径，
-# 而不是把 OBJECT 库的中间路径拼进宏里。
+# 编译器在运行时需要 rt.o 的绝对路径；运行时按职责拆成多个 .c，
+# 分别编译成可重定位对象后再用 ld -r 合成一个 rt.o。
 set(PY23_RT_OBJ "${CMAKE_BINARY_DIR}/rt.o")
 set(PY23_MODCACHE_DIR "${CMAKE_BINARY_DIR}/modcache")
+set(PY23_RT_PARTS core exc gen async task fd agen obj)
+set(PY23_RT_OBJS "")
+foreach(part ${PY23_RT_PARTS})
+  set(rt_obj "${CMAKE_BINARY_DIR}/rt_${part}.o")
+  add_custom_command(
+    OUTPUT "${rt_obj}"
+    COMMAND ${CMAKE_C_COMPILER} -O2 -Wall -Wextra
+            -I "${CMAKE_SOURCE_DIR}/runtime"
+            -c "${CMAKE_SOURCE_DIR}/runtime/rt_${part}.c" -o "${rt_obj}"
+    DEPENDS "${CMAKE_SOURCE_DIR}/runtime/rt_${part}.c"
+            "${CMAKE_SOURCE_DIR}/runtime/rt_internal.h"
+    COMMENT "Building py23 runtime rt_${part}.o"
+    VERBATIM
+  )
+  list(APPEND PY23_RT_OBJS "${rt_obj}")
+endforeach()
 add_custom_command(
   OUTPUT "${PY23_RT_OBJ}"
-  COMMAND ${CMAKE_C_COMPILER} -O2 -Wall -Wextra -c
-          "${CMAKE_SOURCE_DIR}/runtime/rt.c" -o "${PY23_RT_OBJ}"
-  DEPENDS "${CMAKE_SOURCE_DIR}/runtime/rt.c"
-  COMMENT "Building py23 runtime rt.o"
+  COMMAND ${CMAKE_LINKER} -r -o "${PY23_RT_OBJ}" ${PY23_RT_OBJS}
+  DEPENDS ${PY23_RT_OBJS}
+  COMMENT "Combining py23 runtime rt.o"
   VERBATIM
 )
 add_custom_target(py23_rt ALL DEPENDS "${PY23_RT_OBJ}")

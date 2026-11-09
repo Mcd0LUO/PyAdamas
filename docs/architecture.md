@@ -12,17 +12,17 @@ token 流（token.h）
 AST（ast.h）
    │  Desugar（desugar.cpp）：lambda → 合成嵌套 def
    ▼
-AST（已展开）─────────────► TypeChecker（typecheck.cpp）
+AST（已展开）─────────────► TypeChecker（typecheck*.cpp）
    │                          │ 只做检查与推断，不改树
    ▼                          ▼
-Lowerer（lower.cpp）◄──── 类型查询接口（typecheck.h）
+Lowerer（lower*.cpp）◄──── 类型查询接口（typecheck.h）
    │
    ▼
 IR（ir.h）：函数 → 基本块 → 三态指令
    │  AsmGen（codegen.cpp）
    ▼
 GNU as 汇编（AT&T）
-   │  cc + runtime/rt.c
+   │  cc + runtime/rt.o
    ▼
 可执行文件
 ```

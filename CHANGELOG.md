@@ -4,6 +4,20 @@
 
 早期阶段没有逐条留痕，按阶段归纳；0.4 之后逐条记录。
 
+## [未发布]
+
+### 重构
+
+- 降级器按职责拆成 `lower*.cpp`：驱动/预扫描、语句、表达式、调用、
+  生成器与协程；共享的 `Lowerer` 声明、`FuncCtx`、`ClosureMeta` 移到
+  `lower_impl.h`。
+- 类型检查按职责拆成 `typecheck*.cpp`：驱动与作用域、语句、表达式、
+  调用与内置、函数与类。
+- 运行时拆成 `runtime/rt_*.c` + `rt_internal.h`（RC/GC、异常、生成器、
+  异步、Task/Future、fd、异步生成器、容器与输出），各单元独立编译后
+  由 CMake 用 `ld -r` 合成 `rt.o`，对外 ABI 不变。
+- 文档同步新的文件布局与 sanitizer 构建步骤。
+
 ## [0.21] - 2026-11-09
 
 语言面补齐：`yield from` 与异步推导式。

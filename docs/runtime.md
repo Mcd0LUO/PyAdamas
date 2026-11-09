@@ -1,6 +1,6 @@
 # 运行时
 
-`runtime/rt.c`，纯 C11，编成 `rt.o` 后由 `py23 build` 链接进每个生成的程序，只依赖 libc 和 libm。**py23 编译器本身不链接它**（`PY23_RT_OBJ` 只是把路径编进二进制，供 `cc` 使用）。
+运行时按职责拆成 `runtime/rt_*.c`（引用计数/GC、异常、生成器、异步、Task/Future、fd、异步生成器、容器与输出），共享接口在 `runtime/rt_internal.h`；各部分编成可重定位对象后用 `ld -r` 合成 `rt.o`，由 `py23 build` 链接进每个生成的程序，只依赖 libc 和 libm。**py23 编译器本身不链接它**（`PY23_RT_OBJ` 只是把路径编进二进制，供 `cc` 使用）。
 
 ## ABI 约定
 
@@ -511,7 +511,7 @@ ASan 下用内联汇编取真实 `%rsp`，避免扫描 ASan fake stack 的未映
 1. `src/ir.h`：`RtFn` 加枚举项 + 注释写签名
 2. `src/ir.h` 的 `rt_name()`：加 `case` 返回符号名
 3. `src/codegen.cpp` 的 `gen_call_rt`：按参数形态把实参搬进 `%rdi/%rsi/%rdx/%xmm0`（`-Wswitch` 会强制你加）
-4. `runtime/rt.c`：实现，函数名与第 2 步一致，参数用 `int64_t` / `double`
+4. `runtime/rt_*.c`（先看 `rt_internal.h` 选文件）：实现，函数名与第 2 步一致，参数用 `int64_t` / `double`
 5. `docs/runtime.md`：函数表加一行
 
 参数超过 3 个、或者要传浮点时，第 3 步最容易写错——照抄相邻的 `case`，别自己推。

@@ -109,7 +109,7 @@ Future/取消/fd、`yield from` 和异步推导式。`tests/modules/`
 覆盖 import 图、`from` 快照、惰性初始化、外部全局读写、GC 根和缓存
 失效。RSS 压力用受限地址空间跑长循环（命令见
 [compatibility.md](compatibility.md#内存验收)）。
-改 `lower.cpp` 的 RC/闭包/容器/异常插桩、模块 ABI 或 `runtime/rt.c` 的 GC/哈希表后至少
+改 `lower*.cpp` 的 RC/闭包/容器/异常插桩、模块 ABI 或 `runtime/rt_*.c` 的 GC/哈希表后至少
 跑一遍：
 
 ```bash
@@ -154,11 +154,16 @@ g++ -std=c++23 -O0 -g -fsanitize=address,undefined -fno-omit-frame-pointer -Isrc
 注意 ASan 下每层递归帧约 4KB，8MB 栈撑不住几千层。所以语法层对表达式嵌套设了硬上限：`parser.h` 的 `kMaxExprDepth` / `kMaxUnaryDepth`（目前 200），超了报 `expression nested too deeply`。这类保护必须在解析器里，因为类型检查和降级都是照 AST 递归的，树有多深它们就有多深。
 
 上面的命令只给**编译器**插桩，生成代码和 `rt.o` 不受检查。要验证引用计数
-路径，`runtime/rt.c` 也要用同样的 sanitizer 编译，并在 `PATH` 前面放一个
-给链接加 `-fsanitize=address,undefined` 的 `cc` 包装脚本：
+路径，运行时的各个部分也要用同样的 sanitizer 编译再合成 `rt.o`，并在
+`PATH` 前面放一个给链接加 `-fsanitize=address,undefined` 的 `cc` 包装脚本：
 
 ```bash
-cc -O1 -g -fsanitize=address,undefined -c runtime/rt.c -o /tmp/rt_asan.o
+mkdir -p /tmp/rt_asan
+for f in runtime/rt_*.c; do
+    cc -O1 -g -fsanitize=address,undefined -Iruntime -c "$f" \
+       -o "/tmp/rt_asan/$(basename "$f" .c).o"
+done
+ld -r /tmp/rt_asan/*.o -o /tmp/rt_asan.o
 g++ -std=c++23 -O1 -g -fsanitize=address,undefined -Isrc \
     -DPY23_RT_OBJ='"/tmp/rt_asan.o"' src/*.cpp -o /tmp/py23-asan
 mkdir -p /tmp/asancc
@@ -200,13 +205,13 @@ g++ -std=c++23 -O0 -g -Wall -Wextra -Wshadow -Wnon-virtual-dtor -Wold-style-cast
 2. `lexer.h`：产出它
 3. `ast.h`：加节点，实现 `dump`
 4. `parser.cpp`：解析它（注意 `parse_atom` / `parse_stmt` 的分派和优先级）
-5. `typecheck.cpp`：加类型规则；不确定就返回 `unknown` 放行
-6. `lower.cpp`：降级；做不到就 `err("... is not supported by the code generator yet")`
+5. `typecheck*.cpp`：加类型规则；不确定就返回 `unknown` 放行
+6. `lower*.cpp`：降级；做不到就 `err("... is not supported by the code generator yet")`
 7. `tests/`：正例 + 反例各一个
 
 ### 加一条类型规则
 
-`typecheck.cpp` 里按语句/表达式分派。注意两条底线：
+`typecheck*.cpp` 里按语句/表达式分派。注意两条底线：
 
 - 遇到 `unknown` 一律放行（`is_unknown(t)` 提前 return）
 - 不确定的时候宁可漏报——把真实代码误判为错误，比漏掉一个错更糟
@@ -218,7 +223,7 @@ g++ -std=c++23 -O0 -g -Wall -Wextra -Wshadow -Wnon-virtual-dtor -Wold-style-cast
 类的真相在 `ClassInfo`（`typecheck.h`）：字段顺序决定 `field.get` 的偏移，`MethodInfo::slot` 决定 vtable 下标。加特性时按这条链走：
 
 1. `typecheck.h`：`ClassInfo` / `FieldInfo` / `MethodInfo` 加字段
-2. `typecheck.cpp` 的 `classdef()`：填进去（注意先绑类名、再解析字段、最后检查方法体）
+2. `typecheck_func.cpp` 的 `classdef()`：填进去（注意先绑类名、再解析字段、最后检查方法体）
 3. `lower.cpp` 的 `collect_classes()`（预扫描建 `IRClass`）与 `lower_classdef()`（填 vtable）
 4. `codegen.cpp`：只有对象布局变了才需要动（`field.get` 的偏移由 IR 携带）
 5. `tests/run/09_class.py`：钉住新行为
@@ -235,9 +240,9 @@ g++ -std=c++23 -O0 -g -Wall -Wextra -Wshadow -Wnon-virtual-dtor -Wold-style-cast
 
 ### 加一个内置函数
 
-1. `typecheck.cpp` 的 `builtin_call()`：加签名规则
-2. `typecheck.cpp` 的 `is_builtin_callable()`：登记名字
-3. `lower.cpp` 的 `lower_builtin_call()`：降级（可能展开成多条指令，也可能调运行时）
+1. `typecheck_call.cpp` 的 `builtin_call()`：加签名规则
+2. `typecheck_call.cpp` 的 `is_builtin_callable()`：登记名字
+3. `lower_call.cpp` 的 `lower_builtin_call()`：降级（可能展开成多条指令，也可能调运行时）
 4. `tests/`：正例 + 反例
 
 ### 加一个运行时函数
