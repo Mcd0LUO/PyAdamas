@@ -362,8 +362,17 @@ VReg Lowerer::lower_call(Call& c) {
             static const std::unordered_set<std::string> kBuiltins = {
                 "print", "len", "int", "float", "str", "bool", "range", "next",
                 "abs", "min", "max", "sum", "pow", "any", "all", "complex",
+                "ord", "chr", "hex", "bin", "oct", "round", "divmod", "repr", "format",
             };
             if (kBuiltins.count(n.id)) return lower_builtin_call(n.id, c);
+            // 名字能解析但语义没实现的内置：以前会退化成调用空指针直接
+            // 段错误，这里明确报“未支持”，至少是可用诊断。
+            if (TypeChecker::is_builtin_name(n.id)) {
+                err(n.line, n.col,
+                    std::format("builtin '{}' is not supported by the code generator yet",
+                                n.id));
+                return const_none();
+            }
         }
         // 类名直接调用 = 构造。类名不是可求值的表达式，必须在这里拦，
         // 否则会退化成 LoadGlobal 读到一个空槽。
@@ -489,12 +498,29 @@ VReg Lowerer::lower_builtin_call(const std::string& name, Call& c) {
         return def_heap(t_complex(), std::move(in));
     }
     if (name == "pow") {
-        if (c.args.size() != 2) {
-            err(c.line, c.col, "pow() takes exactly two arguments");
+        if (c.args.size() != 2 && c.args.size() != 3) {
+            err(c.line, c.col, "pow() takes 2 or 3 arguments");
             return const_none();
         }
         TypePtr ty = tc_.type_of(&c);
         if (!ty || ty->kind == TyKind::Unknown) ty = t_int();
+        if (c.args.size() == 3) {
+            VReg a = coerce(expr(*c.args[0]), tc_.type_of(c.args[0].get()), t_int());
+            VReg b = coerce(expr(*c.args[1]), tc_.type_of(c.args[1].get()), t_int());
+            VReg m = coerce(expr(*c.args[2]), tc_.type_of(c.args[2].get()), t_int());
+            Inst pw;
+            pw.op = IrOp::Bin;
+            pw.bop = BinKind::Pow;
+            pw.a = a;
+            pw.b = b;
+            VReg p = def(t_int(), std::move(pw));
+            Inst md;
+            md.op = IrOp::Bin;
+            md.bop = BinKind::Mod;
+            md.a = p;
+            md.b = m;
+            return def(t_int(), std::move(md));
+        }
         VReg a = coerce(expr(*c.args[0]), tc_.type_of(c.args[0].get()), ty);
         VReg b = coerce(expr(*c.args[1]), tc_.type_of(c.args[1].get()), ty);
         Inst in;
@@ -503,6 +529,148 @@ VReg Lowerer::lower_builtin_call(const std::string& name, Call& c) {
         in.a = a;
         in.b = b;
         return def(ty, std::move(in));
+    }
+
+    if (name == "ord") {
+        if (c.args.size() != 1) {
+            err(c.line, c.col, "ord() takes exactly one argument");
+            return const_int(0);
+        }
+        TypePtr t = tc_.type_of(c.args[0].get());
+        if (!t || (t->kind != TyKind::Str && t->kind != TyKind::Unknown)) {
+            err(c.line, c.col, std::format("ord() expects a string, got '{}'", type_name(t)));
+            return const_int(0);
+        }
+        VReg v = expr(*c.args[0]);
+        return call_runtime(RtFn::Ord, t_int(), {v});
+    }
+
+    if (name == "chr") {
+        if (c.args.size() != 1) {
+            err(c.line, c.col, "chr() takes exactly one argument");
+            return const_str("");
+        }
+        VReg v = coerce(expr(*c.args[0]), tc_.type_of(c.args[0].get()), t_int());
+        VReg s = call_runtime(RtFn::Chr, t_str(), {v});
+        push_temp(s);
+        return s;
+    }
+
+    if (name == "hex" || name == "bin" || name == "oct") {
+        if (c.args.size() != 1) {
+            err(c.line, c.col, std::format("{}() takes exactly one argument", name));
+            return const_str("");
+        }
+        int64_t base = name == "hex" ? 16 : name == "bin" ? 2 : 8;
+        VReg v = coerce(expr(*c.args[0]), tc_.type_of(c.args[0].get()), t_int());
+        VReg s = call_runtime(RtFn::IntToBase, t_str(), {v, const_int(base)});
+        push_temp(s);
+        return s;
+    }
+
+    if (name == "round") {
+        if (c.args.empty() || c.args.size() > 2) {
+            err(c.line, c.col, "round() takes 1 or 2 arguments");
+            return const_int(0);
+        }
+        TypePtr at = tc_.type_of(c.args[0].get());
+        VReg v = expr(*c.args[0]);
+        if (at && at->kind == TyKind::Float) {
+            VReg nd = c.args.size() == 2
+                          ? coerce(expr(*c.args[1]), tc_.type_of(c.args[1].get()), t_int())
+                          : const_int(0);
+            VReg r = call_runtime(RtFn::RoundF64, t_float(), {v, nd});
+            // round(x) 返回 int；round(x, n) 仍返回 float。
+            if (c.args.size() == 1) return convert_to(r, t_float(), t_int());
+            return r;
+        }
+        // 整数输入：单参就是它自己；带负 ndigits 要按 10 的幂取整。
+        if (c.args.size() == 2 && at &&
+            (at->kind == TyKind::Int || at->kind == TyKind::Bool)) {
+            VReg nd = coerce(expr(*c.args[1]), tc_.type_of(c.args[1].get()), t_int());
+            return call_runtime(RtFn::RoundI64, t_int(), {v, nd});
+        }
+        return v;
+    }
+
+    if (name == "divmod") {
+        if (c.args.size() != 2) {
+            err(c.line, c.col, "divmod() takes exactly two arguments");
+            return const_none();
+        }
+        TypePtr ty = tc_.type_of(&c);
+        TypePtr et = t_int();
+        if (ty && ty->kind == TyKind::Tuple && !ty->sub.empty()) et = ty->sub[0];
+        VReg a = coerce(expr(*c.args[0]), tc_.type_of(c.args[0].get()), et);
+        VReg b = coerce(expr(*c.args[1]), tc_.type_of(c.args[1].get()), et);
+        Inst q;
+        q.op = IrOp::Bin;
+        q.bop = BinKind::FloorDiv;
+        q.a = a;
+        q.b = b;
+        VReg qv = def(et, std::move(q));
+        Inst m;
+        m.op = IrOp::Bin;
+        m.bop = BinKind::Mod;
+        m.a = a;
+        m.b = b;
+        VReg mv = def(et, std::move(m));
+        Inst mt;
+        mt.op = IrOp::MakeTuple;
+        mt.imm = !et ? 2 : et->kind == TyKind::Unknown ? 2 : (ir_is_heap(et) ? 1 : 0);
+        mt.args = {qv, mv};
+        return def_heap(ty && ty->kind == TyKind::Tuple ? ty : mk_tuple({et, et}),
+                        std::move(mt));
+    }
+
+    if (name == "repr") {
+        if (c.args.size() != 1) {
+            err(c.line, c.col, "repr() takes exactly one argument");
+            return const_str("");
+        }
+        TypePtr t = tc_.type_of(c.args[0].get());
+        VReg v = expr(*c.args[0]);
+        if (t && t->kind == TyKind::Str) {
+            Inst in;
+            in.op = IrOp::CallRt;
+            in.imm = static_cast<int64_t>(RtFn::ReprStr);
+            in.args = {v};
+            return def_heap(t_str(), std::move(in));
+        }
+        if (t && (t->kind == TyKind::Int || t->kind == TyKind::Bool ||
+                  t->kind == TyKind::Float || t->kind == TyKind::Complex ||
+                  t->kind == TyKind::None))
+            return convert_to(v, t, t_str());
+        err(c.line, c.col,
+            std::format("repr() of '{}' is not supported by the code generator yet",
+                        type_name(t)));
+        return const_str("");
+    }
+
+    if (name == "format") {
+        if (c.args.size() != 2) {
+            err(c.line, c.col, "format() takes exactly two arguments");
+            return const_str("");
+        }
+        TypePtr vt = tc_.type_of(c.args[0].get());
+        RtFn fn = RtFn::FmtI64;
+        if (vt && vt->kind == TyKind::Float) fn = RtFn::FmtF64;
+        else if (vt && vt->kind == TyKind::Bool) fn = RtFn::FmtBool;
+        else if (vt && vt->kind == TyKind::Str) fn = RtFn::FmtStr;
+        else if (vt && vt->kind == TyKind::Complex) fn = RtFn::FmtComplex;
+        else if (!vt || (vt->kind != TyKind::Int && vt->kind != TyKind::Unknown)) {
+            err(c.line, c.col,
+                std::format("format() of '{}' is not supported yet", type_name(vt)));
+            return const_str("");
+        }
+        VReg v = expr(*c.args[0]);
+        VReg spec = expr(*c.args[1]);
+        if (spec == kNoReg) return const_str("");
+        Inst in;
+        in.op = IrOp::CallRt;
+        in.imm = static_cast<int64_t>(fn);
+        in.args = {v, spec};
+        return def_heap(t_str(), std::move(in));
     }
 
     if (name == "range") {
@@ -536,12 +704,28 @@ VReg Lowerer::lower_builtin_call(const std::string& name, Call& c) {
                                        : to->kind == TyKind::Float ? const_float(0)
                                        : to->kind == TyKind::Str   ? const_str("")
                                                                    : const_bool(false);
+        // int(str, base)
+        if (name == "int" && c.args.size() == 2) {
+            TypePtr st = tc_.type_of(c.args[0].get());
+            VReg sv = expr(*c.args[0]);
+            if (!st || st->kind != TyKind::Str) {
+                err(c.line, c.col, "int(x, base) requires a string first argument");
+                return const_int(0);
+            }
+            VReg bv = coerce(expr(*c.args[1]), tc_.type_of(c.args[1].get()), t_int());
+            return call_runtime(RtFn::StrToI64, t_int(), {sv, bv});
+        }
         if (c.args.size() > 1) {
             err(c.line, c.col, std::format("{}() takes at most one argument", name));
             return const_none();
         }
         VReg v = expr(*c.args[0]);
         TypePtr from = tc_.type_of(c.args[0].get());
+        // 字符串解析：以前走 Convert 会把字符串指针直接当数值，静默算错。
+        if (name == "int" && from && from->kind == TyKind::Str)
+            return call_runtime(RtFn::StrToI64, t_int(), {v, const_int(10)});
+        if (name == "float" && from && from->kind == TyKind::Str)
+            return call_runtime(RtFn::StrToF64, t_float(), {v});
         if (to->kind == TyKind::Str && from && from->kind == TyKind::Exception) {
             VReg s = call_runtime(RtFn::ExcValueStr, t_str(), {v});
             push_temp(s);

@@ -92,6 +92,13 @@ enum class RtFn : uint8_t {
     StrFromF64,  // (f64) -> str*
     StrFromBool, // (i64) -> str*
     StrFromNone, // () -> str*
+    StrToI64,    // (str*, i64 base) -> i64  解析失败抛 ValueError
+    StrToF64,    // (str*) -> f64
+    Ord,         // (str*) -> i64
+    Chr,         // (i64) -> str*
+    IntToBase,   // (i64 v, i64 base) -> str*  hex/bin/oct 的格式
+    RoundF64,    // (f64 x, i64 ndigits) -> f64
+    RoundI64,    // (i64 v, i64 ndigits) -> i64
     PrintI64,    // (i64) -> void
     PrintF64,    // (f64) -> void
     PrintBool,   // (i64) -> void
@@ -236,6 +243,13 @@ inline const char* rt_name(RtFn f) {
         case RtFn::StrFromF64: return "py23_str_from_f64";
         case RtFn::StrFromBool: return "py23_str_from_bool";
         case RtFn::StrFromNone: return "py23_str_from_none";
+        case RtFn::StrToI64: return "py23_str_to_i64";
+        case RtFn::StrToF64: return "py23_str_to_f64";
+        case RtFn::Ord: return "py23_ord";
+        case RtFn::Chr: return "py23_chr";
+        case RtFn::IntToBase: return "py23_int_to_base";
+        case RtFn::RoundF64: return "py23_round_f64";
+        case RtFn::RoundI64: return "py23_round_i64";
         case RtFn::PrintI64: return "py23_print_i64";
         case RtFn::PrintF64: return "py23_print_f64";
         case RtFn::PrintBool: return "py23_print_bool";

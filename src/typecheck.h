@@ -831,6 +831,10 @@ public:
 
     const std::vector<Diag>& diags() const { return diags_; }
 
+    // 名字是否是「内置可调用」。降级阶段用它把「能解析但没实现」的内置
+    // 变成明确诊断，而不是退化成调用空指针。
+    static bool is_builtin_name(const std::string& n) { return is_builtin_callable(n); }
+
     // 表达式推断出的类型。IR 降级阶段要用它决定槽宽和指令选择，
     // 不能靠 ast 重新推一遍——两套推断迟早会分叉。
     TypePtr type_of(const Expr* e) const {

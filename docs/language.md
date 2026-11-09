@@ -549,11 +549,22 @@ class Connection:
 ### 内置函数
 
 已生成代码：`print` / `len` / `int` / `float` / `str` / `bool` / `range` /
-`next` / `abs` / `min` / `max` / `sum` / `pow` / `any` / `all` / `complex`。
+`next` / `abs` / `min` / `max` / `sum` / `pow` / `any` / `all` / `complex` /
+`ord` / `chr` / `hex` / `bin` / `oct` / `round` / `divmod` / `repr` /
+`format`。
 `min` / `max` 支持多实参和 list/tuple/str/dict/set 迭代，空序列抛
 `ValueError`；`sum` 支持可选的起始值；`any` / `all` 支持短路；`abs` /
-`pow` 支持 int 与 float。其余内置名（`sorted` / `map` / `filter` 等）
-类型层面放行，但降级阶段会报「还没有生成代码」。
+`pow` 支持 int 与 float，`pow(x, y, m)` 是 `(x ** y) % m`；
+`int("42")` / `int("ff", 16)` / `float("1.5")` 按 CPython 规则解析字符串
+（失败抛 `ValueError`）；`ord` / `chr` 按**字节**处理（`chr` 只接受
+0..255）；`round` 用「四舍六入五成双」，`round(x)` 返回 int、
+`round(x, n)` 返回 float，整数配负 ndigits 也按 10 的幂取整；
+`divmod` 返回 `(商, 余数)`，符号规则同 CPython；`repr` 支持字符串/
+数值/bool/None；`format` 支持数值和字符串的格式说明符。
+其余内置名（`sorted` / `reversed` / `enumerate` / `zip` / `list()` /
+`dict()` / `map` / `filter` / `isinstance` / `type` / `getattr` 等）
+类型层面放行，降级阶段报「not supported by the code generator yet」，
+不会再退化成调用空指针。
 
 ### 跳转与异常
 

@@ -39,6 +39,144 @@ Py23Str* py23_str_from_bool(int64_t v) {
 
 Py23Str* py23_str_from_none(void) { return str_new("None", 4); }
 
+/* ── 字符串/数值转换 ────────────────────────────────────────────
+   字符串是字节串；int()/float() 的解析按 CPython 的规则做（允许
+   前后空白、下划线、0x/0o/0b 前缀），失败抛 ValueError。 */
+
+static int digit_val(char c) {
+    if (c >= '0' && c <= '9') return c - '0';
+    if (c >= 'a' && c <= 'z') return c - 'a' + 10;
+    if (c >= 'A' && c <= 'Z') return c - 'A' + 10;
+    return -1;
+}
+
+static int is_space(char c) {
+    return c == ' ' || c == '\t' || c == '\n' || c == '\r' || c == '\v' || c == '\f';
+}
+
+int64_t py23_str_to_i64(Py23Str* s, int64_t base) {
+    if (base != 0 && (base < 2 || base > 36))
+        py23_raise_c("ValueError", "int() base must be >= 2 and <= 36");
+    const char* p = s->data;
+    const char* end = s->data + s->len;
+    while (p < end && is_space(*p)) ++p;
+    int neg = 0;
+    if (p < end && (*p == '+' || *p == '-')) {
+        neg = *p == '-';
+        ++p;
+    }
+    int b = (int)(base == 0 ? 10 : base);
+    if (p + 1 < end && p[0] == '0' &&
+        (p[1] == 'x' || p[1] == 'X' || p[1] == 'o' || p[1] == 'O' || p[1] == 'b' ||
+         p[1] == 'B')) {
+        int pref = p[1] == 'x' || p[1] == 'X' ? 16 : p[1] == 'o' || p[1] == 'O' ? 8 : 2;
+        if (base != 0 && base != pref)
+            py23_raise_c("ValueError", "invalid literal for int()");
+        b = pref;
+        p += 2;
+    }
+    uint64_t acc = 0;
+    int any = 0;
+    while (p < end) {
+        char c = *p;
+        if (c == '_') {
+            if (!any) break;
+            ++p;
+            continue;
+        }
+        int d = digit_val(c);
+        if (d < 0 || d >= b) break;
+        acc = acc * (uint64_t)b + (uint64_t)d;
+        any = 1;
+        ++p;
+    }
+    while (p < end && is_space(*p)) ++p;
+    if (!any || p != end) py23_raise_c("ValueError", "invalid literal for int()");
+    return neg ? (int64_t)(0 - acc) : (int64_t)acc;
+}
+
+double py23_str_to_f64(Py23Str* s) {
+    char stackbuf[64];
+    char* buf = stackbuf;
+    if (s->len + 1 > (int64_t)sizeof stackbuf) {
+        buf = (char*)malloc((size_t)s->len + 1);
+        if (!buf) panic_c("out of memory");
+    }
+    memcpy(buf, s->data, (size_t)s->len);
+    buf[s->len] = 0;
+    char* endp = NULL;
+    double v = strtod(buf, &endp);
+    int bad = (endp == buf);
+    while (endp && *endp && is_space(*endp)) ++endp;
+    if (endp && *endp) bad = 1;
+    if (buf != stackbuf) free(buf);
+    if (bad) py23_raise_c("ValueError", "could not convert string to float");
+    return v;
+}
+
+int64_t py23_ord(Py23Str* s) {
+    if (s->len != 1)
+        py23_raise_c("TypeError", "ord() expected a character, but string length differs");
+    return (int64_t)(unsigned char)s->data[0];
+}
+
+Py23Str* py23_chr(int64_t c) {
+    /* 字节串：只支持 0..255（见 compatibility.md）。 */
+    if (c < 0 || c > 255) py23_raise_c("ValueError", "chr() arg not in range(256)");
+    char b = (char)(unsigned char)c;
+    return str_new(&b, 1);
+}
+
+Py23Str* py23_int_to_base(int64_t v, int64_t base) {
+    static const char* digits = "0123456789abcdef";
+    char tmp[72];
+    char* q = tmp + sizeof tmp;
+    uint64_t mag = v < 0 ? (uint64_t)(-(v + 1)) + 1 : (uint64_t)v;
+    int n = 0;
+    do {
+        *--q = digits[mag % (uint64_t)base];
+        mag /= (uint64_t)base;
+        ++n;
+    } while (mag);
+    const char* prefix = base == 16 ? "0x" : base == 8 ? "0o" : "0b";
+    char out[80];
+    int k = 0;
+    if (v < 0) out[k++] = '-';
+    for (const char* pp = prefix; *pp; ++pp) out[k++] = *pp;
+    memcpy(out + k, q, (size_t)n);
+    k += n;
+    return str_new(out, k);
+}
+
+double py23_round_f64(double x, int64_t ndigits) {
+    /* 无 digits 时 nearbyint 默认按「四舍六入五成双」，和 CPython 一致。
+       正 digits 用 printf 的正确舍入（直接对二进制值的十进制表示取整），
+       2.675 这种缩放会引入误差的值才能和 CPython 对上。 */
+    if (ndigits == 0) return nearbyint(x);
+    if (ndigits > 0 && ndigits <= 17 && fabs(x) < 1e300) {
+        char buf[512];
+        snprintf(buf, sizeof buf, "%.*f", (int)ndigits, x);
+        return strtod(buf, NULL);
+    }
+    if (ndigits < 0 && ndigits >= -15) {
+        double scale = pow(10.0, (double)(-ndigits));
+        return nearbyint(x / scale) * scale;
+    }
+    return x;
+}
+
+int64_t py23_round_i64(int64_t v, int64_t ndigits) {
+    if (ndigits >= 0) return v;
+    int64_t p = 1;
+    for (int64_t i = 0; i < -ndigits && i < 18; ++i) p *= 10;
+    int64_t q = v / p;
+    int64_t r = v % p;
+    int64_t ar = r < 0 ? -r : r;
+    int64_t half = p / 2;
+    if (ar > half || (ar == half && (q % 2 != 0))) q += v < 0 ? -1 : 1;
+    return q * p;
+}
+
 int64_t py23_str_eq(Py23Str* a, Py23Str* b) {
     if (a == b) return 1;
     if (a->len != b->len) return 0;

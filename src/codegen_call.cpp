@@ -494,6 +494,9 @@ void AsmGen::gen_call_rt(const Inst& in) {
             case RtFn::IsException:
             case RtFn::StrEqUnknown:
             case RtFn::ComplexEqUnknown:
+            case RtFn::StrToI64:
+            case RtFn::IntToBase:
+            case RtFn::RoundI64:
                 line(std::format("movq {}, %rdi", src_op(in.args[0])));
                 line(std::format("movq {}, %rsi", src_op(in.args[1])));
                 break;
@@ -562,6 +565,9 @@ void AsmGen::gen_call_rt(const Inst& in) {
             case RtFn::ExcValueCause:
             case RtFn::RaiseValue:
             case RtFn::AbsI64:
+            case RtFn::StrToF64:
+            case RtFn::Ord:
+            case RtFn::Chr:
             case RtFn::ComplexNeg:
             case RtFn::ComplexAbs:
             case RtFn::ComplexStr:
@@ -620,6 +626,10 @@ void AsmGen::gen_call_rt(const Inst& in) {
                 line(std::format("movq {}, %rsi", src_op(in.args[1])));
                 break;
             case RtFn::FmtF64:
+                line(std::format("movsd {}, %xmm0", src_op(in.args[0])));
+                line(std::format("movq {}, %rdi", src_op(in.args[1])));
+                break;
+            case RtFn::RoundF64:
                 line(std::format("movsd {}, %xmm0", src_op(in.args[0])));
                 line(std::format("movq {}, %rdi", src_op(in.args[1])));
                 break;

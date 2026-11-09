@@ -552,7 +552,15 @@ TypePtr TypeChecker::builtin_call(const std::string& n, Call& c) {
             for (auto& t : a) elems.push_back(iter_elem(t, c.line, c.col));
             return mk_list(mk_tuple(std::move(elems)));
         }
-        if (n == "int") return t_int();
+        if (n == "int") {
+            if (a.size() > 2)
+                err(c.line, c.col, std::format("int() takes at most 2 arguments, got {}", a.size()));
+            else if (a.size() == 2 && !is_unknown(a[0]) && (!a[0] || a[0]->kind != TyKind::Str))
+                err(c.line, c.col,
+                    std::format("int() can't convert non-string with explicit base: '{}'",
+                                type_name(a[0])));
+            return t_int();
+        }
         if (n == "float") return t_float();
         if (n == "str") return t_str();
         if (n == "bool") return t_bool();
@@ -575,8 +583,10 @@ TypePtr TypeChecker::builtin_call(const std::string& n, Call& c) {
         if (n == "hex" || n == "bin" || n == "oct") return t_str();
         if (n == "any" || n == "all" || n == "isinstance") return t_bool();
         if (n == "round") {
-            if (!a.empty() && a[0]->kind == TyKind::Float) return t_int();
-            return a.empty() ? t_unknown() : a[0];
+            if (a.empty()) return t_unknown();
+            if (a[0] && a[0]->kind == TyKind::Float)
+                return a.size() >= 2 ? t_float() : t_int();
+            return a[0];
         }
         if (n == "divmod") {
             if (a.size() >= 2 && is_num(a[0]) && is_num(a[1])) {
