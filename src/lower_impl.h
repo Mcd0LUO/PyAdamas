@@ -510,6 +510,19 @@ private:
         return 0;
     }
 
+    // 排序比较器的种类：0 int/bool、1 float、2 str、其它按机器字。
+    static int sort_kind(const TypePtr& t) {
+        if (!t) return 3;
+        if (t->kind == TyKind::Int || t->kind == TyKind::Bool) return 0;
+        if (t->kind == TyKind::Float) return 1;
+        if (t->kind == TyKind::Str) return 2;
+        return 3;
+    }
+
+    // 内置序列构造（list/sorted/enumerate/...）的入参规整成运行时列表：
+    // str → 字符列表，dict/set → 键列表，list/tuple 原样。
+    VReg seq_as_list(Expr* e, TypePtr& elem_out);
+
     void store_slot(int slot, VReg v) {
         TypePtr dst = st_->fn->slot_ty[slot];
         if (ir_is_heap(vreg_ty(v))) rc_inc(v);

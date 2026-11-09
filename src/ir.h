@@ -156,6 +156,16 @@ enum class RtFn : uint8_t {
     ListSumF64,   // (list*, f64 start) -> f64
     ListMinI64,   // (list*) -> i64  空表抛 ValueError
     ListMaxI64,   // (list*) -> i64
+    ListCopy,     // (list*) -> list*
+    ListReversed, // (list*) -> list*  倒序副本
+    ListSort,     // (list*, i64 kind) -> void  原地排序
+    SortedList,   // (list*, i64 kind) -> list*  排序副本
+    ListIndex,    // (list*, i64 v, i64 kind) -> i64  找不到抛 ValueError
+    ListCount,    // (list*, i64 v, i64 kind) -> i64
+    ListInsert,   // (list*, i64 idx, i64 v) -> void
+    EnumerateList,// (list*) -> list*  元素是 [i, v] 对
+    Zip2List,     // (list*, list*) -> list*
+    SetFromList,  // (list*, i64 key_kind, i64 key_own) -> dict*
     RangeNew,     // (i64 start, i64 stop, i64 step) -> list*
     HandlerPush,  // () -> handler*   压入异常 handler，记录临时栈水位
     HandlerLeave, // (handler*) -> void 弹出并清理临时栈
@@ -307,6 +317,16 @@ inline const char* rt_name(RtFn f) {
         case RtFn::ListSumF64: return "py23_list_sum_f64";
         case RtFn::ListMinI64: return "py23_list_min_i64";
         case RtFn::ListMaxI64: return "py23_list_max_i64";
+        case RtFn::ListCopy: return "py23_list_copy";
+        case RtFn::ListReversed: return "py23_list_reversed";
+        case RtFn::ListSort: return "py23_list_sort";
+        case RtFn::SortedList: return "py23_sorted_list";
+        case RtFn::ListIndex: return "py23_list_index";
+        case RtFn::ListCount: return "py23_list_count";
+        case RtFn::ListInsert: return "py23_list_insert";
+        case RtFn::EnumerateList: return "py23_enumerate_list";
+        case RtFn::Zip2List: return "py23_zip2_list";
+        case RtFn::SetFromList: return "py23_set_from_list";
         case RtFn::RangeNew: return "py23_range_new";
         case RtFn::HandlerPush: return "py23_handler_push";
         case RtFn::HandlerLeave: return "py23_handler_leave";

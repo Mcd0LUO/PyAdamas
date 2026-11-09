@@ -363,6 +363,7 @@ VReg Lowerer::lower_call(Call& c) {
                 "print", "len", "int", "float", "str", "bool", "range", "next",
                 "abs", "min", "max", "sum", "pow", "any", "all", "complex",
                 "ord", "chr", "hex", "bin", "oct", "round", "divmod", "repr", "format",
+                "list", "tuple", "dict", "set", "sorted", "reversed", "enumerate", "zip",
             };
             if (kBuiltins.count(n.id)) return lower_builtin_call(n.id, c);
             // 名字能解析但语义没实现的内置：以前会退化成调用空指针直接
@@ -412,11 +413,39 @@ VReg Lowerer::lower_call(Call& c) {
     return def_heap(tc_.type_of(&c), std::move(in));
 }
 
+VReg Lowerer::seq_as_list(Expr* e, TypePtr& elem_out) {
+    VReg x = expr(*e);
+    TypePtr xt = tc_.type_of(e);
+    elem_out = t_unknown();
+    if (!xt) return x;
+    switch (xt->kind) {
+        case TyKind::Str: {
+            elem_out = t_str();
+            VReg l = call_runtime(RtFn::StrToList, mk_list(t_str()), {x});
+            push_temp(l);
+            return l;
+        }
+        case TyKind::Dict:
+        case TyKind::Set: {
+            elem_out = xt->sub.empty() ? t_unknown() : xt->sub[0];
+            VReg l = call_runtime(RtFn::DictKeys, mk_list(elem_out), {x});
+            push_temp(l);
+            return l;
+        }
+        case TyKind::List:
+        case TyKind::Tuple:
+            elem_out = xt->sub.empty() ? t_unknown() : xt->sub[0];
+            return x;
+        default:
+            return x;
+    }
+}
+
 VReg Lowerer::lower_builtin_call(const std::string& name, Call& c) {
     // print 的关键字是 sep / end，得单独处理，不能走下面这条通用拦截
     if (name == "print") return lower_print(c);
 
-    if (!c.keywords.empty()) {
+    if (!c.keywords.empty() && name != "dict") {
         err(c.line, c.col, std::format("{}() does not take keyword arguments here", name));
     }
 
@@ -732,6 +761,194 @@ VReg Lowerer::lower_builtin_call(const std::string& name, Call& c) {
             return s;
         }
         return convert_to(v, from, to);
+    }
+
+    if (name == "list" || name == "tuple") {
+        TypePtr ty = tc_.type_of(&c);
+        bool as_tuple = name == "tuple";
+        auto result_ty = [&]() -> TypePtr {
+            if (ty) return ty;
+            return as_tuple ? mk_tuple({}) : mk_list(t_unknown());
+        };
+        if (c.args.empty()) {
+            if (as_tuple) {
+                Inst mt;
+                mt.op = IrOp::MakeTuple;
+                mt.imm = list_kind(ty);
+                mt.ty = result_ty();
+                return def_heap(result_ty(), std::move(mt));
+            }
+            VReg l = call_runtime(RtFn::ListNew, result_ty(),
+                                  {const_int(0), const_int(list_kind(ty))});
+            push_temp(l);
+            return l;
+        }
+        if (c.args.size() != 1) {
+            err(c.line, c.col, std::format("{}() takes at most one argument", name));
+            return const_none();
+        }
+        TypePtr xt = tc_.type_of(c.args[0].get());
+        if (!xt || (xt->kind != TyKind::List && xt->kind != TyKind::Tuple &&
+                    xt->kind != TyKind::Str && xt->kind != TyKind::Dict &&
+                    xt->kind != TyKind::Set)) {
+            err(c.args[0]->line, c.args[0]->col,
+                std::format("{}() cannot iterate over '{}'", name, type_name(xt)));
+            return const_none();
+        }
+        TypePtr et = t_unknown();
+        VReg x = seq_as_list(c.args[0].get(), et);
+        bool fresh = xt->kind == TyKind::Str || xt->kind == TyKind::Dict ||
+                     xt->kind == TyKind::Set;
+        VReg l = fresh ? x : call_runtime(RtFn::ListCopy, result_ty(), {x});
+        if (!fresh) push_temp(l);
+        return as_tuple ? retype(l, result_ty()) : l;
+    }
+
+    if (name == "dict") {
+        TypePtr ty = tc_.type_of(&c);
+        if (!ty || ty->kind != TyKind::Dict) ty = mk_dict(t_unknown(), t_unknown());
+        TypePtr kt = t_unknown(), vt = t_unknown();
+        if (!ty->sub.empty()) kt = ty->sub[0];
+        if (ty->sub.size() > 1) vt = ty->sub[1];
+        if (!c.args.empty()) {
+            err(c.line, c.col,
+                "dict(iterable) is not supported yet; use {} or dict(**kw)");
+            return const_none();
+        }
+        if (c.keywords.empty()) {
+            VReg d = call_runtime(RtFn::DictNew, ty,
+                                  {const_int(key_kind(kt)), const_int(own_kind(kt)),
+                                   const_int(own_kind(vt))});
+            push_temp(d);
+            return d;
+        }
+        // dict(a=1, b=2)：关键字是字符串键。
+        int vo = own_kind(vt);
+        VReg d = call_runtime(RtFn::DictNew, ty,
+                              {const_int(1), const_int(1), const_int(vo)});
+        push_temp(d);
+        for (auto& kw : c.keywords) {
+            if (kw.arg.empty()) {
+                err(kw.value->line, kw.value->col, "'**' is not supported in dict()");
+                continue;
+            }
+            VReg v = expr(*kw.value);
+            v = coerce(v, tc_.type_of(kw.value.get()), vt);
+            retain_elem(v, vo);
+            call_void(RtFn::DictSet, {d, const_str(kw.arg), v});
+        }
+        return d;
+    }
+
+    if (name == "set") {
+        TypePtr ty = tc_.type_of(&c);
+        if (!ty || ty->kind != TyKind::Set) ty = mk_set(t_unknown());
+        TypePtr et = ty->sub.empty() ? t_unknown() : ty->sub[0];
+        int kk = key_kind(et), ko = own_kind(et);
+        if (c.args.empty()) {
+            VReg d = call_runtime(RtFn::DictNew, ty,
+                                  {const_int(kk), const_int(ko), const_int(0)});
+            push_temp(d);
+            return d;
+        }
+        if (c.args.size() != 1) {
+            err(c.line, c.col, "set() takes at most one argument");
+            return const_none();
+        }
+        TypePtr xt = tc_.type_of(c.args[0].get());
+        if (!xt || (xt->kind != TyKind::List && xt->kind != TyKind::Tuple &&
+                    xt->kind != TyKind::Str && xt->kind != TyKind::Dict &&
+                    xt->kind != TyKind::Set)) {
+            err(c.args[0]->line, c.args[0]->col,
+                std::format("set() cannot iterate over '{}'", type_name(xt)));
+            return const_none();
+        }
+        TypePtr se = t_unknown();
+        VReg x = seq_as_list(c.args[0].get(), se);
+        Inst in;
+        in.op = IrOp::CallRt;
+        in.imm = static_cast<int64_t>(RtFn::SetFromList);
+        in.args = {x, const_int(kk), const_int(ko)};
+        in.ty = ty;
+        VReg d = def(ty, std::move(in));
+        push_temp(d);
+        return d;
+    }
+
+    if (name == "sorted" || name == "reversed") {
+        if (c.args.size() != 1) {
+            err(c.line, c.col, std::format("{}() takes exactly one argument", name));
+            return const_none();
+        }
+        TypePtr xt = tc_.type_of(c.args[0].get());
+        if (!xt || (xt->kind != TyKind::List && xt->kind != TyKind::Tuple &&
+                    xt->kind != TyKind::Str && xt->kind != TyKind::Dict &&
+                    xt->kind != TyKind::Set)) {
+            err(c.args[0]->line, c.args[0]->col,
+                std::format("{}() cannot iterate over '{}'", name, type_name(xt)));
+            return const_none();
+        }
+        TypePtr se = t_unknown();
+        VReg x = seq_as_list(c.args[0].get(), se);
+        TypePtr ty = tc_.type_of(&c);
+        if (!ty || ty->kind != TyKind::List) ty = mk_list(se);
+        Inst in;
+        in.op = IrOp::CallRt;
+        in.imm = static_cast<int64_t>(name == "sorted" ? RtFn::SortedList
+                                                       : RtFn::ListReversed);
+        in.args = {x};
+        if (name == "sorted") in.args.push_back(const_int(sort_kind(se)));
+        in.ty = ty;
+        VReg l = def(ty, std::move(in));
+        push_temp(l);
+        return l;
+    }
+
+    if (name == "enumerate") {
+        if (c.args.size() != 1) {
+            err(c.line, c.col, "enumerate() supports exactly one argument (no start=)");
+            return const_none();
+        }
+        TypePtr xt = tc_.type_of(c.args[0].get());
+        if (!xt || (xt->kind != TyKind::List && xt->kind != TyKind::Tuple &&
+                    xt->kind != TyKind::Str && xt->kind != TyKind::Dict &&
+                    xt->kind != TyKind::Set)) {
+            err(c.args[0]->line, c.args[0]->col,
+                std::format("enumerate() cannot iterate over '{}'", type_name(xt)));
+            return const_none();
+        }
+        TypePtr se = t_unknown();
+        VReg x = seq_as_list(c.args[0].get(), se);
+        TypePtr ty = tc_.type_of(&c);
+        if (!ty || ty->kind != TyKind::List) ty = mk_list(mk_tuple({t_int(), se}));
+        Inst in;
+        in.op = IrOp::CallRt;
+        in.imm = static_cast<int64_t>(RtFn::EnumerateList);
+        in.args = {x};
+        in.ty = ty;
+        VReg l = def(ty, std::move(in));
+        push_temp(l);
+        return l;
+    }
+
+    if (name == "zip") {
+        if (c.args.size() != 2) {
+            err(c.line, c.col, "zip() supports exactly two iterables for now");
+            return const_none();
+        }
+        TypePtr se1 = t_unknown(), se2 = t_unknown();
+        VReg a = seq_as_list(c.args[0].get(), se1);
+        VReg b = seq_as_list(c.args[1].get(), se2);
+        TypePtr ty = tc_.type_of(&c);
+        if (!ty || ty->kind != TyKind::List) ty = mk_list(mk_tuple({se1, se2}));
+        Inst in;
+        in.op = IrOp::CallRt;
+        in.imm = static_cast<int64_t>(RtFn::Zip2List);
+        in.args = {a, b};
+        in.ty = ty;
+        VReg l = def(ty, std::move(in));
+        push_temp(l);
+        return l;
     }
 
     err(c.line, c.col, std::format("builtin '{}' is not supported by the code generator yet", name));

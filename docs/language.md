@@ -551,7 +551,8 @@ class Connection:
 已生成代码：`print` / `len` / `int` / `float` / `str` / `bool` / `range` /
 `next` / `abs` / `min` / `max` / `sum` / `pow` / `any` / `all` / `complex` /
 `ord` / `chr` / `hex` / `bin` / `oct` / `round` / `divmod` / `repr` /
-`format`。
+`format` / `list` / `tuple` / `dict` / `set` / `sorted` / `reversed` /
+`enumerate` / `zip`。
 `min` / `max` 支持多实参和 list/tuple/str/dict/set 迭代，空序列抛
 `ValueError`；`sum` 支持可选的起始值；`any` / `all` 支持短路；`abs` /
 `pow` 支持 int 与 float，`pow(x, y, m)` 是 `(x ** y) % m`；
@@ -561,10 +562,14 @@ class Connection:
 `round(x, n)` 返回 float，整数配负 ndigits 也按 10 的幂取整；
 `divmod` 返回 `(商, 余数)`，符号规则同 CPython；`repr` 支持字符串/
 数值/bool/None；`format` 支持数值和字符串的格式说明符。
-其余内置名（`sorted` / `reversed` / `enumerate` / `zip` / `list()` /
-`dict()` / `map` / `filter` / `isinstance` / `type` / `getattr` 等）
-类型层面放行，降级阶段报「not supported by the code generator yet」，
-不会再退化成调用空指针。
+`list(seq)` / `tuple(seq)` 做浅拷贝，`set(seq)` 按键去重，`dict(**kw)`
+用字符串键；`sorted` 支持 int/float/str 元素（`key=` / `reverse=` 尚未
+支持）；`enumerate` 产出的元素是 `[下标, 值]` 对，`zip` 支持两个可迭代
+对象；这些迭代辅助都返回具体列表，与生成器表达式立即求值的模型一致。
+其余内置名（`map` / `filter` / `isinstance` / `type` / `getattr` /
+`hash` / `iter` / `next(列表)` / `slice` / `callable` 等）类型层面放行，
+降级阶段报「not supported by the code generator yet」，不会再退化成
+调用空指针。
 
 ### 跳转与异常
 

@@ -4,6 +4,35 @@
 
 早期阶段没有逐条留痕，按阶段归纳；0.4 之后逐条记录。
 
+## [0.40] - 2026-11-10
+
+内置函数补齐（二）：序列构造与排序/迭代辅助。
+
+### 新增
+
+- `list()` / `list(seq)`、`tuple()` / `tuple(seq)`、`dict()` / `dict(**kw)`、
+  `set()` / `set(seq)`；str 源按字符列表、dict/set 源按键列表规整，
+  list/tuple 源做浅拷贝。
+- `sorted(seq)`（int/float/str 三种比较器，返回新列表）、`reversed(seq)`、
+  `enumerate(seq)`（元素是 `[下标, 值]` 对）、`zip(a, b)`（两个可迭代
+  对象，长度取较短者）。
+- 运行时新增 list_copy / list_reversed / list_sort / sorted_list /
+  list_index / list_count / list_insert / enumerate_list / zip2_list /
+  set_from_list。
+- 测试：`54_builtins_seq.py`。
+
+### 验证
+
+- `ctest --preset dev/release` 全绿；O0/O1 全量 54 个运行用例通过；
+  810 程序差分零失败
+- `54_builtins_seq.py` 与 CPython 逐字节一致
+
+### 已知限制
+
+- `sorted(key=..., reverse=...)`、`enumerate(start=)`、三个及以上可迭代
+  对象的 `zip()`、`dict(iterable)` 暂不支持（降级阶段明确报错）
+- 迭代辅助返回的都是具体列表（与生成器表达式立即求值的既有模型一致）
+
 ## [0.39] - 2026-11-10
 
 内置函数补齐（一）：标量转换与格式化，并消灭未实现内置的段错误。
