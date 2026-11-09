@@ -15,6 +15,9 @@ endif()
 set(PY23_SOURCES
   src/main.cpp
   src/parser.cpp
+  src/parser_stmt.cpp
+  src/parser_func.cpp
+  src/parser_expr.cpp
   src/typecheck.cpp
   src/typecheck_stmt.cpp
   src/typecheck_expr.cpp
