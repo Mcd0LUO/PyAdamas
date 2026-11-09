@@ -271,6 +271,36 @@ dict 指针，调用点打包好按普通参数传；整数寄存器不够时照
 - `return` / `break` / `continue` 不 longjmp，走编译期 cleanup 栈：
   `handler_discard` + `__exit__` / finalbody 直接内联发射。
 
+## 生成器
+
+含 `yield` 的函数编译成两个入口：
+
+- **创建包装**：普通函数，按原签名收参，`gen.new` 分配帧，把实参 retain
+  进帧槽，再把 `%r10` 里的闭包指针存进环境槽，返回生成器对象。函数值
+  一律指向它。
+- **resume**：`IRFunction::is_generator` 为真，`%r15` 固定指向帧负载；
+  槽位读写走 `8*(6+slot)(%r15)`，不占栈帧，也不参与槽位寄存器提升。
+  入口按 `state` 分发到续跑块，`gen.yield` 把值写进 out、state，然后
+  直接返回。
+
+yield 时的寄存器策略很简单：vreg 的栈槽不跨挂起保存，所以临时值要么
+落进帧槽（循环的序列/上界、水位），要么在 yield 前清理。槽位寄存器
+提升整体关闭。`gen.done` 先由 lower 发射 `release_slots`，再置
+status=1；帧析构由运行时的 finalize 路径按挂起点快照跑清理。
+
+跨挂起的 `try` / `with` / `finally`：yield 前用
+`py23_handler_suspend` 把记录摘下，恢复时分发块先
+`py23_handler_rearm` 再重新 `setjmp`，非 0 直接跳回原 landing pad。
+close 分发按挂起点快照重放 `__exit__` / finalbody，并
+`py23_handler_free` 释放摘下的记录。
+
+协程复用同一套寄存器/槽位约定：帧头多出 kind/waiter/exc/cur 四个字，
+`gen.await` 写 status=3；恢复入口先看 closing，再看 `gen.exc`，有注入
+异常就按 state 进入 throw 分发——重挂 handler 后 `gen.rethrow`，让
+`try/except` 能抓到跨 await 的异常。返回值由 `gen.done a` 写进 out。
+`asyncio.run/sleep/gather/create_task` 与异步生成器的 `__anext__`
+都是普通 `call.rt`；事件循环、Task 取消和驱动推进都在运行时里。
+
 ## 模块编译
 
 每个模块单独汇编成 `.o`，符号统一加前缀：

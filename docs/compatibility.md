@@ -27,7 +27,9 @@ py23 不追求兼容 CPython：语义是按静态类型的需要重新定的。�
 | `with` | 只支持类实例的 `__enter__` / `__exit__`；正常、`return` / `break` / `continue` 和异常路径都调用 `__exit__` | 完整上下文管理协议 | `__exit__` 返回值只有真/假语义；异常路径传 `(type, message, None)` |
 | import | 本地单层 `.py`；`m.x` 直接读写模块全局；`from m import x` 是快照；模块别名不能当值 | 任意模块/包、运行时模块对象 | 支持包/相对导入/静态 `import *`（按非下划线导出）；跨模块继承暂不支持 |
 | 模块初始化 | 第一次执行 import 时惰性运行一次；循环导入编译期报错 | 支持循环导入和部分初始化 | 初始化失败的模块不会再重试；模块对象不可见 |
-| 推导式 | list/set/dict 推导式按循环展开；生成器表达式立即构造成 list | 生成器惰性求值 | 没有生成器/协程状态机 |
+| 推导式 | list/set/dict 推导式按循环展开；生成器表达式立即构造成 list；含 `async for` 的推导式在协程里可挂起 | 生成器惰性求值 | 异步推导式只能作为语句/赋值/`return` 的根表达式；生成器表达式仍立即求值 |
+| 生成器 | 状态机 + 堆帧；`for` / `next` / `send` / `close` / `yield from`；跨 `yield` 跑 `finally` / `__exit__` | 完整生成器协议 | `yield`/`yield from` 只能是语句或赋值右值，不能位于 `finally`/`except` 体内；`yield from` 的值固定为 None；`send` 值静态是 unknown；生成器类型跨模块降级为 unknown |
+| 协程 / Task / Future | `async def` / `await` 复用生成器帧；`asyncio.run`/`sleep`/`gather`/`create_task`；`done()`/`cancel()`/`result()`/`exception()`；Future 多等待者；取消级联；`wait_readable`/`wait_writable` + poll；异步生成器 + `async for` + `async with`；异步推导式 | 完整 asyncio（Task 组/Future 回调/I/O 流） | `await` 只能是语句、赋值右值或 `return` 值；异步生成器没有 `asend`/`athrow`/`aclose`，停在 `async with` 里被直接回收时不 await 退出；自定义 `__aiter__` 未支持；无 `Future.set_exception`/`add_done_callback`；task 结果异常是消息字符串；`CancelledError` 是内置名；`wait_readable` 不是 CPython 标准 API；`gather` 结果元素是 unknown；Task 单等待者 |
 | 递归深度 | 受栈大小限制（万级） | 默认 1000，可调 | 没有解释器递归检查 |
 | 字段初值 `x: int = []` | 每次构造重新求值，实例之间独立 | 类属性，所有实例共享 | 更安全；也避免可变默认值的经典 bug |
 | 类体里的非声明语句 | `check` 通过并标记「没建模」，`build` 报错 | 类体是独立命名空间，可执行任意语句 | 布局在编译期定死，没有类命名空间 |
@@ -55,7 +57,7 @@ py23 不追求兼容 CPython：语义是按静态类型的需要重新定的。�
 
 **语法层就拒**（`check` 报错）：`bytes` / `complex` 字面量、超出 int64 的整数、`match` 语句、Python 2 遗留写法、方法缺 `self`、字段赋值类型不符。
 
-**能解析、能过类型检查，但 `build` 报错**：生成器、`async`/`await`、`del`、`print(*args)`、通过 unknown 函数值的 `*` / `**` 展开、`*` 位于固定形参之前且不是定长 tuple、`raise ... from`、非内置异常名、`finally` 体内跳出 finally 的 `return`/`break`/`continue`、跨模块继承、带装饰器的方法、类装饰器、`print(file=)`、把类名当值用、函数内定义类、**多继承、类体里的非声明语句、类体字段默认值里的 lambda**。
+**能解析、能过类型检查，但 `build` 报错**：`del`、`print(*args)`、通过 unknown 函数值的 `*` / `**` 展开、`*` 位于固定形参之前且不是定长 tuple、`raise ... from`、非内置异常名、`finally` 体内跳出 finally 的 `return`/`break`/`continue`、跨模块继承、带装饰器的方法、类装饰器、`print(file=)`、把类名当值用、函数内定义类、**多继承、类体里的非声明语句、类体字段默认值里的 lambda**，以及生成器的 `yield`/`yield from` 位于 `finally`/`except` 体内（协程的 `await` 同样）、异步生成器表达式、嵌在其它表达式里的异步推导式。
 
 清楚这个分层很重要：`py23 check` 尽量当通用 Python 语法/类型检查器用，检查器放宽的边界都记在 [CHANGELOG 0.6.1](../CHANGELOG.md)；`py23 build` 才是「能不能编译」的判据。
 
@@ -67,10 +69,10 @@ py23 不追求兼容 CPython：语义是按静态类型的需要重新定的。�
 |---|---|---|---|
 | 正例 | `ctest --preset dev` 里 `tests/*.py` | 11 个文件 | 前端退回保守 |
 | 反例 | `ctest --preset dev` 里 `tests/fail/*.py` | 33 个文件 | 检查器为了过测而放水 |
-| 运行 | `ctest --preset dev` 里 `tests/run/*.py` | 22 个文件 | 后端烂掉没人知道 |
+| 运行 | `ctest --preset dev` 里 `tests/run/*.py` | 29 个文件 | 后端烂掉没人知道 |
 | 模块 | `ctest --preset dev` 里 `tests/modules/*/` | 8 个目录 | 分模块编译/链接、惰性初始化、缓存失效 |
 | 未建模 | `ctest --preset dev` 里 `tests/unsupported/*.py` | 4 个文件 | 「标了没建模、实际却悄悄编译过去」 |
-| 内存 | 16MB `RLIMIT_AS` 下跑压力程序 | 拼接 / 对象 / 闭包 / 容器 / 切片 / 删除 / 推导式 / 变长实参 / `with` / 装饰器 / 异常展开 / 环 / unknown 泄漏 | 引用计数或 GC 漏插桩、重复释放、误回收 |
+| 内存 | 16MB `RLIMIT_AS` 下跑压力程序 | 拼接 / 对象 / 闭包 / 容器 / 切片 / 删除 / 推导式 / 变长实参 / `with` / 装饰器 / 异常展开 / `yield from` / 异步推导式 / 环 / unknown 泄漏 | 引用计数或 GC 漏插桩、重复释放、误回收 |
 | 差分 | `python3 tests/diff/run_diff.py` | 随机程序 | 语义漂移、边界错误 |
 
 ### 四类测试的写法
@@ -84,7 +86,7 @@ py23 不追求兼容 CPython：语义是按静态类型的需要重新定的。�
 
 ### 差分测试
 
-`tests/diff/` 下四个生成器，覆盖不同侧面：
+`tests/diff/` 下六个生成器，覆盖不同侧面：
 
 | 生成器 | 内容 | 每个种子用例数 |
 |---|---|---|
@@ -92,11 +94,13 @@ py23 不追求兼容 CPython：语义是按静态类型的需要重新定的。�
 | `struct` | 函数、循环、分支、变量复用 | 40 |
 | `float` | 浮点 `//` `%` 的符号修正、`print` 的 `sep`/`end` | 60 |
 | `repr` | 随机位模式的 `double`，专测浮点转字符串 | 40 |
+| `gen` | 生成器迭代、`next`/`StopIteration`、`close` 清理 | 40 |
+| `async` | `asyncio.run`/`sleep(0)`/`gather`/`create_task`、异常跨 await、取消级联、Future、fd poll、异步生成器 + `async for`/`async with` | 30 |
 
 ```bash
-python3 tests/diff/run_diff.py                 # 3 个种子 = 600 个程序
-python3 tests/diff/run_diff.py --seeds 5       # 1000 个程序
-python3 tests/diff/run_diff.py --seeds 10      # 2000 个程序，建议每次改后端都跑
+python3 tests/diff/run_diff.py                 # 3 个种子 = 810 个程序
+python3 tests/diff/run_diff.py --seeds 5       # 1350 个程序
+python3 tests/diff/run_diff.py --seeds 10      # 2700 个程序，建议每次改后端都跑
 python3 tests/diff/run_diff.py --only repr     # 只跑浮点格式化
 ```
 
@@ -124,7 +128,9 @@ PY
 `tests/run/16_dict_del.py` ~ `tests/run/21_decorator.py` 分别覆盖删除类
 方法、切片赋值、变长实参、推导式、`with` 和装饰器；
 `tests/run/22_exception.py` 覆盖 try/except/else/finally、raise、层级
-匹配、`with` 异常路径和运行时错误转换。
+匹配、`with` 异常路径和运行时错误转换；`tests/run/23_generator.py` ~
+`tests/run/29_async_comp.py` 覆盖生成器、协程、Task、异步语言面、
+Future/取消/fd、`yield from` 与异步推导式。
 `tests/run/13_gc.py` 会真正触发收集器：对象环、字典自环、闭包垃圾和
 unknown 容器。RSS 压力程序负责「长循环里内存不随迭代数增长」。当前实测
 100 万次拼接 / 100 万次对象分配 / 30 万次带字符串字段的对象分配 /

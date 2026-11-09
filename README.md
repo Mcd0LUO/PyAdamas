@@ -71,7 +71,7 @@ bad.py:1:7: error: expected parameter name, found ':'
 
 ## 现在能做什么
 
-标量、字符串、列表、元组、**字典 / 集合**（字面量、下标读写、`len`、`in`、`for`、`get`/`keys`/`values`/`items`/`update`/`add`、删除类方法）、**切片（读与赋值）**、函数（默认参数、递归、一等值、闭包、`nonlocal`、`lambda`、`*args`/`**kwargs`、装饰器）、推导式、`with`、`try/except/else/finally`、`raise`、本地单层模块 import（`.py` → `.py23i` + `.o`，惰性初始化、增量缓存）、`class`（字段、方法、单继承、虚调用）、`if` / `while` / `for`（含循环 `else`）、`break` / `continue`、`assert`、`global`、f-string、`print`（含 `sep=` / `end=`）。堆值用引用计数自动回收，循环收集器回收环和 unknown 容器泄漏；不含堆临时值的代码不会插入任何 RC 指令。
+标量、字符串、列表、元组、**字典 / 集合**（字面量、下标读写、`len`、`in`、`for`、`get`/`keys`/`values`/`items`/`update`/`add`、删除类方法）、**切片（读与赋值）**、函数（默认参数、递归、一等值、闭包、`nonlocal`、`lambda`、`*args`/`**kwargs`、装饰器）、推导式（含异步推导式）、`with`、`try/except/else/finally`、`raise`、本地单层模块 import（`.py` → `.py23i` + `.o`，惰性初始化、增量缓存）、`class`（字段、方法、单继承、虚调用）、`if` / `while` / `for`（含循环 `else`）、`break` / `continue`、`assert`、`global`、f-string、`print`（含 `sep=` / `end=`）。生成器支持 `yield from`；协程支持 `async def` / `await` / `asyncio.run` / `sleep` / `gather` / `create_task`、`Future`、异步生成器、`async for` / `async with`。堆值用引用计数自动回收，循环收集器回收环和 unknown 容器泄漏；不含堆临时值的代码不会插入任何 RC 指令。
 
 完整的支持清单和语义定义见 [docs/language.md](docs/language.md)。
 
@@ -107,6 +107,8 @@ tools/                    一次性脚本
 - **字典是开放寻址表**：`order` 数组保留插入顺序，`set` 复用同一结构；key/value 按静态类型接入 RC，未知类型交给 GC。字符串 key 按字节哈希、逐字节判等。删除按 `order` 剩余项整表重建。→ [运行时](docs/runtime.md#字典--集合)
 - **语法糖各归其位**：`lambda` 在类型检查前脱糖成嵌套 `def`，推导式在降级期展开成独立作用域的循环，`with` 在正常/跳转/异常出口补 `__exit__`，装饰器按逆序做普通闭包调用。→ [IR](docs/ir.md#降级规则)
 - **异常用 setjmp/longjmp 展开**：`try`/`with`/`finally` 压运行时 handler 记录，`raise` 一次 `longjmp` 到最内层 landing pad；含 handler 的函数关闭热变量寄存器提升，异常跳过的局部引用交给保守 GC。→ [代码生成](docs/codegen.md#异常展开)
+- **生成器是状态机 + 堆帧**：含 `yield` 的函数拆成创建包装和 resume，局部槽位在堆帧里；yield 时把 handler 记录摘下，恢复时重新 setjmp；`close()` 和引用计数归零会按挂起点快照跑 `finally` / `__exit__`。→ [运行时](docs/runtime.md#生成器)
+- **协程复用同一套状态机**：`async def` 的帧多一个 kind 标记，`await` 是第三种挂起；`asyncio.run` 驱动就绪队列 + 定时器，`gather` 并发启动，`create_task` 立即调度并可 `cancel()`（沿 await 链级联取消），`Future` 支持多等待者与 `set_result`，`wait_readable`/`wait_writable` 把 fd 交给事件循环 `poll`；异常通过帧内注入跨 await 传播；异步生成器 + `async for` / `async with` 也已接通。→ [运行时](docs/runtime.md#协程与事件循环)
 - **模块独立编译 + 链接**：本地 `.py` 模块与内置 `math`/`sys`；每个 `.py` 编译成独立 `.o` 和二进制 `.py23i` 接口，入口与依赖按 import 图链接；初始化惰性且只执行一次，源码哈希 + 依赖接口哈希决定是否复用缓存。→ [路线图](docs/roadmap.md)
 - **运行时是纯 C**，只依赖 libc + libm，随产物一起链接。
 
@@ -114,7 +116,7 @@ tools/                    一次性脚本
 
 语法层明确拒绝：`bytes` / `complex` 字面量、超出 int64 的整数、`match` 语句。
 
-能解析、能检查，但 `build` 报错：生成器、`async`、`del`、`print(*args)`、通过 unknown 函数值的 `*` / `**` 展开、`raise ... from`、自定义异常类，以及类的多继承、类体里的非声明语句、带装饰器的方法/类。`finally` 体里跳出 finally 的 `return` / `break` / `continue` 也会被拒。类只支持单继承，没有 `super()`、类属性、`@property`；字段可以不写标注，由 `self.x = ...` 推断。闭包、`lambda`、`*args`/`**kwargs`、推导式、`with`、函数装饰器、`try/except/else/finally`、`raise`、字典/集合、`in`、容器方法与删除、切片（读与赋值）已支持；循环收集器是保守的，可能延迟回收，但没有 `__del__`/弱引用。异常对象只有**类型名 + 消息**，`except ... as e` 里的 `e` 是消息字符串；没有 traceback/异常链。import 支持本地包与相对导入（需要 `__init__.py`）：`import pkg`、`import pkg.mod as m`、`from pkg import mod`、`from .mod import x`、`from ..pkg import y`，以及静态展开的 `from m import *`（按非下划线名字导出，暂不解析 `__all__`）；跨模块继承还没接；已内置 `math`/`sys`；导入类可以构造、访问字段和调用方法，但类类型出现在跨模块函数签名里会降级成 unknown。空字典的 key 类型是 unknown，内容相同的动态字符串 key 可能按机器字不等；混合 value 类型会退化成 unknown；`keys()` / `values()` / `items()` 返回列表而不是视图。
+能解析、能检查，但 `build` 报错：`del`、`print(*args)`、通过 unknown 函数值的 `*` / `**` 展开、`raise ... from`、自定义异常类，以及类的多继承、类体里的非声明语句、带装饰器的方法/类。`finally` 体里跳出 finally 的 `return` / `break` / `continue` 也会被拒。生成器已支持 `yield` 与 `yield from`，但 `yield`/`yield from` 只能作为语句或赋值右值，不能位于 `finally`/`except` 体内，生成器表达式仍是立即求值的 list。协程已支持 `async def` / `await` / `asyncio.run` / `sleep` / `gather` / `create_task`（`done()` / `cancel()`，取消级联）、`Future`、异步生成器、`async for`、`async with`、`wait_readable`/`wait_writable`，但 `await` 只能作为语句、赋值右值或 `return` 值，异步生成器没有 `asend`/`athrow`/`aclose`，异步推导式只能作为语句、赋值或 `return` 的根表达式。类只支持单继承，没有 `super()`、类属性、`@property`；字段可以不写标注，由 `self.x = ...` 推断。闭包、`lambda`、`*args`/`**kwargs`、推导式、`with`、函数装饰器、`try/except/else/finally`、`raise`、字典/集合、`in`、容器方法与删除、切片（读与赋值）已支持；循环收集器是保守的，可能延迟回收，但没有 `__del__`/弱引用。异常对象只有**类型名 + 消息**，`except ... as e` 里的 `e` 是消息字符串；没有 traceback/异常链。import 支持本地包与相对导入（需要 `__init__.py`）：`import pkg`、`import pkg.mod as m`、`from pkg import mod`、`from .mod import x`、`from ..pkg import y`，以及静态展开的 `from m import *`（按非下划线名字导出，暂不解析 `__all__`）；跨模块继承还没接；已内置 `math`/`sys`；导入类可以构造、访问字段和调用方法，但类类型出现在跨模块函数签名里会降级成 unknown。空字典的 key 类型是 unknown，内容相同的动态字符串 key 可能按机器字不等；混合 value 类型会退化成 unknown；`keys()` / `values()` / `items()` 返回列表而不是视图。
 
 语义上有意与 CPython 不同：列表相等比指针、整数溢出回绕、字符串按字节（`len("中文") == 6`）、读未赋值局部变量得到 0。引用计数处理不了的环和 `unknown` / `list[unknown]` / 混合元组引用由保守 GC 兜底；误报只延迟回收，没有 `__del__`/弱引用。
 
@@ -126,20 +128,20 @@ tools/                    一次性脚本
 |---|---|---|
 | `tests/*.py` | 11 | 前端正例，267 条语句 / 29 个函数 / 1165 个表达式 |
 | `tests/fail/*.py` | 33 | 反例，必须报出首行 `# expect:` 指定的错 |
-| `tests/run/*.py` | 22 | 编译 + 运行，输出与文件末尾的 `# --- expect ---` 逐行比对 |
+| `tests/run/*.py` | 29 | 编译 + 运行，输出与文件末尾的 `# --- expect ---` 逐行比对 |
 | `tests/unsupported/*.py` | 4 | `check` 必须打「没建模」标记，且 `build` 必须拒绝 |
-| `tests/diff/` | 4 个生成器 | 随机程序与 CPython 比 stdout，默认 3 种子 600 个程序 |
+| `tests/diff/` | 6 个生成器 | 随机程序与 CPython 比 stdout，默认 3 种子 810 个程序 |
 | `tests/modules/` | 8 个目录 | 多模块编译 + 运行 + 二次构建缓存命中 |
-| 内存验收 | — | 16MB 地址空间限制下跑拼接 / 对象 / 闭包 / 容器 / 切片 / 删除 / 推导式 / 变长实参 / `with` / 装饰器 / 异常展开 / 环 / unknown 泄漏 |
+| 内存验收 | — | 16MB 地址空间限制下跑拼接 / 对象 / 闭包 / 容器 / 切片 / 删除 / 推导式 / 变长实参 / `with` / 装饰器 / 异常展开 / 生成器 / `yield from` / 协程 / Task / Future / fd 等待 / 异步生成器 / 异步推导式 / 环 / unknown 泄漏 |
 
 ```bash
 ctest --preset dev
-python3 tests/diff/run_diff.py --seeds 5     # 1000 个程序，目前零差异
+python3 tests/diff/run_diff.py --seeds 5     # 1350 个程序，目前零差异
 ```
 
 前端鲁棒性基线（CPython 3.11 标准库 + site-packages，38582 个 `.py`）：语法通过 35693，其中类型通过 29143（81.6%）；标准库本体 1143 / 1289（88.7%）。0.6 引入类检查后口径变了——刚加上时失败 19064 个文件，逐条去误杀后降到 6550 个，明细见 [compatibility.md](docs/compatibility.md#前端鲁棒性基线)。
 
-ASan + UBSan + LSan 下跑全部用例零报告（含生成代码的 RC、闭包、GC、字典、切片、删除、推导式、`with`、装饰器、变长实参与异常展开路径），`-Wshadow -Wnon-virtual-dtor -Wold-style-cast -Wcast-qual` 零警告。内存验收在 16MB `RLIMIT_AS` 下完成，对象环 / 字典环 / unknown 泄漏 / 闭包垃圾 / 容器与切片 / 异常展开的峰值 RSS 约 8MB。
+ASan + UBSan + LSan 下跑全部用例零报告（含生成代码的 RC、闭包、GC、字典、切片、删除、推导式、`with`、装饰器、变长实参、异常展开、生成器挂起/恢复、`yield from` 委托、协程调度、Task 取消级联、Future 多等待者、fd 轮询与异步推导式路径），`-Wshadow -Wnon-virtual-dtor -Wold-style-cast -Wcast-qual` 零警告。内存验收在 16MB `RLIMIT_AS` 下完成，对象环 / 字典环 / unknown 泄漏 / 闭包垃圾 / 容器与切片 / 异常展开的峰值 RSS 约 8MB。
 
 ## 文档
 

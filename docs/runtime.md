@@ -146,6 +146,79 @@ cell 不是新的运行时类型，就是一个**单元素列表** `list[T]`：�
 写 `l[0] = v`，元素所有权和析构完全复用列表规则。这样闭包不需要第二套
 引用计数实现。
 
+### 生成器
+
+生成器帧是普通堆对象（`PY23_RC_OBJ`），负载布局：
+
+```
+[state][status][sent][out][resume][closing][kind][waiter][exc][cur][slot0..]
+```
+
+- `resume` 是状态机代码地址，`gen_run` 用 `void (*)(void*, int64_t)` 调用；
+- `status`：0 未开始/挂起，1 已完成（槽位已释放），2 异常逃出（清理已跑，
+  槽位交给 GC），3 awaiting，4 已排队；
+- `kind`：0 生成器，`PY23_CORO_MAGIC` 协程，`PY23_AGEN_MAGIC` 异步生成器；
+- `waiter` 是等待本对象的协程/gather/task（持有一个引用）；
+- `exc` 是待注入的 `Py23Exception*`；
+- `cur` 是当前等待的 awaitable（借用观察指针，取消时用来解绑）；
+- `out` 保存 yield/await 值或协程返回值，运行时读走后清零。
+
+```c
+void* py23_gen_new(int64_t n_slots, int64_t resume, int64_t release, int64_t kind);
+int64_t py23_gen_next(void*);                  // 结束抛 StopIteration
+int64_t py23_gen_next_opt(void*, int64_t* ok); // 结束写 ok=0
+int64_t py23_gen_send(void*, int64_t sent);
+int64_t py23_gen_send_opt(void*, int64_t sent, int64_t* ok); // yield from
+void    py23_gen_close(void*);
+```
+
+`gen_run` 用一层 C 级 handler 兜住逃出 resume 的异常：标记 `status=2`
+后重新转抛，避免生成器对象销毁时把已经跑过的 `finally`/`__exit__`
+再跑一遍。析构器（`gen_destroy`）释放帧里挂着的异常/等待者引用，再调用
+`py23_gen_finalize`：按挂起点快照执行清理并释放槽位，清理期间抛出的
+异常被吞掉。GC 清扫不执行 Python 代码，只由 codegen 生成的 `gcrel`
+把指向可达对象的槽引用减掉。
+
+跨挂起的 handler 记录：yield/await 前 `py23_handler_suspend` 把它从全局栈
+摘下（不 free），恢复时 `py23_handler_rearm` 重新压栈并记录临时值
+水位，生成代码随后重新 `setjmp`；close 路径用 `py23_handler_free`
+回收这些记录。
+
+### 协程与事件循环
+
+`async def` 复用生成器帧，`coro_step` 每次恢复后按 status 处理：
+
+- `1`：把 `out` 里的返回值交给 waiter（或记为 `asyncio.run` 的结果）；
+- `3`：`out` 是 awaitable，交给 `await_from_coro` 挂到事件循环；
+- `2`：异常交给 waiter；等待者下次恢复时走注入分发，在帧内重新抛出。
+
+awaitable 有六类：协程帧、`Py23Await` 的 sleep(1)/gather(2)/task(3)、
+异步生成器驱动(4)、Future(5)、fd 等待(6)。每个对象只有一个 `waiter`，
+Future 用 `waiters` 列表支持多个等待者；gather 把自己的引用挂在每个
+子 awaitable 上，最后一个子任务完成时汇总结果。task 由 `loop_pending`
+持有到完成，保存结果/异常供后续 await；`cancel()` 沿 `cur` 向下级联
+（协程链/task/gather/future/sleep/fd 各有取消路径），再注入
+`CancelledError`，各层 `finally` 照常执行。
+
+异步生成器的驱动对象挂在就绪队列上一步步推进（不递归调用 resume 栈）：
+拉起生成器 → 遇到 `yield` 就完成驱动对象并把值交给等待者；遇到
+`await` 则把驱动对象挂到内部 awaitable 上，等它完成后把结果写回帧的
+`sent`/`exc` 槽再重新入队。生成器结束抛 `StopAsyncIteration`，
+`async for` 在自己的 handler 里捕获。`asyncio.run` 的循环：
+
+```
+就绪队列非空 → 取一个协程 step
+否则有定时器 → 触发到期项；没有到期项就 nanosleep 到最近 deadline
+两者都空且根协程未完成 → RuntimeError("event loop stalled")
+```
+
+就绪队列、定时器表、`loop_pending` 和 `loop_fds` 都是 `list` 对象
+并注册为 GC 根；`sleep` 用 `CLOCK_MONOTONIC` 毫秒定时。没有就绪任务时，
+有 fd 等待就调用 `poll`（超时取最近定时器），否则 `nanosleep` 到
+最近 deadline。根协程的异常在清空事件循环状态后设成 pending 并
+longjmp 回同步调用点。GC 清扫和进程退出不跑析构器，但会单独释放挂在
+帧 / Task / Future 上的 malloc 异常对象。
+
 ### 异常
 
 异常不参与 RC/GC：handler 记录和异常对象都是 `malloc` 的普通内存。
@@ -250,6 +323,36 @@ cell 不是新的运行时类型，就是一个**单元素列表** `list[T]`：�
 | 函数 | 签名 | 语义 |
 |---|---|---|
 | `py23_obj_new` | `(i64 size, dtor, gc_release) -> void*` | `rc_alloc`，全零；`size < 8` panic |
+
+### 生成器
+
+| 函数 | 签名 | 语义 |
+|---|---|---|
+| `py23_gen_new` | `(i64 n_slots, i64 resume, i64 release, i64 kind) -> void*` | 分配堆帧；kind=1 表示协程 |
+| `py23_gen_next` | `(void*) -> i64` | 恢复并取下一个值；结束抛 StopIteration |
+| `py23_gen_next_opt` | `(void*, i64* ok) -> i64` | for 循环用：结束写 `ok=0`，不抛异常 |
+| `py23_gen_send` | `(void*, i64) -> i64` | 把值送到 `x = yield v` |
+| `py23_gen_send_opt` | `(void*, i64, i64* ok) -> i64` | `yield from` 用：转发 send，结束写 `ok=0`；非生成器帧报 TypeError |
+| `py23_gen_close` | `(void*) -> void` | 跑挂起点清理；异常向外传 |
+| `py23_gen_finalize` | `(void*) -> void` | 引用计数归零时清理；异常吞掉 |
+| `py23_handler_suspend` | `(void*) -> void` | yield/await：把 handler 记录从全局栈摘下 |
+| `py23_handler_rearm` | `(void*) -> void` | 恢复：重压记录并更新临时值水位 |
+| `py23_handler_free` | `(void*) -> void` | close：释放挂起的记录 |
+| `py23_coro_rethrow` | `(void*) -> void` | 在 resume 帧里抛出注入异常（noreturn） |
+| `py23_asyncio_run` | `(void* coro) -> i64` | 跑事件循环到根协程结束，返回结果或抛异常 |
+| `py23_asyncio_sleep` | `(double) -> void*` | 创建毫秒定时 awaitable |
+| `py23_asyncio_gather` | `(list*) -> void*` | 创建 gather awaitable（不接管参数列表） |
+| `py23_asyncio_create_task` | `(void* coro) -> void*` | 立即调度协程，返回 task awaitable |
+| `py23_asyncio_task_done` | `(void*) -> i64` | 任务是否结束 |
+| `py23_asyncio_task_cancel` | `(void*) -> i64` | 请求取消；解绑当前 awaitable 并注入 CancelledError |
+| `py23_asyncgen_anext` | `(void*) -> void*` | 创建异步生成器的 `__anext__` 驱动对象 |
+| `py23_asyncio_future_new` | `() -> void*` | 创建 Future（多等待者） |
+| `py23_future_set_result` | `(void*, i64) -> void` | 设置结果并唤醒全部等待者 |
+| `py23_future_result` | `(void*) -> i64` | 取结果；未完成抛 RuntimeError，失败抛异常副本 |
+| `py23_future_exception` | `(void*) -> str*` | 失败消息；成功返回 NULL |
+| `py23_future_cancel/done/cancelled` | `(void*) -> i64/bool` | Future 状态 |
+| `py23_asyncio_task_result/exception/cancelled` | `(void*) -> i64/str*` | Task 结果与状态 |
+| `py23_asyncio_wait_fd` | `(i64 fd, i64 write) -> void*` | 创建 fd 等待对象，事件循环用 poll 唤醒 |
 
 ### 引用计数
 

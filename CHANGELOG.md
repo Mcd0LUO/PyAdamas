@@ -4,6 +4,232 @@
 
 早期阶段没有逐条留痕，按阶段归纳；0.4 之后逐条记录。
 
+## [0.21] - 2026-11-09
+
+语言面补齐：`yield from` 与异步推导式。
+
+### 新增
+
+- **`yield from`**：委托给生成器或其他可迭代对象（list/tuple/str/dict/set）。
+  生成器委托支持 `send` 转发；生成器完成时循环自然退出，外层
+  `close()` 释放子生成器引用并让它执行 `finally`；委托期间子生成器
+  抛出的异常向外传播。表达式值固定为 None（异常对象不携带
+  `StopIteration.value`）。
+- **异步推导式**：`[x async for x in agen()]`、集合与字典推导式都支持，
+  可混用同步/异步 `for` 子句与 `if` 过滤；累加器和循环状态放在帧槽里，
+  挂起恢复后继续，`StopAsyncIteration` 在循环边界捕获。
+- 修正生成器元素为堆类型时 `for` / `next` / `send` 结果的静态类型：
+  运行时按机器字返回值，之前按 unknown 落槽会漏 retain。
+- 用例 `tests/run/28_yield_from.py`、`tests/run/29_async_comp.py`；
+  差分生成器的 gen / async 两组补上委托与异步推导式路径。
+
+### 验证
+
+- `ctest --preset dev` / `release` 全绿（11 正例 + 33 反例 + 29 运行 +
+  4 未建模 + 8 模块目录）
+- 差分测试 6 个生成器、810 个程序零差异
+- ASan/UBSan/LSan：yield from 关闭/异常路径、异步推导式挂起路径零报告
+
+### 已知限制
+
+- `yield from` 的表达式值固定为 None，不能把异常 `throw` 进生成器
+- `yield from` 只静态识别生成器与 list/tuple/str/dict/set；静态类型是
+  unknown 时按生成器协议尝试，失败抛 TypeError
+- 异步推导式只能作为整条语句、赋值或 `return` 的根表达式，不能嵌在
+  `print(...)` 等其它表达式里；元素表达式里不能含 `await`；不支持
+  异步生成器表达式
+
+## [0.20] - 2026-11-09
+
+运行时补齐：Future 协议、取消级联、fd 轮询。
+
+### 新增
+
+- `asyncio.Future()`：支持 `set_result` / `cancel` / `done` /
+  `cancelled` / `result` / `exception`，可被多个协程同时 await；
+  完成后 `result()` 返回保存值，失败/取消时抛出异常副本。
+- Task 补齐 `result()` / `exception()` / `cancelled()`；Future 与 Task
+  的 `exception()` 返回消息字符串（成功返回 None），和现有“异常只有
+  类型名 + 消息”的模型一致。
+- **取消级联**：取消 Task 会沿它等待的对象向下传播——协程链继续注入
+  `CancelledError`，被等待的 Task 递归取消，gather 取消全部子任务，
+  Future/sleep/fd 等待对象标记取消；各层的 `finally` 都会执行。
+- **fd 轮询**：`asyncio.wait_readable(fd)` / `wait_writable(fd)` 返回
+  可等待对象，事件循环在没有就绪任务时调用 `poll`（超时取最近定时器），
+  无效 fd 以 `OSError` 结束等待；fd 等待对象挂在 GC 根表里。
+- `create_task` 也接受 Future/sleep/fd/等可等待对象（内部包装成 Task）。
+- 类型标注支持 `Future[T]` / `Task[T]` / `Coroutine[T]` /
+  `Generator[T]` / `AsyncGenerator[T]` 的解析。
+- `print(Optional[T])` 对 None 打印 `None`，不再落到整数/指针分支。
+- 修复协程挂起时 state 被清零导致取消无法沿链传播；GC 清扫和进程退出
+  现在会回收挂在帧/Task/Future 上的 malloc 异常对象。
+- 用例 `tests/run/27_runtime.py`。
+
+### 验证
+
+- `ctest --preset dev` / `release` 全绿（11 正例 + 33 反例 + 27 运行 +
+  4 未建模 + 8 模块目录）
+- 差分测试 6 个生成器、810 个程序零差异
+- ASan/UBSan/LSan：Future 多等待者、取消级联、fd 轮询、异常清理零报告
+
+### 已知限制
+
+- 没有 `Future.set_exception`（异常不是一等值）和回调 `add_done_callback`
+- `exception()` 返回消息字符串而不是异常对象；协程未来可等对象仍用单
+  等待者模型（Future 支持多个）
+- `wait_readable` / `wait_writable` 不是 CPython 标准 API（标准 asyncio
+  用 `loop.add_reader`）；没有配套的 fd 读写函数，只暴露等待能力
+- 事件循环仍是非线程安全的单循环；没有信号处理/子进程
+
+## [0.19] - 2026-11-09
+
+语言面异步收尾：异步生成器、`async for`、`async with`。
+
+### 新增
+
+- `async def` + `yield` 编译成异步生成器（帧 kind=2）；`async for`
+  通过 `__anext__` 驱动对象逐个取值，结束时抛 `StopAsyncIteration`
+  并在循环边界捕获。
+- 异步生成器里可以混用 `await` 和 `yield`；内部 await 的结果由驱动
+  对象回填后继续推进，不递归展开调用栈（驱动对象走就绪队列）。
+- `async with` 支持类实例的 `async def __aenter__/__aexit__`：进入、
+  正常退出、异常展开、`return`/`break`/`continue` 路径都会 await
+  `__aexit__`；退出期间的异常上下文先抄进槽再清 pending，避免跨
+  挂起污染全局异常状态。
+- 类型系统新增 `asyncgen[T]`；`async for` 只接受异步生成器（或
+  unknown），`async with` 要求两个协议方法都是协程。
+- 用例 `tests/run/26_async_lang.py`；差分测试的 `async` 生成器加入
+  async for / async with / 异步生成器场景。
+
+### 验证
+
+- `ctest --preset dev` / `release` 全绿（11 正例 + 33 反例 + 26 运行 +
+  4 未建模 + 8 模块目录）
+- 差分测试 6 个生成器、810 个程序零差异
+- ASan/UBSan/LSan：异步生成器嵌套、async for 中断、async with 的
+  异常/取消/嵌套清理零报告
+- 16MB 地址空间下 20 轮 × 50 次异步迭代通过
+
+### 已知限制
+
+- 异步生成器只支持 `async for`；没有 `asend` / `athrow` / `aclose`
+  方法，GC 回收时同步跑 `finally`（`finally` 里不能有 await）
+- 异步生成器被中途抛弃且正停在 `async with` 里时，close 路径无法
+  await `__aexit__`（取消仍会正常 await，只有“不再恢复直接回收”没有）
+- `async for` / `async with` 只支持异步生成器和类协议，不支持
+  `__aiter__` 返回自定义迭代器；异步推导式仍拒绝
+
+## [0.18] - 2026-11-09
+
+asyncio Task：`create_task`、`done()` / `cancel()` 与 `CancelledError`。
+
+### 新增
+
+- `asyncio.create_task(coro)` 立即把协程挂到事件循环，返回 `task[T]`；
+  `await task` 取结果（完成后可重复 await），也支持放进 `gather`。
+- Task 额外持有协程和结果：完成时保存 result/exception，等待者拿到
+  独立引用/异常副本；`loop_pending` 负责让运行中的 Task 活到完成。
+- `task.done()` 返回是否结束；`task.cancel()` 请求取消：排队中的任务
+  直接注入 `CancelledError`，挂起中的任务先从当前 awaitable
+  （协程/sleep/gather/task）解绑再注入，避免迟到的结果写进已结束帧。
+- `CancelledError` 加入内置异常表，父类是 `BaseException`（`except
+  Exception` 不会误吞取消），`finally` 在取消路径正常执行。
+- 帧头增加 `cur`（当前等待的 awaitable，借用观察指针）；Task 的
+  magic/kind 复用运行时 awaitable 结构。
+- 用例 `tests/run/25_task.py`；差分测试的 `async` 生成器加入
+  create_task / cancel 场景。
+
+### 验证
+
+- `ctest --preset dev` 全绿（11 正例 + 33 反例 + 25 运行 + 4 未建模 +
+  8 模块目录）
+- 差分测试 6 个生成器，810 个程序零差异（`async` 种子 5 单独跑到 150）
+- ASan/UBSan/LSan：Task 完成/重复 await/取消（sleep、gather、finally）
+  零报告
+
+### 已知限制
+
+- Task 只允许一个并发等待者；重复 await 已完成任务会返回保存的结果
+- 取消是协作式的：被取消协程若在 except 里继续 await/return，Task
+  会按正常完成处理（与 CPython 一致）；不会级联取消它等待的 gather
+- 没有 `Task.result()` / `exception()`、`current_task`、任务名字、
+  取消消息，也没有 `asyncio.CancelledError` 的模块限定写法
+  （直接用内置名 `CancelledError`）
+
+## [0.17] - 2026-11-09
+
+协程：`async def` / `await` 复用生成器状态机，事件循环 + 定时器 + gather。
+
+### 新增
+
+- `async def` 编译成协程帧（与生成器同构，kind 字段区分）；调用返回
+  `coroutine[T]`，`await` 是第三种挂起状态，结果通过帧的 sent 槽送回。
+- `asyncio` 内置模块：`run(coro)`（返回协程结果）、`sleep(seconds)`
+  （毫秒定时器）、`gather(*awaitables)`（并发启动、按参数顺序收集结果）。
+  模块限定调用有精确结果类型；`from asyncio import sleep` 也可用。
+- 完整事件循环：就绪队列 + 定时器列表，都是注册过 GC 根的对象表；
+  `loop_pending` 持有尚在运行的 gather。`sleep` 用 `CLOCK_MONOTONIC`
+  定时，零延时立即完成。
+- 异常跨 `await`：被等待协程失败时，把异常注入等待者帧，恢复路径先
+  重挂 handler 再抛出，`try/except` 能抓到；根协程失败会抛回
+  `asyncio.run` 的同步调用点。
+- async 方法、返回 `await`、`with` 内的 `await`、跨 `await` 的
+  `finally` 都支持；协程帧参与 RC/GC，未被 await 的协程由 finalize 清理。
+- 用例 `tests/run/24_async.py`；差分测试新增 `async` 生成器。
+
+### 验证
+
+- `ctest --preset dev` 全绿（11 正例 + 33 反例 + 24 运行 + 4 未建模 +
+  8 模块目录）
+- 差分测试 6 个生成器，3 种子 810 个程序零差异
+- ASan/UBSan/LSan：asyncio.run/sleep/gather/异常注入/with/finally 零报告
+- 3 次 50ms `sleep` 实际耗时约 0.15s；16MB 地址空间下 500 次 await 通过
+
+### 已知限制
+
+- `await` 只能作为语句、赋值右值或 `return` 值；`yield`/`await` 不能
+  出现在 `finally`/`except` 体内（`finally` 可用于跨 await 清理）
+- 不支持 `async for`、`async with`、异步生成器、`create_task`、取消、
+  Future 协议和 fd 级 I/O 轮询；`gather` 参数个数在源码里写死
+- `gather` 结果的元素类型按 `unknown` 处理（容器只 retain 不 release）
+- 跨模块协程类型降级成 unknown
+
+## [0.16] - 2026-11-09
+
+生成器：状态机 + 堆帧，支持跨 `yield` 的异常与清理。
+
+### 新增
+
+- 含 `yield` 的函数编译成「创建包装 + resume 状态机」：调用返回
+  生成器对象；局部槽位放在堆帧里，`yield` 只保存 state 并返回。
+- 类型系统新增 `Generator[T]`：yield 值类型取公共上界，`for` / `next` /
+  `.send` / `.close` / `.__next__` 接入；返回生成器的普通工厂函数不再
+  被误判成生成器函数。
+- `for x in gen` 走 `py23_gen_next_opt`，结束时不建异常；`next(gen)`
+  在结束时抛 `StopIteration`；`send()` 把值送入 `x = yield v`。
+- **跨 yield 清理**：`yield` 时把活跃 handler 记录从全局栈摘下，恢复时
+  按原顺序重挂并重新 setjmp；`close()`、引用计数归零和 GC 前的
+  finalize 会按挂起点的快照执行 `finally` 与 `with.__exit__`。
+- 生成器帧参与 RC/GC：堆槽在帧销毁时 dec，槽位由 GC 保守扫描；
+  异常逃出生成器时标记 aborted，避免清理跑第二遍。
+- 用例 `tests/run/23_generator.py`（基本迭代、send、with/finally、
+  handler 重挂、闭包捕获、丢弃清理）。
+
+### 验证
+
+- `ctest --preset dev` 全绿（11 正例 + 33 反例 + 23 运行 + 4 未建模 +
+  8 模块目录）
+- 差分测试新增 `gen` 生成器，3 种子 720 个程序零差异
+- ASan/UBSan/LSan：生成器用例与异常/清理组合零报告
+- 严格警告零报告
+
+### 已知限制
+
+- `yield` 只能作为语句或赋值右值出现；不支持 `yield from`、生成器
+  表达式惰性求值、`yield` 位于 `finally` 体内
+- `yield` 位于 `except` 体内暂不支持（跨挂起保存异常上下文）
+- 跨模块接口里生成器类型降级成 unknown，生成器函数跨模块调用未支持
+
 ## [0.15] - 2026-11-09
 
 包、相对导入与静态 `from m import *`。

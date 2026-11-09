@@ -89,6 +89,22 @@ std::string Inst::text() const {
             return std::format("{} = setjmp {}", vreg_str(dst), vreg_str(a));
         case IrOp::ImportModule:
             return std::format("import.module m{}", imm);
+        case IrOp::SlotAddr: return std::format("{} = slot.addr s{}", vreg_str(dst), idx);
+        case IrOp::GenNew: return std::format("{} = gen.new g{}", vreg_str(dst), imm);
+        case IrOp::GenSetSlot:
+            return std::format("gen.set {}, s{}, {}", args.empty() ? "_" : vreg_str(args[0]), idx,
+                               args.size() > 1 ? vreg_str(args[1]) : "_");
+        case IrOp::GenGetState: return std::format("{} = gen.state", vreg_str(dst));
+        case IrOp::GenClosing: return std::format("{} = gen.closing", vreg_str(dst));
+        case IrOp::GenSent: return std::format("{} = gen.sent", vreg_str(dst));
+        case IrOp::GenYield:
+            return std::format("gen.yield {}, state={}", vreg_str(a), imm);
+        case IrOp::GenAwait:
+            return std::format("gen.await {}, state={}", vreg_str(a), imm);
+        case IrOp::GenGetExc: return std::format("{} = gen.exc", vreg_str(dst));
+        case IrOp::GenRethrow: return "gen.rethrow";
+        case IrOp::GenDone:
+            return a == kNoReg ? "gen.done" : std::format("gen.done {}", vreg_str(a));
         case IrOp::Jump: return std::format("jump bb{}", target);
         case IrOp::Branch:
             return std::format("branch {}, bb{}, bb{}", vreg_str(a), target, target2);

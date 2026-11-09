@@ -174,6 +174,16 @@ TypePtr TypeChecker::parse_annotation_impl(Expr* e, int line, int depth) {
                 args.push_back(parse_annotation(s->slice.get(), line, depth));
             }
             if (base == "Optional" && args.size() == 1) return mk_optional(args[0]);
+            if ((base == "Future" || base == "Task" || base == "Coroutine" ||
+                 base == "Generator" || base == "AsyncGenerator") &&
+                !args.empty()) {
+                TypePtr inner = args[0];
+                if (base == "Future") return mk_future(inner);
+                if (base == "Task") return mk_task(inner);
+                if (base == "Coroutine") return mk_coroutine(inner);
+                if (base == "Generator") return mk_generator(inner);
+                return mk_async_generator(inner);
+            }
             if (base == "Union") {
                 TypePtr acc = nullptr;
                 bool has_none = false;
@@ -551,6 +561,12 @@ FuncInfoPtr TypeChecker::build_sig(FunctionDef& f) {
         }
         info->ret = parse_annotation(f.returns.get(), f.line);
         info->ret_declared = f.returns != nullptr;
+        info->is_async = f.is_async;
+        if (f.is_async) {
+            // 调用 async def 得到协程对象；return/await 看到的是结果类型。
+            info->async_result = info->ret;
+            info->ret = mk_coroutine(info->ret ? info->ret : t_unknown());
+        }
         return info;
     }
 
@@ -679,10 +695,11 @@ void TypeChecker::stmt(Stmt& s) {
                     break;
                 }
                 if (cur_fn_->ret_declared) {
-                    if (!assignable(cur_fn_->ret, vt))
+                    TypePtr want = cur_fn_->is_async ? cur_fn_->async_result : cur_fn_->ret;
+                    if (!assignable(want, vt))
                         err(r.line, r.col,
                             std::format("function '{}' is declared to return '{}', got '{}'",
-                                        cur_fn_->name, type_name(cur_fn_->ret), type_name(vt)));
+                                        cur_fn_->name, type_name(want), type_name(vt)));
                 } else if (rets_) {
                     rets_->push_back({vt, r.line, r.col});
                 }
@@ -751,7 +768,24 @@ void TypeChecker::stmt(Stmt& s) {
             case StmtKind::For: {
                 auto& f = static_cast<For&>(s);
                 auto it = expr(*f.iter);
-                auto elem = iter_elem(it, f.line, f.col);
+                TypePtr elem;
+                if (f.is_async) {
+                    if (is_unknown(it)) {
+                        elem = t_unknown();
+                    } else if (it && it->kind == TyKind::AsyncGenerator) {
+                        elem = it->sub.empty() ? t_unknown() : it->sub[0];
+                    } else {
+                        err(f.iter->line, f.iter->col,
+                            std::format("async for requires an async generator, got '{}'",
+                                        type_name(it)));
+                        elem = t_unknown();
+                    }
+                } else {
+                    if (it && it->kind == TyKind::AsyncGenerator)
+                        err(f.iter->line, f.iter->col,
+                            "'asyncgen' object is not iterable without 'async for'");
+                    elem = iter_elem(it, f.line, f.col);
+                }
                 assign(*f.target, elem, f.line, f.col);
                 ++loop_depth_;
                 stmts(f.body);
@@ -809,9 +843,29 @@ void TypeChecker::stmt(Stmt& s) {
                     TypePtr ct = t;
                     if (ct && ct->kind == TyKind::Optional && !ct->sub.empty()) ct = ct->sub[0];
                     if (ct && ct->kind == TyKind::Class && ct->cls) {
-                        if (auto* m = ct->cls->method("__enter__");
-                            m && m->call_sig && m->call_sig->ret)
+                        const char* enter = w.is_async ? "__aenter__" : "__enter__";
+                        if (auto* m = ct->cls->method(enter); m && m->call_sig && m->call_sig->ret)
                             vt = m->call_sig->ret;
+                        if (w.is_async) {
+                            // 异步上下文管理器：__aenter__/__aexit__ 必须
+                            // 是 async def，绑定的是 await 之后的结果。
+                            auto* ex = ct->cls->method("__aexit__");
+                            if (!vt || vt->kind != TyKind::Coroutine)
+                                err(item.context->line, item.context->col,
+                                    std::format("'{}' does not define async __aenter__",
+                                                ct->cls->name));
+                            else
+                                vt = vt->sub.empty() ? t_unknown() : vt->sub[0];
+                            if (!ex || !ex->call_sig || !ex->call_sig->ret ||
+                                ex->call_sig->ret->kind != TyKind::Coroutine)
+                                err(item.context->line, item.context->col,
+                                    std::format("'{}' does not define async __aexit__",
+                                                ct->cls->name));
+                        }
+                    } else if (w.is_async) {
+                        err(item.context->line, item.context->col,
+                            "async with requires a class instance with async "
+                            "__aenter__/__aexit__");
                     }
                     if (item.optional_vars)
                         assign(*item.optional_vars, vt, w.line, w.col);
@@ -1083,6 +1137,7 @@ void TypeChecker::funcdef_impl(FunctionDef& f, const ClassInfoPtr& owner) {
 
         auto prev_fn = cur_fn_;
         bool prev_yield = saw_yield_;
+        auto* prev_yields = yields_;
         auto* prev_scope = cur_;   // 必须回到进入函数前的作用域，不能一律挂到 module_
         auto sc = std::make_unique<Scope>();
         sc->parent = prev_scope;
@@ -1103,6 +1158,9 @@ void TypeChecker::funcdef_impl(FunctionDef& f, const ClassInfoPtr& owner) {
         std::vector<RetInfo> rets;
         auto* prev_rets = rets_;
         rets_ = &rets;
+        std::vector<TypePtr> yields;
+        yields_ = &yields;
+        saw_yield_ = false;
 
         for (auto& p : info->pos)
             cur_->vars[p.name] = Symbol{p.ty ? p.ty : t_unknown(), f.line, true, false};
@@ -1130,24 +1188,44 @@ void TypeChecker::funcdef_impl(FunctionDef& f, const ClassInfoPtr& owner) {
         cur_self_name_ = std::move(saved_self_name);
 
         // 无标注函数：从所有 return 处推断返回类型
+        TypePtr inferred = nullptr;
         if (!info->ret_declared) {
-            TypePtr acc = nullptr;
-            for (auto& r : rets) acc = acc ? join(acc, r.ty) : r.ty;
-            info->ret = acc;
+            for (auto& r : rets) inferred = inferred ? join(inferred, r.ty) : r.ty;
+        }
+
+        if (f.is_async) {
+            // async def 调用得到协程对象，不是 return 标注里的值；
+            // `_c = _c()` 这类「函数名复用成结果」的写法全靠这条才不误报。
+            if (saw_yield_) {
+                // 异步生成器：调用得到 asyncgen[T]，只供 async for 消费。
+                TypePtr elem = nullptr;
+                for (auto& y : yields) elem = elem ? join(elem, y) : y;
+                info->is_async_generator = true;
+                info->ret = mk_async_generator(elem ? elem : t_unknown());
+                info->async_result = t_none();
+            } else {
+                if (!info->ret_declared)
+                    info->async_result = inferred ? inferred : t_unknown();
+                if (!info->async_result) info->async_result = t_unknown();
+                info->ret = mk_coroutine(info->async_result);
+            }
+        } else if (saw_yield_) {
+            // 生成器：调用得到 Generator[所有 yield 值的公共上界]
+            TypePtr elem = nullptr;
+            for (auto& y : yields) elem = elem ? join(elem, y) : y;
+            info->ret = mk_generator(elem ? elem : t_unknown());
+            info->is_generator = true;
+        } else if (!info->ret_declared) {
+            info->ret = inferred;
         }
         info->ret_known = true;
-
-        // 生成器的返回类型无法用现有 Type 表达：调它就是拿一个可迭代对象
-        if (saw_yield_) info->ret = t_unknown();
-        // async def 调用得到的是协程对象，不是返回标注里的值；
-        // `_c = _c()` 这类「函数名复用成结果」的写法全靠这条才不误报
-        if (f.is_async) info->ret = t_unknown();
 
         cur_ = prev_scope;
         cur_fn_ = prev_fn;
         cur_fn_def_ = prev_fn_def;
         cur_fn_scope_ = prev_fn_scope;
         saw_yield_ = prev_yield;
+        yields_ = prev_yields;
         rets_ = prev_rets;
         global_decl_ = std::move(saved_globals);
         nonlocal_decl_ = std::move(saved_nonlocals);
@@ -1906,6 +1984,12 @@ TypePtr TypeChecker::expr(Expr& e) {
             }
             case ExprKind::GeneratorExp: {
                 auto& c = static_cast<GeneratorExp&>(e);
+                for (auto& g : c.generators)
+                    if (static_cast<Comprehension&>(*g).is_async) {
+                        err(e.line, e.col,
+                            "async generator expressions are not supported yet");
+                        break;
+                    }
                 return mk_list(comp_elem(e, c.generators, c.elt));
             }
             case ExprKind::Lambda: {
@@ -1967,14 +2051,64 @@ TypePtr TypeChecker::expr(Expr& e) {
                 assign(*n.target, vt, n.line, n.col);
                 return vt;
             }
-            case ExprKind::Await:
-                unsupported.push_back("await");
-                return expr(*static_cast<Await&>(e).value);
-            case ExprKind::Yield:
-            case ExprKind::YieldFrom:
-                saw_yield_ = true;
-                unsupported.push_back("generator");
+            case ExprKind::Await: {
+                auto& aw = static_cast<Await&>(e);
+                TypePtr vt = expr(*aw.value);
+                if (!vt || vt->kind == TyKind::Unknown) return t_unknown();
+                if (vt->kind == TyKind::Coroutine || vt->kind == TyKind::Task ||
+                    vt->kind == TyKind::Future)
+                    return vt->sub.empty() ? t_unknown() : vt->sub[0];
+                err(e.line, e.col,
+                    std::format("'{}' object is not awaitable", type_name(vt)));
                 return t_unknown();
+            }
+            case ExprKind::Yield: {
+                saw_yield_ = true;
+                auto& y = static_cast<Yield&>(e);
+                TypePtr t = y.value ? expr(*y.value) : t_none();
+                if (yields_) yields_->push_back(t);
+                // yield 表达式本身的值是 send() 传进来的，静态不可知
+                return t_unknown();
+            }
+            case ExprKind::YieldFrom: {
+                saw_yield_ = true;
+                auto& yf = static_cast<YieldFrom&>(e);
+                TypePtr vt = expr(*yf.value);
+                if (cur_fn_ && cur_fn_->is_async) {
+                    err(e.line, e.col, "'yield from' is not allowed in an async function");
+                    return t_unknown();
+                }
+                TypePtr elem = t_unknown();
+                if (vt) {
+                    switch (vt->kind) {
+                        case TyKind::Unknown:
+                        case TyKind::Optional:
+                            break;
+                        case TyKind::Generator:
+                            elem = vt->sub.empty() ? t_unknown() : vt->sub[0];
+                            break;
+                        case TyKind::List:
+                        case TyKind::Tuple:
+                        case TyKind::Dict:
+                        case TyKind::Set:
+                            elem = vt->sub.empty() ? t_unknown() : vt->sub[0];
+                            break;
+                        case TyKind::Str:
+                            elem = t_str();
+                            break;
+                        case TyKind::AsyncGenerator:
+                            err(e.line, e.col,
+                                "cannot 'yield from' an async generator; use 'async for'");
+                            break;
+                        default:
+                            err(e.line, e.col,
+                                std::format("cannot 'yield from' '{}'", type_name(vt)));
+                            break;
+                    }
+                }
+                if (yields_) yields_->push_back(elem);
+                return t_unknown();
+            }
             case ExprKind::Comprehension:
                 return t_unknown();
         }
@@ -1997,7 +2131,24 @@ void TypeChecker::enter_comp_scope(std::vector<ExprPtr>& gens) {
         for (auto& g : gens) {
             auto& c = static_cast<Comprehension&>(*g);
             auto it = expr(*c.iter);
-            auto elem = iter_elem(it, c.line, c.col);
+            TypePtr elem;
+            if (c.is_async) {
+                if (!cur_fn_ || !cur_fn_->is_async)
+                    err(c.line, c.col, "'async for' outside async function");
+                if (!it || it->kind == TyKind::Unknown || it->kind == TyKind::Optional ||
+                    it->kind == TyKind::AsyncGenerator)
+                    elem = (it && it->kind == TyKind::AsyncGenerator && !it->sub.empty())
+                               ? it->sub[0]
+                               : t_unknown();
+                else {
+                    err(c.line, c.col,
+                        std::format("async for requires an async generator, got '{}'",
+                                    type_name(it)));
+                    elem = t_unknown();
+                }
+            } else {
+                elem = iter_elem(it, c.line, c.col);
+            }
             assign(*c.target, elem, c.line, c.col);
             for (auto& cond : c.ifs) expr(*cond);
         }
@@ -2154,6 +2305,8 @@ TypePtr TypeChecker::iter_elem(TypePtr it, int line, int col) {
                 for (size_t i = 1; i < it->sub.size(); ++i) acc = join(acc, it->sub[i]);
                 return acc;
             }
+            case TyKind::Generator:
+                return it->sub.empty() ? t_unknown() : it->sub[0];
             default:
                 // 类可能实现了 __iter__（或从外部基类继承），静态上看不见
                 if (it->kind == TyKind::Class) return t_unknown();
@@ -2170,6 +2323,9 @@ TypePtr TypeChecker::call(Call& c) {
         if (auto* a = dynamic_cast<Attribute*>(c.func.get())) {
             if (auto* vn = dynamic_cast<Name*>(a->value.get())) {
                 if (auto mod = lookup_module_alias(vn->id)) {
+                    if (mod->builtin && mod->name == "asyncio") {
+                        if (auto r = asyncio_call(a->attr, c)) return *r;
+                    }
                     if (auto ci = mod->classes.find(a->attr); ci != mod->classes.end()) {
                         auto cls = ci->second.cls;
                         if (cls->has_init && ci->second.ctor_sig) {
@@ -2401,6 +2557,7 @@ bool TypeChecker::is_exception_name(const std::string& n) {
             "BlockingIOError", "ChildProcessError", "ConnectionAbortedError",
             "ConnectionRefusedError", "ConnectionResetError", "InterruptedError",
             "ProcessLookupError", "UnicodeTranslateError", "GeneratorExit",
+            "CancelledError",
             "StopAsyncIteration", "WindowsError",  // WindowsError 只在 Windows 上存在（OSError 别名）
         };
         return names.count(n) > 0;
@@ -2447,6 +2604,94 @@ TypePtr TypeChecker::builtin_type(const std::string& n) {
         auto t = new_ty(TyKind::Func);
         t->fn = info;
         return t;
+    }
+
+std::optional<TypePtr> TypeChecker::asyncio_call(const std::string& member, Call& c) {
+        if (member != "run" && member != "sleep" && member != "gather" &&
+            member != "create_task" && member != "Future" &&
+            member != "wait_readable" && member != "wait_writable")
+            return std::nullopt;
+
+        std::vector<TypePtr> a;
+        for (auto& arg : c.args) a.push_back(expr(*arg));
+        for (auto& kw : c.keywords) expr(*kw.value);
+        if (!c.keywords.empty())
+            err(c.line, c.col, std::format("asyncio.{}() does not take keyword arguments", member));
+
+        if (member == "run") {
+            if (a.size() != 1) {
+                err(c.line, c.col, std::format("asyncio.run() expects 1 argument, got {}", a.size()));
+                return t_unknown();
+            }
+            if (!a[0] || a[0]->kind == TyKind::Unknown) return t_unknown();
+            if (a[0]->kind == TyKind::Coroutine)
+                return a[0]->sub.empty() ? t_unknown() : a[0]->sub[0];
+            err(c.line, c.col,
+                std::format("asyncio.run() expects a coroutine, got '{}'", type_name(a[0])));
+            return t_unknown();
+        }
+
+        if (member == "sleep") {
+            if (a.size() != 1) {
+                err(c.line, c.col,
+                    std::format("asyncio.sleep() expects 1 argument, got {}", a.size()));
+            } else if (!is_unknown(a[0]) && !is_num(a[0])) {
+                err(c.line, c.col,
+                    std::format("asyncio.sleep() delay must be a number, got '{}'",
+                                type_name(a[0])));
+            }
+            return mk_coroutine(t_none());
+        }
+
+        if (member == "Future") {
+            if (!a.empty() || !c.keywords.empty())
+                err(c.line, c.col, "asyncio.Future() takes no arguments");
+            return mk_future(t_unknown());
+        }
+
+        if (member == "wait_readable" || member == "wait_writable") {
+            if (a.size() != 1) {
+                err(c.line, c.col,
+                    std::format("asyncio.{}() expects 1 argument, got {}", member, a.size()));
+            } else if (!is_unknown(a[0]) && a[0]->kind != TyKind::Int) {
+                err(c.line, c.col,
+                    std::format("asyncio.{}() expects an int fd, got '{}'", member,
+                                type_name(a[0])));
+            }
+            return mk_coroutine(t_none());
+        }
+
+        if (member == "create_task") {
+            if (a.size() != 1) {
+                err(c.line, c.col,
+                    std::format("asyncio.create_task() expects 1 argument, got {}", a.size()));
+                return mk_task(t_unknown());
+            }
+            if (!a[0] || a[0]->kind == TyKind::Unknown) return mk_task(t_unknown());
+            if (a[0]->kind == TyKind::Coroutine)
+                return mk_task(a[0]->sub.empty() ? t_unknown() : a[0]->sub[0]);
+            err(c.line, c.col,
+                std::format("asyncio.create_task() expects a coroutine, got '{}'",
+                            type_name(a[0])));
+            return mk_task(t_unknown());
+        }
+
+        // gather(*awaitables) -> Coroutine[list[公共结果类型]]
+        TypePtr elem = nullptr;
+        for (size_t i = 0; i < a.size(); ++i) {
+            TypePtr it = a[i];
+            TypePtr r = t_unknown();
+            if (it && (it->kind == TyKind::Coroutine || it->kind == TyKind::Task ||
+                       it->kind == TyKind::Future))
+                r = it->sub.empty() ? t_unknown() : it->sub[0];
+            else if (!is_unknown(it)) {
+                err(c.args[i]->line, c.args[i]->col,
+                    std::format("asyncio.gather() argument is not awaitable: '{}'",
+                                type_name(it)));
+            }
+            elem = elem ? join(elem, r) : r;
+        }
+        return mk_coroutine(mk_list(elem ? elem : t_unknown()));
     }
 
 TypePtr TypeChecker::builtin_call(const std::string& n, Call& c) {
@@ -2628,6 +2873,14 @@ bool TypeChecker::has_method(const TypePtr& t, const std::string& m) {
                 };
                 return ms.count(m) > 0;
             }
+            case TyKind::Generator:
+                return m == "send" || m == "close" || m == "__next__";
+            case TyKind::Task:
+                return m == "done" || m == "cancel" || m == "cancelled" ||
+                       m == "result" || m == "exception";
+            case TyKind::Future:
+                return m == "done" || m == "cancel" || m == "cancelled" ||
+                       m == "result" || m == "exception" || m == "set_result";
             case TyKind::Str: {
                 static const std::unordered_set<std::string> ms = {
                     "upper",    "lower",     "strip",  "lstrip", "rstrip", "split",
@@ -2715,6 +2968,57 @@ TypePtr TypeChecker::method_call(TypePtr recv, const std::string& name, Call& c,
             }
             auto r = m->call_sig ? check_args(m->call_sig, c) : t_unknown();
             return r;
+        }
+
+        if (recv->kind == TyKind::Generator) {
+            if (name == "send") {
+                argc(1, 1);
+                return t_unknown();
+            }
+            if (name == "__next__" || name == "close") {
+                argc(0, 0);
+                return name == "close" ? t_none() : elem();
+            }
+            err(c.line, c.col, std::format("'generator' object has no method '{}'", name));
+            return t_unknown();
+        }
+
+        if (recv->kind == TyKind::Task) {
+            if (name == "done" || name == "cancel" || name == "cancelled") {
+                argc(0, 0);
+                return t_bool();
+            }
+            if (name == "result") {
+                argc(0, 0);
+                return elem();
+            }
+            if (name == "exception") {
+                argc(0, 0);
+                return mk_optional(t_str());
+            }
+            err(c.line, c.col, std::format("'task' object has no method '{}'", name));
+            return t_unknown();
+        }
+
+        if (recv->kind == TyKind::Future) {
+            if (name == "done" || name == "cancel" || name == "cancelled") {
+                argc(0, 0);
+                return t_bool();
+            }
+            if (name == "set_result") {
+                argc(1, 1);
+                return t_none();
+            }
+            if (name == "result") {
+                argc(0, 0);
+                return elem();
+            }
+            if (name == "exception") {
+                argc(0, 0);
+                return mk_optional(t_str());
+            }
+            err(c.line, c.col, std::format("'future' object has no method '{}'", name));
+            return t_unknown();
         }
 
         if (recv->kind == TyKind::List) {

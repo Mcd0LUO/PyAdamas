@@ -69,6 +69,17 @@ Python 语义里变量天生可变，循环里反复赋值是常态。一上来�
 | `call.rt args..., imm` | `imm: RtFn` | 调运行时函数 | `call py23_xxx` |
 | `setjmp dst, a` | `a: handler 记录` | `dst = setjmp(a)`；异常 longjmp 回来时为非 0 | `call setjmp` |
 | `import.module imm` | `imm: imports 下标` | 确保模块已初始化 | `py23_import_module(ready, init)` |
+| `slot.addr dst, idx` | `idx: 槽号` | `dst = &slot`（栈槽或生成器帧槽） | `leaq off(%rbp/%r15)` |
+| `gen.new dst, imm` | `imm: generators 下标` | 分配生成器帧，写入 resume 代码和 GC release | `call py23_gen_new` |
+| `gen.set gen, s, v` | `imm: 槽号` | 创建期把实参/闭包写进帧槽 | `movq v, 8*(6+s)(gen)` |
+| `gen.state dst` | — | 读帧 state | `movq 0(%r15)` |
+| `gen.closing dst` | — | 读帧 closing 标志 | `movq 40(%r15)` |
+| `gen.exc dst` | — | 读待注入异常 | `movq 64(%r15)` |
+| `gen.sent dst` | — | 读本次 resume 传入的值 | `movq 16(%r15)` |
+| `gen.yield a, state` | `a == kNoReg` 表示 None | 写 out、存 state、返回（终止指令） | 写 `24(%r15)` / `0(%r15)` + 尾声 |
+| `gen.await a, state` | — | 写 out、state，status=3（awaiting），返回（终止指令） | 同上 + 写 status |
+| `gen.rethrow` | — | 在 resume 帧内抛出注入的异常（终止指令，noreturn） | `call py23_coro_rethrow` |
+| `gen.done [a]` | `a` 非空时写返回值 | status=1、返回（终止指令） | 写 `24(%r15)` / `8(%r15)` + 尾声 |
 | `jump target` | — | 无条件跳转 | `jmp` |
 | `branch a, target, target2` | — | `a` 为真跳 `target` | 按类型测试真值 |
 | `return a` | `a == kNoReg` 表示 `None` | 返回 | `rax` / `xmm0` |
@@ -95,13 +106,21 @@ Python 语义里变量天生可变，循环里反复赋值是常态。一上来�
 `py23_exc_accept` / `py23_exc_done` / `py23_exc_reraise` 分派。
 `has_handlers` 的函数关闭槽位寄存器提升，避免 longjmp 回滚变量。
 
+生成器帧的布局由 `IRGenerator` 描述：`resume` 是状态机函数下标，
+`slot_heap` 标记哪些帧槽在销毁时需要 `rc_dec`，`frame_kind` 决定帧里
+的 kind 标记（0 生成器 / 1 协程 / 2 异步生成器）。帧负载的前 10 个字是
+`[state, status, sent, out, resume, closing, kind, waiter, exc, cur]`，槽位从
+下标 10 开始；`gen.new` 只出现在创建包装里，resume 函数里用固定偏移访问
+头部。协程恢复时 `exc` 非空就走异常注入分发：按 state 重挂 handler 后
+`gen.rethrow`。Task 没有新指令，全部走 `asyncio.*` 的 `call.rt`。
+
 另有三类符号不走 `RtFn`，由后端直接按名字调用：`py23_pow_i64`、`py23_str_eq`、`py23_str_cmp`（以及 libm 的 `floor` / `fmod` / `pow`）。这类是「参数形态固定、没有枚举必要」的辅助函数。
 
 ## 不变量
 
 降级器必须保证，后端可以依赖：
 
-1. 每个基本块以 `jump` / `branch` / `return` 结尾。（codegen 有兜底，但那条路径不该被触发。）
+1. 每个基本块以 `jump` / `branch` / `return` / `gen.yield` / `gen.await` / `gen.rethrow` / `gen.done` 结尾。（codegen 有兜底，但那条路径不该被触发。）
 2. 指令的 `dst` 类型等于 `vreg_ty[dst]`；`def()` 是唯一分配 vreg 的入口，会自动登记类型。
 3. `store.slot` / `store.global` 的值类型与目标槽类型一致——由 `coerce()` 在写入前补 `convert` 保证。
 4. 形参槽排在最前面，槽号等于形参下标（后端按这个顺序搬寄存器）。
@@ -151,7 +170,8 @@ Python 语义里变量天生可变，循环里反复赋值是常态。一上来�
 | `Call(类名)` | `obj.new` → 逐个字段初值 `field.set` → 有 `__init__` 时 `vcall` |
 | `Call(对象方法)` | `vcall`，`self` 放在 `a`，`args` 只放其余实参 |
 | 列表/元组字面量 | `list.new` / `tuple.new`，元素按声明的元素类型 `coerce` |
-| 推导式 | 结果容器 + 逐层计数器循环 + 条件分支；循环变量放在降级器自己的作用域槽里 |
+| 推导式 | 结果容器 + 逐层计数器循环 + 条件分支；循环变量放在降级器自己的作用域槽里；含 `async for` 的推导式把累加器/循环状态落帧槽，每个异步子句插一层 `StopAsyncIteration` handler |
+| `YieldFrom` | 委托生成器：`gen.send_opt` 循环 + `gen.yield`；序列委托：计数器 + 下标循环；子生成器放帧槽，close 时随槽释放 |
 | `IfExp` | 三块 + 临时槽 |
 | `JoinedStr` | `str_concat` 链，每个 `{...}` 先 `convert` 到 `str` |
 | `NamedExpr` | 求值后 `assign_to`，结果就是该值 |

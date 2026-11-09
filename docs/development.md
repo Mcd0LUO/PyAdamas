@@ -82,7 +82,7 @@ print("hi")
 ### 差分测试
 
 ```bash
-python3 tests/diff/run_diff.py              # 3 个种子 = 600 个程序
+python3 tests/diff/run_diff.py              # 3 个种子 = 810 个程序
 python3 tests/diff/run_diff.py --seeds 20   # 更多随机性
 python3 tests/diff/run_diff.py --only repr  # 只测浮点转字符串
 ```
@@ -103,7 +103,9 @@ python3 tests/diff/run_diff.py --only repr  # 只测浮点转字符串
 覆盖 `*args` / `**kwargs` / 方法 / 闭包 / 转发；`tests/run/19_comprehension.py`
 覆盖推导式；`tests/run/20_with.py` 覆盖 `with` 的提前退出；`tests/run/21_decorator.py`
 覆盖装饰器；`tests/run/22_exception.py` 覆盖异常层级、bare raise、
-finally 的提前退出、with 异常路径和运行时错误转换。`tests/modules/`
+finally 的提前退出、with 异常路径和运行时错误转换；`tests/run/23_generator.py`
+~ `tests/run/29_async_comp.py` 覆盖生成器、协程、Task、异步语言面、
+Future/取消/fd、`yield from` 和异步推导式。`tests/modules/`
 覆盖 import 图、`from` 快照、惰性初始化、外部全局读写、GC 根和缓存
 失效。RSS 压力用受限地址空间跑长循环（命令见
 [compatibility.md](compatibility.md#内存验收)）。

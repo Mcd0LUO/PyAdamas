@@ -151,6 +151,32 @@ enum class RtFn : uint8_t {
     MathPow, MathFmod,
     SysArgv,      // () -> list*
     SysExit,      // (i64 code) -> noreturn
+    GenNext,      // (gen*) -> i64  取下一个值；结束抛 StopIteration
+    GenNextOpt,   // (gen*, i64* ok) -> i64  结束时不抛，写 ok=0
+    GenSend,      // (gen*, i64 sent) -> i64
+    GenSendOpt,   // (gen*, i64 sent, i64* ok) -> i64  yield from 用
+    GenClose,     // (gen*) -> void  跑跨挂起点的清理并结束
+    HandlerSuspend, // (handler*) -> void  yield 时把记录临时摘下
+    HandlerRearm,   // (handler*) -> void  恢复时重新压栈并记录水位
+    HandlerFree,    // (handler*) -> void  生成器 close：释放挂起的记录
+    AsyncioRun,     // (coro*) -> i64   跑事件循环直到根协程结束
+    AsyncioSleep,   // (f64) -> awaitable*
+    AsyncioGather,  // (list*) -> awaitable*
+    AsyncioCreateTask, // (coro*) -> task*
+    AsyncioTaskDone,   // (task*) -> bool
+    AsyncioTaskCancel, // (task*) -> bool
+    AsyncGenANext,     // (asyncgen*) -> awaitable*  __anext__ 的驱动对象
+    AsyncioFutureNew,  // () -> future*
+    FutureSetResult,   // (future*, i64) -> void
+    FutureDone,        // (future*) -> bool
+    FutureCancel,      // (future*) -> bool
+    FutureResult,      // (future*) -> i64（未完成抛异常）
+    FutureException,   // (future*) -> str*|None
+    FutureCancelled,   // (future*) -> bool
+    AsyncioTaskResult, // (task*) -> i64
+    AsyncioTaskException, // (task*) -> str*|None
+    AsyncioTaskCancelled, // (task*) -> bool
+    AsyncioWaitFd,     // (i64 fd, i64 write) -> awaitable*
 };
 
 inline const char* rt_name(RtFn f) {
@@ -235,6 +261,32 @@ inline const char* rt_name(RtFn f) {
         case RtFn::MathFmod: return "py23_math_fmod";
         case RtFn::SysArgv: return "py23_sys_argv";
         case RtFn::SysExit: return "py23_sys_exit";
+        case RtFn::GenNext: return "py23_gen_next";
+        case RtFn::GenNextOpt: return "py23_gen_next_opt";
+        case RtFn::GenSend: return "py23_gen_send";
+        case RtFn::GenSendOpt: return "py23_gen_send_opt";
+        case RtFn::GenClose: return "py23_gen_close";
+        case RtFn::HandlerSuspend: return "py23_handler_suspend";
+        case RtFn::HandlerRearm: return "py23_handler_rearm";
+        case RtFn::HandlerFree: return "py23_handler_free";
+        case RtFn::AsyncioRun: return "py23_asyncio_run";
+        case RtFn::AsyncioSleep: return "py23_asyncio_sleep";
+        case RtFn::AsyncioGather: return "py23_asyncio_gather";
+        case RtFn::AsyncioCreateTask: return "py23_asyncio_create_task";
+        case RtFn::AsyncioTaskDone: return "py23_asyncio_task_done";
+        case RtFn::AsyncioTaskCancel: return "py23_asyncio_task_cancel";
+        case RtFn::AsyncGenANext: return "py23_asyncgen_anext";
+        case RtFn::AsyncioFutureNew: return "py23_asyncio_future_new";
+        case RtFn::FutureSetResult: return "py23_future_set_result";
+        case RtFn::FutureDone: return "py23_future_done";
+        case RtFn::FutureCancel: return "py23_future_cancel";
+        case RtFn::FutureResult: return "py23_future_result";
+        case RtFn::FutureException: return "py23_future_exception";
+        case RtFn::FutureCancelled: return "py23_future_cancelled";
+        case RtFn::AsyncioTaskResult: return "py23_asyncio_task_result";
+        case RtFn::AsyncioTaskException: return "py23_asyncio_task_exception";
+        case RtFn::AsyncioTaskCancelled: return "py23_asyncio_task_cancelled";
+        case RtFn::AsyncioWaitFd: return "py23_asyncio_wait_fd";
     }
     return "?";
 }
@@ -281,6 +333,19 @@ enum class IrOp : uint8_t {
     CallRt,  // dst = <RtFn(imm)>(args...)
     Setjmp,  // dst = setjmp(a)（a 是 handler 记录，异常跳回时返回非 0）
     ImportModule, // imm 是 imports 下标：确保模块已初始化
+    SlotAddr,     // dst = &slots[idx]（栈槽或生成器帧槽的地址）
+
+    // ── 生成器 ────────────────────────────────────────────────
+    GenNew,     // dst = 新生成器帧；imm 是 generators 下标
+    GenSetSlot, // 创建期把参数写进帧槽；imm 是槽号，args = {gen, value}
+    GenGetState,// dst = 帧 state
+    GenClosing, // dst = 帧 closing 标志（close/finalize 期间非 0）
+    GenSent,    // dst = 恢复时传入的值
+    GenYield,   // 把 a 写进 out、state=imm，然后返回（终止指令）
+    GenAwait,   // 把 a 写进 out、state=imm、status=3，然后返回（终止指令）
+    GenGetExc,  // dst = 帧里待注入的异常指针
+    GenRethrow, // 在 resume 帧内抛出注入的异常（终止指令）
+    GenDone,    // status=1；a 非空时先把返回值写进 out（终止指令）
 
     // ── 控制流 ────────────────────────────────────────────
     Jump,    // -> target
@@ -318,6 +383,17 @@ inline const char* irop_name(IrOp op) {
         case IrOp::CallRt: return "call.rt";
         case IrOp::Setjmp: return "setjmp";
         case IrOp::ImportModule: return "import.module";
+        case IrOp::SlotAddr: return "slot.addr";
+        case IrOp::GenNew: return "gen.new";
+        case IrOp::GenSetSlot: return "gen.set";
+        case IrOp::GenGetState: return "gen.state";
+        case IrOp::GenClosing: return "gen.closing";
+        case IrOp::GenSent: return "gen.sent";
+        case IrOp::GenYield: return "gen.yield";
+        case IrOp::GenAwait: return "gen.await";
+        case IrOp::GenGetExc: return "gen.exc";
+        case IrOp::GenRethrow: return "gen.rethrow";
+        case IrOp::GenDone: return "gen.done";
         case IrOp::Jump: return "jump";
         case IrOp::Branch: return "branch";
         case IrOp::Return: return "return";
@@ -354,7 +430,11 @@ struct Block {
     bool terminated() const {
         return !insts.empty() && (insts.back().op == IrOp::Jump ||
                                   insts.back().op == IrOp::Branch ||
-                                  insts.back().op == IrOp::Return);
+                                  insts.back().op == IrOp::Return ||
+                                  insts.back().op == IrOp::GenYield ||
+                                  insts.back().op == IrOp::GenAwait ||
+                                  insts.back().op == IrOp::GenRethrow ||
+                                  insts.back().op == IrOp::GenDone);
     }
 };
 
@@ -390,6 +470,9 @@ struct IRFunction {
     // 含 setjmp 的函数关闭槽位寄存器提升：longjmp 会把 callee-saved
     // 寄存器恢复成 setjmp 时刻的值，寄存器里的变量会回退。
     bool has_handlers = false;
+    // 生成器 resume：槽位不在栈上，而在堆帧里（%r15 指向帧负载）。
+    // 入口按帧里的 state 分发到续跑块，参数已由创建包装写进帧。
+    bool is_generator = false;
 
     int new_slot(TypePtr ty) {
         slot_ty.push_back(std::move(ty));
@@ -408,6 +491,17 @@ struct IRClass {
     std::vector<uint8_t> field_heap;
 };
 
+// 一个生成器的运行时形态。帧负载布局与运行时 rt.c 一致：
+//   [state][status][sent][out][slot0..slotN-1]
+// resume 是状态机函数；slot_heap 决定帧销毁时要 dec 哪些槽。
+struct IRGenerator {
+    int resume = -1;
+    std::vector<uint8_t> slot_heap;
+    int n_slots = 0;
+    // 0 生成器 / 1 协程 / 2 异步生成器
+    int frame_kind = 0;
+};
+
 struct IRModule {
     // 用 unique_ptr 持有：降级过程中会不断新增函数（嵌套 def），
     // vector<IRFunction> 扩容会让外面持有的指针失效。
@@ -415,6 +509,7 @@ struct IRModule {
     std::vector<IRGlobal> globals;
     std::vector<std::string> strings;
     std::vector<IRClass> classes;
+    std::vector<IRGenerator> generators;
     // 模块编译：符号前缀、运行期 __name__、源路径、是否入口。
     std::string module_symbol;
     std::string runtime_name = "__main__";
@@ -455,6 +550,11 @@ inline bool ir_is_heap(const TypePtr& t) {
         case TyKind::Func:  // 静态闭包永生，堆闭包引用计数
         case TyKind::Dict:
         case TyKind::Set:
+        case TyKind::Generator:
+        case TyKind::Coroutine:
+        case TyKind::Task:
+        case TyKind::AsyncGenerator:
+        case TyKind::Future:
             return true;
         case TyKind::Optional:
             return !t->sub.empty() && ir_is_heap(t->sub[0]);
@@ -475,6 +575,11 @@ inline bool ir_is_ref(const TypePtr& t) {
         case TyKind::Func:
         case TyKind::BoundMethod:
         case TyKind::Class:
+        case TyKind::Generator:
+        case TyKind::Coroutine:
+        case TyKind::Task:
+        case TyKind::AsyncGenerator:
+        case TyKind::Future:
             return true;
         default:
             return false;

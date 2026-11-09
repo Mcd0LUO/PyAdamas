@@ -125,9 +125,160 @@ def repr_doubles(rng, n):
     return "\n".join(out) + "\n"
 
 
+def gen_ops(rng, n):
+    """生成器：for / next / StopIteration / close 清理 / yield from。"""
+    count = rng.randint(2, 6)
+    step = rng.randint(1, 4)
+    base = rng.randint(-9, 9)
+    lines = [
+        "def gen0(n: int):",
+        "    i = 0",
+        "    while i < n:",
+        f"        yield {base} + i * {step}",
+        "        i += 1",
+        "",
+        "def dgen(n: int):",
+        "    yield from gen0(n)",
+        "    yield from [n, n + 1]",
+        "",
+        "def cgen(n: int):",
+        "    try:",
+        "        yield from dgen(n)",
+        "    finally:",
+        "        print('dcleanup')",
+        "",
+    ]
+    for _ in range(n):
+        r = rng.random()
+        if r < 0.4:
+            lines.append(f"for v in gen0({count}):")
+            lines.append("    print(v)")
+        elif r < 0.6:
+            lines.append(f"for v in dgen({count}):")
+            lines.append("    print(v)")
+        elif r < 0.7:
+            lines.append(f"g = cgen({count})")
+            lines.append("print(next(g))")
+            lines.append("g.close()")
+        elif r < 0.85:
+            lines.append(f"g = gen0({count})")
+            lines.append("try:")
+            lines.append("    while True:")
+            lines.append("        print(next(g))")
+            lines.append("except StopIteration:")
+            lines.append("    print('done')")
+        else:
+            lines.append(f"g = gen0({count})")
+            lines.append("try:")
+            lines.append("    print(next(g))")
+            lines.append("finally:")
+            lines.append("    print('cleanup')")
+            lines.append("g.close()")
+        lines.append("")
+    return "\n".join(lines)
+
+
+def async_ops(rng, n):
+    """async/await：asyncio.run、sleep(0)、gather、异常跨 await。"""
+    k = rng.randint(-9, 9)
+    m = rng.randint(1, 4)
+    k2 = rng.randint(-9, 9)
+    k3 = rng.randint(-9, 9)
+    lines = [
+        "import asyncio",
+        "",
+        "async def f0(x: int) -> int:",
+        "    await asyncio.sleep(0)",
+        f"    return x + {k}",
+        "",
+        "async def f1(x: int) -> int:",
+        "    a = await f0(x)",
+        "    b = await f0(a)",
+        f"    return a * {m} + b",
+        "",
+        "async def fail() -> int:",
+        "    await asyncio.sleep(0.001)",
+        "    raise ValueError('diff')",
+        "",
+        "async def agen(k: int):",
+        "    i = 0",
+        "    while i < k:",
+        "        await asyncio.sleep(0)",
+        "        yield i",
+        "        i += 1",
+        "",
+        "class Ctx:",
+        "    async def __aenter__(self) -> int:",
+        "        await asyncio.sleep(0)",
+        f"        return {k}",
+        "",
+        "    async def __aexit__(self, a, b, c) -> bool:",
+        "        await asyncio.sleep(0)",
+        "        return False",
+        "",
+        "async def catcher() -> int:",
+        "    try:",
+        "        await fail()",
+        "    except ValueError:",
+        f"        return {k}",
+        "    return 0",
+        "",
+        "async def main() -> int:",
+        f"    t = asyncio.create_task(f0({k2}))",
+        f"    vals = await asyncio.gather(f1({k3}), t)",
+        "    s = 0",
+        "    for v in vals:",
+        "        s += v",
+        "    async for v in agen(3):",
+        "        s += v",
+        "    comp = [v * 2 async for v in agen(3)]",
+        "    for v in comp:",
+        "        s += v",
+        "    evens = [v async for v in agen(4) if v % 2 == 0]",
+        "    s += len(evens)",
+        "    table = {v: v + 1 async for v in agen(2)}",
+        "    s += table[1]",
+        "    async with Ctx() as c:",
+        "        s += c",
+        "    return s",
+        "",
+        "async def victim() -> int:",
+        "    try:",
+        "        await asyncio.sleep(10)",
+        "        return 1",
+        "    except CancelledError:",
+        "        return -5",
+        "",
+        "async def canceler() -> int:",
+        "    t = asyncio.create_task(victim())",
+        "    ok = t.cancel()",
+        "    if ok:",
+        "        print('req')",
+        "    try:",
+        "        v = await t",
+        "        return v",
+        "    except:",
+        "        return -7",
+        "",
+    ]
+    for _ in range(n):
+        r = rng.random()
+        if r < 0.4:
+            lines.append("print(asyncio.run(main()))")
+        elif r < 0.65:
+            lines.append("print(asyncio.run(canceler()))")
+        elif r < 0.85:
+            lines.append("print(asyncio.run(catcher()))")
+        else:
+            lines.append(f"print(asyncio.run(f1({rng.randint(-9, 9)})))")
+    return "\n".join(lines) + "\n"
+
+
 GENERATORS = {
     "expr": (expr, 60),
     "struct": (struct, 40),
     "float": (float_ops, 60),
     "repr": (repr_doubles, 40),
+    "gen": (gen_ops, 40),
+    "async": (async_ops, 30),
 }

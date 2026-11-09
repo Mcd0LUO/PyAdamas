@@ -27,14 +27,14 @@ py23 借 Python 的语法外壳，但**不是 CPython 的实现**：语义按静
 | 分类 | 支持 |
 |---|---|
 | 简单语句 | 表达式语句、赋值（含链式、多重解包）、增量赋值、标注赋值、`pass`、`return`、`break`、`continue`、`raise`、`assert`、`global`、`import` / `from ... import` |
-| 复合语句 | `if` / `elif` / `else`、`while`（含 `else`）、`for`（含 `else`）、`def`（含默认参数、`*`、`/`、仅限关键字参数、`*args` / `**kwargs`、装饰器）、`class`（单继承、方法与字段）、`with`（多个项、`as`）、`try` / `except` / `else` / `finally` |
-| 能解析、不能生成 | `del`、`async` / `await`、`yield`、带装饰器的方法/类、`match` 之外的软关键字写法 |
+| 复合语句 | `if` / `elif` / `else`、`while`（含 `else`）、`for` / `async for`（含 `else`）、`def` / `async def`（含默认参数、`*`、`/`、仅限关键字参数、`*args` / `**kwargs`、装饰器、生成器/协程/异步生成器）、`class`（单继承、方法与字段）、`with` / `async with`（多个项、`as`）、`try` / `except` / `else` / `finally` |
+| 能解析、不能生成 | `del`、带装饰器的方法/类、`match` 之外的软关键字写法 |
 
 `assert` 条件为假时抛出 `AssertionError`，第二个参数作为消息；没有消息时是 `assertion failed`。
 
 ### 表达式
 
-支持：常量、名字、二元/一元运算、布尔短路、链式比较、条件表达式、调用（位置 + 关键字 + `*` / `**` 展开）、下标（读与写）、切片（读与赋值）、列表/元组/字典/集合字面量、列表/集合/字典推导式、生成器表达式（按 list 立即求值）、`in` / `not in`、f-string、`lambda`、海象运算符、`range()`、用户类的属性读与写、用户类的方法调用。
+支持：常量、名字、二元/一元运算、布尔短路、链式比较、条件表达式、调用（位置 + 关键字 + `*` / `**` 展开）、下标（读与写）、切片（读与赋值）、列表/元组/字典/集合字面量、列表/集合/字典推导式（含 `async for`）、生成器表达式（按 list 立即求值）、`in` / `not in`、f-string、`lambda`、海象运算符、`range()`、`yield`、`yield from`、`await`、用户类的属性读与写、用户类的方法调用。
 
 没有代码生成的：内置类型上的属性访问（除 `list.append` / `list.pop` 两个特例）、`print(*args)` 的星号展开。
 
@@ -53,6 +53,11 @@ py23 借 Python 的语法外壳，但**不是 CPython 的实现**：语义按静
 | `None` | 单值类型 |
 | `Optional[T]` / `T \| None` | 可空 |
 | `func(...) -> T` | 函数值 |
+| `generator[T]` | 生成器对象；`for` / `next` 产出 `T`，`send` 送入的值是 `unknown` |
+| `coroutine[T]` | 协程对象；`await` / `asyncio.run` 得到 `T` |
+| `task[T]` | `asyncio.create_task` 调度的任务；`await` 得到 `T`，有 `done()` / `cancel()` |
+| `asyncgen[T]` | `async def` + `yield` 的异步生成器；只能用于 `async for` |
+| `future[T]` | `asyncio.Future`；可多等待，`set_result` 之后可 `await`/`result` |
 | `类名` | 类实例；字段布局与 vtable 在编译期确定 |
 | `set[T]` / `dict[K, V]` | 堆上的哈希表；`set` 复用 `dict`（值恒 0），保留插入顺序 |
 | `unknown` | 推断失败的占位，任何检查都放行 |
@@ -166,8 +171,11 @@ mods = {x % 3 for x in range(10)}
 ```
 
 推导式有独立的变量作用域：循环变量不会覆盖同名的外层变量。生成器
-表达式没有惰性求值，直接按 list 构造。推导式内部暂不支持 `lambda`
-捕获循环变量、`async for` 和海象运算符写回外层。
+表达式没有惰性求值，直接按 list 构造。含 `async for` 的推导式只能在
+`async def` 里使用，可以混用同步/异步子句；它只能作为整条语句、赋值
+或 `return` 的根表达式（挂起会清空当前表达式的临时值），元素表达式
+里也不能含 `await`。推导式内部暂不支持 `lambda` 捕获循环变量、
+海象运算符写回外层和异步生成器表达式。
 
 ### 函数
 
@@ -217,6 +225,160 @@ print(f(), f(), g())    # 1 2 1
 
 相互递归的嵌套闭包会形成 cell 环；这类环不是引用计数能处理的，由下面的
 循环收集器回收。
+
+### 生成器
+
+函数体里出现 `yield` 就变成生成器函数：调用它不执行函数体，而是返回
+`generator[T]`，其中 `T` 是所有 `yield` 值类型的公共上界。
+
+```python
+def count(n: int):
+    i = 0
+    while i < n:
+        yield i
+        i += 1
+
+for x in count(3):      # 0 1 2
+    print(x)
+
+g = count(2)
+print(next(g), next(g)) # 0 1
+```
+
+支持 `for` / `next()` / `.send(v)` / `.close()` / `.__next__()`。`send` 的
+值成为 `x = yield v` 里 `x` 的值（普通 `next` 是 None）。生成器函数里
+`return` 只表示结束，返回值被丢弃。
+
+**`yield from`**：把子迭代器的值逐个转 yield 出去；委托生成器时
+`send` 的值会转发给子生成器，子生成器结束（或出错）后继续执行外层
+代码。可委托生成器、list / tuple / str / dict / set；其他静态类型
+（unknown）按生成器协议尝试，失败抛 `TypeError`。外层生成器被
+`close()` 时，子生成器的引用被释放，它的 `finally` 照常执行。表达式
+的值固定为 None（异常对象不保存 `StopIteration.value`）。
+
+```python
+def inner():
+    yield 1
+    yield 2
+
+def outer():
+    yield from inner()
+    yield from [3, 4]
+```
+
+**跨 yield 清理**：`yield` 可以出现在 `try` / `with` 体内；挂起时活跃的
+handler 记录被摘下，恢复时按原顺序重挂并重新建立 setjmp。`close()`、
+引用计数归零与 GC 前的 finalize 会按挂起点快照执行 `finally` 和
+`with.__exit__(None, None, None)`。异常从生成器逃出时，生成代码的
+landing 路径负责展开清理，帧被标记 aborted，避免销毁时重复执行。
+
+限制：`yield` / `yield from` 只能作为语句或赋值右值（`x = yield v`），
+不能位于 `finally` 或 `except` 体内；生成器表达式仍是立即求值的 list。
+生成器类型跨模块接口会降级成 `unknown`。
+
+### 协程
+
+`async def` 调用返回 `coroutine[T]`，`T` 是 `return` 的类型；`await`
+挂起当前协程，等被等待对象完成后取回结果：
+
+```python
+import asyncio
+
+async def double(x: int) -> int:
+    return x * 2
+
+async def add(a: int, b: int) -> int:
+    x = await double(a)
+    await asyncio.sleep(0.01)
+    return x + b
+
+print(asyncio.run(add(3, 4)))   # 10
+```
+
+内置 `asyncio` 只提供三件东西：
+
+- `asyncio.run(coro)`：事件循环跑到根协程结束并返回结果；根协程的
+  异常抛回同步调用点。
+- `asyncio.sleep(seconds)`：毫秒定时器，`0` 立即就绪；
+- `asyncio.gather(a, b, ...)`：并发启动，按实参顺序返回结果列表。
+- `asyncio.create_task(coro)`：立即调度协程，返回 `task[T]`；`await
+  task` 取结果，完成后可重复 await；`task.done()` 判断是否结束；
+  `task.cancel()` 请求取消（返回 bool）。
+
+也支持 `from asyncio import sleep, gather, run, create_task`（`run` 的结果
+类型会退化成 unknown）。async 方法、`with` 里的 `await`、跨 `await` 的
+`finally` 都可以用；异常跨 `await` 通过在恢复时注入异常传播，
+`try/except` 能正常捕获。
+
+取消会向任务注入内置异常 `CancelledError`（父类是 `BaseException`，
+`except Exception` 不会误吞）：排队中的任务直接注入，挂起中的任务先
+从当前 awaitable 解绑再注入，`finally` 照常执行。被取消协程若自己
+捕获 `CancelledError` 并继续运行，任务按正常完成处理。
+
+**异步生成器**：`async def` 里同时有 `yield` 时，调用得到
+`asyncgen[T]`，用 `async for` 消费：
+
+```python
+async def agen(n: int):
+    i = 0
+    while i < n:
+        await asyncio.sleep(0)
+        yield i
+        i += 1
+
+async def main() -> int:
+    s = 0
+    async for v in agen(3):
+        s += v
+    return s
+```
+
+生成器内部可以混用 `await` / `yield`；`return`、`break` 中断迭代后，
+生成器对象被回收时同步执行 `finally`（`finally` 里不能再 await）。
+没有 `asend` / `athrow` / `aclose` 方法。
+
+**异步上下文管理器**：类上定义 `async def __aenter__` /
+`async def __aexit__`，用 `async with` 进入；进入、正常退出、异常展开、
+`return` / `break` / `continue` 路径都会 await `__aexit__`，
+返回真值可吞掉异常。若协程在 `async with` 体内被取消，退出路径同样
+会 await `__aexit__`；只有生成器对象被直接回收且停在 `async with`
+里时无法等待退出（限制）。
+
+**Future**：`asyncio.Future()` 创建一个可由别的协程 `set_result` 的
+等待对象，可以被多个协程同时 `await`：
+
+```python
+async def setter(f: Future[int]) -> None:
+    await asyncio.sleep(0.01)
+    f.set_result(42)
+
+async def main() -> int:
+    f = asyncio.Future()
+    asyncio.create_task(setter(f))
+    x = await f          # 42
+    return f.result()
+```
+
+方法：`set_result(v)`、`cancel()`、`done()`、`cancelled()`、
+`result()`（未完成抛 RuntimeError，失败/取消抛原异常）、`exception()`
+（成功返回 None，失败返回消息字符串）。Task 也有
+`result()` / `exception()` / `cancelled()`。
+
+**取消级联**：取消 Task 会沿它等待的对象向下传播：协程链继续注入
+`CancelledError`，被等待的 Task 递归取消，gather 取消全部子任务，
+Future/sleep/fd 等待标记取消；各层 `finally` 都会执行。被等待的
+Future 被取消时，其他等待者也会收到 `CancelledError`。
+
+**fd 等待**：`asyncio.wait_readable(fd)` / `wait_writable(fd)` 返回
+可等待对象，事件循环空闲时用 `poll` 等待，超时取最近的定时器；
+无效 fd 以 `OSError` 结束等待。这是 py23 自己的低级接口（CPython
+用 `loop.add_reader`），没有配套的 fd 读写函数。
+
+限制：`await` 只能作为语句、赋值右值或 `return` 值；不能出现在
+`finally` / `except` 体内；异步推导式只能作为语句、赋值或 `return` 的
+根表达式；不支持自定义 `__aiter__` 迭代器、`Future.set_exception` /
+回调、fd 读写和线程安全的事件循环；`gather` 的实参个数在源码里写死，
+结果元素类型按 unknown 处理；Task 只允许一个并发等待者，没有任务名字。
 
 ### 内存与生命周期
 
@@ -388,7 +550,7 @@ class Connection:
 - Python 2 遗留写法（`0x1L`、`lambda (a, b):`、`except X, e`）
 - 类：方法缺 `self`、字段赋值类型不符、访问不存在的字段或方法（`self.xxx` 与外部基类的成员除外）
 
-**代码生成层**（`check` 通过，`build` 报错）：生成器、`async`、`del`、带装饰器的方法/类、`print(*args)`、通过 unknown 函数值的 `*` / `**` 展开、`*` 位于固定形参之前且不是定长 tuple、`raise ... from`、非内置异常名、`finally` 体内跳出 finally 的控制流、跨模块继承、把类名当值用（`f = Point`）、函数内定义类、多继承、类体里的非声明语句。类体字段默认值里的 `lambda` 也在这一层拒绝。
+**代码生成层**（`check` 通过，`build` 报错）：`del`、带装饰器的方法/类、`print(*args)`、通过 unknown 函数值的 `*` / `**` 展开、`*` 位于固定形参之前且不是定长 tuple、`raise ... from`、非内置异常名、`finally` 体内跳出 finally 的控制流、跨模块继承、把类名当值用（`f = Point`）、函数内定义类、多继承、类体里的非声明语句、异步生成器表达式、嵌在其它表达式里的异步推导式。生成器的额外限制：`yield` / `yield from` 只能作为语句或赋值右值，不能出现在 `finally` / `except` 体内；协程的 `await` 同样。异步生成器没有 `asend`/`athrow`/`aclose`。类体字段默认值里的 `lambda` 也在这一层拒绝。
 
 为什么这么分层：前端宽、后端严。`check` 的定位是「语法和类型有没有明显毛病」，可以对任意 Python 文件跑；`build` 才是「这门语言现在能不能编译它」。
 

@@ -23,6 +23,7 @@
 #include "codegen.h"
 
 #include <algorithm>
+#include <cstdlib>
 #include <cstring>
 #include <format>
 #include <functional>
@@ -195,6 +196,28 @@ public:
             out_ += "\tret\n";
         }
 
+        // 生成器帧的 GC release：只把指向可达对象的槽引用减掉。正常结束
+        // 时 status==1、槽位已经释放过，直接跳过；被中途抛弃时逐槽处理。
+        // 析构器由运行时统一处理（它会调用生成代码的 close 路径跑 finally/with）。
+        for (size_t i = 0; i < m.generators.size(); ++i) {
+            const IRGenerator& g = m.generators[i];
+            out_ += std::format("\n# ---- gcrel gen g{} ----\n", i);
+            out_ += "\t.align 8\n";
+            out_ += std::format(".Lgengcrel{}:\n", i);
+            out_ += "\tpushq %rbx\n";
+            out_ += "\tmovq %rdi, %rbx\n";
+            out_ += "\tcmpq $1, 8(%rbx)\n";
+            out_ += std::format("\tje .Lgengcreldone{}\n", i);
+            for (size_t s = 0; s < g.slot_heap.size(); ++s) {
+                if (!g.slot_heap[s]) continue;
+                out_ += std::format("\tmovq {}(%rbx), %rdi\n", 8 * (10 + s));
+                out_ += "\tcall py23_gc_unref_child\n";
+            }
+            out_ += std::format(".Lgengcreldone{}:\n", i);
+            out_ += "\tpopq %rbx\n";
+            out_ += "\tret\n";
+        }
+
         for (size_t i = 0; i < m.funcs.size(); ++i) emit_function(*m.funcs[i], static_cast<int>(i));
 
         if (!m.is_entry && !m.module_symbol.empty() && m.entry >= 0) {
@@ -265,6 +288,10 @@ private:
     // 在寄存器里，要么整函数在栈上，规则简单到不会出隐蔽 bug。
     std::vector<std::string> slot_reg_;
     int n_saved_regs_ = 0;  // 实际 push 了几个 callee-saved
+    // 生成器/协程 resume：槽位在堆帧里，%r15 固定指向帧负载；
+    // 帧头 10 个字：state/status/sent/out/resume/closing/kind/waiter/exc/cur。
+    bool gen_ = false;
+    static constexpr int kGenHeader = 10;
 
     // vreg → 它当前所在的物理位置（"%r13" 这种）。只在块内有效：
     // 块边界一律清空，所以跨块的值永远走栈槽，不会读到过期的寄存器。
@@ -323,8 +350,13 @@ private:
 
     std::string smem(int slot) const { return std::format("{}(%rbp)", slot_off(slot)); }
 
+    std::string gen_smem(int slot) const {
+        return std::format("{}(%r15)", 8 * (kGenHeader + slot));
+    }
+
     // 变量的现在位置：寄存器（提升过）或栈槽。
     std::string slot_op(int slot) const {
+        if (gen_) return gen_smem(slot);
         if (slot >= 0 && slot < static_cast<int>(slot_reg_.size()) && !slot_reg_[slot].empty())
             return slot_reg_[slot];
         return smem(slot);
@@ -386,7 +418,7 @@ private:
         if (n_saved_regs_ > 0) line(std::format("leaq {}(%rbp), %rsp", -8 * n_saved_regs_));
         else line("movq %rbp, %rsp");
         for (int i = n_saved_regs_ - 1; i >= 0; --i)
-            line(std::format("popq {}", kSlotRegs[i]));
+            line(std::format("popq {}", gen_ ? "%r15" : kSlotRegs[i]));
         line("popq %rbp");
         line("ret");
     }
@@ -506,12 +538,19 @@ private:
         // 含 setjmp 的函数：longjmp 会把 callee-saved 寄存器恢复到 setjmp
         // 时刻，寄存器里的变量会悄悄回退。这类函数全部走内存槽。
         if (f_->has_handlers) return;
+        if (f_->is_generator) return;
+
+        // 被取过地址的槽必须留在内存里：寄存器里的副本不会跟着地址写更新。
+        std::vector<bool> addr_taken(ns, false);
+        for (const auto& b : f_->blocks)
+            for (const auto& in : b.insts)
+                if (in.op == IrOp::SlotAddr && in.idx >= 0 && in.idx < ns) addr_taken[in.idx] = true;
 
         std::vector<int> score(ns, 0);
         for (const auto& b : f_->blocks)
             for (const auto& in : b.insts) {
                 if ((in.op == IrOp::LoadSlot || in.op == IrOp::StoreSlot) && in.idx >= 0 &&
-                    in.idx < ns && !ir_is_float(f_->slot_ty[in.idx]))
+                    in.idx < ns && !ir_is_float(f_->slot_ty[in.idx]) && !addr_taken[in.idx])
                     ++score[in.idx];
             }
 
@@ -553,48 +592,59 @@ private:
     void emit_function(const IRFunction& f, int fi) {
         f_ = &f;
         fi_ = fi;
+        gen_ = f.is_generator;
         n_slots_ = static_cast<int>(f.slot_ty.size());
         assign_vreg_slots();
-        assign_slot_regs();
+        if (gen_) {
+            slot_reg_.assign(f.slot_ty.size(), std::string());
+            n_saved_regs_ = 1;  // %r15 帧指针
+        } else {
+            assign_slot_regs();
+        }
 
         out_ += std::format("\n# ---- {} ({}) ----\n", f.name, type_name(f.ret));
         label(func_label(fi));
         line("pushq %rbp");
         line("movq %rsp, %rbp");
-        for (int i = 0; i < n_saved_regs_; ++i) line(std::format("pushq {}", kSlotRegs[i]));
+        if (gen_) {
+            line("pushq %r15");
+            line("movq %rdi, %r15");
+        } else {
+            for (int i = 0; i < n_saved_regs_; ++i) line(std::format("pushq {}", kSlotRegs[i]));
+        }
         frame_size(n_slots_ + n_vreg_slots_);
 
-        // 非参数变量清零。`x: int` 这种纯声明在 lower 里不生成任何指令，
-        // 靠的是「槽初值为 0」，而栈帧里的内存是脏的——不显式清掉就会
-        // 读到上一个函数留下的垃圾。参数槽下面马上被实参覆盖，跳过。
-        {
+        if (!gen_) {
+            // 非参数变量清零。`x: int` 这种纯声明在 lower 里不生成任何指令，
+            // 靠的是「槽初值为 0」，而栈帧里的内存是脏的——不显式清掉就会
+            // 读到上一个函数留下的垃圾。参数槽下面马上被实参覆盖，跳过。
             std::vector<bool> is_param(static_cast<size_t>(n_slots_), false);
             for (const auto& p : f.params)
                 if (p.slot >= 0 && p.slot < n_slots_) is_param[p.slot] = true;
             for (int s = 0; s < n_slots_; ++s)
                 if (!is_param[s]) line(std::format("movq $0, {}", slot_op(s)));
-        }
 
-        // 形参落位
-        std::vector<TypePtr> ptypes;
-        ptypes.reserve(f.params.size());
-        for (auto& p : f.params) ptypes.push_back(p.ty);
-        auto locs = classify(ptypes);
-        for (size_t i = 0; i < f.params.size(); ++i) {
-            const auto& p = f.params[i];
-            const auto& l = locs[i];
-            if (l.stack_off >= 0) {
-                line(std::format("movq {}(%rbp), %rax", 16 + l.stack_off));
-                move_to(slot_op(p.slot), "%rax");
-            } else if (l.fp) {
-                line(std::format("movsd %xmm{}, {}", l.reg, smem(p.slot)));
-            } else {
-                move_to(slot_op(p.slot), kIntArgRegs[l.reg]);
+            // 形参落位
+            std::vector<TypePtr> ptypes;
+            ptypes.reserve(f.params.size());
+            for (auto& p : f.params) ptypes.push_back(p.ty);
+            auto locs = classify(ptypes);
+            for (size_t i = 0; i < f.params.size(); ++i) {
+                const auto& p = f.params[i];
+                const auto& l = locs[i];
+                if (l.stack_off >= 0) {
+                    line(std::format("movq {}(%rbp), %rax", 16 + l.stack_off));
+                    move_to(slot_op(p.slot), "%rax");
+                } else if (l.fp) {
+                    line(std::format("movsd %xmm{}, {}", l.reg, smem(p.slot)));
+                } else {
+                    move_to(slot_op(p.slot), kIntArgRegs[l.reg]);
+                }
             }
-        }
 
-        // 有捕获的函数从 %r10 拿闭包环境；调用方在 call 前设置。
-        if (f.env_slot >= 0) line(std::format("movq %r10, {}", slot_op(f.env_slot)));
+            // 有捕获的函数从 %r10 拿闭包环境；调用方在 call 前设置。
+            if (f.env_slot >= 0) line(std::format("movq %r10, {}", slot_op(f.env_slot)));
+        }
 
         // 被导入模块的 init：先把自己的全局根表交给 GC，再跑顶层代码。
         if (!m_->is_entry && fi == m_->entry) {
@@ -826,6 +876,74 @@ private:
             case IrOp::Jump: line(std::format("jmp {}", block_label(in.target))); break;
             case IrOp::Branch: gen_branch(in); break;
             case IrOp::Return: gen_return(in); break;
+            case IrOp::SlotAddr: {
+                int slot = in.idx;
+                line(std::format("leaq {}, %rax", gen_ ? gen_smem(slot) : smem(slot)));
+                move_to(dst_op(in.dst), "%rax");
+                break;
+            }
+            case IrOp::GenNew: {
+                const auto& g = m_->generators[static_cast<size_t>(in.imm)];
+                line(std::format("movq ${}, %rdi", g.n_slots));
+                line(std::format("leaq {}(%rip), %rsi", func_label(g.resume)));
+                line(std::format("leaq .Lgengcrel{}(%rip), %rdx", in.imm));
+                line(std::format("movq ${}, %rcx", g.frame_kind));
+                line("call py23_gen_new");
+                move_to(dst_op(in.dst), "%rax");
+                break;
+            }
+            case IrOp::GenSetSlot:
+                line(std::format("movq {}, %rax", src_op(in.args[0])));
+                line(std::format("movq {}, %rcx", src_op(in.args[1])));
+                line(std::format("movq %rcx, {}(%rax)", 8 * (10 + in.idx)));
+                break;
+            case IrOp::GenGetState:
+                line("movq 0(%r15), %rax");
+                move_to(dst_op(in.dst), "%rax");
+                break;
+            case IrOp::GenClosing:
+                line("movq 40(%r15), %rax");
+                move_to(dst_op(in.dst), "%rax");
+                break;
+            case IrOp::GenGetExc:
+                line("movq 64(%r15), %rax");
+                move_to(dst_op(in.dst), "%rax");
+                break;
+            case IrOp::GenSent:
+                line("movq 16(%r15), %rax");
+                move_to(dst_op(in.dst), "%rax");
+                break;
+            case IrOp::GenYield:
+                if (in.a != kNoReg) line(std::format("movq {}, %rax", src_op(in.a)));
+                else line("xorl %eax, %eax");
+                line("movq %rax, 24(%r15)");
+                line(std::format("movq ${}, 0(%r15)", in.imm));
+                line("xorl %eax, %eax");
+                emit_epilogue();
+                break;
+            case IrOp::GenAwait:
+                if (in.a != kNoReg) line(std::format("movq {}, %rax", src_op(in.a)));
+                else line("xorl %eax, %eax");
+                line("movq %rax, 24(%r15)");
+                line(std::format("movq ${}, 0(%r15)", in.imm));
+                line("movq $3, 8(%r15)");
+                line("xorl %eax, %eax");
+                emit_epilogue();
+                break;
+            case IrOp::GenRethrow:
+                line("movq %r15, %rdi");
+                line("call py23_coro_rethrow");
+                line("ud2");
+                break;
+            case IrOp::GenDone:
+                if (in.a != kNoReg) {
+                    line(std::format("movq {}, %rax", src_op(in.a)));
+                    line("movq %rax, 24(%r15)");
+                }
+                line("movq $1, 8(%r15)");
+                line("xorl %eax, %eax");
+                emit_epilogue();
+                break;
         }
     }
 
@@ -1396,7 +1514,14 @@ private:
             line(std::format("jmp {}", block_label(in.target2)));
             return;
         }
-        line(std::format("cmpq $0, {}", src_op(in.a)));
+        std::string sa = src_op(in.a);
+        // 被折叠成常量的条件（如 while True 的 1）不能进 cmpq 的立即数位置。
+        if (!sa.empty() && sa[0] == '$') {
+            long long v = std::strtoll(sa.c_str() + 1, nullptr, 10);
+            line(std::format("jmp {}", block_label(v ? in.target : in.target2)));
+            return;
+        }
+        line(std::format("cmpq $0, {}", sa));
         line(std::format("jne {}", block_label(in.target)));
         line(std::format("jmp {}", block_label(in.target2)));
     }
@@ -1486,6 +1611,7 @@ private:
                 line(std::format("movq {}, %rdi", src_op(in.args[0])));
                 line(std::format("movq {}, %rsi", src_op(in.args[1])));
                 break;
+            case RtFn::GenSendOpt:
             case RtFn::ListSet:
             case RtFn::DictNew:
             case RtFn::DictSet:
@@ -1537,7 +1663,42 @@ private:
             case RtFn::HandlerLeave:
             case RtFn::HandlerDiscard:
             case RtFn::ExcMatches:
+            case RtFn::GenNext:
+            case RtFn::GenClose:
+            case RtFn::HandlerSuspend:
+            case RtFn::HandlerRearm:
+            case RtFn::HandlerFree:
+            case RtFn::AsyncioRun:
+            case RtFn::AsyncioGather:
+            case RtFn::AsyncioCreateTask:
+            case RtFn::AsyncioTaskDone:
+            case RtFn::AsyncioTaskCancel:
+            case RtFn::AsyncGenANext:
+            case RtFn::FutureDone:
+            case RtFn::FutureCancel:
+            case RtFn::FutureResult:
+            case RtFn::FutureException:
+            case RtFn::FutureCancelled:
+            case RtFn::AsyncioTaskResult:
+            case RtFn::AsyncioTaskException:
+            case RtFn::AsyncioTaskCancelled:
                 line(std::format("movq {}, %rdi", src_op(in.args[0])));
+                break;
+            case RtFn::AsyncioWaitFd:
+                line(std::format("movq {}, %rdi", src_op(in.args[0])));
+                line(std::format("movq {}, %rsi", src_op(in.args[1])));
+                break;
+            case RtFn::FutureSetResult:
+                line(std::format("movq {}, %rdi", src_op(in.args[0])));
+                line(std::format("movq {}, %rsi", src_op(in.args[1])));
+                break;
+            case RtFn::GenNextOpt:
+            case RtFn::GenSend:
+                line(std::format("movq {}, %rdi", src_op(in.args[0])));
+                line(std::format("movq {}, %rsi", src_op(in.args[1])));
+                break;
+            case RtFn::AsyncioSleep:
+                line(std::format("movsd {}, %xmm0", src_op(in.args[0])));
                 break;
             case RtFn::StrFromF64:
             case RtFn::PrintF64:
@@ -1575,6 +1736,7 @@ private:
             case RtFn::RcShutdown:
             case RtFn::GcShutdown:
             case RtFn::HandlerPush:
+            case RtFn::AsyncioFutureNew:
             case RtFn::ExcAccept:
             case RtFn::ExcDone:
             case RtFn::ExcClear:

@@ -563,7 +563,7 @@ bool visit_unit(Program& p, ModuleUnit& u, std::vector<ModuleUnit*>& stack) {
                    "'__entry__' is reserved for the entry module");
             return false;
         }
-        if (req.name == "math" || req.name == "sys") {
+        if (req.name == "math" || req.name == "sys" || req.name == "asyncio") {
             // 内置模块没有源文件/对象，只提供编译期接口。
             continue;
         }
@@ -691,7 +691,7 @@ bool try_cache(Program& p, ModuleUnit& u) {
 py23::ModuleInfoPtr builtin_module(const std::string& name);
 
 py23::ModuleInfoPtr program_module(Program& p, const std::string& name) {
-    if (name == "math" || name == "sys") return builtin_module(name);
+    if (name == "math" || name == "sys" || name == "asyncio") return builtin_module(name);
     auto it = p.units.find(name);
     return it == p.units.end() ? nullptr : it->second->info;
 }
@@ -737,6 +737,26 @@ py23::ModuleInfoPtr builtin_module(const std::string& name) {
         info->globals["argv"] = py23::mk_list(py23::t_str());
         info->globals["maxsize"] = py23::t_int();
         func("exit", {py23::t_int()}, py23::t_none());
+    } else if (name == "asyncio") {
+        // run/create_task 的结果类型按实参在 typecheck 里特判；这里的签名
+        // 只用于 from-import 的缺省检查和错误提示。
+        func("run", {py23::mk_coroutine(py23::t_unknown())}, py23::t_unknown());
+        func("sleep", {py23::t_float()}, py23::mk_coroutine(py23::t_none()));
+        func("create_task", {py23::mk_coroutine(py23::t_unknown())},
+             py23::mk_task(py23::t_unknown()));
+        func("Future", {}, py23::mk_future(py23::t_unknown()));
+        func("wait_readable", {py23::t_int()}, py23::mk_coroutine(py23::t_none()));
+        func("wait_writable", {py23::t_int()}, py23::mk_coroutine(py23::t_none()));
+        auto gather = std::make_shared<py23::FuncInfo>();
+        gather->name = "gather";
+        gather->varargs = true;
+        gather->vararg_name = "aws";
+        gather->vararg_ty = py23::t_unknown();
+        gather->ret = py23::mk_coroutine(py23::mk_list(py23::t_unknown()));
+        gather->ret_known = true;
+        auto gt = py23::new_ty(py23::TyKind::Func);
+        gt->fn = gather;
+        info->globals["gather"] = gt;
     }
     cache[name] = info;
     return info;

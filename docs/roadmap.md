@@ -213,38 +213,95 @@ traceback / `raise ... from`；`finally` 体内跳出 finally 的
 - 已知边界：包 `__init__` 不会因为导入子模块自动执行；点号 import 必须
   带 `as`；`__all__`、命名空间包、跨模块继承未支持。
 
-## 0.16 / 0.17：生成器与 async（模型已定）
+## 0.16：生成器（已完成）
 
-**结论：生成器与协程统一用状态机，不用独立栈。**
+**模型：状态机 + 堆帧，不用独立栈。**
 
-每个含 `yield` / `await` 的函数在降级阶段被拆成若干基本块，装进堆上的
-帧对象（布局和闭包类似，多一个 `code` / `state` / `resume` 指针）：
+- 含 `yield` 的函数拆成「创建包装 + resume」：局部槽位放在堆帧里，
+  `yield` 只写 state/out 并返回；入口按 state 分发到续跑块。
+- 类型 `Generator[T]`：yield 值取公共上界，`for` / `next` / `send` /
+  `close` / `__next__` 可用；返回生成器的普通函数不会被误判。
+- 跨 `yield` 清理：yield 时 `py23_handler_suspend` 摘下活跃 handler
+  记录，恢复时重挂并重新 setjmp；`close()`、引用计数归零和 finalize
+  按挂起点快照执行 `finally` / `with.__exit__`。
+- 帧槽参与 RC/GC；异常逃出生成器时标 aborted，避免清理重复执行。
+- 用例 `tests/run/23_generator.py`。
 
-```
-帧 = { rc, gc_link, dtor=None, code, state, resume, 槽位... }
-```
+已知限制：`yield` 只能作为语句或赋值右值；不支持 `yield from`、
+`yield` 位于 `finally`/`except` 体内、生成器表达式惰性求值；
+`send` 的值和跨模块生成器类型都是 unknown。
 
-- `resume(frame, sent)` 是按 `state` 分发的一次执行：跑到下一个
-  `yield` 就存回 `state` 并返回。`yield` 与 `await` 是同一种状态切换，
-  区别只在 `await` 要等一个 future 就绪后才被再次 resume。
-- 帧里的槽位是 GC 根：帧对象登记到动态根表，GC 扫描时按槽位类型
-  决定是否把内容当指针。
-- 跨 `yield` 的 `try` / `with` / `finally` 必须直接支持：状态机把
-  `try` 区间编译成「离开时需要执行的清理列表」，`close()` / 异常注入
-  时按栈序跑。这条不做，生成器里的 `with open(...)` 就无法正确关文件。
-- `for x in gen:` 走 `__next__`；`StopIteration` 用现有异常机制表达。
-- 类型：`Generator[T]`，`send` 可选；`yield` 表达式本身留作 0.16 的
-  收尾项（先支持 `yield` 语句和 `for`）。
+**0.17 async 复用同一套状态机（已完成）**：
 
-**0.17 async 复用同一套状态机**，新增：
+- `async def` 产出的帧和生成器帧同构（kind 标记区分），`await` 是
+  awaiting 状态；协程的返回值写进 out，交给等待者。
+- 事件循环：就绪队列 + 毫秒定时器 + `loop_pending`（运行中的 gather/Task），
+  三者都是 GC 根；`asyncio.run` / `sleep` / `gather` / `create_task`
+  已可用；Task 有 `done()` / `cancel()`，取消会注入 `CancelledError`。
+- 异常跨 `await` 通过帧内注入传播：恢复时重挂 handler 后 rethrow，
+  `try/except` 正常工作；根协程异常抛回同步调用点。
+- 用例 `tests/run/24_async.py`；差分测试新增 `async` 生成器。
 
-- `async def` 产出的帧和生成器帧同构，`await` 即「挂到 future 的
-  完成回调上」；恢复仍走 `resume`。
-- 完整事件循环：就绪队列 + 定时器堆 + I/O 轮询；`asyncio.run` /
-  `sleep` / `gather` 最小集合，不追 CPython 全套。
-- 选状态机的理由：帧一次分配、切换只改 `state` 并返回，内存和
-  切换成本都低于独立栈；代价是编译期要处理控制流拆分（`yield`
-  不能出现在 `try` 的 `finally` 语句块里这类限制先按 CPython 规则拒）。
+已知限制：`await` 只能作为语句、赋值右值或 `return` 值；`gather` 实参
+个数写死，结果元素类型是 unknown；Task 单等待者、取消不级联。
+
+## 0.19：异步语言面（已完成）
+
+- 异步生成器：`async def` + `yield` → `asyncgen[T]`，可混用 `await`；
+  `async for` 通过 `__anext__` 驱动对象消费，结束抛
+  `StopAsyncIteration` 并在循环边界捕获。
+- `async with`：类的 `async def __aenter__/__aexit__`，进入/退出、
+  异常展开、`return`/`break`/`continue` 都会 await 退出；异常上下文
+  先落槽再清 pending，避免跨挂起污染。
+- 驱动对象改为就绪队列调度，不再递归调用 resume 栈；嵌套异步生成器
+  （async gen 里 async for）可用。
+- 用例 `tests/run/26_async_lang.py`。
+
+已知限制：异步生成器没有 `asend`/`athrow`/`aclose`；生成器对象停在
+`async with` 里被直接回收时不 await 退出；异步推导式、自定义
+`__aiter__` 迭代器、Future/取消级联/fd 级 I/O 未支持。
+
+## 0.20：运行时补齐（已完成）
+
+- Future：`asyncio.Future()`，多等待者、`set_result`/`cancel`/`done`/
+  `cancelled`/`result`/`exception`；Task 同步补齐状态查询。
+- 取消级联：Task 取消沿 await 链向下传播（协程链/task/gather/future/
+  sleep/fd），各层 `finally` 执行；修复协程挂起时 state 被清零的问题。
+- fd 轮询：`wait_readable`/`wait_writable` + 事件循环 `poll`（超时取最近
+  定时器），无效 fd 以 `OSError` 结束；fd 等待对象登记为 GC 根。
+- `create_task` 接受 Future/sleep/fd 等等待对象；类型标注支持
+  `Future[T]`/`Task[T]`/`Coroutine[T]`/`Generator[T]`/`AsyncGenerator[T]`。
+- GC 清扫和退出时回收挂在帧/Task/Future 上的 malloc 异常。
+- 用例 `tests/run/27_runtime.py`。
+
+已知限制：没有 `Future.set_exception`/`add_done_callback`；`exception()`
+返回消息字符串；`wait_readable` 不是 CPython 标准 API；没有 fd 读写、
+子进程和线程安全事件循环。
+
+## 0.21：yield from 与异步推导式（已完成）
+
+- `yield from` 支持生成器与 list/tuple/str/dict/set 委托；生成器委托
+  转发 `send`，子生成器异常向外传播，外层 `close()` 释放子生成器并
+  执行其 `finally`；表达式值固定为 None。
+- 异步推导式：list/set/dict 推导式里的 `async for` 子句，可混用同步/
+  异步子句与 `if`；累加器和循环状态落帧槽，每个异步子句用一层
+  handler 捕获 `StopAsyncIteration`。
+- 修复生成器元素为堆类型时 `for`/`next`/`send` 结果按 unknown 落槽
+  漏 retain 的问题（运行时按机器字返回，降级器补静态类型）。
+- 用例 `tests/run/28_yield_from.py`、`tests/run/29_async_comp.py`；
+  差分测试的 gen/async 生成器补上对应路径。
+
+已知限制：`yield from` 不能 throw、表达式值为 None；异步推导式只能
+作为语句/赋值/return 的根表达式，元素里不能含 `await`，没有异步
+生成器表达式。
+
+## 下一步
+
+- 语言面：方法/类装饰器的剩余形态、生成器 `throw()`、异步生成器
+  `asend`/`athrow`/`aclose`
+- 运行时：Future 回调与 `set_exception`、fd 读写/子进程、
+  线程安全事件循环
+- 工程面：按 [技术债](#技术债) 顺序处理（优化遍、列表 repr、异常对象等）
 
 ## 待决策
 
@@ -275,3 +332,7 @@ traceback / `raise ... from`；`finally` 体内跳出 finally 的
 10. **异常路径的 RC 不精确**：longjmp 跳过普通函数帧时局部变量不执行 `release_slots`，要等 GC；如果要确定性回收，需要给每个函数登记展开清理回调
 11. **异常对象太轻**：只有类型名和消息，没有 `args`/traceback/异常链，也没有自定义异常类；`except ... as e` 的 `e` 是字符串，和 CPython 差异明显
 12. **含 handler 的函数没有寄存器提升**：longjmp 会回滚 callee-saved 寄存器，只能全走内存槽；异常密集且热点的函数会吃亏
+13. **生成器/协程的表达式能力不全**：`yield`/`yield from`/`await` 只能作为语句或赋值右值，`yield`/`await` 位于 `finally`/`except` 体内都还没接；生成器表达式仍是立即求值的 list；`send`/await 跨挂起值的静态类型不精确；`yield from` 的值固定为 None，也不能 throw
+14. **生成器/协程异常逃出时槽位不精确释放**：异常从 resume longjmp 出去时只把帧标成 aborted，堆槽引用交给 GC 下一轮回收，不做确定性 `rc_dec`
+15. **跨模块生成器/协程不支持**：`.py23i` 里 `Generator[T]` / `Coroutine[T]` 降级成 unknown，导入模块的生成器/协程无法 `for` / `next` / `await`
+16. **asyncio 只是最小集合**：没有 `Future.set_exception`/`add_done_callback`、自定义 `__aiter__`、fd 读写/子进程/线程安全循环；异步生成器没有 `asend`/`athrow`/`aclose`，停在 `async with` 里被直接回收时不等待退出；`wait_readable` 不是 CPython 标准 API；异常结果只有消息字符串；`gather` 结果按 unknown 容器处理；Task 只允许一个并发等待者；异步推导式只能出现在语句/赋值/return 的根位置

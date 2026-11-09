@@ -137,14 +137,18 @@ struct FuncCtx {
     std::vector<size_t> loop_cleanup_depth;    // 词法上活跃的清理动作，按从外到内排列。return/break/continue 和
     // 异常 landing 都从这里生成对应动作。
     struct Cleanup {
-        enum class Kind { With, Finally, Handler, ExcDone } kind;
+        enum class Kind { With, AsyncWith, Finally, Handler, ExcDone } kind;
         // With / Finally / Handler：handler 记录所在的槽
         int handler_slot = -1;
+        // Handler/With/Finally：setjmp 非 0 时跳转的异常展开块
+        int land = -1;
         // With
         int mgr_slot = -1;
         int exit_slot = -1;
         int nargs = 0;
         TypePtr ret;
+        // AsyncWith：await __aexit__() 的结果类型
+        TypePtr inner_ret;
         // Finally
         std::vector<StmtPtr>* body = nullptr;
     };
@@ -164,6 +168,22 @@ struct FuncCtx {
     size_t rc_pushes = 0;
     int fn_mark_block = -1;
     size_t fn_mark_pos = 0;
+    // 生成器：槽位在堆帧里，临时值水位在每次 resume 时重新记录到槽里
+    //（vreg 不跨 yield 存活）。
+    bool is_generator = false;
+    int gen_mark_slot = -1;
+    int gen_next_state = 1;
+    // async def：同一个帧状态机，await 作为第三种挂起。
+    bool is_coroutine = false;
+    bool is_async_generator = false;
+    TypePtr async_result;
+    // 每个挂起点：续跑块 + 挂起时的清理栈快照（close 时按它跑 finally/with）。
+    struct GenState {
+        int id = 0;
+        int cont = -1;
+        std::vector<Cleanup> cleanups;
+    };
+    std::vector<GenState> gen_states;
 };
 
 class Lowerer {
@@ -202,6 +222,15 @@ private:
 
     std::unordered_map<std::string, int> global_ids_;
     std::unordered_map<std::string, FunctionDef*> func_defs_;
+    // yield 只在语句级 / 赋值右值里可用：其它位置会有临时 vreg 跨挂起，
+    // 而 vreg 的栈槽不随帧保存。
+    const Expr* yield_ctx_node_ = nullptr;
+    const Expr* await_ctx_node_ = nullptr;
+    // 含 async for 的推导式会挂起，只能作为整条语句/赋值/返回值的根表达式：
+    // 嵌套在别的表达式里时，外层还有未完成的临时值，挂起会一起清掉。
+    const Expr* comp_ctx_node_ = nullptr;
+    // 正在编译 finally 体：跨挂起的 finally 清理需要复制控制流，暂不支持。
+    int finally_body_depth_ = 0;
     // 闭包捕获分析：函数树 + 每个函数的捕获形态。
     std::unordered_map<const FunctionDef*, FunctionDef*> func_parent_;
     std::unordered_map<const FunctionDef*, std::vector<FunctionDef*>> func_children_;
@@ -387,6 +416,17 @@ private:
         VReg v = def(ty ? ty : t_unknown(), std::move(in));
         if (ir_is_heap(ty)) push_temp(v);
         return v;
+    }
+
+    // 运行时按机器字返回的值（生成器 next/send）静态类型只能是 unknown；
+    // 用 mov 补一个静态类型，后续 store_slot 才能按堆类型 retain。
+    VReg retype(VReg v, TypePtr ty) {
+        if (!ty || type_eq(vreg_ty(v), ty)) return v;
+        Inst mv;
+        mv.op = IrOp::Mov;
+        mv.a = v;
+        mv.ty = ty;
+        return def(ty, std::move(mv));
     }
 
     // 列表元素所有权类别，必须和 codegen 传给 py23_list_new 的值一致。
@@ -786,6 +826,25 @@ private:
 
     // 把一个函数体编译成 IRFunction，返回它的下标。普通函数和方法共用。
     int compile_function_body(FunctionDef& f, FuncInfoPtr info, const std::string& label);
+    // 含 yield / await 的函数：编译 resume 状态机 + 创建包装，返回创建包装下标。
+    // frame_kind: 0 生成器 / 1 协程 / 2 异步生成器
+    int compile_suspendable_function(FunctionDef& f, FuncInfoPtr info, const std::string& label,
+                                     int frame_kind);
+    VReg lower_yield(Expr& y);
+    VReg lower_yield_from(YieldFrom& y);
+    // 把 v 作为一次 yield 挂起，返回恢复后 send 进来的值。
+    VReg emit_yield(VReg v, TypePtr vt);
+    VReg lower_await(Expr& e);
+    // 把「等待 w」编译成挂起；返回恢复后 sent 槽里的结果值（堆结果已入临时栈）。
+    // active_limit 用于清理路径：只把仍然挂在运行时栈上的外层 handler 计入快照。
+    VReg suspend_on_awaitable(VReg w, TypePtr result_ty, int line, int col,
+                              size_t active_limit = static_cast<size_t>(-1));
+    void lower_async_with_item(With& w, size_t idx);
+    void lower_async_for(For& f, VReg seq, TypePtr seq_ty);
+    void gen_finish(VReg v = kNoReg, TypePtr vty = nullptr);
+    void cleanup_gen_mark();
+    void lower_for_gen(For& f, VReg seq, TypePtr seq_ty);
+    VReg lower_asyncio(const std::string& member, Call& c);
 
     VReg lower_construct(Call& c, const ClassInfoPtr& cls);
 
@@ -1204,16 +1263,36 @@ void Lowerer::stmt(Stmt& s) {
     // 不该为 RC 付出任何运行时开销）。
     int mark_block = -1;
     size_t mark_pos = 0;
-    VReg stmt_mark = rc_mark_at(mark_block, mark_pos);
+    VReg stmt_mark = st_->is_generator ? kNoReg : rc_mark_at(mark_block, mark_pos);
     size_t pushes_before = st_->rc_pushes;
+    auto mark_comp = [&](Expr* v) {
+        if (v && (v->kind == ExprKind::ListComp || v->kind == ExprKind::SetComp ||
+                  v->kind == ExprKind::DictComp || v->kind == ExprKind::GeneratorExp))
+            comp_ctx_node_ = v;
+    };
     switch (s.kind) {
         case StmtKind::Expr: {
-            expr(*static_cast<ExprStmt&>(s).value);
+            auto& es = static_cast<ExprStmt&>(s);
+            if (es.value->kind == ExprKind::Yield || es.value->kind == ExprKind::YieldFrom)
+                yield_ctx_node_ = es.value.get();
+            if (es.value->kind == ExprKind::Await) await_ctx_node_ = es.value.get();
+            mark_comp(es.value.get());
+            expr(*es.value);
+            yield_ctx_node_ = nullptr;
+            await_ctx_node_ = nullptr;
+            comp_ctx_node_ = nullptr;
             break;
         }
         case StmtKind::Assign: {
             auto& a = static_cast<Assign&>(s);
+            if (a.value->kind == ExprKind::Yield || a.value->kind == ExprKind::YieldFrom)
+                yield_ctx_node_ = a.value.get();
+            if (a.value->kind == ExprKind::Await) await_ctx_node_ = a.value.get();
+            mark_comp(a.value.get());
             VReg v = expr(*a.value);
+            yield_ctx_node_ = nullptr;
+            await_ctx_node_ = nullptr;
+            comp_ctx_node_ = nullptr;
             TypePtr vt = tc_.type_of(a.value.get());
             for (auto& t : a.targets) assign_to(*t, v, vt);
             break;
@@ -1253,17 +1332,53 @@ void Lowerer::stmt(Stmt& s) {
             VReg v;
             bool typed_literal = want && vt && want->kind == vt->kind &&
                                  (want->kind == TyKind::List || want->kind == TyKind::Tuple);
+            if (a.value->kind == ExprKind::Yield || a.value->kind == ExprKind::YieldFrom)
+                yield_ctx_node_ = a.value.get();
+            if (a.value->kind == ExprKind::Await) await_ctx_node_ = a.value.get();
+            mark_comp(a.value.get());
             if (typed_literal && a.value->kind == ExprKind::List)
                 v = lower_list_like(static_cast<ListExpr&>(*a.value).elts, want, false);
             else if (typed_literal && a.value->kind == ExprKind::Tuple)
                 v = lower_list_like(static_cast<TupleExpr&>(*a.value).elts, want, true);
             else
                 v = expr(*a.value);
+            yield_ctx_node_ = nullptr;
+            await_ctx_node_ = nullptr;
+            comp_ctx_node_ = nullptr;
             assign_to(*a.target, v, want ? want : vt);
             break;
         }
         case StmtKind::Return: {
             auto& r = static_cast<Return&>(s);
+            if (st_->is_generator) {
+                if (r.value && r.value->kind == ExprKind::Await)
+                    await_ctx_node_ = r.value.get();
+                mark_comp(r.value.get());
+                VReg v = r.value ? expr(*r.value) : kNoReg;
+                await_ctx_node_ = nullptr;
+                comp_ctx_node_ = nullptr;
+                if (st_->is_coroutine && !st_->is_async_generator) {
+                    // 协程的返回值要送到 await 处（或 asyncio.run）。
+                    if (v != kNoReg && st_->async_result)
+                        v = coerce(v, vreg_ty(v), st_->async_result);
+                    // 清理里可能有 await（async with 的 __aexit__）：
+                    // vreg 不跨挂起，返回值先落帧槽。
+                    int ret_slot = -1;
+                    TypePtr rty = v != kNoReg ? vreg_ty(v) : nullptr;
+                    if (v != kNoReg) {
+                        ret_slot = new_temp_slot(rty);
+                        store_slot(ret_slot, v);
+                    }
+                    emit_cleanup_exits(0);
+                    if (ret_slot >= 0) v = load_slot(ret_slot, rty);
+                    gen_finish(v, rty);
+                    break;
+                }
+                // 生成器/异步生成器的 return 只表示结束，返回值不保留。
+                emit_cleanup_exits(0);
+                gen_finish();
+                break;
+            }
             VReg v = r.value ? expr(*r.value) : kNoReg;
             // `def f() -> float: return 1` 要在返回处转成 double
             if (v != kNoReg && st_->fn->ret) v = coerce(v, vreg_ty(v), st_->fn->ret);
@@ -1317,8 +1432,11 @@ void Lowerer::stmt(Stmt& s) {
         case StmtKind::Nonlocal: break;  // 名字解析已经由 cell/env 接管
     }
     if (st_->rc_pushes != pushes_before) {
-        if (!terminated()) rc_cleanup(stmt_mark);
-    } else {
+        if (!terminated()) {
+            if (st_->is_generator) cleanup_gen_mark();
+            else rc_cleanup(stmt_mark);
+        }
+    } else if (!st_->is_generator) {
         if (!terminated() && !cur().insts.empty()) {
             const Inst& last = cur().insts.back();
             if (last.op == IrOp::CallRt && static_cast<RtFn>(last.imm) == RtFn::RcCleanup &&
@@ -1383,7 +1501,11 @@ void Lowerer::lower_while(While& f) {
     // 整条脚手架会被删掉。
     int loop_mark_block = -1;
     size_t loop_mark_pos = 0;
-    VReg loop_mark = rc_mark_at(loop_mark_block, loop_mark_pos);
+    VReg loop_mark = st_->is_generator ? kNoReg : rc_mark_at(loop_mark_block, loop_mark_pos);
+    auto clean = [&]() {
+        if (st_->is_generator) cleanup_gen_mark();
+        else rc_cleanup(loop_mark);
+    };
 
     Inst j;
     j.op = IrOp::Jump;
@@ -1401,7 +1523,7 @@ void Lowerer::lower_while(While& f) {
     emit(std::move(br));
 
     switch_to(body);
-    rc_cleanup(loop_mark);
+    clean();
     st_->loops.push_back({end, cond});
     st_->loop_cleanup_depth.push_back(st_->cleanups.size());
     stmts(f.body);
@@ -1415,7 +1537,7 @@ void Lowerer::lower_while(While& f) {
     }
 
     switch_to(orelse);
-    rc_cleanup(loop_mark);
+    clean();
     if (!f.orelse.empty()) {
         stmts(f.orelse);
         if (!terminated()) {
@@ -1429,7 +1551,7 @@ void Lowerer::lower_while(While& f) {
     // 循环内（条件或循环体）完全没有临时堆值时，把循环水位整条删掉。
     // 注意不能只看条件：`continue`/`break` 会跳过语句级清理，循环体里
     // 的临时值要靠循环水位兜底。
-    if (st_->rc_pushes == pushes_before_cond) {
+    if (!st_->is_generator && st_->rc_pushes == pushes_before_cond) {
         erase_cleanup(body, loop_mark);
         erase_cleanup(orelse, loop_mark);
         erase_cleanup(end, loop_mark);
@@ -1439,7 +1561,8 @@ void Lowerer::lower_while(While& f) {
 
 void Lowerer::lower_for(For& f) {
     if (f.is_async) {
-        unsupported(f, "'async for'");
+        VReg seq = expr(*f.iter);
+        lower_async_for(f, seq, tc_.type_of(f.iter.get()));
         return;
     }
     if (f.iter->kind == ExprKind::Call) {
@@ -1494,6 +1617,12 @@ void Lowerer::lower_for_range(For& f, Call& c) {
     // 不影响迭代，计数器必须是私有的。
     int ctr = new_temp_slot(t_int());
     store_slot(ctr, start);
+    // 生成器里 vreg 不跨 yield 存活：上界必须落槽，每次条件判断重新读。
+    int stop_slot = -1;
+    if (st_->is_generator) {
+        stop_slot = new_temp_slot(t_int());
+        store_slot(stop_slot, stop);
+    }
 
     int cond = new_block("for.cond");
     int body = new_block("for.body");
@@ -1503,7 +1632,11 @@ void Lowerer::lower_for_range(For& f, Call& c) {
 
     int loop_mark_block = -1;
     size_t loop_mark_pos = 0;
-    VReg loop_mark = rc_mark_at(loop_mark_block, loop_mark_pos);
+    VReg loop_mark = st_->is_generator ? kNoReg : rc_mark_at(loop_mark_block, loop_mark_pos);
+    auto clean = [&]() {
+        if (st_->is_generator) cleanup_gen_mark();
+        else rc_cleanup(loop_mark);
+    };
     size_t pushes_before_loop = st_->rc_pushes;
 
     Inst j;
@@ -1513,11 +1646,12 @@ void Lowerer::lower_for_range(For& f, Call& c) {
 
     switch_to(cond);
     VReg cv = load_slot(ctr, t_int());
+    VReg stop_v = stop_slot >= 0 ? load_slot(stop_slot, t_int()) : stop;
     Inst cmp;
     cmp.op = IrOp::Cmp;
     cmp.cop = step > 0 ? CmpKind::Lt : CmpKind::Gt;
     cmp.a = cv;
-    cmp.b = stop;
+    cmp.b = stop_v;
     VReg cc = def(t_bool(), std::move(cmp));
     Inst br;
     br.op = IrOp::Branch;
@@ -1527,7 +1661,7 @@ void Lowerer::lower_for_range(For& f, Call& c) {
     emit(std::move(br));
 
     switch_to(body);
-    rc_cleanup(loop_mark);
+    clean();
     VReg iv = load_slot(ctr, t_int());
     assign_to(*f.target, iv, t_int());
     st_->loops.push_back({end, incr});
@@ -1543,7 +1677,7 @@ void Lowerer::lower_for_range(For& f, Call& c) {
     }
 
     switch_to(incr);
-    rc_cleanup(loop_mark);
+    clean();
     VReg iv2 = load_slot(ctr, t_int());
     Inst add;
     add.op = IrOp::Bin;
@@ -1558,7 +1692,7 @@ void Lowerer::lower_for_range(For& f, Call& c) {
     emit(std::move(ji));
 
     switch_to(orelse);
-    rc_cleanup(loop_mark);
+    clean();
     if (!f.orelse.empty()) {
         stmts(f.orelse);
         if (!terminated()) {
@@ -1569,8 +1703,8 @@ void Lowerer::lower_for_range(For& f, Call& c) {
         }
     }
     switch_to(end);
-    rc_cleanup(loop_mark);
-    if (st_->rc_pushes == pushes_before_loop) {
+    clean();
+    if (!st_->is_generator && st_->rc_pushes == pushes_before_loop) {
         erase_cleanup(body, loop_mark);
         erase_cleanup(incr, loop_mark);
         erase_cleanup(orelse, loop_mark);
@@ -1582,6 +1716,10 @@ void Lowerer::lower_for_range(For& f, Call& c) {
 void Lowerer::lower_for_seq(For& f) {
     VReg seq = expr(*f.iter);
     TypePtr seq_ty = tc_.type_of(f.iter.get());
+    if (seq_ty && seq_ty->kind == TyKind::Generator) {
+        lower_for_gen(f, seq, seq_ty);
+        return;
+    }
     if (!seq_ty || (seq_ty->kind != TyKind::List && seq_ty->kind != TyKind::Tuple &&
                     seq_ty->kind != TyKind::Str && seq_ty->kind != TyKind::Dict &&
                     seq_ty->kind != TyKind::Set)) {
@@ -1594,6 +1732,17 @@ void Lowerer::lower_for_seq(For& f) {
     ln.op = IrOp::Len;
     ln.a = seq;
     VReg n = def(t_int(), std::move(ln));
+    // 生成器里 vreg 不跨 yield 存活：序列和长度都必须落槽。
+    int seq_slot = -1;
+    int n_slot = -1;
+    if (st_->is_generator) {
+        seq_slot = new_temp_slot(seq_ty);
+        store_slot(seq_slot, seq);
+        n_slot = new_temp_slot(t_int());
+        store_slot(n_slot, n);
+    }
+    auto seq_val = [&]() { return seq_slot >= 0 ? load_slot(seq_slot, seq_ty) : seq; };
+    auto n_val = [&]() { return n_slot >= 0 ? load_slot(n_slot, t_int()) : n; };
 
     int idx = new_temp_slot(t_int());
     store_slot(idx, const_int(0));
@@ -1607,7 +1756,11 @@ void Lowerer::lower_for_seq(For& f) {
     // 水位取在序列求值之后：seq 本身可能是个临时列表，不能被每轮清掉。
     int loop_mark_block = -1;
     size_t loop_mark_pos = 0;
-    VReg loop_mark = rc_mark_at(loop_mark_block, loop_mark_pos);
+    VReg loop_mark = st_->is_generator ? kNoReg : rc_mark_at(loop_mark_block, loop_mark_pos);
+    auto clean = [&]() {
+        if (st_->is_generator) cleanup_gen_mark();
+        else rc_cleanup(loop_mark);
+    };
     size_t pushes_before_loop = st_->rc_pushes;
 
     Inst j;
@@ -1621,7 +1774,7 @@ void Lowerer::lower_for_seq(For& f) {
     cmp.op = IrOp::Cmp;
     cmp.cop = CmpKind::Lt;
     cmp.a = iv;
-    cmp.b = n;
+    cmp.b = n_val();
     VReg cc = def(t_bool(), std::move(cmp));
     Inst br;
     br.op = IrOp::Branch;
@@ -1631,7 +1784,7 @@ void Lowerer::lower_for_seq(For& f) {
     emit(std::move(br));
 
     switch_to(body);
-    rc_cleanup(loop_mark);
+    clean();
     VReg iv2 = load_slot(idx, t_int());
     TypePtr et = tc_.type_of(f.target.get());
     if (!et || et->kind == TyKind::Unknown) {
@@ -1641,13 +1794,14 @@ void Lowerer::lower_for_seq(For& f) {
             et = seq_ty->sub[0];
     }
     VReg ev;
+    VReg sv = seq_val();
     if (seq_ty->kind == TyKind::Dict || seq_ty->kind == TyKind::Set) {
         // 字典/集合按插入顺序按下标取 key；返回的是容器内部的借用引用。
-        ev = call_runtime(RtFn::DictKeyAt, et, {seq, iv2});
+        ev = call_runtime(RtFn::DictKeyAt, et, {sv, iv2});
     } else {
         Inst get;
         get.op = IrOp::IndexLoad;
-        get.a = seq;
+        get.a = sv;
         get.b = iv2;
         // 遍历字符串时每个下标是 py23_str_char_at 新造的单字节串；
         // 遍历列表/元组时是容器内部的借用引用。
@@ -1669,7 +1823,7 @@ void Lowerer::lower_for_seq(For& f) {
     }
 
     switch_to(incr);
-    rc_cleanup(loop_mark);
+    clean();
     VReg iv3 = load_slot(idx, t_int());
     Inst add;
     add.op = IrOp::Bin;
@@ -1684,7 +1838,7 @@ void Lowerer::lower_for_seq(For& f) {
     emit(std::move(ji));
 
     switch_to(orelse);
-    rc_cleanup(loop_mark);
+    clean();
     if (!f.orelse.empty()) {
         stmts(f.orelse);
         if (!terminated()) {
@@ -1695,8 +1849,8 @@ void Lowerer::lower_for_seq(For& f) {
         }
     }
     switch_to(end);
-    rc_cleanup(loop_mark);
-    if (st_->rc_pushes == pushes_before_loop) {
+    clean();
+    if (!st_->is_generator && st_->rc_pushes == pushes_before_loop) {
         erase_cleanup(body, loop_mark);
         erase_cleanup(incr, loop_mark);
         erase_cleanup(orelse, loop_mark);
@@ -1760,6 +1914,13 @@ void Lowerer::emit_cleanup_exits(size_t down_to) {
                 call_void(RtFn::HandlerDiscard, {load_slot(c.handler_slot, t_int())});
                 emit_exit_call(c, false);
                 break;
+            case FuncCtx::Cleanup::Kind::AsyncWith: {
+                call_void(RtFn::HandlerDiscard, {load_slot(c.handler_slot, t_int())});
+                VReg coro = emit_exit_call(c, false);
+                // return/break/continue 路径也要把 __aexit__ 跑完。
+                suspend_on_awaitable(coro, c.inner_ret, 1, 1, i - 1);
+                break;
+            }
             case FuncCtx::Cleanup::Kind::Finally:
                 call_void(RtFn::HandlerDiscard, {load_slot(c.handler_slot, t_int())});
                 if (c.body) stmts(*c.body);
@@ -1773,7 +1934,7 @@ void Lowerer::emit_cleanup_exits(size_t down_to) {
 
 void Lowerer::lower_with(With& w) {
     if (w.is_async) {
-        unsupported(w, "'async with'");
+        lower_async_with_item(w, 0);
         return;
     }
     lower_with_item(w, 0);
@@ -1836,6 +1997,7 @@ void Lowerer::lower_with_item(With& w, size_t idx) {
     FuncCtx::Cleanup cf;
     cf.kind = FuncCtx::Cleanup::Kind::With;
     cf.handler_slot = hs;
+    cf.land = land;
     cf.mgr_slot = ms;
     cf.exit_slot = ex->slot;
     cf.nargs = static_cast<int>(ex->call_sig->pos.size());
@@ -1875,6 +2037,147 @@ void Lowerer::lower_with_item(With& w, size_t idx) {
     switch_to(rethrow);
     call_void(RtFn::ExcReraise, {});
     end_unreachable();
+    switch_to(end);
+}
+
+void Lowerer::lower_async_with_item(With& w, size_t idx) {
+    if (idx >= w.items.size()) {
+        stmts(w.body);
+        return;
+    }
+    if (!st_->is_coroutine) {
+        err(w.line, w.col, "'async with' outside async function");
+        stmts(w.body);
+        return;
+    }
+    auto& item = w.items[idx];
+    TypePtr raw = tc_.type_of(item.context.get());
+    TypePtr ct = strip_optional(raw);
+    VReg mgr = expr(*item.context);
+    if (ct != raw && raw && raw->kind == TyKind::Optional)
+        mgr = guard_not_none(mgr, "async with item");
+    if (!ct || ct->kind != TyKind::Class || !ct->cls) {
+        err(item.context->line, item.context->col,
+            "async with requires a class instance with async __aenter__/__aexit__");
+        lower_async_with_item(w, idx + 1);
+        return;
+    }
+    auto* en = ct->cls->method("__aenter__");
+    auto* ex = ct->cls->method("__aexit__");
+    if (!en || !en->call_sig || !en->call_sig->ret ||
+        en->call_sig->ret->kind != TyKind::Coroutine) {
+        err(item.context->line, item.context->col,
+            std::format("'{}' does not define async __aenter__", ct->cls->name));
+        lower_async_with_item(w, idx + 1);
+        return;
+    }
+    if (!ex || !ex->call_sig || !ex->call_sig->ret ||
+        ex->call_sig->ret->kind != TyKind::Coroutine) {
+        err(item.context->line, item.context->col,
+            std::format("'{}' does not define async __aexit__", ct->cls->name));
+        lower_async_with_item(w, idx + 1);
+        return;
+    }
+    int ms = new_temp_slot(ct);
+    store_slot(ms, mgr);
+
+    // __aenter__：调用得到协程，await 出绑定值。
+    Call enter_call;
+    enter_call.line = w.line;
+    enter_call.col = w.col;
+    std::vector<VReg> eargs = bind_args(enter_call, en->call_sig, en->def);
+    Inst vc;
+    vc.op = IrOp::VCall;
+    vc.a = load_slot(ms, ct);
+    vc.imm = en->slot;
+    vc.args = std::move(eargs);
+    VReg enter_coro = def_heap(en->call_sig->ret, std::move(vc));
+    TypePtr ert = en->call_sig->ret->sub.empty() ? t_unknown() : en->call_sig->ret->sub[0];
+    VReg ev = suspend_on_awaitable(enter_coro, ert, item.context->line, item.context->col);
+    if (item.optional_vars) assign_to(*item.optional_vars, ev, ert);
+
+    int hs = push_handler();
+    VReg sj = setjmp_handler(hs);
+    int body = new_block("awith.body");
+    int land = new_block("awith.land");
+    int end = new_block("awith.end");
+    {
+        Inst br;
+        br.op = IrOp::Branch;
+        br.a = sj;
+        br.target = land;
+        br.target2 = body;
+        emit(std::move(br));
+    }
+    switch_to(body);
+
+    FuncCtx::Cleanup cf;
+    cf.kind = FuncCtx::Cleanup::Kind::AsyncWith;
+    cf.handler_slot = hs;
+    cf.land = land;
+    cf.mgr_slot = ms;
+    cf.exit_slot = ex->slot;
+    cf.nargs = static_cast<int>(ex->call_sig->pos.size());
+    cf.ret = ex->call_sig->ret;
+    cf.inner_ret = ex->call_sig->ret->sub.empty() ? t_unknown() : ex->call_sig->ret->sub[0];
+    st_->cleanups.push_back(cf);
+
+    lower_async_with_item(w, idx + 1);
+
+    st_->cleanups.pop_back();
+    if (!terminated()) {
+        call_void(RtFn::HandlerLeave, {load_slot(hs, t_int())});
+        VReg coro = emit_exit_call(cf, false);
+        suspend_on_awaitable(coro, cf.inner_ret, w.line, w.col);
+        Inst j;
+        j.op = IrOp::Jump;
+        j.target = end;
+        emit(std::move(j));
+    }
+
+    switch_to(land);
+    call_void(RtFn::HandlerLeave, {load_slot(hs, t_int())});
+    // 异常上下文不能带着 pending 穿过 await，先抄到槽里再清空。
+    VReg tname = call_runtime(RtFn::ExcTypeName, t_str(), {});
+    push_temp(tname);
+    VReg tmsg = call_runtime(RtFn::ExcMessage, t_str(), {});
+    push_temp(tmsg);
+    int ts = new_temp_slot(t_str());
+    store_slot(ts, tname);
+    int msgs = new_temp_slot(t_str());
+    store_slot(msgs, tmsg);
+    call_void(RtFn::ExcClear, {});
+    {
+        std::vector<VReg> args;
+        for (int i = 0; i < cf.nargs; ++i) {
+            if (i == 0) args.push_back(load_slot(ts, t_str()));
+            else if (i == 1) args.push_back(load_slot(msgs, t_str()));
+            else args.push_back(const_none());
+        }
+        Inst vc2;
+        vc2.op = IrOp::VCall;
+        vc2.a = load_slot(ms, ct);
+        vc2.imm = ex->slot;
+        vc2.args = std::move(args);
+        VReg coro = def_heap(cf.ret, std::move(vc2));
+        VReg keep = suspend_on_awaitable(coro, cf.inner_ret, w.line, w.col);
+        int suppress = new_block("awith.suppress");
+        int rethrow = new_block("awith.rethrow");
+        Inst cb;
+        cb.op = IrOp::Branch;
+        cb.a = keep;
+        cb.target = suppress;
+        cb.target2 = rethrow;
+        emit(std::move(cb));
+        switch_to(suppress);
+        Inst j;
+        j.op = IrOp::Jump;
+        j.target = end;
+        emit(std::move(j));
+        switch_to(rethrow);
+        call_void(RtFn::Raise, {load_slot(ts, t_str()), load_slot(msgs, t_str())});
+        end_unreachable();
+    }
     switch_to(end);
 }
 
@@ -2049,6 +2352,17 @@ VReg Lowerer::construct_imported(const ImportedClass& ic, Call& c, TypePtr cls_t
 }
 
 std::optional<RtFn> Lowerer::native_fn(const std::string& module, const std::string& member) {
+    if (module == "asyncio") {
+        // 只为 from-import 登记别名；真正降级走 lower_asyncio。
+        if (member == "run") return RtFn::AsyncioRun;
+        if (member == "sleep") return RtFn::AsyncioSleep;
+        if (member == "gather") return RtFn::AsyncioGather;
+        if (member == "create_task") return RtFn::AsyncioCreateTask;
+        if (member == "Future") return RtFn::AsyncioFutureNew;
+        if (member == "wait_readable" || member == "wait_writable")
+            return RtFn::AsyncioWaitFd;
+        return std::nullopt;
+    }
     if (module == "math") {
         if (member == "sqrt") return RtFn::MathSqrt;
         if (member == "floor") return RtFn::MathFloor;
@@ -2251,6 +2565,7 @@ void Lowerer::lower_try_core(Try& t) {
     FuncCtx::Cleanup cf;
     cf.kind = FuncCtx::Cleanup::Kind::Handler;
     cf.handler_slot = hs;
+    cf.land = land;
     st_->cleanups.push_back(cf);
     stmts(t.body);
     st_->cleanups.pop_back();
@@ -2440,13 +2755,16 @@ void Lowerer::lower_finally(Try& t) {
     FuncCtx::Cleanup cf;
     cf.kind = FuncCtx::Cleanup::Kind::Finally;
     cf.handler_slot = hs;
+    cf.land = land;
     cf.body = &t.finalbody;
     st_->cleanups.push_back(cf);
     lower_try_core(t);
     st_->cleanups.pop_back();
     if (!terminated()) {
         call_void(RtFn::HandlerLeave, {load_slot(hs, t_int())});
+        ++finally_body_depth_;
         stmts(t.finalbody);
+        --finally_body_depth_;
         Inst j;
         j.op = IrOp::Jump;
         j.target = end;
@@ -2455,13 +2773,21 @@ void Lowerer::lower_finally(Try& t) {
 
     switch_to(land);
     call_void(RtFn::HandlerLeave, {load_slot(hs, t_int())});
+    ++finally_body_depth_;
     stmts(t.finalbody);
+    --finally_body_depth_;
     call_void(RtFn::ExcReraise, {});
     end_unreachable();
     switch_to(end);
 }
 
 int Lowerer::compile_function_body(FunctionDef& f, FuncInfoPtr info, const std::string& label) {
+    if (f.is_async) {
+        int kind = (info && info->is_async_generator) ? 2 : 1;
+        return compile_suspendable_function(f, info, label, kind);
+    }
+    if (info && info->is_generator) return compile_suspendable_function(f, info, label, 0);
+
     IRFunction* irf = mod_.add_func(label);
     int fidx = static_cast<int>(mod_.funcs.size()) - 1;
 
@@ -2563,12 +2889,878 @@ int Lowerer::compile_function_body(FunctionDef& f, FuncInfoPtr info, const std::
     return fidx;
 }
 
-void Lowerer::lower_funcdef(FunctionDef& f) {
-    if (f.is_async) {
-        unsupported(f, "'async def'");
-        return;
+// ────────────────────────── 生成器 / 协程 ──────────────────────────
+
+void Lowerer::cleanup_gen_mark() {
+    if (st_->gen_mark_slot < 0) return;
+    rc_cleanup(load_slot(st_->gen_mark_slot, t_int()));
+}
+
+void Lowerer::gen_finish(VReg v, TypePtr vty) {
+    // 协程的返回值放进 out，由事件循环取走；生成器忽略。
+    if (v != kNoReg && ir_is_heap(vty)) rc_inc(v);
+    cleanup_gen_mark();
+    release_slots();
+    Inst d;
+    d.op = IrOp::GenDone;
+    d.a = v;
+    emit(std::move(d));
+}
+
+VReg Lowerer::lower_yield(Expr& y) {
+    if (!st_->is_generator) {
+        err(y.line, y.col, "'yield' outside generator");
+        return const_none();
+    }
+    if (yield_ctx_node_ != &y) {
+        err(y.line, y.col,
+            "'yield' is only supported as a statement or assignment value in this version");
+    }
+    if (finally_body_depth_ > 0)
+        err(y.line, y.col, "'yield' inside finally is not supported yet");
+    // except 体里的 yield 需要跨挂起保存异常上下文，暂不支持。
+    for (auto& c : st_->cleanups) {
+        if (c.kind == FuncCtx::Cleanup::Kind::ExcDone) {
+            err(y.line, y.col, "'yield' inside except is not supported yet");
+            break;
+        }
+    }    auto& yn = static_cast<Yield&>(y);
+    VReg v = yn.value ? expr(*yn.value) : const_none();
+    TypePtr vt = yn.value ? tc_.type_of(yn.value.get()) : t_none();
+    return emit_yield(v, vt);
+}
+
+VReg Lowerer::emit_yield(VReg v, TypePtr vt) {
+    // 帧里的 out 槽接管一个引用；未知类型按注册表保守 retain。
+    if (ir_is_heap(vt)) rc_inc(v);
+    else if (!vt || vt->kind == TyKind::Unknown) rc_inc_unknown(v);
+    // 挂起前把本次 resume 的临时值清干净：临时栈是全局的，不清会把
+    // 调用方的临时值连同本帧的一起留给下一次 resume。
+    cleanup_gen_mark();
+    // handler 记录不能留在全局栈上：resume 帧已经返回，longjmp 进去
+    // 就是野跳。从内到外摘下来，恢复时按原顺序重挂并重新 setjmp。
+    for (size_t i = st_->cleanups.size(); i > 0; --i) {
+        const auto& c = st_->cleanups[i - 1];
+        if (c.kind == FuncCtx::Cleanup::Kind::With ||
+            c.kind == FuncCtx::Cleanup::Kind::AsyncWith ||
+            c.kind == FuncCtx::Cleanup::Kind::Finally ||
+            c.kind == FuncCtx::Cleanup::Kind::Handler)
+            call_void(RtFn::HandlerSuspend, {load_slot(c.handler_slot, t_int())});
+    }
+    int id = st_->gen_next_state++;
+    int cont = new_block("g.resume");
+    FuncCtx::GenState gs;
+    gs.id = id;
+    gs.cont = cont;
+    gs.cleanups = st_->cleanups;  // close 时需要按这份快照跑清理
+    st_->gen_states.push_back(std::move(gs));
+    Inst gy;
+    gy.op = IrOp::GenYield;
+    gy.a = v;
+    gy.imm = id;
+    emit(std::move(gy));
+    switch_to(cont);
+    // yield 表达式的值是 send() 传进来的（普通 next 是 None），静态不可知。
+    Inst gs2;
+    gs2.op = IrOp::GenSent;
+    return def(t_unknown(), std::move(gs2));
+}
+
+// yield from：把子迭代器的值逐个转 yield 出去；子生成器额外支持
+// send 转发。close 时外层帧释放槽位会把子生成器 finalize。
+VReg Lowerer::lower_yield_from(YieldFrom& y) {
+    if (!st_->is_generator) {
+        err(y.line, y.col, "'yield from' outside generator");
+        return const_none();
+    }
+    if (st_->is_coroutine) {
+        err(y.line, y.col, "'yield from' inside an async function is not supported");
+        expr(*y.value);
+        return const_none();
+    }
+    if (finally_body_depth_ > 0)
+        err(y.line, y.col, "'yield from' inside finally is not supported yet");
+    for (auto& c : st_->cleanups) {
+        if (c.kind == FuncCtx::Cleanup::Kind::ExcDone) {
+            err(y.line, y.col, "'yield from' inside except is not supported yet");
+            break;
+        }
+    }
+    TypePtr vt = tc_.type_of(y.value.get());
+    VReg sub = expr(*y.value);
+    Inst cn;
+    cn.op = IrOp::ConstNone;
+    VReg result = def(t_unknown(), std::move(cn));
+
+    auto is_seq = [&](const TypePtr& t) {
+        return t && (t->kind == TyKind::List || t->kind == TyKind::Tuple ||
+                     t->kind == TyKind::Str || t->kind == TyKind::Dict ||
+                     t->kind == TyKind::Set);
+    };
+
+    if (!vt || vt->kind == TyKind::Unknown || vt->kind == TyKind::Generator) {
+        TypePtr styp = vt ? vt : t_unknown();
+        TypePtr et = t_unknown();
+        if (vt && vt->kind == TyKind::Generator && !vt->sub.empty()) et = vt->sub[0];
+        int sub_slot = new_temp_slot(styp);
+        store_slot(sub_slot, sub);
+        int ok_slot = new_temp_slot(t_int());
+        store_slot(ok_slot, const_int(0));
+
+        int cond = new_block("yfrom.cond");
+        int body = new_block("yfrom.body");
+        int end = new_block("yfrom.end");
+        Inst j;
+        j.op = IrOp::Jump;
+        j.target = cond;
+        emit(std::move(j));
+
+        switch_to(cond);
+        // 恢复后 p[2] 是调用方 send 进来的值；第一次 resume 时它是初始
+        // 值（next 为 None），直接转发给子生成器。
+        Inst se;
+        se.op = IrOp::GenSent;
+        VReg sent = def(t_unknown(), std::move(se));
+        Inst sa;
+        sa.op = IrOp::SlotAddr;
+        sa.idx = ok_slot;
+        VReg okp = def(t_unknown(), std::move(sa));
+        Inst call;
+        call.op = IrOp::CallRt;
+        call.imm = static_cast<int64_t>(RtFn::GenSendOpt);
+        call.args = {load_slot(sub_slot, styp), sent, okp};
+        VReg ev = def(t_unknown(), std::move(call));
+        if (ir_is_heap(et)) push_temp(ev);
+        VReg ok = load_slot(ok_slot, t_int());
+        Inst br;
+        br.op = IrOp::Branch;
+        br.a = ok;
+        br.target = body;
+        br.target2 = end;
+        emit(std::move(br));
+
+        switch_to(body);
+        emit_yield(ev, et);
+        Inst jb;
+        jb.op = IrOp::Jump;
+        jb.target = cond;
+        emit(std::move(jb));
+        switch_to(end);
+        return result;
     }
 
+    if (!is_seq(vt)) {
+        err(y.value->line, y.value->col,
+            std::format("cannot 'yield from' '{}'", type_name(vt)));
+        return result;
+    }
+
+    TypePtr et = t_unknown();
+    if (vt->kind == TyKind::Str) et = t_str();
+    else if (!vt->sub.empty()) et = vt->sub[0];
+
+    int seq_slot = new_temp_slot(vt);
+    store_slot(seq_slot, sub);
+    Inst ln;
+    ln.op = IrOp::Len;
+    ln.a = sub;
+    VReg n = def(t_int(), std::move(ln));
+    int n_slot = new_temp_slot(t_int());
+    store_slot(n_slot, n);
+    int idx_slot = new_temp_slot(t_int());
+    store_slot(idx_slot, const_int(0));
+
+    int cond = new_block("yfrom.seq.cond");
+    int body = new_block("yfrom.seq.body");
+    int incr = new_block("yfrom.seq.incr");
+    int end = new_block("yfrom.seq.end");
+    Inst j;
+    j.op = IrOp::Jump;
+    j.target = cond;
+    emit(std::move(j));
+
+    switch_to(cond);
+    VReg iv = load_slot(idx_slot, t_int());
+    Inst cmp;
+    cmp.op = IrOp::Cmp;
+    cmp.cop = CmpKind::Lt;
+    cmp.a = iv;
+    cmp.b = load_slot(n_slot, t_int());
+    VReg cc = def(t_bool(), std::move(cmp));
+    Inst br;
+    br.op = IrOp::Branch;
+    br.a = cc;
+    br.target = body;
+    br.target2 = end;
+    emit(std::move(br));
+
+    switch_to(body);
+    cleanup_gen_mark();
+    VReg sv = load_slot(seq_slot, vt);
+    VReg iv2 = load_slot(idx_slot, t_int());
+    VReg ev;
+    if (vt->kind == TyKind::Dict || vt->kind == TyKind::Set) {
+        ev = call_runtime(RtFn::DictKeyAt, et, {sv, iv2});
+    } else {
+        Inst get;
+        get.op = IrOp::IndexLoad;
+        get.a = sv;
+        get.b = iv2;
+        ev = vt->kind == TyKind::Str ? def_heap(et, std::move(get))
+                                     : def(et, std::move(get));
+    }
+    emit_yield(ev, et);
+    Inst jb;
+    jb.op = IrOp::Jump;
+    jb.target = incr;
+    emit(std::move(jb));
+
+    switch_to(incr);
+    cleanup_gen_mark();
+    VReg iv3 = load_slot(idx_slot, t_int());
+    Inst add;
+    add.op = IrOp::Bin;
+    add.bop = BinKind::Add;
+    add.a = iv3;
+    add.b = const_int(1);
+    VReg iv4 = def(t_int(), std::move(add));
+    store_slot(idx_slot, iv4);
+    Inst ji;
+    ji.op = IrOp::Jump;
+    ji.target = cond;
+    emit(std::move(ji));
+
+    switch_to(end);
+    return result;
+}
+
+VReg Lowerer::suspend_on_awaitable(VReg w, TypePtr result_ty, int line, int col,
+                                   size_t active_limit) {
+    (void)line;
+    (void)col;
+    TypePtr vt = vreg_ty(w);
+    // 把 awaitable 的所有权交给 out，事件循环接管。
+    if (ir_is_heap(vt)) rc_inc(w);
+    else if (!vt || vt->kind == TyKind::Unknown) rc_inc_unknown(w);
+    cleanup_gen_mark();
+    // handler 记录和 yield 一样要在挂起时摘下来。
+    size_t n_active = std::min(st_->cleanups.size(), active_limit);
+    for (size_t i = n_active; i > 0; --i) {
+        const auto& c = st_->cleanups[i - 1];
+        if (c.kind == FuncCtx::Cleanup::Kind::With ||
+            c.kind == FuncCtx::Cleanup::Kind::AsyncWith ||
+            c.kind == FuncCtx::Cleanup::Kind::Finally ||
+            c.kind == FuncCtx::Cleanup::Kind::Handler)
+            call_void(RtFn::HandlerSuspend, {load_slot(c.handler_slot, t_int())});
+    }
+    int id = st_->gen_next_state++;
+    int cont = new_block("g.await");
+    FuncCtx::GenState gs;
+    gs.id = id;
+    gs.cont = cont;
+    gs.cleanups.assign(st_->cleanups.begin(),
+                       st_->cleanups.begin() + static_cast<std::ptrdiff_t>(n_active));
+    st_->gen_states.push_back(std::move(gs));
+    Inst ga;
+    ga.op = IrOp::GenAwait;
+    ga.a = w;
+    ga.imm = id;
+    emit(std::move(ga));
+    switch_to(cont);
+    // 恢复时 sent 里是 await 的结果（或由 throw 分发注入异常）。
+    TypePtr at = result_ty;
+    Inst gs2;
+    gs2.op = IrOp::GenSent;
+    VReg sent = def(at ? at : t_unknown(), std::move(gs2));
+    // 事件循环把结果的引用转移给这里；堆结果交给临时栈，语句末释放。
+    if (ir_is_heap(at)) push_temp(sent);
+    return sent;
+}
+
+VReg Lowerer::lower_await(Expr& e) {
+    if (!st_->is_coroutine) {
+        err(e.line, e.col, "'await' outside async function");
+        return const_none();
+    }
+    if (await_ctx_node_ != &e) {
+        err(e.line, e.col,
+            "'await' is only supported as a statement, assignment value or return value "
+            "in this version");
+    }
+    if (finally_body_depth_ > 0)
+        err(e.line, e.col, "'await' inside finally is not supported yet");
+    for (auto& c : st_->cleanups) {
+        if (c.kind == FuncCtx::Cleanup::Kind::ExcDone) {
+            err(e.line, e.col, "'await' inside except is not supported yet");
+            break;
+        }
+    }
+    auto& aw = static_cast<Await&>(e);
+    VReg v = expr(*aw.value);
+    return suspend_on_awaitable(v, tc_.type_of(&e), e.line, e.col);
+}
+
+void Lowerer::lower_for_gen(For& f, VReg seq, TypePtr seq_ty) {
+    TypePtr et = seq_ty->sub.empty() ? t_unknown() : seq_ty->sub[0];
+    // 生成器里 vreg 不跨 yield：序列落槽，每次重新读。
+    int seq_slot = -1;
+    if (st_->is_generator) {
+        seq_slot = new_temp_slot(seq_ty);
+        store_slot(seq_slot, seq);
+    }
+    auto seq_val = [&]() { return seq_slot >= 0 ? load_slot(seq_slot, seq_ty) : seq; };
+
+    int ok_slot = new_temp_slot(t_int());
+    store_slot(ok_slot, const_int(0));
+
+    int cond = new_block("for.gen.cond");
+    int body = new_block("for.gen.body");
+    int end = new_block("for.gen.end");
+    int orelse = f.orelse.empty() ? end : new_block("for.gen.else");
+
+    Inst j;
+    j.op = IrOp::Jump;
+    j.target = cond;
+    emit(std::move(j));
+
+    switch_to(cond);
+    Inst sa;
+    sa.op = IrOp::SlotAddr;
+    sa.idx = ok_slot;
+    VReg okp = def(t_unknown(), std::move(sa));
+    Inst call;
+    call.op = IrOp::CallRt;
+    call.imm = static_cast<int64_t>(RtFn::GenNextOpt);
+    call.args = {seq_val(), okp};
+    // 返回的是机器字（浮点也是位模式），vreg 类型只能记 unknown。
+    VReg ev = def(t_unknown(), std::move(call));
+    ev = retype(ev, et);
+    if (ir_is_heap(et)) push_temp(ev);
+    VReg ok = load_slot(ok_slot, t_int());
+    Inst br;
+    br.op = IrOp::Branch;
+    br.a = ok;
+    br.target = body;
+    br.target2 = orelse;
+    emit(std::move(br));
+
+    switch_to(body);
+    assign_to(*f.target, ev, et);
+    st_->loops.push_back({end, cond});
+    st_->loop_cleanup_depth.push_back(st_->cleanups.size());
+    stmts(f.body);
+    st_->loops.pop_back();
+    st_->loop_cleanup_depth.pop_back();
+    if (!terminated()) {
+        Inst jj;
+        jj.op = IrOp::Jump;
+        jj.target = cond;
+        emit(std::move(jj));
+    }
+
+    switch_to(orelse);
+    if (!f.orelse.empty()) {
+        stmts(f.orelse);
+        if (!terminated()) {
+            Inst jj;
+            jj.op = IrOp::Jump;
+            jj.target = end;
+            emit(std::move(jj));
+        }
+    }
+    switch_to(end);
+}
+
+void Lowerer::lower_async_for(For& f, VReg seq, TypePtr seq_ty) {
+    TypePtr et = t_unknown();
+    if (seq_ty && seq_ty->kind == TyKind::AsyncGenerator) {
+        et = seq_ty->sub.empty() ? t_unknown() : seq_ty->sub[0];
+    } else if (seq_ty && seq_ty->kind != TyKind::Unknown) {
+        err(f.iter->line, f.iter->col,
+            std::format("async for requires an async generator, got '{}'",
+                        type_name(seq_ty)));
+        return;
+    }
+    // 挂起会丢 vreg：序列落帧槽。
+    int seq_slot = -1;
+    TypePtr sst = seq_ty ? seq_ty : t_unknown();
+    if (st_->is_generator) {
+        seq_slot = new_temp_slot(sst);
+        store_slot(seq_slot, seq);
+    }
+    auto seq_val = [&]() { return seq_slot >= 0 ? load_slot(seq_slot, sst) : seq; };
+
+    int hs_slot = new_temp_slot(t_int());
+    int next_try = new_block("afor.next");
+    int fetch = new_block("afor.fetch");
+    int land = new_block("afor.land");
+    int reraise_b = new_block("afor.reraise");
+    int body = new_block("afor.body");
+    int end = new_block("afor.end");
+    int orelse = f.orelse.empty() ? end : new_block("afor.else");
+
+    {
+        Inst j;
+        j.op = IrOp::Jump;
+        j.target = next_try;
+        emit(std::move(j));
+    }
+
+    switch_to(next_try);
+    VReg h = call_runtime(RtFn::HandlerPush, t_int(), {});
+    store_slot(hs_slot, h);
+    VReg sj = setjmp_handler(hs_slot);
+    {
+        Inst br;
+        br.op = IrOp::Branch;
+        br.a = sj;
+        br.target = land;
+        br.target2 = fetch;
+        emit(std::move(br));
+    }
+
+    // 这一层 handler 保护「__anext__ + await」，异常（含 StopAsyncIteration）
+    // 由 landing 分派；挂起时它和普通 try 一样会被摘下/重挂。
+    FuncCtx::Cleanup cf;
+    cf.kind = FuncCtx::Cleanup::Kind::Handler;
+    cf.handler_slot = hs_slot;
+    cf.land = land;
+    st_->cleanups.push_back(cf);
+
+    switch_to(fetch);
+    Inst call;
+    call.op = IrOp::CallRt;
+    call.imm = static_cast<int64_t>(RtFn::AsyncGenANext);
+    call.args = {seq_val()};
+    VReg w = def_heap(mk_coroutine(et), std::move(call));
+    VReg val = suspend_on_awaitable(w, et, f.line, f.col);
+
+    st_->cleanups.pop_back();
+    call_void(RtFn::HandlerLeave, {load_slot(hs_slot, t_int())});
+    assign_to(*f.target, val, et);
+    {
+        Inst j;
+        j.op = IrOp::Jump;
+        j.target = body;
+        emit(std::move(j));
+    }
+
+    switch_to(land);
+    call_void(RtFn::HandlerLeave, {load_slot(hs_slot, t_int())});
+    VReg m = call_runtime(RtFn::ExcMatches, t_bool(), {const_str("StopAsyncIteration")});
+    int stop_ok = new_block("afor.stop");
+    {
+        Inst br;
+        br.op = IrOp::Branch;
+        br.a = m;
+        br.target = stop_ok;
+        br.target2 = reraise_b;
+        emit(std::move(br));
+    }
+    switch_to(reraise_b);
+    call_void(RtFn::ExcReraise, {});
+    end_unreachable();
+    switch_to(stop_ok);
+    call_void(RtFn::ExcClear, {});
+    {
+        Inst j;
+        j.op = IrOp::Jump;
+        j.target = orelse;
+        emit(std::move(j));
+    }
+
+    switch_to(body);
+    st_->loops.push_back({end, next_try});
+    st_->loop_cleanup_depth.push_back(st_->cleanups.size());
+    stmts(f.body);
+    st_->loops.pop_back();
+    st_->loop_cleanup_depth.pop_back();
+    if (!terminated()) {
+        Inst j;
+        j.op = IrOp::Jump;
+        j.target = next_try;
+        emit(std::move(j));
+    }
+
+    switch_to(orelse);
+    if (!f.orelse.empty()) {
+        stmts(f.orelse);
+        if (!terminated()) {
+            Inst j;
+            j.op = IrOp::Jump;
+            j.target = end;
+            emit(std::move(j));
+        }
+    }
+    switch_to(end);
+}
+
+// 生成器/协程 = resume 状态机 + 创建包装。
+//   resume: 槽位在堆帧里，入口按 state 分发到续跑块；
+//   包装:   普通函数，按原签名收参，分配帧、把实参 retain 进帧槽、
+//           绑定闭包环境，返回生成器/协程对象。函数值指向包装。
+int Lowerer::compile_suspendable_function(FunctionDef& f, FuncInfoPtr info,
+                                          const std::string& label, int frame_kind) {
+    bool is_coro = frame_kind != 0;   // 协程和异步生成器都能 await
+    bool is_agen = frame_kind == 2;
+    IRFunction* irf = mod_.add_func(label + "$resume");
+    int ridx = static_cast<int>(mod_.funcs.size()) - 1;
+    IRFunction* cw = mod_.add_func(label);
+    int cidx = static_cast<int>(mod_.funcs.size()) - 1;
+
+    irf->ret = t_none();
+    irf->is_generator = true;
+    TypePtr gen_ty = (info && info->ret)
+                         ? info->ret
+                         : (is_agen ? mk_async_generator(t_unknown())
+                                    : (is_coro ? mk_coroutine(t_unknown())
+                                               : mk_generator(t_unknown())));
+    cw->ret = gen_ty;
+
+    const Scope* scope = tc_.scope_of(&f);
+    push_frame(irf, scope);
+    if (auto it = closure_meta_.find(&f); it != closure_meta_.end()) st_->closure = &it->second;
+    st_->is_generator = true;
+    st_->is_coroutine = is_coro;
+    st_->is_async_generator = is_agen;
+    st_->async_result = (is_coro && !is_agen && info) ? info->async_result : nullptr;
+    const ClosureMeta* meta = st_->closure;
+
+    int entry = new_block("g.entry");
+    int start = new_block("g.start");
+    switch_to(start);
+
+    // 形参：原值放普通槽；被内层捕获的参数另外有一个 cell 槽，
+    // create_cells 在第一次启动时建 cell。
+    auto add_param = [&](const Param& p) {
+        TypePtr T = p.ty ? p.ty : t_unknown();
+        int s = irf->new_slot(T);
+        irf->params.push_back(IRParam{p.name, T, s});
+        if (meta && meta->cell_index.count(p.name)) {
+            int cs = irf->new_slot(mk_list(T));
+            st_->cell_slots[p.name] = cs;
+            st_->param_slots[p.name] = s;
+            st_->slots[p.name] = cs;
+        } else {
+            st_->slots[p.name] = s;
+        }
+    };
+    if (info) {
+        for (auto& p : info->pos) add_param(p);
+        for (auto& p : info->kwonly) add_param(p);
+        if (info->varargs) {
+            TypePtr et = info->vararg_ty ? info->vararg_ty : t_unknown();
+            Param p;
+            p.name = info->vararg_name;
+            p.ty = mk_list(et);
+            add_param(p);
+        }
+        if (info->kwargs) {
+            TypePtr vt = info->kwarg_ty ? info->kwarg_ty : t_unknown();
+            Param p;
+            p.name = info->kwarg_name;
+            p.ty = mk_dict(t_str(), vt);
+            add_param(p);
+        }
+    }
+    if (scope) {
+        for (auto& [name, sym] : scope->vars) {
+            if (st_->slots.count(name)) continue;
+            if (st_->globals_decl.count(name)) continue;
+            TypePtr T = sym.ty ? sym.ty : t_unknown();
+            if (meta && meta->cell_index.count(name)) {
+                int cs = irf->new_slot(mk_list(T));
+                st_->cell_slots[name] = cs;
+                st_->slots[name] = cs;
+            } else {
+                st_->slots[name] = irf->new_slot(T);
+            }
+        }
+    }
+
+    // 闭包环境是帧里的一个普通堆槽：创建时 retain 闭包，帧销毁时 dec。
+    TypePtr env_ty = new_ty(TyKind::Func);
+    int env_slot = -1;
+    if (meta && !meta->env.empty()) {
+        env_slot = irf->new_slot(env_ty);
+        st_->env_slot = env_slot;
+    }
+    irf->env_slot = -1;  // %r10 只在创建包装里用
+
+    if (auto pit = func_parent_.find(&f); pit != func_parent_.end() && pit->second) {
+        st_->self_def = &f;
+        st_->self_idx = cidx;
+        st_->self_type = new_ty(TyKind::Func);
+        st_->self_type->fn = info;
+    }
+
+    // 临时值水位每次 resume 重新记录（vreg 不跨 yield）。
+    int mark_slot = irf->new_slot(t_int());
+    st_->gen_mark_slot = mark_slot;
+    st_->fn_mark = kNoReg;
+
+    // 创建包装已经 retain 过实参，这里不再 inc_params。
+    create_cells();
+    stmts(f.body);
+    if (!terminated()) gen_finish();
+
+    // ── close 路径：按挂起点快照跑 finally / __exit__，再释放帧槽 ──
+    auto has_runtime_handler = [](const FuncCtx::Cleanup& c) {
+        return c.kind == FuncCtx::Cleanup::Kind::Handler ||
+               c.kind == FuncCtx::Cleanup::Kind::With ||
+               c.kind == FuncCtx::Cleanup::Kind::AsyncWith ||
+               c.kind == FuncCtx::Cleanup::Kind::Finally;
+    };
+    std::vector<std::pair<int, int>> close_targets;
+    for (auto& gs : st_->gen_states) {
+        // 只要挂起点有 handler 记录，就要一条 close 块：即使没有 with/finally
+        // 动作，也必须把摘下来的记录 free 掉。
+        bool has_action = false;
+        for (auto& c : gs.cleanups)
+            if (has_runtime_handler(c)) has_action = true;
+        if (!has_action) continue;
+        int cb = new_block("g.close");
+        switch_to(cb);
+        for (size_t i = gs.cleanups.size(); i > 0; --i) {
+            const auto& c = gs.cleanups[i - 1];
+            if (c.kind == FuncCtx::Cleanup::Kind::With) {
+                emit_exit_call(c, false);
+            } else if (c.kind == FuncCtx::Cleanup::Kind::Finally && c.body) {
+                ++finally_body_depth_;
+                stmts(*c.body);
+                --finally_body_depth_;
+            }
+        }
+        // 挂起时摘下来的 handler 记录不会有人再弹栈，close 路径负责释放。
+        for (auto& c : gs.cleanups)
+            if (has_runtime_handler(c))
+                call_void(RtFn::HandlerFree, {load_slot(c.handler_slot, t_int())});
+        cleanup_gen_mark();
+        release_slots();
+        Inst d;
+        d.op = IrOp::GenDone;
+        emit(std::move(d));
+        close_targets.push_back({gs.id, cb});
+    }
+    int close_default = new_block("g.close.default");
+    switch_to(close_default);
+    cleanup_gen_mark();
+    release_slots();
+    {
+        Inst d;
+        d.op = IrOp::GenDone;
+        emit(std::move(d));
+    }
+
+    // ── 入口分发 ────────────────────────────────────────────────
+    // 每次 resume 先取临时栈水位；close 走清理分发，否则按 state 恢复。
+    // try/with/finally 的 handler 在 yield 时被摘掉，恢复时必须按原顺序
+    // 重新压栈并重新 setjmp（jmp_buf 属于已经返回的旧 resume 帧）。
+    switch_to(entry);
+    VReg m0 = call_runtime(RtFn::RcMark, t_int(), {});
+    store_slot(mark_slot, m0);
+    Inst gsit;
+    gsit.op = IrOp::GenGetState;
+    VReg state = def(t_int(), std::move(gsit));
+    Inst gcl;
+    gcl.op = IrOp::GenClosing;
+    VReg closing = def(t_int(), std::move(gcl));
+    int close_disp = new_block("g.close.dispatch");
+    int normal_disp = new_block("g.dispatch");
+    int throw_disp = is_coro ? new_block("g.throw.dispatch") : -1;
+    int after_close = new_block("g.not.closing");
+    {
+        Inst br;
+        br.op = IrOp::Branch;
+        br.a = closing;
+        br.target = close_disp;
+        br.target2 = after_close;
+        emit(std::move(br));
+    }
+    switch_to(after_close);
+    if (is_coro) {
+        Inst ge;
+        ge.op = IrOp::GenGetExc;
+        VReg exc = def(t_int(), std::move(ge));
+        Inst br;
+        br.op = IrOp::Branch;
+        br.a = exc;
+        br.target = throw_disp;
+        br.target2 = normal_disp;
+        emit(std::move(br));
+    } else {
+        Inst j;
+        j.op = IrOp::Jump;
+        j.target = normal_disp;
+        emit(std::move(j));
+    }
+
+    int cur = normal_disp;
+    for (auto& gs : st_->gen_states) {
+        switch_to(cur);
+        Inst cmp;
+        cmp.op = IrOp::Cmp;
+        cmp.cop = CmpKind::Eq;
+        cmp.a = state;
+        cmp.b = const_int(gs.id);
+        VReg cc = def(t_bool(), std::move(cmp));
+        std::vector<const FuncCtx::Cleanup*> hs;
+        for (auto& c : gs.cleanups)
+            if (has_runtime_handler(c)) hs.push_back(&c);
+        int target = gs.cont;
+        if (!hs.empty()) target = new_block("g.arm");
+        int nextb = new_block("g.disp");
+        Inst br;
+        br.op = IrOp::Branch;
+        br.a = cc;
+        br.target = target;
+        br.target2 = nextb;
+        emit(std::move(br));
+        if (!hs.empty()) {
+            switch_to(target);
+            for (const auto* c : hs) {
+                call_void(RtFn::HandlerRearm, {load_slot(c->handler_slot, t_int())});
+                VReg sj = setjmp_handler(c->handler_slot);
+                int nb = new_block("g.arm.next");
+                Inst ab;
+                ab.op = IrOp::Branch;
+                ab.a = sj;
+                ab.target = c->land;
+                ab.target2 = nb;
+                emit(std::move(ab));
+                switch_to(nb);
+            }
+            Inst jj;
+            jj.op = IrOp::Jump;
+            jj.target = gs.cont;
+            emit(std::move(jj));
+        }
+        cur = nextb;
+    }
+    switch_to(cur);
+    {
+        Inst j;
+        j.op = IrOp::Jump;
+        j.target = start;
+        emit(std::move(j));
+    }
+
+    // ── 异常注入分发（协程）────────────────────────────────────
+    // 被 await 的对象失败时，事件循环把异常放进帧里并重新调度本协程。
+    // 恢复路径先重挂 handler 再抛：try/except 才能抓到跨 await 的异常。
+    if (is_coro) {
+        int tcur = throw_disp;
+        for (auto& gs : st_->gen_states) {
+            switch_to(tcur);
+            Inst cmp;
+            cmp.op = IrOp::Cmp;
+            cmp.cop = CmpKind::Eq;
+            cmp.a = state;
+            cmp.b = const_int(gs.id);
+            VReg cc = def(t_bool(), std::move(cmp));
+            std::vector<const FuncCtx::Cleanup*> hs;
+            for (auto& c : gs.cleanups)
+                if (has_runtime_handler(c)) hs.push_back(&c);
+            int arm = new_block("g.throw.arm");
+            int nextb = new_block("g.throw.disp");
+            Inst br;
+            br.op = IrOp::Branch;
+            br.a = cc;
+            br.target = arm;
+            br.target2 = nextb;
+            emit(std::move(br));
+            switch_to(arm);
+            for (const auto* c : hs)
+                call_void(RtFn::HandlerRearm, {load_slot(c->handler_slot, t_int())});
+            Inst rt;
+            rt.op = IrOp::GenRethrow;
+            emit(std::move(rt));
+            tcur = nextb;
+        }
+        switch_to(tcur);
+        Inst rt;
+        rt.op = IrOp::GenRethrow;
+        emit(std::move(rt));
+    }
+
+    switch_to(close_disp);
+    int ccur = st_->blk;
+    for (auto& [id, blk] : close_targets) {
+        switch_to(ccur);
+        Inst cmp;
+        cmp.op = IrOp::Cmp;
+        cmp.cop = CmpKind::Eq;
+        cmp.a = state;
+        cmp.b = const_int(id);
+        VReg cc = def(t_bool(), std::move(cmp));
+        int nextb = new_block("g.close.disp");
+        Inst br;
+        br.op = IrOp::Branch;
+        br.a = cc;
+        br.target = blk;
+        br.target2 = nextb;
+        emit(std::move(br));
+        ccur = nextb;
+    }
+    switch_to(ccur);
+    {
+        Inst j;
+        j.op = IrOp::Jump;
+        j.target = close_default;
+        emit(std::move(j));
+    }
+
+    IRGenerator gin;
+    gin.resume = ridx;
+    gin.n_slots = static_cast<int>(irf->slot_ty.size());
+    gin.frame_kind = frame_kind;
+    gin.slot_heap.assign(static_cast<size_t>(gin.n_slots), 0);
+    for (int s = 0; s < gin.n_slots; ++s)
+        if (!st_->borrow_slots.count(s) && ir_is_heap(irf->slot_ty[static_cast<size_t>(s)]))
+            gin.slot_heap[static_cast<size_t>(s)] = 1;
+    int gidx = static_cast<int>(mod_.generators.size());
+    mod_.generators.push_back(std::move(gin));
+
+    pop_frame();
+
+    // 创建包装：参数槽与 resume 完全一致，帧里的槽位按同一编号填。
+    cw->params = irf->params;
+    cw->slot_ty = irf->slot_ty;
+    cw->env_slot = env_slot;
+    push_frame(cw, nullptr);
+    int b0 = new_block("entry");
+    switch_to(b0);
+    Inst gn;
+    gn.op = IrOp::GenNew;
+    gn.imm = gidx;
+    VReg gen = def(gen_ty, std::move(gn));
+    for (auto& p : cw->params) {
+        VReg v = load_slot(p.slot, p.ty);
+        if (ir_is_heap(p.ty)) rc_inc(v);
+        Inst si;
+        si.op = IrOp::GenSetSlot;
+        si.idx = p.slot;
+        si.args = {gen, v};
+        emit(std::move(si));
+    }
+    if (env_slot >= 0) {
+        VReg ev = load_slot(env_slot, env_ty);
+        rc_inc(ev);
+        Inst si;
+        si.op = IrOp::GenSetSlot;
+        si.idx = env_slot;
+        si.args = {gen, ev};
+        emit(std::move(si));
+    }
+    Inst r;
+    r.op = IrOp::Return;
+    r.a = gen;
+    emit(std::move(r));
+    pop_frame();
+    return cidx;
+}
+
+void Lowerer::lower_funcdef(FunctionDef& f) {
     FuncInfoPtr info = tc_.func_info(&f);
     TypePtr fty = new_ty(TyKind::Func);
     fty->fn = info;
@@ -2700,10 +3892,6 @@ void Lowerer::lower_classdef(ClassDef& c) {
         if (!m.def) continue;
         if (!m.def->decorators.empty()) {
             err(m.def->line, m.def->col, "decorators on methods are not supported yet");
-            continue;
-        }
-        if (m.def->is_async) {
-            err(m.def->line, m.def->col, "'async def' methods are not supported yet");
             continue;
         }
         std::string label = std::format("{}_{}_{}", c.name, m.name, mod_.funcs.size());
@@ -3104,6 +4292,10 @@ VReg Lowerer::expr(Expr& e) {
             assign_to(*n.target, v, tc_.type_of(n.value.get()));
             return v;
         }
+        case ExprKind::Yield: return lower_yield(e);
+        case ExprKind::Await: return lower_await(e);
+        case ExprKind::YieldFrom:
+            return lower_yield_from(static_cast<YieldFrom&>(e));
         case ExprKind::FormattedValue: {
             // 顶层 FormattedValue 只会出现在 f-string 内部，单独出现说明
             // 上游构造有问题；按表达式处理即可。
@@ -3570,6 +4762,26 @@ VReg Lowerer::lower_comp(Expr& e) {
     TypePtr rty = tc_.type_of(&e);
     TypePtr elem_ty = t_unknown();
     TypePtr val_ty = t_unknown();
+
+    bool any_async = false;
+    for (auto& g : *gens)
+        if (static_cast<Comprehension&>(*g).is_async) any_async = true;
+    bool async_mode = false;
+    if (any_async) {
+        if (!st_->is_coroutine) {
+            err(e.line, e.col, "'async for' in a comprehension requires an async function");
+        } else if (comp_ctx_node_ != &e) {
+            err(e.line, e.col,
+                "'async for' in a comprehension is only supported as a statement, "
+                "assignment or return value");
+        } else if (e.kind == ExprKind::GeneratorExp) {
+            err(e.line, e.col, "async generator expressions are not supported yet");
+        } else {
+            async_mode = true;
+        }
+        if (!async_mode) return const_none();
+    }
+
     VReg acc;
     if (is_dict) {
         if (!rty || rty->kind != TyKind::Dict) rty = mk_dict(t_unknown(), t_unknown());
@@ -3595,6 +4807,14 @@ VReg Lowerer::lower_comp(Expr& e) {
         acc = def_heap(rty, std::move(mk));
     }
 
+    // 挂起后 vreg 不存活：累加器落帧槽，循环内外都从槽里读。
+    int acc_slot = -1;
+    if (async_mode) {
+        acc_slot = new_temp_slot(rty);
+        store_slot(acc_slot, acc);
+    }
+    auto acc_val = [&]() { return acc_slot >= 0 ? load_slot(acc_slot, rty) : acc; };
+
     auto emit_result = [&]() {
         if (is_dict) {
             VReg k = expr(*key_expr);
@@ -3603,17 +4823,17 @@ VReg Lowerer::lower_comp(Expr& e) {
             VReg v = expr(*val_expr);
             v = coerce(v, tc_.type_of(val_expr), val_ty);
             retain_elem(v, own_kind(val_ty));
-            call_void(RtFn::DictSet, {acc, k, v});
+            call_void(RtFn::DictSet, {acc_val(), k, v});
             return;
         }
         VReg v = expr(*elt_expr);
         v = coerce(v, tc_.type_of(elt_expr), elem_ty);
         if (is_set) {
             retain_elem(v, own_kind(elem_ty));
-            call_void(RtFn::DictSet, {acc, v, const_int(0)});
+            call_void(RtFn::DictSet, {acc_val(), v, const_int(0)});
         } else {
             retain_elem(v, list_kind(rty));
-            call_void(RtFn::ListAppend, {acc, v});
+            call_void(RtFn::ListAppend, {acc_val(), v});
         }
     };
 
@@ -3625,12 +4845,116 @@ VReg Lowerer::lower_comp(Expr& e) {
             return;
         }
         auto& g = static_cast<Comprehension&>(*(*gens)[gi]);
-        if (g.is_async) {
-            err(g.line, g.col, "'async for' in a comprehension is not supported");
-            return;
-        }
         VReg seq = expr(*g.iter);
         TypePtr sty = tc_.type_of(g.iter.get());
+
+        if (g.is_async) {
+            TypePtr sst = sty ? sty : t_unknown();
+            TypePtr ety = t_unknown();
+            if (sty && sty->kind == TyKind::AsyncGenerator && !sty->sub.empty())
+                ety = sty->sub[0];
+            int seq_slot = new_temp_slot(sst);
+            store_slot(seq_slot, seq);
+            int hs_slot = new_temp_slot(t_int());
+
+            int next_try = new_block("comp.anext");
+            int fetch = new_block("comp.afetch");
+            int land = new_block("comp.aland");
+            int reraise_b = new_block("comp.areaise");
+            int end = new_block("comp.aend");
+
+            Inst j;
+            j.op = IrOp::Jump;
+            j.target = next_try;
+            emit(std::move(j));
+
+            switch_to(next_try);
+            VReg h = call_runtime(RtFn::HandlerPush, t_int(), {});
+            store_slot(hs_slot, h);
+            VReg sj = setjmp_handler(hs_slot);
+            {
+                Inst br;
+                br.op = IrOp::Branch;
+                br.a = sj;
+                br.target = land;
+                br.target2 = fetch;
+                emit(std::move(br));
+            }
+            FuncCtx::Cleanup cf;
+            cf.kind = FuncCtx::Cleanup::Kind::Handler;
+            cf.handler_slot = hs_slot;
+            cf.land = land;
+            st_->cleanups.push_back(cf);
+
+            switch_to(fetch);
+            Inst call;
+            call.op = IrOp::CallRt;
+            call.imm = static_cast<int64_t>(RtFn::AsyncGenANext);
+            call.args = {load_slot(seq_slot, sst)};
+            VReg w = def_heap(mk_coroutine(ety), std::move(call));
+            VReg val = suspend_on_awaitable(w, ety, g.line, g.col);
+            st_->cleanups.pop_back();
+            call_void(RtFn::HandlerLeave, {load_slot(hs_slot, t_int())});
+
+            if (auto* tn = dynamic_cast<Name*>(g.target.get())) {
+                int slot = comp_slot(tn->id);
+                if (slot < 0) {
+                    slot = st_->fn->new_slot(ety);
+                    comp_slots_.back()[tn->id] = slot;
+                }
+                store_slot(slot, val);
+            } else {
+                assign_to(*g.target, val, ety);
+            }
+
+            for (auto& cond_expr : g.ifs) {
+                VReg c = expr(*cond_expr);
+                int ok_b = new_block("comp.aif");
+                Inst cb;
+                cb.op = IrOp::Branch;
+                cb.a = c;
+                cb.target = ok_b;
+                cb.target2 = next_try;
+                emit(std::move(cb));
+                switch_to(ok_b);
+            }
+
+            gen(gi + 1);
+            if (!terminated()) {
+                Inst jj;
+                jj.op = IrOp::Jump;
+                jj.target = next_try;
+                emit(std::move(jj));
+            }
+
+            switch_to(land);
+            call_void(RtFn::HandlerLeave, {load_slot(hs_slot, t_int())});
+            VReg m = call_runtime(RtFn::ExcMatches, t_bool(),
+                                  {const_str("StopAsyncIteration")});
+            int stop_ok = new_block("comp.astop");
+            {
+                Inst br;
+                br.op = IrOp::Branch;
+                br.a = m;
+                br.target = stop_ok;
+                br.target2 = reraise_b;
+                emit(std::move(br));
+            }
+            switch_to(reraise_b);
+            call_void(RtFn::ExcReraise, {});
+            end_unreachable();
+            switch_to(stop_ok);
+            call_void(RtFn::ExcClear, {});
+            {
+                Inst jj;
+                jj.op = IrOp::Jump;
+                jj.target = end;
+                emit(std::move(jj));
+            }
+            switch_to(end);
+            return;
+        }
+
         bool ok = sty && (sty->kind == TyKind::List || sty->kind == TyKind::Tuple ||
                           sty->kind == TyKind::Str || sty->kind == TyKind::Dict ||
                           sty->kind == TyKind::Set);
@@ -3648,6 +4972,17 @@ VReg Lowerer::lower_comp(Expr& e) {
         ln.a = seq;
         VReg n = def(t_int(), std::move(ln));
 
+        int seq_slot = -1;
+        int n_slot = -1;
+        if (async_mode) {
+            seq_slot = new_temp_slot(sty);
+            store_slot(seq_slot, seq);
+            n_slot = new_temp_slot(t_int());
+            store_slot(n_slot, n);
+        }
+        auto seq_val = [&]() { return seq_slot >= 0 ? load_slot(seq_slot, sty) : seq; };
+        auto n_val = [&]() { return n_slot >= 0 ? load_slot(n_slot, t_int()) : n; };
+
         int idx = new_temp_slot(t_int());
         store_slot(idx, const_int(0));
 
@@ -3657,9 +4992,15 @@ VReg Lowerer::lower_comp(Expr& e) {
         int end = new_block("comp.end");
 
         // 水位取在序列求值之后：seq 本身可能是临时容器，不能被每轮清掉。
+        // async 模式下临时值随挂起统一清理，不需要局部水位。
         int mark_block = -1;
         size_t mark_pos = 0;
-        VReg mark = rc_mark_at(mark_block, mark_pos);
+        VReg mark = async_mode ? kNoReg : rc_mark_at(mark_block, mark_pos);
+        auto clean = [&]() {
+            if (async_mode) cleanup_gen_mark();
+            else rc_cleanup(mark);
+        };
+        size_t pushes_before = st_->rc_pushes;
 
         Inst j;
         j.op = IrOp::Jump;
@@ -3672,7 +5013,7 @@ VReg Lowerer::lower_comp(Expr& e) {
         cmp.op = IrOp::Cmp;
         cmp.cop = CmpKind::Lt;
         cmp.a = iv;
-        cmp.b = n;
+        cmp.b = n_val();
         VReg cc = def(t_bool(), std::move(cmp));
         Inst br;
         br.op = IrOp::Branch;
@@ -3682,15 +5023,15 @@ VReg Lowerer::lower_comp(Expr& e) {
         emit(std::move(br));
 
         switch_to(body);
-        rc_cleanup(mark);
+        clean();
         VReg iv2 = load_slot(idx, t_int());
         VReg ev;
         if (sty->kind == TyKind::Dict || sty->kind == TyKind::Set) {
-            ev = call_runtime(RtFn::DictKeyAt, ety, {seq, iv2});
+            ev = call_runtime(RtFn::DictKeyAt, ety, {seq_val(), iv2});
         } else {
             Inst get;
             get.op = IrOp::IndexLoad;
-            get.a = seq;
+            get.a = seq_val();
             get.b = iv2;
             ev = sty->kind == TyKind::Str ? def_heap(ety, std::move(get))
                                           : def(ety, std::move(get));
@@ -3728,7 +5069,7 @@ VReg Lowerer::lower_comp(Expr& e) {
         }
 
         switch_to(incr);
-        rc_cleanup(mark);
+        clean();
         VReg iv3 = load_slot(idx, t_int());
         Inst add;
         add.op = IrOp::Bin;
@@ -3743,12 +5084,18 @@ VReg Lowerer::lower_comp(Expr& e) {
         emit(std::move(ji));
 
         switch_to(end);
-        rc_cleanup(mark);
+        clean();
+        if (!async_mode && !st_->is_generator && st_->rc_pushes == pushes_before) {
+            erase_cleanup(body, mark);
+            erase_cleanup(incr, mark);
+            erase_cleanup(end, mark);
+            erase_mark(mark_block, mark_pos, mark);
+        }
     };
 
     gen(0);
     comp_slots_.pop_back();
-    return acc;
+    return async_mode ? acc_val() : acc;
 }
 
 VReg Lowerer::lower_ifexp(IfExp& e) {
@@ -4191,7 +5538,7 @@ VReg Lowerer::lower_call(Call& c) {
         auto& n = static_cast<Name&>(*c.func);
         if (is_builtin(n.id)) {
             static const std::unordered_set<std::string> kBuiltins = {
-                "print", "len", "int", "float", "str", "bool", "range",
+                "print", "len", "int", "float", "str", "bool", "range", "next",
             };
             if (kBuiltins.count(n.id)) return lower_builtin_call(n.id, c);
         }
@@ -4202,6 +5549,7 @@ VReg Lowerer::lower_call(Call& c) {
         if (auto it = imported_classes_.find(n.id); it != imported_classes_.end())
             return construct_imported(it->second, c, mk_class(it->second.cls.get()));
         if (auto it = native_aliases_.find(n.id); it != native_aliases_.end()) {
+            if (it->second.module == "asyncio") return lower_asyncio(it->second.member, c);
             TypePtr ft = tc_.type_of(c.func.get());
             FuncInfoPtr info = (ft && ft->kind == TyKind::Func) ? ft->fn : nullptr;
             return call_native(it->second.module, it->second.member, c, info);
@@ -4252,6 +5600,30 @@ VReg Lowerer::lower_builtin_call(const std::string& name, Call& c) {
         return def(t_int(), std::move(in));
     }
 
+    if (name == "next") {
+        if (c.args.size() != 1) {
+            err(c.line, c.col, "next() takes exactly one argument");
+            return const_none();
+        }
+        TypePtr gt = tc_.type_of(c.args[0].get());
+        if (!gt || gt->kind != TyKind::Generator) {
+            err(c.line, c.col, std::format("next() requires a generator, got '{}'", type_name(gt)));
+            return const_none();
+        }
+        TypePtr et = gt->sub.empty() ? t_unknown() : gt->sub[0];
+        VReg g = expr(*c.args[0]);
+        Inst in;
+        in.op = IrOp::CallRt;
+        in.imm = static_cast<int64_t>(RtFn::GenNext);
+        in.args = {g};
+        // 运行时按位返回（浮点也是整数寄存器），vreg 类型记为 unknown；
+        // 堆元素才入临时栈。
+        VReg v = def(t_unknown(), std::move(in));
+        v = retype(v, et);
+        if (ir_is_heap(et)) push_temp(v);
+        return v;
+    }
+
     if (name == "range") {
         if (c.args.empty() || c.args.size() > 3) {
             err(c.line, c.col, "range() takes 1 to 3 arguments");
@@ -4292,6 +5664,102 @@ VReg Lowerer::lower_builtin_call(const std::string& name, Call& c) {
     }
 
     err(c.line, c.col, std::format("builtin '{}' is not supported by the code generator yet", name));
+    return const_none();
+}
+
+VReg Lowerer::lower_asyncio(const std::string& member, Call& c) {
+    TypePtr rt = tc_.type_of(&c);
+    if (!c.keywords.empty()) {
+        err(c.line, c.col, std::format("asyncio.{}() does not take keyword arguments", member));
+    }
+
+    if (member == "run") {
+        if (c.args.size() != 1) {
+            err(c.line, c.col, "asyncio.run() takes exactly one coroutine");
+            return const_none();
+        }
+        VReg coro = expr(*c.args[0]);
+        Inst in;
+        in.op = IrOp::CallRt;
+        in.imm = static_cast<int64_t>(RtFn::AsyncioRun);
+        in.args = {coro};
+        // 结果是协程的返回值，运行时按机器字返回（浮点也是位模式）。
+        VReg v = def(t_unknown(), std::move(in));
+        if (ir_is_heap(rt)) push_temp(v);
+        return v;
+    }
+
+    if (member == "Future") {
+        if (!c.args.empty())
+            err(c.line, c.col, "asyncio.Future() takes no arguments");
+        VReg f = call_runtime(RtFn::AsyncioFutureNew,
+                              rt ? rt : mk_future(t_unknown()), {});
+        push_temp(f);
+        return f;
+    }
+
+    if (member == "wait_readable" || member == "wait_writable") {
+        if (c.args.size() != 1) {
+            err(c.line, c.col,
+                std::format("asyncio.{}() takes exactly one fd", member));
+            return const_none();
+        }
+        VReg fd = expr(*c.args[0]);
+        fd = coerce(fd, tc_.type_of(c.args[0].get()), t_int());
+        VReg w = call_runtime(RtFn::AsyncioWaitFd,
+                              rt ? rt : mk_coroutine(t_none()),
+                              {fd, const_int(member == "wait_writable" ? 1 : 0)});
+        push_temp(w);
+        return w;
+    }
+
+    if (member == "create_task") {
+        if (c.args.size() != 1) {
+            err(c.line, c.col, "asyncio.create_task() takes exactly one coroutine");
+            return const_none();
+        }
+        VReg coro = expr(*c.args[0]);
+        VReg t = call_runtime(RtFn::AsyncioCreateTask,
+                              rt ? rt : mk_task(t_unknown()), {coro});
+        push_temp(t);
+        return t;
+    }
+
+    if (member == "sleep") {
+        if (c.args.size() != 1) {
+            err(c.line, c.col, "asyncio.sleep() takes exactly one argument");
+            return const_none();
+        }
+        VReg secs = expr(*c.args[0]);
+        secs = coerce(secs, tc_.type_of(c.args[0].get()), t_float());
+        VReg w = call_runtime(RtFn::AsyncioSleep,
+                              rt ? rt : mk_coroutine(t_none()), {secs});
+        push_temp(w);
+        return w;
+    }
+
+    if (member == "gather") {
+        std::vector<VReg> vals;
+        for (auto& a : c.args) {
+            VReg v = expr(*a);
+            TypePtr vt = vreg_ty(v);
+            if (ir_is_heap(vt)) rc_inc(v);
+            else if (!vt || vt->kind == TyKind::Unknown) rc_inc_unknown(v);
+            vals.push_back(v);
+        }
+        Inst lst;
+        lst.op = IrOp::MakeList;
+        lst.imm = 1;
+        lst.args = std::move(vals);
+        VReg L = def_heap(mk_list(t_unknown()), std::move(lst));
+        VReg w = call_runtime(RtFn::AsyncioGather,
+                              rt ? rt : mk_coroutine(mk_list(t_unknown())), {L});
+        push_temp(w);
+        return w;
+    }
+
+    err(c.line, c.col,
+        std::format("asyncio.{} is not supported by the code generator yet", member));
     return const_none();
 }
 
@@ -4360,6 +5828,7 @@ VReg Lowerer::lower_method_call(Attribute& at, Call& c) {
     // 内置模块的原生函数/常量。
     if (auto* n = dynamic_cast<Name*>(at.value.get())) {
         if (auto mod = resolve_module_alias(n->id); mod && mod->builtin) {
+            if (mod->name == "asyncio") return lower_asyncio(at.attr, c);
             auto it = mod->globals.find(at.attr);
             if (it != mod->globals.end() && it->second && it->second->kind == TyKind::Func)
                 return call_native(mod->name, at.attr, c, it->second->fn);
@@ -4424,6 +5893,116 @@ VReg Lowerer::lower_method_call(Attribute& at, Call& c) {
         err(c.line, c.col,
             std::format("method '{}' called on a maybe-None value; add a None check first",
                         at.attr));
+        return const_none();
+    }
+
+    if (recv_ty && recv_ty->kind == TyKind::Generator) {
+        TypePtr et = recv_ty->sub.empty() ? t_unknown() : recv_ty->sub[0];
+        if (at.attr == "__next__") {
+            if (!c.args.empty())
+                err(c.line, c.col, "generator.__next__() takes no arguments");
+            Inst in;
+            in.op = IrOp::CallRt;
+            in.imm = static_cast<int64_t>(RtFn::GenNext);
+            in.args = {recv};
+            VReg v = def(t_unknown(), std::move(in));
+            v = retype(v, et);
+            if (ir_is_heap(et)) push_temp(v);
+            return v;
+        }
+        if (at.attr == "send") {
+            if (c.args.size() != 1) {
+                err(c.line, c.col, "generator.send() takes exactly one argument");
+                return const_none();
+            }
+            VReg sv = expr(*c.args[0]);
+            Inst in;
+            in.op = IrOp::CallRt;
+            in.imm = static_cast<int64_t>(RtFn::GenSend);
+            in.args = {recv, sv};
+            VReg v = def(t_unknown(), std::move(in));
+            v = retype(v, et);
+            if (ir_is_heap(et)) push_temp(v);
+            return v;
+        }
+        if (at.attr == "close") {
+            if (!c.args.empty())
+                err(c.line, c.col, "generator.close() takes no arguments");
+            call_void(RtFn::GenClose, {recv});
+            return const_none();
+        }
+        err(c.line, c.col, std::format("'generator' object has no method '{}'", at.attr));
+        return const_none();
+    }
+
+    if (recv_ty && recv_ty->kind == TyKind::Task) {
+        if (!c.args.empty()) {
+            err(c.line, c.col, std::format("task.{}() takes no arguments", at.attr));
+        }
+        if (at.attr == "done" || at.attr == "cancel" || at.attr == "cancelled") {
+            RtFn fn = at.attr == "done"       ? RtFn::AsyncioTaskDone
+                      : at.attr == "cancel"   ? RtFn::AsyncioTaskCancel
+                                              : RtFn::AsyncioTaskCancelled;
+            return call_runtime(fn, t_bool(), {recv});
+        }
+        TypePtr et = recv_ty->sub.empty() ? t_unknown() : recv_ty->sub[0];
+        if (at.attr == "result") {
+            Inst in;
+            in.op = IrOp::CallRt;
+            in.imm = static_cast<int64_t>(RtFn::AsyncioTaskResult);
+            in.args = {recv};
+            VReg v = def(t_unknown(), std::move(in));
+            if (ir_is_heap(et)) push_temp(v);
+            return v;
+        }
+        if (at.attr == "exception") {
+            VReg v = call_runtime(RtFn::AsyncioTaskException, mk_optional(t_str()), {recv});
+            push_temp(v);
+            return v;
+        }
+        err(c.line, c.col, std::format("'task' object has no method '{}'", at.attr));
+        return const_none();
+    }
+
+    if (recv_ty && recv_ty->kind == TyKind::Future) {
+        if (at.attr == "done" || at.attr == "cancel" || at.attr == "cancelled") {
+            if (!c.args.empty())
+                err(c.line, c.col, std::format("future.{}() takes no arguments", at.attr));
+            RtFn fn = at.attr == "done"       ? RtFn::FutureDone
+                      : at.attr == "cancel"   ? RtFn::FutureCancel
+                                              : RtFn::FutureCancelled;
+            return call_runtime(fn, t_bool(), {recv});
+        }
+        TypePtr et = recv_ty->sub.empty() ? t_unknown() : recv_ty->sub[0];
+        if (at.attr == "set_result") {
+            if (c.args.size() != 1) {
+                err(c.line, c.col, "future.set_result() takes exactly one argument");
+                return const_none();
+            }
+            VReg v = expr(*c.args[0]);
+            TypePtr vt = vreg_ty(v);
+            if (ir_is_heap(vt)) rc_inc(v);
+            else if (!vt || vt->kind == TyKind::Unknown) rc_inc_unknown(v);
+            call_void(RtFn::FutureSetResult, {recv, v});
+            return const_none();
+        }
+        if (at.attr == "result") {
+            if (!c.args.empty()) err(c.line, c.col, "future.result() takes no arguments");
+            Inst in;
+            in.op = IrOp::CallRt;
+            in.imm = static_cast<int64_t>(RtFn::FutureResult);
+            in.args = {recv};
+            VReg v = def(t_unknown(), std::move(in));
+            if (ir_is_heap(et)) push_temp(v);
+            return v;
+        }
+        if (at.attr == "exception") {
+            if (!c.args.empty()) err(c.line, c.col, "future.exception() takes no arguments");
+            VReg v = call_runtime(RtFn::FutureException, mk_optional(t_str()), {recv});
+            push_temp(v);
+            return v;
+        }
+        err(c.line, c.col, std::format("'future' object has no method '{}'", at.attr));
         return const_none();
     }
 
@@ -4662,6 +6241,36 @@ void Lowerer::print_value(VReg v, TypePtr ty, int line, int col) {
         case TyKind::Int: call_void(RtFn::PrintI64, {v}); break;
         case TyKind::Dict: call_void(RtFn::PrintStr, {const_str("<dict object>")}); break;
         case TyKind::Set: call_void(RtFn::PrintStr, {const_str("<set object>")}); break;
+        case TyKind::Optional: {
+            TypePtr inner = ty->sub.empty() ? t_unknown() : ty->sub[0];
+            int some = new_block("print.opt.some");
+            int none = new_block("print.opt.none");
+            int end = new_block("print.opt.end");
+            Inst br;
+            br.op = IrOp::Branch;
+            br.a = v;
+            br.target = some;
+            br.target2 = none;
+            emit(std::move(br));
+            switch_to(none);
+            call_void(RtFn::PrintNone, {});
+            {
+                Inst j;
+                j.op = IrOp::Jump;
+                j.target = end;
+                emit(std::move(j));
+            }
+            switch_to(some);
+            print_value(v, inner, line, col);
+            {
+                Inst j;
+                j.op = IrOp::Jump;
+                j.target = end;
+                emit(std::move(j));
+            }
+            switch_to(end);
+            break;
+        }
         case TyKind::Class: {
             // 没有 __str__，就按 CPython 的形状打一个 `<Point object>`。
             // 类名进字符串池，和字面量走同一条路。

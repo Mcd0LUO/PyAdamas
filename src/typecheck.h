@@ -47,6 +47,11 @@ enum class TyKind : uint8_t {
     Func,
     BoundMethod,  // 尚未调用的方法，sub[0] 是接收者
     Class,        // 类实例，cls 指向编译期确定的布局
+    Generator,    // sub[0] 是 yield 产生的元素类型
+    Coroutine,    // sub[0] 是 await / asyncio.run 得到的结果类型
+    Task,         // asyncio.create_task 返回的已调度协程；sub[0] 是结果类型
+    AsyncGenerator, // async def + yield；sub[0] 是产出类型
+    Future,       // asyncio.Future；sub[0] 是结果类型
 };
 
 struct Type;
@@ -149,6 +154,16 @@ struct FuncInfo {
     // 进而产生一堆 "None is not iterable" 的假错误。
     bool ret_known = false;
     bool unchecked = false;   // 内置函数：参数规则在 builtin_call 里按名字分派
+    // 函数体里有 yield：调用得到生成器对象，return 标注描述的是元素类型
+    // 之外的东西。不能只看 ret 是不是 Generator——返回生成器的普通函数
+    // （工厂）也会是 Generator，但它们本身不是生成器函数。
+    bool is_generator = false;
+    // async def：ret 存 Coroutine[结果]，async_result 是 return/await 看到的
+    // 结果类型。两者分开是因为调用点需要前者、return 检查需要后者。
+    bool is_async = false;
+    TypePtr async_result;
+    // async def 里还有 yield：调用得到异步生成器（只支持 async for）
+    bool is_async_generator = false;
 };
 
 // ── 类 ────────────────────────────────────────────────────────────
@@ -321,6 +336,31 @@ inline TypePtr mk_class(ClassInfo* c) {
     t->cls = c;
     return t;
 }
+inline TypePtr mk_generator(TypePtr elem) {
+    auto t = new_ty(TyKind::Generator);
+    t->sub.push_back(std::move(elem));
+    return t;
+}
+inline TypePtr mk_coroutine(TypePtr result) {
+    auto t = new_ty(TyKind::Coroutine);
+    t->sub.push_back(std::move(result));
+    return t;
+}
+inline TypePtr mk_task(TypePtr result) {
+    auto t = new_ty(TyKind::Task);
+    t->sub.push_back(std::move(result));
+    return t;
+}
+inline TypePtr mk_async_generator(TypePtr elem) {
+    auto t = new_ty(TyKind::AsyncGenerator);
+    t->sub.push_back(std::move(elem));
+    return t;
+}
+inline TypePtr mk_future(TypePtr result) {
+    auto t = new_ty(TyKind::Future);
+    t->sub.push_back(std::move(result));
+    return t;
+}
 
 // ── 判定与显示 ────────────────────────────────────────────────────
 
@@ -427,6 +467,24 @@ inline std::string type_name_impl(const TypePtr& t, int depth) {
                                t->sub.empty() ? "?" : type_name_impl(t->sub[0], depth + 1));
         case TyKind::Class:
             return t->cls ? t->cls->name : "class";
+        case TyKind::Generator:
+            return t->sub.empty()
+                       ? "generator"
+                       : std::format("generator[{}]", type_name_impl(t->sub[0], depth + 1));
+        case TyKind::Coroutine:
+            return t->sub.empty()
+                       ? "coroutine"
+                       : std::format("coroutine[{}]", type_name_impl(t->sub[0], depth + 1));
+        case TyKind::Task:
+            return t->sub.empty() ? "task"
+                                  : std::format("task[{}]", type_name_impl(t->sub[0], depth + 1));
+        case TyKind::AsyncGenerator:
+            return t->sub.empty()
+                       ? "asyncgen"
+                       : std::format("asyncgen[{}]", type_name_impl(t->sub[0], depth + 1));
+        case TyKind::Future:
+            return t->sub.empty() ? "future"
+                                  : std::format("future[{}]", type_name_impl(t->sub[0], depth + 1));
     }
     return "?";
 }
@@ -464,6 +522,21 @@ inline TypePtr join_into(const TypePtr& a, const TypePtr& b) {
         return mk_set(join(a->sub[0], b->sub[0]));
     if (a->kind == TyKind::Dict && b->kind == TyKind::Dict)
         return mk_dict(join(a->sub[0], b->sub[0]), join(a->sub[1], b->sub[1]));
+    if (a->kind == TyKind::Generator && b->kind == TyKind::Generator)
+        return mk_generator(join(a->sub.empty() ? t_unknown() : a->sub[0],
+                                 b->sub.empty() ? t_unknown() : b->sub[0]));
+    if (a->kind == TyKind::Coroutine && b->kind == TyKind::Coroutine)
+        return mk_coroutine(join(a->sub.empty() ? t_unknown() : a->sub[0],
+                                 b->sub.empty() ? t_unknown() : b->sub[0]));
+    if (a->kind == TyKind::Task && b->kind == TyKind::Task)
+        return mk_task(join(a->sub.empty() ? t_unknown() : a->sub[0],
+                            b->sub.empty() ? t_unknown() : b->sub[0]));
+    if (a->kind == TyKind::AsyncGenerator && b->kind == TyKind::AsyncGenerator)
+        return mk_async_generator(join(a->sub.empty() ? t_unknown() : a->sub[0],
+                                       b->sub.empty() ? t_unknown() : b->sub[0]));
+    if (a->kind == TyKind::Future && b->kind == TyKind::Future)
+        return mk_future(join(a->sub.empty() ? t_unknown() : a->sub[0],
+                              b->sub.empty() ? t_unknown() : b->sub[0]));
     if (a->kind == TyKind::Tuple && b->kind == TyKind::Tuple) {
         if (a->variadic || b->variadic) {
             // 有一边长度不定，结果也只能是长度不定：元素取公共上界
@@ -518,6 +591,18 @@ inline bool assignable(const TypePtr& dst, const TypePtr& src) {
         return src->sub.empty() ? true : assignable(dst, src->sub[0]);
     if (dst->kind == TyKind::List && src->kind == TyKind::List)
         return assignable(dst->sub[0], src->sub[0]);
+    // 协程/生成器是只读产出，元素类型按协变放宽（coroutine[int] 可传给
+    // coroutine[unknown] 的 asyncio.gather/run）。
+    if (dst->kind == TyKind::Coroutine && src->kind == TyKind::Coroutine)
+        return dst->sub.empty() || src->sub.empty() || assignable(dst->sub[0], src->sub[0]);
+    if (dst->kind == TyKind::Generator && src->kind == TyKind::Generator)
+        return dst->sub.empty() || src->sub.empty() || assignable(dst->sub[0], src->sub[0]);
+    if (dst->kind == TyKind::Task && src->kind == TyKind::Task)
+        return dst->sub.empty() || src->sub.empty() || assignable(dst->sub[0], src->sub[0]);
+    if (dst->kind == TyKind::AsyncGenerator && src->kind == TyKind::AsyncGenerator)
+        return dst->sub.empty() || src->sub.empty() || assignable(dst->sub[0], src->sub[0]);
+    if (dst->kind == TyKind::Future && src->kind == TyKind::Future)
+        return dst->sub.empty() || src->sub.empty() || assignable(dst->sub[0], src->sub[0]);
     if (dst->kind == TyKind::Set && src->kind == TyKind::Set)
         return assignable(dst->sub[0], src->sub[0]);
     if (dst->kind == TyKind::Dict && src->kind == TyKind::Dict)
@@ -686,6 +771,8 @@ private:
     // 指向当前函数的 return 收集器。嵌套函数必须有自己的，
     // 否则内层 def 会把外层的 return 记录清掉。
     std::vector<RetInfo>* rets_ = nullptr;
+    // 当前函数里每个 yield 产生的值类型，用来推断 Generator[T] 的 T。
+    std::vector<TypePtr>* yields_ = nullptr;
     int loop_depth_ = 0;
     int expr_depth_ = 0;
     bool saw_yield_ = false;
@@ -866,6 +953,8 @@ private:
     TypePtr builtin_type(const std::string& n);
 
     TypePtr builtin_call(const std::string& n, Call& c);
+    // asyncio 的 run/sleep/gather 需要按实参类型推结果，静态签名表达不了。
+    std::optional<TypePtr> asyncio_call(const std::string& member, Call& c);
 
     // ── 方法 ────────────────────────────────────────────────────
 

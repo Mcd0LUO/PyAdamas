@@ -218,6 +218,12 @@ void enc_type(Enc& e, const TypePtr& t) {
     }
     switch (t->kind) {
         case TyKind::Unknown: e.u8(0); break;
+        // 生成器/协程跨模块接口暂不支持：按 unknown 处理，调用点退回保守路径
+        case TyKind::Generator:
+        case TyKind::Coroutine:
+        case TyKind::Task:
+        case TyKind::AsyncGenerator:
+        case TyKind::Future: e.u8(0); break;
         case TyKind::None: e.u8(1); break;
         case TyKind::Bool: e.u8(2); break;
         case TyKind::Int: e.u8(3); break;
