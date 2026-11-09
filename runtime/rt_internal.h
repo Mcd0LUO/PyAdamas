@@ -110,6 +110,7 @@ typedef struct {
     Py23List* waiters;  /* kind 5 future：多个等待者（owned refs） */
     Py23List* results;
     Py23List* children;
+    Py23List* callbacks; /* kind 5 future：add_done_callback 注册的函数（owned refs） */
 } Py23Await;
 
 #define PY23_GEN_HEADER 10
@@ -221,6 +222,8 @@ void* ready_pop(void);
 int64_t list_take_at(Py23List* l, int64_t i);
 void list_clear_owned(Py23List* l);
 void* pending_take(void* w);
+/* 调用一个 py23 函数值（闭包首字是代码地址，%r10 是环境），单参数。 */
+void py23_call1(void* fn, int64_t arg);
 void finish_gather(Py23Await* g);
 void gather_child_fail(Py23Await* g, Py23Exception* e);
 void start_gather(Py23Await* w, void* waiter);

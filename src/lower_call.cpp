@@ -779,6 +779,27 @@ VReg Lowerer::lower_method_call(Attribute& at, Call& c) {
             call_void(RtFn::FutureSetResult, {recv, v});
             return const_none();
         }
+        if (at.attr == "set_exception") {
+            if (c.args.size() != 1) {
+                err(c.line, c.col, "future.set_exception() takes exactly one argument");
+                return const_none();
+            }
+            VReg msg = expr(*c.args[0]);
+            call_void(RtFn::FutureSetException, {recv, msg});
+            return const_none();
+        }
+        if (at.attr == "add_done_callback") {
+            if (c.args.size() != 1) {
+                err(c.line, c.col, "future.add_done_callback() takes exactly one argument");
+                return const_none();
+            }
+            VReg cb = expr(*c.args[0]);
+            TypePtr ct = vreg_ty(cb);
+            if (ir_is_heap(ct)) rc_inc(cb);
+            else if (!ct || ct->kind == TyKind::Unknown) rc_inc_unknown(cb);
+            call_void(RtFn::FutureAddCallback, {recv, cb});
+            return const_none();
+        }
         if (at.attr == "result") {
             if (!c.args.empty()) err(c.line, c.col, "future.result() takes no arguments");
             Inst in;

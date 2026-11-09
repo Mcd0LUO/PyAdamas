@@ -570,7 +570,8 @@ bool TypeChecker::has_method(const TypePtr& t, const std::string& m) {
                        m == "result" || m == "exception";
             case TyKind::Future:
                 return m == "done" || m == "cancel" || m == "cancelled" ||
-                       m == "result" || m == "exception" || m == "set_result";
+                       m == "result" || m == "exception" || m == "set_result" ||
+                       m == "set_exception" || m == "add_done_callback";
             case TyKind::Str: {
                 static const std::unordered_set<std::string> ms = {
                     "upper",    "lower",     "strip",  "lstrip", "rstrip", "split",
@@ -697,6 +698,21 @@ TypePtr TypeChecker::method_call(TypePtr recv, const std::string& name, Call& c,
             }
             if (name == "set_result") {
                 argc(1, 1);
+                return t_none();
+            }
+            if (name == "set_exception") {
+                argc(1, 1);
+                if (a.size() == 1 && !is_unknown(a[0]) && a[0]->kind != TyKind::Str)
+                    err(c.line, c.col,
+                        "set_exception() expects a string message "
+                        "(py23 exceptions are type name + message)");
+                return t_none();
+            }
+            if (name == "add_done_callback") {
+                argc(1, 1);
+                if (a.size() == 1 && !is_unknown(a[0]) && a[0]->kind != TyKind::Func)
+                    err(c.line, c.col,
+                        "add_done_callback() expects a function taking the future");
                 return t_none();
             }
             if (name == "result") {

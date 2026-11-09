@@ -58,6 +58,7 @@ void await_destroy(void* p) {
     if (w->waiters) py23_rc_dec(w->waiters);
     if (w->results) py23_rc_dec(w->results);
     if (w->children) py23_rc_dec(w->children);
+    if (w->callbacks) py23_rc_dec(w->callbacks);
 }
 
 void await_gc_release(void* p) {
@@ -69,6 +70,7 @@ void await_gc_release(void* p) {
     if (w->waiters) py23_gc_unref_child(w->waiters);
     if (w->results) py23_gc_unref_child(w->results);
     if (w->children) py23_gc_unref_child(w->children);
+    if (w->callbacks) py23_gc_unref_child(w->callbacks);
 }
 
 /* GC 清扫 / 进程退出不跑析构器，但异常对象是 malloc 的普通内存，

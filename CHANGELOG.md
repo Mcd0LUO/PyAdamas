@@ -4,19 +4,49 @@
 
 早期阶段没有逐条留痕，按阶段归纳；0.4 之后逐条记录。
 
-## [未发布]
+## [0.22] - 2026-11-09
+
+Future 完成回调与失败结果。
+
+### 新增
+
+- `Future.add_done_callback(fn)`：完成时按注册顺序同步调用 `fn(future)`；
+  对已完成的 Future 注册会立即调用；取消也会触发回调。
+- `Future.set_exception(msg)`：把 Future 标记为失败，`await` 时抛出
+  `Exception(msg)`，`exception()` 返回该消息。py23 的异常不是一等值，
+  所以参数是消息字符串而不是异常对象。
+- 运行时新增 `py23_call1` 跳板，按闭包 ABI（`%r10` 环境 + `%rdi` 参数）
+  调用函数值；回调列表参与引用计数和 GC。
+- 用例 `tests/run/30_future_cb.py`。
 
 ### 重构
 
-- 降级器按职责拆成 `lower*.cpp`：驱动/预扫描、语句、表达式、调用、
+- 降级器按职责拆成 `lower*.cpp`：驱动/预扫描、语句、异常、表达式、调用、
   生成器与协程；共享的 `Lowerer` 声明、`FuncCtx`、`ClosureMeta` 移到
   `lower_impl.h`。
 - 类型检查按职责拆成 `typecheck*.cpp`：驱动与作用域、语句、表达式、
   调用与内置、函数与类。
+- 解析器按职责拆成 `parser*.cpp`：驱动、语句、函数与类、表达式。
 - 运行时拆成 `runtime/rt_*.c` + `rt_internal.h`（RC/GC、异常、生成器、
   异步、Task/Future、fd、异步生成器、容器与输出），各单元独立编译后
   由 CMake 用 `ld -r` 合成 `rt.o`，对外 ABI 不变。
 - 文档同步新的文件布局与 sanitizer 构建步骤。
+
+### 验证
+
+- `ctest --preset dev` / `release` 全绿（11 正例 + 33 反例 + 30 运行 +
+  4 未建模 + 8 模块目录），干净重建零警告
+- 差分测试 6 个生成器、810 个程序零差异
+- ASan/UBSan/LSan：生成器、协程、Future 回调、`yield from`、异步推导式
+  路径零报告
+
+### 已知限制
+
+- 回调是同步调用（CPython 用 `call_soon` 排队）；回调抛出的异常向外
+  传播，并跳过本 Future 剩余的回调
+- `set_exception` 只接收消息字符串，失败类型固定为 `Exception`
+- 回调参数没有类型标注时，函数体里访问 `future.done()` 等会因为 unknown
+  接收者无法降级；需要标注成 `Future[T]`
 
 ## [0.21] - 2026-11-09
 

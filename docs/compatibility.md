@@ -29,7 +29,7 @@ py23 不追求兼容 CPython：语义是按静态类型的需要重新定的。�
 | 模块初始化 | 第一次执行 import 时惰性运行一次；循环导入编译期报错 | 支持循环导入和部分初始化 | 初始化失败的模块不会再重试；模块对象不可见 |
 | 推导式 | list/set/dict 推导式按循环展开；生成器表达式立即构造成 list；含 `async for` 的推导式在协程里可挂起 | 生成器惰性求值 | 异步推导式只能作为语句/赋值/`return` 的根表达式；生成器表达式仍立即求值 |
 | 生成器 | 状态机 + 堆帧；`for` / `next` / `send` / `close` / `yield from`；跨 `yield` 跑 `finally` / `__exit__` | 完整生成器协议 | `yield`/`yield from` 只能是语句或赋值右值，不能位于 `finally`/`except` 体内；`yield from` 的值固定为 None；`send` 值静态是 unknown；生成器类型跨模块降级为 unknown |
-| 协程 / Task / Future | `async def` / `await` 复用生成器帧；`asyncio.run`/`sleep`/`gather`/`create_task`；`done()`/`cancel()`/`result()`/`exception()`；Future 多等待者；取消级联；`wait_readable`/`wait_writable` + poll；异步生成器 + `async for` + `async with`；异步推导式 | 完整 asyncio（Task 组/Future 回调/I/O 流） | `await` 只能是语句、赋值右值或 `return` 值；异步生成器没有 `asend`/`athrow`/`aclose`，停在 `async with` 里被直接回收时不 await 退出；自定义 `__aiter__` 未支持；无 `Future.set_exception`/`add_done_callback`；task 结果异常是消息字符串；`CancelledError` 是内置名；`wait_readable` 不是 CPython 标准 API；`gather` 结果元素是 unknown；Task 单等待者 |
+| 协程 / Task / Future | `async def` / `await` 复用生成器帧；`asyncio.run`/`sleep`/`gather`/`create_task`；`done()`/`cancel()`/`result()`/`exception()`；Future 多等待者、`set_exception`、`add_done_callback`；取消级联；`wait_readable`/`wait_writable` + poll；异步生成器 + `async for` + `async with`；异步推导式 | 完整 asyncio（Task 组/Future 回调/I/O 流） | `await` 只能是语句、赋值右值或 `return` 值；异步生成器没有 `asend`/`athrow`/`aclose`，停在 `async with` 里被直接回收时不 await 退出；自定义 `__aiter__` 未支持；Future 回调同步执行；`set_exception` 接收消息字符串，失败类型固定为 `Exception`；task 结果异常是消息字符串；`CancelledError` 是内置名；`wait_readable` 不是 CPython 标准 API；`gather` 结果元素是 unknown；Task 单等待者 |
 | 递归深度 | 受栈大小限制（万级） | 默认 1000，可调 | 没有解释器递归检查 |
 | 字段初值 `x: int = []` | 每次构造重新求值，实例之间独立 | 类属性，所有实例共享 | 更安全；也避免可变默认值的经典 bug |
 | 类体里的非声明语句 | `check` 通过并标记「没建模」，`build` 报错 | 类体是独立命名空间，可执行任意语句 | 布局在编译期定死，没有类命名空间 |
@@ -69,7 +69,7 @@ py23 不追求兼容 CPython：语义是按静态类型的需要重新定的。�
 |---|---|---|---|
 | 正例 | `ctest --preset dev` 里 `tests/*.py` | 11 个文件 | 前端退回保守 |
 | 反例 | `ctest --preset dev` 里 `tests/fail/*.py` | 33 个文件 | 检查器为了过测而放水 |
-| 运行 | `ctest --preset dev` 里 `tests/run/*.py` | 29 个文件 | 后端烂掉没人知道 |
+| 运行 | `ctest --preset dev` 里 `tests/run/*.py` | 30 个文件 | 后端烂掉没人知道 |
 | 模块 | `ctest --preset dev` 里 `tests/modules/*/` | 8 个目录 | 分模块编译/链接、惰性初始化、缓存失效 |
 | 未建模 | `ctest --preset dev` 里 `tests/unsupported/*.py` | 4 个文件 | 「标了没建模、实际却悄悄编译过去」 |
 | 内存 | 16MB `RLIMIT_AS` 下跑压力程序 | 拼接 / 对象 / 闭包 / 容器 / 切片 / 删除 / 推导式 / 变长实参 / `with` / 装饰器 / 异常展开 / `yield from` / 异步推导式 / 环 / unknown 泄漏 | 引用计数或 GC 漏插桩、重复释放、误回收 |
@@ -129,8 +129,8 @@ PY
 方法、切片赋值、变长实参、推导式、`with` 和装饰器；
 `tests/run/22_exception.py` 覆盖 try/except/else/finally、raise、层级
 匹配、`with` 异常路径和运行时错误转换；`tests/run/23_generator.py` ~
-`tests/run/29_async_comp.py` 覆盖生成器、协程、Task、异步语言面、
-Future/取消/fd、`yield from` 与异步推导式。
+`tests/run/30_future_cb.py` 覆盖生成器、协程、Task、异步语言面、
+Future/取消/fd/回调、`yield from` 与异步推导式。
 `tests/run/13_gc.py` 会真正触发收集器：对象环、字典自环、闭包垃圾和
 unknown 容器。RSS 压力程序负责「长循环里内存不随迭代数增长」。当前实测
 100 万次拼接 / 100 万次对象分配 / 30 万次带字符串字段的对象分配 /

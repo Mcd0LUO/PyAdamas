@@ -1689,6 +1689,8 @@ private:
                 line(std::format("movq {}, %rsi", src_op(in.args[1])));
                 break;
             case RtFn::FutureSetResult:
+            case RtFn::FutureSetException:
+            case RtFn::FutureAddCallback:
                 line(std::format("movq {}, %rdi", src_op(in.args[0])));
                 line(std::format("movq {}, %rsi", src_op(in.args[1])));
                 break;

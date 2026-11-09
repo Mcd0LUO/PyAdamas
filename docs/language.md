@@ -359,9 +359,12 @@ async def main() -> int:
     return f.result()
 ```
 
-方法：`set_result(v)`、`cancel()`、`done()`、`cancelled()`、
-`result()`（未完成抛 RuntimeError，失败/取消抛原异常）、`exception()`
-（成功返回 None，失败返回消息字符串）。Task 也有
+方法：`set_result(v)`、`set_exception(msg)`、`add_done_callback(fn)`、
+`cancel()`、`done()`、`cancelled()`、`result()`（未完成抛 RuntimeError，
+失败/取消抛原异常）、`exception()`（成功返回 None，失败返回消息字符串）。
+回调在完成时按注册顺序**同步**调用，参数是 future 本身；对已完成的
+Future 注册会立即调用。`set_exception` 接收消息字符串（py23 的异常不是
+一等值），失败类型记为 `Exception`。Task 也有
 `result()` / `exception()` / `cancelled()`。
 
 **取消级联**：取消 Task 会沿它等待的对象向下传播：协程链继续注入
@@ -376,9 +379,11 @@ Future 被取消时，其他等待者也会收到 `CancelledError`。
 
 限制：`await` 只能作为语句、赋值右值或 `return` 值；不能出现在
 `finally` / `except` 体内；异步推导式只能作为语句、赋值或 `return` 的
-根表达式；不支持自定义 `__aiter__` 迭代器、`Future.set_exception` /
-回调、fd 读写和线程安全的事件循环；`gather` 的实参个数在源码里写死，
-结果元素类型按 unknown 处理；Task 只允许一个并发等待者，没有任务名字。
+根表达式；不支持自定义 `__aiter__` 迭代器、fd 读写和线程安全的事件
+循环；Future 回调是同步调用（CPython 用 `call_soon` 排队），
+`set_exception` 接收消息字符串而不是异常对象；`gather` 的实参个数在
+源码里写死，结果元素类型按 unknown 处理；Task 只允许一个并发等待者，
+没有任务名字。
 
 ### 内存与生命周期
 

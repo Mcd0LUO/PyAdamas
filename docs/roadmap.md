@@ -295,12 +295,25 @@ traceback / `raise ... from`；`finally` 体内跳出 finally 的
 作为语句/赋值/return 的根表达式，元素里不能含 `await`，没有异步
 生成器表达式。
 
+## 0.22：Future 回调与 set_exception（已完成）
+
+- `Future.add_done_callback(fn)`：完成/取消时按注册顺序同步调用
+  `fn(future)`；对已完成的 Future 注册会立即调用。
+- `Future.set_exception(msg)`：把 Future 标记为失败，`await` 抛出
+  `Exception(msg)`；`exception()` 返回消息。
+- 运行时新增 `py23_call1` 跳板，按闭包 ABI 调用函数值；回调列表参与
+  RC 和 GC。
+- 用例 `tests/run/30_future_cb.py`。
+- 同时完成工程重构：lower/typecheck/parser/runtime 按职责拆分。
+
+已知限制：回调同步执行（CPython 用 `call_soon`）；回调异常向外传播
+并跳过剩余回调；`set_exception` 接收消息字符串而不是异常对象。
+
 ## 下一步
 
 - 语言面：方法/类装饰器的剩余形态、生成器 `throw()`、异步生成器
   `asend`/`athrow`/`aclose`
-- 运行时：Future 回调与 `set_exception`、fd 读写/子进程、
-  线程安全事件循环
+- 运行时：fd 读写/子进程、线程安全事件循环
 - 工程面：按 [技术债](#技术债) 顺序处理（优化遍、列表 repr、异常对象等）
 
 ## 待决策
@@ -335,4 +348,4 @@ traceback / `raise ... from`；`finally` 体内跳出 finally 的
 13. **生成器/协程的表达式能力不全**：`yield`/`yield from`/`await` 只能作为语句或赋值右值，`yield`/`await` 位于 `finally`/`except` 体内都还没接；生成器表达式仍是立即求值的 list；`send`/await 跨挂起值的静态类型不精确；`yield from` 的值固定为 None，也不能 throw
 14. **生成器/协程异常逃出时槽位不精确释放**：异常从 resume longjmp 出去时只把帧标成 aborted，堆槽引用交给 GC 下一轮回收，不做确定性 `rc_dec`
 15. **跨模块生成器/协程不支持**：`.py23i` 里 `Generator[T]` / `Coroutine[T]` 降级成 unknown，导入模块的生成器/协程无法 `for` / `next` / `await`
-16. **asyncio 只是最小集合**：没有 `Future.set_exception`/`add_done_callback`、自定义 `__aiter__`、fd 读写/子进程/线程安全循环；异步生成器没有 `asend`/`athrow`/`aclose`，停在 `async with` 里被直接回收时不等待退出；`wait_readable` 不是 CPython 标准 API；异常结果只有消息字符串；`gather` 结果按 unknown 容器处理；Task 只允许一个并发等待者；异步推导式只能出现在语句/赋值/return 的根位置
+16. **asyncio 只是最小集合**：自定义 `__aiter__`、fd 读写/子进程/线程安全循环未支持；异步生成器没有 `asend`/`athrow`/`aclose`，停在 `async with` 里被直接回收时不等待退出；`wait_readable` 不是 CPython 标准 API；异常结果只有消息字符串（`set_exception` 也只收消息）；Future 回调同步执行；`gather` 结果按 unknown 容器处理；Task 只允许一个并发等待者；异步推导式只能出现在语句/赋值/return 的根位置

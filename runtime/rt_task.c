@@ -1,6 +1,36 @@
 // rt_task.c —— Task 与 Future
 #include "rt_internal.h"
 
+/* py23 函数值 = 闭包对象：[0] 代码地址，%r10 传闭包指针（环境）。
+   C 没有隐藏寄存器参数，运行时回调用一个跳板。 */
+__asm__(
+    ".text\n"
+    ".globl py23_call1\n"
+    ".type py23_call1,@function\n"
+    "py23_call1:\n"
+    "\tmovq %rdi, %r10\n"
+    "\tmovq (%rdi), %r11\n"
+    "\tmovq %rsi, %rdi\n"
+    "\txorl %eax, %eax\n"
+    "\tjmp *%r11\n"
+    ".size py23_call1, .-py23_call1\n");
+
+/* 完成时同步调用 add_done_callback 注册的函数，参数是 future 本身。
+   CPython 用 call_soon 排队，这里直接调用；回调抛出的异常会向外传播。 */
+static void future_run_callbacks(Py23Await* f) {
+    Py23List* cbs = f->callbacks;
+    if (!cbs || cbs->len == 0) return;
+    // 注册顺序调用。先把长度清零，回调里再注册的（future 已完成）
+    // 会走立即调用分支，不会追加到本轮。
+    int64_t n = cbs->len;
+    cbs->len = 0;
+    for (int64_t i = 0; i < n; ++i) {
+        int64_t cb = cbs->data[i];
+        py23_call1((void*)(uintptr_t)cb, (int64_t)f);
+        py23_rc_dec_unknown(cb);
+    }
+}
+
 void* py23_asyncio_create_task(void* coro) {
     if (!frame_is_coro(coro)) {
         // 也接受 Future/sleep/fd/gather 等可等待对象：Task 直接等它完成。
@@ -108,6 +138,7 @@ void future_cancel(Py23Await* f) {
     f->exc = (int64_t)stored;
     void* owned = pending_take(f);
     if (owned) py23_rc_dec(owned);
+    future_run_callbacks(f);
 }
 
 /* sleep/fd 这类没有内部链的等待对象：摘表、标记完成、通知等待者。 */
@@ -169,12 +200,14 @@ void future_settle(Py23Await* f, int64_t value, Py23Exception* exc) {
     }
     void* owned = pending_take(f);
     if (owned) py23_rc_dec(owned);
+    future_run_callbacks(f);
 }
 
 void* py23_asyncio_future_new(void) {
     loop_ensure();
     Py23Await* f = await_new(5);
     f->waiters = py23_list_new(4, 1);
+    f->callbacks = py23_list_new(2, 1);
     return f;
 }
 
@@ -184,6 +217,31 @@ void py23_future_set_result(void* fp, int64_t value) {
         py23_raise_c("TypeError", "set_result() expects a Future");
     if (f->done) py23_raise_c("RuntimeError", "future is already done");
     future_settle(f, value, NULL);
+}
+
+/* py23 的异常不是一等值：set_exception 接收消息字符串，失败类型统一
+   记为 Exception，与 exception() 返回消息的约定一致。 */
+void py23_future_set_exception(void* fp, Py23Str* msg) {
+    Py23Await* f = (Py23Await*)fp;
+    if (!is_await_obj(fp) || f->kind != 5)
+        py23_raise_c("TypeError", "set_exception() expects a Future");
+    if (f->done) py23_raise_c("RuntimeError", "future is already done");
+    Py23Exception* e = exc_new("Exception", msg ? msg->data : "");
+    future_settle(f, 0, e);
+}
+
+void py23_future_add_callback(void* fp, int64_t cb) {
+    Py23Await* f = (Py23Await*)fp;
+    if (!is_await_obj(fp) || f->kind != 5)
+        py23_raise_c("TypeError", "add_done_callback() expects a Future");
+    if (f->done) {
+        // 调用方把 cb 的引用交给了这里；同步调用完就还掉。
+        py23_call1((void*)(uintptr_t)cb, (int64_t)f);
+        py23_rc_dec_unknown(cb);
+        return;
+    }
+    if (!f->callbacks) f->callbacks = py23_list_new(2, 1);
+    py23_list_append(f->callbacks, cb);  // 接管 cb 的引用
 }
 
 int64_t py23_future_done(void* fp) {
