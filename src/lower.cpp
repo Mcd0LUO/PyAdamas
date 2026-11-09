@@ -5,13 +5,14 @@
 // 重新推断 —— 两套推断迟早会分叉。
 //
 // 覆盖范围是后端当前能吃下的子集：标量运算、字符串、list/tuple、
-// if/while/for/函数/调用/print。class/try/with/生成器/闭包这些还没轮到，
+// if/while/for/函数/闭包/调用/print。try/with/生成器这些还没轮到，
 // 遇到时记一条错误并继续，让用户一次看到全部缺口。
 #include "lower.h"
 
 #include <algorithm>
 #include <format>
 #include <optional>
+#include <set>
 #include <unordered_map>
 #include <unordered_set>
 
@@ -96,11 +97,36 @@ Tok aug_to_bin(Tok t) {
     }
 }
 
+struct CaptureVar {
+    std::string name;
+    TypePtr ty;
+};
+
+// 一个函数的闭包形态：env 是从祖先函数捕获的变量（cell 指针在闭包
+// 对象里的下标），cells 是本函数自己的局部变量里被子孙函数捕获的。
+struct ClosureMeta {
+    std::vector<CaptureVar> env;
+    std::unordered_map<std::string, int> env_index;
+    std::vector<CaptureVar> cells;
+    std::unordered_map<std::string, int> cell_index;
+    // 自底向上传播后的需求集合：本函数及其子孙需要从祖先拿到的名字。
+    std::unordered_set<std::string> needed;
+};
+
 struct FuncCtx {
     IRFunction* fn = nullptr;
     const Scope* scope = nullptr;
     std::unordered_map<std::string, int> slots;
     std::unordered_set<std::string> globals_decl;
+    // 闭包：本函数需要从外层拿的变量，以及被内层捕获、需要转成 cell 的局部名。
+    const ClosureMeta* closure = nullptr;
+    std::unordered_map<std::string, int> cell_slots;   // 名字 → 存 cell 指针的槽
+    std::unordered_map<std::string, int> param_slots;  // 被捕获形参的原始值槽
+    int env_slot = -1;                                 // 存闭包指针（%r10）的槽
+    // 嵌套函数直接引用自己的名字：用当前闭包指针，不需要 self cell。
+    const FunctionDef* self_def = nullptr;
+    TypePtr self_type;
+    int self_idx = -1;
     // {break 目标块, continue 目标块}
     std::vector<std::pair<int, int>> loops;
     int blk = 0;
@@ -137,6 +163,11 @@ private:
 
     std::unordered_map<std::string, int> global_ids_;
     std::unordered_map<std::string, FunctionDef*> func_defs_;
+    // 闭包捕获分析：函数树 + 每个函数的捕获形态。
+    std::unordered_map<const FunctionDef*, FunctionDef*> func_parent_;
+    std::unordered_map<const FunctionDef*, std::vector<FunctionDef*>> func_children_;
+    std::vector<FunctionDef*> func_roots_;
+    std::unordered_map<const FunctionDef*, ClosureMeta> closure_meta_;
     // 类：ClassInfo 是 typecheck 的产物，IRClass 是它的运行时形态。
     // 用 ClassInfo 指针做键，同名类重定义时不会串。
     std::unordered_map<std::string, ClassInfoPtr> classes_;
@@ -398,6 +429,7 @@ private:
         release_slots();
         if (st_->is_entry) {
             release_globals();
+            call_void(RtFn::GcShutdown, {});
             call_void(RtFn::RcShutdown, {});
         }
         Inst in;
@@ -422,7 +454,142 @@ private:
         return id;
     }
 
+    // ── 闭包 ────────────────────────────────────────────────────
+
+    const ClosureMeta* closure() const { return st_ ? st_->closure : nullptr; }
+
+    bool is_cell(const std::string& name) const {
+        return st_ && st_->cell_slots.count(name) > 0;
+    }
+
+    bool is_env(const std::string& name) const {
+        auto* m = closure();
+        return m && st_->env_slot >= 0 && m->env_index.count(name) > 0;
+    }
+
+    TypePtr captured_ty(const std::string& name) const {
+        auto* m = closure();
+        if (!m) return nullptr;
+        if (auto it = m->cell_index.find(name); it != m->cell_index.end())
+            return m->cells[static_cast<size_t>(it->second)].ty;
+        if (auto it = m->env_index.find(name); it != m->env_index.end())
+            return m->env[static_cast<size_t>(it->second)].ty;
+        return nullptr;
+    }
+
+    VReg load_cell(const std::string& name) {
+        TypePtr T = captured_ty(name);
+        int slot = st_->cell_slots.at(name);
+        return load_slot(slot, mk_list(T ? T : t_unknown()));
+    }
+
+    // cell 是单元素 list[T]；读出来是借用引用，写进去由 list_set 管旧值。
+    VReg read_cell(const std::string& name) {
+        VReg c = load_cell(name);
+        TypePtr T = captured_ty(name);
+        Inst in;
+        in.op = IrOp::IndexLoad;
+        in.a = c;
+        in.b = const_int(0);
+        return def(T ? T : t_unknown(), std::move(in));
+    }
+
+    VReg read_env(const std::string& name) {
+        auto* m = closure();
+        int idx = m->env_index.at(name);
+        TypePtr T = captured_ty(name);
+        VReg env = load_slot(st_->env_slot, t_unknown());
+        VReg c = field_load(env, 16 + 8 * idx, mk_list(T ? T : t_unknown()));
+        Inst in;
+        in.op = IrOp::IndexLoad;
+        in.a = c;
+        in.b = const_int(0);
+        return def(T ? T : t_unknown(), std::move(in));
+    }
+
+    VReg cell_for_capture(const std::string& name) {
+        if (is_cell(name)) return load_cell(name);
+        if (is_env(name)) {
+            auto* m = closure();
+            int idx = m->env_index.at(name);
+            TypePtr T = captured_ty(name);
+            VReg env = load_slot(st_->env_slot, t_unknown());
+            return field_load(env, 16 + 8 * idx, mk_list(T ? T : t_unknown()));
+        }
+        return kNoReg;
+    }
+
+    // 写回捕获变量：先按 cell 的元素类别 retain，list_set 负责 dec 旧值
+    //（kind 1）；kind 2 只 retain 不 release，宁可泄漏。
+    void write_cell(const std::string& name, VReg v, TypePtr vty) {
+        TypePtr T = captured_ty(name);
+        v = coerce(v, vty, T);
+        VReg cell = is_cell(name) ? load_cell(name) : kNoReg;
+        if (cell == kNoReg) {
+            auto* m = closure();
+            int idx = m->env_index.at(name);
+            VReg env = load_slot(st_->env_slot, t_unknown());
+            cell = field_load(env, 16 + 8 * idx, mk_list(T ? T : t_unknown()));
+        }
+        retain_elem(v, list_kind(mk_list(T ? T : t_unknown())));
+        Inst in;
+        in.op = IrOp::IndexStore;
+        in.a = cell;
+        in.b = const_int(0);
+        in.c = v;
+        emit(std::move(in));
+    }
+
+    VReg zero_value(TypePtr T) {
+        if (!T) return const_none();
+        switch (T->kind) {
+            case TyKind::Int:
+            case TyKind::Bool:
+            case TyKind::None:
+                return const_int(0);
+            case TyKind::Float:
+                return const_float(0.0);
+            default:
+                return const_none();
+        }
+    }
+
+    // 被内层函数捕获的局部变量在入口转成单元素 list[T]（cell）。
+    // 形参先用原始槽接实参，再把值 retain 进 cell。
+    void create_cells() {
+        auto* m = closure();
+        if (!m) return;
+        for (auto& cv : m->cells) {
+            TypePtr T = cv.ty;
+            TypePtr cell_ty = mk_list(T ? T : t_unknown());
+            int kind = list_kind(cell_ty);
+            VReg init;
+            if (auto it = st_->param_slots.find(cv.name); it != st_->param_slots.end())
+                init = load_slot(it->second, T);
+            else
+                init = zero_value(T);
+            retain_elem(init, kind);
+            Inst in;
+            in.op = IrOp::MakeList;
+            in.imm = kind;
+            in.args = {init};
+            VReg cell = def_heap(cell_ty, std::move(in));
+            store_slot(st_->cell_slots.at(cv.name), cell);
+        }
+    }
+
+    void bind_name_value(const std::string& name, VReg v, TypePtr vty) {
+        if (is_cell(name)) {
+            write_cell(name, v, vty);
+        } else if (is_local(name)) {
+            store_slot(st_->slots[name], v);
+        } else {
+            store_global(global_idx(name), v);
+        }
+    }
+
     TypePtr name_ty(const std::string& name) {
+        if (auto t = captured_ty(name)) return t;
         if (st_ && st_->scope) {
             auto it = st_->scope->vars.find(name);
             if (it != st_->scope->vars.end()) return it->second.ty;
@@ -435,21 +602,22 @@ private:
     }
 
     bool is_local(const std::string& name) const {
-        return st_ && st_->slots.count(name) > 0;
+        if (!st_) return false;
+        return st_->slots.count(name) > 0 || is_env(name);
     }
 
-    // 一个名字的存储类型：局部看槽，模块级看全局表。
+    // 一个名字的存储类型：cell/env 看捕获类型，局部看槽，模块级看全局表。
     TypePtr storage_ty(const std::string& name) {
+        if (auto t = captured_ty(name)) return t;
         if (st_->globals_decl.count(name) || !is_local(name)) return mod_.globals[global_idx(name)].ty;
         return st_->fn->slot_ty[st_->slots[name]];
     }
 
-    // 当前作用域里有没有这个名字（局部槽或 global 声明）。
+    // 当前作用域里有没有这个名字（局部槽、捕获变量或 global 声明）。
     bool is_bound_here(const std::string& name) const {
         if (!st_) return false;
         if (st_->globals_decl.count(name)) return true;
-        if (st_->slots.count(name)) return true;
-        return false;
+        return is_local(name);
     }
 
     // 内置名可以被用户遮蔽：模块里定义了 print，它就不再是内置。
@@ -582,7 +750,9 @@ private:
     // ── 预扫描 ──────────────────────────────────────────────────
 
     void hoist_globals(std::vector<StmtPtr>& body);
-    void collect_funcdefs(std::vector<StmtPtr>& body);
+    void collect_funcdefs(std::vector<StmtPtr>& body, FunctionDef* parent = nullptr);
+    void compute_closure_meta(FunctionDef* f);
+    TypePtr capture_type(const FunctionDef* f, const std::string& name);
     void bind_name(Expr& target);
     void scan_globals(Stmt& s, bool enter_functions = false);
 
@@ -696,28 +866,90 @@ void Lowerer::hoist_globals(std::vector<StmtPtr>& body) {
     for (auto& s : body) scan_globals(*s, false);
 }
 
-void Lowerer::collect_funcdefs(std::vector<StmtPtr>& body) {
+void Lowerer::collect_funcdefs(std::vector<StmtPtr>& body, FunctionDef* parent) {
     for (auto& s : body) {
         if (s->kind == StmtKind::FunctionDef) {
             auto& f = static_cast<FunctionDef&>(*s);
             func_defs_[f.name] = &f;
-            collect_funcdefs(f.body);
+            func_parent_[&f] = parent;
+            if (parent) func_children_[parent].push_back(&f);
+            else func_roots_.push_back(&f);
+            collect_funcdefs(f.body, &f);
+        } else if (s->kind == StmtKind::ClassDef) {
+            // 方法不是词法嵌套函数（类作用域不参与捕获），但方法体里的
+            // def 仍是其嵌套函数，需要单独建树。
+            for (auto& m : static_cast<ClassDef&>(*s).body) {
+                if (m->kind != StmtKind::FunctionDef) continue;
+                auto& f = static_cast<FunctionDef&>(*m);
+                func_parent_[&f] = nullptr;
+                func_roots_.push_back(&f);
+                collect_funcdefs(f.body, &f);
+            }
         } else if (s->kind == StmtKind::If) {
-            for (auto& b : static_cast<If&>(*s).branches) collect_funcdefs(b.body);
-            collect_funcdefs(static_cast<If&>(*s).orelse);
+            for (auto& b : static_cast<If&>(*s).branches) collect_funcdefs(b.body, parent);
+            collect_funcdefs(static_cast<If&>(*s).orelse, parent);
         } else if (s->kind == StmtKind::While) {
-            collect_funcdefs(static_cast<While&>(*s).body);
+            collect_funcdefs(static_cast<While&>(*s).body, parent);
         } else if (s->kind == StmtKind::For) {
-            collect_funcdefs(static_cast<For&>(*s).body);
+            collect_funcdefs(static_cast<For&>(*s).body, parent);
         } else if (s->kind == StmtKind::Try) {
             auto& t = static_cast<Try&>(*s);
-            collect_funcdefs(t.body);
-            for (auto& h : t.handlers) collect_funcdefs(h.body);
-            collect_funcdefs(t.finalbody);
+            collect_funcdefs(t.body, parent);
+            for (auto& h : t.handlers) collect_funcdefs(h.body, parent);
+            collect_funcdefs(t.finalbody, parent);
         } else if (s->kind == StmtKind::With) {
-            collect_funcdefs(static_cast<With&>(*s).body);
+            collect_funcdefs(static_cast<With&>(*s).body, parent);
         }
     }
+}
+
+TypePtr Lowerer::capture_type(const FunctionDef* f, const std::string& name) {
+    const Scope* s = tc_.scope_of(f);
+    for (s = s ? s->parent : nullptr; s; s = s->parent) {
+        auto it = s->vars.find(name);
+        if (it != s->vars.end()) return it->second.ty;
+    }
+    return t_unknown();
+}
+
+// 自底向上传播捕获集：子函数需要的名字，如果在本函数里有绑定，就变成
+// 本函数的 cell；否则继续往上要。这样多层嵌套闭包也能拿到正确的 cell。
+void Lowerer::compute_closure_meta(FunctionDef* f) {
+    if (closure_meta_.count(f)) return;
+
+    std::unordered_set<std::string> local_names;
+    if (auto* sc = tc_.scope_of(f))
+        for (auto& [n, sym] : sc->vars) local_names.insert(n);
+
+    std::unordered_set<std::string> needed;
+    for (auto& n : tc_.free_refs(f))
+        if (n != f->name) needed.insert(n);  // 自引用走 env/静态闭包，不建 cell 环
+    std::set<std::string> cell_names;
+    for (auto* c : func_children_[f]) {
+        compute_closure_meta(c);
+        for (auto& n : closure_meta_[c].needed) {
+            if (local_names.count(n)) cell_names.insert(n);
+            else needed.insert(n);
+        }
+    }
+
+    ClosureMeta meta;
+    for (auto& n : cell_names) {
+        TypePtr t = t_unknown();
+        if (auto* sc = tc_.scope_of(f)) {
+            auto it = sc->vars.find(n);
+            if (it != sc->vars.end()) t = it->second.ty;
+        }
+        meta.cell_index[n] = static_cast<int>(meta.cells.size());
+        meta.cells.push_back({n, t});
+    }
+    std::set<std::string> sorted_env(needed.begin(), needed.end());
+    for (auto& n : sorted_env) {
+        meta.env_index[n] = static_cast<int>(meta.env.size());
+        meta.env.push_back({n, capture_type(f, n)});
+    }
+    meta.needed = std::move(needed);
+    closure_meta_[f] = std::move(meta);
 }
 
 // 类表必须在编译任何方法体之前建好：方法里可能构造另一个类，
@@ -789,6 +1021,7 @@ void Lowerer::collect_classes(std::vector<StmtPtr>& body) {
 void Lowerer::run(Module& ast) {
     hoist_globals(ast.body);
     collect_funcdefs(ast.body);
+    for (auto* root : func_roots_) compute_closure_meta(root);
     classes_ = tc_.classes();
     collect_classes(ast.body);
 
@@ -926,7 +1159,7 @@ void Lowerer::stmt(Stmt& s) {
             for (auto& n : static_cast<Global&>(s).names) st_->globals_decl.insert(n);
             break;
         }
-        case StmtKind::Nonlocal: unsupported(s, "'nonlocal'"); break;
+        case StmtKind::Nonlocal: break;  // 名字解析已经由 cell/env 接管
     }
     if (st_->rc_pushes != pushes_before) {
         if (!terminated()) rc_cleanup(stmt_mark);
@@ -1315,16 +1548,29 @@ int Lowerer::compile_function_body(FunctionDef& f, FuncInfoPtr info, const std::
 
     const Scope* scope = tc_.scope_of(&f);
     push_frame(irf, scope);
+    if (auto it = closure_meta_.find(&f); it != closure_meta_.end()) st_->closure = &it->second;
+
     int entry = new_block("entry");
     switch_to(entry);
 
-    // 参数先占槽，顺序必须和 IRParam 一致，后端靠它搬实参。
-    if (info) {
-        auto add_param = [&](const Param& p) {
-            int s = irf->new_slot(p.ty ? p.ty : t_unknown());
-            irf->params.push_back(IRParam{p.name, p.ty ? p.ty : t_unknown(), s});
+    const ClosureMeta* meta = st_->closure;
+
+    // 被内层捕获的变量不占普通值槽，槽里放的是 cell（单元素 list[T]）。
+    // 形参例外：IRParam 需要原始值槽接实参，入口再 retain 进 cell。
+    auto add_param = [&](const Param& p) {
+        TypePtr T = p.ty ? p.ty : t_unknown();
+        int s = irf->new_slot(T);
+        irf->params.push_back(IRParam{p.name, T, s});
+        if (meta && meta->cell_index.count(p.name)) {
+            int cs = irf->new_slot(mk_list(T));
+            st_->cell_slots[p.name] = cs;
+            st_->param_slots[p.name] = s;
+            st_->slots[p.name] = cs;
+        } else {
             st_->slots[p.name] = s;
-        };
+        }
+    };
+    if (info) {
         for (auto& p : info->pos) add_param(p);
         for (auto& p : info->kwonly) add_param(p);
     }
@@ -1335,15 +1581,40 @@ int Lowerer::compile_function_body(FunctionDef& f, FuncInfoPtr info, const std::
         for (auto& [name, sym] : scope->vars) {
             if (st_->slots.count(name)) continue;
             if (st_->globals_decl.count(name)) continue;
-            int s = irf->new_slot(sym.ty ? sym.ty : t_unknown());
-            st_->slots[name] = s;
+            TypePtr T = sym.ty ? sym.ty : t_unknown();
+            if (meta && meta->cell_index.count(name)) {
+                int cs = irf->new_slot(mk_list(T));
+                st_->cell_slots[name] = cs;
+                st_->slots[name] = cs;
+            } else {
+                st_->slots[name] = irf->new_slot(T);
+            }
         }
+    }
+
+    // 闭包环境指针由 codegen 在入口从 %r10 存进这个槽；只是借用，
+    // 不参与引用计数，出口也不释放。
+    if (meta && !meta->env.empty()) {
+        int es = irf->new_slot(t_unknown());
+        st_->env_slot = es;
+        irf->env_slot = es;
+        st_->borrow_slots.insert(es);
+    }
+
+    // 嵌套函数里的自引用：如果它需要闭包（有其它捕获），env_slot 里就是
+    // 自己；没有捕获则是静态闭包。两种情况都不需要 self cell。
+    if (auto pit = func_parent_.find(&f); pit != func_parent_.end() && pit->second) {
+        st_->self_def = &f;
+        st_->self_idx = fidx;
+        st_->self_type = new_ty(TyKind::Func);
+        st_->self_type->fn = info;
     }
 
     // 形参按值借用，入口统一 retain 一份归形参槽所有；出口 release_slots
     // 负责释放。这样函数体内覆盖形参时也能按普通槽的规则 dec 旧值。
     st_->fn_mark = rc_mark_at(st_->fn_mark_block, st_->fn_mark_pos);
     inc_params();
+    create_cells();
 
     stmts(f.body);
     if (!terminated()) emit_return(kNoReg, nullptr);
@@ -1370,19 +1641,49 @@ void Lowerer::lower_funcdef(FunctionDef& f) {
         return;
     }
 
+    TypePtr fty = new_ty(TyKind::Func);
+    fty->fn = info;
+
     std::string label = std::format("{}_{}", f.name, mod_.funcs.size());
     int fidx = compile_function_body(f, info, label);
 
-    // 函数对象在 def 执行时才绑定到名字上
-    Inst fa;
-    fa.op = IrOp::FuncAddr;
-    fa.imm = fidx;
-    VReg fv = def(new_ty(TyKind::Func), std::move(fa));
+    auto mit = closure_meta_.find(&f);
+    const ClosureMeta* meta = mit == closure_meta_.end() ? nullptr : &mit->second;
 
-    if (is_local(f.name)) {
-        store_slot(st_->slots[f.name], fv);
+    // 无捕获：函数值指向静态闭包（rc = INT64_MIN，永生）。
+    // 有捕获：运行时分配闭包对象，填 code 和各 cell 指针。
+    VReg fv;
+    if (!meta || meta->env.empty()) {
+        Inst fa;
+        fa.op = IrOp::FuncAddr;
+        fa.imm = fidx;
+        fv = def(fty, std::move(fa));
     } else {
-        store_global(global_idx(f.name), fv);
+        Inst fc;
+        fc.op = IrOp::FuncCode;
+        fc.imm = fidx;
+        VReg code = def(t_int(), std::move(fc));
+        fv = call_runtime(RtFn::ClosureNew, fty,
+                          {code, const_int(static_cast<int64_t>(meta->env.size()))});
+        push_temp(fv);
+    }
+
+    // def 执行时才绑定名字。先绑定再填 env：自递归闭包要靠 cell 里
+    // 已经写好的闭包指针找到自己（这会形成环，环目前靠泄漏处理）。
+    bind_name_value(f.name, fv, fty);
+
+    if (meta && !meta->env.empty()) {
+        for (size_t i = 0; i < meta->env.size(); ++i) {
+            const auto& cv = meta->env[i];
+            VReg cell = cell_for_capture(cv.name);
+            if (cell == kNoReg) {
+                err(f.line, f.col,
+                    std::format("closure capture of '{}' is not available here", cv.name));
+                continue;
+            }
+            rc_inc(cell);
+            field_store(fv, 16 + 8 * static_cast<int>(i), cell);
+        }
     }
 }
 
@@ -1506,6 +1807,10 @@ void Lowerer::assign_to(Expr& target, VReg v, TypePtr vty) {
     switch (target.kind) {
         case ExprKind::Name: {
             auto& n = static_cast<Name&>(target);
+            if (is_cell(n.id) || is_env(n.id)) {
+                write_cell(n.id, v, src_ty);
+                break;
+            }
             if (st_->globals_decl.count(n.id) || !is_local(n.id)) {
                 int gi = global_idx(n.id);
                 TypePtr want = mod_.globals[gi].ty;
@@ -1561,6 +1866,8 @@ void Lowerer::assign_to(Expr& target, VReg v, TypePtr vty) {
             TypePtr ot = tc_.type_of(s.value.get());
             if (ot && ot->kind == TyKind::List && !ot->sub.empty())
                 v = coerce(v, src_ty, ot->sub[0]);
+            // 运行时 list_set 只负责 dec 旧值；新值的 retain 在这里做。
+            retain_elem(v, list_kind(strip_optional(ot)));
             Inst in;
             in.op = IrOp::IndexStore;
             in.a = obj;
@@ -1604,6 +1911,17 @@ VReg Lowerer::expr(Expr& e) {
         case ExprKind::Constant: return lower_constant(static_cast<Constant&>(e));
         case ExprKind::Name: {
             auto& n = static_cast<Name&>(e);
+            // 嵌套函数直接引用自己：取当前闭包，而不是外层绑定。
+            if (st_->self_def && n.id == st_->self_def->name && !is_cell(n.id) &&
+                !is_env(n.id) && !st_->slots.count(n.id)) {
+                if (st_->env_slot >= 0) return load_slot(st_->env_slot, st_->self_type);
+                Inst fa;
+                fa.op = IrOp::FuncAddr;
+                fa.imm = st_->self_idx;
+                return def(st_->self_type, std::move(fa));
+            }
+            if (is_cell(n.id)) return read_cell(n.id);
+            if (is_env(n.id)) return read_env(n.id);
             // 类名不是一个运行时可求值的值：没有类对象，构造必须在调用点
             // 直接展开。悄悄读一个空全局槽只会得到 0，比报错难查得多。
             if (!is_local(n.id) && classes_.count(n.id)) {
@@ -1686,6 +2004,10 @@ VReg Lowerer::expr(Expr& e) {
         }
         case ExprKind::Slice:
             err(e.line, e.col, "slice is not supported by the code generator yet");
+            return const_none();
+        case ExprKind::Lambda:
+            err(e.line, e.col,
+                "lambda in a class-body value is not supported by the code generator yet");
             return const_none();
         default:
             err(e.line, e.col, std::format("expression kind {} is not supported by the code generator",
@@ -2098,6 +2420,10 @@ std::vector<VReg> Lowerer::bind_args(Call& c, const FuncInfoPtr& info, FunctionD
 
     // 缺省参数：只支持字面量常量默认值
     auto default_of = [&](size_t pos_index) -> std::optional<ConstVal> {
+        // 签名里的默认表达式优先：通过函数值 / lambda 调用时没有
+        // FunctionDef 可查，只能靠 FuncInfo 带着的 AST 指针。
+        if (info && pos_index < info->pos.size() && info->pos[pos_index].default_expr)
+            return as_const(info->pos[pos_index].default_expr);
         if (!def) return std::nullopt;
         size_t nd = def->args.defaults.size();
         if (pos_index + nd < npos) return std::nullopt;
@@ -2144,9 +2470,11 @@ std::vector<VReg> Lowerer::bind_args(Call& c, const FuncInfoPtr& info, FunctionD
             bound[bi] = const_none();
             continue;
         }
-        // kwonly 默认值在 def->args.kw_defaults 里，与 kwonly 下标对齐
+        // kwonly 默认值：签名里带了默认表达式就直接用，否则回退到 def。
         std::optional<ConstVal> cv;
-        if (def && i < def->args.kw_defaults.size() && def->args.kw_defaults[i])
+        if (info && i < info->kwonly.size() && info->kwonly[i].default_expr)
+            cv = as_const(info->kwonly[i].default_expr);
+        if (!cv && def && i < def->args.kw_defaults.size() && def->args.kw_defaults[i])
             cv = as_const(def->args.kw_defaults[i].get());
         if (!cv) {
             err(c.line, c.col,

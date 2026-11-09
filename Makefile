@@ -31,7 +31,8 @@ TARGET   := $(BUILD)/py23
 
 SRCDIR := src
 SRCS   := $(SRCDIR)/main.cpp $(SRCDIR)/parser.cpp $(SRCDIR)/typecheck.cpp \
-          $(SRCDIR)/lower.cpp $(SRCDIR)/codegen.cpp $(SRCDIR)/ir.cpp
+          $(SRCDIR)/lower.cpp $(SRCDIR)/codegen.cpp $(SRCDIR)/ir.cpp \
+          $(SRCDIR)/desugar.cpp
 OBJS   := $(SRCS:$(SRCDIR)/%.cpp=$(BUILD)/%.o)
 DEPS   := $(OBJS:.o=.d)
 

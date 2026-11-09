@@ -84,9 +84,11 @@ python3 tests/diff/run_diff.py --only repr  # 只测浮点转字符串
 ### 内存验收
 
 `tests/run/10_rc.py` 覆盖别名、字段、列表、返回值和 `continue` 跳过清理；
-RSS 压力用受限地址空间跑长循环（命令见
-[compatibility.md](compatibility.md#内存验收)）。改 `lower.cpp` 的 RC 插桩后
-至少跑一遍：
+`tests/run/11_closure.py` 覆盖闭包捕获、`nonlocal`、多层嵌套、自递归；
+`tests/run/12_lambda.py` 覆盖 lambda；`tests/run/13_gc.py` 会真正触发
+2MB 阈值后的标记-清扫（对象环、闭包垃圾、unknown 容器）。RSS 压力用
+受限地址空间跑长循环（命令见 [compatibility.md](compatibility.md#内存验收)）。
+改 `lower.cpp` 的 RC 插桩、闭包捕获或 `runtime/rt.c` 的 GC 后至少跑一遍：
 
 ```bash
 ./build/dev/py23 build stress.py -o stress
@@ -138,10 +140,11 @@ cc -O1 -g -fsanitize=address,undefined -c runtime/rt.c -o /tmp/rt_asan.o
 g++ -std=c++23 -O1 -g -fsanitize=address,undefined -Isrc \
     -DPY23_RT_OBJ='"/tmp/rt_asan.o"' src/*.cpp -o /tmp/py23-asan
 mkdir -p /tmp/asancc
-printf '#!/bin/sh\nexec cc -fsanitize=address,undefined "$@"\n' > /tmp/asancc/cc
+printf '#!/bin/sh\nexec /usr/bin/cc -fsanitize=address,undefined "$@"\n' > /tmp/asancc/cc
 chmod +x /tmp/asancc/cc
 PATH=/tmp/asancc:$PATH ASAN_OPTIONS=detect_leaks=1 \
     /tmp/py23-asan run tests/run/10_rc.py
+    /tmp/py23-asan run tests/run/13_gc.py
 ```
 
 ### 严格警告

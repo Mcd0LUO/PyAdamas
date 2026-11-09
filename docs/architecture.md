@@ -9,7 +9,10 @@ source.py
 token 流（token.h）
    │  Parser（parser.cpp，递归下降 + 优先级爬升）
    ▼
-AST（ast.h）──────────────► TypeChecker（typecheck.cpp）
+AST（ast.h）
+   │  Desugar（desugar.cpp）：lambda → 合成嵌套 def
+   ▼
+AST（已展开）─────────────► TypeChecker（typecheck.cpp）
    │                          │ 只做检查与推断，不改树
    ▼                          ▼
 Lowerer（lower.cpp）◄──── 类型查询接口（typecheck.h）
@@ -32,6 +35,7 @@ GNU as 汇编（AT&T）
 |---|---|---|---|
 | 词法 | 源码字节 | `vector<Token>` | 抛 `LexError` |
 | 语法 | token 流 | `Module`（AST 根） | 抛 `ParseError` |
+| 脱糖 | AST | AST（lambda 已展开成嵌套 def） | 不失败 |
 | 类型检查 | AST | 无（副作用是 `expr_types_` 等映射） | 收集错误，返回 `bool` |
 | 降级 | AST + 类型查询接口 | `IRModule` | 收集 `LowerError`，不抛 |
 | 代码生成 | `IRModule` | 汇编文本 | 不失败（前置阶段已挡住） |
@@ -87,7 +91,7 @@ codegen.h/cpp
 
 ### 前端宽、后端严
 
-类型检查的原则是**宁可漏报，不可误杀**：推断不出来就退化成 `unknown`，凡是涉及 `unknown` 的检查一律放行。真正做不了的东西（`class`、`try`、闭包）前端**照样放行**，留到降级阶段报「code generator 还不支持」。
+类型检查的原则是**宁可漏报，不可误杀**：推断不出来就退化成 `unknown`，凡是涉及 `unknown` 的检查一律放行。真正做不了的东西（`try`/`with`、生成器、装饰器实现）前端**照样放行**，留到降级阶段报「code generator 还不支持」。
 
 这样做的直接后果是：`py23 check` 可以当「这文件语法和类型有没有明显毛病」的通用检查器用（它对 3.8 万个真实 `.py` 文件的通过率见 [compatibility.md](compatibility.md)），而 `py23 build` 才是「能不能真编译」的判据。
 

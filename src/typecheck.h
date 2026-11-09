@@ -7,7 +7,7 @@
 //      —— 宁可漏报，不可误杀。歧义是静态检查最大的敌人。
 //   2. 变量类型一旦确定就不可改变（这是与 CPython 的语义分歧点，
 //      也是拿到性能的前提：每个变量在栈上有固定槽位和固定宽度）。
-//   3. 遇到尚未实现的语句（class/try/with/import/yield/async）
+//   3. 遇到尚未实现的语句（try/with/import/yield/async）
 //      不报错，只记入 unsupported 列表，并尽量把子树也检查一遍。
 //      这样 check 命令对真实代码仍然可用。
 #include <algorithm>
@@ -109,6 +109,9 @@ struct Param {
     TypePtr ty;
     bool has_default = false;
     bool kwonly = false;
+    // 默认值的 AST 节点。降级器在调用点内联填充；通过函数值调用时
+    // 没有 FunctionDef 可查，只能靠签名里的这个指针。
+    const Expr* default_expr = nullptr;
 };
 
 struct FuncInfo {
@@ -587,6 +590,9 @@ struct Scope {
     std::unordered_map<std::string, Symbol> vars;
     Scope* parent = nullptr;
     bool is_module = false;
+    // 这个作用域属于哪个函数；模块 / 推导式 / 类作用域为 nullptr。
+    // 闭包捕获靠它判断「名字是不是从外层函数来的」。
+    const FunctionDef* fn_owner = nullptr;
 };
 
 class TypeChecker {
@@ -621,6 +627,14 @@ public:
     // 类表：名字 → 编译期布局。lower 靠它把属性访问变成固定偏移。
     const std::unordered_map<std::string, ClassInfoPtr>& classes() const { return classes_; }
 
+    // 函数体直接引用、且解析到外层函数作用域的名字。降级期用它算
+    // cell / env；不含通过嵌套函数传递的引用（那部分由 lower 自底向上传播）。
+    const std::unordered_set<std::string>& free_refs(const Stmt* fn) const {
+        static const std::unordered_set<std::string> empty;
+        auto it = free_refs_.find(fn);
+        return it == free_refs_.end() ? empty : it->second;
+    }
+
     // 顶层符号快照，供 `types` 子命令展示
     std::vector<std::pair<std::string, std::string>> top_symbols() const;
     std::vector<std::string> unsupported;
@@ -633,7 +647,12 @@ private:
     Scope* module_ = nullptr;
     std::vector<Diag> diags_;
     FuncInfoPtr cur_fn_;
+    const FunctionDef* cur_fn_def_ = nullptr;
+    Scope* cur_fn_scope_ = nullptr;
     std::unordered_set<std::string> global_decl_;
+    std::unordered_set<std::string> nonlocal_decl_;
+    // 每个函数直接引用的外层函数变量；值在 lookup 命中祖先函数作用域时记录。
+    std::unordered_map<const Stmt*, std::unordered_set<std::string>> free_refs_;
     struct RetInfo {
         TypePtr ty;
         int line = 1;
@@ -708,6 +727,12 @@ private:
     // 函数体同样需要预登记局部名字：内层函数可以引用外层稍后才赋值的
     // 变量（Python 的名字在调用时解析）。
     void hoist_scope_bindings(std::vector<StmtPtr>& body, Scope* sc);
+
+    // 预收集函数体内（不含嵌套函数/类）的 global / nonlocal 声明。
+    // 两者都作用于整个函数，不能等按文本顺序执行到语句才生效。
+    void collect_fn_decls(std::vector<StmtPtr>& body,
+                          std::unordered_set<std::string>& globals,
+                          std::unordered_set<std::string>& nonlocals);
 
     void bind_target(Expr& target, Scope* sc);
 

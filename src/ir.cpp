@@ -25,7 +25,8 @@ std::string Inst::text() const {
         case IrOp::ConstFloat: return std::format("{} = const.float {}", vreg_str(dst), fimm);
         case IrOp::ConstStr: return std::format("{} = const.str #{}", vreg_str(dst), idx);
         case IrOp::ConstNone: return std::format("{} = const.none", vreg_str(dst));
-        case IrOp::FuncAddr: return std::format("{} = func.addr f{}", vreg_str(dst), idx);
+        case IrOp::FuncAddr: return std::format("{} = func.addr f{}", vreg_str(dst), imm);
+        case IrOp::FuncCode: return std::format("{} = func.code f{}", vreg_str(dst), imm);
         case IrOp::Mov: return std::format("{} = mov {}", vreg_str(dst), vreg_str(a));
         case IrOp::Bin:
             return std::format("{} = bin.{} {}, {}", vreg_str(dst), bin_name(bop), vreg_str(a),

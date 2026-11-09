@@ -108,6 +108,8 @@ enum class RtFn : uint8_t {
     RcMark,      // () -> i64      临时值栈水位
     RcCleanup,   // (i64) -> void  释放到指定水位
     RcShutdown,  // () -> void     程序退出，释放临时栈自身的存储
+    GcShutdown,  // () -> void     程序退出，释放所有剩余堆对象（含环）
+    ClosureNew,  // (i64 code, i64 n_caps) -> closure*
 };
 
 inline const char* rt_name(RtFn f) {
@@ -139,6 +141,8 @@ inline const char* rt_name(RtFn f) {
         case RtFn::RcMark: return "py23_rc_mark";
         case RtFn::RcCleanup: return "py23_rc_cleanup";
         case RtFn::RcShutdown: return "py23_rc_shutdown";
+        case RtFn::GcShutdown: return "py23_gc_shutdown";
+        case RtFn::ClosureNew: return "py23_closure_new";
     }
     return "?";
 }
@@ -151,7 +155,8 @@ enum class IrOp : uint8_t {
     ConstNone,   // dst = None
 
     // ── 值 ────────────────────────────────────────────────
-    FuncAddr,  // dst = &funcs[imm]
+    FuncAddr,  // dst = &static_closure[imm]（无条件/无捕获函数值）
+    FuncCode,  // dst = &funcs[imm]（裸代码地址，只给 ClosureNew 用）
     Mov,       // dst = a
 
     // ── 运算 ──────────────────────────────────────────────
@@ -196,6 +201,7 @@ inline const char* irop_name(IrOp op) {
         case IrOp::ConstStr: return "const.str";
         case IrOp::ConstNone: return "const.none";
         case IrOp::FuncAddr: return "func.addr";
+        case IrOp::FuncCode: return "func.code";
         case IrOp::Mov: return "mov";
         case IrOp::Bin: return "bin";
         case IrOp::Un: return "un";
@@ -279,6 +285,8 @@ struct IRFunction {
     // 每个虚拟寄存器的类型，后端决定用 rax 还是 xmm 时查它
     std::vector<TypePtr> vreg_ty;
     std::vector<Block> blocks;
+    // 有捕获的函数：入口把 %r10 里的闭包指针存进这个槽。
+    int env_slot = -1;
 
     int new_slot(TypePtr ty) {
         slot_ty.push_back(std::move(ty));
@@ -334,6 +342,7 @@ inline bool ir_is_heap(const TypePtr& t) {
         case TyKind::List:
         case TyKind::Tuple:
         case TyKind::Class:
+        case TyKind::Func:  // 静态闭包永生，堆闭包引用计数
             return true;
         case TyKind::Optional:
             return !t->sub.empty() && ir_is_heap(t->sub[0]);

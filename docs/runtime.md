@@ -15,10 +15,16 @@
 ## 对象布局
 
 ```c
-typedef struct {
+typedef struct Py23Rc {
+    struct Py23Rc* next;    /* GC 注册表链 */
+    struct Py23Rc* prev;
     int64_t rc;             /* INT64_MIN = 永生（字面量） */
-    void (*dtor)(void*);    /* rc 归零时回调，字符串为 NULL */
-} Py23Rc;                   /* 位于负载之前 16 字节，对象指针不指向它 */
+    void (*dtor)(void*);    /* rc 归零：正常释放路径 */
+    void (*release)(void*); /* GC 清扫：只减掉指向可达对象的引用 */
+    int64_t size;           /* 负载字节数，GC 扫描范围 */
+    int64_t kind;           /* STR / LIST / OBJ / CLOSURE */
+    int64_t marked;         /* 标记-清扫用 */
+} Py23Rc;                   /* 64 字节，位于负载之前，对象指针不指向它 */
 
 typedef struct { int64_t len; int64_t hash; const char* data; } Py23Str;
 typedef struct { int64_t len; int64_t cap; int64_t* data; int64_t elem_kind; } Py23List;
@@ -27,8 +33,9 @@ typedef struct { int64_t len; int64_t cap; int64_t* data; int64_t elem_kind; } P
    头在负载前面，所以既有偏移一个都没变。 */
 ```
 
-分配统一走 `rc_alloc(size, dtor)`，返回负载指针；`py23_rc_inc` / `py23_rc_dec`
-从负载指针往前 16 字节找到头。`rc_dec` 归零时先调 `dtor`，再释放整块内存。
+分配统一走 `rc_alloc(size, dtor, release, kind)`，返回负载指针；
+`py23_rc_inc` / `py23_rc_dec` 从负载指针往前 64 字节找到头。`rc_dec`
+归零时先调 `dtor`，再释放整块内存。所有堆对象同时挂进 GC 注册表。
 
 ### 字符串
 
@@ -57,7 +64,8 @@ typedef struct { int64_t len; int64_t cap; int64_t* data; int64_t elem_kind; } P
 
 `py23_list_new(cap, elem_kind)` 最小容量 4；`append` 满了就翻倍。
 `py23_list_set` 只在 kind 1 时 dec 旧元素；`py23_list_set_len` 只在 kind 1
-时 dec 被截掉的元素。kind 2 会泄漏元素引用，这是「宁可泄漏，不可误杀」的代价。
+时 dec 被截掉的元素。kind 2 不做精确 dec，靠循环收集器兜底——误报只会
+延迟回收，不会提前释放。
 
 ### 用户对象
 
@@ -74,6 +82,23 @@ void* py23_obj_new(int64_t size, void (*dtor)(void*));
 `NULL`。子类析构器包含父类字段，顺序与对象布局一致。
 
 vtable 是静态数据，在 `.data.rel.ro` 里，由 codegen 按 `IRClass::vtable` 生成，运行时不需要知道它的存在。
+
+### 闭包
+
+闭包负载是 `[code, n_caps, cell0, cell1…]`：
+
+```c
+void* py23_closure_new(int64_t code, int64_t n_caps);
+```
+
+- `code` 是静态代码地址，不是堆指针，析构时不 dec；
+- `n_caps` 后面的每个 8 字节槽是一个 cell 指针；
+- 析构器逐个 `rc_dec` cell，然后由 RC 头统一释放；
+- 无捕获函数的闭包在 `.data.rel.ro` 里静态构造，rc = `INT64_MIN`。
+
+cell 不是新的运行时类型，就是一个**单元素列表** `list[T]`：读 `l[0]`、
+写 `l[0] = v`，元素所有权和析构完全复用列表规则。这样闭包不需要第二套
+引用计数实现。
 
 ## 函数表
 
@@ -105,6 +130,16 @@ vtable 是静态数据，在 `.data.rel.ro` 里，由 codegen 按 `IRClass::vtab
 | `py23_rc_mark` | `() -> i64` | 返回临时值栈当前水位 |
 | `py23_rc_cleanup` | `(i64 mark) -> void` | 释放到指定水位 |
 | `py23_rc_shutdown` | `() -> void` | 入口函数退出时释放临时栈自身存储 |
+| `py23_closure_new` | `(i64 code, i64 n_caps) -> closure*` | 分配闭包负载并挂 cell 析构器 |
+
+### 循环收集
+
+| 函数 | 签名 | 语义 |
+|---|---|---|
+| `py23_gc_init` | `(void** roots, i64 n, void* stack_top) -> void` | 注册全局根表与栈顶，生成的 `main` 调一次 |
+| `py23_gc_collect` | `() -> void` | 分配量超过 2MB 时由 `rc_alloc` 自动触发 |
+| `py23_gc_unref_child` | `(void*) -> void` | GC 清扫用：对象可达时把引用计数减一 |
+| `py23_gc_shutdown` | `() -> void` | 程序退出，释放所有剩余堆对象（含环） |
 
 ### 字符串
 
@@ -168,7 +203,8 @@ vtable 是静态数据，在 `.data.rel.ro` 里，由 codegen 按 `IRClass::vtab
 
 ## 内存模型
 
-**引用计数。** 每个堆对象带隐藏的 `Py23Rc{rc, dtor}` 头；所有权约定：
+**引用计数。** 每个堆对象（字符串、列表、元组、类实例、闭包）带隐藏的
+`Py23Rc{rc, dtor}` 头；所有权约定：
 
 - 槽 / 全局 / 字段 / kind 1 列表元素持有引用；
 - `load` / `field.get` / `list.get` 只借用，不增加计数；
@@ -181,17 +217,44 @@ vtable 是静态数据，在 `.data.rel.ro` 里，由 codegen 按 `IRClass::vtab
 完全不含临时堆值的语句、循环和函数会把 mark/cleanup 在降级期删掉，
 所以整数代码的生成结果与 0.6.1 完全相同。
 
-不是所有东西都会回收：
+引用计数处理不了两类东西：**环**和**类型看不见的引用**。它们交给下面的
+循环收集器：
 
-- **循环引用没人收**：`a.next = a` 这种环会一直活着；还没有标记-清扫。
-- **unknown 类型不插桩**：机器表示可能是整数，按指针 dec 会崩。unknown
-  值以及 `list[unknown]` / 混合类型元组的元素会泄漏。
-- 进程退出时入口函数会释放全局变量并关掉临时栈，ASan 的泄漏检查
-  因此仍能保持零报告（有环的情况除外）。
+- 对象自环、相互递归闭包形成的 cell 环：分配量超过 2MB 时被标记-清扫；
+  进程退出时也会清空整个堆。
+- `unknown` / `list[unknown]` / 混合元组：正常 RC 不精确 dec，但 GC 会
+  保守扫描并回收不可达对象。若某个 unknown 元素指向「仍有其它根」的
+  对象，它的计数可能虚高，要到后续轮次才回收。
+- 唯一的「回收静默性」：没有 `__del__`/弱引用，对象什么时候真正释放
+  不可观察；GC 是 stop-the-world、全堆扫描，没有分代/增量。
 
-静态类型的好处是插桩位置是确定的：赋值、传参、返回、容器写入都是明确
-的增减引用点，不需要保守扫描栈和寄存器。后续做闭包和异常时，cell 与
-异常对象也要遵守同一套所有权约定。
+静态类型的好处是 RC 插桩位置是确定的：赋值、传参、返回、容器写入都是
+明确的增减引用点。GC 只是兜底，不替代 RC。
+
+## 循环收集器
+
+`rc_alloc` 把每个堆对象挂进双向注册表；`alloc_since_gc` 超过 2MB 就在
+下一次分配前触发一轮收集：
+
+1. **建表**：按负载地址建开放寻址哈希表，所有对象 `marked = 0`。
+2. **标记**：根包括全局根表（生成代码在 `main` 里注册）、临时值栈、
+   真实栈扫描（从当前 `%rsp` 到 `main` 的栈顶）和 `setjmp` 捕获的
+   callee-saved 寄存器。标记对象时保守扫描：
+   - 列表：`data[0..len)` 每个 8 字节槽；
+   - 用户对象 / 闭包：整个负载按 8 字节扫；
+   - 字符串：没有子指针，跳过。
+3. **释放引用**：对每个不可达对象调用它的 `release`：
+   - 列表 kind 1 逐个 `gc_unref_child` 元素；
+   - 闭包逐个 cell；
+   - 用户对象用 codegen 生成的 `.LgcrelN`，只处理堆字段；
+   - `gc_unref_child` 只在子对象 **可达** 时 `rc--`，绝不释放。
+   这一步在没有任何对象被 free 之前完成，避免释放顺序造成悬空读取。
+4. **清扫**：释放所有不可达对象（列表顺带 `free(data)`），清掉可达对象
+   的 mark 位，释放临时哈希表/工作栈。
+
+保守扫描的代价是「误报只会延迟回收」：栈或寄存器里的整数如果恰好等于
+某个堆地址，会把它当根留下；不会把可达对象误判成垃圾。
+ASan 下用内联汇编取真实 `%rsp`，避免扫描 ASan fake stack 的未映射区域。
 
 ## 加一个运行时函数
 
@@ -205,9 +268,9 @@ vtable 是静态数据，在 `.data.rel.ro` 里，由 codegen 按 `IRClass::vtab
 
 ## 未来
 
-- **循环收集**：现在只有引用计数，环永远不释放。要做得加一个试验性的
-  标记-清扫，至少覆盖列表和用户对象。
-- **闭包 / 异常接入**：cell 和异常对象也要遵守「存储持有、读取借用、
-  临时值入栈」的约定，直接复用 `rc_alloc` 与临时值栈。
-- **kind 2 元素**：`list[unknown]` 现在只 retain 不 release。要彻底解决，
-  得给容器元素加运行时类型标签，或者把 unknown 从语言里消掉。
+- **异常接入**：异常对象也要遵守「存储持有、读取借用、临时值入栈」的
+  约定，直接复用 `rc_alloc`、临时值栈和 GC。
+- **精确根/分代**：现在是保守栈扫描 + 全堆 stop-the-world。要提速可以
+  给生成代码加栈映射，或做分代/增量收集。
+- **kind 2 元素**：`list[unknown]` 的引用计数仍不精确，靠 GC 兜底。要
+  彻底解决，得给容器元素加运行时类型标签，或者把 unknown 从语言里消掉。

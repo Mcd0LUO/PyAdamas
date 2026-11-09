@@ -28,7 +28,12 @@ std::vector<std::pair<std::string, std::string>> TypeChecker::top_symbols() cons
 Symbol* TypeChecker::lookup(const std::string& name) {
         for (Scope* s = cur_; s; s = s->parent) {
             auto it = s->vars.find(name);
-            if (it != s->vars.end()) return &it->second;
+            if (it == s->vars.end()) continue;
+            // 命中祖先函数作用域 = 闭包捕获。模块 / 推导式 / 类作用域
+            // 的 fn_owner 是空的，不算捕获。
+            if (cur_fn_def_ && s->fn_owner && s->fn_owner != cur_fn_def_)
+                free_refs_[cur_fn_def_].insert(name);
+            return &it->second;
         }
         return nullptr;
     }
@@ -36,6 +41,13 @@ Symbol* TypeChecker::lookup(const std::string& name) {
 Scope* TypeChecker::assign_target_scope(const std::string& name) {
         if (cur_ == module_) return module_;
         if (global_decl_.count(name)) return module_;
+        if (nonlocal_decl_.count(name)) {
+            for (Scope* s = cur_fn_scope_ ? cur_fn_scope_->parent : cur_->parent; s; s = s->parent) {
+                if (s->is_module) break;
+                if (s->vars.count(name)) return s;
+            }
+            return cur_;  // 声明阶段已经报过「no binding」
+        }
         return cur_;
     }
 
@@ -395,6 +407,56 @@ void TypeChecker::bind_target(Expr& target, Scope* sc) {
         }
     }
 
+void TypeChecker::collect_fn_decls(std::vector<StmtPtr>& body,
+                                   std::unordered_set<std::string>& globals,
+                                   std::unordered_set<std::string>& nonlocals) {
+        for (auto& s : body) {
+            switch (s->kind) {
+                case StmtKind::Global:
+                    for (auto& n : static_cast<Global&>(*s).names) globals.insert(n);
+                    break;
+                case StmtKind::Nonlocal:
+                    for (auto& n : static_cast<Nonlocal&>(*s).names) nonlocals.insert(n);
+                    break;
+                case StmtKind::If: {
+                    auto& f = static_cast<If&>(*s);
+                    for (auto& b : f.branches) collect_fn_decls(b.body, globals, nonlocals);
+                    collect_fn_decls(f.orelse, globals, nonlocals);
+                    break;
+                }
+                case StmtKind::While: {
+                    auto& w = static_cast<While&>(*s);
+                    collect_fn_decls(w.body, globals, nonlocals);
+                    collect_fn_decls(w.orelse, globals, nonlocals);
+                    break;
+                }
+                case StmtKind::For: {
+                    auto& f = static_cast<For&>(*s);
+                    collect_fn_decls(f.body, globals, nonlocals);
+                    collect_fn_decls(f.orelse, globals, nonlocals);
+                    break;
+                }
+                case StmtKind::Try: {
+                    auto& t = static_cast<Try&>(*s);
+                    collect_fn_decls(t.body, globals, nonlocals);
+                    for (auto& h : t.handlers) collect_fn_decls(h.body, globals, nonlocals);
+                    collect_fn_decls(t.orelse, globals, nonlocals);
+                    collect_fn_decls(t.finalbody, globals, nonlocals);
+                    break;
+                }
+                case StmtKind::With:
+                    collect_fn_decls(static_cast<With&>(*s).body, globals, nonlocals);
+                    break;
+                case StmtKind::FunctionDef:
+                case StmtKind::ClassDef:
+                    // 嵌套函数 / 类是独立作用域，它们的声明不算本函数的
+                    break;
+                default:
+                    break;
+            }
+        }
+    }
+
 FuncInfoPtr TypeChecker::build_sig(FunctionDef& f) {
         auto info = std::make_shared<FuncInfo>();
         info->name = f.name;
@@ -410,6 +472,10 @@ FuncInfoPtr TypeChecker::build_sig(FunctionDef& f) {
             size_t idx = info->pos.size();
             p.has_default = idx + ndef >= total_pos;
             p.kwonly = false;
+            if (p.has_default) {
+                size_t di = idx - (total_pos - ndef);
+                if (di < a.defaults.size()) p.default_expr = a.defaults[di].get();
+            }
             info->pos.push_back(std::move(p));
             if (posonly) ++info->n_posonly;
         };
@@ -422,6 +488,7 @@ FuncInfoPtr TypeChecker::build_sig(FunctionDef& f) {
             p.ty = parse_annotation(a.kwonly[i].annotation.get(), f.line);
             p.has_default = i < a.kw_defaults.size() && a.kw_defaults[i] != nullptr;
             p.kwonly = true;
+            if (i < a.kw_defaults.size()) p.default_expr = a.kw_defaults[i].get();
             info->kwonly.push_back(std::move(p));
         }
         if (a.vararg) {
@@ -731,8 +798,20 @@ void TypeChecker::stmt(Stmt& s) {
                 for (auto& n : static_cast<Global&>(s).names) global_decl_.insert(n);
                 break;
             }
-            case StmtKind::Nonlocal:
+            case StmtKind::Nonlocal: {
+                auto& nl = static_cast<Nonlocal&>(s);
+                for (auto& n : nl.names) {
+                    nonlocal_decl_.insert(n);
+                    if (cur_fn_def_) free_refs_[cur_fn_def_].insert(n);
+                    bool found = false;
+                    if (cur_fn_scope_) {
+                        for (Scope* sc = cur_fn_scope_->parent; sc && !sc->is_module; sc = sc->parent)
+                            if (sc->vars.count(n)) { found = true; break; }
+                    }
+                    if (!found) err(s.line, s.col, std::format("no binding for nonlocal '{}' found", n));
+                }
                 break;
+            }
             case StmtKind::Delete: {
                 for (auto& t : static_cast<Delete&>(s).targets) expr(*t);
                 break;
@@ -862,17 +941,23 @@ void TypeChecker::funcdef_impl(FunctionDef& f, const ClassInfoPtr& owner) {
 
         auto prev_fn = cur_fn_;
         bool prev_yield = saw_yield_;
-        saw_yield_ = false;
         auto* prev_scope = cur_;   // 必须回到进入函数前的作用域，不能一律挂到 module_
         auto sc = std::make_unique<Scope>();
         sc->parent = prev_scope;
+        sc->fn_owner = &f;
         cur_ = sc.get();
         func_scopes_[&f] = sc.get();
         func_infos_[&f] = info;
+        auto* prev_fn_def = cur_fn_def_;
+        auto* prev_fn_scope = cur_fn_scope_;
         cur_fn_ = info;
+        cur_fn_def_ = &f;
+        cur_fn_scope_ = sc.get();
         loop_depth_ = 0;
         auto saved_globals = std::move(global_decl_);
+        auto saved_nonlocals = std::move(nonlocal_decl_);
         global_decl_.clear();
+        nonlocal_decl_.clear();
         std::vector<RetInfo> rets;
         auto* prev_rets = rets_;
         rets_ = &rets;
@@ -891,7 +976,11 @@ void TypeChecker::funcdef_impl(FunctionDef& f, const ClassInfoPtr& owner) {
                 Symbol{mk_dict(t_str(), info->kwarg_ty ? info->kwarg_ty : t_unknown()),
                        f.line, true, false};
 
+        // global / nonlocal 作用于整个函数，先收集，再让 hoist 跳过这些名字。
+        collect_fn_decls(f.body, global_decl_, nonlocal_decl_);
         hoist_scope_bindings(f.body, cur_);
+        for (auto& n : global_decl_) cur_->vars.erase(n);
+        for (auto& n : nonlocal_decl_) cur_->vars.erase(n);
         auto saved_self_name = cur_self_name_;  // 拷贝：下面要让嵌套函数看见它
         if (owner) cur_self_name_ = info->pos.empty() ? std::string() : info->pos[0].name;
         // 嵌套函数不改它：闭包捕获的 self 还是外层那个名字
@@ -914,9 +1003,12 @@ void TypeChecker::funcdef_impl(FunctionDef& f, const ClassInfoPtr& owner) {
 
         cur_ = prev_scope;
         cur_fn_ = prev_fn;
+        cur_fn_def_ = prev_fn_def;
+        cur_fn_scope_ = prev_fn_scope;
         saw_yield_ = prev_yield;
         rets_ = prev_rets;
         global_decl_ = std::move(saved_globals);
+        nonlocal_decl_ = std::move(saved_nonlocals);
         // 保留函数作用域：IR 降级要按名字查最终类型
         pool_.push_back(std::move(sc));
     }

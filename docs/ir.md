@@ -26,7 +26,7 @@ Python 语义里变量天生可变，循环里反复赋值是常态。一上来�
 |---|---|
 | `Inst` | 一条指令。`op` + 至多三个源操作数 `a/b/c` + `dst` + `imm/fimm/idx/target/target2` + `args` + `ty` |
 | `Block` | 名字 + 指令序列，`terminated()` 判断末尾是不是跳转/分支/返回 |
-| `IRFunction` | 名字、形参、返回类型、`slot_ty`（局部槽类型）、`vreg_ty`（每个 vreg 的类型）、基本块 |
+| `IRFunction` | 名字、形参、返回类型、`slot_ty`（局部槽类型）、`vreg_ty`（每个 vreg 的类型）、基本块、`env_slot`（有捕获时存闭包指针的槽） |
 | `IRGlobal` | 一个全局变量；数据段里就是一个 `.quad`，初值 0 同时也是 `None` |
 | `IRClass` | 名字、vtable（槽 → 函数下标）、字段数（含继承）、`field_heap`（每个字段是否堆类型，供析构器使用） |
 | `IRModule` | 函数表、全局表、字符串池、类表、`entry`（顶层代码编译成的函数下标） |
@@ -45,7 +45,8 @@ Python 语义里变量天生可变，循环里反复赋值是常态。一上来�
 | `const.float dst, fimm` | `fimm: double` | `dst = fimm` | `movabsq` + `movq` + `movsd` |
 | `const.str dst, idx` | `idx: 字符串池` | `dst = &str_obj[idx]` | `leaq .LstrN(%rip)` |
 | `const.none dst` | — | `dst = 0` | `xorl` 或直接存 0 |
-| `func.addr dst, idx` | `idx: 函数号` | `dst = &func` | `leaq .LfN(%rip)` |
+| `func.addr dst, idx` | `idx: 函数号` | `dst = &static_closure`（无捕获函数值） | `leaq .LclosN(%rip)` |
+| `func.code dst, idx` | `idx: 函数号` | `dst = 裸代码地址`（只给 `closure.new` 用） | `leaq .LfN(%rip)` |
 | `mov dst, a` | — | `dst = a` | 两条 `movq`。**当前没有降级路径产生它**，留着给后续优化遍用 |
 | `bin dst, a, b` | `bop` | 按 `bop` 做二元运算 | 整数 `addq` 系 / 浮点 `addsd` 系 |
 | `un dst, a` | `uop` | `neg/pos/bitnot/not` | `negq` / 空 / `notq` / 真值取反 |
@@ -76,7 +77,13 @@ Python 语义里变量天生可变，循环里反复赋值是常态。一上来�
 
 引用计数不走 IR 新指令，全部是 `call.rt`：`py23_rc_inc` / `py23_rc_dec`
 管堆值，`py23_rc_temp` / `py23_rc_mark` / `py23_rc_cleanup` 管表达式临时
-值栈，`py23_rc_shutdown` 在入口函数退出时收尾。
+值栈，`py23_rc_shutdown` 在入口函数退出时收尾。循环收集器也是 `call.rt`：
+`py23_gc_shutdown` 在入口退出时清空剩余堆；周期性收集由 `rc_alloc` 在
+运行时内部按 2MB 阈值触发，IR 看不到。
+
+闭包对象用 `py23_closure_new(code, n_caps)` 分配，负载是
+`[code, n_caps, cell…]`；`Func` 是堆类型，静态闭包 rc 为永生。
+`func.code` 只在创建堆闭包时取裸代码地址，`func.addr` 一律指静态闭包。
 
 另有三类符号不走 `RtFn`，由后端直接按名字调用：`py23_pow_i64`、`py23_str_eq`、`py23_str_cmp`（以及 libm 的 `floor` / `fmod` / `pow`）。这类是「参数形态固定、没有枚举必要」的辅助函数。
 
@@ -133,7 +140,7 @@ Python 语义里变量天生可变，循环里反复赋值是常态。一上来�
 | `IfExp` | 三块 + 临时槽 |
 | `JoinedStr` | `str_concat` 链，每个 `{...}` 先 `convert` 到 `str` |
 | `NamedExpr` | 求值后 `assign_to`，结果就是该值 |
-| `Lambda` | 报错：还没有闭包表示 |
+| `Lambda` | 普通 lambda 在解析后已脱糖成嵌套 `def`；只有类体字段默认值里的 lambda 会走到这里报错 |
 
 ### 几处细节
 
@@ -146,6 +153,23 @@ Python 语义里变量天生可变，循环里反复赋值是常态。一上来�
 **`coerce` 的边界**：只处理数值域之间的转换（int/bool ↔ float）。指针类之间的差异（`list[int]` → `list[float]`）需要逐元素转换并重新分配，现阶段直接报错，不允许静默产生错误的位模式。
 
 **类在降级前先建表**：`Lowerer::run` 里先扫一遍语句块（不进函数体）把每个 `ClassDef` 变成一条 `IRClass`，vtable 槽先填 -1。这样方法体里构造另一个类时，类下标和对象大小都已经确定。真正编译 `ClassDef` 时分两步：先从父类 vtable 抄一份前缀（父类一定在前，此时已填好），再编译本类方法覆盖对应槽。`field_heap` 也在这时按父类到子类的布局顺序填好，codegen 据此生成析构器。
+
+**lambda 的位置**：解析后、类型检查前，`lambda` 被展开成插在包含它的
+语句之前的合成 `def`，表达式位置换成名字。这样类型检查和降级只需要
+处理 `FunctionDef`，捕获/引用计数规则不重复。
+
+**闭包的降级**：
+
+- 类型检查在 `lookup` 命中祖先函数作用域时记录自由变量；降级器自底向上
+  传播，得到每个函数的 `env`（从祖先捕获）和 `cells`（被子孙捕获的局部）
+- 函数的捕获局部在入口变成单元素 `list[T]` cell；读写成
+  `index.get/index.set`，引用计数沿用列表元素规则
+- 嵌套 `def`：无捕获用 `func.addr` 静态闭包；有捕获用
+  `closure.new` + 逐个 `field.set` 填 cell 指针
+- 被调函数入口从 `%r10` 把闭包指针存进 `env_slot`；捕获变量读成
+  `field.get env[16+8i]` 再 `index.get cell[0]`
+- 嵌套函数直接引用自己的名字时走当前闭包（有 env 用 env，否则静态闭包），
+  避免 self cell 环
 
 **引用计数插桩的边界**：
 

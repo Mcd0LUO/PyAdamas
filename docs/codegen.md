@@ -6,8 +6,14 @@
 
 ```asm
         .section .data.rel.ro,"aw",@progbits   ; 字符串常量对象
+        .quad 0                                ; next = NULL（不进 GC 注册表）
+        .quad 0                                ; prev
         .quad 0x8000000000000000               ; rc = INT64_MIN，永生
         .quad 0                                ; dtor = NULL
+        .quad 0                                ; release = NULL
+        .quad 0                                ; size
+        .quad 0                                ; kind
+        .quad 0                                ; marked
 .Lstr0: .quad 11                               ; 负载从 len 开始，布局与堆字符串一致
         .quad 0
         .quad .Lstr0_c
@@ -37,13 +43,26 @@ main:
 ```
 
 字符串对象是 `{len, hash, data}` 三字段，`data` 直接跟在后面；前面额外有
-16 字节的 RC 头（rc + dtor）。放在 `.data.rel.ro` 而不是 `.rodata`：对象
+64 字节的 RC/GC 头。放在 `.data.rel.ro` 而不是 `.rodata`：对象
 里有指向自身字符区的绝对地址，只读段会触发 PIE 重定位报错。vtable 同理
 ——表里是函数地址的 relocation。
 
-每个有堆字段的类还会生成一个 `.LdtorN`：按字段偏移逐个把值装进 `%rdi`
-调 `py23_rc_dec`，最后 `ret`。对象分配时把这个地址作为第二个参数传给
-`py23_obj_new`，引用计数归零时由运行时回调。
+每个有堆字段的类会生成两个回调：`.LdtorN`（按字段偏移调 `py23_rc_dec`，
+正常引用计数归零时用）和 `.LgcrelN`（调 `py23_gc_unref_child`，只减掉
+指向可达对象的引用，GC 清扫时用）。对象分配时把这两个地址传给
+`py23_obj_new`。
+
+全局变量在 `.data.rel.ro` 里还有一张 `.Lgroots` 根表（每个全局槽一个
+`.quad .LgN`）。生成的 `main` 在调用入口前执行：
+
+```asm
+        leaq .Lgroots(%rip), %rdi
+        movq $<全局数>, %rsi
+        movq %rsp, %rdx              # 栈顶
+        call py23_gc_init
+```
+
+循环收集器按全局表、临时值栈、真实栈和 callee-saved 寄存器找根。
 
 ## 寄存器策略
 
@@ -170,6 +189,7 @@ IR 一行没改，全部优化都发生在这一层。五件事叠起来，把�
 | 超出部分 | 按出现顺序压栈，`stack_off = 序号 * 8` |
 | 栈对齐 | 压栈字节数向上取整到 16 的倍数再 `subq` |
 | 返回值 | `%rax`（整数/指针）、`%xmm0`（浮点） |
+| 闭包环境 | `%r10`（隐藏参数，不属于 SysV 参数序列）；方法调用清零 |
 | 调用前 | `xorl %eax, %eax`（变参 ABI 约定，表示没有 vector 参数） |
 
 被调用者只保存 `%rbx` / `%r12`–`%r15` 里**实际用到的那几个**，序言 push、尾声逆序 pop。
@@ -188,10 +208,51 @@ IR 一行没改，全部优化都发生在这一层。五件事叠起来，把�
         addq  $16, %rsp
 ```
 
+## 闭包
+
+函数值现在一律指向**闭包对象**，负载 `[code, n_caps, cell…]`。无捕获函数
+用 `.data.rel.ro` 里的静态闭包：
+
+```asm
+        .section .data.rel.ro
+        .align 8
+        .quad 0                    # next
+        .quad 0                    # prev
+        .quad 0x8000000000000000   # rc = INT64_MIN
+        .quad 0                    # dtor = NULL
+        .quad 0                    # release = NULL
+        .quad 0                    # size
+        .quad 0                    # kind
+        .quad 0                    # marked
+.Lclos7:
+        .quad .Lf7                 # code
+        .quad 0                    # n_caps
+```
+
+有捕获的嵌套函数在运行时分配闭包（`py23_closure_new(code, n)`），析构器
+逐个 dec cell。调用序列：
+
+```asm
+        movq funcval, %r11
+        movq (%r11), %r11          # +0 是代码地址
+        ... 装实参 ...
+        movq funcval, %r10         # 闭包指针作为隐藏环境参数
+        xorl %eax, %eax
+        call *%r11
+```
+
+被调函数如果有捕获，入口执行 `movq %r10, env_slot`；之后的变量访问是
+「env + 16 + 8i 取 cell → cell[0] 读值」。方法调用在 `call` 前把 `%r10`
+清零，因为方法没有闭包环境。嵌套函数直接引用自己的名字时：有 env 就
+用 env 里的闭包指针，没有就是静态闭包，因此不会为自递归生成 self cell 环。
+
+被捕获变量是单元素 `list[T]`（cell），读写复用 `index.get/index.set` 和
+列表元素的引用计数；这样闭包、列表、RC 三套机制不需要各自实现一份。
+
 ## 对象与虚调用
 
-对象是一块连续内存，字段偏移在编译期就定了。对象指针指向负载，RC 头
-在负载前面 16 字节，所以下面这些偏移一个都没变：
+对象是一块连续内存，字段偏移在编译期就定了。对象指针指向负载，RC/GC 头
+在负载前面 64 字节，所以下面这些偏移一个都没变：
 
 ```
 -16   rc（隐藏）
@@ -216,6 +277,7 @@ a.speak()   →   a->vtable[0](a)   →   Dog::speak
 ```asm
         movq  $24, %rdi          # 8 * (1 + 2 个字段)
         leaq  .Ldtor0(%rip), %rsi
+        leaq  .Lgcrel0(%rip), %rdx
         call  py23_obj_new       # rc_alloc，全零，rc = 1
         leaq  .Lvt0(%rip), %rcx
         movq  %rcx, (%rax)       # 对象头写 vtable
@@ -345,7 +407,8 @@ objdump -d --no-show-raw-insn ./x | less
 RC 不新增 IR 指令，全部通过 `call.rt` 调运行时：
 
 - 字面量 rc = `INT64_MIN`，inc/dec 在运行时直接跳过；
-- 有堆字段的类才有 `.LdtorN`，没有堆字段的类传 `NULL`；
+- 有堆字段的类才有 `.LdtorN` / `.LgcrelN`，没有堆字段的类传 `NULL`；
+- 分配量超过 2MB 才触发循环收集；纯整数代码不分配堆，完全不受影响；
 - 不含临时堆值的语句 / 循环 / 函数在降级期把 mark/cleanup 删掉。
   所以整数循环和递归生成的汇编与 0.6.1 完全一样，性能差异只在
   「方法调用的 self 形参 inc/dec」这类真正的堆值传递上。

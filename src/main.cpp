@@ -29,6 +29,7 @@
 
 #include "ast.h"
 #include "codegen.h"
+#include "desugar.h"
 #include "ir.h"
 #include "lexer.h"
 #include "lower.h"
@@ -142,6 +143,7 @@ std::optional<Frontend> run_frontend(const std::string& path, const std::string&
 
     py23::Parser parser(std::move(tokens));
     auto mod = parser.parse();
+    py23::desugar_lambdas(*mod);
 
     Frontend fe(path);
     fe.mod = std::move(mod);

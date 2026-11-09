@@ -83,10 +83,11 @@ public:
             for (size_t i = 0; i < m.strings.size(); ++i) {
                 const std::string& s = m.strings[i];
                 out_ += "\t.align 8\n";
-                // 隐藏的 RC 头：rc = INT64_MIN 表示永生（字面量不参与回收），
-                // dtor = 0。负载仍然以 len 开头，布局和堆上的字符串一致。
+                // 隐藏 RC 头（64 字节）：next/prev/rc/dtor/release/size/kind/marked。
+                // 字面量 rc = INT64_MIN 永生，不进 GC 注册表。
+                out_ += "\t.quad 0\n\t.quad 0\n";
                 out_ += "\t.quad 0x8000000000000000\n";
-                out_ += "\t.quad 0\n";
+                out_ += "\t.quad 0\n\t.quad 0\n\t.quad 0\n\t.quad 0\n\t.quad 0\n";
                 out_ += std::format(".Lstr{}:\n", i);
                 out_ += std::format("\t.quad {}\n", s.size());
                 out_ += "\t.quad 0\n";
@@ -102,6 +103,17 @@ public:
             out_ += "\t.align 8\n";
             for (size_t i = 0; i < m.globals.size(); ++i)
                 out_ += std::format(".Lg{}:\n\t.zero 8\n", i);
+
+            // GC 根表：所有全局槽的地址。类型 unknown 的全局也可能存堆指针，
+            // 所以不做类型过滤，运行时会按地址查注册表。
+            out_ += "\t.section .data.rel.ro,\"aw\",@progbits\n";
+            out_ += "\t.align 8\n";
+            out_ += ".Lgroots:\n";
+            for (size_t i = 0; i < m.globals.size(); ++i)
+                out_ += std::format("\t.quad .Lg{}\n", i);
+        } else {
+            out_ += "\t.section .data.rel.ro,\"aw\",@progbits\n";
+            out_ += "\t.align 8\n.Lgroots:\n";
         }
 
         // 每个类一张静态 vtable：槽里是方法代码地址。对象头第一个
@@ -114,6 +126,21 @@ public:
                 if (m.classes[i].vtable.empty()) out_ += "\t.quad 0\n";
                 for (int f : m.classes[i].vtable)
                     out_ += f < 0 ? "\t.quad 0\n" : std::format("\t.quad {}\n", func_label(f));
+            }
+        }
+
+        // 每个函数一个静态闭包（code + 0 个捕获），用作无捕获函数值。
+        // 布局和堆闭包一致：+0 code，+8 n_caps，+16 起是 cell。
+        if (!m.funcs.empty()) {
+            out_ += "\t.section .data.rel.ro,\"aw\",@progbits\n";
+            for (size_t i = 0; i < m.funcs.size(); ++i) {
+                out_ += "\t.align 8\n";
+                out_ += "\t.quad 0\n\t.quad 0\n";
+                out_ += "\t.quad 0x8000000000000000\n";
+                out_ += "\t.quad 0\n\t.quad 0\n\t.quad 0\n\t.quad 0\n\t.quad 0\n";
+                out_ += std::format(".Lclos{}:\n", i);
+                out_ += std::format("\t.quad {}\n", func_label(static_cast<int>(i)));
+                out_ += "\t.quad 0\n";
             }
         }
 
@@ -137,6 +164,20 @@ public:
             }
             out_ += "\tpopq %rbx\n";
             out_ += "\tret\n";
+
+            // GC 清扫用：只把指向可达对象的字段引用减掉，不释放任何东西。
+            out_ += "\n# ---- gc release class " + c.name + " ----\n";
+            out_ += "\t.align 8\n";
+            out_ += std::format(".Lgcrel{}:\n", i);
+            out_ += "\tpushq %rbx\n";
+            out_ += "\tmovq %rdi, %rbx\n";
+            for (size_t f = 0; f < c.field_heap.size(); ++f) {
+                if (!c.field_heap[f]) continue;
+                out_ += std::format("\tmovq {}(%rbx), %rdi\n", 8 * (f + 1));
+                out_ += "\tcall py23_gc_unref_child\n";
+            }
+            out_ += "\tpopq %rbx\n";
+            out_ += "\tret\n";
         }
 
         for (size_t i = 0; i < m.funcs.size(); ++i) emit_function(*m.funcs[i], static_cast<int>(i));
@@ -147,6 +188,11 @@ public:
         out_ += "main:\n";
         out_ += "\tpushq %rbp\n";
         out_ += "\tmovq %rsp, %rbp\n";
+        // GC 根表 + 栈顶。栈顶取 main 的 rsp，收集器向下扫描到当前帧。
+        out_ += "\tleaq .Lgroots(%rip), %rdi\n";
+        out_ += std::format("\tmovq ${}, %rsi\n", m.globals.size());
+        out_ += "\tmovq %rsp, %rdx\n";
+        out_ += "\tcall py23_gc_init\n";
         if (m.entry >= 0) out_ += std::format("\tcall {}\n", func_label(m.entry));
         out_ += "\tpopq %rbp\n";
         out_ += "\tret\n";
@@ -500,6 +546,9 @@ private:
             }
         }
 
+        // 有捕获的函数从 %r10 拿闭包环境；调用方在 call 前设置。
+        if (f.env_slot >= 0) line(std::format("movq %r10, {}", slot_op(f.env_slot)));
+
         for (size_t bi = 0; bi < f.blocks.size(); ++bi) {
             label(block_label(static_cast<int>(bi)));
             gen_block(f.blocks[bi]);
@@ -670,6 +719,10 @@ private:
                 move_to(dst_op(in.dst), "$0");
                 break;
             case IrOp::FuncAddr:
+                line(std::format("leaq .Lclos{}(%rip), %rax", in.imm));
+                move_to(dst_op(in.dst), "%rax");
+                break;
+            case IrOp::FuncCode:
                 line(std::format("leaq {}(%rip), %rax", func_label(static_cast<int>(in.imm))));
                 move_to(dst_op(in.dst), "%rax");
                 break;
@@ -1188,10 +1241,13 @@ private:
         const IRClass& c = m_->classes[static_cast<size_t>(in.imm)];
         line(std::format("movq ${}, %rdi", 8 * (c.n_fields + 1)));
         bool has_heap = std::ranges::any_of(c.field_heap, [](uint8_t v) { return v != 0; });
-        if (has_heap)
+        if (has_heap) {
             line(std::format("leaq .Ldtor{}(%rip), %rsi", in.imm));
-        else
+            line(std::format("leaq .Lgcrel{}(%rip), %rdx", in.imm));
+        } else {
             line("xorl %esi, %esi");
+            line("xorl %edx, %edx");
+        }
         line("call py23_obj_new");
         line(std::format("leaq .Lvt{}(%rip), %rcx", in.imm));
         line("movq %rcx, (%rax)");
@@ -1246,6 +1302,7 @@ private:
             else
                 line(std::format("movq {}, {}", src_op(in.args[i]), kIntArgRegs[l.reg]));
         }
+        line("xorl %r10d, %r10d");
         line("xorl %eax, %eax");
         line("call *%r11");
         if (alloc) line(std::format("addq ${}, %rsp", alloc));
@@ -1305,8 +1362,10 @@ private:
         int stack_bytes = stack_args * 8;
         int alloc = (stack_bytes + 15) & ~15;
 
-        // callee 先取到 r11：后面装参数会用到其它寄存器，r11 不在参数序列里
+        // 函数值是闭包对象指针：+0 是代码地址。先取代码到 r11，
+        // 参数装完后再把闭包指针放进 r10 传给被调函数当环境。
         line(std::format("movq {}, %r11", src_op(in.a)));
+        line("movq (%r11), %r11");
         if (alloc) line(std::format("subq ${}, %rsp", alloc));
         for (size_t i = 0; i < in.args.size(); ++i) {
             if (locs[i].stack_off < 0) continue;
@@ -1321,6 +1380,7 @@ private:
             else
                 line(std::format("movq {}, {}", src_op(in.args[i]), kIntArgRegs[l.reg]));
         }
+        line(std::format("movq {}, %r10", src_op(in.a)));
         line("xorl %eax, %eax");
         line("call *%r11");
         if (alloc) line(std::format("addq ${}, %rsp", alloc));
@@ -1342,6 +1402,7 @@ private:
             case RtFn::ListSetLen:
             case RtFn::StrConcat:
             case RtFn::StrCharAt:
+            case RtFn::ClosureNew:
                 line(std::format("movq {}, %rdi", src_op(in.args[0])));
                 line(std::format("movq {}, %rsi", src_op(in.args[1])));
                 break;
@@ -1376,6 +1437,7 @@ private:
             case RtFn::PrintEnd:
             case RtFn::RcMark:
             case RtFn::RcShutdown:
+            case RtFn::GcShutdown:
                 break;
         }
         line(std::format("call {}", rt_name(fn)));

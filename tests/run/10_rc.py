@@ -46,6 +46,10 @@ nums: list[int] = [1, 2]
 nums[0] = nums[1]
 print(nums[0])
 
+words: list[str] = ["a", "b"]
+words[0] = "x" + "y"
+print(words[0])
+
 class Bag:
     items: list[str]
     def __init__(self) -> None:
@@ -133,6 +137,7 @@ print(len(total))
 # z
 # xy
 # 2
+# xy
 # hello
 # same
 # truthy

@@ -69,7 +69,7 @@ bad.py:1:7: error: expected parameter name, found ':'
 
 ## 现在能做什么
 
-标量、字符串、列表、元组、函数（默认参数、递归、一等值）、`class`（字段、方法、单继承、虚调用）、`if` / `while` / `for`（含循环 `else`）、`break` / `continue`、`assert`、`try/finally`、`global`、f-string、`print`（含 `sep=` / `end=`）。堆值用引用计数自动回收；不含堆临时值的代码不会插入任何 RC 指令。
+标量、字符串、列表、元组、函数（默认参数、递归、一等值、闭包、`nonlocal`、`lambda`）、`class`（字段、方法、单继承、虚调用）、`if` / `while` / `for`（含循环 `else`）、`break` / `continue`、`assert`、`try/finally`、`global`、f-string、`print`（含 `sep=` / `end=`）。堆值用引用计数自动回收，循环收集器回收环和 unknown 容器泄漏；不含堆临时值的代码不会插入任何 RC 指令。
 
 完整的支持清单和语义定义见 [docs/language.md](docs/language.md)。
 
@@ -83,7 +83,7 @@ src/
   ir.h     lower.cpp      IR：三地址码、AST → IR 降级
   codegen.cpp             x86-64 指令选择、寄存器分配
   main.cpp                CLI：把各阶段串起来
-runtime/rt.c              运行时：引用计数、字符串、列表、对象、输出、panic
+runtime/rt.c              运行时：引用计数、循环收集、字符串、列表、对象、输出、panic
 tests/                    正例 / 反例 / 运行用例 / 差分测试
 docs/                     设计与参考文档
 tools/                    一次性脚本
@@ -99,15 +99,17 @@ tools/                    一次性脚本
 - **类型挂在指令上**：前端推完的类型一路带到后端，宽度选择不靠猜。
 - **类布局编译期定死**：对象是 `[RC 头][vtable][字段…]`，字段偏移和方法槽号都是常量，没有查表也没有哈希。→ [代码生成](docs/codegen.md#对象与虚调用)
 - **引用计数不查栈**：所有权由静态类型决定，表达式临时值进运行时临时值栈；纯整数语句、循环、函数的 RC 脚手架在降级期删掉。→ [运行时](docs/runtime.md#内存模型)
+- **闭包是 cell + 闭包对象**：被捕获变量转成单元素列表，闭包存代码和 cell 指针；函数值是一等堆值，静态闭包永生。`lambda` 脱糖成嵌套 `def`。→ [代码生成](docs/codegen.md#闭包)
+- **RC + 保守循环收集**：堆对象进注册表，分配超过 2MB 触发标记-清扫；根来自全局表、临时栈、真实栈和 callee-saved 寄存器。误报只延迟回收，不提前释放。→ [运行时](docs/runtime.md#循环收集器)
 - **运行时是纯 C**，只依赖 libc + libm，随产物一起链接。
 
 ## 已知限制（摘要）
 
 语法层明确拒绝：`bytes` / `complex` 字面量、超出 int64 的整数、`match` 语句。
 
-能解析、能检查，但 `build` 报错：`try/except`、`with`、闭包、`lambda`、字典/集合、切片、推导式、生成器、`async`、装饰器、`import`、`raise`、`del`、`*args`/`**kwargs`、`in`，以及类的多继承、类体里的非声明语句、带装饰器的方法。类只支持单继承，没有 `super()`、类属性、`@property`；字段可以不写标注，由 `self.x = ...` 推断。
+能解析、能检查，但 `build` 报错：`try/except`、`with`、字典/集合、切片、推导式、生成器、`async`、装饰器、`import`、`raise`、`del`、`*args`/`**kwargs`、`in`，以及类的多继承、类体里的非声明语句、带装饰器的方法。类只支持单继承，没有 `super()`、类属性、`@property`；字段可以不写标注，由 `self.x = ...` 推断。闭包和 `lambda` 已支持；循环收集器是保守的，可能延迟回收，但没有 `__del__`/弱引用。
 
-语义上有意与 CPython 不同：列表相等比指针、整数溢出回绕、字符串按字节（`len("中文") == 6`）、读未赋值局部变量得到 0。引用计数不处理循环引用；`unknown` 类型和 `list[unknown]` / 混合类型元组的元素不参与计数，会泄漏。
+语义上有意与 CPython 不同：列表相等比指针、整数溢出回绕、字符串按字节（`len("中文") == 6`）、读未赋值局部变量得到 0。引用计数处理不了的环和 `unknown` / `list[unknown]` / 混合元组引用由保守 GC 兜底；误报只延迟回收，没有 `__del__`/弱引用。
 
 完整清单（含原因）在 [docs/compatibility.md](docs/compatibility.md)。
 
@@ -116,11 +118,11 @@ tools/                    一次性脚本
 | 组 | 数量 | 内容 |
 |---|---|---|
 | `tests/*.py` | 11 | 前端正例，267 条语句 / 29 个函数 / 1165 个表达式 |
-| `tests/fail/*.py` | 32 | 反例，必须报出首行 `# expect:` 指定的错 |
-| `tests/run/*.py` | 10 | 编译 + 运行，输出与文件末尾的 `# --- expect ---` 逐行比对 |
+| `tests/fail/*.py` | 34 | 反例，必须报出首行 `# expect:` 指定的错 |
+| `tests/run/*.py` | 13 | 编译 + 运行，输出与文件末尾的 `# --- expect ---` 逐行比对 |
 | `tests/unsupported/*.py` | 2 | `check` 必须打「没建模」标记，且 `build` 必须拒绝 |
 | `tests/diff/` | 4 个生成器 | 随机程序与 CPython 比 stdout，默认 3 种子 600 个程序 |
-| 内存验收 | — | 16MB 地址空间限制下跑 100 万次拼接 / 100 万次对象分配 |
+| 内存验收 | — | 16MB 地址空间限制下跑拼接 / 对象分配 / 闭包工厂 / 对象环 / unknown 泄漏 |
 
 ```bash
 make test
@@ -129,7 +131,7 @@ python3 tests/diff/run_diff.py --seeds 5     # 1000 个程序，目前零差异
 
 前端鲁棒性基线（CPython 3.11 标准库 + site-packages，38582 个 `.py`）：语法通过 35693，其中类型通过 29143（81.6%）；标准库本体 1143 / 1289（88.7%）。0.6 引入类检查后口径变了——刚加上时失败 19064 个文件，逐条去误杀后降到 6550 个，明细见 [compatibility.md](docs/compatibility.md#前端鲁棒性基线)。
 
-ASan + UBSan 下跑全部用例零报告（含生成代码的 RC 路径），`-Wshadow -Wnon-virtual-dtor -Wold-style-cast -Wcast-qual` 零警告。内存验收在 16MB `RLIMIT_AS` 下完成，峰值 RSS 约 8MB。
+ASan + UBSan + LSan 下跑全部用例零报告（含生成代码的 RC、闭包与 GC 路径），`-Wshadow -Wnon-virtual-dtor -Wold-style-cast -Wcast-qual` 零警告。内存验收在 16MB `RLIMIT_AS` 下完成，对象环 / unknown 泄漏 / 闭包垃圾的峰值 RSS 约 8MB。
 
 ## 文档
 
