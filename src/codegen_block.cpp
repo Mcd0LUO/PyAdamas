@@ -36,7 +36,13 @@ void AsmGen::emit_function(const IRFunction& f, int fi) {
             for (const auto& p : f.params)
                 if (p.slot >= 0 && p.slot < n_slots_) is_param[p.slot] = true;
             for (int s = 0; s < n_slots_; ++s)
-                if (!is_param[s]) line(std::format("movq $0, {}", slot_op(s)));
+                if (!is_param[s]) {
+                    std::string loc = slot_op(s);
+                    if (loc.starts_with("%xmm"))
+                        line(std::format("xorpd {}, {}", loc, loc));
+                    else
+                        line(std::format("movq $0, {}", loc));
+                }
 
             // 形参落位
             std::vector<TypePtr> ptypes;
@@ -50,7 +56,7 @@ void AsmGen::emit_function(const IRFunction& f, int fi) {
                     line(std::format("movq {}(%rbp), %rax", 16 + l.stack_off));
                     move_to(slot_op(p.slot), "%rax");
                 } else if (l.fp) {
-                    line(std::format("movsd %xmm{}, {}", l.reg, smem(p.slot)));
+                    line(std::format("movsd %xmm{}, {}", l.reg, slot_op(p.slot)));
                 } else {
                     move_to(slot_op(p.slot), kIntArgRegs[l.reg]);
                 }
@@ -64,7 +70,9 @@ void AsmGen::emit_function(const IRFunction& f, int fi) {
         if (!m_->is_entry && fi == m_->entry) {
             line(std::format("leaq {}(%rip), %rdi", roots_label()));
             line(std::format("movq ${}, %rsi", local_global_count()));
+            spill_fp_slots();
             line("call py23_gc_add_roots");
+            reload_fp_slots();
         }
 
         for (size_t bi = 0; bi < f.blocks.size(); ++bi) {
@@ -89,10 +97,21 @@ bool AsmGen::can_fuse(const Inst& in, const Inst& nx) const {
         if (in.op == IrOp::StoreSlot || in.op == IrOp::StoreGlobal) return false;
         if (nx.op != IrOp::StoreSlot || nx.a != in.dst) return false;
         if (nx.idx < 0 || nx.idx >= static_cast<int>(slot_reg_.size())) return false;
-        if (slot_reg_[nx.idx].empty()) return false;
         if (in.dst >= use_count_.size()) return false;
         // 只有「定义后在本块里正好被用一次」才能就地写变量槽。
         // 用两次就不行了：第二次读到的会是新值。
+        return use_count_[in.dst] == 1 && !cross_block_[in.dst];
+    }
+
+bool AsmGen::can_fuse_fp_temp(const Inst& in, const Inst& nx) const {
+        auto simple_bin = [](const Inst& x) {
+            if (x.op != IrOp::Bin || !ir_is_float(x.ty)) return false;
+            return x.bop == BinKind::Add || x.bop == BinKind::Sub ||
+                   x.bop == BinKind::Mul || x.bop == BinKind::Div;
+        };
+        if (!simple_bin(in) || !simple_bin(nx)) return false;
+        if (in.dst == kNoReg || (nx.a != in.dst && nx.b != in.dst)) return false;
+        if (in.dst >= use_count_.size()) return false;
         return use_count_[in.dst] == 1 && !cross_block_[in.dst];
     }
 
@@ -142,16 +161,14 @@ void AsmGen::gen_block(const Block& b) {
         alias_.clear();
         const_val_.clear();
 
-        // 预扫描：每个槽在本块内第一次被 store 的位置，以及每个 vreg
-        // 在本块内第一次被读的位置。LoadSlot 会把临时值直接绑到变量
-        // 寄存器上，这个绑定只在「读之后、写之前」成立，所以要先确认
-        // 中间没有对同一变量的赋值。
-        block_first_store_.clear();
+        // 预扫描：每个变量槽在本块内被 store 的位置，以及每个 vreg
+        // 第一次被读的位置。LoadSlot 的别名只在「读之后、第一次赋值之前」
+        // 成立；第一次赋值之后别名会读到新值。
+        block_stores_.clear();
         block_first_use_.clear();
         for (int i = 0; i < static_cast<int>(b.insts.size()); ++i) {
             const Inst& in = b.insts[i];
-            if (in.op == IrOp::StoreSlot && !block_first_store_.contains(in.idx))
-                block_first_store_[in.idx] = i;
+            if (in.op == IrOp::StoreSlot) block_stores_[in.idx].push_back(i);
             VReg ops[3] = {in.a, in.b, in.c};
             for (VReg r : ops)
                 if (r != kNoReg && !block_first_use_.contains(r)) block_first_use_[r] = i;
@@ -175,9 +192,19 @@ void AsmGen::gen_block(const Block& b) {
             }
 
             int fused_slot = -1;
+            bool fp_temp = false;
             if (i + 1 < b.insts.size() && can_fuse(in, b.insts[i + 1])) {
                 fused_slot = b.insts[i + 1].idx;
-                dst_loc_ = slot_reg_[fused_slot];
+                // 提升到寄存器的槽直接写寄存器；没提升的槽也可以把
+                // 结果直接落到变量内存，省掉「临时 vreg 槽 → 变量槽」。
+                dst_loc_ = slot_reg_[fused_slot].empty() ? slot_op(fused_slot)
+                                                         : slot_reg_[fused_slot];
+            } else if (i + 2 < b.insts.size() &&
+                       can_fuse_fp_temp(in, b.insts[i + 1]) &&
+                       !can_fuse_fp_temp(b.insts[i + 1], b.insts[i + 2])) {
+                // 下一条自己也要当临时结果时不能共用 %xmm1。
+                dst_loc_ = "%xmm1";
+                fp_temp = true;
             }
 
             // 常量干脆不生成指令，让使用者把它当立即数。`s += 1` 因此
@@ -192,6 +219,7 @@ void AsmGen::gen_block(const Block& b) {
 
             gen_inst(in);
             dst_loc_.clear();
+            if (fp_temp) alias_[in.dst] = "%xmm1";
 
             if (fused_slot >= 0) {
                 // 融合掉的 store.slot 仍然改了变量，指向它的别名要失效

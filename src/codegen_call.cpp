@@ -8,29 +8,104 @@ void AsmGen::gen_make_list(const Inst& in) {
         // 由降级器按容器类型算好，运行时据此决定覆盖和销毁时是否 dec。
         line(std::format("movq ${}, %rdi", in.args.size()));
         line(std::format("movq ${}, %rsi", in.imm));
+        spill_fp_slots();
         line("call py23_list_new");
+        reload_fp_slots();
         line(std::format("movq %rax, {}", dst_op(in.dst)));
         for (VReg a : in.args) {
             line(std::format("movq {}, %rdi", dst_op(in.dst)));
             line(std::format("movq {}, %rsi", src_op(a)));
+            spill_fp_slots();
             line("call py23_list_append");
+            reload_fp_slots();
         }
     }
 
 void AsmGen::gen_index_load(const Inst& in) {
         TypePtr ot = ty_of(in.a);
-        bool is_str = ot && ot->kind == TyKind::Str;
+        if (ot && ot->kind == TyKind::Str) {
+            line(std::format("movq {}, %rdi", src_op(in.a)));
+            line(std::format("movq {}, %rsi", src_op(in.b)));
+            spill_fp_slots();
+            line("call py23_str_char_at");
+            reload_fp_slots();
+            line(std::format("movq %rax, {}", dst_op(in.dst)));
+            return;
+        }
+        // list/tuple 共用 Py23List 布局：+0 len，+16 data。
+        // 快路径用无符号比较一次挡掉 0..len-1 之外的值；负索引归一化
+        // 也在内联路径里完成。慢路径只处理越界，运行时直接抛异常且
+        // 不返回，因此不会破坏常驻 xmm 的浮点槽。
+        std::string fast = fresh_label("idxfast");
+        std::string neg = fresh_label("idxneg");
         line(std::format("movq {}, %rdi", src_op(in.a)));
         line(std::format("movq {}, %rsi", src_op(in.b)));
-        line(is_str ? "call py23_str_char_at" : "call py23_list_get");
-        line(std::format("movq %rax, {}", dst_op(in.dst)));
+        line("movq 0(%rdi), %rcx");
+        line("cmpq %rcx, %rsi");
+        line(std::format("jb {}", fast));
+        line("testq %rsi, %rsi");
+        line(std::format("js {}", neg));
+        line("call py23_list_get");
+        line("ud2");
+        label(neg);
+        line("addq %rcx, %rsi");
+        line("cmpq %rcx, %rsi");
+        line(std::format("jb {}", fast));
+        line("movq %rcx, %rsi");
+        line("call py23_list_get");
+        line("ud2");
+        label(fast);
+        line("movq 16(%rdi), %rdx");
+        if (ir_is_float(in.ty)) {
+            line("movsd (%rdx,%rsi,8), %xmm0");
+            line(std::format("movsd %xmm0, {}", dst_op(in.dst)));
+        } else {
+            line("movq (%rdx,%rsi,8), %rax");
+            move_to(dst_op(in.dst), "%rax");
+        }
     }
 
 void AsmGen::gen_index_store(const Inst& in) {
+        std::string fast = fresh_label("idxsf");
+        std::string neg = fresh_label("idxsneg");
+        std::string done = fresh_label("idxsdone");
         line(std::format("movq {}, %rdi", src_op(in.a)));
         line(std::format("movq {}, %rsi", src_op(in.b)));
-        line(std::format("movq {}, %rdx", src_op(in.c)));
+        line("movq 0(%rdi), %rcx");
+        line("cmpq %rcx, %rsi");
+        line(std::format("jb {}", fast));
+        line("testq %rsi, %rsi");
+        line(std::format("js {}", neg));
+        line("xorl %edx, %edx");
         line("call py23_list_set");
+        line("ud2");
+        label(neg);
+        line("addq %rcx, %rsi");
+        line("cmpq %rcx, %rsi");
+        line(std::format("jb {}", fast));
+        line("movq %rcx, %rsi");
+        line("xorl %edx, %edx");
+        line("call py23_list_set");
+        line("ud2");
+        label(fast);
+        line("movq 16(%rdi), %rdx");
+        line("movq (%rdx,%rsi,8), %r8");
+        if (is_fp(in.c)) {
+            line(std::format("movsd {}, %xmm0", src_op(in.c)));
+            line("movsd %xmm0, (%rdx,%rsi,8)");
+        } else {
+            line(std::format("movq {}, %rax", src_op(in.c)));
+            line("movq %rax, (%rdx,%rsi,8)");
+        }
+        // 旧值的所有权按容器运行期 elem_kind 决定，不能只看静态类型：
+        // 空列表推出来的类型可能会在后续赋值里变窄/变宽。
+        line("cmpq $1, 24(%rdi)");
+        line(std::format("jne {}", done));
+        line("movq %r8, %rdi");
+        spill_fp_slots();
+        line("call py23_rc_dec");
+        reload_fp_slots();
+        label(done);
     }
 
 // ── 对象 ────────────────────────────────────────────────────
@@ -48,7 +123,9 @@ void AsmGen::gen_obj_new(const Inst& in) {
             line("xorl %esi, %esi");
             line("xorl %edx, %edx");
         }
+        spill_fp_slots();
         line("call py23_obj_new");
+        reload_fp_slots();
         line(std::format("leaq .Lvt{}(%rip), %rcx", in.imm));
         line("movq %rcx, (%rax)");
         move_to(dst_op(in.dst), "%rax");
@@ -104,7 +181,9 @@ void AsmGen::gen_vcall(const Inst& in) {
         }
         line("xorl %r10d, %r10d");
         line("xorl %eax, %eax");
+        spill_fp_slots();
         line("call *%r11");
+        reload_fp_slots();
         if (alloc) line(std::format("addq ${}, %rsp", alloc));
 
         if (in.dst != kNoReg) {
@@ -144,7 +223,9 @@ void AsmGen::gen_vcall_static(const Inst& in) {
         }
         line("xorl %r10d, %r10d");
         line("xorl %eax, %eax");
+        spill_fp_slots();
         line("call *%r11");
+        reload_fp_slots();
         if (alloc) line(std::format("addq ${}, %rsp", alloc));
         if (in.dst != kNoReg) {
             if (ir_is_float(in.ty)) line(std::format("movsd %xmm0, {}", dst_op(in.dst)));
@@ -159,7 +240,9 @@ void AsmGen::gen_super_vcall(const Inst& in) {
         line(std::format("movq ${}, %rsi", in.idx));
         line(std::format("movq ${}, %rdx", in.imm));
         line(std::format("movq {}, %rcx", src_op(in.b)));
+        spill_fp_slots();
         line("call py23_super_lookup");
+        reload_fp_slots();
         line("movq %rax, %r11");
 
         std::vector<TypePtr> types;
@@ -190,7 +273,9 @@ void AsmGen::gen_super_vcall(const Inst& in) {
         }
         line("xorl %r10d, %r10d");
         line("xorl %eax, %eax");
+        spill_fp_slots();
         line("call *%r11");
+        reload_fp_slots();
         if (alloc) line(std::format("addq ${}, %rsp", alloc));
 
         if (in.dst != kNoReg) {
@@ -227,7 +312,9 @@ void AsmGen::gen_call_direct(const Inst& in) {
         }
         line("xorl %r10d, %r10d");
         line("xorl %eax, %eax");
+        spill_fp_slots();
         line("call *%r11");
+        reload_fp_slots();
         if (alloc) line(std::format("addq ${}, %rsp", alloc));
         if (in.dst != kNoReg) {
             if (ir_is_float(in.ty)) line(std::format("movsd %xmm0, {}", dst_op(in.dst)));
@@ -321,7 +408,9 @@ void AsmGen::gen_call(const Inst& in) {
         }
         line(std::format("movq {}, %r10", src_op(in.a)));
         line("xorl %eax, %eax");
+        spill_fp_slots();
         line("call *%r11");
+        reload_fp_slots();
         if (alloc) line(std::format("addq ${}, %rsp", alloc));
 
         if (in.dst != kNoReg) {
@@ -546,7 +635,9 @@ void AsmGen::gen_call_rt(const Inst& in) {
             case RtFn::SysArgv:
                 break;
         }
+        spill_fp_slots();
         line(std::format("call {}", rt_name(fn)));
+        reload_fp_slots();
         if (in.dst != kNoReg) {
             if (ir_is_float(in.ty)) line(std::format("movsd %xmm0, {}", dst_op(in.dst)));
             else line(std::format("movq %rax, {}", dst_op(in.dst)));

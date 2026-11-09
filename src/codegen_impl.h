@@ -31,6 +31,13 @@ constexpr int kMaxFpArgs = 8;
 inline const char* const kSlotRegs[] = {"%rbx", "%r12", "%r13", "%r14", "%r15"};
 constexpr int kMaxSlotRegs = 5;
 
+// 浮点变量常驻寄存器。只用 xmm8–15：xmm0–7 是参数/临时寄存器，
+// 所有指令生成器都只把它们当 scratch。提升仅发生在函数没有任何
+// 「会正常返回的调用」时，所以 caller-saved 不影响正确性。
+inline const char* const kFpSlotRegs[] = {"%xmm8",  "%xmm9",  "%xmm10", "%xmm11",
+                                          "%xmm12", "%xmm13", "%xmm14", "%xmm15"};
+constexpr int kMaxFpSlotRegs = 8;
+
 // 一条指令里临时用的寄存器。和 kSlotRegs 不相交，指令生成中途可以
 // 随便写，不会踩到变量。
 
@@ -96,6 +103,11 @@ private:
     // 在寄存器里，要么整函数在栈上，规则简单到不会出隐蔽 bug。
     std::vector<std::string> slot_reg_;
     int n_saved_regs_ = 0;  // 实际 push 了几个 callee-saved
+    // 提升到 xmm8–15 的浮点槽。call 会破坏 caller-saved xmm，调用前后
+    // 统一把它们写回/读出各自的栈槽。
+    std::vector<int> fp_promoted_slots_;
+    void spill_fp_slots();
+    void reload_fp_slots();
     // 生成器/协程 resume：槽位在堆帧里，%r15 固定指向帧负载；
     // 帧头 10 个字：state/status/sent/out/resume/closing/kind/waiter/exc/cur。
     bool gen_ = false;
@@ -117,7 +129,7 @@ private:
     std::vector<int> def_block_;
 
     // 当前块内的位置索引，gen_block 开头重建。
-    std::unordered_map<int, int> block_first_store_;
+    std::unordered_map<int, std::vector<int>> block_stores_;
     std::unordered_map<VReg, int> block_first_use_;
     int cur_pos_ = 0;  // 正在生成的指令在块内的下标
 
@@ -256,6 +268,10 @@ private:
     // 不需要在块之间传播任何状态，也就不可能读到过期的寄存器。
     bool can_fuse(const Inst& in, const Inst& nx) const;
 
+    // 浮点二元结果只被紧邻的下一条浮点二元指令使用时，先留在 %xmm1，
+    // 省掉「结果 → 临时槽 → 再读回」的一条存储和一条装载。
+    bool can_fuse_fp_temp(const Inst& in, const Inst& nx) const;
+
         bool can_fuse_branch(const Inst& in, const Inst& nx) const;
 
     // 比较结果只用来做分支时，直接发条件跳转：`setl` + `movzbq` +
@@ -317,7 +333,7 @@ private:
 
         void gen_index_load(const Inst& in);
 
-        void gen_index_store(const Inst& in);
+    void gen_index_store(const Inst& in);
 
     // ── 对象 ────────────────────────────────────────────────────
 

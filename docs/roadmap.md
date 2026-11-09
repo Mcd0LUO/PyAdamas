@@ -382,6 +382,18 @@ unknown 值不能做字符串/复数/内置类型模式；映射模式不查重�
 已知限制：`@classmethod`、自定义方法/类装饰器、`super(C, self)`、
 staticmethod/property 上的 super、导入类字段子模式、unknown 数值类型模式。
 
+## 0.29：优化遍 P0/P1（已完成）
+
+- P0：list/tuple 下标内联快路径，负数归一化内联，越界慢路径不返回；
+  浮点元素走 movsd；IndexStore 按运行期 elem_kind 决定旧值 dec。
+- P1：StoreSlot 结果融合到栈槽；LoadSlot 内存别名；浮点槽提升到
+  xmm8–15，call 前后统一 spill/reload；浮点就地运算与 %xmm1 临时融合。
+- 基准（同机）：matmul 160³ ~1.9×，300³ ~1.4×，dot 10M ~1.1×，
+  sum 接近持平（运行时 sum 循环未动）。
+
+下一步：P2 越界检查消除、P3/P4 循环旋转与 LICM、P5/P6 直接调用与
+序言清零裁剪。
+
 ## 下一步
 
 - 语言面：`@classmethod`、自定义方法/类装饰器、生成器 `throw()`

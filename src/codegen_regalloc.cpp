@@ -120,20 +120,28 @@ void AsmGen::assign_vreg_slots() {
         }
     }
 
-// 变量提升：按被读写次数排序，把最热的几个局部变量放进 callee-saved
-    // 寄存器。没提升的变量继续住栈槽，语义完全一样，所以这一步错了
-    // 最多是慢，不会算错。
-    //
-    // 不做活跃性分析——一个变量要么整函数在寄存器里，要么整函数在栈上。
-    // 分支汇合、循环回边都因此天然正确，不需要任何 spill 逻辑。代价是
-    // 寄存器被长期占着，但 Python 的局部变量本来就不多，这个代价基本
-    // 不存在。
-    //
-    // 浮点变量不参与：xmm 全是 caller-saved，跨调用要自己 save/restore，
-    // 收益抵不上复杂度。
+// 变量提升：按被读写次数排序，把最热的几个局部变量放进寄存器。
+// 没提升的变量继续住栈槽，语义完全一样，所以这一步错了最多是慢，
+// 不会算错。
+//
+// 不做活跃性分析——一个变量要么整函数在寄存器里，要么整函数在栈上。
+// 分支汇合、循环回边都因此天然正确，不需要活跃性 spill 逻辑。整数
+// 用 callee-saved GPR，调用天然安全；浮点用 xmm8–15（xmm0–7 留给
+// 参数和临时），在每次会正常返回的 call 前后统一写回/读出栈槽。
+void AsmGen::spill_fp_slots() {
+        for (int slot : fp_promoted_slots_)
+            line(std::format("movsd {}, {}", slot_reg_[slot], smem(slot)));
+    }
+
+void AsmGen::reload_fp_slots() {
+        for (int slot : fp_promoted_slots_)
+            line(std::format("movsd {}, {}", smem(slot), slot_reg_[slot]));
+    }
+
 void AsmGen::assign_slot_regs() {
         int ns = static_cast<int>(f_->slot_ty.size());
         slot_reg_.assign(ns, std::string());
+        fp_promoted_slots_.clear();
         n_saved_regs_ = 0;
         if (ns == 0) return;
         // 含 setjmp 的函数：longjmp 会把 callee-saved 寄存器恢复到 setjmp
@@ -151,21 +159,30 @@ void AsmGen::assign_slot_regs() {
         for (const auto& b : f_->blocks)
             for (const auto& in : b.insts) {
                 if ((in.op == IrOp::LoadSlot || in.op == IrOp::StoreSlot) && in.idx >= 0 &&
-                    in.idx < ns && !ir_is_float(f_->slot_ty[in.idx]) && !addr_taken[in.idx])
+                    in.idx < ns && !addr_taken[in.idx])
                     ++score[in.idx];
             }
 
-        std::vector<std::pair<int, int>> hot;  // {次数, 槽}
-        for (int i = 0; i < ns; ++i)
-            if (score[i] > 0) hot.push_back({score[i], i});
-        std::ranges::sort(hot, [](const auto& a, const auto& b) {
+        std::vector<std::pair<int, int>> hot_int, hot_fp;
+        for (int i = 0; i < ns; ++i) {
+            if (score[i] <= 0) continue;
+            if (ir_is_float(f_->slot_ty[i])) hot_fp.push_back({score[i], i});
+            else hot_int.push_back({score[i], i});
+        }
+        auto hotter = [](const auto& a, const auto& b) {
             return a.first != b.first ? a.first > b.first : a.second < b.second;
-        });
+        };
+        std::ranges::sort(hot_int, hotter);
+        std::ranges::sort(hot_fp, hotter);
 
-        int k = std::min<int>(kMaxSlotRegs, static_cast<int>(hot.size()));
-        for (int i = 0; i < k; ++i) {
-            slot_reg_[hot[i].second] = kSlotRegs[i];
-            n_saved_regs_ = i + 1;
+        int k = std::min<int>(kMaxSlotRegs, static_cast<int>(hot_int.size()));
+        for (int i = 0; i < k; ++i) slot_reg_[hot_int[i].second] = kSlotRegs[i];
+        n_saved_regs_ = k;
+
+        int kf = std::min<int>(kMaxFpSlotRegs, static_cast<int>(hot_fp.size()));
+        for (int i = 0; i < kf; ++i) {
+            slot_reg_[hot_fp[i].second] = kFpSlotRegs[i];
+            fp_promoted_slots_.push_back(hot_fp[i].second);
         }
     }
 

@@ -254,8 +254,8 @@ longjmp 回同步调用点。GC 清扫和进程退出不跑析构器，但会单
 |---|---|---|
 | `py23_list_new` | `(i64 cap, i64 elem_kind) -> Py23List*` | 建空表，容量至少 4 |
 | `py23_list_append` | `(Py23List*, i64) -> void` | 追加，满则翻倍 `realloc`；不隐式 retain |
-| `py23_list_get` | `(Py23List*, i64) -> i64` | 负索引先加 `len`；越界抛 IndexError；返回借用 |
-| `py23_list_set` | `(Py23List*, i64, i64) -> void` | 同上，写入；kind 1 时 dec 旧元素 |
+| `py23_list_get` | `(Py23List*, i64) -> i64` | 负索引先加 `len`；越界抛 IndexError；返回借用。生成代码内联快路径，只有越界才进来 |
+| `py23_list_set` | `(Py23List*, i64, i64) -> void` | 同上，写入；kind 1 时 dec 旧元素。生成代码内联快路径，运行期 elem_kind 决定是否 dec |
 | `py23_list_set_len` | `(Py23List*, i64) -> void` | 改 `len`；kind 1 时 dec 被截掉的元素 |
 | `py23_list_extend` | `(Py23List* dst, Py23List* src) -> void` | 追加 src 全部元素；按 dst kind retain，`src == dst` 先快照 |
 | `py23_list_slice_assign` | `(Py23List*, i64, i64, i64, Py23List*) -> void` | 切片赋值；step 1 支持长度变化 |

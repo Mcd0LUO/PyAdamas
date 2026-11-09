@@ -67,7 +67,9 @@ void AsmGen::gen_inst(const Inst& in) {
                 const std::string& name = m_->imports[static_cast<size_t>(in.imm)];
                 line(std::format("leaq {}(%rip), %rdi", module_ready_symbol(name)));
                 line(std::format("leaq {}(%rip), %rsi", module_init_symbol(name)));
+                spill_fp_slots();
                 line("call py23_import_module");
+                reload_fp_slots();
                 break;
             }
             case IrOp::Jump: line(std::format("jmp {}", block_label(in.target))); break;
@@ -151,16 +153,20 @@ void AsmGen::gen_inst(const Inst& in) {
 void AsmGen::gen_load_slot(const Inst& in) {
         std::string sop = slot_op(in.idx);
         // 融合目标非空时**必须**真的写过去，不能走别名——别名只是
-        // 让 %v 指向变量的寄存器，而 `store.slot s, %v` 已经被吞掉，
-        // 变量的寄存器不会有任何变化，值就悄悄丢了。
-        if (dst_loc_.empty() && sop[0] == '%' && in.dst != kNoReg && in.dst < use_count_.size() &&
+        // 让 %v 指向变量的位置，而 `store.slot s, %v` 已经被吞掉，
+        // 变量的位置不会有任何变化，值就悄悄丢了。
+        if (dst_loc_.empty() && in.dst != kNoReg && in.dst < use_count_.size() &&
             use_count_[in.dst] == 1 && !cross_block_[in.dst]) {
-            // 只有「本条 load 之后、%v 第一次被读之前」的赋值才会
-            // 覆盖寄存器里的值。更早的赋值早就生效了，不算冲突。
-            auto st = block_first_store_.find(in.idx);
+            // 读之后、第一次真正使用之前不能有对该变量的赋值。
+            // 允许别名指向栈槽：后续使用者可以直接以内存操作数读它，
+            // 省掉「变量 → 临时 vreg 槽」的一次搬运。
+            bool clobbered = false;
+            auto stv = block_stores_.find(in.idx);
             auto us = block_first_use_.find(in.dst);
-            bool clobbered = st != block_first_store_.end() && us != block_first_use_.end() &&
-                             st->second > cur_pos_ && st->second < us->second;
+            if (stv != block_stores_.end() && us != block_first_use_.end()) {
+                auto it = std::upper_bound(stv->second.begin(), stv->second.end(), cur_pos_);
+                if (it != stv->second.end() && *it < us->second) clobbered = true;
+            }
             if (!clobbered) {
                 alias_[in.dst] = sop;
                 return;
@@ -196,7 +202,9 @@ void AsmGen::gen_bin(const Inst& in) {
             }
             line(std::format("movq {}, %rdi", src_op(in.a)));
             line(std::format("movq {}, %rsi", src_op(in.b)));
+            spill_fp_slots();
             line("call py23_str_concat");
+            reload_fp_slots();
             move_to(dst_op(in.dst), "%rax");
             return;
         }
@@ -262,7 +270,9 @@ void AsmGen::gen_bin_int(const Inst& in) {
             case BinKind::Pow:
                 line(std::format("movq {}, %rdi", sa));
                 line(std::format("movq {}, %rsi", sb));
+                spill_fp_slots();
                 line("call py23_pow_i64");
+                reload_fp_slots();
                 break;
         }
         move_to(d, "%rax");
@@ -322,6 +332,23 @@ void AsmGen::gen_mod(const Inst& in) {
     }
 
 void AsmGen::gen_bin_fp(const Inst& in) {
+        std::string d = dst_op(in.dst);
+        bool simple = in.bop == BinKind::Add || in.bop == BinKind::Sub ||
+                      in.bop == BinKind::Mul || in.bop == BinKind::Div;
+        // 结果直接落在提升过的浮点寄存器时，把左操作数装进目标寄存器
+        // 就地算。累加 `s = s + ...` 因此只剩一条 addsd。
+        if (simple && d.starts_with("%xmm")) {
+            std::string sa = src_op(in.a);
+            if (sa != d) line(std::format("movsd {}, {}", sa, d));
+            switch (in.bop) {
+                case BinKind::Add: line(std::format("addsd {}, {}", src_op(in.b), d)); break;
+                case BinKind::Sub: line(std::format("subsd {}, {}", src_op(in.b), d)); break;
+                case BinKind::Mul: line(std::format("mulsd {}, {}", src_op(in.b), d)); break;
+                case BinKind::Div: line(std::format("divsd {}, {}", src_op(in.b), d)); break;
+                default: break;
+            }
+            return;
+        }
         line(std::format("movsd {}, %xmm0", src_op(in.a)));
         switch (in.bop) {
             case BinKind::Add: line(std::format("addsd {}, %xmm0", src_op(in.b))); break;
@@ -332,7 +359,9 @@ void AsmGen::gen_bin_fp(const Inst& in) {
                 // floor(a / b)：先除再向下取整。roundsd 要 SSE4.1，
                 // 为了兼容性走 libm。
                 line(std::format("divsd {}, %xmm0", src_op(in.b)));
+                spill_fp_slots();
                 line("call floor");
+                reload_fp_slots();
                 break;
             case BinKind::Mod: {
                 // C 的 fmod 余数与被除数同号，Python 的 % 与除数同号，
@@ -342,7 +371,9 @@ void AsmGen::gen_bin_fp(const Inst& in) {
                 std::string done = fresh_label("fmod");
                 std::string nz = fresh_label("fmodnz");
                 line(std::format("movsd {}, %xmm1", src_op(in.b)));
+                spill_fp_slots();
                 line("call fmod");
+                reload_fp_slots();
                 line(std::format("movsd {}, %xmm1", src_op(in.b)));
                 line("xorpd %xmm2, %xmm2");
                 line("ucomisd %xmm2, %xmm0");
@@ -364,7 +395,9 @@ void AsmGen::gen_bin_fp(const Inst& in) {
             }
             case BinKind::Pow:
                 line(std::format("movsd {}, %xmm1", src_op(in.b)));
+                spill_fp_slots();
                 line("call pow");
+                reload_fp_slots();
                 break;
             default:
                 line("# unsupported float operator");
@@ -453,14 +486,18 @@ void AsmGen::gen_cmp(const Inst& in) {
             line(std::format("movq {}, %rdi", src_op(in.a)));
             line(std::format("movq {}, %rsi", src_op(in.b)));
             if (in.cop == CmpKind::Eq || in.cop == CmpKind::Ne) {
+                spill_fp_slots();
                 line("call py23_str_eq");
+                reload_fp_slots();
                 if (in.cop == CmpKind::Ne) line("xorq $1, %rax");
                 line(std::format("movq %rax, {}", dst_op(in.dst)));
                 return;
             }
             // 大小比较走三路比较。早先这里只留了一句注释、什么都不生成，
             // 于是 `a < b` 静默拿到槽里的残留值——恒为 False。
+            spill_fp_slots();
             line("call py23_str_cmp");
+            reload_fp_slots();
             line("cmpq $0, %rax");
             switch (in.cop) {
                 case CmpKind::Lt: line("setl %al"); break;
@@ -586,15 +623,23 @@ void AsmGen::gen_convert(const Inst& in) {
             }
             if (ir_is_float(from)) {
                 line(std::format("movsd {}, %xmm0", src_op(in.a)));
+                spill_fp_slots();
                 line("call py23_str_from_f64");
+                reload_fp_slots();
             } else if (from && from->kind == TyKind::Bool) {
                 line(std::format("movq {}, %rdi", src_op(in.a)));
+                spill_fp_slots();
                 line("call py23_str_from_bool");
+                reload_fp_slots();
             } else if (from && from->kind == TyKind::None) {
+                spill_fp_slots();
                 line("call py23_str_from_none");
+                reload_fp_slots();
             } else {
                 line(std::format("movq {}, %rdi", src_op(in.a)));
+                spill_fp_slots();
                 line("call py23_str_from_i64");
+                reload_fp_slots();
             }
             line(std::format("movq %rax, {}", dst_op(in.dst)));
             return;
