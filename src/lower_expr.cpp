@@ -182,6 +182,19 @@ void Lowerer::assign_to(Expr& target, VReg v, TypePtr vty) {
             TypePtr ot = strip_optional(raw);
             bool opt = ot != raw;
             if (ot && ot->kind == TyKind::Class && ot->cls) {
+                // `C.x = v`：写类属性的共享存储
+                if (is_class_receiver(at)) {
+                    const ClassInfo* rcls = class_receiver_cls(at, ot);
+                    const ClassAttrInfo* ca = rcls ? rcls->class_attr(at.attr) : nullptr;
+                    if (!ca) {
+                        err(target.line, target.col,
+                            std::format("class '{}' has no attribute '{}'",
+                                        rcls ? rcls->name : ot->cls->name, at.attr));
+                        break;
+                    }
+                    class_attr_store(rcls, ca, v, src_ty);
+                    break;
+                }
                 if (const PropertyInfo* p = ot->cls->property(at.attr)) {
                     ++side_effect_seq_;  // setter 可能改动容器
                     if (!p->owner || p->setter < 0 ||
@@ -234,8 +247,20 @@ VReg Lowerer::expr(Expr& e) {
         case ExprKind::Constant: return lower_constant(static_cast<Constant&>(e));
         case ExprKind::Name: {
             auto& n = static_cast<Name&>(e);
+            // @classmethod 的 cls：编译期就绑定成所属类。运行时不需要真值
+            // （调用点传的类 id 只是占位），直接给常量再改标类型——这样既
+            // 不会按堆类型做 rc，也避开了被内层闭包捕获时的 cell 问题。
+            if (!st_->class_self_name.empty() && n.id == st_->class_self_name &&
+                st_->class_self_ty) {
+                auto cid = class_ids_.find(st_->class_self_ty);
+                VReg raw = const_int(cid == class_ids_.end() ? 0 : cid->second);
+                return retype(raw, mk_class(const_cast<ClassInfo*>(st_->class_self_ty)));
+            }
             if (int cs = comp_slot(n.id); cs >= 0)
                 return load_slot(cs, st_->fn->slot_ty[cs]);
+            // 类体命名空间：前面几行定义的类属性
+            if (auto it = st_->class_body_attrs.find(n.id); it != st_->class_body_attrs.end())
+                return load_global(it->second, mod_.globals[static_cast<size_t>(it->second)].ty);
             // 嵌套函数直接引用自己：取当前闭包，而不是外层绑定。
             if (st_->self_def && n.id == st_->self_def->name && !is_cell(n.id) &&
                 !is_env(n.id) && !st_->slots.count(n.id)) {
@@ -428,6 +453,28 @@ VReg Lowerer::expr(Expr& e) {
                 return const_none();
             }
             if (ot && ot->kind == TyKind::Class && ot->cls) {
+                // 类接收者：`C.x` / `cls.x` 读的是类属性那份共享存储，
+                // 接收者本身不是可求值的值，不能走下面的实例路径。
+                if (is_class_receiver(a)) {
+                    const ClassInfo* rcls = class_receiver_cls(a, ot);
+                    if (rcls) {
+                        if (const ClassAttrInfo* ca = rcls->class_attr(a.attr))
+                            return class_attr_load(rcls, ca);
+                        if (rcls->method(a.attr))
+                            err(e.line, e.col,
+                                std::format("method '{}.{}' must be called with ()", rcls->name,
+                                            a.attr));
+                        else if (rcls->field(a.attr))
+                            err(e.line, e.col,
+                                std::format("'{}.{}' is an instance field, not a class attribute",
+                                            rcls->name, a.attr));
+                        else
+                            err(e.line, e.col,
+                                std::format("class '{}' has no attribute '{}'", rcls->name,
+                                            a.attr));
+                        return const_none();
+                    }
+                }
                 if (const PropertyInfo* p = ot->cls->property(a.attr)) {
                     ++side_effect_seq_;  // getter 可能改动容器
                     if (!p->owner || p->getter < 0 ||
@@ -452,6 +499,12 @@ VReg Lowerer::expr(Expr& e) {
                     if (opt) obj = guard_not_none(obj, std::format("attribute '{}'", a.attr));
                     int off = static_cast<int>(8 * (1 + ot->cls->field_index(a.attr)));
                     return field_load(obj, off, f->ty);
+                }
+                // 实例字段没有，回退到类属性（Python 的实例查找顺序）
+                if (const ClassAttrInfo* ca = ot->cls->class_attr(a.attr)) {
+                    VReg obj = expr(*a.value);
+                    if (opt) obj = guard_not_none(obj, std::format("attribute '{}'", a.attr));
+                    return class_attr_load_dyn(obj, ot->cls, ca);
                 }
                 if (ot->cls->method(a.attr))
                     err(e.line, e.col,

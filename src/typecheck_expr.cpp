@@ -42,6 +42,10 @@ TypePtr TypeChecker::expr(Expr& e) {
             }
             case ExprKind::Name: {
                 auto& n = static_cast<Name&>(e);
+                // 类体命名空间优先于模块全局：Python 的类体里，前面几行
+                // 赋过的名字就是类命名空间的成员，会遮住同名全局。
+                if (auto it = class_body_attrs_.find(n.id); it != class_body_attrs_.end())
+                    return it->second;
                 if (auto* sym = lookup(n.id)) return sym->ty;
                 if (lookup_module_alias(n.id)) {
                     err(n.line, n.col,
@@ -315,7 +319,19 @@ TypePtr TypeChecker::expr(Expr& e) {
                         return gm.call_sig && gm.call_sig->ret ? gm.call_sig->ret
                                                                : t_unknown();
                     }
+                    if (is_class_receiver(a)) {
+                        // 类接收者：`C.x` / `cls.x` 只可能是类属性或方法，
+                        // 实例字段在类上不存在（同名时也不能被它挡住）。
+                        if (const ClassAttrInfo* ca = ot->cls->class_attr(a.attr)) return ca->ty;
+                        if (ot->cls->method(a.attr)) return mk_bound(ot, a.attr);
+                        if (ot->cls->is_open()) return t_unknown();
+                        err(a.line, a.col,
+                            std::format("class '{}' has no attribute '{}'", ot->cls->name,
+                                        a.attr));
+                        return t_unknown();
+                    }
                     if (auto* f = ot->cls->field(a.attr)) return f->ty;
+                    if (const ClassAttrInfo* ca = ot->cls->class_attr(a.attr)) return ca->ty;
                     if (ot->cls->method(a.attr)) return mk_bound(ot, a.attr);
                     // `self.x` 找不到：可能是 mixin 组合出来的成员，也可能
                     // 是类体里赋的类属性——两种都不是错误，静态上认输。

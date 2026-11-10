@@ -32,7 +32,8 @@ py23 不追求兼容 CPython：语义是按静态类型的需要重新定的。�
 | 协程 / Task / Future | `async def` / `await` 复用生成器帧；`asyncio.run`/`sleep`/`gather`/`create_task`；`done()`/`cancel()`/`result()`/`exception()`；Future 多等待者、`set_exception`、`add_done_callback`；取消级联；`wait_readable`/`wait_writable` + poll；异步生成器 + `async for` + `async with`；异步推导式 | 完整 asyncio（Task 组/Future 回调/I/O 流） | `await` 只能是语句、赋值右值或 `return` 值；异步生成器有 `asend`/`athrow`/`__anext__`/`aclose`，`aclose` 不会 await `async with` 的 `__aexit__`，停在 `async with` 里被直接回收时不 await 退出；自定义 `__aiter__` 未支持；Future 回调同步执行；`set_exception` 接收异常值或消息；`exception()` 返回异常值；`CancelledError` 是内置名；`wait_readable` 不是 CPython 标准 API；`gather` 结果元素是 unknown；Task 单等待者 |
 | 递归深度 | 受栈大小限制（万级） | 默认 1000，可调 | 没有解释器递归检查 |
 | 字段初值 `x: int = []` | 每次构造重新求值，实例之间独立 | 类属性，所有实例共享 | 更安全；也避免可变默认值的经典 bug |
-| 类体里的非声明语句 | 在类定义点执行；赋值按模块全局处理 | 类体是独立命名空间 | 没有类命名空间，`C.x` / `self.x` 的类属性访问未建模 |
+| 类体里的普通赋值 | 是类属性：所有实例共享一份存储，`C.x` / `cls.x` / `self.x` 都能读到；子类赋值走写时复制，基类不受影响 | 类体是独立命名空间，属性存在类对象上 | `if`/`for` 等其它类体语句仍按模块全局处理；`obj.类属性 = v` 不支持（对象布局编译期定死） |
+| `@classmethod` | 支持；`cls` 静态绑定到所属类，子类继承时按子类重新特化一份 | 运行期传入 `type(obj)` | 子类特化会复制方法体；`cls` 当值传出去会退化成整数 |
 | 类的属性 | 声明过的字段，或 `self.x = ...` 就地长出来的字段 | 可随时给实例挂任意属性 | 偏移是编译期常量，没有运行时 `__dict__` |
 | `print(obj)` | 有 `__str__`（或 `__repr__`）就调，否则 `<Point object>` | 同 Python（默认文本带模块名和地址） | 默认文本没有模块名和地址 |
 | 协议 dunder | `__str__`/`__repr__`/`__eq__`/`__ne__`/`__len__`/`__hash__`/`__contains__`/`__iter__`/算术与比较类 dunder 走 vtable；`in` 需要 `__contains__`，`<` 等需要比较 dunder，算术需要对应 dunder，否则编译报错 | 完整数据模型 | `__format__`/`__bool__`/`__reversed__` 未建模；`__eq__` 的 other 限 unknown 或类类型；只定义 `__eq__` 没定义 `__hash__` 的类在 dict/set 里按身份处理 |

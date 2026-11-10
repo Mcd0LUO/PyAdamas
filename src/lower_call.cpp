@@ -323,6 +323,21 @@ VReg Lowerer::lower_construct(Call& c, const ClassInfoPtr& cls) {
         store_field(fi->ty, obj, off, v);
     }
 
+    // 隐式字段遮蔽了同名类属性（方法里写了 self.x = ...，而 x 是类属性）：
+    // 构造时先把类属性的当前值拷进字段，这样「还没赋值就读 self.x」看到的
+    // 是类属性默认值，而不是 0 / None。
+    for (const ClassInfo* k = cls.get(); k; k = k->base) {
+        for (const FieldInfo& f : k->fields) {
+            if (!f.implicit) continue;
+            const ClassAttrInfo* ca = cls->class_attr(f.name);
+            if (!ca) continue;
+            int off = static_cast<int>(8 * (1 + cls->field_index(f.name)));
+            VReg v = class_attr_load(cls.get(), ca);
+            v = coerce(v, vreg_ty(v), f.ty);
+            store_field(f.ty, obj, off, v);
+        }
+    }
+
     if (cls->has_init) {
         if (auto* im = cls->method("__init__"); im && im->call_sig) {
             std::vector<VReg> args = bind_args(c, im->call_sig, im->def);
@@ -415,6 +430,12 @@ VReg Lowerer::lower_call(Call& c) {
                                 n.id));
                 return const_none();
             }
+        }
+        // @classmethod 里的 cls(...)：静态绑定到所属类，等价于类名构造。
+        if (!st_->class_self_name.empty() && n.id == st_->class_self_name &&
+            st_->class_self_ty) {
+            auto it = classes_.find(st_->class_self_ty->name);
+            if (it != classes_.end()) return lower_construct(c, it->second);
         }
         // 类名直接调用 = 构造。类名不是可求值的表达式，必须在这里拦，
         // 否则会退化成 LoadGlobal 读到一个空槽。

@@ -160,6 +160,7 @@ enum class RtFn : uint16_t {
     DictUpdate,   // (dict*, dict*) -> void
     DictCopy,     // (dict*) -> dict*  浅拷贝（匹配 **rest）
     IsInstance,   // (obj*, i64 class_id) -> i64
+    ObjClassId,   // (obj*) -> i64
     IsNamedClass, // (obj*, str* qualname) -> i64  跨模块类模式按限定名匹配
     SuperLookup,  // (obj*, i64 after_cid, i64 slot, str* name) -> fnptr
     IsException,  // (obj*, str* type) -> i64
@@ -456,6 +457,7 @@ inline const char* rt_name(RtFn f) {
         case RtFn::DictUpdate: return "py23_dict_update";
         case RtFn::DictCopy: return "py23_dict_copy";
         case RtFn::IsInstance: return "py23_isinstance";
+        case RtFn::ObjClassId: return "py23_obj_class_id";
         case RtFn::IsNamedClass: return "py23_is_named_class";
         case RtFn::SuperLookup: return "py23_super_lookup";
         case RtFn::IsException: return "py23_is_exc";

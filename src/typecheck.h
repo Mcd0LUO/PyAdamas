@@ -212,6 +212,8 @@ struct FieldInfo {
 enum class MethodKind : uint8_t {
     Normal,
     Static,
+    // @classmethod：首参 cls 不占运行时实参，方法体里静态绑定成所属类。
+    ClassMethod,
     PropertyGetter,
     PropertySetter,
     PropertyDeleter,
@@ -239,6 +241,16 @@ struct PropertyInfo {
     int deleter = -1;
 };
 
+// 类体里的普通赋值（class C: x = 1）是类属性：所有实例共享同一份存储。
+// py23 没有运行期类对象，类属性在模块里占一个隐藏全局，按「声明它的类」
+// 命名；子类读取时沿 MRO 找到声明者，读到的是同一份数据。
+struct ClassAttrInfo {
+    std::string name;
+    TypePtr ty;
+    Expr* init = nullptr;            // 类体里的初值表达式，降级时求值一次
+    const ClassInfo* owner = nullptr;  // 声明它的类
+};
+
 struct ClassInfo {
     std::string name;
     // 基类用裸指针，所有权统一在 TypeChecker::all_classes_。
@@ -253,6 +265,10 @@ struct ClassInfo {
     std::vector<ClassInfo*> extra_bases;
     std::vector<FieldInfo> fields;    // 只含本类声明的字段
     std::vector<MethodInfo> methods;  // 只含本类声明的方法（含属性访问器）
+    std::vector<ClassAttrInfo> class_attrs;  // 只含本类声明的类属性
+    // 通过本类给「继承来的」类属性赋过值的名字。Python 里这会让本类从
+    // 此拥有独立的一份；降级阶段据此分配独立存储和「已拥有」标志位。
+    std::unordered_set<std::string> cowed_attrs;
     // class 体里的 `__match_args__ = ("x", "y")`，只服务类模式的位置子模式。
     std::vector<std::string> match_args;
     // C3 线性化，self 在首位。跨模块导入的类没有运行期 MRO 表，留空。
@@ -297,6 +313,19 @@ struct ClassInfo {
         for (auto& f : fields)
             if (f.name == n) return &f;
         return base ? base->field(n) : nullptr;
+    }
+    // 类属性沿 MRO 解析：子类读到的就是声明者那一份，没有拷贝。
+    const ClassAttrInfo* class_attr(const std::string& n) const {
+        for (const ClassInfo* c : mro)
+            for (auto& a : c->class_attrs)
+                if (a.name == n) return &a;
+        if (!mro.empty()) return nullptr;
+        for (auto& a : class_attrs)
+            if (a.name == n) return &a;
+        if (base) return base->class_attr(n);
+        for (const ClassInfo* e : extra_bases)
+            if (auto* a = e->class_attr(n)) return a;
+        return nullptr;
     }
     // 自己声明的方法；后定义的同名方法胜出。属性访问器默认不参与
     // 普通方法查找（它们只通过属性语法触发）。
@@ -1026,6 +1055,9 @@ private:
     // Python 的实例属性本来就是在 __init__ 里长出来的，要求先写标注会把
     // 标准库里绝大多数类挡在门外。
     ClassInfo* cur_class_ = nullptr;
+    // 类体命名空间：class 体里先定义的类属性对后面的语句可见（`y = x + 1`），
+    // 但方法体里看不见（那里必须写 self.x / C.x）。只在检查类体语句时非空。
+    std::unordered_map<std::string, TypePtr> class_body_attrs_;
     // 方法槽按「名字」在模块内全局分配：多继承的两个无关基类可能给同名
     // 方法分配过不同槽，全局唯一后 vtable 才能同时满足两边的调用点。
     std::unordered_map<std::string, int> method_slots_;
@@ -1042,6 +1074,8 @@ private:
     // 当前方法第一个参数的名字（通常就是 self）。`self.x = 1` 只有认得出
     // 这里，才能把它当成字段声明而不是外部对象的属性写入。
     std::string cur_self_name_;
+    // @classmethod 里首参的名字（cls）。它不是 self：`cls.x` 读的是类属性。
+    std::string cur_cls_name_;
     // 所有建过的类，含被同名重定义顶掉的旧类。Type 里存的是裸指针，
     // 这里必须保证它们在 typecheck 期间一直有效。
     std::vector<ClassInfoPtr> all_classes_;
@@ -1146,7 +1180,8 @@ private:
 
     // 这个属性访问的目标是不是当前方法的 self（`self.x`）
     bool is_self_attr(const Attribute& a) const;
-
+    // 接收者是不是类本身（`C.x` / @classmethod 里的 `cls.x`），而不是实例
+    bool is_class_receiver(const Attribute& a);
     // 把 `self.x` 补成隐式字段；已存在就按 join 放宽，返回是否新建
     bool add_implicit_field(const Attribute& a, TypePtr ty);
 

@@ -24,29 +24,42 @@
 | 运行时 | 字符串、列表、字典、集合、对象分配、输出、panic；浮点 repr 与 CPython 一致 |
 | 验证 | 四类用例（正例 / 反例 / 运行 / 未建模） + 差分测试 + 标准库基线 |
 | 0.6–0.38 | 对象模型、异常值、match、C3 MRO、优化遍/O2、块内寄存器；逐版本记录见 [archive/roadmap-0.6-0.38.md](archive/roadmap-0.6-0.38.md) |
-| 0.39–0.79 | -O0/O1/O2、dunder 第二批、random/os/subprocess、差分 runner 自举、stdlib 批次（string/time/os/itertools/collections/json）、re 模块 v1/v2；详见 [CHANGELOG](../CHANGELOG.md) |
+| 0.39–0.80 | -O0/O1/O2、dunder 第二批、random/os/subprocess、差分 runner 自举、stdlib 批次（string/time/os/itertools/collections/json）、re 模块 v1/v2；详见 [CHANGELOG](../CHANGELOG.md) |
 | 许可证 | Apache-2.0（见 [LICENSE](../LICENSE) / [NOTICE](../NOTICE)） |
 
-## 当前状态（0.79）
+## 当前状态（0.80）
 
 流水线 `源码 → 词法 → AST → lambda 脱糖 → 类型检查 → IR → x86-64 汇编 → 可执行文件` 已打通。
 
-- **语言面**：标量、字符串、列表/元组/字典/集合、切片读写、闭包/lambda/`*args`/`**kwargs`/装饰器、推导式、`with`、异常值（`args`/`raise ... from`/自定义异常）、类（字段/方法/C3 多继承/零参 `super()`/`@staticmethod`/`@property`）、`match/case`、`del`、复数字面量、f-string 格式说明、dunder 协议、`open`/`input`/`sys.stdin`。
+- **语言面**：标量、字符串、列表/元组/字典/集合、切片读写、闭包/lambda/`*args`/`**kwargs`/装饰器、推导式、`with`、异常值（`args`/`raise ... from`/自定义异常）、类（字段/方法/C3 多继承/零参 `super()`/`@staticmethod`/`@classmethod`/`@property`/类属性）、`match/case`、`del`、复数字面量、f-string 格式说明、dunder 协议、`open`/`input`/`sys.stdin`。
 - **标准库**：`math`/`sys`/`asyncio`/`random`/`os`/`os.path`/`subprocess`/`time`/`itertools`/`collections`/`json`/`string`/`re`。
-- **验证**：64 个运行用例、34 个反例、9 个模块目录；差分 runner 已自举，默认 810 例。
-- **主要缺口**：`datetime`/`csv`/`pathlib`；C FFI/BLAS；`bytes` 的方法与迭代；跨模块生成器/协程；asyncio 边角。
+- **验证**：65 个运行用例、34 个反例、9 个模块目录；差分 runner 已自举，默认 810 例。
+- **主要缺口**：`datetime`/`csv`/`pathlib`；C FFI/BLAS；`bytes` 的方法与迭代；跨模块生成器/协程；asyncio 边角；生成器表达式仍立即求值。
 
 ## 下一步
 
-### 1. C FFI + buffer + BLAS
+语言与标准库的完备性优先，科学计算放后面。
 
-科学计算的唯一捷径。py23 的 ABI 已经是 SysV + `int64`/`double`/指针，运行时是纯 C；补一层 `extern "C"` 声明和 buffer 类型，就能把 `list[float]` 的连续数据直接传给 `cblas_dgemm`。验收：512³ matmul 进入毫秒级；不要求自己实现 BLAS。
+### 1. 语言面收尾
 
-### 2. `bytes` 收尾
+- **生成器表达式惰性求值**：现在 `sum(x*x for x in xs)` 会先建整个 list，语义和内存都不对。
+- **`slice()` / `vars()` / `dir()`**：小内置，各自几十行。
+- **自定义方法装饰器**：现在只认 `@staticmethod`/`@classmethod`/`@property`，其它装饰器的方法体不检查实参。
+
+### 2. `functools` + `datetime` / `pathlib` / `csv`
+
+语言相关度最高的标准库。`functools` 的 `reduce`/`partial`/`wraps`/`lru_cache` 基本是接线；
+`datetime` 要新的值类型（可以复用 `Py23Obj` 布局 + vtable）。
+
+### 3. `bytes` 收尾
 
 字面量、索引/切片、`encode`/`decode`、`+`/`in`/比较已经通了（0.79）。剩下：`for c in b"..."`（要转 `list[int]`）、格式化与 `%`、`join`/`find`/`split` 等方法、跨模块接口不再降级成 `unknown`。
 
-### 3. 工程收尾
+### 4. C FFI + buffer + BLAS
+
+科学计算的唯一捷径。py23 的 ABI 已经是 SysV + `int64`/`double`/指针，运行时是纯 C；补一层 `extern "C"` 声明和 buffer 类型，就能把 `list[float]` 的连续数据直接传给 `cblas_dgemm`。验收：512³ matmul 进入毫秒级；不要求自己实现 BLAS。
+
+### 5. 工程收尾
 
 - 重跑 0.75 的标准库前端基线（`bytes` 仍拒，`match`/`complex` 已支持，口径已变）；
 - 保持 `docs/` 与 README 的验证表同步；

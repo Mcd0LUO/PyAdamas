@@ -137,6 +137,13 @@ struct FuncCtx {
     std::unordered_map<std::string, int> cell_slots;   // 名字 → 存 cell 指针的槽
     std::unordered_map<std::string, int> param_slots;  // 被捕获形参的原始值槽
     int env_slot = -1;                                 // 存闭包指针（%r10）的槽
+    // @classmethod 的 cls：槽位里放的是类 id（整数，不参与 rc），表达式
+    // 类型仍是那个类，所以 cls(...) 走静态构造、cls.attr 走类属性。
+    std::string class_self_name;
+    const ClassInfo* class_self_ty = nullptr;
+    // 类体命名空间：类属性名 → 隐藏全局下标。只在降级类体语句时非空，
+    // 让 `y = x + 1` 里的 x 解析到前面定义的类属性。
+    std::unordered_map<std::string, int> class_body_attrs;
     // for k in range(len(a))：循环体里 a[k] 天然在界内。body 里一旦给 a/k
     // 赋值（写槽）就作废；调用等副作用由 side_effect_seq_ 统一挡。
     struct BoundsHint {
@@ -259,6 +266,8 @@ private:
     // 用 ClassInfo 指针做键，同名类重定义时不会串。
     std::unordered_map<std::string, ClassInfoPtr> classes_;
     std::unordered_map<const ClassInfo*, int> class_ids_;
+    // (声明类, 属性名) → 模块隐藏全局下标。子类读基类属性时用同一份。
+    std::unordered_map<const ClassInfo*, std::unordered_map<std::string, int>> class_attr_globals_;
     // 没有任何本模块类继承的类（跨模块继承不支持，所以这就是「终态」）：
     // 方法调用可以绕过 vtable 直接调用具体实现。
     std::unordered_set<const ClassInfo*> sealed_classes_;
@@ -1112,6 +1121,22 @@ private:
     }
 
     void assign_to(Expr& target, VReg v, TypePtr vty);
+
+    // 类属性：每个 (声明类, 名字) 在模块里占一个隐藏全局，子类共用同一份。
+    struct ClassAttrStorage {
+        int slot = -1;    // 存储槽
+        int flag = -1;    // 子类「已拥有自己一份」的标志；-1 表示无需判断
+        int parent = -1;  // 标志为 0 时读哪里
+    };
+    int class_attr_global(const ClassInfo* owner, const std::string& name, TypePtr ty);
+    ClassAttrStorage class_attr_storage(const ClassInfo* recv, const ClassAttrInfo* ca);
+    int class_attr_slot(const ClassInfo* recv, const ClassAttrInfo* ca);
+    VReg class_attr_load(const ClassInfo* recv, const ClassAttrInfo* ca);
+    VReg class_attr_load_dyn(VReg obj, const ClassInfo* stat, const ClassAttrInfo* ca);
+    void class_attr_store(const ClassInfo* recv, const ClassAttrInfo* ca, VReg v, TypePtr vty);
+    // 接收者是类本身（`C.x` / @classmethod 的 `cls.x`）而不是实例
+    bool is_class_receiver(const Attribute& a);
+    const ClassInfo* class_receiver_cls(const Attribute& a, TypePtr ot);
 
     // ── 表达式 ──────────────────────────────────────────────────
 

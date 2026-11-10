@@ -490,6 +490,7 @@ void AsmGen::gen_call_rt(const Inst& in) {
             case RtFn::ListDelIndex:
             case RtFn::ListSumI64:
             case RtFn::IsInstance:
+            case RtFn::ObjClassId:
             case RtFn::IsNamedClass:
             case RtFn::IsException:
             case RtFn::StrEqUnknown:

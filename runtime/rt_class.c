@@ -37,6 +37,14 @@ int64_t py23_isinstance(void* obj, int64_t class_id) {
     return 0;
 }
 
+/* 实例的运行期类编号；不是类实例返回 -1。读类属性时用它按实际类型
+   选择存储槽——静态类型可能是基类，值却是子类。 */
+int64_t py23_obj_class_id(void* obj) {
+    const int64_t* vt = inst_vtable(obj);
+    if (!vt) return -1;
+    return (vt - 5)[1];   /* 元数据第 1 个字是类编号 */
+}
+
 /* 跨模块类模式：类编号只在模块内唯一，用「模块名.类名」比较。 */
 int64_t py23_is_named_class(void* obj, Py23Str* qualname) {
     if (!qualname) return 0;

@@ -451,6 +451,7 @@ Py23List* py23_dict_items(Py23Dict* d);
 void py23_dict_update(Py23Dict* dst, Py23Dict* src);
 Py23Dict* py23_dict_copy(Py23Dict* src);
 int64_t py23_isinstance(void* obj, int64_t class_id);
+int64_t py23_obj_class_id(void* obj);
 int64_t py23_is_named_class(void* obj, Py23Str* qualname);
 void* py23_super_lookup(void* obj, int64_t after_cid, int64_t slot, Py23Str* name);
 int64_t py23_is_exc(void* obj, Py23Str* type);

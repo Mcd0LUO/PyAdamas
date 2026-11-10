@@ -696,6 +696,20 @@ void TypeChecker::assign(Expr& target, TypePtr value, int line, int col) {
                                         type_name(value)));
                     return;
                 }
+                // `C.x = v`：改的是这个类自己的那份类属性存储
+                if (is_class_receiver(*at)) {
+                    if (const ClassAttrInfo* ca = ot->cls->class_attr(at->attr)) {
+                        if (!assignable(ca->ty, value))
+                            err(line, col,
+                                std::format("class attribute '{}.{}' has type '{}', cannot "
+                                            "assign '{}'",
+                                            ot->cls->name, at->attr, type_name(ca->ty),
+                                            type_name(value)));
+                        // 继承来的：本类从此有自己的一份，基类那份不动
+                        if (ca->owner != ot->cls) ot->cls->cowed_attrs.insert(at->attr);
+                        return;
+                    }
+                }
                 // `self.x = ...` 且 x 没声明过：就地补成字段，类型不再苛求
                 if (add_implicit_field(*at, value)) return;
                 if (auto* f = ot->cls->field(at->attr)) {
@@ -720,6 +734,15 @@ void TypeChecker::assign(Expr& target, TypePtr value, int line, int col) {
                 }
                 // 外部基类可能带来任意属性
                 if (ot->cls->is_open()) return;
+                // 实例上给类属性赋值要新建实例属性，而 py23 的对象布局是
+                // 编译期定死的；明确报错，别静默写到类属性上影响所有实例。
+                if (const ClassAttrInfo* ca = ot->cls->class_attr(at->attr)) {
+                    err(line, col,
+                        std::format("cannot assign to class attribute '{}.{}' through an "
+                                    "instance: object layout is fixed at compile time",
+                                    ot->cls->name, at->attr));
+                    return;
+                }
                 err(line, col,
                     std::format("'{}' object has no attribute '{}'", ot->cls->name, at->attr));
                 return;

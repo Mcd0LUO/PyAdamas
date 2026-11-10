@@ -345,8 +345,12 @@ int Lowerer::compile_function_body(FunctionDef& f, FuncInfoPtr info, const std::
 
     // 被内层捕获的变量不占普通值槽，槽里放的是 cell（单元素 list[T]）。
     // 形参例外：IRParam 需要原始值槽接实参，入口再 retain 进 cell。
-    auto add_param = [&](const Param& p) {
-        TypePtr T = p.ty ? p.ty : t_unknown();
+    // @classmethod 的 cls 槽位按整数存类 id：它是编译期类型标记，不是
+    // 真实对象（调用点传的是小整数），按堆类型做 rc 会直接崩。
+    const MethodInfo* self_m = owner ? owner->method(f.name) : nullptr;
+    bool is_cmethod = self_m && self_m->kind == MethodKind::ClassMethod;
+    auto add_param = [&](const Param& p, bool as_int = false) {
+        TypePtr T = as_int ? t_int() : (p.ty ? p.ty : t_unknown());
         int s = irf->new_slot(T);
         irf->params.push_back(IRParam{p.name, T, s});
         if (meta && meta->cell_index.count(p.name)) {
@@ -359,7 +363,14 @@ int Lowerer::compile_function_body(FunctionDef& f, FuncInfoPtr info, const std::
         }
     };
     if (info) {
-        for (auto& p : info->pos) add_param(p);
+        for (size_t i = 0; i < info->pos.size(); ++i) {
+            bool is_cls = is_cmethod && i == 0;
+            if (is_cls) {
+                st_->class_self_name = info->pos[i].name;
+                st_->class_self_ty = owner;
+            }
+            add_param(info->pos[i], is_cls);
+        }
         for (auto& p : info->kwonly) add_param(p);
         if (info->varargs) {
             TypePtr et = info->vararg_ty ? info->vararg_ty : t_unknown();
@@ -515,6 +526,179 @@ void Lowerer::lower_funcdef(FunctionDef& f) {
     }
 }
 
+int Lowerer::class_attr_global(const ClassInfo* owner, const std::string& name, TypePtr ty) {
+    auto& m = class_attr_globals_[owner];
+    auto it = m.find(name);
+    if (it != m.end()) {
+        // 先用到后定义（方法体里读类属性）：把后来才知道的类型补上
+        int gi = it->second;
+        if (ty && mod_.globals[static_cast<size_t>(gi)].ty &&
+            mod_.globals[static_cast<size_t>(gi)].ty->kind == TyKind::Unknown)
+            mod_.globals[static_cast<size_t>(gi)].ty = ty;
+        return gi;
+    }
+    std::string sym = std::format("__py23_cattr_{}_{}", owner->name, name);
+    int gi = global_idx_as(sym, ty);
+    m.emplace(name, gi);
+    return gi;
+}
+
+// 类属性的存储位置。
+//   声明者：自己就是唯一那份，没有标志位。
+//   赋过值的子类：有自己的槽 + 「已拥有」标志；标志为 0 时读父类那份。
+//   其余子类：直接读声明者那份（Python 的类属性继承就是这个语义）。
+Lowerer::ClassAttrStorage Lowerer::class_attr_storage(const ClassInfo* recv,
+                                                      const ClassAttrInfo* ca) {
+    ClassAttrStorage st;
+    if (!recv || recv == ca->owner) {
+        st.slot = class_attr_global(ca->owner, ca->name, ca->ty);
+        return st;
+    }
+    if (recv->cowed_attrs.count(ca->name)) {
+        st.slot = class_attr_global(recv, ca->name, ca->ty);
+        std::string sym = std::format("__py23_cattr_own_{}_{}", recv->name, ca->name);
+        st.flag = global_idx_as(sym, t_int());
+        st.parent = class_attr_storage(ca->owner, ca).slot;
+        return st;
+    }
+    return class_attr_storage(ca->owner, ca);
+}
+
+int Lowerer::class_attr_slot(const ClassInfo* recv, const ClassAttrInfo* ca) {
+    return class_attr_storage(recv, ca).slot;
+}
+
+// 读类属性：有标志位的类要先看「自己那份」是否已经存在。
+VReg Lowerer::class_attr_load(const ClassInfo* recv, const ClassAttrInfo* ca) {
+    ClassAttrStorage st = class_attr_storage(recv, ca);
+    if (st.flag < 0) return load_global(st.slot, ca->ty);
+
+    int tmp = new_borrow_slot(ca->ty);
+    int own = new_block("cattr.own");
+    int parent = new_block("cattr.parent");
+    int end = new_block("cattr.end");
+
+    VReg f = load_global(st.flag, t_int());
+    Inst br;
+    br.op = IrOp::Branch;
+    br.a = f;
+    br.target = own;
+    br.target2 = parent;
+    emit(std::move(br));
+
+    switch_to(own);
+    store_borrow_slot(tmp, load_global(st.slot, ca->ty));
+    Inst j1;
+    j1.op = IrOp::Jump;
+    j1.target = end;
+    emit(std::move(j1));
+
+    switch_to(parent);
+    store_borrow_slot(tmp, load_global(st.parent, ca->ty));
+    Inst j2;
+    j2.op = IrOp::Jump;
+    j2.target = end;
+    emit(std::move(j2));
+
+    switch_to(end);
+    return load_slot(tmp, ca->ty);
+}
+
+// 写类属性：通过子类第一次写时置位标志，从此读的就是本类这一份。
+void Lowerer::class_attr_store(const ClassInfo* recv, const ClassAttrInfo* ca, VReg v,
+                               TypePtr vty) {
+    ClassAttrStorage st = class_attr_storage(recv, ca);
+    v = coerce(v, vty, ca->ty);
+    store_global(st.slot, v);
+    if (st.flag >= 0) store_global(st.flag, const_int(1));
+}
+
+// 实例读类属性：静态类型可能只是基类，值却是子类，所以要按运行期类号
+// 派发。没有任何子类覆盖这个属性时退化成一次直接读，不产生额外开销。
+VReg Lowerer::class_attr_load_dyn(VReg obj, const ClassInfo* stat, const ClassAttrInfo* ca) {
+    std::vector<std::pair<const ClassInfo*, const ClassAttrInfo*>> overrides;
+    for (auto& [name, ptr] : classes_) {
+        const ClassInfo* k = ptr.get();
+        if (!k || k == stat) continue;
+        bool derived = false;
+        for (const ClassInfo* m : k->mro)
+            if (m == stat) { derived = true; break; }
+        if (!derived) continue;
+        const ClassAttrInfo* kca = k->class_attr(ca->name);
+        if (!kca) continue;
+        // 覆盖了才算：自己声明，或者通过子类赋过值（有独立的槽）
+        if (kca->owner == ca->owner && !k->cowed_attrs.count(ca->name)) continue;
+        overrides.push_back({k, kca});
+    }
+    if (overrides.empty()) return class_attr_load(stat, ca);
+
+    int tmp = new_borrow_slot(ca->ty);
+    int end = new_block("cattr.dyn.end");
+    VReg cid = call_runtime(RtFn::ObjClassId, t_int(), {obj});
+    for (auto& [k, kca] : overrides) {
+        auto idit = class_ids_.find(k);
+        if (idit == class_ids_.end()) continue;
+        int hit = new_block("cattr.dyn.hit");
+        int next = new_block("cattr.dyn.next");
+
+        Inst cmp;
+        cmp.op = IrOp::Cmp;
+        cmp.cop = CmpKind::Eq;
+        cmp.a = cid;
+        cmp.b = const_int(idit->second);
+        VReg eq = def(t_bool(), std::move(cmp));
+
+        Inst br;
+        br.op = IrOp::Branch;
+        br.a = eq;
+        br.target = hit;
+        br.target2 = next;
+        emit(std::move(br));
+
+        switch_to(hit);
+        store_borrow_slot(tmp, class_attr_load(k, kca));
+        Inst j;
+        j.op = IrOp::Jump;
+        j.target = end;
+        emit(std::move(j));
+
+        switch_to(next);
+    }
+    // 所有子类都没命中：用静态类型那一份
+    store_borrow_slot(tmp, class_attr_load(stat, ca));
+    Inst jd;
+    jd.op = IrOp::Jump;
+    jd.target = end;
+    emit(std::move(jd));
+
+    switch_to(end);
+    return load_slot(tmp, ca->ty);
+}
+
+// `C.x` / `cls.x`：接收者是类本身。类名不是可求值的值，属性访问必须
+// 在降级阶段就分流，不能先 expr(接收者)。
+bool Lowerer::is_class_receiver(const Attribute& a) {
+    auto* n = dynamic_cast<Name*>(a.value.get());
+    if (!n) return false;
+    if (!st_->class_self_name.empty() && n->id == st_->class_self_name) return true;
+    if (is_bound_here(n->id)) return false;
+    return classes_.count(n->id) > 0;
+}
+
+// 类接收者对应的类。@classmethod 的 cls 要用本帧静态绑定的那个类，
+// 不能信类型检查记下的「声明它的类」——子类特化副本里那已经过时了。
+const ClassInfo* Lowerer::class_receiver_cls(const Attribute& a, TypePtr ot) {
+    if (auto* n = dynamic_cast<Name*>(a.value.get())) {
+        if (!st_->class_self_name.empty() && n->id == st_->class_self_name)
+            return st_->class_self_ty;
+        if (!is_bound_here(n->id)) {
+            auto it = classes_.find(n->id);
+            if (it != classes_.end() && it->second) return it->second.get();
+        }
+    }
+    return (ot && ot->kind == TyKind::Class) ? ot->cls : nullptr;
+}
+
 void Lowerer::lower_classdef(ClassDef& c) {
     if (!c.decorators.empty()) {
         err(c.line, c.col, "class decorators are not supported by the code generator yet");
@@ -579,10 +763,28 @@ void Lowerer::lower_classdef(ClassDef& c) {
             mod_.classes[cid].vtable[static_cast<size_t>(m.slot)] = fidx;
     }
 
+    // 继承来的 @classmethod 按本类再编一份：cls 静态绑定到本类，所以
+    // Sub.make() 构造的是 Sub 而不是 Base。不这么做的话，所有子类
+    // 共用基类那份实现，工厂方法就永远返回基类实例。
+    for (const ClassInfo* k : ci->mro) {
+        if (k == ci.get()) continue;
+        for (const MethodInfo& km : k->methods) {
+            if (km.kind != MethodKind::ClassMethod || !km.def || km.slot < 0) continue;
+            // 被更靠前的类（含本类自己）覆盖了，不重复编
+            if (ci->method(km.name) != &km) continue;
+            if (km.slot >= static_cast<int>(mod_.classes[cid].vtable.size())) continue;
+            std::string label = std::format("{}_{}_{}", c.name, km.name, mod_.funcs.size());
+            int fidx = compile_function_body(*km.def, km.sig, label, ci.get());
+            mod_.classes[cid].vtable[static_cast<size_t>(km.slot)] = fidx;
+        }
+    }
+
     if (!opts_.module_symbol.empty() && !opts_.is_entry)
         compile_ctor_wrapper(c, ci, cid);
 
-    // 类体里的非声明语句：在类定义点执行（赋值按模块全局处理）。
+    // 类体里的非声明语句：在类定义点执行。普通赋值是类属性，写进隐藏
+    // 全局（方法体里读到的也是这一份）；其余语句仍然按模块全局处理。
+    st_->class_body_attrs.clear();
     for (auto& s : c.body) {
         if (s->kind == StmtKind::FunctionDef || s->kind == StmtKind::AnnAssign ||
             s->kind == StmtKind::Pass)
@@ -593,8 +795,22 @@ void Lowerer::lower_classdef(ClassDef& c) {
                 static_cast<Constant&>(*e.value).ck == Constant::CK::Str)
                 continue;
         }
+        if (s->kind == StmtKind::Assign) {
+            auto& as = static_cast<Assign&>(*s);
+            if (as.targets.size() == 1 && as.targets[0]->kind == ExprKind::Name) {
+                auto& nm = static_cast<Name&>(*as.targets[0]);
+                const ClassAttrInfo* ca = ci->class_attr(nm.id);
+                if (ca && ca->owner == ci.get()) {
+                    st_->class_body_attrs[nm.id] = class_attr_slot(ci.get(), ca);
+                    class_attr_store(ci.get(), ca, expr(*as.value),
+                                     tc_.type_of(as.value.get()));
+                    continue;
+                }
+            }
+        }
         stmt(*s);
     }
+    st_->class_body_attrs.clear();
 }
 
 void Lowerer::compile_ctor_wrapper(ClassDef& clsdef, const ClassInfoPtr& ci, int cid) {

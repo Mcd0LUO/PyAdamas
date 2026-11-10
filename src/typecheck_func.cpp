@@ -166,9 +166,18 @@ void TypeChecker::funcdef_impl(FunctionDef& f, const ClassInfoPtr& owner) {
         }
         if (owner && !owner_is_static)
             cur_self_name_ = info->pos.empty() ? std::string() : info->pos[0].name;
+        // @classmethod：首参是类不是实例，`cls.x` 要走类属性查找
+        auto saved_cls_name = cur_cls_name_;
+        bool owner_is_cmethod = false;
+        if (owner) {
+            if (const MethodInfo* om = owner->method(f.name))
+                owner_is_cmethod = om->kind == MethodKind::ClassMethod;
+        }
+        if (owner_is_cmethod && !info->pos.empty()) cur_cls_name_ = info->pos[0].name;
         // 嵌套函数不改它：闭包捕获的 self 还是外层那个名字
         stmts(f.body);
         cur_self_name_ = std::move(saved_self_name);
+        cur_cls_name_ = std::move(saved_cls_name);
 
         // 无标注函数：从所有 return 处推断返回类型
         TypePtr inferred = nullptr;
@@ -222,6 +231,21 @@ bool TypeChecker::is_self_attr(const Attribute& a) const {
     return static_cast<const Name&>(*a.value).id == cur_self_name_;
 }
 
+// `C.x` / `cls.x`：接收者是一个类，不是实例。区分不了的时候按实例处理——
+// 实例侧多了字段回退，宁可宽松也不要误判。
+bool TypeChecker::is_class_receiver(const Attribute& a) {
+    if (a.value->kind != ExprKind::Name) return false;
+    auto& n = static_cast<const Name&>(*a.value);
+    if (!cur_cls_name_.empty() && n.id == cur_cls_name_) return true;
+    if (!cur_self_name_.empty() && n.id == cur_self_name_) return false;
+    // 类名绑定在模块作用域里；被函数局部或形参遮住就不是类了
+    for (Scope* s = cur_; s; s = s->parent) {
+        if (s->vars.find(n.id) == s->vars.end()) continue;
+        return s->is_module && classes_.count(n.id) > 0;
+    }
+    return false;
+}
+
 // `self.x = ...` 里 x 没在类体里声明过：补成字段。Python 的实例属性本来
 // 就是在 __init__ 里长出来的，强制先写标注会把标准库挡在门外。
 // 返回 true 表示这次赋值已经处理完（隐式字段一律放宽，不再做类型检查）；
@@ -251,10 +275,10 @@ bool TypeChecker::add_implicit_field(const Attribute& a, TypePtr ty) {
     return true;
 }
 
-// 类体只允许四种语句：方法定义、带类型标注的字段声明、pass、文档字符串。
-// 其余（类变量赋值、if、for……）在 Python 里是「类体在独立命名空间里执行」，
-// 要做对得先有类对象和动态查找，而我们的布局是编译期定死的。语法照收，
-// 标记成「没建模」，由编译阶段拒绝——不能在这里报错，真实代码太常见。
+// 类体里的语句：方法定义和字段标注之外，普通赋值按类属性处理（存进
+// 模块里的隐藏全局），其余（if / for / with …）在 Python 里是「类体在
+// 独立命名空间里执行」，py23 没有运行期类对象，标记成「没建模」，
+// 由编译阶段拒绝——不能在这里报错，真实代码太常见。
 void TypeChecker::classdef(ClassDef& c) {
         if (!c.decorators.empty()) {
             unsupported.push_back("class decorator");
@@ -490,6 +514,7 @@ void TypeChecker::classdef(ClassDef& c) {
             Expr* d = f.decorators[0].get();
             if (auto* n = dynamic_cast<Name*>(d)) {
                 if (n->id == "staticmethod") return MethodKind::Static;
+                if (n->id == "classmethod") return MethodKind::ClassMethod;
                 if (n->id == "property") return MethodKind::PropertyGetter;
                 ok = false;
                 return MethodKind::Normal;
@@ -534,7 +559,7 @@ void TypeChecker::classdef(ClassDef& c) {
             m.kind = kind;
             m.sig = build_sig(f);
             int midx = static_cast<int>(cls->methods.size());
-            if (kind == MethodKind::Normal || !decor_ok) {
+            if (kind == MethodKind::Normal || kind == MethodKind::ClassMethod || !decor_ok) {
                 if (m.sig->pos.empty()) {
                     err(f.line, f.col,
                         std::format("method '{}' must take 'self' as first parameter", f.name));
@@ -673,14 +698,43 @@ void TypeChecker::classdef(ClassDef& c) {
             }
         }
 
-        // 类体里的其他语句：在类定义点执行。py23 没有类命名空间，
-        // 赋值按模块全局处理；成员表因此可能不全，类标记成 open。
+        // 类体里的其他语句：在类定义点执行。普通赋值是类属性（存进
+        // 模块里的隐藏全局，所有实例共享）；其他语句（if/for/with…）
+        // 仍然没法建模，把类标记成 open 后按模块全局处理。
+        auto saved_body_attrs = std::move(class_body_attrs_);
+        class_body_attrs_.clear();
         for (auto& s : c.body) {
             switch (s->kind) {
                 case StmtKind::FunctionDef:
                 case StmtKind::AnnAssign:
                 case StmtKind::Pass:
                     break;
+                case StmtKind::Assign: {
+                    auto& as = static_cast<Assign&>(*s);
+                    if (as.targets.size() == 1 &&
+                        as.targets[0]->kind == ExprKind::Name) {
+                        auto& nm = static_cast<Name&>(*as.targets[0]);
+                        if (nm.id.starts_with("__") && nm.id.ends_with("__") &&
+                            nm.id != "__match_args__") {
+                            // 双下划线类变量（__slots__ 之类）没有语义模型
+                            cls->open = true;
+                            stmt(*s);
+                            break;
+                        }
+                        TypePtr ty = expr(*as.value);
+                        ClassAttrInfo ai;
+                        ai.name = nm.id;
+                        ai.ty = ty ? ty : t_unknown();
+                        ai.init = as.value.get();
+                        ai.owner = cls.get();
+                        class_body_attrs_[nm.id] = ai.ty;
+                        cls->class_attrs.push_back(std::move(ai));
+                        break;
+                    }
+                    cls->open = true;
+                    stmt(*s);
+                    break;
+                }
                 case StmtKind::Expr: {
                     auto& e = static_cast<ExprStmt&>(*s);
                     if (e.value->kind == ExprKind::Constant &&
@@ -696,6 +750,7 @@ void TypeChecker::classdef(ClassDef& c) {
                     break;
             }
         }
+        class_body_attrs_ = std::move(saved_body_attrs);
 
         // 方法体最后检查：签名、字段、self 类型都已就位。
         ClassInfo* saved_cls = cur_class_;

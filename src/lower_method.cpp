@@ -112,27 +112,39 @@ VReg Lowerer::lower_method_call(Attribute& at, Call& c) {
         TypePtr rt = info->ret ? info->ret : t_unknown();
         return def_heap(rt, std::move(in));
     }
-    // C.f(...)：类名接收者的静态方法直接调用；普通方法需要实例。
-    if (auto* n = dynamic_cast<Name*>(at.value.get());
-        n && !is_bound_here(n->id) && !imported_classes_.count(n->id)) {
-        auto cit = classes_.find(n->id);
-        if (cit != classes_.end() && cit->second && !cit->second->is_exception_class) {
-            const ClassInfo* cls = cit->second.get();
+    // C.f(...) / cls.f(...)：类接收者的静态方法、类方法直接调用；
+    // 普通方法需要实例。@classmethod 里的 cls 编译期就绑定成所属类，
+    // 和写类名完全等价。
+    const ClassInfo* class_recv = nullptr;
+    if (auto* n = dynamic_cast<Name*>(at.value.get())) {
+        if (!st_->class_self_name.empty() && n->id == st_->class_self_name &&
+            st_->class_self_ty) {
+            class_recv = st_->class_self_ty;
+        } else if (!is_bound_here(n->id) && !imported_classes_.count(n->id)) {
+            auto cit = classes_.find(n->id);
+            if (cit != classes_.end() && cit->second && !cit->second->is_exception_class)
+                class_recv = cit->second.get();
+        }
+    }
+    if (class_recv) {
+        {
+            const ClassInfo* cls = class_recv;
             const MethodInfo* m = cls->method(at.attr);
             if (!m) {
                 err(c.line, c.col,
                     std::format("'{}' has no method '{}'", cls->name, at.attr));
                 return const_none();
             }
-            if (m->kind != MethodKind::Static) {
+            if (m->kind != MethodKind::Static && m->kind != MethodKind::ClassMethod) {
                 err(c.line, c.col,
                     std::format("'{}.{}' is an instance method; call it on an instance",
                                 cls->name, at.attr));
                 return const_none();
             }
             if (!m->call_sig) return const_none();
-            const ClassInfo* owner = cls->method_owner(at.attr);
-            auto cid = owner ? class_ids_.find(owner) : class_ids_.end();
+            // 用接收者类的 vtable：类方法在子类里会重新编一份，槽位指向
+            // 子类特化的实现；静态方法继承时也应当按 MRO 解析到最终覆盖。
+            auto cid = class_ids_.find(cls);
             if (cid == class_ids_.end()) {
                 err(c.line, c.col,
                     std::format("static method '{}.{}' is not available here", cls->name,
@@ -149,7 +161,9 @@ VReg Lowerer::lower_method_call(Attribute& at, Call& c) {
             Inst cd;
             cd.op = IrOp::CallDirect;
             cd.idx = vt[m->slot];
-            cd.args = std::move(args);
+            // 类方法的 cls 占第一个实参位：传所属类的 id，纯整数不参与 rc
+            if (m->kind == MethodKind::ClassMethod) cd.args.push_back(const_int(cid->second));
+            for (VReg a : args) cd.args.push_back(a);
             TypePtr rt = m->call_sig->ret ? m->call_sig->ret : t_none();
             return def_heap(rt, std::move(cd));
         }
@@ -171,9 +185,15 @@ VReg Lowerer::lower_method_call(Attribute& at, Call& c) {
         }
         if (!m->call_sig) return const_none();
         std::vector<VReg> args = bind_args(c, m->call_sig, m->def);
+        // 类方法在实例上调用时，cls 仍占第一个实参位；传静态类型对应的类 id
+        if (m->kind == MethodKind::ClassMethod) {
+            auto cid = class_ids_.find(recv_ty->cls);
+            args.insert(args.begin(), const_int(cid == class_ids_.end() ? 0 : cid->second));
+        }
         // 终态类（本模块没有任何类继承它）：vtable 槽在编译期就能解析成
         // 具体实现，直接调用，省掉两次查表和间接跳转，也让内联器能接上。
-        if ((m->kind == MethodKind::Normal || m->kind == MethodKind::Static) &&
+        if ((m->kind == MethodKind::Normal || m->kind == MethodKind::Static ||
+             m->kind == MethodKind::ClassMethod) &&
             sealed_classes_.count(recv_ty->cls)) {
             auto cid = class_ids_.find(recv_ty->cls);
             if (cid != class_ids_.end() && m->slot >= 0) {
@@ -188,7 +208,8 @@ VReg Lowerer::lower_method_call(Attribute& at, Call& c) {
                         Inst cd;
                         cd.op = IrOp::CallDirect;
                         cd.idx = fidx;
-                        if (m->kind != MethodKind::Static) cd.args.push_back(recv);
+                        // 只有普通方法传 self；静态方法和类方法都不占这个位置
+                        if (m->kind == MethodKind::Normal) cd.args.push_back(recv);
                         for (VReg a : args) cd.args.push_back(a);
                         TypePtr rt = m->call_sig->ret ? m->call_sig->ret : t_none();
                         return def_heap(rt, std::move(cd));
@@ -197,7 +218,9 @@ VReg Lowerer::lower_method_call(Attribute& at, Call& c) {
             }
         }
         Inst vc;
-        vc.op = m->kind == MethodKind::Static ? IrOp::VCallStatic : IrOp::VCall;
+        vc.op = (m->kind == MethodKind::Static || m->kind == MethodKind::ClassMethod)
+                    ? IrOp::VCallStatic
+                    : IrOp::VCall;
         vc.a = recv;
         vc.imm = m->slot;
         vc.args = std::move(args);
