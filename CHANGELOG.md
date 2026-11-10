@@ -4,6 +4,34 @@
 
 早期阶段没有逐条留痕，按阶段归纳；0.4 之后逐条记录。
 
+## [0.75] - 2026-11-10
+
+`re` 模块 v1：回溯 VM + Pattern / Match。
+
+### 新增
+
+- 内置 `re`（`runtime/rt_re.c`）：`compile` / `search` / `match` /
+  `fullmatch` / `findall` / `sub` / `split` / `escape`；`Pattern` 上的同名
+  方法；`Match` 的 `group` / `groups` / `start` / `end` / `span`。
+- 语法：字面量、`.`、字符类（含范围/取反）、`\d\w\s\D\W\S`、`\b`、
+  `^ $`、分组（捕获 / `(?:...)` / `(?P<name>...)`）、交替、`* + ? {m,n}`
+  （含惰性）；标志 `I`/`IGNORECASE`、`M`/`MULTILINE`、`S`/`DOTALL`。
+- 字符串按字节匹配，与 py23 的 `str` 语义一致。
+- `tests/run/56_re.py` 覆盖 search/groups/compile/flags/lazy/alternation/
+  findall/sub/split/escape 和 Pattern 方法。
+
+### 已知限制
+
+- v1 不支持 lookaround、反向引用、条件组；`findall` 返回整段匹配而不是
+  分组元组，`split` 不含捕获组，没有 `groupdict`；未匹配分组返回空串
+  而不是 None；`sub` 的替换只支持 `\1`..`\9` 和 `\\`。
+
+### 验证
+
+- `ctest --preset dev` 连跑 3 次、release 全绿；810 差分 0 失败。
+- re 探针与 CPython 3.13 逐行一致（除 CPython 对位置 `count`/`maxsplit`
+  的 DeprecationWarning）。
+
 ## [0.74.1] - 2026-11-10
 
 修复四元数 probe 暴露的类型传播与 fsum 缺陷。

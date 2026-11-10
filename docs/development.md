@@ -60,7 +60,7 @@ rm -rf build/dev                   # 连 CMake 中间产物一起清
 | `tests/run/*.py` | 必须编译运行成功，输出与末尾 `# --- expect ---` 逐行一致 | `NN_主题.py` |
 | `tests/unsupported/*.py` | `check -v` 必须打标记，`build` 必须拒绝 | `主题.py` |
 
-当前规模：正例 11 / 反例 35 / 运行 55 / 未建模 1 / 模块 9。
+当前规模：正例 11 / 反例 35 / 运行 56 / 未建模 1 / 模块 9。
 
 跑单个文件：
 
@@ -116,16 +116,17 @@ python3 tests/diff/run_diff.py --only repr  # 只测浮点转字符串
 覆盖推导式；`tests/run/20_with.py` 覆盖 `with` 的提前退出；`tests/run/21_decorator.py`
 覆盖装饰器；`tests/run/22_exception.py` 覆盖异常层级、bare raise、
 finally 的提前退出、with 异常路径和运行时错误转换；`tests/run/23_generator.py`
-~ `tests/run/55_slot_types.py` 覆盖生成器、协程、Task、异步语言面、
+~ `tests/run/56_re.py` 覆盖生成器、协程、Task、异步语言面、
 Future/取消/fd/回调、`yield from`、异步推导式、异步生成器协议、
 异常值、内置函数、f-string、del/print(*args)/复数、match 与多继承；
-`53_json.py` / `54_stdlib.py` / `55_slot_types.py` 覆盖 json、string/time/os/
-itertools/collections 批次，以及 call.rt 槽位类型、循环条件更新和 fsum 抵消。
+`53_json.py` / `54_stdlib.py` / `55_slot_types.py` / `56_re.py` 覆盖 json、
+string/time/os/itertools/collections、call.rt 槽位类型、循环条件更新、
+fsum 抵消和 re。
 
 敏捷开发时只跑相关用例，不要每次全量：
 
 ```bash
-PY23_TEST_FILTER='5[0-5]*' PY23_TEST_JOBS=16 bash tests/run_tests.sh build/dev build/dev/py23
+PY23_TEST_FILTER='5[0-6]*' PY23_TEST_JOBS=16 bash tests/run_tests.sh build/dev build/dev/py23
 python3 tests/diff/run_diff.py --only async --seeds 1 --jobs 16
 ```
 

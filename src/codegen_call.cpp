@@ -535,6 +535,9 @@ void AsmGen::gen_call_rt(const Inst& in) {
                 emit2("movq", src_op(in.args[0]), "%rdi");
                 emit2("movq", src_op(in.args[1]), "%rsi");
                 break;
+            case RtFn::RegexSearch:
+            case RtFn::RegexFindAllStr:
+            case RtFn::RegexSplit:
             case RtFn::GenSendOpt:
             case RtFn::ListSet:
             case RtFn::DictSet:
@@ -545,6 +548,12 @@ void AsmGen::gen_call_rt(const Inst& in) {
             case RtFn::ListIndex:
             case RtFn::ListCount:
             case RtFn::ListInsert:
+            case RtFn::RegexCompile:
+            case RtFn::RegexFindAll:
+            case RtFn::RegexGroup:
+            case RtFn::RegexStart:
+            case RtFn::RegexEnd:
+            case RtFn::RegexSpan:
             case RtFn::FileConfig:
             case RtFn::IterChain:
             case RtFn::IterRepeat:
@@ -553,6 +562,7 @@ void AsmGen::gen_call_rt(const Inst& in) {
                 emit2("movq", src_op(in.args[1]), "%rsi");
                 emit2("movq", src_op(in.args[2]), "%rdx");
                 break;
+            case RtFn::RegexSubStr:
             case RtFn::DictNew:
             case RtFn::SetFromList:
                 // (kind/own 三个 + 类 key 的 hash/eq 槽号)
@@ -562,6 +572,9 @@ void AsmGen::gen_call_rt(const Inst& in) {
                 emit2("movq", src_op(in.args[3]), "%rcx");
                 emit2("movq", src_op(in.args[4]), "%r8");
                 break;
+            case RtFn::RegexSearchStr:
+            case RtFn::RegexSub:
+            case RtFn::RegexSplitStr:
             case RtFn::ListSlice:
             case RtFn::StrSlice:
                 emit2("movq", src_op(in.args[0]), "%rdi");
@@ -590,6 +603,8 @@ void AsmGen::gen_call_rt(const Inst& in) {
                 emit2("movq", src_op(in.args[0]), "%rdi");
                 emit2("movq", src_op(in.args[1]), "%rsi");
                 break;
+            case RtFn::RegexGroups:
+            case RtFn::RegexEscape:
             case RtFn::StrFromI64:
             case RtFn::StrFromBool:
             case RtFn::PrintI64:

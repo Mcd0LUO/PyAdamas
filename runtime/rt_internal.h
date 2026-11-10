@@ -617,6 +617,26 @@ Py23List* py23_collections_most_common(Py23Dict* d, int64_t n);
 Py23Str* py23_json_dumps(int64_t value, Py23Str* desc);
 int64_t py23_json_loads(Py23Str* text, Py23Str* desc);
 
+/* ── re：回溯 VM 与 Pattern/Match ──────────────────────────────── */
+typedef struct Py23Regex Py23Regex;
+typedef struct Py23Match Py23Match;
+int64_t py23_re_compile(Py23Str* pat, int64_t flags);
+int64_t py23_re_search_str(Py23Str* pat, Py23Str* text, int64_t flags, int64_t mode);
+int64_t py23_re_search(Py23Regex* re, Py23Str* text, int64_t mode);
+int64_t py23_re_group(Py23Match* m, int64_t n);
+int64_t py23_re_groups(Py23Match* m);
+int64_t py23_re_start(Py23Match* m, int64_t n);
+int64_t py23_re_end(Py23Match* m, int64_t n);
+int64_t py23_re_span(Py23Match* m, int64_t n);
+int64_t py23_re_findall_str(Py23Str* pat, Py23Str* text, int64_t flags);
+int64_t py23_re_findall(Py23Regex* re, Py23Str* text);
+int64_t py23_re_sub_str(Py23Str* pat, Py23Str* repl, Py23Str* text, int64_t count,
+                        int64_t flags);
+int64_t py23_re_sub(Py23Regex* re, Py23Str* repl, Py23Str* text, int64_t count);
+int64_t py23_re_split_str(Py23Str* pat, Py23Str* text, int64_t maxsplit, int64_t flags);
+int64_t py23_re_split(Py23Regex* re, Py23Str* text, int64_t maxsplit);
+int64_t py23_re_escape(Py23Str* s);
+
 /* ── subprocess：CompletedProcess 与 run() ─────────────────────── */
 typedef struct Py23Proc Py23Proc;
 Py23Proc* py23_subprocess_run(Py23List* argv, int64_t capture, int64_t text,

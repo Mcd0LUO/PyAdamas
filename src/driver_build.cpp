@@ -423,7 +423,7 @@ bool visit_unit(Program& p, ModuleUnit& u, std::vector<ModuleUnit*>& stack) {
         if (req.name == "math" || req.name == "sys" || req.name == "asyncio" ||
             req.name == "random" || req.name == "os" || req.name == "os.path" ||
             req.name == "subprocess" || req.name == "time" || req.name == "itertools" ||
-            req.name == "collections" || req.name == "json") {
+            req.name == "collections" || req.name == "json" || req.name == "re") {
             // 内置模块没有源文件/对象，只提供编译期接口。
             continue;
         }
@@ -535,7 +535,7 @@ py23::ModuleInfoPtr builtin_module(const std::string& name);
 py23::ModuleInfoPtr program_module(Program& p, const std::string& name) {
     if (name == "math" || name == "sys" || name == "asyncio" || name == "random" ||
         name == "os" || name == "os.path" || name == "subprocess" || name == "time" ||
-        name == "itertools" || name == "collections" || name == "json")
+        name == "itertools" || name == "collections" || name == "json" || name == "re")
         return builtin_module(name);
     auto it = p.units.find(name);
     return it == p.units.end() ? nullptr : it->second->info;
@@ -783,6 +783,60 @@ py23::ModuleInfoPtr builtin_module(const std::string& name) {
             f->ret_known = false;
             func_with("loads", f);
         }
+    } else if (name == "re") {
+        info->globals["I"] = py23::t_int();
+        info->globals["IGNORECASE"] = py23::t_int();
+        info->globals["M"] = py23::t_int();
+        info->globals["MULTILINE"] = py23::t_int();
+        info->globals["S"] = py23::t_int();
+        info->globals["DOTALL"] = py23::t_int();
+        auto re_fn = [&](const std::string& n,
+                         std::vector<std::pair<std::string, py23::TypePtr>> ps,
+                         size_t ndef, py23::TypePtr ret) {
+            auto f = std::make_shared<py23::FuncInfo>();
+            f->name = n;
+            for (size_t i = 0; i < ps.size(); ++i) {
+                py23::Param p;
+                p.name = ps[i].first;
+                p.ty = ps[i].second;
+                if (i + ndef >= ps.size()) {
+                    p.has_default = true;
+                    p.default_lit = lv_int(0);
+                }
+                f->pos.push_back(std::move(p));
+            }
+            f->ret = ret;
+            f->ret_known = true;
+            func_with(n, f);
+        };
+        re_fn("compile", {{"pattern", py23::t_str()}, {"flags", py23::t_int()}}, 1,
+              py23::t_regex());
+        re_fn("search",
+              {{"pattern", py23::t_str()}, {"string", py23::t_str()}, {"flags", py23::t_int()}},
+              1, py23::mk_optional(py23::t_match()));
+        re_fn("match",
+              {{"pattern", py23::t_str()}, {"string", py23::t_str()}, {"flags", py23::t_int()}},
+              1, py23::mk_optional(py23::t_match()));
+        re_fn("fullmatch",
+              {{"pattern", py23::t_str()}, {"string", py23::t_str()}, {"flags", py23::t_int()}},
+              1, py23::mk_optional(py23::t_match()));
+        re_fn("findall",
+              {{"pattern", py23::t_str()}, {"string", py23::t_str()}, {"flags", py23::t_int()}},
+              1, py23::mk_list(py23::t_str()));
+        re_fn("sub",
+              {{"pattern", py23::t_str()},
+               {"repl", py23::t_str()},
+               {"string", py23::t_str()},
+               {"count", py23::t_int()},
+               {"flags", py23::t_int()}},
+              2, py23::t_str());
+        re_fn("split",
+              {{"pattern", py23::t_str()},
+               {"string", py23::t_str()},
+               {"maxsplit", py23::t_int()},
+               {"flags", py23::t_int()}},
+              2, py23::mk_list(py23::t_str()));
+        re_fn("escape", {{"pattern", py23::t_str()}}, 0, py23::t_str());
     } else if (name == "random") {
         // 不传种子时绑定哨兵 INT64_MIN，运行时用时间 + pid 播种。
         const int64_t kNoSeed = -9223372036854775807LL - 1;

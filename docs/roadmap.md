@@ -24,41 +24,30 @@
 | 运行时 | 字符串、列表、字典、集合、对象分配、输出、panic；浮点 repr 与 CPython 一致 |
 | 验证 | 四类用例（正例 / 反例 / 运行 / 未建模） + 差分测试 + 标准库基线 |
 | 0.6–0.38 | 对象模型、异常值、match、C3 MRO、优化遍/O2、块内寄存器；逐版本记录见 [archive/roadmap-0.6-0.38.md](archive/roadmap-0.6-0.38.md) |
-| 0.39–0.74 | -O0/O1/O2、dunder 第二批、random/os/subprocess、差分 runner 自举、stdlib 批次（string/time/os/itertools/collections/json）；详见 [CHANGELOG](../CHANGELOG.md) |
+| 0.39–0.75 | -O0/O1/O2、dunder 第二批、random/os/subprocess、差分 runner 自举、stdlib 批次（string/time/os/itertools/collections/json）、re 模块 v1；详见 [CHANGELOG](../CHANGELOG.md) |
 
-## 当前状态（0.74）
+## 当前状态（0.75）
 
 流水线 `源码 → 词法 → AST → lambda 脱糖 → 类型检查 → IR → x86-64 汇编 → 可执行文件` 已打通。
 
 - **语言面**：标量、字符串、列表/元组/字典/集合、切片读写、闭包/lambda/`*args`/`**kwargs`/装饰器、推导式、`with`、异常值（`args`/`raise ... from`/自定义异常）、类（字段/方法/C3 多继承/零参 `super()`/`@staticmethod`/`@property`）、`match/case`、`del`、复数字面量、f-string 格式说明、dunder 协议、`open`/`input`/`sys.stdin`。
-- **标准库**：`math`/`sys`/`asyncio`/`random`/`os`/`os.path`/`subprocess`/`time`/`itertools`/`collections`/`json`/`string`。
-- **验证**：55 个运行用例、35 个反例、9 个模块目录；差分 runner 已自举，默认 810 例。
-- **主要缺口**：`bytes` 字面量；`re`/`datetime`/`csv`/`pathlib`；C FFI/BLAS；跨模块生成器/协程；asyncio 边角。
+- **标准库**：`math`/`sys`/`asyncio`/`random`/`os`/`os.path`/`subprocess`/`time`/`itertools`/`collections`/`json`/`string`/`re`。
+- **验证**：56 个运行用例、35 个反例、9 个模块目录；差分 runner 已自举，默认 810 例。
+- **主要缺口**：`bytes` 字面量；`datetime`/`csv`/`pathlib`；C FFI/BLAS；跨模块生成器/协程；asyncio 边角。
 
 ## 下一步
 
-### 1. `re`（建议 0.75）
-
-0.74 之后脚本层最缺的原语。范围先做 v1：
-
-- `compile` / `search` / `match` / `fullmatch` / `findall` / `sub` / `split`；
-- 字符类、量词（贪婪/非贪婪）、锚点、分组/命名分组、交替、`I`/`M`/`S` 标志；
-- v1 不做 lookbehind、反向引用、原子组、条件组，文档写清楚；
-- 回溯引擎放 `runtime/rt_re.c`；`Match` 用 py23 类暴露 `group`/`groups`/`start`/`end`。
-
-验收：`tests/run/55_re.py` + 复用差分基础设施加一个 `re` 生成器，随机 pattern/input 对 CPython 比 `search`/`findall`/`sub` 的输出。
-
-### 2. `bytes`（建议 0.76）
+### 1. `bytes`（建议 0.76）
 
 剩余最大的单点兼容缺口：语法层仍在拒绝 `b"..."`。py23 的 `str` 本来就是字节串，可以复用大部分表示，主要工作在类型系统、索引语义（返回 int 而不是单字节 str）和 `decode`/`encode`。验收：`bytes` 字面量、索引/切片、`decode`/`encode`、与 `str` 的边界；重跑标准库语法基线。
 
-### 3. C FFI + buffer + BLAS
+### 2. C FFI + buffer + BLAS
 
 科学计算的唯一捷径。py23 的 ABI 已经是 SysV + `int64`/`double`/指针，运行时是纯 C；补一层 `extern "C"` 声明和 buffer 类型，就能把 `list[float]` 的连续数据直接传给 `cblas_dgemm`。验收：512³ matmul 进入毫秒级；不要求自己实现 BLAS。
 
-### 4. 工程收尾
+### 3. 工程收尾
 
-- 重跑 0.74 的标准库前端基线（`bytes` 仍拒，`match`/`complex` 已支持，口径已变）；
+- 重跑 0.75 的标准库前端基线（`bytes` 仍拒，`match`/`complex` 已支持，口径已变）；
 - 保持 `docs/` 与 README 的验证表同步；
 - 把临时性能基准固化成 `tests/bench/`（可选）。
 
@@ -93,5 +82,5 @@
 14. **生成器/协程异常逃出时槽位不精确释放**：异常从 resume longjmp 出去时只把帧标成 aborted，堆槽引用交给 GC 下一轮回收
 15. **跨模块生成器/协程不支持**：`.py23i` 里 `Generator[T]` / `Coroutine[T]` 降级成 unknown
 16. **asyncio 仍是最小集合**：自定义 `__aiter__`、fd 读写、asyncio 子进程、线程安全循环未支持；`wait_readable` 不是 CPython 标准 API；Future 回调同步执行；`gather` 结果按 unknown 容器处理；Task 只允许一个并发等待者；`await` 位置受限
-17. **stdlib 覆盖不足**：没有 `re`/`datetime`/`csv`/`pathlib`/`functools`/`logging`/`argparse`；`json`/`collections`/`itertools` 是子集
+17. **stdlib 覆盖不足**：没有 `datetime`/`csv`/`pathlib`/`functools`/`logging`/`argparse`；`json`/`collections`/`itertools`/`re` 是子集
 18. **没有 C FFI / 包管理 / 调试信息**：第三方库接入和科学计算受限；出错没有 traceback

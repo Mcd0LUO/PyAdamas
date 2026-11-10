@@ -64,6 +64,8 @@ enum class TyKind : uint8_t {
     File,         // open() 返回的文件对象
     Random,       // random.Random() 返回的随机数生成器
     CompletedProcess,  // subprocess.run() 返回的结果对象
+    Regex,        // re.compile() 返回的 Pattern
+    Match,        // re.search()/match() 返回的 Match
 };
 
 struct Type;
@@ -416,6 +418,14 @@ inline const TypePtr& t_completed() {
     static TypePtr v = new_ty(TyKind::CompletedProcess);
     return v;
 }
+inline const TypePtr& t_regex() {
+    static TypePtr v = new_ty(TyKind::Regex);
+    return v;
+}
+inline const TypePtr& t_match() {
+    static TypePtr v = new_ty(TyKind::Match);
+    return v;
+}
 
 // 可变的类型洞：容器元素类型未知时用它占位，后续插入时原地填上
 inline TypePtr fresh_hole() { return new_ty(TyKind::Unknown); }
@@ -651,6 +661,8 @@ inline std::string type_name_impl(const TypePtr& t, int depth) {
         case TyKind::File: return "file";
         case TyKind::Random: return "random.Random";
         case TyKind::CompletedProcess: return "subprocess.CompletedProcess";
+        case TyKind::Regex: return "re.Pattern";
+        case TyKind::Match: return "re.Match";
     }
     return "?";
 }

@@ -866,6 +866,120 @@ VReg Lowerer::lower_method_call(Attribute& at, Call& c) {
         return const_none();
     }
 
+    if (recv_ty && recv_ty->kind == TyKind::Regex) {
+        if (!c.keywords.empty()) {
+            err(c.line, c.col,
+                std::format("re.Pattern.{}() does not take keyword arguments", at.attr));
+            return const_none();
+        }
+        auto int_at = [&](size_t i) -> VReg {
+            return coerce(expr(*c.args[i]), tc_.type_of(c.args[i].get()), t_int());
+        };
+        if (at.attr == "search" || at.attr == "match" || at.attr == "fullmatch") {
+            if (c.args.size() != 1) {
+                err(c.line, c.col,
+                    std::format("{}() takes exactly one argument", at.attr));
+                return const_none();
+            }
+            int64_t mode = at.attr == "search" ? 0 : at.attr == "match" ? 1 : 2;
+            VReg text = expr(*c.args[0]);
+            TypePtr mt = mk_optional(t_match());
+            VReg m = call_runtime(RtFn::RegexSearch, mt, {recv, text, const_int(mode)});
+            if (ir_is_heap(mt)) push_temp(m);
+            return m;
+        }
+        if (at.attr == "findall") {
+            if (c.args.size() != 1) {
+                err(c.line, c.col, "findall() takes exactly one argument");
+                return const_none();
+            }
+            VReg text = expr(*c.args[0]);
+            VReg l = call_runtime(RtFn::RegexFindAll, mk_list(t_str()), {recv, text});
+            push_temp(l);
+            return l;
+        }
+        if (at.attr == "sub") {
+            if (c.args.size() < 2 || c.args.size() > 3) {
+                err(c.line, c.col, "sub() takes two or three arguments");
+                return const_none();
+            }
+            VReg repl = expr(*c.args[0]);
+            VReg text = expr(*c.args[1]);
+            VReg count = c.args.size() == 3 ? int_at(2) : const_int(0);
+            VReg s = call_runtime(RtFn::RegexSub, t_str(), {recv, repl, text, count});
+            push_temp(s);
+            return s;
+        }
+        if (at.attr == "split") {
+            if (c.args.size() < 1 || c.args.size() > 2) {
+                err(c.line, c.col, "split() takes one or two arguments");
+                return const_none();
+            }
+            VReg text = expr(*c.args[0]);
+            VReg maxsplit = c.args.size() == 2 ? int_at(1) : const_int(0);
+            VReg l = call_runtime(RtFn::RegexSplit, mk_list(t_str()),
+                                  {recv, text, maxsplit});
+            push_temp(l);
+            return l;
+        }
+        err(c.line, c.col,
+            std::format("re.Pattern method '{}' is not supported", at.attr));
+        return const_none();
+    }
+
+    if (recv_ty && recv_ty->kind == TyKind::Match) {
+        if (!c.keywords.empty()) {
+            err(c.line, c.col,
+                std::format("re.Match.{}() does not take keyword arguments", at.attr));
+            return const_none();
+        }
+        auto int_at = [&](size_t i) -> VReg {
+            return coerce(expr(*c.args[i]), tc_.type_of(c.args[i].get()), t_int());
+        };
+        if (at.attr == "group") {
+            if (c.args.size() > 1) {
+                err(c.line, c.col, "group() takes at most one argument");
+                return const_none();
+            }
+            VReg n = c.args.empty() ? const_int(0) : int_at(0);
+            VReg s = call_runtime(RtFn::RegexGroup, t_str(), {recv, n});
+            push_temp(s);
+            return s;
+        }
+        if (at.attr == "groups") {
+            if (!c.args.empty()) {
+                err(c.line, c.col, "groups() takes no arguments");
+                return const_none();
+            }
+            VReg l = call_runtime(RtFn::RegexGroups, mk_list(t_str()), {recv});
+            push_temp(l);
+            return l;
+        }
+        if (at.attr == "start" || at.attr == "end") {
+            if (c.args.size() > 1) {
+                err(c.line, c.col,
+                    std::format("{}() takes at most one argument", at.attr));
+                return const_none();
+            }
+            VReg n = c.args.empty() ? const_int(0) : int_at(0);
+            return call_runtime(at.attr == "start" ? RtFn::RegexStart : RtFn::RegexEnd,
+                                t_int(), {recv, n});
+        }
+        if (at.attr == "span") {
+            if (c.args.size() > 1) {
+                err(c.line, c.col, "span() takes at most one argument");
+                return const_none();
+            }
+            VReg n = c.args.empty() ? const_int(0) : int_at(0);
+            VReg t = call_runtime(RtFn::RegexSpan, mk_tuple({t_int(), t_int()}),
+                                  {recv, n});
+            push_temp(t);
+            return t;
+        }
+        err(c.line, c.col, std::format("re.Match method '{}' is not supported", at.attr));
+        return const_none();
+    }
+
     if (recv_ty && recv_ty->kind == TyKind::File) {
         if (!c.keywords.empty()) {
             err(c.line, c.col,

@@ -210,12 +210,37 @@ std::optional<RtFn> Lowerer::native_fn(const std::string& module, const std::str
     } else if (module == "json") {
         if (member == "dumps") return RtFn::JsonDumps;
         if (member == "loads") return RtFn::JsonLoads;
+    } else if (module == "re") {
+        if (member == "compile") return RtFn::RegexCompile;
+        if (member == "search" || member == "match" || member == "fullmatch")
+            return RtFn::RegexSearchStr;
+        if (member == "findall") return RtFn::RegexFindAllStr;
+        if (member == "sub") return RtFn::RegexSubStr;
+        if (member == "split") return RtFn::RegexSplitStr;
+        if (member == "escape") return RtFn::RegexEscape;
     }
     return std::nullopt;
 }
 
 bool Lowerer::builtin_value(const std::string& module, const std::string& member, VReg& out,
                             TypePtr& ty) {
+    if (module == "re") {
+        if (member == "I" || member == "IGNORECASE") {
+            out = const_int(2);
+            ty = t_int();
+            return true;
+        }
+        if (member == "M" || member == "MULTILINE") {
+            out = const_int(8);
+            ty = t_int();
+            return true;
+        }
+        if (member == "S" || member == "DOTALL") {
+            out = const_int(16);
+            ty = t_int();
+            return true;
+        }
+    }
     if (module == "math") {
         if (member == "pi") {
             out = const_float(3.14159265358979323846);
@@ -294,6 +319,15 @@ VReg Lowerer::call_native(const std::string& module, const std::string& member, 
         return v;
     }
     std::vector<VReg> args = bind_args(c, info, nullptr);
+    if (module == "re" && (member == "search" || member == "match" || member == "fullmatch")) {
+        int64_t mode = member == "search" ? 0 : member == "match" ? 1 : 2;
+        args.push_back(const_int(mode));
+        TypePtr rt = tc_.type_of(&c);
+        if (!rt || rt->kind == TyKind::Unknown) rt = mk_optional(t_match());
+        VReg v = call_runtime(RtFn::RegexSearchStr, rt, std::move(args));
+        if (ir_is_heap(rt)) push_temp(v);
+        return v;
+    }
     if (*fn == RtFn::SysExit) {
         call_void(*fn, args);
         return const_none();

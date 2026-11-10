@@ -757,6 +757,18 @@ bool TypeChecker::has_method(const TypePtr& t, const std::string& m) {
                 };
                 return ms.count(m) > 0;
             }
+            case TyKind::Regex: {
+                static const std::unordered_set<std::string> ms = {
+                    "search", "match", "fullmatch", "findall", "sub", "split",
+                };
+                return ms.count(m) > 0;
+            }
+            case TyKind::Match: {
+                static const std::unordered_set<std::string> ms = {
+                    "group", "groups", "start", "end", "span",
+                };
+                return ms.count(m) > 0;
+            }
             // 数值类型没有真正的「方法表」，但这些名字确实存在；
             // 缺了就是标准库里的假错误（statistics 用 int.bit_length）。
             case TyKind::Int:
@@ -792,7 +804,7 @@ TypePtr TypeChecker::method_call(TypePtr recv, const std::string& name, Call& c,
         // Optional[Class] 上的方法：内层类的方法表是确定的，运行时有
         // None 检查兜底，静态上直接按内层查，避免收窄不到位就误杀。
         if (recv && recv->kind == TyKind::Optional && !recv->sub.empty() &&
-            recv->sub[0]->kind == TyKind::Class)
+            (recv->sub[0]->kind == TyKind::Class || recv->sub[0]->kind == TyKind::Match))
             recv = recv->sub[0];
         std::vector<TypePtr> a;
         for (auto& arg : c.args) a.push_back(expr(*arg));
@@ -1148,6 +1160,60 @@ TypePtr TypeChecker::method_call(TypePtr recv, const std::string& name, Call& c,
             if (name == "partition" || name == "rpartition")
                 return mk_tuple({t_str(), t_str(), t_str()});
             if (name == "encode") return t_unknown();
+        }
+
+        if (recv->kind == TyKind::Regex) {
+            if (!c.keywords.empty())
+                err(c.line, c.col,
+                    std::format("re.Pattern.{}() does not take keyword arguments", name));
+            if (name == "search" || name == "match" || name == "fullmatch") {
+                argc(1, 1);
+                if (!a.empty() && a[0] && !is_unknown(a[0]) && a[0]->kind != TyKind::Str)
+                    err(c.line, c.col, "re.Pattern method expects a str");
+                return mk_optional(t_match());
+            }
+            if (name == "findall") {
+                argc(1, 1);
+                return mk_list(t_str());
+            }
+            if (name == "sub") {
+                argc(2, 3);
+                if (a.size() >= 2 && a[0] && !is_unknown(a[0]) && a[0]->kind != TyKind::Str)
+                    err(c.line, c.col, "sub() replacement must be a str");
+                if (a.size() >= 2 && a[1] && !is_unknown(a[1]) && a[1]->kind != TyKind::Str)
+                    err(c.line, c.col, "sub() text must be a str");
+                return t_str();
+            }
+            if (name == "split") {
+                argc(1, 2);
+                return mk_list(t_str());
+            }
+            err(c.line, c.col, std::format("re.Pattern has no method '{}'", name));
+            return t_unknown();
+        }
+
+        if (recv->kind == TyKind::Match) {
+            if (!c.keywords.empty())
+                err(c.line, c.col,
+                    std::format("re.Match.{}() does not take keyword arguments", name));
+            if (name == "group") {
+                argc(0, 1);
+                return t_str();
+            }
+            if (name == "groups") {
+                argc(0, 0);
+                return mk_list(t_str());
+            }
+            if (name == "start" || name == "end") {
+                argc(0, 1);
+                return t_int();
+            }
+            if (name == "span") {
+                argc(0, 1);
+                return mk_tuple({t_int(), t_int()});
+            }
+            err(c.line, c.col, std::format("re.Match has no method '{}'", name));
+            return t_unknown();
         }
 
         if (recv->kind == TyKind::File) {

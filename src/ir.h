@@ -344,6 +344,21 @@ enum class RtFn : uint16_t {
     CollMostCommon,        // (dict*, i64 n) -> list*
     JsonDumps,             // (i64 value, str* desc) -> str*
     JsonLoads,             // (str* text, str* desc) -> i64
+    RegexCompile,          // (str* pat, i64 flags) -> regex*
+    RegexSearchStr,        // (str* pat, str* text, i64 flags, i64 mode) -> match*
+    RegexSearch,           // (regex*, str* text, i64 mode) -> match*
+    RegexFindAllStr,       // (str* pat, str* text, i64 flags) -> list*
+    RegexFindAll,          // (regex*, str* text) -> list*
+    RegexSubStr,           // (str* pat, str* repl, str* text, i64 count, i64 flags) -> str*
+    RegexSub,              // (regex*, str* repl, str* text, i64 count) -> str*
+    RegexSplitStr,         // (str* pat, str* text, i64 maxsplit, i64 flags) -> list*
+    RegexSplit,            // (regex*, str* text, i64 maxsplit) -> list*
+    RegexEscape,           // (str*) -> str*
+    RegexGroup,            // (match*, i64 n) -> str*
+    RegexGroups,           // (match*) -> list*
+    RegexStart,            // (match*, i64 n) -> i64
+    RegexEnd,              // (match*, i64 n) -> i64
+    RegexSpan,             // (match*, i64 n) -> tuple[i64, i64]
 };
 
 inline const char* rt_name(RtFn f) {
@@ -667,6 +682,21 @@ inline const char* rt_name(RtFn f) {
         case RtFn::CollMostCommon: return "py23_collections_most_common";
         case RtFn::JsonDumps: return "py23_json_dumps";
         case RtFn::JsonLoads: return "py23_json_loads";
+        case RtFn::RegexCompile: return "py23_re_compile";
+        case RtFn::RegexSearchStr: return "py23_re_search_str";
+        case RtFn::RegexSearch: return "py23_re_search";
+        case RtFn::RegexFindAllStr: return "py23_re_findall_str";
+        case RtFn::RegexFindAll: return "py23_re_findall";
+        case RtFn::RegexSubStr: return "py23_re_sub_str";
+        case RtFn::RegexSub: return "py23_re_sub";
+        case RtFn::RegexSplitStr: return "py23_re_split_str";
+        case RtFn::RegexSplit: return "py23_re_split";
+        case RtFn::RegexEscape: return "py23_re_escape";
+        case RtFn::RegexGroup: return "py23_re_group";
+        case RtFn::RegexGroups: return "py23_re_groups";
+        case RtFn::RegexStart: return "py23_re_start";
+        case RtFn::RegexEnd: return "py23_re_end";
+        case RtFn::RegexSpan: return "py23_re_span";
     }
     return "?";
 }
@@ -972,6 +1002,8 @@ inline bool ir_is_heap(const TypePtr& t) {
         case TyKind::File:
         case TyKind::Random:
         case TyKind::CompletedProcess:
+        case TyKind::Regex:
+        case TyKind::Match:
             return true;
         case TyKind::Optional:
             return !t->sub.empty() && ir_is_heap(t->sub[0]);
@@ -1009,6 +1041,8 @@ inline bool ir_is_ref(const TypePtr& t) {
         case TyKind::File:
         case TyKind::Random:
         case TyKind::CompletedProcess:
+        case TyKind::Regex:
+        case TyKind::Match:
             return true;
         default:
             return false;

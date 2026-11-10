@@ -683,6 +683,13 @@ CPython 一致。
 - 内置 `json`：`dumps(obj)` 按静态类型生成 JSON；`loads(text, sample)`
   用 sample 的静态类型决定结果结构，覆盖 int/bool/float/str/None/list/
   dict/定长 tuple；默认分隔符 `", "` / `": "`。
+- 内置 `re`：`compile` / `search` / `match` / `fullmatch` / `findall` /
+  `sub` / `split` / `escape`，以及 `Pattern` 上的同名方法和 `Match` 的
+  `group`/`groups`/`start`/`end`/`span`。支持字面量、`.`、字符类、
+  `\d\w\s\D\W\S`、`\b`、`^ $`、分组（`(...)`/`(?:...)`/`(?P<name>...)`）、
+  交替、`* + ? {m,n}`（含惰性）和 `I`/`M`/`S` 标志；字符串按字节匹配。
+  v1 不支持 lookaround、反向引用、条件组；`findall` 返回整段匹配，
+  `split` 不含捕获组，未匹配分组返回空串。
 
 ### 文件
 

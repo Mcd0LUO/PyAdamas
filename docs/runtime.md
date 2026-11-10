@@ -1,6 +1,6 @@
 # 运行时
 
-运行时按职责拆成 `runtime/rt_*.c`（引用计数/GC、异常、生成器、异步、Task/Future、fd、文件、字符串/列表/字典/切片、类/复数、math/格式化、random/os/subprocess/time、itertools/collections、json），共享接口在 `runtime/rt_internal.h`；各部分编成可重定位对象后用 `ld -r` 合成 `rt.o`，由 `py23 build` 链接进每个生成的程序，只依赖 libc 和 libm。**py23 编译器本身不链接它**（`PY23_RT_OBJ` 只是把路径编进二进制，供 `cc` 使用）。
+运行时按职责拆成 `runtime/rt_*.c`（引用计数/GC、异常、生成器、异步、Task/Future、fd、文件、字符串/列表/字典/切片、类/复数、math/格式化、random/os/subprocess/time、itertools/collections、json、re），共享接口在 `runtime/rt_internal.h`；各部分编成可重定位对象后用 `ld -r` 合成 `rt.o`，由 `py23 build` 链接进每个生成的程序，只依赖 libc 和 libm。**py23 编译器本身不链接它**（`PY23_RT_OBJ` 只是把路径编进二进制，供 `cc` 使用）。
 
 ## ABI 约定
 
@@ -405,6 +405,19 @@ longjmp 回同步调用点。GC 清扫和进程退出不跑析构器，但会单
 | `py23_collections_most_common` | `(dict*, i64 n) -> list*` | `(key, count)` 按 count 降序，稳定 |
 | `py23_json_dumps` | `(i64 v, str* desc) -> str*` | 按编译期类型描述符序列化 |
 | `py23_json_loads` | `(str* text, str* desc) -> i64` | 按描述符解析；类型不匹配抛 ValueError |
+
+### re
+
+| 函数 | 签名 | 语义 |
+|---|---|---|
+| `py23_re_compile` | `(str* pat, i64 flags) -> regex*` | 编译 Pattern；语法错误抛 ValueError |
+| `py23_re_search_str` | `(str* pat, str* text, i64 flags, i64 mode) -> match*` | mode 0 search / 1 match / 2 fullmatch；无匹配返回 0 |
+| `py23_re_search` | `(regex*, str* text, i64 mode) -> match*` | Pattern 方法；无匹配返回 0 |
+| `py23_re_findall_str` / `py23_re_findall` | `(...) -> list*` | 返回 `list[str]`，元素是整段匹配 |
+| `py23_re_sub_str` / `py23_re_sub` | `(...) -> str*` | 替换；`\1`..`\9` 引用分组 |
+| `py23_re_split_str` / `py23_re_split` | `(...) -> list*` | 按匹配切分，不含捕获组 |
+| `py23_re_escape` | `(str*) -> str*` | 转义正则元字符与空白 |
+| `py23_re_group` / `groups` / `start` / `end` / `span` | `(match*, i64 n) -> ...` | Match 方法；未匹配分组 `group` 返回空串，`start`/`end` 返回 -1 |
 
 ### 对象
 
