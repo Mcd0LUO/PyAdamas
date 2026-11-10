@@ -20,6 +20,10 @@ h2 = open(path)
 print(h2.read(5))
 h2.close()
 
+fe = open(path, encoding="utf-8")
+print(len(fe.read()))
+fe.close()
+
 ok = 0
 try:
     open("/tmp/py23_missing_input.txt")
@@ -33,4 +37,5 @@ print("missing", ok)
 # 1
 # 17
 # hello
+# 17
 # missing 1

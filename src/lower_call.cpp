@@ -448,7 +448,7 @@ VReg Lowerer::lower_builtin_call(const std::string& name, Call& c) {
     // print 的关键字是 sep / end，得单独处理，不能走下面这条通用拦截
     if (name == "print") return lower_print(c);
 
-    if (!c.keywords.empty() && name != "dict") {
+    if (!c.keywords.empty() && name != "dict" && name != "open") {
         err(c.line, c.col, std::format("{}() does not take keyword arguments here", name));
     }
 
@@ -492,6 +492,14 @@ VReg Lowerer::lower_builtin_call(const std::string& name, Call& c) {
         if (c.args.empty() || c.args.size() > 2) {
             err(c.line, c.col, "open() takes 1 or 2 arguments");
             return const_none();
+        }
+        // encoding/errors 只是兼容参数（字节串模型下是恒等变换），
+        // 值仍要求值一次以保留副作用。
+        for (auto& kw : c.keywords) {
+            if (kw.arg.empty())
+                err(kw.value->line, kw.value->col, "'**' is not supported in open()");
+            else
+                expr(*kw.value);
         }
         VReg path = expr(*c.args[0]);
         VReg mode = c.args.size() == 2 ? expr(*c.args[1]) : kNoReg;

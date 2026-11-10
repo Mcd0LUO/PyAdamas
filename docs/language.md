@@ -528,9 +528,10 @@ class Connection:
 `open(path[, mode])` 返回字节流文件对象：`read([n])`（无参读全部）、
 `readline()`（EOF 返回空串）、`readlines()`、`write(str)`（返回写入的
 字节数）、`flush()`、`close()`。打开失败抛 `OSError`，关闭后读写抛
-`ValueError`。路径/模式是字节串（没有 `encoding=` 文本模式参数）；没有
-`seek`/`tell`/`closed` 属性，也不支持 `for line in f`（可用 `readlines()`）。
-`print(..., file=f)` 尚未支持。
+`ValueError`。接受 `encoding=` / `errors=` 兼容参数：字符串是字节串，
+读写本身就是原始字节，所以 `encoding="utf-8"/"utf8"/"ascii"` 是恒等变换，
+其它编码在类型检查阶段明确报错。没有 `seek`/`tell`/`closed` 属性，也不
+支持 `for line in f`（可用 `readlines()`）。`print(..., file=f)` 尚未支持。
 
 ### print
 

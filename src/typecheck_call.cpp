@@ -616,6 +616,38 @@ TypePtr TypeChecker::builtin_call(const std::string& n, Call& c) {
                 if (!is_unknown(t) && (!t || t->kind != TyKind::Str))
                     err(c.line, c.col,
                         std::format("open() expects string arguments, got '{}'", type_name(t)));
+            // py23 字符串是字节串：encoding 只接受能静态确认的 utf-8/ascii
+            // 别名（对字节读写是恒等变换），其它编码明确拒绝。
+            for (size_t i = 0; i < c.keywords.size(); ++i) {
+                const std::string& k = c.keywords[i].arg;
+                Expr* ve = c.keywords[i].value.get();
+                if (k == "errors") continue;
+                if (k != "encoding") {
+                    err(ve->line, ve->col,
+                        std::format("open() got an unexpected keyword argument '{}'", k));
+                    continue;
+                }
+                std::string val;
+                bool lit = false;
+                if (ve->kind == ExprKind::Constant) {
+                    const auto& cc = static_cast<const Constant&>(*ve);
+                    if (cc.ck == Constant::CK::Str) {
+                        val = cc.s;
+                        lit = true;
+                    }
+                }
+                if (!lit) {
+                    err(ve->line, ve->col,
+                        "open() encoding must be a string literal (strings are byte strings)");
+                    continue;
+                }
+                for (char& ch : val)
+                    if (ch >= 'A' && ch <= 'Z') ch = static_cast<char>(ch - 'A' + 'a');
+                if (val != "utf-8" && val != "utf8" && val != "ascii")
+                    err(ve->line, ve->col,
+                        std::format("open() encoding '{}' is not supported: ", val) +
+                            "py23 strings are byte strings (utf-8/ascii only)");
+            }
             return t_file();
         }
         if (n == "getattr" || n == "setattr" ||
