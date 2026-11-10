@@ -14,6 +14,8 @@ endif()
 
 set(PY23_SOURCES
   src/main.cpp
+  src/driver_util.cpp
+  src/driver_build.cpp
   src/parser.cpp
   src/parser_stmt.cpp
   src/parser_func.cpp
