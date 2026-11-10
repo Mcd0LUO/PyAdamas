@@ -287,6 +287,25 @@ VReg Lowerer::lower_builtin_call(const std::string& name, Call& c) {
                             {expr(*c.args[0]), const_int(cid->second)});
     }
 
+    if (name == "hash") {
+        if (c.args.size() != 1) {
+            err(c.line, c.col, "hash() takes exactly one argument");
+            return const_int(0);
+        }
+        TypePtr t = tc_.type_of(c.args[0].get());
+        VReg v = expr(*c.args[0]);
+        if (t && (t->kind == TyKind::Int || t->kind == TyKind::Bool))
+            return call_runtime(RtFn::HashValue, t_int(), {const_int(0), v});
+        if (t && t->kind == TyKind::Str)
+            return call_runtime(RtFn::HashValue, t_int(), {const_int(1), v});
+        if (t && t->kind == TyKind::Float)
+            return call_runtime(RtFn::HashF64, t_int(), {v});
+        err(c.args[0]->line, c.args[0]->col,
+            std::format("hash() of '{}' is not supported yet (int/bool/str/float)",
+                        type_name(t)));
+        return const_int(0);
+    }
+
     if (name == "callable") {
         if (c.args.size() != 1) {
             err(c.line, c.col, "callable() takes exactly one argument");

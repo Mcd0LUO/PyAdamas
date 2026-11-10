@@ -82,6 +82,156 @@ double py23_math_fsum(Py23List* l) {
     return sum;
 }
 
+double py23_math_acos(double x) {
+    if (x < -1.0 || x > 1.0) py23_raise_c("ValueError", "math domain error");
+    return acos(x);
+}
+double py23_math_asin(double x) {
+    if (x < -1.0 || x > 1.0) py23_raise_c("ValueError", "math domain error");
+    return asin(x);
+}
+double py23_math_atan(double x) { return atan(x); }
+double py23_math_acosh(double x) {
+    if (x < 1.0) py23_raise_c("ValueError", "math domain error");
+    return acosh(x);
+}
+double py23_math_asinh(double x) { return asinh(x); }
+double py23_math_atanh(double x) {
+    if (x <= -1.0 || x >= 1.0) py23_raise_c("ValueError", "math domain error");
+    return atanh(x);
+}
+double py23_math_cbrt(double x) { return cbrt(x); }
+double py23_math_cosh(double x) { return cosh(x); }
+double py23_math_sinh(double x) { return sinh(x); }
+double py23_math_tanh(double x) { return tanh(x); }
+double py23_math_exp2(double x) { return exp2(x); }
+double py23_math_expm1(double x) { return expm1(x); }
+double py23_math_log1p(double x) {
+    if (x <= -1.0) py23_raise_c("ValueError", "math domain error");
+    return log1p(x);
+}
+double py23_math_erf(double x) { return erf(x); }
+double py23_math_erfc(double x) { return erfc(x); }
+
+static int math_is_pole(double x) { return x == 0.0 || (x < 0.0 && x == floor(x)); }
+
+double py23_math_gamma(double x) {
+    if (math_is_pole(x)) py23_raise_c("ValueError", "math domain error");
+    return tgamma(x);
+}
+double py23_math_lgamma(double x) {
+    if (math_is_pole(x)) py23_raise_c("ValueError", "math domain error");
+    return lgamma(x);
+}
+
+double py23_math_ulp(double x) {
+    if (isnan(x)) return x;
+    if (isinf(x)) return fabs(x);
+    if (x == 0.0) return nextafter(0.0, 1.0);
+    double up = nextafter(x, INFINITY);
+    return fabs(up - x);
+}
+double py23_math_nextafter(double x, double y) { return nextafter(x, y); }
+double py23_math_remainder(double x, double y) {
+    if (y == 0.0) py23_raise_c("ValueError", "math domain error");
+    return remainder(x, y);
+}
+double py23_math_ldexp(double x, int64_t i) { return ldexp(x, (int)i); }
+double py23_math_fma(double x, double y, double z) { return fma(x, y, z); }
+
+int64_t py23_math_isclose(double a, double b) {
+    if (a == b) return 1;
+    if (isinf(a) || isinf(b)) return 0;
+    double diff = fabs(a - b);
+    double rel = 1e-9 * fmax(fabs(a), fabs(b));
+    return diff <= rel ? 1 : 0;
+}
+
+static void math_tuple_push_f64(Py23List* l, double v) {
+    int64_t bits;
+    memcpy(&bits, &v, sizeof bits);
+    py23_list_append(l, bits);
+}
+
+Py23List* py23_math_frexp(double x) {
+    int e = 0;
+    double m = frexp(x, &e);
+    Py23List* l = py23_list_new(2, 0);
+    math_tuple_push_f64(l, m);
+    py23_list_append(l, (int64_t)e);
+    return l;
+}
+
+Py23List* py23_math_modf(double x) {
+    double ip = 0.0;
+    double fp = modf(x, &ip);
+    Py23List* l = py23_list_new(2, 0);
+    math_tuple_push_f64(l, fp);
+    math_tuple_push_f64(l, ip);
+    return l;
+}
+
+int64_t py23_math_isqrt(int64_t n) {
+    if (n < 0) py23_raise_c("ValueError", "isqrt() argument must be nonnegative");
+    if (n < 2) return n;
+    uint64_t r = (uint64_t)sqrt((double)n);
+    while (r > 0 && r > (uint64_t)n / r) --r;
+    while ((r + 1) <= (uint64_t)n / (r + 1)) ++r;
+    return (int64_t)r;
+}
+
+static int64_t math_binom(int64_t n, int64_t k) {
+    if (k < 0 || k > n) return 0;
+    if (k > n - k) k = n - k;
+    int64_t r = 1;
+    for (int64_t i = 1; i <= k; ++i) r = r * (n - k + i) / i;
+    return r;
+}
+
+int64_t py23_math_comb(int64_t n, int64_t k) {
+    if (n < 0 || k < 0) py23_raise_c("ValueError", "comb() arguments must be nonnegative");
+    return math_binom(n, k);
+}
+
+int64_t py23_math_perm(int64_t n, int64_t k) {
+    if (n < 0 || k < 0) py23_raise_c("ValueError", "perm() arguments must be nonnegative");
+    if (k > n) return 0;
+    int64_t r = 1;
+    for (int64_t i = 0; i < k; ++i) r *= n - i;
+    return r;
+}
+
+int64_t py23_math_prod(Py23List* l) {
+    if (!l) return 1;
+    int64_t r = 1;
+    for (int64_t i = 0; i < l->len; ++i) r *= l->data[i];
+    return r;
+}
+
+int64_t py23_math_sumprod(Py23List* a, Py23List* b) {
+    if (!a || !b) return 0;
+    if (a->len != b->len)
+        py23_raise_c("ValueError", "sumprod() inputs must have the same length");
+    int64_t r = 0;
+    for (int64_t i = 0; i < a->len; ++i) r += a->data[i] * b->data[i];
+    return r;
+}
+
+double py23_math_dist(Py23List* a, Py23List* b) {
+    if (!a || !b) return 0.0;
+    if (a->len != b->len)
+        py23_raise_c("ValueError", "dist() requires two points of the same dimension");
+    double sum = 0.0;
+    for (int64_t i = 0; i < a->len; ++i) {
+        double x, y;
+        memcpy(&x, &a->data[i], sizeof x);
+        memcpy(&y, &b->data[i], sizeof y);
+        double d = x - y;
+        sum += d * d;
+    }
+    return sqrt(sum);
+}
+
 Py23List* sys_argv_list;
 
 void py23_sys_set_args(int64_t argc, char** argv) {

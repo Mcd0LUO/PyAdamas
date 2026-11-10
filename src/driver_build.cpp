@@ -553,6 +553,26 @@ py23::ModuleInfoPtr builtin_module(const std::string& name) {
         func("gcd", {py23::t_int(), py23::t_int()}, py23::t_int());
         func("lcm", {py23::t_int(), py23::t_int()}, py23::t_int());
         func("fsum", {py23::mk_list(py23::t_float())}, py23::t_float());
+        for (auto& n : {"acos", "asin", "atan", "acosh", "asinh", "atanh", "cbrt",
+                        "cosh", "sinh", "tanh", "exp2", "expm1", "log1p", "erf",
+                        "erfc", "gamma", "lgamma", "ulp"})
+            func(n, {py23::t_float()}, py23::t_float());
+        for (auto& n : {"nextafter", "remainder"})
+            func(n, {py23::t_float(), py23::t_float()}, py23::t_float());
+        func("ldexp", {py23::t_float(), py23::t_int()}, py23::t_float());
+        func("fma", {py23::t_float(), py23::t_float(), py23::t_float()},
+             py23::t_float());
+        func("isclose", {py23::t_float(), py23::t_float()}, py23::t_bool());
+        func("frexp", {py23::t_float()}, py23::mk_tuple({py23::t_float(), py23::t_int()}));
+        func("modf", {py23::t_float()}, py23::mk_tuple({py23::t_float(), py23::t_float()}));
+        func("isqrt", {py23::t_int()}, py23::t_int());
+        func("comb", {py23::t_int(), py23::t_int()}, py23::t_int());
+        func("perm", {py23::t_int(), py23::t_int()}, py23::t_int());
+        func("prod", {py23::mk_list(py23::t_int())}, py23::t_int());
+        func("sumprod", {py23::mk_list(py23::t_int()), py23::mk_list(py23::t_int())},
+             py23::t_int());
+        func("dist", {py23::mk_list(py23::t_float()), py23::mk_list(py23::t_float())},
+             py23::t_float());
     } else if (name == "sys") {
         info->globals["argv"] = py23::mk_list(py23::t_str());
         info->globals["maxsize"] = py23::t_int();

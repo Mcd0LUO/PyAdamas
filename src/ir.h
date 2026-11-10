@@ -233,6 +233,7 @@ enum class RtFn : uint8_t {
     MathPow, MathFmod,
     MathAtan2, MathHypot, MathDegrees, MathRadians, MathTrunc, MathCopysign,
     MathIsnan, MathIsinf, MathIsfinite, MathFactorial, MathGcd, MathLcm, MathFsum,
+    HashValue, HashF64, MathAcos, MathAsin, MathAtan, MathAcosh, MathAsinh, MathAtanh, MathCbrt, MathCosh, MathSinh, MathTanh, MathExp2, MathExpm1, MathLog1p, MathErf, MathErfc, MathGamma, MathLgamma, MathUlp, MathNextafter, MathRemainder, MathLdexp, MathFma, MathIsclose, MathFrexp, MathModf, MathIsqrt, MathComb, MathPerm, MathProd, MathSumprod, MathDist,
     SysArgv,      // () -> list*
     SysExit,      // (i64 code) -> noreturn
     GenNext,      // (gen*) -> i64  取下一个值；结束抛 StopIteration
@@ -447,6 +448,39 @@ inline const char* rt_name(RtFn f) {
         case RtFn::MathGcd: return "py23_math_gcd";
         case RtFn::MathLcm: return "py23_math_lcm";
         case RtFn::MathFsum: return "py23_math_fsum";
+        case RtFn::HashValue: return "py23_hash_value";
+        case RtFn::HashF64: return "py23_hash_f64";
+        case RtFn::MathAcos: return "py23_math_acos";
+        case RtFn::MathAsin: return "py23_math_asin";
+        case RtFn::MathAtan: return "py23_math_atan";
+        case RtFn::MathAcosh: return "py23_math_acosh";
+        case RtFn::MathAsinh: return "py23_math_asinh";
+        case RtFn::MathAtanh: return "py23_math_atanh";
+        case RtFn::MathCbrt: return "py23_math_cbrt";
+        case RtFn::MathCosh: return "py23_math_cosh";
+        case RtFn::MathSinh: return "py23_math_sinh";
+        case RtFn::MathTanh: return "py23_math_tanh";
+        case RtFn::MathExp2: return "py23_math_exp2";
+        case RtFn::MathExpm1: return "py23_math_expm1";
+        case RtFn::MathLog1p: return "py23_math_log1p";
+        case RtFn::MathErf: return "py23_math_erf";
+        case RtFn::MathErfc: return "py23_math_erfc";
+        case RtFn::MathGamma: return "py23_math_gamma";
+        case RtFn::MathLgamma: return "py23_math_lgamma";
+        case RtFn::MathUlp: return "py23_math_ulp";
+        case RtFn::MathNextafter: return "py23_math_nextafter";
+        case RtFn::MathRemainder: return "py23_math_remainder";
+        case RtFn::MathLdexp: return "py23_math_ldexp";
+        case RtFn::MathFma: return "py23_math_fma";
+        case RtFn::MathIsclose: return "py23_math_isclose";
+        case RtFn::MathFrexp: return "py23_math_frexp";
+        case RtFn::MathModf: return "py23_math_modf";
+        case RtFn::MathIsqrt: return "py23_math_isqrt";
+        case RtFn::MathComb: return "py23_math_comb";
+        case RtFn::MathPerm: return "py23_math_perm";
+        case RtFn::MathProd: return "py23_math_prod";
+        case RtFn::MathSumprod: return "py23_math_sumprod";
+        case RtFn::MathDist: return "py23_math_dist";
         case RtFn::SysArgv: return "py23_sys_argv";
         case RtFn::SysExit: return "py23_sys_exit";
         case RtFn::GenNext: return "py23_gen_next";

@@ -125,6 +125,37 @@ std::optional<RtFn> Lowerer::native_fn(const std::string& module, const std::str
         if (member == "gcd") return RtFn::MathGcd;
         if (member == "lcm") return RtFn::MathLcm;
         if (member == "fsum") return RtFn::MathFsum;
+        if (member == "acos") return RtFn::MathAcos;
+        if (member == "asin") return RtFn::MathAsin;
+        if (member == "atan") return RtFn::MathAtan;
+        if (member == "acosh") return RtFn::MathAcosh;
+        if (member == "asinh") return RtFn::MathAsinh;
+        if (member == "atanh") return RtFn::MathAtanh;
+        if (member == "cbrt") return RtFn::MathCbrt;
+        if (member == "cosh") return RtFn::MathCosh;
+        if (member == "sinh") return RtFn::MathSinh;
+        if (member == "tanh") return RtFn::MathTanh;
+        if (member == "exp2") return RtFn::MathExp2;
+        if (member == "expm1") return RtFn::MathExpm1;
+        if (member == "log1p") return RtFn::MathLog1p;
+        if (member == "erf") return RtFn::MathErf;
+        if (member == "erfc") return RtFn::MathErfc;
+        if (member == "gamma") return RtFn::MathGamma;
+        if (member == "lgamma") return RtFn::MathLgamma;
+        if (member == "ulp") return RtFn::MathUlp;
+        if (member == "nextafter") return RtFn::MathNextafter;
+        if (member == "remainder") return RtFn::MathRemainder;
+        if (member == "ldexp") return RtFn::MathLdexp;
+        if (member == "fma") return RtFn::MathFma;
+        if (member == "isclose") return RtFn::MathIsclose;
+        if (member == "frexp") return RtFn::MathFrexp;
+        if (member == "modf") return RtFn::MathModf;
+        if (member == "isqrt") return RtFn::MathIsqrt;
+        if (member == "comb") return RtFn::MathComb;
+        if (member == "perm") return RtFn::MathPerm;
+        if (member == "prod") return RtFn::MathProd;
+        if (member == "sumprod") return RtFn::MathSumprod;
+        if (member == "dist") return RtFn::MathDist;
     } else if (module == "sys" && member == "exit") {
         return RtFn::SysExit;
     }
@@ -193,7 +224,9 @@ VReg Lowerer::call_native(const std::string& module, const std::string& member, 
         return const_none();
     }
     TypePtr rt = info && info->ret ? info->ret : t_float();
-    return call_runtime(*fn, rt, std::move(args));
+    VReg v = call_runtime(*fn, rt, std::move(args));
+    if (ir_is_heap(rt)) push_temp(v);
+    return v;
 }
 
 void Lowerer::lower_import(Import& im) {

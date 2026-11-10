@@ -579,12 +579,18 @@ CPython 一致。
   先跑 `__init__.py`。
 - 每个模块有自己的 `__name__` / `__file__`；入口模块的 `__name__` 是
   `"__main__"`。
-- 内置 `math` / `sys`：`math` 提供 `pi`/`e`/`tau`/`inf`/`nan` 和
-  `sqrt`/`floor`/`ceil`/`fabs`/`sin`/`cos`/`tan`/`log`/`log2`/`log10`/
-  `exp`/`pow`/`fmod`/`atan2`/`hypot`/`degrees`/`radians`/`trunc`/
-  `copysign`/`isnan`/`isinf`/`isfinite`/`factorial`/`gcd`/`lcm`/`fsum`；
-  `sys` 提供 `argv`/`exit`/`maxsize`/`stdin`/`stdout`/`stderr`；原生函数
-  只能直接调用。`hypot` 固定接受两个参数。
+- 内置 `math` / `sys`：`math` 常量 `pi`/`e`/`tau`/`inf`/`nan`，函数
+  `sqrt`/`floor`/`ceil`/`fabs`/`sin`/`cos`/`tan`/`asin`/`acos`/`atan`/
+  `sinh`/`cosh`/`tanh`/`asinh`/`acosh`/`atanh`/`log`/`log2`/`log10`/
+  `log1p`/`exp`/`exp2`/`expm1`/`pow`/`fmod`/`remainder`/`atan2`/`hypot`/
+  `degrees`/`radians`/`trunc`/`copysign`/`nextafter`/`ulp`/`ldexp`/`fma`/
+  `isnan`/`isinf`/`isfinite`/`isclose`/`erf`/`erfc`/`gamma`/`lgamma`/
+  `factorial`/`gcd`/`lcm`/`comb`/`perm`/`isqrt`/`fsum`/`prod`/`sumprod`/
+  `dist`/`frexp`/`modf`；`sys` 提供 `argv`/`exit`/`maxsize`/`stdin`/
+  `stdout`/`stderr`；原生函数只能直接调用。签名收窄的地方：`hypot`、
+  `isclose` 固定两个参数（`isclose` 用 CPython 默认容差），`prod` 只接受
+  `list[int]`，`sumprod` 只接受两个等长 `list[int]`，`dist` 只接受两个
+  等长 `list[float]`；`frexp`/`modf` 返回二元组。
 
 ### 内置函数
 
@@ -593,7 +599,7 @@ CPython 一致。
 `ord` / `chr` / `hex` / `bin` / `oct` / `round` / `divmod` / `repr` /
 `format` / `list` / `tuple` / `dict` / `set` / `sorted` / `reversed` /
 `enumerate` / `zip` / `input` / `isinstance` / `getattr` / `setattr` /
-`hasattr` / `map` / `filter` / `callable` / `issubclass`。
+`hasattr` / `map` / `filter` / `callable` / `issubclass` / `hash`。
 `min` / `max` 支持多实参和 list/tuple/str/dict/set 迭代，空序列抛
 `ValueError`；`sum` 支持可选的起始值；`any` / `all` 支持短路；`abs` /
 `pow` 支持 int 与 float，`pow(x, y, m)` 是 `(x ** y) % m`；
@@ -616,6 +622,8 @@ unknown 值上对带运行期类型标签的类型（str/list/dict/complex）走
 真值元素。模块里绑定过 `map`/`filter` 名字时不做改写（按普通调用处理）。
 `callable(x)` / `issubclass(A, B)` 按静态类型编译期折叠（`callable(int)`
 这类内置名也认；unknown 值上的 `callable` 暂不支持）。
+`hash(x)` 支持 int/bool/float/str，和字典键共用同一套哈希（同值同哈希，
+数值与 CPython 不同；list/dict/set 等不可哈希类型报错）。
 `list(seq)` / `tuple(seq)` 做浅拷贝，`set(seq)` 按键去重，`dict(**kw)`
 用字符串键；`sorted` 支持 int/float/str 元素（`key=` / `reverse=` 尚未
 支持）；`enumerate` 产出的元素是 `[下标, 值]` 对，`zip` 支持两个可迭代
@@ -631,7 +639,7 @@ unknown 值上对带运行期类型标签的类型（str/list/dict/complex）走
 `count` / `zfill` / `ljust` / `rjust` / `center` / `removeprefix` /
 `removesuffix` / `isdigit` / `isalpha` / `isspace` / `isupper` / `islower` /
 `isalnum`。
-其余内置名（`type` / `hash` / `id` / `slice` / `delattr` / `vars` / `dir`
+其余内置名（`type` / `id` / `slice` / `delattr` / `vars` / `dir`
 等）类型层面放行，降级阶段报「not supported by the code generator yet」，
 不会再退化成调用空指针。
 

@@ -167,6 +167,10 @@ TypePtr TypeChecker::builtin_call(const std::string& n, Call& c) {
             if (!need(1, 1)) return t_bool();
             return t_bool();
         }
+        if (n == "hash") {
+            if (!need(1, 1)) return t_int();
+            return t_int();
+        }
         if (n == "issubclass") {
             if (!need(2, 2)) return t_bool();
             return t_bool();
@@ -315,7 +319,7 @@ TypePtr TypeChecker::builtin_call(const std::string& n, Call& c) {
             return t_file();
         }
         if (n == "super" || n == "vars" || n == "dir" ||
-            n == "id" || n == "hash" || n == "slice" || n == "frozenset" ||
+            n == "id" || n == "slice" || n == "frozenset" ||
             n == "bytearray" || n == "object" || n == "complex" || n == "memoryview") {
             unsupported.push_back(std::format("runtime builtin '{}'", n));
             // frozenset 是 set 的不可变版本，不是 list；元素类型取参数的元素

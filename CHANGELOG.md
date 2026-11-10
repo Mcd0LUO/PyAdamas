@@ -4,6 +4,39 @@
 
 早期阶段没有逐条留痕，按阶段归纳；0.4 之后逐条记录。
 
+## [0.53] - 2026-11-10
+
+补 `hash()`，并把 math 模块补齐到 CPython 成员集合。
+
+### 新增
+
+- `hash(x)`：支持 int/bool/float/str，直接复用字典键的哈希
+  （`dict_hash_value`），同值同哈希，与 py23 字典/集合行为自洽；不可哈希
+  类型（list/dict/set/tuple/类）明确报错。
+- math 新增：`acos`/`asin`/`atan`/`acosh`/`asinh`/`atanh`/`cbrt`/`cosh`/
+  `sinh`/`tanh`/`exp2`/`expm1`/`log1p`/`erf`/`erfc`/`gamma`/`lgamma`/
+  `ulp`/`nextafter`/`remainder`/`ldexp`/`fma`/`isclose`/`frexp`/`modf`/
+  `isqrt`/`comb`/`perm`/`prod`/`sumprod`/`dist`。`frexp`/`modf` 返回二元组；
+  定义域错误（`acos`/`atanh`/`gamma` 极点等）抛 `ValueError`。
+- 运行期新增 frexp/modf 二元组构造、整数 sqrt/comb/perm、浮点距离与
+  补偿求和等实现；`call_native` 对堆返回值补临时值登记。
+
+### 验证
+
+- `ctest --preset dev/release` 全绿；O0/O1 全量 52 个运行用例通过；
+  810 程序差分零失败
+- 临时探针（不入库）：31 个新 math 函数/常量与 CPython 数值一致
+  （`lgamma` 末位受浮点打印格式影响除外）；`hash` 的自反/区分性、
+  frexp/modf 解包、isqrt/comb/perm/prod/sumprod/dist 均通过（O0/O1/O2）
+
+### 已知限制
+
+- `hash` 数值与 CPython 不同（按 py23 字典的 mix64/FNV），只保证同值同
+  哈希；tuple/None 暂不支持
+- `hypot`、`isclose` 固定两参；`prod`/`sumprod` 只接受 `list[int]`；
+  `dist` 只接受等长 `list[float]`
+- math 整数函数按 int64 回绕/截断，不做大整数
+
 ## [0.52] - 2026-11-10
 
 内置函数补齐（三）：`map` / `filter`、`callable` / `issubclass`、

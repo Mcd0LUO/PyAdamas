@@ -515,6 +515,11 @@ void AsmGen::gen_call_rt(const Inst& in) {
             case RtFn::Zip2List:
             case RtFn::MathGcd:
             case RtFn::MathLcm:
+            case RtFn::MathComb:
+            case RtFn::MathPerm:
+            case RtFn::MathSumprod:
+            case RtFn::MathDist:
+            case RtFn::HashValue:
             case RtFn::FileRead:
             case RtFn::FileWrite:
             case RtFn::FileWritelines:
@@ -631,6 +636,8 @@ void AsmGen::gen_call_rt(const Inst& in) {
             case RtFn::ReprStr:
             case RtFn::MathFactorial:
             case RtFn::MathFsum:
+            case RtFn::MathIsqrt:
+            case RtFn::MathProd:
             case RtFn::GenNext:
             case RtFn::GenClose:
             case RtFn::HandlerSuspend:
@@ -721,13 +728,46 @@ void AsmGen::gen_call_rt(const Inst& in) {
             case RtFn::MathIsnan:
             case RtFn::MathIsinf:
             case RtFn::MathIsfinite:
+            case RtFn::MathAcos:
+            case RtFn::MathAsin:
+            case RtFn::MathAtan:
+            case RtFn::MathAcosh:
+            case RtFn::MathAsinh:
+            case RtFn::MathAtanh:
+            case RtFn::MathCbrt:
+            case RtFn::MathCosh:
+            case RtFn::MathSinh:
+            case RtFn::MathTanh:
+            case RtFn::MathExp2:
+            case RtFn::MathExpm1:
+            case RtFn::MathLog1p:
+            case RtFn::MathErf:
+            case RtFn::MathErfc:
+            case RtFn::MathGamma:
+            case RtFn::MathLgamma:
+            case RtFn::MathUlp:
+            case RtFn::MathFrexp:
+            case RtFn::MathModf:
+            case RtFn::HashF64:
                 line(std::format("movsd {}, %xmm0", src_op(in.args[0])));
+                break;
+            case RtFn::MathLdexp:
+                line(std::format("movsd {}, %xmm0", src_op(in.args[0])));
+                line(std::format("movq {}, %rdi", src_op(in.args[1])));
+                break;
+            case RtFn::MathFma:
+                line(std::format("movsd {}, %xmm0", src_op(in.args[0])));
+                line(std::format("movsd {}, %xmm1", src_op(in.args[1])));
+                line(std::format("movsd {}, %xmm2", src_op(in.args[2])));
                 break;
             case RtFn::MathPow:
             case RtFn::MathFmod:
             case RtFn::MathAtan2:
             case RtFn::MathHypot:
             case RtFn::MathCopysign:
+            case RtFn::MathNextafter:
+            case RtFn::MathRemainder:
+            case RtFn::MathIsclose:
                 line(std::format("movsd {}, %xmm0", src_op(in.args[0])));
                 line(std::format("movsd {}, %xmm1", src_op(in.args[1])));
                 break;

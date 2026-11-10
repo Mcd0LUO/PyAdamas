@@ -33,6 +33,15 @@ int64_t dict_hash_value(int64_t kind, int64_t v) {
     return (int64_t)(h ? h : 1);
 }
 
+/* hash() 内置函数和字典键共用同一套哈希，保证同值同哈希。 */
+int64_t py23_hash_value(int64_t kind, int64_t v) { return dict_hash_value(kind, v); }
+
+int64_t py23_hash_f64(double v) {
+    int64_t bits;
+    memcpy(&bits, &v, sizeof bits);
+    return dict_hash_value(2, bits);
+}
+
 int dict_key_eq(int64_t kind, int64_t a, int64_t b) {
     if (kind == 1) return py23_str_eq((Py23Str*)a, (Py23Str*)b) != 0;
     if (kind == 2) {
