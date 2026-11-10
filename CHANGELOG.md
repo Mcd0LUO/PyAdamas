@@ -4,6 +4,30 @@
 
 早期阶段没有逐条留痕，按阶段归纳；0.4 之后逐条记录。
 
+## [0.74.1] - 2026-11-10
+
+修复四元数 probe 暴露的类型传播与 fsum 缺陷。
+
+### 修复
+
+- **容器元素跨数值域实参**：`list[int]` 传给 `list[float]` 形参现在在 build
+  阶段报错，不再静默按 double 读 int64 槽位（`bind_args` 补 `bad_elem` 检查，
+  与赋值路径一致）；`math.fsum([1,2,3])` 同样被拒。
+- **槽位类型回填**：`store.slot` 遇到 unknown 槽位时从源 vreg 补类型，
+  `load.slot` 在调用方给 unknown 时回退到槽位表。修复 `call.rt` 结果经
+  临时槽后退化成整数比较（非法 `cmpq %xmm8`）、`-O2` 浮点结果与
+  `-O0/-O1` 分叉、循环内条件更新不生效（`max_drift` 恒 0）三条现象。
+- **`math.fsum` 精确求和**：从 Kahan 补偿求和换成 CPython 的 Shewchuk
+  部分和算法；`fsum([1e16, 1.0, -1e16])` 现在返回 1.0。
+- `tests/run/55_slot_types.py` 覆盖 call.rt → 槽位 → 浮点比较、循环条件
+  更新和 fsum 抵消。
+
+### 验证
+
+- `ctest --preset dev` 连跑 3 次、release 全绿；810 差分 0 失败。
+- quaternion-probe：attitude 在 `-O0/-O1/-O2` 下与 CPython 逐位一致；
+  selftest 14/14；bench checksum 与末态一致。
+
 ## [0.74] - 2026-11-10
 
 stdlib 批次：`string` / `time` / `os` / `itertools` / `collections` / `json`。

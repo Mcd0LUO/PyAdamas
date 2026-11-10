@@ -32,7 +32,7 @@
 
 - **语言面**：标量、字符串、列表/元组/字典/集合、切片读写、闭包/lambda/`*args`/`**kwargs`/装饰器、推导式、`with`、异常值（`args`/`raise ... from`/自定义异常）、类（字段/方法/C3 多继承/零参 `super()`/`@staticmethod`/`@property`）、`match/case`、`del`、复数字面量、f-string 格式说明、dunder 协议、`open`/`input`/`sys.stdin`。
 - **标准库**：`math`/`sys`/`asyncio`/`random`/`os`/`os.path`/`subprocess`/`time`/`itertools`/`collections`/`json`/`string`。
-- **验证**：54 个运行用例、35 个反例、9 个模块目录；差分 runner 已自举，默认 810 例。
+- **验证**：55 个运行用例、35 个反例、9 个模块目录；差分 runner 已自举，默认 810 例。
 - **主要缺口**：`bytes` 字面量；`re`/`datetime`/`csv`/`pathlib`；C FFI/BLAS；跨模块生成器/协程；asyncio 边角。
 
 ## 下一步

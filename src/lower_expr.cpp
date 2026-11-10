@@ -3,20 +3,21 @@
 
 namespace py23 {
 
+bool Lowerer::bad_elem(const TypePtr& from, const TypePtr& to) {
+    // 元素跨数值域的容器（list[int] → list[float]）要逐元素转换并重新分配，
+    // 现在没做。宁可报错，也不要让 double 槽里躺整数位模式。
+    if (!from || !to || from->kind != to->kind) return false;
+    if (from->kind != TyKind::List && from->kind != TyKind::Tuple) return false;
+    if (from->sub.empty() || to->sub.empty() || !from->sub[0] || !to->sub[0]) return false;
+    if (from->sub[0]->kind == TyKind::Unknown || to->sub[0]->kind == TyKind::Unknown)
+        return false;
+    return (from->sub[0]->kind == TyKind::Float) != (to->sub[0]->kind == TyKind::Float);
+}
+
 void Lowerer::assign_to(Expr& target, VReg v, TypePtr vty) {
     // 以 vreg 上记录的类型为准：调用方传进来的 vty 有时是目标侧的类型
     TypePtr src_ty = vreg_ty(v);
     if (!src_ty || src_ty->kind == TyKind::Unknown) src_ty = vty;
-    // 元素跨数值域的容器（list[int] → list[float]）要逐元素转换并重新分配，
-    // 现在没做。宁可报错，也不要让 double 槽里躺整数位模式。
-    auto bad_elem = [](const TypePtr& from, const TypePtr& to) {
-        if (!from || !to || from->kind != to->kind) return false;
-        if (from->kind != TyKind::List && from->kind != TyKind::Tuple) return false;
-        if (from->sub.empty() || to->sub.empty() || !from->sub[0] || !to->sub[0]) return false;
-        if (from->sub[0]->kind == TyKind::Unknown || to->sub[0]->kind == TyKind::Unknown)
-            return false;
-        return (from->sub[0]->kind == TyKind::Float) != (to->sub[0]->kind == TyKind::Float);
-    };
     switch (target.kind) {
         case ExprKind::Name: {
             auto& n = static_cast<Name&>(target);

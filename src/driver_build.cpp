@@ -547,7 +547,7 @@ py23::FuncInfoPtr builtin_fn(const std::string& name, const std::vector<py23::Ty
     f->name = name;
     for (size_t i = 0; i < args.size(); ++i) {
         py23::Param p;
-        p.name = std::format("x{}", i);
+        p.name = (name == "fsum" && i == 0) ? "xs" : std::format("x{}", i);
         p.ty = args[i];
         f->pos.push_back(std::move(p));
     }

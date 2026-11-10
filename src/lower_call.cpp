@@ -271,7 +271,17 @@ std::vector<VReg> Lowerer::bind_args(Call& c, const FuncInfoPtr& info, FunctionD
     // 否则形参槽里躺的是整数位模式。
     for (size_t i = 0; i < args.size() && i < npos + nkw; ++i) {
         TypePtr want = i < npos ? info->pos[i].ty : info->kwonly[i - npos].ty;
-        if (args[i] != kNoReg) args[i] = coerce(args[i], vreg_ty(args[i]), want);
+        if (args[i] == kNoReg) continue;
+        TypePtr from = vreg_ty(args[i]);
+        if (bad_elem(from, want)) {
+            const std::string& pname =
+                i < npos ? info->pos[i].name : info->kwonly[i - npos].name;
+            err(c.line, c.col,
+                std::format("'{}' cannot be passed to parameter '{}' of type '{}': element "
+                            "type conversion is not supported by the code generator yet",
+                            type_name(from), pname, type_name(want)));
+        }
+        args[i] = coerce(args[i], from, want);
     }
     // 变长形参即使没收到实参也要传空容器：callee 的形参槽必须有值。
     if (info->varargs) args.push_back(vararg_list());

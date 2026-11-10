@@ -44,6 +44,7 @@ py23 不追求兼容 CPython：语义是按静态类型的需要重新定的。�
 | `itertools` | `chain`/`repeat`/`islice`，按实参静态特化，返回 list | 完整 itertools | 立即求值，没有惰性迭代器；`islice` 只接受 `(x, stop)` |
 | `collections` | `Counter`/`most_common` | 完整 collections | 没有 `defaultdict`/`deque`/`OrderedDict`；`Counter` 返回普通 dict |
 | `json` | `dumps`/`loads(text, sample)`；默认分隔符 `", "`/`": "`；`loads` 用 sample 的静态类型决定目标结构 | 完整 json | 没有 `indent`/`separators`/`ensure_ascii` 参数；`loads` 必须给 sample（`None` 用于解析 null）；只覆盖 int/bool/float/str/None/list/dict/定长 tuple |
+| `math.fsum` | `list[float]` 的 Shewchuk 精确求和；`list[int]` 在 build 阶段报错 | CPython 接受任意数值可迭代 | 只收 `list[float]`；结果是正确舍入 |
 | 方法调用 | 走 vtable，代价固定 | 走 `__dict__` / 描述符 | 没有去虚化，也不做内联 |
 | 内存回收 | 引用计数 + 保守标记-清扫 | 分代 GC | 环和 unknown 泄漏由 GC 延迟回收；栈/寄存器里的整数可能被误认为根，只影响回收时机；无 `__del__`/弱引用 |
 | 闭包捕获 | cell 按引用捕获；嵌套函数直接自引用用当前闭包 | cell 按引用捕获，晚绑定 | 父作用域之后重绑函数自己的名字时，py23 仍指向原闭包；相互递归闭包的环由 GC 回收 |
@@ -66,7 +67,7 @@ py23 不追求兼容 CPython：语义是按静态类型的需要重新定的。�
 
 **语法层就拒**（`check` 报错）：`bytes` 字面量、超出 int64 的整数、Python 2 遗留写法、方法缺 `self`、字段赋值类型不符。
 
-**能解析、能过类型检查，但 `build` 报错**：通过 unknown 函数值的 `*` / `**` 展开、`*` 位于固定形参之前且不是定长 tuple、非异常类名当异常用、`finally` 体内跳出 finally 的 `return`/`break`/`continue`、跨模块继承、类装饰器、`@classmethod`、自定义方法装饰器、把类名当值用、函数内定义类、导入类模式的字段子模式、unknown 值上的数值/list/dict/tuple/set 内置类型模式、类体字段默认值里的 lambda，以及生成器的 `yield`/`yield from` 位于 `finally`/`except` 体内（协程的 `await` 同样）、异步生成器表达式、嵌在其它表达式里的异步推导式。
+**能解析、能过类型检查，但 `build` 报错**：通过 unknown 函数值的 `*` / `**` 展开、`*` 位于固定形参之前且不是定长 tuple、非异常类名当异常用、容器元素跨数值域的转换（`list[int]` → `list[float]` 的赋值/实参）、`finally` 体内跳出 finally 的 `return`/`break`/`continue`、跨模块继承、类装饰器、`@classmethod`、自定义方法装饰器、把类名当值用、函数内定义类、导入类模式的字段子模式、unknown 值上的数值/list/dict/tuple/set 内置类型模式、类体字段默认值里的 lambda，以及生成器的 `yield`/`yield from` 位于 `finally`/`except` 体内（协程的 `await` 同样）、异步生成器表达式、嵌在其它表达式里的异步推导式。
 
 清楚这个分层很重要：`py23 check` 尽量当通用 Python 语法/类型检查器用，检查器放宽的边界都记在 [CHANGELOG 0.6.1](archive/changelog-0.40.md)；`py23 build` 才是「能不能编译」的判据。
 
@@ -78,7 +79,7 @@ py23 不追求兼容 CPython：语义是按静态类型的需要重新定的。�
 |---|---|---|---|
 | 正例 | `ctest --preset dev` 里 `tests/*.py` | 11 个文件 | 前端退回保守 |
 | 反例 | `ctest --preset dev` 里 `tests/fail/*.py` | 35 个文件 | 检查器为了过测而放水 |
-| 运行 | `ctest --preset dev` 里 `tests/run/*.py` | 54 个文件 | 后端烂掉没人知道 |
+| 运行 | `ctest --preset dev` 里 `tests/run/*.py` | 55 个文件 | 后端烂掉没人知道 |
 | 模块 | `ctest --preset dev` 里 `tests/modules/*/` | 9 个目录 | 分模块编译/链接、惰性初始化、缓存失效 |
 | 未建模 | `ctest --preset dev` 里 `tests/unsupported/*.py` | 1 个文件 | 「标了没建模、实际却悄悄编译过去」 |
 | 内存 | 16MB `RLIMIT_AS` 下跑压力程序 | 拼接 / 对象 / 闭包 / 容器 / 切片 / 删除 / 推导式 / 变长实参 / `with` / 装饰器 / 异常展开 / `yield from` / 异步推导式 / 环 / unknown 泄漏 | 引用计数或 GC 漏插桩、重复释放、误回收 |

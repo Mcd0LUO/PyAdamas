@@ -363,11 +363,17 @@ private:
     void store_borrow_slot(int slot, VReg v) { store_slot_raw(slot, v); }
 
     VReg load_slot(int slot, TypePtr ty) {
+        // 槽位类型是唯一真相：调用方给 unknown 时回退到槽位表，
+        // 否则 call.rt 结果经临时槽后会在后端退化成整数比较。
+        TypePtr actual = ty;
+        if ((!actual || actual->kind == TyKind::Unknown) && slot >= 0 &&
+            slot < static_cast<int>(st_->fn->slot_ty.size()))
+            actual = st_->fn->slot_ty[slot];
         Inst in;
         in.op = IrOp::LoadSlot;
         in.idx = slot;
-        in.ty = ty;
-        return def(ty ? ty : t_unknown(), std::move(in));
+        in.ty = actual;
+        return def(actual ? actual : t_unknown(), std::move(in));
     }
 
     VReg load_global(int gi, TypePtr ty) {
@@ -544,6 +550,11 @@ private:
 
     void store_slot(int slot, VReg v) {
         TypePtr dst = st_->fn->slot_ty[slot];
+        TypePtr src = vreg_ty(v);
+        // 未知槽位第一次收到已知类型的值时补上类型；后续 load.slot
+        // 才能按 float/int 正确选指令。
+        if (dst && dst->kind == TyKind::Unknown && src && src->kind != TyKind::Unknown)
+            st_->fn->slot_ty[slot] = dst = src;
         retain_for_store(dst, v);
         if (ir_is_heap(dst)) {
             VReg old = load_slot(slot, dst);
@@ -1010,6 +1021,10 @@ private:
 
     // 按签名重排实参：位置、关键字、默认值、数值转换。
     std::vector<VReg> bind_args(Call& c, const FuncInfoPtr& info, FunctionDef* defn);
+
+    // 容器元素跨数值域（list[int] ↔ list[float]）需要逐元素转换，
+    // 现阶段一律报错，避免按错误的机器表示读槽位。
+    bool bad_elem(const TypePtr& from, const TypePtr& to);
 
     void field_store(VReg obj, int off, VReg v) {
         Inst in;

@@ -69,17 +69,55 @@ int64_t py23_math_lcm(int64_t a, int64_t b) {
 }
 
 double py23_math_fsum(Py23List* l) {
-    if (!l) return 0.0;
-    double sum = 0.0, c = 0.0;
-    for (int64_t i = 0; i < l->len; ++i) {
-        double x;
-        memcpy(&x, &l->data[i], sizeof x);
-        double y = x - c;
-        double t = sum + y;
-        c = (t - sum) - y;
-        sum = t;
+    if (!l || l->len == 0) return 0.0;
+    // Shewchuk 部分和，和 CPython 的 math.fsum 同一套算法：
+    // 每个输入与现有 partials 做无误差的 hi/lo 分解，最后从高位往低位
+    // 合并并做一次舍入修正。Kahan 在灾难性抵消下不保证正确舍入。
+    int64_t n = l->len;
+    double* p = (double*)malloc(sizeof(double) * (size_t)n);
+    if (!p) {
+        fputs("py23: panic: out of memory\n", stderr);
+        exit(1);
     }
-    return sum;
+    int64_t m = 0;
+    for (int64_t k = 0; k < n; ++k) {
+        double x;
+        memcpy(&x, &l->data[k], sizeof x);
+        int64_t i = 0;
+        for (int64_t j = 0; j < m; ++j) {
+            double y = p[j];
+            if (fabs(x) < fabs(y)) {
+                double t = x;
+                x = y;
+                y = t;
+            }
+            double hi = x + y;
+            double lo = y - (hi - x);
+            if (lo != 0.0) p[i++] = lo;
+            x = hi;
+        }
+        m = i;
+        p[m++] = x;
+    }
+    double hi = 0.0;
+    if (m > 0) {
+        hi = p[--m];
+        double lo = 0.0;
+        while (m > 0) {
+            double x = hi;
+            double y = p[--m];
+            hi = x + y;
+            lo = y - (hi - x);
+            if (lo != 0.0) break;
+        }
+        if (m > 0 && ((lo < 0.0 && p[m - 1] < 0.0) || (lo > 0.0 && p[m - 1] > 0.0))) {
+            double y = lo * 2.0;
+            double x = hi + y;
+            if (y == x - hi) hi = x;
+        }
+    }
+    free(p);
+    return hi;
 }
 
 double py23_math_acos(double x) {
