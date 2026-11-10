@@ -368,6 +368,23 @@ VReg Lowerer::expr(Expr& e) {
                     std::format("'file' object has no attribute '{}'", a.attr));
                 return const_none();
             }
+            if (ot && ot->kind == TyKind::CompletedProcess) {
+                VReg pv = expr(*a.value);
+                if (opt)
+                    pv = guard_not_none(pv, std::format("attribute '{}'", a.attr));
+                if (a.attr == "returncode")
+                    return call_runtime(RtFn::SubprocessReturnCode, t_int(), {pv});
+                if (a.attr == "stdout" || a.attr == "stderr") {
+                    RtFn fn = a.attr == "stdout" ? RtFn::SubprocessStdout
+                                                 : RtFn::SubprocessStderr;
+                    VReg s = call_runtime(fn, t_str(), {pv});
+                    push_temp(s);
+                    return s;
+                }
+                err(e.line, e.col,
+                    std::format("'CompletedProcess' object has no attribute '{}'", a.attr));
+                return const_none();
+            }
             if (ot && ot->kind == TyKind::Class && ot->cls) {
                 if (const PropertyInfo* p = ot->cls->property(a.attr)) {
                     ++side_effect_seq_;  // getter 可能改动容器
@@ -1179,6 +1196,11 @@ VReg Lowerer::convert_to(VReg v, TypePtr from, TypePtr to) {
         push_temp(s);
         return s;
     }
+    // 原生对象没有 __str__ 协议，按和其他内置对象一致的默认文本处理。
+    if (to->kind == TyKind::Str && from && from->kind == TyKind::Random)
+        return const_str("<random.Random object>");
+    if (to->kind == TyKind::Str && from && from->kind == TyKind::CompletedProcess)
+        return const_str("<subprocess.CompletedProcess object>");
     Inst in;
     in.op = IrOp::Convert;
     in.a = v;

@@ -233,7 +233,9 @@ void enc_type(Enc& e, const TypePtr& t) {
         case TyKind::AsyncSemaphore:
         case TyKind::Exception:
         case TyKind::Complex:
-        case TyKind::File: e.u8(0); break;
+        case TyKind::File:
+        case TyKind::Random:
+        case TyKind::CompletedProcess: e.u8(0); break;
         case TyKind::None: e.u8(1); break;
         case TyKind::Bool: e.u8(2); break;
         case TyKind::Int: e.u8(3); break;

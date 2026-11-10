@@ -769,6 +769,87 @@ VReg Lowerer::lower_method_call(Attribute& at, Call& c) {
         return const_none();
     }
 
+    if (recv_ty && recv_ty->kind == TyKind::Random) {
+        if (!c.keywords.empty()) {
+            err(c.line, c.col,
+                std::format("random.Random.{}() does not take keyword arguments", at.attr));
+            return const_none();
+        }
+        auto int_at = [&](size_t i) -> VReg {
+            return coerce(expr(*c.args[i]), tc_.type_of(c.args[i].get()), t_int());
+        };
+        auto float_at = [&](size_t i) -> VReg {
+            return coerce(expr(*c.args[i]), tc_.type_of(c.args[i].get()), t_float());
+        };
+        if (at.attr == "random") {
+            if (!c.args.empty()) {
+                err(c.line, c.col, "random() takes no arguments");
+                return const_none();
+            }
+            return call_runtime(RtFn::RandNext, t_float(), {recv});
+        }
+        if (at.attr == "seed") {
+            if (c.args.size() > 1) {
+                err(c.line, c.col, "seed() takes at most one argument");
+                return const_none();
+            }
+            VReg seed = const_int(-9223372036854775807LL - 1);
+            if (!c.args.empty()) seed = int_at(0);
+            call_void(RtFn::RandSeed, {recv, seed});
+            return const_none();
+        }
+        if (at.attr == "randint") {
+            if (c.args.size() != 2) {
+                err(c.line, c.col, "randint() takes exactly two arguments");
+                return const_none();
+            }
+            VReg a = int_at(0);
+            VReg b = int_at(1);
+            return call_runtime(RtFn::RandRandint, t_int(), {recv, a, b});
+        }
+        if (at.attr == "uniform") {
+            if (c.args.size() != 2) {
+                err(c.line, c.col, "uniform() takes exactly two arguments");
+                return const_none();
+            }
+            VReg a = float_at(0);
+            VReg b = float_at(1);
+            return call_runtime(RtFn::RandUniform, t_float(), {recv, a, b});
+        }
+        if (at.attr == "choice") {
+            if (c.args.size() != 1) {
+                err(c.line, c.col, "choice() takes exactly one argument");
+                return const_none();
+            }
+            TypePtr st = tc_.type_of(c.args[0].get());
+            VReg seq = expr(*c.args[0]);
+            TypePtr elem = tc_.type_of(&c);
+            if (st && st->kind == TyKind::Str) {
+                seq = call_runtime(RtFn::StrToList, mk_list(t_str()), {seq});
+                push_temp(seq);
+                elem = t_str();
+            }
+            VReg v = call_runtime(RtFn::RandChoice, elem ? elem : t_unknown(), {recv, seq});
+            if (ir_is_heap(elem)) {
+                rc_inc(v);
+                push_temp(v);
+            }
+            return v;
+        }
+        if (at.attr == "shuffle") {
+            if (c.args.size() != 1) {
+                err(c.line, c.col, "shuffle() takes exactly one argument");
+                return const_none();
+            }
+            VReg l = expr(*c.args[0]);
+            call_void(RtFn::RandShuffle, {recv, l});
+            return const_none();
+        }
+        err(c.line, c.col,
+            std::format("random.Random method '{}' is not supported", at.attr));
+        return const_none();
+    }
+
     if (recv_ty && recv_ty->kind == TyKind::File) {
         if (!c.keywords.empty()) {
             err(c.line, c.col,

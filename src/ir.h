@@ -299,6 +299,33 @@ enum class RtFn : uint16_t {
     SemAcquire,        // (semaphore*) -> future*
     SemRelease,        // (semaphore*) -> void
     SemLocked,         // (semaphore*) -> bool
+    RandNew,           // (i64 seed) -> random*    INT64_MIN 表示时间种子
+    RandSeed,          // (random*, i64 seed) -> void
+    RandNext,          // (random*) -> f64
+    RandRandint,       // (random*, i64 a, i64 b) -> i64
+    RandChoice,        // (random*, list*) -> i64（借用）
+    RandUniform,       // (random*, f64 a, f64 b) -> f64
+    RandShuffle,       // (random*, list*) -> void
+    RandGSeed,         // (i64 seed) -> void
+    RandGNext,         // () -> f64
+    RandGRandint,      // (i64 a, i64 b) -> i64
+    RandGChoice,       // (list*) -> i64（借用）
+    RandGUniform,      // (f64 a, f64 b) -> f64
+    RandGShuffle,      // (list*) -> void
+    OsMkdir,           // (str* path) -> void
+    OsRmdir,           // (str* path) -> void
+    OsRemove,          // (str* path) -> void
+    OsRename,          // (str* from, str* to) -> void
+    OsGetcwd,          // () -> str*
+    OsCpuCount,        // () -> i64
+    OsPathJoin,        // (list* parts) -> str*
+    OsPathExists,      // (str* path) -> i64
+    OsPathIsdir,       // (str* path) -> i64
+    OsPathIsfile,      // (str* path) -> i64
+    SubprocessRun,     // (list* argv, i64 capture, i64 text, f64 timeout, i64 check) -> proc*
+    SubprocessReturnCode,  // (proc*) -> i64
+    SubprocessStdout,      // (proc*) -> str*
+    SubprocessStderr,      // (proc*) -> str*
 };
 
 inline const char* rt_name(RtFn f) {
@@ -577,6 +604,33 @@ inline const char* rt_name(RtFn f) {
         case RtFn::SemAcquire: return "py23_sem_acquire";
         case RtFn::SemRelease: return "py23_sem_release";
         case RtFn::SemLocked: return "py23_sem_locked";
+        case RtFn::RandNew: return "py23_random_new";
+        case RtFn::RandSeed: return "py23_random_seed";
+        case RtFn::RandNext: return "py23_random_next";
+        case RtFn::RandRandint: return "py23_random_randint";
+        case RtFn::RandChoice: return "py23_random_choice";
+        case RtFn::RandUniform: return "py23_random_uniform";
+        case RtFn::RandShuffle: return "py23_random_shuffle";
+        case RtFn::RandGSeed: return "py23_random_gseed";
+        case RtFn::RandGNext: return "py23_random_gnext";
+        case RtFn::RandGRandint: return "py23_random_grandint";
+        case RtFn::RandGChoice: return "py23_random_gchoice";
+        case RtFn::RandGUniform: return "py23_random_guniform";
+        case RtFn::RandGShuffle: return "py23_random_gshuffle";
+        case RtFn::OsMkdir: return "py23_os_mkdir";
+        case RtFn::OsRmdir: return "py23_os_rmdir";
+        case RtFn::OsRemove: return "py23_os_remove";
+        case RtFn::OsRename: return "py23_os_rename";
+        case RtFn::OsGetcwd: return "py23_os_getcwd";
+        case RtFn::OsCpuCount: return "py23_os_cpu_count";
+        case RtFn::OsPathJoin: return "py23_os_path_join";
+        case RtFn::OsPathExists: return "py23_os_path_exists";
+        case RtFn::OsPathIsdir: return "py23_os_path_isdir";
+        case RtFn::OsPathIsfile: return "py23_os_path_isfile";
+        case RtFn::SubprocessRun: return "py23_subprocess_run";
+        case RtFn::SubprocessReturnCode: return "py23_subprocess_returncode";
+        case RtFn::SubprocessStdout: return "py23_subprocess_stdout";
+        case RtFn::SubprocessStderr: return "py23_subprocess_stderr";
     }
     return "?";
 }
@@ -880,6 +934,8 @@ inline bool ir_is_heap(const TypePtr& t) {
         case TyKind::Exception:  // 异常值：堆对象，args 列表归它所有
         case TyKind::Complex:
         case TyKind::File:
+        case TyKind::Random:
+        case TyKind::CompletedProcess:
             return true;
         case TyKind::Optional:
             return !t->sub.empty() && ir_is_heap(t->sub[0]);
@@ -915,6 +971,8 @@ inline bool ir_is_ref(const TypePtr& t) {
         case TyKind::Exception:
         case TyKind::Complex:
         case TyKind::File:
+        case TyKind::Random:
+        case TyKind::CompletedProcess:
             return true;
         default:
             return false;

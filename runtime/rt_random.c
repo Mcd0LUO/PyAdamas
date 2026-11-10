@@ -1,0 +1,209 @@
+// rt_random.c —— random 模块：与 CPython 逐位一致的 MT19937
+//
+// 种子、random()、getrandbits()、_randbelow() 全部按 CPython
+// _randommodule.c 的算法实现，同一个整数种子产生同样的序列，
+// 差分用例在两端生成时可以直接复现。
+#include "rt_internal.h"
+
+#include <unistd.h>
+
+#define MT_N 624
+#define MT_M 397
+#define MT_MATRIX_A 0x9908b0dfU
+#define MT_UPPER_MASK 0x80000000U
+#define MT_LOWER_MASK 0x7fffffffU
+
+struct Py23Random {
+    uint32_t mt[MT_N];
+    int64_t index;
+};
+
+static void mt_init_genrand(Py23Random* r, uint32_t s) {
+    r->mt[0] = s;
+    for (uint32_t i = 1; i < MT_N; ++i)
+        r->mt[i] = 1812433253U * (r->mt[i - 1] ^ (r->mt[i - 1] >> 30)) + i;
+    r->index = MT_N;
+}
+
+/* CPython 的 init_by_array：把种子拆成 32 位字后做双混洗。 */
+static void mt_init_by_array(Py23Random* r, const uint32_t* key, int64_t key_len) {
+    mt_init_genrand(r, 19650218U);
+    int64_t i = 1, j = 0;
+    int64_t k = MT_N > key_len ? MT_N : key_len;
+    for (; k; k--) {
+        r->mt[i] = (r->mt[i] ^ ((r->mt[i - 1] ^ (r->mt[i - 1] >> 30)) * 1664525U)) +
+                   key[j] + (uint32_t)j;
+        i++;
+        j++;
+        if (i >= MT_N) {
+            r->mt[0] = r->mt[MT_N - 1];
+            i = 1;
+        }
+        if (j >= key_len) j = 0;
+    }
+    for (k = MT_N - 1; k; k--) {
+        r->mt[i] = (r->mt[i] ^ ((r->mt[i - 1] ^ (r->mt[i - 1] >> 30)) * 1566083941U)) -
+                   (uint32_t)i;
+        i++;
+        if (i >= MT_N) {
+            r->mt[0] = r->mt[MT_N - 1];
+            i = 1;
+        }
+    }
+    r->mt[0] = 0x80000000U;
+}
+
+/* CPython seed(int, version=2)：abs(int) 按 32 位小端拆字，0 用 [0]。 */
+static void mt_seed_i64(Py23Random* r, int64_t seed) {
+    uint64_t n = seed < 0 ? (uint64_t)(-(seed + 1)) + 1 : (uint64_t)seed;
+    uint32_t key[2];
+    int64_t kn = 0;
+    if (n == 0) {
+        key[0] = 0;
+        kn = 1;
+    } else {
+        while (n && kn < 2) {
+            key[kn++] = (uint32_t)(n & 0xffffffffU);
+            n >>= 32;
+        }
+    }
+    mt_init_by_array(r, key, kn);
+}
+
+static uint32_t mt_next32(Py23Random* r) {
+    static const uint32_t mag01[2] = {0U, MT_MATRIX_A};
+    uint32_t y;
+    if (r->index >= MT_N) {
+        int64_t kk;
+        for (kk = 0; kk < MT_N - MT_M; ++kk) {
+            y = (r->mt[kk] & MT_UPPER_MASK) | (r->mt[kk + 1] & MT_LOWER_MASK);
+            r->mt[kk] = r->mt[kk + MT_M] ^ (y >> 1) ^ mag01[y & 1U];
+        }
+        for (; kk < MT_N - 1; ++kk) {
+            y = (r->mt[kk] & MT_UPPER_MASK) | (r->mt[kk + 1] & MT_LOWER_MASK);
+            r->mt[kk] = r->mt[kk + (MT_M - MT_N)] ^ (y >> 1) ^ mag01[y & 1U];
+        }
+        y = (r->mt[MT_N - 1] & MT_UPPER_MASK) | (r->mt[0] & MT_LOWER_MASK);
+        r->mt[MT_N - 1] = r->mt[MT_M - 1] ^ (y >> 1) ^ mag01[y & 1U];
+        r->index = 0;
+    }
+    y = r->mt[r->index++];
+    y ^= y >> 11;
+    y ^= (y << 7) & 0x9d2c5680U;
+    y ^= (y << 15) & 0xefc60000U;
+    y ^= y >> 18;
+    return y;
+}
+
+static double mt_next_double(Py23Random* r) {
+    uint32_t a = mt_next32(r) >> 5;
+    uint32_t b = mt_next32(r) >> 6;
+    return ((double)a * 67108864.0 + (double)b) * (1.0 / 9007199254740992.0);
+}
+
+static uint64_t mt_getrandbits(Py23Random* r, int64_t k) {
+    if (k <= 0) return 0;
+    if (k <= 32) return (uint64_t)(mt_next32(r) >> (32 - k));
+    uint64_t res = 0;
+    int64_t i = 0;
+    while (k > 0) {
+        uint32_t rv = mt_next32(r);
+        if (k < 32) rv >>= (32 - k);
+        res |= (uint64_t)rv << i;
+        i += 32;
+        k -= 32;
+    }
+    return res;
+}
+
+/* CPython 的 _randbelow：取比 n 多一位的随机数，落在区间外就重抽。 */
+static uint64_t mt_randbelow(Py23Random* r, uint64_t n) {
+    if (n == 0) return 0;
+    int64_t k = 0;
+    for (uint64_t t = n; t; t >>= 1) k++;
+    uint64_t v = mt_getrandbits(r, k);
+    while (v >= n) v = mt_getrandbits(r, k);
+    return v;
+}
+
+static void mt_time_seed(Py23Random* r) {
+    struct timespec ts;
+    clock_gettime(CLOCK_REALTIME, &ts);
+    uint64_t x = (uint64_t)ts.tv_nsec ^ ((uint64_t)ts.tv_sec << 20) ^
+                 ((uint64_t)getpid() << 40);
+    mt_seed_i64(r, (int64_t)(x >> 1));
+}
+
+Py23Random* py23_random_new(int64_t seed) {
+    Py23Random* r = (Py23Random*)rc_alloc((int64_t)sizeof(Py23Random), NULL, NULL,
+                                          PY23_RC_OBJ);
+    py23_random_seed(r, seed);
+    return r;
+}
+
+void py23_random_seed(Py23Random* r, int64_t seed) {
+    // 未传 seed 时调用点填的是 INT64_MIN 哨兵：用时间 + pid 播种。
+    if (seed == INT64_MIN)
+        mt_time_seed(r);
+    else
+        mt_seed_i64(r, seed);
+}
+
+double py23_random_next(Py23Random* r) { return mt_next_double(r); }
+
+int64_t py23_random_randint(Py23Random* r, int64_t a, int64_t b) {
+    if (a > b) py23_raise_c("ValueError", "empty range for randrange()");
+    uint64_t width = (uint64_t)b - (uint64_t)a + 1;
+    return (int64_t)((uint64_t)a + mt_randbelow(r, width));
+}
+
+/* 返回借用：调用点按静态元素类型决定是否补一次 rc_inc。 */
+int64_t py23_random_choice(Py23Random* r, Py23List* seq) {
+    if (!seq || seq->len == 0)
+        py23_raise_c("IndexError", "cannot choose from an empty sequence");
+    return seq->data[mt_randbelow(r, (uint64_t)seq->len)];
+}
+
+double py23_random_uniform(Py23Random* r, double a, double b) {
+    return a + (b - a) * mt_next_double(r);
+}
+
+void py23_random_shuffle(Py23Random* r, Py23List* seq) {
+    for (int64_t i = seq->len - 1; i > 0; --i) {
+        uint64_t j = mt_randbelow(r, (uint64_t)(i + 1));
+        int64_t tmp = seq->data[i];
+        seq->data[i] = seq->data[(int64_t)j];
+        seq->data[(int64_t)j] = tmp;
+    }
+}
+
+/* ── 模块级函数共用一把全局 RNG ─────────────────────────────── */
+
+static Py23Random g_rng;
+static int g_rng_ready = 0;
+
+static Py23Random* global_rng(void) {
+    if (!g_rng_ready) {
+        py23_random_seed(&g_rng, INT64_MIN);
+        g_rng_ready = 1;
+    }
+    return &g_rng;
+}
+
+void py23_random_gseed(int64_t seed) {
+    py23_random_seed(global_rng(), seed);
+}
+
+double py23_random_gnext(void) { return mt_next_double(global_rng()); }
+
+int64_t py23_random_grandint(int64_t a, int64_t b) {
+    return py23_random_randint(global_rng(), a, b);
+}
+
+int64_t py23_random_gchoice(Py23List* seq) { return py23_random_choice(global_rng(), seq); }
+
+double py23_random_guniform(double a, double b) {
+    return py23_random_uniform(global_rng(), a, b);
+}
+
+void py23_random_gshuffle(Py23List* seq) { py23_random_shuffle(global_rng(), seq); }

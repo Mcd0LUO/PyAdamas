@@ -168,6 +168,10 @@ TypePtr TypeChecker::call(Call& c) {
     }
 
 TypePtr TypeChecker::check_args(const FuncInfoPtr& fn, Call& c) {
+        if (fn && (fn->name == "random.choice" || fn->name == "random.shuffle")) {
+            std::string m = fn->name == "random.choice" ? "choice" : "shuffle";
+            if (auto r = random_call(m, c)) return *r;
+        }
         // 实参和关键字实参都只求值一次。之前关键字值在循环里被求了两次，
         // 一次的类型错误会重复报两遍。
         std::vector<TypePtr> argtys;
@@ -314,6 +318,8 @@ bool TypeChecker::is_exception_name(const std::string& n) {
             "ProcessLookupError", "UnicodeTranslateError", "GeneratorExit",
             "CancelledError",
             "StopAsyncIteration", "WindowsError",  // WindowsError 只在 Windows 上存在（OSError 别名）
+            // subprocess 相关：py23 没有模块限定异常名，按内置名捕获
+            "SubprocessError", "TimeoutExpired", "CalledProcessError",
         };
         return names.count(n) > 0;
     }
@@ -516,6 +522,41 @@ std::optional<TypePtr> TypeChecker::asyncio_call(const std::string& member, Call
     }
 
 
+std::optional<TypePtr> TypeChecker::random_call(const std::string& member, Call& c) {
+        if (member != "choice" && member != "shuffle") return std::nullopt;
+        if (!c.keywords.empty()) {
+            err(c.line, c.col,
+                std::format("random.{}() does not take keyword arguments", member));
+            for (auto& kw : c.keywords) expr(*kw.value);
+        }
+        if (c.args.size() != 1) {
+            for (auto& arg : c.args) expr(*arg);
+            err(c.line, c.col,
+                std::format("random.{}() expects 1 argument, got {}", member, c.args.size()));
+            return t_unknown();
+        }
+        TypePtr st = expr(*c.args[0]);
+        if (member == "shuffle") {
+            if (st && st->kind != TyKind::List && st->kind != TyKind::Unknown)
+                err(c.args[0]->line, c.args[0]->col,
+                    std::format("random.shuffle() expects a list, got '{}'", type_name(st)));
+            return t_none();
+        }
+        if (st && st->kind == TyKind::List)
+            return st->sub.empty() ? t_unknown() : st->sub[0];
+        if (st && st->kind == TyKind::Tuple) {
+            if (st->sub.empty()) return t_unknown();
+            TypePtr acc = st->sub[0];
+            for (size_t i = 1; i < st->sub.size(); ++i) acc = join(acc, st->sub[i]);
+            return acc;
+        }
+        if (st && st->kind == TyKind::Str) return t_str();
+        if (st && st->kind != TyKind::Unknown)
+            err(c.args[0]->line, c.args[0]->col,
+                std::format("random.choice() expects a sequence, got '{}'", type_name(st)));
+        return t_unknown();
+}
+
 bool TypeChecker::has_method(const TypePtr& t, const std::string& m) {
         if (!t) return true;
         switch (t->kind) {
@@ -577,6 +618,12 @@ bool TypeChecker::has_method(const TypePtr& t, const std::string& m) {
                     "close",   "flush",    "seek",      "tell",     "truncate",
                     "fileno",  "isatty",   "readable",  "writable", "seekable",
                     "__enter__", "__exit__",
+                };
+                return ms.count(m) > 0;
+            }
+            case TyKind::Random: {
+                static const std::unordered_set<std::string> ms = {
+                    "random", "seed", "randint", "uniform", "choice", "shuffle",
                 };
                 return ms.count(m) > 0;
             }
@@ -646,6 +693,59 @@ TypePtr TypeChecker::method_call(TypePtr recv, const std::string& name, Call& c,
             }
             auto r = m->call_sig ? check_args(m->call_sig, c) : t_unknown();
             return r;
+        }
+
+        if (recv->kind == TyKind::Random) {
+            if (!c.keywords.empty())
+                err(c.line, c.col,
+                    std::format("random.Random.{}() does not take keyword arguments", name));
+            if (name == "random") {
+                argc(0, 0);
+                return t_float();
+            }
+            if (name == "seed") {
+                argc(0, 1);
+                if (!a.empty() && a[0] && !is_unknown(a[0]) && a[0]->kind != TyKind::Int)
+                    err(c.line, c.col, "seed() expects an int");
+                return t_none();
+            }
+            if (name == "randint") {
+                argc(2, 2);
+                for (auto& t : a)
+                    if (t && !is_unknown(t) && t->kind != TyKind::Int)
+                        err(c.line, c.col, "randint() expects int arguments");
+                return t_int();
+            }
+            if (name == "uniform") {
+                argc(2, 2);
+                for (auto& t : a)
+                    if (t && !is_unknown(t) && !is_num(t))
+                        err(c.line, c.col, "uniform() expects number arguments");
+                return t_float();
+            }
+            if (name == "choice") {
+                argc(1, 1);
+                TypePtr st = a.empty() ? nullptr : a[0];
+                if (st && st->kind == TyKind::List)
+                    return st->sub.empty() ? t_unknown() : st->sub[0];
+                if (st && st->kind == TyKind::Tuple) {
+                    if (st->sub.empty()) return t_unknown();
+                    TypePtr acc = st->sub[0];
+                    for (size_t i = 1; i < st->sub.size(); ++i) acc = join(acc, st->sub[i]);
+                    return acc;
+                }
+                if (st && st->kind == TyKind::Str) return t_str();
+                if (st && !is_unknown(st))
+                    err(c.line, c.col, "choice() expects a sequence");
+                return t_unknown();
+            }
+            if (name == "shuffle") {
+                argc(1, 1);
+                if (!a.empty() && a[0] && !is_unknown(a[0]) && a[0]->kind != TyKind::List)
+                    err(c.line, c.col, "shuffle() expects a list");
+                return t_none();
+            }
+            return t_unknown();
         }
 
         if (recv->kind == TyKind::Generator) {

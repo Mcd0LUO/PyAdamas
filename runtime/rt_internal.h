@@ -564,3 +564,39 @@ void py23_panic(Py23Str* msg);
 void py23_panic_div0(void);
 void py23_panic_overflow(void);
 int64_t py23_pow_i64(int64_t base, int64_t exp);
+
+/* ── random：CPython 兼容的 MT19937 ─────────────────────────────── */
+typedef struct Py23Random Py23Random;
+Py23Random* py23_random_new(int64_t seed);
+void py23_random_seed(Py23Random* r, int64_t seed);
+double py23_random_next(Py23Random* r);
+int64_t py23_random_randint(Py23Random* r, int64_t a, int64_t b);
+int64_t py23_random_choice(Py23Random* r, Py23List* seq);
+double py23_random_uniform(Py23Random* r, double a, double b);
+void py23_random_shuffle(Py23Random* r, Py23List* seq);
+void py23_random_gseed(int64_t seed);
+double py23_random_gnext(void);
+int64_t py23_random_grandint(int64_t a, int64_t b);
+int64_t py23_random_gchoice(Py23List* seq);
+double py23_random_guniform(double a, double b);
+void py23_random_gshuffle(Py23List* seq);
+
+/* ── os：目录与路径 ─────────────────────────────────────────────── */
+void py23_os_mkdir(Py23Str* path);
+void py23_os_rmdir(Py23Str* path);
+void py23_os_remove(Py23Str* path);
+void py23_os_rename(Py23Str* from, Py23Str* to);
+Py23Str* py23_os_getcwd(void);
+int64_t py23_os_cpu_count(void);
+Py23Str* py23_os_path_join(Py23List* parts);
+int64_t py23_os_path_exists(Py23Str* path);
+int64_t py23_os_path_isdir(Py23Str* path);
+int64_t py23_os_path_isfile(Py23Str* path);
+
+/* ── subprocess：CompletedProcess 与 run() ─────────────────────── */
+typedef struct Py23Proc Py23Proc;
+Py23Proc* py23_subprocess_run(Py23List* argv, int64_t capture, int64_t text,
+                              double timeout, int64_t check);
+int64_t py23_subprocess_returncode(Py23Proc* p);
+Py23Str* py23_subprocess_stdout(Py23Proc* p);
+Py23Str* py23_subprocess_stderr(Py23Proc* p);

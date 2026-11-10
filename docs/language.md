@@ -649,6 +649,26 @@ CPython 一致。
   `isclose` 固定两个参数（`isclose` 用 CPython 默认容差），`prod` 只接受
   `list[int]`，`sumprod` 只接受两个等长 `list[int]`，`dist` 只接受两个
   等长 `list[float]`；`frexp`/`modf` 返回二元组。
+- 内置 `random`：`Random(seed)` 对象和模块级 `random()` / `seed()` /
+  `randint(a, b)` / `uniform(a, b)` / `choice(seq)` / `shuffle(list)`，
+  实例方法同名。随机引擎按 CPython 的 MT19937 实现，同一个整数种子产生
+  与 CPython **完全相同**的序列；省略 `seed` 时用时间 + pid 播种。
+  `choice` 接受 list/tuple/str 并返回元素类型，`shuffle` 只接受 list。
+- 内置 `os`：`mkdir` / `rmdir` / `remove` / `rename` / `getcwd` /
+  `cpu_count`。内置 `os.path`：`join`（变长参数，posix 语义）、
+  `exists` / `isdir` / `isfile`。子模块用 `import os.path as osp` 或
+  `from os.path import join, exists` 引入；`import os` 之后
+  `os.path.join` 这种属性链暂不支持（`os.path` 是独立模块别名）。
+- 内置 `subprocess`：`run(args, capture_output=False, text=False,
+  timeout=-1.0, check=False)` 返回 `CompletedProcess` 对象，属性
+  `.returncode` / `.stdout` / `.stderr`。`timeout` 为负表示不超时；
+  超时抛 `TimeoutExpired`，`check=True` 且退出码非零抛
+  `CalledProcessError`。这两个异常按 py23 的内置异常名匹配，直接写
+  `except TimeoutExpired`；`from subprocess import TimeoutExpired` 暂不
+  支持。与 CPython 的偏差：没有 bytes 类型，`text=False` 也返回 `str`；
+  没有捕获时 `.stdout` / `.stderr` 是空串（CPython 是 `None`）；
+  `input` / `cwd` / `env` / `shell` 等参数未实现；exec 失败按退出码
+  127 返回。
 
 ### 内置函数
 

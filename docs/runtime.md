@@ -361,6 +361,27 @@ longjmp 回同步调用点。GC 清扫和进程退出不跑析构器，但会单
 | `py23_sys_argv` | `() -> list*` | 借用全局 argv 列表 |
 | `py23_sys_exit` | `(i64 code) -> void` | 直接 `exit(code)`，noreturn |
 
+### random / os / subprocess
+
+| 函数 | 签名 | 语义 |
+|---|---|---|
+| `py23_random_new` | `(i64 seed) -> random*` | 分配 MT19937 状态；seed 为 `INT64_MIN` 时用时间 + pid 播种 |
+| `py23_random_seed` | `(random*, i64 seed) -> void` | 按 CPython 的 seed(int, version=2) 重新播种 |
+| `py23_random_next` | `(random*) -> f64` | `genrand_res53`，与 CPython `random()` 逐位一致 |
+| `py23_random_randint` | `(random*, i64 a, i64 b) -> i64` | `a + _randbelow(b - a + 1)`；空区间抛 ValueError |
+| `py23_random_choice` | `(random*, list*) -> i64` | 返回借用元素；空序列抛 IndexError |
+| `py23_random_uniform` | `(random*, f64 a, f64 b) -> f64` | `a + (b - a) * random()` |
+| `py23_random_shuffle` | `(random*, list*) -> void` | 原地 Fisher-Yates，与 CPython 交换顺序一致 |
+| `py23_random_g*` | 同上但不带 random* | 模块级函数共用一把静态全局 RNG（不在 GC 链上） |
+| `py23_os_mkdir/rmdir/remove/rename` | `(str*, ...) -> void` | 失败抛 OSError 子类（ENOENT→FileNotFoundError 等） |
+| `py23_os_getcwd` | `() -> str*` | 新字符串 |
+| `py23_os_cpu_count` | `() -> i64` | `_SC_NPROCESSORS_ONLN` |
+| `py23_os_path_join` | `(list*) -> str*` | posixpath.join 语义；参数是字符串列表 |
+| `py23_os_path_exists/isdir/isfile` | `(str*) -> i64` | access/stat，返回 0/1 |
+| `py23_subprocess_run` | `(list* argv, i64 capture, i64 text, f64 timeout, i64 check) -> proc*` | fork/execvp + 管道捕获；timeout < 0 表示不超时；超时 SIGKILL 后抛 TimeoutExpired；check 且 rc≠0 抛 CalledProcessError |
+| `py23_subprocess_returncode` | `(proc*) -> i64` | 正常退出取退出码，被信号终止取负信号号 |
+| `py23_subprocess_stdout/stderr` | `(proc*) -> str*` | 新字符串；未捕获时为空串 |
+
 ### 对象
 
 | 函数 | 签名 | 语义 |

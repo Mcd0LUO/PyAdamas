@@ -165,6 +165,28 @@ std::optional<RtFn> Lowerer::native_fn(const std::string& module, const std::str
         if (member == "dist") return RtFn::MathDist;
     } else if (module == "sys" && member == "exit") {
         return RtFn::SysExit;
+    } else if (module == "random") {
+        if (member == "random") return RtFn::RandGNext;
+        if (member == "seed") return RtFn::RandGSeed;
+        if (member == "randint") return RtFn::RandGRandint;
+        if (member == "uniform") return RtFn::RandGUniform;
+        if (member == "choice") return RtFn::RandGChoice;
+        if (member == "shuffle") return RtFn::RandGShuffle;
+        if (member == "Random") return RtFn::RandNew;
+    } else if (module == "os") {
+        if (member == "mkdir") return RtFn::OsMkdir;
+        if (member == "rmdir") return RtFn::OsRmdir;
+        if (member == "remove") return RtFn::OsRemove;
+        if (member == "rename") return RtFn::OsRename;
+        if (member == "getcwd") return RtFn::OsGetcwd;
+        if (member == "cpu_count") return RtFn::OsCpuCount;
+    } else if (module == "os.path") {
+        if (member == "join") return RtFn::OsPathJoin;
+        if (member == "exists") return RtFn::OsPathExists;
+        if (member == "isdir") return RtFn::OsPathIsdir;
+        if (member == "isfile") return RtFn::OsPathIsfile;
+    } else if (module == "subprocess") {
+        if (member == "run") return RtFn::SubprocessRun;
     }
     return std::nullopt;
 }
@@ -225,12 +247,37 @@ VReg Lowerer::call_native(const std::string& module, const std::string& member, 
         err(c.line, c.col, std::format("{}.{} is not a supported native function", module, member));
         return const_none();
     }
+    // random.choice 返回序列元素类型，FuncInfo 的静态签名表达不了；
+    // 结果类型以类型检查阶段记录在 Call 上的类型为准。
+    if (module == "random" && member == "choice") {
+        if (c.args.size() != 1 || !c.keywords.empty()) {
+            err(c.line, c.col, "random.choice() expects 1 positional argument");
+            return const_none();
+        }
+        TypePtr st = tc_.type_of(c.args[0].get());
+        VReg seq = expr(*c.args[0]);
+        TypePtr elem = tc_.type_of(&c);
+        if (st && st->kind == TyKind::Str) {
+            seq = call_runtime(RtFn::StrToList, mk_list(t_str()), {seq});
+            push_temp(seq);
+            elem = t_str();
+        }
+        // 运行时返回借用元素；当元素是堆对象时补一个引用进临时栈。
+        VReg v = call_runtime(*fn, elem ? elem : t_unknown(), {seq});
+        if (ir_is_heap(elem)) {
+            rc_inc(v);
+            push_temp(v);
+        }
+        return v;
+    }
     std::vector<VReg> args = bind_args(c, info, nullptr);
     if (*fn == RtFn::SysExit) {
         call_void(*fn, args);
         return const_none();
     }
-    TypePtr rt = info && info->ret ? info->ret : t_float();
+    TypePtr rt = tc_.type_of(&c);
+    if (!rt || rt->kind == TyKind::Unknown)
+        rt = info && info->ret ? info->ret : t_float();
     VReg v = call_runtime(*fn, rt, std::move(args));
     if (ir_is_heap(rt)) push_temp(v);
     return v;

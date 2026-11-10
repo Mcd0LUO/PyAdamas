@@ -62,6 +62,8 @@ enum class TyKind : uint8_t {
     AsyncSemaphore, // asyncio.Semaphore
     Exception,    // 异常值（type name 放在 Type::name）；args 是 message 列表
     File,         // open() 返回的文件对象
+    Random,       // random.Random() 返回的随机数生成器
+    CompletedProcess,  // subprocess.run() 返回的结果对象
 };
 
 struct Type;
@@ -406,6 +408,14 @@ inline const TypePtr& t_file() {
     static TypePtr v = new_ty(TyKind::File);
     return v;
 }
+inline const TypePtr& t_random() {
+    static TypePtr v = new_ty(TyKind::Random);
+    return v;
+}
+inline const TypePtr& t_completed() {
+    static TypePtr v = new_ty(TyKind::CompletedProcess);
+    return v;
+}
 
 // 可变的类型洞：容器元素类型未知时用它占位，后续插入时原地填上
 inline TypePtr fresh_hole() { return new_ty(TyKind::Unknown); }
@@ -639,6 +649,8 @@ inline std::string type_name_impl(const TypePtr& t, int depth) {
         case TyKind::Exception:
             return t->name.empty() ? "Exception" : t->name;
         case TyKind::File: return "file";
+        case TyKind::Random: return "random.Random";
+        case TyKind::CompletedProcess: return "subprocess.CompletedProcess";
     }
     return "?";
 }
@@ -1176,6 +1188,8 @@ private:
     TypePtr builtin_call(const std::string& n, Call& c);
     // asyncio 的 run/sleep/gather 需要按实参类型推结果，静态签名表达不了。
     std::optional<TypePtr> asyncio_call(const std::string& member, Call& c);
+    // random.choice/shuffle 同理：choice 的返回类型是序列的元素类型。
+    std::optional<TypePtr> random_call(const std::string& member, Call& c);
 
     // ── 方法 ────────────────────────────────────────────────────
 

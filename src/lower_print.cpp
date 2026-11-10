@@ -24,6 +24,12 @@ void Lowerer::print_value(VReg v, TypePtr ty, int line, int col) {
             break;
         case TyKind::Dict: call_void(RtFn::PrintStr, {const_str("<dict object>")}); break;
         case TyKind::Set: call_void(RtFn::PrintStr, {const_str("<set object>")}); break;
+        case TyKind::Random:
+            call_void(RtFn::PrintStr, {const_str("<random.Random object>")});
+            break;
+        case TyKind::CompletedProcess:
+            call_void(RtFn::PrintStr, {const_str("<subprocess.CompletedProcess object>")});
+            break;
         case TyKind::Exception: {
             VReg s = call_runtime(RtFn::ExcValueStr, t_str(), {v});
             push_temp(s);
@@ -106,6 +112,12 @@ void Lowerer::print_value_to_file(VReg v, TypePtr ty, int line, int col) {
             return;
         case TyKind::Set:
             call_void(RtFn::FileWrite, {f, const_str("<set object>")});
+            return;
+        case TyKind::Random:
+            call_void(RtFn::FileWrite, {f, const_str("<random.Random object>")});
+            return;
+        case TyKind::CompletedProcess:
+            call_void(RtFn::FileWrite, {f, const_str("<subprocess.CompletedProcess object>")});
             return;
         case TyKind::Class: {
             VReg s = dunder_str(v, ty, false);

@@ -34,7 +34,11 @@ py23 不追求兼容 CPython：语义是按静态类型的需要重新定的。�
 | 字段初值 `x: int = []` | 每次构造重新求值，实例之间独立 | 类属性，所有实例共享 | 更安全；也避免可变默认值的经典 bug |
 | 类体里的非声明语句 | 在类定义点执行；赋值按模块全局处理 | 类体是独立命名空间 | 没有类命名空间，`C.x` / `self.x` 的类属性访问未建模 |
 | 类的属性 | 声明过的字段，或 `self.x = ...` 就地长出来的字段 | 可随时给实例挂任意属性 | 偏移是编译期常量，没有运行时 `__dict__` |
-| `print(obj)` | `<Point object>` | `<__main__.Point object at 0x...>` | 没有 `__str__` 协议，也不打地址 |
+| `print(obj)` | 有 `__str__`（或 `__repr__`）就调，否则 `<Point object>` | 同 Python（默认文本带模块名和地址） | 默认文本没有模块名和地址 |
+| 协议 dunder | `__str__`/`__repr__`/`__eq__`/`__ne__`/`__len__`/`__hash__`/`__contains__`/`__iter__`/算术与比较类 dunder 走 vtable；`in` 需要 `__contains__`，`<` 等需要比较 dunder，算术需要对应 dunder，否则编译报错 | 完整数据模型 | `__format__`/`__bool__`/`__reversed__` 未建模；`__eq__` 的 other 限 unknown 或类类型；只定义 `__eq__` 没定义 `__hash__` 的类在 dict/set 里按身份处理 |
+| `random` | MT19937 与 CPython 同种子同序列；模块级函数和 `Random` 实例方法；`choice` 支持 list/tuple/str，`shuffle` 仅 list | 完整 random（`randrange`/`gauss`/bytes 等未实现） | 只实现常用方法；省略种子时时间 + pid 播种 |
+| `os` / `os.path` | `mkdir`/`rmdir`/`remove`/`rename`/`getcwd`/`cpu_count`；`join`/`exists`/`isdir`/`isfile` | 完整 os | `os.path` 是独立模块别名：`import os.path as p` 或 `from os.path import ...`，`import os` 后 `os.path.x` 暂不支持 |
+| `subprocess` | `run` 支持 `capture_output`/`text`/`timeout`/`check`，返回 `CompletedProcess`（`.returncode`/`.stdout`/`.stderr`）；`TimeoutExpired`/`CalledProcessError` 按内置异常名捕获 | 完整 subprocess | 没有 bytes：`text=False` 也返回 str；未捕获时 `.stdout`/`.stderr` 为空串；`input`/`cwd`/`env`/`shell` 未实现；exec 失败按退出码 127；`from subprocess import TimeoutExpired` 不支持 |
 | 方法调用 | 走 vtable，代价固定 | 走 `__dict__` / 描述符 | 没有去虚化，也不做内联 |
 | 内存回收 | 引用计数 + 保守标记-清扫 | 分代 GC | 环和 unknown 泄漏由 GC 延迟回收；栈/寄存器里的整数可能被误认为根，只影响回收时机；无 `__del__`/弱引用 |
 | 闭包捕获 | cell 按引用捕获；嵌套函数直接自引用用当前闭包 | cell 按引用捕获，晚绑定 | 父作用域之后重绑函数自己的名字时，py23 仍指向原闭包；相互递归闭包的环由 GC 回收 |

@@ -1057,6 +1057,8 @@ private:
             case TyKind::AsyncGenerator: return "async_generator";
             case TyKind::Future: return "future";
             case TyKind::File: return "file";
+            case TyKind::Random: return "random.Random";
+            case TyKind::CompletedProcess: return "subprocess.CompletedProcess";
             case TyKind::Exception: return t->name.empty() ? "Exception" : t->name;
             case TyKind::Class: return t->cls ? t->cls->name : "object";
             case TyKind::TypeObj: return "type";

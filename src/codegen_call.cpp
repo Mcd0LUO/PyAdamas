@@ -839,6 +839,66 @@ void AsmGen::gen_call_rt(const Inst& in) {
             case RtFn::Reraise:
             case RtFn::SysArgv:
                 break;
+            case RtFn::RandNew:
+            case RtFn::RandGSeed:
+                emit2("movq", src_op(in.args[0]), "%rdi");
+                break;
+            case RtFn::RandSeed:
+            case RtFn::RandChoice:
+            case RtFn::RandShuffle:
+                emit2("movq", src_op(in.args[0]), "%rdi");
+                emit2("movq", src_op(in.args[1]), "%rsi");
+                break;
+            case RtFn::RandRandint:
+                emit2("movq", src_op(in.args[0]), "%rdi");
+                emit2("movq", src_op(in.args[1]), "%rsi");
+                emit2("movq", src_op(in.args[2]), "%rdx");
+                break;
+            case RtFn::RandNext:
+            case RtFn::OsMkdir:
+            case RtFn::OsRmdir:
+            case RtFn::OsRemove:
+            case RtFn::OsPathJoin:
+            case RtFn::OsPathExists:
+            case RtFn::OsPathIsdir:
+            case RtFn::OsPathIsfile:
+            case RtFn::SubprocessReturnCode:
+            case RtFn::SubprocessStdout:
+            case RtFn::SubprocessStderr:
+                emit2("movq", src_op(in.args[0]), "%rdi");
+                break;
+            case RtFn::RandUniform:
+                emit2("movq", src_op(in.args[0]), "%rdi");
+                emit2("movsd", src_op(in.args[1]), "%xmm0");
+                emit2("movsd", src_op(in.args[2]), "%xmm1");
+                break;
+            case RtFn::RandGNext:
+            case RtFn::OsGetcwd:
+            case RtFn::OsCpuCount:
+                break;
+            case RtFn::RandGRandint:
+                emit2("movq", src_op(in.args[0]), "%rdi");
+                emit2("movq", src_op(in.args[1]), "%rsi");
+                break;
+            case RtFn::RandGChoice:
+            case RtFn::RandGShuffle:
+                emit2("movq", src_op(in.args[0]), "%rdi");
+                break;
+            case RtFn::RandGUniform:
+                emit2("movsd", src_op(in.args[0]), "%xmm0");
+                emit2("movsd", src_op(in.args[1]), "%xmm1");
+                break;
+            case RtFn::OsRename:
+                emit2("movq", src_op(in.args[0]), "%rdi");
+                emit2("movq", src_op(in.args[1]), "%rsi");
+                break;
+            case RtFn::SubprocessRun:
+                emit2("movq", src_op(in.args[0]), "%rdi");
+                emit2("movq", src_op(in.args[1]), "%rsi");
+                emit2("movq", src_op(in.args[2]), "%rdx");
+                emit2("movsd", src_op(in.args[3]), "%xmm0");
+                emit2("movq", src_op(in.args[4]), "%rcx");
+                break;
         }
         spill_fp_slots();
         line(std::format("call {}", rt_name(fn)));

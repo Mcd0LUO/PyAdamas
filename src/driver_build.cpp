@@ -420,7 +420,9 @@ bool visit_unit(Program& p, ModuleUnit& u, std::vector<ModuleUnit*>& stack) {
                    "'__entry__' is reserved for the entry module");
             return false;
         }
-        if (req.name == "math" || req.name == "sys" || req.name == "asyncio") {
+        if (req.name == "math" || req.name == "sys" || req.name == "asyncio" ||
+            req.name == "random" || req.name == "os" || req.name == "os.path" ||
+            req.name == "subprocess") {
             // 内置模块没有源文件/对象，只提供编译期接口。
             continue;
         }
@@ -530,7 +532,9 @@ bool try_cache(Program& p, ModuleUnit& u) {
 py23::ModuleInfoPtr builtin_module(const std::string& name);
 
 py23::ModuleInfoPtr program_module(Program& p, const std::string& name) {
-    if (name == "math" || name == "sys" || name == "asyncio") return builtin_module(name);
+    if (name == "math" || name == "sys" || name == "asyncio" || name == "random" ||
+        name == "os" || name == "os.path" || name == "subprocess")
+        return builtin_module(name);
     auto it = p.units.find(name);
     return it == p.units.end() ? nullptr : it->second->info;
 }
@@ -560,6 +564,29 @@ py23::ModuleInfoPtr builtin_module(const std::string& name) {
     auto func = [&](const std::string& n, std::vector<py23::TypePtr> args, py23::TypePtr ret) {
         auto t = py23::new_ty(py23::TyKind::Func);
         t->fn = builtin_fn(n, args, ret);
+        info->globals[n] = t;
+    };
+    auto lv_int = [](int64_t v) {
+        py23::LiteralValue lv;
+        lv.kind = py23::LiteralValue::Kind::Int;
+        lv.i = v;
+        return lv;
+    };
+    auto lv_bool = [](bool v) {
+        py23::LiteralValue lv;
+        lv.kind = py23::LiteralValue::Kind::Bool;
+        lv.b = v;
+        return lv;
+    };
+    auto lv_float = [](double v) {
+        py23::LiteralValue lv;
+        lv.kind = py23::LiteralValue::Kind::Float;
+        lv.f = v;
+        return lv;
+    };
+    auto func_with = [&](const std::string& n, const py23::FuncInfoPtr& f) {
+        auto t = py23::new_ty(py23::TyKind::Func);
+        t->fn = f;
         info->globals[n] = t;
     };
     if (name == "math") {
@@ -674,6 +701,101 @@ py23::ModuleInfoPtr builtin_module(const std::string& name) {
         auto gt = py23::new_ty(py23::TyKind::Func);
         gt->fn = gather;
         info->globals["gather"] = gt;
+    } else if (name == "random") {
+        // 不传种子时绑定哨兵 INT64_MIN，运行时用时间 + pid 播种。
+        const int64_t kNoSeed = -9223372036854775807LL - 1;
+        func("random", {}, py23::t_float());
+        func("randint", {py23::t_int(), py23::t_int()}, py23::t_int());
+        func("uniform", {py23::t_float(), py23::t_float()}, py23::t_float());
+        // choice/shuffle 的返回类型按实参在 typecheck 里特判（random_call）；
+        // 这两个 FuncInfo 用带模块前缀的名字，from-import 调用也能识别。
+        {
+            auto f = std::make_shared<py23::FuncInfo>();
+            f->name = "random.choice";
+            py23::Param p;
+            p.name = "seq";
+            p.ty = py23::t_unknown();
+            f->pos.push_back(std::move(p));
+            f->ret = py23::t_unknown();
+            f->ret_known = false;
+            func_with("choice", f);
+        }
+        {
+            auto f = std::make_shared<py23::FuncInfo>();
+            f->name = "random.shuffle";
+            py23::Param p;
+            p.name = "x";
+            p.ty = py23::mk_list(py23::t_unknown());
+            f->pos.push_back(std::move(p));
+            f->ret = py23::t_none();
+            f->ret_known = true;
+            func_with("shuffle", f);
+        }
+        {
+            auto f = std::make_shared<py23::FuncInfo>();
+            f->name = "seed";
+            py23::Param p;
+            p.name = "a";
+            p.ty = py23::t_int();
+            p.has_default = true;
+            p.default_lit = lv_int(kNoSeed);
+            f->pos.push_back(std::move(p));
+            f->ret = py23::t_none();
+            f->ret_known = true;
+            func_with("seed", f);
+        }
+        {
+            auto f = std::make_shared<py23::FuncInfo>();
+            f->name = "Random";
+            py23::Param p;
+            p.name = "a";
+            p.ty = py23::t_int();
+            p.has_default = true;
+            p.default_lit = lv_int(kNoSeed);
+            f->pos.push_back(std::move(p));
+            f->ret = py23::t_random();
+            f->ret_known = true;
+            func_with("Random", f);
+        }
+    } else if (name == "os") {
+        func("mkdir", {py23::t_str()}, py23::t_none());
+        func("rmdir", {py23::t_str()}, py23::t_none());
+        func("remove", {py23::t_str()}, py23::t_none());
+        func("rename", {py23::t_str(), py23::t_str()}, py23::t_none());
+        func("getcwd", {}, py23::t_str());
+        func("cpu_count", {}, py23::t_int());
+    } else if (name == "os.path") {
+        auto f = std::make_shared<py23::FuncInfo>();
+        f->name = "join";
+        f->varargs = true;
+        f->vararg_name = "parts";
+        f->vararg_ty = py23::t_str();
+        f->ret = py23::t_str();
+        f->ret_known = true;
+        func_with("join", f);
+        func("exists", {py23::t_str()}, py23::t_bool());
+        func("isdir", {py23::t_str()}, py23::t_bool());
+        func("isfile", {py23::t_str()}, py23::t_bool());
+    } else if (name == "subprocess") {
+        auto f = std::make_shared<py23::FuncInfo>();
+        f->name = "run";
+        auto add = [&](const std::string& n, py23::TypePtr ty, bool has_def,
+                       py23::LiteralValue lv) {
+            py23::Param p;
+            p.name = n;
+            p.ty = std::move(ty);
+            p.has_default = has_def;
+            if (has_def) p.default_lit = lv;
+            f->pos.push_back(std::move(p));
+        };
+        add("args", py23::mk_list(py23::t_str()), false, lv_int(0));
+        add("capture_output", py23::t_bool(), true, lv_bool(false));
+        add("text", py23::t_bool(), true, lv_bool(false));
+        add("timeout", py23::t_float(), true, lv_float(-1.0));
+        add("check", py23::t_bool(), true, lv_bool(false));
+        f->ret = py23::t_completed();
+        f->ret_known = true;
+        func_with("run", f);
     }
     cache[name] = info;
     return info;

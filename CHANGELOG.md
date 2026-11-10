@@ -4,6 +4,58 @@
 
 早期阶段没有逐条留痕，按阶段归纳；0.4 之后逐条记录。
 
+## [0.72] - 2026-11-10
+
+运行时扩展：`random`、`os`/`os.path`、`subprocess` 三个内置模块。
+
+### 新增
+
+- `random`：`Random(seed)` 对象与模块级函数（`random` / `seed` /
+  `randint` / `uniform` / `choice` / `shuffle`）。引擎按 CPython 的
+  MT19937 实现（`seed(int, version=2)`、`genrand_res53`、
+  `_randbelow`、Fisher-Yates 全部对齐），同一个整数种子产生与 CPython
+  逐位相同的序列；省略种子时用时间 + pid 播种。`choice` 返回序列的
+  元素类型（支持 list/tuple/str，str 在降级期转 list），`shuffle` 只
+  接受 list。
+- `os`：`mkdir` / `rmdir` / `remove` / `rename` / `getcwd` /
+  `cpu_count`，失败按 errno 抛 OSError 子类（FileNotFoundError /
+  FileExistsError / PermissionError 等）。
+- `os.path`：`join`（变长参数，posixpath 语义）、`exists` / `isdir` /
+  `isfile`。作为独立内建模块支持 `import os.path as p` 与
+  `from os.path import join, exists`。
+- `subprocess.run(args, capture_output=False, text=False,
+  timeout=-1.0, check=False)`：fork/execvp + 管道捕获，返回
+  `CompletedProcess` 原生对象（`.returncode` / `.stdout` / `.stderr`）。
+  超时 SIGKILL 后抛 `TimeoutExpired`；`check=True` 且退出码非零抛
+  `CalledProcessError`；被信号终止时返回码为负信号号。
+- 类型系统新增 `Random` / `CompletedProcess` 两个原生类型：属性读取、
+  方法表、堆类型与 RC 管理、打印文本（`<random.Random object>` /
+  `<subprocess.CompletedProcess object>`）、`str()` 转换全部接通。
+- `TimeoutExpired` / `CalledProcessError` / `SubprocessError` 进入内置
+  异常名表和父类匹配表，可直接 `except TimeoutExpired`。
+
+### 实现说明
+
+- `random` 的模块级函数共用一把静态全局 RNG（C 静态对象，不进 GC
+  链）；实例用 `rc_alloc` 分配，无子对象，GC 保守扫描状态数组。
+- `subprocess.run` 用 `poll` + `waitpid(WNOHANG)` 循环实现超时；捕获时
+  同时读 stdout/stderr 两个管道，关闭后回收子进程。没有捕获时按 10ms
+  粒度轮询退出状态。
+- 已知偏差：没有 bytes 类型，`text=False` 也返回 `str`；没有捕获时
+  `.stdout`/`.stderr` 是空串（CPython 是 None）；`input`/`cwd`/`env`/
+  `shell` 未实现；exec 失败按退出码 127 返回；`from subprocess import
+  TimeoutExpired` 暂不支持（按内置异常名捕获）。
+
+### 验证
+
+- 探针与 CPython 逐行一致：`Random(42)`/`Random(99)` 的
+  randint/random/choice/uniform/shuffle 序列、模块级 `seed()` 后序列、
+  from-import 用法；os 的目录创建/改名/删除、join/exists/isdir/isfile、
+  FileExistsError 捕获；subprocess 的正常输出、非零退出码、
+  stdout/stderr 分离、超时与 check。
+- `ctest --preset dev` 连跑 3 次、release 全绿；810 程序差分零失败；
+  O0/O1 全量 52 个运行用例通过。
+
 ## [0.71] - 2026-11-10
 
 协议 dunder 第二批：哈希/包含/迭代，以及算术与比较运算符重载。
