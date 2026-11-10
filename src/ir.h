@@ -355,6 +355,7 @@ enum class RtFn : uint16_t {
     RegexSplit,            // (regex*, str* text, i64 maxsplit) -> list*
     RegexEscape,           // (str*) -> str*
     RegexGroup,            // (match*, i64 n) -> str*
+    RegexGroupStr,         // (match*, str* name) -> str*
     RegexGroups,           // (match*) -> list*
     RegexStart,            // (match*, i64 n) -> i64
     RegexEnd,              // (match*, i64 n) -> i64
@@ -693,6 +694,7 @@ inline const char* rt_name(RtFn f) {
         case RtFn::RegexSplit: return "py23_re_split";
         case RtFn::RegexEscape: return "py23_re_escape";
         case RtFn::RegexGroup: return "py23_re_group";
+        case RtFn::RegexGroupStr: return "py23_re_group_str";
         case RtFn::RegexGroups: return "py23_re_groups";
         case RtFn::RegexStart: return "py23_re_start";
         case RtFn::RegexEnd: return "py23_re_end";

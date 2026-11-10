@@ -240,6 +240,11 @@ bool Lowerer::builtin_value(const std::string& module, const std::string& member
             ty = t_int();
             return true;
         }
+        if (member == "X" || member == "VERBOSE") {
+            out = const_int(64);
+            ty = t_int();
+            return true;
+        }
     }
     if (module == "math") {
         if (member == "pi") {

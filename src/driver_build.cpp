@@ -790,6 +790,8 @@ py23::ModuleInfoPtr builtin_module(const std::string& name) {
         info->globals["MULTILINE"] = py23::t_int();
         info->globals["S"] = py23::t_int();
         info->globals["DOTALL"] = py23::t_int();
+        info->globals["X"] = py23::t_int();
+        info->globals["VERBOSE"] = py23::t_int();
         auto re_fn = [&](const std::string& n,
                          std::vector<std::pair<std::string, py23::TypePtr>> ps,
                          size_t ndef, py23::TypePtr ret) {

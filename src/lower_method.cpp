@@ -941,7 +941,19 @@ VReg Lowerer::lower_method_call(Attribute& at, Call& c) {
                 err(c.line, c.col, "group() takes at most one argument");
                 return const_none();
             }
-            VReg n = c.args.empty() ? const_int(0) : int_at(0);
+            if (c.args.empty()) {
+                VReg s = call_runtime(RtFn::RegexGroup, t_str(), {recv, const_int(0)});
+                push_temp(s);
+                return s;
+            }
+            TypePtr a0 = tc_.type_of(c.args[0].get());
+            if (a0 && a0->kind == TyKind::Str) {
+                VReg sv = expr(*c.args[0]);
+                VReg s = call_runtime(RtFn::RegexGroupStr, t_str(), {recv, sv});
+                push_temp(s);
+                return s;
+            }
+            VReg n = int_at(0);
             VReg s = call_runtime(RtFn::RegexGroup, t_str(), {recv, n});
             push_temp(s);
             return s;

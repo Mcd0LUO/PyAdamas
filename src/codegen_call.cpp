@@ -532,6 +532,7 @@ void AsmGen::gen_call_rt(const Inst& in) {
             case RtFn::FileReadLines:
             case RtFn::FileTruncate:
             case RtFn::CollMostCommon:
+            case RtFn::RegexGroupStr:
                 emit2("movq", src_op(in.args[0]), "%rdi");
                 emit2("movq", src_op(in.args[1]), "%rsi");
                 break;

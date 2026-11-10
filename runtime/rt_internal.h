@@ -624,6 +624,7 @@ int64_t py23_re_compile(Py23Str* pat, int64_t flags);
 int64_t py23_re_search_str(Py23Str* pat, Py23Str* text, int64_t flags, int64_t mode);
 int64_t py23_re_search(Py23Regex* re, Py23Str* text, int64_t mode);
 int64_t py23_re_group(Py23Match* m, int64_t n);
+int64_t py23_re_group_str(Py23Match* m, Py23Str* name);
 int64_t py23_re_groups(Py23Match* m);
 int64_t py23_re_start(Py23Match* m, int64_t n);
 int64_t py23_re_end(Py23Match* m, int64_t n);
