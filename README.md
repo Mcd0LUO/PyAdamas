@@ -89,16 +89,22 @@ src/
   token.h  lexer.h        词法：记号定义、缩进敏感分析器
   ast.h    parser.cpp     语法：AST 节点、递归下降解析器
   desugar.cpp             lambda 脱糖成合成嵌套 def
-  typecheck*.cpp          类型：规则、推断、内置函数表（按语句/表达式/调用拆分）
-  ir.h     lower*.cpp     IR：三地址码、AST → IR 降级（按语句/表达式/调用/生成器拆分）
+  typecheck*.cpp          类型：规则、推断、内置函数表（按语句/表达式/调用/内置拆分）
+  ir.h     lower*.cpp     IR：三地址码、AST → IR 降级（按语句/表达式/调用/内置/方法/打印/推导式/导入/匹配/生成器拆分）
+  opt*.cpp                O2 优化：折叠/内联/循环不变外提/下标版本化
   codegen*.cpp            x86-64：寄存器分配、基本块、指令选择、调用
-  main.cpp                CLI：把各阶段串起来
+  main.cpp                CLI 分派与前端入口
+  driver_build.cpp        多模块解析、增量缓存、汇编与链接
 runtime/
   rt_internal.h           运行时内部接口：类型、全局状态、内部函数声明
   rt_core.c  rt_exc.c     引用计数/GC/闭包、异常与 handler 栈
   rt_gen.c   rt_agen.c    生成器帧、异步生成器驱动
   rt_async.c rt_task.c    事件循环/协程、Task 与 Future、fd 等待
-  rt_obj.c                字符串/列表/字典/切片/对象/输出/math
+  rt_str.c   rt_list.c    字符串/字符串方法、列表/排序/归约
+  rt_dict.c  rt_slice.c   字典/集合、查找/切片/range
+  rt_class.c rt_math.c    对象布局/类型检查、math/sys/panic
+  rt_complex.c rt_format.c 复数、f-string 格式化与 repr
+  rt_file.c               文件对象与文本编码
 tests/                    正例 / 反例 / 运行用例 / 差分测试
 docs/                     设计与参考文档
 tools/                    一次性脚本

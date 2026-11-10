@@ -4,6 +4,33 @@
 
 早期阶段没有逐条留痕，按阶段归纳；0.4 之后逐条记录。
 
+## [0.51] - 2026-11-10
+
+重构：拆分上帝文件，无行为变化。
+
+### 结构
+
+- `lower_expr.cpp` 拆出 `lower_comp.cpp`（推导式）
+- `lower_call.cpp` 拆出 `lower_builtin.cpp`（内置分派）、`lower_aggregate.cpp`
+  （min/max/sum/any/all）、`lower_method.cpp`（方法/super）、
+  `lower_print.cpp`（print 与 `print_value`，后者来自 lower_expr）
+- `lower_exc.cpp` 拆出 `lower_import.cpp`、`lower_match.cpp`
+- `typecheck_call.cpp` 拆出 `typecheck_builtin.cpp`
+- `opt.cpp` 拆为 `opt_fold.cpp` / `opt_inline.cpp` / `opt_loop.cpp` +
+  `opt_detail.h`，驱动只留调度
+- `rt_obj.c` 按职责拆成 `rt_str.c` / `rt_list.c` / `rt_dict.c` /
+  `rt_slice.c` / `rt_class.c` / `rt_math.c` / `rt_complex.c` /
+  `rt_format.c` / `rt_file.c`，CMake 运行时 parts 同步
+- `main.cpp` 拆出 `driver_util.*`（文件/诊断/临时文件）与
+  `driver_build.*`（多模块构建、缓存、汇编、链接）
+
+### 验证
+
+- 每步单独构建 + `ctest --preset dev`
+- 全部完成后 dev×3 / release 全绿，810 程序差分零失败，O0/O1 全量
+  52 个运行用例通过
+- 最大源文件从 3059 行降到 1143 行（`lower_stmt.cpp`）
+
 ## [0.50] - 2026-11-10
 
 补内置函数：`isinstance` / `getattr` / `setattr` / `hasattr`。

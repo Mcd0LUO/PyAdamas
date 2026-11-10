@@ -70,10 +70,10 @@ typecheck.h ──────────────────────�
      ↑
 codegen.h/cpp
      ↑
-  main.cpp（唯一知道所有阶段的文件）
+  main.cpp + driver_build.cpp（唯一知道所有阶段的文件）
 ```
 
-只有 `main.cpp` 同时 include 全部阶段，负责把它们串起来、统一报错格式、决定 CLI 模式。任何阶段都不 include `main.cpp`，也不互相跨层调用（`lower` 是唯一一个同时依赖 AST 和类型检查的阶段，这是它存在的意义）。
+只有 `main.cpp` / `driver_build.cpp` 同时 include 全部阶段：前者做 CLI 分派与前端入口，后者负责多模块编译、增量缓存与链接，并统一报错格式。任何阶段都不 include 它们，也不互相跨层调用（`lower` 是唯一一个同时依赖 AST 和类型检查的阶段，这是它存在的意义）。
 
 ## 关键取舍
 

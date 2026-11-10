@@ -31,7 +31,7 @@ rm -rf build/dev                   # 连 CMake 中间产物一起清
 
 ### 增量原理
 
-源码按翻译单元拆成 8 个 `.cpp`，Ninja 根据编译器的 depfile 跟踪头文件，改哪个 `.cpp` 只重编哪个 `.o`，改 `.h` 只重编真正依赖它的单元。dev/release 是两个独立 build 目录，`-O` 级别不会混。
+源码按翻译单元拆成多个 `.cpp`，Ninja 根据编译器的 depfile 跟踪头文件，改哪个 `.cpp` 只重编哪个 `.o`，改 `.h` 只重编真正依赖它的单元。dev/release 是两个独立 build 目录，`-O` 级别不会混。
 
 | 场景 | 耗时 |
 |---|---|
@@ -255,9 +255,9 @@ g++ -std=c++23 -O0 -g -Wall -Wextra -Wshadow -Wnon-virtual-dtor -Wold-style-cast
 
 ### 加一个内置函数
 
-1. `typecheck_call.cpp` 的 `builtin_call()`：加签名规则
+1. `typecheck_builtin.cpp` 的 `builtin_call()`：加签名规则
 2. `typecheck_call.cpp` 的 `is_builtin_callable()`：登记名字
-3. `lower_call.cpp` 的 `lower_builtin_call()`：降级（可能展开成多条指令，也可能调运行时）
+3. `lower_builtin.cpp` 的 `lower_builtin_call()`：降级（可能展开成多条指令，也可能调运行时）
 4. `tests/`：正例 + 反例
 
 ### 加一个运行时函数
