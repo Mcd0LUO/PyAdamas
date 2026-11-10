@@ -496,6 +496,7 @@ VReg Lowerer::lower_constant(Constant& c) {
             return def_heap(t_complex(), std::move(in));
         }
         case Constant::CK::Str: return const_str(c.s);
+        case Constant::CK::Bytes: return const_str(c.s);
         case Constant::CK::Ellipsis:
             err(c.line, c.col, "Ellipsis is not supported by the code generator");
             return const_none();
@@ -513,7 +514,8 @@ VReg Lowerer::lower_binop(BinOp& b) {
     if (ty) {
         bool bad = false;
         switch (ty->kind) {
-            case TyKind::Str: bad = b.op != Tok::PLUS; break;
+            case TyKind::Str:
+            case TyKind::Bytes: bad = b.op != Tok::PLUS; break;
             case TyKind::List:
             case TyKind::Tuple:
             case TyKind::Set:
@@ -724,8 +726,9 @@ VReg Lowerer::lower_compare(Compare& c) {
                         if (key_kind(sub) != ck) { ck = 3; break; }
                 }
                 flag = call_runtime(RtFn::ListContains, t_bool(), {r, l, const_int(ck)});
-            } else if (rt && rt->kind == TyKind::Str) {
-                if (lt && lt->kind != TyKind::Str && lt->kind != TyKind::Unknown) {
+            } else if (rt && (rt->kind == TyKind::Str || rt->kind == TyKind::Bytes)) {
+                if (lt && lt->kind != TyKind::Str && lt->kind != TyKind::Bytes &&
+                    lt->kind != TyKind::Unknown) {
                     err(c.line, c.col,
                         std::format("'in <str>' requires a string, got '{}'", type_name(lt)));
                     return const_bool(false);
@@ -855,7 +858,7 @@ VReg Lowerer::lower_subscript(Subscript& s) {
         VReg start = bound(sl.lower);
         VReg stop = bound(sl.upper);
         VReg step = bound(sl.step);
-        if (ot && ot->kind == TyKind::Str) {
+        if (ot && (ot->kind == TyKind::Str || ot->kind == TyKind::Bytes)) {
             VReg v = call_runtime(RtFn::StrSlice, ty, {obj, start, stop, step});
             push_temp(v);
             return v;
@@ -878,6 +881,11 @@ VReg Lowerer::lower_subscript(Subscript& s) {
     if (ot && ot->kind == TyKind::Set) {
         err(s.line, s.col, "set is not subscriptable");
         return const_none();
+    }
+    if (ot && ot->kind == TyKind::Bytes) {
+        // bytes 下标返回 0..255 的整数，不是单字节切片
+        idx = coerce(idx, tc_.type_of(s.slice.get()), t_int());
+        return call_runtime(RtFn::BytesAt, t_int(), {obj, idx});
     }
     // 外层是 for k in range(len(a)) 且提示仍然有效：记下这条 IndexLoad，
     // 等循环体降级完、确认没有副作用后再改成免检查。

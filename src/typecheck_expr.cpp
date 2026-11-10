@@ -35,6 +35,7 @@ TypePtr TypeChecker::expr(Expr& e) {
                     case Constant::CK::Float: return t_float();
                     case Constant::CK::Complex: return t_complex();
                     case Constant::CK::Str: return t_str();
+                    case Constant::CK::Bytes: return t_bytes();
                     case Constant::CK::Ellipsis: return t_unknown();
                 }
                 return t_unknown();
@@ -194,7 +195,8 @@ TypePtr TypeChecker::expr(Expr& e) {
                     if (sl.lower) expr(*sl.lower);
                     if (sl.upper) expr(*sl.upper);
                     if (sl.step) expr(*sl.step);
-                    if (ot->kind == TyKind::List || ot->kind == TyKind::Str)
+                    if (ot->kind == TyKind::List || ot->kind == TyKind::Str ||
+                        ot->kind == TyKind::Bytes)
                         return ot;
                     if (ot->kind == TyKind::Tuple) {
                         // 切片长度不可知，元素类型仍是原来的元素类型：
@@ -689,6 +691,7 @@ TypePtr TypeChecker::binop_type(Tok op, TypePtr l, TypePtr r, int line, int col)
             case Tok::PLUS:
                 if (is_num(l) && is_num(r)) return promote(l, r);
                 if (l->kind == TyKind::Str && r->kind == TyKind::Str) return t_str();
+                if (l->kind == TyKind::Bytes && r->kind == TyKind::Bytes) return t_bytes();
                 // 异常值参与字符串拼接时按消息处理，兼容旧代码 "msg:" + e
                 if (l->kind == TyKind::Str && r->kind == TyKind::Exception) return t_str();
                 if (l->kind == TyKind::Exception && r->kind == TyKind::Str) return t_str();
@@ -756,6 +759,7 @@ void TypeChecker::compare_type(CmpOp op, TypePtr l, TypePtr r, int line, int col
             case CmpOp::Ge:
                 if (is_num(l) && is_num(r)) return;
                 if (l->kind == TyKind::Str && r->kind == TyKind::Str) return;
+                if (l->kind == TyKind::Bytes && r->kind == TyKind::Bytes) return;
                 // 元组按字典序比较（版本号、日期这类 (a, b) 比较很常见）
                 if (l->kind == TyKind::Tuple && r->kind == TyKind::Tuple) return;
                 if (l->kind == TyKind::List && r->kind == TyKind::List) return;
@@ -776,7 +780,8 @@ void TypeChecker::compare_type(CmpOp op, TypePtr l, TypePtr r, int line, int col
             case CmpOp::In:
             case CmpOp::NotIn:
                 if (r->kind == TyKind::List || r->kind == TyKind::Set || r->kind == TyKind::Str ||
-                    r->kind == TyKind::Dict || r->kind == TyKind::Tuple)
+                    r->kind == TyKind::Bytes || r->kind == TyKind::Dict ||
+                    r->kind == TyKind::Tuple)
                     return;
                 // 类可能实现了 __iter__（或从外部基类继承），静态上看不见
                 if (r->kind == TyKind::Class) return;
@@ -796,6 +801,11 @@ TypePtr TypeChecker::subscript_type(TypePtr obj, TypePtr idx, int line, int col)
                 if (!is_unknown(idx) && idx->kind != TyKind::Int && idx->kind != TyKind::Bool)
                     err(line, col, std::format("string index must be int, got '{}'", type_name(idx)));
                 return t_str();
+            case TyKind::Bytes:
+                // bytes 下标取的是那个字节的整数值，不是单字节切片
+                if (!is_unknown(idx) && idx->kind != TyKind::Int && idx->kind != TyKind::Bool)
+                    err(line, col, std::format("bytes index must be int, got '{}'", type_name(idx)));
+                return t_int();
             case TyKind::Tuple:
                 // 长度不定的元组，下标拿到的就是元素类型
                 return obj->variadic && !obj->sub.empty() ? obj->sub[0] : t_unknown();
@@ -821,6 +831,7 @@ TypePtr TypeChecker::iter_elem(TypePtr it, int line, int col) {
             case TyKind::Set:
                 return it->sub[0];
             case TyKind::Str: return t_str();
+            case TyKind::Bytes: return t_int();
             case TyKind::Dict: return it->sub[0];
             case TyKind::File: return t_str();  // for line in f
             case TyKind::Tuple: {

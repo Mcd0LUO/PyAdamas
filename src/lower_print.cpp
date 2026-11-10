@@ -14,6 +14,7 @@ void Lowerer::print_value(VReg v, TypePtr ty, int line, int col) {
         case TyKind::Bool: call_void(RtFn::PrintBool, {v}); break;
         case TyKind::Float: call_void(RtFn::PrintF64, {v}); break;
         case TyKind::Str: call_void(RtFn::PrintStr, {v}); break;
+        case TyKind::Bytes: call_void(RtFn::PrintBytes, {v}); break;
         case TyKind::Int: call_void(RtFn::PrintI64, {v}); break;
         case TyKind::List: print_seq(v, ty, false, false, line, col); break;
         case TyKind::Tuple: print_seq(v, ty, true, false, line, col); break;

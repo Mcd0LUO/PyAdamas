@@ -559,6 +559,8 @@ int rc_index_has(Py23Rc* h);
 void py23_print_f64(double v);
 void py23_print_bool(int64_t v);
 void py23_print_str(Py23Str* s);
+void py23_print_bytes(Py23Str* s);
+int64_t py23_bytes_at(Py23Str* s, int64_t i);
 void py23_print_none(void);
 void py23_print_sep(void);
 void py23_print_end(void);

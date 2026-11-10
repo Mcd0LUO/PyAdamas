@@ -206,7 +206,7 @@ void AsmGen::gen_const_float(const Inst& in) {
 
 void AsmGen::gen_bin(const Inst& in) {
         TypePtr ty = in.ty;
-        if (ty && ty->kind == TyKind::Str) {
+        if (ty && (ty->kind == TyKind::Str || ty->kind == TyKind::Bytes)) {
             if (in.bop != BinKind::Add) {
                 line("# unsupported string operator");
                 return;
@@ -500,7 +500,7 @@ void AsmGen::emit_truth(VReg r, const char* byte_reg) {
 
 void AsmGen::gen_cmp(const Inst& in) {
         TypePtr ty = ty_of(in.a);
-        if (ty && ty->kind == TyKind::Str) {
+        if (ty && (ty->kind == TyKind::Str || ty->kind == TyKind::Bytes)) {
             emit2("movq", src_op(in.a), "%rdi");
             emit2("movq", src_op(in.b), "%rsi");
             if (in.cop == CmpKind::Eq || in.cop == CmpKind::Ne) {

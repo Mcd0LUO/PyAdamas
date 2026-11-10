@@ -44,6 +44,7 @@ inline std::optional<ConstVal> as_const(const Expr* e) {
         case Constant::CK::Float: v.ty = t_float(); v.f = c.f; return v;
         case Constant::CK::Complex: return std::nullopt;
         case Constant::CK::Str: v.ty = t_str(); v.s = c.s; return v;
+        case Constant::CK::Bytes: v.ty = t_bytes(); v.s = c.s; return v;
         case Constant::CK::Ellipsis: return std::nullopt;
     }
     return std::nullopt;

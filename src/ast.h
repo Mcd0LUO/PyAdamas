@@ -68,7 +68,7 @@ inline void pad(std::ostream& os, int n) {
 }
 
 struct Constant : Expr {
-    enum class CK : uint8_t { None, Bool, Int, Float, Str, Complex, Ellipsis } ck = CK::None;
+    enum class CK : uint8_t { None, Bool, Int, Float, Str, Bytes, Complex, Ellipsis } ck = CK::None;
     bool b = false;
     int64_t i = 0;
     double f = 0.0;
@@ -119,6 +119,7 @@ struct Constant : Expr {
             case CK::Float: os << "Constant(" << f << ")\n"; break;
             case CK::Complex: os << "Constant(" << im << "j)\n"; break;
             case CK::Str: os << "Constant(" << quote(s) << ")\n"; break;
+            case CK::Bytes: os << "Constant(b" << quote(s) << ")\n"; break;
             case CK::Ellipsis: os << "Constant(Ellipsis)\n"; break;
         }
     }

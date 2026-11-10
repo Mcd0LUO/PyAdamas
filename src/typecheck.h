@@ -40,6 +40,7 @@ enum class TyKind : uint8_t {
     Float,
     Complex,
     Str,
+    Bytes,  // b"..."：运行时和 str 同一套表示，类型上区分
     List,
     Set,
     Dict,
@@ -416,6 +417,10 @@ inline const TypePtr& t_str() {
     static TypePtr v = new_ty(TyKind::Str);
     return v;
 }
+inline const TypePtr& t_bytes() {
+    static TypePtr v = new_ty(TyKind::Bytes);
+    return v;
+}
 inline const TypePtr& t_file() {
     static TypePtr v = new_ty(TyKind::File);
     return v;
@@ -573,6 +578,7 @@ inline std::string type_name_impl(const TypePtr& t, int depth) {
         case TyKind::Float: return "float";
         case TyKind::Complex: return "complex";
         case TyKind::Str: return "str";
+        case TyKind::Bytes: return "bytes";
         case TyKind::List:
             return t->sub.empty() ? "list"
                                   : std::format("list[{}]", type_name_impl(t->sub[0], depth + 1));

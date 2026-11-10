@@ -1168,6 +1168,30 @@ VReg Lowerer::lower_method_call(Attribute& at, Call& c) {
         return const_none();
     }
 
+    if (recv_ty && recv_ty->kind == TyKind::Bytes) {
+        if (at.attr == "decode") {
+            // bytes 和 str 同一套运行时表示，解码就是改标类型；
+            // 编码参数（utf-8 之类）在按字节的世界里没有意义，忽略。
+            for (auto& a : c.args) expr(*a);
+            return recv;
+        }
+        // 其余方法在字节层面和 str 完全一致，直接借道 StrMethod。
+        if (at.attr == "upper" || at.attr == "lower" || at.attr == "strip" ||
+            at.attr == "lstrip" || at.attr == "rstrip" || at.attr == "replace") {
+            VReg l = call_runtime(RtFn::ListNew, mk_list(t_str()), {const_int(0)});
+            push_temp(l);
+            for (auto& a : c.args) {
+                VReg v = expr(*a);
+                call_void(RtFn::ListAppend, {l, v});
+            }
+            VReg r = call_runtime(RtFn::StrMethod, t_bytes(),
+                                  {recv, const_int(0), const_int(0), const_int(0), l});
+            push_temp(r);
+            return r;
+        }
+        err(c.line, c.col, std::format("bytes method '{}' is not supported", at.attr));
+        return const_none();
+    }
     if (recv_ty && recv_ty->kind == TyKind::Str) {
         if (!c.keywords.empty()) {
             err(c.line, c.col,
@@ -1177,7 +1201,7 @@ VReg Lowerer::lower_method_call(Attribute& at, Call& c) {
         auto need_str = [&](size_t i) -> VReg {
             VReg v = expr(*c.args[i]);
             TypePtr t = tc_.type_of(c.args[i].get());
-            if (!t || t->kind != TyKind::Str)
+            if (!t || (t->kind != TyKind::Str && t->kind != TyKind::Bytes))
                 err(c.args[i]->line, c.args[i]->col,
                     std::format("str.{}() expects a string argument", at.attr));
             return v;
@@ -1187,6 +1211,11 @@ VReg Lowerer::lower_method_call(Attribute& at, Call& c) {
             VReg v = expr(*c.args[i]);
             return coerce(v, tc_.type_of(c.args[i].get()), t_int());
         };
+        if (at.attr == "encode") {
+            // 按字节的世界里编码就是改标类型；编码名参数忽略。
+            for (auto& a : c.args) expr(*a);
+            return recv;
+        }
         auto arg_count = [&](size_t lo, size_t hi) {
             if (c.args.size() >= lo && c.args.size() <= hi) return true;
             err(c.line, c.col,

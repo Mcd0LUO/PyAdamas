@@ -88,6 +88,7 @@ enum class RtFn : uint16_t {
     ListSetLen,  // (list*, i64) -> void
     StrConcat,   // (str*, str*) -> str*
     StrCharAt,   // (str*, i64) -> str*
+    BytesAt,     // (bytes*, i64) -> i64
     StrFromI64,  // (i64) -> str*
     StrFromF64,  // (f64) -> str*
     StrFromBool, // (i64) -> str*
@@ -128,7 +129,8 @@ enum class RtFn : uint16_t {
     PrintAny,    // (i64) -> void
     PrintF64,    // (f64) -> void
     PrintBool,   // (i64) -> void
-    PrintStr,    // (str*) -> void
+    PrintStr,
+    PrintBytes,    // (str*) -> void
     PrintNone,   // () -> void
     PrintSep,    // () -> void  打印一个空格
     PrintEnd,    // () -> void  打印换行
@@ -382,6 +384,7 @@ inline const char* rt_name(RtFn f) {
         case RtFn::ListSetLen: return "py23_list_set_len";
         case RtFn::StrConcat: return "py23_str_concat";
         case RtFn::StrCharAt: return "py23_str_char_at";
+        case RtFn::BytesAt: return "py23_bytes_at";
         case RtFn::StrFromI64: return "py23_str_from_i64";
         case RtFn::StrFromF64: return "py23_str_from_f64";
         case RtFn::StrFromBool: return "py23_str_from_bool";
@@ -423,6 +426,7 @@ inline const char* rt_name(RtFn f) {
         case RtFn::PrintF64: return "py23_print_f64";
         case RtFn::PrintBool: return "py23_print_bool";
         case RtFn::PrintStr: return "py23_print_str";
+        case RtFn::PrintBytes: return "py23_print_bytes";
         case RtFn::PrintNone: return "py23_print_none";
         case RtFn::PrintSep: return "py23_print_sep";
         case RtFn::PrintEnd: return "py23_print_end";
@@ -1003,6 +1007,7 @@ inline bool ir_is_heap(const TypePtr& t) {
     if (!t) return false;
     switch (t->kind) {
         case TyKind::Str:
+        case TyKind::Bytes:
         case TyKind::List:
         case TyKind::Tuple:
         case TyKind::Class:
@@ -1041,6 +1046,7 @@ inline bool ir_is_ref(const TypePtr& t) {
     if (!t) return false;
     switch (t->kind) {
         case TyKind::Str:
+        case TyKind::Bytes:
         case TyKind::List:
         case TyKind::Set:
         case TyKind::Dict:

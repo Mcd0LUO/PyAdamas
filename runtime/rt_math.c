@@ -306,6 +306,47 @@ void py23_print_bool(int64_t v) { fputs(v ? "True" : "False", stdout); }
 
 void py23_print_str(Py23Str* s) { fwrite(s->data, 1, (size_t)s->len, stdout); }
 
+// bytes 下标：返回那个字节的整数值（0..255），不是单字节切片。
+int64_t py23_bytes_at(Py23Str* s, int64_t i) {
+    if (!s) return 0;
+    if (i < 0) i += s->len;
+    if (i < 0 || i >= s->len) py23_raise_c("IndexError", "bytes index out of range");
+    return (unsigned char)s->data[i];
+}
+
+// bytes 的 repr：b'...'，不可打印字节转成 \xNN。CPython 的引号选择规则：
+// 内容里有单引号且没有双引号时改用双引号，避免转义。
+void py23_print_bytes(Py23Str* s) {
+    int has_s = 0, has_d = 0;
+    for (int64_t i = 0; i < s->len; ++i) {
+        if (s->data[i] == '\'') has_s = 1;
+        if (s->data[i] == '"') has_d = 1;
+    }
+    char q = (has_s && !has_d) ? '"' : '\'';
+    putchar('b');
+    putchar(q);
+    for (int64_t i = 0; i < s->len; ++i) {
+        unsigned char c = (unsigned char)s->data[i];
+        if (c == (unsigned char)q) {
+            putchar('\\');
+            putchar(q);
+        } else if (c == '\\') {
+            fputs("\\\\", stdout);
+        } else if (c == '\n') {
+            fputs("\\n", stdout);
+        } else if (c == '\r') {
+            fputs("\\r", stdout);
+        } else if (c == '\t') {
+            fputs("\\t", stdout);
+        } else if (c >= 0x20 && c < 0x7f) {
+            putchar((int)c);
+        } else {
+            printf("\\x%02x", (unsigned)c);
+        }
+    }
+    putchar(q);
+}
+
 void py23_print_none(void) { fputs("None", stdout); }
 
 void py23_print_sep(void) { fputc(' ', stdout); }

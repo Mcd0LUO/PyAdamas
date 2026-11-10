@@ -532,6 +532,7 @@ void AsmGen::gen_call_rt(const Inst& in) {
             case RtFn::FileReadLines:
             case RtFn::FileTruncate:
             case RtFn::CollMostCommon:
+            case RtFn::BytesAt:
             case RtFn::RegexGroupStr:
             case RtFn::RegexExpand:
             case RtFn::RegexFindIter:
@@ -847,6 +848,7 @@ void AsmGen::gen_call_rt(const Inst& in) {
                 emit2("movq", src_op(in.args[0]), "%rdi");
                 break;
             case RtFn::PrintStr:
+            case RtFn::PrintBytes:
                 emit2("movq", src_op(in.args[0]), "%rdi");
                 break;
             case RtFn::StrFromNone:

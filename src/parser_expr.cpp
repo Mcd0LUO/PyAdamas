@@ -375,8 +375,13 @@ ExprPtr Parser::parse_atom() {
                 n->i = t.ival;
                 return n;
             }
-            case Tok::BYTES:
-                throw err_at("bytes literals are not supported by this compiler", ln, cl);
+            case Tok::BYTES: {
+                auto t = advance();
+                auto n = node_at<Constant>(ln, cl);
+                n->ck = Constant::CK::Bytes;
+                n->s = t.text;
+                return n;
+            }
             case Tok::FLOAT: {
                 auto t = advance();
                 auto n = node_at<Constant>(ln, cl);

@@ -4,6 +4,32 @@
 
 早期阶段没有逐条留痕，按阶段归纳；0.4 之后逐条记录。
 
+## [0.79] - 2026-11-10
+
+`bytes` 字面量与基本操作。
+
+### 新增
+
+- **`bytes` 字面量**：`b"..."` / `b'...'` 不再被解析器拒绝。运行时复用 `str`
+  的表示（同样的 `Py23Str` 布局和 RC 头），类型层面用 `TyKind::Bytes` 区分。
+- 索引 `b[i]` 返回该字节的整数值（0..255），切片返回 `bytes`；
+  `len` / `+` / `in` / `==` / 大小比较都按字节工作。
+- `str.encode()` 返回 `bytes`、`bytes.decode()` 返回 `str`——两者同表示，
+  实现上只是改标类型，零成本。
+- `bytes` 的 `repr`：`b'...'`，不可打印字节转 `\xNN`；内容含单引号且不含
+  双引号时改用双引号（与 CPython 一致）。
+- `bytes` 方法：`upper` / `lower` / `strip` / `lstrip` / `rstrip` / `replace`。
+
+### 测试
+
+- `tests/run/63_bytes.py`；删除过时的反例 `tests/fail/f23_bytes.py`。
+
+### 已知限制
+
+- `for c in b"..."` 还没接（迭代 bytes 要转成 `list[int]`）。
+- `bytes` 还没有格式化、`%`、`join`、`find`、`startswith` 之外的大部分方法。
+- `bytes` 跨模块接口降级成 `unknown`（`enc_type` 里归到 unknown 组）。
+
 ## [0.78] - 2026-11-10
 
 `print` 对 unknown 值做运行时分派，`re.sub` 支持函数回调。

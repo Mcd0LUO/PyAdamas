@@ -1159,6 +1159,34 @@ TypePtr TypeChecker::method_call(TypePtr recv, const std::string& name, Call& c,
             if (name == "copy") { argc(0, 0); return recv; }
         }
 
+        if (recv->kind == TyKind::Bytes) {
+            if (!c.keywords.empty())
+                err(c.line, c.col, std::format("bytes.{}() does not take keyword arguments", name));
+            if (name == "decode") {
+                argc(0, 1);
+                return t_str();
+            }
+            if (name == "upper" || name == "lower" || name == "strip" || name == "lstrip" ||
+                name == "rstrip") {
+                argc(0, 1);
+                return t_bytes();
+            }
+            if (name == "startswith" || name == "endswith") {
+                argc(1, 1);
+                return t_bool();
+            }
+            if (name == "find" || name == "rfind" || name == "count") return t_int();
+            if (name == "replace") {
+                argc(2, 3);
+                return t_bytes();
+            }
+            if (name == "split") {
+                argc(0, 2);
+                return mk_list(t_bytes());
+            }
+            err(c.line, c.col, std::format("bytes has no method '{}'", name));
+            return t_unknown();
+        }
         if (recv->kind == TyKind::Str) {
             if (name == "upper" || name == "lower" || name == "strip" || name == "lstrip" ||
                 name == "rstrip" || name == "title" || name == "capitalize" ||
@@ -1189,7 +1217,7 @@ TypePtr TypeChecker::method_call(TypePtr recv, const std::string& name, Call& c,
                 return t_str();
             if (name == "partition" || name == "rpartition")
                 return mk_tuple({t_str(), t_str(), t_str()});
-            if (name == "encode") return t_unknown();
+            if (name == "encode") return t_bytes();
         }
 
         if (recv->kind == TyKind::Regex) {
