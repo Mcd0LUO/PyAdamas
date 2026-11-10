@@ -154,6 +154,47 @@ void Lowerer::print_seq(VReg v, TypePtr ty, bool tuple, bool to_file, int line, 
             call_void(RtFn::PrintStr, {const_str(s)});
     };
     write(tuple ? "(" : "[");
+
+    // 定长 tuple 的元素类型可以逐个不同（d.items() 返回 (str, int) 这种）。
+    // 循环体里只能用一个静态类型；类型不一致就按常量下标展开，每个元素用
+    // 自己的类型打印。否则 int 会被当成 str 交给 repr，直接段错误。
+    if (tuple && !ty->variadic && ty->sub.size() > 1) {
+        bool same = true;
+        for (size_t i = 1; i < ty->sub.size(); ++i)
+            if (!type_eq(ty->sub[0], ty->sub[i])) {
+                same = false;
+                break;
+            }
+        if (!same) {
+            for (size_t i = 0; i < ty->sub.size(); ++i) {
+                if (i) write(", ");
+                Inst get;
+                get.op = IrOp::IndexLoad;
+                get.a = v;
+                get.b = const_int(static_cast<int64_t>(i));
+                VReg ev = def(ty->sub[i], std::move(get));
+                if (ty->sub[i] && ty->sub[i]->kind == TyKind::Str) {
+                    Inst rp;
+                    rp.op = IrOp::CallRt;
+                    rp.imm = static_cast<int64_t>(RtFn::ReprStr);
+                    rp.args = {ev};
+                    VReg rs = def_heap(t_str(), std::move(rp));
+                    if (to_file)
+                        call_void(RtFn::FileWrite,
+                                  {load_slot(print_file_slot_, t_file()), rs});
+                    else
+                        call_void(RtFn::PrintStr, {rs});
+                } else if (to_file) {
+                    print_value_to_file(ev, ty->sub[i], line, col);
+                } else {
+                    print_value(ev, ty->sub[i], line, col);
+                }
+            }
+            write(")");
+            return;
+        }
+    }
+
     TypePtr et = ty->sub.empty() ? t_unknown() : ty->sub[0];
 
     int idx = new_temp_slot(t_int());
