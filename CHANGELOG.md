@@ -6,7 +6,7 @@
 
 ## [0.57] - 2026-11-10
 
-asyncio 再补 `Semaphore`。
+asyncio 再补 `Semaphore`，并接通 `frozenset`。
 
 ### 新增
 
@@ -15,6 +15,8 @@ asyncio 再补 `Semaphore`。
   计数累加（与 CPython 一致）。
 - `async with sem:`：进入 acquire、退出（含异常路径）自动 release。
 - `from asyncio import Semaphore` 支持零参形式。
+- `frozenset(seq)`：复用 set 的运行时与去重语义（不强制不可变）；
+  `id()` 的类型检查补成 int（此前只放行）。
 
 ### 验证
 

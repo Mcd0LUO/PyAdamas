@@ -623,7 +623,7 @@ CPython 一致。
 已生成代码：`print` / `len` / `int` / `float` / `str` / `bool` / `range` /
 `next` / `abs` / `min` / `max` / `sum` / `pow` / `any` / `all` / `complex` /
 `ord` / `chr` / `hex` / `bin` / `oct` / `round` / `divmod` / `repr` /
-`format` / `list` / `tuple` / `dict` / `set` / `sorted` / `reversed` /
+`format` / `list` / `tuple` / `dict` / `set` / `frozenset` / `sorted` / `reversed` /
 `enumerate` / `zip` / `input` / `isinstance` / `getattr` / `setattr` /
 `hasattr` / `map` / `filter` / `callable` / `issubclass` / `hash`。
 `min` / `max` 支持多实参和 list/tuple/str/dict/set 迭代，空序列抛
@@ -655,7 +655,8 @@ unknown 值上对带运行期类型标签的类型（str/list/dict/complex）走
 `type(x).__name__` 得到类型名；运行时令牌是驻留字符串，没有动态类对象。
 `id(x)` 返回机器字身份（堆指针 / 整数本身 / 浮点位模式），同进程内稳定，
 数值与 CPython 不同。
-`list(seq)` / `tuple(seq)` 做浅拷贝，`set(seq)` 按键去重，`dict(**kw)`
+`list(seq)` / `tuple(seq)` 做浅拷贝，`set(seq)` / `frozenset(seq)` 按键
+去重（frozenset 复用 set 的运行时，不强制不可变），`dict(**kw)`
 用字符串键；`sorted` 支持 int/float/str 元素（`key=` / `reverse=` 尚未
 支持）；`enumerate` 产出的元素是 `[下标, 值]` 对，`zip` 支持两个可迭代
 对象；这些迭代辅助都返回具体列表，与生成器表达式立即求值的模型一致。

@@ -834,7 +834,7 @@ VReg Lowerer::lower_builtin_call(const std::string& name, Call& c) {
         return d;
     }
 
-    if (name == "set") {
+    if (name == "set" || name == "frozenset") {
         TypePtr ty = tc_.type_of(&c);
         if (!ty || ty->kind != TyKind::Set) ty = mk_set(t_unknown());
         TypePtr et = ty->sub.empty() ? t_unknown() : ty->sub[0];
@@ -846,7 +846,7 @@ VReg Lowerer::lower_builtin_call(const std::string& name, Call& c) {
             return d;
         }
         if (c.args.size() != 1) {
-            err(c.line, c.col, "set() takes at most one argument");
+            err(c.line, c.col, std::format("{}() takes at most one argument", name));
             return const_none();
         }
         TypePtr xt = tc_.type_of(c.args[0].get());
@@ -854,7 +854,7 @@ VReg Lowerer::lower_builtin_call(const std::string& name, Call& c) {
                     xt->kind != TyKind::Str && xt->kind != TyKind::Dict &&
                     xt->kind != TyKind::Set && xt->kind != TyKind::File)) {
             err(c.args[0]->line, c.args[0]->col,
-                std::format("set() cannot iterate over '{}'", type_name(xt)));
+                std::format("{}() cannot iterate over '{}'", name, type_name(xt)));
             return const_none();
         }
         TypePtr se = t_unknown();

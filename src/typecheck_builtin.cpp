@@ -175,6 +175,15 @@ TypePtr TypeChecker::builtin_call(const std::string& n, Call& c) {
             if (!need(1, 1)) return t_unknown();
             return mk_typeobj(a.empty() ? t_unknown() : a[0]);
         }
+        if (n == "frozenset") {
+            if (a.size() > 1)
+                err(c.line, c.col, "frozenset() takes at most one argument");
+            return a.empty() ? mk_set(t_unknown()) : mk_set(iter_elem(a[0], c.line, c.col));
+        }
+        if (n == "id") {
+            if (!need(1, 1)) return t_int();
+            return t_int();
+        }
         if (n == "issubclass") {
             if (!need(2, 2)) return t_bool();
             return t_bool();
@@ -323,12 +332,9 @@ TypePtr TypeChecker::builtin_call(const std::string& n, Call& c) {
             return t_file();
         }
         if (n == "super" || n == "vars" || n == "dir" ||
-            n == "id" || n == "slice" || n == "frozenset" ||
+            n == "slice" ||
             n == "bytearray" || n == "object" || n == "complex" || n == "memoryview") {
             unsupported.push_back(std::format("runtime builtin '{}'", n));
-            // frozenset 是 set 的不可变版本，不是 list；元素类型取参数的元素
-            if (n == "frozenset")
-                return a.empty() ? mk_set(t_unknown()) : mk_set(iter_elem(a[0], c.line, c.col));
             if (n == "bytearray") return a.empty() ? t_unknown() : mk_list(t_unknown());
             if (n == "format") return t_str();
             return t_unknown();
