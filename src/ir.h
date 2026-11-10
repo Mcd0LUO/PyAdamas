@@ -936,4 +936,11 @@ inline bool ir_is_int_like(const TypePtr& t) {
 
 void dump_ir(const IRModule& m, std::ostream& os);
 
+// 程序是否需要「存活堆索引」：unknown 值的保守 retain 靠它判断一个机器字
+// 是不是堆指针。没有任何 unknown 类型、没有编译器发出的 RcIncUnknown、
+// 也不涉及 asyncio/生成器运行时的程序用不到索引，可以在入口关掉维护，
+// 省掉每个堆对象分配/释放时的哈希表插入和删除。
+bool ir_type_contains_unknown(const TypePtr& t);
+bool ir_module_needs_unknown_index(const IRModule& m);
+
 }  // namespace py23

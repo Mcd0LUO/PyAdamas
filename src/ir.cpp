@@ -141,6 +141,81 @@ std::string Inst::text() const {
     return "?";
 }
 
+bool ir_type_contains_unknown(const TypePtr& t) {
+    // 容器元素类型可能递归指回容器自身，限制深度避免无限下钻。
+    struct Walk {
+        static bool go(const TypePtr& x, int depth) {
+            if (!x || depth > 8) return false;
+            if (x->kind == TyKind::Unknown) return true;
+            for (const auto& s : x->sub)
+                if (go(s, depth + 1)) return true;
+            if (x->fn) {
+                for (const auto& p : x->fn->pos)
+                    if (go(p.ty, depth + 1)) return true;
+                for (const auto& p : x->fn->kwonly)
+                    if (go(p.ty, depth + 1)) return true;
+                if (go(x->fn->ret, depth + 1)) return true;
+                if (go(x->fn->vararg_ty, depth + 1)) return true;
+                if (go(x->fn->kwarg_ty, depth + 1)) return true;
+                if (go(x->fn->async_result, depth + 1)) return true;
+            }
+            return false;
+        }
+    };
+    return Walk::go(t, 0);
+}
+
+bool ir_module_needs_unknown_index(const IRModule& m) {
+    // asyncio / 生成器运行时内部无条件地用 unknown 保守 retain 等待结果
+    // 和帧值（rt_async.c / rt_task.c / rt_agen.c），这些调用在 IR 里
+    // 看不出来，只能按模块整体保守打开。
+    if (!m.generators.empty()) return true;
+    for (const auto& name : m.imports)
+        if (name == "asyncio") return true;
+    for (const auto& g : m.globals)
+        if (ir_type_contains_unknown(g.ty)) return true;
+
+    // 运行期类型检查也靠这张注册表确认「这个机器字确实是某类堆对象」：
+    // super()、isinstance、异常匹配、unknown 值上的容器/字符串模式。
+    // 这些调用即使操作数静态类型确定也会走索引，不能关。
+    auto registry_rtfn = [](RtFn fn) {
+        switch (fn) {
+            case RtFn::IsInstance:
+            case RtFn::IsNamedClass:
+            case RtFn::IsException:
+            case RtFn::IsSeq:
+            case RtFn::IsDict:
+            case RtFn::StrEqUnknown:
+            case RtFn::ComplexEqUnknown:
+            case RtFn::IsStr:
+            case RtFn::IsComplex:
+                return true;
+            default:
+                return false;
+        }
+    };
+
+    for (const auto& fp : m.funcs) {
+        const IRFunction& f = *fp;
+        if (ir_type_contains_unknown(f.ret)) return true;
+        for (const auto& p : f.params)
+            if (ir_type_contains_unknown(p.ty)) return true;
+        for (const auto& t : f.slot_ty)
+            if (ir_type_contains_unknown(t)) return true;
+        for (const auto& t : f.vreg_ty)
+            if (ir_type_contains_unknown(t)) return true;
+        for (const auto& b : f.blocks)
+            for (const auto& in : b.insts) {
+                if (in.op == IrOp::SuperVCall) return true;
+                if (in.op == IrOp::CallRt) {
+                    RtFn fn = static_cast<RtFn>(in.imm);
+                    if (fn == RtFn::RcIncUnknown || registry_rtfn(fn)) return true;
+                }
+            }
+    }
+    return false;
+}
+
 void dump_ir(const IRModule& m, std::ostream& os) {
     os << std::format("; globals: {}\n", m.globals.size());
     for (size_t i = 0; i < m.globals.size(); ++i)

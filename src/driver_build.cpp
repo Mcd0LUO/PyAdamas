@@ -20,6 +20,7 @@
 #include <sstream>
 #include <string>
 #include <string_view>
+#include <sys/stat.h>
 #include <vector>
 
 #include "ast.h"
@@ -247,6 +248,20 @@ bool parse_unit(ModuleUnit& u) {
     return false;
 }
 
+// 编译器/运行时的构建指纹。源码没变但换了编译器时不能复用旧对象：
+// 代码生成和运行时的行为不进源码哈希，旧清单必须失效。
+std::string toolchain_id() {
+    auto one = [](const char* path) {
+        struct stat st {};
+        if (::stat(path, &st) != 0) return std::string("na");
+        return std::format("{}:{}:{}", static_cast<long long>(st.st_size),
+                           static_cast<long long>(st.st_mtim.tv_sec),
+                           static_cast<long long>(st.st_mtim.tv_nsec));
+    };
+    static const std::string id = one("/proc/self/exe") + "|" + one(PY23_RT_OBJ);
+    return id;
+}
+
 void set_cache_paths(ModuleUnit& u) {
     std::string key = sanitize_symbol(u.name) + "-" + py23::hex64(py23::fnv1a64(u.path));
     u.cache_dir = std::string(PY23_MODCACHE_DIR) + "/" + key;
@@ -271,6 +286,9 @@ struct Manifest {
     uint64_t source_hash = 0;
     int opt = -1;
     int fast_math = -1;
+    // 旧清单没有这一行：保守按「需要索引」处理。
+    bool unknown_index = true;
+    std::string toolchain;
     std::map<std::string, std::string> deps;
 };
 
@@ -307,6 +325,14 @@ std::optional<Manifest> read_manifest(const ModuleUnit& u) {
             auto o = parse_u64(v);
             if (!o) return std::nullopt;
             m.fast_math = static_cast<int>(*o);
+        } else if (tag == "unknownindex") {
+            std::string v;
+            ss >> v;
+            auto o = parse_u64(v);
+            if (!o) return std::nullopt;
+            m.unknown_index = *o != 0;
+        } else if (tag == "toolchain") {
+            ss >> m.toolchain;
         } else if (tag == "dep") {
             std::string name, hash;
             ss >> name >> hash;
@@ -327,6 +353,8 @@ void write_manifest(const Program& p, const ModuleUnit& u) {
     out << "source " << py23::fnv1a64(u.source) << "\n";
     out << "opt " << p.opt << "\n";
     out << "fastmath " << (p.fast_math ? 1 : 0) << "\n";
+    out << "unknownindex " << (u.needs_unknown_index ? 1 : 0) << "\n";
+    out << "toolchain " << toolchain_id() << "\n";
     for (auto& d : u.deps) {
         auto it = p.units.find(d);
         std::string hash = (it != p.units.end() && it->second->info)
@@ -472,6 +500,7 @@ bool try_cache(Program& p, ModuleUnit& u) {
     auto m = read_manifest(u);
     if (!m) return false;
     if (m->source_hash != py23::fnv1a64(u.source)) return false;
+    if (m->toolchain != toolchain_id()) return false;  // 换了编译器/运行时
     if (m->opt != p.opt) return false;
     if (m->fast_math != (p.fast_math ? 1 : 0)) return false;
     if (m->deps.size() != u.deps.size()) return false;
@@ -492,6 +521,8 @@ bool try_cache(Program& p, ModuleUnit& u) {
         (*info)->interface_hash = py23::hex64(py23::fnv1a64(*bytes));
         u.info = *info;
     }
+    u.needs_unknown_index = m->unknown_index;
+    p.needs_unknown_index |= u.needs_unknown_index;
     u.from_cache = true;
     return true;
 }
@@ -740,6 +771,10 @@ bool build_unit(Program& p, ModuleUnit& u, bool emit_object, bool entry_ir) {
                      lr.errors.size() == 1 ? "" : "s", u.path.c_str());
         return false;
     }
+    u.needs_unknown_index = py23::ir_module_needs_unknown_index(lr.mod);
+    // A/B 诊断：强制保留存活堆索引（对照「关闭」带来的收益）。
+    if (std::getenv("PY23_FORCE_UNKNOWN_INDEX")) u.needs_unknown_index = true;
+    p.needs_unknown_index |= u.needs_unknown_index;
     if (entry_ir) {
         u.ir = std::move(lr.mod);
         if (timing) {
@@ -753,7 +788,7 @@ bool build_unit(Program& p, ModuleUnit& u, bool emit_object, bool entry_ir) {
     }
     if (!emit_object) return true;
 
-    u.asm_text = py23::generate_asm(lr.mod);
+    u.asm_text = py23::generate_asm(lr.mod, u.is_entry && !p.needs_unknown_index);
     auto t3 = now();
     std::string err;
     if (!assemble_object(u, err)) {

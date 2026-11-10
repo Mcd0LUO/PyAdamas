@@ -70,6 +70,9 @@ inline std::string asm_escape(const std::string& s) {
 class AsmGen {
 public:
         std::string gen(const IRModule& m);
+        // 整程序没有任何 unknown 值、也不涉及 asyncio/生成器运行时：入口
+        // 关闭存活堆索引维护（unknown 保守 retain 用不到）。
+        void set_disable_unknown_index(bool v) { disable_unknown_index_ = v; }
 
 private:
     const std::string& global_label(int i) const {
@@ -90,6 +93,7 @@ private:
     int fi_ = 0;
     // 生成代码优化等级：0 基础 / 1 常规 / 2 默认追加控制流与小函数优化。
     int opt_ = 2;
+    bool disable_unknown_index_ = false;
     int cur_block_ = -1;
     int n_slots_ = 0;
     int n_vreg_slots_ = 0;

@@ -499,6 +499,11 @@ RC 不新增 IR 指令，全部通过 `call.rt` 调运行时：
   下限 2MB——存活堆翻倍才扫一次，总扫描量是 O(live)，垃圾多时回落到
   2MB 下限（扫描本身也便宜）；`PY23_GC_DISABLE=1` 可整机关闭循环收集
   （只留下引用计数，会漏检环）。纯整数代码不分配堆，完全不受影响；
+- 存活堆索引只在程序可能用到 unknown 时维护：IR 里没有 unknown 类型、
+  没有 `RcIncUnknown`、没有 `super()` / `isinstance` 这类运行期类型检查、
+  也不涉及 asyncio/生成器时，入口调用 `py23_disable_unknown_index`，
+  此后分配/释放不再做索引哈希表的插入和删除（`PY23_FORCE_UNKNOWN_INDEX=1`
+  可强制保留，用于 A/B）；
 - 不含临时堆值的语句 / 循环 / 函数在降级期把 mark/cleanup 删掉。
   所以整数循环和递归生成的汇编与 0.6.1 完全一样，性能差异只在
   「方法调用的 self 形参 inc/dec」这类真正的堆值传递上。

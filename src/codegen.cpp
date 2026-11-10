@@ -213,6 +213,8 @@ std::string AsmGen::gen(const IRModule& m) {
             out_ += std::format("\tmovq ${}, %rsi\n", local_global_count());
             out_ += "\tmovq %rbp, %rdx\n";
             out_ += "\tcall py23_gc_init\n";
+            if (disable_unknown_index_)
+                out_ += "\tcall py23_disable_unknown_index\n";
             out_ += "\tleaq .Lstrtab(%rip), %rdi\n";
             out_ += std::format("\tmovq ${}, %rsi\n", m.strings.size());
             out_ += "\tcall py23_register_literals\n";
@@ -232,8 +234,9 @@ std::string AsmGen::gen(const IRModule& m) {
         return std::move(out_);
     }
 
-std::string generate_asm(const IRModule& m) {
+std::string generate_asm(const IRModule& m, bool disable_unknown_index) {
     AsmGen g;
+    g.set_disable_unknown_index(disable_unknown_index);
     return g.gen(m);
 }
 

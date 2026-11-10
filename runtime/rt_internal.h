@@ -480,6 +480,7 @@ void gc_mark(uintptr_t v);
 void gc_scan_object(Py23Rc* h);
 void py23_gc_add_roots(void** roots, int64_t n_roots);
 void py23_gc_init(void** roots, int64_t n_roots, void* stack_top);
+void py23_disable_unknown_index(void);
 void py23_gc_unref_child(void* p);
 void gc_drain(void);
 void py23_gc_collect(void);

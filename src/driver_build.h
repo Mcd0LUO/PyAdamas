@@ -34,6 +34,9 @@ struct ModuleUnit {
     bool is_package = false;
     std::string parent_name;
     bool from_cache = false;
+    // 模块的 IR 是否用到 unknown 保守 retain（含 asyncio/生成器运行时）。
+    // 写进缓存清单：命中缓存时也要参与整程序判断。
+    bool needs_unknown_index = true;
     int state = 0;  // 0 未访问 / 1 正在访问 / 2 完成
 };
 
@@ -46,6 +49,8 @@ struct Program {
     bool verbose = false;
     int opt = 2;
     bool fast_math = false;
+    // 任一模块需要 unknown 索引就保持开启；全都不需要时入口关掉维护。
+    bool needs_unknown_index = false;
 };
 
 bool load_program(const std::string& entry_path, const std::vector<std::string>& include_dirs,

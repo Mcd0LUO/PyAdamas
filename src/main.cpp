@@ -234,7 +234,8 @@ int main(int argc, char** argv) {
                 py23::dump_ir(*prog.entry->ir, std::cout);
             } else {
                 auto a = std::chrono::steady_clock::now();
-                std::string asm_text = py23::generate_asm(*prog.entry->ir);
+                std::string asm_text =
+                    py23::generate_asm(*prog.entry->ir, !prog.needs_unknown_index);
                 auto b = std::chrono::steady_clock::now();
                 if (std::getenv("PY23_TIMING"))
                     std::fprintf(stderr, "[timing] codegen=%.1f ms\n",

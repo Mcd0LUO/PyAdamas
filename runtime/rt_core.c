@@ -23,6 +23,11 @@ int gc_sweeping;
    量是 O(live)；垃圾多、存活少时回落到 2MB 下限，扫描本身也便宜。 */
 static int64_t gc_next_threshold = PY23_GC_THRESHOLD;
 
+/* 存活堆索引只服务 unknown 值的保守 retain/dec（值可能是整数，必须先
+   确认是堆指针）。整程序没有任何 unknown 时，入口会调用
+   py23_disable_unknown_index 关掉它，省掉每个堆对象的插入/删除。 */
+static int rc_index_off;
+
 void panic_c(const char* msg);
 
 /* 存活堆对象索引：unknown 值的静态类型看不见，不能直接 rc_inc（可能
@@ -60,6 +65,7 @@ void rc_index_rehash(size_t ncap) {
 }
 
 void rc_index_put(Py23Rc* h) {
+    if (rc_index_off) return;
     if (rc_index_cap == 0) {
         rc_index_rehash(64);
     } else if ((rc_index_fill + 1) * 10 >= rc_index_cap * 7) {
@@ -85,6 +91,7 @@ void rc_index_put(Py23Rc* h) {
 }
 
 void rc_index_del(Py23Rc* h) {
+    if (rc_index_off) return;
     if (rc_index_cap == 0) return;
     size_t s = rc_index_slot(h);
     while (rc_index[s]) {
@@ -98,6 +105,7 @@ void rc_index_del(Py23Rc* h) {
 }
 
 int rc_index_has(Py23Rc* h) {
+    if (rc_index_off) return 0;
     if (rc_index_cap == 0) return 0;
     size_t s = rc_index_slot(h);
     while (rc_index[s]) {
@@ -432,6 +440,10 @@ void py23_gc_init(void** roots, int64_t n_roots, void* stack_top) {
     if (getenv("PY23_GC_DISABLE")) return;
     gc_ready = 1;
 }
+
+/* 整程序无 unknown 值、不涉及 asyncio/生成器时，入口调用这里关掉
+   存活堆索引；此后 rc_index_put/del/has 都是空操作。 */
+void py23_disable_unknown_index(void) { rc_index_off = 1; }
 
 void py23_gc_unref_child(void* p) {
     if (!p) return;

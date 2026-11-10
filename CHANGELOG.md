@@ -4,6 +4,38 @@
 
 早期阶段没有逐条留痕，按阶段归纳；0.4 之后逐条记录。
 
+## [0.62] - 2026-11-10
+
+Typed 程序关闭存活堆索引。
+
+### 新增
+
+- 存活堆索引按程序裁剪：编译器扫描全部模块的 IR（类型里的 `unknown`、
+  `RcIncUnknown`、`super()`、`isinstance` / 异常匹配 / unknown 窗口比较，
+  以及 asyncio 导入和生成器），全都不需要时入口调用
+  `py23_disable_unknown_index`，此后每次堆分配/释放不再维护索引哈希表。
+  多模块取并集；缓存清单新增 `unknownindex` 行，命中缓存也参与判断。
+  实测同源 A/B：`objects 1M` -29%（241→171ms）、`strlist 300k` -19%
+  （57→46ms）、`dict_str 300k` -13%（152→132ms）。
+- `PY23_FORCE_UNKNOWN_INDEX=1` 强制保留索引（A/B 诊断用）。
+- 模块缓存清单加 `toolchain` 指纹（编译器可执行文件 + `rt.o` 的大小与
+  mtime）：换了编译器/运行时后源码没变也不会命中旧对象。之前
+  `py23 run` 曾静默复用旧代码生成结果。
+
+### 修复
+
+- `super()` 的运行期查找用 RC 注册表确认接收者是实例；`isinstance`、
+  异常匹配、unknown 值的容器/字符串模式检查同理，所以这些调用点一律
+  保留索引，避免「typed 程序关索引后 super 报 AttributeError」。
+
+### 验证
+
+- `ctest --preset dev` 连跑 3 次、release 全绿；810 程序差分零失败；
+  O0/O1 全量 52 个运行用例通过
+- 基准（release `-O2`，`taskset -c 0`，3 轮）：相对 CPython 的差距
+  `strlist` 3.6×→1.3×、`dict_str` 6.1×→1.7×、`objects` 4.7× 慢→1.4× 快；
+  纯标量项不变
+
 ## [0.61] - 2026-11-10
 
 GC 阈值自适应与空字典标注修复。
