@@ -23,6 +23,7 @@ set(PY23_SOURCES
   src/typecheck_stmt.cpp
   src/typecheck_expr.cpp
   src/typecheck_call.cpp
+  src/typecheck_builtin.cpp
   src/typecheck_func.cpp
   src/lower.cpp
   src/lower_stmt.cpp
