@@ -1,6 +1,6 @@
 # 运行时
 
-运行时按职责拆成 `runtime/rt_*.c`（引用计数/GC、异常、生成器、异步、Task/Future、fd、异步生成器、容器与输出），共享接口在 `runtime/rt_internal.h`；各部分编成可重定位对象后用 `ld -r` 合成 `rt.o`，由 `py23 build` 链接进每个生成的程序，只依赖 libc 和 libm。**py23 编译器本身不链接它**（`PY23_RT_OBJ` 只是把路径编进二进制，供 `cc` 使用）。
+运行时按职责拆成 `runtime/rt_*.c`（引用计数/GC、异常、生成器、异步、Task/Future、fd、文件、字符串/列表/字典/切片、类/复数、math/格式化、random/os/subprocess/time、itertools/collections、json），共享接口在 `runtime/rt_internal.h`；各部分编成可重定位对象后用 `ld -r` 合成 `rt.o`，由 `py23 build` 链接进每个生成的程序，只依赖 libc 和 libm。**py23 编译器本身不链接它**（`PY23_RT_OBJ` 只是把路径编进二进制，供 `cc` 使用）。
 
 ## ABI 约定
 
@@ -376,11 +376,35 @@ longjmp 回同步调用点。GC 清扫和进程退出不跑析构器，但会单
 | `py23_os_mkdir/rmdir/remove/rename` | `(str*, ...) -> void` | 失败抛 OSError 子类（ENOENT→FileNotFoundError 等） |
 | `py23_os_getcwd` | `() -> str*` | 新字符串 |
 | `py23_os_cpu_count` | `() -> i64` | `_SC_NPROCESSORS_ONLN` |
+| `py23_os_listdir` | `(str*) -> list*` | 新 list[str]，按 `os.listdir` 顺序 |
+| `py23_os_getenv` | `(str* name, str* def) -> str*` | 缺失返回 `def`；编译器默认传空串 |
 | `py23_os_path_join` | `(list*) -> str*` | posixpath.join 语义；参数是字符串列表 |
 | `py23_os_path_exists/isdir/isfile` | `(str*) -> i64` | access/stat，返回 0/1 |
+| `py23_os_path_basename/dirname/normpath/abspath/expanduser` | `(str*) -> str*` | posixpath 对应函数 |
+| `py23_os_path_splitext` | `(str*) -> list*` | `(root, ext)` 二元组（list 表示） |
 | `py23_subprocess_run` | `(list* argv, i64 capture, i64 text, f64 timeout, i64 check) -> proc*` | fork/execvp + 管道捕获；timeout < 0 表示不超时；超时 SIGKILL 后抛 TimeoutExpired；check 且 rc≠0 抛 CalledProcessError |
 | `py23_subprocess_returncode` | `(proc*) -> i64` | 正常退出取退出码，被信号终止取负信号号 |
 | `py23_subprocess_stdout/stderr` | `(proc*) -> str*` | 新字符串；未捕获时为空串 |
+
+### time / file / itertools / collections / json
+
+| 函数 | 签名 | 语义 |
+|---|---|---|
+| `py23_time_time` | `() -> f64` | `CLOCK_REALTIME`，秒 |
+| `py23_time_monotonic` | `() -> f64` | `CLOCK_MONOTONIC`，秒 |
+| `py23_time_perf_counter` | `() -> f64` | 单调高精度时钟，秒 |
+| `py23_time_sleep` | `(f64) -> void` | `nanosleep`；负值按 0 |
+| `py23_file_open` | `(str* path, i64 fd, str* mode, i64 buffering, i64 newline, i64 closefd) -> file*` | `fd >= 0` 时包装已有描述符；文本模式默认 UTF-8 |
+| `py23_file_config` | `(file*, str* enc, str* errors) -> void` | 设置编码/错误策略 |
+| `py23_file_read/readline/readlines` | `(file*, i64 n/hint) -> str*/list*` | 文本读取；`readlines` 返回 list[str] |
+| `py23_file_write/writelines` | `(file*, str*/list*) -> i64/void` | 写入；返回写入字节数 |
+| `py23_file_seek/tell/truncate` | `(file*, i64, ...) -> i64` | 定位/截断 |
+| `py23_itertools_chain` | `(list*, list*, i64 elem_kind) -> list*` | 拼接两个 list；`islice` 在降级期展开，无运行时入口 |
+| `py23_itertools_repeat` | `(i64 v, i64 n, i64 elem_kind) -> list*` | n 个 v |
+| `py23_collections_counter` | `(list*, i64 key_kind, i64 key_own) -> dict*` | 计频，返回 dict |
+| `py23_collections_most_common` | `(dict*, i64 n) -> list*` | `(key, count)` 按 count 降序，稳定 |
+| `py23_json_dumps` | `(i64 v, str* desc) -> str*` | 按编译期类型描述符序列化 |
+| `py23_json_loads` | `(str* text, str* desc) -> i64` | 按描述符解析；类型不匹配抛 ValueError |
 
 ### 对象
 

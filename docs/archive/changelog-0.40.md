@@ -1,6 +1,6 @@
 # 变更记录（归档）
 
-0.40 及更早版本。当前记录见 [CHANGELOG.md](../CHANGELOG.md)。
+0.40 及更早版本。当前记录见 [CHANGELOG.md](../../CHANGELOG.md)。
 
 ## [0.40] - 2026-11-10
 

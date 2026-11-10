@@ -47,7 +47,7 @@ Python 语义里变量天生可变，循环里反复赋值是常态。一上来�
 | `const.none dst` | — | `dst = 0` | `xorl` 或直接存 0 |
 | `func.addr dst, idx` | `idx: 函数号` | `dst = &static_closure`（无捕获函数值） | `leaq .LclosN(%rip)` |
 | `func.code dst, idx` | `idx: 函数号` | `dst = 裸代码地址`（只给 `closure.new` 用） | `leaq .LfN(%rip)` |
-| `mov dst, a` | — | `dst = a` | 两条 `movq`。**当前没有降级路径产生它**，留着给后续优化遍用 |
+| `mov dst, a` | — | `dst = a` | 两条 `movq`。降级路径不产生；内联遍用它做参数复制，后端照常搬一条 |
 | `bin dst, a, b` | `bop` | 按 `bop` 做二元运算 | 整数 `addq` 系 / 浮点 `addsd` 系 |
 | `un dst, a` | `uop` | `neg/pos/bitnot/not` | `negq` / 空 / `notq` / 真值取反 |
 | `cmp dst, a, b` | `cop` | 比较，结果 bool | `cmpq`+`setcc` / `ucomisd`+`setcc` |

@@ -60,6 +60,8 @@ rm -rf build/dev                   # 连 CMake 中间产物一起清
 | `tests/run/*.py` | 必须编译运行成功，输出与末尾 `# --- expect ---` 逐行一致 | `NN_主题.py` |
 | `tests/unsupported/*.py` | `check -v` 必须打标记，`build` 必须拒绝 | `主题.py` |
 
+当前规模：正例 11 / 反例 35 / 运行 54 / 未建模 1 / 模块 9。
+
 跑单个文件：
 
 ```bash
@@ -114,14 +116,16 @@ python3 tests/diff/run_diff.py --only repr  # 只测浮点转字符串
 覆盖推导式；`tests/run/20_with.py` 覆盖 `with` 的提前退出；`tests/run/21_decorator.py`
 覆盖装饰器；`tests/run/22_exception.py` 覆盖异常层级、bare raise、
 finally 的提前退出、with 异常路径和运行时错误转换；`tests/run/23_generator.py`
-~ `tests/run/38_match.py` 覆盖生成器、协程、Task、异步语言面、
+~ `tests/run/54_stdlib.py` 覆盖生成器、协程、Task、异步语言面、
 Future/取消/fd/回调、`yield from`、异步推导式、异步生成器协议、
-异常值、内置函数、f-string、del/print(*args)/复数、match 与多继承。
+异常值、内置函数、f-string、del/print(*args)/复数、match 与多继承；
+`53_json.py` / `54_stdlib.py` 覆盖 json 与 string/time/os/itertools/
+collections 批次。
 
 敏捷开发时只跑相关用例，不要每次全量：
 
 ```bash
-PY23_TEST_FILTER='3[0-4]*' PY23_TEST_JOBS=16 bash tests/run_tests.sh build/dev build/dev/py23
+PY23_TEST_FILTER='5[0-4]*' PY23_TEST_JOBS=16 bash tests/run_tests.sh build/dev build/dev/py23
 python3 tests/diff/run_diff.py --only async --seeds 1 --jobs 16
 ```
 
@@ -204,7 +208,7 @@ g++ -std=c++23 -O0 -g -Wall -Wextra -Wshadow -Wnon-virtual-dtor -Wold-style-cast
     -Isrc -DPY23_RT_OBJ="\"$PWD/build/dev/rt.o\"" src/*.cpp -o /tmp/py23-strict
 ```
 
-不用 `make CXXFLAGS=...`：命令行变量会覆盖 Makefile 里的 `+=`，`PY23_RT_OBJ` 就丢了。
+直接用上面的 g++ 命令；不要用 `cmake -DCMAKE_CXX_FLAGS=...` 覆盖，`PY23_RT_OBJ` 由 CMake 生成，手改 flags 会丢。
 
 当前零警告。新代码请保持。
 

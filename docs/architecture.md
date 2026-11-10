@@ -18,7 +18,8 @@ AST（已展开）─────────────► TypeChecker（typec
 Lowerer（lower*.cpp）◄──── 类型查询接口（typecheck.h）
    │
    ▼
-IR（ir.h）：函数 → 基本块 → 三态指令
+IR（ir.h）：函数 → 基本块 → 三地址指令
+   │  Opt（opt*.cpp，-O2 时的折叠/内联/LICM/下标版本化）
    │  AsmGen（codegen*.cpp）
    ▼
 GNU as 汇编（AT&T）

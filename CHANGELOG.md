@@ -1072,4 +1072,4 @@ list/tuple 打印、`UnboundLocalError` 与常用 math 函数。
 
 ## 更早版本
 
-0.40 及更早的记录已归档到 [docs/changelog-archive.md](docs/changelog-archive.md)。
+0.40 及更早的记录已归档到 [docs/archive/changelog-0.40.md](docs/archive/changelog-0.40.md)。

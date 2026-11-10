@@ -14,11 +14,12 @@
 | [codegen.md](codegen.md) | 汇编怎么生成？栈帧和调用约定怎么定的？ | `codegen*.cpp` |
 | [runtime.md](runtime.md) | 编译产物运行时依赖什么？对象在内存里怎么摆？ | `runtime/rt_*.c` |
 | [compatibility.md](compatibility.md) | 和 CPython 的差异清单，以及正确性是怎么验证的 | `tests/` |
-| [development.md](development.md) | 怎么构建、怎么测、怎么调试、加功能要动哪几处 | `Makefile` `tests/` |
+| [development.md](development.md) | 怎么构建、怎么测、怎么调试、加功能要动哪几处 | `CMakeLists.txt` `tests/` |
 | [roadmap.md](roadmap.md) | 现在做到哪、下一步做什么、为什么是这个顺序 | — |
+| [archive/README.md](archive/README.md) | 已轮转出去的旧文档索引 | — |
 
 变更记录在根目录 [CHANGELOG.md](../CHANGELOG.md)（0.40 及更早归档在
-[changelog-archive.md](changelog-archive.md)），参与开发的规矩见
+[archive/changelog-0.40.md](archive/changelog-0.40.md)），参与开发的规矩见
 [CONTRIBUTING.md](../CONTRIBUTING.md)。
 
 ## 按角色选读
@@ -36,7 +37,7 @@
 | 术语 | 含义 |
 |---|---|
 | **槽位（slot）** | 一个局部变量的固定归属：栈帧里的某个偏移，或被提升后占的常驻寄存器。形参也是槽 |
-| **提升（promotion）** | 把局部变量从栈槽挪到 callee-saved 寄存器，整函数有效，不做活跃性分析 |
+| **提升（promotion）** | 把局部变量从栈槽挪到常驻寄存器：整型/指针用 callee-saved，浮点只在无调用函数里用 `xmm8`–`xmm15` |
 | **vreg** | 虚拟寄存器，三地址码里每个中间值一个编号（dump 里写成 `%3`） |
 | **降级（lower）** | AST → IR 的过程，把树形结构拍平成基本块 + 线性指令 |
 | **机器类** | 后端关心的粗分类：整数类（i64）、浮点类（f64）、指针类 |
@@ -69,4 +70,4 @@
 
 ## 当前状态
 
-对应 CHANGELOG 的 0.38（块内临时寄存器、range(len) 下标免检查、检查型下标外提、循环不变量外提、静态调用直接化、小函数内联、IR 遍与 AVX2 归约、-O0/O1/O2、C3 MRO、super、方法装饰器与 match 边角）：流水线 `源码 → 词法 → AST → lambda 脱糖 → 类型检查 → IR → x86-64 汇编 → 可执行文件` 已打通，支持标量、字符串、列表、元组、字典、集合、切片（读与赋值）、删除类方法、函数（默认参数、递归、闭包、`nonlocal`、`lambda`、`*args`/`**kwargs`、装饰器）、生成器（`yield`/`yield from`/`send`/`close`/跨挂起清理）、协程（`async def`/`await`/`asyncio.run`/`sleep`/`gather`/`create_task`/`Future`（多等待者、`set_exception`、完成回调），Task 支持 `done()`/`cancel()`/`result()`/`exception()` 和取消级联）、异步生成器协议（`asend`/`athrow`/`__anext__`/`aclose`）与 `async for`/`async with`、fd 等待与 poll、推导式（含异步推导式）、`with`、`try/except/else/finally`、`raise`、类（字段、方法、C3 多继承、零参 super、静态方法、属性）、控制流、`print`。异常是带 `args` 的值对象（控制流仍用 setjmp/longjmp + handler 栈展开）；内置函数支持 abs/min/max/sum/pow/any/all/complex；支持 del、print(*args)、复数字面量、match/case（类模式、值模式、`as`、`**rest`、异常类模式、导入类、捕获赛后可见、运行期 isinstance）、f-string 格式化、多继承与类体语句；自定义异常类与 `raise ... from` 已接通；堆值用引用计数回收，环和 unknown 泄漏由保守 GC 兜底。本地包/相对导入、内置 math/sys/asyncio 已支持；自定义 `__aiter__`、fd 读写/子进程尚未生成代码；GC 的保守性和回收时机见 [compatibility.md](compatibility.md)。
+对应 CHANGELOG 的 0.74（stdlib 批次：string/time/os/itertools/collections/json）：流水线 `源码 → 词法 → AST → lambda 脱糖 → 类型检查 → IR → x86-64 汇编 → 可执行文件` 已打通。语言面支持标量、字符串、列表/元组/字典/集合、切片读写、闭包/lambda/`*args`/`**kwargs`/装饰器、推导式、`with`、异常值（`args`/`raise ... from`/自定义异常）、类（字段/方法/C3 多继承/零参 `super()`/`@staticmethod`/`@property`）、`match/case`、`del`、复数字面量、f-string 格式说明、dunder 协议、`open`/`input`/`sys.stdin`；标准库内置 `math`/`sys`/`asyncio`/`random`/`os`/`os.path`/`subprocess`/`time`/`itertools`/`collections`/`json`/`string`。差分 runner 已自举（810 例）。剩余主要缺口：`bytes` 字面量、`re`/`datetime`/`csv`/`pathlib`、C FFI/BLAS、跨模块生成器/协程、asyncio 边角。GC 的保守性和回收时机见 [compatibility.md](compatibility.md)。

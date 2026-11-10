@@ -37,8 +37,13 @@ py23 不追求兼容 CPython：语义是按静态类型的需要重新定的。�
 | `print(obj)` | 有 `__str__`（或 `__repr__`）就调，否则 `<Point object>` | 同 Python（默认文本带模块名和地址） | 默认文本没有模块名和地址 |
 | 协议 dunder | `__str__`/`__repr__`/`__eq__`/`__ne__`/`__len__`/`__hash__`/`__contains__`/`__iter__`/算术与比较类 dunder 走 vtable；`in` 需要 `__contains__`，`<` 等需要比较 dunder，算术需要对应 dunder，否则编译报错 | 完整数据模型 | `__format__`/`__bool__`/`__reversed__` 未建模；`__eq__` 的 other 限 unknown 或类类型；只定义 `__eq__` 没定义 `__hash__` 的类在 dict/set 里按身份处理 |
 | `random` | MT19937 与 CPython 同种子同序列；模块级函数和 `Random` 实例方法；`choice` 支持 list/tuple/str，`shuffle` 仅 list | 完整 random（`randrange`/`gauss`/bytes 等未实现） | 只实现常用方法；省略种子时时间 + pid 播种 |
-| `os` / `os.path` | `mkdir`/`rmdir`/`remove`/`rename`/`getcwd`/`cpu_count`；`join`/`exists`/`isdir`/`isfile` | 完整 os | `os.path` 是独立模块别名：`import os.path as p` 或 `from os.path import ...`，`import os` 后 `os.path.x` 暂不支持 |
+| `os` / `os.path` | `listdir`/`getenv`/`mkdir`/`rmdir`/`remove`/`rename`/`getcwd`/`cpu_count`；`join`/`exists`/`isdir`/`isfile`/`basename`/`dirname`/`normpath`/`abspath`/`expanduser`/`splitext` | 完整 os | `getenv` 缺失返回空串（CPython 返回 None）；`os.path` 是独立模块别名：`import os.path as p` 或 `from os.path import ...`，`import os` 后 `os.path.x` 暂不支持 |
 | `subprocess` | `run` 支持 `capture_output`/`text`/`timeout`/`check`，返回 `CompletedProcess`（`.returncode`/`.stdout`/`.stderr`）；`TimeoutExpired`/`CalledProcessError` 按内置异常名捕获 | 完整 subprocess | 没有 bytes：`text=False` 也返回 str；未捕获时 `.stdout`/`.stderr` 为空串；`input`/`cwd`/`env`/`shell` 未实现；exec 失败按退出码 127；`from subprocess import TimeoutExpired` 不支持 |
+| `time` | `time`/`monotonic`/`perf_counter`/`sleep`，秒为单位 | 完整 time | 没有 `localtime`/`gmtime`/`strftime`/`mktime` |
+| `string` | 常量 + `capwords()`，随编译器分发 `stdlib/string.py` | 完整 string | 子集；`capwords` 用 `split()` + `capitalize()` |
+| `itertools` | `chain`/`repeat`/`islice`，按实参静态特化，返回 list | 完整 itertools | 立即求值，没有惰性迭代器；`islice` 只接受 `(x, stop)` |
+| `collections` | `Counter`/`most_common` | 完整 collections | 没有 `defaultdict`/`deque`/`OrderedDict`；`Counter` 返回普通 dict |
+| `json` | `dumps`/`loads(text, sample)`；默认分隔符 `", "`/`": "`；`loads` 用 sample 的静态类型决定目标结构 | 完整 json | 没有 `indent`/`separators`/`ensure_ascii` 参数；`loads` 必须给 sample（`None` 用于解析 null）；只覆盖 int/bool/float/str/None/list/dict/定长 tuple |
 | 方法调用 | 走 vtable，代价固定 | 走 `__dict__` / 描述符 | 没有去虚化，也不做内联 |
 | 内存回收 | 引用计数 + 保守标记-清扫 | 分代 GC | 环和 unknown 泄漏由 GC 延迟回收；栈/寄存器里的整数可能被误认为根，只影响回收时机；无 `__del__`/弱引用 |
 | 闭包捕获 | cell 按引用捕获；嵌套函数直接自引用用当前闭包 | cell 按引用捕获，晚绑定 | 父作用域之后重绑函数自己的名字时，py23 仍指向原闭包；相互递归闭包的环由 GC 回收 |
@@ -63,7 +68,7 @@ py23 不追求兼容 CPython：语义是按静态类型的需要重新定的。�
 
 **能解析、能过类型检查，但 `build` 报错**：通过 unknown 函数值的 `*` / `**` 展开、`*` 位于固定形参之前且不是定长 tuple、非异常类名当异常用、`finally` 体内跳出 finally 的 `return`/`break`/`continue`、跨模块继承、类装饰器、`@classmethod`、自定义方法装饰器、把类名当值用、函数内定义类、导入类模式的字段子模式、unknown 值上的数值/list/dict/tuple/set 内置类型模式、类体字段默认值里的 lambda，以及生成器的 `yield`/`yield from` 位于 `finally`/`except` 体内（协程的 `await` 同样）、异步生成器表达式、嵌在其它表达式里的异步推导式。
 
-清楚这个分层很重要：`py23 check` 尽量当通用 Python 语法/类型检查器用，检查器放宽的边界都记在 [CHANGELOG 0.6.1](changelog-archive.md)；`py23 build` 才是「能不能编译」的判据。
+清楚这个分层很重要：`py23 check` 尽量当通用 Python 语法/类型检查器用，检查器放宽的边界都记在 [CHANGELOG 0.6.1](archive/changelog-0.40.md)；`py23 build` 才是「能不能编译」的判据。
 
 ## 三、验证手段
 
@@ -72,10 +77,10 @@ py23 不追求兼容 CPython：语义是按静态类型的需要重新定的。�
 | 层 | 命令 | 规模 | 防的是什么 |
 |---|---|---|---|
 | 正例 | `ctest --preset dev` 里 `tests/*.py` | 11 个文件 | 前端退回保守 |
-| 反例 | `ctest --preset dev` 里 `tests/fail/*.py` | 32 个文件 | 检查器为了过测而放水 |
-| 运行 | `ctest --preset dev` 里 `tests/run/*.py` | 38 个文件 | 后端烂掉没人知道 |
-| 模块 | `ctest --preset dev` 里 `tests/modules/*/` | 8 个目录 | 分模块编译/链接、惰性初始化、缓存失效 |
-| 未建模 | `ctest --preset dev` 里 `tests/unsupported/*.py` | 2 个文件 | 「标了没建模、实际却悄悄编译过去」 |
+| 反例 | `ctest --preset dev` 里 `tests/fail/*.py` | 35 个文件 | 检查器为了过测而放水 |
+| 运行 | `ctest --preset dev` 里 `tests/run/*.py` | 54 个文件 | 后端烂掉没人知道 |
+| 模块 | `ctest --preset dev` 里 `tests/modules/*/` | 9 个目录 | 分模块编译/链接、惰性初始化、缓存失效 |
+| 未建模 | `ctest --preset dev` 里 `tests/unsupported/*.py` | 1 个文件 | 「标了没建模、实际却悄悄编译过去」 |
 | 内存 | 16MB `RLIMIT_AS` 下跑压力程序 | 拼接 / 对象 / 闭包 / 容器 / 切片 / 删除 / 推导式 / 变长实参 / `with` / 装饰器 / 异常展开 / `yield from` / 异步推导式 / 环 / unknown 泄漏 | 引用计数或 GC 漏插桩、重复释放、误回收 |
 | 差分 | `py23 build` 后运行 `tests/diff/run_diff.py`（自举），也可 `python3` 直接跑 | 随机程序 | 语义漂移、边界错误 |
 
@@ -171,16 +176,16 @@ echo "类型失败:"; wc -l < /tmp/fail.txt
 
 `check --syntax` 只做语法，`check` 再做类型；统计口径是「语法通过的那些文件里，类型检查也通过的比例」。全量约 7 分钟（本机 8 并发）。
 
-实测（CPython 3.11.1 + 本机 site-packages，0.6.1）：
+实测（CPython 3.11.1 + 本机 site-packages，0.6.1 口径；0.74 已支持 complex/match/多继承，语法失败清单和通过率都变了，尚未重跑）：
 
 | 范围 | 文件数 | 语法通过 | 类型通过（占语法通过者） |
 |---|---|---|---|
 | 标准库本体 | 1740 | 1289 | 1143 / 1289（88.7%） |
 | 标准库 + site-packages | 38582 | 35693 | 29143 / 35693（81.6%） |
 
-**这个数字不能直接和 0.5 的 96.1% 比。** 0.6 之前根本没有类检查，`class` 语句只解析不分析，「通过」是虚高。0.6.0 刚加类检查时失败 **19064** 个文件（通过率 46.6%），把误杀逐条放宽（见 [CHANGELOG 0.6.1](changelog-archive.md)）之后降到 **6550** 个（81.6%）。也就是说，剩下的下降主要是「多了一层以前没有的检查」，不是前端变严。
+**这个数字不能直接和 0.5 的 96.1% 比。** 0.6 之前根本没有类检查，`class` 语句只解析不分析，「通过」是虚高。0.6.0 刚加类检查时失败 **19064** 个文件（通过率 46.6%），把误杀逐条放宽（见 [CHANGELOG 0.6.1](archive/changelog-0.40.md)）之后降到 **6550** 个（81.6%）。也就是说，剩下的下降主要是「多了一层以前没有的检查」，不是前端变严。
 
-语法层的失败**全部**是明确拒绝的那几类，没有解析器 bug：
+语法层的失败**全部**是明确拒绝的那几类，没有解析器 bug（0.6.1 时 complex/match 仍是语法拒绝；0.74 已支持，这两项不再计入）：
 
 ```
 bytes 字面量 2038   complex 字面量 620   超过 int64 的整数 138   match 91
@@ -214,6 +219,6 @@ Python 2 的 long 后缀 1   旧式 except 参数 1
 | 2 亿次 `while` 累加 | 约 33× |
 | 2000 万次方法调用 `a.add(1)` | 约 19× |
 
-只看数量级就好：py23 没有任何优化遍，赢在「静态类型 + 直接出机器码」。
+只看数量级就好：py23 的优化遍仍然很轻（折叠/内联/LICM/下标版本化），赢在「静态类型 + 直接出机器码」；下表是 0.7 口径，0.74 默认 -O2，实际会更快。
 0.7 加入引用计数后，整数路径与 0.6.1 持平（不含临时堆值的语句/循环/
 函数会把 RC 脚手架删掉）；方法调用因为 self 形参的 inc/dec 慢约 30%。

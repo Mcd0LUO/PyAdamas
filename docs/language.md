@@ -16,7 +16,7 @@ py23 借 Python 的语法外壳，但**不是 CPython 的实现**：语义按静
 | 字符串 | 单/双/三引号，前缀 `r` `b` `f` `rf` 任意顺序组合；相邻字面量自动拼接 |
 | f-string | 按 PEP 701 解析：同引号嵌套、自文档化 `f"{x=}"`、spec 里再嵌 `{}` 都支持；format spec 支持 fill/align/sign/`0`/width/precision/类型 `d,b,o,x,X,f,e,E,g,G,%` 与 `!s/!r/!a` |
 
-有几处词法层就拒绝，因为语义没有对应物：`bytes` 字面量、`complex` 字面量、超出 int64 的整数、`0x1L` 这类 Python 2 写法。
+有几处词法层就拒绝，因为语义没有对应物：`bytes` 字面量、超出 int64 的整数、`0x1L` 这类 Python 2 写法。
 
 `\N{NAME}` 是个特殊处理：词法层整体吞掉（否则 `{` 会被当成 f-string 的替换字段），但不查 Unicode 名字表，字符串里保留原文。
 
@@ -508,7 +508,7 @@ class Point:
 | 字段 | 标注可选：`x: int` 定死偏移；`self.x = ...` 也能长出字段 |
 | 字段初值 | `n: int = 0` 在**每次构造时**求值，不是 CPython 的类属性 |
 | 构造 | `Point(1, 2)` = 分配 + 初始化带初值的字段 + 调 `__init__` |
-| 继承 | 单继承；子类字段接在父类之后，方法槽位前缀与父类完全一致 |
+| 继承 | 多继承（C3 MRO）；主基类的字段/方法槽位前缀保持不变 |
 | 覆盖 | 子类同名方法占用父类同一个槽，所以父类类型的变量能调到子类实现 |
 | `self` | 普通参数，名字不限；省略标注时类型就是所属类 |
 | 属性读 | `p.x` → `movq 8(%rax), %rax` |
@@ -669,6 +669,26 @@ CPython 一致。
   没有捕获时 `.stdout` / `.stderr` 是空串（CPython 是 `None`）；
   `input` / `cwd` / `env` / `shell` 等参数未实现；exec 失败按退出码
   127 返回。
+- 内置 `time`：`time` / `monotonic` / `perf_counter` / `sleep`，秒为单位。
+- 内置 `string`：`stdlib/string.py` 随编译器分发，提供
+  `ascii_lowercase` / `ascii_uppercase` / `ascii_letters` / `digits` /
+  `hexdigits` / `octdigits` / `punctuation` / `whitespace` / `printable`
+  和 `capwords()`。
+- 内置 `itertools`：`chain(a, b)` / `repeat(v, n)` / `islice(x, stop)`，
+  按实参静态特化，返回 list（立即求值）。
+- 内置 `collections`：`Counter(items)` 返回 dict，`most_common(n)` 返回
+  `(key, count)` 列表。
+- 内置 `json`：`dumps(obj)` 按静态类型生成 JSON；`loads(text, sample)`
+  用 sample 的静态类型决定结果结构，覆盖 int/bool/float/str/None/list/
+  dict/定长 tuple；默认分隔符 `", "` / `": "`。
+
+### 文件
+
+`open(path, mode="r", encoding="utf-8")` 返回文件对象，支持 `read` /
+`readline` / `readlines` / `write` / `writelines` / `close` / `flush` /
+`seek` / `tell` / `truncate`、迭代和 `with`。文本模式默认 UTF-8；没有
+bytes，读写都是 `str`。`input()` 从 stdin 读一行；`sys.stdin` /
+`sys.stdout` / `sys.stderr` 是文件对象。
 
 ### 内置函数
 
@@ -817,7 +837,7 @@ match value:
 
 **语法层**（`check` 就报错）：
 
-- `bytes` / `complex` 字面量，超出 int64 的整数
+- `bytes` 字面量，超出 int64 的整数
 - `await` 在函数外、`break` 在循环外
 - Python 2 遗留写法（`0x1L`、`lambda (a, b):`、`except X, e`）
 - 类：方法缺 `self`、字段赋值类型不符、访问不存在的字段或方法（`self.xxx` 与外部基类的成员除外）
