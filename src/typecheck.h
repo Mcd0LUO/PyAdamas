@@ -1049,6 +1049,12 @@ private:
     std::unordered_map<const Stmt*, FuncInfoPtr> func_infos_;
     // 检查过的函数定义（含方法），供形参回填后的重查用。
     std::vector<FunctionDef*> func_defs_;
+    // 嵌套的生成器表达式合成函数：重查时要回到定义时的词法父作用域，
+    // 否则形参回填后函数体里的自由变量会解析到模块级。
+    std::unordered_map<const FunctionDef*, Scope*> nested_recheck_parent_;
+    // 调用合成生成器函数的位置：重查后返回类型从 Generator[unknown] 变成
+    // Generator[T]，这里要同步刷新调用点缓存的表达式类型。
+    std::unordered_map<const Expr*, FuncInfoPtr> genexpr_call_sites_;
     std::unordered_map<FunctionDef*, ClassInfoPtr> func_owners_;
     std::unordered_map<std::string, ClassInfoPtr> classes_;
     // 正在检查方法体的类。`self.x = ...` 里 x 没声明过时，就地补成字段——

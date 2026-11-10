@@ -27,11 +27,21 @@ void TypeChecker::check(Module& m) {
                 if (it == func_infos_.end() || !it->second || !it->second->sig_dirty) continue;
                 it->second->sig_dirty = false;
                 auto oit = func_owners_.find(fd);
+                // 嵌套的合成生成器函数：重查要回到它定义时的词法父作用域，
+                // 否则体里的自由变量会当成模块全局。
+                Scope* saved_cur = cur_;
+                if (auto nit = nested_recheck_parent_.find(fd); nit != nested_recheck_parent_.end())
+                    cur_ = nit->second;
                 funcdef_impl(*fd, oit == func_owners_.end() ? nullptr : oit->second);
+                cur_ = saved_cur;
                 changed = true;
             }
             if (!changed) break;
         }
+        // 合成生成器函数的元素类型在重查后才定下来，调用点缓存的表达式
+        // 类型跟着刷新——降级层按它选流式迭代路径。
+        for (auto& [ce, fi] : genexpr_call_sites_)
+            if (fi && fi->ret) expr_types_[ce] = fi->ret;
     }
 
 std::vector<std::pair<std::string, std::string>> TypeChecker::top_symbols() const {

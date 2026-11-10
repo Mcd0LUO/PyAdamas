@@ -241,6 +241,39 @@ VReg Lowerer::lower_comp(Expr& e) {
             return;
         }
 
+        // 生成器当迭代源：没有长度也没有下标，流式消费。
+        if (sty && sty->kind == TyKind::Generator) {
+            TypePtr ety = sty->sub.empty() ? t_unknown() : sty->sub[0];
+            emit_gen_for_each(seq, sty, [&](VReg ev, TypePtr, int cont, int) {
+                if (auto* tn = dynamic_cast<Name*>(g.target.get())) {
+                    int slot = comp_slot(tn->id);
+                    if (slot < 0) {
+                        slot = st_->fn->new_slot(ety);
+                        comp_slots_.back()[tn->id] = slot;
+                    }
+                    store_slot(slot, ev);
+                } else {
+                    assign_to(*g.target, ev, ety);
+                }
+                // 过滤器不成立就直接跳下一轮（cont 是 emit_gen_for_each
+                // 的取元素块）。
+                for (auto& cond_expr : g.ifs) {
+                    VReg c = expr(*cond_expr);
+                    c = truth_bool(c, tc_.type_of(cond_expr.get()));
+                    int ok_b = new_block("comp.gif");
+                    Inst cb;
+                    cb.op = IrOp::Branch;
+                    cb.a = c;
+                    cb.target = ok_b;
+                    cb.target2 = cont;
+                    emit(std::move(cb));
+                    switch_to(ok_b);
+                }
+                gen(gi + 1);
+            });
+            return;
+        }
+
         bool ok = sty && (sty->kind == TyKind::List || sty->kind == TyKind::Tuple ||
                           sty->kind == TyKind::Str || sty->kind == TyKind::Dict ||
                           sty->kind == TyKind::Set);

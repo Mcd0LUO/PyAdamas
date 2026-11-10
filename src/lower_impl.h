@@ -539,8 +539,14 @@ private:
     }
 
     // 内置序列构造（list/sorted/enumerate/...）的入参规整成运行时列表：
-    // str → 字符列表，dict/set → 键列表，list/tuple 原样。
+    // str → 字符列表，dict/set → 键列表，list/tuple 原样，生成器顺序消费。
     VReg seq_as_list(Expr* e, TypePtr& elem_out);
+    // 生成器物化成 list：惰性值没有 len/下标，只能顺序消费一次。
+    VReg gen_to_list(VReg gen, TypePtr gen_ty);
+    // 生成器流式迭代：每个元素执行一次 body(ev, elem_ty, cond_blk, end_blk)。
+    // ev 是借用引用；body 里跳 cond_blk 继续下一轮、跳 end_blk 提前结束。
+    void emit_gen_for_each(VReg gen, TypePtr gen_ty,
+                           const std::function<void(VReg, TypePtr, int, int)>& body);
 
     // 槽/全局/字段按**目标类型**决定是否 retain：出口按目标类型释放，
     // 只按源类型加引用会在「unknown 值写进带标注的堆槽」时失衡

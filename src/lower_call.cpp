@@ -510,6 +510,10 @@ VReg Lowerer::seq_as_list(Expr* e, TypePtr& elem_out) {
             push_temp(l);
             return l;
         }
+        case TyKind::Generator: {
+            elem_out = xt->sub.empty() ? t_unknown() : xt->sub[0];
+            return gen_to_list(x, xt);
+        }
         default:
             return x;
     }

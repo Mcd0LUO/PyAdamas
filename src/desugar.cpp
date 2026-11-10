@@ -1,4 +1,4 @@
-// desugar.cpp —— 把 lambda 展开成合成的嵌套函数
+// desugar.cpp —— 把 lambda 和生成器表达式展开成合成的嵌套函数
 //
 // lambda 是表达式，但闭包/捕获/引用计数都建立在 FunctionDef 上。这里在
 // 类型检查之前把它改写成：
@@ -6,9 +6,16 @@
 //     __py23$lambda_N = def (...) -> ...: return <body>
 //     ... __py23$lambda_N ...
 //
+// 生成器表达式同理，展开成生成器函数 + 一次调用，让惰性语义落在已有的
+// 生成器状态机上：
+//
+//     def __py23$gen_N(it):
+//         for x in it: ... yield elt
+//     __py23$gen_N(<最外层 iterable>)
+//
 // 合成函数插在包含该表达式的那条语句之前，所以循环体里的 lambda 仍然
-// 每次执行都创建新的闭包。类体里的 lambda 暂不展开（类体只有字段声明，
-// 降级层会拒绝）。
+// 每次执行都创建新的闭包。类体里的 lambda / 生成器表达式暂不展开
+// （类体只有字段声明，降级层会拒绝 lambda，生成器表达式按 list 构造）。
 #include "desugar.h"
 
 #include <format>
@@ -149,6 +156,7 @@ public:
 
 private:
     int lambda_id_ = 0;
+    int gen_id_ = 0;
     int map_arg_id_ = 0;
     bool allow_map_ = true;
     bool allow_filter_ = true;
@@ -208,6 +216,92 @@ private:
         n->line = line;
         n->col = col;
         slot = std::move(n);
+    }
+
+    // 生成器表达式 → 合成的生成器函数 + 一次调用：
+    //
+    //     def __py23$gen_N(__py23$it_N):
+    //         for x in __py23$it_N:
+    //             if <ifs>: yield <elt>
+    //     __py23$gen_N(<最外层 iterable>)
+    //
+    // 最外层 iterable 在创建时求值（Python 语义），其余部分在 next() 时
+    // 才执行，所以 sum(x*x for x in xs) 不再先建整个列表。合成函数体里的
+    // 嵌套 lambda / 生成器表达式在合成函数作用域内展开，闭包捕获照旧。
+    void desugar_genexpr(GeneratorExp& g, ExprPtr& slot, std::vector<StmtPtr>& pre) {
+        if (g.generators.empty()) return;
+        const int line = g.line;
+        const int col = g.col;
+        const int id = ++gen_id_;
+        const std::string itname = std::format("__py23$it_{}", id);
+
+        auto named = [&](const std::string& s) {
+            auto n = std::make_unique<Name>(s);
+            n->line = line;
+            n->col = col;
+            return n;
+        };
+
+        // 最外层 iterable 属于外层作用域：它内部的 lambda 提到 pre 里，
+        // 之后整个表达式作为实参传进来。
+        auto& first = static_cast<Comprehension&>(*g.generators[0]);
+        desugar_expr(first.iter, pre);
+
+        // 从最内层往外搭：yield elt，再逐层包 if / for。
+        std::vector<StmtPtr> body;
+        {
+            auto y = std::make_unique<Yield>();
+            y->value = std::move(g.elt);
+            y->line = line;
+            y->col = col;
+            auto es = std::make_unique<ExprStmt>();
+            es->value = std::move(y);
+            es->line = line;
+            es->col = col;
+            body.push_back(std::move(es));
+        }
+        for (size_t i = g.generators.size(); i-- > 0;) {
+            auto& c = static_cast<Comprehension&>(*g.generators[i]);
+            for (size_t k = c.ifs.size(); k-- > 0;) {
+                auto iff = std::make_unique<If>();
+                If::Branch b;
+                b.cond = std::move(c.ifs[k]);
+                b.body = std::move(body);
+                iff->branches.push_back(std::move(b));
+                iff->line = line;
+                iff->col = col;
+                body.clear();
+                body.push_back(std::move(iff));
+            }
+            auto fr = std::make_unique<For>();
+            fr->target = std::move(c.target);
+            fr->iter = i == 0 ? named(itname) : std::move(c.iter);
+            fr->body = std::move(body);
+            fr->line = line;
+            fr->col = col;
+            body.clear();
+            body.push_back(std::move(fr));
+        }
+
+        auto fn = std::make_unique<FunctionDef>();
+        fn->name = std::format("__py23$gen_{}", id);
+        Arg a;
+        a.name = itname;
+        fn->args.args.push_back(std::move(a));
+        fn->body = std::move(body);
+        fn->line = line;
+        fn->col = col;
+
+        // 体里的嵌套 lambda / 生成器表达式插在合成函数自己的作用域里。
+        desugar_body(fn->body, false);
+
+        auto call = std::make_unique<Call>();
+        call->func = named(fn->name);
+        call->args.push_back(std::move(first.iter));
+        call->line = line;
+        call->col = col;
+        slot = std::move(call);
+        pre.push_back(std::move(fn));
     }
 
     void desugar_expr(ExprPtr& e, std::vector<StmtPtr>& pre) {
@@ -362,12 +456,9 @@ private:
                 desugar_exprs(c.generators, pre);
                 break;
             }
-            case ExprKind::GeneratorExp: {
-                auto& c = static_cast<GeneratorExp&>(*e);
-                desugar_expr(c.elt, pre);
-                desugar_exprs(c.generators, pre);
+            case ExprKind::GeneratorExp:
+                desugar_genexpr(static_cast<GeneratorExp&>(*e), e, pre);
                 break;
-            }
             case ExprKind::DictComp: {
                 auto& c = static_cast<DictComp&>(*e);
                 desugar_expr(c.key, pre);

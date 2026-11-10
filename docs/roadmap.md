@@ -27,14 +27,14 @@
 | 0.39–0.80 | -O0/O1/O2、dunder 第二批、random/os/subprocess、差分 runner 自举、stdlib 批次（string/time/os/itertools/collections/json）、re 模块 v1/v2；详见 [CHANGELOG](../CHANGELOG.md) |
 | 许可证 | Apache-2.0（见 [LICENSE](../LICENSE) / [NOTICE](../NOTICE)） |
 
-## 当前状态（0.80）
+## 当前状态（0.81）
 
 流水线 `源码 → 词法 → AST → lambda 脱糖 → 类型检查 → IR → x86-64 汇编 → 可执行文件` 已打通。
 
 - **语言面**：标量、字符串、列表/元组/字典/集合、切片读写、闭包/lambda/`*args`/`**kwargs`/装饰器、推导式、`with`、异常值（`args`/`raise ... from`/自定义异常）、类（字段/方法/C3 多继承/零参 `super()`/`@staticmethod`/`@classmethod`/`@property`/类属性）、`match/case`、`del`、复数字面量、f-string 格式说明、dunder 协议、`open`/`input`/`sys.stdin`。
 - **标准库**：`math`/`sys`/`asyncio`/`random`/`os`/`os.path`/`subprocess`/`time`/`itertools`/`collections`/`json`/`string`/`re`。
-- **验证**：65 个运行用例、34 个反例、9 个模块目录；差分 runner 已自举，默认 810 例。
-- **主要缺口**：`datetime`/`csv`/`pathlib`；C FFI/BLAS；`bytes` 的方法与迭代；跨模块生成器/协程；asyncio 边角；生成器表达式仍立即求值。
+- **验证**：66 个运行用例、34 个反例、9 个模块目录；差分 runner 已自举，默认 810 例。
+- **主要缺口**：`datetime`/`csv`/`pathlib`；C FFI/BLAS；`bytes` 的方法与迭代；跨模块生成器/协程；asyncio 边角。
 
 ## 下一步
 
@@ -42,7 +42,6 @@
 
 ### 1. 语言面收尾
 
-- **生成器表达式惰性求值**：现在 `sum(x*x for x in xs)` 会先建整个 list，语义和内存都不对。
 - **`slice()` / `vars()` / `dir()`**：小内置，各自几十行。
 - **自定义方法装饰器**：现在只认 `@staticmethod`/`@classmethod`/`@property`，其它装饰器的方法体不检查实参。
 
@@ -92,7 +91,7 @@
 10. **异常路径的 RC 不精确**：longjmp 跳过普通函数帧时局部变量不执行 `release_slots`，要等 GC
 11. **异常对象仍缺 traceback**：有异常值、`args`、自定义异常类和 `raise ... from`，但 `args` 只保存消息
 12. **含 handler 的函数没有寄存器提升**：longjmp 会回滚 callee-saved 寄存器，只能全走内存槽
-13. **生成器/协程的表达式能力不全**：`yield`/`yield from`/`await` 只能作为语句或赋值右值，不能位于 `finally`/`except` 体内；生成器表达式仍立即求值；`send`/await 跨挂起值的静态类型不精确；`yield from` 的值固定为 None、不能 throw。`asend`/`athrow`/`aclose` 已支持
+13. **生成器/协程的表达式能力不全**：`yield`/`yield from`/`await` 只能作为语句或赋值右值，不能位于 `finally`/`except` 体内；`send`/await 跨挂起值的静态类型不精确；`yield from` 的值固定为 None、不能 throw。`asend`/`athrow`/`aclose` 已支持
 14. **生成器/协程异常逃出时槽位不精确释放**：异常从 resume longjmp 出去时只把帧标成 aborted，堆槽引用交给 GC 下一轮回收
 15. **跨模块生成器/协程不支持**：`.py23i` 里 `Generator[T]` / `Coroutine[T]` 降级成 unknown
 16. **asyncio 仍是最小集合**：自定义 `__aiter__`、fd 读写、asyncio 子进程、线程安全循环未支持；`wait_readable` 不是 CPython 标准 API；Future 回调同步执行；`gather` 结果按 unknown 容器处理；Task 只允许一个并发等待者；`await` 位置受限

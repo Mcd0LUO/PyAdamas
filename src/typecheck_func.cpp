@@ -45,7 +45,14 @@ void TypeChecker::funcdef_impl(FunctionDef& f, const ClassInfoPtr& owner) {
             func_owners_[&f] = owner;
             // 只登记模块级函数和方法：嵌套函数（含 lambda 脱糖产物）的
             // 词法父作用域在重查时要重新挂接，收益不值这个复杂度。
-            if (cur_ == module_ || owner) func_defs_.push_back(&f);
+            // 生成器表达式的合成函数例外：它的形参就是最外层 iterable，
+            // 拿不到实参类型就没法在降级层选迭代路径。
+            if (cur_ == module_ || owner) {
+                func_defs_.push_back(&f);
+            } else if (f.name.rfind("__py23$gen_", 0) == 0) {
+                nested_recheck_parent_[&f] = cur_;
+                func_defs_.push_back(&f);
+            }
         }
         FuncInfoPtr info;
         if (owner) {

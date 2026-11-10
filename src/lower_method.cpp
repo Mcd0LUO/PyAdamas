@@ -1296,12 +1296,18 @@ VReg Lowerer::lower_method_call(Attribute& at, Call& c) {
         if (at.attr == "join") {
             if (!arg_count(1, 1)) return const_none();
             TypePtr lt = tc_.type_of(c.args[0].get());
-            if (!lt || (lt->kind != TyKind::List && lt->kind != TyKind::Tuple)) {
+            VReg parts;
+            if (lt && lt->kind == TyKind::Generator) {
+                // 生成器没有下标：先物化成列表再拼。
+                TypePtr se = t_unknown();
+                parts = seq_as_list(c.args[0].get(), se);
+            } else if (!lt || (lt->kind != TyKind::List && lt->kind != TyKind::Tuple)) {
                 err(c.args[0]->line, c.args[0]->col,
                     "str.join() expects a list of strings");
                 return const_none();
+            } else {
+                parts = expr(*c.args[0]);
             }
-            VReg parts = expr(*c.args[0]);
             return emit_op(StrOp::Join, t_str(), parts, kNoReg, kNoReg);
         }
         if (at.attr == "replace") {

@@ -34,7 +34,7 @@ py23 借 Python 的语法外壳，但**不是 CPython 的实现**：语义按静
 
 ### 表达式
 
-支持：常量、名字、二元/一元运算、布尔短路、链式比较、条件表达式、调用（位置 + 关键字 + `*` / `**` 展开）、下标（读与写）、切片（读与赋值）、列表/元组/字典/集合字面量、列表/集合/字典推导式（含 `async for`）、生成器表达式（按 list 立即求值）、`in` / `not in`、f-string、`lambda`、海象运算符、`range()`、`yield`、`yield from`、`await`、用户类的属性读与写、用户类的方法调用。
+支持：常量、名字、二元/一元运算、布尔短路、链式比较、条件表达式、调用（位置 + 关键字 + `*` / `**` 展开）、下标（读与写）、切片（读与赋值）、列表/元组/字典/集合字面量、列表/集合/字典推导式（含 `async for`）、生成器表达式（惰性）、`in` / `not in`、f-string、`lambda`、海象运算符、`range()`、`yield`、`yield from`、`await`、用户类的属性读与写、用户类的方法调用。
 
 没有代码生成的：内置类型上的属性访问（除 `list.append` / `list.pop` 两个特例）。
 
@@ -170,8 +170,25 @@ index = {k: len(k) for k in ["a", "bb"]}
 mods = {x % 3 for x in range(10)}
 ```
 
-推导式有独立的变量作用域：循环变量不会覆盖同名的外层变量。生成器
-表达式没有惰性求值，直接按 list 构造。含 `async for` 的推导式只能在
+推导式有独立的变量作用域：循环变量不会覆盖同名的外层变量。
+
+生成器表达式 `(elt for x in xs)` 是**惰性**的：脱糖阶段把它展开成一个
+合成生成器函数加一次调用，最外层迭代源在创建时求值（Python 语义），
+其余部分等 `next()` 才执行。`sum` / `min` / `max` / `any` / `all` 直接
+流式消费它（`any`/`all` 命中即停），`list` / `tuple` / `set` / `sorted` /
+`enumerate` / `zip` / `str.join` 会把它抽干成列表，`for` 循环逐元素拉取。
+生成器表达式只能消费一次。
+
+```python
+total = sum(x * x for x in range(1000))     # 不建中间列表
+first = next(x for x in xs if x > 0)
+```
+
+限制：类体里的生成器表达式仍按 list 立即构造（类体只支持简单值）；
+推导式内部不能写引用推导式循环变量的生成器表达式（合成函数被提到语句
+之前，那时循环变量还不存在）；异步生成器表达式不支持。
+
+含 `async for` 的推导式只能在
 `async def` 里使用，可以混用同步/异步子句；它只能作为整条语句、赋值
 或 `return` 的根表达式（挂起会清空当前表达式的临时值），元素表达式
 里也不能含 `await`。推导式内部暂不支持 `lambda` 捕获循环变量、
@@ -275,8 +292,8 @@ handler 记录被摘下，恢复时按原顺序重挂并重新建立 setjmp。`c
 landing 路径负责展开清理，帧被标记 aborted，避免销毁时重复执行。
 
 限制：`yield` / `yield from` 只能作为语句或赋值右值（`x = yield v`），
-不能位于 `finally` 或 `except` 体内；生成器表达式仍是立即求值的 list。
-生成器类型跨模块接口会降级成 `unknown`。
+不能位于 `finally` 或 `except` 体内。生成器类型跨模块接口会降级成
+`unknown`。
 
 ### 协程
 
@@ -762,7 +779,8 @@ unknown 值上对带运行期类型标签的类型（str/list/dict/complex）走
 去重（frozenset 复用 set 的运行时，不强制不可变），`dict(**kw)`
 用字符串键；`sorted` 支持 int/float/str 元素（`key=` / `reverse=` 尚未
 支持）；`enumerate` 产出的元素是 `[下标, 值]` 对，`zip` 支持两个可迭代
-对象；这些迭代辅助都返回具体列表，与生成器表达式立即求值的模型一致。
+对象；这些迭代辅助都返回具体列表（生成器实参会被抽干），生成器表达式
+本身仍是惰性的。
 容器方法：list 有 `append` / `extend` / `insert` / `remove` / `pop(i)` /
 `clear` / `index` / `count` / `copy` / `reverse` / `sort`；dict 有 `get` /
 `keys` / `values` / `items` / `update` / `pop` / `popitem` / `setdefault` /

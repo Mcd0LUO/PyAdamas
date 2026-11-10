@@ -332,7 +332,13 @@ TypePtr TypeChecker::check_args(const FuncInfoPtr& fn, Call& c) {
                 std::format("function '{}' missing required argument{}: {}", fn->name,
                             missing.find(',') == std::string::npos ? "" : "s", missing));
 
-        if (fn->ret) return fn->ret;
+        if (fn->ret) {
+            // 合成生成器函数的返回类型跟着形参回填走：第一次检查时形参
+            // 还是 unknown，重查后才是 Generator[T]。调用点缓存的表达式
+            // 类型要在重查结束后刷新一次，降级层才能按 T 选迭代路径。
+            if (fn->name.rfind("__py23$gen_", 0) == 0) genexpr_call_sites_[&c] = fn;
+            return fn->ret;
+        }
         return fn->ret_known ? t_none() : t_unknown();
     }
 

@@ -29,7 +29,7 @@ x: int = 100
 probe: list[int] = [x for x in range(3)]
 print(x, len(probe))
 
-gen: list[int] = (y + 1 for y in range(3))
+gen: list[int] = list(y + 1 for y in range(3))
 print(len(gen), gen[0], gen[2])
 
 d2: dict[str, int] = {"a": 1, "bb": 2}

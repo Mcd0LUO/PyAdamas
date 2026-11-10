@@ -811,16 +811,19 @@ VReg Lowerer::lower_builtin_call(const std::string& name, Call& c) {
         TypePtr xt = tc_.type_of(c.args[0].get());
         if (!xt || (xt->kind != TyKind::List && xt->kind != TyKind::Tuple &&
                     xt->kind != TyKind::Str && xt->kind != TyKind::Dict &&
-                    xt->kind != TyKind::Set && xt->kind != TyKind::File)) {
+                    xt->kind != TyKind::Set && xt->kind != TyKind::File &&
+                    xt->kind != TyKind::Generator)) {
             err(c.args[0]->line, c.args[0]->col,
                 std::format("{}() cannot iterate over '{}'", name, type_name(xt)));
             return const_none();
         }
         TypePtr et = t_unknown();
         VReg x = seq_as_list(c.args[0].get(), et);
+        // str/dict/set/生成器 走 seq_as_list 时已经是新建的列表，不用再拷。
         bool fresh = xt->kind == TyKind::Str || xt->kind == TyKind::Dict ||
-                     xt->kind == TyKind::Set;
-        VReg l = fresh ? x : call_runtime(RtFn::ListCopy, result_ty(), {x});
+                     xt->kind == TyKind::Set || xt->kind == TyKind::Generator;
+        VReg l = fresh ? retype(x, result_ty())
+                       : call_runtime(RtFn::ListCopy, result_ty(), {x});
         if (!fresh) push_temp(l);
         return as_tuple ? retype(l, result_ty()) : l;
     }
@@ -884,7 +887,8 @@ VReg Lowerer::lower_builtin_call(const std::string& name, Call& c) {
         TypePtr xt = tc_.type_of(c.args[0].get());
         if (!xt || (xt->kind != TyKind::List && xt->kind != TyKind::Tuple &&
                     xt->kind != TyKind::Str && xt->kind != TyKind::Dict &&
-                    xt->kind != TyKind::Set && xt->kind != TyKind::File)) {
+                    xt->kind != TyKind::Set && xt->kind != TyKind::File &&
+                    xt->kind != TyKind::Generator)) {
             err(c.args[0]->line, c.args[0]->col,
                 std::format("{}() cannot iterate over '{}'", name, type_name(xt)));
             return const_none();
@@ -938,7 +942,8 @@ VReg Lowerer::lower_builtin_call(const std::string& name, Call& c) {
         TypePtr xt = tc_.type_of(c.args[0].get());
         if (!xt || (xt->kind != TyKind::List && xt->kind != TyKind::Tuple &&
                     xt->kind != TyKind::Str && xt->kind != TyKind::Dict &&
-                    xt->kind != TyKind::Set && xt->kind != TyKind::File)) {
+                    xt->kind != TyKind::Set && xt->kind != TyKind::File &&
+                    xt->kind != TyKind::Generator)) {
             err(c.args[0]->line, c.args[0]->col,
                 std::format("{}() cannot iterate over '{}'", name, type_name(xt)));
             return const_none();
@@ -981,7 +986,8 @@ VReg Lowerer::lower_builtin_call(const std::string& name, Call& c) {
         TypePtr xt = tc_.type_of(c.args[0].get());
         if (!xt || (xt->kind != TyKind::List && xt->kind != TyKind::Tuple &&
                     xt->kind != TyKind::Str && xt->kind != TyKind::Dict &&
-                    xt->kind != TyKind::Set && xt->kind != TyKind::File)) {
+                    xt->kind != TyKind::Set && xt->kind != TyKind::File &&
+                    xt->kind != TyKind::Generator)) {
             err(c.args[0]->line, c.args[0]->col,
                 std::format("enumerate() cannot iterate over '{}'", type_name(xt)));
             return const_none();

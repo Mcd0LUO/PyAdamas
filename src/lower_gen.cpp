@@ -322,6 +322,116 @@ VReg Lowerer::lower_await(Expr& e) {
     return suspend_on_awaitable(v, tc_.type_of(&e), e.line, e.col);
 }
 
+// 生成器 → list：惰性值没有 len/下标，只能顺序抽干一次。
+VReg Lowerer::gen_to_list(VReg gen, TypePtr gen_ty) {
+    TypePtr et = (gen_ty && !gen_ty->sub.empty()) ? gen_ty->sub[0] : t_unknown();
+    TypePtr lt = mk_list(et);
+    int ko = list_kind(lt);
+    VReg l = call_runtime(RtFn::ListNew, lt, {const_int(0), const_int(ko)});
+    push_temp(l);
+    int l_slot = new_temp_slot(lt);
+    store_slot(l_slot, l);
+    TypePtr gt = gen_ty ? gen_ty : t_unknown();
+    int g_slot = new_temp_slot(gt);
+    store_slot(g_slot, gen);
+    int ok_slot = new_temp_slot(t_int());
+    store_slot(ok_slot, const_int(0));
+
+    int cond = new_block("genlist.cond");
+    int body = new_block("genlist.body");
+    int end = new_block("genlist.end");
+
+    Inst j;
+    j.op = IrOp::Jump;
+    j.target = cond;
+    emit(std::move(j));
+
+    switch_to(cond);
+    Inst sa;
+    sa.op = IrOp::SlotAddr;
+    sa.idx = ok_slot;
+    VReg okp = def(t_unknown(), std::move(sa));
+    Inst call;
+    call.op = IrOp::CallRt;
+    call.imm = static_cast<int64_t>(RtFn::GenNextOpt);
+    call.args = {load_slot(g_slot, gt), okp};
+    // 返回的是机器字（浮点也是位模式），vreg 类型只能记 unknown。
+    VReg ev = def(t_unknown(), std::move(call));
+    ev = retype(ev, et);
+    Inst br;
+    br.op = IrOp::Branch;
+    br.a = load_slot(ok_slot, t_int());
+    br.target = body;
+    br.target2 = end;
+    emit(std::move(br));
+
+    switch_to(body);
+    retain_elem(ev, ko);
+    call_void(RtFn::ListAppend, {load_slot(l_slot, lt), ev});
+    // 元素引用已经转给列表，产生者的那份立即还掉，否则循环里一路累积。
+    if (ir_is_heap(et)) call_void(RtFn::RcDec, {ev});
+    Inst jb;
+    jb.op = IrOp::Jump;
+    jb.target = cond;
+    emit(std::move(jb));
+
+    switch_to(end);
+    return load_slot(l_slot, lt);
+}
+
+// 生成器流式迭代：每取一个元素就交给 body，不建中间列表。
+void Lowerer::emit_gen_for_each(VReg gen, TypePtr gen_ty,
+                                const std::function<void(VReg, TypePtr, int, int)>& body) {
+    TypePtr et = (gen_ty && !gen_ty->sub.empty()) ? gen_ty->sub[0] : t_unknown();
+    TypePtr gt = gen_ty ? gen_ty : t_unknown();
+    int g_slot = new_temp_slot(gt);
+    store_slot(g_slot, gen);
+    int ok_slot = new_temp_slot(t_int());
+    store_slot(ok_slot, const_int(0));
+
+    int cond = new_block("genfor.cond");
+    int b = new_block("genfor.body");
+    int end = new_block("genfor.end");
+
+    Inst j;
+    j.op = IrOp::Jump;
+    j.target = cond;
+    emit(std::move(j));
+
+    switch_to(cond);
+    Inst sa;
+    sa.op = IrOp::SlotAddr;
+    sa.idx = ok_slot;
+    VReg okp = def(t_unknown(), std::move(sa));
+    Inst call;
+    call.op = IrOp::CallRt;
+    call.imm = static_cast<int64_t>(RtFn::GenNextOpt);
+    call.args = {load_slot(g_slot, gt), okp};
+    VReg ev = def(t_unknown(), std::move(call));
+    ev = retype(ev, et);
+    Inst br;
+    br.op = IrOp::Branch;
+    br.a = load_slot(ok_slot, t_int());
+    br.target = b;
+    br.target2 = end;
+    emit(std::move(br));
+
+    switch_to(b);
+    // 元素引用转进槽里，下一轮覆盖时自动释放；body 借槽里的值，
+    // 提前跳出（any/all 短路）也不会漏掉这一份。
+    int ev_slot = new_temp_slot(et);
+    store_slot(ev_slot, ev);
+    if (ir_is_heap(et)) call_void(RtFn::RcDec, {ev});
+    body(load_slot(ev_slot, et), et, cond, end);
+    if (!terminated()) {
+        Inst jb;
+        jb.op = IrOp::Jump;
+        jb.target = cond;
+        emit(std::move(jb));
+    }
+    switch_to(end);
+}
+
 void Lowerer::lower_for_gen(For& f, VReg seq, TypePtr seq_ty) {
     TypePtr et = seq_ty->sub.empty() ? t_unknown() : seq_ty->sub[0];
     // 生成器里 vreg 不跨 yield：序列落槽，每次重新读。

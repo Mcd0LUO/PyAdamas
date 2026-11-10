@@ -25,7 +25,7 @@ VReg Lowerer::lower_minmax(Call& c, bool is_min) {
         TypePtr seq_ty = tc_.type_of(c.args[0].get());
         bool ok = seq_ty && (seq_ty->kind == TyKind::List || seq_ty->kind == TyKind::Tuple ||
                              seq_ty->kind == TyKind::Str || seq_ty->kind == TyKind::Dict ||
-                             seq_ty->kind == TyKind::Set);
+                             seq_ty->kind == TyKind::Set || seq_ty->kind == TyKind::Generator);
         if (!ok) {
             err(c.args[0]->line, c.args[0]->col,
                 std::format("cannot iterate over '{}' in {}()", type_name(seq_ty),
@@ -35,6 +35,77 @@ VReg Lowerer::lower_minmax(Call& c, bool is_min) {
         TypePtr elem_ty = t_unknown();
         if (seq_ty->kind == TyKind::Str) elem_ty = t_str();
         else if (!seq_ty->sub.empty()) elem_ty = seq_ty->sub[0];
+
+        // 生成器：没有长度也没有下标，流式比较，空的时候同样报 ValueError。
+        if (seq_ty->kind == TyKind::Generator) {
+            VReg seq = expr(*c.args[0]);
+            int seen = new_temp_slot(t_int());
+            store_slot(seen, const_int(0));
+            emit_gen_for_each(seq, seq_ty, [&](VReg ev, TypePtr et, int cond, int) {
+                VReg v = coerce(ev, et, acc_ty);
+                Inst c0;
+                c0.op = IrOp::Cmp;
+                c0.cop = CmpKind::Eq;
+                c0.a = load_slot(seen, t_int());
+                c0.b = const_int(0);
+                VReg is_first = def(t_bool(), std::move(c0));
+                int init_b = new_block("minmax.ginit");
+                int cmp_b = new_block("minmax.gcmp");
+                Inst b0;
+                b0.op = IrOp::Branch;
+                b0.a = is_first;
+                b0.target = init_b;
+                b0.target2 = cmp_b;
+                emit(std::move(b0));
+                switch_to(init_b);
+                store_slot(best, v);
+                store_slot(seen, const_int(1));
+                Inst j0;
+                j0.op = IrOp::Jump;
+                j0.target = cond;
+                emit(std::move(j0));
+                switch_to(cmp_b);
+                Inst cmp;
+                cmp.op = IrOp::Cmp;
+                cmp.cop = cop;
+                cmp.a = v;
+                cmp.b = load_slot(best, acc_ty);
+                VReg take = def(t_bool(), std::move(cmp));
+                int choose = new_block("minmax.gchoose");
+                Inst bt;
+                bt.op = IrOp::Branch;
+                bt.a = take;
+                bt.target = choose;
+                bt.target2 = cond;
+                emit(std::move(bt));
+                switch_to(choose);
+                store_slot(best, v);
+                Inst jc;
+                jc.op = IrOp::Jump;
+                jc.target = cond;
+                emit(std::move(jc));
+            });
+            int empty_b = new_block("minmax.gempty");
+            int done_b = new_block("minmax.gdone");
+            Inst ce;
+            ce.op = IrOp::Cmp;
+            ce.cop = CmpKind::Eq;
+            ce.a = load_slot(seen, t_int());
+            ce.b = const_int(0);
+            VReg is_empty = def(t_bool(), std::move(ce));
+            Inst be;
+            be.op = IrOp::Branch;
+            be.a = is_empty;
+            be.target = empty_b;
+            be.target2 = done_b;
+            emit(std::move(be));
+            switch_to(empty_b);
+            call_void(RtFn::Raise, {const_str("ValueError"),
+                                    const_str(is_min ? "min() arg is an empty sequence"
+                                                     : "max() arg is an empty sequence")});
+            switch_to(done_b);
+            return load_slot(best, acc_ty);
+        }
 
         // SIMD min/max：int/bool 列表用 AVX2 归约；float 仍走标量以保持
         // NaN 下的比较顺序语义。
@@ -202,7 +273,7 @@ VReg Lowerer::lower_sum(Call& c) {
     TypePtr seq_ty = tc_.type_of(c.args[0].get());
     bool ok = seq_ty && (seq_ty->kind == TyKind::List || seq_ty->kind == TyKind::Tuple ||
                          seq_ty->kind == TyKind::Str || seq_ty->kind == TyKind::Dict ||
-                         seq_ty->kind == TyKind::Set);
+                         seq_ty->kind == TyKind::Set || seq_ty->kind == TyKind::Generator);
     if (!ok) {
         err(c.args[0]->line, c.args[0]->col,
             std::format("cannot iterate over '{}' in sum()", type_name(seq_ty)));
@@ -211,6 +282,26 @@ VReg Lowerer::lower_sum(Call& c) {
     TypePtr elem_ty = t_unknown();
     if (seq_ty->kind == TyKind::Str) elem_ty = t_str();
     else if (!seq_ty->sub.empty()) elem_ty = seq_ty->sub[0];
+
+    // 生成器：流式累加，不建中间列表（这正是生成器表达式存在的意义）。
+    if (seq_ty->kind == TyKind::Generator) {
+        VReg seq = expr(*c.args[0]);
+        VReg start = acc_ty && acc_ty->kind == TyKind::Float ? const_float(0.0) : const_int(0);
+        if (c.args.size() == 2)
+            start = coerce(expr(*c.args[1]), tc_.type_of(c.args[1].get()), acc_ty);
+        int acc = new_temp_slot(acc_ty);
+        store_slot(acc, start);
+        emit_gen_for_each(seq, seq_ty, [&](VReg ev, TypePtr et, int, int) {
+            VReg v = coerce(ev, et, acc_ty);
+            Inst add;
+            add.op = IrOp::Bin;
+            add.bop = BinKind::Add;
+            add.a = load_slot(acc, acc_ty);
+            add.b = v;
+            store_slot(acc, def(acc_ty, std::move(add)));
+        });
+        return load_slot(acc, acc_ty);
+    }
 
     // SIMD 归约：只覆盖同域 list/tuple[int|bool] 与 float；混合数值
     // （如 int 列表 + float start）继续走标量循环保持转换语义。
@@ -328,7 +419,7 @@ VReg Lowerer::lower_anyall(Call& c, bool is_any) {
     TypePtr seq_ty = tc_.type_of(c.args[0].get());
     bool ok = seq_ty && (seq_ty->kind == TyKind::List || seq_ty->kind == TyKind::Tuple ||
                          seq_ty->kind == TyKind::Str || seq_ty->kind == TyKind::Dict ||
-                         seq_ty->kind == TyKind::Set);
+                         seq_ty->kind == TyKind::Set || seq_ty->kind == TyKind::Generator);
     if (!ok) {
         err(c.args[0]->line, c.args[0]->col,
             std::format("cannot iterate over '{}' in {}()", type_name(seq_ty),
@@ -338,6 +429,35 @@ VReg Lowerer::lower_anyall(Call& c, bool is_any) {
     TypePtr elem_ty = t_unknown();
     if (seq_ty->kind == TyKind::Str) elem_ty = t_str();
     else if (!seq_ty->sub.empty()) elem_ty = seq_ty->sub[0];
+
+    // 生成器：短路迭代，命中就停（剩下的元素连算都不算）。
+    if (seq_ty->kind == TyKind::Generator) {
+        VReg seq = expr(*c.args[0]);
+        int result = new_temp_slot(t_bool());
+        store_slot(result, const_bool(!is_any));
+        int stop_b = new_block("anyall.gstop");
+        emit_gen_for_each(seq, seq_ty, [&](VReg ev, TypePtr, int cond, int) {
+            Inst ib;
+            ib.op = IrOp::Branch;
+            ib.a = ev;
+            ib.target = is_any ? stop_b : cond;
+            ib.target2 = is_any ? cond : stop_b;
+            emit(std::move(ib));
+        });
+        int done_b = new_block("anyall.gdone");
+        Inst j;
+        j.op = IrOp::Jump;
+        j.target = done_b;
+        emit(std::move(j));
+        switch_to(stop_b);
+        store_slot(result, const_bool(is_any));
+        Inst j2;
+        j2.op = IrOp::Jump;
+        j2.target = done_b;
+        emit(std::move(j2));
+        switch_to(done_b);
+        return load_slot(result, t_bool());
+    }
 
     VReg seq = expr(*c.args[0]);
     int seq_slot = new_temp_slot(seq_ty);
