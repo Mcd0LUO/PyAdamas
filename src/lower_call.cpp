@@ -414,6 +414,12 @@ VReg Lowerer::lower_call(Call& c) {
             return construct_imported(it->second, c, mk_class(it->second.cls.get()));
         if (auto it = native_aliases_.find(n.id); it != native_aliases_.end()) {
             if (it->second.module == "asyncio") return lower_asyncio(it->second.member, c);
+            if (it->second.module == "itertools")
+                return lower_itertools(it->second.member, c);
+            if (it->second.module == "collections")
+                return lower_collections(it->second.member, c);
+            if (it->second.module == "json")
+                return lower_json(it->second.member, c);
             TypePtr ft = tc_.type_of(c.func.get());
             FuncInfoPtr info = (ft && ft->kind == TyKind::Func) ? ft->fn : nullptr;
             return call_native(it->second.module, it->second.member, c, info);

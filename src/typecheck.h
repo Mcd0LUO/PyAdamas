@@ -1190,6 +1190,11 @@ private:
     std::optional<TypePtr> asyncio_call(const std::string& member, Call& c);
     // random.choice/shuffle 同理：choice 的返回类型是序列的元素类型。
     std::optional<TypePtr> random_call(const std::string& member, Call& c);
+    // itertools/collections 没有泛型，按调用点的实参类型特化。
+    std::optional<TypePtr> itertools_call(const std::string& member, Call& c);
+    std::optional<TypePtr> collections_call(const std::string& member, Call& c);
+    // json.loads 的目标类型由第二个「样例值」的静态类型给出。
+    std::optional<TypePtr> json_call(const std::string& member, Call& c);
 
     // ── 方法 ────────────────────────────────────────────────────
 

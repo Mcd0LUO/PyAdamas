@@ -326,6 +326,24 @@ enum class RtFn : uint16_t {
     SubprocessReturnCode,  // (proc*) -> i64
     SubprocessStdout,      // (proc*) -> str*
     SubprocessStderr,      // (proc*) -> str*
+    TimeTime,              // () -> f64
+    TimeMonotonic,         // () -> f64
+    TimePerfCounter,       // () -> f64
+    TimeSleep,             // (f64 secs) -> void
+    OsListdir,             // (str* path) -> list*
+    OsGetenv,              // (str* name, str* default) -> str*
+    OsPathBasename,        // (str*) -> str*
+    OsPathDirname,         // (str*) -> str*
+    OsPathSplitext,        // (str*) -> tuple[str, str]
+    OsPathNormpath,        // (str*) -> str*
+    OsPathAbspath,         // (str*) -> str*
+    OsPathExpanduser,      // (str*) -> str*
+    IterChain,             // (list* a, list* b, i64 elem_kind) -> list*
+    IterRepeat,            // (i64 v, i64 n, i64 elem_kind) -> list*
+    CollCounter,           // (list* items, i64 key_kind, i64 key_own) -> dict*
+    CollMostCommon,        // (dict*, i64 n) -> list*
+    JsonDumps,             // (i64 value, str* desc) -> str*
+    JsonLoads,             // (str* text, str* desc) -> i64
 };
 
 inline const char* rt_name(RtFn f) {
@@ -631,6 +649,24 @@ inline const char* rt_name(RtFn f) {
         case RtFn::SubprocessReturnCode: return "py23_subprocess_returncode";
         case RtFn::SubprocessStdout: return "py23_subprocess_stdout";
         case RtFn::SubprocessStderr: return "py23_subprocess_stderr";
+        case RtFn::TimeTime: return "py23_time_time";
+        case RtFn::TimeMonotonic: return "py23_time_monotonic";
+        case RtFn::TimePerfCounter: return "py23_time_perf_counter";
+        case RtFn::TimeSleep: return "py23_time_sleep";
+        case RtFn::OsListdir: return "py23_os_listdir";
+        case RtFn::OsGetenv: return "py23_os_getenv";
+        case RtFn::OsPathBasename: return "py23_os_path_basename";
+        case RtFn::OsPathDirname: return "py23_os_path_dirname";
+        case RtFn::OsPathSplitext: return "py23_os_path_splitext";
+        case RtFn::OsPathNormpath: return "py23_os_path_normpath";
+        case RtFn::OsPathAbspath: return "py23_os_path_abspath";
+        case RtFn::OsPathExpanduser: return "py23_os_path_expanduser";
+        case RtFn::IterChain: return "py23_itertools_chain";
+        case RtFn::IterRepeat: return "py23_itertools_repeat";
+        case RtFn::CollCounter: return "py23_collections_counter";
+        case RtFn::CollMostCommon: return "py23_collections_most_common";
+        case RtFn::JsonDumps: return "py23_json_dumps";
+        case RtFn::JsonLoads: return "py23_json_loads";
     }
     return "?";
 }

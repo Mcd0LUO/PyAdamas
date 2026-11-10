@@ -77,6 +77,9 @@ VReg Lowerer::lower_method_call(Attribute& at, Call& c) {
     if (auto* n = dynamic_cast<Name*>(at.value.get())) {
         if (auto mod = resolve_module_alias(n->id); mod && mod->builtin) {
             if (mod->name == "asyncio") return lower_asyncio(at.attr, c);
+            if (mod->name == "itertools") return lower_itertools(at.attr, c);
+            if (mod->name == "collections") return lower_collections(at.attr, c);
+            if (mod->name == "json") return lower_json(at.attr, c);
             auto it = mod->globals.find(at.attr);
             if (it != mod->globals.end() && it->second && it->second->kind == TyKind::Func)
                 return call_native(mod->name, at.attr, c, it->second->fn);
@@ -573,6 +576,19 @@ VReg Lowerer::lower_method_call(Attribute& at, Call& c) {
             err(c.line, c.col,
                 std::format("dict.{}() does not take keyword arguments", at.attr));
             return const_none();
+        }
+        if (at.attr == "most_common") {
+            if (c.args.size() > 1) {
+                err(c.line, c.col, "dict.most_common() takes at most one argument");
+                return const_none();
+            }
+            VReg n = const_int(-1);
+            if (c.args.size() == 1)
+                n = coerce(expr(*c.args[0]), tc_.type_of(c.args[0].get()), t_int());
+            TypePtr rt = mk_list(mk_tuple({kt, t_int()}));
+            VReg v = call_runtime(RtFn::CollMostCommon, rt, {recv, n});
+            push_temp(v);
+            return v;
         }
         if (at.attr == "keys" || at.attr == "values" || at.attr == "items") {
             if (!c.args.empty()) {

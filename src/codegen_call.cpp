@@ -498,6 +498,8 @@ void AsmGen::gen_call_rt(const Inst& in) {
             case RtFn::IntToBase:
             case RtFn::RoundI64:
             case RtFn::FileOpen:
+            case RtFn::JsonDumps:
+            case RtFn::JsonLoads:
                 emit2("movq", src_op(in.args[0]), "%rdi");
                 emit2("movq", src_op(in.args[1]), "%rsi");
                 emit2("movq", src_op(in.args[2]), "%rdx");
@@ -529,6 +531,7 @@ void AsmGen::gen_call_rt(const Inst& in) {
             case RtFn::FileReadLine:
             case RtFn::FileReadLines:
             case RtFn::FileTruncate:
+            case RtFn::CollMostCommon:
                 emit2("movq", src_op(in.args[0]), "%rdi");
                 emit2("movq", src_op(in.args[1]), "%rsi");
                 break;
@@ -543,6 +546,9 @@ void AsmGen::gen_call_rt(const Inst& in) {
             case RtFn::ListCount:
             case RtFn::ListInsert:
             case RtFn::FileConfig:
+            case RtFn::IterChain:
+            case RtFn::IterRepeat:
+            case RtFn::CollCounter:
                 emit2("movq", src_op(in.args[0]), "%rdi");
                 emit2("movq", src_op(in.args[1]), "%rsi");
                 emit2("movq", src_op(in.args[2]), "%rdx");
@@ -782,6 +788,7 @@ void AsmGen::gen_call_rt(const Inst& in) {
             case RtFn::MathFrexp:
             case RtFn::MathModf:
             case RtFn::HashF64:
+            case RtFn::TimeSleep:
             case RtFn::AsyncTimeoutNew:
                 emit2("movsd", src_op(in.args[0]), "%xmm0");
                 break;
@@ -862,6 +869,13 @@ void AsmGen::gen_call_rt(const Inst& in) {
             case RtFn::OsPathExists:
             case RtFn::OsPathIsdir:
             case RtFn::OsPathIsfile:
+            case RtFn::OsListdir:
+            case RtFn::OsPathBasename:
+            case RtFn::OsPathDirname:
+            case RtFn::OsPathSplitext:
+            case RtFn::OsPathNormpath:
+            case RtFn::OsPathAbspath:
+            case RtFn::OsPathExpanduser:
             case RtFn::SubprocessReturnCode:
             case RtFn::SubprocessStdout:
             case RtFn::SubprocessStderr:
@@ -875,6 +889,9 @@ void AsmGen::gen_call_rt(const Inst& in) {
             case RtFn::RandGNext:
             case RtFn::OsGetcwd:
             case RtFn::OsCpuCount:
+            case RtFn::TimeTime:
+            case RtFn::TimeMonotonic:
+            case RtFn::TimePerfCounter:
                 break;
             case RtFn::RandGRandint:
                 emit2("movq", src_op(in.args[0]), "%rdi");
@@ -889,6 +906,7 @@ void AsmGen::gen_call_rt(const Inst& in) {
                 emit2("movsd", src_op(in.args[1]), "%xmm1");
                 break;
             case RtFn::OsRename:
+            case RtFn::OsGetenv:
                 emit2("movq", src_op(in.args[0]), "%rdi");
                 emit2("movq", src_op(in.args[1]), "%rsi");
                 break;

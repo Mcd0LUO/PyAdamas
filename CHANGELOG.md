@@ -4,6 +4,46 @@
 
 早期阶段没有逐条留痕，按阶段归纳；0.4 之后逐条记录。
 
+## [0.74] - 2026-11-10
+
+stdlib 批次：`string` / `time` / `os` / `itertools` / `collections` / `json`。
+
+### 新增
+
+- `stdlib/string.py`：随编译器分发的纯 py23 子集，提供
+  `ascii_lowercase` / `ascii_uppercase` / `ascii_letters` / `digits` /
+  `hexdigits` / `octdigits` / `punctuation` / `whitespace` / `printable`
+  常量与 `capwords()`。
+- 内置 `time`（`runtime/rt_time.c`）：`time` / `monotonic` /
+  `perf_counter` / `sleep`，秒为单位。
+- `os` 扩展（`runtime/rt_os.c`）：`listdir` / `getenv` / `mkdir` /
+  `rmdir` / `remove` / `rename` / `getcwd` / `cpu_count`；`getenv` 缺失
+  返回空串（CPython 返回 None）。`os.path` 增加 `join` / `exists` /
+  `isdir` / `isfile` / `basename` / `dirname` / `normpath` / `abspath` /
+  `expanduser` / `splitext`。
+- `itertools`（`runtime/rt_stdlib.c`）：`chain` / `repeat` / `islice`，
+  按实参静态特化，结果是 list。
+- `collections`：`Counter` / `most_common`。
+- `json`（`runtime/rt_json.c`）：`dumps` / `loads`。`dumps` 按实参静态
+  类型生成描述符；`loads(text, sample)` 用 sample 的静态类型决定目标
+  结构，覆盖 int / bool / float / str / None / list / dict / 定长 tuple。
+- `tests/run/53_json.py`、`tests/run/54_stdlib.py`。
+
+### 修复
+
+- `json.dumps` 默认分隔符对齐 CPython：`", "` / `": "`（原来是无空格
+  的 `,` / `:`）。
+- `json.loads` 允许 `None` 作为 sample，解析 JSON `null` 返回 None，
+  与 `dumps(None)` 对称；类型检查与降级两处原先显式拒绝 None。
+
+### 验证
+
+- `ctest --preset dev` 连跑 3 次、release 全绿；O0/O1 52 个运行用例通过。
+- 自举差分 runner `--seeds 3`：810 个程序 0 失败。
+- `json.dumps` 与 CPython 输出逐字节一致；`loads` 覆盖 null、嵌套、
+  类型错误与语法错误；`54_stdlib.py` 覆盖 string / time / os /
+  itertools / collections。
+
 ## [0.73] - 2026-11-10
 
 差分测试自举：`tests/diff/run_diff.py` 现在可以用 py23 自己执行。

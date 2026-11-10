@@ -422,7 +422,8 @@ bool visit_unit(Program& p, ModuleUnit& u, std::vector<ModuleUnit*>& stack) {
         }
         if (req.name == "math" || req.name == "sys" || req.name == "asyncio" ||
             req.name == "random" || req.name == "os" || req.name == "os.path" ||
-            req.name == "subprocess") {
+            req.name == "subprocess" || req.name == "time" || req.name == "itertools" ||
+            req.name == "collections" || req.name == "json") {
             // 内置模块没有源文件/对象，只提供编译期接口。
             continue;
         }
@@ -533,7 +534,8 @@ py23::ModuleInfoPtr builtin_module(const std::string& name);
 
 py23::ModuleInfoPtr program_module(Program& p, const std::string& name) {
     if (name == "math" || name == "sys" || name == "asyncio" || name == "random" ||
-        name == "os" || name == "os.path" || name == "subprocess")
+        name == "os" || name == "os.path" || name == "subprocess" || name == "time" ||
+        name == "itertools" || name == "collections" || name == "json")
         return builtin_module(name);
     auto it = p.units.find(name);
     return it == p.units.end() ? nullptr : it->second->info;
@@ -701,6 +703,86 @@ py23::ModuleInfoPtr builtin_module(const std::string& name) {
         auto gt = py23::new_ty(py23::TyKind::Func);
         gt->fn = gather;
         info->globals["gather"] = gt;
+    } else if (name == "time") {
+        func("time", {}, py23::t_float());
+        func("monotonic", {}, py23::t_float());
+        func("perf_counter", {}, py23::t_float());
+        func("sleep", {py23::t_float()}, py23::t_none());
+    } else if (name == "itertools") {
+        // 没有泛型：签名只用于 from-import 的可调用标记，返回类型在
+        // 调用点由 itertools_call 按实参特化。
+        auto two_lists = [&](const std::string& n, bool second_int, py23::TypePtr ret) {
+            auto f = std::make_shared<py23::FuncInfo>();
+            f->name = "itertools." + n;
+            py23::Param p;
+            p.name = "a";
+            p.ty = py23::mk_list(py23::t_unknown());
+            f->pos.push_back(std::move(p));
+            py23::Param q;
+            q.name = second_int ? "b" : "b";
+            q.ty = second_int ? py23::t_int() : py23::mk_list(py23::t_unknown());
+            f->pos.push_back(std::move(q));
+            f->ret = std::move(ret);
+            f->ret_known = true;
+            func_with(n, f);
+        };
+        two_lists("chain", false, py23::mk_list(py23::t_unknown()));
+        two_lists("repeat", true, py23::mk_list(py23::t_unknown()));
+        {
+            auto f = std::make_shared<py23::FuncInfo>();
+            f->name = "itertools.islice";
+            py23::Param p;
+            p.name = "x";
+            p.ty = py23::mk_list(py23::t_unknown());
+            f->pos.push_back(std::move(p));
+            py23::Param q;
+            q.name = "stop";
+            q.ty = py23::t_int();
+            f->pos.push_back(std::move(q));
+            f->ret = py23::mk_list(py23::t_unknown());
+            f->ret_known = true;
+            func_with("islice", f);
+        }
+    } else if (name == "collections") {
+        {
+            auto f = std::make_shared<py23::FuncInfo>();
+            f->name = "collections.Counter";
+            py23::Param p;
+            p.name = "items";
+            p.ty = py23::mk_list(py23::t_unknown());
+            f->pos.push_back(std::move(p));
+            f->ret = py23::mk_dict(py23::t_unknown(), py23::t_int());
+            f->ret_known = true;
+            func_with("Counter", f);
+        }
+    } else if (name == "json") {
+        // 类型由调用点的静态类型决定；签名只用于 from-import 的可调用标记。
+        {
+            auto f = std::make_shared<py23::FuncInfo>();
+            f->name = "json.dumps";
+            py23::Param p;
+            p.name = "obj";
+            p.ty = py23::t_unknown();
+            f->pos.push_back(std::move(p));
+            f->ret = py23::t_str();
+            f->ret_known = true;
+            func_with("dumps", f);
+        }
+        {
+            auto f = std::make_shared<py23::FuncInfo>();
+            f->name = "json.loads";
+            py23::Param p;
+            p.name = "s";
+            p.ty = py23::t_str();
+            f->pos.push_back(std::move(p));
+            py23::Param q;
+            q.name = "sample";
+            q.ty = py23::t_unknown();
+            f->pos.push_back(std::move(q));
+            f->ret = py23::t_unknown();
+            f->ret_known = false;
+            func_with("loads", f);
+        }
     } else if (name == "random") {
         // 不传种子时绑定哨兵 INT64_MIN，运行时用时间 + pid 播种。
         const int64_t kNoSeed = -9223372036854775807LL - 1;
@@ -764,6 +846,28 @@ py23::ModuleInfoPtr builtin_module(const std::string& name) {
         func("rename", {py23::t_str(), py23::t_str()}, py23::t_none());
         func("getcwd", {}, py23::t_str());
         func("cpu_count", {}, py23::t_int());
+        func("listdir", {py23::t_str()}, py23::mk_list(py23::t_str()));
+        {
+            // getenv(name, default="")：CPython 缺失返回 None，py23 用空串默认值。
+            auto f = std::make_shared<py23::FuncInfo>();
+            f->name = "getenv";
+            py23::Param p;
+            p.name = "name";
+            p.ty = py23::t_str();
+            f->pos.push_back(std::move(p));
+            py23::Param d;
+            d.name = "default";
+            d.ty = py23::t_str();
+            d.has_default = true;
+            py23::LiteralValue lv;
+            lv.kind = py23::LiteralValue::Kind::Str;
+            lv.s = "";
+            d.default_lit = lv;
+            f->pos.push_back(std::move(d));
+            f->ret = py23::t_str();
+            f->ret_known = true;
+            func_with("getenv", f);
+        }
     } else if (name == "os.path") {
         auto f = std::make_shared<py23::FuncInfo>();
         f->name = "join";
@@ -776,6 +880,9 @@ py23::ModuleInfoPtr builtin_module(const std::string& name) {
         func("exists", {py23::t_str()}, py23::t_bool());
         func("isdir", {py23::t_str()}, py23::t_bool());
         func("isfile", {py23::t_str()}, py23::t_bool());
+        for (auto& n : {"basename", "dirname", "normpath", "abspath", "expanduser"})
+            func(n, {py23::t_str()}, py23::t_str());
+        func("splitext", {py23::t_str()}, py23::mk_tuple({py23::t_str(), py23::t_str()}));
     } else if (name == "subprocess") {
         auto f = std::make_shared<py23::FuncInfo>();
         f->name = "run";
@@ -951,6 +1058,8 @@ bool build_unit(Program& p, ModuleUnit& u, bool emit_object, bool entry_ir) {
 bool load_program(const std::string& entry_path, const std::vector<std::string>& include_dirs,
                   Program& p) {
     p.include_dirs = include_dirs;
+    // 随编译器分发的标准库源码目录：导入方同目录与用户 -I 优先，最后落这里。
+    p.include_dirs.emplace_back(PY23_STDLIB_DIR);
     auto unit = std::make_unique<ModuleUnit>();
     unit->key = "@entry";
     unit->name = "__entry__";

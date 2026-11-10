@@ -50,6 +50,15 @@ TypePtr TypeChecker::call(Call& c) {
                     if (mod->builtin && mod->name == "asyncio") {
                         if (auto r = asyncio_call(a->attr, c)) return *r;
                     }
+                    if (mod->builtin && mod->name == "itertools") {
+                        if (auto r = itertools_call(a->attr, c)) return *r;
+                    }
+                    if (mod->builtin && mod->name == "collections") {
+                        if (auto r = collections_call(a->attr, c)) return *r;
+                    }
+                    if (mod->builtin && mod->name == "json") {
+                        if (auto r = json_call(a->attr, c)) return *r;
+                    }
                     if (auto ci = mod->classes.find(a->attr); ci != mod->classes.end()) {
                         auto cls = ci->second.cls;
                         if (cls->has_init && ci->second.ctor_sig) {
@@ -171,6 +180,15 @@ TypePtr TypeChecker::check_args(const FuncInfoPtr& fn, Call& c) {
         if (fn && (fn->name == "random.choice" || fn->name == "random.shuffle")) {
             std::string m = fn->name == "random.choice" ? "choice" : "shuffle";
             if (auto r = random_call(m, c)) return *r;
+        }
+        if (fn && fn->name.starts_with("itertools.")) {
+            if (auto r = itertools_call(fn->name.substr(10), c)) return *r;
+        }
+        if (fn && fn->name.starts_with("collections.")) {
+            if (auto r = collections_call(fn->name.substr(12), c)) return *r;
+        }
+        if (fn && fn->name.starts_with("json.")) {
+            if (auto r = json_call(fn->name.substr(5), c)) return *r;
         }
         // 实参和关键字实参都只求值一次。之前关键字值在循环里被求了两次，
         // 一次的类型错误会重复报两遍。
@@ -557,6 +575,118 @@ std::optional<TypePtr> TypeChecker::random_call(const std::string& member, Call&
         return t_unknown();
 }
 
+std::optional<TypePtr> TypeChecker::itertools_call(const std::string& member, Call& c) {
+        if (member != "chain" && member != "islice" && member != "repeat")
+            return std::nullopt;
+        if (!c.keywords.empty()) {
+            err(c.line, c.col,
+                std::format("itertools.{}() does not take keyword arguments", member));
+            for (auto& kw : c.keywords) expr(*kw.value);
+        }
+        std::vector<TypePtr> a;
+        for (auto& arg : c.args) a.push_back(expr(*arg));
+        auto is_list = [](const TypePtr& t) { return t && t->kind == TyKind::List; };
+        auto elem_of = [](const TypePtr& t) {
+            return t && t->kind == TyKind::List && !t->sub.empty() ? t->sub[0] : t_unknown();
+        };
+        if (member == "chain") {
+            if (a.size() != 2) {
+                err(c.line, c.col,
+                    std::format("itertools.chain() expects 2 arguments, got {}", a.size()));
+                return mk_list(t_unknown());
+            }
+            for (size_t i = 0; i < 2; ++i)
+                if (!is_list(a[i]) && !is_unknown(a[i]))
+                    err(c.args[i]->line, c.args[i]->col,
+                        std::format("itertools.chain() expects lists, got '{}'",
+                                    type_name(a[i])));
+            TypePtr ea = elem_of(a[0]);
+            TypePtr eb = elem_of(a[1]);
+            return mk_list(join(ea, eb));
+        }
+        if (member == "islice") {
+            if (a.size() != 2 && a.size() != 3) {
+                err(c.line, c.col,
+                    std::format("itertools.islice() expects 2 or 3 arguments, got {}", a.size()));
+                return mk_list(t_unknown());
+            }
+            if (!is_list(a[0]) && !is_unknown(a[0]))
+                err(c.args[0]->line, c.args[0]->col,
+                    std::format("itertools.islice() expects a list, got '{}'",
+                                type_name(a[0])));
+            for (size_t i = 1; i < a.size(); ++i)
+                if (a[i] && !is_unknown(a[i]) && a[i]->kind != TyKind::Int)
+                    err(c.args[i]->line, c.args[i]->col,
+                        "itertools.islice() indices must be int");
+            return is_list(a[0]) ? a[0] : mk_list(t_unknown());
+        }
+        // repeat(x, n)
+        if (a.size() != 2) {
+            err(c.line, c.col,
+                std::format("itertools.repeat() expects 2 arguments, got {}", a.size()));
+            return mk_list(t_unknown());
+        }
+        if (a[1] && !is_unknown(a[1]) && a[1]->kind != TyKind::Int)
+            err(c.args[1]->line, c.args[1]->col, "itertools.repeat() count must be int");
+        return mk_list(a[0] ? a[0] : t_unknown());
+}
+
+std::optional<TypePtr> TypeChecker::collections_call(const std::string& member, Call& c) {
+        if (member != "Counter") return std::nullopt;
+        if (!c.keywords.empty()) {
+            err(c.line, c.col, "collections.Counter() does not take keyword arguments");
+            for (auto& kw : c.keywords) expr(*kw.value);
+        }
+        std::vector<TypePtr> a;
+        for (auto& arg : c.args) a.push_back(expr(*arg));
+        if (a.size() != 1) {
+            err(c.line, c.col,
+                std::format("collections.Counter() expects 1 argument, got {}", a.size()));
+            return mk_dict(t_unknown(), t_int());
+        }
+        TypePtr et = t_unknown();
+        if (a[0] && a[0]->kind == TyKind::List && !a[0]->sub.empty()) et = a[0]->sub[0];
+        else if (a[0] && !is_unknown(a[0]))
+            err(c.args[0]->line, c.args[0]->col,
+                std::format("collections.Counter() expects a list, got '{}'",
+                            type_name(a[0])));
+        return mk_dict(et, t_int());
+}
+
+std::optional<TypePtr> TypeChecker::json_call(const std::string& member, Call& c) {
+        if (member != "dumps" && member != "loads") return std::nullopt;
+        if (!c.keywords.empty()) {
+            err(c.line, c.col, std::format("json.{}() does not take keyword arguments", member));
+            for (auto& kw : c.keywords) expr(*kw.value);
+        }
+        std::vector<TypePtr> a;
+        for (auto& arg : c.args) a.push_back(expr(*arg));
+        if (member == "dumps") {
+            if (a.size() != 1) {
+                err(c.line, c.col,
+                    std::format("json.dumps() expects 1 argument, got {}", a.size()));
+            }
+            return t_str();
+        }
+        // loads(text, sample)：样例值只提供静态类型，运行时不求值。
+        if (a.size() != 2) {
+            err(c.line, c.col,
+                std::format("json.loads() expects 2 arguments (text, sample), got {}",
+                            a.size()));
+            return t_unknown();
+        }
+        if (a[0] && !is_unknown(a[0]) && a[0]->kind != TyKind::Str)
+            err(c.args[0]->line, c.args[0]->col,
+                std::format("json.loads() expects a str, got '{}'", type_name(a[0])));
+        TypePtr sample = a[1];
+        if (!sample || sample->kind == TyKind::Unknown) {
+            err(c.args[1]->line, c.args[1]->col,
+                "json.loads() needs a sample value with a static type");
+            return t_unknown();
+        }
+        return sample;
+}
+
 bool TypeChecker::has_method(const TypePtr& t, const std::string& m) {
         if (!t) return true;
         switch (t->kind) {
@@ -595,7 +725,7 @@ bool TypeChecker::has_method(const TypePtr& t, const std::string& m) {
             case TyKind::Dict: {
                 static const std::unordered_set<std::string> ms = {
                     "get",   "keys",   "values", "items",  "pop",    "update",
-                    "setdefault", "clear", "copy", "popitem",
+                    "setdefault", "clear", "copy", "popitem", "most_common",
                 };
                 return ms.count(m) > 0;
             }
@@ -1089,6 +1219,16 @@ TypePtr TypeChecker::method_call(TypePtr recv, const std::string& name, Call& c,
             if (name == "clear") { argc(0, 0); return t_none(); }
             if (name == "copy") { argc(0, 0); return recv; }
             if (name == "popitem") { return mk_tuple({kt, vt}); }
+            if (name == "most_common") {
+                // py23 扩展：Counter 返回普通 dict，计数排序走这个方法。
+                argc(0, 1);
+                if (a.size() == 1 && a[0] && !is_unknown(a[0]) &&
+                    a[0]->kind != TyKind::Int)
+                    err(c.line, c.col, "most_common() count must be int");
+                if (vt && !is_unknown(vt) && vt->kind != TyKind::Int)
+                    err(c.line, c.col, "most_common() expects a dict with int values");
+                return mk_list(mk_tuple({kt, t_int()}));
+            }
         }
 
         if (recv->kind == TyKind::Tuple) {

@@ -58,7 +58,7 @@ set(PY23_SOURCES
 # 分别编译成可重定位对象后再用 ld -r 合成一个 rt.o。
 set(PY23_RT_OBJ "${CMAKE_BINARY_DIR}/rt.o")
 set(PY23_MODCACHE_DIR "${CMAKE_BINARY_DIR}/modcache")
-set(PY23_RT_PARTS core exc gen async task fd agen str list dict slice class math complex format file random os subprocess)
+set(PY23_RT_PARTS core exc gen async task fd agen str list dict slice class math complex format file random os subprocess time stdlib json)
 set(PY23_RT_OBJS "")
 foreach(part ${PY23_RT_PARTS})
   set(rt_obj "${CMAKE_BINARY_DIR}/rt_${part}.o")
@@ -89,6 +89,7 @@ target_compile_options(py23 PRIVATE -Wall -Wextra)
 target_compile_definitions(py23 PRIVATE
   PY23_RT_OBJ="${PY23_RT_OBJ}"
   PY23_MODCACHE_DIR="${PY23_MODCACHE_DIR}"
+  PY23_STDLIB_DIR="${CMAKE_SOURCE_DIR}/stdlib"
 )
 add_dependencies(py23 py23_rt)
 

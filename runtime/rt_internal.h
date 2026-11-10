@@ -592,6 +592,30 @@ Py23Str* py23_os_path_join(Py23List* parts);
 int64_t py23_os_path_exists(Py23Str* path);
 int64_t py23_os_path_isdir(Py23Str* path);
 int64_t py23_os_path_isfile(Py23Str* path);
+Py23List* py23_os_listdir(Py23Str* path);
+Py23Str* py23_os_getenv(Py23Str* name, Py23Str* def);
+Py23Str* py23_os_path_basename(Py23Str* path);
+Py23Str* py23_os_path_dirname(Py23Str* path);
+Py23List* py23_os_path_splitext(Py23Str* path);
+Py23Str* py23_os_path_normpath(Py23Str* path);
+Py23Str* py23_os_path_abspath(Py23Str* path);
+Py23Str* py23_os_path_expanduser(Py23Str* path);
+
+/* ── time ───────────────────────────────────────────────────────── */
+double py23_time_time(void);
+double py23_time_monotonic(void);
+double py23_time_perf_counter(void);
+void py23_time_sleep(double seconds);
+
+/* ── itertools / collections 的静态特化辅助 ─────────────────────── */
+Py23List* py23_itertools_chain(Py23List* a, Py23List* b, int64_t elem_kind);
+Py23List* py23_itertools_repeat(int64_t v, int64_t n, int64_t elem_kind);
+Py23Dict* py23_collections_counter(Py23List* src, int64_t key_kind, int64_t key_own);
+Py23List* py23_collections_most_common(Py23Dict* d, int64_t n);
+
+/* ── json：静态类型描述符 ───────────────────────────────────────── */
+Py23Str* py23_json_dumps(int64_t value, Py23Str* desc);
+int64_t py23_json_loads(Py23Str* text, Py23Str* desc);
 
 /* ── subprocess：CompletedProcess 与 run() ─────────────────────── */
 typedef struct Py23Proc Py23Proc;

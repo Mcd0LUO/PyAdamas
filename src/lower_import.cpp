@@ -180,13 +180,36 @@ std::optional<RtFn> Lowerer::native_fn(const std::string& module, const std::str
         if (member == "rename") return RtFn::OsRename;
         if (member == "getcwd") return RtFn::OsGetcwd;
         if (member == "cpu_count") return RtFn::OsCpuCount;
+        if (member == "listdir") return RtFn::OsListdir;
+        if (member == "getenv") return RtFn::OsGetenv;
     } else if (module == "os.path") {
         if (member == "join") return RtFn::OsPathJoin;
         if (member == "exists") return RtFn::OsPathExists;
         if (member == "isdir") return RtFn::OsPathIsdir;
         if (member == "isfile") return RtFn::OsPathIsfile;
+        if (member == "basename") return RtFn::OsPathBasename;
+        if (member == "dirname") return RtFn::OsPathDirname;
+        if (member == "splitext") return RtFn::OsPathSplitext;
+        if (member == "normpath") return RtFn::OsPathNormpath;
+        if (member == "abspath") return RtFn::OsPathAbspath;
+        if (member == "expanduser") return RtFn::OsPathExpanduser;
     } else if (module == "subprocess") {
         if (member == "run") return RtFn::SubprocessRun;
+    } else if (module == "time") {
+        if (member == "time") return RtFn::TimeTime;
+        if (member == "monotonic") return RtFn::TimeMonotonic;
+        if (member == "perf_counter") return RtFn::TimePerfCounter;
+        if (member == "sleep") return RtFn::TimeSleep;
+    } else if (module == "itertools") {
+        // 只为 from-import 登记别名；真正降级走 lower_itertools。
+        if (member == "chain") return RtFn::IterChain;
+        if (member == "islice") return RtFn::ListSlice;
+        if (member == "repeat") return RtFn::IterRepeat;
+    } else if (module == "collections") {
+        if (member == "Counter") return RtFn::CollCounter;
+    } else if (module == "json") {
+        if (member == "dumps") return RtFn::JsonDumps;
+        if (member == "loads") return RtFn::JsonLoads;
     }
     return std::nullopt;
 }
@@ -281,6 +304,185 @@ VReg Lowerer::call_native(const std::string& module, const std::string& member, 
     VReg v = call_runtime(*fn, rt, std::move(args));
     if (ir_is_heap(rt)) push_temp(v);
     return v;
+}
+
+VReg Lowerer::lower_itertools(const std::string& member, Call& c) {
+    if (!c.keywords.empty()) {
+        err(c.line, c.col,
+            std::format("itertools.{}() does not take keyword arguments", member));
+    }
+    if (member == "chain") {
+        if (c.args.size() != 2) {
+            err(c.line, c.col,
+                std::format("itertools.chain() expects 2 arguments, got {}", c.args.size()));
+            return const_none();
+        }
+        TypePtr rt = tc_.type_of(&c);
+        VReg a = expr(*c.args[0]);
+        VReg b = expr(*c.args[1]);
+        VReg v = call_runtime(RtFn::IterChain, rt, {a, b, const_int(list_kind(rt))});
+        push_temp(v);
+        return v;
+    }
+    if (member == "islice") {
+        if (c.args.size() != 2 && c.args.size() != 3) {
+            err(c.line, c.col,
+                std::format("itertools.islice() expects 2 or 3 arguments, got {}",
+                            c.args.size()));
+            return const_none();
+        }
+        VReg x = expr(*c.args[0]);
+        VReg start = const_int(0);
+        VReg stop = const_int(0);
+        if (c.args.size() == 2) {
+            stop = coerce(expr(*c.args[1]), tc_.type_of(c.args[1].get()), t_int());
+        } else {
+            start = coerce(expr(*c.args[1]), tc_.type_of(c.args[1].get()), t_int());
+            stop = coerce(expr(*c.args[2]), tc_.type_of(c.args[2].get()), t_int());
+        }
+        TypePtr rt = tc_.type_of(&c);
+        VReg v = call_runtime(RtFn::ListSlice, rt, {x, start, stop, const_int(1)});
+        push_temp(v);
+        return v;
+    }
+    if (member == "repeat") {
+        if (c.args.size() != 2) {
+            err(c.line, c.col,
+                std::format("itertools.repeat() expects 2 arguments, got {}", c.args.size()));
+            return const_none();
+        }
+        TypePtr rt = tc_.type_of(&c);
+        VReg v = expr(*c.args[0]);
+        VReg n = coerce(expr(*c.args[1]), tc_.type_of(c.args[1].get()), t_int());
+        VReg out = call_runtime(RtFn::IterRepeat, rt, {v, n, const_int(list_kind(rt))});
+        push_temp(out);
+        return out;
+    }
+    err(c.line, c.col, std::format("itertools.{} is not supported", member));
+    return const_none();
+}
+
+VReg Lowerer::lower_collections(const std::string& member, Call& c) {
+    if (!c.keywords.empty()) {
+        err(c.line, c.col,
+            std::format("collections.{}() does not take keyword arguments", member));
+    }
+    if (member == "Counter") {
+        if (c.args.size() != 1) {
+            err(c.line, c.col,
+                std::format("collections.Counter() expects 1 argument, got {}",
+                            c.args.size()));
+            return const_none();
+        }
+        TypePtr at = tc_.type_of(c.args[0].get());
+        TypePtr et = (at && at->kind == TyKind::List && !at->sub.empty()) ? at->sub[0]
+                                                                          : t_unknown();
+        VReg items = expr(*c.args[0]);
+        TypePtr rt = tc_.type_of(&c);
+        VReg v = call_runtime(RtFn::CollCounter, rt,
+                              {items, const_int(key_kind(et)), const_int(own_kind(et))});
+        push_temp(v);
+        return v;
+    }
+    err(c.line, c.col, std::format("collections.{} is not supported", member));
+    return const_none();
+}
+
+bool Lowerer::json_desc(const TypePtr& t, std::string& out, int line, int col) {
+    if (!t || t->kind == TyKind::Unknown) {
+        err(line, col, "json needs a statically known type");
+        return false;
+    }
+    switch (t->kind) {
+        case TyKind::None: out = "n"; return true;
+        case TyKind::Bool: out = "b"; return true;
+        case TyKind::Int: out = "i"; return true;
+        case TyKind::Float: out = "f"; return true;
+        case TyKind::Str: out = "s"; return true;
+        case TyKind::List: {
+            if (t->sub.empty()) {
+                err(line, col, "json: list element type is unknown");
+                return false;
+            }
+            std::string inner;
+            if (!json_desc(t->sub[0], inner, line, col)) return false;
+            out = "(l" + inner + ")";
+            return true;
+        }
+        case TyKind::Dict: {
+            if (t->sub.size() < 2) {
+                err(line, col, "json: dict type is unknown");
+                return false;
+            }
+            if (t->sub[0] && t->sub[0]->kind != TyKind::Str) {
+                err(line, col,
+                    std::format("json dict keys must be str, got '{}'", type_name(t->sub[0])));
+                return false;
+            }
+            std::string inner;
+            if (!json_desc(t->sub[1], inner, line, col)) return false;
+            out = "(d" + inner + ")";
+            return true;
+        }
+        case TyKind::Tuple: {
+            if (t->variadic) {
+                err(line, col, "json does not support variable-length tuples");
+                return false;
+            }
+            std::string s = "(t";
+            for (auto& sub : t->sub) {
+                std::string inner;
+                if (!json_desc(sub, inner, line, col)) return false;
+                s += inner;
+            }
+            s += ")";
+            out = std::move(s);
+            return true;
+        }
+        default:
+            err(line, col,
+                std::format("json does not support type '{}'", type_name(t)));
+            return false;
+    }
+}
+
+VReg Lowerer::lower_json(const std::string& member, Call& c) {
+    if (!c.keywords.empty()) {
+        err(c.line, c.col, std::format("json.{}() does not take keyword arguments", member));
+    }
+    if (member == "dumps") {
+        if (c.args.size() != 1) {
+            err(c.line, c.col,
+                std::format("json.dumps() expects 1 argument, got {}", c.args.size()));
+            return const_none();
+        }
+        TypePtr vt = tc_.type_of(c.args[0].get());
+        std::string desc;
+        if (!json_desc(vt, desc, c.args[0]->line, c.args[0]->col)) return const_none();
+        if (vt && vt->kind == TyKind::None) return const_str("null");
+        VReg v = expr(*c.args[0]);
+        VReg s = call_runtime(RtFn::JsonDumps, t_str(), {v, const_str(desc)});
+        push_temp(s);
+        return s;
+    }
+    if (member == "loads") {
+        if (c.args.size() != 2) {
+            err(c.line, c.col,
+                std::format("json.loads() expects 2 arguments (text, sample), got {}",
+                            c.args.size()));
+            return const_none();
+        }
+        // 样例值只提供类型，运行时不求值（类型检查阶段已经检查过）。
+        TypePtr sample = tc_.type_of(c.args[1].get());
+        std::string desc;
+        if (!json_desc(sample, desc, c.args[1]->line, c.args[1]->col)) return const_none();
+        VReg text = expr(*c.args[0]);
+        VReg v = call_runtime(RtFn::JsonLoads, sample, {text, const_str(desc)});
+        if (ir_is_heap(sample)) push_temp(v);
+        return v;
+    }
+    err(c.line, c.col, std::format("json.{} is not supported", member));
+    return const_none();
 }
 
 void Lowerer::lower_import(Import& im) {
