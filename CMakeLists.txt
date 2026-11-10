@@ -38,6 +38,9 @@ set(PY23_SOURCES
   src/lower_print.cpp
   src/lower_gen.cpp
   src/opt.cpp
+  src/opt_fold.cpp
+  src/opt_inline.cpp
+  src/opt_loop.cpp
   src/codegen.cpp
   src/codegen_regalloc.cpp
   src/codegen_block.cpp
