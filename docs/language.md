@@ -324,14 +324,17 @@ print(asyncio.run(add(3, 4)))   # 10
 - `asyncio.timeout(delay)`：`async with asyncio.timeout(0.5):` 在块内
   到期时向当前协程注入 `TimeoutError`（块外的 `try/except` 能捕获），
   退出时取消定时器；`t.expired()` 查询是否已超时。
+- `asyncio.Semaphore([value=1])`：`await sem.acquire()`、
+  `sem.release()`、`sem.locked()`；等待者 FIFO，支持
+  `async with sem:`；release 多调时名额按 CPython 语义累加。
 - `asyncio.TaskGroup()`：`async with ... as tg:` 内用
   `tg.create_task(coro)` 启动子任务；退出时等待全部结束，任一失败则
   取消其余任务并把第一个异常抛给调用方（不是 CPython 的
   `ExceptionGroup`）。
 
 也支持 `from asyncio import sleep, gather, run, create_task, Event, Lock,
-Queue, wait_for, timeout, TaskGroup`（跨模块 `run`/`wait_for` 的结果类型
-会退化成 unknown）。async 方法、`with` 里的 `await`、跨 `await` 的
+Queue, wait_for, timeout, TaskGroup, Semaphore`（跨模块 `run`/`wait_for`
+的结果类型会退化成 unknown）。async 方法、`with` 里的 `await`、跨 `await` 的
 `finally` 都可以用；异常跨 `await` 通过在恢复时注入异常传播，
 `try/except` 能正常捕获。
 

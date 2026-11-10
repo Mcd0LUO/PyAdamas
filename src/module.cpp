@@ -230,6 +230,7 @@ void enc_type(Enc& e, const TypePtr& t) {
         case TyKind::TypeObj:
         case TyKind::AsyncTimeout:
         case TyKind::AsyncTaskGroup:
+        case TyKind::AsyncSemaphore:
         case TyKind::Exception:
         case TyKind::Complex:
         case TyKind::File: e.u8(0); break;

@@ -295,6 +295,10 @@ enum class RtFn : uint16_t {
     TaskGroupAdd,      // (taskgroup*, coro*) -> task*
     TaskGroupExit,     // (taskgroup*) -> future*
     TaskGroupCancel,   // (taskgroup*) -> void
+    SemNew,            // (i64 value) -> semaphore*
+    SemAcquire,        // (semaphore*) -> future*
+    SemRelease,        // (semaphore*) -> void
+    SemLocked,         // (semaphore*) -> bool
 };
 
 inline const char* rt_name(RtFn f) {
@@ -569,6 +573,10 @@ inline const char* rt_name(RtFn f) {
         case RtFn::TaskGroupAdd: return "py23_taskgroup_add";
         case RtFn::TaskGroupExit: return "py23_taskgroup_exit";
         case RtFn::TaskGroupCancel: return "py23_taskgroup_cancel";
+        case RtFn::SemNew: return "py23_sem_new";
+        case RtFn::SemAcquire: return "py23_sem_acquire";
+        case RtFn::SemRelease: return "py23_sem_release";
+        case RtFn::SemLocked: return "py23_sem_locked";
     }
     return "?";
 }
@@ -868,6 +876,7 @@ inline bool ir_is_heap(const TypePtr& t) {
         case TyKind::TypeObj:
         case TyKind::AsyncTimeout:
         case TyKind::AsyncTaskGroup:
+        case TyKind::AsyncSemaphore:
         case TyKind::Exception:  // 异常值：堆对象，args 列表归它所有
         case TyKind::Complex:
         case TyKind::File:
@@ -902,6 +911,7 @@ inline bool ir_is_ref(const TypePtr& t) {
         case TyKind::TypeObj:
         case TyKind::AsyncTimeout:
         case TyKind::AsyncTaskGroup:
+        case TyKind::AsyncSemaphore:
         case TyKind::Exception:
         case TyKind::Complex:
         case TyKind::File:

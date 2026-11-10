@@ -612,6 +612,24 @@ py23::ModuleInfoPtr builtin_module(const std::string& name) {
              py23::mk_coroutine(py23::t_unknown()));
         func("timeout", {py23::t_float()}, py23::mk_async_timeout());
         func("TaskGroup", {}, py23::mk_async_taskgroup());
+        {
+            auto sf = std::make_shared<py23::FuncInfo>();
+            sf->name = "Semaphore";
+            py23::Param p;
+            p.name = "value";
+            p.ty = py23::t_int();
+            p.has_default = true;
+            py23::LiteralValue lv;
+            lv.kind = py23::LiteralValue::Kind::Int;
+            lv.i = 1;
+            p.default_lit = lv;
+            sf->pos.push_back(std::move(p));
+            sf->ret = py23::mk_async_semaphore();
+            sf->ret_known = true;
+            auto st = py23::new_ty(py23::TyKind::Func);
+            st->fn = sf;
+            info->globals["Semaphore"] = st;
+        }
         func("wait_readable", {py23::t_int()}, py23::mk_coroutine(py23::t_none()));
         func("wait_writable", {py23::t_int()}, py23::mk_coroutine(py23::t_none()));
         auto gather = std::make_shared<py23::FuncInfo>();

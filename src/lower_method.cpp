@@ -181,7 +181,8 @@ VReg Lowerer::lower_method_call(Attribute& at, Call& c) {
                     recv_ty->kind == TyKind::AsyncLock ||
                     recv_ty->kind == TyKind::AsyncQueue ||
                     recv_ty->kind == TyKind::AsyncTimeout ||
-                    recv_ty->kind == TyKind::AsyncTaskGroup)) {
+                    recv_ty->kind == TyKind::AsyncTaskGroup ||
+                    recv_ty->kind == TyKind::AsyncSemaphore)) {
         if (opt) recv = guard_not_none(recv, std::format("method '{}'", at.attr));
         if (!c.keywords.empty())
             err(c.line, c.col, std::format("{}() does not take keyword arguments", at.attr));
@@ -291,6 +292,23 @@ VReg Lowerer::lower_method_call(Attribute& at, Call& c) {
             if (at.attr == "expired") {
                 if (!count(0)) return const_none();
                 return call_runtime(RtFn::TimeoutExpired, t_bool(), {recv});
+            }
+        }
+        if (recv_ty->kind == TyKind::AsyncSemaphore) {
+            if (at.attr == "acquire") {
+                if (!count(0)) return const_none();
+                VReg f = call_runtime(RtFn::SemAcquire, mk_future(t_bool()), {recv});
+                push_temp(f);
+                return f;
+            }
+            if (at.attr == "release") {
+                if (!count(0)) return const_none();
+                call_void(RtFn::SemRelease, {recv});
+                return const_none();
+            }
+            if (at.attr == "locked") {
+                if (!count(0)) return const_none();
+                return call_runtime(RtFn::SemLocked, t_bool(), {recv});
             }
         }
         if (recv_ty->kind == TyKind::AsyncTaskGroup) {

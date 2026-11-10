@@ -635,3 +635,55 @@ void py23_taskgroup_cancel(void* gp) {
         py23_asyncio_task_cancel((void*)(uintptr_t)g->tasks->data[i]);
 }
 
+/* ── asyncio.Semaphore ───────────────────────────────────────── */
+
+typedef struct {
+    int64_t value;
+    Py23List* waiters; /* Future* */
+} Py23Sem;
+
+static void sem_destroy(void* p) {
+    Py23Sem* s = (Py23Sem*)p;
+    if (s->waiters) py23_rc_dec(s->waiters);
+}
+
+void* py23_sem_new(int64_t value) {
+    loop_ensure();
+    Py23Sem* s = (Py23Sem*)rc_alloc((int64_t)sizeof(Py23Sem), sem_destroy, NULL,
+                                    PY23_RC_OBJ);
+    s->value = value > 0 ? value : 0;
+    s->waiters = py23_list_new(4, 1);
+    return s;
+}
+
+void* py23_sem_acquire(void* sp) {
+    if (!sp) py23_raise_c("TypeError", "acquire() expects a Semaphore");
+    Py23Sem* s = (Py23Sem*)sp;
+    void* f = py23_asyncio_future_new();
+    if (s->value > 0) {
+        --s->value;
+        py23_future_set_result(f, 1);
+        return f;
+    }
+    py23_rc_inc(f);
+    py23_list_append(s->waiters, (int64_t)f);
+    return f;
+}
+
+void py23_sem_release(void* sp) {
+    if (!sp) py23_raise_c("TypeError", "release() expects a Semaphore");
+    Py23Sem* s = (Py23Sem*)sp;
+    if (s->waiters->len > 0) {
+        void* f = (void*)(uintptr_t)s->waiters->data[0];
+        py23_future_set_result(f, 1);
+        py23_list_del_index(s->waiters, 0);
+        return; /* 名额直接转给等待者 */
+    }
+    ++s->value;
+}
+
+int64_t py23_sem_locked(void* sp) {
+    if (!sp) return 0;
+    return ((Py23Sem*)sp)->value == 0 ? 1 : 0;
+}
+

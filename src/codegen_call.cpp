@@ -660,6 +660,10 @@ void AsmGen::gen_call_rt(const Inst& in) {
             case RtFn::TimeoutExpired:
             case RtFn::TaskGroupExit:
             case RtFn::TaskGroupCancel:
+            case RtFn::SemAcquire:
+            case RtFn::SemRelease:
+            case RtFn::SemLocked:
+            case RtFn::SemNew:
             case RtFn::GenNext:
             case RtFn::GenClose:
             case RtFn::HandlerSuspend:

@@ -315,6 +315,8 @@ void TypeChecker::stmt(Stmt& s) {
                         vt = t_bool();
                     } else if (w.is_async && ct && ct->kind == TyKind::AsyncEvent) {
                         vt = t_bool();
+                    } else if (w.is_async && ct && ct->kind == TyKind::AsyncSemaphore) {
+                        vt = t_bool();
                     } else if (w.is_async && ct && ct->kind == TyKind::AsyncTimeout) {
                         vt = t_none();
                     } else if (w.is_async && ct && ct->kind == TyKind::AsyncTaskGroup) {

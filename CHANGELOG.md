@@ -4,6 +4,31 @@
 
 早期阶段没有逐条留痕，按阶段归纳；0.4 之后逐条记录。
 
+## [0.57] - 2026-11-10
+
+asyncio 再补 `Semaphore`。
+
+### 新增
+
+- `asyncio.Semaphore([value=1])`：`await acquire()` / `release()` /
+  `locked()`，等待者 FIFO；release 优先把名额转给等待者，无等待者时
+  计数累加（与 CPython 一致）。
+- `async with sem:`：进入 acquire、退出（含异常路径）自动 release。
+- `from asyncio import Semaphore` 支持零参形式。
+
+### 验证
+
+- `ctest --preset dev/release` 全绿；O0/O1 全量 52 个运行用例通过；
+  810 程序差分零失败
+- 临时探针（不入库）：Semaphore(2) 三任务并发顺序、async with 与
+  locked() 状态、from-import、手动 acquire/release 均与 CPython 一致
+  （O0/O1/O2）
+
+### 已知限制
+
+- 与 Lock 相同：不支持 `Semaphore` 的 `_value` 直接读写；取消等待者时
+  名额回收由 release 路径承担（未实现取消时自动补发）
+
 ## [0.56] - 2026-11-10
 
 asyncio 收尾：Queue nowait、Event 上下文、`asyncio.timeout` 与 `TaskGroup`。

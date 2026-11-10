@@ -366,7 +366,8 @@ std::optional<TypePtr> TypeChecker::asyncio_call(const std::string& member, Call
             member != "create_task" && member != "Future" &&
             member != "wait_readable" && member != "wait_writable" &&
             member != "Event" && member != "Lock" && member != "Queue" &&
-            member != "wait_for" && member != "timeout" && member != "TaskGroup")
+            member != "wait_for" && member != "timeout" && member != "TaskGroup" &&
+            member != "Semaphore")
             return std::nullopt;
 
         std::vector<TypePtr> a;
@@ -422,6 +423,16 @@ std::optional<TypePtr> TypeChecker::asyncio_call(const std::string& member, Call
                     std::format("asyncio.Queue() maxsize must be an int, got '{}'",
                                 type_name(a[0])));
             return mk_async_queue(t_unknown());
+        }
+
+        if (member == "Semaphore") {
+            if (a.size() > 1)
+                err(c.line, c.col, "asyncio.Semaphore() takes at most one argument");
+            if (a.size() == 1 && !is_unknown(a[0]) && a[0]->kind != TyKind::Int)
+                err(c.line, c.col,
+                    std::format("asyncio.Semaphore() value must be an int, got '{}'",
+                                type_name(a[0])));
+            return mk_async_semaphore();
         }
 
         if (member == "TaskGroup") {
@@ -810,6 +821,24 @@ TypePtr TypeChecker::method_call(TypePtr recv, const std::string& name, Call& c,
                 return t_bool();
             }
             err(c.line, c.col, std::format("'asyncio.Timeout' has no method '{}'", name));
+            return t_unknown();
+        }
+
+        if (recv->kind == TyKind::AsyncSemaphore) {
+            if (name == "acquire") {
+                argc(0, 0);
+                return mk_future(t_bool());
+            }
+            if (name == "release") {
+                argc(0, 0);
+                return t_none();
+            }
+            if (name == "locked") {
+                argc(0, 0);
+                return t_bool();
+            }
+            err(c.line, c.col,
+                std::format("'asyncio.Semaphore' has no method '{}'", name));
             return t_unknown();
         }
 

@@ -511,6 +511,17 @@ VReg Lowerer::lower_asyncio(const std::string& member, Call& c) {
         return q;
     }
 
+    if (member == "Semaphore") {
+        if (c.args.size() > 1)
+            err(c.line, c.col, "asyncio.Semaphore() takes at most one argument");
+        VReg value = const_int(1);
+        if (!c.args.empty())
+            value = coerce(expr(*c.args[0]), tc_.type_of(c.args[0].get()), t_int());
+        VReg s = call_runtime(RtFn::SemNew, rt ? rt : mk_async_semaphore(), {value});
+        push_temp(s);
+        return s;
+    }
+
     if (member == "TaskGroup") {
         if (!c.args.empty())
             err(c.line, c.col, "asyncio.TaskGroup() takes no arguments");

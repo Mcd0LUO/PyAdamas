@@ -61,7 +61,8 @@ VReg Lowerer::emit_yield(VReg v, TypePtr vt) {
             c.kind == FuncCtx::Cleanup::Kind::Handler ||
             c.kind == FuncCtx::Cleanup::Kind::LockRelease ||
             c.kind == FuncCtx::Cleanup::Kind::TimeoutExit ||
-            c.kind == FuncCtx::Cleanup::Kind::TaskGroupCancel)
+            c.kind == FuncCtx::Cleanup::Kind::TaskGroupCancel ||
+            c.kind == FuncCtx::Cleanup::Kind::SemRelease)
             call_void(RtFn::HandlerSuspend, {load_slot(c.handler_slot, t_int())});
     }
     int id = st_->gen_next_state++;
@@ -270,7 +271,8 @@ VReg Lowerer::suspend_on_awaitable(VReg w, TypePtr result_ty, int line, int col,
             c.kind == FuncCtx::Cleanup::Kind::Handler ||
             c.kind == FuncCtx::Cleanup::Kind::LockRelease ||
             c.kind == FuncCtx::Cleanup::Kind::TimeoutExit ||
-            c.kind == FuncCtx::Cleanup::Kind::TaskGroupCancel)
+            c.kind == FuncCtx::Cleanup::Kind::TaskGroupCancel ||
+            c.kind == FuncCtx::Cleanup::Kind::SemRelease)
             call_void(RtFn::HandlerSuspend, {load_slot(c.handler_slot, t_int())});
     }
     int id = st_->gen_next_state++;
@@ -634,7 +636,8 @@ int Lowerer::compile_suspendable_function(FunctionDef& f, FuncInfoPtr info,
                c.kind == FuncCtx::Cleanup::Kind::Finally ||
                c.kind == FuncCtx::Cleanup::Kind::LockRelease ||
                c.kind == FuncCtx::Cleanup::Kind::TimeoutExit ||
-               c.kind == FuncCtx::Cleanup::Kind::TaskGroupCancel;
+               c.kind == FuncCtx::Cleanup::Kind::TaskGroupCancel ||
+               c.kind == FuncCtx::Cleanup::Kind::SemRelease;
     };
     std::vector<std::pair<int, int>> close_targets;
     for (auto& gs : st_->gen_states) {
@@ -656,6 +659,8 @@ int Lowerer::compile_suspendable_function(FunctionDef& f, FuncInfoPtr info,
                 call_void(RtFn::TimeoutExit, {load_slot(c.mgr_slot, t_unknown())});
             } else if (c.kind == FuncCtx::Cleanup::Kind::TaskGroupCancel) {
                 call_void(RtFn::TaskGroupCancel, {load_slot(c.mgr_slot, t_unknown())});
+            } else if (c.kind == FuncCtx::Cleanup::Kind::SemRelease) {
+                call_void(RtFn::SemRelease, {load_slot(c.mgr_slot, t_unknown())});
             } else if (c.kind == FuncCtx::Cleanup::Kind::Finally && c.body) {
                 ++finally_body_depth_;
                 stmts(*c.body);
