@@ -2591,24 +2591,29 @@ static void file_write_bytes(Py23File* f, const char* p, int64_t n) {
     }
 }
 
+/* 把底层句柄退回到逻辑位置并清空解码缓冲。文本模式预读会让 ftell
+   领先于逻辑位置，写/截断之前必须先对齐。 */
+static void file_sync_raw(Py23File* f) {
+    if (f->binary) return;
+    if (!(f->dpos < f->dlen || f->rawleft_len || f->pending_cr)) return;
+    int64_t raw_target = f->raw_base + f->dpos + f->rawleft_len;
+    if (fseek(f->fp, (long)raw_target, SEEK_SET) != 0)
+        py23_raise_c("OSError", "seek failed");
+    f->dlen = f->dpos = 0;
+    f->rawleft_len = 0;
+    f->pending_cr = 0;
+    f->eof = 0;
+    f->raw_base = raw_target;
+    if (f->dec_cd) iconv(f->dec_cd, NULL, NULL, NULL, NULL);
+    if (f->enc_cd) iconv(f->enc_cd, NULL, NULL, NULL, NULL);
+}
+
 int64_t py23_file_write(Py23File* f, Py23Str* s) {
     FILE* fp = file_check(f);
     if (f->binary) {
         return (int64_t)fwrite(s->data, 1, (size_t)s->len, fp);
     }
-    if (f->dpos < f->dlen || f->rawleft_len || f->pending_cr) {
-        /* 解码缓冲预读了后续字节，底层句柄已越过逻辑位置；写之前退回去。 */
-        int64_t raw_target = f->raw_base + f->dpos + f->rawleft_len;
-        if (fseek(fp, (long)raw_target, SEEK_SET) != 0)
-            py23_raise_c("OSError", "seek failed");
-        f->dlen = f->dpos = 0;
-        f->rawleft_len = 0;
-        f->pending_cr = 0;
-        f->eof = 0;
-        f->raw_base = raw_target;
-        if (f->dec_cd) iconv(f->dec_cd, NULL, NULL, NULL, NULL);
-        if (f->enc_cd) iconv(f->enc_cd, NULL, NULL, NULL, NULL);
-    }
+    file_sync_raw(f);
     Py23Str* t = file_translate_write(f, s);
     file_write_bytes(f, t->data, t->len);
     if (t != s) py23_rc_dec(t);
@@ -2691,8 +2696,14 @@ int64_t py23_file_tell(Py23File* f) {
 
 int64_t py23_file_truncate(Py23File* f, int64_t size) {
     FILE* fp = file_check(f);
+    /* CPython 无参 truncate 用底层缓冲位置（文本预读后是原始偏移）；
+       显式 size 按字节截断，先把逻辑位置对齐到底层句柄。 */
+    if (size < 0) {
+        size = (int64_t)ftell(fp);
+    } else {
+        file_sync_raw(f);
+    }
     fflush(fp);
-    if (size < 0) size = (int64_t)ftell(fp);
     if (ftruncate(fileno(fp), (off_t)size) != 0)
         py23_raise_c("OSError", "truncate failed");
     return size;
@@ -2703,8 +2714,8 @@ int64_t py23_file_isatty(Py23File* f) { return isatty(fileno(file_check(f))) ? 1
 int64_t py23_file_readable(Py23File* f) { return f ? f->readable : 0; }
 int64_t py23_file_writable(Py23File* f) { return f ? f->writable : 0; }
 int64_t py23_file_seekable(Py23File* f) {
-    (void)f;
-    return 1;
+    if (!f || !f->fp || f->closed) return 0;
+    return fseek(f->fp, 0, SEEK_CUR) == 0 ? 1 : 0;
 }
 int64_t py23_file_closed(Py23File* f) { return f ? f->closed : 1; }
 

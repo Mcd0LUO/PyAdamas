@@ -27,6 +27,9 @@
 
 ### 修复
 
+- `truncate()` 无参时和 CPython 一样使用底层缓冲位置（文本预读后即原始
+  偏移）；显式 `size` 会先把逻辑位置对齐到底层句柄再截断。
+- `seekable()` 改为探测 `fseek` 是否成功：管道上的 stdin 返回 `False`。
 - `runtime/rt_internal.h` 的 `exc_longjmp` 补上 `_Noreturn`，消除
   `py23_raise_c` 的 “noreturn function does return” 警告。
 
