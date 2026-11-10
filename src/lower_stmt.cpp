@@ -58,6 +58,17 @@ void Lowerer::stmt(Stmt& s) {
                 if (!ir_is_float(cur_t)) cur_v = convert_to(cur_v, cur_t, t_float());
                 if (!ir_is_float(rhs_t)) rhs = convert_to(rhs, rhs_t, t_float());
             }
+            // 类实例的增量赋值：__iadd__ 优先，其次普通 __add__，
+            // 右侧是类时还有反射版 __radd__。
+            bool cls_involved = (cur_t && cur_t->kind == TyKind::Class) ||
+                                (rhs_t && rhs_t->kind == TyKind::Class);
+            if (cls_involved) {
+                VReg dr = lower_dunder_binop(cur_v, cur_t, rhs, rhs_t, a.op, true);
+                if (dr != kNoReg) {
+                    assign_to(*a.target, dr, vreg_ty(dr));
+                    break;
+                }
+            }
             Inst in;
             in.op = IrOp::Bin;
             in.bop = map_bin(aug_to_bin(a.op));
@@ -528,6 +539,19 @@ void Lowerer::lower_for_range(For& f, Call& c) {
 void Lowerer::lower_for_seq(For& f) {
     VReg seq = expr(*f.iter);
     TypePtr seq_ty = tc_.type_of(f.iter.get());
+    // 用户类实现 __iter__ 时先调用它，再按返回类型（generator/list/...）
+    // 走现有的迭代路径。
+    if (seq_ty && seq_ty->kind == TyKind::Class) {
+        VReg it = dunder_call(seq, seq_ty, "__iter__", {}, nullptr);
+        if (it == kNoReg) {
+            err(f.iter->line, f.iter->col,
+                std::format("cannot iterate over '{}' (no usable __iter__)",
+                            type_name(seq_ty)));
+            return;
+        }
+        seq = it;
+        seq_ty = vreg_ty(it);
+    }
     if (seq_ty && seq_ty->kind == TyKind::Generator) {
         lower_for_gen(f, seq, seq_ty);
         return;

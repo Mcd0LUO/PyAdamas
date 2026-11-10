@@ -667,6 +667,7 @@ VReg Lowerer::lower_method_call(Attribute& at, Call& c) {
             br.target2 = add_b;
             emit(std::move(br));
             switch_to(add_b);
+            retain_elem(key, own_kind(kt));
             retain_elem(def, own_kind(vt));
             call_void(RtFn::DictSet, {recv, key, def});
             Inst j;

@@ -1134,6 +1134,13 @@ private:
     // ── 运算规则 ────────────────────────────────────────────────
 
     TypePtr binop_type(Tok op, TypePtr l, TypePtr r, int line, int col);
+    // 类实例的算术 dunder：有可用实现时返回方法声明的返回类型，
+    // 否则 nullptr。
+    TypePtr dunder_binop_ret(Tok op, TypePtr l, TypePtr r);
+    // 增量赋值优先看 __iadd__ 这类原地版本。
+    TypePtr dunder_aug_ret(Tok op, TypePtr l, TypePtr r);
+    // 大小比较的 dunder 是否存在（含右操作数镜像版）。
+    bool dunder_cmp_ok(CmpOp op, TypePtr l, TypePtr r);
 
     static TypePtr promote(const TypePtr& l, const TypePtr& r) {
         if (l->kind == TyKind::Float || r->kind == TyKind::Float) return t_float();

@@ -4,6 +4,60 @@
 
 早期阶段没有逐条留痕，按阶段归纳；0.4 之后逐条记录。
 
+## [0.71] - 2026-11-10
+
+协议 dunder 第二批：哈希/包含/迭代，以及算术与比较运算符重载。
+
+### 新增
+
+- `__hash__` / `__eq__` 接入 dict/set 键：`Py23Dict` 增加 hash/eq 槽号，
+  哈希与查相等经 vtable 调类的实现（不同实例内容相等可命中同一个键）。
+  字典/集合的所有构造点（字面量、推导式、`dict()`/`set()`、kwargs、
+  `set(list)`）都传槽号。两个都缺时退回指针哈希 + 指针比较（没定义
+  `__eq__` 的类的身份语义）。
+- `hash()`：类走 `__hash__`；没有该方法和 `__eq__` 时退回身份哈希
+  （指针混合，和字典对类键的默认一致）；只定义 `__eq__` 没有 `__hash__`
+  按 CPython 规则编译期报不可哈希。
+- `__contains__`：`in` / `not in` 分发；类没有可用实现时编译报错。
+- `__iter__`：`for x in obj` 先调 `__iter__`，再按返回值
+  （generator/list/tuple/str）走现有迭代逻辑。
+- 算术 dunder：`__add__` / `__sub__` / `__mul__` / `__truediv__` /
+  `__floordiv__` / `__mod__` / `__pow__`，以及反射版 `__r*__` 和原地版
+  `__i*__`。分派顺序：普通二元先左后右反射；`+=` 依次
+  `__iadd__` → `__add__` → 右操作数 `__radd__`。
+- 比较 dunder：`__lt__` / `__le__` / `__gt__` / `__ge__` 及右操作数
+  镜像版（`3 < obj` 可调 `obj.__gt__(3)`）。
+- 类型检查在定义处校验新 dunder 的签名：算术 dunder 允许标量参数；
+  返回 bool 的（eq/ne/contains/cmp）第二个参数限 unknown 或类类型。
+
+### 修复
+
+- `kNoReg` 是 `0xFFFFFFFF`，`if (VReg v = dunder_call(...))` 恒为真：
+  正向分派失败后直接返回哨兵，反射分支永远不执行（`3 * obj` 退回整数
+  乘法后崩溃）。所有同类判断改为显式 `!= kNoReg`。
+- 增广赋值把 `+=` 记号直接传给 dunder 表（表里只有 `+`），查表失败退化
+  成整数运算；先归一化记号再查表。增量赋值同时扩展到「右侧是类」的
+  反射场景（`x += obj` 调 `obj.__radd__`）。
+- `dict.setdefault` 只 retain value 没 retain key：类键（以及字符串键）
+  在临时栈释放后留下悬空引用，程序退出时报 refcount 错误。补上 key 的
+  引用计数。
+
+### 变更
+
+- 类实例参与算术、两侧都没有匹配 dunder 时编译报错
+  `unsupported operand type(s)`（以前会按机器整数算指针，静默出错）。
+- `<` / `<=` / `>` / `>=` 在类实例缺少比较 dunder 时编译报错
+  `not orderable`（`==` / `!=` 仍按指针身份比较，和 CPython 一致）。
+
+### 验证
+
+- 探针与 CPython 逐行一致（默认对象文本 `<X object>` 保留既有简化）：
+  类键 dict 字面量/get/setdefault/pop/del/update/clear/len、set 的
+  in/add/discard/pop/update/clear、哈希与相等、反射算术、增量回退、
+  生成器 `__iter__`；dict/set 变更后无引用计数告警
+- `ctest --preset dev` 连跑 3 次、release 全绿；810 程序差分零失败；
+  O0/O1 全量 52 个运行用例通过
+
 ## [0.70] - 2026-11-10
 
 协议 dunder：`__str__` / `__repr__` / `__eq__` / `__ne__` / `__len__`。

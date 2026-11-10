@@ -456,8 +456,9 @@ Task 只允许一个并发等待者，没有任务名字。
 - 类型标注 `dict[str, int]`、`set[str]`。
 
 key 的哈希/判等按静态类型选：int/bool 用机器字、str 用字节（FNV-1a +
-逐字节比较）、float 用 IEEE 值（`0.0` 与 `-0.0` 同键）；其他类型按机器
-字比较。支持的方法：
+逐字节比较）、float 用 IEEE 值（`0.0` 与 `-0.0` 同键）；类实例实现了
+`__hash__` 和 `__eq__` 时走 vtable，否则按指针；其他类型按机器字比较。
+支持的方法：
 
 - `d.get(k)` / `d.get(k, default)`：有默认值时缺失返回默认值；没有默认值
   时缺失像 `d[k]` 一样 panic（静态返回类型不是 Optional）；
@@ -522,9 +523,20 @@ class Point:
 | `__repr__(self) -> str` | 普通方法，只有 self | `repr()`、`!r`、list/tuple 等容器内部元素；没有时回退 `<类名 object>` |
 | `__eq__(self, other) -> bool` | `other` 可省略标注（unknown）或标成类类型 | `==`；两边都没有实现时保持指针比较 |
 | `__ne__(self, other) -> bool` | 同上 | `!=`；没定义时用 `__eq__` 取反 |
+| `__hash__(self) -> int` | 普通方法，只有 self，返回 int | `hash()`；类作 dict/set 键时和 `__eq__` 一起走 vtable |
 | `__len__(self) -> int` | 普通方法，只有 self | `len()`、真值（`if`/`while`/`not`/`and`/`or`/三元/`bool()`/`assert`/推导式过滤）；没有 `__len__` 的类调 `len()` 直接编译报错 |
+| `__contains__(self, other) -> bool` | `other` 可省略标注或标成类类型，返回 bool | `x in obj` / `not in`；没有可用实现时编译报错 |
+| `__iter__(self) -> ...` | 普通方法，只有 self；返回类型不限 | `for x in obj`：先调 `__iter__`，再按返回值（list/tuple/str/generator）走现有迭代。返回 list 也接受（CPython 要求返回迭代器，这里有意放宽） |
+| `__add__` / `__sub__` / `__mul__` / `__truediv__` / `__floordiv__` / `__mod__` / `__pow__(self, other)` | 普通方法，两个参数；参数和返回类型任意 | 二元算术 |
+| `__radd__` 等反射版 | 同上 | 右操作数是类、左边不是类时（`3 * obj`） |
+| `__iadd__` 等原地版 | 同上 | `obj += x` 优先 `__iadd__`，没有再走 `__add__`，最后才是右操作数反射版 |
+| `__lt__` / `__le__` / `__gt__` / `__ge__(self, other) -> bool` | 两个参数；`other` 必须是 unknown 或类类型；返回 bool | `<` / `<=` / `>` / `>=`；左侧没有时用右操作数的镜像版（`a < b` 可调 `b.__gt__(a)`） |
 
-`__eq__` 的 `other` 标成具体类时，调用点只在实参静态类型可赋值给它（或为 unknown）时走协议；其它具体类型回退指针比较，不会把不匹配的值送进方法体。容器打印用**元素 repr**（和字符串元素一致）；类实例的默认文本是 `<类名 object>`，没有 CPython 的模块名和地址。f-string 带格式说明时，类实例先按 `__str__` 转成字符串再套用说明（CPython 需要 `__format__`，这里是有意放宽）。暂不支持 `__hash__`、`__contains__`、`__iter__` 和算术类 dunder。
+二参数协议的实参规则：方法的 `other` 标成具体类时，调用点只在实参静态类型可赋值给它（或为 unknown）时走协议，不匹配就换另一侧或按下面的规则报错，不会把错误类型的值送进方法体。容器打印用**元素 repr**（和字符串元素一致）；类实例的默认文本是 `<类名 object>`，没有 CPython 的模块名和地址。f-string 带格式说明时，类实例先按 `__str__` 转成字符串再套用说明（CPython 需要 `__format__`，这里是有意放宽）。
+
+**类作 dict/set 键**：`__hash__` 和 `__eq__` 都有实现时，哈希和相等判断走 vtable（不同实例内容相等即可命中同一个键）。两个都缺时退回机器字（指针）哈希 + 指针比较，等价于 CPython 里没定义 `__eq__` 的类的身份语义。只定义 `__eq__` 而没有 `__hash__` 的类在 CPython 里不可哈希；这里 dict/set 仍按身份处理，而 `hash()` 会在编译期报错。
+
+**错误的运算符组合不再静默算指针**：类实例参与算术但两侧都没有匹配的 dunder（含反射版）时编译报错 `unsupported operand type(s)`；大小比较（`<`/`<=`/`>`/`>=`）同理，缺少比较 dunder 直接报 `not orderable`。`==`/`!=` 例外：没有 `__eq__` 时按指针比较（和 CPython 的默认身份比较一致）。`in` 目前要求类实现 `__contains__`，不做 CPython 的 `__iter__` 回退。
 
 字段初值在构造点求值，比 CPython 的「类属性 + 实例回退」更简单也更安全：`items: list[int] = []` 每个实例拿到的是**独立**的空列表，不会出现所有实例共享一个 list 的经典 bug。
 
@@ -550,9 +562,10 @@ class Connection:
 赋值按模块全局处理，`C.x` / `self.x` 这类类属性访问仍未建模。
 
 不支持：`@classmethod`、自定义方法装饰器、类装饰器、`super(C, self)`、
-`__str__` / `__eq__` 等协议方法、`isinstance` 的导入类目标（本地类与内置
-类型支持）、把类本身当值用（`f = Point`）。
-`__init__` 之外的构造协议（`__new__`）也没有。
+`isinstance` 的导入类目标（本地类与内置类型支持）、把类本身当值用
+（`f = Point`）。`__init__` 之外的构造协议（`__new__`）也没有；
+`__format__` 之外的容器/迭代协议个别面（如 `__reversed__`、`__bool__`）
+未建模。
 
 没有 `__init__` 时只能零参构造——基类在外部的类除外，`__init__` 可能在那边。`__init__` 的默认参数和关键字参数与普通函数规则相同。
 

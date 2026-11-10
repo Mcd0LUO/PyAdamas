@@ -583,9 +583,23 @@ void TypeChecker::classdef(ClassDef& c) {
                 auto bad = [&](const std::string& msg) {
                     err(f.line, f.col, std::format("'{}' {}", f.name, msg));
                 };
-                bool two_arg = f.name == "__eq__" || f.name == "__ne__";
-                if (f.name == "__str__" || f.name == "__repr__" || f.name == "__len__" ||
-                    two_arg) {
+                auto one_of = [&](std::initializer_list<const char*> names) {
+                    for (const char* n : names)
+                        if (f.name == n) return true;
+                    return false;
+                };
+                bool cmp_d = one_of({"__lt__", "__le__", "__gt__", "__ge__"});
+                bool arith_d = one_of({"__add__", "__sub__", "__mul__", "__truediv__",
+                                       "__floordiv__", "__mod__", "__pow__", "__radd__",
+                                       "__rsub__", "__rmul__", "__rtruediv__", "__rfloordiv__",
+                                       "__rmod__", "__rpow__", "__iadd__", "__isub__", "__imul__",
+                                       "__itruediv__", "__ifloordiv__", "__imod__", "__ipow__"});
+                bool bool_ret = cmp_d || f.name == "__eq__" || f.name == "__ne__" ||
+                                f.name == "__contains__";
+                bool two_arg = bool_ret || arith_d;
+                bool one_arg = one_of(
+                    {"__str__", "__repr__", "__len__", "__hash__", "__iter__"});
+                if (two_arg || one_arg) {
                     if (kind != MethodKind::Normal) {
                         bad("must be a normal method");
                     } else if (m.sig->varargs || m.sig->kwargs) {
@@ -593,20 +607,23 @@ void TypeChecker::classdef(ClassDef& c) {
                     } else if (two_arg) {
                         if (m.sig->pos.size() != 2) {
                             bad("takes 'self' and one other parameter");
-                        } else if (!is_unknown(m.sig->pos[1].ty) &&
+                        } else if (bool_ret && !is_unknown(m.sig->pos[1].ty) &&
                                    m.sig->pos[1].ty->kind != TyKind::Class) {
                             bad("second parameter must be unannotated or a class type");
-                        } else if (!m.sig->ret || m.sig->ret->kind != TyKind::Bool) {
+                        } else if (bool_ret &&
+                                   (!m.sig->ret || m.sig->ret->kind != TyKind::Bool)) {
                             bad("must return bool");
                         }
                     } else if (m.sig->pos.size() != 1) {
                         bad("takes only 'self'");
-                    } else if (f.name == "__len__") {
+                    } else if (f.name == "__len__" || f.name == "__hash__") {
                         if (!m.sig->ret || m.sig->ret->kind != TyKind::Int)
                             bad("must return int");
-                    } else if (!m.sig->ret || m.sig->ret->kind != TyKind::Str) {
-                        bad("must return str");
+                    } else if (f.name == "__str__" || f.name == "__repr__") {
+                        if (!m.sig->ret || m.sig->ret->kind != TyKind::Str)
+                            bad("must return str");
                     }
+                    // __iter__ 不限制返回类型：生成器方法的标注是元素类型。
                 }
             }
             // 方法体检查复用这份签名，返回类型才会回填到同一个对象上

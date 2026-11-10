@@ -1100,6 +1100,23 @@ private:
     VReg dunder_str(VReg v, TypePtr ty, bool prefer_repr);
     VReg dunder_len(VReg v, TypePtr ty);
     VReg lower_dunder_eq(VReg l, TypePtr lt, VReg r, TypePtr rt, bool ne);
+    // 类作为 dict/set key：__hash__ 和 __eq__ 都存在时返回两个 vtable
+    // 槽号，否则 (-1, -1)（运行时按机器字哈希/比较）。
+    std::pair<int64_t, int64_t> dunder_key_slots(const TypePtr& key_ty) const {
+        if (!key_ty || key_ty->kind != TyKind::Class || !key_ty->cls)
+            return {-1, -1};
+        const MethodInfo* h = key_ty->cls->method("__hash__");
+        const MethodInfo* e = key_ty->cls->method("__eq__");
+        if (!h || h->kind != MethodKind::Normal || !h->call_sig || h->slot < 0)
+            return {-1, -1};
+        if (!e || e->kind != MethodKind::Normal || !e->call_sig || e->slot < 0)
+            return {-1, -1};
+        return {h->slot, e->slot};
+    }
+    // 算术/比较 dunder：左操作数（或右操作数的反射版）有实现时返回调用
+    // 结果；没有可用实现返回 kNoReg。aug=true 时先试 __iadd__ 这类。
+    VReg lower_dunder_binop(VReg l, TypePtr lt, VReg r, TypePtr rt, Tok op, bool aug);
+    VReg lower_dunder_cmp(VReg l, TypePtr lt, VReg r, TypePtr rt, CmpOp op);
     // 真值：类实例有 __len__ 时返回 len(...) != 0 的 bool vreg，
     // 否则原样返回（后端按类型做指针/数值判断）。
     VReg truth_bool(VReg v, TypePtr ty);

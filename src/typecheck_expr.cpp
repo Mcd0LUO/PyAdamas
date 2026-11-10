@@ -502,6 +502,110 @@ void TypeChecker::enter_comp_scope(std::vector<ExprPtr>& gens) {
         }
     }
 
+TypePtr TypeChecker::dunder_binop_ret(Tok op, TypePtr l, TypePtr r) {
+    struct Ref {
+        Tok op;
+        const char* fwd;
+        const char* rev;
+    };
+    static const Ref tbl[] = {
+        {Tok::PLUS, "__add__", "__radd__"},
+        {Tok::MINUS, "__sub__", "__rsub__"},
+        {Tok::STAR, "__mul__", "__rmul__"},
+        {Tok::SLASH, "__truediv__", "__rtruediv__"},
+        {Tok::DOUBLESLASH, "__floordiv__", "__rfloordiv__"},
+        {Tok::PERCENT, "__mod__", "__rmod__"},
+        {Tok::DOUBLESTAR, "__pow__", "__rpow__"},
+    };
+    const Ref* ref = nullptr;
+    for (const auto& e : tbl)
+        if (e.op == op) {
+            ref = &e;
+            break;
+        }
+    if (!ref) return nullptr;
+    auto try_side = [&](TypePtr self, TypePtr other, const char* name) -> TypePtr {
+        if (!self || self->kind != TyKind::Class || !self->cls) return nullptr;
+        const MethodInfo* m = self->cls->method(name);
+        if (!m || m->kind != MethodKind::Normal || !m->call_sig) return nullptr;
+        if (m->call_sig->varargs || m->call_sig->kwargs || m->call_sig->pos.size() != 1)
+            return nullptr;
+        TypePtr pt = m->call_sig->pos[0].ty;
+        if (pt && pt->kind != TyKind::Unknown && other && other->kind != TyKind::Unknown &&
+            !assignable(pt, other))
+            return nullptr;
+        return m->call_sig->ret ? m->call_sig->ret : t_unknown();
+    };
+    if (TypePtr t = try_side(l, r, ref->fwd)) return t;
+    return try_side(r, l, ref->rev);
+}
+
+TypePtr TypeChecker::dunder_aug_ret(Tok op, TypePtr l, TypePtr r) {
+    struct Ref {
+        Tok op;
+        const char* iaug;
+    };
+    static const Ref tbl[] = {
+        {Tok::PLUSEQUAL, "__iadd__"},      {Tok::MINUSEQUAL, "__isub__"},
+        {Tok::STAREQUAL, "__imul__"},      {Tok::SLASHEQUAL, "__itruediv__"},
+        {Tok::DOUBLESLASHEQUAL, "__ifloordiv__"}, {Tok::PERCENTEQUAL, "__imod__"},
+        {Tok::DOUBLESTAREQUAL, "__ipow__"},
+    };
+    const char* name = nullptr;
+    for (const auto& e : tbl)
+        if (e.op == op) {
+            name = e.iaug;
+            break;
+        }
+    if (!name) return nullptr;
+    if (!l || l->kind != TyKind::Class || !l->cls) return nullptr;
+    const MethodInfo* m = l->cls->method(name);
+    if (!m || m->kind != MethodKind::Normal || !m->call_sig) return nullptr;
+    if (m->call_sig->varargs || m->call_sig->kwargs || m->call_sig->pos.size() != 1)
+        return nullptr;
+    TypePtr pt = m->call_sig->pos[0].ty;
+    if (pt && pt->kind != TyKind::Unknown && r && r->kind != TyKind::Unknown &&
+        !assignable(pt, r))
+        return nullptr;
+    return m->call_sig->ret ? m->call_sig->ret : t_unknown();
+}
+
+bool TypeChecker::dunder_cmp_ok(CmpOp op, TypePtr l, TypePtr r) {
+    struct Ref {
+        CmpOp op;
+        const char* fwd;
+        const char* rev;
+    };
+    static const Ref tbl[] = {
+        {CmpOp::Lt, "__lt__", "__gt__"},
+        {CmpOp::Le, "__le__", "__ge__"},
+        {CmpOp::Gt, "__gt__", "__lt__"},
+        {CmpOp::Ge, "__ge__", "__le__"},
+    };
+    const char* fwd = nullptr;
+    const char* rev = nullptr;
+    for (const auto& e : tbl)
+        if (e.op == op) {
+            fwd = e.fwd;
+            rev = e.rev;
+            break;
+        }
+    if (!fwd) return false;
+    auto side_ok = [&](TypePtr self, TypePtr other, const char* name) {
+        if (!self || self->kind != TyKind::Class || !self->cls) return false;
+        const MethodInfo* m = self->cls->method(name);
+        if (!m || m->kind != MethodKind::Normal || !m->call_sig) return false;
+        if (m->call_sig->varargs || m->call_sig->kwargs || m->call_sig->pos.size() != 1)
+            return false;
+        TypePtr pt = m->call_sig->pos[0].ty;
+        if (pt && pt->kind != TyKind::Unknown && other && other->kind != TyKind::Unknown &&
+            !assignable(pt, other))
+            return false;
+        return true;
+    };
+    return side_ok(l, r, fwd) || side_ok(r, l, rev);
+}
+
 TypePtr TypeChecker::binop_type(Tok op, TypePtr l, TypePtr r, int line, int col) {
         if (is_unknown(l) || is_unknown(r)) {
             // 一侧 unknown（没标注的参数最常见）、另一侧是 float 时，结果
@@ -526,10 +630,13 @@ TypePtr TypeChecker::binop_type(Tok op, TypePtr l, TypePtr r, int line, int col)
             }
             return t_unknown();
         }
-        // 类实例可能重载了运算符（Fraction.__sub__、__eq__……），重载还可能
-        // 来自外部基类。我们没有 dunder 协议表，静态上无从判断，放过。
-        if (l->kind == TyKind::Class || r->kind == TyKind::Class ||
-            l->kind == TyKind::BoundMethod || r->kind == TyKind::BoundMethod)
+        // 类实例的算术 dunder：有实现就按方法声明的返回类型走。
+        if (l->kind == TyKind::Class || r->kind == TyKind::Class) {
+            if (TypePtr t = dunder_binop_ret(op, l, r)) return t;
+        }
+        // BoundMethod 上做算术没有静态规则，放过；类实例一侧没有匹配的
+        // dunder 时后端只能按整数算指针，宁可在这里报错。
+        if (l->kind == TyKind::BoundMethod || r->kind == TyKind::BoundMethod)
             return t_unknown();
         // Optional / None 需要先判空才能运算，这里不做数据流分析，直接放行
         if (l->kind == TyKind::Optional || r->kind == TyKind::Optional ||
@@ -633,7 +740,16 @@ void TypeChecker::compare_type(CmpOp op, TypePtr l, TypePtr r, int line, int col
                 if (l->kind == TyKind::Tuple && r->kind == TyKind::Tuple) return;
                 if (l->kind == TyKind::List && r->kind == TyKind::List) return;
                 if (l->kind == TyKind::Set && r->kind == TyKind::Set) return;
-                if (l->kind == TyKind::Class || r->kind == TyKind::Class) return;
+                // 类实例只有实现了 __lt__/__le__/__gt__/__ge__（含镜像）
+                // 才可排序，否则后端会拿指针当整数比——必须在这里拦住。
+                if (l->kind == TyKind::Class || r->kind == TyKind::Class) {
+                    if (dunder_cmp_ok(op, l, r)) return;
+                    err(line, col,
+                        std::format("'{}' and '{}' are not orderable (no matching "
+                                    "__lt__/__le__/__gt__/__ge__)",
+                                    type_name(l), type_name(r)));
+                    return;
+                }
                 err(line, col,
                     std::format("'{}' and '{}' are not orderable", type_name(l), type_name(r)));
                 return;
@@ -698,8 +814,19 @@ TypePtr TypeChecker::iter_elem(TypePtr it, int line, int col) {
             case TyKind::Generator:
                 return it->sub.empty() ? t_unknown() : it->sub[0];
             default:
-                // 类可能实现了 __iter__（或从外部基类继承），静态上看不见
-                if (it->kind == TyKind::Class) return t_unknown();
+                // 类实现了 __iter__ 时，元素类型取它返回的容器/生成器的
+                // 元素类型；没有实现就维持 unknown（生成阶段再报错）。
+                if (it->kind == TyKind::Class) {
+                    const MethodInfo* m = it->cls ? it->cls->method("__iter__") : nullptr;
+                    if (m && m->kind == MethodKind::Normal && m->call_sig && m->call_sig->ret) {
+                        TypePtr rt = m->call_sig->ret;
+                        if ((rt->kind == TyKind::Generator || rt->kind == TyKind::List ||
+                             rt->kind == TyKind::Tuple || rt->kind == TyKind::Str) &&
+                            !rt->sub.empty())
+                            return rt->sub[0];
+                    }
+                    return t_unknown();
+                }
                 err(line, col, std::format("'{}' object is not iterable", type_name(it)));
                 return t_unknown();
         }

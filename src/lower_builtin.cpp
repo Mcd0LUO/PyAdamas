@@ -340,6 +340,20 @@ VReg Lowerer::lower_builtin_call(const std::string& name, Call& c) {
             return call_runtime(RtFn::HashValue, t_int(), {const_int(1), v});
         if (t && t->kind == TyKind::Float)
             return call_runtime(RtFn::HashF64, t_int(), {v});
+        if (t && t->kind == TyKind::Class) {
+            VReg h = dunder_call(v, t, "__hash__", {}, t_int());
+            if (h != kNoReg) return h;
+            // 没有 __hash__：定义了 __eq__ 的类按 CPython 规则不可哈希；
+            // 否则退回身份哈希（和 dict/set 对类键的指针哈希一致）。
+            const MethodInfo* eq = t->cls ? t->cls->method("__eq__") : nullptr;
+            if (eq && eq->kind == MethodKind::Normal) {
+                err(c.args[0]->line, c.args[0]->col,
+                    std::format("unhashable type: '{}' defines __eq__ but no __hash__",
+                                type_name(t)));
+                return const_int(0);
+            }
+            return call_runtime(RtFn::HashValue, t_int(), {const_int(3), v});
+        }
         err(c.args[0]->line, c.args[0]->col,
             std::format("hash() of '{}' is not supported yet (int/bool/str/float)",
                         type_name(t)));
@@ -823,16 +837,19 @@ VReg Lowerer::lower_builtin_call(const std::string& name, Call& c) {
             return const_none();
         }
         if (c.keywords.empty()) {
+            auto [hslot, eslot] = dunder_key_slots(kt);
             VReg d = call_runtime(RtFn::DictNew, ty,
                                   {const_int(key_kind(kt)), const_int(own_kind(kt)),
-                                   const_int(own_kind(vt))});
+                                   const_int(own_kind(vt)), const_int(hslot),
+                                   const_int(eslot)});
             push_temp(d);
             return d;
         }
         // dict(a=1, b=2)：关键字是字符串键。
         int vo = own_kind(vt);
         VReg d = call_runtime(RtFn::DictNew, ty,
-                              {const_int(1), const_int(1), const_int(vo)});
+                              {const_int(1), const_int(1), const_int(vo),
+                               const_int(-1), const_int(-1)});
         push_temp(d);
         for (auto& kw : c.keywords) {
             if (kw.arg.empty()) {
@@ -853,8 +870,10 @@ VReg Lowerer::lower_builtin_call(const std::string& name, Call& c) {
         TypePtr et = ty->sub.empty() ? t_unknown() : ty->sub[0];
         int kk = key_kind(et), ko = own_kind(et);
         if (c.args.empty()) {
+            auto [hslot, eslot] = dunder_key_slots(et);
             VReg d = call_runtime(RtFn::DictNew, ty,
-                                  {const_int(kk), const_int(ko), const_int(0)});
+                                  {const_int(kk), const_int(ko), const_int(0),
+                                   const_int(hslot), const_int(eslot)});
             push_temp(d);
             return d;
         }
@@ -875,7 +894,8 @@ VReg Lowerer::lower_builtin_call(const std::string& name, Call& c) {
         Inst in;
         in.op = IrOp::CallRt;
         in.imm = static_cast<int64_t>(RtFn::SetFromList);
-        in.args = {x, const_int(kk), const_int(ko)};
+        auto [hslot, eslot] = dunder_key_slots(et);
+        in.args = {x, const_int(kk), const_int(ko), const_int(hslot), const_int(eslot)};
         in.ty = ty;
         VReg d = def(ty, std::move(in));
         push_temp(d);

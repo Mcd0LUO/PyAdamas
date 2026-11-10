@@ -58,6 +58,36 @@ int dict_key_eq(int64_t kind, int64_t a, int64_t b) {
     return a == b;
 }
 
+/* 类 key：__hash__ / __eq__ 的 vtable 槽在编译期分配好，槽里是生成的
+   普通方法（self 在 %rdi，__eq__ 的 other 在 %rsi）。只有类同时实现了
+   两个 dunder 时调用方才会把槽号传进来。 */
+static int64_t dunder_call1(void* obj, int64_t slot) {
+    int64_t* vt = *(int64_t**)obj;
+    int64_t fn = vt[slot];
+    if (fn <= 0) return 0;
+    return ((int64_t(*)(void*))(uintptr_t)fn)(obj);
+}
+
+static int64_t dunder_call2(void* a, int64_t b, int64_t slot) {
+    int64_t* vt = *(int64_t**)a;
+    int64_t fn = vt[slot];
+    if (fn <= 0) return 0;
+    return ((int64_t(*)(void*, int64_t))(uintptr_t)fn)(a, b);
+}
+
+static int64_t dict_hash_key(Py23Dict* d, int64_t key) {
+    if (d->hash_slot >= 0) {
+        int64_t h = dunder_call1((void*)key, d->hash_slot);
+        return h ? h : 1;
+    }
+    return dict_hash_value(d->key_kind, key);
+}
+
+static int dict_key_matches(Py23Dict* d, int64_t a, int64_t b) {
+    if (d->eq_slot >= 0) return dunder_call2((void*)a, b, d->eq_slot) != 0;
+    return dict_key_eq(d->key_kind, a, b);
+}
+
 /* 索引表里找到 key 的 entry 下标；找不到返回 -1。 */
 static int64_t dict_lookup(Py23Dict* d, int64_t key, int64_t hash) {
     int64_t mask = d->icap - 1;
@@ -66,8 +96,7 @@ static int64_t dict_lookup(Py23Dict* d, int64_t key, int64_t hash) {
         int32_t slot = d->index[i];
         if (!slot) return -1;
         int64_t e = (int64_t)slot - 1;
-        if (d->entries[e].hash == hash &&
-            dict_key_eq(d->key_kind, d->entries[e].key, key))
+        if (d->entries[e].hash == hash && dict_key_matches(d, d->entries[e].key, key))
             return e;
         i = (i + 1) & mask;
     }
@@ -119,7 +148,8 @@ void dict_gc_release(void* p) {
     }
 }
 
-Py23Dict* py23_dict_new(int64_t key_kind, int64_t key_own, int64_t val_own) {
+Py23Dict* py23_dict_new(int64_t key_kind, int64_t key_own, int64_t val_own,
+                        int64_t hash_slot, int64_t eq_slot) {
     if (key_kind < 0 || key_kind > 3) panic_c("invalid dict key kind");
     if (key_own < 0 || key_own > 2 || val_own < 0 || val_own > 2)
         panic_c("invalid dict ownership kind");
@@ -135,13 +165,15 @@ Py23Dict* py23_dict_new(int64_t key_kind, int64_t key_own, int64_t val_own) {
     d->key_kind = key_kind;
     d->key_own = key_own;
     d->val_own = val_own;
+    d->hash_slot = hash_slot;
+    d->eq_slot = eq_slot;
     return d;
 }
 
 /* 调用方已经把 key/value 的「入表引用」retain 好；更新已有 key 时
    释放这份多余的新 key 引用，字典继续保留原来的 key 对象。 */
 void py23_dict_set(Py23Dict* d, int64_t key, int64_t val) {
-    int64_t h = dict_hash_value(d->key_kind, key);
+    int64_t h = dict_hash_key(d, key);
     int64_t e = dict_lookup(d, key, h);
     if (e >= 0) {
         if (d->key_own == 1) py23_rc_dec((void*)key);
@@ -167,14 +199,14 @@ void py23_dict_set(Py23Dict* d, int64_t key, int64_t val) {
 }
 
 int64_t py23_dict_get(Py23Dict* d, int64_t key) {
-    int64_t h = dict_hash_value(d->key_kind, key);
+    int64_t h = dict_hash_key(d, key);
     int64_t e = dict_lookup(d, key, h);
     if (e < 0) py23_raise_c("KeyError", "key not found");
     return d->entries[e].val;
 }
 
 int64_t py23_dict_contains(Py23Dict* d, int64_t key) {
-    int64_t h = dict_hash_value(d->key_kind, key);
+    int64_t h = dict_hash_key(d, key);
     return dict_lookup(d, key, h) >= 0 ? 1 : 0;
 }
 
@@ -184,7 +216,7 @@ int64_t py23_dict_key_at(Py23Dict* d, int64_t i) {
 }
 
 int64_t py23_dict_get_or(Py23Dict* d, int64_t key, int64_t def) {
-    int64_t h = dict_hash_value(d->key_kind, key);
+    int64_t h = dict_hash_key(d, key);
     int64_t e = dict_lookup(d, key, h);
     return e >= 0 ? d->entries[e].val : def;
 }
@@ -251,7 +283,8 @@ void py23_dict_update(Py23Dict* dst, Py23Dict* src) {
 /* 同 kind 的浅拷贝：所有权类别也复制过去，键值按需 retain。
    供 match 的 `**rest` 使用，随后再删掉显式匹配过的 key。 */
 Py23Dict* py23_dict_copy(Py23Dict* src) {
-    Py23Dict* out = py23_dict_new(src->key_kind, src->key_own, src->val_own);
+    Py23Dict* out = py23_dict_new(src->key_kind, src->key_own, src->val_own,
+                                  src->hash_slot, src->eq_slot);
     for (int64_t i = 0; i < src->len; ++i) {
         Py23DictEntry e = src->entries[i];
         if (src->key_own == 1 && e.key) py23_rc_inc((void*)e.key);
@@ -261,8 +294,9 @@ Py23Dict* py23_dict_copy(Py23Dict* src) {
     return out;
 }
 
-Py23Dict* py23_set_from_list(Py23List* src, int64_t key_kind, int64_t key_own) {
-    Py23Dict* d = py23_dict_new(key_kind, key_own, 0);
+Py23Dict* py23_set_from_list(Py23List* src, int64_t key_kind, int64_t key_own,
+                             int64_t hash_slot, int64_t eq_slot) {
+    Py23Dict* d = py23_dict_new(key_kind, key_own, 0, hash_slot, eq_slot);
     for (int64_t i = 0; i < src->len; ++i) {
         int64_t k = src->data[i];
         if (key_own == 1 && k) py23_rc_inc((void*)k);
@@ -276,7 +310,7 @@ Py23Dict* py23_set_from_list(Py23List* src, int64_t key_kind, int64_t key_own) {
    （pop 返回给 Python 层，由临时栈接管）。entries 保持插入顺序：
    后面的项前移一格，然后重建索引。删除不在热路径上。 */
 int dict_take(Py23Dict* d, int64_t key, int64_t* val_out) {
-    int64_t h = dict_hash_value(d->key_kind, key);
+    int64_t h = dict_hash_key(d, key);
     int64_t e = dict_lookup(d, key, h);
     if (e < 0) return 0;
     *val_out = d->entries[e].val;

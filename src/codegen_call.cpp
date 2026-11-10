@@ -534,7 +534,6 @@ void AsmGen::gen_call_rt(const Inst& in) {
                 break;
             case RtFn::GenSendOpt:
             case RtFn::ListSet:
-            case RtFn::DictNew:
             case RtFn::DictSet:
             case RtFn::ListContains:
             case RtFn::DictGetOr:
@@ -543,11 +542,19 @@ void AsmGen::gen_call_rt(const Inst& in) {
             case RtFn::ListIndex:
             case RtFn::ListCount:
             case RtFn::ListInsert:
-            case RtFn::SetFromList:
             case RtFn::FileConfig:
                 emit2("movq", src_op(in.args[0]), "%rdi");
                 emit2("movq", src_op(in.args[1]), "%rsi");
                 emit2("movq", src_op(in.args[2]), "%rdx");
+                break;
+            case RtFn::DictNew:
+            case RtFn::SetFromList:
+                // (kind/own 三个 + 类 key 的 hash/eq 槽号)
+                emit2("movq", src_op(in.args[0]), "%rdi");
+                emit2("movq", src_op(in.args[1]), "%rsi");
+                emit2("movq", src_op(in.args[2]), "%rdx");
+                emit2("movq", src_op(in.args[3]), "%rcx");
+                emit2("movq", src_op(in.args[4]), "%r8");
                 break;
             case RtFn::ListSlice:
             case RtFn::StrSlice:

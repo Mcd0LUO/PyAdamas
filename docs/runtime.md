@@ -269,7 +269,7 @@ longjmp 回同步调用点。GC 清扫和进程退出不跑析构器，但会单
 
 | 函数 | 签名 | 语义 |
 |---|---|---|
-| `py23_dict_new` | `(i64 key_kind, i64 key_own, i64 val_own) -> Py23Dict*` | 空表，初始 8 槽；set 传 `val_own = 0` |
+| `py23_dict_new` | `(i64 key_kind, i64 key_own, i64 val_own, i64 hash_slot, i64 eq_slot) -> Py23Dict*` | 空表，初始 8 槽；set 传 `val_own = 0`。`hash_slot`/`eq_slot` ≥ 0 时类键的哈希/相等走 vtable（`__hash__`/`__eq__`），-1 表示按 `key_kind` 走内建哈希 |
 | `py23_dict_set` | `(Py23Dict*, i64 key, i64 val) -> void` | 插入/更新；更新时释放新 key 引用并 dec 旧 value |
 | `py23_dict_get` | `(Py23Dict*, i64 key) -> i64` | 缺失抛 KeyError；返回借用 |
 | `py23_dict_contains` | `(Py23Dict*, i64 key) -> i64` | `in` 用，返回 0/1 |

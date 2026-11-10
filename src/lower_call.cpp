@@ -126,7 +126,8 @@ std::vector<VReg> Lowerer::bind_args(Call& c, const FuncInfoPtr& info, FunctionD
     auto kwarg_dict = [&]() -> VReg {
         if (kwd == kNoReg) {
             kwd = call_runtime(RtFn::DictNew, kdty,
-                               {const_int(1), const_int(1), const_int(kown)});
+                               {const_int(1), const_int(1), const_int(kown),
+                                const_int(-1), const_int(-1)});
             push_temp(kwd);
         }
         return kwd;

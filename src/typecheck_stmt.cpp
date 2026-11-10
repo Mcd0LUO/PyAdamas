@@ -92,6 +92,11 @@ void TypeChecker::stmt(Stmt& s) {
                     break;
                 }
                 auto vt = expr(*a.value);
+                // x += y：优先原地 dunder，没有再看普通 __add__ / __radd__。
+                if (TypePtr irt = dunder_aug_ret(a.op, cur_ty, vt)) {
+                    assign(*a.target, irt, a.line, a.col);
+                    break;
+                }
                 Tok bin = aug_to_bin(a.op);
                 auto rt = binop_type(bin, cur_ty, vt, a.line, a.col);
                 assign(*a.target, rt, a.line, a.col);

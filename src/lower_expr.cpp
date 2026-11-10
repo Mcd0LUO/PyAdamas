@@ -470,6 +470,11 @@ VReg Lowerer::lower_binop(BinOp& b) {
     }
     VReg l = expr(*b.left);
     VReg r = expr(*b.right);
+    // 类实例的算术运算：先试左操作数的 dunder，再试右操作数的反射版。
+    if ((lt && lt->kind == TyKind::Class) || (rt && rt->kind == TyKind::Class)) {
+        VReg dr = lower_dunder_binop(l, lt, r, rt, b.op, false);
+        if (dr != kNoReg) return dr;
+    }
     if (ty && ty->kind == TyKind::Complex) {
         auto as_complex = [&](VReg v, TypePtr from) {
             return (from && from->kind == TyKind::Complex)
@@ -630,9 +635,24 @@ VReg Lowerer::lower_compare(Compare& c) {
             VReg eqres = lower_dunder_eq(l, lt, r, rt, op == CmpOp::Ne);
             if (eqres != kNoReg) return eqres;
         }
+        // 大小比较：__lt__/__le__/__gt__/__ge__（含右操作数的镜像版）。
+        if (op == CmpOp::Lt || op == CmpOp::Le || op == CmpOp::Gt || op == CmpOp::Ge) {
+            VReg cmpres = lower_dunder_cmp(l, lt, r, rt, op);
+            if (cmpres != kNoReg) return cmpres;
+        }
         if (op == CmpOp::In || op == CmpOp::NotIn) {
             VReg flag;
-            if (rt && (rt->kind == TyKind::Dict || rt->kind == TyKind::Set)) {
+            if (rt && rt->kind == TyKind::Class) {
+                std::vector<TypePtr> tys{lt};
+                VReg cv = dunder_call(r, rt, "__contains__", {l}, t_bool(), &tys);
+                if (cv == kNoReg) {
+                    err(c.line, c.col,
+                        std::format("'{}' does not support 'in' (no usable __contains__)",
+                                    type_name(rt)));
+                    return const_bool(false);
+                }
+                flag = cv;
+            } else if (rt && (rt->kind == TyKind::Dict || rt->kind == TyKind::Set)) {
                 TypePtr kt = rt->sub.empty() ? t_unknown() : rt->sub[0];
                 l = coerce(l, lt, kt);
                 flag = call_runtime(RtFn::DictContains, t_bool(), {r, l});
@@ -877,8 +897,10 @@ VReg Lowerer::lower_dict(DictExpr& d, TypePtr ty) {
     int ko = own_kind(kt);
     int vo = own_kind(vt);
 
+    auto [hslot, eslot] = dunder_key_slots(kt);
     VReg dict = call_runtime(RtFn::DictNew, dtype,
-                             {const_int(kk), const_int(ko), const_int(vo)});
+                             {const_int(kk), const_int(ko), const_int(vo),
+                              const_int(hslot), const_int(eslot)});
     push_temp(dict);
     for (size_t i = 0; i < d.values.size(); ++i) {
         if (!d.keys[i]) {
@@ -903,8 +925,10 @@ VReg Lowerer::lower_set(SetExpr& s, TypePtr ty) {
     int ek = key_kind(et);
     int eo = own_kind(et);
 
+    auto [hslot, eslot] = dunder_key_slots(et);
     VReg set = call_runtime(RtFn::DictNew, stype,
-                            {const_int(ek), const_int(eo), const_int(0)});
+                            {const_int(ek), const_int(eo), const_int(0),
+                             const_int(hslot), const_int(eslot)});
     push_temp(set);
     for (auto& e : s.elts) {
         VReg v = expr(*e);
@@ -1019,6 +1043,73 @@ VReg Lowerer::lower_dunder_eq(VReg l, TypePtr lt, VReg r, TypePtr rt, bool ne) {
     VReg res = one(l, lt, r, rt);
     if (res != kNoReg) return res;
     return one(r, rt, l, lt);
+}
+
+VReg Lowerer::lower_dunder_cmp(VReg l, TypePtr lt, VReg r, TypePtr rt, CmpOp op) {
+    struct Ref {
+        CmpOp op;
+        const char* fwd;
+        const char* rev;
+    };
+    static const Ref tbl[] = {
+        {CmpOp::Lt, "__lt__", "__gt__"},
+        {CmpOp::Le, "__le__", "__ge__"},
+        {CmpOp::Gt, "__gt__", "__lt__"},
+        {CmpOp::Ge, "__ge__", "__le__"},
+    };
+    const Ref* ref = nullptr;
+    for (const auto& e : tbl)
+        if (e.op == op) {
+            ref = &e;
+            break;
+        }
+    if (!ref) return kNoReg;
+    std::vector<TypePtr> ltys{rt};
+    std::vector<TypePtr> rtys{lt};
+    VReg v = dunder_call(l, lt, ref->fwd, {r}, t_bool(), &ltys);
+    if (v != kNoReg) return v;
+    v = dunder_call(r, rt, ref->rev, {l}, t_bool(), &rtys);
+    if (v != kNoReg) return v;
+    return kNoReg;
+}
+
+VReg Lowerer::lower_dunder_binop(VReg l, TypePtr lt, VReg r, TypePtr rt, Tok op, bool aug) {
+    struct Ref {
+        Tok op;
+        const char* fwd;
+        const char* rev;
+        const char* iaug;
+    };
+    static const Ref tbl[] = {
+        {Tok::PLUS, "__add__", "__radd__", "__iadd__"},
+        {Tok::MINUS, "__sub__", "__rsub__", "__isub__"},
+        {Tok::STAR, "__mul__", "__rmul__", "__imul__"},
+        {Tok::SLASH, "__truediv__", "__rtruediv__", "__itruediv__"},
+        {Tok::DOUBLESLASH, "__floordiv__", "__rfloordiv__", "__ifloordiv__"},
+        {Tok::PERCENT, "__mod__", "__rmod__", "__imod__"},
+        {Tok::DOUBLESTAR, "__pow__", "__rpow__", "__ipow__"},
+    };
+    if (aug) op = aug_to_bin(op);
+    const Ref* ref = nullptr;
+    for (const auto& e : tbl)
+        if (e.op == op) {
+            ref = &e;
+            break;
+        }
+    if (!ref) return kNoReg;
+    std::vector<TypePtr> ltys{rt};
+    std::vector<TypePtr> rtys{lt};
+    VReg v = kNoReg;
+    if (aug) {
+        v = dunder_call(l, lt, ref->iaug, {r}, nullptr, &ltys);
+        if (v != kNoReg) return v;
+    }
+    v = dunder_call(l, lt, ref->fwd, {r}, nullptr, &ltys);
+    if (v != kNoReg) return v;
+    // 增量赋值同样可能落到右操作数的反射版（int += 类实例）。
+    v = dunder_call(r, rt, ref->rev, {l}, nullptr, &rtys);
+    if (v != kNoReg) return v;
+    return kNoReg;
 }
 
 VReg Lowerer::truth_bool(VReg v, TypePtr ty) {

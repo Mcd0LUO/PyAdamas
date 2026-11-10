@@ -49,6 +49,9 @@ typedef struct {
     int64_t key_kind;  /* 0 int/bool, 1 str, 2 float, 3 raw */
     int64_t key_own;   /* 0 非堆, 1 堆, 2 unknown */
     int64_t val_own;   /* 0 非堆, 1 堆, 2 unknown */
+    /* 类 key 的 __hash__ / __eq__ vtable 槽号；-1 表示按机器字哈希/比较。 */
+    int64_t hash_slot;
+    int64_t eq_slot;
 } Py23Dict;
 
 
@@ -423,7 +426,8 @@ void py23_list_reverse(Py23List* l);
 int64_t py23_int_bit_length(int64_t v);
 Py23List* py23_enumerate_list(Py23List* seq);
 Py23List* py23_zip2_list(Py23List* a, Py23List* b);
-Py23Dict* py23_set_from_list(Py23List* src, int64_t key_kind, int64_t key_own);
+Py23Dict* py23_set_from_list(Py23List* src, int64_t key_kind, int64_t key_own,
+                             int64_t hash_slot, int64_t eq_slot);
 int64_t py23_list_sum_i64(Py23List* l, int64_t start);
 double py23_list_sum_f64(Py23List* l, double start);
 int64_t py23_list_min_i64(Py23List* l);
@@ -433,7 +437,8 @@ int64_t dict_hash_value(int64_t kind, int64_t v);
 int dict_key_eq(int64_t kind, int64_t a, int64_t b);
 void dict_destroy(void* p);
 void dict_gc_release(void* p);
-Py23Dict* py23_dict_new(int64_t key_kind, int64_t key_own, int64_t val_own);
+Py23Dict* py23_dict_new(int64_t key_kind, int64_t key_own, int64_t val_own,
+                        int64_t hash_slot, int64_t eq_slot);
 void py23_dict_set(Py23Dict* d, int64_t key, int64_t val);
 int64_t py23_dict_get(Py23Dict* d, int64_t key);
 int64_t py23_dict_contains(Py23Dict* d, int64_t key);
