@@ -7,7 +7,7 @@ VReg Lowerer::lower_builtin_call(const std::string& name, Call& c) {
     // print 的关键字是 sep / end，得单独处理，不能走下面这条通用拦截
     if (name == "print") return lower_print(c);
 
-    if (!c.keywords.empty() && name != "dict" && name != "open") {
+    if (!c.keywords.empty() && name != "dict" && name != "open" && name != "sorted") {
         err(c.line, c.col, std::format("{}() does not take keyword arguments here", name));
     }
 
@@ -902,6 +902,34 @@ VReg Lowerer::lower_builtin_call(const std::string& name, Call& c) {
         return d;
     }
 
+    if (name == "format") {
+        if (c.args.size() != 2) {
+            err(c.line, c.col, "format() takes exactly two arguments");
+            return const_none();
+        }
+        VReg v = expr(*c.args[0]);
+        VReg spec = expr(*c.args[1]);
+        TypePtr vt = tc_.type_of(c.args[0].get());
+        RtFn fn = RtFn::FmtStr;
+        if (vt) {
+            switch (vt->kind) {
+                case TyKind::Bool: fn = RtFn::FmtBool; break;
+                case TyKind::Int: fn = RtFn::FmtI64; break;
+                case TyKind::Float: fn = RtFn::FmtF64; break;
+                case TyKind::Str: fn = RtFn::FmtStr; break;
+                case TyKind::Complex: fn = RtFn::FmtComplex; break;
+                case TyKind::Unknown: break;
+                default:
+                    err(c.args[0]->line, c.args[0]->col,
+                        std::format("format() cannot format '{}'", type_name(vt)));
+                    return const_none();
+            }
+        }
+        VReg r = call_runtime(fn, t_str(), {v, spec});
+        push_temp(r);
+        return r;
+    }
+
     if (name == "sorted" || name == "reversed") {
         if (c.args.size() != 1) {
             err(c.line, c.col, std::format("{}() takes exactly one argument", name));
@@ -928,6 +956,20 @@ VReg Lowerer::lower_builtin_call(const std::string& name, Call& c) {
         in.ty = ty;
         VReg l = def(ty, std::move(in));
         push_temp(l);
+        // sorted(xs, reverse=True)：排完整体反转。reverse 只接受字面量，
+        // 运行时的 bool 要单独做分支，这里先不做。
+        if (name == "sorted") {
+            for (auto& kw : c.keywords) {
+                if (kw.arg != "reverse") continue;
+                auto cv = as_const(kw.value.get());
+                if (!cv) {
+                    err(kw.value->line, kw.value->col,
+                        "sorted() 'reverse' must be a literal True/False");
+                    return const_none();
+                }
+                if (cv->i != 0) call_void(RtFn::ListReverse, {l});
+            }
+        }
         return l;
     }
 

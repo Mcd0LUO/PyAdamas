@@ -4,6 +4,22 @@
 
 早期阶段没有逐条留痕，按阶段归纳；0.4 之后逐条记录。
 
+## [0.79.1] - 2026-11-10
+
+内置函数的两个缺口。
+
+### 新增
+
+- `sorted(xs, reverse=True)`：`reverse` 接受字面量 `True`/`False`，排完整体反转。
+- `format(value, spec)`：按值类型分派到 `FmtI64`/`FmtF64`/`FmtStr` 等，和
+  f-string 的格式说明共用同一套实现。
+
+### 测试
+
+- `tests/run/64_builtins.py`：map / filter / sorted / any / all / divmod / pow /
+  round / repr / format / min / max / sum / abs / zip / enumerate / hex / oct /
+  bin / chr / ord / isinstance / callable / hash 一轮过。
+
 ## [0.79] - 2026-11-10
 
 `bytes` 字面量与基本操作。

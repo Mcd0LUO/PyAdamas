@@ -331,6 +331,11 @@ TypePtr TypeChecker::builtin_call(const std::string& n, Call& c) {
             }
             return t_file();
         }
+        if (n == "format") {
+            if (a.size() != 2)
+                err(c.line, c.col, "format() takes exactly two arguments");
+            return t_str();
+        }
         if (n == "super" || n == "vars" || n == "dir" ||
             n == "slice" ||
             n == "bytearray" || n == "object" || n == "complex" || n == "memoryview") {
