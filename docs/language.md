@@ -505,7 +505,8 @@ class Connection:
 赋值按模块全局处理，`C.x` / `self.x` 这类类属性访问仍未建模。
 
 不支持：`@classmethod`、自定义方法装饰器、类装饰器、`super(C, self)`、
-`__str__` / `__eq__` 等协议方法、`isinstance`、把类本身当值用（`f = Point`）。
+`__str__` / `__eq__` 等协议方法、`isinstance` 的导入类目标（本地类与内置
+类型支持）、把类本身当值用（`f = Point`）。
 `__init__` 之外的构造协议（`__new__`）也没有。
 
 没有 `__init__` 时只能零参构造——基类在外部的类除外，`__init__` 可能在那边。`__init__` 的默认参数和关键字参数与普通函数规则相同。
@@ -585,7 +586,8 @@ CPython 一致。
 `next` / `abs` / `min` / `max` / `sum` / `pow` / `any` / `all` / `complex` /
 `ord` / `chr` / `hex` / `bin` / `oct` / `round` / `divmod` / `repr` /
 `format` / `list` / `tuple` / `dict` / `set` / `sorted` / `reversed` /
-`enumerate` / `zip` / `input`。
+`enumerate` / `zip` / `input` / `isinstance` / `getattr` / `setattr` /
+`hasattr`。
 `min` / `max` 支持多实参和 list/tuple/str/dict/set 迭代，空序列抛
 `ValueError`；`sum` 支持可选的起始值；`any` / `all` 支持短路；`abs` /
 `pow` 支持 int 与 float，`pow(x, y, m)` 是 `(x ** y) % m`；
@@ -595,6 +597,13 @@ CPython 一致。
 `round(x, n)` 返回 float，整数配负 ndigits 也按 10 的幂取整；
 `divmod` 返回 `(商, 余数)`，符号规则同 CPython；`repr` 支持字符串/
 数值/bool/None；`format` 支持数值和字符串的格式说明符。
+`isinstance(x, T)` 的第二个参数支持内置类型名（int/float/str/bool/list/
+tuple/dict/set/complex/object）和本地类；静态类型确定时编译期折叠，
+unknown 值上对带运行期类型标签的类型（str/list/dict/complex）走运行时
+检查，类走 MRO 检查；导入类目标暂不支持。
+`getattr` / `setattr` / `hasattr` 只支持类实例，属性名必须是字符串字面量：
+`getattr`/`setattr` 支持字段和 property（property setter 暂不支持），
+`hasattr` 对存在的字段/方法/property 编译期返回 True/False。
 `list(seq)` / `tuple(seq)` 做浅拷贝，`set(seq)` 按键去重，`dict(**kw)`
 用字符串键；`sorted` 支持 int/float/str 元素（`key=` / `reverse=` 尚未
 支持）；`enumerate` 产出的元素是 `[下标, 值]` 对，`zip` 支持两个可迭代
@@ -610,10 +619,9 @@ CPython 一致。
 `count` / `zfill` / `ljust` / `rjust` / `center` / `removeprefix` /
 `removesuffix` / `isdigit` / `isalpha` / `isspace` / `isupper` / `islower` /
 `isalnum`。
-其余内置名（`map` / `filter` / `isinstance` / `type` / `getattr` /
-`hash` / `iter` / `next(列表)` / `slice` / `callable` 等）类型层面放行，
-降级阶段报「not supported by the code generator yet」，不会再退化成
-调用空指针。
+其余内置名（`map` / `filter` / `type` / `hash` / `callable` / `slice` /
+`delattr` 等）类型层面放行，降级阶段报「not supported by the code
+generator yet」，不会再退化成调用空指针。
 
 ### 跳转与异常
 

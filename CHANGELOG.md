@@ -4,6 +4,31 @@
 
 早期阶段没有逐条留痕，按阶段归纳；0.4 之后逐条记录。
 
+## [0.50] - 2026-11-10
+
+补内置函数：`isinstance` / `getattr` / `setattr` / `hasattr`。
+
+### 新增
+
+- `isinstance(x, T)`：目标支持内置类型名（int/float/str/bool/list/tuple/
+  dict/set/complex/object）和本地类。静态类型确定时编译期折叠；unknown
+  值上 str/list/dict/complex 走运行期类型标签检查，类走 MRO 检查
+  （`py23_isinstance`）；Optional 值与父类/子类关系走运行时，避免把
+  None 误判成实例；导入类目标明确报不支持。
+- `getattr` / `setattr` / `hasattr` 支持类实例，属性名必须是字符串
+  字面量：字段读写与 property 读取复用普通属性访问的降级路径；property
+  setter 暂不支持。`hasattr` 对字段/方法/property 在编译期给出
+  True/False（保留对象求值副作用）。
+- 类型检查同步校验参数个数、字面量属性名、目标类型和字段存在性。
+
+### 验证
+
+- `ctest --preset dev/release` 全绿；O0/O1 全量 52 个运行用例通过；
+  810 程序差分零失败
+- 临时探针（不入库）：字段/方法/property 的 hasattr/getattr、setattr、
+  基类/子类/无关类、内置类型、unknown 值与 Optional 的 isinstance 均与
+  CPython 一致（O0/O1/O2）
+
 ## [0.49] - 2026-11-10
 
 文件 I/O 编码层：任意 `encoding=`（iconv）、`errors=` 策略、精确通用换行与

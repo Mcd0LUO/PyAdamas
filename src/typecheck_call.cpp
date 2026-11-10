@@ -591,7 +591,73 @@ TypePtr TypeChecker::builtin_call(const std::string& n, Call& c) {
         if (n == "chr") return t_str();
         if (n == "repr") return t_str();
         if (n == "hex" || n == "bin" || n == "oct") return t_str();
-        if (n == "any" || n == "all" || n == "isinstance") return t_bool();
+        if (n == "isinstance") {
+            if (!need(2, 2)) return t_bool();
+            TypePtr tt = a[1];
+            bool ok = tt && tt->kind == TyKind::Class;
+            if (!ok && tt && tt->kind == TyKind::Func && tt->fn) {
+                static const std::unordered_set<std::string> types = {
+                    "int", "float", "str", "bool", "list",
+                    "tuple", "dict", "set", "complex", "object",
+                };
+                ok = types.count(tt->fn->name) > 0;
+            }
+            if (!ok && !is_unknown(tt))
+                err(c.args[1]->line, c.args[1]->col,
+                    "isinstance() second argument must be a class or builtin type");
+            return t_bool();
+        }
+        if (n == "hasattr" || n == "getattr" || n == "setattr") {
+            size_t want = n == "setattr" ? 3 : 2;
+            if (!need(want, want))
+                return n == "hasattr" ? t_bool() : n == "getattr" ? t_unknown() : t_none();
+            auto* ne = c.args[1].get();
+            const std::string* an = nullptr;
+            if (ne->kind == ExprKind::Constant) {
+                auto& cc = static_cast<Constant&>(*ne);
+                if (cc.ck == Constant::CK::Str) an = &cc.s;
+            }
+            if (!an) {
+                err(ne->line, ne->col,
+                    std::format("{}() attribute name must be a string literal", n));
+                return n == "hasattr" ? t_bool() : n == "getattr" ? t_unknown() : t_none();
+            }
+            TypePtr ot = a[0];
+            if (ot && ot->kind == TyKind::Optional && !ot->sub.empty()) ot = ot->sub[0];
+            if (!ot || ot->kind != TyKind::Class || !ot->cls) {
+                err(c.args[0]->line, c.args[0]->col,
+                    std::format("{}() is only supported on class instances", n));
+                return n == "hasattr" ? t_bool() : n == "getattr" ? t_unknown() : t_none();
+            }
+            if (n == "hasattr") return t_bool();
+            if (!ot->cls->complete && ot->cls != cur_class_) return t_unknown();
+            if (const PropertyInfo* p = ot->cls->property(*an)) {
+                if (n == "setattr") {
+                    err(c.line, c.col,
+                        std::format("setattr() of property '{}' is not supported yet", *an));
+                    return t_none();
+                }
+                if (!p->owner || p->getter < 0 ||
+                    p->getter >= static_cast<int>(p->owner->methods.size()))
+                    return t_unknown();
+                const MethodInfo& gm = p->owner->methods[p->getter];
+                return gm.call_sig && gm.call_sig->ret ? gm.call_sig->ret : t_unknown();
+            }
+            if (const FieldInfo* f = ot->cls->field(*an)) {
+                if (n == "getattr") return f->ty;
+                return t_none();
+            }
+            if (ot->cls->method(*an) && n == "getattr") {
+                err(c.line, c.col,
+                    std::format("getattr() of method '{}' must be called with ()", *an));
+                return t_unknown();
+            }
+            if (ot->cls->is_open()) return t_unknown();
+            err(c.line, c.col,
+                std::format("'{}' object has no field '{}'", ot->cls->name, *an));
+            return n == "getattr" ? t_unknown() : t_none();
+        }
+        if (n == "any" || n == "all") return t_bool();
         if (n == "round") {
             if (a.empty()) return t_unknown();
             if (a[0] && a[0]->kind == TyKind::Float)
@@ -684,8 +750,7 @@ TypePtr TypeChecker::builtin_call(const std::string& n, Call& c) {
             }
             return t_file();
         }
-        if (n == "getattr" || n == "setattr" ||
-            n == "hasattr" || n == "super" || n == "vars" || n == "dir" || n == "format" ||
+        if (n == "super" || n == "vars" || n == "dir" ||
             n == "id" || n == "hash" || n == "callable" || n == "slice" || n == "frozenset" ||
             n == "bytearray" || n == "object" || n == "complex" || n == "memoryview") {
             unsupported.push_back(std::format("runtime builtin '{}'", n));
@@ -693,7 +758,7 @@ TypePtr TypeChecker::builtin_call(const std::string& n, Call& c) {
             if (n == "frozenset")
                 return a.empty() ? mk_set(t_unknown()) : mk_set(iter_elem(a[0], c.line, c.col));
             if (n == "bytearray") return a.empty() ? t_unknown() : mk_list(t_unknown());
-            if (n == "hasattr" || n == "callable") return t_bool();
+            if (n == "callable") return t_bool();
             if (n == "format") return t_str();
             return t_unknown();
         }

@@ -366,7 +366,7 @@ VReg Lowerer::lower_call(Call& c) {
                 "abs", "min", "max", "sum", "pow", "any", "all", "complex",
                 "ord", "chr", "hex", "bin", "oct", "round", "divmod", "repr", "format",
                 "list", "tuple", "dict", "set", "sorted", "reversed", "enumerate", "zip",
-                "open", "input", "iter",
+                "open", "input", "iter", "isinstance", "getattr", "setattr", "hasattr",
             };
             if (kBuiltins.count(n.id)) return lower_builtin_call(n.id, c);
             // 名字能解析但语义没实现的内置：以前会退化成调用空指针直接
@@ -647,6 +647,173 @@ VReg Lowerer::lower_builtin_call(const std::string& name, Call& c) {
             std::format("iter() of '{}' is not supported by the code generator yet "
                         "(only files)",
                         type_name(it)));
+        return const_none();
+    }
+
+    if (name == "isinstance") {
+        if (c.args.size() != 2) {
+            err(c.line, c.col, "isinstance() takes exactly two arguments");
+            return const_bool(false);
+        }
+        TypePtr vt = tc_.type_of(c.args[0].get());
+        TypePtr tt = tc_.type_of(c.args[1].get());
+        TypePtr st = strip_optional(vt);
+        std::string builtin;
+        if (tt && tt->kind == TyKind::Func && tt->fn) builtin = tt->fn->name;
+        if (!builtin.empty()) {
+            if (builtin == "object") return const_bool(true);
+            bool known = st && st->kind != TyKind::Unknown;
+            auto kind_is = [&](std::initializer_list<TyKind> ks) {
+                for (auto k : ks)
+                    if (st && st->kind == k) return true;
+                return false;
+            };
+            if (known) {
+                bool r = false;
+                if (builtin == "int") r = kind_is({TyKind::Int, TyKind::Bool});
+                else if (builtin == "bool") r = kind_is({TyKind::Bool});
+                else if (builtin == "float") r = kind_is({TyKind::Float});
+                else if (builtin == "str") r = kind_is({TyKind::Str});
+                else if (builtin == "list") r = kind_is({TyKind::List});
+                else if (builtin == "tuple") r = kind_is({TyKind::Tuple});
+                else if (builtin == "dict") r = kind_is({TyKind::Dict});
+                else if (builtin == "set") r = kind_is({TyKind::Set});
+                else if (builtin == "complex") r = kind_is({TyKind::Complex});
+                else {
+                    err(c.args[1]->line, c.args[1]->col,
+                        std::format("isinstance() does not support type '{}' yet", builtin));
+                    return const_bool(false);
+                }
+                return const_bool(r);
+            }
+            // unknown 值：只有带运行期类型标签的容器/标量能查。
+            RtFn fn{};
+            if (builtin == "str") fn = RtFn::IsStr;
+            else if (builtin == "list" || builtin == "tuple") fn = RtFn::IsSeq;
+            else if (builtin == "dict") fn = RtFn::IsDict;
+            else if (builtin == "complex") fn = RtFn::IsComplex;
+            else {
+                err(c.args[1]->line, c.args[1]->col,
+                    std::format("isinstance() of an unknown value as '{}' is not supported yet",
+                                builtin));
+                return const_bool(false);
+            }
+            return call_runtime(fn, t_bool(), {expr(*c.args[0])});
+        }
+        ClassInfo* target = tt && tt->kind == TyKind::Class ? tt->cls : nullptr;
+        if (!target) {
+            err(c.args[1]->line, c.args[1]->col,
+                "isinstance() second argument must be a class or builtin type");
+            return const_bool(false);
+        }
+        if (target->is_exception_class) {
+            if (st && st->kind != TyKind::Unknown && st->kind != TyKind::Exception)
+                return const_bool(false);
+            return call_runtime(RtFn::IsException, t_bool(),
+                                {expr(*c.args[0]), const_str(target->name)});
+        }
+        auto cid = class_ids_.find(target);
+        if (cid == class_ids_.end()) {
+            err(c.args[1]->line, c.args[1]->col,
+                "isinstance() with an imported class is not supported yet");
+            return const_bool(false);
+        }
+        bool runtime = true;
+        if (st && st->kind == TyKind::Class && st->cls) {
+            if (st->cls->is_subclass_of(target))
+                runtime = vt != st;  // Optional 可能实际是 None
+            else if (target->is_subclass_of(st->cls))
+                runtime = true;      // 值可能是子类
+            else
+                return const_bool(false);
+        } else if (st && st->kind != TyKind::Unknown) {
+            return const_bool(false);
+        }
+        if (!runtime) return const_bool(true);
+        return call_runtime(RtFn::IsInstance, t_bool(),
+                            {expr(*c.args[0]), const_int(cid->second)});
+    }
+
+    if (name == "hasattr" || name == "getattr" || name == "setattr") {
+        size_t want = name == "setattr" ? 3 : 2;
+        if (c.args.size() != want) {
+            err(c.line, c.col, std::format("{}() takes exactly {} arguments", name, want));
+            return name == "hasattr" ? const_bool(false) : const_none();
+        }
+        const std::string* an = nullptr;
+        Expr* name_expr = c.args[1].get();
+        if (name_expr->kind == ExprKind::Constant) {
+            auto& cc = static_cast<Constant&>(*name_expr);
+            if (cc.ck == Constant::CK::Str) an = &cc.s;
+        }
+        if (!an) {
+            err(name_expr->line, name_expr->col,
+                std::format("{}() attribute name must be a string literal", name));
+            return name == "hasattr" ? const_bool(false) : const_none();
+        }
+        TypePtr raw = tc_.type_of(c.args[0].get());
+        TypePtr ot = strip_optional(raw);
+        if (!ot || ot->kind != TyKind::Class || !ot->cls) {
+            err(c.args[0]->line, c.args[0]->col,
+                std::format("{}() is only supported on class instances", name));
+            return name == "hasattr" ? const_bool(false) : const_none();
+        }
+        const FieldInfo* f = ot->cls->field(*an);
+        const PropertyInfo* prop = ot->cls->property(*an);
+        auto* meth = ot->cls->method(*an);
+        bool optional = ot != raw;
+        if (name == "hasattr") {
+            if (optional) {
+                err(c.line, c.col,
+                    "hasattr() on an Optional value is not supported yet");
+                return const_bool(false);
+            }
+            (void)expr(*c.args[0]);  // 保留求值副作用
+            return const_bool(f || prop || meth);
+        }
+        VReg obj = expr(*c.args[0]);
+        if (optional) obj = guard_not_none(obj, std::format("attribute '{}'", *an));
+        if (name == "getattr") {
+            if (prop) {
+                if (!prop->owner || prop->getter < 0 ||
+                    prop->getter >= static_cast<int>(prop->owner->methods.size())) {
+                    err(c.line, c.col, std::format("property '{}' has no getter", *an));
+                    return const_none();
+                }
+                ++side_effect_seq_;
+                const MethodInfo& gm = prop->owner->methods[prop->getter];
+                Inst vc;
+                vc.op = IrOp::VCall;
+                vc.a = obj;
+                vc.imm = gm.slot;
+                TypePtr rt = gm.call_sig && gm.call_sig->ret ? gm.call_sig->ret : t_unknown();
+                return def_heap(rt, std::move(vc));
+            }
+            if (!f) {
+                if (meth)
+                    err(c.line, c.col,
+                        std::format("getattr() of method '{}' must be called with ()", *an));
+                else
+                    err(c.line, c.col,
+                        std::format("'{}' object has no attribute '{}'", ot->cls->name, *an));
+                return const_none();
+            }
+            int off = static_cast<int>(8 * (1 + ot->cls->field_index(*an)));
+            return field_load(obj, off, f->ty);
+        }
+        // setattr
+        if (!f) {
+            if (prop)
+                err(c.line, c.col,
+                    std::format("setattr() of property '{}' is not supported yet", *an));
+            else
+                err(c.line, c.col,
+                    std::format("'{}' object has no field '{}'", ot->cls->name, *an));
+            return const_none();
+        }
+        VReg v = coerce(expr(*c.args[2]), tc_.type_of(c.args[2].get()), f->ty);
+        int off = static_cast<int>(8 * (1 + ot->cls->field_index(*an)));
+        store_field(f->ty, obj, off, v);
         return const_none();
     }
 
