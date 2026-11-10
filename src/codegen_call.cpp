@@ -534,6 +534,7 @@ void AsmGen::gen_call_rt(const Inst& in) {
             case RtFn::ListCount:
             case RtFn::ListInsert:
             case RtFn::SetFromList:
+            case RtFn::FileConfig:
                 line(std::format("movq {}, %rdi", src_op(in.args[0])));
                 line(std::format("movq {}, %rsi", src_op(in.args[1])));
                 line(std::format("movq {}, %rdx", src_op(in.args[2])));
@@ -606,6 +607,8 @@ void AsmGen::gen_call_rt(const Inst& in) {
             case RtFn::FileClosed:
             case RtFn::FileName:
             case RtFn::FileMode:
+            case RtFn::FileEncoding:
+            case RtFn::FileErrors:
             case RtFn::Input:
             case RtFn::SysStream:
             case RtFn::HandlerLeave:

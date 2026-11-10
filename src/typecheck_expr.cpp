@@ -262,7 +262,9 @@ TypePtr TypeChecker::expr(Expr& e) {
                 }
                 if (ot->kind == TyKind::File) {
                     if (a.attr == "closed") return t_bool();
-                    if (a.attr == "name" || a.attr == "mode") return t_str();
+                    if (a.attr == "name" || a.attr == "mode" || a.attr == "encoding" ||
+                        a.attr == "errors")
+                        return t_str();
                     err(a.line, a.col,
                         std::format("'file' object has no attribute '{}'", a.attr));
                     return t_unknown();

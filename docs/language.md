@@ -526,18 +526,25 @@ class Connection:
 ### 文件
 
 `open(file, mode='r', buffering=-1, encoding=None, errors=None, newline=None,
-closefd=True)` 返回字节流文件对象，位置/关键字参数按 CPython 的名字绑定：
+closefd=True)` 返回文件对象，位置/关键字参数按 CPython 的名字绑定：
 `file` 是路径字符串或文件描述符；`mode` 校验 `r/w/a/x` 与 `+`/`b`/`t`
 的组合；`buffering` 的 0/1/>1 分别映射无缓冲/行缓冲/全缓冲（文本模式不允许
-0）；`encoding` 只接受 `utf-8`/`utf8`/`ascii` 字面量（字节串模型下是恒等
-变换），其它编码在类型检查阶段报错；`errors` 接受并忽略；`newline` 支持
-`None`（读时通用换行：`\r\n` 和 `\r` 折成 `\n`）、`""`（不转换）、`"\n"`、
-`"\r"`、`"\r\n"`（后两者在写时把 `\n` 换成对应形式）；`closefd` 只对 fd
-生效；`opener=` 明确不支持。
+0）；`encoding` 支持任意 glibc iconv 认识的编码名（大小写与 `-`/`_` 不敏感，
+`latin-1`、`utf-16` 等别名可解析），文本读写经 iconv 在源编码与 UTF-8 之间
+转换，字符串内容始终是 UTF-8 字节；未知编码抛 `LookupError`；`errors` 支持
+`strict`（默认，解码/编码失败抛 `UnicodeDecodeError` / `UnicodeEncodeError`）、
+`ignore`、`replace`；`newline` 支持 `None`（读时通用换行：`\r\n` 和 `\r`
+折成 `\n`，跨读块也拼接正确）、`""`（不转换）、`"\n"`、`"\r"`、`"\r\n"`
+（后两者在写时把 `\n` 换成对应形式）；`closefd` 只对 fd 生效；`opener=`
+明确不支持。
 方法：`read([n])` / `readline([size])` / `readlines([hint])` / `write(str)`
 / `writelines(list[str])` / `seek(offset[, whence])` / `tell()` /
 `truncate([size])` / `fileno()` / `isatty()` / `readable()` / `writable()` /
-`seekable()` / `flush()` / `close()`；属性 `closed` / `name` / `mode`。
+`seekable()` / `flush()` / `close()`；属性 `closed` / `name` / `mode` /
+`encoding` / `errors`。`tell()` 在文本模式下返回解码后的逻辑位置，`seek()`
+接受同样的值（从文件头重解码定位，O(n)）；二进制模式按原始字节。读预读后
+的写入会先把底层句柄退回逻辑位置，`r+` 下 `seek` 后 `write` 的结果与
+CPython 一致。
 `with open(...) as f:` 在正常、异常、`return`、`break`/`continue` 路径都会
 关闭文件；`for line in f:` 按行迭代，`list(f)` / `sorted(f)` /
 `enumerate(f)` / `zip(f)` 走 readlines 语义；`iter(f)` 返回文件本身，
@@ -552,8 +559,7 @@ closefd=True)` 返回字节流文件对象，位置/关键字参数按 CPython �
 
 `print` 不是函数，是降级期展开的一串输出调用：
 
-- 支持 `sep=` / `end=`（任意字符串表达式）。
-- 不支持 `file=` / `flush=`（前端放行，`build` 时拒）。
+- 支持 `sep=` / `end=`（任意字符串表达式）/ `file=`（文件对象）/ `flush=`。
 - 求值顺序：边算边写，`sep` 在第一个逗号处求值，`end` 最后求值。CPython 是先全算完再写。
 
 ### import

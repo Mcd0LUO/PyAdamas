@@ -4,6 +4,48 @@
 
 早期阶段没有逐条留痕，按阶段归纳；0.4 之后逐条记录。
 
+## [0.49] - 2026-11-10
+
+文件 I/O 编码层：任意 `encoding=`（iconv）、`errors=` 策略、精确通用换行与
+文本逻辑定位。
+
+### 新增
+
+- 文本模式的读写统一走 glibc iconv：源编码 ↔ UTF-8。编码名做候选解析
+  （原样、去 `-`/`_`/空格转大写、常见别名），glibc 不认的 `latin-1`
+  也能映射到 `ISO-8859-1`；未知编码抛 `LookupError`。
+- `errors=` 支持 `strict` / `ignore` / `replace`：解码失败抛
+  `UnicodeDecodeError`（replace 输出 U+FFFD），编码失败抛
+  `UnicodeEncodeError`（replace 输出 `?`）。
+- 通用换行改为在解码后的缓冲上翻译，`\r\n` 跨读块（含逐字节
+  `read(1)`）也能正确折成一个 `\n`；EOF 时挂起的 `\r` 补发 `\n`。
+- 解码缓冲会预读整块，`tell()` 在文本模式下改为记录解码后的逻辑位置，
+  `seek()` 接受同样的值（从文件头重解码定位）；写入前若缓冲里有预读
+  字节，先把底层句柄退回逻辑位置，`r+` 下 `seek` 后 `write` 与 CPython
+  一致。
+- 文件属性新增 `encoding` / `errors`。
+
+### 修复
+
+- `runtime/rt_internal.h` 的 `exc_longjmp` 补上 `_Noreturn`，消除
+  `py23_raise_c` 的 “noreturn function does return” 警告。
+
+### 验证
+
+- `ctest --preset dev/release` 全绿；O0/O1 全量 52 个运行用例通过；
+  810 程序差分零失败
+- 临时探针（不入库）：latin-1 写读字节数/文本、utf-16 写读、未知编码、
+  strict/replace、跨块 `\r\n`、`r+` 读写混用均与 CPython 一致
+  （O0/O1/O2）
+
+### 已知限制
+
+- 文本 `tell()` 的位置按解码后的 UTF-8 字节计；非 UTF-8 源编码（如
+  latin-1）与 CPython 的原始字节 cookie 数值不同，但 `tell`/`seek`
+  自身自洽
+- 文本 `seek` 是 O(n)（重解码到目标位置）
+- 仍无 `sys.stdout.buffer`、`reconfigure()`、`opener=`
+
 ## [0.48] - 2026-11-10
 
 文件 I/O 修正：独占创建模式与 `input()` 的 EOF 语义。

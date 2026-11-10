@@ -347,9 +347,13 @@ VReg Lowerer::expr(Expr& e) {
                 if (opt) fv = guard_not_none(fv, std::format("attribute '{}'", a.attr));
                 if (a.attr == "closed")
                     return call_runtime(RtFn::FileClosed, t_bool(), {fv});
-                if (a.attr == "name" || a.attr == "mode") {
-                    VReg s = call_runtime(a.attr == "name" ? RtFn::FileName : RtFn::FileMode,
-                                          t_str(), {fv});
+                if (a.attr == "name" || a.attr == "mode" || a.attr == "encoding" ||
+                    a.attr == "errors") {
+                    RtFn fn = a.attr == "name"     ? RtFn::FileName
+                              : a.attr == "mode"   ? RtFn::FileMode
+                              : a.attr == "encoding" ? RtFn::FileEncoding
+                                                     : RtFn::FileErrors;
+                    VReg s = call_runtime(fn, t_str(), {fv});
                     push_temp(s);
                     return s;
                 }

@@ -682,32 +682,6 @@ TypePtr TypeChecker::builtin_call(const std::string& n, Call& c) {
                 err(c.line, c.col, "open() opener= is not supported by the code generator");
                 return t_file();
             }
-            // py23 字符串是字节串：encoding 只接受能静态确认的 utf-8/ascii
-            // 字面量（对字节读写是恒等变换），其它编码明确拒绝。
-            if (bexpr[3]) {
-                std::string val;
-                bool ok_lit = false;
-                if (bexpr[3]->kind == ExprKind::Constant) {
-                    const auto& cc = static_cast<const Constant&>(*bexpr[3]);
-                    if (cc.ck == Constant::CK::Str) {
-                        val = cc.s;
-                        ok_lit = true;
-                    } else if (cc.ck == Constant::CK::None) {
-                        ok_lit = true;
-                    }
-                }
-                if (!ok_lit) {
-                    err(bexpr[3]->line, bexpr[3]->col,
-                        "open() encoding must be a string literal (strings are byte strings)");
-                } else if (!val.empty()) {
-                    for (char& ch : val)
-                        if (ch >= 'A' && ch <= 'Z') ch = static_cast<char>(ch - 'A' + 'a');
-                    if (val != "utf-8" && val != "utf8" && val != "ascii")
-                        err(bexpr[3]->line, bexpr[3]->col,
-                            std::format("open() encoding '{}' is not supported: ", val) +
-                                "py23 strings are byte strings (utf-8/ascii only)");
-                }
-            }
             return t_file();
         }
         if (n == "getattr" || n == "setattr" ||

@@ -101,6 +101,9 @@ enum class RtFn : uint8_t {
     RoundI64,    // (i64 v, i64 ndigits) -> i64
     StrMethod,   // (str* self, i64 op, i64 a0, i64 a1, i64 a2) -> i64
     FileOpen,    // (str* path|0, i64 fd, str* mode|0, i64 buffering, i64 newline, i64 closefd) -> file*
+    FileConfig,  // (file*, str* enc|0, str* errors|0) -> void
+    FileEncoding,// (file*) -> str*
+    FileErrors,  // (file*) -> str*
     FileRead,    // (file*, i64 n) -> str*   n < 0 读全部
     FileReadLine,// (file*, i64 size) -> str*  size < 0 读一行；EOF 返回空串
     FileReadLines,// (file*, i64 hint) -> list*
@@ -286,6 +289,9 @@ inline const char* rt_name(RtFn f) {
         case RtFn::RoundI64: return "py23_round_i64";
         case RtFn::StrMethod: return "py23_str_method";
         case RtFn::FileOpen: return "py23_file_open";
+        case RtFn::FileConfig: return "py23_file_config";
+        case RtFn::FileEncoding: return "py23_file_encoding";
+        case RtFn::FileErrors: return "py23_file_errors";
         case RtFn::FileRead: return "py23_file_read";
         case RtFn::FileReadLine: return "py23_file_readline";
         case RtFn::FileReadLines: return "py23_file_readlines";

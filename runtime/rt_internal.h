@@ -226,7 +226,7 @@ Py23Exception* exc_clone(Py23Exception* e);
 const char* exc_parent(const char* name);
 int exc_is_a(const char* child, const char* want);
 void exc_print_uncaught(Py23Exception* e);
-void exc_longjmp(void);
+_Noreturn void exc_longjmp(void);
 void* py23_handler_push(void);
 void py23_handler_leave(void* p);
 void py23_handler_discard(void* p);
@@ -252,7 +252,7 @@ Py23Str* py23_exc_message(void);
 void py23_raise(Py23Str* type, Py23Str* msg);
 void py23_reraise(void);
 void py23_exc_reraise(void);
-void py23_raise_c(const char* type, const char* msg);
+_Noreturn void py23_raise_c(const char* type, const char* msg);
 void gen_destroy(void* g);
 void* py23_gen_new(int64_t n_slots, int64_t resume, int64_t release, int64_t kind);
 int64_t gen_run(void* g, int64_t sent, int* done);
@@ -345,6 +345,9 @@ int64_t py23_str_method(Py23Str* s, int64_t op, int64_t a0, int64_t a1, int64_t 
 typedef struct Py23File Py23File;
 Py23File* py23_file_open(Py23Str* path, int64_t fd, Py23Str* mode, int64_t buffering,
                          int64_t newline, int64_t closefd);
+void py23_file_config(Py23File* f, Py23Str* encoding, Py23Str* errors);
+Py23Str* py23_file_encoding(Py23File* f);
+Py23Str* py23_file_errors(Py23File* f);
 Py23Str* py23_file_read(Py23File* f, int64_t n);
 Py23Str* py23_file_readline(Py23File* f, int64_t size);
 Py23List* py23_file_readlines(Py23File* f, int64_t hint);

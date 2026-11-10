@@ -616,6 +616,12 @@ VReg Lowerer::lower_builtin_call(const std::string& name, Call& c) {
         in.ty = t_file();
         VReg f = def(t_file(), std::move(in));
         push_temp(f);
+        // encoding/errors 只在实际给了的时候再配置一次（默认 utf-8/strict）。
+        if (bound[3] != kNoReg || bound[4] != kNoReg) {
+            call_void(RtFn::FileConfig,
+                      {f, bound[3] == kNoReg ? const_int(0) : bound[3],
+                       bound[4] == kNoReg ? const_int(0) : bound[4]});
+        }
         return f;
     }
 

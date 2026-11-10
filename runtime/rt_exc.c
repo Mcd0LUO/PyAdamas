@@ -164,7 +164,7 @@ void exc_print_uncaught(Py23Exception* e) {
         fprintf(stderr, "py23: uncaught %s\n", e->type);
 }
 
-void exc_longjmp(void) {
+_Noreturn void exc_longjmp(void) {
     if (!handler_top) {
         exc_print_uncaught(pending_exc);
         exit(1);

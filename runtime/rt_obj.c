@@ -1,6 +1,8 @@
 // rt_obj.c —— 字符串/列表/字典/切片/对象/输出/math
 #include "rt_internal.h"
 
+#include <errno.h>
+#include <iconv.h>
 #include <unistd.h>
 
 #if defined(__x86_64__) && defined(__GNUC__)
@@ -2069,9 +2071,25 @@ struct Py23File {
     int64_t readable;
     int64_t writable;
     int64_t newline;
-    char* vbuf;    /* buffering > 1 时自己分配的全缓冲 */
-    Py23Str* name; /* 拥有 */
-    Py23Str* mode; /* 拥有，规范化后的 Python 风格 mode */
+    char* vbuf;       /* buffering > 1 时自己分配的全缓冲 */
+    Py23Str* name;    /* 拥有 */
+    Py23Str* mode;    /* 拥有，规范化后的 Python 风格 mode */
+    Py23Str* encoding; /* 拥有，规范化后的编码名 */
+    Py23Str* errors;  /* 拥有，strict / ignore / replace */
+    iconv_t dec_cd;   /* 源编码 → UTF-8；NULL 表示恒等 */
+    iconv_t enc_cd;   /* UTF-8 → 目标编码 */
+    /* 解码缓冲：已转成 UTF-8 且做完换行翻译的字节 */
+    char* dbuf;
+    int64_t dlen;
+    int64_t dpos;
+    int64_t dcap;
+    /* 上一块末尾不完整的多字节序列，留到下一块 */
+    char rawleft[16];
+    int64_t rawleft_len;
+    int64_t pending_cr;
+    int64_t eof;
+    int64_t text_off;  /* 文本模式的逻辑位置（解码后的 UTF-8 字节数） */
+    int64_t raw_base;  /* 当前解码块对应的原始文件偏移 */
 };
 
 static void file_destroy(void* p) {
@@ -2081,8 +2099,13 @@ static void file_destroy(void* p) {
         f->fp = NULL;
     }
     free(f->vbuf);
+    free(f->dbuf);
     if (f->name) py23_rc_dec(f->name);
     if (f->mode) py23_rc_dec(f->mode);
+    if (f->encoding) py23_rc_dec(f->encoding);
+    if (f->errors) py23_rc_dec(f->errors);
+    if (f->dec_cd) iconv_close(f->dec_cd);
+    if (f->enc_cd) iconv_close(f->enc_cd);
 }
 
 static char* file_cstr(Py23Str* s) {
@@ -2091,6 +2114,21 @@ static char* file_cstr(Py23Str* s) {
     memcpy(p, s->data, (size_t)s->len);
     p[s->len] = 0;
     return p;
+}
+
+static Py23Str* file_norm_lower(Py23Str* s) {
+    Py23Str* out = str_alloc(s->len);
+    char* p = (char*)out->data;
+    for (int64_t i = 0; i < s->len; ++i) {
+        char c = s->data[i];
+        p[i] = (c >= 'A' && c <= 'Z') ? (char)(c - 'A' + 'a') : c;
+    }
+    return out;
+}
+
+static int file_str_is(Py23Str* s, const char* lit) {
+    size_t n = strlen(lit);
+    return s && s->len == (int64_t)n && memcmp(s->data, lit, n) == 0;
 }
 
 Py23File* py23_file_open(Py23Str* path, int64_t fd, Py23Str* mode, int64_t buffering,
@@ -2143,7 +2181,6 @@ Py23File* py23_file_open(Py23Str* path, int64_t fd, Py23Str* mode, int64_t buffe
         if (base == 'x') {
             char xmode[10];
             int xn = 0;
-            /* 独占创建：C11 的 "wx"（glibc 支持），读写再加 '+' */
             xmode[xn++] = 'w';
             xmode[xn++] = 'x';
             if (plus) xmode[xn++] = '+';
@@ -2160,15 +2197,14 @@ Py23File* py23_file_open(Py23Str* path, int64_t fd, Py23Str* mode, int64_t buffe
 
     Py23File* f =
         (Py23File*)rc_alloc((int64_t)sizeof(Py23File), file_destroy, NULL, PY23_RC_OBJ);
+    memset(f, 0, sizeof *f);
     f->fp = fp;
     f->fd = fdnum;
-    f->closed = 0;
     f->closefd = closefd;
     f->binary = bin;
     f->readable = base == 'r' || plus;
     f->writable = base != 'r' || plus;
     f->newline = bin ? PY23_NL_NONE : (newline < 0 || newline > 4 ? 0 : newline);
-    f->vbuf = NULL;
     f->name = path;
     if (f->name) py23_rc_inc(f->name);
     {
@@ -2179,6 +2215,8 @@ Py23File* py23_file_open(Py23Str* path, int64_t fd, Py23Str* mode, int64_t buffe
         if (bin) nb[nn++] = 'b';
         f->mode = str_new(nb, nn);
     }
+    f->encoding = str_new("utf-8", 5);
+    f->errors = str_new("strict", 6);
     if (buffering == 0) {
         setvbuf(fp, NULL, _IONBF, 0);
     } else if (buffering == 1) {
@@ -2191,65 +2229,275 @@ Py23File* py23_file_open(Py23Str* path, int64_t fd, Py23Str* mode, int64_t buffe
     return f;
 }
 
+/* encoding/errors 必须在任何 I/O 之前配置；未知编码抛 LookupError。 */
+void py23_file_config(Py23File* f, Py23Str* enc, Py23Str* errors) {
+    if (!f) return;
+    if (f->binary) {
+        if (enc || errors)
+            py23_raise_c("ValueError",
+                         "binary mode doesn't take an encoding/errors argument");
+        return;
+    }
+    Py23Str* e = enc ? file_norm_lower(enc) : str_new("utf-8", 5);
+    Py23Str* er = errors ? file_norm_lower(errors) : str_new("strict", 6);
+    if (!file_str_is(er, "strict") && !file_str_is(er, "ignore") &&
+        !file_str_is(er, "replace")) {
+        py23_rc_dec(e);
+        py23_rc_dec(er);
+        py23_raise_c("LookupError", "unknown error handler name");
+    }
+    iconv_t d = (iconv_t)0;
+    iconv_t en = (iconv_t)0;
+    {
+        /* Python 的编码名和 glibc iconv 不完全一致（如 "latin-1"）。
+           依次尝试：原名、去分隔符大写名、常见别名映射。UTF-8 也走
+           iconv：这样非法字节会按 errors 策略处理，和 CPython 一致。 */
+        char norm[64];
+        int nn = 0;
+        for (int64_t i = 0; i < e->len && nn < 63; ++i) {
+            char c = e->data[i];
+            if (c == '-' || c == '_' || c == ' ') continue;
+            norm[nn++] = (c >= 'a' && c <= 'z') ? (char)(c - 'a' + 'A') : c;
+        }
+        norm[nn] = 0;
+        const char* mapped = NULL;
+        if (!strcmp(norm, "LATIN1") || !strcmp(norm, "L1") || !strcmp(norm, "ISO88591") ||
+            !strcmp(norm, "88591"))
+            mapped = "ISO-8859-1";
+        else if (!strcmp(norm, "UTF16"))
+            mapped = "UTF-16";
+        else if (!strcmp(norm, "UTF16LE"))
+            mapped = "UTF-16LE";
+        else if (!strcmp(norm, "UTF16BE"))
+            mapped = "UTF-16BE";
+        else if (!strcmp(norm, "UTF32"))
+            mapped = "UTF-32";
+        else if (!strcmp(norm, "UTF32LE"))
+            mapped = "UTF-32LE";
+        else if (!strcmp(norm, "UTF32BE"))
+            mapped = "UTF-32BE";
+        else if (!strcmp(norm, "ASCII") || !strcmp(norm, "USASCII") || !strcmp(norm, "646"))
+            mapped = "ASCII";
+        const char* cands[3];
+        int nc = 0;
+        char* orig = file_cstr(e);
+        cands[nc++] = orig;
+        cands[nc++] = norm;
+        if (mapped) cands[nc++] = mapped;
+        for (int ci = 0; ci < nc && d == (iconv_t)0; ++ci) {
+            iconv_t cd = iconv_open("UTF-8", cands[ci]);
+            if (cd == (iconv_t)-1) continue;
+            iconv_t ce = iconv_open(cands[ci], "UTF-8");
+            if (ce == (iconv_t)-1) {
+                iconv_close(cd);
+                continue;
+            }
+            d = cd;
+            en = ce;
+        }
+        free(orig);
+        if (d == (iconv_t)0) {
+            py23_rc_dec(e);
+            py23_rc_dec(er);
+            py23_raise_c("LookupError", "unknown encoding");
+        }
+    }
+    if (f->dec_cd) iconv_close(f->dec_cd);
+    if (f->enc_cd) iconv_close(f->enc_cd);
+    f->dec_cd = d;
+    f->enc_cd = en;
+    if (f->encoding) py23_rc_dec(f->encoding);
+    if (f->errors) py23_rc_dec(f->errors);
+    f->encoding = e;
+    f->errors = er;
+}
+
 static FILE* file_check(Py23File* f) {
     if (!f || !f->fp || f->closed)
         py23_raise_c("ValueError", "I/O operation on closed file");
     return f->fp;
 }
 
-static int file_translate_read(Py23File* f) {
-    return !f->binary && f->newline == PY23_NL_UNIVERSAL;
+/* ── 文本模式的解码缓冲 ───────────────────────────────────────── */
+
+static void file_dbuf_append(Py23File* f, const char* p, int64_t n, int translate) {
+    if (n <= 0) return;
+    if (f->dlen + n > f->dcap) {
+        int64_t ncap = f->dcap ? f->dcap : 8192;
+        while (ncap < f->dlen + n) ncap *= 2;
+        char* nb = (char*)realloc(f->dbuf, (size_t)ncap);
+        if (!nb) panic_c("out of memory");
+        f->dbuf = nb;
+        f->dcap = ncap;
+    }
+    char* out = f->dbuf + f->dlen;
+    if (!translate) {
+        memcpy(out, p, (size_t)n);
+        f->dlen += n;
+        return;
+    }
+    /* 通用换行：\r\n 与单独 \r 折成 \n，跨块用 pending_cr 挂起 */
+    for (int64_t i = 0; i < n; ++i) {
+        char c = p[i];
+        if (f->pending_cr) {
+            f->pending_cr = 0;
+            out[f->dlen++] = '\n';
+            if (c == '\n') continue;
+        }
+        if (c == '\r') {
+            f->pending_cr = 1;
+            continue;
+        }
+        out[f->dlen++] = c;
+    }
 }
 
-/* 通用换行：\r\n 与单独 \r 都折成 \n。 */
-static void file_universal_newlines(char* buf, int64_t* lenp) {
-    int64_t n = *lenp, j = 0;
-    for (int64_t i = 0; i < n; ++i) {
-        if (buf[i] == '\r') {
-            buf[j++] = '\n';
-            if (i + 1 < n && buf[i + 1] == '\n') ++i;
-        } else {
-            buf[j++] = buf[i];
+/* 把一块原始字节转成 UTF-8 并追加到解码缓冲；返回 1 表示读到了数据。 */
+static int file_fill(Py23File* f) {
+    if (f->eof) return 0;
+    f->dpos = f->dlen = 0;
+    char raw[8192];
+    int64_t rn = 0;
+    if (f->rawleft_len) {
+        memcpy(raw, f->rawleft, (size_t)f->rawleft_len);
+        rn = f->rawleft_len;
+        f->rawleft_len = 0;
+    }
+    size_t want = sizeof raw - (size_t)rn;
+    size_t got = fread(raw + rn, 1, want, f->fp);
+    int64_t total = rn + (int64_t)got;
+    f->raw_base = (int64_t)ftell(f->fp) - total;
+    if (total == 0) {
+        if (f->pending_cr) {
+            f->pending_cr = 0;
+            file_dbuf_append(f, "\n", 1, 0);
+        }
+        f->eof = 1;
+        return f->dlen > 0;
+    }
+    int translate = !f->binary && f->newline == PY23_NL_UNIVERSAL;
+    if (!f->dec_cd) {
+        file_dbuf_append(f, raw, total, translate);
+    } else {
+        char outbuf[16384];
+        char* in = raw;
+        size_t inleft = (size_t)total;
+        for (;;) {
+            char* outp = outbuf;
+            size_t outleft = sizeof outbuf;
+            size_t r = iconv(f->dec_cd, &in, &inleft, &outp, &outleft);
+            file_dbuf_append(f, outbuf, (int64_t)(sizeof outbuf - outleft), translate);
+            if (r != (size_t)-1) break;
+            if (errno == E2BIG) continue;
+            if (errno == EINVAL) {
+                /* 不完整的多字节序列：留到下一块 */
+                if (inleft > 0 && inleft <= sizeof f->rawleft) {
+                    memcpy(f->rawleft, in, inleft);
+                    f->rawleft_len = (int64_t)inleft;
+                }
+                break;
+            }
+            if (errno == EILSEQ) {
+                if (file_str_is(f->errors, "strict"))
+                    py23_raise_c("UnicodeDecodeError", "invalid byte sequence");
+                if (file_str_is(f->errors, "replace"))
+                    file_dbuf_append(f, "\xEF\xBF\xBD", 3, translate);
+                ++in;
+                --inleft;
+                continue;
+            }
+            break;
         }
     }
-    *lenp = j;
+    if (got < want) f->eof = 1;
+    return f->dlen > 0;
+}
+
+static int file_takec(Py23File* f) {
+    if (f->dpos >= f->dlen && !file_fill(f)) return -1;
+    ++f->text_off;
+    return (unsigned char)f->dbuf[f->dpos++];
 }
 
 Py23Str* py23_file_read(Py23File* f, int64_t n) {
     FILE* fp = file_check(f);
-    char* buf = NULL;
+    if (f->binary) {
+        char* buf = NULL;
+        int64_t len = 0, cap = 0;
+        int64_t remain = n < 0 ? INT64_MAX : n;
+        char chunk[4096];
+        while (remain > 0) {
+            size_t want = remain < (int64_t)sizeof chunk ? (size_t)remain : sizeof chunk;
+            size_t got = fread(chunk, 1, want, fp);
+            if (got == 0) break;
+            if (len + (int64_t)got > cap) {
+                int64_t ncap = cap ? cap : 8192;
+                while (ncap < len + (int64_t)got) ncap *= 2;
+                char* nb = (char*)realloc(buf, (size_t)ncap);
+                if (!nb) panic_c("out of memory");
+                buf = nb;
+                cap = ncap;
+            }
+            memcpy(buf + len, chunk, got);
+            len += (int64_t)got;
+            if (n >= 0) remain -= (int64_t)got;
+            if (got < want) break;
+        }
+        Py23Str* s = str_new(buf ? buf : "", len);
+        free(buf);
+        return s;
+    }
+    char* out = NULL;
     int64_t len = 0, cap = 0;
-    int64_t remain = n < 0 ? INT64_MAX : n;
-    char chunk[4096];
-    while (remain > 0) {
-        size_t want = remain < (int64_t)sizeof chunk ? (size_t)remain : sizeof chunk;
-        size_t got = fread(chunk, 1, want, fp);
-        if (got == 0) break;
-        if (len + (int64_t)got > cap) {
+    while (n < 0 || len < n) {
+        if (f->dpos >= f->dlen && !file_fill(f)) break;
+        int64_t avail = f->dlen - f->dpos;
+        int64_t take = (n < 0 || avail <= n - len) ? avail : n - len;
+        if (len + take > cap) {
             int64_t ncap = cap ? cap : 8192;
-            while (ncap < len + (int64_t)got) ncap *= 2;
-            char* nb = (char*)realloc(buf, (size_t)ncap);
+            while (ncap < len + take) ncap *= 2;
+            char* nb = (char*)realloc(out, (size_t)ncap);
             if (!nb) panic_c("out of memory");
-            buf = nb;
+            out = nb;
             cap = ncap;
         }
-        memcpy(buf + len, chunk, got);
-        len += (int64_t)got;
-        if (n >= 0) remain -= (int64_t)got;
-        if (got < want) break;
+        memcpy(out + len, f->dbuf + f->dpos, (size_t)take);
+        f->dpos += take;
+        f->text_off += take;
+        len += take;
     }
-    if (file_translate_read(f)) file_universal_newlines(buf ? buf : chunk, &len);
-    Py23Str* s = str_new(buf ? buf : "", len);
-    free(buf);
+    Py23Str* s = str_new(out ? out : "", len);
+    free(out);
     return s;
 }
 
 Py23Str* py23_file_readline(Py23File* f, int64_t size) {
     FILE* fp = file_check(f);
+    if (f->binary) {
+        char* buf = NULL;
+        int64_t len = 0, cap = 0;
+        int c;
+        while ((size < 0 || len < size) && (c = fgetc(fp)) != EOF) {
+            if (len + 1 > cap) {
+                int64_t ncap = cap ? cap * 2 : 128;
+                char* nb = (char*)realloc(buf, (size_t)ncap);
+                if (!nb) panic_c("out of memory");
+                buf = nb;
+                cap = ncap;
+            }
+            buf[len++] = (char)c;
+            if (c == '\n') break;
+        }
+        Py23Str* s = str_new(buf ? buf : "", len);
+        free(buf);
+        return s;
+    }
     char* buf = NULL;
     int64_t len = 0, cap = 0;
-    int c;
-    while ((size < 0 || len < size) && (c = fgetc(fp)) != EOF) {
+    for (;;) {
+        if (size >= 0 && len >= size) break;
+        int c = file_takec(f);
+        if (c < 0) break;
         if (len + 1 > cap) {
             int64_t ncap = cap ? cap * 2 : 128;
             char* nb = (char*)realloc(buf, (size_t)ncap);
@@ -2260,7 +2508,6 @@ Py23Str* py23_file_readline(Py23File* f, int64_t size) {
         buf[len++] = (char)c;
         if (c == '\n') break;
     }
-    if (file_translate_read(f)) file_universal_newlines(buf ? buf : (char*)"", &len);
     Py23Str* s = str_new(buf ? buf : "", len);
     free(buf);
     return s;
@@ -2280,9 +2527,11 @@ Py23List* py23_file_readlines(Py23File* f, int64_t hint) {
     return out;
 }
 
+/* ── 写入 ─────────────────────────────────────────────────────── */
+
 /* 写侧换行翻译：newline="\r" / "\r\n" 时把 \n 换掉。 */
 static Py23Str* file_translate_write(Py23File* f, Py23Str* s) {
-    if (f->binary || (f->newline != PY23_NL_CR && f->newline != PY23_NL_CRLF)) return s;
+    if ((f->newline != PY23_NL_CR && f->newline != PY23_NL_CRLF)) return s;
     if (f->newline == PY23_NL_CR) {
         Py23Str* out = str_new(s->data, s->len);
         for (int64_t i = 0; i < out->len; ++i)
@@ -2306,12 +2555,65 @@ static Py23Str* file_translate_write(Py23File* f, Py23Str* s) {
     return out;
 }
 
+// 返回实际写出的字节数；出错按 errors 策略处理。
+static void file_write_bytes(Py23File* f, const char* p, int64_t n) {
+    if (n <= 0) return;
+    if (!f->enc_cd) {
+        fwrite(p, 1, (size_t)n, f->fp);
+        return;
+    }
+    char outbuf[16384];
+    char* in = (char*)p;
+    size_t inleft = (size_t)n;
+    for (;;) {
+        char* outp = outbuf;
+        size_t outleft = sizeof outbuf;
+        size_t r = iconv(f->enc_cd, &in, &inleft, &outp, &outleft);
+        size_t produced = sizeof outbuf - outleft;
+        if (produced) fwrite(outbuf, 1, produced, f->fp);
+        if (r != (size_t)-1) break;
+        if (errno == E2BIG) continue;
+        if (errno == EINVAL) { /* 输入不是完整的 UTF-8 序列 */
+            if (file_str_is(f->errors, "strict"))
+                py23_raise_c("UnicodeEncodeError", "invalid UTF-8 input");
+            break;
+        }
+        if (errno == EILSEQ) {
+            if (file_str_is(f->errors, "strict"))
+                py23_raise_c("UnicodeEncodeError",
+                             "character cannot be encoded in the target encoding");
+            if (file_str_is(f->errors, "replace")) fwrite("?", 1, 1, f->fp);
+            ++in;
+            --inleft;
+            continue;
+        }
+        break;
+    }
+}
+
 int64_t py23_file_write(Py23File* f, Py23Str* s) {
     FILE* fp = file_check(f);
+    if (f->binary) {
+        return (int64_t)fwrite(s->data, 1, (size_t)s->len, fp);
+    }
+    if (f->dpos < f->dlen || f->rawleft_len || f->pending_cr) {
+        /* 解码缓冲预读了后续字节，底层句柄已越过逻辑位置；写之前退回去。 */
+        int64_t raw_target = f->raw_base + f->dpos + f->rawleft_len;
+        if (fseek(fp, (long)raw_target, SEEK_SET) != 0)
+            py23_raise_c("OSError", "seek failed");
+        f->dlen = f->dpos = 0;
+        f->rawleft_len = 0;
+        f->pending_cr = 0;
+        f->eof = 0;
+        f->raw_base = raw_target;
+        if (f->dec_cd) iconv(f->dec_cd, NULL, NULL, NULL, NULL);
+        if (f->enc_cd) iconv(f->enc_cd, NULL, NULL, NULL, NULL);
+    }
     Py23Str* t = file_translate_write(f, s);
-    int64_t n = (int64_t)fwrite(t->data, 1, (size_t)t->len, fp);
+    file_write_bytes(f, t->data, t->len);
     if (t != s) py23_rc_dec(t);
-    return n;
+    f->text_off += s->len;
+    return s->len;
 }
 
 void py23_file_writelines(Py23File* f, Py23List* lines) {
@@ -2319,14 +2621,73 @@ void py23_file_writelines(Py23File* f, Py23List* lines) {
         py23_file_write(f, (Py23Str*)lines->data[i]);
 }
 
+/* 文本定位：位置按解码后的 UTF-8 字节计。从文件头重解码并丢弃前 target
+   个字节；这是 O(n) 但和 tell 的返回值自洽，也与 CPython 的 cookie 同形。 */
+static void file_text_reset(Py23File* f) {
+    fflush(f->fp);
+    if (fseek(f->fp, 0, SEEK_SET) != 0)
+        py23_raise_c("OSError", "seek failed");
+    f->dlen = f->dpos = 0;
+    f->rawleft_len = 0;
+    f->pending_cr = 0;
+    f->eof = 0;
+    f->text_off = 0;
+    f->raw_base = 0;
+    if (f->dec_cd) iconv(f->dec_cd, NULL, NULL, NULL, NULL);
+    if (f->enc_cd) iconv(f->enc_cd, NULL, NULL, NULL, NULL);
+}
+
+static int64_t file_text_skip(Py23File* f, int64_t target) {
+    while (f->text_off < target) {
+        if (f->dpos >= f->dlen && !file_fill(f)) break;
+        int64_t take = target - f->text_off;
+        int64_t avail = f->dlen - f->dpos;
+        if (take > avail) take = avail;
+        f->dpos += take;
+        f->text_off += take;
+    }
+    return f->text_off;
+}
+
 int64_t py23_file_seek(Py23File* f, int64_t off, int64_t whence) {
     FILE* fp = file_check(f);
+    if (!f->binary) {
+        int64_t target;
+        if (whence == 2) {
+            file_text_reset(f);
+            int64_t total = file_text_skip(f, INT64_MAX);
+            target = total + off;
+            if (target < 0) py23_raise_c("OSError", "negative seek position");
+            if (off != 0) {
+                file_text_reset(f);
+                file_text_skip(f, target);
+            }
+        } else {
+            int64_t cur = whence == 1 ? f->text_off : 0;
+            target = cur + off;
+            if (target < 0) py23_raise_c("OSError", "negative seek position");
+            file_text_reset(f);
+            file_text_skip(f, target);
+        }
+        return f->text_off;
+    }
     int w = whence == 1 ? SEEK_CUR : whence == 2 ? SEEK_END : SEEK_SET;
     if (fseek(fp, (long)off, w) != 0) py23_raise_c("OSError", "seek failed");
+    f->dlen = f->dpos = 0;
+    f->rawleft_len = 0;
+    f->pending_cr = 0;
+    f->eof = 0;
+    f->text_off = 0;
+    if (f->dec_cd) iconv(f->dec_cd, NULL, NULL, NULL, NULL);
+    if (f->enc_cd) iconv(f->enc_cd, NULL, NULL, NULL, NULL);
     return (int64_t)ftell(fp);
 }
 
-int64_t py23_file_tell(Py23File* f) { return (int64_t)ftell(file_check(f)); }
+int64_t py23_file_tell(Py23File* f) {
+    FILE* fp = file_check(f);
+    if (f->binary) return (int64_t)ftell(fp);
+    return f->text_off;
+}
 
 int64_t py23_file_truncate(Py23File* f, int64_t size) {
     FILE* fp = file_check(f);
@@ -2356,6 +2717,16 @@ Py23Str* py23_file_name(Py23File* f) {
 Py23Str* py23_file_mode(Py23File* f) {
     if (!f || !f->mode) return str_new("", 0);
     return str_new(f->mode->data, f->mode->len);
+}
+
+Py23Str* py23_file_encoding(Py23File* f) {
+    if (!f || !f->encoding) return str_new("", 0);
+    return str_new(f->encoding->data, f->encoding->len);
+}
+
+Py23Str* py23_file_errors(Py23File* f) {
+    if (!f || !f->errors) return str_new("", 0);
+    return str_new(f->errors->data, f->errors->len);
 }
 
 void py23_file_close(Py23File* f) {
