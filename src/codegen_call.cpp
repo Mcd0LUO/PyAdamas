@@ -533,11 +533,14 @@ void AsmGen::gen_call_rt(const Inst& in) {
             case RtFn::FileTruncate:
             case RtFn::CollMostCommon:
             case RtFn::RegexGroupStr:
+            case RtFn::RegexExpand:
+            case RtFn::RegexFindIter:
                 emit2("movq", src_op(in.args[0]), "%rdi");
                 emit2("movq", src_op(in.args[1]), "%rsi");
                 break;
             case RtFn::RegexSearch:
             case RtFn::RegexFindAllStr:
+            case RtFn::RegexFindIterStr:
             case RtFn::RegexSplit:
             case RtFn::GenSendOpt:
             case RtFn::ListSet:
@@ -605,6 +608,9 @@ void AsmGen::gen_call_rt(const Inst& in) {
                 emit2("movq", src_op(in.args[1]), "%rsi");
                 break;
             case RtFn::RegexGroups:
+            case RtFn::RegexPatternGroups:
+            case RtFn::RegexPatternFlags:
+            case RtFn::RegexPatternStr:
             case RtFn::RegexEscape:
             case RtFn::StrFromI64:
             case RtFn::StrFromBool:

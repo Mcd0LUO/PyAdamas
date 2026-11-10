@@ -354,6 +354,12 @@ enum class RtFn : uint16_t {
     RegexSplitStr,         // (str* pat, str* text, i64 maxsplit, i64 flags) -> list*
     RegexSplit,            // (regex*, str* text, i64 maxsplit) -> list*
     RegexEscape,           // (str*) -> str*
+    RegexPatternGroups,    // (regex*) -> i64
+    RegexPatternFlags,     // (regex*) -> i64
+    RegexPatternStr,       // (regex*) -> str*
+    RegexFindIter,         // (regex*, str* text) -> list*
+    RegexFindIterStr,      // (str* pat, str* text, i64 flags) -> list*
+    RegexExpand,           // (match*, str* tmpl) -> str*
     RegexGroup,            // (match*, i64 n) -> str*
     RegexGroupStr,         // (match*, str* name) -> str*
     RegexGroups,           // (match*) -> list*
@@ -693,6 +699,12 @@ inline const char* rt_name(RtFn f) {
         case RtFn::RegexSplitStr: return "py23_re_split_str";
         case RtFn::RegexSplit: return "py23_re_split";
         case RtFn::RegexEscape: return "py23_re_escape";
+        case RtFn::RegexPatternGroups: return "py23_re_pattern_groups";
+        case RtFn::RegexPatternFlags: return "py23_re_pattern_flags";
+        case RtFn::RegexPatternStr: return "py23_re_pattern_str";
+        case RtFn::RegexFindIter: return "py23_re_finditer";
+        case RtFn::RegexFindIterStr: return "py23_re_finditer_str";
+        case RtFn::RegexExpand: return "py23_re_expand";
         case RtFn::RegexGroup: return "py23_re_group";
         case RtFn::RegexGroupStr: return "py23_re_group_str";
         case RtFn::RegexGroups: return "py23_re_groups";

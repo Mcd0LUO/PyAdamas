@@ -1180,11 +1180,13 @@ typedef struct Py23Match {
 
 typedef struct Py23Regex {
     ReProg prog;
+    Py23Str* pat;  // 原始模式串，供 Pattern.pattern 用
 } Py23Regex;
 
 static void regex_dtor(void* p) {
     Py23Regex* r = (Py23Regex*)p;
     prog_free(&r->prog);
+    if (r->pat) py23_rc_dec(r->pat);
 }
 
 static void match_dtor(void* p) {
@@ -1244,12 +1246,25 @@ static int64_t group_end(Py23Match* m, int64_t n) {
 
 int64_t py23_re_compile(Py23Str* pat, int64_t flags) {
     Py23Regex* r = (Py23Regex*)rc_alloc(sizeof(Py23Regex), regex_dtor, NULL, PY23_RC_OBJ);
+    r->pat = NULL;
     const char* err = NULL;
     if (!prog_build(&r->prog, (const unsigned char*)pat->data, (int)pat->len, (int)flags, &err)) {
         prog_free(&r->prog);
         py23_raise_c("ValueError", err ? err : "bad pattern");
     }
+    r->pat = pat;
+    py23_rc_inc(pat);
     return (int64_t)r;
+}
+
+int64_t py23_re_pattern_groups(Py23Regex* re) { return re ? re->prog.ngroups : 0; }
+
+int64_t py23_re_pattern_flags(Py23Regex* re) { return re ? re->prog.flags : 0; }
+
+int64_t py23_re_pattern_str(Py23Regex* re) {
+    if (!re || !re->pat) return (int64_t)str_new("", 0);
+    py23_rc_inc(re->pat);
+    return (int64_t)re->pat;
 }
 
 int64_t py23_re_search_str(Py23Str* pat, Py23Str* text, int64_t flags, int64_t mode) {
@@ -1337,6 +1352,38 @@ static int find_next(ReProg* g, Py23Str* text, int64_t from, int64_t* caps) {
     return find_from(g, text, from, 0, caps);
 }
 
+// finditer 返回 list[Match]（py23 没有惰性迭代器，按列表给，语义等价）。
+static Py23List* finditer_impl(ReProg* g, Py23Str* text) {
+    Py23List* out = py23_list_new(0, 1);
+    int64_t ncap = 2 * (int64_t)(g->ngroups + 1);
+    int64_t* caps = (int64_t*)re_alloc(sizeof(int64_t) * (size_t)ncap);
+    int64_t pos = 0;
+    while (pos <= text->len && find_next(g, text, pos, caps)) {
+        py23_list_append(out,
+                         (int64_t)match_new(text, g->ngroups, caps, g->names, g->nnames));
+        if (caps[1] == caps[0]) pos = caps[1] + 1;
+        else pos = caps[1];
+    }
+    free(caps);
+    return out;
+}
+
+int64_t py23_re_finditer(Py23Regex* re, Py23Str* text) {
+    if (!re) py23_raise_c("AttributeError", "NoneType has no regex method");
+    return (int64_t)finditer_impl(&re->prog, text);
+}
+
+int64_t py23_re_finditer_str(Py23Str* pat, Py23Str* text, int64_t flags) {
+    ReProg g;
+    const char* err = NULL;
+    if (!prog_build(&g, (const unsigned char*)pat->data, (int)pat->len, (int)flags, &err)) {
+        py23_raise_c("ValueError", err ? err : "bad pattern");
+    }
+    Py23List* out = finditer_impl(&g, text);
+    prog_free(&g);
+    return (int64_t)out;
+}
+
 // findall 的取段规则：没有捕获组取整段；只有一个捕获组时取该组（CPython 语义）。
 static void findall_push(Py23List* out, Py23Str* text, int64_t ngroups, const int64_t* caps) {
     int64_t a = caps[0], b = caps[1];
@@ -1386,6 +1433,16 @@ int64_t py23_re_findall(Py23Regex* re, Py23Str* text) {
     return (int64_t)out;
 }
 
+static int64_t group_index_by_name(Py23Match* m, const char* s, int64_t len) {
+    if (!m) return -1;
+    for (int i = 0; i < m->nnames; ++i) {
+        if ((int64_t)strlen(m->names[i].name) == len &&
+            memcmp(m->names[i].name, s, (size_t)len) == 0)
+            return m->names[i].group;
+    }
+    return -1;
+}
+
 static void add_repl(ReBuf* b, const char* r, int64_t rlen, Py23Match* m) {
     for (int64_t i = 0; i < rlen; ++i) {
         char c = r[i];
@@ -1398,6 +1455,35 @@ static void add_repl(ReBuf* b, const char* r, int64_t rlen, Py23Match* m) {
                 i++;
                 continue;
             }
+            // \g<name> / \g<1> / \g<0>
+            if (d == 'g' && i + 2 < rlen && r[i + 2] == '<') {
+                int64_t j = i + 3, ns = i + 3;
+                while (j < rlen && r[j] != '>') j++;
+                if (j < rlen && j > ns) {
+                    int digits = 1;
+                    for (int64_t k = ns; k < j; ++k)
+                        if (r[k] < '0' || r[k] > '9') {
+                            digits = 0;
+                            break;
+                        }
+                    int64_t gi = -1;
+                    if (digits) {
+                        for (int64_t k = ns; k < j; ++k) {
+                            if (gi < 0) gi = 0;
+                            gi = gi * 10 + (r[k] - '0');
+                        }
+                    } else {
+                        gi = group_index_by_name(m, r + ns, j - ns);
+                    }
+                    if (gi >= 0) {
+                        Py23Str* s = group_str(m, gi);
+                        buf_add(b, s->data, (size_t)s->len);
+                        py23_rc_dec(s);
+                        i = j;
+                        continue;
+                    }
+                }
+            }
             if (d == '\\') {
                 buf_ch(b, '\\');
                 i++;
@@ -1406,6 +1492,14 @@ static void add_repl(ReBuf* b, const char* r, int64_t rlen, Py23Match* m) {
         }
         buf_ch(b, c);
     }
+}
+
+int64_t py23_re_expand(Py23Match* m, Py23Str* tmpl) {
+    ReBuf b = {NULL, 0, 0};
+    add_repl(&b, tmpl->data, tmpl->len, m);
+    Py23Str* out = str_new(b.p ? b.p : "", (int64_t)b.n);
+    free(b.p);
+    return (int64_t)out;
 }
 
 int64_t py23_re_sub_str(Py23Str* pat, Py23Str* repl, Py23Str* text, int64_t count,
@@ -1426,6 +1520,8 @@ int64_t py23_re_sub_str(Py23Str* pat, Py23Str* repl, Py23Str* text, int64_t coun
         tmp.text = text;
         tmp.ngroups = g.ngroups;
         tmp.caps = caps;
+        tmp.names = g.names;
+        tmp.nnames = g.nnames;
         add_repl(&b, repl->data, repl->len, &tmp);
         done++;
         if (caps[1] == caps[0]) {
@@ -1457,6 +1553,8 @@ int64_t py23_re_sub(Py23Regex* re, Py23Str* repl, Py23Str* text, int64_t count) 
         tmp.text = text;
         tmp.ngroups = re->prog.ngroups;
         tmp.caps = caps;
+        tmp.names = re->prog.names;
+        tmp.nnames = re->prog.nnames;
         add_repl(&b, repl->data, repl->len, &tmp);
         done++;
         if (caps[1] == caps[0]) {

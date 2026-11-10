@@ -637,6 +637,12 @@ int64_t py23_re_sub(Py23Regex* re, Py23Str* repl, Py23Str* text, int64_t count);
 int64_t py23_re_split_str(Py23Str* pat, Py23Str* text, int64_t maxsplit, int64_t flags);
 int64_t py23_re_split(Py23Regex* re, Py23Str* text, int64_t maxsplit);
 int64_t py23_re_escape(Py23Str* s);
+int64_t py23_re_pattern_groups(Py23Regex* re);
+int64_t py23_re_pattern_flags(Py23Regex* re);
+int64_t py23_re_pattern_str(Py23Regex* re);
+int64_t py23_re_finditer(Py23Regex* re, Py23Str* text);
+int64_t py23_re_finditer_str(Py23Str* pat, Py23Str* text, int64_t flags);
+int64_t py23_re_expand(Py23Match* m, Py23Str* tmpl);
 
 /* ── subprocess：CompletedProcess 与 run() ─────────────────────── */
 typedef struct Py23Proc Py23Proc;

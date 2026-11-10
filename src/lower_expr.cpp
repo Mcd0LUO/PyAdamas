@@ -399,6 +399,21 @@ VReg Lowerer::expr(Expr& e) {
                     std::format("'CompletedProcess' object has no attribute '{}'", a.attr));
                 return const_none();
             }
+            if (ot && ot->kind == TyKind::Regex) {
+                VReg rv = expr(*a.value);
+                if (opt) rv = guard_not_none(rv, std::format("attribute '{}'", a.attr));
+                if (a.attr == "groups")
+                    return call_runtime(RtFn::RegexPatternGroups, t_int(), {rv});
+                if (a.attr == "flags")
+                    return call_runtime(RtFn::RegexPatternFlags, t_int(), {rv});
+                if (a.attr == "pattern") {
+                    VReg s = call_runtime(RtFn::RegexPatternStr, t_str(), {rv});
+                    push_temp(s);
+                    return s;
+                }
+                err(e.line, e.col, std::format("re.Pattern has no attribute '{}'", a.attr));
+                return const_none();
+            }
             if (ot && ot->kind == TyKind::Class && ot->cls) {
                 if (const PropertyInfo* p = ot->cls->property(a.attr)) {
                     ++side_effect_seq_;  // getter 可能改动容器

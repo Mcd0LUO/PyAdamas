@@ -825,6 +825,9 @@ py23::ModuleInfoPtr builtin_module(const std::string& name) {
         re_fn("findall",
               {{"pattern", py23::t_str()}, {"string", py23::t_str()}, {"flags", py23::t_int()}},
               1, py23::mk_list(py23::t_str()));
+        re_fn("finditer",
+              {{"pattern", py23::t_str()}, {"string", py23::t_str()}, {"flags", py23::t_int()}},
+              1, py23::mk_list(py23::t_match()));
         re_fn("sub",
               {{"pattern", py23::t_str()},
                {"repl", py23::t_str()},

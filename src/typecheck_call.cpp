@@ -1176,6 +1176,12 @@ TypePtr TypeChecker::method_call(TypePtr recv, const std::string& name, Call& c,
                 argc(1, 1);
                 return mk_list(t_str());
             }
+            if (name == "finditer") {
+                argc(1, 1);
+                if (!a.empty() && a[0] && !is_unknown(a[0]) && a[0]->kind != TyKind::Str)
+                    err(c.line, c.col, "re.Pattern.finditer() expects a str");
+                return mk_list(t_match());
+            }
             if (name == "sub") {
                 argc(2, 3);
                 if (a.size() >= 2 && a[0] && !is_unknown(a[0]) && a[0]->kind != TyKind::Str)
@@ -1197,7 +1203,7 @@ TypePtr TypeChecker::method_call(TypePtr recv, const std::string& name, Call& c,
                 err(c.line, c.col,
                     std::format("re.Match.{}() does not take keyword arguments", name));
             if (name == "group") {
-                argc(0, 1);
+                if (c.args.size() > 1) return mk_tuple_rest(t_str());
                 return t_str();
             }
             if (name == "groups") {
@@ -1211,6 +1217,10 @@ TypePtr TypeChecker::method_call(TypePtr recv, const std::string& name, Call& c,
             if (name == "span") {
                 argc(0, 1);
                 return mk_tuple({t_int(), t_int()});
+            }
+            if (name == "expand") {
+                argc(1, 1);
+                return t_str();
             }
             err(c.line, c.col, std::format("re.Match has no method '{}'", name));
             return t_unknown();

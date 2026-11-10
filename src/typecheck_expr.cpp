@@ -282,6 +282,13 @@ TypePtr TypeChecker::expr(Expr& e) {
                         std::format("'CompletedProcess' object has no attribute '{}'", a.attr));
                     return t_unknown();
                 }
+                if (ot->kind == TyKind::Regex) {
+                    if (a.attr == "groups" || a.attr == "flags") return t_int();
+                    if (a.attr == "pattern") return t_str();
+                    err(a.line, a.col,
+                        std::format("re.Pattern has no attribute '{}'", a.attr));
+                    return t_unknown();
+                }
                 // 双下划线属性属于运行时的协议实现，静态上没有方法表
                 if (a.attr.size() > 4 && a.attr.starts_with("__") && a.attr.ends_with("__"))
                     return t_unknown();

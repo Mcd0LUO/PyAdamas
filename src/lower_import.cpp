@@ -215,6 +215,7 @@ std::optional<RtFn> Lowerer::native_fn(const std::string& module, const std::str
         if (member == "search" || member == "match" || member == "fullmatch")
             return RtFn::RegexSearchStr;
         if (member == "findall") return RtFn::RegexFindAllStr;
+        if (member == "finditer") return RtFn::RegexFindIterStr;
         if (member == "sub") return RtFn::RegexSubStr;
         if (member == "split") return RtFn::RegexSplitStr;
         if (member == "escape") return RtFn::RegexEscape;

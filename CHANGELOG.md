@@ -4,6 +4,27 @@
 
 早期阶段没有逐条留痕，按阶段归纳；0.4 之后逐条记录。
 
+## [0.76.1] - 2026-11-10
+
+`re` 的 API 补齐（0.76 的语法层不动）。
+
+### 新增
+
+- `Pattern.groups` / `Pattern.pattern` / `Pattern.flags` 属性。
+- `Match.expand(template)`。
+- `Match.group(a, b, ...)` 多参数，返回元组。
+- `re.finditer` / `Pattern.finditer`，返回 `list[Match]`：py23 没有惰性迭代器，
+  按列表给，`for` 循环语义一致；副作用是 `len()` 能用（CPython 会 TypeError）。
+- 替换模板支持 `\g<name>` / `\g<1>` / `\g<0>`，`sub` 和 `expand` 共用同一套展开。
+
+### 修复
+
+- `re.sub` 里的临时 Match 没带名字表，`\g<name>` 会静默输出原文。
+
+### 测试
+
+- `tests/run/59_re_api.py`，输出与 CPython 3.13 逐行一致。
+
 ## [0.76] - 2026-11-10
 
 `re` v2：补上回溯引擎缺的那几块。

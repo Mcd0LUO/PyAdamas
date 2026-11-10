@@ -898,6 +898,16 @@ VReg Lowerer::lower_method_call(Attribute& at, Call& c) {
             push_temp(l);
             return l;
         }
+        if (at.attr == "finditer") {
+            if (c.args.size() != 1) {
+                err(c.line, c.col, "finditer() takes exactly one argument");
+                return const_none();
+            }
+            VReg text = expr(*c.args[0]);
+            VReg l = call_runtime(RtFn::RegexFindIter, mk_list(t_match()), {recv, text});
+            push_temp(l);
+            return l;
+        }
         if (at.attr == "sub") {
             if (c.args.size() < 2 || c.args.size() > 3) {
                 err(c.line, c.col, "sub() takes two or three arguments");
@@ -938,8 +948,23 @@ VReg Lowerer::lower_method_call(Attribute& at, Call& c) {
         };
         if (at.attr == "group") {
             if (c.args.size() > 1) {
-                err(c.line, c.col, "group() takes at most one argument");
-                return const_none();
+                // group(1, 2, ...) 返回元组；先按 list 建，再改标成 tuple。
+                VReg l = call_runtime(RtFn::ListNew, mk_list(t_str()),
+                                      {const_int(static_cast<int64_t>(c.args.size()))});
+                push_temp(l);
+                for (size_t i = 0; i < c.args.size(); ++i) {
+                    TypePtr a0 = tc_.type_of(c.args[i].get());
+                    VReg s;
+                    if (a0 && a0->kind == TyKind::Str) {
+                        VReg sv = expr(*c.args[i]);
+                        s = call_runtime(RtFn::RegexGroupStr, t_str(), {recv, sv});
+                    } else {
+                        VReg n = int_at(i);
+                        s = call_runtime(RtFn::RegexGroup, t_str(), {recv, n});
+                    }
+                    call_void(RtFn::ListAppend, {l, s});
+                }
+                return retype(l, mk_tuple_rest(t_str()));
             }
             if (c.args.empty()) {
                 VReg s = call_runtime(RtFn::RegexGroup, t_str(), {recv, const_int(0)});
@@ -955,6 +980,16 @@ VReg Lowerer::lower_method_call(Attribute& at, Call& c) {
             }
             VReg n = int_at(0);
             VReg s = call_runtime(RtFn::RegexGroup, t_str(), {recv, n});
+            push_temp(s);
+            return s;
+        }
+        if (at.attr == "expand") {
+            if (c.args.size() != 1) {
+                err(c.line, c.col, "expand() takes exactly one argument");
+                return const_none();
+            }
+            VReg t = expr(*c.args[0]);
+            VReg s = call_runtime(RtFn::RegexExpand, t_str(), {recv, t});
             push_temp(s);
             return s;
         }
