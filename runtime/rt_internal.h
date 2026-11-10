@@ -30,7 +30,9 @@ typedef struct {
     int64_t elem_kind;
 } Py23List;
 
-/* 字典 = 开放寻址哈希表 + 插入顺序 order 数组。set 复用同一结构，
+/* 字典 = 密集 entries（插入顺序）+ 开放寻址索引表。index 槽存
+   「entry 下标 + 1」，0 表示空；查找先走 4 字节索引，命中才读 entry。
+   扩容/删除只重建索引，entries 顺序不动。set 复用同一结构，
    val_own = 0、值恒为 0。len 在偏移 0，len() 和真值判断都只读它。 */
 typedef struct {
     int64_t hash;  /* 0 表示空槽；真实 hash 强制非 0 */
@@ -40,9 +42,10 @@ typedef struct {
 
 typedef struct {
     int64_t len;
-    int64_t cap;
+    int64_t cap;       /* entries 容量 */
     Py23DictEntry* entries;
-    int64_t* order;    /* order[i] = 第 i 个插入项在 entries 里的槽号 */
+    int32_t* index;    /* 开放寻址索引：entry 下标 + 1，0 为空 */
+    int64_t icap;      /* 索引表容量（2 的幂） */
     int64_t key_kind;  /* 0 int/bool, 1 str, 2 float, 3 raw */
     int64_t key_own;   /* 0 非堆, 1 堆, 2 unknown */
     int64_t val_own;   /* 0 非堆, 1 堆, 2 unknown */
@@ -428,9 +431,6 @@ int64_t py23_list_max_i64(Py23List* l);
 uint64_t mix64(uint64_t x);
 int64_t dict_hash_value(int64_t kind, int64_t v);
 int dict_key_eq(int64_t kind, int64_t a, int64_t b);
-int64_t dict_probe(Py23DictEntry* entries, int64_t cap, int64_t kind, int64_t key, int64_t hash);
-int64_t dict_empty_slot(Py23DictEntry* entries, int64_t cap, int64_t hash);
-void dict_resize(Py23Dict* d, int64_t ncap);
 void dict_destroy(void* p);
 void dict_gc_release(void* p);
 Py23Dict* py23_dict_new(int64_t key_kind, int64_t key_own, int64_t val_own);

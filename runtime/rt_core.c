@@ -511,7 +511,7 @@ void gc_scan_object(Py23Rc* h) {
             Py23Dict* d = (Py23Dict*)p;
             int precise = gc_untracked_leaves;
             for (int64_t i = 0; i < d->len; ++i) {
-                Py23DictEntry e = d->entries[d->order[i]];
+                Py23DictEntry e = d->entries[i];
                 if (precise && d->key_own == 1)
                     gc_mark_direct((uintptr_t)e.key);
                 else if (!precise || d->key_own == 2)
@@ -723,7 +723,7 @@ void py23_gc_collect(void) {
             } else if (h->kind == PY23_RC_DICT) {
                 Py23Dict* d = (Py23Dict*)((char*)h + PY23_RC_HDR);
                 free(d->entries);
-                free(d->order);
+                free(d->index);
             }
             free(h);
         }
@@ -758,7 +758,7 @@ void py23_gc_shutdown(void) {
         } else if (h->kind == PY23_RC_DICT) {
             Py23Dict* d = (Py23Dict*)((char*)h + PY23_RC_HDR);
             free(d->entries);
-            free(d->order);
+            free(d->index);
         }
         free(h);
     }
