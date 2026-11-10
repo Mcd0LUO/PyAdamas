@@ -414,6 +414,19 @@ VReg Lowerer::expr(Expr& e) {
                 err(e.line, e.col, std::format("re.Pattern has no attribute '{}'", a.attr));
                 return const_none();
             }
+            if (ot && ot->kind == TyKind::Match) {
+                VReg mv = expr(*a.value);
+                if (opt) mv = guard_not_none(mv, std::format("attribute '{}'", a.attr));
+                if (a.attr == "lastindex")
+                    return call_runtime(RtFn::RegexLastIndex, t_int(), {mv});
+                if (a.attr == "lastgroup") {
+                    VReg s = call_runtime(RtFn::RegexLastGroup, t_str(), {mv});
+                    push_temp(s);
+                    return s;
+                }
+                err(e.line, e.col, std::format("re.Match has no attribute '{}'", a.attr));
+                return const_none();
+            }
             if (ot && ot->kind == TyKind::Class && ot->cls) {
                 if (const PropertyInfo* p = ot->cls->property(a.attr)) {
                     ++side_effect_seq_;  // getter 可能改动容器

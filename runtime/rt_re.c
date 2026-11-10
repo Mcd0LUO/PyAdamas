@@ -1319,6 +1319,37 @@ int64_t py23_re_groups(Py23Match* m) {
     return (int64_t)out;
 }
 
+int64_t py23_re_groupdict(Py23Match* m) {
+    // key_kind=1 是 str；key/val 都由字典拥有，析构时各自 rc_dec。
+    Py23Dict* d = py23_dict_new(1, 1, 1, -1, -1);
+    if (m) {
+        for (int i = 0; i < m->nnames; ++i) {
+            Py23Str* k = str_new(m->names[i].name, (int64_t)strlen(m->names[i].name));
+            Py23Str* v = group_str(m, m->names[i].group);
+            py23_dict_set(d, (int64_t)k, (int64_t)v);
+        }
+    }
+    return (int64_t)d;
+}
+
+int64_t py23_re_lastindex(Py23Match* m) {
+    if (!m) return 0;
+    int64_t last = 0;
+    for (int64_t i = 1; i <= m->ngroups; ++i)
+        if (m->caps[2 * i] >= 0) last = i;
+    return last;
+}
+
+int64_t py23_re_lastgroup(Py23Match* m) {
+    int64_t idx = py23_re_lastindex(m);
+    if (!m || idx <= 0) return (int64_t)str_new("", 0);
+    for (int i = 0; i < m->nnames; ++i) {
+        if (m->names[i].group == idx)
+            return (int64_t)str_new(m->names[i].name, (int64_t)strlen(m->names[i].name));
+    }
+    return (int64_t)str_new("", 0);
+}
+
 int64_t py23_re_start(Py23Match* m, int64_t n) { return group_start(m, n); }
 int64_t py23_re_end(Py23Match* m, int64_t n) { return group_end(m, n); }
 

@@ -24,16 +24,16 @@
 | 运行时 | 字符串、列表、字典、集合、对象分配、输出、panic；浮点 repr 与 CPython 一致 |
 | 验证 | 四类用例（正例 / 反例 / 运行 / 未建模） + 差分测试 + 标准库基线 |
 | 0.6–0.38 | 对象模型、异常值、match、C3 MRO、优化遍/O2、块内寄存器；逐版本记录见 [archive/roadmap-0.6-0.38.md](archive/roadmap-0.6-0.38.md) |
-| 0.39–0.76 | -O0/O1/O2、dunder 第二批、random/os/subprocess、差分 runner 自举、stdlib 批次（string/time/os/itertools/collections/json）、re 模块 v1/v2；详见 [CHANGELOG](../CHANGELOG.md) |
+| 0.39–0.77 | -O0/O1/O2、dunder 第二批、random/os/subprocess、差分 runner 自举、stdlib 批次（string/time/os/itertools/collections/json）、re 模块 v1/v2；详见 [CHANGELOG](../CHANGELOG.md) |
 | 许可证 | Apache-2.0（见 [LICENSE](../LICENSE) / [NOTICE](../NOTICE)） |
 
-## 当前状态（0.76）
+## 当前状态（0.77）
 
 流水线 `源码 → 词法 → AST → lambda 脱糖 → 类型检查 → IR → x86-64 汇编 → 可执行文件` 已打通。
 
 - **语言面**：标量、字符串、列表/元组/字典/集合、切片读写、闭包/lambda/`*args`/`**kwargs`/装饰器、推导式、`with`、异常值（`args`/`raise ... from`/自定义异常）、类（字段/方法/C3 多继承/零参 `super()`/`@staticmethod`/`@property`）、`match/case`、`del`、复数字面量、f-string 格式说明、dunder 协议、`open`/`input`/`sys.stdin`。
 - **标准库**：`math`/`sys`/`asyncio`/`random`/`os`/`os.path`/`subprocess`/`time`/`itertools`/`collections`/`json`/`string`/`re`。
-- **验证**：59 个运行用例、35 个反例、9 个模块目录；差分 runner 已自举，默认 810 例。
+- **验证**：61 个运行用例、35 个反例、9 个模块目录；差分 runner 已自举，默认 810 例。
 - **主要缺口**：`bytes` 字面量；`datetime`/`csv`/`pathlib`；C FFI/BLAS；跨模块生成器/协程；asyncio 边角。
 
 ## 下一步
@@ -61,6 +61,7 @@
 | 字符串语义 | 字节串（现状）/ UTF-8 码点 | 改码点则 `len` 变成 O(n)，索引要解码；不改则非 ASCII 的 `len` 与 CPython 不一致 |
 | 整数溢出 | 回绕（现状）/ 溢出检查 / 升格 bignum | 检查要每条算术加一条 `jo`；bignum 要一整套运行时 |
 | `print` 求值顺序 | 边算边写（现状）/ 对齐 CPython | 只有副作用可见时才看得出来 |
+| 值表示 | 裸 i64（现状）/ 全量 tag / NaN-boxing / 只在 unknown 加 shadow tag | 有 tag 才能对 `unknown` 做运行时分派；全量 tag 值翻倍、寄存器压力减半，NaN-boxing 会废掉 AVX2 归约 |
 
 ## 技术债
 
@@ -85,3 +86,4 @@
 17. **stdlib 覆盖不足**：没有 `datetime`/`csv`/`pathlib`/`functools`/`logging`/`argparse`；`json`/`collections`/`itertools` 是子集；`re` 有后向引用/四向断言/原子组/内联标志，但缺 Unicode 属性类和 `findall` 的分组语义
 18. **没有 C FFI / 包管理 / 调试信息**：第三方库接入和科学计算受限；出错没有 traceback
 19. **`re` 是纯回溯 VM**：递归实现，深模式或灾难性模式会吃栈，只靠 2 亿步上限兜底；没有 DFA/JIT，`findall`/`split` 每次重新编译模式字符串
+20. **形参类型推断只做单态**：未标注形参由调用点回填，同一形参吃多种类型时退回 unknown（`print` 会按整数输出）；嵌套函数不参与重查。根治要运行时类型标签，代价是全量 tag 或 NaN-boxing（见「待决策」）

@@ -1002,6 +1002,15 @@ VReg Lowerer::lower_method_call(Attribute& at, Call& c) {
             push_temp(l);
             return l;
         }
+        if (at.attr == "groupdict") {
+            if (!c.args.empty()) {
+                err(c.line, c.col, "groupdict() takes no arguments");
+                return const_none();
+            }
+            VReg d = call_runtime(RtFn::RegexGroupDict, mk_dict(t_str(), t_str()), {recv});
+            push_temp(d);
+            return d;
+        }
         if (at.attr == "start" || at.attr == "end") {
             if (c.args.size() > 1) {
                 err(c.line, c.col,

@@ -363,6 +363,9 @@ enum class RtFn : uint16_t {
     RegexGroup,            // (match*, i64 n) -> str*
     RegexGroupStr,         // (match*, str* name) -> str*
     RegexGroups,           // (match*) -> list*
+    RegexGroupDict,        // (match*) -> dict*
+    RegexLastIndex,        // (match*) -> i64
+    RegexLastGroup,        // (match*) -> str*
     RegexStart,            // (match*, i64 n) -> i64
     RegexEnd,              // (match*, i64 n) -> i64
     RegexSpan,             // (match*, i64 n) -> tuple[i64, i64]
@@ -708,6 +711,9 @@ inline const char* rt_name(RtFn f) {
         case RtFn::RegexGroup: return "py23_re_group";
         case RtFn::RegexGroupStr: return "py23_re_group_str";
         case RtFn::RegexGroups: return "py23_re_groups";
+        case RtFn::RegexGroupDict: return "py23_re_groupdict";
+        case RtFn::RegexLastIndex: return "py23_re_lastindex";
+        case RtFn::RegexLastGroup: return "py23_re_lastgroup";
         case RtFn::RegexStart: return "py23_re_start";
         case RtFn::RegexEnd: return "py23_re_end";
         case RtFn::RegexSpan: return "py23_re_span";

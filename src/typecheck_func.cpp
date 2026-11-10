@@ -41,6 +41,12 @@ static bool c3_merge(std::vector<std::vector<ClassInfo*>>& seqs,
 void TypeChecker::funcdef(FunctionDef& f) { funcdef_impl(f, nullptr); }
 
 void TypeChecker::funcdef_impl(FunctionDef& f, const ClassInfoPtr& owner) {
+        if (!func_owners_.count(&f)) {
+            func_owners_[&f] = owner;
+            // 只登记模块级函数和方法：嵌套函数（含 lambda 脱糖产物）的
+            // 词法父作用域在重查时要重新挂接，收益不值这个复杂度。
+            if (cur_ == module_ || owner) func_defs_.push_back(&f);
+        }
         FuncInfoPtr info;
         if (owner) {
             // 方法名属于类命名空间，不进外层作用域；签名在 classdef 里
@@ -506,12 +512,15 @@ void TypeChecker::classdef(ClassDef& c) {
             }
             m.call_sig = std::make_shared<FuncInfo>(*m.sig);
             m.call_sig->name = m.name;
+            m.call_sig->outer = m.sig.get();
+            m.call_sig->outer_off = 0;
             if (m.kind == MethodKind::Static) return;  // 静态方法没有隐式 self
             if (m.call_sig->pos.empty()) {
                 m.call_sig = nullptr;
                 return;
             }
             m.call_sig->pos.erase(m.call_sig->pos.begin());
+            m.call_sig->outer_off = 1;
             if (m.call_sig->n_posonly > 0) --m.call_sig->n_posonly;
         };
         for (auto& s : c.body) {

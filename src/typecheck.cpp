@@ -16,6 +16,22 @@ void TypeChecker::check(Module& m) {
         hoist_module_bindings(m.body);
         hoist_global_decls(m.body);
         for (auto& s : m.body) stmt(*s);
+        // 单态化回填：没标注的形参在调用点拿到实参类型后，函数体是按旧
+        // 的 unknown 形参查过的，需要按新签名重查一遍。只重查被回填过的
+        // 函数，保持文本顺序检查的其它语义（生成器返回类型、match 分发）
+        // 完全不变。
+        for (int round = 0; round < 4; ++round) {
+            bool changed = false;
+            for (auto* fd : func_defs_) {
+                auto it = func_infos_.find(fd);
+                if (it == func_infos_.end() || !it->second || !it->second->sig_dirty) continue;
+                it->second->sig_dirty = false;
+                auto oit = func_owners_.find(fd);
+                funcdef_impl(*fd, oit == func_owners_.end() ? nullptr : oit->second);
+                changed = true;
+            }
+            if (!changed) break;
+        }
     }
 
 std::vector<std::pair<std::string, std::string>> TypeChecker::top_symbols() const {

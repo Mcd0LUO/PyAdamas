@@ -608,6 +608,9 @@ void AsmGen::gen_call_rt(const Inst& in) {
                 emit2("movq", src_op(in.args[1]), "%rsi");
                 break;
             case RtFn::RegexGroups:
+            case RtFn::RegexGroupDict:
+            case RtFn::RegexLastIndex:
+            case RtFn::RegexLastGroup:
             case RtFn::RegexPatternGroups:
             case RtFn::RegexPatternFlags:
             case RtFn::RegexPatternStr:

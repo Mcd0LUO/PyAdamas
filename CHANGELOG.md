@@ -4,6 +4,37 @@
 
 早期阶段没有逐条留痕，按阶段归纳；0.4 之后逐条记录。
 
+## [0.77] - 2026-11-10
+
+修 `print` 打印字符串参数的根因，`re` 的 Match 属性补齐。
+
+### 修复
+
+- **未标注形参的类型推断**：调用点现在用实参类型回填形参（`bind_param`），
+  函数体在回填后按新签名重查（`FuncInfo::sig_dirty` + 固定点，最多 4 轮）。
+  `def f(p): print(p)` 传字符串不再打印指针值。方法的 `call_sig` 是去掉
+  `self` 的副本，回填会同步写回含 `self` 的 `sig`（`outer` / `outer_off`）。
+- 同一形参被多种类型调用时退回 `unknown` 而不是报错（`Param::multi`），
+  不把 Python 的多态用法误杀成类型错误。
+- 嵌套函数（含 lambda 脱糖产物）不参与重查：它们的词法父作用域要重新挂接，
+  收益不值这个复杂度。
+
+### 新增
+
+- `Match.groupdict()`。
+- `Match.lastindex` / `Match.lastgroup` 属性。
+
+### 已知限制
+
+- 多态形参（同一函数用 `int` 和 `str` 各调一次）退化成 `unknown`，`print`
+  仍按整数输出；根治需要运行时类型标签，代价见 roadmap 的待决策。
+- `lastindex` 在没有参与匹配的组时返回 0、`lastgroup` 返回空串（CPython 是 None）。
+
+### 测试
+
+- `tests/run/60_param_types.py`：单态 / 多参数 / 关键字 / 跨函数 / 方法 / 多态。
+- `tests/run/61_re_dict.py`：`groupdict` / `lastindex` / `lastgroup`。
+
 ## [0.76.1] - 2026-11-10
 
 `re` 的 API 补齐（0.76 的语法层不动）。

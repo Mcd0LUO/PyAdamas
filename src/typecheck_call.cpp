@@ -224,14 +224,50 @@ TypePtr TypeChecker::check_args(const FuncInfoPtr& fn, Call& c) {
                             fn->name, npos, npos == 1 ? "" : "s", argtys.size()));
         }
 
+        // 未标注的形参用实参类型回填（单态化）。回填后函数体要按新签名
+        // 重查；同一形参被多种类型调用则退回 unknown，不误杀 Python 的
+        // 多态用法。
+        auto bind_param = [&](Param& p, size_t idx, TypePtr ty, int line, int col) {
+            // 方法调用走的是去掉 self 的 call_sig，回填要同步回含 self 的 sig，
+            // 否则方法体重查时仍是旧类型。
+            auto sync = [&]() {
+                if (!fn->outer) return;
+                size_t k = idx + fn->outer_off;
+                if (k >= fn->outer->pos.size()) return;
+                Param& sp = fn->outer->pos[k];
+                sp.ty = p.ty;
+                sp.inferred = p.inferred;
+                sp.multi = p.multi;
+                fn->outer->sig_dirty = true;
+            };
+            if (p.multi) return;
+            if (!p.ty || p.ty->kind == TyKind::Unknown) {
+                if (ty && ty->kind != TyKind::Unknown) {
+                    p.ty = ty;
+                    p.inferred = true;
+                    fn->sig_dirty = true;
+                    sync();
+                }
+                return;
+            }
+            if (assignable(p.ty, ty)) return;
+            if (p.inferred) {
+                p.ty = t_unknown();
+                p.inferred = false;
+                p.multi = true;
+                fn->sig_dirty = true;
+                sync();
+                return;
+            }
+            err(line, col,
+                std::format("argument '{}' of '{}' expects '{}', got '{}'", p.name, fn->name,
+                            type_name(p.ty), type_name(ty)));
+        };
+
         for (size_t i = 0; i < argtys.size(); ++i) {
             if (i < npos) {
                 filled[i] = true;
-                if (!assignable(fn->pos[i].ty, argtys[i]))
-                    err(c.args[i]->line, c.args[i]->col,
-                        std::format("argument '{}' of '{}' expects '{}', got '{}'",
-                                    fn->pos[i].name, fn->name, type_name(fn->pos[i].ty),
-                                    type_name(argtys[i])));
+                bind_param(fn->pos[i], i, argtys[i], c.args[i]->line, c.args[i]->col);
             } else if (fn->varargs && !assignable(fn->vararg_ty, argtys[i])) {
                 err(c.args[i]->line, c.args[i]->col,
                     std::format("'*{}' of '{}' expects '{}', got '{}'", fn->vararg_name,
@@ -257,10 +293,7 @@ TypePtr TypeChecker::check_args(const FuncInfoPtr& fn, Call& c) {
                     continue;
                 }
                 filled[idx] = true;
-                if (!assignable(pit->ty, ty))
-                    err(c.line, c.col,
-                        std::format("argument '{}' of '{}' expects '{}', got '{}'", name,
-                                    fn->name, type_name(pit->ty), type_name(ty)));
+                bind_param(*pit, idx, ty, c.line, c.col);
                 continue;
             }
             auto kit = std::find_if(fn->kwonly.begin(), fn->kwonly.end(),
@@ -273,10 +306,7 @@ TypePtr TypeChecker::check_args(const FuncInfoPtr& fn, Call& c) {
                     continue;
                 }
                 kw_filled[idx] = true;
-                if (!assignable(kit->ty, ty))
-                    err(c.line, c.col,
-                        std::format("argument '{}' of '{}' expects '{}', got '{}'", name,
-                                    fn->name, type_name(kit->ty), type_name(ty)));
+                bind_param(*kit, idx, ty, c.line, c.col);
                 continue;
             }
             if (!fn->kwargs)
@@ -1209,6 +1239,10 @@ TypePtr TypeChecker::method_call(TypePtr recv, const std::string& name, Call& c,
             if (name == "groups") {
                 argc(0, 0);
                 return mk_list(t_str());
+            }
+            if (name == "groupdict") {
+                argc(0, 0);
+                return mk_dict(t_str(), t_str());
             }
             if (name == "start" || name == "end") {
                 argc(0, 1);

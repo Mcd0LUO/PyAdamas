@@ -148,6 +148,10 @@ struct Param {
     const Expr* default_expr = nullptr;
     // 跨模块接口用的字面量形式；本地函数也会填，导入函数只有它。
     std::optional<LiteralValue> default_lit;
+    // ty 是从调用点实参回填来的（不是标注）。同一个函数被多种类型调用时
+    // 要退回 unknown，不能当成类型错误。
+    bool inferred = false;
+    bool multi = false;
 };
 
 struct FuncInfo {
@@ -178,6 +182,12 @@ struct FuncInfo {
     TypePtr async_result;
     // async def 里还有 yield：调用得到异步生成器（只支持 async for）
     bool is_async_generator = false;
+    // 未标注形参被调用点回填过。函数体如果已经查过，需要按新签名重查。
+    bool sig_dirty = false;
+    // 方法的 call_sig 是 sig 去掉 self 的副本。回填要写回 sig，否则方法体
+    // 重查时看不到新类型。outer_off 是 call_sig->pos[0] 在 sig->pos 里的下标。
+    FuncInfo* outer = nullptr;
+    size_t outer_off = 0;
 };
 
 // ── 类 ────────────────────────────────────────────────────────────
@@ -1002,6 +1012,9 @@ private:
     std::unordered_map<const Expr*, TypePtr> expr_types_;
     std::unordered_map<const Stmt*, Scope*> func_scopes_;
     std::unordered_map<const Stmt*, FuncInfoPtr> func_infos_;
+    // 检查过的函数定义（含方法），供形参回填后的重查用。
+    std::vector<FunctionDef*> func_defs_;
+    std::unordered_map<FunctionDef*, ClassInfoPtr> func_owners_;
     std::unordered_map<std::string, ClassInfoPtr> classes_;
     // 正在检查方法体的类。`self.x = ...` 里 x 没声明过时，就地补成字段——
     // Python 的实例属性本来就是在 __init__ 里长出来的，要求先写标注会把
