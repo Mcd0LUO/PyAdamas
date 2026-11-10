@@ -258,6 +258,9 @@ private:
     // 用 ClassInfo 指针做键，同名类重定义时不会串。
     std::unordered_map<std::string, ClassInfoPtr> classes_;
     std::unordered_map<const ClassInfo*, int> class_ids_;
+    // 没有任何本模块类继承的类（跨模块继承不支持，所以这就是「终态」）：
+    // 方法调用可以绕过 vtable 直接调用具体实现。
+    std::unordered_set<const ClassInfo*> sealed_classes_;
     // 方法帧 → 运行时类。零参 super() 只在这个方法自己的帧里有效。
     std::unordered_map<const IRFunction*, const ClassInfo*> fn_owner_class_;
     // 降级期副作用计数：调用、del、切片赋值等会自增。for/推导式用它
@@ -571,6 +574,95 @@ private:
             TypePtr ty = st_->fn->slot_ty[s];
             if (!ir_is_heap(ty)) continue;
             rc_dec(load_slot(static_cast<int>(s), ty));
+        }
+    }
+
+    // 只读形参不需要「入口 retain + 出口 release」：实参在调用期间由
+    // 调用方持有，函数体既没覆盖形参槽、也没把它存进别处时，这对 RC
+    // 纯属多余。方法调用的 self 绝大多数是这种形态，省掉的是每次
+    // 调用两条运行时调用。判定在函数降级完成后做：
+    //   - 入口 retain 是入口块开头按形参顺序排的两条指令（load + rc_inc）；
+    //   - 出口 release 只由 release_slots 发出，形态是 load(param) + rc_dec，
+    //     只读形参意味着函数体里不会覆盖它，所以这种形态只可能是出口释放。
+    // 不记录指令下标：降低过程中语句/循环的 mark 擦除会让下标失效。
+    void finalize_param_borrows() {
+        if (st_->is_generator) return;
+        IRFunction* fn = st_->fn;
+        const size_t ns = fn->slot_ty.size();
+        std::vector<bool> written(ns, false);
+        std::unordered_map<VReg, int> uses;
+        auto touch = [&](VReg v) {
+            if (v != kNoReg) uses[v]++;
+        };
+        for (auto& b : fn->blocks)
+            for (auto& in : b.insts) {
+                if ((in.op == IrOp::StoreSlot || in.op == IrOp::SlotAddr) && in.idx >= 0 &&
+                    in.idx < static_cast<int>(ns))
+                    written[static_cast<size_t>(in.idx)] = true;
+                touch(in.a);
+                touch(in.b);
+                touch(in.c);
+                for (VReg r : in.args) touch(r);
+            }
+        std::vector<bool> read_only(ns, false);
+        bool any = false;
+        for (auto& p : fn->params)
+            if (ir_is_heap(p.ty) && p.slot >= 0 && p.slot < static_cast<int>(ns) &&
+                !written[static_cast<size_t>(p.slot)]) {
+                read_only[static_cast<size_t>(p.slot)] = true;
+                any = true;
+            }
+        if (!any) return;
+
+        std::vector<std::pair<int, size_t>> dels;
+        // 入口 retain：只匹配入口块开头的连续序列，形态不符就停。
+        if (!fn->blocks.empty()) {
+            auto& ins = fn->blocks.front().insts;
+            size_t i = 0;
+            if (i < ins.size() && ins[i].op == IrOp::CallRt &&
+                static_cast<RtFn>(ins[i].imm) == RtFn::RcMark)
+                ++i;
+            for (auto& p : fn->params) {
+                if (!ir_is_heap(p.ty)) continue;
+                if (i + 1 >= ins.size()) break;
+                if (ins[i].op != IrOp::LoadSlot || ins[i].idx != p.slot) break;
+                const Inst& inc = ins[i + 1];
+                if (inc.op != IrOp::CallRt || static_cast<RtFn>(inc.imm) != RtFn::RcInc ||
+                    inc.args.size() != 1 || inc.args[0] != ins[i].dst)
+                    break;
+                if (read_only[static_cast<size_t>(p.slot)]) {
+                    dels.push_back({0, i + 1});
+                    if (ins[i].dst != kNoReg && uses[ins[i].dst] == 1)
+                        dels.push_back({0, i});
+                }
+                i += 2;
+            }
+        }
+        // 出口 release：read-only 槽的 load + rc_dec 只可能是 release_slots。
+        for (size_t b = 0; b < fn->blocks.size(); ++b) {
+            auto& ins = fn->blocks[b].insts;
+            for (size_t i = 0; i + 1 < ins.size(); ++i) {
+                if (ins[i].op != IrOp::LoadSlot || ins[i].idx < 0 ||
+                    ins[i].idx >= static_cast<int>(ns) ||
+                    !read_only[static_cast<size_t>(ins[i].idx)])
+                    continue;
+                const Inst& dec = ins[i + 1];
+                if (dec.op != IrOp::CallRt || static_cast<RtFn>(dec.imm) != RtFn::RcDec ||
+                    dec.args.size() != 1 || dec.args[0] != ins[i].dst)
+                    continue;
+                dels.push_back({static_cast<int>(b), i + 1});
+                if (ins[i].dst != kNoReg && uses[ins[i].dst] == 1)
+                    dels.push_back({static_cast<int>(b), i});
+                ++i;
+            }
+        }
+        if (dels.empty()) return;
+        std::ranges::sort(dels, [](const auto& a, const auto& b) {
+            return a.first != b.first ? a.first > b.first : a.second > b.second;
+        });
+        for (auto& [b, idx] : dels) {
+            auto& ins = fn->blocks[static_cast<size_t>(b)].insts;
+            if (idx < ins.size()) ins.erase(ins.begin() + static_cast<std::ptrdiff_t>(idx));
         }
     }
 

@@ -273,6 +273,21 @@ void Lowerer::run(Module& ast) {
     for (auto* root : func_roots_) compute_closure_meta(root);
     classes_ = tc_.classes();
     collect_classes(ast.body);
+    // 跨模块继承不支持，所有子类都在本模块可见：没被任何本模块类继承的
+    // 类就是终态。方法调用点可以据此把 vtable 间接跳转换成直接调用。
+    {
+        std::unordered_set<const ClassInfo*> has_sub;
+        for (auto& [name, ci] : classes_) {
+            if (!ci || ci->is_exception_class || !class_ids_.count(ci.get())) continue;
+            for (const ClassInfo* k : ci->mro)
+                if (k && k != ci.get()) has_sub.insert(k);
+        }
+        sealed_classes_.clear();
+        for (auto& [name, ci] : classes_)
+            if (ci && !ci->is_exception_class && class_ids_.count(ci.get()) &&
+                !has_sub.count(ci.get()))
+                sealed_classes_.insert(ci.get());
+    }
 
     IRFunction* entry = mod_.add_func(opts_.is_entry ? "__py23_main" : "__py23_init");
     entry->ret = opts_.is_entry ? t_int() : t_none();
@@ -405,6 +420,7 @@ int Lowerer::compile_function_body(FunctionDef& f, FuncInfoPtr info, const std::
 
     stmts(f.body);
     if (!terminated()) emit_return(kNoReg, nullptr);
+    finalize_param_borrows();
     if (st_->rc_pushes == 0)
         erase_mark(st_->fn_mark_block, st_->fn_mark_pos, st_->fn_mark);
 
@@ -653,6 +669,7 @@ void Lowerer::compile_ctor_wrapper(ClassDef& clsdef, const ClassInfoPtr& ci, int
         (void)r;
     }
     emit_return(obj, cls_ty);
+    finalize_param_borrows();
     if (st_->rc_pushes == 0)
         erase_mark(st_->fn_mark_block, st_->fn_mark_pos, st_->fn_mark);
     pop_frame();

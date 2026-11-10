@@ -215,7 +215,7 @@ void AsmGen::gen_vcall(const Inst& in) {
         reload_fp_slots();
         if (alloc) emit_imm_op("addq", alloc, "%rsp");
 
-        if (in.dst != kNoReg) {
+        if (!dst_unused(in)) {
             if (ir_is_float(in.ty)) emit2("movsd", "%xmm0", dst_op(in.dst));
             else emit2("movq", "%rax", dst_op(in.dst));
         }
@@ -256,7 +256,7 @@ void AsmGen::gen_vcall_static(const Inst& in) {
         line("call *%r11");
         reload_fp_slots();
         if (alloc) emit_imm_op("addq", alloc, "%rsp");
-        if (in.dst != kNoReg) {
+        if (!dst_unused(in)) {
             if (ir_is_float(in.ty)) emit2("movsd", "%xmm0", dst_op(in.dst));
             else emit2("movq", "%rax", dst_op(in.dst));
         }
@@ -307,7 +307,7 @@ void AsmGen::gen_super_vcall(const Inst& in) {
         reload_fp_slots();
         if (alloc) emit_imm_op("addq", alloc, "%rsp");
 
-        if (in.dst != kNoReg) {
+        if (!dst_unused(in)) {
             if (ir_is_float(in.ty)) emit2("movsd", "%xmm0", dst_op(in.dst));
             else emit2("movq", "%rax", dst_op(in.dst));
         }
@@ -349,7 +349,7 @@ void AsmGen::gen_call_direct(const Inst& in) {
         line(std::format("call {}", func_label(in.idx)));
         reload_fp_slots();
         if (alloc) emit_imm_op("addq", alloc, "%rsp");
-        if (in.dst != kNoReg) {
+        if (!dst_unused(in)) {
             if (ir_is_float(in.ty)) emit2("movsd", "%xmm0", dst_op(in.dst));
             else emit2("movq", "%rax", dst_op(in.dst));
         }
@@ -453,7 +453,7 @@ void AsmGen::gen_call(const Inst& in) {
         reload_fp_slots();
         if (alloc) emit_imm_op("addq", alloc, "%rsp");
 
-        if (in.dst != kNoReg) {
+        if (!dst_unused(in)) {
             if (ir_is_float(in.ty)) emit2("movsd", "%xmm0", dst_op(in.dst));
             else emit2("movq", "%rax", dst_op(in.dst));
         }
@@ -836,7 +836,7 @@ void AsmGen::gen_call_rt(const Inst& in) {
         spill_fp_slots();
         line(std::format("call {}", rt_name(fn)));
         reload_fp_slots();
-        if (in.dst != kNoReg) {
+        if (!dst_unused(in)) {
             if (ir_is_float(in.ty)) emit2("movsd", "%xmm0", dst_op(in.dst));
             else emit2("movq", "%rax", dst_op(in.dst));
         }

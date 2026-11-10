@@ -168,6 +168,31 @@ VReg Lowerer::lower_method_call(Attribute& at, Call& c) {
         }
         if (!m->call_sig) return const_none();
         std::vector<VReg> args = bind_args(c, m->call_sig, m->def);
+        // 终态类（本模块没有任何类继承它）：vtable 槽在编译期就能解析成
+        // 具体实现，直接调用，省掉两次查表和间接跳转，也让内联器能接上。
+        if ((m->kind == MethodKind::Normal || m->kind == MethodKind::Static) &&
+            sealed_classes_.count(recv_ty->cls)) {
+            auto cid = class_ids_.find(recv_ty->cls);
+            if (cid != class_ids_.end() && m->slot >= 0) {
+                const auto& vt = mod_.classes[static_cast<size_t>(cid->second)].vtable;
+                if (m->slot < static_cast<int>(vt.size())) {
+                    int fidx = vt[static_cast<size_t>(m->slot)];
+                    const IRFunction* callee =
+                        (fidx >= 0 && fidx < static_cast<int>(mod_.funcs.size()))
+                            ? mod_.funcs[static_cast<size_t>(fidx)].get()
+                            : nullptr;
+                    if (callee && callee->env_slot < 0) {
+                        Inst cd;
+                        cd.op = IrOp::CallDirect;
+                        cd.idx = fidx;
+                        if (m->kind != MethodKind::Static) cd.args.push_back(recv);
+                        for (VReg a : args) cd.args.push_back(a);
+                        TypePtr rt = m->call_sig->ret ? m->call_sig->ret : t_none();
+                        return def_heap(rt, std::move(cd));
+                    }
+                }
+            }
+        }
         Inst vc;
         vc.op = m->kind == MethodKind::Static ? IrOp::VCallStatic : IrOp::VCall;
         vc.a = recv;

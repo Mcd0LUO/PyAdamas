@@ -315,13 +315,39 @@ VReg Lowerer::lower_construct(Call& c, const ClassInfoPtr& cls) {
     if (cls->has_init) {
         if (auto* im = cls->method("__init__"); im && im->call_sig) {
             std::vector<VReg> args = bind_args(c, im->call_sig, im->def);
-            Inst vc;
-            vc.op = IrOp::VCall;
-            vc.a = obj;
-            vc.imm = im->slot;
-            vc.args = std::move(args);
-            TypePtr rt = im->call_sig->ret ? im->call_sig->ret : t_none();
-            def_heap(rt, std::move(vc));
+            // 刚构造出来的对象类型是确定的：本模块的类可以直接调用
+            // 它 vtable 槽里的实现（子类构造函数同理，槽已按 MRO 解析）。
+            bool direct = false;
+            if (auto cid = class_ids_.find(cls.get()); cid != class_ids_.end() &&
+                im->slot >= 0) {
+                const auto& vt = mod_.classes[static_cast<size_t>(cid->second)].vtable;
+                if (im->slot < static_cast<int>(vt.size())) {
+                    int fidx = vt[static_cast<size_t>(im->slot)];
+                    const IRFunction* callee =
+                        (fidx >= 0 && fidx < static_cast<int>(mod_.funcs.size()))
+                            ? mod_.funcs[static_cast<size_t>(fidx)].get()
+                            : nullptr;
+                    if (callee && callee->env_slot < 0) {
+                        Inst cd;
+                        cd.op = IrOp::CallDirect;
+                        cd.idx = fidx;
+                        cd.args.push_back(obj);
+                        for (VReg a : args) cd.args.push_back(a);
+                        TypePtr rt = im->call_sig->ret ? im->call_sig->ret : t_none();
+                        def_heap(rt, std::move(cd));
+                        direct = true;
+                    }
+                }
+            }
+            if (!direct) {
+                Inst vc;
+                vc.op = IrOp::VCall;
+                vc.a = obj;
+                vc.imm = im->slot;
+                vc.args = std::move(args);
+                TypePtr rt = im->call_sig->ret ? im->call_sig->ret : t_none();
+                def_heap(rt, std::move(vc));
+            }
         }
     }
     return obj;

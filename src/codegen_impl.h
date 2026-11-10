@@ -148,6 +148,12 @@ private:
 
     std::vector<int> use_count_;
     std::vector<bool> cross_block_;
+
+    // 调用的 dst 没人读：不必把返回值搬回栈槽（表达式语句里的调用）。
+    bool dst_unused(const Inst& in) const {
+        return in.dst == kNoReg || (in.dst < static_cast<VReg>(use_count_.size()) &&
+                                    use_count_[static_cast<size_t>(in.dst)] == 0);
+    }
     std::vector<int> def_block_;
 
     // 块内临时寄存器：整块没有会调用/占用 %r8–%r11 的指令时，块内定义、
