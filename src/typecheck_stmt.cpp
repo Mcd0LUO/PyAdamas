@@ -310,6 +310,9 @@ void TypeChecker::stmt(Stmt& s) {
                                     std::format("'{}' does not define async __aexit__",
                                                 ct->cls->name));
                         }
+                    } else if (w.is_async && ct && ct->kind == TyKind::AsyncLock) {
+                        // 内置 Lock 的 __aenter__ 就是 await acquire()。
+                        vt = t_bool();
                     } else if (ct && ct->kind == TyKind::File) {
                         // with open(...) as f：f 就是文件对象本身。
                         vt = ct;

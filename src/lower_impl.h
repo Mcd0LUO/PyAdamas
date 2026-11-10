@@ -155,7 +155,7 @@ struct FuncCtx {
     std::vector<size_t> loop_cleanup_depth;    // 词法上活跃的清理动作，按从外到内排列。return/break/continue 和
     // 异常 landing 都从这里生成对应动作。
     struct Cleanup {
-        enum class Kind { With, AsyncWith, Finally, Handler, ExcDone, FileClose } kind;
+        enum class Kind { With, AsyncWith, Finally, Handler, ExcDone, FileClose, LockRelease } kind;
         // With / Finally / Handler：handler 记录所在的槽
         int handler_slot = -1;
         // Handler/With/Finally：setjmp 非 0 时跳转的异常展开块
@@ -942,6 +942,39 @@ private:
     static TypePtr strip_optional(const TypePtr& t) {
         if (t && t->kind == TyKind::Optional && !t->sub.empty()) return t->sub[0];
         return t;
+    }
+
+    // type(x) 用的 Python 侧类型名。
+    static std::string py_type_name(const TypePtr& t) {
+        if (!t) return "object";
+        switch (t->kind) {
+            case TyKind::None: return "NoneType";
+            case TyKind::Bool: return "bool";
+            case TyKind::Int: return "int";
+            case TyKind::Float: return "float";
+            case TyKind::Complex: return "complex";
+            case TyKind::Str: return "str";
+            case TyKind::List: return "list";
+            case TyKind::Set: return "set";
+            case TyKind::Dict: return "dict";
+            case TyKind::Tuple: return "tuple";
+            case TyKind::Func: return "function";
+            case TyKind::Generator: return "generator";
+            case TyKind::Coroutine: return "coroutine";
+            case TyKind::Task: return "task";
+            case TyKind::AsyncGenerator: return "async_generator";
+            case TyKind::Future: return "future";
+            case TyKind::File: return "file";
+            case TyKind::Exception: return t->name.empty() ? "Exception" : t->name;
+            case TyKind::Class: return t->cls ? t->cls->name : "object";
+            case TyKind::TypeObj: return "type";
+            case TyKind::AsyncEvent: return "Event";
+            case TyKind::AsyncLock: return "Lock";
+            case TyKind::AsyncQueue: return "Queue";
+            case TyKind::Optional:
+                return t->sub.empty() ? "object" : py_type_name(t->sub[0]);
+            default: return "object";
+        }
     }
 
     void assign_to(Expr& target, VReg v, TypePtr vty);

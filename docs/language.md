@@ -310,10 +310,12 @@ print(asyncio.run(add(3, 4)))   # 10
   `add_done_callback` / `result` / `exception` / `cancel`）。
 - `asyncio.Event()`：`await ev.wait()`、`ev.set()`、`ev.is_set()`。
 - `asyncio.Lock()`：`await lock.acquire()`、`lock.release()`、
-  `lock.locked()`；等待者按 FIFO 唤醒。
-- `asyncio.Queue()`：`await q.put(v)`、`await q.get()`、`q.qsize()`、
-  `q.empty()`；无界队列，元素静态类型按 unknown 处理（`get` 的
-  await 结果不能用字符串方法等需要具体类型的操作）。
+  `lock.locked()`；等待者按 FIFO 唤醒，支持 `async with lock:`。
+- `asyncio.Queue([maxsize])`：`await q.put(v)`、`await q.get()`、
+  `q.qsize()`、`q.empty()`、`q.full()`、`await q.join()`、`q.task_done()`；
+  `maxsize > 0` 时满队列的 put 会阻塞，get 腾出位置后按 FIFO 放行；
+  元素静态类型按 unknown 处理（`get` 的 await 结果不能用字符串方法等
+  需要具体类型的操作）。
 - `asyncio.wait_for(aw, timeout)`：可等待对象与超时竞速；超时取消
   内部任务并抛 `TimeoutError`，内部对象可以是协程、Task 或 Future。
 
@@ -634,6 +636,11 @@ unknown 值上对带运行期类型标签的类型（str/list/dict/complex）走
 这类内置名也认；unknown 值上的 `callable` 暂不支持）。
 `hash(x)` 支持 int/bool/float/str，和字典键共用同一套哈希（同值同哈希，
 数值与 CPython 不同；list/dict/set 等不可哈希类型报错）。
+`type(x)` 返回静态类型令牌：`print(type(x))` 输出 `<class 'int'>`，
+`type(x) == int` / `is` / `type(x) == type(y)` 编译期折叠，
+`type(x).__name__` 得到类型名；运行时令牌是驻留字符串，没有动态类对象。
+`id(x)` 返回机器字身份（堆指针 / 整数本身 / 浮点位模式），同进程内稳定，
+数值与 CPython 不同。
 `list(seq)` / `tuple(seq)` 做浅拷贝，`set(seq)` 按键去重，`dict(**kw)`
 用字符串键；`sorted` 支持 int/float/str 元素（`key=` / `reverse=` 尚未
 支持）；`enumerate` 产出的元素是 `[下标, 值]` 对，`zip` 支持两个可迭代
@@ -649,9 +656,9 @@ unknown 值上对带运行期类型标签的类型（str/list/dict/complex）走
 `count` / `zfill` / `ljust` / `rjust` / `center` / `removeprefix` /
 `removesuffix` / `isdigit` / `isalpha` / `isspace` / `isupper` / `islower` /
 `isalnum`。
-其余内置名（`type` / `id` / `slice` / `delattr` / `vars` / `dir`
-等）类型层面放行，降级阶段报「not supported by the code generator yet」，
-不会再退化成调用空指针。
+其余内置名（`slice` / `delattr` / `vars` / `dir` 等）类型层面放行，
+降级阶段报「not supported by the code generator yet」，不会再退化成调用
+空指针。
 
 ### 跳转与异常
 

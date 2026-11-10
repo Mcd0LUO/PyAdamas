@@ -282,6 +282,9 @@ enum class RtFn : uint16_t {
     QueueGet,          // (queue*) -> future*
     QueueQsize,        // (queue*) -> int
     QueueEmpty,        // (queue*) -> bool
+    QueueFull,         // (queue*) -> bool
+    QueueJoin,         // (queue*) -> future*
+    QueueTaskDone,     // (queue*) -> void
 };
 
 inline const char* rt_name(RtFn f) {
@@ -543,6 +546,9 @@ inline const char* rt_name(RtFn f) {
         case RtFn::QueueGet: return "py23_queue_get";
         case RtFn::QueueQsize: return "py23_queue_qsize";
         case RtFn::QueueEmpty: return "py23_queue_empty";
+        case RtFn::QueueFull: return "py23_queue_full";
+        case RtFn::QueueJoin: return "py23_queue_join";
+        case RtFn::QueueTaskDone: return "py23_queue_task_done";
     }
     return "?";
 }
@@ -839,6 +845,7 @@ inline bool ir_is_heap(const TypePtr& t) {
         case TyKind::AsyncEvent:
         case TyKind::AsyncLock:
         case TyKind::AsyncQueue:
+        case TyKind::TypeObj:
         case TyKind::Exception:  // 异常值：堆对象，args 列表归它所有
         case TyKind::Complex:
         case TyKind::File:
@@ -870,6 +877,7 @@ inline bool ir_is_ref(const TypePtr& t) {
         case TyKind::AsyncEvent:
         case TyKind::AsyncLock:
         case TyKind::AsyncQueue:
+        case TyKind::TypeObj:
         case TyKind::Exception:
         case TyKind::Complex:
         case TyKind::File:

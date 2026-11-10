@@ -590,7 +590,24 @@ py23::ModuleInfoPtr builtin_module(const std::string& name) {
         func("Future", {}, py23::mk_future(py23::t_unknown()));
         func("Event", {}, py23::mk_async_event());
         func("Lock", {}, py23::mk_async_lock());
-        func("Queue", {}, py23::mk_async_queue(py23::t_unknown()));
+        {
+            auto qf = std::make_shared<py23::FuncInfo>();
+            qf->name = "Queue";
+            py23::Param p;
+            p.name = "maxsize";
+            p.ty = py23::t_int();
+            p.has_default = true;
+            py23::LiteralValue lv;
+            lv.kind = py23::LiteralValue::Kind::Int;
+            lv.i = 0;
+            p.default_lit = lv;
+            qf->pos.push_back(std::move(p));
+            qf->ret = py23::mk_async_queue(py23::t_unknown());
+            qf->ret_known = true;
+            auto qt = py23::new_ty(py23::TyKind::Func);
+            qt->fn = qf;
+            info->globals["Queue"] = qt;
+        }
         func("wait_for", {py23::t_unknown(), py23::t_float()},
              py23::mk_coroutine(py23::t_unknown()));
         func("wait_readable", {py23::t_int()}, py23::mk_coroutine(py23::t_none()));

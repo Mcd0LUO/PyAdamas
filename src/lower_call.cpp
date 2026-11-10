@@ -367,7 +367,7 @@ VReg Lowerer::lower_call(Call& c) {
                 "ord", "chr", "hex", "bin", "oct", "round", "divmod", "repr", "format",
                 "list", "tuple", "dict", "set", "sorted", "reversed", "enumerate", "zip",
                 "open", "input", "iter", "isinstance", "getattr", "setattr", "hasattr",
-                "callable", "issubclass", "hash",
+                "callable", "issubclass", "hash", "type", "id",
             };
             if (kBuiltins.count(n.id)) return lower_builtin_call(n.id, c);
             // 名字能解析但语义没实现的内置：以前会退化成调用空指针直接
@@ -500,9 +500,13 @@ VReg Lowerer::lower_asyncio(const std::string& member, Call& c) {
     }
 
     if (member == "Queue") {
+        if (c.args.size() > 1)
+            err(c.line, c.col, "asyncio.Queue() takes at most one argument");
+        VReg maxsize = const_int(0);
         if (!c.args.empty())
-            err(c.line, c.col, "asyncio.Queue() takes no arguments");
-        VReg q = call_runtime(RtFn::QueueNew, rt ? rt : mk_async_queue(t_unknown()), {});
+            maxsize = coerce(expr(*c.args[0]), tc_.type_of(c.args[0].get()), t_int());
+        VReg q = call_runtime(RtFn::QueueNew, rt ? rt : mk_async_queue(t_unknown()),
+                              {maxsize});
         push_temp(q);
         return q;
     }

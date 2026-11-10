@@ -4,6 +4,39 @@
 
 早期阶段没有逐条留痕，按阶段归纳；0.4 之后逐条记录。
 
+## [0.55] - 2026-11-10
+
+补 `type` / `id`，asyncio 深入：受限队列、join 与 `async with lock`。
+
+### 新增
+
+- `type(x)`：新增 `TypeObj` 类型（sub[0] 是被表示类型）。打印输出
+  `<class 'int'>`；`type(x) == int` / `is` / `!=`、`type(x) == type(y)`
+  编译期折叠；`type(x).__name__` 返回类型名。运行时令牌是驻留字符串。
+- `id(x)`：堆值返回指针、整数返回自身、浮点返回位模式；同进程内稳定。
+- `asyncio.Queue([maxsize])`：满队列时 put 返回未完成 Future 并按 FIFO
+  等待，get 腾位后放行；新增 `full()`、`await join()`、`task_done()`
+  （unfinished 计数与 CPython 一致），put 改为始终返回 Future。
+- `async with lock:`：内置 Lock 的异步上下文管理器，退出（含异常路径）
+  自动 release；类型检查同步放宽。
+- `from asyncio import Queue` 支持零参形式（maxsize 默认 0）。
+
+### 验证
+
+- `ctest --preset dev/release` 全绿；O0/O1 全量 52 个运行用例通过；
+  810 程序差分零失败
+- 临时探针（不入库）：type 打印/比较/`__name__`、id 自反性、受限 Queue
+  阻塞与 join/task_done、`async with lock` 正常/异常路径、from-import
+  Queue 均与 CPython 一致（O0/O1/O2）
+
+### 已知限制
+
+- `type(x)` 是静态类型令牌：拿不到更精确的运行期子类；`type(None)` 的
+  `__name__` 为 `NoneType`，但令牌不适合当字典键以外的动态用途
+- `id` 数值与 CPython 不同；`type`/`id` 不能用于动态类构造
+- Queue 的 `put_nowait` / `get_nowait` / `QueueFull` / `QueueEmpty` 未实现
+- `async with` 仅内置 Lock 支持，Event/Timeout/TaskGroup 尚未接入
+
 ## [0.54] - 2026-11-10
 
 asyncio 同步原语：`Event` / `Lock` / `Queue` 与 `wait_for`。

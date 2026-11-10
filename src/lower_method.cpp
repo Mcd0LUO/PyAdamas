@@ -233,11 +233,9 @@ VReg Lowerer::lower_method_call(Attribute& at, Call& c) {
                     return const_none();
                 }
                 VReg v = expr(*c.args[0]);
-                call_void(RtFn::QueuePut, {recv, v});
-                // CPython 的 Queue.put 是协程；这里返回一个已完成的
-                // Future，await 与不 await 都能用。
-                VReg f = call_runtime(RtFn::AsyncioFutureNew, mk_future(t_none()), {});
-                call_void(RtFn::FutureSetResult, {f, const_int(0)});
+                // put 可能阻塞（满队列），运行时返回 Future；lowering 直接
+                // 把它当可等待值返回，await 与忽略都行。
+                VReg f = call_runtime(RtFn::QueuePut, mk_future(t_none()), {recv, v});
                 push_temp(f);
                 return f;
             }
@@ -255,6 +253,21 @@ VReg Lowerer::lower_method_call(Attribute& at, Call& c) {
             if (at.attr == "empty") {
                 if (!count(0)) return const_none();
                 return call_runtime(RtFn::QueueEmpty, t_bool(), {recv});
+            }
+            if (at.attr == "full") {
+                if (!count(0)) return const_none();
+                return call_runtime(RtFn::QueueFull, t_bool(), {recv});
+            }
+            if (at.attr == "join") {
+                if (!count(0)) return const_none();
+                VReg f = call_runtime(RtFn::QueueJoin, mk_future(t_none()), {recv});
+                push_temp(f);
+                return f;
+            }
+            if (at.attr == "task_done") {
+                if (!count(0)) return const_none();
+                call_void(RtFn::QueueTaskDone, {recv});
+                return const_none();
             }
         }
         err(c.line, c.col,

@@ -17,6 +17,11 @@ void Lowerer::print_value(VReg v, TypePtr ty, int line, int col) {
         case TyKind::Int: call_void(RtFn::PrintI64, {v}); break;
         case TyKind::List: print_seq(v, ty, false, false, line, col); break;
         case TyKind::Tuple: print_seq(v, ty, true, false, line, col); break;
+        case TyKind::TypeObj:
+            call_void(RtFn::PrintStr, {const_str("<class '")});
+            call_void(RtFn::PrintStr, {v});
+            call_void(RtFn::PrintStr, {const_str("'>")});
+            break;
         case TyKind::Dict: call_void(RtFn::PrintStr, {const_str("<dict object>")}); break;
         case TyKind::Set: call_void(RtFn::PrintStr, {const_str("<set object>")}); break;
         case TyKind::Exception: {
@@ -85,6 +90,12 @@ void Lowerer::print_value_to_file(VReg v, TypePtr ty, int line, int col) {
     switch (ty->kind) {
         case TyKind::List: print_seq(v, ty, false, true, line, col); return;
         case TyKind::Tuple: print_seq(v, ty, true, true, line, col); return;
+        case TyKind::TypeObj: {
+            call_void(RtFn::FileWrite, {f, const_str("<class '")});
+            call_void(RtFn::FileWrite, {f, v});
+            call_void(RtFn::FileWrite, {f, const_str("'>")});
+            return;
+        }
         case TyKind::Dict:
             call_void(RtFn::FileWrite, {f, const_str("<dict object>")});
             return;

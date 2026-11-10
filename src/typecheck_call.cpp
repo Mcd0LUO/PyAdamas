@@ -414,7 +414,12 @@ std::optional<TypePtr> TypeChecker::asyncio_call(const std::string& member, Call
             return mk_async_lock();
         }
         if (member == "Queue") {
-            if (!a.empty()) err(c.line, c.col, "asyncio.Queue() takes no arguments");
+            if (a.size() > 1)
+                err(c.line, c.col, "asyncio.Queue() takes at most one argument");
+            if (a.size() == 1 && !is_unknown(a[0]) && a[0]->kind != TyKind::Int)
+                err(c.line, c.col,
+                    std::format("asyncio.Queue() maxsize must be an int, got '{}'",
+                                type_name(a[0])));
             return mk_async_queue(t_unknown());
         }
 
@@ -756,6 +761,18 @@ TypePtr TypeChecker::method_call(TypePtr recv, const std::string& name, Call& c,
             if (name == "empty") {
                 argc(0, 0);
                 return t_bool();
+            }
+            if (name == "full") {
+                argc(0, 0);
+                return t_bool();
+            }
+            if (name == "join") {
+                argc(0, 0);
+                return mk_future(t_none());
+            }
+            if (name == "task_done") {
+                argc(0, 0);
+                return t_none();
             }
             err(c.line, c.col, std::format("'asyncio.Queue' has no method '{}'", name));
             return t_unknown();

@@ -171,6 +171,10 @@ TypePtr TypeChecker::builtin_call(const std::string& n, Call& c) {
             if (!need(1, 1)) return t_int();
             return t_int();
         }
+        if (n == "type") {
+            if (!need(1, 1)) return t_unknown();
+            return mk_typeobj(a.empty() ? t_unknown() : a[0]);
+        }
         if (n == "issubclass") {
             if (!need(2, 2)) return t_bool();
             return t_bool();

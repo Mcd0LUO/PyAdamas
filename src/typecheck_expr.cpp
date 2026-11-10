@@ -260,6 +260,12 @@ TypePtr TypeChecker::expr(Expr& e) {
                         std::format("'exception' object has no attribute '{}'", a.attr));
                     return t_unknown();
                 }
+                if (ot->kind == TyKind::TypeObj) {
+                    if (a.attr == "__name__") return t_str();
+                    err(a.line, a.col,
+                        std::format("'type' object has no attribute '{}'", a.attr));
+                    return t_unknown();
+                }
                 if (ot->kind == TyKind::File) {
                     if (a.attr == "closed") return t_bool();
                     if (a.attr == "name" || a.attr == "mode" || a.attr == "encoding" ||

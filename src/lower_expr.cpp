@@ -342,6 +342,13 @@ VReg Lowerer::expr(Expr& e) {
                     std::format("'exception' object has no attribute '{}'", a.attr));
                 return const_none();
             }
+            if (ot && ot->kind == TyKind::TypeObj) {
+                VReg tv = expr(*a.value);  // interned 类型名
+                if (a.attr == "__name__") return retype(tv, t_str());
+                err(e.line, e.col,
+                    std::format("'type' object has no attribute '{}'", a.attr));
+                return const_none();
+            }
             if (ot && ot->kind == TyKind::File) {
                 VReg fv = expr(*a.value);
                 if (opt) fv = guard_not_none(fv, std::format("attribute '{}'", a.attr));
@@ -576,6 +583,40 @@ VReg Lowerer::lower_boolop(BoolOp& b) {
 
 VReg Lowerer::lower_compare(Compare& c) {
     if (c.ops.size() == 1) {
+        CmpOp op0 = c.ops[0];
+        TypePtr lt0 = tc_.type_of(c.left.get());
+        TypePtr rt0 = tc_.type_of(c.comparators[0].get());
+        bool lto = lt0 && lt0->kind == TyKind::TypeObj;
+        bool rto = rt0 && rt0->kind == TyKind::TypeObj;
+        if ((lto || rto) && (op0 == CmpOp::Eq || op0 == CmpOp::Ne ||
+                             op0 == CmpOp::Is || op0 == CmpOp::IsNot)) {
+            auto operand_name = [&](Expr* e, TypePtr t) -> std::optional<std::string> {
+                if (t && t->kind == TyKind::TypeObj)
+                    return py_type_name(t->sub.empty() ? t_unknown() : t->sub[0]);
+                if (e && e->kind == ExprKind::Name) {
+                    auto& id = static_cast<Name*>(e)->id;
+                    if (!is_bound_here(id)) {
+                        if (auto cit = classes_.find(id);
+                            cit != classes_.end() && cit->second)
+                            return cit->second->name;
+                        if (auto iit = imported_classes_.find(id);
+                            iit != imported_classes_.end())
+                            return iit->second.cls ? iit->second.cls->name : id;
+                        if (TypeChecker::is_builtin_name(id)) return id;
+                    }
+                }
+                return std::nullopt;
+            };
+            auto ln = operand_name(c.left.get(), lt0);
+            auto rn = operand_name(c.comparators[0].get(), rt0);
+            if (ln && rn) {
+                if (lto) (void)expr(*c.left);  // 保留 type(x) 里 x 的求值副作用
+                if (rto) (void)expr(*c.comparators[0]);
+                bool eq = *ln == *rn;
+                if (op0 == CmpOp::Ne || op0 == CmpOp::IsNot) eq = !eq;
+                return const_bool(eq);
+            }
+        }
         VReg l = expr(*c.left);
         VReg r = expr(*c.comparators[0]);
         CmpOp op = c.ops[0];

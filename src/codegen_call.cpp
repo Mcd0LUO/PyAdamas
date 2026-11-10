@@ -648,6 +648,10 @@ void AsmGen::gen_call_rt(const Inst& in) {
             case RtFn::QueueGet:
             case RtFn::QueueQsize:
             case RtFn::QueueEmpty:
+            case RtFn::QueueFull:
+            case RtFn::QueueJoin:
+            case RtFn::QueueTaskDone:
+            case RtFn::QueueNew:
             case RtFn::GenNext:
             case RtFn::GenClose:
             case RtFn::HandlerSuspend:
@@ -804,7 +808,6 @@ void AsmGen::gen_call_rt(const Inst& in) {
             case RtFn::AsyncioFutureNew:
             case RtFn::EventNew:
             case RtFn::LockNew:
-            case RtFn::QueueNew:
             case RtFn::ExcAccept:
             case RtFn::ExcAcceptValue:
             case RtFn::ExcDone:

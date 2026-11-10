@@ -287,6 +287,37 @@ VReg Lowerer::lower_builtin_call(const std::string& name, Call& c) {
                             {expr(*c.args[0]), const_int(cid->second)});
     }
 
+    if (name == "type") {
+        if (c.args.size() != 1) {
+            err(c.line, c.col, "type() takes exactly one argument");
+            return const_none();
+        }
+        Expr* arg = c.args[0].get();
+        TypePtr t = tc_.type_of(arg);
+        bool skip_eval = false;
+        if (arg->kind == ExprKind::Name) {
+            auto& id = static_cast<Name*>(arg)->id;
+            skip_eval = !is_bound_here(id) &&
+                        (classes_.count(id) || imported_classes_.count(id) ||
+                         TypeChecker::is_builtin_name(id));
+        }
+        if (!skip_eval) (void)expr(*arg);  // 保留求值副作用
+        VReg s = const_str(py_type_name(t));
+        return retype(s, mk_typeobj(t ? t : t_unknown()));
+    }
+
+    if (name == "id") {
+        if (c.args.size() != 1) {
+            err(c.line, c.col, "id() takes exactly one argument");
+            return const_int(0);
+        }
+        TypePtr t = tc_.type_of(c.args[0].get());
+        VReg v = expr(*c.args[0]);
+        if (t && t->kind == TyKind::Float)
+            return call_runtime(RtFn::HashF64, t_int(), {v});
+        return retype(v, t_int());
+    }
+
     if (name == "hash") {
         if (c.args.size() != 1) {
             err(c.line, c.col, "hash() takes exactly one argument");

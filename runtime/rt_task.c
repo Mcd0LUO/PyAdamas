@@ -339,8 +339,13 @@ typedef struct {
 } Py23Lock;
 
 typedef struct {
-    Py23List* items;   /* 元素按 unknown 容器存放（kind 2） */
-    Py23List* getters; /* Future* */
+    Py23List* items;    /* 元素按 unknown 容器存放（kind 2） */
+    Py23List* getters;  /* Future* */
+    Py23List* putters;  /* 满队列时等待的 put Future* */
+    Py23List* pvalues;  /* 与 putters 一一对应的值（kind 2） */
+    Py23List* joiners;  /* join() 的 Future* */
+    int64_t maxsize;
+    int64_t unfinished;
 } Py23Queue;
 
 static void event_destroy(void* p) {
@@ -355,6 +360,9 @@ static void queue_destroy(void* p) {
     Py23Queue* q = (Py23Queue*)p;
     if (q->items) py23_rc_dec(q->items);
     if (q->getters) py23_rc_dec(q->getters);
+    if (q->putters) py23_rc_dec(q->putters);
+    if (q->pvalues) py23_rc_dec(q->pvalues);
+    if (q->joiners) py23_rc_dec(q->joiners);
 }
 
 void* py23_event_new(void) {
@@ -433,26 +441,50 @@ int64_t py23_lock_locked(void* lp) {
     return ((Py23Lock*)lp)->locked;
 }
 
-void* py23_queue_new(void) {
+void* py23_queue_new(int64_t maxsize) {
     loop_ensure();
     Py23Queue* q = (Py23Queue*)rc_alloc((int64_t)sizeof(Py23Queue), queue_destroy, NULL,
                                         PY23_RC_OBJ);
     q->items = py23_list_new(4, 2);
     q->getters = py23_list_new(4, 1);
+    q->putters = py23_list_new(4, 1);
+    q->pvalues = py23_list_new(4, 2);
+    q->joiners = py23_list_new(4, 1);
+    q->maxsize = maxsize > 0 ? maxsize : 0;
     return q;
 }
 
-void py23_queue_put(void* qp, int64_t v) {
+static void* queue_ready_future(void) {
+    void* f = py23_asyncio_future_new();
+    py23_future_set_result(f, 0);
+    return f;
+}
+
+static void queue_push_item(Py23Queue* q, int64_t v) {
+    ++q->unfinished;
+    py23_rc_inc_unknown(v);
+    py23_list_append(q->items, v);
+}
+
+void* py23_queue_put(void* qp, int64_t v) {
     if (!qp) py23_raise_c("TypeError", "put() expects a Queue");
     Py23Queue* q = (Py23Queue*)qp;
     if (q->getters->len > 0) {
         void* f = (void*)(uintptr_t)q->getters->data[0];
         py23_future_set_result(f, v);
         py23_list_del_index(q->getters, 0);
-        return;
+        return queue_ready_future();
     }
-    py23_rc_inc_unknown(v);
-    py23_list_append(q->items, v);
+    if (q->maxsize > 0 && q->items->len >= q->maxsize) {
+        void* f = py23_asyncio_future_new();
+        py23_rc_inc(f);
+        py23_list_append(q->putters, (int64_t)f);
+        py23_rc_inc_unknown(v);
+        py23_list_append(q->pvalues, v);
+        return f;
+    }
+    queue_push_item(q, v);
+    return queue_ready_future();
 }
 
 void* py23_queue_get(void* qp) {
@@ -462,6 +494,15 @@ void* py23_queue_get(void* qp) {
         int64_t v = py23_list_get(q->items, 0);
         // items 是 kind 2：删除不 release，值的所有权转交给 Future。
         py23_list_del_index(q->items, 0);
+        if (q->putters->len > 0) {
+            // 队列腾出位置：把一个等待中的 put 值搬进来。
+            void* pf = (void*)(uintptr_t)q->putters->data[0];
+            int64_t pv = q->pvalues->data[0];
+            py23_list_del_index(q->putters, 0);
+            py23_list_del_index(q->pvalues, 0);
+            py23_future_set_result(pf, 0);
+            queue_push_item(q, pv);  // pvalues 的引用直接转交给 items
+        }
         void* f = py23_asyncio_future_new();
         py23_future_set_result(f, v);
         return f;
@@ -480,5 +521,35 @@ int64_t py23_queue_qsize(void* qp) {
 int64_t py23_queue_empty(void* qp) {
     if (!qp) return 1;
     return ((Py23Queue*)qp)->items->len == 0 ? 1 : 0;
+}
+
+int64_t py23_queue_full(void* qp) {
+    if (!qp) return 0;
+    Py23Queue* q = (Py23Queue*)qp;
+    return q->maxsize > 0 && q->items->len >= q->maxsize ? 1 : 0;
+}
+
+void* py23_queue_join(void* qp) {
+    if (!qp) py23_raise_c("TypeError", "join() expects a Queue");
+    Py23Queue* q = (Py23Queue*)qp;
+    if (q->unfinished == 0) return queue_ready_future();
+    void* f = py23_asyncio_future_new();
+    py23_rc_inc(f);
+    py23_list_append(q->joiners, (int64_t)f);
+    return f;
+}
+
+void py23_queue_task_done(void* qp) {
+    if (!qp) py23_raise_c("TypeError", "task_done() expects a Queue");
+    Py23Queue* q = (Py23Queue*)qp;
+    if (q->unfinished <= 0)
+        py23_raise_c("ValueError", "task_done() called too many times");
+    --q->unfinished;
+    if (q->unfinished == 0 && q->joiners->len > 0) {
+        int64_t n = q->joiners->len;
+        for (int64_t i = 0; i < n; ++i)
+            py23_future_set_result((void*)(uintptr_t)q->joiners->data[i], 0);
+        py23_list_set_len(q->joiners, 0);
+    }
 }
 
