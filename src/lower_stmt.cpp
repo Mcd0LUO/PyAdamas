@@ -81,7 +81,8 @@ void Lowerer::stmt(Stmt& s) {
                 want = storage_ty(static_cast<Name&>(*a.target).id);
             VReg v;
             bool typed_literal = want && vt && want->kind == vt->kind &&
-                                 (want->kind == TyKind::List || want->kind == TyKind::Tuple);
+                                 (want->kind == TyKind::List || want->kind == TyKind::Tuple ||
+                                  want->kind == TyKind::Dict || want->kind == TyKind::Set);
             if (a.value->kind == ExprKind::Yield || a.value->kind == ExprKind::YieldFrom)
                 yield_ctx_node_ = a.value.get();
             if (a.value->kind == ExprKind::Await) await_ctx_node_ = a.value.get();
@@ -90,6 +91,13 @@ void Lowerer::stmt(Stmt& s) {
                 v = lower_list_like(static_cast<ListExpr&>(*a.value).elts, want, false);
             else if (typed_literal && a.value->kind == ExprKind::Tuple)
                 v = lower_list_like(static_cast<TupleExpr&>(*a.value).elts, want, true);
+            // `d: dict[str, int] = {}`：空字面量自己推不出 key 类型，
+            // 必须按标注构造，否则运行时 key_kind 是「按机器字比较」，
+            // 动态 str key 查不回来。set 同理（元素可能要补转换）。
+            else if (typed_literal && a.value->kind == ExprKind::Dict)
+                v = lower_dict(static_cast<DictExpr&>(*a.value), want);
+            else if (typed_literal && a.value->kind == ExprKind::Set)
+                v = lower_set(static_cast<SetExpr&>(*a.value), want);
             else
                 v = expr(*a.value);
             yield_ctx_node_ = nullptr;

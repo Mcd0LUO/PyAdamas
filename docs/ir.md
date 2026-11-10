@@ -97,7 +97,7 @@ Python 语义里变量天生可变，循环里反复赋值是常态。一上来�
 `py23_rc_temp` / `py23_rc_mark` / `py23_rc_cleanup` 管表达式临时值栈，
 `py23_rc_shutdown` 在入口函数退出时收尾。循环收集器也是 `call.rt`：
 `py23_gc_shutdown` 在入口退出时清空剩余堆；周期性收集由 `rc_alloc` 在
-运行时内部按 2MB 阈值触发，IR 看不到。
+运行时内部按「存活堆自适应阈值」（下限 2MB）触发，IR 看不到。
 
 闭包对象用 `py23_closure_new(code, n_caps)` 分配，负载是
 `[code, n_caps, cell…]`；`Func` 是堆类型，静态闭包 rc 为永生。

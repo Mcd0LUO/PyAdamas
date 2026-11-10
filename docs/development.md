@@ -100,7 +100,7 @@ python3 tests/diff/run_diff.py --only repr  # 只测浮点转字符串
 `tests/run/10_rc.py` 覆盖别名、字段、列表、返回值和 `continue` 跳过清理；
 `tests/run/11_closure.py` 覆盖闭包捕获、`nonlocal`、多层嵌套、自递归；
 `tests/run/12_lambda.py` 覆盖 lambda；`tests/run/13_gc.py` 会真正触发
-2MB 阈值后的标记-清扫（对象环、字典自环、闭包垃圾、unknown 容器）；
+阈值后的标记-清扫（对象环、字典自环、闭包垃圾、unknown 容器）；
 `tests/run/14_dict.py` 覆盖字典/集合/`in`/方法；`tests/run/15_slice.py`
 覆盖切片（缺省、负边界、正负步长）；`tests/run/16_dict_del.py` 覆盖删除类
 方法；`tests/run/17_slice_assign.py` 覆盖切片赋值；`tests/run/18_starargs.py`

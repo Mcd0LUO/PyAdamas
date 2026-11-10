@@ -17,6 +17,12 @@ int64_t alloc_since_gc;
 int gc_ready;
 int gc_sweeping;
 
+/* 下一次触发全堆扫描的分配量。固定 2MB 会让大堆反复全扫——1M 个
+   存活对象约 88MB，按 2MB 触发要扫四十多遍，总成本接近 O(n²)。
+   每次扫描完按「本次存活字节数」重置，存活堆翻倍才扫一次，总扫描
+   量是 O(live)；垃圾多、存活少时回落到 2MB 下限，扫描本身也便宜。 */
+static int64_t gc_next_threshold = PY23_GC_THRESHOLD;
+
 void panic_c(const char* msg);
 
 /* 存活堆对象索引：unknown 值的静态类型看不见，不能直接 rc_inc（可能
@@ -173,7 +179,7 @@ void* rc_alloc(int64_t size, void (*dtor)(void*), void (*release)(void*),
                       int64_t kind) {
     if (size < 0) panic_c("negative allocation size");
     if (gc_ready && !gc_sweeping && heap_head &&
-        alloc_since_gc >= PY23_GC_THRESHOLD)
+        alloc_since_gc >= gc_next_threshold)
         py23_gc_collect();
     Py23Rc* h = (Py23Rc*)malloc(sizeof(Py23Rc) + (size_t)size);
     if (!h) panic_c("out of memory");
@@ -422,6 +428,8 @@ void py23_gc_init(void** roots, int64_t n_roots, void* stack_top) {
     gc_globals_cap = 0;
     py23_gc_add_roots(roots, n_roots);
     gc_stack_top = (uintptr_t)stack_top;
+    // 嵌入/基准场景可以关掉循环收集，只靠引用计数（会漏检环）。
+    if (getenv("PY23_GC_DISABLE")) return;
     gc_ready = 1;
 }
 
@@ -444,6 +452,7 @@ void py23_gc_collect(void) {
     for (Py23Rc* h = heap_head; h; h = h->next) ++n;
     if (n == 0) {
         alloc_since_gc = 0;
+        gc_next_threshold = PY23_GC_THRESHOLD;
         return;
     }
     gc_table_cap = 1;
@@ -475,10 +484,12 @@ void py23_gc_collect(void) {
     }
 
     // 第二遍：释放不可达对象，清理可达对象的 mark 位。
+    int64_t live = 0;
     Py23Rc* h = heap_head;
     while (h) {
         Py23Rc* next = h->next;
         if (h->marked) {
+            live += h->size + PY23_RC_HDR;
             h->marked = 0;
         } else {
             rc_unlink(h);
@@ -505,6 +516,7 @@ void py23_gc_collect(void) {
     gc_table_cap = 0;
     gc_work_len = 0;
     alloc_since_gc = 0;
+    gc_next_threshold = live > (int64_t)PY23_GC_THRESHOLD ? live : PY23_GC_THRESHOLD;
 }
 
 // 程序退出：所有还活着的堆对象（包括环）一次性还给系统。
