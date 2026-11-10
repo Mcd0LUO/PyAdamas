@@ -10,9 +10,9 @@
 
 ### 修复
 
-- **容器元素跨数值域实参**：`list[int]` 传给 `list[float]` 形参现在在 build
-  阶段报错，不再静默按 double 读 int64 槽位（`bind_args` 补 `bad_elem` 检查，
-  与赋值路径一致）；`math.fsum([1,2,3])` 同样被拒。
+- **容器元素跨数值域实参**：`list` / `tuple` / `dict` / `set` 的 `int` → `float`
+  实参现在在 build 阶段报错，不再静默按 double 读 int64 槽位（`bind_args`
+  补 `bad_elem` 检查，与赋值路径一致）；`math.fsum([1,2,3])` 同样被拒。
 - **槽位类型回填**：`store.slot` 遇到 unknown 槽位时从源 vreg 补类型，
   `load.slot` 在调用方给 unknown 时回退到槽位表。修复 `call.rt` 结果经
   临时槽后退化成整数比较（非法 `cmpq %xmm8`）、`-O2` 浮点结果与
