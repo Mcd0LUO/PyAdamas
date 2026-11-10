@@ -4,6 +4,33 @@
 
 早期阶段没有逐条留痕，按阶段归纳；0.4 之后逐条记录。
 
+## [0.47] - 2026-11-10
+
+文件 I/O 续：标准流对象与 `iter(f)` / `next(f)`。
+
+### 新增
+
+- `sys.stdin` / `sys.stdout` / `sys.stderr` 现在是文件对象：直接包住 C
+  标准流（不 dup，和 `print` 共用一个 `FILE*`，缓冲顺序一致），对象标记
+  为永生，进程退出时不析构；`close()` 会像 CPython 一样关掉底层流。
+  支持 `sys.stdout.write(...)`、`print(..., file=sys.stderr)`、
+  `for line in sys.stdin:`、`sys.stdin.readline()` 等写法。
+- `iter(f)` 返回文件本身；`next(f)` 读下一行，EOF 抛 `StopIteration`。
+
+### 验证
+
+- `ctest --preset dev/release` 全绿；O0/O1 全量 52 个运行用例通过；
+  810 程序差分零失败
+- 临时探针（不入库）：stdout/stderr 写入与刷新顺序、stdin 逐行读取 +
+  迭代、`next(f)`/`StopIteration` 与 CPython 一致（O0/O1/O2）
+
+### 已知限制
+
+- 标准流包装的是 C 标准流：没有 `buffer`/`reconfigure`；关闭
+  `sys.stdout` 后普通 `print` 也会失败（CPython 同样）
+- `input()` 与 `sys.stdin` 共用同一个 C 输入缓冲，混用时分界以底层
+  stdio 缓冲为准
+
 ## [0.46] - 2026-11-10
 
 文件 I/O 细化：`open()` 参数全覆盖、文件方法/属性、按行迭代、`print(file=)`。

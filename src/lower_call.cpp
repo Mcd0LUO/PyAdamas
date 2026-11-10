@@ -366,7 +366,7 @@ VReg Lowerer::lower_call(Call& c) {
                 "abs", "min", "max", "sum", "pow", "any", "all", "complex",
                 "ord", "chr", "hex", "bin", "oct", "round", "divmod", "repr", "format",
                 "list", "tuple", "dict", "set", "sorted", "reversed", "enumerate", "zip",
-                "open", "input",
+                "open", "input", "iter",
             };
             if (kBuiltins.count(n.id)) return lower_builtin_call(n.id, c);
             // 名字能解析但语义没实现的内置：以前会退化成调用空指针直接
@@ -476,6 +476,38 @@ VReg Lowerer::lower_builtin_call(const std::string& name, Call& c) {
             return const_none();
         }
         TypePtr gt = tc_.type_of(c.args[0].get());
+        if (gt && gt->kind == TyKind::File) {
+            // next(f)：读一行，EOF 抛 StopIteration。
+            VReg f = expr(*c.args[0]);
+            VReg line = call_runtime(RtFn::FileReadLine, t_str(), {f, const_int(-1)});
+            push_temp(line);
+            Inst ln;
+            ln.op = IrOp::Len;
+            ln.a = line;
+            VReg n = def(t_int(), std::move(ln));
+            Inst c0;
+            c0.op = IrOp::Cmp;
+            c0.cop = CmpKind::Eq;
+            c0.a = n;
+            c0.b = const_int(0);
+            VReg empty = def(t_bool(), std::move(c0));
+            int ok = new_block("next.ok");
+            int stop = new_block("next.stop");
+            Inst br;
+            br.op = IrOp::Branch;
+            br.a = empty;
+            br.target = stop;
+            br.target2 = ok;
+            emit(std::move(br));
+            switch_to(stop);
+            call_void(RtFn::Raise, {const_str("StopIteration"), const_str("")});
+            Inst j;
+            j.op = IrOp::Jump;
+            j.target = ok;
+            emit(std::move(j));
+            switch_to(ok);
+            return line;
+        }
         if (!gt || gt->kind != TyKind::Generator) {
             err(c.line, c.col, std::format("next() requires a generator, got '{}'", type_name(gt)));
             return const_none();
@@ -596,6 +628,20 @@ VReg Lowerer::lower_builtin_call(const std::string& name, Call& c) {
         VReg s = call_runtime(RtFn::Input, t_str(), {prompt});
         push_temp(s);
         return s;
+    }
+
+    if (name == "iter") {
+        if (c.args.size() != 1) {
+            err(c.line, c.col, "iter() takes exactly one argument");
+            return const_none();
+        }
+        TypePtr it = tc_.type_of(c.args[0].get());
+        if (it && it->kind == TyKind::File) return expr(*c.args[0]);
+        err(c.line, c.col,
+            std::format("iter() of '{}' is not supported by the code generator yet "
+                        "(only files)",
+                        type_name(it)));
+        return const_none();
     }
 
     if (name == "abs") {

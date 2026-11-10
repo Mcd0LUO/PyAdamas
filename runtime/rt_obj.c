@@ -2390,3 +2390,32 @@ Py23Str* py23_input(Py23Str* prompt) {
     free(buf);
     return s;
 }
+
+/* sys.stdin / sys.stdout / sys.stderr：直接包住 C 标准流（不 dup），
+   这样和 print 共用同一个 FILE*，缓冲顺序一致；对象永久存活，进程退出
+   时不会被析构掉。close() 会像 CPython 一样关掉底层流。 */
+static Py23File* sys_stream_files[3];
+
+Py23File* py23_sys_stream(int64_t which) {
+    if (which < 0 || which > 2) return NULL;
+    Py23File* cached = sys_stream_files[which];
+    if (cached) return cached;
+    FILE* fp = which == 0 ? stdin : which == 1 ? stdout : stderr;
+    Py23File* f =
+        (Py23File*)rc_alloc((int64_t)sizeof(Py23File), file_destroy, NULL, PY23_RC_OBJ);
+    f->fp = fp;
+    f->fd = (int64_t)which;
+    f->closed = 0;
+    f->closefd = 1;
+    f->binary = 0;
+    f->readable = which == 0;
+    f->writable = which != 0;
+    f->newline = PY23_NL_UNIVERSAL;
+    f->vbuf = NULL;
+    f->name = str_new(which == 0 ? "<stdin>" : which == 1 ? "<stdout>" : "<stderr>",
+                      which == 0 ? 7 : which == 1 ? 8 : 8);
+    f->mode = str_new(which == 0 ? "r" : "w", 1);
+    ((Py23Rc*)f - 1)->rc = PY23_RC_IMMORTAL;
+    sys_stream_files[which] = f;
+    return f;
+}

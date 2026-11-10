@@ -364,6 +364,7 @@ Py23Str* py23_file_mode(Py23File* f);
 void py23_file_close(Py23File* f);
 void py23_file_flush(Py23File* f);
 Py23Str* py23_input(Py23Str* prompt);
+Py23File* py23_sys_stream(int64_t which);
 void list_destroy(void* p);
 void list_gc_release(void* p);
 Py23List* py23_list_new(int64_t cap, int64_t elem_kind);

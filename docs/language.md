@@ -540,8 +540,12 @@ closefd=True)` 返回字节流文件对象，位置/关键字参数按 CPython �
 `seekable()` / `flush()` / `close()`；属性 `closed` / `name` / `mode`。
 `with open(...) as f:` 在正常、异常、`return`、`break`/`continue` 路径都会
 关闭文件；`for line in f:` 按行迭代，`list(f)` / `sorted(f)` /
-`enumerate(f)` / `zip(f)` 走 readlines 语义；`print(..., file=f)` 和
+`enumerate(f)` / `zip(f)` 走 readlines 语义；`iter(f)` 返回文件本身，
+`next(f)` 读下一行、EOF 抛 `StopIteration`；`print(..., file=f)` 和
 `print(..., file=f, flush=True)` 可把输出重定向到文件。
+`sys.stdin` / `sys.stdout` / `sys.stderr` 是文件对象（直接包住 C 标准流，
+和 `print` 共用缓冲，对象永生）；支持 `sys.stdout.write(...)`、
+`print(..., file=sys.stderr)`、`for line in sys.stdin:` 等写法。
 打开失败抛 `OSError`，关闭后读写抛 `ValueError`。
 
 ### print

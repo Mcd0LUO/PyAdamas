@@ -607,6 +607,7 @@ void AsmGen::gen_call_rt(const Inst& in) {
             case RtFn::FileName:
             case RtFn::FileMode:
             case RtFn::Input:
+            case RtFn::SysStream:
             case RtFn::HandlerLeave:
             case RtFn::HandlerDiscard:
             case RtFn::ExcMatches:

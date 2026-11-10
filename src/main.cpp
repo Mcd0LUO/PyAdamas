@@ -756,6 +756,9 @@ py23::ModuleInfoPtr builtin_module(const std::string& name) {
     } else if (name == "sys") {
         info->globals["argv"] = py23::mk_list(py23::t_str());
         info->globals["maxsize"] = py23::t_int();
+        info->globals["stdin"] = py23::t_file();
+        info->globals["stdout"] = py23::t_file();
+        info->globals["stderr"] = py23::t_file();
         func("exit", {py23::t_int()}, py23::t_none());
     } else if (name == "asyncio") {
         // run/create_task 的结果类型按实参在 typecheck 里特判；这里的签名

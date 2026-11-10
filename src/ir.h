@@ -120,6 +120,7 @@ enum class RtFn : uint8_t {
     FileClose,   // (file*) -> void
     FileFlush,   // (file*) -> void
     Input,       // (str* prompt|0) -> str*
+    SysStream,   // (i64 which 0/1/2) -> file*  sys.stdin/stdout/stderr
     PrintI64,    // (i64) -> void
     PrintF64,    // (f64) -> void
     PrintBool,   // (i64) -> void
@@ -304,6 +305,7 @@ inline const char* rt_name(RtFn f) {
         case RtFn::FileClose: return "py23_file_close";
         case RtFn::FileFlush: return "py23_file_flush";
         case RtFn::Input: return "py23_input";
+        case RtFn::SysStream: return "py23_sys_stream";
         case RtFn::PrintI64: return "py23_print_i64";
         case RtFn::PrintF64: return "py23_print_f64";
         case RtFn::PrintBool: return "py23_print_bool";
