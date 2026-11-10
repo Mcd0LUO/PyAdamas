@@ -2143,8 +2143,9 @@ Py23File* py23_file_open(Py23Str* path, int64_t fd, Py23Str* mode, int64_t buffe
         if (base == 'x') {
             char xmode[10];
             int xn = 0;
-            xmode[xn++] = base;
-            xmode[xn++] = 'x'; /* glibc 支持 C11 的独占创建 */
+            /* 独占创建：C11 的 "wx"（glibc 支持），读写再加 '+' */
+            xmode[xn++] = 'w';
+            xmode[xn++] = 'x';
             if (plus) xmode[xn++] = '+';
             if (bin) xmode[xn++] = 'b';
             xmode[xn] = 0;
@@ -2374,7 +2375,9 @@ Py23Str* py23_input(Py23Str* prompt) {
     char* buf = NULL;
     int64_t len = 0, cap = 0;
     int c;
+    int got_any = 0;
     while ((c = fgetc(stdin)) != EOF) {
+        got_any = 1;
         if (c == '\n') break;
         if (len + 1 > cap) {
             int64_t ncap = cap ? cap * 2 : 128;
@@ -2384,6 +2387,10 @@ Py23Str* py23_input(Py23Str* prompt) {
             cap = ncap;
         }
         buf[len++] = (char)c;
+    }
+    if (!got_any) {
+        free(buf);
+        py23_raise_c("EOFError", "EOF when reading a line");
     }
     if (len > 0 && buf[len - 1] == '\r') --len;
     Py23Str* s = str_new(buf ? buf : "", len);

@@ -4,6 +4,25 @@
 
 早期阶段没有逐条留痕，按阶段归纳；0.4 之后逐条记录。
 
+## [0.48] - 2026-11-10
+
+文件 I/O 修正：独占创建模式与 `input()` 的 EOF 语义。
+
+### 修复
+
+- `open(path, "x")` 生成的 C 模式拼成了 `"xx"`（glibc 视为非法，必然
+  OSError）；改为 `"wx"`（读写加 `+`）。独占创建、已存在报错的行为与
+  CPython 一致。
+- `input()` 在 stdin 立即 EOF 时抛 `EOFError`（以前返回空串）；读到部分
+  行但没有换行仍按 CPython 返回该行。
+
+### 验证
+
+- `ctest --preset dev/release` 全绿；O0/O1 全量 52 个运行用例通过；
+  810 程序差分零失败
+- 临时探针（不入库）：`x` 模式、`seek(whence=2)`、`truncate`、
+  `input()` EOF 与 CPython 一致（O0/O1/O2）
+
 ## [0.47] - 2026-11-10
 
 文件 I/O 续：标准流对象与 `iter(f)` / `next(f)`。
