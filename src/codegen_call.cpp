@@ -6,15 +6,15 @@ namespace py23 {
 void AsmGen::gen_make_list(const Inst& in) {
         // imm 是元素所有权类别（0 非堆 / 1 堆 / 2 unknown 或混合），
         // 由降级器按容器类型算好，运行时据此决定覆盖和销毁时是否 dec。
-        line(std::format("movq ${}, %rdi", in.args.size()));
-        line(std::format("movq ${}, %rsi", in.imm));
+        emit_imm_op("movq", in.args.size(), "%rdi");
+        emit_imm_op("movq", in.imm, "%rsi");
         spill_fp_slots();
         line("call py23_list_new");
         reload_fp_slots();
-        line(std::format("movq %rax, {}", dst_op(in.dst)));
+        emit2("movq", "%rax", dst_op(in.dst));
         for (VReg a : in.args) {
-            line(std::format("movq {}, %rdi", dst_op(in.dst)));
-            line(std::format("movq {}, %rsi", src_op(a)));
+            emit2("movq", dst_op(in.dst), "%rdi");
+            emit2("movq", src_op(a), "%rsi");
             spill_fp_slots();
             line("call py23_list_append");
             reload_fp_slots();
@@ -24,19 +24,19 @@ void AsmGen::gen_make_list(const Inst& in) {
 void AsmGen::gen_index_load(const Inst& in) {
         TypePtr ot = ty_of(in.a);
         if (ot && ot->kind == TyKind::Str) {
-            line(std::format("movq {}, %rdi", src_op(in.a)));
-            line(std::format("movq {}, %rsi", src_op(in.b)));
+            emit2("movq", src_op(in.a), "%rdi");
+            emit2("movq", src_op(in.b), "%rsi");
             spill_fp_slots();
             line("call py23_str_char_at");
             reload_fp_slots();
-            line(std::format("movq %rax, {}", dst_op(in.dst)));
+            emit2("movq", "%rax", dst_op(in.dst));
             return;
         }
         if (opt_ < 1) {
-            line(std::format("movq {}, %rdi", src_op(in.a)));
-            line(std::format("movq {}, %rsi", src_op(in.b)));
+            emit2("movq", src_op(in.a), "%rdi");
+            emit2("movq", src_op(in.b), "%rsi");
             line("call py23_list_get");
-            line(std::format("movq %rax, {}", dst_op(in.dst)));
+            emit2("movq", "%rax", dst_op(in.dst));
             return;
         }
         // list/tuple 共用 Py23List 布局：+0 len，+16 data。
@@ -45,19 +45,19 @@ void AsmGen::gen_index_load(const Inst& in) {
         // 不返回，因此不会破坏常驻 xmm 的浮点槽。
         std::string fast = fresh_label("idxfast");
         std::string neg = fresh_label("idxneg");
-        line(std::format("movq {}, %rdi", src_op(in.a)));
-        line(std::format("movq {}, %rsi", src_op(in.b)));
+        emit2("movq", src_op(in.a), "%rdi");
+        emit2("movq", src_op(in.b), "%rsi");
         line("movq 0(%rdi), %rcx");
         line("cmpq %rcx, %rsi");
-        line(std::format("jb {}", fast));
+        emit_jmp("jb", fast);
         line("testq %rsi, %rsi");
-        line(std::format("js {}", neg));
+        emit_jmp("js", neg);
         line("call py23_list_get");
         line("ud2");
         label(neg);
         line("addq %rcx, %rsi");
         line("cmpq %rcx, %rsi");
-        line(std::format("jb {}", fast));
+        emit_jmp("jb", fast);
         line("movq %rcx, %rsi");
         line("call py23_list_get");
         line("ud2");
@@ -65,7 +65,7 @@ void AsmGen::gen_index_load(const Inst& in) {
         line("movq 16(%rdi), %rdx");
         if (ir_is_float(in.ty)) {
             line("movsd (%rdx,%rsi,8), %xmm0");
-            line(std::format("movsd %xmm0, {}", dst_op(in.dst)));
+            emit2("movsd", "%xmm0", dst_op(in.dst));
         } else {
             line("movq (%rdx,%rsi,8), %rax");
             move_to(dst_op(in.dst), "%rax");
@@ -75,12 +75,12 @@ void AsmGen::gen_index_load(const Inst& in) {
 void AsmGen::gen_index_unchecked_load(const Inst& in) {
         // 调用方（for / 推导式 / sum 等）已经证明 0 <= idx < len，
         // 这里只做一次 data 取址和元素装载。
-        line(std::format("movq {}, %rdi", src_op(in.a)));
-        line(std::format("movq {}, %rsi", src_op(in.b)));
+        emit2("movq", src_op(in.a), "%rdi");
+        emit2("movq", src_op(in.b), "%rsi");
         line("movq 16(%rdi), %rdx");
         if (ir_is_float(in.ty)) {
             line("movsd (%rdx,%rsi,8), %xmm0");
-            line(std::format("movsd %xmm0, {}", dst_op(in.dst)));
+            emit2("movsd", "%xmm0", dst_op(in.dst));
         } else {
             line("movq (%rdx,%rsi,8), %rax");
             move_to(dst_op(in.dst), "%rax");
@@ -89,29 +89,29 @@ void AsmGen::gen_index_unchecked_load(const Inst& in) {
 
 void AsmGen::gen_index_store(const Inst& in) {
         if (opt_ < 1) {
-            line(std::format("movq {}, %rdi", src_op(in.a)));
-            line(std::format("movq {}, %rsi", src_op(in.b)));
-            line(std::format("movq {}, %rdx", src_op(in.c)));
+            emit2("movq", src_op(in.a), "%rdi");
+            emit2("movq", src_op(in.b), "%rsi");
+            emit2("movq", src_op(in.c), "%rdx");
             line("call py23_list_set");
             return;
         }
         std::string fast = fresh_label("idxsf");
         std::string neg = fresh_label("idxsneg");
         std::string done = fresh_label("idxsdone");
-        line(std::format("movq {}, %rdi", src_op(in.a)));
-        line(std::format("movq {}, %rsi", src_op(in.b)));
+        emit2("movq", src_op(in.a), "%rdi");
+        emit2("movq", src_op(in.b), "%rsi");
         line("movq 0(%rdi), %rcx");
         line("cmpq %rcx, %rsi");
-        line(std::format("jb {}", fast));
+        emit_jmp("jb", fast);
         line("testq %rsi, %rsi");
-        line(std::format("js {}", neg));
+        emit_jmp("js", neg);
         line("xorl %edx, %edx");
         line("call py23_list_set");
         line("ud2");
         label(neg);
         line("addq %rcx, %rsi");
         line("cmpq %rcx, %rsi");
-        line(std::format("jb {}", fast));
+        emit_jmp("jb", fast);
         line("movq %rcx, %rsi");
         line("xorl %edx, %edx");
         line("call py23_list_set");
@@ -120,16 +120,16 @@ void AsmGen::gen_index_store(const Inst& in) {
         line("movq 16(%rdi), %rdx");
         line("movq (%rdx,%rsi,8), %r8");
         if (is_fp(in.c)) {
-            line(std::format("movsd {}, %xmm0", src_op(in.c)));
+            emit2("movsd", src_op(in.c), "%xmm0");
             line("movsd %xmm0, (%rdx,%rsi,8)");
         } else {
-            line(std::format("movq {}, %rax", src_op(in.c)));
+            emit2("movq", src_op(in.c), "%rax");
             line("movq %rax, (%rdx,%rsi,8)");
         }
         // 旧值的所有权按容器运行期 elem_kind 决定，不能只看静态类型：
         // 空列表推出来的类型可能会在后续赋值里变窄/变宽。
         line("cmpq $1, 24(%rdi)");
-        line(std::format("jne {}", done));
+        emit_jmp("jne", done);
         line("movq %r8, %rdi");
         spill_fp_slots();
         line("call py23_rc_dec");
@@ -143,7 +143,7 @@ void AsmGen::gen_index_store(const Inst& in) {
     // 属性访问因此是一条固定偏移的 movq，没有查表、没有哈希。
 void AsmGen::gen_obj_new(const Inst& in) {
         const IRClass& c = m_->classes[static_cast<size_t>(in.imm)];
-        line(std::format("movq ${}, %rdi", 8 * (c.n_fields + 1)));
+        emit_imm_op("movq", 8 * (c.n_fields + 1), "%rdi");
         bool has_heap = std::ranges::any_of(c.field_heap, [](uint8_t v) { return v != 0; });
         if (has_heap) {
             line(std::format("leaq .Ldtor{}(%rip), %rsi", in.imm));
@@ -161,14 +161,14 @@ void AsmGen::gen_obj_new(const Inst& in) {
     }
 
 void AsmGen::gen_field_load(const Inst& in) {
-        line(std::format("movq {}, %rax", src_op(in.a)));
+        emit2("movq", src_op(in.a), "%rax");
         line(std::format("movq {}(%rax), %rax", in.imm));
         move_to(dst_op(in.dst), "%rax");
     }
 
 void AsmGen::gen_field_store(const Inst& in) {
-        line(std::format("movq {}, %rax", src_op(in.a)));
-        line(std::format("movq {}, %rcx", src_op(in.b)));
+        emit2("movq", src_op(in.a), "%rax");
+        emit2("movq", src_op(in.b), "%rcx");
         line(std::format("movq %rcx, {}(%rax)", in.imm));
     }
 
@@ -188,36 +188,36 @@ void AsmGen::gen_vcall(const Inst& in) {
         int stack_bytes = stack_args * 8;
         int alloc = (stack_bytes + 15) & ~15;
 
-        line(std::format("movq {}, %r10", src_op(in.a)));
+        emit2("movq", src_op(in.a), "%r10");
         line("movq (%r10), %r11");
         line(std::format("movq {}(%r11), %r11", in.imm * 8));
 
-        if (alloc) line(std::format("subq ${}, %rsp", alloc));
+        if (alloc) emit_imm_op("subq", alloc, "%rsp");
         for (size_t i = 0; i < in.args.size(); ++i) {
             const auto& l = locs[i + 1];
             if (l.stack_off < 0) continue;
-            line(std::format("movq {}, %r10", src_op(in.args[i])));
+            emit2("movq", src_op(in.args[i]), "%r10");
             line(std::format("movq %r10, {}(%rsp)", l.stack_off));
         }
-        line(std::format("movq {}, %rdi", src_op(in.a)));
+        emit2("movq", src_op(in.a), "%rdi");
         for (size_t i = 0; i < in.args.size(); ++i) {
             const auto& l = locs[i + 1];
             if (l.stack_off >= 0) continue;
             if (l.fp)
                 line(std::format("movsd {}, %xmm{}", src_op(in.args[i]), l.reg));
             else
-                line(std::format("movq {}, {}", src_op(in.args[i]), kIntArgRegs[l.reg]));
+                emit2("movq", src_op(in.args[i]), kIntArgRegs[l.reg]);
         }
         line("xorl %r10d, %r10d");
         if (opt_ < 2) line("xorl %eax, %eax");
         spill_fp_slots();
         line("call *%r11");
         reload_fp_slots();
-        if (alloc) line(std::format("addq ${}, %rsp", alloc));
+        if (alloc) emit_imm_op("addq", alloc, "%rsp");
 
         if (in.dst != kNoReg) {
-            if (ir_is_float(in.ty)) line(std::format("movsd %xmm0, {}", dst_op(in.dst)));
-            else line(std::format("movq %rax, {}", dst_op(in.dst)));
+            if (ir_is_float(in.ty)) emit2("movsd", "%xmm0", dst_op(in.dst));
+            else emit2("movq", "%rax", dst_op(in.dst));
         }
     }
 
@@ -231,15 +231,15 @@ void AsmGen::gen_vcall_static(const Inst& in) {
             if (l.stack_off >= 0) stack_args = (l.stack_off / 8) + 1;
         int alloc = (stack_args * 8 + 15) & ~15;
 
-        line(std::format("movq {}, %r10", src_op(in.a)));
+        emit2("movq", src_op(in.a), "%r10");
         line("movq (%r10), %r11");
         line(std::format("movq {}(%r11), %r11", in.imm * 8));
 
-        if (alloc) line(std::format("subq ${}, %rsp", alloc));
+        if (alloc) emit_imm_op("subq", alloc, "%rsp");
         for (size_t i = 0; i < in.args.size(); ++i) {
             const auto& l = locs[i];
             if (l.stack_off < 0) continue;
-            line(std::format("movq {}, %r10", src_op(in.args[i])));
+            emit2("movq", src_op(in.args[i]), "%r10");
             line(std::format("movq %r10, {}(%rsp)", l.stack_off));
         }
         for (size_t i = 0; i < in.args.size(); ++i) {
@@ -248,27 +248,27 @@ void AsmGen::gen_vcall_static(const Inst& in) {
             if (l.fp)
                 line(std::format("movsd {}, %xmm{}", src_op(in.args[i]), l.reg));
             else
-                line(std::format("movq {}, {}", src_op(in.args[i]), kIntArgRegs[l.reg]));
+                emit2("movq", src_op(in.args[i]), kIntArgRegs[l.reg]);
         }
         line("xorl %r10d, %r10d");
         if (opt_ < 2) line("xorl %eax, %eax");
         spill_fp_slots();
         line("call *%r11");
         reload_fp_slots();
-        if (alloc) line(std::format("addq ${}, %rsp", alloc));
+        if (alloc) emit_imm_op("addq", alloc, "%rsp");
         if (in.dst != kNoReg) {
-            if (ir_is_float(in.ty)) line(std::format("movsd %xmm0, {}", dst_op(in.dst)));
-            else line(std::format("movq %rax, {}", dst_op(in.dst)));
+            if (ir_is_float(in.ty)) emit2("movsd", "%xmm0", dst_op(in.dst));
+            else emit2("movq", "%rax", dst_op(in.dst));
         }
     }
 
 void AsmGen::gen_super_vcall(const Inst& in) {
         // 运行期沿实例的动态 MRO 找 after 类之后的下一实现。查找要先做，
         // 因为它会走一次普通调用；找到的函数地址放 %r11 再装实参。
-        line(std::format("movq {}, %rdi", src_op(in.a)));
-        line(std::format("movq ${}, %rsi", in.idx));
-        line(std::format("movq ${}, %rdx", in.imm));
-        line(std::format("movq {}, %rcx", src_op(in.b)));
+        emit2("movq", src_op(in.a), "%rdi");
+        emit_imm_op("movq", in.idx, "%rsi");
+        emit_imm_op("movq", in.imm, "%rdx");
+        emit2("movq", src_op(in.b), "%rcx");
         spill_fp_slots();
         line("call py23_super_lookup");
         reload_fp_slots();
@@ -284,32 +284,32 @@ void AsmGen::gen_super_vcall(const Inst& in) {
             if (l.stack_off >= 0) stack_args = (l.stack_off / 8) + 1;
         int alloc = (stack_args * 8 + 15) & ~15;
 
-        if (alloc) line(std::format("subq ${}, %rsp", alloc));
+        if (alloc) emit_imm_op("subq", alloc, "%rsp");
         for (size_t i = 0; i < in.args.size(); ++i) {
             const auto& l = locs[i + 1];
             if (l.stack_off < 0) continue;
-            line(std::format("movq {}, %r10", src_op(in.args[i])));
+            emit2("movq", src_op(in.args[i]), "%r10");
             line(std::format("movq %r10, {}(%rsp)", l.stack_off));
         }
-        line(std::format("movq {}, %rdi", src_op(in.a)));
+        emit2("movq", src_op(in.a), "%rdi");
         for (size_t i = 0; i < in.args.size(); ++i) {
             const auto& l = locs[i + 1];
             if (l.stack_off >= 0) continue;
             if (l.fp)
                 line(std::format("movsd {}, %xmm{}", src_op(in.args[i]), l.reg));
             else
-                line(std::format("movq {}, {}", src_op(in.args[i]), kIntArgRegs[l.reg]));
+                emit2("movq", src_op(in.args[i]), kIntArgRegs[l.reg]);
         }
         line("xorl %r10d, %r10d");
         if (opt_ < 2) line("xorl %eax, %eax");
         spill_fp_slots();
         line("call *%r11");
         reload_fp_slots();
-        if (alloc) line(std::format("addq ${}, %rsp", alloc));
+        if (alloc) emit_imm_op("addq", alloc, "%rsp");
 
         if (in.dst != kNoReg) {
-            if (ir_is_float(in.ty)) line(std::format("movsd %xmm0, {}", dst_op(in.dst)));
-            else line(std::format("movq %rax, {}", dst_op(in.dst)));
+            if (ir_is_float(in.ty)) emit2("movsd", "%xmm0", dst_op(in.dst));
+            else emit2("movq", "%rax", dst_op(in.dst));
         }
     }
 
@@ -323,11 +323,11 @@ void AsmGen::gen_call_direct(const Inst& in) {
             if (l.stack_off >= 0) stack_args = (l.stack_off / 8) + 1;
         int alloc = (stack_args * 8 + 15) & ~15;
 
-        if (alloc) line(std::format("subq ${}, %rsp", alloc));
+        if (alloc) emit_imm_op("subq", alloc, "%rsp");
         for (size_t i = 0; i < in.args.size(); ++i) {
             const auto& l = locs[i];
             if (l.stack_off < 0) continue;
-            line(std::format("movq {}, %r10", src_op(in.args[i])));
+            emit2("movq", src_op(in.args[i]), "%r10");
             line(std::format("movq %r10, {}(%rsp)", l.stack_off));
         }
         for (size_t i = 0; i < in.args.size(); ++i) {
@@ -336,7 +336,7 @@ void AsmGen::gen_call_direct(const Inst& in) {
             if (l.fp)
                 line(std::format("movsd {}, %xmm{}", src_op(in.args[i]), l.reg));
             else
-                line(std::format("movq {}, {}", src_op(in.args[i]), kIntArgRegs[l.reg]));
+                emit2("movq", src_op(in.args[i]), kIntArgRegs[l.reg]);
         }
         // 不读闭包环境的 callee 不需要 %r10；有 env 槽的才清零占位。
         const IRFunction* callee =
@@ -348,41 +348,41 @@ void AsmGen::gen_call_direct(const Inst& in) {
         spill_fp_slots();
         line(std::format("call {}", func_label(in.idx)));
         reload_fp_slots();
-        if (alloc) line(std::format("addq ${}, %rsp", alloc));
+        if (alloc) emit_imm_op("addq", alloc, "%rsp");
         if (in.dst != kNoReg) {
-            if (ir_is_float(in.ty)) line(std::format("movsd %xmm0, {}", dst_op(in.dst)));
-            else line(std::format("movq %rax, {}", dst_op(in.dst)));
+            if (ir_is_float(in.ty)) emit2("movsd", "%xmm0", dst_op(in.dst));
+            else emit2("movq", "%rax", dst_op(in.dst));
         }
     }
 
 void AsmGen::gen_branch(const Inst& in) {
         TypePtr ty = ty_of(in.a);
         if (ir_is_float(ty)) {
-            line(std::format("movsd {}, %xmm0", src_op(in.a)));
+            emit2("movsd", src_op(in.a), "%xmm0");
             line("xorpd %xmm1, %xmm1");
             line("ucomisd %xmm1, %xmm0");
-            line(std::format("jne {}", block_label(in.target)));
-            line(std::format("jp {}", block_label(in.target)));
-            line(std::format("jmp {}", block_label(in.target2)));
+            emit_jmp("jne", block_label(in.target));
+            emit_jmp("jp", block_label(in.target));
+            emit_jmp("jmp", block_label(in.target2));
             return;
         }
         if (ty && (ty->kind == TyKind::Str || ty->kind == TyKind::List ||
                    ty->kind == TyKind::Tuple || ty->kind == TyKind::Dict ||
                    ty->kind == TyKind::Set)) {
-            line(std::format("movq {}, %rax", src_op(in.a)));
+            emit2("movq", src_op(in.a), "%rax");
             line("cmpq $0, (%rax)");
-            line(std::format("jne {}", block_label(in.target)));
-            line(std::format("jmp {}", block_label(in.target2)));
+            emit_jmp("jne", block_label(in.target));
+            emit_jmp("jmp", block_label(in.target2));
             return;
         }
         if (ty && ty->kind == TyKind::Complex) {
-            line(std::format("movq {}, %rax", src_op(in.a)));
+            emit2("movq", src_op(in.a), "%rax");
             line("xorpd %xmm1, %xmm1");
             line("ucomisd 8(%rax), %xmm1");
-            line(std::format("jne {}", block_label(in.target)));
+            emit_jmp("jne", block_label(in.target));
             line("ucomisd 16(%rax), %xmm1");
-            line(std::format("jne {}", block_label(in.target)));
-            line(std::format("jmp {}", block_label(in.target2)));
+            emit_jmp("jne", block_label(in.target));
+            emit_jmp("jmp", block_label(in.target2));
             return;
         }
         std::string sa = src_op(in.a);
@@ -391,17 +391,17 @@ void AsmGen::gen_branch(const Inst& in) {
             long long v = std::strtoll(sa.c_str() + 1, nullptr, 10);
             int tgt = v ? in.target : in.target2;
             if (!(opt_ >= 2 && tgt == cur_block_ + 1))
-                line(std::format("jmp {}", block_label(tgt)));
+                emit_jmp("jmp", block_label(tgt));
             return;
         }
-        line(std::format("cmpq $0, {}", sa));
+        emit2("cmpq", "$0", sa);
         if (opt_ >= 2 && in.target2 == cur_block_ + 1) {
-            line(std::format("jne {}", block_label(in.target)));
+            emit_jmp("jne", block_label(in.target));
         } else if (opt_ >= 2 && in.target == cur_block_ + 1) {
-            line(std::format("je {}", block_label(in.target2)));
+            emit_jmp("je", block_label(in.target2));
         } else {
-            line(std::format("jne {}", block_label(in.target)));
-            line(std::format("jmp {}", block_label(in.target2)));
+            emit_jmp("jne", block_label(in.target));
+            emit_jmp("jmp", block_label(in.target2));
         }
     }
 
@@ -409,9 +409,9 @@ void AsmGen::gen_return(const Inst& in) {
         if (in.a == kNoReg) {
             line("xorl %eax, %eax");
         } else if (is_fp(in.a)) {
-            line(std::format("movsd {}, %xmm0", src_op(in.a)));
+            emit2("movsd", src_op(in.a), "%xmm0");
         } else {
-            line(std::format("movq {}, %rax", src_op(in.a)));
+            emit2("movq", src_op(in.a), "%rax");
         }
         emit_epilogue();
     }
@@ -431,11 +431,11 @@ void AsmGen::gen_call(const Inst& in) {
 
         // 函数值是闭包对象指针：+0 是代码地址。整个参数装配期间 %r11
         // 一直握着闭包，最后既当环境指针传给被调函数，也从 +0 取地址调用。
-        line(std::format("movq {}, %r11", src_op(in.a)));
-        if (alloc) line(std::format("subq ${}, %rsp", alloc));
+        emit2("movq", src_op(in.a), "%r11");
+        if (alloc) emit_imm_op("subq", alloc, "%rsp");
         for (size_t i = 0; i < in.args.size(); ++i) {
             if (locs[i].stack_off < 0) continue;
-            line(std::format("movq {}, %r10", src_op(in.args[i])));
+            emit2("movq", src_op(in.args[i]), "%r10");
             line(std::format("movq %r10, {}(%rsp)", locs[i].stack_off));
         }
         for (size_t i = 0; i < in.args.size(); ++i) {
@@ -444,36 +444,36 @@ void AsmGen::gen_call(const Inst& in) {
             if (l.fp)
                 line(std::format("movsd {}, %xmm{}", src_op(in.args[i]), l.reg));
             else
-                line(std::format("movq {}, {}", src_op(in.args[i]), kIntArgRegs[l.reg]));
+                emit2("movq", src_op(in.args[i]), kIntArgRegs[l.reg]);
         }
         line("movq %r11, %r10");
         if (opt_ < 2) line("xorl %eax, %eax");
         spill_fp_slots();
         line("call *(%r11)");
         reload_fp_slots();
-        if (alloc) line(std::format("addq ${}, %rsp", alloc));
+        if (alloc) emit_imm_op("addq", alloc, "%rsp");
 
         if (in.dst != kNoReg) {
-            if (ir_is_float(in.ty)) line(std::format("movsd %xmm0, {}", dst_op(in.dst)));
-            else line(std::format("movq %rax, {}", dst_op(in.dst)));
+            if (ir_is_float(in.ty)) emit2("movsd", "%xmm0", dst_op(in.dst));
+            else emit2("movq", "%rax", dst_op(in.dst));
         }
     }
 
 void AsmGen::gen_setjmp(const Inst& in) {
         // handler 记录的第一个字段就是 jmp_buf，所以记录指针可以直接
         // 作为 setjmp 的参数。longjmp 回来后 $rax 非 0。
-        line(std::format("movq {}, %rdi", src_op(in.a)));
+        emit2("movq", src_op(in.a), "%rdi");
         line("call setjmp");
         line("movslq %eax, %rax");
-        line(std::format("movq %rax, {}", dst_op(in.dst)));
+        emit2("movq", "%rax", dst_op(in.dst));
     }
 
 void AsmGen::gen_call_rt(const Inst& in) {
         auto fn = static_cast<RtFn>(in.imm);
         switch (fn) {
             case RtFn::ListNew:
-                line(std::format("movq {}, %rdi", src_op(in.args[0])));
-                line(std::format("movq {}, %rsi", src_op(in.args[1])));
+                emit2("movq", src_op(in.args[0]), "%rdi");
+                emit2("movq", src_op(in.args[1]), "%rsi");
                 break;
             case RtFn::ListAppend:
             case RtFn::ListGet:
@@ -498,17 +498,17 @@ void AsmGen::gen_call_rt(const Inst& in) {
             case RtFn::IntToBase:
             case RtFn::RoundI64:
             case RtFn::FileOpen:
-                line(std::format("movq {}, %rdi", src_op(in.args[0])));
-                line(std::format("movq {}, %rsi", src_op(in.args[1])));
-                line(std::format("movq {}, %rdx", src_op(in.args[2])));
-                line(std::format("movq {}, %rcx", src_op(in.args[3])));
-                line(std::format("movq {}, %r8", src_op(in.args[4])));
-                line(std::format("movq {}, %r9", src_op(in.args[5])));
+                emit2("movq", src_op(in.args[0]), "%rdi");
+                emit2("movq", src_op(in.args[1]), "%rsi");
+                emit2("movq", src_op(in.args[2]), "%rdx");
+                emit2("movq", src_op(in.args[3]), "%rcx");
+                emit2("movq", src_op(in.args[4]), "%r8");
+                emit2("movq", src_op(in.args[5]), "%r9");
                 break;
             case RtFn::FileSeek:
-                line(std::format("movq {}, %rdi", src_op(in.args[0])));
-                line(std::format("movq {}, %rsi", src_op(in.args[1])));
-                line(std::format("movq {}, %rdx", src_op(in.args[2])));
+                emit2("movq", src_op(in.args[0]), "%rdi");
+                emit2("movq", src_op(in.args[1]), "%rsi");
+                emit2("movq", src_op(in.args[2]), "%rdx");
                 break;
             case RtFn::ListSort:
             case RtFn::SortedList:
@@ -529,8 +529,8 @@ void AsmGen::gen_call_rt(const Inst& in) {
             case RtFn::FileReadLine:
             case RtFn::FileReadLines:
             case RtFn::FileTruncate:
-                line(std::format("movq {}, %rdi", src_op(in.args[0])));
-                line(std::format("movq {}, %rsi", src_op(in.args[1])));
+                emit2("movq", src_op(in.args[0]), "%rdi");
+                emit2("movq", src_op(in.args[1]), "%rsi");
                 break;
             case RtFn::GenSendOpt:
             case RtFn::ListSet:
@@ -545,37 +545,37 @@ void AsmGen::gen_call_rt(const Inst& in) {
             case RtFn::ListInsert:
             case RtFn::SetFromList:
             case RtFn::FileConfig:
-                line(std::format("movq {}, %rdi", src_op(in.args[0])));
-                line(std::format("movq {}, %rsi", src_op(in.args[1])));
-                line(std::format("movq {}, %rdx", src_op(in.args[2])));
+                emit2("movq", src_op(in.args[0]), "%rdi");
+                emit2("movq", src_op(in.args[1]), "%rsi");
+                emit2("movq", src_op(in.args[2]), "%rdx");
                 break;
             case RtFn::ListSlice:
             case RtFn::StrSlice:
-                line(std::format("movq {}, %rdi", src_op(in.args[0])));
-                line(std::format("movq {}, %rsi", src_op(in.args[1])));
-                line(std::format("movq {}, %rdx", src_op(in.args[2])));
-                line(std::format("movq {}, %rcx", src_op(in.args[3])));
+                emit2("movq", src_op(in.args[0]), "%rdi");
+                emit2("movq", src_op(in.args[1]), "%rsi");
+                emit2("movq", src_op(in.args[2]), "%rdx");
+                emit2("movq", src_op(in.args[3]), "%rcx");
                 break;
             case RtFn::DictPop:
             case RtFn::ListSliceAssign:
             case RtFn::SuperLookup:
-                line(std::format("movq {}, %rdi", src_op(in.args[0])));
-                line(std::format("movq {}, %rsi", src_op(in.args[1])));
-                line(std::format("movq {}, %rdx", src_op(in.args[2])));
-                line(std::format("movq {}, %rcx", src_op(in.args[3])));
+                emit2("movq", src_op(in.args[0]), "%rdi");
+                emit2("movq", src_op(in.args[1]), "%rsi");
+                emit2("movq", src_op(in.args[2]), "%rdx");
+                emit2("movq", src_op(in.args[3]), "%rcx");
                 if (in.args.size() > 4)
-                    line(std::format("movq {}, %r8", src_op(in.args[4])));
+                    emit2("movq", src_op(in.args[4]), "%r8");
                 break;
             case RtFn::StrMethod:
-                line(std::format("movq {}, %rdi", src_op(in.args[0])));
-                line(std::format("movq {}, %rsi", src_op(in.args[1])));
-                line(std::format("movq {}, %rdx", src_op(in.args[2])));
-                line(std::format("movq {}, %rcx", src_op(in.args[3])));
-                line(std::format("movq {}, %r8", src_op(in.args[4])));
+                emit2("movq", src_op(in.args[0]), "%rdi");
+                emit2("movq", src_op(in.args[1]), "%rsi");
+                emit2("movq", src_op(in.args[2]), "%rdx");
+                emit2("movq", src_op(in.args[3]), "%rcx");
+                emit2("movq", src_op(in.args[4]), "%r8");
                 break;
             case RtFn::Raise:
-                line(std::format("movq {}, %rdi", src_op(in.args[0])));
-                line(std::format("movq {}, %rsi", src_op(in.args[1])));
+                emit2("movq", src_op(in.args[0]), "%rdi");
+                emit2("movq", src_op(in.args[1]), "%rsi");
                 break;
             case RtFn::StrFromI64:
             case RtFn::StrFromBool:
@@ -684,11 +684,11 @@ void AsmGen::gen_call_rt(const Inst& in) {
             case RtFn::AsyncioTaskResult:
             case RtFn::AsyncioTaskException:
             case RtFn::AsyncioTaskCancelled:
-                line(std::format("movq {}, %rdi", src_op(in.args[0])));
+                emit2("movq", src_op(in.args[0]), "%rdi");
                 break;
             case RtFn::AsyncioWaitFd:
-                line(std::format("movq {}, %rdi", src_op(in.args[0])));
-                line(std::format("movq {}, %rsi", src_op(in.args[1])));
+                emit2("movq", src_op(in.args[0]), "%rdi");
+                emit2("movq", src_op(in.args[1]), "%rsi");
                 break;
             case RtFn::ComplexAdd:
             case RtFn::ComplexSub:
@@ -707,33 +707,33 @@ void AsmGen::gen_call_rt(const Inst& in) {
             case RtFn::FmtStr:
             case RtFn::FmtComplex:
             case RtFn::AsyncGenAthrow:
-                line(std::format("movq {}, %rdi", src_op(in.args[0])));
-                line(std::format("movq {}, %rsi", src_op(in.args[1])));
+                emit2("movq", src_op(in.args[0]), "%rdi");
+                emit2("movq", src_op(in.args[1]), "%rsi");
                 break;
             case RtFn::GenNextOpt:
             case RtFn::GenSend:
             case RtFn::AsyncGenAsend:
-                line(std::format("movq {}, %rdi", src_op(in.args[0])));
-                line(std::format("movq {}, %rsi", src_op(in.args[1])));
+                emit2("movq", src_op(in.args[0]), "%rdi");
+                emit2("movq", src_op(in.args[1]), "%rsi");
                 break;
             case RtFn::FmtF64:
-                line(std::format("movsd {}, %xmm0", src_op(in.args[0])));
-                line(std::format("movq {}, %rdi", src_op(in.args[1])));
+                emit2("movsd", src_op(in.args[0]), "%xmm0");
+                emit2("movq", src_op(in.args[1]), "%rdi");
                 break;
             case RtFn::RoundF64:
-                line(std::format("movsd {}, %xmm0", src_op(in.args[0])));
-                line(std::format("movq {}, %rdi", src_op(in.args[1])));
+                emit2("movsd", src_op(in.args[0]), "%xmm0");
+                emit2("movq", src_op(in.args[1]), "%rdi");
                 break;
             case RtFn::ListSumF64:
-                line(std::format("movq {}, %rdi", src_op(in.args[0])));
-                line(std::format("movsd {}, %xmm0", src_op(in.args[1])));
+                emit2("movq", src_op(in.args[0]), "%rdi");
+                emit2("movsd", src_op(in.args[1]), "%xmm0");
                 break;
             case RtFn::ComplexNew:
-                line(std::format("movsd {}, %xmm0", src_op(in.args[0])));
-                line(std::format("movsd {}, %xmm1", src_op(in.args[1])));
+                emit2("movsd", src_op(in.args[0]), "%xmm0");
+                emit2("movsd", src_op(in.args[1]), "%xmm1");
                 break;
             case RtFn::AsyncioSleep:
-                line(std::format("movsd {}, %xmm0", src_op(in.args[0])));
+                emit2("movsd", src_op(in.args[0]), "%xmm0");
                 break;
             case RtFn::StrFromF64:
             case RtFn::PrintF64:
@@ -776,20 +776,20 @@ void AsmGen::gen_call_rt(const Inst& in) {
             case RtFn::MathModf:
             case RtFn::HashF64:
             case RtFn::AsyncTimeoutNew:
-                line(std::format("movsd {}, %xmm0", src_op(in.args[0])));
+                emit2("movsd", src_op(in.args[0]), "%xmm0");
                 break;
             case RtFn::MathLdexp:
-                line(std::format("movsd {}, %xmm0", src_op(in.args[0])));
-                line(std::format("movq {}, %rdi", src_op(in.args[1])));
+                emit2("movsd", src_op(in.args[0]), "%xmm0");
+                emit2("movq", src_op(in.args[1]), "%rdi");
                 break;
             case RtFn::AsyncioWaitFor:
-                line(std::format("movq {}, %rdi", src_op(in.args[0])));
-                line(std::format("movsd {}, %xmm0", src_op(in.args[1])));
+                emit2("movq", src_op(in.args[0]), "%rdi");
+                emit2("movsd", src_op(in.args[1]), "%xmm0");
                 break;
             case RtFn::MathFma:
-                line(std::format("movsd {}, %xmm0", src_op(in.args[0])));
-                line(std::format("movsd {}, %xmm1", src_op(in.args[1])));
-                line(std::format("movsd {}, %xmm2", src_op(in.args[2])));
+                emit2("movsd", src_op(in.args[0]), "%xmm0");
+                emit2("movsd", src_op(in.args[1]), "%xmm1");
+                emit2("movsd", src_op(in.args[2]), "%xmm2");
                 break;
             case RtFn::MathPow:
             case RtFn::MathFmod:
@@ -799,14 +799,14 @@ void AsmGen::gen_call_rt(const Inst& in) {
             case RtFn::MathNextafter:
             case RtFn::MathRemainder:
             case RtFn::MathIsclose:
-                line(std::format("movsd {}, %xmm0", src_op(in.args[0])));
-                line(std::format("movsd {}, %xmm1", src_op(in.args[1])));
+                emit2("movsd", src_op(in.args[0]), "%xmm0");
+                emit2("movsd", src_op(in.args[1]), "%xmm1");
                 break;
             case RtFn::SysExit:
-                line(std::format("movq {}, %rdi", src_op(in.args[0])));
+                emit2("movq", src_op(in.args[0]), "%rdi");
                 break;
             case RtFn::PrintStr:
-                line(std::format("movq {}, %rdi", src_op(in.args[0])));
+                emit2("movq", src_op(in.args[0]), "%rdi");
                 break;
             case RtFn::StrFromNone:
             case RtFn::PanicDiv0:
@@ -837,8 +837,8 @@ void AsmGen::gen_call_rt(const Inst& in) {
         line(std::format("call {}", rt_name(fn)));
         reload_fp_slots();
         if (in.dst != kNoReg) {
-            if (ir_is_float(in.ty)) line(std::format("movsd %xmm0, {}", dst_op(in.dst)));
-            else line(std::format("movq %rax, {}", dst_op(in.dst)));
+            if (ir_is_float(in.ty)) emit2("movsd", "%xmm0", dst_op(in.dst));
+            else emit2("movq", "%rax", dst_op(in.dst));
         }
     }
 

@@ -88,6 +88,7 @@ void AsmGen::emit_function(const IRFunction& f, int fi) {
         fi_ = fi;
         gen_ = f.is_generator;
         n_slots_ = static_cast<int>(f.slot_ty.size());
+        auto t_alloc = std::chrono::steady_clock::now();
         assign_vreg_slots();
         if (gen_) {
             slot_reg_.assign(f.slot_ty.size(), std::string());
@@ -95,7 +96,16 @@ void AsmGen::emit_function(const IRFunction& f, int fi) {
         } else {
             assign_slot_regs();
         }
+        assign_global_vreg_regs();
         assign_block_temp_regs();
+        build_operand_caches();
+        auto t_emit = std::chrono::steady_clock::now();
+        alloc_ns_ += std::chrono::duration<double, std::nano>(t_emit - t_alloc).count();
+        {
+            size_t ninst = 0;
+            for (const auto& b : f.blocks) ninst += b.insts.size();
+            out_.reserve(out_.size() + ninst * 20 + 256);
+        }
 
         out_ += std::format("\n# ---- {} ({}) ----\n", f.name, type_name(f.ret));
         label(func_label(fi));
@@ -126,9 +136,9 @@ void AsmGen::emit_function(const IRFunction& f, int fi) {
                 if (!is_param[s] && (!need || (*need)[static_cast<size_t>(s)])) {
                     std::string loc = slot_op(s);
                     if (loc.starts_with("%xmm"))
-                        line(std::format("xorpd {}, {}", loc, loc));
+                        emit2("xorpd", loc, loc);
                     else
-                        line(std::format("movq $0, {}", loc));
+                        emit2("movq", "$0", loc);
                 }
 
             // 形参落位
@@ -150,13 +160,13 @@ void AsmGen::emit_function(const IRFunction& f, int fi) {
             }
 
             // 有捕获的函数从 %r10 拿闭包环境；调用方在 call 前设置。
-            if (f.env_slot >= 0) line(std::format("movq %r10, {}", slot_op(f.env_slot)));
+            if (f.env_slot >= 0) emit2("movq", "%r10", slot_op(f.env_slot));
         }
 
         // 被导入模块的 init：先把自己的全局根表交给 GC，再跑顶层代码。
         if (!m_->is_entry && fi == m_->entry) {
             line(std::format("leaq {}(%rip), %rdi", roots_label()));
-            line(std::format("movq ${}, %rsi", local_global_count()));
+            emit_imm_op("movq", local_global_count(), "%rsi");
             spill_fp_slots();
             line("call py23_gc_add_roots");
             reload_fp_slots();
@@ -174,6 +184,9 @@ void AsmGen::emit_function(const IRFunction& f, int fi) {
             line("xorl %eax, %eax");
             emit_epilogue();
         }
+        emit_ns_ += std::chrono::duration<double, std::nano>(
+                        std::chrono::steady_clock::now() - t_emit)
+                        .count();
     }
 
 // ── 基本块 ──────────────────────────────────────────────────
@@ -227,13 +240,13 @@ void AsmGen::gen_cmp_branch(const Inst& in, const Inst& br) {
         bool sa_mem = is_mem_operand(sa);
         bool sb_mem = is_mem_operand(sb);
         if (sa_mem && sb_mem) {
-            line(std::format("movq {}, %rax", sa));
-            line(std::format("cmpq {}, %rax", sb));
+            emit2("movq", sa, "%rax");
+            emit2("cmpq", sb, "%rax");
         } else if (sa_mem || sa[0] == '%') {
-            line(std::format("cmpq {}, {}", sb, sa));
+            emit2("cmpq", sb, sa);
         } else {
-            line(std::format("movq {}, %rax", sa));
-            line(std::format("cmpq {}, %rax", sb));
+            emit2("movq", sa, "%rax");
+            emit2("cmpq", sb, "%rax");
         }
         const char* jcc = "je";
         const char* inv = "jne";
@@ -252,7 +265,7 @@ void AsmGen::gen_cmp_branch(const Inst& in, const Inst& br) {
             line(std::format("{} {}", jcc, block_label(br.target)));
         } else {
             line(std::format("{} {}", jcc, block_label(br.target)));
-            line(std::format("jmp {}", block_label(br.target2)));
+            emit_jmp("jmp", block_label(br.target2));
         }
     }
 
@@ -311,7 +324,7 @@ void AsmGen::gen_block(const Block& b) {
             // 只处理 32 位范围内的整数：x86 的 movq 立即数只有
             // 符号扩展的 32 位，更大的必须走 movabsq。
             if (fused_slot < 0 && is_deferable_const(in) && single_use_in_block(in.dst)) {
-                const_val_[in.dst] = in.imm;
+                const_val_[in.dst] = std::format("${}", in.imm);
                 ++i;
                 continue;
             }

@@ -2,12 +2,20 @@
 #include "codegen_impl.h"
 #include "codegen.h"
 
+#include <cstdio>
+#include <cstdlib>
+
 namespace py23 {
 
 std::string AsmGen::gen(const IRModule& m) {
         m_ = &m;
         opt_ = m.opt_level;
         out_.clear();
+        global_labels_.resize(m.globals.size());
+        for (size_t i = 0; i < m.globals.size(); ++i)
+            global_labels_[i] = m.globals[i].symbol.empty()
+                                    ? ".Lg" + std::to_string(i)
+                                    : m.globals[i].symbol;
 
         if (!m.strings.empty()) {
             // 字符串对象里有一个指向自身字符区的绝对地址。放在 .rodata
@@ -218,6 +226,9 @@ std::string AsmGen::gen(const IRModule& m) {
         }
         out_ += "\t.section .note.GNU-stack,\"\",@progbits\n";
 
+        if (std::getenv("PY23_TIMING"))
+            std::fprintf(stderr, "[timing] codegen alloc=%.1f emit=%.1f ms\n",
+                         alloc_ns_ / 1e6, emit_ns_ / 1e6);
         return std::move(out_);
     }
 

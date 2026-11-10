@@ -3,6 +3,9 @@
 
 namespace py23 {
 
+// 调用序列之外不会被指令生成器用到的临时寄存器（%r8–%r11）。
+static const char* const kTempRegs[] = {"%r8", "%r9", "%r10", "%r11"};
+
 // 栈帧 = push 下来的 callee-saved + 局部区。SysV 要求 call 时
     // rsp 是 16 的倍数，而 push 的个数会影响这个余数，所以把两者
     // 合起来算，只补最少的字节。
@@ -252,11 +255,7 @@ bool AsmGen::temp_reg_op_ok(const Inst& in) const {
     }
 
 void AsmGen::assign_block_temp_regs() {
-        vreg_reg_.assign(f_->vreg_ty.size(), std::string());
         if (opt_ < 1 || gen_) return;
-
-        static const char* kPool[] = {"%r8", "%r9", "%r10", "%r11"};
-        constexpr int kPoolSize = 4;
 
         for (const auto& b : f_->blocks) {
             bool safe = true;
@@ -317,8 +316,7 @@ void AsmGen::assign_block_temp_regs() {
             std::priority_queue<std::pair<int, std::string>, std::vector<std::pair<int, std::string>>,
                                 std::greater<>>
                 active;
-            std::vector<std::string> free;
-            for (int i = 0; i < kPoolSize; ++i) free.emplace_back(kPool[i]);
+            std::vector<std::string> free(block_temp_pool_.begin(), block_temp_pool_.end());
             for (const auto& r : ranges) {
                 while (!active.empty() && active.top().first < r.start) {
                     free.push_back(active.top().second);
@@ -331,6 +329,84 @@ void AsmGen::assign_block_temp_regs() {
                 active.push({r.end, std::move(reg)});
             }
         }
+    }
+
+// ── 跨块 vreg 提升 ──────────────────────────────────────────
+// ── 跨块 vreg 提升 ──────────────────────────────────────────
+    //
+    // 块内临时寄存器只给「定义和使用同块」的值；跨块的值（循环不变量、
+    // 合并结果、循环边界等）一直住栈槽。这里把局部变量没用到的
+    // callee-saved 寄存器按使用次数分给最热的跨块整型 vreg：
+    //   - 寄存器整函数独占，不与其他值复用，所以不需要活跃性分析；
+    //   - callee-saved 跨函数调用不会被破坏，only has_handlers 的函数
+    //     例外（longjmp 会回滚），整函数跳过；
+    //   - 不做支配性校验：IR 的 vreg 定义先于使用，整函数独占寄存器
+    //     天然满足「定义后一直有效」。
+    void AsmGen::assign_global_vreg_regs() {
+        const size_t nv = f_->vreg_ty.size();
+        vreg_reg_.assign(nv, std::string());
+        block_temp_pool_.assign(kTempRegs, kTempRegs + 4);
+        if (nv == 0) return;
+        if (opt_ < 2 || gen_ || f_->has_handlers) return;
+
+        struct Cand {
+            int v;
+            int uses;
+        };
+        std::vector<Cand> cands;
+        for (size_t v = 0; v < nv; ++v) {
+            if (!cross_block_[v]) continue;
+            TypePtr vt = f_->vreg_ty[v];
+            if (!vt || vt->kind == TyKind::Float || vt->kind == TyKind::Unknown ||
+                vt->kind == TyKind::Optional)
+                continue;
+            if (use_count_[v] == 0 || def_block_[v] < 0) continue;
+            cands.push_back(Cand{static_cast<int>(v), use_count_[v]});
+        }
+        if (cands.empty()) return;
+        std::ranges::sort(cands, [](const Cand& a, const Cand& b) {
+            return a.uses != b.uses ? a.uses > b.uses : a.v < b.v;
+        });
+        int next = n_saved_regs_;
+        size_t ci = 0;
+        for (; ci < cands.size() && next < kMaxSlotRegs; ++ci)
+            vreg_reg_[static_cast<size_t>(cands[ci].v)] = kSlotRegs[next++];
+        n_saved_regs_ = next;
+
+        // 无调用函数里 %r8–%r11 也不会被任何指令破坏：再拿至多两个
+        // 承载最热的跨块值，剩下的留给块内临时寄存器。
+        bool call_free = true;
+        for (const auto& b : f_->blocks) {
+            for (const auto& in : b.insts)
+                if (!temp_reg_op_ok(in)) {
+                    call_free = false;
+                    break;
+                }
+            if (!call_free) break;
+        }
+        if (call_free) {
+            int used = 0;
+            for (; ci < cands.size() && used < 2; ++ci, ++used)
+                vreg_reg_[static_cast<size_t>(cands[ci].v)] = kTempRegs[used];
+            if (used > 0) block_temp_pool_.assign(kTempRegs + used, kTempRegs + 4);
+        }
+    }
+
+// ── 生成期字符串缓存 ────────────────────────────────────────
+void AsmGen::build_operand_caches() {
+        block_labels_.resize(f_->blocks.size());
+        for (size_t i = 0; i < block_labels_.size(); ++i)
+            block_labels_[i] = std::format(".Lf{}_b{}", fi_, i);
+        vreg_mem_.resize(f_->vreg_ty.size());
+        for (size_t r = 0; r < vreg_mem_.size(); ++r)
+            vreg_mem_[r] = std::format("{}(%rbp)", vreg_off(static_cast<VReg>(r)));
+        smem_cache_.resize(f_->slot_ty.size());
+        for (size_t s = 0; s < smem_cache_.size(); ++s)
+            smem_cache_[s] = std::format("{}(%rbp)", slot_off(static_cast<int>(s)));
+        gen_smem_cache_.resize(f_->slot_ty.size());
+        for (size_t s = 0; s < gen_smem_cache_.size(); ++s)
+            gen_smem_cache_[s] =
+                std::format("{}(%r15)", 8 * (kGenHeader + static_cast<int>(s)));
     }
 
 // ── 函数 ────────────────────────────────────────────────────

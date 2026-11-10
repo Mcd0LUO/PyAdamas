@@ -6,6 +6,8 @@
 #pragma once
 
 #include <algorithm>
+#include <charconv>
+#include <chrono>
 #include <cstdint>
 #include <cstdlib>
 #include <cstring>
@@ -70,9 +72,8 @@ public:
         std::string gen(const IRModule& m);
 
 private:
-    std::string global_label(int i) const {
-        const auto& g = m_->globals[static_cast<size_t>(i)];
-        return g.symbol.empty() ? std::format(".Lg{}", i) : g.symbol;
+    const std::string& global_label(int i) const {
+        return global_labels_[static_cast<size_t>(i)];
     }
     std::string roots_label() const {
         return m_->module_symbol.empty() ? ".Lgroots"
@@ -98,6 +99,8 @@ private:
     int pos_ = 0;
     int label_id_ = 0;
     std::string out_;
+    double alloc_ns_ = 0;
+    double emit_ns_ = 0;
 
     // ── 位置状态（每次 emit_function 重建）──────────────────────
     //
@@ -120,8 +123,8 @@ private:
     // 块边界一律清空，所以跨块的值永远走栈槽，不会读到过期的寄存器。
     std::unordered_map<VReg, std::string> alias_;
 
-    // 能被写成立即数的常量。同样只在块内有效。
-    std::unordered_map<VReg, int64_t> const_val_;
+    // 能被写成立即数的常量。同样只在块内有效（保存 "$imm" 串）。
+    std::unordered_map<VReg, std::string> const_val_;
 
     // 本指令的 dst 该写到哪里。为空表示按 mem(dst)；非空是融合目标
     // （通常是一个变量寄存器），此时 mem(dst) 完全不参与。
@@ -134,8 +137,20 @@ private:
     // 块内临时寄存器：整块没有会调用/占用 %r8–%r11 的指令时，块内定义、
     // 块内用完的临时值直接住在寄存器里，mem(v) 返回它。块边界清空。
     std::vector<std::string> vreg_reg_;
+    // 块内临时寄存器可用池：无调用函数里被跨块提升占走的 %r8–%r11 会剔除。
+    std::vector<std::string> block_temp_pool_;
     bool temp_reg_op_ok(const Inst& in) const;
     void assign_block_temp_regs();
+
+    // 生成期缓存：块标签、vreg/槽的内存操作数串。这些字符串在函数内
+    // 固定不变，生成每条指令时反复 format 会占掉相当一部分编译时间。
+    std::vector<std::string> block_labels_;
+    std::vector<std::string> vreg_mem_;
+    std::vector<std::string> smem_cache_;
+    std::vector<std::string> gen_smem_cache_;
+    std::vector<std::string> global_labels_;
+    std::vector<std::string> func_labels_;
+    void build_operand_caches();
 
     // 当前块内的位置索引，gen_block 开头重建。
     std::unordered_map<int, std::vector<int>> block_stores_;
@@ -157,13 +172,46 @@ private:
 
     void comment(const std::string& s) { out_ += std::format("\t# {}\n", s); }
 
+    // 热路径的迷你发射器：直接拼接，绕开 std::format 的解析开销。
+    void emit2(const char* mn, const std::string& a, const std::string& b) {
+        out_ += '\t';
+        out_ += mn;
+        out_ += ' ';
+        out_ += a;
+        out_ += ", ";
+        out_ += b;
+        out_ += '\n';
+    }
+
+    void emit_imm_op(const char* mn, int64_t v, const std::string& b) {
+        char buf[32];
+        auto r = std::to_chars(buf, buf + sizeof buf, v);
+        out_ += '\t';
+        out_ += mn;
+        out_ += " $";
+        out_.append(buf, r.ptr);
+        out_ += ", ";
+        out_ += b;
+        out_ += '\n';
+    }
+
+    void emit_jmp(const char* mn, const std::string& target) {
+        out_ += '\t';
+        out_ += mn;
+        out_ += ' ';
+        out_ += target;
+        out_ += '\n';
+    }
+
+    void emit_imm_mem(const std::string& mem, int64_t v) { emit_imm_op("movq", v, mem); }
+
     std::string fresh_label(const char* tag) {
         return std::format(".L{}_{}", tag, label_id_++);
     }
 
     static std::string func_label(int i) { return std::format(".Lf{}", i); }
 
-    std::string block_label(int bi) const { return std::format(".Lf{}_b{}", fi_, bi); }
+    std::string block_label(int bi) const { return block_labels_[static_cast<size_t>(bi)]; }
 
     // 局部区必须从 push 下来的 callee-saved 寄存器**下面**开始：
     // rbp-8 起是 push 的内容，直接拿来当变量槽会把保存的寄存器覆盖掉，
@@ -175,20 +223,30 @@ private:
         return -8 * (n_saved_regs_ + n_slots_ + s + 1);
     }
 
-    std::string mem(VReg r) const {
+    const std::string& mem(VReg r) const {
         if (r < static_cast<VReg>(vreg_reg_.size()) && !vreg_reg_[r].empty())
             return vreg_reg_[r];
-        return std::format("{}(%rbp)", vreg_off(r));
+        if (r < static_cast<VReg>(vreg_mem_.size())) return vreg_mem_[r];
+        static const std::string kFallback = "0(%rbp)";
+        return kFallback;
     }
 
-    std::string smem(int slot) const { return std::format("{}(%rbp)", slot_off(slot)); }
+    const std::string& smem(int slot) const {
+        if (slot >= 0 && slot < static_cast<int>(smem_cache_.size()))
+            return smem_cache_[static_cast<size_t>(slot)];
+        static const std::string kFallback = "0(%rbp)";
+        return kFallback;
+    }
 
-    std::string gen_smem(int slot) const {
-        return std::format("{}(%r15)", 8 * (kGenHeader + slot));
+    const std::string& gen_smem(int slot) const {
+        if (slot >= 0 && slot < static_cast<int>(gen_smem_cache_.size()))
+            return gen_smem_cache_[static_cast<size_t>(slot)];
+        static const std::string kFallback = "0(%r15)";
+        return kFallback;
     }
 
     // 变量的现在位置：寄存器（提升过）或栈槽。
-    std::string slot_op(int slot) const {
+    const std::string& slot_op(int slot) const {
         if (gen_) return gen_smem(slot);
         if (slot >= 0 && slot < static_cast<int>(slot_reg_.size()) && !slot_reg_[slot].empty())
             return slot_reg_[slot];
@@ -197,12 +255,13 @@ private:
 
     // 读一个 vreg 的操作数。块内别名优先（别名指向的就是它的当前值），
     // 其次是可以直接当立即数用的常量，最后退回它自己的栈槽。
-    std::string src_op(VReg r) const {
-        if (r == kNoReg) return "$0";
+    const std::string& src_op(VReg r) const {
+        static const std::string kZero = "$0";
+        if (r == kNoReg) return kZero;
         auto it = alias_.find(r);
         if (it != alias_.end()) return it->second;
         auto ct = const_val_.find(r);
-        if (ct != const_val_.end()) return std::format("${}", ct->second);
+        if (ct != const_val_.end()) return ct->second;
         return mem(r);
     }
 
@@ -215,15 +274,22 @@ private:
     void move_to(const std::string& dst, const std::string& src) {
         if (dst == src) return;
         if (is_mem_operand(dst) && is_mem_operand(src)) {
-            line(std::format("movq {}, %rax", src));
-            line(std::format("movq %rax, {}", dst));
+            out_ += "\tmovq ";
+            out_ += src;
+            out_ += ", %rax\n\tmovq %rax, ";
+            out_ += dst;
+            out_ += '\n';
             return;
         }
-        line(std::format("movq {}, {}", src, dst));
+        out_ += "\tmovq ";
+        out_ += src;
+        out_ += ", ";
+        out_ += dst;
+        out_ += '\n';
     }
 
     // 本指令 dst 的落点。
-    std::string dst_op(VReg r) const {
+    const std::string& dst_op(VReg r) const {
         if (!dst_loc_.empty()) return dst_loc_;
         return mem(r);
     }
@@ -269,6 +335,11 @@ private:
     // 浮点变量不参与：xmm 全是 caller-saved，跨调用要自己 save/restore，
     // 收益抵不上复杂度。
     void assign_slot_regs();
+
+    // 跨块 vreg 提升：局部变量没占满的 callee-saved 寄存器分给跨块
+    // 整型临时值。用 CFG 活跃性算区间（覆盖循环回边），定义支配所有
+    // 使用的值才参与；调用不会破坏 callee-saved，所以跨调用也安全。
+    void assign_global_vreg_regs();
 
     // ── 函数 ────────────────────────────────────────────────────
     std::vector<ArgLoc> classify(const std::vector<TypePtr>& types) const;

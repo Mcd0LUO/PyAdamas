@@ -4,6 +4,7 @@
 
 #include <algorithm>
 #include <cctype>
+#include <chrono>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -648,11 +649,15 @@ py23::ModuleInfoPtr builtin_module(const std::string& name) {
 }
 
 bool build_unit(Program& p, ModuleUnit& u, bool emit_object, bool entry_ir) {
+    auto now = [] { return std::chrono::steady_clock::now(); };
+    const bool timing = std::getenv("PY23_TIMING") != nullptr;
+    auto t0 = now();
     auto tc = std::make_shared<py23::TypeChecker>(u.path);
     tc->set_module_lookup([&p](const std::string& name) -> py23::ModuleInfoPtr {
         return program_module(p, name);
     });
     tc->check(*u.ast);
+    auto t1 = now();
     if (!tc->diags().empty()) {
         for (auto& d : tc->diags()) report(u.path, u.source, d.line, d.col, d.msg);
         std::fprintf(stderr, "%zu error%s in %s\n", tc->diags().size(),
@@ -728,6 +733,7 @@ bool build_unit(Program& p, ModuleUnit& u, bool emit_object, bool entry_ir) {
         return program_module(p, name);
     };
     auto lr = py23::lower_module(*u.ast, *tc, u.path, opt);
+    auto t2 = now();
     if (!lr.errors.empty()) {
         for (auto& e : lr.errors) report(u.path, u.source, e.line, e.col, e.msg);
         std::fprintf(stderr, "%zu error%s in code generation (%s)\n", lr.errors.size(),
@@ -736,15 +742,31 @@ bool build_unit(Program& p, ModuleUnit& u, bool emit_object, bool entry_ir) {
     }
     if (entry_ir) {
         u.ir = std::move(lr.mod);
+        if (timing) {
+            auto ms = [](auto a, auto b) {
+                return std::chrono::duration<double, std::milli>(b - a).count();
+            };
+            std::fprintf(stderr, "[timing] %s check=%.1f lower=%.1f ms\n", u.name.c_str(),
+                         ms(t0, t1), ms(t1, t2));
+        }
         return true;
     }
     if (!emit_object) return true;
 
     u.asm_text = py23::generate_asm(lr.mod);
+    auto t3 = now();
     std::string err;
     if (!assemble_object(u, err)) {
         std::fprintf(stderr, "%s: error: %s\n", u.path.c_str(), err.c_str());
         return false;
+    }
+    auto t4 = now();
+    if (timing) {
+        auto ms = [](auto a, auto b) {
+            return std::chrono::duration<double, std::milli>(b - a).count();
+        };
+        std::fprintf(stderr, "[timing] %s check=%.1f lower=%.1f asm=%.1f cc=%.1f ms\n",
+                     u.name.c_str(), ms(t0, t1), ms(t1, t2), ms(t2, t3), ms(t3, t4));
     }
     if (!u.is_entry) {
         auto bytes = py23::encode_module_interface(*info);

@@ -9,6 +9,7 @@
       "binaryDir": "${sourceDir}/build/dev",
       "cacheVariables": {
         "CMAKE_BUILD_TYPE": "Debug",
+        "CMAKE_CXX_FLAGS_DEBUG": "-g -Og",
         "CMAKE_EXPORT_COMPILE_COMMANDS": "ON"
       }
     },

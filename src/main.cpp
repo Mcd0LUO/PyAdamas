@@ -13,6 +13,7 @@
 //   py23        <file.py>   等价于 ast
 #include <algorithm>
 #include <cctype>
+#include <chrono>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -232,7 +233,13 @@ int main(int argc, char** argv) {
             if (mode == "ir") {
                 py23::dump_ir(*prog.entry->ir, std::cout);
             } else {
-                std::cout << py23::generate_asm(*prog.entry->ir);
+                auto a = std::chrono::steady_clock::now();
+                std::string asm_text = py23::generate_asm(*prog.entry->ir);
+                auto b = std::chrono::steady_clock::now();
+                if (std::getenv("PY23_TIMING"))
+                    std::fprintf(stderr, "[timing] codegen=%.1f ms\n",
+                                 std::chrono::duration<double, std::milli>(b - a).count());
+                std::cout << asm_text;
             }
             return 0;
         }

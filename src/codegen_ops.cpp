@@ -37,12 +37,16 @@ void AsmGen::gen_inst(const Inst& in) {
                 invalidate_slot(in.idx);
                 break;
             case IrOp::LoadGlobal:
-                line(std::format("movq {}(%rip), %rax", global_label(in.idx)));
+                out_ += "\tmovq ";
+                out_ += global_label(in.idx);
+                out_ += "(%rip), %rax\n";
                 move_to(dst_op(in.dst), "%rax");
                 break;
             case IrOp::StoreGlobal:
-                line(std::format("movq {}, %rax", src_op(in.a)));
-                line(std::format("movq %rax, {}(%rip)", global_label(in.idx)));
+                emit2("movq", src_op(in.a), "%rax");
+                out_ += "\tmovq %rax, ";
+                out_ += global_label(in.idx);
+                out_ += "(%rip)\n";
                 break;
             case IrOp::MakeList: gen_make_list(in); break;
             case IrOp::MakeTuple: gen_make_list(in); break;
@@ -50,7 +54,7 @@ void AsmGen::gen_inst(const Inst& in) {
             case IrOp::IndexLoadUnchecked: gen_index_unchecked_load(in); break;
             case IrOp::IndexStore: gen_index_store(in); break;
             case IrOp::Len:
-                line(std::format("movq {}, %rax", src_op(in.a)));
+                emit2("movq", src_op(in.a), "%rax");
                 line("movq (%rax), %rax");
                 move_to(dst_op(in.dst), "%rax");
                 break;
@@ -75,29 +79,29 @@ void AsmGen::gen_inst(const Inst& in) {
             }
             case IrOp::Jump:
                 if (!(opt_ >= 2 && in.target == cur_block_ + 1))
-                    line(std::format("jmp {}", block_label(in.target)));
+                    emit_jmp("jmp", block_label(in.target));
                 break;
             case IrOp::Branch: gen_branch(in); break;
             case IrOp::Return: gen_return(in); break;
             case IrOp::SlotAddr: {
                 int slot = in.idx;
-                line(std::format("leaq {}, %rax", gen_ ? gen_smem(slot) : smem(slot)));
+                emit2("leaq", gen_ ? gen_smem(slot) : smem(slot), "%rax");
                 move_to(dst_op(in.dst), "%rax");
                 break;
             }
             case IrOp::GenNew: {
                 const auto& g = m_->generators[static_cast<size_t>(in.imm)];
-                line(std::format("movq ${}, %rdi", g.n_slots));
+                emit_imm_op("movq", g.n_slots, "%rdi");
                 line(std::format("leaq {}(%rip), %rsi", func_label(g.resume)));
                 line(std::format("leaq .Lgengcrel{}(%rip), %rdx", in.imm));
-                line(std::format("movq ${}, %rcx", g.frame_kind));
+                emit_imm_op("movq", g.frame_kind, "%rcx");
                 line("call py23_gen_new");
                 move_to(dst_op(in.dst), "%rax");
                 break;
             }
             case IrOp::GenSetSlot:
-                line(std::format("movq {}, %rax", src_op(in.args[0])));
-                line(std::format("movq {}, %rcx", src_op(in.args[1])));
+                emit2("movq", src_op(in.args[0]), "%rax");
+                emit2("movq", src_op(in.args[1]), "%rcx");
                 line(std::format("movq %rcx, {}(%rax)", 8 * (10 + in.idx)));
                 break;
             case IrOp::GenGetState:
@@ -117,18 +121,18 @@ void AsmGen::gen_inst(const Inst& in) {
                 move_to(dst_op(in.dst), "%rax");
                 break;
             case IrOp::GenYield:
-                if (in.a != kNoReg) line(std::format("movq {}, %rax", src_op(in.a)));
+                if (in.a != kNoReg) emit2("movq", src_op(in.a), "%rax");
                 else line("xorl %eax, %eax");
                 line("movq %rax, 24(%r15)");
-                line(std::format("movq ${}, 0(%r15)", in.imm));
+                emit_imm_mem("0(%r15)", in.imm);
                 line("xorl %eax, %eax");
                 emit_epilogue();
                 break;
             case IrOp::GenAwait:
-                if (in.a != kNoReg) line(std::format("movq {}, %rax", src_op(in.a)));
+                if (in.a != kNoReg) emit2("movq", src_op(in.a), "%rax");
                 else line("xorl %eax, %eax");
                 line("movq %rax, 24(%r15)");
-                line(std::format("movq ${}, 0(%r15)", in.imm));
+                emit_imm_mem("0(%r15)", in.imm);
                 line("movq $3, 8(%r15)");
                 line("xorl %eax, %eax");
                 emit_epilogue();
@@ -140,7 +144,7 @@ void AsmGen::gen_inst(const Inst& in) {
                 break;
             case IrOp::GenDone:
                 if (in.a != kNoReg) {
-                    line(std::format("movq {}, %rax", src_op(in.a)));
+                    emit2("movq", src_op(in.a), "%rax");
                     line("movq %rax, 24(%r15)");
                 }
                 line("movq $1, 8(%r15)");
@@ -179,12 +183,16 @@ void AsmGen::gen_load_slot(const Inst& in) {
     }
 
 void AsmGen::gen_const_int(const Inst& in) {
-        std::string d = dst_op(in.dst);
+        const std::string& d = dst_op(in.dst);
         if (in.imm >= INT32_MIN && in.imm <= INT32_MAX) {
-            line(std::format("movq ${}, {}", in.imm, d));
+            emit_imm_op("movq", in.imm, d);
         } else {
-            line(std::format("movabsq ${}, %rax", in.imm));
-            line(std::format("movq %rax, {}", d));
+            char buf[40];
+            auto r = std::to_chars(buf, buf + sizeof buf, static_cast<uint64_t>(in.imm), 16);
+            out_ += "\tmovabsq $0x";
+            out_.append(buf, r.ptr);
+            out_ += ", %rax\n";
+            emit2("movq", "%rax", d);
         }
     }
 
@@ -193,7 +201,7 @@ void AsmGen::gen_const_float(const Inst& in) {
         std::memcpy(&bits, &in.fimm, sizeof(bits));
         line(std::format("movabsq $0x{:x}, %rax", bits));
         line("movq %rax, %xmm0");
-        line(std::format("movsd %xmm0, {}", dst_op(in.dst)));
+        emit2("movsd", "%xmm0", dst_op(in.dst));
     }
 
 void AsmGen::gen_bin(const Inst& in) {
@@ -203,8 +211,8 @@ void AsmGen::gen_bin(const Inst& in) {
                 line("# unsupported string operator");
                 return;
             }
-            line(std::format("movq {}, %rdi", src_op(in.a)));
-            line(std::format("movq {}, %rsi", src_op(in.b)));
+            emit2("movq", src_op(in.a), "%rdi");
+            emit2("movq", src_op(in.b), "%rsi");
             spill_fp_slots();
             line("call py23_str_concat");
             reload_fp_slots();
@@ -228,42 +236,42 @@ void AsmGen::gen_bin_int(const Inst& in) {
         // 「搬到 rax、算、搬回去」两条指令。
         if (d[0] == '%' && sa == d) {
             switch (in.bop) {
-                case BinKind::Add: line(std::format("addq {}, {}", sb, d)); return;
-                case BinKind::Sub: line(std::format("subq {}, {}", sb, d)); return;
-                case BinKind::Mul: line(std::format("imulq {}, {}", sb, d)); return;
-                case BinKind::BitAnd: line(std::format("andq {}, {}", sb, d)); return;
-                case BinKind::BitOr: line(std::format("orq {}, {}", sb, d)); return;
-                case BinKind::BitXor: line(std::format("xorq {}, {}", sb, d)); return;
+                case BinKind::Add: emit2("addq", sb, d); return;
+                case BinKind::Sub: emit2("subq", sb, d); return;
+                case BinKind::Mul: emit2("imulq", sb, d); return;
+                case BinKind::BitAnd: emit2("andq", sb, d); return;
+                case BinKind::BitOr: emit2("orq", sb, d); return;
+                case BinKind::BitXor: emit2("xorq", sb, d); return;
                 case BinKind::Shl:
-                    line(std::format("movq {}, %rcx", sb));
-                    line(std::format("shlq %cl, {}", d));
+                    emit2("movq", sb, "%rcx");
+                    emit2("shlq", "%cl", d);
                     return;
                 case BinKind::Shr:
-                    line(std::format("movq {}, %rcx", sb));
-                    line(std::format("sarq %cl, {}", d));
+                    emit2("movq", sb, "%rcx");
+                    emit2("sarq", "%cl", d);
                     return;
                 default: break;  // 除法/取模/幂要用 rax/rdx，走通用路径
             }
         }
 
-        line(std::format("movq {}, %rax", sa));
+        emit2("movq", sa, "%rax");
         switch (in.bop) {
-            case BinKind::Add: line(std::format("addq {}, %rax", sb)); break;
-            case BinKind::Sub: line(std::format("subq {}, %rax", sb)); break;
-            case BinKind::Mul: line(std::format("imulq {}, %rax", sb)); break;
-            case BinKind::BitAnd: line(std::format("andq {}, %rax", sb)); break;
-            case BinKind::BitOr: line(std::format("orq {}, %rax", sb)); break;
-            case BinKind::BitXor: line(std::format("xorq {}, %rax", sb)); break;
+            case BinKind::Add: emit2("addq", sb, "%rax"); break;
+            case BinKind::Sub: emit2("subq", sb, "%rax"); break;
+            case BinKind::Mul: emit2("imulq", sb, "%rax"); break;
+            case BinKind::BitAnd: emit2("andq", sb, "%rax"); break;
+            case BinKind::BitOr: emit2("orq", sb, "%rax"); break;
+            case BinKind::BitXor: emit2("xorq", sb, "%rax"); break;
             case BinKind::Shl:
-                line(std::format("movq {}, %rcx", sb));
+                emit2("movq", sb, "%rcx");
                 line("shlq %cl, %rax");
                 break;
             case BinKind::Shr:
-                line(std::format("movq {}, %rcx", sb));
+                emit2("movq", sb, "%rcx");
                 line("sarq %cl, %rax");
                 break;
             case BinKind::Div:
-                line(std::format("movq {}, %rcx", sb));
+                emit2("movq", sb, "%rcx");
                 gen_div_guard();
                 line("cqto");
                 line("idivq %rcx");
@@ -271,8 +279,8 @@ void AsmGen::gen_bin_int(const Inst& in) {
             case BinKind::Mod: gen_mod(in); break;
             case BinKind::FloorDiv: gen_floordiv(in); break;
             case BinKind::Pow:
-                line(std::format("movq {}, %rdi", sa));
-                line(std::format("movq {}, %rsi", sb));
+                emit2("movq", sa, "%rdi");
+                emit2("movq", sb, "%rsi");
                 spill_fp_slots();
                 line("call py23_pow_i64");
                 reload_fp_slots();
@@ -287,14 +295,14 @@ void AsmGen::gen_div_guard() {
         std::string ok = fresh_label("divok");
         std::string ok2 = fresh_label("divok2");
         line("testq %rcx, %rcx");
-        line(std::format("jne {}", ok));
+        emit_jmp("jne", ok);
         line("call py23_panic_div0");
         label(ok);
         line("cmpq $-1, %rcx");
-        line(std::format("jne {}", ok2));
+        emit_jmp("jne", ok2);
         line("movabsq $0x8000000000000000, %r8");
         line("cmpq %r8, %rax");
-        line(std::format("jne {}", ok2));
+        emit_jmp("jne", ok2);
         line("call py23_panic_overflow");
         label(ok2);
     }
@@ -303,15 +311,15 @@ void AsmGen::gen_div_guard() {
     // 差 1 的修正必须做对，否则负数的 // 和 % 全是错的。
 void AsmGen::gen_floordiv(const Inst& in) {
         std::string done = fresh_label("fdiv");
-        line(std::format("movq {}, %rcx", src_op(in.b)));
+        emit2("movq", src_op(in.b), "%rcx");
         gen_div_guard();
         line("cqto");
         line("idivq %rcx");
         line("testq %rdx, %rdx");
-        line(std::format("je {}", done));
+        emit_jmp("je", done);
         line("movq %rdx, %r8");
         line("xorq %rcx, %r8");
-        line(std::format("jns {}", done));
+        emit_jmp("jns", done);
         line("decq %rax");
         label(done);
     }
@@ -320,15 +328,15 @@ void AsmGen::gen_floordiv(const Inst& in) {
     // 差一个除数，需要补回来。
 void AsmGen::gen_mod(const Inst& in) {
         std::string done = fresh_label("mod");
-        line(std::format("movq {}, %rcx", src_op(in.b)));
+        emit2("movq", src_op(in.b), "%rcx");
         gen_div_guard();
         line("cqto");
         line("idivq %rcx");
         line("testq %rdx, %rdx");
-        line(std::format("je {}", done));
+        emit_jmp("je", done);
         line("movq %rdx, %r8");
         line("xorq %rcx, %r8");
-        line(std::format("jns {}", done));
+        emit_jmp("jns", done);
         line("addq %rcx, %rdx");
         label(done);
         line("movq %rdx, %rax");
@@ -342,26 +350,26 @@ void AsmGen::gen_bin_fp(const Inst& in) {
         // 就地算。累加 `s = s + ...` 因此只剩一条 addsd。
         if (opt_ >= 1 && simple && d.starts_with("%xmm")) {
             std::string sa = src_op(in.a);
-            if (sa != d) line(std::format("movsd {}, {}", sa, d));
+            if (sa != d) emit2("movsd", sa, d);
             switch (in.bop) {
-                case BinKind::Add: line(std::format("addsd {}, {}", src_op(in.b), d)); break;
-                case BinKind::Sub: line(std::format("subsd {}, {}", src_op(in.b), d)); break;
-                case BinKind::Mul: line(std::format("mulsd {}, {}", src_op(in.b), d)); break;
-                case BinKind::Div: line(std::format("divsd {}, {}", src_op(in.b), d)); break;
+                case BinKind::Add: emit2("addsd", src_op(in.b), d); break;
+                case BinKind::Sub: emit2("subsd", src_op(in.b), d); break;
+                case BinKind::Mul: emit2("mulsd", src_op(in.b), d); break;
+                case BinKind::Div: emit2("divsd", src_op(in.b), d); break;
                 default: break;
             }
             return;
         }
-        line(std::format("movsd {}, %xmm0", src_op(in.a)));
+        emit2("movsd", src_op(in.a), "%xmm0");
         switch (in.bop) {
-            case BinKind::Add: line(std::format("addsd {}, %xmm0", src_op(in.b))); break;
-            case BinKind::Sub: line(std::format("subsd {}, %xmm0", src_op(in.b))); break;
-            case BinKind::Mul: line(std::format("mulsd {}, %xmm0", src_op(in.b))); break;
-            case BinKind::Div: line(std::format("divsd {}, %xmm0", src_op(in.b))); break;
+            case BinKind::Add: emit2("addsd", src_op(in.b), "%xmm0"); break;
+            case BinKind::Sub: emit2("subsd", src_op(in.b), "%xmm0"); break;
+            case BinKind::Mul: emit2("mulsd", src_op(in.b), "%xmm0"); break;
+            case BinKind::Div: emit2("divsd", src_op(in.b), "%xmm0"); break;
             case BinKind::FloorDiv:
                 // floor(a / b)：先除再向下取整。roundsd 要 SSE4.1，
                 // 为了兼容性走 libm。
-                line(std::format("divsd {}, %xmm0", src_op(in.b)));
+                emit2("divsd", src_op(in.b), "%xmm0");
                 spill_fp_slots();
                 line("call floor");
                 reload_fp_slots();
@@ -373,31 +381,31 @@ void AsmGen::gen_bin_fp(const Inst& in) {
                 // 所以 -0.0 % 3.0 是 0.0 而不是 -0.0。
                 std::string done = fresh_label("fmod");
                 std::string nz = fresh_label("fmodnz");
-                line(std::format("movsd {}, %xmm1", src_op(in.b)));
+                emit2("movsd", src_op(in.b), "%xmm1");
                 spill_fp_slots();
                 line("call fmod");
                 reload_fp_slots();
-                line(std::format("movsd {}, %xmm1", src_op(in.b)));
+                emit2("movsd", src_op(in.b), "%xmm1");
                 line("xorpd %xmm2, %xmm2");
                 line("ucomisd %xmm2, %xmm0");
-                line(std::format("jp {}", done));  // NaN 原样返回
-                line(std::format("jne {}", nz));
+                emit_jmp("jp", done);  // NaN 原样返回
+                emit_jmp("jne", nz);
                 line("movq %xmm1, %rdx");
                 line("movabsq $0x8000000000000000, %rax");
                 line("andq %rdx, %rax");
                 line("movq %rax, %xmm0");  // ±0.0，符号跟除数
-                line(std::format("jmp {}", done));
+                emit_jmp("jmp", done);
                 label(nz);
                 line("movq %xmm0, %rax");
                 line("movq %xmm1, %rdx");
                 line("xorq %rdx, %rax");
-                line(std::format("jns {}", done));  // 同号，无需修正
+                emit_jmp("jns", done);  // 同号，无需修正
                 line("addsd %xmm1, %xmm0");
                 label(done);
                 break;
             }
             case BinKind::Pow:
-                line(std::format("movsd {}, %xmm1", src_op(in.b)));
+                emit2("movsd", src_op(in.b), "%xmm1");
                 spill_fp_slots();
                 line("call pow");
                 reload_fp_slots();
@@ -406,7 +414,7 @@ void AsmGen::gen_bin_fp(const Inst& in) {
                 line("# unsupported float operator");
                 break;
         }
-        line(std::format("movsd %xmm0, {}", dst_op(in.dst)));
+        emit2("movsd", "%xmm0", dst_op(in.dst));
     }
 
 void AsmGen::gen_un(const Inst& in) {
@@ -415,26 +423,26 @@ void AsmGen::gen_un(const Inst& in) {
             emit_truth(in.a, "%al");
             line("xorb $1, %al");
             line("movzbq %al, %rax");
-            line(std::format("movq %rax, {}", dst_op(in.dst)));
+            emit2("movq", "%rax", dst_op(in.dst));
             return;
         }
         if (ir_is_float(ty)) {
             if (in.uop == UnKind::Neg) {
-                line(std::format("movsd {}, %xmm0", src_op(in.a)));
+                emit2("movsd", src_op(in.a), "%xmm0");
                 line("movabsq $0x8000000000000000, %rax");
                 line("movq %rax, %xmm1");
                 line("xorpd %xmm1, %xmm0");
-                line(std::format("movsd %xmm0, {}", dst_op(in.dst)));
+                emit2("movsd", "%xmm0", dst_op(in.dst));
             }
             return;
         }
-        line(std::format("movq {}, %rax", src_op(in.a)));
+        emit2("movq", src_op(in.a), "%rax");
         switch (in.uop) {
             case UnKind::Neg: line("negq %rax"); break;
             case UnKind::BitNot: line("notq %rax"); break;
             default: break;
         }
-        line(std::format("movq %rax, {}", dst_op(in.dst)));
+        emit2("movq", "%rax", dst_op(in.dst));
     }
 
 // 把一个值算成 0/1 放进 %al。浮点的 NaN 视为真（Python 语义），
@@ -443,7 +451,7 @@ void AsmGen::emit_truth(VReg r, const char* byte_reg) {
         (void)byte_reg;
         TypePtr ty = ty_of(r);
         if (ir_is_float(ty)) {
-            line(std::format("movsd {}, %xmm0", src_op(r)));
+            emit2("movsd", src_op(r), "%xmm0");
             line("xorpd %xmm1, %xmm1");
             line("ucomisd %xmm1, %xmm0");
             line("setne %al");
@@ -454,13 +462,13 @@ void AsmGen::emit_truth(VReg r, const char* byte_reg) {
         if (ty && (ty->kind == TyKind::Str || ty->kind == TyKind::List ||
                    ty->kind == TyKind::Tuple || ty->kind == TyKind::Dict ||
                    ty->kind == TyKind::Set)) {
-            line(std::format("movq {}, %rax", src_op(r)));
+            emit2("movq", src_op(r), "%rax");
             line("cmpq $0, (%rax)");
             line("setne %al");
             return;
         }
         if (ty && ty->kind == TyKind::Complex) {
-            line(std::format("movq {}, %rax", src_op(r)));
+            emit2("movq", src_op(r), "%rax");
             line("xorpd %xmm1, %xmm1");
             line("ucomisd 8(%rax), %xmm1");
             line("setne %al");
@@ -470,7 +478,7 @@ void AsmGen::emit_truth(VReg r, const char* byte_reg) {
             return;
         }
         if (ty && ty->kind == TyKind::Complex) {
-            line(std::format("movq {}, %rax", src_op(r)));
+            emit2("movq", src_op(r), "%rax");
             line("xorpd %xmm1, %xmm1");
             line("ucomisd 8(%rax), %xmm1");
             line("setne %al");
@@ -479,21 +487,21 @@ void AsmGen::emit_truth(VReg r, const char* byte_reg) {
             line("orb %cl, %al");
             return;
         }
-        line(std::format("cmpq $0, {}", src_op(r)));
+        emit2("cmpq", "$0", src_op(r));
         line("setne %al");
     }
 
 void AsmGen::gen_cmp(const Inst& in) {
         TypePtr ty = ty_of(in.a);
         if (ty && ty->kind == TyKind::Str) {
-            line(std::format("movq {}, %rdi", src_op(in.a)));
-            line(std::format("movq {}, %rsi", src_op(in.b)));
+            emit2("movq", src_op(in.a), "%rdi");
+            emit2("movq", src_op(in.b), "%rsi");
             if (in.cop == CmpKind::Eq || in.cop == CmpKind::Ne) {
                 spill_fp_slots();
                 line("call py23_str_eq");
                 reload_fp_slots();
                 if (in.cop == CmpKind::Ne) line("xorq $1, %rax");
-                line(std::format("movq %rax, {}", dst_op(in.dst)));
+                emit2("movq", "%rax", dst_op(in.dst));
                 return;
             }
             // 大小比较走三路比较。早先这里只留了一句注释、什么都不生成，
@@ -510,7 +518,7 @@ void AsmGen::gen_cmp(const Inst& in) {
                 default: break;
             }
             line("movzbq %al, %rax");
-            line(std::format("movq %rax, {}", dst_op(in.dst)));
+            emit2("movq", "%rax", dst_op(in.dst));
             return;
         }
         if (ir_is_float(ty)) {
@@ -525,13 +533,13 @@ void AsmGen::gen_cmp(const Inst& in) {
         bool sa_mem = is_mem_operand(sa);
         bool sb_mem = is_mem_operand(sb);
         if (sa_mem && sb_mem) {
-            line(std::format("movq {}, %rax", sa));
-            line(std::format("cmpq {}, %rax", sb));
+            emit2("movq", sa, "%rax");
+            emit2("cmpq", sb, "%rax");
         } else if (sa_mem || sa[0] == '%') {
-            line(std::format("cmpq {}, {}", sb, sa));
+            emit2("cmpq", sb, sa);
         } else {
-            line(std::format("movq {}, %rax", sa));
-            line(std::format("cmpq {}, %rax", sb));
+            emit2("movq", sa, "%rax");
+            emit2("cmpq", sb, "%rax");
         }
         switch (in.cop) {
             case CmpKind::Lt: line("setl %al"); break;
@@ -546,8 +554,8 @@ void AsmGen::gen_cmp(const Inst& in) {
     }
 
 void AsmGen::gen_cmp_fp(const Inst& in) {
-        line(std::format("movsd {}, %xmm0", src_op(in.a)));
-        line(std::format("ucomisd {}, %xmm0", src_op(in.b)));
+        emit2("movsd", src_op(in.a), "%xmm0");
+        emit2("ucomisd", src_op(in.b), "%xmm0");
         switch (in.cop) {
             case CmpKind::Lt:
                 line("setb %al");
@@ -577,7 +585,7 @@ void AsmGen::gen_cmp_fp(const Inst& in) {
                 break;
         }
         line("movzbq %al, %rax");
-        line(std::format("movq %rax, {}", dst_op(in.dst)));
+        emit2("movq", "%rax", dst_op(in.dst));
     }
 
 void AsmGen::gen_convert(const Inst& in) {
@@ -587,50 +595,50 @@ void AsmGen::gen_convert(const Inst& in) {
         if (to->kind == TyKind::Bool) {
             emit_truth(in.a, "%al");
             line("movzbq %al, %rax");
-            line(std::format("movq %rax, {}", dst_op(in.dst)));
+            emit2("movq", "%rax", dst_op(in.dst));
             return;
         }
         if (to->kind == TyKind::Float) {
             if (ir_is_float(from)) {
                 // 已经是 double，只搬一次
-                line(std::format("movq {}, %rax", src_op(in.a)));
-                line(std::format("movq %rax, {}", dst_op(in.dst)));
+                emit2("movq", src_op(in.a), "%rax");
+                emit2("movq", "%rax", dst_op(in.dst));
                 return;
             }
             // cvtsi2sd 的源必须是寄存器或内存，立即数不能直接转
             std::string sa = src_op(in.a);
             if (!is_mem_operand(sa) && sa[0] != '%') {
-                line(std::format("movq {}, %rax", sa));
+                emit2("movq", sa, "%rax");
                 sa = "%rax";
             }
-            line(std::format("cvtsi2sdq {}, %xmm0", sa));
-            line(std::format("movsd %xmm0, {}", dst_op(in.dst)));
+            emit2("cvtsi2sdq", sa, "%xmm0");
+            emit2("movsd", "%xmm0", dst_op(in.dst));
             return;
         }
         if (to->kind == TyKind::Int) {
             if (ir_is_float(from)) {
-                line(std::format("cvttsd2siq {}, %rax", src_op(in.a)));
-                line(std::format("movq %rax, {}", dst_op(in.dst)));
+                emit2("cvttsd2siq", src_op(in.a), "%rax");
+                emit2("movq", "%rax", dst_op(in.dst));
             } else {
-                line(std::format("movq {}, %rax", src_op(in.a)));
-                line(std::format("movq %rax, {}", dst_op(in.dst)));
+                emit2("movq", src_op(in.a), "%rax");
+                emit2("movq", "%rax", dst_op(in.dst));
             }
             return;
         }
         if (to->kind == TyKind::Str) {
             // 源类型已经是 str：什么都不用做，只补一条搬运
             if (from && from->kind == TyKind::Str) {
-                line(std::format("movq {}, %rax", src_op(in.a)));
-                line(std::format("movq %rax, {}", dst_op(in.dst)));
+                emit2("movq", src_op(in.a), "%rax");
+                emit2("movq", "%rax", dst_op(in.dst));
                 return;
             }
             if (ir_is_float(from)) {
-                line(std::format("movsd {}, %xmm0", src_op(in.a)));
+                emit2("movsd", src_op(in.a), "%xmm0");
                 spill_fp_slots();
                 line("call py23_str_from_f64");
                 reload_fp_slots();
             } else if (from && from->kind == TyKind::Bool) {
-                line(std::format("movq {}, %rdi", src_op(in.a)));
+                emit2("movq", src_op(in.a), "%rdi");
                 spill_fp_slots();
                 line("call py23_str_from_bool");
                 reload_fp_slots();
@@ -639,12 +647,12 @@ void AsmGen::gen_convert(const Inst& in) {
                 line("call py23_str_from_none");
                 reload_fp_slots();
             } else {
-                line(std::format("movq {}, %rdi", src_op(in.a)));
+                emit2("movq", src_op(in.a), "%rdi");
                 spill_fp_slots();
                 line("call py23_str_from_i64");
                 reload_fp_slots();
             }
-            line(std::format("movq %rax, {}", dst_op(in.dst)));
+            emit2("movq", "%rax", dst_op(in.dst));
             return;
         }
     }
