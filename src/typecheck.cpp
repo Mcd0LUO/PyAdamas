@@ -222,6 +222,15 @@ TypePtr TypeChecker::parse_annotation_impl(Expr* e, int line, int depth) {
             }
             return t_unknown();
         }
+        if (auto* at = dynamic_cast<Attribute*>(e)) {
+            if (auto* vn = dynamic_cast<Name*>(at->value.get())) {
+                if (auto mod = lookup_module_alias(vn->id); mod && mod->builtin) {
+                    if (mod->name == "random" && at->attr == "Random") return t_random();
+                    if (mod->name == "subprocess" && at->attr == "CompletedProcess")
+                        return t_completed();
+                }
+            }
+        }
         if (auto* b = dynamic_cast<BinOp*>(e); b && b->op == Tok::VBAR) {
             // int | None 这类联合类型
             auto l = parse_annotation(b->left.get(), line, depth);

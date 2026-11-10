@@ -77,7 +77,7 @@ py23 不追求兼容 CPython：语义是按静态类型的需要重新定的。�
 | 模块 | `ctest --preset dev` 里 `tests/modules/*/` | 8 个目录 | 分模块编译/链接、惰性初始化、缓存失效 |
 | 未建模 | `ctest --preset dev` 里 `tests/unsupported/*.py` | 2 个文件 | 「标了没建模、实际却悄悄编译过去」 |
 | 内存 | 16MB `RLIMIT_AS` 下跑压力程序 | 拼接 / 对象 / 闭包 / 容器 / 切片 / 删除 / 推导式 / 变长实参 / `with` / 装饰器 / 异常展开 / `yield from` / 异步推导式 / 环 / unknown 泄漏 | 引用计数或 GC 漏插桩、重复释放、误回收 |
-| 差分 | `python3 tests/diff/run_diff.py` | 随机程序 | 语义漂移、边界错误 |
+| 差分 | `py23 build` 后运行 `tests/diff/run_diff.py`（自举），也可 `python3` 直接跑 | 随机程序 | 语义漂移、边界错误 |
 
 ### 四类测试的写法
 
@@ -97,16 +97,22 @@ py23 不追求兼容 CPython：语义是按静态类型的需要重新定的。�
 | `expr` | 纯表达式：整数/浮点四则、位运算、整除取模 | 60 |
 | `struct` | 函数、循环、分支、变量复用 | 40 |
 | `float` | 浮点 `//` `%` 的符号修正、`print` 的 `sep`/`end` | 60 |
-| `repr` | 随机位模式的 `double`，专测浮点转字符串 | 40 |
+| `repr` | 浮点转字符串：固定边角值（0/-0、次正规、最大正规值）+ 十进制定标随机值 | 40 |
 | `gen` | 生成器迭代、`next`/`StopIteration`、`close` 清理 | 40 |
 | `async` | `asyncio.run`/`sleep(0)`/`gather`/`create_task`、异常跨 await、取消级联、Future、fd poll、异步生成器 + `async for`/`async with` | 30 |
 
 ```bash
-python3 tests/diff/run_diff.py                 # 3 个种子 = 810 个程序
-python3 tests/diff/run_diff.py --seeds 5       # 1350 个程序
+# 自举：runner 自己用 py23 编译执行（verify.sh 走这条；-- 之后是程序参数）
+./build/dev/py23 build -o /tmp/run_diff.prog tests/diff/run_diff.py
+/tmp/run_diff.prog --py23 build/dev/py23 --cpython python3 --seeds 3
+
+# 同一份脚本也能用 CPython 执行（随机引擎逐位一致，生成的用例相同）
+python3 tests/diff/run_diff.py --seeds 3
 python3 tests/diff/run_diff.py --seeds 10      # 2700 个程序，建议每次改后端都跑
 python3 tests/diff/run_diff.py --only repr     # 只跑浮点格式化
 ```
+
+py23 runner 串行执行（py23 没有线程/进程池），810 个程序约几分钟；CPython runner 也串行，行为与判定标准完全相同。
 
 判定标准：py23 退出码必须为 0（编译期错误算失败），stdout 与 CPython **逐字节相同**，stderr 不比（panic 消息是我们自己的）。
 

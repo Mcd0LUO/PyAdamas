@@ -4,6 +4,40 @@
 
 早期阶段没有逐条留痕，按阶段归纳；0.4 之后逐条记录。
 
+## [0.73] - 2026-11-10
+
+差分测试自举：`tests/diff/run_diff.py` 现在可以用 py23 自己执行。
+
+### 新增
+
+- `tests/diff/run_diff.py` / `generators.py` 改写为 py23 子集：去掉
+  `pathlib`/`dataclasses`/`argparse`/`tempfile`/`concurrent.futures`，
+  用 `os`/`os.path`/`random`/`subprocess`/`sys.argv` 重写；810 个差分
+  用例由 py23 编译执行 runner 后生成并比对。
+- 随机引擎逐位一致，同一份脚本在 py23 和 CPython 下生成的用例完全相同
+  （用 `--seeds/--only/--cases` 控制）；runner 串行执行。
+- `repr` 生成器不再依赖 `struct`/`getrandbits`（py23 没有 bytes 重解释），
+  改成固定边角值（0/-0、次正规、最大正规值）+ 十进制定标随机值。
+- `py23 run prog.py -- a b`：`--` 之后的参数原样传给被运行的程序。
+- 注解支持模块限定的原生类型：函数体里可以写
+  `r: random.Random = rng` / `p: subprocess.CompletedProcess = ...`
+  （函数签名注解在 import 处理前解析，这两个类型仍要在函数体内收窄）。
+
+### 修复
+
+- **unknown 值写入带标注的堆槽时引用计数失衡**：`store_slot` /
+  `store_global` / `store_field` 原来按源值类型决定 retain，源是 unknown
+  时不加引用，但函数出口按目标槽类型 release，导致对象被提前释放
+  （递归 + `r: random.Random = rng` 可稳定触发堆损坏）。现在按目标类型
+  判断，unknown 源走运行时的保守 inc（整数安全 no-op）。
+
+### 验证
+
+- 自举 runner 跑满 `--seeds 3`：810 个程序 0 失败；CPython 执行同一脚本
+  的输出逐字节相同。
+- `ctest --preset dev` 连跑 3 次、release 全绿；O0/O1 全量 52 个运行
+  用例通过；`verify.sh` 的差分段已切到 py23 runner。
+
 ## [0.72] - 2026-11-10
 
 运行时扩展：`random`、`os`/`os.path`、`subprocess` 三个内置模块。

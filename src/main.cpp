@@ -131,6 +131,7 @@ int main(int argc, char** argv) {
     std::string path;
     std::string output;
     std::vector<std::string> include_dirs;
+    std::vector<std::string> prog_args;
     bool syntax_only = false;
     bool verbose = false;
     bool rebuild = false;
@@ -162,6 +163,11 @@ int main(int argc, char** argv) {
         else if (a == "-o" && i + 1 < argc) output = argv[++i];
         else if (a == "-I" && i + 1 < argc) include_dirs.push_back(argv[++i]);
         else if (a.starts_with("-I") && a.size() > 2) include_dirs.push_back(a.substr(2));
+        else if (a == "--") {
+            // `py23 run prog.py -- a b`：余下参数原样传给被运行的程序。
+            for (++i; i < argc; ++i) prog_args.push_back(argv[i]);
+            break;
+        }
         else if (mode.empty() && std::ranges::find(kModes, a) != kModes.end()) mode = a;
         else path = a;
     }
@@ -271,6 +277,7 @@ int main(int argc, char** argv) {
             std::string run_path = out;
             if (run_path.find('/') == std::string::npos) run_path = "./" + run_path;
             std::string cmd = shell_quote(run_path);
+            for (auto& pa : prog_args) cmd += " " + shell_quote(pa);
             int rc = std::system(cmd.c_str());
             if (ephemeral) ::unlink(out.c_str());
             if (rc < 0) return 1;

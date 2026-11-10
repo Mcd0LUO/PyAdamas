@@ -86,12 +86,18 @@ print("hi")
 ### 差分测试
 
 ```bash
-python3 tests/diff/run_diff.py              # 3 个种子 = 810 个程序
+# 自举：runner 自己用 py23 执行
+./build/dev/py23 build -o /tmp/run_diff.prog tests/diff/run_diff.py
+/tmp/run_diff.prog --py23 build/dev/py23 --cpython python3 --seeds 3
+
+# 同一份脚本用 CPython 执行也行（随机序列一致，生成的用例相同）
 python3 tests/diff/run_diff.py --seeds 20   # 更多随机性
 python3 tests/diff/run_diff.py --only repr  # 只测浮点转字符串
 ```
 
-生成器在 `tests/diff/generators.py`，加新生成器就三步：写 `gen(rng, n)` 返回源码、在 `GENERATORS` 里登记、确认默认种子下零差异。
+`py23 run prog.py -- a b` 会把 `--` 之后的参数原样传给被运行的程序。
+
+生成器在 `tests/diff/generators.py`，加新生成器就三步：写 `gen(rng, n)` 返回源码、在 `GENERATOR_NAMES` / `default_cases` 与 `run_diff.py` 的分派里登记、确认默认种子下零差异。生成器本身也必须限制在 py23 子集内（不 import 第三方模块，`random.Random` 参数在函数体里用 `r: random.Random = rng` 收窄类型）。
 
 生成的程序必须两端都能跑通、输出一致；已知的语义分歧不要测（列在 [compatibility.md](compatibility.md)），否则只是制造噪音。
 
