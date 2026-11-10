@@ -383,7 +383,9 @@ a.speak()   →   a->vtable[0](a)   →   Dog::speak
 **终态类直接调用**：跨模块继承不支持，所以一个类的所有子类都在本模块
 可见。没有本模块类继承的类就是终态——方法调用点把 vtable 槽直接解析成
 函数下标，发 `call.direct fN`（构造点的 `__init__` 调用同理：对象是刚
-用这个类 `obj.new` 出来的，类型确定）。之后内联器还能继续把它内联。
+用这个类 `obj.new` 出来的，类型确定）。O2 内联器的调用图与内联点识别
+同时接受 `call` 和 `call.direct`，直接化之后再跑一轮，所以 `a.add(i)`
+这类小方法会真正摊平进调用点；递归边（含 `call.direct` 自递归）不内联。
 只有「静态类型存在子类」的接收者才走上面的 vtable 间接调用。
 
 `Optional[Class]` 上的字段访问和方法调用会先生成一次空指针检查（`branch` + `panic`）：类型收窄做不到逐条路径成立，而段错误不带任何上下文——`py23: panic: NoneType object has no attribute 'x'` 有用得多。

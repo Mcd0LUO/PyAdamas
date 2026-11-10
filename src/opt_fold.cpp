@@ -53,6 +53,7 @@ bool inst_is_pure(const Inst& in) {
         case IrOp::Cmp:
         case IrOp::Len:
         case IrOp::IndexLoadUnchecked:
+        case IrOp::FieldLoad:
             return true;
         case IrOp::Bin: {
             TypePtr t = in.ty;

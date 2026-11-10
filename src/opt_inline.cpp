@@ -443,6 +443,11 @@ std::vector<char> recursive_functions(const IRModule& m,
                 if (in.dst != kNoReg) defs[in.dst] = DefRef{in.op, in.imm, in.idx};
         for (const auto& b : f.blocks)
             for (const auto& in : b.insts) {
+                if (in.op == IrOp::CallDirect) {
+                    if (in.idx >= 0 && in.idx < static_cast<int>(n))
+                        edges[fi].push_back(in.idx);
+                    continue;
+                }
                 if (in.op != IrOp::Call) continue;
                 int c = -1;
                 auto it = defs.find(in.a);
@@ -497,16 +502,22 @@ bool inline_calls_in_function(IRModule& m, IRFunction& fn, int fi,
         for (size_t bi = 0; bi < fn.blocks.size() && !did; ++bi) {
             for (size_t ii = 0; ii < fn.blocks[bi].insts.size(); ++ii) {
                 const Inst call = fn.blocks[bi].insts[ii];
-                if (call.op != IrOp::Call) continue;
                 int cidx = -1;
-                auto dit = defs.find(call.a);
-                if (dit != defs.end()) {
-                    if (dit->second.op == IrOp::FuncAddr)
-                        cidx = static_cast<int>(dit->second.imm);
-                    else if (dit->second.op == IrOp::LoadGlobal) {
-                        auto git = gfunc.find(static_cast<int>(dit->second.idx));
-                        if (git != gfunc.end()) cidx = git->second;
+                if (call.op == IrOp::CallDirect) {
+                    // 去虚化/静态调用已经是直接下标，不需要再解析函数值。
+                    cidx = call.idx;
+                } else if (call.op == IrOp::Call) {
+                    auto dit = defs.find(call.a);
+                    if (dit != defs.end()) {
+                        if (dit->second.op == IrOp::FuncAddr)
+                            cidx = static_cast<int>(dit->second.imm);
+                        else if (dit->second.op == IrOp::LoadGlobal) {
+                            auto git = gfunc.find(static_cast<int>(dit->second.idx));
+                            if (git != gfunc.end()) cidx = git->second;
+                        }
                     }
+                } else {
+                    continue;
                 }
                 if (cidx < 0 || cidx == fi || cidx == m.entry) continue;
                 if (recursive[static_cast<size_t>(cidx)]) continue;

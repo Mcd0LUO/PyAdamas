@@ -199,6 +199,10 @@ void optimize_ir(IRModule& m, int opt_level) {
     for (size_t i = 0; i < m.funcs.size(); ++i)
         inline_calls_in_function(m, *m.funcs[i], static_cast<int>(i), gfunc, recursive);
     for (auto& fptr : m.funcs) rewrite_direct_calls(m, *fptr, gfunc);
+    // 直接化新产生的 call.direct 再给一轮内联机会：静态可解析的闭包调用
+    // 现在也是直接下标了。调用图没变（只是边的种类变了），复用 recursive。
+    for (size_t i = 0; i < m.funcs.size(); ++i)
+        inline_calls_in_function(m, *m.funcs[i], static_cast<int>(i), gfunc, recursive);
 
     // 内联/直接化后的 CFG 再做循环不变量外提。
     for (auto& fptr : m.funcs) licm_function(*fptr, m.globals.size());
