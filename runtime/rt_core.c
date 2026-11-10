@@ -16,6 +16,11 @@ Py23Rc* heap_head;
 int64_t alloc_since_gc;
 int gc_ready;
 int gc_sweeping;
+/* 链上的对象数（叶子不进链，不计）。增量维护，收集时不用再数一遍。 */
+size_t gc_tracked_count;
+/* 链上「负载需要保守扫描」的对象数（OBJ/实例）。为 0 且 exact-RC 时
+   GC 可以走精确快速路径：不需要地址表。 */
+size_t gc_conservative_count;
 
 /* 下一次触发全堆扫描的分配量。固定 2MB 会让大堆反复全扫——1M 个
    存活对象约 88MB，按 2MB 触发要扫四十多遍，总成本接近 O(n²)。
@@ -27,6 +32,24 @@ static int64_t gc_next_threshold = PY23_GC_THRESHOLD;
    确认是堆指针）。整程序没有任何 unknown 时，入口会调用
    py23_disable_unknown_index 关掉它，省掉每个堆对象的插入/删除。 */
 static int rc_index_off;
+
+/* exact-RC 模式（= 索引关闭）下，字符串这类叶子对象不进 GC 堆链：
+   RC 是精确的，不可达字符串在 rc 归零时就释放了，GC 永远不需要看到
+   它们；而它们又不可能成环。标记没进链的对象用 marked=2 区分，
+   清扫垃圾容器时对这类子对象直接走正常 RC 释放。 */
+static int gc_untracked_leaves;
+
+#define PY23_RC_UNTRACKED 2
+
+/* exact-RC 模式下可以完全绕开 GC 的对象：没有任何堆字段（没有出边），
+   不可能处在环里。字符串是典型；没有堆字段的类实例（生成代码不给
+   dtor/release）同理。它们的生死完全由 RC 决定。 */
+static int rc_leaf_untracked(const Py23Rc* h) {
+    if (!gc_untracked_leaves) return 0;
+    if (h->kind == PY23_RC_STR) return 1;
+    if (h->kind == PY23_RC_INSTANCE && !h->dtor && !h->release) return 1;
+    return 0;
+}
 
 void panic_c(const char* msg);
 
@@ -169,17 +192,30 @@ void panic_c(const char* msg) {
 }
 
 void rc_link(Py23Rc* h) {
+    if (rc_leaf_untracked(h)) {
+        h->prev = NULL;
+        h->next = NULL;
+        h->marked = PY23_RC_UNTRACKED;
+        return;
+    }
     h->prev = NULL;
     h->next = heap_head;
     if (heap_head) heap_head->prev = h;
     heap_head = h;
+    gc_tracked_count++;
+    if (h->kind == PY23_RC_OBJ || h->kind == PY23_RC_INSTANCE)
+        gc_conservative_count++;
     rc_index_put(h);
 }
 
 void rc_unlink(Py23Rc* h) {
+    if (h->marked == PY23_RC_UNTRACKED) return;
     if (h->prev) h->prev->next = h->next;
     else heap_head = h->next;
     if (h->next) h->next->prev = h->prev;
+    gc_tracked_count--;
+    if (h->kind == PY23_RC_OBJ || h->kind == PY23_RC_INSTANCE)
+        gc_conservative_count--;
     rc_index_del(h);
 }
 
@@ -198,7 +234,8 @@ void* rc_alloc(int64_t size, void (*dtor)(void*), void (*release)(void*),
     h->kind = kind;
     h->marked = 0;
     rc_link(h);
-    alloc_since_gc += size + PY23_RC_HDR;
+    // 叶子对象不可能成环，exact-RC 模式下也不进链，不必驱动 GC 频率。
+    if (!rc_leaf_untracked(h)) alloc_since_gc += size + PY23_RC_HDR;
     void* p = (char*)h + sizeof(Py23Rc);
     memset(p, 0, (size_t)size);
     return p;
@@ -216,7 +253,7 @@ void py23_rc_dec(void* p) {
     if (!p) return;
     Py23Rc* h = (Py23Rc*)p - 1;
     if (h->rc == PY23_RC_IMMORTAL) return;
-    if (gc_sweeping) {
+    if (gc_sweeping && !(gc_untracked_leaves && h->marked == PY23_RC_UNTRACKED)) {
         // 清扫阶段只调整可达对象的计数，绝不在 GC 内部触发释放。
         if (h->marked && h->rc > 0) h->rc--;
         return;
@@ -316,6 +353,11 @@ Py23Rc** gc_table;
 size_t gc_table_cap;
 Py23Rc** gc_work;
 size_t gc_work_len;
+/* 表和工作栈跨收集复用：大堆反复 calloc/free 十几 MB 很伤。 */
+static Py23Rc** gc_table_buf;
+static size_t gc_table_buf_cap;
+static Py23Rc** gc_work_buf;
+static size_t gc_work_buf_cap;
 
 #if defined(__SANITIZE_ADDRESS__)
 #define PY23_NO_ASAN __attribute__((no_sanitize_address))
@@ -346,10 +388,91 @@ Py23Rc* gc_table_find(uintptr_t payload) {
     return NULL;
 }
 
+/* ── 精确路径的根部候选集合 ────────────────────────────────────
+   整堆都是 list/dict/closure（没有需要保守扫描的 OBJ/实例）时，唯一
+   需要「地址 → 头部」反查的地方是保守的栈/寄存器根。与其给整堆建
+   地址表，不如把这些根里的机器字去重成一张小表，再扫一遍堆看谁的
+   负载地址命中——小表常驻 L2，比几 MB 的整堆表便宜得多。 */
+static uintptr_t* gc_cand;
+static size_t gc_cand_cap;  // 2 的幂
+static size_t gc_cand_len;
+
+static void gc_cand_rehash(size_t ncap) {
+    uintptr_t* old = gc_cand;
+    size_t ocap = gc_cand_cap;
+    gc_cand = (uintptr_t*)calloc(ncap, sizeof(uintptr_t));
+    if (!gc_cand) panic_c("out of memory");
+    gc_cand_cap = ncap;
+    gc_cand_len = 0;
+    for (size_t i = 0; i < ocap; ++i) {
+        if (!old[i]) continue;
+        size_t s = gc_hash(old[i]) & (ncap - 1);
+        while (gc_cand[s]) s = (s + 1) & (ncap - 1);
+        gc_cand[s] = old[i];
+        gc_cand_len++;
+    }
+    free(old);
+}
+
+static void gc_cand_reset(void) {
+    if (gc_cand_cap) memset(gc_cand, 0, gc_cand_cap * sizeof(uintptr_t));
+    gc_cand_len = 0;
+}
+
+static void gc_cand_add(uintptr_t v) {
+    if (!v) return;
+    if (gc_cand_cap == 0) gc_cand_rehash(1024);
+    else if ((gc_cand_len + 1) * 10 >= gc_cand_cap * 7)
+        gc_cand_rehash(gc_cand_cap * 2);
+    size_t s = gc_hash(v) & (gc_cand_cap - 1);
+    while (gc_cand[s]) {
+        if (gc_cand[s] == v) return;
+        s = (s + 1) & (gc_cand_cap - 1);
+    }
+    gc_cand[s] = v;
+    gc_cand_len++;
+}
+
+static int gc_cand_has(uintptr_t v) {
+    if (!gc_cand_len || !v) return 0;
+    size_t s = gc_hash(v) & (gc_cand_cap - 1);
+    while (gc_cand[s]) {
+        if (gc_cand[s] == v) return 1;
+        s = (s + 1) & (gc_cand_cap - 1);
+    }
+    return 0;
+}
+
+PY23_NO_ASAN static void gc_cand_add_range(uintptr_t a, uintptr_t b) {
+    if (a >= b) return;
+    for (; a + sizeof(uintptr_t) <= b; a += sizeof(uintptr_t)) {
+        uintptr_t v;
+        memcpy(&v, (const void*)a, sizeof v);
+        gc_cand_add(v);
+    }
+}
+
+PY23_NO_ASAN static void gc_cand_add_registers(void) {
+    jmp_buf regs;
+    if (setjmp(regs) == 0)
+        gc_cand_add_range((uintptr_t)&regs, (uintptr_t)&regs + sizeof regs);
+}
+
 void gc_mark(uintptr_t v) {
     if (!v) return;
     Py23Rc* h = gc_table_find(v);
     if (!h || h->marked) return;
+    h->marked = 1;
+    gc_work[gc_work_len++] = h;
+}
+
+/* exact-RC 模式专用：子对象是静态类型确定的堆指针（列表元素、
+   dict 的 own key/val、闭包 cell），不用查表，直接读头部标记。
+   静态字面量 rc 永生、marked 也不该被写（.data.rel.ro 只读）。 */
+static void gc_mark_direct(uintptr_t v) {
+    if (!v) return;
+    Py23Rc* h = (Py23Rc*)(v - (uintptr_t)PY23_RC_HDR);
+    if (h->rc == PY23_RC_IMMORTAL || h->marked) return;
     h->marked = 1;
     gc_work[gc_work_len++] = h;
 }
@@ -372,22 +495,45 @@ void gc_scan_object(Py23Rc* h) {
             break;
         case PY23_RC_LIST: {
             Py23List* l = (Py23List*)p;
-            if (l->data)
+            if (!l->data) break;
+            // exact-RC 模式下 elem_kind 只可能是 0/1：0 是纯数值元素，
+            // 没有任何引用要标记；1 是静态类型已知的堆指针，直接标记。
+            if (gc_untracked_leaves) {
+                if (l->elem_kind == 1)
+                    for (int64_t i = 0; i < l->len; ++i)
+                        gc_mark_direct((uintptr_t)l->data[i]);
+            } else {
                 for (int64_t i = 0; i < l->len; ++i) gc_mark((uintptr_t)l->data[i]);
+            }
             break;
         }
         case PY23_RC_DICT: {
             Py23Dict* d = (Py23Dict*)p;
+            int precise = gc_untracked_leaves;
             for (int64_t i = 0; i < d->len; ++i) {
                 Py23DictEntry e = d->entries[d->order[i]];
-                gc_mark((uintptr_t)e.key);
-                gc_mark((uintptr_t)e.val);
+                if (precise && d->key_own == 1)
+                    gc_mark_direct((uintptr_t)e.key);
+                else if (!precise || d->key_own == 2)
+                    gc_mark((uintptr_t)e.key);
+                if (precise && d->val_own == 1)
+                    gc_mark_direct((uintptr_t)e.val);
+                else if (!precise || d->val_own == 2)
+                    gc_mark((uintptr_t)e.val);
             }
             break;
         }
+        case PY23_RC_CLOSURE:
         case PY23_RC_OBJ:
-        case PY23_RC_INSTANCE:
-        case PY23_RC_CLOSURE: {
+        case PY23_RC_INSTANCE: {
+            // 闭包负载 = [code, n_caps, cell…]，cell 都是堆上的 list；
+            // exact-RC 模式下可以精确标记。OBJ / INSTANCE 形态不固定
+            // （异常、文件、类实例），仍按保守扫描。
+            if (h->kind == PY23_RC_CLOSURE && gc_untracked_leaves) {
+                int64_t* c = (int64_t*)p;
+                for (int64_t i = 0; i < c[1]; ++i) gc_mark_direct((uintptr_t)c[2 + i]);
+                break;
+            }
             for (int64_t off = 0; off + (int64_t)sizeof(uintptr_t) <= h->size;
                  off += (int64_t)sizeof(uintptr_t)) {
                 uintptr_t v;
@@ -442,11 +588,28 @@ void py23_gc_init(void** roots, int64_t n_roots, void* stack_top) {
 }
 
 /* 整程序无 unknown 值、不涉及 asyncio/生成器时，入口调用这里关掉
-   存活堆索引；此后 rc_index_put/del/has 都是空操作。 */
-void py23_disable_unknown_index(void) { rc_index_off = 1; }
+   存活堆索引；此后 rc_index_put/del/has 都是空操作。RC 变精确后，
+   字符串这类叶子对象也移出 GC 堆链（不可能成环，RC 归零即释放）。 */
+void py23_disable_unknown_index(void) {
+    rc_index_off = 1;
+    gc_untracked_leaves = 1;
+}
 
 void py23_gc_unref_child(void* p) {
     if (!p) return;
+    if (gc_untracked_leaves) {
+        // exact-RC 模式：子对象一定是堆对象或静态字面量，直接读头部。
+        // marked=1 是「本轮可达」，减计数；UNTRACKED 的叶子不在链上，
+        // 必须在这里按正常引用释放；marked=0 是同样会被清扫的垃圾。
+        Py23Rc* u = (Py23Rc*)p - 1;
+        if (u->rc == PY23_RC_IMMORTAL) return;
+        if (u->marked == PY23_RC_UNTRACKED) {
+            if (u->rc > 0 && --u->rc == 0) free(u);
+            return;
+        }
+        if (u->marked == 1 && u->rc > 0) u->rc--;
+        return;
+    }
     Py23Rc* h = gc_table_find((uintptr_t)p);
     if (h && h->marked && h->rc > 0) h->rc--;
 }
@@ -455,37 +618,83 @@ void gc_drain(void) {
     while (gc_work_len) gc_scan_object(gc_work[--gc_work_len]);
 }
 
+static double gc_now_ms(void) {
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return (double)ts.tv_sec * 1e3 + (double)ts.tv_nsec / 1e6;
+}
+
 void py23_gc_collect(void) {
     if (!gc_ready || !heap_head || !gc_stack_top) {
         alloc_since_gc = 0;
         return;
     }
-    size_t n = 0;
-    for (Py23Rc* h = heap_head; h; h = h->next) ++n;
-    if (n == 0) {
+    double t0 = 0, t1 = 0, t2 = 0, t3 = 0, t4 = 0;
+    if (getenv("PY23_GC_TIMING")) t0 = gc_now_ms();
+    size_t n = gc_tracked_count;
+    if (n == 0 || !heap_head) {
         alloc_since_gc = 0;
         gc_next_threshold = PY23_GC_THRESHOLD;
         return;
     }
-    gc_table_cap = 1;
-    while (gc_table_cap < n * 2) gc_table_cap <<= 1;
-    gc_table = (Py23Rc**)calloc(gc_table_cap, sizeof(Py23Rc*));
-    gc_work = (Py23Rc**)malloc(n * sizeof(Py23Rc*));
-    if (!gc_table || !gc_work) panic_c("out of memory");
-    for (Py23Rc* h = heap_head; h; h = h->next) {
-        h->marked = 0;
-        gc_table_insert(h);
+    if (n > gc_work_buf_cap) {
+        free(gc_work_buf);
+        gc_work_buf = (Py23Rc**)malloc(n * sizeof(Py23Rc*));
+        if (!gc_work_buf) panic_c("out of memory");
+        gc_work_buf_cap = n;
     }
+    gc_work = gc_work_buf;
     gc_work_len = 0;
 
-    for (int64_t i = 0; i < gc_n_globals; ++i) {
-        void* v = *(void**)gc_globals[i];
-        gc_mark((uintptr_t)v);
+    int fast = gc_untracked_leaves && gc_conservative_count == 0;
+    if (fast) {
+        // 根部候选集合 → 一遍扫堆命中标记。没有地址表。
+        gc_cand_reset();
+        for (int64_t i = 0; i < gc_n_globals; ++i)
+            gc_cand_add((uintptr_t)*(void**)gc_globals[i]);
+        for (int64_t i = 0; i < temp_len; ++i)
+            gc_cand_add((uintptr_t)temp_stack[i]);
+        gc_cand_add_range(gc_current_sp(), gc_stack_top);
+        gc_cand_add_registers();
+        for (Py23Rc* h = heap_head; h; h = h->next) {
+            h->marked = 0;
+            if (gc_cand_has((uintptr_t)h + (uintptr_t)PY23_RC_HDR)) {
+                h->marked = 1;
+                gc_work[gc_work_len++] = h;
+            }
+        }
+        if (t0) t1 = gc_now_ms();
+        gc_drain();
+        if (t0) t2 = gc_now_ms();
+    } else {
+        size_t cap = 64;
+        while (cap < n * 2) cap <<= 1;
+        if (cap > gc_table_buf_cap) {
+            free(gc_table_buf);
+            gc_table_buf = (Py23Rc**)calloc(cap, sizeof(Py23Rc*));
+            if (!gc_table_buf) panic_c("out of memory");
+            gc_table_buf_cap = cap;
+        } else {
+            memset(gc_table_buf, 0, cap * sizeof(Py23Rc*));
+        }
+        gc_table = gc_table_buf;
+        gc_table_cap = cap;
+        for (Py23Rc* h = heap_head; h; h = h->next) {
+            h->marked = 0;
+            gc_table_insert(h);
+        }
+        if (t0) t1 = gc_now_ms();
+
+        for (int64_t i = 0; i < gc_n_globals; ++i) {
+            void* v = *(void**)gc_globals[i];
+            gc_mark((uintptr_t)v);
+        }
+        for (int64_t i = 0; i < temp_len; ++i) gc_mark((uintptr_t)temp_stack[i]);
+        gc_scan_range((const void*)gc_current_sp(), (const void*)gc_stack_top);
+        gc_scan_registers();
+        gc_drain();
+        if (t0) t2 = gc_now_ms();
     }
-    for (int64_t i = 0; i < temp_len; ++i) gc_mark((uintptr_t)temp_stack[i]);
-    gc_scan_range((const void*)gc_current_sp(), (const void*)gc_stack_top);
-    gc_scan_registers();
-    gc_drain();
 
     // 第一遍：只处理不可达对象指向可达对象的引用。此时所有头都还活着，
     // 查表安全；不调用 dtor，避免释放顺序问题。
@@ -494,6 +703,7 @@ void py23_gc_collect(void) {
         if (!h->marked && h->release)
             h->release((char*)h + PY23_RC_HDR);
     }
+    if (t0) t3 = gc_now_ms();
 
     // 第二遍：释放不可达对象，清理可达对象的 mark 位。
     int64_t live = 0;
@@ -520,15 +730,18 @@ void py23_gc_collect(void) {
         h = next;
     }
     gc_sweeping = 0;
+    if (t0) t4 = gc_now_ms();
 
-    free(gc_table);
-    free(gc_work);
     gc_table = NULL;
-    gc_work = NULL;
     gc_table_cap = 0;
+    gc_work = NULL;
     gc_work_len = 0;
     alloc_since_gc = 0;
     gc_next_threshold = live > (int64_t)PY23_GC_THRESHOLD ? live : PY23_GC_THRESHOLD;
+    if (t0)
+        fprintf(stderr,
+                "[gc] n=%zu live=%lld table=%.2f mark=%.2f release=%.2f sweep=%.2f ms\n",
+                n, (long long)live, t1 - t0, t2 - t1, t3 - t2, t4 - t3);
 }
 
 // 程序退出：所有还活着的堆对象（包括环）一次性还给系统。
@@ -555,6 +768,16 @@ void py23_gc_shutdown(void) {
     gc_globals = NULL;
     gc_n_globals = 0;
     gc_globals_cap = 0;
+    free(gc_table_buf);
+    gc_table_buf = NULL;
+    gc_table_buf_cap = 0;
+    free(gc_work_buf);
+    gc_work_buf = NULL;
+    gc_work_buf_cap = 0;
+    free(gc_cand);
+    gc_cand = NULL;
+    gc_cand_cap = 0;
+    gc_cand_len = 0;
 }
 
 /* 分模块编译：init 是模块顶层生成的 void(void)，ready 是模块 .bss 里的
