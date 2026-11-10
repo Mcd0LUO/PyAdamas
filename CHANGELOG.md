@@ -15,8 +15,7 @@
   `"ascii"` 是恒等变换；其它编码（如 `utf-16`）在类型检查阶段明确报错，
   不会静默按字节读出一堆乱码。
 - `errors=` 接受但忽略（字节语义下没有解码错误）。
-- 测试：`57_file_io.py` 增加 encoding 用法；`tests/fail/f38_open_encoding.py`
-  覆盖不支持的编码。
+- 开发期验证：encoding 用法与不支持的编码报错均已覆盖。
 
 ### 验证
 
@@ -56,9 +55,8 @@
 - 运行时 `Py23File` 由 RC/GC 管理，析构时兜底 `fclose`；打开失败抛
   `OSError`，关闭后读写抛 `ValueError`。
 - 跨模块签名里的 `file` 类型暂时降级为 unknown。
-- 测试：`57_file_io.py`（写/读、readline/readlines、追加、按长度读、
-  缺失文件异常），另有 with 的 return/break/异常清理压测（O0/O1/O2 与
-  CPython 一致）。
+- 开发期验证：读写、追加、缺失文件异常以及 with 的 return/break/异常
+  清理路径（O0/O1/O2 与 CPython 一致）。
 
 ### 验证
 
@@ -88,7 +86,7 @@
   `isdigit` / `isalpha` / `isspace` / `isupper` / `islower` / `isalnum`。
 - 运行时不加几十个 RtFn，而是用一个派发入口
   `py23_str_method(self, op, a0, a1, a2)`，操作码与 `StrOp` 枚举同序。
-- 测试：`56_str_methods.py`（18 行输出与 CPython 逐字节一致）。
+- 开发期验证：18 行输出与 CPython 逐字节一致。
 
 ### 验证
 
@@ -117,8 +115,8 @@
 - int / bool：`bit_length`。
 - 运行时新增 list_reverse / int_bit_length；ListIndex / ListCount /
   ListInsert / ListSort 接入降级。
-- 测试：`55_container_methods.py`；另做 2000 轮字符串容器 RC 压测
-  （O0/O1/O2 与 CPython 输出一致）。
+- 开发期验证：容器方法输出与 CPython 一致；另做 2000 轮字符串容器 RC
+  压测（O0/O1/O2）。
 
 ### 验证
 
@@ -146,13 +144,12 @@
 - 运行时新增 list_copy / list_reversed / list_sort / sorted_list /
   list_index / list_count / list_insert / enumerate_list / zip2_list /
   set_from_list。
-- 测试：`54_builtins_seq.py`。
 
 ### 验证
 
 - `ctest --preset dev/release` 全绿；O0/O1 全量 54 个运行用例通过；
   810 程序差分零失败
-- `54_builtins_seq.py` 与 CPython 逐字节一致
+- 开发期验证：输出与 CPython 逐字节一致
 
 ### 已知限制
 
@@ -179,13 +176,12 @@
   格式说明符）。
 - 未实现的内置名（`sorted` / `enumerate` / `list()` / `map` / `type` /
   `getattr` 等）在降级阶段给出明确诊断，不再生成“调用空指针”的代码。
-- 测试：`53_builtins_scalar.py`。
 
 ### 验证
 
 - `ctest --preset dev/release` 全绿（dev 连跑三次）；O0/O1 全量 53 个
   运行用例通过；810 程序差分零失败
-- `53_builtins_scalar.py` 的 11 行输出与 CPython 逐字节一致
+- 开发期验证：11 行输出与 CPython 逐字节一致
 
 ### 已知限制
 
