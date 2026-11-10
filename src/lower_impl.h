@@ -997,6 +997,8 @@ private:
     // print(..., file=f)：值先转成字符串再 FileWrite；print_file_slot_ >= 0
     // 时由 print_value 分派到这里。
     void print_value_to_file(VReg v, TypePtr ty, int line, int col);
+    // 列表/元组：按静态元素类型逐个打印，元素递归走上面的两条路径。
+    void print_seq(VReg v, TypePtr ty, bool tuple, bool to_file, int line, int col);
     int print_file_slot_ = -1;
 
     // ── 预扫描 ──────────────────────────────────────────────────

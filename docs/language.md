@@ -561,6 +561,8 @@ CPython 一致。
 `print` 不是函数，是降级期展开的一串输出调用：
 
 - 支持 `sep=` / `end=`（任意字符串表达式）/ `file=`（文件对象）/ `flush=`。
+- 值按静态类型输出：list/tuple 逐元素递归打印（`[1, 2]`，容器里的字符串
+  按 repr 带引号）；dict/set 仍只输出 `<dict object>` 占位。
 - 求值顺序：边算边写，`sep` 在第一个逗号处求值，`end` 最后求值。CPython 是先全算完再写。
 
 ### import
@@ -577,8 +579,12 @@ CPython 一致。
   先跑 `__init__.py`。
 - 每个模块有自己的 `__name__` / `__file__`；入口模块的 `__name__` 是
   `"__main__"`。
-- 内置 `math` / `sys`：`math` 常量/函数、`sys.argv` / `exit` / `maxsize`；
-  原生函数只能直接调用。
+- 内置 `math` / `sys`：`math` 提供 `pi`/`e`/`tau`/`inf`/`nan` 和
+  `sqrt`/`floor`/`ceil`/`fabs`/`sin`/`cos`/`tan`/`log`/`log2`/`log10`/
+  `exp`/`pow`/`fmod`/`atan2`/`hypot`/`degrees`/`radians`/`trunc`/
+  `copysign`/`isnan`/`isinf`/`isfinite`/`factorial`/`gcd`/`lcm`/`fsum`；
+  `sys` 提供 `argv`/`exit`/`maxsize`/`stdin`/`stdout`/`stderr`；原生函数
+  只能直接调用。`hypot` 固定接受两个参数。
 
 ### 内置函数
 
@@ -587,7 +593,7 @@ CPython 一致。
 `ord` / `chr` / `hex` / `bin` / `oct` / `round` / `divmod` / `repr` /
 `format` / `list` / `tuple` / `dict` / `set` / `sorted` / `reversed` /
 `enumerate` / `zip` / `input` / `isinstance` / `getattr` / `setattr` /
-`hasattr`。
+`hasattr` / `map` / `filter` / `callable` / `issubclass`。
 `min` / `max` 支持多实参和 list/tuple/str/dict/set 迭代，空序列抛
 `ValueError`；`sum` 支持可选的起始值；`any` / `all` 支持短路；`abs` /
 `pow` 支持 int 与 float，`pow(x, y, m)` 是 `(x ** y) % m`；
@@ -604,6 +610,12 @@ unknown 值上对带运行期类型标签的类型（str/list/dict/complex）走
 `getattr` / `setattr` / `hasattr` 只支持类实例，属性名必须是字符串字面量：
 `getattr`/`setattr` 支持字段和 property（property setter 暂不支持），
 `hasattr` 对存在的字段/方法/property 编译期返回 True/False。
+`map(f, xs)` / `filter(f, xs)` 在脱糖阶段改写成列表推导式（结果立即求值）：
+`f` 必须是名字（普通函数、`int`/`str` 这类内置转换、或 lambda）；写成
+任意表达式会保留普通调用并报 codegen 不支持。`filter(None, xs)` 保留
+真值元素。模块里绑定过 `map`/`filter` 名字时不做改写（按普通调用处理）。
+`callable(x)` / `issubclass(A, B)` 按静态类型编译期折叠（`callable(int)`
+这类内置名也认；unknown 值上的 `callable` 暂不支持）。
 `list(seq)` / `tuple(seq)` 做浅拷贝，`set(seq)` 按键去重，`dict(**kw)`
 用字符串键；`sorted` 支持 int/float/str 元素（`key=` / `reverse=` 尚未
 支持）；`enumerate` 产出的元素是 `[下标, 值]` 对，`zip` 支持两个可迭代
@@ -619,9 +631,9 @@ unknown 值上对带运行期类型标签的类型（str/list/dict/complex）走
 `count` / `zfill` / `ljust` / `rjust` / `center` / `removeprefix` /
 `removesuffix` / `isdigit` / `isalpha` / `isspace` / `isupper` / `islower` /
 `isalnum`。
-其余内置名（`map` / `filter` / `type` / `hash` / `callable` / `slice` /
-`delattr` 等）类型层面放行，降级阶段报「not supported by the code
-generator yet」，不会再退化成调用空指针。
+其余内置名（`type` / `hash` / `id` / `slice` / `delattr` / `vars` / `dir`
+等）类型层面放行，降级阶段报「not supported by the code generator yet」，
+不会再退化成调用空指针。
 
 ### 跳转与异常
 

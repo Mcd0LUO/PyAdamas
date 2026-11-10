@@ -163,6 +163,14 @@ TypePtr TypeChecker::builtin_call(const std::string& n, Call& c) {
                     "isinstance() second argument must be a class or builtin type");
             return t_bool();
         }
+        if (n == "callable") {
+            if (!need(1, 1)) return t_bool();
+            return t_bool();
+        }
+        if (n == "issubclass") {
+            if (!need(2, 2)) return t_bool();
+            return t_bool();
+        }
         if (n == "hasattr" || n == "getattr" || n == "setattr") {
             size_t want = n == "setattr" ? 3 : 2;
             if (!need(want, want))
@@ -307,14 +315,13 @@ TypePtr TypeChecker::builtin_call(const std::string& n, Call& c) {
             return t_file();
         }
         if (n == "super" || n == "vars" || n == "dir" ||
-            n == "id" || n == "hash" || n == "callable" || n == "slice" || n == "frozenset" ||
+            n == "id" || n == "hash" || n == "slice" || n == "frozenset" ||
             n == "bytearray" || n == "object" || n == "complex" || n == "memoryview") {
             unsupported.push_back(std::format("runtime builtin '{}'", n));
             // frozenset 是 set 的不可变版本，不是 list；元素类型取参数的元素
             if (n == "frozenset")
                 return a.empty() ? mk_set(t_unknown()) : mk_set(iter_elem(a[0], c.line, c.col));
             if (n == "bytearray") return a.empty() ? t_unknown() : mk_list(t_unknown());
-            if (n == "callable") return t_bool();
             if (n == "format") return t_str();
             return t_unknown();
         }

@@ -112,6 +112,19 @@ std::optional<RtFn> Lowerer::native_fn(const std::string& module, const std::str
         if (member == "exp") return RtFn::MathExp;
         if (member == "pow") return RtFn::MathPow;
         if (member == "fmod") return RtFn::MathFmod;
+        if (member == "atan2") return RtFn::MathAtan2;
+        if (member == "hypot") return RtFn::MathHypot;
+        if (member == "degrees") return RtFn::MathDegrees;
+        if (member == "radians") return RtFn::MathRadians;
+        if (member == "trunc") return RtFn::MathTrunc;
+        if (member == "copysign") return RtFn::MathCopysign;
+        if (member == "isnan") return RtFn::MathIsnan;
+        if (member == "isinf") return RtFn::MathIsinf;
+        if (member == "isfinite") return RtFn::MathIsfinite;
+        if (member == "factorial") return RtFn::MathFactorial;
+        if (member == "gcd") return RtFn::MathGcd;
+        if (member == "lcm") return RtFn::MathLcm;
+        if (member == "fsum") return RtFn::MathFsum;
     } else if (module == "sys" && member == "exit") {
         return RtFn::SysExit;
     }
@@ -133,6 +146,16 @@ bool Lowerer::builtin_value(const std::string& module, const std::string& member
         }
         if (member == "tau") {
             out = const_float(6.28318530717958647692);
+            ty = t_float();
+            return true;
+        }
+        if (member == "inf") {
+            out = const_float(std::numeric_limits<double>::infinity());
+            ty = t_float();
+            return true;
+        }
+        if (member == "nan") {
+            out = const_float(std::numeric_limits<double>::quiet_NaN());
             ty = t_float();
             return true;
         }

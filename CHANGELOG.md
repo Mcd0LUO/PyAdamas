@@ -4,6 +4,41 @@
 
 早期阶段没有逐条留痕，按阶段归纳；0.4 之后逐条记录。
 
+## [0.52] - 2026-11-10
+
+内置函数补齐（三）：`map` / `filter`、`callable` / `issubclass`、
+list/tuple 打印、`UnboundLocalError` 与常用 math 函数。
+
+### 新增
+
+- `map(f, xs)` / `filter(f, xs)` 在脱糖阶段改写成列表推导式，复用现有
+  推导式的类型检查与降级，结果立即求值；`filter(None, xs)` 保留真值元素。
+  `f` 限定为名字（普通函数、内置转换或脱糖后的 lambda），模块里绑定过
+  `map`/`filter` 时不做改写。
+- `callable(x)` / `issubclass(A, B)`：按静态类型编译期折叠，支持本地类
+  与内置类型名（含 `bool` 是 `int` 子类、一切类型是 `object` 子类）。
+- list/tuple 的 `print`：按静态元素类型逐元素递归输出，字符串元素按 repr
+  带引号；`print(..., file=f)` 同样适用。此前 list 会被当成整数打印指针。
+- 异常名补 `UnboundLocalError`（父类 `NameError`，运行期层级同步）。
+- math 新增：`atan2` / `hypot` / `degrees` / `radians` / `trunc` /
+  `copysign` / `isnan` / `isinf` / `isfinite` / `factorial` / `gcd` /
+  `lcm` / `fsum`，以及常量 `inf` / `nan`（`hypot` 固定两参）。
+
+### 验证
+
+- `ctest --preset dev/release` 全绿；O0/O1 全量 52 个运行用例通过；
+  810 程序差分零失败
+- 临时探针（不入库）：map/filter（lambda、命名函数、内置转换、嵌套）、
+  callable/issubclass、list/tuple 打印（含 file=）、math 各函数、
+  UnboundLocalError 捕获均与 CPython 一致（O0/O1/O2）
+
+### 已知限制
+
+- `map`/`filter` 的 `f` 不能是任意表达式（如属性访问），否则报 codegen
+  不支持；同一模块里先绑定 `map` 再调用会按用户函数处理
+- `math.hypot` 只支持两个参数；`math.fsum` 只接受 list[float]
+- dict/set 的 print 仍是占位符
+
 ## [0.51] - 2026-11-10
 
 重构：拆分上帝文件，无行为变化。

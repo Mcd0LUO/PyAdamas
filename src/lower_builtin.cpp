@@ -287,6 +287,65 @@ VReg Lowerer::lower_builtin_call(const std::string& name, Call& c) {
                             {expr(*c.args[0]), const_int(cid->second)});
     }
 
+    if (name == "callable") {
+        if (c.args.size() != 1) {
+            err(c.line, c.col, "callable() takes exactly one argument");
+            return const_bool(false);
+        }
+        TypePtr t = tc_.type_of(c.args[0].get());
+        bool is_class = t && t->kind == TyKind::Class;
+        bool is_builtin_name = false;
+        if (c.args[0]->kind == ExprKind::Name) {
+            auto& id = static_cast<Name*>(c.args[0].get())->id;
+            is_builtin_name = TypeChecker::is_builtin_name(id) && !is_local(id);
+        }
+        if (!is_class && !is_builtin_name) (void)expr(*c.args[0]);  // 求值副作用
+        if (!t || t->kind == TyKind::Unknown) {
+            err(c.args[0]->line, c.args[0]->col,
+                "callable() of an unknown value is not supported yet");
+            return const_bool(false);
+        }
+        return const_bool(is_class || is_builtin_name || t->kind == TyKind::Func);
+    }
+
+    if (name == "issubclass") {
+        if (c.args.size() != 2) {
+            err(c.line, c.col, "issubclass() takes exactly two arguments");
+            return const_bool(false);
+        }
+        TypePtr a0 = tc_.type_of(c.args[0].get());
+        TypePtr a1 = tc_.type_of(c.args[1].get());
+        auto builtin = [](const TypePtr& t) -> std::string {
+            if (t && t->kind == TyKind::Func && t->fn && t->fn->unchecked)
+                return t->fn->name;
+            return std::string();
+        };
+        ClassInfo* ca = a0 && a0->kind == TyKind::Class ? a0->cls : nullptr;
+        ClassInfo* cb = a1 && a1->kind == TyKind::Class ? a1->cls : nullptr;
+        std::string ba = builtin(a0);
+        std::string bb = builtin(a1);
+        if ((!ca && ba.empty()) || (!cb && bb.empty())) {
+            err(c.line, c.col,
+                "issubclass() arguments must be classes or builtin types");
+            return const_bool(false);
+        }
+        bool r = false;
+        if (ca && cb) {
+            r = ca->is_subclass_of(cb);
+        } else if (ca) {
+            r = bb == "object";
+        } else if (cb) {
+            r = false;
+        } else if (bb == "object") {
+            r = true;
+        } else if (bb == "int") {
+            r = ba == "int" || ba == "bool";
+        } else {
+            r = ba == bb;
+        }
+        return const_bool(r);
+    }
+
     if (name == "hasattr" || name == "getattr" || name == "setattr") {
         size_t want = name == "setattr" ? 3 : 2;
         if (c.args.size() != want) {

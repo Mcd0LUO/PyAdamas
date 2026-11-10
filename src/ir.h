@@ -231,6 +231,8 @@ enum class RtFn : uint8_t {
     MathSqrt, MathFloor, MathCeil, MathFabs, MathSin, MathCos, MathTan,
     MathLog, MathLog2, MathLog10, MathExp,
     MathPow, MathFmod,
+    MathAtan2, MathHypot, MathDegrees, MathRadians, MathTrunc, MathCopysign,
+    MathIsnan, MathIsinf, MathIsfinite, MathFactorial, MathGcd, MathLcm, MathFsum,
     SysArgv,      // () -> list*
     SysExit,      // (i64 code) -> noreturn
     GenNext,      // (gen*) -> i64  取下一个值；结束抛 StopIteration
@@ -432,6 +434,19 @@ inline const char* rt_name(RtFn f) {
         case RtFn::MathExp: return "py23_math_exp";
         case RtFn::MathPow: return "py23_math_pow";
         case RtFn::MathFmod: return "py23_math_fmod";
+        case RtFn::MathAtan2: return "py23_math_atan2";
+        case RtFn::MathHypot: return "py23_math_hypot";
+        case RtFn::MathDegrees: return "py23_math_degrees";
+        case RtFn::MathRadians: return "py23_math_radians";
+        case RtFn::MathTrunc: return "py23_math_trunc";
+        case RtFn::MathCopysign: return "py23_math_copysign";
+        case RtFn::MathIsnan: return "py23_math_isnan";
+        case RtFn::MathIsinf: return "py23_math_isinf";
+        case RtFn::MathIsfinite: return "py23_math_isfinite";
+        case RtFn::MathFactorial: return "py23_math_factorial";
+        case RtFn::MathGcd: return "py23_math_gcd";
+        case RtFn::MathLcm: return "py23_math_lcm";
+        case RtFn::MathFsum: return "py23_math_fsum";
         case RtFn::SysArgv: return "py23_sys_argv";
         case RtFn::SysExit: return "py23_sys_exit";
         case RtFn::GenNext: return "py23_gen_next";

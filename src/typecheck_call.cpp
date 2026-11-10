@@ -293,6 +293,7 @@ bool TypeChecker::is_exception_name(const std::string& n) {
             "BaseException", "Exception", "ArithmeticError", "AssertionError",
             "AttributeError",  "IndexError",  "KeyError",        "LookupError",
             "MemoryError",     "NameError",   "NotImplementedError", "OSError",
+            "UnboundLocalError",
             "IOError",         "OverflowError", "RecursionError", "RuntimeError",
             "StopIteration",   "SyntaxError", "TypeError",       "ValueError",
             "ZeroDivisionError", "FileNotFoundError", "PermissionError",

@@ -31,6 +31,56 @@ double py23_math_fmod(double x, double y) {
     if (y == 0) py23_raise_c("ValueError", "math domain error");
     return fmod(x, y);
 }
+double py23_math_atan2(double y, double x) { return atan2(y, x); }
+double py23_math_hypot(double x, double y) { return hypot(x, y); }
+double py23_math_degrees(double x) { return x * (180.0 / M_PI); }
+double py23_math_radians(double x) { return x * (M_PI / 180.0); }
+int64_t py23_math_trunc(double x) { return (int64_t)trunc(x); }
+double py23_math_copysign(double x, double y) { return copysign(x, y); }
+int64_t py23_math_isnan(double x) { return isnan(x) ? 1 : 0; }
+int64_t py23_math_isinf(double x) { return isinf(x) ? 1 : 0; }
+int64_t py23_math_isfinite(double x) { return isfinite(x) ? 1 : 0; }
+
+int64_t py23_math_factorial(int64_t n) {
+    if (n < 0) py23_raise_c("ValueError", "factorial() not defined for negative values");
+    int64_t r = 1;
+    for (int64_t i = 2; i <= n; ++i) r *= i;
+    return r;
+}
+
+static uint64_t math_mag(int64_t v) {
+    return v < 0 ? (uint64_t)(-(v + 1)) + 1 : (uint64_t)v;
+}
+
+int64_t py23_math_gcd(int64_t a, int64_t b) {
+    uint64_t x = math_mag(a), y = math_mag(b);
+    while (y) {
+        uint64_t t = x % y;
+        x = y;
+        y = t;
+    }
+    return (int64_t)x;
+}
+
+int64_t py23_math_lcm(int64_t a, int64_t b) {
+    if (a == 0 || b == 0) return 0;
+    uint64_t g = (uint64_t)py23_math_gcd(a, b);
+    return (int64_t)((math_mag(a) / g) * math_mag(b));
+}
+
+double py23_math_fsum(Py23List* l) {
+    if (!l) return 0.0;
+    double sum = 0.0, c = 0.0;
+    for (int64_t i = 0; i < l->len; ++i) {
+        double x;
+        memcpy(&x, &l->data[i], sizeof x);
+        double y = x - c;
+        double t = sum + y;
+        c = (t - sum) - y;
+        sum = t;
+    }
+    return sum;
+}
 
 Py23List* sys_argv_list;
 

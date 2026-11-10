@@ -513,6 +513,8 @@ void AsmGen::gen_call_rt(const Inst& in) {
             case RtFn::ListSort:
             case RtFn::SortedList:
             case RtFn::Zip2List:
+            case RtFn::MathGcd:
+            case RtFn::MathLcm:
             case RtFn::FileRead:
             case RtFn::FileWrite:
             case RtFn::FileWritelines:
@@ -627,6 +629,8 @@ void AsmGen::gen_call_rt(const Inst& in) {
             case RtFn::ComplexStr:
             case RtFn::ComplexTruth:
             case RtFn::ReprStr:
+            case RtFn::MathFactorial:
+            case RtFn::MathFsum:
             case RtFn::GenNext:
             case RtFn::GenClose:
             case RtFn::HandlerSuspend:
@@ -711,10 +715,19 @@ void AsmGen::gen_call_rt(const Inst& in) {
             case RtFn::MathLog2:
             case RtFn::MathLog10:
             case RtFn::MathExp:
+            case RtFn::MathDegrees:
+            case RtFn::MathRadians:
+            case RtFn::MathTrunc:
+            case RtFn::MathIsnan:
+            case RtFn::MathIsinf:
+            case RtFn::MathIsfinite:
                 line(std::format("movsd {}, %xmm0", src_op(in.args[0])));
                 break;
             case RtFn::MathPow:
             case RtFn::MathFmod:
+            case RtFn::MathAtan2:
+            case RtFn::MathHypot:
+            case RtFn::MathCopysign:
                 line(std::format("movsd {}, %xmm0", src_op(in.args[0])));
                 line(std::format("movsd {}, %xmm1", src_op(in.args[1])));
                 break;

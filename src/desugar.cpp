@@ -18,12 +18,140 @@
 namespace py23 {
 namespace {
 
+// map/filter 改写前先确认这两个名字没有被用户绑定过。绑定过就保留普通
+// 调用语义（这里不区分作用域，宁可少改写也不误改）。
+bool target_binds(const Expr* e, const std::string& n) {
+    if (!e) return false;
+    switch (e->kind) {
+        case ExprKind::Name: return static_cast<const Name*>(e)->id == n;
+        case ExprKind::Tuple:
+            for (auto& x : static_cast<const TupleExpr*>(e)->elts)
+                if (target_binds(x.get(), n)) return true;
+            return false;
+        case ExprKind::List:
+            for (auto& x : static_cast<const ListExpr*>(e)->elts)
+                if (target_binds(x.get(), n)) return true;
+            return false;
+        case ExprKind::Starred: return target_binds(static_cast<const Starred*>(e)->value.get(), n);
+        default: return false;
+    }
+}
+
+bool args_bind(const Arguments& a, const std::string& n) {
+    auto hit = [&](const Arg& x) { return x.name == n; };
+    for (auto& x : a.posonly)
+        if (hit(x)) return true;
+    for (auto& x : a.args)
+        if (hit(x)) return true;
+    for (auto& x : a.kwonly)
+        if (hit(x)) return true;
+    if (a.vararg && hit(*a.vararg)) return true;
+    if (a.kwarg && hit(*a.kwarg)) return true;
+    return false;
+}
+
+bool stmt_binds(const Stmt& s, const std::string& n);
+
+bool body_binds(const std::vector<StmtPtr>& body, const std::string& n) {
+    for (auto& s : body)
+        if (s && stmt_binds(*s, n)) return true;
+    return false;
+}
+
+bool stmt_binds(const Stmt& s, const std::string& n) {
+    switch (s.kind) {
+        case StmtKind::Assign: {
+            auto& a = static_cast<const Assign&>(s);
+            for (auto& t : a.targets)
+                if (target_binds(t.get(), n)) return true;
+            return false;
+        }
+        case StmtKind::AnnAssign:
+            return target_binds(static_cast<const AnnAssign&>(s).target.get(), n);
+        case StmtKind::AugAssign:
+            return target_binds(static_cast<const AugAssign&>(s).target.get(), n);
+        case StmtKind::For: {
+            auto& f = static_cast<const For&>(s);
+            return target_binds(f.target.get(), n) || body_binds(f.body, n) ||
+                   body_binds(f.orelse, n);
+        }
+        case StmtKind::While: {
+            auto& w = static_cast<const While&>(s);
+            return body_binds(w.body, n) || body_binds(w.orelse, n);
+        }
+        case StmtKind::If: {
+            auto& f = static_cast<const If&>(s);
+            for (auto& b : f.branches)
+                if (body_binds(b.body, n)) return true;
+            return body_binds(f.orelse, n);
+        }
+        case StmtKind::With: {
+            auto& w = static_cast<const With&>(s);
+            for (auto& it : w.items)
+                if (target_binds(it.optional_vars.get(), n)) return true;
+            return body_binds(w.body, n);
+        }
+        case StmtKind::Try: {
+            auto& t = static_cast<const Try&>(s);
+            if (body_binds(t.body, n) || body_binds(t.orelse, n) ||
+                body_binds(t.finalbody, n))
+                return true;
+            for (auto& h : t.handlers)
+                if (h.name == n || body_binds(h.body, n)) return true;
+            return false;
+        }
+        case StmtKind::FunctionDef: {
+            auto& f = static_cast<const FunctionDef&>(s);
+            if (f.name == n || args_bind(f.args, n)) return true;
+            return body_binds(f.body, n);
+        }
+        case StmtKind::ClassDef: {
+            auto& c = static_cast<const ClassDef&>(s);
+            if (c.name == n) return true;
+            return body_binds(c.body, n);
+        }
+        case StmtKind::Import: {
+            for (auto& a : static_cast<const Import&>(s).names)
+                if ((a.asname.empty() ? a.name : a.asname) == n) return true;
+            return false;
+        }
+        case StmtKind::ImportFrom: {
+            for (auto& a : static_cast<const ImportFrom&>(s).names)
+                if ((a.asname.empty() ? a.name : a.asname) == n) return true;
+            return false;
+        }
+        case StmtKind::Global: {
+            for (auto& g : static_cast<const Global&>(s).names)
+                if (g == n) return true;
+            return false;
+        }
+        case StmtKind::Nonlocal: {
+            for (auto& g : static_cast<const Nonlocal&>(s).names)
+                if (g == n) return true;
+            return false;
+        }
+        case StmtKind::Match: {
+            for (auto& c : static_cast<const Match&>(s).cases)
+                if (body_binds(c.body, n)) return true;
+            return false;
+        }
+        default: return false;
+    }
+}
+
 class Desugarer {
 public:
-    void run(Module& m) { desugar_body(m.body, false); }
+    void run(Module& m) {
+        allow_map_ = !body_binds(m.body, "map");
+        allow_filter_ = !body_binds(m.body, "filter");
+        desugar_body(m.body, false);
+    }
 
 private:
     int lambda_id_ = 0;
+    int map_arg_id_ = 0;
+    bool allow_map_ = true;
+    bool allow_filter_ = true;
 
     void desugar_body(std::vector<StmtPtr>& body, bool class_body) {
         std::vector<StmtPtr> out;
@@ -139,6 +267,64 @@ private:
                 desugar_expr(c.func, pre);
                 desugar_exprs(c.args, pre);
                 for (auto& k : c.keywords) desugar_expr(k.value, pre);
+                // map(f, xs) → [f(x) for x in xs]
+                // filter(f, xs) → [x for x in xs if f(x)]
+                // filter(None, xs) → [x for x in xs if x]
+                // f 只接受名字（含脱糖后的 lambda），否则逐个元素求值会改变
+                // 求值次数；这类写法请直接写推导式。
+                if (!c.keywords.empty() || c.args.size() != 2) break;
+                bool is_map = false;
+                bool is_filter = false;
+                if (auto* fn = dynamic_cast<Name*>(c.func.get())) {
+                    is_map = allow_map_ && fn->id == "map";
+                    is_filter = allow_filter_ && fn->id == "filter";
+                }
+                if (!is_map && !is_filter) break;
+                if (c.args[0]->kind == ExprKind::Starred ||
+                    c.args[1]->kind == ExprKind::Starred)
+                    break;
+                bool func_none =
+                    is_filter && c.args[0]->kind == ExprKind::Constant &&
+                    static_cast<Constant*>(c.args[0].get())->ck == Constant::CK::None;
+                if (!func_none && c.args[0]->kind != ExprKind::Name) break;
+
+                const int line = e->line;
+                const int col = e->col;
+                const std::string tmp = std::format("__py23$map_arg_{}", ++map_arg_id_);
+                auto named = [&](const std::string& id) {
+                    auto n = std::make_unique<Name>(id);
+                    n->line = line;
+                    n->col = col;
+                    return n;
+                };
+                auto guarded_call = [&](ExprPtr fn) {
+                    auto call = std::make_unique<Call>();
+                    call->line = line;
+                    call->col = col;
+                    call->func = std::move(fn);
+                    call->args.push_back(named(tmp));
+                    return call;
+                };
+
+                auto gen = std::make_unique<Comprehension>();
+                gen->line = line;
+                gen->col = col;
+                gen->target = named(tmp);
+                gen->iter = std::move(c.args[1]);
+                auto lc = std::make_unique<ListComp>();
+                lc->line = line;
+                lc->col = col;
+                if (is_map) {
+                    lc->elt = guarded_call(std::move(c.args[0]));
+                } else {
+                    lc->elt = named(tmp);
+                    if (func_none)
+                        gen->ifs.push_back(named(tmp));
+                    else
+                        gen->ifs.push_back(guarded_call(std::move(c.args[0])));
+                }
+                lc->generators.push_back(std::move(gen));
+                e = std::move(lc);
                 break;
             }
             case ExprKind::Slice: {

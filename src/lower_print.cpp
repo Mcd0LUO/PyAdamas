@@ -15,6 +15,8 @@ void Lowerer::print_value(VReg v, TypePtr ty, int line, int col) {
         case TyKind::Float: call_void(RtFn::PrintF64, {v}); break;
         case TyKind::Str: call_void(RtFn::PrintStr, {v}); break;
         case TyKind::Int: call_void(RtFn::PrintI64, {v}); break;
+        case TyKind::List: print_seq(v, ty, false, false, line, col); break;
+        case TyKind::Tuple: print_seq(v, ty, true, false, line, col); break;
         case TyKind::Dict: call_void(RtFn::PrintStr, {const_str("<dict object>")}); break;
         case TyKind::Set: call_void(RtFn::PrintStr, {const_str("<set object>")}); break;
         case TyKind::Exception: {
@@ -81,6 +83,8 @@ void Lowerer::print_value_to_file(VReg v, TypePtr ty, int line, int col) {
     if (!ty) ty = t_unknown();
     VReg f = load_slot(print_file_slot_, t_file());
     switch (ty->kind) {
+        case TyKind::List: print_seq(v, ty, false, true, line, col); return;
+        case TyKind::Tuple: print_seq(v, ty, true, true, line, col); return;
         case TyKind::Dict:
             call_void(RtFn::FileWrite, {f, const_str("<dict object>")});
             return;
@@ -129,6 +133,110 @@ void Lowerer::print_value_to_file(VReg v, TypePtr ty, int line, int col) {
             return;
         }
     }
+}
+
+void Lowerer::print_seq(VReg v, TypePtr ty, bool tuple, bool to_file, int line, int col) {
+    auto write = [&](const std::string& s) {
+        if (to_file)
+            call_void(RtFn::FileWrite, {load_slot(print_file_slot_, t_file()), const_str(s)});
+        else
+            call_void(RtFn::PrintStr, {const_str(s)});
+    };
+    write(tuple ? "(" : "[");
+    TypePtr et = ty->sub.empty() ? t_unknown() : ty->sub[0];
+
+    int idx = new_temp_slot(t_int());
+    store_slot(idx, const_int(0));
+    Inst ln;
+    ln.op = IrOp::Len;
+    ln.a = v;
+    VReg n = def(t_int(), std::move(ln));
+
+    int cond = new_block("print.seq.cond");
+    int body = new_block("print.seq.body");
+    int comma = new_block("print.seq.comma");
+    int elem = new_block("print.seq.elem");
+    int end = new_block("print.seq.end");
+
+    Inst j;
+    j.op = IrOp::Jump;
+    j.target = cond;
+    emit(std::move(j));
+
+    switch_to(cond);
+    Inst more;
+    more.op = IrOp::Cmp;
+    more.cop = CmpKind::Lt;
+    more.a = load_slot(idx, t_int());
+    more.b = n;
+    VReg more_v = def(t_bool(), std::move(more));
+    Inst br;
+    br.op = IrOp::Branch;
+    br.a = more_v;
+    br.target = body;
+    br.target2 = end;
+    emit(std::move(br));
+
+    switch_to(body);
+    Inst nz;
+    nz.op = IrOp::Cmp;
+    nz.cop = CmpKind::Gt;
+    nz.a = load_slot(idx, t_int());
+    nz.b = const_int(0);
+    VReg nz_v = def(t_bool(), std::move(nz));
+    Inst need_sep;
+    need_sep.op = IrOp::Branch;
+    need_sep.a = nz_v;
+    need_sep.target = comma;
+    need_sep.target2 = elem;
+    emit(std::move(need_sep));
+
+    switch_to(comma);
+    write(", ");
+    {
+        Inst jj;
+        jj.op = IrOp::Jump;
+        jj.target = elem;
+        emit(std::move(jj));
+    }
+
+    switch_to(elem);
+    Inst get;
+    get.op = IrOp::IndexLoad;
+    get.a = v;
+    get.b = load_slot(idx, t_int());
+    VReg ev = def(et, std::move(get));
+    if (et && et->kind == TyKind::Str) {
+        // 容器内部的字符串按 repr 打印（带引号），和 CPython 一致。
+        Inst rp;
+        rp.op = IrOp::CallRt;
+        rp.imm = static_cast<int64_t>(RtFn::ReprStr);
+        rp.args = {ev};
+        VReg rs = def_heap(t_str(), std::move(rp));
+        if (to_file)
+            call_void(RtFn::FileWrite, {load_slot(print_file_slot_, t_file()), rs});
+        else
+            call_void(RtFn::PrintStr, {rs});
+    } else if (to_file) {
+        print_value_to_file(ev, et, line, col);
+    } else {
+        print_value(ev, et, line, col);
+    }
+    Inst inc;
+    inc.op = IrOp::Bin;
+    inc.bop = BinKind::Add;
+    inc.a = load_slot(idx, t_int());
+    inc.b = const_int(1);
+    store_slot(idx, def(t_int(), std::move(inc)));
+    {
+        Inst jj;
+        jj.op = IrOp::Jump;
+        jj.target = cond;
+        emit(std::move(jj));
+    }
+
+    switch_to(end);
+    write(tuple ? ")" : "]");
 }
 
 VReg Lowerer::lower_print(Call& c) {

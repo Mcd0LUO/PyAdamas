@@ -534,12 +534,25 @@ py23::ModuleInfoPtr builtin_module(const std::string& name) {
         info->globals["pi"] = py23::t_float();
         info->globals["e"] = py23::t_float();
         info->globals["tau"] = py23::t_float();
+        info->globals["inf"] = py23::t_float();
+        info->globals["nan"] = py23::t_float();
         for (auto& n : {"sqrt", "fabs", "sin", "cos", "tan", "log", "log2", "log10", "exp"})
             func(n, {py23::t_float()}, py23::t_float());
         func("floor", {py23::t_float()}, py23::t_int());
         func("ceil", {py23::t_float()}, py23::t_int());
         func("pow", {py23::t_float(), py23::t_float()}, py23::t_float());
         func("fmod", {py23::t_float(), py23::t_float()}, py23::t_float());
+        for (auto& n : {"atan2", "hypot", "copysign"})
+            func(n, {py23::t_float(), py23::t_float()}, py23::t_float());
+        for (auto& n : {"degrees", "radians"})
+            func(n, {py23::t_float()}, py23::t_float());
+        func("trunc", {py23::t_float()}, py23::t_int());
+        for (auto& n : {"isnan", "isinf", "isfinite"})
+            func(n, {py23::t_float()}, py23::t_bool());
+        func("factorial", {py23::t_int()}, py23::t_int());
+        func("gcd", {py23::t_int(), py23::t_int()}, py23::t_int());
+        func("lcm", {py23::t_int(), py23::t_int()}, py23::t_int());
+        func("fsum", {py23::mk_list(py23::t_float())}, py23::t_float());
     } else if (name == "sys") {
         info->globals["argv"] = py23::mk_list(py23::t_str());
         info->globals["maxsize"] = py23::t_int();
