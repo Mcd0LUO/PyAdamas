@@ -98,6 +98,7 @@ void AsmGen::emit_function(const IRFunction& f, int fi) {
         }
         assign_global_vreg_regs();
         assign_block_temp_regs();
+        build_fp_liveness();
         build_operand_caches();
         auto t_emit = std::chrono::steady_clock::now();
         alloc_ns_ += std::chrono::duration<double, std::nano>(t_emit - t_alloc).count();
@@ -288,6 +289,28 @@ void AsmGen::gen_block(const Block& b) {
                 if (!block_first_use_.contains(r)) block_first_use_[r] = i;
         }
 
+        // 每条指令执行后仍存活的浮点提升槽（live-after），调用点只保存
+        // 这些槽。从块末尾倒推，遇到 store 清位、load 置位。
+        std::vector<uint8_t> fp_after;
+        if (!fp_promoted_slots_.empty() && !fp_live_off_ &&
+            cur_block_ >= 0 && static_cast<size_t>(cur_block_) < fp_live_out_.size()) {
+            fp_after.assign(b.insts.size(), 0);
+            uint8_t cur = fp_live_out_[static_cast<size_t>(cur_block_)];
+            for (int k = static_cast<int>(b.insts.size()) - 1; k >= 0; --k) {
+                fp_after[static_cast<size_t>(k)] = cur;
+                const Inst& x = b.insts[static_cast<size_t>(k)];
+                if (x.idx >= 0 && x.idx < static_cast<int>(slot_fpidx_.size())) {
+                    int fi = slot_fpidx_[static_cast<size_t>(x.idx)];
+                    if (fi >= 0) {
+                        if (x.op == IrOp::StoreSlot)
+                            cur = static_cast<uint8_t>(cur & ~(1u << fi));
+                        else if (x.op == IrOp::LoadSlot)
+                            cur = static_cast<uint8_t>(cur | (1u << fi));
+                    }
+                }
+            }
+        }
+
         size_t i = 0;
         while (i < b.insts.size()) {
             const Inst& in = b.insts[i];
@@ -329,7 +352,15 @@ void AsmGen::gen_block(const Block& b) {
                 continue;
             }
 
+            if (!fp_after.empty()) {
+                fp_spill_mask_.assign(fp_promoted_slots_.size(), 0);
+                uint8_t m = fp_after[i];
+                for (size_t j = 0; j < fp_spill_mask_.size(); ++j)
+                    fp_spill_mask_[j] = static_cast<char>((m >> j) & 1);
+                fp_mask_valid_ = true;
+            }
             gen_inst(in);
+            fp_mask_valid_ = false;
             dst_loc_.clear();
             if (fp_temp) alias_[in.dst] = "%xmm1";
 

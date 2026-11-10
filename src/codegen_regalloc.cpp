@@ -132,18 +132,104 @@ void AsmGen::assign_vreg_slots() {
 // 用 callee-saved GPR，调用天然安全；浮点用 xmm8–15（xmm0–7 留给
 // 参数和临时），在每次会正常返回的 call 前后统一写回/读出栈槽。
 void AsmGen::spill_fp_slots() {
-        for (int slot : fp_promoted_slots_)
+        for (size_t j = 0; j < fp_promoted_slots_.size(); ++j) {
+            if (fp_mask_valid_ && j < fp_spill_mask_.size() && !fp_spill_mask_[j])
+                continue;
+            int slot = fp_promoted_slots_[j];
             line(std::format("movsd {}, {}", slot_reg_[slot], smem(slot)));
+        }
     }
 
 void AsmGen::reload_fp_slots() {
-        for (int slot : fp_promoted_slots_)
+        for (size_t j = 0; j < fp_promoted_slots_.size(); ++j) {
+            if (fp_mask_valid_ && j < fp_spill_mask_.size() && !fp_spill_mask_[j])
+                continue;
+            int slot = fp_promoted_slots_[j];
             line(std::format("movsd {}, {}", smem(slot), slot_reg_[slot]));
+        }
+    }
+
+// 浮点槽在调用点是否还需要：块级 live-in/live-out（只跟踪提升过的槽）。
+void AsmGen::build_fp_liveness() {
+        const int nb = static_cast<int>(f_->blocks.size());
+        const size_t kf = fp_promoted_slots_.size();
+        fp_live_in_.assign(static_cast<size_t>(nb), 0);
+        fp_live_out_.assign(static_cast<size_t>(nb), 0);
+        fp_live_off_ = std::getenv("PY23_NO_FPLIVE") != nullptr;
+        if (kf == 0 || nb == 0 || fp_live_off_) return;
+
+        std::vector<uint8_t> use(static_cast<size_t>(nb), 0);
+        std::vector<uint8_t> def(static_cast<size_t>(nb), 0);
+        for (int b = 0; b < nb; ++b) {
+            // 只把「块内先读后写」的读算作 use：先 store 再 load 是本块
+            // 自己定义的值，不构成对入口值的活跃需求。
+            uint8_t defined = 0;
+            uint8_t used = 0;
+            for (const auto& in : f_->blocks[static_cast<size_t>(b)].insts) {
+                if (in.idx < 0 || in.idx >= static_cast<int>(slot_fpidx_.size())) continue;
+                int fi = slot_fpidx_[static_cast<size_t>(in.idx)];
+                if (fi < 0) continue;
+                uint8_t bit = static_cast<uint8_t>(1u << fi);
+                if (in.op == IrOp::LoadSlot) {
+                    if (!(defined & bit)) used |= bit;
+                } else if (in.op == IrOp::StoreSlot) {
+                    defined |= bit;
+                }
+            }
+            use[static_cast<size_t>(b)] = used;
+            def[static_cast<size_t>(b)] = defined;
+        }
+
+        std::vector<std::vector<int>> succ(static_cast<size_t>(nb));
+        for (int b = 0; b < nb; ++b) {
+            const auto& insts = f_->blocks[static_cast<size_t>(b)].insts;
+            auto add = [&](int t) {
+                if (t >= 0 && t < nb) succ[static_cast<size_t>(b)].push_back(t);
+            };
+            if (insts.empty()) {
+                add(b + 1);
+                continue;
+            }
+            switch (insts.back().op) {
+                case IrOp::Jump: add(insts.back().target); break;
+                case IrOp::Branch:
+                    add(insts.back().target);
+                    add(insts.back().target2);
+                    break;
+                case IrOp::Return:
+                case IrOp::GenYield:
+                case IrOp::GenAwait:
+                case IrOp::GenRethrow:
+                case IrOp::GenDone:
+                    break;
+                default: add(b + 1); break;
+            }
+        }
+
+        bool chg = true;
+        while (chg) {
+            chg = false;
+            for (int b = nb - 1; b >= 0; --b) {
+                uint8_t out = 0;
+                for (int s : succ[static_cast<size_t>(b)])
+                    out |= fp_live_in_[static_cast<size_t>(s)];
+                uint8_t in = static_cast<uint8_t>(
+                    use[static_cast<size_t>(b)] |
+                    (out & ~def[static_cast<size_t>(b)]));
+                if (out != fp_live_out_[static_cast<size_t>(b)] ||
+                    in != fp_live_in_[static_cast<size_t>(b)]) {
+                    fp_live_out_[static_cast<size_t>(b)] = out;
+                    fp_live_in_[static_cast<size_t>(b)] = in;
+                    chg = true;
+                }
+            }
+        }
     }
 
 void AsmGen::assign_slot_regs() {
         int ns = static_cast<int>(f_->slot_ty.size());
         slot_reg_.assign(ns, std::string());
+        slot_fpidx_.assign(ns, -1);
         fp_promoted_slots_.clear();
         n_saved_regs_ = 0;
         if (ns == 0) return;
@@ -166,12 +252,29 @@ void AsmGen::assign_slot_regs() {
                     ++score[in.idx];
             }
 
+        // 槽类型可能被 unknown 吞掉（类型合并不上时），但实际流动的值
+        // 仍是浮点。这类槽不能进 GPR——结果融合会把 movsd 直接写到
+        // 整数寄存器上，汇编器都过不了。槽类型确定是 float 的才进 xmm，
+        // 类型模糊但带浮点值的槽留在内存里，两种指令都能落。
+        std::vector<bool> float_valued(ns, false);
+        for (const auto& b : f_->blocks)
+            for (const auto& in : b.insts) {
+                if (in.op == IrOp::StoreSlot && in.idx >= 0 && in.idx < ns &&
+                    in.a != kNoReg && in.a < f_->vreg_ty.size() &&
+                    ir_is_float(f_->vreg_ty[in.a]))
+                    float_valued[in.idx] = true;
+                if (in.op == IrOp::LoadSlot && in.idx >= 0 && in.idx < ns &&
+                    in.dst != kNoReg && in.dst < f_->vreg_ty.size() &&
+                    ir_is_float(f_->vreg_ty[in.dst]))
+                    float_valued[in.idx] = true;
+            }
+
         std::vector<std::pair<int, int>> hot_int, hot_fp;
         for (int i = 0; i < ns; ++i) {
             if (score[i] <= 0) continue;
             if (ir_is_float(f_->slot_ty[i])) {
                 if (opt_ >= 1) hot_fp.push_back({score[i], i});
-            } else {
+            } else if (!float_valued[i]) {
                 hot_int.push_back({score[i], i});
             }
         }
@@ -188,6 +291,7 @@ void AsmGen::assign_slot_regs() {
         int kf = std::min<int>(kMaxFpSlotRegs, static_cast<int>(hot_fp.size()));
         for (int i = 0; i < kf; ++i) {
             slot_reg_[hot_fp[i].second] = kFpSlotRegs[i];
+            slot_fpidx_[hot_fp[i].second] = i;
             fp_promoted_slots_.push_back(hot_fp[i].second);
         }
     }
@@ -332,7 +436,6 @@ void AsmGen::assign_block_temp_regs() {
     }
 
 // ── 跨块 vreg 提升 ──────────────────────────────────────────
-// ── 跨块 vreg 提升 ──────────────────────────────────────────
     //
     // 块内临时寄存器只给「定义和使用同块」的值；跨块的值（循环不变量、
     // 合并结果、循环边界等）一直住栈槽。这里把局部变量没用到的
@@ -389,6 +492,32 @@ void AsmGen::assign_block_temp_regs() {
             for (; ci < cands.size() && used < 2; ++ci, ++used)
                 vreg_reg_[static_cast<size_t>(cands[ci].v)] = kTempRegs[used];
             if (used > 0) block_temp_pool_.assign(kTempRegs + used, kTempRegs + 4);
+
+            // 无调用函数里 xmm8–15 也不会被破坏：空闲的拿走放跨块浮点值。
+            if (!std::getenv("PY23_NO_FPX")) {
+                size_t fp_base = fp_promoted_slots_.size();
+                if (fp_base < static_cast<size_t>(kMaxFpSlotRegs)) {
+                    std::vector<Cand> fcands;
+                    for (size_t v = 0; v < nv; ++v) {
+                        if (!cross_block_[v] || !vreg_reg_[v].empty()) continue;
+                        TypePtr vt = f_->vreg_ty[v];
+                        if (!vt || vt->kind != TyKind::Float) continue;
+                        if (use_count_[v] == 0 || def_block_[v] < 0) continue;
+                        fcands.push_back(Cand{static_cast<int>(v), use_count_[v]});
+                    }
+                    std::ranges::sort(fcands, [](const Cand& a, const Cand& b) {
+                        return a.uses != b.uses ? a.uses > b.uses : a.v < b.v;
+                    });
+                    size_t used_fp = 0;
+                    for (const auto& cd : fcands) {
+                        if (used_fp >= 2 || fp_base + used_fp >= static_cast<size_t>(kMaxFpSlotRegs))
+                            break;
+                        vreg_reg_[static_cast<size_t>(cd.v)] =
+                            kFpSlotRegs[fp_base + used_fp];
+                        ++used_fp;
+                    }
+                }
+            }
         }
     }
 

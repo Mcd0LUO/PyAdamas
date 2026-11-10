@@ -110,8 +110,16 @@ private:
     std::vector<std::string> slot_reg_;
     int n_saved_regs_ = 0;  // 实际 push 了几个 callee-saved
     // 提升到 xmm8–15 的浮点槽。call 会破坏 caller-saved xmm，调用前后
-    // 统一把它们写回/读出各自的栈槽。
+    // 只把「调用后仍存活」的槽写回/读出（块级活跃性在 build_fp_liveness
+    // 里算好，按指令取 live-after 掩码）。
     std::vector<int> fp_promoted_slots_;
+    std::vector<int> slot_fpidx_;      // slot → fp_promoted_slots_ 下标
+    std::vector<uint8_t> fp_live_in_;  // nb 个块
+    std::vector<uint8_t> fp_live_out_;
+    std::vector<char> fp_spill_mask_;  // 当前指令需要保存的槽
+    bool fp_mask_valid_ = false;
+    bool fp_live_off_ = false;  // PY23_NO_FPLIVE：退回全量 spill（A/B 用）
+    void build_fp_liveness();
     void spill_fp_slots();
     void reload_fp_slots();
     // 生成器/协程 resume：槽位在堆帧里，%r15 固定指向帧负载；

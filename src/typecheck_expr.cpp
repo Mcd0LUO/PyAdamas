@@ -503,7 +503,29 @@ void TypeChecker::enter_comp_scope(std::vector<ExprPtr>& gens) {
     }
 
 TypePtr TypeChecker::binop_type(Tok op, TypePtr l, TypePtr r, int line, int col) {
-        if (is_unknown(l) || is_unknown(r)) return t_unknown();
+        if (is_unknown(l) || is_unknown(r)) {
+            // 一侧 unknown（没标注的参数最常见）、另一侧是 float 时，结果
+            // 仍然是 float：Python 先把另一侧提升成 double。以前这里一律
+            // 返回 unknown，codegen 兜底按整数算，算出来是位模式参与整数
+            // 乘除的野值，而且不报错。unknown 一侧按机器整数表示补 convert；
+            // 浮点实参本来就不支持传给未标注参数，这里不改变那个限制。
+            bool lf = l && l->kind == TyKind::Float;
+            bool rf = r && r->kind == TyKind::Float;
+            switch (op) {
+                // / 永远产出 float，哪怕另一侧是 int
+                case Tok::SLASH: return t_float();
+                case Tok::PLUS:
+                case Tok::MINUS:
+                case Tok::STAR:
+                case Tok::DOUBLESLASH:
+                case Tok::PERCENT:
+                case Tok::DOUBLESTAR:
+                    if (lf != rf) return t_float();
+                    break;
+                default: break;
+            }
+            return t_unknown();
+        }
         // 类实例可能重载了运算符（Fraction.__sub__、__eq__……），重载还可能
         // 来自外部基类。我们没有 dunder 协议表，静态上无从判断，放过。
         if (l->kind == TyKind::Class || r->kind == TyKind::Class ||
