@@ -16,9 +16,18 @@ Py23Str* py23_str_char_at(Py23Str* s, int64_t i) {
 }
 
 Py23Str* py23_str_from_i64(int64_t v) {
-    char buf[32];
-    int n = snprintf(buf, sizeof buf, "%lld", (long long)v);
-    return str_new(buf, n);
+    // 手写十进制：snprintf 的格式解析在 str(i) 这种热路径上占大头。
+    // 从缓冲区尾部往前写，负数补符号；INT64_MIN 用 -(v+1)+1 取绝对值。
+    char buf[21];
+    char* end = buf + sizeof buf;
+    char* p = end;
+    uint64_t mag = v < 0 ? (uint64_t)(-(v + 1)) + 1 : (uint64_t)v;
+    do {
+        *--p = (char)('0' + (int)(mag % 10));
+        mag /= 10;
+    } while (mag);
+    if (v < 0) *--p = '-';
+    return str_new(p, (int64_t)(end - p));
 }
 
 Py23Str* py23_str_from_f64(double v) {
