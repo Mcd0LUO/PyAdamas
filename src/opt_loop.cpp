@@ -729,5 +729,188 @@ bool version_bounds_function(IRFunction& fn) {
     return any;
 }
 
+// ── 循环旋转 ───────────────────────────────────────────────────
+//
+// while 循环的形状是「头块算条件 + branch；体块结尾 jmp 头块」。每次迭代
+// 都要执行一条无条件 jmp。把头的条件计算克隆成一个 latch 块、插在体块
+// 后面，体块的回边改成跳到 latch：条件求值次数不变（k+1 次），但
+// 「jmp 头块」被 latch 末尾的 cmp + 条件跳转替代，而体块→latch 是相邻块，
+// 代码生成会省掉这条 jmp。
+//
+// 前提（任一不满足就跳过这个循环）：
+//  - 函数没有 handler / 不是生成器（块下标改动不碰 landing pad）；
+//  - 头块不是函数入口块（入口块的前缀是 rc_mark 之类的序言）；
+//  - 头块末尾是 cmp+branch，且 cmp 的操作数在头块内定义时只被头块使用；
+//  - 指向头块的回边恰好一条，且该块以 jump 头块结尾。
+bool rotate_one_loop(IRFunction& fn) {
+    const int nb = static_cast<int>(fn.blocks.size());
+    for (int h = 1; h < nb; ++h) {
+        auto& hi = fn.blocks[static_cast<size_t>(h)].insts;
+        if (hi.size() < 2) continue;
+        const Inst& br = hi.back();
+        if (br.op != IrOp::Branch || br.a == kNoReg) continue;
+        const Inst& cmp = hi[hi.size() - 2];
+        if (cmp.op != IrOp::Cmp || cmp.dst != br.a) continue;
+
+        // 从头块可达的块才算循环体；前置块也有「jump 头块」，那是入口边。
+        std::vector<char> reach(static_cast<size_t>(nb), 0);
+        {
+            std::vector<int> stack = {h};
+            reach[static_cast<size_t>(h)] = 1;
+            while (!stack.empty()) {
+                int b = stack.back();
+                stack.pop_back();
+                if (b < 0 || b >= nb) continue;
+                auto& bi = fn.blocks[static_cast<size_t>(b)].insts;
+                if (bi.empty()) continue;
+                const Inst& last = bi.back();
+                auto visit = [&](int t) {
+                    if (t >= 0 && t < nb && !reach[static_cast<size_t>(t)]) {
+                        reach[static_cast<size_t>(t)] = 1;
+                        stack.push_back(t);
+                    }
+                };
+                if (last.op == IrOp::Jump) visit(last.target);
+                else if (last.op == IrOp::Branch) {
+                    visit(last.target);
+                    visit(last.target2);
+                } else if (last.op != IrOp::Return && last.op != IrOp::GenYield &&
+                           last.op != IrOp::GenAwait && last.op != IrOp::GenRethrow &&
+                           last.op != IrOp::GenDone) {
+                    visit(b + 1);
+                }
+            }
+        }
+
+        // 头块必须有循环外的前驱（真正的入口边）；否则它只是上一轮旋转
+        // 加出来的 latch，再转一次只会复制出死块。
+        bool has_outside_pred = false;
+        for (int b = 0; b < nb && !has_outside_pred; ++b) {
+            if (reach[static_cast<size_t>(b)]) continue;
+            auto& bi = fn.blocks[static_cast<size_t>(b)].insts;
+            if (bi.empty()) {
+                has_outside_pred = (b + 1 == h);
+                continue;
+            }
+            const Inst& last = bi.back();
+            if (last.op == IrOp::Jump) {
+                has_outside_pred = (last.target == h);
+            } else if (last.op == IrOp::Branch) {
+                has_outside_pred = (last.target == h || last.target2 == h);
+            } else if (last.op != IrOp::Return && last.op != IrOp::GenYield &&
+                       last.op != IrOp::GenAwait && last.op != IrOp::GenRethrow &&
+                       last.op != IrOp::GenDone) {
+                has_outside_pred = (b + 1 == h);
+            }
+        }
+        if (!has_outside_pred) continue;
+
+        // 唯一回边（只数循环体内跳回头块的块）
+        int B = -1;
+        bool multi = false;
+        for (int b = 0; b < nb; ++b) {
+            if (b == h) continue;
+            if (!reach[static_cast<size_t>(b)]) continue;
+            auto& bi = fn.blocks[static_cast<size_t>(b)].insts;
+            if (!bi.empty() && bi.back().op == IrOp::Jump && bi.back().target == h) {
+                if (B >= 0) {
+                    multi = true;
+                    break;
+                }
+                B = b;
+            }
+        }
+        if (multi || B < 0) continue;
+        int E = -1;
+        if (br.target == B) E = br.target2;
+        else if (br.target2 == B) E = br.target;
+        else continue;
+        if (E == h || E == B) continue;
+
+        // 头块里 cmp 之前定义的 vreg 不能在别的块被使用：克隆版只会
+        // 在入口执行一次，外部读者会拿到过期值。
+        bool external_use = false;
+        for (size_t k = 0; k + 1 < hi.size() && !external_use; ++k) {
+            VReg dv = hi[k].dst;
+            if (dv == kNoReg) continue;
+            for (int b = 0; b < nb && !external_use; ++b) {
+                if (b == h) continue;
+                for (const auto& in : fn.blocks[static_cast<size_t>(b)].insts) {
+                    if (in.a == dv || in.b == dv || in.c == dv) {
+                        external_use = true;
+                        break;
+                    }
+                    for (VReg r : in.args)
+                        if (r == dv) {
+                            external_use = true;
+                            break;
+                        }
+                    if (external_use) break;
+                }
+            }
+        }
+        if (external_use) continue;
+
+        // 克隆头块（含 branch）到 latch，vreg 全部换新。
+        Block latch;
+        latch.name = "rot.latch";
+        std::unordered_map<VReg, VReg> sub;
+        auto mv = [&](VReg r) {
+            auto it = sub.find(r);
+            return it == sub.end() ? r : it->second;
+        };
+        latch.insts.reserve(hi.size());
+        for (const Inst& src : hi) {
+            Inst in = src;
+            in.a = mv(src.a);
+            in.b = mv(src.b);
+            in.c = mv(src.c);
+            for (VReg& r : in.args) r = mv(r);
+            if (src.dst != kNoReg) {
+                VReg nv = static_cast<VReg>(fn.vreg_ty.size());
+                fn.vreg_ty.push_back(src.ty);
+                sub[src.dst] = nv;
+                in.dst = nv;
+            }
+            latch.insts.push_back(std::move(in));
+        }
+
+        // 插入位置 B+1：所有 >= B+1 的块整体后移一格。
+        auto bump = [&](int t) { return t >= B + 1 ? t + 1 : t; };
+        for (auto& blk : fn.blocks) {
+            if (blk.insts.empty()) continue;
+            Inst& last = blk.insts.back();
+            if (last.op == IrOp::Jump) {
+                last.target = bump(last.target);
+            } else if (last.op == IrOp::Branch) {
+                last.target = bump(last.target);
+                last.target2 = bump(last.target2);
+            }
+        }
+        for (auto& in : latch.insts) {
+            if (in.op == IrOp::Jump) {
+                in.target = bump(in.target);
+            } else if (in.op == IrOp::Branch) {
+                in.target = bump(in.target);
+                in.target2 = bump(in.target2);
+            }
+        }
+        Inst& bj = fn.blocks[static_cast<size_t>(B)].insts.back();
+        bj.target = B + 1;
+        fn.blocks.insert(fn.blocks.begin() + (B + 1), std::move(latch));
+        return true;
+    }
+    return false;
+}
+
+bool rotate_loops_function(IRFunction& fn) {
+    if (fn.has_handlers || fn.is_generator) return false;
+    bool any = false;
+    for (int i = 0; i < 24; ++i)
+        if (rotate_one_loop(fn)) any = true;
+        else break;
+    return any;
+}
+
 }  // namespace optdetail
 }  // namespace py23
