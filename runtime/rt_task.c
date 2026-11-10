@@ -553,3 +553,85 @@ void py23_queue_task_done(void* qp) {
     }
 }
 
+void py23_queue_put_nowait(void* qp, int64_t v) {
+    if (!qp) py23_raise_c("TypeError", "put_nowait() expects a Queue");
+    Py23Queue* q = (Py23Queue*)qp;
+    if (q->maxsize > 0 && q->items->len >= q->maxsize)
+        py23_raise_c("QueueFull", "queue is full");
+    if (q->getters->len > 0) {
+        void* f = (void*)(uintptr_t)q->getters->data[0];
+        py23_future_set_result(f, v);
+        py23_list_del_index(q->getters, 0);
+        return;
+    }
+    queue_push_item(q, v);
+}
+
+int64_t py23_queue_get_nowait(void* qp) {
+    if (!qp) py23_raise_c("TypeError", "get_nowait() expects a Queue");
+    Py23Queue* q = (Py23Queue*)qp;
+    if (q->items->len == 0) py23_raise_c("QueueEmpty", "queue is empty");
+    int64_t v = py23_list_get(q->items, 0);
+    py23_list_del_index(q->items, 0);
+    if (q->putters->len > 0) {
+        void* pf = (void*)(uintptr_t)q->putters->data[0];
+        int64_t pv = q->pvalues->data[0];
+        py23_list_del_index(q->putters, 0);
+        py23_list_del_index(q->pvalues, 0);
+        py23_future_set_result(pf, 0);
+        queue_push_item(q, pv);
+    }
+    return v;
+}
+
+/* ── asyncio.TaskGroup ───────────────────────────────────────── */
+
+typedef struct {
+    Py23List* tasks; /* Task*（owned） */
+} Py23TaskGroup;
+
+static void taskgroup_destroy(void* p) {
+    Py23TaskGroup* g = (Py23TaskGroup*)p;
+    if (g->tasks) py23_rc_dec(g->tasks);
+}
+
+void* py23_taskgroup_new(void) {
+    loop_ensure();
+    Py23TaskGroup* g = (Py23TaskGroup*)rc_alloc((int64_t)sizeof(Py23TaskGroup),
+                                                taskgroup_destroy, NULL, PY23_RC_OBJ);
+    g->tasks = py23_list_new(4, 1);
+    return g;
+}
+
+void* py23_taskgroup_add(void* gp, void* coro) {
+    if (!gp) py23_raise_c("TypeError", "create_task() expects a TaskGroup");
+    Py23TaskGroup* g = (Py23TaskGroup*)gp;
+    void* t = py23_asyncio_create_task(coro);
+    py23_rc_inc(t);                       // 调用方返回值持有一份
+    py23_list_append(g->tasks, (int64_t)t);  // 转移 create_task 的那份
+    return t;
+}
+
+/* 退出：把组内任务交给一个 gather 等待；gather 的异常会原样抛给调用方。 */
+void* py23_taskgroup_exit(void* gp) {
+    if (!gp) py23_raise_c("TypeError", "__aexit__() expects a TaskGroup");
+    Py23TaskGroup* g = (Py23TaskGroup*)gp;
+    int64_t n = g->tasks->len;
+    Py23List* L = py23_list_new(n > 0 ? n : 1, 1);
+    for (int64_t i = 0; i < n; ++i) {
+        int64_t t = g->tasks->data[i];
+        py23_rc_inc((void*)t);
+        py23_list_append(L, t);
+    }
+    void* fut = py23_asyncio_gather(L);
+    py23_rc_dec(L);
+    return fut;
+}
+
+void py23_taskgroup_cancel(void* gp) {
+    if (!gp) return;
+    Py23TaskGroup* g = (Py23TaskGroup*)gp;
+    for (int64_t i = 0; i < g->tasks->len; ++i)
+        py23_asyncio_task_cancel((void*)(uintptr_t)g->tasks->data[i]);
+}
+

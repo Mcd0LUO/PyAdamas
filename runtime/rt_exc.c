@@ -89,6 +89,8 @@ const char* exc_parent(const char* name) {
         {"MemoryError", "Exception"},
         {"NameError", "Exception"},
         {"UnboundLocalError", "NameError"},
+        {"QueueEmpty", "Exception"},
+        {"QueueFull", "Exception"},
         {"OSError", "Exception"},
         {"IOError", "OSError"},
         {"EnvironmentError", "OSError"},

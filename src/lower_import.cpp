@@ -98,6 +98,8 @@ std::optional<RtFn> Lowerer::native_fn(const std::string& module, const std::str
         if (member == "Lock") return RtFn::LockNew;
         if (member == "Queue") return RtFn::QueueNew;
         if (member == "wait_for") return RtFn::AsyncioWaitFor;
+        if (member == "timeout") return RtFn::AsyncTimeoutNew;
+        if (member == "TaskGroup") return RtFn::TaskGroupNew;
         if (member == "wait_readable" || member == "wait_writable")
             return RtFn::AsyncioWaitFd;
         return std::nullopt;

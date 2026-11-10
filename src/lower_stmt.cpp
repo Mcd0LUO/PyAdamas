@@ -699,6 +699,14 @@ VReg Lowerer::emit_exit_call(const FuncCtx::Cleanup& c, bool exceptional) {
         call_void(RtFn::LockRelease, {load_slot(c.mgr_slot, t_unknown())});
         return const_bool(false);
     }
+    if (c.kind == FuncCtx::Cleanup::Kind::TimeoutExit) {
+        call_void(RtFn::TimeoutExit, {load_slot(c.mgr_slot, t_unknown())});
+        return const_bool(false);
+    }
+    if (c.kind == FuncCtx::Cleanup::Kind::TaskGroupCancel) {
+        call_void(RtFn::TaskGroupCancel, {load_slot(c.mgr_slot, t_unknown())});
+        return const_bool(false);
+    }
     std::vector<VReg> args;
     for (int i = 0; i < c.nargs; ++i) {
         if (exceptional && i == 0) {
@@ -759,6 +767,14 @@ void Lowerer::emit_cleanup_exits(size_t down_to) {
             case FuncCtx::Cleanup::Kind::LockRelease:
                 call_void(RtFn::HandlerDiscard, {load_slot(c.handler_slot, t_int())});
                 call_void(RtFn::LockRelease, {load_slot(c.mgr_slot, t_unknown())});
+                break;
+            case FuncCtx::Cleanup::Kind::TimeoutExit:
+                call_void(RtFn::HandlerDiscard, {load_slot(c.handler_slot, t_int())});
+                call_void(RtFn::TimeoutExit, {load_slot(c.mgr_slot, t_unknown())});
+                break;
+            case FuncCtx::Cleanup::Kind::TaskGroupCancel:
+                call_void(RtFn::HandlerDiscard, {load_slot(c.handler_slot, t_int())});
+                call_void(RtFn::TaskGroupCancel, {load_slot(c.mgr_slot, t_unknown())});
                 break;
         }
     }
@@ -1073,6 +1089,124 @@ void Lowerer::lower_async_with_item(With& w, size_t idx) {
         store_slot(msgs, tmsg);
         call_void(RtFn::ExcClear, {});
         call_void(RtFn::LockRelease, {load_slot(ms, ct)});
+        call_void(RtFn::Raise, {load_slot(ts, t_str()), load_slot(msgs, t_str())});
+        end_unreachable();
+        switch_to(end);
+        return;
+    }
+    if (ct && ct->kind == TyKind::AsyncEvent) {
+        int ms = new_temp_slot(ct);
+        store_slot(ms, mgr);
+        VReg fut = call_runtime(RtFn::EventWait, mk_future(t_bool()),
+                                {load_slot(ms, ct)});
+        push_temp(fut);
+        VReg ev = suspend_on_awaitable(fut, t_bool(), item.context->line, item.context->col);
+        if (item.optional_vars) assign_to(*item.optional_vars, ev, t_bool());
+        lower_async_with_item(w, idx + 1);
+        return;
+    }
+    if (ct && ct->kind == TyKind::AsyncTimeout) {
+        int ms = new_temp_slot(ct);
+        store_slot(ms, mgr);
+        if (st_->is_generator) cleanup_gen_mark();
+        call_void(RtFn::TimeoutEnter, {load_slot(ms, ct)});
+        int hs = push_handler();
+        VReg sj = setjmp_handler(hs);
+        int body = new_block("awith.body");
+        int land = new_block("awith.land");
+        int end = new_block("awith.end");
+        {
+            Inst br;
+            br.op = IrOp::Branch;
+            br.a = sj;
+            br.target = land;
+            br.target2 = body;
+            emit(std::move(br));
+        }
+        switch_to(body);
+        FuncCtx::Cleanup cf;
+        cf.kind = FuncCtx::Cleanup::Kind::TimeoutExit;
+        cf.handler_slot = hs;
+        cf.land = land;
+        cf.mgr_slot = ms;
+        st_->cleanups.push_back(cf);
+        lower_async_with_item(w, idx + 1);
+        st_->cleanups.pop_back();
+        if (!terminated()) {
+            call_void(RtFn::HandlerLeave, {load_slot(hs, t_int())});
+            call_void(RtFn::TimeoutExit, {load_slot(ms, ct)});
+            Inst j;
+            j.op = IrOp::Jump;
+            j.target = end;
+            emit(std::move(j));
+        }
+        switch_to(land);
+        call_void(RtFn::HandlerLeave, {load_slot(hs, t_int())});
+        VReg tname = call_runtime(RtFn::ExcTypeName, t_str(), {});
+        push_temp(tname);
+        VReg tmsg = call_runtime(RtFn::ExcMessage, t_str(), {});
+        push_temp(tmsg);
+        int ts = new_temp_slot(t_str());
+        store_slot(ts, tname);
+        int msgs = new_temp_slot(t_str());
+        store_slot(msgs, tmsg);
+        call_void(RtFn::ExcClear, {});
+        call_void(RtFn::TimeoutExit, {load_slot(ms, ct)});
+        call_void(RtFn::Raise, {load_slot(ts, t_str()), load_slot(msgs, t_str())});
+        end_unreachable();
+        switch_to(end);
+        return;
+    }
+    if (ct && ct->kind == TyKind::AsyncTaskGroup) {
+        int ms = new_temp_slot(ct);
+        store_slot(ms, mgr);
+        if (st_->is_generator) cleanup_gen_mark();
+        if (item.optional_vars) assign_to(*item.optional_vars, load_slot(ms, ct), ct);
+        int hs = push_handler();
+        VReg sj = setjmp_handler(hs);
+        int body = new_block("awith.body");
+        int land = new_block("awith.land");
+        int end = new_block("awith.end");
+        {
+            Inst br;
+            br.op = IrOp::Branch;
+            br.a = sj;
+            br.target = land;
+            br.target2 = body;
+            emit(std::move(br));
+        }
+        switch_to(body);
+        FuncCtx::Cleanup cf;
+        cf.kind = FuncCtx::Cleanup::Kind::TaskGroupCancel;
+        cf.handler_slot = hs;
+        cf.land = land;
+        cf.mgr_slot = ms;
+        st_->cleanups.push_back(cf);
+        lower_async_with_item(w, idx + 1);
+        st_->cleanups.pop_back();
+        if (!terminated()) {
+            call_void(RtFn::HandlerLeave, {load_slot(hs, t_int())});
+            VReg g = call_runtime(RtFn::TaskGroupExit, mk_coroutine(mk_list(t_unknown())),
+                                  {load_slot(ms, ct)});
+            push_temp(g);
+            suspend_on_awaitable(g, mk_list(t_unknown()), w.line, w.col);
+            Inst j;
+            j.op = IrOp::Jump;
+            j.target = end;
+            emit(std::move(j));
+        }
+        switch_to(land);
+        call_void(RtFn::HandlerLeave, {load_slot(hs, t_int())});
+        VReg tname = call_runtime(RtFn::ExcTypeName, t_str(), {});
+        push_temp(tname);
+        VReg tmsg = call_runtime(RtFn::ExcMessage, t_str(), {});
+        push_temp(tmsg);
+        int ts = new_temp_slot(t_str());
+        store_slot(ts, tname);
+        int msgs = new_temp_slot(t_str());
+        store_slot(msgs, tmsg);
+        call_void(RtFn::ExcClear, {});
+        call_void(RtFn::TaskGroupCancel, {load_slot(ms, ct)});
         call_void(RtFn::Raise, {load_slot(ts, t_str()), load_slot(msgs, t_str())});
         end_unreachable();
         switch_to(end);

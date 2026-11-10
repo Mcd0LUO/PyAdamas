@@ -179,7 +179,9 @@ VReg Lowerer::lower_method_call(Attribute& at, Call& c) {
 
     if (recv_ty && (recv_ty->kind == TyKind::AsyncEvent ||
                     recv_ty->kind == TyKind::AsyncLock ||
-                    recv_ty->kind == TyKind::AsyncQueue)) {
+                    recv_ty->kind == TyKind::AsyncQueue ||
+                    recv_ty->kind == TyKind::AsyncTimeout ||
+                    recv_ty->kind == TyKind::AsyncTaskGroup)) {
         if (opt) recv = guard_not_none(recv, std::format("method '{}'", at.attr));
         if (!c.keywords.empty())
             err(c.line, c.col, std::format("{}() does not take keyword arguments", at.attr));
@@ -268,6 +270,37 @@ VReg Lowerer::lower_method_call(Attribute& at, Call& c) {
                 if (!count(0)) return const_none();
                 call_void(RtFn::QueueTaskDone, {recv});
                 return const_none();
+            }
+            if (at.attr == "put_nowait") {
+                if (!count(1)) return const_none();
+                TypePtr vt = tc_.type_of(c.args[0].get());
+                if (vt && vt->kind == TyKind::Float) {
+                    err(c.args[0]->line, c.args[0]->col,
+                        "Queue.put_nowait() of float is not supported yet");
+                    return const_none();
+                }
+                call_void(RtFn::QueuePutNowait, {recv, expr(*c.args[0])});
+                return const_none();
+            }
+            if (at.attr == "get_nowait") {
+                if (!count(0)) return const_none();
+                return call_runtime(RtFn::QueueGetNowait, t_unknown(), {recv});
+            }
+        }
+        if (recv_ty->kind == TyKind::AsyncTimeout) {
+            if (at.attr == "expired") {
+                if (!count(0)) return const_none();
+                return call_runtime(RtFn::TimeoutExpired, t_bool(), {recv});
+            }
+        }
+        if (recv_ty->kind == TyKind::AsyncTaskGroup) {
+            if (at.attr == "create_task") {
+                if (!count(1)) return const_none();
+                VReg coro = expr(*c.args[0]);
+                VReg t = call_runtime(RtFn::TaskGroupAdd, mk_task(t_unknown()),
+                                      {recv, coro});
+                push_temp(t);
+                return t;
             }
         }
         err(c.line, c.col,

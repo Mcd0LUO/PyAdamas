@@ -57,6 +57,8 @@ enum class TyKind : uint8_t {
     AsyncLock,    // asyncio.Lock
     AsyncQueue,   // asyncio.Queue；sub[0] 是元素类型
     TypeObj,      // type(x) 的类型对象；sub[0] 是被表示的类型
+    AsyncTimeout, // asyncio.timeout
+    AsyncTaskGroup, // asyncio.TaskGroup
     Exception,    // 异常值（type name 放在 Type::name）；args 是 message 列表
     File,         // open() 返回的文件对象
 };
@@ -481,6 +483,8 @@ inline TypePtr mk_typeobj(TypePtr inner) {
     t->sub.push_back(std::move(inner));
     return t;
 }
+inline TypePtr mk_async_timeout() { return new_ty(TyKind::AsyncTimeout); }
+inline TypePtr mk_async_taskgroup() { return new_ty(TyKind::AsyncTaskGroup); }
 inline TypePtr mk_async_event() { return new_ty(TyKind::AsyncEvent); }
 inline TypePtr mk_async_lock() { return new_ty(TyKind::AsyncLock); }
 inline TypePtr mk_async_queue(TypePtr elem) {
@@ -620,6 +624,8 @@ inline std::string type_name_impl(const TypePtr& t, int depth) {
             return t->sub.empty() ? "future"
                                   : std::format("future[{}]", type_name_impl(t->sub[0], depth + 1));
         case TyKind::TypeObj: return "type";
+        case TyKind::AsyncTimeout: return "asyncio.Timeout";
+        case TyKind::AsyncTaskGroup: return "asyncio.TaskGroup";
         case TyKind::AsyncEvent: return "asyncio.Event";
         case TyKind::AsyncLock: return "asyncio.Lock";
         case TyKind::AsyncQueue:
@@ -688,6 +694,8 @@ inline TypePtr join_into(const TypePtr& a, const TypePtr& b) {
     if (a->kind == TyKind::AsyncQueue && b->kind == TyKind::AsyncQueue)
         return mk_async_queue(join(a->sub.empty() ? t_unknown() : a->sub[0],
                                    b->sub.empty() ? t_unknown() : b->sub[0]));
+    if (a->kind == TyKind::AsyncTimeout && b->kind == TyKind::AsyncTimeout) return a;
+    if (a->kind == TyKind::AsyncTaskGroup && b->kind == TyKind::AsyncTaskGroup) return a;
     if (a->kind == TyKind::AsyncEvent && b->kind == TyKind::AsyncEvent) return a;
     if (a->kind == TyKind::AsyncLock && b->kind == TyKind::AsyncLock) return a;
     if (a->kind == TyKind::Exception && b->kind == TyKind::Exception) return a;
@@ -759,6 +767,9 @@ inline bool assignable(const TypePtr& dst, const TypePtr& src) {
     if (dst->kind == TyKind::Future && src->kind == TyKind::Future)
         return dst->sub.empty() || src->sub.empty() || assignable(dst->sub[0], src->sub[0]);
     if (dst->kind == TyKind::TypeObj && src->kind == TyKind::TypeObj) return true;
+    if (dst->kind == TyKind::AsyncTimeout && src->kind == TyKind::AsyncTimeout) return true;
+    if (dst->kind == TyKind::AsyncTaskGroup && src->kind == TyKind::AsyncTaskGroup)
+        return true;
     if (dst->kind == TyKind::AsyncEvent && src->kind == TyKind::AsyncEvent) return true;
     if (dst->kind == TyKind::AsyncLock && src->kind == TyKind::AsyncLock) return true;
     if (dst->kind == TyKind::AsyncQueue && src->kind == TyKind::AsyncQueue)

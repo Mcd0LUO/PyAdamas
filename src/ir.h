@@ -285,6 +285,16 @@ enum class RtFn : uint16_t {
     QueueFull,         // (queue*) -> bool
     QueueJoin,         // (queue*) -> future*
     QueueTaskDone,     // (queue*) -> void
+    QueuePutNowait,    // (queue*, i64) -> void；满队列抛 QueueFull
+    QueueGetNowait,    // (queue*) -> i64；空队列抛 QueueEmpty
+    AsyncTimeoutNew,   // (f64 secs) -> timeout*
+    TimeoutEnter,      // (timeout*) -> void
+    TimeoutExit,       // (timeout*) -> int64 已超时?
+    TimeoutExpired,    // (timeout*) -> bool
+    TaskGroupNew,      // () -> taskgroup*
+    TaskGroupAdd,      // (taskgroup*, coro*) -> task*
+    TaskGroupExit,     // (taskgroup*) -> future*
+    TaskGroupCancel,   // (taskgroup*) -> void
 };
 
 inline const char* rt_name(RtFn f) {
@@ -549,6 +559,16 @@ inline const char* rt_name(RtFn f) {
         case RtFn::QueueFull: return "py23_queue_full";
         case RtFn::QueueJoin: return "py23_queue_join";
         case RtFn::QueueTaskDone: return "py23_queue_task_done";
+        case RtFn::QueuePutNowait: return "py23_queue_put_nowait";
+        case RtFn::QueueGetNowait: return "py23_queue_get_nowait";
+        case RtFn::AsyncTimeoutNew: return "py23_timeout_new";
+        case RtFn::TimeoutEnter: return "py23_timeout_enter";
+        case RtFn::TimeoutExit: return "py23_timeout_exit";
+        case RtFn::TimeoutExpired: return "py23_timeout_expired";
+        case RtFn::TaskGroupNew: return "py23_taskgroup_new";
+        case RtFn::TaskGroupAdd: return "py23_taskgroup_add";
+        case RtFn::TaskGroupExit: return "py23_taskgroup_exit";
+        case RtFn::TaskGroupCancel: return "py23_taskgroup_cancel";
     }
     return "?";
 }
@@ -846,6 +866,8 @@ inline bool ir_is_heap(const TypePtr& t) {
         case TyKind::AsyncLock:
         case TyKind::AsyncQueue:
         case TyKind::TypeObj:
+        case TyKind::AsyncTimeout:
+        case TyKind::AsyncTaskGroup:
         case TyKind::Exception:  // 异常值：堆对象，args 列表归它所有
         case TyKind::Complex:
         case TyKind::File:
@@ -878,6 +900,8 @@ inline bool ir_is_ref(const TypePtr& t) {
         case TyKind::AsyncLock:
         case TyKind::AsyncQueue:
         case TyKind::TypeObj:
+        case TyKind::AsyncTimeout:
+        case TyKind::AsyncTaskGroup:
         case TyKind::Exception:
         case TyKind::Complex:
         case TyKind::File:

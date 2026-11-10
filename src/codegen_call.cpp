@@ -521,6 +521,8 @@ void AsmGen::gen_call_rt(const Inst& in) {
             case RtFn::MathDist:
             case RtFn::HashValue:
             case RtFn::QueuePut:
+            case RtFn::QueuePutNowait:
+            case RtFn::TaskGroupAdd:
             case RtFn::FileRead:
             case RtFn::FileWrite:
             case RtFn::FileWritelines:
@@ -652,6 +654,12 @@ void AsmGen::gen_call_rt(const Inst& in) {
             case RtFn::QueueJoin:
             case RtFn::QueueTaskDone:
             case RtFn::QueueNew:
+            case RtFn::QueueGetNowait:
+            case RtFn::TimeoutEnter:
+            case RtFn::TimeoutExit:
+            case RtFn::TimeoutExpired:
+            case RtFn::TaskGroupExit:
+            case RtFn::TaskGroupCancel:
             case RtFn::GenNext:
             case RtFn::GenClose:
             case RtFn::HandlerSuspend:
@@ -763,6 +771,7 @@ void AsmGen::gen_call_rt(const Inst& in) {
             case RtFn::MathFrexp:
             case RtFn::MathModf:
             case RtFn::HashF64:
+            case RtFn::AsyncTimeoutNew:
                 line(std::format("movsd {}, %xmm0", src_op(in.args[0])));
                 break;
             case RtFn::MathLdexp:
@@ -808,6 +817,7 @@ void AsmGen::gen_call_rt(const Inst& in) {
             case RtFn::AsyncioFutureNew:
             case RtFn::EventNew:
             case RtFn::LockNew:
+            case RtFn::TaskGroupNew:
             case RtFn::ExcAccept:
             case RtFn::ExcAcceptValue:
             case RtFn::ExcDone:

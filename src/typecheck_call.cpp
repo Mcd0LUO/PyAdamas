@@ -296,6 +296,7 @@ bool TypeChecker::is_exception_name(const std::string& n) {
             "UnboundLocalError",
             "IOError",         "OverflowError", "RecursionError", "RuntimeError",
             "StopIteration",   "SyntaxError", "TypeError",       "ValueError",
+            "QueueEmpty", "QueueFull",
             "ZeroDivisionError", "FileNotFoundError", "PermissionError",
             "ImportError",     "ModuleNotFoundError", "UnicodeDecodeError",
             "UnicodeEncodeError", "TimeoutError", "SystemExit",   "KeyboardInterrupt",
@@ -365,7 +366,7 @@ std::optional<TypePtr> TypeChecker::asyncio_call(const std::string& member, Call
             member != "create_task" && member != "Future" &&
             member != "wait_readable" && member != "wait_writable" &&
             member != "Event" && member != "Lock" && member != "Queue" &&
-            member != "wait_for")
+            member != "wait_for" && member != "timeout" && member != "TaskGroup")
             return std::nullopt;
 
         std::vector<TypePtr> a;
@@ -421,6 +422,23 @@ std::optional<TypePtr> TypeChecker::asyncio_call(const std::string& member, Call
                     std::format("asyncio.Queue() maxsize must be an int, got '{}'",
                                 type_name(a[0])));
             return mk_async_queue(t_unknown());
+        }
+
+        if (member == "TaskGroup") {
+            if (!a.empty()) err(c.line, c.col, "asyncio.TaskGroup() takes no arguments");
+            return mk_async_taskgroup();
+        }
+
+        if (member == "timeout") {
+            if (a.size() != 1) {
+                err(c.line, c.col,
+                    std::format("asyncio.timeout() expects 1 argument, got {}", a.size()));
+            } else if (!is_unknown(a[0]) && !is_num(a[0])) {
+                err(c.line, c.col,
+                    std::format("asyncio.timeout() delay must be a number, got '{}'",
+                                type_name(a[0])));
+            }
+            return mk_async_timeout();
         }
 
         if (member == "wait_for") {
@@ -774,7 +792,38 @@ TypePtr TypeChecker::method_call(TypePtr recv, const std::string& name, Call& c,
                 argc(0, 0);
                 return t_none();
             }
+            if (name == "put_nowait") {
+                argc(1, 1);
+                return t_none();
+            }
+            if (name == "get_nowait") {
+                argc(0, 0);
+                return elem();
+            }
             err(c.line, c.col, std::format("'asyncio.Queue' has no method '{}'", name));
+            return t_unknown();
+        }
+
+        if (recv->kind == TyKind::AsyncTimeout) {
+            if (name == "expired") {
+                argc(0, 0);
+                return t_bool();
+            }
+            err(c.line, c.col, std::format("'asyncio.Timeout' has no method '{}'", name));
+            return t_unknown();
+        }
+
+        if (recv->kind == TyKind::AsyncTaskGroup) {
+            if (name == "create_task") {
+                argc(1, 1);
+                if (a.size() == 1 && !is_unknown(a[0]) && a[0]->kind != TyKind::Coroutine)
+                    err(c.line, c.col,
+                        std::format("TaskGroup.create_task() expects a coroutine, got '{}'",
+                                    type_name(a[0])));
+                return mk_task(t_unknown());
+            }
+            err(c.line, c.col,
+                std::format("'asyncio.TaskGroup' has no method '{}'", name));
             return t_unknown();
         }
 

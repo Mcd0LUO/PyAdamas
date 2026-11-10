@@ -313,6 +313,13 @@ void TypeChecker::stmt(Stmt& s) {
                     } else if (w.is_async && ct && ct->kind == TyKind::AsyncLock) {
                         // 内置 Lock 的 __aenter__ 就是 await acquire()。
                         vt = t_bool();
+                    } else if (w.is_async && ct && ct->kind == TyKind::AsyncEvent) {
+                        vt = t_bool();
+                    } else if (w.is_async && ct && ct->kind == TyKind::AsyncTimeout) {
+                        vt = t_none();
+                    } else if (w.is_async && ct && ct->kind == TyKind::AsyncTaskGroup) {
+                        // __aenter__ 返回 TaskGroup 自身，as tg 绑定的是管理器。
+                        vt = ct;
                     } else if (ct && ct->kind == TyKind::File) {
                         // with open(...) as f：f 就是文件对象本身。
                         vt = ct;

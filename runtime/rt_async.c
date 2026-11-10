@@ -239,6 +239,89 @@ void start_gather(Py23Await* w, void* waiter) {
     if (w->remaining <= 0 && !w->done) finish_gather(w);
 }
 
+/* ── asyncio.timeout：到期向当前协程注入 TimeoutError ─────────── */
+
+typedef struct {
+    Py23Await* timer; /* 已注册的 kind 9 定时器（可能已触发） */
+    int64_t expired;
+    double secs;
+} Py23Timeout;
+
+void* loop_active_coro; /* coro_step 执行期间指向当前协程 */
+
+static void timeout_detach(Py23Timeout* to) {
+    Py23Await* t = to->timer;
+    if (!t) return;
+    to->timer = NULL;
+    if (loop_timers)
+        for (int64_t i = 0; i < loop_timers->len; ++i)
+            if (loop_timers->data[i] == (int64_t)t) {
+                list_take_at(loop_timers, i);
+                py23_rc_dec(t); /* 定时器表的引用 */
+                break;
+            }
+    py23_rc_dec(t); /* timeout 自己的引用；dtor 负责 dec driver_gen */
+}
+
+static void timeout_destroy(void* p) { timeout_detach((Py23Timeout*)p); }
+
+void* py23_timeout_new(double secs) {
+    loop_ensure();
+    Py23Timeout* to = (Py23Timeout*)rc_alloc((int64_t)sizeof(Py23Timeout),
+                                             timeout_destroy, NULL, PY23_RC_OBJ);
+    to->secs = secs;
+    return to;
+}
+
+void py23_timeout_enter(void* tp) {
+    if (!tp) py23_raise_c("TypeError", "__aenter__() expects a Timeout");
+    Py23Timeout* to = (Py23Timeout*)tp;
+    if (to->timer) py23_raise_c("RuntimeError", "timeout is already active");
+    if (!loop_active_coro)
+        py23_raise_c("RuntimeError", "timeout() must be used inside a coroutine");
+    Py23Await* t = await_new(9);
+    // remaining 只存裸指针，不参与 RC；driver_gen 由 dtor 统一释放。
+    t->remaining = (int64_t)(uintptr_t)to;
+    t->driver_gen = (int64_t)(uintptr_t)loop_active_coro;
+    py23_rc_inc(loop_active_coro);
+    int64_t ms = 0;
+    if (to->secs > 0) {
+        double v = to->secs * 1000.0;
+        ms = v > 9e15 ? (int64_t)9e15 : (int64_t)(v + 0.5);
+    }
+    t->deadline_ms = now_ms() + ms;
+    py23_rc_inc(t); /* 定时器表引用 */
+    py23_list_append(loop_timers, (int64_t)t);
+    to->timer = t;
+}
+
+int64_t py23_timeout_exit(void* tp) {
+    if (!tp) return 0;
+    Py23Timeout* to = (Py23Timeout*)tp;
+    int64_t expired = to->expired;
+    timeout_detach(to);
+    return expired;
+}
+
+int64_t py23_timeout_expired(void* tp) {
+    if (!tp) return 0;
+    return ((Py23Timeout*)tp)->expired;
+}
+
+/* 定时器到期：标记 timeout、向目标协程注入异常。消费 fire 拿到的两个引用。 */
+static void timeout_fire(Py23Await* t) {
+    Py23Timeout* to = (Py23Timeout*)(uintptr_t)t->remaining;
+    void* target = (void*)(uintptr_t)t->driver_gen;
+    if (to) {
+        to->expired = 1;
+        to->timer = NULL;
+    }
+    if (target) cancel_suspended(target, exc_new("TimeoutError", ""));
+    // driver_gen 留给 await_destroy 释放；这里只释放 timer 自身的两个引用。
+    py23_rc_dec(t);
+    py23_rc_dec(t);
+}
+
 /* ── asyncio.wait_for：可等待对象 + 超时竞速（kind 8） ────────── */
 
 static void timer_remove(Py23Await* w) {
@@ -636,7 +719,10 @@ void coro_step(void* c) {
     h.prev = handler_top;
     h.mark = py23_rc_mark();
     handler_top = &h;
+    void* prev_active = loop_active_coro;
+    loop_active_coro = c;
     if (setjmp(h.env) != 0) {
+        loop_active_coro = prev_active;
         handler_top = h.prev;
         Py23Exception* e = pending_exc;
         pending_exc = NULL;
@@ -650,6 +736,7 @@ void coro_step(void* c) {
         return;
     }
     ((void (*)(void*, int64_t))(uintptr_t)p[4])(c, 0);
+    loop_active_coro = prev_active;
     handler_top = h.prev;
     py23_rc_cleanup(h.mark);
     p[5] = 0;
@@ -695,6 +782,11 @@ int fire_due_timers(int64_t now) {
             list_take_at(loop_timers, i);
             if (w->kind == 8) {
                 wait_for_timeout(w);
+                fired = 1;
+                continue;
+            }
+            if (w->kind == 9) {
+                timeout_fire(w);
                 fired = 1;
                 continue;
             }

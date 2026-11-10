@@ -155,7 +155,7 @@ struct FuncCtx {
     std::vector<size_t> loop_cleanup_depth;    // 词法上活跃的清理动作，按从外到内排列。return/break/continue 和
     // 异常 landing 都从这里生成对应动作。
     struct Cleanup {
-        enum class Kind { With, AsyncWith, Finally, Handler, ExcDone, FileClose, LockRelease } kind;
+        enum class Kind { With, AsyncWith, Finally, Handler, ExcDone, FileClose, LockRelease, TimeoutExit, TaskGroupCancel } kind;
         // With / Finally / Handler：handler 记录所在的槽
         int handler_slot = -1;
         // Handler/With/Finally：setjmp 非 0 时跳转的异常展开块
@@ -971,6 +971,8 @@ private:
             case TyKind::AsyncEvent: return "Event";
             case TyKind::AsyncLock: return "Lock";
             case TyKind::AsyncQueue: return "Queue";
+            case TyKind::AsyncTimeout: return "Timeout";
+            case TyKind::AsyncTaskGroup: return "TaskGroup";
             case TyKind::Optional:
                 return t->sub.empty() ? "object" : py_type_name(t->sub[0]);
             default: return "object";

@@ -308,19 +308,30 @@ print(asyncio.run(add(3, 4)))   # 10
   `task.cancel()` 请求取消（返回 bool）。
 - `asyncio.Future()`：手动完成的 future（`set_result` / `set_exception` /
   `add_done_callback` / `result` / `exception` / `cancel`）。
-- `asyncio.Event()`：`await ev.wait()`、`ev.set()`、`ev.is_set()`。
+- `asyncio.Event()`：`await ev.wait()`、`ev.set()`、`ev.is_set()`；
+  支持 `async with ev:`（进入时等 set，退出无动作）。
 - `asyncio.Lock()`：`await lock.acquire()`、`lock.release()`、
   `lock.locked()`；等待者按 FIFO 唤醒，支持 `async with lock:`。
 - `asyncio.Queue([maxsize])`：`await q.put(v)`、`await q.get()`、
-  `q.qsize()`、`q.empty()`、`q.full()`、`await q.join()`、`q.task_done()`；
-  `maxsize > 0` 时满队列的 put 会阻塞，get 腾出位置后按 FIFO 放行；
-  元素静态类型按 unknown 处理（`get` 的 await 结果不能用字符串方法等
-  需要具体类型的操作）。
+  `q.put_nowait(v)` / `q.get_nowait()`（满/空抛 `QueueFull` /
+  `QueueEmpty`，按内置异常名捕获）、`q.qsize()`、`q.empty()`、
+  `q.full()`、`await q.join()`、`q.task_done()`；`maxsize > 0` 时满
+  队列的 put 会阻塞，get 腾出位置后按 FIFO 放行；元素静态类型按
+  unknown 处理（`get` 的 await 结果不能用字符串方法等需要具体类型的
+  操作）。
 - `asyncio.wait_for(aw, timeout)`：可等待对象与超时竞速；超时取消
   内部任务并抛 `TimeoutError`，内部对象可以是协程、Task 或 Future。
+- `asyncio.timeout(delay)`：`async with asyncio.timeout(0.5):` 在块内
+  到期时向当前协程注入 `TimeoutError`（块外的 `try/except` 能捕获），
+  退出时取消定时器；`t.expired()` 查询是否已超时。
+- `asyncio.TaskGroup()`：`async with ... as tg:` 内用
+  `tg.create_task(coro)` 启动子任务；退出时等待全部结束，任一失败则
+  取消其余任务并把第一个异常抛给调用方（不是 CPython 的
+  `ExceptionGroup`）。
 
 也支持 `from asyncio import sleep, gather, run, create_task, Event, Lock,
-Queue, wait_for`（`run`/`wait_for` 的结果类型会退化成 unknown）。async 方法、`with` 里的 `await`、跨 `await` 的
+Queue, wait_for, timeout, TaskGroup`（跨模块 `run`/`wait_for` 的结果类型
+会退化成 unknown）。async 方法、`with` 里的 `await`、跨 `await` 的
 `finally` 都可以用；异常跨 `await` 通过在恢复时注入异常传播，
 `try/except` 能正常捕获。
 

@@ -4,6 +4,43 @@
 
 早期阶段没有逐条留痕，按阶段归纳；0.4 之后逐条记录。
 
+## [0.56] - 2026-11-10
+
+asyncio 收尾：Queue nowait、Event 上下文、`asyncio.timeout` 与 `TaskGroup`。
+
+### 新增
+
+- Queue：`put_nowait` / `get_nowait`（满/空抛内置异常 `QueueFull` /
+  `QueueEmpty`）；与前一轮的 `full`/`join`/`task_done` 拼齐。
+- `async with event:`：进入时 await wait()，退出无动作。
+- `asyncio.timeout(delay)`：新增 await kind 9 定时器；到期向当前协程
+  注入 `TimeoutError`（`try/except` 可捕获），退出时移除定时器；
+  `t.expired()` 可查询。新增 `loop_active_coro` 记录正在执行的协程。
+- `asyncio.TaskGroup()`：`async with` 内 `create_task` 记录子任务；退出
+  时用 gather 等待全部完成，任一失败取消其余任务并抛第一个异常
+  （普通异常而非 `ExceptionGroup`）。
+- 内置 async with（Lock/Event/Timeout/TaskGroup）的清理记录接入挂起
+  摘除与恢复重挂；push handler 前清理管理器表达式临时值，修复
+  “invalid temporary stack mark”。
+- 类型/降级/代码生成新增 AsyncTimeout、AsyncTaskGroup 及对应运行时；
+  `from asyncio import timeout, TaskGroup` 可用。
+
+### 验证
+
+- `ctest --preset dev/release` 全绿；O0/O1 全量 52 个运行用例通过；
+  810 程序差分零失败
+- 临时探针（不入库）：timeout 成功/超时/expired、TaskGroup 正常与子任务
+  失败、Queue nowait 满/空、Event async with、from-import
+  timeout/TaskGroup/Lock 均与 CPython 输出一致（O0/O1/O2）
+
+### 已知限制
+
+- TaskGroup 子任务失败抛原始异常（CPython 抛 ExceptionGroup），且在
+  失败后仍会等完其余任务，不立即取消兄弟任务
+- `asyncio.timeout` 依赖毫秒定时器；仅注入当前协程，不支持嵌套超时
+  的精确语义
+- Queue 元素静态类型仍是 unknown；`put`/`put_nowait` 不接受 float
+
 ## [0.55] - 2026-11-10
 
 补 `type` / `id`，asyncio 深入：受限队列、join 与 `async with lock`。

@@ -511,6 +511,26 @@ VReg Lowerer::lower_asyncio(const std::string& member, Call& c) {
         return q;
     }
 
+    if (member == "TaskGroup") {
+        if (!c.args.empty())
+            err(c.line, c.col, "asyncio.TaskGroup() takes no arguments");
+        VReg g = call_runtime(RtFn::TaskGroupNew, rt ? rt : mk_async_taskgroup(), {});
+        push_temp(g);
+        return g;
+    }
+
+    if (member == "timeout") {
+        if (c.args.size() != 1) {
+            err(c.line, c.col, "asyncio.timeout() takes exactly one argument");
+            return const_none();
+        }
+        VReg secs = expr(*c.args[0]);
+        secs = coerce(secs, tc_.type_of(c.args[0].get()), t_float());
+        VReg to = call_runtime(RtFn::AsyncTimeoutNew, rt ? rt : mk_async_timeout(), {secs});
+        push_temp(to);
+        return to;
+    }
+
     if (member == "wait_for") {
         if (c.args.size() != 2) {
             err(c.line, c.col, "asyncio.wait_for() takes exactly two arguments");
