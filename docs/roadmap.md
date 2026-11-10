@@ -32,7 +32,7 @@
 
 踩到的坑：`ClassInfo` 的字段类型指回 `Type`、`Type` 又用 `shared_ptr` 指回 `ClassInfo`，形成环，ASan 报 2 万字节泄漏。把 `Type::cls` 和 `ClassInfo::base` 都改成裸指针（所有权统一在 `TypeChecker::all_classes_`）之后归零。
 
-第二轮拿 CPython 标准库跑前端基线，才发现类检查把真实代码判死了一大片。按「宁可漏报，不可误杀」放宽：`class A(object)` 认成根类、外部基类标记 `open`、`self.x = ...` 就地补隐式字段、类体语句与多继承降级成「解析了但没建模」（由 `build` 拒绝）、同名方法（`@property` 的 getter/setter）按后者覆盖。详见 [CHANGELOG 0.6.1](../CHANGELOG.md) 和 [compatibility.md](compatibility.md)。
+第二轮拿 CPython 标准库跑前端基线，才发现类检查把真实代码判死了一大片。按「宁可漏报，不可误杀」放宽：`class A(object)` 认成根类、外部基类标记 `open`、`self.x = ...` 就地补隐式字段、类体语句与多继承降级成「解析了但没建模」（由 `build` 拒绝）、同名方法（`@property` 的 getter/setter）按后者覆盖。详见 [CHANGELOG 0.6.1](changelog-archive.md) 和 [compatibility.md](compatibility.md)。
 
 **教训**：每加一层静态检查，都要立刻跑一遍标准库基线。只跑手写用例会以为「检查很准」，实际是悄悄把上万个真实文件判死了。
 

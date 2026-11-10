@@ -17,7 +17,9 @@
 | [development.md](development.md) | 怎么构建、怎么测、怎么调试、加功能要动哪几处 | `Makefile` `tests/` |
 | [roadmap.md](roadmap.md) | 现在做到哪、下一步做什么、为什么是这个顺序 | — |
 
-变更记录在根目录 [CHANGELOG.md](../CHANGELOG.md)，参与开发的规矩见 [CONTRIBUTING.md](../CONTRIBUTING.md)。
+变更记录在根目录 [CHANGELOG.md](../CHANGELOG.md)（0.40 及更早归档在
+[changelog-archive.md](changelog-archive.md)），参与开发的规矩见
+[CONTRIBUTING.md](../CONTRIBUTING.md)。
 
 ## 按角色选读
 
