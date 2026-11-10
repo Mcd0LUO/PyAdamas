@@ -913,10 +913,18 @@ VReg Lowerer::lower_method_call(Attribute& at, Call& c) {
                 err(c.line, c.col, "sub() takes two or three arguments");
                 return const_none();
             }
-            VReg repl = expr(*c.args[0]);
+            TypePtr rty0 = tc_.type_of(c.args[0].get());
             VReg text = expr(*c.args[1]);
             VReg count = c.args.size() == 3 ? int_at(2) : const_int(0);
-            VReg s = call_runtime(RtFn::RegexSub, t_str(), {recv, repl, text, count});
+            VReg s;
+            if (rty0 && rty0->kind == TyKind::Func) {
+                // repl 是函数：运行时每匹配一次调一次闭包。
+                VReg fnv = expr(*c.args[0]);
+                s = call_runtime(RtFn::RegexSubFn, t_str(), {recv, fnv, text, count});
+            } else {
+                VReg repl = expr(*c.args[0]);
+                s = call_runtime(RtFn::RegexSub, t_str(), {recv, repl, text, count});
+            }
             push_temp(s);
             return s;
         }

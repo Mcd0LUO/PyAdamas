@@ -124,7 +124,8 @@ enum class RtFn : uint16_t {
     FileFlush,   // (file*) -> void
     Input,       // (str* prompt|0) -> str*
     SysStream,   // (i64 which 0/1/2) -> file*  sys.stdin/stdout/stderr
-    PrintI64,    // (i64) -> void
+    PrintI64,
+    PrintAny,    // (i64) -> void
     PrintF64,    // (f64) -> void
     PrintBool,   // (i64) -> void
     PrintStr,    // (str*) -> void
@@ -351,6 +352,7 @@ enum class RtFn : uint16_t {
     RegexFindAll,          // (regex*, str* text) -> list*
     RegexSubStr,           // (str* pat, str* repl, str* text, i64 count, i64 flags) -> str*
     RegexSub,              // (regex*, str* repl, str* text, i64 count) -> str*
+    RegexSubFn,            // (regex*, i64 closure, str* text, i64 count) -> str*
     RegexSplitStr,         // (str* pat, str* text, i64 maxsplit, i64 flags) -> list*
     RegexSplit,            // (regex*, str* text, i64 maxsplit) -> list*
     RegexEscape,           // (str*) -> str*
@@ -417,6 +419,7 @@ inline const char* rt_name(RtFn f) {
         case RtFn::Input: return "py23_input";
         case RtFn::SysStream: return "py23_sys_stream";
         case RtFn::PrintI64: return "py23_print_i64";
+        case RtFn::PrintAny: return "py23_print_any";
         case RtFn::PrintF64: return "py23_print_f64";
         case RtFn::PrintBool: return "py23_print_bool";
         case RtFn::PrintStr: return "py23_print_str";
@@ -699,6 +702,7 @@ inline const char* rt_name(RtFn f) {
         case RtFn::RegexFindAll: return "py23_re_findall";
         case RtFn::RegexSubStr: return "py23_re_sub_str";
         case RtFn::RegexSub: return "py23_re_sub";
+        case RtFn::RegexSubFn: return "py23_re_sub_fn";
         case RtFn::RegexSplitStr: return "py23_re_split_str";
         case RtFn::RegexSplit: return "py23_re_split";
         case RtFn::RegexEscape: return "py23_re_escape";

@@ -85,11 +85,11 @@ void Lowerer::print_value(VReg v, TypePtr ty, int line, int col) {
             break;
         }
         default:
-            // 推断不出来时按整数输出。值没有运行时标签，这里没得选；
-            // 与其拒绝编译，不如让程序跑起来，类型问题留给 check。
+            // 推断不出来时交给运行时：先查 GC 的地址索引，是堆对象就按
+            // 真实类型分派（目前认 str），否则按整数输出。
             (void)line;
             (void)col;
-            call_void(RtFn::PrintI64, {v});
+            call_void(RtFn::PrintAny, {v});
             break;
     }
 }

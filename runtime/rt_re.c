@@ -1602,6 +1602,38 @@ int64_t py23_re_sub(Py23Regex* re, Py23Str* repl, Py23Str* text, int64_t count) 
     return (int64_t)out;
 }
 
+// sub 的 repl 是函数：每匹配一次就调一次闭包，返回值拼进结果。
+int64_t py23_re_sub_fn(Py23Regex* re, int64_t closure, Py23Str* text, int64_t count) {
+    if (!re) py23_raise_c("AttributeError", "NoneType has no regex method");
+    ReProg* g = &re->prog;
+    int64_t ncap = 2 * (int64_t)(g->ngroups + 1);
+    int64_t* caps = (int64_t*)re_alloc(sizeof(int64_t) * (size_t)ncap);
+    ReBuf b = {NULL, 0, 0};
+    int64_t pos = 0, done = 0;
+    while (pos <= text->len && (count <= 0 || done < count) && find_next(g, text, pos, caps)) {
+        buf_add(&b, text->data + pos, (size_t)(caps[0] - pos));
+        Py23Match* m = match_new(text, g->ngroups, caps, g->names, g->nnames);
+        Py23Str* r = (Py23Str*)py23_call1((void*)closure, (int64_t)(uintptr_t)m);
+        if (r) {
+            buf_add(&b, r->data, (size_t)r->len);
+            py23_rc_dec(r);
+        }
+        py23_rc_dec(m);
+        done++;
+        if (caps[1] == caps[0]) {
+            if (caps[1] < text->len) buf_ch(&b, text->data[caps[1]]);
+            pos = caps[1] + 1;
+        } else {
+            pos = caps[1];
+        }
+    }
+    if (pos < text->len) buf_add(&b, text->data + pos, (size_t)(text->len - pos));
+    Py23Str* out = str_new(b.p ? b.p : "", (int64_t)b.n);
+    free(b.p);
+    free(caps);
+    return (int64_t)out;
+}
+
 int64_t py23_re_split_str(Py23Str* pat, Py23Str* text, int64_t maxsplit, int64_t flags) {
     ReProg g;
     const char* err = NULL;

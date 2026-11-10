@@ -1214,10 +1214,21 @@ TypePtr TypeChecker::method_call(TypePtr recv, const std::string& name, Call& c,
             }
             if (name == "sub") {
                 argc(2, 3);
-                if (a.size() >= 2 && a[0] && !is_unknown(a[0]) && a[0]->kind != TyKind::Str)
-                    err(c.line, c.col, "sub() replacement must be a str");
+                if (a.size() >= 2 && a[0] && !is_unknown(a[0]) && a[0]->kind != TyKind::Str &&
+                    a[0]->kind != TyKind::Func)
+                    err(c.line, c.col, "sub() replacement must be a str or a function");
                 if (a.size() >= 2 && a[1] && !is_unknown(a[1]) && a[1]->kind != TyKind::Str)
                     err(c.line, c.col, "sub() text must be a str");
+                // 回调形参的类型由这里定：re.sub 的 repl 一定吃一个 Match。
+                if (a.size() >= 2 && a[0] && a[0]->kind == TyKind::Func && a[0]->fn &&
+                    a[0]->fn->pos.size() == 1) {
+                    Param& cp = a[0]->fn->pos[0];
+                    if (!cp.ty || cp.ty->kind == TyKind::Unknown) {
+                        cp.ty = t_match();
+                        cp.inferred = true;
+                        a[0]->fn->sig_dirty = true;
+                    }
+                }
                 return t_str();
             }
             if (name == "split") {

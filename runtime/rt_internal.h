@@ -283,7 +283,7 @@ int64_t list_take_at(Py23List* l, int64_t i);
 void list_clear_owned(Py23List* l);
 void* pending_take(void* w);
 /* 调用一个 py23 函数值（闭包首字是代码地址，%r10 是环境），单参数。 */
-void py23_call1(void* fn, int64_t arg);
+void* py23_call1(void* fn, int64_t arg);
 void finish_gather(Py23Await* g);
 void gather_child_fail(Py23Await* g, Py23Exception* e);
 void start_gather(Py23Await* w, void* waiter);
@@ -554,6 +554,8 @@ void py23_sys_set_args(int64_t argc, char** argv);
 Py23List* py23_sys_argv(void);
 void py23_sys_exit(int64_t code);
 void py23_print_i64(int64_t v);
+void py23_print_any(int64_t v);
+int rc_index_has(Py23Rc* h);
 void py23_print_f64(double v);
 void py23_print_bool(int64_t v);
 void py23_print_str(Py23Str* s);
@@ -646,6 +648,7 @@ int64_t py23_re_pattern_str(Py23Regex* re);
 int64_t py23_re_finditer(Py23Regex* re, Py23Str* text);
 int64_t py23_re_finditer_str(Py23Str* pat, Py23Str* text, int64_t flags);
 int64_t py23_re_expand(Py23Match* m, Py23Str* tmpl);
+int64_t py23_re_sub_fn(Py23Regex* re, int64_t closure, Py23Str* text, int64_t count);
 
 /* ── subprocess：CompletedProcess 与 run() ─────────────────────── */
 typedef struct Py23Proc Py23Proc;

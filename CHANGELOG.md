@@ -4,6 +4,34 @@
 
 早期阶段没有逐条留痕，按阶段归纳；0.4 之后逐条记录。
 
+## [0.78] - 2026-11-10
+
+`print` 对 unknown 值做运行时分派，`re.sub` 支持函数回调。
+
+### 修复
+
+- **unknown 值的 `print`**：`lower_print` 的兜底从 `PrintI64` 换成 `PrintAny`，
+  运行时先查 GC 的地址索引（`rc_index_has`）判断是不是堆对象，命中且是 `str`
+  就按字符串输出，否则按整数。查表只比对地址、不解引用，任意 `int64` 都安全。
+  多态形参（`def f(v)` 同时吃 `str` 和 `int`）不再打印指针值。
+
+### 新增
+
+- `re.Pattern.sub` 的 `repl` 可以是函数：运行时每匹配一次回调一次闭包。
+  复用 `rt_task.c` 里已有的 `py23_call1` 跳板（闭包指针走 `%r10`）；
+  `typecheck` 在 `sub` 处把回调的第一个形参回填成 `re.Match`，回调里
+  `m.group(0)` 才有静态类型。
+
+### 测试
+
+- `tests/run/62_re_subfn.py`。
+
+### 已知限制
+
+- `PrintAny` 只认 `str`；`unknown` 的 `float` 仍按整数打印（`int` 和 `float`
+  在 `unknown` 里分不开）。
+- 只支持 `Pattern.sub(func, s)`；模块级 `re.sub(pat, func, s)` 还没接。
+
 ## [0.77] - 2026-11-10
 
 修 `print` 打印字符串参数的根因，`re` 的 Match 属性补齐。

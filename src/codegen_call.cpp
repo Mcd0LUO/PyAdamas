@@ -578,6 +578,7 @@ void AsmGen::gen_call_rt(const Inst& in) {
                 break;
             case RtFn::RegexSearchStr:
             case RtFn::RegexSub:
+            case RtFn::RegexSubFn:
             case RtFn::RegexSplitStr:
             case RtFn::ListSlice:
             case RtFn::StrSlice:
@@ -618,6 +619,7 @@ void AsmGen::gen_call_rt(const Inst& in) {
             case RtFn::StrFromI64:
             case RtFn::StrFromBool:
             case RtFn::PrintI64:
+            case RtFn::PrintAny:
             case RtFn::PrintBool:
             case RtFn::Panic:
             case RtFn::RcInc:

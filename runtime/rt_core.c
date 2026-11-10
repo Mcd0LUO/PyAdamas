@@ -113,8 +113,7 @@ void rc_index_put(Py23Rc* h) {
     rc_index_live++;
 }
 
-void rc_index_del(Py23Rc* h) {
-    if (rc_index_off) return;
+void rc_index_del(Py23Rc* h) {    if (rc_index_off) return;
     if (rc_index_cap == 0) return;
     size_t s = rc_index_slot(h);
     while (rc_index[s]) {
@@ -239,6 +238,20 @@ void* rc_alloc(int64_t size, void (*dtor)(void*), void (*release)(void*),
     void* p = (char*)h + sizeof(Py23Rc);
     memset(p, 0, (size_t)size);
     return p;
+}
+
+// unknown 值的 print：先查 GC 的地址索引判断是不是堆对象，命中就按真实
+// 类型分派，否则按整数。索引只比对地址、不解引用，所以任意 int64 都安全。
+// 只认 str——int/bool/float 在 unknown 里本来就分不开，保持按整数输出。
+void py23_print_any(int64_t v) {
+    if (v > 4096) {
+        Py23Rc* h = (Py23Rc*)((uintptr_t)v - (uintptr_t)PY23_RC_HDR);
+        if (rc_index_has(h) && h->kind == PY23_RC_STR) {
+            py23_print_str((Py23Str*)(uintptr_t)v);
+            return;
+        }
+    }
+    py23_print_i64(v);
 }
 
 void py23_rc_inc(void* p) {
