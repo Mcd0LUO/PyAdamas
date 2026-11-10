@@ -526,9 +526,25 @@ private:
     // str → 字符列表，dict/set → 键列表，list/tuple 原样。
     VReg seq_as_list(Expr* e, TypePtr& elem_out);
 
+    // 槽/全局/字段按**目标类型**决定是否 retain：出口按目标类型释放，
+    // 只按源类型加引用会在「unknown 值写进带标注的堆槽」时失衡
+    // （源类型未知就漏掉 inc，出口却照常 dec）。unknown 源用运行时
+    // 保守 inc，整数在这里是安全的 no-op。
+    void retain_for_store(const TypePtr& dst, VReg v) {
+        TypePtr src = vreg_ty(v);
+        if (ir_is_heap(dst)) {
+            if (ir_is_heap(src)) rc_inc(v);
+            else if (!src || src->kind == TyKind::Unknown) rc_inc_unknown(v);
+        } else if (ir_is_heap(src)) {
+            // 目标槽是 unknown：只 retain 不 release（看不见的类型不敢 dec），
+            // 和容器元素 kind 2 的策略一致。
+            rc_inc(v);
+        }
+    }
+
     void store_slot(int slot, VReg v) {
         TypePtr dst = st_->fn->slot_ty[slot];
-        if (ir_is_heap(vreg_ty(v))) rc_inc(v);
+        retain_for_store(dst, v);
         if (ir_is_heap(dst)) {
             VReg old = load_slot(slot, dst);
             store_slot_raw(slot, v);
@@ -540,7 +556,7 @@ private:
 
     void store_global(int gi, VReg v) {
         TypePtr dst = mod_.globals[gi].ty;
-        if (ir_is_heap(vreg_ty(v))) rc_inc(v);
+        retain_for_store(dst, v);
         if (ir_is_heap(dst)) {
             VReg old = load_global(gi, dst);
             store_global_raw(gi, v);
@@ -551,7 +567,7 @@ private:
     }
 
     void store_field(TypePtr fty, VReg obj, int off, VReg v) {
-        if (ir_is_heap(vreg_ty(v))) rc_inc(v);
+        retain_for_store(fty, v);
         if (ir_is_heap(fty)) {
             VReg old = field_load(obj, off, fty);
             field_store(obj, off, v);
