@@ -1,0 +1,1055 @@
+// lower_method.cpp —— 方法与 super 调用降级
+#include "lower_impl.h"
+
+namespace py23 {
+
+VReg Lowerer::lower_super_call(Attribute& at, Call& c) {
+    auto fit = fn_owner_class_.find(st_->fn);
+    const ClassInfo* owner = fit == fn_owner_class_.end() ? nullptr : fit->second;
+    if (!owner) {
+        err(c.line, c.col, "super() is only supported directly inside a method body");
+        return const_none();
+    }
+    if (st_->fn->params.empty()) {
+        err(c.line, c.col, "super() requires a method receiver");
+        return const_none();
+    }
+    const MethodInfo* m = nullptr;
+    bool after = false;
+    for (const ClassInfo* k : owner->mro) {
+        if (!after) {
+            if (k == owner) after = true;
+            continue;
+        }
+        if (auto* km = k->own_method(at.attr)) {
+            m = km;
+            break;
+        }
+    }
+    if (!m) {
+        err(c.line, c.col,
+            std::format("super() has no method '{}' after class '{}'", at.attr, owner->name));
+        return const_none();
+    }
+    if (m->kind != MethodKind::Normal) {
+        err(c.line, c.col,
+            std::format("super().{} is not a plain method (decorators on super targets are "
+                        "not supported yet)", at.attr));
+        return const_none();
+    }
+    if (!m->call_sig) {
+        err(c.line, c.col, std::format("super().{} has no known signature", at.attr));
+        return const_none();
+    }
+    auto cid = class_ids_.find(owner);
+    if (cid == class_ids_.end()) {
+        err(c.line, c.col, "super() is not available for this class");
+        return const_none();
+    }
+    std::vector<VReg> args = bind_args(c, m->call_sig, m->def);
+    const IRParam& selfp = st_->fn->params.front();
+    VReg self = load_slot(selfp.slot, selfp.ty);
+    Inst sv;
+    sv.op = IrOp::SuperVCall;
+    sv.a = self;
+    sv.idx = cid->second;
+    sv.imm = m->slot;
+    sv.b = const_str(at.attr);
+    sv.args = std::move(args);
+    TypePtr rt = m->call_sig->ret ? m->call_sig->ret : t_none();
+    return def_heap(rt, std::move(sv));
+}
+
+VReg Lowerer::lower_method_call(Attribute& at, Call& c) {
+    ++side_effect_seq_;
+    // super().m(...)：沿运行期 MRO 找下一个实现。
+    if (auto* sup = dynamic_cast<Call*>(at.value.get())) {
+        if (auto* sn = dynamic_cast<Name*>(sup->func.get());
+            sn && sn->id == "super" && !is_bound_here("super")) {
+            if (!sup->args.empty() || !sup->keywords.empty()) {
+                err(c.line, c.col, "only zero-argument super() is supported");
+                return const_none();
+            }
+            return lower_super_call(at, c);
+        }
+    }
+    // 内置模块的原生函数/常量。
+    if (auto* n = dynamic_cast<Name*>(at.value.get())) {
+        if (auto mod = resolve_module_alias(n->id); mod && mod->builtin) {
+            if (mod->name == "asyncio") return lower_asyncio(at.attr, c);
+            auto it = mod->globals.find(at.attr);
+            if (it != mod->globals.end() && it->second && it->second->kind == TyKind::Func)
+                return call_native(mod->name, at.attr, c, it->second->fn);
+            err(c.line, c.col,
+                std::format("module attribute '{}.{}' is not callable", n->id, at.attr));
+            return const_none();
+        }
+    }
+    // m.C()：导入类的构造包装。
+    if (auto* n = dynamic_cast<Name*>(at.value.get())) {
+        if (auto mod = resolve_module_alias(n->id)) {
+            if (auto ci = mod->classes.find(at.attr); ci != mod->classes.end())
+                return construct_imported(ci->second, c, mk_class(ci->second.cls.get()));
+        }
+    }
+    // m.f()：外部全局里存的是函数闭包，加载后按普通 call 调用。
+    if (auto gi = module_member(at)) {
+        TypePtr ft = mod_.globals[*gi].ty;
+        FuncInfoPtr info = (ft && ft->kind == TyKind::Func) ? ft->fn : nullptr;
+        if (!info) {
+            err(c.line, c.col, "module attribute is not callable");
+            return const_none();
+        }
+        VReg callee = load_global(*gi, ft);
+        std::vector<VReg> args = bind_args(c, info, nullptr);
+        Inst in;
+        in.op = IrOp::Call;
+        in.a = callee;
+        in.args = std::move(args);
+        TypePtr rt = info->ret ? info->ret : t_unknown();
+        return def_heap(rt, std::move(in));
+    }
+    // C.f(...)：类名接收者的静态方法直接调用；普通方法需要实例。
+    if (auto* n = dynamic_cast<Name*>(at.value.get());
+        n && !is_bound_here(n->id) && !imported_classes_.count(n->id)) {
+        auto cit = classes_.find(n->id);
+        if (cit != classes_.end() && cit->second && !cit->second->is_exception_class) {
+            const ClassInfo* cls = cit->second.get();
+            const MethodInfo* m = cls->method(at.attr);
+            if (!m) {
+                err(c.line, c.col,
+                    std::format("'{}' has no method '{}'", cls->name, at.attr));
+                return const_none();
+            }
+            if (m->kind != MethodKind::Static) {
+                err(c.line, c.col,
+                    std::format("'{}.{}' is an instance method; call it on an instance",
+                                cls->name, at.attr));
+                return const_none();
+            }
+            if (!m->call_sig) return const_none();
+            const ClassInfo* owner = cls->method_owner(at.attr);
+            auto cid = owner ? class_ids_.find(owner) : class_ids_.end();
+            if (cid == class_ids_.end()) {
+                err(c.line, c.col,
+                    std::format("static method '{}.{}' is not available here", cls->name,
+                                at.attr));
+                return const_none();
+            }
+            const auto& vt = mod_.classes[cid->second].vtable;
+            if (m->slot < 0 || m->slot >= static_cast<int>(vt.size()) || vt[m->slot] < 0) {
+                err(c.line, c.col,
+                    std::format("static method '{}.{}' was not compiled", cls->name, at.attr));
+                return const_none();
+            }
+            std::vector<VReg> args = bind_args(c, m->call_sig, m->def);
+            Inst cd;
+            cd.op = IrOp::CallDirect;
+            cd.idx = vt[m->slot];
+            cd.args = std::move(args);
+            TypePtr rt = m->call_sig->ret ? m->call_sig->ret : t_none();
+            return def_heap(rt, std::move(cd));
+        }
+    }
+    TypePtr raw = tc_.type_of(at.value.get());
+    TypePtr recv_ty = strip_optional(raw);
+    bool opt = recv_ty != raw;
+    VReg recv = expr(*at.value);
+
+    // 用户类的方法调用：从对象的 vtable 里取函数地址。槽号在编译期
+    // 就定了，运行时只有一次间接跳转，不需要按名字查表。
+    if (recv_ty && recv_ty->kind == TyKind::Class && recv_ty->cls) {
+        if (opt) recv = guard_not_none(recv, std::format("method '{}'", at.attr));
+        auto* m = recv_ty->cls->method(at.attr);
+        if (!m) {
+            err(c.line, c.col,
+                std::format("'{}' object has no method '{}'", recv_ty->cls->name, at.attr));
+            return const_none();
+        }
+        if (!m->call_sig) return const_none();
+        std::vector<VReg> args = bind_args(c, m->call_sig, m->def);
+        Inst vc;
+        vc.op = m->kind == MethodKind::Static ? IrOp::VCallStatic : IrOp::VCall;
+        vc.a = recv;
+        vc.imm = m->slot;
+        vc.args = std::move(args);
+        TypePtr rt = m->call_sig->ret ? m->call_sig->ret : t_none();
+        return def_heap(rt, std::move(vc));
+    }
+
+    // 内置类型的方法表是静态的，Optional 上没有；走到这里说明没做
+    // None 检查。报错比让 py23_list_append 拿到 0 更可查。
+    if (opt) {
+        err(c.line, c.col,
+            std::format("method '{}' called on a maybe-None value; add a None check first",
+                        at.attr));
+        return const_none();
+    }
+
+    if (recv_ty && recv_ty->kind == TyKind::Generator) {
+        TypePtr et = recv_ty->sub.empty() ? t_unknown() : recv_ty->sub[0];
+        if (at.attr == "__next__") {
+            if (!c.args.empty())
+                err(c.line, c.col, "generator.__next__() takes no arguments");
+            Inst in;
+            in.op = IrOp::CallRt;
+            in.imm = static_cast<int64_t>(RtFn::GenNext);
+            in.args = {recv};
+            VReg v = def(t_unknown(), std::move(in));
+            v = retype(v, et);
+            if (ir_is_heap(et)) push_temp(v);
+            return v;
+        }
+        if (at.attr == "send") {
+            if (c.args.size() != 1) {
+                err(c.line, c.col, "generator.send() takes exactly one argument");
+                return const_none();
+            }
+            VReg sv = expr(*c.args[0]);
+            Inst in;
+            in.op = IrOp::CallRt;
+            in.imm = static_cast<int64_t>(RtFn::GenSend);
+            in.args = {recv, sv};
+            VReg v = def(t_unknown(), std::move(in));
+            v = retype(v, et);
+            if (ir_is_heap(et)) push_temp(v);
+            return v;
+        }
+        if (at.attr == "close") {
+            if (!c.args.empty())
+                err(c.line, c.col, "generator.close() takes no arguments");
+            call_void(RtFn::GenClose, {recv});
+            return const_none();
+        }
+        err(c.line, c.col, std::format("'generator' object has no method '{}'", at.attr));
+        return const_none();
+    }
+
+    if (recv_ty && recv_ty->kind == TyKind::AsyncGenerator) {
+        TypePtr et = recv_ty->sub.empty() ? t_unknown() : recv_ty->sub[0];
+        if (at.attr == "__anext__") {
+            if (!c.args.empty())
+                err(c.line, c.col, "async generator.__anext__() takes no arguments");
+            Inst in;
+            in.op = IrOp::CallRt;
+            in.imm = static_cast<int64_t>(RtFn::AsyncGenANext);
+            in.args = {recv};
+            return def_heap(mk_coroutine(et), std::move(in));
+        }
+        if (at.attr == "asend") {
+            if (c.args.size() != 1) {
+                err(c.line, c.col, "async generator.asend() takes exactly one argument");
+                return const_none();
+            }
+            VReg sv = expr(*c.args[0]);
+            TypePtr vt = vreg_ty(sv);
+            if (ir_is_heap(vt)) rc_inc(sv);
+            else if (!vt || vt->kind == TyKind::Unknown) rc_inc_unknown(sv);
+            Inst in;
+            in.op = IrOp::CallRt;
+            in.imm = static_cast<int64_t>(RtFn::AsyncGenAsend);
+            in.args = {recv, sv};
+            return def_heap(mk_coroutine(et), std::move(in));
+        }
+        if (at.attr == "athrow") {
+            if (c.args.size() != 1) {
+                err(c.line, c.col, "async generator.athrow() takes exactly one argument");
+                return const_none();
+            }
+            VReg ev = expr(*c.args[0]);
+            Inst in;
+            in.op = IrOp::CallRt;
+            in.imm = static_cast<int64_t>(RtFn::AsyncGenAthrow);
+            in.args = {recv, ev};
+            return def_heap(mk_coroutine(et), std::move(in));
+        }
+        if (at.attr == "aclose") {
+            if (!c.args.empty())
+                err(c.line, c.col, "async generator.aclose() takes no arguments");
+            Inst in;
+            in.op = IrOp::CallRt;
+            in.imm = static_cast<int64_t>(RtFn::AsyncGenAClose);
+            in.args = {recv};
+            return def_heap(mk_coroutine(t_none()), std::move(in));
+        }
+        err(c.line, c.col,
+            std::format("'async generator' object has no method '{}'", at.attr));
+        return const_none();
+    }
+
+    if (recv_ty && recv_ty->kind == TyKind::Task) {
+        if (!c.args.empty()) {
+            err(c.line, c.col, std::format("task.{}() takes no arguments", at.attr));
+        }
+        if (at.attr == "done" || at.attr == "cancel" || at.attr == "cancelled") {
+            RtFn fn = at.attr == "done"       ? RtFn::AsyncioTaskDone
+                      : at.attr == "cancel"   ? RtFn::AsyncioTaskCancel
+                                              : RtFn::AsyncioTaskCancelled;
+            return call_runtime(fn, t_bool(), {recv});
+        }
+        TypePtr et = recv_ty->sub.empty() ? t_unknown() : recv_ty->sub[0];
+        if (at.attr == "result") {
+            Inst in;
+            in.op = IrOp::CallRt;
+            in.imm = static_cast<int64_t>(RtFn::AsyncioTaskResult);
+            in.args = {recv};
+            VReg v = def(t_unknown(), std::move(in));
+            if (ir_is_heap(et)) push_temp(v);
+            return v;
+        }
+        if (at.attr == "exception") {
+            VReg v = call_runtime(RtFn::AsyncioTaskException,
+                                  mk_optional(mk_exception("Exception")), {recv});
+            push_temp(v);
+            return v;
+        }
+        err(c.line, c.col, std::format("'task' object has no method '{}'", at.attr));
+        return const_none();
+    }
+
+    if (recv_ty && recv_ty->kind == TyKind::Future) {
+        if (at.attr == "done" || at.attr == "cancel" || at.attr == "cancelled") {
+            if (!c.args.empty())
+                err(c.line, c.col, std::format("future.{}() takes no arguments", at.attr));
+            RtFn fn = at.attr == "done"       ? RtFn::FutureDone
+                      : at.attr == "cancel"   ? RtFn::FutureCancel
+                                              : RtFn::FutureCancelled;
+            return call_runtime(fn, t_bool(), {recv});
+        }
+        TypePtr et = recv_ty->sub.empty() ? t_unknown() : recv_ty->sub[0];
+        if (at.attr == "set_result") {
+            if (c.args.size() != 1) {
+                err(c.line, c.col, "future.set_result() takes exactly one argument");
+                return const_none();
+            }
+            VReg v = expr(*c.args[0]);
+            TypePtr vt = vreg_ty(v);
+            if (ir_is_heap(vt)) rc_inc(v);
+            else if (!vt || vt->kind == TyKind::Unknown) rc_inc_unknown(v);
+            call_void(RtFn::FutureSetResult, {recv, v});
+            return const_none();
+        }
+        if (at.attr == "set_exception") {
+            if (c.args.size() != 1) {
+                err(c.line, c.col, "future.set_exception() takes exactly one argument");
+                return const_none();
+            }
+            VReg msg = expr(*c.args[0]);
+            TypePtr mt = vreg_ty(msg);
+            if (mt && mt->kind == TyKind::Exception)
+                call_void(RtFn::FutureSetExceptionValue, {recv, msg});
+            else
+                call_void(RtFn::FutureSetException, {recv, msg});
+            return const_none();
+        }
+        if (at.attr == "add_done_callback") {
+            if (c.args.size() != 1) {
+                err(c.line, c.col, "future.add_done_callback() takes exactly one argument");
+                return const_none();
+            }
+            VReg cb = expr(*c.args[0]);
+            TypePtr ct = vreg_ty(cb);
+            if (ir_is_heap(ct)) rc_inc(cb);
+            else if (!ct || ct->kind == TyKind::Unknown) rc_inc_unknown(cb);
+            call_void(RtFn::FutureAddCallback, {recv, cb});
+            return const_none();
+        }
+        if (at.attr == "result") {
+            if (!c.args.empty()) err(c.line, c.col, "future.result() takes no arguments");
+            Inst in;
+            in.op = IrOp::CallRt;
+            in.imm = static_cast<int64_t>(RtFn::FutureResult);
+            in.args = {recv};
+            VReg v = def(t_unknown(), std::move(in));
+            if (ir_is_heap(et)) push_temp(v);
+            return v;
+        }
+        if (at.attr == "exception") {
+            if (!c.args.empty()) err(c.line, c.col, "future.exception() takes no arguments");
+            VReg v = call_runtime(RtFn::FutureException,
+                                  mk_optional(mk_exception("Exception")), {recv});
+            push_temp(v);
+            return v;
+        }
+        err(c.line, c.col, std::format("'future' object has no method '{}'", at.attr));
+        return const_none();
+    }
+
+    if (recv_ty && recv_ty->kind == TyKind::Dict) {
+        TypePtr kt = recv_ty->sub.empty() ? t_unknown() : recv_ty->sub[0];
+        TypePtr vt = recv_ty->sub.size() > 1 ? recv_ty->sub[1] : t_unknown();
+        if (at.attr == "get") {
+            if (!c.keywords.empty()) {
+                err(c.line, c.col, "dict.get() does not take keyword arguments");
+                return const_none();
+            }
+            if (c.args.size() != 1 && c.args.size() != 2) {
+                err(c.line, c.col, "dict.get() takes 1 or 2 arguments");
+                return const_none();
+            }
+            VReg key = expr(*c.args[0]);
+            key = coerce(key, tc_.type_of(c.args[0].get()), kt);
+            if (c.args.size() == 1)
+                return call_runtime(RtFn::DictGet, vt, {recv, key});
+            VReg def = expr(*c.args[1]);
+            def = coerce(def, tc_.type_of(c.args[1].get()), vt);
+            return call_runtime(RtFn::DictGetOr, vt, {recv, key, def});
+        }
+        if (!c.keywords.empty()) {
+            err(c.line, c.col,
+                std::format("dict.{}() does not take keyword arguments", at.attr));
+            return const_none();
+        }
+        if (at.attr == "keys" || at.attr == "values" || at.attr == "items") {
+            if (!c.args.empty()) {
+                err(c.line, c.col, std::format("dict.{}() takes no arguments", at.attr));
+                return const_none();
+            }
+            TypePtr rt = tc_.type_of(&c);
+            if (!rt || rt->kind != TyKind::List) {
+                rt = at.attr == "keys" ? mk_list(kt)
+                     : at.attr == "values" ? mk_list(vt)
+                                           : mk_list(mk_tuple({kt, vt}));
+            }
+            RtFn fn = at.attr == "keys" ? RtFn::DictKeys
+                      : at.attr == "values" ? RtFn::DictValues
+                                            : RtFn::DictItems;
+            VReg v = call_runtime(fn, rt, {recv});
+            push_temp(v);
+            return v;
+        }
+        if (at.attr == "update") {
+            if (c.args.empty()) return const_none();
+            if (c.args.size() != 1) {
+                err(c.line, c.col, "dict.update() takes at most one argument");
+                return const_none();
+            }
+            VReg other = expr(*c.args[0]);
+            TypePtr ot = tc_.type_of(c.args[0].get());
+            if (!ot || (ot->kind != TyKind::Dict && ot->kind != TyKind::Unknown)) {
+                err(c.args[0]->line, c.args[0]->col,
+                    "dict.update() expects a dict argument");
+                return const_none();
+            }
+            call_void(RtFn::DictUpdate, {recv, other});
+            return const_none();
+        }
+        if (at.attr == "pop") {
+            if (c.args.size() != 1 && c.args.size() != 2) {
+                err(c.line, c.col, "dict.pop() takes 1 or 2 arguments");
+                return const_none();
+            }
+            VReg key = expr(*c.args[0]);
+            key = coerce(key, tc_.type_of(c.args[0].get()), kt);
+            VReg has = const_int(0);
+            VReg def = const_int(0);
+            if (c.args.size() == 2) {
+                has = const_int(1);
+                def = expr(*c.args[1]);
+                def = coerce(def, tc_.type_of(c.args[1].get()), vt);
+                // 运行时把默认值原样返回；补一份引用，让返回值统一按
+                // 「新引用」进临时栈。
+                retain_elem(def, own_kind(vt));
+            }
+            VReg v = call_runtime(RtFn::DictPop, vt, {recv, key, has, def});
+            if (ir_is_heap(vt)) push_temp(v);
+            return v;
+        }
+        if (at.attr == "popitem") {
+            if (!c.args.empty()) {
+                err(c.line, c.col, "dict.popitem() takes no arguments");
+                return const_none();
+            }
+            TypePtr rt = tc_.type_of(&c);
+            if (!rt || rt->kind != TyKind::Tuple) rt = mk_tuple({kt, vt});
+            VReg v = call_runtime(RtFn::DictPopItem, rt, {recv});
+            push_temp(v);
+            return v;
+        }
+        if (at.attr == "clear") {
+            if (!c.args.empty()) {
+                err(c.line, c.col, "dict.clear() takes no arguments");
+                return const_none();
+            }
+            call_void(RtFn::DictClear, {recv});
+            return const_none();
+        }
+        if (at.attr == "setdefault") {
+            if (c.args.size() != 2) {
+                err(c.line, c.col, "dict.setdefault() takes exactly two arguments");
+                return const_none();
+            }
+            VReg key = expr(*c.args[0]);
+            key = coerce(key, tc_.type_of(c.args[0].get()), kt);
+            VReg def = expr(*c.args[1]);
+            def = coerce(def, tc_.type_of(c.args[1].get()), vt);
+            int add_b = new_block("dict.setdefault.add");
+            int done_b = new_block("dict.setdefault.done");
+            VReg has = call_runtime(RtFn::DictContains, t_bool(), {recv, key});
+            Inst br;
+            br.op = IrOp::Branch;
+            br.a = has;
+            br.target = done_b;
+            br.target2 = add_b;
+            emit(std::move(br));
+            switch_to(add_b);
+            retain_elem(def, own_kind(vt));
+            call_void(RtFn::DictSet, {recv, key, def});
+            Inst j;
+            j.op = IrOp::Jump;
+            j.target = done_b;
+            emit(std::move(j));
+            switch_to(done_b);
+            VReg v = call_runtime(RtFn::DictGet, vt, {recv, key});
+            if (ir_is_heap(vt)) push_temp(v);
+            return v;
+        }
+        if (at.attr == "copy") {
+            if (!c.args.empty()) {
+                err(c.line, c.col, "dict.copy() takes no arguments");
+                return const_none();
+            }
+            VReg v = call_runtime(RtFn::DictCopy, recv_ty, {recv});
+            push_temp(v);
+            return v;
+        }
+        err(c.line, c.col,
+            std::format("dict method '{}' is not supported by the code generator yet", at.attr));
+        return const_none();
+    }
+
+    if (recv_ty && recv_ty->kind == TyKind::Set) {
+        TypePtr et = recv_ty->sub.empty() ? t_unknown() : recv_ty->sub[0];
+        if (!c.keywords.empty()) {
+            err(c.line, c.col,
+                std::format("set.{}() does not take keyword arguments", at.attr));
+            return const_none();
+        }
+        if (at.attr == "add") {
+            if (c.args.size() != 1) {
+                err(c.line, c.col, "set.add() takes exactly one argument");
+                return const_none();
+            }
+            VReg v = expr(*c.args[0]);
+            v = coerce(v, tc_.type_of(c.args[0].get()), et);
+            retain_elem(v, own_kind(et));
+            call_void(RtFn::DictSet, {recv, v, const_int(0)});
+            return const_none();
+        }
+        if (at.attr == "update") {
+            if (c.args.empty()) return const_none();
+            if (c.args.size() != 1) {
+                err(c.line, c.col, "set.update() takes at most one argument");
+                return const_none();
+            }
+            VReg other = expr(*c.args[0]);
+            TypePtr ot = tc_.type_of(c.args[0].get());
+            if (!ot || (ot->kind != TyKind::Set && ot->kind != TyKind::Unknown)) {
+                err(c.args[0]->line, c.args[0]->col, "set.update() expects a set argument");
+                return const_none();
+            }
+            call_void(RtFn::DictUpdate, {recv, other});
+            return const_none();
+        }
+        if (at.attr == "remove" || at.attr == "discard") {
+            if (c.args.size() != 1) {
+                err(c.line, c.col,
+                    std::format("set.{}() takes exactly one argument", at.attr));
+                return const_none();
+            }
+            VReg v = expr(*c.args[0]);
+            v = coerce(v, tc_.type_of(c.args[0].get()), et);
+            call_void(RtFn::DictRemove,
+                      {recv, v, const_int(at.attr == "discard" ? 1 : 0)});
+            return const_none();
+        }
+        if (at.attr == "pop") {
+            if (!c.args.empty()) {
+                err(c.line, c.col, "set.pop() takes no arguments");
+                return const_none();
+            }
+            VReg v = call_runtime(RtFn::DictPopLast, et, {recv});
+            if (ir_is_heap(et)) push_temp(v);
+            return v;
+        }
+        if (at.attr == "clear") {
+            if (!c.args.empty()) {
+                err(c.line, c.col, "set.clear() takes no arguments");
+                return const_none();
+            }
+            call_void(RtFn::DictClear, {recv});
+            return const_none();
+        }
+        if (at.attr == "copy") {
+            if (!c.args.empty()) {
+                err(c.line, c.col, "set.copy() takes no arguments");
+                return const_none();
+            }
+            VReg v = call_runtime(RtFn::DictCopy, recv_ty, {recv});
+            push_temp(v);
+            return v;
+        }
+        err(c.line, c.col,
+            std::format("set method '{}' is not supported by the code generator yet", at.attr));
+        return const_none();
+    }
+
+    if (recv_ty && recv_ty->kind == TyKind::File) {
+        if (!c.keywords.empty()) {
+            err(c.line, c.col,
+                std::format("file.{}() does not take keyword arguments", at.attr));
+            return const_none();
+        }
+        auto int_arg = [&](size_t i, int64_t def) -> VReg {
+            if (i >= c.args.size()) return const_int(def);
+            VReg v = expr(*c.args[i]);
+            return coerce(v, tc_.type_of(c.args[i].get()), t_int());
+        };
+        if (at.attr == "read") {
+            if (c.args.size() > 1) {
+                err(c.line, c.col, "file.read() takes at most one argument");
+                return const_none();
+            }
+            VReg s = call_runtime(RtFn::FileRead, t_str(), {recv, int_arg(0, -1)});
+            push_temp(s);
+            return s;
+        }
+        if (at.attr == "readline") {
+            if (c.args.size() > 1) {
+                err(c.line, c.col, "file.readline() takes at most one argument");
+                return const_none();
+            }
+            VReg s = call_runtime(RtFn::FileReadLine, t_str(), {recv, int_arg(0, -1)});
+            push_temp(s);
+            return s;
+        }
+        if (at.attr == "readlines") {
+            if (c.args.size() > 1) {
+                err(c.line, c.col, "file.readlines() takes at most one argument");
+                return const_none();
+            }
+            VReg l = call_runtime(RtFn::FileReadLines, mk_list(t_str()),
+                                  {recv, int_arg(0, -1)});
+            push_temp(l);
+            return l;
+        }
+        if (at.attr == "write") {
+            if (c.args.size() != 1) {
+                err(c.line, c.col, "file.write() takes exactly one argument");
+                return const_none();
+            }
+            TypePtr wt = tc_.type_of(c.args[0].get());
+            VReg v = expr(*c.args[0]);
+            if (wt && wt->kind != TyKind::Str && wt->kind != TyKind::Unknown) {
+                err(c.args[0]->line, c.args[0]->col, "file.write() expects a string");
+                return const_int(0);
+            }
+            return call_runtime(RtFn::FileWrite, t_int(), {recv, v});
+        }
+        if (at.attr == "writelines") {
+            if (c.args.size() != 1) {
+                err(c.line, c.col, "file.writelines() takes exactly one argument");
+                return const_none();
+            }
+            TypePtr lt = tc_.type_of(c.args[0].get());
+            if (!lt || (lt->kind != TyKind::List && lt->kind != TyKind::Tuple)) {
+                err(c.args[0]->line, c.args[0]->col,
+                    "file.writelines() expects a list of strings");
+                return const_none();
+            }
+            VReg l = expr(*c.args[0]);
+            call_void(RtFn::FileWritelines, {recv, l});
+            return const_none();
+        }
+        if (at.attr == "seek") {
+            if (c.args.empty() || c.args.size() > 2) {
+                err(c.line, c.col, "file.seek() takes 1 or 2 arguments");
+                return const_none();
+            }
+            VReg off = int_arg(0, 0);
+            VReg wh = int_arg(1, 0);
+            return call_runtime(RtFn::FileSeek, t_int(), {recv, off, wh});
+        }
+        if (at.attr == "tell" || at.attr == "fileno") {
+            if (!c.args.empty()) {
+                err(c.line, c.col, std::format("file.{}() takes no arguments", at.attr));
+                return const_none();
+            }
+            return call_runtime(at.attr == "tell" ? RtFn::FileTell : RtFn::FileFileno,
+                                t_int(), {recv});
+        }
+        if (at.attr == "truncate") {
+            if (c.args.size() > 1) {
+                err(c.line, c.col, "file.truncate() takes at most one argument");
+                return const_none();
+            }
+            return call_runtime(RtFn::FileTruncate, t_int(), {recv, int_arg(0, -1)});
+        }
+        if (at.attr == "isatty" || at.attr == "readable" || at.attr == "writable" ||
+            at.attr == "seekable") {
+            if (!c.args.empty()) {
+                err(c.line, c.col, std::format("file.{}() takes no arguments", at.attr));
+                return const_none();
+            }
+            RtFn fn = at.attr == "isatty"     ? RtFn::FileIsatty
+                      : at.attr == "readable" ? RtFn::FileReadable
+                      : at.attr == "writable" ? RtFn::FileWritable
+                                              : RtFn::FileSeekable;
+            return call_runtime(fn, t_bool(), {recv});
+        }
+        if (at.attr == "close") {
+            if (!c.args.empty()) {
+                err(c.line, c.col, "file.close() takes no arguments");
+                return const_none();
+            }
+            call_void(RtFn::FileClose, {recv});
+            return const_none();
+        }
+        if (at.attr == "flush") {
+            if (!c.args.empty()) {
+                err(c.line, c.col, "file.flush() takes no arguments");
+                return const_none();
+            }
+            call_void(RtFn::FileFlush, {recv});
+            return const_none();
+        }
+        err(c.line, c.col,
+            std::format("file method '{}' is not supported (use 'with open(...)')", at.attr));
+        return const_none();
+    }
+
+    if (recv_ty && recv_ty->kind == TyKind::Str) {
+        if (!c.keywords.empty()) {
+            err(c.line, c.col,
+                std::format("str.{}() does not take keyword arguments", at.attr));
+            return const_none();
+        }
+        auto need_str = [&](size_t i) -> VReg {
+            VReg v = expr(*c.args[i]);
+            TypePtr t = tc_.type_of(c.args[i].get());
+            if (!t || t->kind != TyKind::Str)
+                err(c.args[i]->line, c.args[i]->col,
+                    std::format("str.{}() expects a string argument", at.attr));
+            return v;
+        };
+        auto need_int = [&](size_t i, int64_t def) -> VReg {
+            if (i >= c.args.size()) return const_int(def);
+            VReg v = expr(*c.args[i]);
+            return coerce(v, tc_.type_of(c.args[i].get()), t_int());
+        };
+        auto arg_count = [&](size_t lo, size_t hi) {
+            if (c.args.size() >= lo && c.args.size() <= hi) return true;
+            err(c.line, c.col,
+                std::format("str.{}() takes {} argument(s)", at.attr,
+                            lo == hi ? std::to_string(lo)
+                                     : std::format("{}..{}", lo, hi)));
+            return false;
+        };
+        auto emit_op = [&](StrOp op, TypePtr ret, VReg a0, VReg a1, VReg a2) -> VReg {
+            Inst in;
+            in.op = IrOp::CallRt;
+            in.imm = static_cast<int64_t>(RtFn::StrMethod);
+            in.args = {recv, const_int(static_cast<int64_t>(op)),
+                       a0 == kNoReg ? const_int(0) : a0,
+                       a1 == kNoReg ? const_int(0) : a1,
+                       a2 == kNoReg ? const_int(0) : a2};
+            in.ty = ret;
+            VReg v = def(ret, std::move(in));
+            if (ir_is_heap(ret)) push_temp(v);
+            return v;
+        };
+        TypePtr rty = tc_.type_of(&c);
+        if (at.attr == "upper" || at.attr == "lower" || at.attr == "capitalize" ||
+            at.attr == "title" || at.attr == "casefold") {
+            if (!arg_count(0, 0)) return const_none();
+            StrOp op = at.attr == "upper" ? StrOp::Upper
+                       : at.attr == "lower" || at.attr == "casefold" ? StrOp::Lower
+                       : at.attr == "capitalize" ? StrOp::Capitalize
+                                                   : StrOp::Title;
+            return emit_op(op, t_str(), kNoReg, kNoReg, kNoReg);
+        }
+        if (at.attr == "strip" || at.attr == "lstrip" || at.attr == "rstrip") {
+            if (!arg_count(0, 1)) return const_none();
+            bool has_chars = c.args.size() == 1;
+            StrOp op;
+            if (at.attr == "strip") op = has_chars ? StrOp::StripChars : StrOp::Strip;
+            else if (at.attr == "lstrip") op = has_chars ? StrOp::LStripChars : StrOp::LStrip;
+            else op = has_chars ? StrOp::RStripChars : StrOp::RStrip;
+            VReg chars = has_chars ? need_str(0) : kNoReg;
+            return emit_op(op, t_str(), chars, kNoReg, kNoReg);
+        }
+        if (at.attr == "split") {
+            if (!arg_count(0, 2)) return const_none();
+            TypePtr lt = mk_list(t_str());
+            if (c.args.empty())
+                return emit_op(StrOp::SplitWs, lt, kNoReg, kNoReg, kNoReg);
+            VReg sep = need_str(0);
+            VReg maxsplit = need_int(1, -1);
+            return emit_op(StrOp::SplitSep, lt, sep, maxsplit, kNoReg);
+        }
+        if (at.attr == "splitlines") {
+            if (!arg_count(0, 0)) return const_none();
+            return emit_op(StrOp::SplitLines, mk_list(t_str()), kNoReg, kNoReg, kNoReg);
+        }
+        if (at.attr == "join") {
+            if (!arg_count(1, 1)) return const_none();
+            TypePtr lt = tc_.type_of(c.args[0].get());
+            if (!lt || (lt->kind != TyKind::List && lt->kind != TyKind::Tuple)) {
+                err(c.args[0]->line, c.args[0]->col,
+                    "str.join() expects a list of strings");
+                return const_none();
+            }
+            VReg parts = expr(*c.args[0]);
+            return emit_op(StrOp::Join, t_str(), parts, kNoReg, kNoReg);
+        }
+        if (at.attr == "replace") {
+            if (!arg_count(2, 3)) return const_none();
+            VReg old = need_str(0);
+            VReg nw = need_str(1);
+            VReg cnt = need_int(2, -1);
+            return emit_op(StrOp::Replace, t_str(), old, nw, cnt);
+        }
+        if (at.attr == "find" || at.attr == "rfind" || at.attr == "index") {
+            if (!arg_count(1, 3)) return const_none();
+            VReg sub = need_str(0);
+            VReg start = need_int(1, 0);
+            VReg end = need_int(2, std::numeric_limits<int64_t>::max());
+            StrOp op = at.attr == "find" ? StrOp::Find
+                       : at.attr == "rfind" ? StrOp::RFind : StrOp::Find;
+            VReg pos = emit_op(op, t_int(), sub, start, end);
+            if (at.attr == "index") {
+                int ok_b = new_block("str.index.ok");
+                int bad_b = new_block("str.index.bad");
+                Inst c0;
+                c0.op = IrOp::Cmp;
+                c0.cop = CmpKind::Ge;
+                c0.a = pos;
+                c0.b = const_int(0);
+                VReg ok = def(t_bool(), std::move(c0));
+                Inst br;
+                br.op = IrOp::Branch;
+                br.a = ok;
+                br.target = ok_b;
+                br.target2 = bad_b;
+                emit(std::move(br));
+                switch_to(bad_b);
+                call_void(RtFn::Raise,
+                          {const_str("ValueError"), const_str("substring not found")});
+                Inst j;
+                j.op = IrOp::Jump;
+                j.target = ok_b;
+                emit(std::move(j));
+                switch_to(ok_b);
+            }
+            return pos;
+        }
+        if (at.attr == "startswith" || at.attr == "endswith") {
+            if (!arg_count(1, 1)) return const_none();
+            VReg prefix = need_str(0);
+            return emit_op(at.attr == "startswith" ? StrOp::StartsWith : StrOp::EndsWith,
+                           t_bool(), prefix, kNoReg, kNoReg);
+        }
+        if (at.attr == "count") {
+            if (!arg_count(1, 1)) return const_none();
+            VReg sub = need_str(0);
+            return emit_op(StrOp::Count, t_int(), sub, kNoReg, kNoReg);
+        }
+        if (at.attr == "zfill") {
+            if (!arg_count(1, 1)) return const_none();
+            VReg width = need_int(0, 0);
+            return emit_op(StrOp::ZFill, t_str(), width, kNoReg, kNoReg);
+        }
+        if (at.attr == "ljust" || at.attr == "rjust" || at.attr == "center") {
+            if (!arg_count(1, 2)) return const_none();
+            VReg width = need_int(0, 0);
+            VReg fill = c.args.size() == 2 ? need_str(1) : kNoReg;
+            StrOp op = at.attr == "ljust" ? StrOp::LJust
+                       : at.attr == "rjust" ? StrOp::RJust : StrOp::Center;
+            return emit_op(op, t_str(), width, fill, kNoReg);
+        }
+        if (at.attr == "removeprefix" || at.attr == "removesuffix") {
+            if (!arg_count(1, 1)) return const_none();
+            VReg affix = need_str(0);
+            return emit_op(at.attr == "removeprefix" ? StrOp::RemovePrefix
+                                                      : StrOp::RemoveSuffix,
+                           t_str(), affix, kNoReg, kNoReg);
+        }
+        if (at.attr == "isdigit" || at.attr == "isalpha" || at.attr == "isspace" ||
+            at.attr == "isupper" || at.attr == "islower" || at.attr == "isalnum") {
+            if (!arg_count(0, 0)) return const_none();
+            StrOp op = at.attr == "isdigit" ? StrOp::IsDigit
+                       : at.attr == "isalpha" ? StrOp::IsAlpha
+                       : at.attr == "isspace" ? StrOp::IsSpace
+                       : at.attr == "isupper" ? StrOp::IsUpper
+                       : at.attr == "islower" ? StrOp::IsLower : StrOp::IsAlphaNum;
+            return emit_op(op, t_bool(), kNoReg, kNoReg, kNoReg);
+        }
+        err(c.line, c.col,
+            std::format("str method '{}' is not supported by the code generator yet", at.attr));
+        return const_none();
+    }
+
+    if (recv_ty && (recv_ty->kind == TyKind::List || recv_ty->kind == TyKind::Tuple)) {
+        TypePtr et = recv_ty->sub.empty() ? t_unknown() : recv_ty->sub[0];
+        int ek = key_kind(et);        // in/index/count 的比较种类
+        int lk = list_kind(recv_ty);  // 容器元素的堆种类
+        bool is_list = recv_ty->kind == TyKind::List;
+        if (!c.keywords.empty()) {
+            err(c.line, c.col,
+                std::format("{}.{}() does not take keyword arguments",
+                            is_list ? "list" : "tuple", at.attr));
+            return const_none();
+        }
+        auto elem_arg = [&](size_t i) {
+            VReg v = expr(*c.args[i]);
+            return coerce(v, tc_.type_of(c.args[i].get()), et);
+        };
+        if (at.attr == "append" && is_list) {
+            if (c.args.size() != 1) {
+                err(c.line, c.col, "list.append() takes exactly one argument");
+                return const_none();
+            }
+            // 运行时不再做隐式 retain：容器元素的所有权由降级器按静态类型决定。
+            VReg v = expr(*c.args[0]);
+            retain_elem(v, lk);
+            call_void(RtFn::ListAppend, {recv, v});
+            return const_none();
+        }
+        if (at.attr == "extend" && is_list) {
+            if (c.args.size() != 1) {
+                err(c.line, c.col, "list.extend() takes exactly one argument");
+                return const_none();
+            }
+            VReg other = expr(*c.args[0]);
+            TypePtr ot = tc_.type_of(c.args[0].get());
+            if (!ot || (ot->kind != TyKind::List && ot->kind != TyKind::Tuple)) {
+                err(c.args[0]->line, c.args[0]->col, "list.extend() expects a list");
+                return const_none();
+            }
+            call_void(RtFn::ListExtend, {recv, other});
+            return const_none();
+        }
+        if (at.attr == "insert" && is_list) {
+            if (c.args.size() != 2) {
+                err(c.line, c.col, "list.insert() takes exactly two arguments");
+                return const_none();
+            }
+            VReg idx = coerce(expr(*c.args[0]), tc_.type_of(c.args[0].get()), t_int());
+            VReg v = elem_arg(1);
+            retain_elem(v, lk);
+            call_void(RtFn::ListInsert, {recv, idx, v});
+            return const_none();
+        }
+        if (at.attr == "remove" && is_list) {
+            if (c.args.size() != 1) {
+                err(c.line, c.col, "list.remove() takes exactly one argument");
+                return const_none();
+            }
+            VReg v = elem_arg(0);
+            VReg idx = call_runtime(RtFn::ListIndex, t_int(), {recv, v, const_int(ek)});
+            call_void(RtFn::ListDelIndex, {recv, idx});
+            return const_none();
+        }
+        if (at.attr == "pop" && is_list) {
+            if (c.args.size() > 1) {
+                err(c.line, c.col, "list.pop() takes at most one argument");
+                return const_none();
+            }
+            VReg idx;
+            if (c.args.empty()) {
+                Inst len;
+                len.op = IrOp::Len;
+                len.a = recv;
+                VReg n = def(t_int(), std::move(len));
+                Inst sub;
+                sub.op = IrOp::Bin;
+                sub.bop = BinKind::Sub;
+                sub.a = n;
+                sub.b = const_int(1);
+                idx = def(t_int(), std::move(sub));
+            } else {
+                idx = coerce(expr(*c.args[0]), tc_.type_of(c.args[0].get()), t_int());
+            }
+            Inst get;
+            get.op = IrOp::IndexLoad;
+            get.a = recv;
+            get.b = idx;
+            VReg v = def(et, std::move(get));
+            // kind 1 的列表持有元素引用，删除时会 dec；把返回值领出来，
+            // 否则返回值会随删除变成悬空指针。
+            if (lk == 1 && ir_is_heap(et)) {
+                rc_inc(v);
+                push_temp(v);
+            }
+            call_void(RtFn::ListDelIndex, {recv, idx});
+            return v;
+        }
+        if (at.attr == "clear" && is_list) {
+            if (!c.args.empty()) {
+                err(c.line, c.col, "list.clear() takes no arguments");
+                return const_none();
+            }
+            call_void(RtFn::ListSetLen, {recv, const_int(0)});
+            return const_none();
+        }
+        if (at.attr == "index") {
+            if (c.args.size() != 1) {
+                err(c.line, c.col, "index() takes exactly one argument");
+                return const_none();
+            }
+            VReg v = elem_arg(0);
+            return call_runtime(RtFn::ListIndex, t_int(), {recv, v, const_int(ek)});
+        }
+        if (at.attr == "count") {
+            if (c.args.size() != 1) {
+                err(c.line, c.col, "count() takes exactly one argument");
+                return const_none();
+            }
+            VReg v = elem_arg(0);
+            return call_runtime(RtFn::ListCount, t_int(), {recv, v, const_int(ek)});
+        }
+        if (at.attr == "copy" && is_list) {
+            if (!c.args.empty()) {
+                err(c.line, c.col, "list.copy() takes no arguments");
+                return const_none();
+            }
+            VReg v = call_runtime(RtFn::ListCopy, recv_ty, {recv});
+            push_temp(v);
+            return v;
+        }
+        if (at.attr == "reverse" && is_list) {
+            if (!c.args.empty()) {
+                err(c.line, c.col, "list.reverse() takes no arguments");
+                return const_none();
+            }
+            call_void(RtFn::ListReverse, {recv});
+            return const_none();
+        }
+        if (at.attr == "sort" && is_list) {
+            if (!c.args.empty() || !c.keywords.empty()) {
+                err(c.line, c.col, "list.sort() key=/reverse= are not supported yet");
+                return const_none();
+            }
+            call_void(RtFn::ListSort, {recv, const_int(sort_kind(et))});
+            return const_none();
+        }
+        err(c.line, c.col, std::format("method '{}' is not supported by the code generator yet",
+                                       at.attr));
+        return const_none();
+    }
+
+    if (recv_ty && (recv_ty->kind == TyKind::Int || recv_ty->kind == TyKind::Bool) &&
+        at.attr == "bit_length") {
+        if (!c.args.empty()) {
+            err(c.line, c.col, "bit_length() takes no arguments");
+            return const_none();
+        }
+        return call_runtime(RtFn::IntBitLength, t_int(), {recv});
+    }
+
+    err(c.line, c.col, std::format("method '{}' is not supported by the code generator yet",
+                                   at.attr));
+    return const_none();
+}
+
+}  // namespace py23

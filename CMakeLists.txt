@@ -30,6 +30,9 @@ set(PY23_SOURCES
   src/lower_expr.cpp
   src/lower_comp.cpp
   src/lower_call.cpp
+  src/lower_builtin.cpp
+  src/lower_method.cpp
+  src/lower_print.cpp
   src/lower_gen.cpp
   src/opt.cpp
   src/codegen.cpp

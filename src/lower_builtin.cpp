@@ -1,0 +1,1263 @@
+// lower_builtin.cpp —— 内置函数调用降级（builtin_call 与聚合辅助）
+#include "lower_impl.h"
+
+namespace py23 {
+
+VReg Lowerer::lower_builtin_call(const std::string& name, Call& c) {
+    // print 的关键字是 sep / end，得单独处理，不能走下面这条通用拦截
+    if (name == "print") return lower_print(c);
+
+    if (!c.keywords.empty() && name != "dict" && name != "open") {
+        err(c.line, c.col, std::format("{}() does not take keyword arguments here", name));
+    }
+
+    if (name == "len") {
+        if (c.args.size() != 1) {
+            err(c.line, c.col, "len() takes exactly one argument");
+            return const_int(0);
+        }
+        VReg v = expr(*c.args[0]);
+        Inst in;
+        in.op = IrOp::Len;
+        in.a = v;
+        return def(t_int(), std::move(in));
+    }
+
+    if (name == "next") {
+        if (c.args.size() != 1) {
+            err(c.line, c.col, "next() takes exactly one argument");
+            return const_none();
+        }
+        TypePtr gt = tc_.type_of(c.args[0].get());
+        if (gt && gt->kind == TyKind::File) {
+            // next(f)：读一行，EOF 抛 StopIteration。
+            VReg f = expr(*c.args[0]);
+            VReg line = call_runtime(RtFn::FileReadLine, t_str(), {f, const_int(-1)});
+            push_temp(line);
+            Inst ln;
+            ln.op = IrOp::Len;
+            ln.a = line;
+            VReg n = def(t_int(), std::move(ln));
+            Inst c0;
+            c0.op = IrOp::Cmp;
+            c0.cop = CmpKind::Eq;
+            c0.a = n;
+            c0.b = const_int(0);
+            VReg empty = def(t_bool(), std::move(c0));
+            int ok = new_block("next.ok");
+            int stop = new_block("next.stop");
+            Inst br;
+            br.op = IrOp::Branch;
+            br.a = empty;
+            br.target = stop;
+            br.target2 = ok;
+            emit(std::move(br));
+            switch_to(stop);
+            call_void(RtFn::Raise, {const_str("StopIteration"), const_str("")});
+            Inst j;
+            j.op = IrOp::Jump;
+            j.target = ok;
+            emit(std::move(j));
+            switch_to(ok);
+            return line;
+        }
+        if (!gt || gt->kind != TyKind::Generator) {
+            err(c.line, c.col, std::format("next() requires a generator, got '{}'", type_name(gt)));
+            return const_none();
+        }
+        TypePtr et = gt->sub.empty() ? t_unknown() : gt->sub[0];
+        VReg g = expr(*c.args[0]);
+        Inst in;
+        in.op = IrOp::CallRt;
+        in.imm = static_cast<int64_t>(RtFn::GenNext);
+        in.args = {g};
+        // 运行时按位返回（浮点也是整数寄存器），vreg 类型记为 unknown；
+        // 堆元素才入临时栈。
+        VReg v = def(t_unknown(), std::move(in));
+        v = retype(v, et);
+        if (ir_is_heap(et)) push_temp(v);
+        return v;
+    }
+
+    if (name == "open") {
+        static const char* kParams[] = {"file",      "mode",    "buffering", "encoding",
+                                        "errors",    "newline", "closefd",   "opener"};
+        constexpr size_t kNP = 8;
+        if (c.args.size() > kNP) {
+            err(c.line, c.col, "open() takes at most 8 arguments");
+            return const_none();
+        }
+        std::vector<VReg> bound(kNP, kNoReg);
+        std::vector<Expr*> bexpr(kNP, nullptr);
+        // 求值顺序按源码：位置实参先，关键字按出现顺序。
+        for (size_t i = 0; i < c.args.size(); ++i) {
+            bound[i] = expr(*c.args[i]);
+            bexpr[i] = c.args[i].get();
+        }
+        for (auto& kw : c.keywords) {
+            if (kw.arg.empty()) {
+                err(kw.value->line, kw.value->col, "open() does not take '**kwargs'");
+                continue;
+            }
+            int idx = -1;
+            for (int p = 0; p < static_cast<int>(kNP); ++p)
+                if (kw.arg == kParams[p]) idx = p;
+            VReg v = expr(*kw.value);
+            if (idx < 0) {
+                err(kw.value->line, kw.value->col,
+                    std::format("open() got an unexpected keyword argument '{}'", kw.arg));
+                continue;
+            }
+            if (bound[static_cast<size_t>(idx)] != kNoReg) {
+                err(kw.value->line, kw.value->col,
+                    std::format("open() got multiple values for argument '{}'", kw.arg));
+                continue;
+            }
+            bound[static_cast<size_t>(idx)] = v;
+            bexpr[static_cast<size_t>(idx)] = kw.value.get();
+        }
+        if (bound[0] == kNoReg) {
+            err(c.line, c.col, "open() missing required argument 'file'");
+            return const_none();
+        }
+        if (bound[7] != kNoReg) {
+            err(c.line, c.col, "open() opener= is not supported by the code generator");
+            return const_none();
+        }
+        TypePtr ft = tc_.type_of(bexpr[0]);
+        if (!ft || (ft->kind != TyKind::Str && ft->kind != TyKind::Int &&
+                    ft->kind != TyKind::Bool)) {
+            err(c.line, c.col, "open() file must be a statically known path or file descriptor");
+            return const_none();
+        }
+        bool is_fd = ft->kind == TyKind::Int || ft->kind == TyKind::Bool;
+        VReg mode = bound[1] == kNoReg ? const_int(0) : bound[1];
+        VReg buffering = bound[2] == kNoReg
+                             ? const_int(-1)
+                             : coerce(bound[2], tc_.type_of(bexpr[2]), t_int());
+        // newline: None→0(通用换行), ""→1, "\n"→2, "\r"→3, "\r\n"→4
+        int64_t nl = 0;
+        if (bexpr[5]) {
+            const Constant* cc =
+                bexpr[5]->kind == ExprKind::Constant ? static_cast<const Constant*>(bexpr[5])
+                                                     : nullptr;
+            if (cc && cc->ck == Constant::CK::None) {
+                nl = 0;
+            } else if (cc && cc->ck == Constant::CK::Str) {
+                if (cc->s.empty()) nl = 1;
+                else if (cc->s == "\n") nl = 2;
+                else if (cc->s == "\r") nl = 3;
+                else if (cc->s == "\r\n") nl = 4;
+                else {
+                    err(bexpr[5]->line, bexpr[5]->col,
+                        "open() newline must be None, '', '\\n', '\\r' or '\\r\\n'");
+                    nl = 1;
+                }
+            } else {
+                err(bexpr[5]->line, bexpr[5]->col,
+                    "open() newline must be a literal (None, '', '\\n', '\\r' or '\\r\\n')");
+            }
+        }
+        VReg closefd = bound[6] == kNoReg
+                           ? const_int(1)
+                           : coerce(bound[6], tc_.type_of(bexpr[6]), t_int());
+        Inst in;
+        in.op = IrOp::CallRt;
+        in.imm = static_cast<int64_t>(RtFn::FileOpen);
+        in.args = {is_fd ? const_int(0) : bound[0], is_fd ? bound[0] : const_int(-1), mode,
+                   buffering, const_int(nl), closefd};
+        in.ty = t_file();
+        VReg f = def(t_file(), std::move(in));
+        push_temp(f);
+        // encoding/errors 只在实际给了的时候再配置一次（默认 utf-8/strict）。
+        if (bound[3] != kNoReg || bound[4] != kNoReg) {
+            call_void(RtFn::FileConfig,
+                      {f, bound[3] == kNoReg ? const_int(0) : bound[3],
+                       bound[4] == kNoReg ? const_int(0) : bound[4]});
+        }
+        return f;
+    }
+
+    if (name == "input") {
+        if (c.args.size() > 1) {
+            err(c.line, c.col, "input() takes at most one argument");
+            return const_str("");
+        }
+        VReg prompt = c.args.empty() ? const_int(0) : expr(*c.args[0]);
+        VReg s = call_runtime(RtFn::Input, t_str(), {prompt});
+        push_temp(s);
+        return s;
+    }
+
+    if (name == "iter") {
+        if (c.args.size() != 1) {
+            err(c.line, c.col, "iter() takes exactly one argument");
+            return const_none();
+        }
+        TypePtr it = tc_.type_of(c.args[0].get());
+        if (it && it->kind == TyKind::File) return expr(*c.args[0]);
+        err(c.line, c.col,
+            std::format("iter() of '{}' is not supported by the code generator yet "
+                        "(only files)",
+                        type_name(it)));
+        return const_none();
+    }
+
+    if (name == "isinstance") {
+        if (c.args.size() != 2) {
+            err(c.line, c.col, "isinstance() takes exactly two arguments");
+            return const_bool(false);
+        }
+        TypePtr vt = tc_.type_of(c.args[0].get());
+        TypePtr tt = tc_.type_of(c.args[1].get());
+        TypePtr st = strip_optional(vt);
+        std::string builtin;
+        if (tt && tt->kind == TyKind::Func && tt->fn) builtin = tt->fn->name;
+        if (!builtin.empty()) {
+            if (builtin == "object") return const_bool(true);
+            bool known = st && st->kind != TyKind::Unknown;
+            auto kind_is = [&](std::initializer_list<TyKind> ks) {
+                for (auto k : ks)
+                    if (st && st->kind == k) return true;
+                return false;
+            };
+            if (known) {
+                bool r = false;
+                if (builtin == "int") r = kind_is({TyKind::Int, TyKind::Bool});
+                else if (builtin == "bool") r = kind_is({TyKind::Bool});
+                else if (builtin == "float") r = kind_is({TyKind::Float});
+                else if (builtin == "str") r = kind_is({TyKind::Str});
+                else if (builtin == "list") r = kind_is({TyKind::List});
+                else if (builtin == "tuple") r = kind_is({TyKind::Tuple});
+                else if (builtin == "dict") r = kind_is({TyKind::Dict});
+                else if (builtin == "set") r = kind_is({TyKind::Set});
+                else if (builtin == "complex") r = kind_is({TyKind::Complex});
+                else {
+                    err(c.args[1]->line, c.args[1]->col,
+                        std::format("isinstance() does not support type '{}' yet", builtin));
+                    return const_bool(false);
+                }
+                return const_bool(r);
+            }
+            // unknown 值：只有带运行期类型标签的容器/标量能查。
+            RtFn fn{};
+            if (builtin == "str") fn = RtFn::IsStr;
+            else if (builtin == "list" || builtin == "tuple") fn = RtFn::IsSeq;
+            else if (builtin == "dict") fn = RtFn::IsDict;
+            else if (builtin == "complex") fn = RtFn::IsComplex;
+            else {
+                err(c.args[1]->line, c.args[1]->col,
+                    std::format("isinstance() of an unknown value as '{}' is not supported yet",
+                                builtin));
+                return const_bool(false);
+            }
+            return call_runtime(fn, t_bool(), {expr(*c.args[0])});
+        }
+        ClassInfo* target = tt && tt->kind == TyKind::Class ? tt->cls : nullptr;
+        if (!target) {
+            err(c.args[1]->line, c.args[1]->col,
+                "isinstance() second argument must be a class or builtin type");
+            return const_bool(false);
+        }
+        if (target->is_exception_class) {
+            if (st && st->kind != TyKind::Unknown && st->kind != TyKind::Exception)
+                return const_bool(false);
+            return call_runtime(RtFn::IsException, t_bool(),
+                                {expr(*c.args[0]), const_str(target->name)});
+        }
+        auto cid = class_ids_.find(target);
+        if (cid == class_ids_.end()) {
+            err(c.args[1]->line, c.args[1]->col,
+                "isinstance() with an imported class is not supported yet");
+            return const_bool(false);
+        }
+        bool runtime = true;
+        if (st && st->kind == TyKind::Class && st->cls) {
+            if (st->cls->is_subclass_of(target))
+                runtime = vt != st;  // Optional 可能实际是 None
+            else if (target->is_subclass_of(st->cls))
+                runtime = true;      // 值可能是子类
+            else
+                return const_bool(false);
+        } else if (st && st->kind != TyKind::Unknown) {
+            return const_bool(false);
+        }
+        if (!runtime) return const_bool(true);
+        return call_runtime(RtFn::IsInstance, t_bool(),
+                            {expr(*c.args[0]), const_int(cid->second)});
+    }
+
+    if (name == "hasattr" || name == "getattr" || name == "setattr") {
+        size_t want = name == "setattr" ? 3 : 2;
+        if (c.args.size() != want) {
+            err(c.line, c.col, std::format("{}() takes exactly {} arguments", name, want));
+            return name == "hasattr" ? const_bool(false) : const_none();
+        }
+        const std::string* an = nullptr;
+        Expr* name_expr = c.args[1].get();
+        if (name_expr->kind == ExprKind::Constant) {
+            auto& cc = static_cast<Constant&>(*name_expr);
+            if (cc.ck == Constant::CK::Str) an = &cc.s;
+        }
+        if (!an) {
+            err(name_expr->line, name_expr->col,
+                std::format("{}() attribute name must be a string literal", name));
+            return name == "hasattr" ? const_bool(false) : const_none();
+        }
+        TypePtr raw = tc_.type_of(c.args[0].get());
+        TypePtr ot = strip_optional(raw);
+        if (!ot || ot->kind != TyKind::Class || !ot->cls) {
+            err(c.args[0]->line, c.args[0]->col,
+                std::format("{}() is only supported on class instances", name));
+            return name == "hasattr" ? const_bool(false) : const_none();
+        }
+        const FieldInfo* f = ot->cls->field(*an);
+        const PropertyInfo* prop = ot->cls->property(*an);
+        auto* meth = ot->cls->method(*an);
+        bool optional = ot != raw;
+        if (name == "hasattr") {
+            if (optional) {
+                err(c.line, c.col,
+                    "hasattr() on an Optional value is not supported yet");
+                return const_bool(false);
+            }
+            (void)expr(*c.args[0]);  // 保留求值副作用
+            return const_bool(f || prop || meth);
+        }
+        VReg obj = expr(*c.args[0]);
+        if (optional) obj = guard_not_none(obj, std::format("attribute '{}'", *an));
+        if (name == "getattr") {
+            if (prop) {
+                if (!prop->owner || prop->getter < 0 ||
+                    prop->getter >= static_cast<int>(prop->owner->methods.size())) {
+                    err(c.line, c.col, std::format("property '{}' has no getter", *an));
+                    return const_none();
+                }
+                ++side_effect_seq_;
+                const MethodInfo& gm = prop->owner->methods[prop->getter];
+                Inst vc;
+                vc.op = IrOp::VCall;
+                vc.a = obj;
+                vc.imm = gm.slot;
+                TypePtr rt = gm.call_sig && gm.call_sig->ret ? gm.call_sig->ret : t_unknown();
+                return def_heap(rt, std::move(vc));
+            }
+            if (!f) {
+                if (meth)
+                    err(c.line, c.col,
+                        std::format("getattr() of method '{}' must be called with ()", *an));
+                else
+                    err(c.line, c.col,
+                        std::format("'{}' object has no attribute '{}'", ot->cls->name, *an));
+                return const_none();
+            }
+            int off = static_cast<int>(8 * (1 + ot->cls->field_index(*an)));
+            return field_load(obj, off, f->ty);
+        }
+        // setattr
+        if (!f) {
+            if (prop)
+                err(c.line, c.col,
+                    std::format("setattr() of property '{}' is not supported yet", *an));
+            else
+                err(c.line, c.col,
+                    std::format("'{}' object has no field '{}'", ot->cls->name, *an));
+            return const_none();
+        }
+        VReg v = coerce(expr(*c.args[2]), tc_.type_of(c.args[2].get()), f->ty);
+        int off = static_cast<int>(8 * (1 + ot->cls->field_index(*an)));
+        store_field(f->ty, obj, off, v);
+        return const_none();
+    }
+
+    if (name == "abs") {
+        if (c.args.size() != 1) {
+            err(c.line, c.col, "abs() takes exactly one argument");
+            return const_none();
+        }
+        TypePtr t = tc_.type_of(c.args[0].get());
+        VReg v = expr(*c.args[0]);
+        if (t && t->kind == TyKind::Float)
+            return call_runtime(RtFn::MathFabs, t_float(), {v});
+        if (t && t->kind == TyKind::Complex)
+            return call_runtime(RtFn::ComplexAbs, t_float(), {v});
+        return call_runtime(RtFn::AbsI64, t_int(), {v});
+    }
+
+    if (name == "min" || name == "max") return lower_minmax(c, name == "min");
+    if (name == "sum") return lower_sum(c);
+    if (name == "any" || name == "all") return lower_anyall(c, name == "any");
+    if (name == "complex") {
+        if (c.args.size() > 2) {
+            err(c.line, c.col, "complex() takes at most two arguments");
+            return const_none();
+        }
+        VReg re = const_float(0.0);
+        VReg im = const_float(0.0);
+        if (!c.args.empty()) {
+            TypePtr t0 = tc_.type_of(c.args[0].get());
+            VReg v0 = expr(*c.args[0]);
+            if (t0 && t0->kind == TyKind::Complex && c.args.size() == 1) return v0;
+            re = (t0 && t0->kind == TyKind::Float) ? v0 : convert_to(v0, t0, t_float());
+        }
+        if (c.args.size() == 2) {
+            TypePtr t1 = tc_.type_of(c.args[1].get());
+            VReg v1 = expr(*c.args[1]);
+            im = (t1 && t1->kind == TyKind::Float) ? v1 : convert_to(v1, t1, t_float());
+        }
+        Inst in;
+        in.op = IrOp::CallRt;
+        in.imm = static_cast<int64_t>(RtFn::ComplexNew);
+        in.args = {re, im};
+        return def_heap(t_complex(), std::move(in));
+    }
+    if (name == "pow") {
+        if (c.args.size() != 2 && c.args.size() != 3) {
+            err(c.line, c.col, "pow() takes 2 or 3 arguments");
+            return const_none();
+        }
+        TypePtr ty = tc_.type_of(&c);
+        if (!ty || ty->kind == TyKind::Unknown) ty = t_int();
+        if (c.args.size() == 3) {
+            VReg a = coerce(expr(*c.args[0]), tc_.type_of(c.args[0].get()), t_int());
+            VReg b = coerce(expr(*c.args[1]), tc_.type_of(c.args[1].get()), t_int());
+            VReg m = coerce(expr(*c.args[2]), tc_.type_of(c.args[2].get()), t_int());
+            Inst pw;
+            pw.op = IrOp::Bin;
+            pw.bop = BinKind::Pow;
+            pw.a = a;
+            pw.b = b;
+            VReg p = def(t_int(), std::move(pw));
+            Inst md;
+            md.op = IrOp::Bin;
+            md.bop = BinKind::Mod;
+            md.a = p;
+            md.b = m;
+            return def(t_int(), std::move(md));
+        }
+        VReg a = coerce(expr(*c.args[0]), tc_.type_of(c.args[0].get()), ty);
+        VReg b = coerce(expr(*c.args[1]), tc_.type_of(c.args[1].get()), ty);
+        Inst in;
+        in.op = IrOp::Bin;
+        in.bop = BinKind::Pow;
+        in.a = a;
+        in.b = b;
+        return def(ty, std::move(in));
+    }
+
+    if (name == "ord") {
+        if (c.args.size() != 1) {
+            err(c.line, c.col, "ord() takes exactly one argument");
+            return const_int(0);
+        }
+        TypePtr t = tc_.type_of(c.args[0].get());
+        if (!t || (t->kind != TyKind::Str && t->kind != TyKind::Unknown)) {
+            err(c.line, c.col, std::format("ord() expects a string, got '{}'", type_name(t)));
+            return const_int(0);
+        }
+        VReg v = expr(*c.args[0]);
+        return call_runtime(RtFn::Ord, t_int(), {v});
+    }
+
+    if (name == "chr") {
+        if (c.args.size() != 1) {
+            err(c.line, c.col, "chr() takes exactly one argument");
+            return const_str("");
+        }
+        VReg v = coerce(expr(*c.args[0]), tc_.type_of(c.args[0].get()), t_int());
+        VReg s = call_runtime(RtFn::Chr, t_str(), {v});
+        push_temp(s);
+        return s;
+    }
+
+    if (name == "hex" || name == "bin" || name == "oct") {
+        if (c.args.size() != 1) {
+            err(c.line, c.col, std::format("{}() takes exactly one argument", name));
+            return const_str("");
+        }
+        int64_t base = name == "hex" ? 16 : name == "bin" ? 2 : 8;
+        VReg v = coerce(expr(*c.args[0]), tc_.type_of(c.args[0].get()), t_int());
+        VReg s = call_runtime(RtFn::IntToBase, t_str(), {v, const_int(base)});
+        push_temp(s);
+        return s;
+    }
+
+    if (name == "round") {
+        if (c.args.empty() || c.args.size() > 2) {
+            err(c.line, c.col, "round() takes 1 or 2 arguments");
+            return const_int(0);
+        }
+        TypePtr at = tc_.type_of(c.args[0].get());
+        VReg v = expr(*c.args[0]);
+        if (at && at->kind == TyKind::Float) {
+            VReg nd = c.args.size() == 2
+                          ? coerce(expr(*c.args[1]), tc_.type_of(c.args[1].get()), t_int())
+                          : const_int(0);
+            VReg r = call_runtime(RtFn::RoundF64, t_float(), {v, nd});
+            // round(x) 返回 int；round(x, n) 仍返回 float。
+            if (c.args.size() == 1) return convert_to(r, t_float(), t_int());
+            return r;
+        }
+        // 整数输入：单参就是它自己；带负 ndigits 要按 10 的幂取整。
+        if (c.args.size() == 2 && at &&
+            (at->kind == TyKind::Int || at->kind == TyKind::Bool)) {
+            VReg nd = coerce(expr(*c.args[1]), tc_.type_of(c.args[1].get()), t_int());
+            return call_runtime(RtFn::RoundI64, t_int(), {v, nd});
+        }
+        return v;
+    }
+
+    if (name == "divmod") {
+        if (c.args.size() != 2) {
+            err(c.line, c.col, "divmod() takes exactly two arguments");
+            return const_none();
+        }
+        TypePtr ty = tc_.type_of(&c);
+        TypePtr et = t_int();
+        if (ty && ty->kind == TyKind::Tuple && !ty->sub.empty()) et = ty->sub[0];
+        VReg a = coerce(expr(*c.args[0]), tc_.type_of(c.args[0].get()), et);
+        VReg b = coerce(expr(*c.args[1]), tc_.type_of(c.args[1].get()), et);
+        Inst q;
+        q.op = IrOp::Bin;
+        q.bop = BinKind::FloorDiv;
+        q.a = a;
+        q.b = b;
+        VReg qv = def(et, std::move(q));
+        Inst m;
+        m.op = IrOp::Bin;
+        m.bop = BinKind::Mod;
+        m.a = a;
+        m.b = b;
+        VReg mv = def(et, std::move(m));
+        Inst mt;
+        mt.op = IrOp::MakeTuple;
+        mt.imm = !et ? 2 : et->kind == TyKind::Unknown ? 2 : (ir_is_heap(et) ? 1 : 0);
+        mt.args = {qv, mv};
+        return def_heap(ty && ty->kind == TyKind::Tuple ? ty : mk_tuple({et, et}),
+                        std::move(mt));
+    }
+
+    if (name == "repr") {
+        if (c.args.size() != 1) {
+            err(c.line, c.col, "repr() takes exactly one argument");
+            return const_str("");
+        }
+        TypePtr t = tc_.type_of(c.args[0].get());
+        VReg v = expr(*c.args[0]);
+        if (t && t->kind == TyKind::Str) {
+            Inst in;
+            in.op = IrOp::CallRt;
+            in.imm = static_cast<int64_t>(RtFn::ReprStr);
+            in.args = {v};
+            return def_heap(t_str(), std::move(in));
+        }
+        if (t && (t->kind == TyKind::Int || t->kind == TyKind::Bool ||
+                  t->kind == TyKind::Float || t->kind == TyKind::Complex ||
+                  t->kind == TyKind::None))
+            return convert_to(v, t, t_str());
+        err(c.line, c.col,
+            std::format("repr() of '{}' is not supported by the code generator yet",
+                        type_name(t)));
+        return const_str("");
+    }
+
+    if (name == "format") {
+        if (c.args.size() != 2) {
+            err(c.line, c.col, "format() takes exactly two arguments");
+            return const_str("");
+        }
+        TypePtr vt = tc_.type_of(c.args[0].get());
+        RtFn fn = RtFn::FmtI64;
+        if (vt && vt->kind == TyKind::Float) fn = RtFn::FmtF64;
+        else if (vt && vt->kind == TyKind::Bool) fn = RtFn::FmtBool;
+        else if (vt && vt->kind == TyKind::Str) fn = RtFn::FmtStr;
+        else if (vt && vt->kind == TyKind::Complex) fn = RtFn::FmtComplex;
+        else if (!vt || (vt->kind != TyKind::Int && vt->kind != TyKind::Unknown)) {
+            err(c.line, c.col,
+                std::format("format() of '{}' is not supported yet", type_name(vt)));
+            return const_str("");
+        }
+        VReg v = expr(*c.args[0]);
+        VReg spec = expr(*c.args[1]);
+        if (spec == kNoReg) return const_str("");
+        Inst in;
+        in.op = IrOp::CallRt;
+        in.imm = static_cast<int64_t>(fn);
+        in.args = {v, spec};
+        return def_heap(t_str(), std::move(in));
+    }
+
+    if (name == "range") {
+        if (c.args.empty() || c.args.size() > 3) {
+            err(c.line, c.col, "range() takes 1 to 3 arguments");
+            return const_none();
+        }
+        auto arg = [&](size_t i) {
+            VReg v = expr(*c.args[i]);
+            return coerce(v, tc_.type_of(c.args[i].get()), t_int());
+        };
+        VReg start = const_int(0);
+        VReg stop = arg(0);
+        VReg step = const_int(1);
+        if (c.args.size() >= 2) {
+            start = stop;
+            stop = arg(1);
+        }
+        if (c.args.size() == 3) step = arg(2);
+        VReg v = call_runtime(RtFn::RangeNew, mk_list(t_int()), {start, stop, step});
+        push_temp(v);
+        return v;
+    }
+
+    if (name == "int" || name == "float" || name == "str" || name == "bool") {
+        TypePtr to = name == "int"     ? t_int()
+                     : name == "float" ? t_float()
+                     : name == "str"   ? t_str()
+                                       : t_bool();
+        if (c.args.empty()) return to->kind == TyKind::Int ? const_int(0)
+                                       : to->kind == TyKind::Float ? const_float(0)
+                                       : to->kind == TyKind::Str   ? const_str("")
+                                                                   : const_bool(false);
+        // int(str, base)
+        if (name == "int" && c.args.size() == 2) {
+            TypePtr st = tc_.type_of(c.args[0].get());
+            VReg sv = expr(*c.args[0]);
+            if (!st || st->kind != TyKind::Str) {
+                err(c.line, c.col, "int(x, base) requires a string first argument");
+                return const_int(0);
+            }
+            VReg bv = coerce(expr(*c.args[1]), tc_.type_of(c.args[1].get()), t_int());
+            return call_runtime(RtFn::StrToI64, t_int(), {sv, bv});
+        }
+        if (c.args.size() > 1) {
+            err(c.line, c.col, std::format("{}() takes at most one argument", name));
+            return const_none();
+        }
+        VReg v = expr(*c.args[0]);
+        TypePtr from = tc_.type_of(c.args[0].get());
+        // 字符串解析：以前走 Convert 会把字符串指针直接当数值，静默算错。
+        if (name == "int" && from && from->kind == TyKind::Str)
+            return call_runtime(RtFn::StrToI64, t_int(), {v, const_int(10)});
+        if (name == "float" && from && from->kind == TyKind::Str)
+            return call_runtime(RtFn::StrToF64, t_float(), {v});
+        if (to->kind == TyKind::Str && from && from->kind == TyKind::Exception) {
+            VReg s = call_runtime(RtFn::ExcValueStr, t_str(), {v});
+            push_temp(s);
+            return s;
+        }
+        return convert_to(v, from, to);
+    }
+
+    if (name == "list" || name == "tuple") {
+        TypePtr ty = tc_.type_of(&c);
+        bool as_tuple = name == "tuple";
+        auto result_ty = [&]() -> TypePtr {
+            if (ty) return ty;
+            return as_tuple ? mk_tuple({}) : mk_list(t_unknown());
+        };
+        if (c.args.empty()) {
+            if (as_tuple) {
+                Inst mt;
+                mt.op = IrOp::MakeTuple;
+                mt.imm = list_kind(ty);
+                mt.ty = result_ty();
+                return def_heap(result_ty(), std::move(mt));
+            }
+            VReg l = call_runtime(RtFn::ListNew, result_ty(),
+                                  {const_int(0), const_int(list_kind(ty))});
+            push_temp(l);
+            return l;
+        }
+        if (c.args.size() != 1) {
+            err(c.line, c.col, std::format("{}() takes at most one argument", name));
+            return const_none();
+        }
+        TypePtr xt = tc_.type_of(c.args[0].get());
+        if (!xt || (xt->kind != TyKind::List && xt->kind != TyKind::Tuple &&
+                    xt->kind != TyKind::Str && xt->kind != TyKind::Dict &&
+                    xt->kind != TyKind::Set && xt->kind != TyKind::File)) {
+            err(c.args[0]->line, c.args[0]->col,
+                std::format("{}() cannot iterate over '{}'", name, type_name(xt)));
+            return const_none();
+        }
+        TypePtr et = t_unknown();
+        VReg x = seq_as_list(c.args[0].get(), et);
+        bool fresh = xt->kind == TyKind::Str || xt->kind == TyKind::Dict ||
+                     xt->kind == TyKind::Set;
+        VReg l = fresh ? x : call_runtime(RtFn::ListCopy, result_ty(), {x});
+        if (!fresh) push_temp(l);
+        return as_tuple ? retype(l, result_ty()) : l;
+    }
+
+    if (name == "dict") {
+        TypePtr ty = tc_.type_of(&c);
+        if (!ty || ty->kind != TyKind::Dict) ty = mk_dict(t_unknown(), t_unknown());
+        TypePtr kt = t_unknown(), vt = t_unknown();
+        if (!ty->sub.empty()) kt = ty->sub[0];
+        if (ty->sub.size() > 1) vt = ty->sub[1];
+        if (!c.args.empty()) {
+            err(c.line, c.col,
+                "dict(iterable) is not supported yet; use {} or dict(**kw)");
+            return const_none();
+        }
+        if (c.keywords.empty()) {
+            VReg d = call_runtime(RtFn::DictNew, ty,
+                                  {const_int(key_kind(kt)), const_int(own_kind(kt)),
+                                   const_int(own_kind(vt))});
+            push_temp(d);
+            return d;
+        }
+        // dict(a=1, b=2)：关键字是字符串键。
+        int vo = own_kind(vt);
+        VReg d = call_runtime(RtFn::DictNew, ty,
+                              {const_int(1), const_int(1), const_int(vo)});
+        push_temp(d);
+        for (auto& kw : c.keywords) {
+            if (kw.arg.empty()) {
+                err(kw.value->line, kw.value->col, "'**' is not supported in dict()");
+                continue;
+            }
+            VReg v = expr(*kw.value);
+            v = coerce(v, tc_.type_of(kw.value.get()), vt);
+            retain_elem(v, vo);
+            call_void(RtFn::DictSet, {d, const_str(kw.arg), v});
+        }
+        return d;
+    }
+
+    if (name == "set") {
+        TypePtr ty = tc_.type_of(&c);
+        if (!ty || ty->kind != TyKind::Set) ty = mk_set(t_unknown());
+        TypePtr et = ty->sub.empty() ? t_unknown() : ty->sub[0];
+        int kk = key_kind(et), ko = own_kind(et);
+        if (c.args.empty()) {
+            VReg d = call_runtime(RtFn::DictNew, ty,
+                                  {const_int(kk), const_int(ko), const_int(0)});
+            push_temp(d);
+            return d;
+        }
+        if (c.args.size() != 1) {
+            err(c.line, c.col, "set() takes at most one argument");
+            return const_none();
+        }
+        TypePtr xt = tc_.type_of(c.args[0].get());
+        if (!xt || (xt->kind != TyKind::List && xt->kind != TyKind::Tuple &&
+                    xt->kind != TyKind::Str && xt->kind != TyKind::Dict &&
+                    xt->kind != TyKind::Set && xt->kind != TyKind::File)) {
+            err(c.args[0]->line, c.args[0]->col,
+                std::format("set() cannot iterate over '{}'", type_name(xt)));
+            return const_none();
+        }
+        TypePtr se = t_unknown();
+        VReg x = seq_as_list(c.args[0].get(), se);
+        Inst in;
+        in.op = IrOp::CallRt;
+        in.imm = static_cast<int64_t>(RtFn::SetFromList);
+        in.args = {x, const_int(kk), const_int(ko)};
+        in.ty = ty;
+        VReg d = def(ty, std::move(in));
+        push_temp(d);
+        return d;
+    }
+
+    if (name == "sorted" || name == "reversed") {
+        if (c.args.size() != 1) {
+            err(c.line, c.col, std::format("{}() takes exactly one argument", name));
+            return const_none();
+        }
+        TypePtr xt = tc_.type_of(c.args[0].get());
+        if (!xt || (xt->kind != TyKind::List && xt->kind != TyKind::Tuple &&
+                    xt->kind != TyKind::Str && xt->kind != TyKind::Dict &&
+                    xt->kind != TyKind::Set && xt->kind != TyKind::File)) {
+            err(c.args[0]->line, c.args[0]->col,
+                std::format("{}() cannot iterate over '{}'", name, type_name(xt)));
+            return const_none();
+        }
+        TypePtr se = t_unknown();
+        VReg x = seq_as_list(c.args[0].get(), se);
+        TypePtr ty = tc_.type_of(&c);
+        if (!ty || ty->kind != TyKind::List) ty = mk_list(se);
+        Inst in;
+        in.op = IrOp::CallRt;
+        in.imm = static_cast<int64_t>(name == "sorted" ? RtFn::SortedList
+                                                       : RtFn::ListReversed);
+        in.args = {x};
+        if (name == "sorted") in.args.push_back(const_int(sort_kind(se)));
+        in.ty = ty;
+        VReg l = def(ty, std::move(in));
+        push_temp(l);
+        return l;
+    }
+
+    if (name == "enumerate") {
+        if (c.args.size() != 1) {
+            err(c.line, c.col, "enumerate() supports exactly one argument (no start=)");
+            return const_none();
+        }
+        TypePtr xt = tc_.type_of(c.args[0].get());
+        if (!xt || (xt->kind != TyKind::List && xt->kind != TyKind::Tuple &&
+                    xt->kind != TyKind::Str && xt->kind != TyKind::Dict &&
+                    xt->kind != TyKind::Set && xt->kind != TyKind::File)) {
+            err(c.args[0]->line, c.args[0]->col,
+                std::format("enumerate() cannot iterate over '{}'", type_name(xt)));
+            return const_none();
+        }
+        TypePtr se = t_unknown();
+        VReg x = seq_as_list(c.args[0].get(), se);
+        TypePtr ty = tc_.type_of(&c);
+        if (!ty || ty->kind != TyKind::List) ty = mk_list(mk_tuple({t_int(), se}));
+        Inst in;
+        in.op = IrOp::CallRt;
+        in.imm = static_cast<int64_t>(RtFn::EnumerateList);
+        in.args = {x};
+        in.ty = ty;
+        VReg l = def(ty, std::move(in));
+        push_temp(l);
+        return l;
+    }
+
+    if (name == "zip") {
+        if (c.args.size() != 2) {
+            err(c.line, c.col, "zip() supports exactly two iterables for now");
+            return const_none();
+        }
+        TypePtr se1 = t_unknown(), se2 = t_unknown();
+        VReg a = seq_as_list(c.args[0].get(), se1);
+        VReg b = seq_as_list(c.args[1].get(), se2);
+        TypePtr ty = tc_.type_of(&c);
+        if (!ty || ty->kind != TyKind::List) ty = mk_list(mk_tuple({se1, se2}));
+        Inst in;
+        in.op = IrOp::CallRt;
+        in.imm = static_cast<int64_t>(RtFn::Zip2List);
+        in.args = {a, b};
+        in.ty = ty;
+        VReg l = def(ty, std::move(in));
+        push_temp(l);
+        return l;
+    }
+
+    err(c.line, c.col, std::format("builtin '{}' is not supported by the code generator yet", name));
+    return const_none();
+}
+
+// min()/max()：多实参逐个比较；单实参按容器迭代。空序列抛 ValueError。
+VReg Lowerer::lower_minmax(Call& c, bool is_min) {
+    if (c.args.empty()) {
+        err(c.line, c.col,
+            std::format("{}() expects at least one argument", is_min ? "min" : "max"));
+        return const_none();
+    }
+    TypePtr acc_ty = tc_.type_of(&c);
+    if (!acc_ty || acc_ty->kind == TyKind::Unknown) acc_ty = t_unknown();
+    else if (!is_num(acc_ty) && acc_ty->kind != TyKind::Str) {
+        err(c.line, c.col,
+            std::format("{}() arguments must be numbers or strings", is_min ? "min" : "max"));
+        return const_none();
+    }
+    CmpKind cop = is_min ? CmpKind::Lt : CmpKind::Gt;
+    int best = new_temp_slot(acc_ty);
+
+    if (c.args.size() == 1) {
+        TypePtr seq_ty = tc_.type_of(c.args[0].get());
+        bool ok = seq_ty && (seq_ty->kind == TyKind::List || seq_ty->kind == TyKind::Tuple ||
+                             seq_ty->kind == TyKind::Str || seq_ty->kind == TyKind::Dict ||
+                             seq_ty->kind == TyKind::Set);
+        if (!ok) {
+            err(c.args[0]->line, c.args[0]->col,
+                std::format("cannot iterate over '{}' in {}()", type_name(seq_ty),
+                            is_min ? "min" : "max"));
+            return const_none();
+        }
+        TypePtr elem_ty = t_unknown();
+        if (seq_ty->kind == TyKind::Str) elem_ty = t_str();
+        else if (!seq_ty->sub.empty()) elem_ty = seq_ty->sub[0];
+
+        // SIMD min/max：int/bool 列表用 AVX2 归约；float 仍走标量以保持
+        // NaN 下的比较顺序语义。
+        if (opts_.opt_level >= 2 &&
+            (seq_ty->kind == TyKind::List || seq_ty->kind == TyKind::Tuple) &&
+            (elem_ty->kind == TyKind::Int || elem_ty->kind == TyKind::Bool) &&
+            (acc_ty->kind == TyKind::Int || acc_ty->kind == TyKind::Bool)) {
+            VReg seq = expr(*c.args[0]);
+            return call_runtime(is_min ? RtFn::ListMinI64 : RtFn::ListMaxI64, acc_ty,
+                                {seq});
+        }
+
+        VReg seq = expr(*c.args[0]);
+        int seq_slot = new_temp_slot(seq_ty);
+        store_slot(seq_slot, seq);
+        Inst ln;
+        ln.op = IrOp::Len;
+        ln.a = seq;
+        VReg n = def(t_int(), std::move(ln));
+        int n_slot = new_temp_slot(t_int());
+        store_slot(n_slot, n);
+
+        int empty_b = new_block("minmax.empty");
+        int nonempty_b = new_block("minmax.nonempty");
+        Inst ce;
+        ce.op = IrOp::Cmp;
+        ce.cop = CmpKind::Eq;
+        ce.a = n;
+        ce.b = const_int(0);
+        VReg is_empty = def(t_bool(), std::move(ce));
+        Inst be;
+        be.op = IrOp::Branch;
+        be.a = is_empty;
+        be.target = empty_b;
+        be.target2 = nonempty_b;
+        emit(std::move(be));
+        switch_to(empty_b);
+        call_void(RtFn::Raise, {const_str("ValueError"),
+                                const_str(is_min ? "min() arg is an empty sequence"
+                                                 : "max() arg is an empty sequence")});
+        switch_to(nonempty_b);
+
+        auto elem_at = [&](VReg idx) -> VReg {
+            VReg sv = load_slot(seq_slot, seq_ty);
+            if (seq_ty->kind == TyKind::Dict || seq_ty->kind == TyKind::Set)
+                return call_runtime(RtFn::DictKeyAt, elem_ty, {sv, idx});
+            Inst get;
+            get.op = (opts_.opt_level >= 1 &&
+                      (seq_ty->kind == TyKind::List || seq_ty->kind == TyKind::Tuple))
+                         ? IrOp::IndexLoadUnchecked
+                         : IrOp::IndexLoad;
+            get.a = sv;
+            get.b = idx;
+            return seq_ty->kind == TyKind::Str ? def_heap(elem_ty, std::move(get))
+                                               : def(elem_ty, std::move(get));
+        };
+
+        VReg first = coerce(elem_at(const_int(0)), elem_ty, acc_ty);
+        store_slot(best, first);
+        int idx = new_temp_slot(t_int());
+        store_slot(idx, const_int(1));
+
+        int cond = new_block("minmax.cond");
+        int body = new_block("minmax.body");
+        int choose = new_block("minmax.choose");
+        int next = new_block("minmax.next");
+        int end = new_block("minmax.end");
+        Inst j;
+        j.op = IrOp::Jump;
+        j.target = cond;
+        emit(std::move(j));
+
+        switch_to(cond);
+        Inst cmp;
+        cmp.op = IrOp::Cmp;
+        cmp.cop = CmpKind::Lt;
+        cmp.a = load_slot(idx, t_int());
+        cmp.b = load_slot(n_slot, t_int());
+        VReg cc = def(t_bool(), std::move(cmp));
+        Inst br;
+        br.op = IrOp::Branch;
+        br.a = cc;
+        br.target = body;
+        br.target2 = end;
+        emit(std::move(br));
+
+        switch_to(body);
+        VReg ev = coerce(elem_at(load_slot(idx, t_int())), elem_ty, acc_ty);
+        Inst cmpb;
+        cmpb.op = IrOp::Cmp;
+        cmpb.cop = cop;
+        cmpb.a = ev;
+        cmpb.b = load_slot(best, acc_ty);
+        VReg take = def(t_bool(), std::move(cmpb));
+        Inst bt;
+        bt.op = IrOp::Branch;
+        bt.a = take;
+        bt.target = choose;
+        bt.target2 = next;
+        emit(std::move(bt));
+        switch_to(choose);
+        store_slot(best, ev);
+        Inst jc;
+        jc.op = IrOp::Jump;
+        jc.target = next;
+        emit(std::move(jc));
+
+        switch_to(next);
+        Inst add;
+        add.op = IrOp::Bin;
+        add.bop = BinKind::Add;
+        add.a = load_slot(idx, t_int());
+        add.b = const_int(1);
+        store_slot(idx, def(t_int(), std::move(add)));
+        Inst jb;
+        jb.op = IrOp::Jump;
+        jb.target = cond;
+        emit(std::move(jb));
+
+        switch_to(end);
+        return load_slot(best, acc_ty);
+    }
+
+    VReg v0 = coerce(expr(*c.args[0]), tc_.type_of(c.args[0].get()), acc_ty);
+    store_slot(best, v0);
+    for (size_t i = 1; i < c.args.size(); ++i) {
+        VReg v = coerce(expr(*c.args[i]), tc_.type_of(c.args[i].get()), acc_ty);
+        Inst cmp;
+        cmp.op = IrOp::Cmp;
+        cmp.cop = cop;
+        cmp.a = v;
+        cmp.b = load_slot(best, acc_ty);
+        VReg take = def(t_bool(), std::move(cmp));
+        int choose = new_block("minmax.choose");
+        int next = new_block("minmax.next");
+        Inst br;
+        br.op = IrOp::Branch;
+        br.a = take;
+        br.target = choose;
+        br.target2 = next;
+        emit(std::move(br));
+        switch_to(choose);
+        store_slot(best, v);
+        Inst j;
+        j.op = IrOp::Jump;
+        j.target = next;
+        emit(std::move(j));
+        switch_to(next);
+    }
+    return load_slot(best, acc_ty);
+}
+
+// sum(iterable, start=0)：计数器循环 + 加法，累加器落槽。
+VReg Lowerer::lower_sum(Call& c) {
+    if (c.args.empty() || c.args.size() > 2) {
+        err(c.line, c.col, "sum() takes one or two arguments");
+        return const_none();
+    }
+    TypePtr acc_ty = tc_.type_of(&c);
+    if (!acc_ty || acc_ty->kind == TyKind::Unknown) acc_ty = t_unknown();
+    else if (!is_num(acc_ty)) {
+        err(c.line, c.col, std::format("sum() over non-numeric '{}'", type_name(acc_ty)));
+        return const_none();
+    }
+    TypePtr seq_ty = tc_.type_of(c.args[0].get());
+    bool ok = seq_ty && (seq_ty->kind == TyKind::List || seq_ty->kind == TyKind::Tuple ||
+                         seq_ty->kind == TyKind::Str || seq_ty->kind == TyKind::Dict ||
+                         seq_ty->kind == TyKind::Set);
+    if (!ok) {
+        err(c.args[0]->line, c.args[0]->col,
+            std::format("cannot iterate over '{}' in sum()", type_name(seq_ty)));
+        return const_none();
+    }
+    TypePtr elem_ty = t_unknown();
+    if (seq_ty->kind == TyKind::Str) elem_ty = t_str();
+    else if (!seq_ty->sub.empty()) elem_ty = seq_ty->sub[0];
+
+    // SIMD 归约：只覆盖同域 list/tuple[int|bool] 与 float；混合数值
+    // （如 int 列表 + float start）继续走标量循环保持转换语义。
+    if (opts_.opt_level >= 2 &&
+        (seq_ty->kind == TyKind::List || seq_ty->kind == TyKind::Tuple) &&
+        !seq_ty->sub.empty() && acc_ty) {
+        bool ints = (elem_ty->kind == TyKind::Int || elem_ty->kind == TyKind::Bool) &&
+                    (acc_ty->kind == TyKind::Int || acc_ty->kind == TyKind::Bool);
+        bool floats = opts_.fast_math && elem_ty->kind == TyKind::Float &&
+                      acc_ty->kind == TyKind::Float;
+        if (ints || floats) {
+            VReg seq = expr(*c.args[0]);
+            VReg start = floats ? const_float(0.0) : const_int(0);
+            if (c.args.size() == 2)
+                start = coerce(expr(*c.args[1]), tc_.type_of(c.args[1].get()), acc_ty);
+            return call_runtime(ints ? RtFn::ListSumI64 : RtFn::ListSumF64, acc_ty,
+                                {seq, start});
+        }
+    }
+
+    VReg seq = expr(*c.args[0]);
+    int seq_slot = new_temp_slot(seq_ty);
+    store_slot(seq_slot, seq);
+    Inst ln;
+    ln.op = IrOp::Len;
+    ln.a = seq;
+    VReg n = def(t_int(), std::move(ln));
+    int n_slot = new_temp_slot(t_int());
+    store_slot(n_slot, n);
+    int idx = new_temp_slot(t_int());
+    store_slot(idx, const_int(0));
+
+    VReg start = acc_ty && acc_ty->kind == TyKind::Float ? const_float(0.0) : const_int(0);
+    if (c.args.size() == 2)
+        start = coerce(expr(*c.args[1]), tc_.type_of(c.args[1].get()), acc_ty);
+    int acc = new_temp_slot(acc_ty);
+    store_slot(acc, start);
+
+    int cond = new_block("sum.cond");
+    int body = new_block("sum.body");
+    int incr = new_block("sum.incr");
+    int end = new_block("sum.end");
+    Inst j;
+    j.op = IrOp::Jump;
+    j.target = cond;
+    emit(std::move(j));
+
+    switch_to(cond);
+    Inst cmp;
+    cmp.op = IrOp::Cmp;
+    cmp.cop = CmpKind::Lt;
+    cmp.a = load_slot(idx, t_int());
+    cmp.b = load_slot(n_slot, t_int());
+    VReg cc = def(t_bool(), std::move(cmp));
+    Inst br;
+    br.op = IrOp::Branch;
+    br.a = cc;
+    br.target = body;
+    br.target2 = end;
+    emit(std::move(br));
+
+    switch_to(body);
+    VReg sv = load_slot(seq_slot, seq_ty);
+    VReg iv = load_slot(idx, t_int());
+    VReg ev;
+    if (seq_ty->kind == TyKind::Dict || seq_ty->kind == TyKind::Set)
+        ev = call_runtime(RtFn::DictKeyAt, elem_ty, {sv, iv});
+    else {
+        Inst get;
+        get.op = (opts_.opt_level >= 1 &&
+                  (seq_ty->kind == TyKind::List || seq_ty->kind == TyKind::Tuple))
+                     ? IrOp::IndexLoadUnchecked
+                     : IrOp::IndexLoad;
+        get.a = sv;
+        get.b = iv;
+        ev = seq_ty->kind == TyKind::Str ? def_heap(elem_ty, std::move(get))
+                                         : def(elem_ty, std::move(get));
+    }
+    ev = coerce(ev, elem_ty, acc_ty);
+    Inst add;
+    add.op = IrOp::Bin;
+    add.bop = BinKind::Add;
+    add.a = load_slot(acc, acc_ty);
+    add.b = ev;
+    store_slot(acc, def(acc_ty, std::move(add)));
+    Inst jin;
+    jin.op = IrOp::Jump;
+    jin.target = incr;
+    emit(std::move(jin));
+
+    switch_to(incr);
+    Inst add2;
+    add2.op = IrOp::Bin;
+    add2.bop = BinKind::Add;
+    add2.a = load_slot(idx, t_int());
+    add2.b = const_int(1);
+    store_slot(idx, def(t_int(), std::move(add2)));
+    Inst jb;
+    jb.op = IrOp::Jump;
+    jb.target = cond;
+    emit(std::move(jb));
+
+    switch_to(end);
+    return load_slot(acc, acc_ty);
+}
+
+
+// any()/all()：短路迭代。any 遇到真值返回 True，all 遇到假值返回 False。
+VReg Lowerer::lower_anyall(Call& c, bool is_any) {
+    if (c.args.size() != 1) {
+        err(c.line, c.col,
+            std::format("{}() takes exactly one argument", is_any ? "any" : "all"));
+        return const_bool(false);
+    }
+    TypePtr seq_ty = tc_.type_of(c.args[0].get());
+    bool ok = seq_ty && (seq_ty->kind == TyKind::List || seq_ty->kind == TyKind::Tuple ||
+                         seq_ty->kind == TyKind::Str || seq_ty->kind == TyKind::Dict ||
+                         seq_ty->kind == TyKind::Set);
+    if (!ok) {
+        err(c.args[0]->line, c.args[0]->col,
+            std::format("cannot iterate over '{}' in {}()", type_name(seq_ty),
+                        is_any ? "any" : "all"));
+        return const_bool(false);
+    }
+    TypePtr elem_ty = t_unknown();
+    if (seq_ty->kind == TyKind::Str) elem_ty = t_str();
+    else if (!seq_ty->sub.empty()) elem_ty = seq_ty->sub[0];
+
+    VReg seq = expr(*c.args[0]);
+    int seq_slot = new_temp_slot(seq_ty);
+    store_slot(seq_slot, seq);
+    Inst ln;
+    ln.op = IrOp::Len;
+    ln.a = seq;
+    VReg n = def(t_int(), std::move(ln));
+    int n_slot = new_temp_slot(t_int());
+    store_slot(n_slot, n);
+    int idx = new_temp_slot(t_int());
+    store_slot(idx, const_int(0));
+    int result = new_temp_slot(t_bool());
+    store_slot(result, const_bool(!is_any));
+
+    int cond = new_block("anyall.cond");
+    int body = new_block("anyall.body");
+    int incr = new_block("anyall.incr");
+    int stop = new_block("anyall.stop");
+    int end = new_block("anyall.end");
+    Inst j;
+    j.op = IrOp::Jump;
+    j.target = cond;
+    emit(std::move(j));
+
+    switch_to(cond);
+    Inst cmp;
+    cmp.op = IrOp::Cmp;
+    cmp.cop = CmpKind::Lt;
+    cmp.a = load_slot(idx, t_int());
+    cmp.b = load_slot(n_slot, t_int());
+    VReg cc = def(t_bool(), std::move(cmp));
+    Inst br;
+    br.op = IrOp::Branch;
+    br.a = cc;
+    br.target = body;
+    br.target2 = end;
+    emit(std::move(br));
+
+    switch_to(body);
+    VReg sv = load_slot(seq_slot, seq_ty);
+    VReg iv = load_slot(idx, t_int());
+    VReg ev;
+    if (seq_ty->kind == TyKind::Dict || seq_ty->kind == TyKind::Set)
+        ev = call_runtime(RtFn::DictKeyAt, elem_ty, {sv, iv});
+    else {
+        Inst get;
+        get.op = (opts_.opt_level >= 1 &&
+                  (seq_ty->kind == TyKind::List || seq_ty->kind == TyKind::Tuple))
+                     ? IrOp::IndexLoadUnchecked
+                     : IrOp::IndexLoad;
+        get.a = sv;
+        get.b = iv;
+        ev = seq_ty->kind == TyKind::Str ? def_heap(elem_ty, std::move(get))
+                                         : def(elem_ty, std::move(get));
+    }
+    Inst ib;
+    ib.op = IrOp::Branch;
+    ib.a = ev;
+    ib.target = is_any ? stop : incr;
+    ib.target2 = is_any ? incr : stop;
+    emit(std::move(ib));
+
+    switch_to(stop);
+    store_slot(result, const_bool(is_any));
+    Inst js;
+    js.op = IrOp::Jump;
+    js.target = end;
+    emit(std::move(js));
+
+    switch_to(incr);
+    Inst add;
+    add.op = IrOp::Bin;
+    add.bop = BinKind::Add;
+    add.a = load_slot(idx, t_int());
+    add.b = const_int(1);
+    store_slot(idx, def(t_int(), std::move(add)));
+    Inst jb;
+    jb.op = IrOp::Jump;
+    jb.target = cond;
+    emit(std::move(jb));
+
+    switch_to(end);
+    return load_slot(result, t_bool());
+}
+
+}  // namespace py23
