@@ -487,7 +487,14 @@ void AsmGen::emit_truth(VReg r, const char* byte_reg) {
             line("orb %cl, %al");
             return;
         }
-        emit2("cmpq", "$0", src_op(r));
+        std::string s = src_op(r);
+        // 立即数不能直接进 cmpq 的源位置：先落 %rax。常量条件一般会被
+        // 分支折叠吃掉，这里只兜底（如 bool(x) 的 x 是常量）。
+        if (!s.empty() && s[0] == '$') {
+            emit2("movq", s, "%rax");
+            s = "%rax";
+        }
+        emit2("cmpq", "$0", s);
         line("setne %al");
     }
 

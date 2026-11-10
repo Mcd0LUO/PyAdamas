@@ -345,8 +345,10 @@ void AsmGen::gen_block(const Block& b) {
             // 常量干脆不生成指令，让使用者把它当立即数。`s += 1` 因此
             // 是 `addq $1, %rbx`，而不是「先 movq $1 到栈上再读回来」。
             // 只处理 32 位范围内的整数：x86 的 movq 立即数只有
-            // 符号扩展的 32 位，更大的必须走 movabsq。
-            if (fused_slot < 0 && is_deferable_const(in) && single_use_in_block(in.dst)) {
+            // 符号扩展的 32 位，更大的必须走 movabsq。跨块常量由
+            // assign_global_vreg_regs 记进 global_imm_，整函数范围生效。
+            if (fused_slot < 0 && is_deferable_const(in) &&
+                (single_use_in_block(in.dst) || global_imm_.contains(in.dst))) {
                 const_val_[in.dst] = std::format("${}", in.imm);
                 ++i;
                 continue;

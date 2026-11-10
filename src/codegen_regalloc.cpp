@@ -449,8 +449,27 @@ void AsmGen::assign_block_temp_regs() {
         const size_t nv = f_->vreg_ty.size();
         vreg_reg_.assign(nv, std::string());
         block_temp_pool_.assign(kTempRegs, kTempRegs + 4);
+        global_imm_.clear();
         if (nv == 0) return;
         if (opt_ < 2 || gen_ || f_->has_handlers) return;
+
+        // 跨块的 const.int 整函数当立即数：寄存器、栈槽都不占。所有使用
+        // 点生成的都是 movq $imm / addq $imm / cmpq $imm 形态（比较和
+        // 分支对立即数位置有专门处理，转换会先搬进 %rax）。
+        std::vector<int64_t> const_imm(nv, 0);
+        std::vector<uint8_t> is_const(nv, 0);
+        for (const auto& b : f_->blocks)
+            for (const auto& in : b.insts) {
+                if (in.op != IrOp::ConstInt || in.dst == kNoReg || in.dst >= nv) continue;
+                if (in.imm < INT32_MIN || in.imm > INT32_MAX) continue;
+                const_imm[static_cast<size_t>(in.dst)] = in.imm;
+                is_const[static_cast<size_t>(in.dst)] = 1;
+            }
+        for (size_t v = 0; v < nv; ++v) {
+            if (is_const[v])
+                global_imm_[static_cast<VReg>(v)] =
+                    std::format("${}", const_imm[v]);
+        }
 
         struct Cand {
             int v;
@@ -459,6 +478,7 @@ void AsmGen::assign_block_temp_regs() {
         std::vector<Cand> cands;
         for (size_t v = 0; v < nv; ++v) {
             if (!cross_block_[v]) continue;
+            if (global_imm_.contains(static_cast<VReg>(v))) continue;
             TypePtr vt = f_->vreg_ty[v];
             if (!vt || vt->kind == TyKind::Float || vt->kind == TyKind::Unknown ||
                 vt->kind == TyKind::Optional)

@@ -134,6 +134,10 @@ private:
     // 能被写成立即数的常量。同样只在块内有效（保存 "$imm" 串）。
     std::unordered_map<VReg, std::string> const_val_;
 
+    // 整函数范围的 const.int → "$imm"。跨块的常量不必占寄存器或栈槽，
+    // 所有使用点直接用立即数；定义指令在 gen_block 里跳过。
+    std::unordered_map<VReg, std::string> global_imm_;
+
     // 本指令的 dst 该写到哪里。为空表示按 mem(dst)；非空是融合目标
     // （通常是一个变量寄存器），此时 mem(dst) 完全不参与。
     std::string dst_loc_;
@@ -270,6 +274,8 @@ private:
         if (it != alias_.end()) return it->second;
         auto ct = const_val_.find(r);
         if (ct != const_val_.end()) return ct->second;
+        auto gi = global_imm_.find(r);
+        if (gi != global_imm_.end()) return gi->second;
         return mem(r);
     }
 
