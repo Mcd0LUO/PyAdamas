@@ -577,6 +577,38 @@ void TypeChecker::classdef(ClassDef& c) {
                 err(f.line, f.col, "__init__ cannot be a static method or property");
             m.def = &f;
             rebuild_call_sig(m);
+            // 协议 dunder 的签名固定，写错在定义处报出来，避免调用点
+            // 拿到不可用的 vtable 槽。
+            {
+                auto bad = [&](const std::string& msg) {
+                    err(f.line, f.col, std::format("'{}' {}", f.name, msg));
+                };
+                bool two_arg = f.name == "__eq__" || f.name == "__ne__";
+                if (f.name == "__str__" || f.name == "__repr__" || f.name == "__len__" ||
+                    two_arg) {
+                    if (kind != MethodKind::Normal) {
+                        bad("must be a normal method");
+                    } else if (m.sig->varargs || m.sig->kwargs) {
+                        bad("does not accept *args / **kwargs");
+                    } else if (two_arg) {
+                        if (m.sig->pos.size() != 2) {
+                            bad("takes 'self' and one other parameter");
+                        } else if (!is_unknown(m.sig->pos[1].ty) &&
+                                   m.sig->pos[1].ty->kind != TyKind::Class) {
+                            bad("second parameter must be unannotated or a class type");
+                        } else if (!m.sig->ret || m.sig->ret->kind != TyKind::Bool) {
+                            bad("must return bool");
+                        }
+                    } else if (m.sig->pos.size() != 1) {
+                        bad("takes only 'self'");
+                    } else if (f.name == "__len__") {
+                        if (!m.sig->ret || m.sig->ret->kind != TyKind::Int)
+                            bad("must return int");
+                    } else if (!m.sig->ret || m.sig->ret->kind != TyKind::Str) {
+                        bad("must return str");
+                    }
+                }
+            }
             // 方法体检查复用这份签名，返回类型才会回填到同一个对象上
             func_infos_[&f] = m.sig;
             cls->methods.push_back(std::move(m));

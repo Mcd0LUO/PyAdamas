@@ -1091,6 +1091,19 @@ private:
     VReg lower_print(Call& c);
     VReg lower_method_call(Attribute& at, Call& c);
     VReg lower_super_call(Attribute& at, Call& c);
+    // 协议 dunder：__str__/__repr__/__eq__/__ne__/__len__。
+    // 静态类型是用户类且 MRO 里有可用实现时构造 VCall（子类覆盖生效），
+    // 否则返回 kNoReg，由调用点退回默认行为。
+    VReg dunder_call(VReg recv, TypePtr recv_ty, const char* name,
+                     std::vector<VReg> args, TypePtr want_ret,
+                     const std::vector<TypePtr>* arg_tys = nullptr);
+    VReg dunder_str(VReg v, TypePtr ty, bool prefer_repr);
+    VReg dunder_len(VReg v, TypePtr ty);
+    VReg lower_dunder_eq(VReg l, TypePtr lt, VReg r, TypePtr rt, bool ne);
+    // 真值：类实例有 __len__ 时返回 len(...) != 0 的 bool vreg，
+    // 否则原样返回（后端按类型做指针/数值判断）。
+    VReg truth_bool(VReg v, TypePtr ty);
+    VReg class_default_str(TypePtr ty);
     VReg lower_subscript(Subscript& s);
     VReg lower_list_like(std::vector<ExprPtr>& elts, TypePtr ty, bool is_tuple);
     VReg lower_dict(DictExpr& d, TypePtr ty);

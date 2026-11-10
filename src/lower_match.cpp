@@ -47,6 +47,7 @@ void Lowerer::lower_match(Match& m) {
         lower_pattern(*c.pattern, load_slot(subj, sty ? sty : t_unknown()), sty, fail);
         if (c.guard) {
             VReg g = expr(*c.guard);
+            g = truth_bool(g, tc_.type_of(c.guard.get()));
             int gok = new_block("match.guard");
             Inst br;
             br.op = IrOp::Branch;

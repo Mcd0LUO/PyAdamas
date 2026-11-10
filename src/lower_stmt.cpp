@@ -212,6 +212,7 @@ void Lowerer::lower_if(If& f) {
     for (size_t i = 0; i < f.branches.size(); ++i) {
         auto& br = f.branches[i];
         VReg c = expr(*br.cond);
+        c = truth_bool(c, tc_.type_of(br.cond.get()));
         int then_b = new_block("if.then");
         int next_b;
         if (i + 1 < f.branches.size())
@@ -274,6 +275,7 @@ void Lowerer::lower_while(While& f) {
     switch_to(cond);
     size_t pushes_before_cond = st_->rc_pushes;
     VReg c = expr(*f.cond);
+    c = truth_bool(c, tc_.type_of(f.cond.get()));
     Inst br;
     br.op = IrOp::Branch;
     br.a = c;

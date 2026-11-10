@@ -191,6 +191,7 @@ VReg Lowerer::lower_comp(Expr& e) {
 
             for (auto& cond_expr : g.ifs) {
                 VReg c = expr(*cond_expr);
+                c = truth_bool(c, tc_.type_of(cond_expr.get()));
                 int ok_b = new_block("comp.aif");
                 Inst cb;
                 cb.op = IrOp::Branch;
@@ -344,6 +345,7 @@ VReg Lowerer::lower_comp(Expr& e) {
         // 过滤器：任何一条不成立就跳到自增块。
         for (auto& cond_expr : g.ifs) {
             VReg c = expr(*cond_expr);
+            c = truth_bool(c, tc_.type_of(cond_expr.get()));
             int ok_b = new_block("comp.if");
             Inst cb;
             cb.op = IrOp::Branch;

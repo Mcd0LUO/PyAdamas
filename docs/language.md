@@ -512,7 +512,19 @@ class Point:
 | `self` | 普通参数，名字不限；省略标注时类型就是所属类 |
 | 属性读 | `p.x` → `movq 8(%rax), %rax` |
 | 方法调用 | `p.m(...)` → 从对象头取 vtable，按常量槽号取地址后间接调用 |
-| 打印 | `print(p)` 输出 `<Point object>`（没有 `__str__`） |
+| 打印 | `print(p)` 有 `__str__` 就调它，否则输出 `<Point object>` |
+
+**协议方法**（vtable 分发，子类覆盖生效；静态类型的 MRO 里没有实现时退回默认行为）：
+
+| 方法 | 要求 | 触发点 |
+|---|---|---|
+| `__str__(self) -> str` | 普通方法，只有 self | `print`、`str()`、f-string 默认转换；没有时回退 `__repr__` |
+| `__repr__(self) -> str` | 普通方法，只有 self | `repr()`、`!r`、list/tuple 等容器内部元素；没有时回退 `<类名 object>` |
+| `__eq__(self, other) -> bool` | `other` 可省略标注（unknown）或标成类类型 | `==`；两边都没有实现时保持指针比较 |
+| `__ne__(self, other) -> bool` | 同上 | `!=`；没定义时用 `__eq__` 取反 |
+| `__len__(self) -> int` | 普通方法，只有 self | `len()`、真值（`if`/`while`/`not`/`and`/`or`/三元/`bool()`/`assert`/推导式过滤）；没有 `__len__` 的类调 `len()` 直接编译报错 |
+
+`__eq__` 的 `other` 标成具体类时，调用点只在实参静态类型可赋值给它（或为 unknown）时走协议；其它具体类型回退指针比较，不会把不匹配的值送进方法体。容器打印用**元素 repr**（和字符串元素一致）；类实例的默认文本是 `<类名 object>`，没有 CPython 的模块名和地址。f-string 带格式说明时，类实例先按 `__str__` 转成字符串再套用说明（CPython 需要 `__format__`，这里是有意放宽）。暂不支持 `__hash__`、`__contains__`、`__iter__` 和算术类 dunder。
 
 字段初值在构造点求值，比 CPython 的「类属性 + 实例回退」更简单也更安全：`items: list[int] = []` 每个实例拿到的是**独立**的空列表，不会出现所有实例共享一个 list 的经典 bug。
 

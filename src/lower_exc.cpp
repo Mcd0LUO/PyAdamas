@@ -379,6 +379,7 @@ void Lowerer::lower_finally(Try& t) {
 
 void Lowerer::lower_assert(Assert& a) {
     VReg c = expr(*a.test);
+    c = truth_bool(c, tc_.type_of(a.test.get()));
     int ok = new_block("assert.ok");
     int bad = new_block("assert.fail");
     Inst br;

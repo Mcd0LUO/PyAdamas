@@ -16,7 +16,16 @@ VReg Lowerer::lower_builtin_call(const std::string& name, Call& c) {
             err(c.line, c.col, "len() takes exactly one argument");
             return const_int(0);
         }
+        TypePtr t = tc_.type_of(c.args[0].get());
         VReg v = expr(*c.args[0]);
+        VReg ln = dunder_len(v, t);
+        if (ln != kNoReg) return ln;
+        if (t && t->kind == TyKind::Class) {
+            err(c.line, c.col,
+                std::format("len() of '{}' which has no __len__",
+                            t->cls ? t->cls->name : "object"));
+            return const_int(0);
+        }
         Inst in;
         in.op = IrOp::Len;
         in.a = v;
@@ -664,6 +673,10 @@ VReg Lowerer::lower_builtin_call(const std::string& name, Call& c) {
                   t->kind == TyKind::Float || t->kind == TyKind::Complex ||
                   t->kind == TyKind::None))
             return convert_to(v, t, t_str());
+        if (t && t->kind == TyKind::Class) {
+            VReg s = dunder_str(v, t, true);
+            return s != kNoReg ? s : class_default_str(t);
+        }
         err(c.line, c.col,
             std::format("repr() of '{}' is not supported by the code generator yet",
                         type_name(t)));

@@ -516,6 +516,8 @@ VReg Lowerer::lower_binop(BinOp& b) {
 VReg Lowerer::lower_unary(UnaryOp& u) {
     TypePtr ty = tc_.type_of(&u);
     VReg v = expr(*u.operand);
+    // 类实例的 `not` 先按 __len__ 求值真值（没有 __len__ 时后端按指针判空）。
+    if (u.op == Tok::KW_NOT) v = truth_bool(v, tc_.type_of(u.operand.get()));
     if (ty && ty->kind == TyKind::Complex) {
         if (u.op == Tok::PLUS) return v;
         if (u.op == Tok::MINUS) {
@@ -559,7 +561,7 @@ VReg Lowerer::lower_boolop(BoolOp& b) {
 
         Inst br;
         br.op = IrOp::Branch;
-        br.a = cur_v;
+        br.a = truth_bool(cur_v, ty);
         // and: 真才继续算右边；or: 假才继续算右边
         br.target = is_and ? rhs : next;
         br.target2 = is_and ? next : rhs;
@@ -622,6 +624,12 @@ VReg Lowerer::lower_compare(Compare& c) {
         CmpOp op = c.ops[0];
         TypePtr lt = tc_.type_of(c.left.get());
         TypePtr rt = tc_.type_of(c.comparators[0].get());
+        // == / != 在类实例上优先走 __eq__ / __ne__；两边都没有实现时
+        // 维持原来的指针比较。
+        if (op == CmpOp::Eq || op == CmpOp::Ne) {
+            VReg eqres = lower_dunder_eq(l, lt, r, rt, op == CmpOp::Ne);
+            if (eqres != kNoReg) return eqres;
+        }
         if (op == CmpOp::In || op == CmpOp::NotIn) {
             VReg flag;
             if (rt && (rt->kind == TyKind::Dict || rt->kind == TyKind::Set)) {
@@ -912,6 +920,7 @@ VReg Lowerer::lower_ifexp(IfExp& e) {
     TypePtr ty = tc_.type_of(&e);
     int tmp = new_borrow_slot(ty);
     VReg c = expr(*e.test);
+    c = truth_bool(c, tc_.type_of(e.test.get()));
     int then_b = new_block("ifexp.then");
     int else_b = new_block("ifexp.else");
     int end = new_block("ifexp.end");
@@ -941,9 +950,114 @@ VReg Lowerer::lower_ifexp(IfExp& e) {
     return load_slot(tmp, ty);
 }
 
+// ── 协议 dunder ────────────────────────────────────────────────
+//
+// 静态类型是用户类、且 MRO 里有签名可用的实现时，构造一次普通 VCall：
+// vtable 槽按方法名全局分配，子类覆盖天然生效；没有实现就返回 kNoReg，
+// 调用点退回默认行为（指针比较 / `<P object>` / 指针非空真值）。
+VReg Lowerer::dunder_call(VReg recv, TypePtr recv_ty, const char* name,
+                          std::vector<VReg> args, TypePtr want_ret,
+                          const std::vector<TypePtr>* arg_tys) {
+    if (!recv_ty || recv_ty->kind != TyKind::Class || !recv_ty->cls) return kNoReg;
+    const MethodInfo* m = recv_ty->cls->method(name);
+    if (!m || m->kind != MethodKind::Normal || !m->call_sig || m->slot < 0) return kNoReg;
+    if (m->call_sig->varargs || m->call_sig->kwargs) return kNoReg;
+    if (m->call_sig->pos.size() != args.size()) return kNoReg;
+    // 形参是具体类时，实参必须能赋值给它（unknown 放行：由用户自己保证，
+    // 方法体里的 isinstance 守卫是运行时行为）。不匹配就不走 dunder，
+    // 留给调用点回退。
+    if (arg_tys && arg_tys->size() == args.size()) {
+        for (size_t i = 0; i < args.size(); ++i) {
+            TypePtr pt = m->call_sig->pos[i].ty;
+            TypePtr at = (*arg_tys)[i];
+            if (!pt || pt->kind != TyKind::Class || !at) continue;
+            if (at->kind == TyKind::Unknown) continue;
+            if (!assignable(pt, at)) return kNoReg;
+        }
+    }
+    TypePtr rt = m->call_sig->ret ? m->call_sig->ret : t_none();
+    if (want_ret && !type_eq(rt, want_ret)) return kNoReg;
+    Inst vc;
+    vc.op = IrOp::VCall;
+    vc.a = recv;
+    vc.imm = m->slot;
+    vc.args = std::move(args);
+    return def_heap(rt, std::move(vc));
+}
+
+VReg Lowerer::dunder_str(VReg v, TypePtr ty, bool prefer_repr) {
+    // repr 语义（容器元素、repr()、!r）只用 __repr__；str 语义先 __str__，
+    // 没有再回退 __repr__。和 CPython 的默认关系一致。
+    if (prefer_repr) return dunder_call(v, ty, "__repr__", {}, t_str());
+    VReg s = dunder_call(v, ty, "__str__", {}, t_str());
+    if (s != kNoReg) return s;
+    return dunder_call(v, ty, "__repr__", {}, t_str());
+}
+
+VReg Lowerer::dunder_len(VReg v, TypePtr ty) {
+    return dunder_call(v, ty, "__len__", {}, t_int());
+}
+
+VReg Lowerer::lower_dunder_eq(VReg l, TypePtr lt, VReg r, TypePtr rt, bool ne) {
+    auto one = [&](VReg self, TypePtr st, VReg other, TypePtr ot) -> VReg {
+        if (!st || st->kind != TyKind::Class || !st->cls) return kNoReg;
+        std::vector<TypePtr> tys{ot};
+        if (ne) {
+            VReg v = dunder_call(self, st, "__ne__", {other}, t_bool(), &tys);
+            if (v != kNoReg) return v;
+        }
+        VReg eq = dunder_call(self, st, "__eq__", {other}, t_bool(), &tys);
+        if (eq == kNoReg) return kNoReg;
+        if (!ne) return eq;
+        Inst un;
+        un.op = IrOp::Un;
+        un.uop = UnKind::Not;
+        un.a = eq;
+        return def(t_bool(), std::move(un));
+    };
+    // 先左后右：左边类没有 __eq__ 时，右边的实现仍然可以接收它。
+    VReg res = one(l, lt, r, rt);
+    if (res != kNoReg) return res;
+    return one(r, rt, l, lt);
+}
+
+VReg Lowerer::truth_bool(VReg v, TypePtr ty) {
+    VReg ln = dunder_len(v, ty);
+    if (ln == kNoReg) return v;
+    Inst c;
+    c.op = IrOp::Cmp;
+    c.cop = CmpKind::Gt;
+    c.a = ln;
+    c.b = const_int(0);
+    return def(t_bool(), std::move(c));
+}
+
+VReg Lowerer::class_default_str(TypePtr ty) {
+    std::string name = ty && ty->cls ? ty->cls->name : "object";
+    return const_str("<" + name + " object>");
+}
+
 VReg Lowerer::convert_to(VReg v, TypePtr from, TypePtr to) {
     if (!to) return v;
     if (from && type_eq(from, to)) return v;
+    // 类实例的字符串/布尔转换走协议 dunder；没有实现就用默认行为。
+    if (from && from->kind == TyKind::Class) {
+        if (to->kind == TyKind::Str) {
+            VReg s = dunder_str(v, from, false);
+            return s != kNoReg ? s : class_default_str(from);
+        }
+        if (to->kind == TyKind::Bool) {
+            VReg ln = dunder_len(v, from);
+            if (ln != kNoReg) {
+                Inst c;
+                c.op = IrOp::Cmp;
+                c.cop = CmpKind::Gt;
+                c.a = ln;
+                c.b = const_int(0);
+                return def(t_bool(), std::move(c));
+            }
+        }
+    }
     if (to->kind == TyKind::Bool && from && from->kind == TyKind::Complex) {
         Inst in;
         in.op = IrOp::CallRt;
@@ -1025,6 +1139,10 @@ VReg Lowerer::lower_joined(JoinedStr& j) {
                     in.imm = static_cast<int64_t>(RtFn::ReprStr);
                     in.args = {raw};
                     raw = def_heap(t_str(), std::move(in));
+                } else if (vt && vt->kind == TyKind::Class) {
+                    // !r 用 __repr__；没有就退回默认对象描述。
+                    VReg s = dunder_str(raw, vt, true);
+                    raw = s != kNoReg ? s : class_default_str(vt);
                 } else {
                     raw = convert_to(raw, vt, t_str());
                 }
@@ -1032,6 +1150,13 @@ VReg Lowerer::lower_joined(JoinedStr& j) {
             VReg spec = const_str("");
             if (fv.format_spec)
                 spec = lower_joined(static_cast<JoinedStr&>(*fv.format_spec));
+            // 没有 !s/!r 的普通格式化：类实例按 __str__ 转成字符串，
+            // 再走字符串的格式说明。（无转换时 conversion 是 -1。）
+            if (fv.conversion < 0 && vt && vt->kind == TyKind::Class) {
+                VReg s = dunder_str(raw, vt, false);
+                raw = s != kNoReg ? s : class_default_str(vt);
+                vt = t_str();
+            }
 
             auto fmt_call = [&](RtFn fn) {
                 Inst in;

@@ -67,8 +67,13 @@ void Lowerer::print_value(VReg v, TypePtr ty, int line, int col) {
             break;
         }
         case TyKind::Class: {
-            // 没有 __str__，就按 CPython 的形状打一个 `<Point object>`。
-            // 类名进字符串池，和字面量走同一条路。
+            // 有 __str__（或只有 __repr__）就调它；否则按 CPython 的形状
+            // 打一个 `<Point object>`。
+            VReg s = dunder_str(v, ty, false);
+            if (s != kNoReg) {
+                call_void(RtFn::PrintStr, {s});
+                break;
+            }
             std::string name = ty->cls ? ty->cls->name : "object";
             call_void(RtFn::PrintStr, {const_str("<" + name + " object>")});
             break;
@@ -103,6 +108,11 @@ void Lowerer::print_value_to_file(VReg v, TypePtr ty, int line, int col) {
             call_void(RtFn::FileWrite, {f, const_str("<set object>")});
             return;
         case TyKind::Class: {
+            VReg s = dunder_str(v, ty, false);
+            if (s != kNoReg) {
+                call_void(RtFn::FileWrite, {f, s});
+                return;
+            }
             std::string name = ty->cls ? ty->cls->name : "object";
             call_void(RtFn::FileWrite, {f, const_str("<" + name + " object>")});
             return;
@@ -269,6 +279,14 @@ void Lowerer::print_seq(VReg v, TypePtr ty, bool tuple, bool to_file, int line, 
             call_void(RtFn::FileWrite, {load_slot(print_file_slot_, t_file()), rs});
         else
             call_void(RtFn::PrintStr, {rs});
+    } else if (et && et->kind == TyKind::Class) {
+        // 容器内部同样用 repr 语义（CPython 打印 list/tuple 用元素 repr）。
+        VReg cs = dunder_str(ev, et, true);
+        if (cs == kNoReg) cs = class_default_str(et);
+        if (to_file)
+            call_void(RtFn::FileWrite, {load_slot(print_file_slot_, t_file()), cs});
+        else
+            call_void(RtFn::PrintStr, {cs});
     } else if (to_file) {
         print_value_to_file(ev, et, line, col);
     } else {
