@@ -224,6 +224,9 @@ void enc_type(Enc& e, const TypePtr& t) {
         case TyKind::Task:
         case TyKind::AsyncGenerator:
         case TyKind::Future:
+        case TyKind::AsyncEvent:
+        case TyKind::AsyncLock:
+        case TyKind::AsyncQueue:
         case TyKind::Exception:
         case TyKind::Complex:
         case TyKind::File: e.u8(0); break;

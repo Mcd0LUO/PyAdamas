@@ -177,6 +177,91 @@ VReg Lowerer::lower_method_call(Attribute& at, Call& c) {
         return def_heap(rt, std::move(vc));
     }
 
+    if (recv_ty && (recv_ty->kind == TyKind::AsyncEvent ||
+                    recv_ty->kind == TyKind::AsyncLock ||
+                    recv_ty->kind == TyKind::AsyncQueue)) {
+        if (opt) recv = guard_not_none(recv, std::format("method '{}'", at.attr));
+        if (!c.keywords.empty())
+            err(c.line, c.col, std::format("{}() does not take keyword arguments", at.attr));
+        auto count = [&](size_t n) {
+            if (c.args.size() == n) return true;
+            err(c.line, c.col,
+                std::format("{}() takes exactly {} argument{}", at.attr, n, n == 1 ? "" : "s"));
+            return false;
+        };
+        if (recv_ty->kind == TyKind::AsyncEvent) {
+            if (at.attr == "wait") {
+                if (!count(0)) return const_none();
+                VReg f = call_runtime(RtFn::EventWait, mk_future(t_bool()), {recv});
+                push_temp(f);
+                return f;
+            }
+            if (at.attr == "set") {
+                if (!count(0)) return const_none();
+                call_void(RtFn::EventSet, {recv});
+                return const_none();
+            }
+            if (at.attr == "is_set") {
+                if (!count(0)) return const_none();
+                return call_runtime(RtFn::EventIsSet, t_bool(), {recv});
+            }
+        }
+        if (recv_ty->kind == TyKind::AsyncLock) {
+            if (at.attr == "acquire") {
+                if (!count(0)) return const_none();
+                VReg f = call_runtime(RtFn::LockAcquire, mk_future(t_bool()), {recv});
+                push_temp(f);
+                return f;
+            }
+            if (at.attr == "release") {
+                if (!count(0)) return const_none();
+                call_void(RtFn::LockRelease, {recv});
+                return const_none();
+            }
+            if (at.attr == "locked") {
+                if (!count(0)) return const_none();
+                return call_runtime(RtFn::LockLocked, t_bool(), {recv});
+            }
+        }
+        if (recv_ty->kind == TyKind::AsyncQueue) {
+            if (at.attr == "put") {
+                if (!count(1)) return const_none();
+                TypePtr vt = tc_.type_of(c.args[0].get());
+                if (vt && vt->kind == TyKind::Float) {
+                    err(c.args[0]->line, c.args[0]->col,
+                        "Queue.put() of float is not supported yet");
+                    return const_none();
+                }
+                VReg v = expr(*c.args[0]);
+                call_void(RtFn::QueuePut, {recv, v});
+                // CPython 的 Queue.put 是协程；这里返回一个已完成的
+                // Future，await 与不 await 都能用。
+                VReg f = call_runtime(RtFn::AsyncioFutureNew, mk_future(t_none()), {});
+                call_void(RtFn::FutureSetResult, {f, const_int(0)});
+                push_temp(f);
+                return f;
+            }
+            if (at.attr == "get") {
+                if (!count(0)) return const_none();
+                TypePtr et = recv_ty->sub.empty() ? t_unknown() : recv_ty->sub[0];
+                VReg f = call_runtime(RtFn::QueueGet, mk_future(et), {recv});
+                push_temp(f);
+                return f;
+            }
+            if (at.attr == "qsize") {
+                if (!count(0)) return const_none();
+                return call_runtime(RtFn::QueueQsize, t_int(), {recv});
+            }
+            if (at.attr == "empty") {
+                if (!count(0)) return const_none();
+                return call_runtime(RtFn::QueueEmpty, t_bool(), {recv});
+            }
+        }
+        err(c.line, c.col,
+            std::format("'{}' has no method '{}'", type_name(recv_ty), at.attr));
+        return const_none();
+    }
+
     // 内置类型的方法表是静态的，Optional 上没有；走到这里说明没做
     // None 检查。报错比让 py23_list_append 拿到 0 更可查。
     if (opt) {

@@ -363,7 +363,9 @@ TypePtr TypeChecker::builtin_type(const std::string& n) {
 std::optional<TypePtr> TypeChecker::asyncio_call(const std::string& member, Call& c) {
         if (member != "run" && member != "sleep" && member != "gather" &&
             member != "create_task" && member != "Future" &&
-            member != "wait_readable" && member != "wait_writable")
+            member != "wait_readable" && member != "wait_writable" &&
+            member != "Event" && member != "Lock" && member != "Queue" &&
+            member != "wait_for")
             return std::nullopt;
 
         std::vector<TypePtr> a;
@@ -401,6 +403,37 @@ std::optional<TypePtr> TypeChecker::asyncio_call(const std::string& member, Call
             if (!a.empty() || !c.keywords.empty())
                 err(c.line, c.col, "asyncio.Future() takes no arguments");
             return mk_future(t_unknown());
+        }
+
+        if (member == "Event") {
+            if (!a.empty()) err(c.line, c.col, "asyncio.Event() takes no arguments");
+            return mk_async_event();
+        }
+        if (member == "Lock") {
+            if (!a.empty()) err(c.line, c.col, "asyncio.Lock() takes no arguments");
+            return mk_async_lock();
+        }
+        if (member == "Queue") {
+            if (!a.empty()) err(c.line, c.col, "asyncio.Queue() takes no arguments");
+            return mk_async_queue(t_unknown());
+        }
+
+        if (member == "wait_for") {
+            if (a.size() != 2) {
+                err(c.line, c.col,
+                    std::format("asyncio.wait_for() expects 2 arguments, got {}", a.size()));
+                return t_unknown();
+            }
+            if (!is_unknown(a[1]) && !is_num(a[1]))
+                err(c.line, c.col,
+                    std::format("asyncio.wait_for() timeout must be a number, got '{}'",
+                                type_name(a[1])));
+            TypePtr res = t_unknown();
+            if (a[0] && (a[0]->kind == TyKind::Coroutine || a[0]->kind == TyKind::Task ||
+                         a[0]->kind == TyKind::Future) &&
+                !a[0]->sub.empty())
+                res = a[0]->sub[0];
+            return mk_coroutine(res);
         }
 
         if (member == "wait_readable" || member == "wait_writable") {
@@ -670,6 +703,61 @@ TypePtr TypeChecker::method_call(TypePtr recv, const std::string& name, Call& c,
                 return mk_optional(mk_exception("Exception"));
             }
             err(c.line, c.col, std::format("'future' object has no method '{}'", name));
+            return t_unknown();
+        }
+
+        if (recv->kind == TyKind::AsyncEvent) {
+            if (name == "wait") {
+                argc(0, 0);
+                return mk_future(t_bool());
+            }
+            if (name == "set") {
+                argc(0, 0);
+                return t_none();
+            }
+            if (name == "is_set") {
+                argc(0, 0);
+                return t_bool();
+            }
+            err(c.line, c.col, std::format("'asyncio.Event' has no method '{}'", name));
+            return t_unknown();
+        }
+
+        if (recv->kind == TyKind::AsyncLock) {
+            if (name == "acquire") {
+                argc(0, 0);
+                return mk_future(t_bool());
+            }
+            if (name == "release") {
+                argc(0, 0);
+                return t_none();
+            }
+            if (name == "locked") {
+                argc(0, 0);
+                return t_bool();
+            }
+            err(c.line, c.col, std::format("'asyncio.Lock' has no method '{}'", name));
+            return t_unknown();
+        }
+
+        if (recv->kind == TyKind::AsyncQueue) {
+            if (name == "put") {
+                argc(1, 1);
+                return mk_future(t_none());
+            }
+            if (name == "get") {
+                argc(0, 0);
+                return mk_future(elem());
+            }
+            if (name == "qsize") {
+                argc(0, 0);
+                return t_int();
+            }
+            if (name == "empty") {
+                argc(0, 0);
+                return t_bool();
+            }
+            err(c.line, c.col, std::format("'asyncio.Queue' has no method '{}'", name));
             return t_unknown();
         }
 

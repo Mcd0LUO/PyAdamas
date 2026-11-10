@@ -588,6 +588,11 @@ py23::ModuleInfoPtr builtin_module(const std::string& name) {
         func("create_task", {py23::mk_coroutine(py23::t_unknown())},
              py23::mk_task(py23::t_unknown()));
         func("Future", {}, py23::mk_future(py23::t_unknown()));
+        func("Event", {}, py23::mk_async_event());
+        func("Lock", {}, py23::mk_async_lock());
+        func("Queue", {}, py23::mk_async_queue(py23::t_unknown()));
+        func("wait_for", {py23::t_unknown(), py23::t_float()},
+             py23::mk_coroutine(py23::t_unknown()));
         func("wait_readable", {py23::t_int()}, py23::mk_coroutine(py23::t_none()));
         func("wait_writable", {py23::t_int()}, py23::mk_coroutine(py23::t_none()));
         auto gather = std::make_shared<py23::FuncInfo>();

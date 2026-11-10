@@ -239,6 +239,79 @@ void start_gather(Py23Await* w, void* waiter) {
     if (w->remaining <= 0 && !w->done) finish_gather(w);
 }
 
+/* ── asyncio.wait_for：可等待对象 + 超时竞速（kind 8） ────────── */
+
+static void timer_remove(Py23Await* w) {
+    for (int64_t i = 0; i < loop_timers->len; ++i)
+        if (loop_timers->data[i] == (int64_t)w) {
+            list_take_at(loop_timers, i);
+            py23_rc_dec(w);
+            return;
+        }
+}
+
+void* py23_asyncio_wait_for(void* aw, double secs) {
+    loop_ensure();
+    if (!frame_is_coro(aw) && !is_await_obj(aw))
+        py23_raise_c("TypeError", "asyncio.wait_for() expects an awaitable");
+    Py23Await* w = await_new(8);
+    w->children = py23_list_new(1, 1);
+    double v = secs * 1000.0;
+    int64_t ms = 0;
+    if (secs > 0) ms = v > 9e15 ? (int64_t)9e15 : (int64_t)(v + 0.5);
+    w->deadline_ms = now_ms() + ms;
+    void* t = py23_asyncio_create_task(aw);
+    py23_list_append(w->children, (int64_t)t);  // 接管 create_task 的引用
+    return w;
+}
+
+/* 定时器到期：取消子任务，把 TimeoutError 交给等待者。消费定时器引用。 */
+static void wait_for_timeout(Py23Await* w) {
+    if (!w->done) {
+        w->done = 1;
+        if (w->children && w->children->len > 0) {
+            void* t = (void*)(uintptr_t)w->children->data[0];
+            py23_rc_inc(t);
+            cancel_chain(t);
+            py23_rc_dec(t);
+        }
+        if (w->children) {
+            py23_rc_dec(w->children);
+            w->children = NULL;
+        }
+        void* owned = pending_take(w);
+        void* a = (void*)w->waiter;
+        w->waiter = 0;
+        Py23Exception* e = exc_new("TimeoutError", "operation timed out");
+        if (a) deliver_owned(a, w, 0, e);
+        else w->exc = (int64_t)e;
+        if (owned) py23_rc_dec(owned);
+    }
+    py23_rc_dec(w);
+}
+
+/* race 自身被取消：取消子任务、摘定时器，把 CancelledError 交出去。 */
+void wait_for_cancel(Py23Await* w) {
+    if (w->done) return;
+    w->done = 1;
+    if (w->children && w->children->len > 0) {
+        void* t = (void*)(uintptr_t)w->children->data[0];
+        py23_rc_inc(t);
+        cancel_chain(t);
+        py23_rc_dec(t);
+    }
+    if (w->children) {
+        py23_rc_dec(w->children);
+        w->children = NULL;
+    }
+    timer_remove(w);
+    void* owned = pending_take(w);
+    void* a = (void*)w->waiter;
+    w->waiter = 0;
+    if (a) deliver_owned(a, w, 0, exc_new("CancelledError", ""));
+    if (owned) py23_rc_dec(owned);
+}
+
 void start_awaitable(void* obj, void* waiter) {
     Py23Await* w = (Py23Await*)obj;
     if (w->kind == 6) {
@@ -320,6 +393,35 @@ void start_awaitable(void* obj, void* waiter) {
         w->waiter = (int64_t)waiter;
         py23_rc_inc(waiter);
         py23_rc_dec(w);
+        return;
+    }
+    if (w->kind == 8) {
+        if (w->done) {
+            py23_rc_inc(waiter);
+            int64_t v = w->result;
+            w->result = 0;
+            Py23Exception* e = (Py23Exception*)w->exc;
+            w->exc = 0;
+            deliver_owned(waiter, w, v, e);
+            py23_rc_dec(w);
+            return;
+        }
+        if (w->waiter) {
+            py23_rc_dec(w);
+            coro_inject(waiter, exc_new("RuntimeError", "awaitable is already awaited"));
+            return;
+        }
+        w->waiter = (int64_t)waiter;
+        py23_rc_inc(waiter);
+        py23_list_append(loop_pending, (int64_t)w);  // 接管调用方引用
+        w->pending = 1;
+        py23_rc_inc(w);
+        py23_list_append(loop_timers, (int64_t)w);  // 定时器自己持有一份
+        if (w->children && w->children->len > 0) {
+            void* t = (void*)(uintptr_t)w->children->data[0];
+            py23_rc_inc(t);
+            start_awaitable(t, w);  // 完成时结果交给 race
+        }
         return;
     }
     if (w->done) {
@@ -413,6 +515,31 @@ void deliver_owned(void* waiter, void* child, int64_t value, Py23Exception* exc)
             py23_rc_dec_unknown(value);
             if (exc) exc_free(exc);
         }
+        py23_rc_dec(waiter);
+        return;
+    }
+    if (g->kind == 8) {
+        if (g->done) {
+            if (exc) exc_free(exc);
+            else py23_rc_dec_unknown(value);
+            py23_rc_dec(waiter);
+            return;
+        }
+        g->done = 1;
+        timer_remove(g);
+        void* owned = pending_take(g);
+        if (g->children) {
+            py23_rc_dec(g->children);
+            g->children = NULL;
+        }
+        void* a = (void*)g->waiter;
+        g->waiter = 0;
+        if (a) deliver_owned(a, g, value, exc);
+        else {
+            g->result = value;
+            g->exc = (int64_t)exc;
+        }
+        if (owned) py23_rc_dec(owned);
         py23_rc_dec(waiter);
         return;
     }
@@ -566,6 +693,11 @@ int fire_due_timers(int64_t now) {
         Py23Await* w = (Py23Await*)loop_timers->data[i];
         if (w->deadline_ms <= now) {
             list_take_at(loop_timers, i);
+            if (w->kind == 8) {
+                wait_for_timeout(w);
+                fired = 1;
+                continue;
+            }
             w->done = 1;
             void* a = (void*)w->waiter;
             w->waiter = 0;

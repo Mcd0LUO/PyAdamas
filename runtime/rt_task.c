@@ -176,6 +176,7 @@ void cancel_chain(void* w) {
         case 2: gather_cancel(aw); break;
         case 3: py23_asyncio_task_cancel(w); break;
         case 5: future_cancel(aw); break;
+        case 8: wait_for_cancel(aw); break;
         default: break;  // driver 让它自然结束
     }
 }
@@ -323,5 +324,161 @@ int64_t py23_asyncio_task_cancelled(void* tp) {
     Py23Await* t = (Py23Await*)tp;
     if (!t->done || !t->exc) return 0;
     return strcmp(((Py23Exception*)t->exc)->type, "CancelledError") == 0;
+}
+
+/* ── asyncio 同步原语（Event / Lock / Queue） ─────────────────── */
+
+typedef struct {
+    int64_t set;
+    Py23List* waiters; /* Future* */
+} Py23Event;
+
+typedef struct {
+    int64_t locked;
+    Py23List* waiters; /* Future* */
+} Py23Lock;
+
+typedef struct {
+    Py23List* items;   /* 元素按 unknown 容器存放（kind 2） */
+    Py23List* getters; /* Future* */
+} Py23Queue;
+
+static void event_destroy(void* p) {
+    Py23Event* e = (Py23Event*)p;
+    if (e->waiters) py23_rc_dec(e->waiters);
+}
+static void lock_destroy(void* p) {
+    Py23Lock* l = (Py23Lock*)p;
+    if (l->waiters) py23_rc_dec(l->waiters);
+}
+static void queue_destroy(void* p) {
+    Py23Queue* q = (Py23Queue*)p;
+    if (q->items) py23_rc_dec(q->items);
+    if (q->getters) py23_rc_dec(q->getters);
+}
+
+void* py23_event_new(void) {
+    loop_ensure();
+    Py23Event* e = (Py23Event*)rc_alloc((int64_t)sizeof(Py23Event), event_destroy, NULL,
+                                        PY23_RC_OBJ);
+    e->waiters = py23_list_new(4, 1);
+    return e;
+}
+
+void py23_event_set(void* ep) {
+    if (!ep) py23_raise_c("TypeError", "set() expects an Event");
+    Py23Event* e = (Py23Event*)ep;
+    e->set = 1;
+    int64_t n = e->waiters->len;
+    for (int64_t i = 0; i < n; ++i)
+        py23_future_set_result((void*)(uintptr_t)e->waiters->data[i], 1);
+    py23_list_set_len(e->waiters, 0);
+}
+
+int64_t py23_event_is_set(void* ep) {
+    if (!ep) return 0;
+    return ((Py23Event*)ep)->set;
+}
+
+void* py23_event_wait(void* ep) {
+    if (!ep) py23_raise_c("TypeError", "wait() expects an Event");
+    Py23Event* e = (Py23Event*)ep;
+    void* f = py23_asyncio_future_new();
+    if (e->set) {
+        py23_future_set_result(f, 1);
+        return f;
+    }
+    py23_rc_inc(f);
+    py23_list_append(e->waiters, (int64_t)f);
+    return f;
+}
+
+void* py23_lock_new(void) {
+    loop_ensure();
+    Py23Lock* l = (Py23Lock*)rc_alloc((int64_t)sizeof(Py23Lock), lock_destroy, NULL,
+                                      PY23_RC_OBJ);
+    l->waiters = py23_list_new(4, 1);
+    return l;
+}
+
+void* py23_lock_acquire(void* lp) {
+    if (!lp) py23_raise_c("TypeError", "acquire() expects a Lock");
+    Py23Lock* l = (Py23Lock*)lp;
+    void* f = py23_asyncio_future_new();
+    if (!l->locked) {
+        l->locked = 1;
+        py23_future_set_result(f, 1);
+        return f;
+    }
+    py23_rc_inc(f);
+    py23_list_append(l->waiters, (int64_t)f);
+    return f;
+}
+
+void py23_lock_release(void* lp) {
+    if (!lp) py23_raise_c("TypeError", "release() expects a Lock");
+    Py23Lock* l = (Py23Lock*)lp;
+    if (!l->locked) py23_raise_c("RuntimeError", "release unlocked lock");
+    if (l->waiters->len > 0) {
+        void* f = (void*)(uintptr_t)l->waiters->data[0];
+        py23_future_set_result(f, 1);
+        py23_list_del_index(l->waiters, 0);
+        return;  /* 所有权直接转给下一个等待者，保持 locked */
+    }
+    l->locked = 0;
+}
+
+int64_t py23_lock_locked(void* lp) {
+    if (!lp) return 0;
+    return ((Py23Lock*)lp)->locked;
+}
+
+void* py23_queue_new(void) {
+    loop_ensure();
+    Py23Queue* q = (Py23Queue*)rc_alloc((int64_t)sizeof(Py23Queue), queue_destroy, NULL,
+                                        PY23_RC_OBJ);
+    q->items = py23_list_new(4, 2);
+    q->getters = py23_list_new(4, 1);
+    return q;
+}
+
+void py23_queue_put(void* qp, int64_t v) {
+    if (!qp) py23_raise_c("TypeError", "put() expects a Queue");
+    Py23Queue* q = (Py23Queue*)qp;
+    if (q->getters->len > 0) {
+        void* f = (void*)(uintptr_t)q->getters->data[0];
+        py23_future_set_result(f, v);
+        py23_list_del_index(q->getters, 0);
+        return;
+    }
+    py23_rc_inc_unknown(v);
+    py23_list_append(q->items, v);
+}
+
+void* py23_queue_get(void* qp) {
+    if (!qp) py23_raise_c("TypeError", "get() expects a Queue");
+    Py23Queue* q = (Py23Queue*)qp;
+    if (q->items->len > 0) {
+        int64_t v = py23_list_get(q->items, 0);
+        // items 是 kind 2：删除不 release，值的所有权转交给 Future。
+        py23_list_del_index(q->items, 0);
+        void* f = py23_asyncio_future_new();
+        py23_future_set_result(f, v);
+        return f;
+    }
+    void* f = py23_asyncio_future_new();
+    py23_rc_inc(f);
+    py23_list_append(q->getters, (int64_t)f);
+    return f;
+}
+
+int64_t py23_queue_qsize(void* qp) {
+    if (!qp) return 0;
+    return ((Py23Queue*)qp)->items->len;
+}
+
+int64_t py23_queue_empty(void* qp) {
+    if (!qp) return 1;
+    return ((Py23Queue*)qp)->items->len == 0 ? 1 : 0;
 }
 

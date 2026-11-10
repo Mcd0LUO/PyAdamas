@@ -483,6 +483,44 @@ VReg Lowerer::lower_asyncio(const std::string& member, Call& c) {
         return f;
     }
 
+    if (member == "Event") {
+        if (!c.args.empty())
+            err(c.line, c.col, "asyncio.Event() takes no arguments");
+        VReg ev = call_runtime(RtFn::EventNew, rt ? rt : mk_async_event(), {});
+        push_temp(ev);
+        return ev;
+    }
+
+    if (member == "Lock") {
+        if (!c.args.empty())
+            err(c.line, c.col, "asyncio.Lock() takes no arguments");
+        VReg lk = call_runtime(RtFn::LockNew, rt ? rt : mk_async_lock(), {});
+        push_temp(lk);
+        return lk;
+    }
+
+    if (member == "Queue") {
+        if (!c.args.empty())
+            err(c.line, c.col, "asyncio.Queue() takes no arguments");
+        VReg q = call_runtime(RtFn::QueueNew, rt ? rt : mk_async_queue(t_unknown()), {});
+        push_temp(q);
+        return q;
+    }
+
+    if (member == "wait_for") {
+        if (c.args.size() != 2) {
+            err(c.line, c.col, "asyncio.wait_for() takes exactly two arguments");
+            return const_none();
+        }
+        VReg aw = expr(*c.args[0]);
+        VReg secs = expr(*c.args[1]);
+        secs = coerce(secs, tc_.type_of(c.args[1].get()), t_float());
+        VReg w = call_runtime(RtFn::AsyncioWaitFor,
+                              rt ? rt : mk_coroutine(t_unknown()), {aw, secs});
+        push_temp(w);
+        return w;
+    }
+
     if (member == "wait_readable" || member == "wait_writable") {
         if (c.args.size() != 1) {
             err(c.line, c.col,

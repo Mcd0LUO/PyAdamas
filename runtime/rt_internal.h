@@ -133,7 +133,7 @@ Py23Str* py23_repr_str(Py23Str* v);
 
 typedef struct {
     int64_t magic;
-    int64_t kind;      /* 1 sleep, 2 gather, 3 task */
+    int64_t kind;      /* 1 sleep, 2 gather, 3 task, 4 asyncgen, 5 future, 6 fd, 8 wait_for */
     int64_t done;
     int64_t starting;  /* gather 正在启动子任务：完成延后到启动结束 */
     int64_t result;    /* owned */
@@ -313,6 +313,22 @@ Py23ExcValue* py23_future_exception(void* fp);
 int64_t py23_asyncio_task_result(void* tp);
 Py23ExcValue* py23_asyncio_task_exception(void* tp);
 int64_t py23_asyncio_task_cancelled(void* tp);
+void py23_list_del_index(Py23List* l, int64_t i);
+void* py23_event_new(void);
+void py23_event_set(void* e);
+int64_t py23_event_is_set(void* e);
+void* py23_event_wait(void* e);
+void* py23_lock_new(void);
+void* py23_lock_acquire(void* l);
+void py23_lock_release(void* l);
+int64_t py23_lock_locked(void* l);
+void* py23_queue_new(void);
+void py23_queue_put(void* q, int64_t v);
+void* py23_queue_get(void* q);
+int64_t py23_queue_qsize(void* q);
+int64_t py23_queue_empty(void* q);
+void* py23_asyncio_wait_for(void* aw, double secs);
+void wait_for_cancel(Py23Await* w);
 void* py23_asyncio_wait_fd(int64_t fd, int64_t write);
 int poll_fds(int timeout_ms);
 void* py23_asyncgen_anext(void* gen);

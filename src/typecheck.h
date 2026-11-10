@@ -53,6 +53,9 @@ enum class TyKind : uint8_t {
     Task,         // asyncio.create_task 返回的已调度协程；sub[0] 是结果类型
     AsyncGenerator, // async def + yield；sub[0] 是产出类型
     Future,       // asyncio.Future；sub[0] 是结果类型
+    AsyncEvent,   // asyncio.Event
+    AsyncLock,    // asyncio.Lock
+    AsyncQueue,   // asyncio.Queue；sub[0] 是元素类型
     Exception,    // 异常值（type name 放在 Type::name）；args 是 message 列表
     File,         // open() 返回的文件对象
 };
@@ -472,6 +475,13 @@ inline TypePtr mk_future(TypePtr result) {
     t->sub.push_back(std::move(result));
     return t;
 }
+inline TypePtr mk_async_event() { return new_ty(TyKind::AsyncEvent); }
+inline TypePtr mk_async_lock() { return new_ty(TyKind::AsyncLock); }
+inline TypePtr mk_async_queue(TypePtr elem) {
+    auto t = new_ty(TyKind::AsyncQueue);
+    t->sub.push_back(std::move(elem));
+    return t;
+}
 inline TypePtr mk_exception(const std::string& name) {
     auto t = new_ty(TyKind::Exception);
     t->name = name;
@@ -603,6 +613,13 @@ inline std::string type_name_impl(const TypePtr& t, int depth) {
         case TyKind::Future:
             return t->sub.empty() ? "future"
                                   : std::format("future[{}]", type_name_impl(t->sub[0], depth + 1));
+        case TyKind::AsyncEvent: return "asyncio.Event";
+        case TyKind::AsyncLock: return "asyncio.Lock";
+        case TyKind::AsyncQueue:
+            return t->sub.empty()
+                       ? "asyncio.Queue"
+                       : std::format("asyncio.Queue[{}]",
+                                     type_name_impl(t->sub[0], depth + 1));
         case TyKind::Exception:
             return t->name.empty() ? "Exception" : t->name;
         case TyKind::File: return "file";
@@ -658,6 +675,11 @@ inline TypePtr join_into(const TypePtr& a, const TypePtr& b) {
     if (a->kind == TyKind::Future && b->kind == TyKind::Future)
         return mk_future(join(a->sub.empty() ? t_unknown() : a->sub[0],
                               b->sub.empty() ? t_unknown() : b->sub[0]));
+    if (a->kind == TyKind::AsyncQueue && b->kind == TyKind::AsyncQueue)
+        return mk_async_queue(join(a->sub.empty() ? t_unknown() : a->sub[0],
+                                   b->sub.empty() ? t_unknown() : b->sub[0]));
+    if (a->kind == TyKind::AsyncEvent && b->kind == TyKind::AsyncEvent) return a;
+    if (a->kind == TyKind::AsyncLock && b->kind == TyKind::AsyncLock) return a;
     if (a->kind == TyKind::Exception && b->kind == TyKind::Exception) return a;
     if (a->kind == TyKind::Complex && b->kind == TyKind::Complex) return a;
     if (a->kind == TyKind::Tuple && b->kind == TyKind::Tuple) {
@@ -725,6 +747,10 @@ inline bool assignable(const TypePtr& dst, const TypePtr& src) {
     if (dst->kind == TyKind::AsyncGenerator && src->kind == TyKind::AsyncGenerator)
         return dst->sub.empty() || src->sub.empty() || assignable(dst->sub[0], src->sub[0]);
     if (dst->kind == TyKind::Future && src->kind == TyKind::Future)
+        return dst->sub.empty() || src->sub.empty() || assignable(dst->sub[0], src->sub[0]);
+    if (dst->kind == TyKind::AsyncEvent && src->kind == TyKind::AsyncEvent) return true;
+    if (dst->kind == TyKind::AsyncLock && src->kind == TyKind::AsyncLock) return true;
+    if (dst->kind == TyKind::AsyncQueue && src->kind == TyKind::AsyncQueue)
         return dst->sub.empty() || src->sub.empty() || assignable(dst->sub[0], src->sub[0]);
     if (dst->kind == TyKind::Exception && src->kind == TyKind::Exception) return true;
     // int/float 可以隐式提升为 complex

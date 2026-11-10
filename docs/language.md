@@ -297,7 +297,7 @@ async def add(a: int, b: int) -> int:
 print(asyncio.run(add(3, 4)))   # 10
 ```
 
-内置 `asyncio` 只提供三件东西：
+内置 `asyncio` 提供：
 
 - `asyncio.run(coro)`：事件循环跑到根协程结束并返回结果；根协程的
   异常抛回同步调用点。
@@ -306,9 +306,19 @@ print(asyncio.run(add(3, 4)))   # 10
 - `asyncio.create_task(coro)`：立即调度协程，返回 `task[T]`；`await
   task` 取结果，完成后可重复 await；`task.done()` 判断是否结束；
   `task.cancel()` 请求取消（返回 bool）。
+- `asyncio.Future()`：手动完成的 future（`set_result` / `set_exception` /
+  `add_done_callback` / `result` / `exception` / `cancel`）。
+- `asyncio.Event()`：`await ev.wait()`、`ev.set()`、`ev.is_set()`。
+- `asyncio.Lock()`：`await lock.acquire()`、`lock.release()`、
+  `lock.locked()`；等待者按 FIFO 唤醒。
+- `asyncio.Queue()`：`await q.put(v)`、`await q.get()`、`q.qsize()`、
+  `q.empty()`；无界队列，元素静态类型按 unknown 处理（`get` 的
+  await 结果不能用字符串方法等需要具体类型的操作）。
+- `asyncio.wait_for(aw, timeout)`：可等待对象与超时竞速；超时取消
+  内部任务并抛 `TimeoutError`，内部对象可以是协程、Task 或 Future。
 
-也支持 `from asyncio import sleep, gather, run, create_task`（`run` 的结果
-类型会退化成 unknown）。async 方法、`with` 里的 `await`、跨 `await` 的
+也支持 `from asyncio import sleep, gather, run, create_task, Event, Lock,
+Queue, wait_for`（`run`/`wait_for` 的结果类型会退化成 unknown）。async 方法、`with` 里的 `await`、跨 `await` 的
 `finally` 都可以用；异常跨 `await` 通过在恢复时注入异常传播，
 `try/except` 能正常捕获。
 

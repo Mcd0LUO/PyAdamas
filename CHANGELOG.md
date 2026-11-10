@@ -4,6 +4,44 @@
 
 早期阶段没有逐条留痕，按阶段归纳；0.4 之后逐条记录。
 
+## [0.54] - 2026-11-10
+
+asyncio 同步原语：`Event` / `Lock` / `Queue` 与 `wait_for`。
+
+### 新增
+
+- `asyncio.Event()`：`await wait()` 返回 `Future[bool]`，`set()` 唤醒全部
+  等待者，`is_set()` 查询状态；已 set 的 `wait()` 立即完成。
+- `asyncio.Lock()`：`await acquire()` 返回 `Future[bool]`，`release()`
+  按 FIFO 唤醒下一个等待者，`locked()` 查询；release 未持有时抛
+  `RuntimeError`。
+- `asyncio.Queue()`：无界队列；`await put(v)`（返回已完成的
+  `Future[None]`，与 CPython 的协程签名兼容）、`await get()`、`qsize()`、
+  `empty()`。空队列阻塞 get，put 直接唤醒等待中的 getter。
+- `asyncio.wait_for(aw, timeout)`：事件循环里的「子任务 + 定时器」竞速
+  （新增 await kind 8）；正常完成按原结果/异常交付，超时取消子任务并抛
+  `TimeoutError`；被外部取消时级联取消子任务。支持协程、Task、Future、
+  sleep/fd 等可等待对象。
+- 类型系统新增 `asyncio.Event` / `asyncio.Lock` / `asyncio.Queue` 三种
+  类型（跨模块接口按 unknown 退化）；`from asyncio import Event, Lock,
+  Queue, wait_for` 也可用。
+- `RtFn` 超过 255 项，底层类型从 `uint8_t` 扩到 `uint16_t`。
+
+### 验证
+
+- `ctest --preset dev/release` 全绿；O0/O1 全量 52 个运行用例通过；
+  810 程序差分零失败
+- 临时探针（不入库）：Event 阻塞/唤醒/重复 wait、Lock FIFO 互斥、
+  Queue put/get 阻塞与 qsize、wait_for 成功/超时/对 Future 竞速与
+  `TimeoutError` 捕获均与 CPython 一致（O0/O1/O2）
+
+### 已知限制
+
+- Queue 元素静态类型是 unknown：`await q.get()` 的结果拿不到具体类型；
+  `put` 暂不接受 float（会明确报错）
+- `asyncio.Queue(maxsize=...)`、`TaskGroup`、`asyncio.timeout` 尚未支持
+- `wait_for` 的超时精度受毫秒定时器限制
+
 ## [0.53] - 2026-11-10
 
 补 `hash()`，并把 math 模块补齐到 CPython 成员集合。

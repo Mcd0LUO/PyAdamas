@@ -520,6 +520,7 @@ void AsmGen::gen_call_rt(const Inst& in) {
             case RtFn::MathSumprod:
             case RtFn::MathDist:
             case RtFn::HashValue:
+            case RtFn::QueuePut:
             case RtFn::FileRead:
             case RtFn::FileWrite:
             case RtFn::FileWritelines:
@@ -638,6 +639,15 @@ void AsmGen::gen_call_rt(const Inst& in) {
             case RtFn::MathFsum:
             case RtFn::MathIsqrt:
             case RtFn::MathProd:
+            case RtFn::EventSet:
+            case RtFn::EventIsSet:
+            case RtFn::EventWait:
+            case RtFn::LockAcquire:
+            case RtFn::LockRelease:
+            case RtFn::LockLocked:
+            case RtFn::QueueGet:
+            case RtFn::QueueQsize:
+            case RtFn::QueueEmpty:
             case RtFn::GenNext:
             case RtFn::GenClose:
             case RtFn::HandlerSuspend:
@@ -755,6 +765,10 @@ void AsmGen::gen_call_rt(const Inst& in) {
                 line(std::format("movsd {}, %xmm0", src_op(in.args[0])));
                 line(std::format("movq {}, %rdi", src_op(in.args[1])));
                 break;
+            case RtFn::AsyncioWaitFor:
+                line(std::format("movq {}, %rdi", src_op(in.args[0])));
+                line(std::format("movsd {}, %xmm0", src_op(in.args[1])));
+                break;
             case RtFn::MathFma:
                 line(std::format("movsd {}, %xmm0", src_op(in.args[0])));
                 line(std::format("movsd {}, %xmm1", src_op(in.args[1])));
@@ -788,6 +802,9 @@ void AsmGen::gen_call_rt(const Inst& in) {
             case RtFn::GcShutdown:
             case RtFn::HandlerPush:
             case RtFn::AsyncioFutureNew:
+            case RtFn::EventNew:
+            case RtFn::LockNew:
+            case RtFn::QueueNew:
             case RtFn::ExcAccept:
             case RtFn::ExcAcceptValue:
             case RtFn::ExcDone:

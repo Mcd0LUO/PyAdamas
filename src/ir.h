@@ -80,7 +80,7 @@ inline const char* cmp_name(CmpKind k) {
 
 // 运行时库函数。名字固定，后端按枚举直接生成调用，
 // 不经过符号查找，也不允许用户代码直接引用。
-enum class RtFn : uint8_t {
+enum class RtFn : uint16_t {
     ListNew,     // (i64 cap) -> list*
     ListAppend,  // (list*, i64) -> void
     ListGet,     // (list*, i64) -> i64
@@ -268,6 +268,20 @@ enum class RtFn : uint8_t {
     AsyncioTaskException, // (task*) -> str*|None
     AsyncioTaskCancelled, // (task*) -> bool
     AsyncioWaitFd,     // (i64 fd, i64 write) -> awaitable*
+    AsyncioWaitFor,    // (awaitable*, f64 secs) -> awaitable*
+    EventNew,          // () -> event*
+    EventSet,          // (event*) -> void
+    EventIsSet,        // (event*) -> bool
+    EventWait,         // (event*) -> future*
+    LockNew,           // () -> lock*
+    LockAcquire,       // (lock*) -> future*
+    LockRelease,       // (lock*) -> void
+    LockLocked,        // (lock*) -> bool
+    QueueNew,          // () -> queue*
+    QueuePut,          // (queue*, i64) -> void
+    QueueGet,          // (queue*) -> future*
+    QueueQsize,        // (queue*) -> int
+    QueueEmpty,        // (queue*) -> bool
 };
 
 inline const char* rt_name(RtFn f) {
@@ -515,6 +529,20 @@ inline const char* rt_name(RtFn f) {
         case RtFn::AsyncioTaskException: return "py23_asyncio_task_exception";
         case RtFn::AsyncioTaskCancelled: return "py23_asyncio_task_cancelled";
         case RtFn::AsyncioWaitFd: return "py23_asyncio_wait_fd";
+        case RtFn::AsyncioWaitFor: return "py23_asyncio_wait_for";
+        case RtFn::EventNew: return "py23_event_new";
+        case RtFn::EventSet: return "py23_event_set";
+        case RtFn::EventIsSet: return "py23_event_is_set";
+        case RtFn::EventWait: return "py23_event_wait";
+        case RtFn::LockNew: return "py23_lock_new";
+        case RtFn::LockAcquire: return "py23_lock_acquire";
+        case RtFn::LockRelease: return "py23_lock_release";
+        case RtFn::LockLocked: return "py23_lock_locked";
+        case RtFn::QueueNew: return "py23_queue_new";
+        case RtFn::QueuePut: return "py23_queue_put";
+        case RtFn::QueueGet: return "py23_queue_get";
+        case RtFn::QueueQsize: return "py23_queue_qsize";
+        case RtFn::QueueEmpty: return "py23_queue_empty";
     }
     return "?";
 }
@@ -808,6 +836,9 @@ inline bool ir_is_heap(const TypePtr& t) {
         case TyKind::Task:
         case TyKind::AsyncGenerator:
         case TyKind::Future:
+        case TyKind::AsyncEvent:
+        case TyKind::AsyncLock:
+        case TyKind::AsyncQueue:
         case TyKind::Exception:  // 异常值：堆对象，args 列表归它所有
         case TyKind::Complex:
         case TyKind::File:
@@ -836,6 +867,9 @@ inline bool ir_is_ref(const TypePtr& t) {
         case TyKind::Task:
         case TyKind::AsyncGenerator:
         case TyKind::Future:
+        case TyKind::AsyncEvent:
+        case TyKind::AsyncLock:
+        case TyKind::AsyncQueue:
         case TyKind::Exception:
         case TyKind::Complex:
         case TyKind::File:
