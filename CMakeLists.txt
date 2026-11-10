@@ -27,6 +27,8 @@ set(PY23_SOURCES
   src/lower.cpp
   src/lower_stmt.cpp
   src/lower_exc.cpp
+  src/lower_import.cpp
+  src/lower_match.cpp
   src/lower_expr.cpp
   src/lower_comp.cpp
   src/lower_call.cpp
