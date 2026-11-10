@@ -342,6 +342,21 @@ VReg Lowerer::expr(Expr& e) {
                     std::format("'exception' object has no attribute '{}'", a.attr));
                 return const_none();
             }
+            if (ot && ot->kind == TyKind::File) {
+                VReg fv = expr(*a.value);
+                if (opt) fv = guard_not_none(fv, std::format("attribute '{}'", a.attr));
+                if (a.attr == "closed")
+                    return call_runtime(RtFn::FileClosed, t_bool(), {fv});
+                if (a.attr == "name" || a.attr == "mode") {
+                    VReg s = call_runtime(a.attr == "name" ? RtFn::FileName : RtFn::FileMode,
+                                          t_str(), {fv});
+                    push_temp(s);
+                    return s;
+                }
+                err(e.line, e.col,
+                    std::format("'file' object has no attribute '{}'", a.attr));
+                return const_none();
+            }
             if (ot && ot->kind == TyKind::Class && ot->cls) {
                 if (const PropertyInfo* p = ot->cls->property(a.attr)) {
                     ++side_effect_seq_;  // getter 可能改动容器
@@ -1426,6 +1441,10 @@ VReg Lowerer::lower_joined(JoinedStr& j) {
 // 按签名重排实参：位置实参、关键字实参、缺省值、形参类型的数值转换。
 // info 为空（签名未知）时按源码顺序直传，关键字参数直接报错。
 void Lowerer::print_value(VReg v, TypePtr ty, int line, int col) {
+    if (print_file_slot_ >= 0) {
+        print_value_to_file(v, ty, line, col);
+        return;
+    }
     if (!ty) ty = t_unknown();
     switch (ty->kind) {
         case TyKind::None: call_void(RtFn::PrintNone, {}); break;
@@ -1491,6 +1510,61 @@ void Lowerer::print_value(VReg v, TypePtr ty, int line, int col) {
             (void)col;
             call_void(RtFn::PrintI64, {v});
             break;
+    }
+}
+
+// print(..., file=f)：值先按 Print 的类型规则转成字符串，再写到文件。
+void Lowerer::print_value_to_file(VReg v, TypePtr ty, int line, int col) {
+    if (!ty) ty = t_unknown();
+    VReg f = load_slot(print_file_slot_, t_file());
+    switch (ty->kind) {
+        case TyKind::Dict:
+            call_void(RtFn::FileWrite, {f, const_str("<dict object>")});
+            return;
+        case TyKind::Set:
+            call_void(RtFn::FileWrite, {f, const_str("<set object>")});
+            return;
+        case TyKind::Class: {
+            std::string name = ty->cls ? ty->cls->name : "object";
+            call_void(RtFn::FileWrite, {f, const_str("<" + name + " object>")});
+            return;
+        }
+        case TyKind::Optional: {
+            TypePtr inner = ty->sub.empty() ? t_unknown() : ty->sub[0];
+            int some = new_block("print.opt.some");
+            int none = new_block("print.opt.none");
+            int end = new_block("print.opt.end");
+            Inst br;
+            br.op = IrOp::Branch;
+            br.a = v;
+            br.target = some;
+            br.target2 = none;
+            emit(std::move(br));
+            switch_to(none);
+            call_void(RtFn::FileWrite, {load_slot(print_file_slot_, t_file()),
+                                        const_str("None")});
+            {
+                Inst j;
+                j.op = IrOp::Jump;
+                j.target = end;
+                emit(std::move(j));
+            }
+            switch_to(some);
+            print_value_to_file(v, inner, line, col);
+            {
+                Inst j;
+                j.op = IrOp::Jump;
+                j.target = end;
+                emit(std::move(j));
+            }
+            switch_to(end);
+            return;
+        }
+        default: {
+            VReg s = convert_to(v, ty, t_str());
+            call_void(RtFn::FileWrite, {load_slot(print_file_slot_, t_file()), s});
+            return;
+        }
     }
 }
 

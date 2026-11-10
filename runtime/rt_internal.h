@@ -343,11 +343,24 @@ int64_t py23_str_method(Py23Str* s, int64_t op, int64_t a0, int64_t a1, int64_t 
 
 /* 文件对象（布局只在 rt_obj.c 里定义） */
 typedef struct Py23File Py23File;
-Py23File* py23_file_open(Py23Str* path, Py23Str* mode);
+Py23File* py23_file_open(Py23Str* path, int64_t fd, Py23Str* mode, int64_t buffering,
+                         int64_t newline, int64_t closefd);
 Py23Str* py23_file_read(Py23File* f, int64_t n);
-Py23Str* py23_file_readline(Py23File* f);
-Py23List* py23_file_readlines(Py23File* f);
+Py23Str* py23_file_readline(Py23File* f, int64_t size);
+Py23List* py23_file_readlines(Py23File* f, int64_t hint);
 int64_t py23_file_write(Py23File* f, Py23Str* s);
+void py23_file_writelines(Py23File* f, Py23List* lines);
+int64_t py23_file_seek(Py23File* f, int64_t off, int64_t whence);
+int64_t py23_file_tell(Py23File* f);
+int64_t py23_file_truncate(Py23File* f, int64_t size);
+int64_t py23_file_fileno(Py23File* f);
+int64_t py23_file_isatty(Py23File* f);
+int64_t py23_file_readable(Py23File* f);
+int64_t py23_file_writable(Py23File* f);
+int64_t py23_file_seekable(Py23File* f);
+int64_t py23_file_closed(Py23File* f);
+Py23Str* py23_file_name(Py23File* f);
+Py23Str* py23_file_mode(Py23File* f);
 void py23_file_close(Py23File* f);
 void py23_file_flush(Py23File* f);
 Py23Str* py23_input(Py23Str* prompt);

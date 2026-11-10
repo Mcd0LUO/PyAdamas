@@ -100,11 +100,23 @@ enum class RtFn : uint8_t {
     RoundF64,    // (f64 x, i64 ndigits) -> f64
     RoundI64,    // (i64 v, i64 ndigits) -> i64
     StrMethod,   // (str* self, i64 op, i64 a0, i64 a1, i64 a2) -> i64
-    FileOpen,    // (str* path, str* mode|0) -> file*
+    FileOpen,    // (str* path|0, i64 fd, str* mode|0, i64 buffering, i64 newline, i64 closefd) -> file*
     FileRead,    // (file*, i64 n) -> str*   n < 0 读全部
-    FileReadLine,// (file*) -> str*           EOF 返回空串
-    FileReadLines,// (file*) -> list*
+    FileReadLine,// (file*, i64 size) -> str*  size < 0 读一行；EOF 返回空串
+    FileReadLines,// (file*, i64 hint) -> list*
     FileWrite,   // (file*, str*) -> i64
+    FileWritelines, // (file*, list*) -> void
+    FileSeek,    // (file*, i64 off, i64 whence) -> i64
+    FileTell,    // (file*) -> i64
+    FileTruncate,// (file*, i64 size) -> i64
+    FileFileno,  // (file*) -> i64
+    FileIsatty,  // (file*) -> i64
+    FileReadable,// (file*) -> i64
+    FileWritable,// (file*) -> i64
+    FileSeekable,// (file*) -> i64
+    FileClosed,  // (file*) -> i64
+    FileName,    // (file*) -> str*
+    FileMode,    // (file*) -> str*
     FileClose,   // (file*) -> void
     FileFlush,   // (file*) -> void
     Input,       // (str* prompt|0) -> str*
@@ -277,6 +289,18 @@ inline const char* rt_name(RtFn f) {
         case RtFn::FileReadLine: return "py23_file_readline";
         case RtFn::FileReadLines: return "py23_file_readlines";
         case RtFn::FileWrite: return "py23_file_write";
+        case RtFn::FileWritelines: return "py23_file_writelines";
+        case RtFn::FileSeek: return "py23_file_seek";
+        case RtFn::FileTell: return "py23_file_tell";
+        case RtFn::FileTruncate: return "py23_file_truncate";
+        case RtFn::FileFileno: return "py23_file_fileno";
+        case RtFn::FileIsatty: return "py23_file_isatty";
+        case RtFn::FileReadable: return "py23_file_readable";
+        case RtFn::FileWritable: return "py23_file_writable";
+        case RtFn::FileSeekable: return "py23_file_seekable";
+        case RtFn::FileClosed: return "py23_file_closed";
+        case RtFn::FileName: return "py23_file_name";
+        case RtFn::FileMode: return "py23_file_mode";
         case RtFn::FileClose: return "py23_file_close";
         case RtFn::FileFlush: return "py23_file_flush";
         case RtFn::Input: return "py23_input";

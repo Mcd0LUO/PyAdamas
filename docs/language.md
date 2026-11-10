@@ -525,13 +525,24 @@ class Connection:
 
 ### 文件
 
-`open(path[, mode])` 返回字节流文件对象：`read([n])`（无参读全部）、
-`readline()`（EOF 返回空串）、`readlines()`、`write(str)`（返回写入的
-字节数）、`flush()`、`close()`。打开失败抛 `OSError`，关闭后读写抛
-`ValueError`。接受 `encoding=` / `errors=` 兼容参数：字符串是字节串，
-读写本身就是原始字节，所以 `encoding="utf-8"/"utf8"/"ascii"` 是恒等变换，
-其它编码在类型检查阶段明确报错。没有 `seek`/`tell`/`closed` 属性，也不
-支持 `for line in f`（可用 `readlines()`）。`print(..., file=f)` 尚未支持。
+`open(file, mode='r', buffering=-1, encoding=None, errors=None, newline=None,
+closefd=True)` 返回字节流文件对象，位置/关键字参数按 CPython 的名字绑定：
+`file` 是路径字符串或文件描述符；`mode` 校验 `r/w/a/x` 与 `+`/`b`/`t`
+的组合；`buffering` 的 0/1/>1 分别映射无缓冲/行缓冲/全缓冲（文本模式不允许
+0）；`encoding` 只接受 `utf-8`/`utf8`/`ascii` 字面量（字节串模型下是恒等
+变换），其它编码在类型检查阶段报错；`errors` 接受并忽略；`newline` 支持
+`None`（读时通用换行：`\r\n` 和 `\r` 折成 `\n`）、`""`（不转换）、`"\n"`、
+`"\r"`、`"\r\n"`（后两者在写时把 `\n` 换成对应形式）；`closefd` 只对 fd
+生效；`opener=` 明确不支持。
+方法：`read([n])` / `readline([size])` / `readlines([hint])` / `write(str)`
+/ `writelines(list[str])` / `seek(offset[, whence])` / `tell()` /
+`truncate([size])` / `fileno()` / `isatty()` / `readable()` / `writable()` /
+`seekable()` / `flush()` / `close()`；属性 `closed` / `name` / `mode`。
+`with open(...) as f:` 在正常、异常、`return`、`break`/`continue` 路径都会
+关闭文件；`for line in f:` 按行迭代，`list(f)` / `sorted(f)` /
+`enumerate(f)` / `zip(f)` 走 readlines 语义；`print(..., file=f)` 和
+`print(..., file=f, flush=True)` 可把输出重定向到文件。
+打开失败抛 `OSError`，关闭后读写抛 `ValueError`。
 
 ### print
 

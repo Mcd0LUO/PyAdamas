@@ -57,7 +57,7 @@ py23 不追求兼容 CPython：语义是按静态类型的需要重新定的。�
 
 **语法层就拒**（`check` 报错）：`bytes` 字面量、超出 int64 的整数、Python 2 遗留写法、方法缺 `self`、字段赋值类型不符。
 
-**能解析、能过类型检查，但 `build` 报错**：通过 unknown 函数值的 `*` / `**` 展开、`*` 位于固定形参之前且不是定长 tuple、非异常类名当异常用、`finally` 体内跳出 finally 的 `return`/`break`/`continue`、跨模块继承、类装饰器、`@classmethod`、自定义方法装饰器、`print(file=)`、把类名当值用、函数内定义类、导入类模式的字段子模式、unknown 值上的数值/list/dict/tuple/set 内置类型模式、类体字段默认值里的 lambda，以及生成器的 `yield`/`yield from` 位于 `finally`/`except` 体内（协程的 `await` 同样）、异步生成器表达式、嵌在其它表达式里的异步推导式。
+**能解析、能过类型检查，但 `build` 报错**：通过 unknown 函数值的 `*` / `**` 展开、`*` 位于固定形参之前且不是定长 tuple、非异常类名当异常用、`finally` 体内跳出 finally 的 `return`/`break`/`continue`、跨模块继承、类装饰器、`@classmethod`、自定义方法装饰器、把类名当值用、函数内定义类、导入类模式的字段子模式、unknown 值上的数值/list/dict/tuple/set 内置类型模式、类体字段默认值里的 lambda，以及生成器的 `yield`/`yield from` 位于 `finally`/`except` 体内（协程的 `await` 同样）、异步生成器表达式、嵌在其它表达式里的异步推导式。
 
 清楚这个分层很重要：`py23 check` 尽量当通用 Python 语法/类型检查器用，检查器放宽的边界都记在 [CHANGELOG 0.6.1](../CHANGELOG.md)；`py23 build` 才是「能不能编译」的判据。
 

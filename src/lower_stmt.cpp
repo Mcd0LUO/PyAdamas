@@ -324,6 +324,10 @@ void Lowerer::lower_for(For& f) {
             return;
         }
     }
+    if (TypePtr it = tc_.type_of(f.iter.get()); it && it->kind == TyKind::File) {
+        lower_for_file(f);
+        return;
+    }
     lower_for_seq(f);
 }
 
@@ -760,6 +764,91 @@ void Lowerer::lower_with(With& w) {
         return;
     }
     lower_with_item(w, 0);
+}
+
+// for line in f：按行读，EOF 结束。continue 跳到下一行，break 到 end；
+// 每轮的行临时值在下一轮开头统一清理。
+void Lowerer::lower_for_file(For& f) {
+    TypePtr ft = t_file();
+    VReg file = expr(*f.iter);
+    int ms = new_temp_slot(ft);
+    store_slot(ms, file);
+
+    int check = new_block("for.file.check");
+    int body = new_block("for.file.body");
+    int end = new_block("for.end");
+    int orelse = f.orelse.empty() ? end : new_block("for.else");
+
+    int loop_mark_block = -1;
+    size_t loop_mark_pos = 0;
+    VReg loop_mark = rc_mark_at(loop_mark_block, loop_mark_pos);
+    auto clean = [&]() { rc_cleanup(loop_mark); };
+    size_t pushes_before_loop = st_->rc_pushes;
+
+    Inst j;
+    j.op = IrOp::Jump;
+    j.target = check;
+    emit(std::move(j));
+
+    switch_to(check);
+    clean();
+    Inst rd;
+    rd.op = IrOp::CallRt;
+    rd.imm = static_cast<int64_t>(RtFn::FileReadLine);
+    rd.args = {load_slot(ms, ft), const_int(-1)};
+    rd.ty = t_str();
+    VReg line = def(t_str(), std::move(rd));
+    push_temp(line);
+    Inst ln;
+    ln.op = IrOp::Len;
+    ln.a = line;
+    VReg n = def(t_int(), std::move(ln));
+    Inst c0;
+    c0.op = IrOp::Cmp;
+    c0.cop = CmpKind::Eq;
+    c0.a = n;
+    c0.b = const_int(0);
+    VReg empty = def(t_bool(), std::move(c0));
+    Inst br;
+    br.op = IrOp::Branch;
+    br.a = empty;
+    br.target = orelse;
+    br.target2 = body;
+    emit(std::move(br));
+
+    switch_to(body);
+    st_->loops.push_back({end, check});
+    st_->loop_cleanup_depth.push_back(st_->cleanups.size());
+    assign_to(*f.target, line, t_str());
+    stmts(f.body);
+    st_->loops.pop_back();
+    st_->loop_cleanup_depth.pop_back();
+    if (!terminated()) {
+        Inst jb;
+        jb.op = IrOp::Jump;
+        jb.target = check;
+        emit(std::move(jb));
+    }
+
+    switch_to(orelse);
+    clean();
+    if (!f.orelse.empty()) {
+        stmts(f.orelse);
+        if (!terminated()) {
+            Inst je;
+            je.op = IrOp::Jump;
+            je.target = end;
+            emit(std::move(je));
+        }
+    }
+    switch_to(end);
+    clean();
+    if (st_->rc_pushes == pushes_before_loop) {
+        erase_cleanup(check, loop_mark);
+        erase_cleanup(orelse, loop_mark);
+        erase_cleanup(end, loop_mark);
+        erase_mark(loop_mark_block, loop_mark_pos, loop_mark);
+    }
 }
 
 void Lowerer::lower_with_item(With& w, size_t idx) {

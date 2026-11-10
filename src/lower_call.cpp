@@ -439,6 +439,12 @@ VReg Lowerer::seq_as_list(Expr* e, TypePtr& elem_out) {
         case TyKind::Tuple:
             elem_out = xt->sub.empty() ? t_unknown() : xt->sub[0];
             return x;
+        case TyKind::File: {
+            elem_out = t_str();
+            VReg l = call_runtime(RtFn::FileReadLines, mk_list(t_str()), {x, const_int(-1)});
+            push_temp(l);
+            return l;
+        }
         default:
             return x;
     }
@@ -489,24 +495,92 @@ VReg Lowerer::lower_builtin_call(const std::string& name, Call& c) {
     }
 
     if (name == "open") {
-        if (c.args.empty() || c.args.size() > 2) {
-            err(c.line, c.col, "open() takes 1 or 2 arguments");
+        static const char* kParams[] = {"file",      "mode",    "buffering", "encoding",
+                                        "errors",    "newline", "closefd",   "opener"};
+        constexpr size_t kNP = 8;
+        if (c.args.size() > kNP) {
+            err(c.line, c.col, "open() takes at most 8 arguments");
             return const_none();
         }
-        // encoding/errors 只是兼容参数（字节串模型下是恒等变换），
-        // 值仍要求值一次以保留副作用。
-        for (auto& kw : c.keywords) {
-            if (kw.arg.empty())
-                err(kw.value->line, kw.value->col, "'**' is not supported in open()");
-            else
-                expr(*kw.value);
+        std::vector<VReg> bound(kNP, kNoReg);
+        std::vector<Expr*> bexpr(kNP, nullptr);
+        // 求值顺序按源码：位置实参先，关键字按出现顺序。
+        for (size_t i = 0; i < c.args.size(); ++i) {
+            bound[i] = expr(*c.args[i]);
+            bexpr[i] = c.args[i].get();
         }
-        VReg path = expr(*c.args[0]);
-        VReg mode = c.args.size() == 2 ? expr(*c.args[1]) : kNoReg;
+        for (auto& kw : c.keywords) {
+            if (kw.arg.empty()) {
+                err(kw.value->line, kw.value->col, "open() does not take '**kwargs'");
+                continue;
+            }
+            int idx = -1;
+            for (int p = 0; p < static_cast<int>(kNP); ++p)
+                if (kw.arg == kParams[p]) idx = p;
+            VReg v = expr(*kw.value);
+            if (idx < 0) {
+                err(kw.value->line, kw.value->col,
+                    std::format("open() got an unexpected keyword argument '{}'", kw.arg));
+                continue;
+            }
+            if (bound[static_cast<size_t>(idx)] != kNoReg) {
+                err(kw.value->line, kw.value->col,
+                    std::format("open() got multiple values for argument '{}'", kw.arg));
+                continue;
+            }
+            bound[static_cast<size_t>(idx)] = v;
+            bexpr[static_cast<size_t>(idx)] = kw.value.get();
+        }
+        if (bound[0] == kNoReg) {
+            err(c.line, c.col, "open() missing required argument 'file'");
+            return const_none();
+        }
+        if (bound[7] != kNoReg) {
+            err(c.line, c.col, "open() opener= is not supported by the code generator");
+            return const_none();
+        }
+        TypePtr ft = tc_.type_of(bexpr[0]);
+        if (!ft || (ft->kind != TyKind::Str && ft->kind != TyKind::Int &&
+                    ft->kind != TyKind::Bool)) {
+            err(c.line, c.col, "open() file must be a statically known path or file descriptor");
+            return const_none();
+        }
+        bool is_fd = ft->kind == TyKind::Int || ft->kind == TyKind::Bool;
+        VReg mode = bound[1] == kNoReg ? const_int(0) : bound[1];
+        VReg buffering = bound[2] == kNoReg
+                             ? const_int(-1)
+                             : coerce(bound[2], tc_.type_of(bexpr[2]), t_int());
+        // newline: None→0(通用换行), ""→1, "\n"→2, "\r"→3, "\r\n"→4
+        int64_t nl = 0;
+        if (bexpr[5]) {
+            const Constant* cc =
+                bexpr[5]->kind == ExprKind::Constant ? static_cast<const Constant*>(bexpr[5])
+                                                     : nullptr;
+            if (cc && cc->ck == Constant::CK::None) {
+                nl = 0;
+            } else if (cc && cc->ck == Constant::CK::Str) {
+                if (cc->s.empty()) nl = 1;
+                else if (cc->s == "\n") nl = 2;
+                else if (cc->s == "\r") nl = 3;
+                else if (cc->s == "\r\n") nl = 4;
+                else {
+                    err(bexpr[5]->line, bexpr[5]->col,
+                        "open() newline must be None, '', '\\n', '\\r' or '\\r\\n'");
+                    nl = 1;
+                }
+            } else {
+                err(bexpr[5]->line, bexpr[5]->col,
+                    "open() newline must be a literal (None, '', '\\n', '\\r' or '\\r\\n')");
+            }
+        }
+        VReg closefd = bound[6] == kNoReg
+                           ? const_int(1)
+                           : coerce(bound[6], tc_.type_of(bexpr[6]), t_int());
         Inst in;
         in.op = IrOp::CallRt;
         in.imm = static_cast<int64_t>(RtFn::FileOpen);
-        in.args = {path, mode == kNoReg ? const_int(0) : mode};
+        in.args = {is_fd ? const_int(0) : bound[0], is_fd ? bound[0] : const_int(-1), mode,
+                   buffering, const_int(nl), closefd};
         in.ty = t_file();
         VReg f = def(t_file(), std::move(in));
         push_temp(f);
@@ -829,7 +903,7 @@ VReg Lowerer::lower_builtin_call(const std::string& name, Call& c) {
         TypePtr xt = tc_.type_of(c.args[0].get());
         if (!xt || (xt->kind != TyKind::List && xt->kind != TyKind::Tuple &&
                     xt->kind != TyKind::Str && xt->kind != TyKind::Dict &&
-                    xt->kind != TyKind::Set)) {
+                    xt->kind != TyKind::Set && xt->kind != TyKind::File)) {
             err(c.args[0]->line, c.args[0]->col,
                 std::format("{}() cannot iterate over '{}'", name, type_name(xt)));
             return const_none();
@@ -897,7 +971,7 @@ VReg Lowerer::lower_builtin_call(const std::string& name, Call& c) {
         TypePtr xt = tc_.type_of(c.args[0].get());
         if (!xt || (xt->kind != TyKind::List && xt->kind != TyKind::Tuple &&
                     xt->kind != TyKind::Str && xt->kind != TyKind::Dict &&
-                    xt->kind != TyKind::Set)) {
+                    xt->kind != TyKind::Set && xt->kind != TyKind::File)) {
             err(c.args[0]->line, c.args[0]->col,
                 std::format("set() cannot iterate over '{}'", type_name(xt)));
             return const_none();
@@ -922,7 +996,7 @@ VReg Lowerer::lower_builtin_call(const std::string& name, Call& c) {
         TypePtr xt = tc_.type_of(c.args[0].get());
         if (!xt || (xt->kind != TyKind::List && xt->kind != TyKind::Tuple &&
                     xt->kind != TyKind::Str && xt->kind != TyKind::Dict &&
-                    xt->kind != TyKind::Set)) {
+                    xt->kind != TyKind::Set && xt->kind != TyKind::File)) {
             err(c.args[0]->line, c.args[0]->col,
                 std::format("{}() cannot iterate over '{}'", name, type_name(xt)));
             return const_none();
@@ -951,7 +1025,7 @@ VReg Lowerer::lower_builtin_call(const std::string& name, Call& c) {
         TypePtr xt = tc_.type_of(c.args[0].get());
         if (!xt || (xt->kind != TyKind::List && xt->kind != TyKind::Tuple &&
                     xt->kind != TyKind::Str && xt->kind != TyKind::Dict &&
-                    xt->kind != TyKind::Set)) {
+                    xt->kind != TyKind::Set && xt->kind != TyKind::File)) {
             err(c.args[0]->line, c.args[0]->col,
                 std::format("enumerate() cannot iterate over '{}'", type_name(xt)));
             return const_none();
@@ -1515,20 +1589,22 @@ VReg Lowerer::lower_print(Call& c) {
     // sep / end 是字符串值，直接交给 PrintStr 原样写出，不再经过格式化。
     Keyword* kw_sep = nullptr;
     Keyword* kw_end = nullptr;
+    Keyword* kw_file = nullptr;
+    Keyword* kw_flush = nullptr;
     for (auto& kw : c.keywords) {
         if (kw.arg.empty()) {
             err(kw.value->line, kw.value->col, "print() does not take '**kwargs'");
             continue;
         }
+        if (kw.arg == "file") {
+            kw_file = &kw;
+            continue;
+        }
+        if (kw.arg == "flush") {
+            kw_flush = &kw;
+            continue;
+        }
         if (kw.arg != "sep" && kw.arg != "end") {
-            if (kw.arg == "file" || kw.arg == "flush") {
-                // 语法和类型都合法，只是这里没有重定向输出流的机制。
-                // 前端放行，到这里才拒，免得 check 把真实代码误杀。
-                err(kw.value->line, kw.value->col,
-                    std::format("print() '{}' is not supported by the code generator yet",
-                                kw.arg));
-                continue;
-            }
             err(kw.value->line, kw.value->col,
                 std::format("print() got an unexpected keyword argument '{}'", kw.arg));
             continue;
@@ -1541,6 +1617,22 @@ VReg Lowerer::lower_print(Call& c) {
         }
         (kw.arg == "sep" ? kw_sep : kw_end) = &kw;
     }
+
+    // file=：求值一次落槽，之后的输出都写到它上面。
+    int file_slot = -1;
+    if (kw_file) {
+        TypePtr ft = tc_.type_of(kw_file->value.get());
+        if (!ft || ft->kind != TyKind::File) {
+            err(kw_file->value->line, kw_file->value->col,
+                "print() file must be an open file object");
+        } else {
+            VReg fv = expr(*kw_file->value);
+            file_slot = new_temp_slot(t_file());
+            store_slot(file_slot, fv);
+        }
+    }
+    int saved_file_slot = print_file_slot_;
+    print_file_slot_ = file_slot;
 
     // sep 在参数前求值一次并落槽；end 在参数都输出完才求值。
     int sep_slot = -1;
@@ -1562,7 +1654,13 @@ VReg Lowerer::lower_print(Call& c) {
         br.target2 = need;
         emit(std::move(br));
         switch_to(need);
-        if (kw_sep) {
+        if (file_slot >= 0) {
+            VReg f = load_slot(file_slot, t_file());
+            if (kw_sep)
+                call_void(RtFn::FileWrite, {f, load_slot(sep_slot, t_str())});
+            else
+                call_void(RtFn::FileWrite, {f, const_str(" ")});
+        } else if (kw_sep) {
             call_void(RtFn::PrintStr, {load_slot(sep_slot, t_str())});
         } else {
             call_void(RtFn::PrintSep, {});
@@ -1664,8 +1762,28 @@ VReg Lowerer::lower_print(Call& c) {
         print_value(v, at, arg->line, arg->col);
         after_item();
     }
-    if (kw_end) call_void(RtFn::PrintStr, {expr(*kw_end->value)});
-    else call_void(RtFn::PrintEnd, {});
+    if (file_slot >= 0) {
+        VReg f = load_slot(file_slot, t_file());
+        if (kw_end) {
+            call_void(RtFn::FileWrite, {f, expr(*kw_end->value)});
+        } else {
+            call_void(RtFn::FileWrite, {f, const_str("\n")});
+        }
+        if (kw_flush) {
+            expr(*kw_flush->value);  // 求值保留副作用；按字面量决定是否 flush
+            bool skip = false;
+            if (kw_flush->value->kind == ExprKind::Constant) {
+                const auto& cc = static_cast<const Constant&>(*kw_flush->value);
+                if (cc.ck == Constant::CK::Bool && !cc.b) skip = true;
+            }
+            if (!skip) call_void(RtFn::FileFlush, {f});
+        }
+    } else if (kw_end) {
+        call_void(RtFn::PrintStr, {expr(*kw_end->value)});
+    } else {
+        call_void(RtFn::PrintEnd, {});
+    }
+    print_file_slot_ = saved_file_slot;
     return const_none();
 }
 
@@ -2266,29 +2384,36 @@ VReg Lowerer::lower_method_call(Attribute& at, Call& c) {
                 std::format("file.{}() does not take keyword arguments", at.attr));
             return const_none();
         }
+        auto int_arg = [&](size_t i, int64_t def) -> VReg {
+            if (i >= c.args.size()) return const_int(def);
+            VReg v = expr(*c.args[i]);
+            return coerce(v, tc_.type_of(c.args[i].get()), t_int());
+        };
         if (at.attr == "read") {
             if (c.args.size() > 1) {
                 err(c.line, c.col, "file.read() takes at most one argument");
                 return const_none();
             }
-            VReg n = c.args.empty()
-                         ? const_int(-1)
-                         : coerce(expr(*c.args[0]), tc_.type_of(c.args[0].get()), t_int());
-            VReg s = call_runtime(RtFn::FileRead, t_str(), {recv, n});
+            VReg s = call_runtime(RtFn::FileRead, t_str(), {recv, int_arg(0, -1)});
             push_temp(s);
             return s;
         }
-        if (at.attr == "readline" || at.attr == "readlines") {
-            if (!c.args.empty()) {
-                err(c.line, c.col, std::format("file.{}() takes no arguments", at.attr));
+        if (at.attr == "readline") {
+            if (c.args.size() > 1) {
+                err(c.line, c.col, "file.readline() takes at most one argument");
                 return const_none();
             }
-            if (at.attr == "readline") {
-                VReg s = call_runtime(RtFn::FileReadLine, t_str(), {recv});
-                push_temp(s);
-                return s;
+            VReg s = call_runtime(RtFn::FileReadLine, t_str(), {recv, int_arg(0, -1)});
+            push_temp(s);
+            return s;
+        }
+        if (at.attr == "readlines") {
+            if (c.args.size() > 1) {
+                err(c.line, c.col, "file.readlines() takes at most one argument");
+                return const_none();
             }
-            VReg l = call_runtime(RtFn::FileReadLines, mk_list(t_str()), {recv});
+            VReg l = call_runtime(RtFn::FileReadLines, mk_list(t_str()),
+                                  {recv, int_arg(0, -1)});
             push_temp(l);
             return l;
         }
@@ -2304,6 +2429,57 @@ VReg Lowerer::lower_method_call(Attribute& at, Call& c) {
                 return const_int(0);
             }
             return call_runtime(RtFn::FileWrite, t_int(), {recv, v});
+        }
+        if (at.attr == "writelines") {
+            if (c.args.size() != 1) {
+                err(c.line, c.col, "file.writelines() takes exactly one argument");
+                return const_none();
+            }
+            TypePtr lt = tc_.type_of(c.args[0].get());
+            if (!lt || (lt->kind != TyKind::List && lt->kind != TyKind::Tuple)) {
+                err(c.args[0]->line, c.args[0]->col,
+                    "file.writelines() expects a list of strings");
+                return const_none();
+            }
+            VReg l = expr(*c.args[0]);
+            call_void(RtFn::FileWritelines, {recv, l});
+            return const_none();
+        }
+        if (at.attr == "seek") {
+            if (c.args.empty() || c.args.size() > 2) {
+                err(c.line, c.col, "file.seek() takes 1 or 2 arguments");
+                return const_none();
+            }
+            VReg off = int_arg(0, 0);
+            VReg wh = int_arg(1, 0);
+            return call_runtime(RtFn::FileSeek, t_int(), {recv, off, wh});
+        }
+        if (at.attr == "tell" || at.attr == "fileno") {
+            if (!c.args.empty()) {
+                err(c.line, c.col, std::format("file.{}() takes no arguments", at.attr));
+                return const_none();
+            }
+            return call_runtime(at.attr == "tell" ? RtFn::FileTell : RtFn::FileFileno,
+                                t_int(), {recv});
+        }
+        if (at.attr == "truncate") {
+            if (c.args.size() > 1) {
+                err(c.line, c.col, "file.truncate() takes at most one argument");
+                return const_none();
+            }
+            return call_runtime(RtFn::FileTruncate, t_int(), {recv, int_arg(0, -1)});
+        }
+        if (at.attr == "isatty" || at.attr == "readable" || at.attr == "writable" ||
+            at.attr == "seekable") {
+            if (!c.args.empty()) {
+                err(c.line, c.col, std::format("file.{}() takes no arguments", at.attr));
+                return const_none();
+            }
+            RtFn fn = at.attr == "isatty"     ? RtFn::FileIsatty
+                      : at.attr == "readable" ? RtFn::FileReadable
+                      : at.attr == "writable" ? RtFn::FileWritable
+                                              : RtFn::FileSeekable;
+            return call_runtime(fn, t_bool(), {recv});
         }
         if (at.attr == "close") {
             if (!c.args.empty()) {

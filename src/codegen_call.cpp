@@ -497,12 +497,28 @@ void AsmGen::gen_call_rt(const Inst& in) {
             case RtFn::StrToI64:
             case RtFn::IntToBase:
             case RtFn::RoundI64:
+            case RtFn::FileOpen:
+                line(std::format("movq {}, %rdi", src_op(in.args[0])));
+                line(std::format("movq {}, %rsi", src_op(in.args[1])));
+                line(std::format("movq {}, %rdx", src_op(in.args[2])));
+                line(std::format("movq {}, %rcx", src_op(in.args[3])));
+                line(std::format("movq {}, %r8", src_op(in.args[4])));
+                line(std::format("movq {}, %r9", src_op(in.args[5])));
+                break;
+            case RtFn::FileSeek:
+                line(std::format("movq {}, %rdi", src_op(in.args[0])));
+                line(std::format("movq {}, %rsi", src_op(in.args[1])));
+                line(std::format("movq {}, %rdx", src_op(in.args[2])));
+                break;
             case RtFn::ListSort:
             case RtFn::SortedList:
             case RtFn::Zip2List:
-            case RtFn::FileOpen:
             case RtFn::FileRead:
             case RtFn::FileWrite:
+            case RtFn::FileWritelines:
+            case RtFn::FileReadLine:
+            case RtFn::FileReadLines:
+            case RtFn::FileTruncate:
                 line(std::format("movq {}, %rdi", src_op(in.args[0])));
                 line(std::format("movq {}, %rsi", src_op(in.args[1])));
                 break;
@@ -579,10 +595,17 @@ void AsmGen::gen_call_rt(const Inst& in) {
             case RtFn::EnumerateList:
             case RtFn::ListReverse:
             case RtFn::IntBitLength:
-            case RtFn::FileReadLine:
-            case RtFn::FileReadLines:
             case RtFn::FileClose:
             case RtFn::FileFlush:
+            case RtFn::FileTell:
+            case RtFn::FileFileno:
+            case RtFn::FileIsatty:
+            case RtFn::FileReadable:
+            case RtFn::FileWritable:
+            case RtFn::FileSeekable:
+            case RtFn::FileClosed:
+            case RtFn::FileName:
+            case RtFn::FileMode:
             case RtFn::Input:
             case RtFn::HandlerLeave:
             case RtFn::HandlerDiscard:

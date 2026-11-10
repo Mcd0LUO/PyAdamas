@@ -1,6 +1,8 @@
 // rt_obj.c —— 字符串/列表/字典/切片/对象/输出/math
 #include "rt_internal.h"
 
+#include <unistd.h>
+
 #if defined(__x86_64__) && defined(__GNUC__)
 #include <immintrin.h>
 #endif
@@ -2054,9 +2056,22 @@ Py23Str* py23_repr_str(Py23Str* v) {
 
 /* ── 文件对象 ─────────────────────────────────────────────────── */
 
+/* newline 参数（与 Python 对应）。 */
+enum { PY23_NL_UNIVERSAL = 0, PY23_NL_NONE = 1, PY23_NL_LF = 2, PY23_NL_CR = 3,
+       PY23_NL_CRLF = 4 };
+
 struct Py23File {
     FILE* fp;
+    int64_t fd;
     int64_t closed;
+    int64_t closefd;
+    int64_t binary;
+    int64_t readable;
+    int64_t writable;
+    int64_t newline;
+    char* vbuf;    /* buffering > 1 时自己分配的全缓冲 */
+    Py23Str* name; /* 拥有 */
+    Py23Str* mode; /* 拥有，规范化后的 Python 风格 mode */
 };
 
 static void file_destroy(void* p) {
@@ -2065,6 +2080,9 @@ static void file_destroy(void* p) {
         fclose(f->fp);
         f->fp = NULL;
     }
+    free(f->vbuf);
+    if (f->name) py23_rc_dec(f->name);
+    if (f->mode) py23_rc_dec(f->mode);
 }
 
 static char* file_cstr(Py23Str* s) {
@@ -2075,17 +2093,100 @@ static char* file_cstr(Py23Str* s) {
     return p;
 }
 
-Py23File* py23_file_open(Py23Str* path, Py23Str* mode) {
-    char* p = file_cstr(path);
-    char* m = mode ? file_cstr(mode) : NULL;
-    FILE* fp = fopen(p, m ? m : "r");
-    free(p);
-    free(m);
-    if (!fp) py23_raise_c("OSError", "cannot open file");
+Py23File* py23_file_open(Py23Str* path, int64_t fd, Py23Str* mode, int64_t buffering,
+                         int64_t newline, int64_t closefd) {
+    char base = 0;
+    int plus = 0, bin = 0, text = 0;
+    const char* mp = mode ? mode->data : "r";
+    int64_t mlen = mode ? mode->len : 1;
+    for (int64_t i = 0; i < mlen; ++i) {
+        char c = mp[i];
+        if (c == 'r' || c == 'w' || c == 'a' || c == 'x') {
+            if (base)
+                py23_raise_c("ValueError", "invalid mode: exactly one of r/w/a/x expected");
+            base = c;
+        } else if (c == '+') {
+            plus = 1;
+        } else if (c == 'b') {
+            bin = 1;
+        } else if (c == 't') {
+            text = 1;
+        } else {
+            py23_raise_c("ValueError", "invalid open() mode");
+        }
+    }
+    if (!base) py23_raise_c("ValueError", "invalid open() mode");
+    if (bin && text) py23_raise_c("ValueError", "can't have text and binary mode at once");
+    if (buffering == 0 && !bin)
+        py23_raise_c("ValueError", "can't have unbuffered text I/O");
+
+    char cmode[8];
+    int cn = 0;
+    cmode[cn++] = base;
+    if (plus) cmode[cn++] = '+';
+    if (bin) cmode[cn++] = 'b';
+    cmode[cn] = 0;
+
+    FILE* fp = NULL;
+    int64_t fdnum = fd;
+    if (fd >= 0) {
+        int fdc = (int)fd;
+        if (!closefd) {
+            fdc = dup(fdc);
+            if (fdc < 0) py23_raise_c("OSError", "bad file descriptor");
+        }
+        fdnum = fdc;
+        fp = fdopen(fdc, cmode);
+        if (!fp) py23_raise_c("OSError", "cannot open file descriptor");
+    } else {
+        char* p = file_cstr(path);
+        if (base == 'x') {
+            char xmode[10];
+            int xn = 0;
+            xmode[xn++] = base;
+            xmode[xn++] = 'x'; /* glibc 支持 C11 的独占创建 */
+            if (plus) xmode[xn++] = '+';
+            if (bin) xmode[xn++] = 'b';
+            xmode[xn] = 0;
+            fp = fopen(p, xmode);
+        } else {
+            fp = fopen(p, cmode);
+        }
+        free(p);
+        if (!fp) py23_raise_c("OSError", "cannot open file");
+        fdnum = fileno(fp);
+    }
+
     Py23File* f =
         (Py23File*)rc_alloc((int64_t)sizeof(Py23File), file_destroy, NULL, PY23_RC_OBJ);
     f->fp = fp;
+    f->fd = fdnum;
     f->closed = 0;
+    f->closefd = closefd;
+    f->binary = bin;
+    f->readable = base == 'r' || plus;
+    f->writable = base != 'r' || plus;
+    f->newline = bin ? PY23_NL_NONE : (newline < 0 || newline > 4 ? 0 : newline);
+    f->vbuf = NULL;
+    f->name = path;
+    if (f->name) py23_rc_inc(f->name);
+    {
+        char nb[4];
+        int nn = 0;
+        nb[nn++] = base;
+        if (plus) nb[nn++] = '+';
+        if (bin) nb[nn++] = 'b';
+        f->mode = str_new(nb, nn);
+    }
+    if (buffering == 0) {
+        setvbuf(fp, NULL, _IONBF, 0);
+    } else if (buffering == 1) {
+        setvbuf(fp, NULL, _IOLBF, 0);
+    } else if (buffering > 1) {
+        f->vbuf = (char*)malloc((size_t)buffering);
+        if (!f->vbuf) panic_c("out of memory");
+        setvbuf(fp, f->vbuf, _IOFBF, (size_t)buffering);
+    }
     return f;
 }
 
@@ -2093,6 +2194,24 @@ static FILE* file_check(Py23File* f) {
     if (!f || !f->fp || f->closed)
         py23_raise_c("ValueError", "I/O operation on closed file");
     return f->fp;
+}
+
+static int file_translate_read(Py23File* f) {
+    return !f->binary && f->newline == PY23_NL_UNIVERSAL;
+}
+
+/* 通用换行：\r\n 与单独 \r 都折成 \n。 */
+static void file_universal_newlines(char* buf, int64_t* lenp) {
+    int64_t n = *lenp, j = 0;
+    for (int64_t i = 0; i < n; ++i) {
+        if (buf[i] == '\r') {
+            buf[j++] = '\n';
+            if (i + 1 < n && buf[i + 1] == '\n') ++i;
+        } else {
+            buf[j++] = buf[i];
+        }
+    }
+    *lenp = j;
 }
 
 Py23Str* py23_file_read(Py23File* f, int64_t n) {
@@ -2118,17 +2237,18 @@ Py23Str* py23_file_read(Py23File* f, int64_t n) {
         if (n >= 0) remain -= (int64_t)got;
         if (got < want) break;
     }
+    if (file_translate_read(f)) file_universal_newlines(buf ? buf : chunk, &len);
     Py23Str* s = str_new(buf ? buf : "", len);
     free(buf);
     return s;
 }
 
-Py23Str* py23_file_readline(Py23File* f) {
+Py23Str* py23_file_readline(Py23File* f, int64_t size) {
     FILE* fp = file_check(f);
     char* buf = NULL;
     int64_t len = 0, cap = 0;
     int c;
-    while ((c = fgetc(fp)) != EOF) {
+    while ((size < 0 || len < size) && (c = fgetc(fp)) != EOF) {
         if (len + 1 > cap) {
             int64_t ncap = cap ? cap * 2 : 128;
             char* nb = (char*)realloc(buf, (size_t)ncap);
@@ -2139,25 +2259,102 @@ Py23Str* py23_file_readline(Py23File* f) {
         buf[len++] = (char)c;
         if (c == '\n') break;
     }
+    if (file_translate_read(f)) file_universal_newlines(buf ? buf : (char*)"", &len);
     Py23Str* s = str_new(buf ? buf : "", len);
     free(buf);
     return s;
 }
 
-Py23List* py23_file_readlines(Py23File* f) {
+Py23List* py23_file_readlines(Py23File* f, int64_t hint) {
     Py23List* out = py23_list_new(4, 1);
+    int64_t total = 0;
     for (;;) {
-        Py23Str* line = py23_file_readline(f);
+        Py23Str* line = py23_file_readline(f, -1);
         if (line->len == 0) break;
         py23_rc_inc(line);
         py23_list_append(out, (int64_t)line);
+        total += line->len;
+        if (hint > 0 && total >= hint) break;
+    }
+    return out;
+}
+
+/* 写侧换行翻译：newline="\r" / "\r\n" 时把 \n 换掉。 */
+static Py23Str* file_translate_write(Py23File* f, Py23Str* s) {
+    if (f->binary || (f->newline != PY23_NL_CR && f->newline != PY23_NL_CRLF)) return s;
+    if (f->newline == PY23_NL_CR) {
+        Py23Str* out = str_new(s->data, s->len);
+        for (int64_t i = 0; i < out->len; ++i)
+            if (((char*)out->data)[i] == '\n') ((char*)out->data)[i] = '\r';
+        return out;
+    }
+    int64_t extra = 0;
+    for (int64_t i = 0; i < s->len; ++i)
+        if (s->data[i] == '\n') ++extra;
+    Py23Str* out = str_alloc(s->len + extra);
+    char* p = (char*)out->data;
+    int64_t j = 0;
+    for (int64_t i = 0; i < s->len; ++i) {
+        if (s->data[i] == '\n') {
+            p[j++] = '\r';
+            p[j++] = '\n';
+        } else {
+            p[j++] = s->data[i];
+        }
     }
     return out;
 }
 
 int64_t py23_file_write(Py23File* f, Py23Str* s) {
     FILE* fp = file_check(f);
-    return (int64_t)fwrite(s->data, 1, (size_t)s->len, fp);
+    Py23Str* t = file_translate_write(f, s);
+    int64_t n = (int64_t)fwrite(t->data, 1, (size_t)t->len, fp);
+    if (t != s) py23_rc_dec(t);
+    return n;
+}
+
+void py23_file_writelines(Py23File* f, Py23List* lines) {
+    for (int64_t i = 0; i < lines->len; ++i)
+        py23_file_write(f, (Py23Str*)lines->data[i]);
+}
+
+int64_t py23_file_seek(Py23File* f, int64_t off, int64_t whence) {
+    FILE* fp = file_check(f);
+    int w = whence == 1 ? SEEK_CUR : whence == 2 ? SEEK_END : SEEK_SET;
+    if (fseek(fp, (long)off, w) != 0) py23_raise_c("OSError", "seek failed");
+    return (int64_t)ftell(fp);
+}
+
+int64_t py23_file_tell(Py23File* f) { return (int64_t)ftell(file_check(f)); }
+
+int64_t py23_file_truncate(Py23File* f, int64_t size) {
+    FILE* fp = file_check(f);
+    fflush(fp);
+    if (size < 0) size = (int64_t)ftell(fp);
+    if (ftruncate(fileno(fp), (off_t)size) != 0)
+        py23_raise_c("OSError", "truncate failed");
+    return size;
+}
+
+int64_t py23_file_fileno(Py23File* f) { return (int64_t)fileno(file_check(f)); }
+int64_t py23_file_isatty(Py23File* f) { return isatty(fileno(file_check(f))) ? 1 : 0; }
+int64_t py23_file_readable(Py23File* f) { return f ? f->readable : 0; }
+int64_t py23_file_writable(Py23File* f) { return f ? f->writable : 0; }
+int64_t py23_file_seekable(Py23File* f) {
+    (void)f;
+    return 1;
+}
+int64_t py23_file_closed(Py23File* f) { return f ? f->closed : 1; }
+
+Py23Str* py23_file_name(Py23File* f) {
+    if (!f) return str_new("", 0);
+    if (f->name) return str_new(f->name->data, f->name->len);
+    return py23_str_from_i64(f->fd);
+}
+
+Py23Str* py23_file_mode(Py23File* f) {
+    if (!f || !f->mode) return str_new("", 0);
+    return str_new(f->mode->data, f->mode->len);
 }
 
 void py23_file_close(Py23File* f) {
@@ -2167,10 +2364,7 @@ void py23_file_close(Py23File* f) {
     f->closed = 1;
 }
 
-void py23_file_flush(Py23File* f) {
-    FILE* fp = file_check(f);
-    fflush(fp);
-}
+void py23_file_flush(Py23File* f) { fflush(file_check(f)); }
 
 Py23Str* py23_input(Py23Str* prompt) {
     if (prompt && prompt->len > 0) {

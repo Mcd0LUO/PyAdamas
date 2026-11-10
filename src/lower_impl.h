@@ -829,6 +829,7 @@ private:
     void lower_for(For& f);
     void lower_for_range(For& f, Call& c);
     void lower_for_seq(For& f);
+    void lower_for_file(For& f);
     void lower_with(With& w);
     void lower_with_item(With& w, size_t idx);
     void emit_cleanup_exits(size_t down_to);
@@ -993,6 +994,10 @@ private:
     }
 
     void print_value(VReg v, TypePtr ty, int line, int col);
+    // print(..., file=f)：值先转成字符串再 FileWrite；print_file_slot_ >= 0
+    // 时由 print_value 分派到这里。
+    void print_value_to_file(VReg v, TypePtr ty, int line, int col);
+    int print_file_slot_ = -1;
 
     // ── 预扫描 ──────────────────────────────────────────────────
 

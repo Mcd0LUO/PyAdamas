@@ -4,6 +4,41 @@
 
 早期阶段没有逐条留痕，按阶段归纳；0.4 之后逐条记录。
 
+## [0.46] - 2026-11-10
+
+文件 I/O 细化：`open()` 参数全覆盖、文件方法/属性、按行迭代、`print(file=)`。
+
+### 新增
+
+- `open(file, mode='r', buffering=-1, encoding=None, errors=None, newline=None,
+  closefd=True)`：位置/关键字按 CPython 的名字绑定；`file` 支持路径或 fd
+  （`closefd=False` 时 dup）；`mode` 校验 `r/w/a/x` 与 `+`/`b`/`t` 组合；
+  `buffering` 0/1/>1 映射 `setvbuf`（文本模式不允许 0）；`encoding` 只接受
+  utf-8/ascii 字面量；`newline` 支持 None/''/`\n`/`\r`/`\r\n`（None 读时
+  通用换行，`\r`/`\r\n` 写时翻译）；`opener=` 明确拒绝。
+- 文件方法：`read([n])` / `readline([size])` / `readlines([hint])` /
+  `write` / `writelines` / `seek` / `tell` / `truncate` / `fileno` /
+  `isatty` / `readable` / `writable` / `seekable` / `flush` / `close`；
+  属性 `closed` / `name` / `mode`。
+- `for line in f:` 按行迭代；`list(f)` / `sorted(f)` / `enumerate(f)` /
+  `zip(f)` 走 readlines 语义。
+- `print(..., file=f[, flush=True])`：值按 print 的类型规则转成字符串后
+  写入文件，sep/end 同样生效。
+
+### 验证
+
+- `ctest --preset dev/release` 全绿；O0/O1 全量 52 个运行用例通过；
+  810 程序差分零失败
+- 临时探针（不入库）：mode/buffering/newline/fd/closefd、文件方法、属性、
+  按行迭代、`print(file=)` 与 CPython 逐字节一致（O0/O1/O2）
+
+### 已知限制
+
+- `encoding` 仅 utf-8/ascii（字节串模型）；`opener=` 不支持
+- `seek`/`tell` 是原始字节位置；`read(n)` 的通用换行转换按单次读取缓冲区
+  进行，跨块 `\r\n` 边界可能不折叠
+- `sys.stdin`/`sys.stdout` 对象仍未建模（`input()` 直接读 stdin）
+
 ## [0.45] - 2026-11-10
 
 `open()` 的 `encoding` / `errors` 兼容参数。

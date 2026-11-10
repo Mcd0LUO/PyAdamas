@@ -468,9 +468,6 @@ TypePtr TypeChecker::builtin_call(const std::string& n, Call& c) {
         };
 
         if (n == "print") {
-            // print 的关键字：sep / end 参与检查，file / flush 合法但代码生成还不做，
-            // 那是 build 阶段的事，前端不能替它拒——真实代码里 print(..., file=sys.stderr)
-            // 到处都是，前端报错只会变成误杀。
             for (size_t i = 0; i < c.keywords.size(); ++i) {
                 auto& kw = c.keywords[i];
                 if (kw.arg.empty()) {
@@ -483,9 +480,22 @@ TypePtr TypeChecker::builtin_call(const std::string& n, Call& c) {
                         std::format("print() got an unexpected keyword argument '{}'", kw.arg));
                     continue;
                 }
-                if (kw.arg != "sep" && kw.arg != "end") continue;
                 TypePtr kt = kwt[i];
-                if (!is_unknown(kt) && kt->kind != TyKind::Str)
+                if (kw.arg == "file") {
+                    if (!is_unknown(kt) && (!kt || kt->kind != TyKind::File))
+                        err(kw.value->line, kw.value->col,
+                            std::format("print() file must be an open file object, got '{}'",
+                                        type_name(kt)));
+                    continue;
+                }
+                if (kw.arg == "flush") {
+                    if (!is_unknown(kt) && kt && kt->kind != TyKind::Bool &&
+                        kt->kind != TyKind::Int)
+                        err(kw.value->line, kw.value->col,
+                            "print() flush must be a bool");
+                    continue;
+                }
+                if (!is_unknown(kt) && (!kt || kt->kind != TyKind::Str))
                     err(kw.value->line, kw.value->col,
                         std::format("print() '{}' must be a string, got '{}'", kw.arg,
                                     type_name(kt)));
@@ -610,43 +620,93 @@ TypePtr TypeChecker::builtin_call(const std::string& n, Call& c) {
             return t_complex();
         }
         if (n == "open") {
-            if (a.empty() || a.size() > 2)
-                err(c.line, c.col, std::format("open() takes 1 or 2 arguments, got {}", a.size()));
-            for (auto& t : a)
-                if (!is_unknown(t) && (!t || t->kind != TyKind::Str))
-                    err(c.line, c.col,
-                        std::format("open() expects string arguments, got '{}'", type_name(t)));
-            // py23 字符串是字节串：encoding 只接受能静态确认的 utf-8/ascii
-            // 别名（对字节读写是恒等变换），其它编码明确拒绝。
+            static const char* kParams[] = {"file",      "mode",    "buffering", "encoding",
+                                            "errors",    "newline", "closefd",   "opener"};
+            constexpr size_t kNP = 8;
+            std::vector<TypePtr> bound(kNP, nullptr);
+            std::vector<Expr*> bexpr(kNP, nullptr);
+            if (a.size() > kNP) {
+                err(c.line, c.col, "open() takes at most 8 arguments");
+                return t_file();
+            }
+            for (size_t i = 0; i < a.size(); ++i) {
+                bound[i] = a[i];
+                bexpr[i] = c.args[i].get();
+            }
             for (size_t i = 0; i < c.keywords.size(); ++i) {
                 const std::string& k = c.keywords[i].arg;
                 Expr* ve = c.keywords[i].value.get();
-                if (k == "errors") continue;
-                if (k != "encoding") {
+                if (k.empty()) {
+                    err(ve->line, ve->col, "open() does not take '**kwargs'");
+                    continue;
+                }
+                int idx = -1;
+                for (int p = 0; p < static_cast<int>(kNP); ++p)
+                    if (k == kParams[p]) idx = p;
+                if (idx < 0) {
                     err(ve->line, ve->col,
                         std::format("open() got an unexpected keyword argument '{}'", k));
                     continue;
                 }
-                std::string val;
-                bool lit = false;
-                if (ve->kind == ExprKind::Constant) {
-                    const auto& cc = static_cast<const Constant&>(*ve);
-                    if (cc.ck == Constant::CK::Str) {
-                        val = cc.s;
-                        lit = true;
-                    }
-                }
-                if (!lit) {
+                if (bound[static_cast<size_t>(idx)]) {
                     err(ve->line, ve->col,
-                        "open() encoding must be a string literal (strings are byte strings)");
+                        std::format("open() got multiple values for argument '{}'", k));
                     continue;
                 }
-                for (char& ch : val)
-                    if (ch >= 'A' && ch <= 'Z') ch = static_cast<char>(ch - 'A' + 'a');
-                if (val != "utf-8" && val != "utf8" && val != "ascii")
-                    err(ve->line, ve->col,
-                        std::format("open() encoding '{}' is not supported: ", val) +
-                            "py23 strings are byte strings (utf-8/ascii only)");
+                bound[static_cast<size_t>(idx)] = kwt[i];
+                bexpr[static_cast<size_t>(idx)] = ve;
+            }
+            if (!bound[0]) err(c.line, c.col, "open() missing required argument 'file'");
+            auto str_or_none = [](const TypePtr& t) {
+                return !t || is_unknown(t) || t->kind == TyKind::Str || t->kind == TyKind::None;
+            };
+            auto int_like = [](const TypePtr& t) {
+                return !t || is_unknown(t) || t->kind == TyKind::Int || t->kind == TyKind::Bool;
+            };
+            if (bound[0] && !is_unknown(bound[0]) && bound[0]->kind != TyKind::Str &&
+                bound[0]->kind != TyKind::Int && bound[0]->kind != TyKind::Bool)
+                err(c.line, c.col,
+                    std::format("open() file must be a path string or file descriptor, got '{}'",
+                                type_name(bound[0])));
+            if (!str_or_none(bound[1])) err(c.line, c.col, "open() mode must be a string");
+            if (!int_like(bound[2]))
+                err(c.line, c.col, "open() buffering must be an integer");
+            if (!str_or_none(bound[3]))
+                err(c.line, c.col, "open() encoding must be a string or None");
+            if (!str_or_none(bound[4]))
+                err(c.line, c.col, "open() errors must be a string or None");
+            if (!str_or_none(bound[5]))
+                err(c.line, c.col, "open() newline must be a string or None");
+            if (!int_like(bound[6])) err(c.line, c.col, "open() closefd must be a bool");
+            if (bound[7]) {
+                err(c.line, c.col, "open() opener= is not supported by the code generator");
+                return t_file();
+            }
+            // py23 字符串是字节串：encoding 只接受能静态确认的 utf-8/ascii
+            // 字面量（对字节读写是恒等变换），其它编码明确拒绝。
+            if (bexpr[3]) {
+                std::string val;
+                bool ok_lit = false;
+                if (bexpr[3]->kind == ExprKind::Constant) {
+                    const auto& cc = static_cast<const Constant&>(*bexpr[3]);
+                    if (cc.ck == Constant::CK::Str) {
+                        val = cc.s;
+                        ok_lit = true;
+                    } else if (cc.ck == Constant::CK::None) {
+                        ok_lit = true;
+                    }
+                }
+                if (!ok_lit) {
+                    err(bexpr[3]->line, bexpr[3]->col,
+                        "open() encoding must be a string literal (strings are byte strings)");
+                } else if (!val.empty()) {
+                    for (char& ch : val)
+                        if (ch >= 'A' && ch <= 'Z') ch = static_cast<char>(ch - 'A' + 'a');
+                    if (val != "utf-8" && val != "utf8" && val != "ascii")
+                        err(bexpr[3]->line, bexpr[3]->col,
+                            std::format("open() encoding '{}' is not supported: ", val) +
+                                "py23 strings are byte strings (utf-8/ascii only)");
+                }
             }
             return t_file();
         }
@@ -734,7 +794,9 @@ bool TypeChecker::has_method(const TypePtr& t, const std::string& m) {
             }
             case TyKind::File: {
                 static const std::unordered_set<std::string> ms = {
-                    "read", "readline", "readlines", "write", "close", "flush",
+                    "read",    "readline", "readlines", "write",    "writelines",
+                    "close",   "flush",    "seek",      "tell",     "truncate",
+                    "fileno",  "isatty",   "readable",  "writable", "seekable",
                     "__enter__", "__exit__",
                 };
                 return ms.count(m) > 0;
@@ -969,7 +1031,7 @@ TypePtr TypeChecker::method_call(TypePtr recv, const std::string& name, Call& c,
                 return t_str();
             }
             if (name == "readlines") {
-                argc(0, 0);
+                argc(0, 1);
                 return mk_list(t_str());
             }
             if (name == "write") {
@@ -977,6 +1039,30 @@ TypePtr TypeChecker::method_call(TypePtr recv, const std::string& name, Call& c,
                 if (!a.empty() && !is_unknown(a[0]) && (!a[0] || a[0]->kind != TyKind::Str))
                     err(c.line, c.col, "write() expects a string argument");
                 return t_int();
+            }
+            if (name == "writelines") {
+                argc(1, 1);
+                if (!a.empty() && !is_unknown(a[0]) &&
+                    (!a[0] || (a[0]->kind != TyKind::List && a[0]->kind != TyKind::Tuple)))
+                    err(c.line, c.col, "writelines() expects a list of strings");
+                return t_none();
+            }
+            if (name == "seek") {
+                argc(1, 2);
+                return t_int();
+            }
+            if (name == "tell" || name == "fileno") {
+                argc(0, 0);
+                return t_int();
+            }
+            if (name == "truncate") {
+                argc(0, 1);
+                return t_int();
+            }
+            if (name == "isatty" || name == "readable" || name == "writable" ||
+                name == "seekable") {
+                argc(0, 0);
+                return t_bool();
             }
             if (name == "close" || name == "flush" || name == "__exit__") {
                 argc(0, name == "__exit__" ? 3 : 0);

@@ -260,6 +260,13 @@ TypePtr TypeChecker::expr(Expr& e) {
                         std::format("'exception' object has no attribute '{}'", a.attr));
                     return t_unknown();
                 }
+                if (ot->kind == TyKind::File) {
+                    if (a.attr == "closed") return t_bool();
+                    if (a.attr == "name" || a.attr == "mode") return t_str();
+                    err(a.line, a.col,
+                        std::format("'file' object has no attribute '{}'", a.attr));
+                    return t_unknown();
+                }
                 // 双下划线属性属于运行时的协议实现，静态上没有方法表
                 if (a.attr.size() > 4 && a.attr.starts_with("__") && a.attr.ends_with("__"))
                     return t_unknown();
@@ -649,6 +656,7 @@ TypePtr TypeChecker::iter_elem(TypePtr it, int line, int col) {
                 return it->sub[0];
             case TyKind::Str: return t_str();
             case TyKind::Dict: return it->sub[0];
+            case TyKind::File: return t_str();  // for line in f
             case TyKind::Tuple: {
                 // 同构元组取元素类型；异构元组取公共上界（合不上就是 unknown）。
                 // 取第一个元素会让 `for x in (1, "a")` 得到 int，属于误判。
