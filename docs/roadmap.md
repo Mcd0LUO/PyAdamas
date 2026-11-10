@@ -25,6 +25,7 @@
 | 验证 | 四类用例（正例 / 反例 / 运行 / 未建模） + 差分测试 + 标准库基线 |
 | 0.6–0.38 | 对象模型、异常值、match、C3 MRO、优化遍/O2、块内寄存器；逐版本记录见 [archive/roadmap-0.6-0.38.md](archive/roadmap-0.6-0.38.md) |
 | 0.39–0.75 | -O0/O1/O2、dunder 第二批、random/os/subprocess、差分 runner 自举、stdlib 批次（string/time/os/itertools/collections/json）、re 模块 v1；详见 [CHANGELOG](../CHANGELOG.md) |
+| 许可证 | Apache-2.0（见 [LICENSE](../LICENSE) / [NOTICE](../NOTICE)） |
 
 ## 当前状态（0.75）
 
@@ -60,7 +61,6 @@
 | 字符串语义 | 字节串（现状）/ UTF-8 码点 | 改码点则 `len` 变成 O(n)，索引要解码；不改则非 ASCII 的 `len` 与 CPython 不一致 |
 | 整数溢出 | 回绕（现状）/ 溢出检查 / 升格 bignum | 检查要每条算术加一条 `jo`；bignum 要一整套运行时 |
 | `print` 求值顺序 | 边算边写（现状）/ 对齐 CPython | 只有副作用可见时才看得出来 |
-| 许可证 | 未定 | 发布前必须定 |
 
 ## 技术债
 

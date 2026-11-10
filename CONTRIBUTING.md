@@ -36,4 +36,4 @@ python3 tests/diff/run_diff.py --seeds 3
 
 ## 许可证
 
-尚未确定。在定下来之前，请把它当作「仅供阅读」的代码，不要直接用于商业项目。
+Apache License 2.0，见 [LICENSE](LICENSE)。提交贡献即表示同意按该许可证分发。
