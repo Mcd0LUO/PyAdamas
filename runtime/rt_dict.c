@@ -267,22 +267,33 @@ Py23List* py23_dict_items(Py23Dict* d) {
 }
 
 /* dict 相等：长度相同，且 a 的每个 (key,val) 在 b 里都能找到同样的 key
-   和等值的 val。顺序无关，和 CPython 一致。val_kind 是值的比较类别。 */
-int64_t py23_dict_eq(Py23Dict* a, Py23Dict* b, int64_t val_kind) {
+   和等值的 val。顺序无关，和 CPython 一致。chain 说明值怎么比。 */
+int64_t chain_dict_eq(Py23Dict* a, Py23Dict* b, const uint8_t* chain, int64_t len,
+                      int64_t level) {
     if (a == b) return 1;
     if (!a || !b) return 0;
     if (a->len != b->len) return 0;
+    int kind = (level < len) ? chain[level] : 'x';
     for (int64_t i = 0; i < a->len; ++i) {
         int64_t k = a->entries[i].key;
         int64_t e = dict_lookup(b, k, dict_hash_key(b, k));
         if (e < 0) return 0;
-        if (!list_value_eq(val_kind, a->entries[i].val, b->entries[e].val)) return 0;
+        if (!chain_elem_eq(kind, a->entries[i].val, b->entries[e].val, chain, len, level))
+            return 0;
     }
     return 1;
 }
 
+int64_t py23_dict_eq(Py23Dict* a, Py23Dict* b, Py23Str* chain) {
+    return chain_dict_eq(a, b, (const uint8_t*)chain->data, chain->len, 0);
+}
+
 /* set 相等：只看键。set 复用 dict 的表（值恒 0），所以按 dict 的键来比。 */
-int64_t py23_set_eq(Py23Dict* a, Py23Dict* b) {
+int64_t chain_set_eq(Py23Dict* a, Py23Dict* b, const uint8_t* chain, int64_t len,
+                     int64_t level) {
+    (void)chain;
+    (void)len;
+    (void)level;
     if (a == b) return 1;
     if (!a || !b) return 0;
     if (a->len != b->len) return 0;
@@ -291,6 +302,10 @@ int64_t py23_set_eq(Py23Dict* a, Py23Dict* b) {
         if (dict_lookup(b, k, dict_hash_key(b, k)) < 0) return 0;
     }
     return 1;
+}
+
+int64_t py23_set_eq(Py23Dict* a, Py23Dict* b) {
+    return chain_set_eq(a, b, 0, 0, 0);
 }
 
 void py23_dict_update(Py23Dict* dst, Py23Dict* src) {

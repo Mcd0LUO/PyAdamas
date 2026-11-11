@@ -20,16 +20,31 @@ print(s != {1, 3})
 x = [1, 2]
 print(x == x)
 
+# 嵌套容器：同构的能逐层比下去
+print([[1]] == [[1]])
+print([[1]] == [[2]])
+print([["a"], ["b"]] == [["a"], ["b"]])
+print({"k": [1]} == {"k": [1]})
+print({"k": [1]} == {"k": [2]})
+print([[1], [2]] == [[1], [2]])
+print([[[1]]] == [[[1]]])
+
 # dict/set 打印真实内容
 print({"a": 1, "b": 2})
 print({1, 2, 3})
 print({"k": [1, 2]})
 print({"k": "v"})
 print({})
-
 # --- expect ---
 # True
 # False
+# False
+# True
+# True
+# False
+# True
+# True
+# True
 # False
 # True
 # True

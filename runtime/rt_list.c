@@ -371,15 +371,50 @@ int64_t py23_list_contains(Py23List* l, int64_t v, int64_t kind) {
     return 0;
 }
 
-/* 逐元素比较两个列表/元组。kind 是元素比较类别（0 int/bool、1 str、
-   2 float、3 按机器字比）。长度不同直接不相等。 */
-int64_t py23_list_eq(Py23List* a, Py23List* b, int64_t kind) {
+/* 元素比较链：编译器按静态类型生成一串字符，每字符说明该层元素怎么比——
+     i = int/bool（机器字）、s = str（按字节）、f = float（IEEE）、
+     x = 其它/未知（机器字）、l = list（递归）、d = dict（递归）、t = set（递归）。
+   链是编译期常量，放在数据段里；嵌套容器就靠它一层一层往下比。 */
+/* level 是「本层元素的层号」：chain[level] 说明本层元素怎么比；
+   元素本身还是容器时，它的元素是下一层，层号 +1。 */
+int chain_elem_eq(int kind, int64_t x, int64_t y, const uint8_t* chain, int64_t len,
+                  int64_t level) {
+    if (kind == 's') return py23_str_eq((Py23Str*)x, (Py23Str*)y) != 0;
+    if (kind == 'f') {
+        double a, b;
+        memcpy(&a, &x, sizeof a);
+        memcpy(&b, &y, sizeof b);
+        return a == b;
+    }
+    if (kind == 'l') {
+        if (level + 1 >= len) return x == y;
+        return chain_list_eq((Py23List*)x, (Py23List*)y, chain, len, level + 1);
+    }
+    if (kind == 'd') {
+        if (level + 1 >= len) return x == y;
+        return chain_dict_eq((Py23Dict*)x, (Py23Dict*)y, chain, len, level + 1);
+    }
+    if (kind == 't') {
+        if (level + 1 >= len) return x == y;
+        return chain_set_eq((Py23Dict*)x, (Py23Dict*)y, chain, len, level + 1);
+    }
+    return x == y;  /* i / x：按机器字比 */
+}
+
+int64_t chain_list_eq(Py23List* a, Py23List* b, const uint8_t* chain, int64_t len,
+                      int64_t level) {
     if (a == b) return 1;
     if (!a || !b) return 0;
     if (a->len != b->len) return 0;
+    int kind = (level < len) ? chain[level] : 'x';
     for (int64_t i = 0; i < a->len; ++i)
-        if (!list_value_eq(kind, a->data[i], b->data[i])) return 0;
+        if (!chain_elem_eq(kind, a->data[i], b->data[i], chain, len, level)) return 0;
     return 1;
+}
+
+/* 逐元素比较两个列表/元组。chain 说明元素怎么比（见上面的说明）。 */
+int64_t py23_list_eq(Py23List* a, Py23List* b, Py23Str* chain) {
+    return chain_list_eq(a, b, (const uint8_t*)chain->data, chain->len, 0);
 }
 
 int64_t py23_list_index(Py23List* l, int64_t v, int64_t kind) {

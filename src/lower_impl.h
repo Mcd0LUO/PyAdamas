@@ -1156,6 +1156,8 @@ private:
     // 容器相等：list/tuple 逐元素比，dict 按键值对（顺序无关），set 按键。
     // 元素类型在编译期已知，所以比较方式也能定下来；不适用时返回 kNoReg。
     VReg lower_container_eq(VReg l, TypePtr lt, VReg r, TypePtr rt);
+    // 容器元素的比较链：每个字符说明该层元素怎么比（i/s/f/x/l/d/t）。
+    void append_elem_chain(TypePtr container, std::string& chain);
     VReg lower_call(Call& c);
     VReg lower_builtin_call(const std::string& name, Call& c);
     VReg lower_minmax(Call& c, bool is_min);

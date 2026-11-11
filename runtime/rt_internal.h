@@ -448,7 +448,9 @@ int own_to_list_kind(int64_t own);
 Py23List* py23_dict_keys(Py23Dict* d);
 Py23List* py23_dict_values(Py23Dict* d);
 Py23List* py23_dict_items(Py23Dict* d);
-int64_t py23_dict_eq(Py23Dict* a, Py23Dict* b, int64_t val_kind);
+int64_t py23_dict_eq(Py23Dict* a, Py23Dict* b, Py23Str* chain);
+int64_t chain_set_eq(Py23Dict* a, Py23Dict* b, const uint8_t* chain, int64_t len,
+                     int64_t depth);
 int64_t py23_set_eq(Py23Dict* a, Py23Dict* b);
 void py23_dict_update(Py23Dict* dst, Py23Dict* src);
 Py23Dict* py23_dict_copy(Py23Dict* src);
@@ -471,8 +473,15 @@ int64_t py23_dict_pop_last(Py23Dict* d);
 void py23_dict_remove(Py23Dict* d, int64_t key, int64_t missing_ok);
 void py23_dict_clear(Py23Dict* d);
 int list_value_eq(int64_t kind, int64_t a, int64_t b);
+// 元素比较链：编译器按静态类型生成，运行时按层递归。见 rt_list.c 的说明。
+int chain_elem_eq(int kind, int64_t x, int64_t y, const uint8_t* chain, int64_t len,
+                  int64_t depth);
+int64_t chain_list_eq(Py23List* a, Py23List* b, const uint8_t* chain, int64_t len,
+                      int64_t depth);
+int64_t chain_dict_eq(Py23Dict* a, Py23Dict* b, const uint8_t* chain, int64_t len,
+                      int64_t depth);
 int64_t py23_list_contains(Py23List* l, int64_t v, int64_t kind);
-int64_t py23_list_eq(Py23List* a, Py23List* b, int64_t kind);
+int64_t py23_list_eq(Py23List* a, Py23List* b, Py23Str* chain);
 int64_t py23_str_contains(Py23Str* hay, Py23Str* needle);
 void slice_bounds(int64_t len, int64_t start, int64_t stop, int64_t step, int64_t* out_start, int64_t* out_stop, int64_t* out_step);
 int64_t slice_total(int64_t start, int64_t stop, int64_t step);

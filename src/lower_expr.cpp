@@ -705,21 +705,57 @@ VReg Lowerer::lower_boolop(BoolOp& b) {
 // 容器的相等：list/tuple 逐元素比，dict 按键值对（顺序无关），set 按键。
 // 元素类型在编译期已知，所以元素怎么比也能定下来（int/str/float/机器字）。
 // 元素本身还是容器时只能按机器字比——再往里一层要编译器展开递归。
+// 容器元素的比较链：每个字符说明该层元素怎么比。编译器按静态类型生成，
+// 运行时按链递归——嵌套容器也能一层一层比下去。
+void Lowerer::append_elem_chain(TypePtr container, std::string& chain) {
+    if (!container) { chain += 'x'; return; }
+    TypePtr et;
+    switch (container->kind) {
+        case TyKind::List:
+        case TyKind::Set:
+            et = container->sub.empty() ? t_unknown() : container->sub[0];
+            break;
+        case TyKind::Tuple: {
+            et = container->sub.empty() ? t_unknown() : container->sub[0];
+            // 定长异构元组的元素类型各不相同，没法用一种方式比
+            if (!container->variadic && container->sub.size() > 1) {
+                int k = key_kind(container->sub[0]);
+                for (size_t i = 1; i < container->sub.size(); ++i)
+                    if (key_kind(container->sub[i]) != k) { et = t_unknown(); break; }
+            }
+            break;
+        }
+        case TyKind::Dict:
+            // dict 比的是值（键由 dict 自己的 key_kind 比）
+            et = container->sub.size() > 1 ? container->sub[1] : t_unknown();
+            break;
+        default:
+            et = t_unknown();
+            break;
+    }
+    if (et && (et->kind == TyKind::List || et->kind == TyKind::Tuple)) {
+        chain += 'l';
+        append_elem_chain(et, chain);
+    } else if (et && et->kind == TyKind::Dict) {
+        chain += 'd';
+        append_elem_chain(et, chain);
+    } else if (et && et->kind == TyKind::Set) {
+        chain += 't';
+        append_elem_chain(et, chain);
+    } else {
+        switch (key_kind(et)) {
+            case 0: chain += 'i'; break;
+            case 1: chain += 's'; break;
+            case 2: chain += 'f'; break;
+            default: chain += 'x'; break;
+        }
+    }
+}
+
 VReg Lowerer::lower_container_eq(VReg l, TypePtr lt, VReg r, TypePtr rt) {
     if (!lt || !rt) return kNoReg;
     auto is_seq = [](TypePtr t) {
         return t->kind == TyKind::List || t->kind == TyKind::Tuple;
-    };
-    // 定长 tuple 的元素类型可能各不相同，只有全同一种才能逐元素比。
-    auto seq_kind = [](TypePtr t) -> int {
-        if (t->sub.empty()) return 3;
-        if (!t->variadic && t->sub.size() > 1) {
-            int k = key_kind(t->sub[0]);
-            for (size_t i = 1; i < t->sub.size(); ++i)
-                if (key_kind(t->sub[i]) != k) return 3;
-            return k;
-        }
-        return key_kind(t->sub[0]);
     };
     if (is_seq(lt) && is_seq(rt)) {
         // list 和 tuple 是不同类型，CPython 里不相等；py23 运行时表示相同，
@@ -727,15 +763,19 @@ VReg Lowerer::lower_container_eq(VReg l, TypePtr lt, VReg r, TypePtr rt) {
         bool l_list = lt->kind == TyKind::List;
         bool r_list = rt->kind == TyKind::List;
         if (l_list != r_list) return const_bool(false);
-        int lk = seq_kind(lt), rk = seq_kind(rt);
-        if (lk != rk) return kNoReg;
-        return call_runtime(RtFn::ListEq, t_bool(), {l, r, const_int(lk)});
+        std::string lc, rc;
+        append_elem_chain(lt, lc);
+        append_elem_chain(rt, rc);
+        // 元素类型不同（list[int] vs list[float] 这种）没法用一条链比，退回指针比较
+        if (lc != rc) return kNoReg;
+        return call_runtime(RtFn::ListEq, t_bool(), {l, r, const_str(lc)});
     }
     if (lt->kind == TyKind::Dict && rt->kind == TyKind::Dict) {
-        TypePtr lv = lt->sub.size() > 1 ? lt->sub[1] : t_unknown();
-        TypePtr rv = rt->sub.size() > 1 ? rt->sub[1] : t_unknown();
-        if (key_kind(lv) != key_kind(rv)) return kNoReg;
-        return call_runtime(RtFn::DictEq, t_bool(), {l, r, const_int(key_kind(lv))});
+        std::string lc, rc;
+        append_elem_chain(lt, lc);
+        append_elem_chain(rt, rc);
+        if (lc != rc) return kNoReg;
+        return call_runtime(RtFn::DictEq, t_bool(), {l, r, const_str(lc)});
     }
     if (lt->kind == TyKind::Set && rt->kind == TyKind::Set) {
         return call_runtime(RtFn::SetEq, t_bool(), {l, r});
