@@ -1,4 +1,9 @@
+#!/usr/bin/env pwsh
 # py23.ps1 - Windows entry point for the py23 compiler.
+#
+# Can be started from cmd/PowerShell (via py23.cmd), or directly from a bash
+# shell (Git Bash) as `./py23.ps1 run x.py` - the shebang above makes bash
+# hand the file to pwsh.
 #
 # py23 itself targets Linux (System V x86-64 ABI + ELF) and lives in WSL2.
 # This script runs it in a throwaway container that mounts:
@@ -25,6 +30,13 @@
 # without a UTF-8 BOM as ANSI/GBK, so non-ASCII text would be mis-decoded.
 
 $ErrorActionPreference = 'Stop'
+
+# When pwsh was started from Git Bash, MSYS would rewrite POSIX-looking
+# arguments of child processes into Windows paths. The container paths below
+# (/w, /work) must survive untouched.
+$env:MSYS_NO_PATHCONV = '1'
+# wsl.exe writes UTF-16 by default, which lands as garbage in a UTF-8 pipe
+$env:WSL_UTF8 = '1'
 
 $Distro  = if ($env:PY23_WSL_DISTRO) { $env:PY23_WSL_DISTRO } else { 'Debian' }
 $Image   = if ($env:PY23_IMAGE)       { $env:PY23_IMAGE }       else { 'py23-env:gcc14' }
