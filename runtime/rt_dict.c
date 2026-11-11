@@ -266,6 +266,33 @@ Py23List* py23_dict_items(Py23Dict* d) {
     return out;
 }
 
+/* dict 相等：长度相同，且 a 的每个 (key,val) 在 b 里都能找到同样的 key
+   和等值的 val。顺序无关，和 CPython 一致。val_kind 是值的比较类别。 */
+int64_t py23_dict_eq(Py23Dict* a, Py23Dict* b, int64_t val_kind) {
+    if (a == b) return 1;
+    if (!a || !b) return 0;
+    if (a->len != b->len) return 0;
+    for (int64_t i = 0; i < a->len; ++i) {
+        int64_t k = a->entries[i].key;
+        int64_t e = dict_lookup(b, k, dict_hash_key(b, k));
+        if (e < 0) return 0;
+        if (!list_value_eq(val_kind, a->entries[i].val, b->entries[e].val)) return 0;
+    }
+    return 1;
+}
+
+/* set 相等：只看键。set 复用 dict 的表（值恒 0），所以按 dict 的键来比。 */
+int64_t py23_set_eq(Py23Dict* a, Py23Dict* b) {
+    if (a == b) return 1;
+    if (!a || !b) return 0;
+    if (a->len != b->len) return 0;
+    for (int64_t i = 0; i < a->len; ++i) {
+        int64_t k = a->entries[i].key;
+        if (dict_lookup(b, k, dict_hash_key(b, k)) < 0) return 0;
+    }
+    return 1;
+}
+
 void py23_dict_update(Py23Dict* dst, Py23Dict* src) {
     if (dst == src) return;
     for (int64_t i = 0; i < src->len; ++i) {

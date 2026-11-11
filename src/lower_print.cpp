@@ -23,8 +23,8 @@ void Lowerer::print_value(VReg v, TypePtr ty, int line, int col) {
             call_void(RtFn::PrintStr, {v});
             call_void(RtFn::PrintStr, {const_str("'>")});
             break;
-        case TyKind::Dict: call_void(RtFn::PrintStr, {const_str("<dict object>")}); break;
-        case TyKind::Set: call_void(RtFn::PrintStr, {const_str("<set object>")}); break;
+        case TyKind::Dict: print_dict(v, ty, false, line, col); break;
+        case TyKind::Set: print_set(v, ty, false, line, col); break;
         case TyKind::Random:
             call_void(RtFn::PrintStr, {const_str("<random.Random object>")});
             break;
@@ -108,12 +108,8 @@ void Lowerer::print_value_to_file(VReg v, TypePtr ty, int line, int col) {
             call_void(RtFn::FileWrite, {f, const_str("'>")});
             return;
         }
-        case TyKind::Dict:
-            call_void(RtFn::FileWrite, {f, const_str("<dict object>")});
-            return;
-        case TyKind::Set:
-            call_void(RtFn::FileWrite, {f, const_str("<set object>")});
-            return;
+        case TyKind::Dict: print_dict(v, ty, true, line, col); return;
+        case TyKind::Set: print_set(v, ty, true, line, col); return;
         case TyKind::Random:
             call_void(RtFn::FileWrite, {f, const_str("<random.Random object>")});
             return;
@@ -170,12 +166,7 @@ void Lowerer::print_value_to_file(VReg v, TypePtr ty, int line, int col) {
 }
 
 void Lowerer::print_seq(VReg v, TypePtr ty, bool tuple, bool to_file, int line, int col) {
-    auto write = [&](const std::string& s) {
-        if (to_file)
-            call_void(RtFn::FileWrite, {load_slot(print_file_slot_, t_file()), const_str(s)});
-        else
-            call_void(RtFn::PrintStr, {const_str(s)});
-    };
+    auto write = [&](const std::string& s) { print_write(s, to_file); };
     write(tuple ? "(" : "[");
 
     // 定长 tuple 的元素类型可以逐个不同（d.items() 返回 (str, int) 这种）。
@@ -219,68 +210,23 @@ void Lowerer::print_seq(VReg v, TypePtr ty, bool tuple, bool to_file, int line, 
     }
 
     TypePtr et = ty->sub.empty() ? t_unknown() : ty->sub[0];
+    print_each(v, et, to_file, [&](VReg ev, VReg) {
+        print_elem(ev, et, to_file, line, col);
+    });
+    write(tuple ? ")" : "]");
+}
 
-    int idx = new_temp_slot(t_int());
-    store_slot(idx, const_int(0));
-    Inst ln;
-    ln.op = IrOp::Len;
-    ln.a = v;
-    VReg n = def(t_int(), std::move(ln));
+// 往 stdout 或 print(..., file=f) 写一段字面量。
+void Lowerer::print_write(const std::string& s, bool to_file) {
+    if (to_file)
+        call_void(RtFn::FileWrite, {load_slot(print_file_slot_, t_file()), const_str(s)});
+    else
+        call_void(RtFn::PrintStr, {const_str(s)});
+}
 
-    int cond = new_block("print.seq.cond");
-    int body = new_block("print.seq.body");
-    int comma = new_block("print.seq.comma");
-    int elem = new_block("print.seq.elem");
-    int end = new_block("print.seq.end");
-
-    Inst j;
-    j.op = IrOp::Jump;
-    j.target = cond;
-    emit(std::move(j));
-
-    switch_to(cond);
-    Inst more;
-    more.op = IrOp::Cmp;
-    more.cop = CmpKind::Lt;
-    more.a = load_slot(idx, t_int());
-    more.b = n;
-    VReg more_v = def(t_bool(), std::move(more));
-    Inst br;
-    br.op = IrOp::Branch;
-    br.a = more_v;
-    br.target = body;
-    br.target2 = end;
-    emit(std::move(br));
-
-    switch_to(body);
-    Inst nz;
-    nz.op = IrOp::Cmp;
-    nz.cop = CmpKind::Gt;
-    nz.a = load_slot(idx, t_int());
-    nz.b = const_int(0);
-    VReg nz_v = def(t_bool(), std::move(nz));
-    Inst need_sep;
-    need_sep.op = IrOp::Branch;
-    need_sep.a = nz_v;
-    need_sep.target = comma;
-    need_sep.target2 = elem;
-    emit(std::move(need_sep));
-
-    switch_to(comma);
-    write(", ");
-    {
-        Inst jj;
-        jj.op = IrOp::Jump;
-        jj.target = elem;
-        emit(std::move(jj));
-    }
-
-    switch_to(elem);
-    Inst get;
-    get.op = IrOp::IndexLoad;
-    get.a = v;
-    get.b = load_slot(idx, t_int());
-    VReg ev = def(et, std::move(get));
+// 容器里的元素按 repr 语义打印（CPython 打印 list/tuple/dict 用元素 repr）：
+// 字符串带引号，类实例走 __repr__，其余按值打印。
+void Lowerer::print_elem(VReg ev, TypePtr et, bool to_file, int line, int col) {
     if (et && et->kind == TyKind::Str) {
         // 容器内部的字符串按 repr 打印（带引号），和 CPython 一致。
         Inst rp;
@@ -305,6 +251,74 @@ void Lowerer::print_seq(VReg v, TypePtr ty, bool tuple, bool to_file, int line, 
     } else {
         print_value(ev, et, line, col);
     }
+}
+
+// 遍历一个列表逐元素打印，元素之间用 ", " 分隔。回调拿到元素和下标。
+void Lowerer::print_each(VReg list, TypePtr et, bool to_file,
+                         const std::function<void(VReg, VReg)>& body) {
+    int idx = new_temp_slot(t_int());
+    store_slot(idx, const_int(0));
+    Inst ln;
+    ln.op = IrOp::Len;
+    ln.a = list;
+    VReg n = def(t_int(), std::move(ln));
+
+    int cond = new_block("print.each.cond");
+    int bodyb = new_block("print.each.body");
+    int comma = new_block("print.each.comma");
+    int elem = new_block("print.each.elem");
+    int end = new_block("print.each.end");
+
+    Inst j;
+    j.op = IrOp::Jump;
+    j.target = cond;
+    emit(std::move(j));
+
+    switch_to(cond);
+    Inst more;
+    more.op = IrOp::Cmp;
+    more.cop = CmpKind::Lt;
+    more.a = load_slot(idx, t_int());
+    more.b = n;
+    VReg more_v = def(t_bool(), std::move(more));
+    Inst br;
+    br.op = IrOp::Branch;
+    br.a = more_v;
+    br.target = bodyb;
+    br.target2 = end;
+    emit(std::move(br));
+
+    switch_to(bodyb);
+    Inst nz;
+    nz.op = IrOp::Cmp;
+    nz.cop = CmpKind::Gt;
+    nz.a = load_slot(idx, t_int());
+    nz.b = const_int(0);
+    VReg nz_v = def(t_bool(), std::move(nz));
+    Inst need_sep;
+    need_sep.op = IrOp::Branch;
+    need_sep.a = nz_v;
+    need_sep.target = comma;
+    need_sep.target2 = elem;
+    emit(std::move(need_sep));
+
+    switch_to(comma);
+    print_write(", ", to_file);
+    {
+        Inst jj;
+        jj.op = IrOp::Jump;
+        jj.target = elem;
+        emit(std::move(jj));
+    }
+
+    switch_to(elem);
+    Inst get;
+    get.op = IrOp::IndexLoad;
+    get.a = list;
+    get.b = load_slot(idx, t_int());
+    VReg ev = def(et, std::move(get));
+    body(ev, load_slot(idx, t_int()));
+
     Inst inc;
     inc.op = IrOp::Bin;
     inc.bop = BinKind::Add;
@@ -319,7 +333,138 @@ void Lowerer::print_seq(VReg v, TypePtr ty, bool tuple, bool to_file, int line, 
     }
 
     switch_to(end);
-    write(tuple ? ")" : "]");
+}
+
+// 空容器打印 empty_text；非空但内容看不清时打印 placeholder。
+void Lowerer::print_empty_or_placeholder(VReg v, const std::string& empty_text,
+                                         const std::string& placeholder, bool to_file) {
+    Inst ln;
+    ln.op = IrOp::Len;
+    ln.a = v;
+    VReg n = def(t_int(), std::move(ln));
+
+    int empty = new_block("print.empty");
+    int nonempty = new_block("print.nonempty");
+    int end = new_block("print.empty.end");
+    Inst c;
+    c.op = IrOp::Cmp;
+    c.cop = CmpKind::Eq;
+    c.a = n;
+    c.b = const_int(0);
+    VReg cv = def(t_bool(), std::move(c));
+    Inst br;
+    br.op = IrOp::Branch;
+    br.a = cv;
+    br.target = empty;
+    br.target2 = nonempty;
+    emit(std::move(br));
+
+    switch_to(empty);
+    print_write(empty_text, to_file);
+    {
+        Inst jj;
+        jj.op = IrOp::Jump;
+        jj.target = end;
+        emit(std::move(jj));
+    }
+
+    switch_to(nonempty);
+    print_write(placeholder, to_file);
+    {
+        Inst jj;
+        jj.op = IrOp::Jump;
+        jj.target = end;
+        emit(std::move(jj));
+    }
+
+    switch_to(end);
+}
+
+// dict 打印：{key: value, ...}。键和值都按 repr 语义（和 CPython 一致）。
+void Lowerer::print_dict(VReg v, TypePtr ty, bool to_file, int line, int col) {
+    if (!ty) ty = t_unknown();
+    TypePtr kt = ty->sub.empty() ? t_unknown() : ty->sub[0];
+    TypePtr vt = ty->sub.size() > 1 ? ty->sub[1] : t_unknown();
+    // 元素类型未知（异构容器）时没法确定怎么打印每个值：运行时又不带类型标签，
+    // 分不清 float 和 int。与其打错，不如保持原来的占位符。空的不受影响。
+    if (kt->kind == TyKind::Unknown || vt->kind == TyKind::Unknown) {
+        print_empty_or_placeholder(v, "{}", "<dict object>", to_file);
+        return;
+    }
+    print_write("{", to_file);
+    VReg keys = call_runtime(RtFn::DictKeys, mk_list(kt), {v});
+    push_temp(keys);
+    VReg vals = call_runtime(RtFn::DictValues, mk_list(vt), {v});
+    push_temp(vals);
+    print_each(keys, kt, to_file, [&](VReg k, VReg i) {
+        print_elem(k, kt, to_file, line, col);
+        print_write(": ", to_file);
+        Inst gv;
+        gv.op = IrOp::IndexLoad;
+        gv.a = vals;
+        gv.b = i;
+        VReg vv = def(vt, std::move(gv));
+        print_elem(vv, vt, to_file, line, col);
+    });
+    print_write("}", to_file);
+}
+
+// set 打印：{elem, ...}。空集打印成 set()——{} 在 Python 里是空字典。
+void Lowerer::print_set(VReg v, TypePtr ty, bool to_file, int line, int col) {
+    if (!ty) ty = t_unknown();
+    TypePtr kt = ty->sub.empty() ? t_unknown() : ty->sub[0];
+    if (kt->kind == TyKind::Unknown) {
+        print_empty_or_placeholder(v, "set()", "<set object>", to_file);
+        return;
+    }
+    VReg keys = call_runtime(RtFn::DictKeys, mk_list(kt), {v});
+    push_temp(keys);
+
+    Inst ln;
+    ln.op = IrOp::Len;
+    ln.a = keys;
+    VReg n = def(t_int(), std::move(ln));
+
+    int empty = new_block("print.set.empty");
+    int nonempty = new_block("print.set.nonempty");
+    int end = new_block("print.set.end");
+    Inst c;
+    c.op = IrOp::Cmp;
+    c.cop = CmpKind::Eq;
+    c.a = n;
+    c.b = const_int(0);
+    VReg cv = def(t_bool(), std::move(c));
+    Inst br;
+    br.op = IrOp::Branch;
+    br.a = cv;
+    br.target = empty;
+    br.target2 = nonempty;
+    emit(std::move(br));
+
+    switch_to(empty);
+    print_write("set()", to_file);
+    {
+        Inst jj;
+        jj.op = IrOp::Jump;
+        jj.target = end;
+        emit(std::move(jj));
+    }
+
+    switch_to(nonempty);
+    print_write("{", to_file);
+    print_each(keys, kt, to_file, [&](VReg k, VReg) {
+        print_elem(k, kt, to_file, line, col);
+    });
+    print_write("}", to_file);
+    {
+        // end 块建在循环块之前，回落会落进 LICM 的 preheader，必须显式跳。
+        Inst jj;
+        jj.op = IrOp::Jump;
+        jj.target = end;
+        emit(std::move(jj));
+    }
+
+    switch_to(end);
 }
 
 VReg Lowerer::lower_print(Call& c) {

@@ -702,6 +702,47 @@ VReg Lowerer::lower_boolop(BoolOp& b) {
     return load_slot(tmp, ty);
 }
 
+// 容器的相等：list/tuple 逐元素比，dict 按键值对（顺序无关），set 按键。
+// 元素类型在编译期已知，所以元素怎么比也能定下来（int/str/float/机器字）。
+// 元素本身还是容器时只能按机器字比——再往里一层要编译器展开递归。
+VReg Lowerer::lower_container_eq(VReg l, TypePtr lt, VReg r, TypePtr rt) {
+    if (!lt || !rt) return kNoReg;
+    auto is_seq = [](TypePtr t) {
+        return t->kind == TyKind::List || t->kind == TyKind::Tuple;
+    };
+    // 定长 tuple 的元素类型可能各不相同，只有全同一种才能逐元素比。
+    auto seq_kind = [](TypePtr t) -> int {
+        if (t->sub.empty()) return 3;
+        if (!t->variadic && t->sub.size() > 1) {
+            int k = key_kind(t->sub[0]);
+            for (size_t i = 1; i < t->sub.size(); ++i)
+                if (key_kind(t->sub[i]) != k) return 3;
+            return k;
+        }
+        return key_kind(t->sub[0]);
+    };
+    if (is_seq(lt) && is_seq(rt)) {
+        // list 和 tuple 是不同类型，CPython 里不相等；py23 运行时表示相同，
+        // 但静态类型分得清，就按静态类型判。
+        bool l_list = lt->kind == TyKind::List;
+        bool r_list = rt->kind == TyKind::List;
+        if (l_list != r_list) return const_bool(false);
+        int lk = seq_kind(lt), rk = seq_kind(rt);
+        if (lk != rk) return kNoReg;
+        return call_runtime(RtFn::ListEq, t_bool(), {l, r, const_int(lk)});
+    }
+    if (lt->kind == TyKind::Dict && rt->kind == TyKind::Dict) {
+        TypePtr lv = lt->sub.size() > 1 ? lt->sub[1] : t_unknown();
+        TypePtr rv = rt->sub.size() > 1 ? rt->sub[1] : t_unknown();
+        if (key_kind(lv) != key_kind(rv)) return kNoReg;
+        return call_runtime(RtFn::DictEq, t_bool(), {l, r, const_int(key_kind(lv))});
+    }
+    if (lt->kind == TyKind::Set && rt->kind == TyKind::Set) {
+        return call_runtime(RtFn::SetEq, t_bool(), {l, r});
+    }
+    return kNoReg;
+}
+
 VReg Lowerer::lower_compare(Compare& c) {
     if (c.ops.size() == 1) {
         CmpOp op0 = c.ops[0];
@@ -748,6 +789,18 @@ VReg Lowerer::lower_compare(Compare& c) {
         if (op == CmpOp::Eq || op == CmpOp::Ne) {
             VReg eqres = lower_dunder_eq(l, lt, r, rt, op == CmpOp::Ne);
             if (eqres != kNoReg) return eqres;
+            // 容器逐元素比较（CPython 语义），取代原来的指针比较。
+            VReg ceq = lower_container_eq(l, lt, r, rt);
+            if (ceq != kNoReg) {
+                if (op == CmpOp::Ne) {
+                    Inst un;
+                    un.op = IrOp::Un;
+                    un.uop = UnKind::Not;
+                    un.a = ceq;
+                    return def(t_bool(), std::move(un));
+                }
+                return ceq;
+            }
         }
         // 大小比较：__lt__/__le__/__gt__/__ge__（含右操作数的镜像版）。
         if (op == CmpOp::Lt || op == CmpOp::Le || op == CmpOp::Gt || op == CmpOp::Ge) {

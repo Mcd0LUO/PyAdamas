@@ -152,11 +152,14 @@ enum class RtFn : uint16_t {
     DictContains, // (dict*, i64 key) -> i64
     DictKeyAt,    // (dict*, i64 index) -> i64
     ListContains, // (list*, i64 value, i64 cmp_kind) -> i64
+    ListEq,       // (list*, list*, i64 cmp_kind) -> i64
     StrContains,  // (str*, str*) -> i64
     DictGetOr,    // (dict*, i64 key, i64 default) -> i64
     DictKeys,     // (dict*) -> list*
     DictValues,   // (dict*) -> list*
     DictItems,    // (dict*) -> list*
+    DictEq,       // (dict*, dict*, i64 val_kind) -> i64
+    SetEq,        // (dict*, dict*) -> i64
     DictUpdate,   // (dict*, dict*) -> void
     DictCopy,     // (dict*) -> dict*  浅拷贝（匹配 **rest）
     IsInstance,   // (obj*, i64 class_id) -> i64
@@ -449,6 +452,9 @@ inline const char* rt_name(RtFn f) {
         case RtFn::DictContains: return "py23_dict_contains";
         case RtFn::DictKeyAt: return "py23_dict_key_at";
         case RtFn::ListContains: return "py23_list_contains";
+        case RtFn::ListEq: return "py23_list_eq";
+        case RtFn::DictEq: return "py23_dict_eq";
+        case RtFn::SetEq: return "py23_set_eq";
         case RtFn::StrContains: return "py23_str_contains";
         case RtFn::DictGetOr: return "py23_dict_get_or";
         case RtFn::DictKeys: return "py23_dict_keys";

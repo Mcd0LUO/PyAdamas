@@ -1153,6 +1153,9 @@ private:
     VReg lower_unary(UnaryOp& u);
     VReg lower_boolop(BoolOp& b);
     VReg lower_compare(Compare& c);
+    // 容器相等：list/tuple 逐元素比，dict 按键值对（顺序无关），set 按键。
+    // 元素类型在编译期已知，所以比较方式也能定下来；不适用时返回 kNoReg。
+    VReg lower_container_eq(VReg l, TypePtr lt, VReg r, TypePtr rt);
     VReg lower_call(Call& c);
     VReg lower_builtin_call(const std::string& name, Call& c);
     VReg lower_minmax(Call& c, bool is_min);
@@ -1227,6 +1230,19 @@ private:
     void print_value_to_file(VReg v, TypePtr ty, int line, int col);
     // 列表/元组：按静态元素类型逐个打印，元素递归走上面的两条路径。
     void print_seq(VReg v, TypePtr ty, bool tuple, bool to_file, int line, int col);
+    // 容器里的元素按 repr 语义打印（CPython 打印容器用元素 repr）。
+    void print_elem(VReg ev, TypePtr et, bool to_file, int line, int col);
+    // 遍历一个列表逐元素打印，元素之间用 ", " 分隔；回调拿到元素和下标。
+    void print_each(VReg list, TypePtr et, bool to_file,
+                    const std::function<void(VReg, VReg)>& body);
+    // dict：{key: value, ...}；set：{elem, ...}。都按 repr 语义。
+    void print_dict(VReg v, TypePtr ty, bool to_file, int line, int col);
+    // 空容器打印 empty_text，非空但内容看不清时打印 placeholder。
+    void print_empty_or_placeholder(VReg v, const std::string& empty_text,
+                                     const std::string& placeholder, bool to_file);
+    void print_set(VReg v, TypePtr ty, bool to_file, int line, int col);
+    // 往 stdout 或 print(..., file=f) 写一段字面量。
+    void print_write(const std::string& s, bool to_file);
     int print_file_slot_ = -1;
 
     // ── 预扫描 ──────────────────────────────────────────────────

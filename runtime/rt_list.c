@@ -371,6 +371,17 @@ int64_t py23_list_contains(Py23List* l, int64_t v, int64_t kind) {
     return 0;
 }
 
+/* 逐元素比较两个列表/元组。kind 是元素比较类别（0 int/bool、1 str、
+   2 float、3 按机器字比）。长度不同直接不相等。 */
+int64_t py23_list_eq(Py23List* a, Py23List* b, int64_t kind) {
+    if (a == b) return 1;
+    if (!a || !b) return 0;
+    if (a->len != b->len) return 0;
+    for (int64_t i = 0; i < a->len; ++i)
+        if (!list_value_eq(kind, a->data[i], b->data[i])) return 0;
+    return 1;
+}
+
 int64_t py23_list_index(Py23List* l, int64_t v, int64_t kind) {
     for (int64_t i = 0; i < l->len; ++i)
         if (list_value_eq(kind, l->data[i], v)) return i;

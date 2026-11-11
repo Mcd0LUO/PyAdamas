@@ -548,6 +548,8 @@ void AsmGen::gen_call_rt(const Inst& in) {
             case RtFn::ListSet:
             case RtFn::DictSet:
             case RtFn::ListContains:
+            case RtFn::ListEq:
+            case RtFn::DictEq:
             case RtFn::DictGetOr:
             case RtFn::DictRemove:
             case RtFn::RangeNew:
@@ -755,6 +757,7 @@ void AsmGen::gen_call_rt(const Inst& in) {
             case RtFn::GenNextOpt:
             case RtFn::GenSend:
             case RtFn::AsyncGenAsend:
+            case RtFn::SetEq:
                 emit2("movq", src_op(in.args[0]), "%rdi");
                 emit2("movq", src_op(in.args[1]), "%rsi");
                 break;

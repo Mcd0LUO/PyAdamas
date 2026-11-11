@@ -55,8 +55,8 @@ py23 不追求兼容 CPython：语义是按静态类型的需要重新定的。�
 | `nonlocal` | 必须显式声明；赋值解析到最近外层函数 | 同 Python | 没有 `nonlocal` 时赋值就是本地变量 |
 | 字典 / 集合 | 开放寻址表，保留插入顺序；key 按静态类型哈希/判等 | dict/set，任意 hashable | 空字典的 unknown key 按机器字比较；没有运行时类型标签，不能混用任意 key |
 | `d[k]` 缺失 | panic `KeyError: key not found` | 抛 `KeyError(key)` | 运行时错误消息不带 key 内容 |
-| `d == e` / `s == t` | 指针比较 | 深比较 | 没有运行时类型标签 |
-| `print(d)` / `print(s)` | `<dict object>` / `<set object>` | 打印内容 | 没有容器 repr |
+| `d == e` / `s == t` | 逐元素比较（dict 与顺序无关） | 深比较 | 元素本身是容器时只比指针；异构元素类型退化成机器字比较 |
+| `print(d)` / `print(s)` | 打印内容（`{'a': 1}` / `{1, 2}`） | 打印内容 | 元素类型未知（异构容器）时仍输出 `<dict object>` / `<set object>` 占位 |
 | dict/set 方法 | `get`/`keys`/`values`/`items`/`update`/`add` 和删除类方法 `pop`/`remove`/`discard`/`clear`/`popitem` 可用 | 完整方法 | `keys()` 等返回 list 而不是视图；删除按 order 重建是 O(n)；`popitem` 固定 LIFO，`set.pop` 固定取最后插入项 |
 | `d.get(k)` 缺失 | panic | 返回 `None` | 静态返回类型不是 Optional；用 `get(k, default)` 避免 |
 | 切片 | str 按字节；list/tuple 返回新容器，语义同 CPython | 同 Python | `step == 0` panic；未知元素类型只做保守 GC |
@@ -82,7 +82,7 @@ py23 不追求兼容 CPython：语义是按静态类型的需要重新定的。�
 |---|---|---|---|
 | 正例 | `ctest --preset dev` 里 `tests/*.py` | 11 个文件 | 前端退回保守 |
 | 反例 | `ctest --preset dev` 里 `tests/fail/*.py` | 35 个文件 | 检查器为了过测而放水 |
-| 运行 | `ctest --preset dev` 里 `tests/run/*.py` | 68 个文件 | 后端烂掉没人知道 |
+| 运行 | `ctest --preset dev` 里 `tests/run/*.py` | 69 个文件 | 后端烂掉没人知道 |
 | 模块 | `ctest --preset dev` 里 `tests/modules/*/` | 9 个目录 | 分模块编译/链接、惰性初始化、缓存失效 |
 | 未建模 | `ctest --preset dev` 里 `tests/unsupported/*.py` | 1 个文件 | 「标了没建模、实际却悄悄编译过去」 |
 | 内存 | 16MB `RLIMIT_AS` 下跑压力程序 | 拼接 / 对象 / 闭包 / 容器 / 切片 / 删除 / 推导式 / 变长实参 / `with` / 装饰器 / 异常展开 / `yield from` / 异步推导式 / 环 / unknown 泄漏 | 引用计数或 GC 漏插桩、重复释放、误回收 |
