@@ -95,6 +95,39 @@
 - `docs/compatibility.md`：「生成器表达式的 range 源会被实体化」改成
   「range 作为值仍然会实体化」，说清剩下的坑是哪一个。
 
+## [0.82.5] - 2026-11-11
+
+给内置函数加了一套逐个对比的性能 bench，顺手挖出三个比 CPython 慢的内置，
+还有一个 `range` 被实体化的坑。
+
+### 新增
+
+- **`bench/`**：逐个内置函数的 py23 / CPython 对比设施。驱动是
+  `bench/run_bench.py`，用例在 `bench/builtins/<序号>_<内置名>.py`（50 个）。
+  驱动会按 CPython 的实测时间校准循环次数、取多次运行的最小值、扣掉进程
+  启动开销，再用 2N 复跑一次检查「循环体有没有被优化掉」，顺带比对两边的
+  标准输出。跑法见 [docs/development.md](docs/development.md#性能-bench)。
+- **`bench/RESULTS.md`**：一次实测快照（机器相关，别当基准线）。
+
+### 已知限制
+
+- **`enumerate` / `sorted` / `zip` 比 CPython 慢**（约 0.7× / 0.8× / 1.0×）：
+  py23 把结果物化成列表（`enumerate` 一次造出整张 `[下标, 值]` 元组表），
+  排序用 `qsort` + 比较函数指针，CPython 用惰性迭代器 + Timsort。
+- **生成器表达式的 range 源会被实体化**：`(x for x in range(10**9))` 在
+  py23 里当场造出 10 亿个元素的列表（CPython 的 range 是惰性的）。脱糖时
+  range 作为值传进合成生成器函数，而 range 作为值使用会实体化成整数列表
+  （`runtime/rt_slice.c` 的 `py23_range_new`）。实测 `range(50000000)`：
+  py23 建生成器要 191ms / 400MB 内存，CPython 7ms；把地址空间限制在
+  200MB 时 py23 直接 OOM。`for x in range(N)` 不受影响（for 循环走专门的
+  计数循环），源是列表的生成器表达式也不受影响。
+
+### 文档
+
+- `docs/compatibility.md`：性能章节新增「内置函数逐个对比」和「生成器表达式
+  的 range 源会被实体化」两小节。
+- `docs/development.md`：测试章节新增「性能 bench」小节。
+
 ## [0.82.4] - 2026-11-11
 
 `sorted(xs, key=f)` 之前被**静默忽略**——按 key 排和不按 key 排结果不同。

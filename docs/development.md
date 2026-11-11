@@ -103,6 +103,34 @@ python3 tests/diff/run_diff.py --only repr  # 只测浮点转字符串
 
 生成的程序必须两端都能跑通、输出一致；已知的语义分歧不要测（列在 [compatibility.md](compatibility.md)），否则只是制造噪音。
 
+### 性能 bench
+
+`bench/` 下是逐个内置函数的性能对比：同一份源码分别喂给 py23（编译成原生
+二进制）和 CPython 3.13，比墙钟时间。
+
+```bash
+cd /w && python3 bench/run_bench.py                   # 全量
+cd /w && python3 bench/run_bench.py 13_sum 32_sorted  # 只跑指定用例
+cd /w && python3 bench/run_bench.py --md /w/bench/RESULTS.md --json /w/bench/report.json
+```
+
+用例在 `bench/builtins/<序号>_<内置名>.py`，第一行是 `N = <整数>`，驱动脚本
+按 CPython 的实测时间把它校准到 0.35 秒左右。三条规则让倍数有意义：
+
+- **参数必须随循环变化**（`S[i % 64]` 或直接用循环变量）。写成 `len(S)` 的
+  话，py23 的 LICM 会把整个调用提到循环外，测到的是优化器不是内置函数。
+- **容器类内置先改写再消费**（`T[i % 64] = i` 之后再 `sum(T)`），否则整条
+  调用同样会被提出循环。
+- **结果要打印出来**（末尾 `print(total)`），避免整段被当成死代码删掉。
+
+驱动还会用 `2N` 再跑一次 py23：耗时没有跟着翻倍，就说明循环体被优化掉了，
+表格里的「线性」列就是这个检查；此时倍数只能当「优化器收益」看，不能当
+「内置函数成本」看。跑完顺带比对两边的标准输出（行数 + 最后一行），确认
+跑的是同一件事。
+
+结果是机器相关的快照，别当基准线看：最新一次见 [bench/RESULTS.md](../bench/RESULTS.md)，
+结论写在 [compatibility.md](compatibility.md#内置函数逐个对比)。
+
 ### 内存验收
 
 `tests/run/10_rc.py` 覆盖别名、字段、列表、返回值和 `continue` 跳过清理；

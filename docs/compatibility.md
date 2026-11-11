@@ -250,6 +250,36 @@ bytes 之后，旧清单（bytes 2038 / complex 620 / int64 138 / match 91）已
 0.7 加入引用计数后，整数路径与 0.6.1 持平（不含临时堆值的语句/循环/
 函数会把 RC 脚手架删掉）；方法调用因为 self 形参的 inc/dec 慢约 30%。
 
+### 内置函数逐个对比
+
+`bench/` 下有一套逐个内置函数的对比设施：同一份源码分别喂给 py23（编译成
+原生二进制）和容器内的 CPython 3.13.5，按 CPython 的实测时间校准循环次数，
+取多次运行的最小值，并扣掉进程启动开销（CPython 约 6ms，py23 约 0.5ms）。
+口径与跑法见 [development.md](development.md#性能-bench)，逐项结果见
+[bench/RESULTS.md](../bench/RESULTS.md)。
+
+结果分四类：
+
+1. **编译期折叠（34~55×）**：静态类型够用时这些内置直接在编译期算掉，循环
+   里几乎免费——`isinstance` / `setattr` / `issubclass` / `callable` /
+   `hasattr` / `getattr` / `type` / `id`。
+2. **整数路径（19~35×）**：`len` / `abs` / `bool` / `range` / `pow` / `sum` /
+   `min` / `max` / `hash` / `ord` / `reversed`。
+3. **字符串格式化与容器构造（1.6~4.5×）**：`hex` / `bin` / `oct` / `repr` /
+   `format` / `str` / `float` / `chr` 走运行时的通用实现，`list` / `tuple` /
+   `set` / `frozenset` / `dict` / `map` 的拷贝建表也贵。
+4. **其余**：`filter` 16.7×、`int` 15.4×、`round` 13.0×、`all` 10.1×、
+   `print` 3.8~11.4×（I/O 主导）、`any` 7.2×、`next` 5.1×、`complex` 4.9×、
+   `open` 1.1×（系统调用主导）。
+
+比 CPython 慢的只有三个，都是「物化成列表」带来的：
+
+| 内置 | 相对 CPython | 原因 |
+|---|---|---|
+| `enumerate` | 约 0.7× | py23 直接产出 `[下标, 值]` 的元组列表；CPython 是惰性迭代器，每次只造一个元组 |
+| `sorted` | 约 0.8× | 运行时用 `qsort` + 比较函数指针（`runtime/rt_list.c`）；CPython 用 Timsort + 特化比较 |
+| `zip` | 约 1.0× | 两边都把结果物化成元组，py23 一次物化整个列表 |
+
 ### range 是惰性对象
 
 `range(...)` 返回的是惰性对象（类型 `range[int]`）：只存起点、终点、步长，
