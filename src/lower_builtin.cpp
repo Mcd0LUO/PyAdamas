@@ -694,6 +694,27 @@ VReg Lowerer::lower_builtin_call(const std::string& name, Call& c) {
             push_temp(s);
             return s;
         }
+        if (t && t->kind == TyKind::Tuple) {
+            // 元组的 repr：元素按静态类型渲染，单元素带尾逗号。
+            // 异构元组（各元素类型不同）暂时不支持，不给错值。
+            TypePtr et = t->sub.empty() ? t_unknown() : t->sub[0];
+            bool same = true;
+            for (auto& sub : t->sub)
+                if (!type_eq(sub, et)) { same = false; break; }
+            if (!same) {
+                err(c.args[0]->line, c.args[0]->col,
+                    "repr() of a heterogeneous tuple is not supported yet");
+                return const_str("");
+            }
+            int64_t kind = 0;
+            if (et->kind == TyKind::Float) kind = 1;
+            else if (et->kind == TyKind::Str) kind = 2;
+            else if (et->kind == TyKind::Bool) kind = 3;
+            else if (et->kind == TyKind::None) kind = 4;
+            VReg s = call_runtime(RtFn::ReprTuple, t_str(), {v, const_int(kind)});
+            push_temp(s);
+            return s;
+        }
         if (t && (t->kind == TyKind::Int || t->kind == TyKind::Bool ||
                   t->kind == TyKind::Float || t->kind == TyKind::Complex ||
                   t->kind == TyKind::None))
@@ -791,6 +812,39 @@ VReg Lowerer::lower_builtin_call(const std::string& name, Call& c) {
             VReg s = call_runtime(RtFn::ExcValueStr, t_str(), {v});
             push_temp(s);
             return s;
+        }
+        if (to->kind == TyKind::Str && from && from->kind == TyKind::Tuple) {
+            // str(tuple) 与 repr(tuple) 相同（CPython 也是这样）
+            TypePtr et = from->sub.empty() ? t_unknown() : from->sub[0];
+            bool same = true;
+            for (auto& sub : from->sub)
+                if (!type_eq(sub, et)) { same = false; break; }
+            if (!same) {
+                err(c.args[0]->line, c.args[0]->col,
+                    "str() of a heterogeneous tuple is not supported yet");
+                return const_str("");
+            }
+            int64_t kind = 0;
+            if (et->kind == TyKind::Float) kind = 1;
+            else if (et->kind == TyKind::Str) kind = 2;
+            else if (et->kind == TyKind::Bool) kind = 3;
+            else if (et->kind == TyKind::None) kind = 4;
+            VReg s = call_runtime(RtFn::ReprTuple, t_str(), {v, const_int(kind)});
+            push_temp(s);
+            return s;
+        }
+        // 容器转标量没有定义（CPython 抛 TypeError）。以前这里直接把
+        // 指针当数字用，会静默给出垃圾值——宁可报错。
+        if (to->kind != TyKind::Bool && from &&
+            (from->kind == TyKind::List || from->kind == TyKind::Dict ||
+             from->kind == TyKind::Set ||
+             (from->kind == TyKind::Range && to->kind != TyKind::Str))) {
+            err(c.args[0]->line, c.args[0]->col,
+                std::format("{}() argument must be a number or a string, not '{}'",
+                            name, type_name(from)));
+            return to->kind == TyKind::Int ? const_int(0)
+                   : to->kind == TyKind::Float ? const_float(0.0)
+                   : to->kind == TyKind::Str ? const_str("") : const_bool(false);
         }
         if (to->kind == TyKind::Str && from && from->kind == TyKind::Range) {
             // str(range) 与 repr(range) 相同

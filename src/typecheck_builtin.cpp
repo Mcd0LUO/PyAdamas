@@ -119,6 +119,22 @@ TypePtr TypeChecker::builtin_call(const std::string& n, Call& c) {
             for (auto& t : a) elems.push_back(iter_elem(t, c.line, c.col));
             return mk_list(mk_tuple(std::move(elems)));
         }
+        // 容器转标量没有定义（CPython 抛 TypeError）。以前不管，
+        // 降级层会把容器指针当数字用，静默给出垃圾值——这里直接拦。
+        // str(元组) / str(range) 是合法的（走 repr 形式）。
+        if (a.size() == 1 && !is_unknown(a[0]) && a[0] &&
+            (n == "int" || n == "float" || n == "str")) {
+            bool container = a[0]->kind == TyKind::List ||
+                              a[0]->kind == TyKind::Dict ||
+                              a[0]->kind == TyKind::Set;
+            bool seq = a[0]->kind == TyKind::Tuple || a[0]->kind == TyKind::Range;
+            bool str_ok = n == "str" && (a[0]->kind == TyKind::Tuple ||
+                                        a[0]->kind == TyKind::Range);
+            if (container || (seq && !str_ok))
+                err(c.line, c.col,
+                    std::format("{}() argument must be a number or a string, not '{}'",
+                                n, type_name(a[0])));
+        }
         if (n == "int") {
             if (a.size() > 2)
                 err(c.line, c.col, std::format("int() takes at most 2 arguments, got {}", a.size()));
@@ -131,6 +147,7 @@ TypePtr TypeChecker::builtin_call(const std::string& n, Call& c) {
         if (n == "float") return t_float();
         if (n == "str") return t_str();
         if (n == "bool") return t_bool();
+
         if (n == "list") {
             if (a.empty()) return mk_list(fresh_hole());
             return mk_list(iter_elem(a[0], c.line, c.col));

@@ -217,6 +217,8 @@ void Lowerer::print_seq(VReg v, TypePtr ty, bool tuple, bool to_file, int line, 
                     print_value(ev, ty->sub[i], line, col);
                 }
             }
+            // 单元素元组在 CPython 里带尾逗号：(1,) 不是 (1)
+            if (tuple && ty->sub.size() == 1) write(",");
             write(")");
             return;
         }
@@ -226,6 +228,39 @@ void Lowerer::print_seq(VReg v, TypePtr ty, bool tuple, bool to_file, int line, 
     print_each(v, et, to_file, [&](VReg ev, VReg) {
         print_elem(ev, et, to_file, line, col);
     });
+    if (tuple) {
+        // 单元素元组在 CPython 里带尾逗号：(1,) 不是 (1)
+        if (!ty->variadic && ty->sub.size() == 1) {
+            write(",");
+        } else if (ty->variadic) {
+            // 变长元组的长度运行期才知道
+            Inst ln;
+            ln.op = IrOp::Len;
+            ln.a = v;
+            VReg n = def(t_int(), std::move(ln));
+            Inst cmp;
+            cmp.op = IrOp::Cmp;
+            cmp.cop = CmpKind::Eq;
+            cmp.a = n;
+            cmp.b = const_int(1);
+            VReg is_one = def(t_bool(), std::move(cmp));
+            int one_b = new_block("print.tuple1");
+            int done_b = new_block("print.tuple.end");
+            Inst br;
+            br.op = IrOp::Branch;
+            br.a = is_one;
+            br.target = one_b;
+            br.target2 = done_b;
+            emit(std::move(br));
+            switch_to(one_b);
+            write(",");
+            Inst j;
+            j.op = IrOp::Jump;
+            j.target = done_b;
+            emit(std::move(j));
+            switch_to(done_b);
+        }
+    }
     write(tuple ? ")" : "]");
 }
 

@@ -218,6 +218,7 @@ enum class RtFn : uint16_t {
     RangeAll,     // (range*) -> i64
     RangeToList,  // (range*) -> list*
     RangeRepr,    // (range*) -> str*
+    ReprTuple,    // (tuple*, i64 kind) -> str*
     HandlerPush,  // () -> handler*   压入异常 handler，记录临时栈水位
     HandlerLeave, // (handler*) -> void 弹出并清理临时栈
     HandlerDiscard, // (handler*) -> void 只弹出，不清理临时值
@@ -535,6 +536,7 @@ inline const char* rt_name(RtFn f) {
         case RtFn::RangeAll: return "py23_range_all";
         case RtFn::RangeToList: return "py23_range_to_list";
         case RtFn::RangeRepr: return "py23_range_repr";
+        case RtFn::ReprTuple: return "py23_repr_tuple";
         case RtFn::HandlerPush: return "py23_handler_push";
         case RtFn::HandlerLeave: return "py23_handler_leave";
         case RtFn::HandlerDiscard: return "py23_handler_discard";

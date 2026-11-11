@@ -1,6 +1,54 @@
 // rt_str.c —— 字符串与字符串方法
 #include "rt_internal.h"
 
+/* 元组的 repr：CPython 打印 (1, 2)，单元素带尾逗号 (1,)。
+   元素按静态类型渲染：kind 0 int / 1 float / 2 str / 3 bool / 4 None。
+   长度事先不知道，用可增长缓冲区拼。 */
+static void tuple_buf_put(char** buf, size_t* cap, size_t* len, const char* p, size_t n) {
+    if (*len + n + 1 > *cap) {
+        size_t nc = *cap ? *cap : 64;
+        while (*len + n + 1 > nc) nc *= 2;
+        char* nb = (char*)realloc(*buf, nc);
+        if (!nb) panic_c("out of memory");
+        *buf = nb;
+        *cap = nc;
+    }
+    memcpy(*buf + *len, p, n);
+    *len += n;
+    (*buf)[*len] = 0;
+}
+
+Py23Str* py23_repr_tuple(Py23List* t, int64_t kind) {
+    size_t cap = 64, len = 0;
+    char* buf = (char*)malloc(cap);
+    if (!buf) panic_c("out of memory");
+    buf[0] = 0;
+    tuple_buf_put(&buf, &cap, &len, "(", 1);
+    for (int64_t i = 0; i < t->len; ++i) {
+        if (i) tuple_buf_put(&buf, &cap, &len, ", ", 2);
+        int64_t v = t->data[i];
+        Py23Str* s;
+        if (kind == 1) {
+            double f;
+            memcpy(&f, &v, sizeof f);
+            s = py23_str_from_f64(f);
+        } else if (kind == 2) {
+            s = py23_repr_str((Py23Str*)(uintptr_t)v);
+        } else if (kind == 3) {
+            s = py23_str_from_bool(v);
+        } else if (kind == 4) {
+            s = py23_str_from_none();
+        } else {
+            s = py23_str_from_i64(v);
+        }
+        tuple_buf_put(&buf, &cap, &len, s->data, (size_t)s->len);
+    }
+    if (t->len == 1) tuple_buf_put(&buf, &cap, &len, ",", 1);
+    tuple_buf_put(&buf, &cap, &len, ")", 1);
+    Py23Str* out = str_new(buf, (int64_t)len);
+    free(buf);
+    return out;
+}
 Py23Str* py23_str_concat(Py23Str* a, Py23Str* b) {
     Py23Str* s = str_alloc(a->len + b->len);
     char* p = (char*)s->data;

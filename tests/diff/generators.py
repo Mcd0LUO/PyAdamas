@@ -375,9 +375,7 @@ def range_ops(rng, n: int) -> str:
         lines.append("        print(-1, -1, -1)")
         lines.append("    print(list(g))")
         lines.append("    print(sorted(g), list(reversed(g)))")
-        # tuple(g) 不测：单元素元组的打印 py23 和 CPython 不同（(0) vs (0,)），
-        # 那是既有的 repr 偏差，不是 range 的问题。
-        lines.append("    print([x * 2 for x in g])")
+        lines.append("    print(tuple(g), [x * 2 for x in g])")
         lines.append("    print(0 in g, 3 in g)")
         lines.append("    print(any(g), all(g))")
         lines.append("")

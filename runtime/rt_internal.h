@@ -374,6 +374,7 @@ void agen_drive(Py23Await* d);
 int64_t py23_asyncio_run(void* coro);
 void format_double(char* buf, size_t n, double v);
 Py23Str* py23_str_concat(Py23Str* a, Py23Str* b);
+Py23Str* py23_repr_tuple(Py23List* t, int64_t kind);
 Py23Str* py23_str_char_at(Py23Str* s, int64_t i);
 Py23Str* py23_str_from_i64(int64_t v);
 Py23Str* py23_str_from_f64(double v);

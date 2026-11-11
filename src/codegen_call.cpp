@@ -771,6 +771,7 @@ void AsmGen::gen_call_rt(const Inst& in) {
             case RtFn::SetEq:
             case RtFn::DictGetOpt:
             case RtFn::RangeGet:
+            case RtFn::ReprTuple:
             case RtFn::RangeContains:
             case RtFn::RangeEq:
             case RtFn::RangeSumI64:
