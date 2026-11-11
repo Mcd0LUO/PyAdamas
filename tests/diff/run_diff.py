@@ -71,6 +71,8 @@ def gen_source(name: str, rng, n: int) -> str:
         return generators.gen_ops(rng, n)
     if name == "async":
         return generators.async_ops(rng, n)
+    if name == "range":
+        return generators.range_ops(rng, n)
     return ""
 
 

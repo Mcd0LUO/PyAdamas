@@ -105,7 +105,8 @@ void Lowerer::assign_to(Expr& target, VReg v, TypePtr vty) {
                 if (!ot || (ot->kind != TyKind::List && ot->kind != TyKind::Tuple &&
                             ot->kind != TyKind::Unknown)) {
                     err(target.line, target.col,
-                        std::format("'{}' does not support slice assignment", type_name(ot)));
+                        std::format("'{}' object does not support item assignment",
+                                    type_name(ot)));
                     break;
                 }
                 if (src_ty && src_ty->kind != TyKind::List && src_ty->kind != TyKind::Tuple &&
@@ -146,7 +147,7 @@ void Lowerer::assign_to(Expr& target, VReg v, TypePtr vty) {
                 break;
             }
             if (ot && ot->kind == TyKind::Set) {
-                err(target.line, target.col, "set does not support item assignment");
+                err(target.line, target.col, "'set' object does not support item assignment");
                 break;
             }
             // 列表有元素类型，存进去的值要跟着转
@@ -780,6 +781,10 @@ VReg Lowerer::lower_container_eq(VReg l, TypePtr lt, VReg r, TypePtr rt) {
     if (lt->kind == TyKind::Set && rt->kind == TyKind::Set) {
         return call_runtime(RtFn::SetEq, t_bool(), {l, r});
     }
+    if (lt->kind == TyKind::Range && rt->kind == TyKind::Range) {
+        // range 按边界比，不物化
+        return call_runtime(RtFn::RangeEq, t_bool(), {l, r});
+    }
     return kNoReg;
 }
 
@@ -863,6 +868,9 @@ VReg Lowerer::lower_compare(Compare& c) {
                 TypePtr kt = rt->sub.empty() ? t_unknown() : rt->sub[0];
                 l = coerce(l, lt, kt);
                 flag = call_runtime(RtFn::DictContains, t_bool(), {r, l});
+            } else if (rt && rt->kind == TyKind::Range) {
+                l = coerce(l, lt, t_int());
+                flag = call_runtime(RtFn::RangeContains, t_bool(), {r, l});
             } else if (rt && (rt->kind == TyKind::List || rt->kind == TyKind::Tuple)) {
                 TypePtr et = rt->sub.empty() ? t_unknown() : rt->sub[0];
                 l = coerce(l, lt, et);
@@ -1032,6 +1040,11 @@ VReg Lowerer::lower_subscript(Subscript& s) {
         // bytes 下标返回 0..255 的整数，不是单字节切片
         idx = coerce(idx, tc_.type_of(s.slice.get()), t_int());
         return call_runtime(RtFn::BytesAt, t_int(), {obj, idx});
+    }
+    if (ot && ot->kind == TyKind::Range) {
+        // range 下标按边界算，不物化
+        idx = coerce(idx, tc_.type_of(s.slice.get()), t_int());
+        return call_runtime(RtFn::RangeGet, t_int(), {obj, idx});
     }
     // 外层是 for k in range(len(a)) 且提示仍然有效：记下这条 IndexLoad，
     // 等循环体降级完、确认没有副作用后再改成免检查。

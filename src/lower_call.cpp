@@ -500,6 +500,13 @@ VReg Lowerer::seq_as_list(Expr* e, TypePtr& elem_out) {
             push_temp(l);
             return l;
         }
+        case TyKind::Range: {
+            // 需要真列表时（list(range(n)) / sorted(range(n))）才物化
+            elem_out = xt->sub.empty() ? t_unknown() : xt->sub[0];
+            VReg l = call_runtime(RtFn::RangeToList, mk_list(elem_out), {x});
+            push_temp(l);
+            return l;
+        }
         case TyKind::List:
         case TyKind::Tuple:
             elem_out = xt->sub.empty() ? t_unknown() : xt->sub[0];

@@ -62,6 +62,7 @@ py23 不追求兼容 CPython：语义是按静态类型的需要重新定的。�
 | `None` 与 `0` | 同一个表示：`0 is None` 为真、`None == 0` 为真 | 完全不同 | 值表示不带类型标签，是「没有 tag」的直接后果 |
 | 切片 | str 按字节；list/tuple 返回新容器，语义同 CPython | 同 Python | `step == 0` panic；未知元素类型只做保守 GC |
 | 切片赋值 | 仅 list；step 1 可改变长度，扩展切片长度必须一致；右侧可为 str | 任意可变序列，任意可迭代右值 | 没有通用迭代协议；tuple 不可变，拒绝赋值 |
+| `range` | 惰性对象（`range[int]`），只存边界；不可变，赋值在编译期就报错 | 惰性对象，不可变，赋值是运行期 TypeError | 静态类型知道 range 不可变，直接拦在类型检查（消息与 CPython 一致） |
 
 字节串这条最容易被忽略：`len` 与索引都按字节，ASCII 之外的字符串会与 CPython 不一致。要不要改成码点语义（`len` 变成 O(n)、索引要解码）是个待定项，见 [roadmap.md](roadmap.md)。
 
@@ -249,17 +250,22 @@ bytes 之后，旧清单（bytes 2038 / complex 620 / int64 138 / match 91）已
 0.7 加入引用计数后，整数路径与 0.6.1 持平（不含临时堆值的语句/循环/
 函数会把 RC 脚手架删掉）；方法调用因为 self 形参的 inc/dec 慢约 30%。
 
-### range 作为值仍然会实体化
+### range 是惰性对象
 
-`range(...)` 作为**普通值**使用时会实体化成整数列表
-（`runtime/rt_slice.c` 的 `py23_range_new` 逐元素 append）：`r = range(10**9)`
-就是当场造 10 亿个元素（8GB），`len(range(n))` / `range(n)[i]` /
-`sum(range(n))` 这些也都是列表语义。CPython 的 range 是惰性对象，
-`range(10**9)` 只占几十字节。
+`range(...)` 返回的是惰性对象（类型 `range[int]`）：只存起点、终点、步长，
+元素按需算。`len(r)` / `r[i]` / `x in r` / `for x in r` / 推导式都不物化，
+`range(10**9)` 只占几十字节。`list(r)` / `tuple(r)` / `sorted(r)` 这类需要
+真列表时才物化。`repr(r)` 是 `"range(0, 10)"`，和 CPython 一样。
 
-生成器表达式不受影响：源是 `range(...)` 时，脱糖把边界值传进合成生成器
-函数、用计数循环逐个产出，所以 `(x for x in range(10**9))` 既不建中间
-列表，第一次 `next()` 就出 0。`for x in range(N)` 一直是计数循环，也不受影响。
+（以前 `range` 作为值使用会实体化成整数列表，`r = range(10**9)` 就是当场
+造 10 亿个元素、8GB 内存。现在没有这个坑了。）
 
-这是**已知的性能坑**，不是设计取舍：把 range 做成真正的惰性对象要动
-值的表示（现在 range 和 list 同一套静态类型），代价大到不值得，先记在这里。
+还剩一处差异：
+
+- **range 不可变**：`r[0] = 1` 在 py23 是**编译期**报错（类型检查就拦住），
+  CPython 是运行期 `TypeError`。range 也没有 list 的那些方法。
+
+错误措辞按 CPython 对齐了：`min()/max()` 空序列是
+`min() iterable argument is empty`，不可变对象的赋值是
+`'tuple' object does not support item assignment` 这种 CPython 原话
+（类型名不带参数）。

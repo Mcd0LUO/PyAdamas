@@ -25,7 +25,8 @@ VReg Lowerer::lower_minmax(Call& c, bool is_min) {
         TypePtr seq_ty = tc_.type_of(c.args[0].get());
         bool ok = seq_ty && (seq_ty->kind == TyKind::List || seq_ty->kind == TyKind::Tuple ||
                              seq_ty->kind == TyKind::Str || seq_ty->kind == TyKind::Dict ||
-                             seq_ty->kind == TyKind::Set || seq_ty->kind == TyKind::Generator);
+                             seq_ty->kind == TyKind::Set || seq_ty->kind == TyKind::Range ||
+                             seq_ty->kind == TyKind::Generator);
         if (!ok) {
             err(c.args[0]->line, c.args[0]->col,
                 std::format("cannot iterate over '{}' in {}()", type_name(seq_ty),
@@ -35,6 +36,13 @@ VReg Lowerer::lower_minmax(Call& c, bool is_min) {
         TypePtr elem_ty = t_unknown();
         if (seq_ty->kind == TyKind::Str) elem_ty = t_str();
         else if (!seq_ty->sub.empty()) elem_ty = seq_ty->sub[0];
+
+        // range：按边界算，不物化。空 range 同样报 ValueError。
+        if (seq_ty->kind == TyKind::Range) {
+            VReg seq = expr(*c.args[0]);
+            return call_runtime(is_min ? RtFn::RangeMinI64 : RtFn::RangeMaxI64, t_int(),
+                                {seq});
+        }
 
         // 生成器：没有长度也没有下标，流式比较，空的时候同样报 ValueError。
         if (seq_ty->kind == TyKind::Generator) {
@@ -101,8 +109,8 @@ VReg Lowerer::lower_minmax(Call& c, bool is_min) {
             emit(std::move(be));
             switch_to(empty_b);
             call_void(RtFn::Raise, {const_str("ValueError"),
-                                    const_str(is_min ? "min() arg is an empty sequence"
-                                                     : "max() arg is an empty sequence")});
+                                    const_str(is_min ? "min() iterable argument is empty"
+                                                     : "max() iterable argument is empty")});
             switch_to(done_b);
             return load_slot(best, acc_ty);
         }
@@ -144,8 +152,8 @@ VReg Lowerer::lower_minmax(Call& c, bool is_min) {
         emit(std::move(be));
         switch_to(empty_b);
         call_void(RtFn::Raise, {const_str("ValueError"),
-                                const_str(is_min ? "min() arg is an empty sequence"
-                                                 : "max() arg is an empty sequence")});
+                                const_str(is_min ? "min() iterable argument is empty"
+                                                 : "max() iterable argument is empty")});
         switch_to(nonempty_b);
 
         auto elem_at = [&](VReg idx) -> VReg {
@@ -273,7 +281,8 @@ VReg Lowerer::lower_sum(Call& c) {
     TypePtr seq_ty = tc_.type_of(c.args[0].get());
     bool ok = seq_ty && (seq_ty->kind == TyKind::List || seq_ty->kind == TyKind::Tuple ||
                          seq_ty->kind == TyKind::Str || seq_ty->kind == TyKind::Dict ||
-                         seq_ty->kind == TyKind::Set || seq_ty->kind == TyKind::Generator);
+                         seq_ty->kind == TyKind::Set || seq_ty->kind == TyKind::Range ||
+                         seq_ty->kind == TyKind::Generator);
     if (!ok) {
         err(c.args[0]->line, c.args[0]->col,
             std::format("cannot iterate over '{}' in sum()", type_name(seq_ty)));
@@ -282,6 +291,17 @@ VReg Lowerer::lower_sum(Call& c) {
     TypePtr elem_ty = t_unknown();
     if (seq_ty->kind == TyKind::Str) elem_ty = t_str();
     else if (!seq_ty->sub.empty()) elem_ty = seq_ty->sub[0];
+
+    // range：按边界流式累加，不物化。
+    if (seq_ty->kind == TyKind::Range) {
+        VReg seq = expr(*c.args[0]);
+        VReg start = acc_ty && acc_ty->kind == TyKind::Float ? const_float(0.0) : const_int(0);
+        if (c.args.size() == 2)
+            start = coerce(expr(*c.args[1]), tc_.type_of(c.args[1].get()), acc_ty);
+        if (acc_ty && acc_ty->kind == TyKind::Float)
+            return call_runtime(RtFn::RangeSumF64, t_float(), {seq, start});
+        return call_runtime(RtFn::RangeSumI64, t_int(), {seq, start});
+    }
 
     // 生成器：流式累加，不建中间列表（这正是生成器表达式存在的意义）。
     if (seq_ty->kind == TyKind::Generator) {
@@ -419,7 +439,8 @@ VReg Lowerer::lower_anyall(Call& c, bool is_any) {
     TypePtr seq_ty = tc_.type_of(c.args[0].get());
     bool ok = seq_ty && (seq_ty->kind == TyKind::List || seq_ty->kind == TyKind::Tuple ||
                          seq_ty->kind == TyKind::Str || seq_ty->kind == TyKind::Dict ||
-                         seq_ty->kind == TyKind::Set || seq_ty->kind == TyKind::Generator);
+                         seq_ty->kind == TyKind::Set || seq_ty->kind == TyKind::Range ||
+                         seq_ty->kind == TyKind::Generator);
     if (!ok) {
         err(c.args[0]->line, c.args[0]->col,
             std::format("cannot iterate over '{}' in {}()", type_name(seq_ty),
@@ -429,6 +450,12 @@ VReg Lowerer::lower_anyall(Call& c, bool is_any) {
     TypePtr elem_ty = t_unknown();
     if (seq_ty->kind == TyKind::Str) elem_ty = t_str();
     else if (!seq_ty->sub.empty()) elem_ty = seq_ty->sub[0];
+
+    // range：按边界算，不物化。
+    if (seq_ty->kind == TyKind::Range) {
+        VReg seq = expr(*c.args[0]);
+        return call_runtime(is_any ? RtFn::RangeAny : RtFn::RangeAll, t_bool(), {seq});
+    }
 
     // 生成器：短路迭代，命中就停（剩下的元素连算都不算）。
     if (seq_ty->kind == TyKind::Generator) {

@@ -20,6 +20,10 @@ VReg Lowerer::lower_builtin_call(const std::string& name, Call& c) {
         VReg v = expr(*c.args[0]);
         VReg ln = dunder_len(v, t);
         if (ln != kNoReg) return ln;
+        if (t && t->kind == TyKind::Range) {
+            // range 的长度按边界算，不物化
+            return call_runtime(RtFn::RangeLen, t_int(), {v});
+        }
         if (t && t->kind == TyKind::Class) {
             err(c.line, c.col,
                 std::format("len() of '{}' which has no __len__",
@@ -241,6 +245,7 @@ VReg Lowerer::lower_builtin_call(const std::string& name, Call& c) {
                 else if (builtin == "dict") r = kind_is({TyKind::Dict});
                 else if (builtin == "set") r = kind_is({TyKind::Set});
                 else if (builtin == "complex") r = kind_is({TyKind::Complex});
+                else if (builtin == "range") r = kind_is({TyKind::Range});
                 else {
                     err(c.args[1]->line, c.args[1]->col,
                         std::format("isinstance() does not support type '{}' yet", builtin));
@@ -683,6 +688,12 @@ VReg Lowerer::lower_builtin_call(const std::string& name, Call& c) {
             in.args = {v};
             return def_heap(t_str(), std::move(in));
         }
+        if (t && t->kind == TyKind::Range) {
+            // repr(range(10)) 是 "range(0, 10)"，和 CPython 一样
+            VReg s = call_runtime(RtFn::RangeRepr, t_str(), {v});
+            push_temp(s);
+            return s;
+        }
         if (t && (t->kind == TyKind::Int || t->kind == TyKind::Bool ||
                   t->kind == TyKind::Float || t->kind == TyKind::Complex ||
                   t->kind == TyKind::None))
@@ -740,7 +751,7 @@ VReg Lowerer::lower_builtin_call(const std::string& name, Call& c) {
             stop = arg(1);
         }
         if (c.args.size() == 3) step = arg(2);
-        VReg v = call_runtime(RtFn::RangeNew, mk_list(t_int()), {start, stop, step});
+        VReg v = call_runtime(RtFn::RangeNew, mk_range(t_int()), {start, stop, step});
         push_temp(v);
         return v;
     }
@@ -781,6 +792,12 @@ VReg Lowerer::lower_builtin_call(const std::string& name, Call& c) {
             push_temp(s);
             return s;
         }
+        if (to->kind == TyKind::Str && from && from->kind == TyKind::Range) {
+            // str(range) 与 repr(range) 相同
+            VReg s = call_runtime(RtFn::RangeRepr, t_str(), {v});
+            push_temp(s);
+            return s;
+        }
         return convert_to(v, from, to);
     }
 
@@ -812,7 +829,7 @@ VReg Lowerer::lower_builtin_call(const std::string& name, Call& c) {
         if (!xt || (xt->kind != TyKind::List && xt->kind != TyKind::Tuple &&
                     xt->kind != TyKind::Str && xt->kind != TyKind::Dict &&
                     xt->kind != TyKind::Set && xt->kind != TyKind::File &&
-                    xt->kind != TyKind::Generator)) {
+                    xt->kind != TyKind::Range && xt->kind != TyKind::Generator)) {
             err(c.args[0]->line, c.args[0]->col,
                 std::format("{}() cannot iterate over '{}'", name, type_name(xt)));
             return const_none();
@@ -888,7 +905,7 @@ VReg Lowerer::lower_builtin_call(const std::string& name, Call& c) {
         if (!xt || (xt->kind != TyKind::List && xt->kind != TyKind::Tuple &&
                     xt->kind != TyKind::Str && xt->kind != TyKind::Dict &&
                     xt->kind != TyKind::Set && xt->kind != TyKind::File &&
-                    xt->kind != TyKind::Generator)) {
+                    xt->kind != TyKind::Range && xt->kind != TyKind::Generator)) {
             err(c.args[0]->line, c.args[0]->col,
                 std::format("{}() cannot iterate over '{}'", name, type_name(xt)));
             return const_none();
@@ -943,7 +960,7 @@ VReg Lowerer::lower_builtin_call(const std::string& name, Call& c) {
         if (!xt || (xt->kind != TyKind::List && xt->kind != TyKind::Tuple &&
                     xt->kind != TyKind::Str && xt->kind != TyKind::Dict &&
                     xt->kind != TyKind::Set && xt->kind != TyKind::File &&
-                    xt->kind != TyKind::Generator)) {
+                    xt->kind != TyKind::Range && xt->kind != TyKind::Generator)) {
             err(c.args[0]->line, c.args[0]->col,
                 std::format("{}() cannot iterate over '{}'", name, type_name(xt)));
             return const_none();
@@ -1103,7 +1120,7 @@ VReg Lowerer::lower_builtin_call(const std::string& name, Call& c) {
         if (!xt || (xt->kind != TyKind::List && xt->kind != TyKind::Tuple &&
                     xt->kind != TyKind::Str && xt->kind != TyKind::Dict &&
                     xt->kind != TyKind::Set && xt->kind != TyKind::File &&
-                    xt->kind != TyKind::Generator)) {
+                    xt->kind != TyKind::Range && xt->kind != TyKind::Generator)) {
             err(c.args[0]->line, c.args[0]->col,
                 std::format("enumerate() cannot iterate over '{}'", type_name(xt)));
             return const_none();

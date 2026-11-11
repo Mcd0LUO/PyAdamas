@@ -202,7 +202,22 @@ enum class RtFn : uint16_t {
     EnumerateList,// (list*) -> list*  元素是 [i, v] 对
     Zip2List,     // (list*, list*) -> list*
     SetFromList,  // (list*, i64 key_kind, i64 key_own) -> dict*
-    RangeNew,     // (i64 start, i64 stop, i64 step) -> list*
+    RangeNew,     // (i64 start, i64 stop, i64 step) -> range*
+    RangeLen,     // (range*) -> i64
+    RangeFirst,   // (range*) -> i64
+    RangeStep,    // (range*) -> i64
+    RangeStop,    // (range*) -> i64
+    RangeGet,     // (range*, i64 idx) -> i64
+    RangeContains,// (range*, i64 v) -> i64
+    RangeEq,      // (range*, range*) -> i64
+    RangeSumI64,  // (range*, i64 start) -> i64
+    RangeSumF64,  // (range*, f64 start) -> f64
+    RangeMinI64,  // (range*) -> i64
+    RangeMaxI64,  // (range*) -> i64
+    RangeAny,     // (range*) -> i64
+    RangeAll,     // (range*) -> i64
+    RangeToList,  // (range*) -> list*
+    RangeRepr,    // (range*) -> str*
     HandlerPush,  // () -> handler*   压入异常 handler，记录临时栈水位
     HandlerLeave, // (handler*) -> void 弹出并清理临时栈
     HandlerDiscard, // (handler*) -> void 只弹出，不清理临时值
@@ -505,6 +520,21 @@ inline const char* rt_name(RtFn f) {
         case RtFn::Zip2List: return "py23_zip2_list";
         case RtFn::SetFromList: return "py23_set_from_list";
         case RtFn::RangeNew: return "py23_range_new";
+        case RtFn::RangeLen: return "py23_range_len";
+        case RtFn::RangeFirst: return "py23_range_first";
+        case RtFn::RangeStep: return "py23_range_step";
+        case RtFn::RangeStop: return "py23_range_stop";
+        case RtFn::RangeGet: return "py23_range_get";
+        case RtFn::RangeContains: return "py23_range_contains";
+        case RtFn::RangeEq: return "py23_range_eq";
+        case RtFn::RangeSumI64: return "py23_range_sum_i64";
+        case RtFn::RangeSumF64: return "py23_range_sum_f64";
+        case RtFn::RangeMinI64: return "py23_range_min_i64";
+        case RtFn::RangeMaxI64: return "py23_range_max_i64";
+        case RtFn::RangeAny: return "py23_range_any";
+        case RtFn::RangeAll: return "py23_range_all";
+        case RtFn::RangeToList: return "py23_range_to_list";
+        case RtFn::RangeRepr: return "py23_range_repr";
         case RtFn::HandlerPush: return "py23_handler_push";
         case RtFn::HandlerLeave: return "py23_handler_leave";
         case RtFn::HandlerDiscard: return "py23_handler_discard";
@@ -1039,6 +1069,7 @@ inline bool ir_is_heap(const TypePtr& t) {
         case TyKind::AsyncTaskGroup:
         case TyKind::AsyncSemaphore:
         case TyKind::Exception:  // 异常值：堆对象，args 列表归它所有
+        case TyKind::Range:  // range 对象：堆上的惰性序列
         case TyKind::Complex:
         case TyKind::File:
         case TyKind::Random:
@@ -1079,6 +1110,7 @@ inline bool ir_is_ref(const TypePtr& t) {
         case TyKind::AsyncTaskGroup:
         case TyKind::AsyncSemaphore:
         case TyKind::Exception:
+        case TyKind::Range:
         case TyKind::Complex:
         case TyKind::File:
         case TyKind::Random:

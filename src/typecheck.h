@@ -42,6 +42,7 @@ enum class TyKind : uint8_t {
     Str,
     Bytes,  // b"..."：运行时和 str 同一套表示，类型上区分
     List,
+    Range,   // range 对象：惰性序列，sub[0] 是元素类型（int）
     Set,
     Dict,
     Tuple,
@@ -479,6 +480,11 @@ inline TypePtr mk_list(TypePtr e) {
     t->sub.push_back(std::move(e));
     return t;
 }
+inline TypePtr mk_range(TypePtr e) {
+    auto t = new_ty(TyKind::Range);
+    t->sub.push_back(std::move(e));
+    return t;
+}
 inline TypePtr mk_set(TypePtr e) {
     auto t = new_ty(TyKind::Set);
     t->sub.push_back(std::move(e));
@@ -611,6 +617,9 @@ inline std::string type_name_impl(const TypePtr& t, int depth) {
         case TyKind::List:
             return t->sub.empty() ? "list"
                                   : std::format("list[{}]", type_name_impl(t->sub[0], depth + 1));
+        case TyKind::Range:
+            return t->sub.empty() ? "range"
+                                  : std::format("range[{}]", type_name_impl(t->sub[0], depth + 1));
         case TyKind::Set:
             return t->sub.empty() ? "set"
                                   : std::format("set[{}]", type_name_impl(t->sub[0], depth + 1));
@@ -714,6 +723,27 @@ inline std::string type_name_impl(const TypePtr& t, int depth) {
 
 inline std::string type_name(const TypePtr& t) { return type_name_impl(t, 0); }
 
+// 错误消息里的类型名不带参数：CPython 说 'tuple'，不说 'tuple[int]'。
+inline std::string bare_type_name(const TypePtr& t) {
+    if (!t) return "unknown";
+    switch (t->kind) {
+        case TyKind::None: return "NoneType";
+        case TyKind::Bool: return "bool";
+        case TyKind::Int: return "int";
+        case TyKind::Float: return "float";
+        case TyKind::Complex: return "complex";
+        case TyKind::Str: return "str";
+        case TyKind::Bytes: return "bytes";
+        case TyKind::List: return "list";
+        case TyKind::Range: return "range";
+        case TyKind::Set: return "set";
+        case TyKind::Dict: return "dict";
+        case TyKind::Tuple: return "tuple";
+        case TyKind::Generator: return "generator";
+        default: return type_name_impl(t, 0);
+    }
+}
+
 // ── 类型合并 ──────────────────────────────────────────────────────
 // 两个分支的类型不同时取公共上界；同一数值域内做提升，其余情况
 // 只要有一边是 Unknown 就取另一边，实在合不了就退化成 Unknown。
@@ -741,6 +771,9 @@ inline TypePtr join_into(const TypePtr& a, const TypePtr& b) {
     if (is_num(a) && is_num(b)) return t_float();
     if (a->kind == TyKind::List && b->kind == TyKind::List)
         return mk_list(join(a->sub[0], b->sub[0]));
+    if (a->kind == TyKind::Range && b->kind == TyKind::Range)
+        return mk_range(join(a->sub.empty() ? t_unknown() : a->sub[0],
+                             b->sub.empty() ? t_unknown() : b->sub[0]));
     if (a->kind == TyKind::Set && b->kind == TyKind::Set)
         return mk_set(join(a->sub[0], b->sub[0]));
     if (a->kind == TyKind::Dict && b->kind == TyKind::Dict)
@@ -827,6 +860,9 @@ inline bool assignable(const TypePtr& dst, const TypePtr& src) {
         return src->sub.empty() ? true : assignable(dst, src->sub[0]);
     if (dst->kind == TyKind::List && src->kind == TyKind::List)
         return assignable(dst->sub[0], src->sub[0]);
+    // range 不是 list：不能互相赋值（CPython 也是两回事）。
+    if (dst->kind == TyKind::Range && src->kind == TyKind::Range)
+        return dst->sub.empty() || src->sub.empty() || assignable(dst->sub[0], src->sub[0]);
     // 协程/生成器是只读产出，元素类型按协变放宽（coroutine[int] 可传给
     // coroutine[unknown] 的 asyncio.gather/run）。
     if (dst->kind == TyKind::Coroutine && src->kind == TyKind::Coroutine)

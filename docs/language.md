@@ -49,6 +49,7 @@ py23 借 Python 的语法外壳，但**不是 CPython 的实现**：语义按静
 | `bool` | `int` 的子类型，机器上是 0/1 |
 | `str` | 不可变字节串，`len` 在对象头里（O(1)） |
 | `list[T]` | 动态数组，元素 8 字节槽 |
+| `range[int]` | 惰性序列：只存边界，元素按需算（`range(10**9)` 不占内存） |
 | `tuple[...]` | 定长元组；`tuple[T, ...]` 表示变长 |
 | `None` | 单值类型 |
 | `Optional[T]` / `T \| None` | 可空 |
@@ -788,7 +789,7 @@ print(sorted(users, key=by_name))   # 键是 str，按字符串比
 `format` / `list` / `tuple` / `dict` / `set` / `frozenset` / `sorted` / `reversed` /
 `enumerate` / `zip` / `input` / `isinstance` / `getattr` / `setattr` /
 `hasattr` / `map` / `filter` / `callable` / `issubclass` / `hash`。
-`min` / `max` 支持多实参和 list/tuple/str/dict/set 迭代，空序列抛
+`min` / `max` 支持多实参和 list/tuple/str/dict/set/range 迭代，空序列抛
 `ValueError`；`sum` 支持可选的起始值；`any` / `all` 支持短路；`abs` /
 `pow` 支持 int 与 float，`pow(x, y, m)` 是 `(x ** y) % m`；
 `int("42")` / `int("ff", 16)` / `float("1.5")` 按 CPython 规则解析字符串
@@ -838,6 +839,11 @@ unknown 值上对带运行期类型标签的类型（str/list/dict/complex）走
 降级阶段报「not supported by the code generator yet」，不会再退化成调用
 空指针。
 
+`range(...)` 返回的是**惰性对象**（类型 `range[int]`）：只存起点、终点、步长，
+元素按需算。`len(r)` / `r[i]` / `x in r` / `for x in r` / 推导式都不物化，
+`range(10**9)` 只占几十字节。`list(r)` / `tuple(r)` / `sorted(r)` 这类需要
+真列表时才物化。range 是不可变的：`r[0] = 1` 报错，也没有 list 的那些
+方法。`repr(r)` 是 `"range(0, 10)"`，和 CPython 一样。
 
 ### 跳转与异常
 

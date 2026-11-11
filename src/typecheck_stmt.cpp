@@ -630,7 +630,8 @@ void TypeChecker::assign(Expr& target, TypePtr value, int line, int col) {
                 if (sl.step) expr(*sl.step);
                 if (!is_unknown(ot) && ot->kind != TyKind::List && ot->kind != TyKind::Optional)
                     err(line, col,
-                        std::format("'{}' does not support slice assignment", type_name(ot)));
+                        std::format("'{}' object does not support item assignment",
+                                    bare_type_name(ot)));
                 return;
             }
             if (ot->kind == TyKind::List) {
@@ -649,8 +650,9 @@ void TypeChecker::assign(Expr& target, TypePtr value, int line, int col) {
                                     type_name(ot)));
             } else if (!is_unknown(ot) && ot->kind != TyKind::Optional &&
                        ot->kind != TyKind::Class) {
-                err(line, col, std::format("'{}' does not support item assignment",
-                                           type_name(ot)));
+                // 措辞跟 CPython 一致：'range' object does not support item assignment
+                err(line, col, std::format("'{}' object does not support item assignment",
+                                           bare_type_name(ot)));
             }
             return;
         }

@@ -4,6 +4,57 @@
 
 早期阶段没有逐条留痕，按阶段归纳；0.4 之后逐条记录。
 
+## [0.84] - 2026-11-11
+
+`range` 根治：不再冒充 list，变成真正的惰性对象。
+
+### 修复
+
+- **`range(...)` 是惰性对象了**。以前 `range` 作为值使用会实体化成整数
+  列表：`r = range(10**9)` 就是当场造 10 亿个元素、8GB 内存，`len(range(n))` /
+  `range(n)[i]` / `sum(range(n))` 这些也都是列表语义。现在 `range` 有自己的
+  运行时表示（只存起点、终点、步长）和静态类型 `range[int]`：
+  - `len(r)` / `r[i]`（含负下标）/ `x in r` / `for x in r` / 推导式都不物化，
+    `range(10**9)` 只占几十字节；
+  - `sum` / `min` / `max` / `any` / `all` 按边界流式算，不建中间列表；
+  - `list(r)` / `tuple(r)` / `set(r)` / `sorted(r)` / `reversed(r)` /
+    `enumerate(r)` / `zip(r, ...)` 需要真列表时才物化；
+  - `repr(r)` 是 `"range(0, 10)"`，和 CPython 一样。
+- **生成器表达式的 range 源不再物化**（上一版只改了脱糖这一条路）：
+  `(x for x in range(10**9))` 既不建列表也不建中间结果，第一次 `next()` 就出 0。
+- **`range()` 的动态步长现在支持了**：`for x in range(0, 10, n)` 和
+  `(x for x in range(0, 10, n))` 都能跑（以前报「step must be an integer
+  literal」）。方向在运行期定，步长为 0 抛 ValueError。
+- **错误措辞按 CPython 对齐**：`min()/max()` 空序列改成
+  `min() iterable argument is empty`（list 与 range 两条路径都改）；
+  不可变对象的赋值/切片赋值改成 `'tuple' object does not support item
+  assignment` 这种 CPython 原话，类型名不带参数。
+
+### 已知限制
+
+- **range 不可变**：`r[0] = 1` 在 py23 是编译期报错，CPython 是运行期 TypeError
+  （消息一致）。
+- **动态步长为 0 时 ValueError 抛得比 CPython 晚**：CPython 在
+  `range(0, 10, 0)` 求值时抛，py23 在第一次 `next()` 时抛（字面量步长 0
+  仍然在创建时抛）。
+
+### 测试
+
+- `tests/run/74_range_object.py`：len / 下标（含负下标）/ 成员 / 归约 / 物化 /
+  repr / 相等 / 迭代 / 推导式 / 枚举 / zip，以及 10**9 的 range 不物化，
+  输出与 CPython 逐字节一致。
+- `tests/fail/f39_range_assign.py`：range 不可变，编译期就报错。
+- 差分测试新增 `range` 生成器（边界、下标、成员、归约、物化、推导式），
+  默认种子下零差异。
+- 用例数：反例 35→36，运行 73→74。
+
+### 文档
+
+- `docs/language.md`：类型表加 `range[int]`；内置函数那节补 range 对象的
+  语义（惰性、不可变、repr）。
+- `docs/compatibility.md`：「range 作为值仍然会实体化」改成「range 是惰性对象」，
+  说清还剩的两处差异；语义差异表加一行 range。
+
 ## [0.83] - 2026-11-11
 
 生成器表达式的 range 源改成真惰性。

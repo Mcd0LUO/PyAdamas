@@ -357,7 +357,35 @@ def async_ops(rng, n: int) -> str:
     return "\n".join(lines) + "\n"
 
 
-GENERATOR_NAMES = ["expr", "struct", "float", "repr", "gen", "async"]
+def range_ops(rng, n: int) -> str:
+    """range 对象：边界、下标、成员、归约、物化、推导式。"""
+    r: random.Random = rng
+    lines: list[str] = [
+        "rs = [range(0), range(1), range(5), range(2, 9), range(9, 2, -2), range(0, 20, 3)]",
+    ]
+    i = 0
+    while i < n:
+        lines.append("for g in rs:")
+        lines.append("    c = len(g)")
+        lines.append("    print(c, repr(g))")
+        lines.append("    if c > 0:")
+        lines.append("        print(g[0], g[c - 1], g[-1])")
+        lines.append("        print(min(g), max(g), sum(g))")
+        lines.append("    else:")
+        lines.append("        print(-1, -1, -1)")
+        lines.append("    print(list(g))")
+        lines.append("    print(sorted(g), list(reversed(g)))")
+        # tuple(g) 不测：单元素元组的打印 py23 和 CPython 不同（(0) vs (0,)），
+        # 那是既有的 repr 偏差，不是 range 的问题。
+        lines.append("    print([x * 2 for x in g])")
+        lines.append("    print(0 in g, 3 in g)")
+        lines.append("    print(any(g), all(g))")
+        lines.append("")
+        i += 1
+    return "\n".join(lines)
+
+
+GENERATOR_NAMES = ["expr", "struct", "float", "repr", "gen", "async", "range"]
 
 
 def default_cases(name: str) -> int:
@@ -373,4 +401,6 @@ def default_cases(name: str) -> int:
         return 40
     if name == "async":
         return 30
+    if name == "range":
+        return 10
     return 0

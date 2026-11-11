@@ -729,6 +729,16 @@ void AsmGen::gen_call_rt(const Inst& in) {
             case RtFn::AsyncioTaskResult:
             case RtFn::AsyncioTaskException:
             case RtFn::AsyncioTaskCancelled:
+            case RtFn::RangeLen:
+            case RtFn::RangeFirst:
+            case RtFn::RangeStep:
+            case RtFn::RangeStop:
+            case RtFn::RangeMinI64:
+            case RtFn::RangeMaxI64:
+            case RtFn::RangeAny:
+            case RtFn::RangeAll:
+            case RtFn::RangeToList:
+            case RtFn::RangeRepr:
                 emit2("movq", src_op(in.args[0]), "%rdi");
                 break;
             case RtFn::AsyncioWaitFd:
@@ -760,6 +770,10 @@ void AsmGen::gen_call_rt(const Inst& in) {
             case RtFn::AsyncGenAsend:
             case RtFn::SetEq:
             case RtFn::DictGetOpt:
+            case RtFn::RangeGet:
+            case RtFn::RangeContains:
+            case RtFn::RangeEq:
+            case RtFn::RangeSumI64:
                 emit2("movq", src_op(in.args[0]), "%rdi");
                 emit2("movq", src_op(in.args[1]), "%rsi");
                 break;
@@ -772,6 +786,7 @@ void AsmGen::gen_call_rt(const Inst& in) {
                 emit2("movq", src_op(in.args[1]), "%rdi");
                 break;
             case RtFn::ListSumF64:
+            case RtFn::RangeSumF64:
                 emit2("movq", src_op(in.args[0]), "%rdi");
                 emit2("movsd", src_op(in.args[1]), "%xmm0");
                 break;

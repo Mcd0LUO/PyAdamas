@@ -349,6 +349,12 @@ void Lowerer::lower_for(For& f) {
         lower_for_file(f);
         return;
     }
+    // range 对象：边界从对象里读，逐个产出，不物化。
+    if (TypePtr it = tc_.type_of(f.iter.get()); it && it->kind == TyKind::Range) {
+        VReg r = expr(*f.iter);
+        lower_for_range_obj(f, r);
+        return;
+    }
     lower_for_seq(f);
 }
 
@@ -392,7 +398,24 @@ void Lowerer::lower_for_range(For& f, Call& c) {
         }
     }
 
+    lower_for_range_core(f, start, stop, step_v, dyn_step, step, &c);
+}
 
+// range 对象当迭代源：边界从对象里读，步长方向运行期定。
+void Lowerer::lower_for_range_obj(For& f, VReg r) {
+    if (f.target->kind != ExprKind::Name) {
+        err(f.line, f.col, "for-loop variable must be a name for range()");
+        return;
+    }
+    VReg start = call_runtime(RtFn::RangeFirst, t_int(), {r});
+    VReg stop = call_runtime(RtFn::RangeStop, t_int(), {r});
+    VReg step = call_runtime(RtFn::RangeStep, t_int(), {r});
+    lower_for_range_core(f, start, stop, step, true, 1, nullptr);
+}
+
+// 计数循环的本体：range(...) 调用和 range 对象共用。
+void Lowerer::lower_for_range_core(For& f, VReg start, VReg stop, VReg step_v, bool dyn_step,
+                                    int64_t step, const Call* c) {
     // 循环计数器独立于用户变量：Python 里在循环体里给 i 重新赋值
     // 不影响迭代，计数器必须是私有的。
     int ctr = new_temp_slot(t_int());
@@ -504,16 +527,16 @@ void Lowerer::lower_for_range(For& f, Call& c) {
     // side_effect_seq_ 统一挡（它们都可能改变 a 的长度）。
     FuncCtx::BoundsHint bounds_hint;
     bool have_bounds_hint = false;
-    if (opts_.opt_level >= 1 && !st_->is_generator) {
+    if (opts_.opt_level >= 1 && !st_->is_generator && c) {
         auto int_is = [](const Expr* e, int64_t v) {
             if (!e || e->kind != ExprKind::Constant) return false;
             const auto& ce = static_cast<const Constant&>(*e);
             return ce.ck == Constant::CK::Int && ce.i == v;
         };
         bool zero_start =
-            c.args.size() == 1 || (c.args.size() >= 2 && int_is(c.args[0].get(), 0));
-        bool unit_step = !dyn_step && (c.args.size() < 3 || step == 1);
-        const Expr* stop_arg = c.args.size() == 1 ? c.args[0].get() : c.args[1].get();
+            c->args.size() == 1 || (c->args.size() >= 2 && int_is(c->args[0].get(), 0));
+        bool unit_step = !dyn_step && (c->args.size() < 3 || step == 1);
+        const Expr* stop_arg = c->args.size() == 1 ? c->args[0].get() : c->args[1].get();
         if (zero_start && unit_step && stop_arg->kind == ExprKind::Call) {
             const auto& lc = static_cast<const Call&>(*stop_arg);
             if (lc.func->kind == ExprKind::Name &&

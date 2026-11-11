@@ -477,6 +477,7 @@ TypePtr TypeChecker::expr(Expr& e) {
                         case TyKind::Tuple:
                         case TyKind::Dict:
                         case TyKind::Set:
+                        case TyKind::Range:
                             elem = vt->sub.empty() ? t_unknown() : vt->sub[0];
                             break;
                         case TyKind::Str:
@@ -797,7 +798,7 @@ void TypeChecker::compare_type(CmpOp op, TypePtr l, TypePtr r, int line, int col
             case CmpOp::NotIn:
                 if (r->kind == TyKind::List || r->kind == TyKind::Set || r->kind == TyKind::Str ||
                     r->kind == TyKind::Bytes || r->kind == TyKind::Dict ||
-                    r->kind == TyKind::Tuple)
+                    r->kind == TyKind::Tuple || r->kind == TyKind::Range)
                     return;
                 // 类可能实现了 __iter__（或从外部基类继承），静态上看不见
                 if (r->kind == TyKind::Class) return;
@@ -813,6 +814,10 @@ TypePtr TypeChecker::subscript_type(TypePtr obj, TypePtr idx, int line, int col)
                 if (!is_unknown(idx) && idx->kind != TyKind::Int && idx->kind != TyKind::Bool)
                     err(line, col, std::format("list index must be int, got '{}'", type_name(idx)));
                 return obj->sub[0];
+            case TyKind::Range:
+                if (!is_unknown(idx) && idx->kind != TyKind::Int && idx->kind != TyKind::Bool)
+                    err(line, col, std::format("range index must be int, got '{}'", type_name(idx)));
+                return obj->sub.empty() ? t_int() : obj->sub[0];
             case TyKind::Str:
                 if (!is_unknown(idx) && idx->kind != TyKind::Int && idx->kind != TyKind::Bool)
                     err(line, col, std::format("string index must be int, got '{}'", type_name(idx)));
@@ -846,6 +851,8 @@ TypePtr TypeChecker::iter_elem(TypePtr it, int line, int col) {
             case TyKind::List:
             case TyKind::Set:
                 return it->sub[0];
+            case TyKind::Range:
+                return it->sub.empty() ? t_int() : it->sub[0];
             case TyKind::Str: return t_str();
             case TyKind::Bytes: return t_int();
             case TyKind::Dict: return it->sub[0];

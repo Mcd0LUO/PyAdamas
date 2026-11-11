@@ -47,6 +47,8 @@ static int gc_untracked_leaves;
 static int rc_leaf_untracked(const Py23Rc* h) {
     if (!gc_untracked_leaves) return 0;
     if (h->kind == PY23_RC_STR) return 1;
+    // range 只存边界，没有堆字段（出边为零），不可能处在环里。
+    if (h->kind == PY23_RC_RANGE) return 1;
     if (h->kind == PY23_RC_INSTANCE && !h->dtor && !h->release) return 1;
     return 0;
 }
@@ -536,6 +538,9 @@ void gc_scan_object(Py23Rc* h) {
             }
             break;
         }
+        case PY23_RC_RANGE:
+            // range 的负载是四个整数，没有子对象要标记。
+            break;
         case PY23_RC_CLOSURE:
         case PY23_RC_OBJ:
         case PY23_RC_INSTANCE: {

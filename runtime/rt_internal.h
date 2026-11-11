@@ -30,6 +30,15 @@ typedef struct {
     int64_t elem_kind;
 } Py23List;
 
+/* range 是惰性对象：只存边界，元素按需算。和 CPython 的 range 一样，
+   range(10**9) 只占几十字节，不会当场造十亿个元素。 */
+typedef struct {
+    int64_t start;
+    int64_t stop;
+    int64_t step;
+    int64_t len;
+} Py23Range;
+
 /* 字典 = 密集 entries（插入顺序）+ 开放寻址索引表。index 槽存
    「entry 下标 + 1」，0 表示空；查找先走 4 字节索引，命中才读 entry。
    扩容/删除只重建索引，entries 顺序不动。set 复用同一结构，
@@ -64,6 +73,8 @@ enum {
     /* 用户类实例。和帧/await/异常值等 OBJ 负载分开，isinstance 才能
        安全地把 payload 第一个字解释成 vtable 指针。 */
     PY23_RC_INSTANCE = 5,
+    /* range：没有堆字段（出边为零），不可能成环，按叶子对象处理。 */
+    PY23_RC_RANGE = 6,
 };
 
 typedef struct Py23Rc {
@@ -410,6 +421,22 @@ Py23File* py23_sys_stream(int64_t which);
 void list_destroy(void* p);
 void list_gc_release(void* p);
 Py23List* py23_list_new(int64_t cap, int64_t elem_kind);
+Py23Range* py23_range_new(int64_t start, int64_t stop, int64_t step);
+int64_t py23_range_len(Py23Range* r);
+int64_t py23_range_first(Py23Range* r);
+int64_t py23_range_step(Py23Range* r);
+int64_t py23_range_stop(Py23Range* r);
+int64_t py23_range_get(Py23Range* r, int64_t i);
+int64_t py23_range_contains(Py23Range* r, int64_t v);
+int64_t py23_range_eq(Py23Range* a, Py23Range* b);
+int64_t py23_range_sum_i64(Py23Range* r, int64_t start);
+double py23_range_sum_f64(Py23Range* r, double start);
+int64_t py23_range_min_i64(Py23Range* r);
+int64_t py23_range_max_i64(Py23Range* r);
+int64_t py23_range_any(Py23Range* r);
+int64_t py23_range_all(Py23Range* r);
+Py23List* py23_range_to_list(Py23Range* r);
+Py23Str* py23_range_repr(Py23Range* r);
 void py23_list_append(Py23List* l, int64_t v);
 int64_t py23_list_get(Py23List* l, int64_t i);
 void py23_list_set(Py23List* l, int64_t i, int64_t v);
@@ -491,7 +518,6 @@ Py23List* py23_list_slice(Py23List* src, int64_t start, int64_t stop, int64_t st
 Py23Str* py23_str_slice(Py23Str* src, int64_t start, int64_t stop, int64_t step);
 void py23_list_slice_assign(Py23List* dst, int64_t start, int64_t stop, int64_t step, Py23List* src);
 Py23List* py23_str_to_list(Py23Str* s);
-Py23List* py23_range_new(int64_t start, int64_t stop, int64_t step);
 void* py23_obj_new(int64_t size, void (*dtor)(void*), void (*release)(void*));
 size_t gc_hash(uintptr_t p);
 void gc_table_insert(Py23Rc* h);

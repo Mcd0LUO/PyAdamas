@@ -159,18 +159,110 @@ Py23List* py23_str_to_list(Py23Str* s) {
     return out;
 }
 
-/* range(...) 作为值使用时实体化成整数列表。for 循环走的是专门的
-   计数循环，不经过这里。 */
-Py23List* py23_range_new(int64_t start, int64_t stop, int64_t step) {
+/* ── range ─────────────────────────────────────────────────────── */
+
+/* range 是惰性对象：只存边界，元素按需算。CPython 的 range 也是这样——
+   range(10**9) 只占几十字节，不会当场造十亿个元素。
+   以前这里是把 range 实体化成整数列表，range(10**9) 就是 8GB 内存。 */
+Py23Range* py23_range_new(int64_t start, int64_t stop, int64_t step) {
     if (step == 0) py23_raise_c("ValueError", "range() arg 3 must not be zero");
     int64_t n;
+    // 写成 (stop - start - 1) / step + 1：比 (stop - start + step - 1) / step
+    // 少一次加法，边界上不容易溢出。
     if (step > 0)
-        n = stop > start ? (stop - start + step - 1) / step : 0;
+        n = stop > start ? (stop - start - 1) / step + 1 : 0;
     else
-        n = stop < start ? (start - stop + (-step) - 1) / (-step) : 0;
-    Py23List* out = py23_list_new(n, 0);
-    for (int64_t i = 0, v = start; i < n; ++i, v += step)
-        py23_list_append(out, v);
+        n = stop < start ? (start - stop - 1) / (-step) + 1 : 0;
+    Py23Range* r = (Py23Range*)rc_alloc((int64_t)sizeof(Py23Range), NULL, NULL,
+                                        PY23_RC_RANGE);
+    r->start = start;
+    r->stop = stop;
+    r->step = step;
+    r->len = n;
+    return r;
+}
+
+int64_t py23_range_len(Py23Range* r) { return r->len; }
+
+int64_t py23_range_first(Py23Range* r) { return r->start; }
+
+int64_t py23_range_step(Py23Range* r) { return r->step; }
+
+int64_t py23_range_stop(Py23Range* r) { return r->stop; }
+
+int64_t py23_range_get(Py23Range* r, int64_t i) {
+    if (i < 0) i += r->len;
+    if (i < 0 || i >= r->len)
+        py23_raise_c("IndexError", "range object index out of range");
+    return r->start + i * r->step;
+}
+
+int64_t py23_range_contains(Py23Range* r, int64_t v) {
+    if (r->len == 0) return 0;
+    if (r->step > 0) {
+        if (v < r->start || v >= r->stop) return 0;
+    } else {
+        if (v > r->start || v <= r->stop) return 0;
+    }
+    return ((v - r->start) % r->step) == 0 ? 1 : 0;
+}
+
+int64_t py23_range_eq(Py23Range* a, Py23Range* b) {
+    if (a == b) return 1;
+    return (a->start == b->start && a->stop == b->stop && a->step == b->step) ? 1 : 0;
+}
+
+int64_t py23_range_sum_i64(Py23Range* r, int64_t start) {
+    int64_t s = start;
+    for (int64_t i = 0; i < r->len; ++i) s += r->start + i * r->step;
+    return s;
+}
+
+double py23_range_sum_f64(Py23Range* r, double start) {
+    double s = start;
+    for (int64_t i = 0; i < r->len; ++i) s += (double)(r->start + i * r->step);
+    return s;
+}
+
+int64_t py23_range_min_i64(Py23Range* r) {
+    if (r->len == 0) py23_raise_c("ValueError", "min() iterable argument is empty");
+    return r->step > 0 ? r->start : r->start + (r->len - 1) * r->step;
+}
+
+int64_t py23_range_max_i64(Py23Range* r) {
+    if (r->len == 0) py23_raise_c("ValueError", "max() iterable argument is empty");
+    return r->step > 0 ? r->start + (r->len - 1) * r->step : r->start;
+}
+
+int64_t py23_range_any(Py23Range* r) {
+    for (int64_t i = 0; i < r->len; ++i)
+        if (r->start + i * r->step) return 1;
+    return 0;
+}
+
+int64_t py23_range_all(Py23Range* r) {
+    for (int64_t i = 0; i < r->len; ++i)
+        if (!(r->start + i * r->step)) return 0;
+    return 1;
+}
+
+/* 需要一个真列表时（list(range(n)) / sorted(range(n))）才物化。 */
+Py23List* py23_range_to_list(Py23Range* r) {
+    Py23List* out = py23_list_new(r->len, 0);
+    for (int64_t i = 0; i < r->len; ++i)
+        py23_list_append(out, r->start + i * r->step);
     return out;
+}
+
+Py23Str* py23_range_repr(Py23Range* r) {
+    char buf[96];
+    int n;
+    if (r->step == 1)
+        n = snprintf(buf, sizeof buf, "range(%lld, %lld)", (long long)r->start,
+                     (long long)r->stop);
+    else
+        n = snprintf(buf, sizeof buf, "range(%lld, %lld, %lld)", (long long)r->start,
+                     (long long)r->stop, (long long)r->step);
+    return str_new(buf, (int64_t)n);
 }
 

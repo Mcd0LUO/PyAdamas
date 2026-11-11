@@ -233,6 +233,8 @@ void enc_type(Enc& e, const TypePtr& t) {
         case TyKind::AsyncSemaphore:
         case TyKind::Exception:
         case TyKind::Complex:
+        // range 跨模块接口暂不支持：按 unknown 处理
+        case TyKind::Range:
         case TyKind::File:
         case TyKind::Random:
         case TyKind::CompletedProcess:

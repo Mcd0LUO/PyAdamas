@@ -32,6 +32,6 @@ print(sum(big), min(big), max(big))
 # 24.0 25.5
 # 7
 # 0.5
-# min min() arg is an empty sequence
-# max max() arg is an empty sequence
+# min min() iterable argument is empty
+# max max() iterable argument is empty
 # 499500 0 999

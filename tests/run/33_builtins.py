@@ -54,8 +54,8 @@ print(any(["", ""]))
 # 3
 # 1024
 # 6.25
-# empty min() arg is an empty sequence
-# empty2 max() arg is an empty sequence
+# empty min() iterable argument is empty
+# empty2 max() iterable argument is empty
 # True
 # False
 # True

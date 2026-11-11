@@ -62,7 +62,7 @@ TypePtr TypeChecker::builtin_call(const std::string& n, Call& c) {
             if (a.size() != 1) return t_int();
             if (!is_unknown(a[0]) && a[0]->kind != TyKind::List && a[0]->kind != TyKind::Str &&
                 a[0]->kind != TyKind::Bytes && a[0]->kind != TyKind::Dict && a[0]->kind != TyKind::Tuple &&
-                a[0]->kind != TyKind::Set && a[0]->kind != TyKind::Class)
+                a[0]->kind != TyKind::Set && a[0]->kind != TyKind::Range && a[0]->kind != TyKind::Class)
                 err(c.line, c.col,
                     std::format("object of type '{}' has no len()", type_name(a[0])));
             return t_int();
@@ -72,7 +72,8 @@ TypePtr TypeChecker::builtin_call(const std::string& n, Call& c) {
                 if (!is_unknown(t) && t->kind != TyKind::Int)
                     err(c.line, c.col,
                         std::format("'range' argument must be int, got '{}'", type_name(t)));
-            return mk_list(t_int());
+            // range 是惰性对象，不是列表：range(10**9) 不造十个亿元素。
+            return mk_range(t_int());
         }
         if (n == "abs") {
             if (a.empty()) return t_unknown();
@@ -154,7 +155,7 @@ TypePtr TypeChecker::builtin_call(const std::string& n, Call& c) {
             if (!ok && tt && tt->kind == TyKind::Func && tt->fn) {
                 static const std::unordered_set<std::string> types = {
                     "int", "float", "str", "bool", "list",
-                    "tuple", "dict", "set", "complex", "object",
+                    "tuple", "dict", "set", "complex", "object", "range",
                 };
                 ok = types.count(tt->fn->name) > 0;
             }

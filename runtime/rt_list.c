@@ -396,7 +396,7 @@ double py23_list_sum_f64(Py23List* l, double start) {
 }
 
 int64_t py23_list_min_i64(Py23List* l) {
-    if (l->len <= 0) py23_raise_c("ValueError", "min() arg is an empty sequence");
+    if (l->len <= 0) py23_raise_c("ValueError", "min() iterable argument is empty");
 #if defined(__x86_64__) && defined(__GNUC__)
     if (py23_has_avx2()) return list_min_i64_avx2(l->data, l->len);
 #endif
@@ -407,7 +407,7 @@ int64_t py23_list_min_i64(Py23List* l) {
 }
 
 int64_t py23_list_max_i64(Py23List* l) {
-    if (l->len <= 0) py23_raise_c("ValueError", "max() arg is an empty sequence");
+    if (l->len <= 0) py23_raise_c("ValueError", "max() iterable argument is empty");
 #if defined(__x86_64__) && defined(__GNUC__)
     if (py23_has_avx2()) return list_max_i64_avx2(l->data, l->len);
 #endif

@@ -276,7 +276,7 @@ VReg Lowerer::lower_comp(Expr& e) {
 
         bool ok = sty && (sty->kind == TyKind::List || sty->kind == TyKind::Tuple ||
                           sty->kind == TyKind::Str || sty->kind == TyKind::Dict ||
-                          sty->kind == TyKind::Set);
+                          sty->kind == TyKind::Set || sty->kind == TyKind::Range);
         if (!ok) {
             err(g.iter->line, g.iter->col,
                 std::format("cannot iterate over '{}' in a comprehension", type_name(sty)));
@@ -295,6 +295,10 @@ VReg Lowerer::lower_comp(Expr& e) {
         ln.op = IrOp::Len;
         ln.a = seq;
         VReg n = def(t_int(), std::move(ln));
+        if (sty->kind == TyKind::Range) {
+            // range 的长度按边界算，不物化
+            n = call_runtime(RtFn::RangeLen, t_int(), {seq});
+        }
 
         int seq_slot = -1;
         int n_slot = -1;
@@ -350,7 +354,10 @@ VReg Lowerer::lower_comp(Expr& e) {
         clean();
         VReg iv2 = load_slot(idx, t_int());
         VReg ev;
-        if (sty->kind == TyKind::Dict || sty->kind == TyKind::Set) {
+        if (sty->kind == TyKind::Range) {
+            // range 的元素按边界算，不物化
+            ev = call_runtime(RtFn::RangeGet, ety, {seq_val(), iv2});
+        } else if (sty->kind == TyKind::Dict || sty->kind == TyKind::Set) {
             ev = call_runtime(RtFn::DictKeyAt, ety, {seq_val(), iv2});
         } else {
             if (!async_mode && opts_.opt_level >= 1 &&

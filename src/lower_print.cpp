@@ -17,6 +17,13 @@ void Lowerer::print_value(VReg v, TypePtr ty, int line, int col) {
         case TyKind::Bytes: call_void(RtFn::PrintBytes, {v}); break;
         case TyKind::Int: call_void(RtFn::PrintI64, {v}); break;
         case TyKind::List: print_seq(v, ty, false, false, line, col); break;
+        case TyKind::Range: {
+            // range 打印成 "range(0, 10)"，和 CPython 一样
+            VReg s = call_runtime(RtFn::RangeRepr, t_str(), {v});
+            push_temp(s);
+            call_void(RtFn::PrintStr, {s});
+            break;
+        }
         case TyKind::Tuple: print_seq(v, ty, true, false, line, col); break;
         case TyKind::TypeObj:
             call_void(RtFn::PrintStr, {const_str("<class '")});
@@ -101,6 +108,12 @@ void Lowerer::print_value_to_file(VReg v, TypePtr ty, int line, int col) {
     VReg f = load_slot(print_file_slot_, t_file());
     switch (ty->kind) {
         case TyKind::List: print_seq(v, ty, false, true, line, col); return;
+        case TyKind::Range: {
+            VReg s = call_runtime(RtFn::RangeRepr, t_str(), {v});
+            push_temp(s);
+            call_void(RtFn::FileWrite, {f, s});
+            return;
+        }
         case TyKind::Tuple: print_seq(v, ty, true, true, line, col); return;
         case TyKind::TypeObj: {
             call_void(RtFn::FileWrite, {f, const_str("<class '")});
