@@ -52,7 +52,7 @@
 
 ### 3. `bytes` 收尾
 
-字面量、索引/切片、`encode`/`decode`、`+`/`in`/比较已经通了（0.79）。剩下：`for c in b"..."`（要转 `list[int]`）、格式化与 `%`、`join`/`find`/`split` 等方法、跨模块接口不再降级成 `unknown`。
+字面量、索引/切片、`encode`/`decode`、`+`/`in`/比较已经通了（0.79）。剩下：`for c in b"..."`（要转 `list[int]`）、格式化与 `%`、`join`/`find`/`split` 等方法、相邻字面量拼接（`b"a" b"b"` 现在被拒）、跨模块接口不再降级成 `unknown`。
 
 ### 4. C FFI + buffer + BLAS
 
@@ -60,7 +60,7 @@
 
 ### 5. 工程收尾
 
-- 重跑 0.75 的标准库前端基线（`bytes` 仍拒，`match`/`complex` 已支持，口径已变）；
+- 重跑标准库前端基线：0.81 已在 Debian python3.13.5 上重跑过一次（见 [compatibility.md](compatibility.md#前端鲁棒性基线)），但原口径（CPython 3.11.1 + site-packages，38582 个文件）还没重跑；
 - 保持 `docs/` 与 README 的验证表同步；
 - 把临时性能基准固化成 `tests/bench/`（可选）。
 

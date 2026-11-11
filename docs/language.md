@@ -12,13 +12,15 @@ py23 借 Python 的语法外壳，但**不是 CPython 的实现**：语义按静
 | 缩进 | 空格与制表符混用按 tabstop=8 展开；缩进栈不匹配报 `IndentationError` 风格的错 |
 | 续行 | 括号内隐式续行；行尾 `\` 显式续行 |
 | 注释 | `#` 到行尾；`# type: ignore` 一类注释不特殊处理 |
-| 数字 | 十进制 / `0x` / `0o` / `0b`，支持 `_` 分隔；浮点支持 `.5`、`5.`、指数、`j` 后缀直接拒绝 |
-| 字符串 | 单/双/三引号，前缀 `r` `b` `f` `rf` 任意顺序组合；相邻字面量自动拼接 |
+| 数字 | 十进制 / `0x` / `0o` / `0b`，支持 `_` 分隔；浮点支持 `.5`、`5.`、指数；`j` 后缀是复数字面量（0.74 起支持） |
+| 字符串 | 单/双/三引号，前缀 `r` `b` `f` `rb` `br` `rf` `fr` 任意顺序组合；相邻字面量自动拼接（只对 `str` / f-string 生效，`bytes` 不行，见下） |
 | f-string | 按 PEP 701 解析：同引号嵌套、自文档化 `f"{x=}"`、spec 里再嵌 `{}` 都支持；format spec 支持 fill/align/sign/`0`/width/precision/类型 `d,b,o,x,X,f,e,E,g,G,%` 与 `!s/!r/!a` |
 
-有几处词法层就拒绝，因为语义没有对应物：`bytes` 字面量、超出 int64 的整数、`0x1L` 这类 Python 2 写法。
+有几处词法层就拒绝，因为语义没有对应物：超出 int64 的整数、`0x1L` 这类 Python 2 写法。（`bytes` 字面量 0.79 起支持，运行时复用 `str` 的表示。）
 
 `\N{NAME}` 是个特殊处理：词法层整体吞掉（否则 `{` 会被当成 f-string 的替换字段），但不查 Unicode 名字表，字符串里保留原文。
+
+相邻字面量拼接只对 `str` 生效：`"a" "b"`、`f"a" f"b"` 可以拼，`b"a" b"b"` 不行（0.79 加 `bytes` 时漏了这条——解析器只对 `str` / f-string 走拼接分支）。
 
 ## 语法子集
 
@@ -240,7 +242,8 @@ print(f(), f(), g())    # 1 2 1
 转发（不能依赖 `*args` 转发给 unknown 被装饰者）。方法装饰器支持
 `@staticmethod`（实例和 `Class.method` 调用，不传 self）、`@property`、
 `@x.setter` 和 `@x.deleter`；属性访问编译成 getter/setter/deleter 的虚调用。
-`@classmethod`、自定义方法装饰器和类装饰器仍被后端拒绝。
+`@classmethod` 也支持（`cls` 静态绑定到所属类，见下面「类属性与 `@classmethod`」）；
+自定义方法装饰器和类装饰器仍被后端拒绝。
 
 相互递归的嵌套闭包会形成 cell 环；这类环不是引用计数能处理的，由下面的
 循环收集器回收。
@@ -624,7 +627,9 @@ class Config:
 ### 文件
 
 `open(file, mode='r', buffering=-1, encoding=None, errors=None, newline=None,
-closefd=True)` 返回文件对象，位置/关键字参数按 CPython 的名字绑定：
+closefd=True)` 返回文件对象，位置/关键字参数按 CPython 的名字绑定。文本模式
+默认 UTF-8。文件对象目前只支持 `str` 读写——`write()` 传 `bytes` 会被拒
+（`bytes` 类型 0.79 才有，文件接口还没接）：
 `file` 是路径字符串或文件描述符；`mode` 校验 `r/w/a/x` 与 `+`/`b`/`t`
 的组合；`buffering` 的 0/1/>1 分别映射无缓冲/行缓冲/全缓冲（文本模式不允许
 0）；`encoding` 支持任意 glibc iconv 认识的编码名（大小写与 `-`/`_` 不敏感，
@@ -706,7 +711,7 @@ CPython 一致。
   超时抛 `TimeoutExpired`，`check=True` 且退出码非零抛
   `CalledProcessError`。这两个异常按 py23 的内置异常名匹配，直接写
   `except TimeoutExpired`；`from subprocess import TimeoutExpired` 暂不
-  支持。与 CPython 的偏差：没有 bytes 类型，`text=False` 也返回 `str`；
+  支持。与 CPython 的偏差：不返回 bytes，`text=False` 也返回 `str`；
   没有捕获时 `.stdout` / `.stderr` 是空串（CPython 是 `None`）；
   `input` / `cwd` / `env` / `shell` 等参数未实现；exec 失败按退出码
   127 返回。
@@ -727,16 +732,10 @@ CPython 一致。
   `group`/`groups`/`start`/`end`/`span`。支持字面量、`.`、字符类、
   `\d\w\s\D\W\S`、`\b`、`^ $`、分组（`(...)`/`(?:...)`/`(?P<name>...)`）、
   交替、`* + ? {m,n}`（含惰性）和 `I`/`M`/`S` 标志；字符串按字节匹配。
-  v1 不支持 lookaround、反向引用、条件组；`findall` 返回整段匹配，
-  `split` 不含捕获组，未匹配分组返回空串。
-
-### 文件
-
-`open(path, mode="r", encoding="utf-8")` 返回文件对象，支持 `read` /
-`readline` / `readlines` / `write` / `writelines` / `close` / `flush` /
-`seek` / `tell` / `truncate`、迭代和 `with`。文本模式默认 UTF-8；没有
-bytes，读写都是 `str`。`input()` 从 stdin 读一行；`sys.stdin` /
-`sys.stdout` / `sys.stderr` 是文件对象。
+  v2 支持反向引用（`\1`..`\99`、`(?P=name)`）、四向断言、`(?>)` 原子组、
+  占有量词、内联标志（`(?i)` / `(?im-sx)` / `(?i:...)`）与 `re.X`；
+  `findall` 只有一个捕获组时返回组内容（多个时返回整段匹配），`split`
+  按序插入捕获组。仍不支持条件组与 Unicode 属性类。
 
 ### 内置函数
 
@@ -886,12 +885,14 @@ match value:
 
 **语法层**（`check` 就报错）：
 
-- `bytes` 字面量，超出 int64 的整数
+- 超出 int64 的整数
 - `await` 在函数外、`break` 在循环外
 - Python 2 遗留写法（`0x1L`、`lambda (a, b):`、`except X, e`）
+- PEP 695 泛型语法（`class C[T]:`）
+- 相邻 `bytes` 字面量拼接（`b"a" b"b"`）
 - 类：方法缺 `self`、字段赋值类型不符、访问不存在的字段或方法（`self.xxx` 与外部基类的成员除外）
 
-**代码生成层**（`check` 通过，`build` 报错）：类装饰器、`@classmethod`、自定义方法装饰器、容器元素跨数值域的转换（`list`/`tuple`/`dict`/`set` 的 int → float 赋值/实参）、通过 unknown 函数值的 `*` / `**` 展开、`*` 位于固定形参之前且不是定长 tuple、非异常类名当异常用、`finally` 体内跳出 finally 的控制流、跨模块继承、把类名当值用（`f = Point`）、函数内定义类、异步生成器表达式、嵌在其它表达式里的异步推导式。生成器的额外限制：`yield` / `yield from` 只能作为语句或赋值右值，不能出现在 `finally` / `except` 体内；协程的 `await` 同样。异步生成器有 `asend`/`athrow`/`__anext__`/`aclose`。自定义异常类目前只支持 `pass` 类体（字段/方法会被拒绝）。类体字段默认值里的 `lambda` 也在这一层拒绝。match 额外拒绝：导入类模式的字段子模式、unknown 值上的数值/list/dict/tuple/set 内置类型模式。
+**代码生成层**（`check` 通过，`build` 报错）：类装饰器、自定义方法装饰器、容器元素跨数值域的转换（`list`/`tuple`/`dict`/`set` 的 int → float 赋值/实参）、通过 unknown 函数值的 `*` / `**` 展开、`*` 位于固定形参之前且不是定长 tuple、非异常类名当异常用、`finally` 体内跳出 finally 的控制流、跨模块继承、把类名当值用（`f = Point`）、函数内定义类、异步生成器表达式、嵌在其它表达式里的异步推导式。生成器的额外限制：`yield` / `yield from` 只能作为语句或赋值右值，不能出现在 `finally` / `except` 体内；协程的 `await` 同样。异步生成器有 `asend`/`athrow`/`__anext__`/`aclose`。自定义异常类目前只支持 `pass` 类体（字段/方法会被拒绝）。类体字段默认值里的 `lambda` 也在这一层拒绝。match 额外拒绝：导入类模式的字段子模式、unknown 值上的数值/list/dict/tuple/set 内置类型模式。
 
 为什么这么分层：前端宽、后端严。`check` 的定位是「语法和类型有没有明显毛病」，可以对任意 Python 文件跑；`build` 才是「这门语言现在能不能编译它」。
 

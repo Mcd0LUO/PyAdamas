@@ -39,14 +39,14 @@ py23 不追求兼容 CPython：语义是按静态类型的需要重新定的。�
 | 协议 dunder | `__str__`/`__repr__`/`__eq__`/`__ne__`/`__len__`/`__hash__`/`__contains__`/`__iter__`/算术与比较类 dunder 走 vtable；`in` 需要 `__contains__`，`<` 等需要比较 dunder，算术需要对应 dunder，否则编译报错 | 完整数据模型 | `__format__`/`__bool__`/`__reversed__` 未建模；`__eq__` 的 other 限 unknown 或类类型；只定义 `__eq__` 没定义 `__hash__` 的类在 dict/set 里按身份处理 |
 | `random` | MT19937 与 CPython 同种子同序列；模块级函数和 `Random` 实例方法；`choice` 支持 list/tuple/str，`shuffle` 仅 list | 完整 random（`randrange`/`gauss`/bytes 等未实现） | 只实现常用方法；省略种子时时间 + pid 播种 |
 | `os` / `os.path` | `listdir`/`getenv`/`mkdir`/`rmdir`/`remove`/`rename`/`getcwd`/`cpu_count`；`join`/`exists`/`isdir`/`isfile`/`basename`/`dirname`/`normpath`/`abspath`/`expanduser`/`splitext` | 完整 os | `getenv` 缺失返回空串（CPython 返回 None）；`os.path` 是独立模块别名：`import os.path as p` 或 `from os.path import ...`，`import os` 后 `os.path.x` 暂不支持 |
-| `subprocess` | `run` 支持 `capture_output`/`text`/`timeout`/`check`，返回 `CompletedProcess`（`.returncode`/`.stdout`/`.stderr`）；`TimeoutExpired`/`CalledProcessError` 按内置异常名捕获 | 完整 subprocess | 没有 bytes：`text=False` 也返回 str；未捕获时 `.stdout`/`.stderr` 为空串；`input`/`cwd`/`env`/`shell` 未实现；exec 失败按退出码 127；`from subprocess import TimeoutExpired` 不支持 |
+| `subprocess` | `run` 支持 `capture_output`/`text`/`timeout`/`check`，返回 `CompletedProcess`（`.returncode`/`.stdout`/`.stderr`）；`TimeoutExpired`/`CalledProcessError` 按内置异常名捕获 | 完整 subprocess | 不返回 bytes：`text=False` 也返回 str；未捕获时 `.stdout`/`.stderr` 为空串；`input`/`cwd`/`env`/`shell` 未实现；exec 失败按退出码 127；`from subprocess import TimeoutExpired` 不支持 |
 | `time` | `time`/`monotonic`/`perf_counter`/`sleep`，秒为单位 | 完整 time | 没有 `localtime`/`gmtime`/`strftime`/`mktime` |
 | `string` | 常量 + `capwords()`，随编译器分发 `stdlib/string.py` | 完整 string | 子集；`capwords` 用 `split()` + `capitalize()` |
 | `itertools` | `chain`/`repeat`/`islice`，按实参静态特化，返回 list | 完整 itertools | 立即求值，没有惰性迭代器；`islice` 只接受 `(x, stop)` |
 | `collections` | `Counter`/`most_common` | 完整 collections | 没有 `defaultdict`/`deque`/`OrderedDict`；`Counter` 返回普通 dict |
 | `json` | `dumps`/`loads(text, sample)`；默认分隔符 `", "`/`": "`；`loads` 用 sample 的静态类型决定目标结构 | 完整 json | 没有 `indent`/`separators`/`ensure_ascii` 参数；`loads` 必须给 sample（`None` 用于解析 null）；只覆盖 int/bool/float/str/None/list/dict/定长 tuple |
 | `math.fsum` | `list[float]` 的 Shewchuk 精确求和；`list[int]` 在 build 阶段报错 | CPython 接受任意数值可迭代 | 只收 `list[float]`；结果是正确舍入 |
-| `re` | `compile`/`search`/`match`/`fullmatch`/`findall`/`sub`/`split`/`escape`，Pattern/Match 方法，`I`/`M`/`S` 标志；回溯 VM | 完整 re | v1 不支持 lookaround、反向引用、条件组；`findall` 返回整段匹配，`split` 不含捕获组，未匹配分组返回空串；字符串按字节匹配 |
+| `re` | `compile`/`search`/`match`/`fullmatch`/`findall`/`sub`/`split`/`escape`，Pattern/Match 方法，`I`/`M`/`S` 标志；回溯 VM | 完整 re | v2 支持反向引用、四向断言、原子组、占有量词、内联标志；`findall` 只有一个捕获组时返回组内容（多个时返回整段匹配），`split` 按序插入捕获组；仍不支持条件组与 Unicode 属性类；字符串按字节匹配 |
 | 方法调用 | 走 vtable，代价固定 | 走 `__dict__` / 描述符 | 没有去虚化，也不做内联 |
 | 内存回收 | 引用计数 + 保守标记-清扫 | 分代 GC | 环和 unknown 泄漏由 GC 延迟回收；栈/寄存器里的整数可能被误认为根，只影响回收时机；无 `__del__`/弱引用 |
 | 闭包捕获 | cell 按引用捕获；嵌套函数直接自引用用当前闭包 | cell 按引用捕获，晚绑定 | 父作用域之后重绑函数自己的名字时，py23 仍指向原闭包；相互递归闭包的环由 GC 回收 |
@@ -80,8 +80,8 @@ py23 不追求兼容 CPython：语义是按静态类型的需要重新定的。�
 | 层 | 命令 | 规模 | 防的是什么 |
 |---|---|---|---|
 | 正例 | `ctest --preset dev` 里 `tests/*.py` | 11 个文件 | 前端退回保守 |
-| 反例 | `ctest --preset dev` 里 `tests/fail/*.py` | 35 个文件 | 检查器为了过测而放水 |
-| 运行 | `ctest --preset dev` 里 `tests/run/*.py` | 56 个文件 | 后端烂掉没人知道 |
+| 反例 | `ctest --preset dev` 里 `tests/fail/*.py` | 34 个文件 | 检查器为了过测而放水 |
+| 运行 | `ctest --preset dev` 里 `tests/run/*.py` | 66 个文件 | 后端烂掉没人知道 |
 | 模块 | `ctest --preset dev` 里 `tests/modules/*/` | 9 个目录 | 分模块编译/链接、惰性初始化、缓存失效 |
 | 未建模 | `ctest --preset dev` 里 `tests/unsupported/*.py` | 1 个文件 | 「标了没建模、实际却悄悄编译过去」 |
 | 内存 | 16MB `RLIMIT_AS` 下跑压力程序 | 拼接 / 对象 / 闭包 / 容器 / 切片 / 删除 / 推导式 / 变长实参 / `with` / 装饰器 / 异常展开 / `yield from` / 异步推导式 / 环 / unknown 泄漏 | 引用计数或 GC 漏插桩、重复释放、误回收 |
@@ -177,40 +177,63 @@ echo "语法通过:"; find . -name '*.py' -print0 | xargs -0 -P 8 -n 1 sh -c \
 echo "类型失败:"; wc -l < /tmp/fail.txt
 ```
 
-`check --syntax` 只做语法，`check` 再做类型；统计口径是「语法通过的那些文件里，类型检查也通过的比例」。全量约 7 分钟（本机 8 并发）。
+`check --syntax` 只做语法，`check` 再做类型；统计口径是「语法通过的那些文件里，类型检查也通过的比例」。
 
-实测（CPython 3.11.1 + 本机 site-packages，0.6.1 口径；0.74 已支持 complex/match/多继承，语法失败清单和通过率都变了，尚未重跑）：
+**历史口径（0.6.1，CPython 3.11.1 + 本机 site-packages）**——保留作对照：
 
 | 范围 | 文件数 | 语法通过 | 类型通过（占语法通过者） |
 |---|---|---|---|
 | 标准库本体 | 1740 | 1289 | 1143 / 1289（88.7%） |
 | 标准库 + site-packages | 38582 | 35693 | 29143 / 35693（81.6%） |
 
-**这个数字不能直接和 0.5 的 96.1% 比。** 0.6 之前根本没有类检查，`class` 语句只解析不分析，「通过」是虚高。0.6.0 刚加类检查时失败 **19064** 个文件（通过率 46.6%），把误杀逐条放宽（见 [CHANGELOG 0.6.1](archive/changelog-0.40.md)）之后降到 **6550** 个（81.6%）。也就是说，剩下的下降主要是「多了一层以前没有的检查」，不是前端变严。
+**0.6.1 那组数字也不能直接和 0.5 的 96.1% 比。** 0.6 之前根本没有类检查，`class` 语句只解析不分析，「通过」是虚高。0.6.0 刚加类检查时失败 **19064** 个文件（通过率 46.6%），把误杀逐条放宽（见 [CHANGELOG 0.6.1](archive/changelog-0.40.md)）之后降到 **6550** 个（81.6%）。也就是说，当时的下降主要是「多了一层以前没有的检查」，不是前端变严。
 
-语法层的失败**全部**是明确拒绝的那几类，没有解析器 bug（0.6.1 时 complex/match 仍是语法拒绝；0.74 已支持，这两项不再计入）：
+**当前口径（0.81 重跑，Debian 打包的 CPython 3.13.5）**：
 
-```
-bytes 字面量 2038   complex 字面量 620   超过 int64 的整数 138   match 91
-Python 2 的 long 后缀 1   旧式 except 参数 1
-```
+| 范围 | 文件数 | 语法通过 | 类型通过（占语法通过者） |
+|---|---|---|---|
+| 标准库本体（去掉 `test/`） | 533 | 527 | 250 / 527（47.4%） |
+| 标准库本体 | 598 | 590 | 278 / 590（47.1%） |
+| 标准库 + site-packages | 731 | 723 | 302 / 723（41.8%） |
 
-合计 2889 = 38582 − 35693，对得上。
+**两段数字不能直接比较。** 0.6.1 那次用的是完整 CPython 3.11.1 安装（38582 个 `.py`）；
+这次是 Debian 打包的 python3.13.5，标准库被拆成多个包（只剩 598 个 `.py`），而且
+里面带着 CPython 自己的 `test/` 目录——那批文件是**故意写错**来测 NameError /
+traceback 的，必然进失败清单。口径变了，趋势才可比。
 
-剩下的类型失败按错误类型看（抽 800 个失败文件统计）：
 
-| 错误 | 条数 | 性质 |
-|---|---|---|
-| `undefined name` | 1700 | 运行时注入：`get_ipython()`、`globals().update(...)`、`exec` 动态生成、测试文件里故意写错的标识符 |
-| 对象没有该属性 / 方法 | 201 | 外部类型的成员表看不见（已按 `open` 放过大部分） |
-| 实参数目不符 | 117 | 装饰器改变函数签名、元类构造 |
-| 其余 | — | 故意写错的测试样本、位运算类型推断、跨函数 `Optional` 收窄 |
 
-`undefined name` 占七成，这是静态分析的固有盲区，再放宽就得牺牲「拼错变量名」这种本来该报的检查。CPython 的标准库测试里专门有一批文件是**故意写错**的（测 NameError / traceback / 解包失败），它们必然进失败清单。
+语法层的失败不再「全部是明确拒绝的那几类」：0.74 支持 complex / match、0.79 支持
+bytes 之后，旧清单（bytes 2038 / complex 620 / int64 138 / match 91）已经不成立。
+当前口径下只剩 8 个文件：
+
+| 构造 | 合计 | 不含 `test/` | `test/` 内 |
+|---|---|---|---|
+| 相邻 `bytes` 字面量拼接 | 6 | 5 | 1 |
+| PEP 695 泛型语法 | 2 | 1 | 1 |
+
+前者是 `b"a" b"b"` 被拒——解析器只对 `str` / f-string 走隐式拼接分支
+（`src/parser_expr.cpp`），0.79 加 `bytes` 时漏了这条；后者是 `class C[T]:` 没建模。
+
+类型失败按错误类型看（当前口径，错误消息归一后聚合）：
+
+| 错误 | 标准库（不含 `test/`） | + site-packages | 性质 |
+|---|---|---|---|
+| 返回值 / 标注不符 | 83 | 96 | 标注是约束：比如 `__repr__` 必须返回 `str` |
+| 实参数目 / 类型不符 | 72 | 84 | 装饰器改变签名、元类构造、`getattr` 参数个数 |
+| 对象没有该属性 / 方法 | 38 | 48 | 外部类型的成员表看不见（已按 `open` 放过大部分） |
+| `hasattr()` 只支持类实例 | 37 | 45 | `hasattr` 目前只接受类实例 |
+| 类体不支持的成员 | 22 | 27 | 自定义异常类只能有 `pass` 类体 |
+| `undefined name` | 10 | 100 | 运行时注入：`exec` 动态生成、测试文件里故意写错的标识符 |
+
+`undefined name` 在带 site-packages 的口径下从 10 条涨到 100 条——运行时注入的名字更多。
+这是静态分析的固有盲区，再放宽就得牺牲「拼错变量名」这种本来该报的检查。CPython 的
+标准库测试里专门有一批文件是**故意写错**的（测 NameError / traceback / 解包失败），
+它们必然进失败清单。
 
 ### 语法对照
 
-另有一次性的实验：拿 91 条语法边角用例同时喂给 `py23 check --syntax` 和 CPython 的 `compile()`，5 条不一致，全部是设计性拒绝（bytes / complex / match）或 PEP 701 已经允许而 CPython 3.11 还不认的 f-string 嵌套。这批用例没有进仓库（价值随时间下降），记在这里供参考。
+另有一次性的实验：拿 91 条语法边角用例同时喂给 `py23 check --syntax` 和 CPython 的 `compile()`，5 条不一致，全部是设计性拒绝（bytes / complex / match）或 PEP 701 已经允许而 CPython 3.11 还不认的 f-string 嵌套。这是一次性实验，结论属于当时的版本——bytes / complex / match 现在都已经支持了。这批用例没有进仓库（价值随时间下降），记在这里供参考。
 
 ## 四、当前性能
 
