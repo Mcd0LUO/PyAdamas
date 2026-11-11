@@ -193,6 +193,7 @@ enum class RtFn : uint16_t {
     ListReversed, // (list*) -> list*  倒序副本
     ListSort,     // (list*, i64 kind) -> void  原地排序
     SortedList,   // (list*, i64 kind) -> list*  排序副本
+    ListSortedBy, // (list* src, list* keys, i64 kind) -> list*  按键排序的副本
     ListIndex,    // (list*, i64 v, i64 kind) -> i64  找不到抛 ValueError
     ListCount,    // (list*, i64 v, i64 kind) -> i64
     ListInsert,   // (list*, i64 idx, i64 v) -> void
@@ -494,6 +495,7 @@ inline const char* rt_name(RtFn f) {
         case RtFn::ListReversed: return "py23_list_reversed";
         case RtFn::ListSort: return "py23_list_sort";
         case RtFn::SortedList: return "py23_sorted_list";
+        case RtFn::ListSortedBy: return "py23_list_sorted_by";
         case RtFn::ListIndex: return "py23_list_index";
         case RtFn::ListCount: return "py23_list_count";
         case RtFn::ListInsert: return "py23_list_insert";

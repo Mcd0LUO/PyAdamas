@@ -482,6 +482,7 @@ int64_t chain_list_eq(Py23List* a, Py23List* b, const uint8_t* chain, int64_t le
 int64_t chain_dict_eq(Py23Dict* a, Py23Dict* b, const uint8_t* chain, int64_t len,
                       int64_t depth);
 int64_t py23_list_contains(Py23List* l, int64_t v, int64_t kind);
+Py23List* py23_list_sorted_by(Py23List* src, Py23List* keys, int64_t kind);
 int64_t py23_list_eq(Py23List* a, Py23List* b, Py23Str* chain);
 int64_t py23_str_contains(Py23Str* hay, Py23Str* needle);
 void slice_bounds(int64_t len, int64_t start, int64_t stop, int64_t step, int64_t* out_start, int64_t* out_stop, int64_t* out_step);

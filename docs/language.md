@@ -758,6 +758,22 @@ CPython 一致。
   `findall` 只有一个捕获组时返回组内容（多个时返回整段匹配），`split`
   按序插入捕获组。仍不支持条件组与 Unicode 属性类。
 
+### sorted 的 key
+
+`sorted(xs, key=f)` 按 `f(x)` 排。`f` 要是一个用户函数（取一个参数）；内建
+函数里只有 `len` 能用（其它内建函数没有闭包对象，调用会跳飞，明确报错）。
+
+键的比较方式由 `f` 的返回类型决定。py23 一般推不出函数的返回类型，这时退到
+机器字比较——int 键对，两边看起来都是字符串对象时按字符串比也对；**负的
+float 键会排错**（IEEE 位模式在负数段是反的）。给 `f` 标注返回类型可以避开：
+
+```python
+def by_name(u: User) -> str:
+    return u.name
+
+print(sorted(users, key=by_name))   # 键是 str，按字符串比
+```
+
 ### 内置函数
 
 已生成代码：`print` / `len` / `int` / `float` / `str` / `bool` / `range` /
@@ -797,8 +813,8 @@ unknown 值上对带运行期类型标签的类型（str/list/dict/complex）走
 数值与 CPython 不同。
 `list(seq)` / `tuple(seq)` 做浅拷贝，`set(seq)` / `frozenset(seq)` 按键
 去重（frozenset 复用 set 的运行时，不强制不可变），`dict(**kw)`
-用字符串键；`sorted` 支持 int/float/str 元素（`key=` / `reverse=` 尚未
-支持）；`enumerate` 产出的元素是 `[下标, 值]` 对，`zip` 支持两个可迭代
+用字符串键；`sorted` 支持 int/float/str 元素，`key=`（按键排）和
+`reverse=True` 都支持；`enumerate` 产出的元素是 `[下标, 值]` 对，`zip` 支持两个可迭代
 对象；这些迭代辅助都返回具体列表（生成器实参会被抽干），生成器表达式
 本身仍是惰性的。
 容器方法：list 有 `append` / `extend` / `insert` / `remove` / `pop(i)` /

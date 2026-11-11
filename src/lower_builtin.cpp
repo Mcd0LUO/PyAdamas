@@ -952,20 +952,136 @@ VReg Lowerer::lower_builtin_call(const std::string& name, Call& c) {
         VReg x = seq_as_list(c.args[0].get(), se);
         TypePtr ty = tc_.type_of(&c);
         if (!ty || ty->kind != TyKind::List) ty = mk_list(se);
-        Inst in;
-        in.op = IrOp::CallRt;
-        in.imm = static_cast<int64_t>(name == "sorted" ? RtFn::SortedList
-                                                       : RtFn::ListReversed);
-        in.args = {x};
-        if (name == "sorted") in.args.push_back(const_int(sort_kind(se)));
-        in.ty = ty;
-        VReg l = def(ty, std::move(in));
-        push_temp(l);
+
+        // sorted(xs, key=f)：先算出每个元素的键，再按键排。
+        // 之前 key= 被静默忽略——按 key 排和不按 key 排结果不同。
+        Expr* key_expr = nullptr;
+        for (auto& kw : c.keywords)
+            if (kw.arg == "key") key_expr = kw.value.get();
+
+        VReg l;
+        if (key_expr) {
+            TypePtr kt0 = tc_.type_of(key_expr);
+            if (!kt0 || kt0->kind != TyKind::Func || !kt0->fn) {
+                err(key_expr->line, key_expr->col,
+                    "sorted() 'key' must be a function taking one argument");
+                return const_none();
+            }
+            // 内建函数没有闭包对象，不能按用户函数那样调用。len 特判成取长度，
+            // 其它内建函数明确报错——宁可报错，也不要静默排错。
+            bool key_builtin = kt0->fn->unchecked;
+            bool key_is_len = key_builtin && kt0->fn->name == "len";
+            if (key_builtin && !key_is_len) {
+                err(key_expr->line, key_expr->col,
+                    std::format("sorted() 'key' does not support the builtin '{}'",
+                                kt0->fn->name));
+                return const_none();
+            }
+            if (!key_builtin && kt0->fn->pos.size() != 1 && !kt0->fn->varargs) {
+                err(key_expr->line, key_expr->col,
+                    "sorted() 'key' must be a function taking one argument");
+                return const_none();
+            }
+            TypePtr kret = (kt0->fn->ret_known && kt0->fn->ret) ? kt0->fn->ret
+                                                                 : t_unknown();
+            TypePtr pty = kt0->fn->pos.empty() ? t_unknown() : kt0->fn->pos[0].ty;
+
+            VReg fn = expr(*key_expr);
+            VReg keys = call_runtime(RtFn::ListNew, mk_list(kret),
+                                      {const_int(0), const_int(own_kind(kret))});
+            push_temp(keys);
+
+            // keys = [f(e) for e in vals]
+            int idx = new_temp_slot(t_int());
+            store_slot(idx, const_int(0));
+            Inst ln;
+            ln.op = IrOp::Len;
+            ln.a = x;
+            VReg n = def(t_int(), std::move(ln));
+            int cond = new_block("sortkey.cond");
+            int body = new_block("sortkey.body");
+            int end = new_block("sortkey.end");
+            Inst j;
+            j.op = IrOp::Jump;
+            j.target = cond;
+            emit(std::move(j));
+            switch_to(cond);
+            Inst more;
+            more.op = IrOp::Cmp;
+            more.cop = CmpKind::Lt;
+            more.a = load_slot(idx, t_int());
+            more.b = n;
+            VReg more_v = def(t_bool(), std::move(more));
+            Inst br;
+            br.op = IrOp::Branch;
+            br.a = more_v;
+            br.target = body;
+            br.target2 = end;
+            emit(std::move(br));
+            switch_to(body);
+            Inst get;
+            get.op = IrOp::IndexLoad;
+            get.a = x;
+            get.b = load_slot(idx, t_int());
+            VReg ev = def(se, std::move(get));
+            ev = coerce(ev, se, pty);
+            VReg kv;
+            if (key_is_len) {
+                // key=len：直接取长度，不走闭包调用
+                Inst ln2;
+                ln2.op = IrOp::Len;
+                ln2.a = ev;
+                kv = def(t_int(), std::move(ln2));
+            } else {
+                Inst call;
+                call.op = IrOp::Call;
+                call.a = fn;
+                call.args = {ev};
+                kv = def_heap(kret, std::move(call));
+            }
+            call_void(RtFn::ListAppend, {keys, kv});
+            Inst inc;
+            inc.op = IrOp::Bin;
+            inc.bop = BinKind::Add;
+            inc.a = load_slot(idx, t_int());
+            inc.b = const_int(1);
+            store_slot(idx, def(t_int(), std::move(inc)));
+            {
+                Inst jj;
+                jj.op = IrOp::Jump;
+                jj.target = cond;
+                emit(std::move(jj));
+            }
+            switch_to(end);
+
+            Inst in2;
+            in2.op = IrOp::CallRt;
+            in2.imm = static_cast<int64_t>(RtFn::ListSortedBy);
+            in2.args = {x, keys, const_int(sort_kind(kret))};
+            in2.ty = ty;
+            l = def(ty, std::move(in2));
+            push_temp(l);
+        } else {
+            Inst in;
+            in.op = IrOp::CallRt;
+            in.imm = static_cast<int64_t>(name == "sorted" ? RtFn::SortedList
+                                                           : RtFn::ListReversed);
+            in.args = {x};
+            if (name == "sorted") in.args.push_back(const_int(sort_kind(se)));
+            in.ty = ty;
+            l = def(ty, std::move(in));
+            push_temp(l);
+        }
         // sorted(xs, reverse=True)：排完整体反转。reverse 只接受字面量，
         // 运行时的 bool 要单独做分支，这里先不做。
         if (name == "sorted") {
             for (auto& kw : c.keywords) {
-                if (kw.arg != "reverse") continue;
+                if (kw.arg == "key") continue;
+                if (kw.arg != "reverse") {
+                    err(kw.value->line, kw.value->col,
+                        std::format("sorted() does not support the '{}' argument", kw.arg));
+                    return const_none();
+                }
                 auto cv = as_const(kw.value.get());
                 if (!cv) {
                     err(kw.value->line, kw.value->col,

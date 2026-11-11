@@ -550,6 +550,7 @@ void AsmGen::gen_call_rt(const Inst& in) {
             case RtFn::ListContains:
             case RtFn::ListEq:
             case RtFn::DictEq:
+            case RtFn::ListSortedBy:
             case RtFn::DictGetOr:
             case RtFn::DictRemove:
             case RtFn::RangeNew:

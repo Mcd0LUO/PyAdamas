@@ -180,6 +180,69 @@ Py23List* py23_sorted_list(Py23List* src, int64_t kind) {
     return l;
 }
 
+/* 按 keys 给 vals 排序：keys 与 vals 一一对应，key 的比较类别是 kind
+   （0 int/bool、1 float、2 str、其它按机器字）。用下标数组 + qsort：
+   比较函数通过静态指针读键表——py23 是单线程的，不会并发踩。 */
+static const int64_t* g_sort_keys = 0;
+static int64_t g_sort_kind = 0;
+
+/* 键的种类未知时（函数的返回类型推不出来），退到机器字比较。这里再加一条
+   启发式：两边看起来都是字符串对象就按字符串比——键是 str 时顺序才对。 */
+static int key_is_str(int64_t v) {
+    if (v <= 4096) return 0;
+    Py23Rc* h = (Py23Rc*)((uintptr_t)v - (uintptr_t)PY23_RC_HDR);
+    return rc_index_has(h) && h->kind == PY23_RC_STR;
+}
+
+static int cmp_sort_by_idx(const void* pa, const void* pb) {
+    int64_t ia = *(const int64_t*)pa, ib = *(const int64_t*)pb;
+    int64_t x = g_sort_keys[ia], y = g_sort_keys[ib];
+    if (g_sort_kind == 2) {
+        int64_t c = py23_str_cmp((Py23Str*)x, (Py23Str*)y);
+        return c < 0 ? -1 : c > 0 ? 1 : 0;
+    }
+    if (g_sort_kind == 1) {
+        double a, b;
+        memcpy(&a, &x, sizeof a);
+        memcpy(&b, &y, sizeof b);
+        return a < b ? -1 : a > b ? 1 : 0;
+    }
+    if (g_sort_kind == 3 && key_is_str(x) && key_is_str(y)) {
+        int64_t c = py23_str_cmp((Py23Str*)x, (Py23Str*)y);
+        return c < 0 ? -1 : c > 0 ? 1 : 0;
+    }
+    return x < y ? -1 : x > y ? 1 : 0;
+}
+
+Py23List* py23_list_sorted_by(Py23List* src, Py23List* keys, int64_t kind) {
+    Py23List* l = py23_list_copy(src);
+    int64_t n = l->len;
+    if (n < 2) return l;
+    /* 键对不上（不该发生）就退回普通排序，别给错结果 */
+    if (!keys || keys->len != n) {
+        py23_list_sort(l, kind);
+        return l;
+    }
+    int64_t* idx = (int64_t*)malloc(sizeof(int64_t) * (size_t)n);
+    if (!idx) {
+        py23_list_sort(l, kind);
+        return l;
+    }
+    for (int64_t i = 0; i < n; ++i) idx[i] = i;
+    g_sort_keys = keys->data;
+    g_sort_kind = kind;
+    qsort(idx, (size_t)n, sizeof(int64_t), cmp_sort_by_idx);
+    g_sort_keys = 0;
+    int64_t* tmp = (int64_t*)malloc(sizeof(int64_t) * (size_t)n);
+    if (tmp) {
+        for (int64_t i = 0; i < n; ++i) tmp[i] = l->data[idx[i]];
+        for (int64_t i = 0; i < n; ++i) l->data[i] = tmp[i];
+        free(tmp);
+    }
+    free(idx);
+    return l;
+}
+
 Py23List* py23_enumerate_list(Py23List* seq) {
     int64_t n = seq->len;
     Py23List* out = py23_list_new(n, 1);  // 外层元素是 pair（堆）

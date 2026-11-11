@@ -152,7 +152,7 @@ tools/                    一次性脚本
 |---|---|---|
 | `tests/*.py` | 11 | 前端正例，275 条语句 / 37 个函数 / 1203 个表达式 |
 | `tests/fail/*.py` | 35 | 反例，必须报出首行 `# expect:` 指定的错 |
-| `tests/run/*.py` | 71 | 编译 + 运行，输出与文件末尾的 `# --- expect ---` 逐行比对 |
+| `tests/run/*.py` | 72 | 编译 + 运行，输出与文件末尾的 `# --- expect ---` 逐行比对 |
 | `tests/unsupported/*.py` | 1 | `check` 必须打「没建模」标记，且 `build` 必须拒绝 |
 | `tests/diff/` | 6 个生成器 | 随机程序与 CPython 比 stdout，默认 3 种子 810 个程序 |
 | `tests/modules/` | 9 个目录 | 多模块编译 + 运行 + 二次构建缓存命中 |
