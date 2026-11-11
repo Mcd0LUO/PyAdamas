@@ -4,6 +4,43 @@
 
 早期阶段没有逐条留痕，按阶段归纳；0.4 之后逐条记录。
 
+## [0.81.1] - 2026-11-11
+
+`bytes` 的两个洞：相邻字面量拼接、方法的操作码。
+
+### 修复
+
+- **相邻 `bytes` 字面量可以隐式拼接**：`b"a" b"b"` 之前被解析器拒绝（0.79 加
+  `bytes` 时只接了字面量本身，漏了隐式拼接）。现在按 CPython 语义拼接，
+  `rb"r" b"w"`、多段连拼、列表元素里拼接、空串拼接都正常。
+- **`bytes` 与 `str` 不能混拼**：写 `b"a" "b"` 现在报
+  `cannot mix bytes and nonbytes literals`（CPython 同款消息），之前是个含糊的
+  `expected ')', found 'b'`。
+- **bytes 方法的操作码按方法名选**：之前 `lower_method.cpp` 的 bytes 分支把
+  StrMethod 的操作码写死成 0（= `Upper`），于是 `lower` / `strip` / `lstrip` /
+  `rstrip` / `replace` 全都执行成 `upper`——`b"  x  ".strip()` 返回 `b'  X  '`。
+  现在照 str 分派同样的选法，结果类型标成 `bytes`。
+- **`bytes.replace()` 不再崩**：旧实现把实参打包进一个 `list[str]`，bytes 实参
+  塞进去触发运行时 `invalid list element kind`。现在实参按字符串语义直接传，
+  第三个参数（替换次数）也支持了。
+
+### 测试
+
+- `tests/run/67_bytes_concat.py`：相邻 bytes 字面量拼接、`len`、`==`、
+  `decode()`、列表元素里拼接、空串拼接、转义拼接。
+- `tests/run/68_bytes_methods.py`：`upper` / `lower` / `strip` / `lstrip` /
+  `rstrip` / `replace`（含替换次数）、`decode` / `encode`。
+- `tests/fail/f38_bytes_mix.py`：`bytes` 与 `str` 混拼必须报错。
+
+### 文档
+
+- `docs/language.md`：新增「bytes」小节，写清字面量、拼接、方法清单和剩下的
+  缺口；去掉「bytes 不能拼接」的限制。
+- `docs/compatibility.md`：补 `bytes` 一行语义差异；前端基线重跑——语法失败从
+  8 个降到 2 个（只剩 PEP 695 泛型语法），类型失败分类表跟着更新。
+- `docs/roadmap.md`：`bytes` 收尾清单去掉「相邻字面量拼接」。
+- 用例数：反例 34→35，运行 66→68。
+
 ## [0.81] - 2026-11-10
 
 生成器表达式惰性求值。

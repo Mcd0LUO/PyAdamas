@@ -13,14 +13,12 @@ py23 借 Python 的语法外壳，但**不是 CPython 的实现**：语义按静
 | 续行 | 括号内隐式续行；行尾 `\` 显式续行 |
 | 注释 | `#` 到行尾；`# type: ignore` 一类注释不特殊处理 |
 | 数字 | 十进制 / `0x` / `0o` / `0b`，支持 `_` 分隔；浮点支持 `.5`、`5.`、指数；`j` 后缀是复数字面量（0.74 起支持） |
-| 字符串 | 单/双/三引号，前缀 `r` `b` `f` `rb` `br` `rf` `fr` 任意顺序组合；相邻字面量自动拼接（只对 `str` / f-string 生效，`bytes` 不行，见下） |
+| 字符串 | 单/双/三引号，前缀 `r` `b` `f` `rb` `br` `rf` `fr` 任意顺序组合；相邻字面量自动拼接（`str` / f-string / `bytes` 各自成组，`bytes` 不能与 `str` 混拼） |
 | f-string | 按 PEP 701 解析：同引号嵌套、自文档化 `f"{x=}"`、spec 里再嵌 `{}` 都支持；format spec 支持 fill/align/sign/`0`/width/precision/类型 `d,b,o,x,X,f,e,E,g,G,%` 与 `!s/!r/!a` |
 
 有几处词法层就拒绝，因为语义没有对应物：超出 int64 的整数、`0x1L` 这类 Python 2 写法。（`bytes` 字面量 0.79 起支持，运行时复用 `str` 的表示。）
 
 `\N{NAME}` 是个特殊处理：词法层整体吞掉（否则 `{` 会被当成 f-string 的替换字段），但不查 Unicode 名字表，字符串里保留原文。
-
-相邻字面量拼接只对 `str` 生效：`"a" "b"`、`f"a" f"b"` 可以拼，`b"a" b"b"` 不行（0.79 加 `bytes` 时漏了这条——解析器只对 `str` / f-string 走拼接分支）。
 
 ## 语法子集
 
@@ -138,6 +136,20 @@ f(2)                # 2 变成 2.0
 不可变，`len` 为字节数（不是字符数）。索引支持负号，越界 panic。
 `+` 拼接分配新对象。切片 `s[a:b:c]` 按**字节**切，语义与 CPython 的
 str 切片一致（只是单位是字节）。方法（`upper()` 这类）还没实现。
+
+### bytes
+
+`bytes` 字面量（`b"..."` / `b'...'` / `rb"..."` / `br"..."`）和 `str` 用同一套运行时
+表示，只是类型层标成 `bytes`，所以 `len` / 索引 / 切片 / `+` / `in` / 比较都按字节
+工作；`decode()` / `encode()` 互转（两者只是改标类型，零成本）。
+
+相邻 `bytes` 字面量可以隐式拼接（`b"a" b"b"` → `b"ab"`），但不能和 `str` 混拼——
+`b"a" "b"` 报 `cannot mix bytes and nonbytes literals`（CPython 同款消息）。
+
+支持的方法只有六个：`upper` / `lower` / `strip` / `lstrip` / `rstrip` / `replace`
+（`replace` 可带第三个参数限制替换次数）。`find` / `rfind` / `count` / `split` /
+`startswith` / `endswith` / `join` 还没接——类型检查放行，`build` 报
+「bytes method '...' is not supported」。`for c in b"..."` 也不支持。
 
 ### 列表
 
@@ -889,7 +901,6 @@ match value:
 - `await` 在函数外、`break` 在循环外
 - Python 2 遗留写法（`0x1L`、`lambda (a, b):`、`except X, e`）
 - PEP 695 泛型语法（`class C[T]:`）
-- 相邻 `bytes` 字面量拼接（`b"a" b"b"`）
 - 类：方法缺 `self`、字段赋值类型不符、访问不存在的字段或方法（`self.xxx` 与外部基类的成员除外）
 
 **代码生成层**（`check` 通过，`build` 报错）：类装饰器、自定义方法装饰器、容器元素跨数值域的转换（`list`/`tuple`/`dict`/`set` 的 int → float 赋值/实参）、通过 unknown 函数值的 `*` / `**` 展开、`*` 位于固定形参之前且不是定长 tuple、非异常类名当异常用、`finally` 体内跳出 finally 的控制流、跨模块继承、把类名当值用（`f = Point`）、函数内定义类、异步生成器表达式、嵌在其它表达式里的异步推导式。生成器的额外限制：`yield` / `yield from` 只能作为语句或赋值右值，不能出现在 `finally` / `except` 体内；协程的 `await` 同样。异步生成器有 `asend`/`athrow`/`__anext__`/`aclose`。自定义异常类目前只支持 `pass` 类体（字段/方法会被拒绝）。类体字段默认值里的 `lambda` 也在这一层拒绝。match 额外拒绝：导入类模式的字段子模式、unknown 值上的数值/list/dict/tuple/set 内置类型模式。

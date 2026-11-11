@@ -52,7 +52,7 @@
 
 ### 3. `bytes` 收尾
 
-字面量、索引/切片、`encode`/`decode`、`+`/`in`/比较已经通了（0.79）。剩下：`for c in b"..."`（要转 `list[int]`）、格式化与 `%`、`join`/`find`/`split` 等方法、相邻字面量拼接（`b"a" b"b"` 现在被拒）、跨模块接口不再降级成 `unknown`。
+字面量、索引/切片、`encode`/`decode`、`+`/`in`/比较已经通了（0.79），相邻字面量拼接与 6 个方法在 0.81.1 补上。剩下：`for c in b"..."`（要转 `list[int]`）、格式化与 `%`、`join`/`find`/`split` 等其余方法、跨模块接口不再降级成 `unknown`。
 
 ### 4. C FFI + buffer + BLAS
 

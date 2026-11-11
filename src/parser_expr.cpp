@@ -376,10 +376,17 @@ ExprPtr Parser::parse_atom() {
                 return n;
             }
             case Tok::BYTES: {
+                // 相邻 bytes 字面量隐式拼接（CPython 语义）：b"a" b"b" -> b"ab"。
+                // 词法层已经把前缀和转义处理掉了，token.text 就是字节内容，
+                // 所以拼接就是拼内容。bytes 与 str 不能混拼。
                 auto t = advance();
+                std::string merged = t.text;
+                while (check(Tok::BYTES)) merged += advance().text;
+                if (check(Tok::STRING) || check(Tok::FSTRING))
+                    throw err("cannot mix bytes and nonbytes literals");
                 auto n = node_at<Constant>(ln, cl);
                 n->ck = Constant::CK::Bytes;
-                n->s = t.text;
+                n->s = std::move(merged);
                 return n;
             }
             case Tok::FLOAT: {
@@ -402,6 +409,9 @@ ExprPtr Parser::parse_atom() {
                 //   ('a' f'{x}' 'b')  →  JoinedStr
                 std::vector<Token> parts;
                 while (check(Tok::STRING) || check(Tok::FSTRING)) parts.push_back(advance());
+                // str / f-string 与 bytes 不能混拼（CPython 同款报错）。
+                if (check(Tok::BYTES))
+                    throw err("cannot mix bytes and nonbytes literals");
 
                 bool has_f = std::ranges::any_of(parts, [](const Token& p) {
                     return p.kind == Tok::FSTRING;
