@@ -16,4 +16,5 @@ if %ERRORLEVEL%==0 (
 ) else (
   powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0py23.ps1" %*
 )
+pause
 exit /b %ERRORLEVEL%
