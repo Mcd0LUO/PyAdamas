@@ -444,6 +444,7 @@ int64_t py23_dict_get(Py23Dict* d, int64_t key);
 int64_t py23_dict_contains(Py23Dict* d, int64_t key);
 int64_t py23_dict_key_at(Py23Dict* d, int64_t i);
 int64_t py23_dict_get_or(Py23Dict* d, int64_t key, int64_t def);
+int64_t py23_dict_get_opt(Py23Dict* d, int64_t key);
 int own_to_list_kind(int64_t own);
 Py23List* py23_dict_keys(Py23Dict* d);
 Py23List* py23_dict_values(Py23Dict* d);

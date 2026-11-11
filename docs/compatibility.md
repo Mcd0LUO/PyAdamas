@@ -58,7 +58,8 @@ py23 不追求兼容 CPython：语义是按静态类型的需要重新定的。�
 | `d == e` / `s == t` | 逐元素比较（dict 与顺序无关，同构嵌套容器逐层比） | 深比较 | 元素类型不同（异构容器）时退回指针比较 |
 | `print(d)` / `print(s)` | 打印内容（`{'a': 1}` / `{1, 2}`） | 打印内容 | 元素类型未知（异构容器）时仍输出 `<dict object>` / `<set object>` 占位 |
 | dict/set 方法 | `get`/`keys`/`values`/`items`/`update`/`add` 和删除类方法 `pop`/`remove`/`discard`/`clear`/`popitem` 可用 | 完整方法 | `keys()` 等返回 list 而不是视图；删除按 order 重建是 O(n)；`popitem` 固定 LIFO，`set.pop` 固定取最后插入项 |
-| `d.get(k)` 缺失 | panic | 返回 `None` | 静态返回类型不是 Optional；用 `get(k, default)` 避免 |
+| `d.get(k)` 缺失 | 返回 `None` | 返回 `None` | py23 里 `None` 就是 `0`，值为 `0` 的项与缺失分不出来 |
+| `None` 与 `0` | 同一个表示：`0 is None` 为真、`None == 0` 为真 | 完全不同 | 值表示不带类型标签，是「没有 tag」的直接后果 |
 | 切片 | str 按字节；list/tuple 返回新容器，语义同 CPython | 同 Python | `step == 0` panic；未知元素类型只做保守 GC |
 | 切片赋值 | 仅 list；step 1 可改变长度，扩展切片长度必须一致；右侧可为 str | 任意可变序列，任意可迭代右值 | 没有通用迭代协议；tuple 不可变，拒绝赋值 |
 

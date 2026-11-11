@@ -1363,7 +1363,8 @@ TypePtr TypeChecker::method_call(TypePtr recv, const std::string& name, Call& c,
                     err(c.line, c.col,
                         std::format("dict key type is '{}', got '{}'", type_name(kt),
                                     type_name(a[0])));
-                return vt;
+                // 只有一个参数时可能缺失，返回类型是 Optional[值类型]
+                return a.size() == 1 ? mk_optional(vt) : vt;
             }
             if (name == "keys") { argc(0, 0); return mk_list(kt); }
             if (name == "values") { argc(0, 0); return mk_list(vt); }

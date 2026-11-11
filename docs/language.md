@@ -496,8 +496,9 @@ key 的哈希/判等按静态类型选：int/bool 用机器字、str 用字节�
 `__hash__` 和 `__eq__` 时走 vtable，否则按指针；其他类型按机器字比较。
 支持的方法：
 
-- `d.get(k)` / `d.get(k, default)`：有默认值时缺失返回默认值；没有默认值
-  时缺失像 `d[k]` 一样 panic（静态返回类型不是 Optional）；
+- `d.get(k)` / `d.get(k, default)`：缺失时返回默认值；没有默认值时返回
+  `None`（静态返回类型是 `Optional[值类型]`，`get(k, default)` 才是值类型）。
+  注意 py23 里 `None` 就是 `0`——值为 `0` 的项和缺失分不出来；
 - `d.keys()` / `d.values()` / `d.items()`：返回新 list（不是视图），元素
   按插入顺序；`items()` 的元素是 `(key, value)` 元组；
 - `d.update(other)`；

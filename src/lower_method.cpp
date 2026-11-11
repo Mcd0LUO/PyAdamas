@@ -590,7 +590,8 @@ VReg Lowerer::lower_method_call(Attribute& at, Call& c) {
             VReg key = expr(*c.args[0]);
             key = coerce(key, tc_.type_of(c.args[0].get()), kt);
             if (c.args.size() == 1)
-                return call_runtime(RtFn::DictGet, vt, {recv, key});
+                // 缺失时返回 None（py23 里 None 就是 0）
+                return call_runtime(RtFn::DictGetOpt, mk_optional(vt), {recv, key});
             VReg def = expr(*c.args[1]);
             def = coerce(def, tc_.type_of(c.args[1].get()), vt);
             return call_runtime(RtFn::DictGetOr, vt, {recv, key, def});

@@ -215,6 +215,14 @@ int64_t py23_dict_key_at(Py23Dict* d, int64_t i) {
     return d->entries[i].key;
 }
 
+/* d.get(k)：缺失时返回 None。py23 里 None 就是 0（没有类型标签），
+   所以这里返回 0——和 const.none 同一个表示。 */
+int64_t py23_dict_get_opt(Py23Dict* d, int64_t key) {
+    int64_t h = dict_hash_key(d, key);
+    int64_t e = dict_lookup(d, key, h);
+    return e >= 0 ? d->entries[e].val : 0;
+}
+
 int64_t py23_dict_get_or(Py23Dict* d, int64_t key, int64_t def) {
     int64_t h = dict_hash_key(d, key);
     int64_t e = dict_lookup(d, key, h);

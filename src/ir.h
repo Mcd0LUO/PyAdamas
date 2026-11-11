@@ -155,6 +155,7 @@ enum class RtFn : uint16_t {
     ListEq,       // (list*, list*, i64 cmp_kind) -> i64
     StrContains,  // (str*, str*) -> i64
     DictGetOr,    // (dict*, i64 key, i64 default) -> i64
+    DictGetOpt,   // (dict*, i64 key) -> i64  缺失时返回 None
     DictKeys,     // (dict*) -> list*
     DictValues,   // (dict*) -> list*
     DictItems,    // (dict*) -> list*
@@ -457,6 +458,7 @@ inline const char* rt_name(RtFn f) {
         case RtFn::SetEq: return "py23_set_eq";
         case RtFn::StrContains: return "py23_str_contains";
         case RtFn::DictGetOr: return "py23_dict_get_or";
+        case RtFn::DictGetOpt: return "py23_dict_get_opt";
         case RtFn::DictKeys: return "py23_dict_keys";
         case RtFn::DictValues: return "py23_dict_values";
         case RtFn::DictItems: return "py23_dict_items";

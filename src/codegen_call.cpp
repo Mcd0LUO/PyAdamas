@@ -758,6 +758,7 @@ void AsmGen::gen_call_rt(const Inst& in) {
             case RtFn::GenSend:
             case RtFn::AsyncGenAsend:
             case RtFn::SetEq:
+            case RtFn::DictGetOpt:
                 emit2("movq", src_op(in.args[0]), "%rdi");
                 emit2("movq", src_op(in.args[1]), "%rsi");
                 break;
