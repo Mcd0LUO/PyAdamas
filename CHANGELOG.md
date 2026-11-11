@@ -4,6 +4,27 @@
 
 早期阶段没有逐条留痕，按阶段归纳；0.4 之后逐条记录。
 
+## [0.82.3] - 2026-11-11
+
+`bytes` 补齐剩余方法。
+
+### 新增
+
+- **`bytes` 的方法补齐**：`split` / `find` / `rfind` / `count` / `startswith` /
+  `endswith` / `join`。这六个类型检查早就放行了，只是降级侧没实现，
+  `build` 会报「bytes method '...' is not supported」。`join` 是新加的
+  （类型检查侧也补上了）。字节层面和 `str` 完全一致，只是结果标成 `bytes`——
+  `split` 返回 `list[bytes]`，`join` 要一个 `list[bytes]`。
+
+### 测试
+
+- `tests/run/71_bytes_methods.py`：七个方法的输出与 CPython 逐字节一致。
+
+### 文档
+
+- `docs/language.md`：bytes 小节补上方法清单。
+- `docs/compatibility.md`：bytes 那行的方法清单与限制。
+
 ## [0.82.2] - 2026-11-11
 
 `d.get(k)` 缺失时返回 `None`，不再抛 `KeyError`。
@@ -25,6 +46,7 @@
 ### 测试
 
 - `tests/run/70_dict_get.py`。
+- 用例数：运行 69→71。
 
 ### 文档
 

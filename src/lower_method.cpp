@@ -1201,58 +1201,104 @@ VReg Lowerer::lower_method_call(Attribute& at, Call& c) {
         }
         // 其余方法在字节层面和 str 完全一致，借道 StrMethod；区别只在结果标成 bytes。
         // 注意：操作码要按方法名选，不能写死——写死成 0（= Upper）会让所有方法都变 upper。
-        if (at.attr == "upper" || at.attr == "lower" || at.attr == "strip" ||
-            at.attr == "lstrip" || at.attr == "rstrip" || at.attr == "replace") {
-            auto need_bytes = [&](size_t i) -> VReg {
-                VReg v = expr(*c.args[i]);
-                TypePtr t = tc_.type_of(c.args[i].get());
-                if (!t || (t->kind != TyKind::Str && t->kind != TyKind::Bytes))
-                    err(c.args[i]->line, c.args[i]->col,
-                        std::format("bytes.{}() expects a string argument", at.attr));
-                return v;
-            };
-            auto arg_count = [&](size_t lo, size_t hi) {
-                if (c.args.size() >= lo && c.args.size() <= hi) return true;
-                err(c.line, c.col,
-                    std::format("bytes.{}() takes {} argument(s)", at.attr,
-                                lo == hi ? std::to_string(lo)
-                                         : std::format("{}..{}", lo, hi)));
-                return false;
-            };
-            auto emit = [&](StrOp op, VReg a0, VReg a1, VReg a2) -> VReg {
-                Inst in;
-                in.op = IrOp::CallRt;
-                in.imm = static_cast<int64_t>(RtFn::StrMethod);
-                in.args = {recv, const_int(static_cast<int64_t>(op)),
-                           a0 == kNoReg ? const_int(0) : a0,
-                           a1 == kNoReg ? const_int(0) : a1,
-                           a2 == kNoReg ? const_int(0) : a2};
-                in.ty = t_bytes();
-                VReg v = def(t_bytes(), std::move(in));
-                if (ir_is_heap(t_bytes())) push_temp(v);
-                return v;
-            };
-            if (at.attr == "upper" || at.attr == "lower") {
-                if (!arg_count(0, 0)) return const_none();
-                return emit(at.attr == "upper" ? StrOp::Upper : StrOp::Lower,
-                            kNoReg, kNoReg, kNoReg);
-            }
-            if (at.attr == "strip" || at.attr == "lstrip" || at.attr == "rstrip") {
-                if (!arg_count(0, 1)) return const_none();
-                bool has_chars = c.args.size() == 1;
-                StrOp op;
-                if (at.attr == "strip") op = has_chars ? StrOp::StripChars : StrOp::Strip;
-                else if (at.attr == "lstrip") op = has_chars ? StrOp::LStripChars : StrOp::LStrip;
-                else op = has_chars ? StrOp::RStripChars : StrOp::RStrip;
-                return emit(op, has_chars ? need_bytes(0) : kNoReg, kNoReg, kNoReg);
-            }
+        auto need_bytes = [&](size_t i) -> VReg {
+            VReg v = expr(*c.args[i]);
+            TypePtr t = tc_.type_of(c.args[i].get());
+            if (!t || (t->kind != TyKind::Str && t->kind != TyKind::Bytes))
+                err(c.args[i]->line, c.args[i]->col,
+                    std::format("bytes.{}() expects a string argument", at.attr));
+            return v;
+        };
+        auto need_int = [&](size_t i, int64_t dv) -> VReg {
+            if (i >= c.args.size()) return const_int(dv);
+            return coerce(expr(*c.args[i]), tc_.type_of(c.args[i].get()), t_int());
+        };
+        auto arg_count = [&](size_t lo, size_t hi) {
+            if (c.args.size() >= lo && c.args.size() <= hi) return true;
+            err(c.line, c.col,
+                std::format("bytes.{}() takes {} argument(s)", at.attr,
+                            lo == hi ? std::to_string(lo)
+                                     : std::format("{}..{}", lo, hi)));
+            return false;
+        };
+        auto emit = [&](StrOp op, TypePtr ret, VReg a0, VReg a1, VReg a2) -> VReg {
+            Inst in;
+            in.op = IrOp::CallRt;
+            in.imm = static_cast<int64_t>(RtFn::StrMethod);
+            in.args = {recv, const_int(static_cast<int64_t>(op)),
+                       a0 == kNoReg ? const_int(0) : a0,
+                       a1 == kNoReg ? const_int(0) : a1,
+                       a2 == kNoReg ? const_int(0) : a2};
+            in.ty = ret;
+            VReg v = def(ret, std::move(in));
+            if (ir_is_heap(ret)) push_temp(v);
+            return v;
+        };
+        if (at.attr == "upper" || at.attr == "lower") {
+            if (!arg_count(0, 0)) return const_none();
+            return emit(at.attr == "upper" ? StrOp::Upper : StrOp::Lower, t_bytes(),
+                        kNoReg, kNoReg, kNoReg);
+        }
+        if (at.attr == "strip" || at.attr == "lstrip" || at.attr == "rstrip") {
+            if (!arg_count(0, 1)) return const_none();
+            bool has_chars = c.args.size() == 1;
+            StrOp op;
+            if (at.attr == "strip") op = has_chars ? StrOp::StripChars : StrOp::Strip;
+            else if (at.attr == "lstrip") op = has_chars ? StrOp::LStripChars : StrOp::LStrip;
+            else op = has_chars ? StrOp::RStripChars : StrOp::RStrip;
+            return emit(op, t_bytes(), has_chars ? need_bytes(0) : kNoReg, kNoReg, kNoReg);
+        }
+        if (at.attr == "replace") {
             if (!arg_count(2, 3)) return const_none();
             VReg old_s = need_bytes(0);
             VReg nw = need_bytes(1);
-            VReg cnt = const_int(-1);
-            if (c.args.size() == 3)
-                cnt = coerce(expr(*c.args[2]), tc_.type_of(c.args[2].get()), t_int());
-            return emit(StrOp::Replace, old_s, nw, cnt);
+            VReg cnt = need_int(2, -1);
+            return emit(StrOp::Replace, t_bytes(), old_s, nw, cnt);
+        }
+        if (at.attr == "split") {
+            if (!arg_count(0, 2)) return const_none();
+            TypePtr lt = mk_list(t_bytes());
+            if (c.args.empty())
+                return emit(StrOp::SplitWs, lt, kNoReg, kNoReg, kNoReg);
+            VReg sep = need_bytes(0);
+            VReg maxsplit = need_int(1, -1);
+            return emit(StrOp::SplitSep, lt, sep, maxsplit, kNoReg);
+        }
+        if (at.attr == "find" || at.attr == "rfind") {
+            if (!arg_count(1, 3)) return const_none();
+            VReg sub = need_bytes(0);
+            VReg start = need_int(1, 0);
+            VReg end = need_int(2, std::numeric_limits<int64_t>::max());
+            return emit(at.attr == "find" ? StrOp::Find : StrOp::RFind, t_int(),
+                        sub, start, end);
+        }
+        if (at.attr == "count") {
+            if (!arg_count(1, 1)) return const_none();
+            VReg sub = need_bytes(0);
+            return emit(StrOp::Count, t_int(), sub, kNoReg, kNoReg);
+        }
+        if (at.attr == "startswith" || at.attr == "endswith") {
+            if (!arg_count(1, 1)) return const_none();
+            VReg prefix = need_bytes(0);
+            return emit(at.attr == "startswith" ? StrOp::StartsWith : StrOp::EndsWith,
+                        t_bool(), prefix, kNoReg, kNoReg);
+        }
+        if (at.attr == "join") {
+            if (!arg_count(1, 1)) return const_none();
+            TypePtr lt = tc_.type_of(c.args[0].get());
+            VReg parts;
+            if (lt && lt->kind == TyKind::Generator) {
+                // 生成器没有下标：先物化成列表再拼
+                TypePtr se = t_unknown();
+                parts = seq_as_list(c.args[0].get(), se);
+            } else if (!lt || (lt->kind != TyKind::List && lt->kind != TyKind::Tuple)) {
+                err(c.args[0]->line, c.args[0]->col,
+                    "bytes.join() expects a list of bytes");
+                return const_none();
+            } else {
+                parts = expr(*c.args[0]);
+            }
+            return emit(StrOp::Join, t_bytes(), parts, kNoReg, kNoReg);
         }
         err(c.line, c.col, std::format("bytes method '{}' is not supported", at.attr));
         return const_none();

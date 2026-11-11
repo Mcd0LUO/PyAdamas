@@ -149,10 +149,11 @@ str 切片一致（只是单位是字节）。方法（`upper()` 这类）还没
 相邻 `bytes` 字面量可以隐式拼接（`b"a" b"b"` → `b"ab"`），但不能和 `str` 混拼——
 `b"a" "b"` 报 `cannot mix bytes and nonbytes literals`（CPython 同款消息）。
 
-支持的方法只有六个：`upper` / `lower` / `strip` / `lstrip` / `rstrip` / `replace`
-（`replace` 可带第三个参数限制替换次数）。`find` / `rfind` / `count` / `split` /
-`startswith` / `endswith` / `join` 还没接——类型检查放行，`build` 报
-「bytes method '...' is not supported」。`for c in b"..."` 也不支持。
+支持的方法：`upper` / `lower` / `strip` / `lstrip` / `rstrip` / `replace`（可带
+第三个参数限制替换次数）/ `find` / `rfind` / `count` / `split` / `startswith` /
+`endswith` / `join`。字节层面和 `str` 完全一致，只是结果标成 `bytes`——
+`split` 返回 `list[bytes]`，`join` 要一个 `list[bytes]`。
+`for c in b"..."` 还不支持（要转 `list[int]`）。
 
 ### 列表
 

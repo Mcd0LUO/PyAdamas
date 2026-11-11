@@ -34,7 +34,7 @@
 - **语言面**：标量、字符串、列表/元组/字典/集合、切片读写、闭包/lambda/`*args`/`**kwargs`/装饰器、推导式、`with`、异常值（`args`/`raise ... from`/自定义异常）、类（字段/方法/C3 多继承/零参 `super()`/`@staticmethod`/`@classmethod`/`@property`/类属性）、`match/case`、`del`、复数字面量、f-string 格式说明、dunder 协议、`open`/`input`/`sys.stdin`。
 - **标准库**：`math`/`sys`/`asyncio`/`random`/`os`/`os.path`/`subprocess`/`time`/`itertools`/`collections`/`json`/`string`/`re`。
 - **验证**：66 个运行用例、34 个反例、9 个模块目录；差分 runner 已自举，默认 810 例。
-- **主要缺口**：`datetime`/`csv`/`pathlib`；C FFI/BLAS；`bytes` 的方法与迭代；跨模块生成器/协程；asyncio 边角。
+- **主要缺口**：`datetime`/`csv`/`pathlib`；C FFI/BLAS；`bytes` 的迭代与格式化；跨模块生成器/协程；asyncio 边角。
 
 ## 下一步
 
@@ -52,7 +52,7 @@
 
 ### 3. `bytes` 收尾
 
-字面量、索引/切片、`encode`/`decode`、`+`/`in`/比较已经通了（0.79），相邻字面量拼接与 6 个方法在 0.81.1 补上。剩下：`for c in b"..."`（要转 `list[int]`）、格式化与 `%`、`join`/`find`/`split` 等其余方法、跨模块接口不再降级成 `unknown`。
+字面量、索引/切片、`encode`/`decode`、`+`/`in`/比较已经通了（0.79），相邻字面量拼接与 6 个方法在 0.81.1 补上，`split`/`find`/`rfind`/`count`/`startswith`/`endswith`/`join` 在 0.82.3 补上。剩下：`for c in b"..."`（要转 `list[int]`）、格式化与 `%`、跨模块接口不再降级成 `unknown`。
 
 ### 4. C FFI + buffer + BLAS
 
