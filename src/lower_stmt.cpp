@@ -368,6 +368,9 @@ void Lowerer::lower_for_range(For& f, Call& c) {
 
     VReg start, stop;
     int64_t step = 1;
+    // 动态步长：方向（< 还是 >）在运行期定，循环里每轮多一个分支。
+    bool dyn_step = false;
+    VReg step_v = kNoReg;
     if (c.args.size() == 1) {
         start = const_int(0);
         stop = expr(*c.args[0]);
@@ -377,17 +380,18 @@ void Lowerer::lower_for_range(For& f, Call& c) {
     }
     if (c.args.size() == 3) {
         auto cv = as_const(c.args[2].get());
-        if (!cv || (cv->ty->kind != TyKind::Int && cv->ty->kind != TyKind::Bool)) {
-            err(c.args[2]->line, c.args[2]->col,
-                "range() step must be an integer literal (dynamic steps are not supported yet)");
-            return;
-        }
-        step = cv->i;
-        if (step == 0) {
-            err(c.args[2]->line, c.args[2]->col, "range() step cannot be zero");
-            return;
+        if (cv && (cv->ty->kind == TyKind::Int || cv->ty->kind == TyKind::Bool)) {
+            step = cv->i;
+            if (step == 0) {
+                err(c.args[2]->line, c.args[2]->col, "range() step cannot be zero");
+                return;
+            }
+        } else {
+            step_v = expr(*c.args[2]);
+            dyn_step = true;
         }
     }
+
 
     // 循环计数器独立于用户变量：Python 里在循环体里给 i 重新赋值
     // 不影响迭代，计数器必须是私有的。
@@ -398,6 +402,38 @@ void Lowerer::lower_for_range(For& f, Call& c) {
     if (st_->is_generator) {
         stop_slot = new_temp_slot(t_int());
         store_slot(stop_slot, stop);
+    }
+    // 动态步长同样要落槽（生成器里跨 yield 不存活）。
+    int step_slot = -1;
+    if (dyn_step) {
+        if (st_->is_generator) {
+            step_slot = new_temp_slot(t_int());
+            store_slot(step_slot, step_v);
+        }
+        // 步长 0 是 ValueError（CPython 在 range() 求值时抛）。
+        VReg sv0 = step_slot >= 0 ? load_slot(step_slot, t_int()) : step_v;
+        Inst zc;
+        zc.op = IrOp::Cmp;
+        zc.cop = CmpKind::Eq;
+        zc.a = sv0;
+        zc.b = const_int(0);
+        VReg isz = def(t_bool(), std::move(zc));
+        int zero_blk = new_block("range.step.zero");
+        int ok_blk = new_block("range.step.ok");
+        Inst brz;
+        brz.op = IrOp::Branch;
+        brz.a = isz;
+        brz.target = zero_blk;
+        brz.target2 = ok_blk;
+        emit(std::move(brz));
+        switch_to(zero_blk);
+        call_void(RtFn::Raise,
+                  {const_str("ValueError"), const_str("range() arg 3 must not be zero")});
+        Inst jz;
+        jz.op = IrOp::Jump;
+        jz.target = ok_blk;
+        emit(std::move(jz));
+        switch_to(ok_blk);
     }
 
     int cond = new_block("for.cond");
@@ -420,21 +456,48 @@ void Lowerer::lower_for_range(For& f, Call& c) {
     j.target = cond;
     emit(std::move(j));
 
+    auto cmp_branch = [&](VReg a, VReg b, CmpKind k) {
+        Inst cmp;
+        cmp.op = IrOp::Cmp;
+        cmp.cop = k;
+        cmp.a = a;
+        cmp.b = b;
+        VReg cc = def(t_bool(), std::move(cmp));
+        Inst br;
+        br.op = IrOp::Branch;
+        br.a = cc;
+        br.target = body;
+        br.target2 = orelse;
+        emit(std::move(br));
+    };
+
     switch_to(cond);
     VReg cv = load_slot(ctr, t_int());
     VReg stop_v = stop_slot >= 0 ? load_slot(stop_slot, t_int()) : stop;
-    Inst cmp;
-    cmp.op = IrOp::Cmp;
-    cmp.cop = step > 0 ? CmpKind::Lt : CmpKind::Gt;
-    cmp.a = cv;
-    cmp.b = stop_v;
-    VReg cc = def(t_bool(), std::move(cmp));
-    Inst br;
-    br.op = IrOp::Branch;
-    br.a = cc;
-    br.target = body;
-    br.target2 = orelse;
-    emit(std::move(br));
+    if (dyn_step) {
+        // 方向是循环不变量，分支预测得住；比较本身多一次而已。
+        VReg sv = step_slot >= 0 ? load_slot(step_slot, t_int()) : step_v;
+        Inst sp;
+        sp.op = IrOp::Cmp;
+        sp.cop = CmpKind::Gt;
+        sp.a = sv;
+        sp.b = const_int(0);
+        VReg pos = def(t_bool(), std::move(sp));
+        int cpos = new_block("for.cond.lt");
+        int cneg = new_block("for.cond.gt");
+        Inst brd;
+        brd.op = IrOp::Branch;
+        brd.a = pos;
+        brd.target = cpos;
+        brd.target2 = cneg;
+        emit(std::move(brd));
+        switch_to(cpos);
+        cmp_branch(cv, stop_v, CmpKind::Lt);
+        switch_to(cneg);
+        cmp_branch(cv, stop_v, CmpKind::Gt);
+    } else {
+        cmp_branch(cv, stop_v, step > 0 ? CmpKind::Lt : CmpKind::Gt);
+    }
 
     // range(len(a)) 且 start=0/step=1：计数器贴出的 k 恰好是 0..len(a)-1。
     // 循环体给 a/k 赋值（写槽）会作废提示；调用、del、切片赋值等副作用由
@@ -449,7 +512,7 @@ void Lowerer::lower_for_range(For& f, Call& c) {
         };
         bool zero_start =
             c.args.size() == 1 || (c.args.size() >= 2 && int_is(c.args[0].get(), 0));
-        bool unit_step = c.args.size() < 3 || step == 1;
+        bool unit_step = !dyn_step && (c.args.size() < 3 || step == 1);
         const Expr* stop_arg = c.args.size() == 1 ? c.args[0].get() : c.args[1].get();
         if (zero_start && unit_step && stop_arg->kind == ExprKind::Call) {
             const auto& lc = static_cast<const Call&>(*stop_arg);
@@ -506,7 +569,8 @@ void Lowerer::lower_for_range(For& f, Call& c) {
     add.op = IrOp::Bin;
     add.bop = BinKind::Add;
     add.a = iv2;
-    add.b = const_int(step);
+    add.b = dyn_step ? (step_slot >= 0 ? load_slot(step_slot, t_int()) : step_v)
+                      : const_int(step);
     VReg iv3 = def(t_int(), std::move(add));
     store_slot(ctr, iv3);
     Inst ji;

@@ -4,6 +4,46 @@
 
 早期阶段没有逐条留痕，按阶段归纳；0.4 之后逐条记录。
 
+## [0.83] - 2026-11-11
+
+生成器表达式的 range 源改成真惰性。
+
+### 修复
+
+- **生成器表达式的 range 源不再实体化**。以前 `(x for x in range(10**9))`
+  会先造出 10 亿个元素的整数列表（8GB），生成器形同虚设；现在脱糖时把
+  边界值传进合成生成器函数，用计数循环逐个产出——第一次 `next()` 就出 0，
+  内存是常数。`range` 作为**普通值**使用仍然会实体化，见下面的已知限制。
+- **`range()` 的动态步长现在支持了**：`for x in range(0, 10, n)` 和
+  `(x for x in range(0, 10, n))` 都能跑（以前报「step must be an integer
+  literal」）。方向在运行期定，步长为 0 抛 ValueError。
+
+### 已知限制
+
+- **range 作为值仍然会实体化**：`r = range(10**9)` 还是当场造 10 亿个元素
+  （CPython 的 range 是惰性对象）。把 range 做成惰性对象要动值的表示
+  （现在 range 和 list 同一套静态类型），先记在
+  [compatibility.md](docs/compatibility.md) 里。
+- **动态步长为 0 时 ValueError 抛得比 CPython 晚**：CPython 在
+  `range(0, 10, 0)` 求值时抛，py23 在第一次 `next()` 时抛（字面量步长 0
+  仍然在创建时抛）。
+
+### 测试
+
+- `tests/run/73_lazy_gen_range.py`：10^9 的 range 源只取前三个值、字面量步长
+  （正负）、动态步长（含负步长）、过滤、多层生成器、sum/max 消费、步长 0 的
+  ValueError、动态步长的 for 循环，输出与 CPython 逐字节一致。
+- 差分测试的 `gen` 生成器新增生成器表达式分支（range 源 + 动态步长 +
+  过滤），默认种子下零差异。
+- 用例数：运行 72→73。
+
+### 文档
+
+- `docs/language.md`：生成器表达式那节补「range 源也是惰性的」和
+  「range 作为普通值仍会实体化」。
+- `docs/compatibility.md`：「生成器表达式的 range 源会被实体化」改成
+  「range 作为值仍然会实体化」，说清剩下的坑是哪一个。
+
 ## [0.82.4] - 2026-11-11
 
 `sorted(xs, key=f)` 之前被**静默忽略**——按 key 排和不按 key 排结果不同。

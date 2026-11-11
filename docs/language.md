@@ -197,6 +197,12 @@ mods = {x % 3 for x in range(10)}
 `enumerate` / `zip` / `str.join` 会把它抽干成列表，`for` 循环逐元素拉取。
 生成器表达式只能消费一次。
 
+源是 `range(...)` 时也是惰性的：脱糖把边界值传进合成生成器函数（而不是把
+range 实体化成列表），用计数循环逐个产出，所以 `(x for x in range(10**9))`
+既不建中间列表，第一次 `next()` 就出 0。`range` 作为**普通值**使用仍然会
+实体化成整数列表（`r = range(10**9)` 就是 10 亿元素），这一点和 CPython
+不同，见 [compatibility.md](compatibility.md)。
+
 ```python
 total = sum(x * x for x in range(1000))     # 不建中间列表
 first = next(x for x in xs if x > 0)
@@ -831,6 +837,7 @@ unknown 值上对带运行期类型标签的类型（str/list/dict/complex）走
 其余内置名（`slice` / `delattr` / `vars` / `dir` 等）类型层面放行，
 降级阶段报「not supported by the code generator yet」，不会再退化成调用
 空指针。
+
 
 ### 跳转与异常
 

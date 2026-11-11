@@ -230,6 +230,15 @@ def gen_ops(rng, n: int) -> str:
             lines.append(f"g = cgen({count})")
             lines.append("print(next(g))")
             lines.append("g.close()")
+        elif pick < 0.80:
+            # 生成器表达式：range 源（字面量步长、动态步长、过滤）要和 CPython 一致。
+            st = r.choice([1, 2, -1, -3])
+            lines.append(f"g = (x * {base} for x in range({count * 3}, {count * 3 + 7}, {st}))")
+            lines.append("print(list(g))")
+            lines.append(f"dst = {r.choice([1, 2, 3])}")
+            lines.append(f"g = (x + {base} for x in range(0, {count * 4}, dst))")
+            lines.append("print(list(g))")
+            lines.append(f"print(list(x for x in range({count * 2}) if x % 2 == 0))")
         elif pick < 0.85:
             lines.append(f"g = gen0({count})")
             lines.append("try:")

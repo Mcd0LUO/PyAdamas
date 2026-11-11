@@ -146,11 +146,65 @@ bool stmt_binds(const Stmt& s, const std::string& n) {
     }
 }
 
+// 生成器表达式的最外层 iterable 是 range(...) 时的边界解析。
+//
+// range 作为值使用会被实体化成整数列表（runtime/rt_slice.c 的
+// py23_range_new）：range(10**9) 就是当场造 10 亿个元素。源是 range 时
+// 改成把边界值传进合成函数，用计数循环惰性迭代。
+//
+// 步长的方向决定比较用 < 还是 >：字面量步长在编译期定下来（快路径），
+// 动态步长走运行期分支。
+bool parse_range(Expr* e, ExprPtr& start, ExprPtr& stop, int64_t& step_val,
+                 ExprPtr& step_expr) {
+    if (!e || e->kind != ExprKind::Call) return false;
+    auto& c = static_cast<Call&>(*e);
+    if (!c.keywords.empty()) return false;
+    auto* fn = dynamic_cast<Name*>(c.func.get());
+    if (!fn || fn->id != "range") return false;
+    if (c.args.empty() || c.args.size() > 3) return false;
+    // 解包实参的个数静态不可知，合成函数的形参对不上，别改写。
+    for (auto& a : c.args)
+        if (a && a->kind == ExprKind::Starred) return false;
+
+    step_val = 1;
+    step_expr = nullptr;
+    if (c.args.size() == 3) {
+        auto* cv = dynamic_cast<Constant*>(c.args[2].get());
+        if (cv && cv->ck == Constant::CK::Int) {
+            if (cv->i == 0) return false;  // 步长 0 是 ValueError，保持原样
+            step_val = cv->i;
+        } else if (cv && cv->ck == Constant::CK::Bool) {
+            if (!cv->b) return false;
+            step_val = 1;
+        } else {
+            step_val = 0;
+            step_expr = std::move(c.args[2]);
+        }
+    }
+    if (c.args.size() == 1) {
+        start = Constant::integer(0);
+        stop = std::move(c.args[0]);
+    } else {
+        start = std::move(c.args[0]);
+        stop = std::move(c.args[1]);
+    }
+    start->line = e->line;
+    start->col = e->col;
+    stop->line = e->line;
+    stop->col = e->col;
+    if (step_expr) {
+        step_expr->line = e->line;
+        step_expr->col = e->col;
+    }
+    return true;
+}
+
 class Desugarer {
 public:
     void run(Module& m) {
         allow_map_ = !body_binds(m.body, "map");
         allow_filter_ = !body_binds(m.body, "filter");
+        allow_range_ = !body_binds(m.body, "range");
         desugar_body(m.body, false);
     }
 
@@ -160,6 +214,8 @@ private:
     int map_arg_id_ = 0;
     bool allow_map_ = true;
     bool allow_filter_ = true;
+    // range 被用户绑定过就不做惰性改写（宁可少改写也不误改）。
+    bool allow_range_ = true;
 
     void desugar_body(std::vector<StmtPtr>& body, bool class_body) {
         std::vector<StmtPtr> out;
@@ -234,6 +290,9 @@ private:
         const int col = g.col;
         const int id = ++gen_id_;
         const std::string itname = std::format("__py23$it_{}", id);
+        const std::string sname = std::format("__py23$rs_{}", id);
+        const std::string ename = std::format("__py23$re_{}", id);
+        const std::string tname = std::format("__py23$rt_{}", id);
 
         auto named = [&](const std::string& s) {
             auto n = std::make_unique<Name>(s);
@@ -245,7 +304,43 @@ private:
         // 最外层 iterable 属于外层作用域：它内部的 lambda 提到 pre 里，
         // 之后整个表达式作为实参传进来。
         auto& first = static_cast<Comprehension&>(*g.generators[0]);
-        desugar_expr(first.iter, pre);
+
+        // 源是 range(...) 时改成传边界值 + 计数循环：range 作为值使用会
+        // 被实体化成整数列表（runtime/rt_slice.c 的 py23_range_new），
+        // 那就没有惰性可言了。边界值在创建时求值（Python 语义），
+        // 元素在 next() 时才产出。
+        ExprPtr rstart, rstop, rstep_expr;
+        int64_t rstep = 1;
+        bool dyn_step = false;
+        bool is_range = allow_range_ &&
+                        parse_range(first.iter.get(), rstart, rstop, rstep, rstep_expr);
+        dyn_step = static_cast<bool>(rstep_expr);
+        if (is_range) {
+            desugar_expr(rstart, pre);
+            desugar_expr(rstop, pre);
+            if (dyn_step) desugar_expr(rstep_expr, pre);
+        } else {
+            desugar_expr(first.iter, pre);
+        }
+
+        // 合成函数体里的 range(...)：边界值是形参，步长是字面量或形参。
+        auto range_iter = [&]() {
+            auto c = std::make_unique<Call>();
+            c->func = named("range");
+            c->args.push_back(named(sname));
+            c->args.push_back(named(ename));
+            if (dyn_step) {
+                c->args.push_back(named(tname));
+            } else {
+                auto st = Constant::integer(rstep);
+                st->line = line;
+                st->col = col;
+                c->args.push_back(std::move(st));
+            }
+            c->line = line;
+            c->col = col;
+            return c;
+        };
 
         // 从最内层往外搭：yield elt，再逐层包 if / for。
         std::vector<StmtPtr> body;
@@ -275,7 +370,8 @@ private:
             }
             auto fr = std::make_unique<For>();
             fr->target = std::move(c.target);
-            fr->iter = i == 0 ? named(itname) : std::move(c.iter);
+            if (i == 0 && is_range) fr->iter = range_iter();
+            else fr->iter = i == 0 ? named(itname) : std::move(c.iter);
             fr->body = std::move(body);
             fr->line = line;
             fr->col = col;
@@ -285,9 +381,23 @@ private:
 
         auto fn = std::make_unique<FunctionDef>();
         fn->name = std::format("__py23$gen_{}", id);
-        Arg a;
-        a.name = itname;
-        fn->args.args.push_back(std::move(a));
+        if (is_range) {
+            Arg s;
+            s.name = sname;
+            fn->args.args.push_back(std::move(s));
+            Arg e;
+            e.name = ename;
+            fn->args.args.push_back(std::move(e));
+            if (dyn_step) {
+                Arg t;
+                t.name = tname;
+                fn->args.args.push_back(std::move(t));
+            }
+        } else {
+            Arg a;
+            a.name = itname;
+            fn->args.args.push_back(std::move(a));
+        }
         fn->body = std::move(body);
         fn->line = line;
         fn->col = col;
@@ -297,7 +407,13 @@ private:
 
         auto call = std::make_unique<Call>();
         call->func = named(fn->name);
-        call->args.push_back(std::move(first.iter));
+        if (is_range) {
+            call->args.push_back(std::move(rstart));
+            call->args.push_back(std::move(rstop));
+            if (dyn_step) call->args.push_back(std::move(rstep_expr));
+        } else {
+            call->args.push_back(std::move(first.iter));
+        }
         call->line = line;
         call->col = col;
         slot = std::move(call);
@@ -562,7 +678,12 @@ private:
                     desugar_arguments(f.args, pre);
                     if (f.returns) desugar_expr(f.returns, pre);
                 }
+                // 函数体里绑定了 range 的话，体里的生成器表达式看到的可能
+                // 不是内建 range：这一层先记下来，宁可少改写也不误改。
+                bool saved_range = allow_range_;
+                allow_range_ = allow_range_ && !body_binds(f.body, "range");
                 desugar_body(f.body, false);
+                allow_range_ = saved_range;
                 break;
             }
             case StmtKind::ClassDef: {
