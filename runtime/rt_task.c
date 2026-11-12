@@ -491,15 +491,13 @@ void* pa_queue_get(void* qp) {
     if (!qp) pa_raise_c("TypeError", "get() expects a Queue");
     PyAdamasQueue* q = (PyAdamasQueue*)qp;
     if (q->items->len > 0) {
-        int64_t v = pa_list_get(q->items, 0);
-        // items 是 kind 2：删除不 release，值的所有权转交给 Future。
-        pa_list_del_index(q->items, 0);
+        int64_t v = list_take_at(q->items, 0);
+        // 摘除时保留引用：值的所有权转交给 Future / 调用方。
         if (q->putters->len > 0) {
             // 队列腾出位置：把一个等待中的 put 值搬进来。
             void* pf = (void*)(uintptr_t)q->putters->data[0];
-            int64_t pv = q->pvalues->data[0];
+            int64_t pv = list_take_at(q->pvalues, 0);
             pa_list_del_index(q->putters, 0);
-            pa_list_del_index(q->pvalues, 0);
             pa_future_set_result(pf, 0);
             queue_push_item(q, pv);  // pvalues 的引用直接转交给 items
         }
@@ -571,13 +569,11 @@ int64_t pa_queue_get_nowait(void* qp) {
     if (!qp) pa_raise_c("TypeError", "get_nowait() expects a Queue");
     PyAdamasQueue* q = (PyAdamasQueue*)qp;
     if (q->items->len == 0) pa_raise_c("QueueEmpty", "queue is empty");
-    int64_t v = pa_list_get(q->items, 0);
-    pa_list_del_index(q->items, 0);
+    int64_t v = list_take_at(q->items, 0);
     if (q->putters->len > 0) {
         void* pf = (void*)(uintptr_t)q->putters->data[0];
-        int64_t pv = q->pvalues->data[0];
+        int64_t pv = list_take_at(q->pvalues, 0);
         pa_list_del_index(q->putters, 0);
-        pa_list_del_index(q->pvalues, 0);
         pa_future_set_result(pf, 0);
         queue_push_item(q, pv);
     }

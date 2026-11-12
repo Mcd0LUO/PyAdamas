@@ -128,8 +128,19 @@ void AsmGen::gen_index_store(const Inst& in) {
         }
         // 旧值的所有权按容器运行期 elem_kind 决定，不能只看静态类型：
         // 空列表推出来的类型可能会在后续赋值里变窄/变宽。
-        line("cmpq $1, 24(%rdi)");
+        // kind 1 直接 dec；kind 2 可能装着整数，走注册表判断。
+        std::string decheap = fresh_label("idxsdec");
+        line("movq 24(%rdi), %rax");
+        line("cmpq $1, %rax");
+        emit_jmp("je", decheap);
+        line("cmpq $2, %rax");
         emit_jmp("jne", done);
+        line("movq %r8, %rdi");
+        spill_fp_slots();
+        line("call pa_rc_dec_unknown");
+        reload_fp_slots();
+        emit_jmp("jmp", done);
+        label(decheap);
         line("movq %r8, %rdi");
         spill_fp_slots();
         line("call pa_rc_dec");
@@ -656,6 +667,7 @@ void AsmGen::gen_call_rt(const Inst& in) {
             case RtFn::RcTemp:
             case RtFn::RcCleanup:
             case RtFn::RcIncUnknown:
+            case RtFn::RcDecUnknown:
             case RtFn::DictKeys:
             case RtFn::DictValues:
             case RtFn::DictItems:

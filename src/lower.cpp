@@ -208,7 +208,9 @@ void Lowerer::collect_classes(std::vector<StmtPtr>& body) {
                     for (const ClassInfo* k = ci.get(); k; k = k->base) chain.push_back(k);
                     for (auto kit = chain.rbegin(); kit != chain.rend(); ++kit)
                         for (auto& f : (*kit)->fields)
-                            irc.field_heap.push_back(ir_is_heap(f.ty) ? 1 : 0);
+                            irc.field_heap.push_back(ir_is_heap(f.ty)
+                                                          ? 1
+                                                          : (f.ty && f.ty->kind == TyKind::Unknown ? 2 : 0));
                 }
                 irc.vtable.assign(static_cast<size_t>(tc_.method_slot_count()), -1);
                 int self_id = static_cast<int>(mod_.classes.size());

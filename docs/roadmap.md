@@ -83,7 +83,7 @@
 按「什么时候会疼」排序：
 
 1. **GC 是保守且 stop-the-world**：栈/寄存器里的整数可能被误认为根，回收时机不确定；没有分代/增量/栈映射
-2. **unknown 引用的计数不精确**：unknown 容器里指向仍有其它根的对象的引用不做 rc 递减，要等下一轮不可达才回收
+2. **unknown 引用的计数不精确**：容器 kind 2 元素、unknown 字段与全局已用 RC 索引精确释放（`pa_rc_dec_unknown`）；仍剩 unknown 类型的局部槽/表达式临时值只 retain 不 release，靠 GC 兜底
 3. **Optional 的收窄能力不足**：`x: Optional[str]` 在 `if x is None: ...` 之后、跨语句块或跨函数调用时仍按 Optional 处理；修它需要正经的数据流分析
 4. **优化遍仍不完整**：有常量折叠、DCE、小函数内联、LICM、下标版本化/免检查；没有 CSE、强度削减、循环旋转和通用向量化
 5. **`tuple` 与 `list` 表示相同**：tuple 也是可变的动态数组，语义上不严谨

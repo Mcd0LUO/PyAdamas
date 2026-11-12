@@ -332,8 +332,9 @@ dict 查找，命中直接返回、未命中调用原函数并写回。两者都
 - `len` 仍是一条 `Len`，真值判断仍走 `branch`（字典/集合的 `len` 在
   偏移 0）。
 
-key/value 的 retain 在写入前由降级器发出；运行时负责更新/销毁时 dec，
-unknown 类别不 dec，由 GC 兜底。
+key/value 的 retain 在写入前由降级器发出；运行时负责更新/销毁时释放，
+unknown 类别（own/kind 2）走 `pa_rc_dec_unknown`：先查 RC 索引确认是堆
+指针再 dec，整数是空操作。
 
 **引用计数插桩的边界**：
 

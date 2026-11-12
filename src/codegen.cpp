@@ -148,7 +148,8 @@ std::string AsmGen::gen(const IRModule& m) {
         out_ += "\t.text\n";
 
         // 每个有堆字段的类生成一个析构器，对象 rc 归零时由运行时回调。
-        // 只 dec 堆字段，字段偏移与对象布局一致（父类字段在前）。
+        // 字段按 field_heap 处理：1 = 已知堆指针（直接 dec），2 = unknown
+        // （可能装着整数或堆指针，走注册表判断）。字段偏移与布局一致。
         for (size_t i = 0; i < m.classes.size(); ++i) {
             const IRClass& c = m.classes[i];
             bool has_heap = std::ranges::any_of(c.field_heap, [](uint8_t v) { return v != 0; });
@@ -161,7 +162,8 @@ std::string AsmGen::gen(const IRModule& m) {
             for (size_t f = 0; f < c.field_heap.size(); ++f) {
                 if (!c.field_heap[f]) continue;
                 out_ += std::format("\tmovq {}(%rbx), %rdi\n", 8 * (f + 1));
-                out_ += "\tcall pa_rc_dec\n";
+                out_ += c.field_heap[f] == 2 ? "\tcall pa_rc_dec_unknown\n"
+                                             : "\tcall pa_rc_dec\n";
             }
             out_ += "\tpopq %rbx\n";
             out_ += "\tret\n";
@@ -175,7 +177,8 @@ std::string AsmGen::gen(const IRModule& m) {
             for (size_t f = 0; f < c.field_heap.size(); ++f) {
                 if (!c.field_heap[f]) continue;
                 out_ += std::format("\tmovq {}(%rbx), %rdi\n", 8 * (f + 1));
-                out_ += "\tcall pa_gc_unref_child\n";
+                out_ += c.field_heap[f] == 2 ? "\tcall pa_rc_dec_unknown\n"
+                                             : "\tcall pa_gc_unref_child\n";
             }
             out_ += "\tpopq %rbx\n";
             out_ += "\tret\n";
@@ -201,7 +204,9 @@ std::string AsmGen::gen(const IRModule& m) {
                 out_ += std::format("\ttestq %rdi, %rdi\n");
                 out_ += std::format("\tje .Lgengcrelskip{}_{}\n", i, s);
                 out_ += std::format("\tmovq $0, {}(%rbx)\n", off);
-                out_ += "\tcall pa_rc_dec\n";
+                // slot_heap: 1=堆，2=可能装着非堆值（unknown 流过堆槽）。
+                out_ += g.slot_heap[s] == 2 ? "\tcall pa_rc_dec_unknown\n"
+                                            : "\tcall pa_rc_dec\n";
                 out_ += std::format(".Lgengcrelskip{}_{}:\n", i, s);
             }
             out_ += std::format(".Lgengcreldone{}:\n", i);

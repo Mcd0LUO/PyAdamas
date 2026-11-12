@@ -104,12 +104,13 @@ RC 索引，取字符不再分配。字符串不可变，共享对象与 CPython
 |---|---|---|---|
 | 0 | 全部非堆类型 | 不 retain | 不 release |
 | 1 | 全部堆类型 | 生成代码 retain | 运行时 release |
-| 2 | unknown 或混合 | 已知堆类型才 retain | 不 release（看不见的类型不敢 dec） |
+| 2 | unknown 或混合 | 堆→`rc_inc`，unknown→`rc_inc_unknown` | `pa_rc_dec_unknown`（注册表判断，整数是空操作） |
 
 `pa_list_new(cap, elem_kind)` 最小容量 4；`append` 满了就翻倍。
-`pa_list_set` 只在 kind 1 时 dec 旧元素；`pa_list_set_len` 只在 kind 1
-时 dec 被截掉的元素。kind 2 不做精确 dec，靠循环收集器兜底——误报只会
-延迟回收，不会提前释放。
+`pa_list_set` / `pa_list_set_len` / `del` / 销毁都按 `elem_kind` 释放旧元素；
+kind 2 统一走 `pa_rc_dec_unknown`：先查 RC 索引确认是堆指针再 dec，
+所以整数和「看起来像指针」的字面量都不会被误减。目标容器原本是 kind 1、
+但接入了 unknown/混合元素时，运行期把 `elem_kind` 提升为 2。
 
 ### 字典 / 集合
 
@@ -124,7 +125,7 @@ RC 索引，取字符不再分配。字符串不可变，共享对象与 CPython
 - key 的哈希/判等类别放在 `key_kind`：int/bool 机器字、str 逐字节
   （FNV-1a）、float IEEE 值（`0.0` / `-0.0` 同键）、其他按机器字；
 - `key_own` / `val_own` 决定 RC：写入前生成代码 retain 一份，更新/销毁
-  时运行时 dec；unknown 只 retain 不 dec，交给 GC；
+  时运行时释放；kind 2（unknown）释放走 `pa_rc_dec_unknown`，整数是空操作；
 - 更新已有 key 时保留原来的 key 对象，释放调用方新传入的 key 引用；
 - **删除是摊还 O(1)**：链表摘链，entry 原地变墓碑（`hash = 0`）挂进
   `free_head` 空闲链，索引槽置 -1；不 memmove、不整表重建，插入时优先
@@ -139,7 +140,8 @@ RC 索引，取字符不再分配。字符串不可变，共享对象与 CPython
   闭包调用协议，尚未支持；`dict_copy` 会继承工厂。
 - 方法：`get` 走 get/get_or；`keys`/`values`/`items` 分配新 list（items
   的元素是二元组），元素按目标 list 的 kind retain；`update` 逐项复制，
-  目标 unknown 时也会 retain 源引用，避免源临时字典释放后悬空；
+  目标的 own 类别向源靠拢（源 unknown 则目标升级为 2），给每个键值补一份
+  引用，避免源临时字典释放后悬空；`copy` 复制 own 类别后逐项 retain；
   `set.add/update` 复用 dict_set/update；`set.pop` 取最后一个插入项。
 
 ### 切片
@@ -148,15 +150,16 @@ RC 索引，取字符不再分配。字符串不可变，共享对象与 CPython
 缺省边界用 `INT64_MIN` 哨兵，运行时按 Python `slice.indices` 归一化：
 
 - 正/负步长、负索引、越界夹取；`step == 0` 抛 ValueError；
-- list/tuple 结果新建同 `elem_kind` 的列表，kind 1 元素逐个 retain；
+- list/tuple 结果新建同 `elem_kind` 的列表，kind 1/2 元素按源类别逐个 retain；
 - str 结果新建字节串，按字节复制；
 - 结果是新堆对象，正常进入 RC/GC。
 
 `pa_list_slice_assign(dst, start, stop, step, src)` 处理写切片：
 `step == 1` 时用 `memmove` 支持长度变化（替换 / 插入 / 删除），扩展切片
-要求 `src->len` 与切片长度一致；写入时按 `dst->elem_kind` retain 新元素、
-dec 被覆盖的旧元素，`src == dst` 先做快照。`pa_list_extend(dst, src)`
-用于 `*args` 打包，按 `dst` 的 kind 接管元素引用。
+要求 `src->len` 与切片长度一致；写入时按来源种类 retain 新元素、
+按 `dst->elem_kind` 释放被覆盖的旧元素（源是 kind 2 时目标提升为 2），
+`src == dst` 先做快照。`pa_list_extend(dst, src)` 用于 `*args` 打包和
+拷贝：按来源种类 retain，目标接入了 kind 2 源时同样提升自己的 kind。
 
 ### 用户对象
 
@@ -309,9 +312,9 @@ longjmp 回同步调用点。GC 清扫和进程退出不跑析构器，但会单
 | `pa_list_new` | `(i64 cap, i64 elem_kind) -> Py23List*` | 建空表，容量至少 4 |
 | `pa_list_append` | `(Py23List*, i64) -> void` | 追加，满则翻倍 `realloc`；不隐式 retain |
 | `pa_list_get` | `(Py23List*, i64) -> i64` | 负索引先加 `len`；越界抛 IndexError；返回借用。生成代码内联快路径，只有越界才进来 |
-| `pa_list_set` | `(Py23List*, i64, i64) -> void` | 同上，写入；kind 1 时 dec 旧元素。生成代码内联快路径，运行期 elem_kind 决定是否 dec |
-| `pa_list_set_len` | `(Py23List*, i64) -> void` | 改 `len`；kind 1 时 dec 被截掉的元素 |
-| `pa_list_extend` | `(Py23List* dst, Py23List* src) -> void` | 追加 src 全部元素；按 dst kind retain，`src == dst` 先快照 |
+| `pa_list_set` | `(Py23List*, i64, i64) -> void` | 同上，写入；按 elem_kind 释放旧元素（kind 2 走注册表）。生成代码内联快路径，运行期 elem_kind 决定是否释放 |
+| `pa_list_set_len` | `(Py23List*, i64) -> void` | 改 `len`；按 elem_kind 释放被截掉的元素 |
+| `pa_list_extend` | `(Py23List* dst, Py23List* src) -> void` | 追加 src 全部元素；按来源种类 retain，dst 原本是 kind 1 而源是 kind 2 时提升为 2，`src == dst` 先快照 |
 | `pa_list_sum_i64` | `(Py23List*, i64 start) -> i64` | O2 归约；AVX2 4×int64 累加（按 uint64 回绕），否则标量 |
 | `pa_list_sum_f64` | `(Py23List*, f64 start) -> f64` | `--fast-math` + O2 时 AVX2 4 路 double 分组求和；否则标量顺序 |
 | `pa_list_min_i64` / `max_i64` | `(Py23List*) -> i64` | O2 归约；AVX2 compare+blend，空表抛 ValueError |
@@ -525,6 +528,7 @@ longjmp 回同步调用点。GC 清扫和进程退出不跑析构器，但会单
 |---|---|---|
 | `pa_rc_inc` | `(void*) -> void` | 引用 +1；空指针和永生字面量跳过 |
 | `pa_rc_inc_unknown` | `(i64) -> i64` | unknown 值按堆注册表保守 retain；不是堆指针就什么也不做 |
+| `pa_rc_dec_unknown` | `(i64) -> void` | unknown 值按堆注册表保守释放；不是堆指针就什么也不做 |
 | `pa_rc_dec` | `(void*) -> void` | 引用 -1；归零时调 `dtor` 并释放整块 |
 | `pa_rc_temp` | `(void*) -> void` | 表达式临时值入栈，接管产生者的引用 |
 | `pa_rc_mark` | `() -> i64` | 返回临时值栈当前水位 |
@@ -631,13 +635,13 @@ longjmp 回同步调用点。GC 清扫和进程退出不跑析构器，但会单
 
 - 对象自环、相互递归闭包形成的 cell 环：分配量超过 2MB 时被标记-清扫；
   进程退出时也会清空整个堆。
-- `unknown` / `list[unknown]` / 混合元组：正常 RC 不精确 dec，但 GC 会
-  保守扫描并回收不可达对象。若某个 unknown 元素指向「仍有其它根」的
-  对象，它的计数可能虚高，要到后续轮次才回收。
-- unknown 值写入容器或 cell 前，生成代码调用 `pa_rc_inc_unknown`：
-  运行时按注册表判断它是不是堆指针，是则 +1。unknown 容器不会 dec，
-  这份引用最终由 GC 回收，但保证被引用者不会先于引用者释放。注册表
-  维护一份开放寻址索引（墓碑复用、按存活数决定扩容或原地压缩），
+- `unknown` 容器元素、unknown 字段/全局：写入时用 `pa_rc_inc_unknown`
+  （或已知堆类型时 `pa_rc_inc`）持有，覆盖/销毁时用 `pa_rc_dec_unknown`
+  释放。注册表先确认机器字确实指向堆对象，因此整数和静态字面量都不会
+  被误减；容器 kind 2、`field_heap == 2`、全局的 `maybe_unknown` 都走
+  这条路径。剩余不精确的地方是 unknown 类型的**局部槽和临时值**：它们
+  在写入时保守 retain，出口不释放，靠 GC 兜底。
+- 注册表维护一份开放寻址索引（墓碑复用、按存活数决定扩容或原地压缩），
   索引本身只随存活对象数增长。
 - 唯一的「回收静默性」：没有 `__del__`/弱引用，对象什么时候真正释放
   不可观察；GC 是 stop-the-world、全堆扫描，没有分代/增量。
@@ -645,10 +649,11 @@ longjmp 回同步调用点。GC 清扫和进程退出不跑析构器，但会单
 静态类型的好处是 RC 插桩位置是确定的：赋值、传参、返回、容器写入都是
 明确的增减引用点。GC 只是兜底，不替代 RC。
 
-**异常路径**：longjmp 跳过普通函数帧时不会执行 `release_slots`，这些帧
-里已经 retain 的局部引用会留在堆上，直到下一轮 GC 按不可达回收。handler
-记录本身保存了受保护区的临时值栈水位，landing pad 会把这段临时值精确
-清掉；所以异常路径只会延迟局部变量的回收，不会泄漏临时表达式。
+**异常路径**：longjmp 跳过普通函数帧时不执行 `release_slots`，改由
+`pa_frame_unwind` 按帧记录逐槽释放并清零；槽地址的最低位标记「可能非堆」，
+这类槽走 `pa_rc_dec_unknown`。handler 记录本身保存了受保护区的临时值栈
+水位，landing pad 会把这段临时值精确清掉；异常路径不会泄漏已 retain 的
+局部引用或临时表达式。生成器/协程的槽在堆帧里，由帧的 gcrel 释放。
 
 ## 循环收集器
 
@@ -664,10 +669,12 @@ longjmp 回同步调用点。GC 清扫和进程退出不跑析构器，但会单
    - 用户对象 / 闭包：整个负载按 8 字节扫；
    - 字符串：没有子指针，跳过。
 3. **释放引用**：对每个不可达对象调用它的 `release`：
-   - 列表 kind 1 逐个 `gc_unref_child` 元素；
-   - 字典/集合按 `key_own` / `val_own` 对已知堆 key/value 做 unref；
+   - 列表 kind 1 逐个 `gc_unref_child` 元素，kind 2 走 `pa_rc_dec_unknown`
+     （清扫期 `pa_rc_dec` 只调整可达对象的计数，不会触发释放）；
+   - 字典/集合按 `key_own` / `val_own` 对已知堆 key/value 做 unref，
+     own 2 同样走注册表；
    - 闭包逐个 cell；
-   - 用户对象用 codegen 生成的 `.LgcrelN`，只处理堆字段；
+   - 用户对象用 codegen 生成的 `.LgcrelN`，只处理堆/unknown 字段；
    - `gc_unref_child` 只在子对象 **可达** 时 `rc--`，绝不释放。
    这一步在没有任何对象被 free 之前完成，避免释放顺序造成悬空读取。
 4. **清扫**：释放所有不可达对象（列表顺带 `free(data)`，字典释放
@@ -693,5 +700,7 @@ ASan 下用内联汇编取真实 `%rsp`，避免扫描 ASan fake stack 的未映
   `args`、traceback 或自定义异常类，需要把异常对象改成正常的堆类型。
 - **精确根/分代**：现在是保守栈扫描 + 全堆 stop-the-world。要提速可以
   给生成代码加栈映射，或做分代/增量收集。
-- **kind 2 元素**：`list[unknown]` 的引用计数仍不精确，靠 GC 兜底。要
-  彻底解决，得给容器元素加运行时类型标签，或者把 unknown 从语言里消掉。
+- **unknown 局部槽/临时值**：容器元素、字段和全局已经用 RC 索引精确
+  释放（`pa_rc_dec_unknown`），但 unknown 类型的局部槽和表达式临时值
+  仍只 retain 不 release，靠 GC 兜底。彻底解决需要给值加运行时标签，
+  或者把 unknown 从语言里消掉。

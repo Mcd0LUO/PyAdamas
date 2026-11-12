@@ -209,7 +209,9 @@ bool ir_module_needs_unknown_index(const IRModule& m) {
                 if (in.op == IrOp::SuperVCall) return true;
                 if (in.op == IrOp::CallRt) {
                     RtFn fn = static_cast<RtFn>(in.imm);
-                    if (fn == RtFn::RcIncUnknown || registry_rtfn(fn)) return true;
+                    if (fn == RtFn::RcIncUnknown || fn == RtFn::RcDecUnknown ||
+                        registry_rtfn(fn))
+                        return true;
                 }
             }
     }

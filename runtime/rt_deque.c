@@ -15,11 +15,9 @@ struct PyAdamasDeque {
 
 static void dq_destroy(void* p) {
     PyAdamasDeque* d = (PyAdamasDeque*)p;
-    if (d->elem_kind == 1 && d->data) {
-        for (int64_t i = 0; i < d->len; ++i) {
-            int64_t v = d->data[(d->head + i) & (d->cap - 1)];
-            if (v) pa_rc_dec((void*)v);
-        }
+    if (d->elem_kind != 0 && d->data) {
+        for (int64_t i = 0; i < d->len; ++i)
+            pa_own_dec(d->elem_kind, d->data[(d->head + i) & (d->cap - 1)]);
     }
     free(d->data);
 }
@@ -72,7 +70,7 @@ void pa_deque_append(PyAdamasDeque* d, int64_t v) {
         int64_t old = dq_at(d, 0);
         d->head = (d->head + 1) & (d->cap - 1);
         --d->len;
-        if (d->elem_kind == 1 && old) pa_rc_dec((void*)old);
+        pa_own_dec(d->elem_kind, old);
     }
     if (d->len == d->cap) dq_grow(d);
     dq_set(d, d->len, v);
@@ -83,7 +81,7 @@ void pa_deque_appendleft(PyAdamasDeque* d, int64_t v) {
     if (d->maxlen > 0 && d->len == d->maxlen) {
         int64_t old = dq_at(d, d->len - 1);
         --d->len;
-        if (d->elem_kind == 1 && old) pa_rc_dec((void*)old);
+        pa_own_dec(d->elem_kind, old);
     }
     if (d->len == d->cap) dq_grow(d);
     d->head = (d->head - 1) & (d->cap - 1);
@@ -123,7 +121,7 @@ void pa_deque_set(PyAdamasDeque* d, int64_t i, int64_t v) {
     if (i < 0 || i >= d->len) pa_raise_c("IndexError", "deque assignment index out of range");
     int64_t old = dq_at(d, i);
     dq_set(d, i, v);
-    if (d->elem_kind == 1 && old) pa_rc_dec((void*)old);
+    pa_own_dec(d->elem_kind, old);
 }
 
 /* rotate(n)：正数右旋（尾部转到头部），负数左旋。 */
@@ -141,11 +139,9 @@ void pa_deque_rotate(PyAdamasDeque* d, int64_t n) {
 }
 
 void pa_deque_clear(PyAdamasDeque* d) {
-    if (d->elem_kind == 1) {
-        for (int64_t i = 0; i < d->len; ++i) {
-            int64_t v = dq_at(d, i);
-            if (v) pa_rc_dec((void*)v);
-        }
+    if (d->elem_kind != 0) {
+        for (int64_t i = 0; i < d->len; ++i)
+            pa_own_dec(d->elem_kind, dq_at(d, i));
     }
     d->head = 0;
     d->len = 0;
@@ -154,9 +150,10 @@ void pa_deque_clear(PyAdamasDeque* d) {
 /* extend：尾部逐个追加（保持顺序）。 */
 void pa_deque_extend(PyAdamasDeque* d, PyAdamasList* items) {
     if (!items) return;
+    if (items->elem_kind > d->elem_kind) d->elem_kind = items->elem_kind;
     for (int64_t i = 0; i < items->len; ++i) {
         int64_t v = items->data[i];
-        if (items->elem_kind == 1 && v) pa_rc_inc((void*)v);
+        pa_own_inc(items->elem_kind, v);
         pa_deque_append(d, v);
     }
 }
@@ -164,9 +161,10 @@ void pa_deque_extend(PyAdamasDeque* d, PyAdamasList* items) {
 /* extendleft：逐个 appendleft，结果是逆序（和 CPython 一致）。 */
 void pa_deque_extendleft(PyAdamasDeque* d, PyAdamasList* items) {
     if (!items) return;
+    if (items->elem_kind > d->elem_kind) d->elem_kind = items->elem_kind;
     for (int64_t i = 0; i < items->len; ++i) {
         int64_t v = items->data[i];
-        if (items->elem_kind == 1 && v) pa_rc_inc((void*)v);
+        pa_own_inc(items->elem_kind, v);
         pa_deque_appendleft(d, v);
     }
 }
@@ -176,7 +174,7 @@ PyAdamasList* pa_deque_to_list(PyAdamasDeque* d) {
     PyAdamasList* out = pa_list_new(d->len, d->elem_kind);
     for (int64_t i = 0; i < d->len; ++i) {
         int64_t v = dq_at(d, i);
-        if (d->elem_kind == 1 && v) pa_rc_inc((void*)v);
+        pa_own_inc(d->elem_kind, v);
         pa_list_append(out, v);
     }
     return out;

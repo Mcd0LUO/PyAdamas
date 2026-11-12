@@ -66,7 +66,7 @@ PyAdamasList* pa_list_slice(PyAdamasList* src, int64_t start, int64_t stop, int6
     PyAdamasList* out = pa_list_new(count, src->elem_kind);
     for (int64_t i = lo; st > 0 ? i < hi : i > hi; i += st) {
         int64_t v = src->data[i];
-        if (src->elem_kind == 1 && v) pa_rc_inc((void*)v);
+        pa_own_inc(src->elem_kind, v);
         pa_list_append(out, v);
     }
     return out;
@@ -109,6 +109,9 @@ void pa_list_slice_assign(PyAdamasList* dst, int64_t start, int64_t stop, int64_
         if (slen) memcpy(snap, src->data, sizeof(int64_t) * (size_t)slen);
         sv = snap;
     }
+    // 源是 unknown/混合（2）时目标也升级为 2：旧元素按注册表释放安全，
+    // 新元素按来源种类 retain，销毁/覆盖时统一走保守释放。
+    if (src->elem_kind == 2) dst->elem_kind = 2;
     int kind = (int)dst->elem_kind;
     if (st != 1) {
         if (slen != n) pa_raise_c("ValueError", "cannot assign sequence of different size to extended slice");
@@ -116,10 +119,9 @@ void pa_list_slice_assign(PyAdamasList* dst, int64_t start, int64_t stop, int64_
             int64_t idx = lo + i * st;
             int64_t v = sv[i];
             int64_t old = dst->data[idx];
-            if (kind == 1 && v) pa_rc_inc((void*)v);
-            else if (kind == 2 && src->elem_kind == 1 && v) pa_rc_inc((void*)v);
+            if (kind != 0) pa_own_inc(src->elem_kind, v);
             dst->data[idx] = v;
-            if (kind == 1 && old) pa_rc_dec((void*)old);
+            pa_own_dec(kind, old);
         }
         free(snap);
         return;
@@ -139,9 +141,9 @@ void pa_list_slice_assign(PyAdamasList* dst, int64_t start, int64_t stop, int64_
         dst->len += delta;
     } else if (delta < 0) {
         // [lo+slen, hi) 的旧元素会被下面的 memmove 覆盖，先释放。
-        if (kind == 1)
+        if (kind != 0)
             for (int64_t i = lo + slen; i < hi; ++i)
-                if (dst->data[i]) pa_rc_dec((void*)dst->data[i]);
+                pa_own_dec(kind, dst->data[i]);
         memmove(&dst->data[lo + slen], &dst->data[hi],
                 sizeof(int64_t) * (size_t)(dst->len - hi));
         dst->len += delta;
@@ -149,13 +151,11 @@ void pa_list_slice_assign(PyAdamasList* dst, int64_t start, int64_t stop, int64_
     for (int64_t i = 0; i < slen; ++i) {
         int64_t v = sv[i];
         int64_t old = dst->data[lo + i];
-        if (kind == 1 && v) pa_rc_inc((void*)v);
-        else if (kind == 2 && src->elem_kind == 1 && v) pa_rc_inc((void*)v);
+        if (kind != 0) pa_own_inc(src->elem_kind, v);
         dst->data[lo + i] = v;
         // 增长时 memmove 会把尾部元素复制到 [hi, hi+delta)，这些副本
         // 没有独立的引用计数；只有原区间 [lo, hi) 的旧元素归本列表所有。
-        if (kind == 1 && old && (delta <= 0 || lo + i < hi))
-            pa_rc_dec((void*)old);
+        if (kind != 0 && (delta <= 0 || lo + i < hi)) pa_own_dec(kind, old);
     }
     free(snap);
 }

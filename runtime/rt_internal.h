@@ -21,8 +21,8 @@ typedef struct {
 } PyAdamasStr;
 
 /* elem_kind: 0 = 全部非堆类型，1 = 全部堆类型，2 = 有 unknown / 混合。
-   kind 1 的元素在写入时由生成代码 retain，销毁时由运行时 release；
-   kind 2 只 retain 不 release（看不见的类型不敢 dec），代价是泄漏。 */
+   kind 1/2 的元素在写入时 retain（堆→rc_inc，unknown→rc_inc_unknown），
+   覆盖/截断/销毁时 release（kind 2 走注册表判断，整数是空操作）。 */
 typedef struct {
     int64_t len;
     int64_t cap;
@@ -826,3 +826,27 @@ void pa_popen_kill(PyAdamasPopen* p);
 void pa_popen_terminate(PyAdamasPopen* p);
 void pa_popen_send_signal(PyAdamasPopen* p, int64_t sig);
 PyAdamasList* pa_popen_communicate(PyAdamasPopen* p, PyAdamasStr* input);
+
+/* ── 引用所有权辅助（kind 2 = unknown，可能非堆）──────────────── */
+/* 容器/槽的引用所有权类别：0 非堆，1 堆指针，2 unknown（可能是整数，
+   也可能是堆指针）。kind 2 的位置在写入时统一 retain（堆指针走 rc_inc，
+   unknown 值走注册表判断），释放时统一走注册表判断。 */
+static inline void pa_own_inc(int64_t own, int64_t v) {
+    if (!v) return;
+    if (own == 1) pa_rc_inc((void*)v);
+    else if (own == 2) pa_rc_inc_unknown(v);
+}
+
+static inline void pa_own_dec(int64_t own, int64_t v) {
+    if (!v) return;
+    if (own == 1) pa_rc_dec((void*)v);
+    else if (own == 2) pa_rc_dec_unknown(v);
+}
+
+/* GC 清扫期：kind 2 的元素同样只能按注册表判断；rc_dec 在清扫期只调
+   可达对象的计数，语义与 gc_unref_child 一致。 */
+static inline void pa_own_gc_unref(int64_t own, int64_t v) {
+    if (!v) return;
+    if (own == 1) pa_gc_unref_child((void*)v);
+    else if (own == 2) pa_rc_dec_unknown(v);
+}

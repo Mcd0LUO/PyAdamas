@@ -258,6 +258,9 @@ private:
     bool frame_rec_ = false;
     // 帧记录里的槽：持有堆引用的非借用槽，异常展开时按地址 dec。
     std::vector<int> frame_owned_;
+    // 与 frame_owned_ 一一对应：槽里可能是非堆值，展开时走注册表释放。
+    // 记录里用地址最低位置 1 标记（槽地址 8 字节对齐）。
+    std::vector<bool> frame_owned_unknown_;
 
     const std::string& mem(VReg r) const {
         if (r < static_cast<VReg>(vreg_reg_.size()) && !vreg_reg_[r].empty())

@@ -94,6 +94,7 @@ void AsmGen::emit_function(const IRFunction& f, int fi) {
         n_slots_ = static_cast<int>(f.slot_ty.size());
         frame_rec_ = false;
         frame_owned_.clear();
+        frame_owned_unknown_.clear();
         auto t_alloc = std::chrono::steady_clock::now();
         assign_vreg_slots();
         if (gen_) {
@@ -106,8 +107,11 @@ void AsmGen::emit_function(const IRFunction& f, int fi) {
             const size_t n_owned =
                 std::min(f.slot_owned.size(), f.slot_ty.size());
             for (size_t s = 0; s < n_owned; ++s)
-                if (f.slot_owned[s] && ir_is_heap(f.slot_ty[s]))
+                if (f.slot_owned[s] && ir_is_heap(f.slot_ty[s])) {
                     frame_owned_.push_back(static_cast<int>(s));
+                    frame_owned_unknown_.push_back(
+                        s < f.slot_unknown.size() && f.slot_unknown[s]);
+                }
         }
         const int rec_words =
             frame_owned_.empty() ? 0 : 2 + static_cast<int>(frame_owned_.size());
@@ -187,6 +191,8 @@ void AsmGen::emit_function(const IRFunction& f, int fi) {
                 emit_imm_op("movq", static_cast<int64_t>(frame_owned_.size()), rec_mem(1));
                 for (size_t i = 0; i < frame_owned_.size(); ++i) {
                     line(std::format("leaq {}, %rax", smem(frame_owned_[i])));
+                    // 低位标记：该槽可能装着非堆值，展开时走注册表释放。
+                    if (frame_owned_unknown_[i]) line("orq $1, %rax");
                     emit2("movq", "%rax", rec_mem(2 + static_cast<int>(i)));
                 }
                 line(std::format("leaq {}, %rax", rec_mem(0)));

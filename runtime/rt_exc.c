@@ -18,11 +18,16 @@ PyAdamasExcSave* exc_save_top;
 void pa_frame_unwind(PyAdamasFrame* target) {
     for (PyAdamasFrame* f = pa_frame_top; f && f != target; f = f->prev) {
         for (int64_t i = 0; i < f->n; ++i) {
-            void** p = (void**)f->slots[i];
-            void* v = *p;
+            /* 低位标记：槽里可能是非堆值（unknown 流过静态堆槽），
+               必须走注册表判断，不能把整数当指针 dec。 */
+            uintptr_t addr = (uintptr_t)f->slots[i];
+            int unknown = (int)(addr & 1);
+            int64_t* p = (int64_t*)(addr & ~(uintptr_t)1);
+            int64_t v = *p;
             if (!v) continue;
-            *p = NULL;
-            pa_rc_dec(v);
+            *p = 0;
+            if (unknown) pa_rc_dec_unknown(v);
+            else pa_rc_dec((void*)(uintptr_t)v);
         }
     }
     pa_frame_top = target;

@@ -4,6 +4,41 @@
 
 早期阶段没有逐条留痕，按阶段归纳；0.4 之后逐条记录。
 
+## [0.109] - 2026-11-12
+
+unknown 引用计数精确化：容器 kind 2 元素、unknown 字段与全局改走 RC 索引释放。
+
+### 修复
+
+- **容器 kind 2**：`list`/`dict`/`set` 的 unknown/混合元素不再「只 retain
+  不 release」。写入统一 retain（堆→`rc_inc`，unknown→`rc_inc_unknown`），
+  覆盖、截断、`del`、销毁统一 `pa_rc_dec_unknown`（先查 RC 索引，整数是
+  空操作）。运行时辅助构造路径（extend/reversed/slice/enumerate/zip/
+  keys/values/items/update/copy/popitem/set_from_list/deque/random/
+  itertools）同步补齐 retain；目标容器原本是 kind 1 而源是 kind 2 时
+  运行期把目标提升为 2。
+- **unknown 字段**：`IRClass.field_heap` 增加 2（unknown 字段）；类析构器
+  与 GC release 改调 `pa_rc_dec_unknown`，`store_field` 覆盖旧值同样按
+  注册表释放，unknown 源写入字段时补一份引用。
+- **unknown 全局**：`IRGlobal.maybe_unknown` 记录「写过的值可能非堆」；
+  `store_global` 的旧值释放与出口 `release_globals` 改走注册表，
+  unknown 源写入补 `rc_inc_unknown`。
+- **槽/帧记录**：unknown 流过静态堆槽时打 `slot_unknown` 标记，出口、
+  异常展开的帧记录和内联入口释放都改走 `pa_rc_dec_unknown`；生成器帧的
+  `slot_heap` 增加 2，GC 扫描 kind 2 列表时保守查表标记。
+- **队列所有权**：`pa_queue_get` / `get_nowait` 摘元素改用 `list_take_at`，
+  把引用直接转交给 Future/调用方，避免新增的 `del` 释放提前回收。
+
+### 验证
+
+- 专项：`dict[str, unknown]` 2000 轮峰值 158MB → 2.1MB；unknown 字段
+  310MB → 2.0MB；unknown 值流进堆槽的段错误用例输出正常。
+- 新增 `96_unknown_rc`：unknown dict/list 的切片、反转、enumerate/zip，
+  unknown 字段覆盖，unknown 全局覆盖，输出与 CPython 一致。
+- `ctest --preset dev` 2/2；16MB `RLIMIT_AS` 验收 6/6；差分 runner
+  280 例 0 失败；typed 基准 `03_len`/`08_range`/`11_min`/`13_sum`
+  每轮耗时与快照持平。
+
 ## [0.108] - 2026-11-12
 
 项目更名为 **PyAdamas**。

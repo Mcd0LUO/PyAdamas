@@ -666,12 +666,15 @@ void gc_scan_object(PyAdamasRc* h) {
         case PYADAMAS_RC_LIST: {
             PyAdamasList* l = (PyAdamasList*)p;
             if (!l->data) break;
-            // exact-RC 模式下 elem_kind 只可能是 0/1：0 是纯数值元素，
-            // 没有任何引用要标记；1 是静态类型已知的堆指针，直接标记。
+            // exact-RC 模式：0 是纯数值元素，没有引用要标记；1 是静态类型
+            // 已知的堆指针，直接标记；2 是推不出来的混合元素，保守查表标记。
             if (gc_untracked_leaves) {
                 if (l->elem_kind == 1)
                     for (int64_t i = 0; i < l->len; ++i)
                         gc_mark_direct((uintptr_t)l->data[i]);
+                else if (l->elem_kind == 2)
+                    for (int64_t i = 0; i < l->len; ++i)
+                        gc_mark((uintptr_t)l->data[i]);
             } else {
                 for (int64_t i = 0; i < l->len; ++i) gc_mark((uintptr_t)l->data[i]);
             }

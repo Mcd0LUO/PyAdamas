@@ -143,6 +143,7 @@ enum class RtFn : uint16_t {
     RcInc,       // (ptr) -> void
     RcDec,       // (ptr) -> void
     RcIncUnknown,// (i64) -> i64  按堆注册表保守 retain（unknown 值）
+    RcDecUnknown,// (i64) -> void 按堆注册表保守 release（unknown 值）
     RcTemp,      // (ptr) -> void  表达式临时值入栈，接管产生者的引用
     RcMark,      // () -> i64      临时值栈水位
     RcCleanup,   // (i64) -> void  释放到指定水位
@@ -534,6 +535,7 @@ inline const char* rt_name(RtFn f) {
         case RtFn::RcInc: return "pa_rc_inc";
         case RtFn::RcDec: return "pa_rc_dec";
         case RtFn::RcIncUnknown: return "pa_rc_inc_unknown";
+        case RtFn::RcDecUnknown: return "pa_rc_dec_unknown";
         case RtFn::RcTemp: return "pa_rc_temp";
         case RtFn::RcMark: return "pa_rc_mark";
         case RtFn::RcCleanup: return "pa_rc_cleanup";
@@ -1094,10 +1096,13 @@ struct IRParam {
 struct IRGlobal {
     std::string name;
     TypePtr ty;
-    // 模块编译时的链接符号；为空表示本地 .LgN。
+    // 编译期的链接符号；为空表示本地 .LgN。
     std::string symbol;
     // 外部模块的全局：只引用符号，不在这里分配存储，也不进根表。
     bool external = false;
+    // 曾经以 unknown 值写入过（或被 unknown 类型重新标注）：旧值释放要
+    // 走注册表判断，避免把整数当指针 dec。
+    bool maybe_unknown = false;
 };
 
 struct IRFunction {
@@ -1110,6 +1115,9 @@ struct IRFunction {
     // 槽是否持有堆引用（出口要 release、异常展开要按帧记录释放）。
     // 借用槽（只读形参、迭代临时槽、闭包环境槽）为 false。
     std::vector<bool> slot_owned;
+    // 堆槽里可能装着非堆值（unknown 值流过静态堆类型槽）：释放要走
+    // 注册表判断，不能直接按指针 dec。
+    std::vector<bool> slot_unknown;
     // 每个虚拟寄存器的类型，后端决定用 rax 还是 xmm 时查它
     std::vector<TypePtr> vreg_ty;
     std::vector<Block> blocks;
@@ -1126,6 +1134,7 @@ struct IRFunction {
 
     int new_slot(TypePtr ty) {
         slot_owned.push_back(ir_is_heap(ty));
+        slot_unknown.push_back(false);
         slot_ty.push_back(std::move(ty));
         return static_cast<int>(slot_ty.size()) - 1;
     }

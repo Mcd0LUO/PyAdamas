@@ -15,19 +15,20 @@ PyAdamasList* pa_itertools_repeat(int64_t v, int64_t n, int64_t elem_kind) {
     if (n < 0) n = 0;
     PyAdamasList* out = pa_list_new(n, elem_kind);
     for (int64_t i = 0; i < n; ++i) {
-        if (v && elem_kind == 1) pa_rc_inc((void*)v);
+        pa_own_inc(elem_kind, v);
         pa_list_append(out, v);
     }
     return out;
 }
 
 PyAdamasDict* pa_collections_counter(PyAdamasList* src, int64_t key_kind, int64_t key_own) {
+    if (src->elem_kind > key_own) key_own = src->elem_kind;
     PyAdamasDict* d = pa_dict_new(key_kind, key_own, 0, -1, -1);
     for (int64_t i = 0; i < src->len; ++i) {
         int64_t k = src->data[i];
         int64_t c = pa_dict_get_or(d, k, 0);
-        // dict_set 的约定：key_own==1 时它「消费」传入的 key 引用。
-        if (key_own == 1 && k) pa_rc_inc((void*)k);
+        // dict_set 的约定：key_own 非 0 时它「消费」传入的 key 引用。
+        pa_own_inc(key_own, k);
         pa_dict_set(d, k, c + 1);
     }
     return d;
@@ -64,11 +65,9 @@ PyAdamasList* pa_collections_most_common(PyAdamasDict* d, int64_t n) {
     PyAdamasList* out = pa_list_new(take, 1);
     for (int64_t i = 0; i < take; ++i) {
         PyAdamasList* tup = pa_list_new(2, tk);
-        if ((tk == 1 || d->key_own == 1) && arr[i].key)
-            pa_rc_inc((void*)arr[i].key);
+        pa_own_inc(d->key_own, arr[i].key);
         pa_list_append(tup, arr[i].key);
-        if ((tk == 1 || d->val_own == 1) && arr[i].val)
-            pa_rc_inc((void*)arr[i].val);
+        pa_own_inc(d->val_own, arr[i].val);
         pa_list_append(tup, arr[i].val);
         pa_list_append(out, (int64_t)tup);
     }

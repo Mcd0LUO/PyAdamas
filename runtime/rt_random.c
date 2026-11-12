@@ -282,6 +282,8 @@ PyAdamasList* pa_random_sample(PyAdamasRandom* r, PyAdamasList* seq, int64_t k) 
         pool->data[i] = pool->data[j];
         pool->data[j] = t;
     }
+    // 截断掉 [k, n) 的副本引用，否则无条件复制会让多余元素泄漏。
+    for (int64_t i = k; i < n; ++i) pa_own_dec(pool->elem_kind, pool->data[i]);
     pool->len = k;
     return pool;
 }
@@ -297,7 +299,7 @@ PyAdamasList* pa_random_choices(PyAdamasRandom* r, PyAdamasList* seq, int64_t k)
         int64_t j = (int64_t)(mt_next_double(g) * (double)n);
         if (j >= n) j = n - 1;
         int64_t v = seq->data[j];
-        if (seq->elem_kind == 1 && v) pa_rc_inc((void*)v);
+        pa_own_inc(seq->elem_kind, v);
         pa_list_append(out, v);
     }
     return out;

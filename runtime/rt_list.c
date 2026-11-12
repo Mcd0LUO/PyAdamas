@@ -61,17 +61,17 @@ static void list_buf_put(int64_t* p, int64_t cap) {
 
 void list_destroy(void* p) {
     PyAdamasList* l = (PyAdamasList*)p;
-    if (l->elem_kind == 1)
-        for (int64_t i = 0; i < l->len; ++i) pa_rc_dec((void*)l->data[i]);
+    if (l->elem_kind != 0)
+        for (int64_t i = 0; i < l->len; ++i) pa_own_dec(l->elem_kind, l->data[i]);
     list_buf_put(l->data, l->cap);
 }
 
-// GC 清扫前调用：只把「指向可达对象」的引用计数减掉。kind 2 的元素类型
-// 不可知，跳过（那些对象如果只被这个容器引用，会在同一轮清扫里被释放）。
+// GC 清扫前调用：只把「指向可达对象」的引用计数减掉。kind 2 的元素走
+// 注册表判断（整数不会命中），不再整体跳过。
 void list_gc_release(void* p) {
     PyAdamasList* l = (PyAdamasList*)p;
-    if (l->elem_kind != 1 || !l->data) return;
-    for (int64_t i = 0; i < l->len; ++i) pa_gc_unref_child((void*)l->data[i]);
+    if (l->elem_kind == 0 || !l->data) return;
+    for (int64_t i = 0; i < l->len; ++i) pa_own_gc_unref(l->elem_kind, l->data[i]);
 }
 
 PyAdamasList* pa_list_new(int64_t cap, int64_t elem_kind) {
@@ -111,19 +111,19 @@ void pa_list_set(PyAdamasList* l, int64_t i, int64_t v) {
     if (i < 0 || i >= l->len) pa_raise_c("IndexError", "list assignment index out of range");
     int64_t old = l->data[i];
     l->data[i] = v;
-    if (l->elem_kind == 1) pa_rc_dec((void*)old);
+    pa_own_dec(l->elem_kind, old);
 }
 
 void pa_list_set_len(PyAdamasList* l, int64_t n) {
     if (n < 0 || n > l->len) panic_c("invalid list length");
-    if (l->elem_kind == 1)
-        for (int64_t i = n; i < l->len; ++i) pa_rc_dec((void*)l->data[i]);
+    for (int64_t i = n; i < l->len; ++i) pa_own_dec(l->elem_kind, l->data[i]);
     l->len = n;
 }
 
 /* 把 src 的元素接到 dst 末尾，供 *args 打包和切片拷贝使用。
-   元素的引用按 dst 的 elem_kind 处理：kind 1 正常 inc；kind 2 只对
-   已知是堆的源元素 inc（不 release，交给 GC）。 */
+   所有权规则统一：目标容器非 int（kind 1/2）时，每个元素按源的种类
+   retain（堆→rc_inc，unknown/混合→rc_inc_unknown）；目标原本是堆容器
+   而源是 unknown/混合时，目标降级为 kind 2，保证销毁时走注册表释放。 */
 void pa_list_extend(PyAdamasList* dst, PyAdamasList* src) {
     int64_t slen = src->len;
     int64_t* snap = NULL;
@@ -134,11 +134,11 @@ void pa_list_extend(PyAdamasList* dst, PyAdamasList* src) {
         if (slen) memcpy(snap, src->data, sizeof(int64_t) * (size_t)slen);
         sv = snap;
     }
+    if (dst->elem_kind == 1 && src->elem_kind == 2) dst->elem_kind = 2;
     for (int64_t i = 0; i < slen; ++i) {
         int64_t v = sv[i];
-        if (v && src->elem_kind == 1 &&
-            (dst->elem_kind == 1 || dst->elem_kind == 2))
-            pa_rc_inc((void*)v);
+        if (dst->elem_kind != 0 && src->elem_kind != 0)
+            pa_own_inc(src->elem_kind, v);
         pa_list_append(dst, v);
     }
     free(snap);
@@ -155,8 +155,7 @@ PyAdamasList* pa_list_reversed(PyAdamasList* src) {
     PyAdamasList* l = pa_list_new(n, src->elem_kind);
     for (int64_t i = n - 1; i >= 0; --i) {
         int64_t v = src->data[i];
-        if (v && src->elem_kind == 1 && (l->elem_kind == 1 || l->elem_kind == 2))
-            pa_rc_inc((void*)v);
+        if (l->elem_kind != 0) pa_own_inc(src->elem_kind, v);
         pa_list_append(l, v);
     }
     return l;
@@ -425,13 +424,15 @@ PyAdamasList* pa_list_sorted_by(PyAdamasList* src, PyAdamasList* keys, int64_t k
 PyAdamasList* pa_enumerate_list(PyAdamasList* seq) {
     int64_t n = seq->len;
     PyAdamasList* out = pa_list_new(n, 1);  // 外层元素是 pair（堆）
+    // pair 里 index 是 int、元素种类跟着源走，混合存放统一按 kind 2 保守释放。
+    int pk = seq->elem_kind == 0 ? 0 : 2;
     for (int64_t i = 0; i < n; ++i) {
         int64_t ev = seq->data[i];
-        PyAdamasList* pair = pa_list_new(2, seq->elem_kind);
+        PyAdamasList* pair = pa_list_new(2, pk);
         pair->len = 2;
         pair->data[0] = i;
         pair->data[1] = ev;
-        if (seq->elem_kind == 1 && ev) pa_rc_inc((void*)ev);
+        pa_own_inc(seq->elem_kind, ev);
         pa_rc_inc(pair);
         pa_list_append(out, (int64_t)pair);
     }
@@ -451,8 +452,8 @@ PyAdamasList* pa_zip2_list(PyAdamasList* a, PyAdamasList* b) {
         pair->data[0] = x;
         pair->data[1] = y;
         if (pk != 0) {
-            if (ka == 1 && x) pa_rc_inc((void*)x);
-            if (kb == 1 && y) pa_rc_inc((void*)y);
+            pa_own_inc(ka, x);
+            pa_own_inc(kb, y);
         }
         pa_rc_inc(pair);
         pa_list_append(out, (int64_t)pair);
@@ -677,7 +678,7 @@ void pa_list_del_index(PyAdamasList* l, int64_t i) {
     if (i < 0) i += l->len;
     if (i < 0 || i >= l->len) pa_raise_c("IndexError", "list index out of range");
     int64_t v = l->data[i];
-    if (l->elem_kind == 1 && v) pa_rc_dec((void*)v);
+    pa_own_dec(l->elem_kind, v);
     memmove(&l->data[i], &l->data[i + 1],
             sizeof(int64_t) * (size_t)(l->len - i - 1));
     l->len--;

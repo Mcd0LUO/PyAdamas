@@ -373,6 +373,7 @@ private:
         int s = new_temp_slot(std::move(ty));
         st_->borrow_slots.insert(s);
         st_->fn->slot_owned[static_cast<size_t>(s)] = false;
+        st_->fn->slot_unknown[static_cast<size_t>(s)] = false;
         return s;
     }
 
@@ -430,6 +431,13 @@ private:
     void rc_dec(VReg v) { call_void(RtFn::RcDec, {v}); }
     // unknown 值可能是整数也可能是堆指针，交给运行时按注册表判断。
     void rc_inc_unknown(VReg v) { call_void(RtFn::RcIncUnknown, {v}); }
+    void rc_dec_unknown(VReg v) { call_void(RtFn::RcDecUnknown, {v}); }
+    // 槽/字段/全局按「是否可能装着非堆值」选释放方式。
+    void release_slot_value(int slot, TypePtr ty, bool maybe_unknown) {
+        VReg v = load_slot(slot, ty);
+        if (maybe_unknown) rc_dec_unknown(v);
+        else rc_dec(v);
+    }
 
     VReg rc_mark() { return call_runtime(RtFn::RcMark, t_int(), {}); }
     void rc_cleanup(VReg mark) { call_void(RtFn::RcCleanup, {mark}); }
@@ -528,7 +536,7 @@ private:
         }
     }
 
-    // 所有权类别：0 非堆，1 堆，2 unknown（只 retain，运行时不解引用）。
+    // 所有权类别：0 非堆，1 堆，2 unknown（保守 retain，注册表释放）。
     static int own_kind(const TypePtr& t) {
         if (ir_is_heap(t)) return 1;
         if (!t || t->kind == TyKind::Unknown) return 2;
@@ -564,8 +572,7 @@ private:
             if (ir_is_heap(src)) rc_inc(v);
             else if (!src || src->kind == TyKind::Unknown) rc_inc_unknown(v);
         } else if (ir_is_heap(src)) {
-            // 目标槽是 unknown：只 retain 不 release（看不见的类型不敢 dec），
-            // 和容器元素 kind 2 的策略一致。
+            // 目标是 unknown：不知道将来按什么类型读，保守 retain。
             rc_inc(v);
         }
     }
@@ -577,14 +584,21 @@ private:
         // 才能按 float/int 正确选指令。retain_for_store 从这一刻起
         // 按堆槽的规则 retain/dec，槽也进入帧记录的释放清单。
         if (dst && dst->kind == TyKind::Unknown && src && src->kind != TyKind::Unknown) {
+            // 之前可能以 unknown 值写入过这个槽：旧值不一定是堆指针。
+            st_->fn->slot_unknown[static_cast<size_t>(slot)] = true;
             st_->fn->slot_ty[slot] = dst = src;
             st_->fn->slot_owned[static_cast<size_t>(slot)] = ir_is_heap(src);
         }
         retain_for_store(dst, v);
         if (ir_is_heap(dst)) {
+            // 堆槽收到 unknown/None 等非堆值后，槽里可能装着整数：之后
+            // 所有旧值释放都改用注册表判断，避免把整数当指针 dec。
+            if (!ir_is_heap(src))
+                st_->fn->slot_unknown[static_cast<size_t>(slot)] = true;
             VReg old = load_slot(slot, dst);
             store_slot_raw(slot, v);
-            rc_dec(old);
+            if (st_->fn->slot_unknown[static_cast<size_t>(slot)]) rc_dec_unknown(old);
+            else rc_dec(old);
         } else {
             store_slot_raw(slot, v);
         }
@@ -592,11 +606,23 @@ private:
 
     void store_global(int gi, VReg v) {
         TypePtr dst = mod_.globals[gi].ty;
+        TypePtr src = vreg_ty(v);
         retain_for_store(dst, v);
-        if (ir_is_heap(dst)) {
+        bool unknown = dst && dst->kind == TyKind::Unknown;
+        if (ir_is_heap(dst) || unknown) {
+            // unknown 全局和老值释放都走注册表：槽里可能装着整数。
+            IRGlobal& g = mod_.globals[gi];
+            if (unknown) {
+                g.maybe_unknown = true;
+                // unknown 源可能是堆指针：补一份引用，出口按注册表释放。
+                if (src && src->kind == TyKind::Unknown) rc_inc_unknown(v);
+            } else if (!ir_is_heap(src)) {
+                g.maybe_unknown = true;
+            }
             VReg old = load_global(gi, dst);
             store_global_raw(gi, v);
-            rc_dec(old);
+            if (g.maybe_unknown) rc_dec_unknown(old);
+            else rc_dec(old);
         } else {
             store_global_raw(gi, v);
         }
@@ -604,10 +630,17 @@ private:
 
     void store_field(TypePtr fty, VReg obj, int off, VReg v) {
         retain_for_store(fty, v);
-        if (ir_is_heap(fty)) {
+        bool unknown = fty && fty->kind == TyKind::Unknown;
+        if (unknown) {
+            TypePtr src = vreg_ty(v);
+            // unknown 字段自己持有一份引用，析构时按注册表释放。
+            if (src && src->kind == TyKind::Unknown) rc_inc_unknown(v);
+        }
+        if (ir_is_heap(fty) || unknown) {
             VReg old = field_load(obj, off, fty);
             field_store(obj, off, v);
-            rc_dec(old);
+            if (unknown) rc_dec_unknown(old);
+            else rc_dec(old);
         } else {
             field_store(obj, off, v);
         }
@@ -628,7 +661,9 @@ private:
             if (st_->borrow_slots.count(static_cast<int>(s))) continue;
             TypePtr ty = st_->fn->slot_ty[s];
             if (!ir_is_heap(ty)) continue;
-            rc_dec(load_slot(static_cast<int>(s), ty));
+            VReg v = load_slot(static_cast<int>(s), ty);
+            if (st_->fn->slot_unknown[s]) rc_dec_unknown(v);
+            else rc_dec(v);
             if (zero == kNoReg) zero = const_int(0);
             store_slot_raw(static_cast<int>(s), zero);
         }
@@ -748,10 +783,16 @@ private:
 
     void release_globals() {
         for (size_t gi = 0; gi < mod_.globals.size(); ++gi) {
-            if (mod_.globals[gi].external) continue;
-            TypePtr ty = mod_.globals[gi].ty;
-            if (!ir_is_heap(ty)) continue;
-            rc_dec(load_global(static_cast<int>(gi), ty));
+            IRGlobal& g = mod_.globals[gi];
+            if (g.external) continue;
+            bool unknown = g.ty && g.ty->kind == TyKind::Unknown;
+            if (!ir_is_heap(g.ty) && !unknown) continue;
+            // 可能装着 non-heap 值（unknown 流过）时按注册表释放；从没写过
+            // unknown 的堆全局还是走更快的 rc_dec。
+            if (unknown || g.maybe_unknown)
+                rc_dec_unknown(load_global(static_cast<int>(gi), g.ty));
+            else
+                rc_dec(load_global(static_cast<int>(gi), g.ty));
         }
     }
 
@@ -786,9 +827,12 @@ private:
     int global_idx_as(const std::string& name, TypePtr ty) {
         auto it = global_ids_.find(name);
         if (it != global_ids_.end()) {
-            if (ty && mod_.globals[it->second].ty &&
-                mod_.globals[it->second].ty->kind == TyKind::Unknown)
-                mod_.globals[it->second].ty = ty;
+            IRGlobal& g = mod_.globals[it->second];
+            if (ty && g.ty && g.ty->kind == TyKind::Unknown) {
+                g.ty = ty;
+                // 之前可能以 unknown 值写过：旧值释放要按注册表判断。
+                g.maybe_unknown = true;
+            }
             return it->second;
         }
         int id = static_cast<int>(mod_.globals.size());

@@ -180,8 +180,8 @@ void dict_destroy(void* p) {
     PyAdamasDict* d = (PyAdamasDict*)p;
     for (int32_t i = d->head; i >= 0; i = d->entries[i].next) {
         PyAdamasDictEntry e = d->entries[i];
-        if (d->key_own == 1) pa_rc_dec((void*)e.key);
-        if (d->val_own == 1) pa_rc_dec((void*)e.val);
+        pa_own_dec(d->key_own, e.key);
+        pa_own_dec(d->val_own, e.val);
     }
     free(d->entries);
     free(d->order);
@@ -192,8 +192,8 @@ void dict_gc_release(void* p) {
     PyAdamasDict* d = (PyAdamasDict*)p;
     for (int32_t i = d->head; i >= 0; i = d->entries[i].next) {
         PyAdamasDictEntry e = d->entries[i];
-        if (d->key_own == 1) pa_gc_unref_child((void*)e.key);
-        if (d->val_own == 1) pa_gc_unref_child((void*)e.val);
+        pa_own_gc_unref(d->key_own, e.key);
+        pa_own_gc_unref(d->val_own, e.val);
     }
 }
 
@@ -233,8 +233,8 @@ void pa_dict_set(PyAdamasDict* d, int64_t key, int64_t val) {
     int64_t h = dict_hash_key(d, key);
     int64_t e = dict_lookup(d, key, h);
     if (e >= 0) {
-        if (d->key_own == 1) pa_rc_dec((void*)key);
-        if (d->val_own == 1) pa_rc_dec((void*)d->entries[e].val);
+        pa_own_dec(d->key_own, key);
+        pa_own_dec(d->val_own, d->entries[e].val);
         d->entries[e].val = val;
         return;
     }
@@ -291,7 +291,7 @@ static int64_t dict_make_default(PyAdamasDict* d) {
             return 0;
         case 4: /* str */
             return (int64_t)str_new("", 0);
-        case 5: /* list：元素类型未知，销毁时不盲目 dec */
+        case 5: /* list：元素类型未知（kind 2，释放走注册表） */
             return (int64_t)pa_list_new(0, 2);
         case 6: /* dict：键值类型未知 */
             return (int64_t)pa_dict_new(3, 2, 2, -1, -1);
@@ -315,10 +315,7 @@ int64_t pa_dict_get(PyAdamasDict* d, int64_t key) {
         if (d->default_factory) {
             /* 新值交给 dict 持有；key 是调用方借来的，入表前补引用。 */
             int64_t val = dict_make_default(d);
-            if (d->key_own == 1 && key)
-                pa_rc_inc((void*)key);
-            else if (d->key_own == 2)
-                pa_rc_inc_unknown(key);
+            pa_own_inc(d->key_own, key);
             pa_dict_set(d, key, val);
             return val; /* 和已有 key 一样返回 dict 内部的借用值 */
         }
@@ -380,7 +377,7 @@ PyAdamasList* pa_dict_keys(PyAdamasDict* d) {
     PyAdamasList* out = pa_list_new(d->len, kind);
     for (int64_t i = 0; i < d->len; ++i) {
         int64_t v = pa_dict_key_at(d, i);
-        if (kind == 1 && v) pa_rc_inc((void*)v);
+        pa_own_inc(kind, v);
         pa_list_append(out, v);
     }
     return out;
@@ -391,7 +388,7 @@ PyAdamasList* pa_dict_values(PyAdamasDict* d) {
     PyAdamasList* out = pa_list_new(d->len, kind);
     for (int64_t i = 0; i < d->len; ++i) {
         int64_t v = pa_dict_val_at(d, i);
-        if (kind == 1 && v) pa_rc_inc((void*)v);
+        pa_own_inc(kind, v);
         pa_list_append(out, v);
     }
     return out;
@@ -399,7 +396,7 @@ PyAdamasList* pa_dict_values(PyAdamasDict* d) {
 
 PyAdamasList* pa_dict_items(PyAdamasDict* d) {
     // 单元素 kind 无法同时表达 key/value 两类所有权：都为堆用 1，
-    // 都非堆用 0，混合用 2（已知堆的元素 retain，销毁时不解引用，靠 GC）。
+    // 都非堆用 0，混合用 2（销毁时按注册表保守释放）。
     int tk = (d->key_own == 1 && d->val_own == 1)
                  ? 1
                  : ((d->key_own == 0 && d->val_own == 0) ? 0 : 2);
@@ -407,9 +404,9 @@ PyAdamasList* pa_dict_items(PyAdamasDict* d) {
     for (int32_t i = d->head; i >= 0; i = d->entries[i].next) {
         PyAdamasDictEntry e = d->entries[i];
         PyAdamasList* tup = pa_list_new(2, tk);
-        if ((tk == 1 || d->key_own == 1) && e.key) pa_rc_inc((void*)e.key);
+        pa_own_inc(d->key_own, e.key);
         pa_list_append(tup, e.key);
-        if ((tk == 1 || d->val_own == 1) && e.val) pa_rc_inc((void*)e.val);
+        pa_own_inc(d->val_own, e.val);
         pa_list_append(tup, e.val);
         pa_list_append(out, (int64_t)tup);  // tuple 的初始引用交给外层 list
     }
@@ -460,14 +457,16 @@ int64_t pa_set_eq(PyAdamasDict* a, PyAdamasDict* b) {
 
 void pa_dict_update(PyAdamasDict* dst, PyAdamasDict* src) {
     if (dst == src) return;
+    // 所有权类别向源靠拢：两边不一致时统一升级为 2（unknown/混合），
+    // 保证目标既有的键值也不会被按错误类别释放——kind 2 对整数是空操作。
+    if (src->key_own != dst->key_own) dst->key_own = 2;
+    if (src->val_own != dst->val_own) dst->val_own = 2;
+    int kr = dst->key_own;
+    int vr = dst->val_own;
     for (int32_t i = src->head; i >= 0; i = src->entries[i].next) {
         PyAdamasDictEntry e = src->entries[i];
-        // 目标类型未知时也要保证源销毁后指针不悬空：源自己是堆所有权
-        // 就 retain 一份。目标 own=2/0 不会 dec，这份引用会留给 GC。
-        if ((dst->key_own == 1 || src->key_own == 1) && e.key)
-            pa_rc_inc((void*)e.key);
-        if ((dst->val_own == 1 || src->val_own == 1) && e.val)
-            pa_rc_inc((void*)e.val);
+        pa_own_inc(kr, e.key);
+        pa_own_inc(vr, e.val);
         pa_dict_set(dst, e.key, e.val);
     }
 }
@@ -480,8 +479,8 @@ PyAdamasDict* pa_dict_copy(PyAdamasDict* src) {
     out->default_factory = src->default_factory;
     for (int32_t i = src->head; i >= 0; i = src->entries[i].next) {
         PyAdamasDictEntry e = src->entries[i];
-        if (src->key_own == 1 && e.key) pa_rc_inc((void*)e.key);
-        if (src->val_own == 1 && e.val) pa_rc_inc((void*)e.val);
+        pa_own_inc(src->key_own, e.key);
+        pa_own_inc(src->val_own, e.val);
         pa_dict_set(out, e.key, e.val);
     }
     return out;
@@ -489,10 +488,12 @@ PyAdamasDict* pa_dict_copy(PyAdamasDict* src) {
 
 PyAdamasDict* pa_set_from_list(PyAdamasList* src, int64_t key_kind, int64_t key_own,
                              int64_t hash_slot, int64_t eq_slot) {
+    // 列表元素种类可能比声明的 key_own 更保守（推导不出来时是 2），取较大者。
+    if (src->elem_kind > key_own) key_own = src->elem_kind;
     PyAdamasDict* d = pa_dict_new(key_kind, key_own, 0, hash_slot, eq_slot);
     for (int64_t i = 0; i < src->len; ++i) {
         int64_t k = src->data[i];
-        if (key_own == 1 && k) pa_rc_inc((void*)k);
+        pa_own_inc(key_own, k);
         pa_dict_set(d, k, 0);  // 重复 key 时 dict_set 会退掉这份多余引用
     }
     return d;
@@ -507,7 +508,7 @@ int dict_take(PyAdamasDict* d, int64_t key, int64_t* val_out) {
     int64_t e = dict_lookup(d, key, h);
     if (e < 0) return 0;
     *val_out = d->entries[e].val;
-    if (d->key_own == 1) pa_rc_dec((void*)d->entries[e].key);
+    pa_own_dec(d->key_own, d->entries[e].key);
     dict_erase(d, e);
     return 1;
 }
@@ -529,12 +530,12 @@ PyAdamasList* pa_dict_popitem(PyAdamasDict* d) {
                  ? 1
                  : ((d->key_own == 0 && d->val_own == 0) ? 0 : 2);
     PyAdamasList* tup = pa_list_new(2, tk);
-    if ((tk == 1 || d->key_own == 1) && ent.key) pa_rc_inc((void*)ent.key);
+    pa_own_inc(d->key_own, ent.key);
     pa_list_append(tup, ent.key);
-    if ((tk == 1 || d->val_own == 1) && ent.val) pa_rc_inc((void*)ent.val);
+    pa_own_inc(d->val_own, ent.val);
     pa_list_append(tup, ent.val);
-    if (d->key_own == 1) pa_rc_dec((void*)ent.key);
-    if (d->val_own == 1) pa_rc_dec((void*)ent.val);
+    pa_own_dec(d->key_own, ent.key);
+    pa_own_dec(d->val_own, ent.val);
     dict_erase(d, e);
     return tup;
 }
@@ -554,14 +555,14 @@ void pa_dict_remove(PyAdamasDict* d, int64_t key, int64_t missing_ok) {
         if (!missing_ok) pa_raise_c("KeyError", "key not found");
         return;
     }
-    if (d->val_own == 1) pa_rc_dec((void*)v);
+    pa_own_dec(d->val_own, v);
 }
 
 void pa_dict_clear(PyAdamasDict* d) {
     for (int32_t i = d->head; i >= 0; i = d->entries[i].next) {
         PyAdamasDictEntry e = d->entries[i];
-        if (d->key_own == 1) pa_rc_dec((void*)e.key);
-        if (d->val_own == 1) pa_rc_dec((void*)e.val);
+        pa_own_dec(d->key_own, e.key);
+        pa_own_dec(d->val_own, e.val);
     }
     d->len = 0;
     d->ord_len = 0;

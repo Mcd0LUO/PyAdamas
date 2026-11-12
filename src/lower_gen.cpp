@@ -966,9 +966,16 @@ int Lowerer::compile_suspendable_function(FunctionDef& f, FuncInfoPtr info,
     gin.n_slots = static_cast<int>(irf->slot_ty.size());
     gin.frame_kind = frame_kind;
     gin.slot_heap.assign(static_cast<size_t>(gin.n_slots), 0);
-    for (int s = 0; s < gin.n_slots; ++s)
-        if (!st_->borrow_slots.count(s) && ir_is_heap(irf->slot_ty[static_cast<size_t>(s)]))
-            gin.slot_heap[static_cast<size_t>(s)] = 1;
+    for (int s = 0; s < gin.n_slots; ++s) {
+        if (st_->borrow_slots.count(s)) continue;
+        if (!ir_is_heap(irf->slot_ty[static_cast<size_t>(s)])) continue;
+        // 2 = 可能装着非堆值：帧销毁/异常逃出释放时走注册表。
+        gin.slot_heap[static_cast<size_t>(s)] =
+            (static_cast<size_t>(s) < irf->slot_unknown.size() &&
+             irf->slot_unknown[static_cast<size_t>(s)])
+                ? 2
+                : 1;
+    }
     int gidx = static_cast<int>(mod_.generators.size());
     mod_.generators.push_back(std::move(gin));
 
