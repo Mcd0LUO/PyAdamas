@@ -162,6 +162,8 @@ struct Param {
     // cimport 的 ptr/ptr[T] 形参：额外接受 list/bytes 缓冲区实参。
     bool cptr = false;
     CKind cptr_elem = CKind::None;  // ptr[T] 的 T；None 表示无类型 ptr
+    // ptr[Struct]：不透明结构体指针，只接受地址/None，不接受 list/bytes。
+    bool cptr_opaque = false;
 };
 
 struct FuncInfo {

@@ -34,6 +34,8 @@ struct CParam {
     CKind kind = CKind::Int;
     // 仅 kind == Ptr 有意义：ptr[T] 的 T；未写 T 时为 None。
     CKind ptr_elem = CKind::None;
+    // ptr[T] 的 T 是 .cpya 里声明的 struct 名：不透明指针，不接受缓冲区实参。
+    bool opaque = false;
 };
 
 struct CExtern {

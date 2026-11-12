@@ -426,6 +426,7 @@ void TypeChecker::stmt(Stmt& s) {
                             if (p.kind == CKind::Ptr) {
                                 pm.cptr = true;
                                 pm.cptr_elem = p.ptr_elem;
+                                pm.cptr_opaque = p.opaque;
                             }
                             fi->pos.push_back(std::move(pm));
                         }

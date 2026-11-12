@@ -1031,6 +1031,7 @@ cmodule m                       # 必须是第一条非注释行，且等于 cim
 link m                          # -> -lm；引号内则原样传给链接器
 link "/usr/lib/libfoo.a"
 const PI: float = 3.141592653589793
+struct FILE                     # 不透明结构体，只能以 ptr[FILE] 使用
 extern def "sqrt" as sqrt(x: float) -> float
 extern def strlen(s: str) -> int
 extern def free(p: ptr) -> None
@@ -1046,10 +1047,11 @@ extern def free(p: ptr) -> None
 | `bool` | `_Bool` | 返回值统一为 0/1 |
 | `str` | `char*` | 传入 `data`；返回时复制成 `str` |
 | `ptr` / `ptr[T]` | `void*` / `T*` | 类型系统中是 `Optional[int]`，0 表示 NULL |
+| `ptr[Struct]` | `Struct*` | 不透明结构体指针，同样是 `Optional[int]` |
 | `None` | `void` | |
 | `Optional[str]` | 可空 `char*` | NULL 返回 `None` |
 
-不支持：解析 C 头文件、varargs、回调、struct、`extern` 变量、指针解引用。`link` 参数去重后追加到最终链接命令；`.cpya` 不参与 `.pya` 模块缓存。
+不支持：解析 C 头文件、varargs、回调、struct 字段访问、`extern` 变量、指针解引用。`struct NAME` 只声明不透明指针类型。`link` 参数去重后追加到最终链接命令；`.cpya` 不参与 `.pya` 模块缓存。
 
 `str` 参数要求非空，不能把 `Optional[str]` 直接传给它（会有 NULL）；需要接受 NULL 时声明为 `Optional[str]`。`ptr` 是不透明地址，0 表示 `NULL`，不能解引用或做数组访问。
 
@@ -1067,6 +1069,30 @@ extern def free(p: ptr) -> None
 `list[float]` 的槽位就是 8 字节 double，`list[int]` 是 8 字节 long；`bytes` 的 `data` 连续且 NUL 结尾。不匹配的组合会被拒绝，例如 `list[int]` 不能传给 `ptr[float]`，`bytes` 不能传给 `ptr[float]`/`ptr[int]`（元素宽度不同）。空 list 的 `data` 可能为 NULL，原样传 0。
 
 指针只在本次 C 调用期间有效：C 函数不得保存它，调用期间也不要改变 list 长度。C 写回 `data` 后，py23 侧的 list 元素立即可见。多维数组请自己拍平并显式传 stride。
+
+### 不透明结构体指针
+
+`struct NAME` 只登记类型名，不描述布局；`ptr[NAME]` 表示 `NAME*`，用于 `FILE*`、`sqlite3*` 这类句柄：
+
+```
+cmodule cstdio
+struct FILE
+extern def "tmpfile" as tmpfile() -> ptr[FILE]
+extern def "fopen" as fopen(path: str, mode: str) -> ptr[FILE]
+extern def "fputs" as fputs(s: str, f: ptr[FILE]) -> int32
+extern def "fclose" as fclose(f: ptr[FILE]) -> int32
+```
+
+```python
+cimport cstdio
+
+f = cstdio.tmpfile()
+if f is not None:
+    cstdio.fputs("hello", f)
+    cstdio.fclose(f)
+```
+
+结构体名可以先使用后声明（解析时会先扫描全部 `struct` 行）。`ptr[Struct]` 在类型系统里仍是 `Optional[int]`，可以判 `is None`；但它**不接受** `list`/`bytes`，避免把缓冲区误当句柄。字段读写仍未支持。
 
 BLAS 示例（`cblas.cpya`，需系统安装 OpenBLAS；开发容器已安装 `libopenblas-dev`）：
 

@@ -1,0 +1,5 @@
+cmodule cstdio
+
+struct FILE
+
+extern def "fputs" as fputs(s: str, f: ptr[FILE]) -> int32

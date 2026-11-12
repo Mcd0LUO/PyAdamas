@@ -4,6 +4,28 @@
 
 早期阶段没有逐条留痕，按阶段归纳；0.4 之后逐条记录。
 
+## [0.112] - 2026-11-13
+
+C 互操作 v3 第一步：不透明结构体指针，可接 `FILE*`、`sqlite3*` 等句柄。
+
+### 新增
+
+- `.cpya` 支持 `struct NAME` 声明：只登记类型名，不描述布局；解析时先
+  扫描全部 `struct` 行，允许先用后声明。
+- `ptr[Struct]` 作为参数/返回类型，C 侧为 `Struct*`，py23 类型系统里仍是
+  `Optional[int]`，可判 `is None`。
+- `ptr[Struct]` 不接受 `list`/`bytes` 实参，避免把缓冲区误当句柄；普通
+  `ptr`/`ptr[T]` 的缓冲区规则不变。
+- 文档补充不透明结构体指针与 `fopen`/`fputs`/`fclose` 示例。
+
+### 验证
+
+- 新增 `101_cimport_struct`：`tmpfile` 取句柄、`fputs` 写入、`fclose`
+  关闭，并验证 `fopen` 失败返回 `None`。
+- 新增反例 `f45_cimport_opaque_buffer`：`list[float]` 传给 `ptr[FILE]`
+  被拒绝。
+- `ctest --preset dev`、完整 `tests/run_tests.sh` 全绿。
+
 ## [0.111] - 2026-11-13
 
 C 互操作 v2：`ptr[T]` 可直接接收 py23 缓冲区，支持把数组交给 BLAS 等 C API。

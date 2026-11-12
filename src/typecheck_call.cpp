@@ -270,9 +270,10 @@ TypePtr TypeChecker::check_args(const FuncInfoPtr& fn, Call& c) {
 
         // cimport 的 ptr/ptr[T]：除原始地址外，还接受底层布局兼容的缓冲区。
         // 返回 0 表示不是缓冲区（交给 assignable），1 兼容，-1 元素不匹配。
-        auto cptr_buffer = [](CKind elem, TypePtr ty) -> int {
+        auto cptr_buffer = [](CKind elem, bool opaque, TypePtr ty) -> int {
             if (!ty) return 0;
             if (ty->kind == TyKind::List) {
+                if (opaque) return -1;
                 if (ty->sub.empty() || !ty->sub[0]) return 0;
                 TyKind e = ty->sub[0]->kind;
                 if (elem == CKind::None)
@@ -281,7 +282,7 @@ TypePtr TypeChecker::check_args(const FuncInfoPtr& fn, Call& c) {
                 if (elem == CKind::Int) return e == TyKind::Int ? 1 : -1;
                 return -1;
             }
-            if (ty->kind == TyKind::Bytes) return elem == CKind::None ? 1 : -1;
+            if (ty->kind == TyKind::Bytes) return (opaque || elem != CKind::None) ? -1 : 1;
             return 0;
         };
 
@@ -303,11 +304,13 @@ TypePtr TypeChecker::check_args(const FuncInfoPtr& fn, Call& c) {
             };
             if (p.multi) return;
             if (p.cptr) {
-                int r = cptr_buffer(p.cptr_elem, ty);
+                int r = cptr_buffer(p.cptr_elem, p.cptr_opaque, ty);
                 if (r == 1) return;
                 if (r == -1) {
                     std::string want;
-                    if (p.cptr_elem == CKind::Float)
+                    if (p.cptr_opaque)
+                        want = "an opaque C pointer";
+                    else if (p.cptr_elem == CKind::Float)
                         want = "list[float] for 'ptr[float]'";
                     else if (p.cptr_elem == CKind::Int)
                         want = "list[int] for 'ptr[int]'";

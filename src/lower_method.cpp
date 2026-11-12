@@ -1922,7 +1922,7 @@ VReg Lowerer::lower_cimport_call(Attribute& at, Call& c) {
         CKind k = ex->params[i].kind;
         // ptr/ptr[T] 接 list/bytes 时不转换，直接把对象指针交给 codegen；
         // codegen 按 Buf* 取 data 字段。
-        if (k == CKind::Ptr && aty) {
+        if (k == CKind::Ptr && aty && !ex->params[i].opaque) {
             if (aty->kind == TyKind::List && !aty->sub.empty() && aty->sub[0]) {
                 TyKind e = aty->sub[0]->kind;
                 if (e == TyKind::Float) k = CKind::BufF64;

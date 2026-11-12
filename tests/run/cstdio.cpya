@@ -1,0 +1,8 @@
+cmodule cstdio
+
+struct FILE
+
+extern def "tmpfile" as tmpfile() -> ptr[FILE]
+extern def "fopen" as fopen(path: str, mode: str) -> ptr[FILE]
+extern def "fputs" as fputs(s: str, f: ptr[FILE]) -> int32
+extern def "fclose" as fclose(f: ptr[FILE]) -> int32

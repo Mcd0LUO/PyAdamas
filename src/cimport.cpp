@@ -121,6 +121,31 @@ std::optional<CKind> parse_ckind(const std::string& text) {
     return std::nullopt;
 }
 
+namespace {
+
+struct CTypeRef {
+    CKind kind = CKind::None;
+    CKind elem = CKind::None;  // ptr[T] 的 T（标量时）
+    bool opaque = false;       // ptr[Struct]：不透明结构体指针
+};
+
+// 解析类型，允许 ptr[Struct] 引用本文件声明的 struct。
+std::optional<CTypeRef> parse_ctype(const std::string& text,
+                                    const std::unordered_set<std::string>& structs) {
+    std::string t = trim(text);
+    if (t.starts_with("ptr[") && t.back() == ']') {
+        std::string inner = trim(t.substr(4, t.size() - 5));
+        if (inner.empty()) return std::nullopt;
+        if (structs.count(inner)) return CTypeRef{CKind::Ptr, CKind::None, true};
+        if (auto k = parse_ckind(inner)) return CTypeRef{CKind::Ptr, *k, false};
+        return std::nullopt;
+    }
+    if (auto k = parse_ckind(t)) return CTypeRef{*k, CKind::None, false};
+    return std::nullopt;
+}
+
+}  // namespace
+
 std::optional<CImportDecl> load_cpya(const std::string& name, const std::string& source_dir,
                                     const std::vector<std::string>& include_dirs,
                                     std::string& err) {
@@ -164,12 +189,29 @@ std::optional<CImportDecl> load_cpya(const std::string& name, const std::string&
         return std::nullopt;
     };
 
-    std::string line;
-    int lineno = 0;
-    while (std::getline(in, line)) {
-        ++lineno;
-        if (!line.empty() && line.back() == '\r') line.pop_back();
-        std::string text = trim(strip_comment(line));
+    // 先收集所有 struct 名，允许 ptr[Struct] 出现在声明之前。
+    std::vector<std::string> lines;
+    {
+        std::string line;
+        while (std::getline(in, line)) {
+            if (!line.empty() && line.back() == '\r') line.pop_back();
+            lines.push_back(std::move(line));
+        }
+    }
+    std::unordered_set<std::string> structs;
+    for (size_t i = 0; i < lines.size(); ++i) {
+        std::string text = trim(strip_comment(lines[i]));
+        if (!text.starts_with("struct ")) continue;
+        std::string sname = trim(text.substr(7));
+        if (!is_ident(sname))
+            return fail(static_cast<int>(i) + 1, std::format("invalid struct name '{}'", sname));
+        if (!structs.insert(sname).second)
+            return fail(static_cast<int>(i) + 1, std::format("duplicate struct '{}'", sname));
+    }
+
+    for (size_t li = 0; li < lines.size(); ++li) {
+        int lineno = static_cast<int>(li) + 1;
+        std::string text = trim(strip_comment(lines[li]));
         if (text.empty()) continue;
 
         if (!saw_any) {
@@ -189,6 +231,8 @@ std::optional<CImportDecl> load_cpya(const std::string& name, const std::string&
             continue;
         }
         if (!saw_cmodule) return fail(lineno, "'cmodule' must appear before other declarations");
+
+        if (text.starts_with("struct ")) continue;  // 预扫描已校验
 
         if (text.starts_with("link")) {
             std::string rest = trim(text.substr(4));
@@ -299,27 +343,23 @@ std::optional<CImportDecl> load_cpya(const std::string& name, const std::string&
                     return fail(lineno, std::format("invalid parameter name '{}'", pname));
                 CParam cp;
                 cp.name = pname;
-                if (ptype == "ptr") {
-                    cp.kind = CKind::Ptr;
-                } else if (ptype.starts_with("ptr[") && ptype.back() == ']') {
-                    std::string inner = trim(ptype.substr(4, ptype.size() - 5));
-                    auto elem = parse_ckind(inner);
-                    if (!elem || *elem == CKind::None)
+                auto ct = parse_ctype(ptype, structs);
+                if (!ct) {
+                    if (ptype.starts_with("ptr[") && ptype.back() == ']') {
+                        std::string inner = trim(ptype.substr(4, ptype.size() - 5));
                         return fail(lineno,
                                     std::format("unknown pointer element type '{}'", inner));
-                    cp.kind = CKind::Ptr;
-                    cp.ptr_elem = *elem;
-                } else {
-                    auto k = parse_ckind(ptype);
-                    if (!k)
-                        return fail(lineno, std::format("unknown parameter type '{}'", ptype));
-                    cp.kind = *k;
+                    }
+                    return fail(lineno, std::format("unknown parameter type '{}'", ptype));
                 }
+                cp.kind = ct->kind;
+                cp.ptr_elem = ct->elem;
+                cp.opaque = ct->opaque;
                 ex.params.push_back(std::move(cp));
             }
-            auto rk = parse_ckind(ret_text);
+            auto rk = parse_ctype(ret_text, structs);
             if (!rk) return fail(lineno, std::format("unknown return type '{}'", ret_text));
-            ex.ret = *rk;
+            ex.ret = rk->kind;
 
             if (seen_py.count(py_name))
                 return fail(lineno, std::format("duplicate name '{}'", py_name));
