@@ -979,6 +979,8 @@ private:
     VReg lower_exc_match(Expr& type);
     VReg raise_exception(const std::string& type, VReg msg);
     void lower_funcdef(FunctionDef& f);
+    // @functools.wraps(...)：没有运行期语义，装饰器链里整层跳过。
+    bool is_wraps_decorator(const Expr* e) const;
     void lower_assert(Assert& a);
     void lower_delete(Delete& d);
     void lower_match(Match& m);
@@ -1032,6 +1034,7 @@ private:
     VReg lower_asyncio(const std::string& member, Call& c);
     VReg lower_itertools(const std::string& member, Call& c);
     VReg lower_collections(const std::string& member, Call& c);
+    VReg lower_functools(const std::string& member, Call& c);
     VReg lower_json(const std::string& member, Call& c);
     // 把静态类型编码成 json 运行时描述符；不支持的类型就地报错。
     bool json_desc(const TypePtr& t, std::string& out, int line, int col);

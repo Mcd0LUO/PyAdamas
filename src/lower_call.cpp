@@ -420,6 +420,7 @@ VReg Lowerer::lower_call(Call& c) {
                 "list", "tuple", "dict", "set", "sorted", "reversed", "enumerate", "zip",
                 "open", "input", "iter", "isinstance", "getattr", "setattr", "hasattr",
                 "callable", "issubclass", "hash", "type", "id", "frozenset",
+                "slice", "vars", "dir",
             };
             if (kBuiltins.count(n.id)) return lower_builtin_call(n.id, c);
             // 名字能解析但语义没实现的内置：以前会退化成调用空指针直接
@@ -449,6 +450,8 @@ VReg Lowerer::lower_call(Call& c) {
                 return lower_itertools(it->second.member, c);
             if (it->second.module == "collections")
                 return lower_collections(it->second.member, c);
+            if (it->second.module == "functools")
+                return lower_functools(it->second.member, c);
             if (it->second.module == "json")
                 return lower_json(it->second.member, c);
             TypePtr ft = tc_.type_of(c.func.get());

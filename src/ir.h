@@ -365,6 +365,8 @@ enum class RtFn : uint16_t {
     OsPathExpanduser,      // (str*) -> str*
     IterChain,             // (list* a, list* b, i64 elem_kind) -> list*
     IterRepeat,            // (i64 v, i64 n, i64 elem_kind) -> list*
+    FuncReduce,            // (fn*, list* xs, i64 init, i64 has_init) -> i64
+    FuncReduceF,           // (fn*, list* xs, f64 init, i64 has_init) -> f64
     CollCounter,           // (list* items, i64 key_kind, i64 key_own) -> dict*
     CollMostCommon,        // (dict*, i64 n) -> list*
     JsonDumps,             // (i64 value, str* desc) -> str*
@@ -739,6 +741,8 @@ inline const char* rt_name(RtFn f) {
         case RtFn::OsPathExpanduser: return "py23_os_path_expanduser";
         case RtFn::IterChain: return "py23_itertools_chain";
         case RtFn::IterRepeat: return "py23_itertools_repeat";
+        case RtFn::FuncReduce: return "py23_functools_reduce";
+        case RtFn::FuncReduceF: return "py23_functools_reduce_f";
         case RtFn::CollCounter: return "py23_collections_counter";
         case RtFn::CollMostCommon: return "py23_collections_most_common";
         case RtFn::JsonDumps: return "py23_json_dumps";

@@ -59,6 +59,9 @@ TypePtr TypeChecker::call(Call& c) {
                     if (mod->builtin && mod->name == "json") {
                         if (auto r = json_call(a->attr, c)) return *r;
                     }
+                    if (mod->builtin && mod->name == "functools") {
+                        if (auto r = functools_call(a->attr, c)) return *r;
+                    }
                     if (auto ci = mod->classes.find(a->attr); ci != mod->classes.end()) {
                         auto cls = ci->second.cls;
                         if (cls->has_init && ci->second.ctor_sig) {
@@ -189,6 +192,9 @@ TypePtr TypeChecker::check_args(const FuncInfoPtr& fn, Call& c) {
         }
         if (fn && fn->name.starts_with("json.")) {
             if (auto r = json_call(fn->name.substr(5), c)) return *r;
+        }
+        if (fn && fn->name.starts_with("functools.")) {
+            if (auto r = functools_call(fn->name.substr(10), c)) return *r;
         }
         // 实参和关键字实参都只求值一次。之前关键字值在循环里被求了两次，
         // 一次的类型错误会重复报两遍。
@@ -687,6 +693,78 @@ std::optional<TypePtr> TypeChecker::collections_call(const std::string& member, 
                 std::format("collections.Counter() expects a list, got '{}'",
                             type_name(a[0])));
         return mk_dict(et, t_int());
+}
+
+std::optional<TypePtr> TypeChecker::functools_call(const std::string& member, Call& c) {
+        if (member == "reduce") {
+            if (!c.keywords.empty()) {
+                err(c.line, c.col, "functools.reduce() does not take keyword arguments");
+                for (auto& kw : c.keywords) expr(*kw.value);
+            }
+            std::vector<TypePtr> a;
+            for (auto& arg : c.args) a.push_back(expr(*arg));
+            if (a.size() < 2 || a.size() > 3) {
+                err(c.line, c.col,
+                    std::format("functools.reduce() expects 2 or 3 arguments, got {}",
+                                a.size()));
+                return t_unknown();
+            }
+            if (a[0] && !is_unknown(a[0]) && a[0]->kind != TyKind::Func &&
+                a[0]->kind != TyKind::BoundMethod) {
+                err(c.args[0]->line, c.args[0]->col,
+                    std::format("functools.reduce() expects a function, got '{}'",
+                                type_name(a[0])));
+            }
+            TypePtr elem = iter_elem(a[1], c.args[1]->line, c.args[1]->col);
+            // reduce 不直接调用 f，形参类型只能在这里回填：否则 lambda /
+            // 具名函数的形参一直是 unknown，float 元素会按整数寄存器传参。
+            // 同一个函数被不同类型的 reduce 用过就退回 unknown（和普通
+            // 调用点的单态化规则一致），否则会按错误的值域编译。
+            if (a[0] && a[0]->kind == TyKind::Func && a[0]->fn && elem && !is_unknown(elem)) {
+                FuncInfoPtr fi = a[0]->fn;
+                bool dirty = false;
+                for (size_t i = 0; i < fi->pos.size() && i < 2; ++i) {
+                    Param& p = fi->pos[i];
+                    if (p.multi) continue;
+                    if (is_unknown(p.ty)) {
+                        p.ty = elem;
+                        p.inferred = true;
+                        dirty = true;
+                    } else if (!assignable(p.ty, elem) && p.inferred) {
+                        p.ty = t_unknown();
+                        p.inferred = false;
+                        p.multi = true;
+                        dirty = true;
+                    }
+                }
+                if (dirty) fi->sig_dirty = true;
+            }
+            // 有初始值时结果类型是元素类型与初始值的公共上界。
+            if (a.size() == 3) return join(elem, a[2]);
+            return elem;
+        }
+        if (member == "wraps") {
+            if (!c.keywords.empty()) {
+                err(c.line, c.col, "functools.wraps() does not take keyword arguments");
+                for (auto& kw : c.keywords) expr(*kw.value);
+            }
+            std::vector<TypePtr> a;
+            for (auto& arg : c.args) a.push_back(expr(*arg));
+            if (a.size() != 1) {
+                err(c.line, c.col,
+                    std::format("functools.wraps() expects 1 argument, got {}", a.size()));
+            }
+            // 只当装饰器用：返回 unknown，装饰器那一步会因为「看不出来」
+            // 保留被装饰函数原有的签名——正是 wraps 的语义。
+            return t_unknown();
+        }
+        if (member == "partial" || member == "lru_cache") {
+            for (auto& arg : c.args) expr(*arg);
+            for (auto& kw : c.keywords) expr(*kw.value);
+            err(c.line, c.col, std::format("functools.{}() is not supported yet", member));
+            return t_unknown();
+        }
+        return std::nullopt;
 }
 
 std::optional<TypePtr> TypeChecker::json_call(const std::string& member, Call& c) {

@@ -656,6 +656,8 @@ void py23_time_sleep(double seconds);
 /* ── itertools / collections 的静态特化辅助 ─────────────────────── */
 Py23List* py23_itertools_chain(Py23List* a, Py23List* b, int64_t elem_kind);
 Py23List* py23_itertools_repeat(int64_t v, int64_t n, int64_t elem_kind);
+int64_t py23_functools_reduce(void* fn, Py23List* xs, int64_t init, int64_t has_init);
+double py23_functools_reduce_f(void* fn, Py23List* xs, double init, int64_t has_init);
 Py23Dict* py23_collections_counter(Py23List* src, int64_t key_kind, int64_t key_own);
 Py23List* py23_collections_most_common(Py23Dict* d, int64_t n);
 

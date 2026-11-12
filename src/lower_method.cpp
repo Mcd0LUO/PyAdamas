@@ -79,6 +79,7 @@ VReg Lowerer::lower_method_call(Attribute& at, Call& c) {
             if (mod->name == "asyncio") return lower_asyncio(at.attr, c);
             if (mod->name == "itertools") return lower_itertools(at.attr, c);
             if (mod->name == "collections") return lower_collections(at.attr, c);
+            if (mod->name == "functools") return lower_functools(at.attr, c);
             if (mod->name == "json") return lower_json(at.attr, c);
             auto it = mod->globals.find(at.attr);
             if (it != mod->globals.end() && it->second && it->second->kind == TyKind::Func)

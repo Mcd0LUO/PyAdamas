@@ -207,6 +207,11 @@ std::optional<RtFn> Lowerer::native_fn(const std::string& module, const std::str
         if (member == "repeat") return RtFn::IterRepeat;
     } else if (module == "collections") {
         if (member == "Counter") return RtFn::CollCounter;
+    } else if (module == "functools") {
+        // 只为 from-import 登记别名；真正降级走 lower_functools。
+        if (member == "reduce" || member == "wraps" || member == "partial" ||
+            member == "lru_cache")
+            return RtFn::FuncReduce;
     } else if (module == "json") {
         if (member == "dumps") return RtFn::JsonDumps;
         if (member == "loads") return RtFn::JsonLoads;
@@ -484,6 +489,63 @@ bool Lowerer::json_desc(const TypePtr& t, std::string& out, int line, int col) {
                 std::format("json does not support type '{}'", type_name(t)));
             return false;
     }
+}
+
+VReg Lowerer::lower_functools(const std::string& member, Call& c) {
+    if (member == "reduce") {
+        if (!c.keywords.empty()) {
+            err(c.line, c.col, "functools.reduce() does not take keyword arguments");
+        }
+        if (c.args.size() < 2 || c.args.size() > 3) {
+            err(c.line, c.col,
+                std::format("functools.reduce() expects 2 or 3 arguments, got {}",
+                            c.args.size()));
+            return const_none();
+        }
+        TypePtr ft = tc_.type_of(c.args[0].get());
+        if (ft && ft->kind != TyKind::Func && ft->kind != TyKind::BoundMethod &&
+            ft->kind != TyKind::Unknown) {
+            err(c.args[0]->line, c.args[0]->col,
+                std::format("functools.reduce() expects a function, got '{}'", type_name(ft)));
+            return const_none();
+        }
+        TypePtr rt = tc_.type_of(&c);
+        if (!rt) rt = t_unknown();
+        VReg f = expr(*c.args[0]);
+        TypePtr elem = t_unknown();
+        VReg xs = seq_as_list(c.args[1].get(), elem);
+        bool use_fp = rt->kind == TyKind::Float;
+        // 运行时按结果域读元素：float 版把列表当 double 数组，元素域必须
+        // 一致，否则会读出错误的位模式。
+        if (use_fp && elem && elem->kind != TyKind::Float && elem->kind != TyKind::Unknown) {
+            err(c.args[1]->line, c.args[1]->col,
+                "reduce() over mixed int/float is not supported yet");
+            return const_none();
+        }
+        bool has_init = c.args.size() == 3;
+        VReg init = use_fp ? const_float(0.0) : const_int(0);
+        if (has_init)
+            init = coerce(expr(*c.args[2]), tc_.type_of(c.args[2].get()), rt);
+        VReg v = call_runtime(use_fp ? RtFn::FuncReduceF : RtFn::FuncReduce, rt,
+                              {f, xs, init, const_int(has_init ? 1 : 0)});
+        if (ir_is_heap(rt)) push_temp(v);
+        return v;
+    }
+    if (member == "wraps") {
+        // py23 不建模 __name__/__doc__，@functools.wraps(f) 这一层在装饰器
+        // 处理里直接跳过；当普通函数调用说明用户想拿返回值，做不了。
+        err(c.line, c.col, "functools.wraps() is only supported as a decorator");
+        for (auto& a : c.args) expr(*a);
+        return const_none();
+    }
+    if (member == "partial" || member == "lru_cache") {
+        err(c.line, c.col, std::format("functools.{}() is not supported yet", member));
+        for (auto& a : c.args) expr(*a);
+        for (auto& kw : c.keywords) expr(*kw.value);
+        return const_none();
+    }
+    err(c.line, c.col, std::format("functools.{} is not supported", member));
+    return const_none();
 }
 
 VReg Lowerer::lower_json(const std::string& member, Call& c) {

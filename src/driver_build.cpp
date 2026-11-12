@@ -423,7 +423,8 @@ bool visit_unit(Program& p, ModuleUnit& u, std::vector<ModuleUnit*>& stack) {
         if (req.name == "math" || req.name == "sys" || req.name == "asyncio" ||
             req.name == "random" || req.name == "os" || req.name == "os.path" ||
             req.name == "subprocess" || req.name == "time" || req.name == "itertools" ||
-            req.name == "collections" || req.name == "json" || req.name == "re") {
+            req.name == "collections" || req.name == "json" || req.name == "re" ||
+            req.name == "functools") {
             // 内置模块没有源文件/对象，只提供编译期接口。
             continue;
         }
@@ -535,7 +536,8 @@ py23::ModuleInfoPtr builtin_module(const std::string& name);
 py23::ModuleInfoPtr program_module(Program& p, const std::string& name) {
     if (name == "math" || name == "sys" || name == "asyncio" || name == "random" ||
         name == "os" || name == "os.path" || name == "subprocess" || name == "time" ||
-        name == "itertools" || name == "collections" || name == "json" || name == "re")
+        name == "itertools" || name == "collections" || name == "json" || name == "re" ||
+        name == "functools")
         return builtin_module(name);
     auto it = p.units.find(name);
     return it == p.units.end() ? nullptr : it->second->info;
@@ -754,6 +756,49 @@ py23::ModuleInfoPtr builtin_module(const std::string& name) {
             f->ret = py23::mk_dict(py23::t_unknown(), py23::t_int());
             f->ret_known = true;
             func_with("Counter", f);
+        }
+    } else if (name == "functools") {
+        // reduce 的返回类型按实参在调用点特化，签名只负责参数个数检查。
+        {
+            auto f = std::make_shared<py23::FuncInfo>();
+            f->name = "functools.reduce";
+            py23::Param p;
+            p.name = "function";
+            p.ty = py23::t_unknown();
+            f->pos.push_back(std::move(p));
+            py23::Param q;
+            q.name = "iterable";
+            q.ty = py23::t_unknown();
+            f->pos.push_back(std::move(q));
+            py23::Param r;
+            r.name = "initial";
+            r.ty = py23::t_unknown();
+            r.has_default = true;
+            f->pos.push_back(std::move(r));
+            f->ret = py23::t_unknown();
+            f->ret_known = false;
+            func_with("reduce", f);
+        }
+        {
+            auto f = std::make_shared<py23::FuncInfo>();
+            f->name = "functools.wraps";
+            py23::Param p;
+            p.name = "wrapped";
+            p.ty = py23::t_unknown();
+            f->pos.push_back(std::move(p));
+            f->ret = py23::t_unknown();
+            f->ret_known = false;
+            func_with("wraps", f);
+        }
+        for (auto& n : {"partial", "lru_cache"}) {
+            auto f = std::make_shared<py23::FuncInfo>();
+            f->name = std::string("functools.") + n;
+            f->varargs = true;
+            f->vararg_name = "args";
+            f->vararg_ty = py23::t_unknown();
+            f->ret = py23::t_unknown();
+            f->ret_known = false;
+            func_with(n, f);
         }
     } else if (name == "json") {
         // 类型由调用点的静态类型决定；签名只用于 from-import 的可调用标记。

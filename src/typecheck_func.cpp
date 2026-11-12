@@ -49,7 +49,8 @@ void TypeChecker::funcdef_impl(FunctionDef& f, const ClassInfoPtr& owner) {
             // 拿不到实参类型就没法在降级层选迭代路径。
             if (cur_ == module_ || owner) {
                 func_defs_.push_back(&f);
-            } else if (f.name.rfind("__py23$gen_", 0) == 0) {
+            } else if (f.name.rfind("__py23$gen_", 0) == 0 ||
+                       f.name.rfind("__py23$lambda_", 0) == 0) {
                 nested_recheck_parent_[&f] = cur_;
                 func_defs_.push_back(&f);
             }

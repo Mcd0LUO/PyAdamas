@@ -571,6 +571,18 @@ void AsmGen::gen_call_rt(const Inst& in) {
                 emit2("movq", src_op(in.args[1]), "%rsi");
                 emit2("movq", src_op(in.args[2]), "%rdx");
                 break;
+            case RtFn::FuncReduce:
+                emit2("movq", src_op(in.args[0]), "%rdi");
+                emit2("movq", src_op(in.args[1]), "%rsi");
+                emit2("movq", src_op(in.args[2]), "%rdx");
+                emit2("movq", src_op(in.args[3]), "%rcx");
+                break;
+            case RtFn::FuncReduceF:
+                emit2("movq", src_op(in.args[0]), "%rdi");
+                emit2("movq", src_op(in.args[1]), "%rsi");
+                emit2("movsd", src_op(in.args[2]), "%xmm0");
+                emit2("movq", src_op(in.args[3]), "%rdx");
+                break;
             case RtFn::RegexSubStr:
             case RtFn::DictNew:
             case RtFn::SetFromList:

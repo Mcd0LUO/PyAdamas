@@ -205,6 +205,7 @@ public:
         allow_map_ = !body_binds(m.body, "map");
         allow_filter_ = !body_binds(m.body, "filter");
         allow_range_ = !body_binds(m.body, "range");
+        allow_slice_ = !body_binds(m.body, "slice");
         desugar_body(m.body, false);
     }
 
@@ -214,6 +215,7 @@ private:
     int map_arg_id_ = 0;
     bool allow_map_ = true;
     bool allow_filter_ = true;
+    bool allow_slice_ = true;
     // range 被用户绑定过就不做惰性改写（宁可少改写也不误改）。
     bool allow_range_ = true;
 
@@ -542,12 +544,54 @@ private:
                 if (s.lower) desugar_expr(s.lower, pre);
                 if (s.upper) desugar_expr(s.upper, pre);
                 if (s.step) desugar_expr(s.step, pre);
+                // 切片里的 None 表示「这一端不设限」：xs[None:3] / xs[-2:None]。
+                // 留成常量会被降级层当成 0。
+                auto drop_none = [](ExprPtr& x) {
+                    if (x && x->kind == ExprKind::Constant &&
+                        static_cast<Constant*>(x.get())->ck == Constant::CK::None)
+                        x.reset();
+                };
+                drop_none(s.lower);
+                drop_none(s.upper);
+                drop_none(s.step);
                 break;
             }
             case ExprKind::Subscript: {
                 auto& s = static_cast<Subscript&>(*e);
                 desugar_expr(s.value, pre);
                 desugar_expr(s.slice, pre);
+                // xs[slice(a, b, c)] → xs[a:b:c]：切片本身在 py23 里是
+                // 语法层的，没有运行期 slice 对象；这里把直接调用的写法
+                // 折成同样的形状，typecheck/lower 完全不用改。
+                // slice() 当独立值用仍然不支持（降级层会明确报错）。
+                if (allow_slice_ && s.slice && s.slice->kind == ExprKind::Call) {
+                    auto& call = static_cast<Call&>(*s.slice);
+                    auto* fn = dynamic_cast<Name*>(call.func.get());
+                    bool plain = fn && fn->id == "slice" && call.keywords.empty() &&
+                                 call.args.size() >= 1 && call.args.size() <= 3;
+                    for (auto& a : call.args)
+                        if (a->kind == ExprKind::Starred) plain = false;
+                    if (plain) {
+                        auto sl = std::make_unique<SliceExpr>();
+                        sl->line = call.line;
+                        sl->col = call.col;
+                        auto take = [](ExprPtr& x) -> ExprPtr {
+                            if (!x) return nullptr;
+                            if (x->kind == ExprKind::Constant &&
+                                static_cast<Constant*>(x.get())->ck == Constant::CK::None)
+                                return nullptr;
+                            return std::move(x);
+                        };
+                        if (call.args.size() == 1) {
+                            sl->upper = take(call.args[0]);
+                        } else {
+                            sl->lower = take(call.args[0]);
+                            sl->upper = take(call.args[1]);
+                            if (call.args.size() == 3) sl->step = take(call.args[2]);
+                        }
+                        s.slice = std::move(sl);
+                    }
+                }
                 break;
             }
             case ExprKind::Attribute:

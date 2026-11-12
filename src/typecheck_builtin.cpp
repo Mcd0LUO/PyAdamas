@@ -354,8 +354,29 @@ TypePtr TypeChecker::builtin_call(const std::string& n, Call& c) {
                 err(c.line, c.col, "format() takes exactly two arguments");
             return t_str();
         }
-        if (n == "super" || n == "vars" || n == "dir" ||
-            n == "slice" ||
+        if (n == "slice") {
+            // 只在 xs[slice(a, b, c)] 里支持：脱糖阶段已经折成切片语法，
+            // 走到这里说明是当独立值用。
+            err(c.line, c.col,
+                "slice() is only supported as a subscript, e.g. xs[slice(1, 3)]");
+            return t_unknown();
+        }
+        if (n == "vars") {
+            if (!need(1, 1)) return mk_dict(t_str(), t_unknown());
+            TypePtr ot = a[0];
+            if (ot && ot->kind == TyKind::Class && ot->cls)
+                return mk_dict(t_str(), t_unknown());
+            if (!is_unknown(ot))
+                err(c.args[0]->line, c.args[0]->col,
+                    std::format("vars() argument must be a class instance, got '{}'",
+                                type_name(ot)));
+            return mk_dict(t_str(), t_unknown());
+        }
+        if (n == "dir") {
+            if (a.size() > 1) err(c.line, c.col, "dir() takes at most one argument");
+            return mk_list(t_str());
+        }
+        if (n == "super" ||
             n == "bytearray" || n == "object" || n == "complex" || n == "memoryview") {
             unsupported.push_back(std::format("runtime builtin '{}'", n));
             if (n == "bytearray") return a.empty() ? t_unknown() : mk_list(t_unknown());

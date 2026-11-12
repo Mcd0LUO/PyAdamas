@@ -497,6 +497,10 @@ void Lowerer::lower_funcdef(FunctionDef& f) {
     // 装饰器按从下到上的顺序调用：f = d1(d2(f))。函数值已经绑定，
     // 每一步都重新绑定同名，后一个装饰器拿到前一步的结果。
     for (auto it = f.decorators.rbegin(); it != f.decorators.rend(); ++it) {
+        // @functools.wraps(f)：py23 不建模函数元数据（__name__/__doc__），
+        // 这一层没有可观察效果，直接跳过——否则它要求一个运行期的
+        // identity 装饰器，而那是当前架构里没有的东西。
+        if (is_wraps_decorator(it->get())) continue;
         ExprPtr dec = std::move(*it);
         int line = dec->line;
         int col = dec->col;
@@ -524,6 +528,25 @@ void Lowerer::lower_funcdef(FunctionDef& f) {
         VReg dv = def_heap(rty, std::move(in));
         bind_name_value(f.name, dv, rty);
     }
+}
+
+// @functools.wraps(...) / @wraps(...)：装饰器链里可以整层跳过。
+bool Lowerer::is_wraps_decorator(const Expr* e) const {
+    auto* call = dynamic_cast<const Call*>(e);
+    if (!call) return false;
+    if (auto* at = dynamic_cast<const Attribute*>(call->func.get())) {
+        if (at->attr != "wraps") return false;
+        auto* rn = dynamic_cast<const Name*>(at->value.get());
+        if (!rn) return false;
+        auto mod = resolve_module_alias(rn->id);
+        return mod && mod->builtin && mod->name == "functools";
+    }
+    if (auto* fn = dynamic_cast<const Name*>(call->func.get())) {
+        auto it = native_aliases_.find(fn->id);
+        return it != native_aliases_.end() && it->second.module == "functools" &&
+               it->second.member == "wraps";
+    }
+    return false;
 }
 
 int Lowerer::class_attr_global(const ClassInfo* owner, const std::string& name, TypePtr ty) {

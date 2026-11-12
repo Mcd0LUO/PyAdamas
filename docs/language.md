@@ -752,6 +752,10 @@ CPython 一致。
   按实参静态特化，返回 list（立即求值）。
 - 内置 `collections`：`Counter(items)` 返回 dict，`most_common(n)` 返回
   `(key, count)` 列表。
+- 内置 `functools`：`reduce(f, xs[, init])` 折叠（int/str 走整数跳板，
+  float 要求 f 的形参是 float，或由调用点按元素类型回填）；`wraps(f)`
+  只作装饰器用——py23 不建模 `__name__`/`__doc__`，这一层在装饰器链里
+  直接跳过。`partial` / `lru_cache` 需要运行期构造闭包，暂不支持。
 - 内置 `json`：`dumps(obj)` 按静态类型生成 JSON；`loads(text, sample)`
   用 sample 的静态类型决定结果结构，覆盖 int/bool/float/str/None/list/
   dict/定长 tuple；默认分隔符 `", "` / `": "`。
@@ -836,9 +840,18 @@ unknown 值上对带运行期类型标签的类型（str/list/dict/complex）走
 `count` / `zfill` / `ljust` / `rjust` / `center` / `removeprefix` /
 `removesuffix` / `isdigit` / `isalpha` / `isspace` / `isupper` / `islower` /
 `isalnum`。
-其余内置名（`slice` / `delattr` / `vars` / `dir` 等）类型层面放行，
-降级阶段报「not supported by the code generator yet」，不会再退化成调用
-空指针。
+其余内置名（`delattr` 等）类型层面放行，降级阶段报「not supported by the
+code generator yet」，不会再退化成调用空指针。
+
+`slice(a, b, c)` 只在**下标位置**支持：脱糖阶段折成切片语法 `xs[a:b:c]`，
+所以 `xs[slice(1, 3)]` / `xs[slice(3)]` / `xs[slice(None, 2)]` 都能用，
+切片赋值和 `del` 同理。当独立值用（`s = slice(1, 3)`）会报错——py23 没有
+运行期的 slice 对象。切片里的 `None` 表示「这一端不设限」。
+
+`vars(obj)` 返回实例字段的 dict：key 是字段名（含继承来的），value 统一
+是 `unknown`（字段类型各不相同，dict 装不下异构的具体类型）。
+`dir(obj)` 返回字段名 + 方法名 + 类属性名 + property 名（排序去重）；
+`dir()` 无参返回当前作用域的局部名，模块级是全局名。
 
 `range(...)` 返回的是**惰性对象**（类型 `range[int]`）：只存起点、终点、步长，
 元素按需算。`len(r)` / `r[i]` / `x in r` / `for x in r` / 推导式都不物化，

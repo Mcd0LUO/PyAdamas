@@ -977,6 +977,90 @@ VReg Lowerer::lower_builtin_call(const std::string& name, Call& c) {
         return d;
     }
 
+    if (name == "slice") {
+        // 下标位置的形式在脱糖阶段已经折成切片语法，能走到这里说明是当
+        // 独立值用——py23 没有运行期的 slice 对象。
+        err(c.line, c.col,
+            "slice() is only supported as a subscript, e.g. xs[slice(1, 3)]");
+        for (auto& a : c.args) expr(*a);
+        return const_none();
+    }
+
+    if (name == "vars") {
+        if (c.args.size() != 1) {
+            err(c.line, c.col, "vars() takes exactly one argument");
+            return const_none();
+        }
+        TypePtr ot = tc_.type_of(c.args[0].get());
+        if (!ot || ot->kind != TyKind::Class || !ot->cls) {
+            err(c.args[0]->line, c.args[0]->col, "vars() argument must be a class instance");
+            return const_none();
+        }
+        TypePtr ty = tc_.type_of(&c);
+        if (!ty || ty->kind != TyKind::Dict) ty = mk_dict(t_str(), t_unknown());
+        // key 是 str（堆），value 统一 unknown：字段类型各不相同，只能保守存。
+        VReg d = call_runtime(RtFn::DictNew, ty,
+                              {const_int(1), const_int(1), const_int(2), const_int(-1),
+                               const_int(-1)});
+        push_temp(d);
+        VReg obj = expr(*c.args[0]);
+        for (const ClassInfo* p = ot->cls; p; p = p->base) {
+            for (auto& f : p->fields) {
+                int idx = ot->cls->field_index(f.name);
+                if (idx < 0) continue;
+                // field_load 的 imm 是字节偏移，跳过对象头的 vtable 指针。
+                VReg v = retype(field_load(obj, static_cast<int>(8 * (1 + idx)), f.ty),
+                                t_unknown());
+                retain_elem(v, 2);
+                call_void(RtFn::DictSet, {d, const_str(f.name), v});
+            }
+        }
+        return d;
+    }
+
+    if (name == "dir") {
+        if (c.args.size() > 1) {
+            err(c.line, c.col, "dir() takes at most one argument");
+            return const_none();
+        }
+        std::vector<std::string> names;
+        if (c.args.empty()) {
+            for (auto& [n, s] : st_->slots) names.push_back(n);
+            if (st_->is_module_top)
+                for (auto& [n, gi] : global_ids_) names.push_back(n);
+        } else {
+            TypePtr ot = tc_.type_of(c.args[0].get());
+            if (ot && ot->kind == TyKind::Class && ot->cls) {
+                for (const ClassInfo* p = ot->cls; p; p = p->base) {
+                    for (auto& f : p->fields) names.push_back(f.name);
+                    for (auto& m : p->methods) names.push_back(m.name);
+                    for (auto& a : p->class_attrs) names.push_back(a.name);
+                    for (auto& [pn, pr] : p->properties) names.push_back(pn);
+                }
+            } else if (ot && ot->kind != TyKind::Unknown) {
+                err(c.args[0]->line, c.args[0]->col,
+                    std::format("dir() is not supported for '{}'", type_name(ot)));
+                return const_none();
+            }
+            // 实参照常求值一次（可能带副作用）。
+            expr(*c.args[0]);
+        }
+        std::sort(names.begin(), names.end());
+        names.erase(std::unique(names.begin(), names.end()), names.end());
+        TypePtr lt = tc_.type_of(&c);
+        if (!lt || lt->kind != TyKind::List) lt = mk_list(t_str());
+        VReg l = call_runtime(RtFn::ListNew, lt,
+                              {const_int(static_cast<int64_t>(names.size())),
+                               const_int(list_kind(lt))});
+        push_temp(l);
+        for (auto& n : names) {
+            VReg s = const_str(n);
+            retain_elem(s, 1);
+            call_void(RtFn::ListAppend, {l, s});
+        }
+        return l;
+    }
+
     if (name == "format") {
         if (c.args.size() != 2) {
             err(c.line, c.col, "format() takes exactly two arguments");

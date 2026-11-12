@@ -4,6 +4,51 @@
 
 早期阶段没有逐条留痕，按阶段归纳；0.4 之后逐条记录。
 
+## [0.86] - 2026-11-12
+
+小内置（`slice` / `vars` / `dir`）与 `functools.reduce` / `wraps`。
+
+### 新增
+
+- **`slice(a, b, c)` 作下标**：脱糖阶段把 `xs[slice(a, b, c)]` 折成切片语法
+  `xs[a:b:c]`，读取、切片赋值、`del` 三条路径都通；`slice(3)`（只有 stop）
+  和 `slice(None, 2)`（`None` 表示不设限）也对齐 CPython。当独立值用会明确
+  报错——py23 没有运行期的 slice 对象。
+- **`vars(obj)`**：返回实例字段的 dict（含继承来的字段，key 是字段名）。
+  value 统一是 `unknown`：字段类型各不相同，dict 装不下异构的具体类型。
+- **`dir(obj)`**：字段名 + 方法名 + 类属性名 + property 名，排序去重；
+  `dir()` 无参返回当前作用域的局部名（模块级是全局名）。
+- **`functools` 模块**：`reduce(f, xs[, init])` 折叠——int/str 走整数跳板、
+  float 走 xmm 跳板（新增 `py23_call2` / `py23_call2_f` 两个汇编跳板）；
+  `wraps(f)` 只作装饰器用，装饰器链里整层跳过（py23 不建模
+  `__name__`/`__doc__`）。
+- **嵌套 lambda 也参与形参回填**：`__py23$lambda_*` 和生成器合成函数一样
+  登记重查，重查时回到定义时的词法父作用域。`reduce(lambda a, b: a + b,
+  [1.5, 2.5])` 靠这条把形参回填成 float，否则 float 元素会按整数寄存器传参。
+
+### 修复
+
+- 切片里的 `None` 表示「这一端不设限」：`xs[None:3]` / `xs[-2:None]` 之前
+  会把 None 当成 0。
+
+### 已知限制
+
+- `functools.partial` / `lru_cache` 需要运行期构造闭包（合成转发函数 +
+  填 env），当前架构没有这个能力，明确报 `not supported yet`。
+- `reduce` 的 float 元素要求 f 的形参是 float（或由调用点回填）；同一个
+  函数被不同类型的 reduce 用过会退回 unknown，float 场景会算错——这是
+  py23 单态化的固有限制。
+- `vars()` 无参（locals）和 `dir(模块)` 不支持。
+- `slice()` 没有运行期对象，只能作下标。
+
+### 测试
+
+- `tests/run/76_small_builtins.py`：slice 的读 / 写 / 删、`None` 边界、
+  vars 的字段、dir 的三种形态。
+- `tests/run/77_functools.py`：reduce 的 int / float / str / tuple / lambda /
+  init / 空序列 TypeError，wraps 的两种导入方式。
+- 用例数：运行 75→77。
+
 ## [0.85] - 2026-11-11
 
 元组的 repr 与单元素元组的打印补齐；容器转标量不再静默给垃圾值。

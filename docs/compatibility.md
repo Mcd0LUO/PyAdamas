@@ -44,6 +44,8 @@ py23 不追求兼容 CPython：语义是按静态类型的需要重新定的。�
 | `string` | 常量 + `capwords()`，随编译器分发 `stdlib/string.py` | 完整 string | 子集；`capwords` 用 `split()` + `capitalize()` |
 | `itertools` | `chain`/`repeat`/`islice`，按实参静态特化，返回 list | 完整 itertools | 立即求值，没有惰性迭代器；`islice` 只接受 `(x, stop)` |
 | `collections` | `Counter`/`most_common` | 完整 collections | 没有 `defaultdict`/`deque`/`OrderedDict`；`Counter` 返回普通 dict |
+| `functools` | `reduce`/`wraps` | 完整 functools | `partial`/`lru_cache` 需要运行期构造闭包，未支持；`wraps` 只作装饰器用（不建模 `__name__`/`__doc__`，装饰器链里整层跳过）；`reduce` 的 float 元素要求 f 形参是 float |
+| `slice` / `vars` / `dir` | `slice()` 只在下标位置（脱糖折成切片语法）；`vars(obj)` 返回字段 dict（value 统一 unknown）；`dir()` 列成员名 | 完整语义 | 没有运行期 slice 对象；`vars()` 无参（locals）不支持；`dir(模块)` 不支持 |
 | `json` | `dumps`/`loads(text, sample)`；默认分隔符 `", "`/`": "`；`loads` 用 sample 的静态类型决定目标结构 | 完整 json | 没有 `indent`/`separators`/`ensure_ascii` 参数；`loads` 必须给 sample（`None` 用于解析 null）；只覆盖 int/bool/float/str/None/list/dict/定长 tuple |
 | `math.fsum` | `list[float]` 的 Shewchuk 精确求和；`list[int]` 在 build 阶段报错 | CPython 接受任意数值可迭代 | 只收 `list[float]`；结果是正确舍入 |
 | `re` | `compile`/`search`/`match`/`fullmatch`/`findall`/`sub`/`split`/`escape`，Pattern/Match 方法，`I`/`M`/`S` 标志；回溯 VM | 完整 re | v2 支持反向引用、四向断言、原子组、占有量词、内联标志；`findall` 只有一个捕获组时返回组内容（多个时返回整段匹配），`split` 按序插入捕获组；仍不支持条件组与 Unicode 属性类；字符串按字节匹配 |
