@@ -23,6 +23,18 @@ match() {
     esac
 }
 
+# 依赖 OpenBLAS 的用例；库不存在时跳过而不是判失败。
+HAVE_OPENBLAS=0
+if find /usr/lib /lib -name 'libopenblas.so*' -print -quit 2>/dev/null | grep -q .; then
+    HAVE_OPENBLAS=1
+fi
+need_blas() {
+    case "$(basename "$1")" in
+        99_cblas.py | 100_linalg.py) [ "$HAVE_OPENBLAS" = 1 ] ;;
+        *) return 0 ;;
+    esac
+}
+
 fail=0
 prog="$BUILD/prog.tmp"
 out="$BUILD/out.txt"
@@ -82,6 +94,7 @@ run_test() {
 
 for f in tests/run/*.py; do
     match "$f" || continue
+    need_blas "$f" || continue
     ( run_test "$f" ) &
     while [ "$(jobs -rp | wc -l)" -ge "$JOBS" ]; do
         wait -n || true
@@ -92,8 +105,12 @@ wait
 for f in tests/run/*.py; do
     match "$f" || continue
     name=$(basename "$f")
-    res="$logdir/$name.res"
     printf '  %-28s ' "$name"
+    if ! need_blas "$f"; then
+        printf 'skipped (no OpenBLAS)\n'
+        continue
+    fi
+    res="$logdir/$name.res"
     if [ -f "$res" ]; then
         first=$(head -1 "$res")
         printf '%s\n' "$first"

@@ -1,0 +1,9 @@
+cmodule cblas
+link openblas
+
+const ROW_MAJOR: int32 = 101
+const NO_TRANS: int32 = 111
+const TRANS: int32 = 112
+
+extern def "cblas_dgemm" as dgemm(layout: int32, trans_a: int32, trans_b: int32, m: int32, n: int32, k: int32, alpha: float, a: ptr[float], lda: int32, b: ptr[float], ldb: int32, beta: float, c: ptr[float], ldc: int32) -> None
+extern def "cblas_ddot" as ddot(n: int32, x: ptr[float], incx: int32, y: ptr[float], incy: int32) -> float

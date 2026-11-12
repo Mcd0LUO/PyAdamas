@@ -1091,6 +1091,18 @@ cblas.dgemm(cblas.ROW_MAJOR, cblas.NO_TRANS, cblas.NO_TRANS,
 print(c)  # [19.0, 22.0, 43.0, 50.0]
 ```
 
+stdlib 已封装常用操作（`stdlib/linalg.py`），不用手写 14 个参数：
+
+```python
+import linalg
+
+c = linalg.matmul([1.0, 2.0, 3.0, 4.0], [5.0, 6.0, 7.0, 8.0], 2, 2, 2)
+print(linalg.dot([1.0, 2.0], [3.0, 4.0]))  # 11.0
+```
+
+`matmul(a, b, m, n, k)` 计算行主序 A(m×k)·B(k×n)，返回长度 `m*n` 的
+`list[float]`；`dot(x, y)` 计算等长向量点积。数据按行主序拍平传入。
+
 ## 会被拒绝的写法
 
 **语法层**（`check` 就报错）：
