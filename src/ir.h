@@ -974,6 +974,7 @@ enum class IrOp : uint8_t {
     // ── 调用 ──────────────────────────────────────────────
     Call,    // dst = a(args...)（a 是函数指针）
     CallRt,  // dst = <RtFn(imm)>(args...)
+    CallExtern, // dst = <externs[idx].symbol>(args...)；参数按 C ABI 编组
     Setjmp,  // dst = setjmp(a)（a 是 handler 记录，异常跳回时返回非 0）
     ImportModule, // imm 是 imports 下标：确保模块已初始化
     SlotAddr,     // dst = &slots[idx]（栈槽或生成器帧槽的地址）
@@ -1028,6 +1029,7 @@ inline const char* irop_name(IrOp op) {
         case IrOp::CallDirect: return "call.direct";
         case IrOp::Call: return "call";
         case IrOp::CallRt: return "call.rt";
+        case IrOp::CallExtern: return "call.extern";
         case IrOp::Setjmp: return "setjmp";
         case IrOp::ImportModule: return "import.module";
         case IrOp::SlotAddr: return "slot.addr";
@@ -1167,6 +1169,12 @@ struct IRGenerator {
     int frame_kind = 0;
 };
 
+struct IRExtern {
+    std::string symbol;
+    std::vector<CKind> params;
+    CKind ret = CKind::None;
+};
+
 struct IRModule {
     // 用 unique_ptr 持有：降级过程中会不断新增函数（嵌套 def），
     // vector<IRFunction> 扩容会让外面持有的指针失效。
@@ -1184,6 +1192,8 @@ struct IRModule {
     int opt_level = 2;
     // import.module 指令引用的模块名（按出现顺序去重）。
     std::vector<std::string> imports;
+    // cimport 外部函数表：CallExtern 的 idx 指向这里。
+    std::vector<IRExtern> externs;
     int entry = -1;  // 模块顶层代码编译成的函数下标
 
     IRFunction* add_func(std::string name) {

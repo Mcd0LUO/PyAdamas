@@ -4,6 +4,36 @@
 
 早期阶段没有逐条留痕，按阶段归纳；0.4 之后逐条记录。
 
+## [0.110] - 2026-11-13
+
+C 互操作 v1：新增 `cimport` 语句与 `.cpya` 声明文件，可直接调用系统 C 库。
+
+### 新增
+
+- **`cimport`**：模块顶层语句，支持 `cimport a.b`、`as` 别名和一行多个名字；
+  不产生运行时对象，当值使用会报错。
+- **`.cpya` 声明文件**：`cmodule` / `link` / `const` / `extern def` 四种声明，
+  支持符号改名、多个 `link` 去重、编译期常量内联。文件按 `a.b` → `a/b.cpya`
+  相对源文件目录或 `-I` 路径查找，不进入模块缓存，**不影响既有 `.pya` 二进制接口**。
+- **调用编组**：`int`(long)、`int32`/`uint32`、`float`(double)、`bool`、
+  `str`(char*)、`ptr`/`ptr[T]`(void*/T*)、`None`、`Optional[str]`；返回值
+  按类型做符号/零扩展、bool 归一、char* 复制成 `str`（NULL 对 `Optional[str]`
+  返回 `None`）。
+- 链接参数自动拼到最终 `cc` 命令。
+
+### 验证
+
+- 新增 `97_cimport`：调用 `libm`/libc 的 `sqrt`/`pow`/`strlen`/`labs`/`abs`/
+  `isalpha`/`malloc`/`free`/`memset`/`getenv`/`syscall`，覆盖常量内联、别名、
+  多绑定、关键字参数、`ptr[T]`、`Optional[str]` 传 NULL，以及 8 个整型参数
+  走栈的编组。
+- 新增模块用例 `cimport_shared`：两个模块各自 `cimport` 同一 `.cpya`，验证
+  链接参数去重与模块缓存二次运行。
+- 新增反例 `f41_cimport_value`、`f42_cimport_nested`、
+  `f43_cimport_optional_str`（拒绝把可能为 NULL 的 `Optional[str]` 传给 `str`）。
+- `str` 入参汇编先做空指针检查；类型检查拒绝 `Optional[str]` → `str` 的隐式收窄。
+- `ctest --preset dev` 2/2，完整 `tests/run_tests.sh` 全绿。
+
 ## [0.109] - 2026-11-12
 
 unknown 引用计数精确化：容器 kind 2 元素、unknown 字段与全局改走 RC 索引释放。

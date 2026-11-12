@@ -166,6 +166,7 @@ bool hoist_loop(IRFunction& fn, int h, const std::vector<char>& body,
                     break;
                 case IrOp::Call:
                 case IrOp::CallRt:
+                case IrOp::CallExtern:
                 case IrOp::CallDirect:
                 case IrOp::VCall:
                 case IrOp::VCallStatic:
@@ -342,6 +343,7 @@ bool version_bounds_loop(IRFunction& fn, int h, const std::vector<char>& body,
             switch (in.op) {
                 case IrOp::Call:
                 case IrOp::CallRt:
+                case IrOp::CallExtern:
                 case IrOp::CallDirect:
                 case IrOp::VCall:
                 case IrOp::VCallStatic:

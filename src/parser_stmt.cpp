@@ -225,6 +225,7 @@ StmtPtr Parser::parse_simple_statement() {
                 return n;
             }
             case Tok::KW_IMPORT: return parse_import();
+            case Tok::KW_CIMPORT: return parse_cimport();
             case Tok::KW_FROM: return parse_import_from();
             default: break;
         }

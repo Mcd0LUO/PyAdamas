@@ -1,6 +1,7 @@
 // typecheck_stmt.cpp —— 语句类型检查：控制流、try/with、赋值与解包
 #include "typecheck.h"
 
+#include <filesystem>
 #include <set>
 
 #include "module.h"
@@ -382,6 +383,52 @@ void TypeChecker::stmt(Stmt& s) {
                         declare(bind, t_unknown(), s.line);
                         unsupported.push_back("import");
                     }
+                }
+                break;
+            }
+            case StmtKind::CImport: {
+                auto& ci = static_cast<CImport&>(s);
+                std::string dir = std::filesystem::path(file_).parent_path().string();
+                for (auto& al : ci.names) {
+                    std::string bind = al.asname;
+                    if (bind.empty()) {
+                        auto dot = al.name.rfind('.');
+                        bind = dot == std::string::npos ? al.name : al.name.substr(dot + 1);
+                    }
+                    if (lookup(bind)) {
+                        err(s.line, s.col,
+                            std::format("name '{}' is already defined in this module", bind));
+                        continue;
+                    }
+                    if (cmodules_.count(bind)) {
+                        err(s.line, s.col,
+                            std::format("cimport name '{}' is already defined", bind));
+                        continue;
+                    }
+                    std::string load_err;
+                    auto decl = load_cpya(al.name, dir, cinclude_dirs_, load_err);
+                    if (!decl) {
+                        err(s.line, s.col, load_err);
+                        continue;
+                    }
+                    auto shared = std::make_shared<CImportDecl>(std::move(*decl));
+                    for (auto& ex : shared->externs) {
+                        auto fi = std::make_shared<FuncInfo>();
+                        fi->name = ex.py_name;
+                        fi->is_extern = true;
+                        fi->ret_declared = true;
+                        fi->ret_known = true;
+                        fi->ret = ckind_type(ex.ret);
+                        for (auto& p : ex.params) {
+                            Param pm;
+                            pm.name = p.name;
+                            pm.ty = ckind_type(p.kind);
+                            fi->pos.push_back(std::move(pm));
+                        }
+                        extern_by_fn_[fi.get()] = &ex;
+                        extern_fns_[&ex] = std::move(fi);
+                    }
+                    cmodules_[bind] = std::move(shared);
                 }
                 break;
             }

@@ -26,7 +26,7 @@ enum class Tok : uint8_t {
 
     // 关键字（按字母序，便于核对完整性）
     KW_AND, KW_AS, KW_ASSERT, KW_ASYNC, KW_AWAIT,
-    KW_BREAK, KW_CLASS, KW_CONTINUE,
+    KW_BREAK, KW_CIMPORT, KW_CLASS, KW_CONTINUE,
     KW_DEF, KW_DEL, KW_ELIF, KW_ELSE, KW_EXCEPT,
     KW_FALSE, KW_FINALLY, KW_FOR, KW_FROM,
     KW_GLOBAL, KW_IF, KW_IMPORT, KW_IN, KW_IS,
@@ -86,6 +86,7 @@ inline const char* tok_name(Tok t) {
         case Tok::KW_ASYNC: return "async";
         case Tok::KW_AWAIT: return "await";
         case Tok::KW_BREAK: return "break";
+        case Tok::KW_CIMPORT: return "cimport";
         case Tok::KW_CLASS: return "class";
         case Tok::KW_CONTINUE: return "continue";
         case Tok::KW_DEF: return "def";

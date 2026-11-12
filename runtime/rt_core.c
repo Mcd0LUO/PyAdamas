@@ -446,6 +446,16 @@ PyAdamasStr* str_new(const char* p, int64_t len) {
     return s;
 }
 
+PyAdamasStr* pa_str_from_cstr(const char* p) {
+    if (!p) p = "";
+    return str_new(p, (int64_t)strlen(p));
+}
+
+PyAdamasStr* pa_str_from_cstr_opt(const char* p) {
+    if (!p) return NULL;
+    return str_new(p, (int64_t)strlen(p));
+}
+
 /* ── 静态驻留字符串 ─────────────────────────────────────────────
    字符串迭代/下标每取一个字符都会造一个单字节串；bool/None 转字符串
    也在 print/repr 里反复出现。字符串不可变，这些结果可以做成永生对象：

@@ -660,6 +660,8 @@ private:
 
     void desugar_stmt(Stmt& s, std::vector<StmtPtr>& pre, bool class_body) {
         switch (s.kind) {
+            case StmtKind::CImport:
+                break;
             case StmtKind::Expr:
                 if (!class_body) desugar_expr(static_cast<ExprStmt&>(s).value, pre);
                 break;

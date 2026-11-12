@@ -52,6 +52,7 @@ set(PYADAMAS_SOURCES
   src/ir.cpp
   src/desugar.cpp
   src/module.cpp
+  src/cimport.cpp
 )
 
 # 编译器在运行时需要 rt.o 的绝对路径；运行时按职责拆成多个 .c，

@@ -112,6 +112,14 @@ std::string Inst::text() const {
             }
             return s + ")";
         }
+        case IrOp::CallExtern: {
+            std::string s = std::format("{} = call.extern e{}(", vreg_str(dst), idx);
+            for (size_t i = 0; i < args.size(); ++i) {
+                if (i) s += ", ";
+                s += vreg_str(args[i]);
+            }
+            return s + ")";
+        }
         case IrOp::Setjmp:
             return std::format("{} = setjmp {}", vreg_str(dst), vreg_str(a));
         case IrOp::ImportModule:

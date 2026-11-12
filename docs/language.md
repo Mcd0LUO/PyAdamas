@@ -1013,6 +1013,46 @@ match value:
 `==` / `!=`、真值判断、`print` / f-string 已支持。复数是有 RC 头的堆对象；
 没有 `**`、排序或与 int/float 的隐式存储转换（运算时允许提升）。
 
+## C 互操作（cimport）
+
+`cimport` 在**模块顶层**声明要调用的 C 库，不产生运行时对象；把它当值用会报错。
+
+```
+cimport m
+cimport mylib as ml, other.lib
+
+print(m.sqrt(2.0))
+```
+
+`a.b` 对应声明文件 `a/b.cpya`（相对源文件目录或 `-I` 路径查找）。没有 `as` 时绑定名取最后一段（`cimport a.b` 之后用 `b.fn`）；`.cpya` 是手写文本，每行一条，`#` 起注释：
+
+```
+cmodule m                       # 必须是第一条非注释行，且等于 cimport 的名字
+link m                          # -> -lm；引号内则原样传给链接器
+link "/usr/lib/libfoo.a"
+const PI: float = 3.141592653589793
+extern def "sqrt" as sqrt(x: float) -> float
+extern def strlen(s: str) -> int
+extern def free(p: ptr) -> None
+```
+
+`extern def` 单行书写；参数名必填；返回值省略等价于 `None`；`"c_name" as py_name` 用于改名。常量在编译期内联。
+
+| `.cpya` 类型 | C 类型 | 说明 |
+|---|---|---|
+| `int` | `long` | 64 位 |
+| `int32` / `uint32` | `int` / `unsigned` | 返回值分别符号/零扩展 |
+| `float` | `double` | |
+| `bool` | `_Bool` | 返回值统一为 0/1 |
+| `str` | `char*` | 传入 `data`；返回时复制成 `str` |
+| `ptr` / `ptr[T]` | `void*` / `T*` | 类型系统中是 `Optional[int]`，0 表示 NULL |
+| `None` | `void` | |
+| `Optional[str]` | 可空 `char*` | NULL 返回 `None` |
+
+不支持：解析 C 头文件、varargs、回调、struct、`extern` 变量、指针解引用。`link` 参数去重后追加到最终链接命令；`.cpya` 不参与 `.pya` 模块缓存。
+
+`str` 参数要求非空，不能把 `Optional[str]` 直接传给它（会有 NULL）；需要接受 NULL 时声明为 `Optional[str]`。`ptr` 是不透明地址，0 表示 `NULL`，不能解引用或做数组访问。
+
 ## 会被拒绝的写法
 
 **语法层**（`check` 就报错）：

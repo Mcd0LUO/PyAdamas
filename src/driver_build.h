@@ -45,6 +45,8 @@ struct Program {
     std::vector<ModuleUnit*> order;
     ModuleUnit* entry = nullptr;
     std::vector<std::string> include_dirs;
+    // cimport .cpya 里 link 声明的链接参数（已归一化并去重）。
+    std::vector<std::string> link_args;
     bool rebuild = false;
     bool verbose = false;
     int opt = 2;

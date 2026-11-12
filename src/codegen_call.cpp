@@ -470,6 +470,104 @@ void AsmGen::gen_call(const Inst& in) {
         }
     }
 
+void AsmGen::gen_call_extern(const Inst& in) {
+        const IRExtern& ex = m_->externs[static_cast<size_t>(in.idx)];
+
+        std::vector<TypePtr> types;
+        types.reserve(ex.params.size());
+        for (CKind k : ex.params) types.push_back(k == CKind::Float ? t_float() : t_int());
+        auto locs = classify(types);
+
+        int stack_args = 0;
+        for (auto& l : locs)
+            if (l.stack_off >= 0) stack_args = (l.stack_off / 8) + 1;
+        int stack_bytes = stack_args * 8;
+        int alloc = (stack_bytes + 15) & ~15;
+
+        // 取实参的机器值。str/可选 str 要先从 PyAdamasStr 里取出 data 字段
+        // （偏移 16），指针按整数直接传。
+        auto arg_into = [&](size_t i, const std::string& reg) {
+            CKind k = ex.params[i];
+            const std::string src = src_op(in.args[i]);
+            if (k == CKind::Str || k == CKind::OptStr) {
+                emit2("movq", src, "%r10");
+                // 可空/可能为 NULL 的字符串：NULL 原样传，不能解引用。
+                // 非可空 str 在类型检查阶段已拒绝 Optional[str]，这里只是
+                // 防御运行期出现的空值。
+                line("testq %r10, %r10");
+                line("je 1f");
+                line("movq 16(%r10), %r10");
+                line("1:");
+                emit2("movq", "%r10", reg);
+            } else {
+                emit2("movq", src, reg);
+            }
+        };
+
+        if (alloc) emit_imm_op("subq", alloc, "%rsp");
+        for (size_t i = 0; i < in.args.size(); ++i) {
+            if (locs[i].stack_off < 0) continue;
+            arg_into(i, "%r10");
+            line(std::format("movq %r10, {}(%rsp)", locs[i].stack_off));
+        }
+        for (size_t i = 0; i < in.args.size(); ++i) {
+            const auto& l = locs[i];
+            if (l.stack_off >= 0) continue;
+            if (l.fp) {
+                line(std::format("movsd {}, %xmm{}", src_op(in.args[i]), l.reg));
+            } else {
+                arg_into(i, kIntArgRegs[l.reg]);
+            }
+        }
+        if (opt_ < 2) line("xorl %eax, %eax");
+        spill_fp_slots();
+        line("call " + ex.symbol);
+        reload_fp_slots();
+
+        if (!dst_unused(in)) {
+            std::string dst = dst_op(in.dst);
+            switch (ex.ret) {
+                case CKind::None:
+                    break;
+                case CKind::Float:
+                    emit2("movsd", "%xmm0", dst);
+                    break;
+                case CKind::Int32:
+                    line("movslq %eax, %rax");
+                    emit2("movq", "%rax", dst);
+                    break;
+                case CKind::UInt32:
+                    line("movl %eax, %eax");
+                    emit2("movq", "%rax", dst);
+                    break;
+                case CKind::Bool:
+                    line("testq %rax, %rax");
+                    line("setne %al");
+                    line("movzbl %al, %eax");
+                    emit2("movq", "%rax", dst);
+                    break;
+                case CKind::Str:
+                case CKind::OptStr: {
+                    // C 返回的 char* 不能直接交给 py23：需要复制成
+                    // PyAdamasStr。NULL 对 str 视为空串，对 Optional[str]
+                    // 保持 None。
+                    spill_fp_slots();
+                    emit2("movq", "%rax", "%rdi");
+                    line(ex.ret == CKind::OptStr ? "call pa_str_from_cstr_opt"
+                                                 : "call pa_str_from_cstr");
+                    reload_fp_slots();
+                    emit2("movq", "%rax", dst);
+                    break;
+                }
+                case CKind::Int:
+                case CKind::Ptr:
+                    emit2("movq", "%rax", dst);
+                    break;
+            }
+        }
+        if (alloc) emit_imm_op("addq", alloc, "%rsp");
+    }
+
 void AsmGen::gen_setjmp(const Inst& in) {
         // handler 记录的第一个字段就是 jmp_buf，所以记录指针可以直接
         // 作为 setjmp 的参数。longjmp 回来后 $rax 非 0。

@@ -1,0 +1,5 @@
+cmodule clib
+link m
+extern def "sqrt" as sqrt(x: float) -> float
+extern def "strlen" as strlen(s: str) -> int
+extern def "getenv" as getenv(name: str) -> Optional[str]

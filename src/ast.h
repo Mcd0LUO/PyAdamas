@@ -522,7 +522,7 @@ enum class StmtKind : uint8_t {
     If, While, For,
     FunctionDef, ClassDef,
     Try, With, Raise, Assert,
-    Import, ImportFrom, Global, Nonlocal, Delete, Match,
+    Import, ImportFrom, Global, Nonlocal, Delete, Match, CImport,
 };
 
 struct Stmt {
@@ -801,6 +801,18 @@ struct Import : Stmt {
         pad(os, ind);
         os << "Import";
         for (auto& a : names) os << " " << a.name << (a.asname.empty() ? "" : " as " + a.asname);
+        os << "\n";
+    }
+};
+
+struct CImport : Stmt {
+    std::vector<Alias> names;
+    CImport() : Stmt(StmtKind::CImport) {}
+    void dump(std::ostream& os, int ind) const override {
+        pad(os, ind);
+        os << "CImport";
+        for (auto& a : names)
+            os << " " << a.name << (a.asname.empty() ? "" : " as " + a.asname);
         os << "\n";
     }
 };

@@ -46,6 +46,45 @@ TypePtr TypeChecker::call(Call& c) {
         }
         if (auto* a = dynamic_cast<Attribute*>(c.func.get())) {
             if (auto* vn = dynamic_cast<Name*>(a->value.get())) {
+                if (const CImportDecl* cd = cmodule(vn->id)) {
+                    for (auto& x : cd->externs) {
+                        if (x.py_name != a->attr) continue;
+                        auto it = extern_fns_.find(&x);
+                        if (it == extern_fns_.end()) break;
+                        auto ft = new_ty(TyKind::Func);
+                        ft->fn = it->second;
+                        TypePtr rt = check_args(ft->fn, c);
+                        // str 参数在 C 侧是 char*，Optional[str] 可能是 NULL，
+                        // 不能隐式收窄成 str。
+                        auto check_str_arg = [&](Expr* arg, size_t pi) {
+                            if (pi >= ft->fn->pos.size()) return;
+                            const TypePtr& pt = ft->fn->pos[pi].ty;
+                            TypePtr at = type_of(arg);
+                            if (pt && pt->kind == TyKind::Str && at &&
+                                at->kind == TyKind::Optional) {
+                                err(arg->line, arg->col,
+                                    std::format("argument '{}' may be None; declare it as "
+                                                "Optional[str] to accept NULL",
+                                                ft->fn->pos[pi].name));
+                            }
+                        };
+                        for (size_t i = 0; i < c.args.size(); ++i)
+                            check_str_arg(c.args[i].get(), i);
+                        for (auto& kw : c.keywords) {
+                            for (size_t i = 0; i < ft->fn->pos.size(); ++i)
+                                if (ft->fn->pos[i].name == kw.arg) {
+                                    check_str_arg(kw.value.get(), i);
+                                    break;
+                                }
+                        }
+                        return rt;
+                    }
+                    err(c.line, c.col,
+                        std::format("cimport '{}' has no function '{}'", vn->id, a->attr));
+                    for (auto& arg : c.args) expr(*arg);
+                    for (auto& kw : c.keywords) expr(*kw.value);
+                    return t_unknown();
+                }
                 if (auto mod = lookup_module_alias(vn->id)) {
                     if (mod->builtin && mod->name == "asyncio") {
                         if (auto r = asyncio_call(a->attr, c)) return *r;

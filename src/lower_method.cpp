@@ -73,6 +73,10 @@ VReg Lowerer::lower_method_call(Attribute& at, Call& c) {
             return lower_super_call(at, c);
         }
     }
+    // cimport 外部函数：alias.fname(...) 直接生成 CallExtern。
+    if (auto* n = dynamic_cast<Name*>(at.value.get())) {
+        if (tc_.cmodule(n->id)) return lower_cimport_call(at, c);
+    }
     // 内置模块的原生函数/常量。
     if (auto* n = dynamic_cast<Name*>(at.value.get())) {
         if (auto mod = resolve_module_alias(n->id); mod && mod->builtin) {
@@ -1857,6 +1861,100 @@ VReg Lowerer::lower_method_call(Attribute& at, Call& c) {
     err(c.line, c.col, std::format("method '{}' is not supported by the code generator yet",
                                    at.attr));
     return const_none();
+}
+
+VReg Lowerer::lower_cimport_call(Attribute& at, Call& c) {
+    auto* n = static_cast<Name*>(at.value.get());
+    const CImportDecl* decl = tc_.cmodule(n->id);
+    const CExtern* ex = nullptr;
+    for (auto& e : decl->externs)
+        if (e.py_name == at.attr) ex = &e;
+    if (!ex) {
+        err(c.line, c.col,
+            std::format("cimport '{}' has no function '{}'", n->id, at.attr));
+        return const_none();
+    }
+    if (c.args.size() > ex->params.size()) {
+        err(c.line, c.col,
+            std::format("'{}' takes {} arguments but {} were given", at.attr,
+                        ex->params.size(), c.args.size()));
+        return const_none();
+    }
+
+    // 按 .cpya 的参数顺序收集实参；位置参数在前，关键字参数按名字补齐。
+    std::vector<Expr*> srcs(ex->params.size(), nullptr);
+    for (size_t i = 0; i < c.args.size(); ++i) srcs[i] = c.args[i].get();
+    for (auto& kw : c.keywords) {
+        bool found = false;
+        for (size_t i = 0; i < ex->params.size(); ++i) {
+            if (ex->params[i].name != kw.arg) continue;
+            if (srcs[i]) {
+                err(c.line, c.col,
+                    std::format("'{}' got multiple values for argument '{}'", at.attr, kw.arg));
+                return const_none();
+            }
+            srcs[i] = kw.value.get();
+            found = true;
+            break;
+        }
+        if (!found) {
+            err(c.line, c.col,
+                std::format("'{}' got an unexpected keyword argument '{}'", at.attr, kw.arg));
+            return const_none();
+        }
+    }
+    for (size_t i = 0; i < srcs.size(); ++i) {
+        if (!srcs[i]) {
+            err(c.line, c.col,
+                std::format("'{}' missing required argument '{}'", at.attr,
+                            ex->params[i].name));
+            return const_none();
+        }
+    }
+
+    std::vector<VReg> args;
+    args.reserve(srcs.size());
+    for (size_t i = 0; i < srcs.size(); ++i) {
+        TypePtr aty = tc_.type_of(srcs[i]);
+        VReg v = expr(*srcs[i]);
+        switch (ex->params[i].kind) {
+            case CKind::Float: v = coerce(v, aty, t_float()); break;
+            case CKind::Str: v = coerce(v, aty, t_str()); break;
+            case CKind::Bool: v = coerce(v, aty, t_bool()); break;
+            case CKind::OptStr:
+                if (aty && aty->kind != TyKind::None) v = coerce(v, aty, t_str());
+                break;
+            case CKind::Ptr:
+                if (aty && aty->kind != TyKind::None) v = coerce(v, aty, t_int());
+                break;
+            case CKind::None: break;
+            default: v = coerce(v, aty, t_int()); break;
+        }
+        args.push_back(v);
+    }
+
+    int idx = -1;
+    for (size_t i = 0; i < mod_.externs.size(); ++i) {
+        if (mod_.externs[i].symbol == ex->symbol) {
+            idx = static_cast<int>(i);
+            break;
+        }
+    }
+    if (idx < 0) {
+        IRExtern ent;
+        ent.symbol = ex->symbol;
+        ent.ret = ex->ret;
+        for (auto& p : ex->params) ent.params.push_back(p.kind);
+        mod_.externs.push_back(std::move(ent));
+        idx = static_cast<int>(mod_.externs.size()) - 1;
+    }
+
+    Inst in;
+    in.op = IrOp::CallExtern;
+    in.idx = idx;
+    in.args = std::move(args);
+    in.ty = ckind_type(ex->ret);
+    return def_heap(in.ty, std::move(in));
 }
 
 }  // namespace pyadamas

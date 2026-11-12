@@ -41,6 +41,7 @@ private:
     size_t pos_ = 0;
     int loop_depth_ = 0;
     int func_depth_ = 0;
+    int suite_depth_ = 0;   // 嵌套语句块深度；cimport 只允许模块顶层
     int async_depth_ = 0;   // 处于 async def 内时才允许 await / async for / async with
     int genexp_depth_ = 0;  // 生成器表达式体内允许 async for（延迟求值）
     int expr_depth_ = 0;    // 防止深层嵌套把栈打穿
@@ -139,6 +140,8 @@ private:
     void check_assignable(const Expr& e);
 
     StmtPtr parse_import();
+
+    StmtPtr parse_cimport();
 
     StmtPtr parse_import_from();
 

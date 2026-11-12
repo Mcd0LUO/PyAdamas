@@ -384,6 +384,27 @@ bool visit_unit(Program& p, ModuleUnit& u, std::vector<ModuleUnit*>& stack) {
         return false;
     }
 
+    // cimport 的 .cpya 声明文件不属于模块依赖图，只收集链接参数。
+    {
+        std::string dir = std::filesystem::path(u.path).parent_path().string();
+        for (auto& s : u.ast->body) {
+            if (s->kind != StmtKind::CImport) continue;
+            auto& ci = static_cast<CImport&>(*s);
+            for (auto& a : ci.names) {
+                std::string err;
+                auto decl = load_cpya(a.name, dir, p.include_dirs, err);
+                if (!decl) {
+                    report(u.path, u.source, s->line, s->col, err);
+                    return false;
+                }
+                for (auto& l : decl->links) {
+                    if (std::find(p.link_args.begin(), p.link_args.end(), l) == p.link_args.end())
+                        p.link_args.push_back(l);
+                }
+            }
+        }
+    }
+
     // 合并同名依赖，保留 ImportFrom 的子模块候选名。
     std::map<std::string, ImportReq> merged;
     for (auto& r : reqs) {
@@ -1198,6 +1219,7 @@ bool build_unit(Program& p, ModuleUnit& u, bool emit_object, bool entry_ir) {
     tc->set_module_lookup([&p](const std::string& name) -> pyadamas::ModuleInfoPtr {
         return program_module(p, name);
     });
+    tc->set_cinclude_dirs(p.include_dirs);
     tc->check(*u.ast);
     auto t1 = now();
     if (!tc->diags().empty()) {
@@ -1380,6 +1402,7 @@ bool link_program(Program& p, const std::string& output) {
     std::string cmd = "cc -o " + shell_quote(output);
     for (auto* u : p.order) cmd += " " + shell_quote(u->obj_path);
     cmd += " " + shell_quote(PYADAMAS_RT_OBJ) + " -lm";
+    for (auto& l : p.link_args) cmd += " " + shell_quote(l);
     if (std::system(cmd.c_str()) != 0) {
         std::fprintf(stderr, "error: link failed\n       command: %s\n", cmd.c_str());
         return false;

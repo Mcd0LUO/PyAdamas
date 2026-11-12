@@ -493,6 +493,8 @@ private:
     // ── 调用 ────────────────────────────────────────────────────
     void gen_call(const Inst& in);
 
+    void gen_call_extern(const Inst& in);
+
         void gen_setjmp(const Inst& in);
 
         void gen_call_rt(const Inst& in);

@@ -269,6 +269,10 @@ void closure_gc_release(void* p);
 void* pa_closure_new(int64_t code, int64_t n_caps);
 PyAdamasStr* str_alloc(int64_t len);
 PyAdamasStr* str_new(const char* p, int64_t len);
+/* cimport 外部函数返回 char* 时复制成 PyAdamasStr；NULL 对前者视为空串，
+   对后者返回 NULL（py23 的 None）。 */
+PyAdamasStr* pa_str_from_cstr(const char* p);
+PyAdamasStr* pa_str_from_cstr_opt(const char* p);
 void exc_free(PyAdamasException* e);
 PyAdamasException* exc_new(const char* type, const char* msg);
 PyAdamasException* exc_clone(PyAdamasException* e);

@@ -23,6 +23,7 @@
 #include <vector>
 
 #include "ast.h"
+#include "cimport.h"
 #include "lexer.h"
 #include "parser.h"
 
@@ -178,6 +179,7 @@ struct FuncInfo {
     // 进而产生一堆 "None is not iterable" 的假错误。
     bool ret_known = false;
     bool unchecked = false;   // 内置函数：参数规则在 builtin_call 里按名字分派
+    bool is_extern = false;   // cimport 外部函数：参数/返回值按 C ABI 编组
     // 函数体里有 yield：调用得到生成器对象，return 标注描述的是元素类型
     // 之外的东西。不能只看 ret 是不是 Generator——返回生成器的普通函数
     // （工厂）也会是 Generator，但它们本身不是生成器函数。
@@ -524,6 +526,23 @@ inline TypePtr mk_optional(TypePtr inner) {
     auto t = new_ty(TyKind::Optional);
     t->sub.push_back(std::move(inner));
     return t;
+}
+
+// .cpya 的 C 类型 → py23 类型。指针统一当作 Optional[int]：
+// 0 表示 NULL，运行时不做解引用。
+inline TypePtr ckind_type(CKind k) {
+    switch (k) {
+        case CKind::None: return t_none();
+        case CKind::Float: return t_float();
+        case CKind::Bool: return t_bool();
+        case CKind::Str: return t_str();
+        case CKind::OptStr: return mk_optional(t_str());
+        case CKind::Ptr: return mk_optional(t_int());
+        case CKind::Int:
+        case CKind::Int32:
+        case CKind::UInt32: return t_int();
+    }
+    return t_int();
 }
 inline TypePtr mk_bound(TypePtr recv, std::string method) {
     auto t = new_ty(TyKind::BoundMethod);
@@ -1020,6 +1039,21 @@ public:
     // 多模块编译时由驱动注入：按模块名取已经加载的接口。
     void set_module_lookup(ModuleLookup lookup) { module_lookup_ = std::move(lookup); }
 
+    // cimport 的 .cpya 查找路径（驱动注入）。
+    void set_cinclude_dirs(std::vector<std::string> dirs) {
+        cinclude_dirs_ = std::move(dirs);
+    }
+
+    const CImportDecl* cmodule(const std::string& bind) const {
+        auto it = cmodules_.find(bind);
+        return it == cmodules_.end() ? nullptr : it->second.get();
+    }
+
+    const CExtern* extern_of(const FuncInfo* fn) const {
+        auto it = extern_by_fn_.find(fn);
+        return it == extern_by_fn_.end() ? nullptr : it->second;
+    }
+
     const std::vector<Diag>& diags() const { return diags_; }
 
     // 名字是否是「内置可调用」。降级阶段用它把「能解析但没实现」的内置
@@ -1083,6 +1117,12 @@ public:
 private:
     std::string file_;
     ModuleLookup module_lookup_;
+    std::vector<std::string> cinclude_dirs_;
+    // cimport 绑定名 → 声明；extern_by_fn_ 把类型系统里的 FuncInfo 指回
+    // .cpya 声明，供降级阶段做 C ABI 编组。
+    std::unordered_map<std::string, std::shared_ptr<CImportDecl>> cmodules_;
+    std::unordered_map<const FuncInfo*, const CExtern*> extern_by_fn_;
+    std::unordered_map<const CExtern*, FuncInfoPtr> extern_fns_;
     std::vector<std::unique_ptr<Scope>> pool_;
     Scope* cur_ = nullptr;
     Scope* module_ = nullptr;

@@ -52,6 +52,11 @@ TypePtr TypeChecker::expr(Expr& e) {
                         std::format("module '{}' cannot be used as a value", n.id));
                     return t_unknown();
                 }
+                if (cmodules_.count(n.id)) {
+                    err(n.line, n.col,
+                        std::format("cimport '{}' cannot be used as a value", n.id));
+                    return t_unknown();
+                }
                 // 先看内置值（__name__ / __file__ / Ellipsis ...），再看可调用对象
                 if (auto vt = builtin_value_type(n.id)) return vt;
                 if (is_builtin_callable(n.id)) return builtin_type(n.id);
@@ -234,6 +239,23 @@ TypePtr TypeChecker::expr(Expr& e) {
             }
             case ExprKind::Attribute: {
                 auto& a = static_cast<Attribute&>(e);
+                if (auto* vn = dynamic_cast<Name*>(a.value.get())) {
+                    if (const CImportDecl* cd = cmodule(vn->id)) {
+                        for (auto& c : cd->consts)
+                            if (c.name == a.attr) return ckind_type(c.kind);
+                        for (auto& x : cd->externs) {
+                            if (x.py_name != a.attr) continue;
+                            auto it = extern_fns_.find(&x);
+                            if (it == extern_fns_.end()) break;
+                            auto ft = new_ty(TyKind::Func);
+                            ft->fn = it->second;
+                            return ft;
+                        }
+                        err(a.line, a.col,
+                            std::format("cimport '{}' has no member '{}'", vn->id, a.attr));
+                        return t_unknown();
+                    }
+                }
                 if (auto* vn = dynamic_cast<Name*>(a.value.get())) {
                     if (auto mod = lookup_module_alias(vn->id)) {
                         if (auto ci = mod->classes.find(a.attr); ci != mod->classes.end())

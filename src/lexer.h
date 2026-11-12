@@ -436,6 +436,7 @@ private:
             {"False", Tok::KW_FALSE}, {"None", Tok::KW_NONE}, {"True", Tok::KW_TRUE},
             {"and", Tok::KW_AND}, {"as", Tok::KW_AS}, {"assert", Tok::KW_ASSERT},
             {"async", Tok::KW_ASYNC}, {"await", Tok::KW_AWAIT}, {"break", Tok::KW_BREAK},
+            {"cimport", Tok::KW_CIMPORT},
             {"class", Tok::KW_CLASS}, {"continue", Tok::KW_CONTINUE}, {"def", Tok::KW_DEF},
             {"del", Tok::KW_DEL}, {"elif", Tok::KW_ELIF}, {"else", Tok::KW_ELSE},
             {"except", Tok::KW_EXCEPT}, {"finally", Tok::KW_FINALLY}, {"for", Tok::KW_FOR},

@@ -67,6 +67,7 @@ void AsmGen::gen_inst(const Inst& in) {
             case IrOp::CallDirect: gen_call_direct(in); break;
             case IrOp::Call: gen_call(in); break;
             case IrOp::CallRt: gen_call_rt(in); break;
+            case IrOp::CallExtern: gen_call_extern(in); break;
             case IrOp::Setjmp: gen_setjmp(in); break;
             case IrOp::ImportModule: {
                 const std::string& name = m_->imports[static_cast<size_t>(in.imm)];

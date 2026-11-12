@@ -73,6 +73,7 @@ StmtPtr Parser::parse_decorated() {
     }
 
 std::vector<StmtPtr> Parser::parse_suite() {
+        ++suite_depth_;
         std::vector<StmtPtr> body;
         if (check(Tok::NEWLINE)) {
             advance();
@@ -101,6 +102,7 @@ std::vector<StmtPtr> Parser::parse_suite() {
             match(Tok::NEWLINE);
         }
         if (body.empty()) throw err("expected at least one statement in block");
+        --suite_depth_;
         return body;
     }
 
@@ -108,6 +110,21 @@ StmtPtr Parser::parse_import() {
         int ln = cur().line, cl = cur().col;
         advance();
         auto n = node_at<Import>(ln, cl);
+        do {
+            Alias a;
+            a.name = parse_dotted_name();
+            if (check(Tok::KW_AS)) { advance(); a.asname = expect(Tok::NAME, "alias").text; }
+            n->names.push_back(std::move(a));
+        } while (match(Tok::COMMA));
+        return n;
+    }
+
+StmtPtr Parser::parse_cimport() {
+        int ln = cur().line, cl = cur().col;
+        advance();
+        if (suite_depth_ != 0)
+            throw err_at("'cimport' is only allowed at module top level", ln, cl);
+        auto n = node_at<CImport>(ln, cl);
         do {
             Alias a;
             a.name = parse_dotted_name();

@@ -166,6 +166,13 @@ void Lowerer::assign_to(Expr& target, VReg v, TypePtr vty) {
         case ExprKind::Attribute: {
             auto& at = static_cast<Attribute&>(target);
             if (auto* n = dynamic_cast<Name*>(at.value.get())) {
+                if (tc_.cmodule(n->id)) {
+                    err(target.line, target.col,
+                        std::format("cannot assign to cimport attribute '{}.{}'", n->id, at.attr));
+                    break;
+                }
+            }
+            if (auto* n = dynamic_cast<Name*>(at.value.get())) {
                 if (auto mod = resolve_module_alias(n->id); mod && mod->builtin) {
                     err(target.line, target.col,
                         std::format("cannot assign to builtin module attribute '{}.{}'", n->id,
@@ -347,6 +354,29 @@ VReg Lowerer::expr(Expr& e) {
         }
         case ExprKind::Attribute: {
             auto& a = static_cast<Attribute&>(e);
+            if (auto* n = dynamic_cast<Name*>(a.value.get())) {
+                if (const CImportDecl* cd = tc_.cmodule(n->id)) {
+                    for (auto& k : cd->consts) {
+                        if (k.name != a.attr) continue;
+                        switch (k.kind) {
+                            case CKind::Float: return const_float(k.f);
+                            case CKind::Bool: return const_bool(k.b);
+                            case CKind::Str: return const_str(k.s);
+                            default: return const_int(k.i);
+                        }
+                    }
+                    for (auto& x : cd->externs)
+                        if (x.py_name == a.attr) {
+                            err(e.line, e.col,
+                                std::format("extern function '{}.{}' must be called", n->id,
+                                            a.attr));
+                            return const_none();
+                        }
+                    err(e.line, e.col,
+                        std::format("cimport '{}' has no member '{}'", n->id, a.attr));
+                    return const_none();
+                }
+            }
             if (auto* n = dynamic_cast<Name*>(a.value.get())) {
                 if (auto mod = resolve_module_alias(n->id); mod && mod->builtin) {
                     VReg bv;

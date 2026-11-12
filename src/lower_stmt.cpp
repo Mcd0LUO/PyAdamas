@@ -203,7 +203,10 @@ void Lowerer::stmt(Stmt& s) {
         case StmtKind::With: lower_with(static_cast<With&>(s)); break;
         case StmtKind::ClassDef: lower_classdef(static_cast<ClassDef&>(s)); break;
         case StmtKind::Import: lower_import(static_cast<Import&>(s)); break;
-        case StmtKind::ImportFrom: lower_import_from(static_cast<ImportFrom&>(s)); break;
+        case StmtKind::CImport:
+        // cimport 只在编译期生效，不产生运行时对象。
+        break;
+    case StmtKind::ImportFrom: lower_import_from(static_cast<ImportFrom&>(s)); break;
         case StmtKind::Global: {
             for (auto& n : static_cast<Global&>(s).names) st_->globals_decl.insert(n);
             break;

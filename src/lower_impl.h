@@ -1272,6 +1272,7 @@ private:
     VReg lower_anyall(Call& c, bool is_any);
     VReg lower_print(Call& c);
     VReg lower_method_call(Attribute& at, Call& c);
+    VReg lower_cimport_call(Attribute& at, Call& c);
     VReg lower_super_call(Attribute& at, Call& c);
     // 协议 dunder：__str__/__repr__/__eq__/__ne__/__len__。
     // 静态类型是用户类且 MRO 里有可用实现时构造 VCall（子类覆盖生效），

@@ -1,0 +1,26 @@
+# C 互操作 v1：cimport + .cpya 声明文件
+cmodule clib
+link m
+link m
+
+const PI: float = 3.141592653589793
+const ANSWER: int = 42
+const SMALL: int32 = 7
+const CODE: uint32 = 8
+const NAME: str = "pyadamas"
+const FLAG: bool = True
+const OFF: bool = False
+
+extern def "sqrt" as sqrt(x: float) -> float
+extern def "pow" as pow(x: float, y: float) -> float
+extern def "strlen" as strlen(s: str) -> int
+extern def "labs" as labs(x: int) -> int
+extern def "abs" as abs32(x: int32) -> int32
+extern def "isalpha" as is_alpha(c: int32) -> bool
+extern def "malloc" as malloc(n: int) -> ptr
+extern def "free" as free(p: ptr) -> None
+extern def "free" as free_opt(p: Optional[str]) -> None
+extern def "memset" as memset(p: ptr[int], v: int32, n: int) -> ptr[int]
+extern def "getenv" as getenv(name: str) -> Optional[str]
+# 8 个 int 参数：验证超过 6 个时走栈。
+extern def "syscall" as syscall(n: int, a1: int, a2: int, a3: int, a4: int, a5: int, a6: int, a7: int) -> int
