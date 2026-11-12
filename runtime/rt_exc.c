@@ -5,11 +5,28 @@
 
 /* 展开机制：try/with/finally 在运行时压一条 handler 记录，raise 设置
    全局异常后 longjmp 到最内层 setjmp 点。记录本身用 malloc，不参与
-   RC/GC；跳过的普通函数帧里的局部引用由保守 GC 回收。 */
+   RC/GC；被跳过的普通函数帧由 py23_frame_unwind 按帧记录释放局部引用。 */
 Py23Handler* handler_top;
+Py23Frame* py23_frame_top;
 Py23Exception* pending_exc;
 Py23Exception* current_exc;
 Py23ExcSave* exc_save_top;
+
+/* 只释放 target 之上（更内层）的帧：target 所在函数还要继续执行，
+   它的槽由自己正常退出时释放。先清空槽再 dec，析构里如果重入到用户
+   代码也不会二次释放同一份引用。 */
+void py23_frame_unwind(Py23Frame* target) {
+    for (Py23Frame* f = py23_frame_top; f && f != target; f = f->prev) {
+        for (int64_t i = 0; i < f->n; ++i) {
+            void** p = (void**)f->slots[i];
+            void* v = *p;
+            if (!v) continue;
+            *p = NULL;
+            py23_rc_dec(v);
+        }
+    }
+    py23_frame_top = target;
+}
 
 void exc_free(Py23Exception* e) {
     if (!e) return;
@@ -175,6 +192,8 @@ _Noreturn void exc_longjmp(void) {
         exc_print_uncaught(pending_exc);
         exit(1);
     }
+    /* 跳过的帧不会再执行自己的出口清理：按记录把里面的堆引用释放掉。 */
+    py23_frame_unwind(handler_top->frame);
     longjmp(handler_top->env, 1);
 }
 
@@ -183,6 +202,7 @@ void* py23_handler_push(void) {
     if (!h) panic_c("out of memory");
     h->prev = handler_top;
     h->mark = py23_rc_mark();
+    h->frame = py23_frame_top;
     handler_top = h;
     return h;
 }
@@ -218,6 +238,7 @@ void py23_handler_rearm(void* p) {
     Py23Handler* h = (Py23Handler*)p;
     h->prev = handler_top;
     h->mark = py23_rc_mark();
+    h->frame = py23_frame_top;
     handler_top = h;
 }
 

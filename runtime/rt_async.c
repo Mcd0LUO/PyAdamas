@@ -718,6 +718,7 @@ void coro_step(void* c) {
     Py23Handler h;
     h.prev = handler_top;
     h.mark = py23_rc_mark();
+    h.frame = py23_frame_top;
     handler_top = &h;
     void* prev_active = loop_active_coro;
     loop_active_coro = c;

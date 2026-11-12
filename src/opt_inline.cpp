@@ -151,11 +151,17 @@ void inline_at(IRFunction& fn, size_t bi, size_t ii, const IRFunction& callee,
         if (facts.subst[static_cast<size_t>(s)] >= 0) continue;
         slot_map[static_cast<size_t>(s)] = static_cast<int>(fn.slot_ty.size());
         fn.slot_ty.push_back(callee.slot_ty[static_cast<size_t>(s)]);
+        // 所有权跟着槽一起搬：调用方帧记录要按这个清单释放内联体的槽。
+        bool owned = static_cast<size_t>(s) < callee.slot_owned.size() &&
+                     callee.slot_owned[static_cast<size_t>(s)];
+        fn.slot_owned.push_back(owned);
     }
     int ret_slot = -1;
     if (!direct_ret && call.dst != kNoReg) {
         ret_slot = static_cast<int>(fn.slot_ty.size());
         fn.slot_ty.push_back(call.ty ? call.ty : t_unknown());
+        // 返回值只是中转一下，引用归调用点结果，槽本身不持有。
+        fn.slot_owned.push_back(false);
     }
 
     std::vector<VReg> vmap(callee.vreg_ty.size());
@@ -207,9 +213,31 @@ void inline_at(IRFunction& fn, size_t bi, size_t ii, const IRFunction& callee,
         if (facts.subst[static_cast<size_t>(s)] >= 0) continue;
         if (!facts.need_zero[static_cast<size_t>(s)] || slot_map[static_cast<size_t>(s)] < 0)
             continue;
+        int dst_slot = slot_map[static_cast<size_t>(s)];
+        TypePtr sty = fn.slot_ty[static_cast<size_t>(dst_slot)];
+        bool owned = static_cast<size_t>(s) < callee.slot_owned.size() &&
+                     callee.slot_owned[static_cast<size_t>(s)];
+        if (ir_is_heap(sty) && owned) {
+            // 槽里可能还留着上一次执行内联体的值（调用点在循环里时很常见），
+            // 直接清零会把那份引用丢掉。先按槽类型释放再清零；槽在函数序言
+            // 已清零，第一次执行 dec(0) 是空操作。借用槽只清零不释放。
+            VReg old = static_cast<VReg>(fn.vreg_ty.size());
+            fn.vreg_ty.push_back(sty);
+            Inst ld;
+            ld.op = IrOp::LoadSlot;
+            ld.idx = dst_slot;
+            ld.dst = old;
+            ld.ty = sty;
+            entry_insts.push_back(std::move(ld));
+            Inst dc;
+            dc.op = IrOp::CallRt;
+            dc.imm = static_cast<int64_t>(RtFn::RcDec);
+            dc.args = {old};
+            entry_insts.push_back(std::move(dc));
+        }
         Inst st;
         st.op = IrOp::StoreSlot;
-        st.idx = slot_map[static_cast<size_t>(s)];
+        st.idx = dst_slot;
         st.a = zero;
         entry_insts.push_back(std::move(st));
     }
@@ -219,6 +247,26 @@ void inline_at(IRFunction& fn, size_t bi, size_t ii, const IRFunction& callee,
         if (facts.subst[static_cast<size_t>(param.slot)] >= 0) continue;
         int dst_slot = slot_map[static_cast<size_t>(param.slot)];
         if (dst_slot < 0) continue;
+        TypePtr pty = fn.slot_ty[static_cast<size_t>(dst_slot)];
+        bool owned = static_cast<size_t>(param.slot) < callee.slot_owned.size() &&
+                     callee.slot_owned[static_cast<size_t>(param.slot)];
+        if (ir_is_heap(pty) && owned) {
+            // 上一次执行内联体时形参槽里的引用可能还在：调用方自己的
+            // handler 捕获异常时不会走帧展开，覆盖前必须先释放。
+            VReg old = static_cast<VReg>(fn.vreg_ty.size());
+            fn.vreg_ty.push_back(pty);
+            Inst ld;
+            ld.op = IrOp::LoadSlot;
+            ld.idx = dst_slot;
+            ld.dst = old;
+            ld.ty = pty;
+            entry_insts.push_back(std::move(ld));
+            Inst dc;
+            dc.op = IrOp::CallRt;
+            dc.imm = static_cast<int64_t>(RtFn::RcDec);
+            dc.args = {old};
+            entry_insts.push_back(std::move(dc));
+        }
         Inst st;
         st.op = IrOp::StoreSlot;
         st.idx = dst_slot;

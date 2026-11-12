@@ -27,6 +27,9 @@ namespace py23 {
 using VReg = uint32_t;
 inline constexpr VReg kNoReg = 0xFFFFFFFFu;
 
+// 定义在文件末尾（依赖 TyKind 的完整列表）。
+inline bool ir_is_heap(const TypePtr& t);
+
 // 二元运算。与 Tok 分开：Tok 是词法记号，可能包含用不到的组合；
 // IR 只保留真正有语义的算子，后端 switch 才不用写 default 兜底。
 enum class BinKind : uint8_t {
@@ -1104,6 +1107,9 @@ struct IRFunction {
     // 局部槽位（含形参），下标即槽号。参数槽排在最前面，后端按这个
     // 顺序把寄存器 / 栈上的实参搬进来。
     std::vector<TypePtr> slot_ty;
+    // 槽是否持有堆引用（出口要 release、异常展开要按帧记录释放）。
+    // 借用槽（只读形参、迭代临时槽、闭包环境槽）为 false。
+    std::vector<bool> slot_owned;
     // 每个虚拟寄存器的类型，后端决定用 rax 还是 xmm 时查它
     std::vector<TypePtr> vreg_ty;
     std::vector<Block> blocks;
@@ -1119,6 +1125,7 @@ struct IRFunction {
     bool is_generator = false;
 
     int new_slot(TypePtr ty) {
+        slot_owned.push_back(ir_is_heap(ty));
         slot_ty.push_back(std::move(ty));
         return static_cast<int>(slot_ty.size()) - 1;
     }

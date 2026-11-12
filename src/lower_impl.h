@@ -367,6 +367,7 @@ private:
     int new_borrow_slot(TypePtr ty) {
         int s = new_temp_slot(std::move(ty));
         st_->borrow_slots.insert(s);
+        st_->fn->slot_owned[static_cast<size_t>(s)] = false;
         return s;
     }
 
@@ -568,9 +569,12 @@ private:
         TypePtr dst = st_->fn->slot_ty[slot];
         TypePtr src = vreg_ty(v);
         // 未知槽位第一次收到已知类型的值时补上类型；后续 load.slot
-        // 才能按 float/int 正确选指令。
-        if (dst && dst->kind == TyKind::Unknown && src && src->kind != TyKind::Unknown)
+        // 才能按 float/int 正确选指令。retain_for_store 从这一刻起
+        // 按堆槽的规则 retain/dec，槽也进入帧记录的释放清单。
+        if (dst && dst->kind == TyKind::Unknown && src && src->kind != TyKind::Unknown) {
             st_->fn->slot_ty[slot] = dst = src;
+            st_->fn->slot_owned[static_cast<size_t>(slot)] = ir_is_heap(src);
+        }
         retain_for_store(dst, v);
         if (ir_is_heap(dst)) {
             VReg old = load_slot(slot, dst);
@@ -611,12 +615,17 @@ private:
 
     // 函数出口释放所有堆槽：形参在入口 retain 过，局部变量在写入时 retain
     // 过。返回值必须先 rc_inc，再走到这里，否则槽一释放就成悬空指针。
+    // 释放后把槽清零：内联会把槽留在调用方帧里跨多次执行复用，残留的
+    // 悬空指针会让下一次赋值的「load 旧值 + dec」二次释放。
     void release_slots() {
+        VReg zero = kNoReg;
         for (size_t s = 0; s < st_->fn->slot_ty.size(); ++s) {
             if (st_->borrow_slots.count(static_cast<int>(s))) continue;
             TypePtr ty = st_->fn->slot_ty[s];
             if (!ir_is_heap(ty)) continue;
             rc_dec(load_slot(static_cast<int>(s), ty));
+            if (zero == kNoReg) zero = const_int(0);
+            store_slot_raw(static_cast<int>(s), zero);
         }
     }
 
@@ -637,11 +646,22 @@ private:
         auto touch = [&](VReg v) {
             if (v != kNoReg) uses[v]++;
         };
+        // release_slots 在出口会先 dec 再写 0；这些清零不算「函数体写过
+        // 形参」，否则只读形参永远判定不出来。
+        std::unordered_set<VReg> zero_regs;
+        for (auto& b : fn->blocks)
+            for (auto& in : b.insts)
+                if (in.op == IrOp::ConstInt && in.imm == 0 && in.dst != kNoReg)
+                    zero_regs.insert(in.dst);
         for (auto& b : fn->blocks)
             for (auto& in : b.insts) {
                 if ((in.op == IrOp::StoreSlot || in.op == IrOp::SlotAddr) && in.idx >= 0 &&
-                    in.idx < static_cast<int>(ns))
-                    written[static_cast<size_t>(in.idx)] = true;
+                    in.idx < static_cast<int>(ns)) {
+                    bool exit_zero = in.op == IrOp::StoreSlot &&
+                                     ir_is_heap(fn->slot_ty[static_cast<size_t>(in.idx)]) &&
+                                     zero_regs.contains(in.a);
+                    if (!exit_zero) written[static_cast<size_t>(in.idx)] = true;
+                }
                 touch(in.a);
                 touch(in.b);
                 touch(in.c);
@@ -653,6 +673,8 @@ private:
             if (ir_is_heap(p.ty) && p.slot >= 0 && p.slot < static_cast<int>(ns) &&
                 !written[static_cast<size_t>(p.slot)]) {
                 read_only[static_cast<size_t>(p.slot)] = true;
+                // 入口 retain 会被删掉，槽此后只是借用：异常展开不能释放。
+                fn->slot_owned[static_cast<size_t>(p.slot)] = false;
                 any = true;
             }
         if (!any) return;
@@ -696,6 +718,16 @@ private:
                 dels.push_back({static_cast<int>(b), i + 1});
                 if (ins[i].dst != kNoReg && uses[ins[i].dst] == 1)
                     dels.push_back({static_cast<int>(b), i});
+                // release_slots 紧接着的「槽清零」也一并删掉：槽改成了
+                // 借用，内联重映射后这个槽没有落点（slot_map = -1）。
+                // 清零用的常量 vreg 是多个槽共用的，只删 store 本身。
+                for (size_t k = i + 2; k < ins.size() && k <= i + 3; ++k) {
+                    if (ins[k].op == IrOp::StoreSlot && ins[k].idx == ins[i].idx) {
+                        dels.push_back({static_cast<int>(b), k});
+                        break;
+                    }
+                    if (ins[k].op != IrOp::ConstInt) break;
+                }
                 ++i;
             }
         }

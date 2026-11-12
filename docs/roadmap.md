@@ -33,15 +33,16 @@
 | 0.102 | 单遍 `string.capwords` intrinsic、<=7 字节短串 SSO |
 | 0.103 | 单字符/True/False/None 静态驻留、`memchr` 搜索、长键哈希缓存、不可变串共享 |
 | 0.104 | 字典/集合删除改墓碑 + 插入顺序双向链表，单次删除摊还 O(1) |
+| 0.105 | 异常 longjmp 路径回收被跳过帧的局部引用（函数帧记录 + 展开释放） |
 | 许可证 | Apache-2.0（见 [LICENSE](../LICENSE) / [NOTICE](../NOTICE)） |
 
-## 当前状态（0.104）
+## 当前状态（0.105）
 
 流水线 `源码 → 词法 → AST → lambda 脱糖 → 类型检查 → IR → x86-64 汇编 → 可执行文件` 已打通。
 
 - **语言面**：标量、字符串、`bytes`（含迭代与 `%` 格式化）、列表/元组/字典/集合、切片读写、闭包/lambda/`*args`/`**kwargs`/装饰器、推导式、`with`、异常值（`args`/`raise ... from`/自定义异常）、类（字段/方法/C3 多继承/零参 `super()`/`@staticmethod`/`@classmethod`/`@property`/类属性）、`match/case`、`del`、复数字面量、f-string 格式说明、dunder 协议、`open`/`input`/`sys.stdin`。
 - **标准库**：`math`/`sys`/`asyncio`/`random`/`os`/`os.path`/`subprocess`/`time`/`itertools`/`collections`/`functools`/`json`/`string`/`re`/`datetime`/`pathlib`/`csv`。
-- **验证**：91 个运行用例、37 个反例、9 个模块目录；差分 runner 已自举，默认 810 例。
+- **验证**：92 个运行用例、37 个反例、9 个模块目录；差分 runner 已自举，默认 810 例。
 - **主要缺口**：C FFI/BLAS；跨模块生成器/协程；asyncio 边角。
 
 ## 下一步

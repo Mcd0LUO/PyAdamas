@@ -80,6 +80,10 @@ std::vector<bool> AsmGen::slots_needing_zero() const {
             }
         }
     }
+    // 堆槽一律从 0 起步：赋值前会先 load 旧值再 dec，内联入口也可能直接清零，
+    // 这两处都要求槽初值是可安全 dec 的空指针。
+    for (int i = 0; i < n_slots_; ++i)
+        if (ir_is_heap(f_->slot_ty[static_cast<size_t>(i)])) need[static_cast<size_t>(i)] = true;
     return need;
 }
 
@@ -88,6 +92,8 @@ void AsmGen::emit_function(const IRFunction& f, int fi) {
         fi_ = fi;
         gen_ = f.is_generator;
         n_slots_ = static_cast<int>(f.slot_ty.size());
+        frame_rec_ = false;
+        frame_owned_.clear();
         auto t_alloc = std::chrono::steady_clock::now();
         assign_vreg_slots();
         if (gen_) {
@@ -95,7 +101,16 @@ void AsmGen::emit_function(const IRFunction& f, int fi) {
             n_saved_regs_ = 1;  // %r15 帧指针
         } else {
             assign_slot_regs();
+            // 持有引用的槽要按栈槽地址登记，异常 longjmp 跳过本帧时逐个
+            // dec。生成器/协程的槽在堆帧里，由帧销毁负责，不走这条路径。
+            const size_t n_owned =
+                std::min(f.slot_owned.size(), f.slot_ty.size());
+            for (size_t s = 0; s < n_owned; ++s)
+                if (f.slot_owned[s] && ir_is_heap(f.slot_ty[s]))
+                    frame_owned_.push_back(static_cast<int>(s));
         }
+        const int rec_words =
+            frame_owned_.empty() ? 0 : 2 + static_cast<int>(frame_owned_.size());
         assign_global_vreg_regs();
         assign_block_temp_regs();
         build_fp_liveness();
@@ -118,7 +133,7 @@ void AsmGen::emit_function(const IRFunction& f, int fi) {
         } else {
             for (int i = 0; i < n_saved_regs_; ++i) line(std::format("pushq {}", kSlotRegs[i]));
         }
-        frame_size(n_slots_ + n_vreg_slots_);
+        frame_size(n_slots_ + n_vreg_slots_ + rec_words);
 
         if (!gen_) {
             // 非参数变量清零。`x: int` 这种纯声明在 lower 里不生成任何指令，
@@ -162,6 +177,21 @@ void AsmGen::emit_function(const IRFunction& f, int fi) {
 
             // 有捕获的函数从 %r10 拿闭包环境；调用方在 call 前设置。
             if (f.env_slot >= 0) emit2("movq", "%r10", slot_op(f.env_slot));
+
+            // 压帧记录。槽地址在 %rbp 上是固定的，异常展开时按地址读
+            // 最新值即可；正常返回由 emit_epilogue 弹栈。
+            if (rec_words > 0) {
+                frame_rec_ = true;
+                line("movq py23_frame_top(%rip), %rax");
+                emit2("movq", "%rax", rec_mem(0));
+                emit_imm_op("movq", static_cast<int64_t>(frame_owned_.size()), rec_mem(1));
+                for (size_t i = 0; i < frame_owned_.size(); ++i) {
+                    line(std::format("leaq {}, %rax", smem(frame_owned_[i])));
+                    emit2("movq", "%rax", rec_mem(2 + static_cast<int>(i)));
+                }
+                line(std::format("leaq {}, %rax", rec_mem(0)));
+                line("movq %rax, py23_frame_top(%rip)");
+            }
         }
 
         // 被导入模块的 init：先把自己的全局根表交给 GC，再跑顶层代码。

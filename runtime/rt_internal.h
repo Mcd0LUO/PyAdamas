@@ -109,10 +109,23 @@ _Static_assert(sizeof(Py23Rc) == 64, "codegen literal headers must match Py23Rc 
 
 #define PY23_GC_THRESHOLD (2 * 1024 * 1024)
 
+/* 普通函数帧记录：codegen 在函数序言压栈、正常返回前弹栈。每个条目是
+   帧里一个「持有引用」的堆槽地址，longjmp 跳过这些帧时按地址读值并
+   dec，避免异常路径漏掉局部变量的引用。记录本身在目标帧的栈上，布局
+   与生成代码一致：prev、n、槽地址×n。 */
+typedef struct Py23Frame {
+    struct Py23Frame* prev;
+    int64_t n;
+    void* slots[];  /* 槽地址（void**），解引用得到当前值 */
+} Py23Frame;
+
 typedef struct Py23Handler {
     jmp_buf env;  /* 必须放在开头：指针同时作为 setjmp 的参数 */
     struct Py23Handler* prev;
     int64_t mark;
+    /* 压 handler 时的帧栈顶：异常展开到这一层就停，当前帧的槽
+       留给函数自己正常退出时释放。 */
+    struct Py23Frame* frame;
 } Py23Handler;
 
 typedef struct Py23Exception {
@@ -206,6 +219,9 @@ extern void** temp_stack;
 extern int64_t temp_len;
 extern int64_t temp_cap;
 extern Py23Handler* handler_top;
+extern Py23Frame* py23_frame_top;
+/* 异常 longjmp 前调用：释放 target 之上（更内层）所有帧里的堆槽引用。 */
+void py23_frame_unwind(Py23Frame* target);
 extern Py23Exception* pending_exc;
 extern Py23Exception* current_exc;
 extern Py23ExcSave* exc_save_top;

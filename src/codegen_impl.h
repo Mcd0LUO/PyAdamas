@@ -245,6 +245,20 @@ private:
         return -8 * (n_saved_regs_ + n_slots_ + s + 1);
     }
 
+    // 帧记录（Py23Frame）在局部区最下面，内存里从低地址往高地址依次是
+    // prev、n、槽地址×n，与两边共用的结构体布局一致。栈向下增长，所以
+    // 下标 0 对应最负的偏移。
+    int rec_off(int i) const {
+        int words = 2 + static_cast<int>(frame_owned_.size());
+        return -8 * (n_saved_regs_ + n_slots_ + n_vreg_slots_ + words - i);
+    }
+    std::string rec_mem(int i) const { return std::format("{}(%rbp)", rec_off(i)); }
+
+    // 本次代码生成是否压了帧记录（弹栈只在这个函数里发）。
+    bool frame_rec_ = false;
+    // 帧记录里的槽：持有堆引用的非借用槽，异常展开时按地址 dec。
+    std::vector<int> frame_owned_;
+
     const std::string& mem(VReg r) const {
         if (r < static_cast<VReg>(vreg_reg_.size()) && !vreg_reg_[r].empty())
             return vreg_reg_[r];

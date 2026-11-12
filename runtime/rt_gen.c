@@ -61,6 +61,7 @@ int64_t gen_run(void* g, int64_t sent, int* done) {
     Py23Handler h;
     h.prev = handler_top;
     h.mark = py23_rc_mark();
+    h.frame = py23_frame_top;
     handler_top = &h;
     if (setjmp(h.env) != 0) {
         handler_top = h.prev;
@@ -139,6 +140,7 @@ void py23_gen_finalize(void* g) {
     Py23Handler h;
     h.prev = handler_top;
     h.mark = py23_rc_mark();
+    h.frame = py23_frame_top;
     handler_top = &h;
     if (setjmp(h.env) == 0) {
         p[5] = 1;

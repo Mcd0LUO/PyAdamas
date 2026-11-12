@@ -276,17 +276,23 @@ longjmp 回同步调用点。GC 清扫和进程退出不跑析构器，但会单
 
 异常不参与 RC/GC：handler 记录和异常对象都是 `malloc` 的普通内存。
 
-- **handler 记录**：`{jmp_buf env; Py23Handler* prev; int64_t mark}`，
+- **handler 记录**：`{jmp_buf env; Py23Handler* prev; int64_t mark; Py23Frame* frame}`，
   `env` 必须在开头，生成代码把记录指针直接交给 `setjmp`。全局
-  `handler_top` 维护 LIFO 链；`mark` 是压入时刻的临时值栈水位。
+  `handler_top` 维护 LIFO 链；`mark` 是压入时刻的临时值栈水位，
+  `frame` 是压入时刻的帧栈顶。
+- **帧记录**：普通函数在序言压一条 `Py23Frame {prev; n; void* slots[]}`
+  （槽地址数组），正常返回前弹栈，全局 `py23_frame_top` 串成链。
+  `raise` 的 `exc_longjmp` 先调 `py23_frame_unwind(handler_top->frame)`
+  沿链释放被跳过帧里持有引用的堆槽（先清空再 `rc_dec`，可重入），
+  再 `longjmp`。生成器/协程的槽在堆帧里，由帧销毁负责，不压记录。
 - **异常对象**：`{char* type; char* message}`，只保存内置异常名和消息。
   `pending_exc` 是待处理异常，`current_exc` 是当前 `except` 体正在处理
   的异常；`py23_exc_accept` / `py23_exc_done` 维护这层上下文。
 - **匹配**：`py23_exc_matches` 按内置异常继承表（KeyError → LookupError
   → Exception 等）判断；未知名字默认按 Exception 子类处理。
 - **展开**：landing pad 先 `py23_handler_leave` 弹出记录并
-  `py23_rc_cleanup(mark)`，再分派。异常路径不执行被跳过函数帧的
-  `release_slots`，那些局部引用由保守 GC 回收。
+  `py23_rc_cleanup(mark)`，再分派。被跳过函数帧的局部引用已在
+  `py23_frame_unwind` 里释放，不再依赖保守 GC 兜底。
 - **未捕获**：打印 `py23: uncaught <type>: <message>` 后 `exit(1)`。
 
 ## 函数表
@@ -363,9 +369,10 @@ longjmp 回同步调用点。GC 清扫和进程退出不跑析构器，但会单
 
 | 函数 | 签名 | 语义 |
 |---|---|---|
-| `py23_handler_push` | `() -> handler*` | 压入 handler 记录，保存临时栈水位 |
+| `py23_handler_push` | `() -> handler*` | 压入 handler 记录，保存临时栈水位与帧栈顶 |
 | `py23_handler_leave` | `(handler*) -> void` | 弹出记录并 `rc_cleanup` 到水位 |
 | `py23_handler_discard` | `(handler*) -> void` | 只弹出记录，不清临时值（提前退出用） |
+| `py23_frame_unwind` | `(Py23Frame* target) -> void` | 释放 target 之上所有帧记录的堆槽引用 |
 | `py23_exc_matches` | `(str* type) -> i64` | 当前异常是否属于该类型（含继承） |
 | `py23_exc_accept` | `() -> str*` | pending 转 current，返回消息新字符串 |
 | `py23_exc_accept_value` | `() -> excval*` | pending 转 current，返回异常值（`except as e`） |
@@ -485,7 +492,7 @@ longjmp 回同步调用点。GC 清扫和进程退出不跑析构器，但会单
 | `py23_gen_close` | `(void*) -> void` | 跑挂起点清理；异常向外传 |
 | `py23_gen_finalize` | `(void*) -> void` | 引用计数归零时清理；异常吞掉 |
 | `py23_handler_suspend` | `(void*) -> void` | yield/await：把 handler 记录从全局栈摘下 |
-| `py23_handler_rearm` | `(void*) -> void` | 恢复：重压记录并更新临时值水位 |
+| `py23_handler_rearm` | `(void*) -> void` | 恢复：重压记录并更新临时值水位与帧栈顶 |
 | `py23_handler_free` | `(void*) -> void` | close：释放挂起的记录 |
 | `py23_coro_rethrow` | `(void*) -> void` | 在 resume 帧里抛出注入异常（noreturn） |
 | `py23_asyncio_run` | `(void* coro) -> i64` | 跑事件循环到根协程结束，返回结果或抛异常 |

@@ -19,6 +19,11 @@ void AsmGen::frame_size(int total_slots) {
 // 尾声：先把 rsp 退回 push 的寄存器下面，逐个弹回，再弹 rbp。
     // 不能用 `movq %rbp, %rsp`——那会把 callee-saved 的槽一起丢掉。
 void AsmGen::emit_epilogue() {
+        // 先弹帧记录再退栈：记录本身在 %rbp 下面，%rcx 此时是自由的。
+        if (frame_rec_) {
+            line("movq " + rec_mem(0) + ", %rcx");
+            line("movq %rcx, py23_frame_top(%rip)");
+        }
         if (n_saved_regs_ > 0) line(std::format("leaq {}(%rbp), %rsp", -8 * n_saved_regs_));
         else line("movq %rbp, %rsp");
         for (int i = n_saved_regs_ - 1; i >= 0; --i)
@@ -272,6 +277,9 @@ void AsmGen::assign_slot_regs() {
         std::vector<std::pair<int, int>> hot_int, hot_fp;
         for (int i = 0; i < ns; ++i) {
             if (score[i] <= 0) continue;
+            // 持有引用的堆槽必须留在内存：帧记录存的是栈槽地址，异常
+            // 展开时直接从地址读值；提升到寄存器会让栈槽里留下旧值。
+            if (ir_is_heap(f_->slot_ty[static_cast<size_t>(i)])) continue;
             if (ir_is_float(f_->slot_ty[i])) {
                 if (opt_ >= 1) hot_fp.push_back({score[i], i});
             } else if (!float_valued[i]) {
