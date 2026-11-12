@@ -757,6 +757,8 @@ py23::ModuleInfoPtr builtin_module(const std::string& name) {
             f->ret_known = true;
             func_with("Counter", f);
         }
+        // OrderedDict：py23 的 dict 保序，直接当空 dict 用。
+        func("OrderedDict", {}, py23::mk_dict(py23::t_str(), py23::t_unknown()));
     } else if (name == "datetime") {
         auto dt = py23::new_ty(py23::TyKind::DateTime);
         // date(y, m, d) / today()

@@ -637,6 +637,17 @@ VReg Lowerer::lower_collections(const std::string& member, Call& c) {
         push_temp(v);
         return v;
     }
+    if (member == "OrderedDict") {
+        // py23 的 dict 本来就按插入序保存，OrderedDict 直接当空 dict 用。
+        if (!c.args.empty()) {
+            err(c.line, c.col, "collections.OrderedDict() takes no arguments in py23");
+            return const_none();
+        }
+        DictExpr empty;
+        empty.line = c.line;
+        empty.col = c.col;
+        return lower_dict(empty, mk_dict(t_str(), t_unknown()));
+    }
     err(c.line, c.col, std::format("collections.{} is not supported", member));
     return const_none();
 }

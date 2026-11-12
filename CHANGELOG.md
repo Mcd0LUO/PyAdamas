@@ -4,6 +4,28 @@
 
 早期阶段没有逐条留痕，按阶段归纳；0.4 之后逐条记录。
 
+## [0.93] - 2026-11-12
+
+`collections.OrderedDict`。
+
+### 新增
+
+- **`collections.OrderedDict()`**：py23 的 dict 本来就按插入序保存，这里直接当
+  空 dict 用——`len` / 下标读写 / `keys` / `items` 等全套 dict 操作都能用。
+  不支持带初始值的构造。
+
+### 尚未支持
+
+- `defaultdict`：要在 `Py23Dict` 上加 factory 字段，并在下标读取的缺省路径里
+  调用它，改动面比表面大。
+- `deque`：需要新的值类型和环形缓冲。
+- `namedtuple`：要在运行期构造类，py23 的类是编译期展开的。
+
+### 测试
+
+- `tests/run/83_collections_extra.py`：OrderedDict 的读写与长度、Counter 计数。
+- 用例数：运行 82→83。
+
 ## [0.92] - 2026-11-12
 
 `json.dumps` 支持 `indent=` / `sort_keys=`。

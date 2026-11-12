@@ -43,7 +43,7 @@ py23 不追求兼容 CPython：语义是按静态类型的需要重新定的。�
 | `time` | `time`/`monotonic`/`perf_counter`/`sleep`，秒为单位 | 完整 time | 没有 `localtime`/`gmtime`/`strftime`/`mktime` |
 | `string` | 常量 + `capwords()`，随编译器分发 `stdlib/string.py` | 完整 string | 子集；`capwords` 用 `split()` + `capitalize()` |
 | `itertools` | `chain`/`repeat`/`islice`，按实参静态特化，返回 list | 完整 itertools | 立即求值，没有惰性迭代器；`islice` 只接受 `(x, stop)` |
-| `collections` | `Counter`/`most_common` | 完整 collections | 没有 `defaultdict`/`deque`/`OrderedDict`；`Counter` 返回普通 dict |
+| `collections` | `Counter`/`most_common`、`OrderedDict()`（dict 本来就保序） | 完整 collections | 没有 `defaultdict`/`deque`/`namedtuple`；`Counter` 返回普通 dict；`OrderedDict` 只支持空构造 |
 | `functools` | `reduce`/`wraps` | 完整 functools | `partial`/`lru_cache` 需要运行期构造闭包，未支持；`wraps` 只作装饰器用（不建模 `__name__`/`__doc__`，装饰器链里整层跳过）；`reduce` 的 float 元素要求 f 形参是 float |
 | `datetime` | `date`/`datetime` 构造、`now`/`today`、字段、`isoformat`/`strftime`/`weekday` | 完整 datetime | 没有 `timedelta`、时区、`fromtimestamp`；`datetime.datetime.now()` 这种链式类方法不支持，用 `datetime.now()` |
 | `pathlib` | `Path` 构造、`name`/`stem`/`suffix`/`parent`、`exists`/`is_file`/`is_dir`、`read_text`/`write_text` | 完整 pathlib | 没有 `/` 运算符、`iterdir`/`glob`/`mkdir`；`str(Path)` 未接（`print(p)` 可以） |
