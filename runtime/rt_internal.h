@@ -702,7 +702,7 @@ Py23Dict* py23_collections_counter(Py23List* src, int64_t key_kind, int64_t key_
 Py23List* py23_collections_most_common(Py23Dict* d, int64_t n);
 
 /* ── json：静态类型描述符 ───────────────────────────────────────── */
-Py23Str* py23_json_dumps(int64_t value, Py23Str* desc);
+Py23Str* py23_json_dumps(int64_t value, Py23Str* desc, int64_t indent, int64_t sort_keys);
 int64_t py23_json_loads(Py23Str* text, Py23Str* desc);
 
 /* ── re：回溯 VM 与 Pattern/Match ──────────────────────────────── */

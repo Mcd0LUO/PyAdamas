@@ -810,9 +810,16 @@ std::optional<TypePtr> TypeChecker::functools_call(const std::string& member, Ca
 
 std::optional<TypePtr> TypeChecker::json_call(const std::string& member, Call& c) {
         if (member != "dumps" && member != "loads") return std::nullopt;
-        if (!c.keywords.empty()) {
-            err(c.line, c.col, std::format("json.{}() does not take keyword arguments", member));
-            for (auto& kw : c.keywords) expr(*kw.value);
+        // dumps 收 indent= / sort_keys= 两个关键字，其它不收。
+        for (auto& kw : c.keywords) {
+            if (member == "dumps" && (kw.arg == "indent" || kw.arg == "sort_keys")) {
+                expr(*kw.value);
+                continue;
+            }
+            err(c.line, c.col,
+                std::format("json.{}() does not take keyword arguments", member));
+            for (auto& k2 : c.keywords) expr(*k2.value);
+            break;
         }
         std::vector<TypePtr> a;
         for (auto& arg : c.args) a.push_back(expr(*arg));

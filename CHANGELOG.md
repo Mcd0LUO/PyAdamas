@@ -4,6 +4,24 @@
 
 早期阶段没有逐条留痕，按阶段归纳；0.4 之后逐条记录。
 
+## [0.92] - 2026-11-12
+
+`json.dumps` 支持 `indent=` / `sort_keys=`。
+
+### 新增
+
+- **`json.dumps(obj, indent=n, sort_keys=True)`**：`indent` 控制缩进（缺省或 0 是
+  紧凑输出），`sort_keys` 按 key 字符串排序。嵌套容器逐层缩进，输出与 CPython
+  的 `json.dumps` 逐行一致。
+- 序列化仍然按静态类型描述符机械遍历，所以 dict 的 value 类型必须一致——
+  `{"a": [1], "b": {"x": 1}}` 这种混合 value 推不出静态类型，会报
+  "json needs a statically known type"。
+
+### 测试
+
+- `tests/run/82_json_dump_opts.py`：紧凑 / indent / sort_keys / 嵌套。
+- 用例数：运行 81→82。
+
 ## [0.91] - 2026-11-12
 
 `os` / `os.path` 补齐常用项。

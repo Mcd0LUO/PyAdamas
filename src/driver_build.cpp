@@ -830,6 +830,17 @@ py23::ModuleInfoPtr builtin_module(const std::string& name) {
             p.name = "obj";
             p.ty = py23::t_unknown();
             f->pos.push_back(std::move(p));
+            // indent / sort_keys 可选；实际取值在降级阶段按关键字读。
+            py23::Param q;
+            q.name = "indent";
+            q.ty = py23::t_int();
+            q.has_default = true;
+            f->pos.push_back(std::move(q));
+            py23::Param r;
+            r.name = "sort_keys";
+            r.ty = py23::t_bool();
+            r.has_default = true;
+            f->pos.push_back(std::move(r));
             f->ret = py23::t_str();
             f->ret_known = true;
             func_with("dumps", f);

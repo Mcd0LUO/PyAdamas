@@ -831,21 +831,36 @@ VReg Lowerer::lower_pathlib(const std::string& member, Call& c) {
 }
 
 VReg Lowerer::lower_json(const std::string& member, Call& c) {
-    if (!c.keywords.empty()) {
+    // dumps 收 indent= / sort_keys=，其它几个不收关键字。
+    if (!c.keywords.empty() && member != "dumps") {
         err(c.line, c.col, std::format("json.{}() does not take keyword arguments", member));
     }
     if (member == "dumps") {
         if (c.args.size() != 1) {
             err(c.line, c.col,
-                std::format("json.dumps() expects 1 argument, got {}", c.args.size()));
+                std::format("json.dumps() expects 1 positional argument, got {}", c.args.size()));
             return const_none();
+        }
+        // indent= / sort_keys= 是关键字参数；indent 用 0 表示紧凑（对应 None）。
+        VReg indent = const_int(0);
+        VReg sort_keys = const_int(0);
+        for (auto& kw : c.keywords) {
+            if (kw.arg == "indent") {
+                indent = coerce(expr(*kw.value), tc_.type_of(kw.value.get()), t_int());
+            } else if (kw.arg == "sort_keys") {
+                sort_keys = coerce(expr(*kw.value), tc_.type_of(kw.value.get()), t_bool());
+            } else {
+                err(kw.value->line, kw.value->col,
+                    std::format("json.dumps() got an unexpected keyword argument '{}'", kw.arg));
+            }
         }
         TypePtr vt = tc_.type_of(c.args[0].get());
         std::string desc;
         if (!json_desc(vt, desc, c.args[0]->line, c.args[0]->col)) return const_none();
         if (vt && vt->kind == TyKind::None) return const_str("null");
         VReg v = expr(*c.args[0]);
-        VReg s = call_runtime(RtFn::JsonDumps, t_str(), {v, const_str(desc)});
+        VReg s = call_runtime(RtFn::JsonDumps, t_str(),
+                              {v, const_str(desc), indent, sort_keys});
         push_temp(s);
         return s;
     }

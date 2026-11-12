@@ -500,6 +500,11 @@ void AsmGen::gen_call_rt(const Inst& in) {
             case RtFn::RoundI64:
             case RtFn::FileOpen:
             case RtFn::JsonDumps:
+                emit2("movq", src_op(in.args[0]), "%rdi");
+                emit2("movq", src_op(in.args[1]), "%rsi");
+                emit2("movq", src_op(in.args[2]), "%rdx");
+                emit2("movq", src_op(in.args[3]), "%rcx");
+                break;
             case RtFn::JsonLoads:
                 emit2("movq", src_op(in.args[0]), "%rdi");
                 emit2("movq", src_op(in.args[1]), "%rsi");

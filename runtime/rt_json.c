@@ -34,6 +34,8 @@ typedef struct {
     char* buf;
     size_t len;
     size_t cap;
+    int64_t indent;     /* 0 = 紧凑输出 */
+    int64_t sort_keys;  /* 非 0 时 dict 按 key 字符串排序 */
 } JBuf;
 
 static void jb_raw(JBuf* b, const char* p, size_t n) {
@@ -166,7 +168,26 @@ static void jb_f64(JBuf* b, double v) {
     jb_cstr(b, buf);
 }
 
-static void jb_value(JBuf* b, int64_t v, const char* d, size_t n) {
+/* 换行 + 缩进；indent <= 0 时是紧凑模式，什么都不输出。 */
+static void jb_nl(JBuf* b, int64_t depth) {
+    if (b->indent <= 0) return;
+    jb_ch(b, '\n');
+    for (int64_t i = 0; i < b->indent * depth; ++i) jb_ch(b, ' ');
+}
+
+/* sort_keys 用：按 key 字符串给 entry 下标排序（单线程，用静态指针传 dict）。 */
+static Py23Dict* g_json_sort_dict;
+
+static int jb_cmp_order(const void* pa, const void* pb) {
+    int64_t ia = *(const int64_t*)pa;
+    int64_t ib = *(const int64_t*)pb;
+    Py23Str* x = (Py23Str*)g_json_sort_dict->entries[ia].key;
+    Py23Str* y = (Py23Str*)g_json_sort_dict->entries[ib].key;
+    int64_t c = py23_str_cmp(x, y);
+    return c < 0 ? -1 : c > 0 ? 1 : 0;
+}
+
+static void jb_value(JBuf* b, int64_t v, const char* d, size_t n, int64_t depth) {
     char t = d[0];
     if (t == '(') {
         char k = d[1];
@@ -176,9 +197,12 @@ static void jb_value(JBuf* b, int64_t v, const char* d, size_t n) {
             size_t cn = n - 3;
             jb_ch(b, '[');
             for (int64_t i = 0; i < l->len; ++i) {
-                if (i) jb_cstr(b, ", ");
-                jb_value(b, l->data[i], cd, cn);
+                if (i) jb_ch(b, ',');
+                jb_nl(b, depth + 1);
+                if (b->indent <= 0 && i) jb_ch(b, ' ');
+                jb_value(b, l->data[i], cd, cn, depth + 1);
             }
+            if (l->len) jb_nl(b, depth);
             jb_ch(b, ']');
             return;
         }
@@ -186,14 +210,27 @@ static void jb_value(JBuf* b, int64_t v, const char* d, size_t n) {
             Py23Dict* m = (Py23Dict*)v;
             const char* cd = d + 2;
             size_t cn = n - 3;
+            int64_t* order = NULL;
+            if (b->sort_keys && m->len > 1) {
+                order = (int64_t*)malloc(sizeof(int64_t) * (size_t)m->len);
+                if (!order) panic_c("out of memory");
+                for (int64_t i = 0; i < m->len; ++i) order[i] = i;
+                g_json_sort_dict = m;
+                qsort(order, (size_t)m->len, sizeof(int64_t), jb_cmp_order);
+            }
             jb_ch(b, '{');
             for (int64_t i = 0; i < m->len; ++i) {
-                if (i) jb_cstr(b, ", ");
-                jb_str(b, (Py23Str*)m->entries[i].key);
+                int64_t e = order ? order[i] : i;
+                if (i) jb_ch(b, ',');
+                jb_nl(b, depth + 1);
+                if (b->indent <= 0 && i) jb_ch(b, ' ');
+                jb_str(b, (Py23Str*)m->entries[e].key);
                 jb_cstr(b, ": ");
-                jb_value(b, m->entries[i].val, cd, cn);
+                jb_value(b, m->entries[e].val, cd, cn, depth + 1);
             }
+            if (m->len) jb_nl(b, depth);
             jb_ch(b, '}');
+            free(order);
             return;
         }
         if (k == 't') {
@@ -203,11 +240,14 @@ static void jb_value(JBuf* b, int64_t v, const char* d, size_t n) {
             jb_ch(b, '[');
             while (pos + 1 < n) {
                 size_t cl = desc_len(d + pos);
-                if (idx) jb_cstr(b, ", ");
-                jb_value(b, l->data[idx], d + pos, cl);
+                if (idx) jb_ch(b, ',');
+                jb_nl(b, depth + 1);
+                if (b->indent <= 0 && idx) jb_ch(b, ' ');
+                jb_value(b, l->data[idx], d + pos, cl, depth + 1);
                 pos += cl;
                 idx++;
             }
+            if (idx) jb_nl(b, depth);
             jb_ch(b, ']');
             return;
         }
@@ -243,9 +283,9 @@ static void jb_value(JBuf* b, int64_t v, const char* d, size_t n) {
     py23_raise_c("ValueError", "json: bad type descriptor");
 }
 
-Py23Str* py23_json_dumps(int64_t v, Py23Str* desc) {
-    JBuf b = {NULL, 0, 0};
-    jb_value(&b, v, desc->data, (size_t)desc->len);
+Py23Str* py23_json_dumps(int64_t v, Py23Str* desc, int64_t indent, int64_t sort_keys) {
+    JBuf b = {NULL, 0, 0, indent, sort_keys};
+    jb_value(&b, v, desc->data, (size_t)desc->len, 0);
     Py23Str* out = str_new(b.buf ? b.buf : "", (int64_t)b.len);
     free(b.buf);
     return out;
