@@ -1011,10 +1011,6 @@ public:
         return it == expr_types_.end() ? t_unknown() : it->second;
     }
 
-    // 这个表达式有没有记录过类型。type_of 对「没记录」和「记录为 unknown」
-    // 都返回 unknown，降级层需要区分这两种情况。
-    bool has_type(const Expr* e) const { return expr_types_.count(e) != 0; }
-
     // 模块作用域与各函数体的最终符号表。lower 直接查它拿「这个名字的
     // 最终类型」，避免自己再实现一遍 join/收窄。
     const Scope* module_scope() const { return module_; }

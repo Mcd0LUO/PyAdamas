@@ -294,12 +294,7 @@ VReg Lowerer::expr(Expr& e) {
                     std::format("class '{}' cannot be used as a value yet", n.id));
                 return const_none();
             }
-            // 逐位置类型优先：同一个变量在不同位置可以是不同类型（循环变量
-            // 复用：`for i, v in enumerate(ints)` 之后
-            // `for i, v in enumerate("abc")`），name_ty 只给最终类型，会把
-            // str 当 int 打印。只有确实没记录过类型时才退回按名字查——
-            // 记录成 unknown 是有意义的（说明这里推不出来），不能覆盖。
-            TypePtr ty = tc_.has_type(&e) ? tc_.type_of(&e) : name_ty(n.id);
+            TypePtr ty = name_ty(n.id);
             if (st_->globals_decl.count(n.id) || !is_local(n.id)) {
                 Inst in;
                 in.op = IrOp::LoadGlobal;
