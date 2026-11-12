@@ -149,6 +149,7 @@ enum class RtFn : uint16_t {
     DictNew,      // (i64 key_kind, i64 key_own, i64 val_own) -> dict*
     DictSet,      // (dict*, i64 key, i64 val) -> void
     DictGet,      // (dict*, i64 key) -> i64
+    DictSetDefaultFactory, // (dict*, i64 factory) -> void
     DictContains, // (dict*, i64 key) -> i64
     DictKeyAt,    // (dict*, i64 index) -> i64
     ListContains, // (list*, i64 value, i64 cmp_kind) -> i64
@@ -536,6 +537,7 @@ inline const char* rt_name(RtFn f) {
         case RtFn::DictNew: return "py23_dict_new";
         case RtFn::DictSet: return "py23_dict_set";
         case RtFn::DictGet: return "py23_dict_get";
+        case RtFn::DictSetDefaultFactory: return "py23_dict_set_default_factory";
         case RtFn::DictContains: return "py23_dict_contains";
         case RtFn::DictKeyAt: return "py23_dict_key_at";
         case RtFn::ListContains: return "py23_list_contains";

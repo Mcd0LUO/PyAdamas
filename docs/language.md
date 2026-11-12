@@ -781,9 +781,12 @@ CPython 一致。
 - 内置 `collections`：`Counter(iterable)` 计数 + `.most_common(n)`；
   `OrderedDict()`（py23 的 dict 本来就保序）；`deque([iterable[, maxlen]])`
   环形队列，支持 `append`/`appendleft`/`pop`/`popleft`/`rotate`/`clear`/
-  `extend`/`extendleft`、`len`、下标和迭代。没有 `defaultdict` / `namedtuple`。
+  `extend`/`extendleft`、`len`、下标和迭代；`defaultdict([factory[, initial]])`
+  在缺省下标读取时按工厂造值并插入，工厂只支持 `int`/`float`/`bool`/`str`/
+  `list`/`dict`/`set`/`tuple`（任意 callable 还不支持），`get` / `in` 不触发
+  工厂。没有 `namedtuple`。
 - 内置模块的构造器可以用 `from X import Y` 直接引入：`from pathlib import Path`、
-  `from collections import deque, OrderedDict, Counter`、
+  `from collections import deque, OrderedDict, Counter, defaultdict`、
   `from datetime import date, datetime`。
 - 内置 `json`：`dumps(obj)` 按静态类型生成 JSON；`loads(text, sample)`
   用 sample 的静态类型决定结果结构，覆盖 int/bool/float/str/None/list/

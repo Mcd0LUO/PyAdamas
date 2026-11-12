@@ -167,6 +167,7 @@ Py23Dict* py23_dict_new(int64_t key_kind, int64_t key_own, int64_t val_own,
     d->val_own = val_own;
     d->hash_slot = hash_slot;
     d->eq_slot = eq_slot;
+    d->default_factory = 0;
     return d;
 }
 
@@ -198,10 +199,49 @@ void py23_dict_set(Py23Dict* d, int64_t key, int64_t val) {
     d->index[dict_place_slot(d, h)] = (int32_t)(idx + 1);
 }
 
+/* default_factory 的编码与 lower_collections 保持一致。这里只实现内置
+   零参数工厂；任意 callable 需要运行期闭包调用协议，另行处理。 */
+static int64_t dict_make_default(Py23Dict* d) {
+    switch (d->default_factory) {
+        case 1: /* int */
+        case 2: /* float：0.0 的位模式就是 0 */
+        case 3: /* bool */
+            return 0;
+        case 4: /* str */
+            return (int64_t)str_new("", 0);
+        case 5: /* list：元素类型未知，销毁时不盲目 dec */
+            return (int64_t)py23_list_new(0, 2);
+        case 6: /* dict：键值类型未知 */
+            return (int64_t)py23_dict_new(3, 2, 2, -1, -1);
+        case 7: /* set：复用 dict，值恒为 0 */
+            return (int64_t)py23_dict_new(3, 2, 0, -1, -1);
+        case 8: /* tuple：py23 用 list 表示元组 */
+            return (int64_t)py23_list_new(0, 2);
+        default:
+            py23_raise_c("TypeError", "defaultdict factory is not callable");
+    }
+}
+
+void py23_dict_set_default_factory(Py23Dict* d, int64_t factory) {
+    d->default_factory = factory;
+}
+
 int64_t py23_dict_get(Py23Dict* d, int64_t key) {
     int64_t h = dict_hash_key(d, key);
     int64_t e = dict_lookup(d, key, h);
-    if (e < 0) py23_raise_c("KeyError", "key not found");
+    if (e < 0) {
+        if (d->default_factory) {
+            /* 新值交给 dict 持有；key 是调用方借来的，入表前补引用。 */
+            int64_t val = dict_make_default(d);
+            if (d->key_own == 1 && key)
+                py23_rc_inc((void*)key);
+            else if (d->key_own == 2)
+                py23_rc_inc_unknown(key);
+            py23_dict_set(d, key, val);
+            return val; /* 和已有 key 一样返回 dict 内部的借用值 */
+        }
+        py23_raise_c("KeyError", "key not found");
+    }
     return d->entries[e].val;
 }
 
@@ -335,6 +375,7 @@ void py23_dict_update(Py23Dict* dst, Py23Dict* src) {
 Py23Dict* py23_dict_copy(Py23Dict* src) {
     Py23Dict* out = py23_dict_new(src->key_kind, src->key_own, src->val_own,
                                   src->hash_slot, src->eq_slot);
+    out->default_factory = src->default_factory;
     for (int64_t i = 0; i < src->len; ++i) {
         Py23DictEntry e = src->entries[i];
         if (src->key_own == 1 && e.key) py23_rc_inc((void*)e.key);

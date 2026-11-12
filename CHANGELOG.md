@@ -4,6 +4,29 @@
 
 早期阶段没有逐条留痕，按阶段归纳；0.4 之后逐条记录。
 
+## [0.96] - 2026-11-12
+
+`collections.defaultdict`。
+
+### 新增
+
+- **`collections.defaultdict([factory[, initial]])`**：缺省下标读取 `d[k]` 时按
+  工厂造值、插入并返回；`get` / `in` 不触发。工厂只支持内置零参类型
+  `int`/`float`/`bool`/`str`/`list`/`dict`/`set`/`tuple`，任意 callable 需要
+  运行期闭包调用协议，暂不支持；`default_factory` 属性不可读，静态类型仍是
+  普通 dict。工厂随 `dict.copy()` 继承。
+- **`from collections import defaultdict`** 可用（`module_ctor` 白名单 + 别名）。
+
+### 测试
+
+- `tests/run/88_defaultdict.py`：缺省插入、`get`/`in` 不触发、初始 dict、copy。
+- 用例数：运行 87→88。
+
+### 文档
+
+- `language.md` / `compatibility.md` / `runtime.md` / `ir.md` 同步工厂语义、
+  `Py23Dict::default_factory` 布局与 `py23_dict_set_default_factory` 运行时函数。
+
 ## [0.95] - 2026-11-12
 
 `subprocess.Popen`、管道与 `shell=True`。

@@ -715,6 +715,64 @@ std::optional<TypePtr> TypeChecker::itertools_call(const std::string& member, Ca
 }
 
 std::optional<TypePtr> TypeChecker::collections_call(const std::string& member, Call& c) {
+        if (member == "defaultdict") {
+            if (!c.keywords.empty()) {
+                err(c.line, c.col, "collections.defaultdict() does not take keyword arguments");
+                for (auto& kw : c.keywords) expr(*kw.value);
+            }
+            if (c.args.size() > 2) {
+                err(c.line, c.col,
+                    std::format("collections.defaultdict() expects at most 2 arguments, got {}",
+                                c.args.size()));
+                for (auto& arg : c.args) expr(*arg);
+                return mk_dict(t_unknown(), t_unknown());
+            }
+            TypePtr vt = t_unknown();
+            if (!c.args.empty()) {
+                auto* n = dynamic_cast<Name*>(c.args[0].get());
+                auto* none = dynamic_cast<Constant*>(c.args[0].get());
+                // 只识别未被遮蔽的内置零参数工厂；其它 callable 暂不支持，
+                // 因为缺省读取发生在运行时，任意闭包还需要一套调用协议。
+                if (n && !lookup(n->id)) {
+                    if (n->id == "int") vt = t_int();
+                    else if (n->id == "float") vt = t_float();
+                    else if (n->id == "bool") vt = t_bool();
+                    else if (n->id == "str") vt = t_str();
+                    else if (n->id == "list") vt = mk_list(t_unknown());
+                    else if (n->id == "dict") vt = mk_dict(t_unknown(), t_unknown());
+                    else if (n->id == "set") vt = mk_set(t_unknown());
+                    else if (n->id == "tuple") vt = mk_tuple_rest(t_unknown());
+                    else {
+                        expr(*c.args[0]);
+                        err(c.args[0]->line, c.args[0]->col,
+                            std::format("collections.defaultdict() factory '{}' is not supported "
+                                        "yet; use int/float/bool/str/list/dict/set/tuple",
+                                        n->id));
+                    }
+                } else if (none && none->ck == Constant::CK::None) {
+                    // defaultdict(None) 和普通 dict 一样，缺省 KeyError。
+                    expr(*c.args[0]);
+                } else {
+                    expr(*c.args[0]);
+                    err(c.args[0]->line, c.args[0]->col,
+                        "collections.defaultdict() currently supports built-in factories only");
+                }
+            }
+            TypePtr kt = t_unknown();
+            if (c.args.size() == 2) {
+                TypePtr init = expr(*c.args[1]);
+                if (init && init->kind == TyKind::Dict && init->sub.size() >= 2) {
+                    kt = init->sub[0];
+                    vt = init->sub[1];
+                } else if (!is_unknown(init)) {
+                    err(c.args[1]->line, c.args[1]->col,
+                        std::format("collections.defaultdict() initial value must be a dict, got "
+                                    "'{}'",
+                                    type_name(init)));
+                }
+            }
+            return mk_dict(kt, vt);
+        }
         if (member != "Counter") return std::nullopt;
         if (!c.keywords.empty()) {
             err(c.line, c.col, "collections.Counter() does not take keyword arguments");

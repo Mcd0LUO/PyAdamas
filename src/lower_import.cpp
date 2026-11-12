@@ -769,6 +769,53 @@ VReg Lowerer::lower_collections(const std::string& member, Call& c) {
         err(c.line, c.col,
             std::format("collections.{}() does not take keyword arguments", member));
     }
+    if (member == "defaultdict") {
+        if (c.args.size() > 2) {
+            err(c.line, c.col,
+                std::format("collections.defaultdict() expects at most 2 arguments, got {}",
+                            c.args.size()));
+            return const_none();
+        }
+        int64_t factory = 0;
+        if (!c.args.empty()) {
+            auto* n = dynamic_cast<Name*>(c.args[0].get());
+            auto* none = dynamic_cast<Constant*>(c.args[0].get());
+            if (n && is_builtin(n->id)) {
+                if (n->id == "int") factory = 1;
+                else if (n->id == "float") factory = 2;
+                else if (n->id == "bool") factory = 3;
+                else if (n->id == "str") factory = 4;
+                else if (n->id == "list") factory = 5;
+                else if (n->id == "dict") factory = 6;
+                else if (n->id == "set") factory = 7;
+                else if (n->id == "tuple") factory = 8;
+                else {
+                    expr(*c.args[0]);
+                    err(c.args[0]->line, c.args[0]->col,
+                        std::format("collections.defaultdict() factory '{}' is not supported",
+                                    n->id));
+                }
+            } else if (none && none->ck == Constant::CK::None) {
+                expr(*c.args[0]);
+            } else {
+                expr(*c.args[0]);
+                err(c.args[0]->line, c.args[0]->col,
+                    "collections.defaultdict() currently supports built-in factories only");
+            }
+        }
+        TypePtr rt = tc_.type_of(&c);
+        if (!rt || rt->kind != TyKind::Dict) rt = mk_dict(t_unknown(), t_unknown());
+        DictExpr empty;
+        empty.line = c.line;
+        empty.col = c.col;
+        VReg dict = lower_dict(empty, rt);
+        if (factory) call_void(RtFn::DictSetDefaultFactory, {dict, const_int(factory)});
+        if (c.args.size() == 2) {
+            VReg init = expr(*c.args[1]);
+            call_void(RtFn::DictUpdate, {dict, init});
+        }
+        return dict;
+    }
     if (member == "Counter") {
         if (c.args.size() != 1) {
             err(c.line, c.col,

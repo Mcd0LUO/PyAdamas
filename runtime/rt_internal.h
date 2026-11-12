@@ -61,6 +61,9 @@ typedef struct {
     /* 类 key 的 __hash__ / __eq__ vtable 槽号；-1 表示按机器字哈希/比较。 */
     int64_t hash_slot;
     int64_t eq_slot;
+    /* collections.defaultdict 的内置工厂；0 表示普通 dict。
+       只记录工厂种类，缺省下标读取时才创建值，不影响 get()/in。 */
+    int64_t default_factory;
 } Py23Dict;
 
 
@@ -469,6 +472,7 @@ Py23Dict* py23_dict_new(int64_t key_kind, int64_t key_own, int64_t val_own,
                         int64_t hash_slot, int64_t eq_slot);
 void py23_dict_set(Py23Dict* d, int64_t key, int64_t val);
 int64_t py23_dict_get(Py23Dict* d, int64_t key);
+void py23_dict_set_default_factory(Py23Dict* d, int64_t factory);
 int64_t py23_dict_contains(Py23Dict* d, int64_t key);
 int64_t py23_dict_key_at(Py23Dict* d, int64_t i);
 int64_t py23_dict_get_or(Py23Dict* d, int64_t key, int64_t def);

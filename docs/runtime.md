@@ -31,11 +31,14 @@ typedef struct { int64_t len; int64_t cap; int64_t* data; int64_t elem_kind; } P
 typedef struct { int64_t hash; int64_t key; int64_t val; } Py23DictEntry;
 typedef struct {
     int64_t len; int64_t cap;      /* len 在偏移 0，len()/真值判断直接读 */
-    Py23DictEntry* entries;        /* 开放寻址表，hash == 0 为空槽 */
-    int64_t* order;                /* 插入顺序：order[i] = entries 槽号 */
+    Py23DictEntry* entries;        /* 密集 entries，按插入顺序 */
+    int32_t* index;                /* 开放寻址索引：entry 下标 + 1，0 为空 */
+    int64_t icap;                  /* 索引表容量（2 的幂） */
     int64_t key_kind;              /* 0 int/bool, 1 str, 2 float, 3 raw */
     int64_t key_own;               /* 0 非堆, 1 堆, 2 unknown */
     int64_t val_own;
+    int64_t hash_slot, eq_slot;    /* 类 key 的 __hash__/__eq__ vtable 槽；-1 内建 */
+    int64_t default_factory;       /* collections.defaultdict 工厂；0 普通 dict */
 } Py23Dict;
 /* 用户对象没有对应的 C struct：布局由编译器按类定义生成。
    负载 +0 是 vtable 指针，字段从 +8 起，每个 8 字节；隐藏的 Py23Rc
@@ -80,18 +83,22 @@ typedef struct {
 
 字典是**开放寻址哈希表 + 插入顺序数组**：
 
-- `entries` 容量为 2 的幂，线性探测；`order` 保留插入顺序，`for k in d`
-  和 `len` 都按它工作；
+- `entries` 是密集数组，本身就按插入顺序；`index` 是 int32 开放寻址表
+  （entry 下标 + 1，0 为空槽），查找先走索引，`for k in d` 直接扫 entries；
 - key 的哈希/判等类别放在 `key_kind`：int/bool 机器字、str 逐字节
   （FNV-1a）、float IEEE 值（`0.0` / `-0.0` 同键）、其他按机器字；
 - `key_own` / `val_own` 决定 RC：写入前生成代码 retain 一份，更新/销毁
   时运行时 dec；unknown 只 retain 不 dec，交给 GC；
 - 更新已有 key 时保留原来的 key 对象，释放调用方新传入的 key 引用；
-- 删除没有墓碑：把项移出 `order` 后按剩余项**整表重建**，单次 O(n)，
-  换取线性探测链不被挖断；`pop` / `popitem` / `remove` / `discard` /
-  `clear` 都走这条路径，`popitem` 取 `order` 末尾（LIFO）；
-- 负载因子超过 0.7 时翻倍 rehash，`order` 重排后仍保持插入顺序。
+- 删除没有墓碑：`entries` 后面的项前移一格，然后**整表重建索引**，单次
+  O(n)，换取线性探测链不被挖断；`pop` / `popitem` / `remove` / `discard` /
+  `clear` 都走这条路径，`popitem` 取 `entries` 末尾（LIFO）；
+- 负载因子超过 0.7 时翻倍 rehash，entries 不搬家，遍历顺序稳定。
 - set 就是 `val_own = 0`、值恒 0 的 dict，复用同一套函数和 GC。
+- `default_factory` 非 0 时是 `collections.defaultdict`：`d[k]` 缺失会按工厂
+  造值、插入并返回；`get` / `in` 不触发。工厂只编码内置零参类型
+  （int/float/bool/str/list/dict/set/tuple），任意 callable 需要运行期
+  闭包调用协议，尚未支持；`dict_copy` 会继承工厂。
 - 方法：`get` 走 get/get_or；`keys`/`values`/`items` 分配新 list（items
   的元素是二元组），元素按目标 list 的 kind retain；`update` 逐项复制，
   目标 unknown 时也会 retain 源引用，避免源临时字典释放后悬空；
@@ -271,7 +278,8 @@ longjmp 回同步调用点。GC 清扫和进程退出不跑析构器，但会单
 |---|---|---|
 | `py23_dict_new` | `(i64 key_kind, i64 key_own, i64 val_own, i64 hash_slot, i64 eq_slot) -> Py23Dict*` | 空表，初始 8 槽；set 传 `val_own = 0`。`hash_slot`/`eq_slot` ≥ 0 时类键的哈希/相等走 vtable（`__hash__`/`__eq__`），-1 表示按 `key_kind` 走内建哈希 |
 | `py23_dict_set` | `(Py23Dict*, i64 key, i64 val) -> void` | 插入/更新；更新时释放新 key 引用并 dec 旧 value |
-| `py23_dict_get` | `(Py23Dict*, i64 key) -> i64` | 缺失抛 KeyError；返回借用 |
+| `py23_dict_get` | `(Py23Dict*, i64 key) -> i64` | 缺失抛 KeyError；defaultdict 设了工厂时先造默认值、插入再返回。返回借用 |
+| `py23_dict_set_default_factory` | `(Py23Dict*, i64 factory) -> void` | 设置 defaultdict 的内置工厂编码（0 = 普通 dict） |
 | `py23_dict_contains` | `(Py23Dict*, i64 key) -> i64` | `in` 用，返回 0/1 |
 | `py23_dict_key_at` | `(Py23Dict*, i64 index) -> i64` | 按插入顺序取 key，遍历用 |
 | `py23_dict_get_or` | `(Py23Dict*, i64 key, i64 def) -> i64` | 缺失返回默认值 |

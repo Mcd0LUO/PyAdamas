@@ -482,6 +482,7 @@ void AsmGen::gen_call_rt(const Inst& in) {
             case RtFn::StrCharAt:
             case RtFn::ClosureNew:
             case RtFn::DictGet:
+            case RtFn::DictSetDefaultFactory:
             case RtFn::DictContains:
             case RtFn::DictKeyAt:
             case RtFn::StrContains:

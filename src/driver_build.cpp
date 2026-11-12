@@ -765,6 +765,17 @@ py23::ModuleInfoPtr builtin_module(const std::string& name) {
         }
         // OrderedDict：py23 的 dict 保序，直接当空 dict 用。
         func("OrderedDict", {}, py23::mk_dict(py23::t_str(), py23::t_unknown()));
+        // defaultdict：签名只用于 from-import；K/V 在 collections_call 里按工厂推。
+        {
+            auto f = std::make_shared<py23::FuncInfo>();
+            f->name = "collections.defaultdict";
+            f->varargs = true;
+            f->vararg_name = "args";
+            f->vararg_ty = py23::t_unknown();
+            f->ret = py23::mk_dict(py23::t_unknown(), py23::t_unknown());
+            f->ret_known = true;
+            func_with("defaultdict", f);
+        }
         // deque(iterable=None, maxlen=None)：两个参数都可选。
         {
             auto f = std::make_shared<py23::FuncInfo>();

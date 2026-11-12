@@ -298,6 +298,9 @@ P0/P1/P2，O2 再加控制流与小函数优化：
 **字典 / 集合不新增 IR 指令**：
 
 - 字面量 → `py23_dict_new` + 逐对 `py23_dict_set`（set 用 `val_own = 0`）；
+- `collections.defaultdict(...)` → `py23_dict_new` + `py23_dict_set_default_factory`，
+  有初始 dict 时再 `py23_dict_update`；工厂编码 1..8 对应
+  int/float/bool/str/list/dict/set/tuple，编译期确定；
 - `d[k]` → `py23_dict_get`，`d[k] = v` → `py23_dict_set`；
 - `k in d` / `k in s` → `py23_dict_contains`；list/tuple 用
   `py23_list_contains`，str 用 `py23_str_contains`；
