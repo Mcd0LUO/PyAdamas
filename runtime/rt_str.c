@@ -262,7 +262,7 @@ static char sm_upper(char c) {
 }
 
 static void sm_push_str(Py23List* l, Py23Str* s) {
-    py23_rc_inc(s);
+    // str_new 的初始引用直接转交给列表，列表析构时统一 dec。
     py23_list_append(l, (int64_t)s);
 }
 
@@ -315,8 +315,17 @@ int64_t py23_str_method(Py23Str* s, int64_t op, int64_t a0, int64_t a1, int64_t 
             return (int64_t)str_new(s->data + b, e - b);
         }
         case 8: { /* split() 按空白 */
-            Py23List* out = py23_list_new(4, 1);
+            // 先数一遍词数，按精确容量建表，避免 append 过程中的 realloc。
+            int64_t count = 0;
             int64_t i = 0;
+            while (i < s->len) {
+                while (i < s->len && sm_is_space(s->data[i])) ++i;
+                if (i >= s->len) break;
+                ++count;
+                while (i < s->len && !sm_is_space(s->data[i])) ++i;
+            }
+            Py23List* out = py23_list_new(count, 1);
+            i = 0;
             while (i < s->len) {
                 while (i < s->len && sm_is_space(s->data[i])) ++i;
                 if (i >= s->len) break;

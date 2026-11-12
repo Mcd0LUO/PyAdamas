@@ -41,6 +41,42 @@ static int gc_untracked_leaves;
 
 #define PY23_RC_UNTRACKED 2
 
+/* 短字符串 freelist。split / capitalize / join 这类路径会高频产生
+   几个字节的小字符串，每次都 malloc/free 会把内存分配变成热点。
+   按 8 字节粒度分档（<=128 字节），每档最多缓存 64 块。复用时块容量
+   一定 >= 请求大小（分配时向上取整到同一档），字符串仍按自己的 len 访问。 */
+#define STR_POOL_MAX_SIZE 128
+#define STR_POOL_CLASSES (STR_POOL_MAX_SIZE / 8)
+#define STR_POOL_MAX_PER_CLASS 64
+static Py23Rc* str_pool[STR_POOL_CLASSES];
+static int str_pool_count[STR_POOL_CLASSES];
+
+static int str_pool_class(int64_t size) {
+    if (size <= 0 || size > STR_POOL_MAX_SIZE) return -1;
+    return (int)((size + 7) / 8) - 1;
+}
+
+static Py23Rc* str_pool_get(int64_t size) {
+    int c = str_pool_class(size);
+    if (c < 0 || !str_pool[c]) return NULL;
+    Py23Rc* h = str_pool[c];
+    str_pool[c] = h->next;
+    str_pool_count[c]--;
+    return h;
+}
+
+static void str_pool_put(Py23Rc* h) {
+    int c = str_pool_class(h->size);
+    if (c < 0 || str_pool_count[c] >= STR_POOL_MAX_PER_CLASS) {
+        free(h);
+        return;
+    }
+    h->next = str_pool[c];
+    h->prev = NULL;
+    str_pool[c] = h;
+    str_pool_count[c]++;
+}
+
 /* exact-RC 模式下可以完全绕开 GC 的对象：没有任何堆字段（没有出边），
    不可能处在环里。字符串是典型；没有堆字段的类实例（生成代码不给
    dtor/release）同理。它们的生死完全由 RC 决定。 */
@@ -226,19 +262,27 @@ void* rc_alloc(int64_t size, void (*dtor)(void*), void (*release)(void*),
     if (gc_ready && !gc_sweeping && heap_head &&
         alloc_since_gc >= gc_next_threshold)
         py23_gc_collect();
-    Py23Rc* h = (Py23Rc*)malloc(sizeof(Py23Rc) + (size_t)size);
-    if (!h) panic_c("out of memory");
+    // 短字符串按 8 字节取整，freelist 里的块容量和档位严格对应。
+    int64_t alloc_size = size;
+    if (kind == PY23_RC_STR && size > 0 && size <= STR_POOL_MAX_SIZE)
+        alloc_size = (size + 7) & ~(int64_t)7;
+    Py23Rc* h = NULL;
+    if (kind == PY23_RC_STR) h = str_pool_get(alloc_size);
+    if (!h) {
+        h = (Py23Rc*)malloc(sizeof(Py23Rc) + (size_t)alloc_size);
+        if (!h) panic_c("out of memory");
+        h->size = alloc_size;
+    }
     h->rc = 1;
     h->dtor = dtor;
     h->release = release;
-    h->size = size;
     h->kind = kind;
     h->marked = 0;
     rc_link(h);
     // 叶子对象不可能成环，exact-RC 模式下也不进链，不必驱动 GC 频率。
-    if (!rc_leaf_untracked(h)) alloc_since_gc += size + PY23_RC_HDR;
+    if (!rc_leaf_untracked(h)) alloc_since_gc += alloc_size + PY23_RC_HDR;
     void* p = (char*)h + sizeof(Py23Rc);
-    memset(p, 0, (size_t)size);
+    memset(p, 0, (size_t)alloc_size);
     return p;
 }
 
@@ -277,7 +321,8 @@ void py23_rc_dec(void* p) {
     if (--h->rc == 0) {
         rc_unlink(h);
         if (h->dtor) h->dtor(p);
-        free(h);
+        if (h->kind == PY23_RC_STR) str_pool_put(h);
+        else free(h);
     }
 }
 
