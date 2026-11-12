@@ -1168,6 +1168,7 @@ private:
 
     VReg lower_constant(Constant& c);
     VReg lower_binop(BinOp& b);
+    VReg lower_percent_format(BinOp& b, TypePtr lt, TypePtr ty);
     VReg lower_unary(UnaryOp& u);
     VReg lower_boolop(BoolOp& b);
     VReg lower_compare(Compare& c);

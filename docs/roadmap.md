@@ -25,16 +25,17 @@
 | 验证 | 四类用例（正例 / 反例 / 运行 / 未建模） + 差分测试 + 标准库基线 |
 | 0.6–0.38 | 对象模型、异常值、match、C3 MRO、优化遍/O2、块内寄存器；逐版本记录见 [archive/roadmap-0.6-0.38.md](archive/roadmap-0.6-0.38.md) |
 | 0.39–0.80 | -O0/O1/O2、dunder 第二批、random/os/subprocess、差分 runner 自举、stdlib 批次（string/time/os/itertools/collections/json）、re 模块 v1/v2；详见 [CHANGELOG](../CHANGELOG.md) |
+| 0.96–0.97 | `collections.defaultdict`；`bytes` 收尾：`for c in b"..."`、printf 风格 `%`、`bytes` 标注与跨模块接口 |
 | 许可证 | Apache-2.0（见 [LICENSE](../LICENSE) / [NOTICE](../NOTICE)） |
 
-## 当前状态（0.89）
+## 当前状态（0.97）
 
 流水线 `源码 → 词法 → AST → lambda 脱糖 → 类型检查 → IR → x86-64 汇编 → 可执行文件` 已打通。
 
-- **语言面**：标量、字符串、列表/元组/字典/集合、切片读写、闭包/lambda/`*args`/`**kwargs`/装饰器、推导式、`with`、异常值（`args`/`raise ... from`/自定义异常）、类（字段/方法/C3 多继承/零参 `super()`/`@staticmethod`/`@classmethod`/`@property`/类属性）、`match/case`、`del`、复数字面量、f-string 格式说明、dunder 协议、`open`/`input`/`sys.stdin`。
+- **语言面**：标量、字符串、`bytes`（含迭代与 `%` 格式化）、列表/元组/字典/集合、切片读写、闭包/lambda/`*args`/`**kwargs`/装饰器、推导式、`with`、异常值（`args`/`raise ... from`/自定义异常）、类（字段/方法/C3 多继承/零参 `super()`/`@staticmethod`/`@classmethod`/`@property`/类属性）、`match/case`、`del`、复数字面量、f-string 格式说明、dunder 协议、`open`/`input`/`sys.stdin`。
 - **标准库**：`math`/`sys`/`asyncio`/`random`/`os`/`os.path`/`subprocess`/`time`/`itertools`/`collections`/`functools`/`json`/`string`/`re`/`datetime`/`pathlib`。
-- **验证**：79 个运行用例、37 个反例、9 个模块目录；差分 runner 已自举，默认 810 例。
-- **主要缺口**：`csv`；C FFI/BLAS；`bytes` 的迭代与格式化；跨模块生成器/协程；asyncio 边角；`functools.partial`/`lru_cache`。
+- **验证**：89 个运行用例、37 个反例、9 个模块目录；差分 runner 已自举，默认 810 例。
+- **主要缺口**：`csv`；C FFI/BLAS；跨模块生成器/协程；asyncio 边角；`functools.partial`/`lru_cache`。
 
 ## 下一步
 
@@ -50,15 +51,11 @@
 `partial`/`lru_cache` 需要**运行期构造闭包**（编译器合成转发函数 + 填 env），
 要么补这个能力，要么先记着。
 
-### 3. `bytes` 收尾
-
-字面量、索引/切片、`encode`/`decode`、`+`/`in`/比较已经通了（0.79），相邻字面量拼接与 6 个方法在 0.81.1 补上，`split`/`find`/`rfind`/`count`/`startswith`/`endswith`/`join` 在 0.82.3 补上。剩下：`for c in b"..."`（要转 `list[int]`）、格式化与 `%`、跨模块接口不再降级成 `unknown`。
-
-### 4. C FFI + buffer + BLAS
+### 3. C FFI + buffer + BLAS
 
 科学计算的唯一捷径。py23 的 ABI 已经是 SysV + `int64`/`double`/指针，运行时是纯 C；补一层 `extern "C"` 声明和 buffer 类型，就能把 `list[float]` 的连续数据直接传给 `cblas_dgemm`。验收：512³ matmul 进入毫秒级；不要求自己实现 BLAS。
 
-### 5. 工程收尾
+### 4. 工程收尾
 
 - 重跑标准库前端基线：0.81 已在 Debian python3.13.5 上重跑过一次（见 [compatibility.md](compatibility.md#前端鲁棒性基线)），但原口径（CPython 3.11.1 + site-packages，38582 个文件）还没重跑；
 - 保持 `docs/` 与 README 的验证表同步；

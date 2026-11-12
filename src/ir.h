@@ -185,6 +185,7 @@ enum class RtFn : uint16_t {
     ListSliceAssign, // (list*, i64 start, i64 stop, i64 step, list*) -> void
     ListDelIndex, // (list*, i64 index) -> void  del list[i]
     StrToList,    // (str*) -> list*
+    BytesToList,  // (bytes*) -> list[int]（for c in b"..."）
     StrWrapList,  // (str*) -> list*（单元素，subprocess 用）
     ListExtend,   // (list* dst, list* src) -> void
     ListSumI64,   // (list*, i64 start) -> i64
@@ -253,6 +254,7 @@ enum class RtFn : uint16_t {
     FmtBool,      // (i64, str* spec) -> str*
     FmtF64,       // (f64, str* spec) -> str*
     FmtStr,       // (str*, str* spec) -> str*
+    StrPercentFormat, // (str* pat, list* args, str* desc, i64 is_bytes) -> str*
     FmtComplex,   // (c*, str* spec) -> str*
     ReprStr,      // (str*) -> str*
     MathSqrt, MathFloor, MathCeil, MathFabs, MathSin, MathCos, MathTan,
@@ -573,6 +575,7 @@ inline const char* rt_name(RtFn f) {
         case RtFn::ListSliceAssign: return "py23_list_slice_assign";
         case RtFn::ListDelIndex: return "py23_list_del_index";
         case RtFn::StrToList: return "py23_str_to_list";
+        case RtFn::BytesToList: return "py23_bytes_to_list";
         case RtFn::StrWrapList: return "py23_str_wrap_list";
         case RtFn::ListExtend: return "py23_list_extend";
         case RtFn::ListSumI64: return "py23_list_sum_i64";
@@ -647,6 +650,7 @@ inline const char* rt_name(RtFn f) {
         case RtFn::FmtBool: return "py23_fmt_bool";
         case RtFn::FmtF64: return "py23_fmt_f64";
         case RtFn::FmtStr: return "py23_fmt_str";
+        case RtFn::StrPercentFormat: return "py23_percent_format";
         case RtFn::FmtComplex: return "py23_fmt_complex";
         case RtFn::ReprStr: return "py23_repr_str";
         case RtFn::MathFabs: return "py23_math_fabs";

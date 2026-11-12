@@ -159,6 +159,14 @@ Py23List* py23_str_to_list(Py23Str* s) {
     return out;
 }
 
+/* bytes 迭代：每个元素是 0..255 的 int，不是单字节串。 */
+Py23List* py23_bytes_to_list(Py23Str* s) {
+    Py23List* out = py23_list_new(s->len, 0);
+    for (int64_t i = 0; i < s->len; ++i)
+        py23_list_append(out, (int64_t)(unsigned char)s->data[i]);
+    return out;
+}
+
 /* 把单个字符串包成 [s]：subprocess.Popen("cmd", shell=True) 这种写法用。 */
 Py23List* py23_str_wrap_list(Py23Str* s) {
     Py23List* out = py23_list_new(1, 1);

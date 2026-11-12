@@ -773,6 +773,7 @@ TypePtr TypeChecker::binop_type(Tok op, TypePtr l, TypePtr r, int line, int col)
             case Tok::PERCENT:
                 if (is_num(l) && is_num(r)) return promote(l, r);
                 if (op == Tok::PERCENT && l->kind == TyKind::Str) return t_str();
+                if (op == Tok::PERCENT && l->kind == TyKind::Bytes) return t_bytes();
                 return bad();
             case Tok::DOUBLESTAR:
                 if (is_num(l) && is_num(r)) return promote(l, r);

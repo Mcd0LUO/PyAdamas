@@ -976,6 +976,13 @@ void Lowerer::lower_for_seq(For& f) {
         seq = xs;
         seq_ty = mk_list(t_int());
     }
+    // bytes 迭代产出 int（0..255）：先转 list[int] 再走普通列表路径。
+    if (seq_ty && seq_ty->kind == TyKind::Bytes) {
+        VReg xs = call_runtime(RtFn::BytesToList, mk_list(t_int()), {seq});
+        push_temp(xs);
+        seq = xs;
+        seq_ty = mk_list(t_int());
+    }
     // 用户类实现 __iter__ 时先调用它，再按返回类型（generator/list/...）
     // 走现有的迭代路径。
     if (seq_ty && seq_ty->kind == TyKind::Class) {

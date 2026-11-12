@@ -240,7 +240,12 @@ void enc_type(Enc& e, const TypePtr& t) {
         case TyKind::CompletedProcess:
         case TyKind::Regex:
         case TyKind::Match:
-        case TyKind::Bytes: e.u8(0); break;
+        // Popen / datetime / pathlib / deque 跨模块签名暂不支持：按 unknown 处理
+        case TyKind::Popen:
+        case TyKind::DateTime:
+        case TyKind::Path:
+        case TyKind::Deque:
+        case TyKind::Bytes: e.u8(12); break;
         case TyKind::None: e.u8(1); break;
         case TyKind::Bool: e.u8(2); break;
         case TyKind::Int: e.u8(3); break;
@@ -317,6 +322,7 @@ TypePtr dec_type(Dec& d) {
             t->fn = dec_sig(d);
             return t;
         }
+        case 12: return t_bytes();
         default: throw std::runtime_error("unknown type tag in interface");
     }
 }

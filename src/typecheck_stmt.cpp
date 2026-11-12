@@ -738,7 +738,7 @@ void TypeChecker::assign(Expr& target, TypePtr value, int line, int col) {
                 if (ot->cls->is_open()) return;
                 // 实例上给类属性赋值要新建实例属性，而 py23 的对象布局是
                 // 编译期定死的；明确报错，别静默写到类属性上影响所有实例。
-                if (const ClassAttrInfo* ca = ot->cls->class_attr(at->attr)) {
+                if (ot->cls->class_attr(at->attr)) {
                     err(line, col,
                         std::format("cannot assign to class attribute '{}.{}' through an "
                                     "instance: object layout is fixed at compile time",

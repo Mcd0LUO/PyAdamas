@@ -24,7 +24,8 @@ VReg Lowerer::lower_minmax(Call& c, bool is_min) {
     if (c.args.size() == 1) {
         TypePtr seq_ty = tc_.type_of(c.args[0].get());
         bool ok = seq_ty && (seq_ty->kind == TyKind::List || seq_ty->kind == TyKind::Tuple ||
-                             seq_ty->kind == TyKind::Str || seq_ty->kind == TyKind::Dict ||
+                             seq_ty->kind == TyKind::Str || seq_ty->kind == TyKind::Bytes ||
+                             seq_ty->kind == TyKind::Dict ||
                              seq_ty->kind == TyKind::Set || seq_ty->kind == TyKind::Range ||
                              seq_ty->kind == TyKind::Generator);
         if (!ok) {
@@ -35,7 +36,16 @@ VReg Lowerer::lower_minmax(Call& c, bool is_min) {
         }
         TypePtr elem_ty = t_unknown();
         if (seq_ty->kind == TyKind::Str) elem_ty = t_str();
+        else if (seq_ty->kind == TyKind::Bytes) elem_ty = t_int();
         else if (!seq_ty->sub.empty()) elem_ty = seq_ty->sub[0];
+        // bytes 不能按下标当 list 读：先物化成 list[int] 再走通用路径。
+        VReg seq_conv = kNoReg;
+        if (seq_ty->kind == TyKind::Bytes) {
+            seq_conv = call_runtime(RtFn::BytesToList, mk_list(t_int()), {expr(*c.args[0])});
+            push_temp(seq_conv);
+            seq_ty = mk_list(t_int());
+            elem_ty = t_int();
+        }
 
         // range：按边界算，不物化。空 range 同样报 ValueError。
         if (seq_ty->kind == TyKind::Range) {
@@ -121,12 +131,12 @@ VReg Lowerer::lower_minmax(Call& c, bool is_min) {
             (seq_ty->kind == TyKind::List || seq_ty->kind == TyKind::Tuple) &&
             (elem_ty->kind == TyKind::Int || elem_ty->kind == TyKind::Bool) &&
             (acc_ty->kind == TyKind::Int || acc_ty->kind == TyKind::Bool)) {
-            VReg seq = expr(*c.args[0]);
+            VReg seq = seq_conv != kNoReg ? seq_conv : expr(*c.args[0]);
             return call_runtime(is_min ? RtFn::ListMinI64 : RtFn::ListMaxI64, acc_ty,
                                 {seq});
         }
 
-        VReg seq = expr(*c.args[0]);
+        VReg seq = seq_conv != kNoReg ? seq_conv : expr(*c.args[0]);
         int seq_slot = new_temp_slot(seq_ty);
         store_slot(seq_slot, seq);
         Inst ln;
@@ -280,7 +290,8 @@ VReg Lowerer::lower_sum(Call& c) {
     }
     TypePtr seq_ty = tc_.type_of(c.args[0].get());
     bool ok = seq_ty && (seq_ty->kind == TyKind::List || seq_ty->kind == TyKind::Tuple ||
-                         seq_ty->kind == TyKind::Str || seq_ty->kind == TyKind::Dict ||
+                         seq_ty->kind == TyKind::Str || seq_ty->kind == TyKind::Bytes ||
+                         seq_ty->kind == TyKind::Dict ||
                          seq_ty->kind == TyKind::Set || seq_ty->kind == TyKind::Range ||
                          seq_ty->kind == TyKind::Generator);
     if (!ok) {
@@ -290,7 +301,16 @@ VReg Lowerer::lower_sum(Call& c) {
     }
     TypePtr elem_ty = t_unknown();
     if (seq_ty->kind == TyKind::Str) elem_ty = t_str();
+    else if (seq_ty->kind == TyKind::Bytes) elem_ty = t_int();
     else if (!seq_ty->sub.empty()) elem_ty = seq_ty->sub[0];
+    // bytes 不能按下标当 list 读：先物化成 list[int] 再走通用路径。
+    VReg seq_conv = kNoReg;
+    if (seq_ty->kind == TyKind::Bytes) {
+        seq_conv = call_runtime(RtFn::BytesToList, mk_list(t_int()), {expr(*c.args[0])});
+        push_temp(seq_conv);
+        seq_ty = mk_list(t_int());
+        elem_ty = t_int();
+    }
 
     // range：按边界流式累加，不物化。
     if (seq_ty->kind == TyKind::Range) {
@@ -333,7 +353,7 @@ VReg Lowerer::lower_sum(Call& c) {
         bool floats = opts_.fast_math && elem_ty->kind == TyKind::Float &&
                       acc_ty->kind == TyKind::Float;
         if (ints || floats) {
-            VReg seq = expr(*c.args[0]);
+            VReg seq = seq_conv != kNoReg ? seq_conv : expr(*c.args[0]);
             VReg start = floats ? const_float(0.0) : const_int(0);
             if (c.args.size() == 2)
                 start = coerce(expr(*c.args[1]), tc_.type_of(c.args[1].get()), acc_ty);
@@ -342,7 +362,7 @@ VReg Lowerer::lower_sum(Call& c) {
         }
     }
 
-    VReg seq = expr(*c.args[0]);
+    VReg seq = seq_conv != kNoReg ? seq_conv : expr(*c.args[0]);
     int seq_slot = new_temp_slot(seq_ty);
     store_slot(seq_slot, seq);
     Inst ln;
@@ -438,7 +458,8 @@ VReg Lowerer::lower_anyall(Call& c, bool is_any) {
     }
     TypePtr seq_ty = tc_.type_of(c.args[0].get());
     bool ok = seq_ty && (seq_ty->kind == TyKind::List || seq_ty->kind == TyKind::Tuple ||
-                         seq_ty->kind == TyKind::Str || seq_ty->kind == TyKind::Dict ||
+                         seq_ty->kind == TyKind::Str || seq_ty->kind == TyKind::Bytes ||
+                         seq_ty->kind == TyKind::Dict ||
                          seq_ty->kind == TyKind::Set || seq_ty->kind == TyKind::Range ||
                          seq_ty->kind == TyKind::Generator);
     if (!ok) {
@@ -449,7 +470,16 @@ VReg Lowerer::lower_anyall(Call& c, bool is_any) {
     }
     TypePtr elem_ty = t_unknown();
     if (seq_ty->kind == TyKind::Str) elem_ty = t_str();
+    else if (seq_ty->kind == TyKind::Bytes) elem_ty = t_int();
     else if (!seq_ty->sub.empty()) elem_ty = seq_ty->sub[0];
+    // bytes 不能按下标当 list 读：先物化成 list[int] 再走通用路径。
+    VReg seq_conv = kNoReg;
+    if (seq_ty->kind == TyKind::Bytes) {
+        seq_conv = call_runtime(RtFn::BytesToList, mk_list(t_int()), {expr(*c.args[0])});
+        push_temp(seq_conv);
+        seq_ty = mk_list(t_int());
+        elem_ty = t_int();
+    }
 
     // range：按边界算，不物化。
     if (seq_ty->kind == TyKind::Range) {
@@ -486,7 +516,7 @@ VReg Lowerer::lower_anyall(Call& c, bool is_any) {
         return load_slot(result, t_bool());
     }
 
-    VReg seq = expr(*c.args[0]);
+    VReg seq = seq_conv != kNoReg ? seq_conv : expr(*c.args[0]);
     int seq_slot = new_temp_slot(seq_ty);
     store_slot(seq_slot, seq);
     Inst ln;

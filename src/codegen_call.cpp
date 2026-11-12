@@ -583,6 +583,12 @@ void AsmGen::gen_call_rt(const Inst& in) {
                 emit2("movq", src_op(in.args[2]), "%rdx");
                 emit2("movq", src_op(in.args[3]), "%rcx");
                 break;
+            case RtFn::StrPercentFormat:
+                emit2("movq", src_op(in.args[0]), "%rdi");
+                emit2("movq", src_op(in.args[1]), "%rsi");
+                emit2("movq", src_op(in.args[2]), "%rdx");
+                emit2("movq", src_op(in.args[3]), "%rcx");
+                break;
             case RtFn::FuncReduceF:
                 emit2("movq", src_op(in.args[0]), "%rdi");
                 emit2("movq", src_op(in.args[1]), "%rsi");
@@ -664,6 +670,7 @@ void AsmGen::gen_call_rt(const Inst& in) {
             case RtFn::ListMinI64:
             case RtFn::ListMaxI64:
             case RtFn::StrToList:
+            case RtFn::BytesToList:
             case RtFn::StrWrapList:
             case RtFn::ListCopy:
             case RtFn::ListReversed:

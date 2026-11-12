@@ -890,7 +890,8 @@ VReg Lowerer::lower_builtin_call(const std::string& name, Call& c) {
             return xs;
         }
         if (!xt || (xt->kind != TyKind::List && xt->kind != TyKind::Tuple &&
-                    xt->kind != TyKind::Str && xt->kind != TyKind::Dict &&
+                    xt->kind != TyKind::Str && xt->kind != TyKind::Bytes &&
+                    xt->kind != TyKind::Dict &&
                     xt->kind != TyKind::Set && xt->kind != TyKind::File &&
                     xt->kind != TyKind::Range && xt->kind != TyKind::Generator)) {
             err(c.args[0]->line, c.args[0]->col,
@@ -900,7 +901,8 @@ VReg Lowerer::lower_builtin_call(const std::string& name, Call& c) {
         TypePtr et = t_unknown();
         VReg x = seq_as_list(c.args[0].get(), et);
         // str/dict/set/生成器 走 seq_as_list 时已经是新建的列表，不用再拷。
-        bool fresh = xt->kind == TyKind::Str || xt->kind == TyKind::Dict ||
+        bool fresh = xt->kind == TyKind::Str || xt->kind == TyKind::Bytes ||
+                     xt->kind == TyKind::Dict ||
                      xt->kind == TyKind::Set || xt->kind == TyKind::Generator;
         VReg l = fresh ? retype(x, result_ty())
                        : call_runtime(RtFn::ListCopy, result_ty(), {x});
@@ -972,7 +974,8 @@ VReg Lowerer::lower_builtin_call(const std::string& name, Call& c) {
             return xs;
         }
         if (!xt || (xt->kind != TyKind::List && xt->kind != TyKind::Tuple &&
-                    xt->kind != TyKind::Str && xt->kind != TyKind::Dict &&
+                    xt->kind != TyKind::Str && xt->kind != TyKind::Bytes &&
+                    xt->kind != TyKind::Dict &&
                     xt->kind != TyKind::Set && xt->kind != TyKind::File &&
                     xt->kind != TyKind::Range && xt->kind != TyKind::Generator)) {
             err(c.args[0]->line, c.args[0]->col,
@@ -1117,7 +1120,8 @@ VReg Lowerer::lower_builtin_call(const std::string& name, Call& c) {
             return xs;
         }
         if (!xt || (xt->kind != TyKind::List && xt->kind != TyKind::Tuple &&
-                    xt->kind != TyKind::Str && xt->kind != TyKind::Dict &&
+                    xt->kind != TyKind::Str && xt->kind != TyKind::Bytes &&
+                    xt->kind != TyKind::Dict &&
                     xt->kind != TyKind::Set && xt->kind != TyKind::File &&
                     xt->kind != TyKind::Range && xt->kind != TyKind::Generator)) {
             err(c.args[0]->line, c.args[0]->col,
@@ -1283,7 +1287,8 @@ VReg Lowerer::lower_builtin_call(const std::string& name, Call& c) {
             return xs;
         }
         if (!xt || (xt->kind != TyKind::List && xt->kind != TyKind::Tuple &&
-                    xt->kind != TyKind::Str && xt->kind != TyKind::Dict &&
+                    xt->kind != TyKind::Str && xt->kind != TyKind::Bytes &&
+                    xt->kind != TyKind::Dict &&
                     xt->kind != TyKind::Set && xt->kind != TyKind::File &&
                     xt->kind != TyKind::Range && xt->kind != TyKind::Generator)) {
             err(c.args[0]->line, c.args[0]->col,

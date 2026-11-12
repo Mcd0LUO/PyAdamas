@@ -32,7 +32,7 @@ struct ModuleInfo {
     std::map<std::string, ImportedClass> classes;
 };
 
-inline constexpr uint16_t kModuleFormatVersion = 2;
+inline constexpr uint16_t kModuleFormatVersion = 3;
 inline constexpr uint16_t kModuleAbiVersion = 1;
 
 std::expected<std::string, std::string> encode_module_interface(const ModuleInfo& info);

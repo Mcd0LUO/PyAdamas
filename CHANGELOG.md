@@ -4,6 +4,37 @@
 
 早期阶段没有逐条留痕，按阶段归纳；0.4 之后逐条记录。
 
+## [0.97] - 2026-11-12
+
+`bytes` 收尾：迭代、`%` 格式化、跨模块类型。
+
+### 新增
+
+- **`for c in b"..."` 与推导式**：逐字节迭代，元素是 0..255 的 `int`
+  （降级期先转 `list[int]`，再走通用列表路径）。`list` / `tuple` / `sum` /
+  `min` / `max` / `any` / `all` / `sorted` / `enumerate` 也接受 bytes。
+- **str / bytes 的 printf 风格 `%`**：支持 `d/i/u/x/X/o/f/F/e/E/g/G/s/r/c`、
+  `%%`、`-`/`0`/`+`/空格标志、宽度和精度；`b"%d-%s" % (7, b"x")`。
+  不支持 `#` 前缀、映射 key 和把 list 当多参数元组。
+- **`bytes` 标注**：`x: bytes` 现在解析为 `bytes` 类型；模块接口新增
+  bytes 类型标签（格式版本 2→3），跨模块全局与函数签名不再降级成 `unknown`。
+
+### 修复
+
+- 模块接口编码补上 `Popen` / `DateTime` / `Path` / `Deque` 的 unknown 分支，
+  避免新增标签后未写入字节导致接口错位。
+
+### 测试
+
+- `tests/run/89_bytes_final.py`：bytes 迭代、推导式、str/bytes 的 `%`。
+- `tests/modules/basic` 增加 bytes 全局与函数签名。
+- 用例数：运行 88→89。
+
+### 文档
+
+- `language.md` / `compatibility.md` / `runtime.md` / `ir.md` 同步迭代、
+  `%` 格式化、`py23_bytes_to_list` / `py23_percent_format` 与接口标签。
+
 ## [0.96] - 2026-11-12
 
 `collections.defaultdict`。

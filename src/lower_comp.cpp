@@ -132,6 +132,13 @@ VReg Lowerer::lower_comp(Expr& e) {
         auto& g = static_cast<Comprehension&>(*(*gens)[gi]);
         VReg seq = expr(*g.iter);
         TypePtr sty = tc_.type_of(g.iter.get());
+        // bytes 迭代产出 int（0..255）：先转 list[int] 再走普通列表路径。
+        if (sty && sty->kind == TyKind::Bytes) {
+            VReg xs = call_runtime(RtFn::BytesToList, mk_list(t_int()), {seq});
+            push_temp(xs);
+            seq = xs;
+            sty = mk_list(t_int());
+        }
 
         if (g.is_async) {
             TypePtr sst = sty ? sty : t_unknown();

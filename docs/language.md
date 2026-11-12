@@ -154,7 +154,21 @@ str 切片一致（只是单位是字节）。方法（`upper()` 这类）还没
 第三个参数限制替换次数）/ `find` / `rfind` / `count` / `split` / `startswith` /
 `endswith` / `join`。字节层面和 `str` 完全一致，只是结果标成 `bytes`——
 `split` 返回 `list[bytes]`，`join` 要一个 `list[bytes]`。
-`for c in b"..."` 还不支持（要转 `list[int]`）。
+
+`for c in b"..."` 逐字节迭代，元素是 0..255 的 `int`（内部先转 `list[int]`），
+列表/集合/字典推导式同样适用；`list()` / `tuple()` / `sum()` / `min()` /
+`max()` / `any()` / `all()` / `sorted()` / `enumerate()` 也接受 `bytes`，
+元素按 int 处理。也支持 printf 风格的 `%` 格式化：
+
+```python
+b"%d-%s" % (7, b"x")     # b'7-x'
+b"%05d" % 42             # b'00042'
+```
+
+`%` 支持 `d/i/u/x/X/o/f/F/e/E/g/G/s/r/c`、`%%`、`-`/`0`/`+`/空格标志、
+宽度和精度；不支持 `#` 前缀、映射 key（`%(name)s`）和把 list 当多参数元组。
+`bytes` 标注（`x: bytes`）和跨模块函数签名都保留 `bytes` 类型，不再降级成
+`unknown`。
 
 ### 列表
 

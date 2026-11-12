@@ -147,6 +147,7 @@ Py23Str* py23_fmt_i64(int64_t v, Py23Str* spec);
 Py23Str* py23_fmt_bool(int64_t v, Py23Str* spec);
 Py23Str* py23_fmt_f64(double v, Py23Str* spec);
 Py23Str* py23_fmt_str(Py23Str* v, Py23Str* spec);
+Py23Str* py23_percent_format(Py23Str* pat, Py23List* args, Py23Str* desc, int64_t is_bytes);
 Py23Str* py23_fmt_complex(Py23Complex* v, Py23Str* spec);
 Py23Str* py23_repr_str(Py23Str* v);
 
@@ -523,6 +524,7 @@ Py23List* py23_list_slice(Py23List* src, int64_t start, int64_t stop, int64_t st
 Py23Str* py23_str_slice(Py23Str* src, int64_t start, int64_t stop, int64_t step);
 void py23_list_slice_assign(Py23List* dst, int64_t start, int64_t stop, int64_t step, Py23List* src);
 Py23List* py23_str_to_list(Py23Str* s);
+Py23List* py23_bytes_to_list(Py23Str* s);
 Py23List* py23_str_wrap_list(Py23Str* s);
 void* py23_obj_new(int64_t size, void (*dtor)(void*), void (*release)(void*));
 size_t gc_hash(uintptr_t p);

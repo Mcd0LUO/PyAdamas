@@ -609,10 +609,56 @@ VReg Lowerer::lower_constant(Constant& c) {
     return const_none();
 }
 
+VReg Lowerer::lower_percent_format(BinOp& b, TypePtr lt, TypePtr ty) {
+    TypePtr rt = tc_.type_of(b.right.get());
+    std::vector<TypePtr> argtys;
+    // CPython 把固定长度 tuple 当作参数列表（含 0/1 个元素）；
+    // list 仍按单个值处理，暂不支持。
+    bool tuple_args = rt && rt->kind == TyKind::Tuple && !rt->variadic;
+    if (tuple_args) argtys = rt->sub;
+    else argtys.push_back(rt);
+    std::string desc;
+    for (auto& t : argtys) {
+        if (t && t->kind == TyKind::Int) desc.push_back('i');
+        else if (t && t->kind == TyKind::Bool) desc.push_back('b');
+        else if (t && t->kind == TyKind::Float) desc.push_back('f');
+        else if (t && (t->kind == TyKind::Str || t->kind == TyKind::Bytes)) desc.push_back('s');
+        else if (t && t->kind == TyKind::None) desc.push_back('n');
+        else desc.push_back('x');
+    }
+    VReg pat = expr(*b.left);
+    VReg args;
+    if (tuple_args) {
+        args = expr(*b.right);
+    } else {
+        VReg v = expr(*b.right);
+        TypePtr vt = rt ? rt : t_unknown();
+        TypePtr list_ty = mk_list(vt);
+        int kind = list_kind(list_ty);
+        retain_elem(v, kind);
+        Inst mk;
+        mk.op = IrOp::MakeList;
+        mk.imm = kind;
+        mk.args.push_back(v);
+        args = def_heap(list_ty, std::move(mk));
+    }
+    TypePtr out_ty =
+        (ty && (ty->kind == TyKind::Str || ty->kind == TyKind::Bytes)) ? ty : t_str();
+    VReg r = call_runtime(RtFn::StrPercentFormat, out_ty,
+                          {pat, args, const_str(desc),
+                           const_int(lt->kind == TyKind::Bytes ? 1 : 0)});
+    push_temp(r);
+    return r;
+}
+
 VReg Lowerer::lower_binop(BinOp& b) {
     TypePtr ty = tc_.type_of(&b);
     TypePtr lt = tc_.type_of(b.left.get());
     TypePtr rt = tc_.type_of(b.right.get());
+    // str/bytes 的 % 格式化（printf 风格）。
+    if (b.op == Tok::PERCENT && lt &&
+        (lt->kind == TyKind::Str || lt->kind == TyKind::Bytes))
+        return lower_percent_format(b, lt, ty);
     // Path / str：路径拼接（对应 CPython 的 Path.__truediv__）
     if (b.op == Tok::SLASH && lt && lt->kind == TyKind::Path) {
         VReg p = expr(*b.left);

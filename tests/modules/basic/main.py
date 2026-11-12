@@ -7,6 +7,7 @@ print(util.base)
 util.base = 20
 print(util.base)
 print(sc(1.5))
+print(util.wrap(util.tag))
 print(__name__)
 
 # --- expect ---
@@ -15,4 +16,5 @@ print(__name__)
 # 10
 # 20
 # 3.0
+# b'pre!'
 # __main__

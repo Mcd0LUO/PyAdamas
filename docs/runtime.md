@@ -270,6 +270,7 @@ longjmp 回同步调用点。GC 清扫和进程退出不跑析构器，但会单
 | `py23_list_min_i64` / `max_i64` | `(Py23List*) -> i64` | O2 归约；AVX2 compare+blend，空表抛 ValueError |
 | `py23_list_slice_assign` | `(Py23List*, i64, i64, i64, Py23List*) -> void` | 切片赋值；step 1 支持长度变化 |
 | `py23_str_to_list` | `(Py23Str*) -> Py23List*` | 按字节拆成 list[str]，每字符新串 |
+| `py23_bytes_to_list` | `(Py23Str*) -> Py23List*` | 按字节拆成 list[int]（0..255），`for c in b"..."` 用 |
 | `py23_range_new` | `(i64 start, i64 stop, i64 step) -> Py23List*` | range() 实体化成 list[int]；step 0 抛 ValueError |
 
 ### 字典 / 集合
@@ -504,6 +505,7 @@ longjmp 回同步调用点。GC 清扫和进程退出不跑析构器，但会单
 | `py23_str_from_none` | `() -> str*` | `"None"` |
 | `py23_str_eq` | `(str*, str*) -> i64` | 逐字节相等，返回 0/1 |
 | `py23_str_cmp` | `(str*, str*) -> i64` | 三路比较，返回 -1/0/1 |
+| `py23_percent_format` | `(str* pat, list* args, str* desc, i64 is_bytes) -> str*` | printf 风格 `%`；`desc` 每个字节描述实参域（`i` int、`b` bool、`f` float、`s` str/bytes、`n` None），非法组合抛 TypeError |
 
 `py23_str_cmp` 用 `memcmp`，前提是 **UTF-8 的字节序与码点序一致**（这是 UTF-8 的设计性质），所以结果与 Python 的字符串比较相同。
 

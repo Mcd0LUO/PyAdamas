@@ -244,7 +244,7 @@ P0/P1/P2，O2 再加控制流与小函数优化：
 |---|---|
 | 常量 | 直接产出 `const.*`；字符串进池 |
 | `Name` | 局部 `load.slot`，否则 `load.global` |
-| `BinOp` | 字符串 `+` 走 `py23_str_concat`；数值走 `bin` |
+| `BinOp` | 字符串 `+` 走 `py23_str_concat`；数值走 `bin`；str/bytes 的 `%` 走 `py23_percent_format` |
 | `BoolOp` | 短路：先求左值，按真值分支，两条路径都把结果写进同一个临时槽 |
 | `Compare` | 单次比较一条 `cmp`；链式比较把中间值存槽，逐个比较并短路 |
 | `Call` | 内置特化（`print` / `len` / `int` / `float` / `str` / `bool` / `range`）→ 否则按 `FuncInfo` 重排实参 → `call`；`*` 打包成 list、`**` 打包成 dict 作为末尾形参传入 |
@@ -263,6 +263,15 @@ P0/P1/P2，O2 再加控制流与小函数优化：
 ### 几处细节
 
 **循环变量私有**：`for i in range(n)` 用独立计数器槽，每轮把计数器写进 `i`。Python 里在循环体给 `i` 重新赋值不影响迭代，两者必须分开。
+
+**bytes 迭代**：`for c in b"..."` 和推导式在降级期先 `call.rt py23_bytes_to_list`
+转成 `list[int]`（元素 0..255），再走通用列表路径；多一次分配，换取与
+`iter_elem(Bytes) == int` 的类型规则一致。
+
+**`%` 格式化**：`str` / `bytes` 的 `%` 降级成
+`py23_percent_format(pattern, args, desc, is_bytes)`。`args` 是单元素列表或
+tuple 字面量；`desc` 是编译期按实参静态类型生成的一串 `i`/`f`/`s`
+（int/bool、float、str/bytes），运行时据此从 8 字节槽里取正确的值域。
 
 **参数重排**：按 `FuncInfo` 把位置参数和关键字参数绑到形参槽上，缺省的用字面量默认值填。签名不可知时（函数值调用）只接受纯位置参数，且不能带 `*` / `**`。`*args` / `**kwargs` 形参接在普通形参之后，调用点把多出来的位置实参装进 `list.new`、关键字实参装进 `dict.new`，再按普通实参传入。`*` 右侧是定长 tuple 时静态展开成逐元素下标读。绑完之后按形参类型逐个 `coerce`。
 

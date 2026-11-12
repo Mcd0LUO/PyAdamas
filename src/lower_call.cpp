@@ -500,6 +500,12 @@ VReg Lowerer::seq_as_list(Expr* e, TypePtr& elem_out) {
             push_temp(l);
             return l;
         }
+        case TyKind::Bytes: {
+            elem_out = t_int();
+            VReg l = call_runtime(RtFn::BytesToList, mk_list(t_int()), {x});
+            push_temp(l);
+            return l;
+        }
         case TyKind::Dict:
         case TyKind::Set: {
             elem_out = xt->sub.empty() ? t_unknown() : xt->sub[0];

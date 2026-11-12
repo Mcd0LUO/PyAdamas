@@ -287,3 +287,212 @@ Py23Str* py23_repr_str(Py23Str* v) {
     return s;
 }
 
+/* ── printf 风格 % 格式化 ──────────────────────────────────────── */
+
+typedef struct {
+    char* p;
+    int64_t len;
+    int64_t cap;
+} PBuf;
+
+static void pb_append(PBuf* b, const char* s, int64_t n) {
+    if (b->len + n + 1 > b->cap) {
+        int64_t ncap = b->cap ? b->cap * 2 : 64;
+        while (ncap < b->len + n + 1) ncap *= 2;
+        char* np = (char*)realloc(b->p, (size_t)ncap);
+        if (!np) panic_c("out of memory");
+        b->p = np;
+        b->cap = ncap;
+    }
+    if (n > 0) memcpy(b->p + b->len, s, (size_t)n);
+    b->len += n;
+    b->p[b->len] = '\0';
+}
+
+static Py23Str* fmt_with(const char* spec, int n, int64_t raw, double d, Py23Str* s, char kind) {
+    Py23Str sp;
+    sp.len = n;
+    sp.hash = 0;
+    sp.data = spec;
+    switch (kind) {
+        case 'i': return py23_fmt_i64(raw, &sp);
+        case 'f': return py23_fmt_f64(d, &sp);
+        case 's': return py23_fmt_str(s, &sp);
+        default: return NULL;
+    }
+}
+
+/* desc 是编译期生成的类型描述：i=int/bool，f=float，s=str/bytes。
+   数字格式（d/i/u/x/X/o/f/F/e/E/g/G）要求对应数值类型；s/r 可以
+   格式化任意受支持的类型。返回新字符串，bytes 与 str 共用表示。 */
+Py23Str* py23_percent_format(Py23Str* pat, Py23List* args, Py23Str* desc, int64_t is_bytes) {
+    (void)is_bytes;
+    if (!pat) return str_new("", 0);
+    if (!args) args = py23_list_new(0, 0);
+    PBuf out = {0};
+    const char* p = pat->data;
+    int64_t n = pat->len;
+    int64_t ai = 0;
+    for (int64_t i = 0; i < n; ++i) {
+        if (p[i] != '%') {
+            pb_append(&out, &p[i], 1);
+            continue;
+        }
+        ++i;
+        if (i >= n) py23_raise_c("ValueError", "incomplete format");
+        if (p[i] == '%') {
+            pb_append(&out, "%", 1);
+            continue;
+        }
+        int left = 0, zero = 0, plus = 0, space = 0;
+        for (; i < n; ++i) {
+            char c = p[i];
+            if (c == '-') left = 1;
+            else if (c == '0') zero = 1;
+            else if (c == '+') plus = 1;
+            else if (c == ' ') space = 1;
+            else if (c == '#') { /* 前缀 # 暂不支持 */ }
+            else break;
+        }
+        int width = 0;
+        while (i < n && p[i] >= '0' && p[i] <= '9') {
+            width = width * 10 + (p[i] - '0');
+            ++i;
+        }
+        int prec = -1;
+        if (i < n && p[i] == '.') {
+            ++i;
+            prec = 0;
+            while (i < n && p[i] >= '0' && p[i] <= '9') {
+                prec = prec * 10 + (p[i] - '0');
+                ++i;
+            }
+        }
+        if (i >= n) py23_raise_c("ValueError", "incomplete format");
+        char conv = p[i];
+        if (ai >= args->len)
+            py23_raise_c("TypeError", "not enough arguments for format string");
+        char dt = (desc && ai < desc->len) ? desc->data[ai] : 'x';
+        int64_t raw = args->data[ai++];
+        double dv = 0.0;
+        if (dt == 'i' || dt == 'b') dv = (double)raw;
+        else if (dt == 'f') memcpy(&dv, &raw, sizeof dv);
+
+        char spec[64];
+        int si = 0;
+        if (left) spec[si++] = '<';
+        if (plus) spec[si++] = '+';
+        else if (space) spec[si++] = ' ';
+        int numeric = conv != 's' && conv != 'r' && conv != 'c';
+        if (zero && numeric) spec[si++] = '0';
+        if (width > 0) {
+            int m = snprintf(spec + si, sizeof spec - (size_t)si, "%d", width);
+            if (m > 0) si += m;
+        }
+        if (prec >= 0 && (conv == 's' || conv == 'r' || conv == 'f' || conv == 'F' ||
+                          conv == 'e' || conv == 'E' || conv == 'g' || conv == 'G')) {
+            int m = snprintf(spec + si, sizeof spec - (size_t)si, ".%d", prec);
+            if (m > 0) si += m;
+        }
+
+        Py23Str* piece = NULL;
+        Py23Str* tmp = NULL;
+        int tmp_owned = 0;
+        switch (conv) {
+            case 'd':
+            case 'i':
+            case 'u':
+            case 'n':
+                spec[si] = 'd';
+                if (dt == 'i' || dt == 'b')
+                    piece = fmt_with(spec, si + 1, raw, 0.0, NULL, 'i');
+                else if (dt == 'f')
+                    piece = fmt_with(spec, si + 1, (int64_t)dv, 0.0, NULL, 'i');
+                else
+                    py23_raise_c("TypeError", "%%d format: a number is required");
+                break;
+            case 'x':
+            case 'X':
+            case 'o':
+                if (dt != 'i' && dt != 'b')
+                    py23_raise_c("TypeError", "%%x format: an integer is required");
+                spec[si] = conv;
+                piece = fmt_with(spec, si + 1, raw, 0.0, NULL, 'i');
+                break;
+            case 'f':
+            case 'F':
+            case 'e':
+            case 'E':
+            case 'g':
+            case 'G':
+                if (dt != 'f' && dt != 'i' && dt != 'b')
+                    py23_raise_c("TypeError", "%%f format: a number is required");
+                spec[si] = conv;
+                piece = fmt_with(spec, si + 1, 0, dv, NULL, 'f');
+                break;
+            case 'c': {
+                spec[si] = 's';
+                if (dt == 'i' || dt == 'b') {
+                    if (raw < 0 || raw > 255)
+                        py23_raise_c("ValueError", "%%c requires a character code in range(256)");
+                    char ch = (char)raw;
+                    tmp = str_new(&ch, 1);
+                    tmp_owned = 1;
+                } else if (dt == 's') {
+                    tmp = (Py23Str*)raw;
+                    if (!tmp || tmp->len != 1)
+                        py23_raise_c("ValueError", "%%c requires a single character");
+                } else {
+                    py23_raise_c("TypeError", "%%c requires an int or a single character");
+                }
+                piece = fmt_with(spec, si + 1, 0, 0.0, tmp, 's');
+                break;
+            }
+            case 's':
+            case 'r': {
+                spec[si] = 's';
+                Py23Str* sv = NULL;
+                if (dt == 's') {
+                    sv = (Py23Str*)raw;
+                    if (conv == 'r') {
+                        tmp = py23_repr_str(sv);
+                        sv = tmp;
+                        tmp_owned = 1;
+                    }
+                } else if (dt == 'i') {
+                    tmp = py23_str_from_i64(raw);
+                    sv = tmp;
+                    tmp_owned = 1;
+                } else if (dt == 'b') {
+                    tmp = py23_str_from_bool(raw);
+                    sv = tmp;
+                    tmp_owned = 1;
+                } else if (dt == 'n') {
+                    tmp = py23_str_from_none();
+                    sv = tmp;
+                    tmp_owned = 1;
+                } else if (dt == 'f') {
+                    tmp = py23_str_from_f64(dv);
+                    sv = tmp;
+                    tmp_owned = 1;
+                } else {
+                    py23_raise_c("TypeError", "unsupported format argument type");
+                }
+                piece = fmt_with(spec, si + 1, 0, 0.0, sv, 's');
+                break;
+            }
+            default:
+                py23_raise_c("ValueError", "unsupported format character");
+        }
+        if (!piece) py23_raise_c("ValueError", "format failed");
+        pb_append(&out, piece->data, piece->len);
+        py23_rc_dec(piece);
+        if (tmp_owned && tmp && tmp != piece) py23_rc_dec(tmp);
+    }
+    if (ai < args->len)
+        py23_raise_c("TypeError", "not all arguments converted during string formatting");
+    Py23Str* res = str_new(out.p ? out.p : "", out.len);
+    free(out.p);
+    return res;
+}
+
