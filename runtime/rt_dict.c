@@ -21,11 +21,18 @@ int64_t dict_hash_value(int64_t kind, int64_t v) {
     uint64_t h;
     if (kind == 1) {
         Py23Str* s = (Py23Str*)v;
+        /* 长串的 hash 字段不参与 SSO（字符内联只占 <=7 字节的串），
+           可以当缓存用；字典反复查同一个长键时省掉整串 FNV。 */
+        if (s->len > 7 && s->hash != 0) return s->hash;
         h = 1469598103934665603ull;
         for (int64_t i = 0; i < s->len; ++i) {
             h ^= (unsigned char)s->data[i];
             h *= 1099511628211ull;
         }
+        h = mix64(h);
+        int64_t hv = (int64_t)(h ? h : 1);
+        if (s->len > 7) s->hash = hv;
+        return hv;
     } else if (kind == 2) {
         double d;
         memcpy(&d, &v, sizeof d);

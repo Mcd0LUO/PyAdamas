@@ -31,9 +31,10 @@
 | 0.100 | 短字符串 freelist、`split` 去泄漏与预分配（`string.capwords` 反超 CPython） |
 | 0.101 | 列表结构体/data freelist、`split(sep)` 单遍 + `memchr`、append 快路径 |
 | 0.102 | 单遍 `string.capwords` intrinsic、<=7 字节短串 SSO |
+| 0.103 | 单字符/True/False/None 静态驻留、`memchr` 搜索、长键哈希缓存、不可变串共享 |
 | 许可证 | Apache-2.0（见 [LICENSE](../LICENSE) / [NOTICE](../NOTICE)） |
 
-## 当前状态（0.102）
+## 当前状态（0.103）
 
 流水线 `源码 → 词法 → AST → lambda 脱糖 → 类型检查 → IR → x86-64 汇编 → 可执行文件` 已打通。
 

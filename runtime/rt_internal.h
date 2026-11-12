@@ -525,6 +525,14 @@ Py23Str* py23_str_slice(Py23Str* src, int64_t start, int64_t stop, int64_t step)
 void py23_list_slice_assign(Py23List* dst, int64_t start, int64_t stop, int64_t step, Py23List* src);
 Py23List* py23_str_to_list(Py23Str* s);
 Py23Str* py23_str_capwords(Py23Str* s);
+/* 静态驻留字符串：256 个单字节串以及 "True"/"False"/"None"，均为永生对象。 */
+Py23Str* py23_char_str(int64_t c);
+Py23Str* py23_str_true(void);
+Py23Str* py23_str_false(void);
+Py23Str* py23_str_none(void);
+/* 在 base[0..n) 的 [from, n-m] 区间里找 pat[0..m)，返回起点或 -1。 */
+int64_t py23_find_bytes(const char* base, int64_t n, const char* pat, int64_t m,
+                        int64_t from);
 Py23List* py23_bytes_to_list(Py23Str* s);
 Py23List* py23_str_wrap_list(Py23Str* s);
 void* py23_obj_new(int64_t size, void (*dtor)(void*), void (*release)(void*));

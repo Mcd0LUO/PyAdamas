@@ -51,7 +51,7 @@ typedef struct {
 
 ### 字符串
 
-`len` 放在**偏移 0**，这是刻意的：`len(s)` 编译成一条 `movq (%rax), %rax`，`if s:` 也只是读这个字段。`hash` 预留给字符串驻留，现在恒为 0。
+`len` 放在**偏移 0**，这是刻意的：`len(s)` 编译成一条 `movq (%rax), %rax`，`if s:` 也只是读这个字段。`hash` 现在有两种用途：≤7 字节的短串用它存内联字符；更长的串用它缓存字典哈希（FNV-1a + mix64）。
 
 字符串有两种来源，负载布局完全一致，运行时函数不需要区分：
 
@@ -70,6 +70,16 @@ RC 归零时不 `free`，而是回到同档池里，下一次同档分配直接�
 `data` 指向这段内联区；长串仍用结构体后面的字符区。值仍然是裸指针，对象
 本身仍走 RC/GC，所以这不是 tagged-value 级别的 SSO，只是省掉短串的尾部
 字符区。
+
+长串的哈希在第一次被字典使用时算好写进 `hash`；**长串字面量的哈希在
+编译期算好**直接写进静态对象——`.data.rel.ro` 在 PIE + RELRO 下是只读的，
+运行时不能在上面做懒缓存。因此 `d["长键"]` 这类重复查找不再每次重扫整串。
+
+单字节字符串（`s[i]`、`for c in s`、`chr()`）和 `"True"/"False"/"None"`
+的转换结果是**静态永生对象**：256 个单字节串在首次使用时初始化并登记进
+RC 索引，取字符不再分配。字符串不可变，共享对象与 CPython 的行为一致；
+`s[:]`、无变化的 `strip()`、`''.join([x])` 也按 CPython 的做法直接返回原串
+（inc 一次）。
 
 ### 列表
 
@@ -511,11 +521,13 @@ longjmp 回同步调用点。GC 清扫和进程退出不跑析构器，但会单
 | 函数 | 签名 | 语义 |
 |---|---|---|
 | `py23_str_concat` | `(str*, str*) -> str*` | 新建对象，两次 `memcpy` |
-| `py23_str_char_at` | `(str*, i64) -> str*` | 负索引先加 `len`；越界抛 IndexError；返回单字节新串 |
-| `py23_str_from_i64` | `(i64) -> str*` | `%lld` |
+| `py23_str_char_at` | `(str*, i64) -> str*` | 负索引先加 `len`；越界抛 IndexError；返回驻留的单字节串（不分配） |
+| `py23_char_str` | `(i64) -> str*` | 取 256 个静态驻留单字节串之一（按低 8 位） |
+| `py23_str_from_i64` | `(i64) -> str*` | 手写十进制，不经过 `snprintf` |
 | `py23_str_from_f64` | `(double) -> str*` | CPython `repr` 规则，见下 |
-| `py23_str_from_bool` | `(i64) -> str*` | `"True"` / `"False"` |
-| `py23_str_from_none` | `() -> str*` | `"None"` |
+| `py23_str_from_bool` | `(i64) -> str*` | 静态驻留的 `"True"` / `"False"` |
+| `py23_str_from_none` | `() -> str*` | 静态驻留的 `"None"` |
+| `py23_find_bytes` | `(const char*, i64, const char*, i64, i64) -> i64` | `memchr` 找首字节 + `memcmp` 校验；`find`/`count`/`replace`/`split`/`in` 共用 |
 | `py23_str_eq` | `(str*, str*) -> i64` | 逐字节相等，返回 0/1 |
 | `py23_str_cmp` | `(str*, str*) -> i64` | 三路比较，返回 -1/0/1 |
 | `py23_str_capwords` | `(str*) -> str*` | 单遍 `string.capwords`：按 ASCII 空白切词、词首大写/其余小写，只分配一个输出串 |

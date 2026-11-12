@@ -446,6 +446,73 @@ Py23Str* str_new(const char* p, int64_t len) {
     return s;
 }
 
+/* ── 静态驻留字符串 ─────────────────────────────────────────────
+   字符串迭代/下标每取一个字符都会造一个单字节串；bool/None 转字符串
+   也在 print/repr 里反复出现。字符串不可变，这些结果可以做成永生对象：
+   256 个单字节串 + "True"/"False"/"None"，首次用到时初始化并登记进
+   RC 索引（unknown 值的运行期类型检查要靠它）。 */
+typedef struct {
+    Py23Rc h;
+    Py23Str s;
+    char c[8];
+} Py23StaticStr;
+
+static Py23StaticStr char_tab[256];
+static Py23StaticStr kw_true_s, kw_false_s, kw_none_s;
+static int static_strs_ready;
+
+static void static_str_init(Py23StaticStr* e, const char* p, int64_t n) {
+    e->h.next = NULL;
+    e->h.prev = NULL;
+    e->h.rc = PY23_RC_IMMORTAL;
+    e->h.dtor = NULL;
+    e->h.release = NULL;
+    e->h.size = (int64_t)sizeof(Py23Str);
+    e->h.kind = PY23_RC_STR;
+    e->h.marked = PY23_RC_UNTRACKED;
+    e->s.len = n;
+    e->s.hash = 0;
+    memcpy(e->c, p, (size_t)n);
+    e->c[n] = '\0';
+    e->s.data = e->c;
+    if (!rc_index_off) rc_index_put(&e->h);
+}
+
+static void static_strs_init(void) {
+    for (int i = 0; i < 256; ++i) {
+        char ch = (char)i;
+        static_str_init(&char_tab[i], &ch, 1);
+    }
+    static_str_init(&kw_true_s, "True", 4);
+    static_str_init(&kw_false_s, "False", 5);
+    static_str_init(&kw_none_s, "None", 4);
+    static_strs_ready = 1;
+}
+
+static void static_strs_ensure(void) {
+    if (!static_strs_ready) static_strs_init();
+}
+
+Py23Str* py23_char_str(int64_t c) {
+    static_strs_ensure();
+    return &char_tab[(int)(c & 0xff)].s;
+}
+
+Py23Str* py23_str_true(void) {
+    static_strs_ensure();
+    return &kw_true_s.s;
+}
+
+Py23Str* py23_str_false(void) {
+    static_strs_ensure();
+    return &kw_false_s.s;
+}
+
+Py23Str* py23_str_none(void) {
+    static_strs_ensure();
+    return &kw_none_s.s;
+}
+
 /* ── 循环收集器 ───────────────────────────────────────────────── */
 
 void** gc_globals;

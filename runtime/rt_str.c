@@ -60,7 +60,7 @@ Py23Str* py23_str_concat(Py23Str* a, Py23Str* b) {
 Py23Str* py23_str_char_at(Py23Str* s, int64_t i) {
     if (i < 0) i += s->len;
     if (i < 0 || i >= s->len) py23_raise_c("IndexError", "string index out of range");
-    return str_new(s->data + i, 1);
+    return py23_char_str((unsigned char)s->data[i]);
 }
 
 Py23Str* py23_str_from_i64(int64_t v) {
@@ -85,10 +85,10 @@ Py23Str* py23_str_from_f64(double v) {
 }
 
 Py23Str* py23_str_from_bool(int64_t v) {
-    return v ? str_new("True", 4) : str_new("False", 5);
+    return v ? py23_str_true() : py23_str_false();
 }
 
-Py23Str* py23_str_from_none(void) { return str_new("None", 4); }
+Py23Str* py23_str_from_none(void) { return py23_str_none(); }
 
 /* ── 字符串/数值转换 ────────────────────────────────────────────
    字符串是字节串；int()/float() 的解析按 CPython 的规则做（允许
@@ -174,8 +174,7 @@ int64_t py23_ord(Py23Str* s) {
 Py23Str* py23_chr(int64_t c) {
     /* 字节串：只支持 0..255（见 compatibility.md）。 */
     if (c < 0 || c > 255) py23_raise_c("ValueError", "chr() arg not in range(256)");
-    char b = (char)(unsigned char)c;
-    return str_new(&b, 1);
+    return py23_char_str(c);
 }
 
 Py23Str* py23_int_to_base(int64_t v, int64_t base) {
@@ -277,6 +276,24 @@ static int sm_char_in_set(char c, Py23Str* set) {
     return 0;
 }
 
+/* 在 base[0..n) 的 [from, n-m] 区间里找 pat[0..m)。先用 memchr 定位首字节，
+   只对首字节命中的位置做整段 memcmp；m==1 时 memchr 的结果就是答案。 */
+int64_t py23_find_bytes(const char* base, int64_t n, const char* pat, int64_t m,
+                        int64_t from) {
+    if (m <= 0) return from <= n ? from : -1;
+    if (from < 0) from = 0;
+    int64_t last = n - m;
+    int64_t i = from;
+    while (i <= last) {
+        const char* hit = (const char*)memchr(base + i, pat[0], (size_t)(last - i + 1));
+        if (!hit) return -1;
+        i = (int64_t)(hit - base);
+        if (m == 1 || memcmp(hit, pat, (size_t)m) == 0) return i;
+        ++i;
+    }
+    return -1;
+}
+
 static int64_t sm_find_from(Py23Str* s, Py23Str* sub, int64_t start, int64_t end) {
     if (start < 0) start += s->len;
     if (start < 0) start = 0;
@@ -284,14 +301,7 @@ static int64_t sm_find_from(Py23Str* s, Py23Str* sub, int64_t start, int64_t end
     if (end > s->len) end = s->len;
     if (end < 0) end = 0;
     if (sub->len == 0) return start <= end ? start : -1;
-    if (sub->len == 1 && end > start) {
-        const char* hit = (const char*)memchr(s->data + start, sub->data[0],
-                                              (size_t)(end - start));
-        return hit ? (int64_t)(hit - s->data) : -1;
-    }
-    for (int64_t i = start; i + sub->len <= end; ++i)
-        if (memcmp(s->data + i, sub->data, (size_t)sub->len) == 0) return i;
-    return -1;
+    return py23_find_bytes(s->data, end, sub->data, sub->len, start);
 }
 
 /* 单遍 capwords：不建中间词表，直接写进一个输出字符串。
@@ -352,6 +362,11 @@ int64_t py23_str_method(Py23Str* s, int64_t op, int64_t a0, int64_t a1, int64_t 
                 while (e > b && (chars ? sm_char_in_set(s->data[e - 1], chars)
                                        : sm_is_space(s->data[e - 1])))
                     --e;
+            /* 没有可剥离的字符时按 CPython 的做法直接共享原串。 */
+            if (b == 0 && e == s->len) {
+                py23_rc_inc(s);
+                return (int64_t)s;
+            }
             return (int64_t)str_new(s->data + b, e - b);
         }
         case 8: { /* split() 按空白 */
@@ -385,16 +400,7 @@ int64_t py23_str_method(Py23Str* s, int64_t op, int64_t a0, int64_t a1, int64_t 
             int64_t done = 0;
             while (i <= s->len) {
                 if (maxsplit >= 0 && done >= maxsplit) break;
-                int64_t j = -1;
-                if (sep->len == 1) {
-                    const char* hit = (const char*)memchr(s->data + i, sep->data[0],
-                                                          (size_t)(s->len - i));
-                    if (hit) j = (int64_t)(hit - s->data);
-                } else {
-                    for (j = i; j + sep->len <= s->len; ++j)
-                        if (memcmp(s->data + j, sep->data, (size_t)sep->len) == 0) break;
-                    if (j + sep->len > s->len) j = -1;
-                }
+                int64_t j = py23_find_bytes(s->data, s->len, sep->data, sep->len, i);
                 if (j < 0) break;
                 sm_push_str(out, str_new(s->data + i, j - i));
                 i = j + sep->len;
@@ -405,6 +411,12 @@ int64_t py23_str_method(Py23Str* s, int64_t op, int64_t a0, int64_t a1, int64_t 
         }
         case 10: { /* join(parts) */
             Py23List* parts = (Py23List*)a0;
+            /* 空分隔符拼单个元素等价于原串；CPython 也返回同一对象。 */
+            if (parts->len == 1 && s->len == 0) {
+                Py23Str* only = (Py23Str*)parts->data[0];
+                py23_rc_inc(only);
+                return (int64_t)only;
+            }
             int64_t total = 0;
             for (int64_t i = 0; i < parts->len; ++i)
                 total += ((Py23Str*)parts->data[i])->len;
@@ -435,13 +447,12 @@ int64_t py23_str_method(Py23Str* s, int64_t op, int64_t a0, int64_t a1, int64_t 
             } else {
                 int64_t i = 0;
                 while (i + old->len <= s->len) {
-                    if (memcmp(s->data + i, old->data, (size_t)old->len) == 0) {
-                        ++hits;
-                        if (count >= 0 && hits >= count) break;
-                        i += old->len;
-                    } else {
-                        ++i;
-                    }
+                    int64_t j = py23_find_bytes(s->data, s->len, old->data,
+                                                old->len, i);
+                    if (j < 0) break;
+                    ++hits;
+                    if (count >= 0 && hits >= count) break;
+                    i = j + old->len;
                 }
             }
             int64_t newlen = s->len + hits * (nw->len - old->len);
@@ -460,8 +471,24 @@ int64_t py23_str_method(Py23Str* s, int64_t op, int64_t a0, int64_t a1, int64_t 
                 }
             } else {
                 while (i < s->len) {
-                    if (used < hits && i + old->len <= s->len &&
-                        memcmp(s->data + i, old->data, (size_t)old->len) == 0) {
+                    if (used >= hits || i + old->len > s->len) {
+                        memcpy(p + pos, s->data + i, (size_t)(s->len - i));
+                        pos += s->len - i;
+                        break;
+                    }
+                    int64_t j = py23_find_bytes(s->data, s->len, old->data,
+                                                old->len, i);
+                    if (j < 0) {
+                        memcpy(p + pos, s->data + i, (size_t)(s->len - i));
+                        pos += s->len - i;
+                        break;
+                    }
+                    if (j > i) {
+                        memcpy(p + pos, s->data + i, (size_t)(j - i));
+                        pos += j - i;
+                        i = j;
+                    }
+                    if (memcmp(s->data + i, old->data, (size_t)old->len) == 0) {
                         memcpy(p + pos, nw->data, (size_t)nw->len);
                         pos += nw->len;
                         i += old->len;
@@ -504,13 +531,11 @@ int64_t py23_str_method(Py23Str* s, int64_t op, int64_t a0, int64_t a1, int64_t 
             Py23Str* sub = (Py23Str*)a0;
             if (sub->len == 0) return s->len + 1;
             int64_t n = 0, i = 0;
-            while (i + sub->len <= s->len) {
-                if (memcmp(s->data + i, sub->data, (size_t)sub->len) == 0) {
-                    ++n;
-                    i += sub->len;
-                } else {
-                    ++i;
-                }
+            for (;;) {
+                int64_t j = py23_find_bytes(s->data, s->len, sub->data, sub->len, i);
+                if (j < 0) break;
+                ++n;
+                i = j + sub->len;
             }
             return n;
         }

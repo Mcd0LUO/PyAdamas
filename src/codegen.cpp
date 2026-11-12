@@ -7,6 +7,23 @@
 
 namespace py23 {
 
+// 与 runtime/rt_dict.c 的字符串哈希保持一致：FNV-1a 64 再 mix64。
+// 长串字面量把结果直接写进 Py23Str::hash，字典查字面量键时就不用再算，
+// 也不用在 .data.rel.ro（RELRO 后被保护为只读）上做懒缓存。
+static uint64_t str_literal_hash(const std::string& s) {
+    uint64_t h = 1469598103934665603ull;
+    for (unsigned char c : s) {
+        h ^= c;
+        h *= 1099511628211ull;
+    }
+    h ^= h >> 30;
+    h *= 0xbf58476d1ce4e5b9ull;
+    h ^= h >> 27;
+    h *= 0x94d049bb133111ebull;
+    h ^= h >> 31;
+    return h ? h : 1;
+}
+
 std::string AsmGen::gen(const IRModule& m) {
         m_ = &m;
         opt_ = m.opt_level;
@@ -33,7 +50,10 @@ std::string AsmGen::gen(const IRModule& m) {
                 out_ += "\t.quad 0\n\t.quad 0\n\t.quad 0\n\t.quad 0\n\t.quad 0\n";
                 out_ += std::format(".Lstr{}:\n", i);
                 out_ += std::format("\t.quad {}\n", s.size());
-                out_ += "\t.quad 0\n";
+                if (s.size() > 7)
+                    out_ += std::format("\t.quad 0x{:x}\n", str_literal_hash(s));
+                else
+                    out_ += "\t.quad 0\n";
                 out_ += std::format("\t.quad .Lstr{}_c\n", i);
                 out_ += std::format(".Lstr{}_c:\n", i);
                 out_ += std::format("\t.ascii \"{}\"\n", asm_escape(s));

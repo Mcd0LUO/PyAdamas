@@ -4,9 +4,7 @@
 int64_t py23_str_contains(Py23Str* hay, Py23Str* needle) {
     if (needle->len == 0) return 1;
     if (needle->len > hay->len) return 0;
-    for (int64_t i = 0; i + needle->len <= hay->len; ++i)
-        if (memcmp(hay->data + i, needle->data, (size_t)needle->len) == 0) return 1;
-    return 0;
+    return py23_find_bytes(hay->data, hay->len, needle->data, needle->len, 0) >= 0;
 }
 
 /* ── 切片 ─────────────────────────────────────────────────────── */
@@ -78,7 +76,17 @@ Py23Str* py23_str_slice(Py23Str* src, int64_t start, int64_t stop, int64_t step)
     int64_t lo, hi, st;
     slice_bounds(src->len, start, stop, step, &lo, &hi, &st);
     int64_t count = slice_total(lo, hi, st);
+    /* 整串切片和单元素切片都很常见：前者共享原串，后者直接取驻留字符。 */
+    if (st == 1 && lo == 0 && hi == src->len) {
+        py23_rc_inc(src);
+        return src;
+    }
+    if (count == 1) return py23_char_str((unsigned char)src->data[lo]);
     Py23Str* out = str_alloc(count);
+    if (st == 1) {
+        if (count) memcpy((char*)out->data, src->data + lo, (size_t)count);
+        return out;
+    }
     char* p = (char*)out->data;
     int64_t j = 0;
     for (int64_t i = lo; st > 0 ? i < hi : i > hi; i += st) p[j++] = src->data[i];
