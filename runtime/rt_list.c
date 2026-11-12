@@ -146,32 +146,160 @@ int64_t py23_int_bit_length(int64_t v) {
     return n;
 }
 
-static int cmp_sort_i64(const void* a, const void* b) {
-    int64_t x = *(const int64_t*)a, y = *(const int64_t*)b;
-    return x < y ? -1 : x > y ? 1 : 0;
+/* ── 排序：Timsort ────────────────────────────────────────────
+   和 CPython 的 list.sort / sorted 同款算法：稳定、自适应。
+   - 先找自然 run（降序的就地反转）；
+   - 短 run 用二分插入排序补到 minrun；
+   - 按栈不变式合并相邻 run，合并时复制较短的一半到临时区。
+   近乎有序的数据（真实代码里最常见）基本不触发归并，退化成 O(n)。
+   稳定性：相等元素保持原相对顺序，和 Python 一致。 */
+
+/* float 按位模式存在 int64_t 槽里，用 memcpy 取出来比较：编译期认得这个
+   惯用法，不会真的搬内存，也避开了 (double*) 强转的严格别名问题。 */
+static inline double f64_of(int64_t v) {
+    double d;
+    memcpy(&d, &v, sizeof d);
+    return d;
 }
 
-static int cmp_sort_f64(const void* a, const void* b) {
-    double x, y;
-    memcpy(&x, a, sizeof x);
-    memcpy(&y, b, sizeof y);
-    if (x < y) return -1;
-    if (x > y) return 1;
-    return 0;
-}
+#define PY23_TIMSORT(NAME, LESS)                                               \
+    /* 二分插入排序：把 a[lo,hi) 排好，稳定。 */                                \
+    static void bin_ins_##NAME(int64_t* a, int64_t lo, int64_t hi) {           \
+        for (int64_t i = lo + 1; i < hi; ++i) {                                \
+            int64_t v = a[i];                                                  \
+            int64_t left = lo, right = i;                                      \
+            while (left < right) {                                             \
+                int64_t m = left + (right - left) / 2;                         \
+                if (LESS(v, a[m])) right = m;                                  \
+                else left = m + 1;                                             \
+            }                                                                  \
+            for (int64_t j = i; j > left; --j) a[j] = a[j - 1];                \
+            a[left] = v;                                                       \
+        }                                                                      \
+    }                                                                          \
+    /* 从 lo 起找一段自然 run；降序的就地反转，返回 run 长度。 */                 \
+    static int64_t count_run_##NAME(int64_t* a, int64_t n, int64_t lo) {       \
+        if (lo + 1 >= n) return 1;                                             \
+        int64_t hi = lo + 1;                                                   \
+        if (LESS(a[hi], a[lo])) {                                              \
+            while (hi + 1 < n && LESS(a[hi + 1], a[hi])) ++hi;                 \
+            for (int64_t i = lo, j = hi; i < j; ++i, --j) {                    \
+                int64_t t = a[i];                                              \
+                a[i] = a[j];                                                   \
+                a[j] = t;                                                      \
+            }                                                                  \
+            return hi - lo + 1;                                                \
+        }                                                                      \
+        while (hi + 1 < n && !LESS(a[hi + 1], a[hi])) ++hi;                    \
+        return hi - lo + 1;                                                    \
+    }                                                                          \
+    /* 归并 [lo,mid) 和 [mid,hi)：复制较短的一半，稳定。 */                      \
+    static void merge_##NAME(int64_t* a, int64_t lo, int64_t mid, int64_t hi,   \
+                             int64_t* tmp) {                                    \
+        int64_t n1 = mid - lo, n2 = hi - mid;                                  \
+        if (n1 <= n2) {                                                        \
+            memcpy(tmp, a + lo, (size_t)n1 * sizeof(int64_t));                 \
+            int64_t i = 0, j = mid, k = lo;                                    \
+            while (i < n1 && j < hi) {                                         \
+                if (LESS(a[j], tmp[i])) a[k++] = a[j++];                       \
+                else a[k++] = tmp[i++];                                        \
+            }                                                                  \
+            while (i < n1) a[k++] = tmp[i++];                                  \
+        } else {                                                               \
+            memcpy(tmp, a + mid, (size_t)n2 * sizeof(int64_t));                \
+            int64_t i = mid - 1, j = n2 - 1, k = hi - 1;                       \
+            while (i >= lo && j >= 0) {                                        \
+                if (LESS(tmp[j], a[i])) a[k--] = a[i--];                       \
+                else a[k--] = tmp[j--];                                        \
+            }                                                                  \
+            while (j >= 0) a[k--] = tmp[j--];                                  \
+        }                                                                      \
+    }                                                                          \
+    typedef struct {                                                           \
+        int64_t base;                                                          \
+        int64_t len;                                                           \
+    } run_##NAME;                                                              \
+    static void merge_at_##NAME(int64_t* a, run_##NAME* st, int* sp, int i,     \
+                                int64_t* tmp) {                                \
+        int64_t lo = st[i - 1].base;                                           \
+        int64_t mid = st[i].base;                                              \
+        int64_t hi = st[i].base + st[i].len;                                   \
+        merge_##NAME(a, lo, mid, hi, tmp);                                     \
+        st[i - 1].len = hi - lo;                                               \
+        for (int j = i; j < *sp - 1; ++j) st[j] = st[j + 1];                   \
+        --*sp;                                                                 \
+    }                                                                          \
+    /* minrun：让 run 数量接近 2 的幂，归并时长度尽量对半。 */                   \
+    static int64_t minrun_##NAME(int64_t n) {                                  \
+        int64_t r = 0;                                                         \
+        while (n >= 64) {                                                      \
+            r |= (n & 1);                                                      \
+            n >>= 1;                                                           \
+        }                                                                      \
+        return n + r;                                                          \
+    }                                                                          \
+    static void sort_##NAME(int64_t* a, int64_t n) {                           \
+        if (n < 2) return;                                                     \
+        /* 小数组只有一个 run：找完自然序再补一段插入排序，不用临时区。 */        \
+        if (n <= 64) {                                                         \
+            count_run_##NAME(a, n, 0);                                         \
+            bin_ins_##NAME(a, 0, n);                                           \
+            return;                                                            \
+        }                                                                      \
+        int64_t mr = minrun_##NAME(n);                                         \
+        int64_t* tmp = (int64_t*)malloc((size_t)(n / 2 + 1) * sizeof(int64_t)); \
+        if (!tmp) {                                                            \
+            bin_ins_##NAME(a, 0, n);                                           \
+            return;                                                            \
+        }                                                                      \
+        run_##NAME st[128];                                                    \
+        int sp = 0;                                                            \
+        int64_t lo = 0;                                                        \
+        while (lo < n) {                                                       \
+            int64_t r = count_run_##NAME(a, n, lo);                            \
+            if (r < mr) {                                                      \
+                int64_t hi = lo + mr;                                          \
+                if (hi > n) hi = n;                                            \
+                bin_ins_##NAME(a, lo, hi);                                     \
+                r = hi - lo;                                                   \
+            }                                                                  \
+            st[sp].base = lo;                                                  \
+            st[sp].len = r;                                                    \
+            ++sp;                                                              \
+            /* 栈不变式：长度单调递减，且相邻三个满足                        \
+               len[i-2] > len[i-1] + len[i]。 */                               \
+            for (;;) {                                                         \
+                if (sp >= 3 &&                                                 \
+                    st[sp - 3].len <= st[sp - 2].len + st[sp - 1].len) {       \
+                    int i = (st[sp - 3].len < st[sp - 1].len) ? sp - 1 : sp - 2; \
+                    merge_at_##NAME(a, st, &sp, i, tmp);                       \
+                } else if (sp >= 2 && st[sp - 2].len <= st[sp - 1].len) {      \
+                    merge_at_##NAME(a, st, &sp, sp - 1, tmp);                  \
+                } else {                                                       \
+                    break;                                                     \
+                }                                                              \
+            }                                                                  \
+            lo += r;                                                           \
+        }                                                                      \
+        while (sp > 1) merge_at_##NAME(a, st, &sp, sp - 1, tmp);               \
+        free(tmp);                                                             \
+    }
 
-static int cmp_sort_str(const void* a, const void* b) {
-    Py23Str* x = (Py23Str*)(*(const int64_t*)a);
-    Py23Str* y = (Py23Str*)(*(const int64_t*)b);
-    int64_t c = py23_str_cmp(x, y);
-    return c < 0 ? -1 : c > 0 ? 1 : 0;
-}
+#define LESS_I64(a, b) ((a) < (b))
+#define LESS_F64(a, b) (f64_of(a) < f64_of(b))
+#define LESS_STR(a, b) \
+    (py23_str_cmp((Py23Str*)(uintptr_t)(a), (Py23Str*)(uintptr_t)(b)) < 0)
+
+PY23_TIMSORT(i64, LESS_I64)
+PY23_TIMSORT(f64, LESS_F64)
+PY23_TIMSORT(str, LESS_STR)
 
 // kind：0 int/bool、1 float、2 str、其它按机器字比较。
 void py23_list_sort(Py23List* l, int64_t kind) {
     if (l->len < 2) return;
-    qsort(l->data, (size_t)l->len, sizeof(int64_t),
-          kind == 2 ? cmp_sort_str : kind == 1 ? cmp_sort_f64 : cmp_sort_i64);
+    if (kind == 2) sort_str(l->data, l->len);
+    else if (kind == 1) sort_f64(l->data, l->len);
+    else sort_i64(l->data, l->len);
 }
 
 Py23List* py23_sorted_list(Py23List* src, int64_t kind) {

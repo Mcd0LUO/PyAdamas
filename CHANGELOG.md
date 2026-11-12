@@ -4,6 +4,31 @@
 
 早期阶段没有逐条留痕，按阶段归纳；0.4 之后逐条记录。
 
+## [0.87] - 2026-11-12
+
+`sorted` / `list.sort()` 从 qsort 换成 Timsort。
+
+### 修复
+
+- **排序换成 Timsort**：原来用 `qsort` + 比较函数指针，两个问题——每次比较
+  一次间接调用；完全没有自适应（近乎有序的数据照样跑 n log n）。现在按
+  `kind` 生成三份内联比较的实例（int/float/str），入口先找自然 run（降序的
+  就地反转），短 run 用二分插入排序补到 minrun，再按栈不变式归并相邻 run。
+  近乎有序的数据基本不触发归并，退化成 O(n)。
+- **排序稳定了**：Timsort 保证相等元素保持原相对顺序，和 Python 的
+  `sorted` / `list.sort` 一致；原来的 `qsort` 不稳定。
+
+### 性能
+
+`bench/builtins/32_sorted.py`：**0.8× → 1.1×**（365.7ms → 285.8ms，N=674877）。
+对手 CPython 的 `sorted` 本身就是 C 实现的 Timsort，所以这个用例的上限就是
+「打平」，不会像 `sum` / `len` 那样 20×+。
+
+### 已知限制
+
+- `sorted(xs, key=f)` 走的是下标数组 + qsort（`py23_list_sorted_by`），没跟着
+  换成 Timsort，稳定性同样没有保证。
+
 ## [0.86] - 2026-11-12
 
 小内置（`slice` / `vars` / `dir`）与 `functools.reduce` / `wraps`。

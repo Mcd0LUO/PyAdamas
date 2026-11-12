@@ -274,13 +274,15 @@ bytes 之后，旧清单（bytes 2038 / complex 620 / int64 138 / match 91）已
    `print` 3.8~11.4×（I/O 主导）、`any` 7.2×、`next` 5.1×、`complex` 4.9×、
    `open` 1.1×（系统调用主导）。
 
-比 CPython 慢的只有三个，都是「物化成列表」带来的：
+比 CPython 慢的只剩两个，都是「物化成列表」带来的：
 
 | 内置 | 相对 CPython | 原因 |
 |---|---|---|
 | `enumerate` | 约 0.7× | py23 直接产出 `[下标, 值]` 的元组列表；CPython 是惰性迭代器，每次只造一个元组 |
-| `sorted` | 约 0.8× | 运行时用 `qsort` + 比较函数指针（`runtime/rt_list.c`）；CPython 用 Timsort + 特化比较 |
 | `zip` | 约 1.0× | 两边都把结果物化成元组，py23 一次物化整个列表 |
+
+`sorted` 在 0.87 换成 Timsort 后追平了 CPython（约 1.1×）：两边都是 C 实现的
+Timsort，这个用例的天花板就是打平，不会像 `sum`/`len` 那样 20×+。
 
 ### range 是惰性对象
 
