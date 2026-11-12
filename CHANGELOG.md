@@ -26,11 +26,15 @@ C 互操作 v2：`ptr[T]` 可直接接收 py23 缓冲区，支持把数组交给
 - 新增 `99_cblas`：在真实 OpenBLAS 上跑 `cblas_dgemm`（2×2 方阵、2×3·3×2
   非方阵、带转置）与 `cblas_ddot`，验证 14 参数混合编组与数组指针；开发容器
   已安装 `libopenblas-dev`。
-- 新增 stdlib `linalg`：`matmul(a, b, m, n, k)` 与 `dot(x, y)` 封装 BLAS，
-  用户只传行主序数据与维度；配套 `stdlib/cblas.cpya`。
+- 新增 stdlib `linalg`：`matmul`（支持 `trans_a`/`trans_b`）、`matmul_into`
+  复用输出缓冲、`matvec`、`dot` 封装 BLAS，用户只传行主序数据与维度；
+  配套 `stdlib/cblas.cpya`。
 - 新增 `100_linalg` 用例；`tests/run_tests.sh` 在缺少 OpenBLAS 时跳过
   `99_cblas`/`100_linalg` 而不是判失败。
 - 新增反例 `f44_cimport_buffer_mismatch`。
+- 本机基准（行主序方阵，BLAS 多线程 vs py23 三重循环）：64² 约 20–27×，
+  128² 约 60–73×，256² 约 39–71×，512² 约 65–83×（512² 单次约 6 ms
+  对 420 ms）。
 - `ctest --preset dev`、完整 `tests/run_tests.sh`、`build/memcheck.sh` 全绿。
 
 ## [0.110] - 2026-11-13

@@ -1100,8 +1100,17 @@ c = linalg.matmul([1.0, 2.0, 3.0, 4.0], [5.0, 6.0, 7.0, 8.0], 2, 2, 2)
 print(linalg.dot([1.0, 2.0], [3.0, 4.0]))  # 11.0
 ```
 
-`matmul(a, b, m, n, k)` 计算行主序 A(m×k)·B(k×n)，返回长度 `m*n` 的
-`list[float]`；`dot(x, y)` 计算等长向量点积。数据按行主序拍平传入。
+常用接口：
+
+- `matmul(a, b, m, n, k, trans_a=False, trans_b=False)`：计算
+  `op(A)(m×k)·op(B)(k×n)`，返回长度 `m*n` 的 `list[float]`；
+  `trans_a` 时 A 以 `k×m` 存储，`trans_b` 时 B 以 `n×k` 存储。
+- `matmul_into(c, a, b, m, n, k, ...)`：同 `matmul`，结果写入已有 `c`，
+  避免重复分配。
+- `matvec(a, x, m, n, trans_a=False)`：计算 `op(A)·x`。
+- `dot(x, y)`：等长向量点积。
+
+数据按行主序拍平传入；维度非法或输入过短会抛 `ValueError`。
 
 ## 会被拒绝的写法
 
