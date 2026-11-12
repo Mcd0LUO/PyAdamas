@@ -663,6 +663,7 @@ void AsmGen::gen_call_rt(const Inst& in) {
             case RtFn::ListMinI64:
             case RtFn::ListMaxI64:
             case RtFn::StrToList:
+            case RtFn::StrWrapList:
             case RtFn::ListCopy:
             case RtFn::ListReversed:
             case RtFn::EnumerateList:
@@ -1097,6 +1098,34 @@ void AsmGen::gen_call_rt(const Inst& in) {
                 emit2("movq", src_op(in.args[2]), "%rdx");
                 emit2("movsd", src_op(in.args[3]), "%xmm0");
                 emit2("movq", src_op(in.args[4]), "%rcx");
+                emit2("movq", src_op(in.args[5]), "%r8");
+                emit2("movq", src_op(in.args[6]), "%r9");
+                break;
+            case RtFn::PopenNew:
+                emit2("movq", src_op(in.args[0]), "%rdi");
+                emit2("movq", src_op(in.args[1]), "%rsi");
+                emit2("movq", src_op(in.args[2]), "%rdx");
+                emit2("movq", src_op(in.args[3]), "%rcx");
+                emit2("movq", src_op(in.args[4]), "%r8");
+                emit2("movq", src_op(in.args[5]), "%r9");
+                break;
+            case RtFn::PopenWait:
+                emit2("movq", src_op(in.args[0]), "%rdi");
+                emit2("movsd", src_op(in.args[1]), "%xmm0");
+                break;
+            case RtFn::PopenSendSignal:
+            case RtFn::PopenCommunicate:
+                emit2("movq", src_op(in.args[0]), "%rdi");
+                emit2("movq", src_op(in.args[1]), "%rsi");
+                break;
+            case RtFn::PopenPid:
+            case RtFn::PopenReturnCode:
+            case RtFn::PopenStdout:
+            case RtFn::PopenStderr:
+            case RtFn::PopenStdin:
+            case RtFn::PopenKill:
+            case RtFn::PopenTerminate:
+                emit2("movq", src_op(in.args[0]), "%rdi");
                 break;
         }
         spill_fp_slots();

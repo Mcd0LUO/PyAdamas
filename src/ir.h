@@ -184,6 +184,7 @@ enum class RtFn : uint16_t {
     ListSliceAssign, // (list*, i64 start, i64 stop, i64 step, list*) -> void
     ListDelIndex, // (list*, i64 index) -> void  del list[i]
     StrToList,    // (str*) -> list*
+    StrWrapList,  // (str*) -> list*（单元素，subprocess 用）
     ListExtend,   // (list* dst, list* src) -> void
     ListSumI64,   // (list*, i64 start) -> i64
     ListSumF64,   // (list*, f64 start) -> f64
@@ -347,10 +348,22 @@ enum class RtFn : uint16_t {
     OsPathExists,      // (str* path) -> i64
     OsPathIsdir,       // (str* path) -> i64
     OsPathIsfile,      // (str* path) -> i64
-    SubprocessRun,     // (list* argv, i64 capture, i64 text, f64 timeout, i64 check) -> proc*
+    SubprocessRun,     // (list* argv, i64 capture, i64 text, f64 timeout, i64 check,
+                       //  i64 shell, str* cwd) -> proc*
     SubprocessReturnCode,  // (proc*) -> i64
     SubprocessStdout,      // (proc*) -> str*
     SubprocessStderr,      // (proc*) -> str*
+    PopenNew,              // (list*, i64 shell, str* cwd, i64 in, i64 out, i64 err) -> popen*
+    PopenPid,              // (popen*) -> i64
+    PopenReturnCode,       // (popen*) -> i64
+    PopenStdout,           // (popen*) -> file*
+    PopenStderr,           // (popen*) -> file*
+    PopenStdin,            // (popen*) -> file*
+    PopenWait,             // (popen*, f64 timeout) -> i64
+    PopenKill,             // (popen*) -> void
+    PopenTerminate,        // (popen*) -> void
+    PopenSendSignal,       // (popen*, i64 sig) -> void
+    PopenCommunicate,      // (popen*, str* input) -> tuple[str, str]
     TimeTime,              // () -> f64
     TimeMonotonic,         // () -> f64
     TimePerfCounter,       // () -> f64
@@ -558,6 +571,7 @@ inline const char* rt_name(RtFn f) {
         case RtFn::ListSliceAssign: return "py23_list_slice_assign";
         case RtFn::ListDelIndex: return "py23_list_del_index";
         case RtFn::StrToList: return "py23_str_to_list";
+        case RtFn::StrWrapList: return "py23_str_wrap_list";
         case RtFn::ListExtend: return "py23_list_extend";
         case RtFn::ListSumI64: return "py23_list_sum_i64";
         case RtFn::ListSumF64: return "py23_list_sum_f64";
@@ -781,6 +795,17 @@ inline const char* rt_name(RtFn f) {
         case RtFn::SubprocessReturnCode: return "py23_subprocess_returncode";
         case RtFn::SubprocessStdout: return "py23_subprocess_stdout";
         case RtFn::SubprocessStderr: return "py23_subprocess_stderr";
+        case RtFn::PopenNew: return "py23_popen_new";
+        case RtFn::PopenPid: return "py23_popen_pid";
+        case RtFn::PopenReturnCode: return "py23_popen_returncode";
+        case RtFn::PopenStdout: return "py23_popen_stdout";
+        case RtFn::PopenStderr: return "py23_popen_stderr";
+        case RtFn::PopenStdin: return "py23_popen_stdin";
+        case RtFn::PopenWait: return "py23_popen_wait";
+        case RtFn::PopenKill: return "py23_popen_kill";
+        case RtFn::PopenTerminate: return "py23_popen_terminate";
+        case RtFn::PopenSendSignal: return "py23_popen_send_signal";
+        case RtFn::PopenCommunicate: return "py23_popen_communicate";
         case RtFn::TimeTime: return "py23_time_time";
         case RtFn::TimeMonotonic: return "py23_time_monotonic";
         case RtFn::TimePerfCounter: return "py23_time_perf_counter";
@@ -1187,6 +1212,7 @@ inline bool ir_is_heap(const TypePtr& t) {
         case TyKind::File:
         case TyKind::Random:
         case TyKind::CompletedProcess:
+        case TyKind::Popen:
         case TyKind::Regex:
         case TyKind::Match:
         case TyKind::DateTime:
@@ -1231,6 +1257,7 @@ inline bool ir_is_ref(const TypePtr& t) {
         case TyKind::File:
         case TyKind::Random:
         case TyKind::CompletedProcess:
+        case TyKind::Popen:
         case TyKind::Regex:
         case TyKind::Match:
         case TyKind::DateTime:

@@ -239,10 +239,14 @@ VReg Lowerer::lower_method_call(Attribute& at, Call& c) {
                     recv_ty->kind == TyKind::AsyncSemaphore ||
                     recv_ty->kind == TyKind::DateTime ||
                     recv_ty->kind == TyKind::Path ||
+                    recv_ty->kind == TyKind::Popen ||
                     recv_ty->kind == TyKind::Deque)) {
         if (opt) recv = guard_not_none(recv, std::format("method '{}'", at.attr));
-        // Path.mkdir 只收关键字参数，下面单独处理。
-        if (!c.keywords.empty() && !(recv_ty->kind == TyKind::Path && at.attr == "mkdir"))
+        // Path.mkdir / Popen.wait / Popen.communicate 收关键字参数，下面单独处理。
+        bool kw_ok = (recv_ty->kind == TyKind::Path && at.attr == "mkdir") ||
+                     (recv_ty->kind == TyKind::Popen &&
+                      (at.attr == "wait" || at.attr == "communicate"));
+        if (!c.keywords.empty() && !kw_ok)
             err(c.line, c.col, std::format("{}() does not take keyword arguments", at.attr));
         auto count = [&](size_t n) {
             if (c.args.size() == n) return true;
@@ -432,6 +436,60 @@ VReg Lowerer::lower_method_call(Attribute& at, Call& c) {
                 return const_none();
             }
             err(c.line, c.col, std::format("pathlib.Path has no method '{}'", at.attr));
+            return const_none();
+        }
+        if (recv_ty->kind == TyKind::Popen) {
+            if (at.attr == "wait") {
+                if (!c.args.empty()) {
+                    err(c.line, c.col, "Popen.wait() takes only the timeout keyword");
+                    return const_none();
+                }
+                VReg to = const_float(-1.0);
+                for (auto& kw : c.keywords) {
+                    if (kw.arg == "timeout") {
+                        to = coerce(expr(*kw.value), tc_.type_of(kw.value.get()), t_float());
+                    } else {
+                        err(kw.value->line, kw.value->col,
+                            std::format("Popen.wait() got an unexpected keyword argument '{}'",
+                                        kw.arg));
+                    }
+                }
+                return call_runtime(RtFn::PopenWait, t_int(), {recv, to});
+            }
+            if (at.attr == "communicate") {
+                if (!c.args.empty()) {
+                    err(c.line, c.col, "Popen.communicate() takes only the input keyword");
+                    return const_none();
+                }
+                VReg in = const_str("");
+                for (auto& kw : c.keywords) {
+                    if (kw.arg == "input") {
+                        in = coerce(expr(*kw.value), tc_.type_of(kw.value.get()), t_str());
+                    } else {
+                        err(kw.value->line, kw.value->col,
+                            std::format("Popen.communicate() got an unexpected keyword "
+                                        "argument '{}'",
+                                        kw.arg));
+                    }
+                }
+                TypePtr rt = tc_.type_of(&c);
+                if (!rt || rt->kind != TyKind::Tuple) rt = mk_tuple({t_str(), t_str()});
+                VReg v = call_runtime(RtFn::PopenCommunicate, rt, {recv, in});
+                push_temp(v);
+                return v;
+            }
+            if (at.attr == "kill" || at.attr == "terminate") {
+                if (!count(0)) return const_none();
+                call_void(at.attr == "kill" ? RtFn::PopenKill : RtFn::PopenTerminate, {recv});
+                return const_none();
+            }
+            if (at.attr == "send_signal") {
+                if (!count(1)) return const_none();
+                VReg s = coerce(expr(*c.args[0]), tc_.type_of(c.args[0].get()), t_int());
+                call_void(RtFn::PopenSendSignal, {recv, s});
+                return const_none();
+            }
+            err(c.line, c.col, std::format("Popen has no method '{}'", at.attr));
             return const_none();
         }
         if (recv_ty->kind == TyKind::Deque) {

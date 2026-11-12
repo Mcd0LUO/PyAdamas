@@ -159,6 +159,14 @@ Py23List* py23_str_to_list(Py23Str* s) {
     return out;
 }
 
+/* 把单个字符串包成 [s]：subprocess.Popen("cmd", shell=True) 这种写法用。 */
+Py23List* py23_str_wrap_list(Py23Str* s) {
+    Py23List* out = py23_list_new(1, 1);
+    py23_rc_inc(s);
+    py23_list_append(out, (int64_t)s);
+    return out;
+}
+
 /* ── range ─────────────────────────────────────────────────────── */
 
 /* range 是惰性对象：只存边界，元素按需算。CPython 的 range 也是这样——

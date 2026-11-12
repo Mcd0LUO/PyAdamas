@@ -1040,6 +1040,9 @@ private:
     VReg lower_collections(const std::string& member, Call& c);
     VReg lower_functools(const std::string& member, Call& c);
     VReg lower_datetime(const std::string& member, Call& c);
+    VReg lower_popen(Call& c);
+    VReg lower_subprocess_run(Call& c);
+    VReg stream_mode(Expr& e);
     VReg lower_pathlib(const std::string& member, Call& c);
     // random 里带 rng 首参的几个函数：模块级传 0（运行时走全局 rng）。
     VReg lower_random_extra(const std::string& member, Call& c);

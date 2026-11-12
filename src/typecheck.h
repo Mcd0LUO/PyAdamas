@@ -66,6 +66,7 @@ enum class TyKind : uint8_t {
     File,         // open() 返回的文件对象
     Random,       // random.Random() 返回的随机数生成器
     CompletedProcess,  // subprocess.run() 返回的结果对象
+    Popen,        // subprocess.Popen() 返回的进程句柄
     Regex,        // re.compile() 返回的 Pattern
     Match,        // re.search()/match() 返回的 Match
     DateTime,     // datetime.date / datetime.datetime
@@ -466,6 +467,10 @@ inline const TypePtr& t_completed() {
     static TypePtr v = new_ty(TyKind::CompletedProcess);
     return v;
 }
+inline const TypePtr& t_popen() {
+    static TypePtr v = new_ty(TyKind::Popen);
+    return v;
+}
 inline const TypePtr& t_regex() {
     static TypePtr v = new_ty(TyKind::Regex);
     return v;
@@ -718,6 +723,7 @@ inline std::string type_name_impl(const TypePtr& t, int depth) {
         case TyKind::File: return "file";
         case TyKind::Random: return "random.Random";
         case TyKind::CompletedProcess: return "subprocess.CompletedProcess";
+        case TyKind::Popen: return "subprocess.Popen";
         case TyKind::Regex: return "re.Pattern";
         case TyKind::Match: return "re.Match";
         case TyKind::DateTime: return "datetime";

@@ -458,6 +458,24 @@ VReg Lowerer::expr(Expr& e) {
                     std::format("'CompletedProcess' object has no attribute '{}'", a.attr));
                 return const_none();
             }
+            if (ot && ot->kind == TyKind::Popen) {
+                VReg pv = expr(*a.value);
+                if (opt) pv = guard_not_none(pv, std::format("attribute '{}'", a.attr));
+                if (a.attr == "pid") return call_runtime(RtFn::PopenPid, t_int(), {pv});
+                if (a.attr == "returncode")
+                    return call_runtime(RtFn::PopenReturnCode, t_int(), {pv});
+                if (a.attr == "stdout" || a.attr == "stderr" || a.attr == "stdin") {
+                    RtFn fn = a.attr == "stdout"   ? RtFn::PopenStdout
+                              : a.attr == "stderr" ? RtFn::PopenStderr
+                                                   : RtFn::PopenStdin;
+                    VReg f = call_runtime(fn, t_file(), {pv});
+                    push_temp(f);
+                    return f;
+                }
+                err(e.line, e.col,
+                    std::format("'Popen' object has no attribute '{}'", a.attr));
+                return const_none();
+            }
             if (ot && ot->kind == TyKind::Regex) {
                 VReg rv = expr(*a.value);
                 if (opt) rv = guard_not_none(rv, std::format("attribute '{}'", a.attr));
@@ -871,6 +889,26 @@ VReg Lowerer::lower_compare(Compare& c) {
         CmpOp op = c.ops[0];
         TypePtr lt = tc_.type_of(c.left.get());
         TypePtr rt = tc_.type_of(c.comparators[0].get());
+        // `is` / `is not` 是同一性比较：比指针，不比内容。以前直接映射成
+        // Eq/Ne，字符串和容器会走按值比较（py23_str_eq 解引用右操作数），
+        // 而 None 就是 0，`x is None` 当场段错误。
+        if (op == CmpOp::Is || op == CmpOp::IsNot) {
+            auto as_bits = [&](VReg v, TypePtr t) -> VReg {
+                if (!t || !ir_is_heap(t)) return v;  // 标量本身就是位模式
+                Inst mv;
+                mv.op = IrOp::Mov;
+                mv.a = v;
+                return def(t_int(), std::move(mv));
+            };
+            VReg bl = as_bits(l, lt);
+            VReg br = as_bits(r, rt);
+            Inst in;
+            in.op = IrOp::Cmp;
+            in.cop = op == CmpOp::Is ? CmpKind::Eq : CmpKind::Ne;
+            in.a = bl;
+            in.b = br;
+            return def(t_bool(), std::move(in));
+        }
         // == / != 在类实例上优先走 __eq__ / __ne__；两边都没有实现时
         // 维持原来的指针比较。
         if (op == CmpOp::Eq || op == CmpOp::Ne) {
@@ -1465,6 +1503,8 @@ VReg Lowerer::convert_to(VReg v, TypePtr from, TypePtr to) {
         return const_str("<random.Random object>");
     if (to->kind == TyKind::Str && from && from->kind == TyKind::CompletedProcess)
         return const_str("<subprocess.CompletedProcess object>");
+    if (to->kind == TyKind::Str && from && from->kind == TyKind::Popen)
+        return const_str("<subprocess.Popen object>");
     Inst in;
     in.op = IrOp::Convert;
     in.a = v;

@@ -734,15 +734,26 @@ CPython 一致。
   `from os.path import join, exists` 引入；`import os` 之后
   `os.path.join` 这种属性链暂不支持（`os.path` 是独立模块别名）。
 - 内置 `subprocess`：`run(args, capture_output=False, text=False,
-  timeout=-1.0, check=False)` 返回 `CompletedProcess` 对象，属性
-  `.returncode` / `.stdout` / `.stderr`。`timeout` 为负表示不超时；
-  超时抛 `TimeoutExpired`，`check=True` 且退出码非零抛
+  timeout=-1.0, check=False, shell=False, cwd="")` 返回 `CompletedProcess`
+  对象，属性 `.returncode` / `.stdout` / `.stderr`。`args` 可以是
+  `list[str]`，也可以是一个字符串（配 `shell=True`）。`timeout` 为负表示
+  不超时；超时抛 `TimeoutExpired`，`check=True` 且退出码非零抛
   `CalledProcessError`。这两个异常按 py23 的内置异常名匹配，直接写
   `except TimeoutExpired`；`from subprocess import TimeoutExpired` 暂不
-  支持。与 CPython 的偏差：不返回 bytes，`text=False` 也返回 `str`；
-  没有捕获时 `.stdout` / `.stderr` 是空串（CPython 是 `None`）；
-  `input` / `cwd` / `env` / `shell` 等参数未实现；exec 失败按退出码
-  127 返回。
+  支持。
+- 内置 `subprocess.Popen(args, shell=False, cwd="", stdin=None,
+  stdout=None, stderr=None)`：流参数取 `subprocess.PIPE` / `DEVNULL` /
+  `STDOUT`（`STDOUT` 只对 `stderr` 有意义）。方法 `wait(timeout=…)` /
+  `communicate(input=…)` / `kill()` / `terminate()` / `send_signal(n)`，
+  属性 `pid` / `returncode` / `stdout` / `stderr` / `stdin`（后三个是
+  `file` 对象）。`communicate()` 返回 `(stdout, stderr)` 两个字符串。
+  没有 `poll()`：py23 里 `None` 和 `0` 同形，`poll() is None` 会把正常
+  退出（rc=0）误判成还在跑，要轮询就用 `wait(timeout=…)` 捕获
+  `TimeoutExpired`。
+- 与 CPython 的偏差：不返回 bytes，`text=False` 也返回 `str`；没有捕获时
+  `.stdout` / `.stderr` 是空串（CPython 是 `None`）；`input` / `env` /
+  `preexec_fn` 未实现；exec 失败按退出码 127 返回；`Popen` 句柄被回收时
+  会 SIGKILL 子进程（CPython 不会）。
 - 内置 `time`：`time` / `monotonic` / `perf_counter` / `sleep`，秒为单位。
 - 内置 `string`：`stdlib/string.py` 随编译器分发，提供
   `ascii_lowercase` / `ascii_uppercase` / `ascii_letters` / `digits` /

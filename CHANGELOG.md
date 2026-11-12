@@ -4,6 +4,40 @@
 
 早期阶段没有逐条留痕，按阶段归纳；0.4 之后逐条记录。
 
+## [0.95] - 2026-11-12
+
+`subprocess.Popen`、管道与 `shell=True`。
+
+### 新增
+
+- **`subprocess.Popen(args, shell=, cwd=, stdin=, stdout=, stderr=)`**：新值类型
+  `TyKind::Popen`。流参数取 `subprocess.PIPE` / `DEVNULL` / `STDOUT`
+  （`STDOUT` 只对 `stderr` 有意义）。方法 `wait(timeout=…)` /
+  `communicate(input=…)` / `kill()` / `terminate()` / `send_signal(n)`，
+  属性 `pid` / `returncode` / `stdout` / `stderr` / `stdin`（后三个是懒创建的
+  `file` 对象，直接复用 `py23_file_open(NULL, fd, …)`）。
+- **`subprocess.run` 支持 `shell=True` 与 `cwd=`**，`args` 也可以是字符串。
+- **`subprocess.PIPE` / `STDOUT` / `DEVNULL`** 常量，取值与 CPython 一致
+  （-1 / -2 / -3）。
+- **`from subprocess import Popen`** 可用（`module_ctor` 白名单 + 别名）。
+
+### 修复
+
+- **`x is None` 在字符串/容器上段错误**。`map_cmp` 把 `Is`/`IsNot` 映射成
+  `Eq`/`Ne`，而 `gen_cmp` 对 str 会调 `py23_str_eq` 解引用两个操作数，`None`
+  就是 0，直接崩。改成：`is` / `is not` 先走 `Mov` 把堆对象转成整数位模式，
+  再做整数比较——语义上就是比指针，和 CPython 的同一性比较一致。
+- `subprocess.run` 的 `cwd` 之前是「未实现」，现在真正 `chdir`。
+
+### 尚未支持
+
+- **没有 `poll()`**：py23 里 `None` 和 `0` 同形，`poll() is None` 会把正常退出
+  （rc=0）误判成还在跑。要非阻塞轮询用 `wait(timeout=…)` 捕获 `TimeoutExpired`。
+- `communicate()` 对没开管道的流返回空串（CPython 是 `None`）；`env` /
+  `preexec_fn` / `input=` 之于 `run` 未实现。
+- `Popen` 句柄被引用计数回收时会 SIGKILL 子进程——CPython 不会这么做，但
+  py23 的释放时机不可预期，留着僵尸进程更糟。
+
 ## [0.94] - 2026-11-12
 
 `collections.deque` 与 pathlib 补完。

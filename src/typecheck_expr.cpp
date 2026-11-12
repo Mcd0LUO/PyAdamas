@@ -304,6 +304,14 @@ TypePtr TypeChecker::expr(Expr& e) {
                         std::format("'CompletedProcess' object has no attribute '{}'", a.attr));
                     return t_unknown();
                 }
+                if (ot->kind == TyKind::Popen) {
+                    if (a.attr == "pid" || a.attr == "returncode") return t_int();
+                    if (a.attr == "stdout" || a.attr == "stderr" || a.attr == "stdin")
+                        return t_file();
+                    err(a.line, a.col,
+                        std::format("'Popen' object has no attribute '{}'", a.attr));
+                    return t_unknown();
+                }
                 if (ot->kind == TyKind::Regex) {
                     if (a.attr == "groups" || a.attr == "flags") return t_int();
                     if (a.attr == "pattern") return t_str();

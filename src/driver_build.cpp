@@ -588,6 +588,12 @@ py23::ModuleInfoPtr builtin_module(const std::string& name) {
         lv.f = v;
         return lv;
     };
+    auto lv_str = [](const std::string& v) {
+        py23::LiteralValue lv;
+        lv.kind = py23::LiteralValue::Kind::Str;
+        lv.s = v;
+        return lv;
+    };
     auto func_with = [&](const std::string& n, const py23::FuncInfoPtr& f) {
         auto t = py23::new_ty(py23::TyKind::Func);
         t->fn = f;
@@ -1131,14 +1137,43 @@ py23::ModuleInfoPtr builtin_module(const std::string& name) {
             if (has_def) p.default_lit = lv;
             f->pos.push_back(std::move(p));
         };
-        add("args", py23::mk_list(py23::t_str()), false, lv_int(0));
+        add("args", py23::t_unknown(), false, lv_int(0));
         add("capture_output", py23::t_bool(), true, lv_bool(false));
         add("text", py23::t_bool(), true, lv_bool(false));
         add("timeout", py23::t_float(), true, lv_float(-1.0));
         add("check", py23::t_bool(), true, lv_bool(false));
+        add("shell", py23::t_bool(), true, lv_bool(false));
+        add("cwd", py23::t_str(), true, lv_str(""));
         f->ret = py23::t_completed();
         f->ret_known = true;
         func_with("run", f);
+        // Popen：真正降级在 lower_popen 里手工装配，这里只让类型检查通过。
+        {
+            auto g = std::make_shared<py23::FuncInfo>();
+            g->name = "subprocess.Popen";
+            auto padd = [&](const std::string& n, py23::TypePtr ty, bool has_def,
+                            py23::LiteralValue lv) {
+                py23::Param q;
+                q.name = n;
+                q.ty = std::move(ty);
+                q.has_default = has_def;
+                if (has_def) q.default_lit = lv;
+                g->pos.push_back(std::move(q));
+            };
+            padd("args", py23::t_unknown(), false, lv_int(0));
+            padd("shell", py23::t_bool(), true, lv_bool(false));
+            padd("cwd", py23::t_unknown(), true, lv_str(""));
+            padd("stdin", py23::t_unknown(), true, lv_int(0));
+            padd("stdout", py23::t_unknown(), true, lv_int(0));
+            padd("stderr", py23::t_unknown(), true, lv_int(0));
+            padd("text", py23::t_bool(), true, lv_bool(false));
+            g->ret = py23::t_popen();
+            g->ret_known = true;
+            func_with("Popen", g);
+        }
+        info->globals["PIPE"] = py23::t_int();
+        info->globals["STDOUT"] = py23::t_int();
+        info->globals["DEVNULL"] = py23::t_int();
     }
     cache[name] = info;
     return info;

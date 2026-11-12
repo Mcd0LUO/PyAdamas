@@ -223,6 +223,8 @@ std::optional<RtFn> Lowerer::native_fn(const std::string& module, const std::str
         if (member == "samefile") return RtFn::OsPathSamefile;
     } else if (module == "subprocess") {
         if (member == "run") return RtFn::SubprocessRun;
+        // 只为 from-import 登记别名；真正降级走 lower_popen。
+        if (member == "Popen") return RtFn::PopenNew;
     } else if (module == "time") {
         if (member == "time") return RtFn::TimeTime;
         if (member == "monotonic") return RtFn::TimeMonotonic;
@@ -276,6 +278,24 @@ bool Lowerer::builtin_value(const std::string& module, const std::string& member
         }
         if (member == "X" || member == "VERBOSE") {
             out = const_int(64);
+            ty = t_int();
+            return true;
+        }
+    }
+    if (module == "subprocess") {
+        // 与 CPython 的取值一致：PIPE=-1、STDOUT=-2、DEVNULL=-3。
+        if (member == "PIPE") {
+            out = const_int(-1);
+            ty = t_int();
+            return true;
+        }
+        if (member == "STDOUT") {
+            out = const_int(-2);
+            ty = t_int();
+            return true;
+        }
+        if (member == "DEVNULL") {
+            out = const_int(-3);
             ty = t_int();
             return true;
         }
@@ -496,8 +516,125 @@ VReg Lowerer::lower_random_extra(const std::string& member, Call& c) {
     return const_none();
 }
 
+/* stdin/stdout/stderr 的取值：None → 0（继承），PIPE/STDOUT/DEVNULL 是模块
+   常量，已经降级成 -1/-2/-3 的整数常量，这里直接取整数值。 */
+VReg Lowerer::stream_mode(Expr& e) {
+    VReg v = expr(e);
+    TypePtr t = tc_.type_of(&e);
+    if (t && t->kind == TyKind::None) return const_int(0);
+    return coerce(v, t, t_int());
+}
+
+VReg Lowerer::lower_popen(Call& c) {
+    if (c.args.size() != 1) {
+        err(c.line, c.col,
+            std::format("subprocess.Popen() takes exactly one positional argument, got {}",
+                        c.args.size()));
+        return const_none();
+    }
+    TypePtr at = tc_.type_of(c.args[0].get());
+    VReg argv;
+    if (at && at->kind == TyKind::Str) {
+        // Popen("cmd", shell=True)：字符串当单条命令，包成单元素列表。
+        VReg s = expr(*c.args[0]);
+        argv = call_runtime(RtFn::StrWrapList, mk_list(t_str()), {s});
+        push_temp(argv);
+    } else {
+        if (at && at->kind != TyKind::List && at->kind != TyKind::Unknown)
+            err(c.args[0]->line, c.args[0]->col,
+                std::format("subprocess.Popen() expects a list of str or a str, got '{}'",
+                            type_name(at)));
+        argv = expr(*c.args[0]);
+    }
+
+    VReg shell = const_bool(false);
+    VReg cwd = const_str("");
+    VReg in_mode = const_int(0);
+    VReg out_mode = const_int(0);
+    VReg err_mode = const_int(0);
+    for (auto& kw : c.keywords) {
+        if (kw.arg == "shell") {
+            shell = coerce(expr(*kw.value), tc_.type_of(kw.value.get()), t_bool());
+        } else if (kw.arg == "cwd") {
+            TypePtr vt = tc_.type_of(kw.value.get());
+            VReg v = expr(*kw.value);
+            cwd = (vt && vt->kind == TyKind::None) ? const_str("") : coerce(v, vt, t_str());
+        } else if (kw.arg == "stdin") {
+            in_mode = stream_mode(*kw.value);
+        } else if (kw.arg == "stdout") {
+            out_mode = stream_mode(*kw.value);
+        } else if (kw.arg == "stderr") {
+            err_mode = stream_mode(*kw.value);
+        } else if (kw.arg == "text") {
+            // py23 没有 bytes：text 只做求值，不影响行为。
+            expr(*kw.value);
+        } else {
+            err(kw.value->line, kw.value->col,
+                std::format("subprocess.Popen() got an unexpected keyword argument '{}'",
+                            kw.arg));
+        }
+    }
+
+    TypePtr rt = new_ty(TyKind::Popen);
+    VReg v = call_runtime(RtFn::PopenNew, rt,
+                          {argv, shell, cwd, in_mode, out_mode, err_mode});
+    push_temp(v);
+    return v;
+}
+
+/* subprocess.run("cmd", shell=True)：第一个位置参数是字符串时，包成单元素
+   列表再走和列表一样的签名。列表参数走通用路径（bind_args）。 */
+VReg Lowerer::lower_subprocess_run(Call& c) {
+    VReg s = expr(*c.args[0]);
+    VReg argv = call_runtime(RtFn::StrWrapList, mk_list(t_str()), {s});
+    push_temp(argv);
+
+    VReg capture = const_bool(false);
+    VReg text = const_bool(false);
+    VReg timeout = const_float(-1.0);
+    VReg check = const_bool(false);
+    VReg shell = const_bool(false);
+    VReg cwd = const_str("");
+    if (c.args.size() > 1)
+        err(c.args[1]->line, c.args[1]->col,
+            "subprocess.run() 的其余参数要用关键字传（capture_output= / shell= 等）");
+    for (auto& kw : c.keywords) {
+        if (kw.arg == "capture_output") {
+            capture = coerce(expr(*kw.value), tc_.type_of(kw.value.get()), t_bool());
+        } else if (kw.arg == "text") {
+            text = coerce(expr(*kw.value), tc_.type_of(kw.value.get()), t_bool());
+        } else if (kw.arg == "timeout") {
+            timeout = coerce(expr(*kw.value), tc_.type_of(kw.value.get()), t_float());
+        } else if (kw.arg == "check") {
+            check = coerce(expr(*kw.value), tc_.type_of(kw.value.get()), t_bool());
+        } else if (kw.arg == "shell") {
+            shell = coerce(expr(*kw.value), tc_.type_of(kw.value.get()), t_bool());
+        } else if (kw.arg == "cwd") {
+            TypePtr vt = tc_.type_of(kw.value.get());
+            VReg v = expr(*kw.value);
+            cwd = (vt && vt->kind == TyKind::None) ? const_str("") : coerce(v, vt, t_str());
+        } else {
+            err(kw.value->line, kw.value->col,
+                std::format("subprocess.run() got an unexpected keyword argument '{}'",
+                            kw.arg));
+        }
+    }
+
+    TypePtr rt = tc_.type_of(&c);
+    if (!rt || rt->kind != TyKind::CompletedProcess) rt = t_completed();
+    VReg v = call_runtime(RtFn::SubprocessRun, rt,
+                          {argv, capture, text, timeout, check, shell, cwd});
+    push_temp(v);
+    return v;
+}
+
 VReg Lowerer::call_native(const std::string& module, const std::string& member, Call& c,
                           const FuncInfoPtr& info) {
+    if (module == "subprocess" && member == "Popen") return lower_popen(c);
+    if (module == "subprocess" && member == "run" && !c.args.empty()) {
+        TypePtr at = tc_.type_of(c.args[0].get());
+        if (at && at->kind == TyKind::Str) return lower_subprocess_run(c);
+    }
     auto fn = native_fn(module, member);
     if (!fn) {
         err(c.line, c.col, std::format("{}.{} is not a supported native function", module, member));

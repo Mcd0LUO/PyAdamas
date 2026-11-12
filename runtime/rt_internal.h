@@ -519,6 +519,7 @@ Py23List* py23_list_slice(Py23List* src, int64_t start, int64_t stop, int64_t st
 Py23Str* py23_str_slice(Py23Str* src, int64_t start, int64_t stop, int64_t step);
 void py23_list_slice_assign(Py23List* dst, int64_t start, int64_t stop, int64_t step, Py23List* src);
 Py23List* py23_str_to_list(Py23Str* s);
+Py23List* py23_str_wrap_list(Py23Str* s);
 void* py23_obj_new(int64_t size, void (*dtor)(void*), void (*release)(void*));
 size_t gc_hash(uintptr_t p);
 void gc_table_insert(Py23Rc* h);
@@ -760,7 +761,22 @@ int64_t py23_re_sub_fn(Py23Regex* re, int64_t closure, Py23Str* text, int64_t co
 /* ── subprocess：CompletedProcess 与 run() ─────────────────────── */
 typedef struct Py23Proc Py23Proc;
 Py23Proc* py23_subprocess_run(Py23List* argv, int64_t capture, int64_t text,
-                              double timeout, int64_t check);
+                              double timeout, int64_t check, int64_t shell, Py23Str* cwd);
 int64_t py23_subprocess_returncode(Py23Proc* p);
 Py23Str* py23_subprocess_stdout(Py23Proc* p);
 Py23Str* py23_subprocess_stderr(Py23Proc* p);
+
+/* ── subprocess.Popen ─────────────────────────────────────────── */
+typedef struct Py23Popen Py23Popen;
+Py23Popen* py23_popen_new(Py23List* argv, int64_t shell, Py23Str* cwd, int64_t stdin_mode,
+                          int64_t stdout_mode, int64_t stderr_mode);
+int64_t py23_popen_pid(Py23Popen* p);
+int64_t py23_popen_returncode(Py23Popen* p);
+Py23File* py23_popen_stdout(Py23Popen* p);
+Py23File* py23_popen_stderr(Py23Popen* p);
+Py23File* py23_popen_stdin(Py23Popen* p);
+int64_t py23_popen_wait(Py23Popen* p, double timeout);
+void py23_popen_kill(Py23Popen* p);
+void py23_popen_terminate(Py23Popen* p);
+void py23_popen_send_signal(Py23Popen* p, int64_t sig);
+Py23List* py23_popen_communicate(Py23Popen* p, Py23Str* input);

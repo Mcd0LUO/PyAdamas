@@ -1450,6 +1450,50 @@ TypePtr TypeChecker::method_call(TypePtr recv, const std::string& name, Call& c,
             err(c.line, c.col, std::format("collections.deque has no method '{}'", name));
             return t_unknown();
         }
+        if (recv->kind == TyKind::Popen) {
+            if (name == "wait") {
+                argc(0, 0);
+                for (auto& kw : c.keywords) {
+                    if (kw.arg == "timeout") {
+                        expr(*kw.value);
+                    } else {
+                        err(kw.value->line, kw.value->col,
+                            std::format("Popen.wait() got an unexpected keyword argument '{}'",
+                                        kw.arg));
+                    }
+                }
+                return t_int();
+            }
+            if (name == "communicate") {
+                argc(0, 0);
+                for (auto& kw : c.keywords) {
+                    if (kw.arg == "input") {
+                        expr(*kw.value);
+                    } else {
+                        err(kw.value->line, kw.value->col,
+                            std::format("Popen.communicate() got an unexpected keyword "
+                                        "argument '{}'",
+                                        kw.arg));
+                    }
+                }
+                return mk_tuple({t_str(), t_str()});
+            }
+            if (name == "kill" || name == "terminate") {
+                if (!c.keywords.empty())
+                    err(c.line, c.col,
+                        std::format("Popen.{}() does not take keyword arguments", name));
+                argc(0, 0);
+                return t_none();
+            }
+            if (name == "send_signal") {
+                if (!c.keywords.empty())
+                    err(c.line, c.col, "Popen.send_signal() does not take keyword arguments");
+                argc(1, 1);
+                return t_none();
+            }
+            err(c.line, c.col, std::format("Popen has no method '{}'", name));
+            return t_unknown();
+        }
         if (recv->kind == TyKind::Regex) {
             if (!c.keywords.empty())
                 err(c.line, c.col,
