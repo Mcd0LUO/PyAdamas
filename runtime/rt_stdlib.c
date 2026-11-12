@@ -51,8 +51,8 @@ Py23List* py23_collections_most_common(Py23Dict* d, int64_t n) {
     CountPair* arr = (CountPair*)malloc(sizeof(CountPair) * (size_t)(m ? m : 1));
     if (!arr) panic_c("out of memory");
     for (int64_t i = 0; i < m; ++i) {
-        arr[i].key = d->entries[i].key;
-        arr[i].val = d->entries[i].val;
+        arr[i].key = py23_dict_key_at(d, i);
+        arr[i].val = py23_dict_val_at(d, i);
         arr[i].idx = i;
     }
     qsort(arr, (size_t)m, sizeof(CountPair), cmp_pair);

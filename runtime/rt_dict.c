@@ -1,9 +1,11 @@
 // rt_dict.c —— 字典与集合
 //
-// 布局：entries 是密集数组，按插入顺序存放 {hash, key, val}；index 是
-// 开放寻址的索引表，槽里是「entry 下标 + 1」，0 表示空。查找先走 4 字节
-// 的索引表（probe 链常驻缓存），命中才去读 24 字节的 entry。扩容/删除只
-// 重建索引表，entries 本身不用搬家；顺序遍历直接扫 entries。
+// 布局：entries 是条目数组；存活的条目用 prev/next 串成插入顺序的双向
+// 链表，删除只摘链、条目留原地当墓碑，由 free_head 空闲链复用——摊还
+// O(1)，不用 memmove。index 是开放寻址的索引表，槽里是「entry 下标 + 1」，
+// 0 为空槽，-1 为墓碑（探测越过继续）。查找先走 4 字节的索引表（probe 链
+// 常驻缓存），命中才去读 entry。按序号遍历走 order 快照，需要时从链表懒
+// 重建，顺序永远是插入顺序。
 #include "rt_internal.h"
 
 /* ── 字典 / 集合 ─────────────────────────────────────────────── */
@@ -95,28 +97,37 @@ static int dict_key_matches(Py23Dict* d, int64_t a, int64_t b) {
     return dict_key_eq(d->key_kind, a, b);
 }
 
-/* 索引表里找到 key 的 entry 下标；找不到返回 -1。 */
+/* 索引表里找到 key 的 entry 下标；找不到返回 -1。墓碑槽（-1）跳过。 */
 static int64_t dict_lookup(Py23Dict* d, int64_t key, int64_t hash) {
     int64_t mask = d->icap - 1;
     int64_t i = (int64_t)((uint64_t)hash & (uint64_t)mask);
     for (;;) {
         int32_t slot = d->index[i];
         if (!slot) return -1;
-        int64_t e = (int64_t)slot - 1;
-        if (d->entries[e].hash == hash && dict_key_matches(d, d->entries[e].key, key))
-            return e;
+        if (slot > 0) {
+            int64_t e = (int64_t)slot - 1;
+            if (d->entries[e].hash == hash && dict_key_matches(d, d->entries[e].key, key))
+                return e;
+        }
         i = (i + 1) & mask;
     }
 }
 
+/* 找可写槽：优先复用探测链上的第一个墓碑，没有墓碑就用第一个空槽。
+   调用前保证索引表至少有一个空槽（见 py23_dict_set 的装载检查）。 */
 static int64_t dict_place_slot(Py23Dict* d, int64_t hash) {
     int64_t mask = d->icap - 1;
     int64_t i = (int64_t)((uint64_t)hash & (uint64_t)mask);
-    while (d->index[i]) i = (i + 1) & mask;
-    return i;
+    int64_t tomb = -1;
+    for (;;) {
+        int32_t slot = d->index[i];
+        if (!slot) return tomb >= 0 ? tomb : i;
+        if (slot < 0 && tomb < 0) tomb = i;
+        i = (i + 1) & mask;
+    }
 }
 
-/* 重建索引表。只读 entries 里已存的 hash，不碰 key；entries 顺序不动。 */
+/* 重建索引表：顺着插入顺序链表扫存活项，顺带清掉墓碑。 */
 static void dict_reindex(Py23Dict* d, int64_t nicap) {
     if (nicap < 8) nicap = 8;
     if (nicap != d->icap) {
@@ -127,28 +138,59 @@ static void dict_reindex(Py23Dict* d, int64_t nicap) {
     } else {
         memset(d->index, 0, sizeof(int32_t) * (size_t)d->icap);
     }
+    d->itomb = 0;
     int64_t mask = d->icap - 1;
-    for (int64_t e = 0; e < d->len; ++e) {
-        int64_t i = (int64_t)((uint64_t)d->entries[e].hash & (uint64_t)mask);
-        while (d->index[i]) i = (i + 1) & mask;
-        d->index[i] = (int32_t)(e + 1);
+    for (int32_t e = d->head; e >= 0; e = d->entries[e].next) {
+        int64_t s = (int64_t)((uint64_t)d->entries[e].hash & (uint64_t)mask);
+        while (d->index[s]) s = (s + 1) & mask;
+        d->index[s] = (int32_t)(e + 1);
     }
+}
+
+/* 把 e 从字典里摘掉：双向链表摘链、索引槽置墓碑、entry 挂空闲链。
+   不碰引用计数——key/value 的释放由调用方按所有权处理。 */
+static void dict_erase(Py23Dict* d, int64_t e) {
+    int32_t prev = d->entries[e].prev;
+    int32_t next = d->entries[e].next;
+    if (prev >= 0)
+        d->entries[prev].next = next;
+    else
+        d->head = next;
+    if (next >= 0)
+        d->entries[next].prev = prev;
+    else
+        d->tail = prev;
+    int64_t mask = d->icap - 1;
+    int64_t s = (int64_t)((uint64_t)d->entries[e].hash & (uint64_t)mask);
+    int64_t steps = 0;
+    while (d->index[s] != (int32_t)(e + 1)) {
+        if (++steps > d->icap) panic_c("dict index corrupted");
+        s = (s + 1) & mask;
+    }
+    d->index[s] = -1;
+    ++d->itomb;
+    --d->len;
+    d->ord_len = -1;
+    d->entries[e].hash = 0;
+    d->entries[e].key = d->free_head;
+    d->free_head = e;
 }
 
 void dict_destroy(void* p) {
     Py23Dict* d = (Py23Dict*)p;
-    for (int64_t i = 0; i < d->len; ++i) {
+    for (int32_t i = d->head; i >= 0; i = d->entries[i].next) {
         Py23DictEntry e = d->entries[i];
         if (d->key_own == 1) py23_rc_dec((void*)e.key);
         if (d->val_own == 1) py23_rc_dec((void*)e.val);
     }
     free(d->entries);
+    free(d->order);
     free(d->index);
 }
 
 void dict_gc_release(void* p) {
     Py23Dict* d = (Py23Dict*)p;
-    for (int64_t i = 0; i < d->len; ++i) {
+    for (int32_t i = d->head; i >= 0; i = d->entries[i].next) {
         Py23DictEntry e = d->entries[i];
         if (d->key_own == 1) py23_gc_unref_child((void*)e.key);
         if (d->val_own == 1) py23_gc_unref_child((void*)e.val);
@@ -166,9 +208,16 @@ Py23Dict* py23_dict_new(int64_t key_kind, int64_t key_own, int64_t val_own,
     d->len = 0;
     d->cap = 8;
     d->icap = 8;
+    d->ord_len = 0;
+    d->nent = 0;
+    d->itomb = 0;
+    d->free_head = -1;
+    d->head = -1;
+    d->tail = -1;
     d->entries = (Py23DictEntry*)malloc(sizeof(Py23DictEntry) * 8);
+    d->order = (int32_t*)malloc(sizeof(int32_t) * 8);
     d->index = (int32_t*)calloc(8, sizeof(int32_t));
-    if (!d->entries || !d->index) panic_c("out of memory");
+    if (!d->entries || !d->order || !d->index) panic_c("out of memory");
     d->key_kind = key_kind;
     d->key_own = key_own;
     d->val_own = val_own;
@@ -189,21 +238,47 @@ void py23_dict_set(Py23Dict* d, int64_t key, int64_t val) {
         d->entries[e].val = val;
         return;
     }
-    // 索引按 2/3 装载，entries 满了才扩；索引重建只动 4 字节槽。
-    if ((d->len + 1) * 3 >= d->icap * 2) dict_reindex(d, d->icap * 2);
-    if (d->len == d->cap) {
-        int64_t ncap = d->cap ? d->cap * 2 : 8;
-        Py23DictEntry* ne =
-            (Py23DictEntry*)realloc(d->entries, sizeof(Py23DictEntry) * (size_t)ncap);
-        if (!ne) panic_c("out of memory");
-        d->entries = ne;
-        d->cap = ncap;
+    // 索引按 2/3 装载（墓碑也计入），超了就重建；存活项本身超了才扩容。
+    if ((d->len + d->itomb + 1) * 3 >= d->icap * 2) {
+        if ((d->len + 1) * 3 >= d->icap * 2)
+            dict_reindex(d, d->icap * 2);
+        else
+            dict_reindex(d, d->icap);
     }
-    int64_t idx = d->len++;
+    int64_t idx;
+    if (d->free_head >= 0) {
+        idx = d->free_head;
+        d->free_head = d->entries[idx].key;
+    } else {
+        if (d->nent == d->cap) {
+            int64_t ncap = d->cap ? d->cap * 2 : 8;
+            Py23DictEntry* ne =
+                (Py23DictEntry*)realloc(d->entries, sizeof(Py23DictEntry) * (size_t)ncap);
+            int32_t* no = (int32_t*)realloc(d->order, sizeof(int32_t) * (size_t)ncap);
+            if (!ne || !no) panic_c("out of memory");
+            d->entries = ne;
+            d->order = no;
+            d->cap = ncap;
+        }
+        idx = d->nent++;
+    }
     d->entries[idx].hash = h;
     d->entries[idx].key = key;
     d->entries[idx].val = val;
-    d->index[dict_place_slot(d, h)] = (int32_t)(idx + 1);
+    d->entries[idx].prev = d->tail;
+    d->entries[idx].next = -1;
+    if (d->tail >= 0)
+        d->entries[d->tail].next = (int32_t)idx;
+    else
+        d->head = (int32_t)idx;
+    d->tail = (int32_t)idx;
+    if (d->ord_len >= 0) {
+        d->order[d->ord_len++] = (int32_t)idx;
+    }
+    ++d->len;
+    int64_t s = dict_place_slot(d, h);
+    if (d->index[s] < 0) --d->itomb;
+    d->index[s] = (int32_t)(idx + 1);
 }
 
 /* default_factory 的编码与 lower_collections 保持一致。这里只实现内置
@@ -257,9 +332,29 @@ int64_t py23_dict_contains(Py23Dict* d, int64_t key) {
     return dict_lookup(d, key, h) >= 0 ? 1 : 0;
 }
 
+/* order 是链表快照：删除会让它失效，下一次按序号访问时重建。遍历本身
+   是 O(n)，这层重建不改变摊还代价，却让按序访问保持 O(1)。 */
+static void dict_ensure_order(Py23Dict* d) {
+    if (d->ord_len == d->len) return;
+    int64_t i = 0;
+    for (int32_t e = d->head; e >= 0; e = d->entries[e].next) {
+        if (i >= d->cap) panic_c("dict order overflow");
+        d->order[i++] = e;
+    }
+    if (i != d->len) panic_c("dict order mismatch");
+    d->ord_len = d->len;
+}
+
 int64_t py23_dict_key_at(Py23Dict* d, int64_t i) {
     if (i < 0 || i >= d->len) panic_c("dict iteration index out of range");
-    return d->entries[i].key;
+    dict_ensure_order(d);
+    return d->entries[d->order[i]].key;
+}
+
+int64_t py23_dict_val_at(Py23Dict* d, int64_t i) {
+    if (i < 0 || i >= d->len) panic_c("dict iteration index out of range");
+    dict_ensure_order(d);
+    return d->entries[d->order[i]].val;
 }
 
 /* d.get(k)：缺失时返回 None。py23 里 None 就是 0（没有类型标签），
@@ -284,7 +379,7 @@ Py23List* py23_dict_keys(Py23Dict* d) {
     int kind = own_to_list_kind(d->key_own);
     Py23List* out = py23_list_new(d->len, kind);
     for (int64_t i = 0; i < d->len; ++i) {
-        int64_t v = d->entries[i].key;
+        int64_t v = py23_dict_key_at(d, i);
         if (kind == 1 && v) py23_rc_inc((void*)v);
         py23_list_append(out, v);
     }
@@ -295,7 +390,7 @@ Py23List* py23_dict_values(Py23Dict* d) {
     int kind = own_to_list_kind(d->val_own);
     Py23List* out = py23_list_new(d->len, kind);
     for (int64_t i = 0; i < d->len; ++i) {
-        int64_t v = d->entries[i].val;
+        int64_t v = py23_dict_val_at(d, i);
         if (kind == 1 && v) py23_rc_inc((void*)v);
         py23_list_append(out, v);
     }
@@ -309,7 +404,7 @@ Py23List* py23_dict_items(Py23Dict* d) {
                  ? 1
                  : ((d->key_own == 0 && d->val_own == 0) ? 0 : 2);
     Py23List* out = py23_list_new(d->len, 1);
-    for (int64_t i = 0; i < d->len; ++i) {
+    for (int32_t i = d->head; i >= 0; i = d->entries[i].next) {
         Py23DictEntry e = d->entries[i];
         Py23List* tup = py23_list_new(2, tk);
         if ((tk == 1 || d->key_own == 1) && e.key) py23_rc_inc((void*)e.key);
@@ -329,11 +424,11 @@ int64_t chain_dict_eq(Py23Dict* a, Py23Dict* b, const uint8_t* chain, int64_t le
     if (!a || !b) return 0;
     if (a->len != b->len) return 0;
     int kind = (level < len) ? chain[level] : 'x';
-    for (int64_t i = 0; i < a->len; ++i) {
-        int64_t k = a->entries[i].key;
-        int64_t e = dict_lookup(b, k, dict_hash_key(b, k));
+    for (int32_t i = a->head; i >= 0; i = a->entries[i].next) {
+        Py23DictEntry ae = a->entries[i];
+        int64_t e = dict_lookup(b, ae.key, dict_hash_key(b, ae.key));
         if (e < 0) return 0;
-        if (!chain_elem_eq(kind, a->entries[i].val, b->entries[e].val, chain, len, level))
+        if (!chain_elem_eq(kind, ae.val, b->entries[e].val, chain, len, level))
             return 0;
     }
     return 1;
@@ -352,7 +447,7 @@ int64_t chain_set_eq(Py23Dict* a, Py23Dict* b, const uint8_t* chain, int64_t len
     if (a == b) return 1;
     if (!a || !b) return 0;
     if (a->len != b->len) return 0;
-    for (int64_t i = 0; i < a->len; ++i) {
+    for (int32_t i = a->head; i >= 0; i = a->entries[i].next) {
         int64_t k = a->entries[i].key;
         if (dict_lookup(b, k, dict_hash_key(b, k)) < 0) return 0;
     }
@@ -365,7 +460,7 @@ int64_t py23_set_eq(Py23Dict* a, Py23Dict* b) {
 
 void py23_dict_update(Py23Dict* dst, Py23Dict* src) {
     if (dst == src) return;
-    for (int64_t i = 0; i < src->len; ++i) {
+    for (int32_t i = src->head; i >= 0; i = src->entries[i].next) {
         Py23DictEntry e = src->entries[i];
         // 目标类型未知时也要保证源销毁后指针不悬空：源自己是堆所有权
         // 就 retain 一份。目标 own=2/0 不会 dec，这份引用会留给 GC。
@@ -383,7 +478,7 @@ Py23Dict* py23_dict_copy(Py23Dict* src) {
     Py23Dict* out = py23_dict_new(src->key_kind, src->key_own, src->val_own,
                                   src->hash_slot, src->eq_slot);
     out->default_factory = src->default_factory;
-    for (int64_t i = 0; i < src->len; ++i) {
+    for (int32_t i = src->head; i >= 0; i = src->entries[i].next) {
         Py23DictEntry e = src->entries[i];
         if (src->key_own == 1 && e.key) py23_rc_inc((void*)e.key);
         if (src->val_own == 1 && e.val) py23_rc_inc((void*)e.val);
@@ -405,19 +500,15 @@ Py23Dict* py23_set_from_list(Py23List* src, int64_t key_kind, int64_t key_own,
 
 /* 找到并移除 key；返回 1 时 val_out 是原值。字典对 key/val 的引用：
    key 立即释放（调用方传的是借用），value 的所有权转交给调用方
-   （pop 返回给 Python 层，由临时栈接管）。entries 保持插入顺序：
-   后面的项前移一格，然后重建索引。删除不在热路径上。 */
+   （pop 返回给 Python 层，由临时栈接管）。order 用末尾项填洞、entry 留
+   墓碑，删除是摊还 O(1)，不再 memmove 和全表重建。 */
 int dict_take(Py23Dict* d, int64_t key, int64_t* val_out) {
     int64_t h = dict_hash_key(d, key);
     int64_t e = dict_lookup(d, key, h);
     if (e < 0) return 0;
     *val_out = d->entries[e].val;
     if (d->key_own == 1) py23_rc_dec((void*)d->entries[e].key);
-    --d->len;
-    if (e < d->len)
-        memmove(&d->entries[e], &d->entries[e + 1],
-                sizeof(Py23DictEntry) * (size_t)(d->len - e));
-    dict_reindex(d, d->icap);
+    dict_erase(d, e);
     return 1;
 }
 
@@ -432,28 +523,28 @@ int64_t py23_dict_pop(Py23Dict* d, int64_t key, int64_t has_default, int64_t def
 
 Py23List* py23_dict_popitem(Py23Dict* d) {
     if (d->len == 0) py23_raise_c("KeyError", "popitem(): dictionary is empty");
-    Py23DictEntry e = d->entries[d->len - 1];
+    int64_t e = (int64_t)d->tail;
+    Py23DictEntry ent = d->entries[e];
     int tk = (d->key_own == 1 && d->val_own == 1)
                  ? 1
                  : ((d->key_own == 0 && d->val_own == 0) ? 0 : 2);
     Py23List* tup = py23_list_new(2, tk);
-    if ((tk == 1 || d->key_own == 1) && e.key) py23_rc_inc((void*)e.key);
-    py23_list_append(tup, e.key);
-    if ((tk == 1 || d->val_own == 1) && e.val) py23_rc_inc((void*)e.val);
-    py23_list_append(tup, e.val);
-    d->len--;
-    if (d->key_own == 1) py23_rc_dec((void*)e.key);
-    if (d->val_own == 1) py23_rc_dec((void*)e.val);
-    dict_reindex(d, d->icap);
+    if ((tk == 1 || d->key_own == 1) && ent.key) py23_rc_inc((void*)ent.key);
+    py23_list_append(tup, ent.key);
+    if ((tk == 1 || d->val_own == 1) && ent.val) py23_rc_inc((void*)ent.val);
+    py23_list_append(tup, ent.val);
+    if (d->key_own == 1) py23_rc_dec((void*)ent.key);
+    if (d->val_own == 1) py23_rc_dec((void*)ent.val);
+    dict_erase(d, e);
     return tup;
 }
 
 /* set.pop()：移除并返回最后一个插入项（py23 的确定性选择）。 */
 int64_t py23_dict_pop_last(Py23Dict* d) {
     if (d->len == 0) py23_raise_c("KeyError", "pop from an empty set");
-    int64_t key = d->entries[d->len - 1].key;
-    d->len--;
-    dict_reindex(d, d->icap);
+    int64_t e = (int64_t)d->tail;
+    int64_t key = d->entries[e].key;
+    dict_erase(d, e);
     return key;  /* 所有权转交给调用方 */
 }
 
@@ -467,11 +558,17 @@ void py23_dict_remove(Py23Dict* d, int64_t key, int64_t missing_ok) {
 }
 
 void py23_dict_clear(Py23Dict* d) {
-    for (int64_t i = 0; i < d->len; ++i) {
+    for (int32_t i = d->head; i >= 0; i = d->entries[i].next) {
         Py23DictEntry e = d->entries[i];
         if (d->key_own == 1) py23_rc_dec((void*)e.key);
         if (d->val_own == 1) py23_rc_dec((void*)e.val);
     }
     d->len = 0;
+    d->ord_len = 0;
+    d->nent = 0;
+    d->itomb = 0;
+    d->free_head = -1;
+    d->head = -1;
+    d->tail = -1;
     memset(d->index, 0, sizeof(int32_t) * (size_t)d->icap);
 }

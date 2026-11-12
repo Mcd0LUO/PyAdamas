@@ -181,8 +181,8 @@ static Py23Dict* g_json_sort_dict;
 static int jb_cmp_order(const void* pa, const void* pb) {
     int64_t ia = *(const int64_t*)pa;
     int64_t ib = *(const int64_t*)pb;
-    Py23Str* x = (Py23Str*)g_json_sort_dict->entries[ia].key;
-    Py23Str* y = (Py23Str*)g_json_sort_dict->entries[ib].key;
+    Py23Str* x = (Py23Str*)py23_dict_key_at(g_json_sort_dict, ia);
+    Py23Str* y = (Py23Str*)py23_dict_key_at(g_json_sort_dict, ib);
     int64_t c = py23_str_cmp(x, y);
     return c < 0 ? -1 : c > 0 ? 1 : 0;
 }
@@ -224,9 +224,9 @@ static void jb_value(JBuf* b, int64_t v, const char* d, size_t n, int64_t depth)
                 if (i) jb_ch(b, ',');
                 jb_nl(b, depth + 1);
                 if (b->indent <= 0 && i) jb_ch(b, ' ');
-                jb_str(b, (Py23Str*)m->entries[e].key);
+                jb_str(b, (Py23Str*)py23_dict_key_at(m, e));
                 jb_cstr(b, ": ");
-                jb_value(b, m->entries[e].val, cd, cn, depth + 1);
+                jb_value(b, py23_dict_val_at(m, e), cd, cn, depth + 1);
             }
             if (m->len) jb_nl(b, depth);
             jb_ch(b, '}');

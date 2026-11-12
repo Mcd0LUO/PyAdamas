@@ -39,22 +39,34 @@ typedef struct {
     int64_t len;
 } Py23Range;
 
-/* 字典 = 密集 entries（插入顺序）+ 开放寻址索引表。index 槽存
-   「entry 下标 + 1」，0 表示空；查找先走 4 字节索引，命中才读 entry。
-   扩容/删除只重建索引，entries 顺序不动。set 复用同一结构，
-   val_own = 0、值恒为 0。len 在偏移 0，len() 和真值判断都只读它。 */
+/* 字典 = entries + 开放寻址索引表。index 槽存「entry 下标 + 1」，0 表示
+   空槽、-1 表示删除留下的墓碑（探测越过它继续）；查找先走 4 字节索引，
+   命中才读 entry。存活项用 prev/next 串成插入顺序的双向链表，删除只摘链、
+   条目留原地当墓碑，由 free_head 链复用——摊还 O(1)，不用 memmove。
+   order 是链表的下标快照，按需重建（ord_len == len 表示有效），给按序号
+   遍历的生成代码提供 O(1) 访问。set 复用同一结构，val_own = 0、值恒为 0。
+   len 在偏移 0，len() 和真值判断都只读它。 */
 typedef struct {
-    int64_t hash;  /* 0 表示空槽；真实 hash 强制非 0 */
+    int64_t hash;   /* 0 表示墓碑/空槽；真实 hash 强制非 0 */
     int64_t key;
     int64_t val;
+    int32_t prev;   /* 插入顺序双向链表（存 entry 下标，-1 结束） */
+    int32_t next;
 } Py23DictEntry;
 
 typedef struct {
     int64_t len;
-    int64_t cap;       /* entries 容量 */
+    int64_t cap;       /* entries / order 容量 */
     Py23DictEntry* entries;
-    int32_t* index;    /* 开放寻址索引：entry 下标 + 1，0 为空 */
+    int32_t* order;    /* order[i] = 第 i 个存活项的 entry 下标（懒重建） */
+    int32_t* index;    /* 开放寻址索引：entry 下标 + 1，0 为空，-1 墓碑 */
     int64_t icap;      /* 索引表容量（2 的幂） */
+    int64_t ord_len;   /* order 有效长度；!= len 表示需要重建 */
+    int64_t nent;      /* entries 高水位（含墓碑） */
+    int64_t itomb;     /* 索引表里的墓碑数 */
+    int64_t free_head; /* 墓碑 entry 空闲链，-1 结束，next 复用 entry.key */
+    int32_t head;      /* 插入顺序链表头/尾（entry 下标，-1 为空） */
+    int32_t tail;
     int64_t key_kind;  /* 0 int/bool, 1 str, 2 float, 3 raw */
     int64_t key_own;   /* 0 非堆, 1 堆, 2 unknown */
     int64_t val_own;   /* 0 非堆, 1 堆, 2 unknown */
@@ -476,6 +488,7 @@ int64_t py23_dict_get(Py23Dict* d, int64_t key);
 void py23_dict_set_default_factory(Py23Dict* d, int64_t factory);
 int64_t py23_dict_contains(Py23Dict* d, int64_t key);
 int64_t py23_dict_key_at(Py23Dict* d, int64_t i);
+int64_t py23_dict_val_at(Py23Dict* d, int64_t i);
 int64_t py23_dict_get_or(Py23Dict* d, int64_t key, int64_t def);
 int64_t py23_dict_get_opt(Py23Dict* d, int64_t key);
 int own_to_list_kind(int64_t own);

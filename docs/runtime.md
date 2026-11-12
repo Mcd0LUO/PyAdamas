@@ -28,12 +28,21 @@ typedef struct Py23Rc {
 
 typedef struct { int64_t len; int64_t hash; const char* data; } Py23Str;
 typedef struct { int64_t len; int64_t cap; int64_t* data; int64_t elem_kind; } Py23List;
-typedef struct { int64_t hash; int64_t key; int64_t val; } Py23DictEntry;
+typedef struct {
+    int64_t hash; int64_t key; int64_t val;
+    int32_t prev, next;            /* 插入顺序双向链表（entry 下标，-1 结束） */
+} Py23DictEntry;
 typedef struct {
     int64_t len; int64_t cap;      /* len 在偏移 0，len()/真值判断直接读 */
-    Py23DictEntry* entries;        /* 密集 entries，按插入顺序 */
-    int32_t* index;                /* 开放寻址索引：entry 下标 + 1，0 为空 */
+    Py23DictEntry* entries;        /* 条目数组；存活项由 prev/next 串成插入顺序 */
+    int32_t* order;                /* 链表快照：order[i] = 第 i 个存活项下标（懒重建） */
+    int32_t* index;                /* 开放寻址索引：entry 下标 + 1，0 为空，-1 墓碑 */
     int64_t icap;                  /* 索引表容量（2 的幂） */
+    int64_t ord_len;               /* order 有效长度；!= len 表示需重建 */
+    int64_t nent;                  /* entries 高水位（含墓碑） */
+    int64_t itomb;                 /* 索引表墓碑数 */
+    int64_t free_head;             /* 墓碑空闲链，-1 结束 */
+    int32_t head, tail;            /* 链表头/尾 */
     int64_t key_kind;              /* 0 int/bool, 1 str, 2 float, 3 raw */
     int64_t key_own;               /* 0 非堆, 1 堆, 2 unknown */
     int64_t val_own;
@@ -104,19 +113,25 @@ RC 索引，取字符不再分配。字符串不可变，共享对象与 CPython
 
 ### 字典 / 集合
 
-字典是**开放寻址哈希表 + 插入顺序数组**：
+字典是**开放寻址哈希表 + 插入顺序双向链表**：
 
-- `entries` 是密集数组，本身就按插入顺序；`index` 是 int32 开放寻址表
-  （entry 下标 + 1，0 为空槽），查找先走索引，`for k in d` 直接扫 entries；
+- 存活条目用 `prev`/`next` 串成插入顺序的双向链表（`head`/`tail`），
+  `index` 是 int32 开放寻址表（entry 下标 + 1，0 为空槽，-1 为墓碑），
+  查找先走索引；按序号遍历（`for k in d`）走 `order` 快照；
+- `order` 是链表的下标快照，删除后失效（`ord_len = -1`），下一次
+  `py23_dict_key_at` 时从链表重建；顺序遍历本身是 O(n)，这层重建不改变
+  摊还代价，却让按序访问保持 O(1)；
 - key 的哈希/判等类别放在 `key_kind`：int/bool 机器字、str 逐字节
   （FNV-1a）、float IEEE 值（`0.0` / `-0.0` 同键）、其他按机器字；
 - `key_own` / `val_own` 决定 RC：写入前生成代码 retain 一份，更新/销毁
   时运行时 dec；unknown 只 retain 不 dec，交给 GC；
 - 更新已有 key 时保留原来的 key 对象，释放调用方新传入的 key 引用；
-- 删除没有墓碑：`entries` 后面的项前移一格，然后**整表重建索引**，单次
-  O(n)，换取线性探测链不被挖断；`pop` / `popitem` / `remove` / `discard` /
-  `clear` 都走这条路径，`popitem` 取 `entries` 末尾（LIFO）；
-- 负载因子超过 0.7 时翻倍 rehash，entries 不搬家，遍历顺序稳定。
+- **删除是摊还 O(1)**：链表摘链，entry 原地变墓碑（`hash = 0`）挂进
+  `free_head` 空闲链，索引槽置 -1；不 memmove、不整表重建，插入时优先
+  复用墓碑。`pop` / `popitem` / `remove` / `discard` 都走这条路径，
+  `popitem` 取链表尾（LIFO）；
+- 索引装载按「存活 + 墓碑」算，超过 2/3 时重建（存活项过多则翻倍）；
+  entries 不搬家，遍历顺序稳定。
 - set 就是 `val_own = 0`、值恒 0 的 dict，复用同一套函数和 GC。
 - `default_factory` 非 0 时是 `collections.defaultdict`：`d[k]` 缺失会按工厂
   造值、插入并返回；`get` / `in` 不触发。工厂只编码内置零参类型
@@ -305,7 +320,8 @@ longjmp 回同步调用点。GC 清扫和进程退出不跑析构器，但会单
 | `py23_dict_get` | `(Py23Dict*, i64 key) -> i64` | 缺失抛 KeyError；defaultdict 设了工厂时先造默认值、插入再返回。返回借用 |
 | `py23_dict_set_default_factory` | `(Py23Dict*, i64 factory) -> void` | 设置 defaultdict 的内置工厂编码（0 = 普通 dict） |
 | `py23_dict_contains` | `(Py23Dict*, i64 key) -> i64` | `in` 用，返回 0/1 |
-| `py23_dict_key_at` | `(Py23Dict*, i64 index) -> i64` | 按插入顺序取 key，遍历用 |
+| `py23_dict_key_at` | `(Py23Dict*, i64 index) -> i64` | 按插入顺序取 key，遍历用（order 快照失效时先重建） |
+| `py23_dict_val_at` | `(Py23Dict*, i64 index) -> i64` | 按插入顺序取 value，遍历用 |
 | `py23_dict_get_or` | `(Py23Dict*, i64 key, i64 def) -> i64` | 缺失返回默认值 |
 | `py23_dict_keys` | `(Py23Dict*) -> Py23List*` | 新 list，按插入顺序装 key |
 | `py23_dict_values` | `(Py23Dict*) -> Py23List*` | 新 list，按插入顺序装 value |
