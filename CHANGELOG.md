@@ -23,6 +23,9 @@ C 互操作 v2：`ptr[T]` 可直接接收 py23 缓冲区，支持把数组交给
 
 - 新增 `98_cimport_buffer`：`modf` 写 `list[float]`、`time` 写 `list[int]`、
   `memcmp` 比较 `list[float]` 与 `bytes`。
+- 新增 `99_cblas`：在真实 OpenBLAS 上跑 `cblas_dgemm`（2×2 行主序）与
+  `cblas_ddot`，验证 14 参数混合编组与数组指针；开发容器已安装
+  `libopenblas-dev`。
 - 新增反例 `f44_cimport_buffer_mismatch`。
 - `ctest --preset dev`、完整 `tests/run_tests.sh`、`build/memcheck.sh` 全绿。
 

@@ -1068,7 +1068,7 @@ extern def free(p: ptr) -> None
 
 指针只在本次 C 调用期间有效：C 函数不得保存它，调用期间也不要改变 list 长度。C 写回 `data` 后，py23 侧的 list 元素立即可见。多维数组请自己拍平并显式传 stride。
 
-BLAS 示例（`cblas.cpya`，需系统安装 OpenBLAS）：
+BLAS 示例（`cblas.cpya`，需系统安装 OpenBLAS；开发容器已安装 `libopenblas-dev`）：
 
 ```
 cmodule cblas
