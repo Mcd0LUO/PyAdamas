@@ -4,6 +4,29 @@
 
 早期阶段没有逐条留痕，按阶段归纳；0.4 之后逐条记录。
 
+## [0.102] - 2026-11-12
+
+字符串单遍化与短串 SSO。
+
+### 性能
+
+- **单遍 `string.capwords`**：`stdlib/string.py` 的 `capwords` 改调内部
+  intrinsic `__py23_capwords`，降级为 `py23_str_capwords`；按 ASCII 空白
+  单遍扫描，词首大写、其余小写，直接写进一个预分配的输出串，不再建中间
+  词表。实测 20 万次（44 字节 / 9 词）：0.108s → 约 0.011s，同机
+  CPython 3.13.5 约 0.16–0.19s。
+- **短串 SSO**：<=7 字节的字符串把字符内联在 `Py23Str::hash` 的 8 字节里
+  （留 1 字节 NUL），`data` 指向这段内联区，省掉结构体后的字符区；长串
+  布局不变。值仍是 8 字节裸指针、对象仍走 RC/GC，属于 ABI 兼容的内联，
+  不是 tagged-value 级 SSO。
+
+### 验证
+
+- `ctest --preset dev` 2/2 通过。
+- `10_rc` / `13_gc` / `14_dict` / `15_slice` / `05_strings` / `54_stdlib`
+  在 16MB `RLIMIT_AS` 下全部通过。
+- `capwords` 语义探针输出与 CPython 一致。
+
 ## [0.101] - 2026-11-12
 
 字符串 / 列表分配继续优化。

@@ -294,6 +294,36 @@ static int64_t sm_find_from(Py23Str* s, Py23Str* sub, int64_t start, int64_t end
     return -1;
 }
 
+/* 单遍 capwords：不建中间词表，直接写进一个输出字符串。
+   语义与 string.capwords 一致：按 ASCII 空白切词，词首大写、其余小写。 */
+Py23Str* py23_str_capwords(Py23Str* s) {
+    Py23Str* out = str_alloc(s->len);
+    char* p = (char*)out->data;
+    int64_t i = 0;
+    int64_t pos = 0;
+    int first = 1;
+    while (i < s->len) {
+        while (i < s->len && sm_is_space(s->data[i])) ++i;
+        if (i >= s->len) break;
+        if (!first) p[pos++] = ' ';
+        first = 0;
+        int lead = 1;
+        while (i < s->len && !sm_is_space(s->data[i])) {
+            char c = s->data[i++];
+            if (lead) {
+                c = sm_upper(c);
+                lead = 0;
+            } else {
+                c = sm_lower(c);
+            }
+            p[pos++] = c;
+        }
+    }
+    out->len = pos;
+    p[pos] = '\0';
+    return out;
+}
+
 int64_t py23_str_method(Py23Str* s, int64_t op, int64_t a0, int64_t a1, int64_t a2) {
     switch (op) {
         case 0:   /* upper */

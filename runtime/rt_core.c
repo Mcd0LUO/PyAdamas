@@ -415,8 +415,21 @@ void* py23_closure_new(int64_t code, int64_t n_caps) {
     return p;
 }
 
+/* 短串 SSO：<=7 字节直接内联在 Py23Str::hash 的 8 字节里，
+   data 指向这段内联区；长串仍用结构体后面的独立字符区。
+   值仍然是 8 字节指针（不是 tagged value），所以对象本身仍走 RC/GC。 */
+#define STR_INLINE_MAX 7
+
 Py23Str* str_alloc(int64_t len) {
     if (len < 0) panic_c("negative string length");
+    if (len <= STR_INLINE_MAX) {
+        Py23Str* s =
+            (Py23Str*)rc_alloc((int64_t)sizeof(Py23Str), NULL, NULL, PY23_RC_STR);
+        s->len = len;
+        s->data = (const char*)&s->hash;
+        ((char*)s->data)[len] = '\0';
+        return s;
+    }
     Py23Str* s =
         (Py23Str*)rc_alloc((int64_t)sizeof(Py23Str) + len + 1, NULL, NULL, PY23_RC_STR);
     s->len = len;

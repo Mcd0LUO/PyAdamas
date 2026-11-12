@@ -185,6 +185,7 @@ enum class RtFn : uint16_t {
     ListSliceAssign, // (list*, i64 start, i64 stop, i64 step, list*) -> void
     ListDelIndex, // (list*, i64 index) -> void  del list[i]
     StrToList,    // (str*) -> list*
+    StrCapwords,  // (str*) -> str*  单遍 capwords
     BytesToList,  // (bytes*) -> list[int]（for c in b"..."）
     StrWrapList,  // (str*) -> list*（单元素，subprocess 用）
     ListExtend,   // (list* dst, list* src) -> void
@@ -575,6 +576,7 @@ inline const char* rt_name(RtFn f) {
         case RtFn::ListSliceAssign: return "py23_list_slice_assign";
         case RtFn::ListDelIndex: return "py23_list_del_index";
         case RtFn::StrToList: return "py23_str_to_list";
+        case RtFn::StrCapwords: return "py23_str_capwords";
         case RtFn::BytesToList: return "py23_bytes_to_list";
         case RtFn::StrWrapList: return "py23_str_wrap_list";
         case RtFn::ListExtend: return "py23_list_extend";

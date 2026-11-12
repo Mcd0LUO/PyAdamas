@@ -599,6 +599,23 @@ VReg Lowerer::lower_builtin_call(const std::string& name, Call& c) {
         return call_runtime(RtFn::Ord, t_int(), {v});
     }
 
+    if (name == "__py23_capwords") {
+        if (c.args.size() != 1 || !c.keywords.empty()) {
+            err(c.line, c.col, "capwords() takes exactly one argument");
+            return const_str("");
+        }
+        TypePtr t = tc_.type_of(c.args[0].get());
+        if (t && t->kind != TyKind::Str && t->kind != TyKind::Unknown) {
+            err(c.line, c.col,
+                std::format("capwords() expects a string, got '{}'", type_name(t)));
+            return const_str("");
+        }
+        VReg v = expr(*c.args[0]);
+        VReg r = call_runtime(RtFn::StrCapwords, t_str(), {v});
+        push_temp(r);
+        return r;
+    }
+
     if (name == "chr") {
         if (c.args.size() != 1) {
             err(c.line, c.col, "chr() takes exactly one argument");

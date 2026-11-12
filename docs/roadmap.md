@@ -30,9 +30,10 @@
 | 0.99 | `csv`：纯 py23 stdlib（reader/writer、QUOTE_*）；`file` 标注与模块接口编码修复 |
 | 0.100 | 短字符串 freelist、`split` 去泄漏与预分配（`string.capwords` 反超 CPython） |
 | 0.101 | 列表结构体/data freelist、`split(sep)` 单遍 + `memchr`、append 快路径 |
+| 0.102 | 单遍 `string.capwords` intrinsic、<=7 字节短串 SSO |
 | 许可证 | Apache-2.0（见 [LICENSE](../LICENSE) / [NOTICE](../NOTICE)） |
 
-## 当前状态（0.101）
+## 当前状态（0.102）
 
 流水线 `源码 → 词法 → AST → lambda 脱糖 → 类型检查 → IR → x86-64 汇编 → 可执行文件` 已打通。
 

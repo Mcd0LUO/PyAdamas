@@ -164,6 +164,13 @@ TypePtr TypeChecker::builtin_call(const std::string& n, Call& c) {
         if (n == "dict") return mk_dict(t_unknown(), t_unknown());
         if (n == "ord") return t_int();
         if (n == "chr") return t_str();
+        if (n == "__py23_capwords") {
+            if (!need(1, 1)) return t_str();
+            if (a[0] && a[0]->kind != TyKind::Str && a[0]->kind != TyKind::Unknown)
+                err(c.args[0]->line, c.args[0]->col,
+                    std::format("capwords() expects a string, got '{}'", type_name(a[0])));
+            return t_str();
+        }
         if (n == "repr") return t_str();
         if (n == "hex" || n == "bin" || n == "oct") return t_str();
         if (n == "isinstance") {

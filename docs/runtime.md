@@ -66,6 +66,11 @@ typedef struct {
 RC 归零时不 `free`，而是回到同档池里，下一次同档分配直接复用。池块在
 进程退出时仍然持有（静态根，不触发泄漏报告），上限约 192KB。
 
+<=7 字节的短串把字符内联在 `Py23Str::hash` 的 8 字节里（留 1 字节 NUL），
+`data` 指向这段内联区；长串仍用结构体后面的字符区。值仍然是裸指针，对象
+本身仍走 RC/GC，所以这不是 tagged-value 级别的 SSO，只是省掉短串的尾部
+字符区。
+
 ### 列表
 
 `cap` 是已分配容量，`len` 是有效元素数，`data` 是 8 字节槽数组。元素统一占 8 字节：整数直接放，浮点放位模式（`memcpy` 转换），指针放地址。**没有运行时类型标签**——取值时按什么类型解释由编译期决定。
@@ -513,6 +518,7 @@ longjmp 回同步调用点。GC 清扫和进程退出不跑析构器，但会单
 | `py23_str_from_none` | `() -> str*` | `"None"` |
 | `py23_str_eq` | `(str*, str*) -> i64` | 逐字节相等，返回 0/1 |
 | `py23_str_cmp` | `(str*, str*) -> i64` | 三路比较，返回 -1/0/1 |
+| `py23_str_capwords` | `(str*) -> str*` | 单遍 `string.capwords`：按 ASCII 空白切词、词首大写/其余小写，只分配一个输出串 |
 | `py23_percent_format` | `(str* pat, list* args, str* desc, i64 is_bytes) -> str*` | printf 风格 `%`；`desc` 每个字节描述实参域（`i` int、`b` bool、`f` float、`s` str/bytes、`n` None），非法组合抛 TypeError |
 
 `py23_str_cmp` 用 `memcmp`，前提是 **UTF-8 的字节序与码点序一致**（这是 UTF-8 的设计性质），所以结果与 Python 的字符串比较相同。

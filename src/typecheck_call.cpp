@@ -410,6 +410,8 @@ bool TypeChecker::is_builtin_callable(const std::string& n) {
             "bytearray", "frozenset", "object", "complex", "bytes",
             "__build_class__",
             "issubclass", "ascii", "aiter", "anext",
+            // 内部 intrinsics：stdlib/string.py 的 capwords 走单遍 C 实现
+            "__py23_capwords",
             // site 模块注入的内置名（交互式退出），真实代码里也会用到
             "quit", "exit", "copyright", "credits", "license",
         };

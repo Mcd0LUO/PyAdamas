@@ -13,10 +13,4 @@ printable = digits + ascii_letters + punctuation + whitespace
 
 def capwords(s: str) -> str:
     """按空白切词，每个词首字母大写后用一个空格连接。"""
-    words: list[str] = s.split()
-    out: list[str] = []
-    i = 0
-    while i < len(words):
-        out.append(words[i].capitalize())
-        i += 1
-    return " ".join(out)
+    return __py23_capwords(s)

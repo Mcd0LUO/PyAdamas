@@ -670,6 +670,7 @@ void AsmGen::gen_call_rt(const Inst& in) {
             case RtFn::ListMinI64:
             case RtFn::ListMaxI64:
             case RtFn::StrToList:
+            case RtFn::StrCapwords:
             case RtFn::BytesToList:
             case RtFn::StrWrapList:
             case RtFn::ListCopy:

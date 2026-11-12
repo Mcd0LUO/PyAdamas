@@ -775,7 +775,8 @@ CPython 一致。
 - 内置 `string`：`stdlib/string.py` 随编译器分发，提供
   `ascii_lowercase` / `ascii_uppercase` / `ascii_letters` / `digits` /
   `hexdigits` / `octdigits` / `punctuation` / `whitespace` / `printable`
-  和 `capwords()`。
+  和 `capwords()`。常量是纯 py23；`capwords` 调内部 intrinsic，走单遍 C
+  实现，不建中间词表。
 - 内置 `itertools`：`chain(a, b)` / `repeat(v, n)` / `islice(x, stop)`，
   按实参静态特化，返回 list（立即求值）。
 - 内置 `collections`：`Counter(items)` 返回 dict，`most_common(n)` 返回
