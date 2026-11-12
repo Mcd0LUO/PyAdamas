@@ -11,7 +11,7 @@
 #include "module.h"
 #include "typecheck.h"
 
-namespace py23 {
+namespace pyadamas {
 
 struct ModuleUnit {
     std::string key;           // 内部映射键；入口是 "@entry"
@@ -19,10 +19,10 @@ struct ModuleUnit {
     std::string runtime_name;  // __name__
     std::string path;
     std::string source;
-    std::unique_ptr<py23::Module> ast;
-    py23::ModuleInfoPtr info;
-    std::shared_ptr<py23::TypeChecker> tc;
-    std::optional<py23::IRModule> ir;
+    std::unique_ptr<pyadamas::Module> ast;
+    pyadamas::ModuleInfoPtr info;
+    std::shared_ptr<pyadamas::TypeChecker> tc;
+    std::optional<pyadamas::IRModule> ir;
     std::vector<std::string> deps;
     std::string cache_dir;
     std::string asm_path;
@@ -58,4 +58,4 @@ bool load_program(const std::string& entry_path, const std::vector<std::string>&
 bool prepare_program(Program& p, bool emit_objects, bool entry_ir);
 bool link_program(Program& p, const std::string& output);
 
-}  // namespace py23
+}  // namespace pyadamas

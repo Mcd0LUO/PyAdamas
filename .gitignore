@@ -1,6 +1,6 @@
 # 构建产物
 build/
-py23
+pyadamas
 
 # 编译中间件
 *.o
@@ -9,7 +9,7 @@ py23
 *.ii
 *.gch
 
-# 编译产物（tests/run 下的可执行文件、py23 build 的默认输出）
+# 编译产物（tests/run 下的可执行文件、pyadamas build 的默认输出）
 tests/run/0[1-9]_*
 !tests/run/*.py
 

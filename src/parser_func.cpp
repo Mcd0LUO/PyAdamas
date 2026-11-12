@@ -1,7 +1,7 @@
 // parser_func.cpp —— 函数与类定义、参数、lambda
 #include "parser.h"
 
-namespace py23 {
+namespace pyadamas {
 
 StmtPtr Parser::parse_funcdef(std::vector<ExprPtr> decorators, bool is_async) {
         int ln = cur().line, cl = cur().col;
@@ -186,4 +186,4 @@ Arguments Parser::parse_lambda_params() {
     }
 
 
-}  // namespace py23
+}  // namespace pyadamas

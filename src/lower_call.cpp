@@ -3,7 +3,7 @@
 
 #include <limits>
 
-namespace py23 {
+namespace pyadamas {
 
 std::vector<VReg> Lowerer::bind_args(Call& c, const FuncInfoPtr& info, FunctionDef* defn) {
     std::vector<VReg> args;
@@ -420,7 +420,7 @@ VReg Lowerer::lower_call(Call& c) {
                 "list", "tuple", "dict", "set", "sorted", "reversed", "enumerate", "zip",
                 "open", "input", "iter", "isinstance", "getattr", "setattr", "hasattr",
                 "callable", "issubclass", "hash", "type", "id", "frozenset",
-                "slice", "vars", "dir", "__py23_capwords",
+                "slice", "vars", "dir", "__pa_capwords",
             };
             if (kBuiltins.count(n.id)) return lower_builtin_call(n.id, c);
             // 名字能解析但语义没实现的内置：以前会退化成调用空指针直接
@@ -712,4 +712,4 @@ VReg Lowerer::lower_asyncio(const std::string& member, Call& c) {
 
 
 
-}  // namespace py23
+}  // namespace pyadamas

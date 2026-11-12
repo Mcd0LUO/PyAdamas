@@ -1,7 +1,7 @@
 // typecheck_builtin.cpp —— 内置函数调用的类型分派
 #include "typecheck.h"
 
-namespace py23 {
+namespace pyadamas {
 
 TypePtr TypeChecker::builtin_call(const std::string& n, Call& c) {
         std::vector<TypePtr> a;
@@ -164,7 +164,7 @@ TypePtr TypeChecker::builtin_call(const std::string& n, Call& c) {
         if (n == "dict") return mk_dict(t_unknown(), t_unknown());
         if (n == "ord") return t_int();
         if (n == "chr") return t_str();
-        if (n == "__py23_capwords") {
+        if (n == "__pa_capwords") {
             if (!need(1, 1)) return t_str();
             if (a[0] && a[0]->kind != TyKind::Str && a[0]->kind != TyKind::Unknown)
                 err(c.args[0]->line, c.args[0]->col,
@@ -405,4 +405,4 @@ TypePtr TypeChecker::builtin_call(const std::string& n, Call& c) {
         return t_unknown();
     }
 
-}  // namespace py23
+}  // namespace pyadamas

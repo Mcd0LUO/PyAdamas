@@ -1,7 +1,7 @@
 // parser.cpp —— 语法驱动：语句分派、简单语句、import
 #include "parser.h"
 
-namespace py23 {
+namespace pyadamas {
 
 std::unique_ptr<Module> Parser::parse() {
         auto mod = std::make_unique<Module>();
@@ -160,4 +160,4 @@ std::string Parser::parse_dotted_name() {
     }
 
 
-}  // namespace py23
+}  // namespace pyadamas

@@ -1,4 +1,4 @@
-# 29_dict —— dict(关键字)：py23 只支持关键字形式
+# 29_dict —— dict(关键字)：pyadamas 只支持关键字形式
 N = 200000
 total = 0
 for i in range(N):

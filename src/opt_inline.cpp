@@ -1,7 +1,7 @@
 // opt_inline.cpp —— 静态小函数内联与直接调用改写
 #include "opt_detail.h"
 
-namespace py23 {
+namespace pyadamas {
 
 using namespace optdetail;
 
@@ -627,4 +627,4 @@ bool rewrite_direct_calls(IRModule& m, IRFunction& fn,
 }
 
 }  // namespace optdetail
-}  // namespace py23
+}  // namespace pyadamas

@@ -19,7 +19,7 @@
 
 #include "token.h"
 
-namespace py23 {
+namespace pyadamas {
 
 struct LexError : std::runtime_error {
     int line, col;
@@ -796,4 +796,4 @@ private:
     }
 };
 
-}  // namespace py23
+}  // namespace pyadamas

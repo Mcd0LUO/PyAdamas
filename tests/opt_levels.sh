@@ -1,10 +1,10 @@
 #!/usr/bin/env bash
 # 优化等级回归：同一批用例分别用 -O0 / -O1 / -O2 编译运行并比对输出。
-# 用法：opt_levels.sh <build-dir> <py23>
+# 用法：opt_levels.sh <build-dir> <pyadamas>
 set -u
 
 BUILD=${1:?build dir}
-PY23=${2:?py23 binary}
+PYADAMAS=${2:?pyadamas binary}
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
 cd "$ROOT" || exit 1
 
@@ -30,7 +30,7 @@ for lvl in 0 1 2; do
         prog="$BUILD/opt_${lvl}_${name}.prog"
         out="$BUILD/opt_${lvl}_${name}.out"
         exp="$BUILD/opt_${lvl}_${name}.exp"
-        if ! "$PY23" run --rebuild "-O$lvl" -o "$prog" "$f" > "$out" 2>&1; then
+        if ! "$PYADAMAS" run --rebuild "-O$lvl" -o "$prog" "$f" > "$out" 2>&1; then
             printf 'FAILED\n'
             sed -n '1,6p' "$out"
             fail=1
@@ -54,7 +54,7 @@ printf '  O2 --fast-math %-26s ' "$name"
 prog="$BUILD/opt_fm_${name}.prog"
 out="$BUILD/opt_fm_${name}.out"
 exp="$BUILD/opt_fm_${name}.exp"
-if "$PY23" run --rebuild -O2 --fast-math -o "$prog" "$f" > "$out" 2>&1; then
+if "$PYADAMAS" run --rebuild -O2 --fast-math -o "$prog" "$f" > "$out" 2>&1; then
     sed -n '/^# --- expect ---$/,$p' "$f" | tail -n +2 | sed -E 's/^# ?//' > "$exp"
     if diff -q "$exp" "$out" > /dev/null 2>&1; then
         printf 'ok\n'

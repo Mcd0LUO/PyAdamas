@@ -6,17 +6,17 @@
 /* 运行时 awaitable：sleep / gather。magic 用来和协程帧区分。
    waiter 持有协程或上层 gather 的一个引用；完成时连同结果一起转交。 */
 
-Py23List* loop_ready;
-Py23List* loop_timers;
-Py23List* loop_pending;  /* 已启动但还没完成的 gather / Task / Future / fd */
-Py23List* loop_fds;
+PyAdamasList* loop_ready;
+PyAdamasList* loop_timers;
+PyAdamasList* loop_pending;  /* 已启动但还没完成的 gather / Task / Future / fd */
+PyAdamasList* loop_fds;
 void* loop_roots[4];
 int loop_roots_registered;
 int loop_running;
 void* loop_root;
 int loop_root_state;  /* 0 pending, 1 done, 2 failed */
 int64_t loop_root_result;
-Py23Exception* loop_root_exc;
+PyAdamasException* loop_root_exc;
 
 int64_t now_ms(void) {
     struct timespec ts;
@@ -26,54 +26,54 @@ int64_t now_ms(void) {
 
 int frame_is_coro(void* p) {
     if (!p) return 0;
-    Py23Rc* h = (Py23Rc*)p - 1;
+    PyAdamasRc* h = (PyAdamasRc*)p - 1;
     if (!rc_index_has(h)) return 0;
-    if (h->kind != PY23_RC_OBJ || h->size < (int64_t)PY23_GEN_HEADER * 8) return 0;
-    return ((int64_t*)p)[6] == PY23_CORO_MAGIC;
+    if (h->kind != PYADAMAS_RC_OBJ || h->size < (int64_t)PYADAMAS_GEN_HEADER * 8) return 0;
+    return ((int64_t*)p)[6] == PYADAMAS_CORO_MAGIC;
 }
 
 int frame_is_agen(void* p) {
     if (!p) return 0;
-    Py23Rc* h = (Py23Rc*)p - 1;
+    PyAdamasRc* h = (PyAdamasRc*)p - 1;
     if (!rc_index_has(h)) return 0;
-    if (h->kind != PY23_RC_OBJ || h->size < (int64_t)PY23_GEN_HEADER * 8) return 0;
-    return ((int64_t*)p)[6] == PY23_AGEN_MAGIC;
+    if (h->kind != PYADAMAS_RC_OBJ || h->size < (int64_t)PYADAMAS_GEN_HEADER * 8) return 0;
+    return ((int64_t*)p)[6] == PYADAMAS_AGEN_MAGIC;
 }
 
 int is_await_obj(void* p) {
     if (!p) return 0;
-    Py23Rc* h = (Py23Rc*)p - 1;
+    PyAdamasRc* h = (PyAdamasRc*)p - 1;
     if (!rc_index_has(h)) return 0;
-    if (h->kind != PY23_RC_OBJ || h->size < (int64_t)sizeof(Py23Await)) return 0;
-    return *(int64_t*)p == PY23_AWAIT_MAGIC;
+    if (h->kind != PYADAMAS_RC_OBJ || h->size < (int64_t)sizeof(PyAdamasAwait)) return 0;
+    return *(int64_t*)p == PYADAMAS_AWAIT_MAGIC;
 }
 
 void await_destroy(void* p) {
-    Py23Await* w = (Py23Await*)p;
-    py23_rc_dec_unknown(w->result);
-    if (w->exc) exc_free((Py23Exception*)w->exc);
-    if (w->waiter) py23_rc_dec((void*)w->waiter);
-    if (w->task_coro) py23_rc_dec((void*)w->task_coro);
-    if (w->driver_gen) py23_rc_dec((void*)w->driver_gen);
-    if (w->driver_sent) py23_rc_dec_unknown(w->driver_sent);
-    if (w->driver_throw) exc_free((Py23Exception*)w->driver_throw);
-    if (w->waiters) py23_rc_dec(w->waiters);
-    if (w->results) py23_rc_dec(w->results);
-    if (w->children) py23_rc_dec(w->children);
-    if (w->callbacks) py23_rc_dec(w->callbacks);
+    PyAdamasAwait* w = (PyAdamasAwait*)p;
+    pa_rc_dec_unknown(w->result);
+    if (w->exc) exc_free((PyAdamasException*)w->exc);
+    if (w->waiter) pa_rc_dec((void*)w->waiter);
+    if (w->task_coro) pa_rc_dec((void*)w->task_coro);
+    if (w->driver_gen) pa_rc_dec((void*)w->driver_gen);
+    if (w->driver_sent) pa_rc_dec_unknown(w->driver_sent);
+    if (w->driver_throw) exc_free((PyAdamasException*)w->driver_throw);
+    if (w->waiters) pa_rc_dec(w->waiters);
+    if (w->results) pa_rc_dec(w->results);
+    if (w->children) pa_rc_dec(w->children);
+    if (w->callbacks) pa_rc_dec(w->callbacks);
 }
 
 void await_gc_release(void* p) {
-    Py23Await* w = (Py23Await*)p;
-    if (w->result) py23_gc_unref_child((void*)w->result);
-    if (w->waiter) py23_gc_unref_child((void*)w->waiter);
-    if (w->task_coro) py23_gc_unref_child((void*)w->task_coro);
-    if (w->driver_gen) py23_gc_unref_child((void*)w->driver_gen);
-    if (w->driver_sent) py23_gc_unref_child((void*)w->driver_sent);
-    if (w->waiters) py23_gc_unref_child(w->waiters);
-    if (w->results) py23_gc_unref_child(w->results);
-    if (w->children) py23_gc_unref_child(w->children);
-    if (w->callbacks) py23_gc_unref_child(w->callbacks);
+    PyAdamasAwait* w = (PyAdamasAwait*)p;
+    if (w->result) pa_gc_unref_child((void*)w->result);
+    if (w->waiter) pa_gc_unref_child((void*)w->waiter);
+    if (w->task_coro) pa_gc_unref_child((void*)w->task_coro);
+    if (w->driver_gen) pa_gc_unref_child((void*)w->driver_gen);
+    if (w->driver_sent) pa_gc_unref_child((void*)w->driver_sent);
+    if (w->waiters) pa_gc_unref_child(w->waiters);
+    if (w->results) pa_gc_unref_child(w->results);
+    if (w->children) pa_gc_unref_child(w->children);
+    if (w->callbacks) pa_gc_unref_child(w->callbacks);
 }
 
 /* GC 清扫 / 进程退出不跑析构器，但异常对象是 malloc 的普通内存，
@@ -81,62 +81,62 @@ void await_gc_release(void* p) {
 void free_attached_exception(void* payload, int64_t size) {
     if (!payload || size < 8) return;
     int64_t* p = (int64_t*)payload;
-    if (p[0] == PY23_EXCVAL_MAGIC && size >= (int64_t)sizeof(Py23ExcValue)) {
+    if (p[0] == PYADAMAS_EXCVAL_MAGIC && size >= (int64_t)sizeof(PyAdamasExcValue)) {
         // 异常值对象：type/message 是 malloc 的，dtor 在 GC 路径不会跑。
-        Py23ExcValue* v = (Py23ExcValue*)payload;
+        PyAdamasExcValue* v = (PyAdamasExcValue*)payload;
         free(v->type);
         free(v->message);
         v->type = NULL;
         v->message = NULL;
         return;
     }
-    if (p[0] == PY23_AWAIT_MAGIC && size >= (int64_t)sizeof(Py23Await)) {
-        Py23Await* w = (Py23Await*)payload;
+    if (p[0] == PYADAMAS_AWAIT_MAGIC && size >= (int64_t)sizeof(PyAdamasAwait)) {
+        PyAdamasAwait* w = (PyAdamasAwait*)payload;
         if (w->driver_throw) {
-            exc_free((Py23Exception*)w->driver_throw);
+            exc_free((PyAdamasException*)w->driver_throw);
             w->driver_throw = 0;
         }
         if (w->exc) {
-            exc_free((Py23Exception*)w->exc);
+            exc_free((PyAdamasException*)w->exc);
             w->exc = 0;
         }
         return;
     }
-    if (size >= (int64_t)PY23_GEN_HEADER * 8 &&
-        (p[6] == PY23_CORO_MAGIC || p[6] == PY23_AGEN_MAGIC)) {
+    if (size >= (int64_t)PYADAMAS_GEN_HEADER * 8 &&
+        (p[6] == PYADAMAS_CORO_MAGIC || p[6] == PYADAMAS_AGEN_MAGIC)) {
         if (p[8]) {
-            exc_free((Py23Exception*)p[8]);
+            exc_free((PyAdamasException*)p[8]);
             p[8] = 0;
         }
     }
 }
 
-Py23Await* await_new(int64_t kind) {
-    Py23Await* w = (Py23Await*)rc_alloc((int64_t)sizeof(Py23Await), await_destroy,
-                                        await_gc_release, PY23_RC_OBJ);
-    w->magic = PY23_AWAIT_MAGIC;
+PyAdamasAwait* await_new(int64_t kind) {
+    PyAdamasAwait* w = (PyAdamasAwait*)rc_alloc((int64_t)sizeof(PyAdamasAwait), await_destroy,
+                                        await_gc_release, PYADAMAS_RC_OBJ);
+    w->magic = PYADAMAS_AWAIT_MAGIC;
     w->kind = kind;
     return w;
 }
 
 void loop_ensure(void) {
     if (!loop_ready) {
-        loop_ready = py23_list_new(8, 1);
-        loop_timers = py23_list_new(8, 1);
-        loop_pending = py23_list_new(8, 1);
-        loop_fds = py23_list_new(8, 1);
+        loop_ready = pa_list_new(8, 1);
+        loop_timers = pa_list_new(8, 1);
+        loop_pending = pa_list_new(8, 1);
+        loop_fds = pa_list_new(8, 1);
     }
     if (!loop_roots_registered) {
         loop_roots[0] = (void*)&loop_ready;
         loop_roots[1] = (void*)&loop_timers;
         loop_roots[2] = (void*)&loop_pending;
         loop_roots[3] = (void*)&loop_fds;
-        py23_gc_add_roots((void**)loop_roots, 4);
+        pa_gc_add_roots((void**)loop_roots, 4);
         loop_roots_registered = 1;
     }
 }
 
-void ready_push(void* c) { py23_list_append(loop_ready, (int64_t)c); }
+void ready_push(void* c) { pa_list_append(loop_ready, (int64_t)c); }
 
 void* ready_pop(void) {
     if (!loop_ready || loop_ready->len == 0) return NULL;
@@ -148,18 +148,18 @@ void* ready_pop(void) {
 }
 
 /* 从表里摘下第 i 项，引用交给调用方。 */
-int64_t list_take_at(Py23List* l, int64_t i) {
+int64_t list_take_at(PyAdamasList* l, int64_t i) {
     int64_t v = l->data[i];
     memmove(&l->data[i], &l->data[i + 1], sizeof(int64_t) * (size_t)(l->len - i - 1));
     l->len--;
     return v;
 }
 
-void list_clear_owned(Py23List* l) {
+void list_clear_owned(PyAdamasList* l) {
     if (!l) return;
     int64_t n = l->len;
     l->len = 0;
-    for (int64_t i = 0; i < n; ++i) py23_rc_dec((void*)l->data[i]);
+    for (int64_t i = 0; i < n; ++i) pa_rc_dec((void*)l->data[i]);
 }
 
 void* pending_take(void* w) {
@@ -172,25 +172,25 @@ void* pending_take(void* w) {
     return NULL;
 }
 
-void deliver_owned(void* waiter, void* child, int64_t value, Py23Exception* exc);
+void deliver_owned(void* waiter, void* child, int64_t value, PyAdamasException* exc);
 void start_awaitable(void* w, void* waiter);
-void finish_gather(Py23Await* g);
-void coro_inject(void* c, Py23Exception* e);
-void agen_drive(Py23Await* d);
+void finish_gather(PyAdamasAwait* g);
+void coro_inject(void* c, PyAdamasException* e);
+void agen_drive(PyAdamasAwait* d);
 void cancel_chain(void* w);
-void cancel_suspended(void* c, Py23Exception* e);
-void future_cancel(Py23Await* f);
-void gather_cancel(Py23Await* g);
+void cancel_suspended(void* c, PyAdamasException* e);
+void future_cancel(PyAdamasAwait* f);
+void gather_cancel(PyAdamasAwait* g);
 
 /* 完成一个 gather：把结果/异常交给它的 waiter，并释放 pending 里的持有引用。 */
-void finish_gather(Py23Await* g) {
+void finish_gather(PyAdamasAwait* g) {
     if (g->done) return;
     g->done = 1;
     void* owned = pending_take(g);
     void* a = (void*)g->waiter;
     g->waiter = 0;
     if (g->exc) {
-        Py23Exception* e = (Py23Exception*)g->exc;
+        PyAdamasException* e = (PyAdamasException*)g->exc;
         g->exc = 0;
         if (a) deliver_owned(a, g, 0, e);
         else exc_free(e);
@@ -200,20 +200,20 @@ void finish_gather(Py23Await* g) {
         if (a) deliver_owned(a, g, r, NULL);
         else g->result = r;
     }
-    if (owned) py23_rc_dec(owned);
+    if (owned) pa_rc_dec(owned);
 }
 
-void gather_child_fail(Py23Await* g, Py23Exception* e) {
+void gather_child_fail(PyAdamasAwait* g, PyAdamasException* e) {
     if (!g->exc) g->exc = (int64_t)e;
     else exc_free(e);
     if (g->remaining > 0) --g->remaining;
 }
 
 /* 启动一个 awaitable。调用方把 w 的一个引用交给本函数。 */
-void start_gather(Py23Await* w, void* waiter) {
+void start_gather(PyAdamasAwait* w, void* waiter) {
     w->waiter = (int64_t)waiter;
-    py23_rc_inc(waiter);
-    py23_list_append(loop_pending, (int64_t)w);  // 接管调用方的引用
+    pa_rc_inc(waiter);
+    pa_list_append(loop_pending, (int64_t)w);  // 接管调用方的引用
     w->starting = 1;
     for (int64_t i = 0; i < w->children->len; ++i) {
         void* child = (void*)w->children->data[i];
@@ -223,13 +223,13 @@ void start_gather(Py23Await* w, void* waiter) {
                 gather_child_fail(w, exc_new("RuntimeError", "coroutine was already awaited"));
             } else {
                 p[7] = (int64_t)w;
-                py23_rc_inc(w);
+                pa_rc_inc(w);
                 p[1] = 4;
-                py23_rc_inc(child);
+                pa_rc_inc(child);
                 ready_push(child);
             }
         } else if (is_await_obj(child)) {
-            py23_rc_inc(child);
+            pa_rc_inc(child);
             start_awaitable(child, w);
         } else {
             gather_child_fail(w, exc_new("TypeError", "gather() argument is not awaitable"));
@@ -242,75 +242,75 @@ void start_gather(Py23Await* w, void* waiter) {
 /* ── asyncio.timeout：到期向当前协程注入 TimeoutError ─────────── */
 
 typedef struct {
-    Py23Await* timer; /* 已注册的 kind 9 定时器（可能已触发） */
+    PyAdamasAwait* timer; /* 已注册的 kind 9 定时器（可能已触发） */
     int64_t expired;
     double secs;
-} Py23Timeout;
+} PyAdamasTimeout;
 
 void* loop_active_coro; /* coro_step 执行期间指向当前协程 */
 
-static void timeout_detach(Py23Timeout* to) {
-    Py23Await* t = to->timer;
+static void timeout_detach(PyAdamasTimeout* to) {
+    PyAdamasAwait* t = to->timer;
     if (!t) return;
     to->timer = NULL;
     if (loop_timers)
         for (int64_t i = 0; i < loop_timers->len; ++i)
             if (loop_timers->data[i] == (int64_t)t) {
                 list_take_at(loop_timers, i);
-                py23_rc_dec(t); /* 定时器表的引用 */
+                pa_rc_dec(t); /* 定时器表的引用 */
                 break;
             }
-    py23_rc_dec(t); /* timeout 自己的引用；dtor 负责 dec driver_gen */
+    pa_rc_dec(t); /* timeout 自己的引用；dtor 负责 dec driver_gen */
 }
 
-static void timeout_destroy(void* p) { timeout_detach((Py23Timeout*)p); }
+static void timeout_destroy(void* p) { timeout_detach((PyAdamasTimeout*)p); }
 
-void* py23_timeout_new(double secs) {
+void* pa_timeout_new(double secs) {
     loop_ensure();
-    Py23Timeout* to = (Py23Timeout*)rc_alloc((int64_t)sizeof(Py23Timeout),
-                                             timeout_destroy, NULL, PY23_RC_OBJ);
+    PyAdamasTimeout* to = (PyAdamasTimeout*)rc_alloc((int64_t)sizeof(PyAdamasTimeout),
+                                             timeout_destroy, NULL, PYADAMAS_RC_OBJ);
     to->secs = secs;
     return to;
 }
 
-void py23_timeout_enter(void* tp) {
-    if (!tp) py23_raise_c("TypeError", "__aenter__() expects a Timeout");
-    Py23Timeout* to = (Py23Timeout*)tp;
-    if (to->timer) py23_raise_c("RuntimeError", "timeout is already active");
+void pa_timeout_enter(void* tp) {
+    if (!tp) pa_raise_c("TypeError", "__aenter__() expects a Timeout");
+    PyAdamasTimeout* to = (PyAdamasTimeout*)tp;
+    if (to->timer) pa_raise_c("RuntimeError", "timeout is already active");
     if (!loop_active_coro)
-        py23_raise_c("RuntimeError", "timeout() must be used inside a coroutine");
-    Py23Await* t = await_new(9);
+        pa_raise_c("RuntimeError", "timeout() must be used inside a coroutine");
+    PyAdamasAwait* t = await_new(9);
     // remaining 只存裸指针，不参与 RC；driver_gen 由 dtor 统一释放。
     t->remaining = (int64_t)(uintptr_t)to;
     t->driver_gen = (int64_t)(uintptr_t)loop_active_coro;
-    py23_rc_inc(loop_active_coro);
+    pa_rc_inc(loop_active_coro);
     int64_t ms = 0;
     if (to->secs > 0) {
         double v = to->secs * 1000.0;
         ms = v > 9e15 ? (int64_t)9e15 : (int64_t)(v + 0.5);
     }
     t->deadline_ms = now_ms() + ms;
-    py23_rc_inc(t); /* 定时器表引用 */
-    py23_list_append(loop_timers, (int64_t)t);
+    pa_rc_inc(t); /* 定时器表引用 */
+    pa_list_append(loop_timers, (int64_t)t);
     to->timer = t;
 }
 
-int64_t py23_timeout_exit(void* tp) {
+int64_t pa_timeout_exit(void* tp) {
     if (!tp) return 0;
-    Py23Timeout* to = (Py23Timeout*)tp;
+    PyAdamasTimeout* to = (PyAdamasTimeout*)tp;
     int64_t expired = to->expired;
     timeout_detach(to);
     return expired;
 }
 
-int64_t py23_timeout_expired(void* tp) {
+int64_t pa_timeout_expired(void* tp) {
     if (!tp) return 0;
-    return ((Py23Timeout*)tp)->expired;
+    return ((PyAdamasTimeout*)tp)->expired;
 }
 
 /* 定时器到期：标记 timeout、向目标协程注入异常。消费 fire 拿到的两个引用。 */
-static void timeout_fire(Py23Await* t) {
-    Py23Timeout* to = (Py23Timeout*)(uintptr_t)t->remaining;
+static void timeout_fire(PyAdamasAwait* t) {
+    PyAdamasTimeout* to = (PyAdamasTimeout*)(uintptr_t)t->remaining;
     void* target = (void*)(uintptr_t)t->driver_gen;
     if (to) {
         to->expired = 1;
@@ -318,73 +318,73 @@ static void timeout_fire(Py23Await* t) {
     }
     if (target) cancel_suspended(target, exc_new("TimeoutError", ""));
     // driver_gen 留给 await_destroy 释放；这里只释放 timer 自身的两个引用。
-    py23_rc_dec(t);
-    py23_rc_dec(t);
+    pa_rc_dec(t);
+    pa_rc_dec(t);
 }
 
 /* ── asyncio.wait_for：可等待对象 + 超时竞速（kind 8） ────────── */
 
-static void timer_remove(Py23Await* w) {
+static void timer_remove(PyAdamasAwait* w) {
     for (int64_t i = 0; i < loop_timers->len; ++i)
         if (loop_timers->data[i] == (int64_t)w) {
             list_take_at(loop_timers, i);
-            py23_rc_dec(w);
+            pa_rc_dec(w);
             return;
         }
 }
 
-void* py23_asyncio_wait_for(void* aw, double secs) {
+void* pa_asyncio_wait_for(void* aw, double secs) {
     loop_ensure();
     if (!frame_is_coro(aw) && !is_await_obj(aw))
-        py23_raise_c("TypeError", "asyncio.wait_for() expects an awaitable");
-    Py23Await* w = await_new(8);
-    w->children = py23_list_new(1, 1);
+        pa_raise_c("TypeError", "asyncio.wait_for() expects an awaitable");
+    PyAdamasAwait* w = await_new(8);
+    w->children = pa_list_new(1, 1);
     double v = secs * 1000.0;
     int64_t ms = 0;
     if (secs > 0) ms = v > 9e15 ? (int64_t)9e15 : (int64_t)(v + 0.5);
     w->deadline_ms = now_ms() + ms;
-    void* t = py23_asyncio_create_task(aw);
-    py23_list_append(w->children, (int64_t)t);  // 接管 create_task 的引用
+    void* t = pa_asyncio_create_task(aw);
+    pa_list_append(w->children, (int64_t)t);  // 接管 create_task 的引用
     return w;
 }
 
 /* 定时器到期：取消子任务，把 TimeoutError 交给等待者。消费定时器引用。 */
-static void wait_for_timeout(Py23Await* w) {
+static void wait_for_timeout(PyAdamasAwait* w) {
     if (!w->done) {
         w->done = 1;
         if (w->children && w->children->len > 0) {
             void* t = (void*)(uintptr_t)w->children->data[0];
-            py23_rc_inc(t);
+            pa_rc_inc(t);
             cancel_chain(t);
-            py23_rc_dec(t);
+            pa_rc_dec(t);
         }
         if (w->children) {
-            py23_rc_dec(w->children);
+            pa_rc_dec(w->children);
             w->children = NULL;
         }
         void* owned = pending_take(w);
         void* a = (void*)w->waiter;
         w->waiter = 0;
-        Py23Exception* e = exc_new("TimeoutError", "operation timed out");
+        PyAdamasException* e = exc_new("TimeoutError", "operation timed out");
         if (a) deliver_owned(a, w, 0, e);
         else w->exc = (int64_t)e;
-        if (owned) py23_rc_dec(owned);
+        if (owned) pa_rc_dec(owned);
     }
-    py23_rc_dec(w);
+    pa_rc_dec(w);
 }
 
 /* race 自身被取消：取消子任务、摘定时器，把 CancelledError 交出去。 */
-void wait_for_cancel(Py23Await* w) {
+void wait_for_cancel(PyAdamasAwait* w) {
     if (w->done) return;
     w->done = 1;
     if (w->children && w->children->len > 0) {
         void* t = (void*)(uintptr_t)w->children->data[0];
-        py23_rc_inc(t);
+        pa_rc_inc(t);
         cancel_chain(t);
-        py23_rc_dec(t);
+        pa_rc_dec(t);
     }
     if (w->children) {
-        py23_rc_dec(w->children);
+        pa_rc_dec(w->children);
         w->children = NULL;
     }
     timer_remove(w);
@@ -392,141 +392,141 @@ void wait_for_cancel(Py23Await* w) {
     void* a = (void*)w->waiter;
     w->waiter = 0;
     if (a) deliver_owned(a, w, 0, exc_new("CancelledError", ""));
-    if (owned) py23_rc_dec(owned);
+    if (owned) pa_rc_dec(owned);
 }
 
 void start_awaitable(void* obj, void* waiter) {
-    Py23Await* w = (Py23Await*)obj;
+    PyAdamasAwait* w = (PyAdamasAwait*)obj;
     if (w->kind == 6) {
         if (w->done) {
-            py23_rc_inc(waiter);
-            py23_rc_inc_unknown(w->result);
-            Py23Exception* e = exc_clone((Py23Exception*)w->exc);
+            pa_rc_inc(waiter);
+            pa_rc_inc_unknown(w->result);
+            PyAdamasException* e = exc_clone((PyAdamasException*)w->exc);
             deliver_owned(waiter, w, w->result, e);
-            py23_rc_dec(w);
+            pa_rc_dec(w);
             return;
         }
         if (w->waiter) {
-            py23_rc_dec(w);
+            pa_rc_dec(w);
             coro_inject(waiter, exc_new("RuntimeError", "fd wait is already awaited"));
             return;
         }
         w->waiter = (int64_t)waiter;
-        py23_rc_inc(waiter);
-        py23_list_append(loop_fds, (int64_t)w);  // 接管调用方的引用
+        pa_rc_inc(waiter);
+        pa_list_append(loop_fds, (int64_t)w);  // 接管调用方的引用
         return;
     }
     if (w->kind == 5) {
         if (w->done) {
-            py23_rc_inc(waiter);
-            py23_rc_inc_unknown(w->result);
-            Py23Exception* e = exc_clone((Py23Exception*)w->exc);
+            pa_rc_inc(waiter);
+            pa_rc_inc_unknown(w->result);
+            PyAdamasException* e = exc_clone((PyAdamasException*)w->exc);
             deliver_owned(waiter, w, w->result, e);
-            py23_rc_dec(w);
+            pa_rc_dec(w);
             return;
         }
-        py23_rc_inc(waiter);
-        py23_list_append(w->waiters, (int64_t)waiter);
+        pa_rc_inc(waiter);
+        pa_list_append(w->waiters, (int64_t)waiter);
         if (!w->pending) {
             w->pending = 1;
-            py23_list_append(loop_pending, (int64_t)w);  // 接管调用方的引用
+            pa_list_append(loop_pending, (int64_t)w);  // 接管调用方的引用
         } else {
-            py23_rc_dec(w);
+            pa_rc_dec(w);
         }
         return;
     }
     if (w->kind == 4) {
         if (w->done) {
-            py23_rc_inc(waiter);
-            py23_rc_inc_unknown(w->result);
-            Py23Exception* e = exc_clone((Py23Exception*)w->exc);
+            pa_rc_inc(waiter);
+            pa_rc_inc_unknown(w->result);
+            PyAdamasException* e = exc_clone((PyAdamasException*)w->exc);
             deliver_owned(waiter, w, w->result, e);
-            py23_rc_dec(w);
+            pa_rc_dec(w);
             return;
         }
         if (w->waiter) {
-            py23_rc_dec(w);
+            pa_rc_dec(w);
             coro_inject(waiter, exc_new("RuntimeError", "awaitable is already awaited"));
             return;
         }
         w->waiter = (int64_t)waiter;
-        py23_rc_inc(waiter);
-        py23_list_append(loop_pending, (int64_t)w);  // 接管调用方的引用
+        pa_rc_inc(waiter);
+        pa_list_append(loop_pending, (int64_t)w);  // 接管调用方的引用
         // 驱动不递归执行：放到就绪队列，由事件循环下一步推进，
         // 避免在别人的 resume 栈上再跑协程/生成器。
-        py23_rc_inc(w);
+        pa_rc_inc(w);
         ready_push(w);
         return;
     }
     if (w->kind == 3) {
         if (w->done) {
-            py23_rc_inc(waiter);
-            py23_rc_inc_unknown(w->result);
-            Py23Exception* e = exc_clone((Py23Exception*)w->exc);
+            pa_rc_inc(waiter);
+            pa_rc_inc_unknown(w->result);
+            PyAdamasException* e = exc_clone((PyAdamasException*)w->exc);
             deliver_owned(waiter, w, w->result, e);
-            py23_rc_dec(w);  // 调用方交来的引用
+            pa_rc_dec(w);  // 调用方交来的引用
             return;
         }
         if (w->waiter) {
-            py23_rc_dec(w);
+            pa_rc_dec(w);
             coro_inject(waiter, exc_new("RuntimeError", "task is already awaited"));
             return;
         }
         // task 由 loop_pending 持有，等它完成再清掉；这里的引用可以还掉。
         w->waiter = (int64_t)waiter;
-        py23_rc_inc(waiter);
-        py23_rc_dec(w);
+        pa_rc_inc(waiter);
+        pa_rc_dec(w);
         return;
     }
     if (w->kind == 8) {
         if (w->done) {
-            py23_rc_inc(waiter);
+            pa_rc_inc(waiter);
             int64_t v = w->result;
             w->result = 0;
-            Py23Exception* e = (Py23Exception*)w->exc;
+            PyAdamasException* e = (PyAdamasException*)w->exc;
             w->exc = 0;
             deliver_owned(waiter, w, v, e);
-            py23_rc_dec(w);
+            pa_rc_dec(w);
             return;
         }
         if (w->waiter) {
-            py23_rc_dec(w);
+            pa_rc_dec(w);
             coro_inject(waiter, exc_new("RuntimeError", "awaitable is already awaited"));
             return;
         }
         w->waiter = (int64_t)waiter;
-        py23_rc_inc(waiter);
-        py23_list_append(loop_pending, (int64_t)w);  // 接管调用方引用
+        pa_rc_inc(waiter);
+        pa_list_append(loop_pending, (int64_t)w);  // 接管调用方引用
         w->pending = 1;
-        py23_rc_inc(w);
-        py23_list_append(loop_timers, (int64_t)w);  // 定时器自己持有一份
+        pa_rc_inc(w);
+        pa_list_append(loop_timers, (int64_t)w);  // 定时器自己持有一份
         if (w->children && w->children->len > 0) {
             void* t = (void*)(uintptr_t)w->children->data[0];
-            py23_rc_inc(t);
+            pa_rc_inc(t);
             start_awaitable(t, w);  // 完成时结果交给 race
         }
         return;
     }
     if (w->done) {
-        py23_rc_inc(waiter);
+        pa_rc_inc(waiter);
         int64_t v = w->result;
         w->result = 0;
-        Py23Exception* e = (Py23Exception*)w->exc;
+        PyAdamasException* e = (PyAdamasException*)w->exc;
         w->exc = 0;
         deliver_owned(waiter, w, v, e);
-        py23_rc_dec(w);  // 调用方交来的引用
+        pa_rc_dec(w);  // 调用方交来的引用
         return;
     }
     if (w->kind == 1) {
         if (w->deadline_ms <= now_ms()) {
             w->done = 1;
-            py23_rc_inc(waiter);
+            pa_rc_inc(waiter);
             deliver_owned(waiter, w, 0, NULL);
-            py23_rc_dec(w);
+            pa_rc_dec(w);
         } else {
             w->waiter = (int64_t)waiter;
-            py23_rc_inc(waiter);
-            py23_list_append(loop_timers, (int64_t)w);  // 接管调用方的引用
+            pa_rc_inc(waiter);
+            pa_list_append(loop_timers, (int64_t)w);  // 接管调用方的引用
         }
         return;
     }
@@ -534,14 +534,14 @@ void start_awaitable(void* obj, void* waiter) {
 }
 
 /* 把一个结果/异常交给等待者。waiter 的引用由本函数消费。 */
-void deliver_owned(void* waiter, void* child, int64_t value, Py23Exception* exc) {
+void deliver_owned(void* waiter, void* child, int64_t value, PyAdamasException* exc) {
     if (frame_is_coro(waiter)) {
         int64_t* p = (int64_t*)waiter;
         if (p[1] == 1 || p[1] == 2) {
             // 协程已经结束（例如刚被取消），迟到的结果直接丢弃。
             if (exc) exc_free(exc);
-            else py23_rc_dec_unknown(value);
-            py23_rc_dec(waiter);
+            else pa_rc_dec_unknown(value);
+            pa_rc_dec(waiter);
             return;
         }
         p[9] = 0;
@@ -553,11 +553,11 @@ void deliver_owned(void* waiter, void* child, int64_t value, Py23Exception* exc)
     }
     if (!is_await_obj(waiter)) {
         if (exc) exc_free(exc);
-        else py23_rc_dec_unknown(value);
-        py23_rc_dec(waiter);
+        else pa_rc_dec_unknown(value);
+        pa_rc_dec(waiter);
         return;
     }
-    Py23Await* g = (Py23Await*)waiter;
+    PyAdamasAwait* g = (PyAdamasAwait*)waiter;
     if (g->kind == 4) {
         // 异步生成器正在等内部 awaitable：把结果送回去，下一轮事件循环
         // 再驱动一步（避免递归展开）。
@@ -570,9 +570,9 @@ void deliver_owned(void* waiter, void* child, int64_t value, Py23Exception* exc)
             p[1] = 0;
             ready_push(waiter);  // 把 child 的 waiter 引用转交给就绪队列
         } else {
-            py23_rc_dec_unknown(value);
+            pa_rc_dec_unknown(value);
             if (exc) exc_free(exc);
-            py23_rc_dec(waiter);
+            pa_rc_dec(waiter);
         }
         return;
     }
@@ -582,7 +582,7 @@ void deliver_owned(void* waiter, void* child, int64_t value, Py23Exception* exc)
             g->done = 1;
             void* owned = pending_take(g);
             if (g->task_coro) {
-                py23_rc_dec((void*)g->task_coro);
+                pa_rc_dec((void*)g->task_coro);
                 g->task_coro = 0;
             }
             g->result = value;
@@ -590,29 +590,29 @@ void deliver_owned(void* waiter, void* child, int64_t value, Py23Exception* exc)
             void* a = (void*)g->waiter;
             g->waiter = 0;
             if (a) {
-                py23_rc_inc_unknown(value);
+                pa_rc_inc_unknown(value);
                 deliver_owned(a, g, value, exc_clone(exc));
             }
-            if (owned) py23_rc_dec(owned);
+            if (owned) pa_rc_dec(owned);
         } else {
-            py23_rc_dec_unknown(value);
+            pa_rc_dec_unknown(value);
             if (exc) exc_free(exc);
         }
-        py23_rc_dec(waiter);
+        pa_rc_dec(waiter);
         return;
     }
     if (g->kind == 8) {
         if (g->done) {
             if (exc) exc_free(exc);
-            else py23_rc_dec_unknown(value);
-            py23_rc_dec(waiter);
+            else pa_rc_dec_unknown(value);
+            pa_rc_dec(waiter);
             return;
         }
         g->done = 1;
         timer_remove(g);
         void* owned = pending_take(g);
         if (g->children) {
-            py23_rc_dec(g->children);
+            pa_rc_dec(g->children);
             g->children = NULL;
         }
         void* a = (void*)g->waiter;
@@ -622,21 +622,21 @@ void deliver_owned(void* waiter, void* child, int64_t value, Py23Exception* exc)
             g->result = value;
             g->exc = (int64_t)exc;
         }
-        if (owned) py23_rc_dec(owned);
-        py23_rc_dec(waiter);
+        if (owned) pa_rc_dec(owned);
+        pa_rc_dec(waiter);
         return;
     }
     if (g->kind != 2) {
         if (exc) exc_free(exc);
-        else py23_rc_dec_unknown(value);
-        py23_rc_dec(waiter);
+        else pa_rc_dec_unknown(value);
+        pa_rc_dec(waiter);
         return;
     }
     if (g->done) {
         // gather 已被取消/完成：迟到的子结果直接丢弃。
         if (exc) exc_free(exc);
-        else py23_rc_dec_unknown(value);
-        py23_rc_dec(waiter);
+        else pa_rc_dec_unknown(value);
+        pa_rc_dec(waiter);
         return;
     }
     int64_t idx = -1;
@@ -650,25 +650,25 @@ void deliver_owned(void* waiter, void* child, int64_t value, Py23Exception* exc)
         if (!g->exc) g->exc = (int64_t)exc;
         else exc_free(exc);
     } else if (value) {
-        if (g->exc || idx < 0 || !g->results) py23_rc_dec_unknown(value);
+        if (g->exc || idx < 0 || !g->results) pa_rc_dec_unknown(value);
         else g->results->data[idx] = value;  // results 持有这个引用
     }
     if (g->remaining > 0) --g->remaining;
     int last = (g->remaining == 0);
     if (last && !g->starting && !g->done) finish_gather(g);
-    py23_rc_dec(waiter);  // 消费 child 的 waiter 引用
+    pa_rc_dec(waiter);  // 消费 child 的 waiter 引用
 }
 
-void coro_inject(void* c, Py23Exception* e) {
+void coro_inject(void* c, PyAdamasException* e) {
     int64_t* p = (int64_t*)c;
     if (p[8]) exc_free(e);
     else p[8] = (int64_t)e;
     p[1] = 4;
-    py23_rc_inc(c);
+    pa_rc_inc(c);
     ready_push(c);
 }
 
-void coro_finish(void* c, int64_t value, Py23Exception* exc) {
+void coro_finish(void* c, int64_t value, PyAdamasException* exc) {
     int64_t* p = (int64_t*)c;
     p[1] = 1;
     p[9] = 0;
@@ -682,7 +682,7 @@ void coro_finish(void* c, int64_t value, Py23Exception* exc) {
         loop_root_exc = exc;
     } else {
         if (exc) exc_free(exc);
-        else py23_rc_dec_unknown(value);
+        else pa_rc_dec_unknown(value);
     }
 }
 
@@ -691,12 +691,12 @@ void await_from_coro(void* c, void* w) {
     if (frame_is_coro(w)) {
         int64_t* p = (int64_t*)w;
         if (p[1] != 0) {
-            py23_rc_dec(w);
+            pa_rc_dec(w);
             coro_inject(c, exc_new("RuntimeError", "coroutine was already awaited"));
             return;
         }
         p[7] = (int64_t)c;
-        py23_rc_inc(c);
+        pa_rc_inc(c);
         p[1] = 4;
         ((int64_t*)c)[9] = (int64_t)w;
         ready_push(w);  // 接管 c->out 的引用
@@ -715,33 +715,33 @@ void coro_step(void* c) {
     p[1] = 0;
     p[5] = 0;
     p[9] = 0;  // 正在运行：没有等待中的 awaitable
-    Py23Handler h;
+    PyAdamasHandler h;
     h.prev = handler_top;
-    h.mark = py23_rc_mark();
-    h.frame = py23_frame_top;
+    h.mark = pa_rc_mark();
+    h.frame = pa_frame_top;
     handler_top = &h;
     void* prev_active = loop_active_coro;
     loop_active_coro = c;
     if (setjmp(h.env) != 0) {
         loop_active_coro = prev_active;
         handler_top = h.prev;
-        Py23Exception* e = pending_exc;
+        PyAdamasException* e = pending_exc;
         pending_exc = NULL;
-        py23_rc_cleanup(h.mark);
+        pa_rc_cleanup(h.mark);
         p[1] = 2;
         p[5] = 0;
         p[2] = 0;
         p[3] = 0;
         p[8] = 0;
         // 异常跳过了 resume 的出口清理：帧里的堆槽当场释放。
-        py23_gen_release_slots(c);
+        pa_gen_release_slots(c);
         coro_finish(c, 0, e);  // 异常逃出：交给等待者或事件循环根
         return;
     }
     ((void (*)(void*, int64_t))(uintptr_t)p[4])(c, 0);
     loop_active_coro = prev_active;
     handler_top = h.prev;
-    py23_rc_cleanup(h.mark);
+    pa_rc_cleanup(h.mark);
     p[5] = 0;
     p[2] = 0;
     int64_t status = p[1];
@@ -751,7 +751,7 @@ void coro_step(void* c) {
         p[3] = 0;
         coro_finish(c, v, NULL);
     } else if (status == 2) {
-        Py23Exception* e = (Py23Exception*)p[8];
+        PyAdamasException* e = (PyAdamasException*)p[8];
         p[8] = 0;
         coro_finish(c, 0, e);
     } else if (status == 3) {
@@ -765,9 +765,9 @@ void coro_step(void* c) {
 }
 
 /* 供生成的 throw 分发调用：在 resume 帧里抛出注入的异常。 */
-void py23_coro_rethrow(void* g) {
+void pa_coro_rethrow(void* g) {
     int64_t* p = (int64_t*)g;
-    Py23Exception* e = (Py23Exception*)p[8];
+    PyAdamasException* e = (PyAdamasException*)p[8];
     p[8] = 0;
     if (!e) e = exc_new("RuntimeError", "coroutine resumed with no exception");
     exc_free(pending_exc);
@@ -780,7 +780,7 @@ int fire_due_timers(int64_t now) {
     int fired = 0;
     int64_t i = 0;
     while (i < loop_timers->len) {
-        Py23Await* w = (Py23Await*)loop_timers->data[i];
+        PyAdamasAwait* w = (PyAdamasAwait*)loop_timers->data[i];
         if (w->deadline_ms <= now) {
             list_take_at(loop_timers, i);
             if (w->kind == 8) {
@@ -797,7 +797,7 @@ int fire_due_timers(int64_t now) {
             void* a = (void*)w->waiter;
             w->waiter = 0;
             if (a) deliver_owned(a, w, 0, NULL);
-            py23_rc_dec(w);
+            pa_rc_dec(w);
             fired = 1;
         } else {
             ++i;
@@ -809,15 +809,15 @@ int fire_due_timers(int64_t now) {
 int64_t earliest_deadline(void) {
     int64_t best = 0;
     for (int64_t i = 0; i < loop_timers->len; ++i) {
-        Py23Await* w = (Py23Await*)loop_timers->data[i];
+        PyAdamasAwait* w = (PyAdamasAwait*)loop_timers->data[i];
         if (i == 0 || w->deadline_ms < best) best = w->deadline_ms;
     }
     return best;
 }
 
-void* py23_asyncio_sleep(double secs) {
+void* pa_asyncio_sleep(double secs) {
     loop_ensure();
-    Py23Await* w = await_new(1);
+    PyAdamasAwait* w = await_new(1);
     int64_t ms = 0;
     if (secs > 0) {
         double v = secs * 1000.0;
@@ -827,19 +827,19 @@ void* py23_asyncio_sleep(double secs) {
     return w;
 }
 
-void* py23_asyncio_gather(Py23List* coros) {
+void* pa_asyncio_gather(PyAdamasList* coros) {
     loop_ensure();
-    Py23Await* w = await_new(2);
+    PyAdamasAwait* w = await_new(2);
     int64_t n = coros ? coros->len : 0;
-    w->children = py23_list_new(n, 1);
+    w->children = pa_list_new(n, 1);
     // 结果元素类型静态不可知：按 unknown 容器处理，只存不释放
     //（kind 2），和 list[unknown] 的约定一致。
-    w->results = py23_list_new(n, 2);
+    w->results = pa_list_new(n, 2);
     for (int64_t i = 0; i < n; ++i) {
         int64_t v = coros->data[i];
-        py23_rc_inc((void*)v);
-        py23_list_append(w->children, v);
-        py23_list_append(w->results, 0);
+        pa_rc_inc((void*)v);
+        pa_list_append(w->children, v);
+        pa_list_append(w->results, 0);
     }
     w->remaining = n;
     return w;
@@ -855,22 +855,22 @@ void detach_cur(void* c) {
         int64_t* q = (int64_t*)w;
         if (q[7] == (int64_t)c) {
             q[7] = 0;
-            py23_rc_dec(c);
+            pa_rc_dec(c);
         }
         return;
     }
     if (!is_await_obj(w)) return;
-    Py23Await* aw = (Py23Await*)w;
+    PyAdamasAwait* aw = (PyAdamasAwait*)w;
     if (aw->waiter == (int64_t)c) {
         aw->waiter = 0;
-        py23_rc_dec(c);
+        pa_rc_dec(c);
     }
     if (aw->kind == 1 && !aw->done) {
         // sleep：定时器表持有它的引用，摘掉并释放
         for (int64_t i = 0; i < loop_timers->len; ++i)
             if (loop_timers->data[i] == (int64_t)w) {
                 list_take_at(loop_timers, i);
-                py23_rc_dec(w);
+                pa_rc_dec(w);
                 break;
             }
     } else if (aw->kind == 5) {
@@ -879,7 +879,7 @@ void detach_cur(void* c) {
             for (int64_t i = 0; i < aw->waiters->len; ++i)
                 if (aw->waiters->data[i] == (int64_t)c) {
                     list_take_at(aw->waiters, i);
-                    py23_rc_dec(c);
+                    pa_rc_dec(c);
                     break;
                 }
     } else if (aw->kind == 6) {
@@ -887,7 +887,7 @@ void detach_cur(void* c) {
         for (int64_t i = 0; i < loop_fds->len; ++i)
             if (loop_fds->data[i] == (int64_t)w) {
                 list_take_at(loop_fds, i);
-                py23_rc_dec(w);
+                pa_rc_dec(w);
                 break;
             }
     }
@@ -895,7 +895,7 @@ void detach_cur(void* c) {
 }
 
 /* 取消一个正在挂起的协程：先沿 await 链向下传播，再向自己注入异常。 */
-void cancel_suspended(void* c, Py23Exception* e) {
+void cancel_suspended(void* c, PyAdamasException* e) {
     int64_t* p = (int64_t*)c;
     if (p[1] == 1 || p[1] == 2) {
         exc_free(e);
@@ -905,28 +905,28 @@ void cancel_suspended(void* c, Py23Exception* e) {
     int heap = w && (frame_is_coro(w) || is_await_obj(w));
     int detach_owns = 0;
     if (heap) {
-        py23_rc_inc(w);
+        pa_rc_inc(w);
         if (is_await_obj(w)) {
-            int64_t kind = ((Py23Await*)w)->kind;
+            int64_t kind = ((PyAdamasAwait*)w)->kind;
             detach_owns = (kind == 1 || kind == 6);  // detach_cur 会摘掉并释放它
         }
     }
     detach_cur(c);
     if (heap) {
         if (!detach_owns) cancel_chain(w);
-        py23_rc_dec(w);
+        pa_rc_dec(w);
     }
     coro_inject(c, e);
 }
 
-int64_t py23_asyncio_run(void* coro) {
+int64_t pa_asyncio_run(void* coro) {
     if (!frame_is_coro(coro))
-        py23_raise_c("TypeError", "asyncio.run() expects a coroutine");
+        pa_raise_c("TypeError", "asyncio.run() expects a coroutine");
     if (loop_running)
-        py23_raise_c("RuntimeError", "event loop is already running");
+        pa_raise_c("RuntimeError", "event loop is already running");
     int64_t* p = (int64_t*)coro;
     if (p[1] != 0)
-        py23_raise_c("RuntimeError", "coroutine was already awaited");
+        pa_raise_c("RuntimeError", "coroutine was already awaited");
     loop_ensure();
     loop_running = 1;
     loop_root = coro;
@@ -934,18 +934,18 @@ int64_t py23_asyncio_run(void* coro) {
     loop_root_result = 0;
     loop_root_exc = NULL;
     p[1] = 4;
-    py23_rc_inc(coro);
+    pa_rc_inc(coro);
     ready_push(coro);
 
     while (loop_root_state == 0) {
         void* c = ready_pop();
         if (c) {
             // 就绪队列同时放协程帧和异步生成器驱动对象。
-            if (is_await_obj(c) && ((Py23Await*)c)->kind == 4)
-                agen_drive((Py23Await*)c);
+            if (is_await_obj(c) && ((PyAdamasAwait*)c)->kind == 4)
+                agen_drive((PyAdamasAwait*)c);
             else
                 coro_step(c);
-            py23_rc_dec(c);
+            pa_rc_dec(c);
             continue;
         }
         int64_t timeout = -1;
@@ -972,7 +972,7 @@ int64_t py23_asyncio_run(void* coro) {
     }
 
     int64_t result = loop_root_result;
-    Py23Exception* err = loop_root_exc;
+    PyAdamasException* err = loop_root_exc;
     loop_root_result = 0;
     loop_root_exc = NULL;
     loop_root = NULL;

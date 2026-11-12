@@ -1,7 +1,7 @@
 // lower_expr.cpp —— 表达式降级：运算、容器、推导式、赋值
 #include "lower_impl.h"
 
-namespace py23 {
+namespace pyadamas {
 
 bool Lowerer::bad_elem(const TypePtr& from, const TypePtr& to) {
     // 元素跨数值域的容器（list[int] → list[float] 等）要逐元素转换并重新分配，
@@ -865,7 +865,7 @@ VReg Lowerer::lower_container_eq(VReg l, TypePtr lt, VReg r, TypePtr rt) {
         return t->kind == TyKind::List || t->kind == TyKind::Tuple;
     };
     if (is_seq(lt) && is_seq(rt)) {
-        // list 和 tuple 是不同类型，CPython 里不相等；py23 运行时表示相同，
+        // list 和 tuple 是不同类型，CPython 里不相等；pyadamas 运行时表示相同，
         // 但静态类型分得清，就按静态类型判。
         bool l_list = lt->kind == TyKind::List;
         bool r_list = rt->kind == TyKind::List;
@@ -936,7 +936,7 @@ VReg Lowerer::lower_compare(Compare& c) {
         TypePtr lt = tc_.type_of(c.left.get());
         TypePtr rt = tc_.type_of(c.comparators[0].get());
         // `is` / `is not` 是同一性比较：比指针，不比内容。以前直接映射成
-        // Eq/Ne，字符串和容器会走按值比较（py23_str_eq 解引用右操作数），
+        // Eq/Ne，字符串和容器会走按值比较（pa_str_eq 解引用右操作数），
         // 而 None 就是 0，`x is None` 当场段错误。
         if (op == CmpOp::Is || op == CmpOp::IsNot) {
             auto as_bits = [&](VReg v, TypePtr t) -> VReg {
@@ -1681,4 +1681,4 @@ VReg Lowerer::lower_joined(JoinedStr& j) {
 // info 为空（签名未知）时按源码顺序直传，关键字参数直接报错。
 
 
-}  // namespace py23
+}  // namespace pyadamas

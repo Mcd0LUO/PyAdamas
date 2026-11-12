@@ -22,7 +22,7 @@
 #include "lexer.h"
 #include "token.h"
 
-namespace py23 {
+namespace pyadamas {
 
 struct ParseError : std::runtime_error {
     int line, col;
@@ -261,4 +261,4 @@ public:
 };
 
 
-}  // namespace py23
+}  // namespace pyadamas

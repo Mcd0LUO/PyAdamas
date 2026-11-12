@@ -1,10 +1,10 @@
 // rt_slice.c —— 序列查找、切片与 range
 #include "rt_internal.h"
 
-int64_t py23_str_contains(Py23Str* hay, Py23Str* needle) {
+int64_t pa_str_contains(PyAdamasStr* hay, PyAdamasStr* needle) {
     if (needle->len == 0) return 1;
     if (needle->len > hay->len) return 0;
-    return py23_find_bytes(hay->data, hay->len, needle->data, needle->len, 0) >= 0;
+    return pa_find_bytes(hay->data, hay->len, needle->data, needle->len, 0) >= 0;
 }
 
 /* ── 切片 ─────────────────────────────────────────────────────── */
@@ -16,7 +16,7 @@ void slice_bounds(int64_t len, int64_t start, int64_t stop, int64_t step,
     int has_stop = stop != INT64_MIN;
     int has_step = step != INT64_MIN;
     if (!has_step) step = 1;
-    if (step == 0) py23_raise_c("ValueError", "slice step cannot be zero");
+    if (step == 0) pa_raise_c("ValueError", "slice step cannot be zero");
 
     if (step > 0) {
         if (!has_start) start = 0;
@@ -59,30 +59,30 @@ int64_t slice_total(int64_t start, int64_t stop, int64_t step) {
     return (start - stop + (-step) - 1) / (-step);
 }
 
-Py23List* py23_list_slice(Py23List* src, int64_t start, int64_t stop, int64_t step) {
+PyAdamasList* pa_list_slice(PyAdamasList* src, int64_t start, int64_t stop, int64_t step) {
     int64_t lo, hi, st;
     slice_bounds(src->len, start, stop, step, &lo, &hi, &st);
     int64_t count = slice_total(lo, hi, st);
-    Py23List* out = py23_list_new(count, src->elem_kind);
+    PyAdamasList* out = pa_list_new(count, src->elem_kind);
     for (int64_t i = lo; st > 0 ? i < hi : i > hi; i += st) {
         int64_t v = src->data[i];
-        if (src->elem_kind == 1 && v) py23_rc_inc((void*)v);
-        py23_list_append(out, v);
+        if (src->elem_kind == 1 && v) pa_rc_inc((void*)v);
+        pa_list_append(out, v);
     }
     return out;
 }
 
-Py23Str* py23_str_slice(Py23Str* src, int64_t start, int64_t stop, int64_t step) {
+PyAdamasStr* pa_str_slice(PyAdamasStr* src, int64_t start, int64_t stop, int64_t step) {
     int64_t lo, hi, st;
     slice_bounds(src->len, start, stop, step, &lo, &hi, &st);
     int64_t count = slice_total(lo, hi, st);
     /* 整串切片和单元素切片都很常见：前者共享原串，后者直接取驻留字符。 */
     if (st == 1 && lo == 0 && hi == src->len) {
-        py23_rc_inc(src);
+        pa_rc_inc(src);
         return src;
     }
-    if (count == 1) return py23_char_str((unsigned char)src->data[lo]);
-    Py23Str* out = str_alloc(count);
+    if (count == 1) return pa_char_str((unsigned char)src->data[lo]);
+    PyAdamasStr* out = str_alloc(count);
     if (st == 1) {
         if (count) memcpy((char*)out->data, src->data + lo, (size_t)count);
         return out;
@@ -95,8 +95,8 @@ Py23Str* py23_str_slice(Py23Str* src, int64_t start, int64_t stop, int64_t step)
 
 /* 切片赋值。src 的元素引用由本函数接管：kind 1 时对新元素 inc、
    对被移除的旧元素 dec；src == dst 时先做快照，避免边读边写。 */
-void py23_list_slice_assign(Py23List* dst, int64_t start, int64_t stop, int64_t step,
-                            Py23List* src) {
+void pa_list_slice_assign(PyAdamasList* dst, int64_t start, int64_t stop, int64_t step,
+                            PyAdamasList* src) {
     int64_t lo, hi, st;
     slice_bounds(dst->len, start, stop, step, &lo, &hi, &st);
     int64_t n = slice_total(lo, hi, st);
@@ -111,15 +111,15 @@ void py23_list_slice_assign(Py23List* dst, int64_t start, int64_t stop, int64_t 
     }
     int kind = (int)dst->elem_kind;
     if (st != 1) {
-        if (slen != n) py23_raise_c("ValueError", "cannot assign sequence of different size to extended slice");
+        if (slen != n) pa_raise_c("ValueError", "cannot assign sequence of different size to extended slice");
         for (int64_t i = 0; i < n; ++i) {
             int64_t idx = lo + i * st;
             int64_t v = sv[i];
             int64_t old = dst->data[idx];
-            if (kind == 1 && v) py23_rc_inc((void*)v);
-            else if (kind == 2 && src->elem_kind == 1 && v) py23_rc_inc((void*)v);
+            if (kind == 1 && v) pa_rc_inc((void*)v);
+            else if (kind == 2 && src->elem_kind == 1 && v) pa_rc_inc((void*)v);
             dst->data[idx] = v;
-            if (kind == 1 && old) py23_rc_dec((void*)old);
+            if (kind == 1 && old) pa_rc_dec((void*)old);
         }
         free(snap);
         return;
@@ -141,7 +141,7 @@ void py23_list_slice_assign(Py23List* dst, int64_t start, int64_t stop, int64_t 
         // [lo+slen, hi) 的旧元素会被下面的 memmove 覆盖，先释放。
         if (kind == 1)
             for (int64_t i = lo + slen; i < hi; ++i)
-                if (dst->data[i]) py23_rc_dec((void*)dst->data[i]);
+                if (dst->data[i]) pa_rc_dec((void*)dst->data[i]);
         memmove(&dst->data[lo + slen], &dst->data[hi],
                 sizeof(int64_t) * (size_t)(dst->len - hi));
         dst->len += delta;
@@ -149,37 +149,37 @@ void py23_list_slice_assign(Py23List* dst, int64_t start, int64_t stop, int64_t 
     for (int64_t i = 0; i < slen; ++i) {
         int64_t v = sv[i];
         int64_t old = dst->data[lo + i];
-        if (kind == 1 && v) py23_rc_inc((void*)v);
-        else if (kind == 2 && src->elem_kind == 1 && v) py23_rc_inc((void*)v);
+        if (kind == 1 && v) pa_rc_inc((void*)v);
+        else if (kind == 2 && src->elem_kind == 1 && v) pa_rc_inc((void*)v);
         dst->data[lo + i] = v;
         // 增长时 memmove 会把尾部元素复制到 [hi, hi+delta)，这些副本
         // 没有独立的引用计数；只有原区间 [lo, hi) 的旧元素归本列表所有。
         if (kind == 1 && old && (delta <= 0 || lo + i < hi))
-            py23_rc_dec((void*)old);
+            pa_rc_dec((void*)old);
     }
     free(snap);
 }
 
-Py23List* py23_str_to_list(Py23Str* s) {
-    Py23List* out = py23_list_new(s->len, 1);
+PyAdamasList* pa_str_to_list(PyAdamasStr* s) {
+    PyAdamasList* out = pa_list_new(s->len, 1);
     for (int64_t i = 0; i < s->len; ++i)
-        py23_list_append(out, (int64_t)py23_str_char_at(s, i));
+        pa_list_append(out, (int64_t)pa_str_char_at(s, i));
     return out;
 }
 
 /* bytes 迭代：每个元素是 0..255 的 int，不是单字节串。 */
-Py23List* py23_bytes_to_list(Py23Str* s) {
-    Py23List* out = py23_list_new(s->len, 0);
+PyAdamasList* pa_bytes_to_list(PyAdamasStr* s) {
+    PyAdamasList* out = pa_list_new(s->len, 0);
     for (int64_t i = 0; i < s->len; ++i)
-        py23_list_append(out, (int64_t)(unsigned char)s->data[i]);
+        pa_list_append(out, (int64_t)(unsigned char)s->data[i]);
     return out;
 }
 
 /* 把单个字符串包成 [s]：subprocess.Popen("cmd", shell=True) 这种写法用。 */
-Py23List* py23_str_wrap_list(Py23Str* s) {
-    Py23List* out = py23_list_new(1, 1);
-    py23_rc_inc(s);
-    py23_list_append(out, (int64_t)s);
+PyAdamasList* pa_str_wrap_list(PyAdamasStr* s) {
+    PyAdamasList* out = pa_list_new(1, 1);
+    pa_rc_inc(s);
+    pa_list_append(out, (int64_t)s);
     return out;
 }
 
@@ -188,8 +188,8 @@ Py23List* py23_str_wrap_list(Py23Str* s) {
 /* range 是惰性对象：只存边界，元素按需算。CPython 的 range 也是这样——
    range(10**9) 只占几十字节，不会当场造十亿个元素。
    以前这里是把 range 实体化成整数列表，range(10**9) 就是 8GB 内存。 */
-Py23Range* py23_range_new(int64_t start, int64_t stop, int64_t step) {
-    if (step == 0) py23_raise_c("ValueError", "range() arg 3 must not be zero");
+PyAdamasRange* pa_range_new(int64_t start, int64_t stop, int64_t step) {
+    if (step == 0) pa_raise_c("ValueError", "range() arg 3 must not be zero");
     int64_t n;
     // 写成 (stop - start - 1) / step + 1：比 (stop - start + step - 1) / step
     // 少一次加法，边界上不容易溢出。
@@ -197,8 +197,8 @@ Py23Range* py23_range_new(int64_t start, int64_t stop, int64_t step) {
         n = stop > start ? (stop - start - 1) / step + 1 : 0;
     else
         n = stop < start ? (start - stop - 1) / (-step) + 1 : 0;
-    Py23Range* r = (Py23Range*)rc_alloc((int64_t)sizeof(Py23Range), NULL, NULL,
-                                        PY23_RC_RANGE);
+    PyAdamasRange* r = (PyAdamasRange*)rc_alloc((int64_t)sizeof(PyAdamasRange), NULL, NULL,
+                                        PYADAMAS_RC_RANGE);
     r->start = start;
     r->stop = stop;
     r->step = step;
@@ -206,22 +206,22 @@ Py23Range* py23_range_new(int64_t start, int64_t stop, int64_t step) {
     return r;
 }
 
-int64_t py23_range_len(Py23Range* r) { return r->len; }
+int64_t pa_range_len(PyAdamasRange* r) { return r->len; }
 
-int64_t py23_range_first(Py23Range* r) { return r->start; }
+int64_t pa_range_first(PyAdamasRange* r) { return r->start; }
 
-int64_t py23_range_step(Py23Range* r) { return r->step; }
+int64_t pa_range_step(PyAdamasRange* r) { return r->step; }
 
-int64_t py23_range_stop(Py23Range* r) { return r->stop; }
+int64_t pa_range_stop(PyAdamasRange* r) { return r->stop; }
 
-int64_t py23_range_get(Py23Range* r, int64_t i) {
+int64_t pa_range_get(PyAdamasRange* r, int64_t i) {
     if (i < 0) i += r->len;
     if (i < 0 || i >= r->len)
-        py23_raise_c("IndexError", "range object index out of range");
+        pa_raise_c("IndexError", "range object index out of range");
     return r->start + i * r->step;
 }
 
-int64_t py23_range_contains(Py23Range* r, int64_t v) {
+int64_t pa_range_contains(PyAdamasRange* r, int64_t v) {
     if (r->len == 0) return 0;
     if (r->step > 0) {
         if (v < r->start || v >= r->stop) return 0;
@@ -231,54 +231,54 @@ int64_t py23_range_contains(Py23Range* r, int64_t v) {
     return ((v - r->start) % r->step) == 0 ? 1 : 0;
 }
 
-int64_t py23_range_eq(Py23Range* a, Py23Range* b) {
+int64_t pa_range_eq(PyAdamasRange* a, PyAdamasRange* b) {
     if (a == b) return 1;
     return (a->start == b->start && a->stop == b->stop && a->step == b->step) ? 1 : 0;
 }
 
-int64_t py23_range_sum_i64(Py23Range* r, int64_t start) {
+int64_t pa_range_sum_i64(PyAdamasRange* r, int64_t start) {
     int64_t s = start;
     for (int64_t i = 0; i < r->len; ++i) s += r->start + i * r->step;
     return s;
 }
 
-double py23_range_sum_f64(Py23Range* r, double start) {
+double pa_range_sum_f64(PyAdamasRange* r, double start) {
     double s = start;
     for (int64_t i = 0; i < r->len; ++i) s += (double)(r->start + i * r->step);
     return s;
 }
 
-int64_t py23_range_min_i64(Py23Range* r) {
-    if (r->len == 0) py23_raise_c("ValueError", "min() iterable argument is empty");
+int64_t pa_range_min_i64(PyAdamasRange* r) {
+    if (r->len == 0) pa_raise_c("ValueError", "min() iterable argument is empty");
     return r->step > 0 ? r->start : r->start + (r->len - 1) * r->step;
 }
 
-int64_t py23_range_max_i64(Py23Range* r) {
-    if (r->len == 0) py23_raise_c("ValueError", "max() iterable argument is empty");
+int64_t pa_range_max_i64(PyAdamasRange* r) {
+    if (r->len == 0) pa_raise_c("ValueError", "max() iterable argument is empty");
     return r->step > 0 ? r->start + (r->len - 1) * r->step : r->start;
 }
 
-int64_t py23_range_any(Py23Range* r) {
+int64_t pa_range_any(PyAdamasRange* r) {
     for (int64_t i = 0; i < r->len; ++i)
         if (r->start + i * r->step) return 1;
     return 0;
 }
 
-int64_t py23_range_all(Py23Range* r) {
+int64_t pa_range_all(PyAdamasRange* r) {
     for (int64_t i = 0; i < r->len; ++i)
         if (!(r->start + i * r->step)) return 0;
     return 1;
 }
 
 /* 需要一个真列表时（list(range(n)) / sorted(range(n))）才物化。 */
-Py23List* py23_range_to_list(Py23Range* r) {
-    Py23List* out = py23_list_new(r->len, 0);
+PyAdamasList* pa_range_to_list(PyAdamasRange* r) {
+    PyAdamasList* out = pa_list_new(r->len, 0);
     for (int64_t i = 0; i < r->len; ++i)
-        py23_list_append(out, r->start + i * r->step);
+        pa_list_append(out, r->start + i * r->step);
     return out;
 }
 
-Py23Str* py23_range_repr(Py23Range* r) {
+PyAdamasStr* pa_range_repr(PyAdamasRange* r) {
     char buf[96];
     int n;
     if (r->step == 1)

@@ -1,7 +1,7 @@
 // lower_stmt.cpp —— 语句降级：控制流、with/try、import
 #include "lower_impl.h"
 
-namespace py23 {
+namespace pyadamas {
 
 // for 的解构目标能否拆成 n 个独立的 Name：`for i, v in ...` 可以，
 // `for i, (a, b) in ...` 或带下标的就不行（退回物化路径）。
@@ -1072,7 +1072,7 @@ void Lowerer::lower_for_seq(For& f) {
         get.op = IrOp::IndexLoad;
         get.a = sv;
         get.b = iv2;
-        // 遍历字符串时每个下标是 py23_str_char_at 新造的单字节串；
+        // 遍历字符串时每个下标是 pa_str_char_at 新造的单字节串；
         // 遍历列表/元组时是容器内部的借用引用。
         ev = seq_ty->kind == TyKind::Str ? def_heap(et, std::move(get))
                                          : def(et, std::move(get));
@@ -1864,4 +1864,4 @@ void Lowerer::lower_async_with_item(With& w, size_t idx) {
 }
 
 
-}  // namespace py23
+}  // namespace pyadamas

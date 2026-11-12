@@ -12,7 +12,7 @@
 #include <unistd.h>
 #include <vector>
 
-namespace py23 {
+namespace pyadamas {
 
 namespace {
 
@@ -94,7 +94,7 @@ std::string shell_quote(const std::string& s) {
 }
 
 std::expected<std::string, std::string> make_temp(const char* suffix) {
-    std::string tmpl = std::format("/tmp/py23-XXXXXX{}", suffix);
+    std::string tmpl = std::format("/tmp/pyadamas-XXXXXX{}", suffix);
     std::vector<char> buf(tmpl.begin(), tmpl.end());
     buf.push_back('\0');
     int fd = ::mkstemps(buf.data(), static_cast<int>(std::strlen(suffix)));
@@ -103,4 +103,4 @@ std::expected<std::string, std::string> make_temp(const char* suffix) {
     return std::string(buf.data());
 }
 
-}  // namespace py23
+}  // namespace pyadamas

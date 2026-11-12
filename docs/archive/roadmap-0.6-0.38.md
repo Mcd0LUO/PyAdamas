@@ -148,10 +148,10 @@ traceback / `raise ... from`；`finally` 体内跳出 finally 的
 **已完成（0.14a）**
 - 模块图/搜索路径（入口目录 + `-I`）、循环导入检测、单层模块
   `import` / `import as` / `from ... import ... as`。
-- 二进制 `.py23i`：全局/函数签名（含默认字面量）、FNV-1a 校验；
+- 二进制 `.pya`：全局/函数签名（含默认字面量）、FNV-1a 校验；
   文本 manifest 记录源码哈希和依赖接口哈希。
 - 每模块独立 `.o`，入口 + 依赖 + `rt.o` 链接；入口也走缓存。
-- 模块符号 `py23$m$g$x` / `ready` / `init` / `roots`；惰性初始化，
+- 模块符号 `pyadamas$m$g$x` / `ready` / `init` / `roots`；惰性初始化，
   模块 init 注册 GC 根；`__name__` / `__file__`。
 - `import m` 编译期别名，`m.x` 直接读写外部全局、`m.f()` 调用外部闭包；
   `from m import x` 快照绑定。
@@ -159,9 +159,9 @@ traceback / `raise ... from`；`finally` 体内跳出 finally 的
   验证输出和二次构建缓存命中。
 
 **已完成（0.14b）**
-- `.py23i` class 记录：扁平字段（根→派生）、方法名/槽号/调用签名、
+- `.pya` class 记录：扁平字段（根→派生）、方法名/槽号/调用签名、
   `has_init`、构造签名和 `ctor_symbol`。
-- 定义模块为每个类生成隐藏构造包装 `py23$m$n$C`（ObjNew + 字段初值 +
+- 定义模块为每个类生成隐藏构造包装 `pyadamas$m$n$C`（ObjNew + 字段初值 +
   `__init__`），模块 init 把它绑定到隐藏全局。
 - 导入方：`import m; m.C(...)` / `from m import C` 构造实例，字段读写和
   方法调用走导出的偏移/槽位；`C` 本身仍不能当值。
@@ -199,7 +199,7 @@ traceback / `raise ... from`；`finally` 体内跳出 finally 的
   `yield` 只写 state/out 并返回；入口按 state 分发到续跑块。
 - 类型 `Generator[T]`：yield 值取公共上界，`for` / `next` / `send` /
   `close` / `__next__` 可用；返回生成器的普通函数不会被误判。
-- 跨 `yield` 清理：yield 时 `py23_handler_suspend` 摘下活跃 handler
+- 跨 `yield` 清理：yield 时 `pa_handler_suspend` 摘下活跃 handler
   记录，恢复时重挂并重新 setjmp；`close()`、引用计数归零和 finalize
   按挂起点快照执行 `finally` / `with.__exit__`。
 - 帧槽参与 RC/GC；异常逃出生成器时标 aborted，避免清理重复执行。
@@ -279,7 +279,7 @@ traceback / `raise ... from`；`finally` 体内跳出 finally 的
   `fn(future)`；对已完成的 Future 注册会立即调用。
 - `Future.set_exception(msg)`：把 Future 标记为失败，`await` 抛出
   `Exception(msg)`；`exception()` 返回消息。
-- 运行时新增 `py23_call1` 跳板，按闭包 ABI 调用函数值；回调列表参与
+- 运行时新增 `pa_call1` 跳板，按闭包 ABI 调用函数值；回调列表参与
   RC 和 GC。
 - 用例 `tests/run/30_future_cb.py`。
 - 同时完成工程重构：lower/typecheck/parser/runtime 按职责拆分。
@@ -319,8 +319,8 @@ traceback / `raise ... from`；`finally` 体内跳出 finally 的
   类体目前只允许 `pass`/文档字符串。
 - `raise ... from cause` 与 `e.__cause__`；`raise ... from None` 清空原因。
 - 内置函数 `any` / `all`，支持短路和 list/tuple/str/dict/set。
-- 测试脚本并行化：`tests/run_tests.sh` 支持 `PY23_TEST_FILTER` /
-  `PY23_TEST_JOBS`，`run_diff.py` 支持 `--jobs`；全量测试从约 9s 降到 3s，
+- 测试脚本并行化：`tests/run_tests.sh` 支持 `PYADAMAS_TEST_FILTER` /
+  `PYADAMAS_TEST_JOBS`，`run_diff.py` 支持 `--jobs`；全量测试从约 9s 降到 3s，
   810 程序差分约 8s。
 
 已知限制：`args` 只保存消息；没有 traceback；自定义异常类不能带字段/方法。
@@ -342,7 +342,7 @@ traceback / `raise ... from`；`finally` 体内跳出 finally 的
 - 类模式：关键字子模式、`__match_args__` 位置子模式（沿继承链查找）、子类实例。
 - 值模式（点分名字按 `==` 比较）、`as` 捕获、OR 分支捕获、映射 `**rest`。
 - 内置/自定义异常类模式；内置类型模式在静态类型已知时判定。
-- 运行期隔离：`PY23_RC_INSTANCE` + vtable 前类元数据，unknown 值上的
+- 运行期隔离：`PYADAMAS_RC_INSTANCE` + vtable 前类元数据，unknown 值上的
   isinstance/序列/映射检查都先查 RC 注册表，原始值不会解引用。
 
 已知限制：捕获名仍是 case 作用域；点分类名与导入类模式未支持；
@@ -388,7 +388,7 @@ staticmethod/property 上的 super、导入类字段子模式、unknown 数值�
 - CLI `-O0/-O1/-O2`，默认 O2；模块缓存按等级隔离。
 - O0 关 P0/P1/P2；O1 打开；O2 再加跳转消除、分支反向 fallthrough、
   call 前 `%eax` 清零裁剪、序言清零裁剪。
-- CTest `py23_opt_levels` 三档回归；O0/O1/O2 差分均零失败。
+- CTest `pa_opt_levels` 三档回归；O0/O1/O2 差分均零失败。
 - 基准：matmul160 21/10/10 ms，sum 63/14.5/13.5 ms（O0/O1/O2）。
 
 已知限制：还没有 C++ O1/O2 的 IR 优化遍；O2 只是后端局部优化。

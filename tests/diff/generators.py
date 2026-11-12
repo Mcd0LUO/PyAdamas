@@ -1,12 +1,12 @@
 """差分测试的程序生成器。
 
-每个生成器接收 random.Random 和行数，返回一段 py23 源码。硬约束是：生成的
-程序在 CPython 和 py23 下必须输出一致。所以刻意避开已知的语义分歧（整数
+每个生成器接收 random.Random 和行数，返回一段 pyadamas 源码。硬约束是：生成的
+程序在 CPython 和 pyadamas 下必须输出一致。所以刻意避开已知的语义分歧（整数
 溢出、列表相等、移位位数、读未初始化的局部变量），那些分歧写在
 docs/compatibility.md 里，不在这里测。
 
-本文件是「py23 能跑的子集」：不 import 第三方模块、不用函数值容器，
-random.Random 参数用函数体内的 `random.Random` 标注收窄（py23 的函数签名
+本文件是「pyadamas 能跑的子集」：不 import 第三方模块、不用函数值容器，
+random.Random 参数用函数体内的 `random.Random` 标注收窄（pyadamas 的函数签名
 注解在 import 处理之前解析，模块属性注解只能写在函数体里）。
 
 新增生成器时注意两点：
@@ -28,7 +28,7 @@ def _int_expr(rng, depth: int, names: list[str]) -> str:
     if op == "//" or op == "%":
         b = f"(({b}) | 1)"  # 保证非零
     if op == "<<" or op == ">>":
-        b = str(r.randint(0, 5))  # 移位超 63 位在 py23 里按 64 取模
+        b = str(r.randint(0, 5))  # 移位超 63 位在 pyadamas 里按 64 取模
     return f"({a} {op} {b})"
 
 
@@ -167,7 +167,7 @@ _REPR_LITERALS = [
 def repr_doubles(rng, n: int) -> str:
     """有限 double 的逐行 print，专测浮点转字符串。
 
-    py23 没有 struct/bit 重解释，用固定边角值 + 十进制定标随机值代替。
+    pyadamas 没有 struct/bit 重解释，用固定边角值 + 十进制定标随机值代替。
     """
     r: random.Random = rng
     out: list[str] = []

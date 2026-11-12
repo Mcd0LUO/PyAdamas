@@ -51,30 +51,30 @@ Python 语义里变量天生可变，循环里反复赋值是常态。一上来�
 | `bin dst, a, b` | `bop` | 按 `bop` 做二元运算 | 整数 `addq` 系 / 浮点 `addsd` 系 |
 | `un dst, a` | `uop` | `neg/pos/bitnot/not` | `negq` / 空 / `notq` / 真值取反 |
 | `cmp dst, a, b` | `cop` | 比较，结果 bool | `cmpq`+`setcc` / `ucomisd`+`setcc` |
-| `convert dst, a` | `ty` 是目标类型 | 数值/字符串转换 | `cvtsi2sdq` / `cvttsd2siq` / `call py23_str_from_*` |
+| `convert dst, a` | `ty` 是目标类型 | 数值/字符串转换 | `cvtsi2sdq` / `cvttsd2siq` / `call pa_str_from_*` |
 | `load.slot dst, idx` | `idx: 槽号` | 读局部槽 | `movq off(%rbp)` |
 | `store.slot idx, a` | — | 写局部槽 | `movq %rax, off(%rbp)` |
 | `load.global dst, idx` | `idx: 全局号` | 读全局 | `movq .LgN(%rip)` |
 | `store.global idx, a` | — | 写全局 | `movq %rax, .LgN(%rip)` |
-| `list.new dst, args...` | `imm: 元素 kind` | 按 `args` 构造列表（0 非堆 / 1 堆 / 2 unknown 或混合） | 逐个 `py23_list_append` |
+| `list.new dst, args...` | `imm: 元素 kind` | 按 `args` 构造列表（0 非堆 / 1 堆 / 2 unknown 或混合） | 逐个 `pa_list_append` |
 | `tuple.new dst, args...` | `imm: 元素 kind` | 按 `args` 构造元组 | 同上（目前与 list 同表示） |
-| `index.get dst, a, b` | — | `dst = a[b]` | list/tuple 内联快路径，str 走 `py23_str_char_at` |
+| `index.get dst, a, b` | — | `dst = a[b]` | list/tuple 内联快路径，str 走 `pa_str_char_at` |
 | `index.get.unchecked dst, a, b` | — | 同 `index.get`，但调用方已证明 `0 <= b < len(a)` | 直接读 `data`，无边界分支 |
-| `index.set a, b, c` | — | `a[b] = c` | `py23_list_set` |
+| `index.set a, b, c` | — | `a[b] = c` | `pa_list_set` |
 | `len dst, a` | — | `dst = len(a)` | 一条 `movq (%rax), %rax` |
-| `obj.new dst, imm` | `imm: 类下标` | 分配对象并写入 vtable 指针；析构器取自 `IRClass::field_heap` | `call py23_obj_new` + `leaq .LvtN`；`.LvtN` 前有 5 字类元数据 |
+| `obj.new dst, imm` | `imm: 类下标` | 分配对象并写入 vtable 指针；析构器取自 `IRClass::field_heap` | `call pa_obj_new` + `leaq .LvtN`；`.LvtN` 前有 5 字类元数据 |
 | `field.get dst, a, imm` | `imm: 字节偏移` | `dst = a->field` | 一条 `movq off(%rax), %rax` |
 | `field.set a, imm, b` | `imm: 字节偏移` | `a->field = b` | `movq %rcx, off(%rax)` |
 | `vcall dst, a, args...` | `imm: vtable 槽` | `dst = a->vtable[imm](a, args...)` | 取表、取槽、间接跳转 |
 | `vcall.static dst, a, args...` | `imm: vtable 槽` | 静态方法：不传 self | 同 vcall，参数序列少一个 self |
-| `vcall.super dst, a, args...` | `imm: 槽`，`idx: after 类下标`，`b: 方法名` | 按运行期 MRO 找下一实现 | 先 `py23_super_lookup`，再照 vcall 传 self |
+| `vcall.super dst, a, args...` | `imm: 槽`，`idx: after 类下标`，`b: 方法名` | 按运行期 MRO 找下一实现 | 先 `pa_super_lookup`，再照 vcall 传 self |
 | `call.direct dst, imm, args...` | `imm: 函数下标` | 直接调用裸函数（类名上的静态方法） | `leaq .LfN(%rip)` + `call` |
 | `call dst, a, args...` | `a: 函数值` | 间接调用 | `call *%r11` |
-| `call.rt args..., imm` | `imm: RtFn` | 调运行时函数 | `call py23_xxx` |
+| `call.rt args..., imm` | `imm: RtFn` | 调运行时函数 | `call pa_xxx` |
 | `setjmp dst, a` | `a: handler 记录` | `dst = setjmp(a)`；异常 longjmp 回来时为非 0 | `call setjmp` |
-| `import.module imm` | `imm: imports 下标` | 确保模块已初始化 | `py23_import_module(ready, init)` |
+| `import.module imm` | `imm: imports 下标` | 确保模块已初始化 | `pa_import_module(ready, init)` |
 | `slot.addr dst, idx` | `idx: 槽号` | `dst = &slot`（栈槽或生成器帧槽） | `leaq off(%rbp/%r15)` |
-| `gen.new dst, imm` | `imm: generators 下标` | 分配生成器帧，写入 resume 代码和 GC release | `call py23_gen_new` |
+| `gen.new dst, imm` | `imm: generators 下标` | 分配生成器帧，写入 resume 代码和 GC release | `call pa_gen_new` |
 | `gen.set gen, s, v` | `imm: 槽号` | 创建期把实参/闭包写进帧槽 | `movq v, 8*(6+s)(gen)` |
 | `gen.state dst` | — | 读帧 state | `movq 0(%r15)` |
 | `gen.closing dst` | — | 读帧 closing 标志 | `movq 40(%r15)` |
@@ -82,7 +82,7 @@ Python 语义里变量天生可变，循环里反复赋值是常态。一上来�
 | `gen.sent dst` | — | 读本次 resume 传入的值 | `movq 16(%r15)` |
 | `gen.yield a, state` | `a == kNoReg` 表示 None | 写 out、存 state、返回（终止指令） | 写 `24(%r15)` / `0(%r15)` + 尾声 |
 | `gen.await a, state` | — | 写 out、state，status=3（awaiting），返回（终止指令） | 同上 + 写 status |
-| `gen.rethrow` | — | 在 resume 帧内抛出注入的异常（终止指令，noreturn） | `call py23_coro_rethrow` |
+| `gen.rethrow` | — | 在 resume 帧内抛出注入的异常（终止指令，noreturn） | `call pa_coro_rethrow` |
 | `gen.done [a]` | `a` 非空时写返回值 | status=1、返回（终止指令） | 写 `24(%r15)` / `8(%r15)` + 尾声 |
 | `jump target` | — | 无条件跳转 | `jmp` |
 | `branch a, target, target2` | — | `a` 为真跳 `target` | 按类型测试真值 |
@@ -92,22 +92,22 @@ Python 语义里变量天生可变，循环里反复赋值是常态。一上来�
 
 `RtFn` 是**枚举**，后端按枚举直接生成调用，不经过符号查找，用户代码也不能引用。清单见 [runtime.md](runtime.md#函数表)。
 
-引用计数不走 IR 新指令，全部是 `call.rt`：`py23_rc_inc` / `py23_rc_dec`
-管堆值，`py23_rc_inc_unknown` 对类型不可见的值按堆注册表保守 retain，
-`py23_rc_temp` / `py23_rc_mark` / `py23_rc_cleanup` 管表达式临时值栈，
-`py23_rc_shutdown` 在入口函数退出时收尾。循环收集器也是 `call.rt`：
-`py23_gc_shutdown` 在入口退出时清空剩余堆；周期性收集由 `rc_alloc` 在
+引用计数不走 IR 新指令，全部是 `call.rt`：`pa_rc_inc` / `pa_rc_dec`
+管堆值，`pa_rc_inc_unknown` 对类型不可见的值按堆注册表保守 retain，
+`pa_rc_temp` / `pa_rc_mark` / `pa_rc_cleanup` 管表达式临时值栈，
+`pa_rc_shutdown` 在入口函数退出时收尾。循环收集器也是 `call.rt`：
+`pa_gc_shutdown` 在入口退出时清空剩余堆；周期性收集由 `rc_alloc` 在
 运行时内部按「存活堆自适应阈值」（下限 2MB）触发，IR 看不到。
 
-闭包对象用 `py23_closure_new(code, n_caps)` 分配，负载是
+闭包对象用 `pa_closure_new(code, n_caps)` 分配，负载是
 `[code, n_caps, cell…]`；`Func` 是堆类型，静态闭包 rc 为永生。
 `func.code` 只在创建堆闭包时取裸代码地址，`func.addr` 一律指静态闭包。
 
-异常同样走 `call.rt` + 新指令 `setjmp`：`py23_handler_push` 压入
+异常同样走 `call.rt` + 新指令 `setjmp`：`pa_handler_push` 压入
 `{jmp_buf, prev, temp_mark}`，`setjmp` 指令把 handler 记录交给 libc；
 `raise` 设置全局异常后 longjmp 回来，landing pad 用
-`py23_handler_leave` 清理临时栈，再用 `py23_exc_matches` /
-`py23_exc_accept` / `py23_exc_done` / `py23_exc_reraise` 分派。
+`pa_handler_leave` 清理临时栈，再用 `pa_exc_matches` /
+`pa_exc_accept` / `pa_exc_done` / `pa_exc_reraise` 分派。
 `has_handlers` 的函数关闭槽位寄存器提升，避免 longjmp 回滚变量。
 
 生成器帧的布局由 `IRGenerator` 描述：`resume` 是状态机函数下标，
@@ -118,7 +118,7 @@ Python 语义里变量天生可变，循环里反复赋值是常态。一上来�
 头部。协程恢复时 `exc` 非空就走异常注入分发：按 state 重挂 handler 后
 `gen.rethrow`。Task 没有新指令，全部走 `asyncio.*` 的 `call.rt`。
 
-另有三类符号不走 `RtFn`，由后端直接按名字调用：`py23_pow_i64`、`py23_str_eq`、`py23_str_cmp`（以及 libm 的 `floor` / `fmod` / `pow`）。这类是「参数形态固定、没有枚举必要」的辅助函数。
+另有三类符号不走 `RtFn`，由后端直接按名字调用：`pa_pow_i64`、`pa_str_eq`、`pa_str_cmp`（以及 libm 的 `floor` / `fmod` / `pow`）。这类是「参数形态固定、没有枚举必要」的辅助函数。
 
 ## IR 优化遍
 
@@ -171,7 +171,7 @@ P0/P1/P2，O2 再加控制流与小函数优化：
   可能读到未赋值值的槽（取地址槽、handler、生成器帧保守清零）。
 
 - **list/tuple 下标内联**：`IndexLoad` / `IndexStore` 不再无条件调
-  `py23_list_get/set`。快路径直接读 `len`/`data` 并用无符号比较挡越界；
+  `pa_list_get/set`。快路径直接读 `len`/`data` 并用无符号比较挡越界；
   负索引归一化也在内联路径里。慢路径只处理越界，调用运行时抛异常，
   不会返回。浮点元素直接走 `movsd`，跳过 GPR 往返。
 - **store.slot 结果融合**：`v = expr` 且 `v` 块内只用一次时，`expr` 的
@@ -207,7 +207,7 @@ P0/P1/P2，O2 再加控制流与小函数优化：
 2. 指令的 `dst` 类型等于 `vreg_ty[dst]`；`def()` 是唯一分配 vreg 的入口，会自动登记类型。
 3. `store.slot` / `store.global` 的值类型与目标槽类型一致——由 `coerce()` 在写入前补 `convert` 保证。
 4. 形参槽排在最前面，槽号等于形参下标（后端按这个顺序搬寄存器）。
-5. `entry` 一定指向「模块顶层代码」编译出的那个函数，名字是 `__py23_main`。
+5. `entry` 一定指向「模块顶层代码」编译出的那个函数，名字是 `__pa_main`。
 6. 同一条指令的 `idx` 只有一个含义，但含义由 `op` 决定（见上表）。
 7. `vcall` 的 `a` 是接收者（self），`args` 里**不含** self——后端把它装进第一个整型参数位。
 8. 类表在降级开始时就按 AST 顺序建好（父类在前），`obj.new` 的 `imm` 是 `IRModule::classes` 的下标；vtable 里 `-1` 表示该槽没填上，正常不会出现（方法编译失败时整个编译已经报错）。
@@ -232,7 +232,7 @@ P0/P1/P2，O2 再加控制流与小函数优化：
 | `With` | 每个项求值一次，调 `__enter__` 并绑定 `as`；每层一个 handler + setjmp。正常/跳转路径按逆序调 `__exit__(None,None,None)`，异常 landing 调 `__exit__(type,message,None)`，返回真值则 `exc_clear` 抑制 |
 | `Try` | 外层 handler + setjmp；正常路径 `handler_leave` 后进 `else`；异常 landing 清理临时值栈，按 handler 顺序匹配，命中后 `exc_accept` 绑定 `as e`，处理完 `exc_done`；没有匹配则 `exc_reraise` |
 | `Try(finally)` | 再用一层 handler 包住核心 try；正常、异常和提前退出路径都执行 finalbody，异常路径最后 `exc_reraise` |
-| `Raise` | `raise X` / `raise X(msg)` 调 `py23_raise`；bare `raise` 调 `py23_reraise`；只接受内置异常名 |
+| `Raise` | `raise X` / `raise X(msg)` 调 `pa_raise`；bare `raise` 调 `pa_reraise`；只接受内置异常名 |
 | `Import` / `ImportFrom` | 发 `import.module` 确保模块初始化；`import m` 只登记编译期别名，`from m import x` 加载外部全局并快照到本地/全局槽 |
 | `Global` | 只影响名字解析（该名字走全局读写） |
 | `Assert` | `br cond, ok, fail`；`fail` 里拼消息后 `raise AssertionError` |
@@ -244,7 +244,7 @@ P0/P1/P2，O2 再加控制流与小函数优化：
 |---|---|
 | 常量 | 直接产出 `const.*`；字符串进池 |
 | `Name` | 局部 `load.slot`，否则 `load.global` |
-| `BinOp` | 字符串 `+` 走 `py23_str_concat`；数值走 `bin`；str/bytes 的 `%` 走 `py23_percent_format` |
+| `BinOp` | 字符串 `+` 走 `pa_str_concat`；数值走 `bin`；str/bytes 的 `%` 走 `pa_percent_format` |
 | `BoolOp` | 短路：先求左值，按真值分支，两条路径都把结果写进同一个临时槽 |
 | `Compare` | 单次比较一条 `cmp`；链式比较把中间值存槽，逐个比较并短路 |
 | `Call` | 内置特化（`print` / `len` / `int` / `float` / `str` / `bool` / `range`）→ 否则按 `FuncInfo` 重排实参 → `call`；`*` 打包成 list、`**` 打包成 dict 作为末尾形参传入 |
@@ -264,17 +264,17 @@ P0/P1/P2，O2 再加控制流与小函数优化：
 
 **循环变量私有**：`for i in range(n)` 用独立计数器槽，每轮把计数器写进 `i`。Python 里在循环体给 `i` 重新赋值不影响迭代，两者必须分开。
 
-**bytes 迭代**：`for c in b"..."` 和推导式在降级期先 `call.rt py23_bytes_to_list`
+**bytes 迭代**：`for c in b"..."` 和推导式在降级期先 `call.rt pa_bytes_to_list`
 转成 `list[int]`（元素 0..255），再走通用列表路径；多一次分配，换取与
 `iter_elem(Bytes) == int` 的类型规则一致。
 
 **`%` 格式化**：`str` / `bytes` 的 `%` 降级成
-`py23_percent_format(pattern, args, desc, is_bytes)`。`args` 是单元素列表或
+`pa_percent_format(pattern, args, desc, is_bytes)`。`args` 是单元素列表或
 tuple 字面量；`desc` 是编译期按实参静态类型生成的一串 `i`/`f`/`s`
 （int/bool、float、str/bytes），运行时据此从 8 字节槽里取正确的值域。
 
 **capwords**：`stdlib/string.py` 的 `capwords` 调内部 intrinsic
-`__py23_capwords`，降级成 `call.rt py23_str_capwords`；单遍扫描并只分配
+`__pa_capwords`，降级成 `call.rt pa_str_capwords`；单遍扫描并只分配
 一个输出串，不建中间词表。
 
 **参数重排**：按 `FuncInfo` 把位置参数和关键字参数绑到形参槽上，缺省的用字面量默认值填。签名不可知时（函数值调用）只接受纯位置参数，且不能带 `*` / `**`。`*args` / `**kwargs` 形参接在普通形参之后，调用点把多出来的位置实参装进 `list.new`、关键字实参装进 `dict.new`，再按普通实参传入。`*` 右侧是定长 tuple 时静态展开成逐元素下标读。绑完之后按形参类型逐个 `coerce`。
@@ -289,9 +289,9 @@ dict 查找，命中直接返回、未命中调用原函数并写回。两者都
 
 **异常展开**：`try` / `with` / `finally` 各自发射 `handler_push` → `setjmp` → `branch`；landing pad 先 `handler_leave`（弹记录 + `rc_cleanup` 到记录水位），再运行 `except` 匹配 / `__exit__` / finalbody。`return` / `break` / `continue` 不经过 longjmp，而是由统一 cleanup 栈直接发射 `handler_discard`、`__exit__` 和 finalbody，因此正常退出路径仍然精确释放槽位。
 
-**模块**：模块全局带链接符号 `py23$m$g$x`；外部模块全局是 `external = true` 的 `IRGlobal`，不分配存储、不进根表、出口也不释放。`import.module` 只带模块下标，符号命名由后端按模块名推导。模块顶层函数成为导出符号 `py23$m$init`，返回 `None` 且不执行 `GcShutdown` / `RcShutdown`。
+**模块**：模块全局带链接符号 `pyadamas$m$g$x`；外部模块全局是 `external = true` 的 `IRGlobal`，不分配存储、不进根表、出口也不释放。`import.module` 只带模块下标，符号命名由后端按模块名推导。模块顶层函数成为导出符号 `pyadamas$m$init`，返回 `None` 且不执行 `GcShutdown` / `RcShutdown`。
 
-**`print` 不是函数**：就地展开成一串 `call.rt`，`sep` / `end` 求值后交给 `py23_print_str` 原样写出。
+**`print` 不是函数**：就地展开成一串 `call.rt`，`sep` / `end` 求值后交给 `pa_print_str` 原样写出。
 
 **`coerce` 的边界**：只处理数值域之间的转换（int/bool ↔ float）。指针类之间的差异（`list[int]` → `list[float]`）需要逐元素转换并重新分配，现阶段直接报错，不允许静默产生错误的位模式。
 
@@ -316,18 +316,18 @@ dict 查找，命中直接返回、未命中调用原函数并写回。两者都
 
 **字典 / 集合不新增 IR 指令**：
 
-- 字面量 → `py23_dict_new` + 逐对 `py23_dict_set`（set 用 `val_own = 0`）；
-- `collections.defaultdict(...)` → `py23_dict_new` + `py23_dict_set_default_factory`，
-  有初始 dict 时再 `py23_dict_update`；工厂编码 1..8 对应
+- 字面量 → `pa_dict_new` + 逐对 `pa_dict_set`（set 用 `val_own = 0`）；
+- `collections.defaultdict(...)` → `pa_dict_new` + `pa_dict_set_default_factory`，
+  有初始 dict 时再 `pa_dict_update`；工厂编码 1..8 对应
   int/float/bool/str/list/dict/set/tuple，编译期确定；
-- `d[k]` → `py23_dict_get`，`d[k] = v` → `py23_dict_set`；
-- `k in d` / `k in s` → `py23_dict_contains`；list/tuple 用
-  `py23_list_contains`，str 用 `py23_str_contains`；
-- `for k in d` / `for x in s` → `len` + `py23_dict_key_at`；
-- 方法：`get(k[,d])` → `py23_dict_get` / `py23_dict_get_or`；
-  `keys()/values()/items()` → `py23_dict_keys/values/items`（新 list）；
-  `update` → `py23_dict_update`；`set.add/update` 复用 dict_set/update；
-- 切片读 → `py23_list_slice` / `py23_str_slice`，缺省边界传 `INT64_MIN`
+- `d[k]` → `pa_dict_get`，`d[k] = v` → `pa_dict_set`；
+- `k in d` / `k in s` → `pa_dict_contains`；list/tuple 用
+  `pa_list_contains`，str 用 `pa_str_contains`；
+- `for k in d` / `for x in s` → `len` + `pa_dict_key_at`；
+- 方法：`get(k[,d])` → `pa_dict_get` / `pa_dict_get_or`；
+  `keys()/values()/items()` → `pa_dict_keys/values/items`（新 list）；
+  `update` → `pa_dict_update`；`set.add/update` 复用 dict_set/update；
+- 切片读 → `pa_list_slice` / `pa_str_slice`，缺省边界传 `INT64_MIN`
   哨兵；结果是新堆对象，需要 `rc_temp` 入栈；
 - `len` 仍是一条 `Len`，真值判断仍走 `branch`（字典/集合的 `len` 在
   偏移 0）。
@@ -337,7 +337,7 @@ unknown 类别不 dec，由 GC 兜底。
 
 **引用计数插桩的边界**：
 
-- 新堆值由 `def_heap()` 统一登记，产生后立刻 `py23_rc_temp` 入栈；
+- 新堆值由 `def_heap()` 统一登记，产生后立刻 `pa_rc_temp` 入栈；
 - 写入槽 / 全局 / 字段 / 容器前，源类型已知是堆才 `rc_inc`；
 - 覆盖旧值前先读出来，写完再 `rc_dec`；
 - 函数入口对堆形参 `rc_inc`，`return` 前对返回值 `rc_inc`，然后清理临时
@@ -350,7 +350,7 @@ unknown 类别不 dec，由 GC 兜底。
 ## dump 怎么看
 
 ```bash
-./build/dev/py23 ir script.py
+./build/dev/pyadamas ir script.py
 ```
 
 ```
@@ -359,7 +359,7 @@ global g0 twice : func(int) -> int
 global g1 total : int
 class c0 Point (2 fields, vtable: f3)
 
-func f0 __py23_main() -> int {
+func f0 __pa_main() -> int {
   slots: s0=int
 bb0 (entry):
   %0 = func.addr f-1  ; func

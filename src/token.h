@@ -7,7 +7,7 @@
 #include <cstdint>
 #include <string>
 
-namespace py23 {
+namespace pyadamas {
 
 enum class Tok : uint8_t {
     END,       // 文件结束
@@ -175,4 +175,4 @@ inline bool is_augassign(Tok t) {
     return t >= Tok::PLUSEQUAL && t <= Tok::DOUBLESTAREQUAL;
 }
 
-}  // namespace py23
+}  // namespace pyadamas

@@ -104,9 +104,9 @@ def split_class(src_path, cls, hdr_path, cpp_path, includes):
     inc = '\n'.join(f'#include {i}' for i in includes)
     cpp = (f'// 由 {src_path} 拆出的实现。声明见 {hdr_path}。\n'
            f'{inc}\n\n'
-           f'namespace py23 {{\n\n'
+           f'namespace pyadamas {{\n\n'
            + '\n\n'.join(cpp_defs) +
-           '\n\n}  // namespace py23\n')
+           '\n\n}  // namespace pyadamas\n')
 
     open(hdr_path, 'w', encoding='utf-8').write(hdr)
     open(cpp_path, 'w', encoding='utf-8').write(cpp)

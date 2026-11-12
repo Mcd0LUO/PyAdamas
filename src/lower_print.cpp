@@ -1,7 +1,7 @@
 // lower_print.cpp —— print 与值输出降级
 #include "lower_impl.h"
 
-namespace py23 {
+namespace pyadamas {
 
 void Lowerer::print_value(VReg v, TypePtr ty, int line, int col) {
     if (print_file_slot_ >= 0) {
@@ -754,4 +754,4 @@ VReg Lowerer::lower_print(Call& c) {
     return const_none();
 }
 
-}  // namespace py23
+}  // namespace pyadamas

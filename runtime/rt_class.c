@@ -7,9 +7,9 @@
    None / 0 / 假，和栈槽的约定一致，所以「声明了但没赋值的字段」
    天然就是 None。vtable 指针由生成代码紧接着写入。
    dtor 由代码生成按类布局生成，只 dec 堆类型字段。 */
-void* py23_obj_new(int64_t size, void (*dtor)(void*), void (*release)(void*)) {
+void* pa_obj_new(int64_t size, void (*dtor)(void*), void (*release)(void*)) {
     if (size < 8) panic_c("object size too small");
-    return rc_alloc(size, dtor, release, PY23_RC_INSTANCE);
+    return rc_alloc(size, dtor, release, PYADAMAS_RC_INSTANCE);
 }
 
 /* 类模式的运行期类型检查。只认用户类实例；原始整数、str、list 等
@@ -17,13 +17,13 @@ void* py23_obj_new(int64_t size, void (*dtor)(void*), void (*release)(void*)) {
    vtable 前 5 个字：MRO 元数据指针表、类编号、vtable、自身槽表、类名。 */
 static const int64_t* inst_vtable(void* obj) {
     if (!obj) return NULL;
-    Py23Rc* h = (Py23Rc*)obj - 1;
+    PyAdamasRc* h = (PyAdamasRc*)obj - 1;
     if (!rc_index_has(h)) return NULL;
-    if (h->kind != PY23_RC_INSTANCE) return NULL;
+    if (h->kind != PYADAMAS_RC_INSTANCE) return NULL;
     return *(int64_t**)obj;
 }
 
-int64_t py23_isinstance(void* obj, int64_t class_id) {
+int64_t pa_isinstance(void* obj, int64_t class_id) {
     const int64_t* vt = inst_vtable(obj);
     if (!vt) return 0;
     const int64_t* meta = vt - 5;
@@ -39,14 +39,14 @@ int64_t py23_isinstance(void* obj, int64_t class_id) {
 
 /* 实例的运行期类编号；不是类实例返回 -1。读类属性时用它按实际类型
    选择存储槽——静态类型可能是基类，值却是子类。 */
-int64_t py23_obj_class_id(void* obj) {
+int64_t pa_obj_class_id(void* obj) {
     const int64_t* vt = inst_vtable(obj);
     if (!vt) return -1;
     return (vt - 5)[1];   /* 元数据第 1 个字是类编号 */
 }
 
 /* 跨模块类模式：类编号只在模块内唯一，用「模块名.类名」比较。 */
-int64_t py23_is_named_class(void* obj, Py23Str* qualname) {
+int64_t pa_is_named_class(void* obj, PyAdamasStr* qualname) {
     if (!qualname) return 0;
     const int64_t* vt = inst_vtable(obj);
     if (!vt) return 0;
@@ -68,10 +68,10 @@ int64_t py23_is_named_class(void* obj, Py23Str* qualname) {
 
 /* super()：从实例的动态 MRO 里找 after 类之后的第一个「自己声明了
    该槽」的类，返回它的实现。没有就按 AttributeError 抛。 */
-void* py23_super_lookup(void* obj, int64_t after_cid, int64_t slot, Py23Str* name) {
+void* pa_super_lookup(void* obj, int64_t after_cid, int64_t slot, PyAdamasStr* name) {
     const int64_t* vt = inst_vtable(obj);
     if (!vt) {
-        py23_raise_c("AttributeError", "'super' object has no attribute");
+        pa_raise_c("AttributeError", "'super' object has no attribute");
         return NULL;
     }
     const int64_t* meta = vt - 5;
@@ -101,17 +101,17 @@ void* py23_super_lookup(void* obj, int64_t after_cid, int64_t slot, Py23Str* nam
     } else {
         snprintf(buf, sizeof buf, "'super' object has no attribute");
     }
-    py23_raise_c("AttributeError", buf);
+    pa_raise_c("AttributeError", buf);
     return NULL;
 }
 
-int64_t py23_is_exc(void* obj, Py23Str* type) {
+int64_t pa_is_exc(void* obj, PyAdamasStr* type) {
     if (!obj || !type) return 0;
-    Py23Rc* h = (Py23Rc*)obj - 1;
+    PyAdamasRc* h = (PyAdamasRc*)obj - 1;
     if (!rc_index_has(h)) return 0;
-    if (h->kind != PY23_RC_OBJ || h->size < (int64_t)sizeof(Py23ExcValue)) return 0;
-    Py23ExcValue* v = (Py23ExcValue*)obj;
-    if (v->magic != PY23_EXCVAL_MAGIC) return 0;
+    if (h->kind != PYADAMAS_RC_OBJ || h->size < (int64_t)sizeof(PyAdamasExcValue)) return 0;
+    PyAdamasExcValue* v = (PyAdamasExcValue*)obj;
+    if (v->magic != PYADAMAS_EXCVAL_MAGIC) return 0;
     char want[128];
     int64_t n = type->len;
     if (n < 0 || n >= (int64_t)sizeof(want)) return 0;
@@ -120,52 +120,52 @@ int64_t py23_is_exc(void* obj, Py23Str* type) {
     return exc_is_a(v->type, want) ? 1 : 0;
 }
 
-int64_t py23_is_seq(void* obj) {
+int64_t pa_is_seq(void* obj) {
     if (!obj) return 0;
-    Py23Rc* h = (Py23Rc*)obj - 1;
+    PyAdamasRc* h = (PyAdamasRc*)obj - 1;
     if (!rc_index_has(h)) return 0;
-    return h->kind == PY23_RC_LIST ? 1 : 0;
+    return h->kind == PYADAMAS_RC_LIST ? 1 : 0;
 }
 
-int64_t py23_is_dict(void* obj) {
+int64_t pa_is_dict(void* obj) {
     if (!obj) return 0;
-    Py23Rc* h = (Py23Rc*)obj - 1;
+    PyAdamasRc* h = (PyAdamasRc*)obj - 1;
     if (!rc_index_has(h)) return 0;
-    return h->kind == PY23_RC_DICT ? 1 : 0;
+    return h->kind == PYADAMAS_RC_DICT ? 1 : 0;
 }
 
 /* unknown 值上的字符串/复数模式：先按 RC 注册表确认载荷类型，再比较。 */
-int64_t py23_str_eq_unknown(void* obj, Py23Str* s) {
+int64_t pa_str_eq_unknown(void* obj, PyAdamasStr* s) {
     if (!obj || !s) return 0;
-    Py23Rc* h = (Py23Rc*)obj - 1;
-    if (!rc_index_has(h) || h->kind != PY23_RC_STR) return 0;
-    return py23_str_eq((Py23Str*)obj, s);
+    PyAdamasRc* h = (PyAdamasRc*)obj - 1;
+    if (!rc_index_has(h) || h->kind != PYADAMAS_RC_STR) return 0;
+    return pa_str_eq((PyAdamasStr*)obj, s);
 }
 
-int64_t py23_complex_eq_unknown(void* obj, Py23Complex* c) {
+int64_t pa_complex_eq_unknown(void* obj, PyAdamasComplex* c) {
     if (!obj || !c) return 0;
-    Py23Rc* h = (Py23Rc*)obj - 1;
-    if (!rc_index_has(h) || h->kind != PY23_RC_OBJ ||
-        h->size < (int64_t)sizeof(Py23Complex))
+    PyAdamasRc* h = (PyAdamasRc*)obj - 1;
+    if (!rc_index_has(h) || h->kind != PYADAMAS_RC_OBJ ||
+        h->size < (int64_t)sizeof(PyAdamasComplex))
         return 0;
-    Py23Complex* x = (Py23Complex*)obj;
-    if (x->magic != PY23_COMPLEX_MAGIC) return 0;
-    return py23_complex_eq(x, c);
+    PyAdamasComplex* x = (PyAdamasComplex*)obj;
+    if (x->magic != PYADAMAS_COMPLEX_MAGIC) return 0;
+    return pa_complex_eq(x, c);
 }
 
-int64_t py23_is_str(void* obj) {
+int64_t pa_is_str(void* obj) {
     if (!obj) return 0;
-    Py23Rc* h = (Py23Rc*)obj - 1;
+    PyAdamasRc* h = (PyAdamasRc*)obj - 1;
     if (!rc_index_has(h)) return 0;
-    return h->kind == PY23_RC_STR ? 1 : 0;
+    return h->kind == PYADAMAS_RC_STR ? 1 : 0;
 }
 
-int64_t py23_is_complex(void* obj) {
+int64_t pa_is_complex(void* obj) {
     if (!obj) return 0;
-    Py23Rc* h = (Py23Rc*)obj - 1;
-    if (!rc_index_has(h) || h->kind != PY23_RC_OBJ ||
-        h->size < (int64_t)sizeof(Py23Complex))
+    PyAdamasRc* h = (PyAdamasRc*)obj - 1;
+    if (!rc_index_has(h) || h->kind != PYADAMAS_RC_OBJ ||
+        h->size < (int64_t)sizeof(PyAdamasComplex))
         return 0;
-    return ((Py23Complex*)obj)->magic == PY23_COMPLEX_MAGIC ? 1 : 0;
+    return ((PyAdamasComplex*)obj)->magic == PYADAMAS_COMPLEX_MAGIC ? 1 : 0;
 }
 

@@ -17,7 +17,7 @@
 .Lstr0: .quad 11                               ; 负载从 len 开始，布局与堆字符串一致
         .quad 0
         .quad .Lstr0_c
-.Lstr0_c: .ascii "hello, py23\000"
+.Lstr0_c: .ascii "hello, PyAdamas\000"
 
         .bss                                   ; 全局变量
 .Lg0:   .zero 8
@@ -47,10 +47,10 @@ main:
 里有指向自身字符区的绝对地址，只读段会触发 PIE 重定位报错。vtable 同理
 ——表里是函数地址的 relocation。
 
-每个有堆字段的类会生成两个回调：`.LdtorN`（按字段偏移调 `py23_rc_dec`，
-正常引用计数归零时用）和 `.LgcrelN`（调 `py23_gc_unref_child`，只减掉
+每个有堆字段的类会生成两个回调：`.LdtorN`（按字段偏移调 `pa_rc_dec`，
+正常引用计数归零时用）和 `.LgcrelN`（调 `pa_gc_unref_child`，只减掉
 指向可达对象的引用，GC 清扫时用）。对象分配时把这两个地址传给
-`py23_obj_new`。
+`pa_obj_new`。
 
 全局变量在 `.data.rel.ro` 里还有一张 `.Lgroots` 根表（每个全局槽一个
 `.quad .LgN`）。生成的 `main` 在调用入口前执行：
@@ -59,7 +59,7 @@ main:
         leaq .Lgroots(%rip), %rdi
         movq $<全局数>, %rsi
         movq %rsp, %rdx              # 栈顶
-        call py23_gc_init
+        call pa_gc_init
 ```
 
 循环收集器按全局表、临时值栈、真实栈和 callee-saved 寄存器找根。
@@ -186,7 +186,7 @@ IR 一行没改，全部优化都发生在这一层。五件事叠起来，把�
 
 跨块的值（尤其循环头里每一轮都要读的）在静态上「已经用完」之后，下一轮迭代还会被读到。线性区间会把它的槽分给别人，然后循环第二次迭代读到垃圾。这类值一律独占槽位、区间拉满整个函数。
 
-> 这个坑真的踩过：`for` 循环里读的列表在第 2 轮变成别的值，`py23_list_get` 段错误。修法就是上面这条规则，写在 `assign_vreg_slots()` 的注释里。
+> 这个坑真的踩过：`for` 循环里读的列表在第 2 轮变成别的值，`pa_list_get` 段错误。修法就是上面这条规则，写在 `assign_vreg_slots()` 的注释里。
 
 提升到寄存器的变量仍然占着一个槽位（不会被读写），这是有意的：`vreg_off()` 的算法因此保持简单，槽位编号不会因为提升与否而错位。
 
@@ -246,7 +246,7 @@ dict 指针，调用点打包好按普通参数传；整数寄存器不够时照
         .quad 0                    # n_caps
 ```
 
-有捕获的嵌套函数在运行时分配闭包（`py23_closure_new(code, n)`），析构器
+有捕获的嵌套函数在运行时分配闭包（`pa_closure_new(code, n)`），析构器
 逐个 dec cell。调用序列：
 
 ```asm
@@ -270,11 +270,11 @@ dict 指针，调用点打包好按普通参数传；整数寄存器不够时照
 
 异常用 **setjmp/longjmp**，不占用返回值寄存器，也不改调用约定：
 
-- `py23_handler_push` 压入一条 `{jmp_buf, prev, temp_mark}` 记录，返回的
+- `pa_handler_push` 压入一条 `{jmp_buf, prev, temp_mark}` 记录，返回的
   指针直接作为 `setjmp` 的参数（`jmp_buf` 是记录的第一个字段）。
 - 生成代码在 try/with/finally 入口 `call setjmp`，0 走正常体，非 0 走
   landing pad；`raise` 在运行时设置全局异常后 `longjmp` 到最内层记录。
-- landing pad 先 `py23_handler_leave`：弹出记录并把临时值栈清理到
+- landing pad 先 `pa_handler_leave`：弹出记录并把临时值栈清理到
   记录水位；然后分派 `except` / `__exit__` / finalbody。
 - 含 handler 的函数关闭槽位寄存器提升；被异常跳过的普通函数帧不执行
   `release_slots`，局部引用交给保守 GC。
@@ -299,10 +299,10 @@ yield 时的寄存器策略很简单：vreg 的栈槽不跨挂起保存，所以
 status=1；帧析构由运行时的 finalize 路径按挂起点快照跑清理。
 
 跨挂起的 `try` / `with` / `finally`：yield 前用
-`py23_handler_suspend` 把记录摘下，恢复时分发块先
-`py23_handler_rearm` 再重新 `setjmp`，非 0 直接跳回原 landing pad。
+`pa_handler_suspend` 把记录摘下，恢复时分发块先
+`pa_handler_rearm` 再重新 `setjmp`，非 0 直接跳回原 landing pad。
 close 分发按挂起点快照重放 `__exit__` / finalbody，并
-`py23_handler_free` 释放摘下的记录。
+`pa_handler_free` 释放摘下的记录。
 
 协程复用同一套寄存器/槽位约定：帧头多出 kind/waiter/exc/cur 四个字，
 `gen.await` 写 status=3；恢复入口先看 closing，再看 `gen.exc`，有注入
@@ -315,16 +315,16 @@ close 分发按挂起点快照重放 `__exit__` / finalbody，并
 
 每个模块单独汇编成 `.o`，符号统一加前缀：
 
-- 全局槽 `py23$m$g$name`（非入口模块用 `.globl` 导出）；模块函数就是
+- 全局槽 `pyadamas$m$g$name`（非入口模块用 `.globl` 导出）；模块函数就是
   这类全局槽里的闭包值。
-- 入口顶层函数 `py23$m$init`；`__entry__` 模块额外生成 `main`。
+- 入口顶层函数 `pyadamas$m$init`；`__entry__` 模块额外生成 `main`。
   `main` 在栈上保存 `argc`/`argv`，`gc_init` 之后调用
-  `py23_sys_set_args` 初始化 `sys.argv`。
-- 模块初始化标志 `py23$m$ready`；根表 `py23$m$roots`。
-- 模块 init 开始先 `py23_gc_add_roots(roots, n)`，再执行顶层代码；
-  入口 `main` 用 `py23_gc_init` 注册入口模块的根表并调用顶层函数。
+  `pa_sys_set_args` 初始化 `sys.argv`。
+- 模块初始化标志 `pyadamas$m$ready`；根表 `pyadamas$m$roots`。
+- 模块 init 开始先 `pa_gc_add_roots(roots, n)`，再执行顶层代码；
+  入口 `main` 用 `pa_gc_init` 注册入口模块的根表并调用顶层函数。
 - `import.module` 发射
-  `py23_import_module(&ready, init)`；`ready` 置位后函数直接返回。
+  `pa_import_module(&ready, init)`；`ready` 置位后函数直接返回。
 - 外部全局（`IRGlobal::external`）只引用符号，不分配存储、不进根表，
   入口退出时也不释放；堆对象由 GC shutdown 统一回收。
 
@@ -360,7 +360,7 @@ a.speak()   →   a->vtable[0](a)   →   Dog::speak
         movq  $24, %rdi          # 8 * (1 + 2 个字段)
         leaq  .Ldtor0(%rip), %rsi
         leaq  .Lgcrel0(%rip), %rdx
-        call  py23_obj_new       # rc_alloc，全零，rc = 1
+        call  pa_obj_new       # rc_alloc，全零，rc = 1
         leaq  .Lvt0(%rip), %rcx
         movq  %rcx, (%rax)       # 对象头写 vtable
 ```
@@ -388,7 +388,7 @@ a.speak()   →   a->vtable[0](a)   →   Dog::speak
 这类小方法会真正摊平进调用点；递归边（含 `call.direct` 自递归）不内联。
 只有「静态类型存在子类」的接收者才走上面的 vtable 间接调用。
 
-`Optional[Class]` 上的字段访问和方法调用会先生成一次空指针检查（`branch` + `panic`）：类型收窄做不到逐条路径成立，而段错误不带任何上下文——`py23: panic: NoneType object has no attribute 'x'` 有用得多。
+`Optional[Class]` 上的字段访问和方法调用会先生成一次空指针检查（`branch` + `panic`）：类型收窄做不到逐条路径成立，而段错误不带任何上下文——`PyAdamas: panic: NoneType object has no attribute 'x'` 有用得多。
 
 ## 指令选择要点
 
@@ -399,13 +399,13 @@ a.speak()   →   a->vtable[0](a)   →   Dog::speak
 ```asm
         testq %rcx, %rcx
         jne   1f
-        call  py23_panic_div0
+        call  pa_panic_div0
 1:      cmpq  $-1, %rcx
         jne   2f
         movabsq $0x8000000000000000, %r8
         cmpq  %r8, %rax
         jne   2f
-        call  py23_panic_overflow
+        call  pa_panic_overflow
 2:
 ```
 
@@ -464,13 +464,13 @@ done:
 `len` 在偏移 0 是刻意设计的：`len(x)` 一条指令，真值判断也是一条。
 
 字典/集合的构造、读写、`in`、遍历、方法和切片都走 `call.rt`
-（`py23_dict_*`、`py23_list_contains`、`py23_str_contains`、
-`py23_list_slice`、`py23_str_slice`），没有新增汇编指令；它们的
+（`pa_dict_*`、`pa_list_contains`、`pa_str_contains`、
+`pa_list_slice`、`pa_str_slice`），没有新增汇编指令；它们的
 `len` 也放在偏移 0。切片缺省边界编码成 `INT64_MIN` 立即数传给运行时。
 
 ### 字符串比较
 
-`==` / `!=` 走 `py23_str_eq`，大小比较走 `py23_str_cmp`（三路比较，返回 -1/0/1）。
+`==` / `!=` 走 `pa_str_eq`，大小比较走 `pa_str_cmp`（三路比较，返回 -1/0/1）。
 
 > 这里曾经有个静默 bug：大小比较只生成了一行注释、什么指令都没有，于是 `a < b` 拿到栈槽里的残留值，恒为 `False`。发现它的方式是对着 CPython 跑差分测试。
 
@@ -489,13 +489,13 @@ done:
 ## 调试
 
 ```bash
-./build/dev/py23 asm script.py            # 看生成的汇编，带 IR 注释
-PY23_KEEP_ASM=1 ./build/dev/py23 run x.py # 保留中间 .s
-./build/dev/py23 build x.py -o x && gdb ./x
+./build/dev/pyadamas asm script.py            # 看生成的汇编，带 IR 注释
+PYADAMAS_KEEP_ASM=1 ./build/dev/pyadamas run x.py # 保留中间 .s
+./build/dev/pyadamas build x.py -o x && gdb ./x
 objdump -d --no-show-raw-insn ./x | less
 ```
 
-汇编里每条指令前都有对应的 IR（`# %3 = bin.add %1, %2`），对照 `py23 ir` 的输出就能定位到是哪条 IR 生成错了。
+汇编里每条指令前都有对应的 IR（`# %3 = bin.add %1, %2`），对照 `pyadamas ir` 的输出就能定位到是哪条 IR 生成错了。
 
 ## 引用计数在汇编层的代价
 
@@ -505,12 +505,12 @@ RC 不新增 IR 指令，全部通过 `call.rt` 调运行时：
 - 有堆字段的类才有 `.LdtorN` / `.LgcrelN`，没有堆字段的类传 `NULL`；
 - 分配量超过阈值才触发循环收集；阈值是「上次收集后的存活堆字节数」，
   下限 2MB——存活堆翻倍才扫一次，总扫描量是 O(live)，垃圾多时回落到
-  2MB 下限（扫描本身也便宜）；`PY23_GC_DISABLE=1` 可整机关闭循环收集
+  2MB 下限（扫描本身也便宜）；`PYADAMAS_GC_DISABLE=1` 可整机关闭循环收集
   （只留下引用计数，会漏检环）。纯整数代码不分配堆，完全不受影响；
 - 存活堆索引只在程序可能用到 unknown 时维护：IR 里没有 unknown 类型、
   没有 `RcIncUnknown`、没有 `super()` / `isinstance` 这类运行期类型检查、
-  也不涉及 asyncio/生成器时，入口调用 `py23_disable_unknown_index`，
-  此后分配/释放不再做索引哈希表的插入和删除（`PY23_FORCE_UNKNOWN_INDEX=1`
+  也不涉及 asyncio/生成器时，入口调用 `pa_disable_unknown_index`，
+  此后分配/释放不再做索引哈希表的插入和删除（`PYADAMAS_FORCE_UNKNOWN_INDEX=1`
   可强制保留，用于 A/B）；
 - 同一条件（exact-RC）下，**字符串和没有堆字段的类实例不进 GC 堆链**：
   它们没有出边、不可能成环，RC 归零即释放；垃圾容器持有的这类叶子在
@@ -519,7 +519,7 @@ RC 不新增 IR 指令，全部通过 `call.rt` 调运行时：
 - exact-RC 且链上没有任何需要保守扫描的 OBJ/实例时走**无表快速路径**：
   把全局/临时栈/真实栈/寄存器里的机器字收敛成一张小候选表（常驻缓存），
   扫一遍堆命中标记；列表/字典/闭包的子节点按静态类型直接标记，纯数值
-  元素的容器完全不标记。`PY23_GC_TIMING=1` 可打印每轮的分段耗时；
+  元素的容器完全不标记。`PYADAMAS_GC_TIMING=1` 可打印每轮的分段耗时；
 - 不含临时堆值的语句 / 循环 / 函数在降级期把 mark/cleanup 删掉。
   所以整数循环和递归生成的汇编与 0.6.1 完全一样；
 - **只读形参免 RC**：函数降级完成后扫描——形参槽在整个函数里从未被
@@ -542,6 +542,6 @@ RC 不新增 IR 指令，全部通过 `call.rt` 调运行时：
 是 0.044s / 0.289s / 0.047s，RC 之后是 0.039s / 0.294s / 0.062s：
 整数路径不变，方法调用因为每个 self 参数的 inc/dec 慢了约 30%。
 
-比的是「py23 出的汇编 + `cc -O0`」对「CPython 的解释器」。
+比的是「PyAdamas 出的汇编 + `cc -O0`」对「CPython 的解释器」。
 
 寄存器分配之前这两项是 0.08s / 0.34s：`fib` 快 1.4 倍（它全是调用，省不下多少），整数循环快 5.7 倍。仍然没有做 CSE、强度削减和通用向量化，`cc` 也没开优化；赢在「静态类型 + 直接出机器码 + 热变量在寄存器里」这三点。

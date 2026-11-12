@@ -4,6 +4,25 @@
 
 早期阶段没有逐条留痕，按阶段归纳；0.4 之后逐条记录。
 
+## [0.108] - 2026-11-12
+
+项目更名为 **PyAdamas**。
+
+### 重构
+
+- **命名**：可执行文件/CLI 从 `py23` 改为 `pyadamas`；C 符号前缀
+  `py23_` → `pa_`；宏与环境变量 `PY23_*` → `PYADAMAS_*`；模块接口
+  扩展名 `.py23i` → `.pya`；CMake 目标、测试名、Windows 包装脚本
+  （`tools/win/pyadamas.*`）与文档统一改名。
+- 仓库目录保持 `cpy23`；语言测试程序里的字符串数据（如
+  `"hello, py23"`）保持不变，避免改变期望输出。
+
+### 验证
+
+- 全量重新配置/构建通过；`ctest --preset dev` 2/2（`pyadamas_suite` /
+  `pyadamas_opt_levels`）；16MB `RLIMIT_AS` 验收 6/6；差分 runner
+  280 例 0 失败；`94`/`95` 在 `-O0/-O1/-O2` 下输出一致。
+
 ## [0.107] - 2026-11-12
 
 语言面收尾：自定义方法装饰器；yield/await 挂起点位置放宽。
@@ -42,15 +61,15 @@
 
 - **gcrel 改为真实释放**：从「GC 清扫时只减子对象计数」改为逐槽
   `rc_dec` + 清零，并用「status==1 跳过 + 槽清零」保证幂等。GC 清扫
-  期间 `py23_rc_dec` 自带「只调可达对象计数」的保护，语义与原来的
-  `py23_gc_unref_child` 一致。
+  期间 `pa_rc_dec` 自带「只调可达对象计数」的保护，语义与原来的
+  `pa_gc_unref_child` 一致。
 - **异常逃出释放帧槽**：`gen_run` / `coro_step` / `agen_drive` 的异常
-  路径、`py23_gen_close` 的 finally 抛异常路径、`py23_gen_finalize`
-  的清理失败路径都调用 `py23_gen_release_slots`。此前只把 `status`
+  路径、`pa_gen_close` 的 finally 抛异常路径、`pa_gen_finalize`
+  的清理失败路径都调用 `pa_gen_release_slots`。此前只把 `status`
   标成 2，只要生成器/协程对象还被引用着，帧里的容器/字符串就永远
   不回收：2000 个被保留的生成器（各带 20000 元素 list）峰值
   157MB → 2.3MB。
-- `py23_gen_close` 补上 handler 与临时值水位：close 期间产生的临时值
+- `pa_gen_close` 补上 handler 与临时值水位：close 期间产生的临时值
   在边界统一清理，异常信息原样向外传。
 
 ### 验证
@@ -71,7 +90,7 @@
 
 - **普通函数帧记录**：非生成器函数在序言压一条
   `Py23Frame {prev; n; 槽地址×n}`（只登记持有引用的堆槽），正常返回前
-  弹栈；`exc_longjmp` 在跳转前调 `py23_frame_unwind`，沿链把被异常跳过
+  弹栈；`exc_longjmp` 在跳转前调 `pa_frame_unwind`，沿链把被异常跳过
   的帧里槽值先清空再 `rc_dec`。此前这些槽要等 GC，而 str 等叶子对象
   untracked、GC 不会回收：2000 轮「str + 20000 元素 list 后 raise」的
   非内联用例峰值 315MB → 2.9MB。
@@ -116,7 +135,7 @@
 - `ctest --preset dev` 2/2 通过；`16_dict_del`（含 popitem 顺序）恢复通过。
 - 专项对比 CPython：50 万次增删、中间删除后重插、`popitem` LIFO、
   `set.pop`、墓碑复用、`copy`/`update`/`==`、`json.dumps(sort_keys=True)`、
-  `defaultdict`、删除后的迭代顺序，输出逐行一致（`set.pop` 与 py23
+  `defaultdict`、删除后的迭代顺序，输出逐行一致（`set.pop` 与 PyAdamas
   既有的确定性取尾语义除外）。
 - `05_strings` / `10_rc` / `13_gc` / `14_dict` / `15_slice` / `54_stdlib`
   在 16MB `RLIMIT_AS` 下通过。
@@ -156,7 +175,7 @@
 ### 性能
 
 - **单遍 `string.capwords`**：`stdlib/string.py` 的 `capwords` 改调内部
-  intrinsic `__py23_capwords`，降级为 `py23_str_capwords`；按 ASCII 空白
+  intrinsic `__pa_capwords`，降级为 `pa_str_capwords`；按 ASCII 空白
   单遍扫描，词首大写、其余小写，直接写进一个预分配的输出串，不再建中间
   词表。实测 20 万次（44 字节 / 9 词）：0.108s → 约 0.011s，同机
   CPython 3.13.5 约 0.16–0.19s。
@@ -183,7 +202,7 @@
 - **`split(sep)` 单遍填充**：单字节分隔符走 `memchr`，容量从 8 起，常见
   2–6 段不再 realloc。
 - **`sm_push_str` 快路径**：容量足够时直接写槽，避开跨 TU 的
-  `py23_list_append` 调用。
+  `pa_list_append` 调用。
 - 实测 20 万次（44 字节 / 9 词）：`capwords` 0.116s → 0.108s，同机
   CPython 3.13.5 约 0.15–0.19s；`split(sep)` 约 0.022s（CPython 约 0.024s）；
   `split + join` 约 0.048s（CPython 约 0.064s）。
@@ -194,7 +213,7 @@
 - `10_rc` / `13_gc` / `14_dict` / `15_slice` / `05_strings` 在 16MB
   `RLIMIT_AS` 下全部通过；50 万次 split 在 16MB 下通过。
 - dev / release 预设生成的基准程序运行时间无实质差异：生成代码走
-  `py23 -O2`，`rt.o` 固定由 `cc -O2` 编译，与编译器自身的 dev/release
+  `PyAdamas -O2`，`rt.o` 固定由 `cc -O2` 编译，与编译器自身的 dev/release
   预设无关。
 
 ## [0.100] - 2026-11-12
@@ -229,7 +248,7 @@
 
 ### 新增
 
-- **`stdlib/csv.py`**（随编译器分发的纯 py23 实现）：`reader(f, delimiter=",",
+- **`stdlib/csv.py`**（随编译器分发的纯 PyAdamas 实现）：`reader(f, delimiter=",",
   quotechar='"')` eager 读完文件并返回 `list[list[str]]`；
   `writer(f, delimiter=",", quotechar='"', quoting=0, lineterminator="\r\n")`
   是带 `writerow(list[str])` / `writerows(list[list[str]])` 的类。支持
@@ -314,7 +333,7 @@
 ### 文档
 
 - `language.md` / `compatibility.md` / `runtime.md` / `ir.md` 同步迭代、
-  `%` 格式化、`py23_bytes_to_list` / `py23_percent_format` 与接口标签。
+  `%` 格式化、`pa_bytes_to_list` / `pa_percent_format` 与接口标签。
 
 ## [0.96] - 2026-11-12
 
@@ -337,7 +356,7 @@
 ### 文档
 
 - `language.md` / `compatibility.md` / `runtime.md` / `ir.md` 同步工厂语义、
-  `Py23Dict::default_factory` 布局与 `py23_dict_set_default_factory` 运行时函数。
+  `Py23Dict::default_factory` 布局与 `pa_dict_set_default_factory` 运行时函数。
 
 ## [0.95] - 2026-11-12
 
@@ -350,7 +369,7 @@
   （`STDOUT` 只对 `stderr` 有意义）。方法 `wait(timeout=…)` /
   `communicate(input=…)` / `kill()` / `terminate()` / `send_signal(n)`，
   属性 `pid` / `returncode` / `stdout` / `stderr` / `stdin`（后三个是懒创建的
-  `file` 对象，直接复用 `py23_file_open(NULL, fd, …)`）。
+  `file` 对象，直接复用 `pa_file_open(NULL, fd, …)`）。
 - **`subprocess.run` 支持 `shell=True` 与 `cwd=`**，`args` 也可以是字符串。
 - **`subprocess.PIPE` / `STDOUT` / `DEVNULL`** 常量，取值与 CPython 一致
   （-1 / -2 / -3）。
@@ -359,19 +378,19 @@
 ### 修复
 
 - **`x is None` 在字符串/容器上段错误**。`map_cmp` 把 `Is`/`IsNot` 映射成
-  `Eq`/`Ne`，而 `gen_cmp` 对 str 会调 `py23_str_eq` 解引用两个操作数，`None`
+  `Eq`/`Ne`，而 `gen_cmp` 对 str 会调 `pa_str_eq` 解引用两个操作数，`None`
   就是 0，直接崩。改成：`is` / `is not` 先走 `Mov` 把堆对象转成整数位模式，
   再做整数比较——语义上就是比指针，和 CPython 的同一性比较一致。
 - `subprocess.run` 的 `cwd` 之前是「未实现」，现在真正 `chdir`。
 
 ### 尚未支持
 
-- **没有 `poll()`**：py23 里 `None` 和 `0` 同形，`poll() is None` 会把正常退出
+- **没有 `poll()`**：PyAdamas 里 `None` 和 `0` 同形，`poll() is None` 会把正常退出
   （rc=0）误判成还在跑。要非阻塞轮询用 `wait(timeout=…)` 捕获 `TimeoutExpired`。
 - `communicate()` 对没开管道的流返回空串（CPython 是 `None`）；`env` /
   `preexec_fn` / `input=` 之于 `run` 未实现。
 - `Popen` 句柄被引用计数回收时会 SIGKILL 子进程——CPython 不会这么做，但
-  py23 的释放时机不可预期，留着僵尸进程更糟。
+  PyAdamas 的释放时机不可预期，留着僵尸进程更糟。
 
 ## [0.94] - 2026-11-12
 
@@ -402,7 +421,7 @@
 
 ### 新增
 
-- **`collections.OrderedDict()`**：py23 的 dict 本来就按插入序保存，这里直接当
+- **`collections.OrderedDict()`**：PyAdamas 的 dict 本来就按插入序保存，这里直接当
   空 dict 用——`len` / 下标读写 / `keys` / `items` 等全套 dict 操作都能用。
   不支持带初始值的构造。
 
@@ -411,7 +430,7 @@
 - `defaultdict`：要在 `Py23Dict` 上加 factory 字段，并在下标读取的缺省路径里
   调用它，改动面比表面大。
 - `deque`：需要新的值类型和环形缓冲。
-- `namedtuple`：要在运行期构造类，py23 的类是编译期展开的。
+- `namedtuple`：要在运行期构造类，PyAdamas 的类是编译期展开的。
 
 ### 测试
 
@@ -516,8 +535,8 @@
 
 - **`for i, v in enumerate(xs)` 不再建 `[下标, 值]` 的元组表**：降级时直接在
   `lower_for_seq` 里识别这个调用形状，走「计数循环 + 按下标取元素」，两个循环
-  变量分别赋值。每个元素省掉一次堆分配（`py23_enumerate_list` 里的
-  `py23_list_new(2, ...)`）。
+  变量分别赋值。每个元素省掉一次堆分配（`pa_enumerate_list` 里的
+  `pa_list_new(2, ...)`）。
 - **`for a, b in zip(xs, ys)` 同理**：双游标，长度取两者较小值（运行期比较），
   不再建元组表。
 - 覆盖面：List / Tuple / Str / Dict / Set 作为源。Generator / Range / 用户类
@@ -565,7 +584,7 @@
 
 ### 已知限制
 
-- `sorted(xs, key=f)` 走的是下标数组 + qsort（`py23_list_sorted_by`），没跟着
+- `sorted(xs, key=f)` 走的是下标数组 + qsort（`pa_list_sorted_by`），没跟着
   换成 Timsort，稳定性同样没有保证。
 
 ## [0.86] - 2026-11-12
@@ -577,16 +596,16 @@
 - **`slice(a, b, c)` 作下标**：脱糖阶段把 `xs[slice(a, b, c)]` 折成切片语法
   `xs[a:b:c]`，读取、切片赋值、`del` 三条路径都通；`slice(3)`（只有 stop）
   和 `slice(None, 2)`（`None` 表示不设限）也对齐 CPython。当独立值用会明确
-  报错——py23 没有运行期的 slice 对象。
+  报错——PyAdamas 没有运行期的 slice 对象。
 - **`vars(obj)`**：返回实例字段的 dict（含继承来的字段，key 是字段名）。
   value 统一是 `unknown`：字段类型各不相同，dict 装不下异构的具体类型。
 - **`dir(obj)`**：字段名 + 方法名 + 类属性名 + property 名，排序去重；
   `dir()` 无参返回当前作用域的局部名（模块级是全局名）。
 - **`functools` 模块**：`reduce(f, xs[, init])` 折叠——int/str 走整数跳板、
-  float 走 xmm 跳板（新增 `py23_call2` / `py23_call2_f` 两个汇编跳板）；
-  `wraps(f)` 只作装饰器用，装饰器链里整层跳过（py23 不建模
+  float 走 xmm 跳板（新增 `pa_call2` / `pa_call2_f` 两个汇编跳板）；
+  `wraps(f)` 只作装饰器用，装饰器链里整层跳过（PyAdamas 不建模
   `__name__`/`__doc__`）。
-- **嵌套 lambda 也参与形参回填**：`__py23$lambda_*` 和生成器合成函数一样
+- **嵌套 lambda 也参与形参回填**：`__pyadamas$lambda_*` 和生成器合成函数一样
   登记重查，重查时回到定义时的词法父作用域。`reduce(lambda a, b: a + b,
   [1.5, 2.5])` 靠这条把形参回填成 float，否则 float 元素会按整数寄存器传参。
 
@@ -601,7 +620,7 @@
   填 env），当前架构没有这个能力，明确报 `not supported yet`。
 - `reduce` 的 float 元素要求 f 的形参是 float（或由调用点回填）；同一个
   函数被不同类型的 reduce 用过会退回 unknown，float 场景会算错——这是
-  py23 单态化的固有限制。
+  PyAdamas 单态化的固有限制。
 - `vars()` 无参（locals）和 `dir(模块)` 不支持。
 - `slice()` 没有运行期对象，只能作下标。
 
@@ -671,10 +690,10 @@
 
 ### 已知限制
 
-- **range 不可变**：`r[0] = 1` 在 py23 是编译期报错，CPython 是运行期 TypeError
+- **range 不可变**：`r[0] = 1` 在 PyAdamas 是编译期报错，CPython 是运行期 TypeError
   （消息一致）。
 - **动态步长为 0 时 ValueError 抛得比 CPython 晚**：CPython 在
-  `range(0, 10, 0)` 求值时抛，py23 在第一次 `next()` 时抛（字面量步长 0
+  `range(0, 10, 0)` 求值时抛，PyAdamas 在第一次 `next()` 时抛（字面量步长 0
   仍然在创建时抛）。
 
 ### 测试
@@ -715,7 +734,7 @@
   （现在 range 和 list 同一套静态类型），先记在
   [compatibility.md](docs/compatibility.md) 里。
 - **动态步长为 0 时 ValueError 抛得比 CPython 晚**：CPython 在
-  `range(0, 10, 0)` 求值时抛，py23 在第一次 `next()` 时抛（字面量步长 0
+  `range(0, 10, 0)` 求值时抛，PyAdamas 在第一次 `next()` 时抛（字面量步长 0
   仍然在创建时抛）。
 
 ### 测试
@@ -741,7 +760,7 @@
 
 ### 新增
 
-- **`bench/`**：逐个内置函数的 py23 / CPython 对比设施。驱动是
+- **`bench/`**：逐个内置函数的 PyAdamas / CPython 对比设施。驱动是
   `bench/run_bench.py`，用例在 `bench/builtins/<序号>_<内置名>.py`（50 个）。
   驱动会按 CPython 的实测时间校准循环次数、取多次运行的最小值、扣掉进程
   启动开销，再用 2N 复跑一次检查「循环体有没有被优化掉」，顺带比对两边的
@@ -751,14 +770,14 @@
 ### 已知限制
 
 - **`enumerate` / `sorted` / `zip` 比 CPython 慢**（约 0.7× / 0.8× / 1.0×）：
-  py23 把结果物化成列表（`enumerate` 一次造出整张 `[下标, 值]` 元组表），
+  PyAdamas 把结果物化成列表（`enumerate` 一次造出整张 `[下标, 值]` 元组表），
   排序用 `qsort` + 比较函数指针，CPython 用惰性迭代器 + Timsort。
 - **生成器表达式的 range 源会被实体化**：`(x for x in range(10**9))` 在
-  py23 里当场造出 10 亿个元素的列表（CPython 的 range 是惰性的）。脱糖时
+  PyAdamas 里当场造出 10 亿个元素的列表（CPython 的 range 是惰性的）。脱糖时
   range 作为值传进合成生成器函数，而 range 作为值使用会实体化成整数列表
-  （`runtime/rt_slice.c` 的 `py23_range_new`）。实测 `range(50000000)`：
-  py23 建生成器要 191ms / 400MB 内存，CPython 7ms；把地址空间限制在
-  200MB 时 py23 直接 OOM。`for x in range(N)` 不受影响（for 循环走专门的
+  （`runtime/rt_slice.c` 的 `pa_range_new`）。实测 `range(50000000)`：
+  PyAdamas 建生成器要 191ms / 400MB 内存，CPython 7ms；把地址空间限制在
+  200MB 时 PyAdamas 直接 OOM。`for x in range(N)` 不受影响（for 循环走专门的
   计数循环），源是列表的生成器表达式也不受影响。
 
 ### 文档
@@ -775,14 +794,14 @@
 
 - **`sorted(xs, key=f)` 真的按 key 排了**。做法：编译器先用 `f` 算出每个元素的
   键（一个平行列表），再让运行时按键排序。运行时按下标数组 + `qsort` 实现
-  （比较函数用静态指针读键表，py23 单线程不会并发踩）。
+  （比较函数用静态指针读键表，PyAdamas 单线程不会并发踩）。
 - **其它关键字不再被静默吞掉**：`sorted(xs, foo=1)` 现在明确报错。
 
 ### 已知限制
 
 - **`key` 必须是用户函数**。内建函数没有闭包对象，走闭包调用会跳飞——`len`
   特判成取长度，其它内建函数明确报错。
-- **键的返回类型一般推不出来**（py23 不把推断出的返回类型写回函数名的类型），
+- **键的返回类型一般推不出来**（PyAdamas 不把推断出的返回类型写回函数名的类型），
   这时退到机器字比较：int 键对，两边看起来都是字符串对象时按字符串比也对，
   但**负的 float 键会排错**（IEEE 位模式在负数段是反的）。给 key 函数标注
   返回类型可以避开。
@@ -832,7 +851,7 @@
 
 ### 已知限制
 
-- **py23 里 `None` 就是 `0`**：所以 `d.get(k)` 拿到的值恰好是 `0` 时，
+- **PyAdamas 里 `None` 就是 `0`**：所以 `d.get(k)` 拿到的值恰好是 `0` 时，
   和「键缺失」分不出来（`0 is None` 为真、`None == 0` 也是真）。这是值表示
   不带类型标签的直接后果，不是这次改动引入的——`x: int = 0` 之后
   `x is None` 同样为真。要彻底解决得动「值表示」那项待决策。
@@ -958,7 +977,7 @@
   抽干一次。
 - **推导式的迭代源可以是生成器**：`[x for x in (y*2 for y in ys) if x > 2]`
   走流式路径，不建中间列表。
-- **嵌套函数形参的单态化回填**：合成生成器函数（`__py23$gen_*`）在函数
+- **嵌套函数形参的单态化回填**：合成生成器函数（`__pyadamas$gen_*`）在函数
   体内定义时也登记重查，重查时回到原来的词法父作用域——否则形参类型
   永远停在 unknown，降级层没法选迭代路径。
 
@@ -1004,7 +1023,7 @@
   每 (类, 属性) 的「已拥有」标志位实现，读路径按标志回退到父类。
 - **运行期类号派发**：`self.x` 读类属性时按实例的真实类号选择存储槽，静态
   类型是基类、值是子类时读到子类覆盖的那份。没有任何子类覆盖时退化成一次
-  直接读，不产生额外开销（新增运行时 `py23_obj_class_id`）。
+  直接读，不产生额外开销（新增运行时 `pa_obj_class_id`）。
 - **实例字段遮蔽类属性**：`self.x = ...` 且 `x` 是类属性时补出隐式字段，
   构造时先把类属性的当前值拷进字段，所以「还没赋值就读」看到的是类属性的
   默认值而不是 0 / None。
@@ -1078,7 +1097,7 @@
 ### 新增
 
 - `re.Pattern.sub` 的 `repl` 可以是函数：运行时每匹配一次回调一次闭包。
-  复用 `rt_task.c` 里已有的 `py23_call1` 跳板（闭包指针走 `%r10`）；
+  复用 `rt_task.c` 里已有的 `pa_call1` 跳板（闭包指针走 `%r10`）；
   `typecheck` 在 `sub` 处把回调的第一个形参回填成 `re.Match`，回调里
   `m.group(0)` 才有静态类型。
 
@@ -1132,7 +1151,7 @@
 - `Pattern.groups` / `Pattern.pattern` / `Pattern.flags` 属性。
 - `Match.expand(template)`。
 - `Match.group(a, b, ...)` 多参数，返回元组。
-- `re.finditer` / `Pattern.finditer`，返回 `list[Match]`：py23 没有惰性迭代器，
+- `re.finditer` / `Pattern.finditer`，返回 `list[Match]`：PyAdamas 没有惰性迭代器，
   按列表给，`for` 循环语义一致；副作用是 `len()` 能用（CPython 会 TypeError）。
 - 替换模板支持 `\g<name>` / `\g<1>` / `\g<0>`，`sub` 和 `expand` 共用同一套展开。
 
@@ -1205,7 +1224,7 @@
 - 语法：字面量、`.`、字符类（含范围/取反）、`\d\w\s\D\W\S`、`\b`、
   `^ $`、分组（捕获 / `(?:...)` / `(?P<name>...)`）、交替、`* + ? {m,n}`
   （含惰性）；标志 `I`/`IGNORECASE`、`M`/`MULTILINE`、`S`/`DOTALL`。
-- 字符串按字节匹配，与 py23 的 `str` 语义一致。
+- 字符串按字节匹配，与 PyAdamas 的 `str` 语义一致。
 - `tests/run/56_re.py` 覆盖 search/groups/compile/flags/lazy/alternation/
   findall/sub/split/escape 和 Pattern 方法。
 
@@ -1251,7 +1270,7 @@ stdlib 批次：`string` / `time` / `os` / `itertools` / `collections` / `json`�
 
 ### 新增
 
-- `stdlib/string.py`：随编译器分发的纯 py23 子集，提供
+- `stdlib/string.py`：随编译器分发的纯 PyAdamas 子集，提供
   `ascii_lowercase` / `ascii_uppercase` / `ascii_letters` / `digits` /
   `hexdigits` / `octdigits` / `punctuation` / `whitespace` / `printable`
   常量与 `capwords()`。
@@ -1287,19 +1306,19 @@ stdlib 批次：`string` / `time` / `os` / `itertools` / `collections` / `json`�
 
 ## [0.73] - 2026-11-10
 
-差分测试自举：`tests/diff/run_diff.py` 现在可以用 py23 自己执行。
+差分测试自举：`tests/diff/run_diff.py` 现在可以用 PyAdamas 自己执行。
 
 ### 新增
 
-- `tests/diff/run_diff.py` / `generators.py` 改写为 py23 子集：去掉
+- `tests/diff/run_diff.py` / `generators.py` 改写为 PyAdamas 子集：去掉
   `pathlib`/`dataclasses`/`argparse`/`tempfile`/`concurrent.futures`，
   用 `os`/`os.path`/`random`/`subprocess`/`sys.argv` 重写；810 个差分
-  用例由 py23 编译执行 runner 后生成并比对。
-- 随机引擎逐位一致，同一份脚本在 py23 和 CPython 下生成的用例完全相同
+  用例由 PyAdamas 编译执行 runner 后生成并比对。
+- 随机引擎逐位一致，同一份脚本在 PyAdamas 和 CPython 下生成的用例完全相同
   （用 `--seeds/--only/--cases` 控制）；runner 串行执行。
-- `repr` 生成器不再依赖 `struct`/`getrandbits`（py23 没有 bytes 重解释），
+- `repr` 生成器不再依赖 `struct`/`getrandbits`（PyAdamas 没有 bytes 重解释），
   改成固定边角值（0/-0、次正规、最大正规值）+ 十进制定标随机值。
-- `py23 run prog.py -- a b`：`--` 之后的参数原样传给被运行的程序。
+- `pyadamas run prog.py -- a b`：`--` 之后的参数原样传给被运行的程序。
 - 注解支持模块限定的原生类型：函数体里可以写
   `r: random.Random = rng` / `p: subprocess.CompletedProcess = ...`
   （函数签名注解在 import 处理前解析，这两个类型仍要在函数体内收窄）。
@@ -1317,7 +1336,7 @@ stdlib 批次：`string` / `time` / `os` / `itertools` / `collections` / `json`�
 - 自举 runner 跑满 `--seeds 3`：810 个程序 0 失败；CPython 执行同一脚本
   的输出逐字节相同。
 - `ctest --preset dev` 连跑 3 次、release 全绿；O0/O1 全量 52 个运行
-  用例通过；`verify.sh` 的差分段已切到 py23 runner。
+  用例通过；`verify.sh` 的差分段已切到 PyAdamas runner。
 
 ## [0.72] - 2026-11-10
 
@@ -1450,7 +1469,7 @@ stdlib 批次：`string` / `time` / `os` / `itertools` / `collections` / `json`�
 ### 验证
 
 - 协议探针与 CPython 输出逐行一致（默认对象文本 `<X object>` 保留
-  py23 的既有简化）：子类覆盖、`super().__str__()`、继承的
+  PyAdamas 的既有简化）：子类覆盖、`super().__str__()`、继承的
   `__repr__`/`__len__`、容器内 repr、文件输出、`while obj:` 真值循环、
   f-string `!r`/格式说明
 - `ctest --preset dev` 连跑 3 次、release 全绿；810 程序差分零失败；
@@ -1492,7 +1511,7 @@ stdlib 批次：`string` / `time` / `os` / `itertools` / `collections` / `json`�
 
 ### 新增
 
-- `py23_str_from_i64` 不再走 `snprintf`：从缓冲区尾部倒写十进制，负数补
+- `pa_str_from_i64` 不再走 `snprintf`：从缓冲区尾部倒写十进制，负数补
   符号，`INT64_MIN` 用 `-(v+1)+1` 取绝对值。`str(i)` 的格式解析在
   `strlist`/`dict_str` 这类热路径上占比很大。
 
@@ -1513,14 +1532,14 @@ stdlib 批次：`string` / `time` / `os` / `itertools` / `collections` / `json`�
 
 - `print((str, int))`、`print(list(d.items()))` 这类「元素类型不同的定长
   元组」原来只按 `sub[0]` 一个静态类型打印，int 会被当成 `str` 交给
-  `py23_repr_str`，读非法指针直接段错误（旧版本同样存在）。
+  `pa_repr_str`，读非法指针直接段错误（旧版本同样存在）。
   `print_seq` 现在检测定长异构元组，按常量下标展开、每个元素用自己的
   静态类型打印；同构元组仍走循环。`print(..., file=...)` 同步修好。
 
 ### 验证
 
 - 直接、嵌套、列表内、文件输出等元组打印形状与 CPython 一致
-  （类实例仍按 py23 的简化 `<P object>` 格式）
+  （类实例仍按 PyAdamas 的简化 `<P object>` 格式）
 - `ctest --preset dev` 连跑 3 次、release 全绿；810 程序差分零失败；
   O0/O1 全量 52 个运行用例通过
 
@@ -1630,7 +1649,7 @@ GC 只收集可能成环的对象，容器堆加无表快速路径。
   标记，纯数值元素的容器完全不标记。
 - 链上对象数在分配/释放时增量维护，收集时不再计数；GC 地址表和工作栈
   跨收集复用，不再每轮 calloc/free 十几 MB。
-- `PY23_GC_TIMING=1` 打印每轮收集的 n/live 与 table/mark/release/sweep
+- `PYADAMAS_GC_TIMING=1` 打印每轮收集的 n/live 与 table/mark/release/sweep
   分段耗时。
 
 ### 验证
@@ -1661,14 +1680,14 @@ Typed 程序关闭存活堆索引。
 - 存活堆索引按程序裁剪：编译器扫描全部模块的 IR（类型里的 `unknown`、
   `RcIncUnknown`、`super()`、`isinstance` / 异常匹配 / unknown 窗口比较，
   以及 asyncio 导入和生成器），全都不需要时入口调用
-  `py23_disable_unknown_index`，此后每次堆分配/释放不再维护索引哈希表。
+  `pa_disable_unknown_index`，此后每次堆分配/释放不再维护索引哈希表。
   多模块取并集；缓存清单新增 `unknownindex` 行，命中缓存也参与判断。
   实测同源 A/B：`objects 1M` -29%（241→171ms）、`strlist 300k` -19%
   （57→46ms）、`dict_str 300k` -13%（152→132ms）。
-- `PY23_FORCE_UNKNOWN_INDEX=1` 强制保留索引（A/B 诊断用）。
+- `PYADAMAS_FORCE_UNKNOWN_INDEX=1` 强制保留索引（A/B 诊断用）。
 - 模块缓存清单加 `toolchain` 指纹（编译器可执行文件 + `rt.o` 的大小与
   mtime）：换了编译器/运行时后源码没变也不会命中旧对象。之前
-  `py23 run` 曾静默复用旧代码生成结果。
+  `pyadamas run` 曾静默复用旧代码生成结果。
 
 ### 修复
 
@@ -1698,7 +1717,7 @@ GC 阈值自适应与空字典标注修复。
   `list` / `tuple` 一样按标注类型构造。空字典字面量自己推不出 key 类型，
   以前 key_kind 落成「按机器字比较」，动态 `str(i)` key 写进去再查会
   `KeyError`。
-- 新增 `PY23_GC_DISABLE=1`：关闭循环收集，只保留引用计数（嵌入/基准用，
+- 新增 `PYADAMAS_GC_DISABLE=1`：关闭循环收集，只保留引用计数（嵌入/基准用，
   会漏检环）。
 
 ### 验证
@@ -1717,7 +1736,7 @@ GC 阈值自适应与空字典标注修复。
 
 - 循环收集仍是 stop-the-world 全堆扫描；大存活堆下每次收集仍是 O(live)
 - 没有标注、或先声明后 `d = {}` 的空字典仍按 `unknown` key 类型处理
-- 模块缓存键只看源码/选项/ABI，编译器换了以后 `py23 run` 可能命中旧
+- 模块缓存键只看源码/选项/ABI，编译器换了以后 `pyadamas run` 可能命中旧
   对象，基准与回归要用 `--rebuild`
 
 ## [0.60] - 2026-11-10
@@ -1789,7 +1808,7 @@ GC 阈值自适应与空字典标注修复。
   - `move_to` 走无分配拼接路径；
   - dev 预设改为 `-g -Og`：开发版编译器编译大文件从 ~350ms 降到 ~61ms
     （约 5.7 倍），release 约 33ms（较基线再快 2–5%）。
-- `PY23_TIMING=1` 可打印 check/lower/codegen 分阶段耗时（env 开关）。
+- `PYADAMAS_TIMING=1` 可打印 check/lower/codegen 分阶段耗时（env 开关）。
 
 ### 验证
 
@@ -1947,7 +1966,7 @@ asyncio 同步原语：`Event` / `Lock` / `Queue` 与 `wait_for`。
 ### 新增
 
 - `hash(x)`：支持 int/bool/float/str，直接复用字典键的哈希
-  （`dict_hash_value`），同值同哈希，与 py23 字典/集合行为自洽；不可哈希
+  （`dict_hash_value`），同值同哈希，与 PyAdamas 字典/集合行为自洽；不可哈希
   类型（list/dict/set/tuple/类）明确报错。
 - math 新增：`acos`/`asin`/`atan`/`acosh`/`asinh`/`atanh`/`cbrt`/`cosh`/
   `sinh`/`tanh`/`exp2`/`expm1`/`log1p`/`erf`/`erfc`/`gamma`/`lgamma`/
@@ -1967,7 +1986,7 @@ asyncio 同步原语：`Event` / `Lock` / `Queue` 与 `wait_for`。
 
 ### 已知限制
 
-- `hash` 数值与 CPython 不同（按 py23 字典的 mix64/FNV），只保证同值同
+- `hash` 数值与 CPython 不同（按 PyAdamas 字典的 mix64/FNV），只保证同值同
   哈希；tuple/None 暂不支持
 - `hypot`、`isclose` 固定两参；`prod`/`sumprod` 只接受 `list[int]`；
   `dist` 只接受等长 `list[float]`
@@ -2044,7 +2063,7 @@ list/tuple 打印、`UnboundLocalError` 与常用 math 函数。
 - `isinstance(x, T)`：目标支持内置类型名（int/float/str/bool/list/tuple/
   dict/set/complex/object）和本地类。静态类型确定时编译期折叠；unknown
   值上 str/list/dict/complex 走运行期类型标签检查，类走 MRO 检查
-  （`py23_isinstance`）；Optional 值与父类/子类关系走运行时，避免把
+  （`pa_isinstance`）；Optional 值与父类/子类关系走运行时，避免把
   None 误判成实例；导入类目标明确报不支持。
 - `getattr` / `setattr` / `hasattr` 支持类实例，属性名必须是字符串
   字面量：字段读写与 property 读取复用普通属性访问的降级路径；property
@@ -2087,7 +2106,7 @@ list/tuple 打印、`UnboundLocalError` 与常用 math 函数。
   偏移）；显式 `size` 会先把逻辑位置对齐到底层句柄再截断。
 - `seekable()` 改为探测 `fseek` 是否成功：管道上的 stdin 返回 `False`。
 - `runtime/rt_internal.h` 的 `exc_longjmp` 补上 `_Noreturn`，消除
-  `py23_raise_c` 的 “noreturn function does return” 警告。
+  `pa_raise_c` 的 “noreturn function does return” 警告。
 
 ### 验证
 
@@ -2192,7 +2211,7 @@ list/tuple 打印、`UnboundLocalError` 与常用 math 函数。
 
 ### 新增
 
-- `open(path, mode, encoding=..., errors=...)` 现在被接受：py23 字符串是
+- `open(path, mode, encoding=..., errors=...)` 现在被接受：PyAdamas 字符串是
   字节串，文件读写本身就是原始字节，所以 `encoding="utf-8"` / `"utf8"` /
   `"ascii"` 是恒等变换；其它编码（如 `utf-16`）在类型检查阶段明确报错，
   不会静默按字节读出一堆乱码。
@@ -2267,7 +2286,7 @@ list/tuple 打印、`UnboundLocalError` 与常用 math 函数。
   `removeprefix` / `removesuffix`；
   `isdigit` / `isalpha` / `isspace` / `isupper` / `islower` / `isalnum`。
 - 运行时不加几十个 RtFn，而是用一个派发入口
-  `py23_str_method(self, op, a0, a1, a2)`，操作码与 `StrOp` 枚举同序。
+  `pa_str_method(self, op, a0, a1, a2)`，操作码与 `StrOp` 枚举同序。
 - 开发期验证：18 行输出与 CPython 逐字节一致。
 
 ### 验证

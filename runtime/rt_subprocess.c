@@ -7,16 +7,16 @@
 #include <sys/wait.h>
 #include <unistd.h>
 
-struct Py23Proc {
+struct PyAdamasProc {
     int64_t returncode;
-    Py23Str* out; /* owned */
-    Py23Str* err; /* owned */
+    PyAdamasStr* out; /* owned */
+    PyAdamasStr* err; /* owned */
 };
 
 static void proc_destroy(void* p) {
-    Py23Proc* q = (Py23Proc*)p;
-    if (q->out) py23_rc_dec(q->out);
-    if (q->err) py23_rc_dec(q->err);
+    PyAdamasProc* q = (PyAdamasProc*)p;
+    if (q->out) pa_rc_dec(q->out);
+    if (q->err) pa_rc_dec(q->err);
 }
 
 static double now_sec(void) {
@@ -66,26 +66,26 @@ static void child_setup(int c_in, int c_out, int c_err, const int* close_list, i
     _exit(127);
 }
 
-Py23Proc* py23_subprocess_run(Py23List* argv, int64_t capture, int64_t text,
+PyAdamasProc* pa_subprocess_run(PyAdamasList* argv, int64_t capture, int64_t text,
                               double timeout, int64_t check, int64_t shell,
-                              Py23Str* cwd) {
+                              PyAdamasStr* cwd) {
     (void)text;  /* 没有 bytes 类型：text=False 也按字符串返回 */
     int64_t n = argv ? argv->len : 0;
-    if (n == 0) py23_raise_c("ValueError", "subprocess.run() needs a non-empty argument list");
+    if (n == 0) pa_raise_c("ValueError", "subprocess.run() needs a non-empty argument list");
     char** cargv = (char**)malloc(sizeof(char*) * (size_t)(n + 1));
     if (!cargv) panic_c("out of memory");
-    for (int64_t i = 0; i < n; ++i) cargv[i] = (char*)((Py23Str*)argv->data[i])->data;
+    for (int64_t i = 0; i < n; ++i) cargv[i] = (char*)((PyAdamasStr*)argv->data[i])->data;
     cargv[n] = NULL;
 
     int op[2] = {-1, -1}, ep[2] = {-1, -1};
     if (capture && (pipe(op) != 0 || pipe(ep) != 0)) {
         free(cargv);
-        py23_raise_c("OSError", "subprocess: pipe failed");
+        pa_raise_c("OSError", "subprocess: pipe failed");
     }
     pid_t pid = fork();
     if (pid < 0) {
         free(cargv);
-        py23_raise_c("OSError", "subprocess: fork failed");
+        pa_raise_c("OSError", "subprocess: fork failed");
     }
     if (pid == 0) {
         int cl[4] = {capture ? op[0] : -1, capture ? op[1] : -1, capture ? ep[0] : -1,
@@ -118,7 +118,7 @@ Py23Proc* py23_subprocess_run(Py23List* argv, int64_t capture, int64_t text,
             free(ebuf);
             char msg[256];
             snprintf(msg, sizeof msg, "Command timed out after %g seconds", timeout);
-            py23_raise_c("TimeoutExpired", msg);
+            pa_raise_c("TimeoutExpired", msg);
         }
         int pipes_open = ofd >= 0 || efd >= 0;
         if (reaped && !pipes_open) break;
@@ -203,11 +203,11 @@ Py23Proc* py23_subprocess_run(Py23List* argv, int64_t capture, int64_t text,
         free(ebuf);
         char msg[256];
         snprintf(msg, sizeof msg, "Command returned non-zero exit status %lld", (long long)rc);
-        py23_raise_c("CalledProcessError", msg);
+        pa_raise_c("CalledProcessError", msg);
     }
 
-    Py23Proc* proc =
-        (Py23Proc*)rc_alloc((int64_t)sizeof(Py23Proc), proc_destroy, NULL, PY23_RC_OBJ);
+    PyAdamasProc* proc =
+        (PyAdamasProc*)rc_alloc((int64_t)sizeof(PyAdamasProc), proc_destroy, NULL, PYADAMAS_RC_OBJ);
     proc->returncode = rc;
     proc->out = str_new(obuf ? obuf : "", (int64_t)olen);
     proc->err = str_new(ebuf ? ebuf : "", (int64_t)elen);
@@ -216,50 +216,50 @@ Py23Proc* py23_subprocess_run(Py23List* argv, int64_t capture, int64_t text,
     return proc;
 }
 
-int64_t py23_subprocess_returncode(Py23Proc* p) { return p->returncode; }
+int64_t pa_subprocess_returncode(PyAdamasProc* p) { return p->returncode; }
 
-Py23Str* py23_subprocess_stdout(Py23Proc* p) {
+PyAdamasStr* pa_subprocess_stdout(PyAdamasProc* p) {
     if (!p || !p->out) return str_new("", 0);
     return str_new(p->out->data, p->out->len);
 }
 
-Py23Str* py23_subprocess_stderr(Py23Proc* p) {
+PyAdamasStr* pa_subprocess_stderr(PyAdamasProc* p) {
     if (!p || !p->err) return str_new("", 0);
     return str_new(p->err->data, p->err->len);
 }
 
 /* ── Popen ───────────────────────────────────────────────────── */
 
-#define PY23_POPEN_MAGIC 0x504f50454e000001LL /* "POPEN" */
+#define PYADAMAS_POPEN_MAGIC 0x504f50454e000001LL /* "POPEN" */
 
 /* stdin/stdout/stderr 的取值：0 = 继承父进程，-1 = PIPE，-2 = STDOUT
    （只对 stderr 有意义），-3 = DEVNULL。和 CPython 的常量取值一致。 */
-#define PY23_SP_PIPE (-1)
-#define PY23_SP_STDOUT (-2)
-#define PY23_SP_DEVNULL (-3)
+#define PYADAMAS_SP_PIPE (-1)
+#define PYADAMAS_SP_STDOUT (-2)
+#define PYADAMAS_SP_DEVNULL (-3)
 
-struct Py23Popen {
+struct PyAdamasPopen {
     int64_t magic;
     int64_t pid;
     int64_t status;
     int64_t has_rc;
     int64_t rc;
     int64_t in_fd, out_fd, err_fd; /* 转交给文件对象后置 -1 */
-    Py23File* in_obj;
-    Py23File* out_obj;
-    Py23File* err_obj;
+    PyAdamasFile* in_obj;
+    PyAdamasFile* out_obj;
+    PyAdamasFile* err_obj;
 };
 
 static void popen_destroy(void* p) {
-    Py23Popen* q = (Py23Popen*)p;
+    PyAdamasPopen* q = (PyAdamasPopen*)p;
     if (q->in_fd >= 0) close((int)q->in_fd);
     if (q->out_fd >= 0) close((int)q->out_fd);
     if (q->err_fd >= 0) close((int)q->err_fd);
-    if (q->in_obj) py23_rc_dec(q->in_obj);
-    if (q->out_obj) py23_rc_dec(q->out_obj);
-    if (q->err_obj) py23_rc_dec(q->err_obj);
+    if (q->in_obj) pa_rc_dec(q->in_obj);
+    if (q->out_obj) pa_rc_dec(q->out_obj);
+    if (q->err_obj) pa_rc_dec(q->err_obj);
     /* 句柄被回收时子进程没人等了：杀掉并回收，避免僵尸。CPython 不这么做，
-       但 py23 的引用计数释放时机不可预期，留着更糟。 */
+       但 pyadamas 的引用计数释放时机不可预期，留着更糟。 */
     if (!q->has_rc && q->pid > 0) {
         int st = 0;
         kill((pid_t)q->pid, SIGKILL);
@@ -270,7 +270,7 @@ static void popen_destroy(void* p) {
 }
 
 /* 非阻塞（block=0）或阻塞地回收子进程。返回 1 表示已经有退出码。 */
-static int64_t popen_reap(Py23Popen* p, int64_t block) {
+static int64_t popen_reap(PyAdamasPopen* p, int64_t block) {
     if (p->has_rc) return 1;
     int st = 0;
     pid_t w = waitpid((pid_t)p->pid, &st, block ? 0 : WNOHANG);
@@ -288,48 +288,48 @@ static int64_t popen_reap(Py23Popen* p, int64_t block) {
     return 0;
 }
 
-Py23Popen* py23_popen_new(Py23List* argv, int64_t shell, Py23Str* cwd, int64_t stdin_mode,
+PyAdamasPopen* pa_popen_new(PyAdamasList* argv, int64_t shell, PyAdamasStr* cwd, int64_t stdin_mode,
                           int64_t stdout_mode, int64_t stderr_mode) {
     int64_t n = argv ? argv->len : 0;
-    if (n == 0) py23_raise_c("ValueError", "Popen() needs a non-empty argument list");
+    if (n == 0) pa_raise_c("ValueError", "Popen() needs a non-empty argument list");
     char** cargv = (char**)malloc(sizeof(char*) * (size_t)(n + 1));
     if (!cargv) panic_c("out of memory");
-    for (int64_t i = 0; i < n; ++i) cargv[i] = (char*)((Py23Str*)argv->data[i])->data;
+    for (int64_t i = 0; i < n; ++i) cargv[i] = (char*)((PyAdamasStr*)argv->data[i])->data;
     cargv[n] = NULL;
 
     int ip[2] = {-1, -1}, op[2] = {-1, -1}, ep[2] = {-1, -1};
     int devnull = -1;
     int child_in = -1, child_out = -1, child_err = -1;
 
-    if (stdin_mode == PY23_SP_PIPE) {
+    if (stdin_mode == PYADAMAS_SP_PIPE) {
         if (pipe(ip) != 0) {
             free(cargv);
-            py23_raise_c("OSError", "Popen: pipe failed");
+            pa_raise_c("OSError", "Popen: pipe failed");
         }
         child_in = ip[0];
-    } else if (stdin_mode == PY23_SP_DEVNULL) {
+    } else if (stdin_mode == PYADAMAS_SP_DEVNULL) {
         devnull = open("/dev/null", O_RDWR);
         child_in = devnull;
     }
-    if (stdout_mode == PY23_SP_PIPE) {
+    if (stdout_mode == PYADAMAS_SP_PIPE) {
         if (pipe(op) != 0) {
             free(cargv);
-            py23_raise_c("OSError", "Popen: pipe failed");
+            pa_raise_c("OSError", "Popen: pipe failed");
         }
         child_out = op[1];
-    } else if (stdout_mode == PY23_SP_DEVNULL) {
+    } else if (stdout_mode == PYADAMAS_SP_DEVNULL) {
         if (devnull < 0) devnull = open("/dev/null", O_RDWR);
         child_out = devnull;
     }
-    if (stderr_mode == PY23_SP_STDOUT) {
+    if (stderr_mode == PYADAMAS_SP_STDOUT) {
         child_err = child_out; /* 并到 stdout */
-    } else if (stderr_mode == PY23_SP_PIPE) {
+    } else if (stderr_mode == PYADAMAS_SP_PIPE) {
         if (pipe(ep) != 0) {
             free(cargv);
-            py23_raise_c("OSError", "Popen: pipe failed");
+            pa_raise_c("OSError", "Popen: pipe failed");
         }
         child_err = ep[1];
-    } else if (stderr_mode == PY23_SP_DEVNULL) {
+    } else if (stderr_mode == PYADAMAS_SP_DEVNULL) {
         if (devnull < 0) devnull = open("/dev/null", O_RDWR);
         child_err = devnull;
     }
@@ -337,7 +337,7 @@ Py23Popen* py23_popen_new(Py23List* argv, int64_t shell, Py23Str* cwd, int64_t s
     pid_t pid = fork();
     if (pid < 0) {
         free(cargv);
-        py23_raise_c("OSError", "Popen: fork failed");
+        pa_raise_c("OSError", "Popen: fork failed");
     }
     if (pid == 0) {
         int cl[7] = {ip[0], ip[1], op[0], op[1], ep[0], ep[1], devnull};
@@ -351,9 +351,9 @@ Py23Popen* py23_popen_new(Py23List* argv, int64_t shell, Py23Str* cwd, int64_t s
     if (ep[1] >= 0) close(ep[1]);
     if (devnull >= 0) close(devnull);
 
-    Py23Popen* p =
-        (Py23Popen*)rc_alloc((int64_t)sizeof(Py23Popen), popen_destroy, NULL, PY23_RC_OBJ);
-    p->magic = PY23_POPEN_MAGIC;
+    PyAdamasPopen* p =
+        (PyAdamasPopen*)rc_alloc((int64_t)sizeof(PyAdamasPopen), popen_destroy, NULL, PYADAMAS_RC_OBJ);
+    p->magic = PYADAMAS_POPEN_MAGIC;
     p->pid = (int64_t)pid;
     p->status = 0;
     p->has_rc = 0;
@@ -367,47 +367,47 @@ Py23Popen* py23_popen_new(Py23List* argv, int64_t shell, Py23Str* cwd, int64_t s
     return p;
 }
 
-int64_t py23_popen_pid(Py23Popen* p) { return p->pid; }
-int64_t py23_popen_returncode(Py23Popen* p) { return p->rc; }
+int64_t pa_popen_pid(PyAdamasPopen* p) { return p->pid; }
+int64_t pa_popen_returncode(PyAdamasPopen* p) { return p->rc; }
 
-static Py23File* popen_wrap(int64_t* fd, const char* mode) {
-    Py23Str* m = str_new(mode, (int64_t)strlen(mode));
-    Py23File* f = py23_file_open(NULL, *fd, m, 0, 0, 1);
-    py23_rc_dec(m);
+static PyAdamasFile* popen_wrap(int64_t* fd, const char* mode) {
+    PyAdamasStr* m = str_new(mode, (int64_t)strlen(mode));
+    PyAdamasFile* f = pa_file_open(NULL, *fd, m, 0, 0, 1);
+    pa_rc_dec(m);
     *fd = -1; /* 所有权转给文件对象 */
     return f;
 }
 
-Py23File* py23_popen_stdout(Py23Popen* p) {
+PyAdamasFile* pa_popen_stdout(PyAdamasPopen* p) {
     if (!p->out_obj) {
         if (p->out_fd < 0)
-            py23_raise_c("AttributeError", "stdout was not opened with PIPE");
+            pa_raise_c("AttributeError", "stdout was not opened with PIPE");
         p->out_obj = popen_wrap(&p->out_fd, "r");
     }
-    py23_rc_inc(p->out_obj);
+    pa_rc_inc(p->out_obj);
     return p->out_obj;
 }
 
-Py23File* py23_popen_stderr(Py23Popen* p) {
+PyAdamasFile* pa_popen_stderr(PyAdamasPopen* p) {
     if (!p->err_obj) {
         if (p->err_fd < 0)
-            py23_raise_c("AttributeError", "stderr was not opened with PIPE");
+            pa_raise_c("AttributeError", "stderr was not opened with PIPE");
         p->err_obj = popen_wrap(&p->err_fd, "r");
     }
-    py23_rc_inc(p->err_obj);
+    pa_rc_inc(p->err_obj);
     return p->err_obj;
 }
 
-Py23File* py23_popen_stdin(Py23Popen* p) {
+PyAdamasFile* pa_popen_stdin(PyAdamasPopen* p) {
     if (!p->in_obj) {
-        if (p->in_fd < 0) py23_raise_c("AttributeError", "stdin was not opened with PIPE");
+        if (p->in_fd < 0) pa_raise_c("AttributeError", "stdin was not opened with PIPE");
         p->in_obj = popen_wrap(&p->in_fd, "w");
     }
-    py23_rc_inc(p->in_obj);
+    pa_rc_inc(p->in_obj);
     return p->in_obj;
 }
 
-int64_t py23_popen_wait(Py23Popen* p, double timeout) {
+int64_t pa_popen_wait(PyAdamasPopen* p, double timeout) {
     if (popen_reap(p, 0)) return p->rc;
     if (timeout < 0.0) {
         popen_reap(p, 1);
@@ -419,21 +419,21 @@ int64_t py23_popen_wait(Py23Popen* p, double timeout) {
         if (now_sec() >= deadline) {
             char msg[256];
             snprintf(msg, sizeof msg, "Timeout %g expired", timeout);
-            py23_raise_c("TimeoutExpired", msg);
+            pa_raise_c("TimeoutExpired", msg);
         }
         poll(NULL, 0, 1);
     }
 }
 
-void py23_popen_kill(Py23Popen* p) {
+void pa_popen_kill(PyAdamasPopen* p) {
     if (!p->has_rc) kill((pid_t)p->pid, SIGKILL);
 }
 
-void py23_popen_terminate(Py23Popen* p) {
+void pa_popen_terminate(PyAdamasPopen* p) {
     if (!p->has_rc) kill((pid_t)p->pid, SIGTERM);
 }
 
-void py23_popen_send_signal(Py23Popen* p, int64_t sig) {
+void pa_popen_send_signal(PyAdamasPopen* p, int64_t sig) {
     if (!p->has_rc) kill((pid_t)p->pid, (int)sig);
 }
 
@@ -458,10 +458,10 @@ static void drain(int64_t* fd, char** buf, size_t* len, size_t* cap) {
 
 /* communicate(input)：写 input、关 stdin，然后同时收 stdout/stderr，最后回收。
    返回 [stdout, stderr]。 */
-Py23List* py23_popen_communicate(Py23Popen* p, Py23Str* input) {
+PyAdamasList* pa_popen_communicate(PyAdamasPopen* p, PyAdamasStr* input) {
     if (input && p->in_obj) {
-        py23_file_write(p->in_obj, input);
-        py23_file_close(p->in_obj);
+        pa_file_write(p->in_obj, input);
+        pa_file_close(p->in_obj);
     } else if (p->in_fd >= 0) {
         if (input && input->len) {
             const char* q = input->data;
@@ -486,21 +486,21 @@ Py23List* py23_popen_communicate(Py23Popen* p, Py23Str* input) {
 
     if (p->out_obj && p->err_obj) {
         /* 两边都已经被包装成文件对象：只能顺序读。 */
-        Py23Str* a = py23_file_read(p->out_obj, -1);
-        Py23Str* b = py23_file_read(p->err_obj, -1);
+        PyAdamasStr* a = pa_file_read(p->out_obj, -1);
+        PyAdamasStr* b = pa_file_read(p->err_obj, -1);
         buf_append(&obuf, &olen, &ocap, a->data, (size_t)a->len);
         buf_append(&ebuf, &elen, &ecap, b->data, (size_t)b->len);
-        py23_rc_dec(a);
-        py23_rc_dec(b);
+        pa_rc_dec(a);
+        pa_rc_dec(b);
     } else if (p->out_obj) {
-        Py23Str* a = py23_file_read(p->out_obj, -1);
+        PyAdamasStr* a = pa_file_read(p->out_obj, -1);
         buf_append(&obuf, &olen, &ocap, a->data, (size_t)a->len);
-        py23_rc_dec(a);
+        pa_rc_dec(a);
         if (p->err_fd >= 0) drain(&p->err_fd, &ebuf, &elen, &ecap);
     } else if (p->err_obj) {
-        Py23Str* b = py23_file_read(p->err_obj, -1);
+        PyAdamasStr* b = pa_file_read(p->err_obj, -1);
         buf_append(&ebuf, &elen, &ecap, b->data, (size_t)b->len);
-        py23_rc_dec(b);
+        pa_rc_dec(b);
         if (p->out_fd >= 0) drain(&p->out_fd, &obuf, &olen, &ocap);
     } else {
         while (p->out_fd >= 0 || p->err_fd >= 0) {
@@ -535,11 +535,11 @@ Py23List* py23_popen_communicate(Py23Popen* p, Py23Str* input) {
 
     popen_reap(p, 1);
 
-    Py23List* out = py23_list_new(2, 1);
-    Py23Str* so = str_new(obuf ? obuf : "", (int64_t)olen);
-    Py23Str* se = str_new(ebuf ? ebuf : "", (int64_t)elen);
-    py23_list_append(out, (int64_t)so);
-    py23_list_append(out, (int64_t)se);
+    PyAdamasList* out = pa_list_new(2, 1);
+    PyAdamasStr* so = str_new(obuf ? obuf : "", (int64_t)olen);
+    PyAdamasStr* se = str_new(ebuf ? ebuf : "", (int64_t)elen);
+    pa_list_append(out, (int64_t)so);
+    pa_list_append(out, (int64_t)se);
     free(obuf);
     free(ebuf);
     return out;

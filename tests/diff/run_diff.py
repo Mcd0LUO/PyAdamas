@@ -1,7 +1,7 @@
-# 差分测试运行器。本脚本限制在 py23 能编译的子集内，可以直接用 py23 执行：
+# 差分测试运行器。本脚本限制在 pyadamas 能编译的子集内，可以直接用 pyadamas 执行：
 #
-#   ./build/dev/py23 build -o /tmp/run_diff.prog tests/diff/run_diff.py
-#   /tmp/run_diff.prog --py23 build/dev/py23 --cpython python3 --seeds 3
+#   ./build/dev/pyadamas build -o /tmp/run_diff.prog tests/diff/run_diff.py
+#   /tmp/run_diff.prog --pyadamas build/dev/pyadamas --cpython python3 --seeds 3
 #
 # 用 CPython 执行也能跑（生成器与随机序列两端一致）。
 import os
@@ -12,7 +12,7 @@ import sys
 
 import generators
 
-PY23 = "build/dev/py23"
+PYADAMAS = "build/dev/pyadamas"
 CPYTHON = "python3"
 SEEDS = 3
 ONLY = ""
@@ -35,12 +35,12 @@ class Case:
 
 
 def parse_args(argv: list[str]) -> None:
-    global PY23, CPYTHON, SEEDS, ONLY, CASES
+    global PYADAMAS, CPYTHON, SEEDS, ONLY, CASES
     i = 1
     while i < len(argv):
         a = argv[i]
-        if a == "--py23" and i + 1 < len(argv):
-            PY23 = argv[i + 1]
+        if a == "--pyadamas" and i + 1 < len(argv):
+            PYADAMAS = argv[i + 1]
             i += 2
         elif a == "--cpython" and i + 1 < len(argv):
             CPYTHON = argv[i + 1]
@@ -76,10 +76,10 @@ def gen_source(name: str, rng, n: int) -> str:
     return ""
 
 
-def run_one(py23: str, case: Case) -> tuple[str, list[str], str]:
+def run_one(pyadamas: str, case: Case) -> tuple[str, list[str], str]:
     # 比较也放在 try 里：变量只在块内使用，try 外的类型合并不会把它拓宽。
     try:
-        a = subprocess.run([py23, "run", case.path],
+        a = subprocess.run([pyadamas, "run", case.path],
                            capture_output=True, text=True, timeout=120.0)
         b = subprocess.run([CPYTHON, case.path],
                            capture_output=True, text=True, timeout=120.0)
@@ -121,12 +121,12 @@ def show(kind: str, detail: list[str], src: str) -> None:
         shown = False
         while i < n:
             if gl[i] != wl[i]:
-                print(f"    line {i}: py23={gl[i]!r} cpython={wl[i]!r}")
+                print(f"    line {i}: pyadamas={gl[i]!r} cpython={wl[i]!r}")
                 shown = True
                 break
             i += 1
         if not shown:
-            print(f"    py23 {len(gl)} 行 / cpython {len(wl)} 行")
+            print(f"    pyadamas {len(gl)} 行 / cpython {len(wl)} 行")
     lines = src.splitlines()
     n = len(lines)
     if n > 12:
@@ -153,11 +153,11 @@ def main() -> int:
             print(f"未知生成器：{nm}")
             return 1
 
-    if not ospath.exists(PY23):
-        print(f"找不到 py23：{PY23}")
+    if not ospath.exists(PYADAMAS):
+        print(f"找不到 pyadamas：{PYADAMAS}")
         return 1
 
-    td = "/tmp/py23-diff-cases"
+    td = "/tmp/pyadamas-diff-cases"
     if not ospath.exists(td):
         os.mkdir(td)
 
@@ -191,7 +191,7 @@ def main() -> int:
     idx = 0
     while idx < total:
         c = cases[idx]
-        kind, detail, src = run_one(PY23, c)
+        kind, detail, src = run_one(PYADAMAS, c)
         done += 1
         if kind != "ok":
             print(f"seed {c.seed} / {c.name} / case {c.idx}")

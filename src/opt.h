@@ -3,9 +3,9 @@
 
 #include "ir.h"
 
-namespace py23 {
+namespace pyadamas {
 
 // opt_level >= 2 时运行常量折叠/分支化简/DCE。
 void optimize_ir(IRModule& m, int opt_level);
 
-}  // namespace py23
+}  // namespace pyadamas

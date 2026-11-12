@@ -27,7 +27,7 @@
 | 0.39–0.80 | -O0/O1/O2、dunder 第二批、random/os/subprocess、差分 runner 自举、stdlib 批次（string/time/os/itertools/collections/json）、re 模块 v1/v2；详见 [CHANGELOG](../CHANGELOG.md) |
 | 0.96–0.97 | `collections.defaultdict`；`bytes` 收尾：`for c in b"..."`、printf 风格 `%`、`bytes` 标注与跨模块接口 |
 | 0.98 | `functools.partial` / `lru_cache`：编译期合成转发闭包与缓存包装 |
-| 0.99 | `csv`：纯 py23 stdlib（reader/writer、QUOTE_*）；`file` 标注与模块接口编码修复 |
+| 0.99 | `csv`：纯 PyAdamas stdlib（reader/writer、QUOTE_*）；`file` 标注与模块接口编码修复 |
 | 0.100 | 短字符串 freelist、`split` 去泄漏与预分配（`string.capwords` 反超 CPython） |
 | 0.101 | 列表结构体/data freelist、`split(sep)` 单遍 + `memchr`、append 快路径 |
 | 0.102 | 单遍 `string.capwords` intrinsic、<=7 字节短串 SSO |
@@ -36,9 +36,10 @@
 | 0.105 | 异常 longjmp 路径回收被跳过帧的局部引用（函数帧记录 + 展开释放） |
 | 0.106 | 生成器/协程异常逃出、close 清理抛异常时立即释放帧槽 |
 | 0.107 | 自定义方法装饰器；yield/await 挂起点位置放宽 |
+| 0.108 | 项目更名 PyAdamas（pyadamas / pa_ / PYADAMAS_ / .pya） |
 | 许可证 | Apache-2.0（见 [LICENSE](../LICENSE) / [NOTICE](../NOTICE)） |
 
-## 当前状态（0.107）
+## 当前状态（0.108）
 
 流水线 `源码 → 词法 → AST → lambda 脱糖 → 类型检查 → IR → x86-64 汇编 → 可执行文件` 已打通。
 
@@ -58,7 +59,7 @@
 
 ### 2. C FFI + buffer + BLAS
 
-科学计算的唯一捷径。py23 的 ABI 已经是 SysV + `int64`/`double`/指针，运行时是纯 C；补一层 `extern "C"` 声明和 buffer 类型，就能把 `list[float]` 的连续数据直接传给 `cblas_dgemm`。验收：512³ matmul 进入毫秒级；不要求自己实现 BLAS。
+科学计算的唯一捷径。PyAdamas 的 ABI 已经是 SysV + `int64`/`double`/指针，运行时是纯 C；补一层 `extern "C"` 声明和 buffer 类型，就能把 `list[float]` 的连续数据直接传给 `cblas_dgemm`。验收：512³ matmul 进入毫秒级；不要求自己实现 BLAS。
 
 ### 3. 工程收尾
 
@@ -92,7 +93,7 @@
 9. **异常对象仍缺 traceback**：有异常值、`args`、自定义异常类和 `raise ... from`，但 `args` 只保存消息
 10. **含 handler 的函数没有寄存器提升**：longjmp 会回滚 callee-saved 寄存器，只能全走内存槽
 11. **生成器/协程的表达式能力不全**：挂起点必须是当前语句里第一个求值的表达式（vreg 不跨挂起），不能位于 `finally`/`except` 体内；`send`/await 跨挂起值的静态类型不精确；`yield from` 的值固定为 None、不能 throw。`asend`/`athrow`/`aclose` 已支持
-12. **跨模块生成器/协程不支持**：`.py23i` 里 `Generator[T]` / `Coroutine[T]` 降级成 unknown
+12. **跨模块生成器/协程不支持**：`.pya` 里 `Generator[T]` / `Coroutine[T]` 降级成 unknown
 13. **asyncio 仍是最小集合**：自定义 `__aiter__`、fd 读写、asyncio 子进程、线程安全循环未支持；`wait_readable` 不是 CPython 标准 API；Future 回调同步执行；`gather` 结果按 unknown 容器处理；Task 只允许一个并发等待者；`await` 位置受限
 14. **stdlib 覆盖不足**：没有 `logging`/`argparse`；`csv` 已接上（reader/writer 子集），`functools` 已覆盖 `reduce`/`wraps`/`partial`/`lru_cache`（`lru_cache` 无淘汰、键类型受限），`json`/`collections`/`itertools` 是子集；`re` 有后向引用/四向断言/原子组/内联标志，但缺 Unicode 属性类和 `findall` 的分组语义
 15. **没有 C FFI / 包管理 / 调试信息**：第三方库接入和科学计算受限；出错没有 traceback

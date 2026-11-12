@@ -5,10 +5,10 @@
 #include <cstdio>
 #include <cstdlib>
 
-namespace py23 {
+namespace pyadamas {
 
 // 与 runtime/rt_dict.c 的字符串哈希保持一致：FNV-1a 64 再 mix64。
-// 长串字面量把结果直接写进 Py23Str::hash，字典查字面量键时就不用再算，
+// 长串字面量把结果直接写进 PyAdamasStr::hash，字典查字面量键时就不用再算，
 // 也不用在 .data.rel.ro（RELRO 后被保护为只读）上做懒缓存。
 static uint64_t str_literal_hash(const std::string& s) {
     uint64_t h = 1469598103934665603ull;
@@ -161,7 +161,7 @@ std::string AsmGen::gen(const IRModule& m) {
             for (size_t f = 0; f < c.field_heap.size(); ++f) {
                 if (!c.field_heap[f]) continue;
                 out_ += std::format("\tmovq {}(%rbx), %rdi\n", 8 * (f + 1));
-                out_ += "\tcall py23_rc_dec\n";
+                out_ += "\tcall pa_rc_dec\n";
             }
             out_ += "\tpopq %rbx\n";
             out_ += "\tret\n";
@@ -175,7 +175,7 @@ std::string AsmGen::gen(const IRModule& m) {
             for (size_t f = 0; f < c.field_heap.size(); ++f) {
                 if (!c.field_heap[f]) continue;
                 out_ += std::format("\tmovq {}(%rbx), %rdi\n", 8 * (f + 1));
-                out_ += "\tcall py23_gc_unref_child\n";
+                out_ += "\tcall pa_gc_unref_child\n";
             }
             out_ += "\tpopq %rbx\n";
             out_ += "\tret\n";
@@ -184,7 +184,7 @@ std::string AsmGen::gen(const IRModule& m) {
         // 生成器帧的槽释放（GC release 与异常逃出共用）：逐槽 dec 并清零。
         // 清零让函数可以重复调用：正常结束时 status==1、槽已释放，直接跳过；
         // 异常逃出后由运行时调用一次，之后 GC 清扫再调到也是空操作。
-        // GC 清扫期间 py23_rc_dec 自带「只调可达对象计数」的保护。
+        // GC 清扫期间 pa_rc_dec 自带「只调可达对象计数」的保护。
         for (size_t i = 0; i < m.generators.size(); ++i) {
             const IRGenerator& g = m.generators[i];
             out_ += std::format("\n# ---- gcrel gen g{} ----\n", i);
@@ -201,7 +201,7 @@ std::string AsmGen::gen(const IRModule& m) {
                 out_ += std::format("\ttestq %rdi, %rdi\n");
                 out_ += std::format("\tje .Lgengcrelskip{}_{}\n", i, s);
                 out_ += std::format("\tmovq $0, {}(%rbx)\n", off);
-                out_ += "\tcall py23_rc_dec\n";
+                out_ += "\tcall pa_rc_dec\n";
                 out_ += std::format(".Lgengcrelskip{}_{}:\n", i, s);
             }
             out_ += std::format(".Lgengcreldone{}:\n", i);
@@ -219,12 +219,12 @@ std::string AsmGen::gen(const IRModule& m) {
             out_ += "\tmovq %rsp, %rbp\n";
             out_ += "\tleaq .Lstrtab(%rip), %rdi\n";
             out_ += std::format("\tmovq ${}, %rsi\n", m.strings.size());
-            out_ += "\tcall py23_register_literals\n";
+            out_ += "\tcall pa_register_literals\n";
             out_ += "\tpopq %rbp\n";
             out_ += "\tjmp " + func_label(m.entry) + "\n";
         }
 
-        // 真正的入口：调用降级出来的 __py23_main，返回它的返回值
+        // 真正的入口：调用降级出来的 __pa_main，返回它的返回值
         if (m.is_entry) {
             out_ += "\t.globl main\n";
             out_ += "\t.type main, @function\n";
@@ -238,15 +238,15 @@ std::string AsmGen::gen(const IRModule& m) {
             out_ += std::format("\tleaq {}(%rip), %rdi\n", roots_label());
             out_ += std::format("\tmovq ${}, %rsi\n", local_global_count());
             out_ += "\tmovq %rbp, %rdx\n";
-            out_ += "\tcall py23_gc_init\n";
+            out_ += "\tcall pa_gc_init\n";
             if (disable_unknown_index_)
-                out_ += "\tcall py23_disable_unknown_index\n";
+                out_ += "\tcall pa_disable_unknown_index\n";
             out_ += "\tleaq .Lstrtab(%rip), %rdi\n";
             out_ += std::format("\tmovq ${}, %rsi\n", m.strings.size());
-            out_ += "\tcall py23_register_literals\n";
+            out_ += "\tcall pa_register_literals\n";
             out_ += "\tmovslq (%rsp), %rdi\n";
             out_ += "\tmovq 8(%rsp), %rsi\n";
-            out_ += "\tcall py23_sys_set_args\n";
+            out_ += "\tcall pa_sys_set_args\n";
             out_ += "\taddq $16, %rsp\n";
             if (m.entry >= 0) out_ += std::format("\tcall {}\n", func_label(m.entry));
             out_ += "\tpopq %rbp\n";
@@ -254,7 +254,7 @@ std::string AsmGen::gen(const IRModule& m) {
         }
         out_ += "\t.section .note.GNU-stack,\"\",@progbits\n";
 
-        if (std::getenv("PY23_TIMING"))
+        if (std::getenv("PYADAMAS_TIMING"))
             std::fprintf(stderr, "[timing] codegen alloc=%.1f emit=%.1f ms\n",
                          alloc_ns_ / 1e6, emit_ns_ / 1e6);
         return std::move(out_);
@@ -266,4 +266,4 @@ std::string generate_asm(const IRModule& m, bool disable_unknown_index) {
     return g.gen(m);
 }
 
-}  // namespace py23
+}  // namespace pyadamas

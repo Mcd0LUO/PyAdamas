@@ -1,7 +1,7 @@
 // lower_method.cpp —— 方法与 super 调用降级
 #include "lower_impl.h"
 
-namespace py23 {
+namespace pyadamas {
 
 VReg Lowerer::lower_super_call(Attribute& at, Call& c) {
     auto fit = fn_owner_class_.find(st_->fn);
@@ -589,7 +589,7 @@ VReg Lowerer::lower_method_call(Attribute& at, Call& c) {
     }
 
     // 内置类型的方法表是静态的，Optional 上没有；走到这里说明没做
-    // None 检查。报错比让 py23_list_append 拿到 0 更可查。
+    // None 检查。报错比让 pa_list_append 拿到 0 更可查。
     if (opt) {
         err(c.line, c.col,
             std::format("method '{}' called on a maybe-None value; add a None check first",
@@ -801,7 +801,7 @@ VReg Lowerer::lower_method_call(Attribute& at, Call& c) {
             VReg key = expr(*c.args[0]);
             key = coerce(key, tc_.type_of(c.args[0].get()), kt);
             if (c.args.size() == 1)
-                // 缺失时返回 None（py23 里 None 就是 0）
+                // 缺失时返回 None（pyadamas 里 None 就是 0）
                 return call_runtime(RtFn::DictGetOpt, mk_optional(vt), {recv, key});
             VReg def = expr(*c.args[1]);
             def = coerce(def, tc_.type_of(c.args[1].get()), vt);
@@ -1859,4 +1859,4 @@ VReg Lowerer::lower_method_call(Attribute& at, Call& c) {
     return const_none();
 }
 
-}  // namespace py23
+}  // namespace pyadamas

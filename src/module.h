@@ -1,4 +1,4 @@
-// module.h —— 跨模块接口与 .py23i
+// module.h —— 跨模块接口与 .pya
 //
 // 分模块编译时，导入方只依赖接口，不读对方的 AST。接口用二进制编码：
 // 头 + 模块名/源路径 + 全局名与类型，尾部 FNV-1a 校验。类型里暂时只
@@ -13,7 +13,7 @@
 
 #include "typecheck.h"
 
-namespace py23 {
+namespace pyadamas {
 
 struct ImportedClass {
     ClassInfoPtr cls;
@@ -49,4 +49,4 @@ std::string module_init_symbol(const std::string& module);
 std::string module_roots_symbol(const std::string& module);
 std::string module_class_new_symbol(const std::string& module, const std::string& cls);
 
-}  // namespace py23
+}  // namespace pyadamas

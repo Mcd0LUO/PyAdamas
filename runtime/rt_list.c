@@ -60,26 +60,26 @@ static void list_buf_put(int64_t* p, int64_t cap) {
 }
 
 void list_destroy(void* p) {
-    Py23List* l = (Py23List*)p;
+    PyAdamasList* l = (PyAdamasList*)p;
     if (l->elem_kind == 1)
-        for (int64_t i = 0; i < l->len; ++i) py23_rc_dec((void*)l->data[i]);
+        for (int64_t i = 0; i < l->len; ++i) pa_rc_dec((void*)l->data[i]);
     list_buf_put(l->data, l->cap);
 }
 
 // GC 清扫前调用：只把「指向可达对象」的引用计数减掉。kind 2 的元素类型
 // 不可知，跳过（那些对象如果只被这个容器引用，会在同一轮清扫里被释放）。
 void list_gc_release(void* p) {
-    Py23List* l = (Py23List*)p;
+    PyAdamasList* l = (PyAdamasList*)p;
     if (l->elem_kind != 1 || !l->data) return;
-    for (int64_t i = 0; i < l->len; ++i) py23_gc_unref_child((void*)l->data[i]);
+    for (int64_t i = 0; i < l->len; ++i) pa_gc_unref_child((void*)l->data[i]);
 }
 
-Py23List* py23_list_new(int64_t cap, int64_t elem_kind) {
+PyAdamasList* pa_list_new(int64_t cap, int64_t elem_kind) {
     if (cap < 0) panic_c("negative list capacity");
     if (elem_kind < 0 || elem_kind > 2) panic_c("invalid list element kind");
     if (cap < 4) cap = 4;
-    Py23List* l = (Py23List*)rc_alloc((int64_t)sizeof(Py23List), list_destroy,
-                                      list_gc_release, PY23_RC_LIST);
+    PyAdamasList* l = (PyAdamasList*)rc_alloc((int64_t)sizeof(PyAdamasList), list_destroy,
+                                      list_gc_release, PYADAMAS_RC_LIST);
     l->len = 0;
     l->cap = cap;
     l->data = list_buf_get(&l->cap);
@@ -89,7 +89,7 @@ Py23List* py23_list_new(int64_t cap, int64_t elem_kind) {
 
 /* 元素引用由生成代码在写入前 retain（kind 1/2 且源类型已知是堆），
    运行时不再重复 inc；kind 1 覆盖/截断/销毁时负责 release。 */
-void py23_list_append(Py23List* l, int64_t v) {
+void pa_list_append(PyAdamasList* l, int64_t v) {
     if (l->len == l->cap) {
         int64_t ncap = l->cap ? l->cap * 2 : 4;
         int64_t* nd = (int64_t*)realloc(l->data, sizeof(int64_t) * (size_t)ncap);
@@ -100,31 +100,31 @@ void py23_list_append(Py23List* l, int64_t v) {
     l->data[l->len++] = v;
 }
 
-int64_t py23_list_get(Py23List* l, int64_t i) {
+int64_t pa_list_get(PyAdamasList* l, int64_t i) {
     if (i < 0) i += l->len;
-    if (i < 0 || i >= l->len) py23_raise_c("IndexError", "list index out of range");
+    if (i < 0 || i >= l->len) pa_raise_c("IndexError", "list index out of range");
     return l->data[i];
 }
 
-void py23_list_set(Py23List* l, int64_t i, int64_t v) {
+void pa_list_set(PyAdamasList* l, int64_t i, int64_t v) {
     if (i < 0) i += l->len;
-    if (i < 0 || i >= l->len) py23_raise_c("IndexError", "list assignment index out of range");
+    if (i < 0 || i >= l->len) pa_raise_c("IndexError", "list assignment index out of range");
     int64_t old = l->data[i];
     l->data[i] = v;
-    if (l->elem_kind == 1) py23_rc_dec((void*)old);
+    if (l->elem_kind == 1) pa_rc_dec((void*)old);
 }
 
-void py23_list_set_len(Py23List* l, int64_t n) {
+void pa_list_set_len(PyAdamasList* l, int64_t n) {
     if (n < 0 || n > l->len) panic_c("invalid list length");
     if (l->elem_kind == 1)
-        for (int64_t i = n; i < l->len; ++i) py23_rc_dec((void*)l->data[i]);
+        for (int64_t i = n; i < l->len; ++i) pa_rc_dec((void*)l->data[i]);
     l->len = n;
 }
 
 /* 把 src 的元素接到 dst 末尾，供 *args 打包和切片拷贝使用。
    元素的引用按 dst 的 elem_kind 处理：kind 1 正常 inc；kind 2 只对
    已知是堆的源元素 inc（不 release，交给 GC）。 */
-void py23_list_extend(Py23List* dst, Py23List* src) {
+void pa_list_extend(PyAdamasList* dst, PyAdamasList* src) {
     int64_t slen = src->len;
     int64_t* snap = NULL;
     const int64_t* sv = src->data;
@@ -138,31 +138,31 @@ void py23_list_extend(Py23List* dst, Py23List* src) {
         int64_t v = sv[i];
         if (v && src->elem_kind == 1 &&
             (dst->elem_kind == 1 || dst->elem_kind == 2))
-            py23_rc_inc((void*)v);
-        py23_list_append(dst, v);
+            pa_rc_inc((void*)v);
+        pa_list_append(dst, v);
     }
     free(snap);
 }
 
-Py23List* py23_list_copy(Py23List* src) {
-    Py23List* l = py23_list_new(src->len, src->elem_kind);
-    py23_list_extend(l, src);
+PyAdamasList* pa_list_copy(PyAdamasList* src) {
+    PyAdamasList* l = pa_list_new(src->len, src->elem_kind);
+    pa_list_extend(l, src);
     return l;
 }
 
-Py23List* py23_list_reversed(Py23List* src) {
+PyAdamasList* pa_list_reversed(PyAdamasList* src) {
     int64_t n = src->len;
-    Py23List* l = py23_list_new(n, src->elem_kind);
+    PyAdamasList* l = pa_list_new(n, src->elem_kind);
     for (int64_t i = n - 1; i >= 0; --i) {
         int64_t v = src->data[i];
         if (v && src->elem_kind == 1 && (l->elem_kind == 1 || l->elem_kind == 2))
-            py23_rc_inc((void*)v);
-        py23_list_append(l, v);
+            pa_rc_inc((void*)v);
+        pa_list_append(l, v);
     }
     return l;
 }
 
-void py23_list_insert(Py23List* l, int64_t i, int64_t v) {
+void pa_list_insert(PyAdamasList* l, int64_t i, int64_t v) {
     if (i < 0) i += l->len;
     if (i < 0) i = 0;
     if (i > l->len) i = l->len;
@@ -179,7 +179,7 @@ void py23_list_insert(Py23List* l, int64_t i, int64_t v) {
     ++l->len;
 }
 
-void py23_list_reverse(Py23List* l) {
+void pa_list_reverse(PyAdamasList* l) {
     for (int64_t i = 0, j = l->len - 1; i < j; ++i, --j) {
         int64_t t = l->data[i];
         l->data[i] = l->data[j];
@@ -187,7 +187,7 @@ void py23_list_reverse(Py23List* l) {
     }
 }
 
-int64_t py23_int_bit_length(int64_t v) {
+int64_t pa_int_bit_length(int64_t v) {
     uint64_t x = v < 0 ? (uint64_t)(-(v + 1)) + 1 : (uint64_t)v;
     int64_t n = 0;
     while (x) {
@@ -213,7 +213,7 @@ static inline double f64_of(int64_t v) {
     return d;
 }
 
-#define PY23_TIMSORT(NAME, LESS)                                               \
+#define PYADAMAS_TIMSORT(NAME, LESS)                                               \
     /* 二分插入排序：把 a[lo,hi) 排好，稳定。 */                                \
     static void bin_ins_##NAME(int64_t* a, int64_t lo, int64_t hi) {           \
         for (int64_t i = lo + 1; i < hi; ++i) {                                \
@@ -339,29 +339,29 @@ static inline double f64_of(int64_t v) {
 #define LESS_I64(a, b) ((a) < (b))
 #define LESS_F64(a, b) (f64_of(a) < f64_of(b))
 #define LESS_STR(a, b) \
-    (py23_str_cmp((Py23Str*)(uintptr_t)(a), (Py23Str*)(uintptr_t)(b)) < 0)
+    (pa_str_cmp((PyAdamasStr*)(uintptr_t)(a), (PyAdamasStr*)(uintptr_t)(b)) < 0)
 
-PY23_TIMSORT(i64, LESS_I64)
-PY23_TIMSORT(f64, LESS_F64)
-PY23_TIMSORT(str, LESS_STR)
+PYADAMAS_TIMSORT(i64, LESS_I64)
+PYADAMAS_TIMSORT(f64, LESS_F64)
+PYADAMAS_TIMSORT(str, LESS_STR)
 
 // kind：0 int/bool、1 float、2 str、其它按机器字比较。
-void py23_list_sort(Py23List* l, int64_t kind) {
+void pa_list_sort(PyAdamasList* l, int64_t kind) {
     if (l->len < 2) return;
     if (kind == 2) sort_str(l->data, l->len);
     else if (kind == 1) sort_f64(l->data, l->len);
     else sort_i64(l->data, l->len);
 }
 
-Py23List* py23_sorted_list(Py23List* src, int64_t kind) {
-    Py23List* l = py23_list_copy(src);
-    py23_list_sort(l, kind);
+PyAdamasList* pa_sorted_list(PyAdamasList* src, int64_t kind) {
+    PyAdamasList* l = pa_list_copy(src);
+    pa_list_sort(l, kind);
     return l;
 }
 
 /* 按 keys 给 vals 排序：keys 与 vals 一一对应，key 的比较类别是 kind
    （0 int/bool、1 float、2 str、其它按机器字）。用下标数组 + qsort：
-   比较函数通过静态指针读键表——py23 是单线程的，不会并发踩。 */
+   比较函数通过静态指针读键表——pyadamas 是单线程的，不会并发踩。 */
 static const int64_t* g_sort_keys = 0;
 static int64_t g_sort_kind = 0;
 
@@ -369,15 +369,15 @@ static int64_t g_sort_kind = 0;
    启发式：两边看起来都是字符串对象就按字符串比——键是 str 时顺序才对。 */
 static int key_is_str(int64_t v) {
     if (v <= 4096) return 0;
-    Py23Rc* h = (Py23Rc*)((uintptr_t)v - (uintptr_t)PY23_RC_HDR);
-    return rc_index_has(h) && h->kind == PY23_RC_STR;
+    PyAdamasRc* h = (PyAdamasRc*)((uintptr_t)v - (uintptr_t)PYADAMAS_RC_HDR);
+    return rc_index_has(h) && h->kind == PYADAMAS_RC_STR;
 }
 
 static int cmp_sort_by_idx(const void* pa, const void* pb) {
     int64_t ia = *(const int64_t*)pa, ib = *(const int64_t*)pb;
     int64_t x = g_sort_keys[ia], y = g_sort_keys[ib];
     if (g_sort_kind == 2) {
-        int64_t c = py23_str_cmp((Py23Str*)x, (Py23Str*)y);
+        int64_t c = pa_str_cmp((PyAdamasStr*)x, (PyAdamasStr*)y);
         return c < 0 ? -1 : c > 0 ? 1 : 0;
     }
     if (g_sort_kind == 1) {
@@ -387,24 +387,24 @@ static int cmp_sort_by_idx(const void* pa, const void* pb) {
         return a < b ? -1 : a > b ? 1 : 0;
     }
     if (g_sort_kind == 3 && key_is_str(x) && key_is_str(y)) {
-        int64_t c = py23_str_cmp((Py23Str*)x, (Py23Str*)y);
+        int64_t c = pa_str_cmp((PyAdamasStr*)x, (PyAdamasStr*)y);
         return c < 0 ? -1 : c > 0 ? 1 : 0;
     }
     return x < y ? -1 : x > y ? 1 : 0;
 }
 
-Py23List* py23_list_sorted_by(Py23List* src, Py23List* keys, int64_t kind) {
-    Py23List* l = py23_list_copy(src);
+PyAdamasList* pa_list_sorted_by(PyAdamasList* src, PyAdamasList* keys, int64_t kind) {
+    PyAdamasList* l = pa_list_copy(src);
     int64_t n = l->len;
     if (n < 2) return l;
     /* 键对不上（不该发生）就退回普通排序，别给错结果 */
     if (!keys || keys->len != n) {
-        py23_list_sort(l, kind);
+        pa_list_sort(l, kind);
         return l;
     }
     int64_t* idx = (int64_t*)malloc(sizeof(int64_t) * (size_t)n);
     if (!idx) {
-        py23_list_sort(l, kind);
+        pa_list_sort(l, kind);
         return l;
     }
     for (int64_t i = 0; i < n; ++i) idx[i] = i;
@@ -422,47 +422,47 @@ Py23List* py23_list_sorted_by(Py23List* src, Py23List* keys, int64_t kind) {
     return l;
 }
 
-Py23List* py23_enumerate_list(Py23List* seq) {
+PyAdamasList* pa_enumerate_list(PyAdamasList* seq) {
     int64_t n = seq->len;
-    Py23List* out = py23_list_new(n, 1);  // 外层元素是 pair（堆）
+    PyAdamasList* out = pa_list_new(n, 1);  // 外层元素是 pair（堆）
     for (int64_t i = 0; i < n; ++i) {
         int64_t ev = seq->data[i];
-        Py23List* pair = py23_list_new(2, seq->elem_kind);
+        PyAdamasList* pair = pa_list_new(2, seq->elem_kind);
         pair->len = 2;
         pair->data[0] = i;
         pair->data[1] = ev;
-        if (seq->elem_kind == 1 && ev) py23_rc_inc((void*)ev);
-        py23_rc_inc(pair);
-        py23_list_append(out, (int64_t)pair);
+        if (seq->elem_kind == 1 && ev) pa_rc_inc((void*)ev);
+        pa_rc_inc(pair);
+        pa_list_append(out, (int64_t)pair);
     }
     return out;
 }
 
-Py23List* py23_zip2_list(Py23List* a, Py23List* b) {
+PyAdamasList* pa_zip2_list(PyAdamasList* a, PyAdamasList* b) {
     int64_t n = a->len < b->len ? a->len : b->len;
     int ka = a->elem_kind, kb = b->elem_kind;
     // pair 的元素种类：两边都是堆才是 1；都是非堆是 0；混合按 2 保守处理。
     int pk = ka == 1 && kb == 1 ? 1 : (ka == 0 && kb == 0 ? 0 : 2);
-    Py23List* out = py23_list_new(n, 1);
+    PyAdamasList* out = pa_list_new(n, 1);
     for (int64_t i = 0; i < n; ++i) {
         int64_t x = a->data[i], y = b->data[i];
-        Py23List* pair = py23_list_new(2, pk);
+        PyAdamasList* pair = pa_list_new(2, pk);
         pair->len = 2;
         pair->data[0] = x;
         pair->data[1] = y;
         if (pk != 0) {
-            if (ka == 1 && x) py23_rc_inc((void*)x);
-            if (kb == 1 && y) py23_rc_inc((void*)y);
+            if (ka == 1 && x) pa_rc_inc((void*)x);
+            if (kb == 1 && y) pa_rc_inc((void*)y);
         }
-        py23_rc_inc(pair);
-        py23_list_append(out, (int64_t)pair);
+        pa_rc_inc(pair);
+        pa_list_append(out, (int64_t)pair);
     }
     return out;
 }
 
 /* ── 列表归约（AVX2 快路径 + 标量回退） ─────────────────────── */
 
-static int py23_has_avx2(void) {
+static int pa_has_avx2(void) {
 #if defined(__x86_64__) && defined(__GNUC__)
     static int cached = -1;
     if (cached < 0) {
@@ -553,19 +553,19 @@ static int64_t list_max_i64_avx2(const int64_t* d, int64_t n) {
 }
 #endif
 
-int64_t py23_list_sum_i64(Py23List* l, int64_t start) {
+int64_t pa_list_sum_i64(PyAdamasList* l, int64_t start) {
     uint64_t s = (uint64_t)start;
 #if defined(__x86_64__) && defined(__GNUC__)
-    if (py23_has_avx2()) s += list_sum_u64_avx2(l->data, l->len);
+    if (pa_has_avx2()) s += list_sum_u64_avx2(l->data, l->len);
     else
 #endif
         for (int64_t i = 0; i < l->len; ++i) s += (uint64_t)l->data[i];
     return (int64_t)s;
 }
 
-double py23_list_sum_f64(Py23List* l, double start) {
+double pa_list_sum_f64(PyAdamasList* l, double start) {
 #if defined(__x86_64__) && defined(__GNUC__)
-    if (py23_has_avx2())
+    if (pa_has_avx2())
         return start + list_sum_f64_avx2((const double*)l->data, l->len);
 #endif
     double s = start;
@@ -574,10 +574,10 @@ double py23_list_sum_f64(Py23List* l, double start) {
     return s;
 }
 
-int64_t py23_list_min_i64(Py23List* l) {
-    if (l->len <= 0) py23_raise_c("ValueError", "min() iterable argument is empty");
+int64_t pa_list_min_i64(PyAdamasList* l) {
+    if (l->len <= 0) pa_raise_c("ValueError", "min() iterable argument is empty");
 #if defined(__x86_64__) && defined(__GNUC__)
-    if (py23_has_avx2()) return list_min_i64_avx2(l->data, l->len);
+    if (pa_has_avx2()) return list_min_i64_avx2(l->data, l->len);
 #endif
     int64_t m = l->data[0];
     for (int64_t i = 1; i < l->len; ++i)
@@ -585,10 +585,10 @@ int64_t py23_list_min_i64(Py23List* l) {
     return m;
 }
 
-int64_t py23_list_max_i64(Py23List* l) {
-    if (l->len <= 0) py23_raise_c("ValueError", "max() iterable argument is empty");
+int64_t pa_list_max_i64(PyAdamasList* l) {
+    if (l->len <= 0) pa_raise_c("ValueError", "max() iterable argument is empty");
 #if defined(__x86_64__) && defined(__GNUC__)
-    if (py23_has_avx2()) return list_max_i64_avx2(l->data, l->len);
+    if (pa_has_avx2()) return list_max_i64_avx2(l->data, l->len);
 #endif
     int64_t m = l->data[0];
     for (int64_t i = 1; i < l->len; ++i)
@@ -597,7 +597,7 @@ int64_t py23_list_max_i64(Py23List* l) {
 }
 
 int list_value_eq(int64_t kind, int64_t a, int64_t b) {
-    if (kind == 1) return py23_str_eq((Py23Str*)a, (Py23Str*)b) != 0;
+    if (kind == 1) return pa_str_eq((PyAdamasStr*)a, (PyAdamasStr*)b) != 0;
     if (kind == 2) {
         double x, y;
         memcpy(&x, &a, sizeof x);
@@ -607,7 +607,7 @@ int list_value_eq(int64_t kind, int64_t a, int64_t b) {
     return a == b;
 }
 
-int64_t py23_list_contains(Py23List* l, int64_t v, int64_t kind) {
+int64_t pa_list_contains(PyAdamasList* l, int64_t v, int64_t kind) {
     for (int64_t i = 0; i < l->len; ++i)
         if (list_value_eq(kind, l->data[i], v)) return 1;
     return 0;
@@ -621,7 +621,7 @@ int64_t py23_list_contains(Py23List* l, int64_t v, int64_t kind) {
    元素本身还是容器时，它的元素是下一层，层号 +1。 */
 int chain_elem_eq(int kind, int64_t x, int64_t y, const uint8_t* chain, int64_t len,
                   int64_t level) {
-    if (kind == 's') return py23_str_eq((Py23Str*)x, (Py23Str*)y) != 0;
+    if (kind == 's') return pa_str_eq((PyAdamasStr*)x, (PyAdamasStr*)y) != 0;
     if (kind == 'f') {
         double a, b;
         memcpy(&a, &x, sizeof a);
@@ -630,20 +630,20 @@ int chain_elem_eq(int kind, int64_t x, int64_t y, const uint8_t* chain, int64_t 
     }
     if (kind == 'l') {
         if (level + 1 >= len) return x == y;
-        return chain_list_eq((Py23List*)x, (Py23List*)y, chain, len, level + 1);
+        return chain_list_eq((PyAdamasList*)x, (PyAdamasList*)y, chain, len, level + 1);
     }
     if (kind == 'd') {
         if (level + 1 >= len) return x == y;
-        return chain_dict_eq((Py23Dict*)x, (Py23Dict*)y, chain, len, level + 1);
+        return chain_dict_eq((PyAdamasDict*)x, (PyAdamasDict*)y, chain, len, level + 1);
     }
     if (kind == 't') {
         if (level + 1 >= len) return x == y;
-        return chain_set_eq((Py23Dict*)x, (Py23Dict*)y, chain, len, level + 1);
+        return chain_set_eq((PyAdamasDict*)x, (PyAdamasDict*)y, chain, len, level + 1);
     }
     return x == y;  /* i / x：按机器字比 */
 }
 
-int64_t chain_list_eq(Py23List* a, Py23List* b, const uint8_t* chain, int64_t len,
+int64_t chain_list_eq(PyAdamasList* a, PyAdamasList* b, const uint8_t* chain, int64_t len,
                       int64_t level) {
     if (a == b) return 1;
     if (!a || !b) return 0;
@@ -655,29 +655,29 @@ int64_t chain_list_eq(Py23List* a, Py23List* b, const uint8_t* chain, int64_t le
 }
 
 /* 逐元素比较两个列表/元组。chain 说明元素怎么比（见上面的说明）。 */
-int64_t py23_list_eq(Py23List* a, Py23List* b, Py23Str* chain) {
+int64_t pa_list_eq(PyAdamasList* a, PyAdamasList* b, PyAdamasStr* chain) {
     return chain_list_eq(a, b, (const uint8_t*)chain->data, chain->len, 0);
 }
 
-int64_t py23_list_index(Py23List* l, int64_t v, int64_t kind) {
+int64_t pa_list_index(PyAdamasList* l, int64_t v, int64_t kind) {
     for (int64_t i = 0; i < l->len; ++i)
         if (list_value_eq(kind, l->data[i], v)) return i;
-    py23_raise_c("ValueError", "value is not in list");
+    pa_raise_c("ValueError", "value is not in list");
 }
 
-int64_t py23_list_count(Py23List* l, int64_t v, int64_t kind) {
+int64_t pa_list_count(PyAdamasList* l, int64_t v, int64_t kind) {
     int64_t n = 0;
     for (int64_t i = 0; i < l->len; ++i)
         if (list_value_eq(kind, l->data[i], v)) ++n;
     return n;
 }
 
-void py23_list_del_index(Py23List* l, int64_t i) {
-    if (!l) py23_raise_c("TypeError", "del: expected a list");
+void pa_list_del_index(PyAdamasList* l, int64_t i) {
+    if (!l) pa_raise_c("TypeError", "del: expected a list");
     if (i < 0) i += l->len;
-    if (i < 0 || i >= l->len) py23_raise_c("IndexError", "list index out of range");
+    if (i < 0 || i >= l->len) pa_raise_c("IndexError", "list index out of range");
     int64_t v = l->data[i];
-    if (l->elem_kind == 1 && v) py23_rc_dec((void*)v);
+    if (l->elem_kind == 1 && v) pa_rc_dec((void*)v);
     memmove(&l->data[i], &l->data[i + 1],
             sizeof(int64_t) * (size_t)(l->len - i - 1));
     l->len--;

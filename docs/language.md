@@ -1,6 +1,6 @@
 # 语言参考
 
-py23 借 Python 的语法外壳，但**不是 CPython 的实现**：语义按静态类型的需要重新定义，不追求行为一致。这份文档说明「什么能写、写出来是什么语义、什么会被拒」。
+PyAdamas 借 Python 的语法外壳，但**不是 CPython 的实现**：语义按静态类型的需要重新定义，不追求行为一致。这份文档说明「什么能写、写出来是什么语义、什么会被拒」。
 
 关于和 CPython 的具体差异清单，见 [compatibility.md](compatibility.md)。
 
@@ -473,7 +473,7 @@ Future 被取消时，其他等待者也会收到 `CancelledError`。
 
 **fd 等待**：`asyncio.wait_readable(fd)` / `wait_writable(fd)` 返回
 可等待对象，事件循环空闲时用 `poll` 等待，超时取最近的定时器；
-无效 fd 以 `OSError` 结束等待。这是 py23 自己的低级接口（CPython
+无效 fd 以 `OSError` 结束等待。这是 PyAdamas 自己的低级接口（CPython
 用 `loop.add_reader`），没有配套的 fd 读写函数。
 
 限制：`await` 必须是当前语句里第一个求值的表达式（语句、赋值右值、
@@ -524,7 +524,7 @@ key 的哈希/判等按静态类型选：int/bool 用机器字、str 用字节�
 
 - `d.get(k)` / `d.get(k, default)`：缺失时返回默认值；没有默认值时返回
   `None`（静态返回类型是 `Optional[值类型]`，`get(k, default)` 才是值类型）。
-  注意 py23 里 `None` 就是 `0`——值为 `0` 的项和缺失分不出来；
+  注意 PyAdamas 里 `None` 就是 `0`——值为 `0` 的项和缺失分不出来；
 - `d.keys()` / `d.values()` / `d.items()`：返回新 list（不是视图），元素
   按插入顺序；`items()` 的元素是 `(key, value)` 元组；
 - `d.update(other)`；
@@ -759,7 +759,7 @@ CPython 一致。
   对象，属性 `.returncode` / `.stdout` / `.stderr`。`args` 可以是
   `list[str]`，也可以是一个字符串（配 `shell=True`）。`timeout` 为负表示
   不超时；超时抛 `TimeoutExpired`，`check=True` 且退出码非零抛
-  `CalledProcessError`。这两个异常按 py23 的内置异常名匹配，直接写
+  `CalledProcessError`。这两个异常按 PyAdamas 的内置异常名匹配，直接写
   `except TimeoutExpired`；`from subprocess import TimeoutExpired` 暂不
   支持。
 - 内置 `subprocess.Popen(args, shell=False, cwd="", stdin=None,
@@ -768,7 +768,7 @@ CPython 一致。
   `communicate(input=…)` / `kill()` / `terminate()` / `send_signal(n)`，
   属性 `pid` / `returncode` / `stdout` / `stderr` / `stdin`（后三个是
   `file` 对象）。`communicate()` 返回 `(stdout, stderr)` 两个字符串。
-  没有 `poll()`：py23 里 `None` 和 `0` 同形，`poll() is None` 会把正常
+  没有 `poll()`：PyAdamas 里 `None` 和 `0` 同形，`poll() is None` 会把正常
   退出（rc=0）误判成还在跑，要轮询就用 `wait(timeout=…)` 捕获
   `TimeoutExpired`。
 - 与 CPython 的偏差：不返回 bytes，`text=False` 也返回 `str`；没有捕获时
@@ -779,7 +779,7 @@ CPython 一致。
 - 内置 `string`：`stdlib/string.py` 随编译器分发，提供
   `ascii_lowercase` / `ascii_uppercase` / `ascii_letters` / `digits` /
   `hexdigits` / `octdigits` / `punctuation` / `whitespace` / `printable`
-  和 `capwords()`。常量是纯 py23；`capwords` 调内部 intrinsic，走单遍 C
+  和 `capwords()`。常量是纯 PyAdamas；`capwords` 调内部 intrinsic，走单遍 C
   实现，不建中间词表。
 - 内置 `itertools`：`chain(a, b)` / `repeat(v, n)` / `islice(x, stop)`，
   按实参静态特化，返回 list（立即求值）。
@@ -787,7 +787,7 @@ CPython 一致。
   `(key, count)` 列表。
 - 内置 `functools`：`reduce(f, xs[, init])` 折叠（int/str 走整数跳板，
   float 要求 f 的形参是 float，或由调用点按元素类型回填）；`wraps(f)`
-  只作装饰器用——py23 不建模 `__name__`/`__doc__`，这一层在装饰器链里
+  只作装饰器用——PyAdamas 不建模 `__name__`/`__doc__`，这一层在装饰器链里
   直接跳过。`partial(f, *args, **kwargs)` 把前面的实参绑定进合成闭包，
   返回签名缩减后的函数值（位置和关键字都能绑定；不支持 `*args`/`**kwargs`
   函数）；`lru_cache` 作为装饰器使用，签名不变，按形参逐层建 dict 缓存，
@@ -806,7 +806,7 @@ CPython 一致。
   `.mkdir(mode=0o777, parents=False, exist_ok=False)` 建目录。
   没有 `unlink` / `rmdir` / `with_suffix` / `parts`。
 - 内置 `collections`：`Counter(iterable)` 计数 + `.most_common(n)`；
-  `OrderedDict()`（py23 的 dict 本来就保序）；`deque([iterable[, maxlen]])`
+  `OrderedDict()`（PyAdamas 的 dict 本来就保序）；`deque([iterable[, maxlen]])`
   环形队列，支持 `append`/`appendleft`/`pop`/`popleft`/`rotate`/`clear`/
   `extend`/`extendleft`、`len`、下标和迭代；`defaultdict([factory[, initial]])`
   在缺省下标读取时按工厂造值并插入，工厂只支持 `int`/`float`/`bool`/`str`/
@@ -842,7 +842,7 @@ CPython 一致。
 `sorted(xs, key=f)` 按 `f(x)` 排。`f` 要是一个用户函数（取一个参数）；内建
 函数里只有 `len` 能用（其它内建函数没有闭包对象，调用会跳飞，明确报错）。
 
-键的比较方式由 `f` 的返回类型决定。py23 一般推不出函数的返回类型，这时退到
+键的比较方式由 `f` 的返回类型决定。PyAdamas 一般推不出函数的返回类型，这时退到
 机器字比较——int 键对，两边看起来都是字符串对象时按字符串比也对；**负的
 float 键会排错**（IEEE 位模式在负数段是反的）。给 `f` 标注返回类型可以避开：
 
@@ -913,7 +913,7 @@ code generator yet」，不会再退化成调用空指针。
 
 `slice(a, b, c)` 只在**下标位置**支持：脱糖阶段折成切片语法 `xs[a:b:c]`，
 所以 `xs[slice(1, 3)]` / `xs[slice(3)]` / `xs[slice(None, 2)]` 都能用，
-切片赋值和 `del` 同理。当独立值用（`s = slice(1, 3)`）会报错——py23 没有
+切片赋值和 `del` 同理。当独立值用（`s = slice(1, 3)`）会报错——PyAdamas 没有
 运行期的 slice 对象。切片里的 `None` 表示「这一端不设限」。
 
 `vars(obj)` 返回实例字段的 dict：key 是字段名（含继承来的），value 统一

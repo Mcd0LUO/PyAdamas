@@ -3,7 +3,7 @@
 
 #include "opt.h"
 
-namespace py23 {
+namespace pyadamas {
 
 // ────────────────────────── 预扫描 ──────────────────────────
 
@@ -289,7 +289,7 @@ void Lowerer::run(Module& ast) {
                 sealed_classes_.insert(ci.get());
     }
 
-    IRFunction* entry = mod_.add_func(opts_.is_entry ? "__py23_main" : "__py23_init");
+    IRFunction* entry = mod_.add_func(opts_.is_entry ? "__pa_main" : "__pa_init");
     entry->ret = opts_.is_entry ? t_int() : t_none();
     mod_.entry = static_cast<int>(mod_.funcs.size()) - 1;
 
@@ -499,7 +499,7 @@ void Lowerer::lower_funcdef(FunctionDef& f) {
     // 装饰器按从下到上的顺序调用：f = d1(d2(f))。函数值已经绑定，
     // 每一步都重新绑定同名，后一个装饰器拿到前一步的结果。
     for (auto it = f.decorators.rbegin(); it != f.decorators.rend(); ++it) {
-        // @functools.wraps(f)：py23 不建模函数元数据（__name__/__doc__），
+        // @functools.wraps(f)：pyadamas 不建模函数元数据（__name__/__doc__），
         // 这一层没有可观察效果，直接跳过——否则它要求一个运行期的
         // identity 装饰器，而那是当前架构里没有的东西。
         if (is_wraps_decorator(it->get())) continue;
@@ -598,7 +598,7 @@ int Lowerer::class_attr_global(const ClassInfo* owner, const std::string& name, 
             mod_.globals[static_cast<size_t>(gi)].ty = ty;
         return gi;
     }
-    std::string sym = std::format("__py23_cattr_{}_{}", owner->name, name);
+    std::string sym = std::format("__pa_cattr_{}_{}", owner->name, name);
     int gi = global_idx_as(sym, ty);
     m.emplace(name, gi);
     return gi;
@@ -617,7 +617,7 @@ Lowerer::ClassAttrStorage Lowerer::class_attr_storage(const ClassInfo* recv,
     }
     if (recv->cowed_attrs.count(ca->name)) {
         st.slot = class_attr_global(recv, ca->name, ca->ty);
-        std::string sym = std::format("__py23_cattr_own_{}_{}", recv->name, ca->name);
+        std::string sym = std::format("__pa_cattr_own_{}_{}", recv->name, ca->name);
         st.flag = global_idx_as(sym, t_int());
         st.parent = class_attr_storage(ca->owner, ca).slot;
         return st;
@@ -902,7 +902,7 @@ void Lowerer::lower_classdef(ClassDef& c) {
                 }
             }
             TypePtr cur_ty = fty;
-            std::string hidden = "__py23$deco$" + f.name;
+            std::string hidden = "__pyadamas$deco$" + f.name;
             bind_name_value(hidden, cur, cur_ty);
             for (auto dit2 = f.decorators.rbegin(); dit2 != f.decorators.rend(); ++dit2) {
                 if (is_wraps_decorator(dit2->get())) continue;
@@ -980,7 +980,7 @@ void Lowerer::compile_ctor_wrapper(ClassDef& clsdef, const ClassInfoPtr& ci, int
     TypePtr fty = new_ty(TyKind::Func);
     fty->fn = ctor;
 
-    std::string label = std::format("__py23_new_{}_{}", ci->name, mod_.funcs.size());
+    std::string label = std::format("__pa_new_{}_{}", ci->name, mod_.funcs.size());
     IRFunction* wf = mod_.add_func(label);
     int widx = static_cast<int>(mod_.funcs.size()) - 1;
     wf->ret = cls_ty;
@@ -1040,12 +1040,12 @@ void Lowerer::compile_ctor_wrapper(ClassDef& clsdef, const ClassInfoPtr& ci, int
 
     // 模块顶层绑定隐藏全局：导入方按 ctor_symbol 加载闭包。
     IRGlobal g;
-    g.name = "__py23$new$" + ci->name;
+    g.name = "__pyadamas$new$" + ci->name;
     g.symbol = module_class_new_symbol(opts_.module_symbol, ci->name);
     g.ty = fty;
     int gi = static_cast<int>(mod_.globals.size());
     mod_.globals.push_back(std::move(g));
-    global_ids_["__py23$new$" + ci->name] = gi;
+    global_ids_["__pyadamas$new$" + ci->name] = gi;
     Inst fa;
     fa.op = IrOp::FuncAddr;
     fa.imm = widx;
@@ -1064,4 +1064,4 @@ LowerResult lower_module(Module& ast, TypeChecker& tc, const std::string& file,
 }
 
 
-}  // namespace py23
+}  // namespace pyadamas

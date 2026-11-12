@@ -3,7 +3,7 @@
 
 #include "module.h"
 
-namespace py23 {
+namespace pyadamas {
 
 TypePtr TypeChecker::expr(Expr& e) {
         TypePtr t = expr_impl(e);
@@ -924,4 +924,4 @@ TypePtr TypeChecker::iter_elem(TypePtr it, int line, int col) {
     }
 
 
-}  // namespace py23
+}  // namespace pyadamas

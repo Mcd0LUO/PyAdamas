@@ -1,7 +1,7 @@
 // parser_expr.cpp —— 表达式：优先级爬升、原子、推导式、f-string
 #include "parser.h"
 
-namespace py23 {
+namespace pyadamas {
 
 ExprPtr Parser::parse_expr_list() {
         int ln = cur().line, cl = cur().col;
@@ -903,4 +903,4 @@ ExprPtr Parser::parse_fstring_expr() {
     }
 
 
-}  // namespace py23
+}  // namespace pyadamas

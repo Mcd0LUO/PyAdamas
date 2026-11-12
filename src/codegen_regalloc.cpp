@@ -1,7 +1,7 @@
 // codegen_regalloc.cpp —— 寄存器/栈槽分配与函数帧
 #include "codegen_impl.h"
 
-namespace py23 {
+namespace pyadamas {
 
 // 调用序列之外不会被指令生成器用到的临时寄存器（%r8–%r11）。
 static const char* const kTempRegs[] = {"%r8", "%r9", "%r10", "%r11"};
@@ -22,7 +22,7 @@ void AsmGen::emit_epilogue() {
         // 先弹帧记录再退栈：记录本身在 %rbp 下面，%rcx 此时是自由的。
         if (frame_rec_) {
             line("movq " + rec_mem(0) + ", %rcx");
-            line("movq %rcx, py23_frame_top(%rip)");
+            line("movq %rcx, pa_frame_top(%rip)");
         }
         if (n_saved_regs_ > 0) line(std::format("leaq {}(%rbp), %rsp", -8 * n_saved_regs_));
         else line("movq %rbp, %rsp");
@@ -160,7 +160,7 @@ void AsmGen::build_fp_liveness() {
         const size_t kf = fp_promoted_slots_.size();
         fp_live_in_.assign(static_cast<size_t>(nb), 0);
         fp_live_out_.assign(static_cast<size_t>(nb), 0);
-        fp_live_off_ = std::getenv("PY23_NO_FPLIVE") != nullptr;
+        fp_live_off_ = std::getenv("PYADAMAS_NO_FPLIVE") != nullptr;
         if (kf == 0 || nb == 0 || fp_live_off_) return;
 
         std::vector<uint8_t> use(static_cast<size_t>(nb), 0);
@@ -334,7 +334,7 @@ bool AsmGen::temp_reg_op_ok(const Inst& in) const {
             case IrOp::Return:
                 return true;
             case IrOp::IndexLoad: {
-                // 字符串下标会真的调 py23_str_char_at；列表下标只有不会
+                // 字符串下标会真的调 pa_str_char_at；列表下标只有不会
                 // 返回的越界慢路径，借用寄存器是安全的。
                 TypePtr bt = ty_of(in.a);
                 return !(bt && bt->kind == TyKind::Str);
@@ -522,7 +522,7 @@ void AsmGen::assign_block_temp_regs() {
             if (used > 0) block_temp_pool_.assign(kTempRegs + used, kTempRegs + 4);
 
             // 无调用函数里 xmm8–15 也不会被破坏：空闲的拿走放跨块浮点值。
-            if (!std::getenv("PY23_NO_FPX")) {
+            if (!std::getenv("PYADAMAS_NO_FPX")) {
                 size_t fp_base = fp_promoted_slots_.size();
                 if (fp_base < static_cast<size_t>(kMaxFpSlotRegs)) {
                     std::vector<Cand> fcands;
@@ -586,4 +586,4 @@ std::vector<ArgLoc> AsmGen::classify(const std::vector<TypePtr>& types) const {
         return locs;
     }
 
-}  // namespace py23
+}  // namespace pyadamas

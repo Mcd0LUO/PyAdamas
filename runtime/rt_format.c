@@ -11,9 +11,9 @@ typedef struct {
     int width;
     int prec;
     int grouping;
-} Py23Fmt;
+} PyAdamasFmt;
 
-static void fmt_parse(Py23Str* spec, Py23Fmt* f, int is_str) {
+static void fmt_parse(PyAdamasStr* spec, PyAdamasFmt* f, int is_str) {
     f->fill = ' ';
     f->align = is_str ? '<' : '>';
     f->sign = 0;
@@ -54,10 +54,10 @@ static void fmt_parse(Py23Str* spec, Py23Fmt* f, int is_str) {
         while (i < n && p[i] >= '0' && p[i] <= '9') f->prec = f->prec * 10 + (p[i++] - '0');
     }
     if (i < n) f->type = p[i++];
-    if (i != n) py23_raise_c("ValueError", "Invalid format specifier");
+    if (i != n) pa_raise_c("ValueError", "Invalid format specifier");
 }
 
-static Py23Str* fmt_pad(const char* sign, const char* body, const Py23Fmt* f) {
+static PyAdamasStr* fmt_pad(const char* sign, const char* body, const PyAdamasFmt* f) {
     size_t sl = sign ? 1 : 0;
     size_t bl = strlen(body);
     size_t total = sl + bl;
@@ -68,7 +68,7 @@ static Py23Str* fmt_pad(const char* sign, const char* body, const Py23Fmt* f) {
         if (sl) out[0] = *sign;
         memcpy(out + sl, body, bl);
         out[total] = '\0';
-        Py23Str* s = str_new(out, (int64_t)total);
+        PyAdamasStr* s = str_new(out, (int64_t)total);
         free(out);
         return s;
     }
@@ -101,7 +101,7 @@ static Py23Str* fmt_pad(const char* sign, const char* body, const Py23Fmt* f) {
         for (int i = 0; i < pad; ++i) *q++ = f->fill;
     }
     *q = '\0';
-    Py23Str* s = str_new(out, (int64_t)(q - out));
+    PyAdamasStr* s = str_new(out, (int64_t)(q - out));
     free(out);
     return s;
 }
@@ -134,14 +134,14 @@ static void fmt_group(char* body) {
     strcpy(body, tmp);
 }
 
-Py23Str* py23_fmt_i64(int64_t v, Py23Str* spec) {
-    Py23Fmt f;
+PyAdamasStr* pa_fmt_i64(int64_t v, PyAdamasStr* spec) {
+    PyAdamasFmt f;
     fmt_parse(spec, &f, 0);
     if (f.type && f.type != 'd' && f.type != 'b' && f.type != 'o' && f.type != 'x' &&
         f.type != 'X' && f.type != 'n')
-        py23_raise_c("ValueError", "Invalid format specifier for int");
+        pa_raise_c("ValueError", "Invalid format specifier for int");
     if (f.prec >= 0)
-        py23_raise_c("ValueError", "Precision not allowed in integer format specifier");
+        pa_raise_c("ValueError", "Precision not allowed in integer format specifier");
     char sign = 0;
     uint64_t mag;
     if (v < 0) {
@@ -167,27 +167,27 @@ Py23Str* py23_fmt_i64(int64_t v, Py23Str* spec) {
     return fmt_pad(sign ? &sign : NULL, body, &f);
 }
 
-Py23Str* py23_fmt_bool(int64_t v, Py23Str* spec) {
-    Py23Fmt f;
+PyAdamasStr* pa_fmt_bool(int64_t v, PyAdamasStr* spec) {
+    PyAdamasFmt f;
     fmt_parse(spec, &f, 0);
     if (f.type && f.type != 's' && f.type != 'd' && f.type != 'b' && f.type != 'o' &&
         f.type != 'x' && f.type != 'X' && f.type != 'n')
-        py23_raise_c("ValueError", "Invalid format specifier for bool");
+        pa_raise_c("ValueError", "Invalid format specifier for bool");
     if (f.type == 'd' || f.type == 'b' || f.type == 'o' || f.type == 'x' ||
         f.type == 'X' || f.type == 'n')
-        return py23_fmt_i64(v ? 1 : 0, spec);
-    Py23Fmt sf = f;
+        return pa_fmt_i64(v ? 1 : 0, spec);
+    PyAdamasFmt sf = f;
     sf.align = f.align == '>' ? '<' : f.align;
     return fmt_pad(NULL, v ? "True" : "False", &sf);
 }
 
-Py23Str* py23_fmt_f64(double v, Py23Str* spec) {
-    Py23Fmt f;
+PyAdamasStr* pa_fmt_f64(double v, PyAdamasStr* spec) {
+    PyAdamasFmt f;
     fmt_parse(spec, &f, 0);
     char type = f.type;
     if (type && type != 'f' && type != 'F' && type != 'e' && type != 'E' && type != 'g' &&
         type != 'G' && type != '%')
-        py23_raise_c("ValueError", "Invalid format specifier for float");
+        pa_raise_c("ValueError", "Invalid format specifier for float");
     char sign = 0;
     double mag = v;
     if (mag < 0) {
@@ -222,36 +222,36 @@ Py23Str* py23_fmt_f64(double v, Py23Str* spec) {
     return fmt_pad(sign ? &sign : NULL, body, &f);
 }
 
-Py23Str* py23_fmt_str(Py23Str* v, Py23Str* spec) {
-    Py23Fmt f;
+PyAdamasStr* pa_fmt_str(PyAdamasStr* v, PyAdamasStr* spec) {
+    PyAdamasFmt f;
     fmt_parse(spec, &f, 1);
     if (f.type && f.type != 's')
-        py23_raise_c("ValueError", "Invalid format specifier for str");
+        pa_raise_c("ValueError", "Invalid format specifier for str");
     int64_t n = v ? v->len : 0;
     if (f.prec >= 0 && n > f.prec) n = f.prec;
     char* body = (char*)malloc((size_t)n + 1);
     if (!body) panic_c("out of memory");
     if (n > 0) memcpy(body, v->data, (size_t)n);
     body[n] = '\0';
-    Py23Str* out = fmt_pad(NULL, body, &f);
+    PyAdamasStr* out = fmt_pad(NULL, body, &f);
     free(body);
     return out;
 }
 
-Py23Str* py23_fmt_complex(Py23Complex* v, Py23Str* spec) {
-    Py23Fmt f;
+PyAdamasStr* pa_fmt_complex(PyAdamasComplex* v, PyAdamasStr* spec) {
+    PyAdamasFmt f;
     fmt_parse(spec, &f, 1);
-    Py23Str* cs = py23_complex_str(v);
+    PyAdamasStr* cs = pa_complex_str(v);
     char* body = (char*)malloc((size_t)cs->len + 1);
     if (!body) panic_c("out of memory");
     memcpy(body, cs->data, (size_t)cs->len + 1);
-    Py23Str* out = fmt_pad(NULL, body, &f);
+    PyAdamasStr* out = fmt_pad(NULL, body, &f);
     free(body);
-    py23_rc_dec(cs);
+    pa_rc_dec(cs);
     return out;
 }
 
-Py23Str* py23_repr_str(Py23Str* v) {
+PyAdamasStr* pa_repr_str(PyAdamasStr* v) {
     int quote = '\'';
     int has_single = 0, has_double = 0;
     for (int64_t i = 0; i < v->len; ++i) {
@@ -282,7 +282,7 @@ Py23Str* py23_repr_str(Py23Str* v) {
         }
     }
     out[j++] = (char)quote;
-    Py23Str* s = str_new(out, j);
+    PyAdamasStr* s = str_new(out, j);
     free(out);
     return s;
 }
@@ -309,15 +309,15 @@ static void pb_append(PBuf* b, const char* s, int64_t n) {
     b->p[b->len] = '\0';
 }
 
-static Py23Str* fmt_with(const char* spec, int n, int64_t raw, double d, Py23Str* s, char kind) {
-    Py23Str sp;
+static PyAdamasStr* fmt_with(const char* spec, int n, int64_t raw, double d, PyAdamasStr* s, char kind) {
+    PyAdamasStr sp;
     sp.len = n;
     sp.hash = 0;
     sp.data = spec;
     switch (kind) {
-        case 'i': return py23_fmt_i64(raw, &sp);
-        case 'f': return py23_fmt_f64(d, &sp);
-        case 's': return py23_fmt_str(s, &sp);
+        case 'i': return pa_fmt_i64(raw, &sp);
+        case 'f': return pa_fmt_f64(d, &sp);
+        case 's': return pa_fmt_str(s, &sp);
         default: return NULL;
     }
 }
@@ -325,10 +325,10 @@ static Py23Str* fmt_with(const char* spec, int n, int64_t raw, double d, Py23Str
 /* desc 是编译期生成的类型描述：i=int/bool，f=float，s=str/bytes。
    数字格式（d/i/u/x/X/o/f/F/e/E/g/G）要求对应数值类型；s/r 可以
    格式化任意受支持的类型。返回新字符串，bytes 与 str 共用表示。 */
-Py23Str* py23_percent_format(Py23Str* pat, Py23List* args, Py23Str* desc, int64_t is_bytes) {
+PyAdamasStr* pa_percent_format(PyAdamasStr* pat, PyAdamasList* args, PyAdamasStr* desc, int64_t is_bytes) {
     (void)is_bytes;
     if (!pat) return str_new("", 0);
-    if (!args) args = py23_list_new(0, 0);
+    if (!args) args = pa_list_new(0, 0);
     PBuf out = {0};
     const char* p = pat->data;
     int64_t n = pat->len;
@@ -339,7 +339,7 @@ Py23Str* py23_percent_format(Py23Str* pat, Py23List* args, Py23Str* desc, int64_
             continue;
         }
         ++i;
-        if (i >= n) py23_raise_c("ValueError", "incomplete format");
+        if (i >= n) pa_raise_c("ValueError", "incomplete format");
         if (p[i] == '%') {
             pb_append(&out, "%", 1);
             continue;
@@ -368,10 +368,10 @@ Py23Str* py23_percent_format(Py23Str* pat, Py23List* args, Py23Str* desc, int64_
                 ++i;
             }
         }
-        if (i >= n) py23_raise_c("ValueError", "incomplete format");
+        if (i >= n) pa_raise_c("ValueError", "incomplete format");
         char conv = p[i];
         if (ai >= args->len)
-            py23_raise_c("TypeError", "not enough arguments for format string");
+            pa_raise_c("TypeError", "not enough arguments for format string");
         char dt = (desc && ai < desc->len) ? desc->data[ai] : 'x';
         int64_t raw = args->data[ai++];
         double dv = 0.0;
@@ -395,8 +395,8 @@ Py23Str* py23_percent_format(Py23Str* pat, Py23List* args, Py23Str* desc, int64_
             if (m > 0) si += m;
         }
 
-        Py23Str* piece = NULL;
-        Py23Str* tmp = NULL;
+        PyAdamasStr* piece = NULL;
+        PyAdamasStr* tmp = NULL;
         int tmp_owned = 0;
         switch (conv) {
             case 'd':
@@ -409,13 +409,13 @@ Py23Str* py23_percent_format(Py23Str* pat, Py23List* args, Py23Str* desc, int64_
                 else if (dt == 'f')
                     piece = fmt_with(spec, si + 1, (int64_t)dv, 0.0, NULL, 'i');
                 else
-                    py23_raise_c("TypeError", "%%d format: a number is required");
+                    pa_raise_c("TypeError", "%%d format: a number is required");
                 break;
             case 'x':
             case 'X':
             case 'o':
                 if (dt != 'i' && dt != 'b')
-                    py23_raise_c("TypeError", "%%x format: an integer is required");
+                    pa_raise_c("TypeError", "%%x format: an integer is required");
                 spec[si] = conv;
                 piece = fmt_with(spec, si + 1, raw, 0.0, NULL, 'i');
                 break;
@@ -426,7 +426,7 @@ Py23Str* py23_percent_format(Py23Str* pat, Py23List* args, Py23Str* desc, int64_
             case 'g':
             case 'G':
                 if (dt != 'f' && dt != 'i' && dt != 'b')
-                    py23_raise_c("TypeError", "%%f format: a number is required");
+                    pa_raise_c("TypeError", "%%f format: a number is required");
                 spec[si] = conv;
                 piece = fmt_with(spec, si + 1, 0, dv, NULL, 'f');
                 break;
@@ -434,16 +434,16 @@ Py23Str* py23_percent_format(Py23Str* pat, Py23List* args, Py23Str* desc, int64_
                 spec[si] = 's';
                 if (dt == 'i' || dt == 'b') {
                     if (raw < 0 || raw > 255)
-                        py23_raise_c("ValueError", "%%c requires a character code in range(256)");
+                        pa_raise_c("ValueError", "%%c requires a character code in range(256)");
                     char ch = (char)raw;
                     tmp = str_new(&ch, 1);
                     tmp_owned = 1;
                 } else if (dt == 's') {
-                    tmp = (Py23Str*)raw;
+                    tmp = (PyAdamasStr*)raw;
                     if (!tmp || tmp->len != 1)
-                        py23_raise_c("ValueError", "%%c requires a single character");
+                        pa_raise_c("ValueError", "%%c requires a single character");
                 } else {
-                    py23_raise_c("TypeError", "%%c requires an int or a single character");
+                    pa_raise_c("TypeError", "%%c requires an int or a single character");
                 }
                 piece = fmt_with(spec, si + 1, 0, 0.0, tmp, 's');
                 break;
@@ -451,47 +451,47 @@ Py23Str* py23_percent_format(Py23Str* pat, Py23List* args, Py23Str* desc, int64_
             case 's':
             case 'r': {
                 spec[si] = 's';
-                Py23Str* sv = NULL;
+                PyAdamasStr* sv = NULL;
                 if (dt == 's') {
-                    sv = (Py23Str*)raw;
+                    sv = (PyAdamasStr*)raw;
                     if (conv == 'r') {
-                        tmp = py23_repr_str(sv);
+                        tmp = pa_repr_str(sv);
                         sv = tmp;
                         tmp_owned = 1;
                     }
                 } else if (dt == 'i') {
-                    tmp = py23_str_from_i64(raw);
+                    tmp = pa_str_from_i64(raw);
                     sv = tmp;
                     tmp_owned = 1;
                 } else if (dt == 'b') {
-                    tmp = py23_str_from_bool(raw);
+                    tmp = pa_str_from_bool(raw);
                     sv = tmp;
                     tmp_owned = 1;
                 } else if (dt == 'n') {
-                    tmp = py23_str_from_none();
+                    tmp = pa_str_from_none();
                     sv = tmp;
                     tmp_owned = 1;
                 } else if (dt == 'f') {
-                    tmp = py23_str_from_f64(dv);
+                    tmp = pa_str_from_f64(dv);
                     sv = tmp;
                     tmp_owned = 1;
                 } else {
-                    py23_raise_c("TypeError", "unsupported format argument type");
+                    pa_raise_c("TypeError", "unsupported format argument type");
                 }
                 piece = fmt_with(spec, si + 1, 0, 0.0, sv, 's');
                 break;
             }
             default:
-                py23_raise_c("ValueError", "unsupported format character");
+                pa_raise_c("ValueError", "unsupported format character");
         }
-        if (!piece) py23_raise_c("ValueError", "format failed");
+        if (!piece) pa_raise_c("ValueError", "format failed");
         pb_append(&out, piece->data, piece->len);
-        py23_rc_dec(piece);
-        if (tmp_owned && tmp && tmp != piece) py23_rc_dec(tmp);
+        pa_rc_dec(piece);
+        if (tmp_owned && tmp && tmp != piece) pa_rc_dec(tmp);
     }
     if (ai < args->len)
-        py23_raise_c("TypeError", "not all arguments converted during string formatting");
-    Py23Str* res = str_new(out.p ? out.p : "", out.len);
+        pa_raise_c("TypeError", "not all arguments converted during string formatting");
+    PyAdamasStr* res = str_new(out.p ? out.p : "", out.len);
     free(out.p);
     return res;
 }

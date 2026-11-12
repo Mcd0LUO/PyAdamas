@@ -26,7 +26,7 @@
 #include "lexer.h"
 #include "parser.h"
 
-namespace py23 {
+namespace pyadamas {
 
 // ════════════════════════════════════════════════════════════════════
 //  类型表示
@@ -251,7 +251,7 @@ struct PropertyInfo {
 };
 
 // 类体里的普通赋值（class C: x = 1）是类属性：所有实例共享同一份存储。
-// py23 没有运行期类对象，类属性在模块里占一个隐藏全局，按「声明它的类」
+// pyadamas 没有运行期类对象，类属性在模块里占一个隐藏全局，按「声明它的类」
 // 命名；子类读取时沿 MRO 找到声明者，读到的是同一份数据。
 struct ClassAttrInfo {
     std::string name;
@@ -1358,4 +1358,4 @@ private:
 };
 
 
-}  // namespace py23
+}  // namespace pyadamas

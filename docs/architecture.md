@@ -94,7 +94,7 @@ codegen.h/cpp
 
 类型检查的原则是**宁可漏报，不可误杀**：推断不出来就退化成 `unknown`，凡是涉及 `unknown` 的检查一律放行。真正做不了的东西（异步生成器表达式、方法/类装饰器）前端**照样放行**，留到降级阶段报「code generator 还不支持」。
 
-这样做的直接后果是：`py23 check` 可以当「这文件语法和类型有没有明显毛病」的通用检查器用（它对 3.8 万个真实 `.py` 文件的通过率见 [compatibility.md](compatibility.md)），而 `py23 build` 才是「能不能真编译」的判据。
+这样做的直接后果是：`pyadamas check` 可以当「这文件语法和类型有没有明显毛病」的通用检查器用（它对 3.8 万个真实 `.py` 文件的通过率见 [compatibility.md](compatibility.md)），而 `pyadamas build` 才是「能不能真编译」的判据。
 
 ## 错误处理
 
@@ -111,9 +111,9 @@ bad.py:1:7: error: expected parameter name, found ':'
 | 词法 / 语法 | `LexError` / `ParseError` 异常 | 否，首个错误即停 | 1 |
 | 类型 | `TypeChecker::errors` | 是，一轮报完 | 1 |
 | 降级 | `LowerResult::errors` | 是，一轮报完 | 1 |
-| 运行时 | `py23_panic*` → `exit(1)` | 否 | 1 |
+| 运行时 | `pa_panic*` → `exit(1)` | 否 | 1 |
 
-运行时错误故意不带堆栈：现在没有调试信息，编出来的栈回溯只会误导。`py23_panic_div0` / `panic_overflow` 这类专用入口存在的唯一目的，是把 `#DE` 信号换成一句人能看懂的话。
+运行时错误故意不带堆栈：现在没有调试信息，编出来的栈回溯只会误导。`pa_panic_div0` / `panic_overflow` 这类专用入口存在的唯一目的，是把 `#DE` 信号换成一句人能看懂的话。
 
 ## 数据所有权
 

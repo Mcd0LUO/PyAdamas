@@ -3,46 +3,46 @@
 
 /* ── 数学 / 内置模块 ──────────────────────────────────────────── */
 
-double py23_math_sqrt(double x) {
-    if (x < 0) py23_raise_c("ValueError", "math domain error");
+double pa_math_sqrt(double x) {
+    if (x < 0) pa_raise_c("ValueError", "math domain error");
     return sqrt(x);
 }
-int64_t py23_math_floor(double x) { return (int64_t)floor(x); }
-int64_t py23_math_ceil(double x) { return (int64_t)ceil(x); }
-double py23_math_fabs(double x) { return fabs(x); }
-double py23_math_sin(double x) { return sin(x); }
-double py23_math_cos(double x) { return cos(x); }
-double py23_math_tan(double x) { return tan(x); }
-double py23_math_log(double x) {
-    if (x <= 0) py23_raise_c("ValueError", "math domain error");
+int64_t pa_math_floor(double x) { return (int64_t)floor(x); }
+int64_t pa_math_ceil(double x) { return (int64_t)ceil(x); }
+double pa_math_fabs(double x) { return fabs(x); }
+double pa_math_sin(double x) { return sin(x); }
+double pa_math_cos(double x) { return cos(x); }
+double pa_math_tan(double x) { return tan(x); }
+double pa_math_log(double x) {
+    if (x <= 0) pa_raise_c("ValueError", "math domain error");
     return log(x);
 }
-double py23_math_log2(double x) {
-    if (x <= 0) py23_raise_c("ValueError", "math domain error");
+double pa_math_log2(double x) {
+    if (x <= 0) pa_raise_c("ValueError", "math domain error");
     return log2(x);
 }
-double py23_math_log10(double x) {
-    if (x <= 0) py23_raise_c("ValueError", "math domain error");
+double pa_math_log10(double x) {
+    if (x <= 0) pa_raise_c("ValueError", "math domain error");
     return log10(x);
 }
-double py23_math_exp(double x) { return exp(x); }
-double py23_math_pow(double x, double y) { return pow(x, y); }
-double py23_math_fmod(double x, double y) {
-    if (y == 0) py23_raise_c("ValueError", "math domain error");
+double pa_math_exp(double x) { return exp(x); }
+double pa_math_pow(double x, double y) { return pow(x, y); }
+double pa_math_fmod(double x, double y) {
+    if (y == 0) pa_raise_c("ValueError", "math domain error");
     return fmod(x, y);
 }
-double py23_math_atan2(double y, double x) { return atan2(y, x); }
-double py23_math_hypot(double x, double y) { return hypot(x, y); }
-double py23_math_degrees(double x) { return x * (180.0 / M_PI); }
-double py23_math_radians(double x) { return x * (M_PI / 180.0); }
-int64_t py23_math_trunc(double x) { return (int64_t)trunc(x); }
-double py23_math_copysign(double x, double y) { return copysign(x, y); }
-int64_t py23_math_isnan(double x) { return isnan(x) ? 1 : 0; }
-int64_t py23_math_isinf(double x) { return isinf(x) ? 1 : 0; }
-int64_t py23_math_isfinite(double x) { return isfinite(x) ? 1 : 0; }
+double pa_math_atan2(double y, double x) { return atan2(y, x); }
+double pa_math_hypot(double x, double y) { return hypot(x, y); }
+double pa_math_degrees(double x) { return x * (180.0 / M_PI); }
+double pa_math_radians(double x) { return x * (M_PI / 180.0); }
+int64_t pa_math_trunc(double x) { return (int64_t)trunc(x); }
+double pa_math_copysign(double x, double y) { return copysign(x, y); }
+int64_t pa_math_isnan(double x) { return isnan(x) ? 1 : 0; }
+int64_t pa_math_isinf(double x) { return isinf(x) ? 1 : 0; }
+int64_t pa_math_isfinite(double x) { return isfinite(x) ? 1 : 0; }
 
-int64_t py23_math_factorial(int64_t n) {
-    if (n < 0) py23_raise_c("ValueError", "factorial() not defined for negative values");
+int64_t pa_math_factorial(int64_t n) {
+    if (n < 0) pa_raise_c("ValueError", "factorial() not defined for negative values");
     int64_t r = 1;
     for (int64_t i = 2; i <= n; ++i) r *= i;
     return r;
@@ -52,7 +52,7 @@ static uint64_t math_mag(int64_t v) {
     return v < 0 ? (uint64_t)(-(v + 1)) + 1 : (uint64_t)v;
 }
 
-int64_t py23_math_gcd(int64_t a, int64_t b) {
+int64_t pa_math_gcd(int64_t a, int64_t b) {
     uint64_t x = math_mag(a), y = math_mag(b);
     while (y) {
         uint64_t t = x % y;
@@ -62,13 +62,13 @@ int64_t py23_math_gcd(int64_t a, int64_t b) {
     return (int64_t)x;
 }
 
-int64_t py23_math_lcm(int64_t a, int64_t b) {
+int64_t pa_math_lcm(int64_t a, int64_t b) {
     if (a == 0 || b == 0) return 0;
-    uint64_t g = (uint64_t)py23_math_gcd(a, b);
+    uint64_t g = (uint64_t)pa_math_gcd(a, b);
     return (int64_t)((math_mag(a) / g) * math_mag(b));
 }
 
-double py23_math_fsum(Py23List* l) {
+double pa_math_fsum(PyAdamasList* l) {
     if (!l || l->len == 0) return 0.0;
     // Shewchuk 部分和，和 CPython 的 math.fsum 同一套算法：
     // 每个输入与现有 partials 做无误差的 hi/lo 分解，最后从高位往低位
@@ -76,7 +76,7 @@ double py23_math_fsum(Py23List* l) {
     int64_t n = l->len;
     double* p = (double*)malloc(sizeof(double) * (size_t)n);
     if (!p) {
-        fputs("py23: panic: out of memory\n", stderr);
+        fputs("pyadamas: panic: out of memory\n", stderr);
         exit(1);
     }
     int64_t m = 0;
@@ -120,64 +120,64 @@ double py23_math_fsum(Py23List* l) {
     return hi;
 }
 
-double py23_math_acos(double x) {
-    if (x < -1.0 || x > 1.0) py23_raise_c("ValueError", "math domain error");
+double pa_math_acos(double x) {
+    if (x < -1.0 || x > 1.0) pa_raise_c("ValueError", "math domain error");
     return acos(x);
 }
-double py23_math_asin(double x) {
-    if (x < -1.0 || x > 1.0) py23_raise_c("ValueError", "math domain error");
+double pa_math_asin(double x) {
+    if (x < -1.0 || x > 1.0) pa_raise_c("ValueError", "math domain error");
     return asin(x);
 }
-double py23_math_atan(double x) { return atan(x); }
-double py23_math_acosh(double x) {
-    if (x < 1.0) py23_raise_c("ValueError", "math domain error");
+double pa_math_atan(double x) { return atan(x); }
+double pa_math_acosh(double x) {
+    if (x < 1.0) pa_raise_c("ValueError", "math domain error");
     return acosh(x);
 }
-double py23_math_asinh(double x) { return asinh(x); }
-double py23_math_atanh(double x) {
-    if (x <= -1.0 || x >= 1.0) py23_raise_c("ValueError", "math domain error");
+double pa_math_asinh(double x) { return asinh(x); }
+double pa_math_atanh(double x) {
+    if (x <= -1.0 || x >= 1.0) pa_raise_c("ValueError", "math domain error");
     return atanh(x);
 }
-double py23_math_cbrt(double x) { return cbrt(x); }
-double py23_math_cosh(double x) { return cosh(x); }
-double py23_math_sinh(double x) { return sinh(x); }
-double py23_math_tanh(double x) { return tanh(x); }
-double py23_math_exp2(double x) { return exp2(x); }
-double py23_math_expm1(double x) { return expm1(x); }
-double py23_math_log1p(double x) {
-    if (x <= -1.0) py23_raise_c("ValueError", "math domain error");
+double pa_math_cbrt(double x) { return cbrt(x); }
+double pa_math_cosh(double x) { return cosh(x); }
+double pa_math_sinh(double x) { return sinh(x); }
+double pa_math_tanh(double x) { return tanh(x); }
+double pa_math_exp2(double x) { return exp2(x); }
+double pa_math_expm1(double x) { return expm1(x); }
+double pa_math_log1p(double x) {
+    if (x <= -1.0) pa_raise_c("ValueError", "math domain error");
     return log1p(x);
 }
-double py23_math_erf(double x) { return erf(x); }
-double py23_math_erfc(double x) { return erfc(x); }
+double pa_math_erf(double x) { return erf(x); }
+double pa_math_erfc(double x) { return erfc(x); }
 
 static int math_is_pole(double x) { return x == 0.0 || (x < 0.0 && x == floor(x)); }
 
-double py23_math_gamma(double x) {
-    if (math_is_pole(x)) py23_raise_c("ValueError", "math domain error");
+double pa_math_gamma(double x) {
+    if (math_is_pole(x)) pa_raise_c("ValueError", "math domain error");
     return tgamma(x);
 }
-double py23_math_lgamma(double x) {
-    if (math_is_pole(x)) py23_raise_c("ValueError", "math domain error");
+double pa_math_lgamma(double x) {
+    if (math_is_pole(x)) pa_raise_c("ValueError", "math domain error");
     return lgamma(x);
 }
 
-double py23_math_ulp(double x) {
+double pa_math_ulp(double x) {
     if (isnan(x)) return x;
     if (isinf(x)) return fabs(x);
     if (x == 0.0) return nextafter(0.0, 1.0);
     double up = nextafter(x, INFINITY);
     return fabs(up - x);
 }
-double py23_math_nextafter(double x, double y) { return nextafter(x, y); }
-double py23_math_remainder(double x, double y) {
-    if (y == 0.0) py23_raise_c("ValueError", "math domain error");
+double pa_math_nextafter(double x, double y) { return nextafter(x, y); }
+double pa_math_remainder(double x, double y) {
+    if (y == 0.0) pa_raise_c("ValueError", "math domain error");
     return remainder(x, y);
 }
-double py23_math_ldexp(double x, int64_t i) { return ldexp(x, (int)i); }
-double py23_math_fma(double x, double y, double z) { return fma(x, y, z); }
+double pa_math_ldexp(double x, int64_t i) { return ldexp(x, (int)i); }
+double pa_math_fma(double x, double y, double z) { return fma(x, y, z); }
 
-int64_t py23_math_isclose(double a, double b) {
+int64_t pa_math_isclose(double a, double b) {
     if (a == b) return 1;
     if (isinf(a) || isinf(b)) return 0;
     double diff = fabs(a - b);
@@ -185,32 +185,32 @@ int64_t py23_math_isclose(double a, double b) {
     return diff <= rel ? 1 : 0;
 }
 
-static void math_tuple_push_f64(Py23List* l, double v) {
+static void math_tuple_push_f64(PyAdamasList* l, double v) {
     int64_t bits;
     memcpy(&bits, &v, sizeof bits);
-    py23_list_append(l, bits);
+    pa_list_append(l, bits);
 }
 
-Py23List* py23_math_frexp(double x) {
+PyAdamasList* pa_math_frexp(double x) {
     int e = 0;
     double m = frexp(x, &e);
-    Py23List* l = py23_list_new(2, 0);
+    PyAdamasList* l = pa_list_new(2, 0);
     math_tuple_push_f64(l, m);
-    py23_list_append(l, (int64_t)e);
+    pa_list_append(l, (int64_t)e);
     return l;
 }
 
-Py23List* py23_math_modf(double x) {
+PyAdamasList* pa_math_modf(double x) {
     double ip = 0.0;
     double fp = modf(x, &ip);
-    Py23List* l = py23_list_new(2, 0);
+    PyAdamasList* l = pa_list_new(2, 0);
     math_tuple_push_f64(l, fp);
     math_tuple_push_f64(l, ip);
     return l;
 }
 
-int64_t py23_math_isqrt(int64_t n) {
-    if (n < 0) py23_raise_c("ValueError", "isqrt() argument must be nonnegative");
+int64_t pa_math_isqrt(int64_t n) {
+    if (n < 0) pa_raise_c("ValueError", "isqrt() argument must be nonnegative");
     if (n < 2) return n;
     uint64_t r = (uint64_t)sqrt((double)n);
     while (r > 0 && r > (uint64_t)n / r) --r;
@@ -226,39 +226,39 @@ static int64_t math_binom(int64_t n, int64_t k) {
     return r;
 }
 
-int64_t py23_math_comb(int64_t n, int64_t k) {
-    if (n < 0 || k < 0) py23_raise_c("ValueError", "comb() arguments must be nonnegative");
+int64_t pa_math_comb(int64_t n, int64_t k) {
+    if (n < 0 || k < 0) pa_raise_c("ValueError", "comb() arguments must be nonnegative");
     return math_binom(n, k);
 }
 
-int64_t py23_math_perm(int64_t n, int64_t k) {
-    if (n < 0 || k < 0) py23_raise_c("ValueError", "perm() arguments must be nonnegative");
+int64_t pa_math_perm(int64_t n, int64_t k) {
+    if (n < 0 || k < 0) pa_raise_c("ValueError", "perm() arguments must be nonnegative");
     if (k > n) return 0;
     int64_t r = 1;
     for (int64_t i = 0; i < k; ++i) r *= n - i;
     return r;
 }
 
-int64_t py23_math_prod(Py23List* l) {
+int64_t pa_math_prod(PyAdamasList* l) {
     if (!l) return 1;
     int64_t r = 1;
     for (int64_t i = 0; i < l->len; ++i) r *= l->data[i];
     return r;
 }
 
-int64_t py23_math_sumprod(Py23List* a, Py23List* b) {
+int64_t pa_math_sumprod(PyAdamasList* a, PyAdamasList* b) {
     if (!a || !b) return 0;
     if (a->len != b->len)
-        py23_raise_c("ValueError", "sumprod() inputs must have the same length");
+        pa_raise_c("ValueError", "sumprod() inputs must have the same length");
     int64_t r = 0;
     for (int64_t i = 0; i < a->len; ++i) r += a->data[i] * b->data[i];
     return r;
 }
 
-double py23_math_dist(Py23List* a, Py23List* b) {
+double pa_math_dist(PyAdamasList* a, PyAdamasList* b) {
     if (!a || !b) return 0.0;
     if (a->len != b->len)
-        py23_raise_c("ValueError", "dist() requires two points of the same dimension");
+        pa_raise_c("ValueError", "dist() requires two points of the same dimension");
     double sum = 0.0;
     for (int64_t i = 0; i < a->len; ++i) {
         double x, y;
@@ -270,53 +270,53 @@ double py23_math_dist(Py23List* a, Py23List* b) {
     return sqrt(sum);
 }
 
-Py23List* sys_argv_list;
+PyAdamasList* sys_argv_list;
 
-void py23_sys_set_args(int64_t argc, char** argv) {
-    Py23List* out = py23_list_new(argc > 0 ? argc : 0, 1);
+void pa_sys_set_args(int64_t argc, char** argv) {
+    PyAdamasList* out = pa_list_new(argc > 0 ? argc : 0, 1);
     sys_argv_list = out;
     // 列表要立刻成为 GC 根；根表元素是「槽的地址」，不是槽里的值。
     void* root_slot[1] = {(void*)&sys_argv_list};
-    py23_gc_add_roots(root_slot, 1);
+    pa_gc_add_roots(root_slot, 1);
     for (int64_t i = 0; i < argc; ++i) {
         const char* s = argv[i] ? argv[i] : "";
-        Py23Str* str = str_new(s, (int64_t)strlen(s));
-        py23_list_append(out, (int64_t)str);
+        PyAdamasStr* str = str_new(s, (int64_t)strlen(s));
+        pa_list_append(out, (int64_t)str);
     }
 }
 
-Py23List* py23_sys_argv(void) {
-    if (!sys_argv_list) sys_argv_list = py23_list_new(0, 1);
+PyAdamasList* pa_sys_argv(void) {
+    if (!sys_argv_list) sys_argv_list = pa_list_new(0, 1);
     return sys_argv_list;
 }
 
-void py23_sys_exit(int64_t code) { exit((int)code); }
+void pa_sys_exit(int64_t code) { exit((int)code); }
 
 /* ── 输出 ─────────────────────────────────────────────────────── */
 
-void py23_print_i64(int64_t v) { printf("%lld", (long long)v); }
+void pa_print_i64(int64_t v) { printf("%lld", (long long)v); }
 
-void py23_print_f64(double v) {
+void pa_print_f64(double v) {
     char buf[64];
     format_double(buf, sizeof buf, v);
     fputs(buf, stdout);
 }
 
-void py23_print_bool(int64_t v) { fputs(v ? "True" : "False", stdout); }
+void pa_print_bool(int64_t v) { fputs(v ? "True" : "False", stdout); }
 
-void py23_print_str(Py23Str* s) { fwrite(s->data, 1, (size_t)s->len, stdout); }
+void pa_print_str(PyAdamasStr* s) { fwrite(s->data, 1, (size_t)s->len, stdout); }
 
 // bytes 下标：返回那个字节的整数值（0..255），不是单字节切片。
-int64_t py23_bytes_at(Py23Str* s, int64_t i) {
+int64_t pa_bytes_at(PyAdamasStr* s, int64_t i) {
     if (!s) return 0;
     if (i < 0) i += s->len;
-    if (i < 0 || i >= s->len) py23_raise_c("IndexError", "bytes index out of range");
+    if (i < 0 || i >= s->len) pa_raise_c("IndexError", "bytes index out of range");
     return (unsigned char)s->data[i];
 }
 
 // bytes 的 repr：b'...'，不可打印字节转成 \xNN。CPython 的引号选择规则：
 // 内容里有单引号且没有双引号时改用双引号，避免转义。
-void py23_print_bytes(Py23Str* s) {
+void pa_print_bytes(PyAdamasStr* s) {
     int has_s = 0, has_d = 0;
     for (int64_t i = 0; i < s->len; ++i) {
         if (s->data[i] == '\'') has_s = 1;
@@ -347,27 +347,27 @@ void py23_print_bytes(Py23Str* s) {
     putchar(q);
 }
 
-void py23_print_none(void) { fputs("None", stdout); }
+void pa_print_none(void) { fputs("None", stdout); }
 
-void py23_print_sep(void) { fputc(' ', stdout); }
+void pa_print_sep(void) { fputc(' ', stdout); }
 
-void py23_print_end(void) { fputc('\n', stdout); }
+void pa_print_end(void) { fputc('\n', stdout); }
 
-void py23_panic(Py23Str* msg) {
-    py23_raise_c("RuntimeError", msg->data);
+void pa_panic(PyAdamasStr* msg) {
+    pa_raise_c("RuntimeError", msg->data);
 }
 
-void py23_panic_div0(void) {
-    py23_raise_c("ZeroDivisionError", "integer division or modulo by zero");
+void pa_panic_div0(void) {
+    pa_raise_c("ZeroDivisionError", "integer division or modulo by zero");
 }
 
-void py23_panic_overflow(void) {
-    py23_raise_c("OverflowError", "integer division result too large for int64");
+void pa_panic_overflow(void) {
+    pa_raise_c("OverflowError", "integer division result too large for int64");
 }
 
 /* ── 数学 ─────────────────────────────────────────────────────── */
 
-int64_t py23_pow_i64(int64_t base, int64_t exp) {
+int64_t pa_pow_i64(int64_t base, int64_t exp) {
     if (exp < 0) return 0;
     int64_t r = 1;
     while (exp > 0) {
@@ -379,5 +379,5 @@ int64_t py23_pow_i64(int64_t base, int64_t exp) {
 }
 
 /* abs(int)：回绕语义和整数加减一致。 */
-int64_t py23_abs_i64(int64_t v) { return v < 0 ? -v : v; }
+int64_t pa_abs_i64(int64_t v) { return v < 0 ? -v : v; }
 

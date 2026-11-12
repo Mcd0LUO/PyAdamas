@@ -1,10 +1,10 @@
 // ir.cpp —— IR 的可读打印
 //
-// 打印器的用处不只是调试：`py23 ir x.py` 的输出是降级阶段的验收标准。
+// 打印器的用处不只是调试：`pyadamas ir x.py` 的输出是降级阶段的验收标准。
 // 每条指令都带结果类型注释，能一眼看出前端推出来的类型对不对。
 #include "ir.h"
 
-namespace py23 {
+namespace pyadamas {
 namespace {
 
 std::string vreg_str(VReg r) {
@@ -255,4 +255,4 @@ void dump_ir(const IRModule& m, std::ostream& os) {
     }
 }
 
-}  // namespace py23
+}  // namespace pyadamas

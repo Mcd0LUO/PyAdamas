@@ -4,7 +4,7 @@
 // LICM 与下标版本化见 opt_loop.cpp；这里只按顺序调度。
 #include "opt_detail.h"
 
-namespace py23 {
+namespace pyadamas {
 
 using namespace optdetail;
 
@@ -217,4 +217,4 @@ void optimize_ir(IRModule& m, int opt_level) {
     fold_all();
 }
 
-}  // namespace py23
+}  // namespace pyadamas

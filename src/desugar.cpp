@@ -3,15 +3,15 @@
 // lambda 是表达式，但闭包/捕获/引用计数都建立在 FunctionDef 上。这里在
 // 类型检查之前把它改写成：
 //
-//     __py23$lambda_N = def (...) -> ...: return <body>
-//     ... __py23$lambda_N ...
+//     __pyadamas$lambda_N = def (...) -> ...: return <body>
+//     ... __pyadamas$lambda_N ...
 //
 // 生成器表达式同理，展开成生成器函数 + 一次调用，让惰性语义落在已有的
 // 生成器状态机上：
 //
-//     def __py23$gen_N(it):
+//     def __pyadamas$gen_N(it):
 //         for x in it: ... yield elt
-//     __py23$gen_N(<最外层 iterable>)
+//     __pyadamas$gen_N(<最外层 iterable>)
 //
 // 合成函数插在包含该表达式的那条语句之前，所以循环体里的 lambda 仍然
 // 每次执行都创建新的闭包。类体里的 lambda / 生成器表达式暂不展开
@@ -22,7 +22,7 @@
 #include <utility>
 #include <vector>
 
-namespace py23 {
+namespace pyadamas {
 namespace {
 
 // map/filter 改写前先确认这两个名字没有被用户绑定过。绑定过就保留普通
@@ -149,7 +149,7 @@ bool stmt_binds(const Stmt& s, const std::string& n) {
 // 生成器表达式的最外层 iterable 是 range(...) 时的边界解析。
 //
 // range 作为值使用会被实体化成整数列表（runtime/rt_slice.c 的
-// py23_range_new）：range(10**9) 就是当场造 10 亿个元素。源是 range 时
+// pa_range_new）：range(10**9) 就是当场造 10 亿个元素。源是 range 时
 // 改成把边界值传进合成函数，用计数循环惰性迭代。
 //
 // 步长的方向决定比较用 < 还是 >：字面量步长在编译期定下来（快路径），
@@ -258,7 +258,7 @@ private:
         ret->col = col;
 
         auto fn = std::make_unique<FunctionDef>();
-        fn->name = std::format("__py23$lambda_{}", ++lambda_id_);
+        fn->name = std::format("__pyadamas$lambda_{}", ++lambda_id_);
         fn->args = std::move(args);
         fn->line = line;
         fn->col = col;
@@ -278,10 +278,10 @@ private:
 
     // 生成器表达式 → 合成的生成器函数 + 一次调用：
     //
-    //     def __py23$gen_N(__py23$it_N):
-    //         for x in __py23$it_N:
+    //     def __pyadamas$gen_N(__pyadamas$it_N):
+    //         for x in __pyadamas$it_N:
     //             if <ifs>: yield <elt>
-    //     __py23$gen_N(<最外层 iterable>)
+    //     __pyadamas$gen_N(<最外层 iterable>)
     //
     // 最外层 iterable 在创建时求值（Python 语义），其余部分在 next() 时
     // 才执行，所以 sum(x*x for x in xs) 不再先建整个列表。合成函数体里的
@@ -291,10 +291,10 @@ private:
         const int line = g.line;
         const int col = g.col;
         const int id = ++gen_id_;
-        const std::string itname = std::format("__py23$it_{}", id);
-        const std::string sname = std::format("__py23$rs_{}", id);
-        const std::string ename = std::format("__py23$re_{}", id);
-        const std::string tname = std::format("__py23$rt_{}", id);
+        const std::string itname = std::format("__pyadamas$it_{}", id);
+        const std::string sname = std::format("__pyadamas$rs_{}", id);
+        const std::string ename = std::format("__pyadamas$re_{}", id);
+        const std::string tname = std::format("__pyadamas$rt_{}", id);
 
         auto named = [&](const std::string& s) {
             auto n = std::make_unique<Name>(s);
@@ -308,7 +308,7 @@ private:
         auto& first = static_cast<Comprehension&>(*g.generators[0]);
 
         // 源是 range(...) 时改成传边界值 + 计数循环：range 作为值使用会
-        // 被实体化成整数列表（runtime/rt_slice.c 的 py23_range_new），
+        // 被实体化成整数列表（runtime/rt_slice.c 的 pa_range_new），
         // 那就没有惰性可言了。边界值在创建时求值（Python 语义），
         // 元素在 next() 时才产出。
         ExprPtr rstart, rstop, rstep_expr;
@@ -382,7 +382,7 @@ private:
         }
 
         auto fn = std::make_unique<FunctionDef>();
-        fn->name = std::format("__py23$gen_{}", id);
+        fn->name = std::format("__pyadamas$gen_{}", id);
         if (is_range) {
             Arg s;
             s.name = sname;
@@ -502,7 +502,7 @@ private:
 
                 const int line = e->line;
                 const int col = e->col;
-                const std::string tmp = std::format("__py23$map_arg_{}", ++map_arg_id_);
+                const std::string tmp = std::format("__pyadamas$map_arg_{}", ++map_arg_id_);
                 auto named = [&](const std::string& id) {
                     auto n = std::make_unique<Name>(id);
                     n->line = line;
@@ -560,7 +560,7 @@ private:
                 auto& s = static_cast<Subscript&>(*e);
                 desugar_expr(s.value, pre);
                 desugar_expr(s.slice, pre);
-                // xs[slice(a, b, c)] → xs[a:b:c]：切片本身在 py23 里是
+                // xs[slice(a, b, c)] → xs[a:b:c]：切片本身在 pyadamas 里是
                 // 语法层的，没有运行期 slice 对象；这里把直接调用的写法
                 // 折成同样的形状，typecheck/lower 完全不用改。
                 // slice() 当独立值用仍然不支持（降级层会明确报错）。
@@ -801,4 +801,4 @@ void desugar_lambdas(Module& m) {
     d.run(m);
 }
 
-}  // namespace py23
+}  // namespace pyadamas

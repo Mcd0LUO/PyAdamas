@@ -1,7 +1,7 @@
 // opt_loop.cpp —— 循环不变量外提与检查型下标版本化
 #include "opt_detail.h"
 
-namespace py23 {
+namespace pyadamas {
 
 using namespace optdetail;
 
@@ -913,4 +913,4 @@ bool rotate_loops_function(IRFunction& fn) {
 }
 
 }  // namespace optdetail
-}  // namespace py23
+}  // namespace pyadamas

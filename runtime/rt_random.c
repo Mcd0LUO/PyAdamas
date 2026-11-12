@@ -13,12 +13,12 @@
 #define MT_UPPER_MASK 0x80000000U
 #define MT_LOWER_MASK 0x7fffffffU
 
-struct Py23Random {
+struct PyAdamasRandom {
     uint32_t mt[MT_N];
     int64_t index;
 };
 
-static void mt_init_genrand(Py23Random* r, uint32_t s) {
+static void mt_init_genrand(PyAdamasRandom* r, uint32_t s) {
     r->mt[0] = s;
     for (uint32_t i = 1; i < MT_N; ++i)
         r->mt[i] = 1812433253U * (r->mt[i - 1] ^ (r->mt[i - 1] >> 30)) + i;
@@ -26,7 +26,7 @@ static void mt_init_genrand(Py23Random* r, uint32_t s) {
 }
 
 /* CPython 的 init_by_array：把种子拆成 32 位字后做双混洗。 */
-static void mt_init_by_array(Py23Random* r, const uint32_t* key, int64_t key_len) {
+static void mt_init_by_array(PyAdamasRandom* r, const uint32_t* key, int64_t key_len) {
     mt_init_genrand(r, 19650218U);
     int64_t i = 1, j = 0;
     int64_t k = MT_N > key_len ? MT_N : key_len;
@@ -54,7 +54,7 @@ static void mt_init_by_array(Py23Random* r, const uint32_t* key, int64_t key_len
 }
 
 /* CPython seed(int, version=2)：abs(int) 按 32 位小端拆字，0 用 [0]。 */
-static void mt_seed_i64(Py23Random* r, int64_t seed) {
+static void mt_seed_i64(PyAdamasRandom* r, int64_t seed) {
     uint64_t n = seed < 0 ? (uint64_t)(-(seed + 1)) + 1 : (uint64_t)seed;
     uint32_t key[2];
     int64_t kn = 0;
@@ -70,7 +70,7 @@ static void mt_seed_i64(Py23Random* r, int64_t seed) {
     mt_init_by_array(r, key, kn);
 }
 
-static uint32_t mt_next32(Py23Random* r) {
+static uint32_t mt_next32(PyAdamasRandom* r) {
     static const uint32_t mag01[2] = {0U, MT_MATRIX_A};
     uint32_t y;
     if (r->index >= MT_N) {
@@ -95,13 +95,13 @@ static uint32_t mt_next32(Py23Random* r) {
     return y;
 }
 
-static double mt_next_double(Py23Random* r) {
+static double mt_next_double(PyAdamasRandom* r) {
     uint32_t a = mt_next32(r) >> 5;
     uint32_t b = mt_next32(r) >> 6;
     return ((double)a * 67108864.0 + (double)b) * (1.0 / 9007199254740992.0);
 }
 
-static uint64_t mt_getrandbits(Py23Random* r, int64_t k) {
+static uint64_t mt_getrandbits(PyAdamasRandom* r, int64_t k) {
     if (k <= 0) return 0;
     if (k <= 32) return (uint64_t)(mt_next32(r) >> (32 - k));
     uint64_t res = 0;
@@ -117,7 +117,7 @@ static uint64_t mt_getrandbits(Py23Random* r, int64_t k) {
 }
 
 /* CPython 的 _randbelow：取比 n 多一位的随机数，落在区间外就重抽。 */
-static uint64_t mt_randbelow(Py23Random* r, uint64_t n) {
+static uint64_t mt_randbelow(PyAdamasRandom* r, uint64_t n) {
     if (n == 0) return 0;
     int64_t k = 0;
     for (uint64_t t = n; t; t >>= 1) k++;
@@ -126,7 +126,7 @@ static uint64_t mt_randbelow(Py23Random* r, uint64_t n) {
     return v;
 }
 
-static void mt_time_seed(Py23Random* r) {
+static void mt_time_seed(PyAdamasRandom* r) {
     struct timespec ts;
     clock_gettime(CLOCK_REALTIME, &ts);
     uint64_t x = (uint64_t)ts.tv_nsec ^ ((uint64_t)ts.tv_sec << 20) ^
@@ -134,14 +134,14 @@ static void mt_time_seed(Py23Random* r) {
     mt_seed_i64(r, (int64_t)(x >> 1));
 }
 
-Py23Random* py23_random_new(int64_t seed) {
-    Py23Random* r = (Py23Random*)rc_alloc((int64_t)sizeof(Py23Random), NULL, NULL,
-                                          PY23_RC_OBJ);
-    py23_random_seed(r, seed);
+PyAdamasRandom* pa_random_new(int64_t seed) {
+    PyAdamasRandom* r = (PyAdamasRandom*)rc_alloc((int64_t)sizeof(PyAdamasRandom), NULL, NULL,
+                                          PYADAMAS_RC_OBJ);
+    pa_random_seed(r, seed);
     return r;
 }
 
-void py23_random_seed(Py23Random* r, int64_t seed) {
+void pa_random_seed(PyAdamasRandom* r, int64_t seed) {
     // 未传 seed 时调用点填的是 INT64_MIN 哨兵：用时间 + pid 播种。
     if (seed == INT64_MIN)
         mt_time_seed(r);
@@ -149,26 +149,26 @@ void py23_random_seed(Py23Random* r, int64_t seed) {
         mt_seed_i64(r, seed);
 }
 
-double py23_random_next(Py23Random* r) { return mt_next_double(r); }
+double pa_random_next(PyAdamasRandom* r) { return mt_next_double(r); }
 
-int64_t py23_random_randint(Py23Random* r, int64_t a, int64_t b) {
-    if (a > b) py23_raise_c("ValueError", "empty range for randrange()");
+int64_t pa_random_randint(PyAdamasRandom* r, int64_t a, int64_t b) {
+    if (a > b) pa_raise_c("ValueError", "empty range for randrange()");
     uint64_t width = (uint64_t)b - (uint64_t)a + 1;
     return (int64_t)((uint64_t)a + mt_randbelow(r, width));
 }
 
 /* 返回借用：调用点按静态元素类型决定是否补一次 rc_inc。 */
-int64_t py23_random_choice(Py23Random* r, Py23List* seq) {
+int64_t pa_random_choice(PyAdamasRandom* r, PyAdamasList* seq) {
     if (!seq || seq->len == 0)
-        py23_raise_c("IndexError", "cannot choose from an empty sequence");
+        pa_raise_c("IndexError", "cannot choose from an empty sequence");
     return seq->data[mt_randbelow(r, (uint64_t)seq->len)];
 }
 
-double py23_random_uniform(Py23Random* r, double a, double b) {
+double pa_random_uniform(PyAdamasRandom* r, double a, double b) {
     return a + (b - a) * mt_next_double(r);
 }
 
-void py23_random_shuffle(Py23Random* r, Py23List* seq) {
+void pa_random_shuffle(PyAdamasRandom* r, PyAdamasList* seq) {
     for (int64_t i = seq->len - 1; i > 0; --i) {
         uint64_t j = mt_randbelow(r, (uint64_t)(i + 1));
         int64_t tmp = seq->data[i];
@@ -179,49 +179,49 @@ void py23_random_shuffle(Py23Random* r, Py23List* seq) {
 
 /* ── 模块级函数共用一把全局 RNG ─────────────────────────────── */
 
-static Py23Random g_rng;
+static PyAdamasRandom g_rng;
 static int g_rng_ready = 0;
 
-static Py23Random* global_rng(void) {
+static PyAdamasRandom* global_rng(void) {
     if (!g_rng_ready) {
-        py23_random_seed(&g_rng, INT64_MIN);
+        pa_random_seed(&g_rng, INT64_MIN);
         g_rng_ready = 1;
     }
     return &g_rng;
 }
 
-void py23_random_gseed(int64_t seed) {
-    py23_random_seed(global_rng(), seed);
+void pa_random_gseed(int64_t seed) {
+    pa_random_seed(global_rng(), seed);
 }
 
-double py23_random_gnext(void) { return mt_next_double(global_rng()); }
+double pa_random_gnext(void) { return mt_next_double(global_rng()); }
 
-int64_t py23_random_grandint(int64_t a, int64_t b) {
-    return py23_random_randint(global_rng(), a, b);
+int64_t pa_random_grandint(int64_t a, int64_t b) {
+    return pa_random_randint(global_rng(), a, b);
 }
 
-int64_t py23_random_gchoice(Py23List* seq) { return py23_random_choice(global_rng(), seq); }
+int64_t pa_random_gchoice(PyAdamasList* seq) { return pa_random_choice(global_rng(), seq); }
 
-double py23_random_guniform(double a, double b) {
-    return py23_random_uniform(global_rng(), a, b);
+double pa_random_guniform(double a, double b) {
+    return pa_random_uniform(global_rng(), a, b);
 }
 
-void py23_random_gshuffle(Py23List* seq) { py23_random_shuffle(global_rng(), seq); }
+void pa_random_gshuffle(PyAdamasList* seq) { pa_random_shuffle(global_rng(), seq); }
 
 /* ── 补充的分布与采样 ─────────────────────────────────────────
    统一用「r 为 NULL 就走全局 rng」的约定：模块级函数传 0，实例方法传实例。 */
 
-static Py23Random* rng_of(Py23Random* r) { return r ? r : global_rng(); }
+static PyAdamasRandom* rng_of(PyAdamasRandom* r) { return r ? r : global_rng(); }
 
 /* randrange(a, b, step)：step 非零，方向由调用点保证。 */
-int64_t py23_random_randrange(Py23Random* r, int64_t a, int64_t b, int64_t step) {
-    Py23Random* g = rng_of(r);
+int64_t pa_random_randrange(PyAdamasRandom* r, int64_t a, int64_t b, int64_t step) {
+    PyAdamasRandom* g = rng_of(r);
     int64_t n;
     if (step > 0) {
-        if (b <= a) py23_raise_c("ValueError", "empty range for randrange()");
+        if (b <= a) pa_raise_c("ValueError", "empty range for randrange()");
         n = (b - a + step - 1) / step;
     } else {
-        if (b >= a) py23_raise_c("ValueError", "empty range for randrange()");
+        if (b >= a) pa_raise_c("ValueError", "empty range for randrange()");
         n = (a - b + (-step) - 1) / (-step);
     }
     int64_t k = (int64_t)(mt_next_double(g) * (double)n);
@@ -229,15 +229,15 @@ int64_t py23_random_randrange(Py23Random* r, int64_t a, int64_t b, int64_t step)
     return a + step * k;
 }
 
-int64_t py23_random_getrandbits(Py23Random* r, int64_t k) {
-    if (k <= 0) py23_raise_c("ValueError", "number of bits must be greater than zero");
+int64_t pa_random_getrandbits(PyAdamasRandom* r, int64_t k) {
+    if (k <= 0) pa_raise_c("ValueError", "number of bits must be greater than zero");
     if (k > 62) k = 62;
     int64_t v = (int64_t)(mt_next_double(rng_of(r)) * (double)((uint64_t)1 << k));
     return v;
 }
 
-double py23_random_gauss(Py23Random* r, double mu, double sigma) {
-    Py23Random* g = rng_of(r);
+double pa_random_gauss(PyAdamasRandom* r, double mu, double sigma) {
+    PyAdamasRandom* g = rng_of(r);
     double u1 = mt_next_double(g);
     double u2 = mt_next_double(g);
     if (u1 < 1e-300) u1 = 1e-300;
@@ -246,16 +246,16 @@ double py23_random_gauss(Py23Random* r, double mu, double sigma) {
     return mu + sigma * z;
 }
 
-double py23_random_expovariate(Py23Random* r, double lambd) {
-    if (lambd <= 0) py23_raise_c("ValueError", "lambda must be positive");
+double pa_random_expovariate(PyAdamasRandom* r, double lambd) {
+    if (lambd <= 0) pa_raise_c("ValueError", "lambda must be positive");
     double u = mt_next_double(rng_of(r));
     if (u <= 0) u = 1e-300;
     return -log(u) / lambd;
 }
 
-double py23_random_triangular(Py23Random* r, double low, double high, double mode) {
-    if (high < low) py23_raise_c("ValueError", "high must be >= low");
-    if (mode < low || mode > high) py23_raise_c("ValueError", "mode must be between low and high");
+double pa_random_triangular(PyAdamasRandom* r, double low, double high, double mode) {
+    if (high < low) pa_raise_c("ValueError", "high must be >= low");
+    if (mode < low || mode > high) pa_raise_c("ValueError", "mode must be between low and high");
     double u = mt_next_double(rng_of(r));
     double c = (mode - low) / (high - low);
     if (u > c) {
@@ -269,12 +269,12 @@ double py23_random_triangular(Py23Random* r, double low, double high, double mod
 }
 
 /* 无放回采样：复制一份再部分洗牌，取前 k 个。 */
-Py23List* py23_random_sample(Py23Random* r, Py23List* seq, int64_t k) {
+PyAdamasList* pa_random_sample(PyAdamasRandom* r, PyAdamasList* seq, int64_t k) {
     int64_t n = seq ? seq->len : 0;
-    if (k < 0) py23_raise_c("ValueError", "sample size must be non-negative");
-    if (k > n) py23_raise_c("ValueError", "sample larger than population");
-    Py23Random* g = rng_of(r);
-    Py23List* pool = py23_list_copy(seq);
+    if (k < 0) pa_raise_c("ValueError", "sample size must be non-negative");
+    if (k > n) pa_raise_c("ValueError", "sample larger than population");
+    PyAdamasRandom* g = rng_of(r);
+    PyAdamasList* pool = pa_list_copy(seq);
     for (int64_t i = 0; i < k; ++i) {
         int64_t j = i + (int64_t)(mt_next_double(g) * (double)(n - i));
         if (j >= n) j = n - 1;
@@ -287,18 +287,18 @@ Py23List* py23_random_sample(Py23Random* r, Py23List* seq, int64_t k) {
 }
 
 /* 有放回采样。 */
-Py23List* py23_random_choices(Py23Random* r, Py23List* seq, int64_t k) {
+PyAdamasList* pa_random_choices(PyAdamasRandom* r, PyAdamasList* seq, int64_t k) {
     int64_t n = seq ? seq->len : 0;
-    if (n == 0) py23_raise_c("IndexError", "Cannot choose from an empty sequence");
-    if (k < 0) py23_raise_c("ValueError", "number of choices must be non-negative");
-    Py23Random* g = rng_of(r);
-    Py23List* out = py23_list_new(k, seq->elem_kind);
+    if (n == 0) pa_raise_c("IndexError", "Cannot choose from an empty sequence");
+    if (k < 0) pa_raise_c("ValueError", "number of choices must be non-negative");
+    PyAdamasRandom* g = rng_of(r);
+    PyAdamasList* out = pa_list_new(k, seq->elem_kind);
     for (int64_t i = 0; i < k; ++i) {
         int64_t j = (int64_t)(mt_next_double(g) * (double)n);
         if (j >= n) j = n - 1;
         int64_t v = seq->data[j];
-        if (seq->elem_kind == 1 && v) py23_rc_inc((void*)v);
-        py23_list_append(out, v);
+        if (seq->elem_kind == 1 && v) pa_rc_inc((void*)v);
+        pa_list_append(out, v);
     }
     return out;
 }

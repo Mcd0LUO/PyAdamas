@@ -7,7 +7,7 @@
 #include <unordered_map>
 #include <vector>
 
-namespace py23 {
+namespace pyadamas {
 namespace optdetail {
 
 struct CVal {
@@ -39,4 +39,4 @@ bool version_bounds_function(IRFunction& fn);
 bool rotate_loops_function(IRFunction& fn);
 
 }  // namespace optdetail
-}  // namespace py23
+}  // namespace pyadamas

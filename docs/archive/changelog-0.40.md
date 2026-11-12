@@ -266,7 +266,7 @@ O2 深度优化：IR 常量折叠/DCE，以及 AVX2 归约内核。
   `--fast-math`。
 - 修正 `sum()` 的 start 参数类型提升：`sum([], 0.5)` 现在是 float 0.5。
 - 测试：`46_simd_reduce.py`、`47_float_sum_order.py`，并加入
-  `py23_opt_levels` 三档回归（含 `--fast-math` 专项）。
+  `pa_opt_levels` 三档回归（含 `--fast-math` 专项）。
 
 ### 验证与基准
 
@@ -277,7 +277,7 @@ O2 深度优化：IR 常量折叠/DCE，以及 AVX2 归约内核。
   - sum 100 万×20（int）：O1 12.5 ms → O2 7.5 ms（AVX2 归约，约 1.7×）
   - dot 10M：O2 约 87 ms → 74 ms（IR 遍约 1.18×）
   - matmul 160³：O2 约 10 ms（持平，内核仍是标量用户代码）
-- `python3 tests/diff/run_diff.py --py23 /tmp/py23O0|O1|O2` 均 0 失败
+- `python3 tests/diff/run_diff.py --pyadamas /tmp/PyAdamasO0|O1|O2` 均 0 失败
 
 ### 已知限制
 
@@ -305,7 +305,7 @@ O2 深度优化：IR 常量折叠/DCE，以及 AVX2 归约内核。
   - 非变参调用不再发 `xorl %eax, %eax`；
   - 序言清零裁剪：must 数据流只清零可能「读在写之前」的槽，含
     `SlotAddr` / handler 的函数保守处理。
-- 测试：`tests/opt_levels.sh`（CTest `py23_opt_levels`）三档各跑容器、
+- 测试：`tests/opt_levels.sh`（CTest `pa_opt_levels`）三档各跑容器、
   推导式、免检查、序言/跳转回归；新增 `45_opt_semantics.py`。
 
 ### 验证与基准
@@ -412,8 +412,8 @@ C3 MRO、零参 super()、方法装饰器与 match 边角收尾。
 - `@property` + `@x.setter` + `@x.deleter`：属性读写删分别编译成
   getter/setter/deleter 虚调用，沿 MRO 继承。
 - vtable 前元数据扩成 5 个字：MRO 元数据指针表、类编号、vtable、本类声明的
-  槽表、模块限定类名；新增 `py23_is_named_class` / `py23_super_lookup`。
-- 静态字符串字面量在模块入口通过 `py23_register_literals` 登记进 RC 索引，
+  槽表、模块限定类名；新增 `pa_is_named_class` / `pa_super_lookup`。
+- 静态字符串字面量在模块入口通过 `pa_register_literals` 登记进 RC 索引，
   unknown 值上的字符串模式可以安全比较字面量。
 - match 边角：捕获名在 case 结束后仍可见（各分支类型 join）；unknown 值上的
   字符串/复数模式；导入类点分类名（按限定名检查 MRO，字段子模式仍不支持）；
@@ -448,9 +448,9 @@ match 收尾：类模式、值模式、`as`、OR 捕获与映射 `**rest`。
 - 内置/自定义异常类模式：`case ValueError():`，按运行时异常类型和父子关系匹配。
 - 内置类型模式（`case int():` 等）在 subject 静态类型已知时编译期判定。
 - 运行期安全检查：unknown 值上的序列模式先查 list/tuple 载体，映射模式先查
-  dict 载体；类模式用 `py23_isinstance` 查 RC 注册表和 vtable 祖先表，
+  dict 载体；类模式用 `pa_isinstance` 查 RC 注册表和 vtable 祖先表，
   原始整数等非堆值安全返回 false。
-- 运行时：新增 `PY23_RC_INSTANCE` 类实例 kind；vtable 前增加 16 字节元数据
+- 运行时：新增 `PYADAMAS_RC_INSTANCE` 类实例 kind；vtable 前增加 16 字节元数据
   （祖先编号表 + 类编号），对象布局与虚调用槽位不变。
 - 测试：`39_match_advanced.py`、`f35_match_no_match_args.py`、
   `f36_match_or_names.py`。
@@ -510,10 +510,10 @@ match 收尾：类模式、值模式、`as`、OR 捕获与映射 `**rest`。
   `pass` / 文档字符串。
 - `raise X from cause` 和 `e.__cause__`；`raise ... from None` 清空原因。
 - 内置函数 `any` / `all`：短路，支持 list/tuple/str/dict/set。
-- 测试提速：`run_tests.sh` 支持 `PY23_TEST_FILTER` / `PY23_TEST_JOBS`
+- 测试提速：`run_tests.sh` 支持 `PYADAMAS_TEST_FILTER` / `PYADAMAS_TEST_JOBS`
   并并行跑运行/模块用例；`run_diff.py` 加 `--jobs`。全量套件约 3s，
   810 程序差分约 8s。
-- 修复 `py23_raise` 手工构造异常时未初始化 `cause` 的崩溃。
+- 修复 `pa_raise` 手工构造异常时未初始化 `cause` 的崩溃。
 
 ### 验证
 
@@ -588,9 +588,9 @@ Future 完成回调与失败结果。
 - `Future.add_done_callback(fn)`：完成时按注册顺序同步调用 `fn(future)`；
   对已完成的 Future 注册会立即调用；取消也会触发回调。
 - `Future.set_exception(msg)`：把 Future 标记为失败，`await` 时抛出
-  `Exception(msg)`，`exception()` 返回该消息。py23 的异常不是一等值，
+  `Exception(msg)`，`exception()` 返回该消息。PyAdamas 的异常不是一等值，
   所以参数是消息字符串而不是异常对象。
-- 运行时新增 `py23_call1` 跳板，按闭包 ABI（`%r10` 环境 + `%rdi` 参数）
+- 运行时新增 `pa_call1` 跳板，按闭包 ABI（`%r10` 环境 + `%rdi` 参数）
   调用函数值；回调列表参与引用计数和 GC。
 - 用例 `tests/run/30_future_cb.py`。
 
@@ -826,7 +826,7 @@ asyncio Task：`create_task`、`done()` / `cancel()` 与 `CancelledError`。
 - 类型系统新增 `Generator[T]`：yield 值类型取公共上界，`for` / `next` /
   `.send` / `.close` / `.__next__` 接入；返回生成器的普通工厂函数不再
   被误判成生成器函数。
-- `for x in gen` 走 `py23_gen_next_opt`，结束时不建异常；`next(gen)`
+- `for x in gen` 走 `pa_gen_next_opt`，结束时不建异常；`next(gen)`
   在结束时抛 `StopIteration`；`send()` 把值送入 `x = yield v`。
 - **跨 yield 清理**：`yield` 时把活跃 handler 记录从全局栈摘下，恢复时
   按原顺序重挂并重新 setjmp；`close()`、引用计数归零和 GC 前的
@@ -907,7 +907,7 @@ asyncio Task：`create_task`、`done()` / `cancel()` 与 `CancelledError`。
 - 运行时 `rt.o` 由 CMake 自定义命令生成，编译器宏里的绝对路径由
   `CMAKE_BINARY_DIR` 注入；`clean-modcache` 目标清理模块缓存。
 - 原 Makefile 的测试 shell 逻辑抽到 `tests/run_tests.sh`，由 CTest
-  注册为 `py23_suite`：`ctest --preset dev`。
+  注册为 `pa_suite`：`ctest --preset dev`。
 
 ## [0.14b] - 2026-11-09
 
@@ -915,9 +915,9 @@ asyncio Task：`create_task`、`done()` / `cancel()` 与 `CancelledError`。
 
 ### 新增
 
-- `.py23i` class 记录：扁平字段（根→派生顺序）、方法名/槽号/调用签名、
+- `.pya` class 记录：扁平字段（根→派生顺序）、方法名/槽号/调用签名、
   `has_init`、构造签名、`ctor_symbol`；格式版本升到 2。
-- 定义模块为每个类生成构造包装 `py23$m$n$C`（ObjNew + 字段初值 +
+- 定义模块为每个类生成构造包装 `pyadamas$m$n$C`（ObjNew + 字段初值 +
   `__init__`），模块 init 绑定到隐藏全局。
 - 导入方支持 `import m; m.C(...)`、`from m import C`，字段读写和方法
   调用使用导出的偏移/槽位；继承类按最终布局拍平。
@@ -942,19 +942,19 @@ asyncio Task：`create_task`、`done()` / `cancel()` 与 `CancelledError`。
 - **模块图**：入口目录 + `-I` 搜索路径；单层模块 `import m` /
   `import m as n` / `from m import x as y`；点号/相对/星号 import
   明确报错；循环导入编译期检测。
-- **二进制 `.py23i`**：模块全局名 + 递归类型编码 + 函数签名（含
+- **二进制 `.pya`**：模块全局名 + 递归类型编码 + 函数签名（含
   `posonly`、`kwonly`、`*args`/`**kwargs`、字面量默认值）+ FNV-1a
   校验；文本 manifest 记录源码哈希、依赖接口哈希和 ABI 版本。
 - **独立编译与链接**：每个模块汇编成独立 `.o`，入口、依赖和 `rt.o`
-  链接；入口也走缓存。模块符号 `py23$m$g$x` / `ready` / `init` /
+  链接；入口也走缓存。模块符号 `pyadamas$m$g$x` / `ready` / `init` /
   `roots`。
-- **惰性初始化**：`import` 在语句点调用 `py23_import_module`，模块顶层
-  只执行一次；模块 init 先 `py23_gc_add_roots` 注册全局根表，不释放
+- **惰性初始化**：`import` 在语句点调用 `pa_import_module`，模块顶层
+  只执行一次；模块 init 先 `pa_gc_add_roots` 注册全局根表，不释放
   全局也不 shutdown。
 - **跨模块名称**：`m.x` 直接读写外部全局，`m.f()` 调用外部闭包；
   `from m import x` 在导入点做快照绑定；`__name__` / `__file__` 按模块
   设置，入口是 `"__main__"`。
-- **缓存**：manifest 命中时复用 `.o` / `.py23i`；源码体变化但接口不变
+- **缓存**：manifest 命中时复用 `.o` / `.pya`；源码体变化但接口不变
   只重编模块本身，接口变化才重编依赖方；`--rebuild` 强制全量。
 - 用例 `tests/modules/{basic,lazy,chain,values,gcroot}`；`make test`
   同时验证运行输出和二次构建缓存命中。
@@ -971,7 +971,7 @@ asyncio Task：`create_task`、`done()` / `cancel()` 与 `CancelledError`。
 
 - 只支持本地单层 `.py`；不支持点号模块、相对导入、`import *`
 - 跨模块类（0.14b）和内置 `math` / `sys`（0.14c）尚未接入
-- 模块导出类型含 class 时 `.py23i` 无法编码
+- 模块导出类型含 class 时 `.pya` 无法编码
 - 模块初始化失败后 ready 已置位，不会重试
 - 缓存不跟踪编译器版本；编译器 ABI 变化时需要 `--rebuild` 或清理
   `modcache`
@@ -990,7 +990,7 @@ asyncio Task：`create_task`、`done()` / `cancel()` 与 `CancelledError`。
   `with.__exit__` 或 `finally`。
 - **异常对象**：内置异常名 + 消息字符串。`except` 按名称和层级匹配
   （`KeyError → LookupError → Exception` 等）；`as e` 绑定的是**消息
-  字符串**。未捕获异常打印 `py23: uncaught ValueError: msg` 后 `exit(1)`。
+  字符串**。未捕获异常打印 `PyAdamas: uncaught ValueError: msg` 后 `exit(1)`。
 - **try/except/else**：多个 handler、tuple 类型 `except (A, B)`、bare
   `except:`、`else`；handler 体再次抛异常时先 `ExcDone` 再继续展开。
 - **try/finally**：正常、异常、`return`、`break`、`continue` 都会执行
@@ -1059,12 +1059,12 @@ asyncio Task：`create_task`、`done()` / `cancel()` 与 `CancelledError`。
   （`d.popitem()[0]` 不再退化成 unknown）；装饰后的函数名绑定到装饰器
   返回的函数签名，调用点可以正常做参数检查与数值转换
 - **unknown 保守 retain**：unknown 值写入 cell / 容器前调用
-  `py23_rc_inc_unknown`，运行时按堆注册表判断是否堆指针再 +1。修复了
+  `pa_rc_inc_unknown`，运行时按堆注册表判断是否堆指针再 +1。修复了
   装饰器参数 `f` 这类 unknown 捕获在源引用释放后悬空的 UAF；注册表索引
   用墓碑复用 + 按存活数压缩，长循环下不膨胀
-- 运行时新增 `py23_dict_pop/popitem/pop_last/remove/clear`、
-  `py23_list_slice_assign`、`py23_list_extend`、`py23_str_to_list`、
-  `py23_range_new`、`py23_rc_inc_unknown`
+- 运行时新增 `pa_dict_pop/popitem/pop_last/remove/clear`、
+  `pa_list_slice_assign`、`pa_list_extend`、`pa_str_to_list`、
+  `pa_range_new`、`pa_rc_inc_unknown`
 - 运行用例 `16_dict_del` ~ `21_decorator`；未建模用例
   `decorated_method` / `class_decorator`
 
@@ -1097,7 +1097,7 @@ asyncio Task：`create_task`、`done()` / `cancel()` 与 `CancelledError`。
 ### 新增
 
 - **dict 方法**：
-  - `get(k[, default])`：有默认值走 `py23_dict_get_or`；没有默认值时
+  - `get(k[, default])`：有默认值走 `pa_dict_get_or`；没有默认值时
     缺失像 `[]` 一样 panic（静态返回类型不是 Optional）
   - `keys()` / `values()` / `items()`：返回新 list；`items()` 的元素是
     `(key, value)` 元组，按插入顺序；元素按 key_own/val_own 接入 RC
@@ -1107,7 +1107,7 @@ asyncio Task：`create_task`、`done()` / `cancel()` 与 `CancelledError`。
 - **切片（读）**：`s[a:b:c]` 支持 str / list / tuple，缺省边界、负索引、
   正负步长都按 Python 语义；长度和边界在运行时归一化，结果列表按源
   `elem_kind` 接管元素引用
-- `py23_list_slice` / `py23_str_slice`、`py23_dict_get_or/keys/values/
+- `pa_list_slice` / `pa_str_slice`、`pa_dict_get_or/keys/values/
   items/update`
 - `tests/run/15_slice.py`；`tests/run/14_dict.py` 扩展方法用例
 
@@ -1141,18 +1141,18 @@ asyncio Task：`create_task`、`done()` / `cancel()` 与 `CancelledError`。
   key_own, val_own}`，`order` 保留插入顺序；`len` 在偏移 0，`len()` 和
   真值判断都是一条读
 - **key 类别**：int/bool、str（FNV-1a）、float（规范化 -0.0）、其他按
-  机器字比较；字符串 key 用 `py23_str_eq` 判等
+  机器字比较；字符串 key 用 `pa_str_eq` 判等
 - **key/value 所有权**：`key_own` / `val_own` 区分非堆、堆、unknown；
   插入时降级器 retain，更新/销毁时运行时 dec；unknown 靠 GC 兜底
 - **set 复用 dict**：`val_own = 0`、值恒 0；集合字面量、`in`、`for`
   都走同一张表
-- **下标读写**：`d[k]` → `py23_dict_get`（缺失 panic KeyError），
-  `d[k] = v` → `py23_dict_set`；key 按字典声明类型做数值转换
-- **迭代**：`for k in d` / `for x in s` 按下标 `py23_dict_key_at` 取 key
-- **`in`**：dict/set 用 `py23_dict_contains`；list/tuple 用
-  `py23_list_contains`（int/str/float/raw 四种比较）；str 子串用
-  `py23_str_contains`；支持 `not in`
-- **GC**：`PY23_RC_DICT` 扫描条目 key/value，清扫时用 `dict_gc_release`
+- **下标读写**：`d[k]` → `pa_dict_get`（缺失 panic KeyError），
+  `d[k] = v` → `pa_dict_set`；key 按字典声明类型做数值转换
+- **迭代**：`for k in d` / `for x in s` 按下标 `pa_dict_key_at` 取 key
+- **`in`**：dict/set 用 `pa_dict_contains`；list/tuple 用
+  `pa_list_contains`（int/str/float/raw 四种比较）；str 子串用
+  `pa_str_contains`；支持 `not in`
+- **GC**：`PYADAMAS_RC_DICT` 扫描条目 key/value，清扫时用 `dict_gc_release`
   只减可达对象的引用；`entries` / `order` 在 dtor/GC/退出时释放
 - `tests/run/14_dict.py`；`tests/run/13_gc.py` 增加字典自环
 
@@ -1192,7 +1192,7 @@ asyncio Task：`create_task`、`done()` / `cancel()` 与 `CancelledError`。
 ### 新增
 
 - **lambda 脱糖**：解析后把 `lambda` 展开成插在语句前的合成嵌套 `def`
-  （名字形如 `__py23$lambda_N`），表达式位置替换成这个名字。类型检查、
+  （名字形如 `__pyadamas$lambda_N`），表达式位置替换成这个名字。类型检查、
   闭包捕获、cell、引用计数全部复用普通函数路径
 - **签名携带默认表达式**：`Param::default_expr` 指向 AST 默认值，通过
   函数值 / lambda 调用时也能内联填充默认参数（以前只认 `def` 名字）
@@ -1204,9 +1204,9 @@ asyncio Task：`create_task`、`done()` / `cancel()` 与 `CancelledError`。
   - 标记阶段保守扫描列表元素、对象字段、闭包 cell；清扫阶段先只对
     「不可达对象 → 可达对象」的引用做 rc 递减（`release` 回调），
     再统一释放，避免释放顺序问题
-  - 入口函数退出时 `py23_gc_shutdown` 清空剩余堆对象（含环），
+  - 入口函数退出时 `pa_gc_shutdown` 清空剩余堆对象（含环），
     LSan 零报告
-- 生成代码：全局根表 `.Lgroots`、`py23_gc_init`、每个有堆字段的类多一个
+- 生成代码：全局根表 `.Lgroots`、`pa_gc_init`、每个有堆字段的类多一个
   `.LgcrelN`（GC 用 release），对象分配传 `dtor + release`
 - `tests/run/12_lambda.py`、`tests/run/13_gc.py`
 
@@ -1264,7 +1264,7 @@ asyncio Task：`create_task`、`done()` / `cancel()` 与 `CancelledError`。
 - **自递归优化**：嵌套函数直接引用自己的名字时使用当前闭包/env，不生成
   self cell 环；`make_fact()` 这类递归工厂不再泄漏
 - `tests/run/11_closure.py`、`tests/fail/f34_nonlocal.py`
-- 运行时 `py23_closure_new` / 闭包析构器
+- 运行时 `pa_closure_new` / 闭包析构器
 
 ### 修复
 
@@ -1304,19 +1304,19 @@ asyncio Task：`create_task`、`done()` / `cancel()` 与 `CancelledError`。
 - **隐藏 RC 头**：每个堆对象前面 16 字节 `{rc, dtor}`，负载指针和所有字段
   偏移保持不变（字符串 `len` 仍在 +0，对象 vtable 仍在 +0）
 - **字面量永生**：`.data.rel.ro` 里的字符串前置 `rc = INT64_MIN`，inc/dec 跳过
-- **临时值栈**：`py23_rc_mark` / `py23_rc_temp` / `py23_rc_cleanup`；语句、
+- **临时值栈**：`pa_rc_mark` / `pa_rc_temp` / `pa_rc_cleanup`；语句、
   `while` / `for`、函数返回值都按水位清理
 - **所有权规则**：槽 / 全局 / 字段 / kind 1 列表元素持有引用；load /
   `field.get` / `list.get` 借用；形参入口 retain、出口释放；返回值 retain
-- **容器元素类别**：`py23_list_new(cap, elem_kind)`；kind 1 的元素在覆盖、
+- **容器元素类别**：`pa_list_new(cap, elem_kind)`；kind 1 的元素在覆盖、
   截断、销毁时由运行时 dec；kind 2（unknown / 混合）只 retain 不 release
 - **对象析构器**：codegen 按 `IRClass::field_heap` 生成 `.LdtorN`，只 dec
-  堆字段；`py23_obj_new(size, dtor)`
+  堆字段；`pa_obj_new(size, dtor)`
 - **RC 脚手架消除**：语句 / 循环 / 函数完全没有临时堆值时，mark 和 cleanup
   在降级期删掉；纯整数代码的生成结果与 0.6.1 完全相同
 - `tests/run/10_rc.py`：覆盖别名、字段、列表、返回值、字符串迭代、
   `continue` 跳过清理等场景
-- 入口函数返回前释放全局变量并 `py23_rc_shutdown`，保持 ASan 零泄漏基线
+- 入口函数返回前释放全局变量并 `pa_rc_shutdown`，保持 ASan 零泄漏基线
 
 ### 修复
 
@@ -1394,7 +1394,7 @@ asyncio Task：`create_task`、`done()` / `cancel()` 与 `CancelledError`。
 - `Optional[Cls]` 上的字段访问与方法调用带运行时空指针检查
 - `print(obj)` 输出 `<Point object>`
 - IR 新指令：`obj.new` / `field.get` / `field.set` / `vcall`；`IRModule::classes`
-- 运行时 `py23_obj_new(size)`（`calloc`，全零）
+- 运行时 `pa_obj_new(size)`（`calloc`，全零）
 - `tests/09_class.py`（类型正例）、`tests/run/09_class.py`（运行用例）、6 个类相关反例
 
 ### 修复
@@ -1478,13 +1478,13 @@ asyncio Task：`create_task`、`done()` / `cancel()` 与 `CancelledError`。
 - f-string 里的表达式从未被类型检查
 - vreg 槽位复用忽略控制流回边，循环第二轮读到垃圾（段错误）
 - 整数除零与 `INT64_MIN / -1` 触发 `SIGFPE`，改为带消息的 panic
-- `py23 run` 在源码旁边留下可执行文件，改为临时文件、跑完即删
+- `pyadamas run` 在源码旁边留下可执行文件，改为临时文件、跑完即删
 - 字符串常量放 `.rodata` 触发 PIE 重定位警告，改 `.data.rel.ro`
 
 ### 移除
 
 - 死指令 `IrOp::Print`（降级器从不产出，codegen 里是空 `case`）
-- 无人调用的 `py23_pow_f64` / `py23_fmod_f64` 包装
+- 无人调用的 `pa_pow_f64` / `pa_fmod_f64` 包装
 
 ## [0.3] - 阶段
 

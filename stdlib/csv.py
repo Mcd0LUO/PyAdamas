@@ -1,4 +1,4 @@
-"""csv 模块的 py23 子集（纯 py23 源码，随编译器分发）。
+"""csv 模块的 pyadamas 子集（纯 pyadamas 源码，随编译器分发）。
 
 reader(f) 一次读完整个文件，返回 list[list[str]]；writer(f) 是带
 writerow / writerows 的类。支持 delimiter / quotechar / quoting /

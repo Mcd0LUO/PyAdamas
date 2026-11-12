@@ -7,7 +7,7 @@
 #include "ir.h"
 #include "typecheck.h"
 
-namespace py23 {
+namespace pyadamas {
 
 struct LowerError {
     int line = 1;
@@ -39,4 +39,4 @@ struct LowerOptions {
 LowerResult lower_module(Module& ast, TypeChecker& tc, const std::string& file,
                          const LowerOptions& options = {});
 
-}  // namespace py23
+}  // namespace pyadamas

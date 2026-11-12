@@ -20,45 +20,45 @@ static void os_raise(const char* what, int err) {
     }
     char buf[512];
     snprintf(buf, sizeof buf, "%s: %s", what, strerror(err));
-    py23_raise_c(type, buf);
+    pa_raise_c(type, buf);
 }
 
-void py23_os_mkdir(Py23Str* path) {
+void pa_os_mkdir(PyAdamasStr* path) {
     if (mkdir(path->data, 0777) != 0) os_raise("mkdir", errno);
 }
 
-void py23_os_rmdir(Py23Str* path) {
+void pa_os_rmdir(PyAdamasStr* path) {
     if (rmdir(path->data) != 0) os_raise("rmdir", errno);
 }
 
-void py23_os_remove(Py23Str* path) {
+void pa_os_remove(PyAdamasStr* path) {
     if (unlink(path->data) != 0) os_raise("remove", errno);
 }
 
-void py23_os_rename(Py23Str* from, Py23Str* to) {
+void pa_os_rename(PyAdamasStr* from, PyAdamasStr* to) {
     if (rename(from->data, to->data) != 0) os_raise("rename", errno);
 }
 
-Py23Str* py23_os_getcwd(void) {
+PyAdamasStr* pa_os_getcwd(void) {
     char buf[4096];
     if (!getcwd(buf, sizeof buf)) os_raise("getcwd", errno);
     return str_new(buf, (int64_t)strlen(buf));
 }
 
-int64_t py23_os_cpu_count(void) {
+int64_t pa_os_cpu_count(void) {
     long n = sysconf(_SC_NPROCESSORS_ONLN);
     return n > 0 ? (int64_t)n : 1;
 }
 
 /* os.path.join 的 posix 语义：后一段以 '/' 开头就整体替换，
    否则按需补一个分隔符；空段照样补分隔符（join("a", "") == "a/"）。 */
-Py23Str* py23_os_path_join(Py23List* parts) {
+PyAdamasStr* pa_os_path_join(PyAdamasList* parts) {
     size_t cap = 64, len = 0;
     char* out = (char*)malloc(cap);
     if (!out) panic_c("out of memory");
     out[0] = '\0';
     for (int64_t i = 0; i < parts->len; ++i) {
-        Py23Str* p = (Py23Str*)parts->data[i];
+        PyAdamasStr* p = (PyAdamasStr*)parts->data[i];
         int64_t n = p->len;
         size_t need = len + (size_t)n + 2;
         if (need > cap) {
@@ -80,42 +80,42 @@ Py23Str* py23_os_path_join(Py23List* parts) {
         }
         out[len] = '\0';
     }
-    Py23Str* res = str_new(out, (int64_t)len);
+    PyAdamasStr* res = str_new(out, (int64_t)len);
     free(out);
     return res;
 }
 
-int64_t py23_os_path_exists(Py23Str* path) {
+int64_t pa_os_path_exists(PyAdamasStr* path) {
     return access(path->data, F_OK) == 0 ? 1 : 0;
 }
 
-int64_t py23_os_path_isdir(Py23Str* path) {
+int64_t pa_os_path_isdir(PyAdamasStr* path) {
     struct stat st;
     return stat(path->data, &st) == 0 && S_ISDIR(st.st_mode) ? 1 : 0;
 }
 
-int64_t py23_os_path_isfile(Py23Str* path) {
+int64_t pa_os_path_isfile(PyAdamasStr* path) {
     struct stat st;
     return stat(path->data, &st) == 0 && S_ISREG(st.st_mode) ? 1 : 0;
 }
 
 /* ── os 扩展：目录枚举、环境变量 ─────────────────────────────── */
 
-Py23List* py23_os_listdir(Py23Str* path) {
+PyAdamasList* pa_os_listdir(PyAdamasStr* path) {
     DIR* d = opendir(path->data);
     if (!d) os_raise("listdir", errno);
-    Py23List* out = py23_list_new(0, 1);
+    PyAdamasList* out = pa_list_new(0, 1);
     struct dirent* e;
     while ((e = readdir(d)) != NULL) {
         if (strcmp(e->d_name, ".") == 0 || strcmp(e->d_name, "..") == 0) continue;
-        Py23Str* s = str_new(e->d_name, (int64_t)strlen(e->d_name));
-        py23_list_append(out, (int64_t)s);
+        PyAdamasStr* s = str_new(e->d_name, (int64_t)strlen(e->d_name));
+        pa_list_append(out, (int64_t)s);
     }
     closedir(d);
     return out;
 }
 
-Py23Str* py23_os_getenv(Py23Str* name, Py23Str* def) {
+PyAdamasStr* pa_os_getenv(PyAdamasStr* name, PyAdamasStr* def) {
     const char* v = getenv(name->data);
     if (!v) return str_new(def->data, def->len);
     return str_new(v, (int64_t)strlen(v));
@@ -129,12 +129,12 @@ static int64_t last_slash(const char* p, int64_t n) {
     return -1;
 }
 
-Py23Str* py23_os_path_basename(Py23Str* s) {
+PyAdamasStr* pa_os_path_basename(PyAdamasStr* s) {
     int64_t i = last_slash(s->data, s->len);
     return str_new(s->data + i + 1, s->len - i - 1);
 }
 
-Py23Str* py23_os_path_dirname(Py23Str* s) {
+PyAdamasStr* pa_os_path_dirname(PyAdamasStr* s) {
     int64_t i = last_slash(s->data, s->len);
     if (i < 0) return str_new("", 0);
     int64_t end = i + 1;
@@ -142,7 +142,7 @@ Py23Str* py23_os_path_dirname(Py23Str* s) {
     return str_new(s->data, end);
 }
 
-Py23List* py23_os_path_splitext(Py23Str* s) {
+PyAdamasList* pa_os_path_splitext(PyAdamasStr* s) {
     int64_t sep = last_slash(s->data, s->len);
     int64_t dot = -1;
     for (int64_t i = s->len - 1; i > sep; --i)
@@ -157,11 +157,11 @@ Py23List* py23_os_path_splitext(Py23Str* s) {
         while (k < dot && s->data[k] == '.') ++k;
         if (k < dot) cut = dot;
     }
-    Py23List* out = py23_list_new(2, 1);
-    Py23Str* root = str_new(s->data, cut);
-    Py23Str* ext = str_new(s->data + cut, s->len - cut);
-    py23_list_append(out, (int64_t)root);
-    py23_list_append(out, (int64_t)ext);
+    PyAdamasList* out = pa_list_new(2, 1);
+    PyAdamasStr* root = str_new(s->data, cut);
+    PyAdamasStr* ext = str_new(s->data + cut, s->len - cut);
+    pa_list_append(out, (int64_t)root);
+    pa_list_append(out, (int64_t)ext);
     return out;
 }
 
@@ -170,7 +170,7 @@ typedef struct {
     int64_t n;
 } PathComp;
 
-Py23Str* py23_os_path_normpath(Py23Str* s) {
+PyAdamasStr* pa_os_path_normpath(PyAdamasStr* s) {
     const char* p = s->data;
     int64_t n = s->len;
     int64_t initial_slashes = 0;
@@ -224,7 +224,7 @@ Py23Str* py23_os_path_normpath(Py23Str* s) {
         if (initial_slashes) return str_new("/", initial_slashes);
         return str_new(".", 1);
     }
-    Py23Str* out = str_alloc(total);
+    PyAdamasStr* out = str_alloc(total);
     char* q = (char*)out->data;
     int64_t pos = 0;
     for (int64_t k = 0; k < initial_slashes; ++k) q[pos++] = '/';
@@ -237,8 +237,8 @@ Py23Str* py23_os_path_normpath(Py23Str* s) {
     return out;
 }
 
-Py23Str* py23_os_path_abspath(Py23Str* s) {
-    if (s->len > 0 && s->data[0] == '/') return py23_os_path_normpath(s);
+PyAdamasStr* pa_os_path_abspath(PyAdamasStr* s) {
+    if (s->len > 0 && s->data[0] == '/') return pa_os_path_normpath(s);
     char cwd[4096];
     if (!getcwd(cwd, sizeof cwd)) os_raise("getcwd", errno);
     size_t cl = strlen(cwd);
@@ -248,14 +248,14 @@ Py23Str* py23_os_path_abspath(Py23Str* s) {
     joined[cl] = '/';
     memcpy(joined + cl + 1, s->data, (size_t)s->len);
     joined[cl + 1 + (size_t)s->len] = 0;
-    Py23Str* tmp = str_new(joined, (int64_t)(cl + 1 + (size_t)s->len));
+    PyAdamasStr* tmp = str_new(joined, (int64_t)(cl + 1 + (size_t)s->len));
     free(joined);
-    Py23Str* out = py23_os_path_normpath(tmp);
-    py23_rc_dec(tmp);
+    PyAdamasStr* out = pa_os_path_normpath(tmp);
+    pa_rc_dec(tmp);
     return out;
 }
 
-Py23Str* py23_os_path_expanduser(Py23Str* s) {
+PyAdamasStr* pa_os_path_expanduser(PyAdamasStr* s) {
     if (s->len == 0 || s->data[0] != '~') return str_new(s->data, s->len);
     int64_t i = 1;
     while (i < s->len && s->data[i] != '/') ++i;
@@ -268,32 +268,32 @@ Py23Str* py23_os_path_expanduser(Py23Str* s) {
     memcpy(joined, home, hl);
     memcpy(joined + hl, s->data + 1, (size_t)(s->len - 1));
     joined[hl + (size_t)(s->len - 1)] = 0;
-    Py23Str* out = str_new(joined, (int64_t)(hl + (size_t)(s->len - 1)));
+    PyAdamasStr* out = str_new(joined, (int64_t)(hl + (size_t)(s->len - 1)));
     free(joined);
     return out;
 }
 
 /* ── 补充的常用项 ───────────────────────────────────────────── */
 
-int64_t py23_os_getpid(void) { return (int64_t)getpid(); }
+int64_t pa_os_getpid(void) { return (int64_t)getpid(); }
 
-void py23_os_chdir(Py23Str* path) {
+void pa_os_chdir(PyAdamasStr* path) {
     if (chdir(path->data) != 0) os_raise("chdir", errno);
 }
 
-void py23_os_chmod(Py23Str* path, int64_t mode) {
+void pa_os_chmod(PyAdamasStr* path, int64_t mode) {
     if (chmod(path->data, (mode_t)mode) != 0) os_raise("chmod", errno);
 }
 
-int64_t py23_os_access(Py23Str* path, int64_t mode) {
+int64_t pa_os_access(PyAdamasStr* path, int64_t mode) {
     return access(path->data, (int)mode) == 0 ? 1 : 0;
 }
 
 /* makedirs：逐级创建。中间层已存在直接跳过；最后一级已存在时，只有
    exist_ok 为真才不报错（和 CPython 一致）。 */
-void py23_os_makedirs(Py23Str* path, int64_t exist_ok) {
+void pa_os_makedirs(PyAdamasStr* path, int64_t exist_ok) {
     int64_t n = path->len;
-    if (n == 0) py23_raise_c("FileNotFoundError", "No such file or directory");
+    if (n == 0) pa_raise_c("FileNotFoundError", "No such file or directory");
     char* buf = (char*)malloc((size_t)n + 1);
     if (!buf) panic_c("out of memory");
     memcpy(buf, path->data, (size_t)n);
@@ -315,45 +315,45 @@ void py23_os_makedirs(Py23Str* path, int64_t exist_ok) {
     free(buf);
 }
 
-Py23Str* py23_os_path_realpath(Py23Str* s) {
+PyAdamasStr* pa_os_path_realpath(PyAdamasStr* s) {
     char* r = realpath(s->data, NULL);
     if (!r) return str_new(s->data, s->len);
-    Py23Str* out = str_new(r, (int64_t)strlen(r));
+    PyAdamasStr* out = str_new(r, (int64_t)strlen(r));
     free(r);
     return out;
 }
 
-int64_t py23_os_path_getsize(Py23Str* s) {
+int64_t pa_os_path_getsize(PyAdamasStr* s) {
     struct stat st;
     if (stat(s->data, &st) != 0) os_raise("getsize", errno);
     return (int64_t)st.st_size;
 }
 
-double py23_os_path_getmtime(Py23Str* s) {
+double pa_os_path_getmtime(PyAdamasStr* s) {
     struct stat st;
     if (stat(s->data, &st) != 0) os_raise("getmtime", errno);
     return (double)st.st_mtime;
 }
 
 /* os.path.split：拆成 (head, tail)，规则与 posixpath 一致。 */
-Py23List* py23_os_path_split(Py23Str* s) {
+PyAdamasList* pa_os_path_split(PyAdamasStr* s) {
     int64_t n = s->len;
     int64_t i = n;
     while (i > 0 && s->data[i - 1] == '/') --i;
     while (i > 0 && s->data[i - 1] != '/') --i;
     int64_t head_len = i;
     while (head_len > 1 && s->data[head_len - 1] == '/') --head_len;
-    Py23Str* head = str_new(s->data, head_len);
-    Py23Str* tail = str_new(s->data + i, n - i);
-    Py23List* out = py23_list_new(2, 1);
-    py23_rc_inc(head);
-    py23_list_append(out, (int64_t)head);
-    py23_rc_inc(tail);
-    py23_list_append(out, (int64_t)tail);
+    PyAdamasStr* head = str_new(s->data, head_len);
+    PyAdamasStr* tail = str_new(s->data + i, n - i);
+    PyAdamasList* out = pa_list_new(2, 1);
+    pa_rc_inc(head);
+    pa_list_append(out, (int64_t)head);
+    pa_rc_inc(tail);
+    pa_list_append(out, (int64_t)tail);
     return out;
 }
 
-int64_t py23_os_path_samefile(Py23Str* a, Py23Str* b) {
+int64_t pa_os_path_samefile(PyAdamasStr* a, PyAdamasStr* b) {
     struct stat sa, sb;
     if (stat(a->data, &sa) != 0 || stat(b->data, &sb) != 0) return 0;
     return sa.st_dev == sb.st_dev && sa.st_ino == sb.st_ino;

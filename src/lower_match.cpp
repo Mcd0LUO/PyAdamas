@@ -1,7 +1,7 @@
 // lower_match.cpp —— match/case 与模式降级
 #include "lower_impl.h"
 
-namespace py23 {
+namespace pyadamas {
 
 void Lowerer::lower_match(Match& m) {
     TypePtr sty = tc_.type_of(m.subject.get());
@@ -512,4 +512,4 @@ void Lowerer::lower_pattern(Pattern& p, VReg value, TypePtr ty, int fail, bool i
     }
 }
 
-}  // namespace py23
+}  // namespace pyadamas

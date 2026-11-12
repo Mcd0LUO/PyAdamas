@@ -8,10 +8,10 @@
 /* ── 文件对象 ─────────────────────────────────────────────────── */
 
 /* newline 参数（与 Python 对应）。 */
-enum { PY23_NL_UNIVERSAL = 0, PY23_NL_NONE = 1, PY23_NL_LF = 2, PY23_NL_CR = 3,
-       PY23_NL_CRLF = 4 };
+enum { PYADAMAS_NL_UNIVERSAL = 0, PYADAMAS_NL_NONE = 1, PYADAMAS_NL_LF = 2, PYADAMAS_NL_CR = 3,
+       PYADAMAS_NL_CRLF = 4 };
 
-struct Py23File {
+struct PyAdamasFile {
     FILE* fp;
     int64_t fd;
     int64_t closed;
@@ -21,10 +21,10 @@ struct Py23File {
     int64_t writable;
     int64_t newline;
     char* vbuf;       /* buffering > 1 时自己分配的全缓冲 */
-    Py23Str* name;    /* 拥有 */
-    Py23Str* mode;    /* 拥有，规范化后的 Python 风格 mode */
-    Py23Str* encoding; /* 拥有，规范化后的编码名 */
-    Py23Str* errors;  /* 拥有，strict / ignore / replace */
+    PyAdamasStr* name;    /* 拥有 */
+    PyAdamasStr* mode;    /* 拥有，规范化后的 Python 风格 mode */
+    PyAdamasStr* encoding; /* 拥有，规范化后的编码名 */
+    PyAdamasStr* errors;  /* 拥有，strict / ignore / replace */
     iconv_t dec_cd;   /* 源编码 → UTF-8；NULL 表示恒等 */
     iconv_t enc_cd;   /* UTF-8 → 目标编码 */
     /* 解码缓冲：已转成 UTF-8 且做完换行翻译的字节 */
@@ -42,22 +42,22 @@ struct Py23File {
 };
 
 static void file_destroy(void* p) {
-    Py23File* f = (Py23File*)p;
+    PyAdamasFile* f = (PyAdamasFile*)p;
     if (f->fp) {
         fclose(f->fp);
         f->fp = NULL;
     }
     free(f->vbuf);
     free(f->dbuf);
-    if (f->name) py23_rc_dec(f->name);
-    if (f->mode) py23_rc_dec(f->mode);
-    if (f->encoding) py23_rc_dec(f->encoding);
-    if (f->errors) py23_rc_dec(f->errors);
+    if (f->name) pa_rc_dec(f->name);
+    if (f->mode) pa_rc_dec(f->mode);
+    if (f->encoding) pa_rc_dec(f->encoding);
+    if (f->errors) pa_rc_dec(f->errors);
     if (f->dec_cd) iconv_close(f->dec_cd);
     if (f->enc_cd) iconv_close(f->enc_cd);
 }
 
-static char* file_cstr(Py23Str* s) {
+static char* file_cstr(PyAdamasStr* s) {
     char* p = (char*)malloc((size_t)s->len + 1);
     if (!p) panic_c("out of memory");
     memcpy(p, s->data, (size_t)s->len);
@@ -65,8 +65,8 @@ static char* file_cstr(Py23Str* s) {
     return p;
 }
 
-static Py23Str* file_norm_lower(Py23Str* s) {
-    Py23Str* out = str_alloc(s->len);
+static PyAdamasStr* file_norm_lower(PyAdamasStr* s) {
+    PyAdamasStr* out = str_alloc(s->len);
     char* p = (char*)out->data;
     for (int64_t i = 0; i < s->len; ++i) {
         char c = s->data[i];
@@ -75,12 +75,12 @@ static Py23Str* file_norm_lower(Py23Str* s) {
     return out;
 }
 
-static int file_str_is(Py23Str* s, const char* lit) {
+static int file_str_is(PyAdamasStr* s, const char* lit) {
     size_t n = strlen(lit);
     return s && s->len == (int64_t)n && memcmp(s->data, lit, n) == 0;
 }
 
-Py23File* py23_file_open(Py23Str* path, int64_t fd, Py23Str* mode, int64_t buffering,
+PyAdamasFile* pa_file_open(PyAdamasStr* path, int64_t fd, PyAdamasStr* mode, int64_t buffering,
                          int64_t newline, int64_t closefd) {
     char base = 0;
     int plus = 0, bin = 0, text = 0;
@@ -90,7 +90,7 @@ Py23File* py23_file_open(Py23Str* path, int64_t fd, Py23Str* mode, int64_t buffe
         char c = mp[i];
         if (c == 'r' || c == 'w' || c == 'a' || c == 'x') {
             if (base)
-                py23_raise_c("ValueError", "invalid mode: exactly one of r/w/a/x expected");
+                pa_raise_c("ValueError", "invalid mode: exactly one of r/w/a/x expected");
             base = c;
         } else if (c == '+') {
             plus = 1;
@@ -99,13 +99,13 @@ Py23File* py23_file_open(Py23Str* path, int64_t fd, Py23Str* mode, int64_t buffe
         } else if (c == 't') {
             text = 1;
         } else {
-            py23_raise_c("ValueError", "invalid open() mode");
+            pa_raise_c("ValueError", "invalid open() mode");
         }
     }
-    if (!base) py23_raise_c("ValueError", "invalid open() mode");
-    if (bin && text) py23_raise_c("ValueError", "can't have text and binary mode at once");
+    if (!base) pa_raise_c("ValueError", "invalid open() mode");
+    if (bin && text) pa_raise_c("ValueError", "can't have text and binary mode at once");
     if (buffering == 0 && !bin)
-        py23_raise_c("ValueError", "can't have unbuffered text I/O");
+        pa_raise_c("ValueError", "can't have unbuffered text I/O");
 
     char cmode[8];
     int cn = 0;
@@ -120,11 +120,11 @@ Py23File* py23_file_open(Py23Str* path, int64_t fd, Py23Str* mode, int64_t buffe
         int fdc = (int)fd;
         if (!closefd) {
             fdc = dup(fdc);
-            if (fdc < 0) py23_raise_c("OSError", "bad file descriptor");
+            if (fdc < 0) pa_raise_c("OSError", "bad file descriptor");
         }
         fdnum = fdc;
         fp = fdopen(fdc, cmode);
-        if (!fp) py23_raise_c("OSError", "cannot open file descriptor");
+        if (!fp) pa_raise_c("OSError", "cannot open file descriptor");
     } else {
         char* p = file_cstr(path);
         if (base == 'x') {
@@ -140,12 +140,12 @@ Py23File* py23_file_open(Py23Str* path, int64_t fd, Py23Str* mode, int64_t buffe
             fp = fopen(p, cmode);
         }
         free(p);
-        if (!fp) py23_raise_c("OSError", "cannot open file");
+        if (!fp) pa_raise_c("OSError", "cannot open file");
         fdnum = fileno(fp);
     }
 
-    Py23File* f =
-        (Py23File*)rc_alloc((int64_t)sizeof(Py23File), file_destroy, NULL, PY23_RC_OBJ);
+    PyAdamasFile* f =
+        (PyAdamasFile*)rc_alloc((int64_t)sizeof(PyAdamasFile), file_destroy, NULL, PYADAMAS_RC_OBJ);
     memset(f, 0, sizeof *f);
     f->fp = fp;
     f->fd = fdnum;
@@ -153,9 +153,9 @@ Py23File* py23_file_open(Py23Str* path, int64_t fd, Py23Str* mode, int64_t buffe
     f->binary = bin;
     f->readable = base == 'r' || plus;
     f->writable = base != 'r' || plus;
-    f->newline = bin ? PY23_NL_NONE : (newline < 0 || newline > 4 ? 0 : newline);
+    f->newline = bin ? PYADAMAS_NL_NONE : (newline < 0 || newline > 4 ? 0 : newline);
     f->name = path;
-    if (f->name) py23_rc_inc(f->name);
+    if (f->name) pa_rc_inc(f->name);
     {
         char nb[4];
         int nn = 0;
@@ -179,21 +179,21 @@ Py23File* py23_file_open(Py23Str* path, int64_t fd, Py23Str* mode, int64_t buffe
 }
 
 /* encoding/errors 必须在任何 I/O 之前配置；未知编码抛 LookupError。 */
-void py23_file_config(Py23File* f, Py23Str* enc, Py23Str* errors) {
+void pa_file_config(PyAdamasFile* f, PyAdamasStr* enc, PyAdamasStr* errors) {
     if (!f) return;
     if (f->binary) {
         if (enc || errors)
-            py23_raise_c("ValueError",
+            pa_raise_c("ValueError",
                          "binary mode doesn't take an encoding/errors argument");
         return;
     }
-    Py23Str* e = enc ? file_norm_lower(enc) : str_new("utf-8", 5);
-    Py23Str* er = errors ? file_norm_lower(errors) : str_new("strict", 6);
+    PyAdamasStr* e = enc ? file_norm_lower(enc) : str_new("utf-8", 5);
+    PyAdamasStr* er = errors ? file_norm_lower(errors) : str_new("strict", 6);
     if (!file_str_is(er, "strict") && !file_str_is(er, "ignore") &&
         !file_str_is(er, "replace")) {
-        py23_rc_dec(e);
-        py23_rc_dec(er);
-        py23_raise_c("LookupError", "unknown error handler name");
+        pa_rc_dec(e);
+        pa_rc_dec(er);
+        pa_raise_c("LookupError", "unknown error handler name");
     }
     iconv_t d = (iconv_t)0;
     iconv_t en = (iconv_t)0;
@@ -246,30 +246,30 @@ void py23_file_config(Py23File* f, Py23Str* enc, Py23Str* errors) {
         }
         free(orig);
         if (d == (iconv_t)0) {
-            py23_rc_dec(e);
-            py23_rc_dec(er);
-            py23_raise_c("LookupError", "unknown encoding");
+            pa_rc_dec(e);
+            pa_rc_dec(er);
+            pa_raise_c("LookupError", "unknown encoding");
         }
     }
     if (f->dec_cd) iconv_close(f->dec_cd);
     if (f->enc_cd) iconv_close(f->enc_cd);
     f->dec_cd = d;
     f->enc_cd = en;
-    if (f->encoding) py23_rc_dec(f->encoding);
-    if (f->errors) py23_rc_dec(f->errors);
+    if (f->encoding) pa_rc_dec(f->encoding);
+    if (f->errors) pa_rc_dec(f->errors);
     f->encoding = e;
     f->errors = er;
 }
 
-static FILE* file_check(Py23File* f) {
+static FILE* file_check(PyAdamasFile* f) {
     if (!f || !f->fp || f->closed)
-        py23_raise_c("ValueError", "I/O operation on closed file");
+        pa_raise_c("ValueError", "I/O operation on closed file");
     return f->fp;
 }
 
 /* ── 文本模式的解码缓冲 ───────────────────────────────────────── */
 
-static void file_dbuf_append(Py23File* f, const char* p, int64_t n, int translate) {
+static void file_dbuf_append(PyAdamasFile* f, const char* p, int64_t n, int translate) {
     if (n <= 0) return;
     if (f->dlen + n > f->dcap) {
         int64_t ncap = f->dcap ? f->dcap : 8192;
@@ -302,7 +302,7 @@ static void file_dbuf_append(Py23File* f, const char* p, int64_t n, int translat
 }
 
 /* 把一块原始字节转成 UTF-8 并追加到解码缓冲；返回 1 表示读到了数据。 */
-static int file_fill(Py23File* f) {
+static int file_fill(PyAdamasFile* f) {
     if (f->eof) return 0;
     f->dpos = f->dlen = 0;
     char raw[8192];
@@ -324,7 +324,7 @@ static int file_fill(Py23File* f) {
         f->eof = 1;
         return f->dlen > 0;
     }
-    int translate = !f->binary && f->newline == PY23_NL_UNIVERSAL;
+    int translate = !f->binary && f->newline == PYADAMAS_NL_UNIVERSAL;
     if (!f->dec_cd) {
         file_dbuf_append(f, raw, total, translate);
     } else {
@@ -348,7 +348,7 @@ static int file_fill(Py23File* f) {
             }
             if (errno == EILSEQ) {
                 if (file_str_is(f->errors, "strict"))
-                    py23_raise_c("UnicodeDecodeError", "invalid byte sequence");
+                    pa_raise_c("UnicodeDecodeError", "invalid byte sequence");
                 if (file_str_is(f->errors, "replace"))
                     file_dbuf_append(f, "\xEF\xBF\xBD", 3, translate);
                 ++in;
@@ -362,13 +362,13 @@ static int file_fill(Py23File* f) {
     return f->dlen > 0;
 }
 
-static int file_takec(Py23File* f) {
+static int file_takec(PyAdamasFile* f) {
     if (f->dpos >= f->dlen && !file_fill(f)) return -1;
     ++f->text_off;
     return (unsigned char)f->dbuf[f->dpos++];
 }
 
-Py23Str* py23_file_read(Py23File* f, int64_t n) {
+PyAdamasStr* pa_file_read(PyAdamasFile* f, int64_t n) {
     FILE* fp = file_check(f);
     if (f->binary) {
         char* buf = NULL;
@@ -392,7 +392,7 @@ Py23Str* py23_file_read(Py23File* f, int64_t n) {
             if (n >= 0) remain -= (int64_t)got;
             if (got < want) break;
         }
-        Py23Str* s = str_new(buf ? buf : "", len);
+        PyAdamasStr* s = str_new(buf ? buf : "", len);
         free(buf);
         return s;
     }
@@ -415,12 +415,12 @@ Py23Str* py23_file_read(Py23File* f, int64_t n) {
         f->text_off += take;
         len += take;
     }
-    Py23Str* s = str_new(out ? out : "", len);
+    PyAdamasStr* s = str_new(out ? out : "", len);
     free(out);
     return s;
 }
 
-Py23Str* py23_file_readline(Py23File* f, int64_t size) {
+PyAdamasStr* pa_file_readline(PyAdamasFile* f, int64_t size) {
     FILE* fp = file_check(f);
     if (f->binary) {
         char* buf = NULL;
@@ -437,7 +437,7 @@ Py23Str* py23_file_readline(Py23File* f, int64_t size) {
             buf[len++] = (char)c;
             if (c == '\n') break;
         }
-        Py23Str* s = str_new(buf ? buf : "", len);
+        PyAdamasStr* s = str_new(buf ? buf : "", len);
         free(buf);
         return s;
     }
@@ -457,19 +457,19 @@ Py23Str* py23_file_readline(Py23File* f, int64_t size) {
         buf[len++] = (char)c;
         if (c == '\n') break;
     }
-    Py23Str* s = str_new(buf ? buf : "", len);
+    PyAdamasStr* s = str_new(buf ? buf : "", len);
     free(buf);
     return s;
 }
 
-Py23List* py23_file_readlines(Py23File* f, int64_t hint) {
-    Py23List* out = py23_list_new(4, 1);
+PyAdamasList* pa_file_readlines(PyAdamasFile* f, int64_t hint) {
+    PyAdamasList* out = pa_list_new(4, 1);
     int64_t total = 0;
     for (;;) {
-        Py23Str* line = py23_file_readline(f, -1);
+        PyAdamasStr* line = pa_file_readline(f, -1);
         if (line->len == 0) break;
-        py23_rc_inc(line);
-        py23_list_append(out, (int64_t)line);
+        pa_rc_inc(line);
+        pa_list_append(out, (int64_t)line);
         total += line->len;
         if (hint > 0 && total >= hint) break;
     }
@@ -479,10 +479,10 @@ Py23List* py23_file_readlines(Py23File* f, int64_t hint) {
 /* ── 写入 ─────────────────────────────────────────────────────── */
 
 /* 写侧换行翻译：newline="\r" / "\r\n" 时把 \n 换掉。 */
-static Py23Str* file_translate_write(Py23File* f, Py23Str* s) {
-    if ((f->newline != PY23_NL_CR && f->newline != PY23_NL_CRLF)) return s;
-    if (f->newline == PY23_NL_CR) {
-        Py23Str* out = str_new(s->data, s->len);
+static PyAdamasStr* file_translate_write(PyAdamasFile* f, PyAdamasStr* s) {
+    if ((f->newline != PYADAMAS_NL_CR && f->newline != PYADAMAS_NL_CRLF)) return s;
+    if (f->newline == PYADAMAS_NL_CR) {
+        PyAdamasStr* out = str_new(s->data, s->len);
         for (int64_t i = 0; i < out->len; ++i)
             if (((char*)out->data)[i] == '\n') ((char*)out->data)[i] = '\r';
         return out;
@@ -490,7 +490,7 @@ static Py23Str* file_translate_write(Py23File* f, Py23Str* s) {
     int64_t extra = 0;
     for (int64_t i = 0; i < s->len; ++i)
         if (s->data[i] == '\n') ++extra;
-    Py23Str* out = str_alloc(s->len + extra);
+    PyAdamasStr* out = str_alloc(s->len + extra);
     char* p = (char*)out->data;
     int64_t j = 0;
     for (int64_t i = 0; i < s->len; ++i) {
@@ -505,7 +505,7 @@ static Py23Str* file_translate_write(Py23File* f, Py23Str* s) {
 }
 
 // 返回实际写出的字节数；出错按 errors 策略处理。
-static void file_write_bytes(Py23File* f, const char* p, int64_t n) {
+static void file_write_bytes(PyAdamasFile* f, const char* p, int64_t n) {
     if (n <= 0) return;
     if (!f->enc_cd) {
         fwrite(p, 1, (size_t)n, f->fp);
@@ -524,12 +524,12 @@ static void file_write_bytes(Py23File* f, const char* p, int64_t n) {
         if (errno == E2BIG) continue;
         if (errno == EINVAL) { /* 输入不是完整的 UTF-8 序列 */
             if (file_str_is(f->errors, "strict"))
-                py23_raise_c("UnicodeEncodeError", "invalid UTF-8 input");
+                pa_raise_c("UnicodeEncodeError", "invalid UTF-8 input");
             break;
         }
         if (errno == EILSEQ) {
             if (file_str_is(f->errors, "strict"))
-                py23_raise_c("UnicodeEncodeError",
+                pa_raise_c("UnicodeEncodeError",
                              "character cannot be encoded in the target encoding");
             if (file_str_is(f->errors, "replace")) fwrite("?", 1, 1, f->fp);
             ++in;
@@ -542,12 +542,12 @@ static void file_write_bytes(Py23File* f, const char* p, int64_t n) {
 
 /* 把底层句柄退回到逻辑位置并清空解码缓冲。文本模式预读会让 ftell
    领先于逻辑位置，写/截断之前必须先对齐。 */
-static void file_sync_raw(Py23File* f) {
+static void file_sync_raw(PyAdamasFile* f) {
     if (f->binary) return;
     if (!(f->dpos < f->dlen || f->rawleft_len || f->pending_cr)) return;
     int64_t raw_target = f->raw_base + f->dpos + f->rawleft_len;
     if (fseek(f->fp, (long)raw_target, SEEK_SET) != 0)
-        py23_raise_c("OSError", "seek failed");
+        pa_raise_c("OSError", "seek failed");
     f->dlen = f->dpos = 0;
     f->rawleft_len = 0;
     f->pending_cr = 0;
@@ -557,30 +557,30 @@ static void file_sync_raw(Py23File* f) {
     if (f->enc_cd) iconv(f->enc_cd, NULL, NULL, NULL, NULL);
 }
 
-int64_t py23_file_write(Py23File* f, Py23Str* s) {
+int64_t pa_file_write(PyAdamasFile* f, PyAdamasStr* s) {
     FILE* fp = file_check(f);
     if (f->binary) {
         return (int64_t)fwrite(s->data, 1, (size_t)s->len, fp);
     }
     file_sync_raw(f);
-    Py23Str* t = file_translate_write(f, s);
+    PyAdamasStr* t = file_translate_write(f, s);
     file_write_bytes(f, t->data, t->len);
-    if (t != s) py23_rc_dec(t);
+    if (t != s) pa_rc_dec(t);
     f->text_off += s->len;
     return s->len;
 }
 
-void py23_file_writelines(Py23File* f, Py23List* lines) {
+void pa_file_writelines(PyAdamasFile* f, PyAdamasList* lines) {
     for (int64_t i = 0; i < lines->len; ++i)
-        py23_file_write(f, (Py23Str*)lines->data[i]);
+        pa_file_write(f, (PyAdamasStr*)lines->data[i]);
 }
 
 /* 文本定位：位置按解码后的 UTF-8 字节计。从文件头重解码并丢弃前 target
    个字节；这是 O(n) 但和 tell 的返回值自洽，也与 CPython 的 cookie 同形。 */
-static void file_text_reset(Py23File* f) {
+static void file_text_reset(PyAdamasFile* f) {
     fflush(f->fp);
     if (fseek(f->fp, 0, SEEK_SET) != 0)
-        py23_raise_c("OSError", "seek failed");
+        pa_raise_c("OSError", "seek failed");
     f->dlen = f->dpos = 0;
     f->rawleft_len = 0;
     f->pending_cr = 0;
@@ -591,7 +591,7 @@ static void file_text_reset(Py23File* f) {
     if (f->enc_cd) iconv(f->enc_cd, NULL, NULL, NULL, NULL);
 }
 
-static int64_t file_text_skip(Py23File* f, int64_t target) {
+static int64_t file_text_skip(PyAdamasFile* f, int64_t target) {
     while (f->text_off < target) {
         if (f->dpos >= f->dlen && !file_fill(f)) break;
         int64_t take = target - f->text_off;
@@ -603,7 +603,7 @@ static int64_t file_text_skip(Py23File* f, int64_t target) {
     return f->text_off;
 }
 
-int64_t py23_file_seek(Py23File* f, int64_t off, int64_t whence) {
+int64_t pa_file_seek(PyAdamasFile* f, int64_t off, int64_t whence) {
     FILE* fp = file_check(f);
     if (!f->binary) {
         int64_t target;
@@ -611,7 +611,7 @@ int64_t py23_file_seek(Py23File* f, int64_t off, int64_t whence) {
             file_text_reset(f);
             int64_t total = file_text_skip(f, INT64_MAX);
             target = total + off;
-            if (target < 0) py23_raise_c("OSError", "negative seek position");
+            if (target < 0) pa_raise_c("OSError", "negative seek position");
             if (off != 0) {
                 file_text_reset(f);
                 file_text_skip(f, target);
@@ -619,14 +619,14 @@ int64_t py23_file_seek(Py23File* f, int64_t off, int64_t whence) {
         } else {
             int64_t cur = whence == 1 ? f->text_off : 0;
             target = cur + off;
-            if (target < 0) py23_raise_c("OSError", "negative seek position");
+            if (target < 0) pa_raise_c("OSError", "negative seek position");
             file_text_reset(f);
             file_text_skip(f, target);
         }
         return f->text_off;
     }
     int w = whence == 1 ? SEEK_CUR : whence == 2 ? SEEK_END : SEEK_SET;
-    if (fseek(fp, (long)off, w) != 0) py23_raise_c("OSError", "seek failed");
+    if (fseek(fp, (long)off, w) != 0) pa_raise_c("OSError", "seek failed");
     f->dlen = f->dpos = 0;
     f->rawleft_len = 0;
     f->pending_cr = 0;
@@ -637,13 +637,13 @@ int64_t py23_file_seek(Py23File* f, int64_t off, int64_t whence) {
     return (int64_t)ftell(fp);
 }
 
-int64_t py23_file_tell(Py23File* f) {
+int64_t pa_file_tell(PyAdamasFile* f) {
     FILE* fp = file_check(f);
     if (f->binary) return (int64_t)ftell(fp);
     return f->text_off;
 }
 
-int64_t py23_file_truncate(Py23File* f, int64_t size) {
+int64_t pa_file_truncate(PyAdamasFile* f, int64_t size) {
     FILE* fp = file_check(f);
     /* CPython 无参 truncate 用底层缓冲位置（文本预读后是原始偏移）；
        显式 size 按字节截断，先把逻辑位置对齐到底层句柄。 */
@@ -654,51 +654,51 @@ int64_t py23_file_truncate(Py23File* f, int64_t size) {
     }
     fflush(fp);
     if (ftruncate(fileno(fp), (off_t)size) != 0)
-        py23_raise_c("OSError", "truncate failed");
+        pa_raise_c("OSError", "truncate failed");
     return size;
 }
 
-int64_t py23_file_fileno(Py23File* f) { return (int64_t)fileno(file_check(f)); }
-int64_t py23_file_isatty(Py23File* f) { return isatty(fileno(file_check(f))) ? 1 : 0; }
-int64_t py23_file_readable(Py23File* f) { return f ? f->readable : 0; }
-int64_t py23_file_writable(Py23File* f) { return f ? f->writable : 0; }
-int64_t py23_file_seekable(Py23File* f) {
+int64_t pa_file_fileno(PyAdamasFile* f) { return (int64_t)fileno(file_check(f)); }
+int64_t pa_file_isatty(PyAdamasFile* f) { return isatty(fileno(file_check(f))) ? 1 : 0; }
+int64_t pa_file_readable(PyAdamasFile* f) { return f ? f->readable : 0; }
+int64_t pa_file_writable(PyAdamasFile* f) { return f ? f->writable : 0; }
+int64_t pa_file_seekable(PyAdamasFile* f) {
     if (!f || !f->fp || f->closed) return 0;
     return fseek(f->fp, 0, SEEK_CUR) == 0 ? 1 : 0;
 }
-int64_t py23_file_closed(Py23File* f) { return f ? f->closed : 1; }
+int64_t pa_file_closed(PyAdamasFile* f) { return f ? f->closed : 1; }
 
-Py23Str* py23_file_name(Py23File* f) {
+PyAdamasStr* pa_file_name(PyAdamasFile* f) {
     if (!f) return str_new("", 0);
     if (f->name) return str_new(f->name->data, f->name->len);
-    return py23_str_from_i64(f->fd);
+    return pa_str_from_i64(f->fd);
 }
 
-Py23Str* py23_file_mode(Py23File* f) {
+PyAdamasStr* pa_file_mode(PyAdamasFile* f) {
     if (!f || !f->mode) return str_new("", 0);
     return str_new(f->mode->data, f->mode->len);
 }
 
-Py23Str* py23_file_encoding(Py23File* f) {
+PyAdamasStr* pa_file_encoding(PyAdamasFile* f) {
     if (!f || !f->encoding) return str_new("", 0);
     return str_new(f->encoding->data, f->encoding->len);
 }
 
-Py23Str* py23_file_errors(Py23File* f) {
+PyAdamasStr* pa_file_errors(PyAdamasFile* f) {
     if (!f || !f->errors) return str_new("", 0);
     return str_new(f->errors->data, f->errors->len);
 }
 
-void py23_file_close(Py23File* f) {
+void pa_file_close(PyAdamasFile* f) {
     if (!f || !f->fp) return;
     fclose(f->fp);
     f->fp = NULL;
     f->closed = 1;
 }
 
-void py23_file_flush(Py23File* f) { fflush(file_check(f)); }
+void pa_file_flush(PyAdamasFile* f) { fflush(file_check(f)); }
 
-Py23Str* py23_input(Py23Str* prompt) {
+PyAdamasStr* pa_input(PyAdamasStr* prompt) {
     if (prompt && prompt->len > 0) {
         fwrite(prompt->data, 1, (size_t)prompt->len, stdout);
         fflush(stdout);
@@ -721,10 +721,10 @@ Py23Str* py23_input(Py23Str* prompt) {
     }
     if (!got_any) {
         free(buf);
-        py23_raise_c("EOFError", "EOF when reading a line");
+        pa_raise_c("EOFError", "EOF when reading a line");
     }
     if (len > 0 && buf[len - 1] == '\r') --len;
-    Py23Str* s = str_new(buf ? buf : "", len);
+    PyAdamasStr* s = str_new(buf ? buf : "", len);
     free(buf);
     return s;
 }
@@ -732,15 +732,15 @@ Py23Str* py23_input(Py23Str* prompt) {
 /* sys.stdin / sys.stdout / sys.stderr：直接包住 C 标准流（不 dup），
    这样和 print 共用同一个 FILE*，缓冲顺序一致；对象永久存活，进程退出
    时不会被析构掉。close() 会像 CPython 一样关掉底层流。 */
-static Py23File* sys_stream_files[3];
+static PyAdamasFile* sys_stream_files[3];
 
-Py23File* py23_sys_stream(int64_t which) {
+PyAdamasFile* pa_sys_stream(int64_t which) {
     if (which < 0 || which > 2) return NULL;
-    Py23File* cached = sys_stream_files[which];
+    PyAdamasFile* cached = sys_stream_files[which];
     if (cached) return cached;
     FILE* fp = which == 0 ? stdin : which == 1 ? stdout : stderr;
-    Py23File* f =
-        (Py23File*)rc_alloc((int64_t)sizeof(Py23File), file_destroy, NULL, PY23_RC_OBJ);
+    PyAdamasFile* f =
+        (PyAdamasFile*)rc_alloc((int64_t)sizeof(PyAdamasFile), file_destroy, NULL, PYADAMAS_RC_OBJ);
     f->fp = fp;
     f->fd = (int64_t)which;
     f->closed = 0;
@@ -748,12 +748,12 @@ Py23File* py23_sys_stream(int64_t which) {
     f->binary = 0;
     f->readable = which == 0;
     f->writable = which != 0;
-    f->newline = PY23_NL_UNIVERSAL;
+    f->newline = PYADAMAS_NL_UNIVERSAL;
     f->vbuf = NULL;
     f->name = str_new(which == 0 ? "<stdin>" : which == 1 ? "<stdout>" : "<stderr>",
                       which == 0 ? 7 : which == 1 ? 8 : 8);
     f->mode = str_new(which == 0 ? "r" : "w", 1);
-    ((Py23Rc*)f - 1)->rc = PY23_RC_IMMORTAL;
+    ((PyAdamasRc*)f - 1)->rc = PYADAMAS_RC_IMMORTAL;
     sys_stream_files[which] = f;
     return f;
 }

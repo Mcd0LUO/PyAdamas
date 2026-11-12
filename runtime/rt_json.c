@@ -73,7 +73,7 @@ static void jb_utf8_cp(JBuf* b, uint32_t cp) {
 }
 
 /* ensure_ascii=True：非 ASCII 按 UTF-8 解码后用 \uXXXX（含代理对）。 */
-static void jb_str(JBuf* b, Py23Str* s) {
+static void jb_str(JBuf* b, PyAdamasStr* s) {
     jb_ch(b, '"');
     const unsigned char* p = (const unsigned char*)s->data;
     int64_t n = s->len;
@@ -176,14 +176,14 @@ static void jb_nl(JBuf* b, int64_t depth) {
 }
 
 /* sort_keys 用：按 key 字符串给 entry 下标排序（单线程，用静态指针传 dict）。 */
-static Py23Dict* g_json_sort_dict;
+static PyAdamasDict* g_json_sort_dict;
 
 static int jb_cmp_order(const void* pa, const void* pb) {
     int64_t ia = *(const int64_t*)pa;
     int64_t ib = *(const int64_t*)pb;
-    Py23Str* x = (Py23Str*)py23_dict_key_at(g_json_sort_dict, ia);
-    Py23Str* y = (Py23Str*)py23_dict_key_at(g_json_sort_dict, ib);
-    int64_t c = py23_str_cmp(x, y);
+    PyAdamasStr* x = (PyAdamasStr*)pa_dict_key_at(g_json_sort_dict, ia);
+    PyAdamasStr* y = (PyAdamasStr*)pa_dict_key_at(g_json_sort_dict, ib);
+    int64_t c = pa_str_cmp(x, y);
     return c < 0 ? -1 : c > 0 ? 1 : 0;
 }
 
@@ -192,7 +192,7 @@ static void jb_value(JBuf* b, int64_t v, const char* d, size_t n, int64_t depth)
     if (t == '(') {
         char k = d[1];
         if (k == 'l') {
-            Py23List* l = (Py23List*)v;
+            PyAdamasList* l = (PyAdamasList*)v;
             const char* cd = d + 2;
             size_t cn = n - 3;
             jb_ch(b, '[');
@@ -207,7 +207,7 @@ static void jb_value(JBuf* b, int64_t v, const char* d, size_t n, int64_t depth)
             return;
         }
         if (k == 'd') {
-            Py23Dict* m = (Py23Dict*)v;
+            PyAdamasDict* m = (PyAdamasDict*)v;
             const char* cd = d + 2;
             size_t cn = n - 3;
             int64_t* order = NULL;
@@ -224,9 +224,9 @@ static void jb_value(JBuf* b, int64_t v, const char* d, size_t n, int64_t depth)
                 if (i) jb_ch(b, ',');
                 jb_nl(b, depth + 1);
                 if (b->indent <= 0 && i) jb_ch(b, ' ');
-                jb_str(b, (Py23Str*)py23_dict_key_at(m, e));
+                jb_str(b, (PyAdamasStr*)pa_dict_key_at(m, e));
                 jb_cstr(b, ": ");
-                jb_value(b, py23_dict_val_at(m, e), cd, cn, depth + 1);
+                jb_value(b, pa_dict_val_at(m, e), cd, cn, depth + 1);
             }
             if (m->len) jb_nl(b, depth);
             jb_ch(b, '}');
@@ -234,7 +234,7 @@ static void jb_value(JBuf* b, int64_t v, const char* d, size_t n, int64_t depth)
             return;
         }
         if (k == 't') {
-            Py23List* l = (Py23List*)v;
+            PyAdamasList* l = (PyAdamasList*)v;
             size_t pos = 2;
             int64_t idx = 0;
             jb_ch(b, '[');
@@ -251,7 +251,7 @@ static void jb_value(JBuf* b, int64_t v, const char* d, size_t n, int64_t depth)
             jb_ch(b, ']');
             return;
         }
-        py23_raise_c("ValueError", "json: bad type descriptor");
+        pa_raise_c("ValueError", "json: bad type descriptor");
     }
     if (t == 'i') {
         char buf[24];
@@ -273,20 +273,20 @@ static void jb_value(JBuf* b, int64_t v, const char* d, size_t n, int64_t depth)
         return;
     }
     if (t == 's') {
-        jb_str(b, (Py23Str*)v);
+        jb_str(b, (PyAdamasStr*)v);
         return;
     }
     if (t == 'n') {
         jb_cstr(b, "null");
         return;
     }
-    py23_raise_c("ValueError", "json: bad type descriptor");
+    pa_raise_c("ValueError", "json: bad type descriptor");
 }
 
-Py23Str* py23_json_dumps(int64_t v, Py23Str* desc, int64_t indent, int64_t sort_keys) {
+PyAdamasStr* pa_json_dumps(int64_t v, PyAdamasStr* desc, int64_t indent, int64_t sort_keys) {
     JBuf b = {NULL, 0, 0, indent, sort_keys};
     jb_value(&b, v, desc->data, (size_t)desc->len, 0);
-    Py23Str* out = str_new(b.buf ? b.buf : "", (int64_t)b.len);
+    PyAdamasStr* out = str_new(b.buf ? b.buf : "", (int64_t)b.len);
     free(b.buf);
     return out;
 }
@@ -303,7 +303,7 @@ static _Noreturn void jp_fail(JP* s, const char* what) {
     char msg[256];
     snprintf(msg, sizeof msg, "json: %s at offset %lld", what,
              (long long)(s->p - s->start));
-    py23_raise_c("ValueError", msg);
+    pa_raise_c("ValueError", msg);
 }
 
 static void jp_ws(JP* s) {
@@ -356,13 +356,13 @@ static void jp_utf8_put(JBuf* b, uint32_t cp) {
     }
 }
 
-static Py23Str* jp_string(JP* s) {
+static PyAdamasStr* jp_string(JP* s) {
     jp_expect(s, '"');
     JBuf b = {NULL, 0, 0};
     while (s->p < s->end) {
         unsigned char c = (unsigned char)*s->p++;
         if (c == '"') {
-            Py23Str* r = str_new(b.buf ? b.buf : "", (int64_t)b.len);
+            PyAdamasStr* r = str_new(b.buf ? b.buf : "", (int64_t)b.len);
             free(b.buf);
             return r;
         }
@@ -481,7 +481,7 @@ static int64_t jp_value(JP* s, const char* d, size_t n) {
             const char* cd = d + 2;
             size_t cn = n - 3;
             int kind = desc_heap(cd, cn) ? 1 : 0;
-            Py23List* out = py23_list_new(0, kind);
+            PyAdamasList* out = pa_list_new(0, kind);
             jp_expect(s, '[');
             jp_ws(s);
             if (s->p < s->end && *s->p == ']') {
@@ -490,7 +490,7 @@ static int64_t jp_value(JP* s, const char* d, size_t n) {
             }
             for (;;) {
                 int64_t v = jp_value(s, cd, cn);
-                py23_list_append(out, v);
+                pa_list_append(out, v);
                 jp_ws(s);
                 if (s->p < s->end && *s->p == ',') {
                     s->p++;
@@ -505,7 +505,7 @@ static int64_t jp_value(JP* s, const char* d, size_t n) {
             const char* cd = d + 2;
             size_t cn = n - 3;
             int vown = desc_heap(cd, cn) ? 1 : 0;
-            Py23Dict* out = py23_dict_new(1, 1, vown, -1, -1);
+            PyAdamasDict* out = pa_dict_new(1, 1, vown, -1, -1);
             jp_expect(s, '{');
             jp_ws(s);
             if (s->p < s->end && *s->p == '}') {
@@ -513,10 +513,10 @@ static int64_t jp_value(JP* s, const char* d, size_t n) {
                 return (int64_t)out;
             }
             for (;;) {
-                Py23Str* key = jp_string(s);
+                PyAdamasStr* key = jp_string(s);
                 jp_expect(s, ':');
                 int64_t v = jp_value(s, cd, cn);
-                py23_dict_set(out, (int64_t)key, v);
+                pa_dict_set(out, (int64_t)key, v);
                 jp_ws(s);
                 if (s->p < s->end && *s->p == ',') {
                     s->p++;
@@ -542,7 +542,7 @@ static int64_t jp_value(JP* s, const char* d, size_t n) {
                 pos += cl;
             }
             int kind = all_heap ? 1 : (any_heap ? 2 : 0);
-            Py23List* out = py23_list_new(count, kind);
+            PyAdamasList* out = pa_list_new(count, kind);
             jp_expect(s, '[');
             pos = 2;
             int64_t idx = 0;
@@ -557,7 +557,7 @@ static int64_t jp_value(JP* s, const char* d, size_t n) {
                 {
                     size_t cl = desc_len(d + pos);
                     int64_t v = jp_value(s, d + pos, cl);
-                    py23_list_append(out, v);
+                    pa_list_append(out, v);
                     pos += cl;
                 }
                 idx++;
@@ -572,7 +572,7 @@ static int64_t jp_value(JP* s, const char* d, size_t n) {
             if (idx != count) jp_fail(s, "tuple length mismatch");
             return (int64_t)out;
         }
-        py23_raise_c("ValueError", "json: bad type descriptor");
+        pa_raise_c("ValueError", "json: bad type descriptor");
     }
     if (t == 's') return (int64_t)jp_string(s);
     if (t == 'i') return jp_int(s);
@@ -593,10 +593,10 @@ static int64_t jp_value(JP* s, const char* d, size_t n) {
         }
         jp_fail(s, "expected null");
     }
-    py23_raise_c("ValueError", "json: bad type descriptor");
+    pa_raise_c("ValueError", "json: bad type descriptor");
 }
 
-int64_t py23_json_loads(Py23Str* text, Py23Str* desc) {
+int64_t pa_json_loads(PyAdamasStr* text, PyAdamasStr* desc) {
     JP s = {text->data, text->data + text->len, text->data};
     int64_t v = jp_value(&s, desc->data, (size_t)desc->len);
     jp_ws(&s);

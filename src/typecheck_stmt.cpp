@@ -5,7 +5,7 @@
 
 #include "module.h"
 
-namespace py23 {
+namespace pyadamas {
 
 static void pattern_capture_names(const Pattern& p, std::vector<std::string>& out);
 
@@ -736,7 +736,7 @@ void TypeChecker::assign(Expr& target, TypePtr value, int line, int col) {
                 }
                 // 外部基类可能带来任意属性
                 if (ot->cls->is_open()) return;
-                // 实例上给类属性赋值要新建实例属性，而 py23 的对象布局是
+                // 实例上给类属性赋值要新建实例属性，而 pyadamas 的对象布局是
                 // 编译期定死的；明确报错，别静默写到类属性上影响所有实例。
                 if (ot->cls->class_attr(at->attr)) {
                     err(line, col,
@@ -1054,4 +1054,4 @@ void TypeChecker::match_pattern(Pattern& p, TypePtr subject,
     }
 }
 
-}  // namespace py23
+}  // namespace pyadamas

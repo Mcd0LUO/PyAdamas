@@ -1,7 +1,7 @@
 // lower_exc.cpp —— 语句降级：try/except/finally、raise、import
 #include "lower_impl.h"
 
-namespace py23 {
+namespace pyadamas {
 
 VReg Lowerer::lower_exc_match(Expr& type) {
     auto one = [&](Expr& e) -> VReg {
@@ -545,4 +545,4 @@ void Lowerer::lower_delete(Delete& d) {
 
 
 
-}  // namespace py23
+}  // namespace pyadamas

@@ -14,9 +14,9 @@
 ## 构建
 
 ```bash
-cmake --preset dev                 # Debug + Ninja → build/dev/py23
+cmake --preset dev                 # Debug + Ninja → build/dev/pyadamas
 cmake --build --preset dev
-cmake --preset release             # Release → build/release/py23
+cmake --preset release             # Release → build/release/PyAdamas
 cmake --build --preset release
 ctest --preset dev                 # 正例/反例/运行/未建模/模块
 cmake --build build/dev --target clean-modcache
@@ -65,13 +65,13 @@ rm -rf build/dev                   # 连 CMake 中间产物一起清
 跑单个文件：
 
 ```bash
-./build/dev/py23 check tests/09_types.py
-./build/dev/py23 check tests/fail/f17_len.py     # 期望报错
-./build/dev/py23 run   tests/run/06_operators.py
+./build/dev/pyadamas check tests/09_types.py
+./build/dev/pyadamas check tests/fail/f17_len.py     # 期望报错
+./build/dev/pyadamas run   tests/run/06_operators.py
 ```
 
 生成代码优化等级用 `-O0` / `-O1` / `-O2`（默认 `-O2`），和编译器自身的
-dev/release preset 无关。`ctest` 里的 `py23_opt_levels` 会用三档各跑一遍
+dev/release preset 无关。`ctest` 里的 `pa_opt_levels` 会用三档各跑一遍
 容器/推导式/免检查/序言回归。
 
 运行用例的期望输出这么写：
@@ -88,24 +88,24 @@ print("hi")
 ### 差分测试
 
 ```bash
-# 自举：runner 自己用 py23 执行
-./build/dev/py23 build -o /tmp/run_diff.prog tests/diff/run_diff.py
-/tmp/run_diff.prog --py23 build/dev/py23 --cpython python3 --seeds 3
+# 自举：runner 自己用 PyAdamas 执行
+./build/dev/pyadamas build -o /tmp/run_diff.prog tests/diff/run_diff.py
+/tmp/run_diff.prog --pyadamas build/dev/pyadamas --cpython python3 --seeds 3
 
 # 同一份脚本用 CPython 执行也行（随机序列一致，生成的用例相同）
 python3 tests/diff/run_diff.py --seeds 20   # 更多随机性
 python3 tests/diff/run_diff.py --only repr  # 只测浮点转字符串
 ```
 
-`py23 run prog.py -- a b` 会把 `--` 之后的参数原样传给被运行的程序。
+`pyadamas run prog.py -- a b` 会把 `--` 之后的参数原样传给被运行的程序。
 
-生成器在 `tests/diff/generators.py`，加新生成器就三步：写 `gen(rng, n)` 返回源码、在 `GENERATOR_NAMES` / `default_cases` 与 `run_diff.py` 的分派里登记、确认默认种子下零差异。生成器本身也必须限制在 py23 子集内（不 import 第三方模块，`random.Random` 参数在函数体里用 `r: random.Random = rng` 收窄类型）。
+生成器在 `tests/diff/generators.py`，加新生成器就三步：写 `gen(rng, n)` 返回源码、在 `GENERATOR_NAMES` / `default_cases` 与 `run_diff.py` 的分派里登记、确认默认种子下零差异。生成器本身也必须限制在 PyAdamas 子集内（不 import 第三方模块，`random.Random` 参数在函数体里用 `r: random.Random = rng` 收窄类型）。
 
 生成的程序必须两端都能跑通、输出一致；已知的语义分歧不要测（列在 [compatibility.md](compatibility.md)），否则只是制造噪音。
 
 ### 性能 bench
 
-`bench/` 下是逐个内置函数的性能对比：同一份源码分别喂给 py23（编译成原生
+`bench/` 下是逐个内置函数的性能对比：同一份源码分别喂给 PyAdamas（编译成原生
 二进制）和 CPython 3.13，比墙钟时间。
 
 ```bash
@@ -118,12 +118,12 @@ cd /w && python3 bench/run_bench.py --md /w/bench/RESULTS.md --json /w/bench/rep
 按 CPython 的实测时间把它校准到 0.35 秒左右。三条规则让倍数有意义：
 
 - **参数必须随循环变化**（`S[i % 64]` 或直接用循环变量）。写成 `len(S)` 的
-  话，py23 的 LICM 会把整个调用提到循环外，测到的是优化器不是内置函数。
+  话，PyAdamas 的 LICM 会把整个调用提到循环外，测到的是优化器不是内置函数。
 - **容器类内置先改写再消费**（`T[i % 64] = i` 之后再 `sum(T)`），否则整条
   调用同样会被提出循环。
 - **结果要打印出来**（末尾 `print(total)`），避免整段被当成死代码删掉。
 
-驱动还会用 `2N` 再跑一次 py23：耗时没有跟着翻倍，就说明循环体被优化掉了，
+驱动还会用 `2N` 再跑一次 PyAdamas：耗时没有跟着翻倍，就说明循环体被优化掉了，
 表格里的「线性」列就是这个检查；此时倍数只能当「优化器收益」看，不能当
 「内置函数成本」看。跑完顺带比对两边的标准输出（行数 + 最后一行），确认
 跑的是同一件事。
@@ -154,11 +154,11 @@ fsum 抵消和 re。
 敏捷开发时只跑相关用例，不要每次全量：
 
 ```bash
-PY23_TEST_FILTER='5[0-6]*' PY23_TEST_JOBS=16 bash tests/run_tests.sh build/dev build/dev/py23
+PYADAMAS_TEST_FILTER='5[0-6]*' PYADAMAS_TEST_JOBS=16 bash tests/run_tests.sh build/dev build/dev/pyadamas
 python3 tests/diff/run_diff.py --only async --seeds 1 --jobs 16
 ```
 
-提交前再跑全量；`run_tests.sh` 和 `run_diff.py` 都默认并行（`PY23_TEST_JOBS` /
+提交前再跑全量；`run_tests.sh` 和 `run_diff.py` 都默认并行（`PYADAMAS_TEST_JOBS` /
 `--jobs` 可调）。`tests/modules/`
 覆盖 import 图、`from` 快照、惰性初始化、外部全局读写、GC 根和缓存
 失效。RSS 压力用受限地址空间跑长循环（命令见
@@ -167,7 +167,7 @@ python3 tests/diff/run_diff.py --only async --seeds 1 --jobs 16
 跑一遍：
 
 ```bash
-./build/dev/py23 build stress.py -o stress
+./build/dev/pyadamas build stress.py -o stress
 python3 -c 'import resource,subprocess
 def lim(): resource.setrlimit(resource.RLIMIT_AS,(16<<20,16<<20))
 p=subprocess.run(["./stress"],preexec_fn=lim)
@@ -184,25 +184,25 @@ print(p.returncode, resource.getrusage(resource.RUSAGE_CHILDREN).ru_maxrss)'   #
 
 | 想看什么 | 命令 |
 |---|---|
-| token 流 | `py23 tokens x.py` |
-| 语法树 | `py23 ast x.py` |
-| 推断出的顶层类型 | `py23 types x.py` |
-| 降级后的 IR | `py23 ir x.py` |
-| 生成的汇编 | `py23 asm x.py` |
-| 保留中间 `.s` | `PY23_KEEP_ASM=1 py23 run x.py` |
-| 单步调试生成程序 | `py23 build x.py -o x && gdb ./x` |
+| token 流 | `pyadamas tokens x.py` |
+| 语法树 | `pyadamas ast x.py` |
+| 推断出的顶层类型 | `pyadamas types x.py` |
+| 降级后的 IR | `pyadamas ir x.py` |
+| 生成的汇编 | `pyadamas asm x.py` |
+| 保留中间 `.s` | `PYADAMAS_KEEP_ASM=1 pyadamas run x.py` |
+| 单步调试生成程序 | `pyadamas build x.py -o x && gdb ./x` |
 
-汇编里每条指令前都有对应的 IR 注释，对照 `py23 ir` 的输出能定位到是哪条 IR 生成错了。
+汇编里每条指令前都有对应的 IR 注释，对照 `pyadamas ir` 的输出能定位到是哪条 IR 生成错了。
 
 ### 内存 / UB 检查
 
 ```bash
 g++ -std=c++23 -O0 -g -fsanitize=address,undefined -fno-omit-frame-pointer -Isrc \
-    -DPY23_RT_OBJ="\"$PWD/build/dev/rt.o\"" src/*.cpp -o /tmp/py23-asan
+    -DPYADAMAS_RT_OBJ="\"$PWD/build/dev/rt.o\"" src/*.cpp -o /tmp/PyAdamas-asan
 
-/tmp/py23-asan check tests/09_types.py
-/tmp/py23-asan run   tests/run/04_containers.py
-/tmp/py23-asan run   tests/run/09_class.py   # 类：字段偏移 / vtable / 对象分配
+/tmp/PyAdamas-asan check tests/09_types.py
+/tmp/PyAdamas-asan run   tests/run/04_containers.py
+/tmp/PyAdamas-asan run   tests/run/09_class.py   # 类：字段偏移 / vtable / 对象分配
 ```
 
 注意 ASan 下每层递归帧约 4KB，8MB 栈撑不住几千层。所以语法层对表达式嵌套设了硬上限：`parser.h` 的 `kMaxExprDepth` / `kMaxUnaryDepth`（目前 200），超了报 `expression nested too deeply`。这类保护必须在解析器里，因为类型检查和降级都是照 AST 递归的，树有多深它们就有多深。
@@ -219,7 +219,7 @@ for f in runtime/rt_*.c; do
 done
 ld -r /tmp/rt_asan/*.o -o /tmp/rt_asan.o
 g++ -std=c++23 -O1 -g -fsanitize=address,undefined -Isrc \
-    -DPY23_RT_OBJ='"/tmp/rt_asan.o"' src/*.cpp -o /tmp/py23-asan
+    -DPYADAMAS_RT_OBJ='"/tmp/rt_asan.o"' src/*.cpp -o /tmp/PyAdamas-asan
 mkdir -p /tmp/asancc
 printf '#!/bin/sh\nexec /usr/bin/cc -fsanitize=address,undefined "$@"\n' > /tmp/asancc/cc
 chmod +x /tmp/asancc/cc
@@ -227,17 +227,17 @@ PATH=/tmp/asancc:$PATH ASAN_OPTIONS=detect_leaks=1 \
     bash -c 'for t in 10_rc 11_closure 12_lambda 13_gc 14_dict 15_slice \
         16_dict_del 17_slice_assign 18_starargs 19_comprehension 20_with 21_decorator \
         22_exception; do \
-        /tmp/py23-asan run tests/run/$t.py || exit 1; done'
+        /tmp/PyAdamas-asan run tests/run/$t.py || exit 1; done'
 ```
 
 ### 严格警告
 
 ```bash
 g++ -std=c++23 -O0 -g -Wall -Wextra -Wshadow -Wnon-virtual-dtor -Wold-style-cast -Wcast-qual \
-    -Isrc -DPY23_RT_OBJ="\"$PWD/build/dev/rt.o\"" src/*.cpp -o /tmp/py23-strict
+    -Isrc -DPYADAMAS_RT_OBJ="\"$PWD/build/dev/rt.o\"" src/*.cpp -o /tmp/PyAdamas-strict
 ```
 
-直接用上面的 g++ 命令；不要用 `cmake -DCMAKE_CXX_FLAGS=...` 覆盖，`PY23_RT_OBJ` 由 CMake 生成，手改 flags 会丢。
+直接用上面的 g++ 命令；不要用 `cmake -DCMAKE_CXX_FLAGS=...` 覆盖，`PYADAMAS_RT_OBJ` 由 CMake 生成，手改 flags 会丢。
 
 当前零警告。新代码请保持。
 
@@ -246,7 +246,7 @@ g++ -std=c++23 -O0 -g -Wall -Wextra -Wshadow -Wnon-virtual-dtor -Wold-style-cast
 没有单独的格式文件，跟着周围的代码写。几条硬规矩：
 
 - **注释说「为什么」，不说「是什么」**。`// 取模结果与除数同号，补一个 |b|` 有价值；`// 调用 fmod` 没有。
-- **错误消息格式统一**：`py23 xxx.py:12:5: error: ...`，由 `report()` 负责排版，不要自己 `printf`。
+- **错误消息格式统一**：`PyAdamas xxx.py:12:5: error: ...`，由 `report()` 负责排版，不要自己 `printf`。
 - **拒绝的东西要给出下一步**：`'*args' is not supported by the code generator yet` 比 `invalid syntax` 有用。
 - **枚举 switch 不留 `default`**：让 `-Wswitch` 在加新枚举项时报错，比运行时漏一个 `case` 强。
 - **死代码立刻删**：`IrOp::Print` 曾经是一个「谁发出来就会被静默丢掉」的空 `case`，这种比没实现更危险。

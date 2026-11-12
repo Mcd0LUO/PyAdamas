@@ -1,7 +1,7 @@
 // opt_fold.cpp —— 常量判定辅助、纯指令判定与 DCE
 #include "opt_detail.h"
 
-namespace py23 {
+namespace pyadamas {
 namespace optdetail {
 
 bool bin_is_safe_int(BinKind b) {
@@ -106,4 +106,4 @@ void dce_function(IRFunction& fn) {
 }
 
 }  // namespace optdetail
-}  // namespace py23
+}  // namespace pyadamas

@@ -8,7 +8,7 @@
 //   后向引用 \1..\99 与 (?P=name)
 //   内联标志 (?i) (?im-sx) (?i:...) 与 re.I/M/S/X
 //
-// 字符串按字节匹配（与 py23 的 str 语义一致），不做 Unicode 属性类。
+// 字符串按字节匹配（与 pyadamas 的 str 语义一致），不做 Unicode 属性类。
 #include "rt_internal.h"
 
 #define RE_I 2
@@ -124,7 +124,7 @@ typedef struct {
 static void* re_alloc(size_t n) {
     void* p = malloc(n ? n : 1);
     if (!p) {
-        fputs("py23: panic: out of memory\n", stderr);
+        fputs("pyadamas: panic: out of memory\n", stderr);
         exit(1);
     }
     return p;
@@ -133,7 +133,7 @@ static void* re_alloc(size_t n) {
 static void* re_realloc(void* p, size_t n) {
     void* q = realloc(p, n ? n : 1);
     if (!q) {
-        fputs("py23: panic: out of memory\n", stderr);
+        fputs("pyadamas: panic: out of memory\n", stderr);
         exit(1);
     }
     return q;
@@ -1153,7 +1153,7 @@ static int run(ReProg* g, int pc, ReCtx* c) {
 }
 
 // 从 start 起尝试一次匹配。mode: 0 search / 1 match / 2 fullmatch。
-static int find_from(ReProg* g, Py23Str* text, int64_t start, int mode, int64_t* caps) {
+static int find_from(ReProg* g, PyAdamasStr* text, int64_t start, int mode, int64_t* caps) {
     int64_t ncap = 2 * (int64_t)(g->ngroups + 1);
     for (int64_t s = start; s <= text->len; ++s) {
         for (int64_t i = 0; i < ncap; ++i) caps[i] = -1;
@@ -1163,35 +1163,35 @@ static int find_from(ReProg* g, Py23Str* text, int64_t start, int mode, int64_t*
             return 1;
         }
         if (c.err) {
-            py23_raise_c("RuntimeError", "regex step limit exceeded");
+            pa_raise_c("RuntimeError", "regex step limit exceeded");
         }
         if (mode != 0) return 0;
     }
     return 0;
 }
 
-typedef struct Py23Match {
-    Py23Str* text;
+typedef struct PyAdamasMatch {
+    PyAdamasStr* text;
     int64_t ngroups;
     int64_t* caps;
     ReName* names;
     int nnames;
-} Py23Match;
+} PyAdamasMatch;
 
-typedef struct Py23Regex {
+typedef struct PyAdamasRegex {
     ReProg prog;
-    Py23Str* pat;  // 原始模式串，供 Pattern.pattern 用
-} Py23Regex;
+    PyAdamasStr* pat;  // 原始模式串，供 Pattern.pattern 用
+} PyAdamasRegex;
 
 static void regex_dtor(void* p) {
-    Py23Regex* r = (Py23Regex*)p;
+    PyAdamasRegex* r = (PyAdamasRegex*)p;
     prog_free(&r->prog);
-    if (r->pat) py23_rc_dec(r->pat);
+    if (r->pat) pa_rc_dec(r->pat);
 }
 
 static void match_dtor(void* p) {
-    Py23Match* m = (Py23Match*)p;
-    if (m->text) py23_rc_dec(m->text);
+    PyAdamasMatch* m = (PyAdamasMatch*)p;
+    if (m->text) pa_rc_dec(m->text);
     free(m->caps);
     for (int i = 0; i < m->nnames; ++i) free(m->names[i].name);
     free(m->names);
@@ -1213,11 +1213,11 @@ static void names_copy(ReName** dst, int* dstn, const ReName* src, int n) {
     }
 }
 
-static Py23Match* match_new(Py23Str* text, int64_t ngroups, const int64_t* caps,
+static PyAdamasMatch* match_new(PyAdamasStr* text, int64_t ngroups, const int64_t* caps,
                             const ReName* names, int nnames) {
-    Py23Match* m = (Py23Match*)rc_alloc(sizeof(Py23Match), match_dtor, NULL, PY23_RC_OBJ);
+    PyAdamasMatch* m = (PyAdamasMatch*)rc_alloc(sizeof(PyAdamasMatch), match_dtor, NULL, PYADAMAS_RC_OBJ);
     m->text = text;
-    py23_rc_inc(text);
+    pa_rc_inc(text);
     m->ngroups = ngroups;
     int64_t ncap = 2 * (ngroups + 1);
     m->caps = (int64_t*)re_alloc(sizeof(int64_t) * (size_t)ncap);
@@ -1226,7 +1226,7 @@ static Py23Match* match_new(Py23Str* text, int64_t ngroups, const int64_t* caps,
     return m;
 }
 
-static Py23Str* group_str(Py23Match* m, int64_t n) {
+static PyAdamasStr* group_str(PyAdamasMatch* m, int64_t n) {
     if (!m || n < 0 || n > m->ngroups) return str_new("", 0);
     int64_t a = m->caps[2 * n];
     int64_t b = m->caps[2 * n + 1];
@@ -1234,69 +1234,69 @@ static Py23Str* group_str(Py23Match* m, int64_t n) {
     return str_new(m->text->data + a, b - a);
 }
 
-static int64_t group_start(Py23Match* m, int64_t n) {
+static int64_t group_start(PyAdamasMatch* m, int64_t n) {
     if (!m || n < 0 || n > m->ngroups) return -1;
     return m->caps[2 * n];
 }
 
-static int64_t group_end(Py23Match* m, int64_t n) {
+static int64_t group_end(PyAdamasMatch* m, int64_t n) {
     if (!m || n < 0 || n > m->ngroups) return -1;
     return m->caps[2 * n + 1];
 }
 
-int64_t py23_re_compile(Py23Str* pat, int64_t flags) {
-    Py23Regex* r = (Py23Regex*)rc_alloc(sizeof(Py23Regex), regex_dtor, NULL, PY23_RC_OBJ);
+int64_t pa_re_compile(PyAdamasStr* pat, int64_t flags) {
+    PyAdamasRegex* r = (PyAdamasRegex*)rc_alloc(sizeof(PyAdamasRegex), regex_dtor, NULL, PYADAMAS_RC_OBJ);
     r->pat = NULL;
     const char* err = NULL;
     if (!prog_build(&r->prog, (const unsigned char*)pat->data, (int)pat->len, (int)flags, &err)) {
         prog_free(&r->prog);
-        py23_raise_c("ValueError", err ? err : "bad pattern");
+        pa_raise_c("ValueError", err ? err : "bad pattern");
     }
     r->pat = pat;
-    py23_rc_inc(pat);
+    pa_rc_inc(pat);
     return (int64_t)r;
 }
 
-int64_t py23_re_pattern_groups(Py23Regex* re) { return re ? re->prog.ngroups : 0; }
+int64_t pa_re_pattern_groups(PyAdamasRegex* re) { return re ? re->prog.ngroups : 0; }
 
-int64_t py23_re_pattern_flags(Py23Regex* re) { return re ? re->prog.flags : 0; }
+int64_t pa_re_pattern_flags(PyAdamasRegex* re) { return re ? re->prog.flags : 0; }
 
-int64_t py23_re_pattern_str(Py23Regex* re) {
+int64_t pa_re_pattern_str(PyAdamasRegex* re) {
     if (!re || !re->pat) return (int64_t)str_new("", 0);
-    py23_rc_inc(re->pat);
+    pa_rc_inc(re->pat);
     return (int64_t)re->pat;
 }
 
-int64_t py23_re_search_str(Py23Str* pat, Py23Str* text, int64_t flags, int64_t mode) {
+int64_t pa_re_search_str(PyAdamasStr* pat, PyAdamasStr* text, int64_t flags, int64_t mode) {
     ReProg g;
     const char* err = NULL;
     if (!prog_build(&g, (const unsigned char*)pat->data, (int)pat->len, (int)flags, &err)) {
-        py23_raise_c("ValueError", err ? err : "bad pattern");
+        pa_raise_c("ValueError", err ? err : "bad pattern");
     }
     int64_t ncap = 2 * (int64_t)(g.ngroups + 1);
     int64_t* caps = (int64_t*)re_alloc(sizeof(int64_t) * (size_t)ncap);
     int ok = find_from(&g, text, 0, (int)mode, caps);
-    Py23Match* m = ok ? match_new(text, g.ngroups, caps, g.names, g.nnames) : NULL;
+    PyAdamasMatch* m = ok ? match_new(text, g.ngroups, caps, g.names, g.nnames) : NULL;
     free(caps);
     prog_free(&g);
     return (int64_t)m;
 }
 
-int64_t py23_re_search(Py23Regex* re, Py23Str* text, int64_t mode) {
-    if (!re) py23_raise_c("AttributeError", "NoneType has no regex method");
+int64_t pa_re_search(PyAdamasRegex* re, PyAdamasStr* text, int64_t mode) {
+    if (!re) pa_raise_c("AttributeError", "NoneType has no regex method");
     int64_t ncap = 2 * (int64_t)(re->prog.ngroups + 1);
     int64_t* caps = (int64_t*)re_alloc(sizeof(int64_t) * (size_t)ncap);
     int ok = find_from(&re->prog, text, 0, (int)mode, caps);
-    Py23Match* m = ok ? match_new(text, re->prog.ngroups, caps, re->prog.names,
+    PyAdamasMatch* m = ok ? match_new(text, re->prog.ngroups, caps, re->prog.names,
                                   re->prog.nnames)
                       : NULL;
     free(caps);
     return (int64_t)m;
 }
 
-int64_t py23_re_group(Py23Match* m, int64_t n) { return (int64_t)group_str(m, n); }
+int64_t pa_re_group(PyAdamasMatch* m, int64_t n) { return (int64_t)group_str(m, n); }
 
-int64_t py23_re_group_str(Py23Match* m, Py23Str* name) {
+int64_t pa_re_group_str(PyAdamasMatch* m, PyAdamasStr* name) {
     if (m) {
         for (int i = 0; i < m->nnames; ++i) {
             if ((int64_t)strlen(m->names[i].name) == name->len &&
@@ -1304,35 +1304,35 @@ int64_t py23_re_group_str(Py23Match* m, Py23Str* name) {
                 return (int64_t)group_str(m, m->names[i].group);
         }
     }
-    py23_raise_c("IndexError", "no such group");
+    pa_raise_c("IndexError", "no such group");
     return (int64_t)str_new("", 0);
 }
 
-int64_t py23_re_groups(Py23Match* m) {
-    Py23List* out = py23_list_new(0, 1);
+int64_t pa_re_groups(PyAdamasMatch* m) {
+    PyAdamasList* out = pa_list_new(0, 1);
     if (m) {
         for (int64_t i = 1; i <= m->ngroups; ++i) {
-            Py23Str* s = group_str(m, i);
-            py23_list_append(out, (int64_t)s);
+            PyAdamasStr* s = group_str(m, i);
+            pa_list_append(out, (int64_t)s);
         }
     }
     return (int64_t)out;
 }
 
-int64_t py23_re_groupdict(Py23Match* m) {
+int64_t pa_re_groupdict(PyAdamasMatch* m) {
     // key_kind=1 是 str；key/val 都由字典拥有，析构时各自 rc_dec。
-    Py23Dict* d = py23_dict_new(1, 1, 1, -1, -1);
+    PyAdamasDict* d = pa_dict_new(1, 1, 1, -1, -1);
     if (m) {
         for (int i = 0; i < m->nnames; ++i) {
-            Py23Str* k = str_new(m->names[i].name, (int64_t)strlen(m->names[i].name));
-            Py23Str* v = group_str(m, m->names[i].group);
-            py23_dict_set(d, (int64_t)k, (int64_t)v);
+            PyAdamasStr* k = str_new(m->names[i].name, (int64_t)strlen(m->names[i].name));
+            PyAdamasStr* v = group_str(m, m->names[i].group);
+            pa_dict_set(d, (int64_t)k, (int64_t)v);
         }
     }
     return (int64_t)d;
 }
 
-int64_t py23_re_lastindex(Py23Match* m) {
+int64_t pa_re_lastindex(PyAdamasMatch* m) {
     if (!m) return 0;
     int64_t last = 0;
     for (int64_t i = 1; i <= m->ngroups; ++i)
@@ -1340,8 +1340,8 @@ int64_t py23_re_lastindex(Py23Match* m) {
     return last;
 }
 
-int64_t py23_re_lastgroup(Py23Match* m) {
-    int64_t idx = py23_re_lastindex(m);
+int64_t pa_re_lastgroup(PyAdamasMatch* m) {
+    int64_t idx = pa_re_lastindex(m);
     if (!m || idx <= 0) return (int64_t)str_new("", 0);
     for (int i = 0; i < m->nnames; ++i) {
         if (m->names[i].group == idx)
@@ -1350,13 +1350,13 @@ int64_t py23_re_lastgroup(Py23Match* m) {
     return (int64_t)str_new("", 0);
 }
 
-int64_t py23_re_start(Py23Match* m, int64_t n) { return group_start(m, n); }
-int64_t py23_re_end(Py23Match* m, int64_t n) { return group_end(m, n); }
+int64_t pa_re_start(PyAdamasMatch* m, int64_t n) { return group_start(m, n); }
+int64_t pa_re_end(PyAdamasMatch* m, int64_t n) { return group_end(m, n); }
 
-int64_t py23_re_span(Py23Match* m, int64_t n) {
-    Py23List* out = py23_list_new(0, 0);
-    py23_list_append(out, group_start(m, n));
-    py23_list_append(out, group_end(m, n));
+int64_t pa_re_span(PyAdamasMatch* m, int64_t n) {
+    PyAdamasList* out = pa_list_new(0, 0);
+    pa_list_append(out, group_start(m, n));
+    pa_list_append(out, group_end(m, n));
     return (int64_t)out;
 }
 
@@ -1379,18 +1379,18 @@ static void buf_add(ReBuf* b, const char* p, size_t n) {
 
 static void buf_ch(ReBuf* b, char c) { buf_add(b, &c, 1); }
 
-static int find_next(ReProg* g, Py23Str* text, int64_t from, int64_t* caps) {
+static int find_next(ReProg* g, PyAdamasStr* text, int64_t from, int64_t* caps) {
     return find_from(g, text, from, 0, caps);
 }
 
-// finditer 返回 list[Match]（py23 没有惰性迭代器，按列表给，语义等价）。
-static Py23List* finditer_impl(ReProg* g, Py23Str* text) {
-    Py23List* out = py23_list_new(0, 1);
+// finditer 返回 list[Match]（pyadamas 没有惰性迭代器，按列表给，语义等价）。
+static PyAdamasList* finditer_impl(ReProg* g, PyAdamasStr* text) {
+    PyAdamasList* out = pa_list_new(0, 1);
     int64_t ncap = 2 * (int64_t)(g->ngroups + 1);
     int64_t* caps = (int64_t*)re_alloc(sizeof(int64_t) * (size_t)ncap);
     int64_t pos = 0;
     while (pos <= text->len && find_next(g, text, pos, caps)) {
-        py23_list_append(out,
+        pa_list_append(out,
                          (int64_t)match_new(text, g->ngroups, caps, g->names, g->nnames));
         if (caps[1] == caps[0]) pos = caps[1] + 1;
         else pos = caps[1];
@@ -1399,24 +1399,24 @@ static Py23List* finditer_impl(ReProg* g, Py23Str* text) {
     return out;
 }
 
-int64_t py23_re_finditer(Py23Regex* re, Py23Str* text) {
-    if (!re) py23_raise_c("AttributeError", "NoneType has no regex method");
+int64_t pa_re_finditer(PyAdamasRegex* re, PyAdamasStr* text) {
+    if (!re) pa_raise_c("AttributeError", "NoneType has no regex method");
     return (int64_t)finditer_impl(&re->prog, text);
 }
 
-int64_t py23_re_finditer_str(Py23Str* pat, Py23Str* text, int64_t flags) {
+int64_t pa_re_finditer_str(PyAdamasStr* pat, PyAdamasStr* text, int64_t flags) {
     ReProg g;
     const char* err = NULL;
     if (!prog_build(&g, (const unsigned char*)pat->data, (int)pat->len, (int)flags, &err)) {
-        py23_raise_c("ValueError", err ? err : "bad pattern");
+        pa_raise_c("ValueError", err ? err : "bad pattern");
     }
-    Py23List* out = finditer_impl(&g, text);
+    PyAdamasList* out = finditer_impl(&g, text);
     prog_free(&g);
     return (int64_t)out;
 }
 
 // findall 的取段规则：没有捕获组取整段；只有一个捕获组时取该组（CPython 语义）。
-static void findall_push(Py23List* out, Py23Str* text, int64_t ngroups, const int64_t* caps) {
+static void findall_push(PyAdamasList* out, PyAdamasStr* text, int64_t ngroups, const int64_t* caps) {
     int64_t a = caps[0], b = caps[1];
     if (ngroups == 1) {
         if (caps[2] >= 0 && caps[3] >= caps[2]) {
@@ -1426,16 +1426,16 @@ static void findall_push(Py23List* out, Py23Str* text, int64_t ngroups, const in
             a = b = caps[0];
         }
     }
-    py23_list_append(out, (int64_t)str_new(text->data + a, b - a));
+    pa_list_append(out, (int64_t)str_new(text->data + a, b - a));
 }
 
-int64_t py23_re_findall_str(Py23Str* pat, Py23Str* text, int64_t flags) {
+int64_t pa_re_findall_str(PyAdamasStr* pat, PyAdamasStr* text, int64_t flags) {
     ReProg g;
     const char* err = NULL;
     if (!prog_build(&g, (const unsigned char*)pat->data, (int)pat->len, (int)flags, &err)) {
-        py23_raise_c("ValueError", err ? err : "bad pattern");
+        pa_raise_c("ValueError", err ? err : "bad pattern");
     }
-    Py23List* out = py23_list_new(0, 1);
+    PyAdamasList* out = pa_list_new(0, 1);
     int64_t ncap = 2 * (int64_t)(g.ngroups + 1);
     int64_t* caps = (int64_t*)re_alloc(sizeof(int64_t) * (size_t)ncap);
     int64_t pos = 0;
@@ -1449,9 +1449,9 @@ int64_t py23_re_findall_str(Py23Str* pat, Py23Str* text, int64_t flags) {
     return (int64_t)out;
 }
 
-int64_t py23_re_findall(Py23Regex* re, Py23Str* text) {
-    if (!re) py23_raise_c("AttributeError", "NoneType has no regex method");
-    Py23List* out = py23_list_new(0, 1);
+int64_t pa_re_findall(PyAdamasRegex* re, PyAdamasStr* text) {
+    if (!re) pa_raise_c("AttributeError", "NoneType has no regex method");
+    PyAdamasList* out = pa_list_new(0, 1);
     int64_t ncap = 2 * (int64_t)(re->prog.ngroups + 1);
     int64_t* caps = (int64_t*)re_alloc(sizeof(int64_t) * (size_t)ncap);
     int64_t pos = 0;
@@ -1464,7 +1464,7 @@ int64_t py23_re_findall(Py23Regex* re, Py23Str* text) {
     return (int64_t)out;
 }
 
-static int64_t group_index_by_name(Py23Match* m, const char* s, int64_t len) {
+static int64_t group_index_by_name(PyAdamasMatch* m, const char* s, int64_t len) {
     if (!m) return -1;
     for (int i = 0; i < m->nnames; ++i) {
         if ((int64_t)strlen(m->names[i].name) == len &&
@@ -1474,15 +1474,15 @@ static int64_t group_index_by_name(Py23Match* m, const char* s, int64_t len) {
     return -1;
 }
 
-static void add_repl(ReBuf* b, const char* r, int64_t rlen, Py23Match* m) {
+static void add_repl(ReBuf* b, const char* r, int64_t rlen, PyAdamasMatch* m) {
     for (int64_t i = 0; i < rlen; ++i) {
         char c = r[i];
         if (c == '\\' && i + 1 < rlen) {
             char d = r[i + 1];
             if (d >= '0' && d <= '9') {
-                Py23Str* s = group_str(m, d - '0');
+                PyAdamasStr* s = group_str(m, d - '0');
                 buf_add(b, s->data, (size_t)s->len);
-                py23_rc_dec(s);
+                pa_rc_dec(s);
                 i++;
                 continue;
             }
@@ -1507,9 +1507,9 @@ static void add_repl(ReBuf* b, const char* r, int64_t rlen, Py23Match* m) {
                         gi = group_index_by_name(m, r + ns, j - ns);
                     }
                     if (gi >= 0) {
-                        Py23Str* s = group_str(m, gi);
+                        PyAdamasStr* s = group_str(m, gi);
                         buf_add(b, s->data, (size_t)s->len);
-                        py23_rc_dec(s);
+                        pa_rc_dec(s);
                         i = j;
                         continue;
                     }
@@ -1525,20 +1525,20 @@ static void add_repl(ReBuf* b, const char* r, int64_t rlen, Py23Match* m) {
     }
 }
 
-int64_t py23_re_expand(Py23Match* m, Py23Str* tmpl) {
+int64_t pa_re_expand(PyAdamasMatch* m, PyAdamasStr* tmpl) {
     ReBuf b = {NULL, 0, 0};
     add_repl(&b, tmpl->data, tmpl->len, m);
-    Py23Str* out = str_new(b.p ? b.p : "", (int64_t)b.n);
+    PyAdamasStr* out = str_new(b.p ? b.p : "", (int64_t)b.n);
     free(b.p);
     return (int64_t)out;
 }
 
-int64_t py23_re_sub_str(Py23Str* pat, Py23Str* repl, Py23Str* text, int64_t count,
+int64_t pa_re_sub_str(PyAdamasStr* pat, PyAdamasStr* repl, PyAdamasStr* text, int64_t count,
                         int64_t flags) {
     ReProg g;
     const char* err = NULL;
     if (!prog_build(&g, (const unsigned char*)pat->data, (int)pat->len, (int)flags, &err)) {
-        py23_raise_c("ValueError", err ? err : "bad pattern");
+        pa_raise_c("ValueError", err ? err : "bad pattern");
     }
     int64_t ncap = 2 * (int64_t)(g.ngroups + 1);
     int64_t* caps = (int64_t*)re_alloc(sizeof(int64_t) * (size_t)ncap);
@@ -1546,7 +1546,7 @@ int64_t py23_re_sub_str(Py23Str* pat, Py23Str* repl, Py23Str* text, int64_t coun
     int64_t pos = 0, done = 0;
     while (pos <= text->len && (count <= 0 || done < count) && find_next(&g, text, pos, caps)) {
         buf_add(&b, text->data + pos, (size_t)(caps[0] - pos));
-        Py23Match tmp;
+        PyAdamasMatch tmp;
         memset(&tmp, 0, sizeof tmp);
         tmp.text = text;
         tmp.ngroups = g.ngroups;
@@ -1563,15 +1563,15 @@ int64_t py23_re_sub_str(Py23Str* pat, Py23Str* repl, Py23Str* text, int64_t coun
         }
     }
     if (pos < text->len) buf_add(&b, text->data + pos, (size_t)(text->len - pos));
-    Py23Str* out = str_new(b.p ? b.p : "", (int64_t)b.n);
+    PyAdamasStr* out = str_new(b.p ? b.p : "", (int64_t)b.n);
     free(b.p);
     free(caps);
     prog_free(&g);
     return (int64_t)out;
 }
 
-int64_t py23_re_sub(Py23Regex* re, Py23Str* repl, Py23Str* text, int64_t count) {
-    if (!re) py23_raise_c("AttributeError", "NoneType has no regex method");
+int64_t pa_re_sub(PyAdamasRegex* re, PyAdamasStr* repl, PyAdamasStr* text, int64_t count) {
+    if (!re) pa_raise_c("AttributeError", "NoneType has no regex method");
     int64_t ncap = 2 * (int64_t)(re->prog.ngroups + 1);
     int64_t* caps = (int64_t*)re_alloc(sizeof(int64_t) * (size_t)ncap);
     ReBuf b = {NULL, 0, 0};
@@ -1579,7 +1579,7 @@ int64_t py23_re_sub(Py23Regex* re, Py23Str* repl, Py23Str* text, int64_t count) 
     while (pos <= text->len && (count <= 0 || done < count) &&
            find_next(&re->prog, text, pos, caps)) {
         buf_add(&b, text->data + pos, (size_t)(caps[0] - pos));
-        Py23Match tmp;
+        PyAdamasMatch tmp;
         memset(&tmp, 0, sizeof tmp);
         tmp.text = text;
         tmp.ngroups = re->prog.ngroups;
@@ -1596,15 +1596,15 @@ int64_t py23_re_sub(Py23Regex* re, Py23Str* repl, Py23Str* text, int64_t count) 
         }
     }
     if (pos < text->len) buf_add(&b, text->data + pos, (size_t)(text->len - pos));
-    Py23Str* out = str_new(b.p ? b.p : "", (int64_t)b.n);
+    PyAdamasStr* out = str_new(b.p ? b.p : "", (int64_t)b.n);
     free(b.p);
     free(caps);
     return (int64_t)out;
 }
 
 // sub 的 repl 是函数：每匹配一次就调一次闭包，返回值拼进结果。
-int64_t py23_re_sub_fn(Py23Regex* re, int64_t closure, Py23Str* text, int64_t count) {
-    if (!re) py23_raise_c("AttributeError", "NoneType has no regex method");
+int64_t pa_re_sub_fn(PyAdamasRegex* re, int64_t closure, PyAdamasStr* text, int64_t count) {
+    if (!re) pa_raise_c("AttributeError", "NoneType has no regex method");
     ReProg* g = &re->prog;
     int64_t ncap = 2 * (int64_t)(g->ngroups + 1);
     int64_t* caps = (int64_t*)re_alloc(sizeof(int64_t) * (size_t)ncap);
@@ -1612,13 +1612,13 @@ int64_t py23_re_sub_fn(Py23Regex* re, int64_t closure, Py23Str* text, int64_t co
     int64_t pos = 0, done = 0;
     while (pos <= text->len && (count <= 0 || done < count) && find_next(g, text, pos, caps)) {
         buf_add(&b, text->data + pos, (size_t)(caps[0] - pos));
-        Py23Match* m = match_new(text, g->ngroups, caps, g->names, g->nnames);
-        Py23Str* r = (Py23Str*)py23_call1((void*)closure, (int64_t)(uintptr_t)m);
+        PyAdamasMatch* m = match_new(text, g->ngroups, caps, g->names, g->nnames);
+        PyAdamasStr* r = (PyAdamasStr*)pa_call1((void*)closure, (int64_t)(uintptr_t)m);
         if (r) {
             buf_add(&b, r->data, (size_t)r->len);
-            py23_rc_dec(r);
+            pa_rc_dec(r);
         }
-        py23_rc_dec(m);
+        pa_rc_dec(m);
         done++;
         if (caps[1] == caps[0]) {
             if (caps[1] < text->len) buf_ch(&b, text->data[caps[1]]);
@@ -1628,29 +1628,29 @@ int64_t py23_re_sub_fn(Py23Regex* re, int64_t closure, Py23Str* text, int64_t co
         }
     }
     if (pos < text->len) buf_add(&b, text->data + pos, (size_t)(text->len - pos));
-    Py23Str* out = str_new(b.p ? b.p : "", (int64_t)b.n);
+    PyAdamasStr* out = str_new(b.p ? b.p : "", (int64_t)b.n);
     free(b.p);
     free(caps);
     return (int64_t)out;
 }
 
-int64_t py23_re_split_str(Py23Str* pat, Py23Str* text, int64_t maxsplit, int64_t flags) {
+int64_t pa_re_split_str(PyAdamasStr* pat, PyAdamasStr* text, int64_t maxsplit, int64_t flags) {
     ReProg g;
     const char* err = NULL;
     if (!prog_build(&g, (const unsigned char*)pat->data, (int)pat->len, (int)flags, &err)) {
-        py23_raise_c("ValueError", err ? err : "bad pattern");
+        pa_raise_c("ValueError", err ? err : "bad pattern");
     }
     int64_t ncap = 2 * (int64_t)(g.ngroups + 1);
     int64_t* caps = (int64_t*)re_alloc(sizeof(int64_t) * (size_t)ncap);
-    Py23List* out = py23_list_new(0, 1);
+    PyAdamasList* out = pa_list_new(0, 1);
     int64_t pos = 0, last = 0, done = 0;
     while (pos <= text->len && (maxsplit <= 0 || done < maxsplit) &&
            find_next(&g, text, pos, caps)) {
-        Py23Str* s = str_new(text->data + last, caps[0] - last);
-        py23_list_append(out, (int64_t)s);
+        PyAdamasStr* s = str_new(text->data + last, caps[0] - last);
+        pa_list_append(out, (int64_t)s);
         for (int64_t gi = 1; gi <= g.ngroups; ++gi) {
             int64_t a = caps[2 * gi], b = caps[2 * gi + 1];
-            py23_list_append(out, (int64_t)(a >= 0 && b >= a
+            pa_list_append(out, (int64_t)(a >= 0 && b >= a
                                                 ? str_new(text->data + a, b - a)
                                                 : str_new("", 0)));
         }
@@ -1662,26 +1662,26 @@ int64_t py23_re_split_str(Py23Str* pat, Py23Str* text, int64_t maxsplit, int64_t
             pos = caps[1];
         }
     }
-    Py23Str* tail = str_new(text->data + last, text->len - last);
-    py23_list_append(out, (int64_t)tail);
+    PyAdamasStr* tail = str_new(text->data + last, text->len - last);
+    pa_list_append(out, (int64_t)tail);
     free(caps);
     prog_free(&g);
     return (int64_t)out;
 }
 
-int64_t py23_re_split(Py23Regex* re, Py23Str* text, int64_t maxsplit) {
-    if (!re) py23_raise_c("AttributeError", "NoneType has no regex method");
+int64_t pa_re_split(PyAdamasRegex* re, PyAdamasStr* text, int64_t maxsplit) {
+    if (!re) pa_raise_c("AttributeError", "NoneType has no regex method");
     int64_t ncap = 2 * (int64_t)(re->prog.ngroups + 1);
     int64_t* caps = (int64_t*)re_alloc(sizeof(int64_t) * (size_t)ncap);
-    Py23List* out = py23_list_new(0, 1);
+    PyAdamasList* out = pa_list_new(0, 1);
     int64_t pos = 0, last = 0, done = 0;
     while (pos <= text->len && (maxsplit <= 0 || done < maxsplit) &&
            find_next(&re->prog, text, pos, caps)) {
-        Py23Str* s = str_new(text->data + last, caps[0] - last);
-        py23_list_append(out, (int64_t)s);
+        PyAdamasStr* s = str_new(text->data + last, caps[0] - last);
+        pa_list_append(out, (int64_t)s);
         for (int64_t gi = 1; gi <= re->prog.ngroups; ++gi) {
             int64_t a = caps[2 * gi], b = caps[2 * gi + 1];
-            py23_list_append(out, (int64_t)(a >= 0 && b >= a
+            pa_list_append(out, (int64_t)(a >= 0 && b >= a
                                                 ? str_new(text->data + a, b - a)
                                                 : str_new("", 0)));
         }
@@ -1693,13 +1693,13 @@ int64_t py23_re_split(Py23Regex* re, Py23Str* text, int64_t maxsplit) {
             pos = caps[1];
         }
     }
-    Py23Str* tail = str_new(text->data + last, text->len - last);
-    py23_list_append(out, (int64_t)tail);
+    PyAdamasStr* tail = str_new(text->data + last, text->len - last);
+    pa_list_append(out, (int64_t)tail);
     free(caps);
     return (int64_t)out;
 }
 
-int64_t py23_re_escape(Py23Str* s) {
+int64_t pa_re_escape(PyAdamasStr* s) {
     static const char specials[] = "\\^$.*+?{}[]|()-#&~ \t\n\r\v\f";
     ReBuf b = {NULL, 0, 0};
     for (int64_t i = 0; i < s->len; ++i) {
@@ -1707,7 +1707,7 @@ int64_t py23_re_escape(Py23Str* s) {
         if (c && strchr(specials, c)) buf_ch(&b, '\\');
         buf_ch(&b, c);
     }
-    Py23Str* out = str_new(b.p ? b.p : "", (int64_t)b.n);
+    PyAdamasStr* out = str_new(b.p ? b.p : "", (int64_t)b.n);
     free(b.p);
     return (int64_t)out;
 }

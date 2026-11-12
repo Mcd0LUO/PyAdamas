@@ -1,4 +1,4 @@
-# py23
+# PyAdamas
 
 用 C++23 写的 Python 语法外壳编译器。**词法 → AST → 类型检查 → IR → x86-64 汇编 → 可执行文件**，整条链路自己实现，不生成 C。
 
@@ -14,7 +14,7 @@ print(fib(30))
 ```
 
 ```bash
-$ cmake --preset dev && cmake --build --preset dev && ./build/dev/py23 run hello.py
+$ cmake --preset dev && cmake --build --preset dev && ./build/dev/pyadamas run hello.py
 832040
 ```
 
@@ -38,9 +38,9 @@ class Point:
 ## 构建
 
 ```bash
-cmake --preset dev                 # Debug + Ninja → build/dev/py23
+cmake --preset dev                 # Debug + Ninja → build/dev/pyadamas
 cmake --build --preset dev
-cmake --preset release             # Release      → build/release/py23
+cmake --preset release             # Release      → build/release/PyAdamas
 cmake --build --preset release
 ctest --preset dev                 # 正例 + 反例 + 运行 + 模块 + 缓存
 ```
@@ -50,15 +50,15 @@ ctest --preset dev                 # 正例 + 反例 + 运行 + 模块 + 缓存
 ## 用法
 
 ```bash
-py23 check    script.py   # 词法 + 语法 + 类型检查
-py23 check --syntax script.py   # 只做词法/语法
-py23 types    script.py   # 打印顶层名字的推断类型
-py23 ast      script.py   # 打印语法树
-py23 tokens   script.py   # 打印 token 流
-py23 ir       script.py   # 打印降级后的 IR
-py23 asm      script.py   # 打印生成的汇编
-py23 build    script.py [-o out]   # 编译链接成可执行文件
-py23 run      script.py   # 编译、链接并运行（产物是临时文件，跑完即删）
+pyadamas check    script.py   # 词法 + 语法 + 类型检查
+pyadamas check --syntax script.py   # 只做词法/语法
+pyadamas types    script.py   # 打印顶层名字的推断类型
+pyadamas ast      script.py   # 打印语法树
+pyadamas tokens   script.py   # 打印 token 流
+pyadamas ir       script.py   # 打印降级后的 IR
+pyadamas asm      script.py   # 打印生成的汇编
+pyadamas build    script.py [-o out]   # 编译链接成可执行文件
+pyadamas run      script.py   # 编译、链接并运行（产物是临时文件，跑完即删）
 ```
 
 生成代码优化等级：`-O0` 基础 / `-O1` 常规（下标内联、槽融合、浮点提升、
@@ -68,7 +68,7 @@ py23 run      script.py   # 编译、链接并运行（产物是临时文件，�
 序言清零裁剪）。`--fast-math` 额外允许 float 归约用 SIMD 分组求和（可能
 改变末位舍入）。模块缓存按等级和 fast-math 区分。
 
-`PY23_KEEP_ASM=1` 会保留中间汇编。出错时输出带源码行和插入符：
+`PYADAMAS_KEEP_ASM=1` 会保留中间汇编。出错时输出带源码行和插入符：
 
 ```
 bad.py:1:7: error: expected parameter name, found ':'
@@ -78,7 +78,7 @@ bad.py:1:7: error: expected parameter name, found ':'
 
 ## 现在能做什么
 
-标量、字符串、**bytes**（含迭代与 `%` 格式化）、列表、元组、**字典 / 集合**（字面量、下标读写、`len`、`in`、`for`、`get`/`keys`/`values`/`items`/`update`/`add`、删除类方法）、**切片（读与赋值）**、函数（默认参数、递归、一等值、闭包、`nonlocal`、`lambda`、`*args`/`**kwargs`、装饰器）、推导式（含异步推导式）、`with`、`try/except/else/finally`、`raise`（异常值、`args`、`raise ... from`、自定义异常）、本地包/相对导入（`.py` → `.py23i` + `.o`，惰性初始化、增量缓存）、`class`（字段、方法、C3 多继承、零参 `super()`、`@staticmethod`、`@classmethod`、`@property`、类属性）、`if` / `while` / `for`（含循环 `else`）、`break` / `continue`、`assert`、`global`、`del`、`match/case`、复数字面量、f-string（含格式说明）、dunder 协议、`open`/`input`/`sys.stdin`、`print`（含 `sep=` / `end=`）。生成器支持 `yield from`；协程支持 `async def` / `await` / `asyncio.run` / `sleep` / `gather` / `create_task`、`Future`、异步生成器（`async for` / `async with`、`asend` / `athrow` / `__anext__` / `aclose`）。标准库内置 `math`/`sys`/`asyncio`/`random`/`os`/`os.path`/`subprocess`/`time`/`itertools`/`collections`/`functools`/`json`/`string`/`re`/`datetime`/`pathlib`/`csv`。堆值用引用计数自动回收，循环收集器回收环和 unknown 容器泄漏；不含堆临时值的代码不会插入任何 RC 指令。
+标量、字符串、**bytes**（含迭代与 `%` 格式化）、列表、元组、**字典 / 集合**（字面量、下标读写、`len`、`in`、`for`、`get`/`keys`/`values`/`items`/`update`/`add`、删除类方法）、**切片（读与赋值）**、函数（默认参数、递归、一等值、闭包、`nonlocal`、`lambda`、`*args`/`**kwargs`、装饰器）、推导式（含异步推导式）、`with`、`try/except/else/finally`、`raise`（异常值、`args`、`raise ... from`、自定义异常）、本地包/相对导入（`.py` → `.pya` + `.o`，惰性初始化、增量缓存）、`class`（字段、方法、C3 多继承、零参 `super()`、`@staticmethod`、`@classmethod`、`@property`、类属性）、`if` / `while` / `for`（含循环 `else`）、`break` / `continue`、`assert`、`global`、`del`、`match/case`、复数字面量、f-string（含格式说明）、dunder 协议、`open`/`input`/`sys.stdin`、`print`（含 `sep=` / `end=`）。生成器支持 `yield from`；协程支持 `async def` / `await` / `asyncio.run` / `sleep` / `gather` / `create_task`、`Future`、异步生成器（`async for` / `async with`、`asend` / `athrow` / `__anext__` / `aclose`）。标准库内置 `math`/`sys`/`asyncio`/`random`/`os`/`os.path`/`subprocess`/`time`/`itertools`/`collections`/`functools`/`json`/`string`/`re`/`datetime`/`pathlib`/`csv`。堆值用引用计数自动回收，循环收集器回收环和 unknown 容器泄漏；不含堆临时值的代码不会插入任何 RC 指令。
 
 完整的支持清单和语义定义见 [docs/language.md](docs/language.md)。
 
@@ -134,7 +134,7 @@ tools/                    一次性脚本
 - **异常用 setjmp/longjmp 展开**：`try`/`with`/`finally` 压运行时 handler 记录，`raise` 一次 `longjmp` 到最内层 landing pad；含 handler 的函数关闭热变量寄存器提升，异常跳过的局部引用交给保守 GC。→ [代码生成](docs/codegen.md#异常展开)
 - **生成器是状态机 + 堆帧**：含 `yield` 的函数拆成创建包装和 resume，局部槽位在堆帧里；yield 时把 handler 记录摘下，恢复时重新 setjmp；`close()` 和引用计数归零会按挂起点快照跑 `finally` / `__exit__`。→ [运行时](docs/runtime.md#生成器)
 - **协程复用同一套状态机**：`async def` 的帧多一个 kind 标记，`await` 是第三种挂起；`asyncio.run` 驱动就绪队列 + 定时器，`gather` 并发启动，`create_task` 立即调度并可 `cancel()`（沿 await 链级联取消），`Future` 支持多等待者、`set_result`/`set_exception`/`add_done_callback`，`wait_readable`/`wait_writable` 把 fd 交给事件循环 `poll`；异常通过帧内注入跨 await 传播；异步生成器 + `async for` / `async with` / `asend` / `athrow` / `aclose` 也已接通。→ [运行时](docs/runtime.md#协程与事件循环)
-- **模块独立编译 + 链接**：本地 `.py` 模块与内置 `math`/`sys`；每个 `.py` 编译成独立 `.o` 和二进制 `.py23i` 接口，入口与依赖按 import 图链接；初始化惰性且只执行一次，源码哈希 + 依赖接口哈希决定是否复用缓存。→ [路线图](docs/roadmap.md)
+- **模块独立编译 + 链接**：本地 `.py` 模块与内置 `math`/`sys`；每个 `.py` 编译成独立 `.o` 和二进制 `.pya` 接口，入口与依赖按 import 图链接；初始化惰性且只执行一次，源码哈希 + 依赖接口哈希决定是否复用缓存。→ [路线图](docs/roadmap.md)
 - **运行时是纯 C**，只依赖 libc + libm，随产物一起链接。
 
 ## 已知限制（摘要）
@@ -161,8 +161,8 @@ tools/                    一次性脚本
 
 ```bash
 ctest --preset dev
-./build/dev/py23 build -o /tmp/run_diff.prog tests/diff/run_diff.py
-/tmp/run_diff.prog --py23 build/dev/py23 --cpython python3 --seeds 3   # 810 个程序
+./build/dev/pyadamas build -o /tmp/run_diff.prog tests/diff/run_diff.py
+/tmp/run_diff.prog --pyadamas build/dev/pyadamas --cpython python3 --seeds 3   # 810 个程序
 ```
 
 前端鲁棒性基线（CPython 3.11 标准库 + site-packages，38582 个 `.py`）：语法通过 35693，其中类型通过 29143（81.6%）；标准库本体 1143 / 1289（88.7%）。0.6 引入类检查后口径变了——刚加上时失败 19064 个文件，逐条去误杀后降到 6550 个，明细见 [compatibility.md](docs/compatibility.md#前端鲁棒性基线)。

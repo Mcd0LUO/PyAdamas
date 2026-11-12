@@ -1,7 +1,7 @@
 // lower_comp.cpp —— 推导式降级（list/set/dict/生成器/异步）
 #include "lower_impl.h"
 
-namespace py23 {
+namespace pyadamas {
 
 VReg Lowerer::lower_comp(Expr& e) {
     std::vector<ExprPtr>* gens = nullptr;
@@ -450,4 +450,4 @@ VReg Lowerer::lower_comp(Expr& e) {
     return async_mode ? acc_val() : acc;
 }
 
-}  // namespace py23
+}  // namespace pyadamas

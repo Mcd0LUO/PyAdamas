@@ -1,16 +1,16 @@
 // main.cpp —— 命令行入口
 //
 // 用法:
-//   py23 tokens <file.py>   打印 token 流
-//   py23 ast    <file.py>   打印语法树
-//   py23 types  <file.py>   打印每个顶层名字的推断类型
-//   py23 check  <file.py>   词法 + 语法 + 类型检查
-//   py23 check --syntax <f> 只做词法/语法检查
-//   py23 ir     <file.py>   打印降级后的 IR
-//   py23 asm    <file.py>   打印生成的 x86-64 汇编
-//   py23 build  <file.py> [-o out]   编译并链接成可执行文件
-//   py23 run    <file.py>   编译、链接并运行
-//   py23        <file.py>   等价于 ast
+//   pyadamas tokens <file.py>   打印 token 流
+//   pyadamas ast    <file.py>   打印语法树
+//   pyadamas types  <file.py>   打印每个顶层名字的推断类型
+//   pyadamas check  <file.py>   词法 + 语法 + 类型检查
+//   pyadamas check --syntax <f> 只做词法/语法检查
+//   pyadamas ir     <file.py>   打印降级后的 IR
+//   pyadamas asm    <file.py>   打印生成的 x86-64 汇编
+//   pyadamas build  <file.py> [-o out]   编译并链接成可执行文件
+//   pyadamas run    <file.py>   编译、链接并运行
+//   pyadamas        <file.py>   等价于 ast
 #include <algorithm>
 #include <cctype>
 #include <chrono>
@@ -44,47 +44,47 @@
 #include "parser.h"
 #include "typecheck.h"
 
-#ifndef PY23_RT_OBJ
-#define PY23_RT_OBJ "build/dev/rt.o"
+#ifndef PYADAMAS_RT_OBJ
+#define PYADAMAS_RT_OBJ "build/dev/rt.o"
 #endif
-#ifndef PY23_MODCACHE_DIR
-#define PY23_MODCACHE_DIR "build/dev/modcache"
+#ifndef PYADAMAS_MODCACHE_DIR
+#define PYADAMAS_MODCACHE_DIR "build/dev/modcache"
 #endif
 
 #include "driver_build.h"
 #include "driver_util.h"
 
-using py23::read_file;
-using py23::report;
-using py23::shell_quote;
-using py23::make_temp;
-using py23::Program;
-using py23::load_program;
-using py23::prepare_program;
-using py23::link_program;
+using pyadamas::read_file;
+using pyadamas::report;
+using pyadamas::shell_quote;
+using pyadamas::make_temp;
+using pyadamas::Program;
+using pyadamas::load_program;
+using pyadamas::prepare_program;
+using pyadamas::link_program;
 
 namespace {
 
-void dump_tokens(const std::vector<py23::Token>& toks) {
+void dump_tokens(const std::vector<pyadamas::Token>& toks) {
     for (const auto& t : toks) {
         std::string detail;
         switch (t.kind) {
-            case py23::Tok::INT: detail = std::format("  value={}", t.ival); break;
-            case py23::Tok::FLOAT: detail = std::format("  value={}", t.fval); break;
-            case py23::Tok::NAME:
-            case py23::Tok::STRING:
-            case py23::Tok::FSTRING: detail = "  \"" + t.text + "\""; break;
+            case pyadamas::Tok::INT: detail = std::format("  value={}", t.ival); break;
+            case pyadamas::Tok::FLOAT: detail = std::format("  value={}", t.fval); break;
+            case pyadamas::Tok::NAME:
+            case pyadamas::Tok::STRING:
+            case pyadamas::Tok::FSTRING: detail = "  \"" + t.text + "\""; break;
             default: break;
         }
-        std::printf("%4d:%-3d %-12s%s\n", t.line, t.col, py23::tok_name(t.kind), detail.c_str());
+        std::printf("%4d:%-3d %-12s%s\n", t.line, t.col, pyadamas::tok_name(t.kind), detail.c_str());
     }
 }
 
 // ── 编译流水线 ──────────────────────────────────────────────────
 
 struct Frontend {
-    std::unique_ptr<py23::Module> mod;
-    py23::TypeChecker tc;
+    std::unique_ptr<pyadamas::Module> mod;
+    pyadamas::TypeChecker tc;
 
     explicit Frontend(std::string file) : tc(std::move(file)) {}
 };
@@ -92,12 +92,12 @@ struct Frontend {
 // 解析 + 类型检查。有错误时打印并返回 nullopt。
 std::optional<Frontend> run_frontend(const std::string& path, const std::string& source,
                                      bool syntax_only) {
-    py23::Lexer lexer(source);
+    pyadamas::Lexer lexer(source);
     auto tokens = lexer.run();
 
-    py23::Parser parser(std::move(tokens));
+    pyadamas::Parser parser(std::move(tokens));
     auto mod = parser.parse();
-    py23::desugar_lambdas(*mod);
+    pyadamas::desugar_lambdas(*mod);
 
     Frontend fe(path);
     fe.mod = std::move(mod);
@@ -119,7 +119,7 @@ std::optional<Frontend> run_frontend(const std::string& path, const std::string&
 int main(int argc, char** argv) {
     if (argc < 2) {
         std::fprintf(stderr,
-                     "py23 —— Python 语法外壳的编译器\n"
+                     "pyadamas —— Python 语法外壳的编译器\n"
                      "\n"
                      "usage: %s [tokens|ast|types|check|ir|asm|build|run] [-O0|-O1|-O2] "
                      "[--fast-math] [--syntax] [-o out] <file.py>\n",
@@ -164,7 +164,7 @@ int main(int argc, char** argv) {
         else if (a == "-I" && i + 1 < argc) include_dirs.push_back(argv[++i]);
         else if (a.starts_with("-I") && a.size() > 2) include_dirs.push_back(a.substr(2));
         else if (a == "--") {
-            // `py23 run prog.py -- a b`：余下参数原样传给被运行的程序。
+            // `pyadamas run prog.py -- a b`：余下参数原样传给被运行的程序。
             for (++i; i < argc; ++i) prog_args.push_back(argv[i]);
             break;
         }
@@ -185,7 +185,7 @@ int main(int argc, char** argv) {
 
     try {
         if (mode == "tokens") {
-            py23::Lexer lexer(*src);
+            pyadamas::Lexer lexer(*src);
             dump_tokens(lexer.run());
             return 0;
         }
@@ -237,13 +237,13 @@ int main(int argc, char** argv) {
             if (!prepare_program(prog, false, true)) return 1;
             if (!prog.entry->ir) return 1;
             if (mode == "ir") {
-                py23::dump_ir(*prog.entry->ir, std::cout);
+                pyadamas::dump_ir(*prog.entry->ir, std::cout);
             } else {
                 auto a = std::chrono::steady_clock::now();
                 std::string asm_text =
-                    py23::generate_asm(*prog.entry->ir, !prog.needs_unknown_index);
+                    pyadamas::generate_asm(*prog.entry->ir, !prog.needs_unknown_index);
                 auto b = std::chrono::steady_clock::now();
-                if (std::getenv("PY23_TIMING"))
+                if (std::getenv("PYADAMAS_TIMING"))
                     std::fprintf(stderr, "[timing] codegen=%.1f ms\n",
                                  std::chrono::duration<double, std::milli>(b - a).count());
                 std::cout << asm_text;
@@ -284,9 +284,9 @@ int main(int argc, char** argv) {
             return WIFEXITED(rc) ? WEXITSTATUS(rc) : 1;
         }
         return 0;
-    } catch (const py23::LexError& e) {
+    } catch (const pyadamas::LexError& e) {
         report(path, *src, e.line, e.col, e.what());
-    } catch (const py23::ParseError& e) {
+    } catch (const pyadamas::ParseError& e) {
         report(path, *src, e.line, e.col, e.what());
     } catch (const std::exception& e) {
         std::fprintf(stderr, "%s: internal error: %s\n", path.c_str(), e.what());

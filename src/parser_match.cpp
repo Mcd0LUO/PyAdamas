@@ -4,7 +4,7 @@
 #include <optional>
 #include <unordered_set>
 
-namespace py23 {
+namespace pyadamas {
 
 // 映射模式里做静态重复 key 检查：只处理常量键（含 -1 这种一元负号）。
 static std::optional<std::string> pattern_key_id(Expr& e) {
@@ -309,4 +309,4 @@ PatternPtr Parser::parse_closed_pattern() {
     throw err_at("unsupported pattern", ln, cl);
 }
 
-}  // namespace py23
+}  // namespace pyadamas

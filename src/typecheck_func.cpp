@@ -3,7 +3,7 @@
 
 #include "module.h"
 
-namespace py23 {
+namespace pyadamas {
 
 // C3 线性化：反复取各序列中「不在任何序列尾部」的头部。失败说明
 // 继承关系自相矛盾（典型是菱形里父类顺序冲突）。
@@ -49,8 +49,8 @@ void TypeChecker::funcdef_impl(FunctionDef& f, const ClassInfoPtr& owner) {
             // 拿不到实参类型就没法在降级层选迭代路径。
             if (cur_ == module_ || owner) {
                 func_defs_.push_back(&f);
-            } else if (f.name.rfind("__py23$gen_", 0) == 0 ||
-                       f.name.rfind("__py23$lambda_", 0) == 0) {
+            } else if (f.name.rfind("__pyadamas$gen_", 0) == 0 ||
+                       f.name.rfind("__pyadamas$lambda_", 0) == 0) {
                 nested_recheck_parent_[&f] = cur_;
                 func_defs_.push_back(&f);
             }
@@ -287,7 +287,7 @@ bool TypeChecker::add_implicit_field(const Attribute& a, TypePtr ty) {
 
 // 类体里的语句：方法定义和字段标注之外，普通赋值按类属性处理（存进
 // 模块里的隐藏全局），其余（if / for / with …）在 Python 里是「类体在
-// 独立命名空间里执行」，py23 没有运行期类对象，标记成「没建模」，
+// 独立命名空间里执行」，pyadamas 没有运行期类对象，标记成「没建模」，
 // 由编译阶段拒绝——不能在这里报错，真实代码太常见。
 void TypeChecker::classdef(ClassDef& c) {
         if (!c.decorators.empty()) {
@@ -852,4 +852,4 @@ void TypeChecker::classdef(ClassDef& c) {
     }
 
 
-}  // namespace py23
+}  // namespace pyadamas

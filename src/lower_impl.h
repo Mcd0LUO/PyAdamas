@@ -20,7 +20,7 @@
 #include "lower.h"
 #include "module.h"
 
-namespace py23 {
+namespace pyadamas {
 
 // ────────────────────────── 小工具 ──────────────────────────
 
@@ -479,7 +479,7 @@ private:
         return def(ty, std::move(mv));
     }
 
-    // 列表元素所有权类别，必须和 codegen 传给 py23_list_new 的值一致。
+    // 列表元素所有权类别，必须和 codegen 传给 pa_list_new 的值一致。
     static int list_kind(const TypePtr& t) {
         auto one = [](const TypePtr& e) -> int {
             if (!e || e->kind == TyKind::Unknown) return 2;
@@ -1334,4 +1334,4 @@ private:
 };
 
 
-}  // namespace py23
+}  // namespace pyadamas

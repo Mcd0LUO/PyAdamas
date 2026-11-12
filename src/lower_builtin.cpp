@@ -1,7 +1,7 @@
 // lower_builtin.cpp —— 内置函数调用降级（builtin_call 与聚合辅助）
 #include "lower_impl.h"
 
-namespace py23 {
+namespace pyadamas {
 
 VReg Lowerer::lower_builtin_call(const std::string& name, Call& c) {
     // print 的关键字是 sep / end，得单独处理，不能走下面这条通用拦截
@@ -599,7 +599,7 @@ VReg Lowerer::lower_builtin_call(const std::string& name, Call& c) {
         return call_runtime(RtFn::Ord, t_int(), {v});
     }
 
-    if (name == "__py23_capwords") {
+    if (name == "__pa_capwords") {
         if (c.args.size() != 1 || !c.keywords.empty()) {
             err(c.line, c.col, "capwords() takes exactly one argument");
             return const_str("");
@@ -1014,7 +1014,7 @@ VReg Lowerer::lower_builtin_call(const std::string& name, Call& c) {
 
     if (name == "slice") {
         // 下标位置的形式在脱糖阶段已经折成切片语法，能走到这里说明是当
-        // 独立值用——py23 没有运行期的 slice 对象。
+        // 独立值用——pyadamas 没有运行期的 slice 对象。
         err(c.line, c.col,
             "slice() is only supported as a subscript, e.g. xs[slice(1, 3)]");
         for (auto& a : c.args) expr(*a);
@@ -1350,4 +1350,4 @@ VReg Lowerer::lower_builtin_call(const std::string& name, Call& c) {
     return const_none();
 }
 
-}  // namespace py23
+}  // namespace pyadamas

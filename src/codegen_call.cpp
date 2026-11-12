@@ -1,7 +1,7 @@
 // codegen_call.cpp —— 调用、对象、字段与分支/返回
 #include "codegen_impl.h"
 
-namespace py23 {
+namespace pyadamas {
 
 void AsmGen::gen_make_list(const Inst& in) {
         // imm 是元素所有权类别（0 非堆 / 1 堆 / 2 unknown 或混合），
@@ -9,14 +9,14 @@ void AsmGen::gen_make_list(const Inst& in) {
         emit_imm_op("movq", in.args.size(), "%rdi");
         emit_imm_op("movq", in.imm, "%rsi");
         spill_fp_slots();
-        line("call py23_list_new");
+        line("call pa_list_new");
         reload_fp_slots();
         emit2("movq", "%rax", dst_op(in.dst));
         for (VReg a : in.args) {
             emit2("movq", dst_op(in.dst), "%rdi");
             emit2("movq", src_op(a), "%rsi");
             spill_fp_slots();
-            line("call py23_list_append");
+            line("call pa_list_append");
             reload_fp_slots();
         }
     }
@@ -27,7 +27,7 @@ void AsmGen::gen_index_load(const Inst& in) {
             emit2("movq", src_op(in.a), "%rdi");
             emit2("movq", src_op(in.b), "%rsi");
             spill_fp_slots();
-            line("call py23_str_char_at");
+            line("call pa_str_char_at");
             reload_fp_slots();
             emit2("movq", "%rax", dst_op(in.dst));
             return;
@@ -35,11 +35,11 @@ void AsmGen::gen_index_load(const Inst& in) {
         if (opt_ < 1) {
             emit2("movq", src_op(in.a), "%rdi");
             emit2("movq", src_op(in.b), "%rsi");
-            line("call py23_list_get");
+            line("call pa_list_get");
             emit2("movq", "%rax", dst_op(in.dst));
             return;
         }
-        // list/tuple 共用 Py23List 布局：+0 len，+16 data。
+        // list/tuple 共用 PyAdamasList 布局：+0 len，+16 data。
         // 快路径用无符号比较一次挡掉 0..len-1 之外的值；负索引归一化
         // 也在内联路径里完成。慢路径只处理越界，运行时直接抛异常且
         // 不返回，因此不会破坏常驻 xmm 的浮点槽。
@@ -52,14 +52,14 @@ void AsmGen::gen_index_load(const Inst& in) {
         emit_jmp("jb", fast);
         line("testq %rsi, %rsi");
         emit_jmp("js", neg);
-        line("call py23_list_get");
+        line("call pa_list_get");
         line("ud2");
         label(neg);
         line("addq %rcx, %rsi");
         line("cmpq %rcx, %rsi");
         emit_jmp("jb", fast);
         line("movq %rcx, %rsi");
-        line("call py23_list_get");
+        line("call pa_list_get");
         line("ud2");
         label(fast);
         line("movq 16(%rdi), %rdx");
@@ -92,7 +92,7 @@ void AsmGen::gen_index_store(const Inst& in) {
             emit2("movq", src_op(in.a), "%rdi");
             emit2("movq", src_op(in.b), "%rsi");
             emit2("movq", src_op(in.c), "%rdx");
-            line("call py23_list_set");
+            line("call pa_list_set");
             return;
         }
         std::string fast = fresh_label("idxsf");
@@ -106,7 +106,7 @@ void AsmGen::gen_index_store(const Inst& in) {
         line("testq %rsi, %rsi");
         emit_jmp("js", neg);
         line("xorl %edx, %edx");
-        line("call py23_list_set");
+        line("call pa_list_set");
         line("ud2");
         label(neg);
         line("addq %rcx, %rsi");
@@ -114,7 +114,7 @@ void AsmGen::gen_index_store(const Inst& in) {
         emit_jmp("jb", fast);
         line("movq %rcx, %rsi");
         line("xorl %edx, %edx");
-        line("call py23_list_set");
+        line("call pa_list_set");
         line("ud2");
         label(fast);
         line("movq 16(%rdi), %rdx");
@@ -132,7 +132,7 @@ void AsmGen::gen_index_store(const Inst& in) {
         emit_jmp("jne", done);
         line("movq %r8, %rdi");
         spill_fp_slots();
-        line("call py23_rc_dec");
+        line("call pa_rc_dec");
         reload_fp_slots();
         label(done);
     }
@@ -153,7 +153,7 @@ void AsmGen::gen_obj_new(const Inst& in) {
             line("xorl %edx, %edx");
         }
         spill_fp_slots();
-        line("call py23_obj_new");
+        line("call pa_obj_new");
         reload_fp_slots();
         line(std::format("leaq .Lvt{}(%rip), %rcx", in.imm));
         line("movq %rcx, (%rax)");
@@ -270,7 +270,7 @@ void AsmGen::gen_super_vcall(const Inst& in) {
         emit_imm_op("movq", in.imm, "%rdx");
         emit2("movq", src_op(in.b), "%rcx");
         spill_fp_slots();
-        line("call py23_super_lookup");
+        line("call pa_super_lookup");
         reload_fp_slots();
         line("movq %rax, %r11");
 
@@ -1146,4 +1146,4 @@ void AsmGen::gen_call_rt(const Inst& in) {
         }
     }
 
-}  // namespace py23
+}  // namespace pyadamas

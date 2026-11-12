@@ -1,7 +1,7 @@
 // parser_stmt.cpp —— 复合语句：if/while/for/try/with
 #include "parser.h"
 
-namespace py23 {
+namespace pyadamas {
 
 StmtPtr Parser::parse_if() {
         int ln = cur().line, cl = cur().col;
@@ -298,4 +298,4 @@ void Parser::check_assignable(const Expr& e) {
     }
 
 
-}  // namespace py23
+}  // namespace pyadamas

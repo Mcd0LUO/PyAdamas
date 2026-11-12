@@ -1,7 +1,7 @@
 // codegen_ops.cpp —— 指令选择：算术/比较/转换
 #include "codegen_impl.h"
 
-namespace py23 {
+namespace pyadamas {
 
 // ── 指令 ────────────────────────────────────────────────────
 void AsmGen::gen_inst(const Inst& in) {
@@ -73,7 +73,7 @@ void AsmGen::gen_inst(const Inst& in) {
                 line(std::format("leaq {}(%rip), %rdi", module_ready_symbol(name)));
                 line(std::format("leaq {}(%rip), %rsi", module_init_symbol(name)));
                 spill_fp_slots();
-                line("call py23_import_module");
+                line("call pa_import_module");
                 reload_fp_slots();
                 break;
             }
@@ -95,7 +95,7 @@ void AsmGen::gen_inst(const Inst& in) {
                 line(std::format("leaq {}(%rip), %rsi", func_label(g.resume)));
                 line(std::format("leaq .Lgengcrel{}(%rip), %rdx", in.imm));
                 emit_imm_op("movq", g.frame_kind, "%rcx");
-                line("call py23_gen_new");
+                line("call pa_gen_new");
                 move_to(dst_op(in.dst), "%rax");
                 break;
             }
@@ -139,7 +139,7 @@ void AsmGen::gen_inst(const Inst& in) {
                 break;
             case IrOp::GenRethrow:
                 line("movq %r15, %rdi");
-                line("call py23_coro_rethrow");
+                line("call pa_coro_rethrow");
                 line("ud2");
                 break;
             case IrOp::GenDone:
@@ -214,7 +214,7 @@ void AsmGen::gen_bin(const Inst& in) {
             emit2("movq", src_op(in.a), "%rdi");
             emit2("movq", src_op(in.b), "%rsi");
             spill_fp_slots();
-            line("call py23_str_concat");
+            line("call pa_str_concat");
             reload_fp_slots();
             move_to(dst_op(in.dst), "%rax");
             return;
@@ -282,7 +282,7 @@ void AsmGen::gen_bin_int(const Inst& in) {
                 emit2("movq", sa, "%rdi");
                 emit2("movq", sb, "%rsi");
                 spill_fp_slots();
-                line("call py23_pow_i64");
+                line("call pa_pow_i64");
                 reload_fp_slots();
                 break;
         }
@@ -296,14 +296,14 @@ void AsmGen::gen_div_guard() {
         std::string ok2 = fresh_label("divok2");
         line("testq %rcx, %rcx");
         emit_jmp("jne", ok);
-        line("call py23_panic_div0");
+        line("call pa_panic_div0");
         label(ok);
         line("cmpq $-1, %rcx");
         emit_jmp("jne", ok2);
         line("movabsq $0x8000000000000000, %r8");
         line("cmpq %r8, %rax");
         emit_jmp("jne", ok2);
-        line("call py23_panic_overflow");
+        line("call pa_panic_overflow");
         label(ok2);
     }
 
@@ -505,7 +505,7 @@ void AsmGen::gen_cmp(const Inst& in) {
             emit2("movq", src_op(in.b), "%rsi");
             if (in.cop == CmpKind::Eq || in.cop == CmpKind::Ne) {
                 spill_fp_slots();
-                line("call py23_str_eq");
+                line("call pa_str_eq");
                 reload_fp_slots();
                 if (in.cop == CmpKind::Ne) line("xorq $1, %rax");
                 emit2("movq", "%rax", dst_op(in.dst));
@@ -514,7 +514,7 @@ void AsmGen::gen_cmp(const Inst& in) {
             // 大小比较走三路比较。早先这里只留了一句注释、什么都不生成，
             // 于是 `a < b` 静默拿到槽里的残留值——恒为 False。
             spill_fp_slots();
-            line("call py23_str_cmp");
+            line("call pa_str_cmp");
             reload_fp_slots();
             line("cmpq $0, %rax");
             switch (in.cop) {
@@ -642,21 +642,21 @@ void AsmGen::gen_convert(const Inst& in) {
             if (ir_is_float(from)) {
                 emit2("movsd", src_op(in.a), "%xmm0");
                 spill_fp_slots();
-                line("call py23_str_from_f64");
+                line("call pa_str_from_f64");
                 reload_fp_slots();
             } else if (from && from->kind == TyKind::Bool) {
                 emit2("movq", src_op(in.a), "%rdi");
                 spill_fp_slots();
-                line("call py23_str_from_bool");
+                line("call pa_str_from_bool");
                 reload_fp_slots();
             } else if (from && from->kind == TyKind::None) {
                 spill_fp_slots();
-                line("call py23_str_from_none");
+                line("call pa_str_from_none");
                 reload_fp_slots();
             } else {
                 emit2("movq", src_op(in.a), "%rdi");
                 spill_fp_slots();
-                line("call py23_str_from_i64");
+                line("call pa_str_from_i64");
                 reload_fp_slots();
             }
             emit2("movq", "%rax", dst_op(in.dst));
@@ -664,4 +664,4 @@ void AsmGen::gen_convert(const Inst& in) {
         }
     }
 
-}  // namespace py23
+}  // namespace pyadamas

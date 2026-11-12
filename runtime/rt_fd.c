@@ -3,9 +3,9 @@
 
 /* ── fd 等待与 poll 轮询 ─────────────────────────────────────── */
 
-void* py23_asyncio_wait_fd(int64_t fd, int64_t write) {
+void* pa_asyncio_wait_fd(int64_t fd, int64_t write) {
     loop_ensure();
-    Py23Await* w = await_new(6);
+    PyAdamasAwait* w = await_new(6);
     w->fd = fd;
     w->write = write;
     return w;
@@ -19,7 +19,7 @@ int poll_fds(int timeout_ms) {
     int64_t* map = (int64_t*)malloc(sizeof(int64_t) * (size_t)n);
     if (!pfds || !map) panic_c("out of memory");
     for (int64_t i = 0; i < n; ++i) {
-        Py23Await* w = (Py23Await*)loop_fds->data[i];
+        PyAdamasAwait* w = (PyAdamasAwait*)loop_fds->data[i];
         pfds[i].fd = (int)w->fd;
         pfds[i].events = (short)(w->write ? POLLOUT : POLLIN);
         pfds[i].revents = 0;
@@ -37,9 +37,9 @@ int poll_fds(int timeout_ms) {
                     break;
                 }
             if (!owned) continue;
-            Py23Await* w = (Py23Await*)owned;
+            PyAdamasAwait* w = (PyAdamasAwait*)owned;
             w->done = 1;
-            Py23Exception* e = NULL;
+            PyAdamasException* e = NULL;
             if (pfds[i].revents & (POLLERR | POLLNVAL))
                 e = exc_new("OSError", "fd poll error");
             void* a = (void*)w->waiter;
@@ -49,7 +49,7 @@ int poll_fds(int timeout_ms) {
                 w->result = 0;
                 w->exc = (int64_t)e;
             }
-            py23_rc_dec(w);  // 轮询表的引用
+            pa_rc_dec(w);  // 轮询表的引用
             fired++;
         }
     }

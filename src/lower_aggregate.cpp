@@ -1,7 +1,7 @@
 // lower_aggregate.cpp —— min/max/sum/any/all 的降级
 #include "lower_impl.h"
 
-namespace py23 {
+namespace pyadamas {
 
 
 // min()/max()：多实参逐个比较；单实参按容器迭代。空序列抛 ValueError。
@@ -601,4 +601,4 @@ VReg Lowerer::lower_anyall(Call& c, bool is_any) {
     return load_slot(result, t_bool());
 }
 
-}  // namespace py23
+}  // namespace pyadamas

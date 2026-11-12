@@ -3,7 +3,7 @@
 
 #include "module.h"
 
-namespace py23 {
+namespace pyadamas {
 
 TypePtr TypeChecker::call(Call& c) {
         // f(...) 里 f 是 Name：可能是异常构造器、内置函数，也可能是用户函数
@@ -341,7 +341,7 @@ TypePtr TypeChecker::check_args(const FuncInfoPtr& fn, Call& c) {
             // 合成生成器函数的返回类型跟着形参回填走：第一次检查时形参
             // 还是 unknown，重查后才是 Generator[T]。调用点缓存的表达式
             // 类型要在重查结束后刷新一次，降级层才能按 T 选迭代路径。
-            if (fn->name.rfind("__py23$gen_", 0) == 0) genexpr_call_sites_[&c] = fn;
+            if (fn->name.rfind("__pyadamas$gen_", 0) == 0) genexpr_call_sites_[&c] = fn;
             return fn->ret;
         }
         return fn->ret_known ? t_none() : t_unknown();
@@ -377,7 +377,7 @@ bool TypeChecker::is_exception_name(const std::string& n) {
             "ProcessLookupError", "UnicodeTranslateError", "GeneratorExit",
             "CancelledError",
             "StopAsyncIteration", "WindowsError",  // WindowsError 只在 Windows 上存在（OSError 别名）
-            // subprocess 相关：py23 没有模块限定异常名，按内置名捕获
+            // subprocess 相关：pyadamas 没有模块限定异常名，按内置名捕获
             "SubprocessError", "TimeoutExpired", "CalledProcessError",
         };
         return names.count(n) > 0;
@@ -411,7 +411,7 @@ bool TypeChecker::is_builtin_callable(const std::string& n) {
             "__build_class__",
             "issubclass", "ascii", "aiter", "anext",
             // 内部 intrinsics：stdlib/string.py 的 capwords 走单遍 C 实现
-            "__py23_capwords",
+            "__pa_capwords",
             // site 模块注入的内置名（交互式退出），真实代码里也会用到
             "quit", "exit", "copyright", "credits", "license",
         };
@@ -1850,7 +1850,7 @@ TypePtr TypeChecker::method_call(TypePtr recv, const std::string& name, Call& c,
             if (name == "copy") { argc(0, 0); return recv; }
             if (name == "popitem") { return mk_tuple({kt, vt}); }
             if (name == "most_common") {
-                // py23 扩展：Counter 返回普通 dict，计数排序走这个方法。
+                // pyadamas 扩展：Counter 返回普通 dict，计数排序走这个方法。
                 argc(0, 1);
                 if (a.size() == 1 && a[0] && !is_unknown(a[0]) &&
                     a[0]->kind != TyKind::Int)
@@ -1900,4 +1900,4 @@ TypePtr TypeChecker::method_call(TypePtr recv, const std::string& name, Call& c,
     }
 
 
-}  // namespace py23
+}  // namespace pyadamas

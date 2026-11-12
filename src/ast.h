@@ -13,7 +13,7 @@
 
 #include "token.h"
 
-namespace py23 {
+namespace pyadamas {
 
 struct Expr;
 struct Stmt;
@@ -916,4 +916,4 @@ inline ExprPtr make_unary(Tok op, ExprPtr operand, int line, int col) {
     return n;
 }
 
-}  // namespace py23
+}  // namespace pyadamas

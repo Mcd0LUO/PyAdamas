@@ -21,7 +21,7 @@
 #include "ir.h"
 #include "module.h"
 
-namespace py23 {
+namespace pyadamas {
 
 inline const char* const kIntArgRegs[6] = {"%rdi", "%rsi", "%rdx", "%rcx", "%r8", "%r9"};
 constexpr int kMaxIntArgs = 6;
@@ -122,7 +122,7 @@ private:
     std::vector<uint8_t> fp_live_out_;
     std::vector<char> fp_spill_mask_;  // 当前指令需要保存的槽
     bool fp_mask_valid_ = false;
-    bool fp_live_off_ = false;  // PY23_NO_FPLIVE：退回全量 spill（A/B 用）
+    bool fp_live_off_ = false;  // PYADAMAS_NO_FPLIVE：退回全量 spill（A/B 用）
     void build_fp_liveness();
     void spill_fp_slots();
     void reload_fp_slots();
@@ -245,7 +245,7 @@ private:
         return -8 * (n_saved_regs_ + n_slots_ + s + 1);
     }
 
-    // 帧记录（Py23Frame）在局部区最下面，内存里从低地址往高地址依次是
+    // 帧记录（PyAdamasFrame）在局部区最下面，内存里从低地址往高地址依次是
     // prev、n、槽地址×n，与两边共用的结构体布局一致。栈向下增长，所以
     // 下标 0 对应最负的偏移。
     int rec_off(int i) const {
@@ -495,4 +495,4 @@ private:
         void gen_call_rt(const Inst& in);
 };
 
-}  // namespace py23
+}  // namespace pyadamas

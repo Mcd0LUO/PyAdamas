@@ -1,7 +1,7 @@
 // lower_import.cpp —— import / 模块别名与外部符号绑定
 #include "lower_impl.h"
 
-namespace py23 {
+namespace pyadamas {
 
 ModuleInfoPtr Lowerer::resolve_module_alias(const std::string& name) const {
     // 显式登记的模块别名优先：from pkg import sub 会把 sub 放进别名表，
@@ -566,7 +566,7 @@ VReg Lowerer::lower_popen(Call& c) {
         } else if (kw.arg == "stderr") {
             err_mode = stream_mode(*kw.value);
         } else if (kw.arg == "text") {
-            // py23 没有 bytes：text 只做求值，不影响行为。
+            // pyadamas 没有 bytes：text 只做求值，不影响行为。
             expr(*kw.value);
         } else {
             err(kw.value->line, kw.value->col,
@@ -834,9 +834,9 @@ VReg Lowerer::lower_collections(const std::string& member, Call& c) {
         return v;
     }
     if (member == "OrderedDict") {
-        // py23 的 dict 本来就按插入序保存，OrderedDict 直接当空 dict 用。
+        // pyadamas 的 dict 本来就按插入序保存，OrderedDict 直接当空 dict 用。
         if (!c.args.empty()) {
-            err(c.line, c.col, "collections.OrderedDict() takes no arguments in py23");
+            err(c.line, c.col, "collections.OrderedDict() takes no arguments in pyadamas");
             return const_none();
         }
         DictExpr empty;
@@ -1001,7 +1001,7 @@ VReg Lowerer::build_partial_wrapper(Call& c, VReg fnv, TypePtr fty,
     }
     if (plan.bound_params.empty()) return fnv;  // partial(f) 就是 f
 
-    std::string label = std::format("__py23_partial_{}_{}", fn->name, mod_.funcs.size());
+    std::string label = std::format("__pa_partial_{}_{}", fn->name, mod_.funcs.size());
     IRFunction* wf = mod_.add_func(label);
     int widx = static_cast<int>(mod_.funcs.size()) - 1;
     TypePtr rty = fn->ret ? fn->ret : t_unknown();
@@ -1120,7 +1120,7 @@ VReg Lowerer::build_lru_wrapper(const std::string& base, VReg fnv, TypePtr fty,
     TypePtr rty = fn->ret ? fn->ret : t_unknown();
     TypePtr root_ty = mk_dict(fn_param_ty(fn, 0), t_unknown());
 
-    std::string label = std::format("__py23_lru_{}_{}", base, mod_.funcs.size());
+    std::string label = std::format("__pa_lru_{}_{}", base, mod_.funcs.size());
     IRFunction* wf = mod_.add_func(label);
     int widx = static_cast<int>(mod_.funcs.size()) - 1;
     wf->ret = rty;
@@ -1305,7 +1305,7 @@ VReg Lowerer::lower_functools(const std::string& member, Call& c) {
         return v;
     }
     if (member == "wraps") {
-        // py23 不建模 __name__/__doc__，@functools.wraps(f) 这一层在装饰器
+        // pyadamas 不建模 __name__/__doc__，@functools.wraps(f) 这一层在装饰器
         // 处理里直接跳过；当普通函数调用说明用户想拿返回值，做不了。
         err(c.line, c.col, "functools.wraps() is only supported as a decorator");
         for (auto& a : c.args) expr(*a);
@@ -1571,4 +1571,4 @@ void Lowerer::lower_import_from(ImportFrom& im) {
     }
 }
 
-}  // namespace py23
+}  // namespace pyadamas

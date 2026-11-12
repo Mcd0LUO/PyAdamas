@@ -3,7 +3,7 @@
 
 #include "module.h"
 
-namespace py23 {
+namespace pyadamas {
 
 void TypeChecker::check(Module& m) {
         auto mod = std::make_unique<Scope>();
@@ -610,4 +610,4 @@ FuncInfoPtr TypeChecker::build_sig(FunctionDef& f) {
 // 语句块是否必然离开：最后一条是 return/raise/break/continue，
 // 或者是 if/else 且所有分支都离开。用来识别提前退出的 None 守卫。
 
-}  // namespace py23
+}  // namespace pyadamas

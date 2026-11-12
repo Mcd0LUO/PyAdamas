@@ -1,7 +1,7 @@
 // codegen_block.cpp —— 函数与基本块、融合与分支
 #include "codegen_impl.h"
 
-namespace py23 {
+namespace pyadamas {
 
 // O2：只清零「可能读到未赋值值」的槽。对每个块做 must 数据流：
 // in = 所有前驱 out 的交集；out = in ∪ 块内 store。LoadSlot 遇到
@@ -182,7 +182,7 @@ void AsmGen::emit_function(const IRFunction& f, int fi) {
             // 最新值即可；正常返回由 emit_epilogue 弹栈。
             if (rec_words > 0) {
                 frame_rec_ = true;
-                line("movq py23_frame_top(%rip), %rax");
+                line("movq pa_frame_top(%rip), %rax");
                 emit2("movq", "%rax", rec_mem(0));
                 emit_imm_op("movq", static_cast<int64_t>(frame_owned_.size()), rec_mem(1));
                 for (size_t i = 0; i < frame_owned_.size(); ++i) {
@@ -190,7 +190,7 @@ void AsmGen::emit_function(const IRFunction& f, int fi) {
                     emit2("movq", "%rax", rec_mem(2 + static_cast<int>(i)));
                 }
                 line(std::format("leaq {}, %rax", rec_mem(0)));
-                line("movq %rax, py23_frame_top(%rip)");
+                line("movq %rax, pa_frame_top(%rip)");
             }
         }
 
@@ -199,7 +199,7 @@ void AsmGen::emit_function(const IRFunction& f, int fi) {
             line(std::format("leaq {}(%rip), %rdi", roots_label()));
             emit_imm_op("movq", local_global_count(), "%rsi");
             spill_fp_slots();
-            line("call py23_gc_add_roots");
+            line("call pa_gc_add_roots");
             reload_fp_slots();
         }
 
@@ -424,4 +424,4 @@ void AsmGen::invalidate_slot(int slot) {
             it = (it->second == r) ? alias_.erase(it) : std::next(it);
     }
 
-}  // namespace py23
+}  // namespace pyadamas

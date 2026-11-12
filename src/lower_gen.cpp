@@ -1,7 +1,7 @@
 // lower_gen.cpp —— 生成器与协程：yield/await、状态机、跨挂起清理
 #include "lower_impl.h"
 
-namespace py23 {
+namespace pyadamas {
 
 // ────────────────────────── 生成器 / 协程 ──────────────────────────
 
@@ -1012,4 +1012,4 @@ int Lowerer::compile_suspendable_function(FunctionDef& f, FuncInfoPtr info,
 }
 
 
-}  // namespace py23
+}  // namespace pyadamas

@@ -12,7 +12,7 @@
      不释放任何东西（子对象由清扫阶段统一处理）；
    - size/kind：GC 保守扫描负载时要知道范围。 */
 
-Py23Rc* heap_head;
+PyAdamasRc* heap_head;
 int64_t alloc_since_gc;
 int gc_ready;
 int gc_sweeping;
@@ -26,11 +26,11 @@ size_t gc_conservative_count;
    存活对象约 88MB，按 2MB 触发要扫四十多遍，总成本接近 O(n²)。
    每次扫描完按「本次存活字节数」重置，存活堆翻倍才扫一次，总扫描
    量是 O(live)；垃圾多、存活少时回落到 2MB 下限，扫描本身也便宜。 */
-static int64_t gc_next_threshold = PY23_GC_THRESHOLD;
+static int64_t gc_next_threshold = PYADAMAS_GC_THRESHOLD;
 
 /* 存活堆索引只服务 unknown 值的保守 retain/dec（值可能是整数，必须先
    确认是堆指针）。整程序没有任何 unknown 时，入口会调用
-   py23_disable_unknown_index 关掉它，省掉每个堆对象的插入/删除。 */
+   pa_disable_unknown_index 关掉它，省掉每个堆对象的插入/删除。 */
 static int rc_index_off;
 
 /* exact-RC 模式（= 索引关闭）下，字符串这类叶子对象不进 GC 堆链：
@@ -39,7 +39,7 @@ static int rc_index_off;
    清扫垃圾容器时对这类子对象直接走正常 RC 释放。 */
 static int gc_untracked_leaves;
 
-#define PY23_RC_UNTRACKED 2
+#define PYADAMAS_RC_UNTRACKED 2
 
 /* 短字符串 freelist。split / capitalize / join 这类路径会高频产生
    几个字节的小字符串，每次都 malloc/free 会把内存分配变成热点。
@@ -48,7 +48,7 @@ static int gc_untracked_leaves;
 #define STR_POOL_MAX_SIZE 128
 #define STR_POOL_CLASSES (STR_POOL_MAX_SIZE / 8)
 #define STR_POOL_MAX_PER_CLASS 64
-static Py23Rc* str_pool[STR_POOL_CLASSES];
+static PyAdamasRc* str_pool[STR_POOL_CLASSES];
 static int str_pool_count[STR_POOL_CLASSES];
 
 static int str_pool_class(int64_t size) {
@@ -56,16 +56,16 @@ static int str_pool_class(int64_t size) {
     return (int)((size + 7) / 8) - 1;
 }
 
-static Py23Rc* str_pool_get(int64_t size) {
+static PyAdamasRc* str_pool_get(int64_t size) {
     int c = str_pool_class(size);
     if (c < 0 || !str_pool[c]) return NULL;
-    Py23Rc* h = str_pool[c];
+    PyAdamasRc* h = str_pool[c];
     str_pool[c] = h->next;
     str_pool_count[c]--;
     return h;
 }
 
-static void str_pool_put(Py23Rc* h) {
+static void str_pool_put(PyAdamasRc* h) {
     int c = str_pool_class(h->size);
     if (c < 0 || str_pool_count[c] >= STR_POOL_MAX_PER_CLASS) {
         free(h);
@@ -77,14 +77,14 @@ static void str_pool_put(Py23Rc* h) {
     str_pool_count[c]++;
 }
 
-/* 列表结构体 freelist：Py23List 固定 32 字节，单独一档。data 缓冲
+/* 列表结构体 freelist：PyAdamasList 固定 32 字节，单独一档。data 缓冲
    由 rt_list.c 的 list_buf_pool 管理。 */
 #define LIST_POOL_MAX 64
-static Py23Rc* list_pool;
+static PyAdamasRc* list_pool;
 static int list_pool_count;
 
-static Py23Rc* list_pool_get(void) {
-    Py23Rc* h = list_pool;
+static PyAdamasRc* list_pool_get(void) {
+    PyAdamasRc* h = list_pool;
     if (h) {
         list_pool = h->next;
         list_pool_count--;
@@ -92,7 +92,7 @@ static Py23Rc* list_pool_get(void) {
     return h;
 }
 
-static void list_pool_put(Py23Rc* h) {
+static void list_pool_put(PyAdamasRc* h) {
     if (list_pool_count >= LIST_POOL_MAX) {
         free(h);
         return;
@@ -106,12 +106,12 @@ static void list_pool_put(Py23Rc* h) {
 /* exact-RC 模式下可以完全绕开 GC 的对象：没有任何堆字段（没有出边），
    不可能处在环里。字符串是典型；没有堆字段的类实例（生成代码不给
    dtor/release）同理。它们的生死完全由 RC 决定。 */
-static int rc_leaf_untracked(const Py23Rc* h) {
+static int rc_leaf_untracked(const PyAdamasRc* h) {
     if (!gc_untracked_leaves) return 0;
-    if (h->kind == PY23_RC_STR) return 1;
+    if (h->kind == PYADAMAS_RC_STR) return 1;
     // range 只存边界，没有堆字段（出边为零），不可能处在环里。
-    if (h->kind == PY23_RC_RANGE) return 1;
-    if (h->kind == PY23_RC_INSTANCE && !h->dtor && !h->release) return 1;
+    if (h->kind == PYADAMAS_RC_RANGE) return 1;
+    if (h->kind == PYADAMAS_RC_INSTANCE && !h->dtor && !h->release) return 1;
     return 0;
 }
 
@@ -120,13 +120,13 @@ void panic_c(const char* msg);
 /* 存活堆对象索引：unknown 值的静态类型看不见，不能直接 rc_inc（可能
    是整数），先按 payload 查注册表；查到才说明它真是堆对象。索引只用于
    这条保守 retain 路径，开放寻址 + 墓碑。 */
-Py23Rc** rc_index;
+PyAdamasRc** rc_index;
 size_t rc_index_cap;
 size_t rc_index_fill;  // 非空槽（存活 + 墓碑）
 size_t rc_index_live;  // 存活对象数
-Py23Rc* const RC_TOMB = (Py23Rc*)(intptr_t)-1;
+PyAdamasRc* const RC_TOMB = (PyAdamasRc*)(intptr_t)-1;
 
-size_t rc_index_slot(Py23Rc* h) {
+size_t rc_index_slot(PyAdamasRc* h) {
     uint64_t x = (uint64_t)(uintptr_t)h >> 4;
     x *= 0x9e3779b97f4a7c15ull;
     x ^= x >> 29;
@@ -134,14 +134,14 @@ size_t rc_index_slot(Py23Rc* h) {
 }
 
 void rc_index_rehash(size_t ncap) {
-    Py23Rc** old = rc_index;
+    PyAdamasRc** old = rc_index;
     size_t ocap = rc_index_cap;
-    rc_index = (Py23Rc**)calloc(ncap, sizeof(Py23Rc*));
+    rc_index = (PyAdamasRc**)calloc(ncap, sizeof(PyAdamasRc*));
     if (!rc_index) panic_c("out of memory");
     rc_index_cap = ncap;
     rc_index_fill = 0;
     for (size_t i = 0; i < ocap; ++i) {
-        Py23Rc* h = old[i];
+        PyAdamasRc* h = old[i];
         if (!h || h == RC_TOMB) continue;
         size_t s = rc_index_slot(h);
         while (rc_index[s]) s = (s + 1) & (ncap - 1);
@@ -151,7 +151,7 @@ void rc_index_rehash(size_t ncap) {
     free(old);
 }
 
-void rc_index_put(Py23Rc* h) {
+void rc_index_put(PyAdamasRc* h) {
     if (rc_index_off) return;
     if (rc_index_cap == 0) {
         rc_index_rehash(64);
@@ -177,7 +177,7 @@ void rc_index_put(Py23Rc* h) {
     rc_index_live++;
 }
 
-void rc_index_del(Py23Rc* h) {    if (rc_index_off) return;
+void rc_index_del(PyAdamasRc* h) {    if (rc_index_off) return;
     if (rc_index_cap == 0) return;
     size_t s = rc_index_slot(h);
     while (rc_index[s]) {
@@ -190,7 +190,7 @@ void rc_index_del(Py23Rc* h) {    if (rc_index_off) return;
     }
 }
 
-int rc_index_has(Py23Rc* h) {
+int rc_index_has(PyAdamasRc* h) {
     if (rc_index_off) return 0;
     if (rc_index_cap == 0) return 0;
     size_t s = rc_index_slot(h);
@@ -203,22 +203,22 @@ int rc_index_has(Py23Rc* h) {
 
 /* 代码生成把静态字符串字面量指针列表放在 .Lstrtab，模块入口在跑用户
    代码前调用这里登记。字面量 rc=INT64_MIN 永生，不进 GC 堆链，但
-   unknown 值的运行期类型检查要靠 RC 索引确认指针确实指向 Py23Str。 */
-void py23_register_literals(void** objs, int64_t n) {
+   unknown 值的运行期类型检查要靠 RC 索引确认指针确实指向 PyAdamasStr。 */
+void pa_register_literals(void** objs, int64_t n) {
     for (int64_t i = 0; i < n; ++i) {
         if (!objs[i]) continue;
-        Py23Rc* h = (Py23Rc*)(uintptr_t)objs[i] - 1;
+        PyAdamasRc* h = (PyAdamasRc*)(uintptr_t)objs[i] - 1;
         if (!rc_index_has(h)) rc_index_put(h);
     }
 }
 
 /* 对 unknown 值做保守 retain：不是堆指针就什么也不做。查不到的对象
    包括静态字面量（永生，不需要 inc）和整数。 */
-int64_t py23_rc_inc_unknown(int64_t v) {
+int64_t pa_rc_inc_unknown(int64_t v) {
     if (!v) return 0;
-    Py23Rc* h = (Py23Rc*)(uintptr_t)((uint64_t)v - (uint64_t)PY23_RC_HDR);
+    PyAdamasRc* h = (PyAdamasRc*)(uintptr_t)((uint64_t)v - (uint64_t)PYADAMAS_RC_HDR);
     if (!rc_index_has(h)) return 0;
-    if (h->rc == PY23_RC_IMMORTAL) return 1;
+    if (h->rc == PYADAMAS_RC_IMMORTAL) return 1;
     if (gc_sweeping) {
         if (h->marked) h->rc++;
         return 1;
@@ -228,37 +228,37 @@ int64_t py23_rc_inc_unknown(int64_t v) {
     return 1;
 }
 
-void py23_rc_dec(void* p);
+void pa_rc_dec(void* p);
 
 /* unknown 值的保守释放：先按注册表确认是堆指针，再走正常 dec。
    用于「结果类型静态不可知」的跨 await/gather 值。 */
-void py23_rc_dec_unknown(int64_t v) {
+void pa_rc_dec_unknown(int64_t v) {
     if (!v) return;
-    Py23Rc* h = (Py23Rc*)(uintptr_t)((uint64_t)v - (uint64_t)PY23_RC_HDR);
+    PyAdamasRc* h = (PyAdamasRc*)(uintptr_t)((uint64_t)v - (uint64_t)PYADAMAS_RC_HDR);
     if (!rc_index_has(h)) return;
-    if (h->rc == PY23_RC_IMMORTAL) return;
-    py23_rc_dec((void*)(uintptr_t)v);
+    if (h->rc == PYADAMAS_RC_IMMORTAL) return;
+    pa_rc_dec((void*)(uintptr_t)v);
 }
 
-void py23_gc_collect(void);
-void py23_gc_shutdown(void);
-void py23_gc_unref_child(void* p);
-void py23_gc_add_roots(void** roots, int64_t n_roots);
+void pa_gc_collect(void);
+void pa_gc_shutdown(void);
+void pa_gc_unref_child(void* p);
+void pa_gc_add_roots(void** roots, int64_t n_roots);
 void dict_gc_release(void* p);
 
-Py23List* py23_list_new(int64_t cap, int64_t elem_kind);
-void py23_list_append(Py23List* l, int64_t v);
+PyAdamasList* pa_list_new(int64_t cap, int64_t elem_kind);
+void pa_list_append(PyAdamasList* l, int64_t v);
 
 void panic_c(const char* msg) {
-    fprintf(stderr, "py23: runtime error: %s\n", msg);
+    fprintf(stderr, "pyadamas: runtime error: %s\n", msg);
     exit(1);
 }
 
-void rc_link(Py23Rc* h) {
+void rc_link(PyAdamasRc* h) {
     if (rc_leaf_untracked(h)) {
         h->prev = NULL;
         h->next = NULL;
-        h->marked = PY23_RC_UNTRACKED;
+        h->marked = PYADAMAS_RC_UNTRACKED;
         return;
     }
     h->prev = NULL;
@@ -266,18 +266,18 @@ void rc_link(Py23Rc* h) {
     if (heap_head) heap_head->prev = h;
     heap_head = h;
     gc_tracked_count++;
-    if (h->kind == PY23_RC_OBJ || h->kind == PY23_RC_INSTANCE)
+    if (h->kind == PYADAMAS_RC_OBJ || h->kind == PYADAMAS_RC_INSTANCE)
         gc_conservative_count++;
     rc_index_put(h);
 }
 
-void rc_unlink(Py23Rc* h) {
-    if (h->marked == PY23_RC_UNTRACKED) return;
+void rc_unlink(PyAdamasRc* h) {
+    if (h->marked == PYADAMAS_RC_UNTRACKED) return;
     if (h->prev) h->prev->next = h->next;
     else heap_head = h->next;
     if (h->next) h->next->prev = h->prev;
     gc_tracked_count--;
-    if (h->kind == PY23_RC_OBJ || h->kind == PY23_RC_INSTANCE)
+    if (h->kind == PYADAMAS_RC_OBJ || h->kind == PYADAMAS_RC_INSTANCE)
         gc_conservative_count--;
     rc_index_del(h);
 }
@@ -287,17 +287,17 @@ void* rc_alloc(int64_t size, void (*dtor)(void*), void (*release)(void*),
     if (size < 0) panic_c("negative allocation size");
     if (gc_ready && !gc_sweeping && heap_head &&
         alloc_since_gc >= gc_next_threshold)
-        py23_gc_collect();
+        pa_gc_collect();
     // 短字符串按 8 字节取整，freelist 里的块容量和档位严格对应。
     int64_t alloc_size = size;
-    if (kind == PY23_RC_STR && size > 0 && size <= STR_POOL_MAX_SIZE)
+    if (kind == PYADAMAS_RC_STR && size > 0 && size <= STR_POOL_MAX_SIZE)
         alloc_size = (size + 7) & ~(int64_t)7;
-    Py23Rc* h = NULL;
-    if (kind == PY23_RC_STR) h = str_pool_get(alloc_size);
-    else if (kind == PY23_RC_LIST && size == (int64_t)sizeof(Py23List))
+    PyAdamasRc* h = NULL;
+    if (kind == PYADAMAS_RC_STR) h = str_pool_get(alloc_size);
+    else if (kind == PYADAMAS_RC_LIST && size == (int64_t)sizeof(PyAdamasList))
         h = list_pool_get();
     if (!h) {
-        h = (Py23Rc*)malloc(sizeof(Py23Rc) + (size_t)alloc_size);
+        h = (PyAdamasRc*)malloc(sizeof(PyAdamasRc) + (size_t)alloc_size);
         if (!h) panic_c("out of memory");
         h->size = alloc_size;
     }
@@ -308,8 +308,8 @@ void* rc_alloc(int64_t size, void (*dtor)(void*), void (*release)(void*),
     h->marked = 0;
     rc_link(h);
     // 叶子对象不可能成环，exact-RC 模式下也不进链，不必驱动 GC 频率。
-    if (!rc_leaf_untracked(h)) alloc_since_gc += alloc_size + PY23_RC_HDR;
-    void* p = (char*)h + sizeof(Py23Rc);
+    if (!rc_leaf_untracked(h)) alloc_since_gc += alloc_size + PYADAMAS_RC_HDR;
+    void* p = (char*)h + sizeof(PyAdamasRc);
     memset(p, 0, (size_t)alloc_size);
     return p;
 }
@@ -317,30 +317,30 @@ void* rc_alloc(int64_t size, void (*dtor)(void*), void (*release)(void*),
 // unknown 值的 print：先查 GC 的地址索引判断是不是堆对象，命中就按真实
 // 类型分派，否则按整数。索引只比对地址、不解引用，所以任意 int64 都安全。
 // 只认 str——int/bool/float 在 unknown 里本来就分不开，保持按整数输出。
-void py23_print_any(int64_t v) {
+void pa_print_any(int64_t v) {
     if (v > 4096) {
-        Py23Rc* h = (Py23Rc*)((uintptr_t)v - (uintptr_t)PY23_RC_HDR);
-        if (rc_index_has(h) && h->kind == PY23_RC_STR) {
-            py23_print_str((Py23Str*)(uintptr_t)v);
+        PyAdamasRc* h = (PyAdamasRc*)((uintptr_t)v - (uintptr_t)PYADAMAS_RC_HDR);
+        if (rc_index_has(h) && h->kind == PYADAMAS_RC_STR) {
+            pa_print_str((PyAdamasStr*)(uintptr_t)v);
             return;
         }
     }
-    py23_print_i64(v);
+    pa_print_i64(v);
 }
 
-void py23_rc_inc(void* p) {
+void pa_rc_inc(void* p) {
     if (!p) return;
-    Py23Rc* h = (Py23Rc*)p - 1;
-    if (h->rc == PY23_RC_IMMORTAL) return;
+    PyAdamasRc* h = (PyAdamasRc*)p - 1;
+    if (h->rc == PYADAMAS_RC_IMMORTAL) return;
     if (h->rc <= 0) panic_c("refcount increment on a freed object");
     h->rc++;
 }
 
-void py23_rc_dec(void* p) {
+void pa_rc_dec(void* p) {
     if (!p) return;
-    Py23Rc* h = (Py23Rc*)p - 1;
-    if (h->rc == PY23_RC_IMMORTAL) return;
-    if (gc_sweeping && !(gc_untracked_leaves && h->marked == PY23_RC_UNTRACKED)) {
+    PyAdamasRc* h = (PyAdamasRc*)p - 1;
+    if (h->rc == PYADAMAS_RC_IMMORTAL) return;
+    if (gc_sweeping && !(gc_untracked_leaves && h->marked == PYADAMAS_RC_UNTRACKED)) {
         // 清扫阶段只调整可达对象的计数，绝不在 GC 内部触发释放。
         if (h->marked && h->rc > 0) h->rc--;
         return;
@@ -349,8 +349,8 @@ void py23_rc_dec(void* p) {
     if (--h->rc == 0) {
         rc_unlink(h);
         if (h->dtor) h->dtor(p);
-        if (h->kind == PY23_RC_STR) str_pool_put(h);
-        else if (h->kind == PY23_RC_LIST && h->size == (int64_t)sizeof(Py23List))
+        if (h->kind == PYADAMAS_RC_STR) str_pool_put(h);
+        else if (h->kind == PYADAMAS_RC_LIST && h->size == (int64_t)sizeof(PyAdamasList))
             list_pool_put(h);
         else free(h);
     }
@@ -363,12 +363,12 @@ void** temp_stack;
 int64_t temp_len;
 int64_t temp_cap;
 
-int64_t py23_rc_mark(void) { return temp_len; }
+int64_t pa_rc_mark(void) { return temp_len; }
 
-void py23_rc_temp(void* p) {
+void pa_rc_temp(void* p) {
     if (!p) return;
-    Py23Rc* h = (Py23Rc*)p - 1;
-    if (h->rc == PY23_RC_IMMORTAL) return;
+    PyAdamasRc* h = (PyAdamasRc*)p - 1;
+    if (h->rc == PYADAMAS_RC_IMMORTAL) return;
     if (temp_len == temp_cap) {
         int64_t ncap = temp_cap ? temp_cap * 2 : 64;
         void** ns = (void**)realloc(temp_stack, sizeof(void*) * (size_t)ncap);
@@ -379,13 +379,13 @@ void py23_rc_temp(void* p) {
     temp_stack[temp_len++] = p;
 }
 
-void py23_rc_cleanup(int64_t mark) {
+void pa_rc_cleanup(int64_t mark) {
     if (mark < 0 || mark > temp_len) panic_c("invalid temporary stack mark");
-    while (temp_len > mark) py23_rc_dec(temp_stack[--temp_len]);
+    while (temp_len > mark) pa_rc_dec(temp_stack[--temp_len]);
 }
 
 /* 程序退出前由入口函数调用：临时栈此时已经清空，把栈本身的存储还掉。 */
-void py23_rc_shutdown(void) {
+void pa_rc_shutdown(void) {
     free(temp_stack);
     temp_stack = NULL;
     temp_len = 0;
@@ -398,40 +398,40 @@ void py23_rc_shutdown(void) {
    code 是静态代码地址（不是堆指针）；cell 是单元素 list，闭包持有引用。 */
 void closure_destroy(void* p) {
     int64_t* c = (int64_t*)p;
-    for (int64_t i = 0; i < c[1]; ++i) py23_rc_dec((void*)c[2 + i]);
+    for (int64_t i = 0; i < c[1]; ++i) pa_rc_dec((void*)c[2 + i]);
 }
 
 void closure_gc_release(void* p) {
     int64_t* c = (int64_t*)p;
-    for (int64_t i = 0; i < c[1]; ++i) py23_gc_unref_child((void*)c[2 + i]);
+    for (int64_t i = 0; i < c[1]; ++i) pa_gc_unref_child((void*)c[2 + i]);
 }
 
-void* py23_closure_new(int64_t code, int64_t n_caps) {
+void* pa_closure_new(int64_t code, int64_t n_caps) {
     if (n_caps < 0) panic_c("negative closure capture count");
     void* p = rc_alloc(16 + 8 * n_caps, closure_destroy, closure_gc_release,
-                       PY23_RC_CLOSURE);
+                       PYADAMAS_RC_CLOSURE);
     ((int64_t*)p)[0] = code;
     ((int64_t*)p)[1] = n_caps;
     return p;
 }
 
-/* 短串 SSO：<=7 字节直接内联在 Py23Str::hash 的 8 字节里，
+/* 短串 SSO：<=7 字节直接内联在 PyAdamasStr::hash 的 8 字节里，
    data 指向这段内联区；长串仍用结构体后面的独立字符区。
    值仍然是 8 字节指针（不是 tagged value），所以对象本身仍走 RC/GC。 */
 #define STR_INLINE_MAX 7
 
-Py23Str* str_alloc(int64_t len) {
+PyAdamasStr* str_alloc(int64_t len) {
     if (len < 0) panic_c("negative string length");
     if (len <= STR_INLINE_MAX) {
-        Py23Str* s =
-            (Py23Str*)rc_alloc((int64_t)sizeof(Py23Str), NULL, NULL, PY23_RC_STR);
+        PyAdamasStr* s =
+            (PyAdamasStr*)rc_alloc((int64_t)sizeof(PyAdamasStr), NULL, NULL, PYADAMAS_RC_STR);
         s->len = len;
         s->data = (const char*)&s->hash;
         ((char*)s->data)[len] = '\0';
         return s;
     }
-    Py23Str* s =
-        (Py23Str*)rc_alloc((int64_t)sizeof(Py23Str) + len + 1, NULL, NULL, PY23_RC_STR);
+    PyAdamasStr* s =
+        (PyAdamasStr*)rc_alloc((int64_t)sizeof(PyAdamasStr) + len + 1, NULL, NULL, PYADAMAS_RC_STR);
     s->len = len;
     s->hash = 0;
     char* p = (char*)(s + 1);
@@ -440,8 +440,8 @@ Py23Str* str_alloc(int64_t len) {
     return s;
 }
 
-Py23Str* str_new(const char* p, int64_t len) {
-    Py23Str* s = str_alloc(len);
+PyAdamasStr* str_new(const char* p, int64_t len) {
+    PyAdamasStr* s = str_alloc(len);
     memcpy((char*)s->data, p, (size_t)len);
     return s;
 }
@@ -452,24 +452,24 @@ Py23Str* str_new(const char* p, int64_t len) {
    256 个单字节串 + "True"/"False"/"None"，首次用到时初始化并登记进
    RC 索引（unknown 值的运行期类型检查要靠它）。 */
 typedef struct {
-    Py23Rc h;
-    Py23Str s;
+    PyAdamasRc h;
+    PyAdamasStr s;
     char c[8];
-} Py23StaticStr;
+} PyAdamasStaticStr;
 
-static Py23StaticStr char_tab[256];
-static Py23StaticStr kw_true_s, kw_false_s, kw_none_s;
+static PyAdamasStaticStr char_tab[256];
+static PyAdamasStaticStr kw_true_s, kw_false_s, kw_none_s;
 static int static_strs_ready;
 
-static void static_str_init(Py23StaticStr* e, const char* p, int64_t n) {
+static void static_str_init(PyAdamasStaticStr* e, const char* p, int64_t n) {
     e->h.next = NULL;
     e->h.prev = NULL;
-    e->h.rc = PY23_RC_IMMORTAL;
+    e->h.rc = PYADAMAS_RC_IMMORTAL;
     e->h.dtor = NULL;
     e->h.release = NULL;
-    e->h.size = (int64_t)sizeof(Py23Str);
-    e->h.kind = PY23_RC_STR;
-    e->h.marked = PY23_RC_UNTRACKED;
+    e->h.size = (int64_t)sizeof(PyAdamasStr);
+    e->h.kind = PYADAMAS_RC_STR;
+    e->h.marked = PYADAMAS_RC_UNTRACKED;
     e->s.len = n;
     e->s.hash = 0;
     memcpy(e->c, p, (size_t)n);
@@ -493,22 +493,22 @@ static void static_strs_ensure(void) {
     if (!static_strs_ready) static_strs_init();
 }
 
-Py23Str* py23_char_str(int64_t c) {
+PyAdamasStr* pa_char_str(int64_t c) {
     static_strs_ensure();
     return &char_tab[(int)(c & 0xff)].s;
 }
 
-Py23Str* py23_str_true(void) {
+PyAdamasStr* pa_str_true(void) {
     static_strs_ensure();
     return &kw_true_s.s;
 }
 
-Py23Str* py23_str_false(void) {
+PyAdamasStr* pa_str_false(void) {
     static_strs_ensure();
     return &kw_false_s.s;
 }
 
-Py23Str* py23_str_none(void) {
+PyAdamasStr* pa_str_none(void) {
     static_strs_ensure();
     return &kw_none_s.s;
 }
@@ -519,39 +519,39 @@ void** gc_globals;
 int64_t gc_n_globals;
 int64_t gc_globals_cap;
 uintptr_t gc_stack_top;
-Py23Rc** gc_table;
+PyAdamasRc** gc_table;
 size_t gc_table_cap;
-Py23Rc** gc_work;
+PyAdamasRc** gc_work;
 size_t gc_work_len;
 /* 表和工作栈跨收集复用：大堆反复 calloc/free 十几 MB 很伤。 */
-static Py23Rc** gc_table_buf;
+static PyAdamasRc** gc_table_buf;
 static size_t gc_table_buf_cap;
-static Py23Rc** gc_work_buf;
+static PyAdamasRc** gc_work_buf;
 static size_t gc_work_buf_cap;
 
 #if defined(__SANITIZE_ADDRESS__)
-#define PY23_NO_ASAN __attribute__((no_sanitize_address))
+#define PYADAMAS_NO_ASAN __attribute__((no_sanitize_address))
 #else
-#define PY23_NO_ASAN
+#define PYADAMAS_NO_ASAN
 #endif
 
 size_t gc_hash(uintptr_t p) {
     return (size_t)((p >> 4) * 11400714819323198485ull);
 }
 
-void gc_table_insert(Py23Rc* h) {
+void gc_table_insert(PyAdamasRc* h) {
     size_t mask = gc_table_cap - 1;
-    size_t i = gc_hash((uintptr_t)h + (uintptr_t)PY23_RC_HDR) & mask;
+    size_t i = gc_hash((uintptr_t)h + (uintptr_t)PYADAMAS_RC_HDR) & mask;
     while (gc_table[i]) i = (i + 1) & mask;
     gc_table[i] = h;
 }
 
-Py23Rc* gc_table_find(uintptr_t payload) {
+PyAdamasRc* gc_table_find(uintptr_t payload) {
     if (!gc_table_cap) return NULL;
     size_t mask = gc_table_cap - 1;
     size_t i = gc_hash(payload) & mask;
     while (gc_table[i]) {
-        if ((uintptr_t)gc_table[i] + (uintptr_t)PY23_RC_HDR == payload)
+        if ((uintptr_t)gc_table[i] + (uintptr_t)PYADAMAS_RC_HDR == payload)
             return gc_table[i];
         i = (i + 1) & mask;
     }
@@ -613,7 +613,7 @@ static int gc_cand_has(uintptr_t v) {
     return 0;
 }
 
-PY23_NO_ASAN static void gc_cand_add_range(uintptr_t a, uintptr_t b) {
+PYADAMAS_NO_ASAN static void gc_cand_add_range(uintptr_t a, uintptr_t b) {
     if (a >= b) return;
     for (; a + sizeof(uintptr_t) <= b; a += sizeof(uintptr_t)) {
         uintptr_t v;
@@ -622,7 +622,7 @@ PY23_NO_ASAN static void gc_cand_add_range(uintptr_t a, uintptr_t b) {
     }
 }
 
-PY23_NO_ASAN static void gc_cand_add_registers(void) {
+PYADAMAS_NO_ASAN static void gc_cand_add_registers(void) {
     jmp_buf regs;
     if (setjmp(regs) == 0)
         gc_cand_add_range((uintptr_t)&regs, (uintptr_t)&regs + sizeof regs);
@@ -630,7 +630,7 @@ PY23_NO_ASAN static void gc_cand_add_registers(void) {
 
 void gc_mark(uintptr_t v) {
     if (!v) return;
-    Py23Rc* h = gc_table_find(v);
+    PyAdamasRc* h = gc_table_find(v);
     if (!h || h->marked) return;
     h->marked = 1;
     gc_work[gc_work_len++] = h;
@@ -641,13 +641,13 @@ void gc_mark(uintptr_t v) {
    静态字面量 rc 永生、marked 也不该被写（.data.rel.ro 只读）。 */
 static void gc_mark_direct(uintptr_t v) {
     if (!v) return;
-    Py23Rc* h = (Py23Rc*)(v - (uintptr_t)PY23_RC_HDR);
-    if (h->rc == PY23_RC_IMMORTAL || h->marked) return;
+    PyAdamasRc* h = (PyAdamasRc*)(v - (uintptr_t)PYADAMAS_RC_HDR);
+    if (h->rc == PYADAMAS_RC_IMMORTAL || h->marked) return;
     h->marked = 1;
     gc_work[gc_work_len++] = h;
 }
 
-PY23_NO_ASAN static void gc_scan_range(const void* begin, const void* end) {
+PYADAMAS_NO_ASAN static void gc_scan_range(const void* begin, const void* end) {
     uintptr_t a = (uintptr_t)begin;
     uintptr_t b = (uintptr_t)end;
     if (a >= b) return;
@@ -658,13 +658,13 @@ PY23_NO_ASAN static void gc_scan_range(const void* begin, const void* end) {
     }
 }
 
-void gc_scan_object(Py23Rc* h) {
-    void* p = (char*)h + PY23_RC_HDR;
+void gc_scan_object(PyAdamasRc* h) {
+    void* p = (char*)h + PYADAMAS_RC_HDR;
     switch (h->kind) {
-        case PY23_RC_STR:
+        case PYADAMAS_RC_STR:
             break;
-        case PY23_RC_LIST: {
-            Py23List* l = (Py23List*)p;
+        case PYADAMAS_RC_LIST: {
+            PyAdamasList* l = (PyAdamasList*)p;
             if (!l->data) break;
             // exact-RC 模式下 elem_kind 只可能是 0/1：0 是纯数值元素，
             // 没有任何引用要标记；1 是静态类型已知的堆指针，直接标记。
@@ -677,12 +677,12 @@ void gc_scan_object(Py23Rc* h) {
             }
             break;
         }
-        case PY23_RC_DICT: {
-            Py23Dict* d = (Py23Dict*)p;
+        case PYADAMAS_RC_DICT: {
+            PyAdamasDict* d = (PyAdamasDict*)p;
             int precise = gc_untracked_leaves;
             for (int64_t i = 0; i < d->len; ++i) {
-                int64_t k = py23_dict_key_at(d, i);
-                int64_t v = py23_dict_val_at(d, i);
+                int64_t k = pa_dict_key_at(d, i);
+                int64_t v = pa_dict_val_at(d, i);
                 if (precise && d->key_own == 1)
                     gc_mark_direct((uintptr_t)k);
                 else if (!precise || d->key_own == 2)
@@ -694,16 +694,16 @@ void gc_scan_object(Py23Rc* h) {
             }
             break;
         }
-        case PY23_RC_RANGE:
+        case PYADAMAS_RC_RANGE:
             // range 的负载是四个整数，没有子对象要标记。
             break;
-        case PY23_RC_CLOSURE:
-        case PY23_RC_OBJ:
-        case PY23_RC_INSTANCE: {
+        case PYADAMAS_RC_CLOSURE:
+        case PYADAMAS_RC_OBJ:
+        case PYADAMAS_RC_INSTANCE: {
             // 闭包负载 = [code, n_caps, cell…]，cell 都是堆上的 list；
             // exact-RC 模式下可以精确标记。OBJ / INSTANCE 形态不固定
             // （异常、文件、类实例），仍按保守扫描。
-            if (h->kind == PY23_RC_CLOSURE && gc_untracked_leaves) {
+            if (h->kind == PYADAMAS_RC_CLOSURE && gc_untracked_leaves) {
                 int64_t* c = (int64_t*)p;
                 for (int64_t i = 0; i < c[1]; ++i) gc_mark_direct((uintptr_t)c[2 + i]);
                 break;
@@ -723,7 +723,7 @@ void gc_scan_object(Py23Rc* h) {
 
 // 取真实栈指针：ASan 会把带地址的局部变量搬到 fake stack，用 &local
 // 当扫描起点会跨到未映射区域。生成的代码帧本身在真实栈上。
-PY23_NO_ASAN static uintptr_t gc_current_sp(void) {
+PYADAMAS_NO_ASAN static uintptr_t gc_current_sp(void) {
     uintptr_t sp;
     __asm__ volatile("movq %%rsp, %0" : "=r"(sp));
     return sp;
@@ -731,12 +731,12 @@ PY23_NO_ASAN static uintptr_t gc_current_sp(void) {
 
 // setjmp 会把 callee-saved 寄存器存进 jmp_buf；生成代码里常驻寄存器的
 // 堆指针就靠这一段兜住。
-PY23_NO_ASAN static void gc_scan_registers(void) {
+PYADAMAS_NO_ASAN static void gc_scan_registers(void) {
     jmp_buf regs;
     if (setjmp(regs) == 0) gc_scan_range(&regs, (char*)&regs + sizeof regs);
 }
 
-void py23_gc_add_roots(void** roots, int64_t n_roots) {
+void pa_gc_add_roots(void** roots, int64_t n_roots) {
     if (!roots || n_roots <= 0) return;
     if (gc_n_globals + n_roots > gc_globals_cap) {
         int64_t ncap = gc_globals_cap ? gc_globals_cap : 64;
@@ -750,41 +750,41 @@ void py23_gc_add_roots(void** roots, int64_t n_roots) {
     for (int64_t i = 0; i < n_roots; ++i) gc_globals[gc_n_globals++] = roots[i];
 }
 
-void py23_gc_init(void** roots, int64_t n_roots, void* stack_top) {
+void pa_gc_init(void** roots, int64_t n_roots, void* stack_top) {
     gc_globals = NULL;
     gc_n_globals = 0;
     gc_globals_cap = 0;
-    py23_gc_add_roots(roots, n_roots);
+    pa_gc_add_roots(roots, n_roots);
     gc_stack_top = (uintptr_t)stack_top;
     // 嵌入/基准场景可以关掉循环收集，只靠引用计数（会漏检环）。
-    if (getenv("PY23_GC_DISABLE")) return;
+    if (getenv("PYADAMAS_GC_DISABLE")) return;
     gc_ready = 1;
 }
 
 /* 整程序无 unknown 值、不涉及 asyncio/生成器时，入口调用这里关掉
    存活堆索引；此后 rc_index_put/del/has 都是空操作。RC 变精确后，
    字符串这类叶子对象也移出 GC 堆链（不可能成环，RC 归零即释放）。 */
-void py23_disable_unknown_index(void) {
+void pa_disable_unknown_index(void) {
     rc_index_off = 1;
     gc_untracked_leaves = 1;
 }
 
-void py23_gc_unref_child(void* p) {
+void pa_gc_unref_child(void* p) {
     if (!p) return;
     if (gc_untracked_leaves) {
         // exact-RC 模式：子对象一定是堆对象或静态字面量，直接读头部。
         // marked=1 是「本轮可达」，减计数；UNTRACKED 的叶子不在链上，
         // 必须在这里按正常引用释放；marked=0 是同样会被清扫的垃圾。
-        Py23Rc* u = (Py23Rc*)p - 1;
-        if (u->rc == PY23_RC_IMMORTAL) return;
-        if (u->marked == PY23_RC_UNTRACKED) {
+        PyAdamasRc* u = (PyAdamasRc*)p - 1;
+        if (u->rc == PYADAMAS_RC_IMMORTAL) return;
+        if (u->marked == PYADAMAS_RC_UNTRACKED) {
             if (u->rc > 0 && --u->rc == 0) free(u);
             return;
         }
         if (u->marked == 1 && u->rc > 0) u->rc--;
         return;
     }
-    Py23Rc* h = gc_table_find((uintptr_t)p);
+    PyAdamasRc* h = gc_table_find((uintptr_t)p);
     if (h && h->marked && h->rc > 0) h->rc--;
 }
 
@@ -798,22 +798,22 @@ static double gc_now_ms(void) {
     return (double)ts.tv_sec * 1e3 + (double)ts.tv_nsec / 1e6;
 }
 
-void py23_gc_collect(void) {
+void pa_gc_collect(void) {
     if (!gc_ready || !heap_head || !gc_stack_top) {
         alloc_since_gc = 0;
         return;
     }
     double t0 = 0, t1 = 0, t2 = 0, t3 = 0, t4 = 0;
-    if (getenv("PY23_GC_TIMING")) t0 = gc_now_ms();
+    if (getenv("PYADAMAS_GC_TIMING")) t0 = gc_now_ms();
     size_t n = gc_tracked_count;
     if (n == 0 || !heap_head) {
         alloc_since_gc = 0;
-        gc_next_threshold = PY23_GC_THRESHOLD;
+        gc_next_threshold = PYADAMAS_GC_THRESHOLD;
         return;
     }
     if (n > gc_work_buf_cap) {
         free(gc_work_buf);
-        gc_work_buf = (Py23Rc**)malloc(n * sizeof(Py23Rc*));
+        gc_work_buf = (PyAdamasRc**)malloc(n * sizeof(PyAdamasRc*));
         if (!gc_work_buf) panic_c("out of memory");
         gc_work_buf_cap = n;
     }
@@ -830,9 +830,9 @@ void py23_gc_collect(void) {
             gc_cand_add((uintptr_t)temp_stack[i]);
         gc_cand_add_range(gc_current_sp(), gc_stack_top);
         gc_cand_add_registers();
-        for (Py23Rc* h = heap_head; h; h = h->next) {
+        for (PyAdamasRc* h = heap_head; h; h = h->next) {
             h->marked = 0;
-            if (gc_cand_has((uintptr_t)h + (uintptr_t)PY23_RC_HDR)) {
+            if (gc_cand_has((uintptr_t)h + (uintptr_t)PYADAMAS_RC_HDR)) {
                 h->marked = 1;
                 gc_work[gc_work_len++] = h;
             }
@@ -845,15 +845,15 @@ void py23_gc_collect(void) {
         while (cap < n * 2) cap <<= 1;
         if (cap > gc_table_buf_cap) {
             free(gc_table_buf);
-            gc_table_buf = (Py23Rc**)calloc(cap, sizeof(Py23Rc*));
+            gc_table_buf = (PyAdamasRc**)calloc(cap, sizeof(PyAdamasRc*));
             if (!gc_table_buf) panic_c("out of memory");
             gc_table_buf_cap = cap;
         } else {
-            memset(gc_table_buf, 0, cap * sizeof(Py23Rc*));
+            memset(gc_table_buf, 0, cap * sizeof(PyAdamasRc*));
         }
         gc_table = gc_table_buf;
         gc_table_cap = cap;
-        for (Py23Rc* h = heap_head; h; h = h->next) {
+        for (PyAdamasRc* h = heap_head; h; h = h->next) {
             h->marked = 0;
             gc_table_insert(h);
         }
@@ -873,29 +873,29 @@ void py23_gc_collect(void) {
     // 第一遍：只处理不可达对象指向可达对象的引用。此时所有头都还活着，
     // 查表安全；不调用 dtor，避免释放顺序问题。
     gc_sweeping = 1;
-    for (Py23Rc* h = heap_head; h; h = h->next) {
+    for (PyAdamasRc* h = heap_head; h; h = h->next) {
         if (!h->marked && h->release)
-            h->release((char*)h + PY23_RC_HDR);
+            h->release((char*)h + PYADAMAS_RC_HDR);
     }
     if (t0) t3 = gc_now_ms();
 
     // 第二遍：释放不可达对象，清理可达对象的 mark 位。
     int64_t live = 0;
-    Py23Rc* h = heap_head;
+    PyAdamasRc* h = heap_head;
     while (h) {
-        Py23Rc* next = h->next;
+        PyAdamasRc* next = h->next;
         if (h->marked) {
-            live += h->size + PY23_RC_HDR;
+            live += h->size + PYADAMAS_RC_HDR;
             h->marked = 0;
         } else {
             rc_unlink(h);
-            if (h->kind == PY23_RC_OBJ)
-                free_attached_exception((char*)h + PY23_RC_HDR, h->size);
-            if (h->kind == PY23_RC_LIST) {
-                Py23List* l = (Py23List*)((char*)h + PY23_RC_HDR);
+            if (h->kind == PYADAMAS_RC_OBJ)
+                free_attached_exception((char*)h + PYADAMAS_RC_HDR, h->size);
+            if (h->kind == PYADAMAS_RC_LIST) {
+                PyAdamasList* l = (PyAdamasList*)((char*)h + PYADAMAS_RC_HDR);
                 free(l->data);
-            } else if (h->kind == PY23_RC_DICT) {
-                Py23Dict* d = (Py23Dict*)((char*)h + PY23_RC_HDR);
+            } else if (h->kind == PYADAMAS_RC_DICT) {
+                PyAdamasDict* d = (PyAdamasDict*)((char*)h + PYADAMAS_RC_HDR);
                 free(d->entries);
                 free(d->order);
                 free(d->index);
@@ -912,7 +912,7 @@ void py23_gc_collect(void) {
     gc_work = NULL;
     gc_work_len = 0;
     alloc_since_gc = 0;
-    gc_next_threshold = live > (int64_t)PY23_GC_THRESHOLD ? live : PY23_GC_THRESHOLD;
+    gc_next_threshold = live > (int64_t)PYADAMAS_GC_THRESHOLD ? live : PYADAMAS_GC_THRESHOLD;
     if (t0)
         fprintf(stderr,
                 "[gc] n=%zu live=%lld table=%.2f mark=%.2f release=%.2f sweep=%.2f ms\n",
@@ -920,18 +920,18 @@ void py23_gc_collect(void) {
 }
 
 // 程序退出：所有还活着的堆对象（包括环）一次性还给系统。
-void py23_gc_shutdown(void) {
+void pa_gc_shutdown(void) {
     gc_sweeping = 1;
     while (heap_head) {
-        Py23Rc* h = heap_head;
+        PyAdamasRc* h = heap_head;
         rc_unlink(h);
-        if (h->kind == PY23_RC_OBJ)
-            free_attached_exception((char*)h + PY23_RC_HDR, h->size);
-        if (h->kind == PY23_RC_LIST) {
-            Py23List* l = (Py23List*)((char*)h + PY23_RC_HDR);
+        if (h->kind == PYADAMAS_RC_OBJ)
+            free_attached_exception((char*)h + PYADAMAS_RC_HDR, h->size);
+        if (h->kind == PYADAMAS_RC_LIST) {
+            PyAdamasList* l = (PyAdamasList*)((char*)h + PYADAMAS_RC_HDR);
             free(l->data);
-        } else if (h->kind == PY23_RC_DICT) {
-            Py23Dict* d = (Py23Dict*)((char*)h + PY23_RC_HDR);
+        } else if (h->kind == PYADAMAS_RC_DICT) {
+            PyAdamasDict* d = (PyAdamasDict*)((char*)h + PYADAMAS_RC_HDR);
             free(d->entries);
             free(d->order);
             free(d->index);
@@ -959,7 +959,7 @@ void py23_gc_shutdown(void) {
 /* 分模块编译：init 是模块顶层生成的 void(void)，ready 是模块 .bss 里的
    一次性标志。标志在调用前设置，初始化失败不会重试（与 Python 移除
    失败模块的行为不同，但至少不会死循环）。 */
-void py23_import_module(int64_t* ready, void (*init)(void)) {
+void pa_import_module(int64_t* ready, void (*init)(void)) {
     if (!ready || !init || *ready) return;
     *ready = 1;
     init();
