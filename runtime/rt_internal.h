@@ -613,8 +613,30 @@ int64_t py23_pow_i64(int64_t base, int64_t exp);
 
 /* ── random：CPython 兼容的 MT19937 ─────────────────────────────── */
 typedef struct Py23Random Py23Random;
-Py23Random* py23_random_new(int64_t seed);
-void py23_random_seed(Py23Random* r, int64_t seed);
+/* datetime / pathlib：都是不透明句柄，字段读取和字符串操作走下面的函数。 */
+typedef struct Py23DateTime Py23DateTime;
+typedef struct Py23Path Py23Path;
+Py23DateTime* py23_date_new(int64_t y, int64_t mo, int64_t d);
+Py23DateTime* py23_datetime_new(int64_t y, int64_t mo, int64_t d, int64_t h, int64_t mi,
+                                int64_t s);
+Py23DateTime* py23_datetime_now(int64_t is_date);
+int64_t py23_datetime_field(Py23DateTime* dt, int64_t idx);
+Py23Str* py23_datetime_isoformat(Py23DateTime* dt);
+Py23Str* py23_datetime_strftime(Py23DateTime* dt, Py23Str* fmt);
+Py23Path* py23_path_new(Py23Str* s);
+Py23Str* py23_path_str(Py23Path* p);
+Py23Path* py23_path_join(Py23Path* p, Py23Str* s);
+Py23Str* py23_path_name(Py23Path* p);
+Py23Str* py23_path_suffix(Py23Path* p);
+Py23Str* py23_path_stem(Py23Path* p);
+Py23Path* py23_path_parent(Py23Path* p);
+int64_t py23_path_exists(Py23Path* p);
+int64_t py23_path_is_file(Py23Path* p);
+int64_t py23_path_is_dir(Py23Path* p);
+Py23Str* py23_path_read_text(Py23Path* p);
+int64_t py23_path_write_text(Py23Path* p, Py23Str* text);
+
+Py23Random* py23_random_new(int64_t seed);void py23_random_seed(Py23Random* r, int64_t seed);
 double py23_random_next(Py23Random* r);
 int64_t py23_random_randint(Py23Random* r, int64_t a, int64_t b);
 int64_t py23_random_choice(Py23Random* r, Py23List* seq);

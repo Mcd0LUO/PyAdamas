@@ -424,7 +424,7 @@ bool visit_unit(Program& p, ModuleUnit& u, std::vector<ModuleUnit*>& stack) {
             req.name == "random" || req.name == "os" || req.name == "os.path" ||
             req.name == "subprocess" || req.name == "time" || req.name == "itertools" ||
             req.name == "collections" || req.name == "json" || req.name == "re" ||
-            req.name == "functools") {
+            req.name == "functools" || req.name == "datetime" || req.name == "pathlib") {
             // 内置模块没有源文件/对象，只提供编译期接口。
             continue;
         }
@@ -537,7 +537,7 @@ py23::ModuleInfoPtr program_module(Program& p, const std::string& name) {
     if (name == "math" || name == "sys" || name == "asyncio" || name == "random" ||
         name == "os" || name == "os.path" || name == "subprocess" || name == "time" ||
         name == "itertools" || name == "collections" || name == "json" || name == "re" ||
-        name == "functools")
+        name == "functools" || name == "datetime" || name == "pathlib")
         return builtin_module(name);
     auto it = p.units.find(name);
     return it == p.units.end() ? nullptr : it->second->info;
@@ -757,6 +757,27 @@ py23::ModuleInfoPtr builtin_module(const std::string& name) {
             f->ret_known = true;
             func_with("Counter", f);
         }
+    } else if (name == "datetime") {
+        auto dt = py23::new_ty(py23::TyKind::DateTime);
+        // date(y, m, d) / today()
+        func("date", {py23::t_int(), py23::t_int(), py23::t_int()}, dt);
+        func("today", {}, dt);
+        // now()：带时分秒的当前时间
+        func("now", {}, dt);
+        // datetime(...)：3 或 6 个位置参数，个数在降级阶段检查
+        {
+            auto f = std::make_shared<py23::FuncInfo>();
+            f->name = "datetime.datetime";
+            f->varargs = true;
+            f->vararg_name = "args";
+            f->vararg_ty = py23::t_int();
+            f->ret = dt;
+            f->ret_known = true;
+            func_with("datetime", f);
+        }
+    } else if (name == "pathlib") {
+        auto p = py23::new_ty(py23::TyKind::Path);
+        func("Path", {py23::t_str()}, p);
     } else if (name == "functools") {
         // reduce 的返回类型按实参在调用点特化，签名只负责参数个数检查。
         {

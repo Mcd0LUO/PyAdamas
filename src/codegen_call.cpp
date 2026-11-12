@@ -973,6 +973,40 @@ void AsmGen::gen_call_rt(const Inst& in) {
                 emit2("movq", src_op(in.args[0]), "%rdi");
                 emit2("movq", src_op(in.args[1]), "%rsi");
                 break;
+            case RtFn::DateNew:
+                emit2("movq", src_op(in.args[0]), "%rdi");
+                emit2("movq", src_op(in.args[1]), "%rsi");
+                emit2("movq", src_op(in.args[2]), "%rdx");
+                break;
+            case RtFn::DateTimeNew:
+                emit2("movq", src_op(in.args[0]), "%rdi");
+                emit2("movq", src_op(in.args[1]), "%rsi");
+                emit2("movq", src_op(in.args[2]), "%rdx");
+                emit2("movq", src_op(in.args[3]), "%rcx");
+                emit2("movq", src_op(in.args[4]), "%r8");
+                emit2("movq", src_op(in.args[5]), "%r9");
+                break;
+            case RtFn::DateTimeField:
+            case RtFn::DateTimeStrftime:
+            case RtFn::PathJoin:
+            case RtFn::PathWriteText:
+                emit2("movq", src_op(in.args[0]), "%rdi");
+                emit2("movq", src_op(in.args[1]), "%rsi");
+                break;
+            case RtFn::DateTimeNow:
+            case RtFn::DateTimeIsoformat:
+            case RtFn::PathNew:
+            case RtFn::PathStr:
+            case RtFn::PathName:
+            case RtFn::PathStem:
+            case RtFn::PathSuffix:
+            case RtFn::PathParent:
+            case RtFn::PathExists:
+            case RtFn::PathIsFile:
+            case RtFn::PathIsDir:
+            case RtFn::PathReadText:
+                emit2("movq", src_op(in.args[0]), "%rdi");
+                break;
             case RtFn::SubprocessRun:
                 emit2("movq", src_op(in.args[0]), "%rdi");
                 emit2("movq", src_op(in.args[1]), "%rsi");

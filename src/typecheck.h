@@ -68,6 +68,8 @@ enum class TyKind : uint8_t {
     CompletedProcess,  // subprocess.run() 返回的结果对象
     Regex,        // re.compile() 返回的 Pattern
     Match,        // re.search()/match() 返回的 Match
+    DateTime,     // datetime.date / datetime.datetime
+    Path,         // pathlib.Path
 };
 
 struct Type;
@@ -717,6 +719,8 @@ inline std::string type_name_impl(const TypePtr& t, int depth) {
         case TyKind::CompletedProcess: return "subprocess.CompletedProcess";
         case TyKind::Regex: return "re.Pattern";
         case TyKind::Match: return "re.Match";
+        case TyKind::DateTime: return "datetime";
+        case TyKind::Path: return "pathlib.Path";
     }
     return "?";
 }

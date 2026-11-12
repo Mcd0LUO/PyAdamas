@@ -756,6 +756,15 @@ CPython 一致。
   float 要求 f 的形参是 float，或由调用点按元素类型回填）；`wraps(f)`
   只作装饰器用——py23 不建模 `__name__`/`__doc__`，这一层在装饰器链里
   直接跳过。`partial` / `lru_cache` 需要运行期构造闭包，暂不支持。
+- 内置 `datetime`：`date(y, m, d)` / `datetime(y, m, d[, h, mi, s])` 构造，
+  `now()` / `today()` 取当前时间；`.year` / `.month` / `.day` / `.hour` /
+  `.minute` / `.second` / `.weekday()` 读字段，`.isoformat()` /
+  `.strftime(fmt)` 格式化，`print()` 按 ISO 输出。没有 `timedelta` 和时区；
+  `datetime.datetime.now()` 这种链式类方法暂不支持，用 `datetime.now()`。
+- 内置 `pathlib`：`Path(s)` 构造，`.name` / `.stem` / `.suffix` / `.parent`
+  取成分，`.exists()` / `.is_file()` / `.is_dir()` 查文件系统，
+  `.read_text()` / `.write_text(s)` 读写文本。没有 `/` 运算符、`iterdir` /
+  `glob` / `mkdir`。
 - 内置 `json`：`dumps(obj)` 按静态类型生成 JSON；`loads(text, sample)`
   用 sample 的静态类型决定结果结构，覆盖 int/bool/float/str/None/list/
   dict/定长 tuple；默认分隔符 `", "` / `": "`。

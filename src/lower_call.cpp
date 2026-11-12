@@ -452,6 +452,10 @@ VReg Lowerer::lower_call(Call& c) {
                 return lower_collections(it->second.member, c);
             if (it->second.module == "functools")
                 return lower_functools(it->second.member, c);
+            if (it->second.module == "datetime")
+                return lower_datetime(it->second.member, c);
+            if (it->second.module == "pathlib")
+                return lower_pathlib(it->second.member, c);
             if (it->second.module == "json")
                 return lower_json(it->second.member, c);
             TypePtr ft = tc_.type_of(c.func.get());

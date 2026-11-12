@@ -1315,6 +1315,44 @@ TypePtr TypeChecker::method_call(TypePtr recv, const std::string& name, Call& c,
             if (name == "encode") return t_bytes();
         }
 
+        if (recv->kind == TyKind::DateTime) {
+            if (!c.keywords.empty())
+                err(c.line, c.col,
+                    std::format("datetime.{}() does not take keyword arguments", name));
+            if (name == "isoformat") {
+                argc(0, 0);
+                return t_str();
+            }
+            if (name == "strftime") {
+                argc(1, 1);
+                return t_str();
+            }
+            if (name == "weekday") {
+                argc(0, 0);
+                return t_int();
+            }
+            err(c.line, c.col, std::format("datetime has no method '{}'", name));
+            return t_unknown();
+        }
+        if (recv->kind == TyKind::Path) {
+            if (!c.keywords.empty())
+                err(c.line, c.col,
+                    std::format("pathlib.Path.{}() does not take keyword arguments", name));
+            if (name == "exists" || name == "is_file" || name == "is_dir") {
+                argc(0, 0);
+                return t_bool();
+            }
+            if (name == "read_text") {
+                argc(0, 0);
+                return t_str();
+            }
+            if (name == "write_text") {
+                argc(1, 1);
+                return t_int();
+            }
+            err(c.line, c.col, std::format("pathlib.Path has no method '{}'", name));
+            return t_unknown();
+        }
         if (recv->kind == TyKind::Regex) {
             if (!c.keywords.empty())
                 err(c.line, c.col,

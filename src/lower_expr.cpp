@@ -413,6 +413,39 @@ VReg Lowerer::expr(Expr& e) {
                     std::format("'file' object has no attribute '{}'", a.attr));
                 return const_none();
             }
+            if (ot && ot->kind == TyKind::DateTime) {
+                VReg dv = expr(*a.value);
+                if (opt) dv = guard_not_none(dv, std::format("attribute '{}'", a.attr));
+                static const std::unordered_map<std::string, int64_t> kDtFields = {
+                    {"year", 0}, {"month", 1}, {"day", 2},
+                    {"hour", 3}, {"minute", 4}, {"second", 5},
+                };
+                if (auto it = kDtFields.find(a.attr); it != kDtFields.end())
+                    return call_runtime(RtFn::DateTimeField, t_int(), {dv, const_int(it->second)});
+                err(e.line, e.col,
+                    std::format("'datetime' object has no attribute '{}'", a.attr));
+                return const_none();
+            }
+            if (ot && ot->kind == TyKind::Path) {
+                VReg pv = expr(*a.value);
+                if (opt) pv = guard_not_none(pv, std::format("attribute '{}'", a.attr));
+                if (a.attr == "name" || a.attr == "stem" || a.attr == "suffix") {
+                    RtFn fn = a.attr == "name"    ? RtFn::PathName
+                              : a.attr == "stem"  ? RtFn::PathStem
+                                                  : RtFn::PathSuffix;
+                    VReg s = call_runtime(fn, t_str(), {pv});
+                    push_temp(s);
+                    return s;
+                }
+                if (a.attr == "parent") {
+                    VReg s = call_runtime(RtFn::PathParent, new_ty(TyKind::Path), {pv});
+                    push_temp(s);
+                    return s;
+                }
+                err(e.line, e.col,
+                    std::format("'pathlib.Path' object has no attribute '{}'", a.attr));
+                return const_none();
+            }
             if (ot && ot->kind == TyKind::CompletedProcess) {
                 VReg pv = expr(*a.value);
                 if (opt)

@@ -397,6 +397,25 @@ enum class RtFn : uint16_t {
     RegexStart,            // (match*, i64 n) -> i64
     RegexEnd,              // (match*, i64 n) -> i64
     RegexSpan,             // (match*, i64 n) -> tuple[i64, i64]
+    // datetime / pathlib
+    DateNew,               // (y, m, d) -> datetime*
+    DateTimeNew,           // (y, m, d, h, mi, s) -> datetime*
+    DateTimeNow,           // (is_date) -> datetime*
+    DateTimeField,         // (dt*, idx) -> i64
+    DateTimeIsoformat,     // (dt*) -> str*
+    DateTimeStrftime,      // (dt*, str* fmt) -> str*
+    PathNew,               // (str*) -> path*
+    PathStr,               // (path*) -> str*
+    PathJoin,              // (path*, str*) -> path*
+    PathName,              // (path*) -> str*
+    PathStem,              // (path*) -> str*
+    PathSuffix,            // (path*) -> str*
+    PathParent,            // (path*) -> path*
+    PathExists,            // (path*) -> i64
+    PathIsFile,            // (path*) -> i64
+    PathIsDir,             // (path*) -> i64
+    PathReadText,          // (path*) -> str*
+    PathWriteText,         // (path*, str*) -> i64
 };
 
 inline const char* rt_name(RtFn f) {
@@ -773,6 +792,24 @@ inline const char* rt_name(RtFn f) {
         case RtFn::RegexStart: return "py23_re_start";
         case RtFn::RegexEnd: return "py23_re_end";
         case RtFn::RegexSpan: return "py23_re_span";
+        case RtFn::DateNew: return "py23_date_new";
+        case RtFn::DateTimeNew: return "py23_datetime_new";
+        case RtFn::DateTimeNow: return "py23_datetime_now";
+        case RtFn::DateTimeField: return "py23_datetime_field";
+        case RtFn::DateTimeIsoformat: return "py23_datetime_isoformat";
+        case RtFn::DateTimeStrftime: return "py23_datetime_strftime";
+        case RtFn::PathNew: return "py23_path_new";
+        case RtFn::PathStr: return "py23_path_str";
+        case RtFn::PathJoin: return "py23_path_join";
+        case RtFn::PathName: return "py23_path_name";
+        case RtFn::PathStem: return "py23_path_stem";
+        case RtFn::PathSuffix: return "py23_path_suffix";
+        case RtFn::PathParent: return "py23_path_parent";
+        case RtFn::PathExists: return "py23_path_exists";
+        case RtFn::PathIsFile: return "py23_path_is_file";
+        case RtFn::PathIsDir: return "py23_path_is_dir";
+        case RtFn::PathReadText: return "py23_path_read_text";
+        case RtFn::PathWriteText: return "py23_path_write_text";
     }
     return "?";
 }
@@ -1082,6 +1119,8 @@ inline bool ir_is_heap(const TypePtr& t) {
         case TyKind::CompletedProcess:
         case TyKind::Regex:
         case TyKind::Match:
+        case TyKind::DateTime:
+        case TyKind::Path:
             return true;
         case TyKind::Optional:
             return !t->sub.empty() && ir_is_heap(t->sub[0]);
@@ -1123,6 +1162,8 @@ inline bool ir_is_ref(const TypePtr& t) {
         case TyKind::CompletedProcess:
         case TyKind::Regex:
         case TyKind::Match:
+        case TyKind::DateTime:
+        case TyKind::Path:
             return true;
         default:
             return false;

@@ -1039,6 +1039,8 @@ private:
     VReg lower_itertools(const std::string& member, Call& c);
     VReg lower_collections(const std::string& member, Call& c);
     VReg lower_functools(const std::string& member, Call& c);
+    VReg lower_datetime(const std::string& member, Call& c);
+    VReg lower_pathlib(const std::string& member, Call& c);
     VReg lower_json(const std::string& member, Call& c);
     // 把静态类型编码成 json 运行时描述符；不支持的类型就地报错。
     bool json_desc(const TypePtr& t, std::string& out, int line, int col);

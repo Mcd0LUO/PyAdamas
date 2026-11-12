@@ -4,6 +4,34 @@
 
 早期阶段没有逐条留痕，按阶段归纳；0.4 之后逐条记录。
 
+## [0.89] - 2026-11-12
+
+`datetime` 与 `pathlib`。
+
+### 新增
+
+- **`datetime`**：`date(y, m, d)` / `datetime(y, m, d[, h, mi, s])` 构造，
+  `now()` / `today()` 取当前时间；`.year` / `.month` / `.day` / `.hour` /
+  `.minute` / `.second` / `.weekday()` 读字段，`.isoformat()` / `.strftime(fmt)`
+  格式化。`print()` 按 ISO 格式输出，构造时校验字段范围。
+- **`pathlib.Path`**：`Path(s)` 构造，`.name` / `.stem` / `.suffix` / `.parent`
+  取路径成分，`.exists()` / `.is_file()` / `.is_dir()` 查文件系统，
+  `.read_text()` / `.write_text(s)` 读写文本。`print(p)` 直接输出路径。
+
+### 已知限制
+
+- 只支持模块级函数写法（`datetime.now()`），不支持 `datetime.datetime.now()`
+  这种链式类方法。
+- 没有 `timedelta`、时区、`fromtimestamp`。
+- `Path` 没有 `/` 运算符、`iterdir` / `glob` / `mkdir`。
+- `str(Path)` 还没接（`print(p)` 可以）。
+
+### 测试
+
+- `tests/run/79_datetime_pathlib.py`：日期构造 / 字段 / ISO / strftime /
+  weekday / now，路径成分 / 存在性 / 读写。
+- 用例数：运行 78→79。
+
 ## [0.88] - 2026-11-12
 
 `for` 里的 `enumerate` / `zip` 脱糖成计数循环。

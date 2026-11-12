@@ -281,6 +281,22 @@ TypePtr TypeChecker::expr(Expr& e) {
                         std::format("'file' object has no attribute '{}'", a.attr));
                     return t_unknown();
                 }
+                if (ot->kind == TyKind::DateTime) {
+                    if (a.attr == "year" || a.attr == "month" || a.attr == "day" ||
+                        a.attr == "hour" || a.attr == "minute" || a.attr == "second")
+                        return t_int();
+                    err(a.line, a.col,
+                        std::format("'datetime' object has no attribute '{}'", a.attr));
+                    return t_unknown();
+                }
+                if (ot->kind == TyKind::Path) {
+                    if (a.attr == "name" || a.attr == "stem" || a.attr == "suffix")
+                        return t_str();
+                    if (a.attr == "parent") return new_ty(TyKind::Path);
+                    err(a.line, a.col,
+                        std::format("'pathlib.Path' object has no attribute '{}'", a.attr));
+                    return t_unknown();
+                }
                 if (ot->kind == TyKind::CompletedProcess) {
                     if (a.attr == "returncode") return t_int();
                     if (a.attr == "stdout" || a.attr == "stderr") return t_str();

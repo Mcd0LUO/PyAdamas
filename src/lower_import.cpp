@@ -548,6 +548,80 @@ VReg Lowerer::lower_functools(const std::string& member, Call& c) {
     return const_none();
 }
 
+VReg Lowerer::lower_datetime(const std::string& member, Call& c) {
+    if (!c.keywords.empty()) {
+        err(c.line, c.col, std::format("datetime.{}() does not take keyword arguments", member));
+    }
+    TypePtr rt = tc_.type_of(&c);
+    if (!rt || rt->kind != TyKind::DateTime) rt = new_ty(TyKind::DateTime);
+    if (member == "now" || member == "today") {
+        if (!c.args.empty())
+            err(c.line, c.col, std::format("datetime.{}() takes no arguments", member));
+        VReg v = call_runtime(RtFn::DateTimeNow, rt, {const_int(member == "today" ? 1 : 0)});
+        push_temp(v);
+        return v;
+    }
+    // 实参按从左到右求值（C++ 不保证花括号里的求值顺序，必须分开写）。
+    auto iarg = [&](size_t i) {
+        return coerce(expr(*c.args[i]), tc_.type_of(c.args[i].get()), t_int());
+    };
+    if (member == "date") {
+        if (c.args.size() != 3) {
+            err(c.line, c.col, "datetime.date() takes 3 arguments (year, month, day)");
+            return const_none();
+        }
+        VReg y = iarg(0);
+        VReg mo = iarg(1);
+        VReg d = iarg(2);
+        VReg v = call_runtime(RtFn::DateNew, rt, {y, mo, d});
+        push_temp(v);
+        return v;
+    }
+    if (member == "datetime") {
+        if (c.args.size() != 3 && c.args.size() != 6) {
+            err(c.line, c.col, "datetime.datetime() takes 3 or 6 arguments");
+            return const_none();
+        }
+        VReg y = iarg(0);
+        VReg mo = iarg(1);
+        VReg d = iarg(2);
+        VReg h = const_int(0);
+        VReg mi = const_int(0);
+        VReg s = const_int(0);
+        if (c.args.size() == 6) {
+            h = iarg(3);
+            mi = iarg(4);
+            s = iarg(5);
+        }
+        VReg v = call_runtime(RtFn::DateTimeNew, rt, {y, mo, d, h, mi, s});
+        push_temp(v);
+        return v;
+    }
+    err(c.line, c.col, std::format("datetime.{} is not supported", member));
+    return const_none();
+}
+
+VReg Lowerer::lower_pathlib(const std::string& member, Call& c) {
+    if (member == "Path") {
+        if (!c.keywords.empty()) {
+            err(c.line, c.col, "pathlib.Path() does not take keyword arguments");
+        }
+        if (c.args.size() != 1) {
+            err(c.line, c.col, "pathlib.Path() takes exactly one argument");
+            return const_none();
+        }
+        TypePtr rt = tc_.type_of(&c);
+        if (!rt || rt->kind != TyKind::Path) rt = new_ty(TyKind::Path);
+        VReg s = expr(*c.args[0]);
+        s = coerce(s, tc_.type_of(c.args[0].get()), t_str());
+        VReg v = call_runtime(RtFn::PathNew, rt, {s});
+        push_temp(v);
+        return v;
+    }
+    err(c.line, c.col, std::format("pathlib.{} is not supported", member));
+    return const_none();
+}
+
 VReg Lowerer::lower_json(const std::string& member, Call& c) {
     if (!c.keywords.empty()) {
         err(c.line, c.col, std::format("json.{}() does not take keyword arguments", member));

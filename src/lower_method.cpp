@@ -80,6 +80,8 @@ VReg Lowerer::lower_method_call(Attribute& at, Call& c) {
             if (mod->name == "itertools") return lower_itertools(at.attr, c);
             if (mod->name == "collections") return lower_collections(at.attr, c);
             if (mod->name == "functools") return lower_functools(at.attr, c);
+            if (mod->name == "datetime") return lower_datetime(at.attr, c);
+            if (mod->name == "pathlib") return lower_pathlib(at.attr, c);
             if (mod->name == "json") return lower_json(at.attr, c);
             auto it = mod->globals.find(at.attr);
             if (it != mod->globals.end() && it->second && it->second->kind == TyKind::Func)
@@ -234,7 +236,9 @@ VReg Lowerer::lower_method_call(Attribute& at, Call& c) {
                     recv_ty->kind == TyKind::AsyncQueue ||
                     recv_ty->kind == TyKind::AsyncTimeout ||
                     recv_ty->kind == TyKind::AsyncTaskGroup ||
-                    recv_ty->kind == TyKind::AsyncSemaphore)) {
+                    recv_ty->kind == TyKind::AsyncSemaphore ||
+                    recv_ty->kind == TyKind::DateTime ||
+                    recv_ty->kind == TyKind::Path)) {
         if (opt) recv = guard_not_none(recv, std::format("method '{}'", at.attr));
         if (!c.keywords.empty())
             err(c.line, c.col, std::format("{}() does not take keyword arguments", at.attr));
@@ -339,6 +343,51 @@ VReg Lowerer::lower_method_call(Attribute& at, Call& c) {
                 if (!count(0)) return const_none();
                 return call_runtime(RtFn::QueueGetNowait, t_unknown(), {recv});
             }
+        }
+        if (recv_ty->kind == TyKind::DateTime) {
+            if (at.attr == "isoformat") {
+                if (!count(0)) return const_none();
+                VReg s = call_runtime(RtFn::DateTimeIsoformat, t_str(), {recv});
+                push_temp(s);
+                return s;
+            }
+            if (at.attr == "strftime") {
+                if (!count(1)) return const_none();
+                VReg f = expr(*c.args[0]);
+                f = coerce(f, tc_.type_of(c.args[0].get()), t_str());
+                VReg s = call_runtime(RtFn::DateTimeStrftime, t_str(), {recv, f});
+                push_temp(s);
+                return s;
+            }
+            if (at.attr == "weekday") {
+                if (!count(0)) return const_none();
+                return call_runtime(RtFn::DateTimeField, t_int(), {recv, const_int(6)});
+            }
+            err(c.line, c.col, std::format("datetime has no method '{}'", at.attr));
+            return const_none();
+        }
+        if (recv_ty->kind == TyKind::Path) {
+            if (at.attr == "exists" || at.attr == "is_file" || at.attr == "is_dir") {
+                if (!count(0)) return const_none();
+                RtFn fn = at.attr == "exists"    ? RtFn::PathExists
+                          : at.attr == "is_file" ? RtFn::PathIsFile
+                                                 : RtFn::PathIsDir;
+                return call_runtime(fn, t_bool(), {recv});
+            }
+            if (at.attr == "read_text") {
+                if (!count(0)) return const_none();
+                VReg s = call_runtime(RtFn::PathReadText, t_str(), {recv});
+                push_temp(s);
+                return s;
+            }
+            if (at.attr == "write_text") {
+                if (!count(1)) return const_none();
+                VReg s = expr(*c.args[0]);
+                s = coerce(s, tc_.type_of(c.args[0].get()), t_str());
+                return call_runtime(RtFn::PathWriteText, t_int(), {recv, s});
+            }
+            err(c.line, c.col, std::format("pathlib.Path has no method '{}'", at.attr));
+            return const_none();
         }
         if (recv_ty->kind == TyKind::AsyncTimeout) {
             if (at.attr == "expired") {
