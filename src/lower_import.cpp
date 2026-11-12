@@ -944,6 +944,326 @@ bool Lowerer::json_desc(const TypePtr& t, std::string& out, int line, int col) {
     }
 }
 
+// 原始形参下标（pos 在前，kwonly 从 pos.size() 起）→ 类型。
+static TypePtr fn_param_ty(const FuncInfoPtr& fn, int idx) {
+    int n = static_cast<int>(fn->pos.size());
+    if (idx < n) return fn->pos[static_cast<size_t>(idx)].ty;
+    return fn->kwonly[static_cast<size_t>(idx - n)].ty;
+}
+
+static const std::string& fn_param_name(const FuncInfoPtr& fn, int idx) {
+    int n = static_cast<int>(fn->pos.size());
+    if (idx < n) return fn->pos[static_cast<size_t>(idx)].name;
+    return fn->kwonly[static_cast<size_t>(idx - n)].name;
+}
+
+// 闭包捕获的值必须是 cell（单元素 list[T]），析构时由闭包统一 dec。
+VReg Lowerer::make_cell_value(VReg v, TypePtr T) {
+    TypePtr cell_ty = mk_list(T ? T : t_unknown());
+    int kind = list_kind(cell_ty);
+    retain_elem(v, kind);
+    Inst in;
+    in.op = IrOp::MakeList;
+    in.imm = kind;
+    in.args.push_back(v);
+    return def_heap(cell_ty, std::move(in));
+}
+
+// functools.partial：合成一个转发函数，把 f 和绑定实参放进闭包 cell，
+// 其余形参原样转发。返回的闭包签名就是 PartialPlan::sig。
+VReg Lowerer::build_partial_wrapper(Call& c, VReg fnv, TypePtr fty,
+                                    const PartialPlan& plan, int line, int col) {
+    FuncInfoPtr fn = (fty && fty->kind == TyKind::Func) ? fty->fn : nullptr;
+    if (!fn || !plan.sig) {
+        err(line, col, "functools.partial() requires a function with a known signature");
+        return const_none();
+    }
+    FuncInfoPtr sig = plan.sig;
+    int npos = static_cast<int>(fn->pos.size());
+    int ntotal = npos + static_cast<int>(fn->kwonly.size());
+    std::vector<int> cap_of_param(static_cast<size_t>(ntotal), -1);
+    for (size_t i = 0; i < plan.bound_params.size(); ++i)
+        cap_of_param[static_cast<size_t>(plan.bound_params[i])] = static_cast<int>(i) + 1;
+
+    // 实参求值顺序与 CPython 一致：f 之后先位置参数，再关键字参数。
+    std::vector<Expr*> arg_exprs;
+    for (size_t i = 1; i < c.args.size(); ++i) arg_exprs.push_back(c.args[i].get());
+    for (auto& kw : c.keywords) arg_exprs.push_back(kw.value.get());
+    std::vector<VReg> bound_vals;
+    std::vector<TypePtr> bound_tys;
+    for (size_t i = 0; i < arg_exprs.size(); ++i) {
+        VReg v = expr(*arg_exprs[i]);
+        if (i >= plan.bound_params.size()) continue;
+        TypePtr want = fn_param_ty(fn, plan.bound_params[i]);
+        v = coerce(v, tc_.type_of(arg_exprs[i]), want);
+        bound_vals.push_back(v);
+        bound_tys.push_back(want ? want : t_unknown());
+    }
+    if (plan.bound_params.empty()) return fnv;  // partial(f) 就是 f
+
+    std::string label = std::format("__py23_partial_{}_{}", fn->name, mod_.funcs.size());
+    IRFunction* wf = mod_.add_func(label);
+    int widx = static_cast<int>(mod_.funcs.size()) - 1;
+    TypePtr rty = fn->ret ? fn->ret : t_unknown();
+    wf->ret = rty;
+    push_frame(wf, nullptr);
+    int entry = new_block("entry");
+    switch_to(entry);
+    st_->fn_mark = rc_mark_at(st_->fn_mark_block, st_->fn_mark_pos);
+
+    // 暴露给调用方的形参：按 sig 的顺序分配槽，再映射回原始形参下标。
+    std::vector<int> slot_of_param(static_cast<size_t>(ntotal), -1);
+    size_t rem_i = 0;
+    auto add_sig_param = [&](const Param& p) {
+        TypePtr T = p.ty ? p.ty : t_unknown();
+        int s = wf->new_slot(T);
+        wf->params.push_back(IRParam{p.name, T, s});
+        if (rem_i < plan.remaining.size())
+            slot_of_param[static_cast<size_t>(plan.remaining[rem_i++])] = s;
+    };
+    for (auto& p : sig->pos) add_sig_param(p);
+    for (auto& p : sig->kwonly) add_sig_param(p);
+
+    int es = wf->new_slot(t_unknown());
+    st_->env_slot = es;
+    wf->env_slot = es;
+    st_->borrow_slots.insert(es);
+    inc_params();
+
+    auto read_cap = [&](int cap, TypePtr T) {
+        TypePtr cell_ty = mk_list(T ? T : t_unknown());
+        VReg env = load_slot(es, t_unknown());
+        VReg cell = field_load(env, 16 + 8 * cap, cell_ty);
+        Inst in;
+        in.op = IrOp::IndexLoad;
+        in.a = cell;
+        in.b = const_int(0);
+        return def(T ? T : t_unknown(), std::move(in));
+    };
+
+    VReg callee = read_cap(0, fty);
+    std::vector<VReg> call_args;
+    call_args.reserve(static_cast<size_t>(ntotal));
+    for (int i = 0; i < ntotal; ++i) {
+        TypePtr T = fn_param_ty(fn, i);
+        if (cap_of_param[static_cast<size_t>(i)] > 0)
+            call_args.push_back(read_cap(cap_of_param[static_cast<size_t>(i)], T));
+        else if (slot_of_param[static_cast<size_t>(i)] >= 0)
+            call_args.push_back(load_slot(slot_of_param[static_cast<size_t>(i)], T));
+        else
+            call_args.push_back(const_none());
+    }
+    Inst call;
+    call.op = IrOp::Call;
+    call.a = callee;
+    call.args = std::move(call_args);
+    VReg r = def_heap(rty, std::move(call));
+    emit_return(r, rty);
+    pop_frame();
+
+    TypePtr out_ty = tc_.type_of(&c);
+    if (!out_ty || out_ty->kind != TyKind::Func) {
+        out_ty = new_ty(TyKind::Func);
+        out_ty->fn = sig;
+    }
+    Inst fc;
+    fc.op = IrOp::FuncCode;
+    fc.imm = widx;
+    VReg code = def(t_int(), std::move(fc));
+    VReg closure = call_runtime(
+        RtFn::ClosureNew, out_ty,
+        {code, const_int(static_cast<int64_t>(1 + bound_vals.size()))});
+    push_temp(closure);
+    VReg fcell = make_cell_value(fnv, fty);
+    rc_inc(fcell);
+    field_store(closure, 16, fcell);
+    for (size_t i = 0; i < bound_vals.size(); ++i) {
+        VReg cell = make_cell_value(bound_vals[i], bound_tys[i]);
+        rc_inc(cell);
+        field_store(closure, 16 + 8 * (static_cast<int>(i) + 1), cell);
+    }
+    return closure;
+}
+
+// @functools.lru_cache：缓存的键按形参逐个套一层 dict，最后一级存返回值。
+// maxsize 只求值不参与淘汰（缓存无上限）；键类型必须是 int/bool/float/str，
+// unknown 按机器字（和 dict 的既有约定一致）。
+VReg Lowerer::build_lru_wrapper(const std::string& base, VReg fnv, TypePtr fty,
+                                int line, int col) {
+    FuncInfoPtr fn = (fty && fty->kind == TyKind::Func) ? fty->fn : nullptr;
+    if (!fn) {
+        err(line, col, "@lru_cache requires a function with a known signature");
+        return fnv;
+    }
+    if (fn->varargs || fn->kwargs) {
+        err(line, col, "@lru_cache does not support functions with *args/**kwargs");
+        return fnv;
+    }
+    int npos = static_cast<int>(fn->pos.size());
+    int ntotal = npos + static_cast<int>(fn->kwonly.size());
+    if (ntotal == 0) {
+        err(line, col, "@lru_cache requires at least one parameter");
+        return fnv;
+    }
+    for (int i = 0; i < ntotal; ++i) {
+        TypePtr t = fn_param_ty(fn, i);
+        bool ok = !t || t->kind == TyKind::Int || t->kind == TyKind::Bool ||
+                  t->kind == TyKind::Float || t->kind == TyKind::Str ||
+                  t->kind == TyKind::Unknown;
+        if (!ok) {
+            err(line, col,
+                std::format("@lru_cache parameter '{}' has unsupported key type '{}'",
+                            fn_param_name(fn, i), type_name(t)));
+            return fnv;
+        }
+    }
+    TypePtr rty = fn->ret ? fn->ret : t_unknown();
+    TypePtr root_ty = mk_dict(fn_param_ty(fn, 0), t_unknown());
+
+    std::string label = std::format("__py23_lru_{}_{}", base, mod_.funcs.size());
+    IRFunction* wf = mod_.add_func(label);
+    int widx = static_cast<int>(mod_.funcs.size()) - 1;
+    wf->ret = rty;
+    push_frame(wf, nullptr);
+    int entry = new_block("entry");
+    switch_to(entry);
+    st_->fn_mark = rc_mark_at(st_->fn_mark_block, st_->fn_mark_pos);
+
+    std::vector<int> param_slots(static_cast<size_t>(ntotal), -1);
+    int pi = 0;
+    auto add_param = [&](const Param& p) {
+        TypePtr T = p.ty ? p.ty : t_unknown();
+        int s = wf->new_slot(T);
+        wf->params.push_back(IRParam{p.name, T, s});
+        param_slots[static_cast<size_t>(pi++)] = s;
+    };
+    for (auto& p : fn->pos) add_param(p);
+    for (auto& p : fn->kwonly) add_param(p);
+
+    int es = wf->new_slot(t_unknown());
+    st_->env_slot = es;
+    wf->env_slot = es;
+    st_->borrow_slots.insert(es);
+    inc_params();
+
+    auto read_cap = [&](int cap, TypePtr T) {
+        TypePtr cell_ty = mk_list(T ? T : t_unknown());
+        VReg env = load_slot(es, t_unknown());
+        VReg cell = field_load(env, 16 + 8 * cap, cell_ty);
+        Inst in;
+        in.op = IrOp::IndexLoad;
+        in.a = cell;
+        in.b = const_int(0);
+        return def(T ? T : t_unknown(), std::move(in));
+    };
+
+    VReg callee = read_cap(0, fty);
+    VReg cur = read_cap(1, root_ty);
+    VReg ret = const_none();
+    for (int i = 0; i < ntotal; ++i) {
+        TypePtr kt = fn_param_ty(fn, i);
+        int ko = own_kind(kt);
+        VReg key = load_slot(param_slots[static_cast<size_t>(i)], kt);
+        VReg cond = call_runtime(RtFn::DictContains, t_bool(), {cur, key});
+        int hit = new_block("lru.hit");
+        int miss = new_block("lru.miss");
+        int join = new_block("lru.join");
+        Inst br;
+        br.op = IrOp::Branch;
+        br.a = cond;
+        br.target = hit;
+        br.target2 = miss;
+        emit(std::move(br));
+
+        if (i + 1 < ntotal) {
+            TypePtr next_kt = fn_param_ty(fn, i + 1);
+            TypePtr next_ty = (i + 2 < ntotal) ? mk_dict(next_kt, t_unknown())
+                                               : mk_dict(next_kt, rty);
+            int cs = new_temp_slot(next_ty);
+            switch_to(miss);
+            VReg nd = call_runtime(RtFn::DictNew, next_ty,
+                                   {const_int(key_kind(next_kt)),
+                                    const_int(own_kind(next_kt)), const_int(2),
+                                    const_int(-1), const_int(-1)});
+            push_temp(nd);
+            retain_elem(key, ko);
+            rc_inc(nd);  // 字典持有一份，临时栈那份随后清掉
+            call_void(RtFn::DictSet, {cur, key, nd});
+            store_slot(cs, nd);
+            Inst jm;
+            jm.op = IrOp::Jump;
+            jm.target = join;
+            emit(std::move(jm));
+
+            switch_to(hit);
+            VReg got = call_runtime(RtFn::DictGet, next_ty, {cur, key});
+            store_slot(cs, got);
+            Inst jh;
+            jh.op = IrOp::Jump;
+            jh.target = join;
+            emit(std::move(jh));
+
+            switch_to(join);
+            cur = load_slot(cs, next_ty);
+            continue;
+        }
+
+        // 最后一级：命中直接取；未命中调 f，把返回值存进缓存。
+        int rs = new_temp_slot(rty);
+        switch_to(miss);
+        std::vector<VReg> call_args;
+        call_args.reserve(static_cast<size_t>(ntotal));
+        for (int k = 0; k < ntotal; ++k)
+            call_args.push_back(
+                load_slot(param_slots[static_cast<size_t>(k)], fn_param_ty(fn, k)));
+        Inst call;
+        call.op = IrOp::Call;
+        call.a = callee;
+        call.args = std::move(call_args);
+        VReg rv = def_heap(rty, std::move(call));
+        retain_elem(key, ko);
+        if (ir_is_heap(rty)) rc_inc(rv);
+        call_void(RtFn::DictSet, {cur, key, rv});
+        store_slot(rs, rv);
+        Inst jm;
+        jm.op = IrOp::Jump;
+        jm.target = join;
+        emit(std::move(jm));
+
+        switch_to(hit);
+        VReg got = call_runtime(RtFn::DictGet, rty, {cur, key});
+        store_slot(rs, got);
+        Inst jh;
+        jh.op = IrOp::Jump;
+        jh.target = join;
+        emit(std::move(jh));
+
+        switch_to(join);
+        ret = load_slot(rs, rty);
+    }
+    emit_return(ret, rty);
+    pop_frame();
+
+    TypePtr t0 = fn_param_ty(fn, 0);
+    VReg root = call_runtime(RtFn::DictNew, root_ty,
+                             {const_int(key_kind(t0)), const_int(own_kind(t0)),
+                              const_int(2), const_int(-1), const_int(-1)});
+    push_temp(root);
+    Inst fc;
+    fc.op = IrOp::FuncCode;
+    fc.imm = widx;
+    VReg code = def(t_int(), std::move(fc));
+    VReg closure = call_runtime(RtFn::ClosureNew, fty, {code, const_int(2)});
+    push_temp(closure);
+    VReg fcell = make_cell_value(fnv, fty);
+    rc_inc(fcell);
+    field_store(closure, 16, fcell);
+    VReg ccell = make_cell_value(root, root_ty);
+    rc_inc(ccell);
+    field_store(closure, 24, ccell);
+    return closure;
+}
+
 VReg Lowerer::lower_functools(const std::string& member, Call& c) {
     if (member == "reduce") {
         if (!c.keywords.empty()) {
@@ -991,8 +1311,26 @@ VReg Lowerer::lower_functools(const std::string& member, Call& c) {
         for (auto& a : c.args) expr(*a);
         return const_none();
     }
-    if (member == "partial" || member == "lru_cache") {
-        err(c.line, c.col, std::format("functools.{}() is not supported yet", member));
+    if (member == "partial") {
+        if (c.args.empty()) {
+            err(c.line, c.col, "functools.partial() expects at least 1 argument");
+            return const_none();
+        }
+        TypePtr ft = tc_.type_of(c.args[0].get());
+        auto plan = tc_.partial_plan(&c);
+        if (!plan || !ft || ft->kind != TyKind::Func || !ft->fn) {
+            err(c.line, c.col,
+                "functools.partial() requires a function with a known signature");
+            for (auto& a : c.args) expr(*a);
+            for (auto& kw : c.keywords) expr(*kw.value);
+            return const_none();
+        }
+        VReg fnv = expr(*c.args[0]);
+        return build_partial_wrapper(c, fnv, ft, *plan, c.line, c.col);
+    }
+    if (member == "lru_cache") {
+        // @lru_cache 在装饰器处理里合成包装闭包；当普通调用说明想拿返回值。
+        err(c.line, c.col, "functools.lru_cache() is only supported as a decorator");
         for (auto& a : c.args) expr(*a);
         for (auto& kw : c.keywords) expr(*kw.value);
         return const_none();

@@ -857,13 +857,159 @@ std::optional<TypePtr> TypeChecker::functools_call(const std::string& member, Ca
             // 保留被装饰函数原有的签名——正是 wraps 的语义。
             return t_unknown();
         }
-        if (member == "partial" || member == "lru_cache") {
+        if (member == "partial") {
+            std::vector<TypePtr> a;
+            for (auto& arg : c.args) {
+                if (arg->kind == ExprKind::Starred) {
+                    err(arg->line, arg->col,
+                        "functools.partial() does not support * expansion");
+                    expr(*static_cast<Starred&>(*arg).value);
+                    a.push_back(t_unknown());
+                    continue;
+                }
+                a.push_back(expr(*arg));
+            }
+            std::vector<TypePtr> kwtys;
+            for (auto& kw : c.keywords) kwtys.push_back(expr(*kw.value));
+            if (a.empty()) {
+                err(c.line, c.col, "functools.partial() expects at least 1 argument");
+                return t_unknown();
+            }
+            TypePtr ft = a[0];
+            if (is_unknown(ft)) return t_unknown();
+            if (!ft || ft->kind != TyKind::Func || !ft->fn) {
+                err(c.args[0]->line, c.args[0]->col,
+                    std::format("functools.partial() expects a function, got '{}'",
+                                type_name(ft)));
+                return t_unknown();
+            }
+            FuncInfoPtr fn = ft->fn;
+            if (fn->varargs || fn->kwargs) {
+                err(c.args[0]->line, c.args[0]->col,
+                    "functools.partial() does not support functions with *args/**kwargs");
+                return t_unknown();
+            }
+            int npos = static_cast<int>(fn->pos.size());
+            int nkw = static_cast<int>(fn->kwonly.size());
+            std::vector<bool> bound(static_cast<size_t>(npos + nkw), false);
+            std::vector<int> bound_params;
+            auto param_ty = [&](int idx) -> TypePtr {
+                if (idx < npos) return fn->pos[static_cast<size_t>(idx)].ty;
+                return fn->kwonly[static_cast<size_t>(idx - npos)].ty;
+            };
+            auto param_name = [&](int idx) -> const std::string& {
+                if (idx < npos) return fn->pos[static_cast<size_t>(idx)].name;
+                return fn->kwonly[static_cast<size_t>(idx - npos)].name;
+            };
+            auto bind_arg = [&](int idx, const TypePtr& at, const Expr& ae) {
+                if (bound[static_cast<size_t>(idx)]) {
+                    err(ae.line, ae.col,
+                        std::format("functools.partial() got multiple values for argument '{}'",
+                                    param_name(idx)));
+                    return;
+                }
+                bound[static_cast<size_t>(idx)] = true;
+                bound_params.push_back(idx);
+                TypePtr pt = param_ty(idx);
+                if (!is_unknown(pt) && !is_unknown(at) && !assignable(pt, at)) {
+                    err(ae.line, ae.col,
+                        std::format("functools.partial() argument '{}' expects '{}', got '{}'",
+                                    param_name(idx), type_name(pt), type_name(at)));
+                }
+            };
+            size_t extra_pos = a.size() - 1;
+            if (extra_pos > static_cast<size_t>(npos)) {
+                err(c.args[static_cast<size_t>(npos) + 1]->line,
+                    c.args[static_cast<size_t>(npos) + 1]->col,
+                    std::format("functools.partial() takes at most {} positional arguments",
+                                npos));
+                extra_pos = static_cast<size_t>(npos);
+            }
+            for (size_t i = 0; i < extra_pos; ++i)
+                bind_arg(static_cast<int>(i), a[i + 1], *c.args[i + 1]);
+            for (size_t k = 0; k < c.keywords.size(); ++k) {
+                const std::string& name = c.keywords[k].arg;
+                int idx = -1;
+                for (int i = 0; i < npos; ++i)
+                    if (fn->pos[static_cast<size_t>(i)].name == name) { idx = i; break; }
+                if (idx < 0)
+                    for (int i = 0; i < nkw; ++i)
+                        if (fn->kwonly[static_cast<size_t>(i)].name == name) {
+                            idx = npos + i;
+                            break;
+                        }
+                if (idx < 0) {
+                    err(c.keywords[k].value->line, c.keywords[k].value->col,
+                        std::format("functools.partial() got an unexpected keyword argument '{}'",
+                                    name));
+                    continue;
+                }
+                if (idx < static_cast<int>(fn->n_posonly)) {
+                    err(c.keywords[k].value->line, c.keywords[k].value->col,
+                        std::format("functools.partial() argument '{}' is positional-only", name));
+                    continue;
+                }
+                bind_arg(idx, kwtys[k], *c.keywords[k].value);
+            }
+            auto sig = std::make_shared<FuncInfo>();
+            sig->name = "partial";
+            sig->ret = fn->ret;
+            sig->ret_known = fn->ret_known;
+            auto plan = std::make_shared<PartialPlan>();
+            plan->bound_params = std::move(bound_params);
+            int remaining_posonly = 0;
+            for (int i = 0; i < npos; ++i) {
+                if (bound[static_cast<size_t>(i)]) continue;
+                sig->pos.push_back(fn->pos[static_cast<size_t>(i)]);
+                plan->remaining.push_back(i);
+                if (i < static_cast<int>(fn->n_posonly)) ++remaining_posonly;
+            }
+            for (int i = 0; i < nkw; ++i) {
+                if (bound[static_cast<size_t>(npos + i)]) continue;
+                sig->kwonly.push_back(fn->kwonly[static_cast<size_t>(i)]);
+                plan->remaining.push_back(npos + i);
+            }
+            sig->n_posonly = remaining_posonly;
+            plan->sig = sig;
+            partial_plans_[&c] = plan;
+            TypePtr out = new_ty(TyKind::Func);
+            out->fn = sig;
+            return out;
+        }
+        if (member == "lru_cache") {
+            // 装饰器参数：maxsize / typed。参数只求值；缓存策略在降级期决定。
+            if (c.args.size() > 1)
+                err(c.line, c.col,
+                    "functools.lru_cache() takes at most 1 positional argument");
             for (auto& arg : c.args) expr(*arg);
-            for (auto& kw : c.keywords) expr(*kw.value);
-            err(c.line, c.col, std::format("functools.{}() is not supported yet", member));
+            for (auto& kw : c.keywords) {
+                expr(*kw.value);
+                if (kw.arg != "maxsize" && kw.arg != "typed")
+                    err(kw.value->line, kw.value->col,
+                        std::format("functools.lru_cache() got an unexpected keyword argument '{}'",
+                                    kw.arg));
+            }
             return t_unknown();
         }
         return std::nullopt;
+}
+
+// @functools.lru_cache / @lru_cache(...) 在类型上是恒等装饰器：
+// 包装函数的签名与被装饰函数相同，调用点仍按原签名检查实参。
+bool TypeChecker::is_lru_cache_expr(const Expr* e) {
+    if (auto* call = dynamic_cast<const Call*>(e)) e = call->func.get();
+    if (auto* at = dynamic_cast<const Attribute*>(e)) {
+        auto* rn = dynamic_cast<const Name*>(at->value.get());
+        if (!rn || at->attr != "lru_cache") return false;
+        auto mod = lookup_module_alias(rn->id);
+        return mod && mod->builtin && mod->name == "functools";
+    }
+    if (auto* n = dynamic_cast<const Name*>(e)) {
+        auto* sym = lookup(n->id);
+        return sym && sym->ty && sym->ty->kind == TyKind::Func && sym->ty->fn &&
+               sym->ty->fn->name == "functools.lru_cache";
+    }
+    return false;
 }
 
 std::optional<TypePtr> TypeChecker::json_call(const std::string& member, Call& c) {

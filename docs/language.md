@@ -780,7 +780,12 @@ CPython 一致。
 - 内置 `functools`：`reduce(f, xs[, init])` 折叠（int/str 走整数跳板，
   float 要求 f 的形参是 float，或由调用点按元素类型回填）；`wraps(f)`
   只作装饰器用——py23 不建模 `__name__`/`__doc__`，这一层在装饰器链里
-  直接跳过。`partial` / `lru_cache` 需要运行期构造闭包，暂不支持。
+  直接跳过。`partial(f, *args, **kwargs)` 把前面的实参绑定进合成闭包，
+  返回签名缩减后的函数值（位置和关键字都能绑定；不支持 `*args`/`**kwargs`
+  函数）；`lru_cache` 作为装饰器使用，签名不变，按形参逐层建 dict 缓存，
+  未命中再调用原函数并写回。缓存无上限（`maxsize` 只求值不淘汰），键类型
+  限 `int`/`bool`/`float`/`str`（`unknown` 按机器字，和 dict 一致），
+  不支持方法和零参函数。
 - 内置 `datetime`：`date(y, m, d)` / `datetime(y, m, d[, h, mi, s])` 构造，
   `now()` / `today()` 取当前时间；`.year` / `.month` / `.day` / `.hour` /
   `.minute` / `.second` / `.weekday()` 读字段，`.isoformat()` /

@@ -26,16 +26,17 @@
 | 0.6–0.38 | 对象模型、异常值、match、C3 MRO、优化遍/O2、块内寄存器；逐版本记录见 [archive/roadmap-0.6-0.38.md](archive/roadmap-0.6-0.38.md) |
 | 0.39–0.80 | -O0/O1/O2、dunder 第二批、random/os/subprocess、差分 runner 自举、stdlib 批次（string/time/os/itertools/collections/json）、re 模块 v1/v2；详见 [CHANGELOG](../CHANGELOG.md) |
 | 0.96–0.97 | `collections.defaultdict`；`bytes` 收尾：`for c in b"..."`、printf 风格 `%`、`bytes` 标注与跨模块接口 |
+| 0.98 | `functools.partial` / `lru_cache`：编译期合成转发闭包与缓存包装 |
 | 许可证 | Apache-2.0（见 [LICENSE](../LICENSE) / [NOTICE](../NOTICE)） |
 
-## 当前状态（0.97）
+## 当前状态（0.98）
 
 流水线 `源码 → 词法 → AST → lambda 脱糖 → 类型检查 → IR → x86-64 汇编 → 可执行文件` 已打通。
 
 - **语言面**：标量、字符串、`bytes`（含迭代与 `%` 格式化）、列表/元组/字典/集合、切片读写、闭包/lambda/`*args`/`**kwargs`/装饰器、推导式、`with`、异常值（`args`/`raise ... from`/自定义异常）、类（字段/方法/C3 多继承/零参 `super()`/`@staticmethod`/`@classmethod`/`@property`/类属性）、`match/case`、`del`、复数字面量、f-string 格式说明、dunder 协议、`open`/`input`/`sys.stdin`。
 - **标准库**：`math`/`sys`/`asyncio`/`random`/`os`/`os.path`/`subprocess`/`time`/`itertools`/`collections`/`functools`/`json`/`string`/`re`/`datetime`/`pathlib`。
-- **验证**：89 个运行用例、37 个反例、9 个模块目录；差分 runner 已自举，默认 810 例。
-- **主要缺口**：`csv`；C FFI/BLAS；跨模块生成器/协程；asyncio 边角；`functools.partial`/`lru_cache`。
+- **验证**：90 个运行用例、37 个反例、9 个模块目录；差分 runner 已自举，默认 810 例。
+- **主要缺口**：`csv`；C FFI/BLAS；跨模块生成器/协程；asyncio 边角。
 
 ## 下一步
 
@@ -45,11 +46,10 @@
 
 - **自定义方法装饰器**：现在只认 `@staticmethod`/`@classmethod`/`@property`，其它装饰器的方法体不检查实参。
 
-### 2. `csv` 与 `functools` 收尾
+### 2. `csv` 收尾
 
-`datetime`/`pathlib` 已接上（0.89）。剩下的 `csv` 是纯文本解析，工作量小。
-`partial`/`lru_cache` 需要**运行期构造闭包**（编译器合成转发函数 + 填 env），
-要么补这个能力，要么先记着。
+`datetime`/`pathlib` 已接上（0.89），`functools.partial`/`lru_cache` 在 0.98 补上。
+剩下的 `csv` 是纯文本解析，工作量小。
 
 ### 3. C FFI + buffer + BLAS
 
@@ -92,7 +92,7 @@
 14. **生成器/协程异常逃出时槽位不精确释放**：异常从 resume longjmp 出去时只把帧标成 aborted，堆槽引用交给 GC 下一轮回收
 15. **跨模块生成器/协程不支持**：`.py23i` 里 `Generator[T]` / `Coroutine[T]` 降级成 unknown
 16. **asyncio 仍是最小集合**：自定义 `__aiter__`、fd 读写、asyncio 子进程、线程安全循环未支持；`wait_readable` 不是 CPython 标准 API；Future 回调同步执行；`gather` 结果按 unknown 容器处理；Task 只允许一个并发等待者；`await` 位置受限
-17. **stdlib 覆盖不足**：没有 `datetime`/`csv`/`pathlib`/`functools`/`logging`/`argparse`；`json`/`collections`/`itertools` 是子集；`re` 有后向引用/四向断言/原子组/内联标志，但缺 Unicode 属性类和 `findall` 的分组语义
+17. **stdlib 覆盖不足**：没有 `csv`/`logging`/`argparse`；`functools` 已覆盖 `reduce`/`wraps`/`partial`/`lru_cache`（`lru_cache` 无淘汰、键类型受限），`json`/`collections`/`itertools` 是子集；`re` 有后向引用/四向断言/原子组/内联标志，但缺 Unicode 属性类和 `findall` 的分组语义
 18. **没有 C FFI / 包管理 / 调试信息**：第三方库接入和科学计算受限；出错没有 traceback
 19. **`re` 是纯回溯 VM**：递归实现，深模式或灾难性模式会吃栈，只靠 2 亿步上限兜底；没有 DFA/JIT，`findall`/`split` 每次重新编译模式字符串
 20. **形参类型推断只做单态**：未标注形参由调用点回填，同一形参吃多种类型时退回 unknown（`print` 会按整数输出）；嵌套函数不参与重查。根治要运行时类型标签，代价是全量 tag 或 NaN-boxing（见「待决策」）

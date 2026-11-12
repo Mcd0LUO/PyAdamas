@@ -277,6 +277,12 @@ tuple 字面量；`desc` 是编译期按实参静态类型生成的一串 `i`/`f
 
 **函数装饰器**：`def f` 正常编译并把原始函数值绑定到 `f`，然后按逆序对每个装饰器发一次普通闭包调用 `d(f)`，结果重新绑定到 `f`；没有新增 IR 指令。
 
+**partial / lru_cache 的合成函数**：`partial` 在调用点 `mod_.add_func` 合成
+转发函数（形参是未绑定的剩余签名），闭包 cell 依次存 f 和绑定实参；`lru_cache`
+在装饰器降级时合成缓存包装（闭包 cell 存原函数与根 dict），形参逐层套
+dict 查找，命中直接返回、未命中调用原函数并写回。两者都复用普通 IRFunction
+的帧/RC 规则，没有新增 IR 指令。
+
 **异常展开**：`try` / `with` / `finally` 各自发射 `handler_push` → `setjmp` → `branch`；landing pad 先 `handler_leave`（弹记录 + `rc_cleanup` 到记录水位），再运行 `except` 匹配 / `__exit__` / finalbody。`return` / `break` / `continue` 不经过 longjmp，而是由统一 cleanup 栈直接发射 `handler_discard`、`__exit__` 和 finalbody，因此正常退出路径仍然精确释放槽位。
 
 **模块**：模块全局带链接符号 `py23$m$g$x`；外部模块全局是 `external = true` 的 `IRGlobal`，不分配存储、不进根表、出口也不释放。`import.module` 只带模块下标，符号命名由后端按模块名推导。模块顶层函数成为导出符号 `py23$m$init`，返回 `None` 且不执行 `GcShutdown` / `RcShutdown`。

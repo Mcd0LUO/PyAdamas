@@ -4,6 +4,35 @@
 
 早期阶段没有逐条留痕，按阶段归纳；0.4 之后逐条记录。
 
+## [0.98] - 2026-11-12
+
+`functools.partial` 与 `lru_cache`。
+
+### 新增
+
+- **`functools.partial(f, *args, **kwargs)`**：类型检查按 f 的签名绑定前若干
+  实参，返回签名缩减后的函数值；降级期合成转发函数，闭包 cell 存 f 与绑定值。
+  支持位置/关键字绑定（关键字不能重复、不能绑 positional-only）；不支持
+  `*args`/`**kwargs` 函数和方法值。
+- **`functools.lru_cache`**：`@lru_cache` / `@lru_cache(maxsize=...)` /
+  `from functools import lru_cache`；降级期合成缓存包装，签名不变。按形参
+  逐层建 dict 缓存，命中直接返回，未命中调用原函数并写回。缓存无上限
+  （`maxsize` 只求值不淘汰），键类型限 `int`/`bool`/`float`/`str`；不支持
+  方法、零参函数和 `*args`/`**kwargs`。
+- **类型侧恒等装饰器**：`lru_cache` 不改变被装饰函数的静态签名，调用点仍按
+  原签名检查实参。
+
+### 测试
+
+- `tests/run/90_functools_final.py`：partial 的位置/关键字/全绑定/浮点/
+  仅关键字参数，lru_cache 的递归计数、多参数、str 键、默认参数。
+- 用例数：运行 89→90。
+
+### 文档
+
+- `language.md` / `compatibility.md` / `ir.md` / `roadmap.md` 同步 partial /
+  lru_cache 的语义、限制与合成闭包实现。
+
 ## [0.97] - 2026-11-12
 
 `bytes` 收尾：迭代、`%` 格式化、跨模块类型。

@@ -479,6 +479,8 @@ void Lowerer::lower_funcdef(FunctionDef& f) {
     // def 执行时才绑定名字。先绑定再填 env：自递归闭包要靠 cell 里
     // 已经写好的闭包指针找到自己（这会形成环，环目前靠泄漏处理）。
     bind_name_value(f.name, fv, fty);
+    VReg cur_func = fv;
+    TypePtr cur_fty = fty;
 
     if (meta && !meta->env.empty()) {
         for (size_t i = 0; i < meta->env.size(); ++i) {
@@ -501,6 +503,20 @@ void Lowerer::lower_funcdef(FunctionDef& f) {
         // 这一层没有可观察效果，直接跳过——否则它要求一个运行期的
         // identity 装饰器，而那是当前架构里没有的东西。
         if (is_wraps_decorator(it->get())) continue;
+        if (is_lru_cache_decorator(it->get())) {
+            // @lru_cache / @lru_cache(maxsize=...)：参数只求值，包装闭包
+            // 在降级期合成，签名与被装饰函数完全相同。
+            int line = (*it)->line;
+            int col = (*it)->col;
+            if (auto* lc = dynamic_cast<Call*>(it->get())) {
+                for (auto& a : lc->args) expr(*a);
+                for (auto& kw : lc->keywords) expr(*kw.value);
+            }
+            VReg wrapped = build_lru_wrapper(f.name, cur_func, cur_fty, line, col);
+            cur_func = wrapped;
+            bind_name_value(f.name, cur_func, cur_fty);
+            continue;
+        }
         ExprPtr dec = std::move(*it);
         int line = dec->line;
         int col = dec->col;
@@ -527,6 +543,8 @@ void Lowerer::lower_funcdef(FunctionDef& f) {
         in.args = std::move(dargs);
         VReg dv = def_heap(rty, std::move(in));
         bind_name_value(f.name, dv, rty);
+        cur_func = dv;
+        cur_fty = rty;
     }
 }
 
@@ -545,6 +563,26 @@ bool Lowerer::is_wraps_decorator(const Expr* e) const {
         auto it = native_aliases_.find(fn->id);
         return it != native_aliases_.end() && it->second.module == "functools" &&
                it->second.member == "wraps";
+    }
+    return false;
+}
+
+// @functools.lru_cache / @lru_cache / @lru_cache(...)：
+// 装饰器本身不是运行期调用，包装闭包由 build_lru_wrapper 合成。
+bool Lowerer::is_lru_cache_decorator(const Expr* e) const {
+    const Expr* target = e;
+    if (auto* call = dynamic_cast<const Call*>(e)) target = call->func.get();
+    if (auto* at = dynamic_cast<const Attribute*>(target)) {
+        if (at->attr != "lru_cache") return false;
+        auto* rn = dynamic_cast<const Name*>(at->value.get());
+        if (!rn) return false;
+        auto mod = resolve_module_alias(rn->id);
+        return mod && mod->builtin && mod->name == "functools";
+    }
+    if (auto* fn = dynamic_cast<const Name*>(target)) {
+        auto it = native_aliases_.find(fn->id);
+        return it != native_aliases_.end() && it->second.module == "functools" &&
+               it->second.member == "lru_cache";
     }
     return false;
 }

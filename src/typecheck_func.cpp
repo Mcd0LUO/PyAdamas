@@ -106,6 +106,8 @@ void TypeChecker::funcdef_impl(FunctionDef& f, const ClassInfoPtr& owner) {
             cur->fn = info;
             bool known = true;
             for (auto it = f.decorators.rbegin(); it != f.decorators.rend(); ++it) {
+                // lru_cache 包装后签名与被装饰函数相同，类型上按恒等处理。
+                if (is_lru_cache_expr(it->get())) continue;
                 TypePtr dt = type_of(it->get());
                 if (dt && dt->kind == TyKind::Func && dt->fn && dt->fn->ret) {
                     cur = dt->fn->ret;

@@ -44,7 +44,7 @@ py23 不追求兼容 CPython：语义是按静态类型的需要重新定的。�
 | `string` | 常量 + `capwords()`，随编译器分发 `stdlib/string.py` | 完整 string | 子集；`capwords` 用 `split()` + `capitalize()` |
 | `itertools` | `chain`/`repeat`/`islice`，按实参静态特化，返回 list | 完整 itertools | 立即求值，没有惰性迭代器；`islice` 只接受 `(x, stop)` |
 | `collections` | `Counter`/`most_common`、`OrderedDict()`（dict 本来就保序）、`deque([iterable[, maxlen]])` 的 append/appendleft/pop/popleft/rotate/clear/extend/extendleft + `len`/下标/迭代、`defaultdict([factory[, initial]])`（工厂限内置零参类型） | 完整 collections | 没有 `namedtuple`；`Counter` 返回普通 dict；`OrderedDict` 只支持空构造；`defaultdict` 的 `default_factory` 属性不可读，静态类型仍是普通 dict，工厂只支持 `int`/`float`/`bool`/`str`/`list`/`dict`/`set`/`tuple`；deque 只在元素明确是堆类型时才增减引用（字符串元素可能泄漏，不会崩） |
-| `functools` | `reduce`/`wraps` | 完整 functools | `partial`/`lru_cache` 需要运行期构造闭包，未支持；`wraps` 只作装饰器用（不建模 `__name__`/`__doc__`，装饰器链里整层跳过）；`reduce` 的 float 元素要求 f 形参是 float |
+| `functools` | `reduce`/`wraps`/`partial`/`lru_cache`（装饰器） | 完整 functools | `partial` 不能作用于 `*args`/`**kwargs` 函数或方法值；`lru_cache` 只支持普通函数（不支持方法、零参函数），键类型限 `int`/`bool`/`float`/`str`，缓存无上限并忽略 `maxsize`；`wraps` 只作装饰器用（不建模 `__name__`/`__doc__`，装饰器链里整层跳过）；`reduce` 的 float 元素要求 f 形参是 float |
 | `datetime` | `date`/`datetime` 构造、`now`/`today`、字段、`isoformat`/`strftime`/`weekday` | 完整 datetime | 没有 `timedelta`、时区、`fromtimestamp`；`datetime.datetime.now()` 这种链式类方法不支持，用 `datetime.now()` |
 | `pathlib` | `Path` 构造、`/` 运算符、`str(p)`、`name`/`stem`/`suffix`/`parent`、`exists`/`is_file`/`is_dir`、`read_text`/`write_text`、`iterdir`/`glob`/`mkdir` | 完整 pathlib | 没有 `unlink`/`rmdir`/`with_suffix`/`parts`；`glob` 支持 `*`/`?`/`**`，不支持字符类 `[...]`；`mkdir` 只收关键字参数（同 CPython） |
 | `slice` / `vars` / `dir` | `slice()` 只在下标位置（脱糖折成切片语法）；`vars(obj)` 返回字段 dict（value 统一 unknown）；`dir()` 列成员名 | 完整语义 | 没有运行期 slice 对象；`vars()` 无参（locals）不支持；`dir(模块)` 不支持 |
@@ -88,7 +88,7 @@ py23 不追求兼容 CPython：语义是按静态类型的需要重新定的。�
 |---|---|---|---|
 | 正例 | `ctest --preset dev` 里 `tests/*.py` | 11 个文件 | 前端退回保守 |
 | 反例 | `ctest --preset dev` 里 `tests/fail/*.py` | 37 个文件 | 检查器为了过测而放水 |
-| 运行 | `ctest --preset dev` 里 `tests/run/*.py` | 89 个文件 | 后端烂掉没人知道 |
+| 运行 | `ctest --preset dev` 里 `tests/run/*.py` | 90 个文件 | 后端烂掉没人知道 |
 | 模块 | `ctest --preset dev` 里 `tests/modules/*/` | 9 个目录 | 分模块编译/链接、惰性初始化、缓存失效 |
 | 未建模 | `ctest --preset dev` 里 `tests/unsupported/*.py` | 1 个文件 | 「标了没建模、实际却悄悄编译过去」 |
 | 内存 | 16MB `RLIMIT_AS` 下跑压力程序 | 拼接 / 对象 / 闭包 / 容器 / 切片 / 删除 / 推导式 / 变长实参 / `with` / 装饰器 / 异常展开 / `yield from` / 异步推导式 / 环 / unknown 泄漏 | 引用计数或 GC 漏插桩、重复释放、误回收 |

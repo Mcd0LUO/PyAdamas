@@ -997,6 +997,16 @@ struct Scope {
     const FunctionDef* fn_owner = nullptr;
 };
 
+// functools.partial 的绑定结果。sig 是返回的函数签名；bound_params 按
+// 实参求值顺序记录被绑定形参的下标（pos 在前，kwonly 从 pos.size() 起），
+// remaining 是仍暴露给调用方的原始形参下标，顺序与 sig 的形参一致。
+struct PartialPlan {
+    FuncInfoPtr sig;
+    std::vector<int> bound_params;
+    std::vector<int> remaining;
+};
+
+
 class TypeChecker {
 public:
     explicit TypeChecker(std::string file) : file_(std::move(file)) {}
@@ -1031,6 +1041,12 @@ public:
     FuncInfoPtr func_info(const Stmt* fn) const {
         auto it = func_infos_.find(fn);
         return it == func_infos_.end() ? nullptr : it->second;
+    }
+
+    // functools.partial 的绑定计划；lower 用它生成转发函数。
+    std::shared_ptr<PartialPlan> partial_plan(const Call* c) const {
+        auto it = partial_plans_.find(c);
+        return it == partial_plans_.end() ? nullptr : it->second;
     }
 
     // 类表：名字 → 编译期布局。lower 靠它把属性访问变成固定偏移。
@@ -1093,6 +1109,7 @@ private:
     bool dynamic_globals_ = false;
     std::unordered_set<std::string> globals_aliases_;
     std::unordered_map<const Expr*, TypePtr> expr_types_;
+    std::unordered_map<const Call*, std::shared_ptr<PartialPlan>> partial_plans_;
     std::unordered_map<const Stmt*, Scope*> func_scopes_;
     std::unordered_map<const Stmt*, FuncInfoPtr> func_infos_;
     // 检查过的函数定义（含方法），供形参回填后的重查用。
@@ -1314,6 +1331,8 @@ private:
     std::optional<TypePtr> itertools_call(const std::string& member, Call& c);
     std::optional<TypePtr> collections_call(const std::string& member, Call& c);
     std::optional<TypePtr> functools_call(const std::string& member, Call& c);
+    // @functools.lru_cache / @lru_cache(...)：类型上按恒等装饰器处理。
+    bool is_lru_cache_expr(const Expr* e);
     // json.loads 的目标类型由第二个「样例值」的静态类型给出。
     std::optional<TypePtr> json_call(const std::string& member, Call& c);
 

@@ -985,6 +985,13 @@ private:
     void lower_funcdef(FunctionDef& f);
     // @functools.wraps(...)：没有运行期语义，装饰器链里整层跳过。
     bool is_wraps_decorator(const Expr* e) const;
+    // @functools.lru_cache / @lru_cache(...)：降级期合成带缓存的包装闭包。
+    bool is_lru_cache_decorator(const Expr* e) const;
+    // 把值包成单元素 cell（list[T]），用于手工构造闭包环境。
+    VReg make_cell_value(VReg v, TypePtr T);
+    VReg build_partial_wrapper(Call& c, VReg fn, TypePtr fty, const PartialPlan& plan,
+                               int line, int col);
+    VReg build_lru_wrapper(const std::string& base, VReg fn, TypePtr fty, int line, int col);
     void lower_assert(Assert& a);
     void lower_delete(Delete& d);
     void lower_match(Match& m);
