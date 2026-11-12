@@ -4,6 +4,31 @@
 
 早期阶段没有逐条留痕，按阶段归纳；0.4 之后逐条记录。
 
+## [0.90] - 2026-11-12
+
+`random` 补齐常用函数。
+
+### 新增
+
+- **`random.randrange([start, ]stop[, step])`**：1~3 个位置参数，负步长按方向取。
+- **`random.getrandbits(k)`**：`0..2^k-1` 的整数（k > 62 截到 62，避免溢出）。
+- **`random.gauss(mu, sigma)`**：Box-Muller。
+- **`random.expovariate(lambd)`**：反变换采样。
+- **`random.triangular(low, high[, mode])`**：mode 缺省取中点。
+- **`random.sample(seq, k)`**：无放回（复制后部分洗牌），k 超过长度报 ValueError。
+- **`random.choices(seq, k=n)`**：有放回，`k` 是关键字参数（和 CPython 一致），缺省 1。
+
+### 说明
+
+- 序列不保证与 CPython 一致：MT19937 的 `random()` 序列相同，但 `gauss` /
+  `expovariate` 用的是不同算法（CPython 的 gauss 会缓存成对的第二个值）。
+- 这几个函数的运行时入口都带一个 rng 首参，模块级调用传 0 走全局 rng。
+
+### 测试
+
+- `tests/run/80_random_extra.py`：范围 / 均值 / 去重性质，与 CPython 输出逐行一致。
+- 用例数：运行 79→80。
+
 ## [0.89] - 2026-11-12
 
 `datetime` 与 `pathlib`。

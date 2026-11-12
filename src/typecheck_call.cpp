@@ -180,9 +180,8 @@ TypePtr TypeChecker::call(Call& c) {
     }
 
 TypePtr TypeChecker::check_args(const FuncInfoPtr& fn, Call& c) {
-        if (fn && (fn->name == "random.choice" || fn->name == "random.shuffle")) {
-            std::string m = fn->name == "random.choice" ? "choice" : "shuffle";
-            if (auto r = random_call(m, c)) return *r;
+        if (fn && fn->name.starts_with("random.")) {
+            if (auto r = random_call(fn->name.substr(7), c)) return *r;
         }
         if (fn && fn->name.starts_with("itertools.")) {
             if (auto r = itertools_call(fn->name.substr(10), c)) return *r;
@@ -583,6 +582,48 @@ std::optional<TypePtr> TypeChecker::asyncio_call(const std::string& member, Call
 
 
 std::optional<TypePtr> TypeChecker::random_call(const std::string& member, Call& c) {
+        if (member == "sample" || member == "choices") {
+            std::vector<TypePtr> a;
+            for (auto& arg : c.args) a.push_back(expr(*arg));
+            TypePtr kt = nullptr;
+            for (auto& kw : c.keywords) {
+                if (kw.arg == "k") {
+                    kt = expr(*kw.value);
+                } else {
+                    err(kw.value->line, kw.value->col,
+                        std::format("random.{}() got an unexpected keyword argument '{}'",
+                                    member, kw.arg));
+                }
+            }
+            // sample 用位置参数 (seq, k)；choices 跟 CPython 一样用 k= 关键字。
+            size_t want = member == "sample" ? 2 : 1;
+            if (a.size() != want) {
+                err(c.line, c.col,
+                    std::format("random.{}() takes {} positional argument{}, got {}", member, want,
+                                want == 1 ? "" : "s", a.size()));
+                return mk_list(t_unknown());
+            }
+            TypePtr kty = member == "sample" ? (a.size() > 1 ? a[1] : nullptr) : kt;
+            if (kty && !is_unknown(kty) && kty->kind != TyKind::Int)
+                err(c.line, c.col, std::format("random.{}() size must be an int", member));
+            TypePtr et = t_unknown();
+            TypePtr st = a[0];
+            if (st && st->kind == TyKind::List) {
+                if (!st->sub.empty()) et = st->sub[0];
+            } else if (st && st->kind == TyKind::Tuple) {
+                if (!st->sub.empty()) {
+                    et = st->sub[0];
+                    for (size_t i = 1; i < st->sub.size(); ++i) et = join(et, st->sub[i]);
+                }
+            } else if (st && st->kind == TyKind::Str) {
+                et = t_str();
+            } else if (st && st->kind != TyKind::Unknown) {
+                err(c.args[0]->line, c.args[0]->col,
+                    std::format("random.{}() expects a sequence, got '{}'", member,
+                                type_name(st)));
+            }
+            return mk_list(et);
+        }
         if (member != "choice" && member != "shuffle") return std::nullopt;
         if (!c.keywords.empty()) {
             err(c.line, c.col,

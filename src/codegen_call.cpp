@@ -964,6 +964,37 @@ void AsmGen::gen_call_rt(const Inst& in) {
             case RtFn::RandGShuffle:
                 emit2("movq", src_op(in.args[0]), "%rdi");
                 break;
+            case RtFn::RandRange:
+                emit2("movq", src_op(in.args[0]), "%rdi");
+                emit2("movq", src_op(in.args[1]), "%rsi");
+                emit2("movq", src_op(in.args[2]), "%rdx");
+                emit2("movq", src_op(in.args[3]), "%rcx");
+                break;
+            case RtFn::RandGetrandbits:
+                emit2("movq", src_op(in.args[0]), "%rdi");
+                emit2("movq", src_op(in.args[1]), "%rsi");
+                break;
+            case RtFn::RandGauss:
+                emit2("movq", src_op(in.args[0]), "%rdi");
+                emit2("movsd", src_op(in.args[1]), "%xmm0");
+                emit2("movsd", src_op(in.args[2]), "%xmm1");
+                break;
+            case RtFn::RandExpovariate:
+                emit2("movq", src_op(in.args[0]), "%rdi");
+                emit2("movsd", src_op(in.args[1]), "%xmm0");
+                break;
+            case RtFn::RandTriangular:
+                emit2("movq", src_op(in.args[0]), "%rdi");
+                emit2("movsd", src_op(in.args[1]), "%xmm0");
+                emit2("movsd", src_op(in.args[2]), "%xmm1");
+                emit2("movsd", src_op(in.args[3]), "%xmm2");
+                break;
+            case RtFn::RandSample:
+            case RtFn::RandChoices:
+                emit2("movq", src_op(in.args[0]), "%rdi");
+                emit2("movq", src_op(in.args[1]), "%rsi");
+                emit2("movq", src_op(in.args[2]), "%rdx");
+                break;
             case RtFn::RandGUniform:
                 emit2("movsd", src_op(in.args[0]), "%xmm0");
                 emit2("movsd", src_op(in.args[1]), "%xmm1");

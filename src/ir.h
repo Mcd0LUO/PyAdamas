@@ -416,6 +416,13 @@ enum class RtFn : uint16_t {
     PathIsDir,             // (path*) -> i64
     PathReadText,          // (path*) -> str*
     PathWriteText,         // (path*, str*) -> i64
+    RandRange,             // (rng*, a, b, step) -> i64
+    RandGetrandbits,       // (rng*, k) -> i64
+    RandGauss,             // (rng*, mu, sigma) -> f64
+    RandExpovariate,       // (rng*, lambd) -> f64
+    RandTriangular,        // (rng*, low, high, mode) -> f64
+    RandSample,            // (rng*, list*, k) -> list*
+    RandChoices,           // (rng*, list*, k) -> list*
 };
 
 inline const char* rt_name(RtFn f) {
@@ -810,6 +817,13 @@ inline const char* rt_name(RtFn f) {
         case RtFn::PathIsDir: return "py23_path_is_dir";
         case RtFn::PathReadText: return "py23_path_read_text";
         case RtFn::PathWriteText: return "py23_path_write_text";
+        case RtFn::RandRange: return "py23_random_randrange";
+        case RtFn::RandGetrandbits: return "py23_random_getrandbits";
+        case RtFn::RandGauss: return "py23_random_gauss";
+        case RtFn::RandExpovariate: return "py23_random_expovariate";
+        case RtFn::RandTriangular: return "py23_random_triangular";
+        case RtFn::RandSample: return "py23_random_sample";
+        case RtFn::RandChoices: return "py23_random_choices";
     }
     return "?";
 }

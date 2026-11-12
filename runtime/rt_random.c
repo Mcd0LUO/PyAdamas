@@ -207,3 +207,98 @@ double py23_random_guniform(double a, double b) {
 }
 
 void py23_random_gshuffle(Py23List* seq) { py23_random_shuffle(global_rng(), seq); }
+
+/* ── 补充的分布与采样 ─────────────────────────────────────────
+   统一用「r 为 NULL 就走全局 rng」的约定：模块级函数传 0，实例方法传实例。 */
+
+static Py23Random* rng_of(Py23Random* r) { return r ? r : global_rng(); }
+
+/* randrange(a, b, step)：step 非零，方向由调用点保证。 */
+int64_t py23_random_randrange(Py23Random* r, int64_t a, int64_t b, int64_t step) {
+    Py23Random* g = rng_of(r);
+    int64_t n;
+    if (step > 0) {
+        if (b <= a) py23_raise_c("ValueError", "empty range for randrange()");
+        n = (b - a + step - 1) / step;
+    } else {
+        if (b >= a) py23_raise_c("ValueError", "empty range for randrange()");
+        n = (a - b + (-step) - 1) / (-step);
+    }
+    int64_t k = (int64_t)(mt_next_double(g) * (double)n);
+    if (k >= n) k = n - 1;
+    return a + step * k;
+}
+
+int64_t py23_random_getrandbits(Py23Random* r, int64_t k) {
+    if (k <= 0) py23_raise_c("ValueError", "number of bits must be greater than zero");
+    if (k > 62) k = 62;
+    int64_t v = (int64_t)(mt_next_double(rng_of(r)) * (double)((uint64_t)1 << k));
+    return v;
+}
+
+double py23_random_gauss(Py23Random* r, double mu, double sigma) {
+    Py23Random* g = rng_of(r);
+    double u1 = mt_next_double(g);
+    double u2 = mt_next_double(g);
+    if (u1 < 1e-300) u1 = 1e-300;
+    /* Box-Muller；2*pi 直接写常量，免得依赖 M_PI 的宏开关。 */
+    double z = sqrt(-2.0 * log(u1)) * cos(6.283185307179586 * u2);
+    return mu + sigma * z;
+}
+
+double py23_random_expovariate(Py23Random* r, double lambd) {
+    if (lambd <= 0) py23_raise_c("ValueError", "lambda must be positive");
+    double u = mt_next_double(rng_of(r));
+    if (u <= 0) u = 1e-300;
+    return -log(u) / lambd;
+}
+
+double py23_random_triangular(Py23Random* r, double low, double high, double mode) {
+    if (high < low) py23_raise_c("ValueError", "high must be >= low");
+    if (mode < low || mode > high) py23_raise_c("ValueError", "mode must be between low and high");
+    double u = mt_next_double(rng_of(r));
+    double c = (mode - low) / (high - low);
+    if (u > c) {
+        u = 1.0 - u;
+        c = 1.0 - c;
+        double t = low;
+        low = high;
+        high = t;
+    }
+    return low + (high - low) * sqrt(u * c);
+}
+
+/* 无放回采样：复制一份再部分洗牌，取前 k 个。 */
+Py23List* py23_random_sample(Py23Random* r, Py23List* seq, int64_t k) {
+    int64_t n = seq ? seq->len : 0;
+    if (k < 0) py23_raise_c("ValueError", "sample size must be non-negative");
+    if (k > n) py23_raise_c("ValueError", "sample larger than population");
+    Py23Random* g = rng_of(r);
+    Py23List* pool = py23_list_copy(seq);
+    for (int64_t i = 0; i < k; ++i) {
+        int64_t j = i + (int64_t)(mt_next_double(g) * (double)(n - i));
+        if (j >= n) j = n - 1;
+        int64_t t = pool->data[i];
+        pool->data[i] = pool->data[j];
+        pool->data[j] = t;
+    }
+    pool->len = k;
+    return pool;
+}
+
+/* 有放回采样。 */
+Py23List* py23_random_choices(Py23Random* r, Py23List* seq, int64_t k) {
+    int64_t n = seq ? seq->len : 0;
+    if (n == 0) py23_raise_c("IndexError", "Cannot choose from an empty sequence");
+    if (k < 0) py23_raise_c("ValueError", "number of choices must be non-negative");
+    Py23Random* g = rng_of(r);
+    Py23List* out = py23_list_new(k, seq->elem_kind);
+    for (int64_t i = 0; i < k; ++i) {
+        int64_t j = (int64_t)(mt_next_double(g) * (double)n);
+        if (j >= n) j = n - 1;
+        int64_t v = seq->data[j];
+        if (seq->elem_kind == 1 && v) py23_rc_inc((void*)v);
+        py23_list_append(out, v);
+    }
+    return out;
+}

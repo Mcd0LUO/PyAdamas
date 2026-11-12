@@ -914,6 +914,56 @@ py23::ModuleInfoPtr builtin_module(const std::string& name) {
         func("random", {}, py23::t_float());
         func("randint", {py23::t_int(), py23::t_int()}, py23::t_int());
         func("uniform", {py23::t_float(), py23::t_float()}, py23::t_float());
+        func("getrandbits", {py23::t_int()}, py23::t_int());
+        func("gauss", {py23::t_float(), py23::t_float()}, py23::t_float());
+        func("expovariate", {py23::t_float()}, py23::t_float());
+        // triangular：CPython 里三个参数都有默认值，这里只把后两个标成可选，
+        // 实际取值由降级阶段按实参个数决定（mode 缺省取中点）。
+        {
+            auto f = std::make_shared<py23::FuncInfo>();
+            f->name = "random.triangular";
+            const char* names[] = {"low", "high", "mode"};
+            for (int i = 0; i < 3; ++i) {
+                py23::Param p;
+                p.name = names[i];
+                p.ty = py23::t_float();
+                if (i > 0) {
+                    p.has_default = true;
+                    p.default_lit = lv_float(0.0);
+                }
+                f->pos.push_back(std::move(p));
+            }
+            f->ret = py23::t_float();
+            f->ret_known = true;
+            func_with("triangular", f);
+        }
+        // randrange：1~3 个位置参数，个数和方向在降级阶段检查
+        {
+            auto f = std::make_shared<py23::FuncInfo>();
+            f->name = "random.randrange";
+            f->varargs = true;
+            f->vararg_name = "args";
+            f->vararg_ty = py23::t_int();
+            f->ret = py23::t_int();
+            f->ret_known = true;
+            func_with("randrange", f);
+        }
+        // sample / choices：返回 list[元素类型]，类型在 typecheck 里特化
+        for (auto& n : {"sample", "choices"}) {
+            auto f = std::make_shared<py23::FuncInfo>();
+            f->name = std::string("random.") + n;
+            py23::Param p;
+            p.name = "seq";
+            p.ty = py23::t_unknown();
+            f->pos.push_back(std::move(p));
+            py23::Param q;
+            q.name = "k";
+            q.ty = py23::t_int();
+            f->pos.push_back(std::move(q));
+            f->ret = py23::t_unknown();
+            f->ret_known = false;
+            func_with(n, f);
+        }
         // choice/shuffle 的返回类型按实参在 typecheck 里特判（random_call）；
         // 这两个 FuncInfo 用带模块前缀的名字，from-import 调用也能识别。
         {

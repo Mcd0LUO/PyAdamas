@@ -648,6 +648,14 @@ int64_t py23_random_grandint(int64_t a, int64_t b);
 int64_t py23_random_gchoice(Py23List* seq);
 double py23_random_guniform(double a, double b);
 void py23_random_gshuffle(Py23List* seq);
+/* 补充的分布与采样：r 为 NULL 表示走全局 rng。 */
+int64_t py23_random_randrange(Py23Random* r, int64_t a, int64_t b, int64_t step);
+int64_t py23_random_getrandbits(Py23Random* r, int64_t k);
+double py23_random_gauss(Py23Random* r, double mu, double sigma);
+double py23_random_expovariate(Py23Random* r, double lambd);
+double py23_random_triangular(Py23Random* r, double low, double high, double mode);
+Py23List* py23_random_sample(Py23Random* r, Py23List* seq, int64_t k);
+Py23List* py23_random_choices(Py23Random* r, Py23List* seq, int64_t k);
 
 /* ── os：目录与路径 ─────────────────────────────────────────────── */
 void py23_os_mkdir(Py23Str* path);

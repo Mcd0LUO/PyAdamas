@@ -173,6 +173,13 @@ std::optional<RtFn> Lowerer::native_fn(const std::string& module, const std::str
         if (member == "choice") return RtFn::RandGChoice;
         if (member == "shuffle") return RtFn::RandGShuffle;
         if (member == "Random") return RtFn::RandNew;
+        if (member == "randrange") return RtFn::RandRange;
+        if (member == "getrandbits") return RtFn::RandGetrandbits;
+        if (member == "gauss") return RtFn::RandGauss;
+        if (member == "expovariate") return RtFn::RandExpovariate;
+        if (member == "triangular") return RtFn::RandTriangular;
+        if (member == "sample") return RtFn::RandSample;
+        if (member == "choices") return RtFn::RandChoices;
     } else if (module == "os") {
         if (member == "mkdir") return RtFn::OsMkdir;
         if (member == "rmdir") return RtFn::OsRmdir;
@@ -299,6 +306,142 @@ bool Lowerer::builtin_value(const std::string& module, const std::string& member
     return false;
 }
 
+// random.randrange / getrandbits / gauss / expovariate / triangular /
+// sample / choices：这几个运行时函数带一个 rng 首参（模块级传 0，表示用
+// 全局 rng），签名里表达不了，所以参数在这里手工装配。
+VReg Lowerer::lower_random_extra(const std::string& member, Call& c) {
+    // choices 的 k 是关键字参数，其它几个不收关键字。
+    if (!c.keywords.empty() && member != "choices") {
+        err(c.line, c.col, std::format("random.{}() does not take keyword arguments", member));
+    }
+    auto iarg = [&](size_t i) {
+        return coerce(expr(*c.args[i]), tc_.type_of(c.args[i].get()), t_int());
+    };
+    auto farg = [&](size_t i) {
+        return coerce(expr(*c.args[i]), tc_.type_of(c.args[i].get()), t_float());
+    };
+    if (member == "randrange") {
+        if (c.args.size() < 1 || c.args.size() > 3) {
+            err(c.line, c.col,
+                std::format("random.randrange() takes 1 to 3 arguments, got {}", c.args.size()));
+            return const_none();
+        }
+        VReg a = const_int(0);
+        VReg b = const_int(0);
+        VReg step = const_int(1);
+        if (c.args.size() == 1) {
+            b = iarg(0);
+        } else {
+            a = iarg(0);
+            b = iarg(1);
+            if (c.args.size() == 3) step = iarg(2);
+        }
+        return call_runtime(RtFn::RandRange, t_int(), {const_int(0), a, b, step});
+    }
+    if (member == "getrandbits") {
+        if (c.args.size() != 1) {
+            err(c.line, c.col, "random.getrandbits() takes exactly one argument");
+            return const_none();
+        }
+        VReg k = iarg(0);
+        return call_runtime(RtFn::RandGetrandbits, t_int(), {const_int(0), k});
+    }
+    if (member == "gauss") {
+        if (c.args.size() != 2) {
+            err(c.line, c.col, "random.gauss() takes exactly two arguments");
+            return const_none();
+        }
+        VReg mu = farg(0);
+        VReg sigma = farg(1);
+        return call_runtime(RtFn::RandGauss, t_float(), {const_int(0), mu, sigma});
+    }
+    if (member == "expovariate") {
+        if (c.args.size() != 1) {
+            err(c.line, c.col, "random.expovariate() takes exactly one argument");
+            return const_none();
+        }
+        VReg lambd = farg(0);
+        return call_runtime(RtFn::RandExpovariate, t_float(), {const_int(0), lambd});
+    }
+    if (member == "triangular") {
+        if (c.args.size() < 2 || c.args.size() > 3) {
+            err(c.line, c.col,
+                std::format("random.triangular() takes 2 or 3 arguments, got {}", c.args.size()));
+            return const_none();
+        }
+        VReg lo = farg(0);
+        VReg hi = farg(1);
+        VReg mode;
+        if (c.args.size() == 3) {
+            mode = farg(2);
+        } else {
+            // 没给 mode 时取中点 (low + high) / 2
+            Inst add;
+            add.op = IrOp::Bin;
+            add.bop = BinKind::Add;
+            add.a = lo;
+            add.b = hi;
+            VReg sum = def(t_float(), std::move(add));
+            Inst div;
+            div.op = IrOp::Bin;
+            div.bop = BinKind::Div;
+            div.a = sum;
+            div.b = const_float(2.0);
+            mode = def(t_float(), std::move(div));
+        }
+        return call_runtime(RtFn::RandTriangular, t_float(), {const_int(0), lo, hi, mode});
+    }
+    if (member == "sample" || member == "choices") {
+        // sample 用位置参数 (seq, k)；choices 跟 CPython 一样用 k= 关键字。
+        size_t want = member == "sample" ? 2 : 1;
+        if (c.args.size() != want) {
+            err(c.line, c.col,
+                std::format("random.{}() takes {} positional argument{}, got {}", member, want,
+                            want == 1 ? "" : "s", c.args.size()));
+            return const_none();
+        }
+        VReg k;
+        if (member == "sample") {
+            k = iarg(1);
+        } else if (!c.keywords.empty()) {
+            if (c.keywords[0].arg != "k") {
+                err(c.line, c.col, "random.choices() only takes the k= keyword");
+                return const_none();
+            }
+            k = coerce(expr(*c.keywords[0].value),
+                       tc_.type_of(c.keywords[0].value.get()), t_int());
+        } else {
+            k = const_int(1);
+        }
+        TypePtr st = tc_.type_of(c.args[0].get());
+        TypePtr et = t_unknown();
+        VReg seq;
+        if (st && st->kind == TyKind::Str) {
+            seq = call_runtime(RtFn::StrToList, mk_list(t_str()), {expr(*c.args[0])});
+            push_temp(seq);
+            et = t_str();
+        } else {
+            seq = expr(*c.args[0]);
+            if (st && st->kind == TyKind::List) {
+                if (!st->sub.empty()) et = st->sub[0];
+            } else if (st && st->kind == TyKind::Tuple) {
+                if (!st->sub.empty()) {
+                    et = st->sub[0];
+                    for (size_t i = 1; i < st->sub.size(); ++i) et = join(et, st->sub[i]);
+                }
+            }
+        }
+        TypePtr rt = tc_.type_of(&c);
+        if (!rt || rt->kind != TyKind::List) rt = mk_list(et);
+        VReg v = call_runtime(member == "sample" ? RtFn::RandSample : RtFn::RandChoices, rt,
+                              {const_int(0), seq, k});
+        push_temp(v);
+        return v;
+    }
+    err(c.line, c.col, std::format("random.{} is not supported", member));
+    return const_none();
+}
+
 VReg Lowerer::call_native(const std::string& module, const std::string& member, Call& c,
                           const FuncInfoPtr& info) {
     auto fn = native_fn(module, member);
@@ -306,10 +449,17 @@ VReg Lowerer::call_native(const std::string& module, const std::string& member, 
         err(c.line, c.col, std::format("{}.{} is not a supported native function", module, member));
         return const_none();
     }
+    // random 里带 rng 首参的几个函数：参数在 lower_random_extra 里手工装配。
+    if (module == "random") {
+        if (member == "randrange" || member == "getrandbits" || member == "gauss" ||
+            member == "expovariate" || member == "triangular" || member == "sample" ||
+            member == "choices") {
+            return lower_random_extra(member, c);
+        }
+    }
     // random.choice 返回序列元素类型，FuncInfo 的静态签名表达不了；
     // 结果类型以类型检查阶段记录在 Call 上的类型为准。
-    if (module == "random" && member == "choice") {
-        if (c.args.size() != 1 || !c.keywords.empty()) {
+    if (module == "random" && member == "choice") {        if (c.args.size() != 1 || !c.keywords.empty()) {
             err(c.line, c.col, "random.choice() expects 1 positional argument");
             return const_none();
         }
