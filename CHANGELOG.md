@@ -4,6 +4,41 @@
 
 早期阶段没有逐条留痕，按阶段归纳；0.4 之后逐条记录。
 
+## [0.88] - 2026-11-12
+
+`for` 里的 `enumerate` / `zip` 脱糖成计数循环。
+
+### 修复
+
+- **`for i, v in enumerate(xs)` 不再建 `[下标, 值]` 的元组表**：降级时直接在
+  `lower_for_seq` 里识别这个调用形状，走「计数循环 + 按下标取元素」，两个循环
+  变量分别赋值。每个元素省掉一次堆分配（`py23_enumerate_list` 里的
+  `py23_list_new(2, ...)`）。
+- **`for a, b in zip(xs, ys)` 同理**：双游标，长度取两者较小值（运行期比较），
+  不再建元组表。
+- 覆盖面：List / Tuple / Str / Dict / Set 作为源。Generator / Range / 用户类
+  仍然走原来的物化路径；`for i, (a, b) in ...` 这种嵌套解构也退回物化。
+
+### 语义
+
+脱糖后 `enumerate` / `zip` 在 `for` 里是**活视图**：循环体里改列表会看到新元素
+（以前是先建整张表，属于快照语义）。这和 CPython 的惰性迭代器一致，也和
+`for x in xs` 的现有行为一致。
+
+### 性能
+
+`bench/builtins/`：`34_enumerate` **0.7× → 30.9×**（403.9ms → 9.4ms）、
+`35_zip` **0.9× → 43.2×**（407.5ms → 9.2ms），N=100000，对手 CPython 275.7 / 372.2ms。
+两个用例的「线性」检查都通过，不是被优化器消掉了。
+
+### 已知限制
+
+- `e = enumerate(xs)` / `list(zip(a, b))` 当普通值用仍然物化成列表——要 `len`
+  和下标就得是真列表，这部分没变。
+- 同一个循环变量在不同位置用不同类型时（`for i, v in enumerate(ints)` 之后
+  `for i, v in enumerate("abc")`），第二次的 `print(v)` 会按第一次的类型打印。
+  这是 lower 按名字取最终类型的老问题，和这次改动无关；换变量名即可。
+
 ## [0.87] - 2026-11-12
 
 `sorted` / `list.sort()` 从 qsort 换成 Timsort。

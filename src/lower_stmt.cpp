@@ -3,6 +3,30 @@
 
 namespace py23 {
 
+// for 的解构目标能否拆成 n 个独立的 Name：`for i, v in ...` 可以，
+// `for i, (a, b) in ...` 或带下标的就不行（退回物化路径）。
+static bool can_destructure(const Expr* t, size_t n) {
+    if (!t || t->kind != ExprKind::Tuple) return false;
+    const auto& tup = static_cast<const TupleExpr&>(*t);
+    if (tup.elts.size() != n) return false;
+    for (const auto& e : tup.elts)
+        if (!e || e->kind != ExprKind::Name) return false;
+    return true;
+}
+
+// 能按下标逐个取的容器（generator / range 走各自的路径，这里不碰）。
+static bool is_countable(const TypePtr& t) {
+    if (!t) return false;
+    switch (t->kind) {
+        case TyKind::List:
+        case TyKind::Tuple:
+        case TyKind::Str:
+        case TyKind::Dict:
+        case TyKind::Set: return true;
+        default: return false;
+    }
+}
+
 
 // ────────────────────────── 语句 ──────────────────────────
 
@@ -623,7 +647,326 @@ void Lowerer::lower_for_range_core(For& f, VReg start, VReg stop, VReg step_v, b
     }
 }
 
+// for i, v in enumerate(xs)：不建 [下标, 值] 的元组表，直接计数 + 取元素。
+// 语义等价于 CPython 的惰性 enumerate：循环体里改 xs 会看到新元素（以前
+// 是先把整张表建好，属于快照语义）。
+void Lowerer::lower_for_enumerate(For& f, Call& c) {
+    auto& tup = static_cast<TupleExpr&>(*f.target);
+    VReg seq = expr(*c.args[0]);
+    TypePtr sty = tc_.type_of(c.args[0].get());
+    TypePtr ety = t_unknown();
+    if (sty->kind == TyKind::Str) ety = t_str();
+    else if (!sty->sub.empty()) ety = sty->sub[0];
+
+    // 生成器里 vreg 不跨 yield：序列落槽。
+    int seq_slot = -1;
+    if (st_->is_generator) {
+        seq_slot = new_temp_slot(sty);
+        store_slot(seq_slot, seq);
+    }
+    auto seq_val = [&]() { return seq_slot >= 0 ? load_slot(seq_slot, sty) : seq; };
+
+    Inst ln;
+    ln.op = IrOp::Len;
+    ln.a = seq;
+    int n_slot = new_temp_slot(t_int());
+    store_slot(n_slot, def(t_int(), std::move(ln)));
+
+    int idx = new_temp_slot(t_int());
+    store_slot(idx, const_int(0));
+
+    int cond = new_block("for.enum.cond");
+    int body = new_block("for.enum.body");
+    int incr = new_block("for.enum.incr");
+    int end = new_block("for.enum.end");
+    int orelse = f.orelse.empty() ? end : new_block("for.enum.else");
+
+    int mark_block = -1;
+    size_t mark_pos = 0;
+    VReg mark = st_->is_generator ? kNoReg : rc_mark_at(mark_block, mark_pos);
+    auto clean = [&]() {
+        if (st_->is_generator) cleanup_gen_mark();
+        else rc_cleanup(mark);
+    };
+    size_t pushes_before = st_->rc_pushes;
+
+    Inst j;
+    j.op = IrOp::Jump;
+    j.target = cond;
+    emit(std::move(j));
+
+    switch_to(cond);
+    Inst cmp;
+    cmp.op = IrOp::Cmp;
+    cmp.cop = CmpKind::Lt;
+    cmp.a = load_slot(idx, t_int());
+    cmp.b = load_slot(n_slot, t_int());
+    VReg cc = def(t_bool(), std::move(cmp));
+    Inst br;
+    br.op = IrOp::Branch;
+    br.a = cc;
+    br.target = body;
+    br.target2 = orelse;
+    emit(std::move(br));
+
+    switch_to(body);
+    clean();
+    VReg iv = load_slot(idx, t_int());
+    assign_to(*tup.elts[0], iv, t_int());
+    VReg ev;
+    if (sty->kind == TyKind::Dict || sty->kind == TyKind::Set) {
+        ev = call_runtime(RtFn::DictKeyAt, ety, {seq_val(), iv});
+    } else {
+        Inst get;
+        get.op = IrOp::IndexLoad;
+        get.a = seq_val();
+        get.b = iv;
+        ev = sty->kind == TyKind::Str ? def_heap(ety, std::move(get))
+                                      : def(ety, std::move(get));
+    }
+    assign_to(*tup.elts[1], ev, ety);
+
+    st_->loops.push_back({end, incr});
+    st_->loop_cleanup_depth.push_back(st_->cleanups.size());
+    stmts(f.body);
+    st_->loops.pop_back();
+    st_->loop_cleanup_depth.pop_back();
+    if (!terminated()) {
+        Inst jj;
+        jj.op = IrOp::Jump;
+        jj.target = incr;
+        emit(std::move(jj));
+    }
+
+    switch_to(incr);
+    clean();
+    Inst add;
+    add.op = IrOp::Bin;
+    add.bop = BinKind::Add;
+    add.a = load_slot(idx, t_int());
+    add.b = const_int(1);
+    store_slot(idx, def(t_int(), std::move(add)));
+    Inst ji;
+    ji.op = IrOp::Jump;
+    ji.target = cond;
+    emit(std::move(ji));
+
+    switch_to(orelse);
+    if (!f.orelse.empty()) {
+        stmts(f.orelse);
+        if (!terminated()) {
+            Inst jo;
+            jo.op = IrOp::Jump;
+            jo.target = end;
+            emit(std::move(jo));
+        }
+    }
+
+    switch_to(end);
+    clean();
+    if (!st_->is_generator && st_->rc_pushes == pushes_before) {
+        erase_cleanup(body, mark);
+        erase_cleanup(incr, mark);
+        erase_cleanup(end, mark);
+        erase_mark(mark_block, mark_pos, mark);
+    }
+}
+
+// for a, b in zip(xs, ys)：双游标，不建元组表。长度取两者较小值。
+void Lowerer::lower_for_zip(For& f, Call& c) {
+    auto& tup = static_cast<TupleExpr&>(*f.target);
+    VReg a = expr(*c.args[0]);
+    VReg b = expr(*c.args[1]);
+    TypePtr at = tc_.type_of(c.args[0].get());
+    TypePtr bt = tc_.type_of(c.args[1].get());
+    TypePtr ea = t_unknown();
+    TypePtr eb = t_unknown();
+    if (at->kind == TyKind::Str) ea = t_str();
+    else if (!at->sub.empty()) ea = at->sub[0];
+    if (bt->kind == TyKind::Str) eb = t_str();
+    else if (!bt->sub.empty()) eb = bt->sub[0];
+
+    int as = -1;
+    int bs = -1;
+    if (st_->is_generator) {
+        as = new_temp_slot(at);
+        store_slot(as, a);
+        bs = new_temp_slot(bt);
+        store_slot(bs, b);
+    }
+    auto aval = [&]() { return as >= 0 ? load_slot(as, at) : a; };
+    auto bval = [&]() { return bs >= 0 ? load_slot(bs, bt) : b; };
+
+    // n = min(len(a), len(b))
+    Inst la;
+    la.op = IrOp::Len;
+    la.a = a;
+    VReg na = def(t_int(), std::move(la));
+    Inst lb;
+    lb.op = IrOp::Len;
+    lb.a = b;
+    VReg nb = def(t_int(), std::move(lb));
+    int n_slot = new_temp_slot(t_int());
+    int pick_a = new_block("for.zip.a");
+    int pick_b = new_block("for.zip.b");
+    int after = new_block("for.zip.min");
+    Inst cm;
+    cm.op = IrOp::Cmp;
+    cm.cop = CmpKind::Lt;
+    cm.a = na;
+    cm.b = nb;
+    VReg lt = def(t_bool(), std::move(cm));
+    Inst br0;
+    br0.op = IrOp::Branch;
+    br0.a = lt;
+    br0.target = pick_a;
+    br0.target2 = pick_b;
+    emit(std::move(br0));
+    switch_to(pick_a);
+    store_slot(n_slot, na);
+    Inst ja;
+    ja.op = IrOp::Jump;
+    ja.target = after;
+    emit(std::move(ja));
+    switch_to(pick_b);
+    store_slot(n_slot, nb);
+    Inst jb;
+    jb.op = IrOp::Jump;
+    jb.target = after;
+    emit(std::move(jb));
+    switch_to(after);
+
+    int idx = new_temp_slot(t_int());
+    store_slot(idx, const_int(0));
+
+    int cond = new_block("for.zip.cond");
+    int body = new_block("for.zip.body");
+    int incr = new_block("for.zip.incr");
+    int end = new_block("for.zip.end");
+    int orelse = f.orelse.empty() ? end : new_block("for.zip.else");
+
+    int mark_block = -1;
+    size_t mark_pos = 0;
+    VReg mark = st_->is_generator ? kNoReg : rc_mark_at(mark_block, mark_pos);
+    auto clean = [&]() {
+        if (st_->is_generator) cleanup_gen_mark();
+        else rc_cleanup(mark);
+    };
+    size_t pushes_before = st_->rc_pushes;
+
+    Inst j;
+    j.op = IrOp::Jump;
+    j.target = cond;
+    emit(std::move(j));
+
+    switch_to(cond);
+    Inst cmp;
+    cmp.op = IrOp::Cmp;
+    cmp.cop = CmpKind::Lt;
+    cmp.a = load_slot(idx, t_int());
+    cmp.b = load_slot(n_slot, t_int());
+    VReg cc = def(t_bool(), std::move(cmp));
+    Inst br;
+    br.op = IrOp::Branch;
+    br.a = cc;
+    br.target = body;
+    br.target2 = orelse;
+    emit(std::move(br));
+
+    switch_to(body);
+    clean();
+    VReg iv = load_slot(idx, t_int());
+    VReg va;
+    if (at->kind == TyKind::Dict || at->kind == TyKind::Set) {
+        va = call_runtime(RtFn::DictKeyAt, ea, {aval(), iv});
+    } else {
+        Inst g1;
+        g1.op = IrOp::IndexLoad;
+        g1.a = aval();
+        g1.b = iv;
+        va = at->kind == TyKind::Str ? def_heap(ea, std::move(g1)) : def(ea, std::move(g1));
+    }
+    assign_to(*tup.elts[0], va, ea);
+    VReg vb;
+    if (bt->kind == TyKind::Dict || bt->kind == TyKind::Set) {
+        vb = call_runtime(RtFn::DictKeyAt, eb, {bval(), iv});
+    } else {
+        Inst g2;
+        g2.op = IrOp::IndexLoad;
+        g2.a = bval();
+        g2.b = iv;
+        vb = bt->kind == TyKind::Str ? def_heap(eb, std::move(g2)) : def(eb, std::move(g2));
+    }
+    assign_to(*tup.elts[1], vb, eb);
+
+    st_->loops.push_back({end, incr});
+    st_->loop_cleanup_depth.push_back(st_->cleanups.size());
+    stmts(f.body);
+    st_->loops.pop_back();
+    st_->loop_cleanup_depth.pop_back();
+    if (!terminated()) {
+        Inst jj;
+        jj.op = IrOp::Jump;
+        jj.target = incr;
+        emit(std::move(jj));
+    }
+
+    switch_to(incr);
+    clean();
+    Inst add;
+    add.op = IrOp::Bin;
+    add.bop = BinKind::Add;
+    add.a = load_slot(idx, t_int());
+    add.b = const_int(1);
+    store_slot(idx, def(t_int(), std::move(add)));
+    Inst ji;
+    ji.op = IrOp::Jump;
+    ji.target = cond;
+    emit(std::move(ji));
+
+    switch_to(orelse);
+    if (!f.orelse.empty()) {
+        stmts(f.orelse);
+        if (!terminated()) {
+            Inst jo;
+            jo.op = IrOp::Jump;
+            jo.target = end;
+            emit(std::move(jo));
+        }
+    }
+
+    switch_to(end);
+    clean();
+    if (!st_->is_generator && st_->rc_pushes == pushes_before) {
+        erase_cleanup(body, mark);
+        erase_cleanup(incr, mark);
+        erase_cleanup(end, mark);
+        erase_mark(mark_block, mark_pos, mark);
+    }
+}
+
 void Lowerer::lower_for_seq(For& f) {
+    // for i, v in enumerate(xs) / for a, b in zip(xs, ys)：直接计数循环，
+    // 不物化 [下标, 值] 的元组表——每个元素省一次堆分配。
+    if (f.iter->kind == ExprKind::Call) {
+        auto& c = static_cast<Call&>(*f.iter);
+        if (c.func->kind == ExprKind::Name && c.keywords.empty()) {
+            const std::string& fn = static_cast<Name&>(*c.func).id;
+            if (fn == "enumerate" && is_builtin("enumerate") && c.args.size() == 1 &&
+                can_destructure(f.target.get(), 2) &&
+                is_countable(tc_.type_of(c.args[0].get()))) {
+                lower_for_enumerate(f, c);
+                return;
+            }
+            if (fn == "zip" && is_builtin("zip") && c.args.size() == 2 &&
+                can_destructure(f.target.get(), 2) &&
+                is_countable(tc_.type_of(c.args[0].get())) &&
+                is_countable(tc_.type_of(c.args[1].get()))) {
+                lower_for_zip(f, c);
+                return;
+            }
+        }
+    }
     VReg seq = expr(*f.iter);
     TypePtr seq_ty = tc_.type_of(f.iter.get());
     // 用户类实现 __iter__ 时先调用它，再按返回类型（generator/list/...）
