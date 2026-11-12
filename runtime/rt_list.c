@@ -7,11 +7,63 @@
 
 /* ── 列表 ─────────────────────────────────────────────────────── */
 
+/* 列表 data 缓冲按 64 字节分档（<=512 字节），每档最多缓存 64 块。
+   空块的头 8 字节存下一块的指针；复用时容量只会变大，调用方按 cap 使用。 */
+#define LIST_BUF_MAX 512
+#define LIST_BUF_ALIGN 64
+#define LIST_BUF_CLASSES (LIST_BUF_MAX / LIST_BUF_ALIGN)
+#define LIST_BUF_MAX_PER_CLASS 64
+static int64_t* list_buf_pool[LIST_BUF_CLASSES];
+static int list_buf_count[LIST_BUF_CLASSES];
+
+static int list_buf_class(int64_t bytes) {
+    if (bytes <= 0 || bytes > LIST_BUF_MAX) return -1;
+    return (int)((bytes + LIST_BUF_ALIGN - 1) / LIST_BUF_ALIGN) - 1;
+}
+
+static int64_t* list_buf_get(int64_t* cap_io) {
+    int64_t cap = *cap_io < 4 ? 4 : *cap_io;
+    int64_t bytes = cap * (int64_t)sizeof(int64_t);
+    int c = list_buf_class(bytes);
+    if (c >= 0) {
+        // 同一档的块一律按档容量分配，复用后 cap 与真实容量严格一致。
+        int64_t class_bytes = (int64_t)(c + 1) * LIST_BUF_ALIGN;
+        int64_t* p;
+        if (list_buf_pool[c]) {
+            p = list_buf_pool[c];
+            list_buf_pool[c] = (int64_t*)p[0];
+            list_buf_count[c]--;
+        } else {
+            p = (int64_t*)malloc((size_t)class_bytes);
+            if (!p) panic_c("out of memory");
+        }
+        *cap_io = class_bytes / (int64_t)sizeof(int64_t);
+        return p;
+    }
+    *cap_io = cap;
+    int64_t* p = (int64_t*)malloc((size_t)bytes);
+    if (!p) panic_c("out of memory");
+    return p;
+}
+
+static void list_buf_put(int64_t* p, int64_t cap) {
+    if (!p) return;
+    int64_t bytes = cap * (int64_t)sizeof(int64_t);
+    int c = list_buf_class(bytes);
+    if (c < 0 || list_buf_count[c] >= LIST_BUF_MAX_PER_CLASS) {
+        free(p);
+        return;
+    }
+    p[0] = (int64_t)list_buf_pool[c];
+    list_buf_pool[c] = p;
+    list_buf_count[c]++;
+}
+
 void list_destroy(void* p) {
     Py23List* l = (Py23List*)p;
     if (l->elem_kind == 1)
         for (int64_t i = 0; i < l->len; ++i) py23_rc_dec((void*)l->data[i]);
-    free(l->data);
+    list_buf_put(l->data, l->cap);
 }
 
 // GC 清扫前调用：只把「指向可达对象」的引用计数减掉。kind 2 的元素类型
@@ -30,9 +82,8 @@ Py23List* py23_list_new(int64_t cap, int64_t elem_kind) {
                                       list_gc_release, PY23_RC_LIST);
     l->len = 0;
     l->cap = cap;
+    l->data = list_buf_get(&l->cap);
     l->elem_kind = elem_kind;
-    l->data = (int64_t*)malloc(sizeof(int64_t) * (size_t)cap);
-    if (!l->data) panic_c("out of memory");
     return l;
 }
 

@@ -77,6 +77,32 @@ static void str_pool_put(Py23Rc* h) {
     str_pool_count[c]++;
 }
 
+/* 列表结构体 freelist：Py23List 固定 32 字节，单独一档。data 缓冲
+   由 rt_list.c 的 list_buf_pool 管理。 */
+#define LIST_POOL_MAX 64
+static Py23Rc* list_pool;
+static int list_pool_count;
+
+static Py23Rc* list_pool_get(void) {
+    Py23Rc* h = list_pool;
+    if (h) {
+        list_pool = h->next;
+        list_pool_count--;
+    }
+    return h;
+}
+
+static void list_pool_put(Py23Rc* h) {
+    if (list_pool_count >= LIST_POOL_MAX) {
+        free(h);
+        return;
+    }
+    h->next = list_pool;
+    h->prev = NULL;
+    list_pool = h;
+    list_pool_count++;
+}
+
 /* exact-RC 模式下可以完全绕开 GC 的对象：没有任何堆字段（没有出边），
    不可能处在环里。字符串是典型；没有堆字段的类实例（生成代码不给
    dtor/release）同理。它们的生死完全由 RC 决定。 */
@@ -268,6 +294,8 @@ void* rc_alloc(int64_t size, void (*dtor)(void*), void (*release)(void*),
         alloc_size = (size + 7) & ~(int64_t)7;
     Py23Rc* h = NULL;
     if (kind == PY23_RC_STR) h = str_pool_get(alloc_size);
+    else if (kind == PY23_RC_LIST && size == (int64_t)sizeof(Py23List))
+        h = list_pool_get();
     if (!h) {
         h = (Py23Rc*)malloc(sizeof(Py23Rc) + (size_t)alloc_size);
         if (!h) panic_c("out of memory");
@@ -322,6 +350,8 @@ void py23_rc_dec(void* p) {
         rc_unlink(h);
         if (h->dtor) h->dtor(p);
         if (h->kind == PY23_RC_STR) str_pool_put(h);
+        else if (h->kind == PY23_RC_LIST && h->size == (int64_t)sizeof(Py23List))
+            list_pool_put(h);
         else free(h);
     }
 }

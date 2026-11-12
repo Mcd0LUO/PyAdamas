@@ -263,6 +263,11 @@ static char sm_upper(char c) {
 
 static void sm_push_str(Py23List* l, Py23Str* s) {
     // str_new 的初始引用直接转交给列表，列表析构时统一 dec。
+    // 容量够时直接写槽，避开跨 TU 的 py23_list_append 调用。
+    if (l->len < l->cap) {
+        l->data[l->len++] = (int64_t)s;
+        return;
+    }
     py23_list_append(l, (int64_t)s);
 }
 
@@ -279,6 +284,11 @@ static int64_t sm_find_from(Py23Str* s, Py23Str* sub, int64_t start, int64_t end
     if (end > s->len) end = s->len;
     if (end < 0) end = 0;
     if (sub->len == 0) return start <= end ? start : -1;
+    if (sub->len == 1 && end > start) {
+        const char* hit = (const char*)memchr(s->data + start, sub->data[0],
+                                              (size_t)(end - start));
+        return hit ? (int64_t)(hit - s->data) : -1;
+    }
     for (int64_t i = start; i + sub->len <= end; ++i)
         if (memcmp(s->data + i, sub->data, (size_t)sub->len) == 0) return i;
     return -1;
@@ -339,15 +349,23 @@ int64_t py23_str_method(Py23Str* s, int64_t op, int64_t a0, int64_t a1, int64_t 
             Py23Str* sep = (Py23Str*)a0;
             int64_t maxsplit = a1;
             if (sep->len == 0) py23_raise_c("ValueError", "empty separator");
-            Py23List* out = py23_list_new(4, 1);
-            int64_t i = 0, done = 0;
+            // 短分隔符走 memchr；单遍填充，容量从 8 起（常见 2-6 段不 realloc）。
+            Py23List* out = py23_list_new(8, 1);
+            int64_t i = 0;
+            int64_t done = 0;
             while (i <= s->len) {
                 if (maxsplit >= 0 && done >= maxsplit) break;
-                int64_t j = i;
-                while (j + sep->len <= s->len &&
-                       memcmp(s->data + j, sep->data, (size_t)sep->len) != 0)
-                    ++j;
-                if (j + sep->len > s->len) break;
+                int64_t j = -1;
+                if (sep->len == 1) {
+                    const char* hit = (const char*)memchr(s->data + i, sep->data[0],
+                                                          (size_t)(s->len - i));
+                    if (hit) j = (int64_t)(hit - s->data);
+                } else {
+                    for (j = i; j + sep->len <= s->len; ++j)
+                        if (memcmp(s->data + j, sep->data, (size_t)sep->len) == 0) break;
+                    if (j + sep->len > s->len) j = -1;
+                }
+                if (j < 0) break;
                 sm_push_str(out, str_new(s->data + i, j - i));
                 i = j + sep->len;
                 ++done;

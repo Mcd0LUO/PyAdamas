@@ -29,9 +29,10 @@
 | 0.98 | `functools.partial` / `lru_cache`：编译期合成转发闭包与缓存包装 |
 | 0.99 | `csv`：纯 py23 stdlib（reader/writer、QUOTE_*）；`file` 标注与模块接口编码修复 |
 | 0.100 | 短字符串 freelist、`split` 去泄漏与预分配（`string.capwords` 反超 CPython） |
+| 0.101 | 列表结构体/data freelist、`split(sep)` 单遍 + `memchr`、append 快路径 |
 | 许可证 | Apache-2.0（见 [LICENSE](../LICENSE) / [NOTICE](../NOTICE)） |
 
-## 当前状态（0.100）
+## 当前状态（0.101）
 
 流水线 `源码 → 词法 → AST → lambda 脱糖 → 类型检查 → IR → x86-64 汇编 → 可执行文件` 已打通。
 
