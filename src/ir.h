@@ -1068,6 +1068,10 @@ struct Inst {
     TypePtr ty;  // 结果类型；无结果时为 nullptr
 
     std::vector<VReg> args;  // MakeList/MakeTuple/Call 的操作数
+    // CallExtern 每个实参的编组方式（CKind）。同一符号可能被不同类型实参
+    // 调用（如 ptr 既接地址又接 list），所以按调用点记录；为空时回退到
+    // IRExtern::params。
+    std::vector<uint8_t> cargs;
 
     std::string text() const;
 };

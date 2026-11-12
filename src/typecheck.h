@@ -159,6 +159,9 @@ struct Param {
     // 要退回 unknown，不能当成类型错误。
     bool inferred = false;
     bool multi = false;
+    // cimport 的 ptr/ptr[T] 形参：额外接受 list/bytes 缓冲区实参。
+    bool cptr = false;
+    CKind cptr_elem = CKind::None;  // ptr[T] 的 T；None 表示无类型 ptr
 };
 
 struct FuncInfo {
@@ -538,6 +541,9 @@ inline TypePtr ckind_type(CKind k) {
         case CKind::Str: return t_str();
         case CKind::OptStr: return mk_optional(t_str());
         case CKind::Ptr: return mk_optional(t_int());
+        case CKind::BufF64:
+        case CKind::BufI64:
+        case CKind::BufBytes:
         case CKind::Int:
         case CKind::Int32:
         case CKind::UInt32: return t_int();

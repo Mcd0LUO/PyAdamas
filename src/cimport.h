@@ -22,11 +22,18 @@ enum class CKind : uint8_t {
     Str,      // char*（非空）
     Ptr,      // void* / T*
     OptStr,   // 可空 char*
+    // 以下只由 lower 在调用点根据实参类型选择，.cpya 不能声明：
+    // 把 list/bytes 的连续 data 指针传给 C。
+    BufF64,   // list[float] -> double*
+    BufI64,   // list[int] -> long*
+    BufBytes, // bytes -> uint8_t*
 };
 
 struct CParam {
     std::string name;
     CKind kind = CKind::Int;
+    // 仅 kind == Ptr 有意义：ptr[T] 的 T；未写 T 时为 None。
+    CKind ptr_elem = CKind::None;
 };
 
 struct CExtern {

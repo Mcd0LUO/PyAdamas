@@ -4,6 +4,28 @@
 
 早期阶段没有逐条留痕，按阶段归纳；0.4 之后逐条记录。
 
+## [0.111] - 2026-11-13
+
+C 互操作 v2：`ptr[T]` 可直接接收 py23 缓冲区，支持把数组交给 BLAS 等 C API。
+
+### 新增
+
+- **缓冲区传参**：`ptr[float]` 接 `list[float]`（`double*`）、`ptr[int]` 接
+  `list[int]`（`long*`）、无类型 `ptr` 接 `list[float]`/`list[int]`/`bytes`；
+  编译器取 `data` 字段（list/bytes 均偏移 16）直接传给 C。元素宽度不匹配的
+  组合（如 `list[int]` → `ptr[float]`、`bytes` → `ptr[float]`）报错。
+- **按调用点编组**：IR 的 `CallExtern` 记录每个实参的 `CKind`，同一符号既可
+  接地址也可接 list/bytes；`BufF64`/`BufI64`/`BufBytes` 在汇编中先判空再取
+  `data`，空 list 的 NULL 原样传 0。
+- 文档补充缓冲区规则、生命周期约定与 `cblas_dgemm` 声明示例。
+
+### 验证
+
+- 新增 `98_cimport_buffer`：`modf` 写 `list[float]`、`time` 写 `list[int]`、
+  `memcmp` 比较 `list[float]` 与 `bytes`。
+- 新增反例 `f44_cimport_buffer_mismatch`。
+- `ctest --preset dev`、完整 `tests/run_tests.sh`、`build/memcheck.sh` 全绿。
+
 ## [0.110] - 2026-11-13
 
 C 互操作 v1：新增 `cimport` 语句与 `.cpya` 声明文件，可直接调用系统 C 库。

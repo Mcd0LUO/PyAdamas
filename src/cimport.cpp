@@ -297,9 +297,25 @@ std::optional<CImportDecl> load_cpya(const std::string& name, const std::string&
                 std::string ptype = trim(p.substr(colon + 1));
                 if (!is_ident(pname))
                     return fail(lineno, std::format("invalid parameter name '{}'", pname));
-                auto k = parse_ckind(ptype);
-                if (!k) return fail(lineno, std::format("unknown parameter type '{}'", ptype));
-                ex.params.push_back(CParam{pname, *k});
+                CParam cp;
+                cp.name = pname;
+                if (ptype == "ptr") {
+                    cp.kind = CKind::Ptr;
+                } else if (ptype.starts_with("ptr[") && ptype.back() == ']') {
+                    std::string inner = trim(ptype.substr(4, ptype.size() - 5));
+                    auto elem = parse_ckind(inner);
+                    if (!elem || *elem == CKind::None)
+                        return fail(lineno,
+                                    std::format("unknown pointer element type '{}'", inner));
+                    cp.kind = CKind::Ptr;
+                    cp.ptr_elem = *elem;
+                } else {
+                    auto k = parse_ckind(ptype);
+                    if (!k)
+                        return fail(lineno, std::format("unknown parameter type '{}'", ptype));
+                    cp.kind = *k;
+                }
+                ex.params.push_back(std::move(cp));
             }
             auto rk = parse_ckind(ret_text);
             if (!rk) return fail(lineno, std::format("unknown return type '{}'", ret_text));

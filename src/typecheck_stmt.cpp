@@ -423,6 +423,10 @@ void TypeChecker::stmt(Stmt& s) {
                             Param pm;
                             pm.name = p.name;
                             pm.ty = ckind_type(p.kind);
+                            if (p.kind == CKind::Ptr) {
+                                pm.cptr = true;
+                                pm.cptr_elem = p.ptr_elem;
+                            }
                             fi->pos.push_back(std::move(pm));
                         }
                         extern_by_fn_[fi.get()] = &ex;

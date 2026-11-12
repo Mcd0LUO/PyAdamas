@@ -268,6 +268,23 @@ TypePtr TypeChecker::check_args(const FuncInfoPtr& fn, Call& c) {
                             fn->name, npos, npos == 1 ? "" : "s", argtys.size()));
         }
 
+        // cimport 的 ptr/ptr[T]：除原始地址外，还接受底层布局兼容的缓冲区。
+        // 返回 0 表示不是缓冲区（交给 assignable），1 兼容，-1 元素不匹配。
+        auto cptr_buffer = [](CKind elem, TypePtr ty) -> int {
+            if (!ty) return 0;
+            if (ty->kind == TyKind::List) {
+                if (ty->sub.empty() || !ty->sub[0]) return 0;
+                TyKind e = ty->sub[0]->kind;
+                if (elem == CKind::None)
+                    return (e == TyKind::Float || e == TyKind::Int) ? 1 : -1;
+                if (elem == CKind::Float) return e == TyKind::Float ? 1 : -1;
+                if (elem == CKind::Int) return e == TyKind::Int ? 1 : -1;
+                return -1;
+            }
+            if (ty->kind == TyKind::Bytes) return elem == CKind::None ? 1 : -1;
+            return 0;
+        };
+
         // 未标注的形参用实参类型回填（单态化）。回填后函数体要按新签名
         // 重查；同一形参被多种类型调用则退回 unknown，不误杀 Python 的
         // 多态用法。
@@ -285,6 +302,23 @@ TypePtr TypeChecker::check_args(const FuncInfoPtr& fn, Call& c) {
                 fn->outer->sig_dirty = true;
             };
             if (p.multi) return;
+            if (p.cptr) {
+                int r = cptr_buffer(p.cptr_elem, ty);
+                if (r == 1) return;
+                if (r == -1) {
+                    std::string want;
+                    if (p.cptr_elem == CKind::Float)
+                        want = "list[float] for 'ptr[float]'";
+                    else if (p.cptr_elem == CKind::Int)
+                        want = "list[int] for 'ptr[int]'";
+                    else
+                        want = "list[float], list[int] or bytes for 'ptr'";
+                    err(line, col,
+                        std::format("argument '{}' of '{}' expects {}, got '{}'", p.name,
+                                    fn->name, want, type_name(ty)));
+                    return;
+                }
+            }
             if (!p.ty || p.ty->kind == TyKind::Unknown) {
                 if (ty && ty->kind != TyKind::Unknown) {
                     p.ty = ty;

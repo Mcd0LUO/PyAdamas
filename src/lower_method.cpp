@@ -1913,11 +1913,30 @@ VReg Lowerer::lower_cimport_call(Attribute& at, Call& c) {
     }
 
     std::vector<VReg> args;
+    std::vector<uint8_t> cargs;
     args.reserve(srcs.size());
+    cargs.reserve(srcs.size());
     for (size_t i = 0; i < srcs.size(); ++i) {
         TypePtr aty = tc_.type_of(srcs[i]);
         VReg v = expr(*srcs[i]);
-        switch (ex->params[i].kind) {
+        CKind k = ex->params[i].kind;
+        // ptr/ptr[T] 接 list/bytes 时不转换，直接把对象指针交给 codegen；
+        // codegen 按 Buf* 取 data 字段。
+        if (k == CKind::Ptr && aty) {
+            if (aty->kind == TyKind::List && !aty->sub.empty() && aty->sub[0]) {
+                TyKind e = aty->sub[0]->kind;
+                if (e == TyKind::Float) k = CKind::BufF64;
+                else if (e == TyKind::Int) k = CKind::BufI64;
+            } else if (aty->kind == TyKind::Bytes) {
+                k = CKind::BufBytes;
+            }
+        }
+        if (k == CKind::BufF64 || k == CKind::BufI64 || k == CKind::BufBytes) {
+            cargs.push_back(static_cast<uint8_t>(k));
+            args.push_back(v);
+            continue;
+        }
+        switch (k) {
             case CKind::Float: v = coerce(v, aty, t_float()); break;
             case CKind::Str: v = coerce(v, aty, t_str()); break;
             case CKind::Bool: v = coerce(v, aty, t_bool()); break;
@@ -1930,6 +1949,7 @@ VReg Lowerer::lower_cimport_call(Attribute& at, Call& c) {
             case CKind::None: break;
             default: v = coerce(v, aty, t_int()); break;
         }
+        cargs.push_back(static_cast<uint8_t>(k));
         args.push_back(v);
     }
 
@@ -1953,6 +1973,7 @@ VReg Lowerer::lower_cimport_call(Attribute& at, Call& c) {
     in.op = IrOp::CallExtern;
     in.idx = idx;
     in.args = std::move(args);
+    in.cargs = std::move(cargs);
     in.ty = ckind_type(ex->ret);
     return def_heap(in.ty, std::move(in));
 }

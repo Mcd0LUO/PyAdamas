@@ -1053,6 +1053,44 @@ extern def free(p: ptr) -> None
 
 `str` 参数要求非空，不能把 `Optional[str]` 直接传给它（会有 NULL）；需要接受 NULL 时声明为 `Optional[str]`。`ptr` 是不透明地址，0 表示 `NULL`，不能解引用或做数组访问。
 
+### 缓冲区传参
+
+`ptr[T]` 除了原始地址，还可以直接接收底层布局兼容的 py23 缓冲区，编译器会取连续 `data` 指针传给 C：
+
+| 形参 | 允许的实参 | 传给 C |
+|---|---|---|
+| `ptr[float]` | `list[float]` | `double*` |
+| `ptr[int]` | `list[int]` | `long*` |
+| `ptr` | `list[float]`、`list[int]`、`bytes` | 连续 `data` |
+| `ptr` / `ptr[T]` | `int` / `Optional[int]` / `None` | 原样，`None` 为 NULL |
+
+`list[float]` 的槽位就是 8 字节 double，`list[int]` 是 8 字节 long；`bytes` 的 `data` 连续且 NUL 结尾。不匹配的组合会被拒绝，例如 `list[int]` 不能传给 `ptr[float]`，`bytes` 不能传给 `ptr[float]`/`ptr[int]`（元素宽度不同）。空 list 的 `data` 可能为 NULL，原样传 0。
+
+指针只在本次 C 调用期间有效：C 函数不得保存它，调用期间也不要改变 list 长度。C 写回 `data` 后，py23 侧的 list 元素立即可见。多维数组请自己拍平并显式传 stride。
+
+BLAS 示例（`cblas.cpya`，需系统安装 OpenBLAS）：
+
+```
+cmodule cblas
+link openblas
+
+const ROW_MAJOR: int32 = 101
+const NO_TRANS: int32 = 111
+
+extern def "cblas_dgemm" as dgemm(layout: int32, trans_a: int32, trans_b: int32, m: int32, n: int32, k: int32, alpha: float, a: ptr[float], lda: int32, b: ptr[float], ldb: int32, beta: float, c: ptr[float], ldc: int32) -> None
+```
+
+```python
+cimport cblas
+
+a = [1.0, 2.0, 3.0, 4.0]
+b = [5.0, 6.0, 7.0, 8.0]
+c = [0.0, 0.0, 0.0, 0.0]
+cblas.dgemm(cblas.ROW_MAJOR, cblas.NO_TRANS, cblas.NO_TRANS,
+            2, 2, 2, 1.0, a, 2, b, 2, 0.0, c, 2)
+print(c)  # [19.0, 22.0, 43.0, 50.0]
+```
+
 ## 会被拒绝的写法
 
 **语法层**（`check` 就报错）：

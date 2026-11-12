@@ -473,9 +473,17 @@ void AsmGen::gen_call(const Inst& in) {
 void AsmGen::gen_call_extern(const Inst& in) {
         const IRExtern& ex = m_->externs[static_cast<size_t>(in.idx)];
 
+        // 同一符号的不同调用点可能有不同编组（ptr 接地址或 list/bytes），
+        // 优先用调用点记录的 cargs。
+        auto kind_at = [&](size_t i) -> CKind {
+            if (i < in.cargs.size()) return static_cast<CKind>(in.cargs[i]);
+            return ex.params[i];
+        };
+
         std::vector<TypePtr> types;
         types.reserve(ex.params.size());
-        for (CKind k : ex.params) types.push_back(k == CKind::Float ? t_float() : t_int());
+        for (size_t i = 0; i < ex.params.size(); ++i)
+            types.push_back(kind_at(i) == CKind::Float ? t_float() : t_int());
         auto locs = classify(types);
 
         int stack_args = 0;
@@ -485,15 +493,23 @@ void AsmGen::gen_call_extern(const Inst& in) {
         int alloc = (stack_bytes + 15) & ~15;
 
         // 取实参的机器值。str/可选 str 要先从 PyAdamasStr 里取出 data 字段
-        // （偏移 16），指针按整数直接传。
+        // （偏移 16）；Buf* 从 list/bytes 的 data 取指针；普通指针按整数直接传。
         auto arg_into = [&](size_t i, const std::string& reg) {
-            CKind k = ex.params[i];
+            CKind k = kind_at(i);
             const std::string src = src_op(in.args[i]);
             if (k == CKind::Str || k == CKind::OptStr) {
                 emit2("movq", src, "%r10");
                 // 可空/可能为 NULL 的字符串：NULL 原样传，不能解引用。
                 // 非可空 str 在类型检查阶段已拒绝 Optional[str]，这里只是
                 // 防御运行期出现的空值。
+                line("testq %r10, %r10");
+                line("je 1f");
+                line("movq 16(%r10), %r10");
+                line("1:");
+                emit2("movq", "%r10", reg);
+            } else if (k == CKind::BufF64 || k == CKind::BufI64 || k == CKind::BufBytes) {
+                // list/bytes 的 data 都在 +16（PyAdamasList / PyAdamasStr）。
+                emit2("movq", src, "%r10");
                 line("testq %r10, %r10");
                 line("je 1f");
                 line("movq 16(%r10), %r10");
@@ -561,6 +577,9 @@ void AsmGen::gen_call_extern(const Inst& in) {
                 }
                 case CKind::Int:
                 case CKind::Ptr:
+                case CKind::BufF64:
+                case CKind::BufI64:
+                case CKind::BufBytes:
                     emit2("movq", "%rax", dst);
                     break;
             }

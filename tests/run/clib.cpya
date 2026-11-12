@@ -24,3 +24,7 @@ extern def "memset" as memset(p: ptr[int], v: int32, n: int) -> ptr[int]
 extern def "getenv" as getenv(name: str) -> Optional[str]
 # 8 个 int 参数：验证超过 6 个时走栈。
 extern def "syscall" as syscall(n: int, a1: int, a2: int, a3: int, a4: int, a5: int, a6: int, a7: int) -> int
+# 缓冲区传参：list[float] / list[int] / bytes 的 data 指针。
+extern def "modf" as modf(x: float, iptr: ptr[float]) -> float
+extern def "time" as time_at(t: ptr[int]) -> int
+extern def "memcmp" as memcmp(a: ptr, b: ptr, n: int) -> int32
