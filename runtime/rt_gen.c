@@ -47,6 +47,14 @@ void* py23_gen_new(int64_t n_slots, int64_t resume, int64_t release, int64_t kin
     return g;
 }
 
+/* 释放帧里持有引用的槽：调用生成的 gcrel（逐槽 dec + 清零），
+   幂等。异常从 resume 逃出时用它，避免槽引用一直挂到对象销毁。 */
+void py23_gen_release_slots(void* g) {
+    if (!g) return;
+    Py23Rc* h = (Py23Rc*)g - 1;
+    if (h->release) h->release(g);
+}
+
 int64_t gen_run(void* g, int64_t sent, int* done) {
     int64_t* p = (int64_t*)g;
     if (p[1]) {
@@ -69,6 +77,9 @@ int64_t gen_run(void* g, int64_t sent, int* done) {
         p[5] = 0;
         p[2] = 0;
         p[3] = 0;
+        /* 异常跳过了 resume 的出口清理：帧里的堆槽现在就要释放，
+           否则只要生成器对象还被引用着，这些值就永远不回收。 */
+        py23_gen_release_slots(g);
         py23_rc_cleanup(h.mark);
         exc_longjmp();
     }
@@ -121,12 +132,31 @@ int64_t py23_gen_send_opt(void* g, int64_t sent, int64_t* ok) {
     return v;
 }
 
-/* 显式 close()：跑挂起点之后的 finally / __exit__，异常照常向外传。 */
+/* 显式 close()：跑挂起点之后的 finally / __exit__。清理期间抛出的异常
+   同样要先把帧槽释放掉，再原样向外传。 */
 void py23_gen_close(void* g) {
     int64_t* p = (int64_t*)g;
     if (!p || p[1]) return;
+    Py23Handler h;
+    h.prev = handler_top;
+    h.mark = py23_rc_mark();
+    h.frame = py23_frame_top;
+    handler_top = &h;
+    if (setjmp(h.env) != 0) {
+        handler_top = h.prev;
+        py23_gen_release_slots(g);
+        py23_rc_cleanup(h.mark);
+        p[1] = 2;
+        p[5] = 0;
+        p[2] = 0;
+        p[3] = 0;
+        exc_longjmp();
+    }
     p[5] = 1;
     ((void (*)(void*, int64_t))(uintptr_t)p[4])(g, 0);
+    handler_top = h.prev;
+    py23_rc_cleanup(h.mark);
+    py23_gen_release_slots(g);
     p[1] = 1;
     p[5] = 0;
     p[2] = 0;
@@ -150,6 +180,8 @@ void py23_gen_finalize(void* g) {
     }
     handler_top = h.prev;
     py23_rc_cleanup(h.mark);
+    /* 正常跑完时槽已释放（空操作）；清理中途抛异常则在这里补一次。 */
+    py23_gen_release_slots(g);
     p[1] = 1;
     p[5] = 0;
     p[2] = 0;

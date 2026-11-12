@@ -733,6 +733,8 @@ void coro_step(void* c) {
         p[2] = 0;
         p[3] = 0;
         p[8] = 0;
+        // 异常跳过了 resume 的出口清理：帧里的堆槽当场释放。
+        py23_gen_release_slots(c);
         coro_finish(c, 0, e);  // 异常逃出：交给等待者或事件循环根
         return;
     }

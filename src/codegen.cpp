@@ -181,9 +181,10 @@ std::string AsmGen::gen(const IRModule& m) {
             out_ += "\tret\n";
         }
 
-        // 生成器帧的 GC release：只把指向可达对象的槽引用减掉。正常结束
-        // 时 status==1、槽位已经释放过，直接跳过；被中途抛弃时逐槽处理。
-        // 析构器由运行时统一处理（它会调用生成代码的 close 路径跑 finally/with）。
+        // 生成器帧的槽释放（GC release 与异常逃出共用）：逐槽 dec 并清零。
+        // 清零让函数可以重复调用：正常结束时 status==1、槽已释放，直接跳过；
+        // 异常逃出后由运行时调用一次，之后 GC 清扫再调到也是空操作。
+        // GC 清扫期间 py23_rc_dec 自带「只调可达对象计数」的保护。
         for (size_t i = 0; i < m.generators.size(); ++i) {
             const IRGenerator& g = m.generators[i];
             out_ += std::format("\n# ---- gcrel gen g{} ----\n", i);
@@ -195,8 +196,13 @@ std::string AsmGen::gen(const IRModule& m) {
             out_ += std::format("\tje .Lgengcreldone{}\n", i);
             for (size_t s = 0; s < g.slot_heap.size(); ++s) {
                 if (!g.slot_heap[s]) continue;
-                out_ += std::format("\tmovq {}(%rbx), %rdi\n", 8 * (10 + s));
-                out_ += "\tcall py23_gc_unref_child\n";
+                const int off = 8 * (kGenHeader + static_cast<int>(s));
+                out_ += std::format("\tmovq {}(%rbx), %rdi\n", off);
+                out_ += std::format("\ttestq %rdi, %rdi\n");
+                out_ += std::format("\tje .Lgengcrelskip{}_{}\n", i, s);
+                out_ += std::format("\tmovq $0, {}(%rbx)\n", off);
+                out_ += "\tcall py23_rc_dec\n";
+                out_ += std::format(".Lgengcrelskip{}_{}:\n", i, s);
             }
             out_ += std::format(".Lgengcreldone{}:\n", i);
             out_ += "\tpopq %rbx\n";

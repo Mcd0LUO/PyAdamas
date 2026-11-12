@@ -151,6 +151,8 @@ void agen_drive(Py23Await* d) {
         p[2] = 0;
         p[3] = 0;
         if (sent) py23_rc_dec_unknown(sent);
+        // 异常跳过了 resume 的出口清理：帧里的堆槽当场释放。
+        py23_gen_release_slots(g);
         if (closing && e && strcmp(e->type, "GeneratorExit") == 0) {
             exc_free(e);
             driver_complete(d, 0, NULL);

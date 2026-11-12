@@ -205,8 +205,8 @@ cell 不是新的运行时类型，就是一个**单元素列表** `list[T]`：�
 ```
 
 - `resume` 是状态机代码地址，`gen_run` 用 `void (*)(void*, int64_t)` 调用；
-- `status`：0 未开始/挂起，1 已完成（槽位已释放），2 异常逃出（清理已跑，
-  槽位交给 GC），3 awaiting，4 已排队；
+- `status`：0 未开始/挂起，1 已完成（槽位已释放），2 异常逃出（槽位已在
+  展开时释放），3 awaiting，4 已排队；
 - `kind`：0 生成器，`PY23_CORO_MAGIC` 协程，`PY23_AGEN_MAGIC` 异步生成器；
 - `waiter` 是等待本对象的协程/gather/task（持有一个引用）；
 - `exc` 是待注入的 `Py23Exception*`；
@@ -224,10 +224,13 @@ void    py23_gen_close(void*);
 
 `gen_run` 用一层 C 级 handler 兜住逃出 resume 的异常：标记 `status=2`
 后重新转抛，避免生成器对象销毁时把已经跑过的 `finally`/`__exit__`
-再跑一遍。析构器（`gen_destroy`）释放帧里挂着的异常/等待者引用，再调用
-`py23_gen_finalize`：按挂起点快照执行清理并释放槽位，清理期间抛出的
-异常被吞掉。GC 清扫不执行 Python 代码，只由 codegen 生成的 `gcrel`
-把指向可达对象的槽引用减掉。
+再跑一遍；转抛前调用生成的 `gcrel`（`py23_gen_release_slots`）把帧槽
+逐槽 `dec` 并清零，所以只要对象还被引用着，槽里的值也不会滞留。
+`py23_gen_close` 的 finally 抛异常、`coro_step` / `agen_drive` 的异常
+逃出路径同样处理。析构器（`gen_destroy`）释放帧里挂着的异常/等待者
+引用，再调用 `py23_gen_finalize`：按挂起点快照执行清理并释放槽位，
+清理期间抛出的异常被吞掉。`gcrel` 与 GC 清扫共用（幂等）：清扫不执行
+Python 代码，逐槽读到非空值就 `dec` + 清零。
 
 跨挂起的 handler 记录：yield/await 前 `py23_handler_suspend` 把它从全局栈
 摘下（不 free），恢复时 `py23_handler_rearm` 重新压栈并记录临时值

@@ -311,6 +311,8 @@ int64_t py23_gen_send(void* g, int64_t sent);
 int64_t py23_gen_send_opt(void* g, int64_t sent, int64_t* ok);
 void py23_gen_close(void* g);
 void py23_gen_finalize(void* g);
+/* 释放帧里所有持有引用的槽（调用生成的 gcrel，槽清零后可重复调用）。 */
+void py23_gen_release_slots(void* g);
 int64_t now_ms(void);
 int frame_is_coro(void* p);
 int frame_is_agen(void* p);
