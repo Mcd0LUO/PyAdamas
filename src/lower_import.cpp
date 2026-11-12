@@ -189,6 +189,11 @@ std::optional<RtFn> Lowerer::native_fn(const std::string& module, const std::str
         if (member == "cpu_count") return RtFn::OsCpuCount;
         if (member == "listdir") return RtFn::OsListdir;
         if (member == "getenv") return RtFn::OsGetenv;
+        if (member == "getpid") return RtFn::OsGetpid;
+        if (member == "chdir") return RtFn::OsChdir;
+        if (member == "chmod") return RtFn::OsChmod;
+        if (member == "access") return RtFn::OsAccess;
+        if (member == "makedirs") return RtFn::OsMakedirs;
     } else if (module == "os.path") {
         if (member == "join") return RtFn::OsPathJoin;
         if (member == "exists") return RtFn::OsPathExists;
@@ -200,6 +205,11 @@ std::optional<RtFn> Lowerer::native_fn(const std::string& module, const std::str
         if (member == "normpath") return RtFn::OsPathNormpath;
         if (member == "abspath") return RtFn::OsPathAbspath;
         if (member == "expanduser") return RtFn::OsPathExpanduser;
+        if (member == "realpath") return RtFn::OsPathRealpath;
+        if (member == "getsize") return RtFn::OsPathGetsize;
+        if (member == "getmtime") return RtFn::OsPathGetmtime;
+        if (member == "split") return RtFn::OsPathSplit;
+        if (member == "samefile") return RtFn::OsPathSamefile;
     } else if (module == "subprocess") {
         if (member == "run") return RtFn::SubprocessRun;
     } else if (module == "time") {
@@ -255,6 +265,39 @@ bool Lowerer::builtin_value(const std::string& module, const std::string& member
         }
         if (member == "X" || member == "VERBOSE") {
             out = const_int(64);
+            ty = t_int();
+            return true;
+        }
+    }
+    if (module == "os") {
+        if (member == "sep") {
+            out = const_str("/");
+            ty = t_str();
+            return true;
+        }
+        if (member == "linesep") {
+            out = const_str("\n");
+            ty = t_str();
+            return true;
+        }
+        // access() 的模式位（POSIX 取值）
+        if (member == "F_OK") {
+            out = const_int(0);
+            ty = t_int();
+            return true;
+        }
+        if (member == "X_OK") {
+            out = const_int(1);
+            ty = t_int();
+            return true;
+        }
+        if (member == "W_OK") {
+            out = const_int(2);
+            ty = t_int();
+            return true;
+        }
+        if (member == "R_OK") {
+            out = const_int(4);
             ty = t_int();
             return true;
         }
@@ -456,6 +499,21 @@ VReg Lowerer::call_native(const std::string& module, const std::string& member, 
             member == "choices") {
             return lower_random_extra(member, c);
         }
+    }
+    // os.makedirs(name, exist_ok=False)：exist_ok 可选，参数在这里手工装配。
+    if (module == "os" && member == "makedirs") {
+        if (c.args.empty() || c.args.size() > 2) {
+            err(c.line, c.col,
+                std::format("os.makedirs() takes 1 or 2 arguments, got {}", c.args.size()));
+            return const_none();
+        }
+        VReg p = expr(*c.args[0]);
+        p = coerce(p, tc_.type_of(c.args[0].get()), t_str());
+        VReg ok = const_bool(false);
+        if (c.args.size() == 2)
+            ok = coerce(expr(*c.args[1]), tc_.type_of(c.args[1].get()), t_bool());
+        call_void(RtFn::OsMakedirs, {p, ok});
+        return const_none();
     }
     // random.choice 返回序列元素类型，FuncInfo 的静态签名表达不了；
     // 结果类型以类型检查阶段记录在 Call 上的类型为准。

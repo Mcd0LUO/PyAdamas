@@ -272,3 +272,89 @@ Py23Str* py23_os_path_expanduser(Py23Str* s) {
     free(joined);
     return out;
 }
+
+/* ── 补充的常用项 ───────────────────────────────────────────── */
+
+int64_t py23_os_getpid(void) { return (int64_t)getpid(); }
+
+void py23_os_chdir(Py23Str* path) {
+    if (chdir(path->data) != 0) os_raise("chdir", errno);
+}
+
+void py23_os_chmod(Py23Str* path, int64_t mode) {
+    if (chmod(path->data, (mode_t)mode) != 0) os_raise("chmod", errno);
+}
+
+int64_t py23_os_access(Py23Str* path, int64_t mode) {
+    return access(path->data, (int)mode) == 0 ? 1 : 0;
+}
+
+/* makedirs：逐级创建。中间层已存在直接跳过；最后一级已存在时，只有
+   exist_ok 为真才不报错（和 CPython 一致）。 */
+void py23_os_makedirs(Py23Str* path, int64_t exist_ok) {
+    int64_t n = path->len;
+    if (n == 0) py23_raise_c("FileNotFoundError", "No such file or directory");
+    char* buf = (char*)malloc((size_t)n + 1);
+    if (!buf) panic_c("out of memory");
+    memcpy(buf, path->data, (size_t)n);
+    buf[n] = '\0';
+    for (int64_t i = 1; i <= n; ++i) {
+        if (i < n && buf[i] != '/') continue;
+        char save = buf[i];
+        buf[i] = '\0';
+        if (mkdir(buf, 0777) != 0) {
+            int e = errno;
+            if (e != EEXIST || (i == n && !exist_ok)) {
+                buf[i] = save;
+                free(buf);
+                os_raise("makedirs", e);
+            }
+        }
+        buf[i] = save;
+    }
+    free(buf);
+}
+
+Py23Str* py23_os_path_realpath(Py23Str* s) {
+    char* r = realpath(s->data, NULL);
+    if (!r) return str_new(s->data, s->len);
+    Py23Str* out = str_new(r, (int64_t)strlen(r));
+    free(r);
+    return out;
+}
+
+int64_t py23_os_path_getsize(Py23Str* s) {
+    struct stat st;
+    if (stat(s->data, &st) != 0) os_raise("getsize", errno);
+    return (int64_t)st.st_size;
+}
+
+double py23_os_path_getmtime(Py23Str* s) {
+    struct stat st;
+    if (stat(s->data, &st) != 0) os_raise("getmtime", errno);
+    return (double)st.st_mtime;
+}
+
+/* os.path.split：拆成 (head, tail)，规则与 posixpath 一致。 */
+Py23List* py23_os_path_split(Py23Str* s) {
+    int64_t n = s->len;
+    int64_t i = n;
+    while (i > 0 && s->data[i - 1] == '/') --i;
+    while (i > 0 && s->data[i - 1] != '/') --i;
+    int64_t head_len = i;
+    while (head_len > 1 && s->data[head_len - 1] == '/') --head_len;
+    Py23Str* head = str_new(s->data, head_len);
+    Py23Str* tail = str_new(s->data + i, n - i);
+    Py23List* out = py23_list_new(2, 1);
+    py23_rc_inc(head);
+    py23_list_append(out, (int64_t)head);
+    py23_rc_inc(tail);
+    py23_list_append(out, (int64_t)tail);
+    return out;
+}
+
+int64_t py23_os_path_samefile(Py23Str* a, Py23Str* b) {
+    struct stat sa, sb;
+    if (stat(a->data, &sa) != 0 || stat(b->data, &sb) != 0) return 0;
+    return sa.st_dev == sb.st_dev && sa.st_ino == sb.st_ino;
+}

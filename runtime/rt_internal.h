@@ -676,6 +676,16 @@ Py23List* py23_os_path_splitext(Py23Str* path);
 Py23Str* py23_os_path_normpath(Py23Str* path);
 Py23Str* py23_os_path_abspath(Py23Str* path);
 Py23Str* py23_os_path_expanduser(Py23Str* path);
+int64_t py23_os_getpid(void);
+void py23_os_chdir(Py23Str* path);
+void py23_os_chmod(Py23Str* path, int64_t mode);
+int64_t py23_os_access(Py23Str* path, int64_t mode);
+void py23_os_makedirs(Py23Str* path, int64_t exist_ok);
+Py23Str* py23_os_path_realpath(Py23Str* s);
+int64_t py23_os_path_getsize(Py23Str* s);
+double py23_os_path_getmtime(Py23Str* s);
+Py23List* py23_os_path_split(Py23Str* s);
+int64_t py23_os_path_samefile(Py23Str* a, Py23Str* b);
 
 /* ── time ───────────────────────────────────────────────────────── */
 double py23_time_time(void);

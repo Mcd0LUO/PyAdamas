@@ -964,6 +964,22 @@ void AsmGen::gen_call_rt(const Inst& in) {
             case RtFn::RandGShuffle:
                 emit2("movq", src_op(in.args[0]), "%rdi");
                 break;
+            case RtFn::OsGetpid:
+                break;
+            case RtFn::OsChdir:
+            case RtFn::OsPathRealpath:
+            case RtFn::OsPathGetsize:
+            case RtFn::OsPathGetmtime:
+            case RtFn::OsPathSplit:
+                emit2("movq", src_op(in.args[0]), "%rdi");
+                break;
+            case RtFn::OsChmod:
+            case RtFn::OsAccess:
+            case RtFn::OsMakedirs:
+            case RtFn::OsPathSamefile:
+                emit2("movq", src_op(in.args[0]), "%rdi");
+                emit2("movq", src_op(in.args[1]), "%rsi");
+                break;
             case RtFn::RandRange:
                 emit2("movq", src_op(in.args[0]), "%rdi");
                 emit2("movq", src_op(in.args[1]), "%rsi");

@@ -423,6 +423,16 @@ enum class RtFn : uint16_t {
     RandTriangular,        // (rng*, low, high, mode) -> f64
     RandSample,            // (rng*, list*, k) -> list*
     RandChoices,           // (rng*, list*, k) -> list*
+    OsGetpid,              // () -> i64
+    OsChdir,               // (str*) -> void
+    OsChmod,               // (str*, i64) -> void
+    OsAccess,              // (str*, i64) -> i64
+    OsMakedirs,            // (str*, i64 exist_ok) -> void
+    OsPathRealpath,        // (str*) -> str*
+    OsPathGetsize,         // (str*) -> i64
+    OsPathGetmtime,        // (str*) -> f64
+    OsPathSplit,           // (str*) -> list*
+    OsPathSamefile,        // (str*, str*) -> i64
 };
 
 inline const char* rt_name(RtFn f) {
@@ -824,6 +834,16 @@ inline const char* rt_name(RtFn f) {
         case RtFn::RandTriangular: return "py23_random_triangular";
         case RtFn::RandSample: return "py23_random_sample";
         case RtFn::RandChoices: return "py23_random_choices";
+        case RtFn::OsGetpid: return "py23_os_getpid";
+        case RtFn::OsChdir: return "py23_os_chdir";
+        case RtFn::OsChmod: return "py23_os_chmod";
+        case RtFn::OsAccess: return "py23_os_access";
+        case RtFn::OsMakedirs: return "py23_os_makedirs";
+        case RtFn::OsPathRealpath: return "py23_os_path_realpath";
+        case RtFn::OsPathGetsize: return "py23_os_path_getsize";
+        case RtFn::OsPathGetmtime: return "py23_os_path_getmtime";
+        case RtFn::OsPathSplit: return "py23_os_path_split";
+        case RtFn::OsPathSamefile: return "py23_os_path_samefile";
     }
     return "?";
 }

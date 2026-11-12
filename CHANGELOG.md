@@ -4,6 +4,25 @@
 
 早期阶段没有逐条留痕，按阶段归纳；0.4 之后逐条记录。
 
+## [0.91] - 2026-11-12
+
+`os` / `os.path` 补齐常用项。
+
+### 新增
+
+- **`os.makedirs(path[, exist_ok])`**：逐级创建；中间层已存在直接跳过，
+  最后一级已存在时只有 `exist_ok` 为真才不报错。
+- **`os.getpid()` / `os.chdir(path)` / `os.chmod(path, mode)` / `os.access(path, mode)`**。
+- **`os.path.realpath` / `getsize` / `getmtime` / `split` / `samefile`**：
+  `split` 返回 `(head, tail)`，`samefile` 比较 `st_dev` + `st_ino`。
+- **常量 `os.sep` / `os.linesep` / `os.F_OK` / `R_OK` / `W_OK` / `X_OK`**。
+
+### 测试
+
+- `tests/run/81_os_extra.py`：目录创建（含 exist_ok）、大小 / 修改时间、
+  拆分 / 真实路径 / 同一文件判定、chmod + access、chdir。
+- 用例数：运行 80→81。
+
 ## [0.90] - 2026-11-12
 
 `random` 补齐常用函数。

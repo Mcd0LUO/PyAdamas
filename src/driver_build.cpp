@@ -1015,6 +1015,9 @@ py23::ModuleInfoPtr builtin_module(const std::string& name) {
             func_with("Random", f);
         }
     } else if (name == "os") {
+        info->globals["sep"] = py23::t_str();
+        info->globals["linesep"] = py23::t_str();
+        for (auto& n : {"F_OK", "R_OK", "W_OK", "X_OK"}) info->globals[n] = py23::t_int();
         func("mkdir", {py23::t_str()}, py23::t_none());
         func("rmdir", {py23::t_str()}, py23::t_none());
         func("remove", {py23::t_str()}, py23::t_none());
@@ -1043,6 +1046,28 @@ py23::ModuleInfoPtr builtin_module(const std::string& name) {
             f->ret_known = true;
             func_with("getenv", f);
         }
+        func("getpid", {}, py23::t_int());
+        func("chdir", {py23::t_str()}, py23::t_none());
+        func("chmod", {py23::t_str(), py23::t_int()}, py23::t_none());
+        func("access", {py23::t_str(), py23::t_int()}, py23::t_bool());
+        {
+            // makedirs(name, exist_ok=False)：exist_ok 的参数在降级阶段
+            // 手工装配（默认值没有 AST 节点可用）。
+            auto f = std::make_shared<py23::FuncInfo>();
+            f->name = "os.makedirs";
+            py23::Param p;
+            p.name = "name";
+            p.ty = py23::t_str();
+            f->pos.push_back(std::move(p));
+            py23::Param q;
+            q.name = "exist_ok";
+            q.ty = py23::t_bool();
+            q.has_default = true;
+            f->pos.push_back(std::move(q));
+            f->ret = py23::t_none();
+            f->ret_known = true;
+            func_with("makedirs", f);
+        }
     } else if (name == "os.path") {
         auto f = std::make_shared<py23::FuncInfo>();
         f->name = "join";
@@ -1058,6 +1083,11 @@ py23::ModuleInfoPtr builtin_module(const std::string& name) {
         for (auto& n : {"basename", "dirname", "normpath", "abspath", "expanduser"})
             func(n, {py23::t_str()}, py23::t_str());
         func("splitext", {py23::t_str()}, py23::mk_tuple({py23::t_str(), py23::t_str()}));
+        func("realpath", {py23::t_str()}, py23::t_str());
+        func("getsize", {py23::t_str()}, py23::t_int());
+        func("getmtime", {py23::t_str()}, py23::t_float());
+        func("split", {py23::t_str()}, py23::mk_tuple({py23::t_str(), py23::t_str()}));
+        func("samefile", {py23::t_str(), py23::t_str()}, py23::t_bool());
     } else if (name == "subprocess") {
         auto f = std::make_shared<py23::FuncInfo>();
         f->name = "run";
