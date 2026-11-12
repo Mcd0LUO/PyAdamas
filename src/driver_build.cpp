@@ -759,6 +759,24 @@ py23::ModuleInfoPtr builtin_module(const std::string& name) {
         }
         // OrderedDict：py23 的 dict 保序，直接当空 dict 用。
         func("OrderedDict", {}, py23::mk_dict(py23::t_str(), py23::t_unknown()));
+        // deque(iterable=None, maxlen=None)：两个参数都可选。
+        {
+            auto f = std::make_shared<py23::FuncInfo>();
+            f->name = "collections.deque";
+            py23::Param p;
+            p.name = "iterable";
+            p.ty = py23::mk_list(py23::t_unknown());
+            p.has_default = true;
+            f->pos.push_back(std::move(p));
+            py23::Param q;
+            q.name = "maxlen";
+            q.ty = py23::t_int();
+            q.has_default = true;
+            f->pos.push_back(std::move(q));
+            f->ret = py23::new_ty(py23::TyKind::Deque);
+            f->ret_known = true;
+            func_with("deque", f);
+        }
     } else if (name == "datetime") {
         auto dt = py23::new_ty(py23::TyKind::DateTime);
         // date(y, m, d) / today()

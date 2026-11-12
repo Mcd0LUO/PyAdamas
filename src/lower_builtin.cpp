@@ -24,6 +24,9 @@ VReg Lowerer::lower_builtin_call(const std::string& name, Call& c) {
             // range 的长度按边界算，不物化
             return call_runtime(RtFn::RangeLen, t_int(), {v});
         }
+        if (t && t->kind == TyKind::Deque) {
+            return call_runtime(RtFn::DequeLen, t_int(), {v});
+        }
         if (t && t->kind == TyKind::Class) {
             err(c.line, c.col,
                 std::format("len() of '{}' which has no __len__",
@@ -880,6 +883,12 @@ VReg Lowerer::lower_builtin_call(const std::string& name, Call& c) {
             return const_none();
         }
         TypePtr xt = tc_.type_of(c.args[0].get());
+        if (xt && xt->kind == TyKind::Deque) {
+            VReg d = expr(*c.args[0]);
+            VReg xs = call_runtime(RtFn::DequeToList, mk_list(t_int()), {d});
+            push_temp(xs);
+            return xs;
+        }
         if (!xt || (xt->kind != TyKind::List && xt->kind != TyKind::Tuple &&
                     xt->kind != TyKind::Str && xt->kind != TyKind::Dict &&
                     xt->kind != TyKind::Set && xt->kind != TyKind::File &&
@@ -956,6 +965,12 @@ VReg Lowerer::lower_builtin_call(const std::string& name, Call& c) {
             return const_none();
         }
         TypePtr xt = tc_.type_of(c.args[0].get());
+        if (xt && xt->kind == TyKind::Deque) {
+            VReg d = expr(*c.args[0]);
+            VReg xs = call_runtime(RtFn::DequeToList, mk_list(t_int()), {d});
+            push_temp(xs);
+            return xs;
+        }
         if (!xt || (xt->kind != TyKind::List && xt->kind != TyKind::Tuple &&
                     xt->kind != TyKind::Str && xt->kind != TyKind::Dict &&
                     xt->kind != TyKind::Set && xt->kind != TyKind::File &&
@@ -1095,6 +1110,12 @@ VReg Lowerer::lower_builtin_call(const std::string& name, Call& c) {
             return const_none();
         }
         TypePtr xt = tc_.type_of(c.args[0].get());
+        if (xt && xt->kind == TyKind::Deque) {
+            VReg d = expr(*c.args[0]);
+            VReg xs = call_runtime(RtFn::DequeToList, mk_list(t_int()), {d});
+            push_temp(xs);
+            return xs;
+        }
         if (!xt || (xt->kind != TyKind::List && xt->kind != TyKind::Tuple &&
                     xt->kind != TyKind::Str && xt->kind != TyKind::Dict &&
                     xt->kind != TyKind::Set && xt->kind != TyKind::File &&
@@ -1255,6 +1276,12 @@ VReg Lowerer::lower_builtin_call(const std::string& name, Call& c) {
             return const_none();
         }
         TypePtr xt = tc_.type_of(c.args[0].get());
+        if (xt && xt->kind == TyKind::Deque) {
+            VReg d = expr(*c.args[0]);
+            VReg xs = call_runtime(RtFn::DequeToList, mk_list(t_int()), {d});
+            push_temp(xs);
+            return xs;
+        }
         if (!xt || (xt->kind != TyKind::List && xt->kind != TyKind::Tuple &&
                     xt->kind != TyKind::Str && xt->kind != TyKind::Dict &&
                     xt->kind != TyKind::Set && xt->kind != TyKind::File &&

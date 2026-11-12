@@ -969,6 +969,30 @@ void AsmGen::gen_call_rt(const Inst& in) {
             case RtFn::RandGShuffle:
                 emit2("movq", src_op(in.args[0]), "%rdi");
                 break;
+            case RtFn::DequeNew:
+            case RtFn::DequePop:
+            case RtFn::DequePopleft:
+            case RtFn::DequeLen:
+            case RtFn::DequeMaxlen:
+            case RtFn::DequeClear:
+            case RtFn::DequeToList:
+                emit2("movq", src_op(in.args[0]), "%rdi");
+                break;
+            case RtFn::DequeFromList:
+            case RtFn::DequeAppend:
+            case RtFn::DequeAppendLeft:
+            case RtFn::DequeGet:
+            case RtFn::DequeRotate:
+            case RtFn::DequeExtend:
+            case RtFn::DequeExtendLeft:
+                emit2("movq", src_op(in.args[0]), "%rdi");
+                emit2("movq", src_op(in.args[1]), "%rsi");
+                break;
+            case RtFn::DequeSet:
+                emit2("movq", src_op(in.args[0]), "%rdi");
+                emit2("movq", src_op(in.args[1]), "%rsi");
+                emit2("movq", src_op(in.args[2]), "%rdx");
+                break;
             case RtFn::OsGetpid:
                 break;
             case RtFn::OsChdir:
@@ -1042,8 +1066,15 @@ void AsmGen::gen_call_rt(const Inst& in) {
             case RtFn::DateTimeStrftime:
             case RtFn::PathJoin:
             case RtFn::PathWriteText:
+            case RtFn::PathGlob:
                 emit2("movq", src_op(in.args[0]), "%rdi");
                 emit2("movq", src_op(in.args[1]), "%rsi");
+                break;
+            case RtFn::PathMkdir:
+                emit2("movq", src_op(in.args[0]), "%rdi");
+                emit2("movq", src_op(in.args[1]), "%rsi");
+                emit2("movq", src_op(in.args[2]), "%rdx");
+                emit2("movq", src_op(in.args[3]), "%rcx");
                 break;
             case RtFn::DateTimeNow:
             case RtFn::DateTimeIsoformat:
@@ -1057,6 +1088,7 @@ void AsmGen::gen_call_rt(const Inst& in) {
             case RtFn::PathIsFile:
             case RtFn::PathIsDir:
             case RtFn::PathReadText:
+            case RtFn::PathIterdir:
                 emit2("movq", src_op(in.args[0]), "%rdi");
                 break;
             case RtFn::SubprocessRun:

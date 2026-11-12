@@ -761,10 +761,19 @@ CPython 一致。
   `.minute` / `.second` / `.weekday()` 读字段，`.isoformat()` /
   `.strftime(fmt)` 格式化，`print()` 按 ISO 输出。没有 `timedelta` 和时区；
   `datetime.datetime.now()` 这种链式类方法暂不支持，用 `datetime.now()`。
-- 内置 `pathlib`：`Path(s)` 构造，`.name` / `.stem` / `.suffix` / `.parent`
-  取成分，`.exists()` / `.is_file()` / `.is_dir()` 查文件系统，
-  `.read_text()` / `.write_text(s)` 读写文本。没有 `/` 运算符、`iterdir` /
-  `glob` / `mkdir`。
+- 内置 `pathlib`：`Path(s)` 构造，`p / "x"` 拼接，`str(p)` 取路径字符串；
+  `.name` / `.stem` / `.suffix` / `.parent` 取成分，`.exists()` / `.is_file()` /
+  `.is_dir()` 查文件系统，`.read_text()` / `.write_text(s)` 读写文本，
+  `.iterdir()` / `.glob(pattern)` 列目录（`*`、`?`、`**` 递归），
+  `.mkdir(mode=0o777, parents=False, exist_ok=False)` 建目录。
+  没有 `unlink` / `rmdir` / `with_suffix` / `parts`。
+- 内置 `collections`：`Counter(iterable)` 计数 + `.most_common(n)`；
+  `OrderedDict()`（py23 的 dict 本来就保序）；`deque([iterable[, maxlen]])`
+  环形队列，支持 `append`/`appendleft`/`pop`/`popleft`/`rotate`/`clear`/
+  `extend`/`extendleft`、`len`、下标和迭代。没有 `defaultdict` / `namedtuple`。
+- 内置模块的构造器可以用 `from X import Y` 直接引入：`from pathlib import Path`、
+  `from collections import deque, OrderedDict, Counter`、
+  `from datetime import date, datetime`。
 - 内置 `json`：`dumps(obj)` 按静态类型生成 JSON；`loads(text, sample)`
   用 sample 的静态类型决定结果结构，覆盖 int/bool/float/str/None/list/
   dict/定长 tuple；默认分隔符 `", "` / `": "`。

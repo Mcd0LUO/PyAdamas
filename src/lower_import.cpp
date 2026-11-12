@@ -86,6 +86,17 @@ VReg Lowerer::construct_imported(const ImportedClass& ic, Call& c, TypePtr cls_t
     return def_heap(cls_ty, std::move(in));
 }
 
+/* 模块里的「构造器」：由 lower_<module> 分派处理，运行时没有对应函数，
+   所以 native_fn 里查不到。from X import Y 需要单独认这些名字。 */
+static bool module_ctor(const std::string& module, const std::string& name) {
+    if (module == "pathlib") return name == "Path";
+    if (module == "collections")
+        return name == "deque" || name == "OrderedDict" || name == "defaultdict";
+    if (module == "datetime") return name == "date" || name == "datetime";
+    if (module == "random") return name == "Random";
+    return false;
+}
+
 std::optional<RtFn> Lowerer::native_fn(const std::string& module, const std::string& member) {
     if (module == "asyncio") {
         // 只为 from-import 登记别名；真正降级走 lower_asyncio。
@@ -616,7 +627,8 @@ VReg Lowerer::lower_itertools(const std::string& member, Call& c) {
 }
 
 VReg Lowerer::lower_collections(const std::string& member, Call& c) {
-    if (!c.keywords.empty()) {
+    // deque 收 maxlen= 关键字，其它几个不收。
+    if (!c.keywords.empty() && member != "deque") {
         err(c.line, c.col,
             std::format("collections.{}() does not take keyword arguments", member));
     }
@@ -647,6 +659,44 @@ VReg Lowerer::lower_collections(const std::string& member, Call& c) {
         empty.line = c.line;
         empty.col = c.col;
         return lower_dict(empty, mk_dict(t_str(), t_unknown()));
+    }
+    if (member == "deque") {
+        TypePtr rt = tc_.type_of(&c);
+        if (!rt || rt->kind != TyKind::Deque) rt = new_ty(TyKind::Deque);
+        VReg maxlen = const_int(0);
+        for (auto& kw : c.keywords) {
+            if (kw.arg == "maxlen") {
+                maxlen = coerce(expr(*kw.value), tc_.type_of(kw.value.get()), t_int());
+            } else {
+                err(kw.value->line, kw.value->col,
+                    std::format("collections.deque() got an unexpected keyword argument '{}'",
+                                kw.arg));
+            }
+        }
+        if (c.args.size() > 2) {
+            err(c.line, c.col,
+                "collections.deque() takes at most 2 positional arguments");
+            return const_none();
+        }
+        if (c.args.size() == 2) {
+            maxlen = coerce(expr(*c.args[1]), tc_.type_of(c.args[1].get()), t_int());
+        }
+        if (!c.args.empty()) {
+            TypePtr at = tc_.type_of(c.args[0].get());
+            VReg items;
+            if (at && at->kind == TyKind::Str) {
+                items = call_runtime(RtFn::StrToList, mk_list(t_str()), {expr(*c.args[0])});
+                push_temp(items);
+            } else {
+                items = expr(*c.args[0]);
+            }
+            VReg v = call_runtime(RtFn::DequeFromList, rt, {items, maxlen});
+            push_temp(v);
+            return v;
+        }
+        VReg v = call_runtime(RtFn::DequeNew, rt, {maxlen});
+        push_temp(v);
+        return v;
     }
     err(c.line, c.col, std::format("collections.{} is not supported", member));
     return const_none();
@@ -938,7 +988,7 @@ void Lowerer::lower_import_from(ImportFrom& im) {
     if (im.names.size() == 1 && im.names[0].name == "*") {
         for (auto& [name, ty] : mod->globals) {
             if (name.empty() || name[0] == '_') continue;
-            if (mod->builtin && native_fn(mod->name, name)) {
+            if (mod->builtin && (native_fn(mod->name, name) || module_ctor(mod->name, name))) {
                 native_aliases_[name] = NativeRef{mod->name, name};
                 continue;
             }
@@ -961,7 +1011,7 @@ void Lowerer::lower_import_from(ImportFrom& im) {
     for (auto& al : im.names) {
         std::string bind = al.asname.empty() ? al.name : al.asname;
         if (mod->builtin) {
-            if (native_fn(mod->name, al.name)) {
+            if (native_fn(mod->name, al.name) || module_ctor(mod->name, al.name)) {
                 native_aliases_[bind] = NativeRef{mod->name, al.name};
                 continue;
             }

@@ -416,6 +416,9 @@ enum class RtFn : uint16_t {
     PathIsDir,             // (path*) -> i64
     PathReadText,          // (path*) -> str*
     PathWriteText,         // (path*, str*) -> i64
+    PathIterdir,           // (path*) -> list[path]*
+    PathGlob,              // (path*, str*) -> list[path]*
+    PathMkdir,             // (path*, mode, parents, exist_ok) -> i64
     RandRange,             // (rng*, a, b, step) -> i64
     RandGetrandbits,       // (rng*, k) -> i64
     RandGauss,             // (rng*, mu, sigma) -> f64
@@ -433,6 +436,21 @@ enum class RtFn : uint16_t {
     OsPathGetmtime,        // (str*) -> f64
     OsPathSplit,           // (str*) -> list*
     OsPathSamefile,        // (str*, str*) -> i64
+    DequeNew,              // (maxlen) -> deque*
+    DequeFromList,         // (list*, maxlen) -> deque*
+    DequeAppend,           // (dq*, v) -> void
+    DequeAppendLeft,       // (dq*, v) -> void
+    DequePop,              // (dq*) -> v
+    DequePopleft,          // (dq*) -> v
+    DequeLen,              // (dq*) -> i64
+    DequeMaxlen,           // (dq*) -> i64
+    DequeGet,              // (dq*, i) -> v
+    DequeSet,              // (dq*, i, v) -> void
+    DequeRotate,           // (dq*, n) -> void
+    DequeClear,            // (dq*) -> void
+    DequeExtend,           // (dq*, list*) -> void
+    DequeExtendLeft,       // (dq*, list*) -> void
+    DequeToList,           // (dq*) -> list*
 };
 
 inline const char* rt_name(RtFn f) {
@@ -827,6 +845,9 @@ inline const char* rt_name(RtFn f) {
         case RtFn::PathIsDir: return "py23_path_is_dir";
         case RtFn::PathReadText: return "py23_path_read_text";
         case RtFn::PathWriteText: return "py23_path_write_text";
+        case RtFn::PathIterdir: return "py23_path_iterdir";
+        case RtFn::PathGlob: return "py23_path_glob";
+        case RtFn::PathMkdir: return "py23_path_mkdir";
         case RtFn::RandRange: return "py23_random_randrange";
         case RtFn::RandGetrandbits: return "py23_random_getrandbits";
         case RtFn::RandGauss: return "py23_random_gauss";
@@ -844,6 +865,21 @@ inline const char* rt_name(RtFn f) {
         case RtFn::OsPathGetmtime: return "py23_os_path_getmtime";
         case RtFn::OsPathSplit: return "py23_os_path_split";
         case RtFn::OsPathSamefile: return "py23_os_path_samefile";
+        case RtFn::DequeNew: return "py23_deque_new";
+        case RtFn::DequeFromList: return "py23_deque_from_list";
+        case RtFn::DequeAppend: return "py23_deque_append";
+        case RtFn::DequeAppendLeft: return "py23_deque_appendleft";
+        case RtFn::DequePop: return "py23_deque_pop";
+        case RtFn::DequePopleft: return "py23_deque_popleft";
+        case RtFn::DequeLen: return "py23_deque_len";
+        case RtFn::DequeMaxlen: return "py23_deque_maxlen";
+        case RtFn::DequeGet: return "py23_deque_get";
+        case RtFn::DequeSet: return "py23_deque_set";
+        case RtFn::DequeRotate: return "py23_deque_rotate";
+        case RtFn::DequeClear: return "py23_deque_clear";
+        case RtFn::DequeExtend: return "py23_deque_extend";
+        case RtFn::DequeExtendLeft: return "py23_deque_extendleft";
+        case RtFn::DequeToList: return "py23_deque_to_list";
     }
     return "?";
 }
@@ -1155,6 +1191,7 @@ inline bool ir_is_heap(const TypePtr& t) {
         case TyKind::Match:
         case TyKind::DateTime:
         case TyKind::Path:
+        case TyKind::Deque:
             return true;
         case TyKind::Optional:
             return !t->sub.empty() && ir_is_heap(t->sub[0]);
@@ -1198,6 +1235,7 @@ inline bool ir_is_ref(const TypePtr& t) {
         case TyKind::Match:
         case TyKind::DateTime:
         case TyKind::Path:
+        case TyKind::Deque:
             return true;
         default:
             return false;

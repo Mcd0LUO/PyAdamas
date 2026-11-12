@@ -613,6 +613,24 @@ int64_t py23_pow_i64(int64_t base, int64_t exp);
 
 /* ── random：CPython 兼容的 MT19937 ─────────────────────────────── */
 typedef struct Py23Random Py23Random;
+/* deque：环形缓冲的双端队列。pop/popleft 返回转移引用。 */
+typedef struct Py23Deque Py23Deque;
+Py23Deque* py23_deque_new(int64_t maxlen);
+Py23Deque* py23_deque_from_list(Py23List* items, int64_t maxlen);
+void py23_deque_append(Py23Deque* d, int64_t v);
+void py23_deque_appendleft(Py23Deque* d, int64_t v);
+int64_t py23_deque_pop(Py23Deque* d);
+int64_t py23_deque_popleft(Py23Deque* d);
+int64_t py23_deque_len(Py23Deque* d);
+int64_t py23_deque_maxlen(Py23Deque* d);
+int64_t py23_deque_get(Py23Deque* d, int64_t i);
+void py23_deque_set(Py23Deque* d, int64_t i, int64_t v);
+void py23_deque_rotate(Py23Deque* d, int64_t n);
+void py23_deque_clear(Py23Deque* d);
+void py23_deque_extend(Py23Deque* d, Py23List* items);
+void py23_deque_extendleft(Py23Deque* d, Py23List* items);
+Py23List* py23_deque_to_list(Py23Deque* d);
+
 /* datetime / pathlib：都是不透明句柄，字段读取和字符串操作走下面的函数。 */
 typedef struct Py23DateTime Py23DateTime;
 typedef struct Py23Path Py23Path;
@@ -635,6 +653,9 @@ int64_t py23_path_is_file(Py23Path* p);
 int64_t py23_path_is_dir(Py23Path* p);
 Py23Str* py23_path_read_text(Py23Path* p);
 int64_t py23_path_write_text(Py23Path* p, Py23Str* text);
+Py23List* py23_path_iterdir(Py23Path* p);
+Py23List* py23_path_glob(Py23Path* p, Py23Str* pattern);
+int64_t py23_path_mkdir(Py23Path* p, int64_t mode, int64_t parents, int64_t exist_ok);
 
 Py23Random* py23_random_new(int64_t seed);void py23_random_seed(Py23Random* r, int64_t seed);
 double py23_random_next(Py23Random* r);

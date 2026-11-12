@@ -238,9 +238,11 @@ VReg Lowerer::lower_method_call(Attribute& at, Call& c) {
                     recv_ty->kind == TyKind::AsyncTaskGroup ||
                     recv_ty->kind == TyKind::AsyncSemaphore ||
                     recv_ty->kind == TyKind::DateTime ||
-                    recv_ty->kind == TyKind::Path)) {
+                    recv_ty->kind == TyKind::Path ||
+                    recv_ty->kind == TyKind::Deque)) {
         if (opt) recv = guard_not_none(recv, std::format("method '{}'", at.attr));
-        if (!c.keywords.empty())
+        // Path.mkdir 只收关键字参数，下面单独处理。
+        if (!c.keywords.empty() && !(recv_ty->kind == TyKind::Path && at.attr == "mkdir"))
             err(c.line, c.col, std::format("{}() does not take keyword arguments", at.attr));
         auto count = [&](size_t n) {
             if (c.args.size() == n) return true;
@@ -386,7 +388,89 @@ VReg Lowerer::lower_method_call(Attribute& at, Call& c) {
                 s = coerce(s, tc_.type_of(c.args[0].get()), t_str());
                 return call_runtime(RtFn::PathWriteText, t_int(), {recv, s});
             }
+            if (at.attr == "iterdir") {
+                if (!count(0)) return const_none();
+                TypePtr rt = tc_.type_of(&c);
+                if (!rt || rt->kind != TyKind::List) rt = mk_list(new_ty(TyKind::Path));
+                VReg v = call_runtime(RtFn::PathIterdir, rt, {recv});
+                push_temp(v);
+                return v;
+            }
+            if (at.attr == "glob") {
+                if (!count(1)) return const_none();
+                VReg pat = expr(*c.args[0]);
+                pat = coerce(pat, tc_.type_of(c.args[0].get()), t_str());
+                TypePtr rt = tc_.type_of(&c);
+                if (!rt || rt->kind != TyKind::List) rt = mk_list(new_ty(TyKind::Path));
+                VReg v = call_runtime(RtFn::PathGlob, rt, {recv, pat});
+                push_temp(v);
+                return v;
+            }
+            if (at.attr == "mkdir") {
+                if (!c.args.empty()) {
+                    err(c.line, c.col, "pathlib.Path.mkdir() takes only keyword arguments");
+                    return const_none();
+                }
+                VReg mode = const_int(0777);
+                VReg parents = const_int(0);
+                VReg exist_ok = const_int(0);
+                for (auto& kw : c.keywords) {
+                    if (kw.arg == "mode") {
+                        mode = coerce(expr(*kw.value), tc_.type_of(kw.value.get()), t_int());
+                    } else if (kw.arg == "parents") {
+                        parents = coerce(expr(*kw.value), tc_.type_of(kw.value.get()), t_bool());
+                    } else if (kw.arg == "exist_ok") {
+                        exist_ok = coerce(expr(*kw.value), tc_.type_of(kw.value.get()), t_bool());
+                    } else {
+                        err(kw.value->line, kw.value->col,
+                            std::format("pathlib.Path.mkdir() got an unexpected keyword "
+                                        "argument '{}'",
+                                        kw.arg));
+                    }
+                }
+                call_void(RtFn::PathMkdir, {recv, mode, parents, exist_ok});
+                return const_none();
+            }
             err(c.line, c.col, std::format("pathlib.Path has no method '{}'", at.attr));
+            return const_none();
+        }
+        if (recv_ty->kind == TyKind::Deque) {
+            TypePtr et = t_int();
+            if (at.attr == "append" || at.attr == "appendleft") {
+                if (!count(1)) return const_none();
+                VReg v = expr(*c.args[0]);
+                call_void(at.attr == "append" ? RtFn::DequeAppend : RtFn::DequeAppendLeft,
+                          {recv, v});
+                return const_none();
+            }
+            if (at.attr == "pop" || at.attr == "popleft") {
+                if (!count(0)) return const_none();
+                TypePtr rt = tc_.type_of(&c);
+                if (!rt || rt->kind == TyKind::Unknown) rt = et;
+                VReg v = call_runtime(
+                    at.attr == "pop" ? RtFn::DequePop : RtFn::DequePopleft, rt, {recv});
+                if (ir_is_heap(rt)) push_temp(v);
+                return v;
+            }
+            if (at.attr == "rotate") {
+                if (!count(1)) return const_none();
+                VReg n = coerce(expr(*c.args[0]), tc_.type_of(c.args[0].get()), t_int());
+                call_void(RtFn::DequeRotate, {recv, n});
+                return const_none();
+            }
+            if (at.attr == "clear") {
+                if (!count(0)) return const_none();
+                call_void(RtFn::DequeClear, {recv});
+                return const_none();
+            }
+            if (at.attr == "extend" || at.attr == "extendleft") {
+                if (!count(1)) return const_none();
+                VReg xs = expr(*c.args[0]);
+                call_void(at.attr == "extend" ? RtFn::DequeExtend : RtFn::DequeExtendLeft,
+                          {recv, xs});
+                return const_none();
+            }
+            err(c.line, c.col, std::format("collections.deque has no method '{}'", at.attr));
             return const_none();
         }
         if (recv_ty->kind == TyKind::AsyncTimeout) {

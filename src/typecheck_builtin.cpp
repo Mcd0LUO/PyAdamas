@@ -62,7 +62,8 @@ TypePtr TypeChecker::builtin_call(const std::string& n, Call& c) {
             if (a.size() != 1) return t_int();
             if (!is_unknown(a[0]) && a[0]->kind != TyKind::List && a[0]->kind != TyKind::Str &&
                 a[0]->kind != TyKind::Bytes && a[0]->kind != TyKind::Dict && a[0]->kind != TyKind::Tuple &&
-                a[0]->kind != TyKind::Set && a[0]->kind != TyKind::Range && a[0]->kind != TyKind::Class)
+                a[0]->kind != TyKind::Set && a[0]->kind != TyKind::Range &&
+                a[0]->kind != TyKind::Class && a[0]->kind != TyKind::Deque)
                 err(c.line, c.col,
                     std::format("object of type '{}' has no len()", type_name(a[0])));
             return t_int();

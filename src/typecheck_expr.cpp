@@ -697,6 +697,16 @@ TypePtr TypeChecker::binop_type(Tok op, TypePtr l, TypePtr r, int line, int col)
         if (l->kind == TyKind::Optional || r->kind == TyKind::Optional ||
             l->kind == TyKind::None || r->kind == TyKind::None)
             return t_unknown();
+        // Path / str：路径拼接（CPython 的 Path.__truediv__）
+        if (l->kind == TyKind::Path && op == Tok::SLASH) {
+            if (r->kind != TyKind::Str && !is_unknown(r)) {
+                err(line, col,
+                    std::format("unsupported operand type(s) for /: 'pathlib.Path' and '{}'",
+                                type_name(r)));
+                return t_unknown();
+            }
+            return new_ty(TyKind::Path);
+        }
         auto bad = [&]() {
             err(line, col,
                 std::format("unsupported operand type(s) for {}: '{}' and '{}'", tok_name(op),
@@ -852,6 +862,7 @@ TypePtr TypeChecker::subscript_type(TypePtr obj, TypePtr idx, int line, int col)
                         std::format("dict key type is '{}', got '{}'", type_name(obj->sub[0]),
                                     type_name(idx)));
                 return obj->sub[1];
+            case TyKind::Deque: return t_int();
             default:
                 // 类名下标是泛型参数（`MyList[int]`、`Generic[T]`），
                 // 我们不做泛型，返回 unknown 比判死有用
@@ -883,6 +894,7 @@ TypePtr TypeChecker::iter_elem(TypePtr it, int line, int col) {
             }
             case TyKind::Generator:
                 return it->sub.empty() ? t_unknown() : it->sub[0];
+            case TyKind::Deque: return t_int();
             default:
                 // 类实现了 __iter__ 时，元素类型取它返回的容器/生成器的
                 // 元素类型；没有实现就维持 unknown（生成阶段再报错）。

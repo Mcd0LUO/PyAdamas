@@ -1383,6 +1383,23 @@ TypePtr TypeChecker::method_call(TypePtr recv, const std::string& name, Call& c,
             return t_unknown();
         }
         if (recv->kind == TyKind::Path) {
+            if (name == "mkdir") {
+                // mkdir(mode=0o777, parents=False, exist_ok=False)：只收关键字。
+                argc(0, 0);
+                for (auto& kw : c.keywords) {
+                    if (kw.arg == "mode") {
+                        expr(*kw.value);
+                    } else if (kw.arg == "parents" || kw.arg == "exist_ok") {
+                        expr(*kw.value);
+                    } else {
+                        err(kw.value->line, kw.value->col,
+                            std::format("pathlib.Path.mkdir() got an unexpected keyword "
+                                        "argument '{}'",
+                                        kw.arg));
+                    }
+                }
+                return t_none();
+            }
             if (!c.keywords.empty())
                 err(c.line, c.col,
                     std::format("pathlib.Path.{}() does not take keyword arguments", name));
@@ -1398,7 +1415,39 @@ TypePtr TypeChecker::method_call(TypePtr recv, const std::string& name, Call& c,
                 argc(1, 1);
                 return t_int();
             }
+            if (name == "iterdir") {
+                argc(0, 0);
+                return mk_list(new_ty(TyKind::Path));
+            }
+            if (name == "glob") {
+                argc(1, 1);
+                return mk_list(new_ty(TyKind::Path));
+            }
             err(c.line, c.col, std::format("pathlib.Path has no method '{}'", name));
+            return t_unknown();
+        }
+        if (recv->kind == TyKind::Deque) {
+            if (!c.keywords.empty())
+                err(c.line, c.col,
+                    std::format("collections.deque.{}() does not take keyword arguments", name));
+            if (name == "append" || name == "appendleft" || name == "extend" ||
+                name == "extendleft") {
+                argc(1, 1);
+                return t_none();
+            }
+            if (name == "pop" || name == "popleft") {
+                argc(0, 0);
+                return t_int();
+            }
+            if (name == "rotate") {
+                argc(1, 1);
+                return t_none();
+            }
+            if (name == "clear") {
+                argc(0, 0);
+                return t_none();
+            }
+            err(c.line, c.col, std::format("collections.deque has no method '{}'", name));
             return t_unknown();
         }
         if (recv->kind == TyKind::Regex) {

@@ -969,6 +969,13 @@ void Lowerer::lower_for_seq(For& f) {
     }
     VReg seq = expr(*f.iter);
     TypePtr seq_ty = tc_.type_of(f.iter.get());
+    // deque 没有按下标直取的迭代路径：先转成列表再走普通 list 迭代。
+    if (seq_ty && seq_ty->kind == TyKind::Deque) {
+        VReg xs = call_runtime(RtFn::DequeToList, mk_list(t_int()), {seq});
+        push_temp(xs);
+        seq = xs;
+        seq_ty = mk_list(t_int());
+    }
     // 用户类实现 __iter__ 时先调用它，再按返回类型（generator/list/...）
     // 走现有的迭代路径。
     if (seq_ty && seq_ty->kind == TyKind::Class) {

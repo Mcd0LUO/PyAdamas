@@ -70,6 +70,7 @@ enum class TyKind : uint8_t {
     Match,        // re.search()/match() 返回的 Match
     DateTime,     // datetime.date / datetime.datetime
     Path,         // pathlib.Path
+    Deque,        // collections.deque
 };
 
 struct Type;
@@ -721,6 +722,7 @@ inline std::string type_name_impl(const TypePtr& t, int depth) {
         case TyKind::Match: return "re.Match";
         case TyKind::DateTime: return "datetime";
         case TyKind::Path: return "pathlib.Path";
+        case TyKind::Deque: return "collections.deque";
     }
     return "?";
 }

@@ -43,10 +43,10 @@ py23 不追求兼容 CPython：语义是按静态类型的需要重新定的。�
 | `time` | `time`/`monotonic`/`perf_counter`/`sleep`，秒为单位 | 完整 time | 没有 `localtime`/`gmtime`/`strftime`/`mktime` |
 | `string` | 常量 + `capwords()`，随编译器分发 `stdlib/string.py` | 完整 string | 子集；`capwords` 用 `split()` + `capitalize()` |
 | `itertools` | `chain`/`repeat`/`islice`，按实参静态特化，返回 list | 完整 itertools | 立即求值，没有惰性迭代器；`islice` 只接受 `(x, stop)` |
-| `collections` | `Counter`/`most_common`、`OrderedDict()`（dict 本来就保序） | 完整 collections | 没有 `defaultdict`/`deque`/`namedtuple`；`Counter` 返回普通 dict；`OrderedDict` 只支持空构造 |
+| `collections` | `Counter`/`most_common`、`OrderedDict()`（dict 本来就保序）、`deque([iterable[, maxlen]])` 的 append/appendleft/pop/popleft/rotate/clear/extend/extendleft + `len`/下标/迭代 | 完整 collections | 没有 `defaultdict`/`namedtuple`；`Counter` 返回普通 dict；`OrderedDict` 只支持空构造；deque 只在元素明确是堆类型时才增减引用（字符串元素可能泄漏，不会崩） |
 | `functools` | `reduce`/`wraps` | 完整 functools | `partial`/`lru_cache` 需要运行期构造闭包，未支持；`wraps` 只作装饰器用（不建模 `__name__`/`__doc__`，装饰器链里整层跳过）；`reduce` 的 float 元素要求 f 形参是 float |
 | `datetime` | `date`/`datetime` 构造、`now`/`today`、字段、`isoformat`/`strftime`/`weekday` | 完整 datetime | 没有 `timedelta`、时区、`fromtimestamp`；`datetime.datetime.now()` 这种链式类方法不支持，用 `datetime.now()` |
-| `pathlib` | `Path` 构造、`name`/`stem`/`suffix`/`parent`、`exists`/`is_file`/`is_dir`、`read_text`/`write_text` | 完整 pathlib | 没有 `/` 运算符、`iterdir`/`glob`/`mkdir`；`str(Path)` 未接（`print(p)` 可以） |
+| `pathlib` | `Path` 构造、`/` 运算符、`str(p)`、`name`/`stem`/`suffix`/`parent`、`exists`/`is_file`/`is_dir`、`read_text`/`write_text`、`iterdir`/`glob`/`mkdir` | 完整 pathlib | 没有 `unlink`/`rmdir`/`with_suffix`/`parts`；`glob` 支持 `*`/`?`/`**`，不支持字符类 `[...]`；`mkdir` 只收关键字参数（同 CPython） |
 | `slice` / `vars` / `dir` | `slice()` 只在下标位置（脱糖折成切片语法）；`vars(obj)` 返回字段 dict（value 统一 unknown）；`dir()` 列成员名 | 完整语义 | 没有运行期 slice 对象；`vars()` 无参（locals）不支持；`dir(模块)` 不支持 |
 | `json` | `dumps(obj, indent=n, sort_keys=True)` / `loads(text, sample)`；默认分隔符 `", "`/`": "`；`loads` 用 sample 的静态类型决定目标结构 | 完整 json | 没有 `separators`/`ensure_ascii`/`default`；`loads` 必须给 sample（`None` 用于解析 null）；只覆盖 int/bool/float/str/None/list/dict/定长 tuple；dict 的 value 类型必须一致（混合 value 推不出静态类型） |
 | `math.fsum` | `list[float]` 的 Shewchuk 精确求和；`list[int]` 在 build 阶段报错 | CPython 接受任意数值可迭代 | 只收 `list[float]`；结果是正确舍入 |

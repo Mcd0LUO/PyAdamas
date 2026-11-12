@@ -4,6 +4,29 @@
 
 早期阶段没有逐条留痕，按阶段归纳；0.4 之后逐条记录。
 
+## [0.94] - 2026-11-12
+
+`collections.deque` 与 pathlib 补完。
+
+### 新增
+
+- **`collections.deque([iterable[, maxlen]])`**：环形缓冲实现，`append` /
+  `appendleft` / `pop` / `popleft` / `rotate` / `clear` / `extend` /
+  `extendleft`，加 `len` / 下标 / 迭代 / `list(d)`。`maxlen` 满了从另一端
+  丢最旧的，与 CPython 一致。新值类型 `TyKind::Deque`。
+- **`pathlib` 的 `iterdir()` / `glob(pattern)` / `mkdir(mode, parents, exist_ok)`**。
+  `glob` 支持 `*` / `?` / `**` 递归（不支持字符类）；`mkdir` 按 CPython 语义
+  只收关键字参数。
+- **`from <模块> import <构造器>`**：`from pathlib import Path`、
+  `from collections import deque, OrderedDict, Counter`、
+  `from datetime import date, datetime` 现在都能用。之前只支持
+  `import pathlib; pathlib.Path(...)` 的写法。
+
+### 修复
+
+- deque 构造时沿用列表的 `elem_kind`（空列表是保守值 2），把 int 元素当堆
+  指针执行 `rc_dec`，直接崩溃。改成只有元素类型明确是堆对象时才增减引用。
+
 ## [0.93] - 2026-11-12
 
 `collections.OrderedDict`。

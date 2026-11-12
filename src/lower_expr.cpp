@@ -595,6 +595,15 @@ VReg Lowerer::lower_binop(BinOp& b) {
     TypePtr ty = tc_.type_of(&b);
     TypePtr lt = tc_.type_of(b.left.get());
     TypePtr rt = tc_.type_of(b.right.get());
+    // Path / str：路径拼接（对应 CPython 的 Path.__truediv__）
+    if (b.op == Tok::SLASH && lt && lt->kind == TyKind::Path) {
+        VReg p = expr(*b.left);
+        VReg s = expr(*b.right);
+        s = coerce(s, rt, t_str());
+        VReg v = call_runtime(RtFn::PathJoin, new_ty(TyKind::Path), {p, s});
+        push_temp(v);
+        return v;
+    }
     // 类型检查允许但后端还做不了的组合，在这里一次性拦住。
     // 放过去的话 codegen 会走「按整数处理」的兜底路径，指针相加不报错，
     // 只是算出一个野值——这类静默错误比编译失败难查得多。
@@ -1074,6 +1083,13 @@ VReg Lowerer::lower_subscript(Subscript& s) {
         idx = coerce(idx, tc_.type_of(s.slice.get()), t_int());
         return call_runtime(RtFn::BytesAt, t_int(), {obj, idx});
     }
+    if (ot && ot->kind == TyKind::Deque) {
+        // 返回 deque 内部的借用引用，和 list 的 IndexLoad 语义一致
+        idx = coerce(idx, tc_.type_of(s.slice.get()), t_int());
+        TypePtr et = tc_.type_of(&s);
+        if (!et || et->kind == TyKind::Unknown) et = t_int();
+        return call_runtime(RtFn::DequeGet, et, {obj, idx});
+    }
     if (ot && ot->kind == TyKind::Range) {
         // range 下标按边界算，不物化
         idx = coerce(idx, tc_.type_of(s.slice.get()), t_int());
@@ -1390,6 +1406,12 @@ VReg Lowerer::class_default_str(TypePtr ty) {
 VReg Lowerer::convert_to(VReg v, TypePtr from, TypePtr to) {
     if (!to) return v;
     if (from && type_eq(from, to)) return v;
+    // Path → str：拿底层路径字符串
+    if (from && from->kind == TyKind::Path && to->kind == TyKind::Str) {
+        VReg s = call_runtime(RtFn::PathStr, t_str(), {v});
+        push_temp(s);
+        return s;
+    }
     // 类实例的字符串/布尔转换走协议 dunder；没有实现就用默认行为。
     if (from && from->kind == TyKind::Class) {
         if (to->kind == TyKind::Str) {

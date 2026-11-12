@@ -1,6 +1,8 @@
 // rt_datetime.c —— datetime.date / datetime.datetime 与 pathlib.Path
 #include "rt_internal.h"
 
+#include <dirent.h>
+#include <errno.h>
 #include <sys/stat.h>
 #include <unistd.h>
 
@@ -276,3 +278,197 @@ int64_t py23_path_write_text(Py23Path* p, Py23Str* text) {
     free(c);
     return 0;
 }
+
+/* dir + "/" + name（dir 已有尾斜杠时不重复补）。 */
+static char* path_join_cstr(const char* dir, const char* name) {
+    size_t dn = strlen(dir);
+    size_t nn = strlen(name);
+    int sep = dn > 0 && dir[dn - 1] != '/';
+    char* b = (char*)malloc(dn + nn + (size_t)sep + 1);
+    if (!b) panic_c("out of memory");
+    memcpy(b, dir, dn);
+    size_t k = dn;
+    if (sep) b[k++] = '/';
+    memcpy(b + k, name, nn);
+    b[k + nn] = '\0';
+    return b;
+}
+
+static void path_list_push(Py23List* out, const char* full) {
+    size_t n = strlen(full);
+    Py23Str* s = str_alloc((int64_t)n);
+    memcpy((char*)s->data, full, n);
+    /* py23_path_new 返回的引用直接交给列表持有（list_destroy 负责 dec）。 */
+    py23_list_append(out, (int64_t)py23_path_new(s));
+}
+
+static int path_is_dot(const char* name) {
+    return name[0] == '.' && (name[1] == '\0' || (name[1] == '.' && name[2] == '\0'));
+}
+
+Py23List* py23_path_iterdir(Py23Path* p) {
+    char* c = path_cstr(p);
+    DIR* d = opendir(c);
+    if (!d) {
+        free(c);
+        py23_raise_c("FileNotFoundError", "No such file or directory");
+    }
+    Py23List* out = py23_list_new(0, 1);
+    struct dirent* e;
+    while ((e = readdir(d)) != NULL) {
+        if (path_is_dot(e->d_name)) continue;
+        char* full = path_join_cstr(c, e->d_name);
+        path_list_push(out, full);
+        free(full);
+    }
+    closedir(d);
+    free(c);
+    return out;
+}
+
+/* 单段通配：* 和 ?，不做字符类。 */
+static int path_pat_match(const char* p, int64_t pn, const char* s, int64_t sn) {
+    int64_t pi = 0, si = 0, star = -1, mark = 0;
+    while (si < sn) {
+        if (pi < pn && (p[pi] == '?' || p[pi] == s[si])) {
+            ++pi;
+            ++si;
+        } else if (pi < pn && p[pi] == '*') {
+            star = pi++;
+            mark = si;
+        } else if (star >= 0) {
+            pi = star + 1;
+            si = ++mark;
+        } else {
+            return 0;
+        }
+    }
+    while (pi < pn && p[pi] == '*') ++pi;
+    return pi == pn;
+}
+
+typedef struct {
+    const char* p;
+    int64_t n;
+} PatSeg;
+
+static void glob_walk(const char* dir, const PatSeg* segs, int64_t nseg, int64_t idx,
+                      Py23List* out) {
+    if (idx >= nseg) {
+        path_list_push(out, dir);
+        return;
+    }
+    const PatSeg* sg = &segs[idx];
+    int last = idx == nseg - 1;
+
+    /* ** 匹配零段或多段目录。 */
+    if (sg->n == 2 && sg->p[0] == '*' && sg->p[1] == '*') {
+        glob_walk(dir, segs, nseg, idx + 1, out);
+        DIR* d = opendir(dir);
+        if (!d) return;
+        struct dirent* e;
+        while ((e = readdir(d)) != NULL) {
+            if (path_is_dot(e->d_name)) continue;
+            char* sub = path_join_cstr(dir, e->d_name);
+            struct stat st;
+            if (stat(sub, &st) == 0 && S_ISDIR(st.st_mode)) glob_walk(sub, segs, nseg, idx, out);
+            free(sub);
+        }
+        closedir(d);
+        return;
+    }
+
+    DIR* d = opendir(dir);
+    if (!d) return;
+    struct dirent* e;
+    while ((e = readdir(d)) != NULL) {
+        if (path_is_dot(e->d_name)) continue;
+        if (!path_pat_match(sg->p, sg->n, e->d_name, (int64_t)strlen(e->d_name))) continue;
+        char* sub = path_join_cstr(dir, e->d_name);
+        if (last) {
+            path_list_push(out, sub);
+        } else {
+            struct stat st;
+            if (stat(sub, &st) == 0 && S_ISDIR(st.st_mode)) glob_walk(sub, segs, nseg, idx + 1, out);
+        }
+        free(sub);
+    }
+    closedir(d);
+}
+
+Py23List* py23_path_glob(Py23Path* p, Py23Str* pattern) {
+    /* 绝对模式从 "/" 起步，相对模式挂在 Path 自己下面。 */
+    int absolute = pattern->len > 0 && pattern->data[0] == '/';
+    char* base = absolute ? NULL : path_cstr(p);
+    if (absolute) {
+        base = (char*)malloc(2);
+        if (!base) panic_c("out of memory");
+        base[0] = '/';
+        base[1] = '\0';
+    }
+
+    /* 切段：连续的 '/' 忽略，尾随 '/' 也忽略。 */
+    PatSeg segs[32];
+    int64_t nseg = 0;
+    int64_t i = 0;
+    int64_t n = pattern->len;
+    while (i < n) {
+        while (i < n && pattern->data[i] == '/') ++i;
+        int64_t st = i;
+        while (i < n && pattern->data[i] != '/') ++i;
+        if (i > st) {
+            if (nseg >= 32) {
+                free(base);
+                py23_raise_c("ValueError", "pathlib: pattern has too many segments");
+            }
+            segs[nseg].p = pattern->data + st;
+            segs[nseg].n = i - st;
+            ++nseg;
+        }
+    }
+
+    Py23List* out = py23_list_new(0, 1);
+    if (nseg > 0) glob_walk(base, segs, nseg, 0, out);
+    free(base);
+    return out;
+}
+
+int64_t py23_path_mkdir(Py23Path* p, int64_t mode, int64_t parents, int64_t exist_ok) {
+    char* c = path_cstr(p);
+    struct stat st;
+    int existed = stat(c, &st) == 0;
+    if (existed) {
+        if (!S_ISDIR(st.st_mode) || !exist_ok) {
+            free(c);
+            py23_raise_c("FileExistsError", "File exists");
+        }
+        free(c);
+        return 0;
+    }
+
+    if (!parents) {
+        if (mkdir(c, (mode_t)mode) != 0) {
+            int e = errno;
+            free(c);
+            py23_raise_c(e == ENOENT ? "FileNotFoundError" : "OSError", "cannot create directory");
+        }
+        free(c);
+        return 0;
+    }
+
+    int64_t n = (int64_t)strlen(c);
+    for (int64_t i = 1; i <= n; ++i) {
+        if (i != n && c[i] != '/') continue;
+        char save = c[i];
+        c[i] = '\0';
+        if (c[0] && mkdir(c, (mode_t)mode) != 0 && errno != EEXIST) {
+            c[i] = save;
+            free(c);
+            py23_raise_c("OSError", "cannot create directory");
+        }
+        c[i] = save;
+    }
+    free(c);
+    return 0;
+}
+
