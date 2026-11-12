@@ -72,3 +72,37 @@ def dot(x: list[float], y: list[float]) -> float:
     if len(x) != len(y):
         raise ValueError("vectors must have the same length")
     return cblas.ddot(len(x), x, 1, y, 1)
+
+
+def axpy(alpha: float, x: list[float], y: list[float]) -> None:
+    """原地计算 y += alpha * x，x 与 y 必须等长。"""
+    if len(x) != len(y):
+        raise ValueError("vectors must have the same length")
+    cblas.daxpy(len(x), alpha, x, 1, y, 1)
+
+
+def scal(alpha: float, x: list[float]) -> None:
+    """原地计算 x *= alpha。"""
+    cblas.dscal(len(x), alpha, x, 1)
+
+
+def norm(x: list[float]) -> float:
+    """计算向量欧几里得范数。"""
+    return cblas.dnrm2(len(x), x, 1)
+
+
+def transpose(a: list[float], m: int, n: int) -> list[float]:
+    """把 m×n 行主序矩阵转成 n×m 行主序 list。"""
+    _check_mnk(m, n, 0)
+    if len(a) < m * n:
+        raise ValueError("a has fewer than m*n elements")
+    out = _zeros(m * n)
+    i = 0
+    while i < m:
+        j = 0
+        while j < n:
+            out[j * m + i] = a[i * n + j]
+            j += 1
+        i += 1
+    return out
+

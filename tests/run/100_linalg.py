@@ -55,6 +55,36 @@ print(out[3])
 
 print(linalg.dot([1.0, 2.0, 3.0], [4.0, 5.0, 6.0]))
 
+# 向量原地运算
+y: list[float] = [1.0, 2.0, 3.0]
+linalg.axpy(0.5, [10.0, 20.0, 30.0], y)
+print(y[0])
+print(y[1])
+print(y[2])
+
+z: list[float] = [1.0, 2.0, 3.0]
+linalg.scal(2.0, z)
+print(z[0])
+print(z[1])
+print(z[2])
+
+print(linalg.norm([3.0, 4.0]))
+
+# 转置 2x3 -> 3x2
+t = linalg.transpose(a2, 2, 3)
+print(t[0])
+print(t[1])
+print(t[2])
+print(t[3])
+print(t[4])
+print(t[5])
+
+# 输入长度不足
+try:
+    linalg.matmul(a2, b2, 2, 2, 4)
+except ValueError:
+    print("caught")
+
 # --- expect ---
 # 19.0
 # 22.0
@@ -82,3 +112,17 @@ print(linalg.dot([1.0, 2.0, 3.0], [4.0, 5.0, 6.0]))
 # 43.0
 # 50.0
 # 32.0
+# 6.0
+# 12.0
+# 18.0
+# 2.0
+# 4.0
+# 6.0
+# 5.0
+# 1.0
+# 4.0
+# 2.0
+# 5.0
+# 3.0
+# 6.0
+# caught

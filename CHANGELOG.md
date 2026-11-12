@@ -27,8 +27,8 @@ C 互操作 v2：`ptr[T]` 可直接接收 py23 缓冲区，支持把数组交给
   非方阵、带转置）与 `cblas_ddot`，验证 14 参数混合编组与数组指针；开发容器
   已安装 `libopenblas-dev`。
 - 新增 stdlib `linalg`：`matmul`（支持 `trans_a`/`trans_b`）、`matmul_into`
-  复用输出缓冲、`matvec`、`dot` 封装 BLAS，用户只传行主序数据与维度；
-  配套 `stdlib/cblas.cpya`。
+  复用输出缓冲、`matvec`、`axpy`、`scal`、`norm`、`transpose`、`dot`
+  封装 BLAS，用户只传行主序数据与维度；配套 `stdlib/cblas.cpya`。
 - 新增 `100_linalg` 用例；`tests/run_tests.sh` 在缺少 OpenBLAS 时跳过
   `99_cblas`/`100_linalg` 而不是判失败。
 - 新增反例 `f44_cimport_buffer_mismatch`。

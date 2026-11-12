@@ -1108,6 +1108,9 @@ print(linalg.dot([1.0, 2.0], [3.0, 4.0]))  # 11.0
 - `matmul_into(c, a, b, m, n, k, ...)`：同 `matmul`，结果写入已有 `c`，
   避免重复分配。
 - `matvec(a, x, m, n, trans_a=False)`：计算 `op(A)·x`。
+- `axpy(alpha, x, y)`：原地 `y += alpha*x`；`scal(alpha, x)`：原地
+  `x *= alpha`；`norm(x)`：欧几里得范数。
+- `transpose(a, m, n)`：把 m×n 行主序数据转成 n×m。
 - `dot(x, y)`：等长向量点积。
 
 数据按行主序拍平传入；维度非法或输入过短会抛 `ValueError`。
