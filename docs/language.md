@@ -697,6 +697,9 @@ CPython 一致。
 `print(..., file=sys.stderr)`、`for line in sys.stdin:` 等写法。
 打开失败抛 `OSError`，关闭后读写抛 `ValueError`。
 
+`file` 也可以作为形参/字段标注；跨模块接口里它按 unknown 编码（调用点不再
+检查实参类型），但模块内的方法调用仍按 file 正常生成。
+
 ### print
 
 `print` 不是函数，是降级期展开的一串输出调用：
@@ -810,6 +813,15 @@ CPython 一致。
 - 内置 `json`：`dumps(obj)` 按静态类型生成 JSON；`loads(text, sample)`
   用 sample 的静态类型决定结果结构，覆盖 int/bool/float/str/None/list/
   dict/定长 tuple；默认分隔符 `", "` / `": "`。
+- 内置 `csv`（`stdlib/csv.py` 随编译器分发）：`reader(f, delimiter=",",
+  quotechar='"')` 一次读完文件并返回 `list[list[str]]`；
+  `writer(f, delimiter=",", quotechar='"', quoting=0, lineterminator="\r\n")`
+  是带 `writerow(list[str])` / `writerows(list[list[str]])` 的类。常量
+  `QUOTE_MINIMAL` / `QUOTE_ALL` / `QUOTE_NONNUMERIC` / `QUOTE_NONE`；
+  `Error` 是 `ValueError` 子类。只接受 `file`（不接受任意可迭代对象），
+  `reader` 只收 `delimiter`/`quotechar`，`writer` 另收 `quoting`/`lineterminator`；
+  `delimiter`/`quotechar` 按字节，必须单字节；`QUOTE_NONNUMERIC` 等同
+  `QUOTE_ALL`（字段静态类型都是 str）。没有 dialect / DictReader / DictWriter。
 - 内置 `re`：`compile` / `search` / `match` / `fullmatch` / `findall` /
   `sub` / `split` / `escape`，以及 `Pattern` 上的同名方法和 `Match` 的
   `group`/`groups`/`start`/`end`/`span`。支持字面量、`.`、字符类、

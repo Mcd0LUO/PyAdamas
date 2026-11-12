@@ -4,6 +4,39 @@
 
 早期阶段没有逐条留痕，按阶段归纳；0.4 之后逐条记录。
 
+## [0.99] - 2026-11-12
+
+`csv` 模块与模块接口编码修复。
+
+### 新增
+
+- **`stdlib/csv.py`**（随编译器分发的纯 py23 实现）：`reader(f, delimiter=",",
+  quotechar='"')` eager 读完文件并返回 `list[list[str]]`；
+  `writer(f, delimiter=",", quotechar='"', quoting=0, lineterminator="\r\n")`
+  是带 `writerow(list[str])` / `writerows(list[list[str]])` 的类。支持
+  `QUOTE_MINIMAL` / `QUOTE_ALL` / `QUOTE_NONNUMERIC` / `QUOTE_NONE`，
+  `Error` 是 `ValueError` 子类。没有 dialect / DictReader / DictWriter，
+  `reader` 只接受 `file`。
+- **`file` 标注**：`f: file` 现在解析为 `file` 类型（此前按 unknown 处理）。
+
+### 修复
+
+- **模块接口 unknown 分组缺少 `break`**：`file` / `range` / `random` /
+  `datetime` / `regex` / `match` 等类型曾被编码成 bytes 标签，跨模块调用会
+  误判参数类型。修正分组并把接口格式版本升到 4。
+- 顺带修正 Popen / DateTime / Path / Deque 的 unknown 编码。
+
+### 测试
+
+- `tests/run/91_csv.py`：读写、引号转义、字段内换行、空行、自定义分隔符、
+  `QUOTE_ALL`、`lineterminator`、未闭合引号抛 `ValueError`。
+- 用例数：运行 90→91。
+
+### 文档
+
+- `language.md` / `compatibility.md` / `roadmap.md` / `index.md` / README
+  同步 csv 能力、`file` 标注与已知限制。
+
 ## [0.98] - 2026-11-12
 
 `functools.partial` 与 `lru_cache`。

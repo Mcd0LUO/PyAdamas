@@ -168,6 +168,7 @@ TypePtr TypeChecker::parse_annotation_impl(Expr* e, int line, int depth) {
             if (id == "float") return t_float();
             if (id == "str") return t_str();
             if (id == "bytes") return t_bytes();
+            if (id == "file") return t_file();
             if (id == "bool") return t_bool();
             if (id == "None") return t_none();
             // 只建模具体容器，不建模协议：Sequence/Iterable 这类标注

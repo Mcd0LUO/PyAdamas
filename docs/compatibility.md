@@ -49,6 +49,7 @@ py23 不追求兼容 CPython：语义是按静态类型的需要重新定的。�
 | `pathlib` | `Path` 构造、`/` 运算符、`str(p)`、`name`/`stem`/`suffix`/`parent`、`exists`/`is_file`/`is_dir`、`read_text`/`write_text`、`iterdir`/`glob`/`mkdir` | 完整 pathlib | 没有 `unlink`/`rmdir`/`with_suffix`/`parts`；`glob` 支持 `*`/`?`/`**`，不支持字符类 `[...]`；`mkdir` 只收关键字参数（同 CPython） |
 | `slice` / `vars` / `dir` | `slice()` 只在下标位置（脱糖折成切片语法）；`vars(obj)` 返回字段 dict（value 统一 unknown）；`dir()` 列成员名 | 完整语义 | 没有运行期 slice 对象；`vars()` 无参（locals）不支持；`dir(模块)` 不支持 |
 | `json` | `dumps(obj, indent=n, sort_keys=True)` / `loads(text, sample)`；默认分隔符 `", "`/`": "`；`loads` 用 sample 的静态类型决定目标结构 | 完整 json | 没有 `separators`/`ensure_ascii`/`default`；`loads` 必须给 sample（`None` 用于解析 null）；只覆盖 int/bool/float/str/None/list/dict/定长 tuple；dict 的 value 类型必须一致（混合 value 推不出静态类型） |
+| `csv` | `reader(f, delimiter=",", quotechar='"')` 返回 `list[list[str]]`；`writer(f, delimiter=",", quotechar='"', quoting=0, lineterminator="\r\n")` 带 `writerow`/`writerows`；`QUOTE_*` 常量与 `Error` | 完整 csv | `reader` 只接受 `file` 且 eager 读完，不接受任意可迭代对象；`delimiter`/`quotechar` 按字节且必须单字节；`QUOTE_NONNUMERIC` 等同 `QUOTE_ALL`（字段都是 str）；没有 dialect / DictReader / DictWriter；`csv.Error` 跨模块按 `ValueError` 捕获 |
 | `math.fsum` | `list[float]` 的 Shewchuk 精确求和；`list[int]` 在 build 阶段报错 | CPython 接受任意数值可迭代 | 只收 `list[float]`；结果是正确舍入 |
 | `re` | `compile`/`search`/`match`/`fullmatch`/`findall`/`sub`/`split`/`escape`，Pattern/Match 方法，`I`/`M`/`S` 标志；回溯 VM | 完整 re | v2 支持反向引用、四向断言、原子组、占有量词、内联标志；`findall` 只有一个捕获组时返回组内容（多个时返回整段匹配），`split` 按序插入捕获组；仍不支持条件组与 Unicode 属性类；字符串按字节匹配 |
 | `bytes` | 字面量 / 索引 / 切片 / `+` / `in` / 比较 / `decode` / `encode`；相邻字面量可隐式拼接；`for c in b"..."` 产出 int，`list`/`tuple`/`sum`/`min`/`max`/`any`/`all`/`sorted`/`enumerate` 也接受 bytes；printf 风格 `%`（`d/i/u/x/X/o/f/F/e/E/g/G/s/r/c`、`%%`、标志/宽度/精度）；方法 `upper`/`lower`/`strip`/`lstrip`/`rstrip`/`replace`/`find`/`rfind`/`count`/`split`/`startswith`/`endswith`/`join` | 完整 bytes | `%` 不支持 `#` 前缀、映射 key 和把 list 当多参数元组；与 `str` 不能混拼；`bytes` 标注与跨模块签名现在保留类型 |
@@ -88,7 +89,7 @@ py23 不追求兼容 CPython：语义是按静态类型的需要重新定的。�
 |---|---|---|---|
 | 正例 | `ctest --preset dev` 里 `tests/*.py` | 11 个文件 | 前端退回保守 |
 | 反例 | `ctest --preset dev` 里 `tests/fail/*.py` | 37 个文件 | 检查器为了过测而放水 |
-| 运行 | `ctest --preset dev` 里 `tests/run/*.py` | 90 个文件 | 后端烂掉没人知道 |
+| 运行 | `ctest --preset dev` 里 `tests/run/*.py` | 91 个文件 | 后端烂掉没人知道 |
 | 模块 | `ctest --preset dev` 里 `tests/modules/*/` | 9 个目录 | 分模块编译/链接、惰性初始化、缓存失效 |
 | 未建模 | `ctest --preset dev` 里 `tests/unsupported/*.py` | 1 个文件 | 「标了没建模、实际却悄悄编译过去」 |
 | 内存 | 16MB `RLIMIT_AS` 下跑压力程序 | 拼接 / 对象 / 闭包 / 容器 / 切片 / 删除 / 推导式 / 变长实参 / `with` / 装饰器 / 异常展开 / `yield from` / 异步推导式 / 环 / unknown 泄漏 | 引用计数或 GC 漏插桩、重复释放、误回收 |
