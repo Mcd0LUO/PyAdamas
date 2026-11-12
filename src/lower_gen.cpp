@@ -26,9 +26,10 @@ VReg Lowerer::lower_yield(Expr& y) {
         err(y.line, y.col, "'yield' outside generator");
         return const_none();
     }
-    if (yield_ctx_node_ != &y) {
+    if (emit_seq_ != st_->gen_seq_base) {
         err(y.line, y.col,
-            "'yield' is only supported as a statement or assignment value in this version");
+            "'yield' must be the first evaluated value of the statement; earlier values live "
+            "in temporaries that do not survive suspension (assign them to a variable first)");
     }
     if (finally_body_depth_ > 0)
         err(y.line, y.col, "'yield' inside finally is not supported yet");
@@ -78,6 +79,8 @@ VReg Lowerer::emit_yield(VReg v, TypePtr vt) {
     gy.imm = id;
     emit(std::move(gy));
     switch_to(cont);
+    // 恢复后是一个新的 resume 段：后面的挂起点不能依赖这段之前求出的值。
+    st_->gen_seq_base = emit_seq_;
     // yield 表达式的值是 send() 传进来的（普通 next 是 None），静态不可知。
     Inst gs2;
     gs2.op = IrOp::GenSent;
@@ -289,6 +292,8 @@ VReg Lowerer::suspend_on_awaitable(VReg w, TypePtr result_ty, int line, int col,
     ga.imm = id;
     emit(std::move(ga));
     switch_to(cont);
+    // 恢复后是一个新的 resume 段：后面的挂起点不能依赖这段之前求出的值。
+    st_->gen_seq_base = emit_seq_;
     // 恢复时 sent 里是 await 的结果（或由 throw 分发注入异常）。
     TypePtr at = result_ty;
     Inst gs2;
@@ -304,10 +309,10 @@ VReg Lowerer::lower_await(Expr& e) {
         err(e.line, e.col, "'await' outside async function");
         return const_none();
     }
-    if (await_ctx_node_ != &e) {
+    if (emit_seq_ != st_->gen_seq_base) {
         err(e.line, e.col,
-            "'await' is only supported as a statement, assignment value or return value "
-            "in this version");
+            "'await' must be the first evaluated value of the statement; earlier values live "
+            "in temporaries that do not survive suspension (assign them to a variable first)");
     }
     if (finally_body_depth_ > 0)
         err(e.line, e.col, "'await' inside finally is not supported yet");

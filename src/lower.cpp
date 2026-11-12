@@ -811,17 +811,32 @@ void Lowerer::lower_classdef(ClassDef& c) {
         }
     }
 
+    // 自定义装饰器方法：方法体照常编译，但 vtable 槽不填；类创建时把
+    // 装饰器链的结果写进类属性，调用点走类属性的间接调用。
+    std::unordered_map<std::string, int> decorated_methods;
     for (auto& m : ci->methods) {
         if (!m.def) continue;
-        if (!m.def->decorators.empty() && m.kind == MethodKind::Normal) {
+        if (m.decorated) {
+            if (!m.decorated_ty || m.decorated_ty->kind != TyKind::Func) {
+                err(m.def->line, m.def->col,
+                    std::format("decorated method '{}': the decorator must return a function "
+                                "with a known signature",
+                                m.name));
+                continue;
+            }
+        } else if (!m.def->decorators.empty() && m.kind == MethodKind::Normal) {
             err(m.def->line, m.def->col,
                 "only @staticmethod / @property method decorators are supported");
             continue;
         }
         std::string label = std::format("{}_{}_{}", c.name, m.name, mod_.funcs.size());
         int fidx = compile_function_body(*m.def, m.sig, label, ci.get());
-        if (m.slot >= 0 && m.slot < static_cast<int>(mod_.classes[cid].vtable.size()))
+        if (m.decorated) {
+            decorated_methods[m.name] = fidx;
+        } else if (m.slot >= 0 &&
+                   m.slot < static_cast<int>(mod_.classes[cid].vtable.size())) {
             mod_.classes[cid].vtable[static_cast<size_t>(m.slot)] = fidx;
+        }
     }
 
     // 继承来的 @classmethod 按本类再编一份：cls 静态绑定到本类，所以
@@ -847,9 +862,81 @@ void Lowerer::lower_classdef(ClassDef& c) {
     // 全局（方法体里读到的也是这一份）；其余语句仍然按模块全局处理。
     st_->class_body_attrs.clear();
     for (auto& s : c.body) {
-        if (s->kind == StmtKind::FunctionDef || s->kind == StmtKind::AnnAssign ||
-            s->kind == StmtKind::Pass)
+        if (s->kind == StmtKind::FunctionDef) {
+            auto& f = static_cast<FunctionDef&>(*s);
+            auto dit = decorated_methods.find(f.name);
+            if (dit == decorated_methods.end()) continue;
+            // 自定义装饰器方法：生成函数值（含闭包捕获），按从下到上的
+            // 顺序应用装饰器，结果写进类属性槽；调用点通过类属性间接调用。
+            const MethodInfo* m = ci->own_method(f.name);
+            const ClassAttrInfo* ca = ci->class_attr(f.name);
+            if (!m || !ca) continue;
+            TypePtr fty = new_ty(TyKind::Func);
+            fty->fn = m->sig;
+            auto cmit = closure_meta_.find(&f);
+            const ClosureMeta* meta = cmit == closure_meta_.end() ? nullptr : &cmit->second;
+            VReg cur;
+            if (!meta || meta->env.empty()) {
+                Inst fa;
+                fa.op = IrOp::FuncAddr;
+                fa.imm = dit->second;
+                cur = def(fty, std::move(fa));
+            } else {
+                Inst fc;
+                fc.op = IrOp::FuncCode;
+                fc.imm = dit->second;
+                VReg code = def(t_int(), std::move(fc));
+                cur = call_runtime(RtFn::ClosureNew, fty,
+                                   {code, const_int(static_cast<int64_t>(meta->env.size()))});
+                push_temp(cur);
+                for (size_t i = 0; i < meta->env.size(); ++i) {
+                    VReg cell = cell_for_capture(meta->env[i].name);
+                    if (cell == kNoReg) {
+                        err(f.line, f.col,
+                            std::format("closure capture of '{}' is not available here",
+                                        meta->env[i].name));
+                        continue;
+                    }
+                    rc_inc(cell);
+                    field_store(cur, 16 + 8 * static_cast<int>(i), cell);
+                }
+            }
+            TypePtr cur_ty = fty;
+            std::string hidden = "__py23$deco$" + f.name;
+            bind_name_value(hidden, cur, cur_ty);
+            for (auto dit2 = f.decorators.rbegin(); dit2 != f.decorators.rend(); ++dit2) {
+                if (is_wraps_decorator(dit2->get())) continue;
+                Expr* de = dit2->get();
+                int line = de->line;
+                int col = de->col;
+                VReg callee = expr(*de);
+                TypePtr dt = tc_.type_of(de);
+                FuncInfoPtr dinfo = (dt && dt->kind == TyKind::Func) ? dt->fn : nullptr;
+                if (!dinfo) {
+                    err(line, col, "decorator must be a function value with a known signature");
+                    continue;
+                }
+                Call dc;
+                dc.line = line;
+                dc.col = col;
+                auto arg = std::make_unique<Name>(hidden);
+                arg->line = line;
+                arg->col = col;
+                dc.args.push_back(std::move(arg));
+                std::vector<VReg> dargs = bind_args(dc, dinfo, nullptr);
+                TypePtr rty = dinfo->ret ? dinfo->ret : t_unknown();
+                Inst in;
+                in.op = IrOp::Call;
+                in.a = callee;
+                in.args = std::move(dargs);
+                cur = def_heap(rty, std::move(in));
+                cur_ty = rty;
+                bind_name_value(hidden, cur, cur_ty);
+            }
+            class_attr_store(ci.get(), ca, cur, cur_ty);
             continue;
+        }
+        if (s->kind == StmtKind::AnnAssign || s->kind == StmtKind::Pass) continue;
         if (s->kind == StmtKind::Expr) {
             auto& e = static_cast<ExprStmt&>(*s);
             if (e.value->kind == ExprKind::Constant &&

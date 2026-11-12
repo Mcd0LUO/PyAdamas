@@ -231,6 +231,10 @@ struct MethodInfo {
     FuncInfoPtr call_sig;     // 去掉 self 的调用签名（外部 obj.m(...) 按它查）
     FunctionDef* def = nullptr;  // 供降级阶段编译方法体
     int slot = -1;
+    // 自定义装饰器：类创建时把装饰器链的结果存成类属性，调用点按
+    // decorated_ty 查参，降级时通过类属性做间接调用。
+    bool decorated = false;
+    TypePtr decorated_ty;     // 装饰器链的返回类型（含 self 位置）
     bool is_accessor() const {
         return kind == MethodKind::PropertyGetter || kind == MethodKind::PropertySetter ||
                kind == MethodKind::PropertyDeleter;

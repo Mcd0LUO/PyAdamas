@@ -39,6 +39,9 @@ void Lowerer::stmt(Stmt& s) {
     size_t mark_pos = 0;
     VReg stmt_mark = st_->is_generator ? kNoReg : rc_mark_at(mark_block, mark_pos);
     size_t pushes_before = st_->rc_pushes;
+    // 挂起点必须是本语句里第一个求值的东西：生成器 resume 会重建 C 栈帧，
+    // 之前的 vreg 不保留（见 Lowerer::emit_seq_）。
+    st_->gen_seq_base = emit_seq_;
     auto mark_comp = [&](Expr* v) {
         if (v && (v->kind == ExprKind::ListComp || v->kind == ExprKind::SetComp ||
                   v->kind == ExprKind::DictComp || v->kind == ExprKind::GeneratorExp))
@@ -47,25 +50,15 @@ void Lowerer::stmt(Stmt& s) {
     switch (s.kind) {
         case StmtKind::Expr: {
             auto& es = static_cast<ExprStmt&>(s);
-            if (es.value->kind == ExprKind::Yield || es.value->kind == ExprKind::YieldFrom)
-                yield_ctx_node_ = es.value.get();
-            if (es.value->kind == ExprKind::Await) await_ctx_node_ = es.value.get();
             mark_comp(es.value.get());
             expr(*es.value);
-            yield_ctx_node_ = nullptr;
-            await_ctx_node_ = nullptr;
             comp_ctx_node_ = nullptr;
             break;
         }
         case StmtKind::Assign: {
             auto& a = static_cast<Assign&>(s);
-            if (a.value->kind == ExprKind::Yield || a.value->kind == ExprKind::YieldFrom)
-                yield_ctx_node_ = a.value.get();
-            if (a.value->kind == ExprKind::Await) await_ctx_node_ = a.value.get();
             mark_comp(a.value.get());
             VReg v = expr(*a.value);
-            yield_ctx_node_ = nullptr;
-            await_ctx_node_ = nullptr;
             comp_ctx_node_ = nullptr;
             TypePtr vt = tc_.type_of(a.value.get());
             for (auto& t : a.targets) assign_to(*t, v, vt);
@@ -118,9 +111,6 @@ void Lowerer::stmt(Stmt& s) {
             bool typed_literal = want && vt && want->kind == vt->kind &&
                                  (want->kind == TyKind::List || want->kind == TyKind::Tuple ||
                                   want->kind == TyKind::Dict || want->kind == TyKind::Set);
-            if (a.value->kind == ExprKind::Yield || a.value->kind == ExprKind::YieldFrom)
-                yield_ctx_node_ = a.value.get();
-            if (a.value->kind == ExprKind::Await) await_ctx_node_ = a.value.get();
             mark_comp(a.value.get());
             if (typed_literal && a.value->kind == ExprKind::List)
                 v = lower_list_like(static_cast<ListExpr&>(*a.value).elts, want, false);
@@ -135,8 +125,6 @@ void Lowerer::stmt(Stmt& s) {
                 v = lower_set(static_cast<SetExpr&>(*a.value), want);
             else
                 v = expr(*a.value);
-            yield_ctx_node_ = nullptr;
-            await_ctx_node_ = nullptr;
             comp_ctx_node_ = nullptr;
             assign_to(*a.target, v, want ? want : vt);
             break;
@@ -144,11 +132,8 @@ void Lowerer::stmt(Stmt& s) {
         case StmtKind::Return: {
             auto& r = static_cast<Return&>(s);
             if (st_->is_generator) {
-                if (r.value && r.value->kind == ExprKind::Await)
-                    await_ctx_node_ = r.value.get();
                 mark_comp(r.value.get());
                 VReg v = r.value ? expr(*r.value) : kNoReg;
-                await_ctx_node_ = nullptr;
                 comp_ctx_node_ = nullptr;
                 if (st_->is_coroutine && !st_->is_async_generator) {
                     // 协程的返回值要送到 await 处（或 asyncio.run）。

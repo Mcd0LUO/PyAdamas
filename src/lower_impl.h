@@ -197,6 +197,9 @@ struct FuncCtx {
     // 生成器：槽位在堆帧里，临时值水位在每次 resume 时重新记录到槽里
     //（vreg 不跨 yield 存活）。
     bool is_generator = false;
+    // 当前语句开始时的指令序号（见 Lowerer::emit_seq_）。挂起点必须是
+    // 这条语句里第一个被求值的东西，否则恢复后要用到丢失的 vreg。
+    size_t gen_seq_base = 0;
     int gen_mark_slot = -1;
     int gen_next_state = 1;
     // async def：同一个帧状态机，await 作为第三种挂起。
@@ -248,10 +251,10 @@ private:
 
     std::unordered_map<std::string, int> global_ids_;
     std::unordered_map<std::string, FunctionDef*> func_defs_;
-    // yield 只在语句级 / 赋值右值里可用：其它位置会有临时 vreg 跨挂起，
-    // 而 vreg 的栈槽不随帧保存。
-    const Expr* yield_ctx_node_ = nullptr;
-    const Expr* await_ctx_node_ = nullptr;
+    // 已发射的指令序号。生成器的 resume 每次重新建 C 栈帧，vreg 的槽不会
+    // 保留；挂起点前已经求过值的语句恢复后不能再使用这些 vreg，降级时用
+    // 这个序号做保守判定（见 FuncCtx::gen_seq_base）。
+    size_t emit_seq_ = 0;
     // 含 async for 的推导式会挂起，只能作为整条语句/赋值/返回值的根表达式：
     // 嵌套在别的表达式里时，外层还有未完成的临时值，挂起会一起清掉。
     const Expr* comp_ctx_node_ = nullptr;
@@ -317,12 +320,14 @@ private:
         VReg r = alloc(ty);
         in.dst = r;
         in.ty = ty;
+        ++emit_seq_;
         if (!cur().terminated()) cur().insts.push_back(std::move(in));
         return r;
     }
 
     void emit(Inst in) {
         in.dst = kNoReg;
+        ++emit_seq_;
         if (!cur().terminated()) cur().insts.push_back(std::move(in));
     }
 

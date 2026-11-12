@@ -31,7 +31,7 @@ VReg Lowerer::lower_super_call(Attribute& at, Call& c) {
             std::format("super() has no method '{}' after class '{}'", at.attr, owner->name));
         return const_none();
     }
-    if (m->kind != MethodKind::Normal) {
+    if (m->kind != MethodKind::Normal || m->decorated) {
         err(c.line, c.col,
             std::format("super().{} is not a plain method (decorators on super targets are "
                         "not supported yet)", at.attr));
@@ -185,6 +185,25 @@ VReg Lowerer::lower_method_call(Attribute& at, Call& c) {
             err(c.line, c.col,
                 std::format("'{}' object has no method '{}'", recv_ty->cls->name, at.attr));
             return const_none();
+        }
+        if (m->decorated) {
+            // 装饰后的方法值存在类属性里：加载出来，把 self 作为第一个
+            // 实参传进去（装饰器按普通函数值被调用）。
+            const ClassAttrInfo* ca = recv_ty->cls->class_attr(at.attr);
+            if (!ca || !m->call_sig) {
+                err(c.line, c.col,
+                    std::format("decorated method '{}' is not available here", at.attr));
+                return const_none();
+            }
+            VReg fv = class_attr_load_dyn(recv, recv_ty->cls, ca);
+            std::vector<VReg> args = bind_args(c, m->call_sig, nullptr);
+            args.insert(args.begin(), recv);
+            Inst in;
+            in.op = IrOp::Call;
+            in.a = fv;
+            in.args = std::move(args);
+            TypePtr rt = m->call_sig->ret ? m->call_sig->ret : t_none();
+            return def_heap(rt, std::move(in));
         }
         if (!m->call_sig) return const_none();
         std::vector<VReg> args = bind_args(c, m->call_sig, m->def);

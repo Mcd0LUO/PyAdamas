@@ -540,9 +540,25 @@ void TypeChecker::classdef(ClassDef& c) {
         };
         auto rebuild_call_sig = [](MethodInfo& m) {
             if (!m.sig) return;
-            if (m.kind == MethodKind::Normal && m.def && !m.def->decorators.empty()) {
-                // 未识别的方法装饰器：语义不确定，调用点不检查实参。
-                m.call_sig = nullptr;
+            if (m.decorated) {
+                // 装饰器链的返回值就是调用点看到的函数；没有已知的函数
+                // 类型时调用点不检查实参，降级阶段会明确报错。
+                if (!m.decorated_ty || m.decorated_ty->kind != TyKind::Func ||
+                    !m.decorated_ty->fn) {
+                    m.call_sig = nullptr;
+                    return;
+                }
+                m.call_sig = std::make_shared<FuncInfo>(*m.decorated_ty->fn);
+                m.call_sig->name = m.name;
+                m.call_sig->outer = m.sig.get();
+                m.call_sig->outer_off = 0;
+                if (m.call_sig->pos.empty()) {
+                    m.call_sig = nullptr;
+                    return;
+                }
+                m.call_sig->pos.erase(m.call_sig->pos.begin());
+                m.call_sig->outer_off = 1;
+                if (m.call_sig->n_posonly > 0) --m.call_sig->n_posonly;
                 return;
             }
             m.call_sig = std::make_shared<FuncInfo>(*m.sig);
@@ -563,10 +579,11 @@ void TypeChecker::classdef(ClassDef& c) {
             auto& f = static_cast<FunctionDef&>(*s);
             bool decor_ok = true;
             MethodKind kind = decor_kind(f, decor_ok);
-            if (!decor_ok) unsupported.push_back("method decorator");
             MethodInfo m;
             m.name = f.name;
             m.kind = kind;
+            // 没认出来的方法装饰器：装饰器链的结果存成类属性，调用走它。
+            m.decorated = !decor_ok;
             m.sig = build_sig(f);
             int midx = static_cast<int>(cls->methods.size());
             if (kind == MethodKind::Normal || kind == MethodKind::ClassMethod || !decor_ok) {
@@ -715,7 +732,66 @@ void TypeChecker::classdef(ClassDef& c) {
         class_body_attrs_.clear();
         for (auto& s : c.body) {
             switch (s->kind) {
-                case StmtKind::FunctionDef:
+                case StmtKind::FunctionDef: {
+                    // 自定义方法装饰器：在类定义点求值装饰器，把链的结果
+                    // 注册成类属性；方法体仍按自己的签名检查。
+                    auto& f = static_cast<FunctionDef&>(*s);
+                    if (f.decorators.empty()) break;
+                    MethodInfo* m = nullptr;
+                    for (auto& cand : cls->methods)
+                        if (cand.def == &f) {
+                            m = &cand;
+                            break;
+                        }
+                    if (!m || !m->decorated || m->kind != MethodKind::Normal) break;
+                    if (f.name.size() > 4 && f.name.starts_with("__") &&
+                        f.name.ends_with("__")) {
+                        // 双下划线方法要靠 vtable 静态分派（构造、运算符），
+                        // 装饰后调用约定不再成立。
+                        err(f.line, f.col,
+                            std::format("decorating dunder method '{}' is not supported yet",
+                                        f.name));
+                        break;
+                    }
+                    for (auto& d : f.decorators) {
+                        Expr* de = d.get();
+                        if (auto* n = dynamic_cast<Name*>(de)) {
+                            if (n->id == "staticmethod" || n->id == "classmethod" ||
+                                n->id == "property")
+                                continue;
+                        }
+                        if (auto* at = dynamic_cast<Attribute*>(de)) {
+                            if (auto* bn = dynamic_cast<Name*>(at->value.get());
+                                bn && bn->id == f.name &&
+                                (at->attr == "setter" || at->attr == "deleter" ||
+                                 at->attr == "getter"))
+                                continue;
+                        }
+                        expr(*de);
+                    }
+                    TypePtr cur = new_ty(TyKind::Func);
+                    cur->fn = m->sig;
+                    bool known = true;
+                    for (auto it = f.decorators.rbegin(); it != f.decorators.rend(); ++it) {
+                        TypePtr dt = type_of(it->get());
+                        if (dt && dt->kind == TyKind::Func && dt->fn && dt->fn->ret)
+                            cur = dt->fn->ret;
+                        else {
+                            known = false;
+                            break;
+                        }
+                    }
+                    m->decorated_ty = known ? cur : t_unknown();
+                    if (known && cur && cur->kind == TyKind::Func) {
+                        ClassAttrInfo ai;
+                        ai.name = f.name;
+                        ai.ty = cur;
+                        ai.init = nullptr;
+                        ai.owner = cls.get();
+                        cls->class_attrs.push_back(std::move(ai));
+                    }
+                    break;
+                }
                 case StmtKind::AnnAssign:
                 case StmtKind::Pass:
                     break;

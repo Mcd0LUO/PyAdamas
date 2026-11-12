@@ -280,7 +280,10 @@ print(f(), f(), g())    # 1 2 1
 `@staticmethod`（实例和 `Class.method` 调用，不传 self）、`@property`、
 `@x.setter` 和 `@x.deleter`；属性访问编译成 getter/setter/deleter 的虚调用。
 `@classmethod` 也支持（`cls` 静态绑定到所属类，见下面「类属性与 `@classmethod`」）；
-自定义方法装饰器和类装饰器仍被后端拒绝。
+自定义方法装饰器在类创建点按从下到上应用，结果存成类属性，实例调用
+`obj.m(...)` 会把 `obj` 作为第一个实参调用包装函数（装饰器必须返回
+签名已知的函数；不支持 dunder 方法、`super()` 目标和 `C.m(...)` 类接收者
+调用）；类装饰器仍被后端拒绝。
 
 相互递归的嵌套闭包会形成 cell 环；这类环不是引用计数能处理的，由下面的
 循环收集器回收。
@@ -331,9 +334,10 @@ handler 记录被摘下，恢复时按原顺序重挂并重新建立 setjmp。`c
 `with.__exit__(None, None, None)`。异常从生成器逃出时，生成代码的
 landing 路径负责展开清理，帧被标记 aborted，避免销毁时重复执行。
 
-限制：`yield` / `yield from` 只能作为语句或赋值右值（`x = yield v`），
-不能位于 `finally` 或 `except` 体内。生成器类型跨模块接口会降级成
-`unknown`。
+限制：`yield` / `yield from` 必须是当前语句里第一个求值的表达式（例如
+`x = yield v`、`return (yield v)`、`if (yield v):`），不能位于
+`finally` 或 `except` 体内；挂起点之前已经求出的其它 vreg 不随生成器
+帧保存，恢复后不可用。生成器类型跨模块接口会降级成 `unknown`。
 
 ### 协程
 
@@ -472,12 +476,12 @@ Future 被取消时，其他等待者也会收到 `CancelledError`。
 无效 fd 以 `OSError` 结束等待。这是 py23 自己的低级接口（CPython
 用 `loop.add_reader`），没有配套的 fd 读写函数。
 
-限制：`await` 只能作为语句、赋值右值或 `return` 值；不能出现在
-`finally` / `except` 体内；异步推导式只能作为语句、赋值或 `return` 的
-根表达式；不支持自定义 `__aiter__` 迭代器、fd 读写和线程安全的事件
-循环；Future 回调是同步调用（CPython 用 `call_soon` 排队），
-`gather` 的实参个数在源码里写死，结果元素类型按 unknown 处理；
-Task 只允许一个并发等待者，没有任务名字。
+限制：`await` 必须是当前语句里第一个求值的表达式（语句、赋值右值、
+`return` 值、条件、二元表达式左侧等）；不能出现在 `finally` / `except`
+体内；异步推导式只能作为语句、赋值或 `return` 的根表达式；不支持自定义
+`__aiter__` 迭代器、fd 读写和线程安全的事件循环；Future 回调是同步
+调用（CPython 用 `call_soon` 排队），`gather` 的实参个数在源码里写死，
+结果元素类型按 unknown 处理；Task 只允许一个并发等待者，没有任务名字。
 
 ### 内存与生命周期
 
@@ -1019,7 +1023,7 @@ match value:
 - PEP 695 泛型语法（`class C[T]:`）
 - 类：方法缺 `self`、字段赋值类型不符、访问不存在的字段或方法（`self.xxx` 与外部基类的成员除外）
 
-**代码生成层**（`check` 通过，`build` 报错）：类装饰器、自定义方法装饰器、容器转标量（`int([1, 2])`、`str({})`）、异构元组的 `repr()`、容器元素跨数值域的转换（`list`/`tuple`/`dict`/`set` 的 int → float 赋值/实参）、通过 unknown 函数值的 `*` / `**` 展开、`*` 位于固定形参之前且不是定长 tuple、非异常类名当异常用、`finally` 体内跳出 finally 的控制流、跨模块继承、把类名当值用（`f = Point`）、函数内定义类、异步生成器表达式、嵌在其它表达式里的异步推导式。生成器的额外限制：`yield` / `yield from` 只能作为语句或赋值右值，不能出现在 `finally` / `except` 体内；协程的 `await` 同样。异步生成器有 `asend`/`athrow`/`__anext__`/`aclose`。自定义异常类目前只支持 `pass` 类体（字段/方法会被拒绝）。类体字段默认值里的 `lambda` 也在这一层拒绝。match 额外拒绝：导入类模式的字段子模式、unknown 值上的数值/list/dict/tuple/set 内置类型模式。
+**代码生成层**（`check` 通过，`build` 报错）：类装饰器、装饰 dunder 方法或 `super()` 目标、返回类型未知的方法装饰器、容器转标量（`int([1, 2])`、`str({})`）、异构元组的 `repr()`、容器元素跨数值域的转换（`list`/`tuple`/`dict`/`set` 的 int → float 赋值/实参）、通过 unknown 函数值的 `*` / `**` 展开、`*` 位于固定形参之前且不是定长 tuple、非异常类名当异常用、`finally` 体内跳出 finally 的控制流、跨模块继承、把类名当值用（`f = Point`）、函数内定义类、异步生成器表达式、嵌在其它表达式里的异步推导式。生成器的额外限制：`yield` / `yield from` 必须是当前语句里第一个求值的表达式（挂起点之前的其它 vreg 不随帧保存），不能出现在 `finally` / `except` 体内；协程的 `await` 同样。异步生成器有 `asend`/`athrow`/`__anext__`/`aclose`。自定义异常类目前只支持 `pass` 类体（字段/方法会被拒绝）。类体字段默认值里的 `lambda` 也在这一层拒绝。match 额外拒绝：导入类模式的字段子模式、unknown 值上的数值/list/dict/tuple/set 内置类型模式。
 
 为什么这么分层：前端宽、后端严。`check` 的定位是「语法和类型有没有明显毛病」，可以对任意 Python 文件跑；`build` 才是「这门语言现在能不能编译它」。
 
