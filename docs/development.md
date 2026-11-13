@@ -259,6 +259,22 @@ g++ -std=c++23 -O0 -g -Wall -Wextra -Wshadow -Wnon-virtual-dtor -Wold-style-cast
 - **枚举 switch 不留 `default`**：让 `-Wswitch` 在加新枚举项时报错，比运行时漏一个 `case` 强。
 - **死代码立刻删**：`IrOp::Print` 曾经是一个「谁发出来就会被静默丢掉」的空 `case`，这种比没实现更危险。
 
+### 规模检查
+
+```bash
+bash tests/check_size.sh
+```
+
+规则：
+
+- **源文件超过 1200 行 → 失败**。确实还要留着的文件登记在脚本的
+  `ALLOW_FILES` 里；清单只能删不能加，新代码不要往大文件里继续堆。
+- **单个函数超过 300 行 → 只警告**。函数长度是拆分提示，不阻塞提交；
+  改到某个函数时顺手拆一下即可。
+
+新增 `.cpp` 时记得同时加进 `CMakeLists.txt` 的源文件列表（工程没有用
+`file(GLOB)`）。
+
 ## 扩展 checklist
 
 ### 加一条语法

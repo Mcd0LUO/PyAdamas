@@ -4,6 +4,39 @@
 
 早期阶段没有逐条留痕，按阶段归纳；0.4 之后逐条记录。
 
+## [0.153] - 2026-11-14
+
+工程治理：拆分剩余的上帝函数与大文件，并加入规模检查。
+
+### 变更
+
+- `gen_call_rt`：505 个运行期调用 case 按实参形态（全整数/全浮点/混合）
+  抽成 17 个 `gen_rt_*` 装填函数，移到 `codegen_call_rt.cpp`；
+  `codegen_call.cpp` 从 1701 行降到 954 行。
+- `builtin_module`（736 行模块签名数据表）整段搬到 `builtin_sigs.cpp`。
+- `lower_builtin_call`（1655 行）按家族拆成 `lower_builtin_reflect/seq/
+  container/text/misc.cpp` 五个文件，入口只保留 print 特判、关键字拦截
+  和按序分派。
+- `TypeChecker::call` 按被调表达式形态拆成 `call_name` / `call_attr` /
+  `call_value`；`TypeChecker::stmt` 的 15 类语句体搬到
+  `typecheck_stmt_forms.cpp`，`typecheck_stmt.cpp` 从 1364 行降到 864 行。
+- 头文件：`ir.h` 拆出 `ir_ops.h`（算子与运行期函数编号）和
+  `ir_types.h`（数据结构与机器类映射）；`typecheck.h` 的类型模型搬到
+  `typecheck_types.h`；`lower_impl.h` 里 25 个较大的内联成员体移到
+  `lower_impl_util.cpp` / `lower_impl_slots.cpp`。
+- 新增 `tests/check_size.sh`：源文件超过 1200 行直接失败（剩余待拆文件
+  登记在允许清单），单个函数超过 300 行只警告；规则写进
+  `docs/development.md`。
+
+### 工程
+
+- 纯机械搬移，报错文本、检查顺序和生成代码不变；151 运行用例、52 反例、
+  840 差分、全量 bench 全部与拆分前一致。
+- 拆分后仍超过 1200 行的文件：`lower_expr.cpp`（2276）、
+  `lower_import.cpp`（2130）、`typecheck_call.cpp`（2106）、
+  `lower_stmt.cpp`（1968）、`lower_gen.cpp`（1389）、`lower.cpp`（1267）、
+  `cdecl.cpp`（1247）。
+
 ## [0.152] - 2026-11-14
 
 工程治理：拆分 `lower_method.cpp` 的上帝函数。
