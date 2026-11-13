@@ -40,7 +40,7 @@ try:
 except IndexError:
     print("IndexError")
 
-# 异常消息的措辞和 CPython 不同（py23 的列表路径也是这个措辞），只断言类型
+# 异常消息的措辞和 CPython 不同（PyAdamas 的列表路径也是这个措辞），只断言类型
 try:
     print(min(range(0)))
 except ValueError:

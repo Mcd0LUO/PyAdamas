@@ -137,7 +137,7 @@ struct CTypeRef {
     CKind cb_ret = CKind::None;
 };
 
-// 回调签名只允许能在 C 与 py23 之间按机器字直接传递的类型。
+// 回调签名只允许能在 C 与 PyAdamas 之间按机器字直接传递的类型。
 bool callback_kind_ok(CKind k) {
     switch (k) {
         case CKind::Int:

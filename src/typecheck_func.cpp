@@ -333,9 +333,8 @@ bool TypeChecker::add_implicit_field(const Attribute& a, TypePtr ty) {
 }
 
 // 类体里的语句：方法定义和字段标注之外，普通赋值按类属性处理（存进
-// 模块里的隐藏全局），其余（if / for / with …）在 Python 里是「类体在
-// 独立命名空间里执行」，pyadamas 没有运行期类对象，标记成「没建模」，
-// 由编译阶段拒绝——不能在这里报错，真实代码太常见。
+// 模块里的隐藏全局），其余（if / for / with …）在类定义点执行后按模块
+// 全局处理，类标记成 open。不能在这里报错，真实代码太常见。
 void TypeChecker::classdef(ClassDef& c) {
         if (!c.decorators.empty()) {
             // 类装饰器在类定义点拿到运行期类对象；降级时按副作用执行。

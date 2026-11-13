@@ -828,7 +828,7 @@ pyadamas::ModuleInfoPtr builtin_module(const std::string& name) {
             f->ret_known = true;
             func_with("Counter", f);
         }
-        // OrderedDict：pyadamas 的 dict 保序，直接当空 dict 用。
+        // OrderedDict：PyAdamas 的 dict 保序，直接当空 dict 用。
         func("OrderedDict", {}, pyadamas::mk_dict(pyadamas::t_str(), pyadamas::t_unknown()));
         // defaultdict：签名只用于 from-import；K/V 在 collections_call 里按工厂推。
         {

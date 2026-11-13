@@ -531,7 +531,7 @@ void Lowerer::lower_funcdef(FunctionDef& f) {
     // 装饰器按从下到上的顺序调用：f = d1(d2(f))。函数值已经绑定，
     // 每一步都重新绑定同名，后一个装饰器拿到前一步的结果。
     for (auto it = f.decorators.rbegin(); it != f.decorators.rend(); ++it) {
-        // @functools.wraps(f)：pyadamas 不建模函数元数据（__name__/__doc__），
+        // @functools.wraps(f)：PyAdamas 不建模函数元数据（__name__/__doc__），
         // 这一层没有可观察效果，直接跳过——否则它要求一个运行期的
         // identity 装饰器，而那是当前架构里没有的东西。
         if (is_wraps_decorator(it->get())) continue;

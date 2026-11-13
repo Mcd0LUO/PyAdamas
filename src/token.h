@@ -20,7 +20,7 @@ enum class Tok : uint8_t {
     FLOAT,
     COMPLEX,
     STRING,    // 普通字符串（text 为反转义后的内容）
-    BYTES,     // 字节串（lexer 只负责切分，语义层不支持）
+    BYTES,     // 字节串（lexer 负责切分，类型与运行时按 bytes 处理）
     FSTRING,   // f-string（text 为引号内原文，反转义与插值由 parser 处理）
     NAME,
 

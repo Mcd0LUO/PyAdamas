@@ -53,7 +53,7 @@ uint32_t *ptr_u32(void) {
     return v;
 }
 
-/* 回调：C 只传函数地址，由生成的跳板转交给 py23 闭包。 */
+/* 回调：C 只传函数地址，由生成的跳板转交给 PyAdamas 闭包。 */
 long cb_apply(long a, long b, long (*fn)(long, long)) {
     return fn(a, b);
 }

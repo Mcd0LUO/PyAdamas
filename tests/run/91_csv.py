@@ -1,4 +1,4 @@
-# csv：纯 py23 stdlib 模块（reader -> list[list[str]]，writer 类）
+# csv：纯 PyAdamas stdlib 模块（reader -> list[list[str]]，writer 类）
 import csv
 from csv import reader, writer
 

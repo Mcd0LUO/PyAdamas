@@ -1272,7 +1272,7 @@ VReg Lowerer::lower_builtin_call(const std::string& name, Call& c) {
 
     if (name == "slice") {
         // 下标位置的形式在脱糖阶段已经折成切片语法，能走到这里说明是当
-        // 独立值用——pyadamas 没有运行期的 slice 对象。
+        // 独立值用——PyAdamas 没有运行期的 slice 对象。
         err(c.line, c.col,
             "slice() is only supported as a subscript, e.g. xs[slice(1, 3)]");
         for (auto& a : c.args) expr(*a);

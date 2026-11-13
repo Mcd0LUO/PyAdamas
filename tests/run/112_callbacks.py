@@ -1,4 +1,4 @@
-# C 回调：py23 函数/闭包作为 C 函数指针，跳板保持闭包环境。
+# C 回调：PyAdamas 函数/闭包作为 C 函数指针，跳板保持闭包环境。
 cimport cstructabi as c
 
 

@@ -1,6 +1,6 @@
 # os / os.path 补充：makedirs / getpid / chdir / chmod / access /
 # realpath / getsize / getmtime / split / samefile，以及 sep / linesep / F_OK 常量。
-# 注：os.path 要用 from-import（py23 不支持 os.path.xxx 这种属性链）。
+# 注：os.path 要用 from-import（PyAdamas 不支持 os.path.xxx 这种属性链）。
 import os
 from os import sep, linesep, F_OK, R_OK
 from os.path import isdir, exists, getsize, getmtime, split, realpath, samefile

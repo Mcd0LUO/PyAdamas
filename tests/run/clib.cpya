@@ -27,7 +27,7 @@ extern def "memset" as memset(p: ptr[int], v: int32, n: int) -> ptr[int]
 extern def "getenv" as getenv(name: str) -> Optional[str]
 # 可变参数：参数表末尾的 ... 允许任意多个额外实参。
 extern def "printf" as printf(fmt: str, ...) -> int32
-# C 回调：比较函数收到元素指针，py23 侧用 ptr[int] 标注后解引用。
+# C 回调：比较函数收到元素指针，PyAdamas 侧用 ptr[int] 标注后解引用。
 extern def "qsort" as qsort(base: ptr, n: int, size: int, cmp: fn(ptr[int], ptr[int]) -> int) -> None
 # 8 个 int 参数：验证超过 6 个时走栈。
 extern def "syscall" as syscall(n: int, a1: int, a2: int, a3: int, a4: int, a5: int, a6: int, a7: int) -> int

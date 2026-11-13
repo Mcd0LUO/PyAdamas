@@ -1,4 +1,4 @@
-# collections：OrderedDict（py23 的 dict 本来就保序）+ Counter 的既有行为
+# collections：OrderedDict（PyAdamas 的 dict 本来就保序）+ Counter 的既有行为
 import collections
 
 d = collections.OrderedDict()

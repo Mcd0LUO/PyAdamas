@@ -12,7 +12,7 @@ if w is not None:
 else:
     print("is none")
 
-# 已知偏差：py23 里 None 就是 0，值为 0 的项和缺失分不出来
+# 已知偏差：PyAdamas 里 None 就是 0，值为 0 的项和缺失分不出来
 # （CPython 这里打印 0）
 z = {"n": 0}
 print(z.get("n"))

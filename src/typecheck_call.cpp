@@ -103,7 +103,7 @@ TypePtr TypeChecker::call(Call& c) {
                                     break;
                                 }
                         }
-                        // 回调参数：实参必须是 py23 函数，签名按 .cpya 声明校验。
+                        // 回调参数：实参必须是 PyAdamas 函数，签名按 .cpya 声明校验。
                         auto cb_arg_ty = [](CKind k) -> TypePtr {
                             switch (k) {
                                 case CKind::Float: return t_float();
@@ -613,7 +613,7 @@ bool TypeChecker::is_exception_name(const std::string& n) {
             "ProcessLookupError", "UnicodeTranslateError", "GeneratorExit",
             "CancelledError",
             "StopAsyncIteration", "WindowsError",  // WindowsError 只在 Windows 上存在（OSError 别名）
-            // subprocess 相关：pyadamas 没有模块限定异常名，按内置名捕获
+            // subprocess 相关：PyAdamas 没有模块限定异常名，按内置名捕获
             "SubprocessError", "TimeoutExpired", "CalledProcessError",
         };
         return names.count(n) > 0;
@@ -633,8 +633,9 @@ bool TypeChecker::is_builtin_callable(const std::string& n) {
             "bool",   "list",   "dict",   "tuple", "set",     "ord",    "chr",
             "repr",   "any",    "all",    "round", "isinstance", "input", "type",
             "map",    "filter", "divmod", "pow",   "hex",     "bin",    "oct",
-            // 装饰器：语义尚未实现，但名字必须能解析，否则大量真实代码会在
-            // 第一行就报未定义，淹没真正有价值的类型错误
+            // 装饰器/元编程名字：staticmethod / classmethod / property /
+            // lru_cache / wraps 已实现；abstractmethod / dataclass 等其余名字
+            // 只做解析，避免真实代码在第一行就报未定义、淹没真正的类型错误
             "staticmethod", "classmethod", "property", "abstractmethod",
             "dataclass", "override", "cached_property", "contextmanager",
             "lru_cache", "wraps", "total_ordering", "singledispatch",
@@ -2449,7 +2450,7 @@ TypePtr TypeChecker::method_call(TypePtr recv, const std::string& name, Call& c,
             if (name == "conjugate" || name == "real" || name == "imag" || name == "numerator" ||
                 name == "denominator")
                 return recv;
-            // hex/fromhex/from_bytes：结果类型（str/bytes）尚未建模
+            // hex/fromhex/from_bytes：参数形态与结果类型不一致，暂按 unknown
             if (name == "hex" || name == "fromhex" || name == "from_bytes") return t_unknown();
         }
 

@@ -1,4 +1,4 @@
-# 按值结构体：C 返回小结构体、py23 构造结构体按值传参、值语义复制。
+# 按值结构体：C 返回小结构体、PyAdamas 构造结构体按值传参、值语义复制。
 cimport clib as c
 
 # div_t 8 字节，INTEGER 返回在 rax

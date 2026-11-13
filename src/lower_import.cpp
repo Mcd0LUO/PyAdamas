@@ -585,7 +585,7 @@ VReg Lowerer::lower_popen(Call& c) {
         } else if (kw.arg == "stderr") {
             err_mode = stream_mode(*kw.value);
         } else if (kw.arg == "text") {
-            // pyadamas 没有 bytes：text 只做求值，不影响行为。
+            // PyAdamas 的 subprocess 始终返回文本：text 只做求值，不影响行为。
             expr(*kw.value);
         } else {
             err(kw.value->line, kw.value->col,

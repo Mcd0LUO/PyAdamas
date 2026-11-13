@@ -7,7 +7,7 @@
 //      —— 宁可漏报，不可误杀。歧义是静态检查最大的敌人。
 //   2. 变量类型一旦确定就不可改变（这是与 CPython 的语义分歧点，
 //      也是拿到性能的前提：每个变量在栈上有固定槽位和固定宽度）。
-//   3. 遇到尚未实现的语句（try/with/import/yield/async）
+//   3. 遇到尚未建模或无法静态表达的构造（少数 async 边角、动态属性等）
 //      不报错，只记入 unsupported 列表，并尽量把子树也检查一遍。
 //      这样 check 命令对真实代码仍然可用。
 #include <algorithm>
@@ -319,8 +319,8 @@ struct PropertyInfo {
 };
 
 // 类体里的普通赋值（class C: x = 1）是类属性：所有实例共享同一份存储。
-// pyadamas 没有运行期类对象，类属性在模块里占一个隐藏全局，按「声明它的类」
-// 命名；子类读取时沿 MRO 找到声明者，读到的是同一份数据。
+// 类属性在模块里占一个隐藏全局，按「声明它的类」命名；子类读取时沿 MRO
+// 找到声明者，读到的是同一份数据。类名当值时另有运行期类对象单例。
 struct ClassAttrInfo {
     std::string name;
     TypePtr ty;
@@ -655,7 +655,7 @@ inline TypePtr mk_struct_ptr(StructInfo* s) {
     return t;
 }
 
-// .cpya 的 C 类型 → py23 类型。指针统一当作 Optional[int]：
+// .cpya 的 C 类型 → PyAdamas 类型。指针统一当作 Optional[int]：
 // 0 表示 NULL，运行时不做解引用。
 inline TypePtr ckind_type(CKind k) {
     switch (k) {
@@ -1592,7 +1592,7 @@ private:
 
     // ── 内置函数 ────────────────────────────────────────────────
 
-    // 内置异常类型：异常体系尚未实现，先让这些名字可解析
+    // 内置异常类型：让 raise / except 按名字解析并按继承关系匹配
     static bool is_exception_name(const std::string& n);
 
     // 内置「值」与内置「可调用对象」必须分开：

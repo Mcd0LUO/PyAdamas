@@ -537,7 +537,7 @@ void TypeChecker::stmt(Stmt& s) {
                         }
                         StructInfo* st = build_cstruct(cs);
                         structs_[cs.name] = st;
-                        // 允许在 py23 里按字段构造 C 结构体（DivT(7, 3)）；
+                        // 允许在 PyAdamas 里按字段构造 C 结构体（DivT(7, 3)）；
                         // 已有同名符号时不覆盖。
                         if (!lookup(cs.name))
                             module_->vars[cs.name] = Symbol{mk_struct(st), s.line, true, false};
@@ -998,7 +998,7 @@ void TypeChecker::assign(Expr& target, TypePtr value, int line, int col) {
                 }
                 // 外部基类可能带来任意属性
                 if (ot->cls->is_open()) return;
-                // 实例上给类属性赋值要新建实例属性，而 pyadamas 的对象布局是
+                // 实例上给类属性赋值要新建实例属性，而 PyAdamas 的对象布局是
                 // 编译期定死的；明确报错，别静默写到类属性上影响所有实例。
                 if (ot->cls->class_attr(at->attr)) {
                     err(line, col,

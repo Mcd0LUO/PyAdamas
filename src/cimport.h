@@ -24,7 +24,7 @@ enum class CKind : uint8_t {
     OptStr,   // 可空 char*
     // 带字段的 .cpya struct 按值传递；结构体名记在 ptr_struct/ret_struct。
     Struct,
-    // C 回调参数（函数指针）：调用点传入 py23 函数，由生成的跳板适配。
+    // C 回调参数（函数指针）：调用点传入 PyAdamas 函数，由生成的跳板适配。
     Callback,
     // 以下只由 lower 在调用点根据实参类型选择，.cpya 不能声明：
     // 把 list/bytes 的连续 data 指针传给 C。
@@ -50,7 +50,7 @@ struct CParam {
 
 struct CExtern {
     std::string symbol;   // C 侧符号名
-    std::string py_name;  // py23 侧名字
+    std::string py_name;  // PyAdamas 侧名字
     std::vector<CParam> params;
     CKind ret = CKind::None;
     // 参数表末尾有 `...`：允许传任意多个额外实参。
@@ -80,7 +80,7 @@ struct CStruct {
 // 宽度从符号地址加载；不支持按值结构体变量。
 struct CVar {
     std::string symbol;   // C 侧符号名
-    std::string py_name;  // py23 侧名字
+    std::string py_name;  // PyAdamas 侧名字
     CKind kind = CKind::Int;
     // kind == Ptr 且指向 .cpya 里的 struct 时记录名字。
     std::string struct_name;

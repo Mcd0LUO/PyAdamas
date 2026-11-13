@@ -14,8 +14,9 @@
 //     __pyadamas$gen_N(<最外层 iterable>)
 //
 // 合成函数插在包含该表达式的那条语句之前，所以循环体里的 lambda 仍然
-// 每次执行都创建新的闭包。类体里的 lambda / 生成器表达式暂不展开
-// （类体只有字段声明，降级层会拒绝 lambda，生成器表达式按 list 构造）。
+// 每次执行都创建新的闭包。类体里的 `f = lambda self, ...: ...` 在脱糖阶段
+// 改写成方法定义；类体字段默认值里的 lambda 与类体生成器表达式仍不展开
+// （后者按 list 构造）。
 #include "desugar.h"
 
 #include <format>
@@ -149,11 +150,9 @@ bool stmt_binds(const Stmt& s, const std::string& n) {
 
 // 生成器表达式的最外层 iterable 是 range(...) 时的边界解析。
 //
-// range 作为值使用会被实体化成整数列表（runtime/rt_slice.c 的
-// pa_range_new）：range(10**9) 就是当场造 10 亿个元素。源是 range 时
-// 改成把边界值传进合成函数，用计数循环惰性迭代。
-//
-// 步长的方向决定比较用 < 还是 >：字面量步长在编译期定下来（快路径），
+// range 本身是惰性对象（pa_range_new 只存边界），但生成器表达式仍把边界
+// 值传进合成函数、用计数循环逐个产出，省掉每次 next() 对范围对象的下标
+// 调用。步长的方向决定比较用 < 还是 >：字面量步长在编译期定下来（快路径），
 // 动态步长走运行期分支。
 bool parse_range(Expr* e, ExprPtr& start, ExprPtr& stop, int64_t& step_val,
                  ExprPtr& step_expr) {
@@ -339,10 +338,10 @@ private:
         // 之后整个表达式作为实参传进来。
         auto& first = static_cast<Comprehension&>(*g.generators[0]);
 
-        // 源是 range(...) 时改成传边界值 + 计数循环：range 作为值使用会
-        // 被实体化成整数列表（runtime/rt_slice.c 的 pa_range_new），
-        // 那就没有惰性可言了。边界值在创建时求值（Python 语义），
-        // 元素在 next() 时才产出。
+        // 源是 range(...) 时改成传边界值 + 计数循环：跳过范围对象的下标
+        // 调用（pa_range_new 只存边界，本身已经是惰性的），直接按
+        // start/step 递增。边界值在创建时求值（Python 语义），元素在
+        // next() 时才产出。
         ExprPtr rstart, rstop, rstep_expr;
         int64_t rstep = 1;
         bool dyn_step = false;
@@ -463,8 +462,9 @@ private:
     // 语义（所有 lambda 共享同一个循环变量 cell）也和 CPython 一致。
     static bool has_lambda(const Expr* e) {
         if (!e) return false;
-        if (e->kind == ExprKind::Lambda) return true;
         switch (e->kind) {
+            case ExprKind::Lambda:
+                return true;
             case ExprKind::Constant:
             case ExprKind::Name:
                 return false;
@@ -759,7 +759,7 @@ private:
                 auto& s = static_cast<Subscript&>(*e);
                 desugar_expr(s.value, pre);
                 desugar_expr(s.slice, pre);
-                // xs[slice(a, b, c)] → xs[a:b:c]：切片本身在 pyadamas 里是
+                // xs[slice(a, b, c)] → xs[a:b:c]：切片本身在 PyAdamas 里是
                 // 语法层的，没有运行期 slice 对象；这里把直接调用的写法
                 // 折成同样的形状，typecheck/lower 完全不用改。
                 // slice() 当独立值用仍然不支持（降级层会明确报错）。
