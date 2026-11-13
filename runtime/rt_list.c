@@ -61,8 +61,10 @@ static void list_buf_put(int64_t* p, int64_t cap) {
 
 void list_destroy(void* p) {
     PyAdamasList* l = (PyAdamasList*)p;
-    if (l->elem_kind != 0)
-        for (int64_t i = 0; i < l->len; ++i) pa_own_dec(l->elem_kind, l->data[i]);
+    // kind 3 按约定是空列表；真出现元素（不变量被破坏）时按 2 保守释放。
+    int kind = l->elem_kind == 3 ? 2 : (int)l->elem_kind;
+    if (kind != 0)
+        for (int64_t i = 0; i < l->len; ++i) pa_own_dec(kind, l->data[i]);
     list_buf_put(l->data, l->cap);
 }
 
@@ -70,13 +72,14 @@ void list_destroy(void* p) {
 // 注册表判断（整数不会命中），不再整体跳过。
 void list_gc_release(void* p) {
     PyAdamasList* l = (PyAdamasList*)p;
-    if (l->elem_kind == 0 || !l->data) return;
-    for (int64_t i = 0; i < l->len; ++i) pa_own_gc_unref(l->elem_kind, l->data[i]);
+    int kind = l->elem_kind == 3 ? 2 : (int)l->elem_kind;
+    if (kind == 0 || !l->data) return;
+    for (int64_t i = 0; i < l->len; ++i) pa_own_gc_unref(kind, l->data[i]);
 }
 
 PyAdamasList* pa_list_new(int64_t cap, int64_t elem_kind) {
     if (cap < 0) panic_c("negative list capacity");
-    if (elem_kind < 0 || elem_kind > 2) panic_c("invalid list element kind");
+    if (elem_kind < 0 || elem_kind > 3) panic_c("invalid list element kind");
     if (cap < 4) cap = 4;
     PyAdamasList* l = (PyAdamasList*)rc_alloc((int64_t)sizeof(PyAdamasList), list_destroy,
                                       list_gc_release, PYADAMAS_RC_LIST);
@@ -85,6 +88,30 @@ PyAdamasList* pa_list_new(int64_t cap, int64_t elem_kind) {
     l->data = list_buf_get(&l->cap);
     l->elem_kind = elem_kind;
     return l;
+}
+
+/* 探测 unknown 值是不是堆指针：只查存活索引、不解引用，任意 int64 都安全。
+   和 pa_rc_inc_unknown 一致，静态字符串字面量（永生）也算堆。 */
+static int list_probe(int64_t v) {
+    if (v <= 4096) return 0;
+    PyAdamasRc* h = (PyAdamasRc*)(uintptr_t)((uint64_t)v - (uint64_t)PYADAMAS_RC_HDR);
+    return rc_index_has(h) ? 1 : 0;
+}
+
+/* 列表元素类别定型。kind 3 的空列表在这里采用第一个写入值的种类；静态
+   种类和值冲突时降级为 2（混合，销毁走注册表）。vk 是值的静态种类，
+   unknown 时只能运行期探测一次。owned 非 0 表示引用已经转给容器。 */
+void pa_list_prep(PyAdamasList* l, int64_t v, int64_t vk, int64_t owned) {
+    int kind = (int)l->elem_kind;
+    if (kind == 3) {
+        kind = vk == 2 ? list_probe(v) : (int)vk;
+    } else if (vk == 2) {
+        if ((kind == 1) != (list_probe(v) != 0)) kind = 2;
+    } else if (kind != vk) {
+        kind = 2;
+    }
+    l->elem_kind = kind;
+    if (!owned) pa_own_inc(kind, v);
 }
 
 /* 元素引用由生成代码在写入前 retain（kind 1/2 且源类型已知是堆），
@@ -109,21 +136,22 @@ int64_t pa_list_get(PyAdamasList* l, int64_t i) {
 void pa_list_set(PyAdamasList* l, int64_t i, int64_t v) {
     if (i < 0) i += l->len;
     if (i < 0 || i >= l->len) pa_raise_c("IndexError", "list assignment index out of range");
+    int kind = l->elem_kind == 3 ? 2 : (int)l->elem_kind;
     int64_t old = l->data[i];
     l->data[i] = v;
-    pa_own_dec(l->elem_kind, old);
+    pa_own_dec(kind, old);
 }
 
 void pa_list_set_len(PyAdamasList* l, int64_t n) {
     if (n < 0 || n > l->len) panic_c("invalid list length");
-    for (int64_t i = n; i < l->len; ++i) pa_own_dec(l->elem_kind, l->data[i]);
+    int kind = l->elem_kind == 3 ? 2 : (int)l->elem_kind;
+    for (int64_t i = n; i < l->len; ++i) pa_own_dec(kind, l->data[i]);
     l->len = n;
 }
 
 /* 把 src 的元素接到 dst 末尾，供 *args 打包和切片拷贝使用。
-   所有权规则统一：目标容器非 int（kind 1/2）时，每个元素按源的种类
-   retain（堆→rc_inc，unknown/混合→rc_inc_unknown）；目标原本是堆容器
-   而源是 unknown/混合时，目标降级为 kind 2，保证销毁时走注册表释放。 */
+   所有权统一走 pa_list_prep：目标未定型（3）时采用源的种类，与源冲突时
+   降级为 2（销毁走注册表），元素引用按目标种类 retain。 */
 void pa_list_extend(PyAdamasList* dst, PyAdamasList* src) {
     int64_t slen = src->len;
     int64_t* snap = NULL;
@@ -134,11 +162,11 @@ void pa_list_extend(PyAdamasList* dst, PyAdamasList* src) {
         if (slen) memcpy(snap, src->data, sizeof(int64_t) * (size_t)slen);
         sv = snap;
     }
-    if (dst->elem_kind == 1 && src->elem_kind == 2) dst->elem_kind = 2;
+    int sk = (int)src->elem_kind;
     for (int64_t i = 0; i < slen; ++i) {
         int64_t v = sv[i];
-        if (dst->elem_kind != 0 && src->elem_kind != 0)
-            pa_own_inc(src->elem_kind, v);
+        // 源是未定型（3）时只可能是空表，这里统一按 unknown 传给 prep。
+        pa_list_prep(dst, v, sk == 3 ? 2 : sk, 0);
         pa_list_append(dst, v);
     }
     free(snap);

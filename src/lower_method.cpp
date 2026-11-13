@@ -2074,7 +2074,8 @@ VReg Lowerer::lower_method_call(Attribute& at, Call& c) {
             }
             // 运行时不再做隐式 retain：容器元素的所有权由降级器按静态类型决定。
             VReg v = expr(*c.args[0]);
-            if (!move_fresh(v, et)) retain_elem(v, lk);
+            bool owned = move_fresh(v, et);
+            store_list_elem(recv, recv_ty, v, owned);
             call_void(RtFn::ListAppend, {recv, v});
             return const_none();
         }
@@ -2099,7 +2100,8 @@ VReg Lowerer::lower_method_call(Attribute& at, Call& c) {
             }
             VReg idx = coerce(expr(*c.args[0]), tc_.type_of(c.args[0].get()), t_int());
             VReg v = elem_arg(1);
-            if (!move_fresh(v, et)) retain_elem(v, lk);
+            bool owned = move_fresh(v, et);
+            store_list_elem(recv, recv_ty, v, owned);
             call_void(RtFn::ListInsert, {recv, idx, v});
             return const_none();
         }
@@ -2138,11 +2140,14 @@ VReg Lowerer::lower_method_call(Attribute& at, Call& c) {
             get.a = recv;
             get.b = idx;
             VReg v = def(et, std::move(get));
-            // kind 1 的列表持有元素引用，删除时会 dec；把返回值领出来，
-            // 否则返回值会随删除变成悬空指针。
-            if (lk == 1 && ir_is_heap(et)) {
+            // kind 1/2/3 的列表都持有元素引用，删除时会 dec；把返回值领
+            // 出来，否则返回值会随删除变成悬空指针（3 由运行期定型，也要领）。
+            if (lk != 0 && ir_is_heap(et)) {
                 rc_inc(v);
                 push_temp(v);
+            } else if (lk != 0 && (!et || et->kind == TyKind::Unknown)) {
+                rc_inc_unknown(v);
+                call_void(RtFn::RcTempUnknown, {v});
             }
             call_void(RtFn::ListDelIndex, {recv, idx});
             return v;

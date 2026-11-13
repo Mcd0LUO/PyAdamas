@@ -507,8 +507,10 @@ PyAdamasDict* pa_dict_from_pairs(PyAdamasList* src, int64_t key_kind, int64_t ke
 
 PyAdamasDict* pa_set_from_list(PyAdamasList* src, int64_t key_kind, int64_t key_own,
                              int64_t hash_slot, int64_t eq_slot) {
-    // 列表元素种类可能比声明的 key_own 更保守（推导不出来时是 2），取较大者。
-    if (src->elem_kind > key_own) key_own = src->elem_kind;
+    // 列表元素种类可能比声明的 key_own 更保守（推导不出来时是 2，未定型是
+    // 3），取较大者；3 按 2 处理。
+    int sk = src->elem_kind == 3 ? 2 : (int)src->elem_kind;
+    if (sk > key_own) key_own = sk;
     PyAdamasDict* d = pa_dict_new(key_kind, key_own, 0, hash_slot, eq_slot);
     for (int64_t i = 0; i < src->len; ++i) {
         int64_t k = src->data[i];

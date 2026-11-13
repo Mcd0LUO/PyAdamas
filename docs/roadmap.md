@@ -73,15 +73,16 @@
 | 0.145 | 序列重复（`str`/`list`/`tuple` × `int`）与 `base64`/`hashlib` C 内建，标准库基准反超 CPython |
 | 0.146 | 引用计数所有权转移（新值写入目标时移动临时栈引用）与 RC/GC 统计，新增 RC 基准 |
 | 0.147 | 容器字面量与推导式的 RC 所有权转移，扩展 RC 基准与 149 用例 |
+| 0.148 | 裸 list / 空字面量的元素种类延迟定型（kind 3），修复裸 list `pop` 的 use-after-free |
 | 许可证 | Apache-2.0（见 [LICENSE](../LICENSE) / [NOTICE](../NOTICE)） |
 
-## 当前状态（0.147）
+## 当前状态（0.148）
 
 流水线 `源码 → 词法 → AST → lambda 脱糖 → 类型检查 → IR → x86-64 汇编 → 可执行文件` 已打通。
 
 - **语言面**：标量、字符串、`bytes`（含迭代与 `%` 格式化）、列表/元组/字典/集合、切片读写、闭包/lambda/`*args`/`**kwargs`/装饰器、推导式、`with`、异常值（`args`/`raise ... from`/自定义异常）、类（字段/方法/C3 多继承/零参 `super()`/`@staticmethod`/`@classmethod`/`@property`/类属性/类装饰器/类名当值）、`match/case`、`del`、复数字面量、f-string 格式说明、dunder 协议（含装饰 dunder、`__call__` 与方法值）、`Generator[Y, S, R]` 标注、`open`/`input`/`sys.stdin`、`struct` 值类型、`cimport`/`cdecl` C 互操作与跨模块继承。
 - **标准库**：`math`/`sys`/`asyncio`/`random`/`os`/`os.path`/`subprocess`/`time`/`itertools`/`collections`/`functools`/`json`/`string`/`re`/`datetime`/`pathlib`/`csv`/`base64`/`binascii`/`heapq`/`bisect`/`hashlib`/`hmac`/`logging`/`statistics`/`textwrap`/`operator`，以及封装 OpenBLAS 的 `linalg`。
-- **验证**：148 个运行用例、52 个反例、12 个模块目录；差分 runner 已自举，默认 840 例；`tests/bench/` 提供 pyadamas vs CPython 的标准库与 RC/GC 基准（`base64`/`hashlib` 已反超）。
+- **验证**：149 个运行用例、52 个反例、12 个模块目录；差分 runner 已自举，默认 840 例；`tests/bench/` 提供 pyadamas vs CPython 的标准库与 RC/GC 基准（`base64`/`hashlib` 已反超）。
 - **主要缺口**：asyncio 边角；调试信息与 traceback；依赖动态属性的 stdlib（如 `argparse`，见「技术债」）。
 
 ## 下一步
@@ -110,7 +111,7 @@
 按「什么时候会疼」排序：
 
 1. **GC 是保守且 stop-the-world**：栈/寄存器里的整数可能被误认为根，回收时机不确定；没有分代/增量/栈映射
-2. **unknown 引用的计数不精确**：容器 kind 2 元素、unknown 字段与全局已用 RC 索引精确释放（`pa_rc_dec_unknown`）；仍剩 unknown 类型的局部槽/表达式临时值只 retain 不 release，靠 GC 兜底
+2. **unknown 引用的计数不精确**：容器 kind 2 元素、unknown 字段与全局已用 RC 索引精确释放（`pa_rc_dec_unknown`）；裸 `list` 的空容器已在第一次写入时定型，不再一律保守；仍剩 unknown 类型的局部槽/表达式临时值只 retain 不 release，靠 GC 兜底
 3. **Optional 的收窄能力不足**：`x: Optional[str]` 在 `if x is None: ...` 之后、跨语句块或跨函数调用时仍按 Optional 处理；修它需要正经的数据流分析
 4. **优化遍仍不完整**：有常量折叠、DCE、小函数内联、LICM、下标版本化/免检查；没有 CSE、强度削减、循环旋转和通用向量化
 5. **`tuple` 与 `list` 表示相同**：tuple 也是可变的动态数组，语义上不严谨

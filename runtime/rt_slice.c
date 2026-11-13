@@ -109,9 +109,15 @@ void pa_list_slice_assign(PyAdamasList* dst, int64_t start, int64_t stop, int64_
         if (slen) memcpy(snap, src->data, sizeof(int64_t) * (size_t)slen);
         sv = snap;
     }
-    // 源是 unknown/混合（2）时目标也升级为 2：旧元素按注册表释放安全，
-    // 新元素按来源种类 retain，销毁/覆盖时统一走保守释放。
-    if (src->elem_kind == 2) dst->elem_kind = 2;
+    // 目标和源的种类合并：目标未定型（3）时采用源的种类；任一方是
+    // unknown/混合（2）或两者冲突（0/1）时降级为 2，旧元素和新元素都按
+    // 注册表保守释放。
+    int sk = (int)src->elem_kind;
+    int dk = (int)dst->elem_kind;
+    if (sk != 3) {
+        if (dk == 3) dst->elem_kind = sk;
+        else if (dk != sk) dst->elem_kind = 2;
+    }
     int kind = (int)dst->elem_kind;
     if (st != 1) {
         if (slen != n) pa_raise_c("ValueError", "cannot assign sequence of different size to extended slice");
@@ -119,7 +125,7 @@ void pa_list_slice_assign(PyAdamasList* dst, int64_t start, int64_t stop, int64_
             int64_t idx = lo + i * st;
             int64_t v = sv[i];
             int64_t old = dst->data[idx];
-            if (kind != 0) pa_own_inc(src->elem_kind, v);
+            if (kind != 0) pa_own_inc(sk, v);
             dst->data[idx] = v;
             pa_own_dec(kind, old);
         }
@@ -151,7 +157,7 @@ void pa_list_slice_assign(PyAdamasList* dst, int64_t start, int64_t stop, int64_
     for (int64_t i = 0; i < slen; ++i) {
         int64_t v = sv[i];
         int64_t old = dst->data[lo + i];
-        if (kind != 0) pa_own_inc(src->elem_kind, v);
+        if (kind != 0) pa_own_inc(sk, v);
         dst->data[lo + i] = v;
         // 增长时 memmove 会把尾部元素复制到 [hi, hi+delta)，这些副本
         // 没有独立的引用计数；只有原区间 [lo, hi) 的旧元素归本列表所有。

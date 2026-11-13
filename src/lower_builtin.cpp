@@ -1126,7 +1126,7 @@ VReg Lowerer::lower_builtin_call(const std::string& name, Call& c) {
             if (as_tuple) {
                 Inst mt;
                 mt.op = IrOp::MakeTuple;
-                mt.imm = list_kind(ty);
+                mt.imm = list_kind_filled(ty);
                 mt.ty = result_ty();
                 return def_heap(result_ty(), std::move(mt));
             }
@@ -1344,7 +1344,7 @@ VReg Lowerer::lower_builtin_call(const std::string& name, Call& c) {
         if (!lt || lt->kind != TyKind::List) lt = mk_list(t_str());
         VReg l = call_runtime(RtFn::ListNew, lt,
                               {const_int(static_cast<int64_t>(names.size())),
-                               const_int(list_kind(lt))});
+                               const_int(list_kind_filled(lt))});
         push_temp(l);
         for (auto& n : names) {
             VReg s = const_str(n);

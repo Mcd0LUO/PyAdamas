@@ -294,7 +294,9 @@ PyAdamasStr* pa_b64decode(PyAdamasStr* data) {
 }
 
 PyAdamasDict* pa_collections_counter(PyAdamasList* src, int64_t key_kind, int64_t key_own) {
-    if (src->elem_kind > key_own) key_own = src->elem_kind;
+    // 3（未定型）只可能出现在空列表上，按最保守的 2 处理。
+    int sk = src->elem_kind == 3 ? 2 : (int)src->elem_kind;
+    if (sk > key_own) key_own = sk;
     PyAdamasDict* d = pa_dict_new(key_kind, key_own, 0, -1, -1);
     for (int64_t i = 0; i < src->len; ++i) {
         int64_t k = src->data[i];

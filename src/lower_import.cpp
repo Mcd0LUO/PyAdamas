@@ -746,7 +746,8 @@ VReg Lowerer::lower_itertools(const std::string& member, Call& c) {
     // 结果列表的元素是元组：外层列表类别固定为 1，这里算的是元组内部的
     // 元素类别（list_kind 对 Tuple 类型会按各字段合并）。
     auto tuple_elem_kind = [&](const TypePtr& rt) {
-        if (rt && rt->kind == TyKind::List && !rt->sub.empty()) return list_kind(rt->sub[0]);
+        if (rt && rt->kind == TyKind::List && !rt->sub.empty())
+            return list_kind_filled(rt->sub[0]);
         return 2;
     };
     if (member == "chain") {
@@ -758,7 +759,7 @@ VReg Lowerer::lower_itertools(const std::string& member, Call& c) {
         TypePtr rt = tc_.type_of(&c);
         VReg a = expr(*c.args[0]);
         VReg b = expr(*c.args[1]);
-        VReg v = call_runtime(RtFn::IterChain, rt, {a, b, const_int(list_kind(rt))});
+        VReg v = call_runtime(RtFn::IterChain, rt, {a, b, const_int(list_kind_filled(rt))});
         push_temp(v);
         return v;
     }
@@ -792,7 +793,7 @@ VReg Lowerer::lower_itertools(const std::string& member, Call& c) {
         TypePtr rt = tc_.type_of(&c);
         VReg v = expr(*c.args[0]);
         VReg n = coerce(expr(*c.args[1]), tc_.type_of(c.args[1].get()), t_int());
-        VReg out = call_runtime(RtFn::IterRepeat, rt, {v, n, const_int(list_kind(rt))});
+        VReg out = call_runtime(RtFn::IterRepeat, rt, {v, n, const_int(list_kind_filled(rt))});
         push_temp(out);
         return out;
     }
@@ -1436,7 +1437,7 @@ static const std::string& fn_param_name(const FuncInfoPtr& fn, int idx) {
 // 闭包捕获的值必须是 cell（单元素 list[T]），析构时由闭包统一 dec。
 VReg Lowerer::make_cell_value(VReg v, TypePtr T) {
     TypePtr cell_ty = mk_list(T ? T : t_unknown());
-    int kind = list_kind(cell_ty);
+    int kind = list_kind_filled(cell_ty);
     retain_elem(v, kind);
     Inst in;
     in.op = IrOp::MakeList;

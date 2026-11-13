@@ -540,22 +540,31 @@ private:
     }
 
     // 列表元素所有权类别，必须和 codegen 传给 pa_list_new 的值一致。
+    // 3 = 未定：类型里看不出元素种类（裸 list / []），空容器先记 3，第一次
+    // 写入时由 pa_list_prep 按运行时值定型。
     static int list_kind(const TypePtr& t) {
         auto one = [](const TypePtr& e) -> int {
-            if (!e || e->kind == TyKind::Unknown) return 2;
+            if (!e || e->kind == TyKind::Unknown) return 3;
             return ir_is_heap(e) ? 1 : 0;
         };
-        if (!t) return 2;
+        if (!t) return 3;
         if (t->kind == TyKind::List || t->kind == TyKind::Set || t->kind == TyKind::Dict)
-            return t->sub.empty() ? 2 : one(t->sub[0]);
+            return t->sub.empty() ? 3 : one(t->sub[0]);
         if (t->kind == TyKind::Tuple) {
-            if (t->sub.empty()) return 2;
+            if (t->sub.empty()) return 3;
             int k = one(t->sub[0]);
             for (size_t i = 1; i < t->sub.size(); ++i)
                 if (one(t->sub[i]) != k) return 2;
             return k;
         }
         return 2;
+    }
+
+    // 容器一开始就有元素（或由运行时自行填充）时不能停在「未定」3：
+    // 直接降级为 2，保持和原来一致的保守所有权语义。
+    static int list_kind_filled(const TypePtr& t) {
+        int k = list_kind(t);
+        return k == 3 ? 2 : k;
     }
 
     // kind 1/2 且源类型已知是堆，写入前 retain。kind 2 只 retain 不 release
@@ -569,6 +578,19 @@ private:
             return;
         }
         if (!vt || vt->kind == TyKind::Unknown) rc_inc_unknown(v);
+    }
+
+    // 列表元素写入前的所有权交接。容器未定型（3）、静态种类与值冲突、或值
+    // 是 unknown 时交给运行时的 pa_list_prep 定型并 retain；其余情况按静态
+    // 种类直接 retain，省掉一次调用。
+    void store_list_elem(VReg l, const TypePtr& lt, VReg v, bool owned) {
+        int lk = list_kind(lt);
+        int vk = own_kind(vreg_ty(v));
+        if (lk == 3 || (lk != 2 && vk == 2) || (lk == 0 && vk == 1) || (lk == 1 && vk == 0)) {
+            call_void(RtFn::ListPrep, {l, v, const_int(vk), const_int(owned ? 1 : 0)});
+            return;
+        }
+        if (!owned) retain_elem(v, lk);
     }
 
     // 哈希/比较类别：0 int/bool，1 str，2 float，3 其他（按机器字比较）。
@@ -996,7 +1018,7 @@ private:
             VReg env = load_slot(st_->env_slot, t_unknown());
             cell = field_load(env, 16 + 8 * idx, mk_list(T ? T : t_unknown()));
         }
-        retain_elem(v, list_kind(mk_list(T ? T : t_unknown())));
+        retain_elem(v, list_kind_filled(mk_list(T ? T : t_unknown())));
         Inst in;
         in.op = IrOp::IndexStore;
         in.a = cell;
@@ -1027,7 +1049,7 @@ private:
         for (auto& cv : m->cells) {
             TypePtr T = cv.ty;
             TypePtr cell_ty = mk_list(T ? T : t_unknown());
-            int kind = list_kind(cell_ty);
+            int kind = list_kind_filled(cell_ty);
             VReg init;
             if (auto it = st_->param_slots.find(cv.name); it != st_->param_slots.end())
                 init = load_slot(it->second, T);

@@ -944,6 +944,7 @@ void AsmGen::gen_call_rt(const Inst& in) {
                 emit2("movq", src_op(in.args[1]), "%rsi");
                 break;
             case RtFn::ClassNew:
+            case RtFn::ListPrep:
             case RtFn::ListAppend:
             case RtFn::ListGet:
             case RtFn::ListSetLen:

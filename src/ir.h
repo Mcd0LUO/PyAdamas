@@ -89,6 +89,7 @@ enum class RtFn : uint16_t {
     ListGet,     // (list*, i64) -> i64
     ListSet,     // (list*, i64, i64) -> void
     ListSetLen,  // (list*, i64) -> void
+    ListPrep,    // (list*, i64 v, i64 vk, i64 owned) -> void  空列表首次写入定型
     StrConcat,   // (str*, str*) -> str*
     StrCharAt,   // (str*, i64) -> str*
     BytesAt,     // (bytes*, i64) -> i64
@@ -543,6 +544,7 @@ inline const char* rt_name(RtFn f) {
         case RtFn::ListGet: return "pa_list_get";
         case RtFn::ListSet: return "pa_list_set";
         case RtFn::ListSetLen: return "pa_list_set_len";
+        case RtFn::ListPrep: return "pa_list_prep";
         case RtFn::StrConcat: return "pa_str_concat";
         case RtFn::StrCharAt: return "pa_str_char_at";
         case RtFn::BytesAt: return "pa_bytes_at";

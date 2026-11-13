@@ -31,7 +31,7 @@ std::vector<VReg> Lowerer::bind_args(Call& c, const FuncInfoPtr& info, FunctionD
     // 形参传进去；callee 里它就是一个普通 list 形参。
     TypePtr vty = info->varargs ? (info->vararg_ty ? info->vararg_ty : t_unknown()) : nullptr;
     TypePtr lty = info->varargs ? mk_list(vty) : nullptr;
-    int vk = info->varargs ? list_kind(lty) : 0;
+    int vk = info->varargs ? list_kind_filled(lty) : 0;
     VReg vlist = kNoReg;
     auto vararg_list = [&]() -> VReg {
         if (vlist == kNoReg) {

@@ -456,10 +456,11 @@ void Lowerer::assign_to(Expr& target, VReg v, TypePtr vty) {
             // 列表有元素类型，存进去的值要跟着转
             if (ot && ot->kind == TyKind::List && !ot->sub.empty())
                 v = coerce(v, src_ty, ot->sub[0]);
-            // 运行时 list_set 只负责 dec 旧值；新值的 retain 在这里做。
+            // 运行时 list_set 只负责 dec 旧值；新值的 retain（以及空列表的
+            // 元素种类定型）在这里做。
             bool moved = ot && ot->kind == TyKind::List && !ot->sub.empty() &&
                          move_fresh(v, ot->sub[0]);
-            if (!moved) retain_elem(v, list_kind(strip_optional(ot)));
+            store_list_elem(obj, strip_optional(ot), v, moved);
             Inst in;
             in.op = IrOp::IndexStore;
             in.a = obj;
@@ -1060,7 +1061,7 @@ VReg Lowerer::lower_percent_format(BinOp& b, TypePtr lt, TypePtr ty) {
         VReg v = expr(*b.right);
         TypePtr vt = rt ? rt : t_unknown();
         TypePtr list_ty = mk_list(vt);
-        int kind = list_kind(list_ty);
+        int kind = list_kind_filled(list_ty);
         retain_elem(v, kind);
         Inst mk;
         mk.op = IrOp::MakeList;
@@ -1760,7 +1761,10 @@ VReg Lowerer::lower_list_like(std::vector<ExprPtr>& elts, TypePtr ty, bool is_tu
     args.reserve(elts.size());
     // 元素所有权类别：0 非堆 / 1 堆 / 2 unknown 或混合。
     // kind 1/2 的元素在写入前 retain；kind 1 的容器销毁时由运行时 release。
+    // 空字面量可以停在「未定」，第一次写入时再定型；有元素时容器一开始
+    // 就带引用，沿用保守的 2。
     int kind = list_kind(ty);
+    if (kind == 3 && !elts.empty()) kind = 2;
     std::vector<VReg> fresh_args;
     for (size_t i = 0; i < elts.size(); ++i) {
         auto& e = elts[i];

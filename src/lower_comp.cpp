@@ -117,8 +117,10 @@ VReg Lowerer::lower_comp(Expr& e) {
             if (!move_fresh(v, elem_ty)) retain_elem(v, own_kind(elem_ty));
             call_void(RtFn::DictSet, {acc_val(), v, const_int(0)});
         } else {
-            if (!move_fresh(v, elem_ty)) retain_elem(v, list_kind(rty));
-            call_void(RtFn::ListAppend, {acc_val(), v});
+            VReg acc_now = acc_val();
+            bool owned = move_fresh(v, elem_ty);
+            store_list_elem(acc_now, rty, v, owned);
+            call_void(RtFn::ListAppend, {acc_now, v});
         }
     };
 

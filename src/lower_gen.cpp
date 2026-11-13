@@ -381,7 +381,7 @@ VReg Lowerer::lower_await(Expr& e) {
 VReg Lowerer::gen_to_list(VReg gen, TypePtr gen_ty) {
     TypePtr et = (gen_ty && !gen_ty->sub.empty()) ? gen_ty->sub[0] : t_unknown();
     TypePtr lt = mk_list(et);
-    int ko = list_kind(lt);
+    int ko = list_kind_filled(lt);
     VReg l = call_runtime(RtFn::ListNew, lt, {const_int(0), const_int(ko)});
     push_temp(l);
     int l_slot = new_temp_slot(lt);

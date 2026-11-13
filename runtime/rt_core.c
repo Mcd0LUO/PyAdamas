@@ -43,6 +43,7 @@ static int gc_untracked_leaves;
    统计本身只是一个可预测的全局分支，不改变所有权语义。 */
 static int rc_stats_on;
 static int64_t stat_rc_inc;
+static int64_t stat_rc_inc_unknown;
 static int64_t stat_rc_dec;
 static int64_t stat_rc_dec_unknown;
 static int64_t stat_rc_temp;
@@ -56,9 +57,11 @@ static int64_t stat_take_steps;
 
 static void rc_stats_dump(void) {
     fprintf(stderr,
-            "[rc] inc=%lld dec=%lld dec_unknown=%lld temp=%lld cleanup=%lld free=%lld "
-            "gc_runs=%lld gc_freed=%lld gc_live=%lld take=%lld take_steps=%lld\n",
-            (long long)stat_rc_inc, (long long)stat_rc_dec,
+            "[rc] inc=%lld inc_unknown=%lld dec=%lld dec_unknown=%lld temp=%lld "
+            "cleanup=%lld free=%lld gc_runs=%lld gc_freed=%lld gc_live=%lld "
+            "take=%lld take_steps=%lld\n",
+            (long long)stat_rc_inc, (long long)stat_rc_inc_unknown,
+            (long long)stat_rc_dec,
             (long long)stat_rc_dec_unknown, (long long)stat_rc_temp,
             (long long)stat_rc_cleanup, (long long)stat_rc_free,
             (long long)stat_gc_runs, (long long)stat_gc_freed,
@@ -245,6 +248,7 @@ void pa_register_literals(void** objs, int64_t n) {
    包括静态字面量（永生，不需要 inc）和整数。 */
 int64_t pa_rc_inc_unknown(int64_t v) {
     if (!v) return 0;
+    if (rc_stats_on) stat_rc_inc_unknown++;
     PyAdamasRc* h = (PyAdamasRc*)(uintptr_t)((uint64_t)v - (uint64_t)PYADAMAS_RC_HDR);
     if (!rc_index_has(h)) return 0;
     if (h->rc == PYADAMAS_RC_IMMORTAL) return 1;
@@ -741,7 +745,7 @@ void gc_scan_object(PyAdamasRc* h) {
                 if (l->elem_kind == 1)
                     for (int64_t i = 0; i < l->len; ++i)
                         gc_mark_direct((uintptr_t)l->data[i]);
-                else if (l->elem_kind == 2)
+                else if (l->elem_kind >= 2)
                     for (int64_t i = 0; i < l->len; ++i)
                         gc_mark((uintptr_t)l->data[i]);
             } else {

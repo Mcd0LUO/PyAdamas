@@ -20,7 +20,8 @@ typedef struct {
     const char* data;
 } PyAdamasStr;
 
-/* elem_kind: 0 = 全部非堆类型，1 = 全部堆类型，2 = 有 unknown / 混合。
+/* elem_kind: 0 = 全部非堆类型，1 = 全部堆类型，2 = 有 unknown / 混合，
+   3 = 未定（只可能出现在空列表上，第一次写入时由 pa_list_prep 定型）。
    kind 1/2 的元素在写入时 retain（堆→rc_inc，unknown→rc_inc_unknown），
    覆盖/截断/销毁时 release（kind 2 走注册表判断，整数是空操作）。 */
 typedef struct {
@@ -498,6 +499,9 @@ int64_t pa_range_all(PyAdamasRange* r);
 PyAdamasList* pa_range_to_list(PyAdamasRange* r);
 PyAdamasStr* pa_range_repr(PyAdamasRange* r);
 void pa_list_append(PyAdamasList* l, int64_t v);
+/* 空列表第一次写入前定型：vk = 0 非堆 / 1 堆 / 2 unknown；owned 非 0
+   表示引用已经转给容器（新值），不再 retain。 */
+void pa_list_prep(PyAdamasList* l, int64_t v, int64_t vk, int64_t owned);
 int64_t pa_list_get(PyAdamasList* l, int64_t i);
 void pa_list_set(PyAdamasList* l, int64_t i, int64_t v);
 void pa_list_set_len(PyAdamasList* l, int64_t n);

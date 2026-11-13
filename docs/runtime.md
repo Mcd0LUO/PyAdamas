@@ -105,12 +105,19 @@ RC 索引，取字符不再分配。字符串不可变，共享对象与 CPython
 | 0 | 全部非堆类型 | 不 retain | 不 release |
 | 1 | 全部堆类型 | 生成代码 retain | 运行时 release |
 | 2 | unknown 或混合 | 堆→`rc_inc`，unknown→`rc_inc_unknown` | `pa_rc_dec_unknown`（注册表判断，整数是空操作） |
+| 3 | 未定（只可能是空容器） | 第一次写入时定型并 retain | 沿用定型后的种类 |
 
 `pa_list_new(cap, elem_kind)` 最小容量 4；`append` 满了就翻倍。
 `pa_list_set` / `pa_list_set_len` / `del` / 销毁都按 `elem_kind` 释放旧元素；
 kind 2 统一走 `pa_rc_dec_unknown`：先查 RC 索引确认是堆指针再 dec，
 所以整数和「看起来像指针」的字面量都不会被误减。目标容器原本是 kind 1、
 但接入了 unknown/混合元素时，运行期把 `elem_kind` 提升为 2。
+
+kind 3 只出现在空容器上：`pa_list_prep(l, v, vk, owned)` 在第一次写入前
+定型——`vk` 是值的静态种类（0/1/2），unknown 值查一次 RC 索引判断是不是
+堆指针；静态种类和现有 kind 冲突时降级为 2。生成代码只在容器未定型、
+种类冲突或值是 unknown 时调用它（`store_list_elem`），其余写入仍按静态
+种类直接 retain。
 
 ### 字典 / 集合
 
@@ -335,8 +342,9 @@ longjmp 回同步调用点。GC 清扫和进程退出不跑析构器，但会单
 
 | 函数 | 签名 | 语义 |
 |---|---|---|
-| `pa_list_new` | `(i64 cap, i64 elem_kind) -> Py23List*` | 建空表，容量至少 4 |
+| `pa_list_new` | `(i64 cap, i64 elem_kind) -> Py23List*` | 建空表，容量至少 4；kind 3 表示元素种类未定 |
 | `pa_list_append` | `(Py23List*, i64) -> void` | 追加，满则翻倍 `realloc`；不隐式 retain |
+| `pa_list_prep` | `(Py23List*, i64 v, i64 vk, i64 owned) -> void` | 空表首次写入前定型并 retain（`owned` 非 0 则只定型） |
 | `pa_list_get` | `(Py23List*, i64) -> i64` | 负索引先加 `len`；越界抛 IndexError；返回借用。生成代码内联快路径，只有越界才进来 |
 | `pa_list_set` | `(Py23List*, i64, i64) -> void` | 同上，写入；按 elem_kind 释放旧元素（kind 2 走注册表）。生成代码内联快路径，运行期 elem_kind 决定是否释放 |
 | `pa_list_set_len` | `(Py23List*, i64) -> void` | 改 `len`；按 elem_kind 释放被截掉的元素 |
@@ -758,7 +766,8 @@ longjmp 回同步调用点。GC 清扫和进程退出不跑析构器，但会单
    - 用户对象 / 闭包：整个负载按 8 字节扫；
    - 字符串：没有子指针，跳过。
 3. **释放引用**：对每个不可达对象调用它的 `release`：
-   - 列表 kind 1 逐个 `gc_unref_child` 元素，kind 2 走 `pa_rc_dec_unknown`
+   - 列表 kind 1 逐个 `gc_unref_child` 元素，kind 2（以及不变量被破坏时
+     的 3）走 `pa_rc_dec_unknown`
      （清扫期 `pa_rc_dec` 只调整可达对象的计数，不会触发释放）；
    - 字典/集合按 `key_own` / `val_own` 对已知堆 key/value 做 unref，
      own 2 同样走注册表；
