@@ -389,7 +389,7 @@ void AsmGen::assign_block_temp_regs() {
             if (!safe) continue;
 
             std::unordered_map<VReg, int> def_pos;
-            std::unordered_map<VReg, IrOp> def_op;
+            std::unordered_map<VReg, const Inst*> def_inst;
             std::unordered_map<VReg, int> last_use;
             int pos = 0;
             for (const auto& in : b.insts) {
@@ -402,7 +402,7 @@ void AsmGen::assign_block_temp_regs() {
                 for (VReg r : in.args) touch(r);
                 if (in.dst != kNoReg) {
                     def_pos[in.dst] = pos;
-                    def_op[in.dst] = in.op;
+                    def_inst[in.dst] = &in;
                 }
                 ++pos;
             }
@@ -412,6 +412,49 @@ void AsmGen::assign_block_temp_regs() {
                 int end;
                 VReg v;
             };
+            // 分配一个寄存器池。除了线性扫描，还带拷贝合并提示：`v = a op b`
+            // 且 a 的最后一个使用就是这条指令时，把 a 的寄存器直接分给 v。
+            // 指令生成器看到目标寄存器就是左操作数时会原地算（`subsd b, a`），
+            // 省掉一条 movsd / movq。
+            //
+            // 提示只接受本块临时池里的寄存器：跨块值和变量槽的寄存器在定义
+            // 块之外还有读者，覆盖掉就错了。in_place_ok 再筛掉后端不能原地
+            // 算的算子，避免白白占住寄存器。
+            auto allocate = [&](std::vector<Range>& ranges, const std::vector<std::string>& pool,
+                                auto in_place_ok) {
+                std::ranges::sort(ranges, [](const Range& x, const Range& y) {
+                    return x.start != y.start ? x.start < y.start : x.end < y.end;
+                });
+                // until[i]：池里第 i 个寄存器当前占用区间的最大结束位置。
+                std::vector<int> until(pool.size(), -1);
+                for (const auto& r : ranges) {
+                    int pick = -1;
+                    auto di = def_inst.find(r.v);
+                    if (di != def_inst.end() && in_place_ok(*di->second)) {
+                        VReg a = di->second->a;
+                        auto lu = last_use.find(a);
+                        if (a != kNoReg && lu != last_use.end() && lu->second == r.start &&
+                            a < vreg_reg_.size() && !vreg_reg_[a].empty() && !cross_block_[a]) {
+                            for (size_t i = 0; i < pool.size(); ++i)
+                                if (pool[i] == vreg_reg_[a] && until[i] <= r.start) {
+                                    pick = static_cast<int>(i);
+                                    break;
+                                }
+                        }
+                    }
+                    if (pick < 0) {
+                        // 最近释放的优先，保持和原来 LIFO 自由表一致的行为。
+                        for (size_t i = 0; i < pool.size(); ++i)
+                            if (until[i] < r.start && (pick < 0 || until[i] >= until[pick]))
+                                pick = static_cast<int>(i);
+                    }
+                    if (pick < 0) continue;  // 后面的区间更晚开始，仍可能排上
+                    vreg_reg_[r.v] = pool[static_cast<size_t>(pick)];
+                    until[static_cast<size_t>(pick)] =
+                        std::max(until[static_cast<size_t>(pick)], r.end);
+                }
+            };
+
             std::vector<Range> ranges;
             for (const auto& [v, d] : def_pos) {
                 if (v >= static_cast<VReg>(f_->vreg_ty.size())) continue;
@@ -425,31 +468,28 @@ void AsmGen::assign_block_temp_regs() {
                 if (vt->kind == TyKind::Float || vt->kind == TyKind::Unknown ||
                     vt->kind == TyKind::Optional)
                     continue;
-                IrOp op = def_op[v];
+                IrOp op = def_inst[v]->op;
                 // LoadSlot 有自己的别名机制；常量可以延迟成立即数，不用占寄存器。
                 if (op == IrOp::LoadSlot || op == IrOp::ConstInt || op == IrOp::ConstNone)
                     continue;
                 ranges.push_back(Range{d, lu->second, v});
             }
-            std::ranges::sort(ranges, [](const Range& x, const Range& y) {
-                return x.start != y.start ? x.start < y.start : x.end < y.end;
-            });
-
-            std::priority_queue<std::pair<int, std::string>, std::vector<std::pair<int, std::string>>,
-                                std::greater<>>
-                active;
-            std::vector<std::string> free(block_temp_pool_.begin(), block_temp_pool_.end());
-            for (const auto& r : ranges) {
-                while (!active.empty() && active.top().first < r.start) {
-                    free.push_back(active.top().second);
-                    active.pop();
+            allocate(ranges, block_temp_pool_, [](const Inst& in) {
+                if (in.op != IrOp::Bin) return false;
+                switch (in.bop) {
+                    case BinKind::Add:
+                    case BinKind::Sub:
+                    case BinKind::Mul:
+                    case BinKind::BitAnd:
+                    case BinKind::BitOr:
+                    case BinKind::BitXor:
+                    case BinKind::Shl:
+                    case BinKind::Shr:
+                        return true;
+                    default:
+                        return false;  // 除法/取模/幂走 rax/rdx 或运行时调用
                 }
-                if (free.empty()) continue;  // 后面的区间更晚开始，仍可能排上
-                std::string reg = std::move(free.back());
-                free.pop_back();
-                vreg_reg_[r.v] = reg;
-                active.push({r.end, std::move(reg)});
-            }
+            });
 
             // 浮点临时值单独用 xmm3–7：和整型池互不影响。只收块内产生、
             // 块内用完且确定是 float 的纯计算值；LoadSlot 有自己的别名
@@ -462,30 +502,18 @@ void AsmGen::assign_block_temp_regs() {
                 if (lu == last_use.end()) continue;
                 TypePtr vt = f_->vreg_ty[v];
                 if (!vt || vt->kind != TyKind::Float) continue;
-                IrOp op = def_op[v];
+                IrOp op = def_inst[v]->op;
                 if (op != IrOp::Bin && op != IrOp::Un && op != IrOp::Convert &&
                     op != IrOp::ConstFloat && op != IrOp::Mov)
                     continue;
                 fp_ranges.push_back(Range{d, lu->second, v});
             }
-            std::ranges::sort(fp_ranges, [](const Range& x, const Range& y) {
-                return x.start != y.start ? x.start < y.start : x.end < y.end;
-            });
-            std::priority_queue<std::pair<int, std::string>, std::vector<std::pair<int, std::string>>,
-                                std::greater<>>
-                fp_active;
-            std::vector<std::string> fp_free(kFpTempRegs, kFpTempRegs + kMaxFpTempRegs);
-            for (const auto& r : fp_ranges) {
-                while (!fp_active.empty() && fp_active.top().first < r.start) {
-                    fp_free.push_back(fp_active.top().second);
-                    fp_active.pop();
-                }
-                if (fp_free.empty()) continue;
-                std::string reg = std::move(fp_free.back());
-                fp_free.pop_back();
-                vreg_reg_[r.v] = reg;
-                fp_active.push({r.end, std::move(reg)});
-            }
+            allocate(fp_ranges, std::vector<std::string>(kFpTempRegs, kFpTempRegs + kMaxFpTempRegs),
+                     [](const Inst& in) {
+                         if (in.op != IrOp::Bin || !ir_is_float(in.ty)) return false;
+                         return in.bop == BinKind::Add || in.bop == BinKind::Sub ||
+                                in.bop == BinKind::Mul || in.bop == BinKind::Div;
+                     });
         }
     }
 

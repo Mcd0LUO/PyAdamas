@@ -343,6 +343,16 @@ private:
         out_ += '\n';
     }
 
+    // 浮点搬运。寄存器之间用 movapd 做整 128 位拷贝：movsd 只写低 64 位，
+    // 硬件得把它和目的寄存器的旧值合并，于是凭空多出一条对旧值的依赖
+    // （紧挨着复用一个临时寄存器时可能明显变慢）。访存仍用 movsd。
+    void move_fp(const std::string& dst, const std::string& src) {
+        if (dst == src) return;
+        bool dreg = dst.size() > 4 && dst.compare(0, 4, "%xmm") == 0;
+        bool sreg = src.size() > 4 && src.compare(0, 4, "%xmm") == 0;
+        emit2(dreg && sreg ? "movapd" : "movsd", src, dst);
+    }
+
     // 本指令 dst 的落点。
     const std::string& dst_op(VReg r) const {
         if (!dst_loc_.empty()) return dst_loc_;

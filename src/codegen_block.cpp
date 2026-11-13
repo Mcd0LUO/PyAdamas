@@ -441,13 +441,20 @@ void AsmGen::gen_block(const Block& b) {
 
             int fused_slot = -1;
             bool fp_temp = false;
+            // 拷贝合并：目标值和左操作数被分到同一个临时寄存器时，直接原地
+            // 算就行，不必再借 %xmm1 中转（否则还要多一条 movsd）。
+            bool dst_coalesced =
+                in.dst != kNoReg && in.a != kNoReg &&
+                in.dst < static_cast<VReg>(vreg_reg_.size()) &&
+                in.a < static_cast<VReg>(vreg_reg_.size()) &&
+                !vreg_reg_[in.dst].empty() && vreg_reg_[in.dst] == vreg_reg_[in.a];
             if (i + 1 < b.insts.size() && can_fuse(in, b.insts[i + 1])) {
                 fused_slot = b.insts[i + 1].idx;
                 // 提升到寄存器的槽直接写寄存器；没提升的槽也可以把
                 // 结果直接落到变量内存，省掉「临时 vreg 槽 → 变量槽」。
                 dst_loc_ = slot_reg_[fused_slot].empty() ? slot_op(fused_slot)
                                                          : slot_reg_[fused_slot];
-            } else if (i + 2 < b.insts.size() &&
+            } else if (!dst_coalesced && i + 2 < b.insts.size() &&
                        can_fuse_fp_temp(in, b.insts[i + 1]) &&
                        !can_fuse_fp_temp(b.insts[i + 1], b.insts[i + 2])) {
                 // 下一条自己也要当临时结果时不能共用 %xmm1。

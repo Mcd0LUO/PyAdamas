@@ -70,6 +70,7 @@ set(PYADAMAS_SOURCES
   src/lower_gen_spill.cpp
   src/opt.cpp
   src/opt_forward.cpp
+  src/opt_cse.cpp
   src/opt_fold.cpp
   src/opt_inline.cpp
   src/opt_loop.cpp

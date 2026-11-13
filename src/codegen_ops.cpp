@@ -224,7 +224,7 @@ void AsmGen::gen_const_float(const Inst& in) {
         std::memcpy(&bits, &in.fimm, sizeof(bits));
         line(std::format("movabsq $0x{:x}, %rax", bits));
         line("movq %rax, %xmm0");
-        emit2("movsd", "%xmm0", dst_op(in.dst));
+        move_fp(dst_op(in.dst), "%xmm0");
     }
 
 void AsmGen::gen_bin(const Inst& in) {
@@ -373,7 +373,7 @@ void AsmGen::gen_bin_fp(const Inst& in) {
         // 就地算。累加 `s = s + ...` 因此只剩一条 addsd。
         if (opt_ >= 1 && simple && d.starts_with("%xmm")) {
             std::string sa = src_op(in.a);
-            if (sa != d) emit2("movsd", sa, d);
+            if (sa != d) move_fp(d, sa);
             switch (in.bop) {
                 case BinKind::Add: emit2("addsd", src_op(in.b), d); break;
                 case BinKind::Sub: emit2("subsd", src_op(in.b), d); break;
@@ -383,7 +383,7 @@ void AsmGen::gen_bin_fp(const Inst& in) {
             }
             return;
         }
-        emit2("movsd", src_op(in.a), "%xmm0");
+        move_fp("%xmm0", src_op(in.a));
         switch (in.bop) {
             case BinKind::Add: emit2("addsd", src_op(in.b), "%xmm0"); break;
             case BinKind::Sub: emit2("subsd", src_op(in.b), "%xmm0"); break;
@@ -437,7 +437,7 @@ void AsmGen::gen_bin_fp(const Inst& in) {
                 line("# unsupported float operator");
                 break;
         }
-        emit2("movsd", "%xmm0", dst_op(in.dst));
+        move_fp(dst_op(in.dst), "%xmm0");
     }
 
 void AsmGen::gen_un(const Inst& in) {
@@ -451,11 +451,11 @@ void AsmGen::gen_un(const Inst& in) {
         }
         if (ir_is_float(ty)) {
             if (in.uop == UnKind::Neg) {
-                emit2("movsd", src_op(in.a), "%xmm0");
+                move_fp("%xmm0", src_op(in.a));
                 line("movabsq $0x8000000000000000, %rax");
                 line("movq %rax, %xmm1");
                 line("xorpd %xmm1, %xmm0");
-                emit2("movsd", "%xmm0", dst_op(in.dst));
+                move_fp(dst_op(in.dst), "%xmm0");
             }
             return;
         }
@@ -474,7 +474,7 @@ void AsmGen::emit_truth(VReg r, const char* byte_reg) {
         (void)byte_reg;
         TypePtr ty = ty_of(r);
         if (ir_is_float(ty)) {
-            emit2("movsd", src_op(r), "%xmm0");
+            move_fp("%xmm0", src_op(r));
             line("xorpd %xmm1, %xmm1");
             line("ucomisd %xmm1, %xmm0");
             line("setne %al");
@@ -584,7 +584,7 @@ void AsmGen::gen_cmp(const Inst& in) {
     }
 
 void AsmGen::gen_cmp_fp(const Inst& in) {
-        emit2("movsd", src_op(in.a), "%xmm0");
+        move_fp("%xmm0", src_op(in.a));
         emit2("ucomisd", src_op(in.b), "%xmm0");
         switch (in.cop) {
             case CmpKind::Lt:
@@ -631,8 +631,7 @@ void AsmGen::gen_convert(const Inst& in) {
         if (to->kind == TyKind::Float) {
             if (ir_is_float(from)) {
                 // 已经是 double，只搬一次
-                emit2("movq", src_op(in.a), "%rax");
-                emit2("movq", "%rax", dst_op(in.dst));
+                move_fp(dst_op(in.dst), src_op(in.a));
                 return;
             }
             // cvtsi2sd 的源必须是寄存器或内存，立即数不能直接转
@@ -642,7 +641,7 @@ void AsmGen::gen_convert(const Inst& in) {
                 sa = "%rax";
             }
             emit2("cvtsi2sdq", sa, "%xmm0");
-            emit2("movsd", "%xmm0", dst_op(in.dst));
+            move_fp(dst_op(in.dst), "%xmm0");
             return;
         }
         if (to->kind == TyKind::Int) {
@@ -663,7 +662,7 @@ void AsmGen::gen_convert(const Inst& in) {
                 return;
             }
             if (ir_is_float(from)) {
-                emit2("movsd", src_op(in.a), "%xmm0");
+                move_fp("%xmm0", src_op(in.a));
                 spill_fp_slots();
                 line("call pa_str_from_f64");
                 reload_fp_slots();

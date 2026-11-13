@@ -39,6 +39,9 @@ bool version_bounds_function(IRFunction& fn);
 // 循环旋转：把条件计算复制到循环体之后，回边直接走 latch，消掉每次
 // 迭代的无条件跳转（代码生成会把「跳到下一块」的 jmp 省掉）。
 bool rotate_loops_function(IRFunction& fn);
+// 跨块公共子表达式消除：循环条件块算过的纯表达式（如 zr*zr）在体块里
+// 直接复用，不再重算。需要前驱出口状态一致，因此放在 CFG 定形之后。
+bool cse_function(IRFunction& fn);
 
 }  // namespace optdetail
 }  // namespace pyadamas

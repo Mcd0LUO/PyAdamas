@@ -219,6 +219,9 @@ void optimize_ir(IRModule& m, int opt_level) {
     // 旋转后 CFG 变了，再跑一次槽位转发，收掉新的 load+branch 形态。
     for (auto& fptr : m.funcs) forward_slot_loads(*fptr);
 
+    // 跨块 CSE：条件块算过的纯表达式（如循环条件里的 zr*zr）在体块里复用。
+    for (auto& fptr : m.funcs) cse_function(*fptr);
+
     // 内联带进来的实参常量继续折；顺带清掉失效的 load.global / func.addr。
     fold_all();
 }

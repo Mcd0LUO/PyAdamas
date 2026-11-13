@@ -65,7 +65,7 @@ void AsmGen::gen_index_load(const Inst& in) {
         line("movq 16(%rdi), %rdx");
         if (ir_is_float(in.ty)) {
             line("movsd (%rdx,%rsi,8), %xmm0");
-            emit2("movsd", "%xmm0", dst_op(in.dst));
+            move_fp(dst_op(in.dst), "%xmm0");
         } else {
             line("movq (%rdx,%rsi,8), %rax");
             move_to(dst_op(in.dst), "%rax");
@@ -80,7 +80,7 @@ void AsmGen::gen_index_unchecked_load(const Inst& in) {
         line("movq 16(%rdi), %rdx");
         if (ir_is_float(in.ty)) {
             line("movsd (%rdx,%rsi,8), %xmm0");
-            emit2("movsd", "%xmm0", dst_op(in.dst));
+            move_fp(dst_op(in.dst), "%xmm0");
         } else {
             line("movq (%rdx,%rsi,8), %rax");
             move_to(dst_op(in.dst), "%rax");
@@ -257,7 +257,7 @@ void AsmGen::gen_vcall(const Inst& in) {
         if (alloc) emit_imm_op("addq", alloc, "%rsp");
 
         if (!dst_unused(in)) {
-            if (ir_is_float(in.ty)) emit2("movsd", "%xmm0", dst_op(in.dst));
+            if (ir_is_float(in.ty)) move_fp(dst_op(in.dst), "%xmm0");
             else emit2("movq", "%rax", dst_op(in.dst));
         }
     }
@@ -298,7 +298,7 @@ void AsmGen::gen_vcall_static(const Inst& in) {
         reload_fp_slots();
         if (alloc) emit_imm_op("addq", alloc, "%rsp");
         if (!dst_unused(in)) {
-            if (ir_is_float(in.ty)) emit2("movsd", "%xmm0", dst_op(in.dst));
+            if (ir_is_float(in.ty)) move_fp(dst_op(in.dst), "%xmm0");
             else emit2("movq", "%rax", dst_op(in.dst));
         }
     }
@@ -349,7 +349,7 @@ void AsmGen::gen_super_vcall(const Inst& in) {
         if (alloc) emit_imm_op("addq", alloc, "%rsp");
 
         if (!dst_unused(in)) {
-            if (ir_is_float(in.ty)) emit2("movsd", "%xmm0", dst_op(in.dst));
+            if (ir_is_float(in.ty)) move_fp(dst_op(in.dst), "%xmm0");
             else emit2("movq", "%rax", dst_op(in.dst));
         }
     }
@@ -391,7 +391,7 @@ void AsmGen::gen_call_direct(const Inst& in) {
         reload_fp_slots();
         if (alloc) emit_imm_op("addq", alloc, "%rsp");
         if (!dst_unused(in)) {
-            if (ir_is_float(in.ty)) emit2("movsd", "%xmm0", dst_op(in.dst));
+            if (ir_is_float(in.ty)) move_fp(dst_op(in.dst), "%xmm0");
             else emit2("movq", "%rax", dst_op(in.dst));
         }
     }
@@ -431,7 +431,7 @@ void AsmGen::gen_call_ptr(const Inst& in) {
         if (alloc) emit_imm_op("addq", alloc, "%rsp");
 
         if (!dst_unused(in)) {
-            if (ir_is_float(in.ty)) emit2("movsd", "%xmm0", dst_op(in.dst));
+            if (ir_is_float(in.ty)) move_fp(dst_op(in.dst), "%xmm0");
             else emit2("movq", "%rax", dst_op(in.dst));
         }
     }
@@ -535,7 +535,7 @@ void AsmGen::gen_call(const Inst& in) {
         if (alloc) emit_imm_op("addq", alloc, "%rsp");
 
         if (!dst_unused(in)) {
-            if (ir_is_float(in.ty)) emit2("movsd", "%xmm0", dst_op(in.dst));
+            if (ir_is_float(in.ty)) move_fp(dst_op(in.dst), "%xmm0");
             else emit2("movq", "%rax", dst_op(in.dst));
         }
     }
@@ -946,7 +946,7 @@ void AsmGen::gen_call_rt(const Inst& in) {
             // pa_dict_key_at 一律返回机器字；float 元素的位模式也从 rax
             // 取，不能按 double 去读 xmm0。
             bool raw_ret = fn == RtFn::DictKeyAt;
-            if (ir_is_float(in.ty) && !raw_ret) emit2("movsd", "%xmm0", dst_op(in.dst));
+            if (ir_is_float(in.ty) && !raw_ret) move_fp(dst_op(in.dst), "%xmm0");
             else emit2("movq", "%rax", dst_op(in.dst));
         }
     }
