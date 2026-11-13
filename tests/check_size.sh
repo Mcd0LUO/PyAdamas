@@ -15,16 +15,9 @@ cd "$(dirname "$0")/.." || exit 2
 FILE_LIMIT=1200
 FUNC_LIMIT=300
 
-# 仍待拆分的大文件：已经登记，新增文件不允许再进这个清单。
-ALLOW_FILES="
-src/lower_expr.cpp
-src/lower_import.cpp
-src/typecheck_call.cpp
-src/lower_stmt.cpp
-src/lower_gen.cpp
-src/lower.cpp
-src/cdecl.cpp
-"
+# 仍待拆分的大文件。当前为空：所有源文件都已拆到 1200 行以内。
+# 这个清单只能删不能加；新增文件超过上限时必须拆分，不要登记进来。
+ALLOW_FILES=""
 
 is_allowed() {
     case "

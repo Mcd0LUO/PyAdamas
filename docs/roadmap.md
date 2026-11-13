@@ -79,9 +79,10 @@
 | 0.151 | 修复 `str(unknown)` 的运行期分派（堆字符串不再被格式化成地址数字） |
 | 0.152 | 工程治理：拆分 `lower_method.cpp`（2131 行上帝函数 → 15 个按接收者类型划分的成员函数） |
 | 0.153 | 工程治理：拆完 `gen_call_rt` / `builtin_module` / `lower_builtin_call` / `call` / `stmt`，拆分 `ir.h`、`typecheck.h`、`lower_impl.h`，新增 `tests/check_size.sh` |
+| 0.154 | 工程治理：拆完剩余 7 个大文件（`typecheck_call` / `lower_expr` / `lower_import` / `lower_stmt` / `lower_gen` / `lower` / `cdecl`），全部源文件 ≤1200 行 |
 | 许可证 | Apache-2.0（见 [LICENSE](../LICENSE) / [NOTICE](../NOTICE)） |
 
-## 当前状态（0.153）
+## 当前状态（0.154）
 
 流水线 `源码 → 词法 → AST → lambda 脱糖 → 类型检查 → IR → x86-64 汇编 → 可执行文件` 已打通。
 

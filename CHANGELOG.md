@@ -4,6 +4,33 @@
 
 早期阶段没有逐条留痕，按阶段归纳；0.4 之后逐条记录。
 
+## [0.154] - 2026-11-14
+
+工程治理：拆完全部 allowlist 大文件，所有源文件回到 1200 行以内。
+
+### 变更
+
+- `typecheck_call.cpp`（2106 行）按调用类别拆成入口/模块规则/方法表三块，
+  新增 `typecheck_call_modules.cpp`、`typecheck_call_method.cpp`。
+- `lower_expr.cpp`（2276 行）拆成容器提升、赋值与 `expr` 主分派、运算符与
+  比较、容器构造、dunder 协议与转换五个文件。
+- `lower_import.cpp`（2130 行）拆成模块别名/import 语句、原生调用、
+  operator/collections、functools/datetime/pathlib/json 四个文件。
+- `lower_stmt.cpp`（1968 行）拆成控制流/for、with/异常清理、async with。
+- `lower_gen.cpp`（1389 行）拆成 yield 与生成器 for、async for 与可挂起
+  函数编译、跨挂起溢出三块。
+- `lower.cpp`（1267 行）把类相关成员搬到 `lower_class.cpp`，驱动留在原文件。
+- `cdecl.cpp`（1247 行）拆成词法/驱动与解析器两部分，新增内部头
+  `cdecl_internal.h`；`cdecl_parse.cpp` 保留类型解析与 `Cdecl`。
+- `tests/check_size.sh` 的 `ALLOW_FILES` 清空：文件行数检查对所有文件生效。
+
+### 工程
+
+- 纯搬移，接口、报错文本与生成代码不变；151 运行用例、52 反例、840 差分、
+  ctest、memcheck、release bench 全部通过。
+- 函数级警告仍按约定只提示不阻塞（如 `gen_rt_args` 543 行、
+  `builtin_module` 736 行）。
+
 ## [0.153] - 2026-11-14
 
 工程治理：拆分剩余的上帝函数与大文件，并加入规模检查。
