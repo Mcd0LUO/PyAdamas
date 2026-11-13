@@ -145,6 +145,7 @@ enum class RtFn : uint16_t {
     RcIncUnknown,// (i64) -> i64  按堆注册表保守 retain（unknown 值）
     RcDecUnknown,// (i64) -> void 按堆注册表保守 release（unknown 值）
     RcTemp,      // (ptr) -> void  表达式临时值入栈，接管产生者的引用
+    RcTempUnknown, // (i64) -> void unknown 值入临时栈（先按注册表确认是堆对象）
     RcMark,      // () -> i64      临时值栈水位
     RcCleanup,   // (i64) -> void  释放到指定水位
     RcShutdown,  // () -> void     程序退出，释放临时栈自身的存储
@@ -191,6 +192,8 @@ enum class RtFn : uint16_t {
     StrToList,    // (str*) -> list*
     StrCapwords,  // (str*) -> str*  单遍 capwords
     BytesToList,  // (bytes*) -> list[int]（for c in b"..."）
+    BytesFromList, // (list*) -> bytes*  bytes([...])
+    BytesZeros,   // (i64) -> bytes*     bytes(n)
     StrWrapList,  // (str*) -> list*（单元素，subprocess 用）
     ListExtend,   // (list* dst, list* src) -> void
     ListSumI64,   // (list*, i64 start) -> i64
@@ -210,6 +213,7 @@ enum class RtFn : uint16_t {
     EnumerateList,// (list*) -> list*  元素是 [i, v] 对
     Zip2List,     // (list*, list*) -> list*
     SetFromList,  // (list*, i64 key_kind, i64 key_own) -> dict*
+    DictFromPairs, // (list*, kk, ko, vo, hslot, eslot) -> dict* 元素是 (k, v)
     RangeNew,     // (i64 start, i64 stop, i64 step) -> range*
     RangeLen,     // (range*) -> i64
     RangeFirst,   // (range*) -> i64
@@ -234,8 +238,12 @@ enum class RtFn : uint16_t {
     ExcAccept,    // () -> str*       把 pending 转为 current，返回消息
     ExcAcceptValue, // () -> excval*   进入 except 体，返回异常对象
     ExcDone,      // () -> void
+    ExcEnter,     // (i64* cur, i64* top) -> i64 进入 resume：存调用方异常上下文
+    ExcLeave,     // (i64* cur, i64* top, i64 token) -> void 挂起/退出：换回去
     ExcClear,     // () -> void
     ExcReraise,   // () -> void       noreturn
+    ExcTakeValue, // () -> excval*    取出待处理异常（复制成异常值），清空全局
+    ExcReraiseValueIf, // (excval*) -> void  非空时重新抛出（复制后 longjmp）
     ExcTypeName,  // () -> str*
     ExcMessage,   // () -> str*
     ExcValueArgs, // (excval*) -> tuple*
@@ -274,6 +282,8 @@ enum class RtFn : uint16_t {
     GenNextOpt,   // (gen*, i64* ok) -> i64  结束时不抛，写 ok=0
     GenSend,      // (gen*, i64 sent) -> i64
     GenSendOpt,   // (gen*, i64 sent, i64* ok) -> i64  yield from 用
+    GenThrow,     // (gen*, excval*) -> i64  gen.throw(exc)
+    GenThrowOpt,  // (gen*, exc*, i64* ok) -> i64  yield from 转发 throw 用
     GenClose,     // (gen*) -> void  跑跨挂起点的清理并结束
     HandlerSuspend, // (handler*) -> void  yield 时把记录临时摘下
     HandlerRearm,   // (handler*) -> void  恢复时重新压栈并记录水位
@@ -537,6 +547,7 @@ inline const char* rt_name(RtFn f) {
         case RtFn::RcIncUnknown: return "pa_rc_inc_unknown";
         case RtFn::RcDecUnknown: return "pa_rc_dec_unknown";
         case RtFn::RcTemp: return "pa_rc_temp";
+        case RtFn::RcTempUnknown: return "pa_rc_temp_unknown";
         case RtFn::RcMark: return "pa_rc_mark";
         case RtFn::RcCleanup: return "pa_rc_cleanup";
         case RtFn::RcShutdown: return "pa_rc_shutdown";
@@ -583,6 +594,8 @@ inline const char* rt_name(RtFn f) {
         case RtFn::StrToList: return "pa_str_to_list";
         case RtFn::StrCapwords: return "pa_str_capwords";
         case RtFn::BytesToList: return "pa_bytes_to_list";
+        case RtFn::BytesFromList: return "pa_bytes_from_list";
+        case RtFn::BytesZeros: return "pa_bytes_zeros";
         case RtFn::StrWrapList: return "pa_str_wrap_list";
         case RtFn::ListExtend: return "pa_list_extend";
         case RtFn::ListSumI64: return "pa_list_sum_i64";
@@ -602,6 +615,7 @@ inline const char* rt_name(RtFn f) {
         case RtFn::EnumerateList: return "pa_enumerate_list";
         case RtFn::Zip2List: return "pa_zip2_list";
         case RtFn::SetFromList: return "pa_set_from_list";
+        case RtFn::DictFromPairs: return "pa_dict_from_pairs";
         case RtFn::RangeNew: return "pa_range_new";
         case RtFn::RangeLen: return "pa_range_len";
         case RtFn::RangeFirst: return "pa_range_first";
@@ -626,8 +640,12 @@ inline const char* rt_name(RtFn f) {
         case RtFn::ExcAccept: return "pa_exc_accept";
         case RtFn::ExcAcceptValue: return "pa_exc_accept_value";
         case RtFn::ExcDone: return "pa_exc_done";
+        case RtFn::ExcEnter: return "pa_exc_enter";
+        case RtFn::ExcLeave: return "pa_exc_leave";
         case RtFn::ExcClear: return "pa_exc_clear";
         case RtFn::ExcReraise: return "pa_exc_reraise";
+        case RtFn::ExcTakeValue: return "pa_exc_take_value";
+        case RtFn::ExcReraiseValueIf: return "pa_exc_reraise_value_if";
         case RtFn::ExcTypeName: return "pa_exc_type_name";
         case RtFn::ExcMessage: return "pa_exc_message";
         case RtFn::ExcValueArgs: return "pa_exc_value_args";
@@ -722,6 +740,8 @@ inline const char* rt_name(RtFn f) {
         case RtFn::GenNextOpt: return "pa_gen_next_opt";
         case RtFn::GenSend: return "pa_gen_send";
         case RtFn::GenSendOpt: return "pa_gen_send_opt";
+        case RtFn::GenThrow: return "pa_gen_throw";
+        case RtFn::GenThrowOpt: return "pa_gen_throw_opt";
         case RtFn::GenClose: return "pa_gen_close";
         case RtFn::HandlerSuspend: return "pa_handler_suspend";
         case RtFn::HandlerRearm: return "pa_handler_rearm";
@@ -966,15 +986,23 @@ enum class IrOp : uint8_t {
     ObjNew,     // dst = new <class imm>[n_fields]，头部写 vtable 指针
     FieldLoad,  // dst = a->field[imm]（imm 是字节偏移）
     FieldStore, // a->field[imm] = b
+    PtrLoad,    // dst = *(a + b)；imm 是元素宽度（2/4/8 走比例寻址）
+    PtrStore,   // *(a + b) = c；imm 是元素宽度
     VCall,      // dst = a->vtable[imm](a, args...)  第一个实参固定是 self
     VCallStatic,// dst = a->vtable[imm](args...)  静态方法不传 self
     SuperVCall, // dst = super_lookup(a, idx, imm)(a, args...)  沿运行期 MRO
     CallDirect, // dst = funcs[idx](args...)  直接调用裸函数（静态方法）
 
+    // ── 值类型 ────────────────────────────────────────────
+    StructNew,  // dst = pa_struct_new(imm)；imm 是 payload 字节数
+    StructCopy, // dst = pa_struct_copy(a, imm)；按值语义复制一份 payload
+
     // ── 调用 ──────────────────────────────────────────────
     Call,    // dst = a(args...)（a 是函数指针）
     CallRt,  // dst = <RtFn(imm)>(args...)
     CallExtern, // dst = <externs[idx].symbol>(args...)；参数按 C ABI 编组
+    LoadExtern, // dst = <extern_vars[idx].symbol>；按声明宽度读取 C 全局变量
+    StoreExtern, // <extern_vars[idx].symbol> = a；按声明宽度写回
     Setjmp,  // dst = setjmp(a)（a 是 handler 记录，异常跳回时返回非 0）
     ImportModule, // imm 是 imports 下标：确保模块已初始化
     SlotAddr,     // dst = &slots[idx]（栈槽或生成器帧槽的地址）
@@ -988,6 +1016,7 @@ enum class IrOp : uint8_t {
     GenYield,   // 把 a 写进 out、state=imm，然后返回（终止指令）
     GenAwait,   // 把 a 写进 out、state=imm、status=3，然后返回（终止指令）
     GenGetExc,  // dst = 帧里待注入的异常指针
+    GenTakeExc, // dst = 帧里待注入的异常指针，并把帧槽清零（所有权转移出去）
     GenRethrow, // 在 resume 帧内抛出注入的异常（终止指令）
     GenDone,    // status=1；a 非空时先把返回值写进 out（终止指令）
 
@@ -1023,13 +1052,19 @@ inline const char* irop_name(IrOp op) {
         case IrOp::ObjNew: return "obj.new";
         case IrOp::FieldLoad: return "field.get";
         case IrOp::FieldStore: return "field.set";
+        case IrOp::PtrLoad: return "ptr.load";
+        case IrOp::PtrStore: return "ptr.store";
         case IrOp::VCall: return "vcall";
         case IrOp::VCallStatic: return "vcall.static";
         case IrOp::SuperVCall: return "vcall.super";
         case IrOp::CallDirect: return "call.direct";
+        case IrOp::StructNew: return "struct.new";
+        case IrOp::StructCopy: return "struct.copy";
         case IrOp::Call: return "call";
         case IrOp::CallRt: return "call.rt";
         case IrOp::CallExtern: return "call.extern";
+        case IrOp::LoadExtern: return "load.extern";
+        case IrOp::StoreExtern: return "store.extern";
         case IrOp::Setjmp: return "setjmp";
         case IrOp::ImportModule: return "import.module";
         case IrOp::SlotAddr: return "slot.addr";
@@ -1041,6 +1076,7 @@ inline const char* irop_name(IrOp op) {
         case IrOp::GenYield: return "gen.yield";
         case IrOp::GenAwait: return "gen.await";
         case IrOp::GenGetExc: return "gen.exc";
+        case IrOp::GenTakeExc: return "gen.take.exc";
         case IrOp::GenRethrow: return "gen.rethrow";
         case IrOp::GenDone: return "gen.done";
         case IrOp::Jump: return "jump";
@@ -1072,6 +1108,12 @@ struct Inst {
     // 调用（如 ptr 既接地址又接 list），所以按调用点记录；为空时回退到
     // IRExtern::params。
     std::vector<uint8_t> cargs;
+
+    // FieldLoad/FieldStore 的访问宽度（字节）：1/4/8。类字段固定 8；
+    // C 结构体的 int32/uint32 是 4，bool 是 1。
+    uint8_t fwidth = 8;
+    // 4 字节字段是否无符号：false 时 movslq 符号扩展，true 时 movl 零扩展。
+    bool funsigned = false;
 
     std::string text() const;
 };
@@ -1173,10 +1215,36 @@ struct IRGenerator {
     int frame_kind = 0;
 };
 
+// 按值结构体在 SysV x86-64 下的分类结果：每 8 字节一个 chunk，
+// chunk_fp[i] == 1 表示该 chunk 走 XMM（只含 double 字段），否则走整数寄存器/栈。
+struct IRStructABI {
+    int64_t size = 0;
+    std::vector<uint8_t> chunk_fp;
+};
+
+// C 回调参数的签名；codegen 为每个签名生成一个跳板 + 一个闭包槽。
+struct IRCallbackSig {
+    std::vector<CKind> params;
+    CKind ret = CKind::None;
+};
+
 struct IRExtern {
     std::string symbol;
     std::vector<CKind> params;
     CKind ret = CKind::None;
+    // 与 params 等长；非结构体参数对应 size == 0 的空项。
+    std::vector<IRStructABI> param_abi;
+    IRStructABI ret_abi;
+    // 与 params 等长；回调参数记录 cb_sigs 下标，其余为 -1。
+    std::vector<int> param_cb;
+    // C 可变参数函数：调用前要设置 %al（使用的 xmm 寄存器数）。
+    bool varargs = false;
+};
+
+// .cpya 的 extern 变量：只记录符号与加载宽度。
+struct IRExternVar {
+    std::string symbol;
+    CKind kind = CKind::Int;
 };
 
 struct IRModule {
@@ -1198,6 +1266,10 @@ struct IRModule {
     std::vector<std::string> imports;
     // cimport 外部函数表：CallExtern 的 idx 指向这里。
     std::vector<IRExtern> externs;
+    // cimport extern 变量表：LoadExtern 的 idx 指向这里。
+    std::vector<IRExternVar> extern_vars;
+    // cimport 回调签名表：生成的跳板/闭包槽按这里的下标命名。
+    std::vector<IRCallbackSig> cb_sigs;
     int entry = -1;  // 模块顶层代码编译成的函数下标
 
     IRFunction* add_func(std::string name) {
@@ -1256,6 +1328,7 @@ inline bool ir_is_heap(const TypePtr& t) {
         case TyKind::DateTime:
         case TyKind::Path:
         case TyKind::Deque:
+        case TyKind::Struct:
             return true;
         case TyKind::Optional:
             return !t->sub.empty() && ir_is_heap(t->sub[0]);
@@ -1277,6 +1350,10 @@ inline bool ir_is_ref(const TypePtr& t) {
         case TyKind::Func:
         case TyKind::BoundMethod:
         case TyKind::Class:
+        // 值类型结构体（包括 .cpya 声明的 C 结构体）都由 pa_struct_new
+        // 分配，带 RC 头；只有 StructPtr 才可能是没有 RC 头的 C 指针。
+        case TyKind::Struct: return true;
+        case TyKind::StructPtr: return t->st && !t->st->c_struct;
         case TyKind::Generator:
         case TyKind::Coroutine:
         case TyKind::Task:

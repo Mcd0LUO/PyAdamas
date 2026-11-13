@@ -73,6 +73,8 @@ enum class TyKind : uint8_t {
     DateTime,     // datetime.date / datetime.datetime
     Path,         // pathlib.Path
     Deque,        // collections.deque
+    Struct,       // 值类型 struct 的实例，st 指向编译期布局
+    StructPtr,    // addr(struct) 得到的指针；机器表示与 Struct 相同
 };
 
 struct Type;
@@ -81,6 +83,7 @@ struct FuncInfo;
 using FuncInfoPtr = std::shared_ptr<FuncInfo>;
 struct ClassInfo;
 using ClassInfoPtr = std::shared_ptr<ClassInfo>;
+struct StructInfo;
 struct ModuleInfo;
 using ModuleInfoPtr = std::shared_ptr<ModuleInfo>;
 using ModuleLookup = std::function<ModuleInfoPtr(const std::string&)>;
@@ -88,7 +91,7 @@ using ModuleLookup = std::function<ModuleInfoPtr(const std::string&)>;
 // 默认参数的可序列化字面量。跨模块接口不能带 AST 指针，
 // 只能保留这种最小的常量表示。
 struct LiteralValue {
-    enum class Kind : uint8_t { None, Bool, Int, Float, Str } kind = Kind::None;
+    enum class Kind : uint8_t { None, Bool, Int, Float, Str, Bytes } kind = Kind::None;
     bool b = false;
     int64_t i = 0;
     double f = 0.0;
@@ -104,6 +107,8 @@ struct Type {
     // kind == Class。裸指针：ClassInfo 由 TypeChecker 拥有，而 ClassInfo
     // 的字段类型又指回 Type —— 两边都用 shared_ptr 会成环，永远不会释放。
     ClassInfo* cls = nullptr;
+    // kind == Struct / StructPtr。所有权在 TypeChecker::all_structs_。
+    StructInfo* st = nullptr;
     std::string name;  // BoundMethod 的方法名
     // 元素类型是否由标注固定。字面量推出来的容器是「开放」的：
     // d = {}; d['k'] = 1; d['k2'] = 's' 在 Python 里合法，
@@ -113,6 +118,9 @@ struct Type {
     // 不区分「长度不定」和「单元素元组」会造成 (1,) 与 tuple(x) 混淆，
     // `a, b = t[-2:]` 会被误报成「不能把 1 个值拆成 2 个」。
     bool variadic = false;
+    // kind == Optional 且内层是 int 的 C 指针（ptr[T]）：T 的机器种类。
+    // 用于 `p[i]` 解引用；None 表示不透明指针（ptr / void*）。
+    CKind celem = CKind::None;
 };
 
 // 判断 needle 是否出现在 hay 的子树里。容器元素类型可能指向容器自身
@@ -219,6 +227,39 @@ struct FieldInfo {
     // 从 `self.x = ...` 推断出来的字段（没写标注）。类型只是推测，
     // 赋别的类型时放宽成 join，不报错。
     bool implicit = false;
+};
+
+// 值类型 struct 的一个字段。偏移/大小按 C 结构体规则在编译期算好，
+// 降级阶段直接按偏移读写，不生成访问器。
+struct StructFieldInfo {
+    std::string name;
+    TypePtr ty;
+    int64_t offset = 0;
+    int64_t size = 0;
+    int64_t align = 1;
+    // C 结构体的 uint32 字段：读取时零扩展而不是符号扩展。
+    bool c_unsigned = false;
+};
+
+// 值类型 struct 的布局。v1 只允许 int / float / bool 字段：
+// 分别对应 C 的 int64_t / double / _Bool，布局与 C 完全一致。
+struct StructInfo {
+    std::string name;
+    std::vector<StructFieldInfo> fields;
+    int64_t size = 0;
+    int64_t align = 1;
+    // .cpya 声明的 C 结构体：指针只是整数地址，没有 RC 头，不能当引用计数对象。
+    bool c_struct = false;
+    const StructFieldInfo* field(const std::string& n) const {
+        for (auto& f : fields)
+            if (f.name == n) return &f;
+        return nullptr;
+    }
+    int index_of(const std::string& n) const {
+        for (size_t i = 0; i < fields.size(); ++i)
+            if (fields[i].name == n) return static_cast<int>(i);
+        return -1;
+    }
 };
 
 enum class MethodKind : uint8_t {
@@ -533,6 +574,17 @@ inline TypePtr mk_optional(TypePtr inner) {
     return t;
 }
 
+inline TypePtr mk_struct(StructInfo* s) {
+    auto t = new_ty(TyKind::Struct);
+    t->st = s;
+    return t;
+}
+inline TypePtr mk_struct_ptr(StructInfo* s) {
+    auto t = new_ty(TyKind::StructPtr);
+    t->st = s;
+    return t;
+}
+
 // .cpya 的 C 类型 → py23 类型。指针统一当作 Optional[int]：
 // 0 表示 NULL，运行时不做解引用。
 inline TypePtr ckind_type(CKind k) {
@@ -549,13 +601,56 @@ inline TypePtr ckind_type(CKind k) {
         case CKind::Int:
         case CKind::Int32:
         case CKind::UInt32: return t_int();
+        // 按值结构体需要作用域里的 StructInfo，调用方在结构体表命中时
+        // 已提前返回 mk_struct，这里只作兜底。
+        case CKind::Struct:
+        case CKind::Callback: return t_unknown();
     }
     return t_int();
 }
+inline TypePtr cptr_elem_type(CKind k) {
+    switch (k) {
+        case CKind::Float: return t_float();
+        case CKind::Bool: return t_bool();
+        default: return t_int();
+    }
+}
+
 inline TypePtr mk_bound(TypePtr recv, std::string method) {
     auto t = new_ty(TyKind::BoundMethod);
     t->sub.push_back(std::move(recv));
     t->name = std::move(method);
+    return t;
+}
+// 方法值的类型：把 `obj.m` / `C.m` 当成普通函数值。
+// class_recv 为真表示接收者是类本身（`C.m`），普通方法按 Python 3 保持
+// 未绑定（self 仍是第一个形参）；实例上取到的是绑定方法，self 去掉。
+inline TypePtr mk_method_value(const MethodInfo& m, bool class_recv) {
+    FuncInfoPtr src;
+    bool drop_first = false;
+    switch (m.kind) {
+        case MethodKind::Static:
+        case MethodKind::ClassMethod:
+            src = m.call_sig;  // 静态方法没有 self；类方法已绑定到类
+            break;
+        case MethodKind::Normal:
+            if (m.decorated && m.decorated_ty && m.decorated_ty->kind == TyKind::Func) {
+                src = m.decorated_ty->fn;  // 包装签名含 self
+                drop_first = !class_recv;
+            } else {
+                src = class_recv ? m.sig : m.call_sig;
+            }
+            break;
+        default:
+            return t_unknown();
+    }
+    if (!src) return t_unknown();
+    auto fn = std::make_shared<FuncInfo>(*src);
+    fn->outer = nullptr;
+    fn->sig_dirty = false;
+    if (drop_first && !fn->pos.empty()) fn->pos.erase(fn->pos.begin());
+    auto t = new_ty(TyKind::Func);
+    t->fn = std::move(fn);
     return t;
 }
 inline TypePtr mk_class(ClassInfo* c) {
@@ -563,9 +658,13 @@ inline TypePtr mk_class(ClassInfo* c) {
     t->cls = c;
     return t;
 }
-inline TypePtr mk_generator(TypePtr elem) {
+// Generator[Y, S, R]：sub[0]=yield 类型，sub[1]=send 值类型，
+// sub[2]=return 值类型（StopIteration.value，目前只做记录）。
+inline TypePtr mk_generator(TypePtr elem, TypePtr send = nullptr, TypePtr result = nullptr) {
     auto t = new_ty(TyKind::Generator);
     t->sub.push_back(std::move(elem));
+    if (send || result) t->sub.push_back(std::move(send));
+    if (result) t->sub.push_back(std::move(result));
     return t;
 }
 inline TypePtr mk_coroutine(TypePtr result) {
@@ -633,6 +732,7 @@ inline bool type_eq(const TypePtr& a, const TypePtr& b) {
     }
     if (a->kind == TyKind::BoundMethod) return a->name == b->name && type_eq(a->sub[0], b->sub[0]);
     if (a->kind == TyKind::Class) return a->cls == b->cls;
+    if (a->kind == TyKind::Struct || a->kind == TyKind::StructPtr) return a->st == b->st;
     if (a->kind == TyKind::Exception) return true;  // 异常值统一按 Exception 处理
     if (a->kind == TyKind::Tuple && a->variadic != b->variadic) return false;
     if (a->sub.size() != b->sub.size()) return false;
@@ -720,6 +820,10 @@ inline std::string type_name_impl(const TypePtr& t, int depth) {
                                t->sub.empty() ? "?" : type_name_impl(t->sub[0], depth + 1));
         case TyKind::Class:
             return t->cls ? t->cls->name : "class";
+        case TyKind::Struct:
+            return t->st ? t->st->name : "struct";
+        case TyKind::StructPtr:
+            return t->st ? std::format("ptr[{}]", t->st->name) : "ptr";
         case TyKind::Generator:
             return t->sub.empty()
                        ? "generator"
@@ -822,8 +926,11 @@ inline TypePtr join_into(const TypePtr& a, const TypePtr& b) {
     if (a->kind == TyKind::Dict && b->kind == TyKind::Dict)
         return mk_dict(join(a->sub[0], b->sub[0]), join(a->sub[1], b->sub[1]));
     if (a->kind == TyKind::Generator && b->kind == TyKind::Generator)
-        return mk_generator(join(a->sub.empty() ? t_unknown() : a->sub[0],
-                                 b->sub.empty() ? t_unknown() : b->sub[0]));
+        return mk_generator(
+            join(a->sub.empty() ? t_unknown() : a->sub[0],
+                 b->sub.empty() ? t_unknown() : b->sub[0]),
+            (a->sub.size() > 1 && b->sub.size() > 1) ? join(a->sub[1], b->sub[1]) : nullptr,
+            (a->sub.size() > 2 && b->sub.size() > 2) ? join(a->sub[2], b->sub[2]) : nullptr);
     if (a->kind == TyKind::Coroutine && b->kind == TyKind::Coroutine)
         return mk_coroutine(join(a->sub.empty() ? t_unknown() : a->sub[0],
                                  b->sub.empty() ? t_unknown() : b->sub[0]));
@@ -1098,6 +1205,12 @@ public:
     // 类表：名字 → 编译期布局。lower 靠它把属性访问变成固定偏移。
     const std::unordered_map<std::string, ClassInfoPtr>& classes() const { return classes_; }
 
+    // 值类型 struct 表：名字 → 编译期布局（字段偏移/大小/总大小）。
+    StructInfo* struct_info(const std::string& n) const {
+        auto it = structs_.find(n);
+        return it == structs_.end() ? nullptr : it->second;
+    }
+
     // match 捕获名在 case 结束后的合并类型；lower 用它在函数帧里补局部槽。
     const std::unordered_map<std::string, TypePtr>* match_captures(const Match* m) const {
         auto it = match_capture_types_.find(m);
@@ -1156,6 +1269,10 @@ private:
     int expr_depth_ = 0;
     bool saw_yield_ = false;
     bool star_import_ = false;
+    // 模块作用域里装的是类本身（不是实例）的名字：类定义、from ... import
+    // 进来的类、import * 带进来的类。区分「C(...) 构造」和「实例 __call__」
+    // 只能看绑定的来源，类型上两者都是 Class。
+    std::unordered_set<std::string> class_obj_names_;
     // 模块里有 globals()[...] = ... 这类动态注入（inspect/turtle 都这么干），
     // 之后模块级名字集合在静态上就不可知了，未定义名一律放行。
     bool dynamic_globals_ = false;
@@ -1203,6 +1320,10 @@ private:
     // 这里必须保证它们在 typecheck 期间一直有效。
     std::vector<ClassInfoPtr> all_classes_;
 
+    // 值类型 struct：名字 → 布局；vector 保证 Type::st 的裸指针长期有效。
+    std::unordered_map<std::string, StructInfo*> structs_;
+    std::vector<std::unique_ptr<StructInfo>> all_structs_;
+
     // 内置类型名：作为值使用时（str.capitalize、int.bit_length）没有承载物
     static bool is_type_name(const std::string& n) {
         static const std::unordered_set<std::string> names = {
@@ -1236,6 +1357,10 @@ private:
     // ── 顶层收集：让函数可以前向调用（含互递归） ────────────────
 
     void collect_toplevel(std::vector<StmtPtr>& body);
+    // 计算 struct 的 C 兼容布局并登记到模块作用域。
+    void build_struct(StructDef& s);
+    // .cpya 里带字段的 struct：布局已在解析期算好，这里转成类型系统布局。
+    StructInfo* build_cstruct(const CStruct& cs);
 
     // 模块级绑定可能出现在函数定义之后（条件 import、延迟赋值），
     // Python 的全局名在函数调用时才解析，所以要先整体登记一遍。
@@ -1305,6 +1430,8 @@ private:
     bool is_self_attr(const Attribute& a) const;
     // 接收者是不是类本身（`C.x` / @classmethod 里的 `cls.x`），而不是实例
     bool is_class_receiver(const Attribute& a);
+    // 裸名字是不是类本身（构造）而不是装着实例的变量
+    bool name_is_class(const Name& n);
     // 把 `self.x` 补成隐式字段；已存在就按 join 放宽，返回是否新建
     bool add_implicit_field(const Attribute& a, TypePtr ty);
 

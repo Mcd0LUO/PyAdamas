@@ -238,6 +238,9 @@ void Lowerer::lower_try_core(Try& t) {
         FuncCtx::Cleanup hc;
         hc.kind = FuncCtx::Cleanup::Kind::Handler;
         hc.handler_slot = hh;
+        // 挂起后重挂 handler 时，异常要跳回 except 体自己的展开块
+        //（先 ExcDone 再继续向外抛），不能留 -1。
+        hc.land = hland;
         st_->cleanups.push_back(hc);
         FuncCtx::Cleanup done;
         done.kind = FuncCtx::Cleanup::Kind::ExcDone;
@@ -337,9 +340,59 @@ void Lowerer::lower_finally(Try& t) {
     }
     int hs = push_handler();
     VReg sj = setjmp_handler(hs);
+    if (!st_->is_generator && !st_->is_coroutine) {
+        // 非可挂起函数：体内不可能有挂起点，finalbody 内联两份。
+        int body = new_block("finally.body");
+        int land = new_block("finally.land");
+        int end = new_block("finally.end");
+        Inst br;
+        br.op = IrOp::Branch;
+        br.a = sj;
+        br.target = land;
+        br.target2 = body;
+        emit(std::move(br));
+
+        switch_to(body);
+        FuncCtx::Cleanup cf;
+        cf.kind = FuncCtx::Cleanup::Kind::Finally;
+        cf.handler_slot = hs;
+        cf.land = land;
+        cf.body = &t.finalbody;
+        st_->cleanups.push_back(cf);
+        lower_try_core(t);
+        st_->cleanups.pop_back();
+        if (!terminated()) {
+            call_void(RtFn::HandlerLeave, {load_slot(hs, t_int())});
+            stmts(t.finalbody);
+            Inst j;
+            j.op = IrOp::Jump;
+            j.target = end;
+            emit(std::move(j));
+        }
+
+        switch_to(land);
+        call_void(RtFn::HandlerLeave, {load_slot(hs, t_int())});
+        stmts(t.finalbody);
+        call_void(RtFn::ExcReraise, {});
+        end_unreachable();
+        switch_to(end);
+        return;
+    }
+    // 可挂起函数里 finally 体只编译一份：正常路径和异常 landing 都跳到 fin，
+    // 体内挂起点因此只有一套状态机。异常路径把待重抛异常转成堆上的异常值存进
+    // 帧槽，避免挂起期间全局 pending_exc 被调用方的 raise/clear 冲掉。
+    TypePtr exc_ty = mk_exception("Exception");
+    int pend_slot = new_temp_slot(exc_ty);
     int body = new_block("finally.body");
     int land = new_block("finally.land");
+    int fin = new_block("finally.fin");
     int end = new_block("finally.end");
+    auto jump = [&](int target) {
+        Inst j;
+        j.op = IrOp::Jump;
+        j.target = target;
+        emit(std::move(j));
+    };
     Inst br;
     br.op = IrOp::Branch;
     br.a = sj;
@@ -358,22 +411,23 @@ void Lowerer::lower_finally(Try& t) {
     st_->cleanups.pop_back();
     if (!terminated()) {
         call_void(RtFn::HandlerLeave, {load_slot(hs, t_int())});
-        ++finally_body_depth_;
-        stmts(t.finalbody);
-        --finally_body_depth_;
-        Inst j;
-        j.op = IrOp::Jump;
-        j.target = end;
-        emit(std::move(j));
+        store_slot(pend_slot, const_int(0));
+        jump(fin);
     }
 
     switch_to(land);
     call_void(RtFn::HandlerLeave, {load_slot(hs, t_int())});
-    ++finally_body_depth_;
+    VReg pv = call_runtime(RtFn::ExcTakeValue, exc_ty, {});
+    push_temp(pv);
+    store_slot(pend_slot, pv);
+    jump(fin);
+
+    switch_to(fin);
     stmts(t.finalbody);
-    --finally_body_depth_;
-    call_void(RtFn::ExcReraise, {});
-    end_unreachable();
+    if (!terminated()) {
+        call_void(RtFn::ExcReraiseValueIf, {load_slot(pend_slot, exc_ty)});
+        jump(end);
+    }
     switch_to(end);
 }
 

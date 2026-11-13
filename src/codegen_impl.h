@@ -470,6 +470,8 @@ private:
     // 对象布局：+0 是 vtable 指针，字段从 +8 开始，每个 8 字节。
     // 属性访问因此是一条固定偏移的 movq，没有查表、没有哈希。
     void gen_obj_new(const Inst& in);
+    void gen_struct_new(const Inst& in);
+    void gen_struct_copy(const Inst& in);
 
         void gen_field_load(const Inst& in);
 
@@ -494,6 +496,10 @@ private:
     void gen_call(const Inst& in);
 
     void gen_call_extern(const Inst& in);
+    void gen_load_extern(const Inst& in);
+    void gen_store_extern(const Inst& in);
+    void gen_ptr_load(const Inst& in);
+    void gen_ptr_store(const Inst& in);
 
         void gen_setjmp(const Inst& in);
 

@@ -49,11 +49,13 @@ bool inst_is_pure(const Inst& in) {
         case IrOp::Mov:
         case IrOp::LoadSlot:
         case IrOp::LoadGlobal:
+        case IrOp::LoadExtern:
         case IrOp::Un:
         case IrOp::Cmp:
         case IrOp::Len:
         case IrOp::IndexLoadUnchecked:
         case IrOp::FieldLoad:
+        case IrOp::PtrLoad:
             return true;
         case IrOp::Bin: {
             TypePtr t = in.ty;

@@ -222,6 +222,8 @@ int64_t pa_gen_next(void*);                  // 结束抛 StopIteration
 int64_t pa_gen_next_opt(void*, int64_t* ok); // 结束写 ok=0
 int64_t pa_gen_send(void*, int64_t sent);
 int64_t pa_gen_send_opt(void*, int64_t sent, int64_t* ok); // yield from
+int64_t pa_gen_throw(void*, PyAdamasExcValue*);
+int64_t pa_gen_throw_opt(void*, int64_t exc, int64_t* ok); // yield from 转发
 void    pa_gen_close(void*);
 ```
 
@@ -240,6 +242,13 @@ Python 代码，逐槽读到非空值就 `dec` + 清零。
 水位，生成代码随后重新 `setjmp`；close 路径用 `pa_handler_free`
 回收这些记录。
 
+跨挂起的异常上下文：resume 入口 `pa_exc_enter` 把调用方的 `current_exc`
+与 `exc_save_top` 压进运行时节点栈（两边都空时不压），再装上帧槽里
+保存的那份；挂起/正常退出时 `pa_exc_leave` 把本帧的写回帧槽、换回
+调用方那份。异常从 resume 逃出时，`gen_run` / `coro_step` /
+`agen_drive` 按进入时记录的深度 `pa_exc_unwind` 退栈，避免 except 体
+里的挂起把调用方的异常上下文带跑。
+
 ### 协程与事件循环
 
 `async def` 复用生成器帧，`coro_step` 每次恢复后按 status 处理：
@@ -253,7 +262,8 @@ awaitable 有六类：协程帧、`Py23Await` 的 sleep(1)/gather(2)/task(3)、
 Future 用 `waiters` 列表支持多个等待者、用 `callbacks` 列表保存
 `add_done_callback` 注册的函数（完成时按注册顺序同步调用）；异步生成器
 驱动对象用 `driver_sent`（asend 的值，跨事件循环持有引用）和
-`driver_close`（aclose 模式）标记；gather 把自己的引用挂在每个
+`driver_close`（aclose 模式）标记；内部 awaitable 完成时把结果写进帧槽
+并置 `driver_await_result`，下一轮推进不再用 `driver_sent` 覆盖它；gather 把自己的引用挂在每个
 子 awaitable 上，最后一个子任务完成时汇总结果。task 由 `loop_pending`
 持有到完成，保存结果/异常供后续 await；`cancel()` 沿 `cur` 向下级联
 （协程链/task/gather/future/sleep/fd 各有取消路径），再注入
@@ -394,6 +404,8 @@ longjmp 回同步调用点。GC 清扫和进程退出不跑析构器，但会单
 | `pa_exc_done` | `() -> void` | 释放 current，恢复上一层异常上下文 |
 | `pa_exc_clear` | `() -> void` | 抑制并释放 pending |
 | `pa_exc_reraise` | `() -> void` | 继续向外交互展开（noreturn） |
+| `pa_exc_take_value` | `() -> excval*` | pending 复制成异常值并清空（finally 跨挂起保存待重抛异常） |
+| `pa_exc_reraise_value_if` | `(excval*) -> void` | 非空时抛出该异常值，空则返回（finally 结束后的重抛） |
 | `pa_exc_type_name` | `() -> str*` | pending 的类型名新字符串 |
 | `pa_exc_message` | `() -> str*` | pending 的消息新字符串 |
 | `pa_raise` | `(str* type, str* msg) -> void` | 设置 pending 并 longjmp（noreturn） |
@@ -495,6 +507,8 @@ longjmp 回同步调用点。GC 清扫和进程退出不跑析构器，但会单
 | `pa_gen_next_opt` | `(void*, i64* ok) -> i64` | for 循环用：结束写 `ok=0`，不抛异常 |
 | `pa_gen_send` | `(void*, i64) -> i64` | 把值送到 `x = yield v` |
 | `pa_gen_send_opt` | `(void*, i64, i64* ok) -> i64` | `yield from` 用：转发 send，结束写 `ok=0`；非生成器帧报 TypeError |
+| `pa_gen_throw` | `(void*, excval*) -> i64` | `gen.throw(exc)`：异常转成帧内注入并恢复；已结束则把异常抛给调用方 |
+| `pa_gen_throw_opt` | `(void*, i64 exc, i64* ok) -> i64` | `yield from` 的 throw 转发：子生成器结束写 `ok=0` 并返回它的 return 值；没接住则异常在外层挂起点抛出 |
 | `pa_gen_close` | `(void*) -> void` | 跑挂起点清理；异常向外传 |
 | `pa_gen_finalize` | `(void*) -> void` | 引用计数归零时清理；异常吞掉 |
 | `pa_handler_suspend` | `(void*) -> void` | yield/await：把 handler 记录从全局栈摘下 |

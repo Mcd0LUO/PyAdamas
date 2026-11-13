@@ -210,7 +210,16 @@ IR 一行没改，全部优化都发生在这一层。五件事叠起来，把�
 
 `*args` / `**kwargs` 不引入新的调用约定：它们就是参数列表末尾的一个 list /
 dict 指针，调用点打包好按普通参数传；整数寄存器不够时照常压栈。装饰器
-调用、`with` 的 `__enter__` / `__exit__` 也都是普通的 `call` / `vcall`。
+调用、`with` 的 `__enter__` / `__exit__` 都是普通的 `call` / `vcall`。
+`__init__` / `__enter__` / `__exit__` / `__aenter__` / `__aexit__` /
+`__call__` 被装饰时 vtable 槽是空的，调用点改走类属性里的包装函数：
+先按名字取类属性，再用 `call` 把实例作为第一个实参传进去。
+
+方法值 `obj.m` 不是运行期的描述符对象，而是在取值的编译点合成一个闭包：
+接收者存进单元素 cell 作为捕获，闭包体按方法种类发出 `vcall` /
+`vcall_static` / `call_direct`，或在装饰方法上先取类属性再 `call`。
+捕获布局与普通闭包一致（环境槽 16 起是 cell），因此方法值可以像函数值
+一样存变量、进容器、当实参。
 
 调用一个函数值的序列：
 
@@ -276,10 +285,16 @@ dict 指针，调用点打包好按普通参数传；整数寄存器不够时照
   landing pad；`raise` 在运行时设置全局异常后 `longjmp` 到最内层记录。
 - landing pad 先 `pa_handler_leave`：弹出记录并把临时值栈清理到
   记录水位；然后分派 `except` / `__exit__` / finalbody。
+- 挂起恢复后若还要 `handler_leave`（`async for` 的 StopAsyncIteration
+  保护、异步推导式），到手的堆值必须在 leave 之后才 `pa_rc_temp`：
+  leave 会按复查时的水位清理临时栈，先入栈会被当场释放。
+  `suspend_on_awaitable` 的 `push_result_temp=false` 就是给这类调用点用。
 - 含 handler 的函数关闭槽位寄存器提升；被异常跳过的普通函数帧不执行
   `release_slots`，局部引用交给保守 GC。
 - `return` / `break` / `continue` 不 longjmp，走编译期 cleanup 栈：
   `handler_discard` + `__exit__` / finalbody 直接内联发射。
+  `with` / `async with` 的 `FuncCtx::Cleanup` 记录 `exit_cls`（退出方法被
+  装饰时的类），正常、跳转、异常展开三条路径都按它从类属性分派。
 
 ## 生成器
 
@@ -293,21 +308,35 @@ dict 指针，调用点打包好按普通参数传；整数寄存器不够时照
   入口按 `state` 分发到续跑块，`gen.yield` 把值写进 out、state，然后
   直接返回。
 
-yield 时的寄存器策略很简单：vreg 的栈槽不跨挂起保存，所以临时值要么
-落进帧槽（循环的序列/上界、水位），要么在 yield 前清理。槽位寄存器
-提升整体关闭。`gen.done` 先由 lower 发射 `release_slots`，再置
-status=1；帧析构由运行时的 finalize 路径按挂起点快照跑清理。
+vreg 的栈槽不跨挂起保存。降级完成后对整个 resume 函数做一次 vreg
+活跃性分析：续跑块的 live-in 就是挂起期间还得活着的值，挂起前 retain
+一份写进堆帧槽（`pa_rc_inc` / `pa_rc_inc_unknown`），恢复后在续跑块
+开头装回 vreg 并把所有权交给临时栈（`pa_rc_temp` /
+`pa_rc_temp_unknown`）。所以 `yield` / `await` 可以出现在任意子表达式
+里，复合表达式不用逐个改；一个 vreg 因此可能有多个定义，寄存器分配
+按「定义多于一次」直接独占栈槽。槽位寄存器提升整体关闭。`gen.done`
+先由 lower 发射 `release_slots`，再置 status=1；帧析构由运行时的
+finalize 路径按挂起点快照跑清理。
 
 跨挂起的 `try` / `with` / `finally`：yield 前用
 `pa_handler_suspend` 把记录摘下，恢复时分发块先
 `pa_handler_rearm` 再重新 `setjmp`，非 0 直接跳回原 landing pad。
 close 分发按挂起点快照重放 `__exit__` / finalbody，并
-`pa_handler_free` 释放摘下的记录。
+`pa_handler_free` 释放摘下的记录。可挂起函数里的 finally 体只编译
+一份：正常路径与异常 landing 都跳到同一个 `finally.fin` 块，体内挂起点
+因此只有一套状态机；异常路径在 land 里用 `pa_exc_take_value` 把 pending
+转成异常值存进帧槽（`Exception` 堆槽），finalbody 结束后
+`pa_exc_reraise_value_if` 非空就重抛，所以体内再 raise / 嵌套 try 不会
+覆盖待重抛异常。close 重放到 finalbody 里的挂起点时按 CPython 报
+`RuntimeError`（`generator ignored GeneratorExit`）。
 
 协程复用同一套寄存器/槽位约定：帧头多出 kind/waiter/exc/cur 四个字，
 `gen.await` 写 status=3；恢复入口先看 closing，再看 `gen.exc`，有注入
-异常就按 state 进入 throw 分发——重挂 handler 后 `gen.rethrow`，让
-`try/except` 能抓到跨 await 的异常。返回值由 `gen.done a` 写进 out。
+异常就按 state 进入 throw 分发——重挂 handler 并重新 `setjmp` 后
+`gen.rethrow`，让 `try/except` 能抓到跨 await 的异常。返回值由
+`gen.done a` 写进 out。普通生成器的 `.throw()` 复用同一条分发：挂起点不在
+`yield from` 委托中就直接 rethrow，在委托中则用 `gen.take.exc` 取走异常、
+存进帧槽并跳回委托循环的 cond，由它把异常转发给子生成器。
 `asyncio.run/sleep/gather/create_task` 与异步生成器的 `__anext__`
 都是普通 `call.rt`；事件循环、Task 取消和驱动推进都在运行时里。
 

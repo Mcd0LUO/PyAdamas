@@ -194,6 +194,35 @@ for d in tests/modules/*/; do
     fi
 done
 
+# ── cdecl：头文件 → .cpya ──────────────────────────────────────
+if match "cdecl"; then
+    cdir="$BUILD/cdecl"
+    rm -rf "$cdir"
+    mkdir -p "$cdir"
+    printf '  %-28s ' "cdecl:sample"
+    if ! "$PYADAMAS" cdecl tests/cdecl/sample.h -o "$cdir/sample.cpya" \
+            --link "tests/cdecl/sample.c" > "$cdir/gen.out" 2>&1; then
+        printf 'GENERATE FAILED\n'
+        sed -n '1,6p' "$cdir/gen.out"
+        fail=1
+    else
+        sed -n '/^# --- expect ---$/,$p' tests/cdecl/main.py | tail -n +2 | \
+            sed -E 's/^# ?//' > "$cdir/exp"
+        if ! "$PYADAMAS" run --rebuild -I "$cdir" -o "$cdir/prog" \
+                tests/cdecl/main.py > "$cdir/out" 2>&1; then
+            printf 'RUN FAILED\n'
+            sed -n '1,6p' "$cdir/out"
+            fail=1
+        elif diff -q "$cdir/exp" "$cdir/out" > /dev/null 2>&1; then
+            printf 'ran ok\n'
+        else
+            printf 'OUTPUT DIFF\n'
+            diff "$cdir/exp" "$cdir/out" | head -12
+            fail=1
+        fi
+    fi
+fi
+
 rm -rf "$logdir" "$modlog"
 rm -f "$prog" "$out" "$exp" "$BUILD/check.txt"
 exit "$fail"

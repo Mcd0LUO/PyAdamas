@@ -1,0 +1,5 @@
+cmodule badstruct
+
+# 字段只允许定宽标量；str 需要拷贝，暂不支持。
+struct Bad:
+    name: str

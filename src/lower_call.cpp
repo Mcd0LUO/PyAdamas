@@ -192,6 +192,7 @@ std::vector<VReg> Lowerer::bind_args(Call& c, const FuncInfoPtr& info, FunctionD
             case LiteralValue::Kind::Int: cv.ty = t_int(); cv.i = lv.i; break;
             case LiteralValue::Kind::Float: cv.ty = t_float(); cv.f = lv.f; break;
             case LiteralValue::Kind::Str: cv.ty = t_str(); cv.s = lv.s; break;
+            case LiteralValue::Kind::Bytes: cv.ty = t_bytes(); cv.s = lv.s; break;
         }
         return cv;
     };
@@ -217,6 +218,7 @@ std::vector<VReg> Lowerer::bind_args(Call& c, const FuncInfoPtr& info, FunctionD
             case TyKind::Int: return const_int(cv.i);
             case TyKind::Float: return const_float(cv.f);
             case TyKind::Str: return const_str(cv.s);
+            case TyKind::Bytes: return retype(const_str(cv.s), t_bytes());
             default: return const_none();
         }
     };
@@ -282,6 +284,9 @@ std::vector<VReg> Lowerer::bind_args(Call& c, const FuncInfoPtr& info, FunctionD
                             type_name(from), pname, type_name(want)));
         }
         args[i] = coerce(args[i], from, want);
+        // 值语义：结构体按值传参，callee 改自己的副本不影响调用方。
+        if (want && want->kind == TyKind::Struct && want->st)
+            args[i] = struct_copy(args[i], want->st);
     }
     // 变长形参即使没收到实参也要传空容器：callee 的形参槽必须有值。
     if (info->varargs) args.push_back(vararg_list());
@@ -341,38 +346,49 @@ VReg Lowerer::lower_construct(Call& c, const ClassInfoPtr& cls) {
     if (cls->has_init) {
         if (auto* im = cls->method("__init__"); im && im->call_sig) {
             std::vector<VReg> args = bind_args(c, im->call_sig, im->def);
-            // 刚构造出来的对象类型是确定的：本模块的类可以直接调用
-            // 它 vtable 槽里的实现（子类构造函数同理，槽已按 MRO 解析）。
-            bool direct = false;
-            if (auto cid = class_ids_.find(cls.get()); cid != class_ids_.end() &&
-                im->slot >= 0) {
-                const auto& vt = mod_.classes[static_cast<size_t>(cid->second)].vtable;
-                if (im->slot < static_cast<int>(vt.size())) {
-                    int fidx = vt[static_cast<size_t>(im->slot)];
-                    const IRFunction* callee =
-                        (fidx >= 0 && fidx < static_cast<int>(mod_.funcs.size()))
-                            ? mod_.funcs[static_cast<size_t>(fidx)].get()
-                            : nullptr;
-                    if (callee && callee->env_slot < 0) {
-                        Inst cd;
-                        cd.op = IrOp::CallDirect;
-                        cd.idx = fidx;
-                        cd.args.push_back(obj);
-                        for (VReg a : args) cd.args.push_back(a);
-                        TypePtr rt = im->call_sig->ret ? im->call_sig->ret : t_none();
-                        def_heap(rt, std::move(cd));
-                        direct = true;
+            if (im->decorated) {
+                // 装饰后的 __init__ 在类属性里：取包装函数并把 obj 显式传进去。
+                TypePtr rt = im->call_sig->ret ? im->call_sig->ret : t_none();
+                VReg r = dunder_call(obj, mk_class(cls.get()), "__init__",
+                                     std::move(args), rt);
+                if (r == kNoReg)
+                    err(c.line, c.col,
+                        std::format("decorated __init__ of '{}' has an incompatible signature",
+                                    cls->name));
+            } else {
+                // 刚构造出来的对象类型是确定的：本模块的类可以直接调用
+                // 它 vtable 槽里的实现（子类构造函数同理，槽已按 MRO 解析）。
+                bool direct = false;
+                if (auto cid = class_ids_.find(cls.get());
+                    cid != class_ids_.end() && im->slot >= 0) {
+                    const auto& vt = mod_.classes[static_cast<size_t>(cid->second)].vtable;
+                    if (im->slot < static_cast<int>(vt.size())) {
+                        int fidx = vt[static_cast<size_t>(im->slot)];
+                        const IRFunction* callee =
+                            (fidx >= 0 && fidx < static_cast<int>(mod_.funcs.size()))
+                                ? mod_.funcs[static_cast<size_t>(fidx)].get()
+                                : nullptr;
+                        if (callee && callee->env_slot < 0) {
+                            Inst cd;
+                            cd.op = IrOp::CallDirect;
+                            cd.idx = fidx;
+                            cd.args.push_back(obj);
+                            for (VReg a : args) cd.args.push_back(a);
+                            TypePtr rt = im->call_sig->ret ? im->call_sig->ret : t_none();
+                            def_heap(rt, std::move(cd));
+                            direct = true;
+                        }
                     }
                 }
-            }
-            if (!direct) {
-                Inst vc;
-                vc.op = IrOp::VCall;
-                vc.a = obj;
-                vc.imm = im->slot;
-                vc.args = std::move(args);
-                TypePtr rt = im->call_sig->ret ? im->call_sig->ret : t_none();
-                def_heap(rt, std::move(vc));
+                if (!direct) {
+                    Inst vc;
+                    vc.op = IrOp::VCall;
+                    vc.a = obj;
+                    vc.imm = im->slot;
+                    vc.args = std::move(args);
+                    TypePtr rt = im->call_sig->ret ? im->call_sig->ret : t_none();
+                    def_heap(rt, std::move(vc));
+                }
             }
         }
     }
@@ -412,6 +428,11 @@ VReg Lowerer::lower_call(Call& c) {
             in.args = {type, msg};
             return def_heap(mk_exception(n.id), std::move(in));
         }
+        // sizeof / addr 是值类型 struct 的特殊形式；用户自己定义了同名
+        // 函数或类时按普通调用处理。
+        if ((n.id == "sizeof" || n.id == "addr") && !func_defs_.count(n.id) &&
+            !classes_.count(n.id))
+            return lower_struct_builtin(n.id, c);
         if (is_builtin(n.id)) {
             static const std::unordered_set<std::string> kBuiltins = {
                 "print", "len", "int", "float", "str", "bool", "range", "next",
@@ -420,7 +441,7 @@ VReg Lowerer::lower_call(Call& c) {
                 "list", "tuple", "dict", "set", "sorted", "reversed", "enumerate", "zip",
                 "open", "input", "iter", "isinstance", "getattr", "setattr", "hasattr",
                 "callable", "issubclass", "hash", "type", "id", "frozenset",
-                "slice", "vars", "dir", "__pa_capwords",
+                "slice", "vars", "dir", "__pa_capwords", "bytes",
             };
             if (kBuiltins.count(n.id)) return lower_builtin_call(n.id, c);
             // 名字能解析但语义没实现的内置：以前会退化成调用空指针直接
@@ -438,6 +459,9 @@ VReg Lowerer::lower_call(Call& c) {
             auto it = classes_.find(st_->class_self_ty->name);
             if (it != classes_.end()) return lower_construct(c, it->second);
         }
+        // 值类型构造：Point(1.0, 2.0)。按字段声明顺序逐位置求值。
+        if (StructInfo* si = tc_.struct_info(n.id))
+            return lower_struct_construct(c, si);
         // 类名直接调用 = 构造。类名不是可求值的表达式，必须在这里拦，
         // 否则会退化成 LoadGlobal 读到一个空槽。
         if (auto it = classes_.find(n.id); it != classes_.end())
@@ -461,6 +485,36 @@ VReg Lowerer::lower_call(Call& c) {
             TypePtr ft = tc_.type_of(c.func.get());
             FuncInfoPtr info = (ft && ft->kind == TyKind::Func) ? ft->fn : nullptr;
             return call_native(it->second.module, it->second.member, c, info);
+        }
+    }
+
+    // 实例调用：静态类型是类实例（类名构造已在上面拦掉），调用走 __call__。
+    {
+        TypePtr nt = tc_.type_of(c.func.get());
+        bool class_ref = false;
+        if (c.func->kind == ExprKind::Name) {
+            auto& n = static_cast<Name&>(*c.func);
+            class_ref = (classes_.count(n.id) && !st_->slots.count(n.id)) ||
+                        imported_classes_.count(n.id) ||
+                        (!st_->class_self_name.empty() && n.id == st_->class_self_name);
+        }
+        if (!class_ref && nt && nt->kind == TyKind::Class && nt->cls) {
+            const MethodInfo* m = nt->cls->method("__call__");
+            if (m && m->call_sig) {
+                VReg recv = expr(*c.func);
+                std::vector<VReg> args = bind_args(c, m->call_sig, m->def);
+                VReg r = dunder_call(recv, nt, "__call__", std::move(args), nullptr);
+                if (r != kNoReg) return r;
+                err(c.line, c.col,
+                    std::format("decorated __call__ of '{}' has an incompatible signature",
+                                nt->cls->name));
+                return const_none();
+            }
+            err(c.line, c.col,
+                std::format("'{}' object is not callable", nt->cls->name));
+            for (auto& a : c.args) expr(*a);
+            for (auto& kw : c.keywords) expr(*kw.value);
+            return const_none();
         }
     }
 
@@ -711,5 +765,44 @@ VReg Lowerer::lower_asyncio(const std::string& member, Call& c) {
 
 
 
+
+VReg Lowerer::lower_struct_builtin(const std::string& name, Call& c) {
+    if (c.args.empty()) {
+        err(c.line, c.col, std::format("{}() takes exactly one argument", name));
+        return const_int(0);
+    }
+    if (name == "sizeof") {
+        // 编译期常量：类型检查阶段已经保证实参是 struct 类型或值。
+        TypePtr t = tc_.type_of(c.args[0].get());
+        if (t && t->kind == TyKind::Struct && t->st) return const_int(t->st->size);
+        err(c.args[0]->line, c.args[0]->col, "sizeof() expects a struct type or value");
+        return const_int(0);
+    }
+    // addr(p)：payload 地址就是结构体值的机器表示，直接改类型即可。
+    VReg v = expr(*c.args[0]);
+    TypePtr t = vreg_ty(v);
+    if (t && t->kind == TyKind::Struct) return retype(v, mk_struct_ptr(t->st));
+    if (t && t->kind == TyKind::StructPtr) return v;
+    err(c.args[0]->line, c.args[0]->col, "addr() expects a struct value");
+    return const_none();
+}
+
+VReg Lowerer::lower_struct_construct(Call& c, StructInfo* s) {
+    std::vector<VReg> vals;
+    vals.reserve(s->fields.size());
+    for (size_t i = 0; i < c.args.size() && i < s->fields.size(); ++i) {
+        TypePtr at = tc_.type_of(c.args[i].get());
+        VReg v = expr(*c.args[i]);
+        vals.push_back(coerce(v, at, s->fields[i].ty));
+    }
+    for (size_t i = s->fields.size(); i < c.args.size(); ++i) expr(*c.args[i]);
+    VReg obj = struct_new(s);
+    for (size_t i = 0; i < vals.size(); ++i) {
+        const StructFieldInfo& f = s->fields[i];
+        field_store(obj, static_cast<int>(f.offset), vals[i],
+                    static_cast<uint8_t>(f.size));
+    }
+    return obj;
+}
 
 }  // namespace pyadamas

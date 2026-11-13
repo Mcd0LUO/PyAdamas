@@ -65,6 +65,10 @@ std::string Inst::text() const {
             return std::format("{} = field.get {}+{}", vreg_str(dst), vreg_str(a), imm);
         case IrOp::FieldStore:
             return std::format("field.set {}+{} = {}", vreg_str(a), imm, vreg_str(b));
+        case IrOp::PtrLoad:
+            return std::format("{} = ptr.load {}[{}]", vreg_str(dst), vreg_str(a), vreg_str(b));
+        case IrOp::PtrStore:
+            return std::format("ptr.store {}[{}] = {}", vreg_str(a), vreg_str(b), vreg_str(c));
         case IrOp::VCall: {
             std::string s = std::format("{} = vcall {}[{}]({}", vreg_str(dst), vreg_str(a), imm,
                                         vreg_str(a));
@@ -95,6 +99,10 @@ std::string Inst::text() const {
             }
             return s + ")";
         }
+        case IrOp::StructNew:
+            return std::format("{} = struct.new {}", vreg_str(dst), imm);
+        case IrOp::StructCopy:
+            return std::format("{} = struct.copy {}, {}", vreg_str(dst), vreg_str(a), imm);
         case IrOp::Call: {
             std::string s = std::format("{} = call {}(", vreg_str(dst), vreg_str(a));
             for (size_t i = 0; i < args.size(); ++i) {
@@ -120,6 +128,10 @@ std::string Inst::text() const {
             }
             return s + ")";
         }
+        case IrOp::LoadExtern:
+            return std::format("{} = load.extern v{}", vreg_str(dst), idx);
+        case IrOp::StoreExtern:
+            return std::format("store.extern v{}, {}", idx, vreg_str(a));
         case IrOp::Setjmp:
             return std::format("{} = setjmp {}", vreg_str(dst), vreg_str(a));
         case IrOp::ImportModule:
@@ -137,6 +149,7 @@ std::string Inst::text() const {
         case IrOp::GenAwait:
             return std::format("gen.await {}, state={}", vreg_str(a), imm);
         case IrOp::GenGetExc: return std::format("{} = gen.exc", vreg_str(dst));
+        case IrOp::GenTakeExc: return std::format("{} = gen.take.exc", vreg_str(dst));
         case IrOp::GenRethrow: return "gen.rethrow";
         case IrOp::GenDone:
             return a == kNoReg ? "gen.done" : std::format("gen.done {}", vreg_str(a));

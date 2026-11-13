@@ -63,8 +63,10 @@ Python 语义里变量天生可变，循环里反复赋值是常态。一上来�
 | `index.set a, b, c` | — | `a[b] = c` | `pa_list_set` |
 | `len dst, a` | — | `dst = len(a)` | 一条 `movq (%rax), %rax` |
 | `obj.new dst, imm` | `imm: 类下标` | 分配对象并写入 vtable 指针；析构器取自 `IRClass::field_heap` | `call pa_obj_new` + `leaq .LvtN`；`.LvtN` 前有 5 字类元数据 |
-| `field.get dst, a, imm` | `imm: 字节偏移` | `dst = a->field` | 一条 `movq off(%rax), %rax` |
-| `field.set a, imm, b` | `imm: 字节偏移` | `a->field = b` | `movq %rcx, off(%rax)` |
+| `struct.new dst, imm` | `imm: payload 字节数` | 分配 `[RC 头][payload]`，字段清零 | `call pa_struct_new` |
+| `struct.copy dst, a` | `imm: 字节数` | `dst = a` 的独立副本（纯字节 `memcpy`） | `call pa_struct_copy` |
+| `field.get dst, a, imm` | `imm: 字节偏移` | `dst = a->field`；宽度取指令的 `fwidth`（`bool` 1 字节，其余 8） | `movzbq` / `movq off(%rax)` |
+| `field.set a, imm, b` | `imm: 字节偏移` | `a->field = b`；宽度同上 | `movb` / `movq %rcx, off(%rax)` |
 | `vcall dst, a, args...` | `imm: vtable 槽` | `dst = a->vtable[imm](a, args...)` | 取表、取槽、间接跳转 |
 | `vcall.static dst, a, args...` | `imm: vtable 槽` | 静态方法：不传 self | 同 vcall，参数序列少一个 self |
 | `vcall.super dst, a, args...` | `imm: 槽`，`idx: after 类下标`，`b: 方法名` | 按运行期 MRO 找下一实现 | 先 `pa_super_lookup`，再照 vcall 传 self |
@@ -79,6 +81,7 @@ Python 语义里变量天生可变，循环里反复赋值是常态。一上来�
 | `gen.state dst` | — | 读帧 state | `movq 0(%r15)` |
 | `gen.closing dst` | — | 读帧 closing 标志 | `movq 40(%r15)` |
 | `gen.exc dst` | — | 读待注入异常 | `movq 64(%r15)` |
+| `gen.take.exc dst` | — | 读待注入异常并清零帧槽（所有权转移） | `movq 64(%r15)` + 清零 |
 | `gen.sent dst` | — | 读本次 resume 传入的值 | `movq 16(%r15)` |
 | `gen.yield a, state` | `a == kNoReg` 表示 None | 写 out、存 state、返回（终止指令） | 写 `24(%r15)` / `0(%r15)` + 尾声 |
 | `gen.await a, state` | — | 写 out、state，status=3（awaiting），返回（终止指令） | 同上 + 写 status |

@@ -1,4 +1,4 @@
-# yield from：委托生成器 / 序列 / send 转发 / close / 异常传播
+# yield from：委托生成器 / 序列 / send 转发 / close / 异常传播 / 返回值
 
 
 def inner(n: int):
@@ -114,6 +114,21 @@ def layer2():
 for v in layer2():
     print(v)
 
+
+def ret_sub():
+    yield 1
+    return 7
+
+
+def ret_outer():
+    r = yield from ret_sub()
+    print("ret", r)
+    yield 8
+
+
+for v in ret_outer():
+    print(v)
+
 # --- expect ---
 # 0
 # 1
@@ -140,3 +155,6 @@ for v in layer2():
 # 3
 # 4
 # 5
+# 1
+# ret 7
+# 8

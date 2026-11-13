@@ -210,6 +210,10 @@ private:
 
     bool looks_like_match_stmt() const;
 
+    // struct 是软关键字：只有 "struct NAME: NEWLINE INDENT" 才是定义。
+    bool looks_like_struct_def() const;
+    StmtPtr parse_structdef();
+
     // match/case 模式
     StmtPtr parse_match();
     PatternPtr parse_pattern();

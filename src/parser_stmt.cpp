@@ -160,6 +160,48 @@ bool Parser::paren_with_items() const {
         return false;
     }
 
+bool Parser::looks_like_struct_def() const {
+        return cur().kind == Tok::NAME && cur().text == "struct" &&
+               peek_tok(1).kind == Tok::NAME &&
+               peek_tok(2).kind == Tok::COLON &&
+               peek_tok(3).kind == Tok::NEWLINE &&
+               peek_tok(4).kind == Tok::INDENT;
+    }
+
+StmtPtr Parser::parse_structdef() {
+        int ln = cur().line, cl = cur().col;
+        advance();  // struct
+        if (suite_depth_ != 0)
+            throw err_at("'struct' is only allowed at module top level", ln, cl);
+        auto node = node_at<StructDef>(ln, cl);
+        node->name = expect(Tok::NAME, "struct name").text;
+        if (check(Tok::LPAREN))
+            throw err_at("struct does not support inheritance or methods", ln, cl);
+        expect(Tok::COLON, "':' after struct name");
+        expect(Tok::NEWLINE, "newline after struct header");
+        if (!check(Tok::INDENT)) throw err("expected an indented block");
+        advance();
+        skip_newlines();
+        while (!check(Tok::DEDENT) && !check(Tok::END)) {
+            StructFieldDef f;
+            f.line = cur().line;
+            f.col = cur().col;
+            f.name = expect(Tok::NAME, "field name").text;
+            expect(Tok::COLON, "':' after field name");
+            f.type = parse_namedexpr();
+            if (check(Tok::NEWLINE) || check(Tok::SEMICOLON)) advance();
+            else if (!check(Tok::DEDENT) && !check(Tok::END))
+                throw err(std::format("unexpected '{}' after field declaration",
+                                      describe(cur())));
+            skip_newlines();
+            node->fields.push_back(std::move(f));
+        }
+        if (check(Tok::DEDENT)) advance();
+        else throw err("unexpected end of file, expected dedent");
+        if (node->fields.empty()) throw err_at("struct must have at least one field", ln, cl);
+        return node;
+    }
+
 StmtPtr Parser::parse_simple_statement() {
         int ln = cur().line, cl = cur().col;
 
@@ -167,6 +209,11 @@ StmtPtr Parser::parse_simple_statement() {
         // match 语句。match[0]、match.attr、match, x = ... 都是普通标识符。
         if (check(Tok::NAME) && cur().text == "match" && looks_like_match_stmt())
             return parse_match();
+
+        // struct 同样是软关键字：只有 "struct NAME: NEWLINE INDENT" 才是值类型
+        // 定义；`struct = 1`、`import struct` 都不受影响。
+        if (check(Tok::NAME) && cur().text == "struct" && looks_like_struct_def())
+            return parse_structdef();
 
         switch (cur().kind) {
             case Tok::KW_RETURN: {

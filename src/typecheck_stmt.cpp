@@ -10,6 +10,73 @@ namespace pyadamas {
 
 static void pattern_capture_names(const Pattern& p, std::vector<std::string>& out);
 
+void TypeChecker::build_struct(StructDef& s) {
+        if (structs_.count(s.name)) {
+            err(s.line, s.col, std::format("struct '{}' is already defined", s.name));
+            return;
+        }
+        auto info = std::make_unique<StructInfo>();
+        info->name = s.name;
+        // v1 的字段映射固定：int → int64_t(8/8)、float → double(8/8)、
+        // bool → _Bool(1/1)。布局算法与 C 一致：按字段对齐向上取整放置，
+        // 总大小对齐到最大成员对齐。
+        int64_t off = 0;
+        int64_t max_align = 1;
+        for (auto& f : s.fields) {
+            if (info->field(f.name)) {
+                err(f.line, f.col,
+                    std::format("duplicate field '{}' in struct '{}'", f.name, s.name));
+                continue;
+            }
+            auto* nm = dynamic_cast<Name*>(f.type.get());
+            TypePtr ft;
+            if (nm && nm->id == "int") ft = t_int();
+            else if (nm && nm->id == "float") ft = t_float();
+            else if (nm && nm->id == "bool") ft = t_bool();
+            else {
+                err(f.line, f.col, "struct field type must be 'int', 'float' or 'bool'");
+                continue;
+            }
+            const int64_t sz = ft->kind == TyKind::Bool ? 1 : 8;
+            const int64_t al = sz;
+            off = (off + al - 1) / al * al;
+            info->fields.push_back(StructFieldInfo{f.name, ft, off, sz, al});
+            off += sz;
+            if (al > max_align) max_align = al;
+        }
+        info->align = max_align;
+        info->size = (off + max_align - 1) / max_align * max_align;
+        StructInfo* raw = info.get();
+        all_structs_.push_back(std::move(info));
+        structs_[s.name] = raw;
+        module_->vars[s.name] = Symbol{mk_struct(raw), s.line, true, false};
+    }
+
+StructInfo* TypeChecker::build_cstruct(const CStruct& cs) {
+        auto info = std::make_unique<StructInfo>();
+        info->name = cs.name;
+        info->size = cs.size;
+        info->align = cs.align;
+        info->c_struct = true;
+        for (auto& f : cs.fields) {
+            TypePtr ft = t_int();
+            bool unsig = false;
+            switch (f.kind) {
+                case CKind::Int:
+                case CKind::Int32: ft = t_int(); break;
+                case CKind::UInt32: ft = t_int(); unsig = true; break;
+                case CKind::Float: ft = t_float(); break;
+                case CKind::Bool: ft = t_bool(); break;
+                case CKind::Ptr: ft = mk_optional(t_int()); break;
+                default: break;
+            }
+            info->fields.push_back(StructFieldInfo{f.name, ft, f.offset, f.size, f.align, unsig});
+        }
+        StructInfo* raw = info.get();
+        all_structs_.push_back(std::move(info));
+        return raw;
+    }
+
 bool TypeChecker::block_exits(const std::vector<StmtPtr>& body) {
     if (body.empty()) return false;
     auto& last = *body.back();
@@ -242,6 +309,9 @@ void TypeChecker::stmt(Stmt& s) {
             case StmtKind::ClassDef:
                 classdef(static_cast<ClassDef&>(s));
                 break;
+            case StmtKind::StructDef:
+                // 布局与登记已在 collect_toplevel 完成。
+                break;
             case StmtKind::Try: {
                 auto& t = static_cast<Try&>(s);
                 // 异常可能在任何一条语句上抛出，所以 except 分支看到的变量
@@ -298,8 +368,15 @@ void TypeChecker::stmt(Stmt& s) {
                     if (ct && ct->kind == TyKind::Optional && !ct->sub.empty()) ct = ct->sub[0];
                     if (ct && ct->kind == TyKind::Class && ct->cls) {
                         const char* enter = w.is_async ? "__aenter__" : "__enter__";
-                        if (auto* m = ct->cls->method(enter); m && m->call_sig && m->call_sig->ret)
+                        if (auto* m = ct->cls->method(enter); m && m->call_sig && m->call_sig->ret) {
                             vt = m->call_sig->ret;
+                            // 装饰后的方法调用的是类属性里的包装函数，
+                            // 绑定值按包装函数的返回类型算。
+                            if (m->decorated && m->decorated_ty &&
+                                m->decorated_ty->kind == TyKind::Func && m->decorated_ty->fn &&
+                                m->decorated_ty->fn->ret)
+                                vt = m->decorated_ty->fn->ret;
+                        }
                         if (w.is_async) {
                             // 异步上下文管理器：__aenter__/__aexit__ 必须
                             // 是 async def，绑定的是 await 之后的结果。
@@ -412,21 +489,62 @@ void TypeChecker::stmt(Stmt& s) {
                         continue;
                     }
                     auto shared = std::make_shared<CImportDecl>(std::move(*decl));
+                    std::unordered_map<std::string, StructInfo*> cmap;
+                    for (auto& cs : shared->structs) {
+                        auto it = structs_.find(cs.name);
+                        if (it != structs_.end()) {
+                            // 同名 struct 必须来自另一个 cimport 且布局一致；
+                            // 与 .pya struct 冲突时不能悄悄用错布局。
+                            if (!it->second->c_struct || it->second->size != cs.size ||
+                                it->second->align != cs.align) {
+                                err(s.line, s.col,
+                                    std::format("struct '{}' is already defined", cs.name));
+                            }
+                            cmap[cs.name] = it->second;
+                            continue;
+                        }
+                        StructInfo* st = build_cstruct(cs);
+                        structs_[cs.name] = st;
+                        // 允许在 py23 里按字段构造 C 结构体（DivT(7, 3)）；
+                        // 已有同名符号时不覆盖。
+                        if (!lookup(cs.name))
+                            module_->vars[cs.name] = Symbol{mk_struct(st), s.line, true, false};
+                        cmap[cs.name] = st;
+                    }
+                    auto cty = [&](CKind k, const std::string& sname) -> TypePtr {
+                        if (!sname.empty()) {
+                            auto it = cmap.find(sname);
+                            if (it != cmap.end()) {
+                                if (k == CKind::Ptr) return mk_optional(mk_struct_ptr(it->second));
+                                if (k == CKind::Struct) return mk_struct(it->second);
+                            }
+                        }
+                        return ckind_type(k);
+                    };
                     for (auto& ex : shared->externs) {
                         auto fi = std::make_shared<FuncInfo>();
                         fi->name = ex.py_name;
                         fi->is_extern = true;
                         fi->ret_declared = true;
                         fi->ret_known = true;
-                        fi->ret = ckind_type(ex.ret);
+                        fi->ret = cty(ex.ret, ex.ret_struct);
+                        if (ex.ret == CKind::Ptr && ex.ret_elem != CKind::None && fi->ret)
+                            fi->ret->celem = ex.ret_elem;
+                        if (ex.varargs) {
+                            fi->varargs = true;
+                            fi->vararg_ty = t_unknown();
+                        }
                         for (auto& p : ex.params) {
                             Param pm;
                             pm.name = p.name;
-                            pm.ty = ckind_type(p.kind);
+                            pm.ty = cty(p.kind, p.ptr_struct);
+                            if (p.kind == CKind::Ptr && p.ptr_elem != CKind::None && pm.ty)
+                                pm.ty->celem = p.ptr_elem;
                             if (p.kind == CKind::Ptr) {
                                 pm.cptr = true;
                                 pm.cptr_elem = p.ptr_elem;
-                                pm.cptr_opaque = p.opaque;
+                                // 所有结构体指针都不接受 list/bytes 缓冲区。
+                                pm.cptr_opaque = p.opaque || !p.ptr_struct.empty();
                             }
                             fi->pos.push_back(std::move(pm));
                         }
@@ -464,8 +582,11 @@ void TypeChecker::stmt(Stmt& s) {
                     }
                     for (auto& [n, ty] : info->globals)
                         if (!n.empty() && n[0] != '_') declare(n, ty, s.line);
-                    for (auto& [n, ic] : info->classes)
-                        if (!n.empty() && n[0] != '_') declare(n, mk_class(ic.cls.get()), s.line);
+                    for (auto& [n, ic] : info->classes) {
+                        if (n.empty() || n[0] == '_') continue;
+                        declare(n, mk_class(ic.cls.get()), s.line);
+                        class_obj_names_.insert(n);
+                    }
                     break;
                 }
                 ModuleInfoPtr info = module_lookup_(im.module);
@@ -478,6 +599,7 @@ void TypeChecker::stmt(Stmt& s) {
                     }
                     if (auto ci = info->classes.find(al.name); ci != info->classes.end()) {
                         declare(bind, mk_class(ci->second.cls.get()), s.line);
+                        class_obj_names_.insert(bind);
                         continue;
                     }
                     auto it = info->globals.find(al.name);
@@ -686,6 +808,17 @@ void TypeChecker::assign(Expr& target, TypePtr value, int line, int col) {
                                     bare_type_name(ot)));
                 return;
             }
+            if (ot->kind == TyKind::Optional && ot->celem != CKind::None && !ot->sub.empty() &&
+                ot->sub[0]->kind == TyKind::Int) {
+                if (!is_unknown(st) && st->kind != TyKind::Int && st->kind != TyKind::Bool)
+                    err(line, col, "pointer index must be an integer");
+                TypePtr want = cptr_elem_type(ot->celem);
+                if (!assignable(want, value))
+                    err(line, col,
+                        std::format("pointer element has type '{}', cannot assign '{}'",
+                                    type_name(want), type_name(value)));
+                return;
+            }
             if (ot->kind == TyKind::List) {
                 if (!merge_elem(ot->sub[0], ot, value, ot->locked))
                     err(line, col,
@@ -725,11 +858,55 @@ void TypeChecker::assign(Expr& target, TypePtr value, int line, int col) {
                     return;
                 }
             }
+            if (auto* vn = dynamic_cast<Name*>(at->value.get())) {
+                if (const CImportDecl* cd = cmodule(vn->id)) {
+                    for (auto& cv : cd->vars) {
+                        if (cv.py_name != at->attr) continue;
+                        if (cv.kind == CKind::Str || cv.kind == CKind::OptStr) {
+                            err(line, col,
+                                std::format("cannot assign to C string variable '{}.{}'",
+                                            vn->id, at->attr));
+                            return;
+                        }
+                        TypePtr want = ckind_type(cv.kind);
+                        if (cv.kind == CKind::Ptr && !cv.struct_name.empty()) {
+                            if (StructInfo* st = struct_info(cv.struct_name))
+                                want = mk_optional(mk_struct_ptr(st));
+                        }
+                        if (!assignable(want, value))
+                            err(line, col,
+                                std::format("C variable '{}.{}' has type '{}', cannot assign '{}'",
+                                            vn->id, at->attr, type_name(want),
+                                            type_name(value)));
+                        return;
+                    }
+                    err(line, col,
+                        std::format("cannot assign to cimport attribute '{}.{}'", vn->id,
+                                    at->attr));
+                    return;
+                }
+            }
             auto ot = expr(*at->value);
             if (ot->kind == TyKind::Func) return;
-            if (ot->kind == TyKind::Optional && !ot->sub.empty() &&
-                ot->sub[0]->kind == TyKind::Class)
-                ot = ot->sub[0];
+            if (ot->kind == TyKind::Optional && !ot->sub.empty()) {
+                TyKind ik = ot->sub[0]->kind;
+                if (ik == TyKind::Class || ik == TyKind::Struct || ik == TyKind::StructPtr)
+                    ot = ot->sub[0];
+            }
+            if (ot->kind == TyKind::Struct || ot->kind == TyKind::StructPtr) {
+                if (!ot->st) return;
+                const StructFieldInfo* f = ot->st->field(at->attr);
+                if (!f) {
+                    err(line, col, std::format("struct '{}' has no field '{}'", ot->st->name,
+                                               at->attr));
+                    return;
+                }
+                if (!assignable(f->ty, value))
+                    err(line, col,
+                        std::format("field '{}' has type '{}', cannot assign '{}'", at->attr,
+                                    type_name(f->ty), type_name(value)));
+                return;
+            }
             if (ot->kind == TyKind::Class) {
                 if (!ot->cls) return;
                 if (!ot->cls->complete && ot->cls != cur_class_) return;  // 骨架，无从判断

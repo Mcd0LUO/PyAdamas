@@ -27,14 +27,15 @@ PyAdamas 不追求兼容 CPython：语义是按静态类型的需要重新定的
 | `with` | 只支持类实例的 `__enter__` / `__exit__`；正常、`return` / `break` / `continue` 和异常路径都调用 `__exit__` | 完整上下文管理协议 | `__exit__` 返回值只有真/假语义；异常路径传 `(type, message, None)` |
 | import | 本地单层 `.py`；`m.x` 直接读写模块全局；`from m import x` 是快照；模块别名不能当值 | 任意模块/包、运行时模块对象 | 支持包/相对导入/静态 `import *`（按非下划线导出）；跨模块继承暂不支持 |
 | 模块初始化 | 第一次执行 import 时惰性运行一次；循环导入编译期报错 | 支持循环导入和部分初始化 | 初始化失败的模块不会再重试；模块对象不可见 |
-| 推导式 | list/set/dict 推导式按循环展开；生成器表达式脱糖成合成生成器函数，惰性求值；含 `async for` 的推导式在协程里可挂起 | 同 Python | 异步推导式只能作为语句/赋值/`return` 的根表达式；类体里的生成器表达式仍按 list 构造；推导式内部不能引用循环变量的生成器表达式 |
-| 生成器 | 状态机 + 堆帧；`for` / `next` / `send` / `close` / `yield from`；跨 `yield` 跑 `finally` / `__exit__` | 完整生成器协议 | `yield`/`yield from` 必须是当前语句里第一个求值的表达式（可作语句、赋值右值、`return` 值、条件等；挂起点之前的其它 vreg 不随帧保存），不能位于 `finally`/`except` 体内；`yield from` 的值固定为 None；`send` 值静态是 unknown；生成器类型跨模块降级为 unknown |
-| 协程 / Task / Future | `async def` / `await` 复用生成器帧；`asyncio.run`/`sleep`/`gather`/`create_task`；`done()`/`cancel()`/`result()`/`exception()`；Future 多等待者、`set_exception`、`add_done_callback`；取消级联；`wait_readable`/`wait_writable` + poll；异步生成器 + `async for` + `async with`；异步推导式 | 完整 asyncio（Task 组/Future 回调/I/O 流） | `await` 必须是当前语句里第一个求值的表达式（语句、赋值右值、`return` 值、条件、二元表达式左侧等）；异步生成器有 `asend`/`athrow`/`__anext__`/`aclose`，`aclose` 不会 await `async with` 的 `__aexit__`，停在 `async with` 里被直接回收时不 await 退出；自定义 `__aiter__` 未支持；Future 回调同步执行；`set_exception` 接收异常值或消息；`exception()` 返回异常值；`CancelledError` 是内置名；`wait_readable` 不是 CPython 标准 API；`gather` 结果元素是 unknown；Task 单等待者 |
+| 推导式 | list/set/dict 推导式按循环展开；生成器表达式脱糖成合成生成器函数，惰性求值；含 `async for` 的推导式在协程里可挂起；含 lambda 的推导式改写成生成器表达式 + 构造器，循环变量可被捕获 | 同 Python | 异步推导式只能作为语句/赋值/`return` 的根表达式；类体里的生成器表达式仍按 list 构造；推导式内部不能引用循环变量的生成器表达式 |
+| 生成器 | 状态机 + 堆帧；`for` / `next` / `send` / `throw` / `close` / `yield from`；`yield from` 把 `throw` 转发给子生成器；跨 `yield` 跑 `finally` / `__exit__`；挂起点可在任意子表达式、`except` 与 `finally` 体内；生成器/协程/异步生成器类型跨模块保留元素/结果类型；`Generator[Y, S, R]` 标注给 `send` 实参与 `yield` 表达式收窄类型 | 完整生成器协议 | `finally` 体内不能 `return` / `break` / `continue` 跳出；`throw` 只接受异常实例（不接受异常类）；未标注 `Generator[Y, S, R]` 时 `send` 值与 `yield` 表达式静态是 unknown（`R` 只记录，`StopIteration.value` 不检查） |
+| 协程 / Task / Future | `async def` / `await` 复用生成器帧；`asyncio.run`/`sleep`/`gather`/`create_task`；`done()`/`cancel()`/`result()`/`exception()`；Future 多等待者、`set_exception`、`add_done_callback`；取消级联；`wait_readable`/`wait_writable` + poll；异步生成器 + `async for` + `async with`；异步推导式 | 完整 asyncio（Task 组/Future 回调/I/O 流） | `await` 可位于任意子表达式与 `finally` 体内（跨挂起的 vreg 由降级器溢写到帧槽）；异步生成器有 `asend`/`athrow`/`__anext__`/`aclose`，`aclose` 不会 await `async with` 的 `__aexit__`，停在 `async with` 里被直接回收时不 await 退出；自定义 `__aiter__` 未支持；Future 回调同步执行；`set_exception` 接收异常值或消息；`exception()` 返回异常值；`CancelledError` 是内置名；`wait_readable` 不是 CPython 标准 API；`gather` 结果元素是 unknown；Task 单等待者 |
 | 递归深度 | 受栈大小限制（万级） | 默认 1000，可调 | 没有解释器递归检查 |
 | 字段初值 `x: int = []` | 每次构造重新求值，实例之间独立 | 类属性，所有实例共享 | 更安全；也避免可变默认值的经典 bug |
 | 类体里的普通赋值 | 是类属性：所有实例共享一份存储，`C.x` / `cls.x` / `self.x` 都能读到；子类赋值走写时复制，基类不受影响 | 类体是独立命名空间，属性存在类对象上 | `if`/`for` 等其它类体语句仍按模块全局处理；`obj.类属性 = v` 不支持（对象布局编译期定死） |
 | `@classmethod` | 支持；`cls` 静态绑定到所属类，子类继承时按子类重新特化一份 | 运行期传入 `type(obj)` | 子类特化会复制方法体；`cls` 当值传出去会退化成整数 |
-| 自定义方法装饰器 | 类创建时按从下到上应用，结果存成类属性；`obj.m(...)` 以 self 为第一个实参调用包装函数，继承沿 MRO 读同一份 | 同 Python（方法装饰器返回的值按描述符绑定） | 装饰器必须返回已知签名的函数；不支持 dunder 方法、`super()` 目标、`C.m(...)` 类接收者调用；方法值本身不绑定 self |
+| 自定义方法装饰器 | 类创建时按从下到上应用，结果存成类属性；`obj.m(...)` 以 self 为第一个实参调用包装函数，继承沿 MRO 读同一份；`C.m(obj, ...)` 显式传 self，`super().m(...)` 自动补 self；走 `dunder_call` 的 dunder（算术/比较/str/len/hash/iter/contains）、构造（`__init__`）、`with`/`async with` 协议、`__call__` 也可装饰（装饰后不填 vtable 槽，调用点从类属性取包装函数并补 self） | 同 Python（方法装饰器返回的值按描述符绑定） | 装饰器必须返回已知签名的函数且用固定形参 |
+| 方法值 `obj.m` / `C.m` | 合成闭包捕获接收者：普通方法 `vcall`（子类覆盖生效）、静态/类方法 `vcall_static`、类接收者的静态/类方法 `call_direct`；默认参数与关键字参数可用 | 同 Python（descriptor 绑定） | 类接收者上取普通方法的值不支持（和 `C.m(...)` 的直接调用限制一致） |
 | 类的属性 | 声明过的字段，或 `self.x = ...` 就地长出来的字段 | 可随时给实例挂任意属性 | 偏移是编译期常量，没有运行时 `__dict__` |
 | `print(obj)` | 有 `__str__`（或 `__repr__`）就调，否则 `<Point object>` | 同 Python（默认文本带模块名和地址） | 默认文本没有模块名和地址 |
 | 协议 dunder | `__str__`/`__repr__`/`__eq__`/`__ne__`/`__len__`/`__hash__`/`__contains__`/`__iter__`/算术与比较类 dunder 走 vtable；`in` 需要 `__contains__`，`<` 等需要比较 dunder，算术需要对应 dunder，否则编译报错 | 完整数据模型 | `__format__`/`__bool__`/`__reversed__` 未建模；`__eq__` 的 other 限 unknown 或类类型；只定义 `__eq__` 没定义 `__hash__` 的类在 dict/set 里按身份处理 |
@@ -78,7 +79,7 @@ PyAdamas 不追求兼容 CPython：语义是按静态类型的需要重新定的
 
 **语法层就拒**（`check` 报错）：超出 int64 的整数、Python 2 遗留写法、方法缺 `self`、字段赋值类型不符。
 
-**能解析、能过类型检查，但 `build` 报错**：通过 unknown 函数值的 `*` / `**` 展开、`*` 位于固定形参之前且不是定长 tuple、非异常类名当异常用、容器元素跨数值域的转换（`list`/`tuple`/`dict`/`set` 的 int → float 赋值/实参）、`finally` 体内跳出 finally 的 `return`/`break`/`continue`、跨模块继承、类装饰器、装饰 dunder 方法或 `super()` 目标、返回类型未知的方法装饰器、把类名当值用、函数内定义类、导入类模式的字段子模式、unknown 值上的数值/list/dict/tuple/set 内置类型模式、类体字段默认值里的 lambda，以及生成器的 `yield`/`yield from` 位于 `finally`/`except` 体内或前面已有其它求值（协程的 `await` 同样）、异步生成器表达式、嵌在其它表达式里的异步推导式。
+**能解析、能过类型检查，但 `build` 报错**：通过 unknown 函数值的 `*` / `**` 展开、`*` 位于固定形参之前且不是定长 tuple、非异常类名当异常用、容器元素跨数值域的转换（`list`/`tuple`/`dict`/`set` 的 int → float 赋值/实参）、`finally` 体内跳出 finally 的 `return`/`break`/`continue`、跨模块继承、类装饰器、返回类型未知的方法装饰器、把类名当值用、函数内定义类、导入类模式的字段子模式、unknown 值上的数值/list/dict/tuple/set 内置类型模式、类体字段默认值里的 lambda，以及异步生成器表达式、嵌在其它表达式里的异步推导式。
 
 清楚这个分层很重要：`pyadamas check` 尽量当通用 Python 语法/类型检查器用，检查器放宽的边界都记在 [CHANGELOG 0.6.1](archive/changelog-0.40.md)；`pyadamas build` 才是「能不能编译」的判据。
 
@@ -89,9 +90,9 @@ PyAdamas 不追求兼容 CPython：语义是按静态类型的需要重新定的
 | 层 | 命令 | 规模 | 防的是什么 |
 |---|---|---|---|
 | 正例 | `ctest --preset dev` 里 `tests/*.py` | 11 个文件 | 前端退回保守 |
-| 反例 | `ctest --preset dev` 里 `tests/fail/*.py` | 37 个文件 | 检查器为了过测而放水 |
-| 运行 | `ctest --preset dev` 里 `tests/run/*.py` | 95 个文件 | 后端烂掉没人知道 |
-| 模块 | `ctest --preset dev` 里 `tests/modules/*/` | 9 个目录 | 分模块编译/链接、惰性初始化、缓存失效 |
+| 反例 | `ctest --preset dev` 里 `tests/fail/*.py` | 52 个文件 | 检查器为了过测而放水 |
+| 运行 | `ctest --preset dev` 里 `tests/run/*.py` | 127 个文件 | 后端烂掉没人知道 |
+| 模块 | `ctest --preset dev` 里 `tests/modules/*/` | 11 个目录 | 分模块编译/链接、惰性初始化、缓存失效 |
 | 未建模 | `ctest --preset dev` 里 `tests/unsupported/*.py` | 1 个文件 | 「标了没建模、实际却悄悄编译过去」 |
 | 内存 | 16MB `RLIMIT_AS` 下跑压力程序 | 拼接 / 对象 / 闭包 / 容器 / 切片 / 删除 / 推导式 / 变长实参 / `with` / 装饰器 / 异常展开 / `yield from` / 异步推导式 / 环 / unknown 泄漏 | 引用计数或 GC 漏插桩、重复释放、误回收 |
 | 差分 | `pyadamas build` 后运行 `tests/diff/run_diff.py`（自举），也可 `python3` 直接跑 | 随机程序 | 语义漂移、边界错误 |
@@ -129,7 +130,7 @@ python3 tests/diff/run_diff.py --seeds 10      # 2700 个程序，建议每次�
 python3 tests/diff/run_diff.py --only repr     # 只跑浮点格式化
 ```
 
-PyAdamas runner 串行执行（PyAdamas 没有线程/进程池），810 个程序约几分钟；CPython runner 也串行，行为与判定标准完全相同。
+PyAdamas runner 串行执行（PyAdamas 没有线程/进程池），840 个程序约几分钟；CPython runner 也串行，行为与判定标准完全相同。
 
 判定标准：PyAdamas 退出码必须为 0（编译期错误算失败），stdout 与 CPython **逐字节相同**，stderr 不比（panic 消息是我们自己的）。
 
@@ -209,6 +210,10 @@ echo "类型失败:"; wc -l < /tmp/fail.txt
 这次是 Debian 打包的 python3.13.5，标准库被拆成多个包（只剩 598 个 `.py`），而且
 里面带着 CPython 自己的 `test/` 目录——那批文件是**故意写错**来测 NameError /
 traceback 的，必然进失败清单。口径变了，趋势才可比。
+
+0.133 复测（同一台 Debian 3.13.5）：标准库本体 598 个文件，语法通过 596，
+类型通过 277 / 596（46.5%），比 0.81.1 少 2 个；失败项仍集中在
+`__repr__` 返回 `str`、`getattr` 属性名必须是字面量、自定义异常类体等已知模式。
 
 
 

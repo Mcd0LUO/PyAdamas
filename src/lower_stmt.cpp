@@ -39,9 +39,6 @@ void Lowerer::stmt(Stmt& s) {
     size_t mark_pos = 0;
     VReg stmt_mark = st_->is_generator ? kNoReg : rc_mark_at(mark_block, mark_pos);
     size_t pushes_before = st_->rc_pushes;
-    // 挂起点必须是本语句里第一个求值的东西：生成器 resume 会重建 C 栈帧，
-    // 之前的 vreg 不保留（见 Lowerer::emit_seq_）。
-    st_->gen_seq_base = emit_seq_;
     auto mark_comp = [&](Expr* v) {
         if (v && (v->kind == ExprKind::ListComp || v->kind == ExprKind::SetComp ||
                   v->kind == ExprKind::DictComp || v->kind == ExprKind::GeneratorExp))
@@ -152,9 +149,13 @@ void Lowerer::stmt(Stmt& s) {
                     gen_finish(v, rty);
                     break;
                 }
-                // 生成器/异步生成器的 return 只表示结束，返回值不保留。
+                // 生成器的 return 值由外层 `yield from` 取走（CPython 语义）；
+                // 异步生成器没有消费者，返回值丢弃。
                 emit_cleanup_exits(0);
-                gen_finish();
+                if (!st_->is_async_generator && v != kNoReg)
+                    gen_finish(v, vreg_ty(v));
+                else
+                    gen_finish();
                 break;
             }
             VReg v = r.value ? expr(*r.value) : kNoReg;
@@ -202,6 +203,7 @@ void Lowerer::stmt(Stmt& s) {
         case StmtKind::Raise: lower_raise(static_cast<Raise&>(s)); break;
         case StmtKind::With: lower_with(static_cast<With&>(s)); break;
         case StmtKind::ClassDef: lower_classdef(static_cast<ClassDef&>(s)); break;
+        case StmtKind::StructDef: break;  // 纯编译期声明，不生成代码
         case StmtKind::Import: lower_import(static_cast<Import&>(s)); break;
         case StmtKind::CImport:
         // cimport 只在编译期生效，不产生运行时对象。
@@ -1192,12 +1194,21 @@ VReg Lowerer::emit_exit_call(const FuncCtx::Cleanup& c, bool exceptional) {
         }
     }
     VReg mgr = load_slot(c.mgr_slot, t_unknown());
+    TypePtr rt = c.ret ? c.ret : t_none();
+    if (c.exit_cls) {
+        // 装饰后的 __exit__/__aexit__ 存在类属性里：按名字取包装函数，
+        // 显式补上管理器实例。装饰器可以改返回类型，这里不按原签名收窄。
+        const char* nm =
+            c.kind == FuncCtx::Cleanup::Kind::AsyncWith ? "__aexit__" : "__exit__";
+        VReg r = dunder_call(mgr, mk_class(c.exit_cls), nm, std::move(args), nullptr);
+        if (r != kNoReg) return r;
+        return const_bool(false);
+    }
     Inst vc;
     vc.op = IrOp::VCall;
     vc.a = mgr;
     vc.imm = c.exit_slot;
     vc.args = std::move(args);
-    TypePtr rt = c.ret ? c.ret : t_none();
     return def_heap(rt, std::move(vc));
 }
 
@@ -1223,10 +1234,21 @@ void Lowerer::emit_cleanup_exits(size_t down_to) {
                 suspend_on_awaitable(coro, c.inner_ret, 1, 1, i - 1);
                 break;
             }
-            case FuncCtx::Cleanup::Kind::Finally:
-                call_void(RtFn::HandlerDiscard, {load_slot(c.handler_slot, t_int())});
-                if (c.body) stmts(*c.body);
+            case FuncCtx::Cleanup::Kind::Finally: {
+                const int hslot = c.handler_slot;
+                auto* fbody = c.body;
+                call_void(RtFn::HandlerDiscard, {load_slot(hslot, t_int())});
+                if (fbody) {
+                    // 内联的 finally 体里可能有挂起点。handler 已经 discard，
+                    // 本条目和更内层已发射的条目都不能进挂起快照，否则恢复时
+                    // 会去 suspend 已释放的 handler 记录。
+                    auto saved = st_->cleanups;
+                    st_->cleanups.resize(i - 1);
+                    stmts(*fbody);
+                    st_->cleanups = std::move(saved);
+                }
                 break;
+            }
             case FuncCtx::Cleanup::Kind::ExcDone:
                 call_void(RtFn::ExcDone, {});
                 break;
@@ -1428,13 +1450,29 @@ void Lowerer::lower_with_item(With& w, size_t idx) {
     enter_call.line = w.line;
     enter_call.col = w.col;
     std::vector<VReg> eargs = bind_args(enter_call, en->call_sig, en->def);
-    Inst vc;
-    vc.op = IrOp::VCall;
-    vc.a = load_slot(ms, ct);
-    vc.imm = en->slot;
-    vc.args = std::move(eargs);
     TypePtr ert = en->call_sig->ret ? en->call_sig->ret : t_none();
-    VReg ev = def_heap(ert, std::move(vc));
+    VReg ev = kNoReg;
+    if (en->decorated) {
+        // 装饰后的 __enter__：从类属性取包装函数，显式传管理器实例。
+        // 绑定值的类型以包装函数声明的返回值为准。
+        ev = dunder_call(load_slot(ms, ct), ct, "__enter__", std::move(eargs), nullptr);
+        if (const ClassAttrInfo* ca = ct->cls->class_attr("__enter__");
+            ca && ca->ty && ca->ty->kind == TyKind::Func && ca->ty->fn && ca->ty->fn->ret)
+            ert = ca->ty->fn->ret;
+    } else {
+        Inst vc;
+        vc.op = IrOp::VCall;
+        vc.a = load_slot(ms, ct);
+        vc.imm = en->slot;
+        vc.args = std::move(eargs);
+        ev = def_heap(ert, std::move(vc));
+    }
+    if (ev == kNoReg) {
+        err(w.line, w.col,
+            std::format("decorated __enter__ of '{}' has an incompatible signature",
+                        ct->cls->name));
+        ev = const_none();
+    }
     if (item.optional_vars) assign_to(*item.optional_vars, ev, ert);
 
     int hs = push_handler();
@@ -1458,6 +1496,7 @@ void Lowerer::lower_with_item(With& w, size_t idx) {
     cf.exit_slot = ex->slot;
     cf.nargs = static_cast<int>(ex->call_sig->pos.size());
     cf.ret = ex->call_sig->ret ? ex->call_sig->ret : t_none();
+    if (ex->decorated) cf.exit_cls = ct->cls;
     st_->cleanups.push_back(cf);
 
     lower_with_item(w, idx + 1);
@@ -1763,6 +1802,32 @@ void Lowerer::lower_async_with_item(With& w, size_t idx) {
         lower_async_with_item(w, idx + 1);
         return;
     }
+    // 装饰后的 __aenter__/__aexit__ 走类属性里的包装函数：先确认包装函数能
+    // 接住 (self, ...) 并且在定义时就被标注成协程。
+    auto wrapped_ret = [&](const MethodInfo* m, const char* nm) -> TypePtr {
+        if (!m->decorated) return m->call_sig->ret;
+        const ClassAttrInfo* ca = ct->cls->class_attr(nm);
+        TypePtr wty = ca ? ca->ty : nullptr;
+        FuncInfoPtr wf = (wty && wty->kind == TyKind::Func) ? wty->fn : nullptr;
+        if (!wf || wf->varargs || wf->kwargs ||
+            wf->pos.size() != m->call_sig->pos.size() + 1) {
+            err(item.context->line, item.context->col,
+                std::format("decorated {} of '{}' has an incompatible signature", nm,
+                            ct->cls->name));
+            return nullptr;
+        }
+        return wf->ret;
+    };
+    TypePtr en_ret = wrapped_ret(en, "__aenter__");
+    TypePtr ex_ret = wrapped_ret(ex, "__aexit__");
+    if (!en_ret || en_ret->kind != TyKind::Coroutine || !ex_ret ||
+        ex_ret->kind != TyKind::Coroutine) {
+        err(item.context->line, item.context->col,
+            std::format("async with '{}': __aenter__/__aexit__ must return a coroutine",
+                        ct->cls->name));
+        en_ret = en->call_sig->ret;
+        ex_ret = ex->call_sig->ret;
+    }
     int ms = new_temp_slot(ct);
     store_slot(ms, mgr);
 
@@ -1771,13 +1836,19 @@ void Lowerer::lower_async_with_item(With& w, size_t idx) {
     enter_call.line = w.line;
     enter_call.col = w.col;
     std::vector<VReg> eargs = bind_args(enter_call, en->call_sig, en->def);
-    Inst vc;
-    vc.op = IrOp::VCall;
-    vc.a = load_slot(ms, ct);
-    vc.imm = en->slot;
-    vc.args = std::move(eargs);
-    VReg enter_coro = def_heap(en->call_sig->ret, std::move(vc));
-    TypePtr ert = en->call_sig->ret->sub.empty() ? t_unknown() : en->call_sig->ret->sub[0];
+    VReg enter_coro = kNoReg;
+    if (en->decorated) {
+        enter_coro = dunder_call(load_slot(ms, ct), ct, "__aenter__", std::move(eargs), nullptr);
+        if (enter_coro == kNoReg) enter_coro = const_none();
+    } else {
+        Inst vc;
+        vc.op = IrOp::VCall;
+        vc.a = load_slot(ms, ct);
+        vc.imm = en->slot;
+        vc.args = std::move(eargs);
+        enter_coro = def_heap(en_ret, std::move(vc));
+    }
+    TypePtr ert = en_ret->sub.empty() ? t_unknown() : en_ret->sub[0];
     VReg ev = suspend_on_awaitable(enter_coro, ert, item.context->line, item.context->col);
     if (item.optional_vars) assign_to(*item.optional_vars, ev, ert);
 
@@ -1803,8 +1874,9 @@ void Lowerer::lower_async_with_item(With& w, size_t idx) {
     cf.mgr_slot = ms;
     cf.exit_slot = ex->slot;
     cf.nargs = static_cast<int>(ex->call_sig->pos.size());
-    cf.ret = ex->call_sig->ret;
-    cf.inner_ret = ex->call_sig->ret->sub.empty() ? t_unknown() : ex->call_sig->ret->sub[0];
+    cf.ret = ex_ret;
+    cf.inner_ret = ex_ret->sub.empty() ? t_unknown() : ex_ret->sub[0];
+    if (ex->decorated) cf.exit_cls = ct->cls;
     st_->cleanups.push_back(cf);
 
     lower_async_with_item(w, idx + 1);
@@ -1839,12 +1911,18 @@ void Lowerer::lower_async_with_item(With& w, size_t idx) {
             else if (i == 1) args.push_back(load_slot(msgs, t_str()));
             else args.push_back(const_none());
         }
-        Inst vc2;
-        vc2.op = IrOp::VCall;
-        vc2.a = load_slot(ms, ct);
-        vc2.imm = ex->slot;
-        vc2.args = std::move(args);
-        VReg coro = def_heap(cf.ret, std::move(vc2));
+        VReg coro = kNoReg;
+        if (cf.exit_cls) {
+            coro = dunder_call(load_slot(ms, ct), ct, "__aexit__", std::move(args), nullptr);
+            if (coro == kNoReg) coro = const_none();
+        } else {
+            Inst vc2;
+            vc2.op = IrOp::VCall;
+            vc2.a = load_slot(ms, ct);
+            vc2.imm = ex->slot;
+            vc2.args = std::move(args);
+            coro = def_heap(cf.ret, std::move(vc2));
+        }
         VReg keep = suspend_on_awaitable(coro, cf.inner_ret, w.line, w.col);
         int suppress = new_block("awith.suppress");
         int rethrow = new_block("awith.rethrow");

@@ -90,6 +90,8 @@ enum {
     PYADAMAS_RC_INSTANCE = 5,
     /* range：没有堆字段（出边为零），不可能成环，按叶子对象处理。 */
     PYADAMAS_RC_RANGE = 6,
+    /* 值类型 struct：payload 就是 C 结构体，字段只有标量，无出边。 */
+    PYADAMAS_RC_STRUCT = 7,
 };
 
 typedef struct PyAdamasRc {
@@ -193,6 +195,7 @@ typedef struct {
     int64_t driver_sent; /* kind 4：asend 传入值（owned） */
     int64_t driver_close; /* kind 4：aclose 模式 */
     int64_t driver_throw; /* kind 4：athrow 注入的异常（owned，PyAdamasException*） */
+    int64_t driver_await_result; /* kind 4：帧槽已由内部 await 的结果/异常填充 */
     int64_t pending;    /* future/fd：已经挂进 loop_pending/loop_fds */
     int64_t fd;         /* kind 6：等待的 fd */
     int64_t write;      /* kind 6：0 读 / 1 写 */
@@ -261,6 +264,7 @@ void pa_rc_inc(void* p);
 void pa_rc_dec(void* p);
 int64_t pa_rc_mark(void);
 void pa_rc_temp(void* p);
+void pa_rc_temp_unknown(int64_t v);
 void pa_rc_cleanup(int64_t mark);
 void pa_rc_shutdown(void);
 void pa_register_literals(void** objs, int64_t n);
@@ -299,12 +303,21 @@ void pa_exc_register(PyAdamasStr* child, PyAdamasStr* parent);
 PyAdamasList* pa_exc_value_args(PyAdamasExcValue* v);
 PyAdamasStr* pa_exc_value_str(PyAdamasExcValue* v);
 void pa_exc_done(void);
+// 生成器/协程 resume 的异常上下文切换：进入时把调用方的 current_exc /
+// exc_save_top 压栈并装上本帧保存的；挂起/退出时反过来。token 是进入时
+// 的栈深度，leave 只弹到它（没压过就什么也不弹）。
+int64_t pa_exc_enter(int64_t* cur, int64_t* top);
+void pa_exc_leave(int64_t* cur, int64_t* top, int64_t token);
+int64_t pa_exc_depth(void);
+void pa_exc_unwind(int64_t depth);
 void pa_exc_clear(void);
 PyAdamasStr* pa_exc_type_name(void);
 PyAdamasStr* pa_exc_message(void);
 void pa_raise(PyAdamasStr* type, PyAdamasStr* msg);
 void pa_reraise(void);
 void pa_exc_reraise(void);
+PyAdamasExcValue* pa_exc_take_value(void);
+void pa_exc_reraise_value_if(PyAdamasExcValue* v);
 _Noreturn void pa_raise_c(const char* type, const char* msg);
 void gen_destroy(void* g);
 void* pa_gen_new(int64_t n_slots, int64_t resume, int64_t release, int64_t kind);
@@ -313,6 +326,11 @@ int64_t pa_gen_next(void* g);
 int64_t pa_gen_next_opt(void* g, int64_t* ok);
 int64_t pa_gen_send(void* g, int64_t sent);
 int64_t pa_gen_send_opt(void* g, int64_t sent, int64_t* ok);
+/* gen.throw(exc)：在挂起点注入异常；已结束则把异常抛给调用方。 */
+int64_t pa_gen_throw(void* g, PyAdamasExcValue* exc);
+/* yield from 转发用：exc 是 owned 的 PyAdamasException*（转交帧）。
+   子生成器产出写 ok=1，结束写 ok=0 并返回它的 return 值。 */
+int64_t pa_gen_throw_opt(void* g, int64_t exc, int64_t* ok);
 void pa_gen_close(void* g);
 void pa_gen_finalize(void* g);
 /* 释放帧里所有持有引用的槽（调用生成的 gcrel，槽清零后可重复调用）。 */
@@ -492,6 +510,8 @@ void pa_list_reverse(PyAdamasList* l);
 int64_t pa_int_bit_length(int64_t v);
 PyAdamasList* pa_enumerate_list(PyAdamasList* seq);
 PyAdamasList* pa_zip2_list(PyAdamasList* a, PyAdamasList* b);
+PyAdamasDict* pa_dict_from_pairs(PyAdamasList* src, int64_t key_kind, int64_t key_own,
+                              int64_t val_own, int64_t hash_slot, int64_t eq_slot);
 PyAdamasDict* pa_set_from_list(PyAdamasList* src, int64_t key_kind, int64_t key_own,
                              int64_t hash_slot, int64_t eq_slot);
 int64_t pa_list_sum_i64(PyAdamasList* l, int64_t start);
@@ -569,8 +589,13 @@ PyAdamasStr* pa_str_none(void);
 int64_t pa_find_bytes(const char* base, int64_t n, const char* pat, int64_t m,
                         int64_t from);
 PyAdamasList* pa_bytes_to_list(PyAdamasStr* s);
+PyAdamasStr* pa_bytes_from_list(PyAdamasList* items);
+PyAdamasStr* pa_bytes_zeros(int64_t n);
 PyAdamasList* pa_str_wrap_list(PyAdamasStr* s);
 void* pa_obj_new(int64_t size, void (*dtor)(void*), void (*release)(void*));
+/* 值类型 struct：[隐藏 RC 头][C 结构体 payload]，返回 payload 地址。 */
+void* pa_struct_new(int64_t size);
+void* pa_struct_copy(void* src, int64_t size);
 size_t gc_hash(uintptr_t p);
 void gc_table_insert(PyAdamasRc* h);
 PyAdamasRc* gc_table_find(uintptr_t payload);

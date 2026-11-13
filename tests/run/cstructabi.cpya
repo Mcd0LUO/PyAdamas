@@ -1,0 +1,32 @@
+# 按值结构体 ABI 的 shim：SSE chunk 与 >16 字节 MEMORY 类。
+cmodule cstructabi
+link "tests/run/structabi.c"
+
+struct pair:
+    a: float
+    b: float
+
+struct triple:
+    a: int
+    b: int
+    c: int
+
+extern def "pair_add" as pair_add(p: pair, q: pair) -> pair
+extern def "triple_sum" as triple_sum(p: triple) -> triple
+extern def "triple_mix" as triple_mix(x: int, p: triple, y: int) -> int
+
+# 不同宽度的全局变量：读取与写回都要按声明宽度进行。
+extern var "cvar_i" as cvar_i: int
+extern var "cvar_u" as cvar_u: uint32
+extern var "cvar_f" as cvar_f: float
+extern var "cvar_b" as cvar_b: bool
+
+extern def "ptr_i32" as ptr_i32() -> ptr[int32]
+extern def "ptr_u32" as ptr_u32() -> ptr[uint32]
+
+# C 回调参数：fn(...) -> ret 的签名只允许标量/指针。
+extern def "cb_apply" as cb_apply(a: int, b: int, fn: fn(int, int) -> int) -> int
+extern def "cb_apply_f" as cb_apply_f(x: float, fn: fn(float) -> float) -> float
+extern def "cb_apply_i32" as cb_apply_i32(a: int32, b: int32, fn: fn(int32, int32) -> int32) -> int32
+extern def "cb_fold" as cb_fold(n: int, fn: fn(int, int) -> int, init: int) -> int
+extern def "cb_apply_b" as cb_apply_b(x: bool, fn: fn(bool) -> bool) -> bool

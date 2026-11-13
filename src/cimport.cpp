@@ -7,6 +7,7 @@
 #include <format>
 #include <fstream>
 #include <sstream>
+#include <unordered_map>
 #include <unordered_set>
 
 namespace pyadamas {
@@ -124,25 +125,100 @@ std::optional<CKind> parse_ckind(const std::string& text) {
 namespace {
 
 struct CTypeRef {
+    CTypeRef() = default;
+    CTypeRef(CKind k, CKind e, std::string s, bool o)
+        : kind(k), elem(e), stname(std::move(s)), opaque(o) {}
     CKind kind = CKind::None;
-    CKind elem = CKind::None;  // ptr[T] 的 T（标量时）
-    bool opaque = false;       // ptr[Struct]：不透明结构体指针
+    CKind elem = CKind::None;   // ptr[T] 的 T（标量时）
+    std::string stname;         // ptr[Struct] 的结构体名
+    bool opaque = false;        // ptr[Struct]：声明里没有字段
+    // kind == Callback：fn(...) -> ret 的签名。
+    std::vector<CKind> cb_params;
+    CKind cb_ret = CKind::None;
 };
 
-// 解析类型，允许 ptr[Struct] 引用本文件声明的 struct。
-std::optional<CTypeRef> parse_ctype(const std::string& text,
-                                    const std::unordered_set<std::string>& structs) {
+// 回调签名只允许能在 C 与 py23 之间按机器字直接传递的类型。
+bool callback_kind_ok(CKind k) {
+    switch (k) {
+        case CKind::Int:
+        case CKind::Int32:
+        case CKind::UInt32:
+        case CKind::Float:
+        case CKind::Bool:
+        case CKind::Ptr: return true;
+        default: return false;
+    }
+}
+
+// 解析类型，允许 ptr[Struct] 和按值的 Struct 引用本文件声明的 struct。
+std::optional<CTypeRef> parse_ctype(
+    const std::string& text, const std::unordered_map<std::string, const CStruct*>& structs) {
     std::string t = trim(text);
+    // fn(T1, T2, ...) -> R：C 回调参数。
+    if (t.starts_with("fn(")) {
+        size_t rp = t.find(')');
+        if (rp == std::string::npos) return std::nullopt;
+        CTypeRef r;
+        r.kind = CKind::Callback;
+        std::string inside = trim(t.substr(3, rp - 3));
+        std::string tail = trim(t.substr(rp + 1));
+        if (!tail.empty()) {
+            if (!tail.starts_with("->")) return std::nullopt;
+            auto rk = parse_ckind(trim(tail.substr(2)));
+            if (!rk || !callback_kind_ok(*rk)) return std::nullopt;
+            r.cb_ret = *rk;
+        }
+        if (!inside.empty()) {
+            for (auto& part : split_commas(inside)) {
+                // 回调参数允许标量和 ptr[T]；ptr[T] 在调用边界仍按地址传。
+                auto ck = parse_ctype(part, structs);
+                if (!ck || ck->kind == CKind::Callback) return std::nullopt;
+                if (ck->kind == CKind::Ptr) {
+                    r.cb_params.push_back(CKind::Ptr);
+                    continue;
+                }
+                if (!callback_kind_ok(ck->kind)) return std::nullopt;
+                r.cb_params.push_back(ck->kind);
+            }
+        }
+        int ni = 0, nf = 0;
+        for (CKind k : r.cb_params) {
+            if (k == CKind::Float) ++nf;
+            else ++ni;
+        }
+        if (ni > 6 || nf > 8) return std::nullopt;  // 回调参数不转发栈参数
+        return r;
+    }
     if (t.starts_with("ptr[") && t.back() == ']') {
         std::string inner = trim(t.substr(4, t.size() - 5));
         if (inner.empty()) return std::nullopt;
-        if (structs.count(inner)) return CTypeRef{CKind::Ptr, CKind::None, true};
-        if (auto k = parse_ckind(inner)) return CTypeRef{CKind::Ptr, *k, false};
+        if (auto it = structs.find(inner); it != structs.end())
+            return CTypeRef{CKind::Ptr, CKind::None, inner, it->second->fields.empty()};
+        if (auto k = parse_ckind(inner)) return CTypeRef{CKind::Ptr, *k, {}, false};
         return std::nullopt;
     }
-    if (auto k = parse_ckind(t)) return CTypeRef{*k, CKind::None, false};
+    // 裸结构体名：只有带字段的 struct 能按值传递。
+    if (auto it = structs.find(t); it != structs.end())
+        return CTypeRef{CKind::Struct, CKind::None, t, it->second->fields.empty()};
+    if (auto k = parse_ckind(t)) return CTypeRef{*k, CKind::None, {}, false};
     return std::nullopt;
 }
+
+// C 结构体字段的机器宽度。布局规则与 C 一致：offset 按字段对齐向上取整，
+// 整体大小按最大对齐补齐。C 结构体只接受定宽标量，避免依赖 sizeof 探针。
+bool cfield_layout(CKind k, int64_t& size, int64_t& align) {
+    switch (k) {
+        case CKind::Int: size = 8; align = 8; return true;      // long
+        case CKind::Int32: size = 4; align = 4; return true;    // int
+        case CKind::UInt32: size = 4; align = 4; return true;   // unsigned
+        case CKind::Float: size = 8; align = 8; return true;    // double
+        case CKind::Bool: size = 1; align = 1; return true;     // _Bool
+        case CKind::Ptr: size = 8; align = 8; return true;      // void* / T*
+        default: return false;
+    }
+}
+
+int64_t round_up(int64_t v, int64_t a) { return (v + a - 1) / a * a; }
 
 }  // namespace
 
@@ -198,18 +274,86 @@ std::optional<CImportDecl> load_cpya(const std::string& name, const std::string&
             lines.push_back(std::move(line));
         }
     }
-    std::unordered_set<std::string> structs;
+    // 预扫描 struct：`struct NAME` 是不透明句柄，`struct NAME:` 后面跟缩进
+    // 的字段声明，按 C 规则算好布局。字段行在正式解析时跳过。
+    std::unordered_map<std::string, const CStruct*> structs;
+    std::unordered_map<std::string, size_t> struct_pos;
+    std::unordered_set<size_t> field_lines;
     for (size_t i = 0; i < lines.size(); ++i) {
         std::string text = trim(strip_comment(lines[i]));
         if (!text.starts_with("struct ")) continue;
         std::string sname = trim(text.substr(7));
+        bool has_fields = !sname.empty() && sname.back() == ':';
+        if (has_fields) sname.pop_back();
+        sname = trim(sname);
         if (!is_ident(sname))
             return fail(static_cast<int>(i) + 1, std::format("invalid struct name '{}'", sname));
-        if (!structs.insert(sname).second)
+        if (structs.count(sname))
             return fail(static_cast<int>(i) + 1, std::format("duplicate struct '{}'", sname));
+
+        CStruct cs;
+        cs.name = sname;
+        if (has_fields) {
+            size_t j = i + 1;
+            std::unordered_set<std::string> seen_fields;
+            while (j < lines.size()) {
+                std::string raw = strip_comment(lines[j]);
+                std::string ft = trim(raw);
+                if (ft.empty()) {
+                    ++j;
+                    continue;
+                }
+                bool indented = raw[0] == ' ' || raw[0] == '\t';
+                if (!indented) break;
+                size_t colon = ft.find(':');
+                if (colon == std::string::npos)
+                    return fail(static_cast<int>(j) + 1,
+                                std::format("expected 'field: type' in struct '{}'", sname));
+                std::string fname = trim(ft.substr(0, colon));
+                std::string ftype = trim(ft.substr(colon + 1));
+                if (!is_ident(fname))
+                    return fail(static_cast<int>(j) + 1,
+                                std::format("invalid field name '{}'", fname));
+                if (!seen_fields.insert(fname).second)
+                    return fail(static_cast<int>(j) + 1,
+                                std::format("duplicate field '{}' in struct '{}'", fname, sname));
+                auto fk = parse_ckind(ftype);
+                int64_t fsize = 0, falign = 1;
+                if (!fk || !cfield_layout(*fk, fsize, falign))
+                    return fail(static_cast<int>(j) + 1,
+                                std::format("unsupported struct field type '{}' (use int, "
+                                            "int32, uint32, float, bool or ptr)", ftype));
+                CStructField cf;
+                cf.name = fname;
+                cf.kind = *fk;
+                cf.size = fsize;
+                cf.align = falign;
+                cs.fields.push_back(std::move(cf));
+                field_lines.insert(j);
+                ++j;
+            }
+            if (cs.fields.empty())
+                return fail(static_cast<int>(i) + 1,
+                            std::format("struct '{}' needs at least one field", sname));
+            int64_t off = 0, align = 1;
+            for (auto& f : cs.fields) {
+                off = round_up(off, f.align);
+                f.offset = off;
+                off += f.size;
+                if (f.align > align) align = f.align;
+            }
+            cs.align = align;
+            cs.size = round_up(off, align);
+        }
+        decl.structs.push_back(std::move(cs));
+        struct_pos[sname] = decl.structs.size() - 1;
     }
+    // decl.structs 可能扩容，上面的裸指针在 push_back 后失效，重新绑定。
+    structs.clear();
+    for (auto& kv : struct_pos) structs[kv.first] = &decl.structs[kv.second];
 
     for (size_t li = 0; li < lines.size(); ++li) {
+        if (field_lines.count(li)) continue;  // struct 的字段行
         int lineno = static_cast<int>(li) + 1;
         std::string text = trim(strip_comment(lines[li]));
         if (text.empty()) continue;
@@ -304,8 +448,49 @@ std::optional<CImportDecl> load_cpya(const std::string& name, const std::string&
 
         if (text.starts_with("extern")) {
             std::string rest = trim(text.substr(6));
+            // extern var NAME: type —— 读取 C 全局变量。
+            if (rest.starts_with("var ")) {
+                std::string dtext = trim(rest.substr(4));
+                size_t colon = dtext.find(':');
+                if (colon == std::string::npos)
+                    return fail(lineno, "expected 'extern var NAME: type'");
+                std::string head = trim(dtext.substr(0, colon));
+                std::string ty_text = trim(dtext.substr(colon + 1));
+                std::string symbol_part = head;
+                std::string py_part;
+                size_t aspos = head.rfind(" as ");
+                if (aspos != std::string::npos) {
+                    symbol_part = trim(head.substr(0, aspos));
+                    py_part = trim(head.substr(aspos + 4));
+                }
+                std::string symbol = unquote(symbol_part);
+                std::string py_name = py_part.empty() ? symbol : py_part;
+                if (symbol.empty()) return fail(lineno, "missing C symbol name");
+                if (!is_ident(py_name))
+                    return fail(lineno, std::format("invalid name '{}'", py_name));
+                auto ct = parse_ctype(ty_text, structs);
+                if (!ct) return fail(lineno, std::format("unknown variable type '{}'", ty_text));
+                if (ct->kind == CKind::Callback)
+                    return fail(lineno, "callback type is not supported for extern var");
+                if (ct->kind == CKind::Struct)
+                    return fail(lineno,
+                                std::format("struct variable '{}' must be declared with ptr[{}]",
+                                            py_name, ct->stname));
+                if (seen_py.count(py_name))
+                    return fail(lineno, std::format("duplicate name '{}'", py_name));
+                seen_py.insert(py_name);
+                CVar cv;
+                cv.symbol = symbol;
+                cv.py_name = py_name;
+                cv.kind = ct->kind;
+                cv.struct_name = ct->stname;
+                cv.elem = ct->elem;
+                decl.vars.push_back(std::move(cv));
+                continue;
+            }
             if (!rest.starts_with("def "))
-                return fail(lineno, "expected 'extern def <symbol>(...)'");
+                return fail(lineno,
+                            "expected 'extern def <symbol>(...)' or 'extern var NAME: type'");
             rest = trim(rest.substr(4));
             size_t lp = rest.find('(');
             size_t rp = rest.rfind(')');
@@ -333,7 +518,12 @@ std::optional<CImportDecl> load_cpya(const std::string& name, const std::string&
             CExtern ex;
             ex.symbol = symbol;
             ex.py_name = py_name;
-            for (auto& p : split_commas(params_text)) {
+            auto param_parts = split_commas(params_text);
+            if (!param_parts.empty() && param_parts.back() == "...") {
+                ex.varargs = true;
+                param_parts.pop_back();
+            }
+            for (auto& p : param_parts) {
                 size_t colon = p.find(':');
                 if (colon == std::string::npos)
                     return fail(lineno, std::format("parameter '{}' needs a type", p));
@@ -354,12 +544,27 @@ std::optional<CImportDecl> load_cpya(const std::string& name, const std::string&
                 }
                 cp.kind = ct->kind;
                 cp.ptr_elem = ct->elem;
+                cp.ptr_struct = ct->stname;
                 cp.opaque = ct->opaque;
+                cp.cb_params = ct->cb_params;
+                cp.cb_ret = ct->cb_ret;
+                if (cp.kind == CKind::Struct && cp.opaque)
+                    return fail(lineno,
+                                std::format("struct '{}' is opaque and cannot be passed by value",
+                                            cp.ptr_struct));
                 ex.params.push_back(std::move(cp));
             }
             auto rk = parse_ctype(ret_text, structs);
             if (!rk) return fail(lineno, std::format("unknown return type '{}'", ret_text));
+            if (rk->kind == CKind::Callback)
+                return fail(lineno, "returning a C function pointer is not supported");
+            if (rk->kind == CKind::Struct && rk->opaque)
+                return fail(lineno,
+                            std::format("struct '{}' is opaque and cannot be returned by value",
+                                        rk->stname));
             ex.ret = rk->kind;
+            ex.ret_struct = rk->stname;
+            ex.ret_elem = rk->elem;
 
             if (seen_py.count(py_name))
                 return fail(lineno, std::format("duplicate name '{}'", py_name));

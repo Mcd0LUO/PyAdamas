@@ -25,6 +25,10 @@ from shapes import Child
 e = Child(9, "e")
 print(e.label(), e.n)
 
+# 跨模块函数返回类实例：接口按名字序列化类引用
+r = shapes.make_point(5, 12)
+print(r.norm2())
+
 # --- expect ---
 # 25
 # 5
@@ -35,3 +39,4 @@ print(e.label(), e.n)
 # 2 child 12
 # 7 d 8
 # e 9
+# 169

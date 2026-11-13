@@ -184,9 +184,12 @@ VReg Lowerer::lower_comp(Expr& e) {
             call.imm = static_cast<int64_t>(RtFn::AsyncGenANext);
             call.args = {load_slot(seq_slot, sst)};
             VReg w = def_heap(mk_coroutine(ety), std::move(call));
-            VReg val = suspend_on_awaitable(w, ety, g.line, g.col);
+            VReg val = suspend_on_awaitable(w, ety, g.line, g.col,
+                                            static_cast<size_t>(-1), false);
             st_->cleanups.pop_back();
             call_void(RtFn::HandlerLeave, {load_slot(hs_slot, t_int())});
+            // handler 离开后入临时栈，避免 leave 的水位清理释放掉刚送达的值。
+            if (ir_is_heap(ety)) push_temp(val);
 
             if (auto* tn = dynamic_cast<Name*>(g.target.get())) {
                 int slot = comp_slot(tn->id);

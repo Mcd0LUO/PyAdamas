@@ -54,12 +54,13 @@ PyAdamas 借 Python 的语法外壳，但**不是 CPython 的实现**：语义�
 | `None` | 单值类型 |
 | `Optional[T]` / `T \| None` | 可空 |
 | `func(...) -> T` | 函数值 |
-| `generator[T]` | 生成器对象；`for` / `next` 产出 `T`，`send` 送入的值是 `unknown` |
+| `generator[T]` | 生成器对象；`for` / `next` 产出 `T`，`send` 送入的值是 `unknown`（写成 `generator[Y, S, R]` 时按 `S` 检查），有 `throw(exc)` / `close()` |
 | `coroutine[T]` | 协程对象；`await` / `asyncio.run` 得到 `T` |
 | `task[T]` | `asyncio.create_task` 调度的任务；`await` 得到 `T`，有 `done()` / `cancel()` |
 | `asyncgen[T]` | `async def` + `yield` 的异步生成器；`async for` 或 `asend` / `athrow` / `__anext__` / `aclose` |
 | `future[T]` | `asyncio.Future`；可多等待，`set_result` 之后可 `await`/`result` |
 | `类名` | 类实例；字段布局与 vtable 在编译期确定 |
+| `结构体名` | `struct` 值类型；字段按 C 规则布局，赋值/传参/返回都复制 |
 | `set[T]` / `dict[K, V]` | 堆上的哈希表；`set` 复用 `dict`（值恒 0），保留插入顺序 |
 | `unknown` | 推断失败的占位，任何检查都放行 |
 
@@ -170,6 +171,10 @@ b"%05d" % 42             # b'00042'
 `bytes` 标注（`x: bytes`）和跨模块函数签名都保留 `bytes` 类型，不再降级成
 `unknown`。
 
+`bytes(...)` 可以把 `list[int]` 转成字节串（元素必须在 0..255，越界抛
+`ValueError`），`bytes(n)` 生成 n 个零字节，`bytes()` 是空字节串；
+传 `bytes` 原样返回。逆向往 `list[int]` 用 `list(b)`。
+
 ### 列表
 
 `list[T]` 是动态数组，`append` 均摊 O(1)，索引支持负数，越界 panic。列表字面量的元素类型由所有元素的上界推出（`[1, 2.5]` 是 `list[float]`，整数元素在构造时就被转成 double）。
@@ -230,8 +235,11 @@ first = next(x for x in xs if x > 0)
 含 `async for` 的推导式只能在
 `async def` 里使用，可以混用同步/异步子句；它只能作为整条语句、赋值
 或 `return` 的根表达式（挂起会清空当前表达式的临时值），元素表达式
-里也不能含 `await`。推导式内部暂不支持 `lambda` 捕获循环变量、
-海象运算符写回外层和异步生成器表达式。
+里也不能含 `await`。推导式里出现 `lambda` 时，脱糖阶段会把它改写成
+「生成器表达式 + `list()` / `set()` / `dict()`」：循环变量成为合成生成器
+函数的局部变量，闭包捕获走常规路径，语义和 CPython 一致（所有 lambda
+共享循环结束时的值）。不含 lambda 的推导式仍按原来的就地展开编译。
+推导式内部的海象运算符写回外层和异步生成器表达式仍不支持。
 
 ### 函数
 
@@ -281,9 +289,23 @@ print(f(), f(), g())    # 1 2 1
 `@x.setter` 和 `@x.deleter`；属性访问编译成 getter/setter/deleter 的虚调用。
 `@classmethod` 也支持（`cls` 静态绑定到所属类，见下面「类属性与 `@classmethod`」）；
 自定义方法装饰器在类创建点按从下到上应用，结果存成类属性，实例调用
-`obj.m(...)` 会把 `obj` 作为第一个实参调用包装函数（装饰器必须返回
-签名已知的函数；不支持 dunder 方法、`super()` 目标和 `C.m(...)` 类接收者
-调用）；类装饰器仍被后端拒绝。
+`obj.m(...)` 会把 `obj` 作为第一个实参调用包装函数。类接收者
+`C.m(obj, ...)` 也按包装函数的未绑定签名显式接收 `self`；
+`super().m(...)` 会在声明该方法的类上取包装函数并自动补 `self`。
+
+**方法值**：`obj.m` / `C.m` 不加括号时得到绑定接收者的函数值，可以存进
+变量、放进容器、当实参传出去，之后按普通函数值调用。实例上的普通方法
+绑定该实例（调用时不再传 `self`），运行期仍按对象 vtable 分派；静态
+方法/类方法按原语义绑定；装饰方法绑定实例并调用类属性里的包装函数。
+类接收者上只支持取静态方法/类方法的值（普通方法请从实例取）；optional
+接收者上取方法值会先做 None 检查。
+装饰器必须返回签名已知的函数；走 `dunder_call` 的那批 dunder 都可以装饰
+（算术/比较/`__str__`/`__len__`/`__hash__`/`__iter__`/`__contains__`），
+构造（`__init__`）、`with` 协议（`__enter__`/`__exit__`）、
+`async with`（`__aenter__`/`__aexit__`）和实例调用（`__call__`）也一样：
+装饰后的实现不填 vtable 槽，调用点按名字从类属性取包装函数并显式补上
+实例。`as` 目标/表达式结果的类型取包装函数声明的返回值。包装函数必须用
+与目标一致的固定形参（不能靠 `*args` 转发）。类装饰器仍被后端拒绝。
 
 相互递归的嵌套闭包会形成 cell 环；这类环不是引用计数能处理的，由下面的
 循环收集器回收。
@@ -307,16 +329,46 @@ g = count(2)
 print(next(g), next(g)) # 0 1
 ```
 
-支持 `for` / `next()` / `.send(v)` / `.close()` / `.__next__()`。`send` 的
-值成为 `x = yield v` 里 `x` 的值（普通 `next` 是 None）。生成器函数里
-`return` 只表示结束，返回值被丢弃。
+支持 `for` / `next()` / `.send(v)` / `.throw(exc)` / `.close()` / `.__next__()`。
+`send` 的值成为 `x = yield v` 里 `x` 的值（普通 `next` 是 None）；`throw`
+把异常值注入当前挂起点，生成器自己的 `try` / `except` 能接住它。生成器函数的
+`return` 值会被外层 `yield from` 取走；直接用 `for` / `next()` 迭代时
+丢弃（同 CPython）。
+
+`x = yield v` 里 `x` 的静态类型默认是 unknown。函数返回类型写成
+`Generator[Y, S, R]`（`typing` 不用导入，裸名即可）后：`yield` 表达式的类型是
+`S`，`.send(v)` 按 `S` 检查实参并返回 `Y`；`R` 目前只做记录，
+`StopIteration.value` 不参与类型检查。只写 `Generator[Y]` 时 `send` 不检查。
+`AsyncGenerator` 仍只接受一个参数。
+
+```python
+def g():
+    try:
+        x = yield 1
+    except ValueError as e:
+        print("caught", e)
+    yield 2
+
+it = g()
+next(it)                 # 1
+it.throw(ValueError("x"))  # caught x -> 2
+```
+
+`throw` 注入的异常若没人接住，生成器随之结束，异常抛给调用方；对已经结束的
+生成器 `throw` 时异常直接抛给调用方，对从未启动的生成器则从函数入口抛出
+（函数体不执行）。
 
 **`yield from`**：把子迭代器的值逐个转 yield 出去；委托生成器时
 `send` 的值会转发给子生成器，子生成器结束（或出错）后继续执行外层
 代码。可委托生成器、list / tuple / str / dict / set；其他静态类型
 （unknown）按生成器协议尝试，失败抛 `TypeError`。外层生成器被
 `close()` 时，子生成器的引用被释放，它的 `finally` 照常执行。表达式
-的值固定为 None（异常对象不保存 `StopIteration.value`）。
+的值：委托生成器时是子生成器的 `return` 值，委托序列时是 None。
+
+`throw()` 也按同样路径转发：外层停在委托挂起点时，注入的异常交给子生成器的
+`throw`；子生成器接住后继续 yield 的值由外层转 yield，子生成器因此结束则
+`yield from` 取它的 `return` 值，子生成器没接住则异常在 `yield from` 处向外层
+传播（外层自己的 `try` 能抓住）。委托序列时不转发，异常直接在外层挂起点抛出。
 
 ```python
 def inner():
@@ -328,16 +380,30 @@ def outer():
     yield from [3, 4]
 ```
 
-**跨 yield 清理**：`yield` 可以出现在 `try` / `with` 体内；挂起时活跃的
-handler 记录被摘下，恢复时按原顺序重挂并重新建立 setjmp。`close()`、
-引用计数归零与 GC 前的 finalize 会按挂起点快照执行 `finally` 和
-`with.__exit__(None, None, None)`。异常从生成器逃出时，生成代码的
-landing 路径负责展开清理，帧被标记 aborted，避免销毁时重复执行。
+**跨 yield 清理**：`yield` 可以出现在 `try` / `with` / `except` / `finally`
+体内；挂起时活跃的 handler 记录被摘下，恢复时按原顺序重挂并重新建立 setjmp。
+`except` 体里的挂起还要求异常上下文跟着走：resume 入口把调用方的
+`current_exc` / 保存节点换进来，挂起时换回去，所以生成器在 except 体
+里挂起期间，调用方自己的 except 状态不受影响，恢复后裸 `raise` 仍然
+重抛生成器当前处理的异常。`close()`、引用计数归零与 GC 前的 finalize
+会按挂起点快照执行 `finally` 和 `with.__exit__(None, None, None)`。
+异常从生成器逃出时，生成代码的 landing 路径负责展开清理，帧被标记
+aborted，避免销毁时重复执行。
 
-限制：`yield` / `yield from` 必须是当前语句里第一个求值的表达式（例如
-`x = yield v`、`return (yield v)`、`if (yield v):`），不能位于
-`finally` 或 `except` 体内；挂起点之前已经求出的其它 vreg 不随生成器
-帧保存，恢复后不可用。生成器类型跨模块接口会降级成 `unknown`。
+`finally` 体内挂起时，正常路径与异常 landing 汇聚到同一份 finalbody，
+所以体内每个 `yield` 只有一套恢复状态；异常路径在进入 finalbody 前把
+待重抛异常转成异常值存进帧槽，体内再 `raise` / 嵌套 `try/except` 不会
+覆盖它，finalbody 结束后照原样重抛。`close()` 重放 finally 体时若再次
+遇到挂起点，按 CPython 报 `RuntimeError: generator ignored GeneratorExit`
+（协程为 `coroutine ignored GeneratorExit`）。
+
+限制：`yield` / `yield from` / `await` 可以出现在任意子表达式里
+（`f(g(), yield x)`、`10 + (yield x)` 都行）：降级后按 resume 函数的
+vreg 活跃性找出跨挂起的值，挂起前 retain 一份写进生成器堆帧槽，恢复
+后再装回。`finally` 体内的 `return` / `break` / `continue` 仍不支持。
+`throw()` 只接受异常实例，不接受异常类。生成器 / 协程 / 异步生成器的元素与
+结果类型跨模块接口保留（模块格式 7 起 `Generator` 还带 `send` 值与 `return`
+值的类型）。
 
 ### 协程
 
@@ -397,7 +463,9 @@ print(asyncio.run(add(3, 4)))   # 10
 Queue, wait_for, timeout, TaskGroup, Semaphore`（跨模块 `run`/`wait_for`
 的结果类型会退化成 unknown）。async 方法、`with` 里的 `await`、跨 `await` 的
 `finally` 都可以用；异常跨 `await` 通过在恢复时注入异常传播，
-`try/except` 能正常捕获。
+`try/except` 能正常捕获。`await` 同样可以出现在任意子表达式、
+`except` 体和 `finally` 体内（finalbody 只编译一份，异常路径的待重抛
+异常存在帧槽里跨挂起保留）。
 
 取消会向任务注入内置异常 `CancelledError`（父类是 `BaseException`，
 `except Exception` 不会误吞）：排队中的任务直接注入，挂起中的任务先
@@ -422,8 +490,11 @@ async def main() -> int:
     return s
 ```
 
-生成器内部可以混用 `await` / `yield`；`return`、`break` 中断迭代后，
-生成器对象被回收时同步执行 `finally`（`finally` 里不能再 await）。
+生成器内部可以混用 `await` / `yield`；`await` 的结果（包括 `str` / `list`
+这类堆值）会正确送回生成器帧槽，内部 awaitable 抛出的异常也走注入分发，
+可以被生成器自己的 `try/except` 接住。`return`、`break` 中断迭代后，
+生成器对象被回收时同步执行 `finally`（`finally` 里的 `await` 同样按挂起点
+处理：正常路径与异常 landing 汇聚到同一份 finalbody）。
 
 协议方法（都返回 coroutine，需要 `await`）：
 
@@ -476,12 +547,12 @@ Future 被取消时，其他等待者也会收到 `CancelledError`。
 无效 fd 以 `OSError` 结束等待。这是 PyAdamas 自己的低级接口（CPython
 用 `loop.add_reader`），没有配套的 fd 读写函数。
 
-限制：`await` 必须是当前语句里第一个求值的表达式（语句、赋值右值、
-`return` 值、条件、二元表达式左侧等）；不能出现在 `finally` / `except`
-体内；异步推导式只能作为语句、赋值或 `return` 的根表达式；不支持自定义
-`__aiter__` 迭代器、fd 读写和线程安全的事件循环；Future 回调是同步
-调用（CPython 用 `call_soon` 排队），`gather` 的实参个数在源码里写死，
-结果元素类型按 unknown 处理；Task 只允许一个并发等待者，没有任务名字。
+限制：`await` 可以出现在任意子表达式和 `except` 体内，但不能位于
+`finally` 体内；异步推导式只能作为语句、赋值或 `return` 的根表达式；
+不支持自定义 `__aiter__` 迭代器、fd 读写和线程安全的事件循环；Future
+回调是同步调用（CPython 用 `call_soon` 排队），`gather` 的实参个数在
+源码里写死，结果元素类型按 unknown 处理；Task 只允许一个并发等待者，
+没有任务名字。
 
 ### 内存与生命周期
 
@@ -653,6 +724,11 @@ class Config:
 迭代协议个别面（如 `__reversed__`、`__bool__`）未建模。
 
 没有 `__init__` 时只能零参构造——基类在外部的类除外，`__init__` 可能在那边。`__init__` 的默认参数和关键字参数与普通函数规则相同。
+
+定义 `__call__` 的类，其**实例**可以像函数一样调用：`obj(1, 2)` 走
+`__call__` 的调用签名（参数里不含 self），返回值就是 `__call__` 的返回
+值，链式写法 `Maker(10)(1, 1)` 也支持。类名本身仍是构造；被局部变量遮住
+的类名按实例处理。`__call__` 可以套自定义装饰器。
 
 ### with
 
@@ -827,6 +903,32 @@ CPython 一致。
   `reader` 只收 `delimiter`/`quotechar`，`writer` 另收 `quoting`/`lineterminator`；
   `delimiter`/`quotechar` 按字节，必须单字节；`QUOTE_NONNUMERIC` 等同
   `QUOTE_ALL`（字段静态类型都是 str）。没有 dialect / DictReader / DictWriter。
+- 标准库 `logging`（`stdlib/logging.py` 随编译器分发）：等级常量
+  `DEBUG`/`INFO`/`WARNING`/`ERROR`/`CRITICAL`，`basicConfig(level=...)`、
+  `getLogger(name)`、`getLevelName`、`isEnabledFor`，以及 `Logger` 上的
+  `debug`/`info`/`warning`/`error`/`critical`/`log`/`setLevel`。默认输出到
+  `sys.stderr`，格式 `LEVEL:name:message`。没有 handler/filter/Formatter/
+  文件输出/`%` 参数展开；支持 `getLogger(...).info(...)` 这类链式调用。
+- 标准库 `statistics`（`stdlib/statistics.py`）：`mean`/`fmean`/
+  `median`/`median_low`/`median_high`/`mode`/`pvariance`/`variance`/
+  `pstdev`/`stdev`/`harmonic_mean`，输入为 `list[float]`（`mode` 为
+  `list[int]`），空数据抛 `StatisticsError`。
+- 标准库 `textwrap`（`stdlib/textwrap.py`）：`wrap`/`fill`（贪心装行，
+  超长单词不拆）、`dedent`、`indent`；没有 `TextWrapper` 类和
+  `initial_indent` 等参数。
+- 标准库 `base64`（`stdlib/base64.py`）：`b64encode` / `b64decode` /
+  `urlsafe_b64encode` / `urlsafe_b64decode`，输入输出都是 `bytes`；
+  解码同时接受标准与 URL-safe 字母表，非法字符抛 `ValueError`；
+  不支持 `validate=` / `altchars=` 与 `str` 输入。
+- 标准库 `hashlib`（`stdlib/hashlib.py`）：`md5` / `sha1` / `sha256`，
+  返回带 `update(bytes)` / `digest() -> bytes` / `hexdigest() -> str`
+  的对象；纯 pyadamas 实现，结果与 CPython 一致，跨多个 64 字节块也正确。
+  不支持 `usedforsecurity=`、`copy()`、`pbkdf2_hmac`/`scrypt` 等派生函数。
+- 标准库 `hmac`（`stdlib/hmac.py`）：`hmac.new(key, msg=b"", digestmod="sha256")`
+  返回带 `update(bytes)` / `digest()` / `hexdigest()` 的对象。支持
+  `"md5"` / `"sha1"` / `"sha256"` 字符串名（与 CPython 的
+  `hmac.new(key, msg, "sha256")` 一致），>64 字节的 key 会先做一次摘要；
+  不接受传入 hash 构造函数或模块对象。
 - 内置 `re`：`compile` / `search` / `match` / `fullmatch` / `findall` /
   `sub` / `split` / `escape`，以及 `Pattern` 上的同名方法和 `Match` 的
   `group`/`groups`/`start`/`end`/`span`。支持字面量、`.`、字符类、
@@ -893,7 +995,7 @@ unknown 值上对带运行期类型标签的类型（str/list/dict/complex）走
 数值与 CPython 不同。
 `list(seq)` / `tuple(seq)` 做浅拷贝，`set(seq)` / `frozenset(seq)` 按键
 去重（frozenset 复用 set 的运行时，不强制不可变），`dict(**kw)`
-用字符串键；`sorted` 支持 int/float/str 元素，`key=`（按键排）和
+用字符串键、`dict(iterable)` 要求元素是 `(key, value)` 二元组；`sorted` 支持 int/float/str 元素，`key=`（按键排）和
 `reverse=True` 都支持；`enumerate` 产出的元素是 `[下标, 值]` 对，`zip` 支持两个可迭代
 对象；这些迭代辅助都返回具体列表（生成器实参会被抽干），生成器表达式
 本身仍是惰性的。
@@ -1013,6 +1115,37 @@ match value:
 `==` / `!=`、真值判断、`print` / f-string 已支持。复数是有 RC 头的堆对象；
 没有 `**`、排序或与 int/float 的隐式存储转换（运算时允许提升）。
 
+## 值类型 struct
+
+模块顶层用 `struct` 定义值类型，字段只有固定标量：`int`、`float`、`bool`。
+`struct` 是软关键字，只有 `struct NAME:` 换行缩进块的写法才是定义，变量名、
+模块名照常可用。
+
+```python
+struct Point:
+    x: float
+    y: float
+
+p = Point(1.0, 2.0)
+print(p.x, sizeof(Point))    # 1.0 16
+p.x += 0.5
+```
+
+布局与 C 一致：字段按声明顺序，`int` 对应 `int64_t`、`float` 对应 `double`、
+`bool` 对应 `_Bool`；每个字段从自身对齐的偏移开始，整体大小按最大对齐补齐。
+所以上面的 `Point` 与 C 的 `struct Point { double x; double y; }` 同布局，
+`addr(p)` 可以直接传给 C。
+
+- `Point(...)` 按字段顺序构造，参数个数和类型必须匹配。
+- `sizeof(T)` / `sizeof(v)` 是编译期常量。
+- `addr(p)` 得到 `ptr[Point]`（就是 `Point*`），字段读写自动解引用。
+- **值语义**：赋值、传参、返回都复制整块数据，改副本不影响原值；放进
+  `list`/`dict` 等容器时仍按引用存放（与类实例一致）。
+- 字段读写是编译期固定偏移；`bool` 字段只占 1 字节。
+
+限制：字段只能是标量；不支持方法、继承、嵌套结构体、`str` 字段、定长数组；
+`print(p)` 直接报错，请打印字段。
+
 ## C 互操作（cimport）
 
 `cimport` 在**模块顶层**声明要调用的 C 库，不产生运行时对象；把它当值用会报错。
@@ -1032,12 +1165,28 @@ link m                          # -> -lm；引号内则原样传给链接器
 link "/usr/lib/libfoo.a"
 const PI: float = 3.141592653589793
 struct FILE                     # 不透明结构体，只能以 ptr[FILE] 使用
+extern var "stdout" as stdout: ptr[FILE]   # C 全局变量，可读也可写回
 extern def "sqrt" as sqrt(x: float) -> float
 extern def strlen(s: str) -> int
 extern def free(p: ptr) -> None
 ```
 
 `extern def` 单行书写；参数名必填；返回值省略等价于 `None`；`"c_name" as py_name` 用于改名。常量在编译期内联。
+
+`extern var` 读取 C 全局变量，赋值时按同一宽度写回：
+
+```
+extern var "optind" as optind: int32
+extern var "program_invocation_name" as prog: str
+```
+
+```python
+cimport clib as c
+print(c.optind)   # 初始为 1
+c.optind = 0      # 写回 C 全局变量
+```
+
+变量类型支持 `int`/`int32`/`uint32`/`float`/`bool`/`ptr`/`ptr[Struct]`/`str`/`Optional[str]`。`str` 变量只读（写入会报错），因为读取时已经把 `char*` 复制成 `str`；按值结构体变量不支持，请声明为 `ptr[Struct]` 后读写字段。
 
 | `.cpya` 类型 | C 类型 | 说明 |
 |---|---|---|
@@ -1047,11 +1196,12 @@ extern def free(p: ptr) -> None
 | `bool` | `_Bool` | 返回值统一为 0/1 |
 | `str` | `char*` | 传入 `data`；返回时复制成 `str` |
 | `ptr` / `ptr[T]` | `void*` / `T*` | 类型系统中是 `Optional[int]`，0 表示 NULL |
-| `ptr[Struct]` | `Struct*` | 不透明结构体指针，同样是 `Optional[int]` |
+| `ptr[Struct]` | `Struct*` | 结构体有字段声明时是 `Optional[ptr[Struct]]`，可读写字段；否则同 `Optional[int]` |
+| `Struct` | `struct Struct` | 带字段的结构体按值传参/返回，见「结构体按值传递」 |
 | `None` | `void` | |
 | `Optional[str]` | 可空 `char*` | NULL 返回 `None` |
 
-不支持：解析 C 头文件、varargs、回调、struct 字段访问、`extern` 变量、指针解引用。`struct NAME` 只声明不透明指针类型。`link` 参数去重后追加到最终链接命令；`.cpya` 不参与 `.pya` 模块缓存。
+不支持：在 `cimport` 时直接解析 C 头文件（可先用 `pyadamas cdecl` 离线生成 `.cpya`）。`struct NAME` 不带冒号时只声明不透明指针类型；带冒号和缩进字段时按 C 规则布局，`ptr[NAME]` 可直接读写字段。`link` 参数去重后追加到最终链接命令；`.cpya` 不参与 `.pya` 模块缓存。
 
 `str` 参数要求非空，不能把 `Optional[str]` 直接传给它（会有 NULL）；需要接受 NULL 时声明为 `Optional[str]`。`ptr` 是不透明地址，0 表示 `NULL`，不能解引用或做数组访问。
 
@@ -1069,6 +1219,104 @@ extern def free(p: ptr) -> None
 `list[float]` 的槽位就是 8 字节 double，`list[int]` 是 8 字节 long；`bytes` 的 `data` 连续且 NUL 结尾。不匹配的组合会被拒绝，例如 `list[int]` 不能传给 `ptr[float]`，`bytes` 不能传给 `ptr[float]`/`ptr[int]`（元素宽度不同）。空 list 的 `data` 可能为 NULL，原样传 0。
 
 指针只在本次 C 调用期间有效：C 函数不得保存它，调用期间也不要改变 list 长度。C 写回 `data` 后，py23 侧的 list 元素立即可见。多维数组请自己拍平并显式传 stride。
+
+### 指针解引用
+
+带元素类型的指针（`ptr[int]`、`ptr[float]`、`ptr[int32]`、`ptr[uint32]`、`ptr[bool]`）支持 `p[i]` 读写，地址按元素宽度计算，没有边界检查：
+
+```
+extern def "malloc" as malloc_i(n: int) -> ptr[int]
+extern def "malloc" as malloc_f(n: int) -> ptr[float]
+```
+
+```python
+cimport clib as c
+
+p = c.malloc_i(24)
+p[0] = 42
+p[1] = -7
+print(p[0], p[1])   # 42 -7
+c.free(p)
+
+q = c.malloc_f(16)
+q[0] = 1.5
+print(q[0])          # 1.5
+c.free(q)
+```
+
+`int32` 读取符号扩展、`uint32` 零扩展、`float` 走 `movsd`。指针为 `None` 时解引用会抛 `AttributeError`；不透明 `ptr`（没有 `[...]`）不能下标。元素类型会跟着变量传递，但经过手写的 `Optional[int]` 标注后会丢失。
+
+### 可变参数
+
+参数表末尾写 `...` 表示 C 可变参数函数：
+
+```
+extern var "stdout" as stdout: ptr[FILE]
+extern def "printf" as printf(fmt: str, ...) -> int32
+```
+
+```python
+cimport clib as c
+
+n = c.printf("x=%d y=%.2f s=%s\n", 3, 1.5, "ok")
+print(n)   # 16
+```
+
+额外实参按 py23 类型选择编组：`int`/`bool` 走整数寄存器，`float` 走 `xmm`，`str` 传 `data`，`Optional[str]` 可空，`ptr`/`Optional[int]` 按地址传。调用前 `%al` 会被设成使用的向量寄存器数（SysV 要求）。`list`、结构体等不能作为可变参数传递。
+
+### 回调
+
+参数类型写成 `fn(T1, T2, ...) -> R` 表示 C 函数指针，调用时直接传 py23 函数或闭包：
+
+```
+extern def "qsort" as qsort(base: ptr, n: int, size: int, cmp: fn(ptr[int], ptr[int]) -> int) -> None
+```
+
+```python
+cimport clib as c
+
+p = c.malloc_i(40)
+for i in range(5):
+    p[i] = 5 - i
+
+
+def cmp(a: ptr[int], b: ptr[int]) -> int:
+    if a[0] < b[0]:
+        return -1
+    if a[0] > b[0]:
+        return 1
+    return 0
+
+
+c.qsort(p, 5, 8, cmp)
+c.free(p)
+```
+
+回调签名只允许标量（`int`/`int32`/`uint32`/`float`/`bool`）和 `ptr`/`ptr[T]`；返回 `None` 表示 `void`。编译器为每个回调参数生成一个跳板和闭包槽：调用前把闭包登记到槽里，C 调用跳板时恢复闭包环境（`%r10`）再进入 py23 函数，因此**捕获环境**的闭包也能用。32 位/布尔参数会按声明宽度提升到 64 位。
+
+限制：C 必须在本次调用期间同步调用回调，不能保存函数指针；同一个声明位置的回调槽是共享的，回调里再触发同一个 C 函数（重入）会覆盖闭包。回调参数最多 6 个整数 + 8 个浮点，超出会拒绝声明。
+
+`ptr[int]` 这类标注在类型系统里仍是 `Optional[int]`，但保留元素种类，函数体内可以 `a[0]` 解引用。
+
+### 从头文件生成声明（cdecl）
+
+`pyadamas cdecl` 可以把 C 头文件的声明子集离线转换成 `.cpya`，省去手抄函数原型：
+
+```
+pyadamas cdecl /usr/include/foo.h -o foo.cpya --link "-lfoo"
+```
+
+支持：
+
+- `#define NAME 42` / `1.5` / `"text"` / `true` → `const`（表达式宏和函数式宏跳过）
+- `typedef`（标量别名、`typedef struct {...} Name;`、`typedef struct Tag Alias;`）
+- `struct` 定义（定宽标量 / 指针字段）；union、位域、数组、嵌套结构体字段降级为不透明 `struct Name`
+- `enum { A, B = 5 }` → `const A: int = ...`（常量表达式支持 `+ - * / % << >> & | ^ ~ !` 和已定义的枚举/宏）
+- 函数原型 → `extern def`，参数自动命名为 `p0`/`p1`…；`const char*` → `str`，`T*` → `ptr[T]`，`void*` → `ptr`，函数指针参数 → `fn(...)`
+- `extern` 变量 → `extern var`；`static`/`inline` 函数定义跳过
+- `--link ARG` 写入 `link "ARG"`，适合直接给 `.c`/`.o`/`-lfoo`
+
+已知限制：不展开宏函数与条件编译（`#ifdef` 内容仍按原文处理）；`float`（C 的 4 字节浮点）、`union` 按值、定长数组不生成；生成结果建议人工复核后再提交。样例见 `tests/cdecl/sample.h`。
 
 ### 不透明结构体指针
 
@@ -1092,7 +1340,71 @@ if f is not None:
     cstdio.fclose(f)
 ```
 
-结构体名可以先使用后声明（解析时会先扫描全部 `struct` 行）。`ptr[Struct]` 在类型系统里仍是 `Optional[int]`，可以判 `is None`；但它**不接受** `list`/`bytes`，避免把缓冲区误当句柄。字段读写仍未支持。
+结构体名可以先使用后声明（解析时会先扫描全部 `struct` 行）。不透明 `ptr[Struct]` 在类型系统里是 `Optional[int]`，可以判 `is None`；它**不接受** `list`/`bytes`，避免把缓冲区误当句柄。
+
+### 带字段的 C 结构体
+
+`struct NAME:` 加缩进字段会按 C 规则算好布局，`ptr[NAME]` 的字段可以直接读写：
+
+```
+cmodule clib
+struct tm:
+    tm_sec: int32
+    tm_min: int32
+    tm_hour: int32
+    tm_mday: int32
+    tm_mon: int32
+    tm_year: int32
+    tm_wday: int32
+    tm_yday: int32
+    tm_isdst: int32
+    tm_gmtoff: int
+    tm_zone: ptr
+extern def "gmtime" as gmtime(t: ptr[int]) -> ptr[tm]
+```
+
+```python
+cimport clib as c
+
+p = c.malloc(8)
+c.memset(p, 0, 8)
+tm = c.gmtime(p)
+print(tm.tm_year, tm.tm_mon, tm.tm_mday)
+tm.tm_year = 70
+c.free(p)
+```
+
+字段类型只允许定宽标量：`int`（8 字节）、`int32` / `uint32`（4 字节）、`float`（8 字节 double）、`bool`（1 字节）、`ptr`（8 字节）。布局算法与 C 相同：字段按声明顺序，offset 按字段对齐向上取整，整体大小按最大对齐补齐。`int32` 读取符号扩展，`uint32` 零扩展；字段读写都是编译期固定偏移。`ptr` 字段在类型系统里是 `Optional[int]`，可以判空。
+
+这类结构体也能在 py23 里按字段构造，并作为值类型按值传给 C 或从 C 返回；字段访问会做空指针检查。结构体在 C 侧的实际布局仍以头文件为准，声明写错会读到错误数据。
+
+### 结构体按值传递
+
+带字段的 `struct` 可以直接写在 `extern def` 的参数和返回类型上，不需要 `ptr[...]`：
+
+```
+struct div_t:
+    quot: int32
+    rem: int32
+struct in_addr:
+    s_addr: uint32
+
+extern def "div" as div(n: int32, d: int32) -> div_t
+extern def "inet_ntoa" as inet_ntoa(a: in_addr) -> str
+```
+
+```python
+cimport clib as c
+
+d = c.div(7, 3)          # C 返回的结构体直接是 py23 值
+print(d.quot, d.rem)     # 2 1
+a = in_addr(c.htonl(3232235777))
+print(c.inet_ntoa(a))    # 192.168.1.1
+```
+
+传参和返回按 SysV x86-64 聚合规则编组：≤16 字节的结构体按 8 字节 chunk 分类，只含 `double` 的 chunk 走 `xmm`，其余走整数寄存器；寄存器不够时整块走栈；大于 16 字节时参数在栈上，返回值通过隐藏指针（`rdi`）传回。py23 侧的结构体值与 C 结构体二进制一致，赋值、传参、返回都会复制整块 payload（值语义），因此改一个变量不会影响另一个。
+
+不透明 `struct NAME`（无字段）仍然只能以 `ptr[NAME]` 使用，按值出现会报 `struct 'NAME' is opaque and cannot be passed by value`。
 
 BLAS 示例（`cblas.cpya`，需系统安装 OpenBLAS；开发容器已安装 `libopenblas-dev`）：
 
@@ -1151,7 +1463,7 @@ print(linalg.dot([1.0, 2.0], [3.0, 4.0]))  # 11.0
 - PEP 695 泛型语法（`class C[T]:`）
 - 类：方法缺 `self`、字段赋值类型不符、访问不存在的字段或方法（`self.xxx` 与外部基类的成员除外）
 
-**代码生成层**（`check` 通过，`build` 报错）：类装饰器、装饰 dunder 方法或 `super()` 目标、返回类型未知的方法装饰器、容器转标量（`int([1, 2])`、`str({})`）、异构元组的 `repr()`、容器元素跨数值域的转换（`list`/`tuple`/`dict`/`set` 的 int → float 赋值/实参）、通过 unknown 函数值的 `*` / `**` 展开、`*` 位于固定形参之前且不是定长 tuple、非异常类名当异常用、`finally` 体内跳出 finally 的控制流、跨模块继承、把类名当值用（`f = Point`）、函数内定义类、异步生成器表达式、嵌在其它表达式里的异步推导式。生成器的额外限制：`yield` / `yield from` 必须是当前语句里第一个求值的表达式（挂起点之前的其它 vreg 不随帧保存），不能出现在 `finally` / `except` 体内；协程的 `await` 同样。异步生成器有 `asend`/`athrow`/`__anext__`/`aclose`。自定义异常类目前只支持 `pass` 类体（字段/方法会被拒绝）。类体字段默认值里的 `lambda` 也在这一层拒绝。match 额外拒绝：导入类模式的字段子模式、unknown 值上的数值/list/dict/tuple/set 内置类型模式。
+**代码生成层**（`check` 通过，`build` 报错）：类装饰器、返回类型未知的方法装饰器、容器转标量（`int([1, 2])`、`str({})`）、异构元组的 `repr()`、容器元素跨数值域的转换（`list`/`tuple`/`dict`/`set` 的 int → float 赋值/实参）、通过 unknown 函数值的 `*` / `**` 展开、`*` 位于固定形参之前且不是定长 tuple、非异常类名当异常用、`finally` 体内跳出 finally 的控制流、跨模块继承、把类名当值用（`f = Point`）、函数内定义类、异步生成器表达式、嵌在其它表达式里的异步推导式。异步生成器有 `asend`/`athrow`/`__anext__`/`aclose`。自定义异常类目前只支持 `pass` 类体（字段/方法会被拒绝）。类体字段默认值里的 `lambda` 也在这一层拒绝。match 额外拒绝：导入类模式的字段子模式、unknown 值上的数值/list/dict/tuple/set 内置类型模式。
 
 为什么这么分层：前端宽、后端严。`check` 的定位是「语法和类型有没有明显毛病」，可以对任意 Python 文件跑；`build` 才是「这门语言现在能不能编译它」。
 

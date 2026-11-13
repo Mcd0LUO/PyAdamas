@@ -175,6 +175,8 @@ struct FuncCtx {
         TypePtr ret;
         // AsyncWith：await __aexit__() 的结果类型
         TypePtr inner_ret;
+        // 装饰后的 __exit__/__aexit__：vtable 槽没填，走类属性里的包装函数
+        ClassInfo* exit_cls = nullptr;
         // Finally
         std::vector<StmtPtr>* body = nullptr;
     };
@@ -197,10 +199,12 @@ struct FuncCtx {
     // 生成器：槽位在堆帧里，临时值水位在每次 resume 时重新记录到槽里
     //（vreg 不跨 yield 存活）。
     bool is_generator = false;
-    // 当前语句开始时的指令序号（见 Lowerer::emit_seq_）。挂起点必须是
-    // 这条语句里第一个被求值的东西，否则恢复后要用到丢失的 vreg。
-    size_t gen_seq_base = 0;
     int gen_mark_slot = -1;
+    // 跨挂起的异常上下文：cur/top 存本帧的 current_exc / exc_save_top，
+    // tok 是进入 resume 时的运行时异常栈深度（见 pa_exc_enter/leave）。
+    int exc_cur_slot = -1;
+    int exc_top_slot = -1;
+    int exc_tok_slot = -1;
     int gen_next_state = 1;
     // async def：同一个帧状态机，await 作为第三种挂起。
     bool is_coroutine = false;
@@ -211,6 +215,11 @@ struct FuncCtx {
         int id = 0;
         int cont = -1;
         std::vector<Cleanup> cleanups;
+        // 该挂起点位于 `yield from` 委托中：注入的异常要转给子生成器，
+        // 而不是在本帧重新抛出。cond 是委托循环的分发块，exc_slot 暂存
+        // 待转发的 PyAdamasException*（非堆对象）。
+        int delegate_cond = -1;
+        int delegate_exc_slot = -1;
     };
     std::vector<GenState> gen_states;
 };
@@ -251,15 +260,12 @@ private:
 
     std::unordered_map<std::string, int> global_ids_;
     std::unordered_map<std::string, FunctionDef*> func_defs_;
-    // 已发射的指令序号。生成器的 resume 每次重新建 C 栈帧，vreg 的槽不会
-    // 保留；挂起点前已经求过值的语句恢复后不能再使用这些 vreg，降级时用
-    // 这个序号做保守判定（见 FuncCtx::gen_seq_base）。
-    size_t emit_seq_ = 0;
     // 含 async for 的推导式会挂起，只能作为整条语句/赋值/返回值的根表达式：
     // 嵌套在别的表达式里时，外层还有未完成的临时值，挂起会一起清掉。
     const Expr* comp_ctx_node_ = nullptr;
-    // 正在编译 finally 体：跨挂起的 finally 清理需要复制控制流，暂不支持。
-    int finally_body_depth_ = 0;
+    // 正在编译生成器 close 路径里的 finally 体：此时遇到挂起点要报
+    // RuntimeError（generator/coroutine ignored GeneratorExit），不能真挂起。
+    int close_replay_depth_ = 0;
     // 闭包捕获分析：函数树 + 每个函数的捕获形态。
     std::unordered_map<const FunctionDef*, FunctionDef*> func_parent_;
     std::unordered_map<const FunctionDef*, std::vector<FunctionDef*>> func_children_;
@@ -320,14 +326,12 @@ private:
         VReg r = alloc(ty);
         in.dst = r;
         in.ty = ty;
-        ++emit_seq_;
         if (!cur().terminated()) cur().insts.push_back(std::move(in));
         return r;
     }
 
     void emit(Inst in) {
         in.dst = kNoReg;
-        ++emit_seq_;
         if (!cur().terminated()) cur().insts.push_back(std::move(in));
     }
 
@@ -797,6 +801,9 @@ private:
     }
 
     void emit_return(VReg v, TypePtr vty) {
+        // 值语义：返回 struct 时复制 payload，caller 拿到的是独立对象。
+        if (v != kNoReg && vty && vty->kind == TyKind::Struct && vty->st)
+            v = struct_copy(v, vty->st);
         if (v != kNoReg && ir_is_heap(vty)) rc_inc(v);
         if (st_->fn_mark != kNoReg && st_->rc_pushes > 0) rc_cleanup(st_->fn_mark);
         release_slots();
@@ -1111,17 +1118,29 @@ private:
                                      int frame_kind, const ClassInfo* owner = nullptr);
     VReg lower_yield(Expr& y);
     VReg lower_yield_from(YieldFrom& y);
+    // close 路径重放 finally 体时遇到挂起点：按 CPython 报 RuntimeError，
+    // 不产生挂起。返回 true 表示已经发出 raise，调用方直接返回即可。
+    bool reject_suspend_in_close();
     // 把 v 作为一次 yield 挂起，返回恢复后 send 进来的值。
     VReg emit_yield(VReg v, TypePtr vt);
     VReg lower_await(Expr& e);
-    // 把「等待 w」编译成挂起；返回恢复后 sent 槽里的结果值（堆结果已入临时栈）。
+    // 把「等待 w」编译成挂起；返回恢复后 sent 槽里的结果值（默认堆结果已入临时栈）。
     // active_limit 用于清理路径：只把仍然挂在运行时栈上的外层 handler 计入快照。
+    // push_result_temp=false 时由调用方在 handler_leave 之后再 push_temp。
     VReg suspend_on_awaitable(VReg w, TypePtr result_ty, int line, int col,
-                              size_t active_limit = static_cast<size_t>(-1));
+                              size_t active_limit = static_cast<size_t>(-1),
+                              bool push_result_temp = true);
     void lower_async_with_item(With& w, size_t idx);
     void lower_async_for(For& f, VReg seq, TypePtr seq_ty);
     void gen_finish(VReg v = kNoReg, TypePtr vty = nullptr);
     void cleanup_gen_mark();
+    // resume 入口 / 挂起出口的异常上下文切换（except 体里的 yield/await）。
+    void exc_enter();
+    void exc_leave();
+    VReg slot_addr_of(int slot);
+    // 生成器 resume 重进时 C 栈帧是新的：把跨挂起仍然活跃的 vreg
+    // 在挂起前溢写到堆帧槽，恢复后再装回来（见 lower_gen.cpp）。
+    void spill_across_suspends();
     void lower_for_gen(For& f, VReg seq, TypePtr seq_ty);
     VReg lower_asyncio(const std::string& member, Call& c);
     VReg lower_itertools(const std::string& member, Call& c);
@@ -1147,22 +1166,70 @@ private:
     // 现阶段一律报错，避免按错误的机器表示读槽位。
     bool bad_elem(const TypePtr& from, const TypePtr& to);
 
-    void field_store(VReg obj, int off, VReg v) {
+    // extern 变量：登记到模块表并返回下标。同一个 C 符号只登记一次。
+    int extern_var_idx(const CVar& v) {
+        for (size_t i = 0; i < mod_.extern_vars.size(); ++i)
+            if (mod_.extern_vars[i].symbol == v.symbol) return static_cast<int>(i);
+        IRExternVar ev;
+        ev.symbol = v.symbol;
+        ev.kind = v.kind;
+        mod_.extern_vars.push_back(std::move(ev));
+        return static_cast<int>(mod_.extern_vars.size()) - 1;
+    }
+
+    // extern 变量在 py23 侧的类型；ptr[Struct] 保留结构体指针身份。
+    TypePtr cvar_type(const CVar& v) {
+        TypePtr t = ckind_type(v.kind);
+        if (v.kind == CKind::Ptr && !v.struct_name.empty()) {
+            if (StructInfo* st = tc_.struct_info(v.struct_name))
+                t = mk_optional(mk_struct_ptr(st));
+        } else if (v.kind == CKind::Ptr && v.elem != CKind::None && t) {
+            t->celem = v.elem;
+        }
+        return t;
+    }
+
+    void field_store(VReg obj, int off, VReg v, uint8_t width = 8, bool unsig = false) {
         Inst in;
         in.op = IrOp::FieldStore;
         in.a = obj;
         in.imm = off;
         in.b = v;
+        in.fwidth = width;
+        in.funsigned = unsig;
         emit(std::move(in));
     }
 
-    VReg field_load(VReg obj, int off, TypePtr ty) {
+    VReg field_load(VReg obj, int off, TypePtr ty, uint8_t width = 8, bool unsig = false) {
         Inst in;
         in.op = IrOp::FieldLoad;
         in.a = obj;
         in.imm = off;
+        in.fwidth = width;
+        in.funsigned = unsig;
         return def(ty, std::move(in));
     }
+
+    // 值类型 struct：分配一块 payload（带 RC 头，但头在 payload 之前，
+    // 交给 C 的地址就是 payload 地址），以及按值复制一份。
+    VReg struct_new(StructInfo* s) {
+        Inst in;
+        in.op = IrOp::StructNew;
+        in.imm = s->size;
+        return def_heap(mk_struct(s), std::move(in));
+    }
+
+    VReg struct_copy(VReg v, StructInfo* s) {
+        Inst in;
+        in.op = IrOp::StructCopy;
+        in.a = v;
+        in.imm = s->size;
+        return def_heap(mk_struct(s), std::move(in));
+    }
+
+    // struct 的特殊形式与构造。
+    VReg lower_struct_builtin(const std::string& name, Call& c);
+    VReg lower_struct_construct(Call& c, StructInfo* s);
 
     // Optional[T] 上的属性访问必须先确认不是 None。类型收窄做不到
     // 逐条路径成立，这里用一次运行时检查兜底：解引用空指针的段错误
@@ -1272,6 +1339,8 @@ private:
     VReg lower_anyall(Call& c, bool is_any);
     VReg lower_print(Call& c);
     VReg lower_method_call(Attribute& at, Call& c);
+    // 方法值：把 obj.m / C.m 合成成普通函数值的闭包。
+    VReg lower_method_value(Attribute& at);
     VReg lower_cimport_call(Attribute& at, Call& c);
     VReg lower_super_call(Attribute& at, Call& c);
     // 协议 dunder：__str__/__repr__/__eq__/__ne__/__len__。
@@ -1294,6 +1363,8 @@ private:
             return {-1, -1};
         if (!e || e->kind != MethodKind::Normal || !e->call_sig || e->slot < 0)
             return {-1, -1};
+        // 装饰后的方法不在 vtable 里：运行时没法按槽号调，退回机器字身份。
+        if (h->decorated || e->decorated) return {-1, -1};
         return {h->slot, e->slot};
     }
     // 算术/比较 dunder：左操作数（或右操作数的反射版）有实现时返回调用

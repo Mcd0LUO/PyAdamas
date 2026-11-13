@@ -10,6 +10,7 @@
 //   pyadamas asm    <file.py>   打印生成的 x86-64 汇编
 //   pyadamas build  <file.py> [-o out]   编译并链接成可执行文件
 //   pyadamas run    <file.py>   编译、链接并运行
+//   pyadamas cdecl  <h.h> -o <out.cpya>   从头文件子集生成 .cpya 声明
 //   pyadamas        <file.py>   等价于 ast
 #include <algorithm>
 #include <cctype>
@@ -35,6 +36,7 @@
 #include <vector>
 
 #include "ast.h"
+#include "cdecl.h"
 #include "codegen.h"
 #include "desugar.h"
 #include "ir.h"
@@ -121,7 +123,7 @@ int main(int argc, char** argv) {
         std::fprintf(stderr,
                      "pyadamas —— Python 语法外壳的编译器\n"
                      "\n"
-                     "usage: %s [tokens|ast|types|check|ir|asm|build|run] [-O0|-O1|-O2] "
+                     "usage: %s [tokens|ast|types|check|ir|asm|build|run|cdecl] [-O0|-O1|-O2] "
                      "[--fast-math] [--syntax] [-o out] <file.py>\n",
                      argv[0]);
         return 2;
@@ -132,6 +134,7 @@ int main(int argc, char** argv) {
     std::string output;
     std::vector<std::string> include_dirs;
     std::vector<std::string> prog_args;
+    std::vector<std::string> cdecl_links;
     bool syntax_only = false;
     bool verbose = false;
     bool rebuild = false;
@@ -139,7 +142,8 @@ int main(int argc, char** argv) {
     bool fast_math = false;
 
     static const std::vector<std::string> kModes = {"tokens", "ast",     "check", "types",
-                                                    "ir",     "asm",     "build", "run"};
+                                                    "ir",     "asm",     "build", "run",
+                                                    "cdecl"};
     for (int i = 1; i < argc; ++i) {
         std::string a = argv[i];
         if (a == "--syntax") syntax_only = true;
@@ -161,6 +165,7 @@ int main(int argc, char** argv) {
             }
         }
         else if (a == "-o" && i + 1 < argc) output = argv[++i];
+        else if (a == "--link" && i + 1 < argc) cdecl_links.push_back(argv[++i]);
         else if (a == "-I" && i + 1 < argc) include_dirs.push_back(argv[++i]);
         else if (a.starts_with("-I") && a.size() > 2) include_dirs.push_back(a.substr(2));
         else if (a == "--") {
@@ -175,6 +180,27 @@ int main(int argc, char** argv) {
     if (path.empty()) {
         std::fprintf(stderr, "error: no input file\n");
         return 2;
+    }
+
+    if (mode == "cdecl") {
+        if (output.empty()) {
+            std::fprintf(stderr, "error: cdecl needs '-o <out.cpya>'\n");
+            return 2;
+        }
+        std::string module = std::filesystem::path(output).stem().string();
+        std::string err;
+        std::string text = pyadamas::cdecl_generate(path, module, cdecl_links, err);
+        if (text.empty()) {
+            std::fprintf(stderr, "error: %s\n", err.c_str());
+            return 1;
+        }
+        std::ofstream out(output, std::ios::binary);
+        if (!out) {
+            std::fprintf(stderr, "error: cannot write '%s'\n", output.c_str());
+            return 1;
+        }
+        out << text;
+        return 0;
     }
 
     auto src = read_file(path);

@@ -15,6 +15,7 @@ VReg Lowerer::lower_super_call(Attribute& at, Call& c) {
         return const_none();
     }
     const MethodInfo* m = nullptr;
+    const ClassInfo* declaring = nullptr;
     bool after = false;
     for (const ClassInfo* k : owner->mro) {
         if (!after) {
@@ -23,6 +24,7 @@ VReg Lowerer::lower_super_call(Attribute& at, Call& c) {
         }
         if (auto* km = k->own_method(at.attr)) {
             m = km;
+            declaring = k;
             break;
         }
     }
@@ -31,10 +33,31 @@ VReg Lowerer::lower_super_call(Attribute& at, Call& c) {
             std::format("super() has no method '{}' after class '{}'", at.attr, owner->name));
         return const_none();
     }
+    if (m->kind == MethodKind::Normal && m->decorated) {
+        // 装饰方法的实现是声明类类属性里的包装函数：显式补上 self。
+        const ClassAttrInfo* ca = declaring ? declaring->class_attr(at.attr) : nullptr;
+        FuncInfoPtr winfo =
+            (ca && ca->ty && ca->ty->kind == TyKind::Func) ? ca->ty->fn : nullptr;
+        if (!ca || !winfo || !m->call_sig) {
+            err(c.line, c.col,
+                std::format("decorated method '{}.{}' is not available here",
+                            declaring ? declaring->name : owner->name, at.attr));
+            return const_none();
+        }
+        VReg fv = class_attr_load(declaring, ca);
+        std::vector<VReg> args = bind_args(c, m->call_sig, nullptr);
+        const IRParam& selfp = st_->fn->params.front();
+        args.insert(args.begin(), load_slot(selfp.slot, selfp.ty));
+        Inst in;
+        in.op = IrOp::Call;
+        in.a = fv;
+        in.args = std::move(args);
+        TypePtr rt = winfo->ret ? winfo->ret : t_unknown();
+        return def_heap(rt, std::move(in));
+    }
     if (m->kind != MethodKind::Normal || m->decorated) {
         err(c.line, c.col,
-            std::format("super().{} is not a plain method (decorators on super targets are "
-                        "not supported yet)", at.attr));
+            std::format("super().{} is not a plain method", at.attr));
         return const_none();
     }
     if (!m->call_sig) {
@@ -141,6 +164,26 @@ VReg Lowerer::lower_method_call(Attribute& at, Call& c) {
                 err(c.line, c.col,
                     std::format("'{}' has no method '{}'", cls->name, at.attr));
                 return const_none();
+            }
+            if (m->decorated) {
+                // 装饰器链的结果存在类属性里，签名是包装函数的（含 self）。
+                const ClassAttrInfo* ca = cls->class_attr(at.attr);
+                FuncInfoPtr winfo =
+                    (ca && ca->ty && ca->ty->kind == TyKind::Func) ? ca->ty->fn : nullptr;
+                if (!ca || !winfo) {
+                    err(c.line, c.col,
+                        std::format("decorated method '{}.{}' is not available here",
+                                    cls->name, at.attr));
+                    return const_none();
+                }
+                VReg fv = class_attr_load(cls, ca);
+                std::vector<VReg> args = bind_args(c, winfo, nullptr);
+                Inst in;
+                in.op = IrOp::Call;
+                in.a = fv;
+                in.args = std::move(args);
+                TypePtr rt = winfo->ret ? winfo->ret : t_unknown();
+                return def_heap(rt, std::move(in));
             }
             if (m->kind != MethodKind::Static && m->kind != MethodKind::ClassMethod) {
                 err(c.line, c.col,
@@ -625,6 +668,21 @@ VReg Lowerer::lower_method_call(Attribute& at, Call& c) {
             in.op = IrOp::CallRt;
             in.imm = static_cast<int64_t>(RtFn::GenSend);
             in.args = {recv, sv};
+            VReg v = def(t_unknown(), std::move(in));
+            v = retype(v, et);
+            if (ir_is_heap(et)) push_temp(v);
+            return v;
+        }
+        if (at.attr == "throw") {
+            if (c.args.size() != 1) {
+                err(c.line, c.col, "generator.throw() takes exactly one argument");
+                return const_none();
+            }
+            VReg ev = expr(*c.args[0]);
+            Inst in;
+            in.op = IrOp::CallRt;
+            in.imm = static_cast<int64_t>(RtFn::GenThrow);
+            in.args = {recv, ev};
             VReg v = def(t_unknown(), std::move(in));
             v = retype(v, et);
             if (ir_is_heap(et)) push_temp(v);
@@ -1197,7 +1255,8 @@ VReg Lowerer::lower_method_call(Attribute& at, Call& c) {
             if (c.args.size() > 1) {
                 // group(1, 2, ...) 返回元组；先按 list 建，再改标成 tuple。
                 VReg l = call_runtime(RtFn::ListNew, mk_list(t_str()),
-                                      {const_int(static_cast<int64_t>(c.args.size()))});
+                                      {const_int(static_cast<int64_t>(c.args.size())),
+                                       const_int(1)});
                 push_temp(l);
                 for (size_t i = 0; i < c.args.size(); ++i) {
                     TypePtr a0 = tc_.type_of(c.args[i].get());
@@ -1863,6 +1922,28 @@ VReg Lowerer::lower_method_call(Attribute& at, Call& c) {
     return const_none();
 }
 
+namespace {
+
+// SysV x86-64 聚合分类：每个 8 字节 chunk 只含 double 字段时走 SSE，
+// 否则走整数寄存器。C 结构体字段都是自然对齐的定宽标量，double 不会
+// 跨 chunk，因此按 chunk 求并集就够。
+IRStructABI struct_abi(const StructInfo* st) {
+    IRStructABI abi;
+    if (!st) return abi;
+    abi.size = st->size;
+    size_t n = static_cast<size_t>((st->size + 7) / 8);
+    abi.chunk_fp.assign(n, 0);
+    for (auto& f : st->fields) {
+        if (!f.ty || f.ty->kind != TyKind::Float) continue;
+        size_t b = static_cast<size_t>(f.offset / 8);
+        size_t e = static_cast<size_t>((f.offset + f.size - 1) / 8);
+        for (size_t c = b; c <= e && c < n; ++c) abi.chunk_fp[c] = 1;
+    }
+    return abi;
+}
+
+}  // namespace
+
 VReg Lowerer::lower_cimport_call(Attribute& at, Call& c) {
     auto* n = static_cast<Name*>(at.value.get());
     const CImportDecl* decl = tc_.cmodule(n->id);
@@ -1874,7 +1955,7 @@ VReg Lowerer::lower_cimport_call(Attribute& at, Call& c) {
             std::format("cimport '{}' has no function '{}'", n->id, at.attr));
         return const_none();
     }
-    if (c.args.size() > ex->params.size()) {
+    if (c.args.size() > ex->params.size() && !ex->varargs) {
         err(c.line, c.col,
             std::format("'{}' takes {} arguments but {} were given", at.attr,
                         ex->params.size(), c.args.size()));
@@ -1882,7 +1963,9 @@ VReg Lowerer::lower_cimport_call(Attribute& at, Call& c) {
     }
 
     // 按 .cpya 的参数顺序收集实参；位置参数在前，关键字参数按名字补齐。
-    std::vector<Expr*> srcs(ex->params.size(), nullptr);
+    size_t nparams = ex->params.size();
+    size_t nsrcs = c.args.size() > nparams ? c.args.size() : nparams;
+    std::vector<Expr*> srcs(nsrcs, nullptr);
     for (size_t i = 0; i < c.args.size(); ++i) srcs[i] = c.args[i].get();
     for (auto& kw : c.keywords) {
         bool found = false;
@@ -1919,6 +2002,29 @@ VReg Lowerer::lower_cimport_call(Attribute& at, Call& c) {
     for (size_t i = 0; i < srcs.size(); ++i) {
         TypePtr aty = tc_.type_of(srcs[i]);
         VReg v = expr(*srcs[i]);
+        if (i >= ex->params.size()) {
+            // varargs 额外实参：按 py23 实参类型选择 C 编组。
+            CKind k = CKind::Int;
+            if (aty && aty->kind == TyKind::Float) {
+                k = CKind::Float;
+            } else if (aty && aty->kind == TyKind::Str) {
+                k = CKind::Str;
+            } else if (aty && aty->kind == TyKind::Optional && !aty->sub.empty() &&
+                       aty->sub[0]->kind == TyKind::Str) {
+                k = CKind::OptStr;
+            } else if (aty && aty->kind == TyKind::Optional) {
+                k = CKind::Ptr;
+            } else if (aty && (aty->kind == TyKind::Int || aty->kind == TyKind::Bool)) {
+                k = CKind::Int;
+            } else {
+                err(srcs[i]->line, srcs[i]->col,
+                    std::format("varargs argument type '{}' is not supported", type_name(aty)));
+            }
+            if (k == CKind::OptStr) v = coerce(v, aty, t_str());
+            cargs.push_back(static_cast<uint8_t>(k));
+            args.push_back(v);
+            continue;
+        }
         CKind k = ex->params[i].kind;
         // ptr/ptr[T] 接 list/bytes 时不转换，直接把对象指针交给 codegen；
         // codegen 按 Buf* 取 data 字段。
@@ -1932,6 +2038,18 @@ VReg Lowerer::lower_cimport_call(Attribute& at, Call& c) {
             }
         }
         if (k == CKind::BufF64 || k == CKind::BufI64 || k == CKind::BufBytes) {
+            cargs.push_back(static_cast<uint8_t>(k));
+            args.push_back(v);
+            continue;
+        }
+        // 按值结构体已经是等布局的 payload 指针，不需要转换。
+        if (k == CKind::Struct) {
+            cargs.push_back(static_cast<uint8_t>(k));
+            args.push_back(v);
+            continue;
+        }
+        // 回调实参是 py23 函数值；codegen 负责登记闭包并换成跳板地址。
+        if (k == CKind::Callback) {
             cargs.push_back(static_cast<uint8_t>(k));
             args.push_back(v);
             continue;
@@ -1964,7 +2082,26 @@ VReg Lowerer::lower_cimport_call(Attribute& at, Call& c) {
         IRExtern ent;
         ent.symbol = ex->symbol;
         ent.ret = ex->ret;
-        for (auto& p : ex->params) ent.params.push_back(p.kind);
+        ent.varargs = ex->varargs;
+        ent.param_abi.reserve(ex->params.size());
+        ent.param_cb.reserve(ex->params.size());
+        for (auto& p : ex->params) {
+            ent.params.push_back(p.kind);
+            ent.param_abi.push_back(
+                p.kind == CKind::Struct ? struct_abi(tc_.struct_info(p.ptr_struct))
+                                        : IRStructABI{});
+            if (p.kind == CKind::Callback) {
+                IRCallbackSig sig;
+                sig.params = p.cb_params;
+                sig.ret = p.cb_ret;
+                mod_.cb_sigs.push_back(std::move(sig));
+                ent.param_cb.push_back(static_cast<int>(mod_.cb_sigs.size()) - 1);
+            } else {
+                ent.param_cb.push_back(-1);
+            }
+        }
+        if (ex->ret == CKind::Struct)
+            ent.ret_abi = struct_abi(tc_.struct_info(ex->ret_struct));
         mod_.externs.push_back(std::move(ent));
         idx = static_cast<int>(mod_.externs.size()) - 1;
     }
@@ -1974,8 +2111,199 @@ VReg Lowerer::lower_cimport_call(Attribute& at, Call& c) {
     in.idx = idx;
     in.args = std::move(args);
     in.cargs = std::move(cargs);
-    in.ty = ckind_type(ex->ret);
+    TypePtr rty = ckind_type(ex->ret);
+    if (ex->ret == CKind::Struct) {
+        if (StructInfo* st = tc_.struct_info(ex->ret_struct)) rty = mk_struct(st);
+    }
+    in.ty = rty;
     return def_heap(in.ty, std::move(in));
+}
+
+
+// 方法值：把 `obj.m` / `C.m` 合成成一个普通函数值的闭包。闭包的签名由
+// typecheck 的 mk_method_value 决定，这里只负责在调用时把捕获的接收者
+// 补回去：
+//   - 实例上的普通方法：VCall，运行期按对象 vtable 分派；
+//   - 实例上的静态/类方法：VCallStatic（类方法补 cls id）；
+//   - 类上的静态/类方法：CallDirect 到该类 vtable 的最终实现；
+//   - 装饰后的普通方法：捕获实例，调用类属性里的包装函数并补 self。
+VReg Lowerer::lower_method_value(Attribute& at) {
+    ++side_effect_seq_;
+
+    TypePtr out_ty = tc_.type_of(&at);
+    FuncInfoPtr sig = (out_ty && out_ty->kind == TyKind::Func) ? out_ty->fn : nullptr;
+    if (!sig) {
+        err(at.line, at.col, std::format("method '{}' has no known signature", at.attr));
+        return const_none();
+    }
+
+    bool class_recv = is_class_receiver(at);
+    const ClassInfo* cls = nullptr;
+    VReg recv = kNoReg;
+    TypePtr recv_ty = nullptr;
+    if (class_recv) {
+        cls = class_receiver_cls(at, strip_optional(tc_.type_of(at.value.get())));
+        if (!cls) {
+            err(at.line, at.col,
+                std::format("method value '{}.{}' is not available here", at.attr, at.attr));
+            return const_none();
+        }
+    } else {
+        TypePtr raw = tc_.type_of(at.value.get());
+        recv_ty = strip_optional(raw);
+        if (!recv_ty || recv_ty->kind != TyKind::Class || !recv_ty->cls) {
+            err(at.line, at.col,
+                std::format("method value '{}' requires a class instance", at.attr));
+            return const_none();
+        }
+        cls = recv_ty->cls;
+        recv = expr(*at.value);
+        if (recv_ty != raw) recv = guard_not_none(recv, std::format("method '{}'", at.attr));
+    }
+    const MethodInfo* m = cls->method(at.attr);
+    if (!m) {
+        err(at.line, at.col, std::format("'{}' has no method '{}'", cls->name, at.attr));
+        return const_none();
+    }
+    bool decorated = m->kind == MethodKind::Normal && m->decorated;
+    if (class_recv && m->kind == MethodKind::Normal) {
+        err(at.line, at.col,
+            std::format("'{}.{}' is an instance method; take the value on an instance",
+                        cls->name, at.attr));
+        return const_none();
+    }
+    const ClassAttrInfo* ca = decorated ? cls->class_attr(at.attr) : nullptr;
+    if (decorated && !ca) {
+        err(at.line, at.col,
+            std::format("decorated method '{}.{}' is not available here", cls->name, at.attr));
+        return const_none();
+    }
+
+    // 类接收者直接派发到该类 vtable 的最终实现；槽缺失说明没编到。
+    int direct = -1;
+    int cls_id = -1;
+    if (class_recv) {
+        auto cid = class_ids_.find(cls);
+        if (cid == class_ids_.end() || m->slot < 0) {
+            err(at.line, at.col,
+                std::format("method value '{}.{}' is not available here", cls->name, at.attr));
+            return const_none();
+        }
+        const auto& vt = mod_.classes[static_cast<size_t>(cid->second)].vtable;
+        if (m->slot >= static_cast<int>(vt.size()) || vt[static_cast<size_t>(m->slot)] < 0) {
+            err(at.line, at.col,
+                std::format("method '{}.{}' was not compiled", cls->name, at.attr));
+            return const_none();
+        }
+        direct = vt[static_cast<size_t>(m->slot)];
+        cls_id = cid->second;
+    }
+
+    int ncap = class_recv ? 0 : 1;
+    TypePtr rty = sig->ret ? sig->ret : t_unknown();
+    IRFunction* wf = mod_.add_func(std::format("__pa_bound_{}_{}", m->name, mod_.funcs.size()));
+    int widx = static_cast<int>(mod_.funcs.size()) - 1;
+    wf->ret = rty;
+    push_frame(wf, nullptr);
+    int entry = new_block("entry");
+    switch_to(entry);
+    st_->fn_mark = rc_mark_at(st_->fn_mark_block, st_->fn_mark_pos);
+
+    std::vector<std::pair<int, TypePtr>> ps;
+    for (auto& p : sig->pos) {
+        TypePtr T = p.ty ? p.ty : t_unknown();
+        int s = wf->new_slot(T);
+        wf->params.push_back(IRParam{p.name, T, s});
+        ps.emplace_back(s, T);
+    }
+    for (auto& p : sig->kwonly) {
+        TypePtr T = p.ty ? p.ty : t_unknown();
+        int s = wf->new_slot(T);
+        wf->params.push_back(IRParam{p.name, T, s});
+        ps.emplace_back(s, T);
+    }
+    int es = -1;
+    if (ncap) {
+        es = wf->new_slot(t_unknown());
+        st_->env_slot = es;
+        wf->env_slot = es;
+        st_->borrow_slots.insert(es);
+    }
+    inc_params();
+
+    VReg self = kNoReg;
+    if (ncap) {
+        // 环境槽 16 起是捕获值：每个捕获是一个单元素 cell。
+        TypePtr cell_ty = mk_list(recv_ty);
+        VReg env = load_slot(es, t_unknown());
+        VReg cell = field_load(env, 16, cell_ty);
+        Inst in;
+        in.op = IrOp::IndexLoad;
+        in.a = cell;
+        in.b = const_int(0);
+        self = def(recv_ty, std::move(in));
+    }
+
+    std::vector<VReg> args;
+    for (auto& [s, T] : ps) args.push_back(load_slot(s, T));
+
+    VReg r = kNoReg;
+    if (decorated) {
+        VReg fv = class_attr_load_dyn(self, cls, ca);
+        Inst in;
+        in.op = IrOp::Call;
+        in.a = fv;
+        in.args.push_back(self);
+        for (VReg a : args) in.args.push_back(a);
+        r = def_heap(rty, std::move(in));
+    } else if (m->kind != MethodKind::Normal) {
+        std::vector<VReg> all;
+        if (m->kind == MethodKind::ClassMethod) {
+            if (class_recv) {
+                all.push_back(const_int(cls_id));
+            } else {
+                auto cid = class_ids_.find(cls);
+                all.push_back(const_int(cid == class_ids_.end() ? 0 : cid->second));
+            }
+        }
+        for (VReg a : args) all.push_back(a);
+        if (class_recv) {
+            Inst cd;
+            cd.op = IrOp::CallDirect;
+            cd.idx = direct;
+            cd.args = std::move(all);
+            r = def_heap(rty, std::move(cd));
+        } else {
+            Inst vc;
+            vc.op = IrOp::VCallStatic;
+            vc.a = self;
+            vc.imm = m->slot;
+            vc.args = std::move(all);
+            r = def_heap(rty, std::move(vc));
+        }
+    } else {
+        Inst vc;
+        vc.op = IrOp::VCall;
+        vc.a = self;
+        vc.imm = m->slot;
+        vc.args = std::move(args);
+        r = def_heap(rty, std::move(vc));
+    }
+    emit_return(r, rty);
+    pop_frame();
+
+    Inst fc;
+    fc.op = IrOp::FuncCode;
+    fc.imm = widx;
+    VReg code = def(t_int(), std::move(fc));
+    VReg closure = call_runtime(RtFn::ClosureNew, out_ty, {code, const_int(ncap)});
+    push_temp(closure);
+    if (ncap) {
+        VReg cell = make_cell_value(recv, recv_ty);
+        rc_inc(cell);
+        field_store(closure, 16, cell);
+    }
+    return closure;
 }
 
 }  // namespace pyadamas

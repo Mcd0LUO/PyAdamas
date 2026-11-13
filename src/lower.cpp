@@ -1025,14 +1025,25 @@ void Lowerer::compile_ctor_wrapper(ClassDef& clsdef, const ClassInfoPtr& ci, int
     if (sig && init->slot >= 0) {
         std::vector<VReg> args;
         for (int s : arg_slots) args.push_back(load_slot(s, wf->slot_ty[s]));
-        Inst vc;
-        vc.op = IrOp::VCall;
-        vc.a = obj;
-        vc.imm = init->slot;
-        vc.args = std::move(args);
         TypePtr rt = sig->ret ? sig->ret : t_none();
-        VReg r = def_heap(rt, std::move(vc));
-        (void)r;
+        if (init->decorated) {
+            // 装饰后的 __init__ 存在类属性里：走与普通构造一致的分派。
+            VReg r = dunder_call(obj, cls_ty, "__init__", std::move(args), rt);
+            if (r == kNoReg) {
+                // 构造包装函数没有源码位置，错误挂到类定义处。
+                err(clsdef.line, clsdef.col,
+                    std::format("decorated __init__ of '{}' has an incompatible signature",
+                                ci->name));
+            }
+        } else {
+            Inst vc;
+            vc.op = IrOp::VCall;
+            vc.a = obj;
+            vc.imm = init->slot;
+            vc.args = std::move(args);
+            VReg r = def_heap(rt, std::move(vc));
+            (void)r;
+        }
     }
     emit_return(obj, cls_ty);
     finalize_param_borrows();

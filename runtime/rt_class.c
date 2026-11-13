@@ -12,6 +12,20 @@ void* pa_obj_new(int64_t size, void (*dtor)(void*), void (*release)(void*)) {
     return rc_alloc(size, dtor, release, PYADAMAS_RC_INSTANCE);
 }
 
+/* 值类型 struct：payload 与 C 结构体二进制一致，前面只有隐藏的 RC 头。
+   字段只有标量，没有需要递归释放的堆引用，所以 dtor/release 为空。
+   kind 独立于 INSTANCE：isinstance() 不会把 payload 当成 vtable。 */
+void* pa_struct_new(int64_t size) {
+    if (size < 1) panic_c("struct size must be positive");
+    return rc_alloc(size, NULL, NULL, PYADAMAS_RC_STRUCT);
+}
+
+void* pa_struct_copy(void* src, int64_t size) {
+    void* dst = pa_struct_new(size);
+    memcpy(dst, src, (size_t)size);
+    return dst;
+}
+
 /* 类模式的运行期类型检查。只认用户类实例；原始整数、str、list 等
    都不是类实例。查注册表保证对任意 unknown 机器字都安全。
    vtable 前 5 个字：MRO 元数据指针表、类编号、vtable、自身槽表、类名。 */

@@ -567,6 +567,8 @@ void deliver_owned(void* waiter, void* child, int64_t value, PyAdamasException* 
             p[9] = 0;
             if (exc) p[8] = (int64_t)exc;
             else p[2] = value;
+            // 结果已经在帧槽里，下一轮 agen_drive 不能再拿 driver_sent 覆盖。
+            g->driver_await_result = 1;
             p[1] = 0;
             ready_push(waiter);  // 把 child 的 waiter 引用转交给就绪队列
         } else {
@@ -722,6 +724,7 @@ void coro_step(void* c) {
     handler_top = &h;
     void* prev_active = loop_active_coro;
     loop_active_coro = c;
+    int64_t exc_depth0 = pa_exc_depth();
     if (setjmp(h.env) != 0) {
         loop_active_coro = prev_active;
         handler_top = h.prev;
@@ -735,11 +738,13 @@ void coro_step(void* c) {
         p[8] = 0;
         // 异常跳过了 resume 的出口清理：帧里的堆槽当场释放。
         pa_gen_release_slots(c);
+        pa_exc_unwind(exc_depth0);
         coro_finish(c, 0, e);  // 异常逃出：交给等待者或事件循环根
         return;
     }
     ((void (*)(void*, int64_t))(uintptr_t)p[4])(c, 0);
     loop_active_coro = prev_active;
+    pa_exc_unwind(exc_depth0);
     handler_top = h.prev;
     pa_rc_cleanup(h.mark);
     p[5] = 0;

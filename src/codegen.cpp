@@ -24,6 +24,11 @@ static uint64_t str_literal_hash(const std::string& s) {
     return h ? h : 1;
 }
 
+// 回调跳板做参数提升时用的寄存器名（SysV 整数参数寄存器）。
+static const char* const kCbReg64[6] = {"%rdi", "%rsi", "%rdx", "%rcx", "%r8", "%r9"};
+static const char* const kCbReg32[6] = {"%edi", "%esi", "%edx", "%ecx", "%r8d", "%r9d"};
+static const char* const kCbReg8[6] = {"%dil", "%sil", "%dl", "%cl", "%r8b", "%r9b"};
+
 std::string AsmGen::gen(const IRModule& m) {
         m_ = &m;
         opt_ = m.opt_level;
@@ -215,6 +220,33 @@ std::string AsmGen::gen(const IRModule& m) {
         }
 
         for (size_t i = 0; i < m.funcs.size(); ++i) emit_function(*m.funcs[i], static_cast<int>(i));
+
+        // C 回调跳板：C 只传函数地址，不传环境，所以调用点先把 py23 闭包
+        // 登记到每个签名专属的槽里；跳板把闭包放进 %r10（py23 的 env 约定）
+        // 后直接跳到函数体。32 位/布尔参数按声明宽度提升到 64 位。
+        if (!m.cb_sigs.empty()) {
+            out_ += "\n# ---- callback trampolines ----\n";
+            for (size_t i = 0; i < m.cb_sigs.size(); ++i) {
+                out_ += std::format("\t.align 8\n.Lcbtramp{}:\n", i);
+                out_ += std::format("\tmovq .Lcbslot{}(%rip), %r10\n", i);
+                int gi = 0;
+                for (CKind k : m.cb_sigs[i].params) {
+                    if (k == CKind::Float) continue;  // xmm 参数直接透传
+                    if (k == CKind::Int32)
+                        out_ += std::format("\tmovslq {}, {}\n", kCbReg32[gi], kCbReg64[gi]);
+                    else if (k == CKind::UInt32)
+                        out_ += std::format("\tmovl {}, {}\n", kCbReg32[gi], kCbReg32[gi]);
+                    else if (k == CKind::Bool)
+                        out_ += std::format("\tmovzbl {}, {}\n", kCbReg8[gi], kCbReg32[gi]);
+                    ++gi;
+                }
+                out_ += "\tjmp *(%r10)\n";
+            }
+            out_ += "\t.bss\n\t.align 8\n";
+            for (size_t i = 0; i < m.cb_sigs.size(); ++i)
+                out_ += std::format(".Lcbslot{}:\n\t.zero 8\n", i);
+            out_ += "\t.text\n";
+        }
 
         if (!m.is_entry && !m.module_symbol.empty() && m.entry >= 0) {
             out_ += "\t.globl " + module_init_symbol(m.module_symbol) + "\n";

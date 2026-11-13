@@ -934,9 +934,27 @@ VReg Lowerer::lower_builtin_call(const std::string& name, Call& c) {
         if (!ty->sub.empty()) kt = ty->sub[0];
         if (ty->sub.size() > 1) vt = ty->sub[1];
         if (!c.args.empty()) {
-            err(c.line, c.col,
-                "dict(iterable) is not supported yet; use {} or dict(**kw)");
-            return const_none();
+            if (c.args.size() != 1 || !c.keywords.empty()) {
+                err(c.line, c.col, "dict() takes at most one positional argument");
+                return const_none();
+            }
+            TypePtr xt = tc_.type_of(c.args[0].get());
+            if (!xt || (xt->kind != TyKind::List && xt->kind != TyKind::Tuple &&
+                        xt->kind != TyKind::Set && xt->kind != TyKind::Generator &&
+                        xt->kind != TyKind::File && xt->kind != TyKind::Range)) {
+                err(c.args[0]->line, c.args[0]->col,
+                    std::format("dict() cannot iterate over '{}'", type_name(xt)));
+                return const_none();
+            }
+            TypePtr se = t_unknown();
+            VReg xs = seq_as_list(c.args[0].get(), se);
+            auto [hslot, eslot] = dunder_key_slots(kt);
+            VReg d = call_runtime(RtFn::DictFromPairs, ty,
+                                  {xs, const_int(key_kind(kt)), const_int(own_kind(kt)),
+                                   const_int(own_kind(vt)), const_int(hslot),
+                                   const_int(eslot)});
+            push_temp(d);
+            return d;
         }
         if (c.keywords.empty()) {
             auto [hslot, eslot] = dunder_key_slots(kt);
@@ -1344,6 +1362,32 @@ VReg Lowerer::lower_builtin_call(const std::string& name, Call& c) {
         VReg l = def(ty, std::move(in));
         push_temp(l);
         return l;
+    }
+
+    if (name == "bytes") {
+        if (c.args.size() > 1) {
+            err(c.line, c.col, "bytes() expects at most 1 argument");
+            return const_none();
+        }
+        TypePtr ty = t_bytes();
+        if (c.args.empty()) return retype(const_str(""), ty);
+        TypePtr at = tc_.type_of(c.args[0].get());
+        VReg v = expr(*c.args[0]);
+        if (at && at->kind == TyKind::Bytes) return v;
+        if (at && at->kind == TyKind::Int) {
+            VReg b = call_runtime(RtFn::BytesZeros, ty, {v});
+            push_temp(b);
+            return b;
+        }
+        if (at && at->kind == TyKind::List) {
+            VReg b = call_runtime(RtFn::BytesFromList, ty, {v});
+            push_temp(b);
+            return b;
+        }
+        err(c.args[0]->line, c.args[0]->col,
+            std::format("bytes() argument must be int, bytes or list[int], got '{}'",
+                        type_name(at)));
+        return const_none();
     }
 
     err(c.line, c.col, std::format("builtin '{}' is not supported by the code generator yet", name));

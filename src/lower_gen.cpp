@@ -10,11 +10,35 @@ void Lowerer::cleanup_gen_mark() {
     rc_cleanup(load_slot(st_->gen_mark_slot, t_int()));
 }
 
+VReg Lowerer::slot_addr_of(int slot) {
+    Inst in;
+    in.op = IrOp::SlotAddr;
+    in.idx = slot;
+    return def(t_unknown(), std::move(in));
+}
+
+void Lowerer::exc_enter() {
+    if (st_->exc_cur_slot < 0) return;
+    VReg c = slot_addr_of(st_->exc_cur_slot);
+    VReg t = slot_addr_of(st_->exc_top_slot);
+    VReg tok = call_runtime(RtFn::ExcEnter, t_int(), {c, t});
+    store_slot(st_->exc_tok_slot, tok);
+}
+
+void Lowerer::exc_leave() {
+    if (st_->exc_cur_slot < 0) return;
+    VReg c = slot_addr_of(st_->exc_cur_slot);
+    VReg t = slot_addr_of(st_->exc_top_slot);
+    VReg tok = load_slot(st_->exc_tok_slot, t_int());
+    call_void(RtFn::ExcLeave, {c, t, tok});
+}
+
 void Lowerer::gen_finish(VReg v, TypePtr vty) {
     // 协程的返回值放进 out，由事件循环取走；生成器忽略。
     if (v != kNoReg && ir_is_heap(vty)) rc_inc(v);
     cleanup_gen_mark();
     release_slots();
+    exc_leave();
     Inst d;
     d.op = IrOp::GenDone;
     d.a = v;
@@ -26,29 +50,30 @@ VReg Lowerer::lower_yield(Expr& y) {
         err(y.line, y.col, "'yield' outside generator");
         return const_none();
     }
-    if (emit_seq_ != st_->gen_seq_base) {
-        err(y.line, y.col,
-            "'yield' must be the first evaluated value of the statement; earlier values live "
-            "in temporaries that do not survive suspension (assign them to a variable first)");
-    }
-    if (finally_body_depth_ > 0)
-        err(y.line, y.col, "'yield' inside finally is not supported yet");
-    // except 体里的 yield 需要跨挂起保存异常上下文，暂不支持。
-    for (auto& c : st_->cleanups) {
-        if (c.kind == FuncCtx::Cleanup::Kind::ExcDone) {
-            err(y.line, y.col, "'yield' inside except is not supported yet");
-            break;
-        }
-    }    auto& yn = static_cast<Yield&>(y);
+    if (reject_suspend_in_close()) return const_none();
+    auto& yn = static_cast<Yield&>(y);
     VReg v = yn.value ? expr(*yn.value) : const_none();
     TypePtr vt = yn.value ? tc_.type_of(yn.value.get()) : t_none();
     return emit_yield(v, vt);
+}
+
+// close 通过重放 finally 体来清理；体里还有挂起点时 CPython 会报
+// RuntimeError: generator ignored GeneratorExit，而不是真的再挂起一次。
+bool Lowerer::reject_suspend_in_close() {
+    if (close_replay_depth_ <= 0) return false;
+    const char* what = st_->is_async_generator ? "async generator ignored GeneratorExit"
+                       : st_->is_coroutine     ? "coroutine ignored GeneratorExit"
+                                               : "generator ignored GeneratorExit";
+    call_void(RtFn::Raise, {const_str("RuntimeError"), const_str(what)});
+    return true;
 }
 
 VReg Lowerer::emit_yield(VReg v, TypePtr vt) {
     // 帧里的 out 槽接管一个引用；未知类型按注册表保守 retain。
     if (ir_is_heap(vt)) rc_inc(v);
     else if (!vt || vt->kind == TyKind::Unknown) rc_inc_unknown(v);
+    // 挂起期间调用方继续跑，异常上下文要换回调用方那份。
+    exc_leave();
     // 挂起前把本次 resume 的临时值清干净：临时栈是全局的，不清会把
     // 调用方的临时值连同本帧的一起留给下一次 resume。
     cleanup_gen_mark();
@@ -79,8 +104,6 @@ VReg Lowerer::emit_yield(VReg v, TypePtr vt) {
     gy.imm = id;
     emit(std::move(gy));
     switch_to(cont);
-    // 恢复后是一个新的 resume 段：后面的挂起点不能依赖这段之前求出的值。
-    st_->gen_seq_base = emit_seq_;
     // yield 表达式的值是 send() 传进来的（普通 next 是 None），静态不可知。
     Inst gs2;
     gs2.op = IrOp::GenSent;
@@ -99,14 +122,7 @@ VReg Lowerer::lower_yield_from(YieldFrom& y) {
         expr(*y.value);
         return const_none();
     }
-    if (finally_body_depth_ > 0)
-        err(y.line, y.col, "'yield from' inside finally is not supported yet");
-    for (auto& c : st_->cleanups) {
-        if (c.kind == FuncCtx::Cleanup::Kind::ExcDone) {
-            err(y.line, y.col, "'yield from' inside except is not supported yet");
-            break;
-        }
-    }
+    if (reject_suspend_in_close()) return const_none();
     TypePtr vt = tc_.type_of(y.value.get());
     VReg sub = expr(*y.value);
     Inst cn;
@@ -127,8 +143,32 @@ VReg Lowerer::lower_yield_from(YieldFrom& y) {
         store_slot(sub_slot, sub);
         int ok_slot = new_temp_slot(t_int());
         store_slot(ok_slot, const_int(0));
+        // 子生成器本次的结果：send/throw 两条路都写它，yield 和结束共用。
+        int ev_slot = new_temp_slot(et);
+        // 待转发给子生成器的异常（PyAdamasException*，非堆对象）。throw
+        // 分发把它写在这里，cond 看到非 0 就改走 GenThrowOpt。
+        int exc_slot = new_temp_slot(t_int());
+        store_slot(exc_slot, const_int(0));
+
+        // 调用返回的是新引用：入临时栈接管这个引用（与原来一致）。
+        auto own_result = [&](VReg v) {
+            if (ir_is_heap(et)) push_temp(v);
+            else if (!et || et->kind == TyKind::Unknown)
+                call_void(RtFn::RcTempUnknown, {v});
+        };
+        auto branch_ok = [&](int body, int end) {
+            VReg ok = load_slot(ok_slot, t_int());
+            Inst br;
+            br.op = IrOp::Branch;
+            br.a = ok;
+            br.target = body;
+            br.target2 = end;
+            emit(std::move(br));
+        };
 
         int cond = new_block("yfrom.cond");
+        int scond = new_block("yfrom.send");
+        int tcond = new_block("yfrom.throw");
         int body = new_block("yfrom.body");
         int end = new_block("yfrom.end");
         Inst j;
@@ -137,37 +177,58 @@ VReg Lowerer::lower_yield_from(YieldFrom& y) {
         emit(std::move(j));
 
         switch_to(cond);
-        // 恢复后 p[2] 是调用方 send 进来的值；第一次 resume 时它是初始
+        VReg pend = load_slot(exc_slot, t_int());
+        Inst pb;
+        pb.op = IrOp::Branch;
+        pb.a = pend;
+        pb.target = tcond;
+        pb.target2 = scond;
+        emit(std::move(pb));
+
+        // 正常：恢复后 p[2] 是调用方 send 进来的值；第一次 resume 时它是初始
         // 值（next 为 None），直接转发给子生成器。
+        switch_to(scond);
         Inst se;
         se.op = IrOp::GenSent;
         VReg sent = def(t_unknown(), std::move(se));
-        Inst sa;
-        sa.op = IrOp::SlotAddr;
-        sa.idx = ok_slot;
-        VReg okp = def(t_unknown(), std::move(sa));
         Inst call;
         call.op = IrOp::CallRt;
         call.imm = static_cast<int64_t>(RtFn::GenSendOpt);
-        call.args = {load_slot(sub_slot, styp), sent, okp};
+        call.args = {load_slot(sub_slot, styp), sent, slot_addr_of(ok_slot)};
         VReg ev = def(t_unknown(), std::move(call));
-        if (ir_is_heap(et)) push_temp(ev);
-        VReg ok = load_slot(ok_slot, t_int());
-        Inst br;
-        br.op = IrOp::Branch;
-        br.a = ok;
-        br.target = body;
-        br.target2 = end;
-        emit(std::move(br));
+        own_result(ev);
+        store_slot(ev_slot, ev);
+        branch_ok(body, end);
+
+        // throw 转发：把注入的异常交给子生成器，结果同样按「产出 / 结束」
+        // 分流；子生成器自己没接住时异常从它里面逃出，沿外层 handler 传播。
+        switch_to(tcond);
+        VReg excp = load_slot(exc_slot, t_int());
+        store_slot(exc_slot, const_int(0));
+        Inst call2;
+        call2.op = IrOp::CallRt;
+        call2.imm = static_cast<int64_t>(RtFn::GenThrowOpt);
+        call2.args = {load_slot(sub_slot, styp), excp, slot_addr_of(ok_slot)};
+        VReg ev2 = def(t_unknown(), std::move(call2));
+        own_result(ev2);
+        store_slot(ev_slot, ev2);
+        branch_ok(body, end);
 
         switch_to(body);
-        emit_yield(ev, et);
+        emit_yield(load_slot(ev_slot, et), et);
+        // 这个挂起点处于委托中：调用方 throw() 时异常要转给子生成器，
+        // 而不是在本帧重新抛出。
+        st_->gen_states.back().delegate_cond = cond;
+        st_->gen_states.back().delegate_exc_slot = exc_slot;
         Inst jb;
         jb.op = IrOp::Jump;
         jb.target = cond;
         emit(std::move(jb));
+
         switch_to(end);
-        return result;
+        // 子生成器结束时 ev_slot 里是它的 return 值（send_opt/throw_opt
+        // 已把所有权转移过来）。槽持有引用，直接借出即可。
+        return load_slot(ev_slot, et);
     }
 
     if (!is_seq(vt)) {
@@ -256,13 +317,14 @@ VReg Lowerer::lower_yield_from(YieldFrom& y) {
 }
 
 VReg Lowerer::suspend_on_awaitable(VReg w, TypePtr result_ty, int line, int col,
-                                   size_t active_limit) {
+                                   size_t active_limit, bool push_result_temp) {
     (void)line;
     (void)col;
     TypePtr vt = vreg_ty(w);
     // 把 awaitable 的所有权交给 out，事件循环接管。
     if (ir_is_heap(vt)) rc_inc(w);
     else if (!vt || vt->kind == TyKind::Unknown) rc_inc_unknown(w);
+    exc_leave();
     cleanup_gen_mark();
     // handler 记录和 yield 一样要在挂起时摘下来。
     size_t n_active = std::min(st_->cleanups.size(), active_limit);
@@ -292,15 +354,15 @@ VReg Lowerer::suspend_on_awaitable(VReg w, TypePtr result_ty, int line, int col,
     ga.imm = id;
     emit(std::move(ga));
     switch_to(cont);
-    // 恢复后是一个新的 resume 段：后面的挂起点不能依赖这段之前求出的值。
-    st_->gen_seq_base = emit_seq_;
     // 恢复时 sent 里是 await 的结果（或由 throw 分发注入异常）。
     TypePtr at = result_ty;
     Inst gs2;
     gs2.op = IrOp::GenSent;
     VReg sent = def(at ? at : t_unknown(), std::move(gs2));
     // 事件循环把结果的引用转移给这里；堆结果交给临时栈，语句末释放。
-    if (ir_is_heap(at)) push_temp(sent);
+    // 调用方若还要在本表达式内先 handler_leave（如 async for 的 StopAsyncIteration
+    // 保护），必须延后入栈，否则 leave 会按旧水位把这个刚到手的值释放掉。
+    if (push_result_temp && ir_is_heap(at)) push_temp(sent);
     return sent;
 }
 
@@ -309,19 +371,7 @@ VReg Lowerer::lower_await(Expr& e) {
         err(e.line, e.col, "'await' outside async function");
         return const_none();
     }
-    if (emit_seq_ != st_->gen_seq_base) {
-        err(e.line, e.col,
-            "'await' must be the first evaluated value of the statement; earlier values live "
-            "in temporaries that do not survive suspension (assign them to a variable first)");
-    }
-    if (finally_body_depth_ > 0)
-        err(e.line, e.col, "'await' inside finally is not supported yet");
-    for (auto& c : st_->cleanups) {
-        if (c.kind == FuncCtx::Cleanup::Kind::ExcDone) {
-            err(e.line, e.col, "'await' inside except is not supported yet");
-            break;
-        }
-    }
+    if (reject_suspend_in_close()) return const_none();
     auto& aw = static_cast<Await&>(e);
     VReg v = expr(*aw.value);
     return suspend_on_awaitable(v, tc_.type_of(&e), e.line, e.col);
@@ -570,10 +620,12 @@ void Lowerer::lower_async_for(For& f, VReg seq, TypePtr seq_ty) {
     call.imm = static_cast<int64_t>(RtFn::AsyncGenANext);
     call.args = {seq_val()};
     VReg w = def_heap(mk_coroutine(et), std::move(call));
-    VReg val = suspend_on_awaitable(w, et, f.line, f.col);
-
+    VReg val = suspend_on_awaitable(w, et, f.line, f.col,
+                                    static_cast<size_t>(-1), false);
     st_->cleanups.pop_back();
     call_void(RtFn::HandlerLeave, {load_slot(hs_slot, t_int())});
+    // handler 已离开，现在才能把到手的堆值挂到临时栈（语句末释放）。
+    if (ir_is_heap(et)) push_temp(val);
     assign_to(*f.target, val, et);
     {
         Inst j;
@@ -736,11 +788,17 @@ int Lowerer::compile_suspendable_function(FunctionDef& f, FuncInfoPtr info,
     // 临时值水位每次 resume 重新记录（vreg 不跨 yield）。
     int mark_slot = irf->new_slot(t_int());
     st_->gen_mark_slot = mark_slot;
+    // 异常上下文三件套：值是 malloc 指针 / 整数，不参与 RC。
+    st_->exc_cur_slot = irf->new_slot(t_int());
+    st_->exc_top_slot = irf->new_slot(t_int());
+    st_->exc_tok_slot = irf->new_slot(t_int());
     st_->fn_mark = kNoReg;
 
     // 创建包装已经 retain 过实参，这里不再 inc_params。
     create_cells();
     stmts(f.body);
+    // 挂起点位置已经全部确定：把跨挂起仍活跃的 vreg 落进帧槽。
+    spill_across_suspends();
     if (!terminated()) gen_finish();
 
     // ── close 路径：按挂起点快照跑 finally / __exit__，再释放帧槽 ──
@@ -777,9 +835,9 @@ int Lowerer::compile_suspendable_function(FunctionDef& f, FuncInfoPtr info,
             } else if (c.kind == FuncCtx::Cleanup::Kind::SemRelease) {
                 call_void(RtFn::SemRelease, {load_slot(c.mgr_slot, t_unknown())});
             } else if (c.kind == FuncCtx::Cleanup::Kind::Finally && c.body) {
-                ++finally_body_depth_;
+                ++close_replay_depth_;
                 stmts(*c.body);
-                --finally_body_depth_;
+                --close_replay_depth_;
             }
         }
         // 挂起时摘下来的 handler 记录不会有人再弹栈，close 路径负责释放。
@@ -788,6 +846,7 @@ int Lowerer::compile_suspendable_function(FunctionDef& f, FuncInfoPtr info,
                 call_void(RtFn::HandlerFree, {load_slot(c.handler_slot, t_int())});
         cleanup_gen_mark();
         release_slots();
+        exc_leave();
         Inst d;
         d.op = IrOp::GenDone;
         emit(std::move(d));
@@ -797,6 +856,7 @@ int Lowerer::compile_suspendable_function(FunctionDef& f, FuncInfoPtr info,
     switch_to(close_default);
     cleanup_gen_mark();
     release_slots();
+    exc_leave();
     {
         Inst d;
         d.op = IrOp::GenDone;
@@ -810,6 +870,8 @@ int Lowerer::compile_suspendable_function(FunctionDef& f, FuncInfoPtr info,
     switch_to(entry);
     VReg m0 = call_runtime(RtFn::RcMark, t_int(), {});
     store_slot(mark_slot, m0);
+    // 每次 resume 都换成本帧保存的异常上下文；挂起/退出时换回去。
+    exc_enter();
     Inst gsit;
     gsit.op = IrOp::GenGetState;
     VReg state = def(t_int(), std::move(gsit));
@@ -818,7 +880,8 @@ int Lowerer::compile_suspendable_function(FunctionDef& f, FuncInfoPtr info,
     VReg closing = def(t_int(), std::move(gcl));
     int close_disp = new_block("g.close.dispatch");
     int normal_disp = new_block("g.dispatch");
-    int throw_disp = is_coro ? new_block("g.throw.dispatch") : -1;
+    // 协程/异步生成器的失败注入和生成器的 throw() 共用这条分发。
+    int throw_disp = new_block("g.throw.dispatch");
     int after_close = new_block("g.not.closing");
     {
         Inst br;
@@ -829,7 +892,7 @@ int Lowerer::compile_suspendable_function(FunctionDef& f, FuncInfoPtr info,
         emit(std::move(br));
     }
     switch_to(after_close);
-    if (is_coro) {
+    {
         Inst ge;
         ge.op = IrOp::GenGetExc;
         VReg exc = def(t_int(), std::move(ge));
@@ -839,11 +902,6 @@ int Lowerer::compile_suspendable_function(FunctionDef& f, FuncInfoPtr info,
         br.target = throw_disp;
         br.target2 = normal_disp;
         emit(std::move(br));
-    } else {
-        Inst j;
-        j.op = IrOp::Jump;
-        j.target = normal_disp;
-        emit(std::move(j));
     }
 
     int cur = normal_disp;
@@ -896,10 +954,11 @@ int Lowerer::compile_suspendable_function(FunctionDef& f, FuncInfoPtr info,
         emit(std::move(j));
     }
 
-    // ── 异常注入分发（协程）────────────────────────────────────
-    // 被 await 的对象失败时，事件循环把异常放进帧里并重新调度本协程。
-    // 恢复路径先重挂 handler 再抛：try/except 才能抓到跨 await 的异常。
-    if (is_coro) {
+    // ── 异常注入分发 ────────────────────────────────────────────
+    // 被 await 的对象失败（协程）或调用方 throw()（生成器）时，把异常放回
+    // 挂起点。恢复路径先重挂 handler 再抛：try/except 才能抓到跨挂起的异常。
+    // 处于 yield from 委托中的挂起点不在这里抛，而是把异常交给子生成器。
+    {
         int tcur = throw_disp;
         for (auto& gs : st_->gen_states) {
             switch_to(tcur);
@@ -921,14 +980,41 @@ int Lowerer::compile_suspendable_function(FunctionDef& f, FuncInfoPtr info,
             br.target2 = nextb;
             emit(std::move(br));
             switch_to(arm);
-            for (const auto* c : hs)
+            // handler 的 setjmp 环境必须在本帧重新捕获：注入的异常可能是
+            // 由另一个调用点（next/send/throw）触发的，直接 longjmp 到上次
+            // resume 留下的环境会跨越不同的栈帧深度。
+            for (const auto* c : hs) {
                 call_void(RtFn::HandlerRearm, {load_slot(c->handler_slot, t_int())});
-            Inst rt;
-            rt.op = IrOp::GenRethrow;
-            emit(std::move(rt));
+                VReg sj = setjmp_handler(c->handler_slot);
+                int nb = new_block("g.throw.arm.next");
+                Inst ab;
+                ab.op = IrOp::Branch;
+                ab.a = sj;
+                ab.target = c->land;
+                ab.target2 = nb;
+                emit(std::move(ab));
+                switch_to(nb);
+            }
+            if (gs.delegate_cond >= 0) {
+                // 委托给子生成器：取走帧里的异常（所有权转移），交回委托
+                // 循环的 cond，由它改走 GenThrowOpt。
+                Inst te;
+                te.op = IrOp::GenTakeExc;
+                VReg excp = def(t_int(), std::move(te));
+                store_slot(gs.delegate_exc_slot, excp);
+                Inst jj;
+                jj.op = IrOp::Jump;
+                jj.target = gs.delegate_cond;
+                emit(std::move(jj));
+            } else {
+                Inst rt;
+                rt.op = IrOp::GenRethrow;
+                emit(std::move(rt));
+            }
             tcur = nextb;
         }
         switch_to(tcur);
+        // 未启动的生成器没有挂起点：入口即抛出。
         Inst rt;
         rt.op = IrOp::GenRethrow;
         emit(std::move(rt));
@@ -1016,6 +1102,209 @@ int Lowerer::compile_suspendable_function(FunctionDef& f, FuncInfoPtr info,
     emit(std::move(r));
     pop_frame();
     return cidx;
+}
+
+
+// ── 跨挂起的 vreg 溢出 ─────────────────────────────────────────
+//
+// resume 每次被调用都重建 C 栈帧，vreg 落在栈上的那份值在 yield/await
+// 返回后就没了。续跑块的 live-in 恰好就是「挂起期间必须继续活着」的
+// 值：挂起前 retain 一份写进堆帧槽，恢复后再装回 vreg 并交给临时栈。
+// 这样 yield/await 能出现在任意子表达式里，复合表达式不用逐个改。
+void Lowerer::spill_across_suspends() {
+    IRFunction* fn = st_->fn;
+    if (!fn || st_->gen_states.empty()) return;
+    const int nb = static_cast<int>(fn->blocks.size());
+    const int nv = static_cast<int>(fn->vreg_ty.size());
+    if (nb == 0 || nv == 0) return;
+
+    auto for_each_read = [](const Inst& in, auto&& f) {
+        if (in.a != kNoReg) f(in.a);
+        if (in.b != kNoReg) f(in.b);
+        if (in.c != kNoReg) f(in.c);
+        for (VReg r : in.args)
+            if (r != kNoReg) f(r);
+    };
+
+    // 块内 use/def：块首未定义就读取的才算 live-in 需求。
+    std::vector<std::vector<uint8_t>> use(nb, std::vector<uint8_t>(nv, 0));
+    std::vector<std::vector<uint8_t>> def(nb, std::vector<uint8_t>(nv, 0));
+    for (int b = 0; b < nb; ++b) {
+        for (const Inst& in : fn->blocks[static_cast<size_t>(b)].insts) {
+            for_each_read(in, [&](VReg r) {
+                if (static_cast<int>(r) < nv &&
+                    !def[static_cast<size_t>(b)][static_cast<size_t>(r)])
+                    use[static_cast<size_t>(b)][static_cast<size_t>(r)] = 1;
+            });
+            if (in.dst != kNoReg && static_cast<int>(in.dst) < nv)
+                def[static_cast<size_t>(b)][static_cast<size_t>(in.dst)] = 1;
+        }
+    }
+
+    // 挂起是终止指令：GenYield/GenAwait 没有后继，续跑块只从入口分派进。
+    std::vector<std::vector<int>> succ(nb);
+    for (int b = 0; b < nb; ++b) {
+        const auto& ins = fn->blocks[static_cast<size_t>(b)].insts;
+        if (ins.empty()) {
+            if (b + 1 < nb) succ[static_cast<size_t>(b)].push_back(b + 1);
+            continue;
+        }
+        auto add = [&](int t) {
+            if (t >= 0 && t < nb) succ[static_cast<size_t>(b)].push_back(t);
+        };
+        switch (ins.back().op) {
+            case IrOp::Jump: add(ins.back().target); break;
+            case IrOp::Branch:
+                add(ins.back().target);
+                add(ins.back().target2);
+                break;
+            case IrOp::Return:
+            case IrOp::GenYield:
+            case IrOp::GenAwait:
+            case IrOp::GenRethrow:
+            case IrOp::GenDone: break;
+            default:
+                if (b + 1 < nb) succ[static_cast<size_t>(b)].push_back(b + 1);
+                break;
+        }
+    }
+
+    std::vector<std::vector<uint8_t>> live_in(nb, std::vector<uint8_t>(nv, 0));
+    std::vector<std::vector<uint8_t>> live_out(nb, std::vector<uint8_t>(nv, 0));
+    bool changed = true;
+    while (changed) {
+        changed = false;
+        for (int b = nb - 1; b >= 0; --b) {
+            std::vector<uint8_t> out(nv, 0);
+            for (int s : succ[static_cast<size_t>(b)])
+                for (int v = 0; v < nv; ++v)
+                    out[static_cast<size_t>(v)] |=
+                        live_in[static_cast<size_t>(s)][static_cast<size_t>(v)];
+            std::vector<uint8_t> in(nv, 0);
+            for (int v = 0; v < nv; ++v)
+                in[static_cast<size_t>(v)] = static_cast<uint8_t>(
+                    use[static_cast<size_t>(b)][static_cast<size_t>(v)] |
+                    (out[static_cast<size_t>(v)] &
+                     ~def[static_cast<size_t>(b)][static_cast<size_t>(v)]));
+            if (out != live_out[static_cast<size_t>(b)] ||
+                in != live_in[static_cast<size_t>(b)]) {
+                live_out[static_cast<size_t>(b)] = std::move(out);
+                live_in[static_cast<size_t>(b)] = std::move(in);
+                changed = true;
+            }
+        }
+    }
+
+    std::unordered_map<int, int> cont_of_state;
+    for (auto& gs : st_->gen_states) cont_of_state[gs.id] = gs.cont;
+
+    // 同一个 vreg 在多个挂起点之间复用一个溢出槽。
+    std::unordered_map<VReg, int> spill_slot;
+    auto slot_for = [&](VReg v) {
+        auto it = spill_slot.find(v);
+        if (it != spill_slot.end()) return it->second;
+        int s = fn->new_slot(fn->vreg_ty[static_cast<size_t>(v)]);
+        spill_slot.emplace(v, s);
+        return s;
+    };
+
+    for (int b = 0; b < nb; ++b) {
+        auto& ins = fn->blocks[static_cast<size_t>(b)].insts;
+        if (ins.empty()) continue;
+        const IrOp term_op = ins.back().op;
+        if (term_op != IrOp::GenYield && term_op != IrOp::GenAwait) continue;
+        const int state_id = static_cast<int>(ins.back().imm);
+        auto cit = cont_of_state.find(state_id);
+        if (cit == cont_of_state.end()) continue;
+        const int c = cit->second;
+        if (c < 0 || c >= nb) continue;
+
+        std::vector<VReg> live;
+        for (int v = 0; v < nv; ++v)
+            if (live_in[static_cast<size_t>(c)][static_cast<size_t>(v)])
+                live.push_back(static_cast<VReg>(v));
+
+        // 挂起后的续跑块：先把值从堆帧槽装回 vreg，所有权转给临时栈。
+        if (!live.empty()) {
+            std::vector<Inst> post;
+            for (VReg v : live) {
+                TypePtr ty = fn->vreg_ty[static_cast<size_t>(v)];
+                int slot = slot_for(v);
+                Inst ld;
+                ld.op = IrOp::LoadSlot;
+                ld.idx = slot;
+                ld.ty = ty;
+                ld.dst = v;
+                post.push_back(std::move(ld));
+                if (ir_is_heap(ty)) {
+                    Inst tp;
+                    tp.op = IrOp::CallRt;
+                    tp.imm = static_cast<int64_t>(RtFn::RcTemp);
+                    tp.args = {v};
+                    post.push_back(std::move(tp));
+                    // 槽已经不再持有这份引用；不清零的话帧销毁会二次释放。
+                    Inst zero;
+                    zero.op = IrOp::ConstInt;
+                    zero.imm = 0;
+                    VReg z = static_cast<VReg>(fn->vreg_ty.size());
+                    fn->vreg_ty.push_back(t_int());
+                    zero.dst = z;
+                    zero.ty = t_int();
+                    post.push_back(std::move(zero));
+                    Inst cl;
+                    cl.op = IrOp::StoreSlot;
+                    cl.idx = slot;
+                    cl.a = z;
+                    post.push_back(std::move(cl));
+                } else if (!ty || ty->kind == TyKind::Unknown) {
+                    Inst tp;
+                    tp.op = IrOp::CallRt;
+                    tp.imm = static_cast<int64_t>(RtFn::RcTempUnknown);
+                    tp.args = {v};
+                    post.push_back(std::move(tp));
+                }
+            }
+            auto& cont_insts = fn->blocks[static_cast<size_t>(c)].insts;
+            cont_insts.insert(cont_insts.begin(), post.begin(), post.end());
+        }
+
+        // 挂起前：retain 一份再写进堆帧槽。必须赶在 RcCleanup 之前，
+        // 否则临时栈先把产生者那份引用放掉了，写进去的就是悬空指针。
+        if (live.empty()) continue;
+        int cleanup_pos = -1;
+        for (int i = static_cast<int>(ins.size()) - 2; i >= 0; --i) {
+            if (ins[static_cast<size_t>(i)].op == IrOp::CallRt &&
+                static_cast<RtFn>(ins[static_cast<size_t>(i)].imm) == RtFn::RcCleanup) {
+                cleanup_pos = i;
+                break;
+            }
+        }
+        size_t at = cleanup_pos >= 0 ? static_cast<size_t>(cleanup_pos) : ins.size() - 1;
+        std::vector<Inst> pre;
+        for (VReg v : live) {
+            TypePtr ty = fn->vreg_ty[static_cast<size_t>(v)];
+            int slot = slot_for(v);
+            if (ir_is_heap(ty)) {
+                Inst inc;
+                inc.op = IrOp::CallRt;
+                inc.imm = static_cast<int64_t>(RtFn::RcInc);
+                inc.args = {v};
+                pre.push_back(std::move(inc));
+            } else if (!ty || ty->kind == TyKind::Unknown) {
+                Inst inc;
+                inc.op = IrOp::CallRt;
+                inc.imm = static_cast<int64_t>(RtFn::RcIncUnknown);
+                inc.args = {v};
+                pre.push_back(std::move(inc));
+            }
+            Inst st;
+            st.op = IrOp::StoreSlot;
+            st.idx = slot;
+            st.a = v;
+            pre.push_back(std::move(st));
+        }
+        ins.insert(ins.begin() + static_cast<std::ptrdiff_t>(at), pre.begin(), pre.end());
+    }
 }
 
 

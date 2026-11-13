@@ -212,10 +212,22 @@ void TypeChecker::funcdef_impl(FunctionDef& f, const ClassInfoPtr& owner) {
                 info->ret = mk_coroutine(info->async_result);
             }
         } else if (saw_yield_) {
-            // 生成器：调用得到 Generator[所有 yield 值的公共上界]
+            // 生成器：标注了 Generator[Y, S, R] 就以标注为准，Y 未知时用
+            // 推导出的 yield 上界补；否则调用得到 Generator[yield 上界]。
             TypePtr elem = nullptr;
             for (auto& y : yields) elem = elem ? join(elem, y) : y;
-            info->ret = mk_generator(elem ? elem : t_unknown());
+            TypePtr gen = (info->ret_declared && info->ret &&
+                           info->ret->kind == TyKind::Generator)
+                              ? info->ret
+                              : nullptr;
+            if (gen) {
+                if (gen->sub.empty()) gen->sub.push_back(elem ? elem : t_unknown());
+                else if (!gen->sub[0] || gen->sub[0]->kind == TyKind::Unknown)
+                    gen->sub[0] = elem ? elem : t_unknown();
+                info->ret = gen;
+            } else {
+                info->ret = mk_generator(elem ? elem : t_unknown());
+            }
             info->is_generator = true;
         } else if (!info->ret_declared) {
             info->ret = inferred;
@@ -243,17 +255,21 @@ bool TypeChecker::is_self_attr(const Attribute& a) const {
 
 // `C.x` / `cls.x`：接收者是一个类，不是实例。区分不了的时候按实例处理——
 // 实例侧多了字段回退，宁可宽松也不要误判。
-bool TypeChecker::is_class_receiver(const Attribute& a) {
-    if (a.value->kind != ExprKind::Name) return false;
-    auto& n = static_cast<const Name&>(*a.value);
+bool TypeChecker::name_is_class(const Name& n) {
     if (!cur_cls_name_.empty() && n.id == cur_cls_name_) return true;
     if (!cur_self_name_.empty() && n.id == cur_self_name_) return false;
-    // 类名绑定在模块作用域里；被函数局部或形参遮住就不是类了
+    // 类名绑定在模块作用域里；被函数局部或形参遮住就不是类了。
+    // class_obj_names_ 里没有的名字（模块级的实例变量）按实例处理。
     for (Scope* s = cur_; s; s = s->parent) {
         if (s->vars.find(n.id) == s->vars.end()) continue;
-        return s->is_module && classes_.count(n.id) > 0;
+        return s->is_module && class_obj_names_.count(n.id) > 0;
     }
     return false;
+}
+
+bool TypeChecker::is_class_receiver(const Attribute& a) {
+    if (a.value->kind != ExprKind::Name) return false;
+    return name_is_class(static_cast<const Name&>(*a.value));
 }
 
 // `self.x = ...` 里 x 没在类体里声明过：补成字段。Python 的实例属性本来
@@ -423,6 +439,7 @@ void TypeChecker::classdef(ClassDef& c) {
                 sc->vars[c.name] = Symbol{mk_class(cls.get()), c.line, true, false};
             }
         }
+        class_obj_names_.insert(c.name);
         auto prev = classes_.find(c.name);
         classes_[c.name] = cls;
         all_classes_.push_back(cls);
@@ -746,12 +763,28 @@ void TypeChecker::classdef(ClassDef& c) {
                     if (!m || !m->decorated || m->kind != MethodKind::Normal) break;
                     if (f.name.size() > 4 && f.name.starts_with("__") &&
                         f.name.ends_with("__")) {
-                        // 双下划线方法要靠 vtable 静态分派（构造、运算符），
-                        // 装饰后调用约定不再成立。
-                        err(f.line, f.col,
-                            std::format("decorating dunder method '{}' is not supported yet",
-                                        f.name));
-                        break;
+                        // 只有走 dunder_call 的那批 dunder 能装饰：调用点会从
+                        // 类属性里取包装函数并补 self。构造、with/async with、
+                        // 由 vtable 槽按名字分派的 dunder 在调用点显式走类属性
+                        // 里的包装函数，装饰后仍能工作。
+                        static const std::unordered_set<std::string> kDecorOk = {
+                            "__str__", "__repr__", "__eq__", "__ne__", "__lt__",
+                            "__le__", "__gt__", "__ge__", "__add__", "__sub__",
+                            "__mul__", "__truediv__", "__floordiv__", "__mod__",
+                            "__pow__", "__radd__", "__rsub__", "__rmul__",
+                            "__rtruediv__", "__rfloordiv__", "__rmod__", "__rpow__",
+                            "__iadd__", "__isub__", "__imul__", "__itruediv__",
+                            "__ifloordiv__", "__imod__", "__ipow__", "__contains__",
+                            "__len__", "__hash__", "__iter__", "__init__",
+                            "__enter__", "__exit__", "__aenter__", "__aexit__",
+                            "__call__"};
+                        if (!kDecorOk.count(f.name)) {
+                            err(f.line, f.col,
+                                std::format(
+                                    "decorating dunder method '{}' is not supported yet",
+                                    f.name));
+                            break;
+                        }
                     }
                     for (auto& d : f.decorators) {
                         Expr* de = d.get();
@@ -768,6 +801,22 @@ void TypeChecker::classdef(ClassDef& c) {
                                 continue;
                         }
                         expr(*de);
+                        // 装饰器的第一个形参就是被装饰的方法。没标注时把
+                        // 方法类型回填进去，包装体里的 f(self, ...) 才能按
+                        // 真实签名检查；sig_dirty 让重查循环重查装饰器
+                        // 函数体（含内层 wrapper）。
+                        TypePtr dt = type_of(de);
+                        if (dt && dt->kind == TyKind::Func && dt->fn &&
+                            !dt->fn->pos.empty()) {
+                            Param& p0 = dt->fn->pos[0];
+                            if (is_unknown(p0.ty) && m->sig) {
+                                auto ft = new_ty(TyKind::Func);
+                                ft->fn = m->sig;
+                                p0.ty = ft;
+                                p0.inferred = true;
+                                dt->fn->sig_dirty = true;
+                            }
+                        }
                     }
                     TypePtr cur = new_ty(TyKind::Func);
                     cur->fn = m->sig;

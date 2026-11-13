@@ -38,6 +38,48 @@ void TypeChecker::check(Module& m) {
             }
             if (!changed) break;
         }
+        // 装饰器函数体可能在上面的单态化回填里重查过（第一个形参被回填
+        // 成被装饰方法的类型），返回的函数类型会变精确。装饰方法的
+        // decorated_ty / call_sig 和类属性类型在这里按最终类型刷新一次。
+        for (auto& ci : all_classes_) {
+            if (!ci) continue;
+            for (auto& m : ci->methods) {
+                if (!m.decorated || !m.sig || !m.def || m.def->decorators.empty()) continue;
+                TypePtr cur = new_ty(TyKind::Func);
+                cur->fn = m.sig;
+                bool known = true;
+                for (auto it = m.def->decorators.rbegin();
+                     it != m.def->decorators.rend(); ++it) {
+                    TypePtr dt = type_of(it->get());
+                    if (dt && dt->kind == TyKind::Func && dt->fn && dt->fn->ret)
+                        cur = dt->fn->ret;
+                    else {
+                        known = false;
+                        break;
+                    }
+                }
+                m.decorated_ty = known ? cur : t_unknown();
+                if (known && cur && cur->kind == TyKind::Func) {
+                    for (auto& ca : ci->class_attrs)
+                        if (ca.name == m.name) ca.ty = cur;
+                }
+                if (!known || !cur || cur->kind != TyKind::Func || !cur->fn) {
+                    m.call_sig = nullptr;
+                    continue;
+                }
+                m.call_sig = std::make_shared<FuncInfo>(*cur->fn);
+                m.call_sig->name = m.name;
+                m.call_sig->outer = m.sig.get();
+                m.call_sig->outer_off = 0;
+                if (m.call_sig->pos.empty()) {
+                    m.call_sig = nullptr;
+                    continue;
+                }
+                m.call_sig->pos.erase(m.call_sig->pos.begin());
+                m.call_sig->outer_off = 1;
+                if (m.call_sig->n_posonly > 0) --m.call_sig->n_posonly;
+            }
+        }
         // 合成生成器函数的元素类型在重查后才定下来，调用点缓存的表达式
         // 类型跟着刷新——降级层按它选流式迭代路径。
         for (auto& [ce, fi] : genexpr_call_sites_)
@@ -185,6 +227,7 @@ TypePtr TypeChecker::parse_annotation_impl(Expr* e, int line, int depth) {
                 return mk_set(t_unknown());
             if (id == "object" || id == "Any") return t_unknown();
             if (auto it = classes_.find(id); it != classes_.end()) return mk_class(it->second.get());
+            if (auto it = structs_.find(id); it != structs_.end()) return mk_struct(it->second);
             // 前向引用或自造类型：不阻断检查
             return t_unknown();
         }
@@ -209,7 +252,9 @@ TypePtr TypeChecker::parse_annotation_impl(Expr* e, int line, int depth) {
                 if (base == "Future") return mk_future(inner);
                 if (base == "Task") return mk_task(inner);
                 if (base == "Coroutine") return mk_coroutine(inner);
-                if (base == "Generator") return mk_generator(inner);
+                if (base == "Generator")
+                    return mk_generator(inner, args.size() > 1 ? args[1] : nullptr,
+                                        args.size() > 2 ? args[2] : nullptr);
                 return mk_async_generator(inner);
             }
             if (base == "Union") {
@@ -247,6 +292,15 @@ TypePtr TypeChecker::parse_annotation_impl(Expr* e, int line, int depth) {
                 // 裸 tuple：长度和元素都未知
                 if (args.empty()) return mk_tuple_rest(t_unknown());
                 return mk_tuple(std::move(args));
+            }
+            // ptr[int] 这类 C 指针标注：类型仍是 Optional[int]，但保留元素
+            // 种类，函数体内可以 a[0] 解引用。
+            if (base == "ptr" && args.size() == 1) {
+                auto t = mk_optional(t_int());
+                if (args[0] && args[0]->kind == TyKind::Float) t->celem = CKind::Float;
+                else if (args[0] && args[0]->kind == TyKind::Bool) t->celem = CKind::Bool;
+                else t->celem = CKind::Int;
+                return t;
             }
             return t_unknown();
         }
@@ -302,12 +356,17 @@ void TypeChecker::collect_toplevel(std::vector<StmtPtr>& body) {
                 // 类骨架先登记：函数签名（返回标注、形参标注）可能引用
                 // 类名，而签名是在 collect_toplevel 里一次性建好的。
                 // 字段与方法由后面的 classdef 填进同一个对象。
+                class_obj_names_.insert(c->name);
                 if (!classes_.count(c->name)) {
                     auto cls = std::make_shared<ClassInfo>();
                     cls->name = c->name;
                     classes_[c->name] = cls;
                     module_->vars[c->name] = Symbol{mk_class(cls.get()), c->line, true, false};
                 }
+            } else if (auto* st = dynamic_cast<StructDef*>(s.get())) {
+                // struct 的字段只有 int/float/bool，布局不依赖其它声明，
+                // 这里一次算完，函数签名里就能用 `p: Point`。
+                build_struct(*st);
             }
         }
     }
@@ -546,6 +605,10 @@ FuncInfoPtr TypeChecker::build_sig(FunctionDef& f) {
                     break;
                 case Constant::CK::Str:
                     v.kind = LiteralValue::Kind::Str;
+                    v.s = c.s;
+                    break;
+                case Constant::CK::Bytes:
+                    v.kind = LiteralValue::Kind::Bytes;
                     v.s = c.s;
                     break;
                 default: return std::nullopt;

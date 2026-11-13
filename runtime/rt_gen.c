@@ -27,6 +27,11 @@ void gen_destroy(void* g) {
         p[7] = 0;
     }
     pa_gen_finalize(g);
+    // out 里可能还留着生成器的 return 值：没人取走就在这里释放。
+    if (p[3]) {
+        pa_rc_dec_unknown(p[3]);
+        p[3] = 0;
+    }
 }
 
 void* pa_gen_new(int64_t n_slots, int64_t resume, int64_t release, int64_t kind) {
@@ -71,6 +76,7 @@ int64_t gen_run(void* g, int64_t sent, int* done) {
     h.mark = pa_rc_mark();
     h.frame = pa_frame_top;
     handler_top = &h;
+    int64_t exc_depth0 = pa_exc_depth();
     if (setjmp(h.env) != 0) {
         handler_top = h.prev;
         p[1] = 2;
@@ -81,10 +87,13 @@ int64_t gen_run(void* g, int64_t sent, int* done) {
            否则只要生成器对象还被引用着，这些值就永远不回收。 */
         pa_gen_release_slots(g);
         pa_rc_cleanup(h.mark);
+        /* resume 里换上的异常上下文也要退掉，恢复成调用方那一份。 */
+        pa_exc_unwind(exc_depth0);
         exc_longjmp();
     }
     ((void (*)(void*, int64_t))(uintptr_t)p[4])(g, sent);
     handler_top = h.prev;
+    pa_exc_unwind(exc_depth0);
     pa_rc_cleanup(h.mark);
     if (p[1]) {
         *done = 1;
@@ -129,6 +138,70 @@ int64_t pa_gen_send_opt(void* g, int64_t sent, int64_t* ok) {
     int done = 0;
     int64_t v = gen_run(g, sent, &done);
     if (ok) *ok = done ? 0 : 1;
+    if (done) {
+        // 子生成器结束：out 里是它的 return 值，引用转移给外层。
+        int64_t* p = (int64_t*)g;
+        int64_t rv = p[3];
+        p[3] = 0;
+        return rv;
+    }
+    return v;
+}
+
+/* throw / yield from 转发共用：确认 g 是生成器帧，否则按 TypeError 报错。 */
+static int64_t* gen_frame_or_raise(void* g, const char* what) {
+    if (!g) pa_raise_c("TypeError", what);
+    PyAdamasRc* h = (PyAdamasRc*)g - 1;
+    if (!rc_index_has(h) || h->kind != PYADAMAS_RC_OBJ ||
+        h->size < (int64_t)PYADAMAS_GEN_HEADER * 8 || *(int64_t*)g == PYADAMAS_AWAIT_MAGIC)
+        pa_raise_c("TypeError", what);
+    return (int64_t*)g;
+}
+
+/* gen.throw(exc)：把异常注入当前挂起点，由生成代码的 throw 分发重新抛出，
+   生成器自己的 try/except 能接住。已经结束的生成器没有挂起点可注入，
+   按 CPython 语义把异常直接抛给调用方。 */
+int64_t pa_gen_throw(void* g, PyAdamasExcValue* exc) {
+    int64_t* p = gen_frame_or_raise(g, "'throw' expects a generator");
+    if (!exc) pa_raise_c("TypeError", "throw() expects an exception");
+    if (p[1]) pa_raise_value(exc);
+    if (p[8]) {
+        exc_free((PyAdamasException*)p[8]);
+        p[8] = 0;
+    }
+    p[8] = (int64_t)pa_exc_from_value(exc);
+    int done = 0;
+    int64_t v = gen_run(g, 0, &done);
+    if (done) pa_raise_c("StopIteration", "");
+    return v;
+}
+
+/* yield from 的 throw 转发：exc 是 owned 的 PyAdamasException*，交给子生成器
+   的挂起点。子生成器结束（StopIteration）时把它的 return 值交给外层作为
+   yield from 的值；其余异常从子生成器逃出后原样向外层传播。 */
+int64_t pa_gen_throw_opt(void* g, int64_t exc, int64_t* ok) {
+    int64_t* p = gen_frame_or_raise(g, "'yield from' expects a generator");
+    if (p[1]) {
+        // 子生成器早已结束：异常在 yield from 处重新抛出。
+        PyAdamasException* e = (PyAdamasException*)(uintptr_t)exc;
+        if (!e) e = exc_new("RuntimeError", "throw() with no exception");
+        exc_free(pending_exc);
+        pending_exc = e;
+        exc_longjmp();
+    }
+    if (p[8]) {
+        exc_free((PyAdamasException*)p[8]);
+        p[8] = 0;
+    }
+    p[8] = exc;
+    int done = 0;
+    int64_t v = gen_run(g, 0, &done);
+    if (ok) *ok = done ? 0 : 1;
+    if (done) {
+        int64_t rv = p[3];
+        p[3] = 0;
+        return rv;
+    }
     return v;
 }
 
@@ -142,6 +215,7 @@ void pa_gen_close(void* g) {
     h.mark = pa_rc_mark();
     h.frame = pa_frame_top;
     handler_top = &h;
+    int64_t exc_depth0 = pa_exc_depth();
     if (setjmp(h.env) != 0) {
         handler_top = h.prev;
         pa_gen_release_slots(g);
@@ -150,11 +224,13 @@ void pa_gen_close(void* g) {
         p[5] = 0;
         p[2] = 0;
         p[3] = 0;
+        pa_exc_unwind(exc_depth0);
         exc_longjmp();
     }
     p[5] = 1;
     ((void (*)(void*, int64_t))(uintptr_t)p[4])(g, 0);
     handler_top = h.prev;
+    pa_exc_unwind(exc_depth0);
     pa_rc_cleanup(h.mark);
     pa_gen_release_slots(g);
     p[1] = 1;
@@ -172,12 +248,14 @@ void pa_gen_finalize(void* g) {
     h.mark = pa_rc_mark();
     h.frame = pa_frame_top;
     handler_top = &h;
+    int64_t exc_depth0 = pa_exc_depth();
     if (setjmp(h.env) == 0) {
         p[5] = 1;
         ((void (*)(void*, int64_t))(uintptr_t)p[4])(g, 0);
     } else {
         pa_exc_clear();
     }
+    pa_exc_unwind(exc_depth0);
     handler_top = h.prev;
     pa_rc_cleanup(h.mark);
     /* 正常跑完时槽已释放（空操作）；清理中途抛异常则在这里补一次。 */

@@ -31,6 +31,9 @@ void Lowerer::assign_to(Expr& target, VReg v, TypePtr vty) {
     // 以 vreg 上记录的类型为准：调用方传进来的 vty 有时是目标侧的类型
     TypePtr src_ty = vreg_ty(v);
     if (!src_ty || src_ty->kind == TyKind::Unknown) src_ty = vty;
+    // 值语义：`q = p` 必须复制一份 payload，不能共享同一个对象。
+    if (src_ty && src_ty->kind == TyKind::Struct && src_ty->st)
+        v = struct_copy(v, src_ty->st);
     switch (target.kind) {
         case ExprKind::Name: {
             auto& n = static_cast<Name&>(target);
@@ -136,6 +139,23 @@ void Lowerer::assign_to(Expr& target, VReg v, TypePtr vty) {
             VReg obj = expr(*s.value);
             VReg idx = expr(*s.slice);
             TypePtr ot = tc_.type_of(s.value.get());
+            if (ot && ot->kind == TyKind::Optional && ot->celem != CKind::None &&
+                !ot->sub.empty() && ot->sub[0]->kind == TyKind::Int) {
+                VReg base = guard_not_none(obj, "pointer to dereference");
+                idx = coerce(idx, tc_.type_of(s.slice.get()), t_int());
+                TypePtr et = cptr_elem_type(ot->celem);
+                VReg val = coerce(v, src_ty, et);
+                Inst in;
+                in.op = IrOp::PtrStore;
+                in.a = base;
+                in.b = idx;
+                in.c = val;
+                in.imm = ckind_width(ot->celem);
+                in.fwidth = static_cast<uint8_t>(in.imm);
+                in.ty = et;
+                emit(std::move(in));
+                break;
+            }
             if (ot && ot->kind == TyKind::Dict) {
                 TypePtr kt = ot->sub.empty() ? t_unknown() : ot->sub[0];
                 TypePtr vt = ot->sub.size() > 1 ? ot->sub[1] : t_unknown();
@@ -166,7 +186,26 @@ void Lowerer::assign_to(Expr& target, VReg v, TypePtr vty) {
         case ExprKind::Attribute: {
             auto& at = static_cast<Attribute&>(target);
             if (auto* n = dynamic_cast<Name*>(at.value.get())) {
-                if (tc_.cmodule(n->id)) {
+                if (const CImportDecl* cd = tc_.cmodule(n->id)) {
+                    bool handled = false;
+                    for (auto& cv : cd->vars) {
+                        if (cv.py_name != at.attr) continue;
+                        handled = true;
+                        if (cv.kind == CKind::Str || cv.kind == CKind::OptStr) {
+                            err(target.line, target.col,
+                                std::format("cannot assign to C string variable '{}.{}'",
+                                            n->id, at.attr));
+                            break;
+                        }
+                        v = coerce(v, src_ty, cvar_type(cv));
+                        Inst si;
+                        si.op = IrOp::StoreExtern;
+                        si.idx = extern_var_idx(cv);
+                        si.a = v;
+                        emit(std::move(si));
+                        break;
+                    }
+                    if (handled) break;
                     err(target.line, target.col,
                         std::format("cannot assign to cimport attribute '{}.{}'", n->id, at.attr));
                     break;
@@ -189,6 +228,22 @@ void Lowerer::assign_to(Expr& target, VReg v, TypePtr vty) {
             TypePtr raw = tc_.type_of(at.value.get());
             TypePtr ot = strip_optional(raw);
             bool opt = ot != raw;
+            if (ot && (ot->kind == TyKind::Struct || ot->kind == TyKind::StructPtr)) {
+                const StructInfo* s = ot->st;
+                const StructFieldInfo* f = s ? s->field(at.attr) : nullptr;
+                if (!f) {
+                    err(target.line, target.col,
+                        std::format("struct '{}' has no field '{}'",
+                                    s ? s->name : std::string("?"), at.attr));
+                    break;
+                }
+                VReg obj = expr(*at.value);
+                if (opt) obj = guard_not_none(obj, std::format("field '{}'", at.attr));
+                v = coerce(v, src_ty, f->ty);
+                field_store(obj, static_cast<int>(f->offset), v,
+                            static_cast<uint8_t>(f->size), f->c_unsigned);
+                break;
+            }
             if (ot && ot->kind == TyKind::Class && ot->cls) {
                 // `C.x = v`：写类属性的共享存储
                 if (is_class_receiver(at)) {
@@ -365,6 +420,16 @@ VReg Lowerer::expr(Expr& e) {
                             default: return const_int(k.i);
                         }
                     }
+                    for (auto& v : cd->vars) {
+                        if (v.py_name != a.attr) continue;
+                        int vidx = extern_var_idx(v);
+                        TypePtr vt = cvar_type(v);
+                        Inst in;
+                        in.op = IrOp::LoadExtern;
+                        in.idx = vidx;
+                        in.ty = vt;
+                        return def_heap(vt, std::move(in));
+                    }
                     for (auto& x : cd->externs)
                         if (x.py_name == a.attr) {
                             err(e.line, e.col,
@@ -401,6 +466,23 @@ VReg Lowerer::expr(Expr& e) {
             TypePtr raw = tc_.type_of(a.value.get());
             TypePtr ot = strip_optional(raw);
             bool opt = ot != raw;
+            if (ot && (ot->kind == TyKind::Struct || ot->kind == TyKind::StructPtr)) {
+                const StructInfo* s = ot->st;
+                if (!s) {
+                    err(e.line, e.col, std::format("struct has no field '{}'", a.attr));
+                    return const_none();
+                }
+                const StructFieldInfo* f = s->field(a.attr);
+                if (!f) {
+                    err(e.line, e.col,
+                        std::format("struct '{}' has no field '{}'", s->name, a.attr));
+                    return const_none();
+                }
+                VReg obj = expr(*a.value);
+                if (opt) obj = guard_not_none(obj, std::format("attribute '{}'", a.attr));
+                return field_load(obj, static_cast<int>(f->offset), f->ty,
+                                  static_cast<uint8_t>(f->size), f->c_unsigned);
+            }
             if (ot && ot->kind == TyKind::Exception) {
                 VReg ev = expr(*a.value);
                 if (a.attr == "args")
@@ -542,11 +624,8 @@ VReg Lowerer::expr(Expr& e) {
                     if (rcls) {
                         if (const ClassAttrInfo* ca = rcls->class_attr(a.attr))
                             return class_attr_load(rcls, ca);
-                        if (rcls->method(a.attr))
-                            err(e.line, e.col,
-                                std::format("method '{}.{}' must be called with ()", rcls->name,
-                                            a.attr));
-                        else if (rcls->field(a.attr))
+                        if (rcls->method(a.attr)) return lower_method_value(a);
+                        if (rcls->field(a.attr))
                             err(e.line, e.col,
                                 std::format("'{}.{}' is an instance field, not a class attribute",
                                             rcls->name, a.attr));
@@ -582,18 +661,17 @@ VReg Lowerer::expr(Expr& e) {
                     int off = static_cast<int>(8 * (1 + ot->cls->field_index(a.attr)));
                     return field_load(obj, off, f->ty);
                 }
-                // 实例字段没有，回退到类属性（Python 的实例查找顺序）
+                // 实例字段没有，回退到类属性（Python 的实例查找顺序）。
+                // 装饰方法在类属性里也有包装函数，但方法值要绑定接收者，
+                // 必须按方法处理。
+                if (ot->cls->method(a.attr)) return lower_method_value(a);
                 if (const ClassAttrInfo* ca = ot->cls->class_attr(a.attr)) {
                     VReg obj = expr(*a.value);
                     if (opt) obj = guard_not_none(obj, std::format("attribute '{}'", a.attr));
                     return class_attr_load_dyn(obj, ot->cls, ca);
                 }
-                if (ot->cls->method(a.attr))
-                    err(e.line, e.col,
-                        std::format("method '{}.{}' must be called with ()", ot->cls->name, a.attr));
-                else
-                    err(e.line, e.col,
-                        std::format("'{}' object has no attribute '{}'", ot->cls->name, a.attr));
+                err(e.line, e.col,
+                    std::format("'{}' object has no attribute '{}'", ot->cls->name, a.attr));
                 return const_none();
             }
             err(e.line, e.col, "attribute access is only supported as a method call");
@@ -1183,6 +1261,20 @@ VReg Lowerer::lower_subscript(Subscript& s) {
     }
 
     VReg idx = expr(*s.slice);
+    // ptr[T] 解引用：Optional[int] 上带元素种类时读 *(p + i)。
+    if (ot && ot->kind == TyKind::Optional && ot->celem != CKind::None && !ot->sub.empty() &&
+        ot->sub[0]->kind == TyKind::Int) {
+        VReg base = guard_not_none(obj, "pointer to dereference");
+        idx = coerce(idx, tc_.type_of(s.slice.get()), t_int());
+        Inst in;
+        in.op = IrOp::PtrLoad;
+        in.a = base;
+        in.b = idx;
+        in.imm = ckind_width(ot->celem);
+        in.fwidth = static_cast<uint8_t>(in.imm);
+        in.funsigned = ot->celem == CKind::UInt32;
+        return def(cptr_elem_type(ot->celem), std::move(in));
+    }
     if (ot && ot->kind == TyKind::Dict) {
         TypePtr kt = ot->sub.empty() ? t_unknown() : ot->sub[0];
         idx = coerce(idx, tc_.type_of(s.slice.get()), kt);
@@ -1373,7 +1465,7 @@ VReg Lowerer::dunder_call(VReg recv, TypePtr recv_ty, const char* name,
                           const std::vector<TypePtr>* arg_tys) {
     if (!recv_ty || recv_ty->kind != TyKind::Class || !recv_ty->cls) return kNoReg;
     const MethodInfo* m = recv_ty->cls->method(name);
-    if (!m || m->kind != MethodKind::Normal || !m->call_sig || m->slot < 0) return kNoReg;
+    if (!m || m->kind != MethodKind::Normal || !m->call_sig) return kNoReg;
     if (m->call_sig->varargs || m->call_sig->kwargs) return kNoReg;
     if (m->call_sig->pos.size() != args.size()) return kNoReg;
     // 形参是具体类时，实参必须能赋值给它（unknown 放行：由用户自己保证，
@@ -1390,6 +1482,24 @@ VReg Lowerer::dunder_call(VReg recv, TypePtr recv_ty, const char* name,
     }
     TypePtr rt = m->call_sig->ret ? m->call_sig->ret : t_none();
     if (want_ret && !type_eq(rt, want_ret)) return kNoReg;
+    if (m->decorated) {
+        // 装饰后的 dunder 存在类属性里：取包装函数，把 self 显式传进去。
+        const ClassAttrInfo* ca = recv_ty->cls->class_attr(name);
+        TypePtr wty = ca ? ca->ty : nullptr;
+        FuncInfoPtr winfo =
+            (wty && wty->kind == TyKind::Func) ? wty->fn : nullptr;
+        if (!winfo || winfo->varargs || winfo->kwargs) return kNoReg;
+        if (winfo->pos.size() != args.size() + 1) return kNoReg;
+        VReg fv = class_attr_load_dyn(recv, recv_ty->cls, ca);
+        Inst in;
+        in.op = IrOp::Call;
+        in.a = fv;
+        in.args.reserve(args.size() + 1);
+        in.args.push_back(recv);
+        for (VReg a : args) in.args.push_back(a);
+        return def_heap(rt, std::move(in));
+    }
+    if (m->slot < 0) return kNoReg;
     Inst vc;
     vc.op = IrOp::VCall;
     vc.a = recv;

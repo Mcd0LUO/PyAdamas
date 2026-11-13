@@ -486,6 +486,25 @@ PyAdamasDict* pa_dict_copy(PyAdamasDict* src) {
     return out;
 }
 
+/* dict(iterable)：元素是 (key, value) 二元组（PyAdamas 里 tuple 也是 list）。 */
+PyAdamasDict* pa_dict_from_pairs(PyAdamasList* src, int64_t key_kind, int64_t key_own,
+                                 int64_t val_own, int64_t hash_slot, int64_t eq_slot) {
+    PyAdamasDict* d = pa_dict_new(key_kind, key_own, val_own, hash_slot, eq_slot);
+    for (int64_t i = 0; i < src->len; ++i) {
+        PyAdamasList* pair = (PyAdamasList*)(uintptr_t)src->data[i];
+        if (!pair || pair->len != 2) {
+            // 抛异常会跳过临时栈接管：d 泄漏一张空表，可以接受。
+            pa_raise_c("ValueError", "dictionary update sequence element has wrong length");
+        }
+        int64_t k = pair->data[0];
+        int64_t v = pair->data[1];
+        pa_own_inc(key_own, k);
+        pa_own_inc(val_own, v);
+        pa_dict_set(d, k, v);
+    }
+    return d;
+}
+
 PyAdamasDict* pa_set_from_list(PyAdamasList* src, int64_t key_kind, int64_t key_own,
                              int64_t hash_slot, int64_t eq_slot) {
     // 列表元素种类可能比声明的 key_own 更保守（推导不出来时是 2），取较大者。

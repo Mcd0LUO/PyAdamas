@@ -175,6 +175,25 @@ PyAdamasList* pa_bytes_to_list(PyAdamasStr* s) {
     return out;
 }
 
+/* list[int] -> bytes；越界元素与 CPython 一样抛 ValueError。 */
+PyAdamasStr* pa_bytes_from_list(PyAdamasList* items) {
+    int64_t n = items ? items->len : 0;
+    PyAdamasStr* s = str_alloc(n);
+    char* out = (char*)s->data;
+    for (int64_t i = 0; i < n; ++i) {
+        int64_t v = pa_list_get(items, i);
+        if (v < 0 || v > 255) pa_raise_c("ValueError", "bytes must be in range(0, 256)");
+        out[i] = (char)(unsigned char)v;
+    }
+    return s;
+}
+
+/* bytes(n)：n 个零字节。rc_alloc 已把 payload 清零。 */
+PyAdamasStr* pa_bytes_zeros(int64_t n) {
+    if (n <= 0) return str_alloc(0);
+    return str_alloc(n);
+}
+
 /* 把单个字符串包成 [s]：subprocess.Popen("cmd", shell=True) 这种写法用。 */
 PyAdamasList* pa_str_wrap_list(PyAdamasStr* s) {
     PyAdamasList* out = pa_list_new(1, 1);

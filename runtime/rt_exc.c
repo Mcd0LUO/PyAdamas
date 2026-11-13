@@ -283,6 +283,70 @@ void pa_exc_done(void) {
     }
 }
 
+/* 生成器/协程挂起时要把异常上下文（当前异常 + 保存节点栈）一起带走：
+   恢复执行后 except 体里的 current_exc 仍然是挂起前那一个，而调用方
+   在生成器返回期间看到的是它自己的上下文。 */
+typedef struct PyAdamasExcNode {
+    PyAdamasException* cur;
+    PyAdamasExcSave* top;
+    struct PyAdamasExcNode* prev;
+} PyAdamasExcNode;
+
+static PyAdamasExcNode* exc_node_top;
+static int64_t exc_node_depth;
+
+int64_t pa_exc_depth(void) { return exc_node_depth; }
+
+int64_t pa_exc_enter(int64_t* cur, int64_t* top) {
+    PyAdamasException* gc = (PyAdamasException*)(uintptr_t)*cur;
+    PyAdamasExcSave* gt = (PyAdamasExcSave*)(uintptr_t)*top;
+    // 两边都空时不用压节点：绝大多数 resume 都走这条快路径。
+    if (current_exc || exc_save_top || gc || gt) {
+        PyAdamasExcNode* n = (PyAdamasExcNode*)malloc(sizeof(PyAdamasExcNode));
+        if (!n) panic_c("out of memory");
+        n->cur = current_exc;
+        n->top = exc_save_top;
+        n->prev = exc_node_top;
+        exc_node_top = n;
+        ++exc_node_depth;
+    }
+    current_exc = gc;
+    exc_save_top = gt;
+    *cur = 0;
+    *top = 0;
+    return exc_node_depth;
+}
+
+void pa_exc_leave(int64_t* cur, int64_t* top, int64_t token) {
+    *cur = (int64_t)(uintptr_t)current_exc;
+    *top = (int64_t)(uintptr_t)exc_save_top;
+    int64_t before = exc_node_depth;
+    while (exc_node_depth > token && exc_node_top) {
+        PyAdamasExcNode* n = exc_node_top;
+        exc_node_top = n->prev;
+        --exc_node_depth;
+        current_exc = n->cur;
+        exc_save_top = n->top;
+        free(n);
+    }
+    // 进入时没有压节点：调用方本来就没有异常上下文，恢复成空。
+    if (before == token) {
+        current_exc = NULL;
+        exc_save_top = NULL;
+    }
+}
+
+void pa_exc_unwind(int64_t depth) {
+    while (exc_node_depth > depth && exc_node_top) {
+        PyAdamasExcNode* n = exc_node_top;
+        exc_node_top = n->prev;
+        --exc_node_depth;
+        current_exc = n->cur;
+        exc_save_top = n->top;
+        free(n);
+    }
+}
+
 void pa_exc_clear(void) {
     exc_free(pending_exc);
     pending_exc = NULL;
@@ -420,6 +484,22 @@ void pa_raise_value_from(PyAdamasExcValue* v, PyAdamasExcValue* cause) {
 }
 
 void pa_raise_value(PyAdamasExcValue* v) { pa_raise_value_from(v, NULL); }
+
+/* finally 体要跨挂起保留待重抛异常：先把 pending 复制成异常值（堆对象，
+   由帧槽持有），再清空全局指针。挂起期间调用方的 raise/clear 不会碰到它。 */
+PyAdamasExcValue* pa_exc_take_value(void) {
+    PyAdamasExcValue* v = pa_exc_value_from_exc(pending_exc);
+    exc_free(pending_exc);
+    pending_exc = NULL;
+    return v;
+}
+
+/* finally 体结束：槽里还有异常就重新抛出（复制一份再 longjmp），
+   没有就正常返回，继续执行 try 之后的代码。 */
+void pa_exc_reraise_value_if(PyAdamasExcValue* v) {
+    if (!v) return;
+    pa_raise_value(v);
+}
 
 PyAdamasExcValue* pa_exc_value_cause(PyAdamasExcValue* v) {
     if (!v || v->magic != PYADAMAS_EXCVAL_MAGIC)

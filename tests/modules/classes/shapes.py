@@ -29,3 +29,7 @@ class Child(Base):
 
     def total(self, extra: int) -> int:
         return self.n + extra
+
+
+def make_point(x: int, y: int) -> Point:
+    return Point(x, y)

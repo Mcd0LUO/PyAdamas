@@ -54,6 +54,9 @@ void AsmGen::assign_vreg_slots() {
 
         constexpr int kInf = INT32_MAX;
         std::vector<int> def_pos(nv, -1);
+        // 同一个 vreg 可能被定义多次：挂起点恢复时用 load.slot 把值
+        // 装回原来的 vreg（见 Lowerer::spill_across_suspends）。
+        std::vector<int> def_count(nv, 0);
         std::vector<int> first_use(nv, kInf), last_use(nv, -1);
 
         auto touch = [&](VReg r, int bi) {
@@ -76,6 +79,7 @@ void AsmGen::assign_vreg_slots() {
                 if (in.dst != kNoReg && in.dst < nv) {
                     def_pos[in.dst] = pos_;
                     def_block_[in.dst] = bi;
+                    ++def_count[in.dst];
                 }
                 ++pos_;
             }
@@ -93,7 +97,7 @@ void AsmGen::assign_vreg_slots() {
             int fu = first_use[v];
             int lu = last_use[v];
             if (d < 0 && fu == kInf) continue;  // 既没定义也没使用
-            if (cross_block_[v]) {
+            if (cross_block_[v] || def_count[v] > 1) {
                 // 独占：区间覆盖整个函数，不会与任何人重叠
                 ranges.push_back({0, total_pos + 1, static_cast<int>(v)});
                 continue;
@@ -323,10 +327,12 @@ bool AsmGen::temp_reg_op_ok(const Inst& in) const {
             case IrOp::LoadSlot:
             case IrOp::StoreSlot:
             case IrOp::LoadGlobal:
+            case IrOp::LoadExtern:
             case IrOp::StoreGlobal:
             case IrOp::Len:
             case IrOp::IndexLoadUnchecked:
             case IrOp::FieldLoad:
+            case IrOp::PtrLoad:
             case IrOp::FieldStore:
             case IrOp::SlotAddr:
             case IrOp::Jump:

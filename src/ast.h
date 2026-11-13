@@ -522,7 +522,7 @@ enum class StmtKind : uint8_t {
     If, While, For,
     FunctionDef, ClassDef,
     Try, With, Raise, Assert,
-    Import, ImportFrom, Global, Nonlocal, Delete, Match, CImport,
+    Import, ImportFrom, Global, Nonlocal, Delete, Match, CImport, StructDef,
 };
 
 struct Stmt {
@@ -719,6 +719,30 @@ struct ClassDef : Stmt {
         for (auto& b : bases) b->dump(os, ind + 1);
         pad(os, ind + 1); os << "body:\n";
         for (auto& s : body) s->dump(os, ind + 2);
+    }
+};
+
+// 值类型 struct 的字段声明：`x: float`。
+struct StructFieldDef {
+    std::string name;
+    ExprPtr type;  // 只允许 int / float / bool 的 Name
+    int line = 1;
+    int col = 1;
+};
+
+// `struct Point:` 块。布局与 C 结构体一致，字段按声明顺序排列。
+struct StructDef : Stmt {
+    std::string name;
+    std::vector<StructFieldDef> fields;
+    StructDef() : Stmt(StmtKind::StructDef) {}
+    void dump(std::ostream& os, int ind) const override {
+        pad(os, ind);
+        os << "StructDef(" << name << ")\n";
+        for (auto& f : fields) {
+            pad(os, ind + 1);
+            os << "field " << f.name << ":\n";
+            f.type->dump(os, ind + 2);
+        }
     }
 };
 

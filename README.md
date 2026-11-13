@@ -141,7 +141,7 @@ tools/                    一次性脚本
 
 语法层明确拒绝：超出 int64 的整数、`0x1L` 这类 Python 2 写法、PEP 695 泛型语法等少数边角。
 
-能解析、能检查，但 `build` 报错：通过 unknown 函数值的 `*` / `**` 展开、非异常类名当异常用、导入类模式的字段子模式和 unknown 值上的数值/list/dict 内置类型模式、类装饰器与自定义方法装饰器。`finally` 体里跳出 finally 的 `return` / `break` / `continue` 也会被拒。生成器已支持 `yield` 与 `yield from`，但 `yield`/`yield from` 只能作为语句或赋值右值，不能位于 `finally`/`except` 体内；生成器表达式是惰性的（脱糖成合成生成器函数，`sum`/`min`/`max`/`any`/`all` 流式消费），只有类体里仍按 list 构造。协程已支持 `async def` / `await` / `asyncio.run` / `sleep` / `gather` / `create_task`（`done()` / `cancel()`，取消级联）、`Future`、异步生成器（`async for`、`async with`、`asend`/`__anext__`/`aclose`）、`wait_readable`/`wait_writable`、Future 回调与 `set_exception`（回调同步执行，`set_exception` 接收异常实例或消息）、`athrow`，但 `await` 只能作为语句、赋值右值或 `return` 值，异步推导式只能作为语句、赋值或 `return` 的根表达式。类支持多继承（C3 MRO；附加基类可复用主基类已有字段）、零参 `super().m()` / `super().__init__()`、`@staticmethod`、`@property`/setter/deleter、类属性、`@classmethod`；没有类装饰器；字段可以不写标注，由 `self.x = ...` 推断。闭包、`lambda`、`*args`/`**kwargs`、推导式、`with`、函数装饰器、`try/except/else/finally`、`raise`、`del`、`match/case`、复数字面量、字典/集合、`in`、容器方法与删除、切片（读与赋值）已支持；循环收集器是保守的，可能延迟回收，但没有 `__del__`/弱引用。异常值是对象：`except ... as e` 得到一个带 `args` 的异常值，支持 `raise e`、`raise ... from`、`__cause__`、`str(e)` 和 `ValueError("msg")` 构造；自定义异常类继承内置异常（类体目前只允许 `pass`）；`args` 只保存消息，没有 traceback。import 支持本地包与相对导入（需要 `__init__.py`）：`import pkg`、`import pkg.mod as m`、`from pkg import mod`、`from .mod import x`、`from ..pkg import y`，以及静态展开的 `from m import *`（按非下划线名字导出，暂不解析 `__all__`）；跨模块继承还没接；已内置 `math`/`sys`/`asyncio`/`random`/`os`/`os.path`/`subprocess`/`time`/`itertools`/`collections`/`functools`/`json`/`string`/`re`/`datetime`/`pathlib`，`csv` 尚未实现；导入类可以构造、访问字段和调用方法，但类类型出现在跨模块函数签名里会降级成 unknown。空字典的 key 类型是 unknown，内容相同的动态字符串 key 可能按机器字不等；混合 value 类型会退化成 unknown；`keys()` / `values()` / `items()` 返回列表而不是视图。
+能解析、能检查，但 `build` 报错：通过 unknown 函数值的 `*` / `**` 展开、非异常类名当异常用、导入类模式的字段子模式和 unknown 值上的数值/list/dict 内置类型模式、类装饰器与自定义方法装饰器。`finally` 体里跳出 finally 的 `return` / `break` / `continue` 也会被拒。生成器已支持 `yield`、`yield from` 与 `throw`，挂起点可以出现在任意子表达式、`except` 与 `finally` 体内（`finally` 体内不能 `return`/`break`/`continue` 跳出）；`Generator[Y, S, R]` 标注可收窄 `send` 实参与 `yield` 表达式的类型；生成器表达式是惰性的（脱糖成合成生成器函数，`sum`/`min`/`max`/`any`/`all` 流式消费），只有类体里仍按 list 构造。协程已支持 `async def` / `await` / `asyncio.run` / `sleep` / `gather` / `create_task`（`done()` / `cancel()`，取消级联）、`Future`、异步生成器（`async for`、`async with`、`asend`/`__anext__`/`aclose`）、`wait_readable`/`wait_writable`、Future 回调与 `set_exception`（回调同步执行，`set_exception` 接收异常实例或消息）、`athrow`，`await` 可以出现在任意子表达式与 `finally` 体内，异步推导式只能作为语句、赋值或 `return` 的根表达式。类支持多继承（C3 MRO；附加基类可复用主基类已有字段）、零参 `super().m()` / `super().__init__()`、`@staticmethod`、`@property`/setter/deleter、类属性、`@classmethod`；没有类装饰器；字段可以不写标注，由 `self.x = ...` 推断。闭包、`lambda`、`*args`/`**kwargs`、推导式、`with`、函数装饰器、`try/except/else/finally`、`raise`、`del`、`match/case`、复数字面量、字典/集合、`in`、容器方法与删除、切片（读与赋值）已支持；循环收集器是保守的，可能延迟回收，但没有 `__del__`/弱引用。异常值是对象：`except ... as e` 得到一个带 `args` 的异常值，支持 `raise e`、`raise ... from`、`__cause__`、`str(e)` 和 `ValueError("msg")` 构造；自定义异常类继承内置异常（类体目前只允许 `pass`）；`args` 只保存消息，没有 traceback。import 支持本地包与相对导入（需要 `__init__.py`）：`import pkg`、`import pkg.mod as m`、`from pkg import mod`、`from .mod import x`、`from ..pkg import y`，以及静态展开的 `from m import *`（按非下划线名字导出，暂不解析 `__all__`）；跨模块继承还没接；已内置 `math`/`sys`/`asyncio`/`random`/`os`/`os.path`/`subprocess`/`time`/`itertools`/`collections`/`functools`/`json`/`string`/`re`/`datetime`/`pathlib`，`csv` 已实现 reader/writer 子集；导入类可以构造、访问字段和调用方法，类类型出现在跨模块函数签名里也保留。空字典的 key 类型是 unknown，内容相同的动态字符串 key 可能按机器字不等；混合 value 类型会退化成 unknown；`keys()` / `values()` / `items()` 返回列表而不是视图。
 
 语义上有意与 CPython 不同：列表相等比指针、整数溢出回绕、字符串按字节（`len("中文") == 6`）、读未赋值局部变量得到 0。引用计数处理不了的环和 `unknown` / `list[unknown]` / 混合元组引用由保守 GC 兜底；误报只延迟回收，没有 `__del__`/弱引用。
 
@@ -152,17 +152,17 @@ tools/                    一次性脚本
 | 组 | 数量 | 内容 |
 |---|---|---|
 | `tests/*.py` | 11 | 前端正例，275 条语句 / 37 个函数 / 1203 个表达式 |
-| `tests/fail/*.py` | 37 | 反例，必须报出首行 `# expect:` 指定的错 |
-| `tests/run/*.py` | 91 | 编译 + 运行，输出与文件末尾的 `# --- expect ---` 逐行比对 |
+| `tests/fail/*.py` | 52 | 反例，必须报出首行 `# expect:` 指定的错 |
+| `tests/run/*.py` | 127 | 编译 + 运行，输出与文件末尾的 `# --- expect ---` 逐行比对 |
 | `tests/unsupported/*.py` | 1 | `check` 必须打「没建模」标记，且 `build` 必须拒绝 |
-| `tests/diff/` | 6 个生成器 | 随机程序与 CPython 比 stdout，默认 3 种子 810 个程序 |
-| `tests/modules/` | 9 个目录 | 多模块编译 + 运行 + 二次构建缓存命中 |
+| `tests/diff/` | 6 个生成器 | 随机程序与 CPython 比 stdout，默认 3 种子 840 个程序 |
+| `tests/modules/` | 11 个目录 | 多模块编译 + 运行 + 二次构建缓存命中 |
 | 内存验收 | — | 16MB 地址空间限制下跑拼接 / 对象 / 闭包 / 容器 / 切片 / 删除 / 推导式 / 变长实参 / `with` / 装饰器 / 异常展开 / 生成器 / `yield from` / 协程 / Task / Future / fd 等待 / 异步生成器 / 异步推导式 / 环 / unknown 泄漏 |
 
 ```bash
 ctest --preset dev
 ./build/dev/pyadamas build -o /tmp/run_diff.prog tests/diff/run_diff.py
-/tmp/run_diff.prog --pyadamas build/dev/pyadamas --cpython python3 --seeds 3   # 810 个程序
+/tmp/run_diff.prog --pyadamas build/dev/pyadamas --cpython python3 --seeds 3   # 840 个程序
 ```
 
 前端鲁棒性基线（CPython 3.11 标准库 + site-packages，38582 个 `.py`）：语法通过 35693，其中类型通过 29143（81.6%）；标准库本体 1143 / 1289（88.7%）。0.6 引入类检查后口径变了——刚加上时失败 19064 个文件，逐条去误杀后降到 6550 个，明细见 [compatibility.md](docs/compatibility.md#前端鲁棒性基线)。

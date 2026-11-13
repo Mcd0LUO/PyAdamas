@@ -1,0 +1,5 @@
+cmodule badstruct_byval
+
+# 不透明句柄只能通过 ptr[Opaque] 传递，不能按值。
+struct Opaque
+extern def "use" as use(x: Opaque) -> None

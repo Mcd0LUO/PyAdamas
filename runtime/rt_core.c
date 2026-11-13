@@ -111,6 +111,8 @@ static int rc_leaf_untracked(const PyAdamasRc* h) {
     if (h->kind == PYADAMAS_RC_STR) return 1;
     // range 只存边界，没有堆字段（出边为零），不可能处在环里。
     if (h->kind == PYADAMAS_RC_RANGE) return 1;
+    // 值类型 struct：payload 只有标量字段，同样没有出边。
+    if (h->kind == PYADAMAS_RC_STRUCT) return 1;
     if (h->kind == PYADAMAS_RC_INSTANCE && !h->dtor && !h->release) return 1;
     return 0;
 }
@@ -382,6 +384,15 @@ void pa_rc_temp(void* p) {
 void pa_rc_cleanup(int64_t mark) {
     if (mark < 0 || mark > temp_len) panic_c("invalid temporary stack mark");
     while (temp_len > mark) pa_rc_dec(temp_stack[--temp_len]);
+}
+
+/* unknown 值入临时栈：先按 RC 索引确认是堆对象，再接管调用者的引用。
+   unknown 里可能是整数，直接 pa_rc_temp 会按指针读头部。 */
+void pa_rc_temp_unknown(int64_t v) {
+    if (!v) return;
+    PyAdamasRc* h = (PyAdamasRc*)(uintptr_t)((uint64_t)v - (uint64_t)PYADAMAS_RC_HDR);
+    if (!rc_index_has(h)) return;
+    pa_rc_temp((void*)(uintptr_t)v);
 }
 
 /* 程序退出前由入口函数调用：临时栈此时已经清空，把栈本身的存储还掉。 */

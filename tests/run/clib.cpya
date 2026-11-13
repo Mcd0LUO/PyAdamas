@@ -18,13 +18,55 @@ extern def "labs" as labs(x: int) -> int
 extern def "abs" as abs32(x: int32) -> int32
 extern def "isalpha" as is_alpha(c: int32) -> bool
 extern def "malloc" as malloc(n: int) -> ptr
+# 带元素类型的指针返回值：支持 p[i] 解引用。
+extern def "malloc" as malloc_i(n: int) -> ptr[int]
+extern def "malloc" as malloc_f(n: int) -> ptr[float]
 extern def "free" as free(p: ptr) -> None
 extern def "free" as free_opt(p: Optional[str]) -> None
 extern def "memset" as memset(p: ptr[int], v: int32, n: int) -> ptr[int]
 extern def "getenv" as getenv(name: str) -> Optional[str]
+# 可变参数：参数表末尾的 ... 允许任意多个额外实参。
+extern def "printf" as printf(fmt: str, ...) -> int32
+# C 回调：比较函数收到元素指针，py23 侧用 ptr[int] 标注后解引用。
+extern def "qsort" as qsort(base: ptr, n: int, size: int, cmp: fn(ptr[int], ptr[int]) -> int) -> None
 # 8 个 int 参数：验证超过 6 个时走栈。
 extern def "syscall" as syscall(n: int, a1: int, a2: int, a3: int, a4: int, a5: int, a6: int, a7: int) -> int
 # 缓冲区传参：list[float] / list[int] / bytes 的 data 指针。
 extern def "modf" as modf(x: float, iptr: ptr[float]) -> float
 extern def "time" as time_at(t: ptr[int]) -> int
 extern def "memcmp" as memcmp(a: ptr, b: ptr, n: int) -> int32
+
+# 带字段的 C 结构体：布局按 C 规则计算，ptr[tm] 可直接读写字段。
+struct tm:
+    tm_sec: int32
+    tm_min: int32
+    tm_hour: int32
+    tm_mday: int32
+    tm_mon: int32
+    tm_year: int32
+    tm_wday: int32
+    tm_yday: int32
+    tm_isdst: int32
+    tm_gmtoff: int
+    tm_zone: ptr
+
+extern def "gmtime" as gmtime(t: ptr[int]) -> ptr[tm]
+
+# 按值结构体：8 字节 INTEGER 返回（rax）、16 字节返回（rax/rdx）、
+# 4 字节按值传参（整数寄存器）。
+struct div_t:
+    quot: int32
+    rem: int32
+struct ldiv_t:
+    quot: int
+    rem: int
+struct in_addr:
+    s_addr: uint32
+
+extern def "div" as div(n: int32, d: int32) -> div_t
+extern def "ldiv" as ldiv(n: int, d: int) -> ldiv_t
+extern def "htonl" as htonl(x: uint32) -> uint32
+extern def "inet_ntoa" as inet_ntoa(a: in_addr) -> str
+
+# C 全局变量：optind 是 int（getopt 的全局游标），初始值为 1。
+extern var "optind" as optind: int32

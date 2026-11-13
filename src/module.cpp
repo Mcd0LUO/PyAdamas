@@ -40,6 +40,8 @@ struct Enc {
 struct Dec {
     const unsigned char* p;
     const unsigned char* end;
+    // 接口里类按名字引用；类表解码完之前先登记，最后统一解析。
+    std::vector<std::pair<TypePtr, std::string>> pending_classes;
 
     void need(size_t n) {
         if (static_cast<size_t>(end - p) < n) throw std::runtime_error("truncated interface");
@@ -98,6 +100,7 @@ void enc_default(Enc& e, const Param& p) {
         case LiteralValue::Kind::Int: e.u8(3); e.i64(v.i); break;
         case LiteralValue::Kind::Float: e.u8(4); e.f64(v.f); break;
         case LiteralValue::Kind::Str: e.u8(5); e.str(v.s); break;
+        case LiteralValue::Kind::Bytes: e.u8(7); e.str(v.s); break;
     }
 }
 
@@ -105,7 +108,7 @@ Param dec_default(Dec& d) {
     Param p;
     uint8_t tag = d.u8();
     p.has_default = tag != 0;
-    if (tag >= 1 && tag <= 5) {
+    if (tag >= 1 && tag <= 7) {
         LiteralValue v;
         switch (tag) {
             case 1: v.kind = LiteralValue::Kind::None; break;
@@ -123,6 +126,10 @@ Param dec_default(Dec& d) {
                 break;
             case 5:
                 v.kind = LiteralValue::Kind::Str;
+                v.s = d.str();
+                break;
+            case 7:
+                v.kind = LiteralValue::Kind::Bytes;
                 v.s = d.str();
                 break;
             default: break;
@@ -218,11 +225,26 @@ void enc_type(Enc& e, const TypePtr& t) {
     }
     switch (t->kind) {
         case TyKind::Unknown: e.u8(0); break;
-        // 生成器/协程跨模块接口暂不支持：按 unknown 处理，调用点退回保守路径
-        case TyKind::Generator:
+        // 生成器/协程/异步生成器跨模块保留元素/结果类型；其余 asyncio 对象仍按 unknown。
+        case TyKind::Generator: {
+            e.u8(14);
+            enc_type(e, t->sub.empty() ? nullptr : t->sub[0]);
+            for (size_t i = 1; i < 3; ++i) {
+                bool has = t->sub.size() > i && t->sub[i];
+                e.u8(has ? 1 : 0);
+                if (has) enc_type(e, t->sub[i]);
+            }
+            break;
+        }
         case TyKind::Coroutine:
-        case TyKind::Task:
+            e.u8(15);
+            enc_type(e, t->sub.empty() ? nullptr : t->sub[0]);
+            break;
         case TyKind::AsyncGenerator:
+            e.u8(16);
+            enc_type(e, t->sub.empty() ? nullptr : t->sub[0]);
+            break;
+        case TyKind::Task:
         case TyKind::Future:
         case TyKind::AsyncEvent:
         case TyKind::AsyncLock:
@@ -245,6 +267,9 @@ void enc_type(Enc& e, const TypePtr& t) {
         case TyKind::DateTime:
         case TyKind::Path:
         case TyKind::Deque:
+        // struct 的布局不跨模块序列化：按 unknown 处理。
+        case TyKind::Struct:
+        case TyKind::StructPtr:
             e.u8(0);
             break;
         case TyKind::Bytes: e.u8(12); break;
@@ -281,9 +306,11 @@ void enc_type(Enc& e, const TypePtr& t) {
             enc_sig(e, t->fn);
             break;
         case TyKind::Class:
+            // 类按名字引用，导入方在类表解码完后解析成 ClassInfo*。
+            e.u8(13);
+            e.str(t->cls ? t->cls->name : "");
+            break;
         case TyKind::BoundMethod:
-            // 0.14b：类出现在跨模块签名里先按未知处理；类本身通过
-            // classes 记录导入，构造/字段/方法仍可用。
             e.u8(0);
             break;
     }
@@ -325,6 +352,21 @@ TypePtr dec_type(Dec& d) {
             return t;
         }
         case 12: return t_bytes();
+        case 14: {
+            TypePtr y = dec_type(d);
+            TypePtr s = d.u8() ? dec_type(d) : nullptr;
+            TypePtr r = d.u8() ? dec_type(d) : nullptr;
+            return mk_generator(y, s, r);
+        }
+        case 15: return mk_coroutine(dec_type(d));
+        case 16: return mk_async_generator(dec_type(d));
+        case 13: {
+            // 类引用：先占位，等模块类表解码完再填 cls。
+            TypePtr t = std::make_shared<Type>();
+            t->kind = TyKind::Unknown;
+            d.pending_classes.emplace_back(t, d.str());
+            return t;
+        }
         default: throw std::runtime_error("unknown type tag in interface");
     }
 }
@@ -420,7 +462,7 @@ std::expected<ModuleInfoPtr, std::string> decode_module_interface(const std::str
         uint64_t got = fnv1a64(bytes.data(), bytes.size() - 8);
         if (want != got) return std::unexpected("interface checksum mismatch");
         Dec d{reinterpret_cast<const unsigned char*>(bytes.data()),
-              reinterpret_cast<const unsigned char*>(bytes.data()) + bytes.size() - 8};
+              reinterpret_cast<const unsigned char*>(bytes.data()) + bytes.size() - 8, {}};
         d.p += sizeof kMagic;
         uint16_t fmt = d.u16();
         uint16_t abi = d.u16();
@@ -465,6 +507,12 @@ std::expected<ModuleInfoPtr, std::string> decode_module_interface(const std::str
             ic.ctor_sig = dec_sig(d);
             ic.ctor_symbol = d.str();
             info->classes[name] = std::move(ic);
+        }
+        for (auto& [t, cname] : d.pending_classes) {
+            auto it = info->classes.find(cname);
+            if (it == info->classes.end() || !it->second.cls) continue;
+            t->kind = TyKind::Class;
+            t->cls = it->second.cls.get();
         }
         info->interface_hash = hex64(fnv1a64(bytes));
         return info;

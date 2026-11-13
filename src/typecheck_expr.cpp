@@ -235,6 +235,13 @@ TypePtr TypeChecker::expr(Expr& e) {
                             return ot->sub[static_cast<size_t>(i)];
                     }
                 }
+                // ptr[T] 解引用：Optional[int] 上带元素种类时支持 p[i]。
+                if (ot && ot->kind == TyKind::Optional && ot->celem != CKind::None &&
+                    !ot->sub.empty() && ot->sub[0]->kind == TyKind::Int) {
+                    if (!is_unknown(it) && it->kind != TyKind::Int && it->kind != TyKind::Bool)
+                        err(s.line, s.col, "pointer index must be an integer");
+                    return cptr_elem_type(ot->celem);
+                }
                 return subscript_type(ot, it, s.line, s.col);
             }
             case ExprKind::Attribute: {
@@ -243,6 +250,14 @@ TypePtr TypeChecker::expr(Expr& e) {
                     if (const CImportDecl* cd = cmodule(vn->id)) {
                         for (auto& c : cd->consts)
                             if (c.name == a.attr) return ckind_type(c.kind);
+                        for (auto& v : cd->vars) {
+                            if (v.py_name != a.attr) continue;
+                            if (v.kind == CKind::Ptr && !v.struct_name.empty()) {
+                                if (StructInfo* st = struct_info(v.struct_name))
+                                    return mk_optional(mk_struct_ptr(st));
+                            }
+                            return ckind_type(v.kind);
+                        }
                         for (auto& x : cd->externs) {
                             if (x.py_name != a.attr) continue;
                             auto it = extern_fns_.find(&x);
@@ -275,10 +290,21 @@ TypePtr TypeChecker::expr(Expr& e) {
                 auto ot = expr(*a.value);
                 if (is_unknown(ot)) return t_unknown();
                 if (ot->kind == TyKind::Optional) {
-                    // 收窄做不到逐条路径成立，但内层是类时字段类型是确定的；
-                    // 拒绝访问会大面积误杀，运行时有空指针检查兜底。
-                    if (ot->sub.empty() || ot->sub[0]->kind != TyKind::Class) return t_unknown();
+                    // 收窄做不到逐条路径成立，但内层是类/结构体指针时字段
+                    // 类型是确定的；运行时有空指针检查兜底。
+                    if (ot->sub.empty()) return t_unknown();
+                    TyKind ik = ot->sub[0]->kind;
+                    if (ik != TyKind::Class && ik != TyKind::Struct && ik != TyKind::StructPtr)
+                        return t_unknown();
                     ot = ot->sub[0];
+                }
+                if (ot->kind == TyKind::Struct || ot->kind == TyKind::StructPtr) {
+                    const StructInfo* s = ot->st;
+                    if (!s) return t_unknown();
+                    if (const auto* f = s->field(a.attr)) return f->ty;
+                    err(a.line, a.col,
+                        std::format("struct '{}' has no field '{}'", s->name, a.attr));
+                    return t_unknown();
                 }
                 if (ot->kind == TyKind::Exception) {
                     if (a.attr == "args") return mk_tuple({t_str()});
@@ -369,7 +395,8 @@ TypePtr TypeChecker::expr(Expr& e) {
                         // 类接收者：`C.x` / `cls.x` 只可能是类属性或方法，
                         // 实例字段在类上不存在（同名时也不能被它挡住）。
                         if (const ClassAttrInfo* ca = ot->cls->class_attr(a.attr)) return ca->ty;
-                        if (ot->cls->method(a.attr)) return mk_bound(ot, a.attr);
+                        if (const MethodInfo* m = ot->cls->method(a.attr))
+                            return mk_method_value(*m, true);
                         if (ot->cls->is_open()) return t_unknown();
                         err(a.line, a.col,
                             std::format("class '{}' has no attribute '{}'", ot->cls->name,
@@ -377,8 +404,11 @@ TypePtr TypeChecker::expr(Expr& e) {
                         return t_unknown();
                     }
                     if (auto* f = ot->cls->field(a.attr)) return f->ty;
+                    // 装饰方法在类属性里也有包装函数，必须先按方法查，
+                    // 否则会把含 self 的包装签名当成方法值的类型。
+                    if (const MethodInfo* m = ot->cls->method(a.attr))
+                        return mk_method_value(*m, false);
                     if (const ClassAttrInfo* ca = ot->cls->class_attr(a.attr)) return ca->ty;
-                    if (ot->cls->method(a.attr)) return mk_bound(ot, a.attr);
                     // `self.x` 找不到：可能是 mixin 组合出来的成员，也可能
                     // 是类体里赋的类属性——两种都不是错误，静态上认输。
                     if (is_self_attr(a)) return t_unknown();
@@ -499,7 +529,11 @@ TypePtr TypeChecker::expr(Expr& e) {
                 auto& y = static_cast<Yield&>(e);
                 TypePtr t = y.value ? expr(*y.value) : t_none();
                 if (yields_) yields_->push_back(t);
-                // yield 表达式本身的值是 send() 传进来的，静态不可知
+                // yield 表达式的值是 send() 传进来的：声明了
+                // Generator[Y, S, R] 就按 S 收窄，否则静态不可知。
+                if (cur_fn_ && cur_fn_->ret && cur_fn_->ret->kind == TyKind::Generator &&
+                    cur_fn_->ret->sub.size() > 1 && cur_fn_->ret->sub[1])
+                    return cur_fn_->ret->sub[1];
                 return t_unknown();
             }
             case ExprKind::YieldFrom: {

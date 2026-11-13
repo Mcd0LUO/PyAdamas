@@ -24,6 +24,13 @@ TypePtr TypeChecker::builtin_call(const std::string& n, Call& c) {
         };
 
         if (n == "print") {
+            // struct 是值类型，没有通用的文本表示；直接打印会把 payload
+            // 地址当成整数输出，必须明确拒绝。
+            for (size_t i = 0; i < c.args.size() && i < a.size(); ++i) {
+                if (a[i] && (a[i]->kind == TyKind::Struct || a[i]->kind == TyKind::StructPtr))
+                    err(c.args[i]->line, c.args[i]->col,
+                        "cannot print a struct value; print its fields instead");
+            }
             for (size_t i = 0; i < c.keywords.size(); ++i) {
                 auto& kw = c.keywords[i];
                 if (kw.arg.empty()) {
@@ -161,7 +168,16 @@ TypePtr TypeChecker::builtin_call(const std::string& n, Call& c) {
             if (a.empty()) return mk_set(fresh_hole());
             return mk_set(iter_elem(a[0], c.line, c.col));
         }
-        if (n == "dict") return mk_dict(t_unknown(), t_unknown());
+        if (n == "dict") {
+            if (a.size() == 1) {
+                TypePtr et = iter_elem(a[0], c.line, c.col);
+                if (et && (et->kind == TyKind::Tuple || et->kind == TyKind::List) &&
+                    et->sub.size() == 2)
+                    return mk_dict(et->sub[0], et->sub[1]);
+                if (et && et->kind == TyKind::Str) return mk_dict(t_str(), t_str());
+            }
+            return mk_dict(t_unknown(), t_unknown());
+        }
         if (n == "ord") return t_int();
         if (n == "chr") return t_str();
         if (n == "__pa_capwords") {
@@ -400,6 +416,23 @@ TypePtr TypeChecker::builtin_call(const std::string& n, Call& c) {
         if (n == "map" || n == "filter") {
             if (a.size() >= 2) return mk_list(iter_elem(a[1], c.line, c.col));
             return mk_list(t_unknown());
+        }
+        if (n == "bytes") {
+            if (a.empty()) return t_bytes();
+            if (a.size() != 1) {
+                err(c.line, c.col,
+                    std::format("bytes() expects at most 1 argument, got {}", a.size()));
+                return t_bytes();
+            }
+            TypePtr at = a[0];
+            if (at && (at->kind == TyKind::Bytes || at->kind == TyKind::Int)) return t_bytes();
+            if (at && at->kind == TyKind::List && !at->sub.empty() && at->sub[0] &&
+                at->sub[0]->kind == TyKind::Int)
+                return t_bytes();
+            err(c.args[0]->line, c.args[0]->col,
+                std::format("bytes() argument must be int, bytes or list[int], got '{}'",
+                            type_name(at)));
+            return t_bytes();
         }
         (void)need;
         return t_unknown();

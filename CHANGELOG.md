@@ -4,6 +4,437 @@
 
 早期阶段没有逐条留痕，按阶段归纳；0.4 之后逐条记录。
 
+## [0.133] - 2026-11-13
+
+`Generator[Y, S, R]` 标注给 `send` 与 `yield` 表达式静态类型。
+
+### 变更
+
+- 注解解析：`Generator` 接受 1–3 个参数，`sub[0]` = yield 类型、`sub[1]` =
+  `send` 值类型、`sub[2]` = `return` 值类型（只做记录，`StopIteration.value`
+  仍是 unknown）；`AsyncGenerator` 仍只接受一个参数。
+- 类型检查：函数返回 `Generator[Y, S, R]` 时，`x = yield v` 里 `x` 的类型是
+  `S`，`.send(v)` 按 `S` 检查实参并返回 `Y`（`throw` 仍返回 unknown）。
+  显式标注优先于生成器返回类型的推导结果，避免元素类型退化成 unknown 后
+  把标注的 S/R 一起覆盖掉。
+- 未标注时行为不变：`yield` 表达式与 `send` 值仍是 unknown，不做检查。
+- 跨模块接口：`Generator` 额外编码 send / return 类型的 presence 字节与类型，
+  模块格式版本升到 7。
+- 新增 `tests/run/128_send_type.py`（`Generator[int, int, None]`、
+  `Generator[str, str, None]`、只写 `Generator[int]` 三种）与反例
+  `tests/fail/f20_send_type.py`（`send("oops")` 报
+  `send() expects int, got str`），`build/memcheck.sh` 覆盖该用例。
+
+## [0.132] - 2026-11-13
+
+方法值（bound method）：`obj.m` / `C.m` 不加括号得到绑定接收者的函数值。
+
+### 变更
+
+- 类型检查：用户类的方法属性不再返回 `BoundMethod`，而是按
+  `mk_method_value` 合成函数签名——实例上的普通方法去掉 `self`，静态/类
+  方法保持原签名，装饰方法按包装函数签名去掉 `self`；类接收者
+  （`C.m`）上的静态/类方法保持绑定语义。
+- 降级：`lower_method_value` 为每次取方法值合成一个零参/一参闭包，
+  捕获接收者（单元素 cell），调用时按方法种类分派：实例普通方法
+  `vcall`（子类覆盖生效）、静态/类方法 `vcall_static`、类接收者
+  `call_direct` 到该类的 vtable 最终实现、装饰方法调用类属性里的包装
+  函数并补 `self`。默认参数与关键字参数沿用合成签名。
+- 实例属性读取顺序调整：先查方法再查类属性，避免装饰方法的包装函数
+  被当成普通类属性读出来。
+- 新增 `tests/run/127_bound_method.py`（变量/容器/实参传递、默认与关键字
+  参数、静态/类方法、子类覆盖、装饰方法、optional 接收者），
+  `build/memcheck.sh` 覆盖该用例。
+
+## [0.131] - 2026-11-13
+
+vtable 槽 dunder 支持装饰器：构造、`with` / `async with`、`__call__`。
+
+### 变更
+
+- `__init__`、`__enter__`、`__exit__`、`__aenter__`、`__aexit__`、
+  `__call__` 与算术/比较那批 dunder 一样，可以套自定义装饰器。装饰后的
+  实现不填 vtable 槽，调用点统一用 `dunder_call` 从类属性取包装函数并
+  显式补上实例，子类覆盖仍然生效。
+- 构造路径：`lower_construct` 与跨模块/前向引用的构造包装函数
+  （`compile_ctor_wrapper`）都按 `decorated` 分派，装饰器可以改
+  `__init__` 的副作用和返回值。
+- `with` / `async with`：`FuncCtx::Cleanup` 新增 `exit_cls`，退出路径
+  （正常、`return`/`break`/`continue`、异常展开）都从类属性分派；绑定值
+  的类型按包装函数的返回值计算。
+- 实例调用 `obj(...)`：类型检查新增 `name_is_class`，用
+  `class_obj_names_` 区分「类名引用（构造）」和「装着实例的变量/调用
+  结果（`__call__`）」；没有 `__call__` 时报「not callable」。降级侧
+  `lower_call` 用同样的判别走 `dunder_call`。
+- 新增 `tests/run/126_decorated_slots.py`（装饰 `__init__`、`with`
+  正常/异常/抑制、普通与装饰 `__call__`、链式 `Adder(10)(1, 1)`、
+  装饰 `async with`），`build/memcheck.sh` 覆盖该用例。
+
+## [0.130] - 2026-11-13
+
+跨模块生成器 / 协程 / 异步生成器保留元素类型。
+
+### 变更
+
+- `.pya` 接口编码新增 tag 14/15/16：`Generator[T]`、`Coroutine[T]`、
+  `AsyncGenerator[T]` 不再降级为 unknown；导入方可以直接用 `for` /
+  `next` / `send` / `await` / `async for`，元素类型参与运算。
+- 其余 asyncio 对象（`Task` / `Future` / `AsyncEvent` 等）仍按 unknown。
+- 新增 `tests/modules/gen_interface`：跨模块生成器、协程、异步生成器。
+
+## [0.129] - 2026-11-13
+
+异步生成器内部的 `await` 结果不再丢失。
+
+### 变更
+
+- 异步生成器驱动对象新增 `driver_await_result`：内部 awaitable 完成时
+  已把结果/异常写进帧槽（`p[2]` / `p[8]`），下一轮 `agen_drive` 不再用
+  `driver_sent`（普通 `anext` 为 0）把它覆盖掉。
+- 修复 `async for` / 异步推导式里「`__anext__` 返回堆值」时的引用计数
+  错误：`handler_leave` 会按旧水位清理临时栈，之前刚送达的值已经入栈，
+  被当场释放。现在先离开 handler，再把结果压入临时栈。
+- `suspend_on_awaitable` 新增 `push_result_temp` 参数，`async for` 与
+  异步推导式在 `handler_leave` 之后自行入栈。
+- 新增 `124_asyncgen_await.py`（标量/字符串/列表结果、内部 await 抛异常
+  被 `try/except` 接住、`asend`、`async for`、`aclose`），`build/memcheck.sh`
+  覆盖该用例。
+
+## [0.128] - 2026-11-13
+
+生成器/协程的 `finally` 体内支持挂起。
+
+### 变更
+
+- `finally` 体内可以写 `yield` / `yield from` / `await`，恢复状态只有一套：
+  可挂起函数里 finalbody 只编译一份，正常路径与异常 landing 汇聚到同一个
+  `finally.fin` 块。异常路径不再把待重抛异常留在全局 `pending_exc`，而是
+  用 `pa_exc_take_value` 复制成异常值存进帧槽（`Exception` 堆槽，随
+  release/close 自动释放），finalbody 结束后 `pa_exc_reraise_value_if`
+  非空就重抛——体内再 `raise` / 嵌套 `try/except` 不会覆盖它。
+- `close()` 按快照重放 finalbody 时若再次遇到挂起点，按 CPython 报
+  `RuntimeError: generator ignored GeneratorExit`（协程/异步生成器用对应
+  措辞），不再真的挂起。
+- `break` / `continue` / `return` 穿越含挂起 finally 的内联副本时，发射
+  finalbody 期间把编译期 cleanup 栈截断到该 finally 之外，避免恢复时去
+  suspend 已经释放的 handler 记录。
+- 运行时新增 `pa_exc_take_value` / `pa_exc_reraise_value_if`。
+- 新增 `123_finally_yield.py`（含异常重抛、close、`break`、`yield from`、
+  `with`、`send` 与协程 `await`），`build/memcheck.sh` 覆盖该用例。
+- 限制：`finally` 体内的 `return` / `break` / `continue` 仍不支持。
+
+## [0.127] - 2026-11-13
+
+生成器 `.throw()` 与 `yield from` 的 throw 转发。
+
+### 变更
+
+- `Generator.throw(exc)`：把异常注入当前挂起点，生成器自己的 `try` /
+  `except` 能接住；没人接住时异常随生成器结束抛给调用方。已结束的生成器
+  直接抛给调用方，未启动的生成器从函数入口抛出（函数体不执行）。只接受
+  异常实例，不接受异常类。
+- `yield from` 转发 `throw`：外层停在委托挂起点时异常交给子生成器的
+  `throw`，按「子生成器产出 / 结束 / 抛出」分流——产出转 yield、结束取它的
+  `return` 值、没接住则在外层挂起点继续传播（外层 `try` 能抓）。委托序列
+  （list/str/...）不转发。
+- 生成器的恢复入口现在和协程共用 throw 分发：先重挂 handler 并在本帧重新
+  `setjmp` 再 rethrow，避免跨调用点 longjmp 到上次 resume 的栈帧。委托中的
+  挂起点用新指令 `gen.take.exc` 取走异常（清零帧槽）后跳回委托循环。
+- 运行时新增 `pa_gen_throw` / `pa_gen_throw_opt`；`yield from` 循环多了
+  `exc_slot` / `ev_slot` 两个帧槽。
+- 新增 `122_gen_throw.py`，`build/memcheck.sh` 覆盖该用例。
+
+## [0.126] - 2026-11-13
+
+装饰 dunder 方法。
+
+### 变更
+
+- 走 `dunder_call` 的那批 dunder 现在可以加自定义装饰器：`__str__` /
+  `__repr__`、`__eq__` / `__ne__` / 比较、算术与反射/增量、`__contains__`、
+  `__len__`、`__hash__`、`__iter__`。调用点从类属性取包装函数并显式补
+  self；dict/set 键槽在 `__hash__` 或 `__eq__` 被装饰时退回机器字身份。
+- 类型检查在类定义点把被装饰方法的类型回填给装饰器的第一个形参，
+  单态化重查后刷新 `decorated_ty` / `call_sig` / 类属性类型。包装体里的
+  `f(self, ...)` 不再退化成 unknown，字符串结果也不会被当整数拼接。
+- 构造（`__init__`）、`with` 协议（`__enter__` / `__exit__`）、`__call__`
+  等仍由 vtable 槽或专门路径分派，装饰时继续明确报错。
+- 新增 `121_decorated_dunder.py`。
+
+## [0.125] - 2026-11-13
+
+推导式里的 lambda；`dict(iterable)`。
+
+### 变更
+
+- 含 lambda 的 list/set/dict 推导式在脱糖阶段改写成「生成器表达式 +
+  `list()` / `set()` / `dict()`」：循环变量成为合成生成器函数的局部
+  变量，lambda 的闭包捕获按常规路径工作，语义与 CPython 一致（所有
+  lambda 共享循环结束时的值）。`[lambda: i * 10 for i in range(3)]`
+  得到 20/20/20，`{i: (lambda: i) for i in range(2)}` 也能用。
+  不含 lambda 的推导式仍走原来的就地展开路径，性能不变。
+- `dict(iterable)`：元素是 `(key, value)` 二元组时构造字典，新增运行时
+  `pa_dict_from_pairs`；`dict((x, x*x) for x in ...)` 与
+  `dict([(1, 2), (3, 4)])` 都可用，`dict()` 的结果类型从元素类型推成
+  `dict[K, V]`。`d[key]` 的 value 随之有精确类型。
+- 新增 `120_comp_lambda.py` 回归用例。
+
+### 仍未支持
+
+- lambda 的默认参数引用循环变量（默认值全局只支持字面量常量，在调用点
+  内联填充）。
+
+## [0.124] - 2026-11-13
+
+方法装饰器的剩余边界（类接收者与 super）。
+
+### 变更
+
+- `C.m(obj, ...)`：类接收者调用装饰方法时，按类属性里包装函数的未绑定
+  签名检查实参（显式传 self），降级走 `class_attr_load` + 普通 `Call`。
+  子类类接收者读的是继承链上的同一份类属性。
+- `super().m(...)`：目标是装饰方法时，在声明类上取包装函数并自动补
+  `self`；不再报「decorators on super targets are not supported yet」。
+- `95_method_decorator.py` 增补类接收者、子类类接收者和 `super()` 用例。
+
+### 仍未支持
+
+- 装饰 dunder 方法（构造/运算符走 vtable 静态分派）。
+- 装饰后的方法值绑定 self（需要 bound method 对象）。
+
+## [0.123] - 2026-11-13
+
+生成器/协程挂起点泛化。
+
+### 变更
+
+- `yield` / `await` / `yield from` 不再要求是语句里第一个求值的东西。
+  降级完成后对 resume 函数做 vreg 活跃性分析：续跑块的 live-in 就是
+  挂起期间还活着的值，挂起前 retain 一份写进生成器堆帧槽，恢复后装回
+  并把所有权交给临时栈。`f(g(), (yield x))`、`10 + (yield x)`、比较链、
+  f-string、容器字面量等位置都可用了；寄存器分配对「同一 vreg 多次
+  定义」按跨块处理，独占一个栈槽。
+- `except` 体内的挂起：resume 入口用 `pa_exc_enter` 换入本帧的异常
+  上下文（当前异常 + 保存节点栈），挂起时 `pa_exc_leave` 换回调用方
+  那份；异常逃出 resume 时驱动层按进入深度 `pa_exc_unwind` 退栈。
+  生成器在 except 体里挂起期间，调用方的 except 状态不受影响，恢复后
+  裸 `raise` 仍然重抛生成器当前处理的异常。修正了 except 体重挂
+  handler 缺少 landing 分支的问题（之前禁止在 except 内挂起，不会
+  触发）。
+- `yield from` 委托生成器时，表达式的值是子生成器的 `return` 值
+  （`pa_gen_send_opt` 在结束步转移 out 槽）；委托序列仍是 None。
+  生成器的 return 值不再直接丢弃，没人取走时由帧销毁释放。
+- 新增 `118_suspend_expr.py`、`119_gen_except_suspend.py`，扩写
+  `28_yield_from.py`；`build/memcheck.sh` 纳入这三个生成器用例。
+
+### 仍未支持
+
+- `finally` 体内的挂起（close 路径要复制 finally 体，和体内挂起冲突）。
+- `yield from` 的 `throw` 转发（生成器还没有 `.throw()`）。
+
+## [0.122] - 2026-11-13
+
+链式调用回归与未支持特性盘点。
+
+### 变更
+
+- 跨模块类引用修复后，`hashlib.md5(b"x").hexdigest()`、
+  `logging.getLogger(...).info(...)` 这类链式调用已可用；新增
+  `117_chain_call.py` 回归用例，更新 logging/hashlib 文档中的旧限制。
+
+## [0.121] - 2026-11-13
+
+release 基准复跑与 C 头文件导入（cdecl）。
+
+### 新增
+
+- `pyadamas cdecl <header.h> -o <out.cpya> [--link ARG]`：把 C 头文件的
+  声明子集转换成 `.cpya`。支持 `#define` 数值/字符串常量、`typedef`、
+  `struct`/`enum`、函数原型、`extern` 变量、函数指针参数与可变参数；
+  `const char*` → `str`，`T*` → `ptr[T]`，`void*` → `ptr`。
+  宏函数、条件编译、C `float`、union 按值、定长数组会跳过或在 stderr
+  给出 warning；union/复杂 struct 降级为不透明 `struct`。
+- `tests/cdecl/` 端到端用例：生成 `sample.cpya`、链接 `sample.c` shim、
+  运行 `main.py`，并接入 `tests/run_tests.sh`。
+- release preset 复跑九个基准（[RESULTS-release.md](bench/compare/RESULTS-release.md)、
+  `results-release.json`）。生成代码默认 `-O2`，所以 release 与 dev 的
+  运行时间基本一致，差异主要来自测量噪声。
+- `bench/compare/run_compare.py` 的 Markdown 会按实际二进制标注
+  `dev（-O0）` / `release（-O2）`。
+
+## [0.120] - 2026-11-13
+
+标准库补充：`hmac`。
+
+### 新增
+
+- 标准库 `hmac`：`new(key, msg=b"", digestmod="sha256")` 返回带
+  `update` / `digest` / `hexdigest` 的对象，支持 `"md5"` / `"sha1"` /
+  `"sha256"` 字符串名；>64 字节 key 先摘要，增量 update 与 CPython 一致。
+- 测试新增 `116_hmac.py`（三种摘要、长 key、增量更新）。
+
+## [0.119] - 2026-11-13
+
+标准库补充：`base64` 与 `hashlib`，以及跨模块接口增强。
+
+### 新增
+
+- `bytes(list[int])` / `bytes(n)` / `bytes()` 内置转换；越界元素抛
+  `ValueError`。字符串与字节串仍共用运行时表示，零成本。
+- 标准库 `base64`：`b64encode` / `b64decode` / `urlsafe_b64encode` /
+  `urlsafe_b64decode`，解码兼容两种字母表。
+- 标准库 `hashlib`：`md5` / `sha1` / `sha256` 的 `update` / `digest` /
+  `hexdigest`，纯 pyadamas 实现，标准向量与多块输入均与 CPython 一致。
+- 跨模块接口现在按名字序列化类引用（tag 13），导入模块的函数返回类实例
+  时类型不再退化成 `unknown`（如 `hashlib.md5(...)` 的返回值）。
+- 默认参数字面量新增 `bytes`（tag 7），跨模块调用 `md5()` 这类带
+  `b""` 默认值的函数不再把默认值当成 `None`。
+- 模块接口格式版本升到 6。
+- 测试新增 `114_base64.py`、`115_hashlib.py`（MD5 / SHA-1 / SHA-256
+  标准向量、增量 update、200 字节多块输入）。
+
+## [0.118] - 2026-11-13
+
+基准扩充到九个用例。
+
+### 新增
+
+- `bench/compare/` 新增 fannkuch（全排列 + 前缀翻转）、binary_trees
+  （完美二叉树分配与递归统计）、fasta（伪随机 DNA 序列生成）三个
+  Benchmarks Game 经典用例，每个都有 PyAdamas / CPython / Go / C++
+  四份实现，输出逐字节一致。
+- `binary_trees.py` 用字符串标注 `"Optional[Node]"` 同时兼容 CPython
+  与 PyAdamas（py23 没有 `typing` 模块）。
+- 重新生成 [RESULTS.md](bench/compare/RESULTS.md)（每例 5 次取最小）：
+  PyAdamas 比 CPython 快 6.6×–27.8×，与 gccgo 同数量级；新用例中
+  binary_trees 10.1×、fannkuch 11.5×、fasta 12.8×。
+
+## [0.117] - 2026-11-13
+
+C 互操作：回调（C 函数指针）。
+
+### 新增
+
+- `.cpya` 参数类型 `fn(T1, T2, ...) -> R` 声明 C 回调，调用时传 py23
+  函数或闭包；签名只允许标量/指针，参数上限 6 整数 + 8 浮点。
+- codegen 为每个回调参数生成跳板与闭包槽：调用前登记闭包，跳板把闭包
+  放回 `%r10` 后进入 py23 函数，因此捕获环境的闭包可用；`int32`/
+  `uint32`/`bool` 参数按声明宽度提升。
+- 语言标注支持 `ptr[int]`/`ptr[float]`/`ptr[bool]`，保留元素种类，
+  回调里可直接 `a[0]` 解引用。
+- 测试新增 `112_callbacks.py`（int/float/int32/bool、闭包捕获）、
+  `113_qsort.py`（`qsort` 排序）与反例 `f54_callback_not_func.py`。
+
+## [0.116] - 2026-11-13
+
+C 互操作：指针解引用与可变参数。
+
+### 新增
+
+- `ptr[T]` 保留元素类型，支持 `p[i]` 读写（`int`/`float`/`int32`/`uint32`/
+  `bool`），按元素宽度比例寻址；`int32` 符号扩展、`uint32` 零扩展，
+  `float` 使用 `movsd`。指针为 `None` 时抛 `AttributeError`。
+- 新增 IR 指令 `ptr.load` / `ptr.store`；元素类型随变量传播
+  （手写 `Optional[int]` 标注会丢失元素类型）。
+- `.cpya` 的 `extern def` 支持末尾 `...` 声明 C 可变参数函数；
+  额外实参按 py23 类型编组（int/bool→整数寄存器、float→xmm、
+  str→data 指针、Optional[str]/ptr），调用前按 SysV 设置 `%al`。
+- 测试新增 `110_ptr_deref.py`、`111_varargs.py`，并在
+  `108_structabi.py` 覆盖 4 字节指针的符号/零扩展。
+
+## [0.115] - 2026-11-13
+
+C 互操作：结构体按值传参与返回。
+
+### 新增
+
+- `.cpya` 的 `extern def` 可以直接使用带字段的 `struct`（不带 `ptr[]`），
+  按 SysV x86-64 聚合 ABI 编组：≤16 字节按 8 字节 chunk 分为
+  INTEGER/SSE，分别走整数寄存器或 `xmm0–7`；寄存器不足时整块走栈；
+  >16 字节的参数全部在栈上，返回值通过隐藏指针（`rdi`）传回。
+  INTEGER 返回值按 chunk 依次放在 `rax`/`rdx`，SSE 在 `xmm0`/`xmm1`。
+- 单符号覆盖 4/8/16 字节 INTEGER、16 字节双 SSE、24 字节 MEMORY 的
+  传参与返回；混合 `标量 + 大结构体 + 标量` 时隐藏指针与整数寄存器
+  正确移位。
+- C 结构体可以在 py23 里按字段构造（`DivT(7, 3)`），作为值类型参与
+  赋值/传参/返回；payload 布局与 C 完全一致，复制沿用 `pa_struct_copy`。
+- 不透明 `struct NAME` 仍只能以 `ptr[NAME]` 使用，按值出现会报
+  `struct 'NAME' is opaque and cannot be passed by value`。
+- 测试新增 `107_cstruct_byval.py`（`div`/`ldiv`/`inet_ntoa`）、
+  `108_structabi.py` + `structabi.c`（SSE/MEMORY shim）与反例
+  `f52_cstruct_opaque_byval.py`。
+- `.cpya` 支持 `extern var NAME: type` 读取 C 全局变量，赋值按声明宽度
+  写回；支持 int/int32/uint32/float/bool/ptr/ptr[Struct]/str，
+  `str` 变量只读。`stdout`、`optind` 等可直接使用。
+- 测试新增 `109_extern_var.py` 与反例 `f53_cimport_assign_func.py`。
+
+## [0.114] - 2026-11-13
+
+C 互操作 v4、四语言经典基准与常用标准库补充。
+
+### 新增
+
+- `.cpya` 结构体可以带字段：`struct NAME:` 后接缩进的
+  `field: type`，按 C 规则计算布局（`int` 8、`int32`/`uint32` 4、
+  `float` 8、`bool` 1、`ptr` 8）。`ptr[NAME]` 的类型是
+  `Optional[ptr[NAME]]`，可直接读写字段，读取时做空指针检查。
+- 字段读写复用编译期固定偏移；`int32` 符号扩展、`uint32` 零扩展，
+  IR 的 `field.get`/`field.set` 新增 4 字节宽度与无符号标志。
+- C 结构体指针只是 C 地址，没有 RC 头，不参与引用计数。
+- `bench/compare/`：nbody、spectral_norm、matmul、nqueens、mandelbrot、
+  fib 六个经典基准，每个都有 PyAdamas / CPython / Go / C++ 四份实现，
+  `run_compare.py` 统一构建、计时（多次取最小）、校验输出并生成
+  [RESULTS.md](bench/compare/RESULTS.md)。dev preset 下 PyAdamas 比
+  CPython 快 6×–25×（spectral_norm 25×、fib 21×、matmul 19×、
+  nbody 17×、nqueens 7×、mandelbrot 6×），与 gccgo 同一数量级，
+  C++ 仍最快。
+- 标准库 `logging`：等级常量、`basicConfig`、`getLogger`、
+  `getLevelName`/`isEnabledFor` 与 `Logger` 的常用方法，默认写 stderr。
+- 标准库 `statistics`：mean/median/mode/方差/标准差/调和平均等子集。
+- 标准库 `textwrap`：`wrap`/`fill`/`dedent`/`indent` 子集。
+- `argparse` 仍未提供：返回对象需要动态属性，与静态布局冲突，已在
+  roadmap 技术债中记录。
+
+### 验证
+
+- 新增 `104_cstruct`（gmtime 的 `struct tm` 字段读写、负数 int32、
+  `tm_zone` 判空）、`105_stdlib_logging_stats`、`106_textwrap`；
+  反例 `f51_cstruct_field`（`.cpya` 字段类型不支持时报错）。
+- `ctest --preset dev`、完整 `tests/run_tests.sh`、`build/memcheck.sh`
+  全绿。
+
+## [0.113] - 2026-11-13
+
+语言级 `struct` 值类型，语义与 C 结构体一致。
+
+### 新增
+
+- 模块顶层 `struct NAME:` 定义，字段限 `int` / `float` / `bool`；`struct`
+  是软关键字，`struct = 1`、`import struct` 不受影响。
+- 布局自实现，与 C 完全一致：字段按声明顺序，`int`→`int64_t`、
+  `float`→`double`、`bool`→`_Bool`，逐字段对齐，整体按最大对齐补齐；
+  不依赖构建期 C 探针或外部编译器源码。
+- `Point(...)` 按字段顺序构造；字段读写编译期固定偏移，`bool` 字段按
+  1 字节读写；`sizeof(T)` / `sizeof(v)` 为编译期常量；`addr(p)` 得到
+  `ptr[Point]`，就是 payload 地址，可直接传给 C。
+- 值语义：赋值、传参、返回都复制整块 payload；容器仍存引用（与类实例
+  一致，连续数组以后用 buffer）。
+- `print(struct)` 明确报错，替代打印指针数值。
+
+### 修复
+
+- `re.Match.group(n)`（n > 1）构造列表时漏传元素 kind，暴露为
+  `invalid list element kind`。
+
+### 验证
+
+- 新增 `102_struct`：布局/构造/字段/值语义/传参返回/`addr`/`bool` 字段/
+  局部 struct/复合赋值；`103_struct_c`：`cimport clib` +
+  `c.memset(addr(p), 0, 16)`，证明与 C 布局一致。
+- 新增反例 `f46`–`f50`：字段类型、重复字段、构造参数个数、定义位置、
+  直接 `print`。
+- `ctest --preset dev`、完整 `tests/run_tests.sh` 全绿。
+
 ## [0.112] - 2026-11-13
 
 C 互操作 v3 第一步：不透明结构体指针，可接 `FILE*`、`sqlite3*` 等句柄。

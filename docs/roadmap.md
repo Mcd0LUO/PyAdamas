@@ -37,31 +37,47 @@
 | 0.106 | 生成器/协程异常逃出、close 清理抛异常时立即释放帧槽 |
 | 0.107 | 自定义方法装饰器；yield/await 挂起点位置放宽 |
 | 0.108 | 项目更名 PyAdamas（pyadamas / pa_ / PYADAMAS_ / .pya） |
+| 0.113 | 语言级 `struct` 值类型：C 兼容布局、字段读写、值语义复制、`sizeof`/`addr` |
+| 0.114 | C 互操作 v4：`.cpya` 带字段结构体 + `ptr[Struct]` 字段读写；四语言基准；`logging`/`statistics`/`textwrap` |
+| 0.115 | C 互操作 v5：结构体按值传参/返回（SysV INTEGER/SSE/MEMORY 分类） |
+| 0.116 | C 互操作 v6：`extern` 变量读写、`ptr[T]` 解引用、可变参数 |
+| 0.117 | C 互操作 v7：回调（`fn(...)` 跳板 + 闭包槽）、`ptr[T]` 标注 |
+| 0.118 | 基准扩充到九个用例（fannkuch / binary_trees / fasta） |
+| 0.119 | `base64`/`hashlib` 标准库；跨模块类引用与 bytes 默认值 |
+| 0.120 | `hmac` 标准库（MD5 / SHA-1 / SHA-256） |
+| 0.121 | release 基准复跑；`pyadamas cdecl` 头文件子集 → `.cpya` |
+| 0.122 | 链式调用回归（跨模块类引用修复后已可用） |
+| 0.123 | 挂起点泛化：yield/await 可位于任意子表达式与 `except` 体；`yield from` 返回子生成器的 `return` 值 |
+| 0.124 | 方法装饰器：`C.m(obj, ...)`、`super().m(...)` |
+| 0.125 | 推导式里的 lambda（生成器表达式 + 构造器）；`dict(iterable)` |
+| 0.126 | 装饰 dunder 方法（dunder_call 那一批）；装饰器形参类型回填与重查 |
+| 0.127 | 生成器 `.throw()`；`yield from` 的 throw 转发 |
+| 0.128 | `finally` 体内的挂起（yield / yield from / await）；finalbody 单份编译，异常路径待重抛异常存帧槽 |
+| 0.129 | 异步生成器内部 `await` 的结果/异常不再被下轮 `driver_sent` 覆盖 |
+| 0.130 | 跨模块 `Generator` / `Coroutine` / `AsyncGenerator` 保留元素与结果类型 |
+| 0.131 | 构造、`with` / `async with`、`__call__` 的装饰 dunder 支持 |
+| 0.132 | 方法值绑定 self：`obj.m` / `C.m` 得到闭包，支持默认/关键字参数与子类覆盖 |
+| 0.133 | `Generator[Y, S, R]` 标注：`send` 实参按 S 检查、`yield` 表达式为 S；模块格式 7 带 S/R |
 | 许可证 | Apache-2.0（见 [LICENSE](../LICENSE) / [NOTICE](../NOTICE)） |
 
-## 当前状态（0.108）
+## 当前状态（0.133）
 
 流水线 `源码 → 词法 → AST → lambda 脱糖 → 类型检查 → IR → x86-64 汇编 → 可执行文件` 已打通。
 
-- **语言面**：标量、字符串、`bytes`（含迭代与 `%` 格式化）、列表/元组/字典/集合、切片读写、闭包/lambda/`*args`/`**kwargs`/装饰器、推导式、`with`、异常值（`args`/`raise ... from`/自定义异常）、类（字段/方法/C3 多继承/零参 `super()`/`@staticmethod`/`@classmethod`/`@property`/类属性）、`match/case`、`del`、复数字面量、f-string 格式说明、dunder 协议、`open`/`input`/`sys.stdin`。
+- **语言面**：标量、字符串、`bytes`（含迭代与 `%` 格式化）、列表/元组/字典/集合、切片读写、闭包/lambda/`*args`/`**kwargs`/装饰器、推导式、`with`、异常值（`args`/`raise ... from`/自定义异常）、类（字段/方法/C3 多继承/零参 `super()`/`@staticmethod`/`@classmethod`/`@property`/类属性）、`match/case`、`del`、复数字面量、f-string 格式说明、dunder 协议（含装饰 dunder、`__call__` 与方法值）、`Generator[Y, S, R]` 标注、`open`/`input`/`sys.stdin`。
 - **标准库**：`math`/`sys`/`asyncio`/`random`/`os`/`os.path`/`subprocess`/`time`/`itertools`/`collections`/`functools`/`json`/`string`/`re`/`datetime`/`pathlib`/`csv`。
-- **验证**：95 个运行用例、37 个反例、9 个模块目录；差分 runner 已自举，默认 810 例。
-- **主要缺口**：C FFI/BLAS；跨模块生成器/协程；asyncio 边角。
+- **验证**：127 个运行用例、52 个反例、11 个模块目录；差分 runner 已自举，默认 840 例。
+- **主要缺口**：C FFI/BLAS；asyncio 边角。
 
 ## 下一步
 
 语言与标准库的完备性优先，科学计算放后面。
 
-### 1. 语言面收尾
-
-- **方法装饰器的剩余边界**：类接收者调用（`C.m(...)`）、装饰后的方法值绑定 self、`super()` 调用装饰方法、装饰 dunder 方法（构造/运算符走 vtable 静态分派）目前都会明确报错。
-- **跨挂起的 vreg**：`yield`/`await` 已能出现在语句内第一个求值的位置；要支持任意子表达式（如 `f() + (yield x)`），需要挂起点前把活跃 vreg 溢出到生成器帧槽并转移所有权。
-
-### 2. C FFI + buffer + BLAS
+### 1. C FFI + buffer + BLAS
 
 科学计算的唯一捷径。PyAdamas 的 ABI 已经是 SysV + `int64`/`double`/指针，运行时是纯 C；补一层 `extern "C"` 声明和 buffer 类型，就能把 `list[float]` 的连续数据直接传给 `cblas_dgemm`。验收：512³ matmul 进入毫秒级；不要求自己实现 BLAS。
 
-### 3. 工程收尾
+### 2. 工程收尾
 
 - 重跑标准库前端基线：0.81 已在 Debian python3.13.5 上重跑过一次（见 [compatibility.md](compatibility.md#前端鲁棒性基线)），但原口径（CPython 3.11.1 + site-packages，38582 个文件）还没重跑；
 - 保持 `docs/` 与 README 的验证表同步；
@@ -92,10 +108,9 @@
 8. **浮点变量只在无调用函数里提升**：`xmm8–15` 用于无调用函数的跨块浮点值；含调用/handler 的函数仍走内存槽，跨调用要 save/restore
 9. **异常对象仍缺 traceback**：有异常值、`args`、自定义异常类和 `raise ... from`，但 `args` 只保存消息
 10. **含 handler 的函数没有寄存器提升**：longjmp 会回滚 callee-saved 寄存器，只能全走内存槽
-11. **生成器/协程的表达式能力不全**：挂起点必须是当前语句里第一个求值的表达式（vreg 不跨挂起），不能位于 `finally`/`except` 体内；`send`/await 跨挂起值的静态类型不精确；`yield from` 的值固定为 None、不能 throw。`asend`/`athrow`/`aclose` 已支持
-12. **跨模块生成器/协程不支持**：`.pya` 里 `Generator[T]` / `Coroutine[T]` 降级成 unknown
-13. **asyncio 仍是最小集合**：自定义 `__aiter__`、fd 读写、asyncio 子进程、线程安全循环未支持；`wait_readable` 不是 CPython 标准 API；Future 回调同步执行；`gather` 结果按 unknown 容器处理；Task 只允许一个并发等待者；`await` 位置受限
-14. **stdlib 覆盖不足**：没有 `logging`/`argparse`；`csv` 已接上（reader/writer 子集），`functools` 已覆盖 `reduce`/`wraps`/`partial`/`lru_cache`（`lru_cache` 无淘汰、键类型受限），`json`/`collections`/`itertools` 是子集；`re` 有后向引用/四向断言/原子组/内联标志，但缺 Unicode 属性类和 `findall` 的分组语义
-15. **没有 C FFI / 包管理 / 调试信息**：第三方库接入和科学计算受限；出错没有 traceback
-16. **`re` 是纯回溯 VM**：递归实现，深模式或灾难性模式会吃栈，只靠 2 亿步上限兜底；没有 DFA/JIT，`findall`/`split` 每次重新编译模式字符串
-17. **形参类型推断只做单态**：未标注形参由调用点回填，同一形参吃多种类型时退回 unknown（`print` 会按整数输出）；嵌套函数不参与重查。根治要运行时类型标签，代价是全量 tag 或 NaN-boxing（见「待决策」）
+11. **生成器/协程的剩余边角**：`finally` 体内的挂起已支持（finalbody 在可挂起函数里只编译一份，正常与异常路径汇聚，待重抛异常转成异常值存帧槽）；`finally` 体内的 `return`/`break`/`continue` 仍被拒绝；close 重放到挂起点时报 `RuntimeError`。未标注 `Generator[Y, S, R]` 时 `send` 与 `yield` 表达式静态是 unknown（`await` 已按 `Coroutine[T]` / `Awaitable[T]` 定类型）
+12. **asyncio 仍是最小集合**：自定义 `__aiter__`、fd 读写、asyncio 子进程、线程安全循环未支持；`wait_readable` 不是 CPython 标准 API；Future 回调同步执行；`gather` 结果按 unknown 容器处理；Task 只允许一个并发等待者
+13. **stdlib 覆盖不足**：没有 `argparse`（返回对象要有动态属性，和静态布局冲突）；`logging`/`statistics`/`textwrap`/`base64`/`hashlib`/`hmac`/`csv` 已接上子集，`functools` 已覆盖 `reduce`/`wraps`/`partial`/`lru_cache`（`lru_cache` 无淘汰、键类型受限），`json`/`collections`/`itertools` 是子集；`re` 有后向引用/四向断言/原子组/内联标志，但缺 Unicode 属性类和 `findall` 的分组语义
+14. **C FFI 与调试信息仍不全**：`cdecl` 只解析头文件子集（不展开宏函数/条件编译，C `float`、union 按值、定长数组不生成）；回调槽不可重入；没有包管理和 traceback
+15. **`re` 是纯回溯 VM**：递归实现，深模式或灾难性模式会吃栈，只靠 2 亿步上限兜底；没有 DFA/JIT，`findall`/`split` 每次重新编译模式字符串
+16. **形参类型推断只做单态**：未标注形参由调用点回填，同一形参吃多种类型时退回 unknown（`print` 会按整数输出）；嵌套函数不参与重查。根治要运行时类型标签，代价是全量 tag 或 NaN-boxing（见「待决策」）

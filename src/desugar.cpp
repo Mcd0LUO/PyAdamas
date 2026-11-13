@@ -422,6 +422,171 @@ private:
         pre.push_back(std::move(fn));
     }
 
+    // 推导式里出现 lambda 时改成「生成器表达式 + 构造器」：
+    // 列表/集合推导式目前是就地展开的，循环变量存在临时槽里，lambda
+    // 脱糖后是个独立函数，看不到这些槽。生成器表达式本来就被脱糖成
+    // 合成函数，循环变量是它的局部变量，闭包捕获按常规路径就能工作，
+    // 语义（所有 lambda 共享同一个循环变量 cell）也和 CPython 一致。
+    static bool has_lambda(const Expr* e) {
+        if (!e) return false;
+        if (e->kind == ExprKind::Lambda) return true;
+        switch (e->kind) {
+            case ExprKind::Constant:
+            case ExprKind::Name:
+                return false;
+            case ExprKind::FormattedValue: {
+                auto& f = static_cast<const FormattedValue&>(*e);
+                return has_lambda(f.value.get()) || has_lambda(f.format_spec.get());
+            }
+            case ExprKind::JoinedStr: {
+                for (auto& v : static_cast<const JoinedStr&>(*e).values)
+                    if (has_lambda(v.get())) return true;
+                return false;
+            }
+            case ExprKind::List:
+                for (auto& v : static_cast<const ListExpr&>(*e).elts)
+                    if (has_lambda(v.get())) return true;
+                return false;
+            case ExprKind::Tuple:
+                for (auto& v : static_cast<const TupleExpr&>(*e).elts)
+                    if (has_lambda(v.get())) return true;
+                return false;
+            case ExprKind::Set:
+                for (auto& v : static_cast<const SetExpr&>(*e).elts)
+                    if (has_lambda(v.get())) return true;
+                return false;
+            case ExprKind::Dict: {
+                auto& d = static_cast<const DictExpr&>(*e);
+                for (auto& v : d.keys)
+                    if (has_lambda(v.get())) return true;
+                for (auto& v : d.values)
+                    if (has_lambda(v.get())) return true;
+                return false;
+            }
+            case ExprKind::BinOp: {
+                auto& b = static_cast<const BinOp&>(*e);
+                return has_lambda(b.left.get()) || has_lambda(b.right.get());
+            }
+            case ExprKind::UnaryOp:
+                return has_lambda(static_cast<const UnaryOp&>(*e).operand.get());
+            case ExprKind::BoolOp: {
+                for (auto& v : static_cast<const BoolOp&>(*e).values)
+                    if (has_lambda(v.get())) return true;
+                return false;
+            }
+            case ExprKind::Compare: {
+                auto& c = static_cast<const Compare&>(*e);
+                if (has_lambda(c.left.get())) return true;
+                for (auto& v : c.comparators)
+                    if (has_lambda(v.get())) return true;
+                return false;
+            }
+            case ExprKind::Call: {
+                auto& c = static_cast<const Call&>(*e);
+                if (has_lambda(c.func.get())) return true;
+                for (auto& v : c.args)
+                    if (has_lambda(v.get())) return true;
+                for (auto& k : c.keywords)
+                    if (has_lambda(k.value.get())) return true;
+                return false;
+            }
+            case ExprKind::Attribute:
+                return has_lambda(static_cast<const Attribute&>(*e).value.get());
+            case ExprKind::Subscript: {
+                auto& sb = static_cast<const Subscript&>(*e);
+                return has_lambda(sb.value.get()) || has_lambda(sb.slice.get());
+            }
+            case ExprKind::Slice: {
+                auto& sl = static_cast<const SliceExpr&>(*e);
+                return has_lambda(sl.lower.get()) || has_lambda(sl.upper.get()) ||
+                       has_lambda(sl.step.get());
+            }
+            case ExprKind::IfExp: {
+                auto& i = static_cast<const IfExp&>(*e);
+                return has_lambda(i.test.get()) || has_lambda(i.body.get()) ||
+                       has_lambda(i.orelse.get());
+            }
+            case ExprKind::Starred:
+                return has_lambda(static_cast<const Starred&>(*e).value.get());
+            case ExprKind::NamedExpr: {
+                auto& n = static_cast<const NamedExpr&>(*e);
+                return has_lambda(n.value.get());
+            }
+            case ExprKind::Await:
+                return has_lambda(static_cast<const Await&>(*e).value.get());
+            case ExprKind::Yield:
+                return has_lambda(static_cast<const Yield&>(*e).value.get());
+            case ExprKind::YieldFrom:
+                return has_lambda(static_cast<const YieldFrom&>(*e).value.get());
+            case ExprKind::GeneratorExp: {
+                auto& g = static_cast<const GeneratorExp&>(*e);
+                if (has_lambda(g.elt.get())) return true;
+                for (auto& gen : g.generators) {
+                    auto& c = static_cast<const Comprehension&>(*gen);
+                    if (has_lambda(c.iter.get())) return true;
+                    for (auto& cond : c.ifs)
+                        if (has_lambda(cond.get())) return true;
+                }
+                return false;
+            }
+            case ExprKind::ListComp: {
+                auto& g = static_cast<const ListComp&>(*e);
+                if (has_lambda(g.elt.get())) return true;
+                for (auto& gen : g.generators) {
+                    auto& c = static_cast<const Comprehension&>(*gen);
+                    if (has_lambda(c.iter.get())) return true;
+                    for (auto& cond : c.ifs)
+                        if (has_lambda(cond.get())) return true;
+                }
+                return false;
+            }
+            case ExprKind::SetComp: {
+                auto& g = static_cast<const SetComp&>(*e);
+                if (has_lambda(g.elt.get())) return true;
+                for (auto& gen : g.generators) {
+                    auto& c = static_cast<const Comprehension&>(*gen);
+                    if (has_lambda(c.iter.get())) return true;
+                    for (auto& cond : c.ifs)
+                        if (has_lambda(cond.get())) return true;
+                }
+                return false;
+            }
+            case ExprKind::DictComp: {
+                auto& g = static_cast<const DictComp&>(*e);
+                if (has_lambda(g.key.get()) || has_lambda(g.value.get())) return true;
+                for (auto& gen : g.generators) {
+                    auto& c = static_cast<const Comprehension&>(*gen);
+                    if (has_lambda(c.iter.get())) return true;
+                    for (auto& cond : c.ifs)
+                        if (has_lambda(cond.get())) return true;
+                }
+                return false;
+            }
+            case ExprKind::Comprehension:
+                return false;
+        }
+        return false;
+    }
+
+    // 把含 lambda 的 list/set 推导式改写成 list()/set() + 生成器表达式。
+    static ExprPtr as_ctor_genexp(ExprPtr& src, const char* ctor_name,
+                                  ExprPtr elt, std::vector<ExprPtr> gens) {
+        auto call = std::make_unique<Call>();
+        call->line = src->line;
+        call->col = src->col;
+        auto fn = std::make_unique<Name>(ctor_name);
+        fn->line = src->line;
+        fn->col = src->col;
+        call->func = std::move(fn);
+        auto gen = std::make_unique<GeneratorExp>();
+        gen->line = src->line;
+        gen->col = src->col;
+        gen->elt = std::move(elt);
+        gen->generators = std::move(gens);
+        call->args.push_back(std::move(gen));
+        return call;
+    }
+
     void desugar_expr(ExprPtr& e, std::vector<StmtPtr>& pre) {
         if (!e) return;
         if (e->kind == ExprKind::Lambda) {
@@ -606,12 +771,24 @@ private:
             }
             case ExprKind::ListComp: {
                 auto& c = static_cast<ListComp&>(*e);
+                if (has_lambda(e.get())) {
+                    e = as_ctor_genexp(e, "list", std::move(c.elt),
+                                       std::move(c.generators));
+                    desugar_expr(e, pre);
+                    break;
+                }
                 desugar_expr(c.elt, pre);
                 desugar_exprs(c.generators, pre);
                 break;
             }
             case ExprKind::SetComp: {
                 auto& c = static_cast<SetComp&>(*e);
+                if (has_lambda(e.get())) {
+                    e = as_ctor_genexp(e, "set", std::move(c.elt),
+                                       std::move(c.generators));
+                    desugar_expr(e, pre);
+                    break;
+                }
                 desugar_expr(c.elt, pre);
                 desugar_exprs(c.generators, pre);
                 break;
@@ -621,6 +798,17 @@ private:
                 break;
             case ExprKind::DictComp: {
                 auto& c = static_cast<DictComp&>(*e);
+                if (has_lambda(e.get())) {
+                    auto tup = std::make_unique<TupleExpr>();
+                    tup->line = c.key->line;
+                    tup->col = c.key->col;
+                    tup->elts.push_back(std::move(c.key));
+                    tup->elts.push_back(std::move(c.value));
+                    e = as_ctor_genexp(e, "dict", std::move(tup),
+                                       std::move(c.generators));
+                    desugar_expr(e, pre);
+                    break;
+                }
                 desugar_expr(c.key, pre);
                 desugar_expr(c.value, pre);
                 desugar_exprs(c.generators, pre);
@@ -662,6 +850,8 @@ private:
         switch (s.kind) {
             case StmtKind::CImport:
                 break;
+            case StmtKind::StructDef:
+                break;  // 值类型声明，无需脱糖
             case StmtKind::Expr:
                 if (!class_body) desugar_expr(static_cast<ExprStmt&>(s).value, pre);
                 break;

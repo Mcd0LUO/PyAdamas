@@ -82,6 +82,10 @@ void agen_drive(PyAdamasAwait* d) {
     int64_t* p = (int64_t*)g;
     int closing = d->driver_close != 0;
     int throwing = d->driver_throw != 0;
+    // 上一轮内部 await 已经把结果/异常写进帧槽；这一轮不能再用
+    // driver_sent（普通 anext 是 0）覆盖 p[2]。
+    int internal = d->driver_await_result != 0;
+    d->driver_await_result = 0;
 
     if (closing) {
         if (p[1] == 1 || p[1] == 2) {
@@ -135,12 +139,22 @@ void agen_drive(PyAdamasAwait* d) {
     p[9] = 0;
     int64_t sent = d->driver_sent;
     d->driver_sent = 0;
-    p[2] = sent;
+    if (!internal) p[2] = sent;
+    else if (sent) pa_rc_dec_unknown(sent);  // 内部恢复不应携带 send 值
+    if (internal && (closing || throwing)) {
+        // close/throw 抢在结果被消费之前：注入的异常取代刚送达的值，
+        // 帧不会再读 p[2]，当场释放。
+        if (p[2]) {
+            pa_rc_dec_unknown(p[2]);
+            p[2] = 0;
+        }
+    }
     PyAdamasHandler h;
     h.prev = handler_top;
     h.mark = pa_rc_mark();
     h.frame = pa_frame_top;
     handler_top = &h;
+    int64_t exc_depth0 = pa_exc_depth();
     if (setjmp(h.env) != 0) {
         handler_top = h.prev;
         PyAdamasException* e = pending_exc;
@@ -153,6 +167,7 @@ void agen_drive(PyAdamasAwait* d) {
         if (sent) pa_rc_dec_unknown(sent);
         // 异常跳过了 resume 的出口清理：帧里的堆槽当场释放。
         pa_gen_release_slots(g);
+        pa_exc_unwind(exc_depth0);
         if (closing && e && strcmp(e->type, "GeneratorExit") == 0) {
             exc_free(e);
             driver_complete(d, 0, NULL);
@@ -163,6 +178,7 @@ void agen_drive(PyAdamasAwait* d) {
     }
     ((void (*)(void*, int64_t))(uintptr_t)p[4])(g, sent);
     handler_top = h.prev;
+    pa_exc_unwind(exc_depth0);
     pa_rc_cleanup(h.mark);
     p[5] = 0;
     p[2] = 0;

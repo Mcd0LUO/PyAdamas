@@ -43,6 +43,32 @@ TypePtr TypeChecker::call(Call& c) {
                 return mk_exception(sym->ty->cls->name);
             }
             if (!lookup(n->id) && is_builtin_callable(n->id)) return builtin_call(n->id, c);
+            // sizeof / addr 是值类型 struct 的特殊形式：前者是编译期常量，
+            // 后者把结构体值变成 ptr[T]，可以交给 C 函数。
+            if (!lookup(n->id) && (n->id == "sizeof" || n->id == "addr")) {
+                if (!c.keywords.empty()) {
+                    err(c.line, c.col, std::format("{}() takes no keyword arguments", n->id));
+                    for (auto& kw : c.keywords) expr(*kw.value);
+                }
+                if (c.args.size() != 1) {
+                    err(c.line, c.col, std::format("{}() takes exactly one argument", n->id));
+                    for (auto& arg : c.args) expr(*arg);
+                    return n->id == "sizeof" ? t_int() : t_unknown();
+                }
+                TypePtr at = expr(*c.args[0]);
+                if (n->id == "sizeof") {
+                    if (!at || at->kind != TyKind::Struct)
+                        err(c.args[0]->line, c.args[0]->col,
+                            std::format("sizeof() expects a struct type or value, got '{}'",
+                                        type_name(at)));
+                    return t_int();
+                }
+                if (at && at->kind == TyKind::Struct) return mk_struct_ptr(at->st);
+                if (at && at->kind == TyKind::StructPtr) return at;
+                err(c.args[0]->line, c.args[0]->col,
+                    std::format("addr() expects a struct value, got '{}'", type_name(at)));
+                return t_unknown();
+            }
         }
         if (auto* a = dynamic_cast<Attribute*>(c.func.get())) {
             if (auto* vn = dynamic_cast<Name*>(a->value.get())) {
@@ -77,6 +103,57 @@ TypePtr TypeChecker::call(Call& c) {
                                     break;
                                 }
                         }
+                        // 回调参数：实参必须是 py23 函数，签名按 .cpya 声明校验。
+                        auto cb_arg_ty = [](CKind k) -> TypePtr {
+                            switch (k) {
+                                case CKind::Float: return t_float();
+                                case CKind::Bool: return t_bool();
+                                default: return t_int();
+                            }
+                        };
+                        auto check_cb = [&](Expr* arg, const CParam& cp) {
+                            TypePtr at = type_of(arg);
+                            if (!at || at->kind != TyKind::Func || !at->fn) {
+                                err(arg->line, arg->col,
+                                    std::format("callback '{}' expects a function", cp.name));
+                                return;
+                            }
+                            const FuncInfo& fn = *at->fn;
+                            if (fn.varargs || fn.pos.size() != cp.cb_params.size()) {
+                                err(arg->line, arg->col,
+                                    std::format("callback '{}' expects {} parameter(s)", cp.name,
+                                                cp.cb_params.size()));
+                                return;
+                            }
+                            for (size_t j = 0; j < cp.cb_params.size(); ++j) {
+                                TypePtr want = cb_arg_ty(cp.cb_params[j]);
+                                TypePtr got = fn.pos[j].ty;
+                                if (got && got->kind != TyKind::Unknown && !assignable(want, got)) {
+                                    err(arg->line, arg->col,
+                                        std::format("callback '{}' parameter {} has type '{}', "
+                                                    "expected '{}'",
+                                                    cp.name, j + 1, type_name(got),
+                                                    type_name(want)));
+                                    return;
+                                }
+                            }
+                            if (cp.cb_ret != CKind::None && fn.ret &&
+                                fn.ret->kind != TyKind::Unknown &&
+                                !assignable(cb_arg_ty(cp.cb_ret), fn.ret)) {
+                                err(arg->line, arg->col,
+                                    std::format("callback '{}' returns '{}', expected '{}'",
+                                                cp.name, type_name(fn.ret),
+                                                type_name(cb_arg_ty(cp.cb_ret))));
+                            }
+                        };
+                        for (size_t i = 0; i < c.args.size() && i < x.params.size(); ++i)
+                            if (x.params[i].kind == CKind::Callback)
+                                check_cb(c.args[i].get(), x.params[i]);
+                        for (auto& kw : c.keywords)
+                            for (size_t i = 0; i < x.params.size(); ++i)
+                                if (x.params[i].name == kw.arg &&
+                                    x.params[i].kind == CKind::Callback)
+                                    check_cb(kw.value.get(), x.params[i]);
                         return rt;
                     }
                     err(c.line, c.col,
@@ -169,6 +246,20 @@ TypePtr TypeChecker::call(Call& c) {
                 for (auto& kw : c.keywords) expr(*kw.value);
                 return t_unknown();
             }
+            // 类接收者 + 装饰方法：类属性里存的是包装函数，self 显式传。
+            if (is_class_receiver(*a) && ot->kind == TyKind::Class && ot->cls) {
+                const MethodInfo* m = ot->cls->method(a->attr);
+                if (m && m->decorated) {
+                    if (!m->decorated_ty || m->decorated_ty->kind != TyKind::Func ||
+                        !m->decorated_ty->fn) {
+                        err(c.line, c.col,
+                            std::format("decorated method '{}.{}' has no known signature",
+                                        ot->cls->name, a->attr));
+                        return t_unknown();
+                    }
+                    return check_args(m->decorated_ty->fn, c);
+                }
+            }
             return method_call(ot, a->attr, c, is_self_attr(*a));
         }
         auto ft = expr(*c.func);
@@ -178,7 +269,52 @@ TypePtr TypeChecker::call(Call& c) {
             return t_unknown();
         }
         if (ft->kind == TyKind::BoundMethod) return method_call(ft->sub[0], ft->name, c);
+        if (ft->kind == TyKind::Struct) {
+            // 值类型构造：Point(1.0, 2.0)，按字段声明顺序逐位置传参。
+            auto st = ft->st;
+            if (!st) {
+                for (auto& arg : c.args) expr(*arg);
+                for (auto& kw : c.keywords) expr(*kw.value);
+                return t_unknown();
+            }
+            if (!c.keywords.empty())
+                err(c.line, c.col, "struct constructor does not take keyword arguments");
+            for (auto& kw : c.keywords) expr(*kw.value);
+            if (c.args.size() != st->fields.size()) {
+                err(c.line, c.col,
+                    std::format("'{}' takes {} positional argument{} but {} were given",
+                                st->name, st->fields.size(),
+                                st->fields.size() == 1 ? "" : "s", c.args.size()));
+            }
+            for (size_t i = 0; i < c.args.size() && i < st->fields.size(); ++i) {
+                TypePtr at = expr(*c.args[i]);
+                const auto& f = st->fields[i];
+                if (!assignable(f.ty, at))
+                    err(c.args[i]->line, c.args[i]->col,
+                        std::format("field '{}' of '{}' expects '{}', got '{}'", f.name,
+                                    st->name, type_name(f.ty), type_name(at)));
+            }
+            for (size_t i = st->fields.size(); i < c.args.size(); ++i) expr(*c.args[i]);
+            return mk_struct(st);
+        }
         if (ft->kind == TyKind::Class) {
+            // 类类型既可能是类本身，也可能是实例值：类名以外的来源
+            // （变量、调用结果）都是实例，调用走 __call__。
+            bool is_instance = c.func->kind == ExprKind::Call;
+            if (auto* cn = dynamic_cast<Name*>(c.func.get()))
+                is_instance = !name_is_class(*cn);
+            if (is_instance) {
+                const MethodInfo* cm = ft->cls ? ft->cls->method("__call__") : nullptr;
+                if (!ft->cls || !cm || !cm->call_sig) {
+                    err(c.line, c.col,
+                        std::format("'{}' object is not callable",
+                                    ft->cls ? ft->cls->name : "class"));
+                    for (auto& arg : c.args) expr(*arg);
+                    for (auto& kw : c.keywords) expr(*kw.value);
+                    return t_unknown();
+                }
+                return check_args(cm->call_sig, c);
+            }
             // 构造：分配 + 字段初值 + 调 __init__。参数按 __init__ 的
             // 调用签名检查（已去掉 self），返回值是实例。
             auto cls = ft->cls;
@@ -272,6 +408,12 @@ TypePtr TypeChecker::check_args(const FuncInfoPtr& fn, Call& c) {
         // 返回 0 表示不是缓冲区（交给 assignable），1 兼容，-1 元素不匹配。
         auto cptr_buffer = [](CKind elem, bool opaque, TypePtr ty) -> int {
             if (!ty) return 0;
+            // addr(struct) 的机器表示就是结构体 payload 的地址，ptr/ptr[T]
+            // 都能直接接收；C 结构体指针字段/返回值是 Optional[StructPtr]。
+            if (ty->kind == TyKind::StructPtr) return 1;
+            if (ty->kind == TyKind::Optional && !ty->sub.empty() &&
+                ty->sub[0]->kind == TyKind::StructPtr)
+                return 1;
             if (ty->kind == TyKind::List) {
                 if (opaque) return -1;
                 if (ty->sub.empty() || !ty->sub[0]) return 0;
@@ -1142,7 +1284,7 @@ bool TypeChecker::has_method(const TypePtr& t, const std::string& m) {
                 return ms.count(m) > 0;
             }
             case TyKind::Generator:
-                return m == "send" || m == "close" || m == "__next__";
+                return m == "send" || m == "throw" || m == "close" || m == "__next__";
             case TyKind::AsyncGenerator:
                 return m == "asend" || m == "athrow" || m == "aclose" || m == "__anext__";
             case TyKind::Task:
@@ -1337,6 +1479,20 @@ TypePtr TypeChecker::method_call(TypePtr recv, const std::string& name, Call& c,
         if (recv->kind == TyKind::Generator) {
             if (name == "send") {
                 argc(1, 1);
+                // Generator[Y, S, R] 标注了 send 值类型时按 S 检查；
+                // 返回的仍是下一次 yield 的值（Y）。
+                TypePtr st = recv->sub.size() > 1 ? recv->sub[1] : nullptr;
+                if (st && !is_unknown(st) && a.size() == 1 && a[0] && !is_unknown(a[0]) &&
+                    !assignable(st, a[0]))
+                    err(c.line, c.col,
+                        std::format("send() expects {}, got {}", type_name(st), type_name(a[0])));
+                return elem();
+            }
+            if (name == "throw") {
+                argc(1, 1);
+                if (!a.empty() && a[0] && !is_unknown(a[0]) &&
+                    a[0]->kind != TyKind::Exception)
+                    err(c.line, c.col, "throw() expects an exception instance");
                 return t_unknown();
             }
             if (name == "__next__" || name == "close") {

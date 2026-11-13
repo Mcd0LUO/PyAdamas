@@ -59,8 +59,12 @@ void AsmGen::gen_inst(const Inst& in) {
                 move_to(dst_op(in.dst), "%rax");
                 break;
             case IrOp::ObjNew: gen_obj_new(in); break;
+            case IrOp::StructNew: gen_struct_new(in); break;
+            case IrOp::StructCopy: gen_struct_copy(in); break;
             case IrOp::FieldLoad: gen_field_load(in); break;
             case IrOp::FieldStore: gen_field_store(in); break;
+            case IrOp::PtrLoad: gen_ptr_load(in); break;
+            case IrOp::PtrStore: gen_ptr_store(in); break;
             case IrOp::VCall: gen_vcall(in); break;
             case IrOp::VCallStatic: gen_vcall_static(in); break;
             case IrOp::SuperVCall: gen_super_vcall(in); break;
@@ -68,6 +72,8 @@ void AsmGen::gen_inst(const Inst& in) {
             case IrOp::Call: gen_call(in); break;
             case IrOp::CallRt: gen_call_rt(in); break;
             case IrOp::CallExtern: gen_call_extern(in); break;
+            case IrOp::LoadExtern: gen_load_extern(in); break;
+            case IrOp::StoreExtern: gen_store_extern(in); break;
             case IrOp::Setjmp: gen_setjmp(in); break;
             case IrOp::ImportModule: {
                 const std::string& name = m_->imports[static_cast<size_t>(in.imm)];
@@ -115,6 +121,11 @@ void AsmGen::gen_inst(const Inst& in) {
                 break;
             case IrOp::GenGetExc:
                 line("movq 64(%r15), %rax");
+                move_to(dst_op(in.dst), "%rax");
+                break;
+            case IrOp::GenTakeExc:
+                line("movq 64(%r15), %rax");
+                line("movq $0, 64(%r15)");
                 move_to(dst_op(in.dst), "%rax");
                 break;
             case IrOp::GenSent:
