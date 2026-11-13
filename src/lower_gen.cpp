@@ -559,12 +559,59 @@ void Lowerer::lower_for_gen(For& f, VReg seq, TypePtr seq_ty) {
 }
 
 void Lowerer::lower_async_for(For& f, VReg seq, TypePtr seq_ty) {
+    // 自定义 __aiter__：先调用拿到异步迭代器，再按它的类型驱动。
+    if (seq_ty && seq_ty->kind == TyKind::Class && seq_ty->cls) {
+        const MethodInfo* ai = seq_ty->cls->method("__aiter__");
+        if (!ai) {
+            err(f.iter->line, f.iter->col,
+                std::format("async for requires an async generator or a class with "
+                            "__aiter__, got '{}'",
+                            type_name(seq_ty)));
+            return;
+        }
+        TypePtr rt = t_unknown();
+        if (ai->call_sig && ai->call_sig->ret) rt = ai->call_sig->ret;
+        if (ai->decorated && ai->decorated_ty && ai->decorated_ty->kind == TyKind::Func &&
+            ai->decorated_ty->fn && ai->decorated_ty->fn->ret)
+            rt = ai->decorated_ty->fn->ret;
+        VReg iter = kNoReg;
+        if (ai->decorated) {
+            iter = dunder_call(seq, seq_ty, "__aiter__", {}, nullptr);
+        } else if (ai->slot >= 0) {
+            Inst vc;
+            vc.op = IrOp::VCall;
+            vc.a = seq;
+            vc.imm = ai->slot;
+            iter = def_heap(rt, std::move(vc));
+        }
+        if (iter == kNoReg) {
+            err(f.iter->line, f.iter->col,
+                std::format("__aiter__ on '{}' must be an instance method",
+                            seq_ty->cls->name));
+            return;
+        }
+        seq = iter;
+        seq_ty = rt;
+    }
     TypePtr et = t_unknown();
+    const MethodInfo* ne = nullptr;
+    bool use_anext = false;
     if (seq_ty && seq_ty->kind == TyKind::AsyncGenerator) {
         et = seq_ty->sub.empty() ? t_unknown() : seq_ty->sub[0];
+    } else if (seq_ty && seq_ty->kind == TyKind::Class && seq_ty->cls &&
+               (ne = seq_ty->cls->method("__anext__")) != nullptr) {
+        // __aiter__ 返回自身（或另一个异步迭代器）：每轮 await __anext__()。
+        TypePtr nt = ne->call_sig ? ne->call_sig->ret : nullptr;
+        if (ne->decorated && ne->decorated_ty && ne->decorated_ty->kind == TyKind::Func &&
+            ne->decorated_ty->fn)
+            nt = ne->decorated_ty->fn->ret;
+        if (nt && nt->kind == TyKind::Coroutine)
+            et = nt->sub.empty() ? t_unknown() : nt->sub[0];
+        use_anext = true;
     } else if (seq_ty && seq_ty->kind != TyKind::Unknown) {
         err(f.iter->line, f.iter->col,
-            std::format("async for requires an async generator, got '{}'",
+            std::format("async for requires an async generator or a class with "
+                        "__aiter__, got '{}'",
                         type_name(seq_ty)));
         return;
     }
@@ -615,11 +662,30 @@ void Lowerer::lower_async_for(For& f, VReg seq, TypePtr seq_ty) {
     st_->cleanups.push_back(cf);
 
     switch_to(fetch);
-    Inst call;
-    call.op = IrOp::CallRt;
-    call.imm = static_cast<int64_t>(RtFn::AsyncGenANext);
-    call.args = {seq_val()};
-    VReg w = def_heap(mk_coroutine(et), std::move(call));
+    VReg w = kNoReg;
+    if (use_anext) {
+        if (ne->decorated) {
+            w = dunder_call(seq_val(), seq_ty, "__anext__", {}, nullptr);
+        } else if (ne->slot >= 0) {
+            Inst vc;
+            vc.op = IrOp::VCall;
+            vc.a = seq_val();
+            vc.imm = ne->slot;
+            w = def_heap(mk_coroutine(et), std::move(vc));
+        }
+        if (w == kNoReg) {
+            err(f.iter->line, f.iter->col,
+                std::format("__anext__ on '{}' must be an async instance method",
+                            seq_ty->cls->name));
+            return;
+        }
+    } else {
+        Inst call;
+        call.op = IrOp::CallRt;
+        call.imm = static_cast<int64_t>(RtFn::AsyncGenANext);
+        call.args = {seq_val()};
+        w = def_heap(mk_coroutine(et), std::move(call));
+    }
     VReg val = suspend_on_awaitable(w, et, f.line, f.col,
                                     static_cast<size_t>(-1), false);
     st_->cleanups.pop_back();
@@ -835,9 +901,21 @@ int Lowerer::compile_suspendable_function(FunctionDef& f, FuncInfoPtr info,
             } else if (c.kind == FuncCtx::Cleanup::Kind::SemRelease) {
                 call_void(RtFn::SemRelease, {load_slot(c.mgr_slot, t_unknown())});
             } else if (c.kind == FuncCtx::Cleanup::Kind::Finally && c.body) {
+                // 重放发生在函数体降级完之后，loops 已空；恢复 finally
+                // 词法上所属的循环，break/continue 才能找到目标块。
+                bool pushed_loop = false;
+                if (st_->loops.empty() && c.loop_brk >= 0) {
+                    st_->loops.push_back({c.loop_brk, c.loop_cont});
+                    st_->loop_cleanup_depth.push_back(c.loop_depth);
+                    pushed_loop = true;
+                }
                 ++close_replay_depth_;
                 stmts(*c.body);
                 --close_replay_depth_;
+                if (pushed_loop) {
+                    st_->loops.pop_back();
+                    st_->loop_cleanup_depth.pop_back();
+                }
             }
         }
         // 挂起时摘下来的 handler 记录不会有人再弹栈，close 路径负责释放。

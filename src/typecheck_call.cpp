@@ -1490,8 +1490,11 @@ TypePtr TypeChecker::method_call(TypePtr recv, const std::string& name, Call& c,
             }
             if (name == "throw") {
                 argc(1, 1);
+                // 异常类（内置或自定义）等价于无消息实例。
+                bool exc_class = !a.empty() && a[0] && a[0]->kind == TyKind::Class &&
+                                 a[0]->cls && a[0]->cls->is_exception_class;
                 if (!a.empty() && a[0] && !is_unknown(a[0]) &&
-                    a[0]->kind != TyKind::Exception)
+                    a[0]->kind != TyKind::Exception && !exc_class)
                     err(c.line, c.col, "throw() expects an exception instance");
                 return t_unknown();
             }
@@ -1511,8 +1514,11 @@ TypePtr TypeChecker::method_call(TypePtr recv, const std::string& name, Call& c,
             }
             if (name == "athrow") {
                 argc(1, 1);
+                // 异常类（内置或自定义）等价于无消息实例。
+                bool exc_class = a.size() == 1 && a[0] && a[0]->kind == TyKind::Class &&
+                                 a[0]->cls && a[0]->cls->is_exception_class;
                 if (a.size() == 1 && !is_unknown(a[0]) &&
-                    a[0]->kind != TyKind::Exception)
+                    a[0]->kind != TyKind::Exception && !exc_class)
                     err(c.line, c.col, "athrow() expects an exception instance");
                 return mk_coroutine(et);
             }

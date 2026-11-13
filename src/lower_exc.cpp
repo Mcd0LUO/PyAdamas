@@ -35,6 +35,23 @@ VReg Lowerer::lower_exc_match(Expr& type) {
     return one(type);
 }
 
+bool Lowerer::exc_class_name(Expr& e, std::string& out) {
+    if (e.kind != ExprKind::Name) return false;
+    auto& n = static_cast<Name&>(e);
+    if (TypeChecker::is_exception_type(n.id) && is_builtin(n.id) && !is_local(n.id)) {
+        out = n.id;
+        return true;
+    }
+    // 自定义异常类：名字的静态类型是 Class 且标记为异常类。被同名
+    // 变量遮住时类型对不上，不会误判。
+    TypePtr t = tc_.type_of(&e);
+    if (t && t->kind == TyKind::Class && t->cls && t->cls->is_exception_class) {
+        out = t->cls->name;
+        return true;
+    }
+    return false;
+}
+
 void Lowerer::lower_raise(Raise& r) {
     if (!r.exc) {
         if (r.cause) {
@@ -285,59 +302,7 @@ void Lowerer::lower_try_core(Try& t) {
     switch_to(end);
 }
 
-/* finally 体里如果含跳出这个 finally 的 return/break/continue，目前
-   没有复制控制流的机制，直接拒绝；循环内部的 break/continue 是合法的。 */
-static bool outer_control(const std::vector<StmtPtr>& body, int loop_depth) {
-    for (auto& s : body) {
-        switch (s->kind) {
-            case StmtKind::Return: return true;
-            case StmtKind::Break:
-            case StmtKind::Continue: return loop_depth == 0;
-            case StmtKind::If: {
-                auto& f = static_cast<If&>(*s);
-                for (auto& b : f.branches)
-                    if (outer_control(b.body, loop_depth)) return true;
-                if (outer_control(f.orelse, loop_depth)) return true;
-                break;
-            }
-            case StmtKind::While: {
-                auto& w = static_cast<While&>(*s);
-                if (outer_control(w.body, loop_depth + 1)) return true;
-                if (outer_control(w.orelse, loop_depth)) return true;
-                break;
-            }
-            case StmtKind::For: {
-                auto& f = static_cast<For&>(*s);
-                if (outer_control(f.body, loop_depth + 1)) return true;
-                if (outer_control(f.orelse, loop_depth)) return true;
-                break;
-            }
-            case StmtKind::With: {
-                auto& w = static_cast<With&>(*s);
-                if (outer_control(w.body, loop_depth)) return true;
-                break;
-            }
-            case StmtKind::Try: {
-                auto& t = static_cast<Try&>(*s);
-                if (outer_control(t.body, loop_depth)) return true;
-                for (auto& h : t.handlers)
-                    if (outer_control(h.body, loop_depth)) return true;
-                if (outer_control(t.orelse, loop_depth)) return true;
-                if (outer_control(t.finalbody, loop_depth)) return true;
-                break;
-            }
-            default: break;
-        }
-    }
-    return false;
-}
-
 void Lowerer::lower_finally(Try& t) {
-    if (outer_control(t.finalbody, 0)) {
-        err(t.line, t.col,
-            "return/break/continue inside finally is not supported by the code generator yet");
-        return;
-    }
     int hs = push_handler();
     VReg sj = setjmp_handler(hs);
     if (!st_->is_generator && !st_->is_coroutine) {
@@ -358,6 +323,11 @@ void Lowerer::lower_finally(Try& t) {
         cf.handler_slot = hs;
         cf.land = land;
         cf.body = &t.finalbody;
+        if (!st_->loops.empty()) {
+            cf.loop_brk = st_->loops.back().first;
+            cf.loop_cont = st_->loops.back().second;
+            cf.loop_depth = st_->loop_cleanup_depth.back();
+        }
         st_->cleanups.push_back(cf);
         lower_try_core(t);
         st_->cleanups.pop_back();
@@ -372,9 +342,18 @@ void Lowerer::lower_finally(Try& t) {
 
         switch_to(land);
         call_void(RtFn::HandlerLeave, {load_slot(hs, t_int())});
+        // 待重抛异常先转成异常值存槽：finally 里的 return/break/continue
+        // 终止控制流时异常被吞掉，全局 pending_exc 也不会残留。
+        TypePtr exc_ty = mk_exception("Exception");
+        int pend_slot = new_temp_slot(exc_ty);
+        VReg pv = call_runtime(RtFn::ExcTakeValue, exc_ty, {});
+        push_temp(pv);
+        store_slot(pend_slot, pv);
         stmts(t.finalbody);
-        call_void(RtFn::ExcReraise, {});
-        end_unreachable();
+        if (!terminated()) {
+            call_void(RtFn::ExcReraiseValueIf, {load_slot(pend_slot, exc_ty)});
+            end_unreachable();
+        }
         switch_to(end);
         return;
     }
@@ -406,6 +385,11 @@ void Lowerer::lower_finally(Try& t) {
     cf.handler_slot = hs;
     cf.land = land;
     cf.body = &t.finalbody;
+    if (!st_->loops.empty()) {
+        cf.loop_brk = st_->loops.back().first;
+        cf.loop_cont = st_->loops.back().second;
+        cf.loop_depth = st_->loop_cleanup_depth.back();
+    }
     st_->cleanups.push_back(cf);
     lower_try_core(t);
     st_->cleanups.pop_back();

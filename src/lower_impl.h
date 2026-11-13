@@ -179,6 +179,11 @@ struct FuncCtx {
         ClassInfo* exit_cls = nullptr;
         // Finally
         std::vector<StmtPtr>* body = nullptr;
+        // finally 体词法上所属的循环：close 重放 break/continue 时恢复，
+        // -1 表示不在循环里。
+        int loop_brk = -1;
+        int loop_cont = -1;
+        size_t loop_depth = 0;
     };
     std::vector<Cleanup> cleanups;
     // 函数内 import 的模块别名；模块顶层的别名在 Lowerer::module_aliases_。
@@ -1349,6 +1354,9 @@ private:
     VReg dunder_call(VReg recv, TypePtr recv_ty, const char* name,
                      std::vector<VReg> args, TypePtr want_ret,
                      const std::vector<TypePtr>* arg_tys = nullptr);
+    // 实参是异常类名（内置异常或自定义异常类）时返回 true 并写回类名。
+    // throw()/athrow() 接受异常类，按无消息实例处理。
+    bool exc_class_name(Expr& e, std::string& out);
     VReg dunder_str(VReg v, TypePtr ty, bool prefer_repr);
     VReg dunder_len(VReg v, TypePtr ty);
     VReg lower_dunder_eq(VReg l, TypePtr lt, VReg r, TypePtr rt, bool ne);

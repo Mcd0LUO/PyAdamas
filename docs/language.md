@@ -356,7 +356,8 @@ it.throw(ValueError("x"))  # caught x -> 2
 
 `throw` 注入的异常若没人接住，生成器随之结束，异常抛给调用方；对已经结束的
 生成器 `throw` 时异常直接抛给调用方，对从未启动的生成器则从函数入口抛出
-（函数体不执行）。
+（函数体不执行）。实参可以是异常实例，也可以是异常类：`throw(ValueError)`
+等价于 `throw(ValueError())`；`athrow()` 同理。
 
 **`yield from`**：把子迭代器的值逐个转 yield 出去；委托生成器时
 `send` 的值会转发给子生成器，子生成器结束（或出错）后继续执行外层
@@ -400,8 +401,9 @@ aborted，避免销毁时重复执行。
 限制：`yield` / `yield from` / `await` 可以出现在任意子表达式里
 （`f(g(), yield x)`、`10 + (yield x)` 都行）：降级后按 resume 函数的
 vreg 活跃性找出跨挂起的值，挂起前 retain 一份写进生成器堆帧槽，恢复
-后再装回。`finally` 体内的 `return` / `break` / `continue` 仍不支持。
-`throw()` 只接受异常实例，不接受异常类。生成器 / 协程 / 异步生成器的元素与
+后再装回。`finally` 体内的 `return` / `break` / `continue` 可以跳出
+（含生成器 `close()` 重放路径）。`throw()` / `athrow()` 接受异常实例，
+也接受异常类（等价于无消息实例）。生成器 / 协程 / 异步生成器的元素与
 结果类型跨模块接口保留（模块格式 7 起 `Generator` 还带 `send` 值与 `return`
 值的类型）。
 
@@ -547,12 +549,12 @@ Future 被取消时，其他等待者也会收到 `CancelledError`。
 无效 fd 以 `OSError` 结束等待。这是 PyAdamas 自己的低级接口（CPython
 用 `loop.add_reader`），没有配套的 fd 读写函数。
 
-限制：`await` 可以出现在任意子表达式和 `except` 体内，但不能位于
-`finally` 体内；异步推导式只能作为语句、赋值或 `return` 的根表达式；
-不支持自定义 `__aiter__` 迭代器、fd 读写和线程安全的事件循环；Future
-回调是同步调用（CPython 用 `call_soon` 排队），`gather` 的实参个数在
-源码里写死，结果元素类型按 unknown 处理；Task 只允许一个并发等待者，
-没有任务名字。
+限制：异步推导式只能作为语句、赋值或 `return` 的根表达式；`async for`
+支持 `AsyncGenerator` 以及定义了 `__aiter__` 的类实例（`__aiter__` 返回
+`AsyncGenerator`，或返回自身/另一个定义了 `async __anext__` 的对象）；
+fd 读写和线程安全的事件循环未支持；Future 回调是同步调用（CPython 用
+`call_soon` 排队），`gather` 的实参个数在源码里写死，结果元素类型按
+unknown 处理；Task 只允许一个并发等待者，没有任务名字。
 
 ### 内存与生命周期
 
@@ -1055,8 +1057,10 @@ raise MyError("bad")
 `raise ... from None` 清空原因。traceback 仍未支持，`args` 目前只保存
 消息。
 `finally` 在正常、异常、`return`、`break`、`continue` 路径都会执行；
-但 `finally` 体内**跳出 finally** 的 `return` / `break` / `continue`
-会被后端拒绝（finally 里嵌套循环自己的跳转是允许的）。
+`finally` 体内跳出 finally 的 `return` / `break` / `continue` 也支持：
+跳出路径会内联一份 finalbody，最终返回值/跳转以 finally 里的为准，
+异常被 finally 里的跳转吞掉。生成器 `close()` 重放 finally 体时同样
+支持 `break` / `continue`（重放会恢复 finally 词法上所属的循环）。
 
 `with` 的 `__exit__` 在 `return` / `break` / `continue` 和异常路径都会执行。
 
@@ -1463,7 +1467,7 @@ print(linalg.dot([1.0, 2.0], [3.0, 4.0]))  # 11.0
 - PEP 695 泛型语法（`class C[T]:`）
 - 类：方法缺 `self`、字段赋值类型不符、访问不存在的字段或方法（`self.xxx` 与外部基类的成员除外）
 
-**代码生成层**（`check` 通过，`build` 报错）：类装饰器、返回类型未知的方法装饰器、容器转标量（`int([1, 2])`、`str({})`）、异构元组的 `repr()`、容器元素跨数值域的转换（`list`/`tuple`/`dict`/`set` 的 int → float 赋值/实参）、通过 unknown 函数值的 `*` / `**` 展开、`*` 位于固定形参之前且不是定长 tuple、非异常类名当异常用、`finally` 体内跳出 finally 的控制流、跨模块继承、把类名当值用（`f = Point`）、函数内定义类、异步生成器表达式、嵌在其它表达式里的异步推导式。异步生成器有 `asend`/`athrow`/`__anext__`/`aclose`。自定义异常类目前只支持 `pass` 类体（字段/方法会被拒绝）。类体字段默认值里的 `lambda` 也在这一层拒绝。match 额外拒绝：导入类模式的字段子模式、unknown 值上的数值/list/dict/tuple/set 内置类型模式。
+**代码生成层**（`check` 通过，`build` 报错）：类装饰器、返回类型未知的方法装饰器、容器转标量（`int([1, 2])`、`str({})`）、异构元组的 `repr()`、容器元素跨数值域的转换（`list`/`tuple`/`dict`/`set` 的 int → float 赋值/实参）、通过 unknown 函数值的 `*` / `**` 展开、`*` 位于固定形参之前且不是定长 tuple、非异常类名当异常用、跨模块继承、把类名当值用（`f = Point`）、函数内定义类、异步生成器表达式、嵌在其它表达式里的异步推导式。异步生成器有 `asend`/`athrow`/`__anext__`/`aclose`。自定义异常类目前只支持 `pass` 类体（字段/方法会被拒绝）。类体字段默认值里的 `lambda` 也在这一层拒绝。match 额外拒绝：导入类模式的字段子模式、unknown 值上的数值/list/dict/tuple/set 内置类型模式。
 
 为什么这么分层：前端宽、后端严。`check` 的定位是「语法和类型有没有明显毛病」，可以对任意 Python 文件跑；`build` 才是「这门语言现在能不能编译它」。
 

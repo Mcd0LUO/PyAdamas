@@ -4,6 +4,33 @@
 
 早期阶段没有逐条留痕，按阶段归纳；0.4 之后逐条记录。
 
+## [0.134] - 2026-11-13
+
+`finally` 体内跳出、`throw()`/`athrow()` 接受异常类、自定义 `__aiter__`。
+
+### 变更
+
+- `finally` 体内的 `return` / `break` / `continue`：跳出路径内联 finalbody，
+  最终返回值/跳转以 finally 为准，异常被吞掉。非可挂起函数的 landing 路径
+  先用 `ExcTakeValue` 把待重抛异常转成槽里的异常值，跳出时不会留下悬空的
+  `pending_exc`。
+- 生成器 `close()` 重放 finally 体时恢复 finally 词法上所属的循环，
+  `break` / `continue` 能正常找到目标块（`Cleanup::Finally` 记录
+  break/continue 目标与清理深度）。
+- `throw()` / `athrow()` 接受异常类：`throw(ValueError)` 等价于
+  `throw(ValueError())`；内置异常名与自定义异常类都支持，类型检查接受
+  `Class` 形态的异常类实参。
+- 自定义 `__aiter__`：`async for` 支持类实例。`__aiter__` 返回
+  `AsyncGenerator` 时复用 `AsyncGenANext` 驱动；返回自身（或另一个带
+  `async __anext__` 的对象）时每轮 `VCall __anext__` 并
+  `suspend_on_awaitable`。装饰的 `__aiter__`/`__anext__` 走 `dunder_call`。
+- 新增 `tests/run/129_finally_jump.py`（普通函数/生成器/协程的 finally
+  跳出、异常吞掉、嵌套 finally）、`tests/run/130_throw_class.py`
+  （内置/自定义异常类、未启动/已结束生成器、异步生成器）、
+  `tests/run/131_async_aiter.py`（`__aiter__` 返回异步生成器、
+  `__aiter__` 返回 self + `async __anext__`、break/continue/else），
+  `build/memcheck.sh` 覆盖这三个用例。
+
 ## [0.133] - 2026-11-13
 
 `Generator[Y, S, R]` 标注给 `send` 与 `yield` 表达式静态类型。

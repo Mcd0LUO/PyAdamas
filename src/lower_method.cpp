@@ -678,7 +678,18 @@ VReg Lowerer::lower_method_call(Attribute& at, Call& c) {
                 err(c.line, c.col, "generator.throw() takes exactly one argument");
                 return const_none();
             }
-            VReg ev = expr(*c.args[0]);
+            VReg ev = kNoReg;
+            std::string cn;
+            if (exc_class_name(*c.args[0], cn)) {
+                // throw(ValueError) 等价于 throw(ValueError())。
+                Inst ctor;
+                ctor.op = IrOp::CallRt;
+                ctor.imm = static_cast<int64_t>(RtFn::ExcValueNew);
+                ctor.args = {const_str(cn), const_int(0)};
+                ev = def_heap(mk_exception(cn), std::move(ctor));
+            } else {
+                ev = expr(*c.args[0]);
+            }
             Inst in;
             in.op = IrOp::CallRt;
             in.imm = static_cast<int64_t>(RtFn::GenThrow);
@@ -729,7 +740,18 @@ VReg Lowerer::lower_method_call(Attribute& at, Call& c) {
                 err(c.line, c.col, "async generator.athrow() takes exactly one argument");
                 return const_none();
             }
-            VReg ev = expr(*c.args[0]);
+            VReg ev = kNoReg;
+            std::string cn;
+            if (exc_class_name(*c.args[0], cn)) {
+                // athrow(ValueError) 等价于 athrow(ValueError())。
+                Inst ctor;
+                ctor.op = IrOp::CallRt;
+                ctor.imm = static_cast<int64_t>(RtFn::ExcValueNew);
+                ctor.args = {const_str(cn), const_int(0)};
+                ev = def_heap(mk_exception(cn), std::move(ctor));
+            } else {
+                ev = expr(*c.args[0]);
+            }
             Inst in;
             in.op = IrOp::CallRt;
             in.imm = static_cast<int64_t>(RtFn::AsyncGenAthrow);

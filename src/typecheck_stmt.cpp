@@ -280,13 +280,45 @@ void TypeChecker::stmt(Stmt& s) {
                 auto it = expr(*f.iter);
                 TypePtr elem;
                 if (f.is_async) {
-                    if (is_unknown(it)) {
+                    // 自定义 __aiter__：先静态解析成异步迭代器类型。
+                    TypePtr iter_ty = it;
+                    bool via_aiter = false;
+                    if (it && it->kind == TyKind::Class && it->cls) {
+                        if (auto* ai = it->cls->method("__aiter__")) {
+                            via_aiter = true;
+                            iter_ty = t_unknown();
+                            if (ai->call_sig && ai->call_sig->ret) iter_ty = ai->call_sig->ret;
+                            if (ai->decorated && ai->decorated_ty &&
+                                ai->decorated_ty->kind == TyKind::Func &&
+                                ai->decorated_ty->fn && ai->decorated_ty->fn->ret)
+                                iter_ty = ai->decorated_ty->fn->ret;
+                        }
+                    }
+                    if (is_unknown(it) || (via_aiter && is_unknown(iter_ty))) {
                         elem = t_unknown();
-                    } else if (it && it->kind == TyKind::AsyncGenerator) {
-                        elem = it->sub.empty() ? t_unknown() : it->sub[0];
+                    } else if (iter_ty && iter_ty->kind == TyKind::AsyncGenerator) {
+                        elem = iter_ty->sub.empty() ? t_unknown() : iter_ty->sub[0];
+                    } else if (via_aiter && iter_ty && iter_ty->kind == TyKind::Class &&
+                               iter_ty->cls && iter_ty->cls->method("__anext__")) {
+                        // __aiter__ 返回自身（或另一个异步迭代器）：每轮
+                        // await __anext__()，元素类型是协程的结果。
+                        auto* ne = iter_ty->cls->method("__anext__");
+                        TypePtr nt = ne->call_sig ? ne->call_sig->ret : nullptr;
+                        if (ne->decorated && ne->decorated_ty &&
+                            ne->decorated_ty->kind == TyKind::Func && ne->decorated_ty->fn)
+                            nt = ne->decorated_ty->fn->ret;
+                        if (nt && nt->kind == TyKind::Coroutine)
+                            elem = nt->sub.empty() ? t_unknown() : nt->sub[0];
+                        else {
+                            err(f.iter->line, f.iter->col,
+                                std::format("async for requires __anext__ to be async on '{}'",
+                                            iter_ty->cls->name));
+                            elem = t_unknown();
+                        }
                     } else {
                         err(f.iter->line, f.iter->col,
-                            std::format("async for requires an async generator, got '{}'",
+                            std::format("async for requires an async generator or a class "
+                                        "with __aiter__, got '{}'",
                                         type_name(it)));
                         elem = t_unknown();
                     }

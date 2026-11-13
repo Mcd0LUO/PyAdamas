@@ -28,8 +28,8 @@ PyAdamas 不追求兼容 CPython：语义是按静态类型的需要重新定的
 | import | 本地单层 `.py`；`m.x` 直接读写模块全局；`from m import x` 是快照；模块别名不能当值 | 任意模块/包、运行时模块对象 | 支持包/相对导入/静态 `import *`（按非下划线导出）；跨模块继承暂不支持 |
 | 模块初始化 | 第一次执行 import 时惰性运行一次；循环导入编译期报错 | 支持循环导入和部分初始化 | 初始化失败的模块不会再重试；模块对象不可见 |
 | 推导式 | list/set/dict 推导式按循环展开；生成器表达式脱糖成合成生成器函数，惰性求值；含 `async for` 的推导式在协程里可挂起；含 lambda 的推导式改写成生成器表达式 + 构造器，循环变量可被捕获 | 同 Python | 异步推导式只能作为语句/赋值/`return` 的根表达式；类体里的生成器表达式仍按 list 构造；推导式内部不能引用循环变量的生成器表达式 |
-| 生成器 | 状态机 + 堆帧；`for` / `next` / `send` / `throw` / `close` / `yield from`；`yield from` 把 `throw` 转发给子生成器；跨 `yield` 跑 `finally` / `__exit__`；挂起点可在任意子表达式、`except` 与 `finally` 体内；生成器/协程/异步生成器类型跨模块保留元素/结果类型；`Generator[Y, S, R]` 标注给 `send` 实参与 `yield` 表达式收窄类型 | 完整生成器协议 | `finally` 体内不能 `return` / `break` / `continue` 跳出；`throw` 只接受异常实例（不接受异常类）；未标注 `Generator[Y, S, R]` 时 `send` 值与 `yield` 表达式静态是 unknown（`R` 只记录，`StopIteration.value` 不检查） |
-| 协程 / Task / Future | `async def` / `await` 复用生成器帧；`asyncio.run`/`sleep`/`gather`/`create_task`；`done()`/`cancel()`/`result()`/`exception()`；Future 多等待者、`set_exception`、`add_done_callback`；取消级联；`wait_readable`/`wait_writable` + poll；异步生成器 + `async for` + `async with`；异步推导式 | 完整 asyncio（Task 组/Future 回调/I/O 流） | `await` 可位于任意子表达式与 `finally` 体内（跨挂起的 vreg 由降级器溢写到帧槽）；异步生成器有 `asend`/`athrow`/`__anext__`/`aclose`，`aclose` 不会 await `async with` 的 `__aexit__`，停在 `async with` 里被直接回收时不 await 退出；自定义 `__aiter__` 未支持；Future 回调同步执行；`set_exception` 接收异常值或消息；`exception()` 返回异常值；`CancelledError` 是内置名；`wait_readable` 不是 CPython 标准 API；`gather` 结果元素是 unknown；Task 单等待者 |
+| 生成器 | 状态机 + 堆帧；`for` / `next` / `send` / `throw` / `close` / `yield from`；`yield from` 把 `throw` 转发给子生成器；跨 `yield` 跑 `finally` / `__exit__`；挂起点可在任意子表达式、`except` 与 `finally` 体内；生成器/协程/异步生成器类型跨模块保留元素/结果类型；`Generator[Y, S, R]` 标注给 `send` 实参与 `yield` 表达式收窄类型 | 完整生成器协议 | 未标注 `Generator[Y, S, R]` 时 `send` 值与 `yield` 表达式静态是 unknown（`R` 只记录，`StopIteration.value` 不检查） |
+| 协程 / Task / Future | `async def` / `await` 复用生成器帧；`asyncio.run`/`sleep`/`gather`/`create_task`；`done()`/`cancel()`/`result()`/`exception()`；Future 多等待者、`set_exception`、`add_done_callback`；取消级联；`wait_readable`/`wait_writable` + poll；异步生成器 + `async for` + `async with`；异步推导式 | 完整 asyncio（Task 组/Future 回调/I/O 流） | `await` 可位于任意子表达式与 `finally` 体内（跨挂起的 vreg 由降级器溢写到帧槽）；异步生成器有 `asend`/`athrow`/`__anext__`/`aclose`，`aclose` 不会 await `async with` 的 `__aexit__`，停在 `async with` 里被直接回收时不 await 退出；Future 回调同步执行；`set_exception` 接收异常值或消息；`exception()` 返回异常值；`CancelledError` 是内置名；`wait_readable` 不是 CPython 标准 API；`gather` 结果元素是 unknown；Task 单等待者 |
 | 递归深度 | 受栈大小限制（万级） | 默认 1000，可调 | 没有解释器递归检查 |
 | 字段初值 `x: int = []` | 每次构造重新求值，实例之间独立 | 类属性，所有实例共享 | 更安全；也避免可变默认值的经典 bug |
 | 类体里的普通赋值 | 是类属性：所有实例共享一份存储，`C.x` / `cls.x` / `self.x` 都能读到；子类赋值走写时复制，基类不受影响 | 类体是独立命名空间，属性存在类对象上 | `if`/`for` 等其它类体语句仍按模块全局处理；`obj.类属性 = v` 不支持（对象布局编译期定死） |
@@ -79,7 +79,7 @@ PyAdamas 不追求兼容 CPython：语义是按静态类型的需要重新定的
 
 **语法层就拒**（`check` 报错）：超出 int64 的整数、Python 2 遗留写法、方法缺 `self`、字段赋值类型不符。
 
-**能解析、能过类型检查，但 `build` 报错**：通过 unknown 函数值的 `*` / `**` 展开、`*` 位于固定形参之前且不是定长 tuple、非异常类名当异常用、容器元素跨数值域的转换（`list`/`tuple`/`dict`/`set` 的 int → float 赋值/实参）、`finally` 体内跳出 finally 的 `return`/`break`/`continue`、跨模块继承、类装饰器、返回类型未知的方法装饰器、把类名当值用、函数内定义类、导入类模式的字段子模式、unknown 值上的数值/list/dict/tuple/set 内置类型模式、类体字段默认值里的 lambda，以及异步生成器表达式、嵌在其它表达式里的异步推导式。
+**能解析、能过类型检查，但 `build` 报错**：通过 unknown 函数值的 `*` / `**` 展开、`*` 位于固定形参之前且不是定长 tuple、非异常类名当异常用、容器元素跨数值域的转换（`list`/`tuple`/`dict`/`set` 的 int → float 赋值/实参）、跨模块继承、类装饰器、返回类型未知的方法装饰器、把类名当值用、函数内定义类、导入类模式的字段子模式、unknown 值上的数值/list/dict/tuple/set 内置类型模式、类体字段默认值里的 lambda，以及异步生成器表达式、嵌在其它表达式里的异步推导式。
 
 清楚这个分层很重要：`pyadamas check` 尽量当通用 Python 语法/类型检查器用，检查器放宽的边界都记在 [CHANGELOG 0.6.1](archive/changelog-0.40.md)；`pyadamas build` 才是「能不能编译」的判据。
 
