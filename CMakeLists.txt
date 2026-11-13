@@ -24,8 +24,10 @@ set(PYADAMAS_SOURCES
   src/parser_match.cpp
   src/typecheck.cpp
   src/typecheck_stmt.cpp
+  src/typecheck_stmt_forms.cpp
   src/typecheck_expr.cpp
   src/typecheck_call.cpp
+  src/typecheck_call_forms.cpp
   src/typecheck_builtin.cpp
   src/typecheck_func.cpp
   src/lower.cpp

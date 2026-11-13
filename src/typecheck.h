@@ -1499,6 +1499,22 @@ private:
     static bool block_exits(const std::vector<StmtPtr>& body);
 
     void stmt(Stmt& s);
+    // 按语句形态拆开（typecheck_stmt_forms.cpp）。
+    void stmt_assign(Assign& a);
+    void stmt_aug_assign(AugAssign& a);
+    void stmt_ann_assign(AnnAssign& a);
+    void stmt_return(Return& a);
+    void stmt_if(If& a);
+    void stmt_while(While& a);
+    void stmt_for(For& a);
+    void stmt_try(Try& a);
+    void stmt_with(With& a);
+    void stmt_raise(Raise& a);
+    void stmt_assert(Assert& a);
+    void stmt_import(Import& a);
+    void stmt_cimport(CImport& a);
+    void stmt_import_from(ImportFrom& a);
+    void stmt_delete(Delete& a);
 
     // match/case 模式：在当前位置绑定捕获名。
     void match_pattern(Pattern& p, TypePtr subject,
@@ -1587,6 +1603,10 @@ private:
     // ── 调用 ────────────────────────────────────────────────────
 
     TypePtr call(Call& c);
+    // 按被调表达式形态拆开（typecheck_call_forms.cpp）。
+    TypePtr call_name(Name& n, Call& c);
+    TypePtr call_attr(Attribute& a, Call& c);
+    TypePtr call_value(Call& c);
 
     TypePtr check_args(const FuncInfoPtr& fn, Call& c);
 
