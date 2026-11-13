@@ -891,7 +891,10 @@ std::optional<TypePtr> TypeChecker::random_call(const std::string& member, Call&
 }
 
 std::optional<TypePtr> TypeChecker::itertools_call(const std::string& member, Call& c) {
-        if (member != "chain" && member != "islice" && member != "repeat")
+        if (member != "chain" && member != "islice" && member != "repeat" &&
+            member != "product" && member != "permutations" && member != "combinations" &&
+            member != "combinations_with_replacement" && member != "zip_longest" &&
+            member != "accumulate")
             return std::nullopt;
         if (!c.keywords.empty()) {
             err(c.line, c.col,
@@ -934,6 +937,74 @@ std::optional<TypePtr> TypeChecker::itertools_call(const std::string& member, Ca
                     err(c.args[i]->line, c.args[i]->col,
                         "itertools.islice() indices must be int");
             return is_list(a[0]) ? a[0] : mk_list(t_unknown());
+        }
+        if (member == "product") {
+            // product() 无实参时 CPython 返回 [()]，这里照做。
+            std::vector<TypePtr> elems;
+            elems.reserve(a.size());
+            for (size_t i = 0; i < a.size(); ++i) {
+                if (!is_list(a[i]) && !is_unknown(a[i]))
+                    err(c.args[i]->line, c.args[i]->col,
+                        std::format("itertools.product() expects lists, got '{}'",
+                                    type_name(a[i])));
+                elems.push_back(elem_of(a[i]));
+            }
+            return mk_list(mk_tuple(std::move(elems)));
+        }
+        if (member == "permutations" || member == "combinations" ||
+            member == "combinations_with_replacement") {
+            bool argc_ok = member == "permutations" ? (a.size() == 1 || a.size() == 2)
+                                                    : a.size() == 2;
+            if (!argc_ok) {
+                err(c.line, c.col,
+                    std::format("itertools.{}() expects {} arguments, got {}", member,
+                                member == "permutations" ? "1 or 2" : "2", a.size()));
+                return mk_list(mk_tuple_rest(t_unknown()));
+            }
+            if (!is_list(a[0]) && !is_unknown(a[0]))
+                err(c.args[0]->line, c.args[0]->col,
+                    std::format("itertools.{}() expects a list, got '{}'", member,
+                                type_name(a[0])));
+            if (a.size() > 1 && a[1] && !is_unknown(a[1]) && a[1]->kind != TyKind::Int)
+                err(c.args[1]->line, c.args[1]->col,
+                    std::format("itertools.{}() r must be int", member));
+            return mk_list(mk_tuple_rest(elem_of(a[0])));
+        }
+        if (member == "zip_longest") {
+            if (a.empty()) {
+                err(c.line, c.col, "itertools.zip_longest() expects at least 1 argument");
+                return mk_list(mk_tuple_rest(t_unknown()));
+            }
+            // 短的序列用 None 补齐：每一列的类型是 Optional[elem]。
+            std::vector<TypePtr> cols;
+            cols.reserve(a.size());
+            for (size_t i = 0; i < a.size(); ++i) {
+                if (!is_list(a[i]) && !is_unknown(a[i]))
+                    err(c.args[i]->line, c.args[i]->col,
+                        std::format("itertools.zip_longest() expects lists, got '{}'",
+                                    type_name(a[i])));
+                cols.push_back(mk_optional(elem_of(a[i])));
+            }
+            return mk_list(mk_tuple(std::move(cols)));
+        }
+        if (member == "accumulate") {
+            if (a.size() != 1) {
+                err(c.line, c.col,
+                    std::format("itertools.accumulate() expects 1 argument, got {}", a.size()));
+                return mk_list(t_unknown());
+            }
+            if (!is_list(a[0]) && !is_unknown(a[0]))
+                err(c.args[0]->line, c.args[0]->col,
+                    std::format("itertools.accumulate() expects a list, got '{}'",
+                                type_name(a[0])));
+            TypePtr e = elem_of(a[0]);
+            if (e && e->kind != TyKind::Int && e->kind != TyKind::Float &&
+                e->kind != TyKind::Bool && !is_unknown(e)) {
+                err(c.args[0]->line, c.args[0]->col,
+                    "itertools.accumulate() expects list[int] or list[float]");
+                return mk_list(t_unknown());
+            }
+            return a[0];
         }
         // repeat(x, n)
         if (a.size() != 2) {
@@ -1840,6 +1911,18 @@ TypePtr TypeChecker::method_call(TypePtr recv, const std::string& name, Call& c,
                 return t_int();
             }
             err(c.line, c.col, std::format("datetime has no method '{}'", name));
+            return t_unknown();
+        }
+        if (recv->kind == TyKind::TimeDelta) {
+            if (!c.keywords.empty())
+                err(c.line, c.col,
+                    std::format("datetime.timedelta.{}() does not take keyword arguments",
+                                name));
+            if (name == "total_seconds") {
+                argc(0, 0);
+                return t_float();
+            }
+            err(c.line, c.col, std::format("timedelta has no method '{}'", name));
             return t_unknown();
         }
         if (recv->kind == TyKind::Path) {

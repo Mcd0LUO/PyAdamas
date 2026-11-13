@@ -4,6 +4,28 @@
 
 早期阶段没有逐条留痕，按阶段归纳；0.4 之后逐条记录。
 
+## [0.142] - 2026-11-13
+
+标准库基础静态包（第二批）：itertools 组合函数、datetime.timedelta、operator 子集。
+
+### 变更
+
+- `itertools` 增加 `product`、`permutations`、`combinations`、
+  `combinations_with_replacement`、`zip_longest`、`accumulate`。结果仍是
+  立即求值的列表；`zip_longest` 的每一列按 `Optional[T]` 补齐 `None`。
+- 新增 `datetime.timedelta`：新类型 `TimeDelta`。构造支持
+  `days`/`seconds`/`microseconds`/`milliseconds`/`minutes`/`hours`/`weeks`
+  （位置或关键字）；提供 `.days`/`.seconds`/`.microseconds`、
+  `total_seconds()`、加减、乘整数、取负、比较，打印文本与 CPython 的
+  `str(timedelta)` 对齐。
+- `datetime`/`date` 与 `timedelta` 的加减、`datetime - datetime` 得到
+  `timedelta`；`datetime`/`date` 之间的比较改为按值（原来按指针）。
+- 新增纯 PyAdamas `operator` 子集：`itemgetter`（列表/元组下标）、
+  `truth`、`not_`。`attrgetter` 需要运行期按名字取属性、算术与比较包装
+  需要按调用点特化，留待后续。
+- 新增运行用例 142（itertools 组合函数）、143（timedelta）、
+  144（operator）。
+
 ## [0.141] - 2026-11-13
 
 标准库基础静态包（第一批）。

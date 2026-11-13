@@ -436,6 +436,7 @@ VReg Lowerer::lower_method_call(Attribute& at, Call& c) {
                     recv_ty->kind == TyKind::AsyncTaskGroup ||
                     recv_ty->kind == TyKind::AsyncSemaphore ||
                     recv_ty->kind == TyKind::DateTime ||
+                    recv_ty->kind == TyKind::TimeDelta ||
                     recv_ty->kind == TyKind::Path ||
                     recv_ty->kind == TyKind::Popen ||
                     recv_ty->kind == TyKind::Deque)) {
@@ -561,6 +562,14 @@ VReg Lowerer::lower_method_call(Attribute& at, Call& c) {
                 return call_runtime(RtFn::DateTimeField, t_int(), {recv, const_int(6)});
             }
             err(c.line, c.col, std::format("datetime has no method '{}'", at.attr));
+            return const_none();
+        }
+        if (recv_ty->kind == TyKind::TimeDelta) {
+            if (at.attr == "total_seconds") {
+                if (!count(0)) return const_none();
+                return call_runtime(RtFn::TimeDeltaTotalSeconds, t_float(), {recv});
+            }
+            err(c.line, c.col, std::format("timedelta has no method '{}'", at.attr));
             return const_none();
         }
         if (recv_ty->kind == TyKind::Path) {

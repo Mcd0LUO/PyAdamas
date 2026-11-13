@@ -72,6 +72,7 @@ enum class TyKind : uint8_t {
     Regex,        // re.compile() 返回的 Pattern
     Match,        // re.search()/match() 返回的 Match
     DateTime,     // datetime.date / datetime.datetime
+    TimeDelta,    // datetime.timedelta
     Path,         // pathlib.Path
     Deque,        // collections.deque
     Struct,       // 值类型 struct 的实例，st 指向编译期布局
@@ -939,6 +940,7 @@ inline std::string type_name_impl(const TypePtr& t, int depth) {
         case TyKind::Regex: return "re.Pattern";
         case TyKind::Match: return "re.Match";
         case TyKind::DateTime: return "datetime";
+        case TyKind::TimeDelta: return "timedelta";
         case TyKind::Path: return "pathlib.Path";
         case TyKind::Deque: return "collections.deque";
     }

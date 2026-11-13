@@ -402,6 +402,12 @@ enum class RtFn : uint16_t {
     OsPathExpanduser,      // (str*) -> str*
     IterChain,             // (list* a, list* b, i64 elem_kind) -> list*
     IterRepeat,            // (i64 v, i64 n, i64 elem_kind) -> list*
+    IterProduct,           // (list* seqs, i64 elem_kind) -> list*；seqs 里装源列表
+    IterPermutations,      // (list* pool, i64 r, i64 elem_kind) -> list*；r < 0 表示 len
+    IterCombinations,      // (list* pool, i64 r, i64 elem_kind) -> list*
+    IterCombinationsWR,    // (list* pool, i64 r, i64 elem_kind) -> list*
+    IterZipLongest,        // (list* seqs, i64 elem_kind) -> list*；缺的补 None
+    IterAccumulate,        // (list* xs, i64 is_float) -> list*
     FuncReduce,            // (fn*, list* xs, i64 init, i64 has_init) -> i64
     FuncReduceF,           // (fn*, list* xs, f64 init, i64 has_init) -> f64
     CollCounter,           // (list* items, i64 key_kind, i64 key_own) -> dict*
@@ -441,6 +447,19 @@ enum class RtFn : uint16_t {
     DateTimeField,         // (dt*, idx) -> i64
     DateTimeIsoformat,     // (dt*) -> str*
     DateTimeStrftime,      // (dt*, str* fmt) -> str*
+    // datetime.timedelta
+    TimeDeltaNew,          // (days, seconds, microseconds) -> timedelta*
+    TimeDeltaField,        // (td*, idx) -> i64（0 days / 1 seconds / 2 microseconds）
+    TimeDeltaTotalSeconds, // (td*) -> f64
+    TimeDeltaCmp,          // (td*, td*) -> i64（-1 / 0 / 1）
+    TimeDeltaAdd,          // (td*, td*) -> timedelta*
+    TimeDeltaSub,          // (td*, td*) -> timedelta*
+    TimeDeltaMul,          // (td*, i64) -> timedelta*
+    TimeDeltaNeg,          // (td*) -> timedelta*
+    TimeDeltaStr,          // (td*) -> str*
+    DateTimeAddDelta,      // (dt*, td*, i64 sub) -> datetime*
+    DateTimeDiff,          // (dt*, dt*) -> timedelta*
+    DateTimeCmp,           // (dt*, dt*) -> i64（-1 / 0 / 1）
     PathNew,               // (str*) -> path*
     PathStr,               // (path*) -> str*
     PathJoin,              // (path*, str*) -> path*
@@ -867,6 +886,12 @@ inline const char* rt_name(RtFn f) {
         case RtFn::OsPathExpanduser: return "pa_os_path_expanduser";
         case RtFn::IterChain: return "pa_itertools_chain";
         case RtFn::IterRepeat: return "pa_itertools_repeat";
+        case RtFn::IterProduct: return "pa_itertools_product";
+        case RtFn::IterPermutations: return "pa_itertools_permutations";
+        case RtFn::IterCombinations: return "pa_itertools_combinations";
+        case RtFn::IterCombinationsWR: return "pa_itertools_combinations_wr";
+        case RtFn::IterZipLongest: return "pa_itertools_zip_longest";
+        case RtFn::IterAccumulate: return "pa_itertools_accumulate";
         case RtFn::FuncReduce: return "pa_functools_reduce";
         case RtFn::FuncReduceF: return "pa_functools_reduce_f";
         case RtFn::CollCounter: return "pa_collections_counter";
@@ -905,6 +930,18 @@ inline const char* rt_name(RtFn f) {
         case RtFn::DateTimeField: return "pa_datetime_field";
         case RtFn::DateTimeIsoformat: return "pa_datetime_isoformat";
         case RtFn::DateTimeStrftime: return "pa_datetime_strftime";
+        case RtFn::TimeDeltaNew: return "pa_timedelta_new";
+        case RtFn::TimeDeltaField: return "pa_timedelta_field";
+        case RtFn::TimeDeltaTotalSeconds: return "pa_timedelta_total_seconds";
+        case RtFn::TimeDeltaCmp: return "pa_timedelta_cmp";
+        case RtFn::TimeDeltaAdd: return "pa_timedelta_add";
+        case RtFn::TimeDeltaSub: return "pa_timedelta_sub";
+        case RtFn::TimeDeltaMul: return "pa_timedelta_mul";
+        case RtFn::TimeDeltaNeg: return "pa_timedelta_neg";
+        case RtFn::TimeDeltaStr: return "pa_timedelta_str";
+        case RtFn::DateTimeAddDelta: return "pa_datetime_add_delta";
+        case RtFn::DateTimeDiff: return "pa_datetime_diff";
+        case RtFn::DateTimeCmp: return "pa_datetime_cmp";
         case RtFn::PathNew: return "pa_path_new";
         case RtFn::PathStr: return "pa_path_str";
         case RtFn::PathJoin: return "pa_path_join";
@@ -1364,6 +1401,7 @@ inline bool ir_is_heap(const TypePtr& t) {
         case TyKind::Regex:
         case TyKind::Match:
         case TyKind::DateTime:
+        case TyKind::TimeDelta:
         case TyKind::Path:
         case TyKind::Deque:
         case TyKind::Struct:
@@ -1415,6 +1453,7 @@ inline bool ir_is_ref(const TypePtr& t) {
         case TyKind::Regex:
         case TyKind::Match:
         case TyKind::DateTime:
+        case TyKind::TimeDelta:
         case TyKind::Path:
         case TyKind::Deque:
             return true;

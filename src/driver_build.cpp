@@ -757,6 +757,48 @@ pyadamas::ModuleInfoPtr builtin_module(const std::string& name) {
         };
         two_lists("chain", false, pyadamas::mk_list(pyadamas::t_unknown()));
         two_lists("repeat", true, pyadamas::mk_list(pyadamas::t_unknown()));
+        // product / zip_longest：可变个数的列表实参，类型在调用点特化。
+        for (const char* n : {"product", "zip_longest"}) {
+            auto f = std::make_shared<pyadamas::FuncInfo>();
+            f->name = std::string("itertools.") + n;
+            f->varargs = true;
+            f->vararg_name = "iterables";
+            f->vararg_ty = pyadamas::mk_list(pyadamas::t_unknown());
+            f->ret = pyadamas::mk_list(pyadamas::t_unknown());
+            f->ret_known = true;
+            func_with(n, f);
+        }
+        // permutations(p[, r]) / combinations(p, r) /
+        // combinations_with_replacement(p, r)：签名只做可调用标记。
+        for (const char* n : {"permutations", "combinations", "combinations_with_replacement"}) {
+            auto f = std::make_shared<pyadamas::FuncInfo>();
+            f->name = std::string("itertools.") + n;
+            pyadamas::Param p;
+            p.name = "iterable";
+            p.ty = pyadamas::mk_list(pyadamas::t_unknown());
+            f->pos.push_back(std::move(p));
+            pyadamas::Param r;
+            r.name = "r";
+            r.ty = pyadamas::t_int();
+            // permutations 的 r 可以省略（默认取序列长度）。
+            r.has_default = std::string(n) == "permutations";
+            f->pos.push_back(std::move(r));
+            f->ret = pyadamas::mk_list(pyadamas::t_unknown());
+            f->ret_known = true;
+            func_with(n, f);
+        }
+        // accumulate(xs)
+        {
+            auto f = std::make_shared<pyadamas::FuncInfo>();
+            f->name = "itertools.accumulate";
+            pyadamas::Param p;
+            p.name = "xs";
+            p.ty = pyadamas::mk_list(pyadamas::t_unknown());
+            f->pos.push_back(std::move(p));
+            f->ret = pyadamas::mk_list(pyadamas::t_unknown());
+            f->ret_known = true;
+            func_with("accumulate", f);
+        }
         {
             auto f = std::make_shared<pyadamas::FuncInfo>();
             f->name = "itertools.islice";
@@ -832,6 +874,23 @@ pyadamas::ModuleInfoPtr builtin_module(const std::string& name) {
             f->ret = dt;
             f->ret_known = true;
             func_with("datetime", f);
+        }
+        // timedelta(days=0, seconds=0, microseconds=0, milliseconds=0,
+        //           minutes=0, hours=0, weeks=0)：全部是可选的 int 参数。
+        {
+            auto f = std::make_shared<pyadamas::FuncInfo>();
+            f->name = "datetime.timedelta";
+            for (const char* pn : {"days", "seconds", "microseconds", "milliseconds",
+                                   "minutes", "hours", "weeks"}) {
+                pyadamas::Param p;
+                p.name = pn;
+                p.ty = pyadamas::t_int();
+                p.has_default = true;
+                f->pos.push_back(std::move(p));
+            }
+            f->ret = pyadamas::new_ty(pyadamas::TyKind::TimeDelta);
+            f->ret_known = true;
+            func_with("timedelta", f);
         }
     } else if (name == "pathlib") {
         auto p = pyadamas::new_ty(pyadamas::TyKind::Path);

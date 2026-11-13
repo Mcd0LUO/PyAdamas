@@ -53,6 +53,12 @@ void Lowerer::print_value(VReg v, TypePtr ty, int line, int col) {
             call_void(RtFn::PrintStr, {s});
             break;
         }
+        case TyKind::TimeDelta: {
+            VReg s = call_runtime(RtFn::TimeDeltaStr, t_str(), {v});
+            push_temp(s);
+            call_void(RtFn::PrintStr, {s});
+            break;
+        }
         case TyKind::Path: {
             VReg s = call_runtime(RtFn::PathStr, t_str(), {v});
             push_temp(s);
@@ -164,6 +170,12 @@ void Lowerer::print_value_to_file(VReg v, TypePtr ty, int line, int col) {
             return;
         case TyKind::DateTime: {
             VReg s = call_runtime(RtFn::DateTimeIsoformat, t_str(), {v});
+            push_temp(s);
+            call_void(RtFn::FileWrite, {f, s});
+            return;
+        }
+        case TyKind::TimeDelta: {
+            VReg s = call_runtime(RtFn::TimeDeltaStr, t_str(), {v});
             push_temp(s);
             call_void(RtFn::FileWrite, {f, s});
             return;

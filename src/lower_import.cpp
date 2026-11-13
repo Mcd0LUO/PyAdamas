@@ -92,7 +92,8 @@ static bool module_ctor(const std::string& module, const std::string& name) {
     if (module == "pathlib") return name == "Path";
     if (module == "collections")
         return name == "deque" || name == "OrderedDict" || name == "defaultdict";
-    if (module == "datetime") return name == "date" || name == "datetime";
+    if (module == "datetime")
+        return name == "date" || name == "datetime" || name == "timedelta";
     if (module == "random") return name == "Random";
     return false;
 }
@@ -235,6 +236,12 @@ std::optional<RtFn> Lowerer::native_fn(const std::string& module, const std::str
         if (member == "chain") return RtFn::IterChain;
         if (member == "islice") return RtFn::ListSlice;
         if (member == "repeat") return RtFn::IterRepeat;
+        if (member == "product") return RtFn::IterProduct;
+        if (member == "permutations") return RtFn::IterPermutations;
+        if (member == "combinations") return RtFn::IterCombinations;
+        if (member == "combinations_with_replacement") return RtFn::IterCombinationsWR;
+        if (member == "zip_longest") return RtFn::IterZipLongest;
+        if (member == "accumulate") return RtFn::IterAccumulate;
     } else if (module == "collections") {
         if (member == "Counter") return RtFn::CollCounter;
     } else if (module == "functools") {
@@ -712,6 +719,24 @@ VReg Lowerer::lower_itertools(const std::string& member, Call& c) {
         err(c.line, c.col,
             std::format("itertools.{}() does not take keyword arguments", member));
     }
+    // 把若干个列表实参装进一个临时 kind 0 列表，交给运行时的变参辅助函数。
+    // kind 0 表示不持有元素引用：临时列表销毁时不会去 dec 源列表。
+    auto pack_seqs = [&](size_t from, size_t to) {
+        VReg seqs = call_runtime(RtFn::ListNew, mk_list(t_unknown()),
+                                 {const_int(0), const_int(0)});
+        push_temp(seqs);
+        for (size_t i = from; i < to; ++i) {
+            VReg v = expr(*c.args[i]);
+            call_void(RtFn::ListAppend, {seqs, v});
+        }
+        return seqs;
+    };
+    // 结果列表的元素是元组：外层列表类别固定为 1，这里算的是元组内部的
+    // 元素类别（list_kind 对 Tuple 类型会按各字段合并）。
+    auto tuple_elem_kind = [&](const TypePtr& rt) {
+        if (rt && rt->kind == TyKind::List && !rt->sub.empty()) return list_kind(rt->sub[0]);
+        return 2;
+    };
     if (member == "chain") {
         if (c.args.size() != 2) {
             err(c.line, c.col,
@@ -756,6 +781,64 @@ VReg Lowerer::lower_itertools(const std::string& member, Call& c) {
         VReg v = expr(*c.args[0]);
         VReg n = coerce(expr(*c.args[1]), tc_.type_of(c.args[1].get()), t_int());
         VReg out = call_runtime(RtFn::IterRepeat, rt, {v, n, const_int(list_kind(rt))});
+        push_temp(out);
+        return out;
+    }
+    if (member == "product") {
+        TypePtr rt = tc_.type_of(&c);
+        VReg seqs = pack_seqs(0, c.args.size());
+        VReg out = call_runtime(RtFn::IterProduct, rt,
+                                {seqs, const_int(tuple_elem_kind(rt))});
+        push_temp(out);
+        return out;
+    }
+    if (member == "permutations" || member == "combinations" ||
+        member == "combinations_with_replacement") {
+        bool ok = member == "permutations" ? (c.args.size() == 1 || c.args.size() == 2)
+                                           : c.args.size() == 2;
+        if (!ok) {
+            err(c.line, c.col,
+                std::format("itertools.{}() expects {} arguments, got {}", member,
+                            member == "permutations" ? "1 or 2" : "2", c.args.size()));
+            return const_none();
+        }
+        TypePtr rt = tc_.type_of(&c);
+        VReg pool = expr(*c.args[0]);
+        VReg r = const_int(-1);
+        if (c.args.size() > 1)
+            r = coerce(expr(*c.args[1]), tc_.type_of(c.args[1].get()), t_int());
+        RtFn fn = member == "permutations"          ? RtFn::IterPermutations
+                  : member == "combinations"        ? RtFn::IterCombinations
+                                                    : RtFn::IterCombinationsWR;
+        VReg out = call_runtime(fn, rt, {pool, r, const_int(tuple_elem_kind(rt))});
+        push_temp(out);
+        return out;
+    }
+    if (member == "zip_longest") {
+        if (c.args.empty()) {
+            err(c.line, c.col, "itertools.zip_longest() expects at least 1 argument");
+            return const_none();
+        }
+        TypePtr rt = tc_.type_of(&c);
+        VReg seqs = pack_seqs(0, c.args.size());
+        VReg out = call_runtime(RtFn::IterZipLongest, rt,
+                                {seqs, const_int(tuple_elem_kind(rt))});
+        push_temp(out);
+        return out;
+    }
+    if (member == "accumulate") {
+        if (c.args.size() != 1) {
+            err(c.line, c.col,
+                std::format("itertools.accumulate() expects 1 argument, got {}",
+                            c.args.size()));
+            return const_none();
+        }
+        TypePtr rt = tc_.type_of(&c);
+        TypePtr et = rt && rt->kind == TyKind::List && !rt->sub.empty() ? rt->sub[0]
+                                                                        : t_unknown();
+        VReg xs = expr(*c.args[0]);
+        VReg out = call_runtime(RtFn::IterAccumulate, rt,
+                                {xs, const_int(et && et->kind == TyKind::Float ? 1 : 0)});
         push_temp(out);
         return out;
     }
@@ -1357,8 +1440,70 @@ VReg Lowerer::lower_functools(const std::string& member, Call& c) {
 }
 
 VReg Lowerer::lower_datetime(const std::string& member, Call& c) {
-    if (!c.keywords.empty()) {
+    // timedelta 收同名关键字参数，其它构造函数不收。
+    if (!c.keywords.empty() && member != "timedelta") {
         err(c.line, c.col, std::format("datetime.{}() does not take keyword arguments", member));
+    }
+    if (member == "timedelta") {
+        TypePtr tdty = tc_.type_of(&c);
+        if (!tdty || tdty->kind != TyKind::TimeDelta) tdty = new_ty(TyKind::TimeDelta);
+        static const char* kParams[7] = {"days",         "seconds", "microseconds",
+                                         "milliseconds", "minutes", "hours",
+                                         "weeks"};
+        VReg vals[7];
+        bool set[7] = {false, false, false, false, false, false, false};
+        for (int i = 0; i < 7; ++i) vals[i] = const_int(0);
+        if (c.args.size() > 7) {
+            err(c.line, c.col,
+                std::format("datetime.timedelta() takes at most 7 arguments, got {}",
+                            c.args.size()));
+        }
+        for (size_t i = 0; i < c.args.size() && i < 7; ++i) {
+            vals[i] = coerce(expr(*c.args[i]), tc_.type_of(c.args[i].get()), t_int());
+            set[i] = true;
+        }
+        for (auto& kw : c.keywords) {
+            int idx = -1;
+            for (int i = 0; i < 7; ++i)
+                if (kw.arg == kParams[i]) idx = i;
+            if (idx < 0) {
+                err(kw.value->line, kw.value->col,
+                    std::format("datetime.timedelta() got an unexpected keyword argument '{}'",
+                                kw.arg));
+                expr(*kw.value);
+                continue;
+            }
+            if (set[idx]) {
+                err(kw.value->line, kw.value->col,
+                    std::format("datetime.timedelta() got multiple values for argument '{}'",
+                                kw.arg));
+                expr(*kw.value);
+                continue;
+            }
+            vals[idx] = coerce(expr(*kw.value), tc_.type_of(kw.value.get()), t_int());
+            set[idx] = true;
+        }
+        // 单位换算放进整数运算，运行时只接收 days / seconds / microseconds。
+        auto mul_add = [&](VReg a, int64_t k, VReg b) {
+            Inst m;
+            m.op = IrOp::Bin;
+            m.bop = BinKind::Mul;
+            m.a = a;
+            m.b = const_int(k);
+            VReg mv = def(t_int(), std::move(m));
+            Inst ad;
+            ad.op = IrOp::Bin;
+            ad.bop = BinKind::Add;
+            ad.a = mv;
+            ad.b = b;
+            return def(t_int(), std::move(ad));
+        };
+        VReg days = mul_add(vals[6], 7, vals[0]);                 // weeks * 7 + days
+        VReg micros = mul_add(vals[3], 1000, vals[2]);            // millis * 1000 + micros
+        VReg secs = mul_add(vals[5], 3600, mul_add(vals[4], 60, vals[1]));
+        VReg v = call_runtime(RtFn::TimeDeltaNew, tdty, {days, secs, micros});
+        push_temp(v);
+        return v;
     }
     TypePtr rt = tc_.type_of(&c);
     if (!rt || rt->kind != TyKind::DateTime) rt = new_ty(TyKind::DateTime);

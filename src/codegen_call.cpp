@@ -1010,6 +1010,9 @@ void AsmGen::gen_call_rt(const Inst& in) {
             case RtFn::FileReadLines:
             case RtFn::FileTruncate:
             case RtFn::CollMostCommon:
+            case RtFn::IterProduct:
+            case RtFn::IterZipLongest:
+            case RtFn::IterAccumulate:
             case RtFn::BytesAt:
             case RtFn::RegexGroupStr:
             case RtFn::RegexExpand:
@@ -1044,6 +1047,9 @@ void AsmGen::gen_call_rt(const Inst& in) {
             case RtFn::FileConfig:
             case RtFn::IterChain:
             case RtFn::IterRepeat:
+            case RtFn::IterPermutations:
+            case RtFn::IterCombinations:
+            case RtFn::IterCombinationsWR:
             case RtFn::CollCounter:
                 emit2("movq", src_op(in.args[0]), "%rdi");
                 emit2("movq", src_op(in.args[1]), "%rsi");
@@ -1557,6 +1563,12 @@ void AsmGen::gen_call_rt(const Inst& in) {
                 emit2("movq", src_op(in.args[0]), "%rdi");
                 emit2("movq", src_op(in.args[1]), "%rsi");
                 break;
+            case RtFn::TimeDeltaNew:
+            case RtFn::DateTimeAddDelta:
+                emit2("movq", src_op(in.args[0]), "%rdi");
+                emit2("movq", src_op(in.args[1]), "%rsi");
+                emit2("movq", src_op(in.args[2]), "%rdx");
+                break;
             case RtFn::DateNew:
                 emit2("movq", src_op(in.args[0]), "%rdi");
                 emit2("movq", src_op(in.args[1]), "%rsi");
@@ -1572,6 +1584,13 @@ void AsmGen::gen_call_rt(const Inst& in) {
                 break;
             case RtFn::DateTimeField:
             case RtFn::DateTimeStrftime:
+            case RtFn::TimeDeltaField:
+            case RtFn::TimeDeltaCmp:
+            case RtFn::TimeDeltaAdd:
+            case RtFn::TimeDeltaSub:
+            case RtFn::TimeDeltaMul:
+            case RtFn::DateTimeDiff:
+            case RtFn::DateTimeCmp:
             case RtFn::PathJoin:
             case RtFn::PathWriteText:
             case RtFn::PathGlob:
@@ -1587,6 +1606,9 @@ void AsmGen::gen_call_rt(const Inst& in) {
                 break;
             case RtFn::DateTimeNow:
             case RtFn::DateTimeIsoformat:
+            case RtFn::TimeDeltaTotalSeconds:
+            case RtFn::TimeDeltaNeg:
+            case RtFn::TimeDeltaStr:
             case RtFn::PathNew:
             case RtFn::PathStr:
             case RtFn::PathName:

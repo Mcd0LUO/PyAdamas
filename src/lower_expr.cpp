@@ -821,6 +821,19 @@ VReg Lowerer::expr(Expr& e) {
                     std::format("'datetime' object has no attribute '{}'", a.attr));
                 return const_none();
             }
+            if (ot && ot->kind == TyKind::TimeDelta) {
+                VReg tv = expr(*a.value);
+                if (opt) tv = guard_not_none(tv, std::format("attribute '{}'", a.attr));
+                static const std::unordered_map<std::string, int64_t> kTdFields = {
+                    {"days", 0}, {"seconds", 1}, {"microseconds", 2},
+                };
+                if (auto it = kTdFields.find(a.attr); it != kTdFields.end())
+                    return call_runtime(RtFn::TimeDeltaField, t_int(),
+                                        {tv, const_int(it->second)});
+                err(e.line, e.col,
+                    std::format("'timedelta' object has no attribute '{}'", a.attr));
+                return const_none();
+            }
             if (ot && ot->kind == TyKind::Path) {
                 VReg pv = expr(*a.value);
                 if (opt) pv = guard_not_none(pv, std::format("attribute '{}'", a.attr));
@@ -1070,6 +1083,49 @@ VReg Lowerer::lower_binop(BinOp& b) {
         push_temp(v);
         return v;
     }
+    // datetime / timedelta 的算术：按运算符和两侧类型直接调运行时函数。
+    // 不能落到下面按机器整数运算的通用路径（指针加减不会报错，只会算出野值）。
+    if ((lt && (lt->kind == TyKind::DateTime || lt->kind == TyKind::TimeDelta)) ||
+        (rt && (rt->kind == TyKind::DateTime || rt->kind == TyKind::TimeDelta))) {
+        auto is_dt = [](const TypePtr& t) { return t && t->kind == TyKind::DateTime; };
+        auto is_td = [](const TypePtr& t) { return t && t->kind == TyKind::TimeDelta; };
+        VReg l = expr(*b.left);
+        VReg r = expr(*b.right);
+        if (b.op == Tok::MINUS && is_dt(lt) && is_dt(rt)) {
+            VReg v = call_runtime(RtFn::DateTimeDiff, new_ty(TyKind::TimeDelta), {l, r});
+            push_temp(v);
+            return v;
+        }
+        if ((b.op == Tok::PLUS || b.op == Tok::MINUS) && is_dt(lt) && is_td(rt)) {
+            VReg v = call_runtime(RtFn::DateTimeAddDelta, new_ty(TyKind::DateTime),
+                                  {l, r, const_int(b.op == Tok::MINUS ? 1 : 0)});
+            push_temp(v);
+            return v;
+        }
+        if (b.op == Tok::PLUS && is_td(lt) && is_dt(rt)) {
+            VReg v = call_runtime(RtFn::DateTimeAddDelta, new_ty(TyKind::DateTime),
+                                  {r, l, const_int(0)});
+            push_temp(v);
+            return v;
+        }
+        if ((b.op == Tok::PLUS || b.op == Tok::MINUS) && is_td(lt) && is_td(rt)) {
+            RtFn fn = b.op == Tok::PLUS ? RtFn::TimeDeltaAdd : RtFn::TimeDeltaSub;
+            VReg v = call_runtime(fn, new_ty(TyKind::TimeDelta), {l, r});
+            push_temp(v);
+            return v;
+        }
+        if (b.op == Tok::STAR && (is_td(lt) || is_td(rt))) {
+            VReg td = is_td(lt) ? l : r;
+            VReg k = is_td(lt) ? r : l;
+            VReg v = call_runtime(RtFn::TimeDeltaMul, new_ty(TyKind::TimeDelta), {td, k});
+            push_temp(v);
+            return v;
+        }
+        err(b.line, b.col,
+            std::format("operator '{}' on '{}' and '{}' is not supported", tok_name(b.op),
+                        type_name(lt), type_name(rt)));
+        return const_none();
+    }
     // 类型检查允许但后端还做不了的组合，在这里一次性拦住。
     // 放过去的话 codegen 会走「按整数处理」的兜底路径，指针相加不报错，
     // 只是算出一个野值——这类静默错误比编译失败难查得多。
@@ -1146,6 +1202,11 @@ VReg Lowerer::lower_unary(UnaryOp& u) {
     VReg v = expr(*u.operand);
     // 类实例的 `not` 先按 __len__ 求值真值（没有 __len__ 时后端按指针判空）。
     if (u.op == Tok::KW_NOT) v = truth_bool(v, tc_.type_of(u.operand.get()));
+    if (ty && ty->kind == TyKind::TimeDelta && u.op == Tok::MINUS) {
+        VReg out = call_runtime(RtFn::TimeDeltaNeg, ty, {v});
+        push_temp(out);
+        return out;
+    }
     if (ty && ty->kind == TyKind::Complex) {
         if (u.op == Tok::PLUS) return v;
         if (u.op == Tok::MINUS) {
@@ -1341,6 +1402,20 @@ VReg Lowerer::lower_compare(Compare& c) {
         CmpOp op = c.ops[0];
         TypePtr lt = tc_.type_of(c.left.get());
         TypePtr rt = tc_.type_of(c.comparators[0].get());
+        // datetime / timedelta 按值比较：调运行时的三路比较，再和 0 比。
+        if (lt && rt && lt->kind == rt->kind &&
+            (lt->kind == TyKind::DateTime || lt->kind == TyKind::TimeDelta) &&
+            (op == CmpOp::Eq || op == CmpOp::Ne || op == CmpOp::Lt || op == CmpOp::Le ||
+             op == CmpOp::Gt || op == CmpOp::Ge)) {
+            RtFn fn = lt->kind == TyKind::TimeDelta ? RtFn::TimeDeltaCmp : RtFn::DateTimeCmp;
+            VReg cv = call_runtime(fn, t_int(), {l, r});
+            Inst in;
+            in.op = IrOp::Cmp;
+            in.cop = map_cmp(op);
+            in.a = cv;
+            in.b = const_int(0);
+            return def(t_bool(), std::move(in));
+        }
         // `is` / `is not` 是同一性比较：比指针，不比内容。以前直接映射成
         // Eq/Ne，字符串和容器会走按值比较（pa_str_eq 解引用右操作数），
         // 而 None 就是 0，`x is None` 当场段错误。

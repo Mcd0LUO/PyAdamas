@@ -119,6 +119,179 @@ PyAdamasStr* pa_datetime_strftime(PyAdamasDateTime* dt, PyAdamasStr* fmt) {
     return str_new(buf, (int64_t)n);
 }
 
+/* ── datetime.timedelta ────────────────────────────────────── */
+
+#define PYADAMAS_TD_MAGIC 0x54444c5400000001LL /* "TDLT" */
+
+struct PyAdamasTimeDelta {
+    int64_t magic;
+    /* CPython 的规范化形式：0 <= seconds < 86400，0 <= microseconds < 1000000，
+       days 可正可负。 */
+    int64_t days, seconds, microseconds;
+};
+
+static void td_destroy(void* p) {
+    (void)p; /* 没有指针字段 */
+}
+
+static void td_normalize(int64_t* d, int64_t* s, int64_t* us) {
+    int64_t sec = *s + *us / 1000000;
+    int64_t micro = *us % 1000000;
+    if (micro < 0) {
+        micro += 1000000;
+        sec -= 1;
+    }
+    int64_t day = *d + sec / 86400;
+    int64_t rem = sec % 86400;
+    if (rem < 0) {
+        rem += 86400;
+        day -= 1;
+    }
+    *d = day;
+    *s = rem;
+    *us = micro;
+}
+
+PyAdamasTimeDelta* pa_timedelta_new(int64_t days, int64_t seconds, int64_t microseconds) {
+    PyAdamasTimeDelta* td = (PyAdamasTimeDelta*)rc_alloc(
+        (int64_t)sizeof(PyAdamasTimeDelta), td_destroy, NULL, PYADAMAS_RC_OBJ);
+    td->magic = PYADAMAS_TD_MAGIC;
+    td->days = days;
+    td->seconds = seconds;
+    td->microseconds = microseconds;
+    td_normalize(&td->days, &td->seconds, &td->microseconds);
+    return td;
+}
+
+/* idx：0 days、1 seconds、2 microseconds。 */
+int64_t pa_timedelta_field(PyAdamasTimeDelta* td, int64_t idx) {
+    switch (idx) {
+        case 0: return td->days;
+        case 1: return td->seconds;
+        case 2: return td->microseconds;
+        default: return 0;
+    }
+}
+
+double pa_timedelta_total_seconds(PyAdamasTimeDelta* td) {
+    return (double)td->days * 86400.0 + (double)td->seconds + (double)td->microseconds / 1e6;
+}
+
+int64_t pa_timedelta_cmp(PyAdamasTimeDelta* a, PyAdamasTimeDelta* b) {
+    if (a->days != b->days) return a->days < b->days ? -1 : 1;
+    if (a->seconds != b->seconds) return a->seconds < b->seconds ? -1 : 1;
+    if (a->microseconds != b->microseconds) return a->microseconds < b->microseconds ? -1 : 1;
+    return 0;
+}
+
+PyAdamasTimeDelta* pa_timedelta_add(PyAdamasTimeDelta* a, PyAdamasTimeDelta* b) {
+    return pa_timedelta_new(a->days + b->days, a->seconds + b->seconds,
+                            a->microseconds + b->microseconds);
+}
+
+PyAdamasTimeDelta* pa_timedelta_sub(PyAdamasTimeDelta* a, PyAdamasTimeDelta* b) {
+    return pa_timedelta_new(a->days - b->days, a->seconds - b->seconds,
+                            a->microseconds - b->microseconds);
+}
+
+PyAdamasTimeDelta* pa_timedelta_mul(PyAdamasTimeDelta* td, int64_t k) {
+    return pa_timedelta_new(td->days * k, td->seconds * k, td->microseconds * k);
+}
+
+PyAdamasTimeDelta* pa_timedelta_neg(PyAdamasTimeDelta* td) {
+    return pa_timedelta_new(-td->days, -td->seconds, -td->microseconds);
+}
+
+/* 与 CPython 的 str(timedelta) 对齐：days 段只在非 0 时出现，
+   微秒非 0 时补 ".%06lld"。 */
+PyAdamasStr* pa_timedelta_str(PyAdamasTimeDelta* td) {
+    char buf[128];
+    int64_t h = td->seconds / 3600;
+    int64_t m = (td->seconds % 3600) / 60;
+    int64_t s = td->seconds % 60;
+    int n;
+    if (td->days != 0) {
+        n = snprintf(buf, sizeof buf, "%lld day%s, %lld:%02lld:%02lld", (long long)td->days,
+                     (td->days == 1 || td->days == -1) ? "" : "s", (long long)h,
+                     (long long)m, (long long)s);
+    } else {
+        n = snprintf(buf, sizeof buf, "%lld:%02lld:%02lld", (long long)h, (long long)m,
+                     (long long)s);
+    }
+    if (td->microseconds != 0 && n > 0 && n < (int)sizeof buf)
+        n += snprintf(buf + n, sizeof buf - (size_t)n, ".%06lld",
+                      (long long)td->microseconds);
+    return str_new(buf, (int64_t)n);
+}
+
+/* 公历日期 <-> 1970-01-01 起的天数（Howard Hinnant 的算法）。 */
+static int64_t days_from_civil(int64_t y, int64_t m, int64_t d) {
+    y -= m <= 2;
+    int64_t era = (y >= 0 ? y : y - 399) / 400;
+    int64_t yoe = y - era * 400;
+    int64_t doy = (153 * (m + (m > 2 ? -3 : 9)) + 2) / 5 + d - 1;
+    int64_t doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    return era * 146097 + doe - 719468;
+}
+
+static void civil_from_days(int64_t z, int64_t* y, int64_t* m, int64_t* d) {
+    z += 719468;
+    int64_t era = (z >= 0 ? z : z - 146096) / 146097;
+    int64_t doe = z - era * 146097;
+    int64_t yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365;
+    int64_t yy = yoe + era * 400;
+    int64_t doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    int64_t mp = (5 * doy + 2) / 153;
+    int64_t dd = doy - (153 * mp + 2) / 5 + 1;
+    int64_t mm = mp + (mp < 10 ? 3 : -9);
+    *y = yy + (mm <= 2);
+    *m = mm;
+    *d = dd;
+}
+
+/* datetime/date → 自 1970-01-01 00:00:00 起的微秒数。 */
+static int64_t dt_epoch_us(PyAdamasDateTime* dt) {
+    int64_t days = days_from_civil(dt->year, dt->month, dt->day);
+    int64_t secs = dt->hour * 3600 + dt->minute * 60 + dt->second;
+    return days * 86400000000LL + secs * 1000000LL;
+}
+
+PyAdamasDateTime* pa_datetime_add_delta(PyAdamasDateTime* dt, PyAdamasTimeDelta* td,
+                                        int64_t sub) {
+    int64_t sign = sub ? -1 : 1;
+    if (dt->is_date) {
+        // date + timedelta 只用 days 部分（CPython 语义）。
+        int64_t days = days_from_civil(dt->year, dt->month, dt->day) + sign * td->days;
+        int64_t y, m, d;
+        civil_from_days(days, &y, &m, &d);
+        return pa_date_new(y, m, d);
+    }
+    int64_t us = dt_epoch_us(dt) + sign * (td->days * 86400000000LL +
+                                            td->seconds * 1000000LL + td->microseconds);
+    int64_t days = us / 86400000000LL;
+    int64_t rem = us % 86400000000LL;
+    if (rem < 0) {
+        rem += 86400000000LL;
+        --days;
+    }
+    int64_t y, m, d;
+    civil_from_days(days, &y, &m, &d);
+    int64_t secs = rem / 1000000LL;
+    return pa_datetime_new(y, m, d, secs / 3600, (secs % 3600) / 60, secs % 60);
+}
+
+PyAdamasTimeDelta* pa_datetime_diff(PyAdamasDateTime* a, PyAdamasDateTime* b) {
+    int64_t us = dt_epoch_us(a) - dt_epoch_us(b);
+    return pa_timedelta_new(us / 86400000000LL, (us % 86400000000LL) / 1000000LL,
+                            us % 1000000LL);
+}
+
+int64_t pa_datetime_cmp(PyAdamasDateTime* a, PyAdamasDateTime* b) {
+    int64_t va = dt_epoch_us(a);
+    int64_t vb = dt_epoch_us(b);
+    return va < vb ? -1 : (va > vb ? 1 : 0);
+}
+
 /* ── pathlib ───────────────────────────────────────────────── */
 
 static void path_destroy(void* p) {

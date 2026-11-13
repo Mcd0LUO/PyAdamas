@@ -733,6 +733,7 @@ PyAdamasList* pa_deque_to_list(PyAdamasDeque* d);
 
 /* datetime / pathlib：都是不透明句柄，字段读取和字符串操作走下面的函数。 */
 typedef struct PyAdamasDateTime PyAdamasDateTime;
+typedef struct PyAdamasTimeDelta PyAdamasTimeDelta;
 typedef struct PyAdamasPath PyAdamasPath;
 PyAdamasDateTime* pa_date_new(int64_t y, int64_t mo, int64_t d);
 PyAdamasDateTime* pa_datetime_new(int64_t y, int64_t mo, int64_t d, int64_t h, int64_t mi,
@@ -741,6 +742,19 @@ PyAdamasDateTime* pa_datetime_now(int64_t is_date);
 int64_t pa_datetime_field(PyAdamasDateTime* dt, int64_t idx);
 PyAdamasStr* pa_datetime_isoformat(PyAdamasDateTime* dt);
 PyAdamasStr* pa_datetime_strftime(PyAdamasDateTime* dt, PyAdamasStr* fmt);
+PyAdamasTimeDelta* pa_timedelta_new(int64_t days, int64_t seconds, int64_t microseconds);
+int64_t pa_timedelta_field(PyAdamasTimeDelta* td, int64_t idx);
+double pa_timedelta_total_seconds(PyAdamasTimeDelta* td);
+int64_t pa_timedelta_cmp(PyAdamasTimeDelta* a, PyAdamasTimeDelta* b);
+PyAdamasTimeDelta* pa_timedelta_add(PyAdamasTimeDelta* a, PyAdamasTimeDelta* b);
+PyAdamasTimeDelta* pa_timedelta_sub(PyAdamasTimeDelta* a, PyAdamasTimeDelta* b);
+PyAdamasTimeDelta* pa_timedelta_mul(PyAdamasTimeDelta* td, int64_t k);
+PyAdamasTimeDelta* pa_timedelta_neg(PyAdamasTimeDelta* td);
+PyAdamasStr* pa_timedelta_str(PyAdamasTimeDelta* td);
+PyAdamasDateTime* pa_datetime_add_delta(PyAdamasDateTime* dt, PyAdamasTimeDelta* td,
+                                        int64_t sub);
+PyAdamasTimeDelta* pa_datetime_diff(PyAdamasDateTime* a, PyAdamasDateTime* b);
+int64_t pa_datetime_cmp(PyAdamasDateTime* a, PyAdamasDateTime* b);
 PyAdamasPath* pa_path_new(PyAdamasStr* s);
 PyAdamasStr* pa_path_str(PyAdamasPath* p);
 PyAdamasPath* pa_path_join(PyAdamasPath* p, PyAdamasStr* s);
@@ -819,6 +833,14 @@ void pa_time_sleep(double seconds);
 /* ── itertools / collections 的静态特化辅助 ─────────────────────── */
 PyAdamasList* pa_itertools_chain(PyAdamasList* a, PyAdamasList* b, int64_t elem_kind);
 PyAdamasList* pa_itertools_repeat(int64_t v, int64_t n, int64_t elem_kind);
+/* seqs 是一个 kind 0 的临时列表，data 里直接装源列表指针（不持所有权）。 */
+PyAdamasList* pa_itertools_product(PyAdamasList* seqs, int64_t elem_kind);
+PyAdamasList* pa_itertools_permutations(PyAdamasList* pool, int64_t r, int64_t elem_kind);
+PyAdamasList* pa_itertools_combinations(PyAdamasList* pool, int64_t r, int64_t elem_kind);
+PyAdamasList* pa_itertools_combinations_wr(PyAdamasList* pool, int64_t r,
+                                           int64_t elem_kind);
+PyAdamasList* pa_itertools_zip_longest(PyAdamasList* seqs, int64_t elem_kind);
+PyAdamasList* pa_itertools_accumulate(PyAdamasList* xs, int64_t is_float);
 int64_t pa_functools_reduce(void* fn, PyAdamasList* xs, int64_t init, int64_t has_init);
 double pa_functools_reduce_f(void* fn, PyAdamasList* xs, double init, int64_t has_init);
 PyAdamasDict* pa_collections_counter(PyAdamasList* src, int64_t key_kind, int64_t key_own);

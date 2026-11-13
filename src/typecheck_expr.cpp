@@ -162,7 +162,8 @@ TypePtr TypeChecker::expr(Expr& e) {
                         // 类实例 / 绑定方法可能重载了一元运算符（@property
                         // 返回的数值最常见），静态上看不见
                         if (is_unknown(t) || is_num(t) || t->kind == TyKind::Complex ||
-                            t->kind == TyKind::Class || t->kind == TyKind::BoundMethod)
+                            t->kind == TyKind::Class || t->kind == TyKind::BoundMethod ||
+                            t->kind == TyKind::TimeDelta)
                             return t;
                         err(u.line, u.col,
                             std::format("bad operand type for unary operator: '{}'", type_name(t)));
@@ -348,6 +349,14 @@ TypePtr TypeChecker::expr(Expr& e) {
                         return t_int();
                     err(a.line, a.col,
                         std::format("'datetime' object has no attribute '{}'", a.attr));
+                    return t_unknown();
+                }
+                if (ot->kind == TyKind::TimeDelta) {
+                    if (a.attr == "days" || a.attr == "seconds" ||
+                        a.attr == "microseconds")
+                        return t_int();
+                    err(a.line, a.col,
+                        std::format("'timedelta' object has no attribute '{}'", a.attr));
                     return t_unknown();
                 }
                 if (ot->kind == TyKind::Path) {
@@ -792,6 +801,31 @@ TypePtr TypeChecker::binop_type(Tok op, TypePtr l, TypePtr r, int line, int col)
             return t_unknown();
         };
 
+        // datetime / timedelta 的算术：只有下面这几种组合有定义。
+        if (l->kind == TyKind::DateTime || r->kind == TyKind::DateTime ||
+            l->kind == TyKind::TimeDelta || r->kind == TyKind::TimeDelta) {
+            auto td = [](const TypePtr& t) { return t->kind == TyKind::TimeDelta; };
+            auto dt = [](const TypePtr& t) { return t->kind == TyKind::DateTime; };
+            switch (op) {
+                case Tok::MINUS:
+                    if (dt(l) && dt(r)) return new_ty(TyKind::TimeDelta);
+                    if (dt(l) && td(r)) return new_ty(TyKind::DateTime);
+                    if (td(l) && td(r)) return new_ty(TyKind::TimeDelta);
+                    break;
+                case Tok::PLUS:
+                    if (dt(l) && td(r)) return new_ty(TyKind::DateTime);
+                    if (td(l) && dt(r)) return new_ty(TyKind::DateTime);
+                    if (td(l) && td(r)) return new_ty(TyKind::TimeDelta);
+                    break;
+                case Tok::STAR:
+                    if (td(l) && r->kind == TyKind::Int) return new_ty(TyKind::TimeDelta);
+                    if (l->kind == TyKind::Int && td(r)) return new_ty(TyKind::TimeDelta);
+                    break;
+                default: break;
+            }
+            return bad();
+        }
+
         if (l->kind == TyKind::Complex || r->kind == TyKind::Complex) {
             auto ok = [](const TypePtr& t) {
                 return t && (t->kind == TyKind::Complex || is_num(t));
@@ -886,6 +920,9 @@ void TypeChecker::compare_type(CmpOp op, TypePtr l, TypePtr r, int line, int col
                 if (l->kind == TyKind::Tuple && r->kind == TyKind::Tuple) return;
                 if (l->kind == TyKind::List && r->kind == TyKind::List) return;
                 if (l->kind == TyKind::Set && r->kind == TyKind::Set) return;
+                if ((l->kind == TyKind::DateTime && r->kind == TyKind::DateTime) ||
+                    (l->kind == TyKind::TimeDelta && r->kind == TyKind::TimeDelta))
+                    return;
                 // 类实例只有实现了 __lt__/__le__/__gt__/__ge__（含镜像）
                 // 才可排序，否则后端会拿指针当整数比——必须在这里拦住。
                 if (l->kind == TyKind::Class || r->kind == TyKind::Class) {

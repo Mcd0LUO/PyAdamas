@@ -285,6 +285,7 @@ void enc_type(Enc& e, const TypePtr& t) {
         // Popen / datetime / pathlib / deque 跨模块签名暂不支持：按 unknown 处理
         case TyKind::Popen:
         case TyKind::DateTime:
+        case TyKind::TimeDelta:
         case TyKind::Path:
         case TyKind::Deque:
         // struct 的布局不跨模块序列化：按 unknown 处理。
