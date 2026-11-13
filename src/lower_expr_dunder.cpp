@@ -1,0 +1,337 @@
+// lower_expr_dunder.cpp —— dunder 协议、类型转换与 f-string
+#include "lower_impl.h"
+
+namespace pyadamas {
+
+VReg Lowerer::dunder_str(VReg v, TypePtr ty, bool prefer_repr) {
+    // repr 语义（容器元素、repr()、!r）只用 __repr__；str 语义先 __str__，
+    // 没有再回退 __repr__。和 CPython 的默认关系一致。
+    if (prefer_repr) return dunder_call(v, ty, "__repr__", {}, t_str());
+    VReg s = dunder_call(v, ty, "__str__", {}, t_str());
+    if (s != kNoReg) return s;
+    return dunder_call(v, ty, "__repr__", {}, t_str());
+}
+
+VReg Lowerer::dunder_len(VReg v, TypePtr ty) {
+    return dunder_call(v, ty, "__len__", {}, t_int());
+}
+
+VReg Lowerer::dunder_bool(VReg v, TypePtr ty) {
+    return dunder_call(v, ty, "__bool__", {}, t_bool());
+}
+
+VReg Lowerer::lower_dunder_eq(VReg l, TypePtr lt, VReg r, TypePtr rt, bool ne) {
+    auto one = [&](VReg self, TypePtr st, VReg other, TypePtr ot) -> VReg {
+        if (!st || st->kind != TyKind::Class || !st->cls) return kNoReg;
+        std::vector<TypePtr> tys{ot};
+        if (ne) {
+            VReg v = dunder_call(self, st, "__ne__", {other}, t_bool(), &tys);
+            if (v != kNoReg) return v;
+        }
+        VReg eq = dunder_call(self, st, "__eq__", {other}, t_bool(), &tys);
+        if (eq == kNoReg) return kNoReg;
+        if (!ne) return eq;
+        Inst un;
+        un.op = IrOp::Un;
+        un.uop = UnKind::Not;
+        un.a = eq;
+        return def(t_bool(), std::move(un));
+    };
+    // 先左后右：左边类没有 __eq__ 时，右边的实现仍然可以接收它。
+    VReg res = one(l, lt, r, rt);
+    if (res != kNoReg) return res;
+    return one(r, rt, l, lt);
+}
+
+VReg Lowerer::lower_dunder_cmp(VReg l, TypePtr lt, VReg r, TypePtr rt, CmpOp op) {
+    struct Ref {
+        CmpOp op;
+        const char* fwd;
+        const char* rev;
+    };
+    static const Ref tbl[] = {
+        {CmpOp::Lt, "__lt__", "__gt__"},
+        {CmpOp::Le, "__le__", "__ge__"},
+        {CmpOp::Gt, "__gt__", "__lt__"},
+        {CmpOp::Ge, "__ge__", "__le__"},
+    };
+    const Ref* ref = nullptr;
+    for (const auto& e : tbl)
+        if (e.op == op) {
+            ref = &e;
+            break;
+        }
+    if (!ref) return kNoReg;
+    std::vector<TypePtr> ltys{rt};
+    std::vector<TypePtr> rtys{lt};
+    VReg v = dunder_call(l, lt, ref->fwd, {r}, t_bool(), &ltys);
+    if (v != kNoReg) return v;
+    v = dunder_call(r, rt, ref->rev, {l}, t_bool(), &rtys);
+    if (v != kNoReg) return v;
+    return kNoReg;
+}
+
+VReg Lowerer::lower_dunder_binop(VReg l, TypePtr lt, VReg r, TypePtr rt, Tok op, bool aug) {
+    struct Ref {
+        Tok op;
+        const char* fwd;
+        const char* rev;
+        const char* iaug;
+    };
+    static const Ref tbl[] = {
+        {Tok::PLUS, "__add__", "__radd__", "__iadd__"},
+        {Tok::MINUS, "__sub__", "__rsub__", "__isub__"},
+        {Tok::STAR, "__mul__", "__rmul__", "__imul__"},
+        {Tok::SLASH, "__truediv__", "__rtruediv__", "__itruediv__"},
+        {Tok::DOUBLESLASH, "__floordiv__", "__rfloordiv__", "__ifloordiv__"},
+        {Tok::PERCENT, "__mod__", "__rmod__", "__imod__"},
+        {Tok::DOUBLESTAR, "__pow__", "__rpow__", "__ipow__"},
+    };
+    if (aug) op = aug_to_bin(op);
+    const Ref* ref = nullptr;
+    for (const auto& e : tbl)
+        if (e.op == op) {
+            ref = &e;
+            break;
+        }
+    if (!ref) return kNoReg;
+    std::vector<TypePtr> ltys{rt};
+    std::vector<TypePtr> rtys{lt};
+    VReg v = kNoReg;
+    if (aug) {
+        v = dunder_call(l, lt, ref->iaug, {r}, nullptr, &ltys);
+        if (v != kNoReg) return v;
+    }
+    v = dunder_call(l, lt, ref->fwd, {r}, nullptr, &ltys);
+    if (v != kNoReg) return v;
+    // 增量赋值同样可能落到右操作数的反射版（int += 类实例）。
+    v = dunder_call(r, rt, ref->rev, {l}, nullptr, &rtys);
+    if (v != kNoReg) return v;
+    return kNoReg;
+}
+
+VReg Lowerer::truth_bool(VReg v, TypePtr ty) {
+    // CPython：先 __bool__，没有再按 __len__ 是否非零；都没有时按指针判空。
+    VReg b = dunder_bool(v, ty);
+    if (b != kNoReg) return b;
+    VReg ln = dunder_len(v, ty);
+    if (ln == kNoReg) return v;
+    Inst c;
+    c.op = IrOp::Cmp;
+    c.cop = CmpKind::Gt;
+    c.a = ln;
+    c.b = const_int(0);
+    return def(t_bool(), std::move(c));
+}
+
+VReg Lowerer::class_default_str(TypePtr ty) {
+    std::string name = ty && ty->cls ? ty->cls->name : "object";
+    return const_str("<" + name + " object>");
+}
+
+VReg Lowerer::convert_to(VReg v, TypePtr from, TypePtr to) {
+    if (!to) return v;
+    if (from && type_eq(from, to)) return v;
+    // Path → str：拿底层路径字符串
+    if (from && from->kind == TyKind::Path && to->kind == TyKind::Str) {
+        VReg s = call_runtime(RtFn::PathStr, t_str(), {v});
+        push_temp(s);
+        return s;
+    }
+    // 类实例的字符串/布尔转换走协议 dunder；没有实现就用默认行为。
+    if (from && from->kind == TyKind::Class) {
+        if (to->kind == TyKind::Str) {
+            VReg s = dunder_str(v, from, false);
+            return s != kNoReg ? s : class_default_str(from);
+        }
+        if (to->kind == TyKind::Bool) {
+            VReg b = dunder_bool(v, from);
+            if (b != kNoReg) return b;
+            VReg ln = dunder_len(v, from);
+            if (ln != kNoReg) {
+                Inst c;
+                c.op = IrOp::Cmp;
+                c.cop = CmpKind::Gt;
+                c.a = ln;
+                c.b = const_int(0);
+                return def(t_bool(), std::move(c));
+            }
+        }
+    }
+    if (to->kind == TyKind::Bool && from && from->kind == TyKind::Complex) {
+        Inst in;
+        in.op = IrOp::CallRt;
+        in.imm = static_cast<int64_t>(RtFn::ComplexTruth);
+        in.args = {v};
+        return def(t_bool(), std::move(in));
+    }
+    if (to->kind == TyKind::Complex) {
+        if (from && from->kind == TyKind::Complex) return v;
+        VReg f = (from && from->kind == TyKind::Float) ? v
+                                                       : convert_to(v, from, t_float());
+        Inst in;
+        in.op = IrOp::CallRt;
+        in.imm = static_cast<int64_t>(RtFn::ComplexNew);
+        in.args = {f, const_float(0.0)};
+        return def_heap(t_complex(), std::move(in));
+    }
+    if (to->kind == TyKind::Str && from && from->kind == TyKind::Complex) {
+        Inst in;
+        in.op = IrOp::CallRt;
+        in.imm = static_cast<int64_t>(RtFn::ComplexStr);
+        in.args = {v};
+        VReg s = def_heap(t_str(), std::move(in));
+        return s;
+    }
+    if (to->kind == TyKind::Str && from && from->kind == TyKind::Exception) {
+        VReg s = call_runtime(RtFn::ExcValueStr, t_str(), {v});
+        push_temp(s);
+        return s;
+    }
+    // 原生对象没有 __str__ 协议，按和其他内置对象一致的默认文本处理。
+    if (to->kind == TyKind::Str && from && from->kind == TyKind::Random)
+        return const_str("<random.Random object>");
+    if (to->kind == TyKind::Str && from && from->kind == TyKind::CompletedProcess)
+        return const_str("<subprocess.CompletedProcess object>");
+    if (to->kind == TyKind::Str && from && from->kind == TyKind::Popen)
+        return const_str("<subprocess.Popen object>");
+    Inst in;
+    in.op = IrOp::Convert;
+    in.a = v;
+    VReg r = def(to, std::move(in));
+    // 数值转换产出标量；转成字符串才是一个新的堆对象。
+    if (to->kind == TyKind::Str && (!from || from->kind != TyKind::Str))
+        push_temp(r);
+    return r;
+}
+
+// 存储位置（槽 / 全局 / 形参 / 列表元素）有静态类型，值可能落在另一个
+// 数值域上——典型是 `x: float = 1`。不补这条 convert，整数 1 的位模式
+// 会被当成 double 读出来（5e-324），而且错得毫无声响。
+// 只在数值域之间转：指针类之间的差异属于类型检查该报的错，这里不猜。
+VReg Lowerer::coerce(VReg v, TypePtr from, TypePtr to) {
+    if (!from || !to) return v;
+    if (type_eq(from, to)) return v;
+    auto num = [](TyKind k) { return k == TyKind::Int || k == TyKind::Bool || k == TyKind::Float; };
+    if (!num(from->kind) || !num(to->kind)) return v;
+    bool from_int = from->kind != TyKind::Float;
+    bool to_int = to->kind != TyKind::Float;
+    if (from_int == to_int) return v;  // int/bool 互换不用动，机器表示一样
+    return convert_to(v, from, to);
+}
+
+VReg Lowerer::lower_joined(JoinedStr& j) {
+    VReg acc = const_str("");
+    bool first = true;
+    for (auto& part : j.values) {
+        VReg piece;
+        if (part->kind == ExprKind::Constant) {
+            auto& c = static_cast<Constant&>(*part);
+            if (c.ck != Constant::CK::Str) {
+                err(part->line, part->col, "non-string literal inside f-string");
+                continue;
+            }
+            if (c.s.empty()) continue;
+            piece = const_str(c.s);
+        } else if (part->kind == ExprKind::FormattedValue) {
+            auto& fv = static_cast<FormattedValue&>(*part);
+            TypePtr vt = tc_.type_of(fv.value.get());
+            VReg raw = expr(*fv.value);
+            if (fv.conversion == 's') {
+                if (!vt || vt->kind != TyKind::Str) raw = convert_to(raw, vt, t_str());
+            } else if (fv.conversion == 'r' || fv.conversion == 'a') {
+                if (vt && vt->kind == TyKind::Str) {
+                    Inst in;
+                    in.op = IrOp::CallRt;
+                    in.imm = static_cast<int64_t>(RtFn::ReprStr);
+                    in.args = {raw};
+                    raw = def_heap(t_str(), std::move(in));
+                } else if (vt && vt->kind == TyKind::Class) {
+                    // !r 用 __repr__；没有就退回默认对象描述。
+                    VReg s = dunder_str(raw, vt, true);
+                    raw = s != kNoReg ? s : class_default_str(vt);
+                } else {
+                    raw = convert_to(raw, vt, t_str());
+                }
+            }
+            VReg spec = const_str("");
+            if (fv.format_spec)
+                spec = lower_joined(static_cast<JoinedStr&>(*fv.format_spec));
+            // 没有 !s/!r 的普通格式化：有 __format__ 就用它（和 format() 一致），
+            // 否则按 __str__ 转成字符串再走字符串的格式说明。
+            // （无转换时 conversion 是 -1。）
+            if (fv.conversion < 0 && vt && vt->kind == TyKind::Class) {
+                VReg r = kNoReg;
+                if (vt->cls && vt->cls->method("__format__"))
+                    r = dunder_call(raw, vt, "__format__", {spec}, t_str());
+                if (r != kNoReg) {
+                    raw = r;
+                } else {
+                    VReg s = dunder_str(raw, vt, false);
+                    raw = s != kNoReg ? s : class_default_str(vt);
+                }
+                vt = t_str();
+            }
+
+            auto fmt_call = [&](RtFn fn) {
+                Inst in;
+                in.op = IrOp::CallRt;
+                in.imm = static_cast<int64_t>(fn);
+                in.args = {raw, spec};
+                return def_heap(t_str(), std::move(in));
+            };
+            TypePtr ct = vt;
+            if (fv.conversion == 's' || fv.conversion == 'r' || fv.conversion == 'a')
+                ct = t_str();
+            if (!ct || ct->kind == TyKind::Unknown) {
+                VReg s = convert_to(raw, ct, t_str());
+                Inst in;
+                in.op = IrOp::CallRt;
+                in.imm = static_cast<int64_t>(RtFn::FmtStr);
+                in.args = {s, spec};
+                piece = def_heap(t_str(), std::move(in));
+            } else {
+                switch (ct->kind) {
+                    case TyKind::Bool: piece = fmt_call(RtFn::FmtBool); break;
+                    case TyKind::Int: piece = fmt_call(RtFn::FmtI64); break;
+                    case TyKind::Float: piece = fmt_call(RtFn::FmtF64); break;
+                    case TyKind::Str: piece = fmt_call(RtFn::FmtStr); break;
+                    case TyKind::Complex: piece = fmt_call(RtFn::FmtComplex); break;
+                    case TyKind::Exception: {
+                        VReg ev = call_runtime(RtFn::ExcValueStr, t_str(), {raw});
+                        push_temp(ev);
+                        Inst in;
+                        in.op = IrOp::CallRt;
+                        in.imm = static_cast<int64_t>(RtFn::FmtStr);
+                        in.args = {ev, spec};
+                        piece = def_heap(t_str(), std::move(in));
+                        break;
+                    }
+                    default:
+                        err(part->line, part->col,
+                            std::format("f-string cannot format '{}'", type_name(ct)));
+                        continue;
+                }
+            }
+        } else {
+            err(part->line, part->col, "unsupported f-string part");
+            continue;
+        }
+
+        if (first) {
+            acc = piece;
+            first = false;
+        } else {
+            acc = call_runtime(RtFn::StrConcat, t_str(), {acc, piece});
+            push_temp(acc);
+        }
+    }
+    return acc;
+}
+
+// 按签名重排实参：位置实参、关键字实参、缺省值、形参类型的数值转换。
+// info 为空（签名未知）时按源码顺序直传，关键字参数直接报错。
+
+
+
+}  // namespace pyadamas

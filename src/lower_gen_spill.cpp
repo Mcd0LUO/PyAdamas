@@ -1,0 +1,204 @@
+// lower_gen_spill.cpp —— 跨挂起点的槽位溢出
+#include "lower_impl.h"
+
+namespace pyadamas {
+
+void Lowerer::spill_across_suspends() {
+    IRFunction* fn = st_->fn;
+    if (!fn || st_->gen_states.empty()) return;
+    const int nb = static_cast<int>(fn->blocks.size());
+    const int nv = static_cast<int>(fn->vreg_ty.size());
+    if (nb == 0 || nv == 0) return;
+
+    auto for_each_read = [](const Inst& in, auto&& f) {
+        if (in.a != kNoReg) f(in.a);
+        if (in.b != kNoReg) f(in.b);
+        if (in.c != kNoReg) f(in.c);
+        for (VReg r : in.args)
+            if (r != kNoReg) f(r);
+    };
+
+    // 块内 use/def：块首未定义就读取的才算 live-in 需求。
+    std::vector<std::vector<uint8_t>> use(nb, std::vector<uint8_t>(nv, 0));
+    std::vector<std::vector<uint8_t>> def(nb, std::vector<uint8_t>(nv, 0));
+    for (int b = 0; b < nb; ++b) {
+        for (const Inst& in : fn->blocks[static_cast<size_t>(b)].insts) {
+            for_each_read(in, [&](VReg r) {
+                if (static_cast<int>(r) < nv &&
+                    !def[static_cast<size_t>(b)][static_cast<size_t>(r)])
+                    use[static_cast<size_t>(b)][static_cast<size_t>(r)] = 1;
+            });
+            if (in.dst != kNoReg && static_cast<int>(in.dst) < nv)
+                def[static_cast<size_t>(b)][static_cast<size_t>(in.dst)] = 1;
+        }
+    }
+
+    // 挂起是终止指令：GenYield/GenAwait 没有后继，续跑块只从入口分派进。
+    std::vector<std::vector<int>> succ(nb);
+    for (int b = 0; b < nb; ++b) {
+        const auto& ins = fn->blocks[static_cast<size_t>(b)].insts;
+        if (ins.empty()) {
+            if (b + 1 < nb) succ[static_cast<size_t>(b)].push_back(b + 1);
+            continue;
+        }
+        auto add = [&](int t) {
+            if (t >= 0 && t < nb) succ[static_cast<size_t>(b)].push_back(t);
+        };
+        switch (ins.back().op) {
+            case IrOp::Jump: add(ins.back().target); break;
+            case IrOp::Branch:
+                add(ins.back().target);
+                add(ins.back().target2);
+                break;
+            case IrOp::Return:
+            case IrOp::GenYield:
+            case IrOp::GenAwait:
+            case IrOp::GenRethrow:
+            case IrOp::GenDone: break;
+            default:
+                if (b + 1 < nb) succ[static_cast<size_t>(b)].push_back(b + 1);
+                break;
+        }
+    }
+
+    std::vector<std::vector<uint8_t>> live_in(nb, std::vector<uint8_t>(nv, 0));
+    std::vector<std::vector<uint8_t>> live_out(nb, std::vector<uint8_t>(nv, 0));
+    bool changed = true;
+    while (changed) {
+        changed = false;
+        for (int b = nb - 1; b >= 0; --b) {
+            std::vector<uint8_t> out(nv, 0);
+            for (int s : succ[static_cast<size_t>(b)])
+                for (int v = 0; v < nv; ++v)
+                    out[static_cast<size_t>(v)] |=
+                        live_in[static_cast<size_t>(s)][static_cast<size_t>(v)];
+            std::vector<uint8_t> in(nv, 0);
+            for (int v = 0; v < nv; ++v)
+                in[static_cast<size_t>(v)] = static_cast<uint8_t>(
+                    use[static_cast<size_t>(b)][static_cast<size_t>(v)] |
+                    (out[static_cast<size_t>(v)] &
+                     ~def[static_cast<size_t>(b)][static_cast<size_t>(v)]));
+            if (out != live_out[static_cast<size_t>(b)] ||
+                in != live_in[static_cast<size_t>(b)]) {
+                live_out[static_cast<size_t>(b)] = std::move(out);
+                live_in[static_cast<size_t>(b)] = std::move(in);
+                changed = true;
+            }
+        }
+    }
+
+    std::unordered_map<int, int> cont_of_state;
+    for (auto& gs : st_->gen_states) cont_of_state[gs.id] = gs.cont;
+
+    // 同一个 vreg 在多个挂起点之间复用一个溢出槽。
+    std::unordered_map<VReg, int> spill_slot;
+    auto slot_for = [&](VReg v) {
+        auto it = spill_slot.find(v);
+        if (it != spill_slot.end()) return it->second;
+        int s = fn->new_slot(fn->vreg_ty[static_cast<size_t>(v)]);
+        spill_slot.emplace(v, s);
+        return s;
+    };
+
+    for (int b = 0; b < nb; ++b) {
+        auto& ins = fn->blocks[static_cast<size_t>(b)].insts;
+        if (ins.empty()) continue;
+        const IrOp term_op = ins.back().op;
+        if (term_op != IrOp::GenYield && term_op != IrOp::GenAwait) continue;
+        const int state_id = static_cast<int>(ins.back().imm);
+        auto cit = cont_of_state.find(state_id);
+        if (cit == cont_of_state.end()) continue;
+        const int c = cit->second;
+        if (c < 0 || c >= nb) continue;
+
+        std::vector<VReg> live;
+        for (int v = 0; v < nv; ++v)
+            if (live_in[static_cast<size_t>(c)][static_cast<size_t>(v)])
+                live.push_back(static_cast<VReg>(v));
+
+        // 挂起后的续跑块：先把值从堆帧槽装回 vreg，所有权转给临时栈。
+        if (!live.empty()) {
+            std::vector<Inst> post;
+            for (VReg v : live) {
+                TypePtr ty = fn->vreg_ty[static_cast<size_t>(v)];
+                int slot = slot_for(v);
+                Inst ld;
+                ld.op = IrOp::LoadSlot;
+                ld.idx = slot;
+                ld.ty = ty;
+                ld.dst = v;
+                post.push_back(std::move(ld));
+                if (ir_is_heap(ty)) {
+                    Inst tp;
+                    tp.op = IrOp::CallRt;
+                    tp.imm = static_cast<int64_t>(RtFn::RcTemp);
+                    tp.args = {v};
+                    post.push_back(std::move(tp));
+                    // 槽已经不再持有这份引用；不清零的话帧销毁会二次释放。
+                    Inst zero;
+                    zero.op = IrOp::ConstInt;
+                    zero.imm = 0;
+                    VReg z = static_cast<VReg>(fn->vreg_ty.size());
+                    fn->vreg_ty.push_back(t_int());
+                    zero.dst = z;
+                    zero.ty = t_int();
+                    post.push_back(std::move(zero));
+                    Inst cl;
+                    cl.op = IrOp::StoreSlot;
+                    cl.idx = slot;
+                    cl.a = z;
+                    post.push_back(std::move(cl));
+                } else if (!ty || ty->kind == TyKind::Unknown) {
+                    Inst tp;
+                    tp.op = IrOp::CallRt;
+                    tp.imm = static_cast<int64_t>(RtFn::RcTempUnknown);
+                    tp.args = {v};
+                    post.push_back(std::move(tp));
+                }
+            }
+            auto& cont_insts = fn->blocks[static_cast<size_t>(c)].insts;
+            cont_insts.insert(cont_insts.begin(), post.begin(), post.end());
+        }
+
+        // 挂起前：retain 一份再写进堆帧槽。必须赶在 RcCleanup 之前，
+        // 否则临时栈先把产生者那份引用放掉了，写进去的就是悬空指针。
+        if (live.empty()) continue;
+        int cleanup_pos = -1;
+        for (int i = static_cast<int>(ins.size()) - 2; i >= 0; --i) {
+            if (ins[static_cast<size_t>(i)].op == IrOp::CallRt &&
+                static_cast<RtFn>(ins[static_cast<size_t>(i)].imm) == RtFn::RcCleanup) {
+                cleanup_pos = i;
+                break;
+            }
+        }
+        size_t at = cleanup_pos >= 0 ? static_cast<size_t>(cleanup_pos) : ins.size() - 1;
+        std::vector<Inst> pre;
+        for (VReg v : live) {
+            TypePtr ty = fn->vreg_ty[static_cast<size_t>(v)];
+            int slot = slot_for(v);
+            if (ir_is_heap(ty)) {
+                Inst inc;
+                inc.op = IrOp::CallRt;
+                inc.imm = static_cast<int64_t>(RtFn::RcInc);
+                inc.args = {v};
+                pre.push_back(std::move(inc));
+            } else if (!ty || ty->kind == TyKind::Unknown) {
+                Inst inc;
+                inc.op = IrOp::CallRt;
+                inc.imm = static_cast<int64_t>(RtFn::RcIncUnknown);
+                inc.args = {v};
+                pre.push_back(std::move(inc));
+            }
+            Inst st;
+            st.op = IrOp::StoreSlot;
+            st.idx = slot;
+            st.a = v;
+            pre.push_back(std::move(st));
+        }
+        ins.insert(ins.begin() + static_cast<std::ptrdiff_t>(at), pre.begin(), pre.end());
+    }
+}
+
+
+
+}  // namespace pyadamas

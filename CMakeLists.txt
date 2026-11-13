@@ -28,16 +28,28 @@ set(PYADAMAS_SOURCES
   src/typecheck_expr.cpp
   src/typecheck_call.cpp
   src/typecheck_call_forms.cpp
+  src/typecheck_call_modules.cpp
+  src/typecheck_call_method.cpp
   src/typecheck_builtin.cpp
   src/typecheck_func.cpp
   src/lower.cpp
+  src/lower_class.cpp
   src/lower_impl_util.cpp
   src/lower_impl_slots.cpp
   src/lower_stmt.cpp
+  src/lower_stmt_with.cpp
+  src/lower_stmt_async.cpp
   src/lower_exc.cpp
   src/lower_import.cpp
+  src/lower_import_native.cpp
+  src/lower_import_stdlib.cpp
+  src/lower_import_misc.cpp
   src/lower_match.cpp
   src/lower_expr.cpp
+  src/lower_expr_assign.cpp
+  src/lower_expr_ops.cpp
+  src/lower_expr_container.cpp
+  src/lower_expr_dunder.cpp
   src/lower_comp.cpp
   src/lower_call.cpp
   src/lower_builtin.cpp
@@ -54,6 +66,8 @@ set(PYADAMAS_SOURCES
   src/lower_method_misc.cpp
   src/lower_print.cpp
   src/lower_gen.cpp
+  src/lower_gen_async.cpp
+  src/lower_gen_spill.cpp
   src/opt.cpp
   src/opt_fold.cpp
   src/opt_inline.cpp
@@ -69,6 +83,7 @@ set(PYADAMAS_SOURCES
   src/module.cpp
   src/cimport.cpp
   src/cdecl.cpp
+  src/cdecl_parse.cpp
 )
 
 # 编译器在运行时需要 rt.o 的绝对路径；运行时按职责拆成多个 .c，
