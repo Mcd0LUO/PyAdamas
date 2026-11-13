@@ -456,7 +456,12 @@ enum class RtFn : uint16_t {
     TimeDeltaSub,          // (td*, td*) -> timedelta*
     TimeDeltaMul,          // (td*, i64) -> timedelta*
     TimeDeltaNeg,          // (td*) -> timedelta*
+    TimeDeltaFloorDivInt,  // (td*, i64) -> timedelta*
+    TimeDeltaTrueDivInt,   // (td*, i64) -> timedelta*
+    TimeDeltaFloorDivTD,   // (td*, td*) -> i64
+    TimeDeltaTrueDivTD,    // (td*, td*) -> f64
     TimeDeltaStr,          // (td*) -> str*
+    DateTimeReplace,       // (dt*, list* fields) -> datetime*
     DateTimeAddDelta,      // (dt*, td*, i64 sub) -> datetime*
     DateTimeDiff,          // (dt*, dt*) -> timedelta*
     DateTimeCmp,           // (dt*, dt*) -> i64（-1 / 0 / 1）
@@ -477,6 +482,13 @@ enum class RtFn : uint16_t {
     PathMkdir,             // (path*, mode, parents, exist_ok) -> i64
     PathWithSuffix,        // (path*, str*) -> path*
     PathParts,             // (path*) -> list[str]*
+    PathReadBytes,         // (path*) -> bytes*
+    PathWriteBytes,        // (path*, bytes*) -> i64
+    PathIsAbsolute,        // (path*) -> i64
+    PathRelativeTo,        // (path*, str*) -> path*
+    PathResolve,           // (path*) -> path*
+    PathAbsolute,          // (path*) -> path*
+    PathTouch,             // (path*) -> i64
     RandRange,             // (rng*, a, b, step) -> i64
     RandGetrandbits,       // (rng*, k) -> i64
     RandGauss,             // (rng*, mu, sigma) -> f64
@@ -509,6 +521,12 @@ enum class RtFn : uint16_t {
     DequeExtend,           // (dq*, list*) -> void
     DequeExtendLeft,       // (dq*, list*) -> void
     DequeToList,           // (dq*) -> list*
+    DequeRemove,           // (dq*, v, kind) -> void
+    DequeCount,            // (dq*, v, kind) -> i64
+    DequeIndex,            // (dq*, v, kind) -> i64
+    DequeInsert,           // (dq*, i, v) -> void
+    DequeReverse,          // (dq*) -> void
+    DequeCopy,             // (dq*) -> deque*
 };
 
 inline const char* rt_name(RtFn f) {
@@ -938,7 +956,12 @@ inline const char* rt_name(RtFn f) {
         case RtFn::TimeDeltaSub: return "pa_timedelta_sub";
         case RtFn::TimeDeltaMul: return "pa_timedelta_mul";
         case RtFn::TimeDeltaNeg: return "pa_timedelta_neg";
+        case RtFn::TimeDeltaFloorDivInt: return "pa_timedelta_floordiv_int";
+        case RtFn::TimeDeltaTrueDivInt: return "pa_timedelta_truediv_int";
+        case RtFn::TimeDeltaFloorDivTD: return "pa_timedelta_floordiv_td";
+        case RtFn::TimeDeltaTrueDivTD: return "pa_timedelta_truediv_td";
         case RtFn::TimeDeltaStr: return "pa_timedelta_str";
+        case RtFn::DateTimeReplace: return "pa_datetime_replace";
         case RtFn::DateTimeAddDelta: return "pa_datetime_add_delta";
         case RtFn::DateTimeDiff: return "pa_datetime_diff";
         case RtFn::DateTimeCmp: return "pa_datetime_cmp";
@@ -959,6 +982,13 @@ inline const char* rt_name(RtFn f) {
         case RtFn::PathMkdir: return "pa_path_mkdir";
         case RtFn::PathWithSuffix: return "pa_path_with_suffix";
         case RtFn::PathParts: return "pa_path_parts";
+        case RtFn::PathReadBytes: return "pa_path_read_bytes";
+        case RtFn::PathWriteBytes: return "pa_path_write_bytes";
+        case RtFn::PathIsAbsolute: return "pa_path_is_absolute";
+        case RtFn::PathRelativeTo: return "pa_path_relative_to";
+        case RtFn::PathResolve: return "pa_path_resolve";
+        case RtFn::PathAbsolute: return "pa_path_absolute";
+        case RtFn::PathTouch: return "pa_path_touch";
         case RtFn::RandRange: return "pa_random_randrange";
         case RtFn::RandGetrandbits: return "pa_random_getrandbits";
         case RtFn::RandGauss: return "pa_random_gauss";
@@ -991,6 +1021,12 @@ inline const char* rt_name(RtFn f) {
         case RtFn::DequeExtend: return "pa_deque_extend";
         case RtFn::DequeExtendLeft: return "pa_deque_extendleft";
         case RtFn::DequeToList: return "pa_deque_to_list";
+        case RtFn::DequeRemove: return "pa_deque_remove";
+        case RtFn::DequeCount: return "pa_deque_count";
+        case RtFn::DequeIndex: return "pa_deque_index";
+        case RtFn::DequeInsert: return "pa_deque_insert";
+        case RtFn::DequeReverse: return "pa_deque_reverse";
+        case RtFn::DequeCopy: return "pa_deque_copy";
     }
     return "?";
 }

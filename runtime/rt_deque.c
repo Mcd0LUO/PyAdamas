@@ -179,3 +179,60 @@ PyAdamasList* pa_deque_to_list(PyAdamasDeque* d) {
     }
     return out;
 }
+
+int64_t pa_deque_count(PyAdamasDeque* d, int64_t v, int64_t kind) {
+    int64_t n = 0;
+    for (int64_t i = 0; i < d->len; ++i)
+        if (list_value_eq(kind, dq_at(d, i), v)) ++n;
+    return n;
+}
+
+int64_t pa_deque_index(PyAdamasDeque* d, int64_t v, int64_t kind) {
+    for (int64_t i = 0; i < d->len; ++i)
+        if (list_value_eq(kind, dq_at(d, i), v)) return i;
+    pa_raise_c("ValueError", "value is not in deque");
+}
+
+void pa_deque_remove(PyAdamasDeque* d, int64_t v, int64_t kind) {
+    for (int64_t i = 0; i < d->len; ++i) {
+        if (!list_value_eq(kind, dq_at(d, i), v)) continue;
+        int64_t old = dq_at(d, i);
+        for (int64_t j = i; j + 1 < d->len; ++j) dq_set(d, j, dq_at(d, j + 1));
+        --d->len;
+        pa_own_dec(d->elem_kind, old);
+        return;
+    }
+    pa_raise_c("ValueError", "deque.remove(x): x not in deque");
+}
+
+void pa_deque_insert(PyAdamasDeque* d, int64_t i, int64_t v) {
+    if (d->maxlen > 0 && d->len == d->maxlen)
+        pa_raise_c("IndexError", "deque already at its maximum size");
+    if (i < 0) i += d->len;
+    if (i < 0) i = 0;
+    if (i > d->len) i = d->len;
+    if (d->len == d->cap) dq_grow(d);
+    for (int64_t j = d->len; j > i; --j) dq_set(d, j, dq_at(d, j - 1));
+    dq_set(d, i, v);
+    ++d->len;
+}
+
+void pa_deque_reverse(PyAdamasDeque* d) {
+    for (int64_t i = 0, j = d->len - 1; i < j; ++i, --j) {
+        int64_t a = dq_at(d, i);
+        int64_t b = dq_at(d, j);
+        dq_set(d, i, b);
+        dq_set(d, j, a);
+    }
+}
+
+PyAdamasDeque* pa_deque_copy(PyAdamasDeque* d) {
+    PyAdamasDeque* out = pa_deque_new(d->maxlen);
+    out->elem_kind = d->elem_kind;
+    for (int64_t i = 0; i < d->len; ++i) {
+        int64_t v = dq_at(d, i);
+        pa_own_inc(d->elem_kind, v);
+        pa_deque_append(out, v);
+    }
+    return out;
+}

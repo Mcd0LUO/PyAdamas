@@ -4,6 +4,26 @@
 
 早期阶段没有逐条留痕，按阶段归纳；0.4 之后逐条记录。
 
+## [0.144] - 2026-11-13
+
+collections / datetime / pathlib 收尾，并固化标准库基准。
+
+### 变更
+
+- `collections.deque` 补齐 `remove`/`count`/`index`/`insert`/`reverse`/
+  `copy` 与 `.maxlen`；`deque(...)` 保留元素类型（`pop`/下标/迭代不再退化成
+  `int`），`append`/`insert` 按元素所有权补 retain。
+- `datetime.timedelta` 增加 `//`（int 与 timedelta）和 `/`（int 与 timedelta）；
+  `date`/`datetime` 增加 `replace()`；日期校验按实际月份天数（含闰年）。
+- `pathlib.Path` 增加 `read_bytes`/`write_bytes`、`is_absolute`、`joinpath`、
+  `relative_to`、`resolve`、`absolute`、`touch`。
+- 新增 `tests/bench/`：同一份用例分别用 pyadamas 与 CPython 运行并取最优
+  耗时（`python3 tests/bench/run_bench.py`），覆盖 itertools、collections、
+  heapq、bisect、statistics、math、datetime、string/textwrap、json、
+  base64/hashlib。
+- 新增运行用例 145（deque）、146（timedelta 除法与 replace）、
+  147（pathlib 扩展）。
+
 ## [0.143] - 2026-11-13
 
 `operator` 改为内置模块并补齐包装函数。

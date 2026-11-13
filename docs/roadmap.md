@@ -68,15 +68,16 @@
 | 0.141 | 标准库基础静态包（第一批）：heapq、bisect、binascii、base64 b16/b32/encodebytes、statistics.geometric_mean、textwrap.shorten/缩进、pathlib unlink/rmdir/with_suffix/parts |
 | 0.142 | 标准库基础静态包（第二批）：itertools 组合函数、datetime.timedelta（算术/比较/打印）、operator 子集 |
 | 0.143 | operator 改为内置模块：算术/比较/逻辑/容器包装函数按调用点特化，itemgetter 支持多键 |
+| 0.144 | collections/datetime/pathlib 收尾（deque 方法与元素类型、timedelta 除法、date.replace、Path 字节与路径方法）；新增 tests/bench 标准库基准 |
 | 许可证 | Apache-2.0（见 [LICENSE](../LICENSE) / [NOTICE](../NOTICE)） |
 
-## 当前状态（0.143）
+## 当前状态（0.144）
 
 流水线 `源码 → 词法 → AST → lambda 脱糖 → 类型检查 → IR → x86-64 汇编 → 可执行文件` 已打通。
 
 - **语言面**：标量、字符串、`bytes`（含迭代与 `%` 格式化）、列表/元组/字典/集合、切片读写、闭包/lambda/`*args`/`**kwargs`/装饰器、推导式、`with`、异常值（`args`/`raise ... from`/自定义异常）、类（字段/方法/C3 多继承/零参 `super()`/`@staticmethod`/`@classmethod`/`@property`/类属性）、`match/case`、`del`、复数字面量、f-string 格式说明、dunder 协议（含装饰 dunder、`__call__` 与方法值）、`Generator[Y, S, R]` 标注、`open`/`input`/`sys.stdin`。
 - **标准库**：`math`/`sys`/`asyncio`/`random`/`os`/`os.path`/`subprocess`/`time`/`itertools`/`collections`/`functools`/`json`/`string`/`re`/`datetime`/`pathlib`/`csv`/`base64`/`binascii`/`heapq`/`bisect`/`hashlib`/`hmac`/`logging`/`statistics`/`textwrap`/`operator`。
-- **验证**：154 个运行用例、52 个反例、12 个模块目录；差分 runner 已自举，默认 840 例。
+- **验证**：157 个运行用例、52 个反例、12 个模块目录；差分 runner 已自举，默认 840 例；`tests/bench/` 提供 pyadamas vs CPython 的标准库基准。
 - **主要缺口**：C FFI/BLAS；asyncio 边角。
 
 ## 下一步

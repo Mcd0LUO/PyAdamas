@@ -444,6 +444,7 @@ VReg Lowerer::lower_method_call(Attribute& at, Call& c) {
         if (opt) recv = guard_not_none(recv, std::format("method '{}'", at.attr));
         // Path.mkdir / Popen.wait / Popen.communicate 收关键字参数，下面单独处理。
         bool kw_ok = (recv_ty->kind == TyKind::Path && at.attr == "mkdir") ||
+                     (recv_ty->kind == TyKind::DateTime && at.attr == "replace") ||
                      (recv_ty->kind == TyKind::Popen &&
                       (at.attr == "wait" || at.attr == "communicate"));
         if (!c.keywords.empty() && !kw_ok)
@@ -562,6 +563,36 @@ VReg Lowerer::lower_method_call(Attribute& at, Call& c) {
                 if (!count(0)) return const_none();
                 return call_runtime(RtFn::DateTimeField, t_int(), {recv, const_int(6)});
             }
+            if (at.attr == "replace") {
+                if (!count(0)) return const_none();
+                static const char* kNames[6] = {"year",  "month", "day",
+                                                "hour",  "minute", "second"};
+                VReg fields = call_runtime(RtFn::ListNew, mk_list(t_unknown()),
+                                           {const_int(6), const_int(0)});
+                push_temp(fields);
+                for (int i = 0; i < 6; ++i)
+                    call_void(RtFn::ListAppend, {fields, const_int(-1)});
+                for (auto& kw : c.keywords) {
+                    int idx = -1;
+                    for (int i = 0; i < 6; ++i)
+                        if (kw.arg == kNames[i]) idx = i;
+                    if (idx < 0) {
+                        err(kw.value->line, kw.value->col,
+                            std::format("datetime.replace() got an unexpected keyword "
+                                        "argument '{}'",
+                                        kw.arg));
+                        expr(*kw.value);
+                        continue;
+                    }
+                    VReg v = coerce(expr(*kw.value), tc_.type_of(kw.value.get()), t_int());
+                    call_void(RtFn::ListSet, {fields, const_int(idx), v});
+                }
+                TypePtr rt = tc_.type_of(&c);
+                if (!rt || rt->kind != TyKind::DateTime) rt = new_ty(TyKind::DateTime);
+                VReg v = call_runtime(RtFn::DateTimeReplace, rt, {recv, fields});
+                push_temp(v);
+                return v;
+            }
             err(c.line, c.col, std::format("datetime has no method '{}'", at.attr));
             return const_none();
         }
@@ -592,6 +623,50 @@ VReg Lowerer::lower_method_call(Attribute& at, Call& c) {
                 VReg s = expr(*c.args[0]);
                 s = coerce(s, tc_.type_of(c.args[0].get()), t_str());
                 return call_runtime(RtFn::PathWriteText, t_int(), {recv, s});
+            }
+            if (at.attr == "read_bytes") {
+                if (!count(0)) return const_none();
+                VReg s = call_runtime(RtFn::PathReadBytes, t_bytes(), {recv});
+                push_temp(s);
+                return s;
+            }
+            if (at.attr == "write_bytes") {
+                if (!count(1)) return const_none();
+                VReg s = expr(*c.args[0]);
+                s = coerce(s, tc_.type_of(c.args[0].get()), t_bytes());
+                return call_runtime(RtFn::PathWriteBytes, t_int(), {recv, s});
+            }
+            if (at.attr == "is_absolute") {
+                if (!count(0)) return const_none();
+                return call_runtime(RtFn::PathIsAbsolute, t_bool(), {recv});
+            }
+            if (at.attr == "joinpath") {
+                if (!count(1)) return const_none();
+                VReg s = expr(*c.args[0]);
+                s = coerce(s, tc_.type_of(c.args[0].get()), t_str());
+                VReg v = call_runtime(RtFn::PathJoin, new_ty(TyKind::Path), {recv, s});
+                push_temp(v);
+                return v;
+            }
+            if (at.attr == "relative_to") {
+                if (!count(1)) return const_none();
+                VReg s = expr(*c.args[0]);
+                s = coerce(s, tc_.type_of(c.args[0].get()), t_str());
+                VReg v = call_runtime(RtFn::PathRelativeTo, new_ty(TyKind::Path), {recv, s});
+                push_temp(v);
+                return v;
+            }
+            if (at.attr == "resolve" || at.attr == "absolute") {
+                if (!count(0)) return const_none();
+                RtFn fn = at.attr == "resolve" ? RtFn::PathResolve : RtFn::PathAbsolute;
+                VReg v = call_runtime(fn, new_ty(TyKind::Path), {recv});
+                push_temp(v);
+                return v;
+            }
+            if (at.attr == "touch") {
+                if (!count(0)) return const_none();
+                call_runtime(RtFn::PathTouch, t_int(), {recv});
+                return const_none();
             }
             if (at.attr == "iterdir") {
                 if (!count(0)) return const_none();
@@ -717,10 +792,14 @@ VReg Lowerer::lower_method_call(Attribute& at, Call& c) {
             return const_none();
         }
         if (recv_ty->kind == TyKind::Deque) {
-            TypePtr et = t_int();
+            TypePtr et = recv_ty->sub.empty() ? t_unknown() : recv_ty->sub[0];
+            int ko = own_kind(et);
+            int kk = key_kind(et);
             if (at.attr == "append" || at.attr == "appendleft") {
                 if (!count(1)) return const_none();
                 VReg v = expr(*c.args[0]);
+                v = coerce(v, tc_.type_of(c.args[0].get()), et);
+                retain_elem(v, ko);
                 call_void(at.attr == "append" ? RtFn::DequeAppend : RtFn::DequeAppendLeft,
                           {recv, v});
                 return const_none();
@@ -745,12 +824,46 @@ VReg Lowerer::lower_method_call(Attribute& at, Call& c) {
                 call_void(RtFn::DequeClear, {recv});
                 return const_none();
             }
+            if (at.attr == "reverse") {
+                if (!count(0)) return const_none();
+                call_void(RtFn::DequeReverse, {recv});
+                return const_none();
+            }
             if (at.attr == "extend" || at.attr == "extendleft") {
                 if (!count(1)) return const_none();
                 VReg xs = expr(*c.args[0]);
                 call_void(at.attr == "extend" ? RtFn::DequeExtend : RtFn::DequeExtendLeft,
                           {recv, xs});
                 return const_none();
+            }
+            if (at.attr == "insert") {
+                if (!count(2)) return const_none();
+                VReg idx = coerce(expr(*c.args[0]), tc_.type_of(c.args[0].get()), t_int());
+                VReg v = expr(*c.args[1]);
+                v = coerce(v, tc_.type_of(c.args[1].get()), et);
+                retain_elem(v, ko);
+                call_void(RtFn::DequeInsert, {recv, idx, v});
+                return const_none();
+            }
+            if (at.attr == "remove" || at.attr == "count" || at.attr == "index") {
+                if (!count(1)) return const_none();
+                VReg v = expr(*c.args[0]);
+                v = coerce(v, tc_.type_of(c.args[0].get()), et);
+                RtFn fn = at.attr == "remove"  ? RtFn::DequeRemove
+                          : at.attr == "count" ? RtFn::DequeCount
+                                               : RtFn::DequeIndex;
+                TypePtr rt = at.attr == "remove" ? t_none() : t_int();
+                VReg r = call_runtime(fn, rt, {recv, v, const_int(kk)});
+                if (at.attr == "remove") return const_none();
+                return r;
+            }
+            if (at.attr == "copy") {
+                if (!count(0)) return const_none();
+                TypePtr rt = tc_.type_of(&c);
+                if (!rt || rt->kind != TyKind::Deque) rt = mk_deque(et);
+                VReg v = call_runtime(RtFn::DequeCopy, rt, {recv});
+                push_temp(v);
+                return v;
             }
             err(c.line, c.col, std::format("collections.deque has no method '{}'", at.attr));
             return const_none();

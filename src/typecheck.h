@@ -605,6 +605,11 @@ inline TypePtr mk_list(TypePtr e) {
     t->sub.push_back(std::move(e));
     return t;
 }
+inline TypePtr mk_deque(TypePtr e) {
+    auto t = new_ty(TyKind::Deque);
+    t->sub.push_back(std::move(e));
+    return t;
+}
 inline TypePtr mk_range(TypePtr e) {
     auto t = new_ty(TyKind::Range);
     t->sub.push_back(std::move(e));

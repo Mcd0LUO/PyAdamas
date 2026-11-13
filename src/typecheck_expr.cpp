@@ -368,6 +368,13 @@ TypePtr TypeChecker::expr(Expr& e) {
                         std::format("'pathlib.Path' object has no attribute '{}'", a.attr));
                     return t_unknown();
                 }
+                if (ot->kind == TyKind::Deque) {
+                    if (a.attr == "maxlen") return t_int();
+                    err(a.line, a.col,
+                        std::format("'collections.deque' object has no attribute '{}'",
+                                    a.attr));
+                    return t_unknown();
+                }
                 if (ot->kind == TyKind::CompletedProcess) {
                     if (a.attr == "returncode") return t_int();
                     if (a.attr == "stdout" || a.attr == "stderr") return t_str();
@@ -821,6 +828,14 @@ TypePtr TypeChecker::binop_type(Tok op, TypePtr l, TypePtr r, int line, int col)
                     if (td(l) && r->kind == TyKind::Int) return new_ty(TyKind::TimeDelta);
                     if (l->kind == TyKind::Int && td(r)) return new_ty(TyKind::TimeDelta);
                     break;
+                case Tok::SLASH:
+                    if (td(l) && r->kind == TyKind::Int) return new_ty(TyKind::TimeDelta);
+                    if (td(l) && td(r)) return t_float();
+                    break;
+                case Tok::DOUBLESLASH:
+                    if (td(l) && r->kind == TyKind::Int) return new_ty(TyKind::TimeDelta);
+                    if (td(l) && td(r)) return t_int();
+                    break;
                 default: break;
             }
             return bad();
@@ -978,7 +993,8 @@ TypePtr TypeChecker::subscript_type(TypePtr obj, TypePtr idx, int line, int col)
                         std::format("dict key type is '{}', got '{}'", type_name(obj->sub[0]),
                                     type_name(idx)));
                 return obj->sub[1];
-            case TyKind::Deque: return t_int();
+            case TyKind::Deque:
+                return obj->sub.empty() ? t_unknown() : obj->sub[0];
             default:
                 // 类名下标是泛型参数（`MyList[int]`、`Generic[T]`），
                 // 我们不做泛型，返回 unknown 比判死有用
@@ -1010,7 +1026,8 @@ TypePtr TypeChecker::iter_elem(TypePtr it, int line, int col) {
             }
             case TyKind::Generator:
                 return it->sub.empty() ? t_unknown() : it->sub[0];
-            case TyKind::Deque: return t_int();
+            case TyKind::Deque:
+                return it->sub.empty() ? t_unknown() : it->sub[0];
             default:
                 // 类实现了 __iter__ 时，元素类型取它返回的容器/生成器的
                 // 元素类型；没有实现就维持 unknown（生成阶段再报错）。

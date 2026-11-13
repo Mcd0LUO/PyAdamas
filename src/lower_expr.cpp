@@ -860,6 +860,15 @@ VReg Lowerer::expr(Expr& e) {
                     std::format("'pathlib.Path' object has no attribute '{}'", a.attr));
                 return const_none();
             }
+            if (ot && ot->kind == TyKind::Deque) {
+                VReg dv = expr(*a.value);
+                if (opt) dv = guard_not_none(dv, std::format("attribute '{}'", a.attr));
+                if (a.attr == "maxlen")
+                    return call_runtime(RtFn::DequeMaxlen, t_int(), {dv});
+                err(e.line, e.col,
+                    std::format("'collections.deque' object has no attribute '{}'", a.attr));
+                return const_none();
+            }
             if (ot && ot->kind == TyKind::CompletedProcess) {
                 VReg pv = expr(*a.value);
                 if (opt)
@@ -1120,6 +1129,20 @@ VReg Lowerer::lower_binop(BinOp& b) {
             VReg v = call_runtime(RtFn::TimeDeltaMul, new_ty(TyKind::TimeDelta), {td, k});
             push_temp(v);
             return v;
+        }
+        if ((b.op == Tok::SLASH || b.op == Tok::DOUBLESLASH) && is_td(lt)) {
+            if (is_td(rt)) {
+                RtFn fn = b.op == Tok::SLASH ? RtFn::TimeDeltaTrueDivTD
+                                             : RtFn::TimeDeltaFloorDivTD;
+                return call_runtime(fn, b.op == Tok::SLASH ? t_float() : t_int(), {l, r});
+            }
+            if (rt && rt->kind == TyKind::Int) {
+                RtFn fn = b.op == Tok::SLASH ? RtFn::TimeDeltaTrueDivInt
+                                             : RtFn::TimeDeltaFloorDivInt;
+                VReg v = call_runtime(fn, new_ty(TyKind::TimeDelta), {l, r});
+                push_temp(v);
+                return v;
+            }
         }
         err(b.line, b.col,
             std::format("operator '{}' on '{}' and '{}' is not supported", tok_name(b.op),

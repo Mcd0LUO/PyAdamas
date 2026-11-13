@@ -1490,6 +1490,8 @@ void AsmGen::gen_call_rt(const Inst& in) {
             case RtFn::DequeMaxlen:
             case RtFn::DequeClear:
             case RtFn::DequeToList:
+            case RtFn::DequeReverse:
+            case RtFn::DequeCopy:
                 emit2("movq", src_op(in.args[0]), "%rdi");
                 break;
             case RtFn::DequeFromList:
@@ -1503,6 +1505,10 @@ void AsmGen::gen_call_rt(const Inst& in) {
                 emit2("movq", src_op(in.args[1]), "%rsi");
                 break;
             case RtFn::DequeSet:
+            case RtFn::DequeRemove:
+            case RtFn::DequeCount:
+            case RtFn::DequeIndex:
+            case RtFn::DequeInsert:
                 emit2("movq", src_op(in.args[0]), "%rdi");
                 emit2("movq", src_op(in.args[1]), "%rsi");
                 emit2("movq", src_op(in.args[2]), "%rdx");
@@ -1589,11 +1595,18 @@ void AsmGen::gen_call_rt(const Inst& in) {
             case RtFn::TimeDeltaAdd:
             case RtFn::TimeDeltaSub:
             case RtFn::TimeDeltaMul:
+            case RtFn::TimeDeltaFloorDivInt:
+            case RtFn::TimeDeltaTrueDivInt:
+            case RtFn::TimeDeltaFloorDivTD:
+            case RtFn::TimeDeltaTrueDivTD:
+            case RtFn::DateTimeReplace:
             case RtFn::DateTimeDiff:
             case RtFn::DateTimeCmp:
             case RtFn::PathJoin:
             case RtFn::PathWriteText:
+            case RtFn::PathWriteBytes:
             case RtFn::PathGlob:
+            case RtFn::PathRelativeTo:
             case RtFn::PathWithSuffix:
                 emit2("movq", src_op(in.args[0]), "%rdi");
                 emit2("movq", src_op(in.args[1]), "%rsi");
@@ -1619,6 +1632,11 @@ void AsmGen::gen_call_rt(const Inst& in) {
             case RtFn::PathIsFile:
             case RtFn::PathIsDir:
             case RtFn::PathReadText:
+            case RtFn::PathReadBytes:
+            case RtFn::PathIsAbsolute:
+            case RtFn::PathResolve:
+            case RtFn::PathAbsolute:
+            case RtFn::PathTouch:
             case RtFn::PathIterdir:
             case RtFn::PathParts:
                 emit2("movq", src_op(in.args[0]), "%rdi");

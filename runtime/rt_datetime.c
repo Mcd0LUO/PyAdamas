@@ -28,7 +28,10 @@ static void dt_destroy(void* p) {
 static PyAdamasDateTime* dt_make(int64_t y, int64_t mo, int64_t d, int64_t h, int64_t mi,
                              int64_t s, int64_t is_date) {
     if (mo < 1 || mo > 12) pa_raise_c("ValueError", "month must be in 1..12");
-    if (d < 1 || d > 31) pa_raise_c("ValueError", "day is out of range for month");
+    static const int64_t kDays[12] = {31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31};
+    int leap = (y % 4 == 0 && y % 100 != 0) || y % 400 == 0;
+    int64_t dim = mo == 2 && leap ? 29 : kDays[mo - 1];
+    if (d < 1 || d > dim) pa_raise_c("ValueError", "day is out of range for month");
     if (h < 0 || h > 23) pa_raise_c("ValueError", "hour must be in 0..23");
     if (mi < 0 || mi > 59) pa_raise_c("ValueError", "minute must be in 0..59");
     if (s < 0 || s > 59) pa_raise_c("ValueError", "second must be in 0..59");
@@ -200,6 +203,78 @@ PyAdamasTimeDelta* pa_timedelta_mul(PyAdamasTimeDelta* td, int64_t k) {
 
 PyAdamasTimeDelta* pa_timedelta_neg(PyAdamasTimeDelta* td) {
     return pa_timedelta_new(-td->days, -td->seconds, -td->microseconds);
+}
+
+/* timedelta 的总微秒数。用 __int128 承接 days * 86400e6，避免中间溢出。 */
+static __int128 td_total_us(const PyAdamasTimeDelta* td) {
+    return ((__int128)td->days) * 86400000000LL + ((__int128)td->seconds) * 1000000LL +
+           td->microseconds;
+}
+
+static PyAdamasTimeDelta* td_from_us(__int128 us) {
+    const __int128 day = 86400000000LL;
+    __int128 d = us / day;
+    __int128 rem = us % day;
+    if (rem < 0) {
+        rem += day;
+        --d;
+    }
+    return pa_timedelta_new((int64_t)d, (int64_t)(rem / 1000000), (int64_t)(rem % 1000000));
+}
+
+/* timedelta // int：向下取整（负数也要向 -inf 方向）。 */
+PyAdamasTimeDelta* pa_timedelta_floordiv_int(PyAdamasTimeDelta* td, int64_t k) {
+    if (k == 0) pa_raise_c("ZeroDivisionError", "integer division or modulo by zero");
+    __int128 us = td_total_us(td);
+    __int128 q = us / k;
+    if (us % k != 0 && ((us < 0) != (k < 0))) --q;
+    return td_from_us(q);
+}
+
+/* timedelta / int：四舍五入到微秒，恰好一半时取偶（CPython 语义）。 */
+PyAdamasTimeDelta* pa_timedelta_truediv_int(PyAdamasTimeDelta* td, int64_t k) {
+    if (k == 0) pa_raise_c("ZeroDivisionError", "division by zero");
+    __int128 us = td_total_us(td);
+    int neg = (us < 0) != (k < 0);
+    __int128 a = us < 0 ? -us : us;
+    __int128 b = k < 0 ? -k : k;
+    __int128 q = a / b;
+    __int128 r = a % b;
+    if (r * 2 > b || (r * 2 == b && (q & 1))) ++q;
+    return td_from_us(neg ? -q : q);
+}
+
+int64_t pa_timedelta_floordiv_td(PyAdamasTimeDelta* a, PyAdamasTimeDelta* b) {
+    __int128 ub = td_total_us(b);
+    if (ub == 0) pa_raise_c("ZeroDivisionError", "integer division or modulo by zero");
+    __int128 ua = td_total_us(a);
+    __int128 q = ua / ub;
+    if (ua % ub != 0 && ((ua < 0) != (ub < 0))) --q;
+    return (int64_t)q;
+}
+
+double pa_timedelta_truediv_td(PyAdamasTimeDelta* a, PyAdamasTimeDelta* b) {
+    __int128 ub = td_total_us(b);
+    if (ub == 0) pa_raise_c("ZeroDivisionError", "division by zero");
+    return (double)td_total_us(a) / (double)ub;
+}
+
+/* datetime.date / datetime.datetime 的 replace：fields 是 6 个值，
+   -1 表示保留原值（年份/月/日/时/分/秒都不会是 -1）。 */
+PyAdamasDateTime* pa_datetime_replace(PyAdamasDateTime* dt, PyAdamasList* fields) {
+    int64_t y = dt->year, mo = dt->month, d = dt->day;
+    int64_t h = dt->hour, mi = dt->minute, s = dt->second;
+    if (fields && fields->len >= 6) {
+        const int64_t* f = fields->data;
+        if (f[0] >= 0) y = f[0];
+        if (f[1] >= 0) mo = f[1];
+        if (f[2] >= 0) d = f[2];
+        if (f[3] >= 0) h = f[3];
+        if (f[4] >= 0) mi = f[4];
+        if (f[5] >= 0) s = f[5];
+    }
+    if (dt->is_date) return pa_date_new(y, mo, d);
+    return pa_datetime_new(y, mo, d, h, mi, s);
 }
 
 /* 与 CPython 的 str(timedelta) 对齐：days 段只在非 0 时出现，
@@ -487,6 +562,87 @@ int64_t pa_path_write_text(PyAdamasPath* p, PyAdamasStr* text) {
         pa_raise_c("OSError", "cannot open file for writing");
     }
     if (text && text->len) fwrite(text->data, 1, (size_t)text->len, f);
+    fclose(f);
+    free(c);
+    return 0;
+}
+
+/* read_bytes / write_bytes 与文本版本共用同一套字节读写；类型上由
+   调用点区分 bytes。 */
+PyAdamasStr* pa_path_read_bytes(PyAdamasPath* p) {
+    return pa_path_read_text(p);
+}
+
+int64_t pa_path_write_bytes(PyAdamasPath* p, PyAdamasStr* data) {
+    return pa_path_write_text(p, data);
+}
+
+int64_t pa_path_is_absolute(PyAdamasPath* p) {
+    PyAdamasStr* s = p->path;
+    return s && s->len > 0 && s->data[0] == '/' ? 1 : 0;
+}
+
+/* relative_to：base 必须是 path 的前缀（按路径分量），否则 ValueError。 */
+PyAdamasPath* pa_path_relative_to(PyAdamasPath* p, PyAdamasStr* base) {
+    PyAdamasStr* s = p->path;
+    int64_t n = s ? s->len : 0;
+    int64_t bn = base ? base->len : 0;
+    const char* sd = s ? s->data : "";
+    const char* bd = base ? base->data : "";
+    while (bn > 0 && bd[bn - 1] == '/') --bn;
+    int ok = n >= bn && (bn == 0 || memcmp(sd, bd, (size_t)bn) == 0);
+    if (ok && n > bn && sd[bn] != '/') ok = 0;
+    if (!ok) pa_raise_c("ValueError", "is not in the subpath of");
+    int64_t off = bn < n ? bn + 1 : n;
+    PyAdamasStr* out = str_alloc(n - off);
+    if (n > off) memcpy((char*)out->data, sd + off, (size_t)(n - off));
+    return pa_path_new(out);
+}
+
+/* 复制一份 Path（返回新引用，调用方负责释放）。 */
+static PyAdamasPath* path_clone(PyAdamasPath* p) {
+    PyAdamasStr* s = p->path;
+    PyAdamasStr* cp = str_alloc(s ? s->len : 0);
+    if (s && s->len) memcpy((char*)cp->data, s->data, (size_t)s->len);
+    return pa_path_new(cp);
+}
+
+/* resolve / absolute：realpath 失败（路径不存在）时退回「cwd + 原路径」。 */
+PyAdamasPath* pa_path_resolve(PyAdamasPath* p) {
+    char* c = path_cstr(p);
+    char* r = realpath(c, NULL);
+    if (r) {
+        PyAdamasStr* s = str_new(r, (int64_t)strlen(r));
+        free(r);
+        free(c);
+        return pa_path_new(s);
+    }
+    free(c);
+    return path_clone(p);
+}
+
+PyAdamasPath* pa_path_absolute(PyAdamasPath* p) {
+    PyAdamasStr* s = p->path;
+    int64_t n = s ? s->len : 0;
+    if (n > 0 && s->data[0] == '/') return path_clone(p);
+    char cwd[4096];
+    if (!getcwd(cwd, sizeof cwd)) cwd[0] = '\0';
+    PyAdamasStr* out = str_alloc((int64_t)strlen(cwd) + 1 + n);
+    char* d = (char*)out->data;
+    size_t cl = strlen(cwd);
+    memcpy(d, cwd, cl);
+    d[cl] = '/';
+    if (n) memcpy(d + cl + 1, s->data, (size_t)n);
+    return pa_path_new(out);
+}
+
+int64_t pa_path_touch(PyAdamasPath* p) {
+    char* c = path_cstr(p);
+    FILE* f = fopen(c, "ab");
+    if (!f) {
+        free(c);
+        pa_raise_c("OSError", "cannot touch file");
+    }
     fclose(f);
     free(c);
     return 0;

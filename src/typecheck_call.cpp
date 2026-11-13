@@ -1197,6 +1197,38 @@ std::optional<TypePtr> TypeChecker::collections_call(const std::string& member, 
             }
             return mk_dict(kt, vt);
         }
+        if (member == "deque") {
+            if (c.args.size() > 2) {
+                err(c.line, c.col,
+                    std::format("collections.deque() expects at most 2 arguments, got {}",
+                                c.args.size()));
+                for (auto& arg : c.args) expr(*arg);
+                for (auto& kw : c.keywords) expr(*kw.value);
+                return mk_deque(t_unknown());
+            }
+            TypePtr et = t_unknown();
+            std::vector<TypePtr> a;
+            for (auto& arg : c.args) a.push_back(expr(*arg));
+            if (!a.empty()) {
+                if (a[0] && a[0]->kind == TyKind::List && !a[0]->sub.empty())
+                    et = a[0]->sub[0];
+                else if (a[0] && !is_unknown(a[0]))
+                    err(c.args[0]->line, c.args[0]->col,
+                        std::format("collections.deque() expects a list, got '{}'",
+                                    type_name(a[0])));
+            }
+            for (auto& kw : c.keywords) {
+                if (kw.arg == "maxlen") {
+                    expr(*kw.value);
+                } else {
+                    err(kw.value->line, kw.value->col,
+                        std::format("collections.deque() got an unexpected keyword argument "
+                                    "'{}'",
+                                    kw.arg));
+                }
+            }
+            return mk_deque(et);
+        }
         if (member != "Counter") return std::nullopt;
         if (!c.keywords.empty()) {
             err(c.line, c.col, "collections.Counter() does not take keyword arguments");
@@ -2016,7 +2048,7 @@ TypePtr TypeChecker::method_call(TypePtr recv, const std::string& name, Call& c,
         }
 
         if (recv->kind == TyKind::DateTime) {
-            if (!c.keywords.empty())
+            if (!c.keywords.empty() && name != "replace")
                 err(c.line, c.col,
                     std::format("datetime.{}() does not take keyword arguments", name));
             if (name == "isoformat") {
@@ -2030,6 +2062,21 @@ TypePtr TypeChecker::method_call(TypePtr recv, const std::string& name, Call& c,
             if (name == "weekday") {
                 argc(0, 0);
                 return t_int();
+            }
+            if (name == "replace") {
+                argc(0, 0);
+                for (auto& kw : c.keywords) {
+                    if (kw.arg == "year" || kw.arg == "month" || kw.arg == "day" ||
+                        kw.arg == "hour" || kw.arg == "minute" || kw.arg == "second") {
+                        expr(*kw.value);
+                    } else {
+                        err(kw.value->line, kw.value->col,
+                            std::format("datetime.replace() got an unexpected keyword "
+                                        "argument '{}'",
+                                        kw.arg));
+                    }
+                }
+                return new_ty(TyKind::DateTime);
             }
             err(c.line, c.col, std::format("datetime has no method '{}'", name));
             return t_unknown();
@@ -2087,12 +2134,36 @@ TypePtr TypeChecker::method_call(TypePtr recv, const std::string& name, Call& c,
                 argc(1, 1);
                 return mk_list(new_ty(TyKind::Path));
             }
-            if (name == "unlink" || name == "rmdir") {
+            if (name == "unlink" || name == "rmdir" || name == "touch") {
                 argc(0, 0);
                 return t_none();
             }
             if (name == "with_suffix") {
                 argc(1, 1);
+                return new_ty(TyKind::Path);
+            }
+            if (name == "read_bytes") {
+                argc(0, 0);
+                return t_bytes();
+            }
+            if (name == "write_bytes") {
+                argc(1, 1);
+                if (a.size() == 1 && a[0] && !is_unknown(a[0]) &&
+                    a[0]->kind != TyKind::Bytes)
+                    err(c.args[0]->line, c.args[0]->col,
+                        std::format("write_bytes() expects bytes, got '{}'", type_name(a[0])));
+                return t_int();
+            }
+            if (name == "is_absolute") {
+                argc(0, 0);
+                return t_bool();
+            }
+            if (name == "joinpath" || name == "relative_to") {
+                argc(1, 1);
+                return new_ty(TyKind::Path);
+            }
+            if (name == "resolve" || name == "absolute") {
+                argc(0, 0);
                 return new_ty(TyKind::Path);
             }
             err(c.line, c.col, std::format("pathlib.Path has no method '{}'", name));
@@ -2109,15 +2180,31 @@ TypePtr TypeChecker::method_call(TypePtr recv, const std::string& name, Call& c,
             }
             if (name == "pop" || name == "popleft") {
                 argc(0, 0);
-                return t_int();
+                return elem();
             }
             if (name == "rotate") {
                 argc(1, 1);
                 return t_none();
             }
-            if (name == "clear") {
+            if (name == "clear" || name == "reverse") {
                 argc(0, 0);
                 return t_none();
+            }
+            if (name == "remove") {
+                argc(1, 1);
+                return t_none();
+            }
+            if (name == "count" || name == "index") {
+                argc(1, 1);
+                return t_int();
+            }
+            if (name == "insert") {
+                argc(2, 2);
+                return t_none();
+            }
+            if (name == "copy") {
+                argc(0, 0);
+                return mk_deque(elem());
             }
             err(c.line, c.col, std::format("collections.deque has no method '{}'", name));
             return t_unknown();
