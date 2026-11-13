@@ -55,6 +55,9 @@ struct Program {
     bool needs_unknown_index = false;
 };
 
+// 内建模块（math/os/json/...）的签名表，实现在 builtin_sigs.cpp。
+ModuleInfoPtr builtin_module(const std::string& name);
+
 bool load_program(const std::string& entry_path, const std::vector<std::string>& include_dirs,
                   Program& p);
 bool prepare_program(Program& p, bool emit_objects, bool entry_ir);
