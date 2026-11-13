@@ -350,23 +350,32 @@ void AsmGen::gen_cmp_branch_fp(const Inst& in, const Inst& br) {
         comment(std::format("{} -> {}", in.text(), br.text()));
         std::string sa = src_op(in.a);
         std::string sb = src_op(in.b);
-        // ucomisd 的第二个操作数是 xmm；a 不在 xmm 里就先搬进 %xmm0。
+        const char* jcc = "je";
+        const char* inv = "jne";
+        bool ordered = true;  // 无序（NaN）时 Python 的比较结果为假
+        bool swap = false;
+        // 四种有序比较换个操作数顺序就能把 NaN 归到「不满足」那一侧：
+        // ucomisd 对无序置 CF=1，ja/jae 都不会跳，正好落到假分支，于是
+        // 不用再补一条 jp（内层循环里省一条分支）。
+        switch (in.cop) {
+            case CmpKind::Lt: swap = true; jcc = "ja"; inv = "jbe"; ordered = false; break;
+            case CmpKind::Le: swap = true; jcc = "jae"; inv = "jb"; ordered = false; break;
+            case CmpKind::Gt: jcc = "ja"; inv = "jbe"; ordered = false; break;
+            case CmpKind::Ge: jcc = "jae"; inv = "jb"; ordered = false; break;
+            case CmpKind::Eq: jcc = "je"; inv = "jne"; break;
+            case CmpKind::Ne: jcc = "jne"; inv = "je"; ordered = false; break;
+        }
+        if (swap) {
+            std::string t = sa;
+            sa = sb;
+            sb = t;
+        }
+        // ucomisd 的第二个操作数是 xmm；左操作数不在 xmm 里就先搬进 %xmm0。
         if (sa.starts_with("%xmm")) {
             emit2("ucomisd", sb, sa);
         } else {
             emit2("movsd", sa, "%xmm0");
             emit2("ucomisd", sb, "%xmm0");
-        }
-        const char* jcc = "je";
-        const char* inv = "jne";
-        bool ordered = true;  // 无序（NaN）时 Python 的比较结果为假
-        switch (in.cop) {
-            case CmpKind::Lt: jcc = "jb"; inv = "jae"; break;
-            case CmpKind::Le: jcc = "jbe"; inv = "ja"; break;
-            case CmpKind::Gt: jcc = "ja"; inv = "jbe"; break;
-            case CmpKind::Ge: jcc = "jae"; inv = "jb"; break;
-            case CmpKind::Eq: jcc = "je"; inv = "jne"; break;
-            case CmpKind::Ne: jcc = "jne"; inv = "je"; ordered = false; break;
         }
         // NaN 时 PF=1：除 != 外都要先跳到假分支。之后的落点选择与整型
         // 版本一致，利用「目标块就是下一块」省掉无条件跳。
