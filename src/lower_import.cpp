@@ -1289,11 +1289,28 @@ VReg Lowerer::lower_functools(const std::string& member, Call& c) {
         VReg xs = seq_as_list(c.args[1].get(), elem);
         bool use_fp = rt->kind == TyKind::Float;
         // 运行时按结果域读元素：float 版把列表当 double 数组，元素域必须
-        // 一致，否则会读出错误的位模式。
+        // 一致，否则会读出错误的位模式。int 列表先逐元素提升成 float；
+        // 但回调必须能按 double 调用（形参是 float/unknown），否则算错。
         if (use_fp && elem && elem->kind != TyKind::Float && elem->kind != TyKind::Unknown) {
-            err(c.args[1]->line, c.args[1]->col,
-                "reduce() over mixed int/float is not supported yet");
-            return const_none();
+            bool cb_ok = false;
+            if (ft && ft->kind == TyKind::Func && ft->fn && ft->fn->pos.size() >= 2) {
+                auto compatible = [](const TypePtr& t) {
+                    return !t || t->kind == TyKind::Unknown || t->kind == TyKind::Float;
+                };
+                cb_ok = compatible(ft->fn->pos[0].ty) && compatible(ft->fn->pos[1].ty);
+            }
+            if (!cb_ok) {
+                err(c.args[1]->line, c.args[1]->col,
+                    "reduce() over mixed int/float requires a float callback");
+                return const_none();
+            }
+            VReg conv = promote_container(xs, mk_list(elem), mk_list(t_float()));
+            if (conv == kNoReg) {
+                err(c.args[1]->line, c.args[1]->col,
+                    "reduce() over this element type is not supported yet");
+                return const_none();
+            }
+            xs = conv;
         }
         bool has_init = c.args.size() == 3;
         VReg init = use_fp ? const_float(0.0) : const_int(0);

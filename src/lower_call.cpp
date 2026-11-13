@@ -276,12 +276,17 @@ std::vector<VReg> Lowerer::bind_args(Call& c, const FuncInfoPtr& info, FunctionD
         if (args[i] == kNoReg) continue;
         TypePtr from = vreg_ty(args[i]);
         if (bad_elem(from, want)) {
-            const std::string& pname =
-                i < npos ? info->pos[i].name : info->kwonly[i - npos].name;
-            err(c.line, c.col,
-                std::format("'{}' cannot be passed to parameter '{}' of type '{}': element "
-                            "type conversion is not supported by the code generator yet",
-                            type_name(from), pname, type_name(want)));
+            VReg conv = promote_container(args[i], from, want);
+            if (conv == kNoReg) {
+                const std::string& pname =
+                    i < npos ? info->pos[i].name : info->kwonly[i - npos].name;
+                err(c.line, c.col,
+                    std::format("'{}' cannot be passed to parameter '{}' of type '{}': element "
+                                "type conversion is not supported by the code generator yet",
+                                type_name(from), pname, type_name(want)));
+            } else {
+                args[i] = conv;
+            }
         }
         args[i] = coerce(args[i], from, want);
         // 值语义：结构体按值传参，callee 改自己的副本不影响调用方。

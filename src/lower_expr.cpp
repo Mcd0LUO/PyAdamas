@@ -27,6 +27,164 @@ bool Lowerer::bad_elem(const TypePtr& from, const TypePtr& to) {
     return false;
 }
 
+VReg Lowerer::promote_container(VReg v, TypePtr from, TypePtr to) {
+    if (!from || !to || from->kind != to->kind) return kNoReg;
+    if (from->sub.empty() || to->sub.empty()) return kNoReg;
+
+    if (from->kind == TyKind::Dict) {
+        if (from->sub.size() < 2 || to->sub.size() < 2) return kNoReg;
+        TypePtr kt = to->sub[0];
+        TypePtr sval = from->sub[1];
+        TypePtr dval = to->sub[1];
+        if (!kt || !sval || !dval) return kNoReg;
+        if (dval->kind != TyKind::Float) return kNoReg;
+        if (sval->kind != TyKind::Int && sval->kind != TyKind::Bool) return kNoReg;
+        if (kt->kind != TyKind::Str) return kNoReg;  // 键不做转换，只处理字符串键
+        TypePtr keys_ty = mk_list(kt);
+        int kk = key_kind(kt);
+        int ko = own_kind(kt);
+        int vo = own_kind(dval);
+        auto [hslot, eslot] = dunder_key_slots(kt);
+        VReg out = call_runtime(RtFn::DictNew, to,
+                                {const_int(kk), const_int(ko), const_int(vo),
+                                 const_int(hslot), const_int(eslot)});
+        push_temp(out);
+        int out_slot = new_temp_slot(to);
+        store_slot(out_slot, out);
+        int src_slot = new_temp_slot(from);
+        store_slot(src_slot, v);
+        VReg keys = call_runtime(RtFn::DictKeys, keys_ty, {load_slot(src_slot, from)});
+        push_temp(keys);
+        int keys_slot = new_temp_slot(keys_ty);
+        store_slot(keys_slot, keys);
+        int n_slot = new_temp_slot(t_int());
+        {
+            Inst ln;
+            ln.op = IrOp::Len;
+            ln.a = load_slot(keys_slot, keys_ty);
+            store_slot(n_slot, def(t_int(), std::move(ln)));
+        }
+        int i_slot = new_temp_slot(t_int());
+        store_slot(i_slot, const_int(0));
+
+        int cond = new_block("promote.cond");
+        int body = new_block("promote.body");
+        int end = new_block("promote.end");
+        Inst j;
+        j.op = IrOp::Jump;
+        j.target = cond;
+        emit(std::move(j));
+        switch_to(cond);
+        Inst cmp;
+        cmp.op = IrOp::Cmp;
+        cmp.cop = CmpKind::Lt;
+        cmp.a = load_slot(i_slot, t_int());
+        cmp.b = load_slot(n_slot, t_int());
+        Inst br;
+        br.op = IrOp::Branch;
+        br.a = def(t_bool(), std::move(cmp));
+        br.target = body;
+        br.target2 = end;
+        emit(std::move(br));
+        switch_to(body);
+        Inst getk;
+        getk.op = IrOp::IndexLoad;
+        getk.a = load_slot(keys_slot, keys_ty);
+        getk.b = load_slot(i_slot, t_int());
+        VReg key = def(kt, std::move(getk));
+        Inst getv;
+        getv.op = IrOp::CallRt;
+        getv.imm = static_cast<int64_t>(RtFn::DictGet);
+        getv.args = {load_slot(src_slot, from), key};
+        VReg oldv = def(sval, std::move(getv));
+        VReg newv = convert_to(oldv, sval, dval);
+        retain_elem(newv, vo);
+        call_void(RtFn::DictSet, {load_slot(out_slot, to), key, newv});
+        Inst inc;
+        inc.op = IrOp::Bin;
+        inc.bop = BinKind::Add;
+        inc.a = load_slot(i_slot, t_int());
+        inc.b = const_int(1);
+        store_slot(i_slot, def(t_int(), std::move(inc)));
+        Inst jb;
+        jb.op = IrOp::Jump;
+        jb.target = cond;
+        emit(std::move(jb));
+        switch_to(end);
+        return load_slot(out_slot, to);
+    }
+
+    if (from->kind != TyKind::List && from->kind != TyKind::Tuple) return kNoReg;
+    TypePtr se = from->sub[0];
+    TypePtr de = to->sub[0];
+    if (!se || !de) return kNoReg;
+    // 隐式数值提升只有 int/bool → float 一个方向。
+    if (de->kind != TyKind::Float) return kNoReg;
+    if (se->kind != TyKind::Int && se->kind != TyKind::Bool) return kNoReg;
+
+    TypePtr lt = mk_list(de);
+    int ko = list_kind(lt);
+    VReg out = call_runtime(RtFn::ListNew, lt, {const_int(0), const_int(ko)});
+    push_temp(out);
+    int out_slot = new_temp_slot(lt);
+    store_slot(out_slot, out);
+    int src_slot = new_temp_slot(from);
+    store_slot(src_slot, v);
+    int n_slot = new_temp_slot(t_int());
+    {
+        Inst ln;
+        ln.op = IrOp::Len;
+        ln.a = load_slot(src_slot, from);
+        store_slot(n_slot, def(t_int(), std::move(ln)));
+    }
+    int i_slot = new_temp_slot(t_int());
+    store_slot(i_slot, const_int(0));
+
+    int cond = new_block("promote.cond");
+    int body = new_block("promote.body");
+    int end = new_block("promote.end");
+    Inst j;
+    j.op = IrOp::Jump;
+    j.target = cond;
+    emit(std::move(j));
+
+    switch_to(cond);
+    Inst cmp;
+    cmp.op = IrOp::Cmp;
+    cmp.cop = CmpKind::Lt;
+    cmp.a = load_slot(i_slot, t_int());
+    cmp.b = load_slot(n_slot, t_int());
+    VReg less = def(t_bool(), std::move(cmp));
+    Inst br;
+    br.op = IrOp::Branch;
+    br.a = less;
+    br.target = body;
+    br.target2 = end;
+    emit(std::move(br));
+
+    switch_to(body);
+    Inst get;
+    get.op = IrOp::IndexLoad;
+    get.a = load_slot(src_slot, from);
+    get.b = load_slot(i_slot, t_int());
+    VReg ev = def(se, std::move(get));
+    VReg ce = convert_to(ev, se, de);
+    call_void(RtFn::ListAppend, {load_slot(out_slot, lt), ce});
+    Inst inc;
+    inc.op = IrOp::Bin;
+    inc.bop = BinKind::Add;
+    inc.a = load_slot(i_slot, t_int());
+    inc.b = const_int(1);
+    store_slot(i_slot, def(t_int(), std::move(inc)));
+    Inst jb;
+    jb.op = IrOp::Jump;
+    jb.target = cond;
+    emit(std::move(jb));
+
+    switch_to(end);
+    return load_slot(out_slot, lt);
+}
+
 void Lowerer::assign_to(Expr& target, VReg v, TypePtr vty) {
     // 以 vreg 上记录的类型为准：调用方传进来的 vty 有时是目标侧的类型
     TypePtr src_ty = vreg_ty(v);
@@ -39,11 +197,16 @@ void Lowerer::assign_to(Expr& target, VReg v, TypePtr vty) {
             auto& n = static_cast<Name&>(target);
             if (int cs = comp_slot(n.id); cs >= 0) {
                 TypePtr want = st_->fn->slot_ty[cs];
-                if (bad_elem(src_ty, want))
-                    err(target.line, target.col,
-                        std::format("'{}' cannot be stored into '{}': element type conversion "
-                                    "is not supported by the code generator yet",
-                                    type_name(src_ty), type_name(want)));
+                if (bad_elem(src_ty, want)) {
+                    VReg conv = promote_container(v, src_ty, want);
+                    if (conv == kNoReg)
+                        err(target.line, target.col,
+                            std::format("'{}' cannot be stored into '{}': element type "
+                                        "conversion is not supported by the code generator yet",
+                                        type_name(src_ty), type_name(want)));
+                    else
+                        v = conv;
+                }
                 v = coerce(v, src_ty, want);
                 store_slot(cs, v);
                 break;
@@ -55,21 +218,31 @@ void Lowerer::assign_to(Expr& target, VReg v, TypePtr vty) {
             if (st_->globals_decl.count(n.id) || !is_local(n.id)) {
                 int gi = global_idx(n.id);
                 TypePtr want = mod_.globals[gi].ty;
-                if (bad_elem(src_ty, want))
-                    err(target.line, target.col,
-                        std::format("'{}' cannot be stored into '{}': element type conversion "
-                                    "is not supported by the code generator yet",
-                                    type_name(src_ty), type_name(want)));
+                if (bad_elem(src_ty, want)) {
+                    VReg conv = promote_container(v, src_ty, want);
+                    if (conv == kNoReg)
+                        err(target.line, target.col,
+                            std::format("'{}' cannot be stored into '{}': element type "
+                                        "conversion is not supported by the code generator yet",
+                                        type_name(src_ty), type_name(want)));
+                    else
+                        v = conv;
+                }
                 v = coerce(v, src_ty, want);
                 store_global(gi, v);
             } else {
                 int slot = st_->slots[n.id];
                 TypePtr want = st_->fn->slot_ty[slot];
-                if (bad_elem(src_ty, want))
-                    err(target.line, target.col,
-                        std::format("'{}' cannot be stored into '{}': element type conversion "
-                                    "is not supported by the code generator yet",
-                                    type_name(src_ty), type_name(want)));
+                if (bad_elem(src_ty, want)) {
+                    VReg conv = promote_container(v, src_ty, want);
+                    if (conv == kNoReg)
+                        err(target.line, target.col,
+                            std::format("'{}' cannot be stored into '{}': element type "
+                                        "conversion is not supported by the code generator yet",
+                                        type_name(src_ty), type_name(want)));
+                    else
+                        v = conv;
+                }
                 v = coerce(v, src_ty, want);
                 store_slot(slot, v);
             }

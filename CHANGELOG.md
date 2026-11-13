@@ -4,6 +4,35 @@
 
 早期阶段没有逐条留痕，按阶段归纳；0.4 之后逐条记录。
 
+## [0.135] - 2026-11-13
+
+语言边角收尾：嵌套类、类体 lambda、dunder 补齐、异步生成器表达式、导入类字段子模式、
+容器元素隐式数值提升。
+
+### 变更
+
+- 函数内定义的类：类表收集会进入函数体，构造、方法调用、类内继承都可用；
+  `Symbol` 新增 `is_class_name`，嵌套类名不再被当成「类实例变量」。
+- 类体 `f = lambda self, ...: ...` 在脱糖阶段改写成方法定义，复用方法注册与编译。
+- dunder 补齐：`__format__`（`format()` 与 f-string 普通格式说明）、
+  `__bool__`（`bool()`、`if`/`while`、`and`/`or`/`not`/`assert` 的真值）、
+  `__reversed__`（`reversed()` 物化成 list）。`and`/`or` 的真值按各操作数
+  自己的静态类型判断，修掉了类实例被 join 成 int 后漏查 `__bool__` 的误判。
+- `iter()` 支持类实例的 `__iter__` 和内置可迭代类型；`hasattr()` 对内建/容器
+  类型静态判定、`Optional` 堆类型补裸指针非空检查；`setattr()` 支持带 setter
+  的 property（走 setter 虚调用）。
+- `C.m(obj, ...)` 直接调用类接收者的普通方法（显式传 self）。
+- 异步生成器表达式 `(x async for x in agen())` 脱糖成异步生成器函数，可出现在
+  任意表达式位置；`build_sig` 用语法预扫描区分「协程」和「异步生成器」，
+  前置引用的异步生成器函数不再被当成 `Coroutine`。
+- 导入类的类模式支持字段子模式：模块接口格式 8 导出按布局拍平的字段和
+  `__match_args__`，`case mod.Point(x=1)` 与本地类语义一致。
+- 容器元素隐式数值提升：`list[int]` / `dict[str,int]` 赋给或传给
+  `list[float]` / `dict[str,float]` 时逐元素转成 double；`reduce()` 在
+  回调形参为 float/unknown 时同样支持（回调按 int 检查过的组合仍明确报错）。
+- 新增 `tests/run/132_dunder_edges.py`、`133_asyncgen_expr.py`、
+  `134_container_promote.py`；`tests/modules/matchclasses` 增加导入类字段子模式。
+
 ## [0.134] - 2026-11-13
 
 `finally` 体内跳出、`throw()`/`athrow()` 接受异常类、自定义 `__aiter__`。

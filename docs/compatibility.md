@@ -27,7 +27,7 @@ PyAdamas 不追求兼容 CPython：语义是按静态类型的需要重新定的
 | `with` | 只支持类实例的 `__enter__` / `__exit__`；正常、`return` / `break` / `continue` 和异常路径都调用 `__exit__` | 完整上下文管理协议 | `__exit__` 返回值只有真/假语义；异常路径传 `(type, message, None)` |
 | import | 本地单层 `.py`；`m.x` 直接读写模块全局；`from m import x` 是快照；模块别名不能当值 | 任意模块/包、运行时模块对象 | 支持包/相对导入/静态 `import *`（按非下划线导出）；跨模块继承暂不支持 |
 | 模块初始化 | 第一次执行 import 时惰性运行一次；循环导入编译期报错 | 支持循环导入和部分初始化 | 初始化失败的模块不会再重试；模块对象不可见 |
-| 推导式 | list/set/dict 推导式按循环展开；生成器表达式脱糖成合成生成器函数，惰性求值；含 `async for` 的推导式在协程里可挂起；含 lambda 的推导式改写成生成器表达式 + 构造器，循环变量可被捕获 | 同 Python | 异步推导式只能作为语句/赋值/`return` 的根表达式；类体里的生成器表达式仍按 list 构造；推导式内部不能引用循环变量的生成器表达式 |
+| 推导式 | list/set/dict 推导式按循环展开；生成器表达式脱糖成合成生成器函数，惰性求值；含 `async for` 的推导式在协程里可挂起；含 lambda 的推导式改写成生成器表达式 + 构造器，循环变量可被捕获 | 同 Python | 异步 list/set/dict 推导式只能作为语句/赋值/`return` 的根表达式；异步生成器表达式（`(x async for ...)`）已支持，可出现在任意表达式位置；类体里的生成器表达式仍按 list 构造；推导式内部不能引用循环变量的生成器表达式 |
 | 生成器 | 状态机 + 堆帧；`for` / `next` / `send` / `throw` / `close` / `yield from`；`yield from` 把 `throw` 转发给子生成器；跨 `yield` 跑 `finally` / `__exit__`；挂起点可在任意子表达式、`except` 与 `finally` 体内；生成器/协程/异步生成器类型跨模块保留元素/结果类型；`Generator[Y, S, R]` 标注给 `send` 实参与 `yield` 表达式收窄类型 | 完整生成器协议 | 未标注 `Generator[Y, S, R]` 时 `send` 值与 `yield` 表达式静态是 unknown（`R` 只记录，`StopIteration.value` 不检查） |
 | 协程 / Task / Future | `async def` / `await` 复用生成器帧；`asyncio.run`/`sleep`/`gather`/`create_task`；`done()`/`cancel()`/`result()`/`exception()`；Future 多等待者、`set_exception`、`add_done_callback`；取消级联；`wait_readable`/`wait_writable` + poll；异步生成器 + `async for` + `async with`；异步推导式 | 完整 asyncio（Task 组/Future 回调/I/O 流） | `await` 可位于任意子表达式与 `finally` 体内（跨挂起的 vreg 由降级器溢写到帧槽）；异步生成器有 `asend`/`athrow`/`__anext__`/`aclose`，`aclose` 不会 await `async with` 的 `__aexit__`，停在 `async with` 里被直接回收时不 await 退出；Future 回调同步执行；`set_exception` 接收异常值或消息；`exception()` 返回异常值；`CancelledError` 是内置名；`wait_readable` 不是 CPython 标准 API；`gather` 结果元素是 unknown；Task 单等待者 |
 | 递归深度 | 受栈大小限制（万级） | 默认 1000，可调 | 没有解释器递归检查 |
@@ -38,7 +38,7 @@ PyAdamas 不追求兼容 CPython：语义是按静态类型的需要重新定的
 | 方法值 `obj.m` / `C.m` | 合成闭包捕获接收者：普通方法 `vcall`（子类覆盖生效）、静态/类方法 `vcall_static`、类接收者的静态/类方法 `call_direct`；默认参数与关键字参数可用 | 同 Python（descriptor 绑定） | 类接收者上取普通方法的值不支持（和 `C.m(...)` 的直接调用限制一致） |
 | 类的属性 | 声明过的字段，或 `self.x = ...` 就地长出来的字段 | 可随时给实例挂任意属性 | 偏移是编译期常量，没有运行时 `__dict__` |
 | `print(obj)` | 有 `__str__`（或 `__repr__`）就调，否则 `<Point object>` | 同 Python（默认文本带模块名和地址） | 默认文本没有模块名和地址 |
-| 协议 dunder | `__str__`/`__repr__`/`__eq__`/`__ne__`/`__len__`/`__hash__`/`__contains__`/`__iter__`/算术与比较类 dunder 走 vtable；`in` 需要 `__contains__`，`<` 等需要比较 dunder，算术需要对应 dunder，否则编译报错 | 完整数据模型 | `__format__`/`__bool__`/`__reversed__` 未建模；`__eq__` 的 other 限 unknown 或类类型；只定义 `__eq__` 没定义 `__hash__` 的类在 dict/set 里按身份处理 |
+| 协议 dunder | `__str__`/`__repr__`/`__eq__`/`__ne__`/`__len__`/`__hash__`/`__contains__`/`__iter__`/算术与比较类 dunder 走 vtable；`in` 需要 `__contains__`，`<` 等需要比较 dunder，算术需要对应 dunder，否则编译报错 | 完整数据模型 | `__format__`/`__bool__`/`__reversed__` 已建模（`format()`/f-string 格式说明、真值、`reversed()`）；`__eq__` 的 other 限 unknown 或类类型；只定义 `__eq__` 没定义 `__hash__` 的类在 dict/set 里按身份处理 |
 | `random` | MT19937 与 CPython 同种子同序列；`random`/`seed`/`randint`/`uniform`/`choice`/`shuffle`/`randrange`/`getrandbits`/`gauss`/`expovariate`/`triangular`/`sample`/`choices`，以及 `Random` 实例方法 | 完整 random（`bytes`/`betavariate`/`gammavariate`/`choices` 的 `weights` 未实现） | `gauss`/`expovariate` 的算法与 CPython 不同，序列不保证一致；`choices` 的 `k` 是关键字参数（同 CPython）；省略种子时时间 + pid 播种 |
 | `os` / `os.path` | `listdir`/`getenv`/`mkdir`/`rmdir`/`remove`/`rename`/`getcwd`/`cpu_count`/`getpid`/`chdir`/`chmod`/`access`/`makedirs`；`join`/`exists`/`isdir`/`isfile`/`basename`/`dirname`/`normpath`/`abspath`/`expanduser`/`splitext`/`realpath`/`getsize`/`getmtime`/`split`/`samefile`；常量 `sep`/`linesep`/`F_OK`/`R_OK`/`W_OK`/`X_OK` | 完整 os | `getenv` 缺失返回空串（CPython 返回 None）；没有 `walk`/`environ`/`stat`/`system`；`os.path` 是独立模块别名：`import os.path as p` 或 `from os.path import ...`，`import os` 后 `os.path.x` 暂不支持 |
 | `subprocess` | `run` 支持 `capture_output`/`text`/`timeout`/`check`/`shell`/`cwd`，`args` 可以是 `list[str]` 或字符串；`Popen` 支持 `shell`/`cwd`/`stdin`/`stdout`/`stderr`（`PIPE`/`DEVNULL`/`STDOUT`），方法 `wait`/`communicate`/`kill`/`terminate`/`send_signal`，属性 `pid`/`returncode`/`stdout`/`stderr`/`stdin`；`TimeoutExpired`/`CalledProcessError` 按内置异常名捕获 | 完整 subprocess | 不返回 bytes：`text=False` 也返回 str；`input`/`env`/`preexec_fn` 未实现；exec 失败按退出码 127；**没有 `poll()`**（PyAdamas 里 None 和 0 同形，`poll() is None` 会把正常退出误判成还在跑，要轮询用 `wait(timeout=…)`）；`communicate()` 对没开管道的流返回空串而不是 `None`；`Popen` 句柄被回收时会 SIGKILL 子进程（CPython 不会）；`from subprocess import TimeoutExpired` 不支持 |
@@ -79,7 +79,7 @@ PyAdamas 不追求兼容 CPython：语义是按静态类型的需要重新定的
 
 **语法层就拒**（`check` 报错）：超出 int64 的整数、Python 2 遗留写法、方法缺 `self`、字段赋值类型不符。
 
-**能解析、能过类型检查，但 `build` 报错**：通过 unknown 函数值的 `*` / `**` 展开、`*` 位于固定形参之前且不是定长 tuple、非异常类名当异常用、容器元素跨数值域的转换（`list`/`tuple`/`dict`/`set` 的 int → float 赋值/实参）、跨模块继承、类装饰器、返回类型未知的方法装饰器、把类名当值用、函数内定义类、导入类模式的字段子模式、unknown 值上的数值/list/dict/tuple/set 内置类型模式、类体字段默认值里的 lambda，以及异步生成器表达式、嵌在其它表达式里的异步推导式。
+**能解析、能过类型检查，但 `build` 报错**：通过 unknown 函数值的 `*` / `**` 展开、`*` 位于固定形参之前且不是定长 tuple、非异常类名当异常用、`set[int]` → `set[float]` 的集合元素提升、跨模块继承、类装饰器、返回类型未知的方法装饰器、把类名当值用、函数内定义类、导入类模式的字段子模式、unknown 值上的数值/list/dict/tuple/set 内置类型模式、类体字段默认值里的 lambda，以及异步生成器表达式、嵌在其它表达式里的异步推导式。
 
 清楚这个分层很重要：`pyadamas check` 尽量当通用 Python 语法/类型检查器用，检查器放宽的边界都记在 [CHANGELOG 0.6.1](archive/changelog-0.40.md)；`pyadamas build` 才是「能不能编译」的判据。
 
@@ -91,7 +91,7 @@ PyAdamas 不追求兼容 CPython：语义是按静态类型的需要重新定的
 |---|---|---|---|
 | 正例 | `ctest --preset dev` 里 `tests/*.py` | 11 个文件 | 前端退回保守 |
 | 反例 | `ctest --preset dev` 里 `tests/fail/*.py` | 52 个文件 | 检查器为了过测而放水 |
-| 运行 | `ctest --preset dev` 里 `tests/run/*.py` | 127 个文件 | 后端烂掉没人知道 |
+| 运行 | `ctest --preset dev` 里 `tests/run/*.py` | 145 个文件 | 后端烂掉没人知道 |
 | 模块 | `ctest --preset dev` 里 `tests/modules/*/` | 11 个目录 | 分模块编译/链接、惰性初始化、缓存失效 |
 | 未建模 | `ctest --preset dev` 里 `tests/unsupported/*.py` | 1 个文件 | 「标了没建模、实际却悄悄编译过去」 |
 | 内存 | 16MB `RLIMIT_AS` 下跑压力程序 | 拼接 / 对象 / 闭包 / 容器 / 切片 / 删除 / 推导式 / 变长实参 / `with` / 装饰器 / 异常展开 / `yield from` / 异步推导式 / 环 / unknown 泄漏 | 引用计数或 GC 漏插桩、重复释放、误回收 |
