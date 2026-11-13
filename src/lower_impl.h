@@ -384,17 +384,7 @@ private:
         return def(t_str(), std::move(in));
     }
 
-    VReg const_literal(const LiteralValue& v) {
-        switch (v.kind) {
-            case LiteralValue::Kind::None: return const_none();
-            case LiteralValue::Kind::Bool: return const_bool(v.b);
-            case LiteralValue::Kind::Int: return const_int(v.i);
-            case LiteralValue::Kind::Float: return const_float(v.f);
-            case LiteralValue::Kind::Str: return const_str(v.s);
-            case LiteralValue::Kind::Bytes: return retype(const_str(v.s), t_bytes());
-        }
-        return const_none();
-    }
+    VReg const_literal(const LiteralValue& v);
 
     int new_temp_slot(TypePtr ty) { return st_->fn->new_slot(std::move(ty)); }
 
@@ -408,27 +398,9 @@ private:
 
     void store_borrow_slot(int slot, VReg v) { store_slot_raw(slot, v); }
 
-    VReg load_slot(int slot, TypePtr ty) {
-        // 槽位类型是唯一真相：调用方给 unknown 时回退到槽位表，
-        // 否则 call.rt 结果经临时槽后会在后端退化成整数比较。
-        TypePtr actual = ty;
-        if ((!actual || actual->kind == TyKind::Unknown) && slot >= 0 &&
-            slot < static_cast<int>(st_->fn->slot_ty.size()))
-            actual = st_->fn->slot_ty[slot];
-        Inst in;
-        in.op = IrOp::LoadSlot;
-        in.idx = slot;
-        in.ty = actual;
-        return def(actual ? actual : t_unknown(), std::move(in));
-    }
+    VReg load_slot(int slot, TypePtr ty);
 
-    VReg load_global(int gi, TypePtr ty) {
-        Inst in;
-        in.op = IrOp::LoadGlobal;
-        in.idx = gi;
-        in.ty = ty;
-        return def(ty ? ty : t_unknown(), std::move(in));
-    }
+    VReg load_global(int gi, TypePtr ty);
 
     void store_slot_raw(int slot, VReg v) {
         for (auto* h : st_->bounds_hints)
@@ -542,23 +514,7 @@ private:
     // 列表元素所有权类别，必须和 codegen 传给 pa_list_new 的值一致。
     // 3 = 未定：类型里看不出元素种类（裸 list / []），空容器先记 3，第一次
     // 写入时由 pa_list_prep 按运行时值定型。
-    static int list_kind(const TypePtr& t) {
-        auto one = [](const TypePtr& e) -> int {
-            if (!e || e->kind == TyKind::Unknown) return 3;
-            return ir_is_heap(e) ? 1 : 0;
-        };
-        if (!t) return 3;
-        if (t->kind == TyKind::List || t->kind == TyKind::Set || t->kind == TyKind::Dict)
-            return t->sub.empty() ? 3 : one(t->sub[0]);
-        if (t->kind == TyKind::Tuple) {
-            if (t->sub.empty()) return 3;
-            int k = one(t->sub[0]);
-            for (size_t i = 1; i < t->sub.size(); ++i)
-                if (one(t->sub[i]) != k) return 2;
-            return k;
-        }
-        return 2;
-    }
+    static int list_kind(const TypePtr& t);
 
     // 容器一开始就有元素（或由运行时自行填充）时不能停在「未定」3：
     // 直接降级为 2，保持和原来一致的保守所有权语义。
@@ -594,21 +550,7 @@ private:
     }
 
     // 哈希/比较类别：0 int/bool，1 str，2 float，3 其他（按机器字比较）。
-    static int key_kind(const TypePtr& t) {
-        if (!t) return 3;
-        switch (t->kind) {
-            case TyKind::Int:
-            case TyKind::Bool:
-            case TyKind::None:
-                return 0;
-            case TyKind::Str:
-                return 1;
-            case TyKind::Float:
-                return 2;
-            default:
-                return 3;
-        }
-    }
+    static int key_kind(const TypePtr& t);
 
     // 所有权类别：0 非堆，1 堆，2 unknown（保守 retain，注册表释放）。
     static int own_kind(const TypePtr& t) {
@@ -640,88 +582,13 @@ private:
     // 只按源类型加引用会在「unknown 值写进带标注的堆槽」时失衡
     // （源类型未知就漏掉 inc，出口却照常 dec）。unknown 源用运行时
     // 保守 inc，整数在这里是安全的 no-op。
-    void retain_for_store(const TypePtr& dst, VReg v) {
-        TypePtr src = vreg_ty(v);
-        if (ir_is_heap(dst)) {
-            if (ir_is_heap(src)) rc_inc(v);
-            else if (!src || src->kind == TyKind::Unknown) rc_inc_unknown(v);
-        } else if (ir_is_heap(src)) {
-            // 目标是 unknown：不知道将来按什么类型读，保守 retain。
-            rc_inc(v);
-        }
-    }
+    void retain_for_store(const TypePtr& dst, VReg v);
 
-    void store_slot(int slot, VReg v) {
-        TypePtr dst = st_->fn->slot_ty[slot];
-        TypePtr src = vreg_ty(v);
-        // 未知槽位第一次收到已知类型的值时补上类型；后续 load.slot
-        // 才能按 float/int 正确选指令。retain_for_store 从这一刻起
-        // 按堆槽的规则 retain/dec，槽也进入帧记录的释放清单。
-        if (dst && dst->kind == TyKind::Unknown && src && src->kind != TyKind::Unknown) {
-            // 之前可能以 unknown 值写入过这个槽：旧值不一定是堆指针。
-            st_->fn->slot_unknown[static_cast<size_t>(slot)] = true;
-            st_->fn->slot_ty[slot] = dst = src;
-            st_->fn->slot_owned[static_cast<size_t>(slot)] = ir_is_heap(src);
-        }
-        bool moved = !st_->borrow_slots.count(slot) && move_fresh(v, dst);
-        if (!moved) retain_for_store(dst, v);
-        if (ir_is_heap(dst)) {
-            // 堆槽收到 unknown/None 等非堆值后，槽里可能装着整数：之后
-            // 所有旧值释放都改用注册表判断，避免把整数当指针 dec。
-            if (!ir_is_heap(src))
-                st_->fn->slot_unknown[static_cast<size_t>(slot)] = true;
-            VReg old = load_slot(slot, dst);
-            store_slot_raw(slot, v);
-            if (st_->fn->slot_unknown[static_cast<size_t>(slot)]) rc_dec_unknown(old);
-            else rc_dec(old);
-        } else {
-            store_slot_raw(slot, v);
-        }
-    }
+    void store_slot(int slot, VReg v);
 
-    void store_global(int gi, VReg v) {
-        TypePtr dst = mod_.globals[gi].ty;
-        TypePtr src = vreg_ty(v);
-        bool moved = move_fresh(v, dst);
-        if (!moved) retain_for_store(dst, v);
-        bool unknown = dst && dst->kind == TyKind::Unknown;
-        if (ir_is_heap(dst) || unknown) {
-            // unknown 全局和老值释放都走注册表：槽里可能装着整数。
-            IRGlobal& g = mod_.globals[gi];
-            if (unknown) {
-                g.maybe_unknown = true;
-                // unknown 源可能是堆指针：补一份引用，出口按注册表释放。
-                if (src && src->kind == TyKind::Unknown) rc_inc_unknown(v);
-            } else if (!ir_is_heap(src)) {
-                g.maybe_unknown = true;
-            }
-            VReg old = load_global(gi, dst);
-            store_global_raw(gi, v);
-            if (g.maybe_unknown) rc_dec_unknown(old);
-            else rc_dec(old);
-        } else {
-            store_global_raw(gi, v);
-        }
-    }
+    void store_global(int gi, VReg v);
 
-    void store_field(TypePtr fty, VReg obj, int off, VReg v) {
-        bool moved = move_fresh(v, fty);
-        if (!moved) retain_for_store(fty, v);
-        bool unknown = fty && fty->kind == TyKind::Unknown;
-        if (unknown) {
-            TypePtr src = vreg_ty(v);
-            // unknown 字段自己持有一份引用，析构时按注册表释放。
-            if (src && src->kind == TyKind::Unknown) rc_inc_unknown(v);
-        }
-        if (ir_is_heap(fty) || unknown) {
-            VReg old = field_load(obj, off, fty);
-            field_store(obj, off, v);
-            if (unknown) rc_dec_unknown(old);
-            else rc_dec(old);
-        } else {
-            field_store(obj, off, v);
-        }
-    }
+    void store_field(TypePtr fty, VReg obj, int off, VReg v);
 
     void inc_params() {
         for (auto& p : st_->fn->params)
@@ -732,19 +599,7 @@ private:
     // 过。返回值必须先 rc_inc，再走到这里，否则槽一释放就成悬空指针。
     // 释放后把槽清零：内联会把槽留在调用方帧里跨多次执行复用，残留的
     // 悬空指针会让下一次赋值的「load 旧值 + dec」二次释放。
-    void release_slots() {
-        VReg zero = kNoReg;
-        for (size_t s = 0; s < st_->fn->slot_ty.size(); ++s) {
-            if (st_->borrow_slots.count(static_cast<int>(s))) continue;
-            TypePtr ty = st_->fn->slot_ty[s];
-            if (!ir_is_heap(ty)) continue;
-            VReg v = load_slot(static_cast<int>(s), ty);
-            if (st_->fn->slot_unknown[s]) rc_dec_unknown(v);
-            else rc_dec(v);
-            if (zero == kNoReg) zero = const_int(0);
-            store_slot_raw(static_cast<int>(s), zero);
-        }
-    }
+    void release_slots();
 
     // 只读形参不需要「入口 retain + 出口 release」：实参在调用期间由
     // 调用方持有，函数体既没覆盖形参槽、也没把它存进别处时，这对 RC
@@ -754,184 +609,17 @@ private:
     //   - 出口 release 只由 release_slots 发出，形态是 load(param) + rc_dec，
     //     只读形参意味着函数体里不会覆盖它，所以这种形态只可能是出口释放。
     // 不记录指令下标：降低过程中语句/循环的 mark 擦除会让下标失效。
-    void finalize_param_borrows() {
-        if (st_->is_generator) return;
-        IRFunction* fn = st_->fn;
-        const size_t ns = fn->slot_ty.size();
-        std::vector<bool> written(ns, false);
-        std::unordered_map<VReg, int> uses;
-        auto touch = [&](VReg v) {
-            if (v != kNoReg) uses[v]++;
-        };
-        // release_slots 在出口会先 dec 再写 0；这些清零不算「函数体写过
-        // 形参」，否则只读形参永远判定不出来。
-        std::unordered_set<VReg> zero_regs;
-        for (auto& b : fn->blocks)
-            for (auto& in : b.insts)
-                if (in.op == IrOp::ConstInt && in.imm == 0 && in.dst != kNoReg)
-                    zero_regs.insert(in.dst);
-        for (auto& b : fn->blocks)
-            for (auto& in : b.insts) {
-                if ((in.op == IrOp::StoreSlot || in.op == IrOp::SlotAddr) && in.idx >= 0 &&
-                    in.idx < static_cast<int>(ns)) {
-                    bool exit_zero = in.op == IrOp::StoreSlot &&
-                                     ir_is_heap(fn->slot_ty[static_cast<size_t>(in.idx)]) &&
-                                     zero_regs.contains(in.a);
-                    if (!exit_zero) written[static_cast<size_t>(in.idx)] = true;
-                }
-                touch(in.a);
-                touch(in.b);
-                touch(in.c);
-                for (VReg r : in.args) touch(r);
-            }
-        std::vector<bool> read_only(ns, false);
-        bool any = false;
-        for (auto& p : fn->params)
-            if (ir_is_heap(p.ty) && p.slot >= 0 && p.slot < static_cast<int>(ns) &&
-                !written[static_cast<size_t>(p.slot)]) {
-                read_only[static_cast<size_t>(p.slot)] = true;
-                // 入口 retain 会被删掉，槽此后只是借用：异常展开不能释放。
-                fn->slot_owned[static_cast<size_t>(p.slot)] = false;
-                any = true;
-            }
-        if (!any) return;
+    void finalize_param_borrows();
 
-        std::vector<std::pair<int, size_t>> dels;
-        // 入口 retain：只匹配入口块开头的连续序列，形态不符就停。
-        if (!fn->blocks.empty()) {
-            auto& ins = fn->blocks.front().insts;
-            size_t i = 0;
-            if (i < ins.size() && ins[i].op == IrOp::CallRt &&
-                static_cast<RtFn>(ins[i].imm) == RtFn::RcMark)
-                ++i;
-            for (auto& p : fn->params) {
-                if (!ir_is_heap(p.ty)) continue;
-                if (i + 1 >= ins.size()) break;
-                if (ins[i].op != IrOp::LoadSlot || ins[i].idx != p.slot) break;
-                const Inst& inc = ins[i + 1];
-                if (inc.op != IrOp::CallRt || static_cast<RtFn>(inc.imm) != RtFn::RcInc ||
-                    inc.args.size() != 1 || inc.args[0] != ins[i].dst)
-                    break;
-                if (read_only[static_cast<size_t>(p.slot)]) {
-                    dels.push_back({0, i + 1});
-                    if (ins[i].dst != kNoReg && uses[ins[i].dst] == 1)
-                        dels.push_back({0, i});
-                }
-                i += 2;
-            }
-        }
-        // 出口 release：read-only 槽的 load + rc_dec 只可能是 release_slots。
-        for (size_t b = 0; b < fn->blocks.size(); ++b) {
-            auto& ins = fn->blocks[b].insts;
-            for (size_t i = 0; i + 1 < ins.size(); ++i) {
-                if (ins[i].op != IrOp::LoadSlot || ins[i].idx < 0 ||
-                    ins[i].idx >= static_cast<int>(ns) ||
-                    !read_only[static_cast<size_t>(ins[i].idx)])
-                    continue;
-                const Inst& dec = ins[i + 1];
-                if (dec.op != IrOp::CallRt || static_cast<RtFn>(dec.imm) != RtFn::RcDec ||
-                    dec.args.size() != 1 || dec.args[0] != ins[i].dst)
-                    continue;
-                dels.push_back({static_cast<int>(b), i + 1});
-                if (ins[i].dst != kNoReg && uses[ins[i].dst] == 1)
-                    dels.push_back({static_cast<int>(b), i});
-                // release_slots 紧接着的「槽清零」也一并删掉：槽改成了
-                // 借用，内联重映射后这个槽没有落点（slot_map = -1）。
-                // 清零用的常量 vreg 是多个槽共用的，只删 store 本身。
-                for (size_t k = i + 2; k < ins.size() && k <= i + 3; ++k) {
-                    if (ins[k].op == IrOp::StoreSlot && ins[k].idx == ins[i].idx) {
-                        dels.push_back({static_cast<int>(b), k});
-                        break;
-                    }
-                    if (ins[k].op != IrOp::ConstInt) break;
-                }
-                ++i;
-            }
-        }
-        if (dels.empty()) return;
-        std::ranges::sort(dels, [](const auto& a, const auto& b) {
-            return a.first != b.first ? a.first > b.first : a.second > b.second;
-        });
-        for (auto& [b, idx] : dels) {
-            auto& ins = fn->blocks[static_cast<size_t>(b)].insts;
-            if (idx < ins.size()) ins.erase(ins.begin() + static_cast<std::ptrdiff_t>(idx));
-        }
-    }
+    void release_globals();
 
-    void release_globals() {
-        for (size_t gi = 0; gi < mod_.globals.size(); ++gi) {
-            IRGlobal& g = mod_.globals[gi];
-            if (g.external) continue;
-            bool unknown = g.ty && g.ty->kind == TyKind::Unknown;
-            if (!ir_is_heap(g.ty) && !unknown) continue;
-            // 可能装着 non-heap 值（unknown 流过）时按注册表释放；从没写过
-            // unknown 的堆全局还是走更快的 rc_dec。
-            if (unknown || g.maybe_unknown)
-                rc_dec_unknown(load_global(static_cast<int>(gi), g.ty));
-            else
-                rc_dec(load_global(static_cast<int>(gi), g.ty));
-        }
-    }
-
-    void emit_return(VReg v, TypePtr vty) {
-        // 值语义：返回 struct 时复制 payload，caller 拿到的是独立对象。
-        if (v != kNoReg && vty && vty->kind == TyKind::Struct && vty->st)
-            v = struct_copy(v, vty->st);
-        // 刚产生、还没存过的新值直接把临时栈上的引用转给 caller。
-        bool moved = false;
-        if (v != kNoReg && vty && ir_is_heap(vty) && st_->fresh_vregs.count(v)) {
-            st_->fresh_vregs.erase(v);
-            rc_temp_take(v);
-            moved = true;
-        }
-        if (v != kNoReg && ir_is_heap(vty) && !moved) rc_inc(v);
-        if (st_->fn_mark != kNoReg && st_->rc_pushes > 0) rc_cleanup(st_->fn_mark);
-        release_slots();
-        if (st_->is_entry) {
-            release_globals();
-            call_void(RtFn::GcShutdown, {});
-            call_void(RtFn::RcShutdown, {});
-        }
-        Inst in;
-        in.op = IrOp::Return;
-        in.a = v;
-        emit(std::move(in));
-    }
+    void emit_return(VReg v, TypePtr vty);
 
     // ── 名字解析 ────────────────────────────────────────────────
 
-    int global_idx(const std::string& name) {
-        auto it = global_ids_.find(name);
-        if (it != global_ids_.end()) return it->second;
-        TypePtr ty = t_unknown();
-        if (auto* ms = tc_.module_scope()) {
-            auto sit = ms->vars.find(name);
-            if (sit != ms->vars.end()) ty = sit->second.ty;
-        }
-        return global_idx_as(name, ty);
-    }
+    int global_idx(const std::string& name);
 
-    int global_idx_as(const std::string& name, TypePtr ty) {
-        auto it = global_ids_.find(name);
-        if (it != global_ids_.end()) {
-            IRGlobal& g = mod_.globals[it->second];
-            if (ty && g.ty && g.ty->kind == TyKind::Unknown) {
-                g.ty = ty;
-                // 之前可能以 unknown 值写过：旧值释放要按注册表判断。
-                g.maybe_unknown = true;
-            }
-            return it->second;
-        }
-        int id = static_cast<int>(mod_.globals.size());
-        IRGlobal g;
-        g.name = name;
-        g.ty = ty ? ty : t_unknown();
-        if (!opts_.module_symbol.empty())
-            g.symbol = module_global_symbol(opts_.module_symbol, name);
-        mod_.globals.push_back(std::move(g));
-        global_ids_[name] = id;
-        return id;
-    }
+    int global_idx_as(const std::string& name, TypePtr ty);
 
     // ── 闭包 ────────────────────────────────────────────────────
 
@@ -981,89 +669,19 @@ private:
         return def(T ? T : t_unknown(), std::move(in));
     }
 
-    VReg read_env(const std::string& name) {
-        auto* m = closure();
-        int idx = m->env_index.at(name);
-        TypePtr T = captured_ty(name);
-        VReg env = load_slot(st_->env_slot, t_unknown());
-        VReg c = field_load(env, 16 + 8 * idx, mk_list(T ? T : t_unknown()));
-        Inst in;
-        in.op = IrOp::IndexLoad;
-        in.a = c;
-        in.b = const_int(0);
-        return def(T ? T : t_unknown(), std::move(in));
-    }
+    VReg read_env(const std::string& name);
 
-    VReg cell_for_capture(const std::string& name) {
-        if (is_cell(name)) return load_cell(name);
-        if (is_env(name)) {
-            auto* m = closure();
-            int idx = m->env_index.at(name);
-            TypePtr T = captured_ty(name);
-            VReg env = load_slot(st_->env_slot, t_unknown());
-            return field_load(env, 16 + 8 * idx, mk_list(T ? T : t_unknown()));
-        }
-        return kNoReg;
-    }
+    VReg cell_for_capture(const std::string& name);
 
     // 写回捕获变量：先按 cell 的元素类别 retain，list_set 负责 dec 旧值
     //（kind 1）；kind 2 只 retain 不 release，宁可泄漏。
-    void write_cell(const std::string& name, VReg v, TypePtr vty) {
-        TypePtr T = captured_ty(name);
-        v = coerce(v, vty, T);
-        VReg cell = is_cell(name) ? load_cell(name) : kNoReg;
-        if (cell == kNoReg) {
-            auto* m = closure();
-            int idx = m->env_index.at(name);
-            VReg env = load_slot(st_->env_slot, t_unknown());
-            cell = field_load(env, 16 + 8 * idx, mk_list(T ? T : t_unknown()));
-        }
-        retain_elem(v, list_kind_filled(mk_list(T ? T : t_unknown())));
-        Inst in;
-        in.op = IrOp::IndexStore;
-        in.a = cell;
-        in.b = const_int(0);
-        in.c = v;
-        emit(std::move(in));
-    }
+    void write_cell(const std::string& name, VReg v, TypePtr vty);
 
-    VReg zero_value(TypePtr T) {
-        if (!T) return const_none();
-        switch (T->kind) {
-            case TyKind::Int:
-            case TyKind::Bool:
-            case TyKind::None:
-                return const_int(0);
-            case TyKind::Float:
-                return const_float(0.0);
-            default:
-                return const_none();
-        }
-    }
+    VReg zero_value(TypePtr T);
 
     // 被内层函数捕获的局部变量在入口转成单元素 list[T]（cell）。
     // 形参先用原始槽接实参，再把值 retain 进 cell。
-    void create_cells() {
-        auto* m = closure();
-        if (!m) return;
-        for (auto& cv : m->cells) {
-            TypePtr T = cv.ty;
-            TypePtr cell_ty = mk_list(T ? T : t_unknown());
-            int kind = list_kind_filled(cell_ty);
-            VReg init;
-            if (auto it = st_->param_slots.find(cv.name); it != st_->param_slots.end())
-                init = load_slot(it->second, T);
-            else
-                init = zero_value(T);
-            retain_elem(init, kind);
-            Inst in;
-            in.op = IrOp::MakeList;
-            in.imm = kind;
-            in.args = {init};
-            VReg cell = def_heap(cell_ty, std::move(in));
-            store_slot(st_->cell_slots.at(cv.name), cell);
-        }
-    }
+    void create_cells();
 
     void bind_name_value(const std::string& name, VReg v, TypePtr vty) {
         if (is_cell(name)) {
@@ -1075,21 +693,7 @@ private:
         }
     }
 
-    TypePtr name_ty(const std::string& name) {
-        if (int cs = comp_slot(name); cs >= 0) return st_->fn->slot_ty[cs];
-        if (auto it = st_->extra_locals.find(name); it != st_->extra_locals.end())
-            return it->second;
-        if (auto t = captured_ty(name)) return t;
-        if (st_ && st_->scope) {
-            auto it = st_->scope->vars.find(name);
-            if (it != st_->scope->vars.end()) return it->second.ty;
-        }
-        if (auto* ms = tc_.module_scope()) {
-            auto it = ms->vars.find(name);
-            if (it != ms->vars.end()) return it->second.ty;
-        }
-        return t_unknown();
-    }
+    TypePtr name_ty(const std::string& name);
 
     bool is_local(const std::string& name) const {
         if (!st_) return false;
@@ -1121,9 +725,7 @@ private:
 
     // ── 语句 ────────────────────────────────────────────────────
 
-    void stmts(std::vector<StmtPtr>& body) {
-        for (auto& s : body) stmt(*s);
-    }
+    void stmts(std::vector<StmtPtr>& body);
 
     void stmt(Stmt& s);
 
@@ -1317,25 +919,7 @@ private:
     // Optional[T] 上的属性访问必须先确认不是 None。类型收窄做不到
     // 逐条路径成立，这里用一次运行时检查兜底：解引用空指针的段错误
     // 不带任何上下文，比一条 panic 难查得多。
-    VReg guard_not_none(VReg v, const std::string& what) {
-        int ok = new_block("nn.ok");
-        int bad = new_block("nn.bad");
-        Inst br;
-        br.op = IrOp::Branch;
-        br.a = v;
-        br.target = ok;
-        br.target2 = bad;
-        emit(std::move(br));
-        switch_to(bad);
-        call_void(RtFn::Raise,
-                  {const_str("AttributeError"), const_str("NoneType object has no " + what)});
-        Inst j;
-        j.op = IrOp::Jump;
-        j.target = ok;
-        emit(std::move(j));
-        switch_to(ok);
-        return v;
-    }
+    VReg guard_not_none(VReg v, const std::string& what);
 
     // 剥掉 Optional 外壳，返回内层类型；不是 Optional 就原样返回。
     static TypePtr strip_optional(const TypePtr& t) {
@@ -1344,44 +928,7 @@ private:
     }
 
     // type(x) 用的 Python 侧类型名。
-    static std::string py_type_name(const TypePtr& t) {
-        if (!t) return "object";
-        switch (t->kind) {
-            case TyKind::None: return "NoneType";
-            case TyKind::Bool: return "bool";
-            case TyKind::Int: return "int";
-            case TyKind::Float: return "float";
-            case TyKind::Complex: return "complex";
-            case TyKind::Str: return "str";
-            case TyKind::List: return "list";
-            case TyKind::Range: return "range";
-            case TyKind::Set: return "set";
-            case TyKind::Dict: return "dict";
-            case TyKind::Tuple: return "tuple";
-            case TyKind::Func: return "function";
-            case TyKind::Generator: return "generator";
-            case TyKind::Coroutine: return "coroutine";
-            case TyKind::Task: return "task";
-            case TyKind::AsyncGenerator: return "async_generator";
-            case TyKind::Future: return "future";
-            case TyKind::File: return "file";
-            case TyKind::Random: return "random.Random";
-            case TyKind::CompletedProcess: return "subprocess.CompletedProcess";
-            case TyKind::Exception: return t->name.empty() ? "Exception" : t->name;
-            case TyKind::Class: return t->cls ? t->cls->name : "object";
-            case TyKind::TypeObj: return "type";
-            case TyKind::ClassObj: return "type";
-            case TyKind::AsyncEvent: return "Event";
-            case TyKind::AsyncLock: return "Lock";
-            case TyKind::AsyncQueue: return "Queue";
-            case TyKind::AsyncTimeout: return "Timeout";
-            case TyKind::AsyncTaskGroup: return "TaskGroup";
-            case TyKind::AsyncSemaphore: return "Semaphore";
-            case TyKind::Optional:
-                return t->sub.empty() ? "object" : py_type_name(t->sub[0]);
-            default: return "object";
-        }
-    }
+    static std::string py_type_name(const TypePtr& t);
 
     void assign_to(Expr& target, VReg v, TypePtr vty);
 
@@ -1473,19 +1020,7 @@ private:
     VReg lower_dunder_eq(VReg l, TypePtr lt, VReg r, TypePtr rt, bool ne);
     // 类作为 dict/set key：__hash__ 和 __eq__ 都存在时返回两个 vtable
     // 槽号，否则 (-1, -1)（运行时按机器字哈希/比较）。
-    std::pair<int64_t, int64_t> dunder_key_slots(const TypePtr& key_ty) const {
-        if (!key_ty || key_ty->kind != TyKind::Class || !key_ty->cls)
-            return {-1, -1};
-        const MethodInfo* h = key_ty->cls->method("__hash__");
-        const MethodInfo* e = key_ty->cls->method("__eq__");
-        if (!h || h->kind != MethodKind::Normal || !h->call_sig || h->slot < 0)
-            return {-1, -1};
-        if (!e || e->kind != MethodKind::Normal || !e->call_sig || e->slot < 0)
-            return {-1, -1};
-        // 装饰后的方法不在 vtable 里：运行时没法按槽号调，退回机器字身份。
-        if (h->decorated || e->decorated) return {-1, -1};
-        return {h->slot, e->slot};
-    }
+    std::pair<int64_t, int64_t> dunder_key_slots(const TypePtr& key_ty) const;
     // 算术/比较 dunder：左操作数（或右操作数的反射版）有实现时返回调用
     // 结果；没有可用实现返回 kNoReg。aug=true 时先试 __iadd__ 这类。
     VReg lower_dunder_binop(VReg l, TypePtr lt, VReg r, TypePtr rt, Tok op, bool aug);

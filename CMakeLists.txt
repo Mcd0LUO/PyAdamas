@@ -31,6 +31,8 @@ set(PYADAMAS_SOURCES
   src/typecheck_builtin.cpp
   src/typecheck_func.cpp
   src/lower.cpp
+  src/lower_impl_util.cpp
+  src/lower_impl_slots.cpp
   src/lower_stmt.cpp
   src/lower_exc.cpp
   src/lower_import.cpp
