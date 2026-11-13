@@ -544,7 +544,10 @@ VReg Lowerer::lower_call(Call& c) {
 
 VReg Lowerer::seq_as_list(Expr* e, TypePtr& elem_out) {
     VReg x = expr(*e);
-    TypePtr xt = tc_.type_of(e);
+    return value_as_list(x, tc_.type_of(e), elem_out);
+}
+
+VReg Lowerer::value_as_list(VReg x, TypePtr xt, TypePtr& elem_out) {
     elem_out = t_unknown();
     if (!xt) return x;
     switch (xt->kind) {

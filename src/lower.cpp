@@ -255,6 +255,11 @@ void Lowerer::collect_classes(std::vector<StmtPtr>& body) {
             case StmtKind::With:
                 collect_classes(static_cast<With&>(*s).body);
                 break;
+            case StmtKind::FunctionDef:
+                // 函数体内可以定义类：先给它们分配类编号，方法体编译时
+                // 构造点就能找到布局。
+                collect_classes(static_cast<FunctionDef&>(*s).body);
+                break;
             default:
                 break;
         }

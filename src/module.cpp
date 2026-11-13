@@ -425,11 +425,22 @@ std::expected<std::string, std::string> encode_module_interface(const ModuleInfo
         for (auto& [name, ic] : info.classes) {
             const ClassInfo& c = *ic.cls;
             e.str(name);
-            e.u32(static_cast<uint32_t>(c.fields.size()));
-            for (auto& f : c.fields) {
-                e.str(f.name);
-                enc_type(e, f.ty);
+            // 字段按布局顺序（根类在前）导出：导入方的字段下标与运行期偏移一致，
+            // 模式匹配也能读到继承来的字段。
+            std::vector<const FieldInfo*> layout;
+            {
+                std::vector<const ClassInfo*> chain;
+                for (const ClassInfo* k = &c; k; k = k->base) chain.push_back(k);
+                for (auto it = chain.rbegin(); it != chain.rend(); ++it)
+                    for (auto& f : (*it)->fields) layout.push_back(&f);
             }
+            e.u32(static_cast<uint32_t>(layout.size()));
+            for (auto* f : layout) {
+                e.str(f->name);
+                enc_type(e, f->ty);
+            }
+            e.u32(static_cast<uint32_t>(c.match_args.size()));
+            for (auto& ma : c.match_args) e.str(ma);
             e.u32(static_cast<uint32_t>(c.methods.size()));
             for (auto& m : c.methods) {
                 e.str(m.name);
@@ -490,6 +501,8 @@ std::expected<ModuleInfoPtr, std::string> decode_module_interface(const std::str
                 f.ty = dec_type(d);
                 cls->fields.push_back(std::move(f));
             }
+            uint32_t nma = d.u32();
+            for (uint32_t j = 0; j < nma; ++j) cls->match_args.push_back(d.str());
             uint32_t nm = d.u32();
             for (uint32_t j = 0; j < nm; ++j) {
                 MethodInfo m;

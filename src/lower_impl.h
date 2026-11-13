@@ -1359,6 +1359,9 @@ private:
     bool exc_class_name(Expr& e, std::string& out);
     VReg dunder_str(VReg v, TypePtr ty, bool prefer_repr);
     VReg dunder_len(VReg v, TypePtr ty);
+    VReg dunder_bool(VReg v, TypePtr ty);
+    // 把已知类型的值物化成 list（seq_as_list 的核心，供 VReg 复用）。
+    VReg value_as_list(VReg x, TypePtr xt, TypePtr& elem_out);
     VReg lower_dunder_eq(VReg l, TypePtr lt, VReg r, TypePtr rt, bool ne);
     // 类作为 dict/set key：__hash__ 和 __eq__ 都存在时返回两个 vtable
     // 槽号，否则 (-1, -1)（运行时按机器字哈希/比较）。

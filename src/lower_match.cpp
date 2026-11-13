@@ -395,13 +395,55 @@ void Lowerer::lower_pattern(Pattern& p, VReg value, TypePtr ty, int fail, bool i
         }
         case PatternKind::Class: {
             if (!p.qualname.empty()) {
-                if (!p.positional.empty() || !p.attrs.empty()) {
-                    err(p.line, p.col,
-                        "imported class patterns support only the class check");
-                    return;
-                }
                 test(call_runtime(RtFn::IsNamedClass, t_bool(),
                                   {value, const_str(p.qualname)}));
+                if (p.positional.empty() && p.attrs.empty()) return;
+                // 字段偏移在定义模块里已经算好，接口里的 ClassInfo 直接可用。
+                size_t dot = p.qualname.rfind('.');
+                std::string mod_name = p.qualname.substr(0, dot);
+                std::string cls_name = p.qualname.substr(dot + 1);
+                ModuleInfoPtr mod;
+                auto mit = st_->modules.find(mod_name);
+                if (mit != st_->modules.end()) mod = mit->second;
+                else {
+                    auto ait = module_aliases_.find(mod_name);
+                    if (ait != module_aliases_.end()) mod = ait->second;
+                }
+                ClassInfoPtr pc;
+                if (mod) {
+                    auto ci = mod->classes.find(cls_name);
+                    if (ci != mod->classes.end()) pc = ci->second.cls;
+                }
+                if (!pc) {
+                    err(p.line, p.col,
+                        std::format("class '{}' is not available for pattern matching",
+                                    p.qualname));
+                    return;
+                }
+                auto match_field = [&](const std::string& fname, PatternPtr& sub) {
+                    const FieldInfo* f = pc->field(fname);
+                    if (!f) {
+                        err(p.line, p.col,
+                            std::format("'{}' object has no field '{}'", pc->name, fname));
+                        return;
+                    }
+                    int off = 8 * (1 + pc->field_index(fname));
+                    VReg fv = field_load(value, off, f->ty);
+                    lower_pattern(*sub, fv, f->ty, fail, in_or, or_local);
+                };
+                if (!p.positional.empty()) {
+                    const auto* margs = pc->match_args_of();
+                    if (!margs) {
+                        err(p.line, p.col,
+                            std::format("'{}' has no __match_args__ for positional patterns",
+                                        pc->name));
+                    } else {
+                        size_t n = std::min(p.positional.size(), margs->size());
+                        for (size_t i = 0; i < n; ++i)
+                            match_field((*margs)[i], p.positional[i]);
+                    }
+                }
+                for (auto& kv : p.attrs) match_field(kv.first, kv.second);
                 return;
             }
             if (p.cls.find('.') != std::string::npos) {

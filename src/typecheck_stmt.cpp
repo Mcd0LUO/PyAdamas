@@ -1237,10 +1237,55 @@ void TypeChecker::match_pattern(Pattern& p, TypePtr subject,
                     return;
                 }
                 p.qualname = mod->name + "." + cls_name;
-                if (!p.positional.empty() || !p.attrs.empty())
+                ClassInfo* pc = ci->second.cls.get();
+                if (pc->is_exception_class) {
+                    if (!p.positional.empty() || !p.attrs.empty())
+                        err(p.line, p.col,
+                            "exception class patterns cannot have sub-patterns");
+                    return;
+                }
+                if (!pc->complete) {
                     err(p.line, p.col,
-                        "imported class patterns support only the class check "
-                        "(field sub-patterns are not available)");
+                        std::format("class '{}' must be fully defined before a class pattern "
+                                    "uses its fields", p.cls));
+                    return;
+                }
+                if (!p.positional.empty()) {
+                    const auto* margs = pc->match_args_of();
+                    if (!margs) {
+                        err(p.line, p.col,
+                            std::format("'{}' has no __match_args__ for positional patterns",
+                                        pc->name));
+                    } else {
+                        if (p.positional.size() > margs->size())
+                            err(p.line, p.col,
+                                std::format("'{}' accepts {} positional sub-pattern{}, got {}",
+                                            pc->name, margs->size(),
+                                            margs->size() == 1 ? "" : "s",
+                                            p.positional.size()));
+                        size_t n = std::min(p.positional.size(), margs->size());
+                        for (size_t i = 0; i < n; ++i) {
+                            const FieldInfo* f = pc->field((*margs)[i]);
+                            if (!f) {
+                                err(p.line, p.col,
+                                    std::format(
+                                        "__match_args__ of '{}' names unknown field '{}'",
+                                        pc->name, (*margs)[i]));
+                                continue;
+                            }
+                            match_pattern(*p.positional[i], f->ty, or_names);
+                        }
+                    }
+                }
+                for (auto& kv : p.attrs) {
+                    const FieldInfo* f = pc->field(kv.first);
+                    if (!f) {
+                        err(p.line, p.col,
+                            std::format("'{}' object has no field '{}'", pc->name, kv.first));
+                        continue;
+                    }
+                    match_pattern(*kv.second, f->ty, or_names);
+                }
                 return;
             }
             auto it = classes_.find(p.cls);

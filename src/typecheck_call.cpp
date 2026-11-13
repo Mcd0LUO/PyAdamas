@@ -260,6 +260,12 @@ TypePtr TypeChecker::call(Call& c) {
                     return check_args(m->decorated_ty->fn, c);
                 }
             }
+            // 类接收者的普通方法：C.m(obj, ...) 显式传 self，按含 self 的签名检查。
+            if (is_class_receiver(*a) && ot->kind == TyKind::Class && ot->cls) {
+                const MethodInfo* m = ot->cls->method(a->attr);
+                if (m && m->kind == MethodKind::Normal && !m->decorated && m->sig)
+                    return check_args(m->sig, c);
+            }
             return method_call(ot, a->attr, c, is_self_attr(*a));
         }
         auto ft = expr(*c.func);

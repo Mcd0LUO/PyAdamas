@@ -19,6 +19,7 @@
 #include "desugar.h"
 
 #include <format>
+#include <memory>
 #include <utility>
 #include <vector>
 
@@ -219,10 +220,38 @@ private:
     // range 被用户绑定过就不做惰性改写（宁可少改写也不误改）。
     bool allow_range_ = true;
 
+    // class A: f = lambda self, ...: ... 在 CPython 里就是类字典里的函数，
+    // 通过实例访问时绑定 self。这里直接改写成方法定义，复用方法注册/编译。
+    bool class_body_lambda(StmtPtr& s) {
+        if (s->kind != StmtKind::Assign) return false;
+        auto& a = static_cast<Assign&>(*s);
+        if (a.targets.size() != 1 || !a.value ||
+            a.value->kind != ExprKind::Lambda)
+            return false;
+        auto* nm = dynamic_cast<Name*>(a.targets[0].get());
+        if (!nm) return false;
+        auto& lam = static_cast<Lambda&>(*a.value);
+        // 没有形参的 lambda 不是合法方法（CPython 里调用时也会多传 self）。
+        if (lam.args.posonly.empty() && lam.args.args.empty()) return false;
+        auto fd = std::make_unique<FunctionDef>();
+        fd->line = s->line;
+        fd->col = s->col;
+        fd->name = nm->id;
+        fd->args = std::move(lam.args);
+        auto ret = std::make_unique<Return>();
+        ret->line = lam.line;
+        ret->col = lam.col;
+        ret->value = std::move(lam.body);
+        fd->body.push_back(std::move(ret));
+        s = std::move(fd);
+        return true;
+    }
+
     void desugar_body(std::vector<StmtPtr>& body, bool class_body) {
         std::vector<StmtPtr> out;
         out.reserve(body.size());
         for (auto& s : body) {
+            if (class_body) class_body_lambda(s);
             std::vector<StmtPtr> pre;
             desugar_stmt(*s, pre, class_body);
             for (auto& d : pre) out.push_back(std::move(d));
@@ -288,6 +317,9 @@ private:
     // 嵌套 lambda / 生成器表达式在合成函数作用域内展开，闭包捕获照旧。
     void desugar_genexpr(GeneratorExp& g, ExprPtr& slot, std::vector<StmtPtr>& pre) {
         if (g.generators.empty()) return;
+        bool any_async = false;
+        for (auto& gp : g.generators)
+            if (static_cast<Comprehension&>(*gp).is_async) any_async = true;
         const int line = g.line;
         const int col = g.col;
         const int id = ++gen_id_;
@@ -372,6 +404,7 @@ private:
             }
             auto fr = std::make_unique<For>();
             fr->target = std::move(c.target);
+            fr->is_async = c.is_async;
             if (i == 0 && is_range) fr->iter = range_iter();
             else fr->iter = i == 0 ? named(itname) : std::move(c.iter);
             fr->body = std::move(body);
@@ -383,6 +416,7 @@ private:
 
         auto fn = std::make_unique<FunctionDef>();
         fn->name = std::format("__pyadamas$gen_{}", id);
+        fn->is_async = any_async;
         if (is_range) {
             Arg s;
             s.name = sname;

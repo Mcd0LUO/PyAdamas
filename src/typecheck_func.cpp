@@ -261,7 +261,10 @@ bool TypeChecker::name_is_class(const Name& n) {
     // 类名绑定在模块作用域里；被函数局部或形参遮住就不是类了。
     // class_obj_names_ 里没有的名字（模块级的实例变量）按实例处理。
     for (Scope* s = cur_; s; s = s->parent) {
-        if (s->vars.find(n.id) == s->vars.end()) continue;
+        auto it = s->vars.find(n.id);
+        if (it == s->vars.end()) continue;
+        // class 语句绑定的名字（含函数内定义的类）。
+        if (it->second.is_class_name) return true;
         return s->is_module && class_obj_names_.count(n.id) > 0;
     }
     return false;
@@ -435,8 +438,10 @@ void TypeChecker::classdef(ClassDef& c) {
             if (it != sc->vars.end()) {
                 it->second.ty = mk_class(cls.get());
                 it->second.annotated = true;
+                it->second.is_class_name = true;
             } else {
                 sc->vars[c.name] = Symbol{mk_class(cls.get()), c.line, true, false};
+                sc->vars[c.name].is_class_name = true;
             }
         }
         class_obj_names_.insert(c.name);
@@ -444,7 +449,6 @@ void TypeChecker::classdef(ClassDef& c) {
         classes_[c.name] = cls;
         all_classes_.push_back(cls);
         (void)prev;  // 同名类重定义：后面的引用拿新类，旧实例仍按旧布局走
-        if (!cur_->is_module) unsupported.push_back("nested class definition");
         if (is_exc_class) {
             // 自定义异常类目前只支持继承 + pass/文档字符串。
             for (auto& s : c.body) {
@@ -675,13 +679,23 @@ void TypeChecker::classdef(ClassDef& c) {
                 bool bool_ret = cmp_d || f.name == "__eq__" || f.name == "__ne__" ||
                                 f.name == "__contains__";
                 bool two_arg = bool_ret || arith_d;
+                bool fmt_d = f.name == "__format__";
                 bool one_arg = one_of(
-                    {"__str__", "__repr__", "__len__", "__hash__", "__iter__"});
-                if (two_arg || one_arg) {
+                    {"__str__", "__repr__", "__len__", "__hash__", "__iter__",
+                     "__bool__", "__reversed__"});
+                if (two_arg || one_arg || fmt_d) {
                     if (kind != MethodKind::Normal) {
                         bad("must be a normal method");
                     } else if (m.sig->varargs || m.sig->kwargs) {
                         bad("does not accept *args / **kwargs");
+                    } else if (fmt_d) {
+                        if (m.sig->pos.size() != 2)
+                            bad("takes 'self' and a format spec");
+                        else if (!is_unknown(m.sig->pos[1].ty) &&
+                                 m.sig->pos[1].ty->kind != TyKind::Str)
+                            bad("format spec must be a str");
+                        else if (!m.sig->ret || m.sig->ret->kind != TyKind::Str)
+                            bad("must return str");
                     } else if (two_arg) {
                         if (m.sig->pos.size() != 2) {
                             bad("takes 'self' and one other parameter");
@@ -700,6 +714,9 @@ void TypeChecker::classdef(ClassDef& c) {
                     } else if (f.name == "__str__" || f.name == "__repr__") {
                         if (!m.sig->ret || m.sig->ret->kind != TyKind::Str)
                             bad("must return str");
+                    } else if (f.name == "__bool__") {
+                        if (!m.sig->ret || m.sig->ret->kind != TyKind::Bool)
+                            bad("must return bool");
                     }
                     // __iter__ 不限制返回类型：生成器方法的标注是元素类型。
                 }
@@ -777,7 +794,7 @@ void TypeChecker::classdef(ClassDef& c) {
                             "__ifloordiv__", "__imod__", "__ipow__", "__contains__",
                             "__len__", "__hash__", "__iter__", "__init__",
                             "__enter__", "__exit__", "__aenter__", "__aexit__",
-                            "__call__"};
+                            "__call__", "__format__", "__bool__", "__reversed__"};
                         if (!kDecorOk.count(f.name)) {
                             err(f.line, f.col,
                                 std::format(

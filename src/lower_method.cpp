@@ -185,6 +185,31 @@ VReg Lowerer::lower_method_call(Attribute& at, Call& c) {
                 TypePtr rt = winfo->ret ? winfo->ret : t_unknown();
                 return def_heap(rt, std::move(in));
             }
+            if (m->kind == MethodKind::Normal) {
+                // C.m(obj, ...)：self 由调用方显式传入，直调最终实现。
+                if (!m->sig) return const_none();
+                auto ncid = class_ids_.find(cls);
+                if (ncid == class_ids_.end()) {
+                    err(c.line, c.col,
+                        std::format("method '{}.{}' is not available here", cls->name,
+                                    at.attr));
+                    return const_none();
+                }
+                const auto& nvt = mod_.classes[static_cast<size_t>(ncid->second)].vtable;
+                if (m->slot < 0 || m->slot >= static_cast<int>(nvt.size()) ||
+                    nvt[static_cast<size_t>(m->slot)] < 0) {
+                    err(c.line, c.col,
+                        std::format("method '{}.{}' was not compiled", cls->name, at.attr));
+                    return const_none();
+                }
+                std::vector<VReg> args = bind_args(c, m->sig, m->def);
+                Inst cd;
+                cd.op = IrOp::CallDirect;
+                cd.idx = nvt[static_cast<size_t>(m->slot)];
+                for (VReg a : args) cd.args.push_back(a);
+                TypePtr rt = m->sig->ret ? m->sig->ret : t_none();
+                return def_heap(rt, std::move(cd));
+            }
             if (m->kind != MethodKind::Static && m->kind != MethodKind::ClassMethod) {
                 err(c.line, c.col,
                     std::format("'{}.{}' is an instance method; call it on an instance",

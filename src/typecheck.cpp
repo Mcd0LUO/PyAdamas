@@ -577,6 +577,141 @@ void TypeChecker::collect_fn_decls(std::vector<StmtPtr>& body,
         }
     }
 
+namespace {
+
+// 语法预扫描：函数体还没检查时，前向引用的调用点也要能区分「协程」和
+// 「异步生成器」。这里只看语句/表达式里可能出现的 yield，不进入嵌套
+// def / class（它们的 yield 属于它们自己）。
+bool expr_has_yield(const Expr* e);
+
+bool exprs_have_yield(const std::vector<ExprPtr>& es) {
+    for (auto& x : es)
+        if (expr_has_yield(x.get())) return true;
+    return false;
+}
+
+bool expr_has_yield(const Expr* e) {
+    if (!e) return false;
+    switch (e->kind) {
+        case ExprKind::Yield:
+        case ExprKind::YieldFrom: return true;
+        case ExprKind::Await: return expr_has_yield(static_cast<const Await*>(e)->value.get());
+        case ExprKind::BinOp: {
+            auto& b = static_cast<const BinOp&>(*e);
+            return expr_has_yield(b.left.get()) || expr_has_yield(b.right.get());
+        }
+        case ExprKind::UnaryOp:
+            return expr_has_yield(static_cast<const UnaryOp&>(*e).operand.get());
+        case ExprKind::BoolOp:
+            return exprs_have_yield(static_cast<const BoolOp&>(*e).values);
+        case ExprKind::Compare: {
+            auto& c = static_cast<const Compare&>(*e);
+            return expr_has_yield(c.left.get()) || exprs_have_yield(c.comparators);
+        }
+        case ExprKind::Call: {
+            auto& c = static_cast<const Call&>(*e);
+            if (expr_has_yield(c.func.get()) || exprs_have_yield(c.args)) return true;
+            for (auto& kw : c.keywords)
+                if (expr_has_yield(kw.value.get())) return true;
+            return false;
+        }
+        case ExprKind::Attribute:
+            return expr_has_yield(static_cast<const Attribute&>(*e).value.get());
+        case ExprKind::Subscript: {
+            auto& s = static_cast<const Subscript&>(*e);
+            return expr_has_yield(s.value.get()) || expr_has_yield(s.slice.get());
+        }
+        case ExprKind::List:
+            return exprs_have_yield(static_cast<const ListExpr&>(*e).elts);
+        case ExprKind::Tuple:
+            return exprs_have_yield(static_cast<const TupleExpr&>(*e).elts);
+        case ExprKind::Set:
+            return exprs_have_yield(static_cast<const SetExpr&>(*e).elts);
+        case ExprKind::Dict: {
+            auto& d = static_cast<const DictExpr&>(*e);
+            return exprs_have_yield(d.keys) || exprs_have_yield(d.values);
+        }
+        case ExprKind::Starred:
+            return expr_has_yield(static_cast<const Starred&>(*e).value.get());
+        case ExprKind::IfExp: {
+            auto& i = static_cast<const IfExp&>(*e);
+            return expr_has_yield(i.test.get()) || expr_has_yield(i.body.get()) ||
+                   expr_has_yield(i.orelse.get());
+        }
+        case ExprKind::NamedExpr:
+            return expr_has_yield(static_cast<const NamedExpr&>(*e).value.get());
+        default: return false;
+    }
+}
+
+bool stmt_has_yield(const Stmt& s);
+
+bool body_has_yield(const std::vector<StmtPtr>& body) {
+    for (auto& s : body)
+        if (s && stmt_has_yield(*s)) return true;
+    return false;
+}
+
+bool stmt_has_yield(const Stmt& s) {
+    switch (s.kind) {
+        case StmtKind::Expr: return expr_has_yield(static_cast<const ExprStmt&>(s).value.get());
+        case StmtKind::Assign: return expr_has_yield(static_cast<const Assign&>(s).value.get());
+        case StmtKind::AnnAssign: {
+            auto& a = static_cast<const AnnAssign&>(s);
+            return a.value && expr_has_yield(a.value.get());
+        }
+        case StmtKind::AugAssign:
+            return expr_has_yield(static_cast<const AugAssign&>(s).value.get());
+        case StmtKind::Return: {
+            auto& r = static_cast<const Return&>(s);
+            return r.value && expr_has_yield(r.value.get());
+        }
+        case StmtKind::If: {
+            auto& f = static_cast<const If&>(s);
+            for (auto& b : f.branches)
+                if (expr_has_yield(b.cond.get()) || body_has_yield(b.body)) return true;
+            return body_has_yield(f.orelse);
+        }
+        case StmtKind::While: {
+            auto& w = static_cast<const While&>(s);
+            return expr_has_yield(w.cond.get()) || body_has_yield(w.body) ||
+                   body_has_yield(w.orelse);
+        }
+        case StmtKind::For: {
+            auto& f = static_cast<const For&>(s);
+            return expr_has_yield(f.iter.get()) || body_has_yield(f.body) ||
+                   body_has_yield(f.orelse);
+        }
+        case StmtKind::With: {
+            auto& w = static_cast<const With&>(s);
+            for (auto& it : w.items)
+                if (expr_has_yield(it.context.get())) return true;
+            return body_has_yield(w.body);
+        }
+        case StmtKind::Try: {
+            auto& t = static_cast<const Try&>(s);
+            if (body_has_yield(t.body) || body_has_yield(t.orelse) ||
+                body_has_yield(t.finalbody))
+                return true;
+            for (auto& h : t.handlers)
+                if (body_has_yield(h.body)) return true;
+            return false;
+        }
+        case StmtKind::Match: {
+            auto& m = static_cast<const Match&>(s);
+            if (expr_has_yield(m.subject.get())) return true;
+            for (auto& c : m.cases) {
+                if (c.guard && expr_has_yield(c.guard.get())) return true;
+                if (body_has_yield(c.body)) return true;
+            }
+            return false;
+        }
+        default: return false;
+    }
+}
+
+}  // namespace
+
 FuncInfoPtr TypeChecker::build_sig(FunctionDef& f) {
         auto info = std::make_shared<FuncInfo>();
         info->name = f.name;
@@ -663,6 +798,17 @@ FuncInfoPtr TypeChecker::build_sig(FunctionDef& f) {
         info->ret_declared = f.returns != nullptr;
         info->is_async = f.is_async;
         if (f.is_async) {
+            // 先按语法扫一遍 yield：前向引用时也要把异步生成器标成
+            // AsyncGenerator，而不是 Coroutine。
+            if (body_has_yield(f.body)) {
+                TypePtr gen = (info->ret && info->ret->kind == TyKind::AsyncGenerator)
+                                  ? info->ret
+                                  : nullptr;
+                info->is_async_generator = true;
+                info->ret = gen ? gen : mk_async_generator(t_unknown());
+                info->async_result = t_none();
+                return info;
+            }
             // 调用 async def 得到协程对象；return/await 看到的是结果类型。
             info->async_result = info->ret;
             info->ret = mk_coroutine(info->ret ? info->ret : t_unknown());

@@ -887,6 +887,9 @@ VReg Lowerer::lower_boolop(BoolOp& b) {
 
     VReg acc = expr(*b.values[0]);
     store_borrow_slot(tmp, acc);
+    // 真值必须按操作数自己的类型判断：结果槽的类型是 join 出来的，
+    // 拿它去查 __bool__/__len__ 会漏掉类实例。
+    TypePtr acc_ty = tc_.type_of(b.values[0].get());
 
     for (size_t i = 1; i < b.values.size(); ++i) {
         VReg cur_v = load_slot(tmp, ty);
@@ -895,7 +898,7 @@ VReg Lowerer::lower_boolop(BoolOp& b) {
 
         Inst br;
         br.op = IrOp::Branch;
-        br.a = truth_bool(cur_v, ty);
+        br.a = truth_bool(cur_v, acc_ty);
         // and: 真才继续算右边；or: 假才继续算右边
         br.target = is_and ? rhs : next;
         br.target2 = is_and ? next : rhs;
@@ -904,6 +907,7 @@ VReg Lowerer::lower_boolop(BoolOp& b) {
         switch_to(rhs);
         VReg v = expr(*b.values[i]);
         store_borrow_slot(tmp, v);
+        acc_ty = tc_.type_of(b.values[i].get());
         Inst j;
         j.op = IrOp::Jump;
         j.target = next;
@@ -1521,6 +1525,10 @@ VReg Lowerer::dunder_len(VReg v, TypePtr ty) {
     return dunder_call(v, ty, "__len__", {}, t_int());
 }
 
+VReg Lowerer::dunder_bool(VReg v, TypePtr ty) {
+    return dunder_call(v, ty, "__bool__", {}, t_bool());
+}
+
 VReg Lowerer::lower_dunder_eq(VReg l, TypePtr lt, VReg r, TypePtr rt, bool ne) {
     auto one = [&](VReg self, TypePtr st, VReg other, TypePtr ot) -> VReg {
         if (!st || st->kind != TyKind::Class || !st->cls) return kNoReg;
@@ -1612,6 +1620,9 @@ VReg Lowerer::lower_dunder_binop(VReg l, TypePtr lt, VReg r, TypePtr rt, Tok op,
 }
 
 VReg Lowerer::truth_bool(VReg v, TypePtr ty) {
+    // CPython：先 __bool__，没有再按 __len__ 是否非零；都没有时按指针判空。
+    VReg b = dunder_bool(v, ty);
+    if (b != kNoReg) return b;
     VReg ln = dunder_len(v, ty);
     if (ln == kNoReg) return v;
     Inst c;
@@ -1643,6 +1654,8 @@ VReg Lowerer::convert_to(VReg v, TypePtr from, TypePtr to) {
             return s != kNoReg ? s : class_default_str(from);
         }
         if (to->kind == TyKind::Bool) {
+            VReg b = dunder_bool(v, from);
+            if (b != kNoReg) return b;
             VReg ln = dunder_len(v, from);
             if (ln != kNoReg) {
                 Inst c;
@@ -1753,11 +1766,19 @@ VReg Lowerer::lower_joined(JoinedStr& j) {
             VReg spec = const_str("");
             if (fv.format_spec)
                 spec = lower_joined(static_cast<JoinedStr&>(*fv.format_spec));
-            // 没有 !s/!r 的普通格式化：类实例按 __str__ 转成字符串，
-            // 再走字符串的格式说明。（无转换时 conversion 是 -1。）
+            // 没有 !s/!r 的普通格式化：有 __format__ 就用它（和 format() 一致），
+            // 否则按 __str__ 转成字符串再走字符串的格式说明。
+            // （无转换时 conversion 是 -1。）
             if (fv.conversion < 0 && vt && vt->kind == TyKind::Class) {
-                VReg s = dunder_str(raw, vt, false);
-                raw = s != kNoReg ? s : class_default_str(vt);
+                VReg r = kNoReg;
+                if (vt->cls && vt->cls->method("__format__"))
+                    r = dunder_call(raw, vt, "__format__", {spec}, t_str());
+                if (r != kNoReg) {
+                    raw = r;
+                } else {
+                    VReg s = dunder_str(raw, vt, false);
+                    raw = s != kNoReg ? s : class_default_str(vt);
+                }
                 vt = t_str();
             }
 

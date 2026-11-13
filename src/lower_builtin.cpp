@@ -211,10 +211,25 @@ VReg Lowerer::lower_builtin_call(const std::string& name, Call& c) {
             return const_none();
         }
         TypePtr it = tc_.type_of(c.args[0].get());
-        if (it && it->kind == TyKind::File) return expr(*c.args[0]);
+        if (it && (it->kind == TyKind::File || it->kind == TyKind::List ||
+                   it->kind == TyKind::Tuple || it->kind == TyKind::Str ||
+                   it->kind == TyKind::Bytes || it->kind == TyKind::Dict ||
+                   it->kind == TyKind::Set || it->kind == TyKind::Range ||
+                   it->kind == TyKind::Generator)) {
+            return expr(*c.args[0]);
+        }
+        if (it && it->kind == TyKind::Class) {
+            VReg seq = expr(*c.args[0]);
+            VReg r = dunder_call(seq, it, "__iter__", {}, nullptr);
+            if (r != kNoReg) return r;
+            err(c.args[0]->line, c.args[0]->col,
+                std::format("iter() of '{}' which has no usable __iter__",
+                            type_name(it)));
+            return const_none();
+        }
+        if (!it || it->kind == TyKind::Unknown) return expr(*c.args[0]);
         err(c.line, c.col,
-            std::format("iter() of '{}' is not supported by the code generator yet "
-                        "(only files)",
+            std::format("iter() of '{}' is not supported by the code generator yet",
                         type_name(it)));
         return const_none();
     }
@@ -284,9 +299,28 @@ VReg Lowerer::lower_builtin_call(const std::string& name, Call& c) {
         }
         auto cid = class_ids_.find(target);
         if (cid == class_ids_.end()) {
-            err(c.args[1]->line, c.args[1]->col,
-                "isinstance() with an imported class is not supported yet");
-            return const_bool(false);
+            // 导入类没有本模块的运行期编号，用「模块名.类名」比较；
+            // pa_is_named_class 会沿实例的动态 MRO 查，子类也能匹配。
+            std::string qual;
+            auto scan = [&](const std::unordered_map<std::string, ModuleInfoPtr>& mods) {
+                for (auto& entry : mods) {
+                    if (qual.empty() == false) return;
+                    for (auto& ce : entry.second->classes)
+                        if (ce.second.cls.get() == target) {
+                            qual = entry.second->name + "." + ce.first;
+                            return;
+                        }
+                }
+            };
+            scan(st_->modules);
+            if (qual.empty()) scan(module_aliases_);
+            if (qual.empty()) {
+                err(c.args[1]->line, c.args[1]->col,
+                    "isinstance() with an imported class is not supported yet");
+                return const_bool(false);
+            }
+            return call_runtime(RtFn::IsNamedClass, t_bool(),
+                                {expr(*c.args[0]), const_str(qual)});
         }
         bool runtime = true;
         if (st && st->kind == TyKind::Class && st->cls) {
@@ -447,6 +481,22 @@ VReg Lowerer::lower_builtin_call(const std::string& name, Call& c) {
         TypePtr raw = tc_.type_of(c.args[0].get());
         TypePtr ot = strip_optional(raw);
         if (!ot || ot->kind != TyKind::Class || !ot->cls) {
+            // hasattr 对已知的内建/容器类型可以静态判定；Optional 的堆类型
+            // 再补一个非空检查（None 就是 0）。
+            if (name == "hasattr" && ot && ot->kind != TyKind::Unknown) {
+                bool has = TypeChecker::type_has_member(ot, *an);
+                VReg v = expr(*c.args[0]);
+                if (!has) return const_bool(false);
+                if (raw != ot && ir_is_heap(ot)) {
+                    Inst cmp;
+                    cmp.op = IrOp::Cmp;
+                    cmp.cop = CmpKind::Ne;
+                    cmp.a = retype(v, t_int());  // 按裸指针判空，避免 str 内容比较
+                    cmp.b = const_int(0);
+                    return def(t_bool(), std::move(cmp));
+                }
+                return const_bool(true);
+            }
             err(c.args[0]->line, c.args[0]->col,
                 std::format("{}() is only supported on class instances", name));
             return name == "hasattr" ? const_bool(false) : const_none();
@@ -496,12 +546,28 @@ VReg Lowerer::lower_builtin_call(const std::string& name, Call& c) {
         }
         // setattr
         if (!f) {
-            if (prop)
-                err(c.line, c.col,
-                    std::format("setattr() of property '{}' is not supported yet", *an));
-            else
-                err(c.line, c.col,
-                    std::format("'{}' object has no field '{}'", ot->cls->name, *an));
+            if (prop) {
+                if (!prop->owner || prop->setter < 0 ||
+                    prop->setter >= static_cast<int>(prop->owner->methods.size())) {
+                    err(c.line, c.col, std::format("property '{}' has no setter", *an));
+                    return const_none();
+                }
+                const MethodInfo& sm = prop->owner->methods[prop->setter];
+                VReg val = expr(*c.args[2]);
+                TypePtr want = sm.call_sig && !sm.call_sig->pos.empty()
+                                   ? sm.call_sig->pos[0].ty
+                                   : t_unknown();
+                val = coerce(val, tc_.type_of(c.args[2].get()), want);
+                Inst vc;
+                vc.op = IrOp::VCall;
+                vc.a = obj;
+                vc.imm = sm.slot;
+                vc.args = {val};
+                emit(std::move(vc));
+                return const_none();
+            }
+            err(c.line, c.col,
+                std::format("'{}' object has no field '{}'", ot->cls->name, *an));
             return const_none();
         }
         VReg v = coerce(expr(*c.args[2]), tc_.type_of(c.args[2].get()), f->ty);
@@ -755,6 +821,20 @@ VReg Lowerer::lower_builtin_call(const std::string& name, Call& c) {
             return const_str("");
         }
         TypePtr vt = tc_.type_of(c.args[0].get());
+        if (vt && vt->kind == TyKind::Class && vt->cls &&
+            vt->cls->method("__format__")) {
+            VReg v = expr(*c.args[0]);
+            VReg spec = expr(*c.args[1]);
+            if (spec == kNoReg) return const_str("");
+            VReg r = dunder_call(v, vt, "__format__", {spec}, t_str());
+            if (r == kNoReg) {
+                err(c.line, c.col,
+                    std::format("__format__ on '{}' must be a normal method",
+                                vt->cls->name));
+                return const_str("");
+            }
+            return r;
+        }
         RtFn fn = RtFn::FmtI64;
         if (vt && vt->kind == TyKind::Float) fn = RtFn::FmtF64;
         else if (vt && vt->kind == TyKind::Bool) fn = RtFn::FmtBool;
@@ -1148,6 +1228,24 @@ VReg Lowerer::lower_builtin_call(const std::string& name, Call& c) {
             return const_none();
         }
         TypePtr xt = tc_.type_of(c.args[0].get());
+        if (name == "reversed" && xt && xt->kind == TyKind::Class && xt->cls &&
+            xt->cls->method("__reversed__")) {
+            const MethodInfo* m = xt->cls->method("__reversed__");
+            TypePtr rt = m->call_sig ? m->call_sig->ret : nullptr;
+            if (m->decorated && m->decorated_ty && m->decorated_ty->kind == TyKind::Func &&
+                m->decorated_ty->fn)
+                rt = m->decorated_ty->fn->ret;
+            VReg v = expr(*c.args[0]);
+            VReg r = dunder_call(v, xt, "__reversed__", {}, nullptr);
+            if (r == kNoReg) {
+                err(c.line, c.col,
+                    std::format("__reversed__ on '{}' must be a normal method",
+                                xt->cls->name));
+                return const_none();
+            }
+            TypePtr elem = t_unknown();
+            return value_as_list(r, rt, elem);
+        }
         if (xt && xt->kind == TyKind::Deque) {
             VReg d = expr(*c.args[0]);
             VReg xs = call_runtime(RtFn::DequeToList, mk_list(t_int()), {d});

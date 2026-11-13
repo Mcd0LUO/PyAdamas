@@ -114,6 +114,15 @@ TypePtr TypeChecker::builtin_call(const std::string& n, Call& c) {
         }
         if (n == "sorted" || n == "reversed") {
             if (a.empty()) return mk_list(t_unknown());
+            if (n == "reversed" && a[0] && a[0]->kind == TyKind::Class && a[0]->cls) {
+                if (auto* m = a[0]->cls->method("__reversed__")) {
+                    TypePtr rt = m->call_sig ? m->call_sig->ret : nullptr;
+                    if (m->decorated && m->decorated_ty &&
+                        m->decorated_ty->kind == TyKind::Func && m->decorated_ty->fn)
+                        rt = m->decorated_ty->fn->ret;
+                    return mk_list(iter_elem(rt ? rt : t_unknown(), c.line, c.col));
+                }
+            }
             auto e = iter_elem(a[0], c.line, c.col);
             return mk_list(e);
         }
@@ -248,6 +257,8 @@ TypePtr TypeChecker::builtin_call(const std::string& n, Call& c) {
             TypePtr ot = a[0];
             if (ot && ot->kind == TyKind::Optional && !ot->sub.empty()) ot = ot->sub[0];
             if (!ot || ot->kind != TyKind::Class || !ot->cls) {
+                // hasattr 对已知的内建/容器类型可以静态判定。
+                if (n == "hasattr" && ot && ot->kind != TyKind::Unknown) return t_bool();
                 err(c.args[0]->line, c.args[0]->col,
                     std::format("{}() is only supported on class instances", n));
                 return n == "hasattr" ? t_bool() : n == "getattr" ? t_unknown() : t_none();
@@ -256,8 +267,10 @@ TypePtr TypeChecker::builtin_call(const std::string& n, Call& c) {
             if (!ot->cls->complete && ot->cls != cur_class_) return t_unknown();
             if (const PropertyInfo* p = ot->cls->property(*an)) {
                 if (n == "setattr") {
-                    err(c.line, c.col,
-                        std::format("setattr() of property '{}' is not supported yet", *an));
+                    // 有 setter 就允许，降级层走 setter 的虚调用。
+                    if (!p->owner || p->setter < 0 ||
+                        p->setter >= static_cast<int>(p->owner->methods.size()))
+                        err(c.line, c.col, std::format("property '{}' has no setter", *an));
                     return t_none();
                 }
                 if (!p->owner || p->getter < 0 ||
@@ -301,7 +314,17 @@ TypePtr TypeChecker::builtin_call(const std::string& n, Call& c) {
             return a.empty() ? t_unknown() : iter_elem(a[0], c.line, c.col);
         }
         if (n == "iter") {
-            return a.empty() ? t_unknown() : a[0];
+            if (a.empty()) return t_unknown();
+            if (a[0] && a[0]->kind == TyKind::Class && a[0]->cls) {
+                if (auto* m = a[0]->cls->method("__iter__")) {
+                    TypePtr rt = m->call_sig ? m->call_sig->ret : nullptr;
+                    if (m->decorated && m->decorated_ty &&
+                        m->decorated_ty->kind == TyKind::Func && m->decorated_ty->fn)
+                        rt = m->decorated_ty->fn->ret;
+                    if (rt) return rt;
+                }
+            }
+            return a[0];
         }
         if (n == "complex") {
             if (a.size() > 2)

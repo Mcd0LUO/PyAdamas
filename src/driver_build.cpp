@@ -1247,6 +1247,8 @@ bool build_unit(Program& p, ModuleUnit& u, bool emit_object, bool entry_ir) {
                 flat->open = cls->is_open();
                 for (auto it = chain.rbegin(); it != chain.rend(); ++it)
                     for (auto& f : (*it)->fields) flat->fields.push_back(f);
+                // __match_args__ 决定位置类模式的字段顺序，要跟着接口走。
+                flat->match_args = cls->match_args;
                 std::map<int, pyadamas::MethodInfo> by_slot;
                 for (auto it = chain.rbegin(); it != chain.rend(); ++it)
                     for (auto& m : (*it)->methods)

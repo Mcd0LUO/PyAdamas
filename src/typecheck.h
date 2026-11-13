@@ -1122,6 +1122,8 @@ struct Symbol {
     // （types.py 的 `_c = _c()` 就是拿调用结果覆盖函数名），
     // 所以它不像标注那样锁死类型。
     bool from_def = false;
+    // class 语句绑定的名字：函数内定义的类也靠它和「类实例变量」区分。
+    bool is_class_name = false;
 };
 
 struct Scope {
@@ -1517,6 +1519,13 @@ private:
 
     // ── 方法 ────────────────────────────────────────────────────
 
+public:
+    // 降级层 hasattr() 的静态成员判定（方法或属性都算）。
+    static bool type_has_member(const TypePtr& t, const std::string& m) {
+        return has_method(t, m) || is_property_name(m);
+    }
+
+private:
     static bool has_method(const TypePtr& t, const std::string& m);
 
     // 名字是属性而非方法的成员（int.numerator 等）。取到的是值，
