@@ -37,6 +37,11 @@ set(PYADAMAS_SOURCES
   src/lower_comp.cpp
   src/lower_call.cpp
   src/lower_builtin.cpp
+  src/lower_builtin_reflect.cpp
+  src/lower_builtin_seq.cpp
+  src/lower_builtin_container.cpp
+  src/lower_builtin_text.cpp
+  src/lower_builtin_misc.cpp
   src/lower_aggregate.cpp
   src/lower_method.cpp
   src/lower_method_native.cpp

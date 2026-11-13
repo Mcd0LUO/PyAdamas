@@ -1,0 +1,174 @@
+// lower_builtin_container.cpp —— 内置函数：容器构造
+#include "lower_impl.h"
+
+namespace pyadamas {
+
+VReg Lowerer::lower_builtin_container(const std::string& name, Call& c) {
+    if (name == "list" || name == "tuple") {
+        TypePtr ty = tc_.type_of(&c);
+        bool as_tuple = name == "tuple";
+        auto result_ty = [&]() -> TypePtr {
+            if (ty) return ty;
+            return as_tuple ? mk_tuple({}) : mk_list(t_unknown());
+        };
+        if (c.args.empty()) {
+            if (as_tuple) {
+                Inst mt;
+                mt.op = IrOp::MakeTuple;
+                mt.imm = list_kind_filled(ty);
+                mt.ty = result_ty();
+                return def_heap(result_ty(), std::move(mt));
+            }
+            VReg l = call_runtime(RtFn::ListNew, result_ty(),
+                                  {const_int(0), const_int(list_kind(ty))});
+            push_temp(l);
+            return l;
+        }
+        if (c.args.size() != 1) {
+            err(c.line, c.col, std::format("{}() takes at most one argument", name));
+            return const_none();
+        }
+        TypePtr xt = tc_.type_of(c.args[0].get());
+        if (xt && xt->kind == TyKind::Deque) {
+            VReg d = expr(*c.args[0]);
+            VReg xs = call_runtime(RtFn::DequeToList, mk_list(t_int()), {d});
+            push_temp(xs);
+            return xs;
+        }
+        if (!xt || (xt->kind != TyKind::List && xt->kind != TyKind::Tuple &&
+                    xt->kind != TyKind::Str && xt->kind != TyKind::Bytes &&
+                    xt->kind != TyKind::Dict &&
+                    xt->kind != TyKind::Set && xt->kind != TyKind::File &&
+                    xt->kind != TyKind::Range && xt->kind != TyKind::Generator)) {
+            err(c.args[0]->line, c.args[0]->col,
+                std::format("{}() cannot iterate over '{}'", name, type_name(xt)));
+            return const_none();
+        }
+        TypePtr et = t_unknown();
+        VReg x = seq_as_list(c.args[0].get(), et);
+        // str/dict/set/生成器 走 seq_as_list 时已经是新建的列表，不用再拷。
+        bool fresh = xt->kind == TyKind::Str || xt->kind == TyKind::Bytes ||
+                     xt->kind == TyKind::Dict ||
+                     xt->kind == TyKind::Set || xt->kind == TyKind::Generator;
+        VReg l = fresh ? retype(x, result_ty())
+                       : call_runtime(RtFn::ListCopy, result_ty(), {x});
+        if (!fresh) push_temp(l);
+        return as_tuple ? retype(l, result_ty()) : l;
+    }
+
+    if (name == "dict") {
+        TypePtr ty = tc_.type_of(&c);
+        if (!ty || ty->kind != TyKind::Dict) ty = mk_dict(t_unknown(), t_unknown());
+        TypePtr kt = t_unknown(), vt = t_unknown();
+        if (!ty->sub.empty()) kt = ty->sub[0];
+        if (ty->sub.size() > 1) vt = ty->sub[1];
+        if (!c.args.empty()) {
+            if (c.args.size() != 1 || !c.keywords.empty()) {
+                err(c.line, c.col, "dict() takes at most one positional argument");
+                return const_none();
+            }
+            TypePtr xt = tc_.type_of(c.args[0].get());
+            if (!xt || (xt->kind != TyKind::List && xt->kind != TyKind::Tuple &&
+                        xt->kind != TyKind::Set && xt->kind != TyKind::Generator &&
+                        xt->kind != TyKind::File && xt->kind != TyKind::Range)) {
+                err(c.args[0]->line, c.args[0]->col,
+                    std::format("dict() cannot iterate over '{}'", type_name(xt)));
+                return const_none();
+            }
+            TypePtr se = t_unknown();
+            VReg xs = seq_as_list(c.args[0].get(), se);
+            auto [hslot, eslot] = dunder_key_slots(kt);
+            VReg d = call_runtime(RtFn::DictFromPairs, ty,
+                                  {xs, const_int(key_kind(kt)), const_int(own_kind(kt)),
+                                   const_int(own_kind(vt)), const_int(hslot),
+                                   const_int(eslot)});
+            push_temp(d);
+            return d;
+        }
+        if (c.keywords.empty()) {
+            auto [hslot, eslot] = dunder_key_slots(kt);
+            VReg d = call_runtime(RtFn::DictNew, ty,
+                                  {const_int(key_kind(kt)), const_int(own_kind(kt)),
+                                   const_int(own_kind(vt)), const_int(hslot),
+                                   const_int(eslot)});
+            push_temp(d);
+            return d;
+        }
+        // dict(a=1, b=2)：关键字是字符串键。
+        int vo = own_kind(vt);
+        VReg d = call_runtime(RtFn::DictNew, ty,
+                              {const_int(1), const_int(1), const_int(vo),
+                               const_int(-1), const_int(-1)});
+        push_temp(d);
+        for (auto& kw : c.keywords) {
+            if (kw.arg.empty()) {
+                err(kw.value->line, kw.value->col, "'**' is not supported in dict()");
+                continue;
+            }
+            VReg v = expr(*kw.value);
+            v = coerce(v, tc_.type_of(kw.value.get()), vt);
+            retain_elem(v, vo);
+            call_void(RtFn::DictSet, {d, const_str(kw.arg), v});
+        }
+        return d;
+    }
+
+    if (name == "set" || name == "frozenset") {
+        TypePtr ty = tc_.type_of(&c);
+        if (!ty || ty->kind != TyKind::Set) ty = mk_set(t_unknown());
+        TypePtr et = ty->sub.empty() ? t_unknown() : ty->sub[0];
+        int kk = key_kind(et), ko = own_kind(et);
+        if (c.args.empty()) {
+            auto [hslot, eslot] = dunder_key_slots(et);
+            VReg d = call_runtime(RtFn::DictNew, ty,
+                                  {const_int(kk), const_int(ko), const_int(0),
+                                   const_int(hslot), const_int(eslot)});
+            push_temp(d);
+            return d;
+        }
+        if (c.args.size() != 1) {
+            err(c.line, c.col, std::format("{}() takes at most one argument", name));
+            return const_none();
+        }
+        TypePtr xt = tc_.type_of(c.args[0].get());
+        if (xt && xt->kind == TyKind::Deque) {
+            VReg d = expr(*c.args[0]);
+            VReg xs = call_runtime(RtFn::DequeToList, mk_list(t_int()), {d});
+            push_temp(xs);
+            return xs;
+        }
+        if (!xt || (xt->kind != TyKind::List && xt->kind != TyKind::Tuple &&
+                    xt->kind != TyKind::Str && xt->kind != TyKind::Bytes &&
+                    xt->kind != TyKind::Dict &&
+                    xt->kind != TyKind::Set && xt->kind != TyKind::File &&
+                    xt->kind != TyKind::Range && xt->kind != TyKind::Generator)) {
+            err(c.args[0]->line, c.args[0]->col,
+                std::format("{}() cannot iterate over '{}'", name, type_name(xt)));
+            return const_none();
+        }
+        TypePtr se = t_unknown();
+        VReg x = seq_as_list(c.args[0].get(), se);
+        Inst in;
+        in.op = IrOp::CallRt;
+        in.imm = static_cast<int64_t>(RtFn::SetFromList);
+        auto [hslot, eslot] = dunder_key_slots(et);
+        in.args = {x, const_int(kk), const_int(ko), const_int(hslot), const_int(eslot)};
+        in.ty = ty;
+        VReg d = def(ty, std::move(in));
+        push_temp(d);
+        return d;
+    }
+
+    if (name == "slice") {
+        // 下标位置的形式在脱糖阶段已经折成切片语法，能走到这里说明是当
+        // 独立值用——PyAdamas 没有运行期的 slice 对象。
+        err(c.line, c.col,
+            "slice() is only supported as a subscript, e.g. xs[slice(1, 3)]");
+        for (auto& a : c.args) expr(*a);
+        return const_none();
+    }
+
+    return kNoReg;
+}
+
+}  // namespace pyadamas

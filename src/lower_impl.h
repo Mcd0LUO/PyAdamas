@@ -1418,6 +1418,13 @@ private:
     void append_elem_chain(TypePtr container, std::string& chain);
     VReg lower_call(Call& c);
     VReg lower_builtin_call(const std::string& name, Call& c);
+    // 按内建函数类别拆开的降级入口（lower_builtin_*.cpp）；
+    // 名字不归自己管时返回 kNoReg。
+    VReg lower_builtin_reflect(const std::string& name, Call& c);
+    VReg lower_builtin_seq(const std::string& name, Call& c);
+    VReg lower_builtin_container(const std::string& name, Call& c);
+    VReg lower_builtin_text(const std::string& name, Call& c);
+    VReg lower_builtin_misc(const std::string& name, Call& c);
     VReg lower_minmax(Call& c, bool is_min);
     VReg lower_sum(Call& c);
     VReg lower_anyall(Call& c, bool is_any);
