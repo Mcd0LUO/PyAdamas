@@ -170,6 +170,10 @@ enum class RtFn : uint16_t {
     DictUpdate,   // (dict*, dict*) -> void
     DictCopy,     // (dict*) -> dict*  浅拷贝（匹配 **rest）
     IsInstance,   // (obj*, i64 class_id) -> i64
+    ClassNew,     // (i64 cid, i64 ctor, str* name) -> class*
+    ClassName,    // (class*) -> str*
+    ClassRepr,    // (class*) -> str*
+    IsInstanceClass, // (obj*, class*) -> i64
     ObjClassId,   // (obj*) -> i64
     IsNamedClass, // (obj*, str* qualname) -> i64  跨模块类模式按限定名匹配
     SuperLookup,  // (obj*, i64 after_cid, i64 slot, str* name) -> fnptr
@@ -572,6 +576,10 @@ inline const char* rt_name(RtFn f) {
         case RtFn::DictUpdate: return "pa_dict_update";
         case RtFn::DictCopy: return "pa_dict_copy";
         case RtFn::IsInstance: return "pa_isinstance";
+        case RtFn::ClassNew: return "pa_class_new";
+        case RtFn::ClassName: return "pa_class_name";
+        case RtFn::ClassRepr: return "pa_class_repr";
+        case RtFn::IsInstanceClass: return "pa_isinstance_class";
         case RtFn::ObjClassId: return "pa_obj_class_id";
         case RtFn::IsNamedClass: return "pa_is_named_class";
         case RtFn::SuperLookup: return "pa_super_lookup";
@@ -1313,6 +1321,7 @@ inline bool ir_is_heap(const TypePtr& t) {
         case TyKind::AsyncLock:
         case TyKind::AsyncQueue:
         case TyKind::TypeObj:
+        case TyKind::ClassObj:
         case TyKind::AsyncTimeout:
         case TyKind::AsyncTaskGroup:
         case TyKind::AsyncSemaphore:
@@ -1363,6 +1372,7 @@ inline bool ir_is_ref(const TypePtr& t) {
         case TyKind::AsyncLock:
         case TyKind::AsyncQueue:
         case TyKind::TypeObj:
+        case TyKind::ClassObj:
         case TyKind::AsyncTimeout:
         case TyKind::AsyncTaskGroup:
         case TyKind::AsyncSemaphore:

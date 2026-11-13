@@ -201,7 +201,7 @@ TypePtr TypeChecker::builtin_call(const std::string& n, Call& c) {
         if (n == "isinstance") {
             if (!need(2, 2)) return t_bool();
             TypePtr tt = a[1];
-            bool ok = tt && tt->kind == TyKind::Class;
+            bool ok = tt && (tt->kind == TyKind::Class || tt->kind == TyKind::ClassObj);
             if (!ok && tt && tt->kind == TyKind::Func && tt->fn) {
                 static const std::unordered_set<std::string> types = {
                     "int", "float", "str", "bool", "list",

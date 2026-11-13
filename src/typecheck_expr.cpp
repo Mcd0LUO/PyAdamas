@@ -46,7 +46,16 @@ TypePtr TypeChecker::expr(Expr& e) {
                 // 赋过的名字就是类命名空间的成员，会遮住同名全局。
                 if (auto it = class_body_attrs_.find(n.id); it != class_body_attrs_.end())
                     return it->second;
-                if (auto* sym = lookup(n.id)) return sym->ty;
+                if (auto* sym = lookup(n.id)) {
+                    // 类名在值位置是运行期类对象，不是实例。异常类仍按
+                    // 类型名使用（raise/except/throw 的既有路径）。
+                    if (sym->ty && sym->ty->kind == TyKind::Class && name_is_class(n) &&
+                        (!sym->ty->cls || !sym->ty->cls->is_exception_class)) {
+                        if (sym->ty->cls) sym->ty->cls->value_used = true;
+                        return mk_class_obj(sym->ty);
+                    }
+                    return sym->ty;
+                }
                 if (lookup_module_alias(n.id)) {
                     err(n.line, n.col,
                         std::format("module '{}' cannot be used as a value", n.id));
@@ -274,7 +283,7 @@ TypePtr TypeChecker::expr(Expr& e) {
                 if (auto* vn = dynamic_cast<Name*>(a.value.get())) {
                     if (auto mod = lookup_module_alias(vn->id)) {
                         if (auto ci = mod->classes.find(a.attr); ci != mod->classes.end())
-                            return mk_class(ci->second.cls.get());
+                            return mk_class_obj(mk_class(ci->second.cls.get()));
                         auto it = mod->globals.find(a.attr);
                         if (it == mod->globals.end()) {
                             err(a.line, a.col,
@@ -297,6 +306,10 @@ TypePtr TypeChecker::expr(Expr& e) {
                     if (ik != TyKind::Class && ik != TyKind::Struct && ik != TyKind::StructPtr)
                         return t_unknown();
                     ot = ot->sub[0];
+                }
+                if (ot->kind == TyKind::ClassObj) {
+                    if (a.attr == "__name__") return t_str();
+                    if (!ot->sub.empty()) ot = ot->sub[0];
                 }
                 if (ot->kind == TyKind::Struct || ot->kind == TyKind::StructPtr) {
                     const StructInfo* s = ot->st;

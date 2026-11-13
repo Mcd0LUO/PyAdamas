@@ -768,10 +768,6 @@ const ClassInfo* Lowerer::class_receiver_cls(const Attribute& a, TypePtr ot) {
 }
 
 void Lowerer::lower_classdef(ClassDef& c) {
-    if (!c.decorators.empty()) {
-        err(c.line, c.col, "class decorators are not supported by the code generator yet");
-        return;
-    }
     auto it = classes_.find(c.name);
     if (it == classes_.end()) return;
     const ClassInfoPtr& ci = it->second;
@@ -783,6 +779,10 @@ void Lowerer::lower_classdef(ClassDef& c) {
     int cid = cid_it->second;
     if (ci->is_exception_class) {
         // 自定义异常类不参与对象布局；注册父子关系供 except 匹配。
+        if (!c.decorators.empty()) {
+            err(c.line, c.col, "class decorators on exception classes are not supported yet");
+            return;
+        }
         call_void(RtFn::ExcRegister, {const_str(ci->name), const_str(ci->exc_parent)});
         return;
     }
@@ -854,7 +854,8 @@ void Lowerer::lower_classdef(ClassDef& c) {
         }
     }
 
-    if (!opts_.module_symbol.empty() && !opts_.is_entry)
+    bool need_class_obj = ci->value_used || !c.decorators.empty();
+    if ((!opts_.module_symbol.empty() && !opts_.is_entry) || need_class_obj)
         compile_ctor_wrapper(c, ci, cid);
 
     // 类体里的非声明语句：在类定义点执行。普通赋值是类属性，写进隐藏
@@ -958,9 +959,52 @@ void Lowerer::lower_classdef(ClassDef& c) {
         stmt(*s);
     }
     st_->class_body_attrs.clear();
+
+    if (need_class_obj) {
+        TypePtr cls_ty = mk_class(ci.get());
+        TypePtr obj_ty = mk_class_obj(cls_ty);
+        int ngi = global_idx("__pyadamas$new$" + ci->name);
+        VReg ctor = load_global(ngi, mod_.globals[static_cast<size_t>(ngi)].ty);
+        VReg obj = call_runtime(RtFn::ClassNew, obj_ty,
+                                {const_int(cid), ctor, const_str(ci->name)});
+        push_temp(obj);
+        if (!c.decorators.empty()) {
+            std::string hidden = "__pyadamas$classdeco$" + ci->name;
+            bind_name_value(hidden, obj, obj_ty);
+            for (auto it = c.decorators.rbegin(); it != c.decorators.rend(); ++it) {
+                VReg callee = expr(**it);
+                TypePtr dt = tc_.type_of(it->get());
+                FuncInfoPtr dinfo = (dt && dt->kind == TyKind::Func) ? dt->fn : nullptr;
+                Inst in;
+                in.op = IrOp::Call;
+                in.a = callee;
+                if (dinfo) {
+                    Call dc;
+                    dc.line = (*it)->line;
+                    dc.col = (*it)->col;
+                    auto arg = std::make_unique<Name>(hidden);
+                    arg->line = dc.line;
+                    arg->col = dc.col;
+                    dc.args.push_back(std::move(arg));
+                    in.args = bind_args(dc, dinfo, nullptr);
+                } else {
+                    in.args.push_back(obj);
+                }
+                TypePtr rty = dinfo && dinfo->ret ? dinfo->ret : t_unknown();
+                if (rty && rty->kind != TyKind::ClassObj && rty->kind != TyKind::Unknown) {
+                    err((*it)->line, (*it)->col, "class decorator must return a class");
+                    continue;
+                }
+                obj = def_heap(rty, std::move(in));
+                bind_name_value(hidden, obj, rty);
+            }
+        }
+        int gi = global_idx_as("__pyadamas$class$" + ci->name, obj_ty);
+        store_global(gi, obj);
+    }
 }
 
-void Lowerer::compile_ctor_wrapper(ClassDef& clsdef, const ClassInfoPtr& ci, int cid) {
+int Lowerer::compile_ctor_wrapper(ClassDef& clsdef, const ClassInfoPtr& ci, int cid) {
     (void)clsdef;
     const MethodInfo* init = ci->method("__init__");
     FuncInfoPtr sig;
@@ -1078,6 +1122,7 @@ void Lowerer::compile_ctor_wrapper(ClassDef& clsdef, const ClassInfoPtr& ci, int
     fa.imm = widx;
     VReg fv = def(fty, std::move(fa));
     store_global(gi, fv);
+    return widx;
 }
 
 LowerResult lower_module(Module& ast, TypeChecker& tc, const std::string& file,

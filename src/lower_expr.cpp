@@ -27,6 +27,30 @@ bool Lowerer::bad_elem(const TypePtr& from, const TypePtr& to) {
     return false;
 }
 
+VReg Lowerer::local_class_object(const std::string& name) {
+    auto it = classes_.find(name);
+    if (it == classes_.end()) {
+        err(0, 0, std::format("class '{}' is not available here", name));
+        return const_none();
+    }
+    TypePtr obj_ty = mk_class_obj(mk_class(it->second.get()));
+    int gi = global_idx_as("__pyadamas$class$" + name, obj_ty);
+    return load_global(gi, obj_ty);
+}
+
+VReg Lowerer::imported_class_object(const ImportedClass& ic) {
+    TypePtr obj_ty = mk_class_obj(mk_class(ic.cls.get()));
+    TypePtr fty = new_ty(TyKind::Func);
+    fty->fn = ic.ctor_sig;
+    int cgi = extern_global(ic.ctor_symbol, ic.ctor_symbol, fty);
+    VReg ctor = load_global(cgi, fty);
+    std::string qual = ic.module.empty() ? ic.cls->name : ic.module + "." + ic.cls->name;
+    VReg obj = call_runtime(RtFn::ClassNew, obj_ty,
+                            {const_int(-1), ctor, const_str(qual)});
+    push_temp(obj);
+    return obj;
+}
+
 VReg Lowerer::promote_container(VReg v, TypePtr from, TypePtr to) {
     if (!from || !to || from->kind != to->kind) return kNoReg;
     if (from->sub.empty() || to->sub.empty()) return kNoReg;
@@ -491,6 +515,7 @@ void Lowerer::assign_to(Expr& target, VReg v, TypePtr vty) {
                             static_cast<uint8_t>(f->size), f->c_unsigned);
                 break;
             }
+            if (ot && ot->kind == TyKind::ClassObj && !ot->sub.empty()) ot = ot->sub[0];
             if (ot && ot->kind == TyKind::Class && ot->cls) {
                 // `C.x = v`：写类属性的共享存储
                 if (is_class_receiver(at)) {
@@ -582,11 +607,8 @@ VReg Lowerer::expr(Expr& e) {
             }
             if (is_cell(n.id)) return read_cell(n.id);
             if (is_env(n.id)) return read_env(n.id);
-            if (imported_classes_.count(n.id)) {
-                err(e.line, e.col,
-                    std::format("class '{}' cannot be used as a value", n.id));
-                return const_none();
-            }
+            if (auto it = imported_classes_.find(n.id); it != imported_classes_.end())
+                return imported_class_object(it->second);
             if (native_aliases_.count(n.id)) {
                 err(e.line, e.col,
                     std::format("native function '{}' cannot be used as a value", n.id));
@@ -596,13 +618,8 @@ VReg Lowerer::expr(Expr& e) {
                 err(e.line, e.col, std::format("module '{}' cannot be used as a value", n.id));
                 return const_none();
             }
-            // 类名不是一个运行时可求值的值：没有类对象，构造必须在调用点
-            // 直接展开。悄悄读一个空全局槽只会得到 0，比报错难查得多。
-            if (!is_local(n.id) && classes_.count(n.id)) {
-                err(e.line, e.col,
-                    std::format("class '{}' cannot be used as a value yet", n.id));
-                return const_none();
-            }
+            // 类名在值位置：取类定义点写好的运行期类对象单例。
+            if (!is_local(n.id) && classes_.count(n.id)) return local_class_object(n.id);
             TypePtr ty = name_ty(n.id);
             if (st_->globals_decl.count(n.id) || !is_local(n.id)) {
                 Inst in;
@@ -701,11 +718,8 @@ VReg Lowerer::expr(Expr& e) {
             }
             if (auto* n = dynamic_cast<Name*>(a.value.get())) {
                 if (auto mod = resolve_module_alias(n->id)) {
-                    if (mod->classes.count(a.attr)) {
-                        err(e.line, e.col,
-                            std::format("class '{}.{}' cannot be used as a value", n->id, a.attr));
-                        return const_none();
-                    }
+                    if (auto ci = mod->classes.find(a.attr); ci != mod->classes.end())
+                        return imported_class_object(ci->second);
                 }
             }
             if (auto gi = module_member(a))
@@ -713,6 +727,15 @@ VReg Lowerer::expr(Expr& e) {
             TypePtr raw = tc_.type_of(a.value.get());
             TypePtr ot = strip_optional(raw);
             bool opt = ot != raw;
+            if (ot && ot->kind == TyKind::ClassObj) {
+                if (a.attr == "__name__") {
+                    VReg cv = expr(*a.value);
+                    VReg s = call_runtime(RtFn::ClassName, t_str(), {cv});
+                    push_temp(s);
+                    return s;
+                }
+                if (!ot->sub.empty()) ot = ot->sub[0];
+            }
             if (ot && (ot->kind == TyKind::Struct || ot->kind == TyKind::StructPtr)) {
                 const StructInfo* s = ot->st;
                 if (!s) {

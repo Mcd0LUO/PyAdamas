@@ -247,6 +247,8 @@ TypePtr TypeChecker::call(Call& c) {
                 return t_unknown();
             }
             // 类接收者 + 装饰方法：类属性里存的是包装函数，self 显式传。
+            if (is_class_receiver(*a) && ot && ot->kind == TyKind::ClassObj && !ot->sub.empty())
+                ot = ot->sub[0];
             if (is_class_receiver(*a) && ot->kind == TyKind::Class && ot->cls) {
                 const MethodInfo* m = ot->cls->method(a->attr);
                 if (m && m->decorated) {
@@ -304,12 +306,15 @@ TypePtr TypeChecker::call(Call& c) {
             for (size_t i = st->fields.size(); i < c.args.size(); ++i) expr(*c.args[i]);
             return mk_struct(st);
         }
+        bool class_value = ft->kind == TyKind::ClassObj;
+        if (class_value && !ft->sub.empty() && ft->sub[0]) ft = ft->sub[0];
         if (ft->kind == TyKind::Class) {
             // 类类型既可能是类本身，也可能是实例值：类名以外的来源
             // （变量、调用结果）都是实例，调用走 __call__。
-            bool is_instance = c.func->kind == ExprKind::Call;
-            if (auto* cn = dynamic_cast<Name*>(c.func.get()))
-                is_instance = !name_is_class(*cn);
+            bool is_instance = !class_value && c.func->kind == ExprKind::Call;
+            if (!class_value)
+                if (auto* cn = dynamic_cast<Name*>(c.func.get()))
+                    is_instance = !name_is_class(*cn);
             if (is_instance) {
                 const MethodInfo* cm = ft->cls ? ft->cls->method("__call__") : nullptr;
                 if (!ft->cls || !cm || !cm->call_sig) {
@@ -1497,11 +1502,13 @@ TypePtr TypeChecker::method_call(TypePtr recv, const std::string& name, Call& c,
             }
             if (name == "throw") {
                 argc(1, 1);
+                TypePtr a0t = a.empty() ? nullptr : a[0];
+                if (a0t && a0t->kind == TyKind::ClassObj && !a0t->sub.empty()) a0t = a0t->sub[0];
                 // 异常类（内置或自定义）等价于无消息实例。
-                bool exc_class = !a.empty() && a[0] && a[0]->kind == TyKind::Class &&
-                                 a[0]->cls && a[0]->cls->is_exception_class;
-                if (!a.empty() && a[0] && !is_unknown(a[0]) &&
-                    a[0]->kind != TyKind::Exception && !exc_class)
+                bool exc_class = a0t && a0t->kind == TyKind::Class &&
+                                 a0t->cls && a0t->cls->is_exception_class;
+                if (a0t && !is_unknown(a0t) &&
+                    a0t->kind != TyKind::Exception && !exc_class)
                     err(c.line, c.col, "throw() expects an exception instance");
                 return t_unknown();
             }
@@ -1521,11 +1528,13 @@ TypePtr TypeChecker::method_call(TypePtr recv, const std::string& name, Call& c,
             }
             if (name == "athrow") {
                 argc(1, 1);
+                TypePtr a0t = a.empty() ? nullptr : a[0];
+                if (a0t && a0t->kind == TyKind::ClassObj && !a0t->sub.empty()) a0t = a0t->sub[0];
                 // 异常类（内置或自定义）等价于无消息实例。
-                bool exc_class = a.size() == 1 && a[0] && a[0]->kind == TyKind::Class &&
-                                 a[0]->cls && a[0]->cls->is_exception_class;
-                if (a.size() == 1 && !is_unknown(a[0]) &&
-                    a[0]->kind != TyKind::Exception && !exc_class)
+                bool exc_class = a.size() == 1 && a0t && a0t->kind == TyKind::Class &&
+                                 a0t->cls && a0t->cls->is_exception_class;
+                if (a.size() == 1 && a0t && !is_unknown(a0t) &&
+                    a0t->kind != TyKind::Exception && !exc_class)
                     err(c.line, c.col, "athrow() expects an exception instance");
                 return mk_coroutine(et);
             }

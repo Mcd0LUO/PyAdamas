@@ -202,6 +202,10 @@ bool ir_module_needs_unknown_index(const IRModule& m) {
     auto registry_rtfn = [](RtFn fn) {
         switch (fn) {
             case RtFn::IsInstance:
+            case RtFn::IsInstanceClass:
+            case RtFn::ClassNew:
+            case RtFn::ClassName:
+            case RtFn::ClassRepr:
             case RtFn::IsNamedClass:
             case RtFn::IsException:
             case RtFn::IsSeq:

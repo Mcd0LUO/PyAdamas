@@ -19,6 +19,7 @@ struct ImportedClass {
     ClassInfoPtr cls;
     FuncInfoPtr ctor_sig;
     std::string ctor_symbol;
+    std::string module;  // 定义类的模块名（类对象限定名用）
 };
 
 struct ModuleInfo {

@@ -310,7 +310,7 @@ bool TypeChecker::add_implicit_field(const Attribute& a, TypePtr ty) {
 // 由编译阶段拒绝——不能在这里报错，真实代码太常见。
 void TypeChecker::classdef(ClassDef& c) {
         if (!c.decorators.empty()) {
-            unsupported.push_back("class decorator");
+            // 类装饰器在类定义点拿到运行期类对象；降级时按副作用执行。
             for (auto& d : c.decorators) expr(*d);
         }
         if (!c.keywords.empty()) {
@@ -343,6 +343,7 @@ void TypeChecker::classdef(ClassDef& c) {
             if (!is_exc_class) {
                 for (auto& b : c.bases) {
                     TypePtr bt = expr(*b);
+                    if (bt && bt->kind == TyKind::ClassObj && !bt->sub.empty()) bt = bt->sub[0];
                     if (bt && bt->kind == TyKind::Class) {
                         if (!base) base = bt->cls;
                         else extra_bases.push_back(bt->cls);
@@ -447,6 +448,7 @@ void TypeChecker::classdef(ClassDef& c) {
         class_obj_names_.insert(c.name);
         auto prev = classes_.find(c.name);
         classes_[c.name] = cls;
+        if (!c.decorators.empty()) cls->value_used = true;
         all_classes_.push_back(cls);
         (void)prev;  // 同名类重定义：后面的引用拿新类，旧实例仍按旧布局走
         if (is_exc_class) {

@@ -45,6 +45,7 @@ bool Lowerer::exc_class_name(Expr& e, std::string& out) {
     // 自定义异常类：名字的静态类型是 Class 且标记为异常类。被同名
     // 变量遮住时类型对不上，不会误判。
     TypePtr t = tc_.type_of(&e);
+    if (t && t->kind == TyKind::ClassObj && !t->sub.empty()) t = t->sub[0];
     if (t && t->kind == TyKind::Class && t->cls && t->cls->is_exception_class) {
         out = t->cls->name;
         return true;

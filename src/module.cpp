@@ -250,6 +250,8 @@ void enc_type(Enc& e, const TypePtr& t) {
         case TyKind::AsyncLock:
         case TyKind::AsyncQueue:
         case TyKind::TypeObj:
+        // 类对象跨模块签名暂不序列化：按 unknown 处理。
+        case TyKind::ClassObj:
         case TyKind::AsyncTimeout:
         case TyKind::AsyncTaskGroup:
         case TyKind::AsyncSemaphore:

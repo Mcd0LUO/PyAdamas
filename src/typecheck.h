@@ -60,6 +60,7 @@ enum class TyKind : uint8_t {
     AsyncLock,    // asyncio.Lock
     AsyncQueue,   // asyncio.Queue；sub[0] 是元素类型
     TypeObj,      // type(x) 的类型对象；sub[0] 是被表示的类型
+    ClassObj,     // 类名当值：运行期类对象；sub[0] 是 mk_class(cls)
     AsyncTimeout, // asyncio.timeout
     AsyncTaskGroup, // asyncio.TaskGroup
     AsyncSemaphore, // asyncio.Semaphore
@@ -310,6 +311,9 @@ struct ClassAttrInfo {
 
 struct ClassInfo {
     std::string name;
+    // 类名在值位置被用过（赋值、传参、类装饰器）：降级时要生成一个
+    // 运行期类对象单例。
+    bool value_used = false;
     // 基类用裸指针，所有权统一在 TypeChecker::all_classes_。
     // 类之间的继承是 DAG，但字段类型会指回类，用 shared_ptr 会成环。
     ClassInfo* base = nullptr;
@@ -692,6 +696,16 @@ inline TypePtr mk_typeobj(TypePtr inner) {
     t->sub.push_back(std::move(inner));
     return t;
 }
+inline TypePtr mk_class_obj(TypePtr cls_ty) {
+    auto t = new_ty(TyKind::ClassObj);
+    t->sub.push_back(std::move(cls_ty));
+    return t;
+}
+// 类对象类型里的 ClassInfo；不是类对象返回 nullptr。
+inline ClassInfo* class_obj_cls(const TypePtr& t) {
+    if (!t || t->kind != TyKind::ClassObj || t->sub.empty() || !t->sub[0]) return nullptr;
+    return t->sub[0]->kind == TyKind::Class ? t->sub[0]->cls : nullptr;
+}
 inline TypePtr mk_async_timeout() { return new_ty(TyKind::AsyncTimeout); }
 inline TypePtr mk_async_taskgroup() { return new_ty(TyKind::AsyncTaskGroup); }
 inline TypePtr mk_async_semaphore() { return new_ty(TyKind::AsyncSemaphore); }
@@ -843,6 +857,9 @@ inline std::string type_name_impl(const TypePtr& t, int depth) {
             return t->sub.empty() ? "future"
                                   : std::format("future[{}]", type_name_impl(t->sub[0], depth + 1));
         case TyKind::TypeObj: return "type";
+        case TyKind::ClassObj:
+            return t->sub.empty() ? "type"
+                                  : std::format("type[{}]", type_name_impl(t->sub[0], depth + 1));
         case TyKind::AsyncTimeout: return "asyncio.Timeout";
         case TyKind::AsyncTaskGroup: return "asyncio.TaskGroup";
         case TyKind::AsyncSemaphore: return "asyncio.Semaphore";
@@ -946,6 +963,10 @@ inline TypePtr join_into(const TypePtr& a, const TypePtr& b) {
     if (a->kind == TyKind::TypeObj && b->kind == TyKind::TypeObj)
         return mk_typeobj(join(a->sub.empty() ? t_unknown() : a->sub[0],
                                b->sub.empty() ? t_unknown() : b->sub[0]));
+    if (a->kind == TyKind::ClassObj && b->kind == TyKind::ClassObj) {
+        // 两个不同的类对象合并后没法静态表示，只能退 unknown。
+        return t_unknown();
+    }
     if (a->kind == TyKind::AsyncQueue && b->kind == TyKind::AsyncQueue)
         return mk_async_queue(join(a->sub.empty() ? t_unknown() : a->sub[0],
                                    b->sub.empty() ? t_unknown() : b->sub[0]));
@@ -1026,6 +1047,12 @@ inline bool assignable(const TypePtr& dst, const TypePtr& src) {
     if (dst->kind == TyKind::Future && src->kind == TyKind::Future)
         return dst->sub.empty() || src->sub.empty() || assignable(dst->sub[0], src->sub[0]);
     if (dst->kind == TyKind::TypeObj && src->kind == TyKind::TypeObj) return true;
+    if (dst->kind == TyKind::ClassObj && src->kind == TyKind::ClassObj) {
+        ClassInfo* dc = class_obj_cls(dst);
+        ClassInfo* sc = class_obj_cls(src);
+        if (!dc || !sc) return true;
+        return sc->is_subclass_of(dc);
+    }
     if (dst->kind == TyKind::AsyncTimeout && src->kind == TyKind::AsyncTimeout) return true;
     if (dst->kind == TyKind::AsyncTaskGroup && src->kind == TyKind::AsyncTaskGroup)
         return true;

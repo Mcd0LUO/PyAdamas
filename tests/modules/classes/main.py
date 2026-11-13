@@ -35,6 +35,17 @@ print(v.count, v.first, v.tag)
 w = shapes.Var()
 print(w.count, w.first, w.tag)
 
+# 导入类当值：运行期类对象、构造与 __name__
+C = shapes.Point
+z = C(6, 8)
+print(z.norm2())
+print(C.__name__)
+print(isinstance(z, C))
+
+from shapes import Point as Q
+g = Q
+print(g(9).x)
+
 # --- expect ---
 # 25
 # 5
@@ -48,3 +59,7 @@ print(w.count, w.first, w.tag)
 # 169
 # 3 1 v
 # 0 0 -
+# 100
+# Point
+# True
+# 9

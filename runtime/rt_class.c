@@ -80,6 +80,80 @@ int64_t pa_is_named_class(void* obj, PyAdamasStr* qualname) {
     return 0;
 }
 
+/* ── 运行期类对象 ───────────────────────────────────────────── */
+
+static PyAdamasClass* as_class(void* p) {
+    if (!p) return NULL;
+    PyAdamasRc* h = (PyAdamasRc*)p - 1;
+    if (!rc_index_has(h)) return NULL;
+    PyAdamasClass* c = (PyAdamasClass*)p;
+    return c->magic == PYADAMAS_CLASS_MAGIC ? c : NULL;
+}
+
+static void class_destroy(void* p) {
+    PyAdamasClass* c = (PyAdamasClass*)p;
+    if (c->name) pa_rc_dec(c->name);
+}
+
+void* pa_class_new(int64_t cid, int64_t ctor, PyAdamasStr* name) {
+    PyAdamasClass* c = (PyAdamasClass*)rc_alloc((int64_t)sizeof(PyAdamasClass),
+                                                class_destroy, NULL, PYADAMAS_RC_OBJ);
+    c->magic = PYADAMAS_CLASS_MAGIC;
+    c->cid = cid;
+    c->ctor = ctor;
+    c->name = name;  /* 接管调用方的引用 */
+    return c;
+}
+
+int64_t pa_class_cid(void* cls) {
+    PyAdamasClass* c = as_class(cls);
+    return c ? c->cid : -1;
+}
+
+PyAdamasStr* pa_class_name(void* cls) {
+    PyAdamasClass* c = as_class(cls);
+    if (!c || !c->name) return pa_str_none();
+    /* 跨模块类对象存的是限定名，__name__ 只取最后一段。 */
+    const char* p = c->name->data;
+    const char* dot = NULL;
+    for (const char* q = p; *q; ++q)
+        if (*q == '.') dot = q;
+    const char* start = dot ? dot + 1 : p;
+    int64_t len = dot ? c->name->len - (int64_t)(start - p) : c->name->len;
+    /* 总是返回新字符串：调用方按临时堆值管理。 */
+    return str_new(start, len);
+}
+
+PyAdamasStr* pa_class_repr(void* cls) {
+    PyAdamasClass* c = as_class(cls);
+    const char* name = c && c->name ? c->name->data : "?";
+    int64_t n = c && c->name ? c->name->len : 1;
+    const char* pre = "<class '";
+    const char* post = "'>";
+    int64_t plen = 8, slen = 2;
+    PyAdamasStr* s = str_alloc(plen + n + slen);
+    char* p = (char*)s->data;
+    memcpy(p, pre, (size_t)plen);
+    memcpy(p + plen, name, (size_t)n);
+    memcpy(p + plen + n, post, (size_t)slen);
+    return s;
+}
+
+int64_t pa_isinstance_class(void* obj, void* cls) {
+    PyAdamasClass* c = as_class(cls);
+    if (!c) {
+        /* type(x) 之类返回的字符串：按类名比较。 */
+        if (pa_is_str(cls)) {
+            PyAdamasStr* s = (PyAdamasStr*)cls;
+            return pa_is_named_class(obj, s);
+        }
+        return 0;
+    }
+    if (c->cid >= 0) return pa_isinstance(obj, c->cid);
+    if (c->name) return pa_is_named_class(obj, c->name);
+    return 0;
+}
+
 /* super()：从实例的动态 MRO 里找 after 类之后的第一个「自己声明了
    该槽」的类，返回它的实现。没有就按 AttributeError 抛。 */
 void* pa_super_lookup(void* obj, int64_t after_cid, int64_t slot, PyAdamasStr* name) {

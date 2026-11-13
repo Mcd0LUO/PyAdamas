@@ -523,6 +523,20 @@ VReg Lowerer::lower_call(Call& c) {
         }
     }
 
+    // 类对象值当构造器：静态类型仍是 ClassObj[Class]，按原类展开构造。
+    if (TypePtr ft0 = tc_.type_of(c.func.get()); ft0 && ft0->kind == TyKind::ClassObj) {
+        ClassInfo* cls = class_obj_cls(ft0);
+        if (cls) {
+            if (auto it = classes_.find(cls->name);
+                it != classes_.end() && it->second.get() == cls)
+                return lower_construct(c, it->second);
+            for (auto& [iname, ic] : imported_classes_)
+                if (ic.cls.get() == cls) return construct_imported(ic, c, mk_class(cls));
+        }
+        err(c.line, c.col, "class value is not available for construction here");
+        return const_none();
+    }
+
     // 方法调用
     if (c.func->kind == ExprKind::Attribute)
         return lower_method_call(static_cast<Attribute&>(*c.func), c);

@@ -30,6 +30,12 @@ void Lowerer::print_value(VReg v, TypePtr ty, int line, int col) {
             call_void(RtFn::PrintStr, {v});
             call_void(RtFn::PrintStr, {const_str("'>")});
             break;
+        case TyKind::ClassObj: {
+            VReg s = call_runtime(RtFn::ClassRepr, t_str(), {v});
+            push_temp(s);
+            call_void(RtFn::PrintStr, {s});
+            break;
+        }
         case TyKind::Dict: print_dict(v, ty, false, line, col); break;
         case TyKind::Set: print_set(v, ty, false, line, col); break;
         case TyKind::Random:
@@ -137,6 +143,12 @@ void Lowerer::print_value_to_file(VReg v, TypePtr ty, int line, int col) {
             call_void(RtFn::FileWrite, {f, const_str("<class '")});
             call_void(RtFn::FileWrite, {f, v});
             call_void(RtFn::FileWrite, {f, const_str("'>")});
+            return;
+        }
+        case TyKind::ClassObj: {
+            VReg s = call_runtime(RtFn::ClassRepr, t_str(), {v});
+            push_temp(s);
+            call_void(RtFn::FileWrite, {f, s});
             return;
         }
         case TyKind::Dict: print_dict(v, ty, true, line, col); return;

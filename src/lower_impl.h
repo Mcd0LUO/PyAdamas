@@ -1118,7 +1118,7 @@ private:
     bool builtin_value(const std::string& module, const std::string& member, VReg& out,
                        TypePtr& ty);
     static std::optional<RtFn> native_fn(const std::string& module, const std::string& member);
-    void compile_ctor_wrapper(ClassDef& clsdef, const ClassInfoPtr& ci, int cid);
+    int compile_ctor_wrapper(ClassDef& clsdef, const ClassInfoPtr& ci, int cid);
 
     // ── 类 ──────────────────────────────────────────────────────
 
@@ -1303,6 +1303,7 @@ private:
             case TyKind::Exception: return t->name.empty() ? "Exception" : t->name;
             case TyKind::Class: return t->cls ? t->cls->name : "object";
             case TyKind::TypeObj: return "type";
+            case TyKind::ClassObj: return "type";
             case TyKind::AsyncEvent: return "Event";
             case TyKind::AsyncLock: return "Lock";
             case TyKind::AsyncQueue: return "Queue";
@@ -1376,6 +1377,9 @@ private:
     // 容器元素隐式数值提升（list[int] → list[float] / tuple 同理）：
     // 逐元素转换并重新分配。不支持时返回 kNoReg。
     VReg promote_container(VReg v, TypePtr from, TypePtr to);
+    // 运行期类对象：本地类读类定义点写入的隐藏全局；导入类按需构造。
+    VReg local_class_object(const std::string& name);
+    VReg imported_class_object(const ImportedClass& ic);
     VReg lower_dunder_eq(VReg l, TypePtr lt, VReg r, TypePtr rt, bool ne);
     // 类作为 dict/set key：__hash__ 和 __eq__ 都存在时返回两个 vtable
     // 槽号，否则 (-1, -1)（运行时按机器字哈希/比较）。

@@ -548,6 +548,23 @@ PyAdamasDict* pa_dict_copy(PyAdamasDict* src);
 int64_t pa_isinstance(void* obj, int64_t class_id);
 int64_t pa_obj_class_id(void* obj);
 int64_t pa_is_named_class(void* obj, PyAdamasStr* qualname);
+
+/* 运行期类对象：类名当值、类装饰器、isinstance 的第二个实参。
+   cid 是本模块类编号；跨模块类用 -1 + 限定名。ctor 是构造包装函数
+   地址（动态调用用，暂未启用）。name 是 owned 字符串。 */
+#define PYADAMAS_CLASS_MAGIC 0x434c415300000001LL
+typedef struct {
+    int64_t magic;
+    int64_t cid;
+    int64_t ctor;
+    PyAdamasStr* name;
+} PyAdamasClass;
+
+void* pa_class_new(int64_t cid, int64_t ctor, PyAdamasStr* name);
+int64_t pa_class_cid(void* cls);
+PyAdamasStr* pa_class_name(void* cls);
+PyAdamasStr* pa_class_repr(void* cls);
+int64_t pa_isinstance_class(void* obj, void* cls);
 void* pa_super_lookup(void* obj, int64_t after_cid, int64_t slot, PyAdamasStr* name);
 int64_t pa_is_exc(void* obj, PyAdamasStr* type);
 int64_t pa_is_seq(void* obj);

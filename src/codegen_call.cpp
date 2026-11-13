@@ -903,6 +903,7 @@ void AsmGen::gen_call_rt(const Inst& in) {
                 emit2("movq", src_op(in.args[0]), "%rdi");
                 emit2("movq", src_op(in.args[1]), "%rsi");
                 break;
+            case RtFn::ClassNew:
             case RtFn::ListAppend:
             case RtFn::ListGet:
             case RtFn::ListSetLen:
@@ -913,6 +914,7 @@ void AsmGen::gen_call_rt(const Inst& in) {
             case RtFn::DictSetDefaultFactory:
             case RtFn::DictContains:
             case RtFn::DictKeyAt:
+            case RtFn::IsInstanceClass:
             case RtFn::StrContains:
             case RtFn::DictUpdate:
             case RtFn::ListExtend:
@@ -1214,6 +1216,10 @@ void AsmGen::gen_call_rt(const Inst& in) {
             case RtFn::RangeAll:
             case RtFn::RangeToList:
             case RtFn::RangeRepr:
+                emit2("movq", src_op(in.args[0]), "%rdi");
+                break;
+            case RtFn::ClassName:
+            case RtFn::ClassRepr:
                 emit2("movq", src_op(in.args[0]), "%rdi");
                 break;
             case RtFn::AsyncioWaitFd:

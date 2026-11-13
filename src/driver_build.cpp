@@ -1264,6 +1264,7 @@ bool build_unit(Program& p, ModuleUnit& u, bool emit_object, bool entry_ir) {
                 pyadamas::ImportedClass ic;
                 ic.cls = flat;
                 ic.ctor_symbol = pyadamas::module_class_new_symbol(u.name, name);
+                ic.module = u.name;
                 if (cls->has_init) {
                     if (auto* im = cls->method("__init__"); im && im->call_sig) {
                         ic.ctor_sig = im->call_sig;

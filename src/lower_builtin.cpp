@@ -348,6 +348,7 @@ VReg Lowerer::lower_builtin_call(const std::string& name, Call& c) {
         }
         TypePtr vt = tc_.type_of(c.args[0].get());
         TypePtr tt = tc_.type_of(c.args[1].get());
+        if (tt && tt->kind == TyKind::ClassObj && !tt->sub.empty()) tt = tt->sub[0];
         TypePtr st = strip_optional(vt);
         std::string builtin;
         if (tt && tt->kind == TyKind::Func && tt->fn) builtin = tt->fn->name;
@@ -537,6 +538,8 @@ VReg Lowerer::lower_builtin_call(const std::string& name, Call& c) {
         }
         TypePtr a0 = tc_.type_of(c.args[0].get());
         TypePtr a1 = tc_.type_of(c.args[1].get());
+        if (a0 && a0->kind == TyKind::ClassObj && !a0->sub.empty()) a0 = a0->sub[0];
+        if (a1 && a1->kind == TyKind::ClassObj && !a1->sub.empty()) a1 = a1->sub[0];
         auto builtin = [](const TypePtr& t) -> std::string {
             if (t && t->kind == TyKind::Func && t->fn && t->fn->unchecked)
                 return t->fn->name;
@@ -888,6 +891,11 @@ VReg Lowerer::lower_builtin_call(const std::string& name, Call& c) {
             return s;
         }
         if (t && t->kind == TyKind::Tuple) return tuple_text(t, v);
+        if (t && t->kind == TyKind::ClassObj) {
+            VReg s = call_runtime(RtFn::ClassRepr, t_str(), {v});
+            push_temp(s);
+            return s;
+        }
         if (t && (t->kind == TyKind::Int || t->kind == TyKind::Bool ||
                   t->kind == TyKind::Float || t->kind == TyKind::Complex ||
                   t->kind == TyKind::None))
@@ -1003,6 +1011,11 @@ VReg Lowerer::lower_builtin_call(const std::string& name, Call& c) {
         if (to->kind == TyKind::Str && from && from->kind == TyKind::Tuple) {
             // str(tuple) 与 repr(tuple) 相同（CPython 也是这样）
             return tuple_text(from, v);
+        }
+        if (to->kind == TyKind::Str && from && from->kind == TyKind::ClassObj) {
+            VReg s = call_runtime(RtFn::ClassRepr, t_str(), {v});
+            push_temp(s);
+            return s;
         }
         // 容器转标量没有定义（CPython 抛 TypeError）。以前这里直接把
         // 指针当数字用，会静默给出垃圾值——宁可报错。

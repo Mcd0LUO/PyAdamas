@@ -939,6 +939,7 @@ void TypeChecker::assign(Expr& target, TypePtr value, int line, int col) {
                                     type_name(f->ty), type_name(value)));
                 return;
             }
+            if (ot->kind == TyKind::ClassObj && !ot->sub.empty()) ot = ot->sub[0];
             if (ot->kind == TyKind::Class) {
                 if (!ot->cls) return;
                 if (!ot->cls->complete && ot->cls != cur_class_) return;  // 骨架，无从判断
