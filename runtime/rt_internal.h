@@ -266,6 +266,7 @@ void pa_rc_dec(void* p);
 int64_t pa_rc_mark(void);
 void pa_rc_temp(void* p);
 void pa_rc_temp_unknown(int64_t v);
+void pa_rc_temp_take(void* p);
 void pa_rc_cleanup(int64_t mark);
 void pa_rc_shutdown(void);
 void pa_register_literals(void** objs, int64_t n);
@@ -275,7 +276,7 @@ void* pa_closure_new(int64_t code, int64_t n_caps);
 PyAdamasStr* str_alloc(int64_t len);
 PyAdamasStr* str_new(const char* p, int64_t len);
 /* cimport 外部函数返回 char* 时复制成 PyAdamasStr；NULL 对前者视为空串，
-   对后者返回 NULL（py23 的 None）。 */
+   对后者返回 NULL（PyAdamas 的 None）。 */
 PyAdamasStr* pa_str_from_cstr(const char* p);
 PyAdamasStr* pa_str_from_cstr_opt(const char* p);
 void exc_free(PyAdamasException* e);
@@ -633,6 +634,7 @@ void gc_mark(uintptr_t v);
 void gc_scan_object(PyAdamasRc* h);
 void pa_gc_add_roots(void** roots, int64_t n_roots);
 void pa_gc_init(void** roots, int64_t n_roots, void* stack_top);
+void pa_rc_stats_init(void);
 void pa_disable_unknown_index(void);
 void pa_gc_unref_child(void* p);
 void gc_drain(void);

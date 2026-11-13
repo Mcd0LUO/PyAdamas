@@ -1156,7 +1156,7 @@ VReg Lowerer::lower_method_call(Attribute& at, Call& c) {
             VReg key = expr(*c.args[0]);
             key = coerce(key, tc_.type_of(c.args[0].get()), kt);
             if (c.args.size() == 1)
-                // 缺失时返回 None（pyadamas 里 None 就是 0）
+                // 缺失时返回 None（PyAdamas 里 None 就是 0）
                 return call_runtime(RtFn::DictGetOpt, mk_optional(vt), {recv, key});
             VReg def = expr(*c.args[1]);
             def = coerce(def, tc_.type_of(c.args[1].get()), vt);
@@ -2074,7 +2074,7 @@ VReg Lowerer::lower_method_call(Attribute& at, Call& c) {
             }
             // 运行时不再做隐式 retain：容器元素的所有权由降级器按静态类型决定。
             VReg v = expr(*c.args[0]);
-            retain_elem(v, lk);
+            if (!move_fresh(v, et)) retain_elem(v, lk);
             call_void(RtFn::ListAppend, {recv, v});
             return const_none();
         }
@@ -2099,7 +2099,7 @@ VReg Lowerer::lower_method_call(Attribute& at, Call& c) {
             }
             VReg idx = coerce(expr(*c.args[0]), tc_.type_of(c.args[0].get()), t_int());
             VReg v = elem_arg(1);
-            retain_elem(v, lk);
+            if (!move_fresh(v, et)) retain_elem(v, lk);
             call_void(RtFn::ListInsert, {recv, idx, v});
             return const_none();
         }
@@ -2296,7 +2296,7 @@ VReg Lowerer::lower_cimport_call(Attribute& at, Call& c) {
         TypePtr aty = tc_.type_of(srcs[i]);
         VReg v = expr(*srcs[i]);
         if (i >= ex->params.size()) {
-            // varargs 额外实参：按 py23 实参类型选择 C 编组。
+            // varargs 额外实参：按 PyAdamas 实参类型选择 C 编组。
             CKind k = CKind::Int;
             if (aty && aty->kind == TyKind::Float) {
                 k = CKind::Float;
@@ -2341,7 +2341,7 @@ VReg Lowerer::lower_cimport_call(Attribute& at, Call& c) {
             args.push_back(v);
             continue;
         }
-        // 回调实参是 py23 函数值；codegen 负责登记闭包并换成跳板地址。
+        // 回调实参是 PyAdamas 函数值；codegen 负责登记闭包并换成跳板地址。
         if (k == CKind::Callback) {
             cargs.push_back(static_cast<uint8_t>(k));
             args.push_back(v);

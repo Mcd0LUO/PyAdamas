@@ -58,6 +58,7 @@ pyadamas tokens   script.py   # 打印 token 流
 pyadamas ir       script.py   # 打印降级后的 IR
 pyadamas asm      script.py   # 打印生成的汇编
 pyadamas build    script.py [-o out]   # 编译链接成可执行文件
+pyadamas cdecl    header.h -o out.cpya # 从头文件子集生成 .cpya 声明
 pyadamas run      script.py   # 编译、链接并运行（产物是临时文件，跑完即删）
 ```
 
@@ -153,11 +154,11 @@ tools/                    一次性脚本
 |---|---|---|
 | `tests/*.py` | 11 | 前端正例，覆盖语法与类型规则（按 AST 节点计：43 个函数 / 458 条语句 / 1714 个表达式） |
 | `tests/fail/*.py` | 52 | 反例，必须报出首行 `# expect:` 指定的错 |
-| `tests/run/*.py` | 147 | 编译 + 运行，输出与文件末尾的 `# --- expect ---` 逐行比对 |
+| `tests/run/*.py` | 148 | 编译 + 运行，输出与文件末尾的 `# --- expect ---` 逐行比对 |
 | `tests/unsupported/*.py` | 1 | `check` 必须打「没建模」标记，且 `build` 必须拒绝 |
 | `tests/diff/` | 7 个生成器 | 随机程序与 CPython 比 stdout，默认 3 种子 840 个程序 |
 | `tests/modules/` | 12 个目录 | 多模块编译 + 运行 + 二次构建缓存命中 |
-| `tests/bench/` | 用例集 | 标准库基准：同一用例分别用 PyAdamas 与 CPython 跑，`python3 tests/bench/run_bench.py` |
+| `tests/bench/` | 用例集 | 标准库与 RC/GC 基准：同一用例分别用 PyAdamas 与 CPython 跑，`python3 tests/bench/run_bench.py` |
 | 内存验收 | — | 16MB 地址空间限制下跑拼接 / 对象 / 闭包 / 容器 / 切片 / 删除 / 推导式 / 变长实参 / `with` / 装饰器 / 异常展开 / 生成器 / `yield from` / 协程 / Task / Future / fd 等待 / 异步生成器 / 异步推导式 / 环 / unknown 泄漏 |
 
 ```bash

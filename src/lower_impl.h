@@ -199,6 +199,9 @@ struct FuncCtx {
     // 表达式内部槽（and/or、条件表达式、链式比较）只是借用临时值，
     // 生命周期由临时栈负责；出口不能 dec，否则会重复释放。
     std::unordered_set<int> borrow_slots;
+    // 本函数内产生、尚未被槽/全局/字段/返回值接管的堆值：所有权还在
+    // 临时栈上，写入目标时可以「移动」而不必 inc 后再等 cleanup dec。
+    std::unordered_set<VReg> fresh_vregs;
     // 本函数产生过多少个临时堆值。0 表示整条 RC 脚手架都可以省掉。
     size_t rc_pushes = 0;
     int fn_mark_block = -1;
@@ -287,7 +290,7 @@ private:
     std::unordered_map<const ClassInfo*, int> class_ids_;
     // (声明类, 属性名) → 模块隐藏全局下标。子类读基类属性时用同一份。
     std::unordered_map<const ClassInfo*, std::unordered_map<std::string, int>> class_attr_globals_;
-    // 没有任何本模块类继承的类（跨模块继承不支持，所以这就是「终态」）：
+    // 没有任何本模块类继承的类（跨模块继承在导入方单独处理）：
     // 方法调用可以绕过 vtable 直接调用具体实现。
     std::unordered_set<const ClassInfo*> sealed_classes_;
     // 方法帧 → 运行时类。零参 super() 只在这个方法自己的帧里有效。
@@ -455,9 +458,21 @@ private:
 
     void rc_inc(VReg v) { call_void(RtFn::RcInc, {v}); }
     void rc_dec(VReg v) { call_void(RtFn::RcDec, {v}); }
+    void rc_temp_take(VReg v) { call_void(RtFn::RcTempTake, {v}); }
     // unknown 值可能是整数也可能是堆指针，交给运行时按注册表判断。
     void rc_inc_unknown(VReg v) { call_void(RtFn::RcIncUnknown, {v}); }
     void rc_dec_unknown(VReg v) { call_void(RtFn::RcDecUnknown, {v}); }
+
+    // 把刚产生的堆值的所有权从临时栈转给目标。成功返回 true，调用方
+    // 跳过 retain；目标类型和源类型都不是堆时返回 false（无需持有引用）。
+    bool move_fresh(VReg v, const TypePtr& dst) {
+        if (!st_->fresh_vregs.count(v)) return false;
+        TypePtr src = vreg_ty(v);
+        if (!ir_is_heap(dst) && !ir_is_heap(src)) return false;
+        st_->fresh_vregs.erase(v);
+        rc_temp_take(v);
+        return true;
+    }
     // 槽/字段/全局按「是否可能装着非堆值」选释放方式。
     void release_slot_value(int slot, TypePtr ty, bool maybe_unknown) {
         VReg v = load_slot(slot, ty);
@@ -498,7 +513,10 @@ private:
     // 产生一个堆值：把它交给临时栈，调用方不需要再管这个初始引用。
     VReg def_heap(TypePtr ty, Inst in) {
         VReg v = def(ty ? ty : t_unknown(), std::move(in));
-        if (ir_is_heap(ty)) push_temp(v);
+        if (ir_is_heap(ty)) {
+            push_temp(v);
+            st_->fresh_vregs.insert(v);
+        }
         return v;
     }
 
@@ -623,7 +641,8 @@ private:
             st_->fn->slot_ty[slot] = dst = src;
             st_->fn->slot_owned[static_cast<size_t>(slot)] = ir_is_heap(src);
         }
-        retain_for_store(dst, v);
+        bool moved = !st_->borrow_slots.count(slot) && move_fresh(v, dst);
+        if (!moved) retain_for_store(dst, v);
         if (ir_is_heap(dst)) {
             // 堆槽收到 unknown/None 等非堆值后，槽里可能装着整数：之后
             // 所有旧值释放都改用注册表判断，避免把整数当指针 dec。
@@ -641,7 +660,8 @@ private:
     void store_global(int gi, VReg v) {
         TypePtr dst = mod_.globals[gi].ty;
         TypePtr src = vreg_ty(v);
-        retain_for_store(dst, v);
+        bool moved = move_fresh(v, dst);
+        if (!moved) retain_for_store(dst, v);
         bool unknown = dst && dst->kind == TyKind::Unknown;
         if (ir_is_heap(dst) || unknown) {
             // unknown 全局和老值释放都走注册表：槽里可能装着整数。
@@ -663,7 +683,8 @@ private:
     }
 
     void store_field(TypePtr fty, VReg obj, int off, VReg v) {
-        retain_for_store(fty, v);
+        bool moved = move_fresh(v, fty);
+        if (!moved) retain_for_store(fty, v);
         bool unknown = fty && fty->kind == TyKind::Unknown;
         if (unknown) {
             TypePtr src = vreg_ty(v);
@@ -834,7 +855,14 @@ private:
         // 值语义：返回 struct 时复制 payload，caller 拿到的是独立对象。
         if (v != kNoReg && vty && vty->kind == TyKind::Struct && vty->st)
             v = struct_copy(v, vty->st);
-        if (v != kNoReg && ir_is_heap(vty)) rc_inc(v);
+        // 刚产生、还没存过的新值直接把临时栈上的引用转给 caller。
+        bool moved = false;
+        if (v != kNoReg && vty && ir_is_heap(vty) && st_->fresh_vregs.count(v)) {
+            st_->fresh_vregs.erase(v);
+            rc_temp_take(v);
+            moved = true;
+        }
+        if (v != kNoReg && ir_is_heap(vty) && !moved) rc_inc(v);
         if (st_->fn_mark != kNoReg && st_->rc_pushes > 0) rc_cleanup(st_->fn_mark);
         release_slots();
         if (st_->is_entry) {
@@ -1210,7 +1238,7 @@ private:
         return static_cast<int>(mod_.extern_vars.size()) - 1;
     }
 
-    // extern 变量在 py23 侧的类型；ptr[Struct] 保留结构体指针身份。
+    // extern 变量在 PyAdamas 侧的类型；ptr[Struct] 保留结构体指针身份。
     TypePtr cvar_type(const CVar& v) {
         TypePtr t = ckind_type(v.kind);
         if (v.kind == CKind::Ptr && !v.struct_name.empty()) {

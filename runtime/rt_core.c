@@ -39,6 +39,30 @@ static int rc_index_off;
    清扫垃圾容器时对这类子对象直接走正常 RC 释放。 */
 static int gc_untracked_leaves;
 
+/* RC/GC 统计：PYADAMAS_RC_STATS=1 时在退出时打印。
+   统计本身只是一个可预测的全局分支，不改变所有权语义。 */
+static int rc_stats_on;
+static int64_t stat_rc_inc;
+static int64_t stat_rc_dec;
+static int64_t stat_rc_dec_unknown;
+static int64_t stat_rc_temp;
+static int64_t stat_rc_cleanup;
+static int64_t stat_rc_free;
+static int64_t stat_gc_runs;
+static int64_t stat_gc_freed;
+static int64_t stat_gc_live;
+
+static void rc_stats_dump(void) {
+    fprintf(stderr,
+            "[rc] inc=%lld dec=%lld dec_unknown=%lld temp=%lld cleanup=%lld free=%lld "
+            "gc_runs=%lld gc_freed=%lld gc_live=%lld\n",
+            (long long)stat_rc_inc, (long long)stat_rc_dec,
+            (long long)stat_rc_dec_unknown, (long long)stat_rc_temp,
+            (long long)stat_rc_cleanup, (long long)stat_rc_free,
+            (long long)stat_gc_runs, (long long)stat_gc_freed,
+            (long long)stat_gc_live);
+}
+
 #define PYADAMAS_RC_UNTRACKED 2
 
 /* 短字符串 freelist。split / capitalize / join 这类路径会高频产生
@@ -236,6 +260,7 @@ void pa_rc_dec(void* p);
    用于「结果类型静态不可知」的跨 await/gather 值。 */
 void pa_rc_dec_unknown(int64_t v) {
     if (!v) return;
+    if (rc_stats_on) stat_rc_dec_unknown++;
     PyAdamasRc* h = (PyAdamasRc*)(uintptr_t)((uint64_t)v - (uint64_t)PYADAMAS_RC_HDR);
     if (!rc_index_has(h)) return;
     if (h->rc == PYADAMAS_RC_IMMORTAL) return;
@@ -331,6 +356,7 @@ void pa_print_any(int64_t v) {
 }
 
 void pa_rc_inc(void* p) {
+    if (rc_stats_on) stat_rc_inc++;
     if (!p) return;
     PyAdamasRc* h = (PyAdamasRc*)p - 1;
     if (h->rc == PYADAMAS_RC_IMMORTAL) return;
@@ -339,6 +365,7 @@ void pa_rc_inc(void* p) {
 }
 
 void pa_rc_dec(void* p) {
+    if (rc_stats_on) stat_rc_dec++;
     if (!p) return;
     PyAdamasRc* h = (PyAdamasRc*)p - 1;
     if (h->rc == PYADAMAS_RC_IMMORTAL) return;
@@ -349,6 +376,7 @@ void pa_rc_dec(void* p) {
     }
     if (h->rc <= 0) panic_c("refcount decrement on a freed object");
     if (--h->rc == 0) {
+        if (rc_stats_on) stat_rc_free++;
         rc_unlink(h);
         if (h->dtor) h->dtor(p);
         if (h->kind == PYADAMAS_RC_STR) str_pool_put(h);
@@ -368,6 +396,7 @@ int64_t temp_cap;
 int64_t pa_rc_mark(void) { return temp_len; }
 
 void pa_rc_temp(void* p) {
+    if (rc_stats_on) stat_rc_temp++;
     if (!p) return;
     PyAdamasRc* h = (PyAdamasRc*)p - 1;
     if (h->rc == PYADAMAS_RC_IMMORTAL) return;
@@ -382,8 +411,22 @@ void pa_rc_temp(void* p) {
 }
 
 void pa_rc_cleanup(int64_t mark) {
+    if (rc_stats_on) stat_rc_cleanup++;
     if (mark < 0 || mark > temp_len) panic_c("invalid temporary stack mark");
     while (temp_len > mark) pa_rc_dec(temp_stack[--temp_len]);
+}
+
+/* 把临时栈上的一个新值取走：所有权转给槽/字段/返回值，cleanup 不再
+   释放它。降级器只在「刚产生、未被别名」的值上调用，所以最多命中一次；
+   从后往前找，允许中间还夹着别的临时值。 */
+void pa_rc_temp_take(void* p) {
+    if (!p) return;
+    for (int64_t i = temp_len - 1; i >= 0; --i) {
+        if (temp_stack[i] == p) {
+            temp_stack[i] = temp_stack[--temp_len];
+            return;
+        }
+    }
 }
 
 /* unknown 值入临时栈：先按 RC 索引确认是堆对象，再接管调用者的引用。
@@ -785,6 +828,14 @@ void pa_gc_init(void** roots, int64_t n_roots, void* stack_top) {
     gc_ready = 1;
 }
 
+/* 入口调用：按环境变量打开 RC/GC 统计。统计关闭时热路径只有一个
+   可预测的全局分支。 */
+void pa_rc_stats_init(void) {
+    if (!getenv("PYADAMAS_RC_STATS")) return;
+    rc_stats_on = 1;
+    atexit(rc_stats_dump);
+}
+
 /* 整程序无 unknown 值、不涉及 asyncio/生成器时，入口调用这里关掉
    存活堆索引；此后 rc_index_put/del/has 都是空操作。RC 变精确后，
    字符串这类叶子对象也移出 GC 堆链（不可能成环，RC 归零即释放）。 */
@@ -827,6 +878,7 @@ void pa_gc_collect(void) {
         alloc_since_gc = 0;
         return;
     }
+    if (rc_stats_on) stat_gc_runs++;
     double t0 = 0, t1 = 0, t2 = 0, t3 = 0, t4 = 0;
     if (getenv("PYADAMAS_GC_TIMING")) t0 = gc_now_ms();
     size_t n = gc_tracked_count;
@@ -912,6 +964,7 @@ void pa_gc_collect(void) {
             live += h->size + PYADAMAS_RC_HDR;
             h->marked = 0;
         } else {
+            if (rc_stats_on) stat_gc_freed++;
             rc_unlink(h);
             if (h->kind == PYADAMAS_RC_OBJ)
                 free_attached_exception((char*)h + PYADAMAS_RC_HDR, h->size);
@@ -928,6 +981,7 @@ void pa_gc_collect(void) {
         }
         h = next;
     }
+    stat_gc_live = live;
     gc_sweeping = 0;
     if (t0) t4 = gc_now_ms();
 

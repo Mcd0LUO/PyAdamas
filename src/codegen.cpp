@@ -281,8 +281,8 @@ std::string AsmGen::gen(const IRModule& m) {
 
         for (size_t i = 0; i < m.funcs.size(); ++i) emit_function(*m.funcs[i], static_cast<int>(i));
 
-        // C 回调跳板：C 只传函数地址，不传环境，所以调用点先把 py23 闭包
-        // 登记到每个签名专属的槽里；跳板把闭包放进 %r10（py23 的 env 约定）
+        // C 回调跳板：C 只传函数地址，不传环境，所以调用点先把 PyAdamas 闭包
+        // 登记到每个签名专属的槽里；跳板把闭包放进 %r10（PyAdamas 的 env 约定）
         // 后直接跳到函数体。32 位/布尔参数按声明宽度提升到 64 位。
         if (!m.cb_sigs.empty()) {
             out_ += "\n# ---- callback trampolines ----\n";
@@ -336,6 +336,7 @@ std::string AsmGen::gen(const IRModule& m) {
             out_ += std::format("\tmovq ${}, %rsi\n", local_global_count());
             out_ += "\tmovq %rbp, %rdx\n";
             out_ += "\tcall pa_gc_init\n";
+            out_ += "\tcall pa_rc_stats_init\n";
             if (disable_unknown_index_)
                 out_ += "\tcall pa_disable_unknown_index\n";
             out_ += "\tleaq .Lstrtab(%rip), %rdi\n";

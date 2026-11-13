@@ -793,7 +793,7 @@ void AsmGen::gen_call_extern(const Inst& in) {
                         break;
                     case CKind::Str:
                     case CKind::OptStr: {
-                        // C 返回的 char* 不能直接交给 py23：需要复制成
+                        // C 返回的 char* 不能直接交给 PyAdamas：需要复制成
                         // PyAdamasStr。NULL 对 str 视为空串，对 Optional[str]
                         // 保持 None。
                         spill_fp_slots();
@@ -1150,6 +1150,7 @@ void AsmGen::gen_call_rt(const Inst& in) {
             case RtFn::RcDec:
             case RtFn::RcTemp:
             case RtFn::RcTempUnknown:
+            case RtFn::RcTempTake:
             case RtFn::RcCleanup:
             case RtFn::RcIncUnknown:
             case RtFn::RcDecUnknown:

@@ -603,8 +603,10 @@ longjmp 回同步调用点。GC 清扫和进程退出不跑析构器，但会单
 | `pa_rc_dec_unknown` | `(i64) -> void` | unknown 值按堆注册表保守释放；不是堆指针就什么也不做 |
 | `pa_rc_dec` | `(void*) -> void` | 引用 -1；归零时调 `dtor` 并释放整块 |
 | `pa_rc_temp` | `(void*) -> void` | 表达式临时值入栈，接管产生者的引用 |
+| `pa_rc_temp_take` | `(void*) -> void` | 把临时栈上的新值取走，所有权转给槽/字段/返回值 |
 | `pa_rc_mark` | `() -> i64` | 返回临时值栈当前水位 |
 | `pa_rc_cleanup` | `(i64 mark) -> void` | 释放到指定水位 |
+| `pa_rc_stats_init` | `() -> void` | 入口按 `PYADAMAS_RC_STATS` 打开统计，退出时打印 `[rc] ...` |
 | `pa_rc_shutdown` | `() -> void` | 入口函数退出时释放临时栈自身存储 |
 | `pa_register_literals` | `(void** objs, i64 n) -> void` | 把模块的静态字符串字面量登记进 RC 索引（只登记，不挂 GC 链） |
 | `pa_closure_new` | `(i64 code, i64 n_caps) -> closure*` | 分配闭包负载并挂 cell 析构器 |
@@ -706,6 +708,10 @@ longjmp 回同步调用点。GC 清扫和进程退出不跑析构器，但会单
 - 函数形参在入口统一 retain 一份，出口释放；
 - 返回值在返回处 retain，调用方拿到的是新引用；
 - 每个新堆值带着 `rc=1` 进临时值栈，语句 / 循环 / 函数边界按 mark 清理。
+- **新值移动**：刚产生、还没被别名的堆值写入槽 / 全局 / 字段 / 容器元素，
+  或直接作为返回值时，降级器用 `pa_rc_temp_take` 把临时栈上的引用直接转给
+  目标，省掉「retain 一次、cleanup 再 dec 一次」；写入后被别名或再次读取时
+  不再移动，按普通 retain 处理。
 
 临时值栈让降级器不用做活跃性分析：就算某个分支、`continue`、`break`
 跳过一条清理路径，下一层边界也会兜底。代价是纯堆操作会多几条调用；

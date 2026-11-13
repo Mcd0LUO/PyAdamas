@@ -444,8 +444,8 @@ void Lowerer::assign_to(Expr& target, VReg v, TypePtr vty) {
                 TypePtr vt = ot->sub.size() > 1 ? ot->sub[1] : t_unknown();
                 idx = coerce(idx, tc_.type_of(s.slice.get()), kt);
                 v = coerce(v, src_ty, vt);
-                retain_elem(idx, own_kind(kt));
-                retain_elem(v, own_kind(vt));
+                if (!move_fresh(idx, kt)) retain_elem(idx, own_kind(kt));
+                if (!move_fresh(v, vt)) retain_elem(v, own_kind(vt));
                 call_void(RtFn::DictSet, {obj, idx, v});
                 break;
             }
@@ -457,7 +457,9 @@ void Lowerer::assign_to(Expr& target, VReg v, TypePtr vty) {
             if (ot && ot->kind == TyKind::List && !ot->sub.empty())
                 v = coerce(v, src_ty, ot->sub[0]);
             // 运行时 list_set 只负责 dec 旧值；新值的 retain 在这里做。
-            retain_elem(v, list_kind(strip_optional(ot)));
+            bool moved = ot && ot->kind == TyKind::List && !ot->sub.empty() &&
+                         move_fresh(v, ot->sub[0]);
+            if (!moved) retain_elem(v, list_kind(strip_optional(ot)));
             Inst in;
             in.op = IrOp::IndexStore;
             in.a = obj;
