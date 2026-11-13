@@ -694,14 +694,19 @@ class Connection:
 
 初值是 `None` 的字段类型记 unknown 而不是 `None`——否则后面每一处 `self.sock.send(...)` 都会被判死。推断出来的字段赋值时不检查类型（`self.x = 1` 之后再 `self.x = "s"` 只是把类型放宽成 unknown），只有写了标注的字段才严格。
 
-**看不见的父类**。基类是外部导入的类型（`unittest.TestCase`、`OrderedDict`）时，它的字段和方法我们看不到，这个类就是「开放」的：查不到 `self.xxx` / `self.method()` 时按 unknown 放过，不报错。标准库里每个测试类都继承 `TestCase` 再调 `self.assertEqual`，不放过就是大面积误杀。
+**看不见的父类**。基类是非 PyAdamas 模块的外部类型（`unittest.TestCase`、
+`OrderedDict`）时，它的字段和方法我们看不到，这个类就是「开放」的：查不到
+`self.xxx` / `self.method()` 时按 unknown 放过，不报错。标准库里每个测试类都
+继承 `TestCase` 再调 `self.assertEqual`，不放过就是大面积误杀。
 
 **多继承**。`class C(A, B)` 用标准 C3 线性化算 MRO，方法查找、vtable 填充和
 `super()` 都沿这条链。第一个基类仍提供字段布局前缀；附加基类只能复用
 主基类布局里已有的字段（共享祖先的菱形可以，新增字段不行）。
 方法槽在模块内按名字全局分配，同名覆盖在任意 MRO 路径上写同一个槽。
 零参 `super().m(...)` 支持协作式调用：运行期按实例真实 MRO 找下一实现；
-显式 `super(C, self)` 尚未支持。
+显式 `super(C, self)` 尚未支持。导入的 PyAdamas 模块类可以作为主基类被继承：
+字段布局、方法覆盖、`super()` 和 `isinstance` 都按跨模块接口工作；导入类不能
+作为多继承的附加基类。
 
 **类属性与 `@classmethod`**。类体里的普通赋值是类属性，存进模块里的一个
 隐藏全局，所有实例共享同一份：
@@ -990,7 +995,7 @@ print(sorted(users, key=by_name))   # 键是 str，按字符串比
 `isinstance(x, T)` 的第二个参数支持内置类型名（int/float/str/bool/list/
 tuple/dict/set/complex/object）和本地类；静态类型确定时编译期折叠，
 unknown 值上对带运行期类型标签的类型（str/list/dict/complex）走运行时
-检查，类走 MRO 检查；导入类目标暂不支持。
+检查，类走 MRO 检查；导入类目标按运行期限定名沿实例 MRO 匹配。
 `getattr` / `setattr` / `hasattr` 只支持类实例，属性名必须是字符串字面量：
 `getattr`/`setattr` 支持字段和 property（property setter 暂不支持），
 `hasattr` 对存在的字段/方法/property 编译期返回 True/False。
