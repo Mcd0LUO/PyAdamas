@@ -61,15 +61,16 @@
 | 0.134 | `finally` 体内的 `return`/`break`/`continue`；`throw()`/`athrow()` 接受异常类；自定义 `__aiter__` |
 | 0.135 | 语言边角收尾：函数内定义类、类体 lambda、`__format__`/`__bool__`/`__reversed__`、`iter(__iter__)`、`hasattr`/`setattr` 扩展、`C.m(obj, ...)`、异步生成器表达式、导入类字段子模式、list/dict 元素 int → float 提升；模块格式 8 |
 | 0.136 | 异构元组 `repr()`/`str()`、`set` 元素 int → float 提升、导出类 `__init__` 的 `*args`/`**kwargs`、`asyncio.Queue` 的 float 元素；修正 `pa_dict_key_at` 的浮点返回 ABI |
+| 0.137 | 方法装饰器返回类型未知时的 unknown 间接调用；修复恒等装饰器在方法上的误拒 |
 | 许可证 | Apache-2.0（见 [LICENSE](../LICENSE) / [NOTICE](../NOTICE)） |
 
-## 当前状态（0.136）
+## 当前状态（0.137）
 
 流水线 `源码 → 词法 → AST → lambda 脱糖 → 类型检查 → IR → x86-64 汇编 → 可执行文件` 已打通。
 
 - **语言面**：标量、字符串、`bytes`（含迭代与 `%` 格式化）、列表/元组/字典/集合、切片读写、闭包/lambda/`*args`/`**kwargs`/装饰器、推导式、`with`、异常值（`args`/`raise ... from`/自定义异常）、类（字段/方法/C3 多继承/零参 `super()`/`@staticmethod`/`@classmethod`/`@property`/类属性）、`match/case`、`del`、复数字面量、f-string 格式说明、dunder 协议（含装饰 dunder、`__call__` 与方法值）、`Generator[Y, S, R]` 标注、`open`/`input`/`sys.stdin`。
 - **标准库**：`math`/`sys`/`asyncio`/`random`/`os`/`os.path`/`subprocess`/`time`/`itertools`/`collections`/`functools`/`json`/`string`/`re`/`datetime`/`pathlib`/`csv`。
-- **验证**：146 个运行用例、52 个反例、11 个模块目录；差分 runner 已自举，默认 840 例。
+- **验证**：147 个运行用例、52 个反例、11 个模块目录；差分 runner 已自举，默认 840 例。
 - **主要缺口**：C FFI/BLAS；asyncio 边角。
 
 ## 下一步

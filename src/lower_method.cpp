@@ -170,19 +170,31 @@ VReg Lowerer::lower_method_call(Attribute& at, Call& c) {
                 const ClassAttrInfo* ca = cls->class_attr(at.attr);
                 FuncInfoPtr winfo =
                     (ca && ca->ty && ca->ty->kind == TyKind::Func) ? ca->ty->fn : nullptr;
-                if (!ca || !winfo) {
+                if (!ca) {
                     err(c.line, c.col,
                         std::format("decorated method '{}.{}' is not available here",
                                     cls->name, at.attr));
                     return const_none();
                 }
                 VReg fv = class_attr_load(cls, ca);
-                std::vector<VReg> args = bind_args(c, winfo, nullptr);
+                std::vector<VReg> args;
+                TypePtr rt = t_unknown();
+                if (winfo) {
+                    std::vector<VReg> bound = bind_args(c, winfo, nullptr);
+                    args.insert(args.end(), bound.begin(), bound.end());
+                    rt = winfo->ret ? winfo->ret : t_unknown();
+                } else {
+                    if (!c.keywords.empty()) {
+                        err(c.line, c.col,
+                            "decorated method with unknown signature does not take keyword arguments");
+                        return const_none();
+                    }
+                    for (auto& a : c.args) args.push_back(expr(*a));
+                }
                 Inst in;
                 in.op = IrOp::Call;
                 in.a = fv;
                 in.args = std::move(args);
-                TypePtr rt = winfo->ret ? winfo->ret : t_unknown();
                 return def_heap(rt, std::move(in));
             }
             if (m->kind == MethodKind::Normal) {
@@ -262,19 +274,33 @@ VReg Lowerer::lower_method_call(Attribute& at, Call& c) {
             // 装饰后的方法值存在类属性里：加载出来，把 self 作为第一个
             // 实参传进去（装饰器按普通函数值被调用）。
             const ClassAttrInfo* ca = recv_ty->cls->class_attr(at.attr);
-            if (!ca || !m->call_sig) {
+            if (!ca) {
                 err(c.line, c.col,
                     std::format("decorated method '{}' is not available here", at.attr));
                 return const_none();
             }
             VReg fv = class_attr_load_dyn(recv, recv_ty->cls, ca);
-            std::vector<VReg> args = bind_args(c, m->call_sig, nullptr);
-            args.insert(args.begin(), recv);
+            std::vector<VReg> args;
+            args.push_back(recv);
+            TypePtr rt = t_unknown();
+            if (m->call_sig) {
+                std::vector<VReg> bound = bind_args(c, m->call_sig, nullptr);
+                args.insert(args.end(), bound.begin(), bound.end());
+                rt = m->call_sig->ret ? m->call_sig->ret : t_none();
+            } else {
+                // 装饰器返回类型未知：没有签名可重排，只接受纯位置实参，
+                // 求值后按机器字原样转发，结果也按 unknown 处理。
+                if (!c.keywords.empty()) {
+                    err(c.line, c.col,
+                        "decorated method with unknown signature does not take keyword arguments");
+                    return const_none();
+                }
+                for (auto& a : c.args) args.push_back(expr(*a));
+            }
             Inst in;
             in.op = IrOp::Call;
             in.a = fv;
             in.args = std::move(args);
-            TypePtr rt = m->call_sig->ret ? m->call_sig->ret : t_none();
             return def_heap(rt, std::move(in));
         }
         if (!m->call_sig) return const_none();

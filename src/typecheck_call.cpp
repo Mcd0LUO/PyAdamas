@@ -252,9 +252,10 @@ TypePtr TypeChecker::call(Call& c) {
                 if (m && m->decorated) {
                     if (!m->decorated_ty || m->decorated_ty->kind != TyKind::Func ||
                         !m->decorated_ty->fn) {
-                        err(c.line, c.col,
-                            std::format("decorated method '{}.{}' has no known signature",
-                                        ot->cls->name, a->attr));
+                        // 装饰器返回类型未知：没有签名可检查，实参仍要
+                        // 求值，调用结果按 unknown 处理。
+                        for (auto& arg : c.args) expr(*arg);
+                        for (auto& kw : c.keywords) expr(*kw.value);
                         return t_unknown();
                     }
                     return check_args(m->decorated_ty->fn, c);

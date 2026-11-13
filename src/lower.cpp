@@ -823,15 +823,7 @@ void Lowerer::lower_classdef(ClassDef& c) {
     std::unordered_map<std::string, int> decorated_methods;
     for (auto& m : ci->methods) {
         if (!m.def) continue;
-        if (m.decorated) {
-            if (!m.decorated_ty || m.decorated_ty->kind != TyKind::Func) {
-                err(m.def->line, m.def->col,
-                    std::format("decorated method '{}': the decorator must return a function "
-                                "with a known signature",
-                                m.name));
-                continue;
-            }
-        } else if (!m.def->decorators.empty() && m.kind == MethodKind::Normal) {
+        if (!m.decorated && !m.def->decorators.empty() && m.kind == MethodKind::Normal) {
             err(m.def->line, m.def->col,
                 "only @staticmethod / @property method decorators are supported");
             continue;

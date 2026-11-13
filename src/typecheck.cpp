@@ -59,10 +59,24 @@ void TypeChecker::check(Module& m) {
                     }
                 }
                 m.decorated_ty = known ? cur : t_unknown();
-                if (known && cur && cur->kind == TyKind::Func) {
-                    for (auto& ca : ci->class_attrs)
-                        if (ca.name == m.name) ca.ty = cur;
+                // 第一遍检查时装饰器返回类型可能还没定下来，类属性表里
+                // 没有这个方法。调用点要靠类属性里的函数值做间接调用，
+                // 无论最终类型是否已知都补一条。
+                ClassAttrInfo* attr = nullptr;
+                for (auto& ca : ci->class_attrs)
+                    if (ca.name == m.name) {
+                        attr = &ca;
+                        break;
+                    }
+                if (!attr) {
+                    ClassAttrInfo ai;
+                    ai.name = m.name;
+                    ai.ty = t_unknown();
+                    ai.owner = ci.get();
+                    ci->class_attrs.push_back(std::move(ai));
+                    attr = &ci->class_attrs.back();
                 }
+                if (known && cur && cur->kind == TyKind::Func) attr->ty = cur;
                 if (!known || !cur || cur->kind != TyKind::Func || !cur->fn) {
                     m.call_sig = nullptr;
                     continue;

@@ -28,7 +28,7 @@ PyAdamas 借 Python 的语法外壳，但**不是 CPython 的实现**：语义�
 |---|---|
 | 简单语句 | 表达式语句、赋值（含链式、多重解包）、增量赋值、标注赋值、`pass`、`return`、`break`、`continue`、`raise`、`assert`、`global`、`import` / `from ... import` |
 | 复合语句 | `if` / `elif` / `else`、`while`（含 `else`）、`for` / `async for`（含 `else`）、`def` / `async def`（含默认参数、`*`、`/`、仅限关键字参数、`*args` / `**kwargs`、装饰器、生成器/协程/异步生成器）、`class`（多继承、C3 MRO、方法与字段）、`with` / `async with`（多个项、`as`）、`try` / `except` / `else` / `finally` |
-| 能解析、不能生成 | 类装饰器、非 `@staticmethod` / `@property` 的方法装饰器、`match` 之外的软关键字写法 |
+| 能解析、不能生成 | 类装饰器、`match` 之外的软关键字写法 |
 
 `assert` 条件为假时抛出 `AssertionError`，第二个参数作为消息；没有消息时是 `assertion failed`。
 
@@ -1473,7 +1473,7 @@ print(linalg.dot([1.0, 2.0], [3.0, 4.0]))  # 11.0
 - PEP 695 泛型语法（`class C[T]:`）
 - 类：方法缺 `self`、字段赋值类型不符、访问不存在的字段或方法（`self.xxx` 与外部基类的成员除外）
 
-**代码生成层**（`check` 通过，`build` 报错）：类装饰器、返回类型未知的方法装饰器、容器转标量（`int([1, 2])`、`str({})`）、通过 unknown 函数值的 `*` / `**` 展开、`*` 位于固定形参之前且不是定长 tuple、非异常类名当异常用、跨模块继承、把类名当值用（`f = Point`）。异步生成器有 `asend`/`athrow`/`__anext__`/`aclose`。自定义异常类目前只支持 `pass` 类体（字段/方法会被拒绝）。match 额外拒绝：unknown 值上的数值/list/dict/tuple/set 内置类型模式。
+**代码生成层**（`check` 通过，`build` 报错）：类装饰器、容器转标量（`int([1, 2])`、`str({})`）、通过 unknown 函数值的 `*` / `**` 展开、`*` 位于固定形参之前且不是定长 tuple、非异常类名当异常用、跨模块继承、把类名当值用（`f = Point`）。异步生成器有 `asend`/`athrow`/`__anext__`/`aclose`。自定义异常类目前只支持 `pass` 类体（字段/方法会被拒绝）。match 额外拒绝：unknown 值上的数值/list/dict/tuple/set 内置类型模式。
 
 为什么这么分层：前端宽、后端严。`check` 的定位是「语法和类型有没有明显毛病」，可以对任意 Python 文件跑；`build` 才是「这门语言现在能不能编译它」。
 
