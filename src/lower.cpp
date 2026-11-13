@@ -213,12 +213,30 @@ void Lowerer::collect_classes(std::vector<StmtPtr>& body) {
                                                           : (f.ty && f.ty->kind == TyKind::Unknown ? 2 : 0));
                 }
                 irc.vtable.assign(static_cast<size_t>(tc_.method_slot_count()), -1);
+                irc.vtable_ext.assign(irc.vtable.size(), "");
                 int self_id = static_cast<int>(mod_.classes.size());
                 class_ids_[ci.get()] = self_id;
                 irc.qualname = mod_.runtime_name + "." + ci->name;
+                std::unordered_set<std::string> ext_seen;
+                auto add_ext = [&](const ClassAncestor& a) {
+                    if (a.module.empty() || a.name.empty()) return;
+                    std::string key = a.module + "\x1f" + a.name;
+                    if (!ext_seen.insert(key).second) return;
+                    irc.ext_bases.push_back(
+                        {module_class_vtable_symbol(a.module, a.name),
+                         module_class_own_slots_symbol(a.module, a.name),
+                         a.qualname.empty() ? a.module + "." + a.name : a.qualname});
+                };
                 for (const ClassInfo* k : ci->mro) {
+                    if (!k) continue;
                     auto kit = class_ids_.find(k);
-                    if (kit != class_ids_.end()) irc.mro.push_back(kit->second);
+                    if (kit != class_ids_.end()) {
+                        irc.mro.push_back(kit->second);
+                        continue;
+                    }
+                    // 导入祖先：mirror 元数据接在本地 MRO 之后。
+                    add_ext({k->origin_module, k->external_name(), k->origin_qualname});
+                    for (auto& a : k->ext_ancestors) add_ext(a);
                 }
                 if (irc.mro.empty()) irc.mro.push_back(self_id);
                 for (const MethodInfo& m : ci->methods)
@@ -280,16 +298,16 @@ void Lowerer::run(Module& ast) {
     for (auto* root : func_roots_) compute_closure_meta(root);
     classes_ = tc_.classes();
     collect_classes(ast.body);
-    // 跨模块继承不支持，所有子类都在本模块可见：没被任何本模块类继承的
-    // 类就是终态。方法调用点可以据此把 vtable 间接跳转换成直接调用。
-    {
+    // 跨模块继承：非入口模块的类都可能被导入方继承，不能做「没有子类」
+    // 的终结假设，否则基类模块会把方法调用直调化，丢掉子模块覆盖。
+    sealed_classes_.clear();
+    if (opts_.is_entry) {
         std::unordered_set<const ClassInfo*> has_sub;
         for (auto& [name, ci] : classes_) {
             if (!ci || ci->is_exception_class || !class_ids_.count(ci.get())) continue;
             for (const ClassInfo* k : ci->mro)
                 if (k && k != ci.get()) has_sub.insert(k);
         }
-        sealed_classes_.clear();
         for (auto& [name, ci] : classes_)
             if (ci && !ci->is_exception_class && class_ids_.count(ci.get()) &&
                 !has_sub.count(ci.get()))
@@ -786,34 +804,37 @@ void Lowerer::lower_classdef(ClassDef& c) {
         call_void(RtFn::ExcRegister, {const_str(ci->name), const_str(ci->exc_parent)});
         return;
     }
-    if (ci->base && !class_ids_.count(ci->base)) {
-        err(c.line, c.col, "inheriting from an imported class is not supported yet");
-        return;
-    }
-    for (auto* eb : ci->extra_bases) {
-        if (!class_ids_.count(eb)) {
-            err(c.line, c.col, "inheriting from an imported class is not supported yet");
-            return;
-        }
-    }
-
     // 类体语句在下面按执行语义降级；类命名空间未建模，赋值走模块全局。
 
     // 按 C3 MRO 从前向后填 vtable：MRO 中越靠前的类优先级越高，
     // 每个槽只由最先声明它的类占用。本类自己的方法稍后编译时覆盖。
     {
         auto& cv = mod_.classes[cid].vtable;
+        auto& cext = mod_.classes[cid].vtable_ext;
         for (size_t mi = 1; mi < ci->mro.size(); ++mi) {
             const ClassInfo* k = ci->mro[mi];
             auto kit = class_ids_.find(k);
-            if (kit == class_ids_.end()) continue;
-            const auto& kv = mod_.classes[kit->second].vtable;
+            if (kit != class_ids_.end()) {
+                const auto& kv = mod_.classes[kit->second].vtable;
+                const auto& ke = mod_.classes[kit->second].vtable_ext;
+                for (size_t s = 0; s < cv.size(); ++s) {
+                    if (cv[s] != -1 || (s < cext.size() && !cext[s].empty())) continue;
+                    if (s < kv.size() && kv[s] >= 0)
+                        cv[s] = kv[s];
+                    else if (s < ke.size() && !ke[s].empty())
+                        cext[s] = ke[s];
+                }
+                continue;
+            }
+            if (!k->imported()) continue;
+            // 导入基类：未覆盖的槽指向定义模块导出的 vtable 项。
+            std::string vt =
+                module_class_vtable_symbol(k->origin_module, k->external_name());
             for (const MethodInfo& km : k->methods) {
                 if (km.slot < 0 || km.slot >= static_cast<int>(cv.size())) continue;
-                if (cv[static_cast<size_t>(km.slot)] != -1) continue;
-                if (km.slot < static_cast<int>(kv.size()) &&
-                    kv[static_cast<size_t>(km.slot)] >= 0)
-                    cv[static_cast<size_t>(km.slot)] = kv[static_cast<size_t>(km.slot)];
+                size_t s = static_cast<size_t>(km.slot);
+                if (cv[s] != -1 || !cext[s].empty()) continue;
+                cext[s] = std::format("{} + {}", vt, 8 * km.slot);
             }
         }
     }
@@ -835,6 +856,8 @@ void Lowerer::lower_classdef(ClassDef& c) {
         } else if (m.slot >= 0 &&
                    m.slot < static_cast<int>(mod_.classes[cid].vtable.size())) {
             mod_.classes[cid].vtable[static_cast<size_t>(m.slot)] = fidx;
+            if (m.slot < static_cast<int>(mod_.classes[cid].vtable_ext.size()))
+                mod_.classes[cid].vtable_ext[static_cast<size_t>(m.slot)].clear();
         }
     }
 
@@ -851,6 +874,8 @@ void Lowerer::lower_classdef(ClassDef& c) {
             std::string label = std::format("{}_{}_{}", c.name, km.name, mod_.funcs.size());
             int fidx = compile_function_body(*km.def, km.sig, label, ci.get());
             mod_.classes[cid].vtable[static_cast<size_t>(km.slot)] = fidx;
+            if (km.slot < static_cast<int>(mod_.classes[cid].vtable_ext.size()))
+                mod_.classes[cid].vtable_ext[static_cast<size_t>(km.slot)].clear();
         }
     }
 

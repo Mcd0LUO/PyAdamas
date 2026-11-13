@@ -1233,6 +1233,27 @@ bool build_unit(Program& p, ModuleUnit& u, bool emit_object, bool entry_ir) {
     auto info = std::make_shared<pyadamas::ModuleInfo>();
     info->name = u.name;
     info->source_path = u.path;
+    // 导出类的完整祖先链：本地类按 C3 MRO 拍平，导入类直接沿用接口里
+    // 已展开的链。mirror 元数据靠 module/name/qualname 生成。
+    auto ancestors_of = [&](const pyadamas::ClassInfo* cls) {
+        std::vector<pyadamas::ClassAncestor> out;
+        auto add = [&](const pyadamas::ClassAncestor& a) {
+            for (auto& e : out)
+                if (e.module == a.module && e.name == a.name) return;
+            out.push_back(a);
+        };
+        if (cls->imported()) return cls->ext_ancestors;
+        for (const pyadamas::ClassInfo* k : cls->mro) {
+            if (!k || k == cls) continue;
+            if (k->imported()) {
+                add({k->origin_module, k->external_name(), k->origin_qualname});
+                for (auto& a : k->ext_ancestors) add(a);
+            } else {
+                add({u.name, k->name, u.runtime_name + "." + k->name});
+            }
+        }
+        return out;
+    };
     if (auto* sc = tc->module_scope()) {
         for (auto& [name, sym] : sc->vars) {
             if (!u.is_entry && sym.ty && sym.ty->kind == pyadamas::TyKind::Class && sym.ty->cls) {
@@ -1244,6 +1265,7 @@ bool build_unit(Program& p, ModuleUnit& u, bool emit_object, bool entry_ir) {
                 flat->name = name;
                 flat->complete = true;
                 flat->has_init = cls->has_init;
+                flat->has_field_defaults = cls->has_field_defaults;
                 flat->open = cls->is_open();
                 for (auto it = chain.rbegin(); it != chain.rend(); ++it)
                     for (auto& f : (*it)->fields) flat->fields.push_back(f);
@@ -1251,22 +1273,59 @@ bool build_unit(Program& p, ModuleUnit& u, bool emit_object, bool entry_ir) {
                 flat->match_args = cls->match_args;
                 std::map<int, pyadamas::MethodInfo> by_slot;
                 for (auto it = chain.rbegin(); it != chain.rend(); ++it)
-                    for (auto& m : (*it)->methods)
-                        if (m.call_sig) by_slot[m.slot] = m;
+                    for (auto& m : (*it)->methods) {
+                        if (!m.call_sig) continue;
+                        auto sit = by_slot.find(m.slot);
+                        if (sit != by_slot.end() &&
+                            (sit->second.name != m.name || sit->second.kind != m.kind)) {
+                            report(u.path, u.source, 0, 0,
+                                   std::format("method slot {} of '{}' is used by both '{}' and "
+                                               "'{}' (cross-module slot conflict)",
+                                               m.slot, name, sit->second.name, m.name));
+                            return false;
+                        }
+                        by_slot[m.slot] = m;
+                    }
                 for (auto& [slot, m] : by_slot) {
                     pyadamas::MethodInfo nm;
                     nm.name = m.name;
+                    nm.kind = m.kind;
                     nm.slot = slot;
                     nm.call_sig = m.call_sig;
                     nm.sig = m.call_sig;
                     flat->methods.push_back(std::move(nm));
                 }
+                // 属性描述符按方法索引重建，导入方才能识别 @property。
+                for (size_t mi = 0; mi < flat->methods.size(); ++mi) {
+                    pyadamas::MethodInfo& m = flat->methods[mi];
+                    if (!m.is_accessor()) continue;
+                    auto& pi = flat->properties[m.name];
+                    pi.owner = flat.get();
+                    switch (m.kind) {
+                        case pyadamas::MethodKind::PropertyGetter:
+                            pi.getter = static_cast<int>(mi);
+                            break;
+                        case pyadamas::MethodKind::PropertySetter:
+                            pi.setter = static_cast<int>(mi);
+                            break;
+                        case pyadamas::MethodKind::PropertyDeleter:
+                            pi.deleter = static_cast<int>(mi);
+                            break;
+                        default: break;
+                    }
+                }
+                flat->origin_module = cls->imported() ? cls->origin_module : u.name;
+                flat->origin_qualname =
+                    cls->imported() ? cls->origin_qualname : u.runtime_name + "." + name;
+                flat->ext_ancestors = ancestors_of(cls);
                 pyadamas::ImportedClass ic;
                 ic.cls = flat;
-                ic.ctor_symbol = pyadamas::module_class_new_symbol(u.name, name);
-                ic.module = u.name;
+                ic.ctor_symbol = pyadamas::module_class_new_symbol(
+                    flat->origin_module, cls->imported() ? cls->external_name() : name);
+                ic.module = flat->origin_module;
+                ic.qualname = flat->origin_qualname;
                 if (cls->has_init) {
-                    if (auto* im = cls->method("__init__"); im && im->call_sig) {
+                    if (auto* im = flat->method("__init__"); im && im->call_sig) {
                         ic.ctor_sig = im->call_sig;
                     }
                 }

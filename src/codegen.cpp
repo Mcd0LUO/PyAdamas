@@ -110,7 +110,25 @@ std::string AsmGen::gen(const IRModule& m) {
         // vtable 自身、本类声明的槽表、模块限定类名。
         if (!m.classes.empty()) {
             out_ += "\t.section .data.rel.ro,\"aw\",@progbits\n";
+            // 同名类重定义时接口导出的是最后一次绑定，符号也只导出最后一份。
+            std::unordered_map<std::string, size_t> last_cls;
+            for (size_t i = 0; i < m.classes.size(); ++i) last_cls[m.classes[i].name] = i;
             for (size_t i = 0; i < m.classes.size(); ++i) {
+                const IRClass& c = m.classes[i];
+                // 导入祖先的 mirror 元数据：cid 固定 -1，只用于限定名比较，
+                // vtable/own_slots 指向定义模块导出的表。
+                for (size_t j = 0; j < c.ext_bases.size(); ++j) {
+                    const IRClassExtBase& e = c.ext_bases[j];
+                    out_ += "\t.align 8\n";
+                    out_ += std::format(".Lvtmetaext{}_{}:\n", i, j);
+                    out_ += "\t.quad 0\n";
+                    out_ += "\t.quad -1\n";
+                    out_ += std::format("\t.quad {}\n", e.vtable_symbol);
+                    out_ += std::format("\t.quad {}\n", e.own_slots_symbol);
+                    out_ += std::format("\t.quad .Lcnameext{}_{}\n", i, j);
+                    out_ += std::format(".Lcnameext{}_{}:\n", i, j);
+                    out_ += std::format("\t.asciz \"{}\"\n", asm_escape(e.qualname));
+                }
                 out_ += "\t.align 8\n";
                 out_ += std::format(".Lvtmeta{}:\n", i);
                 out_ += std::format("\t.quad .Lvtmro{}\n", i);
@@ -118,20 +136,41 @@ std::string AsmGen::gen(const IRModule& m) {
                 out_ += std::format("\t.quad .Lvt{}\n", i);
                 out_ += std::format("\t.quad .Lvtown{}\n", i);
                 out_ += std::format("\t.quad .Lcname{}\n", i);
+                bool export_cls = !m.is_entry && !m.module_symbol.empty() &&
+                                  !c.name.empty() && last_cls[c.name] == i;
                 out_ += std::format(".Lvt{}:\n", i);
-                if (m.classes[i].vtable.empty()) out_ += "\t.quad 0\n";
-                for (int f : m.classes[i].vtable)
-                    out_ += f < 0 ? "\t.quad 0\n" : std::format("\t.quad {}\n", func_label(f));
+                if (export_cls) {
+                    std::string sym = module_class_vtable_symbol(m.module_symbol, c.name);
+                    out_ += std::format("\t.globl {}\n\t.hidden {}\n{}:\n", sym, sym, sym);
+                }
+                if (c.vtable.empty()) out_ += "\t.quad 0\n";
+                for (size_t s = 0; s < c.vtable.size(); ++s) {
+                    const std::string& ext =
+                        s < c.vtable_ext.size() ? c.vtable_ext[s] : std::string();
+                    if (!ext.empty()) {
+                        out_ += std::format("\t.quad {}\n", ext);
+                    } else if (c.vtable[s] < 0) {
+                        out_ += "\t.quad 0\n";
+                    } else {
+                        out_ += std::format("\t.quad {}\n", func_label(c.vtable[s]));
+                    }
+                }
                 out_ += std::format(".Lvtmro{}:\n", i);
-                out_ += std::format("\t.quad {}\n", m.classes[i].mro.size());
-                for (int a : m.classes[i].mro)
+                out_ += std::format("\t.quad {}\n", c.mro.size() + c.ext_bases.size());
+                for (int a : c.mro)
                     out_ += std::format("\t.quad .Lvtmeta{}\n", a);
+                for (size_t j = 0; j < c.ext_bases.size(); ++j)
+                    out_ += std::format("\t.quad .Lvtmetaext{}_{}\n", i, j);
                 out_ += std::format(".Lvtown{}:\n", i);
-                out_ += std::format("\t.quad {}\n", m.classes[i].own_slots.size());
-                for (int s : m.classes[i].own_slots)
+                if (export_cls) {
+                    std::string sym = module_class_own_slots_symbol(m.module_symbol, c.name);
+                    out_ += std::format("\t.globl {}\n\t.hidden {}\n{}:\n", sym, sym, sym);
+                }
+                out_ += std::format("\t.quad {}\n", c.own_slots.size());
+                for (int s : c.own_slots)
                     out_ += std::format("\t.quad {}\n", s);
                 out_ += std::format(".Lcname{}:\n", i);
-                out_ += std::format("\t.asciz \"{}\"\n", asm_escape(m.classes[i].qualname));
+                out_ += std::format("\t.asciz \"{}\"\n", asm_escape(c.qualname));
             }
         }
 

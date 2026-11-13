@@ -20,6 +20,7 @@ struct ImportedClass {
     FuncInfoPtr ctor_sig;
     std::string ctor_symbol;
     std::string module;  // 定义类的模块名（类对象限定名用）
+    std::string qualname;  // 定义模块发出的运行期限定名
 };
 
 struct ModuleInfo {
@@ -33,7 +34,7 @@ struct ModuleInfo {
     std::map<std::string, ImportedClass> classes;
 };
 
-inline constexpr uint16_t kModuleFormatVersion = 8;
+inline constexpr uint16_t kModuleFormatVersion = 9;
 inline constexpr uint16_t kModuleAbiVersion = 1;
 
 std::expected<std::string, std::string> encode_module_interface(const ModuleInfo& info);
@@ -49,5 +50,9 @@ std::string module_ready_symbol(const std::string& module);
 std::string module_init_symbol(const std::string& module);
 std::string module_roots_symbol(const std::string& module);
 std::string module_class_new_symbol(const std::string& module, const std::string& cls);
+// 导出类的静态 vtable 与本类声明的槽表地址。跨模块继承时导入方用它们
+// 填子类 vtable / super 查找。
+std::string module_class_vtable_symbol(const std::string& module, const std::string& cls);
+std::string module_class_own_slots_symbol(const std::string& module, const std::string& cls);
 
 }  // namespace pyadamas

@@ -75,6 +75,11 @@ VReg Lowerer::lower_super_call(Attribute& at, Call& c) {
     Inst sv;
     sv.op = IrOp::SuperVCall;
     sv.a = self;
+    // 类编号只在模块内唯一；after 类按运行期限定名定位，跨模块继承
+    // （基类方法在对象上执行 super()）才能找对位置。
+    sv.c = const_str(owner->origin_qualname.empty()
+                         ? mod_.runtime_name + "." + owner->name
+                         : owner->origin_qualname);
     sv.idx = cid->second;
     sv.imm = m->slot;
     sv.b = const_str(at.attr);

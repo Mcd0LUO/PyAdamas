@@ -155,8 +155,10 @@ int64_t pa_isinstance_class(void* obj, void* cls) {
 }
 
 /* super()：从实例的动态 MRO 里找 after 类之后的第一个「自己声明了
-   该槽」的类，返回它的实现。没有就按 AttributeError 抛。 */
-void* pa_super_lookup(void* obj, int64_t after_cid, int64_t slot, PyAdamasStr* name) {
+   该槽」的类，返回它的实现。没有就按 AttributeError 抛。
+   类编号只在模块内唯一，跨模块 super 必须按限定名定位 after 类。 */
+void* pa_super_lookup(void* obj, PyAdamasStr* after_qualname, int64_t slot,
+                      PyAdamasStr* name) {
     const int64_t* vt = inst_vtable(obj);
     if (!vt) {
         pa_raise_c("AttributeError", "'super' object has no attribute");
@@ -170,7 +172,10 @@ void* pa_super_lookup(void* obj, int64_t after_cid, int64_t slot, PyAdamasStr* n
         const int64_t* m = (const int64_t*)(uintptr_t)mro[i];
         if (!m) continue;
         if (!found) {
-            if (m[1] == after_cid) found = 1;
+            const char* cn = (const char*)(uintptr_t)m[4];
+            if (after_qualname && cn && strlen(cn) == (size_t)after_qualname->len &&
+                memcmp(cn, after_qualname->data, (size_t)after_qualname->len) == 0)
+                found = 1;
             continue;
         }
         const int64_t* own = (const int64_t*)(uintptr_t)m[3];

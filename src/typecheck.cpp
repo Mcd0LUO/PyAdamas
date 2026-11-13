@@ -242,6 +242,10 @@ TypePtr TypeChecker::parse_annotation_impl(Expr* e, int line, int depth) {
             if (id == "object" || id == "Any") return t_unknown();
             if (auto it = classes_.find(id); it != classes_.end()) return mk_class(it->second.get());
             if (auto it = structs_.find(id); it != structs_.end()) return mk_struct(it->second);
+            // 导入类写在标注里（`x: Base`）：按当前作用域里的类绑定解析。
+            if (auto* sym = lookup(id);
+                sym && sym->ty && sym->ty->kind == TyKind::Class)
+                return sym->ty;
             // 前向引用或自造类型：不阻断检查
             return t_unknown();
         }

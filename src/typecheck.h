@@ -273,6 +273,16 @@ enum class MethodKind : uint8_t {
     PropertyDeleter,
 };
 
+// 方法槽的全局键：访问器按名字前缀区分，普通/静态/类方法共用方法名。
+inline std::string method_slot_key(const std::string& name, MethodKind kind) {
+    switch (kind) {
+        case MethodKind::PropertyGetter: return "@get:" + name;
+        case MethodKind::PropertySetter: return "@set:" + name;
+        case MethodKind::PropertyDeleter: return "@del:" + name;
+        default: return name;
+    }
+}
+
 struct MethodInfo {
     std::string name;
     MethodKind kind = MethodKind::Normal;
@@ -309,6 +319,15 @@ struct ClassAttrInfo {
     const ClassInfo* owner = nullptr;  // 声明它的类
 };
 
+// 跨模块祖先描述：导入类携带的完整 MRO 链（不含自身）。方法槽与类编号
+// 都只在模块内有效，导入方靠这三项生成 mirror 元数据并引用导出的
+// vtable/own_slots 符号。
+struct ClassAncestor {
+    std::string module;
+    std::string name;
+    std::string qualname;
+};
+
 struct ClassInfo {
     std::string name;
     // 类名在值位置被用过（赋值、传参、类装饰器）：降级时要生成一个
@@ -334,6 +353,18 @@ struct ClassInfo {
     std::vector<std::string> match_args;
     // C3 线性化，self 在首位。跨模块导入的类没有运行期 MRO 表，留空。
     std::vector<ClassInfo*> mro;
+    // 跨模块导入的类的来源：定义模块、定义模块发出的限定名、完整祖先链
+    // （不含自身，MRO 顺序）。本模块定义的类这三项为空。
+    std::string origin_module;
+    std::string origin_qualname;
+    std::vector<ClassAncestor> ext_ancestors;
+    bool imported() const { return !origin_module.empty(); }
+    // 定义模块里的类名：导入时绑定名可能被改过（别名），符号必须用原名。
+    std::string external_name() const {
+        if (origin_qualname.empty()) return name;
+        auto pos = origin_qualname.rfind('.');
+        return pos == std::string::npos ? name : origin_qualname.substr(pos + 1);
+    }
     std::unordered_map<std::string, PropertyInfo> properties;
     int base_fields = 0;              // 继承来的字段数
 
@@ -455,15 +486,36 @@ struct ClassInfo {
         const MethodInfo* m = method(n);
         return m ? m->slot : -1;
     }
+    // 同一类的判断：本模块内的类比指针；导入类在接口里被拍平后可能
+    // 来自不同 ModuleInfo 副本，按定义模块 + 类名比较。
+    static bool same_class(const ClassInfo* a, const ClassInfo* b) {
+        if (a == b) return true;
+        if (!a || !b || !a->imported() || !b->imported()) return false;
+        return a->origin_module == b->origin_module &&
+               a->external_name() == b->external_name();
+    }
     bool is_subclass_of(const ClassInfo* b) const {
-        if (this == b) return true;
+        if (same_class(this, b)) return true;
+        // 导入类的祖先链可能比 mro 更长（接口里拍平过）。
+        if (b && b->imported()) {
+            for (auto& a : ext_ancestors)
+                if (a.module == b->origin_module && a.name == b->external_name())
+                    return true;
+        }
         if (!mro.empty()) {
-            for (const ClassInfo* c : mro)
-                if (c == b) return true;
+            for (const ClassInfo* c : mro) {
+                if (same_class(c, b)) return true;
+                if (!c->imported()) continue;
+                // 导入类的祖先链不在 mro 里，按接口记录展开比较。
+                for (auto& a : c->ext_ancestors)
+                    if (b && b->imported() && a.module == b->origin_module &&
+                        a.name == b->external_name())
+                        return true;
+            }
             return false;
         }
         for (const ClassInfo* p = this; p; p = p->base) {
-            if (p == b) return true;
+            if (same_class(p, b)) return true;
             for (const ClassInfo* e : p->extra_bases)
                 if (e->is_subclass_of(b)) return true;
         }
@@ -1340,6 +1392,10 @@ private:
         method_slots_.emplace(key, s);
         return s;
     }
+    // 继承导入类时把它的方法槽并进本模块的槽空间。导入模块的槽号是
+    // 独立分配的，同名不同槽或不同名同槽都会让 vtable 无法同时满足
+    // 两边的调用点，这里直接报错。
+    bool reserve_imported_method_slots(const ClassInfo* cls, int line, int col);
     // 当前方法第一个参数的名字（通常就是 self）。`self.x = 1` 只有认得出
     // 这里，才能把它当成字段声明而不是外部对象的属性写入。
     std::string cur_self_name_;

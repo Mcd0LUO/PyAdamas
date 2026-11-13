@@ -40,6 +40,43 @@ static bool c3_merge(std::vector<std::vector<ClassInfo*>>& seqs,
 
 void TypeChecker::funcdef(FunctionDef& f) { funcdef_impl(f, nullptr); }
 
+bool TypeChecker::reserve_imported_method_slots(const ClassInfo* cls, int line, int col) {
+    bool ok = true;
+    for (const MethodInfo& m : cls->methods) {
+        if (m.slot < 0) continue;
+        std::string key = method_slot_key(m.name, m.kind);
+        auto it = method_slots_.find(key);
+        if (it != method_slots_.end()) {
+            if (it->second != m.slot) {
+                err(line, col,
+                    std::format("method '{}' of imported class '{}' uses slot {}, but this "
+                                "module already assigned slot {} to it",
+                                m.name, cls->name, m.slot, it->second));
+                ok = false;
+            }
+            continue;
+        }
+        const std::string* clash = nullptr;
+        for (auto& [k, v] : method_slots_) {
+            if (v == m.slot) {
+                clash = &k;
+                break;
+            }
+        }
+        if (clash) {
+            err(line, col,
+                std::format("slot {} of imported class '{}' is already used by method '{}' in "
+                            "this module",
+                            m.slot, cls->name, *clash));
+            ok = false;
+            continue;
+        }
+        method_slots_.emplace(key, m.slot);
+        method_slot_count_ = std::max(method_slot_count_, m.slot + 1);
+    }
+    return ok;
+}
+
 void TypeChecker::funcdef_impl(FunctionDef& f, const ClassInfoPtr& owner) {
         if (!func_owners_.count(&f)) {
             func_owners_[&f] = owner;
@@ -380,6 +417,20 @@ void TypeChecker::classdef(ClassDef& c) {
         cls->is_exception_class = is_exc_class;
         cls->exc_parent = exc_parent;
         cls->extra_bases = extra_bases;
+        bool bad_multi = false;
+        if (!is_exc_class && base && base->imported() && !extra_bases.empty()) {
+            err(c.line, c.col,
+                "multiple inheritance with an imported base class is not supported yet");
+            bad_multi = true;
+        }
+        for (auto* eb : extra_bases) {
+            if (!eb->imported()) continue;
+            err(c.line, c.col,
+                "inheriting from an imported class as an additional base is not supported yet");
+            bad_multi = true;
+        }
+        if (!is_exc_class && base && base->imported() && !bad_multi)
+            reserve_imported_method_slots(base, c.line, c.col);
         for (auto* eb : extra_bases) {
             // 附加基类不能引入主基类布局里没有的字段；共享祖先（菱形
             // 的 A）只要偏移一致就允许，否则继承方法里的字段偏移会错位。
@@ -399,6 +450,7 @@ void TypeChecker::classdef(ClassDef& c) {
         if (base) {
             cls->base_fields = base->n_fields();
             cls->has_field_defaults = base->has_field_defaults;
+            if (base->is_open()) cls->open = true;
         }
 
         // C3 MRO。方法查找、super() 和 vtable 填充都按这条链走。

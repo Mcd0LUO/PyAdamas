@@ -307,7 +307,7 @@ void AsmGen::gen_super_vcall(const Inst& in) {
         // 运行期沿实例的动态 MRO 找 after 类之后的下一实现。查找要先做，
         // 因为它会走一次普通调用；找到的函数地址放 %r11 再装实参。
         emit2("movq", src_op(in.a), "%rdi");
-        emit_imm_op("movq", in.idx, "%rsi");
+        emit2("movq", src_op(in.c), "%rsi");
         emit_imm_op("movq", in.imm, "%rdx");
         emit2("movq", src_op(in.b), "%rcx");
         spill_fp_slots();

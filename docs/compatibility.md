@@ -25,7 +25,7 @@ PyAdamas 不追求兼容 CPython：语义是按静态类型的需要重新定的
 | `*args` | 形参是 `list[T]` | 形参是 tuple | 列表和元组在 PyAdamas 里表示相同；`len` / 下标 / 迭代一致 |
 | 函数装饰器 | `@dec` 在定义点立即执行，包装函数必须用固定形参转发 | 任意可调用 | 没有运行时签名信息，`*args` 转发给 unknown 被装饰者无法绑定 |
 | `with` | 只支持类实例的 `__enter__` / `__exit__`；正常、`return` / `break` / `continue` 和异常路径都调用 `__exit__` | 完整上下文管理协议 | `__exit__` 返回值只有真/假语义；异常路径传 `(type, message, None)` |
-| import | 本地单层 `.py`；`m.x` 直接读写模块全局；`from m import x` 是快照；模块别名不能当值 | 任意模块/包、运行时模块对象 | 支持包/相对导入/静态 `import *`（按非下划线导出）；跨模块继承暂不支持 |
+| import | 本地单层 `.py`；`m.x` 直接读写模块全局；`from m import x` 是快照；模块别名不能当值 | 任意模块/包、运行时模块对象 | 支持包/相对导入/静态 `import *`（按非下划线导出）；支持导入类单继承（字段、覆盖方法、`super()`、`isinstance`）；导入类作为附加基类、导入基类字段默认值、`@classmethod` 跨模块重绑定暂不支持 |
 | 模块初始化 | 第一次执行 import 时惰性运行一次；循环导入编译期报错 | 支持循环导入和部分初始化 | 初始化失败的模块不会再重试；模块对象不可见 |
 | 推导式 | list/set/dict 推导式按循环展开；生成器表达式脱糖成合成生成器函数，惰性求值；含 `async for` 的推导式在协程里可挂起；含 lambda 的推导式改写成生成器表达式 + 构造器，循环变量可被捕获 | 同 Python | 异步 list/set/dict 推导式只能作为语句/赋值/`return` 的根表达式；异步生成器表达式（`(x async for ...)`）已支持，可出现在任意表达式位置；类体里的生成器表达式仍按 list 构造；推导式内部不能引用循环变量的生成器表达式 |
 | 生成器 | 状态机 + 堆帧；`for` / `next` / `send` / `throw` / `close` / `yield from`；`yield from` 把 `throw` 转发给子生成器；跨 `yield` 跑 `finally` / `__exit__`；挂起点可在任意子表达式、`except` 与 `finally` 体内；生成器/协程/异步生成器类型跨模块保留元素/结果类型；`Generator[Y, S, R]` 标注给 `send` 实参与 `yield` 表达式收窄类型 | 完整生成器协议 | 未标注 `Generator[Y, S, R]` 时 `send` 值与 `yield` 表达式静态是 unknown（`R` 只记录，`StopIteration.value` 不检查） |

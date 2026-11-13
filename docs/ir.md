@@ -28,7 +28,7 @@ Python 语义里变量天生可变，循环里反复赋值是常态。一上来�
 | `Block` | 名字 + 指令序列，`terminated()` 判断末尾是不是跳转/分支/返回 |
 | `IRFunction` | 名字、形参、返回类型、`slot_ty`（局部槽类型）、`vreg_ty`（每个 vreg 的类型）、基本块、`env_slot`（有捕获时存闭包指针的槽） |
 | `IRGlobal` | 一个全局变量；数据段里就是一个 `.quad`，初值 0 同时也是 `None` |
-| `IRClass` | 名字、vtable（槽 → 函数下标）、字段数（含继承）、`field_heap`（每个字段是否堆类型，供析构器使用）、`qualname`（模块限定类名）、`mro`（C3 类下标，self 在前）、`own_slots`（本类声明的方法槽） |
+| `IRClass` | 名字、vtable（槽 → 函数下标）、`vtable_ext`（来自导入基类的槽 → 外部符号表达式）、字段数（含继承）、`field_heap`（每个字段是否堆类型，供析构器使用）、`qualname`（模块限定类名）、`mro`（C3 类下标，self 在前）、`ext_bases`（导入祖先的 vtable/own_slots 符号与限定名）、`own_slots`（本类声明的方法槽） |
 | `IRModule` | 函数表、全局表、字符串池、类表、`entry`（顶层代码编译成的函数下标） |
 
 `Inst` 里有个容易踩的点：**`idx` 的含义随 `op` 变**——`const.str` 是字符串池下标，`load.slot` 是槽号，`load.global` 是全局号，`func.addr` 是函数号。类型上看不出区别，读指令时要先看 `op`。
@@ -69,7 +69,7 @@ Python 语义里变量天生可变，循环里反复赋值是常态。一上来�
 | `field.set a, imm, b` | `imm: 字节偏移` | `a->field = b`；宽度同上 | `movb` / `movq %rcx, off(%rax)` |
 | `vcall dst, a, args...` | `imm: vtable 槽` | `dst = a->vtable[imm](a, args...)` | 取表、取槽、间接跳转 |
 | `vcall.static dst, a, args...` | `imm: vtable 槽` | 静态方法：不传 self | 同 vcall，参数序列少一个 self |
-| `vcall.super dst, a, args...` | `imm: 槽`，`idx: after 类下标`，`b: 方法名` | 按运行期 MRO 找下一实现 | 先 `pa_super_lookup`，再照 vcall 传 self |
+| `vcall.super dst, a, args...` | `imm: 槽`，`c: after 类限定名`，`b: 方法名` | 按运行期 MRO 找下一实现（after 类按限定名匹配，跨模块继承可用） | 先 `pa_super_lookup`，再照 vcall 传 self |
 | `call.direct dst, imm, args...` | `imm: 函数下标` | 直接调用裸函数（类名上的静态方法） | `leaq .LfN(%rip)` + `call` |
 | `call dst, a, args...` | `a: 函数值` | 间接调用 | `call *%r11` |
 | `call.rt args..., imm` | `imm: RtFn` | 调运行时函数 | `call pa_xxx` |
@@ -214,6 +214,7 @@ P0/P1/P2，O2 再加控制流与小函数优化：
 6. 同一条指令的 `idx` 只有一个含义，但含义由 `op` 决定（见上表）。
 7. `vcall` 的 `a` 是接收者（self），`args` 里**不含** self——后端把它装进第一个整型参数位。
 8. 类表在降级开始时就按 AST 顺序建好（父类在前），`obj.new` 的 `imm` 是 `IRModule::classes` 的下标；vtable 里 `-1` 表示该槽没填上，正常不会出现（方法编译失败时整个编译已经报错）。
+9. 非入口模块的每个类把 vtable / own_slots 以 `pyadamas$<模块>$vt$<类>` / `pyadamas$<模块>$os$<类>` 导出；导入方继承时用外部符号填 `vtable_ext`，并为每个导入祖先发一个 cid=-1 的本地 mirror 元数据（限定名参与 `isinstance`，vtable/own_slots 参与 `super()`）。
 
 ## 降级规则
 

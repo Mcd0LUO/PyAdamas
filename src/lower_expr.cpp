@@ -44,7 +44,9 @@ VReg Lowerer::imported_class_object(const ImportedClass& ic) {
     fty->fn = ic.ctor_sig;
     int cgi = extern_global(ic.ctor_symbol, ic.ctor_symbol, fty);
     VReg ctor = load_global(cgi, fty);
-    std::string qual = ic.module.empty() ? ic.cls->name : ic.module + "." + ic.cls->name;
+    std::string qual = !ic.qualname.empty()
+                           ? ic.qualname
+                           : (ic.module.empty() ? ic.cls->name : ic.module + "." + ic.cls->name);
     VReg obj = call_runtime(RtFn::ClassNew, obj_ty,
                             {const_int(-1), ctor, const_str(qual)});
     push_temp(obj);

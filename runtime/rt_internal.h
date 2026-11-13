@@ -565,7 +565,8 @@ int64_t pa_class_cid(void* cls);
 PyAdamasStr* pa_class_name(void* cls);
 PyAdamasStr* pa_class_repr(void* cls);
 int64_t pa_isinstance_class(void* obj, void* cls);
-void* pa_super_lookup(void* obj, int64_t after_cid, int64_t slot, PyAdamasStr* name);
+void* pa_super_lookup(void* obj, PyAdamasStr* after_qualname, int64_t slot,
+                      PyAdamasStr* name);
 int64_t pa_is_exc(void* obj, PyAdamasStr* type);
 int64_t pa_is_seq(void* obj);
 int64_t pa_is_dict(void* obj);

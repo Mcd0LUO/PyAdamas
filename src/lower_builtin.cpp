@@ -409,19 +409,21 @@ VReg Lowerer::lower_builtin_call(const std::string& name, Call& c) {
         if (cid == class_ids_.end()) {
             // 导入类没有本模块的运行期编号，用「模块名.类名」比较；
             // pa_is_named_class 会沿实例的动态 MRO 查，子类也能匹配。
-            std::string qual;
-            auto scan = [&](const std::unordered_map<std::string, ModuleInfoPtr>& mods) {
-                for (auto& entry : mods) {
-                    if (qual.empty() == false) return;
-                    for (auto& ce : entry.second->classes)
-                        if (ce.second.cls.get() == target) {
-                            qual = entry.second->name + "." + ce.first;
-                            return;
-                        }
-                }
-            };
-            scan(st_->modules);
-            if (qual.empty()) scan(module_aliases_);
+            std::string qual = target->origin_qualname;
+            if (qual.empty()) {
+                auto scan = [&](const std::unordered_map<std::string, ModuleInfoPtr>& mods) {
+                    for (auto& entry : mods) {
+                        if (qual.empty() == false) return;
+                        for (auto& ce : entry.second->classes)
+                            if (ce.second.cls.get() == target) {
+                                qual = entry.second->name + "." + ce.first;
+                                return;
+                            }
+                    }
+                };
+                scan(st_->modules);
+                if (qual.empty()) scan(module_aliases_);
+            }
             if (qual.empty()) {
                 err(c.args[1]->line, c.args[1]->col,
                     "isinstance() with an imported class is not supported yet");

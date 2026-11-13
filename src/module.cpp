@@ -409,6 +409,12 @@ std::string module_roots_symbol(const std::string& module) {
 std::string module_class_new_symbol(const std::string& module, const std::string& cls) {
     return std::format("pyadamas${}$n${}", module_symbol_prefix(module), cls);
 }
+std::string module_class_vtable_symbol(const std::string& module, const std::string& cls) {
+    return std::format("pyadamas${}$vt${}", module_symbol_prefix(module), cls);
+}
+std::string module_class_own_slots_symbol(const std::string& module, const std::string& cls) {
+    return std::format("pyadamas${}$os${}", module_symbol_prefix(module), cls);
+}
 
 std::expected<std::string, std::string> encode_module_interface(const ModuleInfo& info) {
     try {
@@ -427,6 +433,15 @@ std::expected<std::string, std::string> encode_module_interface(const ModuleInfo
         for (auto& [name, ic] : info.classes) {
             const ClassInfo& c = *ic.cls;
             e.str(name);
+            // 运行期限定名：导入方生成 mirror 元数据和 isinstance 比较都用它。
+            e.str(ic.qualname.empty() ? info.name + "." + name : ic.qualname);
+            // 完整祖先链（不含自身，MRO 顺序）：导入方据此补 mirror 元数据。
+            e.u32(static_cast<uint32_t>(c.ext_ancestors.size()));
+            for (auto& a : c.ext_ancestors) {
+                e.str(a.module);
+                e.str(a.name);
+                e.str(a.qualname);
+            }
             // 字段按布局顺序（根类在前）导出：导入方的字段下标与运行期偏移一致，
             // 模式匹配也能读到继承来的字段。
             std::vector<const FieldInfo*> layout;
@@ -446,6 +461,7 @@ std::expected<std::string, std::string> encode_module_interface(const ModuleInfo
             e.u32(static_cast<uint32_t>(c.methods.size()));
             for (auto& m : c.methods) {
                 e.str(m.name);
+                e.u8(static_cast<uint8_t>(m.kind));
                 e.u32(static_cast<uint32_t>(m.slot));
                 enc_sig(e, m.call_sig ? m.call_sig : m.sig);
             }
@@ -493,9 +509,21 @@ std::expected<ModuleInfoPtr, std::string> decode_module_interface(const std::str
         uint32_t nc = d.u32();
         for (uint32_t i = 0; i < nc; ++i) {
             std::string name = d.str();
+            std::string qualname = d.str();
             auto cls = std::make_shared<ClassInfo>();
             cls->name = name;
             cls->complete = true;
+            cls->origin_module = info->name;
+            cls->origin_qualname =
+                qualname.empty() ? info->name + "." + name : std::move(qualname);
+            uint32_t na = d.u32();
+            for (uint32_t j = 0; j < na; ++j) {
+                ClassAncestor a;
+                a.module = d.str();
+                a.name = d.str();
+                a.qualname = d.str();
+                cls->ext_ancestors.push_back(std::move(a));
+            }
             uint32_t nf = d.u32();
             for (uint32_t j = 0; j < nf; ++j) {
                 FieldInfo f;
@@ -509,10 +537,23 @@ std::expected<ModuleInfoPtr, std::string> decode_module_interface(const std::str
             for (uint32_t j = 0; j < nm; ++j) {
                 MethodInfo m;
                 m.name = d.str();
+                m.kind = static_cast<MethodKind>(d.u8());
                 m.slot = static_cast<int>(d.u32());
                 m.call_sig = dec_sig(d);
                 m.sig = m.call_sig;
                 cls->methods.push_back(std::move(m));
+            }
+            for (size_t mi = 0; mi < cls->methods.size(); ++mi) {
+                MethodInfo& m = cls->methods[mi];
+                if (!m.is_accessor()) continue;
+                auto& slot = cls->properties[m.name];
+                slot.owner = cls.get();
+                switch (m.kind) {
+                    case MethodKind::PropertyGetter: slot.getter = static_cast<int>(mi); break;
+                    case MethodKind::PropertySetter: slot.setter = static_cast<int>(mi); break;
+                    case MethodKind::PropertyDeleter: slot.deleter = static_cast<int>(mi); break;
+                    default: break;
+                }
             }
             cls->has_init = d.u8() != 0;
             cls->complete = d.u8() != 0;
@@ -521,6 +562,8 @@ std::expected<ModuleInfoPtr, std::string> decode_module_interface(const std::str
             ic.cls = cls;
             ic.ctor_sig = dec_sig(d);
             ic.ctor_symbol = d.str();
+            ic.module = info->name;
+            ic.qualname = cls->origin_qualname;
             info->classes[name] = std::move(ic);
         }
         for (auto& [t, cname] : d.pending_classes) {

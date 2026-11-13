@@ -1196,12 +1196,23 @@ struct IRFunction {
     }
 };
 
+// 跨模块祖先：子类元数据里为它生成一个本地 mirror，指向定义模块导出的
+// vtable / own_slots 表。mirror 的类编号固定 -1，只参与限定名比较。
+struct IRClassExtBase {
+    std::string vtable_symbol;
+    std::string own_slots_symbol;
+    std::string qualname;
+};
+
 // 一个类的运行时形态。布局在降级阶段就完全确定：
 //   vtable 是静态表，每个槽一个函数地址（未填的槽是 -1，正常不会出现）；
 //   n_fields 含继承来的字段，对象大小 = 8 * (1 + n_fields)。
 struct IRClass {
     std::string name;
     std::vector<int> vtable;  // 槽 → 函数下标
+    // 与 vtable 平行：非空表示该槽来自导入基类，内容是外部符号表达式
+    // （如 pyadamas$base$vt$Base + 24）。
+    std::vector<std::string> vtable_ext;
     int n_fields = 0;
     // 按字段偏移顺序（父类在前），1 表示该字段是堆类型，析构时要 dec。
     std::vector<uint8_t> field_heap;
@@ -1209,6 +1220,8 @@ struct IRClass {
     // 本类自己声明的方法槽。isinstance / super() 都靠这张表。
     std::string qualname;
     std::vector<int> mro;
+    // 导入祖先按 MRO 顺序接在本地 mro 之后。
+    std::vector<IRClassExtBase> ext_bases;
     std::vector<int> own_slots;
 };
 
