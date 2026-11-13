@@ -1425,6 +1425,22 @@ private:
     VReg lower_method_call(Attribute& at, Call& c);
     // 方法值：把 obj.m / C.m 合成成普通函数值的闭包。
     VReg lower_method_value(Attribute& at);
+    // 按接收者类型拆开的方法调用降级（lower_method_*.cpp）。
+    VReg lower_method_native(Attribute& at, Call& c, VReg recv, TypePtr recv_ty, bool opt);
+    VReg lower_method_generator(Attribute& at, Call& c, VReg recv, TypePtr recv_ty);
+    VReg lower_method_async_generator(Attribute& at, Call& c, VReg recv, TypePtr recv_ty);
+    VReg lower_method_task(Attribute& at, Call& c, VReg recv, TypePtr recv_ty);
+    VReg lower_method_future(Attribute& at, Call& c, VReg recv, TypePtr recv_ty);
+    VReg lower_method_dict(Attribute& at, Call& c, VReg recv, TypePtr recv_ty);
+    VReg lower_method_set(Attribute& at, Call& c, VReg recv, TypePtr recv_ty);
+    VReg lower_method_seq(Attribute& at, Call& c, VReg recv, TypePtr recv_ty);
+    VReg lower_method_str(Attribute& at, Call& c, VReg recv);
+    VReg lower_method_bytes(Attribute& at, Call& c, VReg recv);
+    VReg lower_method_random(Attribute& at, Call& c, VReg recv);
+    VReg lower_method_regex(Attribute& at, Call& c, VReg recv);
+    VReg lower_method_match(Attribute& at, Call& c, VReg recv);
+    VReg lower_method_file(Attribute& at, Call& c, VReg recv);
+    VReg lower_method_int(Call& c, VReg recv);
     VReg lower_cimport_call(Attribute& at, Call& c);
     VReg lower_super_call(Attribute& at, Call& c);
     // 协议 dunder：__str__/__repr__/__eq__/__ne__/__len__。

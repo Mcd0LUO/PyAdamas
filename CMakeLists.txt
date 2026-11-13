@@ -38,6 +38,10 @@ set(PYADAMAS_SOURCES
   src/lower_builtin.cpp
   src/lower_aggregate.cpp
   src/lower_method.cpp
+  src/lower_method_native.cpp
+  src/lower_method_containers.cpp
+  src/lower_method_str.cpp
+  src/lower_method_misc.cpp
   src/lower_print.cpp
   src/lower_gen.cpp
   src/opt.cpp

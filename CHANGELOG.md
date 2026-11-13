@@ -4,6 +4,31 @@
 
 早期阶段没有逐条留痕，按阶段归纳；0.4 之后逐条记录。
 
+## [0.152] - 2026-11-14
+
+工程治理：拆分 `lower_method.cpp` 的上帝函数。
+
+### 变更
+
+- `lower_method_call` 从 2131 行降到约 600 行，只保留模块/类接收者分派
+  和用户类方法调用；其余按接收者类型抽成 15 个成员函数：
+  `lower_method_native` / `generator` / `async_generator` / `task` /
+  `future` / `dict` / `set` / `seq` / `str` / `bytes` / `random` /
+  `regex` / `match` / `file` / `int`。
+- 新增 `lower_method_native.cpp`（异步/原生类型）、
+  `lower_method_containers.cpp`（dict/set/list/tuple）、
+  `lower_method_str.cpp`（str/bytes）、`lower_method_misc.cpp`
+  （random/re/file/int）；`lower_method.cpp` 从 2612 行降到 865 行。
+- 纯机械拆分，不改变降级逻辑与生成代码；151 运行用例、52 反例、840
+  差分、16MB memcheck、全量 bench 全部与拆分前一致。
+
+### 工程
+
+- 拆分前扫描：`lower_method_call` 2131 行（203 处 `at.attr` 分派）、
+  `lower_builtin_call` 1655 行、`gen_call_rt` 761 行（505 个 case）、
+  `builtin_module` 736 行（模块签名数据表）、`typecheck_stmt::stmt` 587 行。
+  这批先处理最大的 `lower_method`，其余按风险从低到高后续处理。
+
 ## [0.151] - 2026-11-13
 
 修复 `str(unknown)` 不做运行期类型分派。
