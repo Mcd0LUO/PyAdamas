@@ -42,6 +42,8 @@ std::string Inst::text() const {
         case IrOp::StoreSlot: return std::format("store.slot s{}, {}", idx, vreg_str(a));
         case IrOp::LoadGlobal: return std::format("{} = load.global g{}", vreg_str(dst), idx);
         case IrOp::StoreGlobal: return std::format("store.global g{}, {}", idx, vreg_str(a));
+        case IrOp::GlobalAddr: return std::format("{} = global.addr g{}", vreg_str(dst), idx);
+        case IrOp::ClassAddr: return std::format("{} = class.addr c{}", vreg_str(dst), imm);
         case IrOp::MakeList:
         case IrOp::MakeTuple: {
             std::string s = std::format("{} = {}{{", vreg_str(dst),
@@ -93,6 +95,14 @@ std::string Inst::text() const {
         case IrOp::CallDirect: {
             std::string s = std::format("{} = call.direct f{}({}", vreg_str(dst), idx,
                                         "");
+            for (size_t i = 0; i < args.size(); ++i) {
+                if (i) s += ", ";
+                s += vreg_str(args[i]);
+            }
+            return s + ")";
+        }
+        case IrOp::CallPtr: {
+            std::string s = std::format("{} = call.ptr {}(", vreg_str(dst), vreg_str(a));
             for (size_t i = 0; i < args.size(); ++i) {
                 if (i) s += ", ";
                 s += vreg_str(args[i]);

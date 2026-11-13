@@ -322,13 +322,23 @@ VReg Lowerer::lower_construct(Call& c, const ClassInfoPtr& cls) {
         for (const ClassInfo* k = cls.get(); k; k = k->base) chain.push_back(k);
         for (auto it = chain.rbegin(); it != chain.rend(); ++it) {
             for (auto& f : (*it)->fields) {
-                if (!f.has_default || !f.default_expr) continue;
+                if (!f.has_default) continue;
                 defaults.push_back({static_cast<int>(8 * (1 + (*it)->field_index(f.name))), &f});
             }
         }
     }
     for (auto& [off, fi] : defaults) {
-        VReg v = expr(*fi->default_expr);
+        VReg v;
+        if (fi->default_lit)
+            v = const_literal(*fi->default_lit);
+        else if (fi->default_expr)
+            v = expr(*fi->default_expr);
+        else {
+            err(c.line, c.col,
+                std::format("non-literal default of imported field '{}' is not supported yet",
+                            fi->name));
+            continue;
+        }
         v = coerce(v, vreg_ty(v), fi->ty);
         store_field(fi->ty, obj, off, v);
     }
@@ -458,9 +468,24 @@ VReg Lowerer::lower_call(Call& c) {
                 return const_none();
             }
         }
-        // @classmethod 里的 cls(...)：静态绑定到所属类，等价于类名构造。
+        // @classmethod 里的 cls(...)：entry 模块静态绑定到所属类；
+        // 非入口模块走运行期类对象，用实际子类的 ctor 包装构造。
         if (!st_->class_self_name.empty() && n.id == st_->class_self_name &&
             st_->class_self_ty) {
+            if (st_->class_self_dynamic) {
+                VReg cls_obj = expr(*c.func);
+                const MethodInfo* init = st_->class_self_ty->method("__init__");
+                FuncInfoPtr ctor_sig =
+                    init && init->call_sig ? init->call_sig : std::make_shared<FuncInfo>();
+                VReg callee = call_runtime(RtFn::ClassCtor, t_int(), {cls_obj});
+                std::vector<VReg> args = bind_args(c, ctor_sig, init ? init->def : nullptr);
+                Inst in;
+                in.op = IrOp::Call;
+                in.a = callee;
+                in.args = std::move(args);
+                return def_heap(mk_class(const_cast<ClassInfo*>(st_->class_self_ty)),
+                                std::move(in));
+            }
             auto it = classes_.find(st_->class_self_ty->name);
             if (it != classes_.end()) return lower_construct(c, it->second);
         }

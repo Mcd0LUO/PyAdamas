@@ -218,14 +218,15 @@ void Lowerer::collect_classes(std::vector<StmtPtr>& body) {
                 class_ids_[ci.get()] = self_id;
                 irc.qualname = mod_.runtime_name + "." + ci->name;
                 std::unordered_set<std::string> ext_seen;
-                auto add_ext = [&](const ClassAncestor& a) {
-                    if (a.module.empty() || a.name.empty()) return;
+                auto add_ext = [&](const ClassAncestor& a) -> int {
+                    if (a.module.empty() || a.name.empty()) return -1;
                     std::string key = a.module + "\x1f" + a.name;
-                    if (!ext_seen.insert(key).second) return;
+                    if (!ext_seen.insert(key).second) return -1;
                     irc.ext_bases.push_back(
                         {module_class_vtable_symbol(a.module, a.name),
                          module_class_own_slots_symbol(a.module, a.name),
                          a.qualname.empty() ? a.module + "." + a.name : a.qualname});
+                    return static_cast<int>(irc.ext_bases.size()) - 1;
                 };
                 for (const ClassInfo* k : ci->mro) {
                     if (!k) continue;
@@ -234,9 +235,14 @@ void Lowerer::collect_classes(std::vector<StmtPtr>& body) {
                         irc.mro.push_back(kit->second);
                         continue;
                     }
-                    // 导入祖先：mirror 元数据接在本地 MRO 之后。
-                    add_ext({k->origin_module, k->external_name(), k->origin_qualname});
-                    for (auto& a : k->ext_ancestors) add_ext(a);
+                    // 导入祖先：mirror 元数据按真实 MRO 顺序交错编码。
+                    int idx = add_ext({k->origin_module, k->external_name(),
+                                       k->origin_qualname});
+                    if (idx >= 0) irc.mro.push_back(-(idx + 1));
+                    for (auto& a : k->ext_ancestors) {
+                        int ai = add_ext(a);
+                        if (ai >= 0) irc.mro.push_back(-(ai + 1));
+                    }
                 }
                 if (irc.mro.empty()) irc.mro.push_back(self_id);
                 for (const MethodInfo& m : ci->methods)
@@ -393,6 +399,7 @@ int Lowerer::compile_function_body(FunctionDef& f, FuncInfoPtr info, const std::
             if (is_cls) {
                 st_->class_self_name = info->pos[i].name;
                 st_->class_self_ty = owner;
+                st_->class_self_dynamic = !opts_.is_entry;
             }
             add_param(info->pos[i], is_cls);
         }
@@ -806,35 +813,78 @@ void Lowerer::lower_classdef(ClassDef& c) {
     }
     // 类体语句在下面按执行语义降级；类命名空间未建模，赋值走模块全局。
 
-    // 按 C3 MRO 从前向后填 vtable：MRO 中越靠前的类优先级越高，
-    // 每个槽只由最先声明它的类占用。本类自己的方法稍后编译时覆盖。
-    {
-        auto& cv = mod_.classes[cid].vtable;
-        auto& cext = mod_.classes[cid].vtable_ext;
-        for (size_t mi = 1; mi < ci->mro.size(); ++mi) {
-            const ClassInfo* k = ci->mro[mi];
-            auto kit = class_ids_.find(k);
+    // 按 (name, kind) 汇总 MRO 上所有槽：不同模块可能给同名方法分了不同
+    // 槽，一个实现要写进该 key 的全部槽；不同 key 抢同一个槽才是冲突。
+    struct SlotPlan {
+        std::vector<int> slots;
+        bool own = false;
+        bool has_winner = false;
+        int fidx = -1;
+        std::string ext;
+    };
+    std::map<std::string, SlotPlan> plans;
+    std::map<int, std::string> slot_owner;
+    auto& cv = mod_.classes[cid].vtable;
+    auto& cext = mod_.classes[cid].vtable_ext;
+    auto add_slot = [&](SlotPlan& p, int slot, const std::string& key) {
+        if (slot < 0 || slot >= static_cast<int>(cv.size())) return;
+        auto oit = slot_owner.find(slot);
+        if (oit != slot_owner.end() && oit->second != key) {
+            err(c.line, c.col,
+                std::format("method slot {} is used by both '{}' and '{}'", slot, oit->second,
+                            key));
+            return;
+        }
+        slot_owner[slot] = key;
+        if (std::find(p.slots.begin(), p.slots.end(), slot) == p.slots.end())
+            p.slots.push_back(slot);
+    };
+    for (size_t mi = 1; mi < ci->mro.size(); ++mi) {
+        const ClassInfo* k = ci->mro[mi];
+        if (!k) continue;
+        auto kit = class_ids_.find(k);
+        for (const MethodInfo& km : k->methods) {
+            if (km.slot < 0) continue;
+            std::string key = method_slot_key(km.name, km.kind);
+            SlotPlan& p = plans[key];
+            add_slot(p, km.slot, key);
+            for (int a : km.aliases) add_slot(p, a, key);
+            if (p.has_winner) continue;
             if (kit != class_ids_.end()) {
                 const auto& kv = mod_.classes[kit->second].vtable;
                 const auto& ke = mod_.classes[kit->second].vtable_ext;
-                for (size_t s = 0; s < cv.size(); ++s) {
-                    if (cv[s] != -1 || (s < cext.size() && !cext[s].empty())) continue;
-                    if (s < kv.size() && kv[s] >= 0)
-                        cv[s] = kv[s];
-                    else if (s < ke.size() && !ke[s].empty())
-                        cext[s] = ke[s];
+                if (km.slot < static_cast<int>(kv.size()) && kv[km.slot] >= 0) {
+                    p.fidx = kv[km.slot];
+                    p.has_winner = true;
+                } else if (km.slot < static_cast<int>(ke.size()) && !ke[km.slot].empty()) {
+                    p.ext = ke[km.slot];
+                    p.has_winner = true;
                 }
-                continue;
+            } else if (k->imported()) {
+                p.ext = module_class_method_symbol(k->origin_module, k->external_name(),
+                                                   km.slot);
+                p.has_winner = true;
             }
-            if (!k->imported()) continue;
-            // 导入基类：未覆盖的槽指向定义模块导出的 vtable 项。
-            std::string vt =
-                module_class_vtable_symbol(k->origin_module, k->external_name());
-            for (const MethodInfo& km : k->methods) {
-                if (km.slot < 0 || km.slot >= static_cast<int>(cv.size())) continue;
-                size_t s = static_cast<size_t>(km.slot);
-                if (cv[s] != -1 || !cext[s].empty()) continue;
-                cext[s] = std::format("{} + {}", vt, 8 * km.slot);
+        }
+    }
+    // 本类声明的方法：同一 key 的全部槽稍后都写自己的实现。
+    for (auto& m : ci->methods) {
+        if (m.slot < 0 || m.decorated) continue;
+        std::string key = method_slot_key(m.name, m.kind);
+        SlotPlan& p = plans[key];
+        add_slot(p, m.slot, key);
+        for (int a : m.aliases) add_slot(p, a, key);
+        p.own = true;
+    }
+    // 先填继承来的 winner。
+    for (auto& [key, p] : plans) {
+        if (p.own || !p.has_winner) continue;
+        for (int slot : p.slots) {
+            if (p.fidx >= 0) {
+                cv[slot] = p.fidx;
+                if (slot < static_cast<int>(cext.size())) cext[slot].clear();
+            } else if (!p.ext.empty()) {
+                cext[slot] = p.ext;
             }
         }
     }
@@ -842,6 +892,7 @@ void Lowerer::lower_classdef(ClassDef& c) {
     // 自定义装饰器方法：方法体照常编译，但 vtable 槽不填；类创建时把
     // 装饰器链的结果写进类属性，调用点走类属性的间接调用。
     std::unordered_map<std::string, int> decorated_methods;
+    std::map<std::string, int> own_fidx;
     for (auto& m : ci->methods) {
         if (!m.def) continue;
         if (!m.decorated && !m.def->decorators.empty() && m.kind == MethodKind::Normal) {
@@ -858,6 +909,7 @@ void Lowerer::lower_classdef(ClassDef& c) {
             mod_.classes[cid].vtable[static_cast<size_t>(m.slot)] = fidx;
             if (m.slot < static_cast<int>(mod_.classes[cid].vtable_ext.size()))
                 mod_.classes[cid].vtable_ext[static_cast<size_t>(m.slot)].clear();
+            own_fidx[method_slot_key(m.name, m.kind)] = fidx;
         }
     }
 
@@ -876,10 +928,46 @@ void Lowerer::lower_classdef(ClassDef& c) {
             mod_.classes[cid].vtable[static_cast<size_t>(km.slot)] = fidx;
             if (km.slot < static_cast<int>(mod_.classes[cid].vtable_ext.size()))
                 mod_.classes[cid].vtable_ext[static_cast<size_t>(km.slot)].clear();
+            std::string key = method_slot_key(km.name, km.kind);
+            SlotPlan& p = plans[key];
+            add_slot(p, km.slot, key);
+            p.own = true;
+            own_fidx[key] = fidx;
+        }
+    }
+    // 本类实现写到该 key 的全部别名槽，并刷新 own_slots（super 依赖它）。
+    for (auto& [key, p] : plans) {
+        if (!p.own) continue;
+        auto fit = own_fidx.find(key);
+        if (fit == own_fidx.end()) continue;
+        for (int slot : p.slots) {
+            cv[slot] = fit->second;
+            if (slot < static_cast<int>(cext.size())) cext[slot].clear();
+        }
+    }
+    {
+        auto& os = mod_.classes[cid].own_slots;
+        os.clear();
+        for (auto& [key, p] : plans) {
+            if (!p.own || !own_fidx.count(key)) continue;
+            for (int slot : p.slots) os.push_back(slot);
         }
     }
 
     bool need_class_obj = ci->value_used || !c.decorators.empty();
+    // classmethod/staticmethod 调用可能要把类对象当接收者传；即使本类
+    // 没有覆盖，也从 MRO 里继承到了这些方法。
+    if (!need_class_obj) {
+        for (const ClassInfo* k : ci->mro) {
+            if (!k) continue;
+            for (const MethodInfo& m : k->methods)
+                if (m.kind == MethodKind::ClassMethod || m.kind == MethodKind::Static) {
+                    need_class_obj = true;
+                    break;
+                }
+            if (need_class_obj) break;
+        }
+    }
     if ((!opts_.module_symbol.empty() && !opts_.is_entry) || need_class_obj)
         compile_ctor_wrapper(c, ci, cid);
 
@@ -990,8 +1078,13 @@ void Lowerer::lower_classdef(ClassDef& c) {
         TypePtr obj_ty = mk_class_obj(cls_ty);
         int ngi = global_idx("__pyadamas$new$" + ci->name);
         VReg ctor = load_global(ngi, mod_.globals[static_cast<size_t>(ngi)].ty);
+        Inst ca;
+        ca.op = IrOp::ClassAddr;
+        ca.imm = cid;
+        VReg vtable = def(t_int(), std::move(ca));
         VReg obj = call_runtime(RtFn::ClassNew, obj_ty,
-                                {const_int(cid), ctor, const_str(ci->name)});
+                                {const_int(cid), ctor, vtable,
+                                 const_str(mod_.runtime_name + "." + ci->name)});
         push_temp(obj);
         if (!c.decorators.empty()) {
             std::string hidden = "__pyadamas$classdeco$" + ci->name;
@@ -1097,8 +1190,18 @@ int Lowerer::compile_ctor_wrapper(ClassDef& clsdef, const ClassInfoPtr& ci, int 
     for (auto* p = ci.get(); p; p = p->base) chain.push_back(p);
     for (auto it = chain.rbegin(); it != chain.rend(); ++it) {
         for (auto& f : (*it)->fields) {
-            if (!f.has_default || !f.default_expr) continue;
-            VReg v = expr(*f.default_expr);
+            if (!f.has_default) continue;
+            VReg v;
+            if (f.default_lit)
+                v = const_literal(*f.default_lit);
+            else if (f.default_expr)
+                v = expr(*f.default_expr);
+            else {
+                err(clsdef.line, clsdef.col,
+                    std::format("non-literal default of imported field '{}' is not supported yet",
+                                f.name));
+                continue;
+            }
             v = coerce(v, vreg_ty(v), f.ty);
             int off = static_cast<int>(8 * (1 + ci->field_index(f.name)));
             store_field(f.ty, obj, off, v);

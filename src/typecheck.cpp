@@ -732,6 +732,37 @@ bool stmt_has_yield(const Stmt& s) {
 
 }  // namespace
 
+std::optional<LiteralValue> literal_of_expr(const Expr* e) {
+    if (!e || e->kind != ExprKind::Constant) return std::nullopt;
+    auto& c = static_cast<const Constant&>(*e);
+    LiteralValue v;
+    switch (c.ck) {
+        case Constant::CK::None: v.kind = LiteralValue::Kind::None; break;
+        case Constant::CK::Bool:
+            v.kind = LiteralValue::Kind::Bool;
+            v.b = c.b;
+            break;
+        case Constant::CK::Int:
+            v.kind = LiteralValue::Kind::Int;
+            v.i = c.i;
+            break;
+        case Constant::CK::Float:
+            v.kind = LiteralValue::Kind::Float;
+            v.f = c.f;
+            break;
+        case Constant::CK::Str:
+            v.kind = LiteralValue::Kind::Str;
+            v.s = c.s;
+            break;
+        case Constant::CK::Bytes:
+            v.kind = LiteralValue::Kind::Bytes;
+            v.s = c.s;
+            break;
+        default: return std::nullopt;
+    }
+    return v;
+}
+
 FuncInfoPtr TypeChecker::build_sig(FunctionDef& f) {
         auto info = std::make_shared<FuncInfo>();
         info->name = f.name;
@@ -740,36 +771,7 @@ FuncInfoPtr TypeChecker::build_sig(FunctionDef& f) {
         size_t ndef = a.defaults.size();
 
         // 默认参数只收字面量；接口序列化需要不依赖 AST 的表示。
-        auto literal_of = [](const Expr* e) -> std::optional<LiteralValue> {
-            if (!e || e->kind != ExprKind::Constant) return std::nullopt;
-            auto& c = static_cast<const Constant&>(*e);
-            LiteralValue v;
-            switch (c.ck) {
-                case Constant::CK::None: v.kind = LiteralValue::Kind::None; break;
-                case Constant::CK::Bool:
-                    v.kind = LiteralValue::Kind::Bool;
-                    v.b = c.b;
-                    break;
-                case Constant::CK::Int:
-                    v.kind = LiteralValue::Kind::Int;
-                    v.i = c.i;
-                    break;
-                case Constant::CK::Float:
-                    v.kind = LiteralValue::Kind::Float;
-                    v.f = c.f;
-                    break;
-                case Constant::CK::Str:
-                    v.kind = LiteralValue::Kind::Str;
-                    v.s = c.s;
-                    break;
-                case Constant::CK::Bytes:
-                    v.kind = LiteralValue::Kind::Bytes;
-                    v.s = c.s;
-                    break;
-                default: return std::nullopt;
-            }
-            return v;
-        };
+        auto literal_of = literal_of_expr;
 
         // 默认值只作用于「最后 ndef 个位置参数」，与位置参数前缀无关
         auto add_pos = [&](Arg& arg, bool posonly) {

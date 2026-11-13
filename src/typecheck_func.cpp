@@ -43,36 +43,27 @@ void TypeChecker::funcdef(FunctionDef& f) { funcdef_impl(f, nullptr); }
 bool TypeChecker::reserve_imported_method_slots(const ClassInfo* cls, int line, int col) {
     bool ok = true;
     for (const MethodInfo& m : cls->methods) {
-        if (m.slot < 0) continue;
         std::string key = method_slot_key(m.name, m.kind);
-        auto it = method_slots_.find(key);
-        if (it != method_slots_.end()) {
-            if (it->second != m.slot) {
+        std::vector<int> slots{m.slot};
+        for (int a : m.aliases) slots.push_back(a);
+        for (int slot : slots) {
+            if (slot < 0) continue;
+            auto owner = method_slot_owner_.find(slot);
+            if (owner != method_slot_owner_.end() && owner->second != key) {
                 err(line, col,
-                    std::format("method '{}' of imported class '{}' uses slot {}, but this "
-                                "module already assigned slot {} to it",
-                                m.name, cls->name, m.slot, it->second));
+                    std::format("slot {} of imported class '{}' is already used by method '{}' in "
+                                "this module",
+                                slot, cls->name, owner->second));
                 ok = false;
+                continue;
             }
-            continue;
+            method_slot_owner_.emplace(slot, key);
         }
-        const std::string* clash = nullptr;
-        for (auto& [k, v] : method_slots_) {
-            if (v == m.slot) {
-                clash = &k;
-                break;
-            }
-        }
-        if (clash) {
-            err(line, col,
-                std::format("slot {} of imported class '{}' is already used by method '{}' in "
-                            "this module",
-                            m.slot, cls->name, *clash));
-            ok = false;
-            continue;
-        }
-        method_slots_.emplace(key, m.slot);
-        method_slot_count_ = std::max(method_slot_count_, m.slot + 1);
+        if (m.slot >= 0 && method_slots_.find(key) == method_slots_.end())
+            method_slots_.emplace(key, m.slot);
+        if (m.slot >= 0) method_slot_count_ = std::max(method_slot_count_, m.slot + 1);
+        for (int a : m.aliases)
+            if (a >= 0) method_slot_count_ = std::max(method_slot_count_, a + 1);
     }
     return ok;
 }
@@ -417,20 +408,10 @@ void TypeChecker::classdef(ClassDef& c) {
         cls->is_exception_class = is_exc_class;
         cls->exc_parent = exc_parent;
         cls->extra_bases = extra_bases;
-        bool bad_multi = false;
-        if (!is_exc_class && base && base->imported() && !extra_bases.empty()) {
-            err(c.line, c.col,
-                "multiple inheritance with an imported base class is not supported yet");
-            bad_multi = true;
-        }
-        for (auto* eb : extra_bases) {
-            if (!eb->imported()) continue;
-            err(c.line, c.col,
-                "inheriting from an imported class as an additional base is not supported yet");
-            bad_multi = true;
-        }
-        if (!is_exc_class && base && base->imported() && !bad_multi)
+        if (!is_exc_class && base && base->imported())
             reserve_imported_method_slots(base, c.line, c.col);
+        for (auto* eb : extra_bases)
+            if (eb->imported()) reserve_imported_method_slots(eb, c.line, c.col);
         for (auto* eb : extra_bases) {
             // 附加基类不能引入主基类布局里没有的字段；共享祖先（菱形
             // 的 A）只要偏移一致就允许，否则继承方法里的字段偏移会错位。
@@ -554,6 +535,7 @@ void TypeChecker::classdef(ClassDef& c) {
             fi.ty = ty ? ty : t_unknown();
             fi.has_default = has_default;
             fi.default_expr = a.value.get();
+            if (a.value) fi.default_lit = literal_of_expr(a.value.get());
             cls->fields.push_back(std::move(fi));
         }
 

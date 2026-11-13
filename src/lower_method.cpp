@@ -147,6 +147,45 @@ VReg Lowerer::lower_method_call(Attribute& at, Call& c) {
         TypePtr rt = info->ret ? info->ret : t_unknown();
         return def_heap(rt, std::move(in));
     }
+    // 非入口模块编译的 classmethod 把 cls 当运行期类对象：入口模块仍用
+    // 静态类 id 直调；导入方法 / 非入口模块方法走类对象 vtable。
+    auto cmethod_dynamic = [&](const MethodInfo* m) {
+        return m->kind == MethodKind::ClassMethod && (!opts_.is_entry || !m->def);
+    };
+    auto class_object_for = [&](const ClassInfo* klass) -> VReg {
+        if (st_->class_self_dynamic && st_->class_self_ty == klass &&
+            !st_->class_self_name.empty()) {
+            int slot =
+                st_->slots.count(st_->class_self_name) ? st_->slots[st_->class_self_name] : -1;
+            return slot >= 0 ? load_slot(slot, t_int()) : const_int(0);
+        }
+        if (class_ids_.count(klass)) return local_class_object(klass->name);
+        for (auto& [alias, ic] : imported_classes_)
+            if (ic.cls.get() == klass) return imported_class_object(ic);
+        for (auto& [alias, mod] : st_->modules)
+            for (auto& ce : mod->classes)
+                if (ce.second.cls.get() == klass) return imported_class_object(ce.second);
+        for (auto& [alias, mod] : module_aliases_)
+            for (auto& ce : mod->classes)
+                if (ce.second.cls.get() == klass) return imported_class_object(ce.second);
+        err(at.line, at.col,
+            std::format("class '{}' is not available for method dispatch", klass->name));
+        return const_none();
+    };
+    auto emit_dynamic_method = [&](VReg cls_obj, const MethodInfo* m, bool pass_cls,
+                                   std::vector<VReg> args) -> VReg {
+        if (!m->call_sig || m->slot < 0) return const_none();
+        VReg fn = call_runtime(RtFn::ClassMethod, t_int(),
+                               {cls_obj, const_int(m->slot)});
+        if (pass_cls) args.insert(args.begin(), cls_obj);
+        Inst cp;
+        cp.op = IrOp::CallPtr;
+        cp.a = fn;
+        cp.args = std::move(args);
+        TypePtr rt = m->call_sig->ret ? m->call_sig->ret : t_none();
+        return def_heap(rt, std::move(cp));
+    };
+
     // C.f(...) / cls.f(...)：类接收者的静态方法、类方法直接调用；
     // 普通方法需要实例。@classmethod 里的 cls 编译期就绑定成所属类，
     // 和写类名完全等价。
@@ -227,6 +266,16 @@ VReg Lowerer::lower_method_call(Attribute& at, Call& c) {
                 TypePtr rt = m->sig->ret ? m->sig->ret : t_none();
                 return def_heap(rt, std::move(cd));
             }
+            if (m->kind == MethodKind::ClassMethod && cmethod_dynamic(m)) {
+                std::vector<VReg> args = bind_args(c, m->call_sig, m->def);
+                VReg obj = class_object_for(cls);
+                return emit_dynamic_method(obj, m, true, std::move(args));
+            }
+            if (m->kind == MethodKind::Static && (!opts_.is_entry || !m->def)) {
+                std::vector<VReg> args = bind_args(c, m->call_sig, m->def);
+                VReg obj = class_object_for(cls);
+                return emit_dynamic_method(obj, m, false, std::move(args));
+            }
             if (m->kind != MethodKind::Static && m->kind != MethodKind::ClassMethod) {
                 err(c.line, c.col,
                     std::format("'{}.{}' is an instance method; call it on an instance",
@@ -258,6 +307,29 @@ VReg Lowerer::lower_method_call(Attribute& at, Call& c) {
             for (VReg a : args) cd.args.push_back(a);
             TypePtr rt = m->call_sig->ret ? m->call_sig->ret : t_none();
             return def_heap(rt, std::move(cd));
+        }
+    }
+    // from m import C 后 C.method(...)：导入类的类接收者。
+    if (auto* n = dynamic_cast<Name*>(at.value.get())) {
+        auto iit = imported_classes_.find(n->id);
+        if (iit != imported_classes_.end()) {
+            const ImportedClass& ic = iit->second;
+            const MethodInfo* m = ic.cls->method(at.attr);
+            if (!m) {
+                err(c.line, c.col,
+                    std::format("'{}' has no method '{}'", ic.cls->name, at.attr));
+                return const_none();
+            }
+            if (m->kind == MethodKind::Normal) {
+                err(c.line, c.col,
+                    std::format("'{}.{}' is an instance method; call it on an instance",
+                                ic.cls->name, at.attr));
+                return const_none();
+            }
+            std::vector<VReg> args = bind_args(c, m->call_sig, nullptr);
+            VReg obj = imported_class_object(ic);
+            return emit_dynamic_method(obj, m, m->kind == MethodKind::ClassMethod,
+                                       std::move(args));
         }
     }
     TypePtr raw = tc_.type_of(at.value.get());
@@ -310,6 +382,10 @@ VReg Lowerer::lower_method_call(Attribute& at, Call& c) {
         }
         if (!m->call_sig) return const_none();
         std::vector<VReg> args = bind_args(c, m->call_sig, m->def);
+        if (m->kind == MethodKind::ClassMethod && cmethod_dynamic(m)) {
+            VReg obj = class_object_for(recv_ty->cls);
+            return emit_dynamic_method(obj, m, true, std::move(args));
+        }
         // 类方法在实例上调用时，cls 仍占第一个实参位；传静态类型对应的类 id
         if (m->kind == MethodKind::ClassMethod) {
             auto cid = class_ids_.find(recv_ty->cls);
@@ -2234,6 +2310,11 @@ VReg Lowerer::lower_method_value(Attribute& at) {
     const MethodInfo* m = cls->method(at.attr);
     if (!m) {
         err(at.line, at.col, std::format("'{}' has no method '{}'", cls->name, at.attr));
+        return const_none();
+    }
+    if (m->kind == MethodKind::ClassMethod && (!opts_.is_entry || !m->def)) {
+        err(at.line, at.col,
+            "method value of a cross-module/dynamic classmethod is not supported yet");
         return const_none();
     }
     bool decorated = m->kind == MethodKind::Normal && m->decorated;

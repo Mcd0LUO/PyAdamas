@@ -84,16 +84,18 @@ struct Dec {
 void enc_type(Enc& e, const TypePtr& t);
 TypePtr dec_type(Dec& d);
 
-void enc_default(Enc& e, const Param& p) {
-    if (!p.has_default) {
+// 默认值的公共编码：0 无默认，1..5/7 字面量，6 有默认但不可跨模块表示。
+void enc_default_value(Enc& e, bool has_default,
+                       const std::optional<LiteralValue>& lit) {
+    if (!has_default) {
         e.u8(0);
         return;
     }
-    if (!p.default_lit) {
-        e.u8(6);  // nonliteral
+    if (!lit) {
+        e.u8(6);
         return;
     }
-    const auto& v = *p.default_lit;
+    const auto& v = *lit;
     switch (v.kind) {
         case LiteralValue::Kind::None: e.u8(1); break;
         case LiteralValue::Kind::Bool: e.u8(2); e.u8(v.b ? 1 : 0); break;
@@ -104,10 +106,14 @@ void enc_default(Enc& e, const Param& p) {
     }
 }
 
-Param dec_default(Dec& d) {
-    Param p;
+struct DecodedDefault {
+    bool has = false;
+    std::optional<LiteralValue> lit;
+};
+DecodedDefault dec_default_value(Dec& d) {
+    DecodedDefault out;
     uint8_t tag = d.u8();
-    p.has_default = tag != 0;
+    out.has = tag != 0;
     if (tag >= 1 && tag <= 7) {
         LiteralValue v;
         switch (tag) {
@@ -134,8 +140,20 @@ Param dec_default(Dec& d) {
                 break;
             default: break;
         }
-        p.default_lit = std::move(v);
+        out.lit = std::move(v);
     }
+    return out;
+}
+
+void enc_default(Enc& e, const Param& p) {
+    enc_default_value(e, p.has_default, p.default_lit);
+}
+
+Param dec_default(Dec& d) {
+    Param p;
+    auto v = dec_default_value(d);
+    p.has_default = v.has;
+    p.default_lit = std::move(v.lit);
     return p;
 }
 
@@ -415,6 +433,10 @@ std::string module_class_vtable_symbol(const std::string& module, const std::str
 std::string module_class_own_slots_symbol(const std::string& module, const std::string& cls) {
     return std::format("pyadamas${}$os${}", module_symbol_prefix(module), cls);
 }
+std::string module_class_method_symbol(const std::string& module, const std::string& cls,
+                                       int slot) {
+    return std::format("pyadamas${}$ms${}${}", module_symbol_prefix(module), cls, slot);
+}
 
 std::expected<std::string, std::string> encode_module_interface(const ModuleInfo& info) {
     try {
@@ -455,6 +477,7 @@ std::expected<std::string, std::string> encode_module_interface(const ModuleInfo
             for (auto* f : layout) {
                 e.str(f->name);
                 enc_type(e, f->ty);
+                enc_default_value(e, f->has_default, f->default_lit);
             }
             e.u32(static_cast<uint32_t>(c.match_args.size()));
             for (auto& ma : c.match_args) e.str(ma);
@@ -463,6 +486,8 @@ std::expected<std::string, std::string> encode_module_interface(const ModuleInfo
                 e.str(m.name);
                 e.u8(static_cast<uint8_t>(m.kind));
                 e.u32(static_cast<uint32_t>(m.slot));
+                e.u32(static_cast<uint32_t>(m.aliases.size()));
+                for (int a : m.aliases) e.u32(static_cast<uint32_t>(a));
                 enc_sig(e, m.call_sig ? m.call_sig : m.sig);
             }
             e.u8(c.has_init ? 1 : 0);
@@ -529,6 +554,9 @@ std::expected<ModuleInfoPtr, std::string> decode_module_interface(const std::str
                 FieldInfo f;
                 f.name = d.str();
                 f.ty = dec_type(d);
+                auto dv = dec_default_value(d);
+                f.has_default = dv.has;
+                f.default_lit = std::move(dv.lit);
                 cls->fields.push_back(std::move(f));
             }
             uint32_t nma = d.u32();
@@ -539,6 +567,9 @@ std::expected<ModuleInfoPtr, std::string> decode_module_interface(const std::str
                 m.name = d.str();
                 m.kind = static_cast<MethodKind>(d.u8());
                 m.slot = static_cast<int>(d.u32());
+                uint32_t nal = d.u32();
+                for (uint32_t k = 0; k < nal; ++k)
+                    m.aliases.push_back(static_cast<int>(d.u32()));
                 m.call_sig = dec_sig(d);
                 m.sig = m.call_sig;
                 cls->methods.push_back(std::move(m));

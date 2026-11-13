@@ -396,6 +396,46 @@ void AsmGen::gen_call_direct(const Inst& in) {
         }
     }
 
+void AsmGen::gen_call_ptr(const Inst& in) {
+        // 裸代码地址调用（类对象 vtable 分派）：没有闭包环境，%r10 清零。
+        std::vector<TypePtr> types;
+        types.reserve(in.args.size());
+        for (VReg a : in.args) types.push_back(ty_of(a));
+        auto locs = classify(types);
+        int stack_args = 0;
+        for (auto& l : locs)
+            if (l.stack_off >= 0) stack_args = (l.stack_off / 8) + 1;
+        int alloc = (stack_args * 8 + 15) & ~15;
+
+        emit2("movq", src_op(in.a), "%r11");
+        if (alloc) emit_imm_op("subq", alloc, "%rsp");
+        for (size_t i = 0; i < in.args.size(); ++i) {
+            const auto& l = locs[i];
+            if (l.stack_off < 0) continue;
+            emit2("movq", src_op(in.args[i]), "%r10");
+            line(std::format("movq %r10, {}(%rsp)", l.stack_off));
+        }
+        for (size_t i = 0; i < in.args.size(); ++i) {
+            const auto& l = locs[i];
+            if (l.stack_off >= 0) continue;
+            if (l.fp)
+                line(std::format("movsd {}, %xmm{}", src_op(in.args[i]), l.reg));
+            else
+                emit2("movq", src_op(in.args[i]), kIntArgRegs[l.reg]);
+        }
+        line("xorl %r10d, %r10d");
+        if (opt_ < 2) line("xorl %eax, %eax");
+        spill_fp_slots();
+        line("call *%r11");
+        reload_fp_slots();
+        if (alloc) emit_imm_op("addq", alloc, "%rsp");
+
+        if (!dst_unused(in)) {
+            if (ir_is_float(in.ty)) emit2("movsd", "%xmm0", dst_op(in.dst));
+            else emit2("movq", "%rax", dst_op(in.dst));
+        }
+    }
+
 void AsmGen::gen_branch(const Inst& in) {
         TypePtr ty = ty_of(in.a);
         if (ir_is_float(ty)) {
@@ -951,6 +991,7 @@ void AsmGen::gen_call_rt(const Inst& in) {
                 break;
             case RtFn::ListSort:
             case RtFn::SortedList:
+            case RtFn::ClassMethod:
             case RtFn::Zip2List:
             case RtFn::MathGcd:
             case RtFn::MathLcm:
@@ -1218,6 +1259,7 @@ void AsmGen::gen_call_rt(const Inst& in) {
             case RtFn::RangeRepr:
                 emit2("movq", src_op(in.args[0]), "%rdi");
                 break;
+            case RtFn::ClassCtor:
             case RtFn::ClassName:
             case RtFn::ClassRepr:
                 emit2("movq", src_op(in.args[0]), "%rdi");

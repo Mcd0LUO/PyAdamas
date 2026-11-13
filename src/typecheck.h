@@ -99,6 +99,9 @@ struct LiteralValue {
     std::string s;
 };
 
+// 常量表达式 → 可序列化字面量；非 Constant 返回 nullopt。
+std::optional<LiteralValue> literal_of_expr(const Expr* e);
+
 struct Type {
     TyKind kind = TyKind::Unknown;
     // List/Set: [elem]   Dict: [key, val]   Tuple: elems
@@ -225,6 +228,8 @@ struct FieldInfo {
     TypePtr ty;
     bool has_default = false;
     Expr* default_expr = nullptr;  // 供降级阶段生成字段初始化
+    // 跨模块接口用的字面量形式；非字面量初值只有 default_expr。
+    std::optional<LiteralValue> default_lit;
     // 从 `self.x = ...` 推断出来的字段（没写标注）。类型只是推测，
     // 赋别的类型时放宽成 join，不报错。
     bool implicit = false;
@@ -290,6 +295,9 @@ struct MethodInfo {
     FuncInfoPtr call_sig;     // 去掉 self 的调用签名（外部 obj.m(...) 按它查）
     FunctionDef* def = nullptr;  // 供降级阶段编译方法体
     int slot = -1;
+    // 同一 (name, kind) 在不同模块里可能占了不同槽；导入类的接口
+    // 会带完整别名表，vtable 填充时所有槽写同一个实现。
+    std::vector<int> aliases;
     // 自定义装饰器：类创建时把装饰器链的结果存成类属性，调用点按
     // decorated_ty 查参，降级时通过类属性做间接调用。
     bool decorated = false;
@@ -1382,6 +1390,8 @@ private:
     // 方法槽按「名字」在模块内全局分配：多继承的两个无关基类可能给同名
     // 方法分配过不同槽，全局唯一后 vtable 才能同时满足两边的调用点。
     std::unordered_map<std::string, int> method_slots_;
+    // 槽号 → (name, kind) 键：用于发现不同方法名占用同一槽。
+    std::unordered_map<int, std::string> method_slot_owner_;
     int method_slot_count_ = 0;
     std::unordered_map<const Match*, std::unordered_map<std::string, TypePtr>> match_capture_types_;
 
@@ -1390,11 +1400,12 @@ private:
         if (it != method_slots_.end()) return it->second;
         int s = method_slot_count_++;
         method_slots_.emplace(key, s);
+        method_slot_owner_.emplace(s, key);
         return s;
     }
-    // 继承导入类时把它的方法槽并进本模块的槽空间。导入模块的槽号是
-    // 独立分配的，同名不同槽或不同名同槽都会让 vtable 无法同时满足
-    // 两边的调用点，这里直接报错。
+    // 继承导入类时把它的方法槽并进本模块的槽空间。同名不同槽作为
+    // aliases 允许（vtable 填多份），不同名同槽无法同时满足两边调用点，
+    // 这里直接报错。
     bool reserve_imported_method_slots(const ClassInfo* cls, int line, int col);
     // 当前方法第一个参数的名字（通常就是 self）。`self.x = 1` 只有认得出
     // 这里，才能把它当成字段声明而不是外部对象的属性写入。

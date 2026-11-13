@@ -25,7 +25,7 @@ PyAdamas 不追求兼容 CPython：语义是按静态类型的需要重新定的
 | `*args` | 形参是 `list[T]` | 形参是 tuple | 列表和元组在 PyAdamas 里表示相同；`len` / 下标 / 迭代一致 |
 | 函数装饰器 | `@dec` 在定义点立即执行，包装函数必须用固定形参转发 | 任意可调用 | 没有运行时签名信息，`*args` 转发给 unknown 被装饰者无法绑定 |
 | `with` | 只支持类实例的 `__enter__` / `__exit__`；正常、`return` / `break` / `continue` 和异常路径都调用 `__exit__` | 完整上下文管理协议 | `__exit__` 返回值只有真/假语义；异常路径传 `(type, message, None)` |
-| import | 本地单层 `.py`；`m.x` 直接读写模块全局；`from m import x` 是快照；模块别名不能当值 | 任意模块/包、运行时模块对象 | 支持包/相对导入/静态 `import *`（按非下划线导出）；支持导入类单继承（字段、覆盖方法、`super()`、`isinstance`）；导入类作为附加基类、导入基类字段默认值、`@classmethod` 跨模块重绑定暂不支持 |
+| import | 本地单层 `.py`；`m.x` 直接读写模块全局；`from m import x` 是快照；模块别名不能当值 | 任意模块/包、运行时模块对象 | 支持包/相对导入/静态 `import *`（按非下划线导出）；支持导入类作主基类或附加基类（字段、覆盖方法、`super()`、`isinstance`、字面量字段默认值、跨模块 classmethod 的 `cls(...)` 重绑定）；动态 classmethod 的 `cls.x` 仍按声明类解析、方法值暂不支持，子类 `__init__` 签名需与基类兼容 |
 | 模块初始化 | 第一次执行 import 时惰性运行一次；循环导入编译期报错 | 支持循环导入和部分初始化 | 初始化失败的模块不会再重试；模块对象不可见 |
 | 推导式 | list/set/dict 推导式按循环展开；生成器表达式脱糖成合成生成器函数，惰性求值；含 `async for` 的推导式在协程里可挂起；含 lambda 的推导式改写成生成器表达式 + 构造器，循环变量可被捕获 | 同 Python | 异步 list/set/dict 推导式只能作为语句/赋值/`return` 的根表达式；异步生成器表达式（`(x async for ...)`）已支持，可出现在任意表达式位置；类体里的生成器表达式仍按 list 构造；推导式内部不能引用循环变量的生成器表达式 |
 | 生成器 | 状态机 + 堆帧；`for` / `next` / `send` / `throw` / `close` / `yield from`；`yield from` 把 `throw` 转发给子生成器；跨 `yield` 跑 `finally` / `__exit__`；挂起点可在任意子表达式、`except` 与 `finally` 体内；生成器/协程/异步生成器类型跨模块保留元素/结果类型；`Generator[Y, S, R]` 标注给 `send` 实参与 `yield` 表达式收窄类型 | 完整生成器协议 | 未标注 `Generator[Y, S, R]` 时 `send` 值与 `yield` 表达式静态是 unknown（`R` 只记录，`StopIteration.value` 不检查） |
@@ -33,9 +33,9 @@ PyAdamas 不追求兼容 CPython：语义是按静态类型的需要重新定的
 | 递归深度 | 受栈大小限制（万级） | 默认 1000，可调 | 没有解释器递归检查 |
 | 字段初值 `x: int = []` | 每次构造重新求值，实例之间独立 | 类属性，所有实例共享 | 更安全；也避免可变默认值的经典 bug |
 | 类体里的普通赋值 | 是类属性：所有实例共享一份存储，`C.x` / `cls.x` / `self.x` 都能读到；子类赋值走写时复制，基类不受影响 | 类体是独立命名空间，属性存在类对象上 | `if`/`for` 等其它类体语句仍按模块全局处理；`obj.类属性 = v` 不支持（对象布局编译期定死） |
-| `@classmethod` | 支持；`cls` 静态绑定到所属类，子类继承时按子类重新特化一份 | 运行期传入 `type(obj)` | 子类特化会复制方法体；`cls` 当值传出去会退化成整数 |
+| `@classmethod` | 支持；entry 模块本地方法 `cls` 静态绑定并在子类重编译；非入口 / 跨模块方法用运行期类对象（带 vtable 与构造器），`cls(...)` 构造实际子类、`cls.m(...)` 动态分派 | 运行期传入 `type(obj)` | 跨模块 `cls.x` 类属性仍按声明类解析；子类 `__init__` 签名需与基类兼容；动态 classmethod 作为方法值暂不支持 |
 | 自定义方法装饰器 | 类创建时按从下到上应用，结果存成类属性；`obj.m(...)` 以 self 为第一个实参调用包装函数，继承沿 MRO 读同一份；`C.m(obj, ...)` 显式传 self，`super().m(...)` 自动补 self；走 `dunder_call` 的 dunder（算术/比较/str/len/hash/iter/contains）、构造（`__init__`）、`with`/`async with` 协议、`__call__` 也可装饰（装饰后不填 vtable 槽，调用点从类属性取包装函数并补 self） | 同 Python（方法装饰器返回的值按描述符绑定） | 装饰器必须返回已知签名的函数且用固定形参 |
-| 方法值 `obj.m` / `C.m` | 合成闭包捕获接收者：普通方法 `vcall`（子类覆盖生效）、静态/类方法 `vcall_static`、类接收者的静态/类方法 `call_direct`；默认参数与关键字参数可用 | 同 Python（descriptor 绑定） | 类接收者上取普通方法的值不支持（和 `C.m(...)` 的直接调用限制一致） |
+| 方法值 `obj.m` / `C.m` | 合成闭包捕获接收者：普通方法 `vcall`（子类覆盖生效）、静态/类方法 `vcall_static`、类接收者的静态/类方法 `call_direct`；默认参数与关键字参数可用 | 同 Python（descriptor 绑定） | 类接收者上取普通方法的值不支持；跨模块 / 动态 classmethod 的方法值暂不支持 |
 | 类的属性 | 声明过的字段，或 `self.x = ...` 就地长出来的字段 | 可随时给实例挂任意属性 | 偏移是编译期常量，没有运行时 `__dict__` |
 | `print(obj)` | 有 `__str__`（或 `__repr__`）就调，否则 `<Point object>` | 同 Python（默认文本带模块名和地址） | 默认文本没有模块名和地址 |
 | 协议 dunder | `__str__`/`__repr__`/`__eq__`/`__ne__`/`__len__`/`__hash__`/`__contains__`/`__iter__`/算术与比较类 dunder 走 vtable；`in` 需要 `__contains__`，`<` 等需要比较 dunder，算术需要对应 dunder，否则编译报错 | 完整数据模型 | `__format__`/`__bool__`/`__reversed__` 已建模（`format()`/f-string 格式说明、真值、`reversed()`）；`__eq__` 的 other 限 unknown 或类类型；只定义 `__eq__` 没定义 `__hash__` 的类在 dict/set 里按身份处理 |

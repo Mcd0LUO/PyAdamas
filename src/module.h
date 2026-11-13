@@ -34,7 +34,7 @@ struct ModuleInfo {
     std::map<std::string, ImportedClass> classes;
 };
 
-inline constexpr uint16_t kModuleFormatVersion = 9;
+inline constexpr uint16_t kModuleFormatVersion = 10;
 inline constexpr uint16_t kModuleAbiVersion = 1;
 
 std::expected<std::string, std::string> encode_module_interface(const ModuleInfo& info);
@@ -54,5 +54,7 @@ std::string module_class_new_symbol(const std::string& module, const std::string
 // 填子类 vtable / super 查找。
 std::string module_class_vtable_symbol(const std::string& module, const std::string& cls);
 std::string module_class_own_slots_symbol(const std::string& module, const std::string& cls);
+std::string module_class_method_symbol(const std::string& module, const std::string& cls,
+                                       int slot);
 
 }  // namespace pyadamas

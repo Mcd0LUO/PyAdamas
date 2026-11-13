@@ -28,7 +28,7 @@ Python 语义里变量天生可变，循环里反复赋值是常态。一上来�
 | `Block` | 名字 + 指令序列，`terminated()` 判断末尾是不是跳转/分支/返回 |
 | `IRFunction` | 名字、形参、返回类型、`slot_ty`（局部槽类型）、`vreg_ty`（每个 vreg 的类型）、基本块、`env_slot`（有捕获时存闭包指针的槽） |
 | `IRGlobal` | 一个全局变量；数据段里就是一个 `.quad`，初值 0 同时也是 `None` |
-| `IRClass` | 名字、vtable（槽 → 函数下标）、`vtable_ext`（来自导入基类的槽 → 外部符号表达式）、字段数（含继承）、`field_heap`（每个字段是否堆类型，供析构器使用）、`qualname`（模块限定类名）、`mro`（C3 类下标，self 在前）、`ext_bases`（导入祖先的 vtable/own_slots 符号与限定名）、`own_slots`（本类声明的方法槽） |
+| `IRClass` | 名字、vtable（槽 → 函数下标）、`vtable_ext`（来自导入基类的槽 → 导出方法符号）、字段数（含继承）、`field_heap`（每个字段是否堆类型，供析构器使用）、`qualname`（模块限定类名）、`mro`（C3 顺序；>=0 本地类下标，<0 表示 ext_bases 下标取反）、`ext_bases`（导入祖先的 vtable/own_slots 符号与限定名）、`own_slots`（本类声明的全部槽，含别名） |
 | `IRModule` | 函数表、全局表、字符串池、类表、`entry`（顶层代码编译成的函数下标） |
 
 `Inst` 里有个容易踩的点：**`idx` 的含义随 `op` 变**——`const.str` 是字符串池下标，`load.slot` 是槽号，`load.global` 是全局号，`func.addr` 是函数号。类型上看不出区别，读指令时要先看 `op`。
@@ -63,6 +63,8 @@ Python 语义里变量天生可变，循环里反复赋值是常态。一上来�
 | `index.set a, b, c` | — | `a[b] = c` | `pa_list_set` |
 | `len dst, a` | — | `dst = len(a)` | 一条 `movq (%rax), %rax` |
 | `obj.new dst, imm` | `imm: 类下标` | 分配对象并写入 vtable 指针；析构器取自 `IRClass::field_heap` | `call pa_obj_new` + `leaq .LvtN`；`.LvtN` 前有 5 字类元数据 |
+| `class.addr dst, imm` | `imm: 类下标` | `dst = &classes[imm].vtable`；类对象记录 vtable 用 | `leaq .LvtN(%rip), %rax` |
+| `global.addr dst, idx` | `idx: 全局下标` | `dst = &globals[idx]`；外部 vtable/方法符号取地址 | `leaq <symbol>(%rip), %rax` |
 | `struct.new dst, imm` | `imm: payload 字节数` | 分配 `[RC 头][payload]`，字段清零 | `call pa_struct_new` |
 | `struct.copy dst, a` | `imm: 字节数` | `dst = a` 的独立副本（纯字节 `memcpy`） | `call pa_struct_copy` |
 | `field.get dst, a, imm` | `imm: 字节偏移` | `dst = a->field`；宽度取指令的 `fwidth`（`bool` 1 字节，其余 8） | `movzbq` / `movq off(%rax)` |
@@ -71,6 +73,7 @@ Python 语义里变量天生可变，循环里反复赋值是常态。一上来�
 | `vcall.static dst, a, args...` | `imm: vtable 槽` | 静态方法：不传 self | 同 vcall，参数序列少一个 self |
 | `vcall.super dst, a, args...` | `imm: 槽`，`c: after 类限定名`，`b: 方法名` | 按运行期 MRO 找下一实现（after 类按限定名匹配，跨模块继承可用） | 先 `pa_super_lookup`，再照 vcall 传 self |
 | `call.direct dst, imm, args...` | `imm: 函数下标` | 直接调用裸函数（类名上的静态方法） | `leaq .LfN(%rip)` + `call` |
+| `call.ptr dst, a, args...` | `a: 裸代码地址` | 间接调用 `a(args...)`（类对象 vtable 分派） | `call *%r11`，`%r10` 清零 |
 | `call dst, a, args...` | `a: 函数值` | 间接调用 | `call *%r11` |
 | `call.rt args..., imm` | `imm: RtFn` | 调运行时函数 | `call pa_xxx` |
 | `setjmp dst, a` | `a: handler 记录` | `dst = setjmp(a)`；异常 longjmp 回来时为非 0 | `call setjmp` |
@@ -215,6 +218,7 @@ P0/P1/P2，O2 再加控制流与小函数优化：
 7. `vcall` 的 `a` 是接收者（self），`args` 里**不含** self——后端把它装进第一个整型参数位。
 8. 类表在降级开始时就按 AST 顺序建好（父类在前），`obj.new` 的 `imm` 是 `IRModule::classes` 的下标；vtable 里 `-1` 表示该槽没填上，正常不会出现（方法编译失败时整个编译已经报错）。
 9. 非入口模块的每个类把 vtable / own_slots 以 `pyadamas$<模块>$vt$<类>` / `pyadamas$<模块>$os$<类>` 导出；导入方继承时用外部符号填 `vtable_ext`，并为每个导入祖先发一个 cid=-1 的本地 mirror 元数据（限定名参与 `isinstance`，vtable/own_slots 参与 `super()`）。
+10. 每个已填 vtable 槽还导出裸代码符号 `pyadamas$<模块>$ms$<类>$<槽>`；导入方 vtable 必须引用这个符号而不是 `vt + 8*slot`（后者是数据槽地址）。类对象 `PyAdamasClass` 保存 cid、ctor、vtable 与限定名，动态 classmethod 用 `pa_class_ctor` / `pa_class_method` 分派。
 
 ## 降级规则
 

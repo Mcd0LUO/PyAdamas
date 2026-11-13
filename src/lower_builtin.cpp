@@ -434,9 +434,11 @@ VReg Lowerer::lower_builtin_call(const std::string& name, Call& c) {
         }
         bool runtime = true;
         if (st && st->kind == TyKind::Class && st->cls) {
-            if (st->cls->is_subclass_of(target))
+            bool a = st->cls->is_subclass_of(target);
+            bool b = target->is_subclass_of(st->cls);
+            if (a)
                 runtime = vt != st;  // Optional 可能实际是 None
-            else if (target->is_subclass_of(st->cls))
+            else if (b)
                 runtime = true;      // 值可能是子类
             else
                 return const_bool(false);
@@ -444,8 +446,11 @@ VReg Lowerer::lower_builtin_call(const std::string& name, Call& c) {
             return const_bool(false);
         }
         if (!runtime) return const_bool(true);
-        return call_runtime(RtFn::IsInstance, t_bool(),
-                            {expr(*c.args[0]), const_int(cid->second)});
+        // 类编号只在模块内唯一，跨模块对象 MRO 里可能有同号的别的类；
+        // 本地类目标也按限定名比较，避免误匹配。
+        std::string qual = mod_.runtime_name + "." + target->name;
+        return call_runtime(RtFn::IsNamedClass, t_bool(),
+                            {expr(*c.args[0]), const_str(qual)});
     }
 
     if (name == "type") {

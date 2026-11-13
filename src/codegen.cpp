@@ -155,12 +155,33 @@ std::string AsmGen::gen(const IRModule& m) {
                         out_ += std::format("\t.quad {}\n", func_label(c.vtable[s]));
                     }
                 }
+                // 每个已填槽导出裸代码符号：导入方 vtable 需要函数地址，
+                // 不能引用 .LvtN + offset（那是数据槽地址）。
+                if (export_cls) {
+                    for (size_t s = 0; s < c.vtable.size(); ++s) {
+                        std::string impl;
+                        const std::string& ext =
+                            s < c.vtable_ext.size() ? c.vtable_ext[s] : std::string();
+                        if (!ext.empty())
+                            impl = ext;
+                        else if (c.vtable[s] >= 0)
+                            impl = func_label(c.vtable[s]);
+                        if (impl.empty()) continue;
+                        std::string sym =
+                            module_class_method_symbol(m.module_symbol, c.name,
+                                                       static_cast<int>(s));
+                        out_ += std::format("\t.globl {}\n\t.hidden {}\n\t.set {}, {}\n",
+                                            sym, sym, sym, impl);
+                    }
+                }
                 out_ += std::format(".Lvtmro{}:\n", i);
-                out_ += std::format("\t.quad {}\n", c.mro.size() + c.ext_bases.size());
-                for (int a : c.mro)
-                    out_ += std::format("\t.quad .Lvtmeta{}\n", a);
-                for (size_t j = 0; j < c.ext_bases.size(); ++j)
-                    out_ += std::format("\t.quad .Lvtmetaext{}_{}\n", i, j);
+                out_ += std::format("\t.quad {}\n", c.mro.size());
+                for (int a : c.mro) {
+                    if (a >= 0)
+                        out_ += std::format("\t.quad .Lvtmeta{}\n", a);
+                    else
+                        out_ += std::format("\t.quad .Lvtmetaext{}_{}\n", i, -a - 1);
+                }
                 out_ += std::format(".Lvtown{}:\n", i);
                 if (export_cls) {
                     std::string sym = module_class_own_slots_symbol(m.module_symbol, c.name);

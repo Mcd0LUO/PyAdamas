@@ -48,6 +48,16 @@ void AsmGen::gen_inst(const Inst& in) {
                 out_ += global_label(in.idx);
                 out_ += "(%rip)\n";
                 break;
+            case IrOp::GlobalAddr:
+                out_ += "\tleaq ";
+                out_ += global_label(in.idx);
+                out_ += "(%rip), %rax\n";
+                move_to(dst_op(in.dst), "%rax");
+                break;
+            case IrOp::ClassAddr:
+                out_ += std::format("\tleaq .Lvt{}(%rip), %rax\n", in.imm);
+                move_to(dst_op(in.dst), "%rax");
+                break;
             case IrOp::MakeList: gen_make_list(in); break;
             case IrOp::MakeTuple: gen_make_list(in); break;
             case IrOp::IndexLoad: gen_index_load(in); break;
@@ -69,6 +79,7 @@ void AsmGen::gen_inst(const Inst& in) {
             case IrOp::VCallStatic: gen_vcall_static(in); break;
             case IrOp::SuperVCall: gen_super_vcall(in); break;
             case IrOp::CallDirect: gen_call_direct(in); break;
+            case IrOp::CallPtr: gen_call_ptr(in); break;
             case IrOp::Call: gen_call(in); break;
             case IrOp::CallRt: gen_call_rt(in); break;
             case IrOp::CallExtern: gen_call_extern(in); break;

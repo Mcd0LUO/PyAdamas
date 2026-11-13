@@ -95,12 +95,13 @@ static void class_destroy(void* p) {
     if (c->name) pa_rc_dec(c->name);
 }
 
-void* pa_class_new(int64_t cid, int64_t ctor, PyAdamasStr* name) {
+void* pa_class_new(int64_t cid, int64_t ctor, int64_t* vtable, PyAdamasStr* name) {
     PyAdamasClass* c = (PyAdamasClass*)rc_alloc((int64_t)sizeof(PyAdamasClass),
                                                 class_destroy, NULL, PYADAMAS_RC_OBJ);
     c->magic = PYADAMAS_CLASS_MAGIC;
     c->cid = cid;
     c->ctor = ctor;
+    c->vtable = vtable;
     c->name = name;  /* 接管调用方的引用 */
     return c;
 }
@@ -108,6 +109,17 @@ void* pa_class_new(int64_t cid, int64_t ctor, PyAdamasStr* name) {
 int64_t pa_class_cid(void* cls) {
     PyAdamasClass* c = as_class(cls);
     return c ? c->cid : -1;
+}
+
+int64_t pa_class_ctor(void* cls) {
+    PyAdamasClass* c = as_class(cls);
+    return c ? c->ctor : 0;
+}
+
+void* pa_class_method(void* cls, int64_t slot) {
+    PyAdamasClass* c = as_class(cls);
+    if (!c || !c->vtable || slot < 0) return NULL;
+    return (void*)(uintptr_t)c->vtable[slot];
 }
 
 PyAdamasStr* pa_class_name(void* cls) {
@@ -128,13 +140,18 @@ PyAdamasStr* pa_class_repr(void* cls) {
     PyAdamasClass* c = as_class(cls);
     const char* name = c && c->name ? c->name->data : "?";
     int64_t n = c && c->name ? c->name->len : 1;
+    /* 类对象存的是限定名；repr 与 __name__ 一样只显示最后一段。 */
+    const char* start = name;
+    for (int64_t i = 0; i < n; ++i)
+        if (name[i] == '.') start = name + i + 1;
+    n -= (int64_t)(start - name);
     const char* pre = "<class '";
     const char* post = "'>";
     int64_t plen = 8, slen = 2;
     PyAdamasStr* s = str_alloc(plen + n + slen);
     char* p = (char*)s->data;
     memcpy(p, pre, (size_t)plen);
-    memcpy(p + plen, name, (size_t)n);
+    memcpy(p + plen, start, (size_t)n);
     memcpy(p + plen + n, post, (size_t)slen);
     return s;
 }
@@ -149,8 +166,10 @@ int64_t pa_isinstance_class(void* obj, void* cls) {
         }
         return 0;
     }
-    if (c->cid >= 0) return pa_isinstance(obj, c->cid);
+    /* 类编号只在模块内唯一；类对象存的是限定名，统一按限定名比较，
+       避免导入模块的对象 MRO 里出现同号的别的类。 */
     if (c->name) return pa_is_named_class(obj, c->name);
+    if (c->cid >= 0) return pa_isinstance(obj, c->cid);
     return 0;
 }
 

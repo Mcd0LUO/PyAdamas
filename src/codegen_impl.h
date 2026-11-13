@@ -487,6 +487,7 @@ private:
     void gen_super_vcall(const Inst& in);
 
     void gen_call_direct(const Inst& in);
+    void gen_call_ptr(const Inst& in);
 
         void gen_branch(const Inst& in);
 

@@ -1270,27 +1270,55 @@ bool build_unit(Program& p, ModuleUnit& u, bool emit_object, bool entry_ir) {
                 for (auto it = chain.rbegin(); it != chain.rend(); ++it)
                     for (auto& f : (*it)->fields) flat->fields.push_back(f);
                 // __match_args__ 决定位置类模式的字段顺序，要跟着接口走。
-                flat->match_args = cls->match_args;
-                std::map<int, pyadamas::MethodInfo> by_slot;
-                for (auto it = chain.rbegin(); it != chain.rend(); ++it)
-                    for (auto& m : (*it)->methods) {
+                if (const auto* ma = cls->match_args_of())
+                    flat->match_args = *ma;
+                else
+                    flat->match_args = cls->match_args;
+                // 完整槽表：按 C3 MRO 收集所有 (name, kind)，同名不同槽
+                // 作为 aliases 一起导出；不同名同槽是真正的冲突。
+                std::map<std::string, pyadamas::MethodInfo> by_key;
+                std::map<std::string, std::vector<int>> key_slots;
+                std::map<int, std::string> slot_owner;
+                bool conflict = false;
+                std::vector<const pyadamas::ClassInfo*> mro;
+                for (auto* k : cls->mro) mro.push_back(k);
+                if (mro.empty()) mro.push_back(cls);
+                for (const pyadamas::ClassInfo* k : mro) {
+                    if (!k) continue;
+                    for (auto& m : k->methods) {
                         if (!m.call_sig) continue;
-                        auto sit = by_slot.find(m.slot);
-                        if (sit != by_slot.end() &&
-                            (sit->second.name != m.name || sit->second.kind != m.kind)) {
-                            report(u.path, u.source, 0, 0,
-                                   std::format("method slot {} of '{}' is used by both '{}' and "
-                                               "'{}' (cross-module slot conflict)",
-                                               m.slot, name, sit->second.name, m.name));
-                            return false;
-                        }
-                        by_slot[m.slot] = m;
+                        std::string key = pyadamas::method_slot_key(m.name, m.kind);
+                        auto add_slot = [&](int slot) -> bool {
+                            auto sit = slot_owner.find(slot);
+                            if (sit != slot_owner.end() && sit->second != key) {
+                                report(u.path, u.source, 0, 0,
+                                       std::format("method slot {} of '{}' is used by both "
+                                                   "'{}' and '{}' (cross-module slot conflict)",
+                                                   slot, name, sit->second, key));
+                                conflict = true;
+                                return false;
+                            }
+                            slot_owner[slot] = key;
+                            auto& v = key_slots[key];
+                            if (std::find(v.begin(), v.end(), slot) == v.end()) v.push_back(slot);
+                            return true;
+                        };
+                        if (!add_slot(m.slot)) break;
+                        for (int a : m.aliases)
+                            if (!add_slot(a)) break;
+                        if (conflict) break;
+                        if (!by_key.count(key)) by_key[key] = m;
                     }
-                for (auto& [slot, m] : by_slot) {
+                    if (conflict) break;
+                }
+                if (conflict) return false;
+                for (auto& [key, m] : by_key) {
                     pyadamas::MethodInfo nm;
                     nm.name = m.name;
                     nm.kind = m.kind;
-                    nm.slot = slot;
+                    nm.slot = m.slot;
+                    for (int slot : key_slots[key])
+                        if (slot != m.slot) nm.aliases.push_back(slot);
                     nm.call_sig = m.call_sig;
                     nm.sig = m.call_sig;
                     flat->methods.push_back(std::move(nm));
@@ -1324,11 +1352,8 @@ bool build_unit(Program& p, ModuleUnit& u, bool emit_object, bool entry_ir) {
                     flat->origin_module, cls->imported() ? cls->external_name() : name);
                 ic.module = flat->origin_module;
                 ic.qualname = flat->origin_qualname;
-                if (cls->has_init) {
-                    if (auto* im = flat->method("__init__"); im && im->call_sig) {
-                        ic.ctor_sig = im->call_sig;
-                    }
-                }
+                if (auto* im = flat->method("__init__"); im && im->call_sig)
+                    ic.ctor_sig = im->call_sig;
                 if (!ic.ctor_sig) ic.ctor_sig = std::make_shared<pyadamas::FuncInfo>();
                 info->classes[name] = std::move(ic);
                 continue;
@@ -1338,6 +1363,24 @@ bool build_unit(Program& p, ModuleUnit& u, bool emit_object, bool entry_ir) {
     }
     info->globals["__name__"] = pyadamas::t_str();
     info->globals["__file__"] = pyadamas::t_str();
+    // 新构建的模块也走一遍接口编解码：导出签名里的类类型必须指向扁平
+    // ClassInfo（带 origin_module），不能泄漏本模块内部的 ClassInfo 指针。
+    if (!u.is_entry) {
+        auto bytes = pyadamas::encode_module_interface(*info);
+        if (!bytes) {
+            report(u.path, u.source, 0, 0,
+                   std::format("cannot encode module interface: {}", bytes.error()));
+            return false;
+        }
+        auto norm = pyadamas::decode_module_interface(*bytes, u.path);
+        if (!norm) {
+            report(u.path, u.source, 0, 0,
+                   std::format("cannot decode module interface: {}", norm.error()));
+            return false;
+        }
+        (*norm)->interface_hash = pyadamas::hex64(pyadamas::fnv1a64(*bytes));
+        info = *norm;
+    }
     u.info = info;
 
     if (!emit_object && !entry_ir) return true;

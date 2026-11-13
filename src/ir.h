@@ -170,7 +170,9 @@ enum class RtFn : uint16_t {
     DictUpdate,   // (dict*, dict*) -> void
     DictCopy,     // (dict*) -> dict*  浅拷贝（匹配 **rest）
     IsInstance,   // (obj*, i64 class_id) -> i64
-    ClassNew,     // (i64 cid, i64 ctor, str* name) -> class*
+    ClassNew,     // (i64 cid, i64 ctor, i64* vtable, str* name) -> class*
+    ClassCtor,    // (class*) -> fn*
+    ClassMethod,  // (class*, i64 slot) -> fnptr
     ClassName,    // (class*) -> str*
     ClassRepr,    // (class*) -> str*
     IsInstanceClass, // (obj*, class*) -> i64
@@ -577,6 +579,8 @@ inline const char* rt_name(RtFn f) {
         case RtFn::DictCopy: return "pa_dict_copy";
         case RtFn::IsInstance: return "pa_isinstance";
         case RtFn::ClassNew: return "pa_class_new";
+        case RtFn::ClassCtor: return "pa_class_ctor";
+        case RtFn::ClassMethod: return "pa_class_method";
         case RtFn::ClassName: return "pa_class_name";
         case RtFn::ClassRepr: return "pa_class_repr";
         case RtFn::IsInstanceClass: return "pa_isinstance_class";
@@ -981,6 +985,8 @@ enum class IrOp : uint8_t {
     StoreSlot,   // slots[idx] = a
     LoadGlobal,  // dst = globals[idx]
     StoreGlobal, // globals[idx] = a
+    GlobalAddr,  // dst = &globals[idx]（外部符号时是符号地址，不解引用）
+    ClassAddr,   // dst = &classes[idx].vtable
 
     // ── 容器 ──────────────────────────────────────────────
     MakeList,   // dst = <ty>[](args...)
@@ -1000,6 +1006,7 @@ enum class IrOp : uint8_t {
     VCallStatic,// dst = a->vtable[imm](args...)  静态方法不传 self
     SuperVCall, // dst = super_lookup(a, idx, imm)(a, args...)  沿运行期 MRO
     CallDirect, // dst = funcs[idx](args...)  直接调用裸函数（静态方法）
+    CallPtr,    // dst = a(args...)  a 是裸代码地址（类对象 vtable 分派）
 
     // ── 值类型 ────────────────────────────────────────────
     StructNew,  // dst = pa_struct_new(imm)；imm 是 payload 字节数
@@ -1051,6 +1058,8 @@ inline const char* irop_name(IrOp op) {
         case IrOp::StoreSlot: return "store.slot";
         case IrOp::LoadGlobal: return "load.global";
         case IrOp::StoreGlobal: return "store.global";
+        case IrOp::GlobalAddr: return "global.addr";
+        case IrOp::ClassAddr: return "class.addr";
         case IrOp::MakeList: return "list.new";
         case IrOp::MakeTuple: return "tuple.new";
         case IrOp::IndexLoad: return "index.get";
@@ -1066,6 +1075,7 @@ inline const char* irop_name(IrOp op) {
         case IrOp::VCallStatic: return "vcall.static";
         case IrOp::SuperVCall: return "vcall.super";
         case IrOp::CallDirect: return "call.direct";
+        case IrOp::CallPtr: return "call.ptr";
         case IrOp::StructNew: return "struct.new";
         case IrOp::StructCopy: return "struct.copy";
         case IrOp::Call: return "call";
@@ -1219,8 +1229,10 @@ struct IRClass {
     // 运行期类元数据：模块限定类名、C3 MRO（类下标，self 在前）和
     // 本类自己声明的方法槽。isinstance / super() 都靠这张表。
     std::string qualname;
+    // C3 MRO，self 在前。>=0 是本地类下标；<0 表示 -(ext_bases 下标 + 1)，
+    // 允许本地类与导入祖先按真实 MRO 顺序交错。
     std::vector<int> mro;
-    // 导入祖先按 MRO 顺序接在本地 mro 之后。
+    // 导入祖先：mirror 元数据描述。
     std::vector<IRClassExtBase> ext_bases;
     std::vector<int> own_slots;
 };

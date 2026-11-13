@@ -1,4 +1,5 @@
 class Base:
+    flag: str = "base"
     tag: str = "base"
 
     def __init__(self, tag: str = "base") -> None:
@@ -9,6 +10,14 @@ class Base:
 
     def value(self) -> int:
         return 1
+
+    @classmethod
+    def make(cls, tag: str) -> "Base":
+        return cls(tag)
+
+    @classmethod
+    def who(cls) -> str:
+        return cls.__name__
 
 
 class Middle(Base):

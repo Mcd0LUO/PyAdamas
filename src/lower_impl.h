@@ -137,10 +137,12 @@ struct FuncCtx {
     std::unordered_map<std::string, int> cell_slots;   // 名字 → 存 cell 指针的槽
     std::unordered_map<std::string, int> param_slots;  // 被捕获形参的原始值槽
     int env_slot = -1;                                 // 存闭包指针（%r10）的槽
-    // @classmethod 的 cls：槽位里放的是类 id（整数，不参与 rc），表达式
-    // 类型仍是那个类，所以 cls(...) 走静态构造、cls.attr 走类属性。
+    // @classmethod 的 cls：entry 模块里槽位放类 id（整数，不参与 rc），
+    // 表达式类型仍是那个类；非入口模块的槽位放运行期类对象指针，
+    // cls(...) / cls.m(...) 走动态构造与动态分派。
     std::string class_self_name;
     const ClassInfo* class_self_ty = nullptr;
+    bool class_self_dynamic = false;
     // 类体命名空间：类属性名 → 隐藏全局下标。只在降级类体语句时非空，
     // 让 `y = x + 1` 里的 x 解析到前面定义的类属性。
     std::unordered_map<std::string, int> class_body_attrs;
@@ -377,6 +379,18 @@ private:
         in.op = IrOp::ConstStr;
         in.idx = mod_.intern_string(s);
         return def(t_str(), std::move(in));
+    }
+
+    VReg const_literal(const LiteralValue& v) {
+        switch (v.kind) {
+            case LiteralValue::Kind::None: return const_none();
+            case LiteralValue::Kind::Bool: return const_bool(v.b);
+            case LiteralValue::Kind::Int: return const_int(v.i);
+            case LiteralValue::Kind::Float: return const_float(v.f);
+            case LiteralValue::Kind::Str: return const_str(v.s);
+            case LiteralValue::Kind::Bytes: return retype(const_str(v.s), t_bytes());
+        }
+        return const_none();
     }
 
     int new_temp_slot(TypePtr ty) { return st_->fn->new_slot(std::move(ty)); }

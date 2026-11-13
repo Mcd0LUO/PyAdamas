@@ -489,8 +489,9 @@ void Lowerer::lower_pattern(Pattern& p, VReg value, TypePtr ty, int fail, bool i
                     return;
                 }
                 if (need_check)
-                    test(call_runtime(RtFn::IsInstance, t_bool(),
-                                      {value, const_int(cid->second)}));
+                    test(call_runtime(
+                        RtFn::IsNamedClass, t_bool(),
+                        {value, const_str(mod_.runtime_name + "." + pc->name)}));
                 auto match_field = [&](const std::string& fname, PatternPtr& sub) {
                     const FieldInfo* f = pc->field(fname);
                     if (!f) {

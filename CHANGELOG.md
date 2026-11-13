@@ -4,6 +4,34 @@
 
 早期阶段没有逐条留痕，按阶段归纳；0.4 之后逐条记录。
 
+## [0.140] - 2026-11-13
+
+跨模块继承补完：运行期类表、导入类附加基类、导入字段默认值。
+
+### 变更
+
+- `PyAdamasClass` 增加 vtable 指针；`pa_class_new` 接收 vtable，
+  新增 `pa_class_ctor` / `pa_class_method`。非入口模块编译的 classmethod
+  把 `cls` 当运行期类对象：`cls(...)` 用实际子类的构造器，`cls.m(...)`
+  通过类对象 vtable 动态分派；`cls.__name__` 返回实际类名。
+- 新增 IR `class.addr` / `global.addr` / `call.ptr` 与 `pa_class_ctor` /
+  `pa_class_method` 运行时入口；entry 模块内本地 classmethod 仍走静态
+  cid 直调，避免回归。
+- vtable 外部槽改为引用导出的裸代码符号
+  `pyadamas$<模块>$ms$<类>$<槽>`，修复「引用 `vt + 8*slot` 数据槽地址」
+  导致的跨模块继承调用崩溃。
+- 模块接口 v10：字段带字面量默认值，方法带 `aliases` 槽表；导入类作为
+  多继承附加基类时按 `(name, kind)` 把实现写到全部别名槽，不同名抢同一
+  槽仍报错。新构建的模块也走一次接口编解码，保证导出签名里的类类型指向
+  扁平 `ClassInfo`。
+- `isinstance` 对本地类目标也改按限定名匹配，修复跨模块对象 MRO 里同号
+  类编号的误匹配；本地类对象存限定名，`__name__` / `repr` 只显示最后一段。
+- 边界：动态 classmethod 的 `cls.x` 类属性仍按声明类解析；子类 `__init__`
+  签名需与基类兼容；动态 classmethod 的方法值暂不支持；导入字段的非字面量
+  默认值在子类构造时报错。
+- 扩展模块用例 `tests/modules/inherit_import`：字段默认值、`Sub2.make`
+  构造子类、`cls.__name__`、导入类附加基类的别名槽与 `isinstance`。
+
 ## [0.139] - 2026-11-13
 
 跨模块继承：导入类可以作为单继承的主基类。

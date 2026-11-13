@@ -47,8 +47,18 @@ VReg Lowerer::imported_class_object(const ImportedClass& ic) {
     std::string qual = !ic.qualname.empty()
                            ? ic.qualname
                            : (ic.module.empty() ? ic.cls->name : ic.module + "." + ic.cls->name);
+    VReg vtable = const_int(0);
+    if (ic.cls->imported()) {
+        std::string sym = module_class_vtable_symbol(ic.cls->origin_module,
+                                                     ic.cls->external_name());
+        int gi = extern_global(sym, sym, t_int());
+        Inst ga;
+        ga.op = IrOp::GlobalAddr;
+        ga.idx = gi;
+        vtable = def(t_int(), std::move(ga));
+    }
     VReg obj = call_runtime(RtFn::ClassNew, obj_ty,
-                            {const_int(-1), ctor, const_str(qual)});
+                            {const_int(-1), ctor, vtable, const_str(qual)});
     push_temp(obj);
     return obj;
 }
@@ -589,6 +599,12 @@ VReg Lowerer::expr(Expr& e) {
             // 不会按堆类型做 rc，也避开了被内层闭包捕获时的 cell 问题。
             if (!st_->class_self_name.empty() && n.id == st_->class_self_name &&
                 st_->class_self_ty) {
+                if (st_->class_self_dynamic) {
+                    int slot = st_->slots.count(n.id) ? st_->slots[n.id] : -1;
+                    VReg raw = slot >= 0 ? load_slot(slot, t_int()) : const_int(0);
+                    return retype(raw, mk_class_obj(
+                                          mk_class(const_cast<ClassInfo*>(st_->class_self_ty))));
+                }
                 auto cid = class_ids_.find(st_->class_self_ty);
                 VReg raw = const_int(cid == class_ids_.end() ? 0 : cid->second);
                 return retype(raw, mk_class(const_cast<ClassInfo*>(st_->class_self_ty)));
