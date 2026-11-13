@@ -104,20 +104,20 @@ VReg Lowerer::lower_comp(Expr& e) {
         if (is_dict) {
             VReg k = expr(*key_expr);
             k = coerce(k, tc_.type_of(key_expr), elem_ty);
-            retain_elem(k, own_kind(elem_ty));
+            if (!move_fresh(k, elem_ty)) retain_elem(k, own_kind(elem_ty));
             VReg v = expr(*val_expr);
             v = coerce(v, tc_.type_of(val_expr), val_ty);
-            retain_elem(v, own_kind(val_ty));
+            if (!move_fresh(v, val_ty)) retain_elem(v, own_kind(val_ty));
             call_void(RtFn::DictSet, {acc_val(), k, v});
             return;
         }
         VReg v = expr(*elt_expr);
         v = coerce(v, tc_.type_of(elt_expr), elem_ty);
         if (is_set) {
-            retain_elem(v, own_kind(elem_ty));
+            if (!move_fresh(v, elem_ty)) retain_elem(v, own_kind(elem_ty));
             call_void(RtFn::DictSet, {acc_val(), v, const_int(0)});
         } else {
-            retain_elem(v, list_kind(rty));
+            if (!move_fresh(v, elem_ty)) retain_elem(v, list_kind(rty));
             call_void(RtFn::ListAppend, {acc_val(), v});
         }
     };

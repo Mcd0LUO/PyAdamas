@@ -1761,6 +1761,7 @@ VReg Lowerer::lower_list_like(std::vector<ExprPtr>& elts, TypePtr ty, bool is_tu
     // 元素所有权类别：0 非堆 / 1 堆 / 2 unknown 或混合。
     // kind 1/2 的元素在写入前 retain；kind 1 的容器销毁时由运行时 release。
     int kind = list_kind(ty);
+    std::vector<VReg> fresh_args;
     for (size_t i = 0; i < elts.size(); ++i) {
         auto& e = elts[i];
         if (e->kind == ExprKind::Starred) {
@@ -1777,14 +1778,24 @@ VReg Lowerer::lower_list_like(std::vector<ExprPtr>& elts, TypePtr ty, bool is_tu
         else if (ty && is_tuple && ty->variadic && !ty->sub.empty())
             want = ty->sub[0];
         v = coerce(v, tc_.type_of(e.get()), want);
-        retain_elem(v, kind);
+        // 新值直接交给容器：先不 retain，构造成功后 take 走临时栈的引用。
+        // 中途有元素求值抛异常时，临时栈仍持有它，cleanup 会正常释放。
+        if (kind != 0 && st_->fresh_vregs.count(v)) {
+            st_->fresh_vregs.erase(v);
+            fresh_args.push_back(v);
+        } else {
+            retain_elem(v, kind);
+        }
         args.push_back(v);
     }
     Inst in;
     in.op = is_tuple ? IrOp::MakeTuple : IrOp::MakeList;
     in.imm = kind;
     in.args = std::move(args);
-    return def_heap(ty, std::move(in));
+    VReg out = def_heap(ty, std::move(in));
+    // 容器已经直接持有这些引用，cleanup 不再 dec。
+    for (VReg v : fresh_args) rc_temp_take(v);
+    return out;
 }
 
 VReg Lowerer::lower_dict(DictExpr& d, TypePtr ty) {
@@ -1810,10 +1821,10 @@ VReg Lowerer::lower_dict(DictExpr& d, TypePtr ty) {
         }
         VReg k = expr(*d.keys[i]);
         k = coerce(k, tc_.type_of(d.keys[i].get()), kt);
-        retain_elem(k, ko);
+        if (!move_fresh(k, kt)) retain_elem(k, ko);
         VReg v = expr(*d.values[i]);
         v = coerce(v, tc_.type_of(d.values[i].get()), vt);
-        retain_elem(v, vo);
+        if (!move_fresh(v, vt)) retain_elem(v, vo);
         call_void(RtFn::DictSet, {dict, k, v});
     }
     return dict;
@@ -1834,7 +1845,7 @@ VReg Lowerer::lower_set(SetExpr& s, TypePtr ty) {
     for (auto& e : s.elts) {
         VReg v = expr(*e);
         v = coerce(v, tc_.type_of(e.get()), et);
-        retain_elem(v, eo);
+        if (!move_fresh(v, et)) retain_elem(v, eo);
         call_void(RtFn::DictSet, {set, v, const_int(0)});
     }
     return set;

@@ -51,16 +51,19 @@ static int64_t stat_rc_free;
 static int64_t stat_gc_runs;
 static int64_t stat_gc_freed;
 static int64_t stat_gc_live;
+static int64_t stat_take_calls;
+static int64_t stat_take_steps;
 
 static void rc_stats_dump(void) {
     fprintf(stderr,
             "[rc] inc=%lld dec=%lld dec_unknown=%lld temp=%lld cleanup=%lld free=%lld "
-            "gc_runs=%lld gc_freed=%lld gc_live=%lld\n",
+            "gc_runs=%lld gc_freed=%lld gc_live=%lld take=%lld take_steps=%lld\n",
             (long long)stat_rc_inc, (long long)stat_rc_dec,
             (long long)stat_rc_dec_unknown, (long long)stat_rc_temp,
             (long long)stat_rc_cleanup, (long long)stat_rc_free,
             (long long)stat_gc_runs, (long long)stat_gc_freed,
-            (long long)stat_gc_live);
+            (long long)stat_gc_live, (long long)stat_take_calls,
+            (long long)stat_take_steps);
 }
 
 #define PYADAMAS_RC_UNTRACKED 2
@@ -420,8 +423,10 @@ void pa_rc_cleanup(int64_t mark) {
    释放它。降级器只在「刚产生、未被别名」的值上调用，所以最多命中一次；
    从后往前找，允许中间还夹着别的临时值。 */
 void pa_rc_temp_take(void* p) {
+    if (rc_stats_on) stat_take_calls++;
     if (!p) return;
     for (int64_t i = temp_len - 1; i >= 0; --i) {
+        if (rc_stats_on) stat_take_steps++;
         if (temp_stack[i] == p) {
             temp_stack[i] = temp_stack[--temp_len];
             return;

@@ -72,9 +72,10 @@
 | 0.144 | collections/datetime/pathlib 收尾（deque 方法与元素类型、timedelta 除法、date.replace、Path 字节与路径方法）；新增 tests/bench 标准库基准 |
 | 0.145 | 序列重复（`str`/`list`/`tuple` × `int`）与 `base64`/`hashlib` C 内建，标准库基准反超 CPython |
 | 0.146 | 引用计数所有权转移（新值写入目标时移动临时栈引用）与 RC/GC 统计，新增 RC 基准 |
+| 0.147 | 容器字面量与推导式的 RC 所有权转移，扩展 RC 基准与 149 用例 |
 | 许可证 | Apache-2.0（见 [LICENSE](../LICENSE) / [NOTICE](../NOTICE)） |
 
-## 当前状态（0.146）
+## 当前状态（0.147）
 
 流水线 `源码 → 词法 → AST → lambda 脱糖 → 类型检查 → IR → x86-64 汇编 → 可执行文件` 已打通。
 

@@ -42,6 +42,23 @@ ys = xs
 xs = ["e" + "f"]
 print(ys[0], ys[1], xs[0])
 
+dl = {"k" + "1": "v" + "1", "k2": "v" + "2"}
+print(dl["k1"], dl["k2"])
+
+st = {"a" + "b", "c" + "d"}
+print(len(st))
+
+tp = ("a" + "b", "c" + "d")
+tq = tp
+tp = ()
+print(tq[0], tq[1])
+
+comp = [str(i) + "x" for i in range(3)]
+print(comp[0], comp[2])
+
+dc = {"k" + str(i): "v" + str(i) for i in range(2)}
+print(dc["k0"], dc["k1"])
+
 n = 0
 total = ""
 while n < 100:
@@ -58,4 +75,9 @@ print(len(total))
 # v1 v2
 # new
 # ab cd ef
+# v1 v2
+# 2
+# ab cd
+# 0x 2x
+# v0 v1
 # 100
