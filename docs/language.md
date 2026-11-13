@@ -446,9 +446,10 @@ print(asyncio.run(add(3, 4)))   # 10
   `q.put_nowait(v)` / `q.get_nowait()`（满/空抛 `QueueFull` /
   `QueueEmpty`，按内置异常名捕获）、`q.qsize()`、`q.empty()`、
   `q.full()`、`await q.join()`、`q.task_done()`；`maxsize > 0` 时满
-  队列的 put 会阻塞，get 腾出位置后按 FIFO 放行；元素静态类型按
-  unknown 处理（`get` 的 await 结果不能用字符串方法等需要具体类型的
-  操作）。
+  队列的 put 会阻塞，get 腾出位置后按 FIFO 放行；`asyncio.Queue[float]`
+  这类标注会把元素类型带进构造，float 元素按裸值存取（不再要求引用
+  计数）；未标注的 `asyncio.Queue()` 元素按 unknown 处理（`get` 的
+  await 结果不能用字符串方法等需要具体类型的操作）。
 - `asyncio.wait_for(aw, timeout)`：可等待对象与超时竞速；超时取消
   内部任务并抛 `TimeoutError`，内部对象可以是协程、Task 或 Future。
 - `asyncio.timeout(delay)`：`async with asyncio.timeout(0.5):` 在块内
@@ -976,7 +977,8 @@ print(sorted(users, key=by_name))   # 键是 str，按字符串比
 0..255）；`round` 用「四舍六入五成双」，`round(x)` 返回 int、
 `round(x, n)` 返回 float，整数配负 ndigits 也按 10 的幂取整；
 `divmod` 返回 `(商, 余数)`，符号规则同 CPython；`repr` 支持字符串/
-数值/bool/None/元组（元组按 CPython 的形式，单元素带尾逗号 `(1,)`）；
+数值/bool/None/元组（元组按 CPython 的形式，单元素带尾逗号 `(1,)`；
+异构元组逐元素按各自静态类型渲染，嵌套元组递归处理）；
 `str(元组)` 与 `repr(元组)` 相同。`format` 支持数值和字符串的格式说明符。
 `isinstance(x, T)` 的第二个参数支持内置类型名（int/float/str/bool/list/
 tuple/dict/set/complex/object）和本地类；静态类型确定时编译期折叠，
@@ -1471,7 +1473,7 @@ print(linalg.dot([1.0, 2.0], [3.0, 4.0]))  # 11.0
 - PEP 695 泛型语法（`class C[T]:`）
 - 类：方法缺 `self`、字段赋值类型不符、访问不存在的字段或方法（`self.xxx` 与外部基类的成员除外）
 
-**代码生成层**（`check` 通过，`build` 报错）：类装饰器、返回类型未知的方法装饰器、容器转标量（`int([1, 2])`、`str({})`）、异构元组的 `repr()`、`set[int]` → `set[float]` 之类的集合元素提升、通过 unknown 函数值的 `*` / `**` 展开、`*` 位于固定形参之前且不是定长 tuple、非异常类名当异常用、跨模块继承、把类名当值用（`f = Point`）。异步生成器有 `asend`/`athrow`/`__anext__`/`aclose`。自定义异常类目前只支持 `pass` 类体（字段/方法会被拒绝）。match 额外拒绝：unknown 值上的数值/list/dict/tuple/set 内置类型模式。
+**代码生成层**（`check` 通过，`build` 报错）：类装饰器、返回类型未知的方法装饰器、容器转标量（`int([1, 2])`、`str({})`）、通过 unknown 函数值的 `*` / `**` 展开、`*` 位于固定形参之前且不是定长 tuple、非异常类名当异常用、跨模块继承、把类名当值用（`f = Point`）。异步生成器有 `asend`/`athrow`/`__anext__`/`aclose`。自定义异常类目前只支持 `pass` 类体（字段/方法会被拒绝）。match 额外拒绝：unknown 值上的数值/list/dict/tuple/set 内置类型模式。
 
 为什么这么分层：前端宽、后端严。`check` 的定位是「语法和类型有没有明显毛病」，可以对任意 Python 文件跑；`build` 才是「这门语言现在能不能编译它」。
 

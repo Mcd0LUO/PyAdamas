@@ -4,6 +4,28 @@
 
 早期阶段没有逐条留痕，按阶段归纳；0.4 之后逐条记录。
 
+## [0.136] - 2026-11-13
+
+四个剩余边角：异构元组 repr、set 元素提升、导出类 varargs 构造、Queue 的 float 元素。
+
+### 变更
+
+- `repr()` / `str()` 支持异构元组：逐元素按各自静态类型渲染后用字符串拼接，
+  单元素补尾逗号，嵌套元组递归；类元素走 `__repr__`，复数/range 也按各自
+  文本形式。纯标量同构元组仍走 `pa_repr_tuple` 快路径。
+- `set[int]` / `set[bool]` → `set[float]` 支持赋值与实参提升：按 set 的 dict
+  载体逐元素转换后重建（float key 用数值哈希）。同时修正
+  `pa_dict_key_at` 返回值的 ABI：float 元素也从 `rax` 取位模式，不再读
+  `xmm0`。
+- 模块导出类的 `__init__` 支持 `*args` / `**kwargs`：构造包装按方法 ABI
+  追加 list/dict 形参并原样转发，模块接口沿用已有 varargs 编码，无需升
+  格式版本。
+- `asyncio.Queue` 支持 float 元素：`asyncio.Queue[float]` 标注把元素类型
+  带进构造，运行时队列记录元素类别（裸值/引用），Future 增加
+  `result_kind`，`put` / `get` / `put_nowait` / `get_nowait` 在裸值路径上
+  跳过 RC；未标注队列保持原有引用语义。
+- 新增运行用例 135 / 136，扩展 134 与模块 classes。
+
 ## [0.135] - 2026-11-13
 
 语言边角收尾：嵌套类、类体 lambda、dunder 补齐、异步生成器表达式、导入类字段子模式、

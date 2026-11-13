@@ -80,7 +80,7 @@ int64_t pa_asyncio_task_cancel(void* t) {
         PyAdamasException* e = exc_new("CancelledError", "");
         void* a = (void*)w->waiter;
         w->waiter = 0;
-        if (a) deliver_owned(a, w, 0, e);
+        if (a) deliver_owned(a, w, 0, e, 1);
         else w->exc = (int64_t)e;
         cancel_chain(sub);
         pa_rc_dec(sub);
@@ -119,7 +119,7 @@ void gather_cancel(PyAdamasAwait* g) {
     void* a = (void*)g->waiter;
     g->waiter = 0;
     PyAdamasException* e = exc_new("CancelledError", "");
-    if (a) deliver_owned(a, g, 0, e);
+    if (a) deliver_owned(a, g, 0, e, 1);
     else g->exc = (int64_t)e;
     if (owned) pa_rc_dec(owned);
 }
@@ -133,7 +133,7 @@ void future_cancel(PyAdamasAwait* f) {
         int64_t n = f->waiters->len;
         f->waiters->len = 0;
         for (int64_t i = 0; i < n; ++i)
-            deliver_owned((void*)f->waiters->data[i], f, 0, exc_clone(stored));
+            deliver_owned((void*)f->waiters->data[i], f, 0, exc_clone(stored), 1);
     }
     f->exc = (int64_t)stored;
     void* owned = pending_take(f);
@@ -156,7 +156,7 @@ void simple_wait_cancel(PyAdamasAwait* w) {
     void* a = (void*)w->waiter;
     w->waiter = 0;
     PyAdamasException* e = exc_new("CancelledError", "");
-    if (a) deliver_owned(a, w, 0, e);
+    if (a) deliver_owned(a, w, 0, e, 1);
     else w->exc = (int64_t)e;
     if (list_owned) pa_rc_dec((void*)list_owned);
 }
@@ -184,7 +184,7 @@ void cancel_chain(void* w) {
 void future_settle(PyAdamasAwait* f, int64_t value, PyAdamasException* exc) {
     if (f->done) {
         if (exc) exc_free(exc);
-        else pa_rc_dec_unknown(value);
+        else if (f->result_kind) pa_rc_dec_unknown(value);
         return;
     }
     f->done = 1;
@@ -195,8 +195,9 @@ void future_settle(PyAdamasAwait* f, int64_t value, PyAdamasException* exc) {
         f->waiters->len = 0;
         for (int64_t i = 0; i < n; ++i) {
             int64_t copy = value;
-            if (copy) pa_rc_inc_unknown(copy);
-            deliver_owned((void*)f->waiters->data[i], f, copy, exc_clone(exc));
+            if (copy && f->result_kind) pa_rc_inc_unknown(copy);
+            deliver_owned((void*)f->waiters->data[i], f, copy, exc_clone(exc),
+                          f->result_kind);
         }
     }
     void* owned = pending_take(f);
@@ -286,7 +287,7 @@ int64_t pa_future_result(void* fp) {
     if (!f->done) pa_raise_c("RuntimeError", "future is not done");
     if (f->exc) raise_exception_copy((PyAdamasException*)f->exc, "future failed");
     int64_t v = f->result;
-    if (v) pa_rc_inc_unknown(v);
+    if (v && f->result_kind) pa_rc_inc_unknown(v);
     return v;
 }
 
@@ -339,13 +340,14 @@ typedef struct {
 } PyAdamasLock;
 
 typedef struct {
-    PyAdamasList* items;    /* 元素按 unknown 容器存放（kind 2） */
+    PyAdamasList* items;    /* 元素容器：kind 0 裸值 / 2 引用 */
     PyAdamasList* getters;  /* Future* */
     PyAdamasList* putters;  /* 满队列时等待的 put Future* */
-    PyAdamasList* pvalues;  /* 与 putters 一一对应的值（kind 2） */
+    PyAdamasList* pvalues;  /* 与 putters 一一对应的值（与 items 同类别） */
     PyAdamasList* joiners;  /* join() 的 Future* */
     int64_t maxsize;
     int64_t unfinished;
+    int64_t kind;           /* 元素类别：0 裸值（float 位模式）/ 1 引用 */
 } PyAdamasQueue;
 
 static void event_destroy(void* p) {
@@ -441,14 +443,16 @@ int64_t pa_lock_locked(void* lp) {
     return ((PyAdamasLock*)lp)->locked;
 }
 
-void* pa_queue_new(int64_t maxsize) {
+void* pa_queue_new(int64_t maxsize, int64_t kind) {
     loop_ensure();
     PyAdamasQueue* q = (PyAdamasQueue*)rc_alloc((int64_t)sizeof(PyAdamasQueue), queue_destroy, NULL,
                                         PYADAMAS_RC_OBJ);
-    q->items = pa_list_new(4, 2);
+    q->kind = kind ? 1 : 0;
+    int64_t lk = q->kind ? 2 : 0;
+    q->items = pa_list_new(4, lk);
     q->getters = pa_list_new(4, 1);
     q->putters = pa_list_new(4, 1);
-    q->pvalues = pa_list_new(4, 2);
+    q->pvalues = pa_list_new(4, lk);
     q->joiners = pa_list_new(4, 1);
     q->maxsize = maxsize > 0 ? maxsize : 0;
     return q;
@@ -462,7 +466,7 @@ static void* queue_ready_future(void) {
 
 static void queue_push_item(PyAdamasQueue* q, int64_t v) {
     ++q->unfinished;
-    pa_rc_inc_unknown(v);
+    if (q->kind) pa_rc_inc_unknown(v);
     pa_list_append(q->items, v);
 }
 
@@ -479,7 +483,7 @@ void* pa_queue_put(void* qp, int64_t v) {
         void* f = pa_asyncio_future_new();
         pa_rc_inc(f);
         pa_list_append(q->putters, (int64_t)f);
-        pa_rc_inc_unknown(v);
+        if (q->kind) pa_rc_inc_unknown(v);
         pa_list_append(q->pvalues, v);
         return f;
     }
@@ -502,10 +506,12 @@ void* pa_queue_get(void* qp) {
             queue_push_item(q, pv);  // pvalues 的引用直接转交给 items
         }
         void* f = pa_asyncio_future_new();
+        ((PyAdamasAwait*)f)->result_kind = q->kind;
         pa_future_set_result(f, v);
         return f;
     }
     void* f = pa_asyncio_future_new();
+    ((PyAdamasAwait*)f)->result_kind = q->kind;
     pa_rc_inc(f);
     pa_list_append(q->getters, (int64_t)f);
     return f;

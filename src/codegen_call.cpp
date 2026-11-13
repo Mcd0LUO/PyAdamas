@@ -1591,7 +1591,10 @@ void AsmGen::gen_call_rt(const Inst& in) {
         line(std::format("call {}", rt_name(fn)));
         reload_fp_slots();
         if (!dst_unused(in)) {
-            if (ir_is_float(in.ty)) emit2("movsd", "%xmm0", dst_op(in.dst));
+            // pa_dict_key_at 一律返回机器字；float 元素的位模式也从 rax
+            // 取，不能按 double 去读 xmm0。
+            bool raw_ret = fn == RtFn::DictKeyAt;
+            if (ir_is_float(in.ty) && !raw_ret) emit2("movsd", "%xmm0", dst_op(in.dst));
             else emit2("movq", "%rax", dst_op(in.dst));
         }
     }

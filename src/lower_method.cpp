@@ -382,13 +382,8 @@ VReg Lowerer::lower_method_call(Attribute& at, Call& c) {
         if (recv_ty->kind == TyKind::AsyncQueue) {
             if (at.attr == "put") {
                 if (!count(1)) return const_none();
-                TypePtr vt = tc_.type_of(c.args[0].get());
-                if (vt && vt->kind == TyKind::Float) {
-                    err(c.args[0]->line, c.args[0]->col,
-                        "Queue.put() of float is not supported yet");
-                    return const_none();
-                }
-                VReg v = expr(*c.args[0]);
+                TypePtr et = recv_ty->sub.empty() ? t_unknown() : recv_ty->sub[0];
+                VReg v = coerce(expr(*c.args[0]), tc_.type_of(c.args[0].get()), et);
                 // put 可能阻塞（满队列），运行时返回 Future；lowering 直接
                 // 把它当可等待值返回，await 与忽略都行。
                 VReg f = call_runtime(RtFn::QueuePut, mk_future(t_none()), {recv, v});
@@ -427,18 +422,16 @@ VReg Lowerer::lower_method_call(Attribute& at, Call& c) {
             }
             if (at.attr == "put_nowait") {
                 if (!count(1)) return const_none();
-                TypePtr vt = tc_.type_of(c.args[0].get());
-                if (vt && vt->kind == TyKind::Float) {
-                    err(c.args[0]->line, c.args[0]->col,
-                        "Queue.put_nowait() of float is not supported yet");
-                    return const_none();
-                }
-                call_void(RtFn::QueuePutNowait, {recv, expr(*c.args[0])});
+                TypePtr et = recv_ty->sub.empty() ? t_unknown() : recv_ty->sub[0];
+                VReg v = coerce(expr(*c.args[0]), tc_.type_of(c.args[0].get()), et);
+                call_void(RtFn::QueuePutNowait, {recv, v});
                 return const_none();
             }
             if (at.attr == "get_nowait") {
                 if (!count(0)) return const_none();
-                return call_runtime(RtFn::QueueGetNowait, t_unknown(), {recv});
+                TypePtr et = recv_ty->sub.empty() ? t_unknown() : recv_ty->sub[0];
+                VReg v = call_runtime(RtFn::QueueGetNowait, t_unknown(), {recv});
+                return retype(v, et);
             }
         }
         if (recv_ty->kind == TyKind::DateTime) {

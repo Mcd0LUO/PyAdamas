@@ -972,16 +972,19 @@ void Lowerer::compile_ctor_wrapper(ClassDef& clsdef, const ClassInfoPtr& ci, int
     (void)clsdef;
     const MethodInfo* init = ci->method("__init__");
     FuncInfoPtr sig;
-    if (init && init->call_sig) {
-        if (init->call_sig->varargs || init->call_sig->kwargs) return;
-        sig = init->call_sig;
-    }
+    if (init && init->call_sig) sig = init->call_sig;
     auto ctor = std::make_shared<FuncInfo>();
     ctor->name = "__new_" + ci->name;
     if (sig) {
         ctor->pos = sig->pos;
         ctor->n_posonly = sig->n_posonly;
         ctor->kwonly = sig->kwonly;
+        ctor->varargs = sig->varargs;
+        ctor->vararg_name = sig->vararg_name;
+        ctor->vararg_ty = sig->vararg_ty;
+        ctor->kwargs = sig->kwargs;
+        ctor->kwarg_name = sig->kwarg_name;
+        ctor->kwarg_ty = sig->kwarg_ty;
     }
     TypePtr cls_ty = mk_class(ci.get());
     TypePtr fty = new_ty(TyKind::Func);
@@ -1007,6 +1010,20 @@ void Lowerer::compile_ctor_wrapper(ClassDef& clsdef, const ClassInfoPtr& ci, int
     if (sig) {
         for (auto& p : sig->pos) add_param(p);
         for (auto& p : sig->kwonly) add_param(p);
+        // *args/**kwargs 在 ABI 上是额外的 list/dict 形参，导入方
+        // bind_args 已经把它们物化好，包装层只负责原样转发。
+        if (sig->varargs) {
+            Param p;
+            p.name = sig->vararg_name.empty() ? "__args" : sig->vararg_name;
+            p.ty = mk_list(sig->vararg_ty ? sig->vararg_ty : t_unknown());
+            add_param(p);
+        }
+        if (sig->kwargs) {
+            Param p;
+            p.name = sig->kwarg_name.empty() ? "__kwargs" : sig->kwarg_name;
+            p.ty = mk_dict(t_str(), sig->kwarg_ty ? sig->kwarg_ty : t_unknown());
+            add_param(p);
+        }
     }
     inc_params();
 

@@ -18,14 +18,23 @@ def addf(a: float, b: float) -> float:
     return a + b
 
 
+def stotal(xs: set[float]) -> float:
+    s = 0.0
+    for x in xs:
+        s = s + x
+    return s
+
+
 ys: list[float] = [1, 2, 3]
 print(total([1, 2]))
 print(total(ys))
 print(getf({"a": 1}) + 0.5)
 print(reduce(addf, [1, 2, 3], 0.5))
+print(stotal({1, 2, 3}))
 
 # --- expect ---
 # 3.0
 # 6.0
 # 1.5
 # 6.5
+# 6.0

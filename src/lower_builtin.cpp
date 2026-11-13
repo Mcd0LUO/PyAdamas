@@ -11,6 +11,113 @@ VReg Lowerer::lower_builtin_call(const std::string& name, Call& c) {
         err(c.line, c.col, std::format("{}() does not take keyword arguments here", name));
     }
 
+    // pa_repr_tuple 只认识 int/float/str/bool/None 五种元素。异构元组或
+    // 元素是类/复数/range 时没有单一 kind，只能逐个取元素、按各自静态
+    // 类型转文本再拼。CPython 的 str(tuple) 就是 repr(tuple)。
+    auto tuple_repr_any = [&](auto&& self, TypePtr tt, VReg tv) -> VReg {
+        auto scalar_kind = [](TypePtr et) -> int64_t {
+            if (!et) return -1;
+            switch (et->kind) {
+                case TyKind::Int: return 0;
+                case TyKind::Float: return 1;
+                case TyKind::Str: return 2;
+                case TyKind::Bool: return 3;
+                case TyKind::None: return 4;
+                default: return -1;
+            }
+        };
+        auto concat = [&](VReg a, VReg b) {
+            VReg s = call_runtime(RtFn::StrConcat, t_str(), {a, b});
+            push_temp(s);
+            return s;
+        };
+        VReg acc = const_str("(");
+        for (size_t i = 0; i < tt->sub.size(); ++i) {
+            if (i) acc = concat(acc, const_str(", "));
+            TypePtr et = tt->sub[i];
+            // 元组元素是容器内部的借用引用，不能交给临时栈释放。
+            Inst get;
+            get.op = IrOp::IndexLoad;
+            get.a = tv;
+            get.b = const_int(static_cast<int64_t>(i));
+            VReg ev = def(et ? et : t_unknown(), std::move(get));
+            int64_t k = scalar_kind(et);
+            VReg piece = kNoReg;
+            if (k == 2) {
+                piece = call_runtime(RtFn::ReprStr, t_str(), {ev});
+                push_temp(piece);
+            } else if (k >= 0) {
+                piece = convert_to(ev, et, t_str());
+            } else if (et && et->kind == TyKind::Tuple) {
+                int64_t ek = et->sub.empty() ? 0 : scalar_kind(et->sub[0]);
+                bool homo = ek >= 0;
+                for (size_t j = 1; homo && j < et->sub.size(); ++j)
+                    if (scalar_kind(et->sub[j]) != ek) homo = false;
+                if (et->variadic && ek < 0) {
+                    err(c.line, c.col,
+                        std::format("repr() of a variadic tuple with element type '{}' "
+                                    "is not supported yet",
+                                    type_name(et->sub[0])));
+                    return const_str("");
+                }
+                if (homo) {
+                    piece = call_runtime(RtFn::ReprTuple, t_str(), {ev, const_int(ek)});
+                    push_temp(piece);
+                } else {
+                    piece = self(self, et, ev);
+                }
+            } else if (et && et->kind == TyKind::Range) {
+                piece = call_runtime(RtFn::RangeRepr, t_str(), {ev});
+                push_temp(piece);
+            } else if (et && et->kind == TyKind::Complex) {
+                piece = convert_to(ev, et, t_str());
+            } else if (et && et->kind == TyKind::Class) {
+                piece = dunder_str(ev, et, true);
+                if (piece == kNoReg) piece = class_default_str(et);
+            } else {
+                err(c.line, c.col,
+                    std::format("repr() of a tuple element of type '{}' is not "
+                                "supported yet",
+                                type_name(et)));
+                return const_str("");
+            }
+            acc = concat(acc, piece);
+        }
+        if (tt->sub.size() == 1) acc = concat(acc, const_str(","));
+        return concat(acc, const_str(")"));
+    };
+
+    // 同构且元素属于 pa_repr_tuple 支持的类型时走运行时快路径；
+    // 其余固定长度元组逐元素拼接。变长元组只有元素同构，
+    // 非标量元素无法在运行时按 kind 渲染。
+    auto tuple_text = [&](TypePtr t, VReg v) -> VReg {
+        TypePtr et = t->sub.empty() ? t_unknown() : t->sub[0];
+        bool same = true;
+        for (auto& sub : t->sub)
+            if (!type_eq(sub, et)) { same = false; break; }
+        bool scalar = et && (et->kind == TyKind::Int || et->kind == TyKind::Float ||
+                             et->kind == TyKind::Str || et->kind == TyKind::Bool ||
+                             et->kind == TyKind::None);
+        if (same && scalar) {
+            int64_t kind = 0;
+            if (et->kind == TyKind::Float) kind = 1;
+            else if (et->kind == TyKind::Str) kind = 2;
+            else if (et->kind == TyKind::Bool) kind = 3;
+            else if (et->kind == TyKind::None) kind = 4;
+            VReg s = call_runtime(RtFn::ReprTuple, t_str(), {v, const_int(kind)});
+            push_temp(s);
+            return s;
+        }
+        if (t->variadic) {
+            err(c.line, c.col,
+                std::format("repr()/str() of a variadic tuple with element type '{}' "
+                            "is not supported yet",
+                            type_name(et)));
+            return const_str("");
+        }
+        return tuple_repr_any(tuple_repr_any, t, v);
+    };
+
     if (name == "len") {
         if (c.args.size() != 1) {
             err(c.line, c.col, "len() takes exactly one argument");
@@ -780,27 +887,7 @@ VReg Lowerer::lower_builtin_call(const std::string& name, Call& c) {
             push_temp(s);
             return s;
         }
-        if (t && t->kind == TyKind::Tuple) {
-            // 元组的 repr：元素按静态类型渲染，单元素带尾逗号。
-            // 异构元组（各元素类型不同）暂时不支持，不给错值。
-            TypePtr et = t->sub.empty() ? t_unknown() : t->sub[0];
-            bool same = true;
-            for (auto& sub : t->sub)
-                if (!type_eq(sub, et)) { same = false; break; }
-            if (!same) {
-                err(c.args[0]->line, c.args[0]->col,
-                    "repr() of a heterogeneous tuple is not supported yet");
-                return const_str("");
-            }
-            int64_t kind = 0;
-            if (et->kind == TyKind::Float) kind = 1;
-            else if (et->kind == TyKind::Str) kind = 2;
-            else if (et->kind == TyKind::Bool) kind = 3;
-            else if (et->kind == TyKind::None) kind = 4;
-            VReg s = call_runtime(RtFn::ReprTuple, t_str(), {v, const_int(kind)});
-            push_temp(s);
-            return s;
-        }
+        if (t && t->kind == TyKind::Tuple) return tuple_text(t, v);
         if (t && (t->kind == TyKind::Int || t->kind == TyKind::Bool ||
                   t->kind == TyKind::Float || t->kind == TyKind::Complex ||
                   t->kind == TyKind::None))
@@ -915,23 +1002,7 @@ VReg Lowerer::lower_builtin_call(const std::string& name, Call& c) {
         }
         if (to->kind == TyKind::Str && from && from->kind == TyKind::Tuple) {
             // str(tuple) 与 repr(tuple) 相同（CPython 也是这样）
-            TypePtr et = from->sub.empty() ? t_unknown() : from->sub[0];
-            bool same = true;
-            for (auto& sub : from->sub)
-                if (!type_eq(sub, et)) { same = false; break; }
-            if (!same) {
-                err(c.args[0]->line, c.args[0]->col,
-                    "str() of a heterogeneous tuple is not supported yet");
-                return const_str("");
-            }
-            int64_t kind = 0;
-            if (et->kind == TyKind::Float) kind = 1;
-            else if (et->kind == TyKind::Str) kind = 2;
-            else if (et->kind == TyKind::Bool) kind = 3;
-            else if (et->kind == TyKind::None) kind = 4;
-            VReg s = call_runtime(RtFn::ReprTuple, t_str(), {v, const_int(kind)});
-            push_temp(s);
-            return s;
+            return tuple_text(from, v);
         }
         // 容器转标量没有定义（CPython 抛 TypeError）。以前这里直接把
         // 指针当数字用，会静默给出垃圾值——宁可报错。

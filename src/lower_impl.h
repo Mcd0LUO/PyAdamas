@@ -262,6 +262,9 @@ private:
         std::string member;
     };
     std::unordered_map<std::string, NativeRef> native_aliases_;
+    // `q: asyncio.Queue[float] = asyncio.Queue()`：构造调用自己推不出元素
+    // 类型，由带标注的赋值把目标类型暂存到这里。
+    TypePtr pending_queue_ty_;
 
     std::unordered_map<std::string, int> global_ids_;
     std::unordered_map<std::string, FunctionDef*> func_defs_;
@@ -494,6 +497,14 @@ private:
         mv.a = v;
         mv.ty = ty;
         return def(ty, std::move(mv));
+    }
+
+    // 队列元素的运行时类别：0 裸值 / 1 引用。unknown 保守按引用。
+    static int queue_kind(const TypePtr& t) {
+        if (!t || t->kind != TyKind::AsyncQueue || t->sub.empty()) return 1;
+        TypePtr e = t->sub[0];
+        if (!e || e->kind == TyKind::Unknown) return 1;
+        return ir_is_heap(e) ? 1 : 0;
     }
 
     // 列表元素所有权类别，必须和 codegen 传给 pa_list_new 的值一致。

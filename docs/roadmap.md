@@ -60,15 +60,16 @@
 | 0.133 | `Generator[Y, S, R]` 标注：`send` 实参按 S 检查、`yield` 表达式为 S；模块格式 7 带 S/R |
 | 0.134 | `finally` 体内的 `return`/`break`/`continue`；`throw()`/`athrow()` 接受异常类；自定义 `__aiter__` |
 | 0.135 | 语言边角收尾：函数内定义类、类体 lambda、`__format__`/`__bool__`/`__reversed__`、`iter(__iter__)`、`hasattr`/`setattr` 扩展、`C.m(obj, ...)`、异步生成器表达式、导入类字段子模式、list/dict 元素 int → float 提升；模块格式 8 |
+| 0.136 | 异构元组 `repr()`/`str()`、`set` 元素 int → float 提升、导出类 `__init__` 的 `*args`/`**kwargs`、`asyncio.Queue` 的 float 元素；修正 `pa_dict_key_at` 的浮点返回 ABI |
 | 许可证 | Apache-2.0（见 [LICENSE](../LICENSE) / [NOTICE](../NOTICE)） |
 
-## 当前状态（0.135）
+## 当前状态（0.136）
 
 流水线 `源码 → 词法 → AST → lambda 脱糖 → 类型检查 → IR → x86-64 汇编 → 可执行文件` 已打通。
 
 - **语言面**：标量、字符串、`bytes`（含迭代与 `%` 格式化）、列表/元组/字典/集合、切片读写、闭包/lambda/`*args`/`**kwargs`/装饰器、推导式、`with`、异常值（`args`/`raise ... from`/自定义异常）、类（字段/方法/C3 多继承/零参 `super()`/`@staticmethod`/`@classmethod`/`@property`/类属性）、`match/case`、`del`、复数字面量、f-string 格式说明、dunder 协议（含装饰 dunder、`__call__` 与方法值）、`Generator[Y, S, R]` 标注、`open`/`input`/`sys.stdin`。
 - **标准库**：`math`/`sys`/`asyncio`/`random`/`os`/`os.path`/`subprocess`/`time`/`itertools`/`collections`/`functools`/`json`/`string`/`re`/`datetime`/`pathlib`/`csv`。
-- **验证**：145 个运行用例、52 个反例、11 个模块目录；差分 runner 已自举，默认 840 例。
+- **验证**：146 个运行用例、52 个反例、11 个模块目录；差分 runner 已自举，默认 840 例。
 - **主要缺口**：C FFI/BLAS；asyncio 边角。
 
 ## 下一步
@@ -111,7 +112,7 @@
 9. **异常对象仍缺 traceback**：有异常值、`args`、自定义异常类和 `raise ... from`，但 `args` 只保存消息
 10. **含 handler 的函数没有寄存器提升**：longjmp 会回滚 callee-saved 寄存器，只能全走内存槽
 11. **生成器/协程的剩余边角**：`finally` 体内的挂起与 `return`/`break`/`continue` 跳出都已支持（finalbody 在可挂起函数里只编译一份，正常与异常路径汇聚；跳出路径内联 finalbody；close 重放到挂起点时报 `RuntimeError`，重放跳出会恢复 finally 词法上所属的循环）。未标注 `Generator[Y, S, R]` 时 `send` 与 `yield` 表达式静态是 unknown（`await` 已按 `Coroutine[T]` / `Awaitable[T]` 定类型）
-12. **asyncio 仍是最小集合**：`async for` 已支持自定义 `__aiter__`，但 fd 读写、asyncio 子进程、线程安全循环未支持；`Queue` 元素为 float 时 `put()` 仍受限（运行时按 unknown 引用计数）；`wait_readable` 不是 CPython 标准 API；Future 回调同步执行；`gather` 结果按 unknown 容器处理；Task 只允许一个并发等待者
+12. **asyncio 仍是最小集合**：`async for` 已支持自定义 `__aiter__`，但 fd 读写、asyncio 子进程、线程安全循环未支持；`Queue` 的 float 元素需要 `asyncio.Queue[float]` 这类标注把元素类型带进构造，未标注队列仍按引用语义；`wait_readable` 不是 CPython 标准 API；Future 回调同步执行；`gather` 结果按 unknown 容器处理；Task 只允许一个并发等待者
 13. **stdlib 覆盖不足**：没有 `argparse`（返回对象要有动态属性，和静态布局冲突）；`logging`/`statistics`/`textwrap`/`base64`/`hashlib`/`hmac`/`csv` 已接上子集，`functools` 已覆盖 `reduce`/`wraps`/`partial`/`lru_cache`（`lru_cache` 无淘汰、键类型受限），`json`/`collections`/`itertools` 是子集；`re` 有后向引用/四向断言/原子组/内联标志，但缺 Unicode 属性类和 `findall` 的分组语义
 14. **C FFI 与调试信息仍不全**：`cdecl` 只解析头文件子集（不展开宏函数/条件编译，C `float`、union 按值、定长数组不生成）；回调槽不可重入；没有包管理和 traceback
 15. **`re` 是纯回溯 VM**：递归实现，深模式或灾难性模式会吃栈，只靠 2 亿步上限兜底；没有 DFA/JIT，`findall`/`split` 每次重新编译模式字符串

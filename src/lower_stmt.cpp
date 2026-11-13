@@ -108,6 +108,25 @@ void Lowerer::stmt(Stmt& s) {
             bool typed_literal = want && vt && want->kind == vt->kind &&
                                  (want->kind == TyKind::List || want->kind == TyKind::Tuple ||
                                   want->kind == TyKind::Dict || want->kind == TyKind::Set);
+            // `q: asyncio.Queue[float] = asyncio.Queue()`：构造调用本身只
+            // 推出 Queue[unknown]，把标注的目标类型交给 lower_asyncio。
+            if (want && want->kind == TyKind::AsyncQueue &&
+                a.value->kind == ExprKind::Call) {
+                auto& call = static_cast<Call&>(*a.value);
+                bool is_queue = false;
+                if (call.func->kind == ExprKind::Name) {
+                    auto it = native_aliases_.find(static_cast<Name&>(*call.func).id);
+                    is_queue = it != native_aliases_.end() &&
+                               it->second.module == "asyncio" &&
+                               it->second.member == "Queue";
+                } else if (call.func->kind == ExprKind::Attribute) {
+                    auto& at = static_cast<Attribute&>(*call.func);
+                    is_queue = at.value->kind == ExprKind::Name &&
+                               static_cast<Name&>(*at.value).id == "asyncio" &&
+                               at.attr == "Queue";
+                }
+                if (is_queue) pending_queue_ty_ = want;
+            }
             mark_comp(a.value.get());
             if (typed_literal && a.value->kind == ExprKind::List)
                 v = lower_list_like(static_cast<ListExpr&>(*a.value).elts, want, false);
@@ -122,6 +141,7 @@ void Lowerer::stmt(Stmt& s) {
                 v = lower_set(static_cast<SetExpr&>(*a.value), want);
             else
                 v = expr(*a.value);
+            pending_queue_ty_ = nullptr;
             comp_ctx_node_ = nullptr;
             assign_to(*a.target, v, want ? want : vt);
             break;

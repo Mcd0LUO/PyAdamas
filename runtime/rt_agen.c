@@ -64,7 +64,7 @@ void driver_complete(PyAdamasAwait* d, int64_t value, PyAdamasException* exc) {
     }
     void* a = (void*)d->waiter;
     d->waiter = 0;
-    if (a) deliver_owned(a, d, value, exc);
+    if (a) deliver_owned(a, d, value, exc, 1);
     else {
         d->result = value;
         d->exc = (int64_t)exc;

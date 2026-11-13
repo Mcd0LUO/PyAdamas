@@ -185,6 +185,7 @@ typedef struct {
     int64_t done;
     int64_t starting;  /* gather 正在启动子任务：完成延后到启动结束 */
     int64_t result;    /* owned */
+    int64_t result_kind; /* 结果的所有权类别：0 裸值（float 位模式）/ 1 引用 */
     int64_t exc;       /* PyAdamasException* */
     int64_t waiter;    /* owned ref */
     int64_t deadline_ms;
@@ -355,7 +356,8 @@ void finish_gather(PyAdamasAwait* g);
 void gather_child_fail(PyAdamasAwait* g, PyAdamasException* e);
 void start_gather(PyAdamasAwait* w, void* waiter);
 void start_awaitable(void* obj, void* waiter);
-void deliver_owned(void* waiter, void* child, int64_t value, PyAdamasException* exc);
+void deliver_owned(void* waiter, void* child, int64_t value, PyAdamasException* exc,
+                   int64_t value_kind);
 void coro_inject(void* c, PyAdamasException* e);
 void coro_finish(void* c, int64_t value, PyAdamasException* exc);
 void await_from_coro(void* c, void* w);
@@ -395,7 +397,7 @@ void* pa_lock_new(void);
 void* pa_lock_acquire(void* l);
 void pa_lock_release(void* l);
 int64_t pa_lock_locked(void* l);
-void* pa_queue_new(int64_t maxsize);
+void* pa_queue_new(int64_t maxsize, int64_t kind);
 void* pa_queue_put(void* q, int64_t v);
 void* pa_queue_get(void* q);
 int64_t pa_queue_qsize(void* q);

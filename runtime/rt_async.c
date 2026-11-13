@@ -116,6 +116,8 @@ PyAdamasAwait* await_new(int64_t kind) {
                                         await_gc_release, PYADAMAS_RC_OBJ);
     w->magic = PYADAMAS_AWAIT_MAGIC;
     w->kind = kind;
+    // 默认结果按引用管理；asyncio.Queue[float] 的 Future 会改成 0。
+    w->result_kind = 1;
     return w;
 }
 
@@ -172,7 +174,8 @@ void* pending_take(void* w) {
     return NULL;
 }
 
-void deliver_owned(void* waiter, void* child, int64_t value, PyAdamasException* exc);
+void deliver_owned(void* waiter, void* child, int64_t value, PyAdamasException* exc,
+                   int64_t value_kind);
 void start_awaitable(void* w, void* waiter);
 void finish_gather(PyAdamasAwait* g);
 void coro_inject(void* c, PyAdamasException* e);
@@ -192,12 +195,12 @@ void finish_gather(PyAdamasAwait* g) {
     if (g->exc) {
         PyAdamasException* e = (PyAdamasException*)g->exc;
         g->exc = 0;
-        if (a) deliver_owned(a, g, 0, e);
+        if (a) deliver_owned(a, g, 0, e, 1);
         else exc_free(e);
     } else {
         int64_t r = (int64_t)g->results;
         g->results = 0;
-        if (a) deliver_owned(a, g, r, NULL);
+        if (a) deliver_owned(a, g, r, NULL, 1);
         else g->result = r;
     }
     if (owned) pa_rc_dec(owned);
@@ -366,7 +369,7 @@ static void wait_for_timeout(PyAdamasAwait* w) {
         void* a = (void*)w->waiter;
         w->waiter = 0;
         PyAdamasException* e = exc_new("TimeoutError", "operation timed out");
-        if (a) deliver_owned(a, w, 0, e);
+        if (a) deliver_owned(a, w, 0, e, 1);
         else w->exc = (int64_t)e;
         if (owned) pa_rc_dec(owned);
     }
@@ -391,7 +394,7 @@ void wait_for_cancel(PyAdamasAwait* w) {
     void* owned = pending_take(w);
     void* a = (void*)w->waiter;
     w->waiter = 0;
-    if (a) deliver_owned(a, w, 0, exc_new("CancelledError", ""));
+    if (a) deliver_owned(a, w, 0, exc_new("CancelledError", ""), 1);
     if (owned) pa_rc_dec(owned);
 }
 
@@ -402,7 +405,7 @@ void start_awaitable(void* obj, void* waiter) {
             pa_rc_inc(waiter);
             pa_rc_inc_unknown(w->result);
             PyAdamasException* e = exc_clone((PyAdamasException*)w->exc);
-            deliver_owned(waiter, w, w->result, e);
+            deliver_owned(waiter, w, w->result, e, w->result_kind);
             pa_rc_dec(w);
             return;
         }
@@ -419,9 +422,9 @@ void start_awaitable(void* obj, void* waiter) {
     if (w->kind == 5) {
         if (w->done) {
             pa_rc_inc(waiter);
-            pa_rc_inc_unknown(w->result);
+            if (w->result_kind) pa_rc_inc_unknown(w->result);
             PyAdamasException* e = exc_clone((PyAdamasException*)w->exc);
-            deliver_owned(waiter, w, w->result, e);
+            deliver_owned(waiter, w, w->result, e, w->result_kind);
             pa_rc_dec(w);
             return;
         }
@@ -440,7 +443,7 @@ void start_awaitable(void* obj, void* waiter) {
             pa_rc_inc(waiter);
             pa_rc_inc_unknown(w->result);
             PyAdamasException* e = exc_clone((PyAdamasException*)w->exc);
-            deliver_owned(waiter, w, w->result, e);
+            deliver_owned(waiter, w, w->result, e, w->result_kind);
             pa_rc_dec(w);
             return;
         }
@@ -463,7 +466,7 @@ void start_awaitable(void* obj, void* waiter) {
             pa_rc_inc(waiter);
             pa_rc_inc_unknown(w->result);
             PyAdamasException* e = exc_clone((PyAdamasException*)w->exc);
-            deliver_owned(waiter, w, w->result, e);
+            deliver_owned(waiter, w, w->result, e, w->result_kind);
             pa_rc_dec(w);  // 调用方交来的引用
             return;
         }
@@ -485,7 +488,7 @@ void start_awaitable(void* obj, void* waiter) {
             w->result = 0;
             PyAdamasException* e = (PyAdamasException*)w->exc;
             w->exc = 0;
-            deliver_owned(waiter, w, v, e);
+            deliver_owned(waiter, w, v, e, w->result_kind);
             pa_rc_dec(w);
             return;
         }
@@ -513,7 +516,7 @@ void start_awaitable(void* obj, void* waiter) {
         w->result = 0;
         PyAdamasException* e = (PyAdamasException*)w->exc;
         w->exc = 0;
-        deliver_owned(waiter, w, v, e);
+        deliver_owned(waiter, w, v, e, w->result_kind);
         pa_rc_dec(w);  // 调用方交来的引用
         return;
     }
@@ -521,7 +524,7 @@ void start_awaitable(void* obj, void* waiter) {
         if (w->deadline_ms <= now_ms()) {
             w->done = 1;
             pa_rc_inc(waiter);
-            deliver_owned(waiter, w, 0, NULL);
+            deliver_owned(waiter, w, 0, NULL, 1);
             pa_rc_dec(w);
         } else {
             w->waiter = (int64_t)waiter;
@@ -533,14 +536,17 @@ void start_awaitable(void* obj, void* waiter) {
     start_gather(w, waiter);
 }
 
-/* 把一个结果/异常交给等待者。waiter 的引用由本函数消费。 */
-void deliver_owned(void* waiter, void* child, int64_t value, PyAdamasException* exc) {
+/* 把一个结果/异常交给等待者。waiter 的引用由本函数消费。
+   value_kind=0 表示结果是不带引用计数的裸值（如 Queue[float] 的 double
+   位模式），这条路径上所有 inc/dec 都要跳过。 */
+void deliver_owned(void* waiter, void* child, int64_t value, PyAdamasException* exc,
+                   int64_t value_kind) {
     if (frame_is_coro(waiter)) {
         int64_t* p = (int64_t*)waiter;
         if (p[1] == 1 || p[1] == 2) {
             // 协程已经结束（例如刚被取消），迟到的结果直接丢弃。
             if (exc) exc_free(exc);
-            else pa_rc_dec_unknown(value);
+            else if (value_kind) pa_rc_dec_unknown(value);
             pa_rc_dec(waiter);
             return;
         }
@@ -553,7 +559,7 @@ void deliver_owned(void* waiter, void* child, int64_t value, PyAdamasException* 
     }
     if (!is_await_obj(waiter)) {
         if (exc) exc_free(exc);
-        else pa_rc_dec_unknown(value);
+        else if (value_kind) pa_rc_dec_unknown(value);
         pa_rc_dec(waiter);
         return;
     }
@@ -572,7 +578,7 @@ void deliver_owned(void* waiter, void* child, int64_t value, PyAdamasException* 
             p[1] = 0;
             ready_push(waiter);  // 把 child 的 waiter 引用转交给就绪队列
         } else {
-            pa_rc_dec_unknown(value);
+            if (value_kind) pa_rc_dec_unknown(value);
             if (exc) exc_free(exc);
             pa_rc_dec(waiter);
         }
@@ -592,12 +598,12 @@ void deliver_owned(void* waiter, void* child, int64_t value, PyAdamasException* 
             void* a = (void*)g->waiter;
             g->waiter = 0;
             if (a) {
-                pa_rc_inc_unknown(value);
-                deliver_owned(a, g, value, exc_clone(exc));
+                if (value_kind) pa_rc_inc_unknown(value);
+                deliver_owned(a, g, value, exc_clone(exc), value_kind);
             }
             if (owned) pa_rc_dec(owned);
         } else {
-            pa_rc_dec_unknown(value);
+            if (value_kind) pa_rc_dec_unknown(value);
             if (exc) exc_free(exc);
         }
         pa_rc_dec(waiter);
@@ -606,7 +612,7 @@ void deliver_owned(void* waiter, void* child, int64_t value, PyAdamasException* 
     if (g->kind == 8) {
         if (g->done) {
             if (exc) exc_free(exc);
-            else pa_rc_dec_unknown(value);
+            else if (value_kind) pa_rc_dec_unknown(value);
             pa_rc_dec(waiter);
             return;
         }
@@ -619,7 +625,7 @@ void deliver_owned(void* waiter, void* child, int64_t value, PyAdamasException* 
         }
         void* a = (void*)g->waiter;
         g->waiter = 0;
-        if (a) deliver_owned(a, g, value, exc);
+        if (a) deliver_owned(a, g, value, exc, value_kind);
         else {
             g->result = value;
             g->exc = (int64_t)exc;
@@ -630,14 +636,14 @@ void deliver_owned(void* waiter, void* child, int64_t value, PyAdamasException* 
     }
     if (g->kind != 2) {
         if (exc) exc_free(exc);
-        else pa_rc_dec_unknown(value);
+        else if (value_kind) pa_rc_dec_unknown(value);
         pa_rc_dec(waiter);
         return;
     }
     if (g->done) {
         // gather 已被取消/完成：迟到的子结果直接丢弃。
         if (exc) exc_free(exc);
-        else pa_rc_dec_unknown(value);
+        else if (value_kind) pa_rc_dec_unknown(value);
         pa_rc_dec(waiter);
         return;
     }
@@ -652,8 +658,11 @@ void deliver_owned(void* waiter, void* child, int64_t value, PyAdamasException* 
         if (!g->exc) g->exc = (int64_t)exc;
         else exc_free(exc);
     } else if (value) {
-        if (g->exc || idx < 0 || !g->results) pa_rc_dec_unknown(value);
-        else g->results->data[idx] = value;  // results 持有这个引用
+        if (g->exc || idx < 0 || !g->results) {
+            if (value_kind) pa_rc_dec_unknown(value);
+        } else {
+            g->results->data[idx] = value;  // results 持有这个引用
+        }
     }
     if (g->remaining > 0) --g->remaining;
     int last = (g->remaining == 0);
@@ -677,7 +686,7 @@ void coro_finish(void* c, int64_t value, PyAdamasException* exc) {
     void* waiter = (void*)p[7];
     p[7] = 0;
     if (waiter) {
-        deliver_owned(waiter, c, value, exc);
+        deliver_owned(waiter, c, value, exc, 1);
     } else if (c == loop_root) {
         loop_root_state = exc ? 2 : 1;
         loop_root_result = value;
@@ -801,7 +810,7 @@ int fire_due_timers(int64_t now) {
             w->done = 1;
             void* a = (void*)w->waiter;
             w->waiter = 0;
-            if (a) deliver_owned(a, w, 0, NULL);
+            if (a) deliver_owned(a, w, 0, NULL, 1);
             pa_rc_dec(w);
             fired = 1;
         } else {

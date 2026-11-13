@@ -33,3 +33,15 @@ class Child(Base):
 
 def make_point(x: int, y: int) -> Point:
     return Point(x, y)
+
+
+class Var:
+    count: int = 0
+    first: int = 0
+    tag: str = "-"
+
+    def __init__(self, *args: int, **kwargs: str) -> None:
+        self.count = len(args)
+        if self.count > 0:
+            self.first = args[0]
+        self.tag = kwargs.get("tag", "-")

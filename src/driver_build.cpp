@@ -1266,11 +1266,6 @@ bool build_unit(Program& p, ModuleUnit& u, bool emit_object, bool entry_ir) {
                 ic.ctor_symbol = pyadamas::module_class_new_symbol(u.name, name);
                 if (cls->has_init) {
                     if (auto* im = cls->method("__init__"); im && im->call_sig) {
-                        if (im->call_sig->varargs || im->call_sig->kwargs) {
-                            report(u.path, u.source, 1, 1,
-                                   "exported class __init__ with *args/**kwargs is not supported yet");
-                            return false;
-                        }
                         ic.ctor_sig = im->call_sig;
                     }
                 }

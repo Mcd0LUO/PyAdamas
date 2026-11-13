@@ -29,6 +29,12 @@ print(e.label(), e.n)
 r = shapes.make_point(5, 12)
 print(r.norm2())
 
+# 导出类 __init__ 的 *args/**kwargs
+v = shapes.Var(1, 2, 3, tag="v")
+print(v.count, v.first, v.tag)
+w = shapes.Var()
+print(w.count, w.first, w.tag)
+
 # --- expect ---
 # 25
 # 5
@@ -40,3 +46,5 @@ print(r.norm2())
 # 7 d 8
 # e 9
 # 169
+# 3 1 v
+# 0 0 -

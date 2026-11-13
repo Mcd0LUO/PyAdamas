@@ -44,7 +44,7 @@ int poll_fds(int timeout_ms) {
                 e = exc_new("OSError", "fd poll error");
             void* a = (void*)w->waiter;
             w->waiter = 0;
-            if (a) deliver_owned(a, w, 0, e);
+            if (a) deliver_owned(a, w, 0, e, 1);
             else {
                 w->result = 0;
                 w->exc = (int64_t)e;

@@ -655,8 +655,16 @@ VReg Lowerer::lower_asyncio(const std::string& member, Call& c) {
         VReg maxsize = const_int(0);
         if (!c.args.empty())
             maxsize = coerce(expr(*c.args[0]), tc_.type_of(c.args[0].get()), t_int());
-        VReg q = call_runtime(RtFn::QueueNew, rt ? rt : mk_async_queue(t_unknown()),
-                              {maxsize});
+        // 构造表达式本身只推出 Queue[unknown]；带标注的赋值会把
+        // Queue[float] 之类的目标类型暂存下来。
+        TypePtr qt = rt;
+        if (pending_queue_ty_ && pending_queue_ty_->kind == TyKind::AsyncQueue &&
+            (!qt || qt->kind != TyKind::AsyncQueue || qt->sub.empty() ||
+             !qt->sub[0] || qt->sub[0]->kind == TyKind::Unknown))
+            qt = pending_queue_ty_;
+        pending_queue_ty_ = nullptr;
+        VReg q = call_runtime(RtFn::QueueNew, qt ? qt : mk_async_queue(t_unknown()),
+                              {maxsize, const_int(queue_kind(qt))});
         push_temp(q);
         return q;
     }

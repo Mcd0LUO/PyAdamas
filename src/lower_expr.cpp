@@ -114,6 +114,80 @@ VReg Lowerer::promote_container(VReg v, TypePtr from, TypePtr to) {
         return load_slot(out_slot, to);
     }
 
+    if (from->kind == TyKind::Set) {
+        TypePtr se = from->sub[0];
+        TypePtr de = to->sub[0];
+        if (!se || !de) return kNoReg;
+        if (de->kind != TyKind::Float) return kNoReg;
+        if (se->kind != TyKind::Int && se->kind != TyKind::Bool) return kNoReg;
+        // set 复用 dict 的键集合，值固定为 0。
+        int kk = key_kind(de);
+        int ko = own_kind(de);
+        auto [hslot, eslot] = dunder_key_slots(de);
+        VReg out = call_runtime(RtFn::DictNew, to,
+                                {const_int(kk), const_int(ko), const_int(0),
+                                 const_int(hslot), const_int(eslot)});
+        push_temp(out);
+        int out_slot = new_temp_slot(to);
+        store_slot(out_slot, out);
+        int src_slot = new_temp_slot(from);
+        store_slot(src_slot, v);
+        TypePtr keys_ty = mk_list(se);
+        VReg keys = call_runtime(RtFn::DictKeys, keys_ty, {load_slot(src_slot, from)});
+        push_temp(keys);
+        int keys_slot = new_temp_slot(keys_ty);
+        store_slot(keys_slot, keys);
+        int n_slot = new_temp_slot(t_int());
+        {
+            Inst ln;
+            ln.op = IrOp::Len;
+            ln.a = load_slot(keys_slot, keys_ty);
+            store_slot(n_slot, def(t_int(), std::move(ln)));
+        }
+        int i_slot = new_temp_slot(t_int());
+        store_slot(i_slot, const_int(0));
+
+        int cond = new_block("promote.cond");
+        int body = new_block("promote.body");
+        int end = new_block("promote.end");
+        Inst j;
+        j.op = IrOp::Jump;
+        j.target = cond;
+        emit(std::move(j));
+        switch_to(cond);
+        Inst cmp;
+        cmp.op = IrOp::Cmp;
+        cmp.cop = CmpKind::Lt;
+        cmp.a = load_slot(i_slot, t_int());
+        cmp.b = load_slot(n_slot, t_int());
+        Inst br;
+        br.op = IrOp::Branch;
+        br.a = def(t_bool(), std::move(cmp));
+        br.target = body;
+        br.target2 = end;
+        emit(std::move(br));
+        switch_to(body);
+        Inst getk;
+        getk.op = IrOp::IndexLoad;
+        getk.a = load_slot(keys_slot, keys_ty);
+        getk.b = load_slot(i_slot, t_int());
+        VReg key = def(se, std::move(getk));
+        VReg newv = convert_to(key, se, de);
+        call_void(RtFn::DictSet, {load_slot(out_slot, to), newv, const_int(0)});
+        Inst inc;
+        inc.op = IrOp::Bin;
+        inc.bop = BinKind::Add;
+        inc.a = load_slot(i_slot, t_int());
+        inc.b = const_int(1);
+        store_slot(i_slot, def(t_int(), std::move(inc)));
+        Inst jb;
+        jb.op = IrOp::Jump;
+        jb.target = cond;
+        emit(std::move(jb));
+        switch_to(end);
+        return load_slot(out_slot, to);
+    }
+
     if (from->kind != TyKind::List && from->kind != TyKind::Tuple) return kNoReg;
     TypePtr se = from->sub[0];
     TypePtr de = to->sub[0];

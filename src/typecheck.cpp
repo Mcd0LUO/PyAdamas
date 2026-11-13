@@ -257,6 +257,8 @@ TypePtr TypeChecker::parse_annotation_impl(Expr* e, int line, int depth) {
                                         args.size() > 2 ? args[2] : nullptr);
                 return mk_async_generator(inner);
             }
+            if (base == "Queue" && args.size() == 1)
+                return mk_async_queue(args[0]);
             if (base == "Union") {
                 TypePtr acc = nullptr;
                 bool has_none = false;
