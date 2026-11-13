@@ -1606,6 +1606,8 @@ private:
     std::optional<TypePtr> random_call(const std::string& member, Call& c);
     // itertools/collections 没有泛型，按调用点的实参类型特化。
     std::optional<TypePtr> itertools_call(const std::string& member, Call& c);
+    // operator 的包装函数没有泛型：按调用点实参类型给出结果类型。
+    std::optional<TypePtr> operator_call(const std::string& member, Call& c);
     std::optional<TypePtr> collections_call(const std::string& member, Call& c);
     std::optional<TypePtr> functools_call(const std::string& member, Call& c);
     // @functools.lru_cache / @lru_cache(...)：类型上按恒等装饰器处理。

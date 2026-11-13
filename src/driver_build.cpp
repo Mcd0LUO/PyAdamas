@@ -445,7 +445,8 @@ bool visit_unit(Program& p, ModuleUnit& u, std::vector<ModuleUnit*>& stack) {
             req.name == "random" || req.name == "os" || req.name == "os.path" ||
             req.name == "subprocess" || req.name == "time" || req.name == "itertools" ||
             req.name == "collections" || req.name == "json" || req.name == "re" ||
-            req.name == "functools" || req.name == "datetime" || req.name == "pathlib") {
+            req.name == "functools" || req.name == "datetime" || req.name == "pathlib" ||
+            req.name == "operator") {
             // 内置模块没有源文件/对象，只提供编译期接口。
             continue;
         }
@@ -558,7 +559,8 @@ pyadamas::ModuleInfoPtr program_module(Program& p, const std::string& name) {
     if (name == "math" || name == "sys" || name == "asyncio" || name == "random" ||
         name == "os" || name == "os.path" || name == "subprocess" || name == "time" ||
         name == "itertools" || name == "collections" || name == "json" || name == "re" ||
-        name == "functools" || name == "datetime" || name == "pathlib")
+        name == "functools" || name == "datetime" || name == "pathlib" ||
+        name == "operator")
         return builtin_module(name);
     auto it = p.units.find(name);
     return it == p.units.end() ? nullptr : it->second->info;
@@ -891,6 +893,52 @@ pyadamas::ModuleInfoPtr builtin_module(const std::string& name) {
             f->ret = pyadamas::new_ty(pyadamas::TyKind::TimeDelta);
             f->ret_known = true;
             func_with("timedelta", f);
+        }
+    } else if (name == "operator") {
+        // 包装函数按调用点特化：签名只用于名字解析与 from-import 标记。
+        auto simple = [&](const std::string& n, size_t nargs, pyadamas::TypePtr ret) {
+            auto f = std::make_shared<pyadamas::FuncInfo>();
+            f->name = "operator." + n;
+            for (size_t i = 0; i < nargs; ++i) {
+                pyadamas::Param p;
+                p.name = i == 0 ? "a" : "b";
+                p.ty = pyadamas::t_unknown();
+                f->pos.push_back(std::move(p));
+            }
+            f->ret = std::move(ret);
+            f->ret_known = true;
+            func_with(n, f);
+        };
+        for (const char* n : {"add", "sub", "mul", "truediv", "floordiv", "mod", "pow",
+                              "and_", "or_", "xor", "lshift", "rshift", "concat",
+                              "getitem", "contains"})
+            simple(n, 2, pyadamas::t_unknown());
+        for (const char* n : {"eq", "ne", "lt", "le", "gt", "ge", "is_", "is_not"})
+            simple(n, 2, pyadamas::t_bool());
+        for (const char* n : {"neg", "pos", "abs", "invert"})
+            simple(n, 1, pyadamas::t_unknown());
+        for (const char* n : {"truth", "not_"})
+            simple(n, 1, pyadamas::t_bool());
+        {
+            auto f = std::make_shared<pyadamas::FuncInfo>();
+            f->name = "operator.itemgetter";
+            f->varargs = true;
+            f->vararg_name = "items";
+            f->vararg_ty = pyadamas::t_unknown();
+            f->ret = pyadamas::t_unknown();
+            f->ret_known = true;
+            func_with("itemgetter", f);
+        }
+        {
+            // 目前只在名字解析层面存在；调用点会给出明确的不支持错误。
+            auto f = std::make_shared<pyadamas::FuncInfo>();
+            f->name = "operator.attrgetter";
+            f->varargs = true;
+            f->vararg_name = "attrs";
+            f->vararg_ty = pyadamas::t_str();
+            f->ret = pyadamas::t_unknown();
+            f->ret_known = true;
+            func_with("attrgetter", f);
         }
     } else if (name == "pathlib") {
         auto p = pyadamas::new_ty(pyadamas::TyKind::Path);

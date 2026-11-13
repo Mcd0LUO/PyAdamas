@@ -4,6 +4,23 @@
 
 早期阶段没有逐条留痕，按阶段归纳；0.4 之后逐条记录。
 
+## [0.143] - 2026-11-13
+
+`operator` 改为内置模块并补齐包装函数。
+
+### 变更
+
+- `operator` 从纯 PyAdamas 子集改为内置模块：`add`/`sub`/`mul`/`truediv`/
+  `floordiv`/`mod`/`pow`/`and_`/`or_`/`xor`/`lshift`/`rshift`/`concat`、
+  比较 `eq`/`ne`/`lt`/`le`/`gt`/`ge`、`is_`/`is_not`、
+  `neg`/`pos`/`abs`/`invert`、`truth`/`not_`、`contains`、`getitem`。
+  结果类型与运算在调用点特化：数值提升、字符串拼接、容器相等、
+  `datetime`/`timedelta` 比较都复用与运算符相同的 lowering。
+- `itemgetter` 改为编译期合成闭包：支持单键与多键（多键返回元组），
+  键目前限 `int`；`attrgetter` 需要运行期按名字取属性，调用点给出
+  明确的不支持错误。
+- 运行用例 144 扩展为完整的 operator 覆盖。
+
 ## [0.142] - 2026-11-13
 
 标准库基础静态包（第二批）：itertools 组合函数、datetime.timedelta、operator 子集。

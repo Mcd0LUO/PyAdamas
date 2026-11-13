@@ -169,6 +169,9 @@ TypePtr TypeChecker::call(Call& c) {
                     if (mod->builtin && mod->name == "itertools") {
                         if (auto r = itertools_call(a->attr, c)) return *r;
                     }
+                    if (mod->builtin && mod->name == "operator") {
+                        if (auto r = operator_call(a->attr, c)) return *r;
+                    }
                     if (mod->builtin && mod->name == "collections") {
                         if (auto r = collections_call(a->attr, c)) return *r;
                     }
@@ -372,6 +375,9 @@ TypePtr TypeChecker::check_args(const FuncInfoPtr& fn, Call& c) {
         }
         if (fn && fn->name.starts_with("itertools.")) {
             if (auto r = itertools_call(fn->name.substr(10), c)) return *r;
+        }
+        if (fn && fn->name.starts_with("operator.")) {
+            if (auto r = operator_call(fn->name.substr(9), c)) return *r;
         }
         if (fn && fn->name.starts_with("collections.")) {
             if (auto r = collections_call(fn->name.substr(12), c)) return *r;
@@ -1015,6 +1021,121 @@ std::optional<TypePtr> TypeChecker::itertools_call(const std::string& member, Ca
         if (a[1] && !is_unknown(a[1]) && a[1]->kind != TyKind::Int)
             err(c.args[1]->line, c.args[1]->col, "itertools.repeat() count must be int");
         return mk_list(a[0] ? a[0] : t_unknown());
+}
+
+std::optional<TypePtr> TypeChecker::operator_call(const std::string& member, Call& c) {
+        static const std::unordered_map<std::string, Tok> kBin = {
+            {"add", Tok::PLUS},        {"sub", Tok::MINUS},
+            {"mul", Tok::STAR},        {"truediv", Tok::SLASH},
+            {"floordiv", Tok::DOUBLESLASH}, {"mod", Tok::PERCENT},
+            {"pow", Tok::DOUBLESTAR},  {"and_", Tok::AMPER},
+            {"or_", Tok::VBAR},        {"xor", Tok::CIRCUMFLEX},
+            {"lshift", Tok::LSHIFT},   {"rshift", Tok::RSHIFT},
+            {"concat", Tok::PLUS},
+        };
+        static const std::unordered_map<std::string, CmpOp> kCmp = {
+            {"eq", CmpOp::Eq}, {"ne", CmpOp::Ne}, {"lt", CmpOp::Lt},
+            {"le", CmpOp::Le}, {"gt", CmpOp::Gt}, {"ge", CmpOp::Ge},
+        };
+        auto known = kBin.count(member) || kCmp.count(member) ||
+                     member == "neg" || member == "pos" || member == "abs" ||
+                     member == "invert" || member == "truth" || member == "not_" ||
+                     member == "is_" || member == "is_not" || member == "contains" ||
+                     member == "getitem" || member == "itemgetter" ||
+                     member == "attrgetter";
+        if (!known) return std::nullopt;
+        if (!c.keywords.empty()) {
+            err(c.line, c.col,
+                std::format("operator.{}() does not take keyword arguments", member));
+            for (auto& kw : c.keywords) expr(*kw.value);
+        }
+        std::vector<TypePtr> a;
+        for (auto& arg : c.args) a.push_back(expr(*arg));
+        auto want_args = [&](size_t n) {
+            if (a.size() == n) return true;
+            err(c.line, c.col,
+                std::format("operator.{}() expects {} argument{}, got {}", member, n,
+                            n == 1 ? "" : "s", a.size()));
+            return false;
+        };
+        if (member == "itemgetter") {
+            if (a.empty()) {
+                err(c.line, c.col, "operator.itemgetter() expects at least 1 argument");
+            }
+            for (size_t i = 0; i < a.size(); ++i)
+                if (a[i] && !is_unknown(a[i]) && a[i]->kind != TyKind::Int)
+                    err(c.args[i]->line, c.args[i]->col,
+                        "operator.itemgetter() only supports int keys");
+            // 返回一个合成的 getter：单键返回 unknown；多键返回变长元组，
+            // 这样调用点至少能按元组打印/解包。
+            auto f = std::make_shared<FuncInfo>();
+            f->name = "operator.itemgetter.<getter>";
+            Param p;
+            p.name = "obj";
+            p.ty = t_unknown();
+            f->pos.push_back(std::move(p));
+            f->ret = a.size() > 1 ? mk_tuple_rest(t_unknown()) : t_unknown();
+            f->ret_known = true;
+            auto ft = new_ty(TyKind::Func);
+            ft->fn = std::move(f);
+            return ft;
+        }
+        if (member == "attrgetter") {
+            err(c.line, c.col, "operator.attrgetter() is not supported yet");
+            return t_unknown();
+        }
+        if (auto it = kBin.find(member); it != kBin.end()) {
+            if (!want_args(2)) return t_unknown();
+            return binop_type(it->second, a[0], a[1], c.line, c.col);
+        }
+        if (auto it = kCmp.find(member); it != kCmp.end()) {
+            if (!want_args(2)) return t_bool();
+            compare_type(it->second, a[0], a[1], c.line, c.col);
+            return t_bool();
+        }
+        if (member == "is_" || member == "is_not") {
+            want_args(2);
+            return t_bool();
+        }
+        if (member == "truth" || member == "not_") {
+            want_args(1);
+            return t_bool();
+        }
+        if (member == "neg" || member == "pos" || member == "abs" ||
+            member == "invert") {
+            if (!want_args(1)) return t_unknown();
+            TypePtr t = a[0];
+            if (member == "invert") {
+                if (t && !is_unknown(t) && t->kind != TyKind::Int &&
+                    t->kind != TyKind::Bool)
+                    err(c.args[0]->line, c.args[0]->col,
+                        std::format("bad operand type for operator.invert(): '{}'",
+                                    type_name(t)));
+                return t_int();
+            }
+            if (is_unknown(t) || is_num(t) || (t && t->kind == TyKind::Complex) ||
+                (member != "abs" && t && t->kind == TyKind::TimeDelta))
+                return t;
+            err(c.args[0]->line, c.args[0]->col,
+                std::format("bad operand type for operator.{}(): '{}'", member,
+                            type_name(t)));
+            return t_unknown();
+        }
+        if (member == "contains") {
+            if (!want_args(2)) return t_bool();
+            TypePtr cont = a[0];
+            if (cont && !is_unknown(cont) && cont->kind != TyKind::List &&
+                cont->kind != TyKind::Tuple && cont->kind != TyKind::Dict &&
+                cont->kind != TyKind::Set && cont->kind != TyKind::Str &&
+                cont->kind != TyKind::Bytes && cont->kind != TyKind::Range)
+                err(c.args[0]->line, c.args[0]->col,
+                    std::format("operator.contains() expects a container, got '{}'",
+                                type_name(cont)));
+            return t_bool();
+        }
+        // getitem
+        if (!want_args(2)) return t_unknown();
+        return subscript_type(a[0], a[1], c.line, c.col);
 }
 
 std::optional<TypePtr> TypeChecker::collections_call(const std::string& member, Call& c) {

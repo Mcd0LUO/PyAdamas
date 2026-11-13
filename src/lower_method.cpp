@@ -110,6 +110,7 @@ VReg Lowerer::lower_method_call(Attribute& at, Call& c) {
         if (auto mod = resolve_module_alias(n->id); mod && mod->builtin) {
             if (mod->name == "asyncio") return lower_asyncio(at.attr, c);
             if (mod->name == "itertools") return lower_itertools(at.attr, c);
+            if (mod->name == "operator") return lower_operator(at.attr, c);
             if (mod->name == "collections") return lower_collections(at.attr, c);
             if (mod->name == "functools") return lower_functools(at.attr, c);
             if (mod->name == "datetime") return lower_datetime(at.attr, c);

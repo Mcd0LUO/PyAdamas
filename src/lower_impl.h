@@ -1174,6 +1174,9 @@ private:
     void lower_for_gen(For& f, VReg seq, TypePtr seq_ty);
     VReg lower_asyncio(const std::string& member, Call& c);
     VReg lower_itertools(const std::string& member, Call& c);
+    VReg lower_operator(const std::string& member, Call& c);
+    // operator.itemgetter：合成一个闭包，内部做 obj[key] 下标读取。
+    VReg build_itemgetter(Call& c, TypePtr fty);
     VReg lower_collections(const std::string& member, Call& c);
     VReg lower_functools(const std::string& member, Call& c);
     VReg lower_datetime(const std::string& member, Call& c);

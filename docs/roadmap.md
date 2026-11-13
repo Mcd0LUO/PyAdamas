@@ -67,9 +67,10 @@
 | 0.140 | 跨模块继承补完：类对象带 vtable/ctor、动态 classmethod 重绑定、导入类附加基类与槽别名、导入基类字段默认值；模块格式 10 |
 | 0.141 | 标准库基础静态包（第一批）：heapq、bisect、binascii、base64 b16/b32/encodebytes、statistics.geometric_mean、textwrap.shorten/缩进、pathlib unlink/rmdir/with_suffix/parts |
 | 0.142 | 标准库基础静态包（第二批）：itertools 组合函数、datetime.timedelta（算术/比较/打印）、operator 子集 |
+| 0.143 | operator 改为内置模块：算术/比较/逻辑/容器包装函数按调用点特化，itemgetter 支持多键 |
 | 许可证 | Apache-2.0（见 [LICENSE](../LICENSE) / [NOTICE](../NOTICE)） |
 
-## 当前状态（0.142）
+## 当前状态（0.143）
 
 流水线 `源码 → 词法 → AST → lambda 脱糖 → 类型检查 → IR → x86-64 汇编 → 可执行文件` 已打通。
 

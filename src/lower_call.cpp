@@ -502,6 +502,8 @@ VReg Lowerer::lower_call(Call& c) {
             if (it->second.module == "asyncio") return lower_asyncio(it->second.member, c);
             if (it->second.module == "itertools")
                 return lower_itertools(it->second.member, c);
+            if (it->second.module == "operator")
+                return lower_operator(it->second.member, c);
             if (it->second.module == "collections")
                 return lower_collections(it->second.member, c);
             if (it->second.module == "functools")
