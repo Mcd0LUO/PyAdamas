@@ -837,6 +837,12 @@ VReg Lowerer::expr(Expr& e) {
                     push_temp(s);
                     return s;
                 }
+                if (a.attr == "parts") {
+                    TypePtr lt = mk_list(t_str());
+                    VReg v = call_runtime(RtFn::PathParts, lt, {pv});
+                    push_temp(v);
+                    return v;
+                }
                 err(e.line, e.col,
                     std::format("'pathlib.Path' object has no attribute '{}'", a.attr));
                 return const_none();

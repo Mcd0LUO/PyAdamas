@@ -4,6 +4,25 @@
 
 早期阶段没有逐条留痕，按阶段归纳；0.4 之后逐条记录。
 
+## [0.141] - 2026-11-13
+
+标准库基础静态包（第一批）。
+
+### 变更
+
+- 新增纯 PyAdamas `heapq`（push/pop/heapify/heapreplace/nlargest/nsmallest）、
+  `bisect`（左右查找与 insort，当前限有序 `list[int]`）、`binascii`
+  （hexlify/unhexlify/b2a_hex/a2b_hex）。
+- `base64` 增加 `standard_b64encode/decode`、`b16encode/decode`、
+  `b32encode/decode`、`encodebytes/decodebytes`。
+- `statistics` 增加 `geometric_mean`；`textwrap` 增加 `shorten` 与
+  `initial_indent`/`subsequent_indent` 参数。
+- `pathlib.Path` 增加 `unlink()`、`rmdir()`、`with_suffix()` 和 `.parts`。
+- 新增运行用例 140（heapq/bisect/binascii/base64/statistics/textwrap）与
+  141（pathlib 扩展）。
+- `itertools` 组合函数、`datetime.timedelta`、`operator` 留到下一批：
+  它们分别需要新的 lowering、类型/运行期与 getter 建模。
+
 ## [0.140] - 2026-11-13
 
 跨模块继承补完：运行期类表、导入类附加基类、导入字段默认值。

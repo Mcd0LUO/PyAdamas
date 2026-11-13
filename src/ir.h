@@ -456,6 +456,8 @@ enum class RtFn : uint16_t {
     PathIterdir,           // (path*) -> list[path]*
     PathGlob,              // (path*, str*) -> list[path]*
     PathMkdir,             // (path*, mode, parents, exist_ok) -> i64
+    PathWithSuffix,        // (path*, str*) -> path*
+    PathParts,             // (path*) -> list[str]*
     RandRange,             // (rng*, a, b, step) -> i64
     RandGetrandbits,       // (rng*, k) -> i64
     RandGauss,             // (rng*, mu, sigma) -> f64
@@ -918,6 +920,8 @@ inline const char* rt_name(RtFn f) {
         case RtFn::PathIterdir: return "pa_path_iterdir";
         case RtFn::PathGlob: return "pa_path_glob";
         case RtFn::PathMkdir: return "pa_path_mkdir";
+        case RtFn::PathWithSuffix: return "pa_path_with_suffix";
+        case RtFn::PathParts: return "pa_path_parts";
         case RtFn::RandRange: return "pa_random_randrange";
         case RtFn::RandGetrandbits: return "pa_random_getrandbits";
         case RtFn::RandGauss: return "pa_random_gauss";

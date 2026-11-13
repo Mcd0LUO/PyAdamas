@@ -354,6 +354,7 @@ TypePtr TypeChecker::expr(Expr& e) {
                     if (a.attr == "name" || a.attr == "stem" || a.attr == "suffix")
                         return t_str();
                     if (a.attr == "parent") return new_ty(TyKind::Path);
+                    if (a.attr == "parts") return mk_list(t_str());
                     err(a.line, a.col,
                         std::format("'pathlib.Path' object has no attribute '{}'", a.attr));
                     return t_unknown();

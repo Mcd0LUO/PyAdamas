@@ -186,6 +186,46 @@ PyAdamasStr* pa_path_suffix(PyAdamasPath* p) {
     return str_new("", 0);
 }
 
+PyAdamasPath* pa_path_with_suffix(PyAdamasPath* p, PyAdamasStr* suffix) {
+    PyAdamasStr* s = p->path;
+    int64_t n = s ? s->len : 0;
+    int64_t start = path_last_seg(s->data, n);
+    int64_t end = n;
+    while (end > start && s->data[end - 1] == '/') --end;
+    int64_t cut = end;
+    for (int64_t i = end - 1; i > start; --i)
+        if (s->data[i] == '.') {
+            cut = i;
+            break;
+        }
+    int64_t sn = suffix ? suffix->len : 0;
+    PyAdamasStr* out = str_alloc(cut + sn);
+    if (cut) memcpy((char*)out->data, s->data, (size_t)cut);
+    if (sn) memcpy((char*)out->data + cut, suffix->data, (size_t)sn);
+    return pa_path_new(out);
+}
+
+PyAdamasList* pa_path_parts(PyAdamasPath* p) {
+    PyAdamasStr* s = p->path;
+    int64_t n = s ? s->len : 0;
+    PyAdamasList* out = pa_list_new(0, 1);
+    int64_t i = 0;
+    if (n > 0 && s->data[0] == '/') {
+        pa_list_append(out, (int64_t)str_new("/", 1));
+        i = 1;
+    }
+    while (i < n) {
+        while (i < n && s->data[i] == '/') ++i;
+        int64_t start = i;
+        while (i < n && s->data[i] != '/') ++i;
+        int64_t len = i - start;
+        if (len == 0) continue;
+        if (len == 1 && s->data[start] == '.') continue;
+        pa_list_append(out, (int64_t)str_new(s->data + start, len));
+    }
+    return out;
+}
+
 PyAdamasStr* pa_path_stem(PyAdamasPath* p) {
     PyAdamasStr* s = p->path;
     int64_t n = s ? s->len : 0;

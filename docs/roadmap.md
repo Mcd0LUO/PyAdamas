@@ -65,15 +65,16 @@
 | 0.138 | 运行期类对象：类名当值、类装饰器、类值构造与 `isinstance`；新类型 `ClassObj` |
 | 0.139 | 跨模块继承：导入类作主基类、字段布局、vtable 外部符号、`super()` 按限定名定位、`isinstance` mirror MRO；模块格式 9 |
 | 0.140 | 跨模块继承补完：类对象带 vtable/ctor、动态 classmethod 重绑定、导入类附加基类与槽别名、导入基类字段默认值；模块格式 10 |
+| 0.141 | 标准库基础静态包（第一批）：heapq、bisect、binascii、base64 b16/b32/encodebytes、statistics.geometric_mean、textwrap.shorten/缩进、pathlib unlink/rmdir/with_suffix/parts |
 | 许可证 | Apache-2.0（见 [LICENSE](../LICENSE) / [NOTICE](../NOTICE)） |
 
-## 当前状态（0.140）
+## 当前状态（0.141）
 
 流水线 `源码 → 词法 → AST → lambda 脱糖 → 类型检查 → IR → x86-64 汇编 → 可执行文件` 已打通。
 
 - **语言面**：标量、字符串、`bytes`（含迭代与 `%` 格式化）、列表/元组/字典/集合、切片读写、闭包/lambda/`*args`/`**kwargs`/装饰器、推导式、`with`、异常值（`args`/`raise ... from`/自定义异常）、类（字段/方法/C3 多继承/零参 `super()`/`@staticmethod`/`@classmethod`/`@property`/类属性）、`match/case`、`del`、复数字面量、f-string 格式说明、dunder 协议（含装饰 dunder、`__call__` 与方法值）、`Generator[Y, S, R]` 标注、`open`/`input`/`sys.stdin`。
-- **标准库**：`math`/`sys`/`asyncio`/`random`/`os`/`os.path`/`subprocess`/`time`/`itertools`/`collections`/`functools`/`json`/`string`/`re`/`datetime`/`pathlib`/`csv`。
-- **验证**：149 个运行用例、52 个反例、12 个模块目录；差分 runner 已自举，默认 840 例。
+- **标准库**：`math`/`sys`/`asyncio`/`random`/`os`/`os.path`/`subprocess`/`time`/`itertools`/`collections`/`functools`/`json`/`string`/`re`/`datetime`/`pathlib`/`csv`/`base64`/`binascii`/`heapq`/`bisect`/`hashlib`/`hmac`/`logging`/`statistics`/`textwrap`。
+- **验证**：151 个运行用例、52 个反例、12 个模块目录；差分 runner 已自举，默认 840 例。
 - **主要缺口**：C FFI/BLAS；asyncio 边角。
 
 ## 下一步

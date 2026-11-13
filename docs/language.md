@@ -898,11 +898,11 @@ CPython 一致。
   `.strftime(fmt)` 格式化，`print()` 按 ISO 输出。没有 `timedelta` 和时区；
   `datetime.datetime.now()` 这种链式类方法暂不支持，用 `datetime.now()`。
 - 内置 `pathlib`：`Path(s)` 构造，`p / "x"` 拼接，`str(p)` 取路径字符串；
-  `.name` / `.stem` / `.suffix` / `.parent` 取成分，`.exists()` / `.is_file()` /
-  `.is_dir()` 查文件系统，`.read_text()` / `.write_text(s)` 读写文本，
+  `.name` / `.stem` / `.suffix` / `.parent` / `.parts` 取成分，`.exists()` /
+  `.is_file()` / `.is_dir()` 查文件系统，`.read_text()` / `.write_text(s)` 读写文本，
   `.iterdir()` / `.glob(pattern)` 列目录（`*`、`?`、`**` 递归），
-  `.mkdir(mode=0o777, parents=False, exist_ok=False)` 建目录。
-  没有 `unlink` / `rmdir` / `with_suffix` / `parts`。
+  `.mkdir(mode=0o777, parents=False, exist_ok=False)` 建目录，
+  `.unlink()` / `.rmdir()` 删除，`.with_suffix(suffix)` 替换后缀。
 - 内置 `collections`：`Counter(iterable)` 计数 + `.most_common(n)`；
   `OrderedDict()`（PyAdamas 的 dict 本来就保序）；`deque([iterable[, maxlen]])`
   环形队列，支持 `append`/`appendleft`/`pop`/`popleft`/`rotate`/`clear`/
@@ -933,15 +933,24 @@ CPython 一致。
   文件输出/`%` 参数展开；支持 `getLogger(...).info(...)` 这类链式调用。
 - 标准库 `statistics`（`stdlib/statistics.py`）：`mean`/`fmean`/
   `median`/`median_low`/`median_high`/`mode`/`pvariance`/`variance`/
-  `pstdev`/`stdev`/`harmonic_mean`，输入为 `list[float]`（`mode` 为
-  `list[int]`），空数据抛 `StatisticsError`。
+  `pstdev`/`stdev`/`harmonic_mean`/`geometric_mean`，输入为 `list[float]`
+  （`mode` 为 `list[int]`），空数据抛 `StatisticsError`。
 - 标准库 `textwrap`（`stdlib/textwrap.py`）：`wrap`/`fill`（贪心装行，
-  超长单词不拆）、`dedent`、`indent`；没有 `TextWrapper` 类和
-  `initial_indent` 等参数。
+  超长单词不拆，接受 `initial_indent`/`subsequent_indent`）、`dedent`、
+  `indent`、`shorten`；没有 `TextWrapper` 类。
 - 标准库 `base64`（`stdlib/base64.py`）：`b64encode` / `b64decode` /
-  `urlsafe_b64encode` / `urlsafe_b64decode`，输入输出都是 `bytes`；
+  `urlsafe_b64encode` / `urlsafe_b64decode` / `standard_b64encode` /
+  `standard_b64decode` / `b16encode` / `b16decode` / `b32encode` /
+  `b32decode` / `encodebytes` / `decodebytes`，输入输出都是 `bytes`；
   解码同时接受标准与 URL-safe 字母表，非法字符抛 `ValueError`；
   不支持 `validate=` / `altchars=` 与 `str` 输入。
+- 标准库 `binascii`（`stdlib/binascii.py`）：`hexlify` / `unhexlify` /
+  `b2a_hex` / `a2b_hex`，非十六进制字符抛 `binascii.Error`。
+- 标准库 `heapq`（`stdlib/heapq.py`）：`heappush` / `heappop` / `heapify` /
+  `heappushpop` / `heapreplace` / `nlargest` / `nsmallest`，按 `<` 比较。
+- 标准库 `bisect`（`stdlib/bisect.py`）：`bisect_left` / `bisect_right` /
+  `bisect` / `insort_left` / `insort_right` / `insort`，当前只覆盖有序
+  `list[int]`，`hi` 省略或 0 表示列表末尾。
 - 标准库 `hashlib`（`stdlib/hashlib.py`）：`md5` / `sha1` / `sha256`，
   返回带 `update(bytes)` / `digest() -> bytes` / `hexdigest() -> str`
   的对象；纯 pyadamas 实现，结果与 CPython 一致，跨多个 64 字节块也正确。

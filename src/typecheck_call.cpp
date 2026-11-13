@@ -1883,6 +1883,14 @@ TypePtr TypeChecker::method_call(TypePtr recv, const std::string& name, Call& c,
                 argc(1, 1);
                 return mk_list(new_ty(TyKind::Path));
             }
+            if (name == "unlink" || name == "rmdir") {
+                argc(0, 0);
+                return t_none();
+            }
+            if (name == "with_suffix") {
+                argc(1, 1);
+                return new_ty(TyKind::Path);
+            }
             err(c.line, c.col, std::format("pathlib.Path has no method '{}'", name));
             return t_unknown();
         }

@@ -110,3 +110,13 @@ def harmonic_mean(data: list[float]) -> float:
             raise StatisticsError("harmonic mean requires positive values")
         total += 1.0 / v
     return n / total
+
+
+def geometric_mean(data: list[float]) -> float:
+    n = _check(data)
+    total = 0.0
+    for v in data:
+        if v <= 0.0:
+            raise StatisticsError("geometric mean requires positive values")
+        total += math.log(v)
+    return math.exp(total / n)

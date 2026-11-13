@@ -746,6 +746,8 @@ PyAdamasStr* pa_path_str(PyAdamasPath* p);
 PyAdamasPath* pa_path_join(PyAdamasPath* p, PyAdamasStr* s);
 PyAdamasStr* pa_path_name(PyAdamasPath* p);
 PyAdamasStr* pa_path_suffix(PyAdamasPath* p);
+PyAdamasPath* pa_path_with_suffix(PyAdamasPath* p, PyAdamasStr* suffix);
+PyAdamasList* pa_path_parts(PyAdamasPath* p);
 PyAdamasStr* pa_path_stem(PyAdamasPath* p);
 PyAdamasPath* pa_path_parent(PyAdamasPath* p);
 int64_t pa_path_exists(PyAdamasPath* p);

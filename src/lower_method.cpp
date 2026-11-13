@@ -601,6 +601,29 @@ VReg Lowerer::lower_method_call(Attribute& at, Call& c) {
                 push_temp(v);
                 return v;
             }
+            if (at.attr == "with_suffix") {
+                if (!count(1)) return const_none();
+                VReg suf = expr(*c.args[0]);
+                suf = coerce(suf, tc_.type_of(c.args[0].get()), t_str());
+                VReg v = call_runtime(RtFn::PathWithSuffix, new_ty(TyKind::Path),
+                                      {recv, suf});
+                push_temp(v);
+                return v;
+            }
+            if (at.attr == "unlink") {
+                if (!count(0)) return const_none();
+                VReg s = call_runtime(RtFn::PathStr, t_str(), {recv});
+                push_temp(s);
+                call_void(RtFn::OsRemove, {s});
+                return const_none();
+            }
+            if (at.attr == "rmdir") {
+                if (!count(0)) return const_none();
+                VReg s = call_runtime(RtFn::PathStr, t_str(), {recv});
+                push_temp(s);
+                call_void(RtFn::OsRmdir, {s});
+                return const_none();
+            }
             if (at.attr == "mkdir") {
                 if (!c.args.empty()) {
                     err(c.line, c.col, "pathlib.Path.mkdir() takes only keyword arguments");

@@ -1575,6 +1575,7 @@ void AsmGen::gen_call_rt(const Inst& in) {
             case RtFn::PathJoin:
             case RtFn::PathWriteText:
             case RtFn::PathGlob:
+            case RtFn::PathWithSuffix:
                 emit2("movq", src_op(in.args[0]), "%rdi");
                 emit2("movq", src_op(in.args[1]), "%rsi");
                 break;
@@ -1597,6 +1598,7 @@ void AsmGen::gen_call_rt(const Inst& in) {
             case RtFn::PathIsDir:
             case RtFn::PathReadText:
             case RtFn::PathIterdir:
+            case RtFn::PathParts:
                 emit2("movq", src_op(in.args[0]), "%rdi");
                 break;
             case RtFn::SubprocessRun:
