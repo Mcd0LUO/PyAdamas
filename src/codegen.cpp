@@ -265,14 +265,13 @@ std::string AsmGen::gen(const IRModule& m) {
             for (size_t s = 0; s < g.slot_heap.size(); ++s) {
                 if (!g.slot_heap[s]) continue;
                 const int off = 8 * (kGenHeader + static_cast<int>(s));
-                out_ += std::format("\tmovq {}(%rbx), %rdi\n", off);
-                out_ += std::format("\ttestq %rdi, %rdi\n");
-                out_ += std::format("\tje .Lgengcrelskip{}_{}\n", i, s);
-                out_ += std::format("\tmovq $0, {}(%rbx)\n", off);
                 // slot_heap: 1=堆，2=可能装着非堆值（unknown 流过堆槽）。
-                out_ += g.slot_heap[s] == 2 ? "\tcall pa_rc_dec_unknown\n"
-                                            : "\tcall pa_rc_dec\n";
-                out_ += std::format(".Lgengcrelskip{}_{}:\n", i, s);
+                // 清零只在 GC 清扫阶段做；trial/restore 阶段运行时只调计数，
+                // 不能破坏生成器帧的内容。
+                out_ += std::format("\tleaq {}(%rbx), %rdi\n", off);
+                out_ += std::format("\tmovq ${}, %rsi\n",
+                                    g.slot_heap[s] == 2 ? 2 : 1);
+                out_ += "\tcall pa_gen_slot_release\n";
             }
             out_ += std::format(".Lgengcreldone{}:\n", i);
             out_ += "\tpopq %rbx\n";

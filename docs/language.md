@@ -583,7 +583,8 @@ unknown 处理；Task 只允许一个并发等待者，没有任务名字。
   的计数可能虚高，要到后续轮次才回收。这是「宁可延迟回收，不可误收」的
   取舍。
 - 没有 `__del__`、`weakref` 或手动释放；对象什么时候真正释放不可观察。
-  GC 是 stop-the-world 的，没有分代/增量。
+  GC 是 stop-the-world 的分代收集（minor trial-deletion + major 标记-清扫），
+  没有增量/并发。
 
 ### 字典与集合
 

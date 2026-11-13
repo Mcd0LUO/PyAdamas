@@ -22,11 +22,90 @@ size_t gc_tracked_count;
    GC 可以走精确快速路径：不需要地址表。 */
 size_t gc_conservative_count;
 
-/* 下一次触发全堆扫描的分配量。固定 2MB 会让大堆反复全扫——1M 个
-   存活对象约 88MB，按 2MB 触发要扫四十多遍，总成本接近 O(n²)。
-   每次扫描完按「本次存活字节数」重置，存活堆翻倍才扫一次，总扫描
-   量是 O(live)；垃圾多、存活少时回落到 2MB 下限，扫描本身也便宜。 */
-static int64_t gc_next_threshold = PYADAMAS_GC_THRESHOLD;
+#define PYADAMAS_RC_MARK 1
+#define PYADAMAS_RC_UNTRACKED 2
+#define PYADAMAS_RC_YOUNG 4
+
+/* ── 分代收集状态（分配热路径和 rc_link 都要用） ──────────────
+   young_buf 是上次收集后分配、还没晋升的对象；marked 高位是它在数组里
+   的下标，正常 RC 释放时 O(1) 摘除。old_bytes 是老生代存活字节，用来
+   决定 major 的触发阈值。 */
+static PyAdamasRc** young_buf;
+static size_t young_len;
+static size_t young_cap;
+static int64_t old_bytes;
+
+/* 收集阶段：非 0 时 pa_rc_dec 只调整集合内对象的计数，不直接释放。 */
+#define GC_PHASE_NONE 0
+#define GC_PHASE_TRIAL 1
+#define GC_PHASE_RESTORE 2
+#define GC_PHASE_SWEEP 3
+static int gc_phase;
+/* major 走经典标记-清扫，minor 走 trial-deletion。清扫时的子引用规则
+   不同：标记-清扫只减可达子对象，trial 模式跳过集合内（已减过）、
+   收集集合外的边。 */
+static int gc_mark_sweep;
+
+/* minor 按新生代分配量触发；major 按「上次 major 以来」的分配量触发，
+   阈值随老生代存活字节增长（和旧的全堆扫描同一个摊还口径）。 */
+static int64_t alloc_since_major;
+static int64_t young_threshold = PYADAMAS_GC_THRESHOLD;
+static int64_t major_threshold = 4 * PYADAMAS_GC_THRESHOLD;
+
+static void gc_collect(int major);
+static void gc_pend_add(int64_t v);
+
+static void young_add(PyAdamasRc* h) {
+    if (young_len == young_cap) {
+        size_t ncap = young_cap ? young_cap * 2 : 1024;
+        PyAdamasRc** ns = (PyAdamasRc**)realloc(young_buf, sizeof(PyAdamasRc*) * ncap);
+        if (!ns) panic_c("out of memory");
+        young_buf = ns;
+        young_cap = ncap;
+    }
+    h->marked = ((int64_t)young_len << 8) | PYADAMAS_RC_YOUNG;
+    young_buf[young_len++] = h;
+}
+
+static void young_del(PyAdamasRc* h) {
+    size_t i = (size_t)(h->marked >> 8);
+    if (i >= young_len || young_buf[i] != h) return;
+    size_t last = --young_len;
+    if (i != last) {
+        PyAdamasRc* m = young_buf[last];
+        young_buf[i] = m;
+        m->marked = ((int64_t)i << 8) | (m->marked & 0xFF);
+    }
+    h->marked = 0;
+}
+
+/* 收集期间的子引用处理：
+   - trial：集合内对象 rc--（试探性减计数）；
+   - restore：集合内对象 rc++（把存活对象的出边加回去）；
+   - sweep：集合内对象已经减过，跳过；集合外（老对象）的边攒进 pending，
+     回合结束后按正常 RC 释放，避免清扫中重入释放。
+   永生字面量在入口就跳过了；exact 模式下的叶子不在集合里，清扫时按
+   普通引用释放。 */
+static void gc_phase_dec(PyAdamasRc* h, void* p) {
+    if (gc_phase == GC_PHASE_TRIAL) {
+        if (h->marked & PYADAMAS_RC_YOUNG) h->rc--;
+        return;
+    }
+    if (gc_phase == GC_PHASE_RESTORE) {
+        if (h->marked & PYADAMAS_RC_YOUNG) h->rc++;
+        return;
+    }
+    if (h->marked & PYADAMAS_RC_UNTRACKED) {
+        if (h->rc > 0 && --h->rc == 0) free(h);
+        return;
+    }
+    if (gc_mark_sweep) {
+        if ((h->marked & PYADAMAS_RC_MARK) && h->rc > 0) h->rc--;
+        return;
+    }
+    if (h->marked & PYADAMAS_RC_YOUNG) return;
+    gc_pend_add((int64_t)(uintptr_t)p);
+}
 
 /* 存活堆索引只服务 unknown 值的保守 retain/dec（值可能是整数，必须先
    确认是堆指针）。整程序没有任何 unknown 时，入口会调用
@@ -50,6 +129,8 @@ static int64_t stat_rc_temp;
 static int64_t stat_rc_cleanup;
 static int64_t stat_rc_free;
 static int64_t stat_gc_runs;
+static int64_t stat_gc_minor;
+static int64_t stat_gc_major;
 static int64_t stat_gc_freed;
 static int64_t stat_gc_live;
 static int64_t stat_take_calls;
@@ -58,18 +139,17 @@ static int64_t stat_take_steps;
 static void rc_stats_dump(void) {
     fprintf(stderr,
             "[rc] inc=%lld inc_unknown=%lld dec=%lld dec_unknown=%lld temp=%lld "
-            "cleanup=%lld free=%lld gc_runs=%lld gc_freed=%lld gc_live=%lld "
-            "take=%lld take_steps=%lld\n",
+            "cleanup=%lld free=%lld gc_runs=%lld gc_minor=%lld gc_major=%lld "
+            "gc_freed=%lld gc_live=%lld take=%lld take_steps=%lld\n",
             (long long)stat_rc_inc, (long long)stat_rc_inc_unknown,
             (long long)stat_rc_dec,
             (long long)stat_rc_dec_unknown, (long long)stat_rc_temp,
             (long long)stat_rc_cleanup, (long long)stat_rc_free,
-            (long long)stat_gc_runs, (long long)stat_gc_freed,
+            (long long)stat_gc_runs, (long long)stat_gc_minor,
+            (long long)stat_gc_major, (long long)stat_gc_freed,
             (long long)stat_gc_live, (long long)stat_take_calls,
             (long long)stat_take_steps);
 }
-
-#define PYADAMAS_RC_UNTRACKED 2
 
 /* 短字符串 freelist。split / capitalize / join 这类路径会高频产生
    几个字节的小字符串，每次都 malloc/free 会把内存分配变成热点。
@@ -225,6 +305,9 @@ void rc_index_del(PyAdamasRc* h) {    if (rc_index_off) return;
 int rc_index_has(PyAdamasRc* h) {
     if (rc_index_off) return 0;
     if (rc_index_cap == 0) return 0;
+    // RC_TOMB 是墓碑哨兵（(PyAdamasRc*)-1）。unknown 值 v 减去 64 字节头后
+    // 可能正好等于它（v == 63），探测时不能把墓碑当成命中。
+    if (h == RC_TOMB) return 0;
     size_t s = rc_index_slot(h);
     while (rc_index[s]) {
         if (rc_index[s] == h) return 1;
@@ -303,10 +386,16 @@ void rc_link(PyAdamasRc* h) {
     if (h->kind == PYADAMAS_RC_OBJ || h->kind == PYADAMAS_RC_INSTANCE)
         gc_conservative_count++;
     rc_index_put(h);
+    young_add(h);
 }
 
 void rc_unlink(PyAdamasRc* h) {
-    if (h->marked == PYADAMAS_RC_UNTRACKED) return;
+    if (h->marked & PYADAMAS_RC_UNTRACKED) return;
+    // 正常 RC 释放时把新生代 O(1) 摘掉；收集期间由收集器统一收尾。
+    if (!gc_phase) {
+        if (h->marked & PYADAMAS_RC_YOUNG) young_del(h);
+        else old_bytes -= h->size + PYADAMAS_RC_HDR;
+    }
     if (h->prev) h->prev->next = h->next;
     else heap_head = h->next;
     if (h->next) h->next->prev = h->prev;
@@ -319,9 +408,10 @@ void rc_unlink(PyAdamasRc* h) {
 void* rc_alloc(int64_t size, void (*dtor)(void*), void (*release)(void*),
                       int64_t kind) {
     if (size < 0) panic_c("negative allocation size");
-    if (gc_ready && !gc_sweeping && heap_head &&
-        alloc_since_gc >= gc_next_threshold)
-        pa_gc_collect();
+    if (gc_ready && !gc_phase && heap_head) {
+        if (alloc_since_major >= major_threshold) gc_collect(1);
+        else if (alloc_since_gc >= young_threshold) gc_collect(0);
+    }
     // 短字符串按 8 字节取整，freelist 里的块容量和档位严格对应。
     int64_t alloc_size = size;
     if (kind == PYADAMAS_RC_STR && size > 0 && size <= STR_POOL_MAX_SIZE)
@@ -342,7 +432,10 @@ void* rc_alloc(int64_t size, void (*dtor)(void*), void (*release)(void*),
     h->marked = 0;
     rc_link(h);
     // 叶子对象不可能成环，exact-RC 模式下也不进链，不必驱动 GC 频率。
-    if (!rc_leaf_untracked(h)) alloc_since_gc += alloc_size + PYADAMAS_RC_HDR;
+    if (!rc_leaf_untracked(h)) {
+        alloc_since_gc += alloc_size + PYADAMAS_RC_HDR;
+        alloc_since_major += alloc_size + PYADAMAS_RC_HDR;
+    }
     void* p = (char*)h + sizeof(PyAdamasRc);
     memset(p, 0, (size_t)alloc_size);
     return p;
@@ -376,9 +469,9 @@ void pa_rc_dec(void* p) {
     if (!p) return;
     PyAdamasRc* h = (PyAdamasRc*)p - 1;
     if (h->rc == PYADAMAS_RC_IMMORTAL) return;
-    if (gc_sweeping && !(gc_untracked_leaves && h->marked == PYADAMAS_RC_UNTRACKED)) {
-        // 清扫阶段只调整可达对象的计数，绝不在 GC 内部触发释放。
-        if (h->marked && h->rc > 0) h->rc--;
+    if (gc_phase) {
+        // 收集期间只调整计数或登记待释放的边，绝不重入释放。
+        gc_phase_dec(h, p);
         return;
     }
     if (h->rc <= 0) panic_c("refcount decrement on a freed object");
@@ -586,21 +679,45 @@ PyAdamasStr* pa_str_none(void) {
     return &kw_none_s.s;
 }
 
-/* ── 循环收集器 ───────────────────────────────────────────────── */
+/* ── 分代循环收集器 ─────────────────────────────────────────────
+   对象按「是否在当前收集集合」分两代：上次收集后分配、还没晋升的是
+   新生代（young_buf），其余存活对象是老生代。minor 只对新生代做
+   trial-deletion；老对象的引用按真实 rc 计入外部引用，天然是根，
+   所以不需要写屏障。老生代增长到阈值时做 major（集合 = 整堆）。
+
+   一个回合（stop-the-world）分四步：
+   1. 试探减计数：对集合内每个对象执行 release 回调，把每条出边从
+      子对象的 rc 减掉。减完 rc > 0 的对象被集合外引用，是根。
+   2. 标记：从根出发沿出边走一遍（gc_scan_object），未标记的集合成员
+      就是环垃圾。
+   3. 恢复：标记对象再走一遍 release，把出边计数加回去并晋升。
+   4. 清扫：垃圾对象先走 release（指向集合外的边攒进 pending），再
+      统一释放；回合结束后 pending 按正常 RC 释放。
+
+   marked 低 8 位是标志（1 本轮可达 / 2 叶子不在链上 / 4 在集合里），
+   高位是 young_buf 下标，正常 RC 释放时 O(1) 摘除。
+   ─────────────────────────────────────────────────────────────── */
 
 void** gc_globals;
 int64_t gc_n_globals;
 int64_t gc_globals_cap;
 uintptr_t gc_stack_top;
-PyAdamasRc** gc_table;
-size_t gc_table_cap;
 PyAdamasRc** gc_work;
 size_t gc_work_len;
-/* 表和工作栈跨收集复用：大堆反复 calloc/free 十几 MB 很伤。 */
-static PyAdamasRc** gc_table_buf;
-static size_t gc_table_buf_cap;
+/* 工作栈、本轮集合、集合地址表、清扫后待释放的老对象，全部跨回合复用。 */
 static PyAdamasRc** gc_work_buf;
 static size_t gc_work_buf_cap;
+static PyAdamasRc** gc_set;
+static size_t gc_set_len;
+static PyAdamasRc** gc_set_buf;
+static size_t gc_set_buf_cap;
+static PyAdamasRc** gc_tab;
+static size_t gc_tab_cap;
+static PyAdamasRc** gc_tab_buf;
+static size_t gc_tab_buf_cap;
+static void** gc_pend;
+static size_t gc_pend_len;
+static size_t gc_pend_cap;
 
 #if defined(__SANITIZE_ADDRESS__)
 #define PYADAMAS_NO_ASAN __attribute__((no_sanitize_address))
@@ -612,111 +729,79 @@ size_t gc_hash(uintptr_t p) {
     return (size_t)((p >> 4) * 11400714819323198485ull);
 }
 
-void gc_table_insert(PyAdamasRc* h) {
-    size_t mask = gc_table_cap - 1;
-    size_t i = gc_hash((uintptr_t)h + (uintptr_t)PYADAMAS_RC_HDR) & mask;
-    while (gc_table[i]) i = (i + 1) & mask;
-    gc_table[i] = h;
+static void gc_reserve_set(size_t need) {
+    if (need <= gc_set_buf_cap) return;
+    size_t ncap = gc_set_buf_cap ? gc_set_buf_cap : 1024;
+    while (ncap < need) ncap *= 2;
+    PyAdamasRc** ns = (PyAdamasRc**)realloc(gc_set_buf, sizeof(PyAdamasRc*) * ncap);
+    if (!ns) panic_c("out of memory");
+    gc_set_buf = ns;
+    gc_set_buf_cap = ncap;
 }
 
-PyAdamasRc* gc_table_find(uintptr_t payload) {
-    if (!gc_table_cap) return NULL;
-    size_t mask = gc_table_cap - 1;
-    size_t i = gc_hash(payload) & mask;
-    while (gc_table[i]) {
-        if ((uintptr_t)gc_table[i] + (uintptr_t)PYADAMAS_RC_HDR == payload)
-            return gc_table[i];
-        i = (i + 1) & mask;
+static void gc_pend_add(int64_t v) {
+    if (gc_pend_len == gc_pend_cap) {
+        size_t ncap = gc_pend_cap ? gc_pend_cap * 2 : 256;
+        void** ns = (void**)realloc(gc_pend, sizeof(void*) * ncap);
+        if (!ns) panic_c("out of memory");
+        gc_pend = ns;
+        gc_pend_cap = ncap;
+    }
+    gc_pend[gc_pend_len++] = (void*)(uintptr_t)v;
+}
+
+/* 集合地址表：键是负载地址，值是对应头部。minor 时集合通常远小于整堆，
+   比旧的全堆地址表便宜；major 时和旧表的规模一致。 */
+static void gc_tab_build(void) {
+    size_t cap = 64;
+    while (cap < gc_set_len * 2) cap <<= 1;
+    if (cap > gc_tab_buf_cap) {
+        free(gc_tab_buf);
+        gc_tab_buf = (PyAdamasRc**)calloc(cap, sizeof(PyAdamasRc*));
+        if (!gc_tab_buf) panic_c("out of memory");
+        gc_tab_buf_cap = cap;
+    } else {
+        memset(gc_tab_buf, 0, cap * sizeof(PyAdamasRc*));
+    }
+    gc_tab = gc_tab_buf;
+    gc_tab_cap = cap;
+    size_t mask = cap - 1;
+    for (size_t i = 0; i < gc_set_len; ++i) {
+        PyAdamasRc* h = gc_set[i];
+        size_t s = gc_hash((uintptr_t)h + (uintptr_t)PYADAMAS_RC_HDR) & mask;
+        while (gc_tab[s]) s = (s + 1) & mask;
+        gc_tab[s] = h;
+    }
+}
+
+static PyAdamasRc* gc_tab_find(uintptr_t v) {
+    if (!gc_tab_cap) return NULL;
+    size_t mask = gc_tab_cap - 1;
+    size_t s = gc_hash(v) & mask;
+    while (gc_tab[s]) {
+        if ((uintptr_t)gc_tab[s] + (uintptr_t)PYADAMAS_RC_HDR == v) return gc_tab[s];
+        s = (s + 1) & mask;
     }
     return NULL;
 }
 
-/* ── 精确路径的根部候选集合 ────────────────────────────────────
-   整堆都是 list/dict/closure（没有需要保守扫描的 OBJ/实例）时，唯一
-   需要「地址 → 头部」反查的地方是保守的栈/寄存器根。与其给整堆建
-   地址表，不如把这些根里的机器字去重成一张小表，再扫一遍堆看谁的
-   负载地址命中——小表常驻 L2，比几 MB 的整堆表便宜得多。 */
-static uintptr_t* gc_cand;
-static size_t gc_cand_cap;  // 2 的幂
-static size_t gc_cand_len;
-
-static void gc_cand_rehash(size_t ncap) {
-    uintptr_t* old = gc_cand;
-    size_t ocap = gc_cand_cap;
-    gc_cand = (uintptr_t*)calloc(ncap, sizeof(uintptr_t));
-    if (!gc_cand) panic_c("out of memory");
-    gc_cand_cap = ncap;
-    gc_cand_len = 0;
-    for (size_t i = 0; i < ocap; ++i) {
-        if (!old[i]) continue;
-        size_t s = gc_hash(old[i]) & (ncap - 1);
-        while (gc_cand[s]) s = (s + 1) & (ncap - 1);
-        gc_cand[s] = old[i];
-        gc_cand_len++;
-    }
-    free(old);
-}
-
-static void gc_cand_reset(void) {
-    if (gc_cand_cap) memset(gc_cand, 0, gc_cand_cap * sizeof(uintptr_t));
-    gc_cand_len = 0;
-}
-
-static void gc_cand_add(uintptr_t v) {
-    if (!v) return;
-    if (gc_cand_cap == 0) gc_cand_rehash(1024);
-    else if ((gc_cand_len + 1) * 10 >= gc_cand_cap * 7)
-        gc_cand_rehash(gc_cand_cap * 2);
-    size_t s = gc_hash(v) & (gc_cand_cap - 1);
-    while (gc_cand[s]) {
-        if (gc_cand[s] == v) return;
-        s = (s + 1) & (gc_cand_cap - 1);
-    }
-    gc_cand[s] = v;
-    gc_cand_len++;
-}
-
-static int gc_cand_has(uintptr_t v) {
-    if (!gc_cand_len || !v) return 0;
-    size_t s = gc_hash(v) & (gc_cand_cap - 1);
-    while (gc_cand[s]) {
-        if (gc_cand[s] == v) return 1;
-        s = (s + 1) & (gc_cand_cap - 1);
-    }
-    return 0;
-}
-
-PYADAMAS_NO_ASAN static void gc_cand_add_range(uintptr_t a, uintptr_t b) {
-    if (a >= b) return;
-    for (; a + sizeof(uintptr_t) <= b; a += sizeof(uintptr_t)) {
-        uintptr_t v;
-        memcpy(&v, (const void*)a, sizeof v);
-        gc_cand_add(v);
-    }
-}
-
-PYADAMAS_NO_ASAN static void gc_cand_add_registers(void) {
-    jmp_buf regs;
-    if (setjmp(regs) == 0)
-        gc_cand_add_range((uintptr_t)&regs, (uintptr_t)&regs + sizeof regs);
-}
-
 void gc_mark(uintptr_t v) {
     if (!v) return;
-    PyAdamasRc* h = gc_table_find(v);
-    if (!h || h->marked) return;
-    h->marked = 1;
+    PyAdamasRc* h = gc_tab_find(v);
+    if (!h || (h->marked & PYADAMAS_RC_MARK)) return;
+    h->marked |= PYADAMAS_RC_MARK;
     gc_work[gc_work_len++] = h;
 }
 
-/* exact-RC 模式专用：子对象是静态类型确定的堆指针（列表元素、
-   dict 的 own key/val、闭包 cell），不用查表，直接读头部标记。
-   静态字面量 rc 永生、marked 也不该被写（.data.rel.ro 只读）。 */
+/* 静态类型已知的堆指针：直接读头部，不查表。字面量（永生）和不在本轮
+   集合里的老对象都不用标记。 */
 static void gc_mark_direct(uintptr_t v) {
     if (!v) return;
-    PyAdamasRc* h = (PyAdamasRc*)(v - (uintptr_t)PYADAMAS_RC_HDR);
-    if (h->rc == PYADAMAS_RC_IMMORTAL || h->marked) return;
-    h->marked = 1;
+    PyAdamasRc* h = (PyAdamasRc*)(uintptr_t)(v - (uintptr_t)PYADAMAS_RC_HDR);
+    if (h->rc == PYADAMAS_RC_IMMORTAL) return;
+    if (!(h->marked & PYADAMAS_RC_YOUNG)) return;
+    if (h->marked & PYADAMAS_RC_MARK) return;
+    h->marked |= PYADAMAS_RC_MARK;
     gc_work[gc_work_len++] = h;
 }
 
@@ -731,6 +816,21 @@ PYADAMAS_NO_ASAN static void gc_scan_range(const void* begin, const void* end) {
     }
 }
 
+// 取真实栈指针：ASan 会把带地址的局部变量搬到 fake stack，用 &local
+// 当扫描起点会跨到未映射区域。生成的代码帧本身在真实栈上。
+PYADAMAS_NO_ASAN static uintptr_t gc_current_sp(void) {
+    uintptr_t sp;
+    __asm__ volatile("movq %%rsp, %0" : "=r"(sp));
+    return sp;
+}
+
+// setjmp 会把 callee-saved 寄存器存进 jmp_buf；生成代码里常驻寄存器的
+// 堆指针就靠这一段兜住。
+PYADAMAS_NO_ASAN static void gc_scan_registers(void) {
+    jmp_buf regs;
+    if (setjmp(regs) == 0) gc_scan_range(&regs, (char*)&regs + sizeof regs);
+}
+
 void gc_scan_object(PyAdamasRc* h) {
     void* p = (char*)h + PYADAMAS_RC_HDR;
     switch (h->kind) {
@@ -739,8 +839,8 @@ void gc_scan_object(PyAdamasRc* h) {
         case PYADAMAS_RC_LIST: {
             PyAdamasList* l = (PyAdamasList*)p;
             if (!l->data) break;
-            // exact-RC 模式：0 是纯数值元素，没有引用要标记；1 是静态类型
-            // 已知的堆指针，直接标记；2 是推不出来的混合元素，保守查表标记。
+            // exact-RC 模式：0 是纯数值元素；1 是静态类型已知的堆指针；
+            // 2/3 是推不出来的元素，保守查集合表标记。
             if (gc_untracked_leaves) {
                 if (l->elem_kind == 1)
                     for (int64_t i = 0; i < l->len; ++i)
@@ -797,21 +897,6 @@ void gc_scan_object(PyAdamasRc* h) {
     }
 }
 
-// 取真实栈指针：ASan 会把带地址的局部变量搬到 fake stack，用 &local
-// 当扫描起点会跨到未映射区域。生成的代码帧本身在真实栈上。
-PYADAMAS_NO_ASAN static uintptr_t gc_current_sp(void) {
-    uintptr_t sp;
-    __asm__ volatile("movq %%rsp, %0" : "=r"(sp));
-    return sp;
-}
-
-// setjmp 会把 callee-saved 寄存器存进 jmp_buf；生成代码里常驻寄存器的
-// 堆指针就靠这一段兜住。
-PYADAMAS_NO_ASAN static void gc_scan_registers(void) {
-    jmp_buf regs;
-    if (setjmp(regs) == 0) gc_scan_range(&regs, (char*)&regs + sizeof regs);
-}
-
 void pa_gc_add_roots(void** roots, int64_t n_roots) {
     if (!roots || n_roots <= 0) return;
     if (gc_n_globals + n_roots > gc_globals_cap) {
@@ -855,21 +940,24 @@ void pa_disable_unknown_index(void) {
 
 void pa_gc_unref_child(void* p) {
     if (!p) return;
-    if (gc_untracked_leaves) {
-        // exact-RC 模式：子对象一定是堆对象或静态字面量，直接读头部。
-        // marked=1 是「本轮可达」，减计数；UNTRACKED 的叶子不在链上，
-        // 必须在这里按正常引用释放；marked=0 是同样会被清扫的垃圾。
-        PyAdamasRc* u = (PyAdamasRc*)p - 1;
-        if (u->rc == PYADAMAS_RC_IMMORTAL) return;
-        if (u->marked == PYADAMAS_RC_UNTRACKED) {
-            if (u->rc > 0 && --u->rc == 0) free(u);
-            return;
-        }
-        if (u->marked == 1 && u->rc > 0) u->rc--;
+    PyAdamasRc* h = (PyAdamasRc*)p - 1;
+    if (h->rc == PYADAMAS_RC_IMMORTAL) return;
+    if (gc_phase) {
+        gc_phase_dec(h, p);
         return;
     }
-    PyAdamasRc* h = gc_table_find((uintptr_t)p);
-    if (h && h->marked && h->rc > 0) h->rc--;
+    // release 回调只在收集期间调用；这里兜底按正常引用释放。
+    pa_rc_dec(p);
+}
+
+/* 生成器帧的堆槽释放（GC release 与异常逃出共用）：清扫阶段顺带清零，
+   之后重复调用是空操作；trial/restore 阶段只调整计数、不动槽。 */
+void pa_gen_slot_release(int64_t* slot, int64_t own) {
+    int64_t v = *slot;
+    if (!v) return;
+    if (gc_phase == GC_PHASE_SWEEP) *slot = 0;
+    if (own == 2) pa_rc_dec_unknown(v);
+    else pa_rc_dec((void*)(uintptr_t)v);
 }
 
 void gc_drain(void) {
@@ -882,165 +970,207 @@ static double gc_now_ms(void) {
     return (double)ts.tv_sec * 1e3 + (double)ts.tv_nsec / 1e6;
 }
 
-void pa_gc_collect(void) {
+static void gc_free_body(PyAdamasRc* h) {
+    rc_unlink(h);
+    if (h->kind == PYADAMAS_RC_OBJ)
+        free_attached_exception((char*)h + PYADAMAS_RC_HDR, h->size);
+    if (h->kind == PYADAMAS_RC_LIST) {
+        PyAdamasList* l = (PyAdamasList*)((char*)h + PYADAMAS_RC_HDR);
+        free(l->data);
+    } else if (h->kind == PYADAMAS_RC_DICT) {
+        PyAdamasDict* d = (PyAdamasDict*)((char*)h + PYADAMAS_RC_HDR);
+        free(d->entries);
+        free(d->order);
+        free(d->index);
+    }
+    free(h);
+}
+
+static void gc_collect(int major) {
     if (!gc_ready || !heap_head || !gc_stack_top) {
         alloc_since_gc = 0;
         return;
     }
-    if (rc_stats_on) stat_gc_runs++;
-    double t0 = 0, t1 = 0, t2 = 0, t3 = 0, t4 = 0;
+    if (rc_stats_on) {
+        stat_gc_runs++;
+        if (major) stat_gc_major++;
+        else stat_gc_minor++;
+    }
+    double t0 = 0, t1 = 0, t2 = 0, t3 = 0, t4 = 0, t5 = 0, t6 = 0;
     if (getenv("PYADAMAS_GC_TIMING")) t0 = gc_now_ms();
-    size_t n = gc_tracked_count;
-    if (n == 0 || !heap_head) {
+
+    // 1. 组装本轮集合。
+    if (major) {
+        gc_reserve_set(gc_tracked_count);
+        gc_set_len = 0;
+        for (PyAdamasRc* h = heap_head; h; h = h->next) {
+            h->marked = PYADAMAS_RC_YOUNG;
+            gc_set_buf[gc_set_len++] = h;
+        }
+        young_len = 0;
+        old_bytes = 0;
+    } else {
+        gc_reserve_set(young_len);
+        if (young_len) memcpy(gc_set_buf, young_buf, sizeof(PyAdamasRc*) * young_len);
+        gc_set_len = young_len;
+        young_len = 0;
+    }
+    gc_set = gc_set_buf;
+    if (gc_set_len == 0) {
         alloc_since_gc = 0;
-        gc_next_threshold = PYADAMAS_GC_THRESHOLD;
         return;
     }
-    if (n > gc_work_buf_cap) {
+    if (gc_set_len > gc_work_buf_cap) {
         free(gc_work_buf);
-        gc_work_buf = (PyAdamasRc**)malloc(n * sizeof(PyAdamasRc*));
+        gc_work_buf = (PyAdamasRc**)malloc(sizeof(PyAdamasRc*) * gc_set_len);
         if (!gc_work_buf) panic_c("out of memory");
-        gc_work_buf_cap = n;
+        gc_work_buf_cap = gc_set_len;
     }
     gc_work = gc_work_buf;
     gc_work_len = 0;
+    gc_tab_build();
+    if (t0) t1 = gc_now_ms();
 
-    int fast = gc_untracked_leaves && gc_conservative_count == 0;
-    if (fast) {
-        // 根部候选集合 → 一遍扫堆命中标记。没有地址表。
-        gc_cand_reset();
+    gc_mark_sweep = major;
+    if (major) {
+        // 整堆收集沿用经典标记-清扫：根是全局、临时栈、真实栈和寄存器，
+        // 不做试探减计数，少两遍边遍历。
         for (int64_t i = 0; i < gc_n_globals; ++i)
-            gc_cand_add((uintptr_t)*(void**)gc_globals[i]);
-        for (int64_t i = 0; i < temp_len; ++i)
-            gc_cand_add((uintptr_t)temp_stack[i]);
-        gc_cand_add_range(gc_current_sp(), gc_stack_top);
-        gc_cand_add_registers();
-        for (PyAdamasRc* h = heap_head; h; h = h->next) {
-            h->marked = 0;
-            if (gc_cand_has((uintptr_t)h + (uintptr_t)PYADAMAS_RC_HDR)) {
-                h->marked = 1;
-                gc_work[gc_work_len++] = h;
-            }
-        }
-        if (t0) t1 = gc_now_ms();
-        gc_drain();
-        if (t0) t2 = gc_now_ms();
-    } else {
-        size_t cap = 64;
-        while (cap < n * 2) cap <<= 1;
-        if (cap > gc_table_buf_cap) {
-            free(gc_table_buf);
-            gc_table_buf = (PyAdamasRc**)calloc(cap, sizeof(PyAdamasRc*));
-            if (!gc_table_buf) panic_c("out of memory");
-            gc_table_buf_cap = cap;
-        } else {
-            memset(gc_table_buf, 0, cap * sizeof(PyAdamasRc*));
-        }
-        gc_table = gc_table_buf;
-        gc_table_cap = cap;
-        for (PyAdamasRc* h = heap_head; h; h = h->next) {
-            h->marked = 0;
-            gc_table_insert(h);
-        }
-        if (t0) t1 = gc_now_ms();
-
-        for (int64_t i = 0; i < gc_n_globals; ++i) {
-            void* v = *(void**)gc_globals[i];
-            gc_mark((uintptr_t)v);
-        }
+            gc_mark((uintptr_t)*(void**)gc_globals[i]);
         for (int64_t i = 0; i < temp_len; ++i) gc_mark((uintptr_t)temp_stack[i]);
         gc_scan_range((const void*)gc_current_sp(), (const void*)gc_stack_top);
         gc_scan_registers();
-        gc_drain();
         if (t0) t2 = gc_now_ms();
+        gc_drain();
+        if (t0) t3 = gc_now_ms();
+        if (t0) t4 = gc_now_ms();
+    } else {
+        // 2. 试探减计数：集合内对象之间的出边全部减掉。
+        gc_phase = GC_PHASE_TRIAL;
+        for (size_t i = 0; i < gc_set_len; ++i) {
+            PyAdamasRc* h = gc_set[i];
+            if (h->release) h->release((char*)h + PYADAMAS_RC_HDR);
+        }
+        if (t0) t2 = gc_now_ms();
+
+        // 3. 根：减完仍 > 0 的说明被集合外引用；再保守扫栈兜住 unknown
+        //    局部槽这类「借来的」引用（它们不计入 rc）。exact-RC 模式下
+        //    所有引用都归某个槽/临时值/容器所有，真实 rc 已经够用。
+        for (size_t i = 0; i < gc_set_len; ++i) {
+            PyAdamasRc* h = gc_set[i];
+            if (h->rc > 0 && !(h->marked & PYADAMAS_RC_MARK)) {
+                h->marked |= PYADAMAS_RC_MARK;
+                gc_work[gc_work_len++] = h;
+            }
+        }
+        if (!gc_untracked_leaves) {
+            gc_scan_range((const void*)gc_current_sp(), (const void*)gc_stack_top);
+            gc_scan_registers();
+        }
+        gc_drain();
+        if (t0) t3 = gc_now_ms();
+
+        // 4. 恢复存活对象的出边计数。
+        gc_phase = GC_PHASE_RESTORE;
+        for (size_t i = 0; i < gc_set_len; ++i) {
+            PyAdamasRc* h = gc_set[i];
+            if ((h->marked & PYADAMAS_RC_MARK) && h->release)
+                h->release((char*)h + PYADAMAS_RC_HDR);
+        }
+        if (t0) t4 = gc_now_ms();
     }
 
-    // 第一遍：只处理不可达对象指向可达对象的引用。此时所有头都还活着，
-    // 查表安全；不调用 dtor，避免释放顺序问题。
+    // 5. 清扫：先让垃圾对象把「指向集合外的边」交出来，再统一释放。
+    gc_phase = GC_PHASE_SWEEP;
     gc_sweeping = 1;
-    for (PyAdamasRc* h = heap_head; h; h = h->next) {
-        if (!h->marked && h->release)
+    for (size_t i = 0; i < gc_set_len; ++i) {
+        PyAdamasRc* h = gc_set[i];
+        if (!(h->marked & PYADAMAS_RC_MARK) && h->release)
             h->release((char*)h + PYADAMAS_RC_HDR);
     }
-    if (t0) t3 = gc_now_ms();
-
-    // 第二遍：释放不可达对象，清理可达对象的 mark 位。
-    int64_t live = 0;
-    PyAdamasRc* h = heap_head;
-    while (h) {
-        PyAdamasRc* next = h->next;
-        if (h->marked) {
-            live += h->size + PYADAMAS_RC_HDR;
-            h->marked = 0;
-        } else {
-            if (rc_stats_on) stat_gc_freed++;
-            rc_unlink(h);
-            if (h->kind == PYADAMAS_RC_OBJ)
-                free_attached_exception((char*)h + PYADAMAS_RC_HDR, h->size);
-            if (h->kind == PYADAMAS_RC_LIST) {
-                PyAdamasList* l = (PyAdamasList*)((char*)h + PYADAMAS_RC_HDR);
-                free(l->data);
-            } else if (h->kind == PYADAMAS_RC_DICT) {
-                PyAdamasDict* d = (PyAdamasDict*)((char*)h + PYADAMAS_RC_HDR);
-                free(d->entries);
-                free(d->order);
-                free(d->index);
-            }
-            free(h);
-        }
-        h = next;
+    int64_t freed = 0;
+    for (size_t i = 0; i < gc_set_len; ++i) {
+        PyAdamasRc* h = gc_set[i];
+        if (h->marked & PYADAMAS_RC_MARK) continue;
+        if (rc_stats_on) stat_gc_freed++;
+        freed++;
+        gc_free_body(h);
     }
-    stat_gc_live = live;
     gc_sweeping = 0;
-    if (t0) t4 = gc_now_ms();
+    gc_phase = GC_PHASE_NONE;
+    gc_mark_sweep = 0;
+    if (t0) t5 = gc_now_ms();
 
-    gc_table = NULL;
-    gc_table_cap = 0;
+    // 6. 晋升：本轮存活的新生代变成老生代。
+    for (size_t i = 0; i < gc_set_len; ++i) {
+        PyAdamasRc* h = gc_set[i];
+        if (!(h->marked & PYADAMAS_RC_MARK)) continue;
+        h->marked = 0;
+        old_bytes += h->size + PYADAMAS_RC_HDR;
+    }
+    // 7. 清扫期攒下的老对象引用，现在按正常 RC 释放（可能级联）。
+    for (size_t i = 0; i < gc_pend_len; ++i) pa_rc_dec(gc_pend[i]);
+    gc_pend_len = 0;
+    if (t0) t6 = gc_now_ms();
+
+    size_t n_set = gc_set_len;
+    gc_set = NULL;
+    gc_set_len = 0;
+    gc_tab = NULL;
+    gc_tab_cap = 0;
     gc_work = NULL;
     gc_work_len = 0;
+    stat_gc_live = old_bytes;
     alloc_since_gc = 0;
-    gc_next_threshold = live > (int64_t)PYADAMAS_GC_THRESHOLD ? live : PYADAMAS_GC_THRESHOLD;
+    if (major) {
+        alloc_since_major = 0;
+        // major 比 minor 稀疏：老生代翻倍（至少 8MB）才全扫一次，含环的
+        // 老对象最多多留一个 major 周期。
+        int64_t mt = old_bytes * 2;
+        if (mt < 4 * (int64_t)PYADAMAS_GC_THRESHOLD)
+            mt = 4 * (int64_t)PYADAMAS_GC_THRESHOLD;
+        major_threshold = mt;
+    }
     if (t0)
         fprintf(stderr,
-                "[gc] n=%zu live=%lld table=%.2f mark=%.2f release=%.2f sweep=%.2f ms\n",
-                n, (long long)live, t1 - t0, t2 - t1, t3 - t2, t4 - t3);
+                "[gc] %s n=%zu freed=%lld live=%lld tab=%.2f trial=%.2f mark=%.2f "
+                "restore=%.2f sweep=%.2f pend=%.2f ms\n",
+                major ? "major" : "minor", n_set, (long long)freed,
+                (long long)old_bytes, t1 - t0, t2 - t1, t3 - t2, t4 - t3, t5 - t4,
+                t6 - t5);
 }
+
+void pa_gc_collect(void) { gc_collect(1); }
 
 // 程序退出：所有还活着的堆对象（包括环）一次性还给系统。
 void pa_gc_shutdown(void) {
     gc_sweeping = 1;
-    while (heap_head) {
-        PyAdamasRc* h = heap_head;
-        rc_unlink(h);
-        if (h->kind == PYADAMAS_RC_OBJ)
-            free_attached_exception((char*)h + PYADAMAS_RC_HDR, h->size);
-        if (h->kind == PYADAMAS_RC_LIST) {
-            PyAdamasList* l = (PyAdamasList*)((char*)h + PYADAMAS_RC_HDR);
-            free(l->data);
-        } else if (h->kind == PYADAMAS_RC_DICT) {
-            PyAdamasDict* d = (PyAdamasDict*)((char*)h + PYADAMAS_RC_HDR);
-            free(d->entries);
-            free(d->order);
-            free(d->index);
-        }
-        free(h);
-    }
+    while (heap_head) gc_free_body(heap_head);
     gc_sweeping = 0;
     alloc_since_gc = 0;
+    alloc_since_major = 0;
+    old_bytes = 0;
+    young_len = 0;
+    free(young_buf);
+    young_buf = NULL;
+    young_cap = 0;
     free(gc_globals);
     gc_globals = NULL;
     gc_n_globals = 0;
     gc_globals_cap = 0;
-    free(gc_table_buf);
-    gc_table_buf = NULL;
-    gc_table_buf_cap = 0;
     free(gc_work_buf);
     gc_work_buf = NULL;
     gc_work_buf_cap = 0;
-    free(gc_cand);
-    gc_cand = NULL;
-    gc_cand_cap = 0;
-    gc_cand_len = 0;
+    free(gc_set_buf);
+    gc_set_buf = NULL;
+    gc_set_buf_cap = 0;
+    free(gc_tab_buf);
+    gc_tab_buf = NULL;
+    gc_tab_buf_cap = 0;
+    free(gc_pend);
+    gc_pend = NULL;
+    gc_pend_len = 0;
+    gc_pend_cap = 0;
 }
 
 /* 分模块编译：init 是模块顶层生成的 void(void)，ready 是模块 .bss 里的

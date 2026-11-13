@@ -60,7 +60,7 @@ PyAdamas 不追求兼容 CPython：语义是按静态类型的需要重新定的
 | `re` | `compile`/`search`/`match`/`fullmatch`/`findall`/`sub`/`split`/`escape`，Pattern/Match 方法，`I`/`M`/`S` 标志；回溯 VM | 完整 re | v2 支持反向引用、四向断言、原子组、占有量词、内联标志；`findall` 只有一个捕获组时返回组内容（多个时返回整段匹配），`split` 按序插入捕获组；仍不支持条件组与 Unicode 属性类；字符串按字节匹配 |
 | `bytes` | 字面量 / 索引 / 切片 / `+` / `in` / 比较 / `decode` / `encode`；相邻字面量可隐式拼接；`for c in b"..."` 产出 int，`list`/`tuple`/`sum`/`min`/`max`/`any`/`all`/`sorted`/`enumerate` 也接受 bytes；printf 风格 `%`（`d/i/u/x/X/o/f/F/e/E/g/G/s/r/c`、`%%`、标志/宽度/精度）；方法 `upper`/`lower`/`strip`/`lstrip`/`rstrip`/`replace`/`find`/`rfind`/`count`/`split`/`startswith`/`endswith`/`join` | 完整 bytes | `%` 不支持 `#` 前缀、映射 key 和把 list 当多参数元组；与 `str` 不能混拼；`bytes` 标注与跨模块签名现在保留类型 |
 | 方法调用 | 走 vtable，代价固定 | 走 `__dict__` / 描述符 | 没有去虚化，也不做内联 |
-| 内存回收 | 引用计数 + 保守标记-清扫 | 分代 GC | 环和 unknown 泄漏由 GC 延迟回收；栈/寄存器里的整数可能被误认为根，只影响回收时机；无 `__del__`/弱引用 |
+| 内存回收 | 引用计数 + 分代收集（minor trial-deletion / major 标记-清扫） | 分代 GC | 环和 unknown 泄漏由 GC 延迟回收；exact-RC 模式不扫栈，含 unknown 局部槽的程序仍保守扫栈，栈/寄存器里的整数可能被误认为根（只影响回收时机）；无 `__del__`/弱引用 |
 | 闭包捕获 | cell 按引用捕获；嵌套函数直接自引用用当前闭包 | cell 按引用捕获，晚绑定 | 父作用域之后重绑函数自己的名字时，PyAdamas 仍指向原闭包；相互递归闭包的环由 GC 回收 |
 | `lambda` | 脱糖成插在语句前的合成嵌套 `def` | 每次求值新建函数对象 | 调用/捕获语义一致；条件/循环里的 lambda 只创建一次，对象身份与创建时机略有差异 |
 | `nonlocal` | 必须显式声明；赋值解析到最近外层函数 | 同 Python | 没有 `nonlocal` 时赋值就是本地变量 |
@@ -95,7 +95,7 @@ PyAdamas 不追求兼容 CPython：语义是按静态类型的需要重新定的
 |---|---|---|---|
 | 正例 | `ctest --preset dev` 里 `tests/*.py` | 11 个文件 | 前端退回保守 |
 | 反例 | `ctest --preset dev` 里 `tests/fail/*.py` | 52 个文件 | 检查器为了过测而放水 |
-| 运行 | `ctest --preset dev` 里 `tests/run/*.py` | 149 个文件 | 后端烂掉没人知道 |
+| 运行 | `ctest --preset dev` 里 `tests/run/*.py` | 150 个文件 | 后端烂掉没人知道 |
 | 模块 | `ctest --preset dev` 里 `tests/modules/*/` | 12 个目录 | 分模块编译/链接、惰性初始化、缓存失效 |
 | 未建模 | `ctest --preset dev` 里 `tests/unsupported/*.py` | 1 个文件 | 「标了没建模、实际却悄悄编译过去」 |
 | 内存 | 16MB `RLIMIT_AS` 下跑压力程序 | 拼接 / 对象 / 闭包 / 容器 / 切片 / 删除 / 推导式 / 变长实参 / `with` / 装饰器 / 异常展开 / `yield from` / 异步推导式 / 环 / unknown 泄漏 | 引用计数或 GC 漏插桩、重复释放、误回收 |
