@@ -94,6 +94,7 @@ enum class RtFn : uint16_t {
     StrCharAt,   // (str*, i64) -> str*
     BytesAt,     // (bytes*, i64) -> i64
     StrFromI64,  // (i64) -> str*
+    StrAny,      // (i64 可能是堆字符串) -> str*  运行期查注册表分派
     StrFromF64,  // (f64) -> str*
     StrFromBool, // (i64) -> str*
     StrFromNone, // () -> str*
@@ -549,6 +550,7 @@ inline const char* rt_name(RtFn f) {
         case RtFn::StrCharAt: return "pa_str_char_at";
         case RtFn::BytesAt: return "pa_bytes_at";
         case RtFn::StrFromI64: return "pa_str_from_i64";
+        case RtFn::StrAny: return "pa_str_any";
         case RtFn::StrFromF64: return "pa_str_from_f64";
         case RtFn::StrFromBool: return "pa_str_from_bool";
         case RtFn::StrFromNone: return "pa_str_from_none";

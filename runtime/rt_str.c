@@ -78,6 +78,21 @@ PyAdamasStr* pa_str_from_i64(int64_t v) {
     return str_new(p, (int64_t)(end - p));
 }
 
+/* unknown 值的 str()：先按 RC 索引确认是不是堆字符串；是就原样返回
+   （补一份引用，调用方拿到的是新引用），否则按整数格式化。判定和
+   pa_print_any 一致——unknown 里分不开 int 和指针，只能查注册表。 */
+PyAdamasStr* pa_str_any(int64_t v) {
+    if (v > 4096) {
+        PyAdamasRc* h = (PyAdamasRc*)(uintptr_t)((uint64_t)v -
+                                                (uint64_t)PYADAMAS_RC_HDR);
+        if (rc_index_has(h) && h->kind == PYADAMAS_RC_STR) {
+            pa_rc_inc((void*)(uintptr_t)v);
+            return (PyAdamasStr*)(uintptr_t)v;
+        }
+    }
+    return pa_str_from_i64(v);
+}
+
 PyAdamasStr* pa_str_from_f64(double v) {
     char buf[64];
     format_double(buf, sizeof buf, v);

@@ -637,6 +637,7 @@ longjmp 回同步调用点。GC 清扫和进程退出不跑析构器，但会单
 | `pa_str_char_at` | `(str*, i64) -> str*` | 负索引先加 `len`；越界抛 IndexError；返回驻留的单字节串（不分配） |
 | `pa_char_str` | `(i64) -> str*` | 取 256 个静态驻留单字节串之一（按低 8 位） |
 | `pa_str_from_i64` | `(i64) -> str*` | 手写十进制，不经过 `snprintf` |
+| `pa_str_any` | `(i64) -> str*` | unknown 值：堆字符串原样返回并补引用，否则按整数格式化 |
 | `pa_str_from_f64` | `(double) -> str*` | CPython `repr` 规则，见下 |
 | `pa_str_from_bool` | `(i64) -> str*` | 静态驻留的 `"True"` / `"False"` |
 | `pa_str_from_none` | `() -> str*` | 静态驻留的 `"None"` |

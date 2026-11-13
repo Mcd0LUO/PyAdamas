@@ -1112,6 +1112,13 @@ VReg Lowerer::lower_builtin_call(const std::string& name, Call& c) {
             push_temp(s);
             return s;
         }
+        // unknown 值的 str()：运行期先查注册表看是不是堆字符串，是就原样
+        // 返回，否则按整数格式化（和 print 对 unknown 的输出一致）。
+        if (to->kind == TyKind::Str && (!from || from->kind == TyKind::Unknown)) {
+            VReg s = call_runtime(RtFn::StrAny, t_str(), {v});
+            push_temp(s);
+            return s;
+        }
         return convert_to(v, from, to);
     }
 

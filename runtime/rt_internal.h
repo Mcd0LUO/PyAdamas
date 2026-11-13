@@ -441,6 +441,8 @@ PyAdamasStr* pa_str_concat(PyAdamasStr* a, PyAdamasStr* b);
 PyAdamasStr* pa_repr_tuple(PyAdamasList* t, int64_t kind);
 PyAdamasStr* pa_str_char_at(PyAdamasStr* s, int64_t i);
 PyAdamasStr* pa_str_from_i64(int64_t v);
+/* unknown 值：堆字符串原样返回并补引用，其余按整数格式化。 */
+PyAdamasStr* pa_str_any(int64_t v);
 PyAdamasStr* pa_str_from_f64(double v);
 PyAdamasStr* pa_str_from_bool(int64_t v);
 PyAdamasStr* pa_str_from_none(void);

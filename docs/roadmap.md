@@ -76,15 +76,16 @@
 | 0.148 | 裸 list / 空字面量的元素种类延迟定型（kind 3），修复裸 list `pop` 的 use-after-free |
 | 0.149 | 分代循环收集：minor 用 trial-deletion、major 用标记-清扫；修复 RC 索引墓碑哨兵误命中 |
 | 0.150 | GC 保守根收窄：帧记录扩展成影子根表，不再扫描整段真实栈 |
+| 0.151 | 修复 `str(unknown)` 的运行期分派（堆字符串不再被格式化成地址数字） |
 | 许可证 | Apache-2.0（见 [LICENSE](../LICENSE) / [NOTICE](../NOTICE)） |
 
-## 当前状态（0.150）
+## 当前状态（0.151）
 
 流水线 `源码 → 词法 → AST → lambda 脱糖 → 类型检查 → IR → x86-64 汇编 → 可执行文件` 已打通。
 
 - **语言面**：标量、字符串、`bytes`（含迭代与 `%` 格式化）、列表/元组/字典/集合、切片读写、闭包/lambda/`*args`/`**kwargs`/装饰器、推导式、`with`、异常值（`args`/`raise ... from`/自定义异常）、类（字段/方法/C3 多继承/零参 `super()`/`@staticmethod`/`@classmethod`/`@property`/类属性/类装饰器/类名当值）、`match/case`、`del`、复数字面量、f-string 格式说明、dunder 协议（含装饰 dunder、`__call__` 与方法值）、`Generator[Y, S, R]` 标注、`open`/`input`/`sys.stdin`、`struct` 值类型、`cimport`/`cdecl` C 互操作与跨模块继承。
 - **标准库**：`math`/`sys`/`asyncio`/`random`/`os`/`os.path`/`subprocess`/`time`/`itertools`/`collections`/`functools`/`json`/`string`/`re`/`datetime`/`pathlib`/`csv`/`base64`/`binascii`/`heapq`/`bisect`/`hashlib`/`hmac`/`logging`/`statistics`/`textwrap`/`operator`，以及封装 OpenBLAS 的 `linalg`。
-- **验证**：150 个运行用例、52 个反例、12 个模块目录；差分 runner 已自举，默认 840 例；`tests/bench/` 提供 pyadamas vs CPython 的标准库与 RC/GC 基准（`base64`/`hashlib` 已反超）。
+- **验证**：151 个运行用例、52 个反例、12 个模块目录；差分 runner 已自举，默认 840 例；`tests/bench/` 提供 pyadamas vs CPython 的标准库与 RC/GC 基准（`base64`/`hashlib` 已反超）。
 - **主要缺口**：asyncio 边角；调试信息与 traceback；依赖动态属性的 stdlib（如 `argparse`，见「技术债」）。
 
 ## 下一步

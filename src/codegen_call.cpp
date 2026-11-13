@@ -1142,6 +1142,7 @@ void AsmGen::gen_call_rt(const Inst& in) {
             case RtFn::RegexPatternStr:
             case RtFn::RegexEscape:
             case RtFn::StrFromI64:
+            case RtFn::StrAny:
             case RtFn::StrFromBool:
             case RtFn::PrintI64:
             case RtFn::PrintAny:
