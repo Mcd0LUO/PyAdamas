@@ -40,6 +40,12 @@ inline const char* const kFpSlotRegs[] = {"%xmm8",  "%xmm9",  "%xmm10", "%xmm11"
                                           "%xmm12", "%xmm13", "%xmm14", "%xmm15"};
 constexpr int kMaxFpSlotRegs = 8;
 
+// 块内浮点临时寄存器。xmm0/xmm1 被各指令生成器当固定 scratch，
+// xmm2 被浮点取模用来装除数，所以从 xmm3 开始。只在「整块没有
+// 调用类指令」时借用，块结束即归还。
+inline const char* const kFpTempRegs[] = {"%xmm3", "%xmm4", "%xmm5", "%xmm6", "%xmm7"};
+constexpr int kMaxFpTempRegs = 5;
+
 // 一条指令里临时用的寄存器。和 kSlotRegs 不相交，指令生成中途可以
 // 随便写，不会踩到变量。
 
@@ -413,6 +419,9 @@ private:
     // 比较结果只用来做分支时，直接发条件跳转：`setl` + `movzbq` +
     // 一次内存往返 + `cmpq $0` 全部省掉。循环条件走的就是这条路。
     void gen_cmp_branch(const Inst& in, const Inst& br);
+
+    // 浮点比较 + 分支：ucomisd 直接吃标志位，NaN 走 jp 排除。
+    void gen_cmp_branch_fp(const Inst& in, const Inst& br);
 
         void gen_block(const Block& b);
 

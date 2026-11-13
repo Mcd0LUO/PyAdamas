@@ -207,11 +207,17 @@ void optimize_ir(IRModule& m, int opt_level) {
     // 内联/直接化后的 CFG 再做循环不变量外提。
     for (auto& fptr : m.funcs) licm_function(*fptr, m.globals.size());
 
+    // 短路布尔值经临时槽往返的形态：转发 + 分支线程化，让 cmp+branch 融合。
+    for (auto& fptr : m.funcs) forward_slot_loads(*fptr);
+
     // 循环内不变量的检查型下标：入口检一次边界，通过则走无检查的循环副本。
     for (auto& fptr : m.funcs) version_bounds_function(*fptr);
 
     // 最后做循环旋转：体块回边改走条件 latch，消掉每轮的无条件跳转。
     for (auto& fptr : m.funcs) rotate_loops_function(*fptr);
+
+    // 旋转后 CFG 变了，再跑一次槽位转发，收掉新的 load+branch 形态。
+    for (auto& fptr : m.funcs) forward_slot_loads(*fptr);
 
     // 内联带进来的实参常量继续折；顺带清掉失效的 load.global / func.addr。
     fold_all();

@@ -358,8 +358,12 @@ bool AsmGen::temp_reg_op_ok(const Inst& in) const {
                     case BinKind::Shl:
                     case BinKind::Shr:
                         return true;
+                    case BinKind::Div:
+                        // 浮点除法只用 xmm0，不碰 %r8–%r11；整数除法要
+                        // %rax/%rdx，块内临时寄存器方案不适用。
+                        return in.ty && in.ty->kind == TyKind::Float;
                     default:
-                        return false;  // div/mod/floordiv/pow 用 %r8 或调运行时
+                        return false;  // mod/floordiv/pow 用 %r8 或调运行时
                 }
             }
             case IrOp::Convert: {
@@ -445,6 +449,42 @@ void AsmGen::assign_block_temp_regs() {
                 free.pop_back();
                 vreg_reg_[r.v] = reg;
                 active.push({r.end, std::move(reg)});
+            }
+
+            // 浮点临时值单独用 xmm3–7：和整型池互不影响。只收块内产生、
+            // 块内用完且确定是 float 的纯计算值；LoadSlot 有自己的别名
+            // 机制，调用类指令所在块根本进不到这里。
+            std::vector<Range> fp_ranges;
+            for (const auto& [v, d] : def_pos) {
+                if (v >= static_cast<VReg>(f_->vreg_ty.size())) continue;
+                if (cross_block_[v]) continue;
+                auto lu = last_use.find(v);
+                if (lu == last_use.end()) continue;
+                TypePtr vt = f_->vreg_ty[v];
+                if (!vt || vt->kind != TyKind::Float) continue;
+                IrOp op = def_op[v];
+                if (op != IrOp::Bin && op != IrOp::Un && op != IrOp::Convert &&
+                    op != IrOp::ConstFloat && op != IrOp::Mov)
+                    continue;
+                fp_ranges.push_back(Range{d, lu->second, v});
+            }
+            std::ranges::sort(fp_ranges, [](const Range& x, const Range& y) {
+                return x.start != y.start ? x.start < y.start : x.end < y.end;
+            });
+            std::priority_queue<std::pair<int, std::string>, std::vector<std::pair<int, std::string>>,
+                                std::greater<>>
+                fp_active;
+            std::vector<std::string> fp_free(kFpTempRegs, kFpTempRegs + kMaxFpTempRegs);
+            for (const auto& r : fp_ranges) {
+                while (!fp_active.empty() && fp_active.top().first < r.start) {
+                    fp_free.push_back(fp_active.top().second);
+                    fp_active.pop();
+                }
+                if (fp_free.empty()) continue;
+                std::string reg = std::move(fp_free.back());
+                fp_free.pop_back();
+                vreg_reg_[r.v] = reg;
+                fp_active.push({r.end, std::move(reg)});
             }
         }
     }
@@ -544,8 +584,7 @@ void AsmGen::assign_block_temp_regs() {
                     });
                     size_t used_fp = 0;
                     for (const auto& cd : fcands) {
-                        if (used_fp >= 2 || fp_base + used_fp >= static_cast<size_t>(kMaxFpSlotRegs))
-                            break;
+                        if (fp_base + used_fp >= static_cast<size_t>(kMaxFpSlotRegs)) break;
                         vreg_reg_[static_cast<size_t>(cd.v)] =
                             kFpSlotRegs[fp_base + used_fp];
                         ++used_fp;

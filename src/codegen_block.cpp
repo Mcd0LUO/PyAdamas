@@ -297,10 +297,9 @@ bool AsmGen::can_fuse_branch(const Inst& in, const Inst& nx) const {
         if (in.op != IrOp::Cmp || nx.op != IrOp::Branch) return false;
         if (in.dst == kNoReg || nx.a != in.dst) return false;
         if (!single_use_in_block(in.dst)) return false;
-        // 浮点要走 setnp 处理 NaN，字符串走三路比较，都直接吃掉标志位，
-        // 没有能直接用的条件跳转。
+        // 字符串走三路比较，没有能直接用的条件跳转；浮点交给
+        // gen_cmp_branch_fp 用 ucomisd + jp 处理 NaN。
         TypePtr t = ty_of(in.a);
-        if (ir_is_float(t)) return false;
         if (t && t->kind == TyKind::Str) return false;
         return true;
     }
@@ -308,6 +307,10 @@ bool AsmGen::can_fuse_branch(const Inst& in, const Inst& nx) const {
 // 比较结果只用来做分支时，直接发条件跳转：`setl` + `movzbq` +
     // 一次内存往返 + `cmpq $0` 全部省掉。循环条件走的就是这条路。
 void AsmGen::gen_cmp_branch(const Inst& in, const Inst& br) {
+        if (ir_is_float(ty_of(in.a))) {
+            gen_cmp_branch_fp(in, br);
+            return;
+        }
         comment(std::format("{} -> {}", in.text(), br.text()));
         std::string sa = src_op(in.a);
         std::string sb = src_op(in.b);
@@ -338,6 +341,43 @@ void AsmGen::gen_cmp_branch(const Inst& in, const Inst& br) {
         } else if (opt_ >= 2 && br.target2 == cur_block_ + 1) {
             line(std::format("{} {}", jcc, block_label(br.target)));
         } else {
+            line(std::format("{} {}", jcc, block_label(br.target)));
+            emit_jmp("jmp", block_label(br.target2));
+        }
+    }
+
+void AsmGen::gen_cmp_branch_fp(const Inst& in, const Inst& br) {
+        comment(std::format("{} -> {}", in.text(), br.text()));
+        std::string sa = src_op(in.a);
+        std::string sb = src_op(in.b);
+        // ucomisd 的第二个操作数是 xmm；a 不在 xmm 里就先搬进 %xmm0。
+        if (sa.starts_with("%xmm")) {
+            emit2("ucomisd", sb, sa);
+        } else {
+            emit2("movsd", sa, "%xmm0");
+            emit2("ucomisd", sb, "%xmm0");
+        }
+        const char* jcc = "je";
+        const char* inv = "jne";
+        bool ordered = true;  // 无序（NaN）时 Python 的比较结果为假
+        switch (in.cop) {
+            case CmpKind::Lt: jcc = "jb"; inv = "jae"; break;
+            case CmpKind::Le: jcc = "jbe"; inv = "ja"; break;
+            case CmpKind::Gt: jcc = "ja"; inv = "jbe"; break;
+            case CmpKind::Ge: jcc = "jae"; inv = "jb"; break;
+            case CmpKind::Eq: jcc = "je"; inv = "jne"; break;
+            case CmpKind::Ne: jcc = "jne"; inv = "je"; ordered = false; break;
+        }
+        // NaN 时 PF=1：除 != 外都要先跳到假分支。之后的落点选择与整型
+        // 版本一致，利用「目标块就是下一块」省掉无条件跳。
+        if (opt_ >= 2 && br.target == cur_block_ + 1) {
+            if (ordered) emit_jmp("jp", block_label(br.target2));
+            line(std::format("{} {}", inv, block_label(br.target2)));
+        } else if (opt_ >= 2 && br.target2 == cur_block_ + 1) {
+            if (ordered) emit_jmp("jp", block_label(br.target2));
+            line(std::format("{} {}", jcc, block_label(br.target)));
+        } else {
+            if (ordered) emit_jmp("jp", block_label(br.target2));
             line(std::format("{} {}", jcc, block_label(br.target)));
             emit_jmp("jmp", block_label(br.target2));
         }
