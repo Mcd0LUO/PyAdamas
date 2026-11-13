@@ -513,6 +513,26 @@ private:
         void gen_setjmp(const Inst& in);
 
         void gen_call_rt(const Inst& in);
+
+        // 运行期调用的实参装填：按实参形态分组，实现在 codegen_call_rt.cpp。
+        void gen_rt_args(const Inst& in, RtFn fn);
+        void gen_rt_none(const Inst& in);
+        void gen_rt_i1(const Inst& in);
+        void gen_rt_i2(const Inst& in);
+        void gen_rt_i3(const Inst& in);
+        void gen_rt_i4(const Inst& in);
+        void gen_rt_i5(const Inst& in);
+        void gen_rt_i6(const Inst& in);
+        void gen_rt_f1(const Inst& in);
+        void gen_rt_f2(const Inst& in);
+        void gen_rt_f3(const Inst& in);
+        void gen_rt_i1f1(const Inst& in);
+        void gen_rt_i1f2(const Inst& in);
+        void gen_rt_i1f3(const Inst& in);
+        void gen_rt_f1i1(const Inst& in);
+        void gen_rt_i4opt5(const Inst& in);
+        void gen_rt_reduce_f(const Inst& in);
+        void gen_rt_subprocess_run(const Inst& in);
 };
 
 }  // namespace pyadamas
