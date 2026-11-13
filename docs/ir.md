@@ -29,7 +29,8 @@ Python 语义里变量天生可变，循环里反复赋值是常态。一上来�
 | `IRFunction` | 名字、形参、返回类型、`slot_ty`（局部槽类型）、`vreg_ty`（每个 vreg 的类型）、基本块、`env_slot`（有捕获时存闭包指针的槽） |
 | `IRGlobal` | 一个全局变量；数据段里就是一个 `.quad`，初值 0 同时也是 `None` |
 | `IRClass` | 名字、vtable（槽 → 函数下标）、`vtable_ext`（来自导入基类的槽 → 导出方法符号）、字段数（含继承）、`field_heap`（每个字段是否堆类型，供析构器使用）、`qualname`（模块限定类名）、`mro`（C3 顺序；>=0 本地类下标，<0 表示 ext_bases 下标取反）、`ext_bases`（导入祖先的 vtable/own_slots 符号与限定名）、`own_slots`（本类声明的全部槽，含别名） |
-| `IRModule` | 函数表、全局表、字符串池、类表、`entry`（顶层代码编译成的函数下标） |
+| `IRExtern` / `IRExternVar` | `cimport` 的 C 函数/全局变量：符号、`CKind` 形参与返回、结构体 ABI、回调签名下标、可变参数标记；同一符号可按调用点以不同 `CKind` 编组 |
+| `IRModule` | 函数表、全局表、字符串池、类表、C 互操作表（`externs` / `extern_vars` / `cb_sigs`）、`entry`（顶层代码编译成的函数下标） |
 
 `Inst` 里有个容易踩的点：**`idx` 的含义随 `op` 变**——`const.str` 是字符串池下标，`load.slot` 是槽号，`load.global` 是全局号，`func.addr` 是函数号。类型上看不出区别，读指令时要先看 `op`。
 
@@ -76,6 +77,9 @@ Python 语义里变量天生可变，循环里反复赋值是常态。一上来�
 | `call.ptr dst, a, args...` | `a: 裸代码地址` | 间接调用 `a(args...)`（类对象 vtable 分派） | `call *%r11`，`%r10` 清零 |
 | `call dst, a, args...` | `a: 函数值` | 间接调用 | `call *%r11` |
 | `call.rt args..., imm` | `imm: RtFn` | 调运行时函数 | `call pa_xxx` |
+| `call.extern args..., imm` | `imm: externs 下标`；实参按 `cargs` 的 `CKind` 编组 | 调 `cimport` 声明的 C 函数；`ptr[T]` 接缓冲区时取 `data` | 按 SysV C ABI 编组（含结构体分类、回调跳板、变参 `%al`） |
+| `load.extern dst, imm` | `imm: extern_vars 下标` | 读 C 全局变量，按声明宽度 | `movq` / `movl` / `movzbq` 取符号 |
+| `store.extern imm, a` | 同上 | 写 C 全局变量，按声明宽度 | 按宽度写回符号 |
 | `setjmp dst, a` | `a: handler 记录` | `dst = setjmp(a)`；异常 longjmp 回来时为非 0 | `call setjmp` |
 | `import.module imm` | `imm: imports 下标` | 确保模块已初始化 | `pa_import_module(ready, init)` |
 | `slot.addr dst, idx` | `idx: 槽号` | `dst = &slot`（栈槽或生成器帧槽） | `leaq off(%rbp/%r15)` |

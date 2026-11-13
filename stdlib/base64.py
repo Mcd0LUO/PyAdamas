@@ -12,17 +12,6 @@ _URL = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_"
 _B32 = "ABCDEFGHIJKLMNOPQRSTUVWXYZ234567"
 _HEX = "0123456789abcdef"
 
-_lookup: list[int] = []
-_i = 0
-while _i < 256:
-    _lookup.append(-1)
-    _i += 1
-_i = 0
-while _i < 64:
-    _lookup[ord(_B64[_i])] = _i
-    _lookup[ord(_URL[_i])] = _i
-    _i += 1
-
 _b32_lookup: list[int] = []
 _i = 0
 while _i < 256:
@@ -49,73 +38,28 @@ while _i < 6:
     _i += 1
 
 
-def _encode(data: bytes, alphabet: str) -> bytes:
-    out: list[int] = []
-    n = len(data)
-    i = 0
-    while i + 2 < n:
-        a = data[i]
-        b = data[i + 1]
-        c = data[i + 2]
-        out.append(ord(alphabet[(a >> 2) & 63]))
-        out.append(ord(alphabet[((a & 3) << 4) | (b >> 4)]))
-        out.append(ord(alphabet[((b & 15) << 2) | (c >> 6)]))
-        out.append(ord(alphabet[c & 63]))
-        i += 3
-    left = n - i
-    if left == 1:
-        a = data[i]
-        out.append(ord(alphabet[(a >> 2) & 63]))
-        out.append(ord(alphabet[(a & 3) << 4]))
-        out.append(61)
-        out.append(61)
-    elif left == 2:
-        a = data[i]
-        b = data[i + 1]
-        out.append(ord(alphabet[(a >> 2) & 63]))
-        out.append(ord(alphabet[((a & 3) << 4) | (b >> 4)]))
-        out.append(ord(alphabet[(b & 15) << 2]))
-        out.append(61)
-    return bytes(out)
-
-
-def _decode(data: bytes) -> bytes:
-    out: list[int] = []
-    acc = 0
-    bits = 0
-    for ch in data:
-        if ch == 61:  # '='
-            continue
-        v = _lookup[ch]
-        if v < 0:
-            raise ValueError("invalid base64 character")
-        acc = (acc << 6) | v
-        bits += 6
-        if bits >= 8:
-            bits -= 8
-            out.append((acc >> bits) & 255)
-            acc = acc & ((1 << bits) - 1)
-    return bytes(out)
+# b64 编解码走 C intrinsic（__pa_b64encode / __pa_b64decode），
+# 纯 PyAdamas 的逐字节版本比 CPython 慢，这里只保留公开入口。
 
 
 def b64encode(data: bytes) -> bytes:
-    return _encode(data, _B64)
+    return __pa_b64encode(data, 0)
 
 
 def urlsafe_b64encode(data: bytes) -> bytes:
-    return _encode(data, _URL)
+    return __pa_b64encode(data, 1)
 
 
 def b64decode(data: bytes) -> bytes:
-    return _decode(data)
+    return __pa_b64decode(data)
 
 
 def standard_b64encode(data: bytes) -> bytes:
-    return _encode(data, _B64)
+    return __pa_b64encode(data, 0)
 
 
 def standard_b64decode(data: bytes) -> bytes:
-    return _decode(data)
+    return __pa_b64decode(data)
 
 
 def b16encode(data: bytes) -> bytes:
@@ -201,4 +145,4 @@ def decodebytes(data: bytes) -> bytes:
 
 
 def urlsafe_b64decode(data: bytes) -> bytes:
-    return _decode(data)
+    return __pa_b64decode(data)

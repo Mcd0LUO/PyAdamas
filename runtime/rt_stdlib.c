@@ -192,6 +192,107 @@ PyAdamasList* pa_itertools_accumulate(PyAdamasList* xs, int64_t is_float) {
     return out;
 }
 
+/* str * n / list * n：一次分配、批量拷贝（CPython 的重复语义）。 */
+PyAdamasStr* pa_str_repeat(PyAdamasStr* s, int64_t n) {
+    int64_t len = s ? s->len : 0;
+    if (n < 0) n = 0;
+    if (len == 0 || n == 0) return str_new("", 0);
+    if (len > INT64_MAX / n) panic_c("string repeat: result too large");
+    PyAdamasStr* out = str_alloc(len * n);
+    char* d = (char*)out->data;
+    for (int64_t i = 0; i < n; ++i) memcpy(d + i * len, s->data, (size_t)len);
+    return out;
+}
+
+PyAdamasList* pa_list_repeat(PyAdamasList* l, int64_t n) {
+    int64_t len = l ? l->len : 0;
+    int kind = l ? (int)l->elem_kind : 0;
+    if (n < 0) n = 0;
+    if (len == 0 || n == 0) return pa_list_new(0, kind);
+    if (len > INT64_MAX / n) panic_c("list repeat: result too large");
+    int64_t total = len * n;
+    PyAdamasList* out = pa_list_new(total > (1 << 20) ? 0 : total, kind);
+    for (int64_t rep = 0; rep < n; ++rep) {
+        for (int64_t i = 0; i < len; ++i) {
+            int64_t v = l->data[i];
+            pa_own_inc(kind, v);
+            pa_list_append(out, v);
+        }
+    }
+    return out;
+}
+
+/* base64：stdlib/base64.py 的 b64 编解码走 C intrinsic。 */
+static int b64val(unsigned char c) {
+    if (c >= 'A' && c <= 'Z') return c - 'A';
+    if (c >= 'a' && c <= 'z') return c - 'a' + 26;
+    if (c >= '0' && c <= '9') return c - '0' + 52;
+    if (c == '+' || c == '-') return 62;
+    if (c == '/' || c == '_') return 63;
+    return -1;
+}
+
+PyAdamasStr* pa_b64encode(PyAdamasStr* data, int64_t urlsafe) {
+    static const char kStd[] =
+        "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    static const char kUrl[] =
+        "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
+    const char* tab = urlsafe ? kUrl : kStd;
+    int64_t n = data ? data->len : 0;
+    const unsigned char* p = (const unsigned char*)(data && data->data ? data->data : "");
+    int64_t rem = n % 3;
+    PyAdamasStr* out = str_alloc((n / 3) * 4 + (rem ? 4 : 0));
+    char* d = (char*)out->data;
+    int64_t i = 0, oi = 0;
+    while (i + 2 < n) {
+        uint32_t v = ((uint32_t)p[i] << 16) | ((uint32_t)p[i + 1] << 8) | p[i + 2];
+        d[oi++] = tab[(v >> 18) & 63];
+        d[oi++] = tab[(v >> 12) & 63];
+        d[oi++] = tab[(v >> 6) & 63];
+        d[oi++] = tab[v & 63];
+        i += 3;
+    }
+    if (rem == 1) {
+        uint32_t v = (uint32_t)p[i] << 16;
+        d[oi++] = tab[(v >> 18) & 63];
+        d[oi++] = tab[(v >> 12) & 63];
+        d[oi++] = '=';
+        d[oi++] = '=';
+    } else if (rem == 2) {
+        uint32_t v = ((uint32_t)p[i] << 16) | ((uint32_t)p[i + 1] << 8);
+        d[oi++] = tab[(v >> 18) & 63];
+        d[oi++] = tab[(v >> 12) & 63];
+        d[oi++] = tab[(v >> 6) & 63];
+        d[oi++] = '=';
+    }
+    return out;
+}
+
+PyAdamasStr* pa_b64decode(PyAdamasStr* data) {
+    int64_t n = data ? data->len : 0;
+    const unsigned char* p = (const unsigned char*)(data && data->data ? data->data : "");
+    PyAdamasStr* out = str_alloc((n / 4 + 1) * 3);
+    char* d = (char*)out->data;
+    int64_t oi = 0;
+    uint32_t acc = 0;
+    int bits = 0;
+    for (int64_t i = 0; i < n; ++i) {
+        unsigned char c = p[i];
+        if (c == '=') continue;
+        int v = b64val(c);
+        if (v < 0) pa_raise_c("ValueError", "invalid base64 character");
+        acc = (acc << 6) | (uint32_t)v;
+        bits += 6;
+        if (bits >= 8) {
+            bits -= 8;
+            d[oi++] = (char)((acc >> bits) & 255);
+            acc &= (1u << bits) - 1;
+        }
+    }
+    out->len = oi;
+    return out;
+}
+
 PyAdamasDict* pa_collections_counter(PyAdamasList* src, int64_t key_kind, int64_t key_own) {
     if (src->elem_kind > key_own) key_own = src->elem_kind;
     PyAdamasDict* d = pa_dict_new(key_kind, key_own, 0, -1, -1);

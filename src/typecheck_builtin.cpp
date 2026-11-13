@@ -196,6 +196,34 @@ TypePtr TypeChecker::builtin_call(const std::string& n, Call& c) {
                     std::format("capwords() expects a string, got '{}'", type_name(a[0])));
             return t_str();
         }
+        if (n == "__pa_sha256") {
+            if (!need(1, 1)) return t_bytes();
+            if (a[0] && a[0]->kind != TyKind::Bytes && a[0]->kind != TyKind::Unknown)
+                err(c.args[0]->line, c.args[0]->col,
+                    std::format("sha256() expects bytes, got '{}'", type_name(a[0])));
+            return t_bytes();
+        }
+        if (n == "__pa_sha256_hex") {
+            if (!need(1, 1)) return t_str();
+            if (a[0] && a[0]->kind != TyKind::Bytes && a[0]->kind != TyKind::Unknown)
+                err(c.args[0]->line, c.args[0]->col,
+                    std::format("sha256() expects bytes, got '{}'", type_name(a[0])));
+            return t_str();
+        }
+        if (n == "__pa_b64encode") {
+            if (!need(2, 2)) return t_bytes();
+            if (a[0] && a[0]->kind != TyKind::Bytes && a[0]->kind != TyKind::Unknown)
+                err(c.args[0]->line, c.args[0]->col,
+                    std::format("b64encode() expects bytes, got '{}'", type_name(a[0])));
+            return t_bytes();
+        }
+        if (n == "__pa_b64decode") {
+            if (!need(1, 1)) return t_bytes();
+            if (a[0] && a[0]->kind != TyKind::Bytes && a[0]->kind != TyKind::Unknown)
+                err(c.args[0]->line, c.args[0]->col,
+                    std::format("b64decode() expects bytes, got '{}'", type_name(a[0])));
+            return t_bytes();
+        }
         if (n == "repr") return t_str();
         if (n == "hex" || n == "bin" || n == "oct") return t_str();
         if (n == "isinstance") {

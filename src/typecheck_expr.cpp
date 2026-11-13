@@ -807,6 +807,17 @@ TypePtr TypeChecker::binop_type(Tok op, TypePtr l, TypePtr r, int line, int col)
                             type_name(l), type_name(r)));
             return t_unknown();
         };
+        // 元组重复的结果长度运行期才知道，静态类型记成变长；异构元素按 unknown。
+        auto tuple_rest_of = [](const TypePtr& t) {
+            TypePtr et = t->sub.empty() ? t_unknown() : t->sub[0];
+            for (size_t i = 1; i < t->sub.size(); ++i) {
+                if (!type_eq(et, t->sub[i])) {
+                    et = t_unknown();
+                    break;
+                }
+            }
+            return mk_tuple_rest(et);
+        };
 
         // datetime / timedelta 的算术：只有下面这几种组合有定义。
         if (l->kind == TyKind::DateTime || r->kind == TyKind::DateTime ||
@@ -883,7 +894,10 @@ TypePtr TypeChecker::binop_type(Tok op, TypePtr l, TypePtr r, int line, int col)
                 if (l->kind == TyKind::Int && r->kind == TyKind::Str) return t_str();
                 if (l->kind == TyKind::List && r->kind == TyKind::Int) return l;
                 if (l->kind == TyKind::Int && r->kind == TyKind::List) return r;
-                if (l->kind == TyKind::Tuple && r->kind == TyKind::Int) return l;
+                if (l->kind == TyKind::Tuple && r->kind == TyKind::Int)
+                    return tuple_rest_of(l);
+                if (l->kind == TyKind::Int && r->kind == TyKind::Tuple)
+                    return tuple_rest_of(r);
                 return bad();
             case Tok::SLASH:
                 if (is_num(l) && is_num(r)) return t_float();

@@ -197,6 +197,12 @@ enum class RtFn : uint16_t {
     ListDelIndex, // (list*, i64 index) -> void  del list[i]
     StrToList,    // (str*) -> list*
     StrCapwords,  // (str*) -> str*  单遍 capwords
+    StrRepeat,    // (str*, i64 n) -> str*
+    ListRepeat,   // (list*, i64 n) -> list*
+    Sha256Digest, // (bytes*) -> bytes*  32 字节摘要
+    Sha256Hex,    // (bytes*) -> str*    64 字符十六进制
+    B64Encode,    // (bytes*, i64 urlsafe) -> bytes*
+    B64Decode,    // (bytes*) -> bytes*
     BytesToList,  // (bytes*) -> list[int]（for c in b"..."）
     BytesFromList, // (list*) -> bytes*  bytes([...])
     BytesZeros,   // (i64) -> bytes*     bytes(n)
@@ -644,6 +650,12 @@ inline const char* rt_name(RtFn f) {
         case RtFn::ListDelIndex: return "pa_list_del_index";
         case RtFn::StrToList: return "pa_str_to_list";
         case RtFn::StrCapwords: return "pa_str_capwords";
+        case RtFn::StrRepeat: return "pa_str_repeat";
+        case RtFn::ListRepeat: return "pa_list_repeat";
+        case RtFn::Sha256Digest: return "pa_sha256_digest";
+        case RtFn::Sha256Hex: return "pa_sha256_hex";
+        case RtFn::B64Encode: return "pa_b64encode";
+        case RtFn::B64Decode: return "pa_b64decode";
         case RtFn::BytesToList: return "pa_bytes_to_list";
         case RtFn::BytesFromList: return "pa_bytes_from_list";
         case RtFn::BytesZeros: return "pa_bytes_zeros";

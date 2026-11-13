@@ -60,7 +60,7 @@ rm -rf build/dev                   # 连 CMake 中间产物一起清
 | `tests/run/*.py` | 必须编译运行成功，输出与末尾 `# --- expect ---` 逐行一致 | `NN_主题.py` |
 | `tests/unsupported/*.py` | `check -v` 必须打标记，`build` 必须拒绝 | `主题.py` |
 
-当前规模：正例 11 / 反例 37 / 运行 91 / 未建模 1 / 模块 9。
+当前规模：正例 11 / 反例 52 / 运行 147 / 未建模 1 / 模块 12。
 
 跑单个文件：
 
@@ -106,7 +106,8 @@ python3 tests/diff/run_diff.py --only repr  # 只测浮点转字符串
 ### 性能 bench
 
 `bench/` 下是逐个内置函数的性能对比：同一份源码分别喂给 PyAdamas（编译成原生
-二进制）和 CPython 3.13，比墙钟时间。
+二进制）和 CPython 3.13，比墙钟时间。标准库层面的对比在 `tests/bench/`
+（`python3 tests/bench/run_bench.py`），两套基准口径不同、互不替代。
 
 ```bash
 cd /w && python3 bench/run_bench.py                   # 全量
@@ -144,12 +145,15 @@ cd /w && python3 bench/run_bench.py --md /w/bench/RESULTS.md --json /w/bench/rep
 覆盖推导式；`tests/run/20_with.py` 覆盖 `with` 的提前退出；`tests/run/21_decorator.py`
 覆盖装饰器；`tests/run/22_exception.py` 覆盖异常层级、bare raise、
 finally 的提前退出、with 异常路径和运行时错误转换；`tests/run/23_generator.py`
-~ `tests/run/56_re.py` 覆盖生成器、协程、Task、异步语言面、
+~ `tests/run/148_repeat.py` 覆盖生成器、协程、Task、异步语言面、
 Future/取消/fd/回调、`yield from`、异步推导式、异步生成器协议、
 异常值、内置函数、f-string、del/print(*args)/复数、match 与多继承；
 `53_json.py` / `54_stdlib.py` / `55_slot_types.py` / `56_re.py` 覆盖 json、
 string/time/os/itertools/collections、call.rt 槽位类型、循环条件更新、
-fsum 抵消和 re。
+fsum 抵消和 re；`98`–`101` 覆盖 C 互操作/缓冲区/BLAS/不透明结构体，
+`130`–`148` 覆盖挂起点边角、类对象与类装饰器、标准库批次（heapq/bisect/
+binascii/base64/statistics/textwrap、itertools 组合函数、operator、deque、
+timedelta、pathlib、序列重复）。
 
 敏捷开发时只跑相关用例，不要每次全量：
 

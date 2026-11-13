@@ -648,6 +648,12 @@ bool TypeChecker::is_builtin_callable(const std::string& n) {
             "issubclass", "ascii", "aiter", "anext",
             // 内部 intrinsics：stdlib/string.py 的 capwords 走单遍 C 实现
             "__pa_capwords",
+            // 内部 intrinsics：stdlib/hashlib.py 的 sha256 走 C 实现
+            "__pa_sha256",
+            "__pa_sha256_hex",
+            // 内部 intrinsics：stdlib/base64.py 的 b64 编解码走 C 实现
+            "__pa_b64encode",
+            "__pa_b64decode",
             // site 模块注入的内置名（交互式退出），真实代码里也会用到
             "quit", "exit", "copyright", "credits", "license",
         };

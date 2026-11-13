@@ -1149,6 +1149,28 @@ VReg Lowerer::lower_binop(BinOp& b) {
                         type_name(lt), type_name(rt)));
         return const_none();
     }
+    // str * int / list * int / tuple * int：一次分配、批量拷贝。
+    if (b.op == Tok::STAR) {
+        auto is_int_ty = [](const TypePtr& t) {
+            return t && (t->kind == TyKind::Int || t->kind == TyKind::Bool);
+        };
+        auto seq_ty = [](const TypePtr& t) {
+            return t && (t->kind == TyKind::Str || t->kind == TyKind::List ||
+                         t->kind == TyKind::Tuple);
+        };
+        if ((seq_ty(lt) && is_int_ty(rt)) || (is_int_ty(lt) && seq_ty(rt))) {
+            VReg l = expr(*b.left);
+            VReg r = expr(*b.right);
+            bool left = seq_ty(lt);
+            VReg base = left ? l : r;
+            VReg n = coerce(left ? r : l, left ? rt : lt, t_int());
+            TypePtr cty = left ? lt : rt;
+            RtFn fn = cty->kind == TyKind::Str ? RtFn::StrRepeat : RtFn::ListRepeat;
+            VReg v = call_runtime(fn, ty ? ty : cty, {base, n});
+            push_temp(v);
+            return v;
+        }
+    }
     // 类型检查允许但后端还做不了的组合，在这里一次性拦住。
     // 放过去的话 codegen 会走「按整数处理」的兜底路径，指针相加不报错，
     // 只是算出一个野值——这类静默错误比编译失败难查得多。

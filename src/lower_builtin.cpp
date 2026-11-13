@@ -799,6 +799,75 @@ VReg Lowerer::lower_builtin_call(const std::string& name, Call& c) {
         return r;
     }
 
+    if (name == "__pa_sha256") {
+        if (c.args.size() != 1 || !c.keywords.empty()) {
+            err(c.line, c.col, "sha256() takes exactly one argument");
+            return const_str("");
+        }
+        TypePtr t = tc_.type_of(c.args[0].get());
+        if (t && t->kind != TyKind::Bytes && t->kind != TyKind::Unknown) {
+            err(c.line, c.col,
+                std::format("sha256() expects bytes, got '{}'", type_name(t)));
+            return const_str("");
+        }
+        VReg v = expr(*c.args[0]);
+        VReg r = call_runtime(RtFn::Sha256Digest, t_bytes(), {v});
+        push_temp(r);
+        return r;
+    }
+
+    if (name == "__pa_sha256_hex") {
+        if (c.args.size() != 1 || !c.keywords.empty()) {
+            err(c.line, c.col, "sha256() takes exactly one argument");
+            return const_str("");
+        }
+        TypePtr t = tc_.type_of(c.args[0].get());
+        if (t && t->kind != TyKind::Bytes && t->kind != TyKind::Unknown) {
+            err(c.line, c.col,
+                std::format("sha256() expects bytes, got '{}'", type_name(t)));
+            return const_str("");
+        }
+        VReg v = expr(*c.args[0]);
+        VReg r = call_runtime(RtFn::Sha256Hex, t_str(), {v});
+        push_temp(r);
+        return r;
+    }
+
+    if (name == "__pa_b64encode") {
+        if (c.args.size() != 2 || !c.keywords.empty()) {
+            err(c.line, c.col, "b64encode() takes exactly two arguments");
+            return const_str("");
+        }
+        TypePtr t = tc_.type_of(c.args[0].get());
+        if (t && t->kind != TyKind::Bytes && t->kind != TyKind::Unknown) {
+            err(c.line, c.col,
+                std::format("b64encode() expects bytes, got '{}'", type_name(t)));
+            return const_str("");
+        }
+        VReg v = expr(*c.args[0]);
+        VReg flag = coerce(expr(*c.args[1]), tc_.type_of(c.args[1].get()), t_int());
+        VReg r = call_runtime(RtFn::B64Encode, t_bytes(), {v, flag});
+        push_temp(r);
+        return r;
+    }
+
+    if (name == "__pa_b64decode") {
+        if (c.args.size() != 1 || !c.keywords.empty()) {
+            err(c.line, c.col, "b64decode() takes exactly one argument");
+            return const_str("");
+        }
+        TypePtr t = tc_.type_of(c.args[0].get());
+        if (t && t->kind != TyKind::Bytes && t->kind != TyKind::Unknown) {
+            err(c.line, c.col,
+                std::format("b64decode() expects bytes, got '{}'", type_name(t)));
+            return const_str("");
+        }
+        VReg v = expr(*c.args[0]);
+        VReg r = call_runtime(RtFn::B64Decode, t_bytes(), {v});
+        push_temp(r);
+        return r;
+    }
+
     if (name == "chr") {
         if (c.args.size() != 1) {
             err(c.line, c.col, "chr() takes exactly one argument");

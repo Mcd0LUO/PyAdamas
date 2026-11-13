@@ -161,6 +161,16 @@ kind 2 统一走 `pa_rc_dec_unknown`：先查 RC 索引确认是堆指针再 dec
 `src == dst` 先做快照。`pa_list_extend(dst, src)` 用于 `*args` 打包和
 拷贝：按来源种类 retain，目标接入了 kind 2 源时同样提升自己的 kind。
 
+### range
+
+```c
+typedef struct { int64_t start; int64_t stop; int64_t step; int64_t len; } PyAdamasRange;
+```
+
+`pa_range_new` 只分配这 32 字节负载，元素按 `start + i * step` 现算；`len`
+在构造时算好，`len()` / 下标 / `in` / 归约都不物化。`list(r)` / `tuple(r)`
+才建列表。range 是不可变堆对象，正常走 RC/GC。
+
 ### 用户对象
 
 对象是编译器按类定义排出来的连续内存，运行时只知道「多大」和析构器：
@@ -181,6 +191,12 @@ vtable 前固定 5 个字：MRO 元数据指针表、类编号、vtable 自身�
 模块限定类名。`pa_isinstance` / `pa_is_named_class` 先查 RC 注册表确认是
 `PYADAMAS_RC_INSTANCE`，再沿 MRO 判断；`pa_super_lookup` 用实例真实 MRO 找
 after 类之后第一个声明该槽的类，供零参 `super().m()` 动态分派。
+
+### struct 值类型
+
+`struct` 也是 `[RC 头][payload]`，payload 按 C 布局（字段偏移与宽度由声明决定），
+分配全零。字段都是 C 数据，不持有 PyAdamas 堆引用，所以析构器为空；
+赋值/传参/返回是整块 `memcpy`（`pa_struct_copy` 分配新副本），不是共享。
 
 ### 闭包
 
@@ -325,13 +341,17 @@ longjmp 回同步调用点。GC 清扫和进程退出不跑析构器，但会单
 | `pa_list_set` | `(Py23List*, i64, i64) -> void` | 同上，写入；按 elem_kind 释放旧元素（kind 2 走注册表）。生成代码内联快路径，运行期 elem_kind 决定是否释放 |
 | `pa_list_set_len` | `(Py23List*, i64) -> void` | 改 `len`；按 elem_kind 释放被截掉的元素 |
 | `pa_list_extend` | `(Py23List* dst, Py23List* src) -> void` | 追加 src 全部元素；按来源种类 retain，dst 原本是 kind 1 而源是 kind 2 时提升为 2，`src == dst` 先快照 |
+| `pa_list_repeat` | `(Py23List*, i64) -> Py23List*` | n 次重复；一次分配后按 `elem_kind` retain 追加，负次数返回空表 |
 | `pa_list_sum_i64` | `(Py23List*, i64 start) -> i64` | O2 归约；AVX2 4×int64 累加（按 uint64 回绕），否则标量 |
 | `pa_list_sum_f64` | `(Py23List*, f64 start) -> f64` | `--fast-math` + O2 时 AVX2 4 路 double 分组求和；否则标量顺序 |
 | `pa_list_min_i64` / `max_i64` | `(Py23List*) -> i64` | O2 归约；AVX2 compare+blend，空表抛 ValueError |
 | `pa_list_slice_assign` | `(Py23List*, i64, i64, i64, Py23List*) -> void` | 切片赋值；step 1 支持长度变化 |
 | `pa_str_to_list` | `(Py23Str*) -> Py23List*` | 按字节拆成 list[str]，每字符新串 |
 | `pa_bytes_to_list` | `(Py23Str*) -> Py23List*` | 按字节拆成 list[int]（0..255），`for c in b"..."` 用 |
-| `pa_range_new` | `(i64 start, i64 stop, i64 step) -> Py23List*` | range() 实体化成 list[int]；step 0 抛 ValueError |
+| `pa_range_new` | `(i64 start, i64 stop, i64 step) -> PyAdamasRange*` | 分配惰性 range（只存边界与 len）；step 0 抛 ValueError |
+| `pa_range_len` / `pa_range_get` / `pa_range_contains` | `(PyAdamasRange*[, i64]) -> i64` | `len` / 下标 / `in`，越界 panic |
+| `pa_range_sum_i64` / `sum_f64` / `min_i64` / `max_i64` / `any` | `(PyAdamasRange*, i64 start) -> i64` 或 `(PyAdamasRange*) -> i64/f64` | 归约，不物化 |
+| `pa_range_first` / `pa_range_step` / `pa_range_stop` / `pa_range_eq` | `(PyAdamasRange*) -> i64` | 迭代边界与相等比较 |
 
 ### 字典 / 集合
 
@@ -479,6 +499,44 @@ longjmp 回同步调用点。GC 清扫和进程退出不跑析构器，但会单
 | `pa_json_dumps` | `(i64 v, str* desc) -> str*` | 按编译期类型描述符序列化 |
 | `pa_json_loads` | `(str* text, str* desc) -> i64` | 按描述符解析；类型不匹配抛 ValueError |
 
+### struct / datetime / pathlib / deque
+
+| 函数 | 签名 | 语义 |
+|---|---|---|
+| `pa_struct_new` | `(i64 size) -> void*` | 分配 `[RC 头][payload]`，字段清零 |
+| `pa_struct_copy` | `(void* src, i64 size) -> void*` | 分配新副本并整块 memcpy |
+| `pa_date_new/pa_datetime_new` | `(i64 y, i64 mo, i64 d[, i64 h, i64 mi, i64 s]) -> datetime*` | 构造；日期按实际月份天数校验（含闰年） |
+| `pa_datetime_now` | `(i64 is_date) -> datetime*` | `date.today()` / `datetime.now()` |
+| `pa_datetime_field` | `(dt*, i64 idx) -> i64` | year/month/day/hour/minute/second/weekday |
+| `pa_datetime_isoformat/strftime` | `(dt*, ...) -> str*` | ISO 文本 / `strftime` |
+| `pa_datetime_replace` | `(dt*, list* fields) -> datetime*` | 替换字段，返回新对象 |
+| `pa_datetime_add_delta/diff` | `(dt*, td*, i64 sub)` / `(dt*, dt*)` | 日期 ± timedelta、日期相减得 timedelta |
+| `pa_datetime_cmp` | `(dt*, dt*) -> i64` | 按值比较 |
+| `pa_timedelta_new` | `(i64 days, i64 seconds, i64 microseconds) -> timedelta*` | 规范化成 days/seconds/microseconds |
+| `pa_timedelta_field` | `(td*, i64 idx) -> i64` | 0 days / 1 seconds / 2 microseconds |
+| `pa_timedelta_total_seconds` | `(td*) -> f64` | `total_seconds()` |
+| `pa_timedelta_cmp` | `(td*, td*) -> i64` | -1 / 0 / 1 |
+| `pa_timedelta_add/sub` | `(td*, td*) -> td*` | 加减，返回新对象 |
+| `pa_timedelta_mul/neg` | `(td*, i64) -> td*` / `(td*) -> td*` | 乘整数、取负 |
+| `pa_timedelta_floordiv_int/truediv_int` | `(td*, i64) -> td*` | 除以整数 |
+| `pa_timedelta_floordiv_td/truediv_td` | `(td*, td*) -> i64` / `f64` | timedelta 相除 |
+| `pa_timedelta_str` | `(td*) -> str*` | `str(timedelta)`，与 CPython 对齐 |
+| `pa_path_new/str/join` | `(str*) -> path*` / `(path*) -> str*` / `(path*, str*) -> path*` | 构造、转字符串、`/` 拼接 |
+| `pa_path_name/stem/suffix/parent/parts` | `(path*) -> str*/path*/list*` | 取路径成分 |
+| `pa_path_exists/is_file/is_dir/is_absolute` | `(path*) -> i64` | 查文件系统 / 绝对路径判断 |
+| `pa_path_read_text/write_text` | `(path*) -> str*` / `(path*, str*) -> i64` | 文本读写 |
+| `pa_path_read_bytes/write_bytes` | `(path*) -> bytes*` / `(path*, bytes*) -> i64` | 字节读写（0.144） |
+| `pa_path_iterdir/glob/mkdir` | `(path*, ...) -> list*/i64` | 列目录、通配、建目录 |
+| `pa_path_unlink/rmdir/with_suffix` | `(path*, ...) -> i64/path*` | 删除、替换后缀 |
+| `pa_path_relative_to/resolve/absolute/touch` | `(path*, ...) -> path*/i64` | 路径运算与建空文件（0.144） |
+| `pa_deque_new/from_list` | `(i64 maxlen) -> deque*` / `(list*, i64 maxlen) -> deque*` | 构造；maxlen 0 表示无界 |
+| `pa_deque_append/appendleft` | `(dq*, v, ...) -> void` | 两端入队，按元素所有权 retain |
+| `pa_deque_pop/popleft` | `(dq*) -> v` | 两端出队 |
+| `pa_deque_len/maxlen/get/set` | `(dq*, ...) -> i64/v` | 长度、容量、下标读写 |
+| `pa_deque_rotate/clear/extend/extendleft` | `(dq*, ...) -> void` | 轮转、清空、批量追加 |
+| `pa_deque_to_list` | `(dq*) -> list*` | 物化成 list |
+| `pa_deque_remove/count/index/insert/reverse/copy` | `(dq*, ...) -> ...` | 0.144 补齐的序列方法 |
+
 ### re
 
 | 函数 | 签名 | 语义 |
@@ -565,6 +623,7 @@ longjmp 回同步调用点。GC 清扫和进程退出不跑析构器，但会单
 | 函数 | 签名 | 语义 |
 |---|---|---|
 | `pa_str_concat` | `(str*, str*) -> str*` | 新建对象，两次 `memcpy` |
+| `pa_str_repeat` | `(str*, i64) -> str*` | n 次重复；一次分配 + `memcpy`，负次数返回空串 |
 | `pa_str_char_at` | `(str*, i64) -> str*` | 负索引先加 `len`；越界抛 IndexError；返回驻留的单字节串（不分配） |
 | `pa_char_str` | `(i64) -> str*` | 取 256 个静态驻留单字节串之一（按低 8 位） |
 | `pa_str_from_i64` | `(i64) -> str*` | 手写十进制，不经过 `snprintf` |
@@ -578,6 +637,15 @@ longjmp 回同步调用点。GC 清扫和进程退出不跑析构器，但会单
 | `pa_percent_format` | `(str* pat, list* args, str* desc, i64 is_bytes) -> str*` | printf 风格 `%`；`desc` 每个字节描述实参域（`i` int、`b` bool、`f` float、`s` str/bytes、`n` None），非法组合抛 TypeError |
 
 `pa_str_cmp` 用 `memcmp`，前提是 **UTF-8 的字节序与码点序一致**（这是 UTF-8 的设计性质），所以结果与 Python 的字符串比较相同。
+
+### 哈希 / Base64
+
+| 函数 | 签名 | 语义 |
+|---|---|---|
+| `pa_sha256_digest` | `(str*) -> str*` | SHA-256，返回 32 字节摘要（`bytes` 与 `str` 共用表示） |
+| `pa_sha256_hex` | `(str*) -> str*` | SHA-256 小写十六进制，64 字符 |
+| `pa_b64encode` | `(str*, i64 urlsafe) -> str*` | b64 编码；`urlsafe` 非 0 用 `-_` 字母表，不补 `=` |
+| `pa_b64decode` | `(str*) -> str*` | 同时接受标准与 URL-safe 字母表；非法字符抛 `ValueError` |
 
 ### 输出
 

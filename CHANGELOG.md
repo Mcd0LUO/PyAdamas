@@ -4,6 +4,29 @@
 
 早期阶段没有逐条留痕，按阶段归纳；0.4 之后逐条记录。
 
+## [0.145] - 2026-11-13
+
+序列重复与 `base64` / `hashlib` 的 C 内建，修掉标准库基准里唯一慢于 CPython 的一项。
+
+### 变更
+
+- `str` / `list` / `tuple` 与 `int` 的 `*` 改为序列重复（两侧顺序均可），
+  走运行时 `pa_str_repeat` / `pa_list_repeat`：一次分配 + `memcpy`，负次数得到
+  空序列；`operator.mul` 对序列同样按此特化。此前这类表达式直接报
+  「not supported by the code generator yet」。
+- `hashlib.sha256` 的压缩函数改为 C 实现（`runtime/rt_hash.c`）：`SHA256`
+  只累积 `bytes`，`digest()` / `hexdigest()` 调 `__pa_sha256` /
+  `__pa_sha256_hex`，不再逐字节跑 PyAdamas 循环；md5 / sha1 保持纯 PyAdamas。
+- `base64` 的 b64 / urlsafe 编解码改为 C 内建 `__pa_b64encode` /
+  `__pa_b64decode`；b16 / b32 仍为纯 PyAdamas。
+- 新增运行用例 148（序列重复）。
+
+### 性能
+
+`tests/bench` 的 `bench_base64_hashlib`（dev 构建，repeat 3）从 0.27x 提升到
+3.05x（14.3ms vs CPython 43.7ms）；拆分测量中 sha256 从 125.8ms 降到 9.6ms，
+b64 从 38.9ms 降到 5.3ms。release 下该项为 2.99x（14.7ms vs 43.9ms）。
+
 ## [0.144] - 2026-11-13
 
 collections / datetime / pathlib 收尾，并固化标准库基准。

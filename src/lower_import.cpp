@@ -998,6 +998,22 @@ VReg Lowerer::lower_operator(const std::string& member, Call& c) {
             VReg dr = lower_dunder_binop(l, lt, r, rty, it->second, false);
             if (dr != kNoReg) return dr;
         }
+        // operator.mul 也支持序列重复。
+        if (member == "mul") {
+            auto seq = [](const TypePtr& t) {
+                return t && (t->kind == TyKind::Str || t->kind == TyKind::List ||
+                             t->kind == TyKind::Tuple);
+            };
+            if (seq(lt) || seq(rty)) {
+                bool left = seq(lt);
+                VReg base = left ? l : r;
+                VReg n = coerce(left ? r : l, left ? rty : lt, t_int());
+                RtFn fn = rt && rt->kind == TyKind::Str ? RtFn::StrRepeat : RtFn::ListRepeat;
+                VReg v = call_runtime(fn, rt, {base, n});
+                push_temp(v);
+                return v;
+            }
+        }
         // 和普通二元运算保持一致：容器拼接后端还没有对应指令。
         if (rt && (rt->kind == TyKind::List || rt->kind == TyKind::Tuple ||
                    rt->kind == TyKind::Set || rt->kind == TyKind::Dict)) {

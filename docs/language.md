@@ -126,6 +126,9 @@ f(2)                # 2 变成 2.0
 
 除零和 `INT64_MIN / -1` 会提前检查并 panic，不会变成 `#DE` 信号。
 
+`str` / `list` / `tuple` 与 `int` 之间的 `*` 是序列重复（两侧顺序均可，
+`"ab" * 3` / `3 * [0]`），负次数得到空序列；一次分配并复制，不反复拼接。
+
 ### 比较
 
 - `int` 与 `float` 可混比（先提升再比）。
@@ -217,11 +220,12 @@ mods = {x % 3 for x in range(10)}
 `enumerate` / `zip` / `str.join` 会把它抽干成列表，`for` 循环逐元素拉取。
 生成器表达式只能消费一次。
 
-源是 `range(...)` 时也是惰性的：脱糖把边界值传进合成生成器函数（而不是把
-range 实体化成列表），用计数循环逐个产出，所以 `(x for x in range(10**9))`
-既不建中间列表，第一次 `next()` 就出 0。`range` 作为**普通值**使用仍然会
-实体化成整数列表（`r = range(10**9)` 就是 10 亿元素），这一点和 CPython
-不同，见 [compatibility.md](compatibility.md)。
+源是 `range(...)` 时也是惰性的：脱糖把边界值传进合成生成器函数，用计数
+循环逐个产出，所以 `(x for x in range(10**9))` 既不建中间列表，第一次
+`next()` 就出 0。`range` 本身也是惰性对象（类型 `range[int]`，只存边界），
+`range(10**9)` 只占几十字节，`len` / 下标 / `in` / 推导式都不物化；
+`list(r)` / `tuple(r)` 这类需要真列表的操作才实体化，详见
+[compatibility.md](compatibility.md#range-是惰性对象)。
 
 ```python
 total = sum(x * x for x in range(1000))     # 不建中间列表
@@ -879,8 +883,10 @@ CPython 一致。
   `hexdigits` / `octdigits` / `punctuation` / `whitespace` / `printable`
   和 `capwords()`。常量是纯 PyAdamas；`capwords` 调内部 intrinsic，走单遍 C
   实现，不建中间词表。
-- 内置 `itertools`：`chain(a, b)` / `repeat(v, n)` / `islice(x, stop)`，
-  按实参静态特化，返回 list（立即求值）。
+- 内置 `itertools`：`chain(a, b)` / `repeat(v, n)` / `islice(x, stop)`，以及
+  `product` / `permutations` / `combinations` / `combinations_with_replacement` /
+  `zip_longest` / `accumulate`。全部按实参静态特化，返回 list（立即求值）；
+  `zip_longest` 用 `Optional[T]` 给缺列补 `None`。
 - 内置 `collections`：`Counter(items)` 返回 dict，`most_common(n)` 返回
   `(key, count)` 列表。
 - 内置 `functools`：`reduce(f, xs[, init])` 折叠（int/str 走整数跳板，
@@ -892,21 +898,32 @@ CPython 一致。
   未命中再调用原函数并写回。缓存无上限（`maxsize` 只求值不淘汰），键类型
   限 `int`/`bool`/`float`/`str`（`unknown` 按机器字，和 dict 一致），
   不支持方法和零参函数。
+- 内置 `operator`：`add`/`sub`/`mul`/`truediv`/`floordiv`/`mod`/`pow`/
+  `and_`/`or_`/`xor`/`lshift`/`rshift`/`concat`、比较 `eq`/`ne`/`lt`/`le`/
+  `gt`/`ge`、`is_`/`is_not`、`neg`/`pos`/`abs`/`invert`、`truth`/`not_`、
+  `contains`、`getitem`、`itemgetter`（int 单键；多键返回元组）。
+  包装函数在调用点按实参类型特化；`attrgetter` 未实现。
 - 内置 `datetime`：`date(y, m, d)` / `datetime(y, m, d[, h, mi, s])` 构造，
   `now()` / `today()` 取当前时间；`.year` / `.month` / `.day` / `.hour` /
   `.minute` / `.second` / `.weekday()` 读字段，`.isoformat()` /
-  `.strftime(fmt)` 格式化，`print()` 按 ISO 输出。没有 `timedelta` 和时区；
+  `.strftime(fmt)` 格式化，`print()` 按 ISO 输出；`timedelta` 支持构造
+  （`days`/`seconds`/`microseconds`/`milliseconds`/`minutes`/`hours`/`weeks`）、
+  字段、`total_seconds()`、加减、乘/除整数、取负、比较与 ISO 风格打印，
+  `date`/`datetime` 也支持 `replace()`。没有时区和 `fromtimestamp`；
   `datetime.datetime.now()` 这种链式类方法暂不支持，用 `datetime.now()`。
 - 内置 `pathlib`：`Path(s)` 构造，`p / "x"` 拼接，`str(p)` 取路径字符串；
   `.name` / `.stem` / `.suffix` / `.parent` / `.parts` 取成分，`.exists()` /
-  `.is_file()` / `.is_dir()` 查文件系统，`.read_text()` / `.write_text(s)` 读写文本，
+  `.is_file()` / `.is_dir()` / `.is_absolute()` 查文件系统，`.read_text()` /
+  `.write_text(s)` / `.read_bytes()` / `.write_bytes(b)` 读写，
   `.iterdir()` / `.glob(pattern)` 列目录（`*`、`?`、`**` 递归），
   `.mkdir(mode=0o777, parents=False, exist_ok=False)` 建目录，
-  `.unlink()` / `.rmdir()` 删除，`.with_suffix(suffix)` 替换后缀。
+  `.joinpath(...)` / `.relative_to(...)` / `.resolve()` / `.absolute()` 处理路径，
+  `.touch()` 建空文件，`.unlink()` / `.rmdir()` 删除，`.with_suffix(suffix)` 替换后缀。
 - 内置 `collections`：`Counter(iterable)` 计数 + `.most_common(n)`；
   `OrderedDict()`（PyAdamas 的 dict 本来就保序）；`deque([iterable[, maxlen]])`
   环形队列，支持 `append`/`appendleft`/`pop`/`popleft`/`rotate`/`clear`/
-  `extend`/`extendleft`、`len`、下标和迭代；`defaultdict([factory[, initial]])`
+  `extend`/`extendleft`/`remove`/`count`/`index`/`insert`/`reverse`/`copy`、
+  `len`、下标、迭代和 `.maxlen`；`defaultdict([factory[, initial]])`
   在缺省下标读取时按工厂造值并插入，工厂只支持 `int`/`float`/`bool`/`str`/
   `list`/`dict`/`set`/`tuple`（任意 callable 还不支持），`get` / `in` 不触发
   工厂。没有 `namedtuple`。
@@ -943,7 +960,8 @@ CPython 一致。
   `standard_b64decode` / `b16encode` / `b16decode` / `b32encode` /
   `b32decode` / `encodebytes` / `decodebytes`，输入输出都是 `bytes`；
   解码同时接受标准与 URL-safe 字母表，非法字符抛 `ValueError`；
-  不支持 `validate=` / `altchars=` 与 `str` 输入。
+  b64 / urlsafe 编解码走 C 内建（`__pa_b64encode` / `__pa_b64decode`），
+  b16 / b32 为纯 PyAdamas；不支持 `validate=` / `altchars=` 与 `str` 输入。
 - 标准库 `binascii`（`stdlib/binascii.py`）：`hexlify` / `unhexlify` /
   `b2a_hex` / `a2b_hex`，非十六进制字符抛 `binascii.Error`。
 - 标准库 `heapq`（`stdlib/heapq.py`）：`heappush` / `heappop` / `heapify` /
@@ -953,7 +971,8 @@ CPython 一致。
   `list[int]`，`hi` 省略或 0 表示列表末尾。
 - 标准库 `hashlib`（`stdlib/hashlib.py`）：`md5` / `sha1` / `sha256`，
   返回带 `update(bytes)` / `digest() -> bytes` / `hexdigest() -> str`
-  的对象；纯 pyadamas 实现，结果与 CPython 一致，跨多个 64 字节块也正确。
+  的对象；SHA-256 的压缩函数走 C 内建（`__pa_sha256` / `__pa_sha256_hex`），
+  md5 / sha1 为纯 PyAdamas 实现，结果与 CPython 一致，跨多个 64 字节块也正确。
   不支持 `usedforsecurity=`、`copy()`、`pbkdf2_hmac`/`scrypt` 等派生函数。
 - 标准库 `hmac`（`stdlib/hmac.py`）：`hmac.new(key, msg=b"", digestmod="sha256")`
   返回带 `update(bytes)` / `digest()` / `hexdigest()` 的对象。支持

@@ -1010,6 +1010,9 @@ void AsmGen::gen_call_rt(const Inst& in) {
             case RtFn::FileReadLines:
             case RtFn::FileTruncate:
             case RtFn::CollMostCommon:
+            case RtFn::StrRepeat:
+            case RtFn::ListRepeat:
+            case RtFn::B64Encode:
             case RtFn::IterProduct:
             case RtFn::IterZipLongest:
             case RtFn::IterAccumulate:
@@ -1165,6 +1168,9 @@ void AsmGen::gen_call_rt(const Inst& in) {
             case RtFn::ListMaxI64:
             case RtFn::StrToList:
             case RtFn::StrCapwords:
+            case RtFn::Sha256Digest:
+            case RtFn::Sha256Hex:
+            case RtFn::B64Decode:
             case RtFn::BytesToList:
             case RtFn::BytesFromList:
             case RtFn::BytesZeros:

@@ -37,6 +37,7 @@
 | 0.106 | 生成器/协程异常逃出、close 清理抛异常时立即释放帧槽 |
 | 0.107 | 自定义方法装饰器；yield/await 挂起点位置放宽 |
 | 0.108 | 项目更名 PyAdamas（pyadamas / pa_ / PYADAMAS_ / .pya） |
+| 0.110–0.112 | C 互操作 v1–v3：`cimport`/`.cpya` 声明文件、`ptr[T]` 缓冲区传参与 BLAS 封装（`linalg`）、不透明结构体指针 |
 | 0.113 | 语言级 `struct` 值类型：C 兼容布局、字段读写、值语义复制、`sizeof`/`addr` |
 | 0.114 | C 互操作 v4：`.cpya` 带字段结构体 + `ptr[Struct]` 字段读写；四语言基准；`logging`/`statistics`/`textwrap` |
 | 0.115 | C 互操作 v5：结构体按值传参/返回（SysV INTEGER/SSE/MEMORY 分类） |
@@ -69,30 +70,27 @@
 | 0.142 | 标准库基础静态包（第二批）：itertools 组合函数、datetime.timedelta（算术/比较/打印）、operator 子集 |
 | 0.143 | operator 改为内置模块：算术/比较/逻辑/容器包装函数按调用点特化，itemgetter 支持多键 |
 | 0.144 | collections/datetime/pathlib 收尾（deque 方法与元素类型、timedelta 除法、date.replace、Path 字节与路径方法）；新增 tests/bench 标准库基准 |
+| 0.145 | 序列重复（`str`/`list`/`tuple` × `int`）与 `base64`/`hashlib` C 内建，标准库基准反超 CPython |
 | 许可证 | Apache-2.0（见 [LICENSE](../LICENSE) / [NOTICE](../NOTICE)） |
 
-## 当前状态（0.144）
+## 当前状态（0.145）
 
 流水线 `源码 → 词法 → AST → lambda 脱糖 → 类型检查 → IR → x86-64 汇编 → 可执行文件` 已打通。
 
-- **语言面**：标量、字符串、`bytes`（含迭代与 `%` 格式化）、列表/元组/字典/集合、切片读写、闭包/lambda/`*args`/`**kwargs`/装饰器、推导式、`with`、异常值（`args`/`raise ... from`/自定义异常）、类（字段/方法/C3 多继承/零参 `super()`/`@staticmethod`/`@classmethod`/`@property`/类属性）、`match/case`、`del`、复数字面量、f-string 格式说明、dunder 协议（含装饰 dunder、`__call__` 与方法值）、`Generator[Y, S, R]` 标注、`open`/`input`/`sys.stdin`。
-- **标准库**：`math`/`sys`/`asyncio`/`random`/`os`/`os.path`/`subprocess`/`time`/`itertools`/`collections`/`functools`/`json`/`string`/`re`/`datetime`/`pathlib`/`csv`/`base64`/`binascii`/`heapq`/`bisect`/`hashlib`/`hmac`/`logging`/`statistics`/`textwrap`/`operator`。
-- **验证**：157 个运行用例、52 个反例、12 个模块目录；差分 runner 已自举，默认 840 例；`tests/bench/` 提供 pyadamas vs CPython 的标准库基准。
-- **主要缺口**：C FFI/BLAS；asyncio 边角。
+- **语言面**：标量、字符串、`bytes`（含迭代与 `%` 格式化）、列表/元组/字典/集合、切片读写、闭包/lambda/`*args`/`**kwargs`/装饰器、推导式、`with`、异常值（`args`/`raise ... from`/自定义异常）、类（字段/方法/C3 多继承/零参 `super()`/`@staticmethod`/`@classmethod`/`@property`/类属性/类装饰器/类名当值）、`match/case`、`del`、复数字面量、f-string 格式说明、dunder 协议（含装饰 dunder、`__call__` 与方法值）、`Generator[Y, S, R]` 标注、`open`/`input`/`sys.stdin`、`struct` 值类型、`cimport`/`cdecl` C 互操作与跨模块继承。
+- **标准库**：`math`/`sys`/`asyncio`/`random`/`os`/`os.path`/`subprocess`/`time`/`itertools`/`collections`/`functools`/`json`/`string`/`re`/`datetime`/`pathlib`/`csv`/`base64`/`binascii`/`heapq`/`bisect`/`hashlib`/`hmac`/`logging`/`statistics`/`textwrap`/`operator`，以及封装 OpenBLAS 的 `linalg`。
+- **验证**：147 个运行用例、52 个反例、12 个模块目录；差分 runner 已自举，默认 840 例；`tests/bench/` 提供 pyadamas vs CPython 的标准库基准（`base64`/`hashlib` 已反超）。
+- **主要缺口**：asyncio 边角；调试信息与 traceback；依赖动态属性的 stdlib（如 `argparse`，见「技术债」）。
 
 ## 下一步
 
-语言与标准库的完备性优先，科学计算放后面。
+语言与标准库的完备性优先；C 互操作与 BLAS 已在 0.110–0.120 落地（`cimport`、`ptr[T]` 缓冲区、`linalg` 封装 OpenBLAS），不再是下一步。
 
-### 1. C FFI + buffer + BLAS
+### 1. 工程收尾
 
-科学计算的唯一捷径。PyAdamas 的 ABI 已经是 SysV + `int64`/`double`/指针，运行时是纯 C；补一层 `extern "C"` 声明和 buffer 类型，就能把 `list[float]` 的连续数据直接传给 `cblas_dgemm`。验收：512³ matmul 进入毫秒级；不要求自己实现 BLAS。
-
-### 2. 工程收尾
-
-- 重跑标准库前端基线：0.81 已在 Debian python3.13.5 上重跑过一次（见 [compatibility.md](compatibility.md#前端鲁棒性基线)），但原口径（CPython 3.11.1 + site-packages，38582 个文件）还没重跑；
-- 保持 `docs/` 与 README 的验证表同步；
-- 把临时性能基准固化成 `tests/bench/`（可选）。
+- 重跑标准库前端基线：最近一次完整口径是 0.81.1（Debian python3.13.5，见 [compatibility.md](compatibility.md#前端鲁棒性基线)），原口径（CPython 3.11.1 + site-packages，38582 个文件）还没重跑；0.133 之后尚未复测；
+- 保持 `docs/` 与 README 的验证表同步（运行用例、模块目录等数字按仓库实际统计）；
+- `tests/bench/` 标准库基准已固化（0.144）。
 
 ## 待决策
 

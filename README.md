@@ -78,7 +78,7 @@ bad.py:1:7: error: expected parameter name, found ':'
 
 ## 现在能做什么
 
-标量、字符串、**bytes**（含迭代与 `%` 格式化）、列表、元组、**字典 / 集合**（字面量、下标读写、`len`、`in`、`for`、`get`/`keys`/`values`/`items`/`update`/`add`、删除类方法）、**切片（读与赋值）**、函数（默认参数、递归、一等值、闭包、`nonlocal`、`lambda`、`*args`/`**kwargs`、装饰器）、推导式（含异步推导式）、`with`、`try/except/else/finally`、`raise`（异常值、`args`、`raise ... from`、自定义异常）、本地包/相对导入（`.py` → `.pya` + `.o`，惰性初始化、增量缓存）、`class`（字段、方法、C3 多继承、零参 `super()`、`@staticmethod`、`@classmethod`、`@property`、类属性）、`if` / `while` / `for`（含循环 `else`）、`break` / `continue`、`assert`、`global`、`del`、`match/case`、复数字面量、f-string（含格式说明）、dunder 协议、`open`/`input`/`sys.stdin`、`print`（含 `sep=` / `end=`）。生成器支持 `yield from`；协程支持 `async def` / `await` / `asyncio.run` / `sleep` / `gather` / `create_task`、`Future`、异步生成器（`async for` / `async with`、`asend` / `athrow` / `__anext__` / `aclose`）。标准库内置 `math`/`sys`/`asyncio`/`random`/`os`/`os.path`/`subprocess`/`time`/`itertools`/`collections`/`functools`/`json`/`string`/`re`/`datetime`/`pathlib`/`csv`。堆值用引用计数自动回收，循环收集器回收环和 unknown 容器泄漏；不含堆临时值的代码不会插入任何 RC 指令。
+标量、字符串、**bytes**（含迭代与 `%` 格式化）、列表、元组、**字典 / 集合**（字面量、下标读写、`len`、`in`、`for`、`get`/`keys`/`values`/`items`/`update`/`add`、删除类方法）、**切片（读与赋值）**、序列重复（`str`/`list`/`tuple` 乘 `int`）、函数（默认参数、递归、一等值、闭包、`nonlocal`、`lambda`、`*args`/`**kwargs`、装饰器）、推导式（含异步推导式）、`with`、`try/except/else/finally`、`raise`（异常值、`args`、`raise ... from`、自定义异常）、本地包/相对导入（`.py` → `.pya` + `.o`，惰性初始化、增量缓存）、`class`（字段、方法、C3 多继承、零参 `super()`、`@staticmethod`、`@classmethod`、`@property`、类属性）、`if` / `while` / `for`（含循环 `else`）、`break` / `continue`、`assert`、`global`、`del`、`match/case`、复数字面量、f-string（含格式说明）、dunder 协议、`open`/`input`/`sys.stdin`、`print`（含 `sep=` / `end=`）。`struct` 值类型、`cimport`/`cdecl` C 互操作（缓冲区、回调、可变参数、结构体按值）与跨模块继承也已支持。生成器支持 `yield from`；协程支持 `async def` / `await` / `asyncio.run` / `sleep` / `gather` / `create_task`、`Future`、异步生成器（`async for` / `async with`、`asend` / `athrow` / `__anext__` / `aclose`）。标准库内置 `math`/`sys`/`asyncio`/`random`/`os`/`os.path`/`subprocess`/`time`/`itertools`/`collections`/`functools`/`json`/`string`/`re`/`datetime`/`pathlib`/`csv`/`base64`/`binascii`/`heapq`/`bisect`/`hashlib`/`hmac`/`logging`/`statistics`/`textwrap`/`operator`，以及封装 OpenBLAS 的 `linalg`。堆值用引用计数自动回收，循环收集器回收环和 unknown 容器泄漏；不含堆临时值的代码不会插入任何 RC 指令。
 
 完整的支持清单和语义定义见 [docs/language.md](docs/language.md)。
 
@@ -112,7 +112,7 @@ runtime/
   rt_functools.c          functools.reduce 与回调跳板
   rt_json.c               json dumps/loads
   rt_re.c                 re 回溯 VM、Pattern/Match
-tests/                    正例 / 反例 / 运行用例 / 差分测试
+tests/                    正例 / 反例 / 运行 / 差分 / 模块 / 基准
 docs/                     设计与参考文档（旧文档在 docs/archive/）
 tools/                    一次性脚本
 ```
@@ -141,9 +141,9 @@ tools/                    一次性脚本
 
 语法层明确拒绝：超出 int64 的整数、`0x1L` 这类 Python 2 写法、PEP 695 泛型语法等少数边角。
 
-能解析、能检查，但 `build` 报错：通过 unknown 函数值的 `*` / `**` 展开、非异常类名当异常用、导入类模式的字段子模式和 unknown 值上的数值/list/dict 内置类型模式、类装饰器与自定义方法装饰器。`finally` 体里跳出 finally 的 `return` / `break` / `continue` 也会被拒。生成器已支持 `yield`、`yield from` 与 `throw`，挂起点可以出现在任意子表达式、`except` 与 `finally` 体内（`finally` 体内不能 `return`/`break`/`continue` 跳出）；`Generator[Y, S, R]` 标注可收窄 `send` 实参与 `yield` 表达式的类型；生成器表达式是惰性的（脱糖成合成生成器函数，`sum`/`min`/`max`/`any`/`all` 流式消费），只有类体里仍按 list 构造。协程已支持 `async def` / `await` / `asyncio.run` / `sleep` / `gather` / `create_task`（`done()` / `cancel()`，取消级联）、`Future`、异步生成器（`async for`、`async with`、`asend`/`__anext__`/`aclose`）、`wait_readable`/`wait_writable`、Future 回调与 `set_exception`（回调同步执行，`set_exception` 接收异常实例或消息）、`athrow`，`await` 可以出现在任意子表达式与 `finally` 体内，异步推导式只能作为语句、赋值或 `return` 的根表达式。类支持多继承（C3 MRO；附加基类可复用主基类已有字段）、零参 `super().m()` / `super().__init__()`、`@staticmethod`、`@property`/setter/deleter、类属性、`@classmethod`；没有类装饰器；字段可以不写标注，由 `self.x = ...` 推断。闭包、`lambda`、`*args`/`**kwargs`、推导式、`with`、函数装饰器、`try/except/else/finally`、`raise`、`del`、`match/case`、复数字面量、字典/集合、`in`、容器方法与删除、切片（读与赋值）已支持；循环收集器是保守的，可能延迟回收，但没有 `__del__`/弱引用。异常值是对象：`except ... as e` 得到一个带 `args` 的异常值，支持 `raise e`、`raise ... from`、`__cause__`、`str(e)` 和 `ValueError("msg")` 构造；自定义异常类继承内置异常（类体目前只允许 `pass`）；`args` 只保存消息，没有 traceback。import 支持本地包与相对导入（需要 `__init__.py`）：`import pkg`、`import pkg.mod as m`、`from pkg import mod`、`from .mod import x`、`from ..pkg import y`，以及静态展开的 `from m import *`（按非下划线名字导出，暂不解析 `__all__`）；跨模块继承还没接；已内置 `math`/`sys`/`asyncio`/`random`/`os`/`os.path`/`subprocess`/`time`/`itertools`/`collections`/`functools`/`json`/`string`/`re`/`datetime`/`pathlib`，`csv` 已实现 reader/writer 子集；导入类可以构造、访问字段和调用方法，类类型出现在跨模块函数签名里也保留。空字典的 key 类型是 unknown，内容相同的动态字符串 key 可能按机器字不等；混合 value 类型会退化成 unknown；`keys()` / `values()` / `items()` 返回列表而不是视图。
+能解析、能检查，但 `build` 报错：通过 unknown 函数值的 `*` / `**` 展开、非异常类名当异常用、unknown 值上的数值/list/dict/tuple/set 内置类型模式。生成器已支持 `yield`、`yield from` 与 `throw`，挂起点可以出现在任意子表达式、`except` 与 `finally` 体内，`finally` 体内的 `return`/`break`/`continue` 也支持；`Generator[Y, S, R]` 标注可收窄 `send` 实参与 `yield` 表达式的类型；生成器表达式是惰性的（脱糖成合成生成器函数，`sum`/`min`/`max`/`any`/`all` 流式消费），只有类体里仍按 list 构造。协程已支持 `async def` / `await` / `asyncio.run` / `sleep` / `gather` / `create_task`（`done()` / `cancel()`，取消级联）、`Future`、异步生成器（`async for`、`async with`、`asend`/`__anext__`/`aclose`）、`wait_readable`/`wait_writable`、Future 回调与 `set_exception`（回调同步执行，`set_exception` 接收异常实例或消息）、`athrow`，`await` 可以出现在任意子表达式与 `finally` 体内，异步推导式只能作为语句、赋值或 `return` 的根表达式。类支持多继承（C3 MRO；附加基类可复用主基类已有字段）、零参 `super().m()` / `super().__init__()`、`@staticmethod`、`@property`/setter/deleter、类属性、`@classmethod`、类装饰器；字段可以不写标注，由 `self.x = ...` 推断。闭包、`lambda`、`*args`/`**kwargs`、推导式、`with`、函数装饰器、`try/except/else/finally`、`raise`、`del`、`match/case`、复数字面量、字典/集合、`in`、容器方法与删除、切片（读与赋值）已支持；循环收集器是保守的，可能延迟回收，但没有 `__del__`/弱引用。异常值是对象：`except ... as e` 得到一个带 `args` 的异常值，支持 `raise e`、`raise ... from`、`__cause__`、`str(e)` 和 `ValueError("msg")` 构造；自定义异常类继承内置异常（类体目前只允许 `pass`）；`args` 只保存消息，没有 traceback。import 支持本地包与相对导入（需要 `__init__.py`）：`import pkg`、`import pkg.mod as m`、`from pkg import mod`、`from .mod import x`、`from ..pkg import y`，以及静态展开的 `from m import *`（按非下划线名字导出，暂不解析 `__all__`）；跨模块继承已支持（0.139/0.140，含导入基类的 vtable、`super()` 与 `isinstance`）；已内置 `math`/`sys`/`asyncio`/`random`/`os`/`os.path`/`subprocess`/`time`/`itertools`/`collections`/`functools`/`json`/`string`/`re`/`datetime`/`pathlib`/`csv`/`base64`/`binascii`/`heapq`/`bisect`/`hashlib`/`hmac`/`logging`/`statistics`/`textwrap`/`operator`，以及封装 OpenBLAS 的 `linalg`；导入类可以构造、访问字段和调用方法，类类型出现在跨模块函数签名里也保留。空字典的 key 类型是 unknown，内容相同的动态字符串 key 可能按机器字不等；混合 value 类型会退化成 unknown；`keys()` / `values()` / `items()` 返回列表而不是视图。
 
-语义上有意与 CPython 不同：列表相等比指针、整数溢出回绕、字符串按字节（`len("中文") == 6`）、读未赋值局部变量得到 0。引用计数处理不了的环和 `unknown` / `list[unknown]` / 混合元组引用由保守 GC 兜底；误报只延迟回收，没有 `__del__`/弱引用。
+语义上有意与 CPython 不同：容器相等是逐元素比较（元素类型未知时退回指针比较）、整数溢出回绕、字符串按字节（`len("中文") == 6`）、读未赋值局部变量得到 0。引用计数处理不了的环和 `unknown` / `list[unknown]` / 混合元组引用由保守 GC 兜底；误报只延迟回收，没有 `__del__`/弱引用。
 
 完整清单（含原因）在 [docs/compatibility.md](docs/compatibility.md)。
 
@@ -151,12 +151,13 @@ tools/                    一次性脚本
 
 | 组 | 数量 | 内容 |
 |---|---|---|
-| `tests/*.py` | 11 | 前端正例，275 条语句 / 37 个函数 / 1203 个表达式 |
+| `tests/*.py` | 11 | 前端正例，覆盖语法与类型规则（按 AST 节点计：43 个函数 / 458 条语句 / 1714 个表达式） |
 | `tests/fail/*.py` | 52 | 反例，必须报出首行 `# expect:` 指定的错 |
-| `tests/run/*.py` | 127 | 编译 + 运行，输出与文件末尾的 `# --- expect ---` 逐行比对 |
+| `tests/run/*.py` | 147 | 编译 + 运行，输出与文件末尾的 `# --- expect ---` 逐行比对 |
 | `tests/unsupported/*.py` | 1 | `check` 必须打「没建模」标记，且 `build` 必须拒绝 |
-| `tests/diff/` | 6 个生成器 | 随机程序与 CPython 比 stdout，默认 3 种子 840 个程序 |
-| `tests/modules/` | 11 个目录 | 多模块编译 + 运行 + 二次构建缓存命中 |
+| `tests/diff/` | 7 个生成器 | 随机程序与 CPython 比 stdout，默认 3 种子 840 个程序 |
+| `tests/modules/` | 12 个目录 | 多模块编译 + 运行 + 二次构建缓存命中 |
+| `tests/bench/` | 用例集 | 标准库基准：同一用例分别用 PyAdamas 与 CPython 跑，`python3 tests/bench/run_bench.py` |
 | 内存验收 | — | 16MB 地址空间限制下跑拼接 / 对象 / 闭包 / 容器 / 切片 / 删除 / 推导式 / 变长实参 / `with` / 装饰器 / 异常展开 / 生成器 / `yield from` / 协程 / Task / Future / fd 等待 / 异步生成器 / 异步推导式 / 环 / unknown 泄漏 |
 
 ```bash
@@ -165,7 +166,7 @@ ctest --preset dev
 /tmp/run_diff.prog --pyadamas build/dev/pyadamas --cpython python3 --seeds 3   # 840 个程序
 ```
 
-前端鲁棒性基线（CPython 3.11 标准库 + site-packages，38582 个 `.py`）：语法通过 35693，其中类型通过 29143（81.6%）；标准库本体 1143 / 1289（88.7%）。0.6 引入类检查后口径变了——刚加上时失败 19064 个文件，逐条去误杀后降到 6550 个，明细见 [compatibility.md](docs/compatibility.md#前端鲁棒性基线)。
+前端鲁棒性基线：历史口径（CPython 3.11 标准库 + site-packages，38582 个 `.py`）语法通过 35693，其中类型通过 29143（81.6%）；标准库本体 1143 / 1289（88.7%）。最近一次完整口径（0.81.1，Debian CPython 3.13.5）为标准库本体 279 / 596（46.8%），两段口径不可直接比较，明细见 [compatibility.md](docs/compatibility.md#前端鲁棒性基线)。
 
 ASan + UBSan + LSan 下跑全部用例零报告（含生成代码的 RC、闭包、GC、字典、切片、删除、推导式、`with`、装饰器、变长实参、异常展开、生成器挂起/恢复、`yield from` 委托、协程调度、Task 取消级联、Future 多等待者、fd 轮询与异步推导式路径），`-Wshadow -Wnon-virtual-dtor -Wold-style-cast -Wcast-qual` 零警告。内存验收在 16MB `RLIMIT_AS` 下完成，对象环 / 字典环 / unknown 泄漏 / 闭包垃圾 / 容器与切片 / 异常展开的峰值 RSS 约 8MB。
 
@@ -183,7 +184,6 @@ ASan + UBSan + LSan 下跑全部用例零报告（含生成代码的 RC、闭包
 | [docs/development.md](docs/development.md) | 构建、测试、调试、扩展 checklist |
 | [docs/roadmap.md](docs/roadmap.md) | 当前状态、下一步、技术债 |
 | [docs/archive/README.md](docs/archive/README.md) | 已轮转出去的旧文档 |
-| [docs/roadmap.md](docs/roadmap.md) | 下一步做什么、为什么是这个顺序 |
 
 变更记录见 [CHANGELOG.md](CHANGELOG.md)，参与开发见 [CONTRIBUTING.md](CONTRIBUTING.md)。
 

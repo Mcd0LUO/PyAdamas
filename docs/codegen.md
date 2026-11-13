@@ -234,6 +234,21 @@ dict 指针，调用点打包好按普通参数传；整数寄存器不够时照
         addq  $16, %rsp
 ```
 
+## C 互操作（cimport）
+
+`call.extern` 不走 PyAdamas 自己的调用约定，直接按 SysV C ABI 调外部符号：
+
+- 实参按调用点的 `CKind` 编组：`long`/`int`/`_Bool`/指针进整数寄存器，`double` 进 `xmm`；`Int32`/`UInt32` 在寄存器里仍占 8 字节，写 C 结构体字段时才截到 4 字节。
+- `ptr[T]` 接 `list[T]` / `bytes` 时编译成取 `data`（偏移 16），空容器传 NULL；`BufF64` / `BufI64` / `BufBytes` 只由 lower 在调用点选择，`.cpya` 不能声明。
+- 带字段的 `struct` 按 SysV 分类：INTEGER / SSE 各占寄存器，超过两个 eightbyte 或含非规整字段时走 MEMORY（调用方分配临时区、传隐藏指针）。
+- 可变参数函数在 `call` 前把用到的 `%xmm` 数写进 `%al`。
+- 回调参数（`Callback`）生成跳板：C 侧拿到裸函数指针，跳板把 C 实参搬进合成闭包的 `fn(...)` 并调用捕获的函数值；闭包槽由 `cb_sigs` 下标命名。
+- `load.extern` / `store.extern` 按声明宽度访问 C 全局；`.cpya` 的 `link <lib>` 追加 `-l<lib>` 到链接命令。
+
+`cdecl` 只解析头文件子集：不展开宏函数/条件编译，`float`、union 按值与定长数组不生成。
+
+`struct` 值类型由 `struct.new` / `struct.copy` 分配 `[RC 头][payload]`；字段读写按指令的 `fwidth` 发 `movb` / `movl` / `movq`，4 字节字段按 `funsigned` 选 `movslq` 或 `movl` 零扩展。
+
 ## 闭包
 
 函数值现在一律指向**闭包对象**，负载 `[code, n_caps, cell…]`。无捕获函数

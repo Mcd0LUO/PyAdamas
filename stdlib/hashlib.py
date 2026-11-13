@@ -264,76 +264,18 @@ class SHA1:
 
 class SHA256:
     def __init__(self, data: bytes = b"") -> None:
-        self.h = [
-            1779033703, 3144134277, 1013904242, 2773480762,
-            1359893119, 2600822924, 528734635, 1541459225,
-        ]
-        self.data = []
-        self.nbytes = 0
+        # 摘要计算走 C intrinsic（__pa_sha256），这里只负责累积字节。
+        self.buf = b""
         self.update(data)
 
     def update(self, data: bytes) -> None:
-        for b in data:
-            self.data.append(b)
-        self.nbytes += len(data)
+        self.buf += data
 
     def digest(self) -> bytes:
-        msg = _pad(self.data, self.nbytes, False)
-        h = []
-        for x in self.h:
-            h.append(x)
-        off = 0
-        while off < len(msg):
-            w: list[int] = []
-            j = 0
-            while j < 16:
-                w.append(_be32(msg, off + j * 4))
-                j += 1
-            while j < 64:
-                x = w[j - 15]
-                y = w[j - 2]
-                s0 = _rotr(x, 7) ^ _rotr(x, 18) ^ (x >> 3)
-                s1 = _rotr(y, 17) ^ _rotr(y, 19) ^ (y >> 10)
-                w.append((w[j - 16] + s0 + w[j - 7] + s1) & 4294967295)
-                j += 1
-            a = h[0]
-            b = h[1]
-            c = h[2]
-            d = h[3]
-            e = h[4]
-            f = h[5]
-            g = h[6]
-            hh = h[7]
-            i = 0
-            while i < 64:
-                s1 = _rotr(e, 6) ^ _rotr(e, 11) ^ _rotr(e, 25)
-                ch = (e & f) ^ ((~e) & g)
-                t1 = (hh + s1 + ch + _K_SHA256[i] + w[i]) & 4294967295
-                s0 = _rotr(a, 2) ^ _rotr(a, 13) ^ _rotr(a, 22)
-                maj = (a & b) ^ (a & c) ^ (b & c)
-                t2 = (s0 + maj) & 4294967295
-                hh = g
-                g = f
-                f = e
-                e = (d + t1) & 4294967295
-                d = c
-                c = b
-                b = a
-                a = (t1 + t2) & 4294967295
-                i += 1
-            h[0] = (h[0] + a) & 4294967295
-            h[1] = (h[1] + b) & 4294967295
-            h[2] = (h[2] + c) & 4294967295
-            h[3] = (h[3] + d) & 4294967295
-            h[4] = (h[4] + e) & 4294967295
-            h[5] = (h[5] + f) & 4294967295
-            h[6] = (h[6] + g) & 4294967295
-            h[7] = (h[7] + hh) & 4294967295
-            off += 64
-        return _be_words(h)
+        return __pa_sha256(self.buf)
 
     def hexdigest(self) -> str:
-        return _hexdigest(self.digest())
+        return __pa_sha256_hex(self.buf)
 
 
 def sha1(data: bytes = b"") -> SHA1:

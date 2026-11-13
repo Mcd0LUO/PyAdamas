@@ -6,7 +6,7 @@ PyAdamas 不追求兼容 CPython：语义是按静态类型的需要重新定的
 
 | 写法 | PyAdamas | CPython | 原因 |
 |---|---|---|---|
-| `[1] == [1]` | `False`（比指针） | `True`（逐元素） | 没有运行时类型标签，做不到通用深比较 |
+| 异构容器的 `==`（如 `[1, "s"]`） | 按指针比较 | 逐元素比较 | 元素类型未知，编不出通用比较链 |
 | 读未赋值的局部变量 | 得到 0 / `None` | `UnboundLocalError` | 槽位在栈上，初值是 0；做「已初始化」标记要额外一张表 |
 | 整数溢出 | 回绕成 int64 | 自动升格为任意精度 | 静态类型的代价，也是性能的来源 |
 | `1 << 70` | `64` | `1180591620717411303424` | x86 的移位次数按 64 取模 |
@@ -20,12 +20,12 @@ PyAdamas 不追求兼容 CPython：语义是按静态类型的需要重新定的
 | 未捕获异常 | `PyAdamas: uncaught ValueError: msg`，`exit(1)` | traceback + `ValueError: msg`，退出码 1 | 没有 traceback |
 | 异常类型 | 内置异常名 + 继承匹配；`ValueError("msg")` 产生异常值，`raise e`、`raise ... from`、自定义异常类（`class E(ValueError): pass`）可用 | 完整异常类层次、traceback | 自定义异常类类体只能是 `pass`/文档字符串；`args` 只保存消息；没有 traceback |
 | 运行时错误 | `IndexError` / `KeyError` / `ZeroDivisionError` / `OverflowError` / `ValueError` / `AssertionError` 可捕获 | 同类异常 | 内部不变量/OOM 仍然直接退出 |
-| `range(a, b, c)` 的 `c` | `for ... in range(...)` 里必须是整数字面量；作为值使用时可以是任意 int 表达式 | 任意表达式 | 循环步长在降级期就要定下来；`range()` 实体化成列表后没有这个限制 |
+| `range(a, b, c)` 的 `c` | `for ... in range(...)` 里必须是整数字面量；作为值使用时可以是任意 int 表达式 | 任意表达式 | 循环步长在降级期就要定下来；range 对象在构造时求值，没有这个限制 |
 | 默认参数不是字面量 | `build` 报错 | 运行时求值 | 默认值在调用点内联填充 |
 | `*args` | 形参是 `list[T]` | 形参是 tuple | 列表和元组在 PyAdamas 里表示相同；`len` / 下标 / 迭代一致 |
 | 函数装饰器 | `@dec` 在定义点立即执行，包装函数必须用固定形参转发 | 任意可调用 | 没有运行时签名信息，`*args` 转发给 unknown 被装饰者无法绑定 |
 | `with` | 只支持类实例的 `__enter__` / `__exit__`；正常、`return` / `break` / `continue` 和异常路径都调用 `__exit__` | 完整上下文管理协议 | `__exit__` 返回值只有真/假语义；异常路径传 `(type, message, None)` |
-| import | 本地单层 `.py`；`m.x` 直接读写模块全局；`from m import x` 是快照；模块别名不能当值 | 任意模块/包、运行时模块对象 | 支持包/相对导入/静态 `import *`（按非下划线导出）；支持导入类作主基类或附加基类（字段、覆盖方法、`super()`、`isinstance`、字面量字段默认值、跨模块 classmethod 的 `cls(...)` 重绑定）；动态 classmethod 的 `cls.x` 仍按声明类解析、方法值暂不支持，子类 `__init__` 签名需与基类兼容 |
+| import | 本地 `.py` 与包（包需要 `__init__.py`），支持相对导入与静态展开的 `import *`；`m.x` 直接读写模块全局；`from m import x` 是快照；模块别名不能当值 | 任意模块/包、运行时模块对象 | 支持包/相对导入/静态 `import *`（按非下划线导出）；支持导入类作主基类或附加基类（字段、覆盖方法、`super()`、`isinstance`、字面量字段默认值、跨模块 classmethod 的 `cls(...)` 重绑定）；动态 classmethod 的 `cls.x` 仍按声明类解析、方法值暂不支持，子类 `__init__` 签名需与基类兼容 |
 | 模块初始化 | 第一次执行 import 时惰性运行一次；循环导入编译期报错 | 支持循环导入和部分初始化 | 初始化失败的模块不会再重试；模块对象不可见 |
 | 推导式 | list/set/dict 推导式按循环展开；生成器表达式脱糖成合成生成器函数，惰性求值；含 `async for` 的推导式在协程里可挂起；含 lambda 的推导式改写成生成器表达式 + 构造器，循环变量可被捕获 | 同 Python | 异步 list/set/dict 推导式只能作为语句/赋值/`return` 的根表达式；异步生成器表达式（`(x async for ...)`）已支持，可出现在任意表达式位置；类体里的生成器表达式仍按 list 构造；推导式内部不能引用循环变量的生成器表达式 |
 | 生成器 | 状态机 + 堆帧；`for` / `next` / `send` / `throw` / `close` / `yield from`；`yield from` 把 `throw` 转发给子生成器；跨 `yield` 跑 `finally` / `__exit__`；挂起点可在任意子表达式、`except` 与 `finally` 体内；生成器/协程/异步生成器类型跨模块保留元素/结果类型；`Generator[Y, S, R]` 标注给 `send` 实参与 `yield` 表达式收窄类型 | 完整生成器协议 | 未标注 `Generator[Y, S, R]` 时 `send` 值与 `yield` 表达式静态是 unknown（`R` 只记录，`StopIteration.value` 不检查） |
@@ -44,12 +44,15 @@ PyAdamas 不追求兼容 CPython：语义是按静态类型的需要重新定的
 | `subprocess` | `run` 支持 `capture_output`/`text`/`timeout`/`check`/`shell`/`cwd`，`args` 可以是 `list[str]` 或字符串；`Popen` 支持 `shell`/`cwd`/`stdin`/`stdout`/`stderr`（`PIPE`/`DEVNULL`/`STDOUT`），方法 `wait`/`communicate`/`kill`/`terminate`/`send_signal`，属性 `pid`/`returncode`/`stdout`/`stderr`/`stdin`；`TimeoutExpired`/`CalledProcessError` 按内置异常名捕获 | 完整 subprocess | 不返回 bytes：`text=False` 也返回 str；`input`/`env`/`preexec_fn` 未实现；exec 失败按退出码 127；**没有 `poll()`**（PyAdamas 里 None 和 0 同形，`poll() is None` 会把正常退出误判成还在跑，要轮询用 `wait(timeout=…)`）；`communicate()` 对没开管道的流返回空串而不是 `None`；`Popen` 句柄被回收时会 SIGKILL 子进程（CPython 不会）；`from subprocess import TimeoutExpired` 不支持 |
 | `time` | `time`/`monotonic`/`perf_counter`/`sleep`，秒为单位 | 完整 time | 没有 `localtime`/`gmtime`/`strftime`/`mktime` |
 | `string` | 常量 + `capwords()`，随编译器分发 `stdlib/string.py`；常量纯 PyAdamas，`capwords` 走单遍 intrinsic | 完整 string | 子集；`capwords` 单遍扫描、只分配一个输出串 |
-| `itertools` | `chain`/`repeat`/`islice`，按实参静态特化，返回 list | 完整 itertools | 立即求值，没有惰性迭代器；`islice` 只接受 `(x, stop)` |
-| `collections` | `Counter`/`most_common`、`OrderedDict()`（dict 本来就保序）、`deque([iterable[, maxlen]])` 的 append/appendleft/pop/popleft/rotate/clear/extend/extendleft + `len`/下标/迭代、`defaultdict([factory[, initial]])`（工厂限内置零参类型） | 完整 collections | 没有 `namedtuple`；`Counter` 返回普通 dict；`OrderedDict` 只支持空构造；`defaultdict` 的 `default_factory` 属性不可读，静态类型仍是普通 dict，工厂只支持 `int`/`float`/`bool`/`str`/`list`/`dict`/`set`/`tuple`；deque 只在元素明确是堆类型时才增减引用（字符串元素可能泄漏，不会崩） |
+| `itertools` | `chain`/`repeat`/`islice`/`product`/`permutations`/`combinations`/`combinations_with_replacement`/`zip_longest`/`accumulate`，按实参静态特化，返回 list | 完整 itertools | 立即求值，没有惰性迭代器；`islice` 只接受 `(x, stop)`；`zip_longest` 用 `Optional[T]` 补 `None` |
+| `collections` | `Counter`/`most_common`、`OrderedDict()`（dict 本来就保序）、`deque([iterable[, maxlen]])` 的 append/appendleft/pop/popleft/rotate/clear/extend/extendleft/remove/count/index/insert/reverse/copy + `len`/下标/迭代/`.maxlen`、`defaultdict([factory[, initial]])`（工厂限内置零参类型） | 完整 collections | 没有 `namedtuple`；`Counter` 返回普通 dict；`OrderedDict` 只支持空构造；`defaultdict` 的 `default_factory` 属性不可读，静态类型仍是普通 dict；deque 只在元素明确是堆类型时才增减引用（字符串元素可能泄漏，不会崩） |
 | `functools` | `reduce`/`wraps`/`partial`/`lru_cache`（装饰器） | 完整 functools | `partial` 不能作用于 `*args`/`**kwargs` 函数或方法值；`lru_cache` 只支持普通函数（不支持方法、零参函数），键类型限 `int`/`bool`/`float`/`str`，缓存无上限并忽略 `maxsize`；`wraps` 只作装饰器用（不建模 `__name__`/`__doc__`，装饰器链里整层跳过）；`reduce` 的 float 元素要求 f 形参是 float |
-| `datetime` | `date`/`datetime` 构造、`now`/`today`、字段、`isoformat`/`strftime`/`weekday` | 完整 datetime | 没有 `timedelta`、时区、`fromtimestamp`；`datetime.datetime.now()` 这种链式类方法不支持，用 `datetime.now()` |
-| `pathlib` | `Path` 构造、`/` 运算符、`str(p)`、`name`/`stem`/`suffix`/`parent`/`parts`、`exists`/`is_file`/`is_dir`、`read_text`/`write_text`、`iterdir`/`glob`/`mkdir`、`unlink`/`rmdir`/`with_suffix` | 完整 pathlib | `glob` 支持 `*`/`?`/`**`，不支持字符类 `[...]`；`mkdir` 只收关键字参数（同 CPython） |
+| `datetime` | `date`/`datetime` 构造、`now`/`today`、字段、`isoformat`/`strftime`/`weekday`、`date`/`datetime` 的 `replace`；`timedelta` 构造、字段、`total_seconds()`、加减、乘/除整数、取负、比较与打印 | 完整 datetime | 没有时区与 `fromtimestamp`；`datetime.datetime.now()` 这种链式类方法不支持，用 `datetime.now()` |
+| `pathlib` | `Path` 构造、`/` 运算符、`str(p)`、`name`/`stem`/`suffix`/`parent`/`parts`、`exists`/`is_file`/`is_dir`/`is_absolute`、`read_text`/`write_text`/`read_bytes`/`write_bytes`、`iterdir`/`glob`/`mkdir`、`joinpath`/`relative_to`/`resolve`/`absolute`/`touch`、`unlink`/`rmdir`/`with_suffix` | 完整 pathlib | `glob` 支持 `*`/`?`/`**`，不支持字符类 `[...]`；`mkdir` 只收关键字参数（同 CPython） |
 | `heapq` / `bisect` / `binascii` | 纯 PyAdamas 实现；`heapq` 的 push/pop/替代与 nlargest/nsmallest，`bisect` 的左右查找与 insort，`binascii` 的 hexlify/unhexlify | 完整模块 | `bisect` 目前只接受有序 `list[int]`，`hi` 省略或 0 表示列表末尾；`binascii` 没有 CRC/Base64 底层接口 |
+| `base64` / `hashlib` / `hmac` | base64 的 b64/urlsafe/b16/b32/`encodebytes`；hashlib 的 `md5`/`sha1`/`sha256`；`hmac.new` + `update`/`digest`/`hexdigest` | 完整模块 | base64 不支持 `validate=`/`altchars=` 与 `str` 输入；hashlib 不支持 `usedforsecurity=`/`copy()`/`pbkdf2_hmac`；hmac 不接受 hash 构造函数或模块对象 |
+| `logging` / `statistics` / `textwrap` / `operator` | 子集：logging 的等级常量、`basicConfig`、`getLogger` 与 Logger 方法；statistics 的均值/中位数/方差/标准差/调和与几何均值；textwrap 的 `wrap`/`fill`/`dedent`/`indent`/`shorten`；operator 的算术/比较/逻辑/容器包装与 `itemgetter` | 完整模块 | logging 没有 handler/filter/Formatter、文件输出与 `%` 参数展开；statistics 输入限 `list[float]`（`mode` 为 `list[int]`）；textwrap 没有 `TextWrapper` 类；operator 没有 `attrgetter` |
+| `linalg` | `matmul`/`matmul_into`/`matvec`/`axpy`/`scal`/`norm`/`transpose`/`dot`，封装 OpenBLAS，数据按行主序拍平传入 | —（PyAdamas 自有模块） | 需要系统安装 OpenBLAS；维度非法或输入过短抛 `ValueError` |
 | `slice` / `vars` / `dir` | `slice()` 只在下标位置（脱糖折成切片语法）；`vars(obj)` 返回字段 dict（value 统一 unknown）；`dir()` 列成员名 | 完整语义 | 没有运行期 slice 对象；`vars()` 无参（locals）不支持；`dir(模块)` 不支持 |
 | `json` | `dumps(obj, indent=n, sort_keys=True)` / `loads(text, sample)`；默认分隔符 `", "`/`": "`；`loads` 用 sample 的静态类型决定目标结构 | 完整 json | 没有 `separators`/`ensure_ascii`/`default`；`loads` 必须给 sample（`None` 用于解析 null）；只覆盖 int/bool/float/str/None/list/dict/定长 tuple；dict 的 value 类型必须一致（混合 value 推不出静态类型） |
 | `csv` | `reader(f, delimiter=",", quotechar='"')` 返回 `list[list[str]]`；`writer(f, delimiter=",", quotechar='"', quoting=0, lineterminator="\r\n")` 带 `writerow`/`writerows`；`QUOTE_*` 常量与 `Error` | 完整 csv | `reader` 只接受 `file` 且 eager 读完，不接受任意可迭代对象；`delimiter`/`quotechar` 按字节且必须单字节；`QUOTE_NONNUMERIC` 等同 `QUOTE_ALL`（字段都是 str）；没有 dialect / DictReader / DictWriter；`csv.Error` 跨模块按 `ValueError` 捕获 |
@@ -80,20 +83,20 @@ PyAdamas 不追求兼容 CPython：语义是按静态类型的需要重新定的
 
 **语法层就拒**（`check` 报错）：超出 int64 的整数、Python 2 遗留写法、方法缺 `self`、字段赋值类型不符。
 
-**能解析、能过类型检查，但 `build` 报错**：通过 unknown 函数值的 `*` / `**` 展开、`*` 位于固定形参之前且不是定长 tuple、非异常类名当异常用、跨模块继承、函数内定义类、导入类模式的字段子模式、unknown 值上的数值/list/dict/tuple/set 内置类型模式、类体字段默认值里的 lambda，以及异步生成器表达式、嵌在其它表达式里的异步推导式。
+**能解析、能过类型检查，但 `build` 报错**：通过 unknown 函数值的 `*` / `**` 展开、`*` 位于固定形参之前且不是定长 tuple、非异常类名当异常用、unknown 值上的数值/list/dict/tuple/set 内置类型模式、类体字段默认值里的 lambda，以及嵌在其它表达式里的异步推导式。跨模块继承（0.139/0.140）、函数内定义类与类体 lambda（0.135）、导入类字段子模式（0.135）、异步生成器表达式（0.135）都已支持，不再属于这一层。
 
 清楚这个分层很重要：`pyadamas check` 尽量当通用 Python 语法/类型检查器用，检查器放宽的边界都记在 [CHANGELOG 0.6.1](archive/changelog-0.40.md)；`pyadamas build` 才是「能不能编译」的判据。
 
 ## 三、验证手段
 
-四层，从便宜到贵：
+七层，从便宜到贵：
 
 | 层 | 命令 | 规模 | 防的是什么 |
 |---|---|---|---|
 | 正例 | `ctest --preset dev` 里 `tests/*.py` | 11 个文件 | 前端退回保守 |
 | 反例 | `ctest --preset dev` 里 `tests/fail/*.py` | 52 个文件 | 检查器为了过测而放水 |
-| 运行 | `ctest --preset dev` 里 `tests/run/*.py` | 138 个文件 | 后端烂掉没人知道 |
-| 模块 | `ctest --preset dev` 里 `tests/modules/*/` | 11 个目录 | 分模块编译/链接、惰性初始化、缓存失效 |
+| 运行 | `ctest --preset dev` 里 `tests/run/*.py` | 147 个文件 | 后端烂掉没人知道 |
+| 模块 | `ctest --preset dev` 里 `tests/modules/*/` | 12 个目录 | 分模块编译/链接、惰性初始化、缓存失效 |
 | 未建模 | `ctest --preset dev` 里 `tests/unsupported/*.py` | 1 个文件 | 「标了没建模、实际却悄悄编译过去」 |
 | 内存 | 16MB `RLIMIT_AS` 下跑压力程序 | 拼接 / 对象 / 闭包 / 容器 / 切片 / 删除 / 推导式 / 变长实参 / `with` / 装饰器 / 异常展开 / `yield from` / 异步推导式 / 环 / unknown 泄漏 | 引用计数或 GC 漏插桩、重复释放、误回收 |
 | 差分 | `pyadamas build` 后运行 `tests/diff/run_diff.py`（自举），也可 `python3` 直接跑 | 随机程序 | 语义漂移、边界错误 |
@@ -109,7 +112,7 @@ PyAdamas 不追求兼容 CPython：语义是按静态类型的需要重新定的
 
 ### 差分测试
 
-`tests/diff/` 下六个生成器，覆盖不同侧面：
+`tests/diff/` 下七个生成器，覆盖不同侧面：
 
 | 生成器 | 内容 | 每个种子用例数 |
 |---|---|---|
@@ -119,6 +122,7 @@ PyAdamas 不追求兼容 CPython：语义是按静态类型的需要重新定的
 | `repr` | 浮点转字符串：固定边角值（0/-0、次正规、最大正规值）+ 十进制定标随机值 | 40 |
 | `gen` | 生成器迭代、`next`/`StopIteration`、`close` 清理 | 40 |
 | `async` | `asyncio.run`/`sleep(0)`/`gather`/`create_task`、异常跨 await、取消级联、Future、fd poll、异步生成器 + `async for`/`async with` | 30 |
+| `range` | `range` 惰性对象：边界、负步长、下标、`in`、`min`/`max`/`sum`、物化与推导式 | 10 |
 
 ```bash
 # 自举：runner 自己用 PyAdamas 编译执行（verify.sh 走这条；-- 之后是程序参数）
@@ -127,7 +131,7 @@ PyAdamas 不追求兼容 CPython：语义是按静态类型的需要重新定的
 
 # 同一份脚本也能用 CPython 执行（随机引擎逐位一致，生成的用例相同）
 python3 tests/diff/run_diff.py --seeds 3
-python3 tests/diff/run_diff.py --seeds 10      # 2700 个程序，建议每次改后端都跑
+python3 tests/diff/run_diff.py --seeds 10      # 2800 个程序，建议每次改后端都跑
 python3 tests/diff/run_diff.py --only repr     # 只跑浮点格式化
 ```
 
@@ -199,7 +203,7 @@ echo "类型失败:"; wc -l < /tmp/fail.txt
 
 **0.6.1 那组数字也不能直接和 0.5 的 96.1% 比。** 0.6 之前根本没有类检查，`class` 语句只解析不分析，「通过」是虚高。0.6.0 刚加类检查时失败 **19064** 个文件（通过率 46.6%），把误杀逐条放宽（见 [CHANGELOG 0.6.1](archive/changelog-0.40.md)）之后降到 **6550** 个（81.6%）。也就是说，当时的下降主要是「多了一层以前没有的检查」，不是前端变严。
 
-**当前口径（0.81.1 重跑，Debian 打包的 CPython 3.13.5）**：
+**最近一次完整口径（0.81.1 重跑，Debian 打包的 CPython 3.13.5）**：
 
 | 范围 | 文件数 | 语法通过 | 类型通过（占语法通过者） |
 |---|---|---|---|
@@ -220,7 +224,7 @@ traceback 的，必然进失败清单。口径变了，趋势才可比。
 
 语法层的失败不再「全部是明确拒绝的那几类」：0.74 支持 complex / match、0.79 支持
 bytes 之后，旧清单（bytes 2038 / complex 620 / int64 138 / match 91）已经不成立。
-当前口径下只剩 2 个文件：
+该口径下只剩 2 个文件：
 
 | 构造 | 合计 | 不含 `test/` | `test/` 内 |
 |---|---|---|---|
@@ -228,7 +232,7 @@ bytes 之后，旧清单（bytes 2038 / complex 620 / int64 138 / match 91）已
 
 都是 `class C[T]:` 没建模。
 
-类型失败按错误类型看（当前口径，错误消息归一后聚合）：
+类型失败按错误类型看（该口径，错误消息归一后聚合）：
 
 | 错误 | 标准库（不含 `test/`） | + site-packages | 性质 |
 |---|---|---|---|
