@@ -95,6 +95,8 @@ void AsmGen::emit_function(const IRFunction& f, int fi) {
         frame_rec_ = false;
         frame_owned_.clear();
         frame_owned_unknown_.clear();
+        frame_scan_.clear();
+        frame_scan_words_ = 0;
         auto t_alloc = std::chrono::steady_clock::now();
         assign_vreg_slots();
         if (gen_) {
@@ -112,9 +114,29 @@ void AsmGen::emit_function(const IRFunction& f, int fi) {
                     frame_owned_unknown_.push_back(
                         s < f.slot_unknown.size() && f.slot_unknown[s]);
                 }
+            // 借来的 unknown 引用（unknown 局部/形参）只登记给 GC 扫描，
+            // 异常展开不能释放。提升到 callee-saved 寄存器的槽不在内存里，
+            // 由 GC 的寄存器扫描兜住。
+            for (size_t s = 0; s < n_owned; ++s) {
+                TypePtr ty = f.slot_ty[s];
+                bool owned_heap = f.slot_owned[s] && ir_is_heap(ty);
+                bool unk = s < f.slot_unknown.size() && f.slot_unknown[s];
+                bool unk_ty = !ty || ty->kind == TyKind::Unknown;
+                if (!owned_heap && (unk || unk_ty) && slot_reg_[s].empty())
+                    frame_scan_.push_back(static_cast<int>(s));
+            }
+            // 临时区里可能流过 unknown 值：含 unknown vreg 的帧把整段
+            // vreg 槽登记给 GC，别的帧一个字节都不扫。
+            for (auto& vt : f.vreg_ty)
+                if (!vt || vt->kind == TyKind::Unknown) {
+                    frame_scan_words_ = n_vreg_slots_;
+                    break;
+                }
         }
+        const int rec_entries =
+            static_cast<int>(frame_owned_.size() + frame_scan_.size());
         const int rec_words =
-            frame_owned_.empty() ? 0 : 2 + static_cast<int>(frame_owned_.size());
+            (rec_entries == 0 && frame_scan_words_ == 0) ? 0 : 4 + rec_entries;
         assign_global_vreg_regs();
         assign_block_temp_regs();
         build_fp_liveness();
@@ -188,12 +210,27 @@ void AsmGen::emit_function(const IRFunction& f, int fi) {
                 frame_rec_ = true;
                 line("movq pa_frame_top(%rip), %rax");
                 emit2("movq", "%rax", rec_mem(0));
-                emit_imm_op("movq", static_cast<int64_t>(frame_owned_.size()), rec_mem(1));
-                for (size_t i = 0; i < frame_owned_.size(); ++i) {
+                emit_imm_op("movq", static_cast<int64_t>(rec_entries), rec_mem(1));
+                if (frame_scan_words_ > 0) {
+                    line(std::format("leaq {}(%rbp), %rax",
+                                     vreg_slot_off(frame_scan_words_ - 1)));
+                    emit2("movq", "%rax", rec_mem(2));
+                } else {
+                    emit_imm_op("movq", static_cast<int64_t>(0), rec_mem(2));
+                }
+                emit_imm_op("movq", static_cast<int64_t>(frame_scan_words_), rec_mem(3));
+                int ri = 4;
+                for (size_t i = 0; i < frame_owned_.size(); ++i, ++ri) {
                     line(std::format("leaq {}, %rax", smem(frame_owned_[i])));
                     // 低位标记：该槽可能装着非堆值，展开时走注册表释放。
                     if (frame_owned_unknown_[i]) line("orq $1, %rax");
-                    emit2("movq", "%rax", rec_mem(2 + static_cast<int>(i)));
+                    emit2("movq", "%rax", rec_mem(ri));
+                }
+                for (int s : frame_scan_) {
+                    line(std::format("leaq {}, %rax", smem(s)));
+                    // bit1：只给 GC 扫描，异常展开不释放。
+                    line("orq $2, %rax");
+                    emit2("movq", "%rax", rec_mem(ri++));
                 }
                 line(std::format("leaq {}, %rax", rec_mem(0)));
                 line("movq %rax, pa_frame_top(%rip)");

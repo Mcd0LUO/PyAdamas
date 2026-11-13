@@ -112,14 +112,20 @@ _Static_assert(sizeof(PyAdamasRc) == 64, "codegen literal headers must match PyA
 
 #define PYADAMAS_GC_THRESHOLD (2 * 1024 * 1024)
 
-/* 普通函数帧记录：codegen 在函数序言压栈、正常返回前弹栈。每个条目是
-   帧里一个「持有引用」的堆槽地址，longjmp 跳过这些帧时按地址读值并
-   dec，避免异常路径漏掉局部变量的引用。记录本身在目标帧的栈上，布局
-   与生成代码一致：prev、n、槽地址×n。 */
+/* 普通函数帧记录：codegen 在函数序言压栈、正常返回前弹栈。它同时服务
+   两件事：
+   - 异常展开：按槽地址 dec 持有引用的槽；
+   - GC 保守根：含 unknown 值的帧把「可能借来 unknown 引用」的槽和临时
+     区登记进来，GC 只扫这些地址，不再扫整段真实栈。
+   布局与生成代码一致：prev、n、临时区起点、临时区字数、槽地址×n。
+   槽地址低两位是标志：bit0 = 值可能非堆（释放走注册表），bit1 = 只给
+   GC 扫描、异常展开不释放（借来的 unknown 引用）。 */
 typedef struct PyAdamasFrame {
     struct PyAdamasFrame* prev;
     int64_t n;
-    void* slots[];  /* 槽地址（void**），解引用得到当前值 */
+    void* scan_base;    /* 临时区起点（vreg 槽），NULL 表示没有 */
+    int64_t scan_words; /* 临时区字节数 / 8 */
+    void* slots[];      /* 槽地址（void**），解引用得到当前值 */
 } PyAdamasFrame;
 
 typedef struct PyAdamasHandler {

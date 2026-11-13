@@ -246,21 +246,29 @@ private:
     }
 
     // 帧记录（PyAdamasFrame）在局部区最下面，内存里从低地址往高地址依次是
-    // prev、n、槽地址×n，与两边共用的结构体布局一致。栈向下增长，所以
-    // 下标 0 对应最负的偏移。
+    // prev、n、临时区起点、临时区字数、槽地址×n，与两边共用的结构体
+    // 布局一致。栈向下增长，所以下标 0 对应最负的偏移。
     int rec_off(int i) const {
-        int words = 2 + static_cast<int>(frame_owned_.size());
+        int words = 4 + static_cast<int>(frame_owned_.size() + frame_scan_.size());
         return -8 * (n_saved_regs_ + n_slots_ + n_vreg_slots_ + words - i);
     }
     std::string rec_mem(int i) const { return std::format("{}(%rbp)", rec_off(i)); }
 
     // 本次代码生成是否压了帧记录（弹栈只在这个函数里发）。
     bool frame_rec_ = false;
+    // vreg 槽区里第 slot 个槽的偏移（vreg 槽紧挨着命名槽往低地址排）。
+    int vreg_slot_off(int slot) const {
+        return -8 * (n_saved_regs_ + n_slots_ + slot + 1);
+    }
     // 帧记录里的槽：持有堆引用的非借用槽，异常展开时按地址 dec。
     std::vector<int> frame_owned_;
     // 与 frame_owned_ 一一对应：槽里可能是非堆值，展开时走注册表释放。
     // 记录里用地址最低位置 1 标记（槽地址 8 字节对齐）。
     std::vector<bool> frame_owned_unknown_;
+    // 借来的 unknown 槽：只登记给 GC 扫描，异常展开不释放。
+    std::vector<int> frame_scan_;
+    // 含 unknown vreg 时，需要保守扫描的临时区字数（0 表示没有）。
+    int frame_scan_words_ = 0;
 
     const std::string& mem(VReg r) const {
         if (r < static_cast<VReg>(vreg_reg_.size()) && !vreg_reg_[r].empty())

@@ -816,19 +816,32 @@ PYADAMAS_NO_ASAN static void gc_scan_range(const void* begin, const void* end) {
     }
 }
 
-// 取真实栈指针：ASan 会把带地址的局部变量搬到 fake stack，用 &local
-// 当扫描起点会跨到未映射区域。生成的代码帧本身在真实栈上。
-PYADAMAS_NO_ASAN static uintptr_t gc_current_sp(void) {
-    uintptr_t sp;
-    __asm__ volatile("movq %%rsp, %0" : "=r"(sp));
-    return sp;
-}
-
 // setjmp 会把 callee-saved 寄存器存进 jmp_buf；生成代码里常驻寄存器的
-// 堆指针就靠这一段兜住。
+// 堆指针（槽位提升、全局 vreg）就靠这一段兜住。
 PYADAMAS_NO_ASAN static void gc_scan_registers(void) {
     jmp_buf regs;
     if (setjmp(regs) == 0) gc_scan_range(&regs, (char*)&regs + sizeof regs);
+}
+
+/* 保守根只扫帧记录登记过的地址：
+   - 借来的 unknown 槽（bit1，只扫描不释放）；
+   - 带 unknown 标志的拥有槽（bit0）；
+   - 含 unknown vreg 的帧的临时区（scan_base/scan_words）。
+   纯类型化帧和栈上的其它内容（返回地址、保存的寄存器、填充）一律
+   不扫。 */
+static void gc_scan_frames(void) {
+    for (PyAdamasFrame* f = pa_frame_top; f; f = f->prev) {
+        if (f->scan_words > 0 && f->scan_base)
+            gc_scan_range(f->scan_base,
+                          (char*)f->scan_base + sizeof(uintptr_t) * (size_t)f->scan_words);
+        for (int64_t i = 0; i < f->n; ++i) {
+            uintptr_t addr = (uintptr_t)f->slots[i];
+            int64_t v = *(int64_t*)(addr & ~(uintptr_t)3);
+            if (!v) continue;
+            if (addr & 3) gc_mark((uintptr_t)v);   // unknown / 只扫描
+            else gc_mark_direct((uintptr_t)v);     // 已知堆槽
+        }
+    }
 }
 
 void gc_scan_object(PyAdamasRc* h) {
@@ -1038,7 +1051,7 @@ static void gc_collect(int major) {
         for (int64_t i = 0; i < gc_n_globals; ++i)
             gc_mark((uintptr_t)*(void**)gc_globals[i]);
         for (int64_t i = 0; i < temp_len; ++i) gc_mark((uintptr_t)temp_stack[i]);
-        gc_scan_range((const void*)gc_current_sp(), (const void*)gc_stack_top);
+        gc_scan_frames();
         gc_scan_registers();
         if (t0) t2 = gc_now_ms();
         gc_drain();
@@ -1064,7 +1077,7 @@ static void gc_collect(int major) {
             }
         }
         if (!gc_untracked_leaves) {
-            gc_scan_range((const void*)gc_current_sp(), (const void*)gc_stack_top);
+            gc_scan_frames();
             gc_scan_registers();
         }
         gc_drain();

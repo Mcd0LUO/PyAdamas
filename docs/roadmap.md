@@ -75,9 +75,10 @@
 | 0.147 | 容器字面量与推导式的 RC 所有权转移，扩展 RC 基准与 149 用例 |
 | 0.148 | 裸 list / 空字面量的元素种类延迟定型（kind 3），修复裸 list `pop` 的 use-after-free |
 | 0.149 | 分代循环收集：minor 用 trial-deletion、major 用标记-清扫；修复 RC 索引墓碑哨兵误命中 |
+| 0.150 | GC 保守根收窄：帧记录扩展成影子根表，不再扫描整段真实栈 |
 | 许可证 | Apache-2.0（见 [LICENSE](../LICENSE) / [NOTICE](../NOTICE)） |
 
-## 当前状态（0.149）
+## 当前状态（0.150）
 
 流水线 `源码 → 词法 → AST → lambda 脱糖 → 类型检查 → IR → x86-64 汇编 → 可执行文件` 已打通。
 
@@ -111,7 +112,7 @@
 
 按「什么时候会疼」排序：
 
-1. **GC 的根仍保守，且 stop-the-world**：分代已落地（minor trial-deletion + major 标记-清扫），exact-RC 模式不再扫栈；含 unknown 局部槽的程序仍扫真实栈，栈/寄存器里的整数可能被误认为根；没有增量/并发和栈映射
+1. **GC 的根只扫登记区，且 stop-the-world**：分代已落地（minor trial-deletion + major 标记-清扫）；GC 不再扫整段真实栈，只扫帧记录登记的 unknown 槽、含 unknown vreg 帧的临时区和 callee-saved 寄存器，临时区仍整段保守扫描；没有增量/并发和栈映射
 2. **unknown 引用的计数不精确**：容器 kind 2 元素、unknown 字段与全局已用 RC 索引精确释放（`pa_rc_dec_unknown`）；裸 `list` 的空容器已在第一次写入时定型；仍剩 unknown 类型的局部槽是借来的引用（不计入 rc），靠保守扫栈兜底
 3. **Optional 的收窄能力不足**：`x: Optional[str]` 在 `if x is None: ...` 之后、跨语句块或跨函数调用时仍按 Optional 处理；修它需要正经的数据流分析
 4. **优化遍仍不完整**：有常量折叠、DCE、小函数内联、LICM、下标版本化/免检查；没有 CSE、强度削减、循环旋转和通用向量化
