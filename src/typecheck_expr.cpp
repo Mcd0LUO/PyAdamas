@@ -76,8 +76,12 @@ TypePtr TypeChecker::expr(Expr& e) {
                 // 模块里出现过 globals()[k] = v：名字集合是动态的
                 if (dynamic_globals_) return t_unknown();
                 // 模块级通常是条件导入、C 扩展常量、__all__ 之外的名字，
-                // 静态无从判断；函数体内才值得报
-                err(n.line, n.col, std::format("undefined name '{}'", n.id));
+                // 静态无从判断；只在函数体内确定性报错。类体/模块体
+                // 的名字可能在后文或其它模块定义，conservative 放过。
+                if (cur_fn_scope_)
+                    err(n.line, n.col, std::format("undefined name '{}'", n.id));
+                else
+                    unsupported.push_back("undefined module-scope name '" + n.id + "'");
                 return t_unknown();
             }
             case ExprKind::JoinedStr: {
