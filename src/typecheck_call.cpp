@@ -144,6 +144,8 @@ TypePtr TypeChecker::check_args(const FuncInfoPtr& fn, Call& c) {
                 sync();
                 return;
             }
+            // 基类 __init__ 显式接收子类 self（Base.__init__(self,...)）合法。
+            if (p.name == "self" && ty && ty->kind == TyKind::Class) return;
             err(line, col,
                 std::format("argument '{}' of '{}' expects '{}', got '{}'", p.name, fn->name,
                             type_name(p.ty), type_name(ty)));

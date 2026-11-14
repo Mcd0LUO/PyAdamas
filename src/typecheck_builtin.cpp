@@ -268,7 +268,9 @@ TypePtr TypeChecker::builtin_call(const std::string& n, Call& c) {
             return t_int();
         }
         if (n == "type") {
-            if (!need(1, 1)) return t_unknown();
+            if (!need(1, 3)) return t_unknown();
+            // 3 参 type(name, bases, dict)：动态造类，结果类型未知。
+            if (a.size() >= 3) return t_unknown();
             return mk_typeobj(a.empty() ? t_unknown() : a[0]);
         }
         if (n == "frozenset") {
