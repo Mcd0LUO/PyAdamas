@@ -177,9 +177,9 @@ void TypeChecker::funcdef_impl(FunctionDef& f, const ClassInfoPtr& owner) {
         saw_yield_ = false;
 
         for (auto& p : info->pos)
-            cur_->vars[p.name] = Symbol{p.ty ? p.ty : t_unknown(), f.line, true, false};
+            cur_->vars[p.name] = Symbol{p.ty ? p.ty : t_unknown(), f.line, !p.inferred, false};
         for (auto& p : info->kwonly)
-            cur_->vars[p.name] = Symbol{p.ty ? p.ty : t_unknown(), f.line, true, false};
+            cur_->vars[p.name] = Symbol{p.ty ? p.ty : t_unknown(), f.line, !p.inferred, false};
         if (info->varargs)
             // *args 在 Python 里是 tuple，不是 list：`(v,) + args` 合法
             cur_->vars[info->vararg_name] =
