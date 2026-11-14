@@ -371,6 +371,9 @@ private:
 
     // 当前方法里 zero-arg super() 的下一实现（按定义类的 C3 MRO）。
     const MethodInfo* super_method(const std::string& name) const;
+    // 定义类的 MRO 里有没有跨模块导入的基类（其方法 check 阶段不可见）。
+    bool imported_base_in_mro(const ClassInfo* c) const;
+
 
     // `if x is not None:` 这类守卫之后的简单类型收窄。
     // 不做完整的数据流分析，只处理 Name 与 None 的比较。

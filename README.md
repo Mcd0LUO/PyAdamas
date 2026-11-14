@@ -159,7 +159,7 @@ tools/                    一次性脚本
 | `tests/run/*.py` | 155 | 编译 + 运行，输出与文件末尾的 `# --- expect ---` 逐行比对 |
 | `tests/unsupported/*.py` | 1 | `check` 必须打「没建模」标记，且 `build` 必须拒绝 |
 | `tests/diff/` | 7 个生成器 | 随机程序与 CPython 比 stdout，默认 3 种子 840 个程序 |
-| `tests/modules/` | 12 个目录 | 多模块编译 + 运行 + 二次构建缓存命中 |
+| `tests/modules/` | 13 个目录 | 多模块编译 + 运行 + 二次构建缓存命中 |
 | `tests/bench/` | 用例集 | 标准库与 RC/GC 基准：同一用例分别用 PyAdamas 与 CPython 跑，`python3 tests/bench/run_bench.py` |
 | 内存验收 | — | 16MB 地址空间限制下跑拼接 / 对象 / 闭包 / 容器 / 切片 / 删除 / 推导式 / 变长实参 / `with` / 装饰器 / 异常展开 / 生成器 / `yield from` / 协程 / Task / Future / fd 等待 / 异步生成器 / 异步推导式 / 环 / unknown 泄漏 |
 
@@ -169,7 +169,7 @@ ctest --preset dev
 /tmp/run_diff.prog --pyadamas build/dev/pyadamas --cpython python3 --seeds 3   # 840 个程序
 ```
 
-前端鲁棒性基线：历史口径（CPython 3.11 标准库 + site-packages，38582 个 `.py`）语法通过 35693，其中类型通过 29143（81.6%）；标准库本体 1143 / 1289（88.7%）。最近一次完整口径（0.165，Debian CPython 3.13.5）为标准库本体 320 / 596（53.7%），去掉 `test/` 为 288 / 532（50.0%）；0.158 同口径为 281 / 596、0.81.1 为 279 / 596。两段口径不可直接比较，明细见 [compatibility.md](docs/compatibility.md#前端鲁棒性基线)。
+前端鲁棒性基线：历史口径（CPython 3.11 标准库 + site-packages，38582 个 `.py`）语法通过 35693，其中类型通过 29143（81.6%）；标准库本体 1143 / 1289（88.7%）。最近一次完整口径（0.166，Debian CPython 3.13.5）为标准库本体 335 / 596（56.3%），去掉 `test/` 为 288 / 532；0.165 为 320 / 596、0.158 为 281 / 596、0.81.1 为 279 / 596。两段口径不可直接比较，明细见 [compatibility.md](docs/compatibility.md#前端鲁棒性基线)。
 
 ASan + UBSan + LSan 下跑全部用例零报告（含生成代码的 RC、闭包、GC、字典、切片、删除、推导式、`with`、装饰器、变长实参、异常展开、生成器挂起/恢复、`yield from` 委托、协程调度、Task 取消级联、Future 多等待者、fd 轮询与异步推导式路径），`-Wshadow -Wnon-virtual-dtor -Wold-style-cast -Wcast-qual` 零警告。内存验收在 16MB `RLIMIT_AS` 下完成，对象环 / 字典环 / unknown 泄漏 / 闭包垃圾 / 容器与切片 / 异常展开的峰值 RSS 约 8MB。
 

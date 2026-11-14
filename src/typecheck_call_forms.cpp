@@ -227,6 +227,14 @@ TypePtr TypeChecker::call_attr(Attribute& a, Call& c) {
                 }
                 const MethodInfo* m = super_method(a.attr);
                 if (!m) {
+                    // 定义类的 MRO 里有导入基类时，这个方法的实现可能在
+                    // 另一份接口里，check 阶段看不见。这不是错误——build
+                    // 会沿运行期 MRO 找。只在纯本地继承链都找不到时报错。
+                    if (cur_class_->is_open() || imported_base_in_mro(cur_class_)) {
+                        for (auto& arg : c.args) expr(*arg);
+                        for (auto& kw : c.keywords) expr(*kw.value);
+                        return t_unknown();
+                    }
                     err(c.line, c.col,
                         std::format("super() has no method '{}' after class '{}'",
                                     a.attr, cur_class_->name));

@@ -104,6 +104,20 @@ bool TypeChecker::has_method(const TypePtr& t, const std::string& m) {
         }
     }
 
+bool TypeChecker::imported_base_in_mro(const ClassInfo* c) const {
+    if (!c) return false;
+    for (const ClassInfo* k : c->mro) {
+        if (k == c) continue;
+        if (k->imported() || k->is_open()) return true;
+    }
+    // 骨架/导入类没有 C3 表时，退回逐层看基类
+    for (const ClassInfo* p = c->base; p; p = p->base)
+        if (p->imported() || p->is_open()) return true;
+    for (const ClassInfo* e : c->extra_bases)
+        if (e->imported() || e->is_open()) return true;
+    return false;
+}
+
 const MethodInfo* TypeChecker::super_method(const std::string& name) const {
         if (!cur_class_) return nullptr;
         bool after = false;
