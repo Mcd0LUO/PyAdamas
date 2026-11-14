@@ -520,9 +520,13 @@ void TypeChecker::assign(Expr& target, TypePtr value, int line, int col) {
                         unsupported.push_back("assignment to a property setter");
                         return;
                     }
-                    // `obj.method = fn` 是动态覆盖方法（monkey-patch），
-                    // 布局固定但 CPython 常见；conservative 放过。
-                    unsupported.push_back("assignment to a method name");
+                    // `obj.method = fn` 动态覆盖方法（monkey-patch）合法；
+                    // 但赋非函数值（`b.f = 1`）是明确错误，保留报错。
+                    if (value && value->kind == TyKind::Func) {
+                        unsupported.push_back("assignment to a method name");
+                        return;
+                    }
+                    err(line, col, std::format("cannot assign to method '{}'", at->attr));
                     return;
                 }
                 // 外部基类可能带来任意属性
