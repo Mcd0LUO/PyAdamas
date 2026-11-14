@@ -93,11 +93,12 @@
 | 0.165 | 动态属性 + 反射放宽：类实例可挂惰性 `dict[str, unknown]`，`setattr`/`getattr`/`hasattr` 落到运行期查表；非类接收者的反射在 check 阶段放过；基线 294 → 320 / 596 |
 | 0.166 | 跨模块 super()：定义类的 MRO 里有导入基类时，`super()` 的方法在 check 阶段看不见，只在纯本地继承链都找不到时报错；有导入基类/`open` 类返回 unknown 交给 build；基线 320 → 335 / 596 |
 | 0.167 | 自定义异常类当普通类：有字段/方法的富异常是真实 vtable 实例，`raise`/`except as e` 走运行期实例；内置异常属性保守放过；基线 335 → 348 / 596 |
+| 0.170 | 一键扫荡：2参 super、no-__init__ 带参实例化、unpack(generator/range/str/Optional)、type 元数据属性、异常值方法、推断形参可重绑定；基线 411 → 435 / 596 |
 | 0.169 | getattr 属性名非字面量放宽 + 内置异常多参构造/关键字：args 元组跨 raise 还原（pending_exc_args）；基线 374 → 411 / 596 |
 | 0.168 | isinstance/bytes：第二参数接受 `bytes`/`bytearray`/`type`/`slice`/`frozenset` 等与 `(A,B,...)` 元组/列表；运行期元组短路 OR、known 类型静态判定、unknown 带运行期标签内置判定；`bytes()` 2 参/可迭代-of-int、`bytes*int`、`decode` 0..2、`translate`、内置类型名当值；基线 348 → 374 / 596 |
 | 许可证 | Apache-2.0（见 [LICENSE](../LICENSE) / [NOTICE](../NOTICE)） |
 
-## 当前状态（0.169）
+## 当前状态（0.170）
 
 流水线 `源码 → 词法 → AST → lambda 脱糖 → 类型检查 → IR → x86-64 汇编 → 可执行文件` 已打通。
 
@@ -115,7 +116,7 @@
 
 ### 1. 工程收尾
 
-- 标准库前端基线 0.169 复测（Debian 3.13.5：本体 411 / 596，去掉 `test/` 370 / 532）；剩余失败已高度分散（undefined name、各类运算符、getattr 非字面量、跨模块类成员等）；原口径（CPython 3.11.1 + site-packages，38582 个文件）仍未重跑；
+- 标准库前端基线 0.170 复测（Debian 3.13.5：本体 435 / 596，去掉 `test/` 392 / 532）；剩余失败已高度分散（undefined name、各类运算符、getattr 非字面量、跨模块类成员等）；原口径（CPython 3.11.1 + site-packages，38582 个文件）仍未重跑；
 - 保持 `docs/` 与 README 的验证表同步（运行用例、模块目录等数字按仓库实际统计）；
 - `tests/bench/` 标准库基准已固化（0.144）。
 

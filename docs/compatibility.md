@@ -315,6 +315,25 @@ bytes 之后，旧清单（bytes 2038 / complex 620 / int64 138 / match 91）已
 | 自定义异常类的字段/方法 | 25 | 异常类类体只允许 `pass` |
 | 跨模块类的字段/方法可见性 | ~25 | 外部的类成员表看不见 |
 
+**0.170 复测（2026-11-14）**——一键扫荡剩余散簇：
+
+| 范围 | 文件数 | 语法通过 | 类型通过（占语法通过者） |
+|---|---|---|---|
+| 标准库本体 | 598 | 596 | 435 / 596（73.0%） |
+| 标准库本体（去掉 `test/`） | 533 | 532 | 392 / 532（73.7%） |
+
+比 0.169 多 24 个（+4.1pp）。批量收口：
+
+- **2 参 super**：`super(Cls, self)` 当 Cls 是当前类时按零参处理。
+- **no-`__init__` 带参实例化**：常量类的标记值实例化不再判死。
+- **unpack 再放宽**：generator/range/str/Optional 目标可解包（元素类型逐个赋）。
+- **type 对象元数据属性**：`__qualname__`/`__mro__`/`__doc__`/`__bases__` 等。
+- **异常值方法**：`with_traceback`/`add_note`；异常/type 对象属性赋值、方法名 monkey-patch（仅函数值）放宽。
+- **推断形参可重绑定**：inferred 参数 not annotated，`cannot assign` 簇 18→4。
+
+剩余 top：`undefined name`（45，多为跨模块/条件导入常量）、`has no method`（22）、`has no attribute`（11）、`is not callable`（10）、`super() is only supported`（10）。
+
+
 **0.169 复测（2026-11-14）**——getattr 非字面量 + 内置异常多参：
 
 | 范围 | 文件数 | 语法通过 | 类型通过（占语法通过者） |
