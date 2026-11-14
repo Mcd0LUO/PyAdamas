@@ -9,111 +9,162 @@ VReg Lowerer::lower_builtin_reflect(const std::string& name, Call& c) {
             err(c.line, c.col, "isinstance() takes exactly two arguments");
             return const_bool(false);
         }
-        TypePtr vt = tc_.type_of(c.args[0].get());
-        TypePtr tt = tc_.type_of(c.args[1].get());
-        if (tt && tt->kind == TyKind::ClassObj && !tt->sub.empty()) tt = tt->sub[0];
-        TypePtr st = strip_optional(vt);
-        std::string builtin;
-        if (tt && tt->kind == TyKind::Func && tt->fn) builtin = tt->fn->name;
-        if (!builtin.empty()) {
-            if (builtin == "object") return const_bool(true);
-            bool known = st && st->kind != TyKind::Unknown;
-            auto kind_is = [&](std::initializer_list<TyKind> ks) {
-                for (auto k : ks)
-                    if (st && st->kind == k) return true;
-                return false;
-            };
-            if (known) {
-                bool r = false;
-                if (builtin == "int") r = kind_is({TyKind::Int, TyKind::Bool});
-                else if (builtin == "bool") r = kind_is({TyKind::Bool});
-                else if (builtin == "float") r = kind_is({TyKind::Float});
-                else if (builtin == "str") r = kind_is({TyKind::Str});
-                else if (builtin == "list") r = kind_is({TyKind::List});
-                else if (builtin == "tuple") r = kind_is({TyKind::Tuple});
-                else if (builtin == "dict") r = kind_is({TyKind::Dict});
-                else if (builtin == "set") r = kind_is({TyKind::Set});
-                else if (builtin == "complex") r = kind_is({TyKind::Complex});
-                else if (builtin == "range") r = kind_is({TyKind::Range});
-                else {
+        TypePtr vt0 = tc_.type_of(c.args[0].get());
+        TypePtr tt0 = tc_.type_of(c.args[1].get());
+        if (tt0 && tt0->kind == TyKind::ClassObj && !tt0->sub.empty()) tt0 = tt0->sub[0];
+        bool obj_evaled = false;
+        VReg objreg = kNoReg;
+        auto obj = [&]() -> VReg {
+            if (!obj_evaled) {
+                objreg = expr(*c.args[0]);
+                obj_evaled = true;
+            }
+            return objreg;
+        };
+        auto class_of_target = [&](TypePtr t) -> ClassInfo* {
+            if (!t) return nullptr;
+            if (t->kind == TyKind::ClassObj && !t->sub.empty()) t = t->sub[0];
+            if (t->kind == TyKind::TypeObj && !t->sub.empty()) t = t->sub[0];
+            if (t->kind == TyKind::ClassObj && !t->sub.empty()) t = t->sub[0];
+            return t->kind == TyKind::Class ? t->cls : nullptr;
+        };
+        // 单个目标类型的检查；tuple 目标是它反复调用后 OR。
+        std::function<VReg(const TypePtr&)> single =
+            [&](const TypePtr& tt) -> VReg {
+            TypePtr st = strip_optional(vt0);
+            std::string builtin;
+            if (tt && tt->kind == TyKind::Func && tt->fn) builtin = tt->fn->name;
+            if (!builtin.empty()) {
+                if (builtin == "object") return const_bool(true);
+                bool known = st && st->kind != TyKind::Unknown;
+                auto kind_is = [&](std::initializer_list<TyKind> ks) {
+                    for (auto k : ks)
+                        if (st && st->kind == k) return true;
+                    return false;
+                };
+                if (known) {
+                    bool r = false;
+                    if (builtin == "int") r = kind_is({TyKind::Int, TyKind::Bool});
+                    else if (builtin == "bool") r = kind_is({TyKind::Bool});
+                    else if (builtin == "float") r = kind_is({TyKind::Float});
+                    else if (builtin == "str") r = kind_is({TyKind::Str});
+                    else if (builtin == "list") r = kind_is({TyKind::List});
+                    else if (builtin == "tuple") r = kind_is({TyKind::Tuple});
+                    else if (builtin == "dict") r = kind_is({TyKind::Dict});
+                    else if (builtin == "set") r = kind_is({TyKind::Set});
+                    else if (builtin == "complex") r = kind_is({TyKind::Complex});
+                    else if (builtin == "range") r = kind_is({TyKind::Range});
+                    else if (builtin == "bytes") r = kind_is({TyKind::Bytes});
+                    else if (builtin == "type")
+                        r = kind_is({TyKind::Class, TyKind::TypeObj, TyKind::ClassObj});
+                    else if (builtin == "frozenset") r = kind_is({TyKind::Set});
+                    else {
+                        err(c.args[1]->line, c.args[1]->col,
+                            std::format("isinstance() does not support type '{}' yet", builtin));
+                        return const_bool(false);
+                    }
+                    return const_bool(r);
+                }
+                // unknown 值：只有带运行期类型标签的容器/标量能查。
+                RtFn fn{};
+                bool has_tag = true;
+                if (builtin == "str") fn = RtFn::IsStr;
+                else if (builtin == "list" || builtin == "tuple") fn = RtFn::IsSeq;
+                else if (builtin == "dict") fn = RtFn::IsDict;
+                else if (builtin == "complex") fn = RtFn::IsComplex;
+                else has_tag = false;
+                // 没有运行期类型标签的内置（int/float/bool/bytes 等）在
+                // unknown 值上无法判定：保守返回 false（tuple 的 OR 场景
+                // 下其余元素仍可继续检查）。
+                if (!has_tag) return const_bool(false);
+                return call_runtime(fn, t_bool(), {obj()});
+            }
+            ClassInfo* target = class_of_target(tt);
+            if (!target) {
+                err(c.args[1]->line, c.args[1]->col,
+                    "isinstance() second argument must be a class or builtin type");
+                return const_bool(false);
+            }
+            if (target->is_exception_class) {
+                if (st && st->kind != TyKind::Unknown && st->kind != TyKind::Exception)
+                    return const_bool(false);
+                return call_runtime(RtFn::IsException, t_bool(),
+                                    {obj(), const_str(target->name)});
+            }
+            auto cid = class_ids_.find(target);
+            if (cid == class_ids_.end()) {
+                std::string qual = target->origin_qualname;
+                if (qual.empty()) {
+                    auto scan = [&](const std::unordered_map<std::string, ModuleInfoPtr>& mods) {
+                        for (auto& entry : mods) {
+                            if (!qual.empty()) return;
+                            for (auto& ce : entry.second->classes)
+                                if (ce.second.cls.get() == target) {
+                                    qual = entry.second->name + "." + ce.first;
+                                    return;
+                                }
+                        }
+                    };
+                    scan(st_->modules);
+                    if (qual.empty()) scan(module_aliases_);
+                }
+                if (qual.empty()) {
                     err(c.args[1]->line, c.args[1]->col,
-                        std::format("isinstance() does not support type '{}' yet", builtin));
+                        "isinstance() with an imported class is not supported yet");
                     return const_bool(false);
                 }
-                return const_bool(r);
+                return call_runtime(RtFn::IsNamedClass, t_bool(),
+                                    {obj(), const_str(qual)});
             }
-            // unknown 值：只有带运行期类型标签的容器/标量能查。
-            RtFn fn{};
-            if (builtin == "str") fn = RtFn::IsStr;
-            else if (builtin == "list" || builtin == "tuple") fn = RtFn::IsSeq;
-            else if (builtin == "dict") fn = RtFn::IsDict;
-            else if (builtin == "complex") fn = RtFn::IsComplex;
-            else {
-                err(c.args[1]->line, c.args[1]->col,
-                    std::format("isinstance() of an unknown value as '{}' is not supported yet",
-                                builtin));
+            bool runtime = true;
+            if (st && st->kind == TyKind::Class && st->cls) {
+                bool a = st->cls->is_subclass_of(target);
+                bool b = target->is_subclass_of(st->cls);
+                if (a)
+                    runtime = vt0 != st;
+                else if (b)
+                    runtime = true;
+                else
+                    return const_bool(false);
+            } else if (st && st->kind != TyKind::Unknown) {
                 return const_bool(false);
             }
-            return call_runtime(fn, t_bool(), {expr(*c.args[0])});
-        }
-        ClassInfo* target = tt && tt->kind == TyKind::Class ? tt->cls : nullptr;
-        if (!target) {
-            err(c.args[1]->line, c.args[1]->col,
-                "isinstance() second argument must be a class or builtin type");
-            return const_bool(false);
-        }
-        if (target->is_exception_class) {
-            if (st && st->kind != TyKind::Unknown && st->kind != TyKind::Exception)
-                return const_bool(false);
-            return call_runtime(RtFn::IsException, t_bool(),
-                                {expr(*c.args[0]), const_str(target->name)});
-        }
-        auto cid = class_ids_.find(target);
-        if (cid == class_ids_.end()) {
-            // 导入类没有本模块的运行期编号，用「模块名.类名」比较；
-            // pa_is_named_class 会沿实例的动态 MRO 查，子类也能匹配。
-            std::string qual = target->origin_qualname;
-            if (qual.empty()) {
-                auto scan = [&](const std::unordered_map<std::string, ModuleInfoPtr>& mods) {
-                    for (auto& entry : mods) {
-                        if (qual.empty() == false) return;
-                        for (auto& ce : entry.second->classes)
-                            if (ce.second.cls.get() == target) {
-                                qual = entry.second->name + "." + ce.first;
-                                return;
-                            }
-                    }
-                };
-                scan(st_->modules);
-                if (qual.empty()) scan(module_aliases_);
-            }
-            if (qual.empty()) {
-                err(c.args[1]->line, c.args[1]->col,
-                    "isinstance() with an imported class is not supported yet");
-                return const_bool(false);
-            }
+            if (!runtime) return const_bool(true);
+            std::string qual = mod_.runtime_name + "." + target->name;
             return call_runtime(RtFn::IsNamedClass, t_bool(),
-                                {expr(*c.args[0]), const_str(qual)});
+                                {obj(), const_str(qual)});
+        };
+        if (tt0 && tt0->kind == TyKind::Tuple) {
+            const auto& subs = tt0->sub;
+            if (subs.size() == 1) return single(subs.empty() ? nullptr : subs[0]);
+            int end = new_block("isinst.end");
+            int res_slot = new_borrow_slot(t_bool());
+            int cur = -1;
+            for (size_t i = 0; i < subs.size(); ++i) {
+                if (i > 0) switch_to(cur);
+                VReg r = single(subs[i]);
+                store_borrow_slot(res_slot, r);
+                if (i + 1 < subs.size()) {
+                    int next = new_block("isinst.n");
+                    Inst br;
+                    br.op = IrOp::Branch;
+                    br.a = load_slot(res_slot, t_bool());
+                    br.target = end;
+                    br.target2 = next;
+                    emit(std::move(br));
+                    cur = next;
+                } else {
+                    Inst j;
+                    j.op = IrOp::Jump;
+                    j.target = end;
+                    emit(std::move(j));
+                }
+            }
+            switch_to(end);
+            return load_slot(res_slot, t_bool());
         }
-        bool runtime = true;
-        if (st && st->kind == TyKind::Class && st->cls) {
-            bool a = st->cls->is_subclass_of(target);
-            bool b = target->is_subclass_of(st->cls);
-            if (a)
-                runtime = vt != st;  // Optional 可能实际是 None
-            else if (b)
-                runtime = true;      // 值可能是子类
-            else
-                return const_bool(false);
-        } else if (st && st->kind != TyKind::Unknown) {
-            return const_bool(false);
-        }
-        if (!runtime) return const_bool(true);
-        // 类编号只在模块内唯一，跨模块对象 MRO 里可能有同号的别的类；
-        // 本地类目标也按限定名比较，避免误匹配。
-        std::string qual = mod_.runtime_name + "." + target->name;
-        return call_runtime(RtFn::IsNamedClass, t_bool(),
-                            {expr(*c.args[0]), const_str(qual)});
+        return single(tt0);
+
     }
 
     if (name == "type") {
