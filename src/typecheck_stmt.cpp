@@ -599,10 +599,14 @@ void TypeChecker::unpack_assign(std::vector<ExprPtr>& targets, TypePtr value, in
             return;
         }
 
-        if (value->kind == TyKind::List || value->kind == TyKind::Set) {
-            // list[int] 只记录元素类型，不记录长度，所以逐个赋元素类型；
-            // 老代码把 sub（元素类型数组）当元素列表，`[a, b] = [1, 2]` 会误报。
-            TypePtr elem = value->sub.empty() ? t_unknown() : value->sub[0];
+        if (value->kind == TyKind::List || value->kind == TyKind::Set ||
+            value->kind == TyKind::Generator || value->kind == TyKind::Range ||
+            value->kind == TyKind::Str) {
+            // 只记录元素类型、不记录长度，逐个赋元素类型。
+            // generator/range 是惰性可迭代；str 解包到单字符。
+            TypePtr elem = value->kind == TyKind::Str ? t_str()
+                          : value->sub.empty()        ? t_unknown()
+                                                      : value->sub[0];
             for (auto& t : targets) {
                 if (t->kind == ExprKind::Starred)
                     assign_one(*t, mk_list(elem));
@@ -617,6 +621,15 @@ void TypeChecker::unpack_assign(std::vector<ExprPtr>& targets, TypePtr value, in
             return;
         }
         if (value->kind == TyKind::Class) return;  // 可能实现了 __iter__
+        if (value->kind == TyKind::Optional && !value->sub.empty()) {
+            // a, b = maybe_tuple：拆 Optional 内层，None 走 unknown。
+            TypePtr inner = value->sub[0];
+            if (inner->kind == TyKind::Tuple || inner->kind == TyKind::List ||
+                inner->kind == TyKind::Str || inner->kind == TyKind::Generator) {
+                for (auto& t : targets) assign_one(*t, t_unknown());
+                return;
+            }
+        }
         err(line, col, std::format("cannot unpack non-sequence '{}'", type_name(value)));
     }
 

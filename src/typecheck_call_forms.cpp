@@ -11,6 +11,26 @@ TypePtr TypeChecker::call_name(Name& n, Call& c) {
                 err(c.line, c.col, "super() is only supported inside a class method");
                 return t_unknown();
             }
+            if (c.keywords.empty() && c.args.size() == 2) {
+                // super(Cls, self)：Cls 是当前类时等价于零参 super()。
+                // 只接受当前类的名字作第一参，展开后按零参 super 处理。
+                Expr* fst = c.args[0].get();
+                const std::string* cname = nullptr;
+                if (fst->kind == ExprKind::Name)
+                    cname = &static_cast<Name*>(fst)->id;
+                else if (fst->kind == ExprKind::Constant) {
+                    auto& cc = static_cast<Constant&>(*fst);
+                    if (cc.ck == Constant::CK::Str) cname = &cc.s;
+                }
+                if (cname && *cname == cur_class_->name) {
+                    expr(*c.args[1]);  // 求值 self，保留副作用
+                    return t_unknown();
+                }
+                err(c.line, c.col,
+                    "two-argument super() is only supported for the current class");
+                for (auto& arg : c.args) expr(*arg);
+                return t_unknown();
+            }
             if (!c.args.empty() || !c.keywords.empty()) {
                 err(c.line, c.col,
                     "only zero-argument super() is supported inside a method");
@@ -383,11 +403,9 @@ TypePtr TypeChecker::call_value(Call& c) {
             else
                 for (auto& arg : c.args) expr(*arg);
         } else {
-            // 没有 __init__ 时只允许零实参；但如果父类在外部（比如
-            // unittest.TestCase），__init__ 是那边定义的，管不了。
-            if ((!c.args.empty() || !c.keywords.empty()) && !cls->is_open())
-                err(c.line, c.col,
-                    std::format("'{}' takes no arguments (no __init__)", cls->name));
+            // 没有 __init__：CPython 会报 TypeError，但这类「常量类」
+            // （SafeUUID 的 safe/unsafe/unknown 等）常被带参实例化做
+            // 标记值。check 一律放过、求值实参返回实例；不要判死。
             for (auto& arg : c.args) expr(*arg);
             for (auto& kw : c.keywords) expr(*kw.value);
         }
