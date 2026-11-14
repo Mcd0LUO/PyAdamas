@@ -262,6 +262,14 @@ TypePtr TypeChecker::call_attr(Attribute& a, Call& c) {
                 const MethodInfo* m = super_method(a.attr);
 
                 if (!m) {
+                    // 协议 dunder（__new__/__init_subclass__/__setattr__ 等）
+                    // 常由 object/基类提供，静态找不到是正常的，保守放行。
+                    if (a.attr.size() > 4 && a.attr.starts_with("__") &&
+                        a.attr.ends_with("__")) {
+                        for (auto& arg : c.args) expr(*arg);
+                        for (auto& kw : c.keywords) expr(*kw.value);
+                        return t_unknown();
+                    }
                     // 定义类的 MRO 里有导入基类时，这个方法的实现可能在
                     // 另一份接口里，check 阶段看不见。这不是错误——build
                     // 会沿运行期 MRO 找。只在纯本地继承链都找不到时报错。
