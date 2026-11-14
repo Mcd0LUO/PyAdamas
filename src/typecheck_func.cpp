@@ -729,30 +729,20 @@ void TypeChecker::classdef(ClassDef& c) {
                         else if (!is_unknown(m.sig->pos[1].ty) &&
                                  m.sig->pos[1].ty->kind != TyKind::Str)
                             bad("format spec must be a str");
-                        else if (!m.sig->ret || m.sig->ret->kind != TyKind::Str)
-                            bad("must return str");
                     } else if (two_arg) {
                         if (m.sig->pos.size() != 2) {
                             bad("takes 'self' and one other parameter");
                         } else if (bool_ret && !is_unknown(m.sig->pos[1].ty) &&
                                    m.sig->pos[1].ty->kind != TyKind::Class) {
                             bad("second parameter must be unannotated or a class type");
-                        } else if (bool_ret &&
-                                   (!m.sig->ret || m.sig->ret->kind != TyKind::Bool)) {
-                            bad("must return bool");
                         }
                     } else if (m.sig->pos.size() != 1) {
                         bad("takes only 'self'");
-                    } else if (f.name == "__len__" || f.name == "__hash__") {
-                        if (!m.sig->ret || m.sig->ret->kind != TyKind::Int)
-                            bad("must return int");
-                    } else if (f.name == "__str__" || f.name == "__repr__") {
-                        if (!m.sig->ret || m.sig->ret->kind != TyKind::Str)
-                            bad("must return str");
-                    } else if (f.name == "__bool__") {
-                        if (!m.sig->ret || m.sig->ret->kind != TyKind::Bool)
-                            bad("must return bool");
                     }
+                    // 返回类型不在这里查：未标注的方法此刻还看不到 return 的
+                    // 类型，按 unknown != str 判会把返回 self.key 这类正当写法
+                    // 全判死。check_dunder_returns() 在函数体推理完之后统一
+                    // 校验；仍是 unknown 就放过——证明不了错就不报错。
                     // __iter__ 不限制返回类型：生成器方法的标注是元素类型。
                 }
             }
@@ -952,5 +942,41 @@ void TypeChecker::classdef(ClassDef& c) {
 
     }
 
+
+// 协议 dunder 的返回类型校验。必须在所有函数体检查完之后跑：未标注的
+// 方法在定义处 ret 还是空的，只有 body 检查完才回填 ret_known。
+void TypeChecker::check_dunder_returns() {
+    for (auto& ci : all_classes_) {
+        if (!ci) continue;
+        for (auto& mi : ci->methods) {
+            if (!mi.def || !mi.sig || mi.kind != MethodKind::Normal) continue;
+            if (mi.sig->varargs || mi.sig->kwargs) continue;
+            const std::string& n = mi.name;
+            TyKind want;
+            if (n == "__len__" || n == "__hash__")
+                want = TyKind::Int;
+            else if (n == "__str__" || n == "__repr__" || n == "__format__")
+                want = TyKind::Str;
+            else if (n == "__bool__" || n == "__eq__" || n == "__ne__" ||
+                     n == "__contains__" || n == "__lt__" || n == "__le__" ||
+                     n == "__gt__" || n == "__ge__")
+                want = TyKind::Bool;
+            else
+                continue;
+            TypePtr r = mi.sig->ret;
+            if (!r || is_unknown(r) || !mi.sig->ret_known) continue;
+            bool ok = r->kind == want;
+            // bool 是 int 的子类，整型返回也不算错。
+            if (!ok && want == TyKind::Int && r->kind == TyKind::Bool) ok = true;
+            if (!ok && want == TyKind::Bool && r->kind == TyKind::Int) ok = true;
+            if (ok) continue;
+            const char* want_s = want == TyKind::Int   ? "int"
+                                 : want == TyKind::Str ? "str"
+                                                       : "bool";
+            err(mi.def->line, mi.def->col,
+                std::format("'{}' must return {}", n, want_s));
+        }
+    }
+}
 
 }  // namespace pyadamas

@@ -268,8 +268,11 @@ TypePtr TypeChecker::builtin_call(const std::string& n, Call& c) {
             return t_bool();
         }
         if (n == "hasattr" || n == "getattr" || n == "setattr") {
-            size_t want = n == "setattr" ? 3 : 2;
-            if (!need(want, want))
+            // getattr 允许第三个参数（缺省值）。静态布局里属性集合是固定的，
+            // 「没有这个字段」时的结果就是缺省值。
+            size_t lo = n == "setattr" ? 3 : 2;
+            size_t hi = n == "getattr" ? 3 : lo;
+            if (!need(lo, hi))
                 return n == "hasattr" ? t_bool() : n == "getattr" ? t_unknown() : t_none();
             auto* ne = c.args[1].get();
             const std::string* an = nullptr;
@@ -287,6 +290,10 @@ TypePtr TypeChecker::builtin_call(const std::string& n, Call& c) {
             if (!ot || ot->kind != TyKind::Class || !ot->cls) {
                 // hasattr 对已知的内建/容器类型可以静态判定。
                 if (n == "hasattr" && ot && ot->kind != TyKind::Unknown) return t_bool();
+                // getattr 第三参：已知类型上没有这个成员，结果就是缺省值。
+                if (n == "getattr" && a.size() == 3 && ot &&
+                    ot->kind != TyKind::Unknown && !type_has_member(ot, *an))
+                    return a[2];
                 err(c.args[0]->line, c.args[0]->col,
                     std::format("{}() is only supported on class instances", n));
                 return n == "hasattr" ? t_bool() : n == "getattr" ? t_unknown() : t_none();
@@ -317,6 +324,7 @@ TypePtr TypeChecker::builtin_call(const std::string& n, Call& c) {
                 return t_unknown();
             }
             if (ot->cls->is_open()) return t_unknown();
+            if (n == "getattr" && a.size() == 3) return a[2];
             err(c.line, c.col,
                 std::format("'{}' object has no field '{}'", ot->cls->name, *an));
             return n == "getattr" ? t_unknown() : t_none();

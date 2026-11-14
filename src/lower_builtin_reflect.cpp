@@ -242,9 +242,13 @@ VReg Lowerer::lower_builtin_reflect(const std::string& name, Call& c) {
     }
 
     if (name == "hasattr" || name == "getattr" || name == "setattr") {
-        size_t want = name == "setattr" ? 3 : 2;
-        if (c.args.size() != want) {
-            err(c.line, c.col, std::format("{}() takes exactly {} arguments", name, want));
+        size_t lo = name == "setattr" ? 3 : 2;
+        size_t hi = name == "getattr" ? 3 : lo;
+        if (c.args.size() < lo || c.args.size() > hi) {
+            err(c.line, c.col,
+                std::format("{}() takes {} arguments, got {}", name,
+                            lo == hi ? std::to_string(lo) : std::format("{}..{}", lo, hi),
+                            c.args.size()));
             return name == "hasattr" ? const_bool(false) : const_none();
         }
         const std::string* an = nullptr;
@@ -277,6 +281,10 @@ VReg Lowerer::lower_builtin_reflect(const std::string& name, Call& c) {
                 }
                 return const_bool(true);
             }
+            // getattr 第三参：已知类型上没有这个成员，直接给缺省值。
+            if (name == "getattr" && c.args.size() == 3 && ot &&
+                ot->kind != TyKind::Unknown && !TypeChecker::type_has_member(ot, *an))
+                return expr(*c.args[2]);
             err(c.args[0]->line, c.args[0]->col,
                 std::format("{}() is only supported on class instances", name));
             return name == "hasattr" ? const_bool(false) : const_none();
@@ -316,6 +324,8 @@ VReg Lowerer::lower_builtin_reflect(const std::string& name, Call& c) {
                 if (meth)
                     err(c.line, c.col,
                         std::format("getattr() of method '{}' must be called with ()", *an));
+                else if (c.args.size() == 3)
+                    return expr(*c.args[2]);
                 else
                     err(c.line, c.col,
                         std::format("'{}' object has no attribute '{}'", ot->cls->name, *an));

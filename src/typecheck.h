@@ -91,6 +91,8 @@ public:
     explicit TypeChecker(std::string file) : file_(std::move(file)) {}
 
     void check(Module& m);
+    // 协议 dunder 的返回类型校验（在函数体推理完之后跑，见 typecheck_func.cpp）。
+    void check_dunder_returns();
 
     // 多模块编译时由驱动注入：按模块名取已经加载的接口。
     void set_module_lookup(ModuleLookup lookup) { module_lookup_ = std::move(lookup); }
