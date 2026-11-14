@@ -120,6 +120,19 @@ async def via_from_import() -> int:
 
 print(run(via_from_import()))
 
+
+async def float_one(x: float) -> float:
+    await sleep(0)
+    return x
+
+
+async def float_gather() -> float:
+    vals = await gather(float_one(0.5), float_one(1.5))
+    return vals[0] + vals[1]
+
+
+print(asyncio.run(float_gather()))
+
 # --- expect ---
 # 14
 # caught
@@ -133,3 +146,4 @@ print(run(via_from_import()))
 # 11+22
 # outer caught
 # 21
+# 2.0

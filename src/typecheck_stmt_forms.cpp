@@ -517,6 +517,8 @@ void TypeChecker::stmt_import_from(ImportFrom& im) {
                 declare(bind, t_unknown(), im.line);
                 continue;
             }
+            if (info->builtin && info->name == "asyncio")
+                native_aliases_[bind] = NativeAlias{info->name, al.name, it->second};
             declare(bind, it->second, im.line);
         }
         return;

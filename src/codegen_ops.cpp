@@ -4,7 +4,18 @@
 namespace pyadamas {
 
 // ── 指令 ────────────────────────────────────────────────────
+void AsmGen::set_loc(int line) {
+    if (line <= 0 || line == cur_loc_line_ || !m_ || m_->source_path.empty()) return;
+    cur_loc_line_ = line;
+    // 行变化处放一个本地标签，运行时表把 PC 映射回 (函数, 行)。
+    std::string lab = std::format(".Ldbg{}", dbg_seq_++);
+    out_ += lab + ":\n";
+    out_ += std::format("\t.loc 1 {}\n", line);
+    dbg_entries_.push_back({lab, fi_, line});
+}
+
 void AsmGen::gen_inst(const Inst& in) {
+        set_loc(in.line);
         comment(in.text());
         switch (in.op) {
             case IrOp::ConstInt: gen_const_int(in); break;

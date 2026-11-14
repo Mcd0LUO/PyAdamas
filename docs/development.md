@@ -60,7 +60,7 @@ rm -rf build/dev                   # 连 CMake 中间产物一起清
 | `tests/run/*.py` | 必须编译运行成功，输出与末尾 `# --- expect ---` 逐行一致 | `NN_主题.py` |
 | `tests/unsupported/*.py` | `check -v` 必须打标记，`build` 必须拒绝 | `主题.py` |
 
-当前规模：正例 11 / 反例 52 / 运行 151 / 未建模 1 / 模块 12。
+当前规模：正例 11 / 反例 52 / 运行 153 / 未建模 1 / 模块 12。`ctest` 另含 `pyadamas_cache_race`：两进程并发 `--rebuild` 编译 hashlib/hmac，守模块缓存原子写；`cfi:unwind`（`tests/cfi/`）用 libgcc 的 `_Unwind_Backtrace` 数帧，守生成代码的 CFI。
 
 跑单个文件：
 
@@ -154,7 +154,7 @@ Future/取消/fd/回调、`yield from`、异步推导式、异步生成器协议
 `53_json.py` / `54_stdlib.py` / `55_slot_types.py` / `56_re.py` 覆盖 json、
 string/time/os/itertools/collections、call.rt 槽位类型、循环条件更新、
 fsum 抵消和 re；`98`–`101` 覆盖 C 互操作/缓冲区/BLAS/不透明结构体，
-`130`–`152` 覆盖挂起点边角、类对象与类装饰器、标准库批次（heapq/bisect/
+`130`–`153` 覆盖挂起点边角、类对象与类装饰器、标准库批次（heapq/bisect/
 binascii/base64/statistics/textwrap、itertools 组合函数、operator、deque、
 timedelta、pathlib、序列重复、RC 所有权转移、裸 list 元素定型、分代 GC、
 unknown 值的 `str()` 分派）。
@@ -199,7 +199,11 @@ print(p.returncode, resource.getrusage(resource.RUSAGE_CHILDREN).ru_maxrss)'   #
 | 生成的汇编 | `pyadamas asm x.py` |
 | 保留中间 `.s` | `PYADAMAS_KEEP_ASM=1 pyadamas run x.py` |
 | 单步调试生成程序 | `pyadamas build x.py -o x && gdb ./x` |
-
+| 地址 → 源码行 | `addr2line -e x -f <addr>`（`build` 默认带 DWARF 行号） |
+| 查看 DWARF 行号表 | `readelf --debug-dump=decodedline x` |
+| 查看栈展开规则（CFI） | `readelf --debug-dump=frames x` |
+| 回溯穿过生成帧和 libc | `gdb -batch -ex 'set backtrace past-main on' -ex run -ex bt ./x` |
+| 未捕获异常回溯 | `pyadamas run bad.py`（stderr 打印 `Traceback`） |
 汇编里每条指令前都有对应的 IR 注释，对照 `pyadamas ir` 的输出能定位到是哪条 IR 生成错了。
 
 ### 内存 / UB 检查

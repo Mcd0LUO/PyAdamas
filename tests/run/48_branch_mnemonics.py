@@ -1,3 +1,6 @@
+import math
+
+
 def le(x: int) -> int:
     if x <= 3:
         return 1
@@ -32,6 +35,30 @@ for i in range(6):
         total = total + 10
 print(total)
 
+nan = math.nan
+print(nan == nan, nan != nan, nan < 1.0, nan <= 1.0, nan > 1.0, nan >= 1.0)
+if nan != nan:
+    print("ne-true")
+else:
+    print("ne-false")
+if nan == nan:
+    print("eq-true")
+else:
+    print("eq-false")
+if nan < 1.0:
+    print("lt-true")
+else:
+    print("lt-false")
+if nan >= 1.0:
+    print("ge-true")
+else:
+    print("ge-false")
+
 # --- expect ---
 # 1 2 1 2 2 1 2 1
 # 13
+# False True False False False False
+# ne-true
+# eq-false
+# lt-false
+# ge-false

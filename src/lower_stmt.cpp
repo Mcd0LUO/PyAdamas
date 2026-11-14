@@ -32,6 +32,7 @@ static bool is_countable(const TypePtr& t) {
 // ────────────────────────── 语句 ──────────────────────────
 
 void Lowerer::stmt(Stmt& s) {
+    cur_line_ = s.line;
     // 每条语句一个临时值栈水位：表达式产生的堆值在语句结束时统一释放。
     // 赋值/传参/返回已经各 retain 了一份，所以清理不会影响仍然存活的值。
     // 语句完全没产生临时堆值时，把 mark/cleanup 一起删掉（纯整数代码

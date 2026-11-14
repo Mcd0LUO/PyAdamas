@@ -29,9 +29,10 @@ constexpr int kMaxFpArgs = 8;
 
 // 可用来长期持有变量的寄存器。全部是 callee-saved：被调用方保证
 // 返回时原样恢复，所以跨函数调用不需要把值挪回栈。
-// rbp 是帧指针，rsp 是栈指针，都不在其中。
-inline const char* const kSlotRegs[] = {"%rbx", "%r12", "%r13", "%r14", "%r15"};
-constexpr int kMaxSlotRegs = 5;
+// rsp 是栈指针，不在其中；rbp 在——生成函数的帧相对 rsp 寻址，不需要
+// 帧指针，回溯走 .eh_frame，所以它也能拿来存变量。
+inline const char* const kSlotRegs[] = {"%rbx", "%r12", "%r13", "%r14", "%r15", "%rbp"};
+constexpr int kMaxSlotRegs = 6;
 
 // 浮点变量常驻寄存器。只用 xmm8–15：xmm0–7 是参数/临时寄存器，
 // 所有指令生成器都只把它们当 scratch。提升仅发生在函数没有任何
@@ -241,31 +242,48 @@ private:
 
     std::string block_label(int bi) const { return block_labels_[static_cast<size_t>(bi)]; }
 
-    // 局部区必须从 push 下来的 callee-saved 寄存器**下面**开始：
-    // rbp-8 起是 push 的内容，直接拿来当变量槽会把保存的寄存器覆盖掉，
-    // 函数返回时 pop 回一个垃圾值，调用方就炸了。
-    int slot_off(int slot) const { return -8 * (n_saved_regs_ + slot + 1); }
+    // 槽位一律相对 rsp：帧的布局是
+    //   [出参区 out_bytes_][槽位区 slot0…][帧记录][push 的 callee-saved][返回地址]
+    // rsp 在函数体里从头到尾不动（出参区一次性预留，调用点不再 subq，
+    // setjmp/longjmp 也只会回到同一个 rsp），所以偏移是常量。
+    // 槽号小的（形参、最常用的局部）排在**低地址**，偏移能落在 disp8 里；
+    // 帧记录这种每函数只碰一两次的放到最上面。
+    int slot_off(int slot) const { return out_bytes_ + 8 * slot; }
 
     int vreg_off(VReg r) const {
         int s = (r < vreg_slot_.size()) ? vreg_slot_[r] : 0;
-        return -8 * (n_saved_regs_ + n_slots_ + s + 1);
+        return out_bytes_ + 8 * (n_slots_ + s);
     }
 
-    // 帧记录（PyAdamasFrame）在局部区最下面，内存里从低地址往高地址依次是
+    // 帧记录（PyAdamasFrame）在槽位区上面，内存里从低地址往高地址依次是
     // prev、n、临时区起点、临时区字数、槽地址×n，与两边共用的结构体
-    // 布局一致。栈向下增长，所以下标 0 对应最负的偏移。
+    // 布局一致。
     int rec_off(int i) const {
         int words = 4 + static_cast<int>(frame_owned_.size() + frame_scan_.size());
-        return -8 * (n_saved_regs_ + n_slots_ + n_vreg_slots_ + words - i);
+        return out_bytes_ + locals_ - 8 * (words - i);
     }
-    std::string rec_mem(int i) const { return std::format("{}(%rbp)", rec_off(i)); }
+    std::string rec_mem(int i) const { return std::format("{}(%rsp)", rec_off(i)); }
 
     // 本次代码生成是否压了帧记录（弹栈只在这个函数里发）。
     bool frame_rec_ = false;
-    // vreg 槽区里第 slot 个槽的偏移（vreg 槽紧挨着命名槽往低地址排）。
-    int vreg_slot_off(int slot) const {
-        return -8 * (n_saved_regs_ + n_slots_ + slot + 1);
-    }
+    // DWARF 行号：当前已发出的 .loc 行，切函数/切行时更新。
+    int cur_loc_line_ = 0;
+    // 生成指令前按需要发出 .loc；line<=0 或未变化时不动。
+    void set_loc(int line);
+    // 运行时 traceback 用的 PC → (函数, 行号) 表的一项。
+    struct DbgEntry {
+        std::string label;  // .LdbgN / .LdbgEndN
+        int fi = -1;        // 函数下标；-1 表示函数结束哨兵
+        int line = 0;
+    };
+    std::vector<DbgEntry> dbg_entries_;
+    int dbg_seq_ = 0;
+    bool dbg_on_ = false;
+    std::string dbg_name_label(int fi) const { return std::format(".Lfnname{}", fi); }
+    void emit_debug_sections(const IRModule& m);
+
+    // vreg 槽区里第 slot 个槽的偏移（vreg 槽紧挨着命名槽往上排）。
+    int vreg_slot_off(int slot) const { return out_bytes_ + 8 * (n_slots_ + slot); }
     // 帧记录里的槽：持有堆引用的非借用槽，异常展开时按地址 dec。
     std::vector<int> frame_owned_;
     // 与 frame_owned_ 一一对应：槽里可能是非堆值，展开时走注册表释放。
@@ -280,14 +298,14 @@ private:
         if (r < static_cast<VReg>(vreg_reg_.size()) && !vreg_reg_[r].empty())
             return vreg_reg_[r];
         if (r < static_cast<VReg>(vreg_mem_.size())) return vreg_mem_[r];
-        static const std::string kFallback = "0(%rbp)";
+        static const std::string kFallback = "0(%rsp)";
         return kFallback;
     }
 
     const std::string& smem(int slot) const {
         if (slot >= 0 && slot < static_cast<int>(smem_cache_.size()))
             return smem_cache_[static_cast<size_t>(slot)];
-        static const std::string kFallback = "0(%rbp)";
+        static const std::string kFallback = "0(%rsp)";
         return kFallback;
     }
 
@@ -366,13 +384,23 @@ private:
 
     bool is_fp(VReg r) const { return ir_is_float(ty_of(r)); }
 
-    // 栈帧 = push 下来的 callee-saved + 局部区。SysV 要求 call 时
-    // rsp 是 16 的倍数，而 push 的个数会影响这个余数，所以把两者
-    // 合起来算，只补最少的字节。
-    void frame_size(int total_slots);
+    // 帧布局 = [出参区 out_bytes_][局部区 locals_][push 的 callee-saved][返回地址]。
+    // rsp 在函数体里全程不动，槽位因此可以相对 rsp 寻址，帧里不需要 rbp。
+    // SysV 要求 call 时 rsp 是 16 的倍数，布局阶段把 padding 补到最小。
+    int out_bytes_ = 0;    // 出参区：整函数最大的那个调用点用量
+    int locals_ = 0;       // 局部区（含对齐 padding）
+    int frame_pad_ = 0;    // subq 的字节数 = out_bytes_ + locals_
+    int frame_bytes_ = 0;  // 返回地址到 rsp 的距离 = frame_pad_ + 8 * n_saved_regs_
+    int cfa_off_ = 0;      // 当前 .cfi_def_cfa_offset（CFA = rsp + cfa_off_）
+    // 扫描全部调用点，算出整函数要预留多少出参区。
+    int outgoing_bytes(const IRFunction& f) const;
+    // 计算 out_bytes_ 之外的几个布局量；必须在 build_operand_caches 之前
+    // 调用——槽位操作数是在那时格式化好的。
+    void layout_frame(int total_slots);
+    // 发 subq 并把 CFA 偏移推到函数体状态。
+    void frame_alloc();
 
-    // 尾声：先把 rsp 退回 push 的寄存器下面，逐个弹回，再弹 rbp。
-    // 不能用 `movq %rbp, %rsp`——那会把 callee-saved 的槽一起丢掉。
+    // 尾声：先退局部区，再逐个弹回 callee-saved，然后 ret。
     void emit_epilogue();
 
     // ── 栈槽分配 ────────────────────────────────────────────────

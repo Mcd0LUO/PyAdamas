@@ -223,6 +223,39 @@ if match "cdecl"; then
     fi
 fi
 
+# ── CFI：生成代码的栈展开规则 ─────────────────────────────────
+#
+# 探针用 libgcc 的 _Unwind_Backtrace 走一遍当前栈：它只认 .eh_frame，
+# 不看 prologue、也不跟 rbp 链。生成代码的 CFI 一旦断了，深度会立刻
+# 掉回 2（只数到第一个生成帧），比任何结构性检查都直接。
+if match "cfi"; then
+    fidir="$BUILD/cfi"
+    rm -rf "$fidir"
+    mkdir -p "$fidir"
+    printf '  %-28s ' "cfi:unwind"
+    if ! "$PYADAMAS" cdecl tests/cfi/probe.h -o "$fidir/probe.cpya" \
+            --link "tests/cfi/probe.c" > "$fidir/gen.out" 2>&1; then
+        printf 'GENERATE FAILED\n'
+        sed -n '1,6p' "$fidir/gen.out"
+        fail=1
+    else
+        sed -n '/^# --- expect ---$/,$p' tests/cfi/main.py | tail -n +2 | \
+            sed -E 's/^# ?//' > "$fidir/exp"
+        if ! "$PYADAMAS" run --rebuild -I "$fidir" -o "$fidir/prog" \
+                tests/cfi/main.py > "$fidir/out" 2>&1; then
+            printf 'RUN FAILED\n'
+            sed -n '1,6p' "$fidir/out"
+            fail=1
+        elif diff -q "$fidir/exp" "$fidir/out" > /dev/null 2>&1; then
+            printf 'ran ok\n'
+        else
+            printf 'OUTPUT DIFF\n'
+            diff "$fidir/exp" "$fidir/out" | head -12
+            fail=1
+        fi
+    fi
+fi
+
 rm -rf "$logdir" "$modlog"
 rm -f "$prog" "$out" "$exp" "$BUILD/check.txt"
 exit "$fail"

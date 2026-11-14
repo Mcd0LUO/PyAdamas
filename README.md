@@ -65,11 +65,12 @@ pyadamas run      script.py   # 编译、链接并运行（产物是临时文件
 生成代码优化等级：`-O0` 基础 / `-O1` 常规（下标内联、槽融合、浮点提升、
 循环免检查（含 `for k in range(len(a))` 的 `a[k]`）、块内临时寄存器）/
 `-O2`（默认，再加 IR 常量折叠/DCE/静态小函数内联/静态调用直接化/循环不
-变量外提/检查型下标外提、AVX2 int 归约、跳转消除、call 前 eax 清零裁剪、
-序言清零裁剪）。`--fast-math` 额外允许 float 归约用 SIMD 分组求和（可能
+变量外提/检查型下标外提/循环旋转/跨块公共子表达式消除、拷贝合并、浮点
+比较分支融合、AVX2 int 归约、跳转消除、call 前 eax 清零裁剪、序言清零
+裁剪、函数入口与循环头 16 字节对齐）。`--fast-math` 额外允许 float 归约用 SIMD 分组求和（可能
 改变末位舍入）。模块缓存按等级和 fast-math 区分。
 
-`PYADAMAS_KEEP_ASM=1` 会保留中间汇编。出错时输出带源码行和插入符：
+`build` 默认把 DWARF 行号（`.file`/`.loc`）和 CFI（`.cfi_*` → `.eh_frame`）写进生成汇编；`addr2line -e prog -f <addr>` 或 `readelf --debug-dump=decodedline prog` 能把机器码映射回源码行。生成函数没有帧指针：`gdb`、libgcc 的展开器和运行时自己的未捕获异常回溯都靠 CFI 逐帧还原。未捕获异常会打印函数级 `Traceback (most recent call last)`（普通帧带文件:行，生成器/协程逻辑帧追加函数名）。`PYADAMAS_KEEP_ASM=1` 会保留中间汇编。出错时输出带源码行和插入符：
 
 ```
 bad.py:1:7: error: expected parameter name, found ':'
@@ -92,7 +93,7 @@ src/
   desugar.cpp             lambda 脱糖成合成嵌套 def
   typecheck*.cpp          类型：规则、推断、内置函数表（按语句/表达式/调用/内置拆分）
   ir.h     lower*.cpp     IR：三地址码、AST → IR 降级（按语句/表达式/调用/内置/方法/打印/推导式/导入/匹配/生成器拆分）
-  opt*.cpp                O2 优化：折叠/内联/循环不变外提/下标版本化
+  opt*.cpp                O2 优化：折叠/内联/LICM/下标版本化/循环旋转/跨块 CSE
   codegen*.cpp            x86-64：寄存器分配、基本块、指令选择、调用
   main.cpp                CLI 分派与前端入口
   driver_build.cpp        多模块解析、增量缓存、汇编与链接
@@ -113,6 +114,7 @@ runtime/
   rt_functools.c          functools.reduce 与回调跳板
   rt_json.c               json dumps/loads
   rt_re.c                 re 回溯 VM、Pattern/Match
+  rt_debug.c              调试表注册与未捕获异常 traceback
 tests/                    正例 / 反例 / 运行 / 差分 / 模块 / 基准
 docs/                     设计与参考文档（旧文档在 docs/archive/）
 tools/                    一次性脚本
@@ -129,12 +131,12 @@ tools/                    一次性脚本
 - **类布局编译期定死**：对象是 `[RC 头][vtable][字段…]`，字段偏移和方法槽号都是常量，没有查表也没有哈希。→ [代码生成](docs/codegen.md#对象与虚调用)
 - **引用计数不查栈**：所有权由静态类型决定，表达式临时值进运行时临时值栈；纯整数语句、循环、函数的 RC 脚手架在降级期删掉。→ [运行时](docs/runtime.md#内存模型)
 - **闭包是 cell + 闭包对象**：被捕获变量转成单元素列表，闭包存代码和 cell 指针；函数值是一等堆值，静态闭包永生。`lambda` 脱糖成嵌套 `def`。→ [代码生成](docs/codegen.md#闭包)
-- **RC + 保守循环收集**：堆对象进注册表，分配超过 2MB 触发标记-清扫；根来自全局表、临时栈、真实栈和 callee-saved 寄存器。误报只延迟回收，不提前释放。→ [运行时](docs/runtime.md#循环收集器)
-- **字典是开放寻址表**：`order` 数组保留插入顺序，`set` 复用同一结构；key/value 按静态类型接入 RC，未知类型交给 GC。字符串 key 按字节哈希、逐字节判等。删除按 `order` 剩余项整表重建。→ [运行时](docs/runtime.md#字典--集合)
+- **RC + 保守循环收集**：堆对象进注册表，分代收集（minor trial-deletion + major 标记-清扫）按存活堆自适应阈值触发（下限 2MB）；根来自全局表、临时值栈、帧记录登记的 unknown 槽和 callee-saved 寄存器，纯类型化帧不扫整段栈。误报只延迟回收，不提前释放。→ [运行时](docs/runtime.md#循环收集器)
+- **字典是开放寻址表**：entries 按插入顺序串成双向链表（`order` 只作遍历快照），`set` 复用同一结构；key/value 按静态类型接入 RC，未知类型交给 GC。字符串 key 按字节哈希、逐字节判等。删除用墓碑，摊还 O(1)。→ [运行时](docs/runtime.md#字典--集合)
 - **语法糖各归其位**：`lambda` 在类型检查前脱糖成嵌套 `def`，推导式在降级期展开成独立作用域的循环，`with` 在正常/跳转/异常出口补 `__exit__`，装饰器按逆序做普通闭包调用。→ [IR](docs/ir.md#降级规则)
 - **异常用 setjmp/longjmp 展开**：`try`/`with`/`finally` 压运行时 handler 记录，`raise` 一次 `longjmp` 到最内层 landing pad；含 handler 的函数关闭热变量寄存器提升，异常跳过的局部引用交给保守 GC。→ [代码生成](docs/codegen.md#异常展开)
 - **生成器是状态机 + 堆帧**：含 `yield` 的函数拆成创建包装和 resume，局部槽位在堆帧里；yield 时把 handler 记录摘下，恢复时重新 setjmp；`close()` 和引用计数归零会按挂起点快照跑 `finally` / `__exit__`。→ [运行时](docs/runtime.md#生成器)
-- **协程复用同一套状态机**：`async def` 的帧多一个 kind 标记，`await` 是第三种挂起；`asyncio.run` 驱动就绪队列 + 定时器，`gather` 并发启动，`create_task` 立即调度并可 `cancel()`（沿 await 链级联取消），`Future` 支持多等待者、`set_result`/`set_exception`/`add_done_callback`，`wait_readable`/`wait_writable` 把 fd 交给事件循环 `poll`；异常通过帧内注入跨 await 传播；异步生成器 + `async for` / `async with` / `asend` / `athrow` / `aclose` 也已接通。→ [运行时](docs/runtime.md#协程与事件循环)
+- **协程复用同一套状态机**：`async def` 的帧多一个 kind 标记，`await` 是第三种挂起；`asyncio.run` 驱动就绪队列 + 定时器，`gather` 并发启动，`create_task` 立即调度并可 `cancel()`（沿 await 链级联取消），`Future` 支持多等待者、Task 支持多个协程同时等待、`set_result`/`set_exception`/`add_done_callback`，`wait_readable`/`wait_writable` 把 fd 交给事件循环 `poll`；异常通过帧内注入跨 await 传播；异步生成器 + `async for` / `async with` / `asend` / `athrow` / `aclose` 也已接通。→ [运行时](docs/runtime.md#协程与事件循环)
 - **模块独立编译 + 链接**：本地 `.py` 模块与内置 `math`/`sys`；每个 `.py` 编译成独立 `.o` 和二进制 `.pya` 接口，入口与依赖按 import 图链接；初始化惰性且只执行一次，源码哈希 + 依赖接口哈希决定是否复用缓存。→ [路线图](docs/roadmap.md)
 - **运行时是纯 C**，只依赖 libc + libm，随产物一起链接。
 
@@ -154,7 +156,7 @@ tools/                    一次性脚本
 |---|---|---|
 | `tests/*.py` | 11 | 前端正例，覆盖语法与类型规则（按 AST 节点计：43 个函数 / 458 条语句 / 1714 个表达式） |
 | `tests/fail/*.py` | 52 | 反例，必须报出首行 `# expect:` 指定的错 |
-| `tests/run/*.py` | 151 | 编译 + 运行，输出与文件末尾的 `# --- expect ---` 逐行比对 |
+| `tests/run/*.py` | 153 | 编译 + 运行，输出与文件末尾的 `# --- expect ---` 逐行比对 |
 | `tests/unsupported/*.py` | 1 | `check` 必须打「没建模」标记，且 `build` 必须拒绝 |
 | `tests/diff/` | 7 个生成器 | 随机程序与 CPython 比 stdout，默认 3 种子 840 个程序 |
 | `tests/modules/` | 12 个目录 | 多模块编译 + 运行 + 二次构建缓存命中 |
@@ -167,7 +169,7 @@ ctest --preset dev
 /tmp/run_diff.prog --pyadamas build/dev/pyadamas --cpython python3 --seeds 3   # 840 个程序
 ```
 
-前端鲁棒性基线：历史口径（CPython 3.11 标准库 + site-packages，38582 个 `.py`）语法通过 35693，其中类型通过 29143（81.6%）；标准库本体 1143 / 1289（88.7%）。最近一次完整口径（0.81.1，Debian CPython 3.13.5）为标准库本体 279 / 596（46.8%），两段口径不可直接比较，明细见 [compatibility.md](docs/compatibility.md#前端鲁棒性基线)。
+前端鲁棒性基线：历史口径（CPython 3.11 标准库 + site-packages，38582 个 `.py`）语法通过 35693，其中类型通过 29143（81.6%）；标准库本体 1143 / 1289（88.7%）。最近一次完整口径（0.158，Debian CPython 3.13.5）为标准库本体 281 / 596（47.1%），去掉 `test/` 为 253 / 532（47.6%）；0.81.1 同口径为 279 / 596。两段口径不可直接比较，明细见 [compatibility.md](docs/compatibility.md#前端鲁棒性基线)。
 
 ASan + UBSan + LSan 下跑全部用例零报告（含生成代码的 RC、闭包、GC、字典、切片、删除、推导式、`with`、装饰器、变长实参、异常展开、生成器挂起/恢复、`yield from` 委托、协程调度、Task 取消级联、Future 多等待者、fd 轮询与异步推导式路径），`-Wshadow -Wnon-virtual-dtor -Wold-style-cast -Wcast-qual` 零警告。内存验收在 16MB `RLIMIT_AS` 下完成，对象环 / 字典环 / unknown 泄漏 / 闭包垃圾 / 容器与切片 / 异常展开的峰值 RSS 约 8MB。
 

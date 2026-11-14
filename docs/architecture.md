@@ -19,7 +19,7 @@ Lowerer（lower*.cpp）◄──── 类型查询接口（typecheck.h）
    │
    ▼
 IR（ir.h）：函数 → 基本块 → 三地址指令
-   │  Opt（opt*.cpp，-O2 时的折叠/内联/LICM/下标版本化）
+   │  Opt（opt*.cpp，-O2 时的折叠/内联/LICM/下标版本化/循环旋转/跨块 CSE）
    │  AsmGen（codegen*.cpp）
    ▼
 GNU as 汇编（AT&T）
@@ -80,7 +80,7 @@ codegen.h/cpp
 
 ### 只借语法，不背兼容包袱
 
-不做 `import`、不实现 C API、不追求 `sys`/`gc` 这些模块。语义按静态类型的需要重新定义：变量可以标注、标注就是约束、溢出按 int64 回绕。换来的是**没有运行时元数据、没有字典查名字、调用就是一条 `call`**。
+不做 CPython C API、不做运行期模块对象/内省（`gc` 这类）和完整标准库：`import` 只支持本地模块与内置子集，`sys` 只提供 `argv`/标准流这类静态接口。语义按静态类型的需要重新定义：变量可以标注、标注就是约束、溢出按 int64 回绕。换来的是**没有运行时名字表、没有字典查名字、调用就是一条 `call`**。
 
 ### 不生成 C，自己出汇编
 
@@ -113,7 +113,7 @@ bad.py:1:7: error: expected parameter name, found ':'
 | 降级 | `LowerResult::errors` | 是，一轮报完 | 1 |
 | 运行时 | `pa_panic*` → `exit(1)` | 否 | 1 |
 
-运行时错误故意不带堆栈：现在没有调试信息，编出来的栈回溯只会误导。`pa_panic_div0` / `panic_overflow` 这类专用入口存在的唯一目的，是把 `#DE` 信号换成一句人能看懂的话。
+运行时错误：0.159 起生成代码带 DWARF 行号，可用 `addr2line` / `gdb` 定位到源码行；0.160 起未捕获异常会先打印函数级 `Traceback (most recent call last)`（codegen 注册的 PC→函数/行号表；0.163 起逐帧靠 `_Unwind_Backtrace`，不再要求帧指针）。0.161 起生成器/协程的 resume 帧以逻辑帧追加到异常上；0.162 起生成代码带 CFI（`.eh_frame`），gdb 与 `_Unwind_Backtrace` 能穿过生成帧。`panic_c` 内部不变量错误仍直接退出。
 
 ## 数据所有权
 

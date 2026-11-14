@@ -301,6 +301,7 @@ void Lowerer::assign_to(Expr& target, VReg v, TypePtr vty) {
 // ────────────────────────── 表达式 ──────────────────────────
 
 VReg Lowerer::expr(Expr& e) {
+    if (e.line > 0) cur_line_ = e.line;
     switch (e.kind) {
         case ExprKind::Constant: return lower_constant(static_cast<Constant&>(e));
         case ExprKind::Name: {

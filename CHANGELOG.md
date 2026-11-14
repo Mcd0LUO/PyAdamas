@@ -4,6 +4,202 @@
 
 早期阶段没有逐条留痕，按阶段归纳；0.4 之后逐条记录。
 
+## [0.163] - 2026-11-14
+
+栈回溯换成标准展开器，生成代码去掉帧指针；顺手修掉跨多个挂起点的溢出 bug。
+
+### 修复
+
+- **跨多个挂起点的值没有落槽**：`spill_across_suspends` 算活跃性时把
+  `GenYield`/`GenAwait` 当成没有后继，只在续跑块里用到的 vreg 既不存槽、
+  也不装回。`await add(await add(1, 2), await add(3, 4))` 这类链式 await 会
+  读到上一轮留下的垃圾（RC 报 `refcount increment on a freed object`，或者
+  直接段错误）。现在把续跑块算作挂起块的后继；新增
+  `tests/run/154_nested_await.py`（await 链 + 生成器连续 `send`）。
+
+### 变更
+
+- **traceback 走 `_Unwind_Backtrace`**：`pa_print_traceback` 不再手走 rbp 链，
+  改用 libgcc 的标准展开器逐帧取返回地址，仍只打印调试表里登记过的帧。
+  运行时因此可以去掉 `-fno-omit-frame-pointer`（`rt_core.c` 早就不带）。
+- **生成代码去掉帧指针**：槽位、帧记录、栈上实参改相对 `rsp` 寻址；出参区
+  按整函数最大用量一次留够（调用点不再 `subq`/`addq`，`rsp` 全程不动），
+  `%rbp` 并入变量寄存器池（最多 6 个）。槽号小的排低地址，偏移落在 disp8。
+- **对齐**：函数入口 `.p2align 4`，循环头（回边目标）同样 16 字节对齐。
+  去掉帧指针后 nqueens 一度慢 10%，对齐后回到原水平。
+- CFI 跟着改：不再 `push %rbp`，CFA 全程由 rsp 定义，尾声逐条
+  `cfi_restore` 并更新 `def_cfa_offset`；`link_program` 显式加
+  `-Wl,--eh-frame-hdr`。
+
+### 验证
+
+- `ctest --preset dev` 3/3（运行用例 153）；差分 840 个程序 0 失败；
+  `tests/check_size.sh` 通过。
+- 未捕获异常回溯、gdb `bt`（含 `set backtrace past-main on`）都还能穿过生成帧；
+  帧里已经没有 rbp，能展开只可能是 CFI 起效。
+- 同机 A/B（8 轮取最小，旧 = 0.162，各 8 次交错跑）：fib 10.67 → 9.22 ms
+  （-13.6%，少 push/pop rbp 与一次 mov）、mandelbrot -2.5%、binary_trees -0.9%；
+  nqueens +3.6%、matmul +2.8%、spectral_norm +2.5%，在逐轮 ±4% 的噪声内。
+  多出来的 `%rbp` 变量寄存器让 fib 这类调用密集的代码受益最明显。
+
+## [0.162] - 2026-11-14
+
+调试信息收尾：生成代码补上 CFI（栈展开规则）。
+
+### 变更
+
+- **CFI**：每个生成函数发 `.cfi_startproc` / `.cfi_endproc`，prologue 用
+  `.cfi_def_cfa_offset` / `.cfi_offset` / `.cfi_def_cfa_register` 描述 CFA 与
+  保存下来的 callee-saved（生成器是 `%r15`）；尾声用 `.cfi_remember_state` +
+  `.cfi_def_cfa %rsp, 8` + `.cfi_restore_state`，一个函数里的多条返回各描述
+  各的。GNU as 据此生成 `.eh_frame`。
+- 函数符号补 `.type ..., @function` 与 `.size`；手写汇编（类析构器、GC
+  release、生成器帧释放、C 回调跳板、模块 init 桩、`main`）同样带 CFI。
+- 新增 `tests/cfi/`（cdecl + `_Unwind_Backtrace` 探针），在
+  `tests/run_tests.sh` 里以 `cfi:unwind` 输出：CFI 断掉时深度从 7 掉回 2。
+
+### 验证
+
+- `gdb` 断在 `pushq %rbp` 之后（rbp 链尚未建立）仍能回溯，栈帧里列出
+  rbp 的保存位置；`set backtrace past-main on` 可一路走到 `_start`。
+- libgcc `_Unwind_Backtrace` 数出的帧依次是 `probe_depth` → `__pa_main` →
+  `main` → `__libc_start_call_main` → `__libc_start_main` → `_start`，与 gdb 一致；
+  生成器 resume 帧与协程帧（`%r15` 那一套）同样能穿过：探针在生成器体内
+  和 `asyncio.run` 的协程体内都数出 10 层。
+- `ctest --preset dev` 3/3；运行用例 152 个；差分 840 个程序 0 失败；
+  `tests/check_size.sh` 通过。
+- 生成代码只多了汇编指示（`.cfi_*` / `.type` / `.size`），指令序列不变；同机 A/B
+  （同一二进制用 objcopy 去掉 `.eh_frame`）20 次取最小：mandelbrot
+  6.91 / 6.81 ms、spectral_norm 18.19 / 18.35 ms，差值在测量噪声内。
+
+## [0.161] - 2026-11-14
+
+可靠性 + async/generator traceback 补全。
+
+### 修复
+
+- **模块缓存写入原子化**：`assemble_object` 不再直接写 `mod.s`/`mod.o`；
+  `mod.pya` 与 `manifest` 也改为临时文件 + `rename`。多个进程同时编译
+  同一模块（并行测试、ctest 与 diff 并发）不会再读到截断的汇编/对象文件。
+- 新增 `pyadamas_cache_race` ctest：两进程并发 `--rebuild` 编译
+  hashlib/hmac 5 轮，专门守这个回归。
+
+### 变更
+
+- **异常携带生成器/协程逻辑帧**：`PyAdamasException` 新增 trace 链表；
+  协程 `coro_step`、生成器 `gen_run`、异步生成器驱动在异常逃出时把
+  resume 函数帧挂到异常上。未捕获异常先打印普通 rbp 回溯，再追加
+  `main` → `outer` → `inner` 这样的逻辑帧（当前只有函数名，没有挂起行号）。
+- trace 节点随 `exc_clone` 深拷贝、随 `exc_free` 释放；153 测试扩展到
+  async/generator 子进程。
+
+### 验证
+
+- `ctest --preset dev` **3/3**（新增 cache_race）；运行用例 152 个；
+  差分 840 个程序 0 失败；16MB 内存验收、`tests/check_size.sh` 通过。
+- `pyadamas_cache_race` 连续 5 轮并发 hashlib/hmac 编译通过；
+  并行 stress（10 轮）无截断、无残留 `.tmp.*`。
+
+## [0.160] - 2026-11-14
+运行时 traceback：未捕获异常打印函数级回溯。
+
+### 变更
+
+- **PC → (函数, 行号) 表**：codegen 在行变化处发 `.LdbgN` 标签并收集表项，
+  模块入口调用 `pa_debug_register` 注册；函数结束有哨兵项。
+- **rbp 链回溯**：运行时 `rt_debug.c` 沿 rbp 链取返回地址，命中调试表后
+  打印 `Traceback (most recent call last)` + `File "...", line N, in func`；
+  运行时除 RC 热路径 `rt_core.c` 外统一 `-fno-omit-frame-pointer` 编译。
+  core 不抛用户异常，排除它避免 RC 热路径回退（对比 0.158，容器类基准
+  恢复到同一水平）。
+- **显示名**：函数名去掉生成后缀（`inner_1` → `inner`）。
+- **测试**：新增 `tests/run/153_traceback.py`，父进程以子进程重跑并检查
+  stderr 含 traceback、函数名、异常消息与退出码。
+
+### 验证
+
+- `ctest --preset dev` 2/2（152 个运行用例）；差分 840 个程序 0 失败；
+  16MB 内存验收和 `tests/check_size.sh` 通过。
+- release 基准复跑（同机）：mandelbrot 26.5×、spectral_norm 30.3×、fib 15.3×、
+  nqueens 8.7× vs CPython；容器类与 0.158 持平。
+- 示例：
+  ```
+  Traceback (most recent call last):
+    File "x.py", line 7, in __pa_main
+    File "x.py", line 4, in rec
+    ...
+  pyadamas: uncaught ValueError: tb
+  ```
+
+### 限制
+
+- 生成器/协程的堆帧不在 rbp 链上，回溯可能只显示调用它们的普通函数；
+  优化内联后内联体归到调用者。
+- 没有 CFI；`panic_c` 内部不变量错误仍直接退出；异常值对象仍不携带
+  traceback（只有未捕获时打印）。
+
+## [0.159] - 2026-11-14
+
+调试信息：生成代码带 DWARF 行号与可读函数符号。
+
+### 变更
+
+- **IR 指令带源码行**：`Inst` 新增 `line`；降级期按当前语句/表达式行打标，
+  优化遍复制/内联指令时保留行号。
+- **DWARF 行号表**：codegen 输出 `.file 1 "<源路径>"` 与按行变化的
+  `.loc 1 <line>`，GNU as 生成 `.debug_line`；每个函数发出可读符号
+  `pyadamas_fn_<N>_<name>`（内部跳转仍是 `.LfN`）。
+- **可定位**：`addr2line -e prog -f <addr>` 返回函数名与 `源文件:行`；
+  `readelf --debug-dump=decodedline prog`、`nm prog | grep pyadamas_fn`
+  可直接查看。
+
+### 说明与验证
+
+- 没有 `.debug_info` / CFI：`gdb` 能定位源码行，但栈回溯不可靠；未捕获异常
+  仍只有 `pyadamas: uncaught <type>: <message>`，运行时 traceback 留待后续。
+- `ctest --preset dev` 2/2；差分 840 个程序 0 失败；16MB 内存验收和
+  `tests/check_size.sh` 通过；生成代码行为与 0.158 一致。
+
+## [0.158] - 2026-11-14
+正确性修复、asyncio 收尾与前端基线复测。
+
+### 修复
+
+- **NaN 的 `!=` 在比较+分支融合路径判错**：`if a != b` 生成
+  `ucomisd + jne`，NaN 时 ZF=1 落到假分支；改为先把无序（PF=1）跳到真
+  分支，再按 ZF 分派。`tests/run/48_branch_mnemonics.py` 补六种比较的
+  NaN 回归。
+- **生成器/协程 resume 复用上一个函数的浮点提升状态**：`assign_slot_regs`
+  对生成器提前返回时没有清 `fp_promoted_slots_` / `slot_fpidx_`，包含
+  `list[float]` 打印或 float gather 的协程会生成 `movsd , off(%rbp)` 这种
+  空操作数汇编。生成器分支现在显式清空这两张表。
+
+### 变更
+
+- **Task 支持多个并发等待者**：完成时把结果/异常分发给 `waiters` 列表中的
+  所有协程；取消等待对象型 Task 时同样通知全部等待者；等待者被取消时从
+  列表摘除。`pa_asyncio_create_task` 新增 `result_kind` 参数，Task 结果的
+  所有权按静态 `task[T]` 元素类型带入运行时。
+- **gather 结果元素所有权按静态类型带入运行时**：`pa_asyncio_gather` 多一个
+  `result_kind` 参数（0 裸值 / 1 堆引用 / 2 unknown），避免 float 位模式被
+  当成堆指针 dec，也让字符串/对象结果按精确 RC 释放。
+- **`from asyncio import ...` 保留特化类型**：`gather` / `run` / `wait_for` /
+  `create_task` 等别名仍走 asyncio 的调用点规则，不再退回泛型
+  `list[unknown]` / unknown。
+
+### 验证
+
+- `ctest --preset dev` 2/2；151 个运行用例（含新增 NaN、float gather、
+  Task 多等待者/多等待者取消覆盖）。
+- 差分 840 个程序，0 失败。
+- 16MB `RLIMIT_AS` 下 13 个 RC/GC/异步用例全部通过；`tests/check_size.sh` 通过。
+- 标准库前端基线（Debian CPython 3.13.5）：598 个文件，语法通过 596，类型通过
+  281 / 596（47.1%）；去掉 `test/` 为 533 个文件、语法 532、类型 253 / 532
+  （47.6%）。0.133 同口径为 277 / 596（46.5%），本版 +4。
+- release 基准（本机 WSL，g++ 14.2，5 次取最小）：mandelbrot 25.8×、
+  spectral_norm 29.5×、fib 14.9×、nqueens 8.5× vs CPython，9 个用例输出与
+  CPython/C++ 一致；快照见 `bench/compare/RESULTS-0p158-wsl.md`。
+
 ## [0.157] - 2026-11-14
 
 优化：浮点比较分支去掉 NaN 专用跳转。

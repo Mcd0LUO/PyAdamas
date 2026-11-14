@@ -265,8 +265,6 @@ void AsmGen::gen_rt_args(const Inst& in, RtFn fn) {
         case RtFn::HandlerRearm:
         case RtFn::HandlerFree:
         case RtFn::AsyncioRun:
-        case RtFn::AsyncioGather:
-        case RtFn::AsyncioCreateTask:
         case RtFn::AsyncioTaskDone:
         case RtFn::AsyncioTaskCancel:
         case RtFn::AsyncGenANext:
@@ -465,6 +463,8 @@ void AsmGen::gen_rt_args(const Inst& in, RtFn fn) {
         case RtFn::PathWithSuffix:
         case RtFn::PopenSendSignal:
         case RtFn::PopenCommunicate:
+        case RtFn::AsyncioGather:
+        case RtFn::AsyncioCreateTask:
             gen_rt_i2(in);
             break;
         case RtFn::FileSeek:

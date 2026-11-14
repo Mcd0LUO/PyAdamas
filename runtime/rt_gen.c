@@ -89,6 +89,7 @@ int64_t gen_run(void* g, int64_t sent, int* done) {
         pa_rc_cleanup(h.mark);
         /* resume 里换上的异常上下文也要退掉，恢复成调用方那一份。 */
         pa_exc_unwind(exc_depth0);
+        pa_trace_attach(pending_exc, g);
         exc_longjmp();
     }
     ((void (*)(void*, int64_t))(uintptr_t)p[4])(g, sent);

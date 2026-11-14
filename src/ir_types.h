@@ -33,6 +33,8 @@ struct Inst {
     int32_t idx = -1;     // 槽号 / 全局号 / 字符串号 / 函数号
     int32_t target = -1;  // 跳转目标块
     int32_t target2 = -1;
+    // 生成指令对应的源码行（调试信息 / DWARF .loc）。0 = 无行信息。
+    int32_t line = 0;
 
     TypePtr ty;  // 结果类型；无结果时为 nullptr
 

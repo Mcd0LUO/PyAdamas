@@ -1,6 +1,8 @@
 // codegen_block.cpp —— 函数与基本块、融合与分支
 #include "codegen_impl.h"
 
+#include <cctype>
+
 namespace pyadamas {
 
 // O2：只清零「可能读到未赋值值」的槽。对每个块做 must 数据流：
@@ -87,6 +89,53 @@ std::vector<bool> AsmGen::slots_needing_zero() const {
     return need;
 }
 
+static std::string debug_func_symbol(int fi, const std::string& name) {
+    std::string s = "pyadamas_fn_" + std::to_string(fi);
+    for (char c : name) s.push_back(std::isalnum(static_cast<unsigned char>(c)) ? c : '_');
+    return s;
+}
+
+// 出参区：调用点把装不下的实参写在 rsp 下面那块地方。以前每个调用点
+// 自己 subq/addq，栈指针一动，槽位地址（相对 rsp）就跟着漂；现在整函数
+// 按最大用量一次性留在帧里，rsp 全程不动。这里只按「每个实参至多一个
+// 八字节、结构体按 ABI 尺寸、再加隐藏指针/暂存」估上界，宁大勿小。
+int AsmGen::outgoing_bytes(const IRFunction& f) const {
+    int worst = 16;  // 至少留两个槽：sret 隐藏指针 + 对齐
+    for (const auto& b : f.blocks) {
+        for (const auto& in : b.insts) {
+            int need = 0;
+            switch (in.op) {
+                case IrOp::Call:
+                case IrOp::CallPtr:
+                case IrOp::CallDirect:
+                case IrOp::CallRt:
+                case IrOp::VCall:
+                case IrOp::VCallStatic:
+                case IrOp::SuperVCall:
+                    // 寄存器用完的实参逐个占 8 字节；+16 兜住隐藏指针和对齐。
+                    need = 8 * (static_cast<int>(in.args.size()) + 2);
+                    break;
+                case IrOp::CallExtern: {
+                    // C 调用还多一块暂存：返回值分块暂存 + sret 指针共 48 字节。
+                    const IRExtern& ex = m_->externs[static_cast<size_t>(in.idx)];
+                    need = 48 + 16;
+                    for (size_t i = 0; i < in.args.size(); ++i) {
+                        int64_t sz = 8;
+                        if (i < ex.param_abi.size() && ex.param_abi[i].size > sz)
+                            sz = ex.param_abi[i].size;
+                        need += static_cast<int>((sz + 7) & ~static_cast<int64_t>(7));
+                    }
+                    break;
+                }
+                default:
+                    continue;
+            }
+            if (need > worst) worst = need;
+        }
+    }
+    return (worst + 15) & ~15;
+}
+
 void AsmGen::emit_function(const IRFunction& f, int fi) {
         f_ = &f;
         fi_ = fi;
@@ -97,10 +146,15 @@ void AsmGen::emit_function(const IRFunction& f, int fi) {
         frame_owned_unknown_.clear();
         frame_scan_.clear();
         frame_scan_words_ = 0;
+        cur_loc_line_ = 0;
         auto t_alloc = std::chrono::steady_clock::now();
         assign_vreg_slots();
         if (gen_) {
             slot_reg_.assign(f.slot_ty.size(), std::string());
+            // 生成器帧不提升槽位，但必须清掉上一个函数留下的浮点提升状态，
+            // 否则调用点的 spill/reload 会去读写一个空寄存器。
+            slot_fpidx_.assign(f.slot_ty.size(), -1);
+            fp_promoted_slots_.clear();
             n_saved_regs_ = 1;  // %r15 帧指针
         } else {
             assign_slot_regs();
@@ -140,6 +194,9 @@ void AsmGen::emit_function(const IRFunction& f, int fi) {
         assign_global_vreg_regs();
         assign_block_temp_regs();
         build_fp_liveness();
+        // 槽位操作数是缓存好的字符串，偏移依赖帧布局，所以先定型再建缓存。
+        out_bytes_ = outgoing_bytes(f);
+        layout_frame(n_slots_ + n_vreg_slots_ + rec_words);
         build_operand_caches();
         auto t_emit = std::chrono::steady_clock::now();
         alloc_ns_ += std::chrono::duration<double, std::nano>(t_emit - t_alloc).count();
@@ -151,15 +208,42 @@ void AsmGen::emit_function(const IRFunction& f, int fi) {
 
         out_ += std::format("\n# ---- {} ({}) ----\n", f.name, type_name(f.ret));
         label(func_label(fi));
-        line("pushq %rbp");
-        line("movq %rsp, %rbp");
+        if (dbg_on_) {
+            // 函数起点也登记一项：生成器/协程帧只保存 resume 代码地址，
+            // 回溯时用它找回函数名。
+            std::string start = std::format(".LdbgStart{}", fi);
+            out_ += start + ":\n";
+            dbg_entries_.push_back({start, fi, 0});
+        }
+        // 可读的函数别名，供 addr2line / nm / gdb 定位；.LfN 仍是内部跳转名。
+        const std::string fname = debug_func_symbol(fi, f.name);
+        out_ += "\t.p2align 4\n";
+        out_ += "\t.type " + fname + ", @function\n";
+        out_ += fname + ":\n";
+        // CFI（.eh_frame 里的栈展开规则）：从「rsp 指向返回地址」到「帧指针
+        // 就位」的每一步都写下来。gdb 的 DWARF 展开器和 libgcc 的
+        // _Unwind_Backtrace 都不解析 prologue，只认这张表——缺了它们就
+        // 展不过生成出来的帧。运行时的 traceback 仍走 rbp 链，不依赖 CFI。
+        line(".cfi_startproc");
+        // 帧里没有帧指针：CFA 全程由 rsp 定义。prologue 每动一次 sp 就把
+        // 偏移记下来，gdb / _Unwind_Backtrace 才能从任意 PC 还原上一层帧。
+        // 被保存的寄存器相对 CFA 的偏移不随 push 变化（CFA 也跟着涨）。
+        cfa_off_ = 8;
         if (gen_) {
             line("pushq %r15");
+            cfa_off_ += 8;
+            line(std::format(".cfi_def_cfa_offset {}", cfa_off_));
+            line(".cfi_offset %r15, -16");
             line("movq %rdi, %r15");
         } else {
-            for (int i = 0; i < n_saved_regs_; ++i) line(std::format("pushq {}", kSlotRegs[i]));
+            for (int i = 0; i < n_saved_regs_; ++i) {
+                line(std::format("pushq {}", kSlotRegs[i]));
+                cfa_off_ += 8;
+                line(std::format(".cfi_def_cfa_offset {}", cfa_off_));
+                line(std::format(".cfi_offset {}, -{}", kSlotRegs[i], cfa_off_));
+            }
         }
-        frame_size(n_slots_ + n_vreg_slots_ + rec_words);
+        frame_alloc();
 
         if (!gen_) {
             // 非参数变量清零。`x: int` 这种纯声明在 lower 里不生成任何指令，
@@ -192,7 +276,8 @@ void AsmGen::emit_function(const IRFunction& f, int fi) {
                 const auto& p = f.params[i];
                 const auto& l = locs[i];
                 if (l.stack_off >= 0) {
-                    line(std::format("movq {}(%rbp), %rax", 16 + l.stack_off));
+                    // 栈上实参在返回地址上面：rsp + 帧长 + 8 + 偏移。
+                    line(std::format("movq {}(%rsp), %rax", frame_bytes_ + 8 + l.stack_off));
                     move_to(slot_op(p.slot), "%rax");
                 } else if (l.fp) {
                     line(std::format("movsd %xmm{}, {}", l.reg, slot_op(p.slot)));
@@ -204,16 +289,16 @@ void AsmGen::emit_function(const IRFunction& f, int fi) {
             // 有捕获的函数从 %r10 拿闭包环境；调用方在 call 前设置。
             if (f.env_slot >= 0) emit2("movq", "%r10", slot_op(f.env_slot));
 
-            // 压帧记录。槽地址在 %rbp 上是固定的，异常展开时按地址读
-            // 最新值即可；正常返回由 emit_epilogue 弹栈。
+            // 压帧记录。槽地址在 %rsp 上是固定的（rsp 全程不动），异常
+            // 展开时按地址读最新值即可；正常返回由 emit_epilogue 弹栈。
             if (rec_words > 0) {
                 frame_rec_ = true;
                 line("movq pa_frame_top(%rip), %rax");
                 emit2("movq", "%rax", rec_mem(0));
                 emit_imm_op("movq", static_cast<int64_t>(rec_entries), rec_mem(1));
                 if (frame_scan_words_ > 0) {
-                    line(std::format("leaq {}(%rbp), %rax",
-                                     vreg_slot_off(frame_scan_words_ - 1)));
+                    // 临时区从第一个 vreg 槽开始，往高地址扫 scan_words 个字。
+                    line(std::format("leaq {}(%rsp), %rax", vreg_slot_off(0)));
                     emit2("movq", "%rax", rec_mem(2));
                 } else {
                     emit_imm_op("movq", static_cast<int64_t>(0), rec_mem(2));
@@ -246,8 +331,26 @@ void AsmGen::emit_function(const IRFunction& f, int fi) {
             reload_fp_slots();
         }
 
+        // 循环头对齐：热循环的入口落在 16 字节边界上，取指和分支预测
+        // 都更稳定。回边目标就是循环头，不需要额外的支配分析。
+        std::vector<bool> loop_header(f.blocks.size(), false);
+        for (size_t bi = 0; bi < f.blocks.size(); ++bi) {
+            const auto& blk = f.blocks[bi];
+            if (blk.insts.empty()) continue;
+            const Inst& term = blk.insts.back();
+            auto mark = [&](int t) {
+                if (t >= 0 && t <= static_cast<int>(bi) && t < static_cast<int>(f.blocks.size()))
+                    loop_header[static_cast<size_t>(t)] = true;
+            };
+            if (term.op == IrOp::Jump) mark(term.target);
+            else if (term.op == IrOp::Branch) {
+                mark(term.target);
+                mark(term.target2);
+            }
+        }
         for (size_t bi = 0; bi < f.blocks.size(); ++bi) {
             cur_block_ = static_cast<int>(bi);
+            if (loop_header[bi]) line(".p2align 4");
             label(block_label(static_cast<int>(bi)));
             gen_block(f.blocks[bi]);
         }
@@ -258,6 +361,13 @@ void AsmGen::emit_function(const IRFunction& f, int fi) {
             line("xorl %eax, %eax");
             emit_epilogue();
         }
+        if (dbg_on_) {
+            std::string end = std::format(".LdbgEnd{}", fi);
+            out_ += end + ":\n";
+            dbg_entries_.push_back({end, -1, 0});
+        }
+        line(".cfi_endproc");
+        out_ += std::format("\t.size {}, .-{}\n", fname, fname);
         emit_ns_ += std::chrono::duration<double, std::nano>(
                         std::chrono::steady_clock::now() - t_emit)
                         .count();
@@ -298,7 +408,7 @@ bool AsmGen::can_fuse_branch(const Inst& in, const Inst& nx) const {
         if (in.dst == kNoReg || nx.a != in.dst) return false;
         if (!single_use_in_block(in.dst)) return false;
         // 字符串走三路比较，没有能直接用的条件跳转；浮点交给
-        // gen_cmp_branch_fp 用 ucomisd + jp 处理 NaN。
+        // gen_cmp_branch_fp（有序比较用 ja/jae 把 NaN 归到假分支，== 再补 jp）。
         TypePtr t = ty_of(in.a);
         if (t && t->kind == TyKind::Str) return false;
         return true;
@@ -363,7 +473,7 @@ void AsmGen::gen_cmp_branch_fp(const Inst& in, const Inst& br) {
             case CmpKind::Gt: jcc = "ja"; inv = "jbe"; ordered = false; break;
             case CmpKind::Ge: jcc = "jae"; inv = "jb"; ordered = false; break;
             case CmpKind::Eq: jcc = "je"; inv = "jne"; break;
-            case CmpKind::Ne: jcc = "jne"; inv = "je"; ordered = false; break;
+            case CmpKind::Ne: jcc = "jne"; inv = "je"; ordered = false; break;  // NaN 由下面的特例先跳真分支
         }
         if (swap) {
             std::string t = sa;
@@ -377,8 +487,26 @@ void AsmGen::gen_cmp_branch_fp(const Inst& in, const Inst& br) {
             emit2("movsd", sa, "%xmm0");
             emit2("ucomisd", sb, "%xmm0");
         }
-        // NaN 时 PF=1：除 != 外都要先跳到假分支。之后的落点选择与整型
-        // 版本一致，利用「目标块就是下一块」省掉无条件跳。
+        // NaN 时 PF=1：!= 的结果应为真，不能直接 je。单独把无序跳到真分支，
+        // 再按 ZF 分真/假；其它比较的 jp 在下面按 ordered 处理。
+        if (in.cop == CmpKind::Ne) {
+            if (opt_ >= 2 && br.target == cur_block_ + 1) {
+                // 真块就是下一块：NaN 和不等都落到 fallthrough，相等跳假。
+                line(std::format("jp {}", block_label(br.target)));
+                line(std::format("je {}", block_label(br.target2)));
+            } else if (opt_ >= 2 && br.target2 == cur_block_ + 1) {
+                // 假块就是下一块：NaN 和不等跳真，相等 fallthrough 到假。
+                line(std::format("jp {}", block_label(br.target)));
+                line(std::format("jne {}", block_label(br.target)));
+            } else {
+                line(std::format("jp {}", block_label(br.target)));
+                line(std::format("jne {}", block_label(br.target)));
+                emit_jmp("jmp", block_label(br.target2));
+            }
+            return;
+        }
+        // 有序比较的 ja/jae 本身已排除无序，ordered=false 时不需要 jp。
+        // 之后的落点选择与整型版本一致，利用「目标块就是下一块」省掉无条件跳。
         if (opt_ >= 2 && br.target == cur_block_ + 1) {
             if (ordered) emit_jmp("jp", block_label(br.target2));
             line(std::format("{} {}", inv, block_label(br.target2)));

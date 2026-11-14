@@ -16,7 +16,7 @@
 | 内存管理 | 引用计数：隐藏头、临时值栈、字段/列表析构、无 RC 代码的脚手架消除 |
 | 闭包 | cell 捕获、`nonlocal`、多层嵌套、自递归、方法捕获 self；函数值是一等闭包对象 |
 | 匿名函数 | `lambda` 脱糖成合成嵌套 `def`，复用闭包/cell；函数值默认参数可用 |
-| 循环收集 | 保守标记-清扫：堆注册表、全局/临时栈/真实栈/寄存器根、存活堆自适应阈值（下限 2MB）、退出清空 |
+| 循环收集 | 分代收集：minor trial-deletion + major 标记-清扫；堆注册表、全局/临时栈/帧记录登记区/寄存器根、存活堆自适应阈值（下限 2MB）、退出清空 |
 | 字典 / 集合 | 开放寻址哈希表 + 插入顺序；字面量、下标读写、`len`、`in`、`for`；RC/GC |
 | 容器方法与切片 | dict get/keys/values/items/update、set add/update；str/list/tuple 读切片（缺省/负数/步长） |
 | 构造补齐 | 删除类方法、切片赋值、`*args`/`**kwargs`、推导式、`with`、函数装饰器 |
@@ -81,16 +81,27 @@
 | 0.153 | 工程治理：拆完 `gen_call_rt` / `builtin_module` / `lower_builtin_call` / `call` / `stmt`，拆分 `ir.h`、`typecheck.h`、`lower_impl.h`，新增 `tests/check_size.sh` |
 | 0.154 | 工程治理：拆完剩余 7 个大文件（`typecheck_call` / `lower_expr` / `lower_import` / `lower_stmt` / `lower_gen` / `lower` / `cdecl`），全部源文件 ≤1200 行 |
 | 0.155 | 浮点数值循环优化：块内 xmm 临时寄存器、浮点比较分支融合、短路布尔槽转发；mandelbrot 同机 1.87× |
+| 0.156 | 拷贝合并与跨块公共子表达式消除：`opt_cse.cpp` 前向可用表达式；mandelbrot release 26.4→12.0ms（约 CPython 23.3×） |
+| 0.157 | 浮点比较分支去掉 NaN 专用跳转：有序比较交换操作数、改用 `ja`/`jae`，内层循环少一条分支 |
+| 0.158 | 正确性 + asyncio 收尾：NaN `!=` 分支修复、生成器浮点提升状态修复、Task 多等待者与结果类型、gather 结果类型、from-import asyncio 特化；基线 281/596 |
+| 0.159 | 调试信息：IR 指令带源码行，生成代码发 DWARF `.file`/`.loc` 与可读函数符号；`addr2line`/`readelf` 可映射回源码 |
+| 0.160 | 运行时 traceback：codegen 发 PC→(函数, 行号) 表并在模块入口注册；未捕获异常沿 rbp 链打印 `Traceback (most recent call last)` |
+| 0.161 | 模块缓存原子写 + async/generator 逻辑帧：并发编译不再读到截断文件；未捕获异常追加协程/生成器 resume 帧 |
+| 0.162 | 调试信息收尾：每个生成函数带 CFI（`.eh_frame`）与 `.type`/`.size`，手写汇编（析构器 / GC release / 回调跳板 / init 桩 / main）同样覆盖；新增 `cfi:unwind` 回归 |
+| 0.163 | 回溯走标准展开器 + 去掉帧指针：`pa_print_traceback` 改用 `_Unwind_Backtrace`，运行时不再强制 `-fno-omit-frame-pointer`；生成代码槽位改相对 rsp、出参区在帧里预留、`%rbp` 并入变量寄存器池，函数入口与循环头 16 字节对齐；修复跨多个挂起点的值不落槽 |
 | 许可证 | Apache-2.0（见 [LICENSE](../LICENSE) / [NOTICE](../NOTICE)） |
 
-## 当前状态（0.155）
+## 当前状态（0.163）
 
 流水线 `源码 → 词法 → AST → lambda 脱糖 → 类型检查 → IR → x86-64 汇编 → 可执行文件` 已打通。
 
 - **语言面**：标量、字符串、`bytes`（含迭代与 `%` 格式化）、列表/元组/字典/集合、切片读写、闭包/lambda/`*args`/`**kwargs`/装饰器、推导式、`with`、异常值（`args`/`raise ... from`/自定义异常）、类（字段/方法/C3 多继承/零参 `super()`/`@staticmethod`/`@classmethod`/`@property`/类属性/类装饰器/类名当值）、`match/case`、`del`、复数字面量、f-string 格式说明、dunder 协议（含装饰 dunder、`__call__` 与方法值）、`Generator[Y, S, R]` 标注、`open`/`input`/`sys.stdin`、`struct` 值类型、`cimport`/`cdecl` C 互操作与跨模块继承。
 - **标准库**：`math`/`sys`/`asyncio`/`random`/`os`/`os.path`/`subprocess`/`time`/`itertools`/`collections`/`functools`/`json`/`string`/`re`/`datetime`/`pathlib`/`csv`/`base64`/`binascii`/`heapq`/`bisect`/`hashlib`/`hmac`/`logging`/`statistics`/`textwrap`/`operator`，以及封装 OpenBLAS 的 `linalg`。
-- **验证**：151 个运行用例、52 个反例、12 个模块目录；差分 runner 已自举，默认 840 例；`tests/bench/` 提供 pyadamas vs CPython 的标准库与 RC/GC 基准（`base64`/`hashlib` 已反超）。
-- **主要缺口**：asyncio 边角；调试信息与 traceback；依赖动态属性的 stdlib（如 `argparse`，见「技术债」）。
+- **验证**：152 个运行用例、52 个反例、12 个模块目录；差分 runner 已自举，默认 840 例；`tests/bench/` 提供 pyadamas vs CPython 的标准库与 RC/GC 基准（`base64`/`hashlib` 已反超）。
+- **优化**：O2 有常量折叠/DCE/小函数内联/静态调用直接化/LICM/检查型下标外提/循环旋转/跨块 CSE；后端有拷贝合并、浮点临时寄存器与浮点比较分支融合（有序比较不再补 NaN 跳转）。
+- **asyncio**：Task 支持多等待者；`gather` 结果元素所有权按静态类型带入运行时；`from asyncio import ...` 保留调用点特化；`run`/`wait_for` 跨模块结果仍可能退化为 unknown。
+- **调试信息**：生成代码带 DWARF 行号、CFI（`.eh_frame`）与可读函数符号（`.type`/`.size`）；帧里没有 rbp，gdb、libgcc 的展开器和运行时自己的 traceback 都靠 CFI 逐帧还原。未捕获异常打印函数级 traceback，异步/生成器 resume 帧也会追加（仅函数名）。异常值对象仍不带 traceback。
+- **主要缺口**：asyncio 边角；异常对象 traceback / 列号 / `.debug_info`；依赖动态属性的 stdlib（如 `argparse`，见「技术债」）。
 
 ## 下一步
 
@@ -98,7 +109,7 @@
 
 ### 1. 工程收尾
 
-- 重跑标准库前端基线：最近一次完整口径是 0.81.1（Debian python3.13.5，见 [compatibility.md](compatibility.md#前端鲁棒性基线)），原口径（CPython 3.11.1 + site-packages，38582 个文件）还没重跑；0.133 之后尚未复测；
+- 标准库前端基线已在 0.158 复测（Debian 3.13.5：本体 281 / 596，去掉 `test/` 253 / 532）；原口径（CPython 3.11.1 + site-packages，38582 个文件）仍未重跑；
 - 保持 `docs/` 与 README 的验证表同步（运行用例、模块目录等数字按仓库实际统计）；
 - `tests/bench/` 标准库基准已固化（0.144）。
 
@@ -120,16 +131,16 @@
 1. **GC 的根只扫登记区，且 stop-the-world**：分代已落地（minor trial-deletion + major 标记-清扫）；GC 不再扫整段真实栈，只扫帧记录登记的 unknown 槽、含 unknown vreg 帧的临时区和 callee-saved 寄存器，临时区仍整段保守扫描；没有增量/并发和栈映射
 2. **unknown 引用的计数不精确**：容器 kind 2 元素、unknown 字段与全局已用 RC 索引精确释放（`pa_rc_dec_unknown`）；裸 `list` 的空容器已在第一次写入时定型；仍剩 unknown 类型的局部槽是借来的引用（不计入 rc），靠保守扫栈兜底
 3. **Optional 的收窄能力不足**：`x: Optional[str]` 在 `if x is None: ...` 之后、跨语句块或跨函数调用时仍按 Optional 处理；修它需要正经的数据流分析
-4. **优化遍仍不完整**：有常量折叠、DCE、小函数内联、LICM、下标版本化/免检查；没有 CSE、强度削减、循环旋转和通用向量化
+4. **优化遍仍不完整**：有常量折叠、DCE、小函数内联、静态调用直接化、LICM、下标版本化/免检查、循环旋转、跨块 CSE 与后端拷贝合并；没有强度削减、通用向量化和全局寄存器分配
 5. **`tuple` 与 `list` 表示相同**：tuple 也是可变的动态数组，语义上不严谨
 6. **诊断不带列区间**：只指向起点，长表达式不好定位
 7. **没有增量重编 Python 源码**：每次 `build` 都是全量编译，只有 import 模块有缓存
 8. **浮点变量只在无调用函数里提升**：`xmm8–15` 用于无调用函数的跨块浮点值；含调用/handler 的函数仍走内存槽，跨调用要 save/restore
-9. **异常对象仍缺 traceback**：有异常值、`args`、自定义异常类和 `raise ... from`，但 `args` 只保存消息
+9. **异常对象仍缺 traceback**：有异常值、`args`、自定义异常类和 `raise ... from`，但 `args` 只保存消息；0.160 的 traceback 只在未捕获异常时打印，异常值本身仍没有 traceback 对象/链
 10. **含 handler 的函数没有寄存器提升**：longjmp 会回滚 callee-saved 寄存器，只能全走内存槽
 11. **生成器/协程的剩余边角**：`finally` 体内的挂起与 `return`/`break`/`continue` 跳出都已支持（finalbody 在可挂起函数里只编译一份，正常与异常路径汇聚；跳出路径内联 finalbody；close 重放到挂起点时报 `RuntimeError`，重放跳出会恢复 finally 词法上所属的循环）。未标注 `Generator[Y, S, R]` 时 `send` 与 `yield` 表达式静态是 unknown（`await` 已按 `Coroutine[T]` / `Awaitable[T]` 定类型）
-12. **asyncio 仍是最小集合**：`async for` 已支持自定义 `__aiter__`，但 fd 读写、asyncio 子进程、线程安全循环未支持；`Queue` 的 float 元素需要 `asyncio.Queue[float]` 这类标注把元素类型带进构造，未标注队列仍按引用语义；`wait_readable` 不是 CPython 标准 API；Future 回调同步执行；`gather` 结果按 unknown 容器处理；Task 只允许一个并发等待者
+12. **asyncio 仍是最小集合**：`async for` 已支持自定义 `__aiter__`，但 fd 读写、asyncio 子进程、线程安全循环未支持；`Queue` 的 float 元素需要 `asyncio.Queue[float]` 这类标注把元素类型带进构造，未标注队列仍按引用语义；`wait_readable` 不是 CPython 标准 API；Future 回调同步执行。Task 已支持多等待者，`gather` 结果元素所有权按静态类型带入运行时（0.158）
 13. **stdlib 覆盖不足**：没有 `argparse`（返回对象要有动态属性，和静态布局冲突）；`logging`/`statistics`/`textwrap`/`base64`/`hashlib`/`hmac`/`csv` 已接上子集，`functools` 已覆盖 `reduce`/`wraps`/`partial`/`lru_cache`（`lru_cache` 无淘汰、键类型受限），`json`/`collections`/`itertools` 是子集；`re` 有后向引用/四向断言/原子组/内联标志，但缺 Unicode 属性类和 `findall` 的分组语义
-14. **C FFI 与调试信息仍不全**：`cdecl` 只解析头文件子集（不展开宏函数/条件编译，C `float`、union 按值、定长数组不生成）；回调槽不可重入；没有包管理和 traceback
+14. **C FFI 与调试信息仍不全**：`cdecl` 只解析头文件子集（不展开宏函数/条件编译，C `float`、union 按值、定长数组不生成）；回调槽不可重入；已有 DWARF 行号（0.159）、函数级 traceback（0.160）、async/generator 逻辑帧（0.161）和 CFI（0.162，0.163 起运行时也走展开器），仍缺 `.debug_info`、列号、异常对象 traceback 和包管理
 15. **`re` 是纯回溯 VM**：递归实现，深模式或灾难性模式会吃栈，只靠 2 亿步上限兜底；没有 DFA/JIT，`findall`/`split` 每次重新编译模式字符串
 16. **形参类型推断只做单态**：未标注形参由调用点回填，同一形参吃多种类型时退回 unknown（`print` 会按整数输出）；嵌套函数不参与重查。根治要运行时类型标签，代价是全量 tag 或 NaN-boxing（见「待决策」）

@@ -41,6 +41,13 @@ TypePtr TypeChecker::call_name(Name& n, Call& c) {
             return mk_exception(sym->ty->cls->name);
         }
         if (!lookup(n.id) && is_builtin_callable(n.id)) return builtin_call(n.id, c);
+        // from asyncio import gather/run/...：别名仍按 asyncio 的调用规则
+        // 推断，否则 gather 会退回泛型签名，结果变成 list[unknown]。
+        if (auto it = native_aliases_.find(n.id); it != native_aliases_.end()) {
+            if (auto* sym = lookup(n.id); sym && sym->ty == it->second.sig &&
+                it->second.module == "asyncio")
+                if (auto r = asyncio_call(it->second.member, c)) return *r;
+        }
         // sizeof / addr 是值类型 struct 的特殊形式：前者是编译期常量，
         // 后者把结构体值变成 ptr[T]，可以交给 C 函数。
         if (!lookup(n.id) && (n.id == "sizeof" || n.id == "addr")) {

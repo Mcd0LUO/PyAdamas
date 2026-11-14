@@ -223,17 +223,11 @@ void AsmGen::gen_vcall(const Inst& in) {
         for (VReg a : in.args) types.push_back(ty_of(a));
         auto locs = classify(types);
 
-        int stack_args = 0;
-        for (auto& l : locs)
-            if (l.stack_off >= 0) stack_args = (l.stack_off / 8) + 1;
-        int stack_bytes = stack_args * 8;
-        int alloc = (stack_bytes + 15) & ~15;
 
         emit2("movq", src_op(in.a), "%r10");
         line("movq (%r10), %r11");
         line(std::format("movq {}(%r11), %r11", in.imm * 8));
 
-        if (alloc) emit_imm_op("subq", alloc, "%rsp");
         for (size_t i = 0; i < in.args.size(); ++i) {
             const auto& l = locs[i + 1];
             if (l.stack_off < 0) continue;
@@ -254,7 +248,6 @@ void AsmGen::gen_vcall(const Inst& in) {
         spill_fp_slots();
         line("call *%r11");
         reload_fp_slots();
-        if (alloc) emit_imm_op("addq", alloc, "%rsp");
 
         if (!dst_unused(in)) {
             if (ir_is_float(in.ty)) move_fp(dst_op(in.dst), "%xmm0");
@@ -267,16 +260,11 @@ void AsmGen::gen_vcall_static(const Inst& in) {
         types.reserve(in.args.size());
         for (VReg a : in.args) types.push_back(ty_of(a));
         auto locs = classify(types);
-        int stack_args = 0;
-        for (auto& l : locs)
-            if (l.stack_off >= 0) stack_args = (l.stack_off / 8) + 1;
-        int alloc = (stack_args * 8 + 15) & ~15;
 
         emit2("movq", src_op(in.a), "%r10");
         line("movq (%r10), %r11");
         line(std::format("movq {}(%r11), %r11", in.imm * 8));
 
-        if (alloc) emit_imm_op("subq", alloc, "%rsp");
         for (size_t i = 0; i < in.args.size(); ++i) {
             const auto& l = locs[i];
             if (l.stack_off < 0) continue;
@@ -296,7 +284,6 @@ void AsmGen::gen_vcall_static(const Inst& in) {
         spill_fp_slots();
         line("call *%r11");
         reload_fp_slots();
-        if (alloc) emit_imm_op("addq", alloc, "%rsp");
         if (!dst_unused(in)) {
             if (ir_is_float(in.ty)) move_fp(dst_op(in.dst), "%xmm0");
             else emit2("movq", "%rax", dst_op(in.dst));
@@ -320,12 +307,7 @@ void AsmGen::gen_super_vcall(const Inst& in) {
         types.push_back(t_unknown());
         for (VReg a : in.args) types.push_back(ty_of(a));
         auto locs = classify(types);
-        int stack_args = 0;
-        for (auto& l : locs)
-            if (l.stack_off >= 0) stack_args = (l.stack_off / 8) + 1;
-        int alloc = (stack_args * 8 + 15) & ~15;
 
-        if (alloc) emit_imm_op("subq", alloc, "%rsp");
         for (size_t i = 0; i < in.args.size(); ++i) {
             const auto& l = locs[i + 1];
             if (l.stack_off < 0) continue;
@@ -346,7 +328,6 @@ void AsmGen::gen_super_vcall(const Inst& in) {
         spill_fp_slots();
         line("call *%r11");
         reload_fp_slots();
-        if (alloc) emit_imm_op("addq", alloc, "%rsp");
 
         if (!dst_unused(in)) {
             if (ir_is_float(in.ty)) move_fp(dst_op(in.dst), "%xmm0");
@@ -359,12 +340,7 @@ void AsmGen::gen_call_direct(const Inst& in) {
         types.reserve(in.args.size());
         for (VReg a : in.args) types.push_back(ty_of(a));
         auto locs = classify(types);
-        int stack_args = 0;
-        for (auto& l : locs)
-            if (l.stack_off >= 0) stack_args = (l.stack_off / 8) + 1;
-        int alloc = (stack_args * 8 + 15) & ~15;
 
-        if (alloc) emit_imm_op("subq", alloc, "%rsp");
         for (size_t i = 0; i < in.args.size(); ++i) {
             const auto& l = locs[i];
             if (l.stack_off < 0) continue;
@@ -389,7 +365,6 @@ void AsmGen::gen_call_direct(const Inst& in) {
         spill_fp_slots();
         line(std::format("call {}", func_label(in.idx)));
         reload_fp_slots();
-        if (alloc) emit_imm_op("addq", alloc, "%rsp");
         if (!dst_unused(in)) {
             if (ir_is_float(in.ty)) move_fp(dst_op(in.dst), "%xmm0");
             else emit2("movq", "%rax", dst_op(in.dst));
@@ -402,13 +377,8 @@ void AsmGen::gen_call_ptr(const Inst& in) {
         types.reserve(in.args.size());
         for (VReg a : in.args) types.push_back(ty_of(a));
         auto locs = classify(types);
-        int stack_args = 0;
-        for (auto& l : locs)
-            if (l.stack_off >= 0) stack_args = (l.stack_off / 8) + 1;
-        int alloc = (stack_args * 8 + 15) & ~15;
 
         emit2("movq", src_op(in.a), "%r11");
-        if (alloc) emit_imm_op("subq", alloc, "%rsp");
         for (size_t i = 0; i < in.args.size(); ++i) {
             const auto& l = locs[i];
             if (l.stack_off < 0) continue;
@@ -428,7 +398,6 @@ void AsmGen::gen_call_ptr(const Inst& in) {
         spill_fp_slots();
         line("call *%r11");
         reload_fp_slots();
-        if (alloc) emit_imm_op("addq", alloc, "%rsp");
 
         if (!dst_unused(in)) {
             if (ir_is_float(in.ty)) move_fp(dst_op(in.dst), "%xmm0");
@@ -504,16 +473,10 @@ void AsmGen::gen_call(const Inst& in) {
         for (VReg a : in.args) types.push_back(ty_of(a));
         auto locs = classify(types);
 
-        int stack_args = 0;
-        for (auto& l : locs)
-            if (l.stack_off >= 0) stack_args = (l.stack_off / 8) + 1;
-        int stack_bytes = stack_args * 8;
-        int alloc = (stack_bytes + 15) & ~15;
 
         // 函数值是闭包对象指针：+0 是代码地址。整个参数装配期间 %r11
         // 一直握着闭包，最后既当环境指针传给被调函数，也从 +0 取地址调用。
         emit2("movq", src_op(in.a), "%r11");
-        if (alloc) emit_imm_op("subq", alloc, "%rsp");
         for (size_t i = 0; i < in.args.size(); ++i) {
             if (locs[i].stack_off < 0) continue;
             emit2("movq", src_op(in.args[i]), "%r10");
@@ -532,7 +495,6 @@ void AsmGen::gen_call(const Inst& in) {
         spill_fp_slots();
         line("call *(%r11)");
         reload_fp_slots();
-        if (alloc) emit_imm_op("addq", alloc, "%rsp");
 
         if (!dst_unused(in)) {
             if (ir_is_float(in.ty)) move_fp(dst_op(in.dst), "%xmm0");
@@ -611,8 +573,6 @@ void AsmGen::gen_call_extern(const Inst& in) {
         int int_tmp0 = stack_bytes + 8, int_tmp1 = stack_bytes + 16;
         int fp_tmp0 = stack_bytes + 24, fp_tmp1 = stack_bytes + 32;
         int sret_tmp = stack_bytes + 40;
-        int extra = ex.ret == CKind::Struct ? 48 : 0;
-        int alloc = (stack_bytes + extra + 15) & ~15;
 
         // 取实参的机器值。str/可选 str 要先从 PyAdamasStr 里取出 data 字段
         // （偏移 16）；Buf* 从 list/bytes 的 data 取指针；普通指针按整数直接传。
@@ -666,7 +626,6 @@ void AsmGen::gen_call_extern(const Inst& in) {
             else line(std::format("movb %r10b, {}({})", off, base));
         };
 
-        if (alloc) emit_imm_op("subq", alloc, "%rsp");
 
         // 隐藏返回指针要在装配实参之前分配好对象（调用 pa_struct_new 会
         // 破坏参数寄存器），指针暂存在栈上，最后再装进 %rdi。
@@ -819,7 +778,6 @@ void AsmGen::gen_call_extern(const Inst& in) {
                 }
             }
         }
-        if (alloc) emit_imm_op("addq", alloc, "%rsp");
     }
 
 // C 全局变量：按声明宽度从符号地址加载。可执行文件里的数据符号用

@@ -282,8 +282,8 @@ enum class RtFn : uint16_t {
     HandlerFree,    // (handler*) -> void  生成器 close：释放挂起的记录
     AsyncioRun,     // (coro*) -> i64   跑事件循环直到根协程结束
     AsyncioSleep,   // (f64) -> awaitable*
-    AsyncioGather,  // (list*) -> awaitable*
-    AsyncioCreateTask, // (coro*) -> task*
+    AsyncioGather,  // (list*, i64 result_kind) -> awaitable*
+    AsyncioCreateTask, // (coro*, i64 result_kind) -> task*
     AsyncioTaskDone,   // (task*) -> bool
     AsyncioTaskCancel, // (task*) -> bool
     AsyncGenANext,     // (asyncgen*) -> awaitable*  __anext__ 的驱动对象

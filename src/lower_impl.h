@@ -298,6 +298,8 @@ private:
     // 降级期副作用计数：调用、del、切片赋值等会自增。for/推导式用它
     // 判断循环体是否可能改变容器长度，进而决定下标免检查是否安全。
     int side_effect_seq_ = 0;
+    // 当前正在降级的源码行，用来给指令打行号（DWARF .loc 用）。
+    int cur_line_ = 0;
 
     // ── 错误 ────────────────────────────────────────────────────
 
@@ -339,12 +341,14 @@ private:
         VReg r = alloc(ty);
         in.dst = r;
         in.ty = ty;
+        if (in.line == 0) in.line = cur_line_;
         if (!cur().terminated()) cur().insts.push_back(std::move(in));
         return r;
     }
 
     void emit(Inst in) {
         in.dst = kNoReg;
+        if (in.line == 0) in.line = cur_line_;
         if (!cur().terminated()) cur().insts.push_back(std::move(in));
     }
 

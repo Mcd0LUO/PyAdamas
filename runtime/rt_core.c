@@ -1046,7 +1046,7 @@ static void gc_collect(int major) {
 
     gc_mark_sweep = major;
     if (major) {
-        // 整堆收集沿用经典标记-清扫：根是全局、临时栈、真实栈和寄存器，
+        // 整堆收集沿用经典标记-清扫：根是全局、临时栈、帧记录登记区和寄存器，
         // 不做试探减计数，少两遍边遍历。
         for (int64_t i = 0; i < gc_n_globals; ++i)
             gc_mark((uintptr_t)*(void**)gc_globals[i]);
@@ -1066,8 +1066,8 @@ static void gc_collect(int major) {
         }
         if (t0) t2 = gc_now_ms();
 
-        // 3. 根：减完仍 > 0 的说明被集合外引用；再保守扫栈兜住 unknown
-        //    局部槽这类「借来的」引用（它们不计入 rc）。exact-RC 模式下
+        // 3. 根：减完仍 > 0 的说明被集合外引用；再保守扫帧记录和寄存器兜住
+        //    unknown 局部槽这类「借来的」引用（它们不计入 rc）。exact-RC 模式下
         //    所有引用都归某个槽/临时值/容器所有，真实 rc 已经够用。
         for (size_t i = 0; i < gc_set_len; ++i) {
             PyAdamasRc* h = gc_set[i];

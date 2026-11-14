@@ -125,6 +125,69 @@ async def cmain3() -> int:
 
 print(asyncio.run(cmain3()))
 
+
+async def shared() -> int:
+    await asyncio.sleep(0.001)
+    return 21
+
+
+async def wait_shared(t: Task[int], tag: str) -> int:
+    v = await t
+    print(tag, v)
+    return v
+
+
+async def multi_wait() -> int:
+    t = asyncio.create_task(shared())
+    a = asyncio.create_task(wait_shared(t, "a"))
+    b = asyncio.create_task(wait_shared(t, "b"))
+    va = await a
+    vb = await b
+    return va + vb
+
+
+print(asyncio.run(multi_wait()))
+
+
+async def float_task() -> float:
+    await asyncio.sleep(0)
+    return 2.5
+
+
+async def wait_float() -> float:
+    t = asyncio.create_task(float_task())
+    return await t
+
+
+print(asyncio.run(wait_float()))
+
+
+async def never() -> int:
+    await asyncio.sleep(10)
+    return 0
+
+
+async def watch(t: Task[int], tag: str) -> int:
+    try:
+        await t
+    except CancelledError:
+        print("cancel", tag)
+    return 0
+
+
+async def multi_cancel() -> int:
+    t = asyncio.create_task(never())
+    a = asyncio.create_task(watch(t, "a"))
+    b = asyncio.create_task(watch(t, "b"))
+    await asyncio.sleep(0.001)
+    t.cancel()
+    await a
+    await b
+    return 0
+
+
+print(asyncio.run(multi_cancel()))
+
 # --- expect ---
 # False
 # True
@@ -145,4 +208,11 @@ print(asyncio.run(cmain3()))
 # True
 # parent finally
 # cancel caught
+# 0
+# a 21
+# b 21
+# 42
+# 2.5
+# cancel a
+# cancel b
 # 0

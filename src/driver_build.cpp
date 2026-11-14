@@ -3,6 +3,8 @@
 #include "driver_util.h"
 
 #include <algorithm>
+#include <atomic>
+#include <unistd.h>
 #include <cctype>
 #include <chrono>
 #include <cstdio>
@@ -43,6 +45,36 @@
 namespace pyadamas {
 
 namespace {
+
+// 模块缓存写入必须原子：多个进程可能同时编译同一个模块（并行测试/构建），
+// 直接写最终文件会让另一个进程读到截断的 mod.s/mod.o/manifest。
+static std::string cache_temp_path(const std::string& path, const char* ext = "") {
+    static std::atomic<uint64_t> seq{0};
+    return std::format("{}.tmp.{}.{}{}", path, static_cast<long long>(::getpid()),
+                       seq.fetch_add(1, std::memory_order_relaxed), ext);
+}
+
+static bool write_atomic(const std::string& path, const std::string& data) {
+    std::string tmp = cache_temp_path(path);
+    {
+        std::ofstream out(tmp, std::ios::binary);
+        if (!out) return false;
+        out.write(data.data(), static_cast<std::streamsize>(data.size()));
+        if (!out) {
+            out.close();
+            std::error_code ec;
+            std::filesystem::remove(tmp, ec);
+            return false;
+        }
+    }
+    std::error_code ec;
+    std::filesystem::rename(tmp, path, ec);
+    if (ec) {
+        std::filesystem::remove(tmp, ec);
+        return false;
+    }
+    return true;
+}
 
 std::string sanitize_symbol(const std::string& s) {
     std::string out;
@@ -347,7 +379,7 @@ std::optional<Manifest> read_manifest(const ModuleUnit& u) {
 void write_manifest(const Program& p, const ModuleUnit& u) {
     std::error_code ec;
     std::filesystem::create_directories(u.cache_dir, ec);
-    std::ofstream out(u.manifest_path, std::ios::binary);
+    std::ostringstream out;
     out << "pyadamasmanifest 1\n";
     out << "abi " << pyadamas::kModuleAbiVersion << "\n";
     out << "source " << pyadamas::fnv1a64(u.source) << "\n";
@@ -362,6 +394,7 @@ void write_manifest(const Program& p, const ModuleUnit& u) {
                                : "";
         out << "dep " << d << " " << hash << "\n";
     }
+    write_atomic(u.manifest_path, out.str());
 }
 
 bool visit_unit(Program& p, ModuleUnit& u, std::vector<ModuleUnit*>& stack) {
@@ -506,18 +539,38 @@ bool visit_unit(Program& p, ModuleUnit& u, std::vector<ModuleUnit*>& stack) {
 bool assemble_object(const ModuleUnit& u, std::string& err) {
     std::error_code ec;
     std::filesystem::create_directories(u.cache_dir, ec);
-    std::ofstream out(u.asm_path, std::ios::binary);
-    if (!out) {
-        err = std::format("cannot write '{}'", u.asm_path);
-        return false;
+    std::string tmp_asm = cache_temp_path(u.asm_path, ".s");
+    std::string tmp_obj = cache_temp_path(u.obj_path);
+    {
+        std::ofstream out(tmp_asm, std::ios::binary);
+        if (!out) {
+            err = std::format("cannot write '{}'", u.asm_path);
+            return false;
+        }
+        out << u.asm_text;
+        if (!out) {
+            out.close();
+            std::filesystem::remove(tmp_asm, ec);
+            err = std::format("cannot write '{}'", u.asm_path);
+            return false;
+        }
     }
-    out << u.asm_text;
-    out.close();
-    std::string cmd = std::format("cc -c -o {} {}", shell_quote(u.obj_path), shell_quote(u.asm_path));
+    std::string cmd = std::format("cc -c -o {} {}", shell_quote(tmp_obj), shell_quote(tmp_asm));
     if (std::system(cmd.c_str()) != 0) {
+        std::filesystem::remove(tmp_obj, ec);
+        std::filesystem::remove(tmp_asm, ec);
         err = "assembler failed";
         return false;
     }
+    std::filesystem::rename(tmp_obj, u.obj_path, ec);
+    if (ec) {
+        std::filesystem::remove(tmp_obj, ec);
+        std::filesystem::remove(tmp_asm, ec);
+        err = std::format("cannot write '{}'", u.obj_path);
+        return false;
+    }
+    std::filesystem::rename(tmp_asm, u.asm_path, ec);
+    if (ec) std::filesystem::remove(tmp_asm, ec);
     return true;
 }
 
@@ -799,9 +852,7 @@ bool build_unit(Program& p, ModuleUnit& u, bool emit_object, bool entry_ir) {
         info->interface_hash = pyadamas::hex64(pyadamas::fnv1a64(*bytes));
         std::error_code ec;
         std::filesystem::create_directories(u.cache_dir, ec);
-        std::ofstream out(u.iface_path, std::ios::binary);
-        out.write(bytes->data(), static_cast<std::streamsize>(bytes->size()));
-        if (!out) {
+        if (!write_atomic(u.iface_path, *bytes)) {
             report(u.path, u.source, 1, 1, "cannot write module interface");
             return false;
         }
@@ -852,7 +903,10 @@ bool prepare_program(Program& p, bool emit_objects, bool entry_ir) {
 }
 
 bool link_program(Program& p, const std::string& output) {
-    std::string cmd = "cc -o " + shell_quote(output);
+    // --eh-frame-hdr：运行时 traceback 用 _Unwind_Backtrace 找 FDE，
+    // 可执行文件必须带 .eh_frame_hdr 索引。多数发行版默认就开，这里显式
+    // 写死，免得换个链接器就退化成「只能打异常、打不出回溯」。
+    std::string cmd = "cc -o " + shell_quote(output) + " -Wl,--eh-frame-hdr";
     for (auto* u : p.order) cmd += " " + shell_quote(u->obj_path);
     cmd += " " + shell_quote(PYADAMAS_RT_OBJ) + " -lm";
     for (auto& l : p.link_args) cmd += " " + shell_quote(l);

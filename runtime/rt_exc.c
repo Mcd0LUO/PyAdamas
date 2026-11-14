@@ -38,6 +38,7 @@ void pa_frame_unwind(PyAdamasFrame* target) {
 void exc_free(PyAdamasException* e) {
     if (!e) return;
     exc_free(e->cause);
+    pa_trace_free(e->trace);
     free(e->type);
     free(e->message);
     free(e);
@@ -52,6 +53,7 @@ PyAdamasException* exc_new(const char* type, const char* msg) {
     strcpy(e->type, type);
     strcpy(e->message, msg);
     e->cause = NULL;
+    e->trace = NULL;
     return e;
 }
 
@@ -59,6 +61,7 @@ PyAdamasException* exc_clone(PyAdamasException* e) {
     if (!e) return NULL;
     PyAdamasException* c = exc_new(e->type, e->message);
     c->cause = exc_clone(e->cause);
+    c->trace = pa_trace_clone(e->trace);
     return c;
 }
 
@@ -188,6 +191,8 @@ int exc_is_a(const char* child, const char* want) {
 
 void exc_print_uncaught(PyAdamasException* e) {
     fflush(stdout);
+    pa_print_traceback();
+    pa_trace_print(e);
     if (e->message[0])
         fprintf(stderr, "pyadamas: uncaught %s: %s\n", e->type, e->message);
     else
@@ -380,6 +385,7 @@ void pa_raise(PyAdamasStr* type, PyAdamasStr* msg) {
     memcpy(e->message, msg->data, (size_t)msg->len);
     e->message[msg->len] = '\0';
     e->cause = NULL;
+    e->trace = NULL;
     pending_exc = e;
     exc_longjmp();
 }

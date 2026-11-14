@@ -777,8 +777,12 @@ VReg Lowerer::lower_asyncio(const std::string& member, Call& c) {
             return const_none();
         }
         VReg coro = expr(*c.args[0]);
+        TypePtr task_elem = (rt && rt->kind == TyKind::Task && !rt->sub.empty())
+                                ? rt->sub[0]
+                                : nullptr;
         VReg t = call_runtime(RtFn::AsyncioCreateTask,
-                              rt ? rt : mk_task(t_unknown()), {coro});
+                              rt ? rt : mk_task(t_unknown()),
+                              {coro, const_int(own_kind(task_elem))});
         push_temp(t);
         return t;
     }
@@ -810,8 +814,14 @@ VReg Lowerer::lower_asyncio(const std::string& member, Call& c) {
         lst.imm = 1;
         lst.args = std::move(vals);
         VReg L = def_heap(mk_list(t_unknown()), std::move(lst));
+        // gather 结果列表的元素所有权按静态结果类型选择，避免把 float
+        // 位模式当堆指针去 dec。
+        TypePtr res_list = (rt && rt->kind == TyKind::Coroutine && !rt->sub.empty())
+                               ? rt->sub[0]
+                               : nullptr;
         VReg w = call_runtime(RtFn::AsyncioGather,
-                              rt ? rt : mk_coroutine(mk_list(t_unknown())), {L});
+                              rt ? rt : mk_coroutine(mk_list(t_unknown())),
+                              {L, const_int(list_kind_filled(res_list))});
         push_temp(w);
         return w;
     }

@@ -27,10 +27,10 @@
         .quad .Lf4
 
         .text
+        .p2align 4
 .Lf0:                                          ; 每个 IR 函数一个 label
-        pushq %rbp
-        movq  %rsp, %rbp
-        subq  $48, %rsp
+        pushq %rbx                             ; 只 push 实际用到的 callee-saved
+        subq  $80, %rsp                        ; 出参区 + 局部区；rsp 全程不动
         ...
         .globl main                            ; 真正的入口，只负责调用 .Lf<entry>
 main:
@@ -62,20 +62,22 @@ main:
         call pa_gc_init
 ```
 
-循环收集器按全局表、临时值栈、真实栈和 callee-saved 寄存器找根。
+循环收集器按全局根表、临时值栈、帧记录登记的地址（unknown 槽与含 unknown vreg 的临时区）和 callee-saved 寄存器找根；纯类型化帧不扫整段栈。
 
 ## 寄存器策略
 
-IR 一行没改，全部优化都发生在这一层。五件事叠起来，把「值在寄存器里」做实：
+IR 一行没改，全部优化都发生在这一层。下面这些机制叠起来，把「值在寄存器里」做实：
 
 | 机制 | 触发条件 | 省掉什么 |
 |---|---|---|
-| 变量提升 | 按 `load.slot` + `store.slot` 次数排序，最热的 5 个变量整函数常驻寄存器 | 每次读写各一次内存访问 |
+| 变量提升 | 按 `load.slot` + `store.slot` 次数排序，最热的 6 个变量整函数常驻寄存器 | 每次读写各一次内存访问 |
 | 临时值别名 | `%v = load.slot x`，且 %v 只被读一次、同块 | 整条 load |
 | 结果融合 | `%v = ...` 紧跟 `store.slot x, %v`，且 %v 只被读一次、同块 | 整条 store |
 | 常量延迟 | `%v = const.int N`，只被读一次、同块、在 32 位有符号范围内 | 一条 mov + 一次内存往返 |
 | 跨块常量立即数化 | O2；`const.int` 在 32 位范围内，整函数范围直接当立即数 | 常量不占寄存器、不落槽；`i += 1` 是 `addq $1` |
 | 比较连分支 | `%v = cmp` 紧跟 `branch %v`，且 %v 只被读一次、同块 | setCC + movzbq + 槽往返 + cmpq |
+| 拷贝合并 | 块内临时池里 `v = a op b`，且 `a` 的最后一次使用就是这条（GPR 限加减乘/位运算/移位，浮点限加减乘除） | 目标复用 `a` 的寄存器，原地算，省一条搬移 |
+| 浮点寄存器搬运 | 寄存器之间复制浮点值 | `movapd` 整 128 位拷贝，避免 `movsd` 写合并的依赖链 |
 | 块内临时寄存器 | 整块没有调用/占用 %r8–%r11 的指令；值定义和使用同块 | 临时值不落栈，线性扫描复用 %r8–%r11 |
 | 跨块 vreg 提升 | O2；跨块整型/指针 vreg，整函数独占「局部变量没用到的」callee-saved 寄存器 | 循环不变量、合并结果等跨块值不落栈 |
 | 无调用函数再扩池 | 整个函数没有任何会破坏 %r8–%r11 的指令时，再用至多两个 %r8–%r11 | 跨块值多两个常驻寄存器，剩余寄存器仍留给块内临时值 |
@@ -93,21 +95,21 @@ IR 一行没改，全部优化都发生在这一层。五件事叠起来，把�
 `while i < n: s += i * 2; i += 1` 的循环体，优化前后：
 
 ```asm
-# 之前：21 条，每个临时值都先落一次栈再读回来
+# 之前：21 条，每个临时值都先落一次栈再读回来（偏移只是示意）
 .Lf1_b2:
-        movq  -16(%rbp), %rax        # %5 = load.slot s1
-        movq  %rax, -48(%rbp)
-        movq  -24(%rbp), %rax        # %6 = load.slot s2
-        movq  %rax, -40(%rbp)
-        movq  $2, -32(%rbp)          # %7 = const.int 2
-        movq  -40(%rbp), %rax        # %8 = bin.mul %6, %7
-        imulq -32(%rbp), %rax
-        movq  %rax, -56(%rbp)
-        movq  -48(%rbp), %rax        # %9 = bin.add %5, %8
-        addq  -56(%rbp), %rax
-        movq  %rax, -40(%rbp)
-        movq  -40(%rbp), %rax        # store.slot s1, %9
-        movq  %rax, -16(%rbp)
+        movq  72(%rsp), %rax         # %5 = load.slot s1
+        movq  %rax, 40(%rsp)
+        movq  64(%rsp), %rax         # %6 = load.slot s2
+        movq  %rax, 48(%rsp)
+        movq  $2, 56(%rsp)           # %7 = const.int 2
+        movq  48(%rsp), %rax         # %8 = bin.mul %6, %7
+        imulq 56(%rsp), %rax
+        movq  %rax, 32(%rsp)
+        movq  40(%rsp), %rax         # %9 = bin.add %5, %8
+        addq  32(%rsp), %rax
+        movq  %rax, 48(%rsp)
+        movq  48(%rsp), %rax         # store.slot s1, %9
+        movq  %rax, 72(%rsp)
         ...                          # i += 1 原样再来一遍，另外 7 条
 ```
 
@@ -116,25 +118,29 @@ IR 一行没改，全部优化都发生在这一层。五件事叠起来，把�
 .Lf1_b2:
         movq  %rbx, %rax             # %8 = bin.mul %6, %7（%6 就是 %rbx）
         imulq $2, %rax               # 常量直接当立即数
-        movq  %rax, -80(%rbp)        # %8 只被用一次，落一次栈
-        addq  -80(%rbp), %r12        # %9 就地写进 s1 的寄存器
+        movq  %rax, 8(%rsp)          # %8 只被用一次，落一次栈
+        addq  8(%rsp), %r12          # %9 就地写进 s1 的寄存器
         addq  $1, %rbx               # i += 1 一条搞定
 ```
 
 ### 为什么不做全局寄存器分配
 变量提升是**函数级、固定**的：一个变量要么整函数在寄存器里，要么整函数在栈上。不做活跃性分析，因此不产生 spill。
 
-代价是寄存器被长期占着。收益是分支汇合、循环回边、异常路径全都天然正确——不存在「这条边上值在寄存器、那条边上在栈里」这种需要插 phi 或 reload 的状态。Python 的局部变量本来就不多，五个够用。
+代价是寄存器被长期占着。收益是分支汇合、循环回边、异常路径全都天然正确——不存在「这条边上值在寄存器、那条边上在栈里」这种需要插 phi 或 reload 的状态。Python 的局部变量本来就不多，六个够用。
 
 真要做图着色，IR 的形状已经准备好了（vreg 是 SSA 风格的，每个只定义一次），但那要等有优化遍需要它的时候。
 
 ### 寄存器池
 
-`%rbx` / `%r12` / `%r13` / `%r14` / `%r15`，全部是 **callee-saved**：被调用方保证返回时原样恢复，所以跨函数调用不需要把值挪回栈，也不需要在调用点保存。
+`%rbx` / `%r12` / `%r13` / `%r14` / `%r15` / `%rbp`，全部是 **callee-saved**：被调用方保证返回时原样恢复，所以跨函数调用不需要把值挪回栈，也不需要在调用点保存。0.163 之前 `%rbp` 被帧指针占着，现在帧相对 `%rsp`，它也能拿来存变量。
 
 浮点槽用 `xmm8`–`xmm15`（`xmm0`–`xmm7` 留给参数和临时），全部是 caller-saved，调用点要自己写回/读出，因此只在有调用的函数里按活跃性 spill；跨块浮点 vreg 只分给无调用函数，调用会破坏寄存器的形状（`//`、`%`、`**` 走 libm）同样排除。
 
 ## 栈帧布局
+
+0.163 起生成函数**没有帧指针**：槽位、帧记录、栈传实参一律相对 `%rsp`，
+而 `rsp` 在函数体里从头到尾不动（出参区一次性留够，调用点不再
+`subq`/`addq`），所以偏移是常量，`setjmp`/`longjmp` 回到的也是同一个 `rsp`。
 
 ```
        高地址
@@ -143,36 +149,42 @@ IR 一行没改，全部优化都发生在这一层。五件事叠起来，把�
     ├──────────────┤
     │  返回地址     │  ↑ 调用者的 rsp
     ├──────────────┤
-    │  保存的 rbp   │  ← rbp 指向这里
-    ├──────────────┤
-    │  保存的 rbx   │  -8(%rbp)      只 push 实际用到的，最多 5 个
-    │  保存的 r12   │  -16(%rbp)
+    │  保存的 rbx   │  frame_bytes_-8(%rsp)  只 push 实际用到的，最多 6 个
+    │  保存的 r12   │                        （rbx/r12/r13/r14/r15/rbp）
     │  ...         │
     ├──────────────┤
-    │  slot 0      │  -8*(k+1)(%rbp)   k = push 的寄存器个数
-    │  slot 1      │
-    │  ...         │
-    │  vreg 槽 0   │  -8*(k+n_slots+1)(%rbp)
-    │  vreg 槽 1   │
-    │  ...         │
+    │  帧记录       │  4+n 个字：GC 根与异常展开用
+    ├──────────────┤
+    │  vreg 槽 ...  │
+    │  slot 1      │  槽号小的在低地址，偏移落在 disp8 里
+    │  slot 0      │  out_bytes_(%rsp)
+    ├──────────────┤
+    │  出参区       │  0(%rsp) 起：第 7 个以后的整数实参、第 9 个以后的浮点实参
     └──────────────┘  ← rsp（16 字节对齐）
        低地址
 ```
 
-- 局部区从 `-8*(k+1)(%rbp)` 开始，**必须让开 push 的 k 个寄存器**。让不开就会把保存的 `%rbx` 当成变量槽写掉，函数返回时 `pop` 回一个垃圾值，调用方的变量凭空变了。这个 bug 差分测试抓到过一次，现象是「调完一个函数，调用方的循环变量变成了 -19」。
-- 整个帧（push 的 + `subq` 的）合起来对齐到 16 的倍数。push 个数是奇数时 `subq` 的量要相应减 8，否则 `call` 时 `rsp` 不是 16 对齐，任何用到 `movaps` 的被调用方（包括 libc 的 `printf`）都会段错误。
-- 栈传的参数在读的时候是 `16 + off(%rbp)`（返回地址 + 保存的 rbp 各 8 字节）。
+- 帧总长 `frame_bytes_ = 8*k + frame_pad_`，而 `frame_pad_ = out_bytes_ + locals_` 是 `subq` 的立即数。布局在 `layout_frame()` 里一次算好：局部区先取 `8 * 槽数`，再把 padding 补到「push + subq 的总量 ≡ 8 (mod 16)」——入口 `rsp ≡ 8`，补完之后 `call` 时正好 16 对齐。
+- 出参区按整函数最大的那个调用点预留（`outgoing_bytes()` 扫一遍 IR 估上界，结构体按 ABI 尺寸算），调用点只写 `{stack_off}(%rsp)`，不碰 `rsp`。
+- 槽位区从 `out_bytes_(%rsp)` 往上排，形参和最常用的局部（slot 号小）落在低地址；帧记录放在最上面（每函数只碰一两次）。
+- 栈传的实参读 `frame_bytes_ + 8 + off(%rsp)`（返回地址上面）。
+- 帧记录、槽地址这些**地址**在函数体内是常量，GC 和异常展开直接按地址读写。
 
 函数末尾：
 
 ```asm
-        leaq  -8*k(%rbp), %rsp     # 退到 push 的寄存器下面
+        addq  $frame_pad_, %rsp     # 退掉出参区和局部区
         popq  %r15 ... popq %rbx    # 逆序弹回
-        popq  %rbp
         ret
 ```
 
-**不能用 `movq %rbp, %rsp`**——那会跳过 push 的寄存器，等于不恢复。
+`%rbp` 因此空出来，并进了变量寄存器池（`kSlotRegs` 现在 6 个）。
+
+### 对齐
+
+函数入口发 `.p2align 4`，循环头（回边目标）也按 16 字节对齐。热点循环
+对「入口落在哪条缓存行」很敏感：0.163 去掉帧指针后 nqueens 一度慢了 10%，
+把函数入口对齐就回到原水平（44.2ms vs 44.5ms），matmul/spectral_norm 同理。
 
 ### 非参数变量清零
 
@@ -205,7 +217,7 @@ IR 一行没改，全部优化都发生在这一层。五件事叠起来，把�
 | 闭包环境 | `%r10`（隐藏参数，不属于 SysV 参数序列）；方法调用清零 |
 | 调用前 | `xorl %eax, %eax`（变参 ABI 约定，表示没有 vector 参数） |
 
-被调用者只保存 `%rbx` / `%r12`–`%r15` 里**实际用到的那几个**，序言 push、尾声逆序 pop。
+被调用者只保存 `%rbx` / `%r12`–`%r15` / `%rbp` 里**实际用到的那几个**，序言 push、尾声逆序 pop。
 其余寄存器（`%rax`、`%rsi`、`%rdi`、`%r8`–`%r11`、全部 `xmm`）是 caller-saved，可以随便写。
 
 `*args` / `**kwargs` 不引入新的调用约定：它们就是参数列表末尾的一个 list /
@@ -224,15 +236,16 @@ dict 指针，调用点打包好按普通参数传；整数寄存器不够时照
 调用一个函数值的序列：
 
 ```asm
-        movq  -24(%rbp), %r11        # callee 先取到 r11，避开参数寄存器
-        subq  $16, %rsp              # 有栈参数时
-        movq  -32(%rbp), %r10        # 栈参数
+        movq  40(%rsp), %r11         # callee 先取到 r11，避开参数寄存器
+        movq  72(%rsp), %r10         # 第 7 个实参：直接写进出参区
         movq  %r10, 0(%rsp)
-        movq  -40(%rbp), %rdi        # 寄存器参数
+        movq  64(%rsp), %rdi         # 寄存器参数
         xorl  %eax, %eax
         call  *%r11
-        addq  $16, %rsp
 ```
+
+出参区在函数帧里预留，调用点**不动 `%rsp`**：栈传实参直接写
+`{stack_off}(%rsp)`（偏移相对出参区起点）。
 
 ## C 互操作（cimport）
 
@@ -414,11 +427,11 @@ a.speak()   →   a->vtable[0](a)   →   Dog::speak
 虚调用：
 
 ```asm
-        movq  -16(%rbp), %r10    # self
+        movq  64(%rsp), %r10     # self
         movq  (%r10), %r11       # vtable
         movq  8(%r11), %r11      # 第 1 号槽（覆盖过的就是子类实现）
-        movq  -16(%rbp), %rdi    # self 固定占第一个整型参数
-        movq  -24(%rbp), %rsi    # 其余实参照常分类
+        movq  64(%rsp), %rdi     # self 固定占第一个整型参数
+        movq  72(%rsp), %rsi     # 其余实参照常分类
         call  *%r11
 ```
 
@@ -495,7 +508,16 @@ done:
 
 ### 浮点比较：NaN
 
-`ucomisd` 遇到 NaN 会把 ZF/PF/CF 全置 1，直接 `setb` 会得到错误的真值。规则是：`<` `<=` `==` 额外 `setnp` 与一下，`!=` 额外 `setp` 或上，`>` `>=` 用 `seta` / `setae`（这两个对手性本身就把无序排除了）。
+`ucomisd` 对无序（NaN）把 CF/ZF/PF 全置 1。规则分两条路径：
+
+- **比较 + 分支融合**（`cmp` 紧跟 `branch`，结果不真正写出布尔值）：
+  `<` / `<=` 交换操作数后分别用 `ja` / `jae`，`>` / `>=` 直接用 `ja` /
+  `jae`——这四种有序比较在 NaN 时 CF=1，条件跳转自然不成立，落到假分支，
+  **不再需要额外的 `jp`**（0.157）。`==` 在无序时 ZF=1，与相等区分不开，
+  仍先 `jp` 到假分支。`!=` 反过来：NaN 应为真，所以先把无序跳到真分支，
+  再按 ZF 用 `jne`/`je` 分派（0.158）。
+- **真正写出布尔值**（`setcc` 路径）：`<` / `<=` / `==` 额外 `setnp` 再与，
+  `!=` 额外 `setp` 再或，`>` / `>=` 用 `seta` / `setae`。
 
 ### 真值测试
 
@@ -527,7 +549,7 @@ done:
 | `neg` 一个 double | `0 - x` 多一条依赖 | 翻符号位：`xorpd` 一个 `0x8000...` 掩码 |
 | 缺 `.note.GNU-stack` | 链接器警告「missing .note.GNU-stack section implies executable stack」 | 文末补一行 |
 | `%al` 没清零 | 变参 ABI 要求 `%al` 是使用的 vector 寄存器个数 | 调用前 `xorl %eax, %eax` |
-| 局部区从 `-8(%rbp)` 开始 | 覆盖 push 下来的 callee-saved，返回时把垃圾弹回调用方 | 局部区从 `-8*(k+1)(%rbp)` 开始 |
+| 局部区压到 push 的寄存器上 | 覆盖保存的 callee-saved，返回时把垃圾弹回调用方 | 局部区从 `out_bytes_(%rsp)` 起往上排，push 的寄存器在它上面 |
 | push 奇数个寄存器 | `call` 时 `rsp` 不是 16 对齐，被调用方一用 `movaps` 就段错误 | 帧大小把 push 的也算进去一起对齐 |
 
 ## 调试
@@ -540,6 +562,64 @@ objdump -d --no-show-raw-insn ./x | less
 ```
 
 汇编里每条指令前都有对应的 IR（`# %3 = bin.add %1, %2`），对照 `pyadamas ir` 的输出就能定位到是哪条 IR 生成错了。
+
+### DWARF 行号
+
+`build` 默认在汇编里发一行 `.file 1 "<源路径>"`，并在函数体内按源码行发
+`.loc 1 <line>`；GNU as 据此生成 `.debug_line`。每个函数还有一个可读
+符号 `pyadamas_fn_<序号>_<名字>`（内部跳转仍用 `.LfN`）。
+
+```bash
+addr2line -e prog -f 0x5d1b          # 地址 → 函数 + 源文件:行
+readelf --debug-dump=decodedline prog
+nm prog | grep pyadamas_fn
+```
+
+只有行号，没有 `.debug_info`：`gdb` 能定位源码行，但看不到变量名和类型。
+未捕获异常另有一张 codegen 发出的 PC → (函数, 行号) 表：模块入口注册，
+异常路径用 libgcc 的 `_Unwind_Backtrace` 逐帧取返回地址、查表命中才打印
+（0.163；0.160 时是手走 rbp 链，因此整个项目都得保留帧指针）。生成器/协程的
+堆帧不在调用栈上，`coro_step` / `gen_run` / 异步生成器驱动会在异常逃出时
+把 resume 帧挂到异常上，未捕获时追加打印（仅函数名，0.161）；优化内联后
+内联体归到调用者。优化遍复制/内联指令保留行号。
+
+### CFI（栈展开规则）
+
+`.debug_line` 只回答「这条 PC 属于第几行」，不回答「上一层帧在哪」。后者是
+DWARF 的调用帧信息（CFI）：每个函数在 `.eh_frame` 里有一段 FDE，描述当前
+PC 下 CFA 是哪个寄存器加多少、被保存的寄存器各在哪个槽。gdb 的 DWARF
+展开器和 libgcc 的 `_Unwind_Backtrace` 都只读这张表，既不解析 prologue 也不
+跟 rbp 链，所以生成代码缺 CFI 时它们走到第一个生成帧就断。0.162 起每个
+生成函数都带 CFI。0.163 的帧里不再有 rbp，CFA 全程由 rsp 定义：
+
+| 位置 | 发出的规则 |
+|---|---|
+| 函数入口 | `.cfi_startproc`（CFA = rsp+8） |
+| 每压一个 callee-saved | `.cfi_def_cfa_offset <累计>` + `.cfi_offset <reg>, -<累计>`（生成器压 `%r15`） |
+| `subq` 留出参区和局部区 | `.cfi_def_cfa_offset frame_bytes_+8` |
+| 尾声 | `.cfi_remember_state` → `addq` 退局部区（更新偏移）→ 每个 `popq` 后 `.cfi_restore` + 更新偏移 → `ret` → `.cfi_restore_state` |
+
+`remember_state` / `restore_state` 让一个函数里的多条 `return` 各描述各的：
+`ret` 之后 CFI 状态退回函数体，后面的块（异常落地、另一条返回）继续按体
+规则展开。函数符号同时补了 `.type ..., @function` 和 `.size`。手写的那几段
+汇编（类析构器、GC release、生成器帧释放、C 回调跳板、模块 init 桩、`main`）
+也各自包了 `.cfi_startproc` / `.cfi_endproc`；跳板不动 `rsp`，只用到入口规则。
+
+```bash
+readelf --debug-dump=frames prog | grep -c FDE   # 每个函数一段
+gdb -batch -ex 'break *pyadamas_fn_1fib_1+4' -ex run -ex 'bt' prog
+```
+
+`bt` 默认在 `main` 停下（gdb 的 `set backtrace past-main off`），要看 libc 的
+启动帧得加 `set backtrace past-main on`。帧里已经没有 rbp，能从函数体
+任意 PC 走回调用方，只可能是 CFI 起的作用。运行时的 traceback 用的是同一个
+展开器，所以 `objcopy --remove-section .eh_frame` 之后连回溯也一起没了——
+链接时显式带 `-Wl,--eh-frame-hdr`，保证 `.eh_frame_hdr` 索引在。
+`tests/cfi/` 用 `_Unwind_Backtrace` 数帧做回归：探针只认 `.eh_frame`，
+CFI 一断深度就从 7 掉回 2。
+
+还没做的：`.debug_info`（变量、类型、内联帧的 `DW_TAG_inlined_subroutine`）
+和列区间。
 
 ## 引用计数在汇编层的代价
 
@@ -560,10 +640,10 @@ RC 不新增 IR 指令，全部通过 `call.rt` 调运行时：
   它们没有出边、不可能成环，RC 归零即释放；垃圾容器持有的这类叶子在
   清扫时按正常引用释放。剩余链上对象数在分配/释放时增量维护，收集时
   不用再遍历计数；地址表和工作栈跨收集复用，不再每轮 calloc/free；
-- exact-RC 且链上没有任何需要保守扫描的 OBJ/实例时走**无表快速路径**：
-  把全局/临时栈/真实栈/寄存器里的机器字收敛成一张小候选表（常驻缓存），
-  扫一遍堆命中标记；列表/字典/闭包的子节点按静态类型直接标记，纯数值
-  元素的容器完全不标记。`PYADAMAS_GC_TIMING=1` 可打印每轮的分段耗时；
+- exact-RC（整程序无 unknown）时，容器与闭包的子节点按静态类型直接标记
+  （`gc_mark_direct`，不查堆表），纯数值元素的容器完全不标记；minor 也
+  不再扫帧记录和寄存器——所有引用都归槽/临时值/容器所有。
+  `PYADAMAS_GC_TIMING=1` 可打印每轮的分段耗时；
 - 不含临时堆值的语句 / 循环 / 函数在降级期把 mark/cleanup 删掉。
   所以整数循环和递归生成的汇编与 0.6.1 完全一样；
 - **只读形参免 RC**：函数降级完成后扫描——形参槽在整个函数里从未被
@@ -582,10 +662,14 @@ RC 不新增 IR 指令，全部通过 `call.rt` 调运行时：
 | 2 亿次 `while` 累加 | 约 33× |
 | 2000 万次方法调用 | 约 19× |
 
+0.156/0.157 后 `bench/` 的浮点用例明显变快：mandelbrot 同机 release
+26.4ms → 12.0ms（约 CPython 23.3×），spectral_norm 34.1→30.0ms，其余
+用例持平。
+
 绝对值随机器和负载浮动，倍数基本稳定。RC 之前同机基线（同一轮测量）
 是 0.044s / 0.289s / 0.047s，RC 之后是 0.039s / 0.294s / 0.062s：
 整数路径不变，方法调用因为每个 self 参数的 inc/dec 慢了约 30%。
 
 比的是「PyAdamas 出的汇编 + `cc -O0`」对「CPython 的解释器」。
 
-寄存器分配之前这两项是 0.08s / 0.34s：`fib` 快 1.4 倍（它全是调用，省不下多少），整数循环快 5.7 倍。仍然没有做 CSE、强度削减和通用向量化，`cc` 也没开优化；赢在「静态类型 + 直接出机器码 + 热变量在寄存器里」这三点。
+寄存器分配之前这两项是 0.08s / 0.34s：`fib` 快 1.4 倍（它全是调用，省不下多少），整数循环快 5.7 倍。现在有跨块 CSE、循环旋转和拷贝合并，仍然没有做强度削减、通用向量化和全局寄存器分配，`cc` 也没开优化；赢在「静态类型 + 直接出机器码 + 热变量在寄存器里」这三点。

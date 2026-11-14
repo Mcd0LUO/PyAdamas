@@ -92,13 +92,16 @@ set(PYADAMAS_SOURCES
 # 分别编译成可重定位对象后再用 ld -r 合成一个 rt.o。
 set(PYADAMAS_RT_OBJ "${CMAKE_BINARY_DIR}/rt.o")
 set(PYADAMAS_MODCACHE_DIR "${CMAKE_BINARY_DIR}/modcache")
-set(PYADAMAS_RT_PARTS core exc gen async task fd agen str list dict slice class math complex format file random os subprocess time stdlib json re functools datetime deque hash)
+set(PYADAMAS_RT_PARTS core exc gen async task fd agen str list dict slice class math complex format file random os subprocess time stdlib json re functools datetime deque hash debug)
 set(PYADAMAS_RT_OBJS "")
 foreach(part ${PYADAMAS_RT_PARTS})
   set(rt_obj "${CMAKE_BINARY_DIR}/rt_${part}.o")
+  # 运行时不再依赖帧指针：traceback 走 .eh_frame（libgcc 的
+  # _Unwind_Backtrace），由编译器自己决定要不要 rbp。
+  set(rt_fp "")
   add_custom_command(
     OUTPUT "${rt_obj}"
-    COMMAND ${CMAKE_C_COMPILER} -O2 -Wall -Wextra
+    COMMAND ${CMAKE_C_COMPILER} -O2 -Wall -Wextra ${rt_fp}
             -I "${CMAKE_SOURCE_DIR}/runtime"
             -c "${CMAKE_SOURCE_DIR}/runtime/rt_${part}.c" -o "${rt_obj}"
     DEPENDS "${CMAKE_SOURCE_DIR}/runtime/rt_${part}.c"
@@ -152,6 +155,17 @@ add_test(
 set_tests_properties(pyadamas_opt_levels PROPERTIES
   WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}"
   TIMEOUT 600
+)
+
+add_test(
+  NAME pyadamas_cache_race
+  COMMAND "${BASH_EXECUTABLE}" "${CMAKE_SOURCE_DIR}/tests/cache_race.sh"
+          "${CMAKE_BINARY_DIR}" "$<TARGET_FILE:pyadamas>"
+)
+set_tests_properties(pyadamas_cache_race PROPERTIES
+  WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}"
+  RUN_SERIAL TRUE
+  TIMEOUT 300
 )
 
 add_custom_target(clean-modcache

@@ -6,30 +6,53 @@ namespace pyadamas {
 // 调用序列之外不会被指令生成器用到的临时寄存器（%r8–%r11）。
 static const char* const kTempRegs[] = {"%r8", "%r9", "%r10", "%r11"};
 
-// 栈帧 = push 下来的 callee-saved + 局部区。SysV 要求 call 时
-    // rsp 是 16 的倍数，而 push 的个数会影响这个余数，所以把两者
-    // 合起来算，只补最少的字节。
-void AsmGen::frame_size(int total_slots) {
-        int base = 8 * (n_saved_regs_ + total_slots);
-        int aligned = (base + 15) & ~15;
-        int pad = aligned - 8 * n_saved_regs_;
-        if (pad > 0) line(std::format("subq ${}, %rsp", pad));
+// 帧布局：出参区一次留够，局部区落在它上面，callee-saved 再往上压。
+    // 这样 rsp 在函数体里恒定，槽位和帧记录都能相对 rsp 寻址，帧里不需要
+    // 帧指针。SysV 要求 call 时 rsp 是 16 的倍数：入口 rsp ≡ 8 (mod 16)，
+    // 所以「push 的字节数 + subq 的字节数」要 ≡ 8 (mod 16)。
+void AsmGen::layout_frame(int total_slots) {
+        int fixed = 8 * n_saved_regs_ + out_bytes_;
+        int pad = 8 * total_slots;
+        while (((fixed + pad) & 15) != 8) pad += 8;
+        locals_ = pad;
+        frame_pad_ = out_bytes_ + locals_;
+        // frame_bytes_ 是 rsp 到返回地址的距离：push 的 + 下面这一整块。
+        frame_bytes_ = 8 * n_saved_regs_ + frame_pad_;
     }
 
-// 尾声：先把 rsp 退回 push 的寄存器下面，逐个弹回，再弹 rbp。
-    // 不能用 `movq %rbp, %rsp`——那会把 callee-saved 的槽一起丢掉。
+void AsmGen::frame_alloc() {
+        if (frame_pad_ > 0) emit_imm_op("subq", frame_pad_, "%rsp");
+        cfa_off_ = frame_bytes_ + 8;
+        line(std::format(".cfi_def_cfa_offset {}", cfa_off_));
+    }
+
+// 尾声：先退局部区，再逐个弹回 callee-saved，最后 ret。
 void AsmGen::emit_epilogue() {
-        // 先弹帧记录再退栈：记录本身在 %rbp 下面，%rcx 此时是自由的。
+        // CFI：尾声里 rsp 会一路退回去，先「记住」函数体的展开规则，
+        // 把每一步都描述出来，ret 之后再还原——后面的块（异常落地、
+        // 另一条 return）继续按函数体状态展开。
+        line(".cfi_remember_state");
+        const int body_cfa = cfa_off_;
+        // 先弹帧记录再退栈：记录本身在局部区底部，%rcx 此时是自由的。
         if (frame_rec_) {
             line("movq " + rec_mem(0) + ", %rcx");
             line("movq %rcx, pa_frame_top(%rip)");
         }
-        if (n_saved_regs_ > 0) line(std::format("leaq {}(%rbp), %rsp", -8 * n_saved_regs_));
-        else line("movq %rbp, %rsp");
-        for (int i = n_saved_regs_ - 1; i >= 0; --i)
-            line(std::format("popq {}", gen_ ? "%r15" : kSlotRegs[i]));
-        line("popq %rbp");
+        if (frame_pad_ > 0) {
+            emit_imm_op("addq", frame_pad_, "%rsp");
+            cfa_off_ -= frame_pad_;
+            line(std::format(".cfi_def_cfa_offset {}", cfa_off_));
+        }
+        for (int i = n_saved_regs_ - 1; i >= 0; --i) {
+            const char* reg = gen_ ? "%r15" : kSlotRegs[i];
+            line(std::format("popq {}", reg));
+            line(std::format(".cfi_restore {}", reg));
+            cfa_off_ -= 8;
+            line(std::format(".cfi_def_cfa_offset {}", cfa_off_));
+        }
         line("ret");
+        line(".cfi_restore_state");
+        cfa_off_ = body_cfa;
     }
 
 // ── 栈槽分配 ────────────────────────────────────────────────
@@ -756,10 +779,10 @@ void AsmGen::build_operand_caches() {
             block_labels_[i] = std::format(".Lf{}_b{}", fi_, i);
         vreg_mem_.resize(f_->vreg_ty.size());
         for (size_t r = 0; r < vreg_mem_.size(); ++r)
-            vreg_mem_[r] = std::format("{}(%rbp)", vreg_off(static_cast<VReg>(r)));
+            vreg_mem_[r] = std::format("{}(%rsp)", vreg_off(static_cast<VReg>(r)));
         smem_cache_.resize(f_->slot_ty.size());
         for (size_t s = 0; s < smem_cache_.size(); ++s)
-            smem_cache_[s] = std::format("{}(%rbp)", slot_off(static_cast<int>(s)));
+            smem_cache_[s] = std::format("{}(%rsp)", slot_off(static_cast<int>(s)));
         gen_smem_cache_.resize(f_->slot_ty.size());
         for (size_t s = 0; s < gen_smem_cache_.size(); ++s)
             gen_smem_cache_[s] =

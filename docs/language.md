@@ -183,7 +183,7 @@ b"%05d" % 42             # b'00042'
 `list[T]` 是动态数组，`append` 均摊 O(1)，索引支持负数，越界 panic。列表字面量的元素类型由所有元素的上界推出（`[1, 2.5]` 是 `list[float]`，整数元素在构造时就被转成 double）。
 
 `l[i] = v` 支持；切片读 `l[a:b:c]` 返回新列表并接管元素引用；
-`l[i:j] = ...` 切片赋值不支持。
+切片赋值 `l[i:j] = ...` 支持（细节见下文「切片」）。
 
 ### 切片
 
@@ -440,7 +440,8 @@ print(asyncio.run(add(3, 4)))   # 10
 - `asyncio.sleep(seconds)`：毫秒定时器，`0` 立即就绪；
 - `asyncio.gather(a, b, ...)`：并发启动，按实参顺序返回结果列表。
 - `asyncio.create_task(coro)`：立即调度协程，返回 `task[T]`；`await
-  task` 取结果，完成后可重复 await；`task.done()` 判断是否结束；
+  task` 取结果，完成后可重复 await；同一个 Task 可以被多个协程同时等待，
+  每个等待者都拿到结果/异常；`task.done()` 判断是否结束；
   `task.cancel()` 请求取消（返回 bool）。
 - `asyncio.Future()`：手动完成的 future（`set_result` / `set_exception` /
   `add_done_callback` / `result` / `exception` / `cancel`）。
@@ -470,8 +471,9 @@ print(asyncio.run(add(3, 4)))   # 10
   `ExceptionGroup`）。
 
 也支持 `from asyncio import sleep, gather, run, create_task, Event, Lock,
-Queue, wait_for, timeout, TaskGroup, Semaphore`（跨模块 `run`/`wait_for`
-的结果类型会退化成 unknown）。async 方法、`with` 里的 `await`、跨 `await` 的
+Queue, wait_for, timeout, TaskGroup, Semaphore`（同一模块内保留调用点
+特化；跨模块导出的 `run`/`wait_for` 结果类型仍可能退化成 unknown）。
+async 方法、`with` 里的 `await`、跨 `await` 的
 `finally` 都可以用；异常跨 `await` 通过在恢复时注入异常传播，
 `try/except` 能正常捕获。`await` 同样可以出现在任意子表达式、
 `except` 体和 `finally` 体内（finalbody 只编译一份，异常路径的待重抛
@@ -561,8 +563,8 @@ Future 被取消时，其他等待者也会收到 `CancelledError`。
 支持 `AsyncGenerator` 以及定义了 `__aiter__` 的类实例（`__aiter__` 返回
 `AsyncGenerator`，或返回自身/另一个定义了 `async __anext__` 的对象）；
 fd 读写和线程安全的事件循环未支持；Future 回调是同步调用（CPython 用
-`call_soon` 排队），`gather` 的实参个数在源码里写死，结果元素类型按
-unknown 处理；Task 只允许一个并发等待者，没有任务名字。
+`call_soon` 排队），`gather` 的实参个数在源码里写死；结果列表的元素类型
+按实参结果的上界推出，所有权类别随静态类型带入运行时；Task 没有任务名字。
 
 ### 内存与生命周期
 
@@ -620,15 +622,17 @@ key 的哈希/判等按静态类型选：int/bool 用机器字、str 用字节�
 - `s.remove(x)`：缺失 panic；`s.discard(x)`：缺失忽略；
 - `s.pop()`：移除最后插入的元素（CPython 是任意元素，这里选择确定性）。
 
-索引表没有墓碑，删除后 entries 保持顺序前移一格、索引表整表重建，单次
-删除是 O(n)；删除不在热路径上，这个代价换的是实现简单和遍历顺序稳定。
-扩容只重建 4 字节索引表，entries 本身不搬家；顺序遍历直接扫 entries。
+删除用墓碑：链表摘链，entry 原地变墓碑挂进空闲链，索引槽置 -1，插入时
+优先复用墓碑，单次删除摊还 O(1)。`order` 是链表的下标快照，删除后失效，
+下一次按序访问时重建；顺序遍历本身是 O(n)，不增加摊还代价。
+扩容只重建 4 字节索引表，entries 本身不搬家；顺序遍历直接扫 `order`。
 
 空字典字面量自己推不出 key 类型。`d: dict[str, int] = {}` 这种标注赋值
 会按标注类型构造，动态字符串 key 正常；没有标注（或先声明、之后再
 `d = {}`）时空字典的 key 类型仍是 `unknown`，不同对象但内容相同的动态
 字符串 key 可能按机器字比较不相等。写了标注或由字面量推出 `str` key
-时没有这个问题。`dict`/`set` 的 `==` 仍是指针比较，没有深比较。
+时没有这个问题。`dict`/`set` 的 `==` 是逐元素比较（见上文「比较」），
+同构嵌套容器可以逐层比下去。
 
 ### 类
 
@@ -1104,8 +1108,8 @@ raise MyError("bad")
 ```
 
 `raise X from cause` 记录 `__cause__`（`e.__cause__` 是异常值或 None）；
-`raise ... from None` 清空原因。traceback 仍未支持，`args` 目前只保存
-消息。
+`raise ... from None` 清空原因。未捕获异常会打印函数级 traceback（文件:行
++ 函数名）；异常值本身仍没有 traceback 对象，`args` 只保存消息。
 `finally` 在正常、异常、`return`、`break`、`continue` 路径都会执行；
 `finally` 体内跳出 finally 的 `return` / `break` / `continue` 也支持：
 跳出路径会内联一份 finalbody，最终返回值/跳转以 finally 里的为准，

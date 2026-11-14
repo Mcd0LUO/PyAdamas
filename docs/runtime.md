@@ -1,6 +1,6 @@
 # 运行时
 
-运行时按职责拆成 `runtime/rt_*.c`（引用计数/GC、异常、生成器、异步、Task/Future、fd、文件、字符串/列表/字典/切片、类/复数、math/格式化、random/os/subprocess/time、itertools/collections、json、re），共享接口在 `runtime/rt_internal.h`；各部分编成可重定位对象后用 `ld -r` 合成 `rt.o`，由 `pyadamas build` 链接进每个生成的程序，只依赖 libc 和 libm。**PyAdamas 编译器本身不链接它**（`PYADAMAS_RT_OBJ` 只是把路径编进二进制，供 `cc` 使用）。
+运行时按职责拆成 `runtime/rt_*.c`（引用计数/GC、异常、生成器、异步、Task/Future、fd、文件、字符串/列表/字典/切片、类/复数、math/格式化、random/os/subprocess/time、itertools/collections、json、re、调试表/traceback），共享接口在 `runtime/rt_internal.h`；各部分编成可重定位对象后用 `ld -r` 合成 `rt.o`，由 `pyadamas build` 链接进每个生成的程序，只依赖 libc 和 libm。**PyAdamas 编译器本身不链接它**（`PYADAMAS_RT_OBJ` 只是把路径编进二进制，供 `cc` 使用）。
 
 ## ABI 约定
 
@@ -281,8 +281,9 @@ Python 代码，逐槽读到非空值就 `dec` + 清零。
 - `2`：异常交给 waiter；等待者下次恢复时走注入分发，在帧内重新抛出。
 
 awaitable 有六类：协程帧、`Py23Await` 的 sleep(1)/gather(2)/task(3)、
-异步生成器驱动(4)、Future(5)、fd 等待(6)。每个对象只有一个 `waiter`，
-Future 用 `waiters` 列表支持多个等待者、用 `callbacks` 列表保存
+异步生成器驱动(4)、Future(5)、fd 等待(6)。协程/异步生成器/fd 只有一个
+`waiter`；Future 和 Task 用 `waiters` 列表支持多个等待者，Future 另用
+`callbacks` 列表保存
 `add_done_callback` 注册的函数（完成时按注册顺序同步调用）；异步生成器
 驱动对象用 `driver_sent`（asend 的值，跨事件循环持有引用）和
 `driver_close`（aclose 模式）标记；内部 awaitable 完成时把结果写进帧槽
@@ -583,8 +584,8 @@ longjmp 回同步调用点。GC 清扫和进程退出不跑析构器，但会单
 | `pa_coro_rethrow` | `(void*) -> void` | 在 resume 帧里抛出注入异常（noreturn） |
 | `pa_asyncio_run` | `(void* coro) -> i64` | 跑事件循环到根协程结束，返回结果或抛异常 |
 | `pa_asyncio_sleep` | `(double) -> void*` | 创建毫秒定时 awaitable |
-| `pa_asyncio_gather` | `(list*) -> void*` | 创建 gather awaitable（不接管参数列表） |
-| `pa_asyncio_create_task` | `(void* coro) -> void*` | 立即调度协程，返回 task awaitable |
+| `pa_asyncio_gather` | `(list*, i64) -> void*` | 创建 gather awaitable（不接管参数列表）；第二参数是结果元素的 RC 类别（0 裸值 / 1 堆引用 / 2 unknown） |
+| `pa_asyncio_create_task` | `(void* coro, i64 kind) -> void*` | 立即调度协程，返回 task awaitable；`kind` 是结果元素的 RC 类别（0 裸值 / 1 堆引用 / 2 unknown）；Task 可被多个协程同时 await |
 | `pa_asyncio_task_done` | `(void*) -> i64` | 任务是否结束 |
 | `pa_asyncio_task_cancel` | `(void*) -> i64` | 请求取消；解绑当前 awaitable 并注入 CancelledError |
 | `pa_asyncgen_anext` | `(void*) -> void*` | 创建异步生成器的 `__anext__` 驱动对象 |
@@ -680,15 +681,26 @@ longjmp 回同步调用点。GC 清扫和进程退出不跑析构器，但会单
 | `pa_panic_div0` | 整数除以 / 模以 0 | 抛 `ZeroDivisionError` |
 | `pa_panic_overflow` | `INT64_MIN / -1` | 抛 `OverflowError` |
 
-这些错误在有 handler 时可以被 `except` 捕获；没有 handler 时打印
-`PyAdamas: uncaught <type>: <message>` 并 `exit(1)`，不打印栈回溯——现在没有
-调试信息，印出来的栈只会误导。内部不变量错误和 OOM 仍走 `panic_c`
-直接退出。
+这些错误在有 handler 时可以被 `except` 捕获；没有 handler 时先经
+`pa_print_traceback()` 打印函数级 `Traceback (most recent call last)`，再打印
+`pyadamas: uncaught <type>: <message>` 并 `exit(1)`。它用 libgcc 的
+`_Unwind_Backtrace` 逐帧取返回地址（0.163 起；0.160–0.162 是手走 rbp 链，
+因此整个运行时都得 `-fno-omit-frame-pointer`），只有命中 codegen 注册的
+PC → (函数, 行号) 表的帧才打印；没有表（旧产物/无调试信息）时只打印消息。
+展开器靠 `.eh_frame`/`.eh_frame_hdr` 找 FDE，`link_program` 显式带
+`-Wl,--eh-frame-hdr`。生成器/协程的堆帧不在调用栈上：`coro_step` /
+`gen_run` / 异步生成器驱动在异常逃出时用 `pa_trace_attach` 把 resume 帧挂到
+异常上，未捕获时追加打印（仅函数名，没有挂起行号）。内部不变量错误和 OOM
+仍走 `panic_c` 直接退出，不打印回溯。
 
 ### 不走枚举的辅助函数
 
 | 函数 | 调用方 | 说明 |
 |---|---|---|
+| `pa_debug_register` | 模块入口 | 注册 codegen 发出的 PC → (函数, 行号) 表 |
+| `pa_print_traceback` | 未捕获异常路径 | 用 `_Unwind_Backtrace` 逐帧查表，打印函数级 `Traceback (most recent call last)` |
+| `pa_trace_attach` | 生成器/协程异常逃出 | 把 resume 帧（函数名/行）挂到异常的 trace 链表 |
+| `pa_trace_print` | 未捕获异常路径 | 追加打印协程/生成器逻辑帧 |
 | `pa_pow_i64` | `gen_bin_int` 的 `Pow` | 快速幂；**负指数返回 0**（CPython 返回 float） |
 | `pa_abs_i64` | `abs(int)` | 整数绝对值，回绕语义 |
 | `pa_str_eq` / `pa_str_cmp` | `gen_cmp` | 参数形态固定，没必要进枚举 |

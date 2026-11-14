@@ -31,13 +31,15 @@ static void future_run_callbacks(PyAdamasAwait* f) {
     }
 }
 
-void* pa_asyncio_create_task(void* coro) {
+void* pa_asyncio_create_task(void* coro, int64_t result_kind) {
+    if (result_kind < 0 || result_kind > 2) result_kind = 2;
     if (!frame_is_coro(coro)) {
         // 也接受 Future/sleep/fd/gather 等可等待对象：Task 直接等它完成。
         if (!is_await_obj(coro))
             pa_raise_c("TypeError", "asyncio.create_task() expects an awaitable");
         loop_ensure();
         PyAdamasAwait* t = await_new(3);
+        t->result_kind = result_kind;
         t->driver_gen = (int64_t)coro;
         pa_rc_inc(coro);
         pa_rc_inc(coro);  // start_awaitable 接管这个引用
@@ -49,6 +51,7 @@ void* pa_asyncio_create_task(void* coro) {
     if (p[1] != 0)
         pa_raise_c("RuntimeError", "coroutine was already awaited");
     PyAdamasAwait* t = await_new(3);
+    t->result_kind = result_kind;
     t->task_coro = (int64_t)coro;
     pa_rc_inc(coro);
     pa_list_append(loop_pending, (int64_t)t);  // 持有 task 的引用
@@ -78,10 +81,13 @@ int64_t pa_asyncio_task_cancel(void* t) {
         w->done = 1;
         w->cancelled = 1;
         PyAdamasException* e = exc_new("CancelledError", "");
-        void* a = (void*)w->waiter;
-        w->waiter = 0;
-        if (a) deliver_owned(a, w, 0, e, 1);
-        else w->exc = (int64_t)e;
+        if (w->waiters && w->waiters->len > 0) {
+            int64_t n = w->waiters->len;
+            w->waiters->len = 0;
+            for (int64_t i = 0; i < n; ++i)
+                deliver_owned((void*)w->waiters->data[i], w, 0, exc_clone(e), 1);
+        }
+        w->exc = (int64_t)e;
         cancel_chain(sub);
         pa_rc_dec(sub);
         return 1;
@@ -608,7 +614,7 @@ void* pa_taskgroup_new(void) {
 void* pa_taskgroup_add(void* gp, void* coro) {
     if (!gp) pa_raise_c("TypeError", "create_task() expects a TaskGroup");
     PyAdamasTaskGroup* g = (PyAdamasTaskGroup*)gp;
-    void* t = pa_asyncio_create_task(coro);
+    void* t = pa_asyncio_create_task(coro, 2);  // TaskGroup 不消费结果，按 unknown 释放
     pa_rc_inc(t);                       // 调用方返回值持有一份
     pa_list_append(g->tasks, (int64_t)t);  // 转移 create_task 的那份
     return t;
@@ -625,7 +631,7 @@ void* pa_taskgroup_exit(void* gp) {
         pa_rc_inc((void*)t);
         pa_list_append(L, t);
     }
-    void* fut = pa_asyncio_gather(L);
+    void* fut = pa_asyncio_gather(L, 2);  // TaskGroup 结果类型不可见，按 unknown 释放
     pa_rc_dec(L);
     return fut;
 }

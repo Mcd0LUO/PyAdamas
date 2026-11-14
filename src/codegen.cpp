@@ -2,10 +2,25 @@
 #include "codegen_impl.h"
 #include "codegen.h"
 
+#include <cctype>
 #include <cstdio>
 #include <cstdlib>
 
 namespace pyadamas {
+
+static std::string debug_display_name(const std::string& name0) {
+    std::string name = name0;
+    auto dollar = name.find('$');
+    if (dollar != std::string::npos) name = name.substr(0, dollar);
+    auto pos = name.rfind('_');
+    if (pos != std::string::npos && pos > 0 && pos + 1 < name.size()) {
+        bool digits = true;
+        for (size_t i = pos + 1; i < name.size(); ++i)
+            if (!std::isdigit(static_cast<unsigned char>(name[i]))) { digits = false; break; }
+        if (digits) return name.substr(0, pos);
+    }
+    return name;
+}
 
 // 与 runtime/rt_dict.c 的字符串哈希保持一致：FNV-1a 64 再 mix64。
 // 长串字面量把结果直接写进 PyAdamasStr::hash，字典查字面量键时就不用再算，
@@ -33,6 +48,9 @@ std::string AsmGen::gen(const IRModule& m) {
         m_ = &m;
         opt_ = m.opt_level;
         out_.clear();
+        dbg_on_ = !m.source_path.empty();
+        dbg_entries_.clear();
+        dbg_seq_ = 0;
         global_labels_.resize(m.globals.size());
         for (size_t i = 0; i < m.globals.size(); ++i)
             global_labels_[i] = m.globals[i].symbol.empty()
@@ -210,7 +228,18 @@ std::string AsmGen::gen(const IRModule& m) {
             }
         }
 
+        if (dbg_on_) {
+            // 运行时 traceback 表引用的源路径与函数名。
+            out_ += "\t.section .rodata\n";
+            out_ += std::format("\t.Ldbfile: .asciz \"{}\"\n", asm_escape(m.source_path));
+            for (size_t i = 0; i < m.funcs.size(); ++i)
+                out_ += std::format("\t.Lfnname{}: .asciz \"{}\"\n", i,
+                                    asm_escape(debug_display_name(m.funcs[i]->name)));
+        }
         out_ += "\t.text\n";
+        // DWARF 行号：.file 1 指定源路径，函数体内的 .loc 指向行号。
+        if (!m.source_path.empty())
+            out_ += std::format("\t.file 1 \"{}\"\n", asm_escape(m.source_path));
 
         // 每个有堆字段的类生成一个析构器，对象 rc 归零时由运行时回调。
         // 字段按 field_heap 处理：1 = 已知堆指针（直接 dec），2 = unknown
@@ -222,7 +251,10 @@ std::string AsmGen::gen(const IRModule& m) {
             out_ += "\n# ---- dtor class " + c.name + " ----\n";
             out_ += "\t.align 8\n";
             out_ += std::format(".Ldtor{}:\n", i);
+            out_ += "\t.cfi_startproc\n";
             out_ += "\tpushq %rbx\n";
+            out_ += "\t.cfi_def_cfa_offset 16\n";
+            out_ += "\t.cfi_offset %rbx, -16\n";
             out_ += "\tmovq %rdi, %rbx\n";
             for (size_t f = 0; f < c.field_heap.size(); ++f) {
                 if (!c.field_heap[f]) continue;
@@ -231,13 +263,19 @@ std::string AsmGen::gen(const IRModule& m) {
                                              : "\tcall pa_rc_dec\n";
             }
             out_ += "\tpopq %rbx\n";
+            out_ += "\t.cfi_def_cfa_offset 8\n";
+            out_ += "\t.cfi_restore %rbx\n";
             out_ += "\tret\n";
+            out_ += "\t.cfi_endproc\n";
 
             // GC 清扫用：只把指向可达对象的字段引用减掉，不释放任何东西。
             out_ += "\n# ---- gc release class " + c.name + " ----\n";
             out_ += "\t.align 8\n";
             out_ += std::format(".Lgcrel{}:\n", i);
+            out_ += "\t.cfi_startproc\n";
             out_ += "\tpushq %rbx\n";
+            out_ += "\t.cfi_def_cfa_offset 16\n";
+            out_ += "\t.cfi_offset %rbx, -16\n";
             out_ += "\tmovq %rdi, %rbx\n";
             for (size_t f = 0; f < c.field_heap.size(); ++f) {
                 if (!c.field_heap[f]) continue;
@@ -246,7 +284,10 @@ std::string AsmGen::gen(const IRModule& m) {
                                              : "\tcall pa_gc_unref_child\n";
             }
             out_ += "\tpopq %rbx\n";
+            out_ += "\t.cfi_def_cfa_offset 8\n";
+            out_ += "\t.cfi_restore %rbx\n";
             out_ += "\tret\n";
+            out_ += "\t.cfi_endproc\n";
         }
 
         // 生成器帧的槽释放（GC release 与异常逃出共用）：逐槽 dec 并清零。
@@ -258,7 +299,10 @@ std::string AsmGen::gen(const IRModule& m) {
             out_ += std::format("\n# ---- gcrel gen g{} ----\n", i);
             out_ += "\t.align 8\n";
             out_ += std::format(".Lgengcrel{}:\n", i);
+            out_ += "\t.cfi_startproc\n";
             out_ += "\tpushq %rbx\n";
+            out_ += "\t.cfi_def_cfa_offset 16\n";
+            out_ += "\t.cfi_offset %rbx, -16\n";
             out_ += "\tmovq %rdi, %rbx\n";
             out_ += "\tcmpq $1, 8(%rbx)\n";
             out_ += std::format("\tje .Lgengcreldone{}\n", i);
@@ -275,10 +319,28 @@ std::string AsmGen::gen(const IRModule& m) {
             }
             out_ += std::format(".Lgengcreldone{}:\n", i);
             out_ += "\tpopq %rbx\n";
+            out_ += "\t.cfi_def_cfa_offset 8\n";
+            out_ += "\t.cfi_restore %rbx\n";
             out_ += "\tret\n";
+            out_ += "\t.cfi_endproc\n";
         }
 
         for (size_t i = 0; i < m.funcs.size(); ++i) emit_function(*m.funcs[i], static_cast<int>(i));
+
+        if (dbg_on_ && !dbg_entries_.empty()) {
+            out_ += "\t.section .data.rel.ro,\"aw\",@progbits\n\t.align 8\n";
+            out_ += ".Ldbgtab:\n\t.quad .Ldbfile\n\t.quad .Ldbg_entries\n";
+            out_ += std::format("\t.quad {}\n.Ldbg_entries:\n", dbg_entries_.size());
+            for (const auto& e : dbg_entries_) {
+                out_ += std::format("\t.quad {}\n", e.label);
+                if (e.fi >= 0)
+                    out_ += std::format("\t.quad {}\n", dbg_name_label(e.fi));
+                else
+                    out_ += "\t.quad 0\n";
+                out_ += std::format("\t.long {}\n\t.long 0\n", e.line);
+            }
+            out_ += "\t.text\n";
+        }
 
         // C 回调跳板：C 只传函数地址，不传环境，所以调用点先把 PyAdamas 闭包
         // 登记到每个签名专属的槽里；跳板把闭包放进 %r10（PyAdamas 的 env 约定）
@@ -287,6 +349,9 @@ std::string AsmGen::gen(const IRModule& m) {
             out_ += "\n# ---- callback trampolines ----\n";
             for (size_t i = 0; i < m.cb_sigs.size(); ++i) {
                 out_ += std::format("\t.align 8\n.Lcbtramp{}:\n", i);
+                // 跳板自成一段 CFI 区域：它不动 rsp，C 的返回地址就在
+                // 栈顶，展开时直接按入口规则（CFA=rsp+8）继续往上走。
+                out_ += "\t.cfi_startproc\n";
                 out_ += std::format("\tmovq .Lcbslot{}(%rip), %r10\n", i);
                 int gi = 0;
                 for (CKind k : m.cb_sigs[i].params) {
@@ -300,6 +365,7 @@ std::string AsmGen::gen(const IRModule& m) {
                     ++gi;
                 }
                 out_ += "\tjmp *(%r10)\n";
+                out_ += "\t.cfi_endproc\n";
             }
             out_ += "\t.bss\n\t.align 8\n";
             for (size_t i = 0; i < m.cb_sigs.size(); ++i)
@@ -311,13 +377,23 @@ std::string AsmGen::gen(const IRModule& m) {
             out_ += "\t.globl " + module_init_symbol(m.module_symbol) + "\n";
             out_ += "\t.type " + module_init_symbol(m.module_symbol) + ", @function\n";
             out_ += module_init_symbol(m.module_symbol) + ":\n";
+            out_ += "\t.cfi_startproc\n";
             out_ += "\tpushq %rbp\n";
+            out_ += "\t.cfi_def_cfa_offset 16\n";
+            out_ += "\t.cfi_offset %rbp, -16\n";
             out_ += "\tmovq %rsp, %rbp\n";
+            out_ += "\t.cfi_def_cfa_register %rbp\n";
             out_ += "\tleaq .Lstrtab(%rip), %rdi\n";
             out_ += std::format("\tmovq ${}, %rsi\n", m.strings.size());
             out_ += "\tcall pa_register_literals\n";
+            if (dbg_on_ && !dbg_entries_.empty())
+                out_ += "\tleaq .Ldbgtab(%rip), %rdi\n\tcall pa_debug_register\n";
             out_ += "\tpopq %rbp\n";
+            out_ += "\t.cfi_def_cfa %rsp, 8\n";
+            // 尾跳进 __pa_main：返回地址原样留在栈顶，CFA 规则跟刚进
+            // 本函数时一致，展开器在这里看到的仍是调用方的帧。
             out_ += "\tjmp " + func_label(m.entry) + "\n";
+            out_ += "\t.cfi_endproc\n";
         }
 
         // 真正的入口：调用降级出来的 __pa_main，返回它的返回值
@@ -325,8 +401,12 @@ std::string AsmGen::gen(const IRModule& m) {
             out_ += "\t.globl main\n";
             out_ += "\t.type main, @function\n";
             out_ += "main:\n";
+            out_ += "\t.cfi_startproc\n";
             out_ += "\tpushq %rbp\n";
+            out_ += "\t.cfi_def_cfa_offset 16\n";
+            out_ += "\t.cfi_offset %rbp, -16\n";
             out_ += "\tmovq %rsp, %rbp\n";
+            out_ += "\t.cfi_def_cfa_register %rbp\n";
             out_ += "\tsubq $16, %rsp\n";
             out_ += "\tmovq %rdi, (%rsp)\n";
             out_ += "\tmovq %rsi, 8(%rsp)\n";
@@ -341,13 +421,18 @@ std::string AsmGen::gen(const IRModule& m) {
             out_ += "\tleaq .Lstrtab(%rip), %rdi\n";
             out_ += std::format("\tmovq ${}, %rsi\n", m.strings.size());
             out_ += "\tcall pa_register_literals\n";
+            if (dbg_on_ && !dbg_entries_.empty())
+                out_ += "\tleaq .Ldbgtab(%rip), %rdi\n\tcall pa_debug_register\n";
             out_ += "\tmovslq (%rsp), %rdi\n";
             out_ += "\tmovq 8(%rsp), %rsi\n";
             out_ += "\tcall pa_sys_set_args\n";
             out_ += "\taddq $16, %rsp\n";
             if (m.entry >= 0) out_ += std::format("\tcall {}\n", func_label(m.entry));
             out_ += "\tpopq %rbp\n";
+            out_ += "\t.cfi_def_cfa %rsp, 8\n";
             out_ += "\tret\n";
+            out_ += "\t.cfi_endproc\n";
+            out_ += "\t.size main, .-main\n";
         }
         out_ += "\t.section .note.GNU-stack,\"\",@progbits\n";
 

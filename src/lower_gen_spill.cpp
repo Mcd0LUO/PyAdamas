@@ -33,7 +33,12 @@ void Lowerer::spill_across_suspends() {
         }
     }
 
-    // 挂起是终止指令：GenYield/GenAwait 没有后继，续跑块只从入口分派进。
+    std::unordered_map<int, int> cont_of_state;
+    for (auto& gs : st_->gen_states) cont_of_state[gs.id] = gs.cont;
+
+    // 计算活跃性用的后继关系。挂起本身是终止指令，但续跑块在「值还活着」
+    // 这一点上必须算作后继：否则跨挂起仍在用的 vreg 不会被判成 live-out，
+    // 挂起前不落槽、续跑后也不装回来，续跑块里读到的是上一轮留下的垃圾。
     std::vector<std::vector<int>> succ(nb);
     for (int b = 0; b < nb; ++b) {
         const auto& ins = fn->blocks[static_cast<size_t>(b)].insts;
@@ -50,9 +55,13 @@ void Lowerer::spill_across_suspends() {
                 add(ins.back().target);
                 add(ins.back().target2);
                 break;
-            case IrOp::Return:
             case IrOp::GenYield:
-            case IrOp::GenAwait:
+            case IrOp::GenAwait: {
+                auto it = cont_of_state.find(static_cast<int>(ins.back().imm));
+                if (it != cont_of_state.end()) add(it->second);
+                break;
+            }
+            case IrOp::Return:
             case IrOp::GenRethrow:
             case IrOp::GenDone: break;
             default:
@@ -86,9 +95,6 @@ void Lowerer::spill_across_suspends() {
             }
         }
     }
-
-    std::unordered_map<int, int> cont_of_state;
-    for (auto& gs : st_->gen_states) cont_of_state[gs.id] = gs.cont;
 
     // 同一个 vreg 在多个挂起点之间复用一个溢出槽。
     std::unordered_map<VReg, int> spill_slot;

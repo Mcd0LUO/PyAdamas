@@ -168,6 +168,7 @@ void agen_drive(PyAdamasAwait* d) {
         // 异常跳过了 resume 的出口清理：帧里的堆槽当场释放。
         pa_gen_release_slots(g);
         pa_exc_unwind(exc_depth0);
+        pa_trace_attach(e, g);
         if (closing && e && strcmp(e->type, "GeneratorExit") == 0) {
             exc_free(e);
             driver_complete(d, 0, NULL);

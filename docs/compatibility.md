@@ -17,7 +17,7 @@ PyAdamas 不追求兼容 CPython：语义是按静态类型的需要重新定的
 | `print(a, b, end=f())` 的求值时机 | 边算边写，`f()` 最后求值 | 先把参数和关键字全算完再写 | `print` 是降级期展开的，不是函数调用 |
 | `assert x, "msg"` | 抛 `AssertionError("msg")`；无消息时 `assertion failed` | 同 Python（消息文本一致） | 消息只保留字符串内容 |
 | `except ... as e` | `e` 是异常值对象，`args` / `str(e)` 可用 | `e` 是异常对象，有完整 `args` / traceback | `args` 目前只保存消息；没有 traceback / 异常链 |
-| 未捕获异常 | `PyAdamas: uncaught ValueError: msg`，`exit(1)` | traceback + `ValueError: msg`，退出码 1 | 没有 traceback |
+| 未捕获异常 | 先打印函数级 `Traceback (most recent call last)`（普通帧文件:行；生成器/协程逻辑帧仅函数名），再 `pyadamas: uncaught ValueError: msg`，`exit(1)` | traceback + `ValueError: msg`，退出码 1 | 没有异常对象 traceback；内联后归到调用者；async/generator 帧无挂起行号 |
 | 异常类型 | 内置异常名 + 继承匹配；`ValueError("msg")` 产生异常值，`raise e`、`raise ... from`、自定义异常类（`class E(ValueError): pass`）可用 | 完整异常类层次、traceback | 自定义异常类类体只能是 `pass`/文档字符串；`args` 只保存消息；没有 traceback |
 | 运行时错误 | `IndexError` / `KeyError` / `ZeroDivisionError` / `OverflowError` / `ValueError` / `AssertionError` 可捕获 | 同类异常 | 内部不变量/OOM 仍然直接退出 |
 | `range(a, b, c)` 的 `c` | `for ... in range(...)` 里必须是整数字面量；作为值使用时可以是任意 int 表达式 | 任意表达式 | 循环步长在降级期就要定下来；range 对象在构造时求值，没有这个限制 |
@@ -29,7 +29,7 @@ PyAdamas 不追求兼容 CPython：语义是按静态类型的需要重新定的
 | 模块初始化 | 第一次执行 import 时惰性运行一次；循环导入编译期报错 | 支持循环导入和部分初始化 | 初始化失败的模块不会再重试；模块对象不可见 |
 | 推导式 | list/set/dict 推导式按循环展开；生成器表达式脱糖成合成生成器函数，惰性求值；含 `async for` 的推导式在协程里可挂起；含 lambda 的推导式改写成生成器表达式 + 构造器，循环变量可被捕获 | 同 Python | 异步 list/set/dict 推导式只能作为语句/赋值/`return` 的根表达式；异步生成器表达式（`(x async for ...)`）已支持，可出现在任意表达式位置；类体里的生成器表达式仍按 list 构造；推导式内部不能引用循环变量的生成器表达式 |
 | 生成器 | 状态机 + 堆帧；`for` / `next` / `send` / `throw` / `close` / `yield from`；`yield from` 把 `throw` 转发给子生成器；跨 `yield` 跑 `finally` / `__exit__`；挂起点可在任意子表达式、`except` 与 `finally` 体内；生成器/协程/异步生成器类型跨模块保留元素/结果类型；`Generator[Y, S, R]` 标注给 `send` 实参与 `yield` 表达式收窄类型 | 完整生成器协议 | 未标注 `Generator[Y, S, R]` 时 `send` 值与 `yield` 表达式静态是 unknown（`R` 只记录，`StopIteration.value` 不检查） |
-| 协程 / Task / Future | `async def` / `await` 复用生成器帧；`asyncio.run`/`sleep`/`gather`/`create_task`；`done()`/`cancel()`/`result()`/`exception()`；Future 多等待者、`set_exception`、`add_done_callback`；取消级联；`wait_readable`/`wait_writable` + poll；异步生成器 + `async for` + `async with`；异步推导式 | 完整 asyncio（Task 组/Future 回调/I/O 流） | `await` 可位于任意子表达式与 `finally` 体内（跨挂起的 vreg 由降级器溢写到帧槽）；异步生成器有 `asend`/`athrow`/`__anext__`/`aclose`，`aclose` 不会 await `async with` 的 `__aexit__`，停在 `async with` 里被直接回收时不 await 退出；Future 回调同步执行；`set_exception` 接收异常值或消息；`exception()` 返回异常值；`CancelledError` 是内置名；`wait_readable` 不是 CPython 标准 API；`gather` 结果元素是 unknown；Task 单等待者 |
+| 协程 / Task / Future | `async def` / `await` 复用生成器帧；`asyncio.run`/`sleep`/`gather`/`create_task`；`done()`/`cancel()`/`result()`/`exception()`；Future 多等待者、Task 多等待者、`set_exception`、`add_done_callback`；取消级联；`wait_readable`/`wait_writable` + poll；异步生成器 + `async for` + `async with`；异步推导式 | 完整 asyncio（Task 组/Future 回调/I/O 流） | `await` 可位于任意子表达式与 `finally` 体内（跨挂起的 vreg 由降级器溢写到帧槽）；异步生成器有 `asend`/`athrow`/`__anext__`/`aclose`，`aclose` 不会 await `async with` 的 `__aexit__`，停在 `async with` 里被直接回收时不 await 退出；Future 回调同步执行；`set_exception` 接收异常值或消息；`exception()` 返回异常值；`CancelledError` 是内置名；`wait_readable` 不是 CPython 标准 API；`gather` 结果元素所有权按静态类型（0.158）；Task 支持多等待者（0.158） |
 | 递归深度 | 受栈大小限制（万级） | 默认 1000，可调 | 没有解释器递归检查 |
 | 字段初值 `x: int = []` | 每次构造重新求值，实例之间独立 | 类属性，所有实例共享 | 更安全；也避免可变默认值的经典 bug |
 | 类体里的普通赋值 | 是类属性：所有实例共享一份存储，`C.x` / `cls.x` / `self.x` 都能读到；子类赋值走写时复制，基类不受影响 | 类体是独立命名空间，属性存在类对象上 | `if`/`for` 等其它类体语句仍按模块全局处理；`obj.类属性 = v` 不支持（对象布局编译期定死） |
@@ -68,7 +68,7 @@ PyAdamas 不追求兼容 CPython：语义是按静态类型的需要重新定的
 | `d[k]` 缺失 | panic `KeyError: key not found` | 抛 `KeyError(key)` | 运行时错误消息不带 key 内容 |
 | `d == e` / `s == t` | 逐元素比较（dict 与顺序无关，同构嵌套容器逐层比） | 深比较 | 元素类型不同（异构容器）时退回指针比较 |
 | `print(d)` / `print(s)` | 打印内容（`{'a': 1}` / `{1, 2}`） | 打印内容 | 元素类型未知（异构容器）时仍输出 `<dict object>` / `<set object>` 占位 |
-| dict/set 方法 | `get`/`keys`/`values`/`items`/`update`/`add` 和删除类方法 `pop`/`remove`/`discard`/`clear`/`popitem` 可用 | 完整方法 | `keys()` 等返回 list 而不是视图；删除按 order 重建是 O(n)；`popitem` 固定 LIFO，`set.pop` 固定取最后插入项 |
+| dict/set 方法 | `get`/`keys`/`values`/`items`/`update`/`add` 和删除类方法 `pop`/`remove`/`discard`/`clear`/`popitem` 可用 | 完整方法 | `keys()` 等返回 list 而不是视图；删除用墓碑 + 插入顺序双向链表，摊还 O(1)；`popitem` 固定 LIFO，`set.pop` 固定取最后插入项 |
 | `d.get(k)` 缺失 | 返回 `None` | 返回 `None` | PyAdamas 里 `None` 就是 `0`，值为 `0` 的项与缺失分不出来 |
 | `None` 与 `0` | 同一个表示：`0 is None` 为真、`None == 0` 为真 | 完全不同 | 值表示不带类型标签，是「没有 tag」的直接后果 |
 | 切片 | str 按字节；list/tuple 返回新容器，语义同 CPython | 同 Python | `step == 0` panic；未知元素类型只做保守 GC |
@@ -95,7 +95,7 @@ PyAdamas 不追求兼容 CPython：语义是按静态类型的需要重新定的
 |---|---|---|---|
 | 正例 | `ctest --preset dev` 里 `tests/*.py` | 11 个文件 | 前端退回保守 |
 | 反例 | `ctest --preset dev` 里 `tests/fail/*.py` | 52 个文件 | 检查器为了过测而放水 |
-| 运行 | `ctest --preset dev` 里 `tests/run/*.py` | 151 个文件 | 后端烂掉没人知道 |
+| 运行 | `ctest --preset dev` 里 `tests/run/*.py` | 152 个文件 | 后端烂掉没人知道 |
 | 模块 | `ctest --preset dev` 里 `tests/modules/*/` | 12 个目录 | 分模块编译/链接、惰性初始化、缓存失效 |
 | 未建模 | `ctest --preset dev` 里 `tests/unsupported/*.py` | 1 个文件 | 「标了没建模、实际却悄悄编译过去」 |
 | 内存 | 16MB `RLIMIT_AS` 下跑压力程序 | 拼接 / 对象 / 闭包 / 容器 / 切片 / 删除 / 推导式 / 变长实参 / `with` / 装饰器 / 异常展开 / `yield from` / 异步推导式 / 环 / unknown 泄漏 | 引用计数或 GC 漏插桩、重复释放、误回收 |
@@ -203,7 +203,7 @@ echo "类型失败:"; wc -l < /tmp/fail.txt
 
 **0.6.1 那组数字也不能直接和 0.5 的 96.1% 比。** 0.6 之前根本没有类检查，`class` 语句只解析不分析，「通过」是虚高。0.6.0 刚加类检查时失败 **19064** 个文件（通过率 46.6%），把误杀逐条放宽（见 [CHANGELOG 0.6.1](archive/changelog-0.40.md)）之后降到 **6550** 个（81.6%）。也就是说，当时的下降主要是「多了一层以前没有的检查」，不是前端变严。
 
-**最近一次完整口径（0.81.1 重跑，Debian 打包的 CPython 3.13.5）**：
+**上一次完整口径（0.81.1 重跑，Debian 打包的 CPython 3.13.5）**：
 
 | 范围 | 文件数 | 语法通过 | 类型通过（占语法通过者） |
 |---|---|---|---|
@@ -220,7 +220,27 @@ traceback 的，必然进失败清单。口径变了，趋势才可比。
 类型通过 277 / 596（46.5%），比 0.81.1 少 2 个；失败项仍集中在
 `__repr__` 返回 `str`、`getattr` 属性名必须是字面量、自定义异常类体等已知模式。
 
+**0.158 复测（2026-11-14，同一 Debian 3.13.5）**：
 
+| 范围 | 文件数 | 语法通过 | 类型通过（占语法通过者） |
+|---|---|---|---|
+| 标准库本体（去掉 `test/`） | 533 | 532 | 253 / 532（47.6%） |
+| 标准库本体 | 598 | 596 | 281 / 596（47.1%） |
+
+比 0.133 的 277 / 596 多 4 个。失败类型 top（不含 `test/`，错误消息归一）：
+
+| 错误 | 文件数 | 性质 |
+|---|---|---|
+| `__repr__` / 返回值必须为 `str` | 52 | 标注是约束 |
+| `hasattr()` 只支持类实例 | 43 | 未建模动态属性 |
+| `isinstance()` 第二参数不是类 | 26 | 动态元组/类型值 |
+| 实参数目 / 类型不符 | 26 | 装饰器改签名、元类构造等 |
+| 自定义异常类字段/方法 | 24 | 类体只允许 `pass` |
+| `super()` 找不到方法 | 23 | 外部基类/动态类 |
+| `getattr()` 属性名非字面量 | 16 | 动态属性 |
+| 对象没有该属性 | 14 | 外部类型成员表不可见 |
+| undefined name | 11 | 运行时注入 |
+| 返回值必须为 `bool` / `int` | 18 | 标注是约束 |
 
 语法层的失败不再「全部是明确拒绝的那几类」：0.74 支持 complex / match、0.79 支持
 bytes 之后，旧清单（bytes 2038 / complex 620 / int64 138 / match 91）已经不成立。
@@ -232,7 +252,7 @@ bytes 之后，旧清单（bytes 2038 / complex 620 / int64 138 / match 91）已
 
 都是 `class C[T]:` 没建模。
 
-类型失败按错误类型看（该口径，错误消息归一后聚合）：
+0.81.1 口径的类型失败分类（含 site-packages，供对照）：
 
 | 错误 | 标准库（不含 `test/`） | + site-packages | 性质 |
 |---|---|---|---|
@@ -262,7 +282,7 @@ bytes 之后，旧清单（bytes 2038 / complex 620 / int64 138 / match 91）已
 | 2 亿次 `while` 累加 | 约 33× |
 | 2000 万次方法调用 `a.add(1)` | 约 19× |
 
-只看数量级就好：PyAdamas 的优化遍仍然很轻（折叠/内联/LICM/下标版本化），赢在「静态类型 + 直接出机器码」；下表是 0.7 口径，0.74 默认 -O2，实际会更快。
+只看数量级就好：PyAdamas 的优化遍仍然很轻（折叠/内联/LICM/下标版本化/循环旋转/跨块 CSE，外加后端拷贝合并），赢在「静态类型 + 直接出机器码」；下表是 0.7 口径，0.74 默认 -O2，实际会更快。0.156 之后 `bench/` 的 mandelbrot 同机 release 26.4→12.0ms（约 CPython 23.3×），其余用例持平。
 0.7 加入引用计数后，整数路径与 0.6.1 持平（不含临时堆值的语句/循环/
 函数会把 RC 脚手架删掉）；方法调用因为 self 形参的 inc/dec 慢约 30%。
 

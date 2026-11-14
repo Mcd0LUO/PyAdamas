@@ -185,6 +185,13 @@ void cancel_suspended(void* c, PyAdamasException* e);
 void future_cancel(PyAdamasAwait* f);
 void gather_cancel(PyAdamasAwait* g);
 
+/* gather 结果元素的所有权类别：0 裸值 / 1 堆引用 / 2 unknown。 */
+static void gather_release_result(int64_t value, int64_t kind) {
+    if (!value) return;
+    if (kind == 1) pa_rc_dec((void*)(uintptr_t)value);
+    else if (kind == 2) pa_rc_dec_unknown(value);
+}
+
 /* 完成一个 gather：把结果/异常交给它的 waiter，并释放 pending 里的持有引用。 */
 void finish_gather(PyAdamasAwait* g) {
     if (g->done) return;
@@ -346,7 +353,7 @@ void* pa_asyncio_wait_for(void* aw, double secs) {
     int64_t ms = 0;
     if (secs > 0) ms = v > 9e15 ? (int64_t)9e15 : (int64_t)(v + 0.5);
     w->deadline_ms = now_ms() + ms;
-    void* t = pa_asyncio_create_task(aw);
+    void* t = pa_asyncio_create_task(aw, 2);  // 内部 awaitable 类型不可见，按 unknown 释放
     pa_list_append(w->children, (int64_t)t);  // 接管 create_task 的引用
     return w;
 }
@@ -470,14 +477,11 @@ void start_awaitable(void* obj, void* waiter) {
             pa_rc_dec(w);  // 调用方交来的引用
             return;
         }
-        if (w->waiter) {
-            pa_rc_dec(w);
-            coro_inject(waiter, exc_new("RuntimeError", "task is already awaited"));
-            return;
-        }
-        // task 由 loop_pending 持有，等它完成再清掉；这里的引用可以还掉。
-        w->waiter = (int64_t)waiter;
+        // Task 允许被多个协程同时 await；完成时逐个交付。
+        if (!w->waiters) w->waiters = pa_list_new(4, 1);
         pa_rc_inc(waiter);
+        pa_list_append(w->waiters, (int64_t)waiter);
+        // task 由 loop_pending 持有，等它完成再清掉；这里的引用可以还掉。
         pa_rc_dec(w);
         return;
     }
@@ -585,7 +589,7 @@ void deliver_owned(void* waiter, void* child, int64_t value, PyAdamasException* 
         return;
     }
     if (g->kind == 3) {
-        // Task：保存结果供后续 await，当前等待者拿到一份独立的引用/副本。
+        // Task：保存结果供后续 await；所有等待者各拿一份独立的引用/副本。
         if (!g->done) {
             g->done = 1;
             void* owned = pending_take(g);
@@ -595,11 +599,15 @@ void deliver_owned(void* waiter, void* child, int64_t value, PyAdamasException* 
             }
             g->result = value;
             g->exc = (int64_t)exc;
-            void* a = (void*)g->waiter;
-            g->waiter = 0;
-            if (a) {
-                if (value_kind) pa_rc_inc_unknown(value);
-                deliver_owned(a, g, value, exc_clone(exc), value_kind);
+            if (g->waiters && g->waiters->len > 0) {
+                int64_t n = g->waiters->len;
+                g->waiters->len = 0;
+                for (int64_t i = 0; i < n; ++i) {
+                    int64_t copy = value;
+                    if (copy && g->result_kind) pa_rc_inc_unknown(copy);
+                    deliver_owned((void*)g->waiters->data[i], g, copy,
+                                  exc_clone(exc), g->result_kind);
+                }
             }
             if (owned) pa_rc_dec(owned);
         } else {
@@ -643,7 +651,7 @@ void deliver_owned(void* waiter, void* child, int64_t value, PyAdamasException* 
     if (g->done) {
         // gather 已被取消/完成：迟到的子结果直接丢弃。
         if (exc) exc_free(exc);
-        else if (value_kind) pa_rc_dec_unknown(value);
+        else gather_release_result(value, g->results ? g->results->elem_kind : 2);
         pa_rc_dec(waiter);
         return;
     }
@@ -659,7 +667,7 @@ void deliver_owned(void* waiter, void* child, int64_t value, PyAdamasException* 
         else exc_free(exc);
     } else if (value) {
         if (g->exc || idx < 0 || !g->results) {
-            if (value_kind) pa_rc_dec_unknown(value);
+            gather_release_result(value, g->results ? g->results->elem_kind : 2);
         } else {
             g->results->data[idx] = value;  // results 持有这个引用
         }
@@ -739,6 +747,7 @@ void coro_step(void* c) {
         handler_top = h.prev;
         PyAdamasException* e = pending_exc;
         pending_exc = NULL;
+        pa_trace_attach(e, c);
         pa_rc_cleanup(h.mark);
         p[1] = 2;
         p[5] = 0;
@@ -841,14 +850,14 @@ void* pa_asyncio_sleep(double secs) {
     return w;
 }
 
-void* pa_asyncio_gather(PyAdamasList* coros) {
+void* pa_asyncio_gather(PyAdamasList* coros, int64_t result_kind) {
     loop_ensure();
     PyAdamasAwait* w = await_new(2);
     int64_t n = coros ? coros->len : 0;
     w->children = pa_list_new(n, 1);
-    // 结果元素类型静态不可知：按 unknown 容器处理，只存不释放
-    //（kind 2），和 list[unknown] 的约定一致。
-    w->results = pa_list_new(n, 2);
+    // 结果元素所有权由调用点的静态类型决定：0 裸值 / 1 堆引用 / 2 unknown。
+    if (result_kind < 0 || result_kind > 2) result_kind = 2;
+    w->results = pa_list_new(n, result_kind);
     for (int64_t i = 0; i < n; ++i) {
         int64_t v = coros->data[i];
         pa_rc_inc((void*)v);
@@ -889,6 +898,15 @@ void detach_cur(void* c) {
             }
     } else if (aw->kind == 5) {
         // future：等待者在 waiters 列表里，摘掉并释放它的引用
+        if (aw->waiters)
+            for (int64_t i = 0; i < aw->waiters->len; ++i)
+                if (aw->waiters->data[i] == (int64_t)c) {
+                    list_take_at(aw->waiters, i);
+                    pa_rc_dec(c);
+                    break;
+                }
+    } else if (aw->kind == 3) {
+        // task：多个等待者同样在 waiters 列表里
         if (aw->waiters)
             for (int64_t i = 0; i < aw->waiters->len; ++i)
                 if (aw->waiters->data[i] == (int64_t)c) {

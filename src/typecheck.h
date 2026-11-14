@@ -58,6 +58,13 @@ struct Symbol {
     bool is_class_name = false;
 };
 
+// from 内置模块 import 的函数：保留原始签名，调用点据此走模块专用规则。
+struct NativeAlias {
+    std::string module;
+    std::string member;
+    TypePtr sig;
+};
+
 struct Scope {
     std::unordered_map<std::string, Symbol> vars;
     // import m 绑定的模块别名；只用于属性/from 解析，不是运行时值。
@@ -207,6 +214,8 @@ private:
     // 进来的类、import * 带进来的类。区分「C(...) 构造」和「实例 __call__」
     // 只能看绑定的来源，类型上两者都是 Class。
     std::unordered_set<std::string> class_obj_names_;
+    // from asyncio import ...：保留成员名与原始泛型签名，调用点仍走专用规则。
+    std::unordered_map<std::string, NativeAlias> native_aliases_;
     // 模块里有 globals()[...] = ... 这类动态注入（inspect/turtle 都这么干），
     // 之后模块级名字集合在静态上就不可知了，未定义名一律放行。
     bool dynamic_globals_ = false;

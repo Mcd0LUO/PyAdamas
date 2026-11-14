@@ -137,10 +137,20 @@ typedef struct PyAdamasHandler {
     struct PyAdamasFrame* frame;
 } PyAdamasHandler;
 
+typedef struct PyAdamasTraceFrame {
+    const char* file;
+    const char* func;
+    int32_t line;
+    int32_t pad;
+    struct PyAdamasTraceFrame* next;
+} PyAdamasTraceFrame;
+
 typedef struct PyAdamasException {
     char* type;     /* 异常名，如 "ValueError" / 自定义异常类名 */
     char* message;  /* 可以为空串，不能为 NULL */
     struct PyAdamasException* cause;  /* raise ... from，owned */
+    /* 生成器/协程逃出的逻辑帧（最外层在前），malloc 链表。 */
+    struct PyAdamasTraceFrame* trace;
 } PyAdamasException;
 
 typedef struct PyAdamasExcSave {
@@ -207,7 +217,7 @@ typedef struct {
     int64_t pending;    /* future/fd：已经挂进 loop_pending/loop_fds */
     int64_t fd;         /* kind 6：等待的 fd */
     int64_t write;      /* kind 6：0 读 / 1 写 */
-    PyAdamasList* waiters;  /* kind 5 future：多个等待者（owned refs） */
+    PyAdamasList* waiters;  /* kind 3/5 task/future：多个等待者（owned refs） */
     PyAdamasList* results;
     PyAdamasList* children;
     PyAdamasList* callbacks; /* kind 5 future：add_done_callback 注册的函数（owned refs） */
@@ -233,6 +243,15 @@ extern PyAdamasHandler* handler_top;
 extern PyAdamasFrame* pa_frame_top;
 /* 异常 longjmp 前调用：释放 target 之上（更内层）所有帧里的堆槽引用。 */
 void pa_frame_unwind(PyAdamasFrame* target);
+/* 调试表：codegen 在模块入口注册，未捕获异常时用来打印函数级回溯。 */
+void pa_debug_register(const void* table);
+void pa_print_traceback(void);
+int pa_debug_lookup_pc(uintptr_t pc, const char** file, const char** func, int32_t* line);
+/* 生成器/协程帧逃出异常时，把逻辑帧挂到异常上；未捕获时追加打印。 */
+void pa_trace_attach(PyAdamasException* e, void* gen_frame);
+void pa_trace_print(const PyAdamasException* e);
+PyAdamasTraceFrame* pa_trace_clone(const PyAdamasTraceFrame* f);
+void pa_trace_free(PyAdamasTraceFrame* f);
 extern PyAdamasException* pending_exc;
 extern PyAdamasException* current_exc;
 extern PyAdamasExcSave* exc_save_top;
@@ -372,10 +391,10 @@ void pa_coro_rethrow(void* g);
 int fire_due_timers(int64_t now);
 int64_t earliest_deadline(void);
 void* pa_asyncio_sleep(double secs);
-void* pa_asyncio_gather(PyAdamasList* coros);
+void* pa_asyncio_gather(PyAdamasList* coros, int64_t result_kind);
 void detach_cur(void* c);
 void cancel_suspended(void* c, PyAdamasException* e);
-void* pa_asyncio_create_task(void* coro);
+void* pa_asyncio_create_task(void* coro, int64_t result_kind);
 int64_t pa_asyncio_task_done(void* t);
 int64_t pa_asyncio_task_cancel(void* t);
 void gather_cancel(PyAdamasAwait* g);
