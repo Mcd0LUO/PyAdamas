@@ -419,6 +419,13 @@ TypePtr TypeChecker::call_value(Call& c) {
         }
         return mk_class(cls);
     }
+    if (ft->kind == TyKind::TypeObj) {
+        // type(self)(...)：动态类型实例化。类型对象当构造器调用，
+        // 结果类型静态未知，conservative 返回 unknown。
+        for (auto& arg : c.args) expr(*arg);
+        for (auto& kw : c.keywords) expr(*kw.value);
+        return t_unknown();
+    }
     if (ft->kind != TyKind::Func) {
         err(c.line, c.col, std::format("'{}' object is not callable", type_name(ft)));
         for (auto& arg : c.args) expr(*arg);
