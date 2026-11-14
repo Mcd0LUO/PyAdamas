@@ -352,6 +352,14 @@ TypePtr TypeChecker::expr(Expr& e) {
                     if (a.attr == "name" || a.attr == "mode" || a.attr == "encoding" ||
                         a.attr == "errors")
                         return t_str();
+                    // 方法名当值取用（file.write 不调用直接传）是文件
+                    // 缓存句柄的常见写法；返回 unknown 保守放行。
+                    if (a.attr == "write" || a.attr == "read" || a.attr == "readline" ||
+                        a.attr == "readlines" || a.attr == "readinto" || a.attr == "close" ||
+                        a.attr == "flush" || a.attr == "seek" || a.attr == "tell" ||
+                        a.attr == "truncate" || a.attr == "writelines" || a.attr == "fileno" ||
+                        a.attr == "isatty")
+                        return t_unknown();
                     err(a.line, a.col,
                         std::format("'file' object has no attribute '{}'", a.attr));
                     return t_unknown();
