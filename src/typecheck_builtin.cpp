@@ -229,15 +229,32 @@ TypePtr TypeChecker::builtin_call(const std::string& n, Call& c) {
         if (n == "isinstance") {
             if (!need(2, 2)) return t_bool();
             TypePtr tt = a[1];
-            bool ok = tt && (tt->kind == TyKind::Class || tt->kind == TyKind::ClassObj);
-            if (!ok && tt && tt->kind == TyKind::Func && tt->fn) {
-                static const std::unordered_set<std::string> types = {
-                    "int", "float", "str", "bool", "list",
-                    "tuple", "dict", "set", "complex", "object", "range",
+            std::function<bool(const TypePtr&)> valid =
+                [&](const TypePtr& t) -> bool {
+                    if (!t || t->kind == TyKind::Unknown) return true;
+                    if (t->kind == TyKind::Class || t->kind == TyKind::ClassObj ||
+                        t->kind == TyKind::TypeObj)
+                        return true;
+                    if (t->kind == TyKind::Func && t->fn) {
+                        static const std::unordered_set<std::string> types = {
+                            "int", "float", "str", "bool", "list", "tuple",
+                            "dict", "set", "complex", "object", "range",
+                            "bytes", "bytearray", "memoryview", "type",
+                            "slice", "frozenset", "property", "classmethod",
+                            "staticmethod",
+                        };
+                        return types.count(t->fn->name) > 0;
+                    }
+                    if (t->kind == TyKind::Tuple || t->kind == TyKind::List) {
+                        for (auto& e : t->sub)
+                            if (!valid(e)) return false;
+                        return true;
+                    }
+                    if (t->kind == TyKind::Optional)
+                        return valid(t->sub.empty() ? nullptr : t->sub[0]);
+                    return false;
                 };
-                ok = types.count(tt->fn->name) > 0;
-            }
-            if (!ok && !is_unknown(tt))
+            if (!valid(tt))
                 err(c.args[1]->line, c.args[1]->col,
                     "isinstance() second argument must be a class or builtin type");
             return t_bool();
@@ -505,19 +522,27 @@ TypePtr TypeChecker::builtin_call(const std::string& n, Call& c) {
         }
         if (n == "bytes") {
             if (a.empty()) return t_bytes();
-            if (a.size() != 1) {
+            if (a.size() > 2) {
                 err(c.line, c.col,
-                    std::format("bytes() expects at most 1 argument, got {}", a.size()));
+                    std::format("bytes() expects at most 2 arguments, got {}", a.size()));
                 return t_bytes();
             }
+            // 第二参是编码/错误（str/None）只影响语义，不影响类型；
+            // 第一参支持 bytes/int/list[int]/tuple[int]/生成器/unknown。
             TypePtr at = a[0];
-            if (at && (at->kind == TyKind::Bytes || at->kind == TyKind::Int)) return t_bytes();
-            if (at && at->kind == TyKind::List && !at->sub.empty() && at->sub[0] &&
-                at->sub[0]->kind == TyKind::Int)
-                return t_bytes();
-            err(c.args[0]->line, c.args[0]->col,
-                std::format("bytes() argument must be int, bytes or list[int], got '{}'",
-                            type_name(at)));
+            bool ok = at && (at->kind == TyKind::Bytes || at->kind == TyKind::Int ||
+                             at->kind == TyKind::Unknown || at->kind == TyKind::None);
+            if (!ok && at && (at->kind == TyKind::List || at->kind == TyKind::Tuple ||
+                              at->kind == TyKind::Generator || at->kind == TyKind::Range)) {
+                auto e = at->sub.empty() ? TypePtr() : at->sub[0];
+                ok = e && (e->kind == TyKind::Int || e->kind == TyKind::Unknown);
+            }
+            if (!ok && a.size() == 2 && at && at->kind == TyKind::Str)
+                ok = true;  // bytes(str, encoding)：编码为 bytes
+            if (!ok)
+                err(c.args[0]->line, c.args[0]->col,
+                    std::format("bytes() argument must be a bytes-like or iterable of int, got '{}'",
+                                type_name(at)));
             return t_bytes();
         }
         (void)need;

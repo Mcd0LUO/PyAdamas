@@ -897,6 +897,8 @@ TypePtr TypeChecker::binop_type(Tok op, TypePtr l, TypePtr r, int line, int col)
                 if (is_num(l) && is_num(r)) return promote(l, r);
                 if (l->kind == TyKind::Str && r->kind == TyKind::Int) return t_str();
                 if (l->kind == TyKind::Int && r->kind == TyKind::Str) return t_str();
+                if (l->kind == TyKind::Bytes && r->kind == TyKind::Int) return t_bytes();
+                if (l->kind == TyKind::Int && r->kind == TyKind::Bytes) return t_bytes();
                 if (l->kind == TyKind::List && r->kind == TyKind::Int) return l;
                 if (l->kind == TyKind::Int && r->kind == TyKind::List) return r;
                 if (l->kind == TyKind::Tuple && r->kind == TyKind::Int)

@@ -489,7 +489,7 @@ TypePtr TypeChecker::method_call(TypePtr recv, const std::string& name, Call& c,
             if (!c.keywords.empty())
                 err(c.line, c.col, std::format("bytes.{}() does not take keyword arguments", name));
             if (name == "decode") {
-                argc(0, 1);
+                argc(0, 2);
                 return t_str();
             }
             if (name == "upper" || name == "lower" || name == "strip" || name == "lstrip" ||
