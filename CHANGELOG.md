@@ -4,6 +4,22 @@
 
 早期阶段没有逐条留痕，按阶段归纳；0.4 之后逐条记录。
 
+## [0.169] - 2026-11-14
+
+getattr 非字面量 + 内置异常多参：标准库前端基线 374 → 411 / 596（68.9%）。
+
+### 变更
+
+- **getattr/setattr/hasattr 属性名非字面量**：`getattr(obj, name)` 对非类/unknown/模块/函数接收者从「报错」改为 check 一律放过（返回 unknown），类实例仍走运行期动态属性表。
+- **内置异常构造多参 + 关键字**：`ValueError(a, b, c)` 任意位置参、`Error(code=1)` 关键字不再拒绝。lower/运行时建 args 元组、消息取元组 repr；`raise→except` 间经 `pending_exc_args` 保留 args，`e.args`/str 与 CPython 一致。
+
+### 验证
+
+- 前端基线：374 → **411 / 596（68.9%）**，去掉 `test/` 370 / 532。
+- `ctest` 3/3；run 套件 173 ok / 0 fail；`check_size.sh` 通过。
+- 新增 `tests/run/159_exc_multi.py`（多参异常与 CPython 逐字一致）。
+
+
 ## [0.168] - 2026-11-14
 
 isinstance / bytes：标准库前端基线 348 → 374 / 596（62.8%）。

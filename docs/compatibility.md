@@ -315,6 +315,21 @@ bytes 之后，旧清单（bytes 2038 / complex 620 / int64 138 / match 91）已
 | 自定义异常类的字段/方法 | 25 | 异常类类体只允许 `pass` |
 | 跨模块类的字段/方法可见性 | ~25 | 外部的类成员表看不见 |
 
+**0.169 复测（2026-11-14）**——getattr 非字面量 + 内置异常多参：
+
+| 范围 | 文件数 | 语法通过 | 类型通过（占语法通过者） |
+|---|---|---|---|
+| 标准库本体 | 598 | 596 | 411 / 596（68.9%） |
+| 标准库本体（去掉 `test/`） | 533 | 532 | 370 / 532（69.5%） |
+
+比 0.168 多 37 个（+6.1pp）。两块高优先级：
+
+- **getattr/setattr/hasattr 属性名非字面量**：属性名是变量（`getattr(obj, name)`）的写法，之前只对类实例放行、其它接收者（模块/函数/unknown）直接报错。现在 check 一律放过（返回 unknown），build 阶段类实例走运行期动态属性表。
+- **内置异常构造多参 + 关键字**：`ValueError(a, b, c)` 任意多个位置参、`Error(code=1)` 关键字构造不再拒绝。lower/运行时给异常值建 args 元组、消息取元组 repr（`(a, b, c)`）；在 raise→except 间保留 args（`pending_exc_args`），`e.args` 与 CPython 一致。新增 `tests/run/159_exc_multi.py`（输出与 CPython 逐字一致）。
+
+剩余失败的新 top：`undefined name`（39）、`has no method`（24）、`has no attribute`（21）、`cannot assign`（18）。isinstance/bytes/getattr/异常构造等高价值簇都已收口。
+
+
 **0.168 复测（2026-11-14）**——isinstance/bytes：
 
 | 范围 | 文件数 | 语法通过 | 类型通过（占语法通过者） |
