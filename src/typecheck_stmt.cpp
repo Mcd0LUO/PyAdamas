@@ -530,10 +530,9 @@ void TypeChecker::assign(Expr& target, TypePtr value, int line, int col) {
                 // 实例上给类属性赋值要新建实例属性，而 PyAdamas 的对象布局是
                 // 编译期定死的；明确报错，别静默写到类属性上影响所有实例。
                 if (ot->cls->class_attr(at->attr)) {
-                    err(line, col,
-                        std::format("cannot assign to class attribute '{}.{}' through an "
-                                    "instance: object layout is fixed at compile time",
-                                    ot->cls->name, at->attr));
+                    // CPython 给实例赋值同名会新建实例属性覆盖类属性；布局固定
+                    // 但这是合法 Python，check 保守放过，build 决定。
+                    unsupported.push_back("assignment to a class attribute through an instance");
                     return;
                 }
                 err(line, col,

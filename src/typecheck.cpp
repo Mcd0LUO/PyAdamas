@@ -173,9 +173,9 @@ void TypeChecker::declare(const std::string& name, TypePtr ty, int line, int col
             return;
         }
         if (sym.annotated) {
-            // 函数名被重新绑定成静态上未知的东西（协程对象、装饰器返回值）：
+            // 函数名被重新绑定成非函数的东西（协程对象、装饰器返回值）：
             // 继续按原签名检查只会误报，直接退化成 unknown
-            if (sym.from_def && is_unknown(ty)) {
+            if (sym.from_def && (!is_unknown(ty) && ty->kind != TyKind::Func)) {
                 sym.ty = t_unknown();
                 return;
             }
