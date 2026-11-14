@@ -301,15 +301,15 @@ TypePtr TypeChecker::builtin_call(const std::string& n, Call& c) {
             TypePtr ot = ot0;
             if (ot && ot->kind == TyKind::Optional && !ot->sub.empty()) ot = ot->sub[0];
             // 属性名不是字面量：只能查运行期动态属性表（类实例才有槽）。
-            if (!an && ot && ot->kind == TyKind::Class && ot->cls) {
-                ot->cls->needs_dict = true;
-
-                return n == "hasattr" ? t_bool() : n == "getattr" ? t_unknown() : t_none();
-            }
+            // 非类接收者（模块/函数/unknown）静态证明不了有没有这个属性，
+            // CPython 最常见的动态判别写法，check 一律放过返回 unknown，
+            // 交给 build 阶段决定是否支持。
             if (!an) {
-                err(ne->line, ne->col,
-                    std::format("{}() attribute name must be a string literal", n));
-                return n == "hasattr" ? t_bool() : n == "getattr" ? t_unknown() : t_none();
+                if (ot && ot->kind == TyKind::Class && ot->cls) ot->cls->needs_dict = true;
+                if (ot && ot->kind != TyKind::Unknown && ot->kind != TyKind::Class)
+                    return n == "hasattr" ? t_bool() : n == "getattr" ? t_unknown() : t_none();
+                return n == "hasattr" ? t_bool()
+                                      : n == "getattr" ? t_unknown() : t_none();
             }
             if (!ot || ot->kind != TyKind::Class || !ot->cls) {
                 // hasattr 对已知的内建/容器类型可以静态判定。

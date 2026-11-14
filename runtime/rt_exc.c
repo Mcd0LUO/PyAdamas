@@ -12,6 +12,7 @@ PyAdamasException* pending_exc;
 PyAdamasException* current_exc;
 PyAdamasExcSave* exc_save_top;
 void* current_exc_inst;  /* 富异常实例（有字段/方法），RC owned；0 = 普通异常 */
+PyAdamasList* pending_exc_args;  /* 多参异常的可选 args 表（RC owned）；0=无 */
 
 /* 只释放 target 之上（更内层）的帧：target 所在函数还要继续执行，
    它的槽由自己正常退出时释放。先清空槽再 dec，析构里如果重入到用户
@@ -510,6 +511,8 @@ _Noreturn void pa_raise_args(PyAdamasStr* type, PyAdamasList* args) {
     e->cause = NULL;
     e->trace = NULL;
     free(msg);
+    if (pending_exc_args) { pa_rc_dec(pending_exc_args); pending_exc_args = NULL; }
+    if (args) { pa_rc_inc(args); pending_exc_args = args; }
     pending_exc = e;
     exc_longjmp();
 }
@@ -536,8 +539,18 @@ PyAdamasExcValue* pa_exc_value_new_args(PyAdamasStr* type, PyAdamasList* args) {
 PyAdamasExcValue* pa_exc_value_from_exc(PyAdamasException* e) {
     if (!e) return NULL;
     PyAdamasExcValue* v = exc_value_alloc(e->type, e->message);
-    PyAdamasStr* msg = str_new(e->message, (int64_t)strlen(e->message));
-    pa_list_append(v->args, (int64_t)msg);
+    /* 多参异常：优先用 raise 时保留的 args 表重建 e.args；否则退化为单消息。 */
+    if (pending_exc_args && pending_exc_args->len >= 1) {
+        for (int64_t i = 0; i < pending_exc_args->len; ++i) {
+            PyAdamasStr* s = (PyAdamasStr*)(uintptr_t)pending_exc_args->data[i];
+            if (!s) continue;
+            pa_rc_inc(s);
+            pa_list_append(v->args, (int64_t)s);
+        }
+    } else {
+        PyAdamasStr* msg = str_new(e->message, (int64_t)strlen(e->message));
+        pa_list_append(v->args, (int64_t)msg);
+    }
     if (e->cause) v->cause = pa_exc_value_from_exc(e->cause);
     return v;
 }
@@ -546,6 +559,12 @@ PyAdamasException* pa_exc_from_value(PyAdamasExcValue* v) {
     if (!v) pa_raise_c("TypeError", "expected an exception instance");
     if (v->magic != PYADAMAS_EXCVAL_MAGIC) pa_raise_c("TypeError", "expected an exception instance");
     PyAdamasException* e = exc_new(v->type, v->message);
+    /* 把 ExcValue 的 args 存下来，except as e 重建时能还原多参。 */
+    if (v->args && v->args->len >= 1) {
+        if (pending_exc_args) { pa_rc_dec(pending_exc_args); pending_exc_args = NULL; }
+        pa_rc_inc(v->args);
+        pending_exc_args = v->args;
+    }
     if (v->cause) e->cause = pa_exc_from_value(v->cause);
     return e;
 }
@@ -618,7 +637,10 @@ PyAdamasExcValue* pa_exc_accept_value(void) {
     current_exc = pending_exc;
     pending_exc = NULL;
     if (!current_exc) return exc_value_alloc("Exception", "");
-    return pa_exc_value_from_exc(current_exc);
+    PyAdamasExcValue* v = pa_exc_value_from_exc(current_exc);
+    /* args 已被 ExcValue 各 rc_inc 复制走，释放暂存的列表。 */
+    if (pending_exc_args) { pa_rc_dec(pending_exc_args); pending_exc_args = NULL; }
+    return v;
 }
 
 PyAdamasList* pa_exc_value_args(PyAdamasExcValue* v) {
