@@ -981,6 +981,17 @@ TypePtr TypeChecker::method_call(TypePtr recv, const std::string& name, Call& c,
             }
         }
 
+        if (recv->kind == TyKind::Exception) {
+            // BaseException 的方法：with_traceback 返回自身，args 是元组，
+            // __str__ 返回消息；其余保守放行（异常类常有自定义协议）。
+            if (name == "with_traceback") { argc(1, 1); return recv; }
+            if (name == "args") { argc(0, 0); return mk_tuple({t_unknown()}); }
+            if (name == "__str__" || name == "add_note" || name == "__reduce__")
+                return t_unknown();
+            unsupported.push_back("method on a builtin exception value");
+            return t_unknown();
+        }
+
         err(c.line, c.col,
             std::format("'{}' object has no method '{}'", type_name(recv), name));
         return t_unknown();

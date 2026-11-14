@@ -520,7 +520,9 @@ void TypeChecker::assign(Expr& target, TypePtr value, int line, int col) {
                         unsupported.push_back("assignment to a property setter");
                         return;
                     }
-                    err(line, col, std::format("cannot assign to method '{}'", at->attr));
+                    // `obj.method = fn` 是动态覆盖方法（monkey-patch），
+                    // 布局固定但 CPython 常见；conservative 放过。
+                    unsupported.push_back("assignment to a method name");
                     return;
                 }
                 // 外部基类可能带来任意属性
@@ -536,6 +538,19 @@ void TypeChecker::assign(Expr& target, TypePtr value, int line, int col) {
                 }
                 err(line, col,
                     std::format("'{}' object has no attribute '{}'", ot->cls->name, at->attr));
+                return;
+            }
+            // 异常值的内置属性（__context__/__cause__/__traceback__/filename/
+            // errno 等）静态看得到一部分，但赋值是常见写法；conservative 放过。
+            if (ot && ot->kind == TyKind::Exception) {
+                if (at->attr.size() > 4 && at->attr.starts_with("__") &&
+                    at->attr.ends_with("__"))
+                    return;
+                unsupported.push_back("assignment to an exception attribute");
+                return;
+            }
+            if (ot && ot->kind == TyKind::TypeObj) {
+                unsupported.push_back("assignment to a type object attribute");
                 return;
             }
             if (!is_unknown(ot))
