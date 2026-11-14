@@ -525,6 +525,10 @@ TypePtr TypeChecker::method_call(TypePtr recv, const std::string& name, Call& c,
                 argc(0, 2);
                 return mk_list(t_bytes());
             }
+            if (name == "partition" || name == "rpartition") {
+                argc(1, 1);
+                return mk_tuple({t_bytes(), t_bytes(), t_bytes()});
+            }
             err(c.line, c.col, std::format("bytes has no method '{}'", name));
             return t_unknown();
         }
@@ -559,6 +563,7 @@ TypePtr TypeChecker::method_call(TypePtr recv, const std::string& name, Call& c,
             if (name == "partition" || name == "rpartition")
                 return mk_tuple({t_str(), t_str(), t_str()});
             if (name == "encode") return t_bytes();
+            if (name == "maketrans") { argc(1, 3); return t_unknown(); }
         }
 
         if (recv->kind == TyKind::DateTime) {
