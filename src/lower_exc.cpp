@@ -133,15 +133,27 @@ void Lowerer::lower_raise(Raise& r) {
             err(e.line, e.col, "raise requires an exception name or instance");
             return;
         }
-        if (!c.keywords.empty()) {
-            err(e.line, e.col, "exception constructor does not take keyword arguments");
-            return;
-        }
-        if (c.args.size() > 1) {
-            err(e.line, e.col, "exception constructor takes at most one message argument");
-            return;
-        }
         type = n.id;
+        for (auto& kw : c.keywords) expr(*kw.value);
+        // 多位置参：逐个字符串化收集成 list[str]，交给运行期建 args 和消息。
+        // 单参数保持旧语义（消息=str，e.args == [msg]），避免行为回归。
+        if (c.args.size() > 1) {
+            TypePtr lt = mk_list(t_str());
+            VReg arglist = call_runtime(
+                RtFn::ListNew, lt,
+                {const_int(static_cast<int64_t>(c.args.size())),
+                 const_int(list_kind_filled(lt))});
+            push_temp(arglist);
+            for (auto& arg : c.args) {
+                TypePtr mt = tc_.type_of(arg.get());
+                VReg raw = expr(*arg);
+                VReg sm = convert_to(raw, mt, t_str());
+                retain_elem(sm, 1);
+                call_void(RtFn::ListAppend, {arglist, sm});
+            }
+            call_void(RtFn::RaiseArgs, {const_str(type), arglist});
+            return;
+        }
         if (!c.args.empty()) {
             TypePtr mt = tc_.type_of(c.args[0].get());
             if (mt && (mt->kind == TyKind::List || mt->kind == TyKind::Tuple ||

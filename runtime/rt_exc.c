@@ -466,6 +466,73 @@ PyAdamasExcValue* pa_exc_value_new(PyAdamasStr* type, PyAdamasStr* msg) {
     return v;
 }
 
+
+/* 多参异常：args 是已字符串化的实参列表（PyAdamasStr*）。message 取
+   args 的逗号join，符合 CPython 对多参异常 str() 的直观；args 原样存。 */
+/* 多参异常的消息 = args 的元组 repr，如 (a, b, c)。*/
+static void args_buf_put(char** buf, size_t* cap, size_t* len, const char* p, int64_t n) {
+    while (*len + (size_t)n + 1 > *cap) { *cap *= 2; *buf = (char*)realloc(*buf, *cap); }
+    memcpy(*buf + *len, p, (size_t)n); *len += (size_t)n; (*buf)[*len] = 0;
+}
+static char* join_args_cstr(PyAdamasList* args) {
+    size_t cap = 64, len = 0;
+    char* buf = (char*)malloc(cap);
+    if (!buf) panic_c("out of memory");
+    buf[0] = 0;
+    args_buf_put(&buf, &cap, &len, "(", 1);
+    for (int64_t i = 0; i < (args ? args->len : 0); ++i) {
+        PyAdamasStr* s = (PyAdamasStr*)(uintptr_t)args->data[i];
+        const char* p = s ? s->data : "";
+        int64_t n = s ? s->len : 0;
+        if (i) args_buf_put(&buf, &cap, &len, ", ", 2);
+        args_buf_put(&buf, &cap, &len, p, n);
+    }
+    if (args && args->len == 1) args_buf_put(&buf, &cap, &len, ",", 1);
+    args_buf_put(&buf, &cap, &len, ")", 1);
+    return buf;
+}
+
+/* 抛多参异常：args 为字符串化实参列表。 */
+_Noreturn void pa_raise_args(PyAdamasStr* type, PyAdamasList* args) {
+    char tn[128];
+    int64_t tn_len = type->len;
+    if (tn_len < 0 || tn_len >= (int64_t)sizeof(tn)) panic_c("exception type name too long");
+    memcpy(tn, type->data, (size_t)tn_len); tn[tn_len] = '\0';
+    char* msg = join_args_cstr(args);
+    exc_free(pending_exc);
+    PyAdamasException* e = (PyAdamasException*)malloc(sizeof(PyAdamasException));
+    if (!e) panic_c("out of memory");
+    e->type = (char*)malloc((size_t)tn_len + 1);
+    e->message = (char*)malloc(strlen(msg) + 1);
+    if (!e->type || !e->message) panic_c("out of memory");
+    memcpy(e->type, tn, (size_t)tn_len + 1);
+    strcpy(e->message, msg);
+    e->cause = NULL;
+    e->trace = NULL;
+    free(msg);
+    pending_exc = e;
+    exc_longjmp();
+}
+
+/* 多参异常值对象：args 是字符串化实参列表，message 取 join。 */
+PyAdamasExcValue* pa_exc_value_new_args(PyAdamasStr* type, PyAdamasList* args) {
+    if (!type) pa_raise_c("TypeError", "exception type must be a string");
+    char tn[128];
+    int64_t n = type->len;
+    if (n < 0 || n >= (int64_t)sizeof(tn)) pa_raise_c("ValueError", "exception type too long");
+    memcpy(tn, type->data, (size_t)n); tn[n] = '\0';
+    char* msg = join_args_cstr(args);
+    PyAdamasExcValue* v = exc_value_alloc(tn, msg);
+    free(msg);
+    for (int64_t i = 0; i < (args ? args->len : 0); ++i) {
+        PyAdamasStr* s = (PyAdamasStr*)(uintptr_t)args->data[i];
+        if (!s) continue;
+        pa_rc_inc(s);
+        pa_list_append(v->args, (int64_t)s);
+    }
+    return v;
+}
+
 PyAdamasExcValue* pa_exc_value_from_exc(PyAdamasException* e) {
     if (!e) return NULL;
     PyAdamasExcValue* v = exc_value_alloc(e->type, e->message);

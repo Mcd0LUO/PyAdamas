@@ -428,18 +428,39 @@ VReg Lowerer::lower_call(Call& c) {
         }
         if (rich_exc) return lower_construct(c, classes_[n.id]);
         if (exc_ctor) {
-            if (!c.keywords.empty())
-                err(c.line, c.col, "exception constructor does not take keyword arguments");
             VReg type = const_str(n.id);
+            // 关键字实参：求值但丢弃（简化）。多位置参 → 建 args 列表。
+            for (auto& kw : c.keywords) expr(*kw.value);
+            if (c.args.size() > 1 || (c.args.empty() && c.keywords.empty())) {
+                if (c.args.empty()) {
+                    Inst in;
+                    in.op = IrOp::CallRt;
+                    in.imm = static_cast<int64_t>(RtFn::ExcValueNew);
+                    in.args = {type, const_int(0)};
+                    return def_heap(mk_exception(n.id), std::move(in));
+                }
+                TypePtr lt = mk_list(t_str());
+                VReg al = call_runtime(RtFn::ListNew, lt,
+                                       {const_int(static_cast<int64_t>(c.args.size())),
+                                        const_int(list_kind_filled(lt))});
+                push_temp(al);
+                for (auto& arg : c.args) {
+                    TypePtr mt = tc_.type_of(arg.get());
+                    VReg raw = expr(*arg);
+                    VReg sm = convert_to(raw, mt, t_str());
+                    retain_elem(sm, 1);
+                    call_void(RtFn::ListAppend, {al, sm});
+                }
+                Inst in;
+                in.op = IrOp::CallRt;
+                in.imm = static_cast<int64_t>(RtFn::ExcValueNewArgs);
+                in.args = {type, al};
+                return def_heap(mk_exception(n.id), std::move(in));
+            }
+            // 单位置参：走单消息 ExcValueNew（保持 e.args == [msg]）
             VReg msg = const_int(0);
             if (!c.args.empty()) {
                 TypePtr mt = tc_.type_of(c.args[0].get());
-                if (mt && (mt->kind == TyKind::List || mt->kind == TyKind::Tuple ||
-                           mt->kind == TyKind::Dict || mt->kind == TyKind::Set ||
-                           mt->kind == TyKind::Class || mt->kind == TyKind::Func)) {
-                    err(c.args[0]->line, c.args[0]->col,
-                        "exception message must be a string or scalar");
-                }
                 VReg raw = expr(*c.args[0]);
                 msg = convert_to(raw, mt, t_str());
             }

@@ -21,12 +21,10 @@ TypePtr TypeChecker::call_name(Name& n, Call& c) {
             return t_unknown();
         }
         if (!lookup(n.id) && is_exception_name(n.id)) {
-            if (!c.keywords.empty())
-                err(c.line, c.col, "exception constructor does not take keyword arguments");
-            if (c.args.size() > 1)
-                err(c.line, c.col,
-                    "exception constructor takes at most one message argument");
+            // 内置异常构造：CPython 允许任意多个位置参（生成 args 元组）
+            // 和关键字参。这里只负责求值全部实参并返回异常类型。
             for (auto& arg : c.args) expr(*arg);
+            for (auto& kw : c.keywords) expr(*kw.value);
             return mk_exception(n.id);
         }
         if (auto* sym = lookup(n.id);
@@ -38,12 +36,8 @@ TypePtr TypeChecker::call_name(Name& n, Call& c) {
                 check_args(init->call_sig, c);
                 return mk_class(const_cast<ClassInfo*>(cls));
             }
-            if (!c.keywords.empty())
-                err(c.line, c.col, "exception constructor does not take keyword arguments");
-            if (c.args.size() > 1)
-                err(c.line, c.col,
-                    "exception constructor takes at most one message argument");
             for (auto& arg : c.args) expr(*arg);
+            for (auto& kw : c.keywords) expr(*kw.value);
             return mk_class(const_cast<ClassInfo*>(cls));
         }
         if (!lookup(n.id) && is_builtin_callable(n.id)) return builtin_call(n.id, c);

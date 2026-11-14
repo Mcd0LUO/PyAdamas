@@ -246,10 +246,12 @@ enum class RtFn : uint16_t {
     ExcValueStr,  // (excval*) -> str*
     ExcValueCause, // (excval*) -> excval*|0
     ExcValueNew,  // (str* type, str* msg|0) -> excval*
+    ExcValueNewArgs, // (str* type, list* args) -> excval*
     ExcRegister,  // (str* child, str* parent) -> void  自定义异常类注册
     RaiseInstance, // (inst*, str* type) -> void noreturn  抛富异常实例
       // (str* child, str* parent) -> void  自定义异常类注册
     Raise,        // (str* type, str* msg) -> void  noreturn
+    RaiseArgs,    // (str* type, list* args) -> void  noreturn
     RaiseValue,   // (excval*) -> void noreturn
     RaiseValueFrom, // (excval*, excval*|0) -> void noreturn
     Reraise,      // () -> void       noreturn  裸 raise
@@ -708,9 +710,11 @@ inline const char* rt_name(RtFn f) {
         case RtFn::ExcValueStr: return "pa_exc_value_str";
         case RtFn::ExcValueCause: return "pa_exc_value_cause";
         case RtFn::ExcValueNew: return "pa_exc_value_new";
+        case RtFn::ExcValueNewArgs: return "pa_exc_value_new_args";
         case RtFn::ExcRegister: return "pa_exc_register";
         case RtFn::RaiseInstance: return "pa_raise_instance";
         case RtFn::Raise: return "pa_raise";
+        case RtFn::RaiseArgs: return "pa_raise_args";
         case RtFn::RaiseValue: return "pa_raise_value";
         case RtFn::RaiseValueFrom: return "pa_raise_value_from";
         case RtFn::Reraise: return "pa_reraise";

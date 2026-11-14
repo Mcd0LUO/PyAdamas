@@ -342,6 +342,8 @@ void pa_exc_clear(void);
 PyAdamasStr* pa_exc_type_name(void);
 PyAdamasStr* pa_exc_message(void);
 void pa_raise(PyAdamasStr* type, PyAdamasStr* msg);
+_Noreturn void pa_raise_args(PyAdamasStr* type, PyAdamasList* args);
+PyAdamasExcValue* pa_exc_value_new_args(PyAdamasStr* type, PyAdamasList* args);
 void pa_reraise(void);
 void pa_exc_reraise(void);
 PyAdamasExcValue* pa_exc_take_value(void);
