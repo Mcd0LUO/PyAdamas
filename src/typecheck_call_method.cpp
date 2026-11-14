@@ -563,6 +563,7 @@ TypePtr TypeChecker::method_call(TypePtr recv, const std::string& name, Call& c,
             if (name == "partition" || name == "rpartition")
                 return mk_tuple({t_str(), t_str(), t_str()});
             if (name == "encode") return t_bytes();
+            if (name == "decode") { argc(0, 2); return t_str(); }  // bytes 误推成 str 时的 decode
             if (name == "maketrans") { argc(1, 3); return t_unknown(); }
         }
 
