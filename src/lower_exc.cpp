@@ -3,6 +3,20 @@
 
 namespace pyadamas {
 
+// except `RichExc as e` 里的 RichExc 是不是富异常类（有字段/方法）。
+const ClassInfo* Lowerer::rich_exc_handler(ExceptHandler* h) {
+    if (!h || h->name.empty() || !h->type) return nullptr;
+    if (h->type->kind != ExprKind::Name) return nullptr;
+    auto& n = static_cast<Name&>(*h->type);
+    auto it = classes_.find(n.id);
+    if (it == classes_.end() || !it->second) return nullptr;
+    if (it->second->is_exception_class && it->second->is_rich_exception)
+        return it->second.get();
+    return nullptr;
+}
+
+
+
 VReg Lowerer::lower_exc_match(Expr& type) {
     auto one = [&](Expr& e) -> VReg {
         if (e.kind == ExprKind::Name) {
@@ -80,6 +94,19 @@ void Lowerer::lower_raise(Raise& r) {
         return it != classes_.end() && it->second->is_exception_class;
     };
     TypePtr xt = tc_.type_of(r.exc.get());
+
+    // 富异常（自定义异常类有字段/方法）：构造真实例后抛实例。
+
+    if (xt && xt->kind == TyKind::Class && xt->cls && xt->cls->is_rich_exception) {
+
+        VReg inst = expr(*r.exc);
+
+        call_void(RtFn::RaiseInstance, {inst, const_str(xt->cls->name)});
+
+        return;
+
+    }
+
     if (xt && xt->kind == TyKind::Exception) {
         VReg v = expr(*r.exc);
         call_void(RtFn::RaiseValueFrom, {v, cause == kNoReg ? const_int(0) : cause});
@@ -226,10 +253,16 @@ void Lowerer::lower_try_core(Try& t) {
 
     for (auto& hb : bodies) {
         switch_to(hb.block);
-        VReg ev = call_runtime(RtFn::ExcAcceptValue, mk_exception("Exception"), {});
+        // 富异常（有字段/方法）的 except as e：取回真实例，类型是那个类；
+        // 否则照旧取扁平异常值。
+        const ClassInfo* rich = rich_exc_handler(hb.h);
+        TypePtr slot_ty = rich ? (TypePtr)mk_class(const_cast<ClassInfo*>(rich))
+                              : (TypePtr)mk_exception("Exception");
+        VReg ev = call_runtime(rich ? RtFn::ExcAcceptInstance : RtFn::ExcAcceptValue,
+                               slot_ty, {});
         int shadow = -1;
         if (!hb.h->name.empty()) {
-            shadow = st_->fn->new_slot(mk_exception("Exception"));
+            shadow = st_->fn->new_slot(slot_ty);
             comp_slots_.emplace_back();
             comp_slots_.back()[hb.h->name] = shadow;
             store_slot(shadow, ev);

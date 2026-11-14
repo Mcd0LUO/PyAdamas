@@ -324,8 +324,9 @@ TypePtr TypeChecker::expr(Expr& e) {
                     if (a.attr == "args") return mk_tuple({t_str()});
                     if (a.attr == "__cause__")
                         return mk_optional(mk_exception("Exception"));
-                    err(a.line, a.col,
-                        std::format("'exception' object has no attribute '{}'", a.attr));
+                    // 内置异常的其它属性（OSError.errno、UnicodeError.code……）
+                    // 静态看不见，check 保守放过，build 再决定。
+                    unsupported.push_back("attribute on a builtin exception");
                     return t_unknown();
                 }
                 if (ot->kind == TyKind::TypeObj) {

@@ -4,7 +4,7 @@
 
 早期阶段没有逐条留痕，按阶段归纳；0.4 之后逐条记录。
 
-## [0.166] - 2026-11-14
+## [0.167] - 2026-11-14\n\n自定义异常类当普通类：富异常收字段/方法/岛\u5efa模。\n\n### 变更\n\n- **富异常类当普通类**：自定义异常类有字段/方法/岚`__init__`/`__str__`时，实例是真正的 vtable 对象。`raise Rich(args)`通过类构造建实例并从岚`pa_raise_instance`抛出。`except Rich as e` 通过岚`pa_exc_accept_instance`取回省实例，`e.code`/`e.describe()` 走普通类字段/方法访问。\n- 实例是普通 vtable 对象：字段初始化、vtable 方法分派、`super()` 均正常；`多模块/内置接受` （请参check 阶段放过。\n- **内置异常属性保守**：`OSError.errno`/`UnicodeError.code` 这类内置异常的大多属性静态看不见，check 打 unsupported 放过。\n\n### 验证\n\n- 前端基线：标准库本体 335 → **348 / 596（58.4%）**。\n- `ctest --preset dev` 3/3（运行 156）；差分 840 个程序 0 失败；`tests/check_size.sh` 通过。\n- 新增 `tests/run/157_rich_exc.py`（富异常字段/方法、raise/except 取回实例『pass-only 仍 e.args）。\n\n## [0.166] - 2026-11-14
 
 跨模块 super(): 基类来自别的模块时，check 不再拒绝。
 

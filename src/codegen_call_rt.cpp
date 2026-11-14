@@ -133,6 +133,7 @@ void AsmGen::gen_rt_args(const Inst& in, RtFn fn) {
         case RtFn::TaskGroupNew:
         case RtFn::ExcAccept:
         case RtFn::ExcAcceptValue:
+        case RtFn::ExcAcceptInstance:
         case RtFn::ExcDone:
         case RtFn::ExcClear:
         case RtFn::ExcReraise:
@@ -403,6 +404,7 @@ void AsmGen::gen_rt_args(const Inst& in, RtFn fn) {
         case RtFn::ExcValueNew:
         case RtFn::ExcRegister:
         case RtFn::RaiseValueFrom:
+        case RtFn::RaiseInstance:
         case RtFn::FutureSetResult:
         case RtFn::FutureSetException:
         case RtFn::FutureSetExceptionValue:

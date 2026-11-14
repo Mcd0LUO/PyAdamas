@@ -189,13 +189,15 @@ void Lowerer::lower_classdef(ClassDef& c) {
     }
     int cid = cid_it->second;
     if (ci->is_exception_class) {
-        // 自定义异常类不参与对象布局；注册父子关系供 except 匹配。
+        // 注册父子关系供 except 按类型匹配。富异常（有字段/方法）另外走
+        // 下面的普通类布局建 vtable/字段；pass-only 保持扁平。
         if (!c.decorators.empty()) {
             err(c.line, c.col, "class decorators on exception classes are not supported yet");
             return;
         }
         call_void(RtFn::ExcRegister, {const_str(ci->name), const_str(ci->exc_parent)});
-        return;
+        if (!ci->is_rich_exception) return;
+        // 富异常：继续建 vtable 实例布局。
     }
     // 类体语句在下面按执行语义降级；类命名空间未建模，赋值走模块全局。
 

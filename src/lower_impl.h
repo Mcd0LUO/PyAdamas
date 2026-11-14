@@ -755,6 +755,8 @@ private:
     void lower_try_core(Try& t);
     void lower_finally(Try& t);
     VReg lower_exc_match(Expr& type);
+    // except `RichExc as e` 是否富异常类（有字段/方法），是则返回那个类。
+    const ClassInfo* rich_exc_handler(ExceptHandler* h);
     VReg raise_exception(const std::string& type, VReg msg);
     void lower_funcdef(FunctionDef& f);
     // @functools.wraps(...)：没有运行期语义，装饰器链里整层跳过。

@@ -234,12 +234,18 @@ void TypeChecker::stmt_try(Try& t) {
                 sym.ty = join(sym.ty, it->second.ty);
             }
             if (!h.name.empty()) {
-                // as e 绑定异常值对象（args 里是消息）
+                // as e 绑定异常值对象。富异常类（有字段/方法）绑定成真实例，
+                // 字段/方法走普通类访问；pass-only 或内置异常仍是 Exception 值。
                 TypePtr et = mk_exception("Exception");
                 if (h.type && h.type->kind == ExprKind::Name) {
                     auto& hn = static_cast<Name&>(*h.type);
                     if (is_exception_name(hn.id)) {
                         et = mk_exception(hn.id);
+                    } else if (auto* sym = lookup(hn.id);
+                               sym && sym->ty && sym->ty->kind == TyKind::Class &&
+                               sym->ty->cls && sym->ty->cls->is_exception_class &&
+                               sym->ty->cls->is_rich_exception) {
+                        et = mk_class(sym->ty->cls);
                     } else if (auto* sym = lookup(hn.id);
                                sym && sym->ty && sym->ty->kind == TyKind::Class &&
                                sym->ty->cls && sym->ty->cls->is_exception_class) {

@@ -334,9 +334,12 @@ struct ClassInfo {
     // 基类用裸指针，所有权统一在 TypeChecker::all_classes_。
     // 类之间的继承是 DAG，但字段类型会指回类，用 shared_ptr 会成环。
     ClassInfo* base = nullptr;
-    // 自定义异常类：继承内置异常名或另一个自定义异常类。实例值按
-    // TyKind::Exception 处理，不参与对象布局/vtable。
+    // 自定义异常类：继承内置异常名或另一个自定义异常类。
     bool is_exception_class = false;
+    // 富异常：定义了字段或方法（含 __init__/__str__）。这类异常实例是
+    // 真正的 vtable 对象，except as e 拿到的是实例；否则（pass-only）
+    // 仍是扁平 Exception 值，e.args 可用。
+    bool is_rich_exception = false;
     std::string exc_parent;
     // 多重继承的附加基类：主基类提供字段布局，附加基类只能复用
     // 已有字段；方法按 C3 MRO 解析。

@@ -254,6 +254,8 @@ PyAdamasTraceFrame* pa_trace_clone(const PyAdamasTraceFrame* f);
 void pa_trace_free(PyAdamasTraceFrame* f);
 extern PyAdamasException* pending_exc;
 extern PyAdamasException* current_exc;
+/* 富异常（有字段/方法的自定义异常类）的实例；0 = 当前异常不是富实例。 */
+extern void* current_exc_inst;
 extern PyAdamasExcSave* exc_save_top;
 extern PyAdamasList* loop_ready;
 extern PyAdamasList* loop_timers;
@@ -343,6 +345,8 @@ void pa_raise(PyAdamasStr* type, PyAdamasStr* msg);
 void pa_reraise(void);
 void pa_exc_reraise(void);
 PyAdamasExcValue* pa_exc_take_value(void);
+void pa_raise_instance(void* inst, PyAdamasStr* type); /* 抛富异常实例（noreturn） */
+void* pa_exc_accept_instance(void);                      /* except 取富实例，无则 0 */
 void pa_exc_reraise_value_if(PyAdamasExcValue* v);
 _Noreturn void pa_raise_c(const char* type, const char* msg);
 void gen_destroy(void* g);

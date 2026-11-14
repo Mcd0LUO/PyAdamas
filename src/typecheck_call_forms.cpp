@@ -32,13 +32,19 @@ TypePtr TypeChecker::call_name(Name& n, Call& c) {
         if (auto* sym = lookup(n.id);
             sym && sym->ty && sym->ty->kind == TyKind::Class && sym->ty->cls &&
             sym->ty->cls->is_exception_class) {
+            const ClassInfo* cls = sym->ty->cls;
+            if (const MethodInfo* init = cls->method("__init__"); init && init->call_sig) {
+                for (auto& arg : c.args) expr(*arg);
+                check_args(init->call_sig, c);
+                return mk_class(const_cast<ClassInfo*>(cls));
+            }
             if (!c.keywords.empty())
                 err(c.line, c.col, "exception constructor does not take keyword arguments");
             if (c.args.size() > 1)
                 err(c.line, c.col,
                     "exception constructor takes at most one message argument");
             for (auto& arg : c.args) expr(*arg);
-            return mk_exception(sym->ty->cls->name);
+            return mk_class(const_cast<ClassInfo*>(cls));
         }
         if (!lookup(n.id) && is_builtin_callable(n.id)) return builtin_call(n.id, c);
         // from asyncio import gather/run/...：别名仍按 asyncio 的调用规则
@@ -225,7 +231,22 @@ TypePtr TypeChecker::call_attr(Attribute& a, Call& c) {
                         "super() is only supported inside a class method");
                     return t_unknown();
                 }
+                // 富异常类的 super().__init__(msg)：基异常把消息存进 args。
+
+                // 没有真实方法表，直接接受（build 端把它降级成记录消息）。
+
+                if (cur_class_->is_exception_class && a.attr == "__init__") {
+
+                    for (auto& arg : c.args) expr(*arg);
+
+                    for (auto& kw : c.keywords) expr(*kw.value);
+
+                    return t_none();
+
+                }
+
                 const MethodInfo* m = super_method(a.attr);
+
                 if (!m) {
                     // 定义类的 MRO 里有导入基类时，这个方法的实现可能在
                     // 另一份接口里，check 阶段看不见。这不是错误——build

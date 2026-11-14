@@ -14,6 +14,16 @@ VReg Lowerer::lower_super_call(Attribute& at, Call& c) {
         err(c.line, c.col, "super() requires a method receiver");
         return const_none();
     }
+    // 富异常类的 super().__init__(msg)：基异常没有真实方法表。这里只求值
+    // 实参（保持副作用）并记录为消息；字段已由 lower_construct 初始化。
+    if (owner->is_exception_class && at.attr == "__init__") {
+        VReg self = load_slot(st_->fn->params.front().slot,
+                            st_->fn->params.front().ty);
+        if (!c.args.empty()) expr(*c.args[0]);
+        for (auto& kw : c.keywords) expr(*kw.value);
+        (void)self;
+        return const_none();
+    }
     const MethodInfo* m = nullptr;
     const ClassInfo* declaring = nullptr;
     bool after = false;

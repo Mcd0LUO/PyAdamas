@@ -494,9 +494,8 @@ VReg Lowerer::expr(Expr& e) {
                 if (a.attr == "__cause__")
                     return call_runtime(RtFn::ExcValueCause,
                                         mk_optional(mk_exception("Exception")), {ev});
-                err(e.line, e.col,
-                    std::format("'exception' object has no attribute '{}'", a.attr));
-                return const_none();
+                // 内置异常的其它属性：静态不可见，返回 unknown（不报错）。
+                return retype(ev, t_unknown());
             }
             if (ot && ot->kind == TyKind::TypeObj) {
                 VReg tv = expr(*a.value);  // interned 类型名

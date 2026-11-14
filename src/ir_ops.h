@@ -232,6 +232,7 @@ enum class RtFn : uint16_t {
     ExcMatches,   // (str* type) -> i64
     ExcAccept,    // () -> str*       把 pending 转为 current，返回消息
     ExcAcceptValue, // () -> excval*   进入 except 体，返回异常对象
+    ExcAcceptInstance, // () -> inst*     进入 except 体，返回富异常实例（无则 0）
     ExcDone,      // () -> void
     ExcEnter,     // (i64* cur, i64* top) -> i64 进入 resume：存调用方异常上下文
     ExcLeave,     // (i64* cur, i64* top, i64 token) -> void 挂起/退出：换回去
@@ -246,6 +247,8 @@ enum class RtFn : uint16_t {
     ExcValueCause, // (excval*) -> excval*|0
     ExcValueNew,  // (str* type, str* msg|0) -> excval*
     ExcRegister,  // (str* child, str* parent) -> void  自定义异常类注册
+    RaiseInstance, // (inst*, str* type) -> void noreturn  抛富异常实例
+      // (str* child, str* parent) -> void  自定义异常类注册
     Raise,        // (str* type, str* msg) -> void  noreturn
     RaiseValue,   // (excval*) -> void noreturn
     RaiseValueFrom, // (excval*, excval*|0) -> void noreturn
@@ -691,6 +694,7 @@ inline const char* rt_name(RtFn f) {
         case RtFn::ExcMatches: return "pa_exc_matches";
         case RtFn::ExcAccept: return "pa_exc_accept";
         case RtFn::ExcAcceptValue: return "pa_exc_accept_value";
+        case RtFn::ExcAcceptInstance: return "pa_exc_accept_instance";
         case RtFn::ExcDone: return "pa_exc_done";
         case RtFn::ExcEnter: return "pa_exc_enter";
         case RtFn::ExcLeave: return "pa_exc_leave";
@@ -705,6 +709,7 @@ inline const char* rt_name(RtFn f) {
         case RtFn::ExcValueCause: return "pa_exc_value_cause";
         case RtFn::ExcValueNew: return "pa_exc_value_new";
         case RtFn::ExcRegister: return "pa_exc_register";
+        case RtFn::RaiseInstance: return "pa_raise_instance";
         case RtFn::Raise: return "pa_raise";
         case RtFn::RaiseValue: return "pa_raise_value";
         case RtFn::RaiseValueFrom: return "pa_raise_value_from";

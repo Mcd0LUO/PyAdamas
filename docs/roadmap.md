@@ -92,15 +92,16 @@
 | 0.164 | 前端基线：dunder 返回类型改到函数体推理之后判、`getattr` 支持缺省值参数；标准库前端基线 281 → 294 / 596 |
 | 0.165 | 动态属性 + 反射放宽：类实例可挂惰性 `dict[str, unknown]`，`setattr`/`getattr`/`hasattr` 落到运行期查表；非类接收者的反射在 check 阶段放过；基线 294 → 320 / 596 |
 | 0.166 | 跨模块 super()：定义类的 MRO 里有导入基类时，`super()` 的方法在 check 阶段看不见，只在纯本地继承链都找不到时报错；有导入基类/`open` 类返回 unknown 交给 build；基线 320 → 335 / 596 |
+| 0.167 | 自定义异常类当普通类：有字段/方法的富异常是真实 vtable 实例，`raise`/`except as e` 走运行期实例；内置异常属性保守放过；基线 335 → 348 / 596 |
 | 许可证 | Apache-2.0（见 [LICENSE](../LICENSE) / [NOTICE](../NOTICE)） |
 
-## 当前状态（0.166）
+## 当前状态（0.167）
 
 流水线 `源码 → 词法 → AST → lambda 脱糖 → 类型检查 → IR → x86-64 汇编 → 可执行文件` 已打通。
 
 - **语言面**：标量、字符串、`bytes`（含迭代与 `%` 格式化）、列表/元组/字典/集合、切片读写、闭包/lambda/`*args`/`**kwargs`/装饰器、推导式、`with`、异常值（`args`/`raise ... from`/自定义异常）、类（字段/方法/C3 多继承/零参 `super()`/`@staticmethod`/`@classmethod`/`@property`/类属性/类装饰器/类名当值）、`match/case`、`del`、复数字面量、f-string 格式说明、dunder 协议（含装饰 dunder、`__call__` 与方法值）、`Generator[Y, S, R]` 标注、`open`/`input`/`sys.stdin`、`struct` 值类型、`cimport`/`cdecl` C 互操作与跨模块继承。
 - **标准库**：`math`/`sys`/`asyncio`/`random`/`os`/`os.path`/`subprocess`/`time`/`itertools`/`collections`/`functools`/`json`/`string`/`re`/`datetime`/`pathlib`/`csv`/`base64`/`binascii`/`heapq`/`bisect`/`hashlib`/`hmac`/`logging`/`statistics`/`textwrap`/`operator`，以及封装 OpenBLAS 的 `linalg`。
-- **验证**：155 个运行用例、53 个反例、13 个模块目录；差分 runner 已自举，默认 840 例；`tests/bench/` 提供 pyadamas vs CPython 的标准库与 RC/GC 基准（`base64`/`hashlib` 已反超）。
+- **验证**：156 个运行用例、53 个反例、13 个模块目录；差分 runner 已自举，默认 840 例；`tests/bench/` 提供 pyadamas vs CPython 的标准库与 RC/GC 基准（`base64`/`hashlib` 已反超）。
 - **优化**：O2 有常量折叠/DCE/小函数内联/静态调用直接化/LICM/检查型下标外提/循环旋转/跨块 CSE；后端有拷贝合并、浮点临时寄存器与浮点比较分支融合（有序比较不再补 NaN 跳转）。
 - **asyncio**：Task 支持多等待者；`gather` 结果元素所有权按静态类型带入运行时；`from asyncio import ...` 保留调用点特化；`run`/`wait_for` 跨模块结果仍可能退化为 unknown。
 - **调试信息**：生成代码带 DWARF 行号、CFI（`.eh_frame`）与可读函数符号（`.type`/`.size`）；帧里没有 rbp，gdb、libgcc 的展开器和运行时自己的 traceback 都靠 CFI 逐帧还原。未捕获异常打印函数级 traceback，异步/生成器 resume 帧也会追加（仅函数名）。异常值对象仍不带 traceback。
@@ -112,7 +113,7 @@
 
 ### 1. 工程收尾
 
-- 标准库前端基线 0.166 复测（Debian 3.13.5：本体 335 / 596）；剩余失败集中在动态属性（`hasattr`/`getattr` 48+20）、跨模块基类（`super()` 41）、`isinstance`（32）和自定义异常类（25+11）；原口径（CPython 3.11.1 + site-packages，38582 个文件）仍未重跑；
+- 标准库前端基线 0.167 复测（Debian 3.13.5：本体 348 / 596）；剩余失败集中在 `isinstance`（49 ）和 `getattr` 属性名非字面量（24）等；原口径（CPython 3.11.1 + site-packages，38582 个文件）仍未重跑；
 - 保持 `docs/` 与 README 的验证表同步（运行用例、模块目录等数字按仓库实际统计）；
 - `tests/bench/` 标准库基准已固化（0.144）。
 

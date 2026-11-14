@@ -11,6 +11,7 @@ PyAdamasFrame* pa_frame_top;
 PyAdamasException* pending_exc;
 PyAdamasException* current_exc;
 PyAdamasExcSave* exc_save_top;
+void* current_exc_inst;  /* 富异常实例（有字段/方法），RC owned；0 = 普通异常 */
 
 /* 只释放 target 之上（更内层）的帧：target 所在函数还要继续执行，
    它的槽由自己正常退出时释放。先清空槽再 dec，析构里如果重入到用户
@@ -282,6 +283,7 @@ PyAdamasStr* pa_exc_accept(void) {
 void pa_exc_done(void) {
     exc_free(current_exc);
     current_exc = NULL;
+    if (current_exc_inst) { pa_rc_dec(current_exc_inst); current_exc_inst = NULL; }
     if (exc_save_top) {
         PyAdamasExcSave* s = exc_save_top;
         exc_save_top = s->up;
@@ -492,6 +494,31 @@ void pa_raise_value_from(PyAdamasExcValue* v, PyAdamasExcValue* cause) {
 }
 
 void pa_raise_value(PyAdamasExcValue* v) { pa_raise_value_from(v, NULL); }
+
+/* 抛富异常实例：控制流仍用扁平异常做类型匹配，实例单独存起来。
+   只记录类名做 except 匹配；实例在 except as e 时取回。 */
+void pa_raise_instance(void* inst, PyAdamasStr* type) {
+    if (!inst) pa_raise_c("TypeError", "exception instance is null");
+    char tn[128];
+    int64_t n = type ? type->len : 0;
+    if (n < 0 || n >= (int64_t)sizeof(tn)) pa_raise_c("ValueError", "exception type too long");
+    if (n > 0) memcpy(tn, type->data, (size_t)n);
+    tn[n] = 0;
+    exc_free(pending_exc);
+    if (current_exc_inst) pa_rc_dec(current_exc_inst);
+    pa_rc_inc(inst);
+    current_exc_inst = inst;
+    pending_exc = exc_new(tn, "");
+    exc_longjmp();
+}
+
+/* except 富异常 as e：取回实例，清空全局。若无富实例返回 0。
+   调用方（except as e 绑定富类时）用它替代 pa_exc_accept_value。 */
+void* pa_exc_accept_instance(void) {
+    void* inst = current_exc_inst;
+    current_exc_inst = NULL;
+    return inst;
+}
 
 /* finally 体要跨挂起保留待重抛异常：先把 pending 复制成异常值（堆对象，
    由帧槽持有），再清空全局指针。挂起期间调用方的 raise/clear 不会碰到它。 */

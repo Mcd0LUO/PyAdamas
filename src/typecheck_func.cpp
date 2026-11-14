@@ -484,20 +484,9 @@ void TypeChecker::classdef(ClassDef& c) {
         all_classes_.push_back(cls);
         (void)prev;  // 同名类重定义：后面的引用拿新类，旧实例仍按旧布局走
         if (is_exc_class) {
-            // 自定义异常类目前只支持继承 + pass/文档字符串。
-            for (auto& s : c.body) {
-                if (s->kind == StmtKind::Pass) continue;
-                if (s->kind == StmtKind::Expr) {
-                    auto& e = static_cast<ExprStmt&>(*s);
-                    if (e.value->kind == ExprKind::Constant &&
-                        static_cast<Constant&>(*e.value).ck == Constant::CK::Str)
-                        continue;
-                }
-                err(s->line, s->col,
-                    "custom exception classes cannot define fields or methods yet");
-            }
-            cls->complete = true;
-            return;
+            // 0.167 起自定义异常类按普通类建模（字段/方法/__init__），
+            // 实例是 vtable 对象。is_exception_class 仍标记它，raise/except
+            // 走专门路径；这里继续走下面的字段/方法处理，不再提前 return。
         }
 
         // 字段先处理：方法体里 `self.x` 的类型要靠它。
@@ -936,6 +925,12 @@ void TypeChecker::classdef(ClassDef& c) {
         cur_class_ = saved_cls;
         // 无标注方法的返回类型是检查完才推断出来的，调用签名要重新切一份
         for (auto& m : cls->methods) rebuild_call_sig(m);
+        if (cls->is_exception_class) {
+            // 有自有字段或方法（含 __init__/__str__）的异常类在 except as e
+            // 时给真实实例；否则保持扁平 Exception 值。
+            if (!cls->fields.empty()) cls->is_rich_exception = true;
+            if (!cls->methods.empty()) cls->is_rich_exception = true;
+        }
         cls->complete = true;
 
 

@@ -417,10 +417,16 @@ VReg Lowerer::lower_call(Call& c) {
         auto& n = static_cast<Name&>(*c.func);
         // 异常构造器：内置异常名和自定义异常类都产生异常值
         bool exc_ctor = TypeChecker::is_exception_type(n.id) && is_builtin(n.id);
+        // 富异常（有字段/方法）不产生扁平值，走普通类构造（vtable 实例）。
+        const ClassInfo* rich_exc = nullptr;
         if (!exc_ctor) {
             auto eit = classes_.find(n.id);
-            if (eit != classes_.end() && eit->second->is_exception_class) exc_ctor = true;
+            if (eit != classes_.end() && eit->second->is_exception_class) {
+                if (eit->second->is_rich_exception) rich_exc = eit->second.get();
+                else exc_ctor = true;
+            }
         }
+        if (rich_exc) return lower_construct(c, classes_[n.id]);
         if (exc_ctor) {
             if (!c.keywords.empty())
                 err(c.line, c.col, "exception constructor does not take keyword arguments");
