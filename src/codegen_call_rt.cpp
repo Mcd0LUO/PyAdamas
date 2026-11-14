@@ -501,6 +501,9 @@ void AsmGen::gen_rt_args(const Inst& in, RtFn fn) {
         case RtFn::CollCounter:
         case RtFn::ExcLeave:
         case RtFn::RandRandint:
+        case RtFn::AttrGet:
+        case RtFn::AttrSet:
+        case RtFn::AttrHas:
         case RtFn::DequeSet:
         case RtFn::DequeRemove:
         case RtFn::DequeCount:

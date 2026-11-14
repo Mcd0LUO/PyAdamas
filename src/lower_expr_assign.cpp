@@ -278,8 +278,12 @@ void Lowerer::assign_to(Expr& target, VReg v, TypePtr vty) {
                 }
                 auto* f = ot->cls->field(at.attr);
                 if (!f) {
-                    err(target.line, target.col,
-                        std::format("'{}' object has no field '{}'", ot->cls->name, at.attr));
+                    // 静态没有这个字段：写进运行期动态属性表。
+                    ot->cls->needs_dict = true;
+                    VReg obj2 = expr(*at.value);
+                    if (opt) obj2 = guard_not_none(obj2, std::format("attribute '{}'", at.attr));
+                    v = coerce(v, src_ty, t_unknown());
+                    call_void(RtFn::AttrSet, {obj2, const_str(at.attr), v});
                     break;
                 }
                 VReg obj = expr(*at.value);
@@ -698,9 +702,12 @@ VReg Lowerer::expr(Expr& e) {
                     if (opt) obj = guard_not_none(obj, std::format("attribute '{}'", a.attr));
                     return class_attr_load_dyn(obj, ot->cls, ca);
                 }
-                err(e.line, e.col,
-                    std::format("'{}' object has no attribute '{}'", ot->cls->name, a.attr));
-                return const_none();
+                // 静态没有这个属性：查运行期动态属性表。
+                ot->cls->needs_dict = true;
+                VReg obj2 = expr(*a.value);
+                if (opt) obj2 = guard_not_none(obj2, std::format("attribute '{}'", a.attr));
+                return call_runtime(RtFn::AttrGet, t_unknown(),
+                                   {obj2, const_str(a.attr), const_int(0)});
             }
             err(e.line, e.col, "attribute access is only supported as a method call");
             return const_none();

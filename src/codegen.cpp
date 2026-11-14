@@ -124,8 +124,8 @@ std::string AsmGen::gen(const IRModule& m) {
 
         // 每个类一张静态 vtable：槽里是方法代码地址。对象头第一个
         // 字段指向它，虚调用就是「取表、取槽、间接跳转」。
-        // vtable 前固定 5 个字的元数据：MRO 元数据指针表、类编号、
-        // vtable 自身、本类声明的槽表、模块限定类名。
+        // vtable 前固定 6 个字的元数据：MRO 元数据指针表、类编号、
+        // vtable 自身、本类声明的槽表、模块限定类名、动态属性槽偏移。
         if (!m.classes.empty()) {
             out_ += "\t.section .data.rel.ro,\"aw\",@progbits\n";
             // 同名类重定义时接口导出的是最后一次绑定，符号也只导出最后一份。
@@ -144,6 +144,7 @@ std::string AsmGen::gen(const IRModule& m) {
                     out_ += std::format("\t.quad {}\n", e.vtable_symbol);
                     out_ += std::format("\t.quad {}\n", e.own_slots_symbol);
                     out_ += std::format("\t.quad .Lcnameext{}_{}\n", i, j);
+                    out_ += "\t.quad 0\n";  // 导入类没有动态属性槽
                     out_ += std::format(".Lcnameext{}_{}:\n", i, j);
                     out_ += std::format("\t.asciz \"{}\"\n", asm_escape(e.qualname));
                 }
@@ -154,6 +155,8 @@ std::string AsmGen::gen(const IRModule& m) {
                 out_ += std::format("\t.quad .Lvt{}\n", i);
                 out_ += std::format("\t.quad .Lvtown{}\n", i);
                 out_ += std::format("\t.quad .Lcname{}\n", i);
+                // 第 6 个字：动态属性槽偏移（0 = 没有）。
+                out_ += std::format("\t.quad {}\n", c.dict_off);
                 bool export_cls = !m.is_entry && !m.module_symbol.empty() &&
                                   !c.name.empty() && last_cls[c.name] == i;
                 out_ += std::format(".Lvt{}:\n", i);
@@ -247,7 +250,8 @@ std::string AsmGen::gen(const IRModule& m) {
         for (size_t i = 0; i < m.classes.size(); ++i) {
             const IRClass& c = m.classes[i];
             bool has_heap = std::ranges::any_of(c.field_heap, [](uint8_t v) { return v != 0; });
-            if (!has_heap) continue;
+            // 有动态属性槽的类即使没有堆字段也要有析构器：槽里的 dict 归它释放。
+            if (!has_heap && c.dict_off == 0) continue;
             out_ += "\n# ---- dtor class " + c.name + " ----\n";
             out_ += "\t.align 8\n";
             out_ += std::format(".Ldtor{}:\n", i);
@@ -261,6 +265,11 @@ std::string AsmGen::gen(const IRModule& m) {
                 out_ += std::format("\tmovq {}(%rbx), %rdi\n", 8 * (f + 1));
                 out_ += c.field_heap[f] == 2 ? "\tcall pa_rc_dec_unknown\n"
                                              : "\tcall pa_rc_dec\n";
+            }
+            if (c.dict_off != 0) {
+                // 动态属性槽：可能还没分配过（NULL），跳过。
+                out_ += std::format("\tmovq {}(%rbx), %rdi\n", c.dict_off);
+                out_ += "\ttestq %rdi, %rdi\n\tje 1f\n\tcall pa_rc_dec\n1:\n";
             }
             out_ += "\tpopq %rbx\n";
             out_ += "\t.cfi_def_cfa_offset 8\n";
@@ -282,6 +291,10 @@ std::string AsmGen::gen(const IRModule& m) {
                 out_ += std::format("\tmovq {}(%rbx), %rdi\n", 8 * (f + 1));
                 out_ += c.field_heap[f] == 2 ? "\tcall pa_rc_dec_unknown\n"
                                              : "\tcall pa_gc_unref_child\n";
+            }
+            if (c.dict_off != 0) {
+                out_ += std::format("\tmovq {}(%rbx), %rdi\n", c.dict_off);
+                out_ += "\ttestq %rdi, %rdi\n\tje 1f\n\tcall pa_gc_unref_child\n1:\n";
             }
             out_ += "\tpopq %rbx\n";
             out_ += "\t.cfi_def_cfa_offset 8\n";

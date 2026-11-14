@@ -370,6 +370,9 @@ struct ClassInfo {
     // 只允许零实参构造。
     bool has_init = false;
     bool has_field_defaults = false;  // 整条继承链上是否有字段初值
+    // 实例需要动态属性槽（反射访问了静态字段没有的名字，或 setattr 过一个
+    // 非类字面量名字）。降级时给实例末尾留一个 dict 指针槽。
+    bool needs_dict = false;
     // 有「看不见的父类」：基类是外部导入的类型（unittest.TestCase、
     // OrderedDict……）或者内建 object。这类类的成员表必然不全，查不到
     // 属性/方法时只能认输返回 unknown —— 否则标准库里每个测试类都会被

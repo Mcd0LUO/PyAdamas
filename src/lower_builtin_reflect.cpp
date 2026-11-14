@@ -257,7 +257,24 @@ VReg Lowerer::lower_builtin_reflect(const std::string& name, Call& c) {
             auto& cc = static_cast<Constant&>(*name_expr);
             if (cc.ck == Constant::CK::Str) an = &cc.s;
         }
+        // 属性名不是字面量：只能走运行期动态属性表。只有类实例能办，
+        // 其它接收者（模块/函数/常量）没有 dict 槽，直接拒绝。
         if (!an) {
+            TypePtr r = strip_optional(tc_.type_of(c.args[0].get()));
+            if (r && r->kind == TyKind::Class && r->cls) {
+                r->cls->needs_dict = true;
+                VReg obj = expr(*c.args[0]);
+                VReg nm = expr(*c.args[1]);
+                if (name == "hasattr")
+                    return call_runtime(RtFn::AttrHas, t_bool(), {obj, nm});
+                if (name == "setattr") {
+                    VReg v = expr(*c.args[2]);
+                    call_void(RtFn::AttrSet, {obj, nm, v});
+                    return const_none();
+                }
+                VReg dflt = c.args.size() == 3 ? expr(*c.args[2]) : const_int(0);
+                return call_runtime(RtFn::AttrGet, t_unknown(), {obj, nm, dflt});
+            }
             err(name_expr->line, name_expr->col,
                 std::format("{}() attribute name must be a string literal", name));
             return name == "hasattr" ? const_bool(false) : const_none();
@@ -294,13 +311,14 @@ VReg Lowerer::lower_builtin_reflect(const std::string& name, Call& c) {
         auto* meth = ot->cls->method(*an);
         bool optional = ot != raw;
         if (name == "hasattr") {
-            if (optional) {
-                err(c.line, c.col,
-                    "hasattr() on an Optional value is not supported yet");
-                return const_bool(false);
-            }
             (void)expr(*c.args[0]);  // 保留求值副作用
-            return const_bool(f || prop || meth);
+            if (f || prop || meth) return const_bool(true);
+            // 静态字段没有：查运行期动态属性表（类带槽时）。
+            ot->cls->needs_dict = true;
+            VReg obj2 = expr(*c.args[0]);
+            if (optional) obj2 = guard_not_none(obj2, *an);
+            return call_runtime(RtFn::AttrHas, t_bool(),
+                               {obj2, const_str(*an)});
         }
         VReg obj = expr(*c.args[0]);
         if (optional) obj = guard_not_none(obj, std::format("attribute '{}'", *an));
@@ -324,11 +342,13 @@ VReg Lowerer::lower_builtin_reflect(const std::string& name, Call& c) {
                 if (meth)
                     err(c.line, c.col,
                         std::format("getattr() of method '{}' must be called with ()", *an));
-                else if (c.args.size() == 3)
-                    return expr(*c.args[2]);
-                else
-                    err(c.line, c.col,
-                        std::format("'{}' object has no attribute '{}'", ot->cls->name, *an));
+                else {
+                    // 静态字段没有：查运行期动态属性表。
+                    ot->cls->needs_dict = true;
+                    VReg dflt = c.args.size() == 3 ? expr(*c.args[2]) : const_int(0);
+                    return call_runtime(RtFn::AttrGet, t_unknown(),
+                                       {obj, const_str(*an), dflt});
+                }
                 return const_none();
             }
             int off = static_cast<int>(8 * (1 + ot->cls->field_index(*an)));
@@ -356,8 +376,10 @@ VReg Lowerer::lower_builtin_reflect(const std::string& name, Call& c) {
                 emit(std::move(vc));
                 return const_none();
             }
-            err(c.line, c.col,
-                std::format("'{}' object has no field '{}'", ot->cls->name, *an));
+            // 静态没有这个字段：写进运行期动态属性表。
+            ot->cls->needs_dict = true;
+            VReg val = coerce(expr(*c.args[2]), tc_.type_of(c.args[2].get()), t_unknown());
+            call_void(RtFn::AttrSet, {obj, const_str(*an), val});
             return const_none();
         }
         VReg v = coerce(expr(*c.args[2]), tc_.type_of(c.args[2].get()), f->ty);

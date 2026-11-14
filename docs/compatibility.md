@@ -95,7 +95,7 @@ PyAdamas 不追求兼容 CPython：语义是按静态类型的需要重新定的
 |---|---|---|---|
 | 正例 | `ctest --preset dev` 里 `tests/*.py` | 11 个文件 | 前端退回保守 |
 | 反例 | `ctest --preset dev` 里 `tests/fail/*.py` | 52 个文件 | 检查器为了过测而放水 |
-| 运行 | `ctest --preset dev` 里 `tests/run/*.py` | 154 个文件 | 后端烂掉没人知道 |
+| 运行 | `ctest --preset dev` 里 `tests/run/*.py` | 155 个文件 | 后端烂掉没人知道 |
 | 模块 | `ctest --preset dev` 里 `tests/modules/*/` | 12 个目录 | 分模块编译/链接、惰性初始化、缓存失效 |
 | 未建模 | `ctest --preset dev` 里 `tests/unsupported/*.py` | 1 个文件 | 「标了没建模、实际却悄悄编译过去」 |
 | 内存 | 16MB `RLIMIT_AS` 下跑压力程序 | 拼接 / 对象 / 闭包 / 容器 / 切片 / 删除 / 推导式 / 变长实参 / `with` / 装饰器 / 异常展开 / `yield from` / 异步推导式 / 环 / unknown 泄漏 | 引用计数或 GC 漏插桩、重复释放、误回收 |
@@ -292,7 +292,28 @@ bytes 之后，旧清单（bytes 2038 / complex 620 / int64 138 / match 91）已
 | 对象没有该属性 | 19 | 外部类型成员表不可见（如异常对象的 `errno`） |
 | 异常构造只接受一个消息参数 | 11 | 自定义异常类的 `__init__` |
 
-**这些已经不是「判得比 CPython 严」，而是四项没建模的能力**：动态属性、跨模块类、异常类当普通类、`bytes` 的运行期标签。继续推基线得先做其中一项，靠放宽规则已经没有余量了——再放宽就会开始吞掉真正的错误。
+**这些已经不是「判得比 CPython 严」，而是四项没建模的能力**：动态属性、跨模块类、异常类当普通类、`bytes` 的运行期标签。继续推基线得先做其中一项，靠放宽规则已经没有余量了——**0.165 \u590d\u6d4b\uff082026-11-14\uff0c\u540c\u4e00 Debian 3.13.5\uff09**
+
+| \u8303\u56f4 | \u6587\u4ef6\u6570 | \u8bed\u6cd5\u901a\u8fc7 | \u7c7b\u578b\u901a\u8fc7\uff08\u5360\u8bed\u6cd5\u901a\u8fc7\u8005\uff09 |
+|---|---|---|---|
+| \u6807\u51c6\u5e93\u672c\u4f53\uff08\u53bb\u6389 `test/`\uff09 | 533 | 532 | 288 / 532\uff0854.1%\uff09 |
+| \u6807\u51c6\u5e93\u672c\u4f53 | 598 | 596 | 320 / 596\uff0853.7%\uff09 |
+
+\u6bd4 0.164 \u591a 26 \u4e2a\uff08+4.4pp\uff09\u3002\u505a\u4e86\u4e24\u4ef6\u4e8b\uff1a
+
+- **\u5b9e\u4f8b\u52a8\u6001\u5c5e\u6027**\uff1a\u7c7b\u5b9e\u4f8b\u672b\u5c3e\u53ef\u6302\u4e00\u4e2a\u61d2\u6027\u5206\u914d\u7684 `dict[str, unknown]`\uff08\u504f\u79fb\u5b58\u8fdb vtable \u5143\u6570\u636e\u7b2c 6 \u4e2a\u5b57\uff0c0 = \u6ca1\u6709\u3001\u4e0d\u7528\u7684\u7c7b\u96f6\u5f00\u9500\uff09\u3002`setattr`/`getattr`/`hasattr` \u5bf9\u9759\u6001\u6ca1\u6709\u7684\u5b57\u6bb5\u843d\u5230\u8fd0\u884c\u671f\u67e5\u8868\uff1b\u5c5e\u6027\u540d\u975e\u5b57\u9762\u91cf\uff08`getattr(a, name)`\uff09\u4e5f\u8d70\u67e5\u8868\u3002\u53ea\u6709\u771f\u7684\u5bf9\u8fd9\u4e9b\u6210\u5458\u505a\u8fc7\u53cd\u5c04\u7684\u7c7b\u624d\u5f00\u69fd\u2014\u2014\u666e\u901a\u5b57\u6bb5\u8bfb\u53d6\u4ecd\u7136\u5728\u7f16\u8bd1\u671f\u5224\u6b7b\u6d3b\uff0c\u6240\u4ee5\u62fc\u9519\u7684\u5b57\u6bb5\u540d\u7167\u6837\u62a5\u9519\uff08`f28` \u4fdd\u4f4f\uff09\u3002
+- **\u975e\u7c7b\u63a5\u6536\u8005\u7684\u53cd\u5c04\uff0ccheck \u9636\u6bb5\u653e\u8fc7**\uff1a`hasattr(module, ...)` / `getattr(func, ...)` / unknown \u63a5\u6536\u8005\uff0c\u9759\u6001\u8bc1\u660e\u4e0d\u4e86\u6709\u8fd8\u662f\u65e0\uff08CPython \u6700\u5e38\u89c1\u7684\u52a8\u6001\u5224\u522b\uff0c\u6807\u51c6\u5e93\u4e00\u534a\u6587\u4ef6\u5728\u7528\uff09\u3002`check` \u53ea\u6253 `unsupported` \u6807\u8bb0\u4e0d\u518d\u5224\u6b7b\uff0c`build` \u9047\u5230\u771f\u6b63\u7528\u6a21\u5757\u5bf9\u8c61\u5f53\u503c\u624d\u62d2\u7edd\u3002
+
+\u5269\u4f59\u5931\u8d25\uff08\u5f52\u4e00\u5316\uff0c596 \u53e3\u5f84\uff09\uff1a
+
+| \u9519\u8bef | \u6587\u4ef6\u6570 | \u6027\u8d28 |
+|---|---|---|
+| `super()` \u5728\u57fa\u7c7b\u91cc\u627e\u4e0d\u5230\u65b9\u6cd5 | ~20 | \u57fa\u7c7b\u6765\u81ea\u522b\u7684\u6a21\u5757\uff0c\u8de8\u6a21\u5757\u7c7b\u6ca1\u5efa\u6a21 |
+| `isinstance()` \u7b2c\u4e8c\u53c2\u6570 | 32 | `bytes` \u6ca1\u6709\u72ec\u7acb\u8fd0\u884c\u671f\u79cd\u7c7b\u3001\u5916\u90e8\u7c7b\u3001`(A, B)` \u5143\u7ec4 |
+| \u81ea\u5b9a\u4e49\u5f02\u5e38\u7c7b\u7684\u5b57\u6bb5/\u65b9\u6cd5 | 25 | \u5f02\u5e38\u7c7b\u7c7b\u4f53\u53ea\u5141\u8bb8 `pass` |
+| \u8de8\u6a21\u5757\u7c7b\u7684\u5b57\u6bb5/\u65b9\u6cd5\u53ef\u89c1\u6027 | ~25 | \u5916\u90e8\u7684\u7c7b\u6210\u5458\u8868\u770b\u4e0d\u89c1 |
+
+\u5269\u4e0b\u7684\u662f\u4e09\u9879\u6ca1\u5efa\u6a21\u7684\u80fd\u529b\uff1a\u8de8\u6a21\u5757\u7c7b\u3001\u81ea\u5b9a\u4e49\u5f02\u5e38\u7c7b\u5f53\u666e\u901a\u7c7b\u3001`bytes` \u7684\u8fd0\u884c\u671f\u6807\u7b7e\u3002
 
 ### 语法对照
 

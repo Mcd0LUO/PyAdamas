@@ -613,6 +613,10 @@ int64_t pa_is_dict(void* obj);
 int64_t pa_str_eq_unknown(void* obj, PyAdamasStr* s);
 int64_t pa_complex_eq_unknown(void* obj, PyAdamasComplex* c);
 int64_t pa_is_str(void* obj);
+/* 实例动态属性（类带动态属性槽时才有；没有槽按「不存在」处理）。 */
+int64_t pa_attr_get(void* obj, PyAdamasStr* name, int64_t dflt);
+void pa_attr_set(void* obj, PyAdamasStr* name, int64_t value);
+int64_t pa_attr_has(void* obj, PyAdamasStr* name);
 int64_t pa_is_complex(void* obj);
 void dict_rebuild(PyAdamasDict* d);
 int dict_take(PyAdamasDict* d, int64_t key, int64_t* val_out);

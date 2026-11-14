@@ -40,7 +40,7 @@ static const int64_t* inst_vtable(void* obj) {
 int64_t pa_isinstance(void* obj, int64_t class_id) {
     const int64_t* vt = inst_vtable(obj);
     if (!vt) return 0;
-    const int64_t* meta = vt - 5;
+    const int64_t* meta = vt - 6;
     const int64_t* mro = (const int64_t*)(uintptr_t)meta[0];
     if (!mro) return 0;
     int64_t n = mro[0];
@@ -56,7 +56,7 @@ int64_t pa_isinstance(void* obj, int64_t class_id) {
 int64_t pa_obj_class_id(void* obj) {
     const int64_t* vt = inst_vtable(obj);
     if (!vt) return -1;
-    return (vt - 5)[1];   /* 元数据第 1 个字是类编号 */
+    return (vt - 6)[1];   /* 元数据第 1 个字是类编号 */
 }
 
 /* 跨模块类模式：类编号只在模块内唯一，用「模块名.类名」比较。 */
@@ -64,7 +64,7 @@ int64_t pa_is_named_class(void* obj, PyAdamasStr* qualname) {
     if (!qualname) return 0;
     const int64_t* vt = inst_vtable(obj);
     if (!vt) return 0;
-    const int64_t* meta = vt - 5;
+    const int64_t* meta = vt - 6;
     const int64_t* mro = (const int64_t*)(uintptr_t)meta[0];
     if (!mro) return 0;
     int64_t n = mro[0];
@@ -183,7 +183,7 @@ void* pa_super_lookup(void* obj, PyAdamasStr* after_qualname, int64_t slot,
         pa_raise_c("AttributeError", "'super' object has no attribute");
         return NULL;
     }
-    const int64_t* meta = vt - 5;
+    const int64_t* meta = vt - 6;
     const int64_t* mro = (const int64_t*)(uintptr_t)meta[0];
     int64_t n = mro ? mro[0] : 0;
     int found = 0;
@@ -270,6 +270,48 @@ int64_t pa_is_str(void* obj) {
     PyAdamasRc* h = (PyAdamasRc*)obj - 1;
     if (!rc_index_has(h)) return 0;
     return h->kind == PYADAMAS_RC_STR ? 1 : 0;
+}
+
+/* ── 动态属性 ─────────────────────────────────────────────────
+   带动态属性的类在实例末尾留一个字，指向 dict[str, unknown]；偏移由
+   vtable 元数据第 6 个字给出（0 = 没有槽）。槽在第一次 setattr 时
+   惰性分配，不用动态属性的类一个字节都不多花。 */
+static void** attr_slot(void* obj) {
+    const int64_t* vt = inst_vtable(obj);
+    if (!vt) return NULL;
+    int64_t off = vt[-1];
+    if (off <= 0) return NULL;
+    return (void**)((char*)obj + off);
+}
+
+static PyAdamasDict* attr_dict(void* obj) {
+    void** s = attr_slot(obj);
+    return s ? (PyAdamasDict*)*s : NULL;
+}
+
+int64_t pa_attr_has(void* obj, PyAdamasStr* name) {
+    PyAdamasDict* d = attr_dict(obj);
+    if (!d || !name) return 0;
+    return pa_dict_contains(d, (int64_t)(uintptr_t)name);
+}
+
+int64_t pa_attr_get(void* obj, PyAdamasStr* name, int64_t dflt) {
+    PyAdamasDict* d = attr_dict(obj);
+    if (!d || !name) return dflt;
+    return pa_dict_get_or(d, (int64_t)(uintptr_t)name, dflt);
+}
+
+void pa_attr_set(void* obj, PyAdamasStr* name, int64_t value) {
+    void** s = attr_slot(obj);
+    if (!name || !s) panic_c("setattr() on an object without dynamic attributes");
+    PyAdamasDict* d = (PyAdamasDict*)*s;
+    if (!d) {
+        d = pa_dict_new(1, 1, 2, -1, -1);
+        *s = d;
+    }
+    pa_own_inc(1, (int64_t)(uintptr_t)name);
+    pa_own_inc(2, value);
+    pa_dict_set(d, (int64_t)(uintptr_t)name, value);
 }
 
 int64_t pa_is_complex(void* obj) {

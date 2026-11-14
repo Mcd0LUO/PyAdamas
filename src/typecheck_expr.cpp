@@ -444,6 +444,10 @@ TypePtr TypeChecker::expr(Expr& e) {
                     if (is_self_attr(a)) return t_unknown();
                     // 有外部基类时成员表本来就不全，查不到不等于不存在
                     if (ot->cls->is_open()) return t_unknown();
+                    // 类已因 setattr/hasattr/getattr 或非字面量名字开启了动态属性：
+                    // 读取落到运行期 dict。注意不能因为一次普通读取就 self-mark，
+                    // 否则拼错的字段名会被当成动态属性静默放过。
+                    if (ot->cls->needs_dict) return t_unknown();
                     err(a.line, a.col,
                         std::format("'{}' object has no attribute '{}'", ot->cls->name, a.attr));
                     return t_unknown();

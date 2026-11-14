@@ -152,6 +152,10 @@ struct IRClass {
     // 导入祖先：mirror 元数据描述。
     std::vector<IRClassExtBase> ext_bases;
     std::vector<int> own_slots;
+    // 动态属性槽在实例里的字节偏移；0 表示这个类没有动态属性槽。
+    // 槽放在字段之后，实例大小 = 8 * (1 + n_fields) + (dict_off ? 8 : 0)。
+    // 运行时通过 vtable 元数据的第 6 个字拿到它，所以派生类的偏移可以不同。
+    int64_t dict_off = 0;
 };
 
 // 一个生成器的运行时形态。帧负载布局与运行时 rt.c 一致：

@@ -248,6 +248,10 @@ void Lowerer::collect_classes(std::vector<StmtPtr>& body) {
                 if (irc.mro.empty()) irc.mro.push_back(self_id);
                 for (const MethodInfo& m : ci->methods)
                     if (m.slot >= 0) irc.own_slots.push_back(m.slot);
+                // 动态属性槽挂在字段之后；需要它的类（含继承链）加一个指针。
+                bool need_dict = false;
+                for (const ClassInfo* k = ci.get(); k; k = k->base) need_dict |= k->needs_dict;
+                irc.dict_off = need_dict ? 8 * (irc.n_fields + 1) : 0;
                 mod_.classes.push_back(std::move(irc));
                 break;
             }

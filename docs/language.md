@@ -1033,9 +1033,11 @@ print(sorted(users, key=by_name))   # 键是 str，按字符串比
 tuple/dict/set/complex/object）和本地类；静态类型确定时编译期折叠，
 unknown 值上对带运行期类型标签的类型（str/list/dict/complex）走运行时
 检查，类走 MRO 检查；导入类目标按运行期限定名沿实例 MRO 匹配。
-`getattr` / `setattr` / `hasattr` 只支持类实例，属性名必须是字符串字面量：
-`getattr`/`setattr` 支持字段和 property（property setter 暂不支持），
-`hasattr` 对存在的字段/方法/property 编译期返回 True/False。
+`getattr` / `setattr` / `hasattr` 支持两种形式：
+`getattr`/`setattr` 支持字段和 property（property setter 暂不支持），静态字段编译期翻成固定偏移的字段读写或 property 虚调用，零运行时开销；
+静态布局里没有的字段或属性名不是字面量则落到实例末尾的惰性 `dict[str, unknown]`（只有真反射过的类才开槽）；
+`hasattr` 对静态存在的字段/方法/property 编译期返回 True/False。
+`hasattr(module, ...)` / `getattr(func, ...)` / unknown 接收者在 check 阶段打 unsupported 放过（静态证明不了有还是无），build 用模块当值才拒绝。
 `map(f, xs)` / `filter(f, xs)` 在脱糖阶段改写成列表推导式（结果立即求值）：
 `f` 必须是名字（普通函数、`int`/`str` 这类内置转换、或 lambda）；写成
 任意表达式会保留普通调用并报 codegen 不支持。`filter(None, xs)` 保留

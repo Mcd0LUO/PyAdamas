@@ -280,13 +280,20 @@ TypePtr TypeChecker::builtin_call(const std::string& n, Call& c) {
                 auto& cc = static_cast<Constant&>(*ne);
                 if (cc.ck == Constant::CK::Str) an = &cc.s;
             }
+            TypePtr ot0 = a[0];
+            TypePtr ot = ot0;
+            if (ot && ot->kind == TyKind::Optional && !ot->sub.empty()) ot = ot->sub[0];
+            // 属性名不是字面量：只能查运行期动态属性表（类实例才有槽）。
+            if (!an && ot && ot->kind == TyKind::Class && ot->cls) {
+                ot->cls->needs_dict = true;
+
+                return n == "hasattr" ? t_bool() : n == "getattr" ? t_unknown() : t_none();
+            }
             if (!an) {
                 err(ne->line, ne->col,
                     std::format("{}() attribute name must be a string literal", n));
                 return n == "hasattr" ? t_bool() : n == "getattr" ? t_unknown() : t_none();
             }
-            TypePtr ot = a[0];
-            if (ot && ot->kind == TyKind::Optional && !ot->sub.empty()) ot = ot->sub[0];
             if (!ot || ot->kind != TyKind::Class || !ot->cls) {
                 // hasattr 对已知的内建/容器类型可以静态判定。
                 if (n == "hasattr" && ot && ot->kind != TyKind::Unknown) return t_bool();
@@ -294,11 +301,21 @@ TypePtr TypeChecker::builtin_call(const std::string& n, Call& c) {
                 if (n == "getattr" && a.size() == 3 && ot &&
                     ot->kind != TyKind::Unknown && !type_has_member(ot, *an))
                     return a[2];
-                err(c.args[0]->line, c.args[0]->col,
-                    std::format("{}() is only supported on class instances", n));
+                // 模块 / 函数 / 其它内建的反射：静态上证明不了有还是无。
+                // 这是 CPython 里最常见的动态判别（hasattr(os,'fork') 之类），
+                // check 阶段必须放过——否则标准库一半文件都会判死。运行的
+                // 细节留给 build（未知的返回 unknown，已知但没成员的 getattr
+                // 给缺省值）。
+                unsupported.push_back("reflection on a non-class instance");
                 return n == "hasattr" ? t_bool() : n == "getattr" ? t_unknown() : t_none();
             }
-            if (n == "hasattr") return t_bool();
+            // 静态布局里没有这个字段：hasattr 结果是「运行时查动态属性表」
+            //（类带槽时），不再静态判死。
+            if (n == "hasattr") {
+                ot->cls->needs_dict = true;
+
+                return t_bool();
+            }
             if (!ot->cls->complete && ot->cls != cur_class_) return t_unknown();
             if (const PropertyInfo* p = ot->cls->property(*an)) {
                 if (n == "setattr") {
@@ -318,13 +335,23 @@ TypePtr TypeChecker::builtin_call(const std::string& n, Call& c) {
                 if (n == "getattr") return f->ty;
                 return t_none();
             }
+            // 静态没有这个字段：setattr 落到运行期动态属性表。
+            if (n == "setattr") {
+                ot->cls->needs_dict = true;
+
+                return t_none();
+            }
             if (ot->cls->method(*an) && n == "getattr") {
                 err(c.line, c.col,
                     std::format("getattr() of method '{}' must be called with ()", *an));
                 return t_unknown();
             }
             if (ot->cls->is_open()) return t_unknown();
-            if (n == "getattr" && a.size() == 3) return a[2];
+            if (n == "getattr" && a.size() == 3) {
+                ot->cls->needs_dict = true;
+
+                return a[2];
+            }
             err(c.line, c.col,
                 std::format("'{}' object has no field '{}'", ot->cls->name, *an));
             return n == "getattr" ? t_unknown() : t_none();

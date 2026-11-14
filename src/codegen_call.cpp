@@ -154,9 +154,10 @@ void AsmGen::gen_index_store(const Inst& in) {
     // 属性访问因此是一条固定偏移的 movq，没有查表、没有哈希。
 void AsmGen::gen_obj_new(const Inst& in) {
         const IRClass& c = m_->classes[static_cast<size_t>(in.imm)];
-        emit_imm_op("movq", 8 * (c.n_fields + 1), "%rdi");
+        // 动态属性槽挂在字段之后，跟着类走（派生类的偏移不同）。
+        emit_imm_op("movq", 8 * (c.n_fields + 1) + (c.dict_off ? 8 : 0), "%rdi");
         bool has_heap = std::ranges::any_of(c.field_heap, [](uint8_t v) { return v != 0; });
-        if (has_heap) {
+        if (has_heap || c.dict_off != 0) {
             line(std::format("leaq .Ldtor{}(%rip), %rsi", in.imm));
             line(std::format("leaq .Lgcrel{}(%rip), %rdx", in.imm));
         } else {

@@ -166,6 +166,9 @@ enum class RtFn : uint16_t {
     ComplexEqUnknown, // (i64, c*) -> i64  unknown 值上的复数模式
     IsStr,        // (i64) -> i64  unknown 值是不是 str
     IsComplex,    // (i64) -> i64  unknown 值是不是复数对象
+    AttrGet,      // (obj*, str* name, i64 dflt) -> i64  实例动态属性
+    AttrSet,      // (obj*, str* name, i64 value) -> void  实例动态属性
+    AttrHas,      // (obj*, str* name) -> i64  实例有没有动态属性
     ListSlice,    // (list*, i64 start, i64 stop, i64 step) -> list*
     StrSlice,     // (str*, i64 start, i64 stop, i64 step) -> str*
     DictPop,      // (dict*, i64 key, i64 has_default, i64 def) -> i64
@@ -622,6 +625,9 @@ inline const char* rt_name(RtFn f) {
         case RtFn::ComplexEqUnknown: return "pa_complex_eq_unknown";
         case RtFn::IsStr: return "pa_is_str";
         case RtFn::IsComplex: return "pa_is_complex";
+        case RtFn::AttrGet: return "pa_attr_get";
+        case RtFn::AttrSet: return "pa_attr_set";
+        case RtFn::AttrHas: return "pa_attr_has";
         case RtFn::ListSlice: return "pa_list_slice";
         case RtFn::StrSlice: return "pa_str_slice";
         case RtFn::DictPop: return "pa_dict_pop";
