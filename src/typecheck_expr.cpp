@@ -329,10 +329,18 @@ TypePtr TypeChecker::expr(Expr& e) {
                     unsupported.push_back("attribute on a builtin exception");
                     return t_unknown();
                 }
-                if (ot->kind == TyKind::TypeObj) {
-                    if (a.attr == "__name__") return t_str();
-                    err(a.line, a.col,
-                        std::format("'type' object has no attribute '{}'", a.attr));
+                if (ot->kind == TyKind::TypeObj || ot->kind == TyKind::ClassObj) {
+                    // type 对象的元数据属性：__name__/__qualname__/__doc__/
+                    // __module__ 是 str，__mro__/__bases__ 是元组，其余保守放行。
+                    if (a.attr == "__name__" || a.attr == "__qualname__" ||
+                        a.attr == "__doc__" || a.attr == "__module__" ||
+                        a.attr == "__dict__")
+                        return t_str();
+                    if (a.attr == "__mro__" || a.attr == "__bases__" ||
+                        a.attr == "__getstate__" || a.attr == "__length_hint__")
+                        return t_unknown();
+                    // 未知的 type 属性（像 _fields_ 这类动态的）保守放行。
+                    unsupported.push_back("attribute on a type object");
                     return t_unknown();
                 }
                 if (ot->kind == TyKind::File) {
