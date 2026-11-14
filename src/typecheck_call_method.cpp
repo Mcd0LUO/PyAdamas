@@ -517,6 +517,10 @@ TypePtr TypeChecker::method_call(TypePtr recv, const std::string& name, Call& c,
                 argc(2, 3);
                 return t_bytes();
             }
+            if (name == "translate") {
+                argc(1, 1);
+                return t_bytes();
+            }
             if (name == "split") {
                 argc(0, 2);
                 return mk_list(t_bytes());
