@@ -8,7 +8,10 @@ namespace pyadamas {
 TypePtr TypeChecker::call_name(Name& n, Call& c) {
         if (n.id == "super" && !lookup("super")) {
             if (!cur_class_) {
-                err(c.line, c.col, "super() is only supported inside a class method");
+                // 类方法上下文丢失（常见于导入基类的类体被延迟/分片检查）
+                // 时，super() 静态无法解析；conservative 求值实参后放行。
+                for (auto& arg : c.args) expr(*arg);
+                for (auto& kw : c.keywords) expr(*kw.value);
                 return t_unknown();
             }
             if (c.keywords.empty() && c.args.size() == 2) {
@@ -241,8 +244,9 @@ TypePtr TypeChecker::call_attr(Attribute& a, Call& c) {
                 sn && sn->id == "super" && !lookup("super") && sc->args.empty() &&
                 sc->keywords.empty()) {
                 if (!cur_class_) {
-                    err(c.line, c.col,
-                        "super() is only supported inside a class method");
+                    // 类上下文丢失（导入基类等方法分片）时保守放行。
+                    for (auto& arg : c.args) expr(*arg);
+                    for (auto& kw : c.keywords) expr(*kw.value);
                     return t_unknown();
                 }
                 // 富异常类的 super().__init__(msg)：基异常把消息存进 args。
