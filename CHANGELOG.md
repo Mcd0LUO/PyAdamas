@@ -4,6 +4,26 @@
 
 早期阶段没有逐条留痕，按阶段归纳；0.4 之后逐条记录。
 
+## [0.168] - 2026-11-14
+
+isinstance / bytes：标准库前端基线 348 → 374 / 596（62.8%）。
+
+### 变更
+
+- **isinstance 第二参数拓宽**：接受的内置类型扩展到 `bytes`/`bytearray`/`memoryview`/`type`/`slice`/`frozenset`/`property`/`classmethod`/`staticmethod`，还有 `(A, B, ...)` 元组/列表、unknown 与可迭代目标。
+- **isinstance 运行期**：
+  - 元组/列表目标短路 OR：逐个元素检查，任一命中为真，对象只求值一次。
+  - known 类型静态判定（`isinstance(b'x', bytes)`→True 等）。
+  - unknown 值带运行期标签的内置（str/list/tuple/dict/complex）按标签查；无标签的（int/float/bool 等）保守返回 false。
+- **bytes**：`bytes()` 构造接受 2 参（对象+编码，编码忽略）与 list/tuple/生成器/range 的 int 元素；`bytes.decode` 放宽 0..2 参；`bytes * int` 重复、`bytes.translate`；内置类型名当值（`int_.from_bytes`）走类型级方法。
+
+### 验证
+
+- 前端基线：标准库本体 348 → **374 / 596（62.8%）**；去掉 `test/` 为 338 / 532。
+- `ctest --preset dev` 3/3（运行 156+）；run 套件 172 ok / 0 fail；`tests/check_size.sh` 通过。
+- 新增 `tests/run/158_isinstance_bytes.py`（输出与 CPython 逐字一致）。
+
+
 ## [0.167] - 2026-11-14\n\n自定义异常类当普通类：富异常收字段/方法/岛\u5efa模。\n\n### 变更\n\n- **富异常类当普通类**：自定义异常类有字段/方法/岚`__init__`/`__str__`时，实例是真正的 vtable 对象。`raise Rich(args)`通过类构造建实例并从岚`pa_raise_instance`抛出。`except Rich as e` 通过岚`pa_exc_accept_instance`取回省实例，`e.code`/`e.describe()` 走普通类字段/方法访问。\n- 实例是普通 vtable 对象：字段初始化、vtable 方法分派、`super()` 均正常；`多模块/内置接受` （请参check 阶段放过。\n- **内置异常属性保守**：`OSError.errno`/`UnicodeError.code` 这类内置异常的大多属性静态看不见，check 打 unsupported 放过。\n\n### 验证\n\n- 前端基线：标准库本体 335 → **348 / 596（58.4%）**。\n- `ctest --preset dev` 3/3（运行 156）；差分 840 个程序 0 失败；`tests/check_size.sh` 通过。\n- 新增 `tests/run/157_rich_exc.py`（富异常字段/方法、raise/except 取回实例『pass-only 仍 e.args）。\n\n## [0.166] - 2026-11-14
 
 跨模块 super(): 基类来自别的模块时，check 不再拒绝。

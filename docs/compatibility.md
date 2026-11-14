@@ -315,6 +315,21 @@ bytes 之后，旧清单（bytes 2038 / complex 620 / int64 138 / match 91）已
 | 自定义异常类的字段/方法 | 25 | 异常类类体只允许 `pass` |
 | 跨模块类的字段/方法可见性 | ~25 | 外部的类成员表看不见 |
 
+**0.168 复测（2026-11-14）**——isinstance/bytes：
+
+| 范围 | 文件数 | 语法通过 | 类型通过（占语法通过者） |
+|---|---|---|---|
+| 标准库本体 | 598 | 596 | 374 / 596（62.8%） |
+| 标准库本体（去掉 `test/`） | 533 | 532 | 338 / 532（63.5%） |
+
+比 0.167 多 26 个（+4.4pp）。两块：
+
+- **isinstance 前端**：第二参数现在接受的内置类型扩展到 `bytes`/`bytearray`/`memoryview`/`type`/`slice`/`frozenset`/`property`/`classmethod`/`staticmethod`，以及 `(A, B, ...)` 元组/列表、unknown 与可迭代目标。运行时对元组/列表目标短路 OR：逐个元素检查，任一命中为真；known 类型静态判定（`isinstance(b'x', bytes)`→True 等）；unknown 值带运行期标签的内置（str/list/tuple/dict/complex）按标签查，无标签的保守返回 false。
+- **bytes**：`bytes()` 构造接受 2 参（对象+编码，编码忽略）与 list/tuple/生成器/range 的 int 元素；`bytes.decode` 放宽到 0..2 参；`bytes * int` 重复、`bytes.translate`；内置类型名当值（`int_.from_bytes`）走类型级方法。新增 `tests/run/158_isinstance_bytes.py`（输出与 CPython 逐字一致）。
+
+剩余失败已高度分散（undefined name、各类运算符、异常构造、跨模块类成员等），isinstance/bytes 两簇基本收口。
+
+
 **0.167 复测（2026-11-14）**——自定义异常类当普通类：
 
 | 范围 | 文件数 | 语法通过 | 类型通过（占语法通过者） |

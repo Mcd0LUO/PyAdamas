@@ -55,6 +55,8 @@ VReg Lowerer::lower_builtin_reflect(const std::string& name, Call& c) {
                     else if (builtin == "complex") r = kind_is({TyKind::Complex});
                     else if (builtin == "range") r = kind_is({TyKind::Range});
                     else if (builtin == "bytes") r = kind_is({TyKind::Bytes});
+                    else if (builtin == "bytearray") r = kind_is({TyKind::List});
+                    else if (builtin == "memoryview") r = kind_is({TyKind::Bytes});
                     else if (builtin == "type")
                         r = kind_is({TyKind::Class, TyKind::TypeObj, TyKind::ClassObj});
                     else if (builtin == "frozenset") r = kind_is({TyKind::Set});

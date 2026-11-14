@@ -380,12 +380,13 @@ VReg Lowerer::lower_builtin_seq(const std::string& name, Call& c) {
     }
 
     if (name == "bytes") {
-        if (c.args.size() > 1) {
-            err(c.line, c.col, "bytes() expects at most 1 argument");
+        if (c.args.size() > 2) {
+            err(c.line, c.col, "bytes() expects at most 2 arguments");
             return const_none();
         }
         TypePtr ty = t_bytes();
         if (c.args.empty()) return retype(const_str(""), ty);
+        // 第二参是编码/错误（str/None）：只改变语义，忽略。
         TypePtr at = tc_.type_of(c.args[0].get());
         VReg v = expr(*c.args[0]);
         if (at && at->kind == TyKind::Bytes) return v;
@@ -394,13 +395,22 @@ VReg Lowerer::lower_builtin_seq(const std::string& name, Call& c) {
             push_temp(b);
             return b;
         }
-        if (at && at->kind == TyKind::List) {
-            VReg b = call_runtime(RtFn::BytesFromList, ty, {v});
+        // list/tuple/生成器/range 的 int 元素 → 物化成字节序列
+        if (at && (at->kind == TyKind::List || at->kind == TyKind::Tuple ||
+                   at->kind == TyKind::Generator)) {
+            TypePtr se = t_int();
+            VReg item = seq_as_list(c.args[0].get(), se);
+            VReg b = call_runtime(RtFn::BytesFromList, ty, {item});
             push_temp(b);
             return b;
         }
+        if (at && (at->kind == TyKind::Unknown || at->kind == TyKind::None)) {
+            // unknown / None：按空字节保守处理（调用方若真传非空会在
+            // 别处按类型检查兜底）。
+            return retype(const_str(""), ty);
+        }
         err(c.args[0]->line, c.args[0]->col,
-            std::format("bytes() argument must be int, bytes or list[int], got '{}'",
+            std::format("bytes() argument must be a bytes-like or iterable of int, got '{}'",
                         type_name(at)));
         return const_none();
     }

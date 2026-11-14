@@ -961,6 +961,21 @@ TypePtr TypeChecker::method_call(TypePtr recv, const std::string& name, Call& c,
             if (name == "hex" || name == "fromhex" || name == "from_bytes") return t_unknown();
         }
 
+        if (recv->kind == TyKind::Func && recv->fn && recv->fn->unchecked) {
+            static const std::unordered_set<std::string> type_ctor = {
+                "int", "float", "str", "bool", "bytes", "bytearray", "complex", "set",
+                "frozenset", "list", "tuple", "dict",
+            };
+            static const std::unordered_set<std::string> type_methods = {
+                "from_bytes", "fromhex", "to_bytes", "bit_length", "as_integer_ratio",
+                "is_integer", "decode", "encode",
+            };
+            if (c.args.size() <= 4 && type_ctor.count(recv->fn->name) && type_methods.count(name)) {
+                (void)argc(0, 4);
+                return t_unknown();
+            }
+        }
+
         err(c.line, c.col,
             std::format("'{}' object has no method '{}'", type_name(recv), name));
         return t_unknown();

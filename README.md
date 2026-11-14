@@ -169,7 +169,7 @@ ctest --preset dev
 /tmp/run_diff.prog --pyadamas build/dev/pyadamas --cpython python3 --seeds 3   # 840 个程序
 ```
 
-前端鲁棒性基线：历史口径（CPython 3.11 标准库 + site-packages，38582 个 `.py`）语法通过 35693，其中类型通过 29143（81.6%）；标准库本体 1143 / 1289（88.7%）。最近一次完整口径（0.167，Debian CPython 3.13.5）为标准库本体 348 / 596（58.4%），去掉 `test/` 为 288 / 532；0.165 为 320 / 596、0.158 为 281 / 596、0.81.1 为 279 / 596。两段口径不可直接比较，明细见 [compatibility.md](docs/compatibility.md#前端鲁棒性基线)。
+前端鲁棒性基线：历史口径（CPython 3.11 标准库 + site-packages，38582 个 `.py`）语法通过 35693，其中类型通过 29143（81.6%）；标准库本体 1143 / 1289（88.7%）。最近一次完整口径（0.168，Debian CPython 3.13.5）为标准库本体 374 / 596（62.8%），去掉 `test/` 为 338 / 532；0.167 为 348 / 596、0.165 为 320 / 596、0.158 为 281 / 596、0.81.1 为 279 / 596。两段口径不可直接比较，明细见 [compatibility.md](docs/compatibility.md#前端鲁棒性基线)。
 
 ASan + UBSan + LSan 下跑全部用例零报告（含生成代码的 RC、闭包、GC、字典、切片、删除、推导式、`with`、装饰器、变长实参、异常展开、生成器挂起/恢复、`yield from` 委托、协程调度、Task 取消级联、Future 多等待者、fd 轮询与异步推导式路径），`-Wshadow -Wnon-virtual-dtor -Wold-style-cast -Wcast-qual` 零警告。内存验收在 16MB `RLIMIT_AS` 下完成，对象环 / 字典环 / unknown 泄漏 / 闭包垃圾 / 容器与切片 / 异常展开的峰值 RSS 约 8MB。
 
