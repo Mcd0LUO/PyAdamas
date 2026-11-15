@@ -1,28 +1,32 @@
 /* rt_personality.c —— 零开销异常：Itanium C++ ABI 的 personality routine
  *
- * 设计文档：docs/zero-cost-exceptions.md。这里实现 Z1 需要的通用骨架：
- *   - 从 .eh_frame / .gcc_except_table 里取 LSDA，**真正通用解码**
- *     uleb128 / sleb128 / encoded pointer，不硬编码任何偏移；
- *   - phase 1（_UA_SEARCH_PHASE）查 call-site 表：PC 落在保护区、该条目
- *     带 landing pad 且 action != 0（不是纯清理）→ _URC_HANDLER_FOUND；
+ * 设计文档：docs/zero-cost-exceptions.md。
+ *
+ * 语义（Z1.5 起按 ABI 口径，与 libstdc++ __gxx_personality_v0 对齐）：
+ *   - phase 1（_UA_SEARCH_PHASE）：查 call-site 表找到覆盖 PC 的条目；
+ *     action 下标 == 0            → 只有 cleanup，继续往外找（CONTINUE_UNWIND）；
+ *     action 下标 != 0            → 解析 action 记录链（两个 SLEB128：filter, disp）：
+ *          filter == 0            → cleanup（CONTINUE_UNWIND）
+ *          filter >  0            → handler（读 TType 表判 catch-all / typed catch）
+ *          filter <  0            → exception spec（本实现不维护异常规格，选择
+ *                                   CONTINUE_UNWIND + 诊断计数，见 README「已知局限」）
  *   - phase 2（_UA_CLEANUP_PHASE）：
- *       带 _UA_HANDLER_FRAME  → SetGR(GR0=exc) + SetIP(lp) → INSTALL_CONTEXT
- *       纯清理条目（action == 0）→ 同样安装上下文，landing pad 里自己
- *                                 _Unwind_Resume 继续展开
- *       其它帧（外层的 catch 帧）→ CONTINUE_UNWIND
- *   - **刻意不做类型匹配**（文档 101-104 行）：action != 0 一律当作 catch-all，
- *     landing pad 统一跳到编译器生成的 except 分发块，由它按类型匹配。
- *     所以 TType 表可以整个省略（encoding 0xff）；本文件只是把表头解出来
- *     备用，不做 filter 查询。
+ *          _UA_HANDLER_FRAME + filter>0 → SetGR/SetIP → _URC_INSTALL_CONTEXT
+ *          没有 HANDLER_FRAME + 纯 cleanup → SetGR/SetIP → _URC_INSTALL_CONTEXT
+ *          （清理 landing pad 自己负责 _Unwind_Resume 继续展开）
+ *          其它帧（外层 handler 帧等）→ CONTINUE_UNWIND
+ *
+ * 类型匹配：**仍然不做**（Z3 再做）。具体表现：filter > 0 时虽然会把 TType 表项解出来，
+ * 但非 null 的 typed catch 也一律按「匹配」处理（catch-all 语义）。所以我们自己的
+ * 异常（不跨 C++ 类型系统）行为是对的；与 C++ 类型系统互通要等 Z3/Z4 补类型匹配。
+ *
+ * LSDA 解码是通用的（uleb128/sleb128/encoded pointer，不硬编码偏移），
+ * 并遵循 libgcc/unwind-pe.h 的关键细节：**读出的原始值为 0 时不施加 pcrel/funcrel
+ * 相对基址、也不做 indirect 解引用**（这正是 GCC catch-all 的「4 字节 0 + 无重定位」
+ * 能表示 null type_info* 的原因）。
  *
  * 自包含：只依赖 <unwind.h>/<stdint.h>/<stddef.h>，不 include rt_internal.h。
  * 需要能被 gcc -O2 -Wall -Wextra -Werror -I runtime -c 直接编过（将来进 rt.o）。
- *
- * 关于 TType 偏移的实测结论（GCC 14 x86-64，z1 夹具核对）：
- *   LSDA 头里的 TType offset 是 uleb128，语义是「从该 uleb 字段之后的位置
- *   到 TType 表**末尾**的偏移」；GCC 的 get_ttype_entry 用
- *   TType - filter_index * size_of_encoded_value 反向下标取条目。
- *   本文件把 TType 表末尾指针存在 info.ttype_end，暂不使用。
  */
 
 #include <unwind.h>
@@ -57,9 +61,11 @@ enum {
 enum {
     PA_LSDA_OK = 0,
     PA_LSDA_ERR_ENCODING = 1,   /* 非法 / 不支持的 DW_EH_PE 编码字节 */
-    PA_LSDA_ERR_TRUNCATED = 2,  /* LEB128 过长、call-site 表长度越界 */
+    PA_LSDA_ERR_TRUNCATED = 2,  /* LEB128 过长、call-site 表长度越界（表越界） */
     PA_LSDA_ERR_OVERFLOW = 3,   /* 表项数量/长度超出合理上限 */
-    PA_LSDA_ERR_NO_LSDA = 4     /* .cfi_lsda 缺失（本函数不该被调用） */
+    PA_LSDA_ERR_NO_LSDA = 4,    /* .cfi_lsda 缺失（本函数不该被调用） */
+    PA_LSDA_ERR_ACTION = 5,     /* action 记录链非法（指针不前进 / 记录过多） */
+    PA_LSDA_ERR_TTYPE = 6       /* filter>0 但没有可用 TType 表（ABI 下无法解析 catch） */
 };
 
 /* 最近一次解码错误：驱动 / 测试可读；正常运行只在真的坏表时才写。 */
@@ -70,16 +76,18 @@ const char *pa_personality_error_str(int code)
     switch (code) {
     case PA_LSDA_OK: return "ok";
     case PA_LSDA_ERR_ENCODING: return "nonconforming-or-unsupported DW_EH_PE encoding";
-    case PA_LSDA_ERR_TRUNCATED: return "truncated or overlong LEB128 / bad call-site length";
-    case PA_LSDA_ERR_OVERFLOW: return "call-site table too large (plausibility limit)";
+    case PA_LSDA_ERR_TRUNCATED: return "truncated/overlong LEB128 or call-site table out of bounds";
+    case PA_LSDA_ERR_OVERFLOW: return "table too large (plausibility limit)";
     case PA_LSDA_ERR_NO_LSDA: return "no LSDA in this frame";
+    case PA_LSDA_ERR_ACTION: return "malformed action record chain";
+    case PA_LSDA_ERR_TTYPE: return "filter>0 but no usable TType table";
     default: return "unknown";
     }
 }
 
 #ifdef PA_PERSONALITY_TRACE
-/* 测试用观测点：Z1 驱动据此断言两阶段都被走到、各帧行为符合预期。
-   只在 -DPA_PERSONALITY_TRACE 时存在，生产构建没有任何额外开销。 */
+/* 测试用观测点：Z1.5 驱动据此断言 ABI 语义（filter 判定、catch-all、spec 处理）。
+   只在 -DPA_PERSONALITY_TRACE 时存在，生产构建没有这些额外开销。 */
 volatile int pa_dbg_calls;
 volatile int pa_dbg_search;
 volatile int pa_dbg_cleanup;
@@ -87,9 +95,13 @@ volatile int pa_dbg_handler_frames;
 volatile int pa_dbg_installs;
 volatile int pa_dbg_continue;
 volatile int pa_dbg_errors;
-volatile int pa_dbg_force_unwind;   /* _UA_FORCE_UNWIND 分支被走到的次数 */
-volatile int pa_dbg_setip_calls;    /* _Unwind_SetIP 被调用的总次数 */
-volatile int pa_dbg_verbose;   /* 1 = 每帧打一行日志（测试用 Z1_TRACE=1 打开） */
+volatile int pa_dbg_force_unwind;      /* _UA_FORCE_UNWIND 分支被走到的次数 */
+volatile int pa_dbg_setip_calls;       /* _Unwind_SetIP 被调用的总次数 */
+volatile int pa_dbg_cleanup_entries;   /* 判定为 cleanup 的 action（不认领 handler） */
+volatile int pa_dbg_catch_all;         /* filter>0 且 TType 项为 null（catch-all） */
+volatile int pa_dbg_typed_catch;       /* filter>0 且 TType 项非 null（typed catch，Z3 才做匹配） */
+volatile int pa_dbg_spec;              /* filter<0：exception spec，本实现选择 CONTINUE */
+volatile int pa_dbg_verbose;           /* 1 = 每帧打一行日志（测试用 Z1_TRACE=1 打开） */
 #endif
 
 /* ── LEB128 解码 ─────────────────────────────────────────────────── */
@@ -165,7 +177,25 @@ static int pa_encoding_ok(unsigned char enc)
     return 1;
 }
 
-/* 读一个 encoded pointer。base 是 funcrel 用到的函数起点。 */
+/* 固定宽度的编码值大小；uleb/sleb/omit 返回 0（可变长/无表）。 */
+static unsigned pa_size_of_encoded_value(unsigned char enc)
+{
+    switch (enc & 0x0f) {
+    case PA_EH_PE_absptr: return (unsigned)sizeof(void *);
+    case PA_EH_PE_udata2:
+    case PA_EH_PE_sdata2: return 2;
+    case PA_EH_PE_udata4:
+    case PA_EH_PE_sdata4: return 4;
+    case PA_EH_PE_udata8:
+    case PA_EH_PE_sdata8: return 8;
+    default: return 0;
+    }
+}
+
+/* 读一个 encoded pointer。base 是 funcrel 用到的函数起点。
+   与 libgcc/unwind-pe.h:read_encoded_value_with_base 一致：
+   **原始值为 0 时不做相对基址加法、也不做 indirect 解引用**，
+   否则 GCC catch-all 的「4 字节 0 + 无重定位」TType 项会被解成非法地址。 */
 static uint64_t pa_read_encoded(const unsigned char **pp, unsigned char enc,
                                 uintptr_t base, int *err)
 {
@@ -180,48 +210,53 @@ static uint64_t pa_read_encoded(const unsigned char **pp, unsigned char enc,
     }
 
     if (app == PA_EH_PE_aligned) {
-        /* 值放在按指针大小对齐的位置（此时格式位被忽略，按 absptr 读）。 */
+        /* 值放在按指针大小对齐的位置（此时格式位被忽略，按 absptr 读）
+           且不参与 pcrel/indirect 处理（与 libgcc 一致）。 */
         p = (const unsigned char *)(((uintptr_t)p + sizeof(void *) - 1)
                                     & ~(uintptr_t)(sizeof(void *) - 1));
         raw = *(const uint64_t *)(const void *)p;
         p += 8;
-    } else {
-        switch (enc & 0x0f) {
-        case PA_EH_PE_absptr:
-        case PA_EH_PE_udata8:
-        case PA_EH_PE_sdata8:
-            raw = *(const uint64_t *)(const void *)p;   /* x86-64 上 absptr = 8 字节 */
-            p += 8;
-            break;
-        case PA_EH_PE_uleb128:
-            raw = pa_uleb128(&p, err);
-            break;
-        case PA_EH_PE_udata2:
-            raw = *(const uint16_t *)(const void *)p;
-            p += 2;
-            break;
-        case PA_EH_PE_udata4:
-            raw = *(const uint32_t *)(const void *)p;
-            p += 4;
-            break;
-        case PA_EH_PE_sleb128:
-            raw = (uint64_t)pa_sleb128(&p, err);
-            break;
-        case PA_EH_PE_sdata2:
-            raw = (uint64_t)(int64_t)*(const int16_t *)(const void *)p;
-            p += 2;
-            break;
-        case PA_EH_PE_sdata4:
-            raw = (uint64_t)(int64_t)*(const int32_t *)(const void *)p;
-            p += 4;
-            break;
-        default:
-            *err = PA_LSDA_ERR_ENCODING;
-            return 0;
-        }
-        if (*err)
-            return 0;
+        *pp = p;
+        return raw;
+    }
 
+    switch (enc & 0x0f) {
+    case PA_EH_PE_absptr:
+    case PA_EH_PE_udata8:
+    case PA_EH_PE_sdata8:
+        raw = *(const uint64_t *)(const void *)p;   /* x86-64 上 absptr = 8 字节 */
+        p += 8;
+        break;
+    case PA_EH_PE_uleb128:
+        raw = pa_uleb128(&p, err);
+        break;
+    case PA_EH_PE_udata2:
+        raw = *(const uint16_t *)(const void *)p;
+        p += 2;
+        break;
+    case PA_EH_PE_udata4:
+        raw = *(const uint32_t *)(const void *)p;
+        p += 4;
+        break;
+    case PA_EH_PE_sleb128:
+        raw = (uint64_t)pa_sleb128(&p, err);
+        break;
+    case PA_EH_PE_sdata2:
+        raw = (uint64_t)(int64_t)*(const int16_t *)(const void *)p;
+        p += 2;
+        break;
+    case PA_EH_PE_sdata4:
+        raw = (uint64_t)(int64_t)*(const int32_t *)(const void *)p;
+        p += 4;
+        break;
+    default:
+        *err = PA_LSDA_ERR_ENCODING;
+        return 0;
+    }
+    if (*err)
+        return 0;
+
+    if (raw != 0) {
         if (app == PA_EH_PE_pcrel)
             raw += (uint64_t)(uintptr_t)field;
         else if (app == PA_EH_PE_funcrel)
@@ -230,11 +265,8 @@ static uint64_t pa_read_encoded(const unsigned char **pp, unsigned char enc,
             *err = PA_LSDA_ERR_ENCODING;
             return 0;
         }
-    }
-
-    if (enc & PA_EH_PE_indirect) {
-        uint64_t addr = raw;
-        raw = *(const uint64_t *)(uintptr_t)addr;
+        if (enc & PA_EH_PE_indirect)
+            raw = *(const uint64_t *)(uintptr_t)raw;
     }
 
     *pp = p;
@@ -248,10 +280,11 @@ typedef struct {
     uintptr_t region_start;         /* _Unwind_GetRegionStart：函数起点 */
     uint64_t lp_start;              /* LPStart：landing pad 偏移的基准 */
     unsigned char ttype_encoding;
-    uint64_t ttype_end;             /* TType 表末尾地址（filter i 从后往前取），未用 */
+    uint64_t ttype_end;             /* TType 表末尾地址（第 i 项在 ttype_end - i*size），
+                                       0 表示没有类型表 */
     unsigned char call_site_encoding;
     const unsigned char *call_site_table;
-    uint64_t call_site_len;
+    const unsigned char *action_table;  /* call-site 表之后紧跟 action 表 */
 } pa_lsda_info;
 
 static int pa_parse_lsda(struct _Unwind_Context *ctx, pa_lsda_info *info)
@@ -279,7 +312,7 @@ static int pa_parse_lsda(struct _Unwind_Context *ctx, pa_lsda_info *info)
             return err;
     }
 
-    /* 2) TType encoding + TType 表偏移（0xff = 没有类型表） */
+    /* 2) TType encoding + TType 表偏移（0xff = 没有类型表，偏移字段整段消失） */
     info->ttype_encoding = *p++;
     if (info->ttype_encoding != PA_EH_PE_omit) {
         uint64_t off;
@@ -291,38 +324,123 @@ static int pa_parse_lsda(struct _Unwind_Context *ctx, pa_lsda_info *info)
         info->ttype_end = (uint64_t)(uintptr_t)p + off;
     }
 
-    /* 3) call-site 表 encoding + 字节长度 */
+    /* 3) call-site 表 encoding + 字节长度；action 表紧跟在 call-site 表之后 */
     info->call_site_encoding = *p++;
     if (!pa_encoding_ok(info->call_site_encoding))
         return PA_LSDA_ERR_ENCODING;
-    info->call_site_len = pa_uleb128(&p, &err);
-    if (err)
-        return err;
-    info->call_site_table = p;
+    {
+        uint64_t cs_len = pa_uleb128(&p, &err);
+        if (err)
+            return err;
+        info->call_site_table = p;
+        info->action_table = p + cs_len;
+    }
     return PA_LSDA_OK;
+}
+
+/* 取 TType 表第 filter 项（1 起、反向索引：ttype_end - filter*size）。
+   返回 0 表示 catch-all（null type_info*），非 0 是 typed catch 的 type_info 指针。 */
+static uint64_t pa_get_ttype_entry(const pa_lsda_info *info, uint64_t filter, int *err)
+{
+    unsigned size = pa_size_of_encoded_value(info->ttype_encoding);
+    uint64_t off;
+    uint64_t addr;
+    const unsigned char *p;
+
+    if (size == 0 || info->ttype_end == 0) {
+        *err = PA_LSDA_ERR_TTYPE;
+        return 0;
+    }
+    off = filter * (uint64_t)size;
+    if (off > info->ttype_end || (uint64_t)info->region_start > info->ttype_end - off) {
+        *err = PA_LSDA_ERR_TTYPE;   /* 反向索引下溢 */
+        return 0;
+    }
+    addr = info->ttype_end - off;
+    p = (const unsigned char *)(uintptr_t)addr;
+    return pa_read_encoded(&p, info->ttype_encoding, info->region_start, err);
+}
+
+/* ── action 记录分类 ─────────────────────────────────────────────── */
+
+enum pa_action_kind {
+    PA_ACTION_CLEANUP = 0,  /* filter==0（或 call-site action 下标为 0） */
+    PA_ACTION_HANDLER = 1,  /* filter>0 */
+    PA_ACTION_SPEC = 2      /* filter<0：exception spec，本实现不支持 */
+};
+
+#define PA_MAX_ACTION_DEPTH 64
+
+/* 解析 call-site 的 action 下标对应的 action 记录链。
+   ABI：action 下标 0 = 没有 action 记录（纯 cleanup）；否则从
+   action_table + (action - 1) 起读 (SLEB filter, SLEB disp)，disp!=0 时继续下一条。 */
+static int pa_classify_action(const pa_lsda_info *info, uint64_t cs_action,
+                              enum pa_action_kind *kind, int64_t *filter_out, int *err)
+{
+    const unsigned char *p;
+
+    if (cs_action == 0) {
+        *kind = PA_ACTION_CLEANUP;      /* 只有 cleanup，不读 action 表 */
+        *filter_out = 0;
+        return PA_LSDA_OK;
+    }
+    p = info->action_table + (cs_action - 1);
+    for (int depth = 0; depth < PA_MAX_ACTION_DEPTH; ++depth) {
+        int64_t filter = pa_sleb128(&p, err);
+        if (*err)
+            return *err;
+        (void)pa_sleb128(&p, err);   /* disp：typed catch 不匹配时才沿链继续；
+                                        我们不做类型匹配，所以不追链 */
+        if (*err)
+            return *err;
+
+        *filter_out = filter;
+        if (filter == 0) {
+            *kind = PA_ACTION_CLEANUP;  /* 零 filter = cleanup（ABI 语义） */
+            return PA_LSDA_OK;
+        }
+        if (filter < 0) {
+            *kind = PA_ACTION_SPEC;     /* 负 filter = exception spec */
+            return PA_LSDA_OK;
+        }
+
+        /* filter > 0：ABI 上要查 TType 表并做类型匹配。我们还没有类型匹配
+           （Z3 再做），这里读出类型项（顺便校验表），然后无论 null（catch-all）
+           还是 typed 都按「handler」处理。 */
+        {
+            uint64_t ttype = pa_get_ttype_entry(info, (uint64_t)filter, err);
+            if (*err)
+                return *err;
+#ifdef PA_PERSONALITY_TRACE
+            if (ttype == 0)
+                ++pa_dbg_catch_all;
+            else
+                ++pa_dbg_typed_catch;
+#endif
+            (void)ttype;
+        }
+        *kind = PA_ACTION_HANDLER;
+        return PA_LSDA_OK;
+    }
+    *err = PA_LSDA_ERR_ACTION;
+    return *err;
 }
 
 /* ── call-site 表查询 ─────────────────────────────────────────────── */
 
-/* Z3 扩展点：这里的 action 只与 0 做比较，**刻意不读 action 表里的 filter**，
-   避免假设 filter 一定是 0 或 1。将来做 phase 1 类型过滤时，在 action != 0
-   的分支里从 action 表（call_site 表之后）读 sleb128 的 filter 即可，本函数
-   已经保留了 info.call_site_table / call_site_len，方便算 action 表起点。
-
-   在 call-site 表里找覆盖 pc 的条目。
-   返回 1 = 命中（带 landing pad），0 = 没命中或该条目 landing pad 为 0，
+/* 在 call-site 表里找覆盖 pc 的条目。
+   返回 1 = 命中（lp/action 已填），0 = 没命中或该条目 landing pad 为 0，
    -1 = 表解码失败（err 里给错误码）。 */
-static int pa_find_landing_pad(const pa_lsda_info *info, uintptr_t pc,
-                               uint64_t *lp_out, uint64_t *action_out, int *err)
+static int pa_find_call_site(const pa_lsda_info *info, uintptr_t pc,
+                             uint64_t *lp_out, uint64_t *action_out, int *err)
 {
     const unsigned char *p = info->call_site_table;
-    uint64_t remaining = info->call_site_len;
     int entries = 0;
 
-    while (remaining > 0) {
+    while (p < info->action_table) {
         const unsigned char *entry = p;
-        uint64_t start, len, lp, action;
-        uint64_t consumed;
+        uint64_t start, len, lp;
+        uint64_t action;
 
         start = pa_read_encoded(&p, info->call_site_encoding, info->region_start, err);
         if (*err)
@@ -337,19 +455,22 @@ static int pa_find_landing_pad(const pa_lsda_info *info, uintptr_t pc,
         if (*err)
             return -1;
 
-        consumed = (uint64_t)(p - entry);
-        if (consumed == 0 || consumed > remaining)
-            return -1;                  /* 表长度和条目对不上：坏表 */
+        if ((uint64_t)(p - entry) == 0 || p > info->action_table) {
+            *err = PA_LSDA_ERR_TRUNCATED;   /* 表长和条目对不上：结构越界 */
+            return -1;
+        }
 
-        remaining -= consumed;
         if (++entries > 4096) {
             *err = PA_LSDA_ERR_OVERFLOW;
             return -1;
         }
 
-        if (pc >= info->lp_start + start && pc < info->lp_start + start + len) {
+        /* call-site 表按 start 排序，可以提前结束。 */
+        if (pc < info->lp_start + start)
+            return 0;
+        if (pc < info->lp_start + start + len) {
             if (lp == 0)
-                return 0;               /* 落在保护区但该区间没有 landing pad */
+                return 0;       /* 落在保护区但该区间没有 landing pad */
             *lp_out = info->lp_start + lp;
             *action_out = action;
             return 1;
@@ -370,7 +491,9 @@ pa_personality(int version, _Unwind_Action actions,
                struct _Unwind_Context *ctx)
 {
     pa_lsda_info info;
-    uint64_t lp = 0, action = 0;
+    enum pa_action_kind kind;
+    uint64_t lp = 0, cs_action = 0;
+    int64_t filter = 0;
     uintptr_t ip;
     uintptr_t pc;
     int before_insn = 0;
@@ -397,7 +520,7 @@ pa_personality(int version, _Unwind_Action actions,
         return _URC_CONTINUE_UNWIND;
     }
 
-    /* 没有 LSDA 的帧（例如只挂了 personality 没挂表）当作没有处理。 */
+    /* 没有 LSDA 的帧当作没有处理。 */
     if (!_Unwind_GetLanguageSpecificData(ctx)) {
 #ifdef PA_PERSONALITY_TRACE
         ++pa_dbg_continue;
@@ -407,7 +530,7 @@ pa_personality(int version, _Unwind_Action actions,
 
     /* PC 语义：展开器给的 IP 是抛出点 call 之后的返回地址；减 1 之后才是
        “调用指令所在地址”，这样即使 call 是保护区最后一条指令（返回地址
-       正好等于区间末尾）也能命中 [start,start+len)。 */
+       正好等于区间末尾）也能命中 [start, start+len)。 */
     ip = (uintptr_t)_Unwind_GetIPInfo(ctx, &before_insn);
     pc = before_insn ? ip : ip - 1;
 
@@ -423,7 +546,7 @@ pa_personality(int version, _Unwind_Action actions,
         return _URC_FATAL_PHASE1_ERROR;
     }
 
-    found = pa_find_landing_pad(&info, pc, &lp, &action, &err);
+    found = pa_find_call_site(&info, pc, &lp, &cs_action, &err);
     if (found < 0) {
         pa_personality_last_error = err;
 #ifdef PA_PERSONALITY_TRACE
@@ -435,16 +558,6 @@ pa_personality(int version, _Unwind_Action actions,
         return _URC_FATAL_PHASE1_ERROR;
     }
 
-#ifdef PA_PERSONALITY_TRACE
-    if (pa_dbg_verbose)
-        fprintf(stderr,
-                "[pa_personality] actions=%#x ip=%#lx pc=%#lx cfa=%#lx region=%#lx lp_start=%#lx found=%d lp=%#lx action=%lu\n",
-                (unsigned)actions, (unsigned long)ip, (unsigned long)pc,
-                (unsigned long)_Unwind_GetCFA(ctx),
-                (unsigned long)info.region_start, (unsigned long)info.lp_start,
-                found, (unsigned long)lp, (unsigned long)action);
-#endif
-
     if (found == 0 || lp == 0) {
         /* 当前 PC 不在任何带 landing pad 的保护区里：穿过这一帧。 */
 #ifdef PA_PERSONALITY_TRACE
@@ -453,18 +566,53 @@ pa_personality(int version, _Unwind_Action actions,
         return _URC_CONTINUE_UNWIND;
     }
 
+    /* 到了这里说明 PC 在保护区里且有 landing pad，按 ABI 语义解析 action。 */
+    err = pa_classify_action(&info, cs_action, &kind, &filter, &err);
+    if (err != PA_LSDA_OK) {
+        pa_personality_last_error = err;
+#ifdef PA_PERSONALITY_TRACE
+        ++pa_dbg_errors;
+        if (pa_dbg_verbose)
+            fprintf(stderr, "[pa_personality] actions=%#x ip=%#lx action 表解码失败 err=%d\n",
+                    (unsigned)actions, (unsigned long)ip, err);
+#endif
+        return _URC_FATAL_PHASE1_ERROR;
+    }
+
+    if (kind == PA_ACTION_CLEANUP) {
+#ifdef PA_PERSONALITY_TRACE
+        ++pa_dbg_cleanup_entries;
+#endif
+    }
+
+#ifdef PA_PERSONALITY_TRACE
+    if (pa_dbg_verbose) {
+        static const char *const kind_name[] = { "cleanup", "handler", "spec" };
+        fprintf(stderr,
+                "[pa_personality] actions=%#x ip=%#lx pc=%#lx cfa=%#lx lp=%#lx action=%lu kind=%s filter=%ld\n",
+                (unsigned)actions, (unsigned long)ip, (unsigned long)pc,
+                (unsigned long)_Unwind_GetCFA(ctx), (unsigned long)lp,
+                (unsigned long)cs_action, kind_name[(int)kind], (long)filter);
+    }
+#endif
+
     if (actions & _UA_SEARCH_PHASE) {
 #ifdef PA_PERSONALITY_TRACE
         ++pa_dbg_search;
 #endif
-        if (action == 0) {
-            /* 纯清理条目不是 handler：phase 1 继续往外找。 */
+        if (kind == PA_ACTION_HANDLER)
+            return _URC_HANDLER_FOUND;
+        if (kind == PA_ACTION_SPEC) {
+            /* 选择的语义：exception spec 不支持 → 当作与本帧无关，继续展开；
+               不 terminate（理由见 README「filter<0 的处理」）。 */
 #ifdef PA_PERSONALITY_TRACE
-            ++pa_dbg_continue;
+            ++pa_dbg_spec;
 #endif
-            return _URC_CONTINUE_UNWIND;
         }
-        return _URC_HANDLER_FOUND;
+#ifdef PA_PERSONALITY_TRACE
+        ++pa_dbg_continue;
+#endif
+        return _URC_CONTINUE_UNWIND;
     }
 
     /* ── phase 2 ────────────────────────────────────────────────── */
@@ -473,34 +621,37 @@ pa_personality(int version, _Unwind_Action actions,
 #endif
 
     if (actions & _UA_HANDLER_FRAME) {
-        if (action == 0) {
-            /* 理论上 phase 1 不会把纯清理帧记成 handler；防御性穿过。 */
+        if (kind != PA_ACTION_HANDLER) {
+            /* 理论上 phase 1 只会在 filter>0 的帧上记 handler；防御性穿过。 */
 #ifdef PA_PERSONALITY_TRACE
+            if (kind == PA_ACTION_SPEC)
+                ++pa_dbg_spec;
             ++pa_dbg_continue;
 #endif
             return _URC_CONTINUE_UNWIND;
         }
-    } else if (action != 0) {
-        /* 外层 catch 帧：本轮展开在更内层就已经找到 handler，这里只跳过。 */
 #ifdef PA_PERSONALITY_TRACE
+        ++pa_dbg_handler_frames;
+#endif
+    } else if (kind != PA_ACTION_CLEANUP) {
+        /* 外层 handler 帧 / spec：本轮展开在更内层就已经找到 handler，跳过。 */
+#ifdef PA_PERSONALITY_TRACE
+        if (kind == PA_ACTION_SPEC)
+            ++pa_dbg_spec;
         ++pa_dbg_continue;
 #endif
         return _URC_CONTINUE_UNWIND;
     }
 
 #ifdef PA_PERSONALITY_TRACE
-    if (actions & _UA_HANDLER_FRAME)
-        ++pa_dbg_handler_frames;
     ++pa_dbg_installs;
+    ++pa_dbg_setip_calls;
 #endif
 
     /* 安装上下文：GR0 = exception 指针（x86-64 的 %rax）；GR1 是类型信息槽，
        简化路径用不到，清 0 免得 landing pad 误读。
        安装后 landing pad 入口的 rsp = 抛出点那条 call 之前的 rsp（不是 CFA），
        所以编译器生成的 LP 可以照抄正常 epilogue 来恢复栈。 */
-#ifdef PA_PERSONALITY_TRACE
-    ++pa_dbg_setip_calls;
-#endif
     _Unwind_SetGR(ctx, 0, (uintptr_t)exc);
     _Unwind_SetGR(ctx, 1, 0);
     _Unwind_SetIP(ctx, (uintptr_t)lp);

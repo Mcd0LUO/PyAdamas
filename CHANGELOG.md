@@ -4,6 +4,35 @@
 
 早期阶段没有逐条留痕，按阶段归纳；0.4 之后逐条记录。
 
+## [0.176] - 2026-11-16
+
+### 零开销异常 Z1.5：handler 判据对齐 ABI + 真 gcc personality 交叉验证
+
+交叉核对（`tools/lsda_ref/CROSSCHECK_M2.md`）指出 Z1 的 personality 用「call-site 的 action
+下标 != 0 即 handler」是**私有语义**：ABI 里 `filter == 0` 就是 cleanup，catch-all 必须
+`filter > 0` **且** TType 表里有一个 null 项。这一版把它对齐。
+
+- `pa_personality` 解析 action 记录链（两个 SLEB128 的 filter / next）：action 下标 == 0 或
+  `filter == 0` -> cleanup；`filter > 0` -> 读 TType 表（反向索引 `ttype_end - filter*size`，
+  并实现 libgcc 的 `result == 0` 特判 —— 这正是 null 项为「4 字节 0 + 无重定位」的原因）；
+  `filter < 0`（exception spec）-> `_URC_CONTINUE_UNWIND` + 诊断计数。
+- 夹具升级为 GCC 同款形态：handler 20 字节（`ttype=0x9b`、偏移指向表末尾、null 项、`filter=1`）、
+  cleanup 12 字节、无 pad 8 字节；personality 指针用 `0x9b` 指向 driver 里的运行期槽，
+  于是**同一份 .S 的同一套字节可以被两种 personality 解释**。
+- cleanup / handler 的 landing pad 区段补了覆盖 LP 的 call-site 记录 —— 缺它时标准
+  personality 在 `_Unwind_Resume` 阶段会 `found_terminate` -> terminate。
+- 负向用例重做：`0x9b` -> `0xfe` 断言「编码非法」，另加 udata8 编码的夹具覆盖「表越界」分支。
+- 新增**真 gcc personality 交叉验证**（`tests/exc/z1_rt/crosscheck_gxx.cpp`）：同一份 `.S`
+  换填 `__gxx_personality_v0`，真 C++ `throw 7` + 外层 `catch(int)`。实测
+  `caught=0 / lp_calls=1 / fn_ret=7 / z1_lp_seen=1` —— 夹具帧被标准 personality 正确当成
+  catch-all（异常被吃掉、landing pad 只跑一次）。PIE 与 -no-pie 两套都过。
+
+`filter < 0` 的处理选择：继续展开 + 诊断计数，**不 terminate**。理由是我们没有 spec 表与
+`__cxa_call_unexpected` 协议，做不了 ABI 的正确行为；贸然 abort 会直接杀用户进程，
+保守继续 + 可观测计数更可控，且不会错误吞异常。Z4 做 spec 时在该分支补实现即可。
+
+验证：`bash tests/exc/z1_rt/run.sh` 退出码 0，两套链接共 **116 项断言**（43 -> 58 / 套，
+含 2 次交叉验证）；`tests/run_tests.sh` 179 项全过。
 ## [0.175] - 2026-11-16
 
 ### GC 根扫描：整段保守扫描 -> 位图收窄（技术债 #1 / #2）

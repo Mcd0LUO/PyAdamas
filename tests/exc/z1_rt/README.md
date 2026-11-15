@@ -1,9 +1,14 @@
-# z1_rt —— 手写汇编 + personality 打通 _Unwind_RaiseException → landing pad
+# z1_rt —— 手写汇编 + personality 打通 _Unwind_RaiseException → landing pad（Z1.5）
 
-这是 [docs/zero-cost-exceptions.md](../../../docs/zero-cost-exceptions.md) 里 **Z1** 的落地验证：
-完全不碰编译器，用「手写的汇编函数 + 我们自己写的 personality routine + 我们自己写的 LSDA」
-证明 libgcc 的 `_Unwind_RaiseException` 能按表把控制跳到 landing pad，并且两阶段展开里
-cleanup 帧和 handler 帧的行为符合 Itanium C++ ABI 的约定。
+这是 [docs/zero-cost-exceptions.md](../../../docs/zero-cost-exceptions.md) 里 **Z1** 的落地验证，
+Z1.5 起升级为「ABI 语义 + GCC 同款 LSDA」：
+
+- 完全不碰编译器，用「手写的汇编函数 + 我们自己写的 personality routine + 我们自己写的 LSDA」
+  证明 libgcc 的 `_Unwind_RaiseException` 能按表把控制跳到 landing pad；
+- handler / cleanup 的判据按 **Itanium ABI**（action 记录的 filter），不是私有约定；
+- LSDA 与 gcc 14 的 catch-all 同构（`ttype_encoding=0x9b` + TType 表一个 **4 字节 0、无重定位**
+  的 null 项 + action 记录 `(filter=1, next=0)`）；
+- 用**真的 libstdc++ `__gxx_personality_v0`** 交叉验证同一个 handler 夹具确实被当作 catch-all。
 
 ## 怎么跑
 
@@ -11,244 +16,321 @@ cleanup 帧和 handler 帧的行为符合 Itanium C++ ABI 的约定。
 bash tests/exc/z1_rt/run.sh
 ```
 
-- 依赖：Linux x86-64、gcc（实测 14.2.0）、binutils（readelf）、libgcc_s；脚本用 gcc 直接编译，
-  **不碰仓库的 CMake/ninja 构建**，构建产物放 mktemp 临时目录，退出即删。
-- 预期：`-no-pie` 和 PIE 两套链接各 43 项断言全部通过，脚本退出码 0：
-  `==== 结果：全部 PASS（两套链接共 86 项断言）====`
-- 脚本里同时检查了产物结构：z1_step2.o 必须有 `.gcc_except_table`、CIE augmentation 必须是
-  `zPLR`（P/L/R 三个字段都在），z1_step1.o 必须是 `zPR`（只有 personality，没有 LSDA）。
+- 依赖：Linux x86-64、gcc/g++（实测 14.2.0）、binutils（readelf）、libstdc++/libgcc_s；
+  脚本用 gcc/g++ 直接编译，**不碰仓库的 CMake/ninja 构建**，构建产物放 mktemp 临时目录，退出即删。
+- 预期：`-no-pie` 和 PIE 两套链接各 **58 项断言**全部通过（共 116 项），
+  外加两套链接各一次「真 `__gxx_personality_v0`」交叉验证，脚本退出码 0：
+  `==== 结果：全部 PASS（两套链接共 116 项断言）====`
+- 脚本里同时检查产物结构：
+  - z1_step2.o / z1_step3.o 的 LSDA 头是 `ff 9b ...`（GCC 同款）；
+  - `.gcc_except_table` 内部**没有重定位**（catch-all 的 null TType 项必须是 4 字节 0 + 无重定位）；
+  - z1_step2.o 的 CIE personality 编码是 `0x9b`（间接），z1_step1.o 是 `"zPR"` + `0x1b`（直连、无 LSDA）；
+  - 交叉验证程序输出 `[crosscheck] caught=0 lp_calls=1 fn_ret=7 z1_lp_seen=1`。
 
 ## 产物
 
 | 文件 | 作用 |
 |---|---|
-| `../../../runtime/rt_personality.c` | 通用 personality routine（**本次唯一的 runtime 改动**）：通用解码 LSDA，不做类型匹配 |
-| `z1_step1.S` + `stub_personality.c` | 第一步：**不带 LSDA** 的 plumbing。stub personality 硬编码 landing pad 地址，只靠 IP 区间认领自己的帧 |
-| `z1_step2.S` | 第二步：`.cfi_personality 0x1b` + `.cfi_lsda 0x1b` + 手写 `.gcc_except_table`，交给真 personality 解析 |
+| `../../../runtime/rt_personality.c` | 通用 personality routine（**本次唯一的 runtime 改动**）：通用解码 LSDA + action 记录，按 ABI 语义判 handler/cleanup/spec |
+| `z1_step1.S` + `stub_personality.c` | 第一步：**不带 LSDA** 的 plumbing。stub personality 硬编码 landing pad 地址，`.cfi_personality 0x1b` 直连（保留 0x1b 路径的活证据） |
+| `z1_step2.S` | 第二步：`.cfi_personality 0x9b` + `.cfi_lsda 0x1b` + **GCC 同款 20 字节 LSDA**；同一份 .S 可编出交叉验证变体 |
 | `z1_step3.S` | 第三步：三层帧（内层无 landing pad / 中间 cleanup / 外层 catch-all），验证两阶段顺序与 `_Unwind_Resume` |
-| `z1_broken_lsda.S` | 负向：LSDA 里只改坏 1 个 bit，验证 personality 真的在解析表并报对应错误 |
-| `driver.c` | 构造 `struct _Unwind_Exception`、调 `_Unwind_RaiseException`、断言 landing pad 的结果；同时提供 `z1_raise_c` / `z1_note` / 探测入口等 C 侧 helper |
-| `run.sh` | 一键编译 + 链接 + 运行 + 断言，PASS/FAIL 打印，退出码 0/1 |
+| `z1_broken_lsda.S` | 负向 A：LSDA 编码非法（TType enc 0x9b → 0xfe） |
+| `z1_broken_table.S` | 负向 B：call-site 表越界（udata8 编码 + 8 字节表长） |
+| `z1_spec_lsda.S` | filter<0（exception spec）的处理选择：CONTINUE_UNWIND + 诊断计数 |
+| `driver.c` | 构造 `struct _Unwind_Exception`、调 `_Unwind_RaiseException`、断言结果；提供 personality 槽、`z1_raise_c`、`z1_note`、traceback/forced-unwind 探针 |
+| `crosscheck_gxx.cpp` | 交叉验证驱动：真 C++ `throw 7` + 外层 `catch(int)`，personality 槽换真 `__gxx_personality_v0` |
+| `run.sh` | 一键编译 + 链接 + 运行 + 断言（PIE / -no-pie / 交叉验证），PASS/FAIL 打印，退出码 0/1 |
 
-## 三步各验证了什么
+## 验证内容
 
-**第一步（无 LSDA）**：给汇编函数挂 `.cfi_personality 0x1b, z1_stub_personality`，
-personality 不解析任何表，靠 `_Unwind_GetIP` 落在 `[函数起点, 函数末尾)` 判断"这是我的帧"。
-断言：personality 在两阶段都被调用（SEARCH 一次、CLEANUP|HANDLER_FRAME 一次）、返回
-`_URC_INSTALL_CONTEXT` 后 `_Unwind_SetIP` 真的把控制跳到硬编码的 landing pad、landing pad 里
-`%rax`（GR0）等于 `_Unwind_SetGR` 传进来的 exception 指针。
+**第一步（无 LSDA，0x1b 直连）**：给汇编函数挂 `.cfi_personality 0x1b, z1_stub_personality`，
+personality 不解析任何表，靠 `_Unwind_GetIP` 落在 `[函数起点, 函数末尾)` 认领自己的帧。
+断言：两阶段都被调用（SEARCH 一次、CLEANUP|HANDLER_FRAME 一次）、`_Unwind_SetIP` 生效、
+landing pad 里 `%rax`（GR0）= exception 指针。此用例保留，作为「0x1b 直连同链接单元符号可用」的活证据。
 
-**第二步（真 LSDA）**：`.cfi_lsda 0x1b, .LLSDA_step2` + 手写 `.gcc_except_table`。
-保护区里先跑一次 `_Unwind_Backtrace`、一次 `_Unwind_ForcedUnwind`，最后真正抛出。
-断言：personality 按 call-site 表找到 landing pad（地址/区间全部来自表格，硬编码不可能过）、
-返回 7、GR0 是 exception 指针、解码错误码为 0；`_Unwind_Backtrace` 能穿过本帧（7 帧）；
-`_Unwind_ForcedUnwind` 期间 personality 走 FORCE_UNWIND 分支 ≥1 次且 `_Unwind_SetIP` **0 次**。
+**第二步（GCC 同款 LSDA，0x9b 间接 personality）**：`.cfi_lsda 0x1b, .LLSDA_step2` + 20 字节 LSDA。
+保护区内先跑一次 `_Unwind_Backtrace`（只走 CFI，实测**不调用** personality）、
+一次 `_Unwind_ForcedUnwind`（带 `_UA_FORCE_UNWIND` 调 personality），最后真正抛出。
+断言：personality 用 action filter 判定 catch-all + 安装 landing pad（地址/区间全来自表）、
+返回 7、GR0 是 exception 指针、解码错误码 0；FORCE_UNWIND 路径被走到且 `_Unwind_SetIP` 0 次；
+action filter>0 + null TType 项被判为 catch-all（计数 ≥2：phase1 + phase2 各解析一次）；
+typed catch 计数 0（本夹具没有 typed catch）；cleanup 计数 0（action 下标 1 没被误判 cleanup）。
 
-**第三步（两阶段行为）**：栈由内到外是
-`z1_step3_nopad_fn`（挂 personality+LSDA，但保护区条目的 landing pad=0）
-→ `z1_step3_cleanup_fn`（LSDA 条目 action 下标=0，纯清理，LP 叫 B）
-→ `z1_step3_handler_fn`（action 下标=1，catch-all，LP 叫 A）。
-断言：phase 1 只由外层认领 handler；phase 2 先给中间 cleanup 帧安装上下文 → **B 先跑**，
-B 里改全局状态后调 `_Unwind_Resume` 继续展开 → **A 后跑**；两层各跑一次、顺序正确；
-没有 landing pad 的中间帧被静默穿过；两个 LP 都拿到同一个 exception 指针。
+**负向 A（编码非法）**：LSDA 的 TType encoding 从 `0x9b` 改成 `0xfe`（1 个字节）。
+`0xfe` 的低 4 位不是合法 DW_EH_PE 格式，且按宽松解析会让 TType 偏移字段「重新出现」、
+把后面 call-site 编码字节吃掉造成错位/越界。断言：`_URC_FATAL_PHASE1_ERROR`、
+错误类别是「编码非法 / 表越界」（本解码器报 `PA_LSDA_ERR_ENCODING`）、landing pad 不执行。
 
-**负向**：`z1_broken_lsda.S` 和第二步的差别只有 LSDA 头的 TType encoding 字节：
-`0xff` → `0xfe`（1 个 bit）。断言：`_Unwind_RaiseException` 返回 `_URC_FATAL_PHASE1_ERROR`、
-`pa_personality_last_error == PA_LSDA_ERR_ENCODING`、landing pad 完全没执行。
-另外 driver 里有一个反例断言：栈上没有任何认领者时，`_Unwind_RaiseException` 返回
-`_URC_END_OF_STACK`（不是崩、不是 0），并且 phase 2 根本不会开始。
+**负向 B（表越界）**：LSDA 头合法（call-site 编码 `0x04`=udata8、表长 8 字节），
+但 udata8 下每条 call-site 至少 25 字节 > 8 字节。断言：`_URC_FATAL_PHASE1_ERROR`、
+错误码 `PA_LSDA_ERR_TRUNCATED`（「表越界」），不越读崩溃。
 
-## 实测出来的 LSDA 字节（给 Z2 抄）
+**filter<0（exception spec）**：见下文「filter<0 的处理」。断言：不被当 handler、
+继续展开 → `_URC_END_OF_STACK`、landing pad 不执行、不是解码错误、`filter<0` 诊断计数 +1。
 
-三份 LSDA 都是「LPStart 省略、TType 省略、call-site 用 uleb128」，全部无重定位，
-PIE / -no-pie 通用。字段：LPStart enc | TType enc | call-site enc | call-site 表长 |
-若干条目(start, len, lp, action) | action 表 | 对齐填充。
+**第三步（两阶段行为）**：栈由内到外 `nopad`（LSDA 有表但 lp=0）→ `cleanup`（action 下标 0）
+→ `handler`（filter=1 + null TType 项）。断言：phase 1 只由外层认领 handler；phase 2 先给
+cleanup 帧安装上下文 → **B 先跑**，B 改状态后 `_Unwind_Resume` → **A 后跑**；各一次、顺序正确；
+无 landing pad 的中间帧被静默穿过；两个 LP 都拿到同一个 exception 指针；
+cleanup 条目判定计数 ≥2、catch-all 计数 ≥2、filter<0 计数 0。
+
+**交叉验证（真 `__gxx_personality_v0`）**：`z1_step2.S` 用 `-Wa,--defsym,Z1_CROSSCHECK=1`
+编出「保护区内只有一条 C++ `throw 7`」的变体（LSDA 结构与主夹具同形，20 字节、`ff 9b` 开头），
+personality 槽在运行期填 `__gxx_personality_v0`，外层是真正的 C++ `try { ... } catch (int)`。
+断言输出 `[crosscheck] caught=0 lp_calls=1 fn_ret=7 z1_lp_seen=1`：
+**夹具帧被 gcc personality 当作 catch-all，异常被吃掉，landing pad 恰好跑一次，程序正常退出。**
+（旧形态 filter=0 时，同一测试会得到 `caught=7, lp_calls=1`：被当 cleanup，异常继续往外走。）
+
+## 实测出来的 LSDA 字节（Z1.5，GCC 同款）
+
+主夹具 `z1_step2.o`（20 字节，与 gcc -O1 catch-all 用例同形；偏移值随代码布局不同）：
 
 ```
-z1_step2.S（tests/exc/z1_rt/z1_step2.S 的 .LLSDA_step2）：
-  ff ff 01 04  08 17 26 01  00 00 00 00
-  LPStart omit | TType omit | call-site enc=01(uleb128) | 表长=4
-  条目: start=8 len=0x17 lp=0x26 action=1 | action 表 = 00 00 | 对齐填充
-
-z1_step3.S 三个 LSDA：
-  handler: ff ff 01 04  08 09 18 01  00 00 00 00
-  cleanup: ff ff 01 04  08 09 18 00  00 00 00      ← action 下标 0 = 纯清理
-  nopad  : ff ff 01 04  08 09 00 00                ← lp = 0 = 这一段没有 landing pad
-
-z1_broken_lsda.S（负向，只改 1 bit）：
-  ff fe 01 04  08 09 18 01  00 00 00 00            ← 第 2 字节 0xff→0xfe，非法编码
+ff 9b 11 01 08 08 17 26 01 3f 05 00 00 01 00 00 00 00 00 00
+  |  |  |  |  |  |  |  |  |  |  |  |  |  |  |  |  |  |  |  |
+  |  |  |  |  |  |  |  |  |  |  |  |  |  |  |  |  +--+--+--+-- TType[1] = 4 字节 0（无重定位）→ null type_info* = catch(...)
+  |  |  |  |  |  |  |  |  |  |  |  |  |  +--+-- action[0] = (filter=1, next=0) 两个 SLEB128
+  |  |  |  |  |  |  |  |  |  |  |  +--+--+--+ 条目 2：LP 内 call 的保护区，lp=0、action=0
+  |  |  |  |  |  |  |  |  |  +--+--+--+ 条目 1：被保护 call → LP，action 下标 1
+  |  |  |  |  |  |  |  +--+ call-site 表字节长度 = 8（2 条）
+  |  |  |  |  |  |  +-- call-site 编码 = 0x01 (uleb128)
+  |  |  |  |  +--+-- TType 表偏移 = 0x11（从该 uleb 之后到表**末尾**）
+  |  |  |  +-- TType 编码 = 0x9b = indirect|pcrel|sdata4
+  |  |  +-- LPStart 编码 = 0xff（省略 → 用 FDE region start）
+  |  +--（同上）
+  +-- ...
 ```
 
-- 偏移基准：LPStart 省略时 = FDE 的 region start = 函数起点；`start/len/lp` 都是相对 LPStart 的 uleb128；
+其他夹具（实际 readelf -x 结果）：
+
+```
+z1_step2 交叉验证变体（同一 .S + --defsym，20 字节）：
+  ff 9b 11 01 08 08 05 14 01 2d 05 00 00 01 00 00 00 00 00 00
+z1_step3 handler（20 字节，GCC catch-all 同形）：
+  ff 9b 11 01 08 08 09 18 01 20 05 00 00 01 00 00 00 00 00 00
+z1_step3 cleanup（12 字节，GCC cleanup 同形，ttype 省略、2 条 call-site）：
+  ff ff 01 08 08 09 18 00 28 12 00 00
+z1_step3 nopad（8 字节，lp=0 的保护区）：
+  ff ff 01 04 08 09 00 00
+z1_broken_lsda（负向 A，TType 编码 0xfe；16 字节）：
+  ff fe 0d 01 04 08 09 18 01 01 00 00 00 00 00 00
+z1_broken_table（负向 B）：ff ff 04 08 + 32 字节 0（表长 8 但 udata8 条目 ≥25 字节）
+z1_spec_lsda（filter=-1；12 字节）：
+  ff ff 01 04 08 09 18 01 7f 00 00 00
+```
+
+- 偏移基准：LPStart 省略时 = FDE 的 region start（函数起点）；`start/len/lp` 相对 LPStart 的 uleb128；
   `action` 恒为 uleb128。
-- **cleanup 与 handler 的判据是 call-site 第 4 个字段（action 下标）是否 0**：
-  0 = 只做清理（phase 1 不认领，phase 2 安装上下文）；非 0 = 指向 action 表的记录，是 handler。
-  action 表那条记录才是两个 SLEB128：`(type filter, next offset)`。
-  GCC 14 对 `catch (...)` 实测是 `filter=1 + TType 表里一个 null type_info 项`（见下），
-  而 ABI 也允许 `filter=0` 表示 catch-all；**我们的 personality 故意不读 action 表/filter**，
-  所以两种写法都兼容（Z3 做类型过滤时再读，扩展点见 rt_personality.c 里 `Z3 扩展点` 注释）。
-- **TType 表的 offset 语义**（GCC 14 实测，容易踩）：它是 uleb128，含义是「从该 uleb 字段之后的位置
-  到 TType 表**末尾**的偏移」；`filter=i` 的条目在 `TType - i * size_of_encoded_value`（反向下标，
-  GCC 的 `get_ttype_entry` 就这么取）。GCC 非 PIE 用 TType enc `0x03`(udata4)，PIE 用 `0x9b`
-  (indirect|pcrel|sdata4)；类型表里 null type_info 表示 catch-all。
-- CIE 实测（本夹具）：
-  `Augmentation: "zPLR"`，augmentation data `1b ed ff ff ff 1b 1b`
-  = personality enc `0x1b` + 4 字节 pcrel 偏移 + LSDA enc `0x1b` + FDE enc `0x1b`。
-  第一步没有 LSDA 时是 `"zPR"`。
+- **action 表的记录是两个 SLEB128**：`filter` 和 `next`；`next!=0` 表示链下一条（相对记录末尾的字节偏移）。
+  action 表紧跟在 call-site 表之后。
+- **cleanup / handler 判据（ABI）**：call-site 的 `action 下标 == 0` → 纯 cleanup；
+  `action 下标 != 0` → 读 action 记录：`filter==0` cleanup，`filter>0` catch handler，
+  `filter<0` exception spec。**`filter>0` 的 catch 还要读 TType 表**：
+  null type_info* = catch-all；非 null = typed catch（类型匹配由 personality 做）。
+- **TType 表偏移语义**：uleb128，从该字段之后到 TType 表**末尾**的偏移；第 i 项在 `表尾 - i*size`
+  （反向索引，GCC 的 `get_ttype_entry` 就这么取）。GCC 非 PIE 的 TType enc 是 `0x03`(udata4)，
+  PIE 是 `0x9b`；本夹具统一用 `0x9b`（两种链接方式都验证过）。
+- **null TType 项为什么是 4 字节 0 而不是「指针槽」**：libgcc `read_encoded_value_with_base` 对
+  `result == 0` 有特判——不施加 pcrel/funcrel 相对基址、也不做 indirect 解引用，直接返回 0。
+  所以 `0x9b` 编码下 4 字节 0 + 无重定位 = null type_info*（GCC 自身写法）。我们的解码器照此实现。
+- CIE 实测：`Augmentation: "zPLR"`，augmentation data `9b <4 字节 pcrel> 1b 1b`。
+  第一步（无 LSDA、0x1b 直连）是 `"zPR"`，aug data `1b <4 字节 pcrel> 1b`。
 
-## personality 契约要点（实测）
+## personality 指针：0x9b + 运行期槽（与 gcc 的差异）
 
-- phase 1 `_UA_SEARCH_PHASE`（actions=0x1）：每个挂了 personality 的帧都会被问一次。
-  有 landing pad 且 action 下标非 0（handler）→ `_URC_HANDLER_FOUND`；否则 `_URC_CONTINUE_UNWIND`。
-- phase 2 `_UA_CLEANUP_PHASE`（actions=0x2）：带 `_UA_HANDLER_FRAME` 时 actions=0x6。
-  handler 帧：`_Unwind_SetGR(GR0=exc)` + `_Unwind_SetIP(lp)` → `_URC_INSTALL_CONTEXT`；
-  纯清理帧（action=0，且没有 HANDLER_FRAME）：同样 `INSTALL_CONTEXT`，LP 里必须自己
-  `_Unwind_Resume` 继续；外层 catch 帧（无 HANDLER_FRAME）：`CONTINUE_UNWIND`。
-- phase 2 怎么判断"哪一帧是 handler 帧"（从 libgcc_s 反汇编实测）：phase 1 找到 handler 后，
-  libgcc 把该帧的 `_Unwind_GetCFA(context)`（按 CFI 里 cfa 是否带标志位减 0/1）存进
-  `exc->private_2`（并把 `private_1` 清零）；phase 2 每帧比较 `_Unwind_GetCFA(ctx) == exc->private_2`
-  来决定要不要加 `_UA_HANDLER_FRAME`。**这意味着传给 `_Unwind_RaiseException` 的异常对象必须是
-  真正那个对象且 private_1/private_2 抛前清零、中途不能被踩**（我们踩过一次，见坑 7）。
-- GR0（x86-64 的 `%rax`）= exception 指针。GR1（`%rdx`）我们简化为 0；GCC 产物会在 landing pad 里
-  用 `cmpq $1,%rdx` 之类做分派（Z2 由我们自己生成 LP，约定可自定，但别假设 GR1 有值）。
-- `_UA_FORCE_UNWIND`（actions=0x8）时必须只 `CONTINUE_UNWIND`、**不得** SetIP/SetGR 安装上下文，
-  否则运行时 traceback/forced unwind 会崩。实测 `_Unwind_Backtrace` 本身**不调用** personality
-  （只走 CFI），真正带 FORCE_UNWIND 调 personality 的是 `_Unwind_ForcedUnwind`。
+夹具的 CIE 用 `.cfi_personality 0x9b, z1_personality_slot`（0x9b = indirect|pcrel|sdata4，
+**gcc 同款编码**），但 `z1_personality_slot` 是普通 8 字节数据符号，由 driver 在运行期填：
+
+- 主测试：`z1_personality_slot = (void *)&pa_personality`；
+- 交叉验证：`z1_personality_slot = (void *)&__gxx_personality_v0`。
+
+好处是**同一个 .S 的同一套 LSDA 字节**可以分别交给两种 personality 解释，交叉验证不是在
+「另一份复制夹具」上做的。与 gcc 的差异：gcc 在 `.data.rel.local` 里发静态 `DW.ref.<符号>` 槽
+（`.quad 目标函数`，运行期不再改）。两种写法 CIE 字节层面的编码一模一样，只是槽的初始化方式不同；
+PIE / -no-pie 都验证通过。注意 0x9b 的操作数必须是「存指针的 8 字节槽」，直接写函数符号会
+汇编/链接通过、运行期 SIGSEGV（见坑 2）。
+
+## ABI 语义要点（从 libsupc++ 源码 + 实测核对）
+
+phase 1 `_UA_SEARCH_PHASE`（actions=0x1）/ phase 2 `_UA_CLEANUP_PHASE`（0x2，
+带 handler 帧时 0x6）里，personality 对每个挂了 personality 的帧都调用。判定：
+
+| call-site action 下标 | action 记录 | 结论 |
+|---|---|---|
+| 0 | （没有记录） | 纯 cleanup：phase1 CONTINUE，phase2 INSTALL_CONTEXT 跑 LP |
+| !=0 | filter == 0 | cleanup（同上） |
+| !=0 | filter > 0 + TType 项为 null | **catch-all handler**：phase1 HANDLER_FOUND，phase2 INSTALL_CONTEXT |
+| !=0 | filter > 0 + TType 项非 null | typed catch（本实现**不做类型匹配**，一律当 handler，Z3 再补） |
+| !=0 | filter < 0 | exception spec（本实现选择 CONTINUE_UNWIND + 诊断计数，见下） |
+
+phase 2 里 `_UA_HANDLER_FRAME` 的判定（libgcc 反汇编实测）：phase 1 找到 handler 后把该帧的
+`_Unwind_GetCFA(context)` 存进 `exc->private_2`（private_1 清零）；phase 2 每帧比较
+`_Unwind_GetCFA(ctx) == exc->private_2` 决定是否加 `_UA_HANDLER_FRAME`。所以传给
+`_Unwind_RaiseException` 的异常对象必须是真实那个、private 字段抛前置零、中途不能被踩。
+
+GR0（x86-64 的 `%rax`）= exception 指针；GR1（`%rdx`）我们清 0（简化路径；gcc 的 landing pad
+会用 GR1 做分派，Z2 生成 LP 时自定义约定即可）。landing pad 入口的 rsp = 抛出点那条 call
+**之前**的 rsp（不是 CFA），所以 LP 的返回路径照抄正常 epilogue 即可。
+
+## filter<0（exception spec）的处理选择
+
+**选择：CONTINUE_UNWIND + `pa_dbg_spec` 诊断计数，不 terminate，也不安装 landing pad。**
+
+理由：
+1. Z2 的 codegen 不会发射负 filter（我们的 except 语义由 landing pad 里的分发块负责），
+   所以正常路径上这条分支不可达；
+2. 一旦真的遇到（比如误读或将来混入 C++ 产物），ABI 的正确行为是执行 spec 检查并可能
+   调 `__cxa_call_unexpected`/terminate——我们既没有 spec 表也没有该协议，贸然 terminate
+   会把用户进程直接 abort；选择「当作本帧无关、继续展开」是保守且可观测的（有诊断计数），
+   同时不会把异常错误地吞掉；
+3. 等 Z4 真做 exception spec 时，在 `pa_classify_action` 的 `filter < 0` 分支里实现
+   「读 TType 表里的 spec 列表 + 匹配失败 → 交给 LP 调 __cxa_call_unexpected」即可；
+   `z1_spec_lsda.S` 用例已经把「我们选择 CONTINUE」钉成回归断言。
+
+## 交叉验证输出（run.sh 里真实输出）
+
+```
+[PASS] 交叉验证（-no-pie）：真 __gxx_personality_v0 把夹具帧当 catch-all（LP 1 次、异常被吃掉）
+    [crosscheck] caught=0 lp_calls=1 fn_ret=7 z1_lp_seen=1
+[PASS] 交叉验证（PIE）：真 __gxx_personality_v0 把夹具帧当 catch-all（LP 1 次、异常被吃掉）
+    [crosscheck] caught=0 lp_calls=1 fn_ret=7 z1_lp_seen=1
+```
+
+`caught=0` = 外层 `catch (int)` 没拿到异常（被夹具帧的 catch-all 吃掉了）；
+`lp_calls=1` = 夹具 landing pad 恰好跑一次；`fn_ret=7` = 夹具 handler 正常返回；
+如果是旧形态（filter=0，ABI 上是 cleanup），同一程序会输出 `caught=7 lp_calls=1` 并 exit 1。
 
 ## 坑清单（每条都有实测现象 / 原因 / 规避）
 
-### 坑 1：`.cfi_personality` 的编码语义与"直连 vs DW.ref"
-- `0x1b` = `DW_EH_PE_pcrel | DW_EH_PE_sdata4`（**sdata4**，不是 udata4=0x03）。
-- 同链接单元（我们和 `pa_personality` 编进同一个可执行文件）用 `0x1b` 直连完全可以：
-  `-no-pie` 和 `-pie` 都实测链接 + 运行通过（本仓库 run.sh 两套都跑）。
-- 但 `0x1b` 直连共享库符号（例如 `__gxx_personality_v0`）在 PIE 下会被 ld 拒绝，原文：
-  `relocation R_X86_64_PC32 against symbol '__gxx_personality_v0@@CXXABI_1.3' can not be used when making a PIE object; recompile with -fPIE`。
-  真接 DSO 时要按 GCC 的写法用 `0x9b`（indirect）+ `DW.ref.<符号>` 间接层。
-  实测 `0x9b + DW.ref` 与 `0x1b` 直连在本夹具上等价（28 项断言全过）。
-- `.cfi_lsda 0x1b, <本地 .gcc_except_table 标签>` 在 PIE/-no-pie 下都正常（pcrel 由链接器解析），
-  我们的 LSDA 内容本身不含绝对地址（全 uleb 相对偏移），所以两种模式字节一样、都能跑。
+### 坑 1：catch-all 必须有 TType 表 —— `filter==0` 是 cleanup，不是 catch-all
+这是 Z1.5 的核心修正。「call-site action 下标 != 0 就当 handler」是私有约定：
+ABI 里 handler 由 action 记录的 **filter>0** 决定；`filter==0` 是 cleanup；
+catch-all 必须 `filter>0` **且** TType 表里对应项是 null type_info*（4 字节 0 + 无重定位）。
+用真 `__gxx_personality_v0` 实测旧形态：handler 夹具被当 cleanup，LP 跑 1 次后异常继续
+传给外层 `catch(int)`（`caught=7`）；而 `ttype=0xff` + `filter=1` 会在 phase 1 直接
+SIGABRT（get_ttype_entry 走 `__gxx_abort`）。结论：**类型表不能省**；
+`ttype_encoding=0xff` 只适合真正的 cleanup-only LSDA。
 
-### 坑 2：`0x9b` 少了 `DW.ref.` —— 汇编器/链接器沉默，运行期 SIGSEGV
-把坑 1 的 `0x9b` 直接写成普通函数符号（`.cfi_personality 0x9b, pa_personality`）：
-GAS 不报错、链接（符号存在时）也不报错，但 CIE 里 `0x9b` 的语义是"字段值是间接层的地址"，
-展开器会把函数代码的头 8 个字节当地址读出来跳过去 → **运行期 SIGSEGV（139），没有任何输出**。
-这是典型的"汇编器沉默、运行期才炸"，想省 `DW.ref` 请用 `0x1b`，不要用 `0x9b` 直连函数符号。
+### 坑 2：`.cfi_personality 0x9b` 的操作数必须是「指针槽」，不是函数本体
+`0x9b` = indirect|pcrel|sdata4：展开器先按 pcrel 找到槽地址，再读 8 字节当作 personality 指针。
+写成 `.cfi_personality 0x9b, <函数符号>`（缺 DW.ref/槽）：GAS 和 ld 都不报错，但运行期会把
+函数代码的头 8 字节当地址跳过去 → **SIGSEGV（139），没有任何输出**。
+本仓库夹具的做法：槽 = driver 里的 `z1_personality_slot` 数据符号，运行期填函数指针
+（见上文「personality 指针」）；gcc 的做法是 `.data.rel.local` 里静态 `.quad 目标函数`。
+同链接单元的符号也可以用 `0x1b` 直连（第一步夹具就这么做，PIE/-no-pie 都验证过）；
+但指向共享库符号（如 `__gxx_personality_v0`）时 PIE/-shared 会被 ld 拒绝：
+`relocation R_X86_64_PC32 against symbol ... can not be used when making a PIE object`。
 
-### 坑 3：只挂 `.cfi_lsda`、忘了 `.cfi_personality` —— GAS 静默接受，handler 永远没人认领
-实测 GAS 不报错、不警告，产物 CIE augmentation 变成 `"zLR"`（没有 P）。运行时展开器只会读 LSDA
-但没有人认领 handler，`_Unwind_RaiseException` 一路走到栈顶返回 `_URC_END_OF_STACK`，
-landing pad 一行都不会执行。排查口诀：`readelf --debug-dump=frames` 看 CIE 是 `zPR`（无 LSDA）、
-`zPLR`（有 personality + LSDA）还是 `zLR`（少了 personality，必错）。
+### 坑 3：只挂 `.cfi_lsda`、忘了 `.cfi_personality`
+GAS 静默接受（CIE 变成 `"zLR"`），运行时没有任何人认领 handler，
+`_Unwind_RaiseException` 一路到栈顶返回 `_URC_END_OF_STACK`，landing pad 不执行。
+排查口诀：`readelf --debug-dump=frames` 看 CIE 是 `zPR`（无 LSDA）、`zPLR`（都在）还是 `zLR`（缺 personality）。
 
-### 坑 4：帧没有 `.eh_frame`（漏 `-funwind-tables`）—— 展开在抛点就断
-汇编夹具和 C helper 都要有 CFI。实测把 driver.c 用
-`-fno-asynchronous-unwind-tables -fno-unwind-tables` 编译（抛点 `z1_raise_c` 就在 driver.c 里）：
-所有"抛出并被 LP 接住"的用例全部失败（返回 0、LP 没执行），因为展开器在抛点这一帧就找不到 FDE，
-phase 1 直接 `_URC_END_OF_STACK`，汇编帧上的 personality 根本没被调用。
-规避：driver/helper 一律 `-funwind-tables`（本项目 x86-64 上默认已开异步 unwind table，但显式写死）。
+### 坑 4：landing pad 里可能抛出的 call 必须被 call-site 表覆盖，否则标准 personality terminate
+GCC 对 cleanup/catch 的 LP 里每条可能抛出的 call 都会再发一条 `lp=0, action=0` 的保护区。
+缺这条时，`_Unwind_Resume` 阶段标准 personality 拿到「不在表内的 PC」→ found_terminate →
+`std::terminate`。本仓库 `z1_step3.S` 的 cleanup LP 里既有 `call z1_note` 又有
+`call _Unwind_Resume`，专门补了一条覆盖这两个 call 的 `lp=0` 记录；handler LP 里的
+`call z1_note` 同样补了。第二步夹具的 LP 只有内存写和 `call z1_note`，也补了。
 
-### 坑 5：landing pad 入口的 `%rsp` 是"抛出点 call 之前的值"，不是 CFA
-- 现象：如果按"展开器已经把 CFA 恢复到 rsp"的直觉写 LP 返回路径，进程**死循环**——
-  LP 的 `ret` 又跳回 LP 自身（本仓库最初版本就是这样；gdb 里 LP 第一个断点反复命中，
-  `timeout` 杀进程返回 137）。
-- 正确规则：**LP 入口 rsp = 抛出点那条 `call` 执行前的 rsp（也就是函数体正常路径的 rsp）**。
-  所以 LP 的返回路径可以照抄正常 epilogue（例如 prologue `subq $8` → LP 里 `addq $8,%rsp; ret`）；
-  被调用者保存寄存器也恢复成调用点的值；返回地址仍在 `CFA-8`。
-- 怎么量出来的（不依赖夹具布局）：
-  1. gdb 断在 LP：`subq $8` 的帧里 LP 入口 `rsp = 函数入口 rsp - 8`，`[rsp+8]` 是返回地址；
-  2. 更有说服力的是 GCC 自己的产物：`-O1` 编一个 `subq $72` 的大帧函数（reference 探针），
-     它的 landing pad 直接 `jmp` 正常 epilogue 的 `addq $72,%rsp; ret`——只有 LP 入口 rsp 等于
-     调用点 rsp（`E-72`，而不是 `CFA-16 = E-8`）才可能算对；
-  3. 我们把自己的第二步夹具 prologue 从 `subq $8` 临时改成 `subq $24`（LP 相应 `addq $24`），
-     43 项断言同样全过——规则与帧大小无关（变体只用于验证，未入库）。
-- 推论：Z2 生成 LP 时，LP 里"恢复栈"这件事 = 生成和正常返回路径完全一样的 epilogue；
-  不需要额外的 CFA 修正。注意 LP 区段的 `.cfi_def_cfa*` 要按"调用点状态"发射（见坑 6）。
+### 坑 5：`0xfe` 不是「合法但含义不同」，是结构非法
+TType encoding `0xff` 时偏移字段整段消失；改成 `0xfe` 后（`0xfe != 0xff`）偏移字段
+「重新出现」，紧随其后的 call-site 编码字节被吃成 TType offset，整个 header 错位
+（call-site 编码被读成 `0x04`=udata8，表越界）。我们的解码器在 TType encoding 校验处
+就报 `PA_LSDA_ERR_ENCODING`；另有独立用例（`z1_broken_table.S`）验证「表越界」判定
+（`PA_LSDA_ERR_TRUNCATED`）。断言消息统一写成「编码非法 / 表越界」。
 
-### 坑 6：landing pad 必须在 FDE 内，且 LP 区段 CFI 要描述 LP 入口状态 —— 否则从 LP 里 `_Unwind_Resume` 直接 SIGABRT 且无输出
-- 现象：把 cleanup 帧的 landing pad 放到 `.cfi_endproc` 之后（LP 没有 FDE 覆盖），
-  LP 里调 `_Unwind_Resume` 时进程 `SIGABRT`（退出码 **134**），**stderr 一个字都没有**；
-  gdb 回溯：`abort ← libgcc_s.so.1 ← <landing pad 所在函数>`。
-- 原因：`_Unwind_Resume` 从 LP 的返回地址重新 `uw_frame_state_for` 找 FDE，找不到就 abort。
-- 规避：LP 留在 `.cfi_startproc/.cfi_endproc` 范围内；LP 区段按"进入 LP 时的真实状态"补 CFI。
-  我们的每一步都这样写：LP 标签后补 `.cfi_def_cfa_offset <call 点的 CFA 规则>`；LP 里如果临时
-  `subq` 出栈槽（例如给 helper 调用保存 exc），要成对补 `.cfi_def_cfa_offset` 调整。
-- 复现方式：把 `z1_step3.S` 里 cleanup 的 LP 整段挪到 `.cfi_endproc` 之后（并去掉 LP 内的
-  `.cfi_*` 指令，否则 GAS 报 "CFI instruction used without previous .cfi_startproc"），重跑即可。
+### 坑 6：landing pad 入口的 `%rsp` 是「抛出点 call 之前的值」，不是 CFA
+现象：按「展开器已经恢复 CFA 到 rsp」写 LP 返回路径 → 进程死循环（LP 的 `ret` 跳回自己，
+gdb 里同一断点反复命中，timeout 杀进程 137）。
+正确规则：**LP 入口 rsp = 抛出点那条 call 执行前的 rsp**（= 函数体正常路径的 rsp），
+所以 LP 的返回路径照抄正常 epilogue；被调用者保存寄存器也恢复成调用点的值。
+怎么量出来的（不依赖夹具布局）：
+1. gdb 断在 LP：`subq $8` 的帧里 LP 入口 `rsp = 函数入口 rsp - 8`，`[rsp+8]` 是返回地址；
+2. GCC 自己的产物：`-O1` 编 `subq $72` 的大帧函数，LP 直接 `jmp` 正常 epilogue 的
+   `addq $72,%rsp; ret`——只有 LP 入口 rsp 等于调用点 rsp（E-72，而不是 CFA-16=E-8）才可能对；
+3. 本仓库把第二步夹具 prologue 从 `subq $8` 临时改成 `subq $24`（LP 相应 `addq $24`），
+   全部断言同样通过——规则与帧大小无关（变体只用于验证，未入库）。
+推论：Z2 生成 LP 时不需要额外的 CFA 修正，照抄正常 epilogue 即可。
 
-### 坑 7：异常对象本身会被 libgcc 写 —— `%rdi` 被中间调用踩掉会表现为"phase 2 找不到 handler 帧"
-我们踩过的真实 bug：第二步夹具为了加 traceback 探针，在保护区里先 `call z1_trace_probe`，
-再 `call z1_raise_c`；但 `z1_raise_c` 的 exc 参数是入口时的 `%rdi`，被探针调用 clobber 了，
-于是 `_Unwind_RaiseException` 收到的是栈上垃圾指针。现象非常迷惑：
-- phase 1 正常找到 handler（`_URC_HANDLER_FOUND`），phase 2 却给同一帧 actions=0x2（没有
-  `_UA_HANDLER_FRAME`），最后 `_Unwind_RaiseException` 返回 `_URC_FATAL_PHASE2_ERROR`(2)；
-- 因为 libgcc 把 handler 帧 CFA 写进的是那个"垃圾 exception 对象"的 `private_2`，
-  而 phase 2 的栈活动又把垃圾对象覆盖了，比较自然失败。
-规避：汇编里把 `%rdi`（或任何跨 call 存活的值）存进自己的栈槽，每次调用前重装；
-异常对象必须 16 字节对齐、`private_1/private_2` 抛前置 0、全程只用一个真实对象。
-定位技巧：`PA_PERSONALITY_TRACE` + `Z1_TRACE=1` 打印每帧 `actions/ip/pc/cfa`，
-并在日志里看 `exc` 指针是否等于自己传进去的地址（我们就是靠这个一眼看出来的）。
+### 坑 7：landing pad 必须在 FDE 内，且 LP 区段 CFI 要描述 LP 入口状态
+否则 LP 里 `_Unwind_Resume` 时 libgcc 找不到 FDE → `SIGABRT`（退出码 **134**），
+**stderr 一个字都没有**；gdb 回溯是 `abort ← libgcc_s.so.1 ← <LP 所在函数>`。
+复现：把 `z1_step3.S` 的 cleanup LP 整段挪到 `.cfi_endproc` 之后（并去掉 LP 内 `.cfi_*`
+指令，否则 GAS 报 `CFI instruction used without previous .cfi_startproc`），重跑即 SIGABRT。
+规避：LP 留在 `cfi_startproc/endproc` 内；LP 区段按「进入 LP 时的真实状态」补
+`.cfi_def_cfa_offset`（本仓库每个 LP 都这么写，包括 LP 里临时 `subq` 后成对调整）。
 
-### 坑 8：personality 必须非 static 且 `__attribute__((used))`
-`.cfi_personality` 只在 `.eh_frame` 里留符号引用，C 代码里没人调用它。如果写成 static，
-`-O2` 会把它当死代码删掉，链接期报：
-`/usr/bin/ld: persref.o:(.eh_frame+0x12): undefined reference to 'hidden_personality'`。
-`pa_personality` 是非 static + `used`，stub 也一样。
+### 坑 8：异常对象会被 libgcc 写 —— `%rdi` 被中间调用踩掉会表现成「phase 2 找不到 handler 帧」
+真实踩坑：保护区里先 `call z1_trace_probe` 再 `call z1_raise_c`，而 `z1_raise_c` 的 exc
+参数是入口时的 `%rdi`，被探针调用 clobber → `_Unwind_RaiseException` 收到栈上垃圾指针。
+现象：phase 1 正常 HANDLER_FOUND，phase 2 给同一帧 actions=0x2（没有 HANDLER_FRAME），
+最后 `_URC_FATAL_PHASE2_ERROR`（因为 libgcc 把 handler 帧 CFA 写进了垃圾对象的 private_2，
+phase 2 再读时已被栈活动覆盖）。
+规避：汇编里把 `%rdi` 存进自己的栈槽、每次 call 前重装；异常对象 16 字节对齐、
+private 字段抛前置 0、全程只用一个真实对象。定位技巧：`PA_PERSONALITY_TRACE` + `Z1_TRACE=1`
+逐帧日志（含 cfa/action/kind），并看日志里的 exc 指针是不是自己传进去的那个。
 
-### 坑 9：LSDA 的对齐与节属性
-`.gcc_except_table` 里每个 LSDA 前 `.align 4`；节声明 `.section .gcc_except_table,"a",@progbits`。
-TType 表（如果发射）本身也要求编码宽度对齐（GCC 用 `.align 4` + `.long`）。
-我们的 LSDA 全用 uleb 相对偏移，所以没有任何重定位，PIE 下也不需要额外处理。
+### 坑 9：personality 必须非 static 且 `__attribute__((used))`
+`.cfi_personality` 只留符号引用，C 代码里没人调用；写成 static 会被 `-O2` 当死代码删掉，
+链接期报 `(.eh_frame+0x12): undefined reference to 'hidden_personality'`。
 
 ### 坑 10：personality 里 PC 语义 —— 拿到的是 call 之后的返回地址，要 -1
-展开器给的 IP 是"抛出点 call 之后的返回地址"。GCC `__gxx_personality` 用
-`_Unwind_GetIPInfo(ctx,&before)`，`before==0` 时把 IP 减 1 再查 call-site 表；不减的话，
-当抛出的 call 是保护区最后一条指令（返回地址正好落在区间末尾、半开区间取不到）时会查不到。
-我们的 `pa_personality` 同样处理。
+展开器给的 IP 是抛出点 call 之后的返回地址；用 `_Unwind_GetIPInfo(ctx,&before)`，
+`before==0` 时减 1 再查 call-site 表（GCC `__gxx_personality` 同样处理）。不减的话，
+当 call 是保护区最后一条指令（返回地址正好等于区间末尾）会查不到。
 
-### 坑 11：汇编约定
-- `.cfi_startproc/.cfi_endproc` 必须包住整个函数（含 LP）；`.cfi_endproc` 后再写 `.cfi_*` 会报
-  `CFI instruction used without previous .cfi_startproc`。
-- 帧里用 `%rsp` 相对 CFA（`.cfi_def_cfa_offset`）就够，不必强上 `%rbp`；没动过被调用者保存寄存器
-  就不需要 `.cfi_offset`。
-- 建议加 `.section .note.GNU-stack,"",@progbits`（GNU 工具链惯例，防止可执行栈标记）。
-  实测本环境 binutils 2.44 漏掉它**不报警告**，别指望链接器提醒你。
-- LP 里调用 helper 前注意 16 字节栈对齐：LP 入口 rsp 是调用点 rsp（调用点上 `rsp % 16 == 0`），
-  直接 `call` 就行；如果 LP 里又 `subq` 了非 16 倍数，记得补到 16 对齐。
+### 坑 11：`_Unwind_Backtrace` 不调用 personality，别拿它测 FORCE_UNWIND
+实测 traceback 只按 CFI 走帧、personality 一次都不会被调。真正会带 `_UA_FORCE_UNWIND`
+调 personality 的是 `_Unwind_ForcedUnwind`（本仓库第二步在保护区里触发它，并断言
+personality 只 CONTINUE、`_Unwind_SetIP` 0 次）。
 
-### 坑 12：`_Unwind_Backtrace` 不调用 personality，别拿它测 FORCE_UNWIND
-实测：`_Unwind_Backtrace` 只按 CFI 走帧，personality 一次都不会被调（我们最初加了个
-"backtrace 期间 personality 走 FORCE_UNWIND"的断言，计数是 0，才发现这一点）。
-真正会带 `_UA_FORCE_UNWIND` 调 personality 的是 `_Unwind_ForcedUnwind`；本仓库第二步
-用它在保护区里触发强制展开，断言 personality 走了 FORCE_UNWIND 分支、且 `_Unwind_SetIP` 0 次。
+### 坑 12：LSDA 对齐 / 节属性 / TType 表位置
+`.gcc_except_table` 里每个 LSDA 前 `.align 4`；节声明 `.section .gcc_except_table,"a",@progbits`。
+action 表与 TType 表之间是 `.align 4` 的 padding（不属于任何表，不能按「action 表长度」硬解析）。
+TType 表项按 ttype 编码定宽（0x9b → 4 字节），且 null 项必须「4 字节 0 + 无重定位」——
+用 `readelf -SW` 确认没有 `.rela.gcc_except_table`。
 
 ### 坑 13：PIE / -no-pie 要整套一致
-driver/夹具用 `-fno-pie` 就配 `-no-pie` 链接、用 `-fPIE` 就配 `-pie`；混用会出现
-"relocation ... can not be used when making a PIE object" 之类的链接错误。
-本仓库 run.sh 两套都跑（两套各 43 项断言全过），说明我们的 LSDA/CFI 写法与 PIE 无关。
+driver/夹具用 `-fno-pie` 就配 `-no-pie`，用 `-fPIE` 就配 `-pie`；混用会出现
+`relocation ... can not be used when making a PIE object`。本仓库 run.sh 两套都跑、各 58 项断言全过。
 
-## 已知局限（Z1 刻意不做，Z2/Z3 再补）
+### 坑 14：汇编约定
+``.cfi_startproc/`.cfi_endproc`` 必须包住整个函数（含 LP）；LP 里调用 helper 前注意 16 字节
+栈对齐（LP 入口 rsp 是调用点 rsp，直接 call 即可）；建议加
+``.section .note.GNU-stack,"",@progbits``（GNU 惯例；本环境 binutils 2.44 漏掉不报警）。
 
-1. **不做类型匹配**：`action != 0` 一律当 handler（catch-all），TType 表整个省略。
-   Z3 要做 phase 1 类型过滤时，在 `pa_find_landing_pad` 里从 action 表读 filter/next 即可
-   （扩展点已在 `rt_personality.c` 注释里标出；不要假设 filter 一定是 0 或 1）。
-2. action 表不解析、不校验；call-site 表也只做了"最长 4096 项 / LEB128 ≤10 字节"的合理性上限，
-   因为 `_Unwind_GetLanguageSpecificData` 不给我们 LSDA 长度，做不了真正的边界检查。
-3. 编码只支持 absptr/uleb128/udata2/udata4/udata8/sleb128/sdata2/sdata4/sdata8 的
-   absptr/pcrel/funcrel/aligned/indirect 组合；textrel/datarel 需要段基址，明确返回
-   `PA_LSDA_ERR_ENCODING`（当前 `.gcc_except_table` 产物用不到）。
-4. 异常类/foreign exception、exception spec、`_Unwind_Resume_or_Rethrow`、多线程/异步异常、
-   生成器/协程挂起（见设计文档"已知难点"）都不在 Z1 范围。
-5. LP 里 GR1（`%rdx`）简化为 0；GCC 的 landing pad 用 GR1 做分派，Z2 生成 LP 时自定义约定即可。
+## 已知局限（Z1.5 刻意不做，Z2/Z3/Z4 再补）
+
+1. **不做类型匹配**：`filter>0` 时会把 TType 表项解出来（顺便校验表），但非 null 的 typed catch
+   也一律按 handler 处理（catch-all 语义）。Z3 要做 phase 1 类型过滤时，在
+   `pa_classify_action` 的 filter>0 分支里用 `pa_get_ttype_entry` 拿 type_info* 做匹配、
+   不匹配时沿 `next` 继续读 action 链即可（结构已就位）。
+2. **filter<0（exception spec）**：选择 CONTINUE_UNWIND + 诊断计数（理由见上）。
+3. **TType 偏移/action 链只做了合理性校验**（反向索引下溢、action 指针/长度上限 64 条、
+   call-site 条目上限 4096），因为 `_Unwind_GetLanguageSpecificData` 不提供 LSDA 长度，
+   做不了真正边界检查；超界时以「表越界/编码非法」报错而不是静默错算。
+4. 编码只支持 absptr/uleb128/udata2/udata4/udata8/sleb128/sdata2/sdata4/sdata8 的
+   absptr/pcrel/funcrel/aligned/indirect 组合；textrel/datarel 需要段基址，明确报
+   `PA_LSDA_ERR_ENCODING`。
+5. crosscheck 只验证「结构/语义被 gcc personality 认作 catch-all」：夹具 LP 是正常返回，
+   没有走 `__cxa_begin_catch/end_catch`（C++ 异常对象会泄漏，程序马上退出，不影响裁决）。
+6. 异常类/foreign exception、多线程/异步异常、生成器/协程挂起（见设计文档「已知难点」）不在 Z1.5 范围。
 
 ## 给 Z2 的 codegen 约束（从本夹具直接抄）
 
-1. 函数级：`.cfi_personality 0x1b, pa_personality`（同一可执行文件；将来进 DSO 换 `0x9b + DW.ref`）
+1. 函数级：`.cfi_personality 0x9b, DW.ref.<personality>`（或运行期槽；gcc 同款编码）
    + `.cfi_lsda 0x1b, .LLSDA_xxx`。
-2. 保护区用一对标签界定在 `call` 前后；call-site 条目写 `start/len/lp/action` 四个 uleb128，
-   action 下标 0 = 纯清理、非 0 = handler；LPStart/TType 编码用 0xff 省略（catch-all 基线）。
-3. LP 代码的栈恢复 = 正常 epilogue（LP 入口 rsp 就是抛出点 call 前的 rsp），并在 LP 区段发射
-   与"调用点状态"一致的 CFI（`.cfi_def_cfa_offset` 等）。
-4. LP 里先按现有语义做类型匹配/清理：handler 帧直接跑 except 体；cleanup 帧必须 `_Unwind_Resume`。
-5. 抛点函数本身也要有完整 `.eh_frame`（`-funwind-tables` 已具备）。
-6. exception 对象：16 字节对齐、`_Unwind_Exception` 32 字节 + payload 跟在后面、
+2. catch-all LSDA 用 20 字节形态：`ff 9b <offset> 01 <len> <条目...> 01 00 <align4> 00000000`；
+   TType 偏移指向表末尾、null 项 4 字节 0 且**无重定位**；action 记录 `(filter=1, next=0)`。
+   cleanup-only 用 12 字节形态（`ff ff 01 <len> ...`，action 下标 0，无 action/TType 表）。
+3. 保护区用一对标签界定在 `call` 前后；call-site 条目 `start/len/lp/action` 四个字段
+   （前三个按 call-site 编码，action 恒 uleb128）。**LP 里每条可能抛出的 call 都要补一条
+   `lp=0, action=0` 的保护区**（否则标准 personality terminate）。
+4. LP 代码的栈恢复 = 正常 epilogue（LP 入口 rsp 就是抛出点 call 前的 rsp），LP 区段发射与
+   「调用点状态」一致的 CFI。
+5. LP 里先按现有语义做类型匹配/清理：handler 帧直接跑 except 体；cleanup 帧必须 `_Unwind_Resume`。
+6. 抛点函数本身也要有完整 `.eh_frame`（`-funwind-tables` 已具备）。
+7. exception 对象：16 字节对齐、`_Unwind_Exception` 32 字节 + payload 跟在后面、
    `private_1/private_2` 抛前置 0、只用一个真实对象。
