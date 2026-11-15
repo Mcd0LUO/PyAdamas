@@ -363,6 +363,11 @@ void TypeChecker::stmt_import(Import& im) {
                 continue;
             }
             if (al.name.find('.') != std::string::npos && al.asname.empty()) {
+                if (lenient_imports_) {
+                    declare(bind, t_unknown(), im.line);
+                    unsupported.push_back("import");
+                    continue;
+                }
                 err(im.line, im.col,
                     "dotted import needs 'as name' (or use from ... import)");
                 continue;
@@ -522,8 +527,12 @@ void TypeChecker::stmt_import_from(ImportFrom& im) {
                     cur_->modules[bind] = std::move(child);
                     continue;
                 }
-                err(im.line, im.col,
-                    std::format("module '{}' has no attribute '{}'", im.module, al.name));
+                if (lenient_imports_) {
+                    unsupported.push_back("import attribute");
+                } else {
+                    err(im.line, im.col,
+                        std::format("module '{}' has no attribute '{}'", im.module, al.name));
+                }
                 declare(bind, t_unknown(), im.line);
                 continue;
             }

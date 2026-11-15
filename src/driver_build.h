@@ -4,6 +4,7 @@
 #include <map>
 #include <memory>
 #include <optional>
+#include <functional>
 #include <string>
 #include <vector>
 
@@ -58,6 +59,13 @@ struct Program {
 // 内建模块（math/os/json/...）的签名表，实现在 builtin_sigs.cpp。
 ModuleInfoPtr builtin_module(const std::string& name);
 
+// check 模式用的 import 图解析：加载依赖模块的接口（不生成代码），
+// 返回一个 module_lookup 闭包给 TypeChecker。无法解析的依赖返回 nullptr
+// （调用方按 unknown 处理）。diagnostics 里收集真正解析失败的模块。
+using CheckLookup = std::function<ModuleInfoPtr(const std::string&)>;
+CheckLookup load_check_lookup(const std::string& entry_path,
+                               const std::vector<std::string>& include_dirs,
+                               std::vector<std::string>& missing);
 bool load_program(const std::string& entry_path, const std::vector<std::string>& include_dirs,
                   Program& p);
 bool prepare_program(Program& p, bool emit_objects, bool entry_ir);

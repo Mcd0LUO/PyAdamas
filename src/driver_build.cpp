@@ -863,6 +863,201 @@ bool build_unit(Program& p, ModuleUnit& u, bool emit_object, bool entry_ir) {
 
 }  // namespace
 
+
+// ── check 模式的 import 图解析 ─────────────────────────────────────
+// 和 build 共用 resolve_module_path / scan_imports_body / builtin_module，
+// 但只跑到「建出接口」为止，不降级、不生成代码。依赖解析失败时返回
+// nullptr（调用方按 unknown 处理），并把失败的模块名记进 missing。
+namespace {
+
+struct CheckCtx {
+    std::vector<std::string> include_dirs;
+    std::map<std::string, pyadamas::ModuleInfoPtr> loaded;
+    std::set<std::string> loading;
+    std::vector<std::string> missing;
+    // 依赖模块的 TypeChecker 拥有 ClassInfo；必须活到 check 结束，
+    // 否则接口里的 ClassInfo* 会悬空。
+    std::vector<std::shared_ptr<pyadamas::TypeChecker>> keep_alive;
+};
+
+std::string check_builtin_name(const std::string& n) {
+    if (n == "math" || n == "sys" || n == "asyncio" || n == "random" || n == "os" ||
+        n == "os.path" || n == "subprocess" || n == "time" || n == "itertools" ||
+        n == "collections" || n == "json" || n == "re" || n == "functools" ||
+        n == "datetime" || n == "pathlib" || n == "operator")
+        return n;
+    return "";
+}
+
+// 把某个模块的类型检查结果压成扁平 ModuleInfo（类方法/字段按 MRO 拍平），
+// 和 build_unit 的接口导出逻辑保持一致，但不做编解码归一。
+pyadamas::ModuleInfoPtr check_build_info(pyadamas::TypeChecker& tc,
+                                          const std::string& runtime_name) {
+    auto info = std::make_shared<pyadamas::ModuleInfo>();
+    auto* sc = tc.module_scope();
+    if (!sc) return info;
+    for (auto& [name, sym] : sc->vars) {
+        if (sym.ty && sym.ty->kind == pyadamas::TyKind::Class && sym.ty->cls) {
+            const pyadamas::ClassInfo* cls = sym.ty->cls;
+            if (cls->imported()) {
+                pyadamas::ImportedClass ic;
+                ic.cls = std::shared_ptr<pyadamas::ClassInfo>(const_cast<pyadamas::ClassInfo*>(cls), [](pyadamas::ClassInfo*){});
+                ic.module = cls->origin_module;
+                ic.qualname = cls->origin_qualname;
+                info->classes[name] = std::move(ic);
+                continue;
+            }
+            // 扁平类：字段按根→派生拍平，方法按最终槽位。
+            std::vector<const pyadamas::ClassInfo*> chain;
+            for (auto* cp = cls; cp; cp = cp->base) chain.push_back(cp);
+            auto flat = std::make_shared<pyadamas::ClassInfo>();
+            flat->name = name;
+            flat->complete = true;
+            flat->has_init = cls->has_init;
+            flat->open = cls->is_open();
+            for (auto it = chain.rbegin(); it != chain.rend(); ++it)
+                for (auto& f : (*it)->fields) flat->fields.push_back(f);
+            if (const auto* ma = cls->match_args_of()) flat->match_args = *ma;
+            else flat->match_args = cls->match_args;
+            std::map<std::string, pyadamas::MethodInfo> by_key;
+            std::map<std::string, std::vector<int>> key_slots;
+            std::vector<const pyadamas::ClassInfo*> mro(cls->mro.begin(), cls->mro.end());
+            if (mro.empty()) mro.push_back(cls);
+            for (const pyadamas::ClassInfo* k : mro) {
+                if (!k) continue;
+                for (auto& m : k->methods) {
+                    if (!m.call_sig) continue;
+                    std::string key = pyadamas::method_slot_key(m.name, m.kind);
+                    auto& v = key_slots[key];
+                    if (std::find(v.begin(), v.end(), m.slot) == v.end()) v.push_back(m.slot);
+                    for (int a : m.aliases)
+                        if (std::find(v.begin(), v.end(), a) == v.end()) v.push_back(a);
+                    if (!by_key.count(key)) by_key[key] = m;
+                }
+            }
+            for (auto& [key, m] : by_key) {
+                pyadamas::MethodInfo nm;
+                nm.name = m.name;
+                nm.kind = m.kind;
+                nm.slot = m.slot;
+                for (int slot : key_slots[key])
+                    if (slot != m.slot) nm.aliases.push_back(slot);
+                nm.call_sig = m.call_sig;
+                nm.sig = m.call_sig;
+                flat->methods.push_back(std::move(nm));
+            }
+            for (size_t mi = 0; mi < flat->methods.size(); ++mi) {
+                pyadamas::MethodInfo& m = flat->methods[mi];
+                if (!m.is_accessor()) continue;
+                auto& pi = flat->properties[m.name];
+                pi.owner = flat.get();
+                switch (m.kind) {
+                    case pyadamas::MethodKind::PropertyGetter: pi.getter = (int)mi; break;
+                    case pyadamas::MethodKind::PropertySetter: pi.setter = (int)mi; break;
+                    case pyadamas::MethodKind::PropertyDeleter: pi.deleter = (int)mi; break;
+                    default: break;
+                }
+            }
+            flat->origin_module = runtime_name;
+            flat->origin_qualname = runtime_name + "." + name;
+            pyadamas::ImportedClass ic;
+            if (auto* im = flat->method("__init__"); im && im->call_sig) ic.ctor_sig = im->call_sig;
+            if (!ic.ctor_sig) ic.ctor_sig = std::make_shared<pyadamas::FuncInfo>();
+            ic.cls = flat;
+            ic.module = runtime_name;
+            ic.qualname = flat->origin_qualname;
+            info->classes[name] = std::move(ic);
+            continue;
+        }
+        info->globals[name] = sym.ty;
+    }
+    info->globals["__name__"] = pyadamas::t_str();
+    info->globals["__file__"] = pyadamas::t_str();
+    return info;
+}
+
+pyadamas::ModuleInfoPtr check_load(CheckCtx& ctx, const std::string& importer,
+                                    const std::string& name);
+
+pyadamas::ModuleInfoPtr check_load(CheckCtx& ctx, const std::string& importer,
+                                    const std::string& name) {
+    if (auto it = ctx.loaded.find(name); it != ctx.loaded.end()) return it->second;
+    if (auto b = check_builtin_name(name); !b.empty()) {
+        auto m = pyadamas::builtin_module(name);
+        ctx.loaded[name] = m;
+        return m;
+    }
+    if (ctx.loading.count(name)) return nullptr;  // 环：按 unknown
+    auto found = resolve_module_path(importer, name, ctx.include_dirs);
+    if (!found) {
+        ctx.missing.push_back(name);
+        ctx.loaded[name] = nullptr;
+        return nullptr;
+    }
+    ctx.loading.insert(name);
+    auto src = read_file(found->path);
+    if (!src) {
+        ctx.loading.erase(name);
+        ctx.missing.push_back(name);
+        ctx.loaded[name] = nullptr;
+        return nullptr;
+    }
+    try {
+    pyadamas::Lexer lexer(*src);
+    pyadamas::Parser parser(lexer.run());
+    auto mod = parser.parse();
+    pyadamas::desugar_lambdas(*mod);
+    auto tc = std::make_shared<pyadamas::TypeChecker>(found->path);
+    std::string cap_name = name;
+    tc->set_module_lookup([&ctx, found, cap_name](const std::string& dep) {
+        return check_load(ctx, found->path, dep);
+    });
+    tc->set_lenient_imports(true);
+    tc->check(*mod);
+    ctx.keep_alive.push_back(tc);
+    auto info = check_build_info(*tc, name);
+    info->name = name;
+    info->source_path = found->path;
+    ctx.loading.erase(name);
+    ctx.loaded[name] = info;
+    return info;
+    } catch (...) {
+        ctx.loading.erase(name);
+        ctx.missing.push_back(name);
+        ctx.loaded[name] = nullptr;
+        return nullptr;
+    }
+}
+
+}  // namespace
+
+CheckLookup load_check_lookup(const std::string& entry_path,
+                               const std::vector<std::string>& include_dirs,
+                               std::vector<std::string>& missing) {
+    auto ctx = std::make_shared<CheckCtx>();
+    ctx->include_dirs = include_dirs;
+    ctx->include_dirs.emplace_back(PYADAMAS_STDLIB_DIR);
+    std::string entry = canonical_path(entry_path);
+    auto lookup = [ctx, entry](const std::string& name) -> ModuleInfoPtr {
+        return check_load(*ctx, entry, name);
+    };
+    // 预加载一次，收集 missing。
+    auto src = read_file(entry);
+    if (src) {
+        pyadamas::Lexer lexer(*src);
+        pyadamas::Parser parser(lexer.run());
+        auto mod = parser.parse();
+        if (mod) {
+            std::vector<ImportReq> reqs;
+            std::vector<ImportIssue> issues;
+            scan_imports_body(mod->body, reqs, issues, std::string());
+            for (auto& r : reqs) lookup(r.name);
+        }
+    }
+    missing = ctx->missing;
+    return lookup;
+}
+
 bool load_program(const std::string& entry_path, const std::vector<std::string>& include_dirs,
                   Program& p) {
     p.include_dirs = include_dirs;

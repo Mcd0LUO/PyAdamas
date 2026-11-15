@@ -93,7 +93,8 @@ struct Frontend {
 
 // 解析 + 类型检查。有错误时打印并返回 nullopt。
 std::optional<Frontend> run_frontend(const std::string& path, const std::string& source,
-                                     bool syntax_only) {
+                                     bool syntax_only,
+                                     pyadamas::ModuleLookup module_lookup = nullptr) {
     pyadamas::Lexer lexer(source);
     auto tokens = lexer.run();
 
@@ -106,6 +107,8 @@ std::optional<Frontend> run_frontend(const std::string& path, const std::string&
 
     if (syntax_only) return fe;
 
+    if (module_lookup) fe.tc.set_lenient_imports(true);
+    if (module_lookup) fe.tc.set_module_lookup(std::move(module_lookup));
     fe.tc.check(*fe.mod);
     if (!fe.tc.diags().empty()) {
         for (const auto& d : fe.tc.diags()) report(path, source, d.line, d.col, d.msg);
@@ -140,6 +143,7 @@ int main(int argc, char** argv) {
     bool rebuild = false;
     int opt_level = 2;
     bool fast_math = false;
+    bool resolve_imports = false;
 
     static const std::vector<std::string> kModes = {"tokens", "ast",     "check", "types",
                                                     "ir",     "asm",     "build", "run",
@@ -147,6 +151,7 @@ int main(int argc, char** argv) {
     for (int i = 1; i < argc; ++i) {
         std::string a = argv[i];
         if (a == "--syntax") syntax_only = true;
+        else if (a == "--imports") resolve_imports = true;
         else if (a == "-v" || a == "--verbose") verbose = true;
         else if (a == "--rebuild") rebuild = true;
         else if (a == "--fast-math") fast_math = true;
@@ -228,9 +233,14 @@ int main(int argc, char** argv) {
         }
 
         if (mode == "check" || mode == "types") {
-            // check/types 定位是通用前端：不解析 import 图，缺失/相对/
-            // 星号导入只记 unsupported，交给 build 阶段判死。
-            auto fe = run_frontend(path, *src, false);
+            // check/types 默认走通用前端（不解析 import 图，宽松）；
+            // --imports 时加载依赖模块接口，让跨模块类型/成员可见（更严格）。
+            pyadamas::ModuleLookup lookup = nullptr;
+            if (resolve_imports) {
+                std::vector<std::string> missing;
+                lookup = pyadamas::load_check_lookup(path, include_dirs, missing);
+            }
+            auto fe = run_frontend(path, *src, false, lookup);
             if (!fe) return 1;
             if (mode == "types") {
                 for (auto& [name, ty] : fe->tc.top_symbols())

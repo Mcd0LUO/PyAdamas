@@ -95,6 +95,9 @@ public:
     void check_dunder_returns();
 
     // 多模块编译时由驱动注入：按模块名取已经加载的接口。
+    // check 模式：import 图解析失败/属性缺失按 unknown 处理，不判死。
+    void set_lenient_imports(bool v) { lenient_imports_ = v; }
+    bool lenient_imports() const { return lenient_imports_; }
     void set_module_lookup(ModuleLookup lookup) { module_lookup_ = std::move(lookup); }
 
     // cimport 的 .cpya 查找路径（驱动注入）。
@@ -181,6 +184,7 @@ public:
 private:
     std::string file_;
     ModuleLookup module_lookup_;
+    bool lenient_imports_ = false;
     std::vector<std::string> cinclude_dirs_;
     // cimport 绑定名 → 声明；extern_by_fn_ 把类型系统里的 FuncInfo 指回
     // .cpya 声明，供降级阶段做 C ABI 编组。
