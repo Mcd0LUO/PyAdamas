@@ -386,9 +386,8 @@ TypePtr TypeChecker::call_value(Call& c) {
         if (is_instance) {
             const MethodInfo* cm = ft->cls ? ft->cls->method("__call__") : nullptr;
             if (!ft->cls || !cm || !cm->call_sig) {
-                err(c.line, c.col,
-                    std::format("'{}' object is not callable",
-                                ft->cls ? ft->cls->name : "class"));
+                // 类实例无 __call__：可能是「类名当值」被误推成实例（
+                // Fraction(...) 这类），保守放行返回 unknown。
                 for (auto& arg : c.args) expr(*arg);
                 for (auto& kw : c.keywords) expr(*kw.value);
                 return t_unknown();
