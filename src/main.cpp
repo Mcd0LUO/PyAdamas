@@ -54,6 +54,7 @@
 #endif
 
 #include "driver_build.h"
+#include "target_abi.h"
 #include "driver_util.h"
 
 using pyadamas::read_file;
@@ -168,6 +169,20 @@ int main(int argc, char** argv) {
                              v.c_str());
                 return 2;
             }
+        }
+        else if (a.starts_with("--target=")) {
+            // 目标 ABI。只影响调用约定/寄存器角色与影子空间，不改指令集：
+            // 目前两个目标都是 x86-64，区别在于 SysV 与 Win64 的 ABI。
+            const char* want = argv[i] + 9;
+            const pyadamas::TargetABI* abi = pyadamas::find_target_abi(want);
+            if (!abi) {
+                std::fprintf(stderr,
+                             "error: unknown target '%s' (expected x86_64-sysv, "
+                             "x86_64-win64)\n",
+                             want);
+                return 2;
+            }
+            pyadamas::set_target_abi(abi);
         }
         else if (a == "-o" && i + 1 < argc) output = argv[++i];
         else if (a == "--link" && i + 1 < argc) cdecl_links.push_back(argv[++i]);

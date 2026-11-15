@@ -3,12 +3,10 @@
 // 把「哪个物理寄存器承担什么角色」从代码生成里抽出来。没有这张表，寄存器
 // 角色会散落在几千行汇编字符串拼接里，既无法审计也无法换目标。
 //
-// 当前只有 x86-64 SysV 一个实例；引入这一层是为 MachineInstr 层和后续
-// 多目标后端留接缝——MachineInstr 需要知道寄存器类（整型/浮点）、调用
-// 约定寄存器、callee-saved 集合，这些必须先有单一出处。
+// 目前有两个实例：x86-64 SysV（默认）与 x86-64 Win64。两者的寄存器池
+// （callee-saved 提升池、scratch）恰好兼容，差异集中在实参寄存器顺序、
+// 影子空间和汇编指示符。
 #pragma once
-
-#include <array>
 
 namespace pyadamas {
 
@@ -16,11 +14,11 @@ namespace pyadamas {
 struct TargetABI {
     const char* name;
 
-    // 整型实参寄存器，按调用约定顺序。SysV：rdi rsi rdx rcx r8 r9
+    // 整型实参寄存器，按调用约定顺序
     const char* const* arg_int;
     int n_arg_int;
 
-    // 浮点实参寄存器。SysV：xmm0-xmm7
+    // 浮点实参寄存器（与整型分属两个寄存器序列）
     const char* const* arg_fp;
     int n_arg_fp;
 
@@ -32,8 +30,7 @@ struct TargetABI {
     const char* const* callee_pool;
     int n_callee_pool;
 
-    // 浮点常驻池。只用 xmm8-15：xmm0-7 是参数/临时寄存器，所有指令生成器
-    // 都只把它们当 scratch。
+    // 浮点常驻池。只用各 ABI 下 callee-saved 的那一段。
     const char* const* fp_pool;
     int n_fp_pool;
 
@@ -43,9 +40,21 @@ struct TargetABI {
 
     // 栈对齐要求（字节）
     int stack_align;
+
+    // 调用点必须为被调方预留的影子空间（字节）。Win64 是 32，SysV 是 0。
+    int shadow_space;
+
+    // 汇编器是否接受 GNU 的 .cfi_* 展开指示符。Windows 用 SEH，不走 .eh_frame。
+    bool gnu_cfi;
 };
 
-// 当前编译目标。目前恒为 x86-64 SysV。
+// 当前编译目标（默认 x86-64 SysV）。
 const TargetABI& target_abi();
+
+// 切换目标。传空指针恢复默认。
+void set_target_abi(const TargetABI* abi);
+
+// 具名目标：失败返回 nullptr。
+const TargetABI* find_target_abi(const char* name);
 
 }  // namespace pyadamas

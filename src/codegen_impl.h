@@ -41,6 +41,10 @@ inline int kMaxSlotRegs() { return target_abi().n_callee_pool; }
 // 浮点变量常驻寄存器。只用 xmm8–15：xmm0–7 是参数/临时寄存器，
 // 所有指令生成器都只把它们当 scratch。提升仅发生在函数没有任何
 // 「会正常返回的调用」时，所以 caller-saved 不影响正确性。
+// 第 i 个整型/浮点实参寄存器。实参寄存器顺序是各 ABI 差异最大的地方
+// （SysV 6 个整型 / 8 个浮点，Win64 各 4 个），所以一律走这里取。
+inline const char* arg_reg_i(int i) { return target_abi().arg_int[i]; }
+inline const char* arg_reg_f(int i) { return target_abi().arg_fp[i]; }
 inline const char* const* kFpSlotRegs() { return target_abi().fp_pool; }
 inline int kMaxFpSlotRegs() { return target_abi().n_fp_pool; }
 

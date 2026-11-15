@@ -35,67 +35,67 @@ void AsmGen::gen_rt_i5(const Inst& in) { gen_rt_args_n(in, 5); }
 void AsmGen::gen_rt_i6(const Inst& in) { gen_rt_args_n(in, 6); }
 
 void AsmGen::gen_rt_f1(const Inst& in) {
-        emit2("movsd", src_op(in.args[0]), "%xmm0");
+        emit2("movsd", src_op(in.args[0]), arg_reg_f(0));
     }
 
 void AsmGen::gen_rt_f2(const Inst& in) {
-        emit2("movsd", src_op(in.args[0]), "%xmm0");
-        emit2("movsd", src_op(in.args[1]), "%xmm1");
+        emit2("movsd", src_op(in.args[0]), arg_reg_f(0));
+        emit2("movsd", src_op(in.args[1]), arg_reg_f(1));
     }
 
 void AsmGen::gen_rt_f3(const Inst& in) {
-        emit2("movsd", src_op(in.args[0]), "%xmm0");
-        emit2("movsd", src_op(in.args[1]), "%xmm1");
-        emit2("movsd", src_op(in.args[2]), "%xmm2");
+        emit2("movsd", src_op(in.args[0]), arg_reg_f(0));
+        emit2("movsd", src_op(in.args[1]), arg_reg_f(1));
+        emit2("movsd", src_op(in.args[2]), arg_reg_f(2));
     }
 
 void AsmGen::gen_rt_i1f1(const Inst& in) {
-        emit2("movq", src_op(in.args[0]), "%rdi");
-        emit2("movsd", src_op(in.args[1]), "%xmm0");
+        emit2("movq", src_op(in.args[0]), arg_reg_i(0));
+        emit2("movsd", src_op(in.args[1]), arg_reg_f(0));
     }
 
 void AsmGen::gen_rt_i1f2(const Inst& in) {
-        emit2("movq", src_op(in.args[0]), "%rdi");
-        emit2("movsd", src_op(in.args[1]), "%xmm0");
-        emit2("movsd", src_op(in.args[2]), "%xmm1");
+        emit2("movq", src_op(in.args[0]), arg_reg_i(0));
+        emit2("movsd", src_op(in.args[1]), arg_reg_f(0));
+        emit2("movsd", src_op(in.args[2]), arg_reg_f(1));
     }
 
 void AsmGen::gen_rt_i1f3(const Inst& in) {
-        emit2("movq", src_op(in.args[0]), "%rdi");
-        emit2("movsd", src_op(in.args[1]), "%xmm0");
-        emit2("movsd", src_op(in.args[2]), "%xmm1");
-        emit2("movsd", src_op(in.args[3]), "%xmm2");
+        emit2("movq", src_op(in.args[0]), arg_reg_i(0));
+        emit2("movsd", src_op(in.args[1]), arg_reg_f(0));
+        emit2("movsd", src_op(in.args[2]), arg_reg_f(1));
+        emit2("movsd", src_op(in.args[3]), arg_reg_f(2));
     }
 
 void AsmGen::gen_rt_f1i1(const Inst& in) {
-        emit2("movsd", src_op(in.args[0]), "%xmm0");
-        emit2("movq", src_op(in.args[1]), "%rdi");
+        emit2("movsd", src_op(in.args[0]), arg_reg_f(0));
+        emit2("movq", src_op(in.args[1]), arg_reg_i(0));
     }
 
 void AsmGen::gen_rt_i4opt5(const Inst& in) {
-        emit2("movq", src_op(in.args[0]), "%rdi");
-        emit2("movq", src_op(in.args[1]), "%rsi");
-        emit2("movq", src_op(in.args[2]), "%rdx");
-        emit2("movq", src_op(in.args[3]), "%rcx");
+        emit2("movq", src_op(in.args[0]), arg_reg_i(0));
+        emit2("movq", src_op(in.args[1]), arg_reg_i(1));
+        emit2("movq", src_op(in.args[2]), arg_reg_i(2));
+        emit2("movq", src_op(in.args[3]), arg_reg_i(3));
         if (in.args.size() > 4)
-            emit2("movq", src_op(in.args[4]), "%r8");
+            emit2("movq", src_op(in.args[4]), arg_reg_i(4));
     }
 
 void AsmGen::gen_rt_reduce_f(const Inst& in) {
-        emit2("movq", src_op(in.args[0]), "%rdi");
-        emit2("movq", src_op(in.args[1]), "%rsi");
-        emit2("movsd", src_op(in.args[2]), "%xmm0");
-        emit2("movq", src_op(in.args[3]), "%rdx");
+        emit2("movq", src_op(in.args[0]), arg_reg_i(0));
+        emit2("movq", src_op(in.args[1]), arg_reg_i(1));
+        emit2("movsd", src_op(in.args[2]), arg_reg_f(0));
+        emit2("movq", src_op(in.args[3]), arg_reg_i(2));
     }
 
 void AsmGen::gen_rt_subprocess_run(const Inst& in) {
-        emit2("movq", src_op(in.args[0]), "%rdi");
-        emit2("movq", src_op(in.args[1]), "%rsi");
-        emit2("movq", src_op(in.args[2]), "%rdx");
-        emit2("movsd", src_op(in.args[3]), "%xmm0");
-        emit2("movq", src_op(in.args[4]), "%rcx");
-        emit2("movq", src_op(in.args[5]), "%r8");
-        emit2("movq", src_op(in.args[6]), "%r9");
+        emit2("movq", src_op(in.args[0]), arg_reg_i(0));
+        emit2("movq", src_op(in.args[1]), arg_reg_i(1));
+        emit2("movq", src_op(in.args[2]), arg_reg_i(2));
+        emit2("movsd", src_op(in.args[3]), arg_reg_f(0));
+        emit2("movq", src_op(in.args[4]), arg_reg_i(3));
+        emit2("movq", src_op(in.args[5]), arg_reg_i(4));
+        emit2("movq", src_op(in.args[6]), arg_reg_i(5));
     }
 
 void AsmGen::gen_rt_args(const Inst& in, RtFn fn) {
