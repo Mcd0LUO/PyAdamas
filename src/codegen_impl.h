@@ -48,17 +48,68 @@ inline const char* arg_reg_f(int i) { return target_abi().arg_fp[i]; }
 // 同一个实参寄存器的 32 位视图。xorl 清零、movl 存字段这类指令需要
 // 32 位名字（%rsi -> %esi，Win64 的 %r8 -> %r8d），实参寄存器本身两种
 // 目标都是 64 位名字，不能直接套。
-inline std::string arg_reg_i32(int i) {
-    std::string r = target_abi().arg_int[i];
-    if (r.size() == 4) return std::string("%e") + r.substr(2);
-    return r + "d";
+// 64 位寄存器名的 32 位别名（%rdx -> %edx，%r8 -> %r8d）。
+// 注意 %rdi/%rsi/%rbp/%rsp 的末位不是 x，只看第三个字符会把 %rdi
+// 错认成 %rdx。
+inline std::string reg32(const std::string& r) {
+    if (r.size() == 4 && r[1] == 'r') {
+        if (r[3] == 'x') {
+            switch (r[2]) {
+                case 'a': return "%eax";
+                case 'b': return "%ebx";
+                case 'c': return "%ecx";
+                case 'd': return "%edx";
+                default: break;
+            }
+        } else if (r[2] == 's' && r[3] == 'i') {
+            return "%esi";
+        } else if (r[2] == 'd' && r[3] == 'i') {
+            return "%edi";
+        } else if (r[2] == 'b' && r[3] == 'p') {
+            return "%ebp";
+        } else if (r[2] == 's' && r[3] == 'p') {
+            return "%esp";
+        }
+    }
+    if (r.size() == 3 && r[1] == 'r' && r[2] >= '8' && r[2] <= '9')
+        return std::string(r) + "d";
+    if (r.size() == 4 && r[1] == 'r' && r[2] == '1' && r[3] >= '0' && r[3] <= '5')
+        return std::string(r) + "d";
+    return r;
 }
-inline std::string arg_reg_i8(int i) {
-    std::string r = target_abi().arg_int[i];
-    if (r == "%rcx") return "%cl";
-    if (r == "%rdx") return "%dl";
-    return r + "b";  // %r8 -> %r8b
+
+// 64 位寄存器名的 8 位别名（%rdx -> %dl，%r9 -> %r9b）。
+inline std::string reg8(const std::string& r) {
+    if (r.size() == 4 && r[1] == 'r') {
+        if (r[3] == 'x') {
+            switch (r[2]) {
+                case 'a': return "%al";
+                case 'b': return "%bl";
+                case 'c': return "%cl";
+                case 'd': return "%dl";
+                default: break;
+            }
+        } else if (r[2] == 's' && r[3] == 'i') {
+            return "%sil";
+        } else if (r[2] == 'd' && r[3] == 'i') {
+            return "%dil";
+        } else if (r[2] == 'b' && r[3] == 'p') {
+            return "%bpl";
+        } else if (r[2] == 's' && r[3] == 'p') {
+            return "%spl";
+        }
+    }
+    if (r.size() == 3 && r[1] == 'r' && r[2] >= '8' && r[2] <= '9')
+        return std::string(r) + "b";
+    if (r.size() == 4 && r[1] == 'r' && r[2] == '1' && r[3] >= '0' && r[3] <= '5')
+        return std::string(r) + "b";
+    return r;
 }
+
+// 实参寄存器的 32 位 / 8 位视图。
+inline std::string arg_reg_i32(int i) { return reg32(target_abi().arg_int[i]); }
+inline std::string arg_reg_i8(int i) { return reg8(target_abi().arg_int[i]); }
+
 inline const char* const* kFpSlotRegs() { return target_abi().fp_pool; }
 inline int kMaxFpSlotRegs() { return target_abi().n_fp_pool; }
 
@@ -237,25 +288,6 @@ private:
     // cls_idx 是该类内的序号（SysV 按类型分计数时用）。
     void emit_arg(int pos, bool is_fp, int cls_idx, const std::string& v);
 
-    // 64 位寄存器名的 32 位别名（%rdx -> %edx，%r8 -> %r8d）。
-    static std::string reg32(const std::string& r) {
-        if (r.size() == 4 && r[1] == 'r') {
-            switch (r[2]) {
-                case 'a': return "%eax";
-                case 'b': return "%ebx";
-                case 'c': return "%ecx";
-                case 'd': return "%edx";
-                case 's': return "%esi";
-                case 'i': return "%edi";
-                default: break;
-            }
-        }
-        if (r.size() == 3 && r[1] == 'r' && r[2] >= '8' && r[2] <= '9')
-            return std::string(r) + "d";
-        if (r.size() == 4 && r[1] == 'r' && r[2] == '1' && r[3] >= '0' && r[3] <= '5')
-            return std::string(r) + "d";
-        return r;
-    }
     void cfi(const std::string& s) {
         if (target_abi().gnu_cfi) line(s);
     }
