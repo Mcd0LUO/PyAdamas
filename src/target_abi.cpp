@@ -42,6 +42,10 @@ const TargetABI kX86_64SysV{
     16,
     0,
     true,
+    false,
+    "%rcx",
+    "%rdx",
+    "%r8",
     "_setjmp",
     "_longjmp",
 };
@@ -57,6 +61,10 @@ const TargetABI kX86_64Win64{
     16,
     32,
     false,
+    true,
+    "%r10",
+    "%r11",
+    "%rax",
     "pa_win_setjmp",
     "pa_win_longjmp",
 };

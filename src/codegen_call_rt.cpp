@@ -19,7 +19,7 @@ void AsmGen::gen_rt_none(const Inst& in) {
 void AsmGen::gen_rt_args_n(const Inst& in, int n) {
     const int m = static_cast<int>(in.args.size());
     const int k = m < n ? m : n;
-    for (int i = 0; i < k; ++i) emit2("movq", src_op(in.args[i]), target_abi().arg_int[i]);
+    for (int i = 0; i < k; ++i) emit_arg(i, false, i, src_op(in.args[i]));
 }
 
 void AsmGen::gen_rt_i1(const Inst& in) { gen_rt_args_n(in, 1); }
@@ -34,68 +34,90 @@ void AsmGen::gen_rt_i5(const Inst& in) { gen_rt_args_n(in, 5); }
 
 void AsmGen::gen_rt_i6(const Inst& in) { gen_rt_args_n(in, 6); }
 
-void AsmGen::gen_rt_f1(const Inst& in) {
-        emit2("movsd", src_op(in.args[0]), arg_reg_f(0));
+void AsmGen::emit_arg(int pos, bool is_fp, int cls_idx, const std::string& v) {
+    const TargetABI& abi = target_abi();
+    if (abi.positional_args) {
+        // Win64：第 pos 个实参固定占第 pos 个槽，与类型无关；超过 4 个落栈。
+        if (pos < 4) {
+            if (is_fp) emit2("movsd", v, abi.arg_fp[pos]);
+            else emit2("movq", v, abi.arg_int[pos]);
+            return;
+        }
+        const int off = out_base() + 8 * (pos - 4);
+        if (is_fp) line(std::format("movsd {}, {}(%rsp)", v, off));
+        else emit2("movq", v, std::format("{}(%rsp)", off));
+        return;
     }
+    // SysV：整型与浮点各一套独立计数器；该类寄存器用完后落栈。
+    if (is_fp) {
+        if (cls_idx < abi.n_arg_fp) { emit2("movsd", v, abi.arg_fp[cls_idx]); return; }
+        line(std::format("movsd {}, {}(%rsp)", v, out_base() + 8 * cls_idx));
+        return;
+    }
+    if (cls_idx < abi.n_arg_int) { emit2("movq", v, abi.arg_int[cls_idx]); return; }
+    emit2("movq", v, std::format("{}(%rsp)", out_base() + 8 * cls_idx));
+}
+
+void AsmGen::gen_rt_f1(const Inst& in) { emit_arg(0, true, 0, src_op(in.args[0])); }
 
 void AsmGen::gen_rt_f2(const Inst& in) {
-        emit2("movsd", src_op(in.args[0]), arg_reg_f(0));
-        emit2("movsd", src_op(in.args[1]), arg_reg_f(1));
+        emit_arg(0, true, 0, src_op(in.args[0]));
+        emit_arg(1, true, 1, src_op(in.args[1]));
     }
 
 void AsmGen::gen_rt_f3(const Inst& in) {
-        emit2("movsd", src_op(in.args[0]), arg_reg_f(0));
-        emit2("movsd", src_op(in.args[1]), arg_reg_f(1));
-        emit2("movsd", src_op(in.args[2]), arg_reg_f(2));
+        emit_arg(0, true, 0, src_op(in.args[0]));
+        emit_arg(1, true, 1, src_op(in.args[1]));
+        emit_arg(2, true, 2, src_op(in.args[2]));
     }
 
 void AsmGen::gen_rt_i1f1(const Inst& in) {
-        emit2("movq", src_op(in.args[0]), arg_reg_i(0));
-        emit2("movsd", src_op(in.args[1]), arg_reg_f(0));
+        emit_arg(0, false, 0, src_op(in.args[0]));
+        emit_arg(1, true, 0, src_op(in.args[1]));
     }
 
 void AsmGen::gen_rt_i1f2(const Inst& in) {
-        emit2("movq", src_op(in.args[0]), arg_reg_i(0));
-        emit2("movsd", src_op(in.args[1]), arg_reg_f(0));
-        emit2("movsd", src_op(in.args[2]), arg_reg_f(1));
+        emit_arg(0, false, 0, src_op(in.args[0]));
+        emit_arg(1, true, 0, src_op(in.args[1]));
+        emit_arg(2, true, 1, src_op(in.args[2]));
     }
 
 void AsmGen::gen_rt_i1f3(const Inst& in) {
-        emit2("movq", src_op(in.args[0]), arg_reg_i(0));
-        emit2("movsd", src_op(in.args[1]), arg_reg_f(0));
-        emit2("movsd", src_op(in.args[2]), arg_reg_f(1));
-        emit2("movsd", src_op(in.args[3]), arg_reg_f(2));
+        emit_arg(0, false, 0, src_op(in.args[0]));
+        emit_arg(1, true, 0, src_op(in.args[1]));
+        emit_arg(2, true, 1, src_op(in.args[2]));
+        emit_arg(3, true, 2, src_op(in.args[3]));
     }
 
 void AsmGen::gen_rt_f1i1(const Inst& in) {
-        emit2("movsd", src_op(in.args[0]), arg_reg_f(0));
-        emit2("movq", src_op(in.args[1]), arg_reg_i(0));
+        emit_arg(0, true, 0, src_op(in.args[0]));
+        emit_arg(1, false, 0, src_op(in.args[1]));
     }
 
 void AsmGen::gen_rt_i4opt5(const Inst& in) {
-        emit2("movq", src_op(in.args[0]), arg_reg_i(0));
-        emit2("movq", src_op(in.args[1]), arg_reg_i(1));
-        emit2("movq", src_op(in.args[2]), arg_reg_i(2));
-        emit2("movq", src_op(in.args[3]), arg_reg_i(3));
+        emit_arg(0, false, 0, src_op(in.args[0]));
+        emit_arg(1, false, 1, src_op(in.args[1]));
+        emit_arg(2, false, 2, src_op(in.args[2]));
+        emit_arg(3, false, 3, src_op(in.args[3]));
         if (in.args.size() > 4)
-            emit2("movq", src_op(in.args[4]), arg_reg_i(4));
+            emit_arg(4, false, 4, src_op(in.args[4]));
     }
 
 void AsmGen::gen_rt_reduce_f(const Inst& in) {
-        emit2("movq", src_op(in.args[0]), arg_reg_i(0));
-        emit2("movq", src_op(in.args[1]), arg_reg_i(1));
-        emit2("movsd", src_op(in.args[2]), arg_reg_f(0));
-        emit2("movq", src_op(in.args[3]), arg_reg_i(2));
+        emit_arg(0, false, 0, src_op(in.args[0]));
+        emit_arg(1, false, 1, src_op(in.args[1]));
+        emit_arg(2, true, 0, src_op(in.args[2]));
+        emit_arg(3, false, 2, src_op(in.args[3]));
     }
 
 void AsmGen::gen_rt_subprocess_run(const Inst& in) {
-        emit2("movq", src_op(in.args[0]), arg_reg_i(0));
-        emit2("movq", src_op(in.args[1]), arg_reg_i(1));
-        emit2("movq", src_op(in.args[2]), arg_reg_i(2));
-        emit2("movsd", src_op(in.args[3]), arg_reg_f(0));
-        emit2("movq", src_op(in.args[4]), arg_reg_i(3));
-        emit2("movq", src_op(in.args[5]), arg_reg_i(4));
-        emit2("movq", src_op(in.args[6]), arg_reg_i(5));
+        emit_arg(0, false, 0, src_op(in.args[0]));
+        emit_arg(1, false, 1, src_op(in.args[1]));
+        emit_arg(2, false, 2, src_op(in.args[2]));
+        emit_arg(3, true, 0, src_op(in.args[3]));
+        emit_arg(4, false, 3, src_op(in.args[4]));
+        emit_arg(5, false, 4, src_op(in.args[5]));
+        emit_arg(6, false, 5, src_op(in.args[6]));
     }
 
 void AsmGen::gen_rt_args(const Inst& in, RtFn fn) {

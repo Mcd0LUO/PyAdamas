@@ -3,6 +3,11 @@
 
 namespace pyadamas {
 
+// idiv 的除数必须在 %rcx。SysV 直接用它；Win64 下 %rcx 是第 1 个实参
+// 寄存器，而除零检查里的 panic 是调用、会破坏它，所以统一用 %r10 中转。
+static const char* div_reg() { return target_abi().gnu_cfi ? "%rcx" : "%r10"; }
+
+
 // ── 指令 ────────────────────────────────────────────────────
 void AsmGen::set_loc(int line) {
     if (line <= 0 || line == cur_loc_line_ || !m_ || m_->source_path.empty()) return;
@@ -120,17 +125,17 @@ void AsmGen::gen_inst(const Inst& in) {
             }
             case IrOp::GenNew: {
                 const auto& g = m_->generators[static_cast<size_t>(in.imm)];
-                emit_imm_op("movq", g.n_slots, "%rdi");
+                emit_imm_op("movq", g.n_slots, arg_reg_i(0));
                 line(std::format("leaq {}(%rip), %rsi", func_label(g.resume)));
                 line(std::format("leaq .Lgengcrel{}(%rip), %rdx", in.imm));
-                emit_imm_op("movq", g.frame_kind, "%rcx");
+                emit_imm_op("movq", g.frame_kind, arg_reg_i(3));
                 line("call pa_gen_new");
                 move_to(dst_op(in.dst), "%rax");
                 break;
             }
             case IrOp::GenSetSlot:
                 emit2("movq", src_op(in.args[0]), "%rax");
-                emit2("movq", src_op(in.args[1]), "%rcx");
+                emit2("movq", src_op(in.args[1]), arg_reg_i(3));
                 line(std::format("movq %rcx, {}(%rax)", 8 * (10 + in.idx)));
                 break;
             case IrOp::GenGetState:
@@ -245,8 +250,8 @@ void AsmGen::gen_bin(const Inst& in) {
                 line("# unsupported string operator");
                 return;
             }
-            emit2("movq", src_op(in.a), "%rdi");
-            emit2("movq", src_op(in.b), "%rsi");
+            emit2("movq", src_op(in.a), arg_reg_i(0));
+            emit2("movq", src_op(in.b), arg_reg_i(1));
             spill_fp_slots();
             line("call pa_str_concat");
             reload_fp_slots();
@@ -277,11 +282,11 @@ void AsmGen::gen_bin_int(const Inst& in) {
                 case BinKind::BitOr: emit2("orq", sb, d); return;
                 case BinKind::BitXor: emit2("xorq", sb, d); return;
                 case BinKind::Shl:
-                    emit2("movq", sb, "%rcx");
+                    emit2("movq", sb, arg_reg_i(3));
                     emit2("shlq", "%cl", d);
                     return;
                 case BinKind::Shr:
-                    emit2("movq", sb, "%rcx");
+                    emit2("movq", sb, arg_reg_i(3));
                     emit2("sarq", "%cl", d);
                     return;
                 default: break;  // 除法/取模/幂要用 rax/rdx，走通用路径
@@ -297,24 +302,25 @@ void AsmGen::gen_bin_int(const Inst& in) {
             case BinKind::BitOr: emit2("orq", sb, "%rax"); break;
             case BinKind::BitXor: emit2("xorq", sb, "%rax"); break;
             case BinKind::Shl:
-                emit2("movq", sb, "%rcx");
+                emit2("movq", sb, arg_reg_i(3));
                 line("shlq %cl, %rax");
                 break;
             case BinKind::Shr:
-                emit2("movq", sb, "%rcx");
+                emit2("movq", sb, arg_reg_i(3));
                 line("sarq %cl, %rax");
                 break;
             case BinKind::Div:
-                emit2("movq", sb, "%rcx");
+                emit2("movq", sb, div_reg());
                 gen_div_guard();
                 line("cqto");
+                if (!target_abi().gnu_cfi) line("movq %r10, %rcx");
                 line("idivq %rcx");
                 break;
             case BinKind::Mod: gen_mod(in); break;
             case BinKind::FloorDiv: gen_floordiv(in); break;
             case BinKind::Pow:
-                emit2("movq", sa, "%rdi");
-                emit2("movq", sb, "%rsi");
+                emit2("movq", sa, arg_reg_i(0));
+                emit2("movq", sb, arg_reg_i(1));
                 spill_fp_slots();
                 line("call pa_pow_i64");
                 reload_fp_slots();
@@ -325,14 +331,15 @@ void AsmGen::gen_bin_int(const Inst& in) {
 
 // idiv 在除数为 0、以及 INT64_MIN / -1 时都会触发 #DE，
     // 那个信号没法带任何上下文。提前挡掉，给一条能看懂的消息。
+
 void AsmGen::gen_div_guard() {
         std::string ok = fresh_label("divok");
         std::string ok2 = fresh_label("divok2");
-        line("testq %rcx, %rcx");
+        line(std::format("testq {}, {}", div_reg(), div_reg()));
         emit_jmp("jne", ok);
         line("call pa_panic_div0");
         label(ok);
-        line("cmpq $-1, %rcx");
+        line(std::format("cmpq $-1, {}", div_reg()));
         emit_jmp("jne", ok2);
         line("movabsq $0x8000000000000000, %r8");
         line("cmpq %r8, %rax");
@@ -345,9 +352,10 @@ void AsmGen::gen_div_guard() {
     // 差 1 的修正必须做对，否则负数的 // 和 % 全是错的。
 void AsmGen::gen_floordiv(const Inst& in) {
         std::string done = fresh_label("fdiv");
-        emit2("movq", src_op(in.b), "%rcx");
+        emit2("movq", src_op(in.b), div_reg());
         gen_div_guard();
         line("cqto");
+        if (!target_abi().gnu_cfi) line("movq %r10, %rcx");
         line("idivq %rcx");
         line("testq %rdx, %rdx");
         emit_jmp("je", done);
@@ -362,9 +370,10 @@ void AsmGen::gen_floordiv(const Inst& in) {
     // 差一个除数，需要补回来。
 void AsmGen::gen_mod(const Inst& in) {
         std::string done = fresh_label("mod");
-        emit2("movq", src_op(in.b), "%rcx");
+        emit2("movq", src_op(in.b), div_reg());
         gen_div_guard();
         line("cqto");
+        if (!target_abi().gnu_cfi) line("movq %r10, %rcx");
         line("idivq %rcx");
         line("testq %rdx, %rdx");
         emit_jmp("je", done);
@@ -535,8 +544,8 @@ void AsmGen::emit_truth(VReg r, const char* byte_reg) {
 void AsmGen::gen_cmp(const Inst& in) {
         TypePtr ty = ty_of(in.a);
         if (ty && (ty->kind == TyKind::Str || ty->kind == TyKind::Bytes)) {
-            emit2("movq", src_op(in.a), "%rdi");
-            emit2("movq", src_op(in.b), "%rsi");
+            emit2("movq", src_op(in.a), arg_reg_i(0));
+            emit2("movq", src_op(in.b), arg_reg_i(1));
             if (in.cop == CmpKind::Eq || in.cop == CmpKind::Ne) {
                 spill_fp_slots();
                 line("call pa_str_eq");
@@ -678,7 +687,7 @@ void AsmGen::gen_convert(const Inst& in) {
                 line("call pa_str_from_f64");
                 reload_fp_slots();
             } else if (from && from->kind == TyKind::Bool) {
-                emit2("movq", src_op(in.a), "%rdi");
+                emit2("movq", src_op(in.a), arg_reg_i(0));
                 spill_fp_slots();
                 line("call pa_str_from_bool");
                 reload_fp_slots();
@@ -687,7 +696,7 @@ void AsmGen::gen_convert(const Inst& in) {
                 line("call pa_str_from_none");
                 reload_fp_slots();
             } else {
-                emit2("movq", src_op(in.a), "%rdi");
+                emit2("movq", src_op(in.a), arg_reg_i(0));
                 spill_fp_slots();
                 line("call pa_str_from_i64");
                 reload_fp_slots();

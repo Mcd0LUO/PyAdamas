@@ -218,6 +218,30 @@ private:
     // 寄存器实参，所以栈传实参和所有暂存都从 shadow_space 之上开始。
     // SysV 的 shadow_space 是 0，偏移与原来完全一致。
     int out_base() const { return target_abi().shadow_space; }
+
+    // 搬运第 pos 个（0 基）实参到 ABI 规定的位置。is_fp 表示浮点类；
+    // cls_idx 是该类内的序号（SysV 按类型分计数时用）。
+    void emit_arg(int pos, bool is_fp, int cls_idx, const std::string& v);
+
+    // 64 位寄存器名的 32 位别名（%rdx -> %edx，%r8 -> %r8d）。
+    static std::string reg32(const std::string& r) {
+        if (r.size() == 4 && r[1] == 'r') {
+            switch (r[2]) {
+                case 'a': return "%eax";
+                case 'b': return "%ebx";
+                case 'c': return "%ecx";
+                case 'd': return "%edx";
+                case 's': return "%esi";
+                case 'i': return "%edi";
+                default: break;
+            }
+        }
+        if (r.size() == 3 && r[1] == 'r' && r[2] >= '8' && r[2] <= '9')
+            return std::string(r) + "d";
+        if (r.size() == 4 && r[1] == 'r' && r[2] == '1' && r[3] >= '0' && r[3] <= '5')
+            return std::string(r) + "d";
+        return r;
+    }
     void cfi(const std::string& s) {
         if (target_abi().gnu_cfi) line(s);
     }

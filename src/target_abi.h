@@ -50,6 +50,20 @@ struct TargetABI {
     // setjmp/longjmp 的符号名。glibc 有下划线变体 _setjmp/_longjmp，它们不
     // 保存信号掩码（实测 2.5ns vs 117ns）；Windows 只有标准名。生成代码和
     // 运行时必须用同一个名字，所以放进 ABI。
+    // 实参寄存器分配是「按位置」还是「按类型分计数」。
+    // SysV：整型和浮点各有一套独立计数器（rdi,rsi,... / xmm0,xmm1,...）。
+    // Win64：第 i 个实参固定用第 i 个槽（rcx/rdx/r8/r9 或 xmm0-3），与类型
+    // 无关；第 5 个起一律落栈。两者不能混用。
+    bool positional_args;
+
+    // 内联下标检查用的三个易失 scratch：长度、data 指针、旧值暂存。
+    // 必须避开该 ABI 的实参寄存器。SysV 可以直接借 rcx/rdx/r8（这三个
+    // 虽然也是实参寄存器，但这段序列里没有调用）；Win64 下 rcx/rdx/r8/r9
+    // 正好是前四个实参，只能改用 r10/r11/rax。
+    const char* scratch_len;
+    const char* scratch_ptr;
+    const char* scratch_val;
+
     const char* setjmp_sym;
     const char* longjmp_sym;
 };
