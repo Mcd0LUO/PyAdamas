@@ -22,7 +22,7 @@ void AsmGen::layout_frame(int total_slots) {
 void AsmGen::frame_alloc() {
         if (frame_pad_ > 0) emit_imm_op("subq", frame_pad_, "%rsp");
         cfa_off_ = frame_bytes_ + 8;
-        line(std::format(".cfi_def_cfa_offset {}", cfa_off_));
+        cfi(std::format(".cfi_def_cfa_offset {}", cfa_off_));
     }
 
 // 尾声：先退局部区，再逐个弹回 callee-saved，最后 ret。
@@ -30,7 +30,7 @@ void AsmGen::emit_epilogue() {
         // CFI：尾声里 rsp 会一路退回去，先「记住」函数体的展开规则，
         // 把每一步都描述出来，ret 之后再还原——后面的块（异常落地、
         // 另一条 return）继续按函数体状态展开。
-        line(".cfi_remember_state");
+        cfi(".cfi_remember_state");
         const int body_cfa = cfa_off_;
         // 先弹帧记录再退栈：记录本身在局部区底部，%rcx 此时是自由的。
         if (frame_rec_) {
@@ -40,17 +40,17 @@ void AsmGen::emit_epilogue() {
         if (frame_pad_ > 0) {
             emit_imm_op("addq", frame_pad_, "%rsp");
             cfa_off_ -= frame_pad_;
-            line(std::format(".cfi_def_cfa_offset {}", cfa_off_));
+            cfi(std::format(".cfi_def_cfa_offset {}", cfa_off_));
         }
         for (int i = n_saved_regs_ - 1; i >= 0; --i) {
             const char* reg = gen_ ? "%r15" : kSlotRegs()[i];
             line(std::format("popq {}", reg));
-            line(std::format(".cfi_restore {}", reg));
+            cfi(std::format(".cfi_restore {}", reg));
             cfa_off_ -= 8;
-            line(std::format(".cfi_def_cfa_offset {}", cfa_off_));
+            cfi(std::format(".cfi_def_cfa_offset {}", cfa_off_));
         }
         line("ret");
-        line(".cfi_restore_state");
+        cfi(".cfi_restore_state");
         cfa_off_ = body_cfa;
     }
 

@@ -218,13 +218,13 @@ void AsmGen::emit_function(const IRFunction& f, int fi) {
         // 可读的函数别名，供 addr2line / nm / gdb 定位；.LfN 仍是内部跳转名。
         const std::string fname = debug_func_symbol(fi, f.name);
         out_ += "\t.p2align 4\n";
-        out_ += "\t.type " + fname + ", @function\n";
+        emit_type_func(fname);
         out_ += fname + ":\n";
         // CFI（.eh_frame 里的栈展开规则）：从「rsp 指向返回地址」到「帧指针
         // 就位」的每一步都写下来。gdb 的 DWARF 展开器和 libgcc 的
         // _Unwind_Backtrace 都不解析 prologue，只认这张表——缺了它们就
         // 展不过生成出来的帧。运行时的 traceback 仍走 rbp 链，不依赖 CFI。
-        line(".cfi_startproc");
+        cfi(".cfi_startproc");
         // 帧里没有帧指针：CFA 全程由 rsp 定义。prologue 每动一次 sp 就把
         // 偏移记下来，gdb / _Unwind_Backtrace 才能从任意 PC 还原上一层帧。
         // 被保存的寄存器相对 CFA 的偏移不随 push 变化（CFA 也跟着涨）。
@@ -232,15 +232,15 @@ void AsmGen::emit_function(const IRFunction& f, int fi) {
         if (gen_) {
             line("pushq %r15");
             cfa_off_ += 8;
-            line(std::format(".cfi_def_cfa_offset {}", cfa_off_));
-            line(".cfi_offset %r15, -16");
+            cfi(std::format(".cfi_def_cfa_offset {}", cfa_off_));
+            cfi(".cfi_offset %r15, -16");
             line("movq %rdi, %r15");
         } else {
             for (int i = 0; i < n_saved_regs_; ++i) {
                 line(std::format("pushq {}", kSlotRegs()[i]));
                 cfa_off_ += 8;
-                line(std::format(".cfi_def_cfa_offset {}", cfa_off_));
-                line(std::format(".cfi_offset {}, -{}", kSlotRegs()[i], cfa_off_));
+                cfi(std::format(".cfi_def_cfa_offset {}", cfa_off_));
+                cfi(std::format(".cfi_offset {}, -{}", kSlotRegs()[i], cfa_off_));
             }
         }
         frame_alloc();
@@ -366,8 +366,8 @@ void AsmGen::emit_function(const IRFunction& f, int fi) {
             out_ += end + ":\n";
             dbg_entries_.push_back({end, -1, 0});
         }
-        line(".cfi_endproc");
-        out_ += std::format("\t.size {}, .-{}\n", fname, fname);
+        cfi(".cfi_endproc");
+        emit_size_func(fname);
         emit_ns_ += std::chrono::duration<double, std::nano>(
                         std::chrono::steady_clock::now() - t_emit)
                         .count();

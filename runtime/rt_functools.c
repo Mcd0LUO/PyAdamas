@@ -8,7 +8,7 @@
 __asm__(
     ".text\n"
     ".globl pa_call2\n"
-    ".type pa_call2,@function\n"
+    PA_TYPE_FUNC(pa_call2)
     "pa_call2:\n"
     "\tmovq %rdi, %r10\n"
     "\tmovq (%rdi), %r11\n"
@@ -16,18 +16,18 @@ __asm__(
     "\tmovq %rdx, %rsi\n"
     "\txorl %eax, %eax\n"
     "\tjmp *%r11\n"
-    ".size pa_call2, .-pa_call2\n");
+    PA_SIZE_FUNC(pa_call2));
 
 __asm__(
     ".text\n"
     ".globl pa_call2_f\n"
-    ".type pa_call2_f,@function\n"
+    PA_TYPE_FUNC(pa_call2_f)
     "pa_call2_f:\n"
     "\tmovq %rdi, %r10\n"
     "\tmovq (%rdi), %r11\n"
     "\txorl %eax, %eax\n"
     "\tjmp *%r11\n"
-    ".size pa_call2_f, .-pa_call2_f\n");
+    PA_SIZE_FUNC(pa_call2_f));
 
 extern int64_t pa_call2(void* fn, int64_t a, int64_t b);
 extern double pa_call2_f(void* fn, double a, double b);

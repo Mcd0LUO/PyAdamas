@@ -2,7 +2,16 @@
 #include "rt_internal.h"
 
 #include <errno.h>
+#if defined(_WIN32)
+/* Windows 没有 iconv。非 UTF-8 编码在 Windows 上不支持，用恒等桩顶住：
+   文件内容按原始字节处理，不做编码转换。 */
+typedef void* iconv_t;
+#define iconv_open(t, f) ((iconv_t)0)
+#define iconv_close(c) (0)
+#define iconv(c, i, il, o, ol) ((size_t)-1)
+#else
 #include <iconv.h>
+#endif
 #include <unistd.h>
 
 /* ── 文件对象 ─────────────────────────────────────────────────── */

@@ -61,7 +61,7 @@ std::string AsmGen::gen(const IRModule& m) {
             // 字符串对象里有一个指向自身字符区的绝对地址。放在 .rodata
             // 会让 PIE 链接器报 "relocation in read-only section"，
             // 必须用可重定位的只读段。
-            out_ += "\t.section .data.rel.ro,\"aw\",@progbits\n";
+            section_relro();
             for (size_t i = 0; i < m.strings.size(); ++i) {
                 const std::string& s = m.strings[i];
                 out_ += "\t.align 8\n";
@@ -85,7 +85,7 @@ std::string AsmGen::gen(const IRModule& m) {
             // 静态字面量虽然永生，但 unknown 值的运行期类型检查要靠 RC
             // 注册表确认载荷类型。表在模块入口统一登记。
         }
-        out_ += "\t.section .data.rel.ro,\"aw\",@progbits\n";
+        section_relro();
         out_ += "\t.align 8\n.Lstrtab:\n";
         for (size_t i = 0; i < m.strings.size(); ++i)
             out_ += std::format("\t.quad .Lstr{}\n", i);
@@ -102,7 +102,7 @@ std::string AsmGen::gen(const IRModule& m) {
             }
 
             // GC 根表：所有本模块全局槽的地址；外部全局的存储属于对方模块。
-            out_ += "\t.section .data.rel.ro,\"aw\",@progbits\n";
+            section_relro();
             out_ += "\t.align 8\n";
             out_ += std::format("{}:\n", roots_label());
             for (size_t i = 0; i < m.globals.size(); ++i) {
@@ -110,7 +110,7 @@ std::string AsmGen::gen(const IRModule& m) {
                 out_ += std::format("\t.quad {}\n", global_label(static_cast<int>(i)));
             }
         } else {
-            out_ += "\t.section .data.rel.ro,\"aw\",@progbits\n";
+            section_relro();
             out_ += std::format("\t.align 8\n{}:\n", roots_label());
         }
 
@@ -127,7 +127,7 @@ std::string AsmGen::gen(const IRModule& m) {
         // vtable 前固定 6 个字的元数据：MRO 元数据指针表、类编号、
         // vtable 自身、本类声明的槽表、模块限定类名、动态属性槽偏移。
         if (!m.classes.empty()) {
-            out_ += "\t.section .data.rel.ro,\"aw\",@progbits\n";
+            section_relro();
             // 同名类重定义时接口导出的是最后一次绑定，符号也只导出最后一份。
             std::unordered_map<std::string, size_t> last_cls;
             for (size_t i = 0; i < m.classes.size(); ++i) last_cls[m.classes[i].name] = i;
@@ -219,7 +219,7 @@ std::string AsmGen::gen(const IRModule& m) {
         // 每个函数一个静态闭包（code + 0 个捕获），用作无捕获函数值。
         // 布局和堆闭包一致：+0 code，+8 n_caps，+16 起是 cell。
         if (!m.funcs.empty()) {
-            out_ += "\t.section .data.rel.ro,\"aw\",@progbits\n";
+            section_relro();
             for (size_t i = 0; i < m.funcs.size(); ++i) {
                 out_ += "\t.align 8\n";
                 out_ += "\t.quad 0\n\t.quad 0\n";
@@ -233,7 +233,7 @@ std::string AsmGen::gen(const IRModule& m) {
 
         if (dbg_on_) {
             // 运行时 traceback 表引用的源路径与函数名。
-            out_ += "\t.section .rodata\n";
+            section_rodata();
             out_ += std::format("\t.Ldbfile: .asciz \"{}\"\n", asm_escape(m.source_path));
             for (size_t i = 0; i < m.funcs.size(); ++i)
                 out_ += std::format("\t.Lfnname{}: .asciz \"{}\"\n", i,
@@ -255,10 +255,10 @@ std::string AsmGen::gen(const IRModule& m) {
             out_ += "\n# ---- dtor class " + c.name + " ----\n";
             out_ += "\t.align 8\n";
             out_ += std::format(".Ldtor{}:\n", i);
-            out_ += "\t.cfi_startproc\n";
+            if (gnu_cfi()) out_ += "\t.cfi_startproc\n";
             out_ += "\tpushq %rbx\n";
-            out_ += "\t.cfi_def_cfa_offset 16\n";
-            out_ += "\t.cfi_offset %rbx, -16\n";
+            if (gnu_cfi()) out_ += "\t.cfi_def_cfa_offset 16\n";
+            if (gnu_cfi()) out_ += "\t.cfi_offset %rbx, -16\n";
             out_ += "\tmovq %rdi, %rbx\n";
             for (size_t f = 0; f < c.field_heap.size(); ++f) {
                 if (!c.field_heap[f]) continue;
@@ -272,19 +272,19 @@ std::string AsmGen::gen(const IRModule& m) {
                 out_ += "\ttestq %rdi, %rdi\n\tje 1f\n\tcall pa_rc_dec\n1:\n";
             }
             out_ += "\tpopq %rbx\n";
-            out_ += "\t.cfi_def_cfa_offset 8\n";
-            out_ += "\t.cfi_restore %rbx\n";
+            if (gnu_cfi()) out_ += "\t.cfi_def_cfa_offset 8\n";
+            if (gnu_cfi()) out_ += "\t.cfi_restore %rbx\n";
             out_ += "\tret\n";
-            out_ += "\t.cfi_endproc\n";
+            if (gnu_cfi()) out_ += "\t.cfi_endproc\n";
 
             // GC 清扫用：只把指向可达对象的字段引用减掉，不释放任何东西。
             out_ += "\n# ---- gc release class " + c.name + " ----\n";
             out_ += "\t.align 8\n";
             out_ += std::format(".Lgcrel{}:\n", i);
-            out_ += "\t.cfi_startproc\n";
+            if (gnu_cfi()) out_ += "\t.cfi_startproc\n";
             out_ += "\tpushq %rbx\n";
-            out_ += "\t.cfi_def_cfa_offset 16\n";
-            out_ += "\t.cfi_offset %rbx, -16\n";
+            if (gnu_cfi()) out_ += "\t.cfi_def_cfa_offset 16\n";
+            if (gnu_cfi()) out_ += "\t.cfi_offset %rbx, -16\n";
             out_ += "\tmovq %rdi, %rbx\n";
             for (size_t f = 0; f < c.field_heap.size(); ++f) {
                 if (!c.field_heap[f]) continue;
@@ -297,10 +297,10 @@ std::string AsmGen::gen(const IRModule& m) {
                 out_ += "\ttestq %rdi, %rdi\n\tje 1f\n\tcall pa_gc_unref_child\n1:\n";
             }
             out_ += "\tpopq %rbx\n";
-            out_ += "\t.cfi_def_cfa_offset 8\n";
-            out_ += "\t.cfi_restore %rbx\n";
+            if (gnu_cfi()) out_ += "\t.cfi_def_cfa_offset 8\n";
+            if (gnu_cfi()) out_ += "\t.cfi_restore %rbx\n";
             out_ += "\tret\n";
-            out_ += "\t.cfi_endproc\n";
+            if (gnu_cfi()) out_ += "\t.cfi_endproc\n";
         }
 
         // 生成器帧的槽释放（GC release 与异常逃出共用）：逐槽 dec 并清零。
@@ -312,10 +312,10 @@ std::string AsmGen::gen(const IRModule& m) {
             out_ += std::format("\n# ---- gcrel gen g{} ----\n", i);
             out_ += "\t.align 8\n";
             out_ += std::format(".Lgengcrel{}:\n", i);
-            out_ += "\t.cfi_startproc\n";
+            if (gnu_cfi()) out_ += "\t.cfi_startproc\n";
             out_ += "\tpushq %rbx\n";
-            out_ += "\t.cfi_def_cfa_offset 16\n";
-            out_ += "\t.cfi_offset %rbx, -16\n";
+            if (gnu_cfi()) out_ += "\t.cfi_def_cfa_offset 16\n";
+            if (gnu_cfi()) out_ += "\t.cfi_offset %rbx, -16\n";
             out_ += "\tmovq %rdi, %rbx\n";
             out_ += "\tcmpq $1, 8(%rbx)\n";
             out_ += std::format("\tje .Lgengcreldone{}\n", i);
@@ -332,16 +332,16 @@ std::string AsmGen::gen(const IRModule& m) {
             }
             out_ += std::format(".Lgengcreldone{}:\n", i);
             out_ += "\tpopq %rbx\n";
-            out_ += "\t.cfi_def_cfa_offset 8\n";
-            out_ += "\t.cfi_restore %rbx\n";
+            if (gnu_cfi()) out_ += "\t.cfi_def_cfa_offset 8\n";
+            if (gnu_cfi()) out_ += "\t.cfi_restore %rbx\n";
             out_ += "\tret\n";
-            out_ += "\t.cfi_endproc\n";
+            if (gnu_cfi()) out_ += "\t.cfi_endproc\n";
         }
 
         for (size_t i = 0; i < m.funcs.size(); ++i) emit_function(*m.funcs[i], static_cast<int>(i));
 
         if (dbg_on_ && !dbg_entries_.empty()) {
-            out_ += "\t.section .data.rel.ro,\"aw\",@progbits\n\t.align 8\n";
+            section_relro(); out_ += "\t.align 8\n";
             out_ += ".Ldbgtab:\n\t.quad .Ldbfile\n\t.quad .Ldbg_entries\n";
             out_ += std::format("\t.quad {}\n.Ldbg_entries:\n", dbg_entries_.size());
             for (const auto& e : dbg_entries_) {
@@ -364,7 +364,7 @@ std::string AsmGen::gen(const IRModule& m) {
                 out_ += std::format("\t.align 8\n.Lcbtramp{}:\n", i);
                 // 跳板自成一段 CFI 区域：它不动 rsp，C 的返回地址就在
                 // 栈顶，展开时直接按入口规则（CFA=rsp+8）继续往上走。
-                out_ += "\t.cfi_startproc\n";
+                if (gnu_cfi()) out_ += "\t.cfi_startproc\n";
                 out_ += std::format("\tmovq .Lcbslot{}(%rip), %r10\n", i);
                 int gi = 0;
                 for (CKind k : m.cb_sigs[i].params) {
@@ -378,7 +378,7 @@ std::string AsmGen::gen(const IRModule& m) {
                     ++gi;
                 }
                 out_ += "\tjmp *(%r10)\n";
-                out_ += "\t.cfi_endproc\n";
+                if (gnu_cfi()) out_ += "\t.cfi_endproc\n";
             }
             out_ += "\t.bss\n\t.align 8\n";
             for (size_t i = 0; i < m.cb_sigs.size(); ++i)
@@ -388,38 +388,38 @@ std::string AsmGen::gen(const IRModule& m) {
 
         if (!m.is_entry && !m.module_symbol.empty() && m.entry >= 0) {
             out_ += "\t.globl " + module_init_symbol(m.module_symbol) + "\n";
-            out_ += "\t.type " + module_init_symbol(m.module_symbol) + ", @function\n";
+            emit_type_func(module_init_symbol(m.module_symbol));
             out_ += module_init_symbol(m.module_symbol) + ":\n";
-            out_ += "\t.cfi_startproc\n";
+            if (gnu_cfi()) out_ += "\t.cfi_startproc\n";
             out_ += "\tpushq %rbp\n";
-            out_ += "\t.cfi_def_cfa_offset 16\n";
-            out_ += "\t.cfi_offset %rbp, -16\n";
+            if (gnu_cfi()) out_ += "\t.cfi_def_cfa_offset 16\n";
+            if (gnu_cfi()) out_ += "\t.cfi_offset %rbp, -16\n";
             out_ += "\tmovq %rsp, %rbp\n";
-            out_ += "\t.cfi_def_cfa_register %rbp\n";
+            if (gnu_cfi()) out_ += "\t.cfi_def_cfa_register %rbp\n";
             out_ += "\tleaq .Lstrtab(%rip), %rdi\n";
             out_ += std::format("\tmovq ${}, %rsi\n", m.strings.size());
             out_ += "\tcall pa_register_literals\n";
             if (dbg_on_ && !dbg_entries_.empty())
                 out_ += "\tleaq .Ldbgtab(%rip), %rdi\n\tcall pa_debug_register\n";
             out_ += "\tpopq %rbp\n";
-            out_ += "\t.cfi_def_cfa %rsp, 8\n";
+            if (gnu_cfi()) out_ += "\t.cfi_def_cfa %rsp, 8\n";
             // 尾跳进 __pa_main：返回地址原样留在栈顶，CFA 规则跟刚进
             // 本函数时一致，展开器在这里看到的仍是调用方的帧。
             out_ += "\tjmp " + func_label(m.entry) + "\n";
-            out_ += "\t.cfi_endproc\n";
+            if (gnu_cfi()) out_ += "\t.cfi_endproc\n";
         }
 
         // 真正的入口：调用降级出来的 __pa_main，返回它的返回值
         if (m.is_entry) {
             out_ += "\t.globl main\n";
-            out_ += "\t.type main, @function\n";
+            emit_type_func("main");
             out_ += "main:\n";
-            out_ += "\t.cfi_startproc\n";
+            if (gnu_cfi()) out_ += "\t.cfi_startproc\n";
             out_ += "\tpushq %rbp\n";
-            out_ += "\t.cfi_def_cfa_offset 16\n";
-            out_ += "\t.cfi_offset %rbp, -16\n";
+            if (gnu_cfi()) out_ += "\t.cfi_def_cfa_offset 16\n";
+            if (gnu_cfi()) out_ += "\t.cfi_offset %rbp, -16\n";
             out_ += "\tmovq %rsp, %rbp\n";
-            out_ += "\t.cfi_def_cfa_register %rbp\n";
+            if (gnu_cfi()) out_ += "\t.cfi_def_cfa_register %rbp\n";
             out_ += "\tsubq $16, %rsp\n";
             out_ += "\tmovq %rdi, (%rsp)\n";
             out_ += "\tmovq %rsi, 8(%rsp)\n";
@@ -442,12 +442,12 @@ std::string AsmGen::gen(const IRModule& m) {
             out_ += "\taddq $16, %rsp\n";
             if (m.entry >= 0) out_ += std::format("\tcall {}\n", func_label(m.entry));
             out_ += "\tpopq %rbp\n";
-            out_ += "\t.cfi_def_cfa %rsp, 8\n";
+            if (gnu_cfi()) out_ += "\t.cfi_def_cfa %rsp, 8\n";
             out_ += "\tret\n";
-            out_ += "\t.cfi_endproc\n";
-            out_ += "\t.size main, .-main\n";
+            if (gnu_cfi()) out_ += "\t.cfi_endproc\n";
+            emit_size_func("main");
         }
-        out_ += "\t.section .note.GNU-stack,\"\",@progbits\n";
+        emit_gnu_stack_note();
 
         if (std::getenv("PYADAMAS_TIMING"))
             std::fprintf(stderr, "[timing] codegen alloc=%.1f emit=%.1f ms\n",

@@ -4,7 +4,9 @@
 #include <errno.h>
 #include <fcntl.h>
 #include <signal.h>
+#if !defined(_WIN32)
 #include <sys/wait.h>
+#endif
 #include <unistd.h>
 
 struct PyAdamasProc {

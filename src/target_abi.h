@@ -46,6 +46,12 @@ struct TargetABI {
 
     // 汇编器是否接受 GNU 的 .cfi_* 展开指示符。Windows 用 SEH，不走 .eh_frame。
     bool gnu_cfi;
+
+    // setjmp/longjmp 的符号名。glibc 有下划线变体 _setjmp/_longjmp，它们不
+    // 保存信号掩码（实测 2.5ns vs 117ns）；Windows 只有标准名。生成代码和
+    // 运行时必须用同一个名字，所以放进 ABI。
+    const char* setjmp_sym;
+    const char* longjmp_sym;
 };
 
 // 当前编译目标（默认 x86-64 SysV）。

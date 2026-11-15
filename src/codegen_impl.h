@@ -208,6 +208,33 @@ private:
 
     void comment(const std::string& s) { out_ += std::format("\t# {}\n", s); }
 
+    // ── 目标相关的汇编指示符 ────────────────────────────────────
+    // ELF/GNU as 的 .cfi_*、.type、.size、.note.GNU-stack 在 COFF 目标上
+    // 要么非法要么被忽略，所以按 TargetABI::gnu_cfi 关掉。关掉后 Windows
+    // 侧没有 .eh_frame 展开信息——那是 SEH 的地盘，需要单独实现。
+    bool gnu_cfi() const { return target_abi().gnu_cfi; }
+    void cfi(const std::string& s) {
+        if (target_abi().gnu_cfi) line(s);
+    }
+    // relro 段：ELF 下是 .data.rel.ro，COFF 没有这个概念，退到 .rdata。
+    void section_relro() {
+        out_ += target_abi().gnu_cfi ? "\t.section .data.rel.ro,\"aw\",@progbits\n"
+                                      : "\t.section .rdata,\"dr\"\n";
+    }
+    void section_rodata() {
+        out_ += target_abi().gnu_cfi ? "\t.section .rodata\n" : "\t.section .rdata,\"dr\"\n";
+    }
+    void emit_type_func(const std::string& n) {
+        if (target_abi().gnu_cfi) out_ += "\t.type " + n + ", @function\n";
+    }
+    void emit_size_func(const std::string& n) {
+        if (target_abi().gnu_cfi) out_ += std::format("\t.size {}, .-{}\n", n, n);
+    }
+    void emit_gnu_stack_note() {
+        if (target_abi().gnu_cfi) out_ += "\t.section .note.GNU-stack,\"\",@progbits\n";
+    }
+
+
     // 热路径的迷你发射器：直接拼接，绕开 std::format 的解析开销。
     void emit2(const char* mn, const std::string& a, const std::string& b) {
         out_ += '\t';

@@ -6,14 +6,14 @@
 __asm__(
     ".text\n"
     ".globl pa_call1\n"
-    ".type pa_call1,@function\n"
+    PA_TYPE_FUNC(pa_call1)
     "pa_call1:\n"
     "\tmovq %rdi, %r10\n"
     "\tmovq (%rdi), %r11\n"
     "\tmovq %rsi, %rdi\n"
     "\txorl %eax, %eax\n"
     "\tjmp *%r11\n"
-    ".size pa_call1, .-pa_call1\n");
+    PA_SIZE_FUNC(pa_call1));
 
 /* 完成时同步调用 add_done_callback 注册的函数，参数是 future 本身。
    CPython 用 call_soon 排队，这里直接调用；回调抛出的异常会向外传播。 */

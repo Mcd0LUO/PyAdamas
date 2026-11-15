@@ -6,13 +6,132 @@
 #pragma once
 
 #include <math.h>
-#include <poll.h>
 #include <setjmp.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
+
+/* ── 平台适配层 ───────────────────────────────────────────────
+   Windows 与 POSIX 的差异集中在少数几个调用上，全部在这里一次性抹平，
+   避免散落到各 .c 里。目前覆盖：轮询、目录创建、路径规范化、处理器个数、
+   UTC 时间换算、setjmp 命名。fork/exec 系的 subprocess 是独立的大块，
+   单独在 rt_subprocess.c 里按平台分叉。 */
+#if defined(_WIN32)
+#include <winsock2.h>
+#include <windows.h>
+#include <direct.h>
+#include <io.h>
+#include <process.h>
+
+/* Windows 没有下划线变体，且 CRT 的 _setjmp 是两参数版本（MSVC 语义），
+   所以用函数式宏转发到标准 setjmp/longjmp。 */
+#define _setjmp(env) setjmp(env)
+#define _longjmp(env, val) longjmp((env), (val))
+
+/* winsock2 的 pollfd 用的句柄类型是 SOCKET，nfds_t 在部分 mingw 版本里没有。 */
+#ifndef nfds_t
+#define nfds_t unsigned long
+#endif
+
+/* POSIX 的 *_r 变体在 Windows 上是 *_s，参数顺序与返回值语义不同。 */
+static inline struct tm* pa_localtime_r(const time_t* t, struct tm* out) {
+    return localtime_s(out, t) == 0 ? out : NULL;
+}
+static inline struct tm* pa_gmtime_r(const time_t* t, struct tm* out) {
+    return gmtime_s(out, t) == 0 ? out : NULL;
+}
+#define localtime_r(t, out) pa_localtime_r((t), (out))
+#define gmtime_r(t, out) pa_gmtime_r((t), (out))
+
+/* POSIX 的 CLOCK_REALTIME / CLOCK_MONOTONIC。Windows 没有这两个 clockid，
+   用两个自选常量分别映射到系统时间和单调计数器。 */
+#ifndef CLOCK_REALTIME
+#define CLOCK_REALTIME 0
+#endif
+#ifndef CLOCK_MONOTONIC
+#define CLOCK_MONOTONIC 1
+#endif
+
+static inline int pa_clock_gettime(int clk, struct timespec* ts) {
+    if (!ts) return -1;
+    if (clk == CLOCK_MONOTONIC) {
+        static LARGE_INTEGER freq;
+        LARGE_INTEGER now;
+        if (freq.QuadPart == 0) QueryPerformanceFrequency(&freq);
+        QueryPerformanceCounter(&now);
+        ts->tv_sec = (time_t)(now.QuadPart / freq.QuadPart);
+        ts->tv_nsec = (long)((now.QuadPart % freq.QuadPart) * 1000000000LL / freq.QuadPart);
+        return 0;
+    }
+    {
+        FILETIME ft;
+        ULARGE_INTEGER u;
+        GetSystemTimeAsFileTime(&ft);
+        u.LowPart = ft.dwLowDateTime;
+        u.HighPart = ft.dwHighDateTime;
+        /* 1601-01-01 到 1970-01-01 之间是 11644473600 秒 */
+        u.QuadPart -= 116444736000000000ULL;
+        ts->tv_sec = (time_t)(u.QuadPart / 10000000ULL);
+        ts->tv_nsec = (long)((u.QuadPart % 10000000ULL) * 100ULL);
+        return 0;
+    }
+}
+#define clock_gettime(clk, ts) pa_clock_gettime((clk), (ts))
+
+static inline int pa_nanosleep(const struct timespec* req, struct timespec* rem) {
+    (void)rem;
+    if (!req) return -1;
+    DWORD ms = (DWORD)(req->tv_sec * 1000 + req->tv_nsec / 1000000);
+    if (ms == 0 && req->tv_nsec > 0) ms = 1;
+    Sleep(ms);
+    return 0;
+}
+#define nanosleep(req, rem) pa_nanosleep((req), (rem))
+
+/* POSIX poll -> WSAPoll。结构体由 winsock2.h 提供（SOCKET/SHORT/SHORT），
+   与 POSIX 的（int/short/short）逐字段对应，可直接转型。 */
+#define poll(fds, n, timeout) WSAPoll((WSAPOLLFD*)(fds), (ULONG)(n), (INT)(timeout))
+
+/* POSIX mkdir 带 mode，Win32 不带。 */
+#define mkdir(path, mode) _mkdir(path)
+
+/* timegm -> _mkgmtime */
+#define timegm(tm) _mkgmtime(tm)
+
+static inline char* pa_realpath(const char* p, char* unused) {
+    (void)unused;
+    char* buf = (char*)malloc(_MAX_PATH);
+    if (!buf) return NULL;
+    if (_fullpath(buf, p, _MAX_PATH) == NULL) { free(buf); return NULL; }
+    return buf;
+}
+#define realpath(p, r) pa_realpath((p), (r))
+
+static inline long pa_cpu_count(void) {
+    SYSTEM_INFO si;
+    GetSystemInfo(&si);
+    return (long)(si.dwNumberOfProcessors ? si.dwNumberOfProcessors : 1);
+}
+#define pa_SC_NPROCESSORS_ONLN 1
+#define sysconf(x) pa_cpu_count()
+#define _SC_NPROCESSORS_ONLN pa_SC_NPROCESSORS_ONLN
+
+#else
+#include <poll.h>
+#include <unistd.h>
+#include <sys/wait.h>
+#endif
+/* 内联汇编里的函数元数据：ELF 用 .type/.size，COFF 不接受这两个指示符。 */
+#if defined(_WIN32)
+#define PA_TYPE_FUNC(n)
+#define PA_SIZE_FUNC(n)
+#else
+#define PA_TYPE_FUNC(n) ".type " #n ",@function\n"
+#define PA_SIZE_FUNC(n) ".size " #n ", .-" #n "\n"
+#endif
+
 
 typedef struct {
     int64_t len;
