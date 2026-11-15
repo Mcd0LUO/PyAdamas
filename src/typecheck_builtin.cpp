@@ -45,10 +45,8 @@ TypePtr TypeChecker::builtin_call(const std::string& n, Call& c) {
                 }
                 TypePtr kt = kwt[i];
                 if (kw.arg == "file") {
-                    if (!is_unknown(kt) && (!kt || kt->kind != TyKind::File))
-                        err(kw.value->line, kw.value->col,
-                            std::format("print() file must be an open file object, got '{}'",
-                                        type_name(kt)));
+                    // 任意 file-like 对象（Devnull、自定义 writer）都接受：
+                    // 静态只认 TyKind::File 会误杀，duck typing 放行。
                     continue;
                 }
                 if (kw.arg == "flush") {
@@ -431,7 +429,7 @@ TypePtr TypeChecker::builtin_call(const std::string& n, Call& c) {
                 const std::string& k = c.keywords[i].arg;
                 Expr* ve = c.keywords[i].value.get();
                 if (k.empty()) {
-                    err(ve->line, ve->col, "open() does not take '**kwargs'");
+                    // open(**kw) 动态关键字：conservative 忽略。
                     continue;
                 }
                 int idx = -1;
