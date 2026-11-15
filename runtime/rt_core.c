@@ -820,7 +820,7 @@ PYADAMAS_NO_ASAN static void gc_scan_range(const void* begin, const void* end) {
 // 堆指针（槽位提升、全局 vreg）就靠这一段兜住。
 PYADAMAS_NO_ASAN static void gc_scan_registers(void) {
     jmp_buf regs;
-    if (setjmp(regs) == 0) gc_scan_range(&regs, (char*)&regs + sizeof regs);
+    if (_setjmp(regs) == 0) gc_scan_range(&regs, (char*)&regs + sizeof regs);
 }
 
 /* 保守根只扫帧记录登记过的地址：

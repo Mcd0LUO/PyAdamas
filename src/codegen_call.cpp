@@ -890,7 +890,10 @@ void AsmGen::gen_setjmp(const Inst& in) {
         // handler 记录的第一个字段就是 jmp_buf，所以记录指针可以直接
         // 作为 setjmp 的参数。longjmp 回来后 $rax 非 0。
         emit2("movq", src_op(in.a), "%rdi");
-        line("call setjmp");
+        // 用 _setjmp 而不是 setjmp：glibc 的 setjmp 每次都存信号掩码
+        //（一次 rt_sigprocmask 系统调用），实测 117ns vs 2.5ns。
+        // pyadamas 从不改信号掩码，没有要恢复的东西。
+        line("call _setjmp");
         line("movslq %eax, %rax");
         emit2("movq", "%rax", dst_op(in.dst));
     }

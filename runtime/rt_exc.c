@@ -208,12 +208,31 @@ _Noreturn void exc_longjmp(void) {
     }
     /* 跳过的帧不会再执行自己的出口清理：按记录把里面的堆引用释放掉。 */
     pa_frame_unwind(handler_top->frame);
-    longjmp(handler_top->env, 1);
+    /* 必须和生成代码里的 _setjmp 配对：glibc 的 setjmp 存信号掩码，
+       _setjmp 不存，两者混用是未定义行为。 */
+    _longjmp(handler_top->env, 1);
+}
+
+/* handler 记录的空闲链表。try 在热循环里每次进入都要一条记录，用
+   malloc/free 的话每轮两次堆操作 —— 实测 300 万次 try 因此多花 400ms，
+   占整个循环的 99%。记录严格是栈式的，空闲块复用即可，链表长度只取决于
+   最大嵌套深度，不会无限增长。 */
+static PyAdamasHandler* handler_freelist = NULL;
+
+static void handler_release(PyAdamasHandler* h) {
+    h->prev = handler_freelist;
+    handler_freelist = h;
 }
 
 void* pa_handler_push(void) {
-    PyAdamasHandler* h = (PyAdamasHandler*)malloc(sizeof(PyAdamasHandler));
-    if (!h) panic_c("out of memory");
+    PyAdamasHandler* h;
+    if (handler_freelist) {
+        h = handler_freelist;
+        handler_freelist = h->prev;
+    } else {
+        h = (PyAdamasHandler*)malloc(sizeof(PyAdamasHandler));
+        if (!h) panic_c("out of memory");
+    }
     h->prev = handler_top;
     h->mark = pa_rc_mark();
     h->frame = pa_frame_top;
@@ -227,7 +246,7 @@ void pa_handler_leave(void* p) {
     if (handler_top != h) panic_c("handler stack corrupted on leave");
     handler_top = h->prev;
     pa_rc_cleanup(h->mark);
-    free(h);
+    handler_release(h);
 }
 
 /* 早期退出（return/break/continue）用：只弹记录，临时值留给外层
@@ -236,7 +255,7 @@ void pa_handler_discard(void* p) {
     PyAdamasHandler* h = (PyAdamasHandler*)p;
     if (handler_top != h) panic_c("handler stack corrupted on discard");
     handler_top = h->prev;
-    free(h);
+    handler_release(h);
 }
 
 /* 生成器在 yield 处返回：handler 记录必须从全局栈上摘下来，否则后面

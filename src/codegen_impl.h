@@ -371,6 +371,15 @@ private:
         if (dst == src) return;
         bool dreg = dst.size() > 4 && dst.compare(0, 4, "%xmm") == 0;
         bool sreg = src.size() > 4 && src.compare(0, 4, "%xmm") == 0;
+        // SSE 不支持内存到内存的 movsd：两侧都在栈槽时必须经寄存器中转。
+        // 走到这里的调用点都是「把已知值搬到某个槽/寄存器」，%xmm0 是
+        // 各指令生成器的固定 scratch，不持有活值。（不中转的话汇编器直接
+        // 报 operand size mismatch，整文件汇编失败。）
+        if (!dreg && !sreg) {
+            emit2("movsd", src, "%xmm0");
+            emit2("movsd", "%xmm0", dst);
+            return;
+        }
         emit2(dreg && sreg ? "movapd" : "movsd", src, dst);
     }
 
