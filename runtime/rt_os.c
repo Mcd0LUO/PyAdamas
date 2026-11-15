@@ -105,6 +105,8 @@ PyAdamasList* pa_os_listdir(PyAdamasStr* path) {
     DIR* d = opendir(path->data);
     if (!d) os_raise("listdir", errno);
     PyAdamasList* out = pa_list_new(0, 1);
+    /* 目录项多时循环里的 str_new 必然会撞上主收集；out 只在 C 局部变量里。 */
+    pa_gc_pin(out);
     struct dirent* e;
     while ((e = readdir(d)) != NULL) {
         if (strcmp(e->d_name, ".") == 0 || strcmp(e->d_name, "..") == 0) continue;
@@ -112,6 +114,7 @@ PyAdamasList* pa_os_listdir(PyAdamasStr* path) {
         pa_list_append(out, (int64_t)s);
     }
     closedir(d);
+    pa_gc_unpin(out);
     return out;
 }
 
@@ -158,10 +161,18 @@ PyAdamasList* pa_os_path_splitext(PyAdamasStr* s) {
         if (k < dot) cut = dot;
     }
     PyAdamasList* out = pa_list_new(2, 1);
+    /* 三次分配：out、root、ext 依次是「只在本帧 C 局部变量里」的对象，
+       后一次分配触发主收集时前一个必须已经在根上。 */
+    pa_gc_pin(out);
     PyAdamasStr* root = str_new(s->data, cut);
+    pa_gc_pin(root);
     PyAdamasStr* ext = str_new(s->data + cut, s->len - cut);
+    pa_gc_pin(ext);
     pa_list_append(out, (int64_t)root);
     pa_list_append(out, (int64_t)ext);
+    pa_gc_unpin(ext);
+    pa_gc_unpin(root);
+    pa_gc_unpin(out);
     return out;
 }
 
@@ -250,7 +261,10 @@ PyAdamasStr* pa_os_path_abspath(PyAdamasStr* s) {
     joined[cl + 1 + (size_t)s->len] = 0;
     PyAdamasStr* tmp = str_new(joined, (int64_t)(cl + 1 + (size_t)s->len));
     free(joined);
+    /* normpath 内部还要分配；tmp 只在本帧 C 局部变量里。 */
+    pa_gc_pin(tmp);
     PyAdamasStr* out = pa_os_path_normpath(tmp);
+    pa_gc_unpin(tmp);
     pa_rc_dec(tmp);
     return out;
 }
@@ -344,12 +358,18 @@ PyAdamasList* pa_os_path_split(PyAdamasStr* s) {
     int64_t head_len = i;
     while (head_len > 1 && s->data[head_len - 1] == '/') --head_len;
     PyAdamasStr* head = str_new(s->data, head_len);
+    pa_gc_pin(head);
     PyAdamasStr* tail = str_new(s->data + i, n - i);
+    pa_gc_pin(tail);
     PyAdamasList* out = pa_list_new(2, 1);
+    pa_gc_pin(out);
     pa_rc_inc(head);
     pa_list_append(out, (int64_t)head);
     pa_rc_inc(tail);
     pa_list_append(out, (int64_t)tail);
+    pa_gc_unpin(out);
+    pa_gc_unpin(tail);
+    pa_gc_unpin(head);
     return out;
 }
 

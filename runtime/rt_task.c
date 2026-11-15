@@ -60,7 +60,11 @@ void* pa_asyncio_create_task(void* coro, int64_t result_kind) {
         t->driver_gen = (int64_t)coro;
         pa_rc_inc(coro);
         pa_rc_inc(coro);  // start_awaitable 接管这个引用
+        /* start_awaitable 内部还会分配（waiters / 列表）；t 只在本帧 C
+           局部变量里，先 pin。 */
+        pa_gc_pin(t);
         start_awaitable(coro, t);
+        pa_gc_unpin(t);
         return t;
     }
     loop_ensure();
@@ -231,8 +235,11 @@ void future_settle(PyAdamasAwait* f, int64_t value, PyAdamasException* exc) {
 void* pa_asyncio_future_new(void) {
     loop_ensure();
     PyAdamasAwait* f = await_new(5);
+    /* 两个列表都是后续分配点；f 只在本帧 C 局部变量里。 */
+    pa_gc_pin(f);
     f->waiters = pa_list_new(4, 1);
     f->callbacks = pa_list_new(2, 1);
+    pa_gc_unpin(f);
     return f;
 }
 
@@ -394,7 +401,9 @@ void* pa_event_new(void) {
     loop_ensure();
     PyAdamasEvent* e = (PyAdamasEvent*)rc_alloc((int64_t)sizeof(PyAdamasEvent), event_destroy, NULL,
                                         PYADAMAS_RC_OBJ);
+    pa_gc_pin(e);  /* waiters 的分配可能触发主收集 */
     e->waiters = pa_list_new(4, 1);
+    pa_gc_unpin(e);
     return e;
 }
 
@@ -430,7 +439,9 @@ void* pa_lock_new(void) {
     loop_ensure();
     PyAdamasLock* l = (PyAdamasLock*)rc_alloc((int64_t)sizeof(PyAdamasLock), lock_destroy, NULL,
                                       PYADAMAS_RC_OBJ);
+    pa_gc_pin(l);  /* waiters 的分配可能触发主收集 */
     l->waiters = pa_list_new(4, 1);
+    pa_gc_unpin(l);
     return l;
 }
 
@@ -472,12 +483,15 @@ void* pa_queue_new(int64_t maxsize, int64_t kind) {
                                         PYADAMAS_RC_OBJ);
     q->kind = kind ? 1 : 0;
     int64_t lk = q->kind ? 2 : 0;
+    /* 下面连建 5 个列表，每个都是主收集触发点；q 只在本帧 C 局部变量里。 */
+    pa_gc_pin(q);
     q->items = pa_list_new(4, lk);
     q->getters = pa_list_new(4, 1);
     q->putters = pa_list_new(4, 1);
     q->pvalues = pa_list_new(4, lk);
     q->joiners = pa_list_new(4, 1);
     q->maxsize = maxsize > 0 ? maxsize : 0;
+    pa_gc_unpin(q);
     return q;
 }
 
@@ -624,7 +638,9 @@ void* pa_taskgroup_new(void) {
     loop_ensure();
     PyAdamasTaskGroup* g = (PyAdamasTaskGroup*)rc_alloc((int64_t)sizeof(PyAdamasTaskGroup),
                                                 taskgroup_destroy, NULL, PYADAMAS_RC_OBJ);
+    pa_gc_pin(g);  /* tasks 的分配可能触发主收集 */
     g->tasks = pa_list_new(4, 1);
+    pa_gc_unpin(g);
     return g;
 }
 
@@ -648,7 +664,10 @@ void* pa_taskgroup_exit(void* gp) {
         pa_rc_inc((void*)t);
         pa_list_append(L, t);
     }
+    /* gather 内部还要建 children/results 列表；L 只在本帧 C 局部变量里。 */
+    pa_gc_pin(L);
     void* fut = pa_asyncio_gather(L, 2);  // TaskGroup 结果类型不可见，按 unknown 释放
+    pa_gc_unpin(L);
     pa_rc_dec(L);
     return fut;
 }
@@ -677,7 +696,9 @@ void* pa_sem_new(int64_t value) {
     PyAdamasSem* s = (PyAdamasSem*)rc_alloc((int64_t)sizeof(PyAdamasSem), sem_destroy, NULL,
                                     PYADAMAS_RC_OBJ);
     s->value = value > 0 ? value : 0;
+    pa_gc_pin(s);  /* waiters 的分配可能触发主收集 */
     s->waiters = pa_list_new(4, 1);
+    pa_gc_unpin(s);
     return s;
 }
 

@@ -423,9 +423,12 @@ PyAdamasProc* pa_subprocess_run(PyAdamasList* argv, int64_t capture, int64_t tex
 
     PyAdamasProc* proc =
         (PyAdamasProc*)rc_alloc((int64_t)sizeof(PyAdamasProc), proc_destroy, NULL, PYADAMAS_RC_OBJ);
+    /* 下面两次 str_new 都可能触发主收集；proc 只在本帧 C 局部变量里。 */
+    pa_gc_pin(proc);
     proc->returncode = rc;
     proc->out = str_new(obuf ? obuf : "", (int64_t)olen);
     proc->err = str_new(ebuf ? ebuf : "", (int64_t)elen);
+    pa_gc_unpin(proc);
     free(obuf);
     free(ebuf);
     return proc;
@@ -652,7 +655,10 @@ static PyAdamasFile* popen_wrap(int64_t* fd, const char* mode) {
        二进制模式，语义才和 POSIX 的字节流一致。 */
     const char* wmode = mode[0] == 'r' ? "rb" : "wb";
     PyAdamasStr* m = str_new(wmode, (int64_t)strlen(wmode));
+    /* pa_file_open 内部还要分配多个对象；m 只在本帧 C 局部变量里。 */
+    pa_gc_pin(m);
     PyAdamasFile* f = pa_file_open(NULL, *fd, m, 0, 0, 1);
+    pa_gc_unpin(m);
     pa_rc_dec(m);
     *fd = -1; /* 所有权转给文件对象 */
     return f;
@@ -791,9 +797,12 @@ PyAdamasList* pa_popen_communicate(PyAdamasPopen* p, PyAdamasStr* input) {
     if (p->out_obj && p->err_obj) {
         /* 两边都已经被包装成文件对象：只能顺序读。 */
         PyAdamasStr* a = pa_file_read(p->out_obj, -1);
+        /* 第二次 read 还会分配；a 只在本帧 C 局部变量里。 */
+        pa_gc_pin(a);
         PyAdamasStr* b = pa_file_read(p->err_obj, -1);
         buf_append(&obuf, &olen, &ocap, a->data, (size_t)a->len);
         buf_append(&ebuf, &elen, &ecap, b->data, (size_t)b->len);
+        pa_gc_unpin(a);
         pa_rc_dec(a);
         pa_rc_dec(b);
     } else if (p->out_obj) {
@@ -818,10 +827,15 @@ PyAdamasList* pa_popen_communicate(PyAdamasPopen* p, PyAdamasStr* input) {
     popen_reap(p, 1);
 
     PyAdamasList* out = pa_list_new(2, 1);
+    /* 三次分配：out、so、se 依次只在本帧 C 局部变量里。 */
+    pa_gc_pin(out);
     PyAdamasStr* so = str_new(obuf ? obuf : "", (int64_t)olen);
+    pa_gc_pin(so);
     PyAdamasStr* se = str_new(ebuf ? ebuf : "", (int64_t)elen);
     pa_list_append(out, (int64_t)so);
     pa_list_append(out, (int64_t)se);
+    pa_gc_unpin(so);
+    pa_gc_unpin(out);
     free(obuf);
     free(ebuf);
     return out;
@@ -1030,9 +1044,12 @@ PyAdamasProc* pa_subprocess_run(PyAdamasList* argv, int64_t capture, int64_t tex
 
     PyAdamasProc* proc =
         (PyAdamasProc*)rc_alloc((int64_t)sizeof(PyAdamasProc), proc_destroy, NULL, PYADAMAS_RC_OBJ);
+    /* 下面两次 str_new 都可能触发主收集；proc 只在本帧 C 局部变量里。 */
+    pa_gc_pin(proc);
     proc->returncode = rc;
     proc->out = str_new(obuf ? obuf : "", (int64_t)olen);
     proc->err = str_new(ebuf ? ebuf : "", (int64_t)elen);
+    pa_gc_unpin(proc);
     free(obuf);
     free(ebuf);
     return proc;
@@ -1194,7 +1211,10 @@ int64_t pa_popen_returncode(PyAdamasPopen* p) { return p->rc; }
 
 static PyAdamasFile* popen_wrap(int64_t* fd, const char* mode) {
     PyAdamasStr* m = str_new(mode, (int64_t)strlen(mode));
+    /* pa_file_open 内部还要分配多个对象；m 只在本帧 C 局部变量里。 */
+    pa_gc_pin(m);
     PyAdamasFile* f = pa_file_open(NULL, *fd, m, 0, 0, 1);
+    pa_gc_unpin(m);
     pa_rc_dec(m);
     *fd = -1; /* 所有权转给文件对象 */
     return f;
@@ -1309,9 +1329,12 @@ PyAdamasList* pa_popen_communicate(PyAdamasPopen* p, PyAdamasStr* input) {
     if (p->out_obj && p->err_obj) {
         /* 两边都已经被包装成文件对象：只能顺序读。 */
         PyAdamasStr* a = pa_file_read(p->out_obj, -1);
+        /* 第二次 read 还会分配；a 只在本帧 C 局部变量里。 */
+        pa_gc_pin(a);
         PyAdamasStr* b = pa_file_read(p->err_obj, -1);
         buf_append(&obuf, &olen, &ocap, a->data, (size_t)a->len);
         buf_append(&ebuf, &elen, &ecap, b->data, (size_t)b->len);
+        pa_gc_unpin(a);
         pa_rc_dec(a);
         pa_rc_dec(b);
     } else if (p->out_obj) {
@@ -1358,10 +1381,15 @@ PyAdamasList* pa_popen_communicate(PyAdamasPopen* p, PyAdamasStr* input) {
     popen_reap(p, 1);
 
     PyAdamasList* out = pa_list_new(2, 1);
+    /* 三次分配：out、so、se 依次只在本帧 C 局部变量里。 */
+    pa_gc_pin(out);
     PyAdamasStr* so = str_new(obuf ? obuf : "", (int64_t)olen);
+    pa_gc_pin(so);
     PyAdamasStr* se = str_new(ebuf ? ebuf : "", (int64_t)elen);
     pa_list_append(out, (int64_t)so);
     pa_list_append(out, (int64_t)se);
+    pa_gc_unpin(so);
+    pa_gc_unpin(out);
     free(obuf);
     free(ebuf);
     return out;

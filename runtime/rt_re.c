@@ -1310,25 +1310,34 @@ int64_t pa_re_group_str(PyAdamasMatch* m, PyAdamasStr* name) {
 
 int64_t pa_re_groups(PyAdamasMatch* m) {
     PyAdamasList* out = pa_list_new(0, 1);
+    /* 每个捕获组一次 str_new：out 只在本帧 C 局部变量里。 */
+    pa_gc_pin(out);
     if (m) {
         for (int64_t i = 1; i <= m->ngroups; ++i) {
             PyAdamasStr* s = group_str(m, i);
             pa_list_append(out, (int64_t)s);
         }
     }
+    pa_gc_unpin(out);
     return (int64_t)out;
 }
 
 int64_t pa_re_groupdict(PyAdamasMatch* m) {
     // key_kind=1 是 str；key/val 都由字典拥有，析构时各自 rc_dec。
     PyAdamasDict* d = pa_dict_new(1, 1, 1, -1, -1);
+    /* d 只在本帧 C 局部变量里；循环里 k 先分配、v 再分配，两个分配点都要
+       保证前一个对象在根上。 */
+    pa_gc_pin(d);
     if (m) {
         for (int i = 0; i < m->nnames; ++i) {
             PyAdamasStr* k = str_new(m->names[i].name, (int64_t)strlen(m->names[i].name));
+            pa_gc_pin(k);
             PyAdamasStr* v = group_str(m, m->names[i].group);
             pa_dict_set(d, (int64_t)k, (int64_t)v);
+            pa_gc_unpin(k);
         }
     }
+    pa_gc_unpin(d);
     return (int64_t)d;
 }
 
@@ -1386,6 +1395,8 @@ static int find_next(ReProg* g, PyAdamasStr* text, int64_t from, int64_t* caps) 
 // finditer 返回 list[Match]（pyadamas 没有惰性迭代器，按列表给，语义等价）。
 static PyAdamasList* finditer_impl(ReProg* g, PyAdamasStr* text) {
     PyAdamasList* out = pa_list_new(0, 1);
+    /* 循环里每次 match_new 都是主收集触发点；out 只在 C 局部变量里。 */
+    pa_gc_pin(out);
     int64_t ncap = 2 * (int64_t)(g->ngroups + 1);
     int64_t* caps = (int64_t*)re_alloc(sizeof(int64_t) * (size_t)ncap);
     int64_t pos = 0;
@@ -1395,6 +1406,7 @@ static PyAdamasList* finditer_impl(ReProg* g, PyAdamasStr* text) {
         if (caps[1] == caps[0]) pos = caps[1] + 1;
         else pos = caps[1];
     }
+    pa_gc_unpin(out);
     free(caps);
     return out;
 }
@@ -1436,6 +1448,8 @@ int64_t pa_re_findall_str(PyAdamasStr* pat, PyAdamasStr* text, int64_t flags) {
         pa_raise_c("ValueError", err ? err : "bad pattern");
     }
     PyAdamasList* out = pa_list_new(0, 1);
+    /* findall_push 内部 str_new 逐个产出匹配串；out 只在本帧 C 局部变量里。 */
+    pa_gc_pin(out);
     int64_t ncap = 2 * (int64_t)(g.ngroups + 1);
     int64_t* caps = (int64_t*)re_alloc(sizeof(int64_t) * (size_t)ncap);
     int64_t pos = 0;
@@ -1444,6 +1458,7 @@ int64_t pa_re_findall_str(PyAdamasStr* pat, PyAdamasStr* text, int64_t flags) {
         if (caps[1] == caps[0]) pos = caps[1] + 1;
         else pos = caps[1];
     }
+    pa_gc_unpin(out);
     free(caps);
     prog_free(&g);
     return (int64_t)out;
@@ -1452,6 +1467,7 @@ int64_t pa_re_findall_str(PyAdamasStr* pat, PyAdamasStr* text, int64_t flags) {
 int64_t pa_re_findall(PyAdamasRegex* re, PyAdamasStr* text) {
     if (!re) pa_raise_c("AttributeError", "NoneType has no regex method");
     PyAdamasList* out = pa_list_new(0, 1);
+    pa_gc_pin(out);  /* 同 pa_re_findall_str：循环内的分配点会清扫无根的 out */
     int64_t ncap = 2 * (int64_t)(re->prog.ngroups + 1);
     int64_t* caps = (int64_t*)re_alloc(sizeof(int64_t) * (size_t)ncap);
     int64_t pos = 0;
@@ -1460,6 +1476,7 @@ int64_t pa_re_findall(PyAdamasRegex* re, PyAdamasStr* text) {
         if (caps[1] == caps[0]) pos = caps[1] + 1;
         else pos = caps[1];
     }
+    pa_gc_unpin(out);
     free(caps);
     return (int64_t)out;
 }
@@ -1613,7 +1630,11 @@ int64_t pa_re_sub_fn(PyAdamasRegex* re, int64_t closure, PyAdamasStr* text, int6
     while (pos <= text->len && (count <= 0 || done < count) && find_next(g, text, pos, caps)) {
         buf_add(&b, text->data + pos, (size_t)(caps[0] - pos));
         PyAdamasMatch* m = match_new(text, g->ngroups, caps, g->names, g->nnames);
+        /* 回调是用户代码，内部必然大量分配：m 只在本帧 C 局部变量里，
+           不 pin 的话主收集会把它清扫，回调返回后再 dec 就是 UAF。 */
+        pa_gc_pin(m);
         PyAdamasStr* r = (PyAdamasStr*)pa_call1((void*)closure, (int64_t)(uintptr_t)m);
+        pa_gc_unpin(m);
         if (r) {
             buf_add(&b, r->data, (size_t)r->len);
             pa_rc_dec(r);
@@ -1643,6 +1664,8 @@ int64_t pa_re_split_str(PyAdamasStr* pat, PyAdamasStr* text, int64_t maxsplit, i
     int64_t ncap = 2 * (int64_t)(g.ngroups + 1);
     int64_t* caps = (int64_t*)re_alloc(sizeof(int64_t) * (size_t)ncap);
     PyAdamasList* out = pa_list_new(0, 1);
+    /* 每个分段/捕获组一次 str_new；out 只在本帧 C 局部变量里。 */
+    pa_gc_pin(out);
     int64_t pos = 0, last = 0, done = 0;
     while (pos <= text->len && (maxsplit <= 0 || done < maxsplit) &&
            find_next(&g, text, pos, caps)) {
@@ -1664,6 +1687,7 @@ int64_t pa_re_split_str(PyAdamasStr* pat, PyAdamasStr* text, int64_t maxsplit, i
     }
     PyAdamasStr* tail = str_new(text->data + last, text->len - last);
     pa_list_append(out, (int64_t)tail);
+    pa_gc_unpin(out);
     free(caps);
     prog_free(&g);
     return (int64_t)out;
@@ -1674,6 +1698,7 @@ int64_t pa_re_split(PyAdamasRegex* re, PyAdamasStr* text, int64_t maxsplit) {
     int64_t ncap = 2 * (int64_t)(re->prog.ngroups + 1);
     int64_t* caps = (int64_t*)re_alloc(sizeof(int64_t) * (size_t)ncap);
     PyAdamasList* out = pa_list_new(0, 1);
+    pa_gc_pin(out);  /* 同 pa_re_split_str：循环里的 str_new 会清扫无根的 out */
     int64_t pos = 0, last = 0, done = 0;
     while (pos <= text->len && (maxsplit <= 0 || done < maxsplit) &&
            find_next(&re->prog, text, pos, caps)) {
@@ -1695,6 +1720,7 @@ int64_t pa_re_split(PyAdamasRegex* re, PyAdamasStr* text, int64_t maxsplit) {
     }
     PyAdamasStr* tail = str_new(text->data + last, text->len - last);
     pa_list_append(out, (int64_t)tail);
+    pa_gc_unpin(out);
     free(caps);
     return (int64_t)out;
 }

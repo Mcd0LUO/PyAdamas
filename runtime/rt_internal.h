@@ -545,6 +545,43 @@ void pa_rc_temp(void* p);
 void pa_rc_temp_unknown(int64_t v);
 void pa_rc_temp_take(void* p);
 void pa_rc_cleanup(int64_t mark);
+
+/* ── 构造期 GC pin：C 局部变量里的半成品挂成根 ─────────────────────
+   背景：循环收集器的根集合只有四处——全局根表（pa_gc_add_roots）、临时值
+   栈、帧记录登记区、寄存器。C 运行时函数里「刚分配、还没交回调用方」的
+   对象只存在于 C 局部变量里，这四处都看不见；若两次分配之间恰好触发主
+   收集（major），它会被当成垃圾清扫，函数拿到的就是悬空指针。
+   0.181 修掉的异常值构造 UAF（runtime/rt_exc.c）就是这一类；本助手把那次
+   手写的 pa_rc_temp / pa_rc_temp_take 组合标准化，供全 runtime 复用。
+
+   语义（务必按此使用）：
+     - pa_gc_pin(p) 临时补一个引用并把 p 挂到临时值栈（临时值栈是 GC 根），
+       **不转移所有权**：pin 之前调用方持有的引用在 unpin 之后原样还在。
+       所以 p 既可以是「自己刚分配、持有 rc=1」的对象，也可以是借来的参数。
+     - pa_gc_unpin(p) 必须与同一对象的 pa_gc_pin(p) 成对；重复 pin 同一对象
+       会各加一个引用，按相反顺序 unpin 即可（不强制 LIFO，按值配对）。
+     - pin 期间 GC 会从 p 继续标记它的整棵出边子图，后代也跟着活；
+       因此「容器 + 逐个填充」的模式只需 pin 容器一次。
+     - 异常安全：pin 加的引用落在临时值栈上，longjmp 抛出时由 handler 的
+       临时栈水位（pa_rc_cleanup）统一释放，不会泄漏、也不会少放。
+     - 只用于函数内的短期保命；全局槽的长期根用 pa_gc_add_roots(槽地址)。
+   典型用法（构造一个列表并在循环里继续分配）：
+       PyAdamasList* out = pa_list_new(n, 1);
+       pa_gc_pin(out);
+       for (int64_t i = 0; i < n; ++i) sm_push_str(out, str_new(...));
+       pa_gc_unpin(out);
+       return out;
+   pin 本身要两次 rc 操作，只在构造点用，不要放进逐元素热路径。 */
+static inline void pa_gc_pin(void* p) {
+    if (!p) return;
+    pa_rc_inc(p);
+    pa_rc_temp(p);
+}
+static inline void pa_gc_unpin(void* p) {
+    if (!p) return;
+    pa_rc_temp_take(p);
+    pa_rc_dec(p);
+}
 void pa_rc_shutdown(void);
 void pa_register_literals(void** objs, int64_t n);
 void closure_destroy(void* p);

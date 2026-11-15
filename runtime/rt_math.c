@@ -272,12 +272,22 @@ double pa_math_dist(PyAdamasList* a, PyAdamasList* b) {
 
 PyAdamasList* sys_argv_list;
 
+/* sys_argv_list 的根只登记一次；登记的是「槽的地址」。 */
+static int sys_argv_root_registered;
+
 void pa_sys_set_args(int64_t argc, char** argv) {
+    /* 先登记根再分配：pa_list_new / str_new 都走 rc_alloc，可能触发主收集。
+       原顺序是「先分配列表、再登记根」，那一步的分配本身不会回收刚返回的
+       列表，但随后的 str_new 循环里任何一次主收集都会看不见只挂在
+       sys_argv_list 上的列表（以及已 append 进去的字符串，列表是它们的
+       唯一持有者），造成 use-after-free。 */
+    if (!sys_argv_root_registered) {
+        void* root_slot[1] = {(void*)&sys_argv_list};
+        pa_gc_add_roots(root_slot, 1);
+        sys_argv_root_registered = 1;
+    }
     PyAdamasList* out = pa_list_new(argc > 0 ? argc : 0, 1);
     sys_argv_list = out;
-    // 列表要立刻成为 GC 根；根表元素是「槽的地址」，不是槽里的值。
-    void* root_slot[1] = {(void*)&sys_argv_list};
-    pa_gc_add_roots(root_slot, 1);
     for (int64_t i = 0; i < argc; ++i) {
         const char* s = argv[i] ? argv[i] : "";
         PyAdamasStr* str = str_new(s, (int64_t)strlen(s));

@@ -491,6 +491,8 @@ static int64_t jp_value(JP* s, const char* d, size_t n) {
                 s->p++;
                 return (int64_t)out;
             }
+            /* 递归解析数组元素时还会分配，out 只在本帧 C 局部变量里。 */
+            pa_gc_pin(out);
             for (;;) {
                 int64_t v = jp_value(s, cd, cn);
                 pa_list_append(out, v);
@@ -502,6 +504,7 @@ static int64_t jp_value(JP* s, const char* d, size_t n) {
                 break;
             }
             jp_expect(s, ']');
+            pa_gc_unpin(out);
             return (int64_t)out;
         }
         if (k == 'd') {
@@ -515,11 +518,16 @@ static int64_t jp_value(JP* s, const char* d, size_t n) {
                 s->p++;
                 return (int64_t)out;
             }
+            /* 字典本身和 key 都只在本帧 C 局部变量里：递归解析值时若触发
+               主收集，两者都会被清扫，接着 pa_dict_set 就是写悬空指针。 */
+            pa_gc_pin(out);
             for (;;) {
                 PyAdamasStr* key = jp_string(s);
+                pa_gc_pin(key);
                 jp_expect(s, ':');
                 int64_t v = jp_value(s, cd, cn);
                 pa_dict_set(out, (int64_t)key, v);
+                pa_gc_unpin(key);
                 jp_ws(s);
                 if (s->p < s->end && *s->p == ',') {
                     s->p++;
@@ -528,6 +536,7 @@ static int64_t jp_value(JP* s, const char* d, size_t n) {
                 break;
             }
             jp_expect(s, '}');
+            pa_gc_unpin(out);
             return (int64_t)out;
         }
         if (k == 't') {
@@ -555,6 +564,7 @@ static int64_t jp_value(JP* s, const char* d, size_t n) {
                 s->p++;
                 return (int64_t)out;
             }
+            pa_gc_pin(out);  /* 递归解析元组元素时会分配，out 必须先挂根 */
             for (;;) {
                 if (idx >= count) jp_fail(s, "tuple length mismatch");
                 {
@@ -573,6 +583,7 @@ static int64_t jp_value(JP* s, const char* d, size_t n) {
             }
             jp_expect(s, ']');
             if (idx != count) jp_fail(s, "tuple length mismatch");
+            pa_gc_unpin(out);
             return (int64_t)out;
         }
         pa_raise_c("ValueError", "json: bad type descriptor");

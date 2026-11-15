@@ -4,6 +4,32 @@
 
 早期阶段没有逐条留痕，按阶段归纳；0.4 之后逐条记录。
 
+## [0.183] - 2026-11-16
+
+### GC：修复 54 个函数的「构造期对象不在 GC 根上」窗口（一整类 UAF）
+
+0.181 修掉异常路径的 GC 根缺失后，沿着同一类问题做了系统性审计。
+
+**方法**：脚本递归统计「能传递触发 `rc_alloc`」的函数共 243 个 → 取「≥2 次分配调用」的候选 80 个
+→ 逐个人工核对「第二次分配发生时，第一次的结果是否只存在于 C 局部变量里」。
+
+**结果**：修复 **54 个函数、70 个 pin 点**，另修 **2 处全局根的登记顺序**（改成「先登记根、再分配」）。
+新增统一助手 `pa_gc_pin` / `pa_gc_unpin`：不转移所有权（临时 +1 引用并挂临时值栈，unpin 撤销），
+所以既能 pin 自己刚分配的对象，也能 pin 借来的参数；**异常安全**——pin 的引用落在临时值栈上，
+`longjmp` 时由 handler 的清理水位统一释放。
+
+**修复前必崩的实际路径**（都实测到 139）：`split` / `split(sep)` / `splitlines`、`dict.items`、
+`re.findall`、`Path.parts`、`itertools.permutations(9)`、`file.readlines`、`json.loads` 深嵌套、
+`asyncio` 的 `wait_for`/`gather`/`create_task`、`subprocess`、`sha256_hex`、`re.sub` 的用户回调等。
+这些都是「平时跑得好、GC 压力一大就炸」的形态。
+
+**根因证据**：新增 `tests/run/174_gc_construct_roots.py` 在**修复前**的运行时上 3/3 稳定 SIGSEGV；
+修复后连跑 5 次 rc=0，`MALLOC_CHECK_=3 MALLOC_PERTURB_=170` 下同样稳定，
+`PYADAMAS_GC_CONSERVATIVE=1` 下输出一致。
+
+**没有采用「保守扫整段 C 栈」**——那会把 0.175 的根扫描收窄对冲掉；本任务坚持定点 pin 加固。
+
+验证：全量 194 个运行用例 ran ok、59 个反例按预期 rejected，0 失败。
 ## [0.182] - 2026-11-16
 
 ### 零开销异常 Z2-b1：运行时胶水 + 方案 G 的帧清理（personality 侧，尚未接 codegen）

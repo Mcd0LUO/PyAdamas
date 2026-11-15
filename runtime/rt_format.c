@@ -242,11 +242,14 @@ PyAdamasStr* pa_fmt_complex(PyAdamasComplex* v, PyAdamasStr* spec) {
     PyAdamasFmt f;
     fmt_parse(spec, &f, 1);
     PyAdamasStr* cs = pa_complex_str(v);
+    /* fmt_pad 里还要 str_new；cs 只在本帧 C 局部变量里，先 pin 再取字符。 */
+    pa_gc_pin(cs);
     char* body = (char*)malloc((size_t)cs->len + 1);
     if (!body) panic_c("out of memory");
     memcpy(body, cs->data, (size_t)cs->len + 1);
     PyAdamasStr* out = fmt_pad(NULL, body, &f);
     free(body);
+    pa_gc_unpin(cs);
     pa_rc_dec(cs);
     return out;
 }
@@ -445,7 +448,10 @@ PyAdamasStr* pa_percent_format(PyAdamasStr* pat, PyAdamasList* args, PyAdamasStr
                 } else {
                     pa_raise_c("TypeError", "%%c requires an int or a single character");
                 }
+                /* tmp 是 %c 的临时单字符串；fmt_with 里还会 str_new。 */
+                pa_gc_pin(tmp);
                 piece = fmt_with(spec, si + 1, 0, 0.0, tmp, 's');
+                pa_gc_unpin(tmp);
                 break;
             }
             case 's':
@@ -478,7 +484,11 @@ PyAdamasStr* pa_percent_format(PyAdamasStr* pat, PyAdamasList* args, PyAdamasStr
                 } else {
                     pa_raise_c("TypeError", "unsupported format argument type");
                 }
+                /* sv 常是 pa_str_from_* / pa_repr_str 刚产生的临时串，
+                   只在本帧 C 局部变量里；fmt_with 内部还要再分配。 */
+                pa_gc_pin(tmp);
                 piece = fmt_with(spec, si + 1, 0, 0.0, sv, 's');
+                pa_gc_unpin(tmp);
                 break;
             }
             default:

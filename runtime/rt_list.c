@@ -452,6 +452,9 @@ PyAdamasList* pa_list_sorted_by(PyAdamasList* src, PyAdamasList* keys, int64_t k
 PyAdamasList* pa_enumerate_list(PyAdamasList* seq) {
     int64_t n = seq->len;
     PyAdamasList* out = pa_list_new(n, 1);  // 外层元素是 pair（堆）
+    /* 循环里每个 pa_list_new(pair) 都可能触发主收集；out 只在本帧 C 局部
+       变量里，不在任何根上，先 pin 住（子 pair 一旦交给 out 就随之可达）。 */
+    pa_gc_pin(out);
     // pair 里 index 是 int、元素种类跟着源走，混合存放统一按 kind 2 保守释放。
     int pk = seq->elem_kind == 0 ? 0 : 2;
     for (int64_t i = 0; i < n; ++i) {
@@ -464,6 +467,7 @@ PyAdamasList* pa_enumerate_list(PyAdamasList* seq) {
         pa_rc_inc(pair);
         pa_list_append(out, (int64_t)pair);
     }
+    pa_gc_unpin(out);
     return out;
 }
 
@@ -473,6 +477,8 @@ PyAdamasList* pa_zip2_list(PyAdamasList* a, PyAdamasList* b) {
     // pair 的元素种类：两边都是堆才是 1；都是非堆是 0；混合按 2 保守处理。
     int pk = ka == 1 && kb == 1 ? 1 : (ka == 0 && kb == 0 ? 0 : 2);
     PyAdamasList* out = pa_list_new(n, 1);
+    /* 同 pa_enumerate_list：循环内每次 pa_list_new 都是主收集触发点。 */
+    pa_gc_pin(out);
     for (int64_t i = 0; i < n; ++i) {
         int64_t x = a->data[i], y = b->data[i];
         PyAdamasList* pair = pa_list_new(2, pk);
@@ -486,6 +492,7 @@ PyAdamasList* pa_zip2_list(PyAdamasList* a, PyAdamasList* b) {
         pa_rc_inc(pair);
         pa_list_append(out, (int64_t)pair);
     }
+    pa_gc_unpin(out);
     return out;
 }
 

@@ -68,6 +68,8 @@ PyAdamasList* pa_itertools_product(PyAdamasList* seqs, int64_t elem_kind) {
     // 且多一层防御，避免将来改逻辑时留下未初始化读取。
     int64_t* vals = (int64_t*)calloc((size_t)n, sizeof(int64_t));
     if (!idx || !vals) panic_c("out of memory");
+    /* 循环里每次 iter_push_tuple 都分配一个元组；out 只在本帧 C 局部变量里。 */
+    pa_gc_pin(out);
     while (1) {
         for (int64_t i = 0; i < n; ++i) vals[i] = iter_seq_at(seqs, i)->data[idx[i]];
         iter_push_tuple(out, vals, n, elem_kind);
@@ -78,6 +80,7 @@ PyAdamasList* pa_itertools_product(PyAdamasList* seqs, int64_t elem_kind) {
         }
         if (k < 0) break;
     }
+    pa_gc_unpin(out);
     free(idx);
     free(vals);
     return out;
@@ -107,7 +110,10 @@ PyAdamasList* pa_itertools_permutations(PyAdamasList* pool, int64_t r,
     int64_t* used = (int64_t*)calloc((size_t)(n ? n : 1), sizeof(int64_t));
     int64_t* cur = (int64_t*)malloc((size_t)(r ? r : 1) * sizeof(int64_t));
     if (!used || !cur) panic_c("out of memory");
+    /* 递归里每个叶子都分配一个元组；out 只在本帧 C 局部变量里。 */
+    pa_gc_pin(out);
     iter_perm_rec(pool, r, 0, used, cur, out, elem_kind);
+    pa_gc_unpin(out);
     free(used);
     free(cur);
     return out;
@@ -133,7 +139,9 @@ PyAdamasList* pa_itertools_combinations(PyAdamasList* pool, int64_t r,
     if (r < 0 || r > pool->len) return out;
     int64_t* cur = (int64_t*)malloc((size_t)(r ? r : 1) * sizeof(int64_t));
     if (!cur) panic_c("out of memory");
+    pa_gc_pin(out);
     iter_comb_rec(pool, r, 0, 0, cur, out, elem_kind, 0);
+    pa_gc_unpin(out);
     free(cur);
     return out;
 }
@@ -144,7 +152,9 @@ PyAdamasList* pa_itertools_combinations_wr(PyAdamasList* pool, int64_t r,
     if (r < 0) return out;
     int64_t* cur = (int64_t*)malloc((size_t)(r ? r : 1) * sizeof(int64_t));
     if (!cur) panic_c("out of memory");
+    pa_gc_pin(out);
     iter_comb_rec(pool, r, 0, 0, cur, out, elem_kind, 1);
+    pa_gc_unpin(out);
     free(cur);
     return out;
 }
@@ -159,6 +169,8 @@ PyAdamasList* pa_itertools_zip_longest(PyAdamasList* seqs, int64_t elem_kind) {
     PyAdamasList* out = pa_list_new(maxlen, 1);
     int64_t* vals = (int64_t*)malloc((size_t)(n ? n : 1) * sizeof(int64_t));
     if (!vals) panic_c("out of memory");
+    /* 每行一次 iter_push_tuple（分配元组）；out 只在本帧 C 局部变量里。 */
+    pa_gc_pin(out);
     for (int64_t row = 0; row < maxlen; ++row) {
         for (int64_t i = 0; i < n; ++i) {
             PyAdamasList* s = iter_seq_at(seqs, i);
@@ -167,6 +179,7 @@ PyAdamasList* pa_itertools_zip_longest(PyAdamasList* seqs, int64_t elem_kind) {
         }
         iter_push_tuple(out, vals, n, elem_kind);
     }
+    pa_gc_unpin(out);
     free(vals);
     return out;
 }
@@ -339,6 +352,8 @@ PyAdamasList* pa_collections_most_common(PyAdamasDict* d, int64_t n) {
                  ? 1
                  : ((d->key_own == 0 && d->val_own == 0) ? 0 : 2);
     PyAdamasList* out = pa_list_new(take, 1);
+    /* 循环里每个元组都是一次分配；out 只在本帧 C 局部变量里。 */
+    pa_gc_pin(out);
     for (int64_t i = 0; i < take; ++i) {
         PyAdamasList* tup = pa_list_new(2, tk);
         pa_own_inc(d->key_own, arr[i].key);
@@ -347,6 +362,7 @@ PyAdamasList* pa_collections_most_common(PyAdamasDict* d, int64_t n) {
         pa_list_append(tup, arr[i].val);
         pa_list_append(out, (int64_t)tup);
     }
+    pa_gc_unpin(out);
     free(arr);
     return out;
 }

@@ -401,6 +401,9 @@ PyAdamasList* pa_dict_items(PyAdamasDict* d) {
                  ? 1
                  : ((d->key_own == 0 && d->val_own == 0) ? 0 : 2);
     PyAdamasList* out = pa_list_new(d->len, 1);
+    /* 循环内每个 pa_list_new(tup) 都是 GC 分配点；out 只在 C 局部变量里，
+       主收集落进循环就会把它当垃圾清扫，先 pin。 */
+    pa_gc_pin(out);
     for (int32_t i = d->head; i >= 0; i = d->entries[i].next) {
         PyAdamasDictEntry e = d->entries[i];
         PyAdamasList* tup = pa_list_new(2, tk);
@@ -410,6 +413,7 @@ PyAdamasList* pa_dict_items(PyAdamasDict* d) {
         pa_list_append(tup, e.val);
         pa_list_append(out, (int64_t)tup);  // tuple 的初始引用交给外层 list
     }
+    pa_gc_unpin(out);
     return out;
 }
 
@@ -476,6 +480,9 @@ void pa_dict_update(PyAdamasDict* dst, PyAdamasDict* src) {
 PyAdamasDict* pa_dict_copy(PyAdamasDict* src) {
     PyAdamasDict* out = pa_dict_new(src->key_kind, src->key_own, src->val_own,
                                   src->hash_slot, src->eq_slot);
+    /* 键是类实例时 pa_dict_set 会调用户 __hash__/__eq__（还能再分配）；
+       out 只在本帧 C 局部变量里，先 pin。 */
+    pa_gc_pin(out);
     out->default_factory = src->default_factory;
     for (int32_t i = src->head; i >= 0; i = src->entries[i].next) {
         PyAdamasDictEntry e = src->entries[i];
@@ -483,6 +490,7 @@ PyAdamasDict* pa_dict_copy(PyAdamasDict* src) {
         pa_own_inc(src->val_own, e.val);
         pa_dict_set(out, e.key, e.val);
     }
+    pa_gc_unpin(out);
     return out;
 }
 
@@ -490,6 +498,8 @@ PyAdamasDict* pa_dict_copy(PyAdamasDict* src) {
 PyAdamasDict* pa_dict_from_pairs(PyAdamasList* src, int64_t key_kind, int64_t key_own,
                                  int64_t val_own, int64_t hash_slot, int64_t eq_slot) {
     PyAdamasDict* d = pa_dict_new(key_kind, key_own, val_own, hash_slot, eq_slot);
+    /* 同 pa_dict_copy：用户 __hash__ 可能在循环内分配，d 只在 C 局部变量里。 */
+    pa_gc_pin(d);
     for (int64_t i = 0; i < src->len; ++i) {
         PyAdamasList* pair = (PyAdamasList*)(uintptr_t)src->data[i];
         if (!pair || pair->len != 2) {
@@ -502,6 +512,7 @@ PyAdamasDict* pa_dict_from_pairs(PyAdamasList* src, int64_t key_kind, int64_t ke
         pa_own_inc(val_own, v);
         pa_dict_set(d, k, v);
     }
+    pa_gc_unpin(d);
     return d;
 }
 
@@ -512,11 +523,14 @@ PyAdamasDict* pa_set_from_list(PyAdamasList* src, int64_t key_kind, int64_t key_
     int sk = src->elem_kind == 3 ? 2 : (int)src->elem_kind;
     if (sk > key_own) key_own = sk;
     PyAdamasDict* d = pa_dict_new(key_kind, key_own, 0, hash_slot, eq_slot);
+    /* 用户 __hash__ 可能在循环内分配，d 只在 C 局部变量里。 */
+    pa_gc_pin(d);
     for (int64_t i = 0; i < src->len; ++i) {
         int64_t k = src->data[i];
         pa_own_inc(key_own, k);
         pa_dict_set(d, k, 0);  // 重复 key 时 dict_set 会退掉这份多余引用
     }
+    pa_gc_unpin(d);
     return d;
 }
 

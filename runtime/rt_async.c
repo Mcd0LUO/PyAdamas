@@ -122,12 +122,12 @@ PyAdamasAwait* await_new(int64_t kind) {
 }
 
 void loop_ensure(void) {
-    if (!loop_ready) {
-        loop_ready = pa_list_new(8, 1);
-        loop_timers = pa_list_new(8, 1);
-        loop_pending = pa_list_new(8, 1);
-        loop_fds = pa_list_new(8, 1);
-    }
+    /* 先把四个全局槽登记成 GC 根，再连发 4 个 pa_list_new。原顺序是「先
+       分配、后登记根」：第 2/3/4 次 pa_list_new 里如果恰好触发主收集，
+       前面刚建好、只挂在全局槽上的 list 不在任何根集合里（C 全局对 major
+       的标记阶段不可见），会被当垃圾清扫；后面 ready_push 之类写
+       loop_ready->data 就是 use-after-free（与 0.181 异常路径同类）。
+       根表登记的是「槽的地址」，提前登记后每次赋值立刻可见。 */
     if (!loop_roots_registered) {
         loop_roots[0] = (void*)&loop_ready;
         loop_roots[1] = (void*)&loop_timers;
@@ -135,6 +135,12 @@ void loop_ensure(void) {
         loop_roots[3] = (void*)&loop_fds;
         pa_gc_add_roots((void**)loop_roots, 4);
         loop_roots_registered = 1;
+    }
+    if (!loop_ready) {
+        loop_ready = pa_list_new(8, 1);
+        loop_timers = pa_list_new(8, 1);
+        loop_pending = pa_list_new(8, 1);
+        loop_fds = pa_list_new(8, 1);
     }
 }
 
@@ -240,7 +246,11 @@ void start_gather(PyAdamasAwait* w, void* waiter) {
             }
         } else if (is_await_obj(child)) {
             pa_rc_inc(child);
+            /* start_awaitable 内部还会分配（waiters 列表等），child 只在
+               本帧 C 局部变量里，先 pin 住。 */
+            pa_gc_pin(child);
             start_awaitable(child, w);
+            pa_gc_unpin(child);
         } else {
             gather_child_fail(w, exc_new("TypeError", "gather() argument is not awaitable"));
         }
@@ -348,6 +358,8 @@ void* pa_asyncio_wait_for(void* aw, double secs) {
     if (!frame_is_coro(aw) && !is_await_obj(aw))
         pa_raise_c("TypeError", "asyncio.wait_for() expects an awaitable");
     PyAdamasAwait* w = await_new(8);
+    /* children 列表和 create_task 都要继续分配；w 只在本帧 C 局部变量里。 */
+    pa_gc_pin(w);
     w->children = pa_list_new(1, 1);
     double v = secs * 1000.0;
     int64_t ms = 0;
@@ -355,6 +367,7 @@ void* pa_asyncio_wait_for(void* aw, double secs) {
     w->deadline_ms = now_ms() + ms;
     void* t = pa_asyncio_create_task(aw, 2);  // 内部 awaitable 类型不可见，按 unknown 释放
     pa_list_append(w->children, (int64_t)t);  // 接管 create_task 的引用
+    pa_gc_unpin(w);
     return w;
 }
 
@@ -855,6 +868,8 @@ void* pa_asyncio_sleep(double secs) {
 void* pa_asyncio_gather(PyAdamasList* coros, int64_t result_kind) {
     loop_ensure();
     PyAdamasAwait* w = await_new(2);
+    /* 后面还要建 children / results 两个列表；w 只在本帧 C 局部变量里。 */
+    pa_gc_pin(w);
     int64_t n = coros ? coros->len : 0;
     w->children = pa_list_new(n, 1);
     // 结果元素所有权由调用点的静态类型决定：0 裸值 / 1 堆引用 / 2 unknown。
@@ -867,6 +882,7 @@ void* pa_asyncio_gather(PyAdamasList* coros, int64_t result_kind) {
         pa_list_append(w->results, 0);
     }
     w->remaining = n;
+    pa_gc_unpin(w);
     return w;
 }
 
@@ -974,11 +990,15 @@ int64_t pa_asyncio_run(void* coro) {
     while (loop_root_state == 0) {
         void* c = ready_pop();
         if (c) {
+            /* 刚从就绪队列摘下，只在 C 局部变量里；下面跑的是用户代码（还会
+               大量分配），主收集看不见它，先 pin 住这一整步。 */
+            pa_gc_pin(c);
             // 就绪队列同时放协程帧和异步生成器驱动对象。
             if (is_await_obj(c) && ((PyAdamasAwait*)c)->kind == 4)
                 agen_drive((PyAdamasAwait*)c);
             else
                 coro_step(c);
+            pa_gc_unpin(c);
             pa_rc_dec(c);
             continue;
         }

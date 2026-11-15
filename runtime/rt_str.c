@@ -395,6 +395,10 @@ int64_t pa_str_method(PyAdamasStr* s, int64_t op, int64_t a0, int64_t a1, int64_
                 while (i < s->len && !sm_is_space(s->data[i])) ++i;
             }
             PyAdamasList* out = pa_list_new(count, 1);
+            /* 循环里每个 str_new 都是一次 GC 分配点；out 只在这个 C 局部
+               变量里，必须 pin 成根，否则主收集落进循环时 out（以及已经
+               转交给它的那些子串）会被清扫。 */
+            pa_gc_pin(out);
             i = 0;
             while (i < s->len) {
                 while (i < s->len && sm_is_space(s->data[i])) ++i;
@@ -403,6 +407,7 @@ int64_t pa_str_method(PyAdamasStr* s, int64_t op, int64_t a0, int64_t a1, int64_
                 while (i < s->len && !sm_is_space(s->data[i])) ++i;
                 sm_push_str(out, str_new(s->data + b, i - b));
             }
+            pa_gc_unpin(out);
             return (int64_t)out;
         }
         case 9: { /* split(sep, maxsplit) */
@@ -411,6 +416,8 @@ int64_t pa_str_method(PyAdamasStr* s, int64_t op, int64_t a0, int64_t a1, int64_
             if (sep->len == 0) pa_raise_c("ValueError", "empty separator");
             // 短分隔符走 memchr；单遍填充，容量从 8 起（常见 2-6 段不 realloc）。
             PyAdamasList* out = pa_list_new(8, 1);
+            /* 同 split() 按空白：str_new 在循环里触发主收集时 out 必须可见。 */
+            pa_gc_pin(out);
             int64_t i = 0;
             int64_t done = 0;
             while (i <= s->len) {
@@ -422,6 +429,7 @@ int64_t pa_str_method(PyAdamasStr* s, int64_t op, int64_t a0, int64_t a1, int64_
                 ++done;
             }
             sm_push_str(out, str_new(s->data + i, s->len - i));
+            pa_gc_unpin(out);
             return (int64_t)out;
         }
         case 10: { /* join(parts) */
@@ -665,6 +673,8 @@ int64_t pa_str_method(PyAdamasStr* s, int64_t op, int64_t a0, int64_t a1, int64_
         }
         case 31: { /* splitlines */
             PyAdamasList* out = pa_list_new(4, 1);
+            /* 每个换行点一次 str_new：out 只在本帧 C 局部里，先 pin。 */
+            pa_gc_pin(out);
             int64_t b = 0, i = 0;
             while (i < s->len) {
                 char c = s->data[i];
@@ -678,6 +688,7 @@ int64_t pa_str_method(PyAdamasStr* s, int64_t op, int64_t a0, int64_t a1, int64_
                 }
             }
             if (b < s->len) sm_push_str(out, str_new(s->data + b, s->len - b));
+            pa_gc_unpin(out);
             return (int64_t)out;
         }
         default:

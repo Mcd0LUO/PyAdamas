@@ -104,6 +104,8 @@ PyAdamasStr* pa_sha256_digest(PyAdamasStr* data) {
 PyAdamasStr* pa_sha256_hex(PyAdamasStr* data) {
     static const char kHex[] = "0123456789abcdef";
     PyAdamasStr* dig = pa_sha256_digest(data);
+    /* digest 和 hex 串是两次分配，dig 只在本帧 C 局部变量里。 */
+    pa_gc_pin(dig);
     PyAdamasStr* out = str_alloc(64);
     char* d = (char*)out->data;
     for (int i = 0; i < 32; ++i) {
@@ -111,6 +113,7 @@ PyAdamasStr* pa_sha256_hex(PyAdamasStr* data) {
         d[i * 2] = kHex[v >> 4];
         d[i * 2 + 1] = kHex[v & 15];
     }
+    pa_gc_unpin(dig);
     pa_rc_dec(dig);
     return out;
 }

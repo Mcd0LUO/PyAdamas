@@ -375,10 +375,16 @@ static void path_destroy(void* p) {
 }
 
 PyAdamasPath* pa_path_new(PyAdamasStr* s) {
+    /* 调用方常把 str_alloc / str_new 的结果直接传进来，那个串只存在于 C
+       局部变量或表达式临时值里。下面的 rc_alloc 若触发主收集，参数串不在
+       任何根上，会被清扫，随后 p->path 就是悬空指针。入口先 pin 参数：
+       它临时补一个引用（不改变所有权），分配完成并 rc_inc 后再撤销。 */
+    pa_gc_pin(s);
     PyAdamasPath* p = (PyAdamasPath*)rc_alloc((int64_t)sizeof(PyAdamasPath), path_destroy, NULL, PYADAMAS_RC_OBJ);
     p->magic = PYADAMAS_PATH_MAGIC;
     p->path = s;
     if (s) pa_rc_inc(s);
+    pa_gc_unpin(s);
     return p;
 }
 
@@ -457,6 +463,8 @@ PyAdamasList* pa_path_parts(PyAdamasPath* p) {
     PyAdamasStr* s = p->path;
     int64_t n = s ? s->len : 0;
     PyAdamasList* out = pa_list_new(0, 1);
+    /* 循环里每个 str_new 都是主收集触发点；out 只在本帧 C 局部变量里。 */
+    pa_gc_pin(out);
     int64_t i = 0;
     if (n > 0 && s->data[0] == '/') {
         pa_list_append(out, (int64_t)str_new("/", 1));
@@ -471,6 +479,7 @@ PyAdamasList* pa_path_parts(PyAdamasPath* p) {
         if (len == 1 && s->data[start] == '.') continue;
         pa_list_append(out, (int64_t)str_new(s->data + start, len));
     }
+    pa_gc_unpin(out);
     return out;
 }
 
@@ -683,6 +692,8 @@ PyAdamasList* pa_path_iterdir(PyAdamasPath* p) {
         pa_raise_c("FileNotFoundError", "No such file or directory");
     }
     PyAdamasList* out = pa_list_new(0, 1);
+    /* path_list_push 里每次 str_alloc / pa_path_new 都会分配，out 必须先 pin。 */
+    pa_gc_pin(out);
     struct dirent* e;
     while ((e = readdir(d)) != NULL) {
         if (path_is_dot(e->d_name)) continue;
@@ -692,6 +703,7 @@ PyAdamasList* pa_path_iterdir(PyAdamasPath* p) {
     }
     closedir(d);
     free(c);
+    pa_gc_unpin(out);
     return out;
 }
 
@@ -797,7 +809,11 @@ PyAdamasList* pa_path_glob(PyAdamasPath* p, PyAdamasStr* pattern) {
     }
 
     PyAdamasList* out = pa_list_new(0, 1);
+    /* glob_walk 递归里每个匹配都会分配字符串/Path 对象，out 只在本帧 C
+       局部变量里，先 pin 再交给递归。 */
+    pa_gc_pin(out);
     if (nseg > 0) glob_walk(base, segs, nseg, 0, out);
+    pa_gc_unpin(out);
     free(base);
     return out;
 }

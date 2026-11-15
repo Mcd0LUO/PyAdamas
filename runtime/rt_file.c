@@ -156,6 +156,9 @@ PyAdamasFile* pa_file_open(PyAdamasStr* path, int64_t fd, PyAdamasStr* mode, int
     PyAdamasFile* f =
         (PyAdamasFile*)rc_alloc((int64_t)sizeof(PyAdamasFile), file_destroy, NULL, PYADAMAS_RC_OBJ);
     memset(f, 0, sizeof *f);
+    /* 下面三次 str_new（mode/encoding/errors）都会走 rc_alloc，f 此时只在
+       本帧 C 局部变量里，先 pin 住，否则主收集落在这里会把它清扫掉。 */
+    pa_gc_pin(f);
     f->fp = fp;
     f->fd = fdnum;
     f->closefd = closefd;
@@ -175,6 +178,7 @@ PyAdamasFile* pa_file_open(PyAdamasStr* path, int64_t fd, PyAdamasStr* mode, int
     }
     f->encoding = str_new("utf-8", 5);
     f->errors = str_new("strict", 6);
+    pa_gc_unpin(f);
     if (buffering == 0) {
         setvbuf(fp, NULL, _IONBF, 0);
     } else if (buffering == 1) {
@@ -197,7 +201,10 @@ void pa_file_config(PyAdamasFile* f, PyAdamasStr* enc, PyAdamasStr* errors) {
         return;
     }
     PyAdamasStr* e = enc ? file_norm_lower(enc) : str_new("utf-8", 5);
+    /* er 的分配可能触发主收集，而 e 此时只在 C 局部变量里。 */
+    pa_gc_pin(e);
     PyAdamasStr* er = errors ? file_norm_lower(errors) : str_new("strict", 6);
+    pa_gc_unpin(e);
     if (!file_str_is(er, "strict") && !file_str_is(er, "ignore") &&
         !file_str_is(er, "replace")) {
         pa_rc_dec(e);
@@ -473,6 +480,8 @@ PyAdamasStr* pa_file_readline(PyAdamasFile* f, int64_t size) {
 
 PyAdamasList* pa_file_readlines(PyAdamasFile* f, int64_t hint) {
     PyAdamasList* out = pa_list_new(4, 1);
+    /* 每行一次 pa_file_readline（内部 str_new）；out 只在本帧 C 局部变量里。 */
+    pa_gc_pin(out);
     int64_t total = 0;
     for (;;) {
         PyAdamasStr* line = pa_file_readline(f, -1);
@@ -482,6 +491,7 @@ PyAdamasList* pa_file_readlines(PyAdamasFile* f, int64_t hint) {
         total += line->len;
         if (hint > 0 && total >= hint) break;
     }
+    pa_gc_unpin(out);
     return out;
 }
 
@@ -750,6 +760,9 @@ PyAdamasFile* pa_sys_stream(int64_t which) {
     FILE* fp = which == 0 ? stdin : which == 1 ? stdout : stderr;
     PyAdamasFile* f =
         (PyAdamasFile*)rc_alloc((int64_t)sizeof(PyAdamasFile), file_destroy, NULL, PYADAMAS_RC_OBJ);
+    /* 下面的 name/mode 两次 str_new 都可能触发主收集：f 只在 C 局部变量里，
+       而且它的 rc 还没被改成 IMMORTAL。 */
+    pa_gc_pin(f);
     f->fp = fp;
     f->fd = (int64_t)which;
     f->closed = 0;
@@ -762,6 +775,7 @@ PyAdamasFile* pa_sys_stream(int64_t which) {
     f->name = str_new(which == 0 ? "<stdin>" : which == 1 ? "<stdout>" : "<stderr>",
                       which == 0 ? 7 : which == 1 ? 8 : 8);
     f->mode = str_new(which == 0 ? "r" : "w", 1);
+    pa_gc_unpin(f);  // f 的 rc 改成 IMMORTAL 之前撤销 pin（此处 dec 是空操作）
     ((PyAdamasRc*)f - 1)->rc = PYADAMAS_RC_IMMORTAL;
     sys_stream_files[which] = f;
     return f;
