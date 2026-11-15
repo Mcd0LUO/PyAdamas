@@ -1,6 +1,8 @@
 // typecheck.cpp —— 类型检查驱动：作用域、声明收集、函数签名、注解解析
 #include "typecheck.h"
 
+#include <deque>
+
 #include "module.h"
 
 namespace pyadamas {
@@ -20,9 +22,22 @@ void TypeChecker::check(Module& m) {
         // 的 unknown 形参查过的，需要按新签名重查一遍。只重查被回填过的
         // 函数，保持文本顺序检查的其它语义（生成器返回类型、match 分发）
         // 完全不变。
-        for (int round = 0; round < 4; ++round) {
-            bool changed = false;
-            for (auto* fd : func_defs_) {
+        // 单态化回填的定点迭代。没标注的形参在调用点拿到实参类型后，函数体
+        // 是按旧的 unknown 形参查过的，需要按新签名重查。
+        //
+        // 这里用 worklist 而不是「固定 N 轮」：每重查一个函数，它可能让
+        // 别的函数变 dirty（互递归、A 调 B 调 A），固定轮数会在依赖链
+        // 深度超过 N 时静默截断，留下半收敛的签名。worklist 一直跑到
+        // 没有 dirty 为止；max_iterations 只是防「收敛不了」的死循环兜底
+        // （正常代码远用不到）。
+        {
+            std::deque<FunctionDef*> worklist(func_defs_.begin(), func_defs_.end());
+            std::unordered_set<FunctionDef*> queued(func_defs_.begin(), func_defs_.end());
+            size_t max_iterations = func_defs_.size() * 8 + 64;
+            while (!worklist.empty() && max_iterations-- > 0) {
+                FunctionDef* fd = worklist.front();
+                worklist.pop_front();
+                queued.erase(fd);
                 auto it = func_infos_.find(fd);
                 if (it == func_infos_.end() || !it->second || !it->second->sig_dirty) continue;
                 it->second->sig_dirty = false;
@@ -30,13 +45,24 @@ void TypeChecker::check(Module& m) {
                 // 嵌套的合成生成器函数：重查要回到它定义时的词法父作用域，
                 // 否则体里的自由变量会当成模块全局。
                 Scope* saved_cur = cur_;
-                if (auto nit = nested_recheck_parent_.find(fd); nit != nested_recheck_parent_.end())
+                if (auto nit = nested_recheck_parent_.find(fd);
+                    nit != nested_recheck_parent_.end())
                     cur_ = nit->second;
-                funcdef_impl(*fd, oit == func_owners_.end() ? nullptr : oit->second);
+                funcdef_impl(*fd,
+                             oit == func_owners_.end() ? nullptr : oit->second);
                 cur_ = saved_cur;
-                changed = true;
+                // 重查可能把别的函数标脏（形参回填 / 装饰器 / 互递归）：
+                // 把所有新脏的重新入队。没有 call graph，按全表扫一遍，
+                // 只对 dirty 且未入队的入队——摊还下来仍是收敛级。
+                for (auto* other : func_defs_) {
+                    if (queued.count(other)) continue;
+                    auto oit2 = func_infos_.find(other);
+                    if (oit2 == func_infos_.end() || !oit2->second || !oit2->second->sig_dirty)
+                        continue;
+                    worklist.push_back(other);
+                    queued.insert(other);
+                }
             }
-            if (!changed) break;
         }
         // 装饰器函数体可能在上面的单态化回填里重查过（第一个形参被回填
         // 成被装饰方法的类型），返回的函数类型会变精确。装饰方法的

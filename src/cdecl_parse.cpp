@@ -933,8 +933,12 @@ struct Cdecl {
             }
             // 纯浮点字面量
             bool has_dot = v.find('.') != std::string::npos;
-            Tok fake{Tok::Num, v, m.line};
-            std::vector<Tok> one{fake};
+            Tok fake;
+            fake.k = Tok::Num;
+            fake.s = v;
+            fake.line = m.line;
+            std::vector<Tok> one;
+            one.push_back(fake);
             auto iv = eval_const(one, 0, 1, macro_env);
             if (iv) {
                 macro_env[m.name] = *iv;
