@@ -38,6 +38,16 @@ struct TargetABI {
     const char* const* scratch;
     int n_scratch;
 
+    // 块内临时寄存器池：「定义和使用同块、块内没有调用」的值可以借这
+    // 几个寄存器。它们必须避开记录类指令序列内部借用的 scratch
+    //（scratch_len/ptr/val/field）：例如内联下标检查会写 scratch_ptr，
+    // 若块内临时值也住在那儿就会被静默冲掉。SysV 的序列 scratch 落在
+    // 池外（rcx/rdx，r8 只在 IndexStore 里用，而 IndexStore 不参与借池），
+    // 所以 SysV 仍是 r8–r11；Win64 的 scratch_len/ptr 正是 r10/r11，池
+    // 只能缩到 r8/r9。
+    const char* const* block_temps;
+    int n_block_temps;
+
     // 栈对齐要求（字节）
     int stack_align;
 
@@ -66,6 +76,11 @@ struct TargetABI {
 
     const char* setjmp_sym;
     const char* longjmp_sym;
+
+    // 字段存储 / 独立存储指令的值寄存器（gen_field_store）：基址固定占
+    // %rax，值需要另借一个 caller-saved 寄存器。SysV 历史上是 %rcx；但
+    // Win64 的 %rcx 是第 1 个实参，借用会读到调用残留，改由 ABI 给出。
+    const char* scratch_field;
 };
 
 // 当前编译目标（默认 x86-64 SysV）。

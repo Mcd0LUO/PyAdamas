@@ -325,6 +325,7 @@ void AsmGen::emit_function(const IRFunction& f, int fi) {
 
         // 被导入模块的 init：先把自己的全局根表交给 GC，再跑顶层代码。
         if (!m_->is_entry && fi == m_->entry) {
+            // 根表指针也是实参：Win64 的最内层实参寄存器是 %rcx。
             line(std::format("leaq {}(%rip), {}", roots_label(), arg_reg_i(0)));
             emit_imm_op("movq", local_global_count(), arg_reg_i(1));
             spill_fp_slots();

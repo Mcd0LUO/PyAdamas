@@ -104,8 +104,8 @@ void AsmGen::gen_inst(const Inst& in) {
             case IrOp::Setjmp: gen_setjmp(in); break;
             case IrOp::ImportModule: {
                 const std::string& name = m_->imports[static_cast<size_t>(in.imm)];
-                line(std::format("leaq {}(%rip), %rdi", module_ready_symbol(name)));
-                line(std::format("leaq {}(%rip), %rsi", module_init_symbol(name)));
+                line(std::format("leaq {}(%rip), {}", module_ready_symbol(name), arg_reg_i(0)));
+                line(std::format("leaq {}(%rip), {}", module_init_symbol(name), arg_reg_i(1)));
                 spill_fp_slots();
                 line("call pa_import_module");
                 reload_fp_slots();
@@ -136,16 +136,14 @@ void AsmGen::gen_inst(const Inst& in) {
                 move_to(dst_op(in.dst), "%rax");
                 break;
             }
-            case IrOp::GenSetSlot: {
-                // %rax 是帧基址，值先落一个 scratch 再写回帧：这个 scratch
-                // 必须按目标取（SysV 是 %rcx，Win64 是 %r9），否则 Win64 下
-                // 会把早已失效的实参寄存器 %rcx 写进槽位，得到垃圾值。
-                const char* tmp = arg_reg_i(3);
+            case IrOp::GenSetSlot:
+                // 基址 %rax + 值暂存：值不能借实参寄存器（Win64 下 arg_reg_i(3)
+                // 是 %r9，而这里根本没有调用），走 ABI 的 scratch_field。
                 emit2("movq", src_op(in.args[0]), "%rax");
-                emit2("movq", src_op(in.args[1]), tmp);
-                line(std::format("movq {}, {}(%rax)", tmp, 8 * (10 + in.idx)));
+                emit2("movq", src_op(in.args[1]), target_abi().scratch_field);
+                line(std::format("movq {}, {}(%rax)", target_abi().scratch_field,
+                                 8 * (10 + in.idx)));
                 break;
-            }
             case IrOp::GenGetState:
                 line("movq 0(%r15), %rax");
                 move_to(dst_op(in.dst), "%rax");
@@ -185,7 +183,6 @@ void AsmGen::gen_inst(const Inst& in) {
                 emit_epilogue();
                 break;
             case IrOp::GenRethrow:
-                // 帧指针是第一个整型实参，按目标 ABI 取寄存器（Win64 是 %rcx）。
                 line(std::format("movq %r15, {}", arg_reg_i(0)));
                 line("call pa_coro_rethrow");
                 line("ud2");
@@ -290,12 +287,14 @@ void AsmGen::gen_bin_int(const Inst& in) {
                 case BinKind::BitAnd: emit2("andq", sb, d); return;
                 case BinKind::BitOr: emit2("orq", sb, d); return;
                 case BinKind::BitXor: emit2("xorq", sb, d); return;
+                // 移位量必须落在 %cl（x86 硬性要求），不能按实参位置装填：
+                // Win64 的 arg_reg_i(3) 是 %r9。SysV 下两者同为 %rcx。
                 case BinKind::Shl:
-                    emit2("movq", sb, arg_reg_i(3));
+                    emit2("movq", sb, "%rcx");
                     emit2("shlq", "%cl", d);
                     return;
                 case BinKind::Shr:
-                    emit2("movq", sb, arg_reg_i(3));
+                    emit2("movq", sb, "%rcx");
                     emit2("sarq", "%cl", d);
                     return;
                 default: break;  // 除法/取模/幂要用 rax/rdx，走通用路径
@@ -311,11 +310,11 @@ void AsmGen::gen_bin_int(const Inst& in) {
             case BinKind::BitOr: emit2("orq", sb, "%rax"); break;
             case BinKind::BitXor: emit2("xorq", sb, "%rax"); break;
             case BinKind::Shl:
-                emit2("movq", sb, arg_reg_i(3));
+                emit2("movq", sb, "%rcx");
                 line("shlq %cl, %rax");
                 break;
             case BinKind::Shr:
-                emit2("movq", sb, arg_reg_i(3));
+                emit2("movq", sb, "%rcx");
                 line("sarq %cl, %rax");
                 break;
             case BinKind::Div:

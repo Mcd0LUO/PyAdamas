@@ -240,6 +240,12 @@ std::string AsmGen::gen(const IRModule& m) {
                                     asm_escape(debug_display_name(m.funcs[i]->name)));
         }
         out_ += "\t.text\n";
+        // 手写跳板（类析构器 / GC 释放 / 生成器帧释放）的实参寄存器与
+        // 影子空间也走 ABI：它们由 C 运行时按平台调用约定回调，最内层
+        // 实参寄存器在 Win64 是 %rcx 而不是 %rdi。
+        const std::string tramp_a0 = arg_reg_i(0);
+        const std::string tramp_a1 = arg_reg_i(1);
+        const int tramp_shadow = target_abi().shadow_space;
         // DWARF 行号：.file 1 指定源路径，函数体内的 .loc 指向行号。
         if (!m.source_path.empty())
             out_ += std::format("\t.file 1 \"{}\"\n", asm_escape(m.source_path));
@@ -259,18 +265,21 @@ std::string AsmGen::gen(const IRModule& m) {
             out_ += "\tpushq %rbx\n";
             if (gnu_cfi()) out_ += "\t.cfi_def_cfa_offset 16\n";
             if (gnu_cfi()) out_ += "\t.cfi_offset %rbx, -16\n";
-            out_ += "\tmovq %rdi, %rbx\n";
+            out_ += "\tmovq " + tramp_a0 + ", %rbx\n";
+            if (tramp_shadow) out_ += std::format("\tsubq ${}, %rsp\n", tramp_shadow);
             for (size_t f = 0; f < c.field_heap.size(); ++f) {
                 if (!c.field_heap[f]) continue;
-                out_ += std::format("\tmovq {}(%rbx), %rdi\n", 8 * (f + 1));
+                out_ += std::format("\tmovq {}(%rbx), {}\n", 8 * (f + 1), tramp_a0);
                 out_ += c.field_heap[f] == 2 ? "\tcall pa_rc_dec_unknown\n"
                                              : "\tcall pa_rc_dec\n";
             }
             if (c.dict_off != 0) {
                 // 动态属性槽：可能还没分配过（NULL），跳过。
-                out_ += std::format("\tmovq {}(%rbx), %rdi\n", c.dict_off);
-                out_ += "\ttestq %rdi, %rdi\n\tje 1f\n\tcall pa_rc_dec\n1:\n";
+                out_ += std::format("\tmovq {}(%rbx), {}\n", c.dict_off, tramp_a0);
+                out_ += std::format("\ttestq {}, {}\n\tje 1f\n\tcall pa_rc_dec\n1:\n",
+                                    tramp_a0, tramp_a0);
             }
+            if (tramp_shadow) out_ += std::format("\taddq ${}, %rsp\n", tramp_shadow);
             out_ += "\tpopq %rbx\n";
             if (gnu_cfi()) out_ += "\t.cfi_def_cfa_offset 8\n";
             if (gnu_cfi()) out_ += "\t.cfi_restore %rbx\n";
@@ -285,17 +294,20 @@ std::string AsmGen::gen(const IRModule& m) {
             out_ += "\tpushq %rbx\n";
             if (gnu_cfi()) out_ += "\t.cfi_def_cfa_offset 16\n";
             if (gnu_cfi()) out_ += "\t.cfi_offset %rbx, -16\n";
-            out_ += "\tmovq %rdi, %rbx\n";
+            out_ += "\tmovq " + tramp_a0 + ", %rbx\n";
+            if (tramp_shadow) out_ += std::format("\tsubq ${}, %rsp\n", tramp_shadow);
             for (size_t f = 0; f < c.field_heap.size(); ++f) {
                 if (!c.field_heap[f]) continue;
-                out_ += std::format("\tmovq {}(%rbx), %rdi\n", 8 * (f + 1));
+                out_ += std::format("\tmovq {}(%rbx), {}\n", 8 * (f + 1), tramp_a0);
                 out_ += c.field_heap[f] == 2 ? "\tcall pa_rc_dec_unknown\n"
                                              : "\tcall pa_gc_unref_child\n";
             }
             if (c.dict_off != 0) {
-                out_ += std::format("\tmovq {}(%rbx), %rdi\n", c.dict_off);
-                out_ += "\ttestq %rdi, %rdi\n\tje 1f\n\tcall pa_gc_unref_child\n1:\n";
+                out_ += std::format("\tmovq {}(%rbx), {}\n", c.dict_off, tramp_a0);
+                out_ += std::format("\ttestq {}, {}\n\tje 1f\n\tcall pa_gc_unref_child\n1:\n",
+                                    tramp_a0, tramp_a0);
             }
+            if (tramp_shadow) out_ += std::format("\taddq ${}, %rsp\n", tramp_shadow);
             out_ += "\tpopq %rbx\n";
             if (gnu_cfi()) out_ += "\t.cfi_def_cfa_offset 8\n";
             if (gnu_cfi()) out_ += "\t.cfi_restore %rbx\n";
@@ -316,10 +328,8 @@ std::string AsmGen::gen(const IRModule& m) {
             out_ += "\tpushq %rbx\n";
             if (gnu_cfi()) out_ += "\t.cfi_def_cfa_offset 16\n";
             if (gnu_cfi()) out_ += "\t.cfi_offset %rbx, -16\n";
-            // 帧指针和 pa_gen_slot_release 的两个实参都按目标 ABI 取寄存器：
-            // SysV 是 %rdi/%rsi，Win64 是 %rcx/%rdx。写死 %rdi 会让 Win64 下
-            // 把垃圾当成帧指针（崩溃），或把 slot 地址塞进错误的实参槽。
-            out_ += std::format("\tmovq {}, %rbx\n", arg_reg_i(0));
+            out_ += "\tmovq " + tramp_a0 + ", %rbx\n";
+            if (tramp_shadow) out_ += std::format("\tsubq ${}, %rsp\n", tramp_shadow);
             out_ += "\tcmpq $1, 8(%rbx)\n";
             out_ += std::format("\tje .Lgengcreldone{}\n", i);
             for (size_t s = 0; s < g.slot_heap.size(); ++s) {
@@ -328,12 +338,13 @@ std::string AsmGen::gen(const IRModule& m) {
                 // slot_heap: 1=堆，2=可能装着非堆值（unknown 流过堆槽）。
                 // 清零只在 GC 清扫阶段做；trial/restore 阶段运行时只调计数，
                 // 不能破坏生成器帧的内容。
-                out_ += std::format("\tleaq {}(%rbx), {}\n", off, arg_reg_i(0));
+                out_ += std::format("\tleaq {}(%rbx), {}\n", off, tramp_a0);
                 out_ += std::format("\tmovq ${}, {}\n",
-                                    g.slot_heap[s] == 2 ? 2 : 1, arg_reg_i(1));
+                                    g.slot_heap[s] == 2 ? 2 : 1, tramp_a1);
                 out_ += "\tcall pa_gen_slot_release\n";
             }
             out_ += std::format(".Lgengcreldone{}:\n", i);
+            if (tramp_shadow) out_ += std::format("\taddq ${}, %rsp\n", tramp_shadow);
             out_ += "\tpopq %rbx\n";
             if (gnu_cfi()) out_ += "\t.cfi_def_cfa_offset 8\n";
             if (gnu_cfi()) out_ += "\t.cfi_restore %rbx\n";

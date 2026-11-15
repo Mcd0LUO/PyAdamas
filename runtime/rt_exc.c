@@ -229,7 +229,13 @@ static void handler_release(PyAdamasHandler* h) {
 /* Win64 上不能用 CRT 的 setjmp/longjmp：msvcrt 的 longjmp 会走 SEH 展开，
    而我们生成的汇编函数没有 .pdata/.xdata 条目（那段代码不走 GCC），
    展开会失败。这里自带一对：只保存/恢复非易失寄存器 + rsp + 返回地址，
-   完全不依赖展开信息。布局 Must 与生成代码一致（都用 handler 记录首字段）。 */
+   完全不依赖展开信息。布局 Must 与生成代码一致（都用 handler 记录首字段）。
+   布局（与 pa_win_longjmp 共用，调用点只把它当不透明 240 字节）：
+     0 rsp / 8 rbx / 16 rbp / 24 rdi / 32 rsi / 40 r12 / 48 r13 / 56 r14
+     / 64 r15 / 72 返回地址 / 80+16*i xmm(6+i)，i=0..9 共 160 字节。
+   Win64 的非易失集合必须完整：xmm6–15 也是非易失的，kFpSlotRegs 用的
+   xmm8–15 就在其中；漏掉它们，异常 longjmp 回来会读到回滚前的旧值。
+   mingw 的 jmp_buf 是 256 字节，240 装得下。 */
 __asm__(
     ".text\n"
     ".globl pa_win_setjmp\n"
@@ -246,6 +252,16 @@ __asm__(
     "\tmovq %r15, 64(%rcx)\n"
     "\tmovq (%rsp), %rax\n"
     "\tmovq %rax, 72(%rcx)\n"
+    "\tmovups %xmm6, 80(%rcx)\n"
+    "\tmovups %xmm7, 96(%rcx)\n"
+    "\tmovups %xmm8, 112(%rcx)\n"
+    "\tmovups %xmm9, 128(%rcx)\n"
+    "\tmovups %xmm10, 144(%rcx)\n"
+    "\tmovups %xmm11, 160(%rcx)\n"
+    "\tmovups %xmm12, 176(%rcx)\n"
+    "\tmovups %xmm13, 192(%rcx)\n"
+    "\tmovups %xmm14, 208(%rcx)\n"
+    "\tmovups %xmm15, 224(%rcx)\n"
     "\txorl %eax, %eax\n"
     "\tret\n");
 
@@ -263,6 +279,16 @@ __asm__(
     "\tmovq 48(%rcx), %r13\n"
     "\tmovq 56(%rcx), %r14\n"
     "\tmovq 64(%rcx), %r15\n"
+    "\tmovups 80(%rcx), %xmm6\n"
+    "\tmovups 96(%rcx), %xmm7\n"
+    "\tmovups 112(%rcx), %xmm8\n"
+    "\tmovups 128(%rcx), %xmm9\n"
+    "\tmovups 144(%rcx), %xmm10\n"
+    "\tmovups 160(%rcx), %xmm11\n"
+    "\tmovups 176(%rcx), %xmm12\n"
+    "\tmovups 192(%rcx), %xmm13\n"
+    "\tmovups 208(%rcx), %xmm14\n"
+    "\tmovups 224(%rcx), %xmm15\n"
     "\tmovl %edx, %eax\n"
     "\ttestl %eax, %eax\n"
     "\tjne 1f\n"
