@@ -1,7 +1,10 @@
 # 零开销异常 —— 设计草案
 
-状态：**未实现**。本文是把 Itanium C++ ABI 的异常机制拆解到可实施粒度后的记录，
-供后续动手时按图施工，不必重新调研。
+状态：**Z1 已打通**（手写汇编 + 自己的 personality，`_Unwind_RaiseException` 能跳到 landing pad，
+两阶段顺序与 FORCE_UNWIND 行为都已实测）。LSDA 的字节布局已用本机 gcc 14.2 / binutils 2.44
+**实测标定**，权威数据在 [`tools/lsda_ref/FINDINGS.md`](../tools/lsda_ref/FINDINGS.md)，
+复核命令：`bash tools/lsda_ref/check.sh`。现有异常语义的逐条对照与改造边界在
+[`docs/exc-semantics.md`](exc-semantics.md)。本文只保留结论与路线；被实测推翻的早期猜测标了「订正」。
 
 ## 现状与目标
 
@@ -26,37 +29,41 @@ call pa_handler_leave     # 弹出
 
 ## 已有的前置条件（已具备）
 
-- **`.eh_frame` 已生成**：`readelf -S` 能看到 `.eh_frame` / `.eh_frame_hdr`，
-  CFI 指令（`.cfi_startproc`/`.cfi_def_cfa_offset`/`.cfi_offset` 等）每个函数都有。
-  这是最关键的一条 —— libgcc 的展开器**已经能逐帧走过我们生成的代码**，
-  `_Unwind_Backtrace` 就是这样实现 traceback 的。
+- **`.eh_frame` 已生成**：CFI 指令（`.cfi_startproc`/`.cfi_def_cfa_offset`/`.cfi_offset` 等）每个函数都有。
+  这是最关键的一条 —— libgcc 的展开器**已经能逐帧走过我们生成的代码**。
 - **libgcc 的 `_Unwind_*` 已经可用**：运行时里已有 5 处 `_Unwind_Backtrace`。
+- 实测：生成程序的 `.eh_frame` 有 789 个 FDE，`libgcc_s.so.1` 已链接，反汇编里有 55 处 `call _setjmp`，
+  且**没有任何 `.gcc_except_table`** —— 也就是说「表驱动展开所需的展开信息全都在，只是没有表」。
 
 缺的只有三样：LSDA 表、personality routine、用 `_Unwind_RaiseException` 抛。
 
-## LSDA 的确切格式（从 GCC 产物反推）
-
-用下面这段 C++ 让 GCC 生成一份参考：
-
-```cpp
-extern void maybe_throw(int);
-int probe(int n) {
-    try { maybe_throw(n); return 1; }
-    catch (int) { return 2; }
-}
-```
-
-`g++ -O1 -S` 得到：
+## LSDA 的确切格式（gcc 14.2 实测）
 
 ### 函数级指令
 
 ```asm
-    .cfi_personality 0x9b, DW.ref.__gxx_personality_v0
+    .cfi_personality 0x9b, DW.ref.pa_personality
     .cfi_lsda 0x1b, .LLSDA0
 ```
 
-`0x9b` 是 personality 指针的编码（`DW_EH_PE_indirect|pcrel|udata4`），
-`0x1b` 是 LSDA 指针的编码（`pcrel|udata4`）。
+- `0x9b` = `DW_EH_PE_indirect | pcrel | sdata4`（0x80|0x10|0x0b）
+- `0x1b` = `pcrel | sdata4`（0x10|0x0b）
+- **订正**：早期本文写成 `udata4` 是错的。`sdata4` 是 0x0b，`udata4` 是 0x03；0x0f 不是合法组合。
+- `0x9b` 后面必须是**一个 8 字节指针槽**（`DW.ref.*`），不是函数本体：
+
+```asm
+    .section .data.rel.local,"aw",@progbits
+    .align 8
+DW.ref.pa_personality:
+    .quad pa_personality
+```
+
+- **坑（已实测）**：`.cfi_personality 0x9b, pa_personality`（直接写函数符号、省掉 DW.ref 槽）
+  **汇编和链接都不报错，但运行期 SIGSEGV**。
+- 若 personality 指向**同一链接单元**内的符号，可以用 `0x1b` 直连、省掉 DW.ref（PIE / no-pie 都能跑）；
+  但指向共享库符号（如 `__gxx_personality_v0`）时 PIE 下会被 ld 拒绝：
+  `relocation R_X86_64_PC32 against symbol ... can not be used when making a PIE object`。
+  我们的 `pa_personality` 在同一个可执行文件里，Z1 用 0x1b；将来若接共享符号再改 0x9b + DW.ref。
 
 ### 保护区标记
 
@@ -66,42 +73,53 @@ int probe(int n) {
 .LEHE0:                    # Exception Handler End
 ```
 
-这对标签界定「哪些 PC 落在保护区内」。我们的 lowering 里对应的就是
-`try.body` 块的起止。
+这对标签界定「哪些 PC 落在保护区内」。我们的 lowering 里对应的就是 `try.body` 块的起止。
+call-site 表里的 `start` / `length` 实测就是 `.LEHB0 - 函数起点` / `.LEHE0 - .LEHB0`。
 
-### LSDA 数据
+### 两种 LSDA 形态（都实测过）
 
-```asm
-    .section .gcc_except_table,"a",@progbits
-    .align 4
-.LLSDA0:
-    .byte   0xff                     # LPStart 编码 = DW_EH_PE_omit（用函数起点）
-    .byte   0x9b                     # TType 编码
-    .uleb128 .LLSDATT0-.LLSDATTD0    # TType 表的偏移
-.LLSDATTD0:
-    .byte   0x1                      # call-site 表编码 = uleb128
-    .uleb128 .LLSDACSE0-.LLSDACSB0   # call-site 表长度
-.LLSDACSB0:                          # 每条目 4 项
-    .uleb128 .LEHB0-.LFB0            #   保护区起点（相对函数起点）
-    .uleb128 .LEHE0-.LEHB0           #   保护区长度
-    .uleb128 .L5-.LFB0               #   landing pad 地址（0 表示无）
-    .uleb128 0x1                     #   action 下标（0 = 只做清理，不捕获）
-    .uleb128 .LEHB1-.LFB0
-    .uleb128 .LEHE1-.LEHB1
-    .uleb128 0                        #   无 landing pad
-    .uleb128 0
-.LLSDACSE0:
-    .byte   0x1                      # action 表：1 条
-    .byte   0
-    .align 4
-    .long   DW.ref._ZTIi-.            # TType 表：类型信息指针
-.LLSDATT0:
+**A. 与 GCC 逐字节同构的 catch-all（20 字节）**
+
+```text
+ff 9b 11 01 08 04 05 13 01 1b 05 00 00 01 00 00 00 00 00 00
 ```
 
-**对我们最有用的简化**：如果只做「catch-all + 内联 except 体」而不需要按类型分派，
-action 表可以只有一条 `0`（cleanup），landing pad 统一跳到我们的 except 分发块，
-由现有代码按类型匹配。这样类型表可以退化成空，personality 实现只需处理
-`_URC_HANDLER_FOUND` / `_URC_CONTINUE_UNWIND` 两个返回码。
+| 偏移 | 字节 | 字段 |
+|---|---|---|
+| 0x00 | `ff` | lpstart_encoding = omit（LPStart 取 FDE 的 region start，即函数起点） |
+| 0x01 | `9b` | ttype_encoding = indirect / pcrel / sdata4 |
+| 0x02 | `11` | ttype_table_offset（uleb128），**指向 TType 表末尾** |
+| 0x03 | `01` | call_site_encoding = uleb128 |
+| 0x04 | `08` | call_site_table_length = 8 字节 |
+| 0x05 | `04 05 13 01` | call-site[1]：start=0x4, len=0x5, landing_pad=0x13, action=1 |
+| 0x09 | `1b 05 00 00` | call-site[2]：landing pad 0 = 该区间无 landing pad |
+| 0x0d | `01 00` | action[1] = (filter=1, next=0)，**两个 SLEB128** |
+| 0x0f | `00` | `.align 4` 的 padding（不属于任何表，解码时别当记录） |
+| 0x10 | `00 00 00 00` | TType[1] = null `type_info*` ⇒ **catch(...)**；**不需要重定位** |
+
+**B. 我们自己的形态（Z1 实际用的，12 字节起）**
+
+```text
+ff ff 01 04 08 0e 1d 01 00 00 00 00
+```
+
+`ttype_encoding = 0xff`（omit，**TType 表偏移字段整段消失**）→ header 变成「2 字节 + 1 个 uleb128」。
+call-site 的 action 下标 `01` 表示「这一帧是 handler」，`00` 表示「只做 cleanup」。
+这个形态不需要 TType 表、不需要重定位，是我们的 personality 自己解析的，所以不受 gcc 编码约束。
+
+**判断 catch / cleanup 的正确层次**：看 **call-site 第 4 个字段（action 下标）是否为 0**，
+不是看 action 记录里的 filter（filter 在 action 记录里，是另一个层次）。
+
+### 四条最容易踩错的（都踩过了）
+
+1. **catch-all 的类型表不能省** —— 这条只对「与 gcc 同构的形态 A」成立。
+   形态 A 里 catch-all = action 的 `filter > 0` + TType 表一个 **null** 项；`filter == 0` 才是 cleanup。
+   早期本文说「类型表可以退化成空」是错的：省掉类型表**并用 libstdc++ 的 personality** 时，
+   catch 会退化成 cleanup，永远抓不到异常。形态 B 我们是自己的 personality，才允许彻底没有类型表。
+2. **action 表不是「条数 + 计数」**，而是每条记录两个 SLEB128：`(filter, next)`。
+3. **TType 表是反向索引**：偏移指向表的**末尾**，第 i 项在 `ttype_end - i*4`。
+4. **dump 里 null 项和真实项都显示 0**，`readelf -x` / `objdump -s` 分不出来；
+   要看 `.rela.gcc_except_table` 有没有对应重定位才能区分。
 
 ## personality routine 契约
 
@@ -111,42 +129,91 @@ _Unwind_Reason_Code personality(int version, _Unwind_Action actions,
                                 struct _Unwind_Context* ctx);
 ```
 
-phase 1（`_UA_SEARCH_PHASE`）：查 LSDA 的 call-site 表，当前 PC 落在哪个保护区、
-有没有 landing pad。有就返回 `_URC_HANDLER_FOUND` 并把自己的上下文存到
-`exc->private`（phase 2 要用）。
+**返回值有三个必需**（早期本文漏了第三个）：
 
-phase 2（`_UA_CLEANUP_PHASE`，带 `_UA_HANDLER_FRAME`）：对每个经过的帧做清理
-（释放帧里登记的堆引用），回到自己的帧时安装上下文并返回 `_URC_INSTALL_CONTEXT`，
-展开器就会跳到 landing pad。
+| 返回码 | 何时 |
+|---|---|
+| `_URC_CONTINUE_UNWIND` | PC 不在保护区内 / 该区间无 landing pad / phase 2 还没轮到自己 / **FORCE_UNWIND** |
+| `_URC_HANDLER_FOUND` | **phase 1**，PC 落在 action 下标 != 0 的 call-site 里，且（Z3 起）类型匹配 |
+| `_URC_INSTALL_CONTEXT` | **phase 2 且 `actions & _UA_HANDLER_FRAME`**，装好上下文后展开器跳 landing pad |
 
-「释放帧里登记的堆引用」这件事**现有代码已经做了**（`pa_frame_unwind`），
-可以直接复用。
+phase 2 里轮到自己的 handler 帧时：
+`_Unwind_SetGR(ctx, 0, (uintptr_t)exc)` + `_Unwind_SetIP(ctx, landing_pad)`，返回 `_URC_INSTALL_CONTEXT`。
 
-## 分阶段落地
+**`_UA_FORCE_UNWIND` 必须只 CONTINUE、不得调用 `_Unwind_SetIP`。** 运行时 traceback 走
+`_Unwind_Backtrace`（内部会 FORCE_UNWIND 扫一遍），personality 一旦在 FORCE_UNWIND 下装上下文，
+traceback 会直接崩或者跳到 landing pad 执行用户代码。Z1 已把这条写成断言。
+
+「释放帧里登记的堆引用」这件事**现有代码已经做了**（`pa_frame_unwind`），可以直接复用。
+
+## Z1 实测出来的硬约束（Z2 的 codegen 必须遵守）
+
+1. **landing pad 入口的 `%rsp` = 抛出点那条 `call` 之前的值**（也就是函数体内正常执行的 rsp），
+   **不是 CFA，也不是函数入口 rsp**。所以 LP 的返回路径照抄正常 epilogue 即可。
+   写错的表现是死循环（LP 的 `ret` 跳回自己）。
+2. **LP 必须落在 `.cfi_endproc` 的 FDE 范围内**，且 LP 区段的 CFI 要描述 LP 入口状态。
+   否则 LP 里 `_Unwind_Resume` 时 libgcc 找不到 FDE → **SIGABRT(134)，而且没有任何错误输出**。
+   这条对编译器最危险：我们每个函数都在 `.cfi_startproc`/`.cfi_endproc` 之间发 LP，天然满足；
+   但**把 LP 挪到另一个段或者补 `.cfi_endproc` 之后再发就会炸**。
+3. 编译器现在的 CFI 状态在「保护区内的 call 点」上是一致的，LP 入口状态可以复用同一套；
+   这一点要在 Z2 里用 md5 基线守住。
+
+## 分阶段落地（Z2/Z3 的范围已按实测收窄）
 
 | 阶段 | 内容 | 验收 |
 |---|---|---|
-| **Z1** | 写 personality routine 骨架 + 手写一个带 LSDA 的汇编函数做端到端验证（不接编译器） | `_Unwind_RaiseException` 能把控制转到 landing pad |
-| **Z2** | 编译器为「catch-all 的单层 try」发射 `.cfi_personality`/`.cfi_lsda`/`.gcc_except_table`；`--zero-cost-exc` 开关选择新路径 | 该用例输出与 setjmp 路径一致 |
-| **Z3** | 类型匹配下放到 personality 之前，即 landing pad 里先跑现有的 `pa_exc_matches` 分发（保持现有语义不变） | 全部 177 个 POSIX 用例通过 |
-| **Z4** | 覆盖嵌套 try / finally / 生成器与协程挂起（这两者涉及 handler 栈重挂，是难点） | 异常相关的 30+ 用例全绿 |
-| **Z5** | 移除 setjmp 路径，删掉 HandlerPush/Setjmp/HandlerLeave 三个 IR 操作 | 汇编里不再出现 `_setjmp` |
+| **Z1** ✅ | personality routine + 手写带 LSDA 的汇编函数端到端验证（不接编译器） | 已打通：raise → LP，两阶段顺序、负向用例、FORCE_UNWIND 全覆盖 |
+| **Z2** | 编译器为**非可挂起函数**里的「catch-all 单层 try」发射 `.cfi_personality`/`.cfi_lsda`/`.gcc_except_table`；`--zero-cost-exc` 开关选择新路径 | 该用例输出与 setjmp 路径一致 |
+| **Z3** | **类型过滤放进 personality 的 phase 1**（见下），landing pad 只做分派 | 全部 177 个 POSIX 用例通过 |
+| **Z4** | 覆盖嵌套 try / finally / 异常对象 traceback | 异常相关的 30+ 用例全绿 |
+| **Z5** | 移除非可挂起函数的 setjmp 路径，删掉对应的 HandlerPush/Setjmp/HandlerLeave | 那些函数的汇编里不再出现 `_setjmp` |
+
+### Z2 的三条范围收紧（都是实测结论，不是保守）
+
+1. **只迁非可挂起函数**（函数体里没有 `yield`/`await`）。生成器 / 协程 / 异步生成器里有 **5 处 C 级 setjmp 兜底**
+   （`rt_gen.c` / `rt_async.c` / `rt_agen.c`），它们**抓不到 `_Unwind` 抛出的异常**。
+   让它们永久保留 setjmp 是**允许且推荐的降级**，不是过渡状态。想统一得先给 resume 帧保存
+   `_Unwind_Context` 快照，那是另一个量级的工程。
+2. **`with` 不要一起迁**：`with` 可能**抑制**异常（`__exit__` 返回 True），不是纯 cleanup，
+   语义上必须留在 setjmp 路径里，等 Z4 单独处理。
+3. **catch-all 单层 try 先行**：类型分派还没进 personality 之前，只有 catch-all 能保证「内层抓到就是对的」。
+
+### Z3 必须改设计：类型过滤在 phase 1，不在 landing pad
+
+早期方案是「landing pad 统一跳到现有的 except 分发块，由 `pa_exc_matches` 分派」。
+**这个方案在多层 try 上不成立**：展开器在 phase 1 只搜索一次 handler；一旦把上下文装进内层 landing pad，
+若发现类型不匹配再 `_Unwind_Resume`，展开器只会继续 cleanup 阶段，**不会重新选外层 handler**，
+一路展开到底 → terminate。
+
+所以类型判定必须在 phase 1、在 personality 里完成。做法（personality 是我们自己的，不受 gcc 编码约束）：
+
+- `ttype_encoding = 0xff`（不发射 TType 表）
+- call-site 的 action 下标 != 0 表示「这一帧是 handler」
+- **把 action 记录里的 `filter` 字段改造成「我们自己的 handler 描述表下标（1 起）」**
+- 描述表每项形如 `{ uint32_t kind; uint32_t n; const char* names[] }`，`kind = 0` 表示 catch-all
+- personality phase 1 拿 filter 查表 → 调运行时 `pa_eh_handler_matches(exc, desc)`（内部复用 `pa_exc_matches`
+  的异常类层级判定）→ 匹配才返回 `_URC_HANDLER_FOUND`，不匹配返回 `_URC_CONTINUE_UNWIND`
+
+personality 里读 filter 必须是**通用的**，不要假设它一定是 0 或 1。
+
+**回退方案 B**（若上面的复杂度超预期）：landing pad 里分发，不匹配就**重新 `_Unwind_RaiseException` 同一个对象**。
+代价是每层一次完整搜索，且同一函数内多级 try 的边界要逐个验证。不到万不得已不走这条。
 
 ## 已知难点
 
-1. **生成器/协程的挂起恢复**：现有实现用 `pa_handler_suspend` 把 handler 记录
-   从全局栈上摘下来、恢复时重新 `setjmp`。表驱动方案里没有「handler 栈」，
-   挂起时展开器的上下文会失效 —— 这块需要单独设计（可能要给每个 resume 帧
-   保存一份 `_Unwind_Context` 快照）。
-2. **Win64 目标**：COFF 没有 `.gcc_except_table`，Windows 用 SEH
-   （`.pdata`/`.xdata` + `.seh_handler`）。两个目标的异常机制完全不同，
-   TargetABI 需要再加一层「异常模型」的抽象。**不建议两条一起做。**
-3. **`finally` 与 `with`**：它们不是 catch，是 cleanup，需要
-   `_UA_CLEANUP_PHASE` 里逐帧执行代码（两步展开），比 catch 复杂。
+1. **生成器/协程的挂起恢复**：现有实现用 `pa_handler_suspend` 把 handler 记录从全局栈上摘下来、
+   恢复时重新 `setjmp`。表驱动方案里没有「handler 栈」，挂起时展开器上下文会失效。
+   **决定：生成器/协程永久保留 setjmp 路径**（5 处 C 级兜底抓不到 `_Unwind`），不在本项目范围内统一。
+2. **Win64 目标**：COFF 没有 `.gcc_except_table`，Windows 用 SEH（`.pdata`/`.xdata` + `.seh_handler`）。
+   两个目标的异常机制完全不同，TargetABI 需要再加一层「异常模型」的抽象。**不建议两条一起做。**
+3. **`finally` 与 `with`**：它们不是 catch，是 cleanup，需要 `_UA_CLEANUP_PHASE` 里逐帧执行代码
+   （两步展开）；`with` 还可能抑制异常，必须留在 setjmp 路径单独处理。cleanup 帧在 call-site 表里是 action=0。
 
 ## 建议
 
-先做 **Z1**：它不碰编译器，风险为零，但能一次性验证 personality 契约、
-LSDA 编码、landing pad 跳转这三件最容易出错的事。Z1 通了再谈 Z2。
+Z1 已完成（`runtime/rt_personality.c` + `tests/exc/z1_rt/`）。下一步 Z2 只做最小闭环：
+**非可挂起函数 + catch-all 单层 try + `--zero-cost-exc` 开关**，与 setjmp 路径并存，靠开关做 A/B。
+
+发射任何 LSDA 之前先用 `tools/lsda_ref/` 对一遍字节 —— 那是唯一有实测背书的口径。
 
 不要和 Win64 的 SEH 一起做。

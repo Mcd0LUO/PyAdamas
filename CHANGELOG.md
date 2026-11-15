@@ -4,6 +4,48 @@
 
 早期阶段没有逐条留痕，按阶段归纳；0.4 之后逐条记录。
 
+## [0.174] - 2026-11-16
+
+### 零开销异常：Z1 地基打通（不改默认代码路径）
+
+目标是把 setjmp/longjmp 换成 Itanium C++ ABI 的表驱动展开。这一步**不碰编译器**，
+只验证 personality 契约、LSDA 编码、landing pad 跳转这三件最容易出错的事。
+
+- 新增 `runtime/rt_personality.c`：通用解码 uleb128/sleb128/encoded pointer 与
+  LPStart/TType/call-site 表头，实现两阶段语义（search 只认 action != 0 的 handler 帧；
+  cleanup 阶段对纯清理帧同样安装上下文，由 landing pad 自己 `_Unwind_Resume`），
+  `_UA_FORCE_UNWIND` 下只穿过、不安装。已编进 `rt.o`，默认代码路径不引用。
+- 新增 `tests/exc/z1_rt/`：四份手写 `.S` 夹具（无 LSDA 的 plumbing / 真 LSDA /
+  两阶段 + 无 pad 中间帧 / 只改 1 bit 的坏表负向）+ driver，`-no-pie` 与 PIE
+  两套链接各 43 项断言共 86 项全过；`bash tests/exc/z1_rt/run.sh` 可复跑。
+- 新增 `tools/lsda_ref/`：用 gcc 14.2 / binutils 2.44 实测标定 LSDA 字节布局
+  （100+ 条硬编码字节断言、11 条链接矩阵断言，`check.sh` 可复跑）。手写汇编产出的
+  `.gcc_except_table`（20 B）与 `.eh_frame`（64 B）和 `g++ -O1` 的 catch-all 产物
+  **逐字节完全一致**。
+- 新增 `docs/exc-semantics.md`（现行异常语义 60+ 行 file:line 对照表、10 条已知不一致、
+  三条难点的具体结论、Z2 发射清单）与 `tests/exc/sem_baseline.sh`（42 个异常用例基线，
+  `PASS 42 / 42`）；重写 `docs/zero-cost-exceptions.md`。
+
+### 订正与范围收紧（实测推翻了若干早期结论）
+
+- `0x9b` / `0x1b` 的字节对没错，但语义是 `sdata4` 不是 `udata4`（`udata4` 是 0x03）。
+- 与 gcc 同构的形态下 **catch-all 的类型表不能省**：gcc 用 `ttype=0x9b` + 一个 null 项
+  表示 `catch(...)`；省掉会让 catch 退化成 cleanup，永远抓不到异常。
+- action 表不是「条数 + 计数」，而是每条记录两个 SLEB128 的 `(filter, next)`。
+- 判断 catch / cleanup 的正确层次是 **call-site 的第 4 个字段（action 下标）是否为 0**。
+- Z2 范围收紧为「非可挂起函数 + catch-all 单层 try」：生成器/协程/异步生成器里的 5 处
+  C 级 setjmp 兜底抓不到 `_Unwind` 抛出的异常，**永久保留 setjmp**；`with` 可能抑制异常，
+  不是纯 cleanup，不一起迁。
+- Z3 的类型过滤必须放进 personality 的 phase 1：展开器在 phase 1 只搜索一次，
+  内层 except 不匹配后 `_Unwind_Resume` **不会**重新选外层 handler。
+
+### 已知坑（都复现过，详见 `tests/exc/z1_rt/README.md`）
+
+- landing pad 入口的 `%rsp` = 抛出点那条 `call` 之前的 rsp（不是 CFA、不是入口 rsp）。
+- landing pad 必须落在 `.cfi_endproc` 的 FDE 范围内，否则 LP 里 `_Unwind_Resume` 时
+  libgcc 找不到 FDE -> `SIGABRT(134)`，且**没有任何错误输出**。
+- `.cfi_personality 0x9b, <函数名>`（省掉 `DW.ref` 指针槽）汇编和链接都不报错，
+  运行期 SIGSEGV。
 ## [0.173] - 2026-11-16
 
 新增 **x86-64 Windows(win64) 目标**：`--target=win64` 产出可在 Windows 上原生运行的

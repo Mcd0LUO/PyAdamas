@@ -99,7 +99,7 @@
 | 0.168 | isinstance/bytes：第二参数接受 `bytes`/`bytearray`/`type`/`slice`/`frozenset` 等与 `(A,B,...)` 元组/列表；运行期元组短路 OR、known 类型静态判定、unknown 带运行期标签内置判定；`bytes()` 2 参/可迭代-of-int、`bytes*int`、`decode` 0..2、`translate`、内置类型名当值；基线 348 → 374 / 596 |
 | 许可证 | Apache-2.0（见 [LICENSE](../LICENSE) / [NOTICE](../NOTICE)） |
 
-## 当前状态（0.173）
+## 当前状态（0.174）
 
 流水线 `源码 → 词法 → AST → lambda 脱糖 → 类型检查 → IR → x86-64 汇编 → 可执行文件` 已打通。
 
@@ -115,6 +115,9 @@
   sysconf/timegm 映射到 Win32，subprocess 用 CreateProcess + 匿名管道；Setjmp 换成自带的
   `pa_win_setjmp`（不依赖展开信息，因为生成的汇编函数没有 `.pdata`）。覆盖面 138 / 146。
 - **主要缺口**：asyncio 边角；异常对象 traceback / 列号 / `.debug_info`；依赖动态属性的 stdlib（如 `argparse`，见「技术债」）。
+- **零开销异常（Z1 地基）**：`runtime/rt_personality.c`（通用 LSDA 解码 + 两阶段语义）与手写汇编夹具已打通，
+  `_Unwind_RaiseException` 能把控制转到 landing pad；LSDA 字节布局用 gcc 14.2 实测标定（`tools/lsda_ref/`）。
+  **尚未接入编译器**，Z2 起才会发 `.gcc_except_table`。设计见 [zero-cost-exceptions.md](zero-cost-exceptions.md)。
 
 ## 下一步
 
