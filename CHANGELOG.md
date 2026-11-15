@@ -4,6 +4,28 @@
 
 早期阶段没有逐条留痕，按阶段归纳；0.4 之后逐条记录。
 
+## [0.177] - 2026-11-16
+
+### 零开销异常 Z2-a：LSDA 发射器（已就绪，尚未接入 codegen）
+
+新增 `src/eh_emit.h` / `src/eh_emit.cpp`：纯函数式的 LSDA / CFI **文本发射器**，
+输入一个函数的保护区计划，输出 `.cfi_personality` / `.cfi_lsda` / `.gcc_except_table`。
+
+- 两种形态：handler（`ttype=0x9b` + TType 表一个 null 项 + `filter=1`）、
+  全 cleanup（`ttype=0xff`、12 字节，TType 偏移字段整段消失）。
+- 输入支持数值偏移与标签差（`.uleb128 .LEHE0-.LFB0`）两种模式，产物字节相同。
+- 接口拆成三段（CFI 指令必须夹在 `.cfi_startproc`/`.cfi_endproc` 之间、LSDA 在
+  `.gcc_except_table`、DW.ref 每个 TU 一次），这是位置约束决定的，不是设计选择。
+
+**订正（实测）**：call-site 的 action 字段是 **action 表内的 1 起字节偏移**，不是记录序号
+（多 handler 应为 1, 3, ...）；按序号实现会被独立解码器判为结构非法。另外单 handler
+且没有 LP 覆盖 range 时是 16 字节 —— 20 字节基准必须**含第二条 `lp=0` 的 range**。
+
+验证：`bash tests/eh/run.sh` 33 项断言全过；`catch_gcc20` 与 `cleanup_gcc12` 两组产物与
+gcc 14.2 实测基准**逐字节一致**；另用 `tools/lsda_ref/decode_eh_lsda.py` 独立解码 6 份 `.o`，
+结构校验 0 处「结构非法」。
+
+尚未接入 codegen（Z2-b），也未处理 LP 覆盖 range 与 typed catch。
 ## [0.176] - 2026-11-16
 
 ### 零开销异常 Z1.5：handler 判据对齐 ABI + 真 gcc personality 交叉验证

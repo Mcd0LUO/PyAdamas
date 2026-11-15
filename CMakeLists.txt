@@ -87,6 +87,7 @@ set(PYADAMAS_SOURCES
   src/cimport.cpp
   src/cdecl.cpp
   src/cdecl_parse.cpp
+  src/eh_emit.cpp
 )
 
 # 编译器在运行时需要 rt.o 的绝对路径；运行时按职责拆成多个 .c，
