@@ -266,8 +266,54 @@ void AsmGen::assign_slot_regs() {
         n_saved_regs_ = 0;
         if (ns == 0) return;
         // 含 setjmp 的函数：longjmp 会把 callee-saved 寄存器恢复到 setjmp
-        // 时刻，寄存器里的变量会悄悄回退。这类函数全部走内存槽。
-        if (f_->has_handlers) return;
+        // 时刻，寄存器里的变量会悄悄回退。但没必要整函数降级 —— 只有
+        // 「在 handler 保护区内被写过、且出了保护区还要读」的槽才有这个
+        // 风险。其余（保护区外写的、只在保护区内用的、循环计数器等）
+        // 完全可以继续驻留寄存器。
+        //
+        // 判定方式：把每个 HandlerPush..HandlerLeave 覆盖的块标成
+        // in_handler[b]；再对每个槽扫一遍，记录它在保护区内的最后一次
+        // 写所在的块，以及该块之后是否还有读。有就是 hazard。
+        std::vector<bool> handler_hazard(static_cast<size_t>(ns), false);
+        if (f_->has_handlers) {
+            const int nb = static_cast<int>(f_->blocks.size());
+            std::vector<bool> in_handler(static_cast<size_t>(nb), false);
+            // 用栈跟踪 handler 嵌套：按块顺序线性扫，遇到 Push 打开、
+            // Leave/Discard 关闭。块内顺序足够（lower 保证 Push/Leave
+            // 与块边界一致：异常体自成块）。
+            std::vector<int> open;  // 嵌套深度
+            for (int b = 0; b < nb; ++b) {
+                for (const auto& in : f_->blocks[static_cast<size_t>(b)].insts) {
+                    if (in.op == IrOp::CallRt &&
+                        in.imm == static_cast<int64_t>(RtFn::HandlerPush))
+                        open.push_back(b);
+                    else if (in.op == IrOp::CallRt &&
+                             (in.imm == static_cast<int64_t>(RtFn::HandlerLeave) ||
+                              in.imm == static_cast<int64_t>(RtFn::HandlerDiscard))) {
+                        if (!open.empty()) open.pop_back();
+                    }
+                }
+                in_handler[static_cast<size_t>(b)] = !open.empty();
+            }
+            // 每个槽：保护区内的写 + 之后的读 => hazard。
+            for (int s = 0; s < ns; ++s) {
+                bool wrote_in_handler = false;
+                bool hazard = false;
+                for (int b = 0; b < nb && !hazard; ++b) {
+                    for (const auto& in : f_->blocks[static_cast<size_t>(b)].insts) {
+                        if (in.idx != s) continue;
+                        const bool in_h = in_handler[static_cast<size_t>(b)];
+                        if (in.op == IrOp::StoreSlot && in_h) {
+                            wrote_in_handler = true;
+                        } else if (in.op == IrOp::LoadSlot && !in_h && wrote_in_handler) {
+                            hazard = true;
+                            break;
+                        }
+                    }
+                }
+                handler_hazard[static_cast<size_t>(s)] = hazard;
+            }
+        }
         if (f_->is_generator) return;
 
         // 被取过地址的槽必须留在内存里：寄存器里的副本不会跟着地址写更新。
@@ -307,6 +353,9 @@ void AsmGen::assign_slot_regs() {
             // 持有引用的堆槽必须留在内存：帧记录存的是栈槽地址，异常
             // 展开时直接从地址读值；提升到寄存器会让栈槽里留下旧值。
             if (ir_is_heap(f_->slot_ty[static_cast<size_t>(i)])) continue;
+            // handler 保护区内的写 + 之后的读：longjmp 会把寄存器回退，
+            // 这类槽必须留在内存。其余槽不受 setjmp 影响。
+            if (handler_hazard[static_cast<size_t>(i)]) continue;
             if (ir_is_float(f_->slot_ty[i])) {
                 if (opt_ >= 1) hot_fp.push_back({score[i], i});
             } else if (!float_valued[i]) {
