@@ -89,6 +89,15 @@ struct PartialPlan {
 class TypeChecker {
 public:
     explicit TypeChecker(std::string file) : file_(std::move(file)) {}
+    // 析构时把本实例拥有的 ClassInfo/StructInfo 标记为失效。Type 里的
+    // cls/st 是裸指针，一旦 TypeChecker 先于 Type 销毁，后续访问就是
+    // use-after-free。alive 标志让这类误用在调试/ASan 构建里立刻暴露，
+    // 而不是变成幽灵读取。（生产构建不读 alive，零开销。）
+    ~TypeChecker();
+    // 声明析构会抑制隐式移动构造/赋值；TypeChecker 里有 unique_ptr 容器
+    // （pool_/all_structs_），必须显式恢复移动语义。
+    TypeChecker(TypeChecker&&) = default;
+    TypeChecker& operator=(TypeChecker&&) = default;
 
     void check(Module& m);
     // 协议 dunder 的返回类型校验（在函数体推理完之后跑，见 typecheck_func.cpp）。

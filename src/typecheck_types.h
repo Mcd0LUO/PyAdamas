@@ -241,6 +241,8 @@ struct StructFieldInfo {
 // 分别对应 C 的 int64_t / double / _Bool，布局与 C 完全一致。
 struct StructInfo {
     std::string name;
+    // 同 ClassInfo::alive：StructInfo 由 TypeChecker::all_structs_ 拥有。
+    bool alive = true;
     std::vector<StructFieldInfo> fields;
     int64_t size = 0;
     int64_t align = 1;
@@ -328,6 +330,11 @@ struct ClassAncestor {
 
 struct ClassInfo {
     std::string name;
+    // 所有权契约（调试期可检测）：ClassInfo 由 TypeChecker::all_classes_ 拥有，
+    // Type 里的 cls 是裸指针。TypeChecker 析构时把 alive 清零；任何在这之后
+    // 通过 Type::cls 访问都是 use-after-free，pa_type_cls() 会断言出来。
+    // 生产构建不读它，零开销。
+    bool alive = true;
     // 类名在值位置被用过（赋值、传参、类装饰器）：降级时要生成一个
     // 运行期类对象单例。
     bool value_used = false;
@@ -1189,4 +1196,36 @@ inline bool merge_elem(TypePtr& slot, const TypePtr& container, const TypePtr& v
 }
 
 
+// ── 所有权契约访问器 ──────────────────────────────────────────
+// Type::cls / Type::st 是裸指针，指向 TypeChecker 拥有的对象。正常路径
+// 下 TypeChecker 一定活得更久（ModuleUnit 同时持有 tc 和 ir）。但契约
+// 一旦被破坏就是 use-after-free，而且普通构建下读到的垃圾指针很难追。
+//
+// 这几个访问器在 PYADAMAS_CHECK_TYPE_OWNERSHIP 打开时校验 alive 标志；
+// 默认（生产）构建里是纯内联指针读取，零开销。
+#if defined(PYADAMAS_CHECK_TYPE_OWNERSHIP)
+#include <cstdio>
+#include <cstdlib>
+inline void pa_assert_type_alive(const void* p, bool alive, const char* what) {
+    if (p && !alive) {
+        std::fprintf(stderr,
+                     "pyadamas: internal error: %s accessed after its TypeChecker "
+                     "was destroyed (use-after-free of %s)\n",
+                     "type owner", what);
+    }
+}
+inline ClassInfo* type_cls(const TypePtr& t) {
+    if (!t) return nullptr;
+    pa_assert_type_alive(t->cls, t->cls ? t->cls->alive : true, "ClassInfo");
+    return t->cls;
+}
+inline StructInfo* type_struct(const TypePtr& t) {
+    if (!t) return nullptr;
+    pa_assert_type_alive(t->st, t->st ? t->st->alive : true, "StructInfo");
+    return t->st;
+}
+#else
+inline ClassInfo* type_cls(const TypePtr& t) { return t ? t->cls : nullptr; }
+inline StructInfo* type_struct(const TypePtr& t) { return t ? t->st : nullptr; }
+#endif
 }  // namespace pyadamas

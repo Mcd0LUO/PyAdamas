@@ -7,6 +7,16 @@
 
 namespace pyadamas {
 
+// 所有权契约的运行时校验：TypeChecker 析构后，它拥有的 ClassInfo/
+// StructInfo 全部标死。Type::cls / Type::st 是裸指针，若在此时被访问，
+// 说明有 TypePtr 活过了它的 owner —— 那是 use-after-free。
+TypeChecker::~TypeChecker() {
+    for (auto& c : all_classes_)
+        if (c) c->alive = false;
+    for (auto& st : all_structs_)
+        if (st) st->alive = false;
+}
+
 void TypeChecker::check(Module& m) {
         auto mod = std::make_unique<Scope>();
         mod->is_module = true;
