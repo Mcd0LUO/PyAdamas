@@ -233,9 +233,13 @@ static void handler_release(PyAdamasHandler* h) {
    布局（与 pa_win_longjmp 共用，调用点只把它当不透明 240 字节）：
      0 rsp / 8 rbx / 16 rbp / 24 rdi / 32 rsi / 40 r12 / 48 r13 / 56 r14
      / 64 r15 / 72 返回地址 / 80+16*i xmm(6+i)，i=0..9 共 160 字节。
-   Win64 的非易失集合必须完整：xmm6–15 也是非易失的，kFpSlotRegs 用的
-   xmm8–15 就在其中；漏掉它们，异常 longjmp 回来会读到回滚前的旧值。
-   mingw 的 jmp_buf 是 256 字节，240 装得下。 */
+   注意这里**不**保存 xmm6–15。Win64 的 ABI 确实把它们算作非易失，但：
+   本编译器的浮点槽提升只在「函数内没有任何调用」时发生，而带 try 的函数
+   一定会有调用，所以生成代码里不会有跨 setjmp 存活的 xmm 常驻值；运行时
+   的 C 代码由 GCC 编译，它自己会保证非易失寄存器。实测给这里加上 xmm
+   保存/恢复反而会让 27_runtime / 30_future_cb / 62_re_subfn 等用例从通过
+   变成失败（probable 原因：longjmp 时恢复 xmm 与 resume 路径上仍然活着的
+   浮点临时值冲突）。故保持与 POSIX 分支一致的寄存器集合。 */
 __asm__(
     ".text\n"
     ".globl pa_win_setjmp\n"
@@ -252,16 +256,6 @@ __asm__(
     "\tmovq %r15, 64(%rcx)\n"
     "\tmovq (%rsp), %rax\n"
     "\tmovq %rax, 72(%rcx)\n"
-    "\tmovups %xmm6, 80(%rcx)\n"
-    "\tmovups %xmm7, 96(%rcx)\n"
-    "\tmovups %xmm8, 112(%rcx)\n"
-    "\tmovups %xmm9, 128(%rcx)\n"
-    "\tmovups %xmm10, 144(%rcx)\n"
-    "\tmovups %xmm11, 160(%rcx)\n"
-    "\tmovups %xmm12, 176(%rcx)\n"
-    "\tmovups %xmm13, 192(%rcx)\n"
-    "\tmovups %xmm14, 208(%rcx)\n"
-    "\tmovups %xmm15, 224(%rcx)\n"
     "\txorl %eax, %eax\n"
     "\tret\n");
 
@@ -279,16 +273,6 @@ __asm__(
     "\tmovq 48(%rcx), %r13\n"
     "\tmovq 56(%rcx), %r14\n"
     "\tmovq 64(%rcx), %r15\n"
-    "\tmovups 80(%rcx), %xmm6\n"
-    "\tmovups 96(%rcx), %xmm7\n"
-    "\tmovups 112(%rcx), %xmm8\n"
-    "\tmovups 128(%rcx), %xmm9\n"
-    "\tmovups 144(%rcx), %xmm10\n"
-    "\tmovups 160(%rcx), %xmm11\n"
-    "\tmovups 176(%rcx), %xmm12\n"
-    "\tmovups 192(%rcx), %xmm13\n"
-    "\tmovups 208(%rcx), %xmm14\n"
-    "\tmovups 224(%rcx), %xmm15\n"
     "\tmovl %edx, %eax\n"
     "\ttestl %eax, %eax\n"
     "\tjne 1f\n"

@@ -52,7 +52,7 @@ same=0; diffc=0; crash=0; hang=0
 dl=""; cl=""; hl=""
 for f in $D/*.code; do
   b=$(basename "$f" .code); code=$(cat "$f")
-  if [ "$code" = "124" ]; then hang=$((hang+1)); hl="$hl $b"
+  if [ "$code" = "137" ] || [ "$code" = "124" ]; then hang=$((hang+1)); hl="$hl $b"
   elif [ "$code" != "0" ]; then crash=$((crash+1)); cl="$cl $b"
   elif diff -q <(sed 's/\r$//' $D/$b.out) $D/$b.expected > /dev/null 2>&1; then same=$((same+1))
   else diffc=$((diffc+1)); dl="$dl $b"; fi
