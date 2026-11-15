@@ -11,45 +11,29 @@ void AsmGen::gen_rt_none(const Inst& in) {
         (void)in;
     }
 
-void AsmGen::gen_rt_i1(const Inst& in) {
-        emit2("movq", src_op(in.args[0]), "%rdi");
-    }
+// 按实参个数装填 SysV 整数寄存器。分组表（gen_rt_args）里同一个
+// gen_rt_iN 会承接不同参数个数的 RtFn（例如 Raise 只有 2 个实参，却和
+// 4 参的 RtFn 同组）。以前无条件读 args[0..N-1] 会越界读 vector ——
+// ASan 一跑就炸。这里按 args.size() 发射，多余寄存器不写。
+static const char* const kRtArgReg[6] = {"%rdi", "%rsi", "%rdx", "%rcx", "%r8", "%r9"};
 
-void AsmGen::gen_rt_i2(const Inst& in) {
-        emit2("movq", src_op(in.args[0]), "%rdi");
-        emit2("movq", src_op(in.args[1]), "%rsi");
-    }
+void AsmGen::gen_rt_args_n(const Inst& in, int n) {
+    const int m = static_cast<int>(in.args.size());
+    const int k = m < n ? m : n;
+    for (int i = 0; i < k; ++i) emit2("movq", src_op(in.args[i]), kRtArgReg[i]);
+}
 
-void AsmGen::gen_rt_i3(const Inst& in) {
-        emit2("movq", src_op(in.args[0]), "%rdi");
-        emit2("movq", src_op(in.args[1]), "%rsi");
-        emit2("movq", src_op(in.args[2]), "%rdx");
-    }
+void AsmGen::gen_rt_i1(const Inst& in) { gen_rt_args_n(in, 1); }
 
-void AsmGen::gen_rt_i4(const Inst& in) {
-        emit2("movq", src_op(in.args[0]), "%rdi");
-        emit2("movq", src_op(in.args[1]), "%rsi");
-        emit2("movq", src_op(in.args[2]), "%rdx");
-        emit2("movq", src_op(in.args[3]), "%rcx");
-    }
+void AsmGen::gen_rt_i2(const Inst& in) { gen_rt_args_n(in, 2); }
 
-void AsmGen::gen_rt_i5(const Inst& in) {
-        // kind/own 三个 + 类 key 的 hash/eq 槽号
-        emit2("movq", src_op(in.args[0]), "%rdi");
-        emit2("movq", src_op(in.args[1]), "%rsi");
-        emit2("movq", src_op(in.args[2]), "%rdx");
-        emit2("movq", src_op(in.args[3]), "%rcx");
-        emit2("movq", src_op(in.args[4]), "%r8");
-    }
+void AsmGen::gen_rt_i3(const Inst& in) { gen_rt_args_n(in, 3); }
 
-void AsmGen::gen_rt_i6(const Inst& in) {
-        emit2("movq", src_op(in.args[0]), "%rdi");
-        emit2("movq", src_op(in.args[1]), "%rsi");
-        emit2("movq", src_op(in.args[2]), "%rdx");
-        emit2("movq", src_op(in.args[3]), "%rcx");
-        emit2("movq", src_op(in.args[4]), "%r8");
-        emit2("movq", src_op(in.args[5]), "%r9");
-    }
+void AsmGen::gen_rt_i4(const Inst& in) { gen_rt_args_n(in, 4); }
+
+void AsmGen::gen_rt_i5(const Inst& in) { gen_rt_args_n(in, 5); }
+
+void AsmGen::gen_rt_i6(const Inst& in) { gen_rt_args_n(in, 6); }
 
 void AsmGen::gen_rt_f1(const Inst& in) {
         emit2("movsd", src_op(in.args[0]), "%xmm0");

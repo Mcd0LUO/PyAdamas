@@ -43,13 +43,13 @@ void TypeChecker::check(Module& m) {
         // decorated_ty / call_sig 和类属性类型在这里按最终类型刷新一次。
         for (auto& ci : all_classes_) {
             if (!ci) continue;
-            for (auto& m : ci->methods) {
-                if (!m.decorated || !m.sig || !m.def || m.def->decorators.empty()) continue;
+            for (auto& mm : ci->methods) {
+                if (!mm.decorated || !mm.sig || !mm.def || mm.def->decorators.empty()) continue;
                 TypePtr cur = new_ty(TyKind::Func);
-                cur->fn = m.sig;
+                cur->fn = mm.sig;
                 bool known = true;
-                for (auto it = m.def->decorators.rbegin();
-                     it != m.def->decorators.rend(); ++it) {
+                for (auto it = mm.def->decorators.rbegin();
+                     it != mm.def->decorators.rend(); ++it) {
                     TypePtr dt = type_of(it->get());
                     if (dt && dt->kind == TyKind::Func && dt->fn && dt->fn->ret)
                         cur = dt->fn->ret;
@@ -58,19 +58,19 @@ void TypeChecker::check(Module& m) {
                         break;
                     }
                 }
-                m.decorated_ty = known ? cur : t_unknown();
+                mm.decorated_ty = known ? cur : t_unknown();
                 // 第一遍检查时装饰器返回类型可能还没定下来，类属性表里
                 // 没有这个方法。调用点要靠类属性里的函数值做间接调用，
                 // 无论最终类型是否已知都补一条。
                 ClassAttrInfo* attr = nullptr;
                 for (auto& ca : ci->class_attrs)
-                    if (ca.name == m.name) {
+                    if (ca.name == mm.name) {
                         attr = &ca;
                         break;
                     }
                 if (!attr) {
                     ClassAttrInfo ai;
-                    ai.name = m.name;
+                    ai.name = mm.name;
                     ai.ty = t_unknown();
                     ai.owner = ci.get();
                     ci->class_attrs.push_back(std::move(ai));
@@ -78,20 +78,20 @@ void TypeChecker::check(Module& m) {
                 }
                 if (known && cur && cur->kind == TyKind::Func) attr->ty = cur;
                 if (!known || !cur || cur->kind != TyKind::Func || !cur->fn) {
-                    m.call_sig = nullptr;
+                    mm.call_sig = nullptr;
                     continue;
                 }
-                m.call_sig = std::make_shared<FuncInfo>(*cur->fn);
-                m.call_sig->name = m.name;
-                m.call_sig->outer = m.sig.get();
-                m.call_sig->outer_off = 0;
-                if (m.call_sig->pos.empty()) {
-                    m.call_sig = nullptr;
+                mm.call_sig = std::make_shared<FuncInfo>(*cur->fn);
+                mm.call_sig->name = mm.name;
+                mm.call_sig->outer = mm.sig.get();
+                mm.call_sig->outer_off = 0;
+                if (mm.call_sig->pos.empty()) {
+                    mm.call_sig = nullptr;
                     continue;
                 }
-                m.call_sig->pos.erase(m.call_sig->pos.begin());
-                m.call_sig->outer_off = 1;
-                if (m.call_sig->n_posonly > 0) --m.call_sig->n_posonly;
+                mm.call_sig->pos.erase(mm.call_sig->pos.begin());
+                mm.call_sig->outer_off = 1;
+                if (mm.call_sig->n_posonly > 0) --mm.call_sig->n_posonly;
             }
         }
         // 合成生成器函数的元素类型在重查后才定下来，调用点缓存的表达式

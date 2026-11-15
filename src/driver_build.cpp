@@ -952,9 +952,9 @@ pyadamas::ModuleInfoPtr check_build_info(pyadamas::TypeChecker& tc,
                 auto& pi = flat->properties[m.name];
                 pi.owner = flat.get();
                 switch (m.kind) {
-                    case pyadamas::MethodKind::PropertyGetter: pi.getter = (int)mi; break;
-                    case pyadamas::MethodKind::PropertySetter: pi.setter = (int)mi; break;
-                    case pyadamas::MethodKind::PropertyDeleter: pi.deleter = (int)mi; break;
+                    case pyadamas::MethodKind::PropertyGetter: pi.getter = static_cast<int>(mi); break;
+                    case pyadamas::MethodKind::PropertySetter: pi.setter = static_cast<int>(mi); break;
+                    case pyadamas::MethodKind::PropertyDeleter: pi.deleter = static_cast<int>(mi); break;
                     default: break;
                 }
             }

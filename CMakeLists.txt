@@ -92,6 +92,14 @@ set(PYADAMAS_SOURCES
 # 分别编译成可重定位对象后再用 ld -r 合成一个 rt.o。
 set(PYADAMAS_RT_OBJ "${CMAKE_BINARY_DIR}/rt.o")
 set(PYADAMAS_MODCACHE_DIR "${CMAKE_BINARY_DIR}/modcache")
+option(PYADAMAS_WERROR "把编译告警当作错误（默认开）" ON)
+
+if(PYADAMAS_WERROR)
+  set(PYADAMAS_RT_WERROR -Werror)
+else()
+  set(PYADAMAS_RT_WERROR "")
+endif()
+
 set(PYADAMAS_RT_PARTS core exc gen async task fd agen str list dict slice class math complex format file random os subprocess time stdlib json re functools datetime deque hash debug)
 set(PYADAMAS_RT_OBJS "")
 foreach(part ${PYADAMAS_RT_PARTS})
@@ -101,7 +109,7 @@ foreach(part ${PYADAMAS_RT_PARTS})
   set(rt_fp "")
   add_custom_command(
     OUTPUT "${rt_obj}"
-    COMMAND ${CMAKE_C_COMPILER} -O2 -Wall -Wextra ${rt_fp}
+    COMMAND ${CMAKE_C_COMPILER} -O2 -Wall -Wextra ${PYADAMAS_RT_WERROR} ${rt_fp}
             -I "${CMAKE_SOURCE_DIR}/runtime"
             -c "${CMAKE_SOURCE_DIR}/runtime/rt_${part}.c" -o "${rt_obj}"
     DEPENDS "${CMAKE_SOURCE_DIR}/runtime/rt_${part}.c"
@@ -130,9 +138,13 @@ target_compile_definitions(pyadamas PRIVATE
 )
 add_dependencies(pyadamas pyadamas_rt)
 
+
 if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
   target_compile_options(pyadamas PRIVATE -Wshadow -Wnon-virtual-dtor
                                       -Wold-style-cast -Wcast-qual)
+  if(PYADAMAS_WERROR)
+    target_compile_options(pyadamas PRIVATE -Werror)
+  endif()
 endif()
 
 enable_testing()

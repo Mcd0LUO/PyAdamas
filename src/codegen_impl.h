@@ -564,6 +564,7 @@ private:
         // 运行期调用的实参装填：按实参形态分组，实现在 codegen_call_rt.cpp。
         void gen_rt_args(const Inst& in, RtFn fn);
         void gen_rt_none(const Inst& in);
+        void gen_rt_args_n(const Inst& in, int n);
         void gen_rt_i1(const Inst& in);
         void gen_rt_i2(const Inst& in);
         void gen_rt_i3(const Inst& in);

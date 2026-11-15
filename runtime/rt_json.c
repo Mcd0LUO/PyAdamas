@@ -58,7 +58,10 @@ static void jb_cstr(JBuf* b, const char* s) { jb_raw(b, s, strlen(s)); }
 
 static void jb_u4(JBuf* b, uint32_t cp) {
     char tmp[8];
-    snprintf(tmp, sizeof tmp, "\\u%04x", (unsigned)cp);
+    /* cp 由调用方保证 <= 0xFFFF（4 位十六进制），格式串固定 6 字节；
+       用 snprintf 返回值确认没截断，比让 -Wformat-truncation 去猜可靠。 */
+    int wn = snprintf(tmp, sizeof tmp, "\\u%04x", (unsigned)cp);
+    if (wn < 0 || wn >= (int)sizeof tmp) panic_c("json: unicode escape overflow");
     jb_raw(b, tmp, 6);
 }
 
@@ -358,7 +361,7 @@ static void jp_utf8_put(JBuf* b, uint32_t cp) {
 
 static PyAdamasStr* jp_string(JP* s) {
     jp_expect(s, '"');
-    JBuf b = {NULL, 0, 0};
+    JBuf b = {NULL, 0, 0, 0, 0};
     while (s->p < s->end) {
         unsigned char c = (unsigned char)*s->p++;
         if (c == '"') {

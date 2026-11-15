@@ -246,10 +246,10 @@ void TypeChecker::stmt_try(Try& t) {
                                sym->ty->cls && sym->ty->cls->is_exception_class &&
                                sym->ty->cls->is_rich_exception) {
                         et = mk_class(sym->ty->cls);
-                    } else if (auto* sym = lookup(hn.id);
-                               sym && sym->ty && sym->ty->kind == TyKind::Class &&
-                               sym->ty->cls && sym->ty->cls->is_exception_class) {
-                        et = mk_exception(sym->ty->cls->name);
+                    } else if (auto* sym2 = lookup(hn.id);
+                               sym2 && sym2->ty && sym2->ty->kind == TyKind::Class &&
+                               sym2->ty->cls && sym2->ty->cls->is_exception_class) {
+                        et = mk_exception(sym2->ty->cls->name);
                     }
                 }
                 auto sc = std::make_unique<Scope>();

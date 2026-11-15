@@ -64,7 +64,9 @@ PyAdamasList* pa_itertools_product(PyAdamasList* seqs, int64_t elem_kind) {
     // 任一源序列为空 → 笛卡尔积为空（混合进制进位在长度为 0 时不会终止）。
     if (has_empty) return out;
     int64_t* idx = (int64_t*)calloc((size_t)n, sizeof(int64_t));
-    int64_t* vals = (int64_t*)malloc((size_t)n * sizeof(int64_t));
+    // calloc 而非 malloc：n==0 的边界已提前返回，但 GCC 证不出；
+    // 且多一层防御，避免将来改逻辑时留下未初始化读取。
+    int64_t* vals = (int64_t*)calloc((size_t)n, sizeof(int64_t));
     if (!idx || !vals) panic_c("out of memory");
     while (1) {
         for (int64_t i = 0; i < n; ++i) vals[i] = iter_seq_at(seqs, i)->data[idx[i]];

@@ -268,8 +268,9 @@ void Lowerer::lower_try_core(Try& t) {
         // 富异常（有字段/方法）的 except as e：取回真实例，类型是那个类；
         // 否则照旧取扁平异常值。
         const ClassInfo* rich = rich_exc_handler(hb.h);
-        TypePtr slot_ty = rich ? (TypePtr)mk_class(const_cast<ClassInfo*>(rich))
-                              : (TypePtr)mk_exception("Exception");
+        TypePtr slot_ty = rich
+                              ? static_cast<TypePtr>(mk_class(const_cast<ClassInfo*>(rich)))
+                              : static_cast<TypePtr>(mk_exception("Exception"));
         VReg ev = call_runtime(rich ? RtFn::ExcAcceptInstance : RtFn::ExcAcceptValue,
                                slot_ty, {});
         int shadow = -1;

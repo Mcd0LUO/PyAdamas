@@ -477,17 +477,17 @@ void Lowerer::lower_classdef(ClassDef& c) {
         if (!c.decorators.empty()) {
             std::string hidden = "__pyadamas$classdeco$" + ci->name;
             bind_name_value(hidden, obj, obj_ty);
-            for (auto it = c.decorators.rbegin(); it != c.decorators.rend(); ++it) {
-                VReg callee = expr(**it);
-                TypePtr dt = tc_.type_of(it->get());
+            for (auto dit = c.decorators.rbegin(); dit != c.decorators.rend(); ++dit) {
+                VReg callee = expr(**dit);
+                TypePtr dt = tc_.type_of(dit->get());
                 FuncInfoPtr dinfo = (dt && dt->kind == TyKind::Func) ? dt->fn : nullptr;
                 Inst in;
                 in.op = IrOp::Call;
                 in.a = callee;
                 if (dinfo) {
                     Call dc;
-                    dc.line = (*it)->line;
-                    dc.col = (*it)->col;
+                    dc.line = (*dit)->line;
+                    dc.col = (*dit)->col;
                     auto arg = std::make_unique<Name>(hidden);
                     arg->line = dc.line;
                     arg->col = dc.col;
@@ -498,7 +498,7 @@ void Lowerer::lower_classdef(ClassDef& c) {
                 }
                 TypePtr rty = dinfo && dinfo->ret ? dinfo->ret : t_unknown();
                 if (rty && rty->kind != TyKind::ClassObj && rty->kind != TyKind::Unknown) {
-                    err((*it)->line, (*it)->col, "class decorator must return a class");
+                    err((*dit)->line, (*dit)->col, "class decorator must return a class");
                     continue;
                 }
                 obj = def_heap(rty, std::move(in));
