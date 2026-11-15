@@ -36,6 +36,15 @@
 #include <stdio.h>
 #endif
 
+/* 方案 G 的帧清理钩子（docs/exc-frame-cleanup.md §5.2）：phase 2 走到
+   _UA_HANDLER_FRAME 那一帧时、安装 landing pad 之前，批量释放比 handler 帧更
+   深的帧记录。本文件刻意自包含（tests/exc/z1_rt 直接编译链接它，不链接
+   rt.o），所以实现不在本编译单元：runtime/rt_eh.c 用构造函数把包装装进来。
+   没装（Z1 夹具）时为 NULL，personality 只做 ABI 安装、不做清理。
+   签名带 ex_class：由实现方决定只对「我们自己的异常」释放帧（foreign 异常
+   不碰我们的帧链）。 */
+void (*pa_personality_frame_hook)(uint64_t ex_class, uintptr_t target_cfa);
+
 /* ── DWARF 异常表编码常量（GCC 的 unwind.h 里没有，自己定义保持自包含） ── */
 enum {
     PA_EH_PE_absptr = 0x00,
@@ -500,8 +509,6 @@ pa_personality(int version, _Unwind_Action actions,
     int err;
     int found;
 
-    (void)ex_class;
-
 #ifdef PA_PERSONALITY_TRACE
     ++pa_dbg_calls;
 #endif
@@ -642,6 +649,17 @@ pa_personality(int version, _Unwind_Action actions,
 #endif
         return _URC_CONTINUE_UNWIND;
     }
+
+    /* 方案 G：安装 landing pad 之前，把「比本 handler 帧更深」的帧记录批量
+       释放掉（语义等价于老世界 longjmp 前的 pa_frame_unwind(handler_top->frame)）。
+       - phase 2 只是逻辑展开：栈指针还在抛出点，被跳过帧的物理栈还完整，
+         此刻释放不会踩到退役栈；
+       - LP 还没执行，任何 call 都还没从 LP 的 rsp 往下写，所以这里是整条
+         展开链上最后一个能安全读死帧记录的时刻（放到 LP 里做会被 LP 的第一
+         条 call 覆盖，见设计文档 §3.2 的实测）；
+       - phase 1 / _UA_FORCE_UNWIND 分支在上面已经早退，不会走到这里。 */
+    if ((actions & _UA_HANDLER_FRAME) && pa_personality_frame_hook)
+        pa_personality_frame_hook(ex_class, (uintptr_t)_Unwind_GetCFA(ctx));
 
 #ifdef PA_PERSONALITY_TRACE
     ++pa_dbg_installs;

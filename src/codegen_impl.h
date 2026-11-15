@@ -490,10 +490,10 @@ private:
     }
 
     // 帧记录（PyAdamasFrame）在槽位区上面，内存里从低地址往高地址依次是
-    // prev、n、临时区起点、临时区字数、临时区位图、槽地址×n，与两边共用
-    // 的结构体布局一致。
+    // prev、n、临时区起点、临时区字数、临时区位图、本帧 CFA、槽地址×n，
+    // 与两边共用的结构体布局一致。
     int rec_off(int i) const {
-        int words = 5 + static_cast<int>(frame_owned_.size() + frame_scan_.size());
+        int words = 6 + static_cast<int>(frame_owned_.size() + frame_scan_.size());
         return out_bytes_ + locals_ - 8 * (words - i);
     }
     std::string rec_mem(int i) const { return std::format("{}(%rsp)", rec_off(i)); }

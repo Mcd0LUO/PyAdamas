@@ -318,7 +318,7 @@ _Static_assert(sizeof(PyAdamasRc) == 64, "codegen literal headers must match PyA
    - GC 保守根：含 unknown 值的帧把「可能借来 unknown 引用」的槽和临时
      区登记进来，GC 只扫这些地址，不再扫整段真实栈。
    布局与生成代码一致：prev、n、临时区起点、临时区字数、临时区位图、
-   槽地址×n。
+   本帧 CFA、槽地址×n。
    槽地址低两位是标志：bit0 = 值可能非堆（释放走注册表），bit1 = 只给
    GC 扫描、异常展开不释放（借来的 unknown 引用）。
    临时区位图（scan_mask）：scan_words 个字里哪些字可能装着需要 GC 看的
@@ -330,6 +330,13 @@ typedef struct PyAdamasFrame {
     void* scan_base;    /* 临时区起点（vreg 槽），NULL 表示没有 */
     int64_t scan_words; /* 临时区字节数 / 8（整段字数，回退口径） */
     const uint64_t* scan_mask; /* 临时区位图，NULL = 整段扫描 */
+    /* 本帧的规范帧地址（CFA = rsp + frame_bytes + 8，与 .cfi_def_cfa 同一
+       口径）：codegen 在推帧进链之前写进来。表驱动展开时 personality 用它
+       判断「哪些帧记录比 handler 帧更深」——CFA 随栈深度严格递减，同一条
+       链上不会重复，等价于老世界 pa_frame_unwind(handler_top->frame) 的停
+       止条件。见 docs/exc-frame-cleanup.md §5.1 与 runtime/rt_eh.c 里关于
+       libgcc _Unwind_GetCFA 口径的说明（停止条件用 <=）。 */
+    uintptr_t cfa;
     void* slots[];      /* 槽地址（void**），解引用得到当前值 */
 } PyAdamasFrame;
 
@@ -448,6 +455,15 @@ extern PyAdamasHandler* handler_top;
 extern PyAdamasFrame* pa_frame_top;
 /* 异常 longjmp 前调用：释放 target 之上（更内层）所有帧里的堆槽引用。 */
 void pa_frame_unwind(PyAdamasFrame* target);
+/* 表驱动展开（Z2 方案 G）：释放帧链上所有「cfa <= target_cfa」的记录——
+   即比 handler 帧更深、被逻辑展开跳过、没人负责释放的那些帧。
+   target_cfa 传 personality 在 phase 2 拿到的 _Unwind_GetCFA(ctx)：它等于
+   handler 帧直接被调帧的 CFA（= handler 帧 call site 的 rsp），所以判据是
+   <= 而不是 <（口径与实测见 runtime/rt_eh.c 的同一函数注释）。
+   语义与 pa_frame_unwind(handler_top->frame) 等价，只是停止条件从「记录
+   指针」换成「CFA」；由 personality 在 phase 2 的 handler 帧里、安装
+   landing pad 之前调用（实现见 runtime/rt_eh.c）。 */
+void pa_frame_unwind_to_cfa(uintptr_t target_cfa);
 /* 调试表：codegen 在模块入口注册，未捕获异常时用来打印函数级回溯。 */
 void pa_debug_register(const void* table);
 void pa_print_traceback(void);
@@ -462,6 +478,36 @@ extern PyAdamasException* current_exc;
 /* 富异常（有字段/方法的自定义异常类）的实例；0 = 当前异常不是富实例。 */
 extern void* current_exc_inst;
 extern PyAdamasExcSave* exc_save_top;
+/* 多参异常的可选 args 表（RC owned）；0 = 无。定义在 rt_exc.c；
+   零开销异常的抛/落地也要搬它（runtime/rt_eh.c），所以提到头里。 */
+extern PyAdamasList* pending_exc_args;
+
+/* ── 零开销异常（Z2）的运行时胶水，实现见 runtime/rt_eh.c ────────────
+   抛路径不再 longjmp，而是把异常包进 Itanium ABI 的 struct
+   _Unwind_Exception（首成员，16 字节对齐）交给 libgcc 的表驱动展开；
+   landing pad 侧再把异常取回来、装成和 longjmp 落地后一样的全局状态，
+   所以下面的 setjmp 路径逻辑一行不用改，两套共存。
+   包装的 exception_class 用这个魔数（与 C++ 的 "GNUCC++" 区分）；
+   personality 只对自己的类做帧清理，foreign 异常不碰我们的帧链。 */
+#define PA_EH_EXC_CLASS ((uint64_t)0x504145585A320001ULL)  /* "PAEXZ2" + 版本 0 */
+/* pa_eh_throw 的返回值。成功时控制已交给 landing pad，函数不会返回。 */
+#define PA_EH_UNCAUGHT 1  /* _Unwind_RaiseException 返回 _URC_END_OF_STACK：没人接 */
+#define PA_EH_FATAL 2     /* 展开器内部错误（FATAL_PHASE1/2_ERROR 等），不该发生 */
+/* 抛出：接管 e 的所有权（e 不能同时还是 pending_exc），装进展开对象后调
+   _Unwind_RaiseException。返回 PA_EH_UNCAUGHT 时由调用方打印 traceback +
+   退出（与 rt_exc.c 的 exc_longjmp 无 handler 分支同一收尾，但这里不做，
+   留给上层决定）。 */
+int pa_eh_throw(PyAdamasException* e);
+/* landing pad 入口调用（%rax = 展开对象指针，即 LP 的第一个实参）：取回异常、
+   装好 pending_exc / current_exc_inst / pending_exc_args 这些全局状态。
+   返回取回的 PyAdamasException*（外来异常返回 NULL：不能按我们的语义分发）。 */
+PyAdamasException* pa_eh_landing(void* unwound);
+/* landing pad 处理完（命中 except / 抑制）后收尾：删掉展开对象，幂等。
+   异常本体不在这里释放——它已经是 pending_exc/current_exc，归 rt_exc.c 的
+   exc_free 生命周期管。 */
+void pa_eh_done(void);
+/* 最近一次抛出、尚未收尾的展开对象（不透明指针；调试与断言用）。 */
+extern void* pa_eh_current;
 extern PyAdamasList* loop_ready;
 extern PyAdamasList* loop_timers;
 extern PyAdamasList* loop_pending;

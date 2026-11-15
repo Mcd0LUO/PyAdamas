@@ -249,9 +249,9 @@ void AsmGen::emit_function(const IRFunction& f, int fi) {
         }
         const int rec_entries =
             static_cast<int>(frame_owned_.size() + frame_scan_.size());
-        // 记录头 5 个字：prev、n、临时区起点、临时区字数、临时区位图。
+        // 记录头 6 个字：prev、n、临时区起点、临时区字数、临时区位图、本帧 CFA。
         const int rec_words =
-            (rec_entries == 0 && frame_scan_words_ == 0) ? 0 : 5 + rec_entries;
+            (rec_entries == 0 && frame_scan_words_ == 0) ? 0 : 6 + rec_entries;
         assign_global_vreg_regs();
         assign_block_temp_regs();
         build_fp_liveness();
@@ -373,7 +373,7 @@ void AsmGen::emit_function(const IRFunction& f, int fi) {
                 } else {
                     emit_imm_op("movq", static_cast<int64_t>(0), rec_mem(4));
                 }
-                int ri = 5;
+                int ri = 6;
                 for (size_t i = 0; i < frame_owned_.size(); ++i, ++ri) {
                     line(std::format("leaq {}, %rax", smem(frame_owned_[i])));
                     // 低位标记：该槽可能装着非堆值，展开时走注册表释放。
@@ -386,6 +386,11 @@ void AsmGen::emit_function(const IRFunction& f, int fi) {
                     line("orq $2, %rax");
                     emit2("movq", "%rax", rec_mem(ri++));
                 }
+                // 本帧 CFA（= rsp + frame_bytes_ + 8，与 .cfi_def_cfa 同一口径）：
+                // 表驱动展开在 phase 2 的 handler 帧人格调用里按它批量释放更深
+                // 帧的记录，所以必须在进链之前写好。
+                line(std::format("leaq {}(%rsp), %rax", frame_bytes_ + 8));
+                emit2("movq", "%rax", rec_mem(5));
                 line(std::format("leaq {}, %rax", rec_mem(0)));
                 line("movq %rax, pa_frame_top(%rip)");
             }

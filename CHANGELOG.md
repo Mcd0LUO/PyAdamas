@@ -4,6 +4,36 @@
 
 早期阶段没有逐条留痕，按阶段归纳；0.4 之后逐条记录。
 
+## [0.182] - 2026-11-16
+
+### 零开销异常 Z2-b1：运行时胶水 + 方案 G 的帧清理（personality 侧，尚未接 codegen）
+
+- 新增 `runtime/rt_eh.c`：`pa_eh_throw`（把异常包进 `_Unwind_Exception`，16 字节对齐、
+  `private` 清零；`_URC_END_OF_STACK` 时返回 `PA_EH_UNCAUGHT` 交上层打印并退出）、
+  `pa_eh_landing`（取回 `PyAdamasException*`，装好 `pending_exc` / `current_exc_inst` /
+  `pending_exc_args`）、`pa_eh_done`。
+- `PyAdamasFrame` 加 `cfa` 字段（帧记录 5 字 -> 6 字），codegen 序言在压帧**之前**把 CFA 写进去；
+  `pa_frame_unwind_to_cfa` 逐行对齐 `pa_frame_unwind` 的 bit0/bit1 处理，并加重入 guard 与
+  不变量 panic；personality 在 phase 2 的 `_UA_HANDLER_FRAME` 分支、`_Unwind_SetIP` **之前**
+  经钩子调用它（不链 `rt_eh.c` 的 Z1 夹具里钩子为 NULL，行为不变）。
+- 新增 `tests/exc/z2_rt/`：手写三层帧夹具（owned / bit0 / 只扫 bit1 三种槽）+ driver +
+  `run.sh`（PIE 与 -no-pie、GC 开/关、两组反证）。
+- 本轮**生成代码仍走 setjmp**，raise / landing pad 的接线是 Z2-b2。
+- 非抛出路径的新成本：有帧记录的函数 +8 字节栈与 2 条指令。
+
+### 两处实测订正（已写回 `docs/exc-frame-cleanup.md`）
+
+1. **`_Unwind_GetCFA` 的语义和设计稿假设不同**：在 personality 里它返回的不是当前帧自己的
+   DWARF CFA，而是「当前帧直接调用出去的那一帧」的 CFA（约等于该帧 call site 的 rsp）。
+   实测 handler 帧真 CFA = rec+112，拿到的是 rec+0；Z1 那种 8 字节帧两者只差 16，所以此前
+   看起来「就是自己的 CFA」。因此停止条件必须是 `cfa <= target`，用 `<` 会漏掉最深一帧。
+2. **「异常路径每次泄漏 0.63 KB」被证伪**：0.181 查明那次规模相关的崩溃是 GC 根缺失，
+   修好后 1 万 / 10 万 / 100 万次异常的峰值 RSS 都是 1.9–2.3 MB，没有泄漏。
+   「用 RSS 不随规模增长做 Z2 验收」这个指标仍然有效。
+
+验证：`tests/exc/z2_rt/run.sh` 134 项断言全过（含两组反证：不压记录时释放计数 FAIL、
+不释放时 RSS 涨 29.8 MB 被抓）；`tests/exc/z1_rt/run.sh` 116 项仍全过；
+全量 `tests/run_tests.sh` 204 用例 0 失败。
 ## [0.181] - 2026-11-16
 
 ### 修复异常路径的 GC 根缺失（10 万次异常循环必崩的 UAF）
