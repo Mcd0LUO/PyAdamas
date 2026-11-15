@@ -709,7 +709,8 @@ static std::vector<int> block_loop_depth(const IRFunction& f) {
     void AsmGen::assign_global_vreg_regs() {
         const size_t nv = f_->vreg_ty.size();
         vreg_reg_.assign(nv, std::string());
-        block_temp_pool_.assign(target_abi().scratch, target_abi().scratch + target_abi().n_scratch);
+        block_temp_pool_.assign(target_abi().block_temps,
+                                 target_abi().block_temps + target_abi().n_block_temps);
         global_imm_.clear();
         if (nv == 0) return;
         if (opt_ < 2 || gen_ || f_->has_handlers) return;
@@ -792,9 +793,12 @@ static std::vector<int> block_loop_depth(const IRFunction& f) {
         }
         if (call_free) {
             int used = 0;
-            for (; ci < cands.size() && used < 2; ++ci, ++used)
-                vreg_reg_[static_cast<size_t>(cands[ci].v)] = target_abi().scratch[used];
-            if (used > 0) block_temp_pool_.assign(target_abi().scratch + used, target_abi().scratch + target_abi().n_scratch);
+            for (; ci < cands.size() && used < 2 && used < target_abi().n_block_temps;
+                 ++ci, ++used)
+                vreg_reg_[static_cast<size_t>(cands[ci].v)] = target_abi().block_temps[used];
+            if (used > 0)
+                block_temp_pool_.assign(target_abi().block_temps + used,
+                                        target_abi().block_temps + target_abi().n_block_temps);
 
             // 无调用函数里 xmm8–15 也不会被破坏：空闲的拿走放跨块浮点值。
             size_t fp_base = fp_promoted_slots_.size();

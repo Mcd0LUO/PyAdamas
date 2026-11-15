@@ -31,6 +31,12 @@ constexpr int kNFpPool = 8;
 const char* const kScratch[] = {"%r8", "%r9", "%r10", "%r11"};
 constexpr int kNScratch = 4;
 
+// Win64 的块内临时池：r10/r11 被内联下标检查当 scratch（长度/data 指针）
+// 借用，不能同时借给块内临时值；r8/r9 是第 3/4 个实参寄存器，借池只发生
+// 在没有调用的块里，安全。
+const char* const kWin64BlockTemps[] = {"%r8", "%r9"};
+constexpr int kNWin64BlockTemps = 2;
+
 const TargetABI kX86_64SysV{
     "x86_64-sysv",
     kSysVArgInt, 6,
@@ -38,6 +44,7 @@ const TargetABI kX86_64SysV{
     "%rax", "%xmm0",
     kCalleePool, kNCalleePool,
     kFpPool, kNFpPool,
+    kScratch, kNScratch,
     kScratch, kNScratch,
     16,
     0,
@@ -48,6 +55,7 @@ const TargetABI kX86_64SysV{
     "%r8",
     "_setjmp",
     "_longjmp",
+    "%rcx",
 };
 
 const TargetABI kX86_64Win64{
@@ -58,6 +66,7 @@ const TargetABI kX86_64Win64{
     kCalleePool, kNCalleePool,
     kFpPool, kNFpPool,
     kScratch, kNScratch,
+    kWin64BlockTemps, kNWin64BlockTemps,
     16,
     32,
     false,
@@ -67,6 +76,7 @@ const TargetABI kX86_64Win64{
     "%rax",
     "pa_win_setjmp",
     "pa_win_longjmp",
+    "%r10",
 };
 
 const TargetABI* g_current = &kX86_64SysV;

@@ -242,6 +242,25 @@ private:
             return std::string(r) + "d";
         return r;
     }
+    // 64 位寄存器名的 8 位别名（%rcx -> %cl，%r10 -> %r10b）。
+    static std::string reg8(const std::string& r) {
+        if (r.size() == 4 && r[1] == 'r') {
+            switch (r[2]) {
+                case 'a': return "%al";
+                case 'b': return "%bl";
+                case 'c': return "%cl";
+                case 'd': return "%dl";
+                case 's': return "%sil";
+                case 'i': return "%dil";
+                default: break;
+            }
+        }
+        if (r.size() == 3 && r[1] == 'r' && r[2] >= '8' && r[2] <= '9')
+            return std::string(r) + "b";
+        if (r.size() == 4 && r[1] == 'r' && r[2] == '1' && r[3] >= '0' && r[3] <= '5')
+            return std::string(r) + "b";
+        return r;
+    }
     void cfi(const std::string& s) {
         if (target_abi().gnu_cfi) line(s);
     }

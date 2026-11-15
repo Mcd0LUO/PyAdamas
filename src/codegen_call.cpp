@@ -103,6 +103,13 @@ void AsmGen::gen_index_store(const Inst& in) {
         const std::string sl = target_abi().scratch_len;
         const std::string sp = target_abi().scratch_ptr;
         const std::string sv = target_abi().scratch_val;
+        // 旧值占 sv，新值临时和 kind 临时都不能再抢它：Win64 的 scratch_val
+        // 就是 %rax，而 %rax 正是这里装载新值/kind 的习惯寄存器。sl、sp 在
+        // 快路径之后再无用处，借给它们最省。SysV 下两者仍是 %rax（逐字节
+        // 输出不变）。
+        const bool sv_is_rax = sv == std::string("%rax");
+        const std::string nv = sv_is_rax ? sl : "%rax";  // 新值临时
+        const std::string kr = sv_is_rax ? sp : "%rax";  // kind 临时
         std::string fast = fresh_label("idxsf");
         std::string neg = fresh_label("idxsneg");
         std::string done = fresh_label("idxsdone");
@@ -131,17 +138,17 @@ void AsmGen::gen_index_store(const Inst& in) {
             emit2("movsd", src_op(in.c), "%xmm0");
             line(std::format("movsd %xmm0, ({},{},8)", sp, r1));
         } else {
-            emit2("movq", src_op(in.c), "%rax");
-            line(std::format("movq %rax, ({},{},8)", sp, r1));
+            emit2("movq", src_op(in.c), nv);
+            line(std::format("movq {}, ({},{},8)", nv, sp, r1));
         }
         // 旧值的所有权按容器运行期 elem_kind 决定，不能只看静态类型：
         // 空列表推出来的类型可能会在后续赋值里变窄/变宽。
         // kind 1 直接 dec；kind 2 可能装着整数，走注册表判断。
         std::string decheap = fresh_label("idxsdec");
-        line(std::format("movq 24({}), %rax", r0));
-        line("cmpq $1, %rax");
+        line(std::format("movq 24({}), {}", r0, kr));
+        line(std::format("cmpq $1, {}", kr));
         emit_jmp("je", decheap);
-        line("cmpq $2, %rax");
+        line(std::format("cmpq $2, {}", kr));
         emit_jmp("jne", done);
         line(std::format("movq {}, {}", sv, arg_reg_i(0)));
         spill_fp_slots();
@@ -161,12 +168,14 @@ void AsmGen::gen_obj_new(const Inst& in) {
         // 动态属性槽挂在字段之后，跟着类走（派生类的偏移不同）。
         emit_imm_op("movq", 8 * (c.n_fields + 1) + (c.dict_off ? 8 : 0), arg_reg_i(0));
         bool has_heap = std::ranges::any_of(c.field_heap, [](uint8_t v) { return v != 0; });
+        // 实参按 ABI 位置装填：SysV 是 rdi/rsi/rdx，Win64 是 rcx/rdx/r8。
+        // 写死 %rsi/%rdx 会让 Win64 的 dtor 收成 gcrel、release 收到垃圾。
         if (has_heap || c.dict_off != 0) {
-            line(std::format("leaq .Ldtor{}(%rip), %rsi", in.imm));
-            line(std::format("leaq .Lgcrel{}(%rip), %rdx", in.imm));
+            line(std::format("leaq .Ldtor{}(%rip), {}", in.imm, arg_reg_i(1)));
+            line(std::format("leaq .Lgcrel{}(%rip), {}", in.imm, arg_reg_i(2)));
         } else {
-            line("xorl %esi, %esi");
-            line("xorl %edx, %edx");
+            line(std::format("xorl {}, {}", reg32(arg_reg_i(1)), reg32(arg_reg_i(1))));
+            line(std::format("xorl {}, {}", reg32(arg_reg_i(2)), reg32(arg_reg_i(2))));
         }
         spill_fp_slots();
         line("call pa_obj_new");
@@ -190,14 +199,18 @@ void AsmGen::gen_field_load(const Inst& in) {
     }
 
 void AsmGen::gen_field_store(const Inst& in) {
+        // 基址固定用 %rax；值另借一个 ABI 给定的 scratch（SysV 是 %rcx，
+        // Win64 是 %r10 —— %rcx 在 Win64 是第 1 个实参，不能当暂存）。
+        const TargetABI& abi = target_abi();
         emit2("movq", src_op(in.a), "%rax");
-        emit2("movq", src_op(in.b), arg_reg_i(3));
+        emit2("movq", src_op(in.b), abi.scratch_field);
+        const std::string v = abi.scratch_field;
         if (in.fwidth == 1)
-            line(std::format("movb %cl, {}(%rax)", in.imm));
+            line(std::format("movb {}, {}(%rax)", reg8(v), in.imm));
         else if (in.fwidth == 4)
-            line(std::format("movl %ecx, {}(%rax)", in.imm));
+            line(std::format("movl {}, {}(%rax)", reg32(v), in.imm));
         else
-            line(std::format("movq %rcx, {}(%rax)", in.imm));
+            line(std::format("movq {}, {}(%rax)", v, in.imm));
     }
 
 // 值类型：payload 前有隐藏的 RC 头，返回的指针就是 payload 地址。
