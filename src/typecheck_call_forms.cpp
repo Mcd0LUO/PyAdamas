@@ -307,6 +307,13 @@ TypePtr TypeChecker::call_attr(Attribute& a, Call& c) {
             return t_unknown();
         }
         auto ot = expr(*a.value);
+        if (ot && ot->kind == TyKind::TypeObj) {
+            // type(self).method(...)：类型对象上的动态方法调用（__lt__ 等），
+            // 静态没有方法表，conservative 返回 unknown。
+            for (auto& arg : c.args) expr(*arg);
+            for (auto& kw : c.keywords) expr(*kw.value);
+            return t_unknown();
+        }
         if (is_unknown(ot)) {
             for (auto& arg : c.args) expr(*arg);
             for (auto& kw : c.keywords) expr(*kw.value);
