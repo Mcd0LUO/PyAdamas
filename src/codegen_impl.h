@@ -13,12 +13,14 @@
 #include <cstring>
 #include <format>
 #include <functional>
+#include <initializer_list>
 #include <queue>
 #include <string>
 #include <unordered_map>
 #include <vector>
 
 #include "ir.h"
+#include "mach_instr.h"
 #include "target_abi.h"
 #include "module.h"
 
@@ -181,9 +183,11 @@ private:
     std::vector<int> vreg_slot_;
     int pos_ = 0;
     int label_id_ = 0;
-    std::string out_;
+    MachFunc out_;
     double alloc_ns_ = 0;
     double emit_ns_ = 0;
+    // line() 的前导 tab 缓冲：复用容量，避免每行一次分配。
+    std::string line_buf_;
 
     // ── 位置状态（每次 emit_function 重建）──────────────────────
     //
@@ -258,20 +262,113 @@ private:
     std::unordered_map<VReg, int> block_first_use_;
     int cur_pos_ = 0;  // 正在生成的指令在块内的下标
 
-    // ── 输出辅助 ────────────────────────────────────────────────
+    // ── 输出辅助（结构化 Machine 层）──────────────────────────────
+    //
+    // out_ 曾经是 std::string，逐段拼接 AT&T 文本；现在是 MachFunc：每条
+    // 发射落成 MItem（Label/Directive/Instr/Comment/Raw）。指令结构化之后，
+    // 后续的寄存器分配 / 指令选择 pass 可以直接改写 MInstr 的操作数，而
+    // 不必只在发射前的字符串上做映射。
+    //
+    // 保留 line() 这个文本入口，是为了让历史发射点零改动地接进来：它把
+    // 一行文本解析成结构化 item（认不出的文法退化 Raw，字节不变）。
+    // 新写的发射点应优先用 instr()/directive()/label() 直接构造。
 
+    // 兜底：原样文本进 Raw（与上一条 Raw 合并）。全部迁移完后应无调用点。
+    void emit_raw(std::string_view s) { out_.append_raw(s); }
+
+    // 一行汇编：指令 / 指示符 / 标签 / 注释都走这里。
+    // 含换行的多行文本直接进 Raw，保证字节不变。
     void line(std::string_view s) {
-        out_ += '\t';
-        out_ += s;
-        out_ += '\n';
+        if (s.find('\n') != std::string_view::npos) {
+            emit_raw("\t");
+            emit_raw(s);
+            emit_raw("\n");
+            return;
+        }
+        // 旧实现是 "\t" + s + "\n"；这里复用缓冲区补上前导 tab，避免每行一次分配。
+        line_buf_.clear();
+        line_buf_ += '\t';
+        line_buf_.append(s);
+        out_.push_line(line_buf_);
     }
 
-    void label(const std::string& s) {
-        out_ += s;
-        out_ += ":\n";
+    // 列 0 的标签（函数标签、数据段符号）。
+    void label(const std::string& s) { out_.push_label(s, false); }
+    // 带前导 tab 的块内局部标签（"\t1:" 这种）。
+    void label_block(const std::string& s) { out_.push_label(s, true); }
+    // "\t# s"
+    void comment(const std::string& s) { out_.push(make_comment("\t# " + s)); }
+    // 列 0 的注释行（"# ---- ... ----"）。
+    void comment0(const std::string& s) { out_.push(make_comment("# " + s)); }
+    // "\t" + body + "\n"：.align/.quad/.section 这类汇编指示符。
+    void directive(std::string_view body) { out_.push_directive(body); }
+    // 空行。
+    void blank_line() { out_.push(make_raw("\n")); }
+
+    // 结构化指令发射：操作码 + 操作数。
+    void instr(MOp op, std::initializer_list<MOperand> ops) {
+        MInstr ins;
+        ins.op = op;
+        ins.ops.assign(ops);
+        out_.push_instr(std::move(ins));
     }
 
-    void comment(const std::string& s) { out_ += std::format("\t# {}\n", s); }
+    // 操作数工厂。寄存器第一阶段仍按名字存（op_reg("%rax")）。
+    static MOperand op_reg(std::string name) {
+        MOperand o;
+        o.kind = MOperandKind::Reg;
+        o.text = std::move(name);
+        return o;
+    }
+    static MOperand op_imm(int64_t v) {
+        MOperand o;
+        o.kind = MOperandKind::Imm;
+        o.imm = v;
+        return o;
+    }
+    static MOperand op_imm_hex(uint64_t bits) {
+        MOperand o;
+        o.kind = MOperandKind::Imm;
+        o.imm = static_cast<int64_t>(bits);
+        o.imm_hex = true;
+        return o;
+    }
+    static MOperand op_label(std::string name) {
+        MOperand o;
+        o.kind = MOperandKind::Label;
+        o.text = std::move(name);
+        return o;
+    }
+    static MOperand op_sym(std::string name) {
+        MOperand o;
+        o.kind = MOperandKind::Sym;
+        o.text = std::move(name);
+        return o;
+    }
+    // "(%base)"
+    static MOperand op_mem(std::string base) {
+        MOperand o;
+        o.kind = MOperandKind::Mem;
+        o.base = std::move(base);
+        return o;
+    }
+    // "disp(%base)"
+    static MOperand op_mem(std::string base, int64_t disp) {
+        MOperand o;
+        o.kind = MOperandKind::Mem;
+        o.base = std::move(base);
+        o.disp = disp;
+        o.has_disp = true;
+        return o;
+    }
+    // "sym(%base)"
+    static MOperand op_mem_sym(std::string sym, std::string base) {
+        MOperand o;
+        o.kind = MOperandKind::Mem;
+        o.sym = std::move(sym);
+        o.base = std::move(base);
+        return o;
+    }
 
     // ── 目标相关的汇编指示符 ────────────────────────────────────
     // ELF/GNU as 的 .cfi_*、.type、.size、.note.GNU-stack 在 COFF 目标上
@@ -293,55 +390,83 @@ private:
     }
     // relro 段：ELF 下是 .data.rel.ro，COFF 没有这个概念，退到 .rdata。
     void section_relro() {
-        out_ += target_abi().gnu_cfi ? "\t.section .data.rel.ro,\"aw\",@progbits\n"
-                                      : "\t.section .rdata,\"dr\"\n";
+        directive(target_abi().gnu_cfi ? ".section .data.rel.ro,\"aw\",@progbits"
+                                        : ".section .rdata,\"dr\"");
     }
     void section_rodata() {
-        out_ += target_abi().gnu_cfi ? "\t.section .rodata\n" : "\t.section .rdata,\"dr\"\n";
+        directive(target_abi().gnu_cfi ? ".section .rodata" : ".section .rdata,\"dr\"");
     }
     void emit_type_func(const std::string& n) {
-        if (target_abi().gnu_cfi) out_ += "\t.type " + n + ", @function\n";
+        if (target_abi().gnu_cfi) directive(".type " + n + ", @function");
     }
     void emit_size_func(const std::string& n) {
-        if (target_abi().gnu_cfi) out_ += std::format("\t.size {}, .-{}\n", n, n);
+        if (target_abi().gnu_cfi) directive(std::format(".size {}, .-{}", n, n));
     }
     void emit_gnu_stack_note() {
-        if (target_abi().gnu_cfi) out_ += "\t.section .note.GNU-stack,\"\",@progbits\n";
+        if (target_abi().gnu_cfi) directive(".section .note.GNU-stack,\"\",@progbits");
     }
 
-
-    // 热路径的迷你发射器：直接拼接，绕开 std::format 的解析开销。
+    // 热路径的迷你发射器：直接构造结构化指令，绕开 std::format。
+    // 助记符没进 MOp 枚举、或操作数文法不认识时退回文本路径（Raw，字节不变）。
     void emit2(const char* mn, const std::string& a, const std::string& b) {
-        out_ += '\t';
-        out_ += mn;
-        out_ += ' ';
-        out_ += a;
-        out_ += ", ";
-        out_ += b;
-        out_ += '\n';
+        MOp op = mop_from_name(mn);
+        MOperand oa;
+        MOperand ob;
+        if (op != MOp::kRaw && parse_operand(a, false, &oa) && parse_operand(b, false, &ob)) {
+            MInstr ins;
+            ins.op = op;
+            ins.ops.push_back(std::move(oa));
+            ins.ops.push_back(std::move(ob));
+            out_.push_instr(std::move(ins));
+            return;
+        }
+        std::string text = mn;
+        text += ' ';
+        text += a;
+        text += ", ";
+        text += b;
+        out_.push_line(text);
     }
 
     void emit_imm_op(const char* mn, int64_t v, const std::string& b) {
+        MOp op = mop_from_name(mn);
+        MOperand ob;
+        if (op != MOp::kRaw && parse_operand(b, false, &ob)) {
+            MInstr ins;
+            ins.op = op;
+            ins.ops.push_back(op_imm(v));
+            ins.ops.push_back(std::move(ob));
+            out_.push_instr(std::move(ins));
+            return;
+        }
         char buf[32];
         auto r = std::to_chars(buf, buf + sizeof buf, v);
-        out_ += '\t';
-        out_ += mn;
-        out_ += " $";
-        out_.append(buf, r.ptr);
-        out_ += ", ";
-        out_ += b;
-        out_ += '\n';
+        std::string text = mn;
+        text += " $";
+        text.append(buf, r.ptr);
+        text += ", ";
+        text += b;
+        out_.push_line(text);
     }
 
     void emit_jmp(const char* mn, const std::string& target) {
-        out_ += '\t';
-        out_ += mn;
-        out_ += ' ';
-        out_ += target;
-        out_ += '\n';
+        MOp op = mop_from_name(mn);
+        MOperand ot;
+        if (op != MOp::kRaw && parse_operand(target, mop_is_branch(op), &ot)) {
+            MInstr ins;
+            ins.op = op;
+            ins.ops.push_back(std::move(ot));
+            out_.push_instr(std::move(ins));
+            return;
+        }
+        std::string text = mn;
+        text += ' ';
+        text += target;
+        out_.push_line(text);
     }
 
     void emit_imm_mem(const std::string& mem, int64_t v) { emit_imm_op("movq", v, mem); }
+
 
     std::string fresh_label(const char* tag) {
         return std::format(".L{}_{}", tag, label_id_++);
@@ -460,19 +585,13 @@ private:
 
     void move_to(const std::string& dst, const std::string& src) {
         if (dst == src) return;
+        // mem-to-mem：x86 没有这种编码，中间过一下 %rax。
         if (is_mem_operand(dst) && is_mem_operand(src)) {
-            out_ += "\tmovq ";
-            out_ += src;
-            out_ += ", %rax\n\tmovq %rax, ";
-            out_ += dst;
-            out_ += '\n';
+            emit2("movq", src, "%rax");
+            emit2("movq", "%rax", dst);
             return;
         }
-        out_ += "\tmovq ";
-        out_ += src;
-        out_ += ", ";
-        out_ += dst;
-        out_ += '\n';
+        emit2("movq", src, dst);
     }
 
     // 浮点搬运。寄存器之间用 movapd 做整 128 位拷贝：movsd 只写低 64 位，

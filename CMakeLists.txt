@@ -81,6 +81,7 @@ set(PYADAMAS_SOURCES
   src/codegen_ops.cpp
   src/codegen_call.cpp
   src/codegen_call_rt.cpp
+  src/mach_emit.cpp
   src/ir.cpp
   src/desugar.cpp
   src/module.cpp

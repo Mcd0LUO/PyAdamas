@@ -468,7 +468,7 @@ std::string AsmGen::gen(const IRModule& m) {
         if (std::getenv("PYADAMAS_TIMING"))
             std::fprintf(stderr, "[timing] codegen alloc=%.1f emit=%.1f ms\n",
                          alloc_ns_ / 1e6, emit_ns_ / 1e6);
-        return std::move(out_);
+        return render(out_);
     }
 
 std::string generate_asm(const IRModule& m, bool disable_unknown_index) {
