@@ -183,12 +183,12 @@ void TypeChecker::funcdef_impl(FunctionDef& f, const ClassInfoPtr& owner) {
         if (info->varargs)
             // *args 在 Python 里是 tuple，不是 list：`(v,) + args` 合法
             cur_->vars[info->vararg_name] =
-                Symbol{mk_tuple_rest(info->vararg_ty ? info->vararg_ty : t_unknown()), f.line, true,
+                Symbol{mk_tuple_rest(info->vararg_ty ? info->vararg_ty : t_unknown()), f.line, false,
                        false};
         if (info->kwargs)
             cur_->vars[info->kwarg_name] =
                 Symbol{mk_dict(t_str(), info->kwarg_ty ? info->kwarg_ty : t_unknown()),
-                       f.line, true, false};
+                       f.line, false, false};
 
         // global / nonlocal 作用于整个函数，先收集，再让 hoist 跳过这些名字。
         collect_fn_decls(f.body, global_decl_, nonlocal_decl_);
