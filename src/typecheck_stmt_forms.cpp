@@ -319,9 +319,13 @@ void TypeChecker::stmt_with(With& w) {
                 // with open(...) as f：f 就是文件对象本身。
                 vt = ct;
             } else if (w.is_async) {
-                err(item.context->line, item.context->col,
-                    "async with requires a class instance with async "
-                    "__aenter__/__aexit__");
+                // 目标类型未知/跨模块（timeouts.timeout 等）或类实例的
+                // __aenter__ 在别处定义：conservative 放过。
+                if (ct && ct->kind != TyKind::Unknown && ct->kind == TyKind::Class &&
+                    ct->cls && !ct->cls->is_open() && !imported_base_in_mro(ct->cls))
+                    err(item.context->line, item.context->col,
+                        "async with requires a class instance with async "
+                        "__aenter__/__aexit__");
             }
             if (item.optional_vars)
                 assign(*item.optional_vars, vt, w.line, w.col);
