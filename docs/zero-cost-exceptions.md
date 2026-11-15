@@ -105,10 +105,19 @@ ff ff 01 04 08 0e 1d 01 00 00 00 00
 
 `ttype_encoding = 0xff`（omit，**TType 表偏移字段整段消失**）→ header 变成「2 字节 + 1 个 uleb128」。
 call-site 的 action 下标 `01` 表示「这一帧是 handler」，`00` 表示「只做 cleanup」。
-这个形态不需要 TType 表、不需要重定位，是我们的 personality 自己解析的，所以不受 gcc 编码约束。
+这个形态不需要 TType 表、不需要重定位，是我们的 personality 自己解析的。
 
-**判断 catch / cleanup 的正确层次**：看 **call-site 第 4 个字段（action 下标）是否为 0**，
-不是看 action 记录里的 filter（filter 在 action 记录里，是另一个层次）。
+**但它不是 ABI 语义上的 catch-all。** 用真的 `__gxx_personality_v0` 实测：`ttype_enc=0xff` +
+action 记录 `(filter=0, next=0)` 会被当成 **cleanup**（landing pad 只跑一次、异常继续往外走）；
+改成 `filter=1` 又因为取不到 TType 项而在 phase 1 直接 SIGABRT。
+所以形态 B 的正确定位是「**字节容器 ABI 合法 + handler 语义是本项目私有扩展**」，
+不能用于和 C++ 异常互通。**Z2 起一律用形态 A**；Z1 的夹具已按形态 A 升级。
+详见 [`tools/lsda_ref/CROSSCHECK_M2.md`](../tools/lsda_ref/CROSSCHECK_M2.md)。
+
+**判断 catch / cleanup 的正确层次**：ABI 的判据是 **action 记录里的 `filter`** ——
+`filter > 0` 是 handler（指向 TType 表第 `filter` 项），`filter == 0` 是 cleanup，`filter < 0` 是
+exception spec。call-site 的第 4 个字段只是「有没有 action 记录」的开关：为 0 表示该区间
+完全没有 action（等价于 cleanup），非 0 才是 action 表下标。两层要分开看，早期本文把两层混了。
 
 ### 四条最容易踩错的（都踩过了）
 
@@ -134,7 +143,7 @@ _Unwind_Reason_Code personality(int version, _Unwind_Action actions,
 | 返回码 | 何时 |
 |---|---|
 | `_URC_CONTINUE_UNWIND` | PC 不在保护区内 / 该区间无 landing pad / phase 2 还没轮到自己 / **FORCE_UNWIND** |
-| `_URC_HANDLER_FOUND` | **phase 1**，PC 落在 action 下标 != 0 的 call-site 里，且（Z3 起）类型匹配 |
+| `_URC_HANDLER_FOUND` | **phase 1**，PC 落在带 action 记录的区间，且 action 的 `filter > 0`、类型匹配（Z3 起） |
 | `_URC_INSTALL_CONTEXT` | **phase 2 且 `actions & _UA_HANDLER_FRAME`**，装好上下文后展开器跳 landing pad |
 
 phase 2 里轮到自己的 handler 帧时：
@@ -157,6 +166,9 @@ traceback 会直接崩或者跳到 landing pad 执行用户代码。Z1 已把这
    但**把 LP 挪到另一个段或者补 `.cfi_endproc` 之后再发就会炸**。
 3. 编译器现在的 CFI 状态在「保护区内的 call 点」上是一致的，LP 入口状态可以复用同一套；
    这一点要在 Z2 里用 md5 基线守住。
+4. **cleanup landing pad 里若调用了可能抛出的函数**（析构、用户代码），必须补一条覆盖
+   LP 区段的 call-site 记录；缺它时标准 personality 在 `_Unwind_Resume` 阶段会
+   `found_terminate` -> terminate（Z1 的 cleanup 夹具实测复现过）。
 
 ## 分阶段落地（Z2/Z3 的范围已按实测收窄）
 
@@ -187,12 +199,15 @@ traceback 会直接崩或者跳到 landing pad 执行用户代码。Z1 已把这
 
 所以类型判定必须在 phase 1、在 personality 里完成。做法（personality 是我们自己的，不受 gcc 编码约束）：
 
-- `ttype_encoding = 0xff`（不发射 TType 表）
-- call-site 的 action 下标 != 0 表示「这一帧是 handler」
-- **把 action 记录里的 `filter` 字段改造成「我们自己的 handler 描述表下标（1 起）」**
-- 描述表每项形如 `{ uint32_t kind; uint32_t n; const char* names[] }`，`kind = 0` 表示 catch-all
-- personality phase 1 拿 filter 查表 → 调运行时 `pa_eh_handler_matches(exc, desc)`（内部复用 `pa_exc_matches`
-  的异常类层级判定）→ 匹配才返回 `_URC_HANDLER_FOUND`，不匹配返回 `_URC_CONTINUE_UNWIND`
+- **保持形态 A 的结构**：`ttype_encoding = 0x1b`（pcrel|sdata4，不需要 indirect 槽），
+  TType 表项写成 `.long <我们的 handler 描述符> - .`，不再是真正的 `type_info` 指针；
+- action 记录按 ABI 用法写 `(filter = i, next = 0)`，`i` 是 1 起的 TType 表下标；
+- 描述符形如 `{ uint32_t kind; uint32_t n; const char* names[] }`，`kind = 0` 表示 catch-all；
+- personality phase 1：`filter > 0` → 取第 `filter` 项 → 调运行时 `pa_eh_handler_matches(exc, desc)`
+  （内部复用 `pa_exc_matches` 的异常类层级判定）→ 匹配才 `_URC_HANDLER_FOUND`，否则 `_URC_CONTINUE_UNWIND`；
+  `filter == 0` 是 cleanup 帧，phase 1 一律 CONTINUE；
+- 这样**结构上仍是合法 LSDA**，只是 TType 表的内容是我们的扩展（标准 personality 会把它当
+  `type_info*` 解，所以不能互通 —— 这是已知且可接受的代价）。
 
 personality 里读 filter 必须是**通用的**，不要假设它一定是 0 或 1。
 
