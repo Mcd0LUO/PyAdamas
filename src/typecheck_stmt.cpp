@@ -393,7 +393,7 @@ void TypeChecker::assign(Expr& target, TypePtr value, int line, int col) {
                         std::format("cannot store '{}' into '{}'", type_name(value),
                                     type_name(ot)));
             } else if (!is_unknown(ot) && ot->kind != TyKind::Optional &&
-                       ot->kind != TyKind::Class) {
+                       ot->kind != TyKind::Class && ot->kind != TyKind::None) {
                 // 措辞跟 CPython 一致：'range' object does not support item assignment
                 err(line, col, std::format("'{}' object does not support item assignment",
                                            bare_type_name(ot)));
