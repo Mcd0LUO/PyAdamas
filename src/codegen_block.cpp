@@ -234,7 +234,8 @@ void AsmGen::emit_function(const IRFunction& f, int fi) {
             cfa_off_ += 8;
             cfi(std::format(".cfi_def_cfa_offset {}", cfa_off_));
             cfi(".cfi_offset %r15, -16");
-            line("movq %rdi, %r15");
+            // 生成器/协程 resume 的第一个实参是生成器对象，按 ABI 位置取。
+            line(std::format("movq {}, %r15", arg_reg_i(0)));
         } else {
             for (int i = 0; i < n_saved_regs_; ++i) {
                 line(std::format("pushq {}", kSlotRegs()[i]));

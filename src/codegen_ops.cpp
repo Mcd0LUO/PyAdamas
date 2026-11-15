@@ -125,9 +125,12 @@ void AsmGen::gen_inst(const Inst& in) {
             }
             case IrOp::GenNew: {
                 const auto& g = m_->generators[static_cast<size_t>(in.imm)];
+                // 四个实参按 ABI 位置走：n_slots / resume / gcrel / frame_kind。
+                // Win64 只有 4 个整型实参寄存器，这里正好用满；第 4 个在
+                // SysV 是 %rcx，在 Win64 是 %r9。
                 emit_imm_op("movq", g.n_slots, arg_reg_i(0));
-                line(std::format("leaq {}(%rip), %rsi", func_label(g.resume)));
-                line(std::format("leaq .Lgengcrel{}(%rip), %rdx", in.imm));
+                line(std::format("leaq {}(%rip), {}", func_label(g.resume), arg_reg_i(1)));
+                line(std::format("leaq .Lgengcrel{}(%rip), {}", in.imm, arg_reg_i(2)));
                 emit_imm_op("movq", g.frame_kind, arg_reg_i(3));
                 line("call pa_gen_new");
                 move_to(dst_op(in.dst), "%rax");
