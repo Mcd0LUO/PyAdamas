@@ -5,6 +5,34 @@
    C 没有隐藏寄存器参数，运行时回调用跳板。reduce 要两参数回调：
    整数版把 rsi/rdx 挪到 rdi/rsi，浮点版的参数已经在 xmm0/xmm1，只搬
    闭包指针。 */
+/* 跳板按 C 调用约定接实参（它由这里的 C 代码 call），被跳进去的函数体
+   按 ABI 收实参。Win64 下 fn 在 rcx、两个整型实参在 rdx/r8，浮点第 2/3
+   个位置是 xmm1/xmm2（第 0 个槽被 fn 指针占了），而函数体期望 xmm0/xmm1。 */
+#if defined(_WIN32)
+__asm__(
+    ".text\n"
+    ".globl pa_call2\n"
+    PA_TYPE_FUNC(pa_call2)
+    "pa_call2:\n"
+    "\tmovq %rcx, %r10\n"
+    "\tmovq (%rcx), %r11\n"
+    "\tmovq %rdx, %rcx\n"
+    "\tmovq %r8, %rdx\n"
+    "\tjmp *%r11\n"
+    PA_SIZE_FUNC(pa_call2));
+
+__asm__(
+    ".text\n"
+    ".globl pa_call2_f\n"
+    PA_TYPE_FUNC(pa_call2_f)
+    "pa_call2_f:\n"
+    "\tmovq %rcx, %r10\n"
+    "\tmovq (%rcx), %r11\n"
+    "\tmovsd %xmm1, %xmm0\n"
+    "\tmovsd %xmm2, %xmm1\n"
+    "\tjmp *%r11\n"
+    PA_SIZE_FUNC(pa_call2_f));
+#else
 __asm__(
     ".text\n"
     ".globl pa_call2\n"
@@ -28,6 +56,7 @@ __asm__(
     "\txorl %eax, %eax\n"
     "\tjmp *%r11\n"
     PA_SIZE_FUNC(pa_call2_f));
+#endif
 
 extern int64_t pa_call2(void* fn, int64_t a, int64_t b);
 extern double pa_call2_f(void* fn, double a, double b);

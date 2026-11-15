@@ -162,11 +162,11 @@ void AsmGen::gen_obj_new(const Inst& in) {
         emit_imm_op("movq", 8 * (c.n_fields + 1) + (c.dict_off ? 8 : 0), arg_reg_i(0));
         bool has_heap = std::ranges::any_of(c.field_heap, [](uint8_t v) { return v != 0; });
         if (has_heap || c.dict_off != 0) {
-            line(std::format("leaq .Ldtor{}(%rip), %rsi", in.imm));
-            line(std::format("leaq .Lgcrel{}(%rip), %rdx", in.imm));
+            line(std::format("leaq .Ldtor{}(%rip), {}", in.imm, arg_reg_i(1)));
+            line(std::format("leaq .Lgcrel{}(%rip), {}", in.imm, arg_reg_i(2)));
         } else {
-            line("xorl %esi, %esi");
-            line("xorl %edx, %edx");
+            line(std::format("xorl {}, {}", reg32(arg_reg_i(1)), reg32(arg_reg_i(1))));
+            line(std::format("xorl {}, {}", reg32(arg_reg_i(2)), reg32(arg_reg_i(2))));
         }
         spill_fp_slots();
         line("call pa_obj_new");
@@ -191,13 +191,14 @@ void AsmGen::gen_field_load(const Inst& in) {
 
 void AsmGen::gen_field_store(const Inst& in) {
         emit2("movq", src_op(in.a), "%rax");
-        emit2("movq", src_op(in.b), arg_reg_i(3));
+        const std::string vr = arg_reg_i(3);
+        emit2("movq", src_op(in.b), vr);
         if (in.fwidth == 1)
-            line(std::format("movb %cl, {}(%rax)", in.imm));
+            line(std::format("movb {}, {}(%rax)", reg8(vr), in.imm));
         else if (in.fwidth == 4)
-            line(std::format("movl %ecx, {}(%rax)", in.imm));
+            line(std::format("movl {}, {}(%rax)", reg32(vr), in.imm));
         else
-            line(std::format("movq %rcx, {}(%rax)", in.imm));
+            line(std::format("movq {}, {}(%rax)", vr, in.imm));
     }
 
 // 值类型：payload 前有隐藏的 RC 头，返回的指针就是 payload 地址。
@@ -811,7 +812,7 @@ void AsmGen::gen_load_extern(const Inst& in) {
             case CKind::Str:
             case CKind::OptStr:
                 // 全局 char* 同样要复制成 PyAdamasStr。
-                line("movq " + sym + ", %rdi");
+                line("movq " + sym + ", " + arg_reg_i(0));
                 spill_fp_slots();
                 line(v.kind == CKind::OptStr ? "call pa_str_from_cstr_opt"
                                              : "call pa_str_from_cstr");

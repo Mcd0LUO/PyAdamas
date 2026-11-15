@@ -224,22 +224,59 @@ private:
     void emit_arg(int pos, bool is_fp, int cls_idx, const std::string& v);
 
     // 64 位寄存器名的 32 位别名（%rdx -> %edx，%r8 -> %r8d）。
+    // 注意 %rdi/%rsi/%rbp/%rsp 的末位不是 x，只看第三个字符会把 %rdi
+    // 错认成 %rdx。
     static std::string reg32(const std::string& r) {
         if (r.size() == 4 && r[1] == 'r') {
-            switch (r[2]) {
-                case 'a': return "%eax";
-                case 'b': return "%ebx";
-                case 'c': return "%ecx";
-                case 'd': return "%edx";
-                case 's': return "%esi";
-                case 'i': return "%edi";
-                default: break;
+            if (r[3] == 'x') {
+                switch (r[2]) {
+                    case 'a': return "%eax";
+                    case 'b': return "%ebx";
+                    case 'c': return "%ecx";
+                    case 'd': return "%edx";
+                    default: break;
+                }
+            } else if (r[2] == 's' && r[3] == 'i') {
+                return "%esi";
+            } else if (r[2] == 'd' && r[3] == 'i') {
+                return "%edi";
+            } else if (r[2] == 'b' && r[3] == 'p') {
+                return "%ebp";
+            } else if (r[2] == 's' && r[3] == 'p') {
+                return "%esp";
             }
         }
         if (r.size() == 3 && r[1] == 'r' && r[2] >= '8' && r[2] <= '9')
             return std::string(r) + "d";
         if (r.size() == 4 && r[1] == 'r' && r[2] == '1' && r[3] >= '0' && r[3] <= '5')
             return std::string(r) + "d";
+        return r;
+    }
+    // 64 位寄存器名的 8 位别名（%rdx -> %dl，%r9 -> %r9b）。
+    static std::string reg8(const std::string& r) {
+        if (r.size() == 4 && r[1] == 'r') {
+            if (r[3] == 'x') {
+                switch (r[2]) {
+                    case 'a': return "%al";
+                    case 'b': return "%bl";
+                    case 'c': return "%cl";
+                    case 'd': return "%dl";
+                    default: break;
+                }
+            } else if (r[2] == 's' && r[3] == 'i') {
+                return "%sil";
+            } else if (r[2] == 'd' && r[3] == 'i') {
+                return "%dil";
+            } else if (r[2] == 'b' && r[3] == 'p') {
+                return "%bpl";
+            } else if (r[2] == 's' && r[3] == 'p') {
+                return "%spl";
+            }
+        }
+        if (r.size() == 3 && r[1] == 'r' && r[2] >= '8' && r[2] <= '9')
+            return std::string(r) + "b";
+        if (r.size() == 4 && r[1] == 'r' && r[2] == '1' && r[3] >= '0' && r[3] <= '5')
+            return std::string(r) + "b";
         return r;
     }
     void cfi(const std::string& s) {

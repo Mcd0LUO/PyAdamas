@@ -39,10 +39,8 @@ static uint64_t str_literal_hash(const std::string& s) {
     return h ? h : 1;
 }
 
-// 回调跳板做参数提升时用的寄存器名（SysV 整数参数寄存器）。
-static const char* const kCbReg64[6] = {"%rdi", "%rsi", "%rdx", "%rcx", "%r8", "%r9"};
-static const char* const kCbReg32[6] = {"%edi", "%esi", "%edx", "%ecx", "%r8d", "%r9d"};
-static const char* const kCbReg8[6] = {"%dil", "%sil", "%dl", "%cl", "%r8b", "%r9b"};
+// C 回调跳板做参数提升时用的寄存器名，一律按目标 ABI 取
+// （见 arg_reg_i / reg32 / reg8）。
 
 std::string AsmGen::gen(const IRModule& m) {
         m_ = &m;
@@ -259,17 +257,18 @@ std::string AsmGen::gen(const IRModule& m) {
             out_ += "\tpushq %rbx\n";
             if (gnu_cfi()) out_ += "\t.cfi_def_cfa_offset 16\n";
             if (gnu_cfi()) out_ += "\t.cfi_offset %rbx, -16\n";
-            out_ += "\tmovq %rdi, %rbx\n";
+            out_ += std::format("\tmovq {}, %rbx\n", arg_reg_i(0));
             for (size_t f = 0; f < c.field_heap.size(); ++f) {
                 if (!c.field_heap[f]) continue;
-                out_ += std::format("\tmovq {}(%rbx), %rdi\n", 8 * (f + 1));
+                out_ += std::format("\tmovq {}(%rbx), {}\n", 8 * (f + 1), arg_reg_i(0));
                 out_ += c.field_heap[f] == 2 ? "\tcall pa_rc_dec_unknown\n"
                                              : "\tcall pa_rc_dec\n";
             }
             if (c.dict_off != 0) {
                 // 动态属性槽：可能还没分配过（NULL），跳过。
-                out_ += std::format("\tmovq {}(%rbx), %rdi\n", c.dict_off);
-                out_ += "\ttestq %rdi, %rdi\n\tje 1f\n\tcall pa_rc_dec\n1:\n";
+                out_ += std::format("\tmovq {}(%rbx), {}\n", c.dict_off, arg_reg_i(0));
+                out_ += std::format("\ttestq {}, {}\n\tje 1f\n\tcall pa_rc_dec\n1:\n",
+                                    arg_reg_i(0), arg_reg_i(0));
             }
             out_ += "\tpopq %rbx\n";
             if (gnu_cfi()) out_ += "\t.cfi_def_cfa_offset 8\n";
@@ -285,16 +284,17 @@ std::string AsmGen::gen(const IRModule& m) {
             out_ += "\tpushq %rbx\n";
             if (gnu_cfi()) out_ += "\t.cfi_def_cfa_offset 16\n";
             if (gnu_cfi()) out_ += "\t.cfi_offset %rbx, -16\n";
-            out_ += "\tmovq %rdi, %rbx\n";
+            out_ += std::format("\tmovq {}, %rbx\n", arg_reg_i(0));
             for (size_t f = 0; f < c.field_heap.size(); ++f) {
                 if (!c.field_heap[f]) continue;
-                out_ += std::format("\tmovq {}(%rbx), %rdi\n", 8 * (f + 1));
+                out_ += std::format("\tmovq {}(%rbx), {}\n", 8 * (f + 1), arg_reg_i(0));
                 out_ += c.field_heap[f] == 2 ? "\tcall pa_rc_dec_unknown\n"
                                              : "\tcall pa_gc_unref_child\n";
             }
             if (c.dict_off != 0) {
-                out_ += std::format("\tmovq {}(%rbx), %rdi\n", c.dict_off);
-                out_ += "\ttestq %rdi, %rdi\n\tje 1f\n\tcall pa_gc_unref_child\n1:\n";
+                out_ += std::format("\tmovq {}(%rbx), {}\n", c.dict_off, arg_reg_i(0));
+                out_ += std::format("\ttestq {}, {}\n\tje 1f\n\tcall pa_gc_unref_child\n1:\n",
+                                    arg_reg_i(0), arg_reg_i(0));
             }
             out_ += "\tpopq %rbx\n";
             if (gnu_cfi()) out_ += "\t.cfi_def_cfa_offset 8\n";
@@ -316,7 +316,7 @@ std::string AsmGen::gen(const IRModule& m) {
             out_ += "\tpushq %rbx\n";
             if (gnu_cfi()) out_ += "\t.cfi_def_cfa_offset 16\n";
             if (gnu_cfi()) out_ += "\t.cfi_offset %rbx, -16\n";
-            out_ += "\tmovq %rdi, %rbx\n";
+            out_ += std::format("\tmovq {}, %rbx\n", arg_reg_i(0));
             out_ += "\tcmpq $1, 8(%rbx)\n";
             out_ += std::format("\tje .Lgengcreldone{}\n", i);
             for (size_t s = 0; s < g.slot_heap.size(); ++s) {
@@ -325,9 +325,9 @@ std::string AsmGen::gen(const IRModule& m) {
                 // slot_heap: 1=堆，2=可能装着非堆值（unknown 流过堆槽）。
                 // 清零只在 GC 清扫阶段做；trial/restore 阶段运行时只调计数，
                 // 不能破坏生成器帧的内容。
-                out_ += std::format("\tleaq {}(%rbx), %rdi\n", off);
-                out_ += std::format("\tmovq ${}, %rsi\n",
-                                    g.slot_heap[s] == 2 ? 2 : 1);
+                out_ += std::format("\tleaq {}(%rbx), {}\n", off, arg_reg_i(0));
+                out_ += std::format("\tmovq ${}, {}\n",
+                                    g.slot_heap[s] == 2 ? 2 : 1, arg_reg_i(1));
                 out_ += "\tcall pa_gen_slot_release\n";
             }
             out_ += std::format(".Lgengcreldone{}:\n", i);
@@ -366,15 +366,24 @@ std::string AsmGen::gen(const IRModule& m) {
                 // 栈顶，展开时直接按入口规则（CFA=rsp+8）继续往上走。
                 if (gnu_cfi()) out_ += "\t.cfi_startproc\n";
                 out_ += std::format("\tmovq .Lcbslot{}(%rip), %r10\n", i);
-                int gi = 0;
+                // 寄存器序号：Win64 按实参位置（浮点也占位），SysV 按整型
+                // 序列单独计数。宽度提升只对寄存器里的实参做；落栈的照原样
+                // 透传（跳板不动 rsp，栈上实参的位置对 C 与 PyAdamas 相同）。
+                const bool pos = target_abi().positional_args;
+                int gi = 0, pi = 0;
                 for (CKind k : m.cb_sigs[i].params) {
+                    const int idx = pos ? pi : gi;
+                    ++pi;
                     if (k == CKind::Float) continue;  // xmm 参数直接透传
-                    if (k == CKind::Int32)
-                        out_ += std::format("\tmovslq {}, {}\n", kCbReg32[gi], kCbReg64[gi]);
-                    else if (k == CKind::UInt32)
-                        out_ += std::format("\tmovl {}, {}\n", kCbReg32[gi], kCbReg32[gi]);
-                    else if (k == CKind::Bool)
-                        out_ += std::format("\tmovzbl {}, {}\n", kCbReg8[gi], kCbReg32[gi]);
+                    if (idx < kMaxIntArgs()) {
+                        const std::string r64 = arg_reg_i(idx);
+                        if (k == CKind::Int32)
+                            out_ += std::format("\tmovslq {}, {}\n", reg32(r64), r64);
+                        else if (k == CKind::UInt32)
+                            out_ += std::format("\tmovl {}, {}\n", reg32(r64), reg32(r64));
+                        else if (k == CKind::Bool)
+                            out_ += std::format("\tmovzbl {}, {}\n", reg8(r64), reg32(r64));
+                    }
                     ++gi;
                 }
                 out_ += "\tjmp *(%r10)\n";

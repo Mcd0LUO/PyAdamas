@@ -90,9 +90,79 @@ static inline int pa_nanosleep(const struct timespec* req, struct timespec* rem)
 }
 #define nanosleep(req, rem) pa_nanosleep((req), (rem))
 
-/* POSIX poll -> WSAPoll。结构体由 winsock2.h 提供（SOCKET/SHORT/SHORT），
-   与 POSIX 的（int/short/short）逐字段对应，可直接转型。 */
-#define poll(fds, n, timeout) WSAPoll((WSAPOLLFD*)(fds), (ULONG)(n), (INT)(timeout))
+/* POSIX poll -> WSAPoll 的桥接。WSAPoll 只认 socket，而 asyncio.wait_readable /
+   wait_writable 也要能等文件、控制台、管道这些普通句柄（POSIX 的 poll 支持）。
+   这里按 POSIX 语义补齐：
+     - 无效句柄（_get_osfhandle 失败）-> POLLNVAL，调用方报 OSError
+     - 非 socket 的有效句柄 -> 视为始终就绪（它们不能 select，但同步读写
+       不会长时间阻塞）
+     - socket -> 收集起来交给 WSAPoll；若已有非 socket 就绪则不再等待
+   结构体由 winsock2.h 提供（SOCKET/SHORT/SHORT），与 POSIX 逐字段对应。 */
+static inline int pa_poll(struct pollfd* fds, unsigned long n, int timeout) {
+    if (n == 0) {
+        if (timeout > 0) Sleep((DWORD)timeout);
+        return 0;
+    }
+    if (!fds) return 0;
+    struct pollfd* socks = (struct pollfd*)malloc(sizeof(struct pollfd) * n);
+    unsigned long* smap = (unsigned long*)malloc(sizeof(unsigned long) * n);
+    if (!socks || !smap) {
+        free(socks);
+        free(smap);
+        return -1;
+    }
+    unsigned long ns = 0;
+    int ready = 0;
+    for (unsigned long i = 0; i < n; ++i) {
+        fds[i].revents = 0;
+        /* 先按 socket 试：socket 的值不是 CRT fd，_get_osfhandle 会失败。 */
+        int type = 0;
+        int tlen = (int)sizeof type;
+        if (getsockopt((SOCKET)(uintptr_t)fds[i].fd, SOL_SOCKET, SO_TYPE, (char*)&type,
+                       &tlen) == 0) {
+            socks[ns].fd = fds[i].fd;
+            socks[ns].events = fds[i].events;
+            socks[ns].revents = 0;
+            smap[ns] = i;
+            ++ns;
+            continue;
+        }
+        /* 不是 socket：CRT fd -> 普通句柄；也接受直接的 HANDLE 值。
+           句柄有效性必须真的问一次系统：随便一个整数（例如 999999）
+           既不是 fd 也不是句柄，应当报 POLLNVAL。 */
+        intptr_t h = _get_osfhandle(fds[i].fd);
+        if (h == -1) h = (intptr_t)fds[i].fd;
+        DWORD hflags = 0;
+        if (h == -1 || h == 0 || !GetHandleInformation((HANDLE)h, &hflags)) {
+            fds[i].revents = POLLNVAL;
+            ++ready;
+            continue;
+        }
+        short ev = (short)(fds[i].events & (POLLIN | POLLOUT));
+        fds[i].revents = ev;
+        if (ev) ++ready;
+    }
+    if (ns) {
+        int tmo = ready > 0 ? 0 : timeout;
+        int rc = WSAPoll((WSAPOLLFD*)socks, (ULONG)ns, (INT)tmo);
+        if (rc > 0) {
+            for (unsigned long k = 0; k < ns; ++k) {
+                if (!socks[k].revents) continue;
+                fds[smap[k]].revents |= socks[k].revents;
+                ++ready;
+            }
+        } else if (rc == SOCKET_ERROR) {
+            for (unsigned long k = 0; k < ns; ++k) {
+                fds[smap[k]].revents |= POLLNVAL;
+                ++ready;
+            }
+        }
+    }
+    free(socks);
+    free(smap);
+    return ready;
+}
+#define poll(fds, n, timeout) pa_poll((fds), (n), (timeout))
 
 /* POSIX mkdir 带 mode，Win32 不带。 */
 #define mkdir(path, mode) _mkdir(path)

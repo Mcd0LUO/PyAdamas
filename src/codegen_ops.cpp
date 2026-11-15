@@ -104,8 +104,8 @@ void AsmGen::gen_inst(const Inst& in) {
             case IrOp::Setjmp: gen_setjmp(in); break;
             case IrOp::ImportModule: {
                 const std::string& name = m_->imports[static_cast<size_t>(in.imm)];
-                line(std::format("leaq {}(%rip), %rdi", module_ready_symbol(name)));
-                line(std::format("leaq {}(%rip), %rsi", module_init_symbol(name)));
+                line(std::format("leaq {}(%rip), {}", module_ready_symbol(name), arg_reg_i(0)));
+                line(std::format("leaq {}(%rip), {}", module_init_symbol(name), arg_reg_i(1)));
                 spill_fp_slots();
                 line("call pa_import_module");
                 reload_fp_slots();
@@ -138,8 +138,10 @@ void AsmGen::gen_inst(const Inst& in) {
             }
             case IrOp::GenSetSlot:
                 emit2("movq", src_op(in.args[0]), "%rax");
+                // 值按 ABI 的第 4 个实参寄存器放（SysV %rcx / Win64 %r9），
+                // 写入也必须用同一个寄存器 —— 不能写死 %rcx。
                 emit2("movq", src_op(in.args[1]), arg_reg_i(3));
-                line(std::format("movq %rcx, {}(%rax)", 8 * (10 + in.idx)));
+                line(std::format("movq {}, {}(%rax)", arg_reg_i(3), 8 * (10 + in.idx)));
                 break;
             case IrOp::GenGetState:
                 line("movq 0(%r15), %rax");
@@ -180,7 +182,7 @@ void AsmGen::gen_inst(const Inst& in) {
                 emit_epilogue();
                 break;
             case IrOp::GenRethrow:
-                line("movq %r15, %rdi");
+                line(std::format("movq %r15, {}", arg_reg_i(0)));
                 line("call pa_coro_rethrow");
                 line("ud2");
                 break;
@@ -284,12 +286,14 @@ void AsmGen::gen_bin_int(const Inst& in) {
                 case BinKind::BitAnd: emit2("andq", sb, d); return;
                 case BinKind::BitOr: emit2("orq", sb, d); return;
                 case BinKind::BitXor: emit2("xorq", sb, d); return;
+                // 移位数只能装在 %cl（ISA 固定），所以这里用 %rcx 而不是
+                // ABI 的第 4 个实参寄存器（这两条指令之间没有调用）。
                 case BinKind::Shl:
-                    emit2("movq", sb, arg_reg_i(3));
+                    emit2("movq", sb, "%rcx");
                     emit2("shlq", "%cl", d);
                     return;
                 case BinKind::Shr:
-                    emit2("movq", sb, arg_reg_i(3));
+                    emit2("movq", sb, "%rcx");
                     emit2("sarq", "%cl", d);
                     return;
                 default: break;  // 除法/取模/幂要用 rax/rdx，走通用路径
@@ -305,11 +309,11 @@ void AsmGen::gen_bin_int(const Inst& in) {
             case BinKind::BitOr: emit2("orq", sb, "%rax"); break;
             case BinKind::BitXor: emit2("xorq", sb, "%rax"); break;
             case BinKind::Shl:
-                emit2("movq", sb, arg_reg_i(3));
+                emit2("movq", sb, "%rcx");
                 line("shlq %cl, %rax");
                 break;
             case BinKind::Shr:
-                emit2("movq", sb, arg_reg_i(3));
+                emit2("movq", sb, "%rcx");
                 line("sarq %cl, %rax");
                 break;
             case BinKind::Div:

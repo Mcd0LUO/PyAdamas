@@ -3,6 +3,22 @@
 
 /* pyadamas 函数值 = 闭包对象：[0] 代码地址，%r10 传闭包指针（环境）。
    C 没有隐藏寄存器参数，运行时回调用一个跳板。 */
+/* 跳板本身也用 C 调用约定（它由运行时 C 代码 call），只有被跳进去的
+   PyAdamas 函数体用 ABI 的实参寄存器。所以这里的两套寄存器搬运必须按
+   目标区分：SysV 的 fn/arg 在 rdi/rsi，Win64 在 rcx/rdx，而函数体入口
+   一律是 ABI 的第 0 个实参寄存器（SysV rdi / Win64 rcx）。 */
+#if defined(_WIN32)
+__asm__(
+    ".text\n"
+    ".globl pa_call1\n"
+    PA_TYPE_FUNC(pa_call1)
+    "pa_call1:\n"
+    "\tmovq %rcx, %r10\n"
+    "\tmovq (%rcx), %r11\n"
+    "\tmovq %rdx, %rcx\n"
+    "\tjmp *%r11\n"
+    PA_SIZE_FUNC(pa_call1));
+#else
 __asm__(
     ".text\n"
     ".globl pa_call1\n"
@@ -14,6 +30,7 @@ __asm__(
     "\txorl %eax, %eax\n"
     "\tjmp *%r11\n"
     PA_SIZE_FUNC(pa_call1));
+#endif
 
 /* 完成时同步调用 add_done_callback 注册的函数，参数是 future 本身。
    CPython 用 call_soon 排队，这里直接调用；回调抛出的异常会向外传播。 */

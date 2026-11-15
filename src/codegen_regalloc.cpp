@@ -841,8 +841,22 @@ void AsmGen::build_operand_caches() {
 std::vector<ArgLoc> AsmGen::classify(const std::vector<TypePtr>& types) const {
         std::vector<ArgLoc> locs(types.size());
         int gi = 0, fi = 0, sp = 0;
+        // Win64 按位置分配：第 i 个实参固定占第 i 个槽，与类型无关，
+        // 浮点实参在第 i 个位置就用 xmmI；SysV 按类型分计数，两套独立序列。
+        const bool pos = target_abi().positional_args;
         for (size_t i = 0; i < types.size(); ++i) {
             bool fp = ir_is_float(types[i]);
+            if (pos) {
+                if (i < static_cast<size_t>(kMaxIntArgs()) &&
+                    i < static_cast<size_t>(kMaxFpArgs())) {
+                    locs[i].fp = fp;
+                    locs[i].reg = static_cast<int>(i);
+                } else {
+                    locs[i].fp = fp;
+                    locs[i].stack_off = out_base() + sp++ * 8;
+                }
+                continue;
+            }
             if (fp && fi < kMaxFpArgs()) {
                 locs[i].fp = true;
                 locs[i].reg = fi++;
