@@ -1077,6 +1077,9 @@ TypePtr TypeChecker::iter_elem(TypePtr it, int line, int col) {
                 return it->sub.empty() ? t_unknown() : it->sub[0];
             case TyKind::Deque:
                 return it->sub.empty() ? t_unknown() : it->sub[0];
+            case TyKind::None:
+                // None 被迭代：多是 optional 守卫没窄化，conservative。
+                return t_unknown();
             default:
                 // 类实现了 __iter__ 时，元素类型取它返回的容器/生成器的
                 // 元素类型；没有实现就维持 unknown（生成阶段再报错）。
