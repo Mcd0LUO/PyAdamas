@@ -77,7 +77,7 @@ int64_t gen_run(void* g, int64_t sent, int* done) {
     h.frame = pa_frame_top;
     handler_top = &h;
     int64_t exc_depth0 = pa_exc_depth();
-    if (_setjmp(h.env) != 0) {
+    if (PA_SETJMP(h.env) != 0) {
         handler_top = h.prev;
         p[1] = 2;
         p[5] = 0;
@@ -217,7 +217,7 @@ void pa_gen_close(void* g) {
     h.frame = pa_frame_top;
     handler_top = &h;
     int64_t exc_depth0 = pa_exc_depth();
-    if (_setjmp(h.env) != 0) {
+    if (PA_SETJMP(h.env) != 0) {
         handler_top = h.prev;
         pa_gen_release_slots(g);
         pa_rc_cleanup(h.mark);
@@ -250,7 +250,7 @@ void pa_gen_finalize(void* g) {
     h.frame = pa_frame_top;
     handler_top = &h;
     int64_t exc_depth0 = pa_exc_depth();
-    if (_setjmp(h.env) == 0) {
+    if (PA_SETJMP(h.env) == 0) {
         p[5] = 1;
         ((void (*)(void*, int64_t))(uintptr_t)p[4])(g, 0);
     } else {

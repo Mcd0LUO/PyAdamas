@@ -155,7 +155,7 @@ void agen_drive(PyAdamasAwait* d) {
     h.frame = pa_frame_top;
     handler_top = &h;
     int64_t exc_depth0 = pa_exc_depth();
-    if (_setjmp(h.env) != 0) {
+    if (PA_SETJMP(h.env) != 0) {
         handler_top = h.prev;
         PyAdamasException* e = pending_exc;
         pending_exc = NULL;

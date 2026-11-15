@@ -57,8 +57,8 @@ const TargetABI kX86_64Win64{
     16,
     32,
     false,
-    "setjmp",
-    "longjmp",
+    "pa_win_setjmp",
+    "pa_win_longjmp",
 };
 
 const TargetABI* g_current = &kX86_64SysV;

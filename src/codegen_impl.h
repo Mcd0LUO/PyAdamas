@@ -24,9 +24,9 @@
 
 namespace pyadamas {
 
-inline const char* const kIntArgRegs[6] = {"%rdi", "%rsi", "%rdx", "%rcx", "%r8", "%r9"};
-constexpr int kMaxIntArgs = 6;
-constexpr int kMaxFpArgs = 8;
+// 实参寄存器一律从 TargetABI 取：SysV 6 整型 / 8 浮点，Win64 各 4 个。
+inline int kMaxIntArgs() { return target_abi().n_arg_int; }
+inline int kMaxFpArgs() { return target_abi().n_arg_fp; }
 
 // 可用来长期持有变量的寄存器。全部是 callee-saved：被调用方保证
 // 返回时原样恢复，所以跨函数调用不需要把值挪回栈。

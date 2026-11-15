@@ -155,7 +155,7 @@ void AsmGen::gen_index_store(const Inst& in) {
 void AsmGen::gen_obj_new(const Inst& in) {
         const IRClass& c = m_->classes[static_cast<size_t>(in.imm)];
         // 动态属性槽挂在字段之后，跟着类走（派生类的偏移不同）。
-        emit_imm_op("movq", 8 * (c.n_fields + 1) + (c.dict_off ? 8 : 0), "%rdi");
+        emit_imm_op("movq", 8 * (c.n_fields + 1) + (c.dict_off ? 8 : 0), arg_reg_i(0));
         bool has_heap = std::ranges::any_of(c.field_heap, [](uint8_t v) { return v != 0; });
         if (has_heap || c.dict_off != 0) {
             line(std::format("leaq .Ldtor{}(%rip), %rsi", in.imm));
@@ -242,7 +242,7 @@ void AsmGen::gen_vcall(const Inst& in) {
             if (l.fp)
                 line(std::format("movsd {}, %xmm{}", src_op(in.args[i]), l.reg));
             else
-                emit2("movq", src_op(in.args[i]), kIntArgRegs[l.reg]);
+                emit2("movq", src_op(in.args[i]), arg_reg_i(l.reg));
         }
         line("xorl %r10d, %r10d");
         if (opt_ < 2) line("xorl %eax, %eax");
@@ -278,7 +278,7 @@ void AsmGen::gen_vcall_static(const Inst& in) {
             if (l.fp)
                 line(std::format("movsd {}, %xmm{}", src_op(in.args[i]), l.reg));
             else
-                emit2("movq", src_op(in.args[i]), kIntArgRegs[l.reg]);
+                emit2("movq", src_op(in.args[i]), arg_reg_i(l.reg));
         }
         line("xorl %r10d, %r10d");
         if (opt_ < 2) line("xorl %eax, %eax");
@@ -322,7 +322,7 @@ void AsmGen::gen_super_vcall(const Inst& in) {
             if (l.fp)
                 line(std::format("movsd {}, %xmm{}", src_op(in.args[i]), l.reg));
             else
-                emit2("movq", src_op(in.args[i]), kIntArgRegs[l.reg]);
+                emit2("movq", src_op(in.args[i]), arg_reg_i(l.reg));
         }
         line("xorl %r10d, %r10d");
         if (opt_ < 2) line("xorl %eax, %eax");
@@ -354,7 +354,7 @@ void AsmGen::gen_call_direct(const Inst& in) {
             if (l.fp)
                 line(std::format("movsd {}, %xmm{}", src_op(in.args[i]), l.reg));
             else
-                emit2("movq", src_op(in.args[i]), kIntArgRegs[l.reg]);
+                emit2("movq", src_op(in.args[i]), arg_reg_i(l.reg));
         }
         // 不读闭包环境的 callee 不需要 %r10；有 env 槽的才清零占位。
         const IRFunction* callee =
@@ -392,7 +392,7 @@ void AsmGen::gen_call_ptr(const Inst& in) {
             if (l.fp)
                 line(std::format("movsd {}, %xmm{}", src_op(in.args[i]), l.reg));
             else
-                emit2("movq", src_op(in.args[i]), kIntArgRegs[l.reg]);
+                emit2("movq", src_op(in.args[i]), arg_reg_i(l.reg));
         }
         line("xorl %r10d, %r10d");
         if (opt_ < 2) line("xorl %eax, %eax");
@@ -489,7 +489,7 @@ void AsmGen::gen_call(const Inst& in) {
             if (l.fp)
                 line(std::format("movsd {}, %xmm{}", src_op(in.args[i]), l.reg));
             else
-                emit2("movq", src_op(in.args[i]), kIntArgRegs[l.reg]);
+                emit2("movq", src_op(in.args[i]), arg_reg_i(l.reg));
         }
         line("movq %r11, %r10");
         if (opt_ < 2) line("xorl %eax, %eax");
@@ -544,9 +544,9 @@ void AsmGen::gen_call_extern(const Inst& in) {
             if (!abi) {
                 bool fp = kind_at(i) == CKind::Float;
                 p.fp = fp;
-                if (fp && fi < kMaxFpArgs) {
+                if (fp && fi < kMaxFpArgs()) {
                     p.reg = fi++;
-                } else if (!fp && gi < kMaxIntArgs) {
+                } else if (!fp && gi < kMaxIntArgs()) {
                     p.reg = gi++;
                 } else {
                     p.stack_off = out_base() + sp++ * 8;
@@ -561,7 +561,7 @@ void AsmGen::gen_call_extern(const Inst& in) {
                 if (c) ++nf;
                 else ++ni;
             }
-            if (p.size > 16 || gi + ni > kMaxIntArgs || fi + nf > kMaxFpArgs) {
+            if (p.size > 16 || gi + ni > kMaxIntArgs() || fi + nf > kMaxFpArgs()) {
                 p.stack_off = out_base() + sp * 8;
                 sp += static_cast<int>(p.cfp.size());
                 continue;
@@ -656,7 +656,7 @@ void AsmGen::gen_call_extern(const Inst& in) {
                     line(std::format("movsd {}(%r11), %xmm{}", off, p.creg[c]));
                 } else {
                     load_chunk("%r11", off, bytes);
-                    emit2("movq", "%r10", kIntArgRegs[p.creg[c]]);
+                    emit2("movq", "%r10", arg_reg_i(p.creg[c]));
                 }
             }
         };
@@ -678,7 +678,7 @@ void AsmGen::gen_call_extern(const Inst& in) {
             } else if (p.fp) {
                 line(std::format("movsd {}, %xmm{}", src_op(in.args[i]), p.reg));
             } else {
-                arg_into(i, kIntArgRegs[p.reg]);
+                arg_into(i, arg_reg_i(p.reg));
             }
         }
         if (hidden) emit2("movq", std::format("{}(%rsp)", sret_tmp), "%rdi");
@@ -889,7 +889,7 @@ void AsmGen::gen_ptr_store(const Inst& in) {
 void AsmGen::gen_setjmp(const Inst& in) {
         // handler 记录的第一个字段就是 jmp_buf，所以记录指针可以直接
         // 作为 setjmp 的参数。longjmp 回来后 $rax 非 0。
-        emit2("movq", src_op(in.a), "%rdi");
+        emit2("movq", src_op(in.a), arg_reg_i(0));
         // 用 _setjmp 而不是 setjmp：glibc 的 setjmp 每次都存信号掩码
         //（一次 rt_sigprocmask 系统调用），实测 117ns vs 2.5ns。
         // pyadamas 从不改信号掩码，没有要恢复的东西。

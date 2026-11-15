@@ -742,7 +742,7 @@ void coro_step(void* c) {
     void* prev_active = loop_active_coro;
     loop_active_coro = c;
     int64_t exc_depth0 = pa_exc_depth();
-    if (_setjmp(h.env) != 0) {
+    if (PA_SETJMP(h.env) != 0) {
         loop_active_coro = prev_active;
         handler_top = h.prev;
         PyAdamasException* e = pending_exc;

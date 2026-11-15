@@ -282,7 +282,7 @@ void AsmGen::emit_function(const IRFunction& f, int fi) {
                 } else if (l.fp) {
                     line(std::format("movsd %xmm{}, {}", l.reg, slot_op(p.slot)));
                 } else {
-                    move_to(slot_op(p.slot), kIntArgRegs[l.reg]);
+                    move_to(slot_op(p.slot), arg_reg_i(l.reg));
                 }
             }
 

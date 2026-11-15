@@ -210,7 +210,7 @@ _Noreturn void exc_longjmp(void) {
     pa_frame_unwind(handler_top->frame);
     /* 必须和生成代码里的 _setjmp 配对：glibc 的 setjmp 存信号掩码，
        _setjmp 不存，两者混用是未定义行为。 */
-    _longjmp(handler_top->env, 1);
+    PA_LONGJMP(handler_top->env, 1);
 }
 
 /* handler 记录的空闲链表。try 在热循环里每次进入都要一条记录，用
@@ -223,6 +223,52 @@ static void handler_release(PyAdamasHandler* h) {
     h->prev = handler_freelist;
     handler_freelist = h;
 }
+
+
+#if defined(_WIN32)
+/* Win64 上不能用 CRT 的 setjmp/longjmp：msvcrt 的 longjmp 会走 SEH 展开，
+   而我们生成的汇编函数没有 .pdata/.xdata 条目（那段代码不走 GCC），
+   展开会失败。这里自带一对：只保存/恢复非易失寄存器 + rsp + 返回地址，
+   完全不依赖展开信息。布局 Must 与生成代码一致（都用 handler 记录首字段）。 */
+__asm__(
+    ".text\n"
+    ".globl pa_win_setjmp\n"
+    "pa_win_setjmp:\n"
+    "\tleaq 8(%rsp), %rax\n"
+    "\tmovq %rax, 0(%rcx)\n"
+    "\tmovq %rbx, 8(%rcx)\n"
+    "\tmovq %rbp, 16(%rcx)\n"
+    "\tmovq %rdi, 24(%rcx)\n"
+    "\tmovq %rsi, 32(%rcx)\n"
+    "\tmovq %r12, 40(%rcx)\n"
+    "\tmovq %r13, 48(%rcx)\n"
+    "\tmovq %r14, 56(%rcx)\n"
+    "\tmovq %r15, 64(%rcx)\n"
+    "\tmovq (%rsp), %rax\n"
+    "\tmovq %rax, 72(%rcx)\n"
+    "\txorl %eax, %eax\n"
+    "\tret\n");
+
+__asm__(
+    ".text\n"
+    ".globl pa_win_longjmp\n"
+    "pa_win_longjmp:\n"
+    "\tmovq 72(%rcx), %r10\n"
+    "\tmovq 0(%rcx), %rsp\n"
+    "\tmovq 8(%rcx), %rbx\n"
+    "\tmovq 16(%rcx), %rbp\n"
+    "\tmovq 24(%rcx), %rdi\n"
+    "\tmovq 32(%rcx), %rsi\n"
+    "\tmovq 40(%rcx), %r12\n"
+    "\tmovq 48(%rcx), %r13\n"
+    "\tmovq 56(%rcx), %r14\n"
+    "\tmovq 64(%rcx), %r15\n"
+    "\tmovl %edx, %eax\n"
+    "\ttestl %eax, %eax\n"
+    "\tjne 1f\n"
+    "\tmovl $1, %eax\n"
+    "1:\tjmp *%r10\n");
+#endif
 
 void* pa_handler_push(void) {
     PyAdamasHandler* h;

@@ -131,6 +131,17 @@ static inline long pa_cpu_count(void) {
 #define PA_TYPE_FUNC(n) ".type " #n ",@function\n"
 #define PA_SIZE_FUNC(n) ".size " #n ", .-" #n "\n"
 #endif
+/* 生成代码走 ABI 里的 setjmp 符号；运行时这边也必须用同一对。
+   Windows 用自带实现（见 rt_exc.c），POSIX 用 _setjmp/_longjmp。 */
+#if defined(_WIN32)
+extern int pa_win_setjmp(void* env);
+extern void pa_win_longjmp(void* env, int val);
+#define PA_SETJMP(env) pa_win_setjmp((void*)(env))
+#define PA_LONGJMP(env, val) pa_win_longjmp((void*)(env), (val))
+#else
+#define PA_SETJMP(env) _setjmp(env)
+#define PA_LONGJMP(env, val) _longjmp((env), (val))
+#endif
 
 
 typedef struct {

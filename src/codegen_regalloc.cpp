@@ -843,10 +843,10 @@ std::vector<ArgLoc> AsmGen::classify(const std::vector<TypePtr>& types) const {
         int gi = 0, fi = 0, sp = 0;
         for (size_t i = 0; i < types.size(); ++i) {
             bool fp = ir_is_float(types[i]);
-            if (fp && fi < kMaxFpArgs) {
+            if (fp && fi < kMaxFpArgs()) {
                 locs[i].fp = true;
                 locs[i].reg = fi++;
-            } else if (!fp && gi < kMaxIntArgs) {
+            } else if (!fp && gi < kMaxIntArgs()) {
                 locs[i].fp = false;
                 locs[i].reg = gi++;
             } else {
