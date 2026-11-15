@@ -361,7 +361,9 @@ void TypeChecker::assign(Expr& target, TypePtr value, int line, int col) {
                 if (sl.lower) expr(*sl.lower);
                 if (sl.upper) expr(*sl.upper);
                 if (sl.step) expr(*sl.step);
-                if (!is_unknown(ot) && ot->kind != TyKind::List && ot->kind != TyKind::Optional)
+                if (!is_unknown(ot) && ot->kind != TyKind::List &&
+                    ot->kind != TyKind::Optional && ot->kind != TyKind::Class &&
+                    ot->kind != TyKind::None)
                     err(line, col,
                         std::format("'{}' object does not support item assignment",
                                     bare_type_name(ot)));
