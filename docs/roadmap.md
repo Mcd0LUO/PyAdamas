@@ -99,7 +99,7 @@
 | 0.168 | isinstance/bytes：第二参数接受 `bytes`/`bytearray`/`type`/`slice`/`frozenset` 等与 `(A,B,...)` 元组/列表；运行期元组短路 OR、known 类型静态判定、unknown 带运行期标签内置判定；`bytes()` 2 参/可迭代-of-int、`bytes*int`、`decode` 0..2、`translate`、内置类型名当值；基线 348 → 374 / 596 |
 | 许可证 | Apache-2.0（见 [LICENSE](../LICENSE) / [NOTICE](../NOTICE)） |
 
-## 当前状态（0.171）
+## 当前状态（0.173）
 
 流水线 `源码 → 词法 → AST → lambda 脱糖 → 类型检查 → IR → x86-64 汇编 → 可执行文件` 已打通。
 
@@ -109,6 +109,11 @@
 - **优化**：O2 有常量折叠/DCE/小函数内联/静态调用直接化/LICM/检查型下标外提/循环旋转/跨块 CSE；后端有拷贝合并、浮点临时寄存器与浮点比较分支融合（有序比较不再补 NaN 跳转）。
 - **asyncio**：Task 支持多等待者；`gather` 结果元素所有权按静态类型带入运行时；`from asyncio import ...` 保留调用点特化；`run`/`wait_for` 跨模块结果仍可能退化为 unknown。
 - **调试信息**：生成代码带 DWARF 行号、CFI（`.eh_frame`）与可读函数符号（`.type`/`.size`）；帧里没有 rbp，gdb、libgcc 的展开器和运行时自己的 traceback 都靠 CFI 逐帧还原。未捕获异常打印函数级 traceback，异步/生成器 resume 帧也会追加（仅函数名）。异常值对象仍不带 traceback。
+- **Windows 目标**：`--target=win64` 产出可原生运行的 PE 可执行文件（已在 Windows 宿主机实测）。
+  ABI 差异集中在 `TargetABI`（实参寄存器、影子空间、callee-saved 集合、setjmp 符号名）；
+  运行时通过 `rt_internal.h` 的平台层把 poll/clock_gettime/nanosleep/mkdir/realpath/
+  sysconf/timegm 映射到 Win32，subprocess 用 CreateProcess + 匿名管道；Setjmp 换成自带的
+  `pa_win_setjmp`（不依赖展开信息，因为生成的汇编函数没有 `.pdata`）。覆盖面 138 / 146。
 - **主要缺口**：asyncio 边角；异常对象 traceback / 列号 / `.debug_info`；依赖动态属性的 stdlib（如 `argparse`，见「技术债」）。
 
 ## 下一步

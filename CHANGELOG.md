@@ -4,6 +4,67 @@
 
 早期阶段没有逐条留痕，按阶段归纳；0.4 之后逐条记录。
 
+## [0.173] - 2026-11-16
+
+新增 **x86-64 Windows(win64) 目标**：`--target=win64` 产出可在 Windows 上原生运行的
+PE 可执行文件（已在 Windows 宿主机实测运行，非 wine）。运行时 28 个编译单元全部
+可交叉编译到 Windows。
+
+### 新增
+
+- `src/target_abi.h` / `target_abi.cpp`：TargetABI 描述一个目标的 ABI 事实（实参
+  寄存器、callee-saved 池、浮点池、scratch、栈对齐、影子空间、setjmp 符号名、
+  块内临时池等）。两个实例：`kX86_64SysV`（默认）与 `kX86_64Win64`。
+- `--target=` 开关（x86_64-sysv / x86_64-win64，也接受 sysv/win64/linux/windows）。
+- `emit_arg(pos, is_fp, cls_idx, v)`：同时支持 SysV 的「按类型分计数」与 Win64 的
+  「按位置分配」，超出寄存器个数时按 ABI 落栈。
+- 运行时平台层（`runtime/rt_internal.h`）：poll → WSAPoll（含非 socket 句柄桥接）、
+  clock_gettime → QueryPerformanceCounter、nanosleep → Sleep、mkdir/realpath/
+  sysconf/timegm 的 Win32 等价、iconv 恒等桩。
+- `runtime/rt_subprocess.c` 的 Win32 分支：CreateProcess + 匿名管道，POSIX 路径零改动。
+- `runtime/rt_exc.c` 的 `pa_win_setjmp`/`pa_win_longjmp`：只保存非易失寄存器、
+  rsp、返回地址，不依赖展开信息（msvcrt 的 longjmp 走 SEH，而生成的汇编函数没有
+  `.pdata`/`.xdata`，展开会失败）。
+- 汇编指示符按目标开关：`.cfi_*`/`.type`/`.size`/`.note.GNU-stack` 在 COFF 下关闭，
+  `.data.rel.ro` → `.rdata`。
+- `verify_win.sh`：一条命令跑完「构建 / POSIX 全量 / SysV 汇编 md5 / 标准库基线 /
+  Windows 覆盖」五项。
+
+### 性能
+
+- `try` 进入开销 **122 ns → 6 ns**：glibc 的 `setjmp` 每次都做 `rt_sigprocmask`
+  保存信号掩码（实测 117.2 ns vs `_setjmp` 2.5 ns）。pyadamas 从不改信号掩码，
+  改用 `_setjmp`/`_longjmp`；handler 记录再改空闲链表复用（13 ns → 6 ns）。
+
+### 修复
+
+- **SSE 不支持内存到内存的 `movsd`**：`move_fp` 在源和目的都在栈槽时直接发
+  `movsd mem, mem`，汇编器报错、整个文件编译失败。此前零测试覆盖（跑 160 个
+  用例的汇编逐字节对比，唯一差异是另一处）。现经 `%xmm0` 中转，新增
+  `tests/run/102_float_slot_move.py` 锁死。
+- **Win64 第 5+ 个栈实参的 mem-to-mem `movq`**：同理，改为经 `%r10` 中转。
+- **`gc_collect` 晋升阶段读取已释放对象**：Windows 堆在 free 后会 decommit，
+  读它直接 `0xC0000005`。POSIX 下靠运气不崩。
+- **生成器 `GenSetSlot` 写死 `%rcx`**：Win64 下 `%rcx` 是第 1 个实参、此刻已失效，
+  于是往生成器帧里写垃圾值——`for` 循环上界变成随机数，**不崩不报错、只是永不
+  结束**。这是整批 Windows 问题里唯一致命形式不是崩溃的一类。
+- 手写汇编跳板（`.Ldtor`/`.Lgcrel`/`.Lgengcrel`/`pa_call1`/`pa_call2`）的实参
+  寄存器与影子空间按 ABI 取。
+
+### 验证
+
+| 项 | 结果 |
+|---|---|
+| Windows 一致用例 | **138 / 146**（派工前 69 / 139） |
+| 挂起 | 0 |
+| POSIX 全量 | 177 通过 / 0 失败 |
+| 标准库前端基线 | 502 / 596 |
+| SysV 汇编 | 160 用例逐字节不变（`88f2bb28…`）|
+
+**未完成**：结构体按值传参的 Win64 分类规则（3 例）、可变参数（1 例）、
+Windows 专有 API（2 例）、COFF 下缺 `.pdata` 导致 traceback（1 例）、
+`86_popen` 用例里写死 `/bin/echo` 不可移植（1 例）。
+
 ## [0.171] - 2026-11-15
 
 继续收口散簇：标准库前端基线 435 → 501 / 596（84.1%）。
