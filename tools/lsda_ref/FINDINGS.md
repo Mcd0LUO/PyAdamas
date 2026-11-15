@@ -559,3 +559,7 @@ bash check.sh    # 重新编译 + 硬编码字节断言 + 链接矩阵断言；�
 - out/probe_catch_all.readelf_r.txt：重定位（TType 项、personality 槽、LSDA 指针）
 - out/probe_catch_all.decode.txt：逐字段解码（含校验结果）
 - out/mini_indirect.decode.txt、out/mini_direct*.decode.txt：手写变体的解码与链接结论
+
+---
+
+> 追加交叉核对（M2 实际发射字节的独立裁决）：见 [CROSSCHECK_M2.md](CROSSCHECK_M2.md)。
