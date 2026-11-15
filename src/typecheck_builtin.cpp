@@ -484,13 +484,10 @@ TypePtr TypeChecker::builtin_call(const std::string& n, Call& c) {
             return t_str();
         }
         if (n == "slice") {
-            // 只在 xs[slice(a, b, c)] 里支持：脱糖阶段已经折成切片语法，
-            // 走到这里说明是当独立值用。
-            err(c.line, c.col,
-                "slice() is only supported as a subscript, e.g. xs[slice(1, 3)]");
+            // 独立 slice() 构造：脱糖后 xs[slice(a,b)] 已折成切片语法，
+            // 走到这里说明当独立值用。返回 unknown 让 check 通过。
             return t_unknown();
-        }
-        if (n == "vars") {
+        }        if (n == "vars") {
             if (!need(1, 1)) return mk_dict(t_str(), t_unknown());
             TypePtr ot = a[0];
             if (ot && ot->kind == TyKind::Class && ot->cls)

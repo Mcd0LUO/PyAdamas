@@ -976,6 +976,9 @@ void TypeChecker::compare_type(CmpOp op, TypePtr l, TypePtr r, int line, int col
                 if (is_num(l) && is_num(r)) return;
                 if (l->kind == TyKind::Str && r->kind == TyKind::Str) return;
                 if (l->kind == TyKind::Bytes && r->kind == TyKind::Bytes) return;
+                // None 与任何有序类型比较：常见于 optional 守卫没窄化；
+                // 保守放行（运行时才真正决定合法性）。
+                if (l->kind == TyKind::None || r->kind == TyKind::None) return;
                 // 元组按字典序比较（版本号、日期这类 (a, b) 比较很常见）
                 if (l->kind == TyKind::Tuple && r->kind == TyKind::Tuple) return;
                 if (l->kind == TyKind::List && r->kind == TyKind::List) return;
@@ -1000,7 +1003,8 @@ void TypeChecker::compare_type(CmpOp op, TypePtr l, TypePtr r, int line, int col
             case CmpOp::NotIn:
                 if (r->kind == TyKind::List || r->kind == TyKind::Set || r->kind == TyKind::Str ||
                     r->kind == TyKind::Bytes || r->kind == TyKind::Dict ||
-                    r->kind == TyKind::Tuple || r->kind == TyKind::Range)
+                    r->kind == TyKind::Tuple || r->kind == TyKind::Range ||
+                    r->kind == TyKind::None)
                     return;
                 // 类可能实现了 __iter__（或从外部基类继承），静态上看不见
                 if (r->kind == TyKind::Class) return;
