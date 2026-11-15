@@ -19,6 +19,7 @@
 #include <vector>
 
 #include "ir.h"
+#include "target_abi.h"
 #include "module.h"
 
 namespace pyadamas {
@@ -31,15 +32,17 @@ constexpr int kMaxFpArgs = 8;
 // 返回时原样恢复，所以跨函数调用不需要把值挪回栈。
 // rsp 是栈指针，不在其中；rbp 在——生成函数的帧相对 rsp 寻址，不需要
 // 帧指针，回溯走 .eh_frame，所以它也能拿来存变量。
-inline const char* const kSlotRegs[] = {"%rbx", "%r12", "%r13", "%r14", "%r15", "%rbp"};
-constexpr int kMaxSlotRegs = 6;
+//
+// 寄存器角色统一由 TargetABI 描述（见 target_abi.h）：这是换目标的唯一
+// 接缝，取值在编译期定死，运行期零开销。
+inline const char* const* kSlotRegs() { return target_abi().callee_pool; }
+inline int kMaxSlotRegs() { return target_abi().n_callee_pool; }
 
 // 浮点变量常驻寄存器。只用 xmm8–15：xmm0–7 是参数/临时寄存器，
 // 所有指令生成器都只把它们当 scratch。提升仅发生在函数没有任何
 // 「会正常返回的调用」时，所以 caller-saved 不影响正确性。
-inline const char* const kFpSlotRegs[] = {"%xmm8",  "%xmm9",  "%xmm10", "%xmm11",
-                                          "%xmm12", "%xmm13", "%xmm14", "%xmm15"};
-constexpr int kMaxFpSlotRegs = 8;
+inline const char* const* kFpSlotRegs() { return target_abi().fp_pool; }
+inline int kMaxFpSlotRegs() { return target_abi().n_fp_pool; }
 
 // 块内浮点临时寄存器。xmm0/xmm1 被各指令生成器当固定 scratch，
 // xmm2 被浮点取模用来装除数，所以从 xmm3 开始。只在「整块没有

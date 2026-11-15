@@ -4,7 +4,6 @@
 namespace pyadamas {
 
 // 调用序列之外不会被指令生成器用到的临时寄存器（%r8–%r11）。
-static const char* const kTempRegs[] = {"%r8", "%r9", "%r10", "%r11"};
 
 // 帧布局：出参区一次留够，局部区落在它上面，callee-saved 再往上压。
     // 这样 rsp 在函数体里恒定，槽位和帧记录都能相对 rsp 寻址，帧里不需要
@@ -44,7 +43,7 @@ void AsmGen::emit_epilogue() {
             line(std::format(".cfi_def_cfa_offset {}", cfa_off_));
         }
         for (int i = n_saved_regs_ - 1; i >= 0; --i) {
-            const char* reg = gen_ ? "%r15" : kSlotRegs[i];
+            const char* reg = gen_ ? "%r15" : kSlotRegs()[i];
             line(std::format("popq {}", reg));
             line(std::format(".cfi_restore {}", reg));
             cfa_off_ -= 8;
@@ -368,13 +367,13 @@ void AsmGen::assign_slot_regs() {
         std::ranges::sort(hot_int, hotter);
         std::ranges::sort(hot_fp, hotter);
 
-        int k = std::min<int>(kMaxSlotRegs, static_cast<int>(hot_int.size()));
-        for (int i = 0; i < k; ++i) slot_reg_[hot_int[i].second] = kSlotRegs[i];
+        int k = std::min<int>(kMaxSlotRegs(), static_cast<int>(hot_int.size()));
+        for (int i = 0; i < k; ++i) slot_reg_[hot_int[i].second] = kSlotRegs()[i];
         n_saved_regs_ = k;
 
-        int kf = std::min<int>(kMaxFpSlotRegs, static_cast<int>(hot_fp.size()));
+        int kf = std::min<int>(kMaxFpSlotRegs(), static_cast<int>(hot_fp.size()));
         for (int i = 0; i < kf; ++i) {
-            slot_reg_[hot_fp[i].second] = kFpSlotRegs[i];
+            slot_reg_[hot_fp[i].second] = kFpSlotRegs()[i];
             slot_fpidx_[hot_fp[i].second] = i;
             fp_promoted_slots_.push_back(hot_fp[i].second);
         }
@@ -710,7 +709,7 @@ static std::vector<int> block_loop_depth(const IRFunction& f) {
     void AsmGen::assign_global_vreg_regs() {
         const size_t nv = f_->vreg_ty.size();
         vreg_reg_.assign(nv, std::string());
-        block_temp_pool_.assign(kTempRegs, kTempRegs + 4);
+        block_temp_pool_.assign(target_abi().scratch, target_abi().scratch + target_abi().n_scratch);
         global_imm_.clear();
         if (nv == 0) return;
         if (opt_ < 2 || gen_ || f_->has_handlers) return;
@@ -776,8 +775,8 @@ static std::vector<int> block_loop_depth(const IRFunction& f) {
         });
         int next = n_saved_regs_;
         size_t ci = 0;
-        for (; ci < cands.size() && next < kMaxSlotRegs; ++ci)
-            vreg_reg_[static_cast<size_t>(cands[ci].v)] = kSlotRegs[next++];
+        for (; ci < cands.size() && next < kMaxSlotRegs(); ++ci)
+            vreg_reg_[static_cast<size_t>(cands[ci].v)] = kSlotRegs()[next++];
         n_saved_regs_ = next;
 
         // 无调用函数里 %r8–%r11 也不会被任何指令破坏：再拿至多两个
@@ -794,12 +793,12 @@ static std::vector<int> block_loop_depth(const IRFunction& f) {
         if (call_free) {
             int used = 0;
             for (; ci < cands.size() && used < 2; ++ci, ++used)
-                vreg_reg_[static_cast<size_t>(cands[ci].v)] = kTempRegs[used];
-            if (used > 0) block_temp_pool_.assign(kTempRegs + used, kTempRegs + 4);
+                vreg_reg_[static_cast<size_t>(cands[ci].v)] = target_abi().scratch[used];
+            if (used > 0) block_temp_pool_.assign(target_abi().scratch + used, target_abi().scratch + target_abi().n_scratch);
 
             // 无调用函数里 xmm8–15 也不会被破坏：空闲的拿走放跨块浮点值。
             size_t fp_base = fp_promoted_slots_.size();
-            if (fp_base < static_cast<size_t>(kMaxFpSlotRegs)) {
+            if (fp_base < static_cast<size_t>(kMaxFpSlotRegs())) {
                 std::vector<Cand> fcands;
                 for (size_t v = 0; v < nv; ++v) {
                     if (!cross_block_[v] || !vreg_reg_[v].empty()) continue;
@@ -813,8 +812,8 @@ static std::vector<int> block_loop_depth(const IRFunction& f) {
                 });
                 size_t used_fp = 0;
                 for (const auto& cd : fcands) {
-                    if (fp_base + used_fp >= static_cast<size_t>(kMaxFpSlotRegs)) break;
-                    vreg_reg_[static_cast<size_t>(cd.v)] = kFpSlotRegs[fp_base + used_fp];
+                    if (fp_base + used_fp >= static_cast<size_t>(kMaxFpSlotRegs())) break;
+                    vreg_reg_[static_cast<size_t>(cd.v)] = kFpSlotRegs()[fp_base + used_fp];
                     ++used_fp;
                 }
             }

@@ -15,12 +15,11 @@ void AsmGen::gen_rt_none(const Inst& in) {
 // gen_rt_iN 会承接不同参数个数的 RtFn（例如 Raise 只有 2 个实参，却和
 // 4 参的 RtFn 同组）。以前无条件读 args[0..N-1] 会越界读 vector ——
 // ASan 一跑就炸。这里按 args.size() 发射，多余寄存器不写。
-static const char* const kRtArgReg[6] = {"%rdi", "%rsi", "%rdx", "%rcx", "%r8", "%r9"};
 
 void AsmGen::gen_rt_args_n(const Inst& in, int n) {
     const int m = static_cast<int>(in.args.size());
     const int k = m < n ? m : n;
-    for (int i = 0; i < k; ++i) emit2("movq", src_op(in.args[i]), kRtArgReg[i]);
+    for (int i = 0; i < k; ++i) emit2("movq", src_op(in.args[i]), target_abi().arg_int[i]);
 }
 
 void AsmGen::gen_rt_i1(const Inst& in) { gen_rt_args_n(in, 1); }

@@ -14,6 +14,7 @@ endif()
 
 set(PYADAMAS_SOURCES
   src/main.cpp
+  src/target_abi.cpp
   src/driver_util.cpp
   src/driver_build.cpp
   src/builtin_sigs.cpp

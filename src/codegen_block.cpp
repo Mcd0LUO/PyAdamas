@@ -237,10 +237,10 @@ void AsmGen::emit_function(const IRFunction& f, int fi) {
             line("movq %rdi, %r15");
         } else {
             for (int i = 0; i < n_saved_regs_; ++i) {
-                line(std::format("pushq {}", kSlotRegs[i]));
+                line(std::format("pushq {}", kSlotRegs()[i]));
                 cfa_off_ += 8;
                 line(std::format(".cfi_def_cfa_offset {}", cfa_off_));
-                line(std::format(".cfi_offset {}, -{}", kSlotRegs[i], cfa_off_));
+                line(std::format(".cfi_offset {}, -{}", kSlotRegs()[i], cfa_off_));
             }
         }
         frame_alloc();
