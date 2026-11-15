@@ -166,6 +166,10 @@ run_module() {
         echo "CACHE MISS" > "$res"
         return
     fi
+    if ! "$PYADAMAS" check --imports "$d/main.py" > "$modlog/$name.chk" 2>&1; then
+        { echo "CHECK --imports FAILED"; sed -n '1,6p' "$modlog/$name.chk"; } > "$res"
+        return
+    fi
     echo "ran ok" > "$res"
 }
 

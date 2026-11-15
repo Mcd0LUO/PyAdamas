@@ -489,6 +489,17 @@ void TypeChecker::stmt_import_from(ImportFrom& im) {
             return;
         }
         if (im.level != 0 || im.module.empty()) {
+            // 相对导入在 check 模式下没有包上下文；lenient 时声明成
+            // unknown 放过，交给 build 阶段的完整 import 图。
+            if (lenient_imports_) {
+                for (auto& al : im.names) {
+                    std::string bind = al.asname.empty() ? al.name : al.asname;
+                    if (bind == "*") { star_import_ = true; continue; }
+                    declare(bind, t_unknown(), im.line);
+                }
+                unsupported.push_back("relative import");
+                return;
+            }
             err(im.line, im.col, "relative imports are not supported yet");
             return;
         }

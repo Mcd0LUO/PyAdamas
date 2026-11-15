@@ -960,6 +960,17 @@ pyadamas::ModuleInfoPtr check_build_info(pyadamas::TypeChecker& tc,
             }
             flat->origin_module = runtime_name;
             flat->origin_qualname = runtime_name + "." + name;
+            // 祖先链：本地类按 C3 MRO 拍平，导入类沿用它的 origin。
+            for (const pyadamas::ClassInfo* k : cls->mro) {
+                if (!k || k == cls) continue;
+                pyadamas::ClassAncestor a;
+                if (k->imported()) { a.module = k->origin_module; a.name = k->external_name(); a.qualname = k->origin_qualname; }
+                else { a.module = runtime_name; a.name = k->name; a.qualname = runtime_name + "." + k->name; }
+                bool dup = false;
+                for (auto& e : flat->ext_ancestors)
+                    if (e.module == a.module && e.name == a.name) { dup = true; break; }
+                if (!dup) flat->ext_ancestors.push_back(std::move(a));
+            }
             pyadamas::ImportedClass ic;
             if (auto* im = flat->method("__init__"); im && im->call_sig) ic.ctor_sig = im->call_sig;
             if (!ic.ctor_sig) ic.ctor_sig = std::make_shared<pyadamas::FuncInfo>();
