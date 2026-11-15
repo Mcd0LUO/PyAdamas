@@ -4,6 +4,37 @@
 
 早期阶段没有逐条留痕，按阶段归纳；0.4 之后逐条记录。
 
+## [0.181] - 2026-11-16
+
+### 修复异常路径的 GC 根缺失（10 万次异常循环必崩的 UAF）
+
+现象：`tests/run/92_exc_inline_rc.py` 把循环从 2000 改成 100000 后**必然 SIGSEGV(139)**，
+20000 以内正常。gdb 断在 `pa_exc_accept_value -> pa_rc_inc`，即对已释放对象做 `rc_inc`。
+
+**根因不是泄漏，是 GC 根缺失**（`runtime/rt_exc.c`）：
+
+1. `pending_exc_args` / `current_exc_inst` 是 RC owned 的普通 C 全局，**从未登记为 GC 根**。
+   raise 与 accept 之间只要有一次分配触发主收集，它们就会被清扫掉；
+   实测 gdb 抓到 args 表内存已被 `PyAdamasExcValue` 复用（`->len` 读到 `EXCVAL_MAGIC`）。
+2. 异常值构造期间（`pa_list_new` / `str_new` / cause 递归）新对象只存在于 C 局部变量里，
+   主收集同样看不见 —— 只修第 1 条后，20 万次仍会崩在 `exc_new(type=NULL)`。
+
+修法：
+- 首次 raise 前把两个全局槽地址 `pa_gc_add_roots` 登记为根；
+- `exc_value_alloc` / `pa_exc_value_from_exc` 构造期间用临时值栈（`pa_rc_temp` /
+  `pa_rc_temp_take`，本来就是 GC 根）挂住半成品，交还调用方时再取回所有权。
+
+归因证据：修前 `PYADAMAS_GC_DISABLE=1` 下 rc=0（确证是 GC 误回收）；
+`PYADAMAS_GC_CONSERVATIVE=1` 下仍 139（排除 0.175 的位图收窄）。
+
+验证（`tests/run/173_exc_loop_100k.py` 新增）：10 万次连跑 5 次 rc=0，输出与 CPython 一致；
+派生用例 10 万 / 50 万 / **100 万** 次均 rc=0；`MALLOC_CHECK_=3 MALLOC_PERTURB_=170` 下同样稳定；
+`-O0/-O1/-O2` 与 runtime `-O0` 全过。
+**峰值 RSS 不随规模增长**（1 万 / 10 万 / 100 万次都是约 1.9–2.3 MB）——
+之前「每次异常泄漏 0.63KB」的判断是错的，修好根之后没有任何泄漏。
+
+遗留：其它 runtime 模块存在同类「构造期只在 C 局部、不在根上」的窗口（如 `loop_ensure`
+连发 4 个 list、`pa_sys_set_args`），本次只覆盖异常路径，建议后续抽统一 pin 助手再全量审计。
 ## [0.180] - 2026-11-16
 
 ### 标准库：新增 7 个模块 + 3 处补全，并给出覆盖缺口矩阵

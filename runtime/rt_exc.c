@@ -14,6 +14,31 @@ PyAdamasExcSave* exc_save_top;
 void* current_exc_inst;  /* 富异常实例（有字段/方法），RC owned；0 = 普通异常 */
 PyAdamasList* pending_exc_args;  /* 多参异常的可选 args 表（RC owned）；0=无 */
 
+/* 异常全局状态里的 GC 根。pending_exc_args（多参异常的 args 表）和
+   current_exc_inst（富异常实例）是 RC owned 的普通全局：它们不在临时值栈、
+   不在帧记录登记区、也不在寄存器里，major GC 的标记阶段看不见。raise
+   把它挂上、accept 才取走/释放；这中间只要有分配触发主收集，它就会被当成
+   垃圾清扫，accept 里再读就是 use-after-free（10 万次循环实测 SIGSEGV：
+   pa_exc_accept_value -> pa_rc_inc 打在已复用的堆块上，rdi 正是消息串内容）。
+   根表登记的是「槽的地址」，所以这两个指针之后的每次赋值都会被扫到。 */
+static void* exc_root_slots[2];
+static int exc_roots_ready;
+static void exc_gc_roots_ensure(void) {
+    if (exc_roots_ready) return;
+    exc_roots_ready = 1;
+    exc_root_slots[0] = (void*)&pending_exc_args;
+    exc_root_slots[1] = (void*)&current_exc_inst;
+    pa_gc_add_roots(exc_root_slots, 2);
+}
+
+/* 构造期根：多步构造出来的异常值，从「刚分配」到「交回调用方（临时栈/槽）」
+   之间没有任何 GC 根。major GC 的根集合里不含 C 局部变量，而构造过程中还会
+   继续分配（args 列表、消息串、cause 递归调用），中途触发的主收集会把半成品
+   当垃圾清扫，函数返回的就是悬空指针。临时值栈本身是 GC 根，而且它接管的
+   正是对象自带的那个引用：end 时取回，所有权原样交还调用方。 */
+static void exc_construct_begin(void* p) { pa_rc_temp(p); }
+static void exc_construct_end(void* p) { pa_rc_temp_take(p); }
+
 /* 只释放 target 之上（更内层）的帧：target 所在函数还要继续执行，
    它的槽由自己正常退出时释放。先清空槽再 dec，析构里如果重入到用户
    代码也不会二次释放同一份引用。 */
@@ -514,6 +539,12 @@ static PyAdamasExcValue* exc_value_alloc(const char* type, const char* msg) {
                                               exc_value_destroy, exc_value_gc_release,
                                               PYADAMAS_RC_OBJ);
     v->magic = PYADAMAS_EXCVAL_MAGIC;
+    v->type = NULL;
+    v->message = NULL;
+    v->args = NULL;
+    v->cause = NULL;
+    /* 下面的 pa_list_new 走 rc_alloc，可能触发主收集；先把半成品挂成根。 */
+    exc_construct_begin(v);
     size_t tn = strlen(type);
     size_t mn = strlen(msg);
     v->type = (char*)malloc(tn + 1);
@@ -522,7 +553,7 @@ static PyAdamasExcValue* exc_value_alloc(const char* type, const char* msg) {
     memcpy(v->type, type, tn + 1);
     memcpy(v->message, msg, mn + 1);
     v->args = pa_list_new(2, 1);
-    v->cause = NULL;
+    exc_construct_end(v);
     return v;
 }
 
@@ -570,6 +601,7 @@ static char* join_args_cstr(PyAdamasList* args) {
 
 /* 抛多参异常：args 为字符串化实参列表。 */
 _Noreturn void pa_raise_args(PyAdamasStr* type, PyAdamasList* args) {
+    exc_gc_roots_ensure();
     char tn[128];
     int64_t tn_len = type->len;
     if (tn_len < 0 || tn_len >= (int64_t)sizeof(tn)) panic_c("exception type name too long");
@@ -614,6 +646,9 @@ PyAdamasExcValue* pa_exc_value_new_args(PyAdamasStr* type, PyAdamasList* args) {
 PyAdamasExcValue* pa_exc_value_from_exc(PyAdamasException* e) {
     if (!e) return NULL;
     PyAdamasExcValue* v = exc_value_alloc(e->type, e->message);
+    /* v 构造完了，但还没交回调用方；下面的 str_new / cause 递归都可能
+       在 rc_alloc 里触发主收集，先把 v 挂成根。 */
+    exc_construct_begin(v);
     /* 多参异常：优先用 raise 时保留的 args 表重建 e.args；否则退化为单消息。 */
     if (pending_exc_args && pending_exc_args->len >= 1) {
         for (int64_t i = 0; i < pending_exc_args->len; ++i) {
@@ -627,10 +662,12 @@ PyAdamasExcValue* pa_exc_value_from_exc(PyAdamasException* e) {
         pa_list_append(v->args, (int64_t)msg);
     }
     if (e->cause) v->cause = pa_exc_value_from_exc(e->cause);
+    exc_construct_end(v);
     return v;
 }
 
 PyAdamasException* pa_exc_from_value(PyAdamasExcValue* v) {
+    exc_gc_roots_ensure();
     if (!v) pa_raise_c("TypeError", "expected an exception instance");
     if (v->magic != PYADAMAS_EXCVAL_MAGIC) pa_raise_c("TypeError", "expected an exception instance");
     PyAdamasException* e = exc_new(v->type, v->message);
@@ -659,6 +696,7 @@ void pa_raise_value(PyAdamasExcValue* v) { pa_raise_value_from(v, NULL); }
 /* 抛富异常实例：控制流仍用扁平异常做类型匹配，实例单独存起来。
    只记录类名做 except 匹配；实例在 except as e 时取回。 */
 void pa_raise_instance(void* inst, PyAdamasStr* type) {
+    exc_gc_roots_ensure();
     if (!inst) pa_raise_c("TypeError", "exception instance is null");
     char tn[128];
     int64_t n = type ? type->len : 0;
