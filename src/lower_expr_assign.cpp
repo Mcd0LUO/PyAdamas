@@ -161,6 +161,17 @@ void Lowerer::assign_to(Expr& target, VReg v, TypePtr vty) {
                 err(target.line, target.col, "'set' object does not support item assignment");
                 break;
             }
+            // 用户类：MRO 里有 __setitem__ 时按 dunder 分发，否则报错。
+            // 以前直接落到 IndexStore，把对象当 PyAdamasList 解引用 -> 段错误。
+            if (ot && ot->kind == TyKind::Class) {
+                std::vector<TypePtr> gtys{tc_.type_of(s.slice.get()), src_ty};
+                VReg g = dunder_call(obj, ot, "__setitem__", {idx, v}, nullptr, &gtys);
+                if (g == kNoReg)
+                    err(target.line, target.col,
+                        std::format("'{}' object does not support item assignment",
+                                    type_name(ot)));
+                break;
+            }
             // 列表有元素类型，存进去的值要跟着转
             if (ot && ot->kind == TyKind::List && !ot->sub.empty())
                 v = coerce(v, src_ty, ot->sub[0]);

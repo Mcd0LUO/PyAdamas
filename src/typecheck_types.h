@@ -379,6 +379,9 @@ struct ClassInfo {
     // 构造签名就是 __init__ 的调用签名（已去掉 self）。没有 __init__ 时
     // 只允许零实参构造。
     bool has_init = false;
+    // 带 @dataclass 装饰器：由装饰器在运行期合成 __init__，静态看不到。
+    // 实例化时不能按「没有 __init__、不许带实参」判死。
+    bool is_dataclass = false;
     bool has_field_defaults = false;  // 整条继承链上是否有字段初值
     // 实例需要动态属性槽（反射访问了静态字段没有的名字，或 setattr 过一个
     // 非类字面量名字）。降级时给实例末尾留一个 dict 指针槽。

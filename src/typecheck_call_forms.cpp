@@ -421,9 +421,16 @@ TypePtr TypeChecker::call_value(Call& c) {
             else
                 for (auto& arg : c.args) expr(*arg);
         } else {
-            // 没有 __init__：CPython 会报 TypeError，但这类「常量类」
-            // （SafeUUID 的 safe/unsafe/unknown 等）常被带参实例化做
-            // 标记值。check 一律放过、求值实参返回实例；不要判死。
+            // 没有 __init__：CPython 对带实参的实例化报 TypeError。以前
+            // 为了 uuid.SafeUUID 一律放过——但 SafeUUID 其实是 @simple_enum
+            // 生成的枚举，SafeUUID(0) 是 Enum 的值查找，根本不是「无
+            // __init__ 带参实例化」。真正的来源是 @dataclass（装饰器在
+            // 运行期合成 __init__，静态看不到）。所以恢复检查，只对
+            // dataclass 和基类来源未知（is_open）的类放行。
+            if ((!c.args.empty() || !c.keywords.empty()) && !cls->is_open() &&
+                !cls->is_dataclass)
+                err(c.line, c.col,
+                    std::format("'{}' takes no arguments (no __init__)", cls->name));
             for (auto& arg : c.args) expr(*arg);
             for (auto& kw : c.keywords) expr(*kw.value);
         }

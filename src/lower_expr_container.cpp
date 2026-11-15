@@ -74,6 +74,16 @@ VReg Lowerer::lower_subscript(Subscript& s) {
         idx = coerce(idx, tc_.type_of(s.slice.get()), t_int());
         return call_runtime(RtFn::RangeGet, t_int(), {obj, idx});
     }
+    // 用户类：静态类型是类且 MRO 里有 __getitem__ 时按 dunder 分发。
+    // 以前直接落到 IndexLoad，把对象当 PyAdamasList 解引用 -> 段错误。
+    if (ot && ot->kind == TyKind::Class) {
+        std::vector<TypePtr> gtys{tc_.type_of(s.slice.get())};
+        VReg g = dunder_call(obj, ot, "__getitem__", {idx}, nullptr, &gtys);
+        if (g != kNoReg) return g;
+        err(s.line, s.col,
+            std::format("'{}' object is not subscriptable", type_name(ot)));
+        return const_none();
+    }
     // 外层是 for k in range(len(a)) 且提示仍然有效：记下这条 IndexLoad，
     // 等循环体降级完、确认没有副作用后再改成免检查。
     FuncCtx::BoundsHint* bounds_hit = nullptr;

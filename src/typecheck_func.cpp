@@ -402,6 +402,23 @@ void TypeChecker::classdef(ClassDef& c) {
             cls = std::make_shared<ClassInfo>();
         }
         cls->name = c.name;
+        // @dataclass / @dataclasses.dataclass / @dataclass(...)：装饰器会在
+        // 运行期按字段标注合成 __init__，静态看不见。记下来供实例化检查用。
+        for (auto& d : c.decorators) {
+            const Expr* e = d.get();
+            if (!e) continue;
+            const std::string* nm = nullptr;
+            if (e->kind == ExprKind::Name) nm = &static_cast<const Name*>(e)->id;
+            else if (e->kind == ExprKind::Attribute)
+                nm = &static_cast<const Attribute*>(e)->attr;
+            else if (e->kind == ExprKind::Call) {
+                const Expr* f = static_cast<const Call*>(e)->func.get();
+                if (f && f->kind == ExprKind::Name) nm = &static_cast<const Name*>(f)->id;
+                else if (f && f->kind == ExprKind::Attribute)
+                    nm = &static_cast<const Attribute*>(f)->attr;
+            }
+            if (nm && *nm == "dataclass") cls->is_dataclass = true;
+        }
         cls->base = base;
         cls->open = open;
         cls->is_exception_class = is_exc_class;
@@ -891,7 +908,11 @@ void TypeChecker::classdef(ClassDef& c) {
                         TypePtr ty = expr(*as.value);
                         ClassAttrInfo ai;
                         ai.name = nm.id;
-                        ai.ty = ty ? ty : t_unknown();
+                        // 类体里的 `name = None` 是占位/清空，不是「这个类
+                        // 属性就是 NoneType」。钉成 None 会让子类实例上的
+                        // self.name[k] = v 误报（wsgiref 的 headers = None
+                        // 就是这种写法）。和模块级 None 占位同一套处理。
+                        ai.ty = (ty && ty->kind != TyKind::None) ? ty : t_unknown();
                         ai.init = as.value.get();
                         ai.owner = cls.get();
                         class_body_attrs_[nm.id] = ai.ty;

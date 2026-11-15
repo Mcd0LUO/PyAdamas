@@ -36,6 +36,18 @@ VReg Lowerer::lower_builtin_reflect(const std::string& name, Call& c) {
             if (tt && tt->kind == TyKind::Func && tt->fn) builtin = tt->fn->name;
             if (!builtin.empty()) {
                 if (builtin == "object") return const_bool(true);
+                // bytearray / memoryview 在 pyadamas 里根本没有独立表示
+                // （bytearray 被当成 list、memoryview 是 unknown、frozenset
+                // 被当成 set），任何静态答案都是编的。以前把这些名字映射
+                // 到内部等价类型，导致 isinstance([1,2,3], bytearray) 返回
+                // True —— 为一个不存在的类型作假证。宁可报不支持。
+                if (builtin == "bytearray" || builtin == "memoryview" ||
+                    builtin == "frozenset") {
+                    err(c.args[1]->line, c.args[1]->col,
+                        std::format("isinstance() does not support type '{}' yet",
+                                    builtin));
+                    return const_bool(false);
+                }
                 bool known = st && st->kind != TyKind::Unknown;
                 auto kind_is = [&](std::initializer_list<TyKind> ks) {
                     for (auto k : ks)
@@ -55,11 +67,8 @@ VReg Lowerer::lower_builtin_reflect(const std::string& name, Call& c) {
                     else if (builtin == "complex") r = kind_is({TyKind::Complex});
                     else if (builtin == "range") r = kind_is({TyKind::Range});
                     else if (builtin == "bytes") r = kind_is({TyKind::Bytes});
-                    else if (builtin == "bytearray") r = kind_is({TyKind::List});
-                    else if (builtin == "memoryview") r = kind_is({TyKind::Bytes});
                     else if (builtin == "type")
                         r = kind_is({TyKind::Class, TyKind::TypeObj, TyKind::ClassObj});
-                    else if (builtin == "frozenset") r = kind_is({TyKind::Set});
                     else {
                         err(c.args[1]->line, c.args[1]->col,
                             std::format("isinstance() does not support type '{}' yet", builtin));

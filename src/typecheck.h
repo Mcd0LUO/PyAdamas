@@ -106,6 +106,11 @@ public:
     // 多模块编译时由驱动注入：按模块名取已经加载的接口。
     // check 模式：import 图解析失败/属性缺失按 unknown 处理，不判死。
     void set_lenient_imports(bool v) { lenient_imports_ = v; }
+    // 模块级未定义名字：check 模式宽松（标准库基线需要），build/run 模式
+    // 必须严格。否则变量名打错会被降级成一个初值为 0 的全局，运行期
+    // 静默算出 0 而不是抛 NameError —— 这是最难发现的静默错误。
+    void set_strict_module_names(bool v) { strict_module_names_ = v; }
+    bool strict_module_names() const { return strict_module_names_; }
     bool lenient_imports() const { return lenient_imports_; }
     void set_module_lookup(ModuleLookup lookup) { module_lookup_ = std::move(lookup); }
 
@@ -194,6 +199,7 @@ private:
     std::string file_;
     ModuleLookup module_lookup_;
     bool lenient_imports_ = false;
+    bool strict_module_names_ = false;
     std::vector<std::string> cinclude_dirs_;
     // cimport 绑定名 → 声明；extern_by_fn_ 把类型系统里的 FuncInfo 指回
     // .cpya 声明，供降级阶段做 C ABI 编组。

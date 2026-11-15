@@ -127,7 +127,12 @@ TypePtr TypeChecker::check_args(const FuncInfoPtr& fn, Call& c) {
                 }
             }
             if (!p.ty || p.ty->kind == TyKind::Unknown) {
-                if (ty && ty->kind != TyKind::Unknown) {
+                // 实参是 None 时不回填：None 是「没传 / 清空」的哨兵，不是
+                // 「这个形参就是 NoneType」。回填了会把 copy._reconstruct(x,
+                // None, *rv) 这种调用点的 memo 钉成 None，随后 memo[k]=v
+                // 就报「NoneType 不支持下标赋值」。留 unknown，等真正带
+                // 类型的调用点（或干脆一直 unknown）来决定。
+                if (ty && ty->kind != TyKind::Unknown && ty->kind != TyKind::None) {
                     p.ty = ty;
                     p.inferred = true;
                     fn->sig_dirty = true;

@@ -626,6 +626,9 @@ bool build_unit(Program& p, ModuleUnit& u, bool emit_object, bool entry_ir) {
         return program_module(p, name);
     });
     tc->set_cinclude_dirs(p.include_dirs);
+    // build/run 会把模块编成机器码：模块级未定义名字必须当错误报，
+    // 否则降级成初值 0 的全局，运行期静默算错。
+    tc->set_strict_module_names(true);
     tc->check(*u.ast);
     auto t1 = now();
     if (!tc->diags().empty()) {

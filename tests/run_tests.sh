@@ -139,6 +139,25 @@ for f in tests/unsupported/*.py; do
     fi
 done
 
+# ── 必须拒绝（错误在降级/构建期才出现，check 看不到）────────────
+for f in tests/strict/*.py; do
+    [ -e "$f" ] || continue
+    match "$f" || continue
+    name=$(basename "$f")
+    want=$(head -1 "$f" | sed -n 's/^# expect: //p')
+    printf '  %-28s ' "$name"
+    got=$("$PYADAMAS" build -o "$prog" "$f" 2>&1 >/dev/null | head -1)
+    if [ -z "$got" ]; then
+        printf 'COMPILED (expected refusal: %s)\n' "$want"
+        fail=1
+    elif ! printf '%s' "$got" | grep -qF "$want"; then
+        printf 'WRONG: %s\n' "$got"
+        fail=1
+    else
+        printf 'rejected (%s)\n' "$want"
+    fi
+done
+
 # ── 多模块：并行（各自独立目录，缓存互不影响）──────────────────
 modlog="$BUILD/modlogs.$$"
 rm -rf "$modlog"
