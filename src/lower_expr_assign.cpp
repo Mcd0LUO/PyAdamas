@@ -505,8 +505,19 @@ VReg Lowerer::expr(Expr& e) {
                 if (a.attr == "__cause__")
                     return call_runtime(RtFn::ExcValueCause,
                                         mk_optional(mk_exception("Exception")), {ev});
-                // 内置异常的其它属性：静态不可见，返回 unknown（不报错）。
-                return retype(ev, t_unknown());
+                // 异常值只有 args / __cause__ 两个真属性。其它属性以前一律
+                // retype 成 unknown 放行，降级后把异常对象指针当值用（实测
+                // print(e.__traceback__) 打出 99498760223040），是静默算错。
+                // 现在明确拒绝：__traceback__/__context__ 在 CPython 里是
+                // 真属性但本项目没实现，消息写「未实现」；其余名字按不存在报。
+                if (a.attr == "__traceback__" || a.attr == "__context__" ||
+                    a.attr == "__suppress_context__")
+                    err(e.line, e.col,
+                        std::format("exception attribute '{}' is not implemented yet", a.attr));
+                else
+                    err(e.line, e.col,
+                        std::format("'{}' object has no attribute '{}'", type_name(ot), a.attr));
+                return const_none();
             }
             if (ot && ot->kind == TyKind::TypeObj) {
                 VReg tv = expr(*a.value);  // interned 类型名

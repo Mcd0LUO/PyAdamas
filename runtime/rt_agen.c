@@ -168,6 +168,8 @@ void agen_drive(PyAdamasAwait* d) {
         // 异常跳过了 resume 的出口清理：帧里的堆槽当场释放。
         pa_gen_release_slots(g);
         pa_exc_unwind(exc_depth0);
+        /* PEP 479：StopIteration 逃出异步生成器帧 -> RuntimeError。 */
+        pa_exc_pep479(e, "async generator raised StopIteration");
         pa_trace_attach(e, g);
         if (closing && e && strcmp(e->type, "GeneratorExit") == 0) {
             exc_free(e);

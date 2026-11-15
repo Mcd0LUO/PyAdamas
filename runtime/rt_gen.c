@@ -3,6 +3,24 @@
 
 /* ── 生成器 ───────────────────────────────────────────────────── */
 
+/* PEP 479：StopIteration 不该从生成器/协程帧里逃到调用方（for 循环会
+   把它当成「正常结束」静默提前收尾）。CPython 3.7+ 在帧边界把它转成
+   RuntimeError，这里做同一件事：就地改类型与消息，保留对象身份，已经
+   挂上的逻辑帧 traceback 也就跟着保留（__context__ 链本项目没建模）。 */
+void pa_exc_pep479(PyAdamasException* e, const char* msg) {
+    if (!e || !exc_is_a(e->type, "StopIteration")) return;
+    size_t mn = strlen(msg);
+    char* ty = (char*)malloc(sizeof("RuntimeError"));
+    char* ms = (char*)malloc(mn + 1);
+    if (!ty || !ms) panic_c("out of memory");
+    memcpy(ty, "RuntimeError", sizeof("RuntimeError"));
+    memcpy(ms, msg, mn + 1);
+    free(e->type);
+    free(e->message);
+    e->type = ty;
+    e->message = ms;
+}
+
 /* 帧负载：
    [state][status][sent][out][resume][closing][kind][waiter][exc][cur][slot..]
    resume 是状态机入口（void (*)(void*, int64_t)），由生成代码按 state
@@ -89,6 +107,9 @@ int64_t gen_run(void* g, int64_t sent, int* done) {
         pa_rc_cleanup(h.mark);
         /* resume 里换上的异常上下文也要退掉，恢复成调用方那一份。 */
         pa_exc_unwind(exc_depth0);
+        /* PEP 479：StopIteration 逃出生成器帧 -> RuntimeError。转换放在
+           trace 挂载之前，未捕获时打印的仍是这一层的逻辑帧。 */
+        pa_exc_pep479(pending_exc, "generator raised StopIteration");
         pa_trace_attach(pending_exc, g);
         exc_longjmp();
     }
@@ -226,6 +247,8 @@ void pa_gen_close(void* g) {
         p[2] = 0;
         p[3] = 0;
         pa_exc_unwind(exc_depth0);
+        /* close() 重放 finally 时逃出的 StopIteration 同样按 PEP 479 转。 */
+        pa_exc_pep479(pending_exc, "generator raised StopIteration");
         exc_longjmp();
     }
     p[5] = 1;

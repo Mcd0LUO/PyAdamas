@@ -516,6 +516,10 @@ PyAdamasException* exc_clone(PyAdamasException* e);
 const char* exc_parent(const char* name);
 int exc_is_a(const char* child, const char* want);
 void exc_print_uncaught(PyAdamasException* e);
+/* PEP 479：生成器/异步生成器/协程帧里逃出的 StopIteration 在 CPython 3.7+
+   会转成 RuntimeError（StopIteration 子类同样转换）。就地改类型与消息，
+   不是 StopIteration 时什么也不做。实现在 rt_gen.c。 */
+void pa_exc_pep479(PyAdamasException* e, const char* msg);
 _Noreturn void exc_longjmp(void);
 void* pa_handler_push(void);
 void pa_handler_leave(void* p);

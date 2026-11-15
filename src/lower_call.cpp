@@ -417,18 +417,31 @@ VReg Lowerer::lower_call(Call& c) {
         auto& n = static_cast<Name&>(*c.func);
         // 异常构造器：内置异常名和自定义异常类都产生异常值
         bool exc_ctor = TypeChecker::is_exception_type(n.id) && is_builtin(n.id);
+        // 跨模块导入的自定义异常类：pass-only 产生扁平异常值，富异常走
+        // 导入类构造。类型名用定义模块里的原名（别名不参与匹配）。
+        std::string exc_name = n.id;
         // 富异常（有字段/方法）不产生扁平值，走普通类构造（vtable 实例）。
         const ClassInfo* rich_exc = nullptr;
         if (!exc_ctor) {
             auto eit = classes_.find(n.id);
             if (eit != classes_.end() && eit->second->is_exception_class) {
                 if (eit->second->is_rich_exception) rich_exc = eit->second.get();
-                else exc_ctor = true;
+                else {
+                    exc_ctor = true;
+                    exc_name = eit->second->name;
+                }
+            } else if (auto iit = imported_classes_.find(n.id);
+                       iit != imported_classes_.end() && iit->second.cls &&
+                       iit->second.cls->is_exception_class) {
+                if (iit->second.cls->is_rich_exception)
+                    return construct_imported(iit->second, c, mk_class(iit->second.cls.get()));
+                exc_ctor = true;
+                exc_name = iit->second.cls->external_name();
             }
         }
         if (rich_exc) return lower_construct(c, classes_[n.id]);
         if (exc_ctor) {
-            VReg type = const_str(n.id);
+            VReg type = const_str(exc_name);
             // 关键字实参：求值但丢弃（简化）。多位置参 → 建 args 列表。
             for (auto& kw : c.keywords) expr(*kw.value);
             if (c.args.size() > 1 || (c.args.empty() && c.keywords.empty())) {
@@ -437,7 +450,7 @@ VReg Lowerer::lower_call(Call& c) {
                     in.op = IrOp::CallRt;
                     in.imm = static_cast<int64_t>(RtFn::ExcValueNew);
                     in.args = {type, const_int(0)};
-                    return def_heap(mk_exception(n.id), std::move(in));
+                    return def_heap(mk_exception(exc_name), std::move(in));
                 }
                 TypePtr lt = mk_list(t_str());
                 VReg al = call_runtime(RtFn::ListNew, lt,
@@ -455,7 +468,7 @@ VReg Lowerer::lower_call(Call& c) {
                 in.op = IrOp::CallRt;
                 in.imm = static_cast<int64_t>(RtFn::ExcValueNewArgs);
                 in.args = {type, al};
-                return def_heap(mk_exception(n.id), std::move(in));
+                return def_heap(mk_exception(exc_name), std::move(in));
             }
             // 单位置参：走单消息 ExcValueNew（保持 e.args == [msg]）
             VReg msg = const_int(0);
@@ -468,7 +481,7 @@ VReg Lowerer::lower_call(Call& c) {
             in.op = IrOp::CallRt;
             in.imm = static_cast<int64_t>(RtFn::ExcValueNew);
             in.args = {type, msg};
-            return def_heap(mk_exception(n.id), std::move(in));
+            return def_heap(mk_exception(exc_name), std::move(in));
         }
         // sizeof / addr 是值类型 struct 的特殊形式；用户自己定义了同名
         // 函数或类时按普通调用处理。
@@ -585,8 +598,8 @@ VReg Lowerer::lower_call(Call& c) {
             if (auto it = classes_.find(cls->name);
                 it != classes_.end() && it->second.get() == cls)
                 return lower_construct(c, it->second);
-            for (auto& [iname, ic] : imported_classes_)
-                if (ic.cls.get() == cls) return construct_imported(ic, c, mk_class(cls));
+            if (const ImportedClass* ic = find_imported_class(cls))
+                return construct_imported(*ic, c, mk_class(cls));
         }
         err(c.line, c.col, "class value is not available for construction here");
         return const_none();

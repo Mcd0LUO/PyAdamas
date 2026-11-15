@@ -214,6 +214,13 @@ TypePtr TypeChecker::call_attr(Attribute& a, Call& c) {
                 }
                 if (auto ci = mod->classes.find(a.attr); ci != mod->classes.end()) {
                     auto cls = ci->second.cls;
+                    // 跨模块异常类构造：CPython 允许任意位置参（生成 args），
+                    // 与 from m import E 的 cname 分支口径一致。
+                    if (cls->is_exception_class) {
+                        for (auto& arg : c.args) expr(*arg);
+                        for (auto& kw : c.keywords) expr(*kw.value);
+                        return mk_class(cls.get());
+                    }
                     if (cls->has_init && ci->second.ctor_sig) {
                         check_args(ci->second.ctor_sig, c);
                     } else if (!c.args.empty() || !c.keywords.empty()) {

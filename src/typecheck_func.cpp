@@ -360,10 +360,14 @@ void TypeChecker::classdef(ClassDef& c) {
                     if (!lookup(bn->id) && is_exception_name(bn->id)) {
                         is_exc_class = true;
                         exc_parent = bn->id;
-                    } else if (auto it = classes_.find(bn->id);
-                               it != classes_.end() && it->second->is_exception_class) {
+                    } else if (auto* sym = lookup(bn->id);
+                               sym && sym->ty && sym->ty->kind == TyKind::Class && sym->ty->cls &&
+                               sym->ty->cls->is_exception_class) {
+                        // 本模块定义或跨模块导入的异常类作基类。父名用定义
+                        // 模块里的原名：运行期注册表按名字串匹配，本地别名
+                        //（from lib import LibError as LE）不能拿来注册。
                         is_exc_class = true;
-                        exc_parent = bn->id;
+                        exc_parent = sym->ty->cls->external_name();
                     }
                 }
             }

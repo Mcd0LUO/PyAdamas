@@ -755,6 +755,9 @@ private:
     void lower_try_core(Try& t);
     void lower_finally(Try& t);
     VReg lower_exc_match(Expr& type);
+    // except / raise 名字位置的异常类解析：内置异常名或本模块/导入的自定义
+    // 异常类；out 是运行期注册表里的类型名（导入类用定义模块里的原名）。
+    bool exc_type_name(Expr& e, std::string& out);
     // except `RichExc as e` 是否富异常类（有字段/方法），是则返回那个类。
     const ClassInfo* rich_exc_handler(ExceptHandler* h);
     VReg raise_exception(const std::string& type, VReg msg);
@@ -1023,6 +1026,9 @@ private:
     // 运行期类对象：本地类读类定义点写入的隐藏全局；导入类按需构造。
     VReg local_class_object(const std::string& name);
     VReg imported_class_object(const ImportedClass& ic);
+    // 按 ClassInfo 指针找导入类元数据（from m import C 的绑定表 + 模块别名
+    // 下的类）。用于类值构造跨模块异常实例等场景。
+    const ImportedClass* find_imported_class(const ClassInfo* cls);
     VReg lower_dunder_eq(VReg l, TypePtr lt, VReg r, TypePtr rt, bool ne);
     // 类作为 dict/set key：__hash__ 和 __eq__ 都存在时返回两个 vtable
     // 槽号，否则 (-1, -1)（运行时按机器字哈希/比较）。

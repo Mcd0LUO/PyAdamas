@@ -4,30 +4,72 @@
 namespace pyadamas {
 
 // except `RichExc as e` 里的 RichExc 是不是富异常类（有字段/方法）。
+// 本模块类和跨模块导入的类都认：导入类靠接口里的 is_rich_exception 标记。
 const ClassInfo* Lowerer::rich_exc_handler(ExceptHandler* h) {
     if (!h || h->name.empty() || !h->type) return nullptr;
     if (h->type->kind != ExprKind::Name) return nullptr;
     auto& n = static_cast<Name&>(*h->type);
-    auto it = classes_.find(n.id);
-    if (it == classes_.end() || !it->second) return nullptr;
-    if (it->second->is_exception_class && it->second->is_rich_exception)
-        return it->second.get();
+    if (auto it = classes_.find(n.id); it != classes_.end() && it->second) {
+        if (it->second->is_exception_class && it->second->is_rich_exception)
+            return it->second.get();
+        return nullptr;
+    }
+    // 跨模块导入的富异常类：except as e 绑定 mirror 实例。
+    if (auto iit = imported_classes_.find(n.id); iit != imported_classes_.end()) {
+        const ClassInfo* cls = iit->second.cls.get();
+        if (cls && cls->is_exception_class && cls->is_rich_exception) return cls;
+    }
     return nullptr;
+}
+
+// except / raise 名字位置能接受什么：内置异常名，或本模块/导入的自定义
+// 异常类。out 是运行期注册表里的类型名 —— 导入类必须用定义模块里的原名
+//（from lib import LibError as LE 的别名不能用于匹配/注册）。
+bool Lowerer::exc_type_name(Expr& e, std::string& out) {
+    if (e.kind == ExprKind::Name) {
+        auto& n = static_cast<Name&>(e);
+        if (TypeChecker::is_exception_type(n.id) && is_builtin(n.id)) {
+            out = n.id;
+            return true;
+        }
+        if (auto it = classes_.find(n.id); it != classes_.end() && it->second) {
+            if (!it->second->is_exception_class) return false;
+            out = it->second->name;
+            return true;
+        }
+        if (auto iit = imported_classes_.find(n.id); iit != imported_classes_.end()) {
+            const ClassInfo* cls = iit->second.cls.get();
+            if (!cls || !cls->is_exception_class) return false;
+            out = cls->external_name();
+            return true;
+        }
+        return false;
+    }
+    if (e.kind == ExprKind::Attribute) {
+        // import lib; try: ... except lib.LibError: —— 模块别名下的异常类。
+        auto& a = static_cast<Attribute&>(e);
+        if (auto* vn = dynamic_cast<Name*>(a.value.get())) {
+            if (auto mod = resolve_module_alias(vn->id)) {
+                auto it = mod->classes.find(a.attr);
+                if (it == mod->classes.end() || !it->second.cls ||
+                    !it->second.cls->is_exception_class)
+                    return false;
+                out = it->second.cls->external_name();
+                return true;
+            }
+        }
+        return false;
+    }
+    return false;
 }
 
 
 
 VReg Lowerer::lower_exc_match(Expr& type) {
     auto one = [&](Expr& e) -> VReg {
-        if (e.kind == ExprKind::Name) {
-            auto& n = static_cast<Name&>(e);
-            bool builtin = TypeChecker::is_exception_type(n.id) && is_builtin(n.id);
-            bool custom = false;
-            if (auto it = classes_.find(n.id); it != classes_.end())
-                custom = it->second->is_exception_class;
-            if (builtin || custom)
-                return call_runtime(RtFn::ExcMatches, t_bool(), {const_str(n.id)});
-        }
+        std::string name;
+        if (exc_type_name(e, name))
+            return call_runtime(RtFn::ExcMatches, t_bool(), {const_str(name)});
         err(e.line, e.col, "except requires an exception name");
         return const_bool(false);
     };
@@ -88,11 +130,6 @@ void Lowerer::lower_raise(Raise& r) {
                     "raise from requires an exception or None");
         }
     }
-    auto is_exc_name = [&](const std::string& n) {
-        if (TypeChecker::is_exception_type(n) && is_builtin(n)) return true;
-        auto it = classes_.find(n);
-        return it != classes_.end() && it->second->is_exception_class;
-    };
     TypePtr xt = tc_.type_of(r.exc.get());
 
     // 富异常（自定义异常类有字段/方法）：构造真实例后抛实例。
@@ -116,24 +153,26 @@ void Lowerer::lower_raise(Raise& r) {
     VReg msg = kNoReg;
     Expr& e = *r.exc;
     if (e.kind == ExprKind::Name) {
-        auto& n = static_cast<Name&>(e);
-        if (!is_exc_name(n.id)) {
+        if (!exc_type_name(e, type)) {
             err(e.line, e.col, "raise requires an exception name or instance");
             return;
         }
-        type = n.id;
+    } else if (e.kind == ExprKind::Attribute) {
+        // 裸 raise lib.LibError：模块属性形式的异常类。
+        if (!exc_type_name(e, type)) {
+            err(e.line, e.col, "raise requires an exception name or instance");
+            return;
+        }
     } else if (e.kind == ExprKind::Call) {
         auto& c = static_cast<Call&>(e);
-        if (c.func->kind != ExprKind::Name) {
-            err(e.line, e.col, "raise requires a built-in exception name");
-            return;
-        }
-        auto& n = static_cast<Name&>(*c.func);
-        if (!is_exc_name(n.id)) {
+        if (c.func->kind != ExprKind::Name && c.func->kind != ExprKind::Attribute) {
             err(e.line, e.col, "raise requires an exception name or instance");
             return;
         }
-        type = n.id;
+        if (!exc_type_name(*c.func, type)) {
+            err(e.line, e.col, "raise requires an exception name or instance");
+            return;
+        }
         for (auto& kw : c.keywords) expr(*kw.value);
         // 多位置参：逐个字符串化收集成 list[str]，交给运行期建 args 和消息。
         // 单参数保持旧语义（消息=str，e.args == [msg]），避免行为回归。

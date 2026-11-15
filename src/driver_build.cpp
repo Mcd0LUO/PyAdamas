@@ -676,6 +676,10 @@ bool build_unit(Program& p, ModuleUnit& u, bool emit_object, bool entry_ir) {
                 flat->has_init = cls->has_init;
                 flat->has_field_defaults = cls->has_field_defaults;
                 flat->open = cls->is_open();
+                // 异常类标记要跟着接口走，导入方才能放行 except/raise 名字。
+                flat->is_exception_class = cls->is_exception_class;
+                flat->is_rich_exception = cls->is_rich_exception;
+                flat->exc_parent = cls->exc_parent;
                 for (auto it = chain.rbegin(); it != chain.rend(); ++it)
                     for (auto& f : (*it)->fields) flat->fields.push_back(f);
                 // __match_args__ 决定位置类模式的字段顺序，要跟着接口走。
@@ -918,6 +922,9 @@ pyadamas::ModuleInfoPtr check_build_info(pyadamas::TypeChecker& tc,
             flat->complete = true;
             flat->has_init = cls->has_init;
             flat->open = cls->is_open();
+            flat->is_exception_class = cls->is_exception_class;
+            flat->is_rich_exception = cls->is_rich_exception;
+            flat->exc_parent = cls->exc_parent;
             for (auto it = chain.rbegin(); it != chain.rend(); ++it)
                 for (auto& f : (*it)->fields) flat->fields.push_back(f);
             if (const auto* ma = cls->match_args_of()) flat->match_args = *ma;

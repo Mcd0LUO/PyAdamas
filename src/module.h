@@ -34,7 +34,10 @@ struct ModuleInfo {
     std::map<std::string, ImportedClass> classes;
 };
 
-inline constexpr uint16_t kModuleFormatVersion = 10;
+// 11：类记录追加 is_exception_class / is_rich_exception / exc_parent。
+// 跨模块的 except/raise 名字位置要靠它判断「这个导入类是不是异常类」，
+// 否则只能在导入方报 except requires an exception name。
+inline constexpr uint16_t kModuleFormatVersion = 11;
 inline constexpr uint16_t kModuleAbiVersion = 1;
 
 std::expected<std::string, std::string> encode_module_interface(const ModuleInfo& info);

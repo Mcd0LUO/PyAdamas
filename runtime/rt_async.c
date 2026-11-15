@@ -747,6 +747,8 @@ void coro_step(void* c) {
         handler_top = h.prev;
         PyAdamasException* e = pending_exc;
         pending_exc = NULL;
+        // PEP 479：StopIteration 逃出协程帧 -> RuntimeError（CPython 同款）。
+        pa_exc_pep479(e, "coroutine raised StopIteration");
         pa_trace_attach(e, c);
         pa_rc_cleanup(h.mark);
         p[1] = 2;

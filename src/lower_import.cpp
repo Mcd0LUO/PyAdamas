@@ -19,6 +19,25 @@ ModuleInfoPtr Lowerer::resolve_module_alias(const std::string& name) const {
     return nullptr;
 }
 
+const ImportedClass* Lowerer::find_imported_class(const ClassInfo* cls) {
+    if (!cls) return nullptr;
+    for (auto& [name, ic] : imported_classes_)
+        if (ic.cls.get() == cls) return &ic;
+    auto scan = [&](const ModuleInfoPtr& mod) -> const ImportedClass* {
+        if (!mod) return nullptr;
+        for (auto& [name, ic] : mod->classes)
+            if (ic.cls.get() == cls) return &ic;
+        return nullptr;
+    };
+    if (st_) {
+        for (auto& [name, mod] : st_->modules)
+            if (const ImportedClass* ic = scan(mod)) return ic;
+    }
+    for (auto& [name, mod] : module_aliases_)
+        if (const ImportedClass* ic = scan(mod)) return ic;
+    return nullptr;
+}
+
 void Lowerer::ensure_module_init(const ModuleInfoPtr& mod) {
     if (!mod) return;
     int idx = -1;

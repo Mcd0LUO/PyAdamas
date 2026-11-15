@@ -494,6 +494,11 @@ std::expected<std::string, std::string> encode_module_interface(const ModuleInfo
             e.u8(c.has_init ? 1 : 0);
             e.u8(c.complete ? 1 : 0);
             e.u8(c.open ? 1 : 0);
+            // 异常类标记：导入方的 except/raise 名字位置与 except as e 绑定
+            // 形态（扁平异常值 / 富实例）都依赖这三项。
+            e.u8(c.is_exception_class ? 1 : 0);
+            e.u8(c.is_rich_exception ? 1 : 0);
+            e.str(c.exc_parent);
             enc_sig(e, ic.ctor_sig);
             e.str(ic.ctor_symbol);
         }
@@ -590,6 +595,9 @@ std::expected<ModuleInfoPtr, std::string> decode_module_interface(const std::str
             cls->has_init = d.u8() != 0;
             cls->complete = d.u8() != 0;
             cls->open = d.u8() != 0;
+            cls->is_exception_class = d.u8() != 0;
+            cls->is_rich_exception = d.u8() != 0;
+            cls->exc_parent = d.str();
             ImportedClass ic;
             ic.cls = cls;
             ic.ctor_sig = dec_sig(d);
