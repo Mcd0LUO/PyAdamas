@@ -1108,16 +1108,22 @@ static void gc_collect(int major) {
         if (rc_stats_on) stat_gc_freed++;
         freed++;
         gc_free_body(h);
+        /* 释放过的槽清空：后面的晋升阶段还要遍历这张表，而这里的 free
+           可能把整页还给系统（Windows 的堆管理器会直接 decommit），
+           再去读 h->marked 就是访问已释放内存。放在这里清空，晋升阶段
+           只需要判空，语义上与「marked 里没有 MARK」完全等价。 */
+        gc_set[i] = NULL;
     }
     gc_sweeping = 0;
     gc_phase = GC_PHASE_NONE;
     gc_mark_sweep = 0;
     if (t0) t5 = gc_now_ms();
 
-    // 6. 晋升：本轮存活的新生代变成老生代。
+    // 6. 晋升：本轮存活的新生代变成老生代。被清扫掉的槽已经是 NULL，
+    // 这里不能再解引用它们。
     for (size_t i = 0; i < gc_set_len; ++i) {
         PyAdamasRc* h = gc_set[i];
-        if (!(h->marked & PYADAMAS_RC_MARK)) continue;
+        if (!h) continue;
         h->marked = 0;
         old_bytes += h->size + PYADAMAS_RC_HDR;
     }

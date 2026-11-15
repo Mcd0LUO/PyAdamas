@@ -44,8 +44,17 @@ void AsmGen::emit_arg(int pos, bool is_fp, int cls_idx, const std::string& v) {
             return;
         }
         const int off = out_base() + 8 * (pos - 4);
-        if (is_fp) line(std::format("movsd {}, {}(%rsp)", v, off));
-        else emit2("movq", v, std::format("{}(%rsp)", off));
+        if (is_fp) {
+            line(std::format("movsd {}, {}(%rsp)", v, off));
+        } else if (v.find('(') != std::string::npos) {
+            /* 栈传实参的源操作数可能在内存里（mem-to-mem 非法）：借
+               Win64 的 caller-saved scratch %r10 中转。实参寄存器只到
+               %r9，%r10 不会和已装填的实参冲突。 */
+            emit2("movq", v, "%r10");
+            emit2("movq", "%r10", std::format("{}(%rsp)", off));
+        } else {
+            emit2("movq", v, std::format("{}(%rsp)", off));
+        }
         return;
     }
     // SysV：整型与浮点各一套独立计数器；该类寄存器用完后落栈。

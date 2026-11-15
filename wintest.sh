@@ -13,7 +13,7 @@ winrt() {
   local objs=""
   for f in runtime/rt_*.c; do
     local b=$(basename "$f" .c)
-    [ "$b" = "rt_subprocess" ] && continue      # 尚未移植
+    # rt_subprocess 已移植      # 尚未移植
     x86_64-w64-mingw32-gcc -O1 -c "$f" -I runtime -o /tmp/winrt/$b.o 2>/dev/null && objs="$objs /tmp/winrt/$b.o"
   done
   x86_64-w64-mingw32-ld -r -o "$RTOBJ" $objs && echo "rt_win.o ok"
