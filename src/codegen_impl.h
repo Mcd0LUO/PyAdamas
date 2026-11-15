@@ -365,10 +365,10 @@ private:
     }
 
     // 帧记录（PyAdamasFrame）在槽位区上面，内存里从低地址往高地址依次是
-    // prev、n、临时区起点、临时区字数、槽地址×n，与两边共用的结构体
-    // 布局一致。
+    // prev、n、临时区起点、临时区字数、临时区位图、槽地址×n，与两边共用
+    // 的结构体布局一致。
     int rec_off(int i) const {
-        int words = 4 + static_cast<int>(frame_owned_.size() + frame_scan_.size());
+        int words = 5 + static_cast<int>(frame_owned_.size() + frame_scan_.size());
         return out_bytes_ + locals_ - 8 * (words - i);
     }
     std::string rec_mem(int i) const { return std::format("{}(%rsp)", rec_off(i)); }
@@ -400,8 +400,13 @@ private:
     std::vector<bool> frame_owned_unknown_;
     // 借来的 unknown 槽：只登记给 GC 扫描，异常展开不释放。
     std::vector<int> frame_scan_;
-    // 含 unknown vreg 时，需要保守扫描的临时区字数（0 表示没有）。
+    // 需要保守扫描的临时区字数（0 表示这个帧的临时区一个字节都不扫）。
     int frame_scan_words_ = 0;
+    // 临时区位图：bit i = 1 表示第 i 个字可能需 GC 保守扫描。空表示没有
+    // 位图（运行时按整段扫）。位图必须是超集，宁多勿少。
+    std::vector<uint64_t> frame_scan_mask_;
+    // 按 vreg 静态类型算出临时区的保守扫描范围 / 位图（见 codegen_block.cpp）。
+    void build_frame_scan_info(const IRFunction& f);
 
     const std::string& mem(VReg r) const {
         if (r < static_cast<VReg>(vreg_reg_.size()) && !vreg_reg_[r].empty())

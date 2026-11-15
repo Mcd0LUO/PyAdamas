@@ -136,6 +136,69 @@ int AsmGen::outgoing_bytes(const IRFunction& f) const {
     return (worst + 15) & ~15;
 }
 
+// ── GC 保守扫描范围（临时区） ──────────────────────────────────
+//
+// 判据里只有一条算「证明」：静态类型是 unknown（或没有类型）的字可能装
+// 着 unknown 值——unknown 的机器表示既可能是整数，也可能是借来的堆指针，
+// 只有保守扫描能兜住。其余类型：
+//
+//   - int / bool / float / None / Optional[标量]：机器表示不可能是堆指针；
+//     float 的位模式即使撞上堆地址也只能造成误报，不扫只会少留垃圾；
+//   - 堆类型（str/list/dict/类实例……）：引用要么是 owned（在临时栈 /
+//     槽 / 容器里，GC 从精确根可达），要么是 borrowed 而其持有者本身从根
+//     可达，所以不需要按字扫——这也是「纯类型化帧整帧不扫」的既有前提；
+//   - BoundMethod / 非 C 结构体指针：机器表示是指针但不归 RC 管，静态上
+//     说不清谁持有它，一律标 1（宁可多扫）；
+//   - vreg 槽复用：一个字被多个 vreg 用过时，只要任一 vreg 需要扫，这个
+//     字就标 1（按字取并集）。
+//
+// 位图是超集，宁多勿少：少扫一个真正含指针的字 = 提前释放 = UAF，比多留
+// 一个垃圾严重得多。收窄不到一半时直接不发位图，让运行时按整段扫。
+void AsmGen::build_frame_scan_info(const IRFunction& f) {
+        frame_scan_words_ = 0;
+        frame_scan_mask_.clear();
+        if (gen_ || n_vreg_slots_ <= 0 || vreg_slot_.empty()) return;
+        const size_t nwords = static_cast<size_t>(n_vreg_slots_);
+        std::vector<uint64_t> mask((nwords + 63) / 64, 0);
+        // 该类型在临时区里是否可能留下一个「只能靠保守扫描看见」的指针。
+        auto maybe_pointer = [](const TypePtr& t, auto&& self) -> bool {
+            if (!t) return true;
+            switch (t->kind) {
+                case TyKind::Unknown:
+                    return true;
+                // Optional 的机器表示是「内层值或 0」：内层是 unknown 时
+                // 可能是借来的指针。
+                case TyKind::Optional:
+                    return self(t->sub.empty() ? TypePtr() : t->sub[0], self);
+                case TyKind::BoundMethod:
+                    return true;
+                case TyKind::StructPtr:
+                    return !(t->st && t->st->c_struct);
+                default:
+                    return false;
+            }
+        };
+        int64_t nbits = 0;
+        for (size_t v = 0; v < f.vreg_ty.size(); ++v) {
+            if (!maybe_pointer(f.vreg_ty[v], maybe_pointer)) continue;
+            // 槽号越界说明布局和 vreg 表对不上：这时不敢收窄，直接按整段扫。
+            if (v >= vreg_slot_.size()) return;
+            int s = vreg_slot_[v];
+            if (s < 0 || s >= static_cast<int>(nwords)) return;
+            uint64_t& w = mask[static_cast<size_t>(s) >> 6];
+            uint64_t bit = static_cast<uint64_t>(1) << (s & 63);
+            if (!(w & bit)) {
+                w |= bit;
+                ++nbits;
+            }
+        }
+        if (nbits == 0) return;  // 这一帧的临时区零扫描
+        frame_scan_words_ = n_vreg_slots_;
+        // 收窄不到一半就不发位图：整段扫的每字成本更低。
+        if (nbits * 2 > static_cast<int64_t>(nwords)) return;
+        frame_scan_mask_ = std::move(mask);
+}
+
 void AsmGen::emit_function(const IRFunction& f, int fi) {
         f_ = &f;
         fi_ = fi;
@@ -146,6 +209,7 @@ void AsmGen::emit_function(const IRFunction& f, int fi) {
         frame_owned_unknown_.clear();
         frame_scan_.clear();
         frame_scan_words_ = 0;
+        frame_scan_mask_.clear();
         cur_loc_line_ = 0;
         auto t_alloc = std::chrono::steady_clock::now();
         assign_vreg_slots();
@@ -179,18 +243,15 @@ void AsmGen::emit_function(const IRFunction& f, int fi) {
                 if (!owned_heap && (unk || unk_ty) && slot_reg_[s].empty())
                     frame_scan_.push_back(static_cast<int>(s));
             }
-            // 临时区里可能流过 unknown 值：含 unknown vreg 的帧把整段
-            // vreg 槽登记给 GC，别的帧一个字节都不扫。
-            for (auto& vt : f.vreg_ty)
-                if (!vt || vt->kind == TyKind::Unknown) {
-                    frame_scan_words_ = n_vreg_slots_;
-                    break;
-                }
+            // 临时区里可能流过 unknown 值：只有「可能装指针」的帧才登记
+            // 临时区，纯 int/float 帧和纯类型化帧一个字节都不扫。
+            build_frame_scan_info(f);
         }
         const int rec_entries =
             static_cast<int>(frame_owned_.size() + frame_scan_.size());
+        // 记录头 5 个字：prev、n、临时区起点、临时区字数、临时区位图。
         const int rec_words =
-            (rec_entries == 0 && frame_scan_words_ == 0) ? 0 : 4 + rec_entries;
+            (rec_entries == 0 && frame_scan_words_ == 0) ? 0 : 5 + rec_entries;
         assign_global_vreg_regs();
         assign_block_temp_regs();
         build_fp_liveness();
@@ -305,7 +366,14 @@ void AsmGen::emit_function(const IRFunction& f, int fi) {
                     emit_imm_op("movq", static_cast<int64_t>(0), rec_mem(2));
                 }
                 emit_imm_op("movq", static_cast<int64_t>(frame_scan_words_), rec_mem(3));
-                int ri = 4;
+                if (!frame_scan_mask_.empty()) {
+                    // 位图是静态只读数据，地址编译期就能定。
+                    line(std::format("leaq .Lscanmask{}(%rip), %rax", fi));
+                    emit2("movq", "%rax", rec_mem(4));
+                } else {
+                    emit_imm_op("movq", static_cast<int64_t>(0), rec_mem(4));
+                }
+                int ri = 5;
                 for (size_t i = 0; i < frame_owned_.size(); ++i, ++ri) {
                     line(std::format("leaq {}, %rax", smem(frame_owned_[i])));
                     // 低位标记：该槽可能装着非堆值，展开时走注册表释放。
@@ -370,6 +438,14 @@ void AsmGen::emit_function(const IRFunction& f, int fi) {
         }
         cfi(".cfi_endproc");
         emit_size_func(fname);
+        if (!frame_scan_mask_.empty()) {
+            // 临时区位图：只读静态数据，运行时按位决定扫哪些字。
+            out_ += "\t.pushsection .rodata\n\t.align 8\n";
+            out_ += std::format(".Lscanmask{}:\n", fi);
+            for (uint64_t w : frame_scan_mask_)
+                out_ += std::format("\t.quad 0x{:016x}\n", w);
+            out_ += "\t.popsection\n";
+        }
         emit_ns_ += std::chrono::duration<double, std::nano>(
                         std::chrono::steady_clock::now() - t_emit)
                         .count();

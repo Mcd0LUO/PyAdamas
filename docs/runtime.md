@@ -624,7 +624,7 @@ longjmp 回同步调用点。GC 清扫和进程退出不跑析构器，但会单
 
 | 函数 | 签名 | 语义 |
 |---|---|---|
-| `pa_gc_init` | `(void** roots, i64 n, void* stack_top) -> void` | 注册全局根表与栈顶，生成的 `main` 调一次 |
+| `pa_gc_init` | `(void** roots, i64 n, void* stack_top) -> void` | 注册全局根表与栈顶，生成的 `main` 调一次；顺带按 `PYADAMAS_GC_STATS` / `PYADAMAS_GC_CONSERVATIVE` 打开诊断与收窄回退（各读一次环境变量） |
 | `pa_gc_collect` | `() -> void` | 分配量超过 2MB 时由 `rc_alloc` 自动触发 |
 | `pa_gc_unref_child` | `(void*) -> void` | GC 清扫用：对象可达时把引用计数减一 |
 | `pa_gc_shutdown` | `() -> void` | 程序退出，释放所有剩余堆对象（含环） |
@@ -800,8 +800,96 @@ landing pad 会把这段临时值精确清掉；异常路径不会泄漏已 reta
 
 保守扫描的代价是「误报只会延迟回收」：登记区或寄存器里的整数如果恰好
 等于某个堆地址，会把它当根留下；不会把可达对象误判成垃圾。误报面已经从
-「整段真实栈」缩小到「登记过的 unknown 槽 + 含 unknown vreg 的帧的临时
-区」，纯类型化帧不参与扫描。
+「整段真实栈」缩小到「登记过的 unknown 槽 + 可能装指针的帧的临时区」，
+纯类型化帧不参与扫描；临时区里「不可能装指针的字」也不再扫（见下一节），
+不再整段保守扫描。
+
+### GC 诊断与临时区扫描收窄
+
+**诊断开关**：`PYADAMAS_GC_STATS=1` 打开 GC 诊断。入口 `pa_gc_init` 只读
+一次环境变量、缓存成全局 int，之后分配 / RC 热路径没有任何额外读写；关闭
+时 GC 仍走原来的单遍扫描路径。每轮收集往 stderr 打三行，退出时打汇总：
+
+```
+[gcstats] #3 minor 0.412ms set=1200 freed=1190 live_objs=2345 live_bytes=456789
+[gcstats]   roots frames=4 slots=7 temp_words=12/40 reg_words=25 mask=on
+[gcstats]   cons_kept 3 objs / 240 bytes (temp=2/160 slot=1/80 reg=0/0)
+```
+
+- `set` / `freed` / `live_objs` / `live_bytes`：本轮集合大小、清扫掉的对象
+  数、收集后链上存活对象数与堆字节数；
+- `roots`：登记帧数、登记槽数、临时区实际扫描字数 / 整段字数、寄存器扫描
+  字数（`setjmp` 存下的 callee-saved 寄存器，按机器字整段扫）、位图是否
+  生效（`on` / `none` / `off(conservative)`）；
+- `cons_kept`：**没有精确根能到达、只在保守扫描阶段才被标活的对象**。诊断
+  模式先把全局、临时栈、已知堆槽这些精确根扫完并排空工作栈，再扫临时区 /
+  unknown 槽 / 寄存器；第二段新标上的对象就是「只靠保守根维持」的那批——
+  这是误报保留的直接度量，按临时区 / unknown 槽 / 寄存器分开计。它衡量
+  的是「整段扫描多留了多少垃圾」，不是「程序有没有 bug」。
+
+**临时区扫描收窄**：`PyAdamasFrame` 增加第 5 个头字 `scan_mask`（临时区
+位图：bit i = 1 表示第 i 个字可能装指针；NULL 表示整段扫描）。生成代码按
+vreg 的静态类型算位图：
+
+- 只有「证明可能装指针」的字才置 1：`unknown` / 无类型，以及
+  `Optional[unknown]`、`BoundMethod`、非 C 结构体指针（有指针机器表示但
+  静态上说不清谁持有）；一个 vreg 槽被多个 vreg 复用时按字取并集。
+- 没有这样的字时 `scan_words = 0`：这一帧的临时区完全跳过（纯
+  int/float/bool 帧、只含已类型化堆引用的帧）。
+- int / bool / float / None / Optional[标量] 的机器表示不可能是堆指针，不
+  置位；类型化堆引用（str/list/dict/类实例……）也不置位——它们要么是 owned
+  （临时栈 / 槽 / 容器持有，GC 从精确根可达），要么是 borrowed 而持有者
+  本身从根可达。这条前提本来就是「纯类型化帧整帧不扫」的既有依据，收窄
+  只是把它用到含 unknown 的帧上。
+- 兜底：收窄不到一半时不发位图、做回整段扫（每字判断的成本反而更贵）；
+  vreg 槽号与 vreg 表对不上时回整段；生成器 / 协程帧不参与（槽在堆帧里，
+  不走帧记录）；名字槽仍按精确地址登记，不受位图影响。
+  `PYADAMAS_GC_CONSERVATIVE=1` 时忽略位图，完全退回整段保守扫描——回归
+  验证和线上回退都用它。
+
+收窄只删「临时区里不可能装指针的字」，从不删已登记的槽和寄存器扫描；方向
+永远是多扫而不是少扫：少扫一个真正含指针的字就是提前释放（UAF），比多留
+一个垃圾严重得多。
+
+**实测**（本机 Debug 构建，`PYADAMAS_GC_STATS=1`）：
+
+| 场景 | 整段扫描 | 位图收窄 |
+|---|---|---|
+| `tests/run/13_gc.py` 每轮临时区字数 | 35 | 3 |
+| `tests/run/151_gc_generations.py` | 33 | 1 |
+| `tests/run/92_exc_inline_rc.py` | 42 | 1 |
+| `tests/run/160_gc_scan_narrow.py` | 16 | 3 |
+| `tests/run/161_gc_conservative_equiv.py` | 20 | 3 |
+| `tests/run` 全部用例合计（163 个用例、143 轮收集） | 2901 字 | 403 字（13.9%） |
+| 全量保守保留量合计（同 143 轮） | 92 个 / 8144 字节 | 0 |
+| 全量用例（`run_tests.sh`） | 179 pass / 0 fail | 179 pass / 0 fail |
+| 16MB `RLIMIT_AS` 压力程序 | 通过，峰值 RSS ≈ 8.0MB | 通过，峰值 RSS ≈ 8.0MB |
+
+163 个 `tests/run` 用例里只有 5 个分配量过 2MB 阈值、真的触发收集，其余
+没有 GC 轮次。整段扫描下有两个用例出现误报保留：
+`151_gc_generations.py`（6 个 / 576 字节）和 `160_gc_scan_narrow.py`
+（86 个 / 7568 字节）；后者用 `id()` 把「恰好等于堆地址的整数」放进临时区，
+整段扫描会把这类整数当根、把成片的垃圾环钉在堆上。位图收窄后这些字不进
+扫描，两个用例的保守保留量都归零，输出逐字节一致（`160` 是 `5340`，
+`151` 是 `288890 / 1 / 1 / 1`）。
+
+验证命令（`build/zgc` 是 M4 的独立构建目录，正式口径用 `build/dev`）：
+
+```bash
+cmake -S . -B build/zgc -G Ninja -DCMAKE_BUILD_TYPE=Debug
+cmake --build build/zgc -j4
+PYADAMAS_TEST_JOBS=4 bash tests/run_tests.sh build/zgc build/zgc/pyadamas
+PYADAMAS_GC_CONSERVATIVE=1 PYADAMAS_TEST_JOBS=4 \
+    bash tests/run_tests.sh build/zgc build/zgc/pyadamas
+./build/zgc/pyadamas build -o /tmp/stress stress.py
+python3 -c 'import resource,subprocess
+def lim(): resource.setrlimit(resource.RLIMIT_AS,(16<<20,16<<20))
+p=subprocess.run(["/tmp/stress"],preexec_fn=lim)
+print(p.returncode, resource.getrusage(resource.RUSAGE_CHILDREN).ru_maxrss)'
+```
+
+注意 `PyAdamasFrame` 的头从 4 个字变成 5 个字：运行时和生成代码必须一起
+重编。
 
 ## 加一个运行时函数
 
@@ -817,10 +905,10 @@ landing pad 会把这段临时值精确清掉；异常路径不会泄漏已 reta
 
 - **异常对象接入 RC/GC**：现在是 malloc 的轻量对象；如果以后要支持
   `args`、traceback 或自定义异常类，需要把异常对象改成正常的堆类型。
-- **更精确的根**：帧记录已经把 unknown 槽的扫描收窄到登记地址；剩下的
-  不确定面是「含 unknown vreg 的帧的临时区」——整段 vreg 槽保守扫描。
-  再进一步需要栈映射/活跃性分析（只登记活跃的 unknown vreg）；增量或
-  并发收集是更远的目标。
+- **更精确的根**：帧记录已经把 unknown 槽的扫描收窄到登记地址，临时区
+  也按静态类型位图收窄（见「GC 诊断与临时区扫描收窄」）。剩下的空间是
+  活跃性：位图按「字」收、不按「时刻」收，不活跃的 unknown 字仍会被扫，
+  这需要栈映射 / 活跃性分析。增量或并发收集是更远的目标。
 - **unknown 局部槽**：容器元素、字段和全局已经用 RC 索引精确释放
   （`pa_rc_dec_unknown`），表达式临时值也由 `pa_rc_temp_unknown` 持有并
   释放；只有 unknown 类型的局部槽仍是借来的引用（不计入 rc），靠保守扫栈

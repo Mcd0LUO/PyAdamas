@@ -105,7 +105,7 @@
 
 - **语言面**：标量、字符串、`bytes`（含迭代与 `%` 格式化）、列表/元组/字典/集合、切片读写、闭包/lambda/`*args`/`**kwargs`/装饰器、推导式、`with`、异常值（`args`/`raise ... from`/自定义异常）、类（字段/方法/C3 多继承/零参 `super()`/`@staticmethod`/`@classmethod`/`@property`/类属性/类装饰器/类名当值）、`match/case`、`del`、复数字面量、f-string 格式说明、dunder 协议（含装饰 dunder、`__call__` 与方法值）、`Generator[Y, S, R]` 标注、`open`/`input`/`sys.stdin`、`struct` 值类型、`cimport`/`cdecl` C 互操作与跨模块继承。
 - **标准库**：`math`/`sys`/`asyncio`/`random`/`os`/`os.path`/`subprocess`/`time`/`itertools`/`collections`/`functools`/`json`/`string`/`re`/`datetime`/`pathlib`/`csv`/`base64`/`binascii`/`heapq`/`bisect`/`hashlib`/`hmac`/`logging`/`statistics`/`textwrap`/`operator`，以及封装 OpenBLAS 的 `linalg`。
-- **验证**：156 个运行用例、53 个反例、13 个模块目录；差分 runner 已自举，默认 840 例；`tests/bench/` 提供 pyadamas vs CPython 的标准库与 RC/GC 基准（`base64`/`hashlib` 已反超）。
+- **验证**：163 个运行用例、53 个反例、13 个模块目录；差分 runner 已自举，默认 840 例；`tests/bench/` 提供 pyadamas vs CPython 的标准库与 RC/GC 基准（`base64`/`hashlib` 已反超）。
 - **优化**：O2 有常量折叠/DCE/小函数内联/静态调用直接化/LICM/检查型下标外提/循环旋转/跨块 CSE；后端有拷贝合并、浮点临时寄存器与浮点比较分支融合（有序比较不再补 NaN 跳转）。
 - **asyncio**：Task 支持多等待者；`gather` 结果元素所有权按静态类型带入运行时；`from asyncio import ...` 保留调用点特化；`run`/`wait_for` 跨模块结果仍可能退化为 unknown。
 - **调试信息**：生成代码带 DWARF 行号、CFI（`.eh_frame`）与可读函数符号（`.type`/`.size`）；帧里没有 rbp，gdb、libgcc 的展开器和运行时自己的 traceback 都靠 CFI 逐帧还原。未捕获异常打印函数级 traceback，异步/生成器 resume 帧也会追加（仅函数名）。异常值对象仍不带 traceback。
@@ -118,6 +118,9 @@
 - **零开销异常（Z1 地基）**：`runtime/rt_personality.c`（通用 LSDA 解码 + 两阶段语义）与手写汇编夹具已打通，
   `_Unwind_RaiseException` 能把控制转到 landing pad；LSDA 字节布局用 gcc 14.2 实测标定（`tools/lsda_ref/`）。
   **尚未接入编译器**，Z2 起才会发 `.gcc_except_table`。设计见 [zero-cost-exceptions.md](zero-cost-exceptions.md)。
+- **GC 根扫描收窄（0.175）**：临时区保守扫描改为按 vreg 静态类型发射位图，
+  纯标量帧整段不扫；全量 163 个用例合计临时区实扫字数 2901 -> 403、
+  保守保留对象 92 个 / 8144 B -> 0。诊断 `PYADAMAS_GC_STATS=1`，回退 `PYADAMAS_GC_CONSERVATIVE=1`。
 
 ## 下一步
 
@@ -144,7 +147,7 @@
 
 按「什么时候会疼」排序：
 
-1. **GC 的根只扫登记区，且 stop-the-world**：分代已落地（minor trial-deletion + major 标记-清扫）；GC 不再扫整段真实栈，只扫帧记录登记的 unknown 槽、含 unknown vreg 帧的临时区和 callee-saved 寄存器，临时区仍整段保守扫描；没有增量/并发和栈映射
+1. **GC 的根只扫登记区，且 stop-the-world**：分代已落地（minor trial-deletion + major 标记-清扫）；GC 不再扫整段真实栈，只扫帧记录登记的 unknown 槽和 callee-saved 寄存器；0.175 起临时区按 vreg 静态类型发射位图、只扫「可能含指针」的字（纯标量帧整段不扫），保守保留实测从 92 个 / 8144 B 降到 0；仍没有增量/并发 GC，也没有完整栈映射（位图按字收，不按时刻收）
 2. **unknown 引用的计数不精确**：容器 kind 2 元素、unknown 字段与全局已用 RC 索引精确释放（`pa_rc_dec_unknown`）；裸 `list` 的空容器已在第一次写入时定型；仍剩 unknown 类型的局部槽是借来的引用（不计入 rc），靠保守扫栈兜底
 3. **Optional 的收窄能力不足**：`x: Optional[str]` 在 `if x is None: ...` 之后、跨语句块或跨函数调用时仍按 Optional 处理；修它需要正经的数据流分析
 4. **优化遍仍不完整**：有常量折叠、DCE、小函数内联、静态调用直接化、LICM、下标版本化/免检查、循环旋转、跨块 CSE 与后端拷贝合并；没有强度削减、通用向量化和全局寄存器分配

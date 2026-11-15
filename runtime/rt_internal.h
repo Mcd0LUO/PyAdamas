@@ -317,14 +317,19 @@ _Static_assert(sizeof(PyAdamasRc) == 64, "codegen literal headers must match PyA
    - 异常展开：按槽地址 dec 持有引用的槽；
    - GC 保守根：含 unknown 值的帧把「可能借来 unknown 引用」的槽和临时
      区登记进来，GC 只扫这些地址，不再扫整段真实栈。
-   布局与生成代码一致：prev、n、临时区起点、临时区字数、槽地址×n。
+   布局与生成代码一致：prev、n、临时区起点、临时区字数、临时区位图、
+   槽地址×n。
    槽地址低两位是标志：bit0 = 值可能非堆（释放走注册表），bit1 = 只给
-   GC 扫描、异常展开不释放（借来的 unknown 引用）。 */
+   GC 扫描、异常展开不释放（借来的 unknown 引用）。
+   临时区位图（scan_mask）：scan_words 个字里哪些字可能装着需要 GC 看的
+   指针，bit i = 1 表示「可能」。位图是超集，宁多勿少；NULL 表示没有
+   位图，按整段扫描（回退口径，早期目标代码也只认这一种）。 */
 typedef struct PyAdamasFrame {
     struct PyAdamasFrame* prev;
     int64_t n;
     void* scan_base;    /* 临时区起点（vreg 槽），NULL 表示没有 */
-    int64_t scan_words; /* 临时区字节数 / 8 */
+    int64_t scan_words; /* 临时区字节数 / 8（整段字数，回退口径） */
+    const uint64_t* scan_mask; /* 临时区位图，NULL = 整段扫描 */
     void* slots[];      /* 槽地址（void**），解引用得到当前值 */
 } PyAdamasFrame;
 

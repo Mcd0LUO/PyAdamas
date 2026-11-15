@@ -25,6 +25,9 @@ size_t gc_conservative_count;
 #define PYADAMAS_RC_MARK 1
 #define PYADAMAS_RC_UNTRACKED 2
 #define PYADAMAS_RC_YOUNG 4
+/* 诊断模式专用：该对象首次是在保守根扫描阶段被发现的（没有精确根能到
+   它）。只用于统计误报保留量，正常模式下永远不置位。 */
+#define PYADAMAS_RC_CONS 8
 
 /* ── 分代收集状态（分配热路径和 rc_link 都要用） ──────────────
    young_buf 是上次收集后分配、还没晋升的对象；marked 高位是它在数组里
@@ -135,6 +138,128 @@ static int64_t stat_gc_freed;
 static int64_t stat_gc_live;
 static int64_t stat_take_calls;
 static int64_t stat_take_steps;
+
+/* ── GC 诊断（PYADAMAS_GC_STATS=1）与收窄回退（PYADAMAS_GC_CONSERVATIVE=1）
+   ─────────────────────────────────────────────────────────────────
+   两个开关都只在入口 pa_gc_init 里各读一次环境变量、缓存成全局 int；
+   之后只在 GC 路径上判断，分配 / RC 热路径一个字节都不多读。
+   诊断统计关闭时 GC 走原来的单遍扫描路径，行为与加统计前完全一致。 */
+static int gc_stats_on;
+static int gc_conservative;
+/* 统计模式的保守根阶段：非 0 时 gc_mark/gc_mark_direct 会给「首次由
+   保守根发现」的对象打上 PYADAMAS_RC_CONS 并计入本轮保留量。 */
+static int gc_cons_phase;
+static int gc_cons_src;  /* 0 = 临时区 / 1 = unknown 槽 / 2 = 寄存器 */
+static int64_t gc_cons_objs[3];
+static int64_t gc_cons_bytes[3];
+/* 本轮根扫描分解（gc_stats_roots 填）。 */
+static int64_t gc_stat_frames;
+static int64_t gc_stat_slots;
+static int64_t gc_stat_temp_words_full;
+static int64_t gc_stat_temp_words_scanned;
+static int64_t gc_stat_reg_words;
+/* 全程累计。 */
+static int64_t gc_stat_runs;
+static int64_t gc_stat_minor;
+static int64_t gc_stat_major;
+static double gc_stat_total_ms;
+static double gc_stat_max_ms;
+static int64_t gc_stat_cons_objs_total[3];
+static int64_t gc_stat_cons_bytes_total[3];
+
+/* 记录「只由保守根发现」的对象：同一个对象只记一次（CONS 位）。
+   字节数按负载 + 隐藏头算，和 GC 自己的记账口径一致。 */
+static void gc_cons_note(PyAdamasRc* h) {
+    if (h->marked & PYADAMAS_RC_CONS) return;
+    h->marked |= PYADAMAS_RC_CONS;
+    gc_cons_objs[gc_cons_src] += 1;
+    gc_cons_bytes[gc_cons_src] += h->size + PYADAMAS_RC_HDR;
+}
+
+/* 本轮根扫描分解 + 位图收窄量。只在统计模式调用：O(帧数 + 位图字数)。 */
+static void gc_stats_roots(int with_regs) {
+    gc_stat_frames = 0;
+    gc_stat_slots = 0;
+    gc_stat_temp_words_full = 0;
+    gc_stat_temp_words_scanned = 0;
+    for (PyAdamasFrame* f = pa_frame_top; f; f = f->prev) {
+        gc_stat_frames++;
+        gc_stat_slots += f->n;
+        if (f->scan_words <= 0 || !f->scan_base) continue;
+        gc_stat_temp_words_full += f->scan_words;
+        if (f->scan_mask && !gc_conservative) {
+            int64_t n = 0;
+            for (int64_t w = 0; w < f->scan_words; ++w)
+                n += (int64_t)((f->scan_mask[w >> 6] >> (w & 63)) & 1);
+            gc_stat_temp_words_scanned += n;
+        } else {
+            gc_stat_temp_words_scanned += f->scan_words;
+        }
+    }
+    // jmp_buf 按机器字整段扫，字数固定；用 / 8 避免 sizeof 数组除法的告警。
+    gc_stat_reg_words = with_regs ? (int64_t)(sizeof(jmp_buf) / 8) : 0;
+}
+
+/* 每回合一行诊断：规模、耗时、存活量、根扫描分解、误报保留量。 */
+static void gc_stats_report(int major, size_t n_set, int64_t freed, double ms) {
+    gc_stat_runs++;
+    if (major) gc_stat_major++;
+    else gc_stat_minor++;
+    gc_stat_total_ms += ms;
+    if (ms > gc_stat_max_ms) gc_stat_max_ms = ms;
+    int64_t cons_objs = 0, cons_bytes = 0;
+    for (int i = 0; i < 3; ++i) {
+        cons_objs += gc_cons_objs[i];
+        cons_bytes += gc_cons_bytes[i];
+        gc_stat_cons_objs_total[i] += gc_cons_objs[i];
+        gc_stat_cons_bytes_total[i] += gc_cons_bytes[i];
+    }
+    fprintf(stderr,
+            "[gcstats] #%lld %s %.3fms set=%zu freed=%lld live_objs=%zu "
+            "live_bytes=%lld\n",
+            (long long)gc_stat_runs, major ? "major" : "minor", ms, n_set,
+            (long long)freed, gc_tracked_count, (long long)old_bytes);
+    fprintf(stderr,
+            "[gcstats]   roots frames=%lld slots=%lld temp_words=%lld/%lld "
+            "reg_words=%lld mask=%s\n",
+            (long long)gc_stat_frames, (long long)gc_stat_slots,
+            (long long)gc_stat_temp_words_scanned,
+            (long long)gc_stat_temp_words_full, (long long)gc_stat_reg_words,
+            gc_conservative ? "off(conservative)"
+                            : ((gc_stat_temp_words_full > gc_stat_temp_words_scanned)
+                                   ? "on" : "none"));
+    fprintf(stderr,
+            "[gcstats]   cons_kept %lld objs / %lld bytes "
+            "(temp=%lld/%lld slot=%lld/%lld reg=%lld/%lld)\n",
+            (long long)cons_objs, (long long)cons_bytes,
+            (long long)gc_cons_objs[0], (long long)gc_cons_bytes[0],
+            (long long)gc_cons_objs[1], (long long)gc_cons_bytes[1],
+            (long long)gc_cons_objs[2], (long long)gc_cons_bytes[2]);
+}
+
+/* 退出时打全程汇总。 */
+static void gc_stats_dump(void) {
+    fprintf(stderr,
+            "[gcstats] total runs=%lld minor=%lld major=%lld total_ms=%.3f "
+            "avg_ms=%.3f max_ms=%.3f\n",
+            (long long)gc_stat_runs, (long long)gc_stat_minor,
+            (long long)gc_stat_major, gc_stat_total_ms,
+            gc_stat_runs ? gc_stat_total_ms / (double)gc_stat_runs : 0.0,
+            gc_stat_max_ms);
+    fprintf(stderr,
+            "[gcstats] cons_kept total=%lld objs / %lld bytes "
+            "(temp=%lld/%lld slot=%lld/%lld reg=%lld/%lld)\n",
+            (long long)(gc_stat_cons_objs_total[0] + gc_stat_cons_objs_total[1] +
+                        gc_stat_cons_objs_total[2]),
+            (long long)(gc_stat_cons_bytes_total[0] + gc_stat_cons_bytes_total[1] +
+                        gc_stat_cons_bytes_total[2]),
+            (long long)gc_stat_cons_objs_total[0],
+            (long long)gc_stat_cons_bytes_total[0],
+            (long long)gc_stat_cons_objs_total[1],
+            (long long)gc_stat_cons_bytes_total[1],
+            (long long)gc_stat_cons_objs_total[2],
+            (long long)gc_stat_cons_bytes_total[2]);
+}
 
 static void rc_stats_dump(void) {
     fprintf(stderr,
@@ -790,6 +915,7 @@ void gc_mark(uintptr_t v) {
     PyAdamasRc* h = gc_tab_find(v);
     if (!h || (h->marked & PYADAMAS_RC_MARK)) return;
     h->marked |= PYADAMAS_RC_MARK;
+    if (gc_cons_phase) gc_cons_note(h);
     gc_work[gc_work_len++] = h;
 }
 
@@ -802,6 +928,7 @@ static void gc_mark_direct(uintptr_t v) {
     if (!(h->marked & PYADAMAS_RC_YOUNG)) return;
     if (h->marked & PYADAMAS_RC_MARK) return;
     h->marked |= PYADAMAS_RC_MARK;
+    if (gc_cons_phase) gc_cons_note(h);
     gc_work[gc_work_len++] = h;
 }
 
@@ -816,6 +943,19 @@ PYADAMAS_NO_ASAN static void gc_scan_range(const void* begin, const void* end) {
     }
 }
 
+/* 位图扫描：只读置位的字。位图由 codegen 按静态类型算出，是超集
+   （宁多勿少）——少扫一个真正含指针的字就会提前释放，所以只有确实
+   「证明不可能装指针」的字才允许不置位。 */
+PYADAMAS_NO_ASAN static void gc_scan_masked(const void* base, const uint64_t* mask,
+                                            int64_t words) {
+    for (int64_t w = 0; w < words; ++w) {
+        if (!(mask[w >> 6] & ((uint64_t)1 << (w & 63)))) continue;
+        uintptr_t v;
+        memcpy(&v, (const char*)base + (size_t)w * sizeof(uintptr_t), sizeof v);
+        gc_mark(v);
+    }
+}
+
 // setjmp 会把 callee-saved 寄存器存进 jmp_buf；生成代码里常驻寄存器的
 // 堆指针（槽位提升、全局 vreg）就靠这一段兜住。
 PYADAMAS_NO_ASAN static void gc_scan_registers(void) {
@@ -823,22 +963,41 @@ PYADAMAS_NO_ASAN static void gc_scan_registers(void) {
     if (_setjmp(regs) == 0) gc_scan_range(&regs, (char*)&regs + sizeof regs);
 }
 
+/* 帧记录扫描的拆分方式：正常路径一次扫完（GC_FRAMES_ALL）；诊断模式
+   把「已知堆槽」「保守槽」「临时区」拆成三遍，分别统计是哪种根在兜底。 */
+#define GC_FRAMES_ALL 0
+#define GC_FRAMES_TEMP 1
+#define GC_FRAMES_SLOTS_EXACT 2
+#define GC_FRAMES_SLOTS_CONS 3
+
 /* 保守根只扫帧记录登记过的地址：
    - 借来的 unknown 槽（bit1，只扫描不释放）；
    - 带 unknown 标志的拥有槽（bit0）；
-   - 含 unknown vreg 的帧的临时区（scan_base/scan_words）。
+   - 可能装指针的帧的临时区（scan_base/scan_words，按 scan_mask 位图
+     收窄；位图为 NULL 或 PYADAMAS_GC_CONSERVATIVE=1 时整段扫描）。
    纯类型化帧和栈上的其它内容（返回地址、保存的寄存器、填充）一律
    不扫。 */
-static void gc_scan_frames(void) {
+static void gc_scan_frames(int mode) {
     for (PyAdamasFrame* f = pa_frame_top; f; f = f->prev) {
-        if (f->scan_words > 0 && f->scan_base)
-            gc_scan_range(f->scan_base,
-                          (char*)f->scan_base + sizeof(uintptr_t) * (size_t)f->scan_words);
+        if (mode == GC_FRAMES_ALL || mode == GC_FRAMES_TEMP) {
+            if (f->scan_words > 0 && f->scan_base) {
+                if (f->scan_mask && !gc_conservative)
+                    gc_scan_masked(f->scan_base, f->scan_mask, f->scan_words);
+                else
+                    gc_scan_range(f->scan_base,
+                                  (char*)f->scan_base +
+                                      sizeof(uintptr_t) * (size_t)f->scan_words);
+            }
+        }
+        if (mode == GC_FRAMES_TEMP) continue;
         for (int64_t i = 0; i < f->n; ++i) {
             uintptr_t addr = (uintptr_t)f->slots[i];
+            uintptr_t low = addr & 3;
+            if (mode == GC_FRAMES_SLOTS_EXACT && low) continue;
+            if (mode == GC_FRAMES_SLOTS_CONS && !low) continue;
             int64_t v = *(int64_t*)(addr & ~(uintptr_t)3);
             if (!v) continue;
-            if (addr & 3) gc_mark((uintptr_t)v);   // unknown / 只扫描
+            if (low) gc_mark((uintptr_t)v);        // unknown / 只扫描
             else gc_mark_direct((uintptr_t)v);     // 已知堆槽
         }
     }
@@ -925,6 +1084,13 @@ void pa_gc_add_roots(void** roots, int64_t n_roots) {
 }
 
 void pa_gc_init(void** roots, int64_t n_roots, void* stack_top) {
+    /* 诊断 / 收窄回退开关：整个进程只在这里各读一次环境变量，之后全都
+       走缓存全局，分配热路径不碰。 */
+    if (getenv("PYADAMAS_GC_STATS")) {
+        gc_stats_on = 1;
+        atexit(gc_stats_dump);
+    }
+    if (getenv("PYADAMAS_GC_CONSERVATIVE")) gc_conservative = 1;
     gc_globals = NULL;
     gc_n_globals = 0;
     gc_globals_cap = 0;
@@ -977,6 +1143,26 @@ void gc_drain(void) {
     while (gc_work_len) gc_scan_object(gc_work[--gc_work_len]);
 }
 
+/* 诊断模式的根扫描顺序：先精确根（已知堆槽），再保守根（临时区、
+   unknown 槽、寄存器），每一段都排空工作栈。根集合最终仍是并集，
+   与一次扫完等价；区别只是能统计「第二、三段新标记的对象」——它们
+   就是没有精确根能到、只被保守根维持的那批（误报保留的直接度量）。 */
+static void gc_scan_roots_split(void) {
+    gc_scan_frames(GC_FRAMES_SLOTS_EXACT);
+    gc_drain();
+    gc_cons_phase = 1;
+    gc_cons_src = 0;
+    gc_scan_frames(GC_FRAMES_TEMP);
+    gc_drain();
+    gc_cons_src = 1;
+    gc_scan_frames(GC_FRAMES_SLOTS_CONS);
+    gc_drain();
+    gc_cons_src = 2;
+    gc_scan_registers();
+    gc_drain();
+    gc_cons_phase = 0;
+}
+
 static double gc_now_ms(void) {
     struct timespec ts;
     clock_gettime(CLOCK_MONOTONIC, &ts);
@@ -1008,6 +1194,15 @@ static void gc_collect(int major) {
         stat_gc_runs++;
         if (major) stat_gc_major++;
         else stat_gc_minor++;
+    }
+    /* 诊断模式：单独计本回合耗时，并把「保守根兜底」计数清零。 */
+    double st0 = 0;
+    if (gc_stats_on) {
+        st0 = gc_now_ms();
+        for (int i = 0; i < 3; ++i) {
+            gc_cons_objs[i] = 0;
+            gc_cons_bytes[i] = 0;
+        }
     }
     double t0 = 0, t1 = 0, t2 = 0, t3 = 0, t4 = 0, t5 = 0, t6 = 0;
     if (getenv("PYADAMAS_GC_TIMING")) t0 = gc_now_ms();
@@ -1051,8 +1246,13 @@ static void gc_collect(int major) {
         for (int64_t i = 0; i < gc_n_globals; ++i)
             gc_mark((uintptr_t)*(void**)gc_globals[i]);
         for (int64_t i = 0; i < temp_len; ++i) gc_mark((uintptr_t)temp_stack[i]);
-        gc_scan_frames();
-        gc_scan_registers();
+        if (gc_stats_on) {
+            gc_stats_roots(1);
+            gc_scan_roots_split();
+        } else {
+            gc_scan_frames(GC_FRAMES_ALL);
+            gc_scan_registers();
+        }
         if (t0) t2 = gc_now_ms();
         gc_drain();
         if (t0) t3 = gc_now_ms();
@@ -1077,8 +1277,16 @@ static void gc_collect(int major) {
             }
         }
         if (!gc_untracked_leaves) {
-            gc_scan_frames();
-            gc_scan_registers();
+            if (gc_stats_on) {
+                gc_stats_roots(1);
+                gc_scan_roots_split();
+            } else {
+                gc_scan_frames(GC_FRAMES_ALL);
+                gc_scan_registers();
+            }
+        } else if (gc_stats_on) {
+            // exact-RC 模式：所有引用都归槽/临时值/容器所有，没有保守根。
+            gc_stats_roots(0);
         }
         gc_drain();
         if (t0) t3 = gc_now_ms();
@@ -1150,6 +1358,7 @@ static void gc_collect(int major) {
             mt = 4 * (int64_t)PYADAMAS_GC_THRESHOLD;
         major_threshold = mt;
     }
+    if (gc_stats_on) gc_stats_report(major, n_set, freed, gc_now_ms() - st0);
     if (t0)
         fprintf(stderr,
                 "[gc] %s n=%zu freed=%lld live=%lld tab=%.2f trial=%.2f mark=%.2f "

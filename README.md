@@ -156,7 +156,7 @@ tools/                    一次性脚本
 |---|---|---|
 | `tests/*.py` | 12 | 前端正例，覆盖语法与类型规则（按 AST 节点计：43 个函数 / 458 条语句 / 1714 个表达式） |
 | `tests/fail/*.py` | 53 | 反例，必须报出首行 `# expect:` 指定的错 |
-| `tests/run/*.py` | 161 | 编译 + 运行，输出与文件末尾的 `# --- expect ---` 逐行比对 |
+| `tests/run/*.py` | 163 | 编译 + 运行，输出与文件末尾的 `# --- expect ---` 逐行比对 |
 | `tests/unsupported/*.py` | 1 | `check` 必须打「没建模」标记，且 `build` 必须拒绝 |
 | `tests/strict/*.py` | 4 | 错误只在降级/构建期出现（`check` 看不到），必须 `build` 拒绝并给出指定消息 |
 | Windows 目标 | 146 | `--target=win64` 产物在 Windows 上有 138 个用例输出与 POSIX 逐字节一致 |
