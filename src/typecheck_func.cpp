@@ -419,10 +419,11 @@ void TypeChecker::classdef(ClassDef& c) {
                     int eidx = eb->field_index(f.name);
                     int pidx = base ? base->field_index(f.name) : -1;
                     if (pidx != eidx)
-                        err(c.line, c.col,
-                            std::format("multiple inheritance base '{}' introduces field '{}' "
-                                        "that is not in the primary base layout", eb->name,
-                                        f.name));
+                        // 附加基类引入主基类布局没有的字段：CPython 允许任意
+                        // 布局，pyadamas 编译期布局不支持。check 只记 unsupported，
+                        // 别把合法 Python 判死。
+                        unsupported.push_back(
+                            "multiple-inheritance field layout '" + f.name + "'");
                 }
             }
             if (eb->is_open()) cls->open = true;
