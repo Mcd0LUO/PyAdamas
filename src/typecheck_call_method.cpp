@@ -993,6 +993,13 @@ TypePtr TypeChecker::method_call(TypePtr recv, const std::string& name, Call& c,
             return t_unknown();
         }
 
+        if (recv->kind == TyKind::None) {
+            // None 接收者多为 flow-narrowing 丢失（is not None 守卫没
+            // 更新类型）；保守求值实参后放行，避免误杀。
+            for (auto& arg : c.args) expr(*arg);
+            for (auto& kw : c.keywords) expr(*kw.value);
+            return t_unknown();
+        }
         err(c.line, c.col,
             std::format("'{}' object has no method '{}'", type_name(recv), name));
         return t_unknown();

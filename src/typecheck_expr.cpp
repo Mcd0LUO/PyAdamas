@@ -477,6 +477,10 @@ TypePtr TypeChecker::expr(Expr& e) {
                 // int.numerator 是属性，`n.numerator` 取到的是数值本身
                 if (is_property_name(a.attr) && has_method(ot, a.attr)) return t_unknown();
                 if (has_method(ot, a.attr)) return mk_bound(ot, a.attr);
+                if (ot->kind == TyKind::None) {
+                    // None 接收者的属性多是 flow-narrowing 丢失；conservative。
+                    return t_unknown();
+                }
                 err(a.line, a.col,
                     std::format("'{}' object has no attribute '{}'", type_name(ot), a.attr));
                 return t_unknown();
