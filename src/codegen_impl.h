@@ -45,6 +45,20 @@ inline int kMaxSlotRegs() { return target_abi().n_callee_pool; }
 // （SysV 6 个整型 / 8 个浮点，Win64 各 4 个），所以一律走这里取。
 inline const char* arg_reg_i(int i) { return target_abi().arg_int[i]; }
 inline const char* arg_reg_f(int i) { return target_abi().arg_fp[i]; }
+// 同一个实参寄存器的 32 位视图。xorl 清零、movl 存字段这类指令需要
+// 32 位名字（%rsi -> %esi，Win64 的 %r8 -> %r8d），实参寄存器本身两种
+// 目标都是 64 位名字，不能直接套。
+inline std::string arg_reg_i32(int i) {
+    std::string r = target_abi().arg_int[i];
+    if (r.size() == 4) return std::string("%e") + r.substr(2);
+    return r + "d";
+}
+inline std::string arg_reg_i8(int i) {
+    std::string r = target_abi().arg_int[i];
+    if (r == "%rcx") return "%cl";
+    if (r == "%rdx") return "%dl";
+    return r + "b";  // %r8 -> %r8b
+}
 inline const char* const* kFpSlotRegs() { return target_abi().fp_pool; }
 inline int kMaxFpSlotRegs() { return target_abi().n_fp_pool; }
 

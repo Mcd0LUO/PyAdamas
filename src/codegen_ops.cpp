@@ -136,11 +136,16 @@ void AsmGen::gen_inst(const Inst& in) {
                 move_to(dst_op(in.dst), "%rax");
                 break;
             }
-            case IrOp::GenSetSlot:
+            case IrOp::GenSetSlot: {
+                // %rax 是帧基址，值先落一个 scratch 再写回帧：这个 scratch
+                // 必须按目标取（SysV 是 %rcx，Win64 是 %r9），否则 Win64 下
+                // 会把早已失效的实参寄存器 %rcx 写进槽位，得到垃圾值。
+                const char* tmp = arg_reg_i(3);
                 emit2("movq", src_op(in.args[0]), "%rax");
-                emit2("movq", src_op(in.args[1]), arg_reg_i(3));
-                line(std::format("movq %rcx, {}(%rax)", 8 * (10 + in.idx)));
+                emit2("movq", src_op(in.args[1]), tmp);
+                line(std::format("movq {}, {}(%rax)", tmp, 8 * (10 + in.idx)));
                 break;
+            }
             case IrOp::GenGetState:
                 line("movq 0(%r15), %rax");
                 move_to(dst_op(in.dst), "%rax");
@@ -180,7 +185,8 @@ void AsmGen::gen_inst(const Inst& in) {
                 emit_epilogue();
                 break;
             case IrOp::GenRethrow:
-                line("movq %r15, %rdi");
+                // 帧指针是第一个整型实参，按目标 ABI 取寄存器（Win64 是 %rcx）。
+                line(std::format("movq %r15, {}", arg_reg_i(0)));
                 line("call pa_coro_rethrow");
                 line("ud2");
                 break;

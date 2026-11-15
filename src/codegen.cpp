@@ -316,7 +316,10 @@ std::string AsmGen::gen(const IRModule& m) {
             out_ += "\tpushq %rbx\n";
             if (gnu_cfi()) out_ += "\t.cfi_def_cfa_offset 16\n";
             if (gnu_cfi()) out_ += "\t.cfi_offset %rbx, -16\n";
-            out_ += "\tmovq %rdi, %rbx\n";
+            // 帧指针和 pa_gen_slot_release 的两个实参都按目标 ABI 取寄存器：
+            // SysV 是 %rdi/%rsi，Win64 是 %rcx/%rdx。写死 %rdi 会让 Win64 下
+            // 把垃圾当成帧指针（崩溃），或把 slot 地址塞进错误的实参槽。
+            out_ += std::format("\tmovq {}, %rbx\n", arg_reg_i(0));
             out_ += "\tcmpq $1, 8(%rbx)\n";
             out_ += std::format("\tje .Lgengcreldone{}\n", i);
             for (size_t s = 0; s < g.slot_heap.size(); ++s) {
@@ -325,9 +328,9 @@ std::string AsmGen::gen(const IRModule& m) {
                 // slot_heap: 1=堆，2=可能装着非堆值（unknown 流过堆槽）。
                 // 清零只在 GC 清扫阶段做；trial/restore 阶段运行时只调计数，
                 // 不能破坏生成器帧的内容。
-                out_ += std::format("\tleaq {}(%rbx), %rdi\n", off);
-                out_ += std::format("\tmovq ${}, %rsi\n",
-                                    g.slot_heap[s] == 2 ? 2 : 1);
+                out_ += std::format("\tleaq {}(%rbx), {}\n", off, arg_reg_i(0));
+                out_ += std::format("\tmovq ${}, {}\n",
+                                    g.slot_heap[s] == 2 ? 2 : 1, arg_reg_i(1));
                 out_ += "\tcall pa_gen_slot_release\n";
             }
             out_ += std::format(".Lgengcreldone{}:\n", i);

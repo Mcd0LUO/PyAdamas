@@ -161,18 +161,22 @@ void AsmGen::gen_obj_new(const Inst& in) {
         // 动态属性槽挂在字段之后，跟着类走（派生类的偏移不同）。
         emit_imm_op("movq", 8 * (c.n_fields + 1) + (c.dict_off ? 8 : 0), arg_reg_i(0));
         bool has_heap = std::ranges::any_of(c.field_heap, [](uint8_t v) { return v != 0; });
+        // dtor/release 是第 2、3 个实参，必须按目标 ABI 取寄存器：
+        // SysV 是 %rsi/%rdx，Win64 是 %rdx/%r8。写死 %rsi 会让 Win64 的
+        // release 拿到垃圾指针，对象销毁时跳到野地址。
         if (has_heap || c.dict_off != 0) {
-            line(std::format("leaq .Ldtor{}(%rip), %rsi", in.imm));
-            line(std::format("leaq .Lgcrel{}(%rip), %rdx", in.imm));
+            line(std::format("leaq .Ldtor{}(%rip), {}", in.imm, arg_reg_i(1)));
+            line(std::format("leaq .Lgcrel{}(%rip), {}", in.imm, arg_reg_i(2)));
         } else {
-            line("xorl %esi, %esi");
-            line("xorl %edx, %edx");
+            line(std::format("xorl {}, {}", arg_reg_i32(1), arg_reg_i32(1)));
+            line(std::format("xorl {}, {}", arg_reg_i32(2), arg_reg_i32(2)));
         }
         spill_fp_slots();
         line("call pa_obj_new");
         reload_fp_slots();
-        line(std::format("leaq .Lvt{}(%rip), %rcx", in.imm));
-        line("movq %rcx, (%rax)");
+        // 写 vtable 的临时寄存器：调用之后实参寄存器已经自由，按目标取。
+        line(std::format("leaq .Lvt{}(%rip), {}", in.imm, arg_reg_i(3)));
+        line(std::format("movq {}, (%rax)", arg_reg_i(3)));
         move_to(dst_op(in.dst), "%rax");
     }
 
@@ -191,13 +195,16 @@ void AsmGen::gen_field_load(const Inst& in) {
 
 void AsmGen::gen_field_store(const Inst& in) {
         emit2("movq", src_op(in.a), "%rax");
-        emit2("movq", src_op(in.b), arg_reg_i(3));
+        // 待存的值先进一个 scratch；写回时必须读同一个寄存器。写死 %rcx 在
+        // Win64 下会把早已失效的 %rcx（通常是 self 指针）写进字段。
+        const char* v = arg_reg_i(3);
+        emit2("movq", src_op(in.b), v);
         if (in.fwidth == 1)
-            line(std::format("movb %cl, {}(%rax)", in.imm));
+            line(std::format("movb {}, {}(%rax)", arg_reg_i8(3), in.imm));
         else if (in.fwidth == 4)
-            line(std::format("movl %ecx, {}(%rax)", in.imm));
+            line(std::format("movl {}, {}(%rax)", arg_reg_i32(3), in.imm));
         else
-            line(std::format("movq %rcx, {}(%rax)", in.imm));
+            line(std::format("movq {}, {}(%rax)", v, in.imm));
     }
 
 // 值类型：payload 前有隐藏的 RC 头，返回的指针就是 payload 地址。
