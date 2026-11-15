@@ -361,9 +361,14 @@ void TypeChecker::assign(Expr& target, TypePtr value, int line, int col) {
                 if (sl.lower) expr(*sl.lower);
                 if (sl.upper) expr(*sl.upper);
                 if (sl.step) expr(*sl.step);
-                if (!is_unknown(ot) && ot->kind != TyKind::List &&
-                    ot->kind != TyKind::Optional && ot->kind != TyKind::Class &&
-                    ot->kind != TyKind::None)
+                if (ot->kind == TyKind::Class) {
+                    if (ot->cls && !ot->cls->is_open() &&
+                        !ot->cls->method("__setitem__"))
+                        err(line, col,
+                            std::format("'{}' object does not support item assignment",
+                                        bare_type_name(ot)));
+                } else if (!is_unknown(ot) && ot->kind != TyKind::List &&
+                           ot->kind != TyKind::Optional)
                     err(line, col,
                         std::format("'{}' object does not support item assignment",
                                     bare_type_name(ot)));
@@ -394,8 +399,17 @@ void TypeChecker::assign(Expr& target, TypePtr value, int line, int col) {
                     err(line, col,
                         std::format("cannot store '{}' into '{}'", type_name(value),
                                     type_name(ot)));
-            } else if (!is_unknown(ot) && ot->kind != TyKind::Optional &&
-                       ot->kind != TyKind::Class && ot->kind != TyKind::None) {
+            } else if (ot->kind == TyKind::Class) {
+                // 类可能实现了 __setitem__（自己的或继承来的）。实现了就
+                // 放过；基类来自未知来源（is_open）时静态无从判断，也放过。
+                // 只有能确定「这个类及其祖先都没有 __setitem__」时才报错——
+                // 否则降级阶段会把对象当 list 解引用，运行期直接段错误。
+                if (ot->cls && !ot->cls->is_open() &&
+                    !ot->cls->method("__setitem__"))
+                    err(line, col,
+                        std::format("'{}' object does not support item assignment",
+                                    bare_type_name(ot)));
+            } else if (!is_unknown(ot) && ot->kind != TyKind::Optional) {
                 // 措辞跟 CPython 一致：'range' object does not support item assignment
                 err(line, col, std::format("'{}' object does not support item assignment",
                                            bare_type_name(ot)));
@@ -623,7 +637,7 @@ void TypeChecker::unpack_assign(std::vector<ExprPtr>& targets, TypePtr value, in
         if (value->kind == TyKind::List || value->kind == TyKind::Set ||
             value->kind == TyKind::Generator || value->kind == TyKind::Range ||
             value->kind == TyKind::Str || value->kind == TyKind::Exception ||
-            value->kind == TyKind::Class || value->kind == TyKind::Dict) {
+            value->kind == TyKind::Dict) {
             // 只记录元素类型、不记录长度，逐个赋元素类型。
             // generator/range 是惰性可迭代；str 解包到单字符。
             TypePtr elem = value->kind == TyKind::Str ? t_str()
@@ -638,11 +652,13 @@ void TypeChecker::unpack_assign(std::vector<ExprPtr>& targets, TypePtr value, in
             return;
         }
 
-        if (is_unknown(value) || value->kind == TyKind::None) {
+        // 类可能实现了 __iter__（静态看不到），None/unknown 无从判断：
+        // 都按 unknown 逐个赋，不报错。
+        if (is_unknown(value) || value->kind == TyKind::None ||
+            value->kind == TyKind::Class) {
             for (auto& t : targets) assign_one(*t, t_unknown());
             return;
         }
-        if (value->kind == TyKind::Class) return;  // 可能实现了 __iter__
         if (value->kind == TyKind::Optional && !value->sub.empty()) {
             // a, b = maybe_tuple：拆 Optional 内层，None 走 unknown。
             TypePtr inner = value->sub[0];

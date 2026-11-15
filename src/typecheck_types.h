@@ -1209,9 +1209,13 @@ inline bool merge_elem(TypePtr& slot, const TypePtr& container, const TypePtr& v
 inline void pa_assert_type_alive(const void* p, bool alive, const char* what) {
     if (p && !alive) {
         std::fprintf(stderr,
-                     "pyadamas: internal error: %s accessed after its TypeChecker "
-                     "was destroyed (use-after-free of %s)\n",
-                     "type owner", what);
+                     "pyadamas: internal error: type owner accessed after its "
+                     "TypeChecker was destroyed (use-after-free of %s)\n",
+                     what);
+        // 必须立即终止：这个访问器要返回的正是已经析构的对象指针，继续
+        // 执行就是实实在在的 use-after-free。只打日志等于把断言降级成
+        // 一行可能被 CI 日志淹没的输出。
+        std::abort();
     }
 }
 inline ClassInfo* type_cls(const TypePtr& t) {

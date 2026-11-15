@@ -295,23 +295,23 @@ void AsmGen::assign_slot_regs() {
                 }
                 in_handler[static_cast<size_t>(b)] = !open.empty();
             }
-            // 每个槽：保护区内的写 + 之后的读 => hazard。
+            // 每个槽：保护区内的写 + 任意读 => hazard。
+            // 保守但可靠：不看块序（块序与 CFG 可达性无关，循环回边会让
+            // 「读」出现在「写」之前的下标上），只要写过就可能被 longjmp
+            // 回退，只要读过就可能读到回退值。
             for (int s = 0; s < ns; ++s) {
                 bool wrote_in_handler = false;
-                bool hazard = false;
-                for (int b = 0; b < nb && !hazard; ++b) {
+                bool any_read = false;
+                for (int b = 0; b < nb; ++b) {
                     for (const auto& in : f_->blocks[static_cast<size_t>(b)].insts) {
                         if (in.idx != s) continue;
-                        const bool in_h = in_handler[static_cast<size_t>(b)];
-                        if (in.op == IrOp::StoreSlot && in_h) {
+                        if (in.op == IrOp::StoreSlot && in_handler[static_cast<size_t>(b)])
                             wrote_in_handler = true;
-                        } else if (in.op == IrOp::LoadSlot && !in_h && wrote_in_handler) {
-                            hazard = true;
-                            break;
-                        }
+                        else if (in.op == IrOp::LoadSlot)
+                            any_read = true;
                     }
                 }
-                handler_hazard[static_cast<size_t>(s)] = hazard;
+                handler_hazard[static_cast<size_t>(s)] = wrote_in_handler && any_read;
             }
         }
         if (f_->is_generator) return;
