@@ -396,11 +396,12 @@ std::string AsmGen::gen(const IRModule& m) {
             if (gnu_cfi()) out_ += "\t.cfi_offset %rbp, -16\n";
             out_ += "\tmovq %rsp, %rbp\n";
             if (gnu_cfi()) out_ += "\t.cfi_def_cfa_register %rbp\n";
-            out_ += "\tleaq .Lstrtab(%rip), %rdi\n";
-            out_ += std::format("\tmovq ${}, %rsi\n", m.strings.size());
+            out_ += std::format("\tleaq .Lstrtab(%rip), {}\n", arg_reg_i(0));
+            out_ += std::format("\tmovq ${}, {}\n", m.strings.size(), arg_reg_i(1));
             out_ += "\tcall pa_register_literals\n";
             if (dbg_on_ && !dbg_entries_.empty())
-                out_ += "\tleaq .Ldbgtab(%rip), %rdi\n\tcall pa_debug_register\n";
+            out_ += std::format("\tleaq .Ldbgtab(%rip), {}\n\tcall pa_debug_register\n",
+                                    arg_reg_i(0));
             out_ += "\tpopq %rbp\n";
             if (gnu_cfi()) out_ += "\t.cfi_def_cfa %rsp, 8\n";
             // 尾跳进 __pa_main：返回地址原样留在栈顶，CFA 规则跟刚进
@@ -420,26 +421,27 @@ std::string AsmGen::gen(const IRModule& m) {
             if (gnu_cfi()) out_ += "\t.cfi_offset %rbp, -16\n";
             out_ += "\tmovq %rsp, %rbp\n";
             if (gnu_cfi()) out_ += "\t.cfi_def_cfa_register %rbp\n";
-            out_ += "\tsubq $16, %rsp\n";
-            out_ += "\tmovq %rdi, (%rsp)\n";
-            out_ += "\tmovq %rsi, 8(%rsp)\n";
+            out_ += std::format("\tsubq ${}, %rsp\n", out_base() + 16);
+            out_ += std::format("\tmovq {}, (%rsp)\n", arg_reg_i(0));
+            out_ += std::format("\tmovq {}, 8(%rsp)\n", arg_reg_i(1));
             // GC 根表 + 栈顶。栈顶取 main 的 rbp，收集器向下扫描。
-            out_ += std::format("\tleaq {}(%rip), %rdi\n", roots_label());
-            out_ += std::format("\tmovq ${}, %rsi\n", local_global_count());
-            out_ += "\tmovq %rbp, %rdx\n";
+            out_ += std::format("\tleaq {}(%rip), {}\n", roots_label(), arg_reg_i(0));
+            out_ += std::format("\tmovq ${}, {}\n", local_global_count(), arg_reg_i(1));
+            out_ += std::format("\tmovq %rbp, {}\n", arg_reg_i(2));
             out_ += "\tcall pa_gc_init\n";
             out_ += "\tcall pa_rc_stats_init\n";
             if (disable_unknown_index_)
                 out_ += "\tcall pa_disable_unknown_index\n";
-            out_ += "\tleaq .Lstrtab(%rip), %rdi\n";
-            out_ += std::format("\tmovq ${}, %rsi\n", m.strings.size());
+            out_ += std::format("\tleaq .Lstrtab(%rip), {}\n", arg_reg_i(0));
+            out_ += std::format("\tmovq ${}, {}\n", m.strings.size(), arg_reg_i(1));
             out_ += "\tcall pa_register_literals\n";
             if (dbg_on_ && !dbg_entries_.empty())
-                out_ += "\tleaq .Ldbgtab(%rip), %rdi\n\tcall pa_debug_register\n";
-            out_ += "\tmovslq (%rsp), %rdi\n";
-            out_ += "\tmovq 8(%rsp), %rsi\n";
+            out_ += std::format("\tleaq .Ldbgtab(%rip), {}\n\tcall pa_debug_register\n",
+                                    arg_reg_i(0));
+            out_ += std::format("\tmovslq (%rsp), {}\n", arg_reg_i(0));
+            out_ += std::format("\tmovq 8(%rsp), {}\n", arg_reg_i(1));
             out_ += "\tcall pa_sys_set_args\n";
-            out_ += "\taddq $16, %rsp\n";
+            out_ += std::format("\taddq ${}, %rsp\n", out_base() + 16);
             if (m.entry >= 0) out_ += std::format("\tcall {}\n", func_label(m.entry));
             out_ += "\tpopq %rbp\n";
             if (gnu_cfi()) out_ += "\t.cfi_def_cfa %rsp, 8\n";

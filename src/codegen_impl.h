@@ -213,6 +213,11 @@ private:
     // 要么非法要么被忽略，所以按 TargetABI::gnu_cfi 关掉。关掉后 Windows
     // 侧没有 .eh_frame 展开信息——那是 SEH 的地盘，需要单独实现。
     bool gnu_cfi() const { return target_abi().gnu_cfi; }
+
+    // 出参区的基址。Win64 要求调用点在栈顶留 32 字节影子空间给被调方写
+    // 寄存器实参，所以栈传实参和所有暂存都从 shadow_space 之上开始。
+    // SysV 的 shadow_space 是 0，偏移与原来完全一致。
+    int out_base() const { return target_abi().shadow_space; }
     void cfi(const std::string& s) {
         if (target_abi().gnu_cfi) line(s);
     }

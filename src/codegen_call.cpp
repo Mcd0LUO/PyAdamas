@@ -549,7 +549,7 @@ void AsmGen::gen_call_extern(const Inst& in) {
                 } else if (!fp && gi < kMaxIntArgs) {
                     p.reg = gi++;
                 } else {
-                    p.stack_off = sp++ * 8;
+                    p.stack_off = out_base() + sp++ * 8;
                 }
                 continue;
             }
@@ -562,7 +562,7 @@ void AsmGen::gen_call_extern(const Inst& in) {
                 else ++ni;
             }
             if (p.size > 16 || gi + ni > kMaxIntArgs || fi + nf > kMaxFpArgs) {
-                p.stack_off = sp * 8;
+                p.stack_off = out_base() + sp * 8;
                 sp += static_cast<int>(p.cfp.size());
                 continue;
             }
@@ -571,9 +571,9 @@ void AsmGen::gen_call_extern(const Inst& in) {
         }
 
         int stack_bytes = sp * 8;
-        int int_tmp0 = stack_bytes + 8, int_tmp1 = stack_bytes + 16;
-        int fp_tmp0 = stack_bytes + 24, fp_tmp1 = stack_bytes + 32;
-        int sret_tmp = stack_bytes + 40;
+        int int_tmp0 = out_base() + stack_bytes + 8, int_tmp1 = out_base() + stack_bytes + 16;
+        int fp_tmp0 = out_base() + stack_bytes + 24, fp_tmp1 = out_base() + stack_bytes + 32;
+        int sret_tmp = out_base() + stack_bytes + 40;
 
         // 取实参的机器值。str/可选 str 要先从 PyAdamasStr 里取出 data 字段
         // （偏移 16）；Buf* 从 list/bytes 的 data 取指针；普通指针按整数直接传。

@@ -100,7 +100,7 @@ static std::string debug_func_symbol(int fi, const std::string& name) {
 // 按最大用量一次性留在帧里，rsp 全程不动。这里只按「每个实参至多一个
 // 八字节、结构体按 ABI 尺寸、再加隐藏指针/暂存」估上界，宁大勿小。
 int AsmGen::outgoing_bytes(const IRFunction& f) const {
-    int worst = 16;  // 至少留两个槽：sret 隐藏指针 + 对齐
+    int worst = 16 + target_abi().shadow_space;  // 至少留两个槽：sret 隐藏指针 + 对齐；再加影子空间
     for (const auto& b : f.blocks) {
         for (const auto& in : b.insts) {
             int need = 0;

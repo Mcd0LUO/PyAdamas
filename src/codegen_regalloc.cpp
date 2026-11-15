@@ -851,7 +851,7 @@ std::vector<ArgLoc> AsmGen::classify(const std::vector<TypePtr>& types) const {
                 locs[i].reg = gi++;
             } else {
                 locs[i].fp = fp;
-                locs[i].stack_off = sp++ * 8;
+                locs[i].stack_off = out_base() + sp++ * 8;
             }
         }
         return locs;
