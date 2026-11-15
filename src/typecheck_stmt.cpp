@@ -492,7 +492,8 @@ void TypeChecker::assign(Expr& target, TypePtr value, int line, int col) {
                 // `C.x = v`：改的是这个类自己的那份类属性存储
                 if (is_class_receiver(*at)) {
                     if (const ClassAttrInfo* ca = ot->cls->class_attr(at->attr)) {
-                        if (!assignable(ca->ty, value))
+                        if (ca->ty && ca->ty->kind != TyKind::None &&
+                            !is_unknown(ca->ty) && !assignable(ca->ty, value))
                             err(line, col,
                                 std::format("class attribute '{}.{}' has type '{}', cannot "
                                             "assign '{}'",
@@ -621,7 +622,8 @@ void TypeChecker::unpack_assign(std::vector<ExprPtr>& targets, TypePtr value, in
 
         if (value->kind == TyKind::List || value->kind == TyKind::Set ||
             value->kind == TyKind::Generator || value->kind == TyKind::Range ||
-            value->kind == TyKind::Str) {
+            value->kind == TyKind::Str || value->kind == TyKind::Exception ||
+            value->kind == TyKind::Class || value->kind == TyKind::Dict) {
             // 只记录元素类型、不记录长度，逐个赋元素类型。
             // generator/range 是惰性可迭代；str 解包到单字符。
             TypePtr elem = value->kind == TyKind::Str ? t_str()
