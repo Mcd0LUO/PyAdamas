@@ -128,7 +128,7 @@ int main(int argc, char** argv) {
                      "pyadamas —— Python 语法外壳的编译器\n"
                      "\n"
                      "usage: %s [tokens|ast|types|check|ir|asm|build|run|cdecl] [-O0|-O1|-O2] "
-                     "[--fast-math] [--syntax] [-o out] <file.py>\n",
+                     "[--fast-math] [--zero-cost-exc] [--syntax] [-o out] <file.py>\n",
                      argv[0]);
         return 2;
     }
@@ -144,6 +144,7 @@ int main(int argc, char** argv) {
     bool rebuild = false;
     int opt_level = 2;
     bool fast_math = false;
+    bool zero_cost_exc = false;
     bool resolve_imports = false;
 
     static const std::vector<std::string> kModes = {"tokens", "ast",     "check", "types",
@@ -156,6 +157,7 @@ int main(int argc, char** argv) {
         else if (a == "-v" || a == "--verbose") verbose = true;
         else if (a == "--rebuild") rebuild = true;
         else if (a == "--fast-math") fast_math = true;
+        else if (a == "--zero-cost-exc") zero_cost_exc = true;
         else if (a == "-O0") opt_level = 0;
         else if (a == "-O1") opt_level = 1;
         else if (a == "-O2") opt_level = 2;
@@ -282,6 +284,7 @@ int main(int argc, char** argv) {
         prog.verbose = verbose;
         prog.opt = opt_level;
         prog.fast_math = fast_math;
+        prog.zero_cost_exc = zero_cost_exc;
         if (!load_program(path, include_dirs, prog)) return 1;
 
         if (mode == "ir" || mode == "asm") {
@@ -291,8 +294,8 @@ int main(int argc, char** argv) {
                 pyadamas::dump_ir(*prog.entry->ir, std::cout);
             } else {
                 auto a = std::chrono::steady_clock::now();
-                std::string asm_text =
-                    pyadamas::generate_asm(*prog.entry->ir, !prog.needs_unknown_index);
+                std::string asm_text = pyadamas::generate_asm(
+                    *prog.entry->ir, !prog.needs_unknown_index, prog.zero_cost_exc);
                 auto b = std::chrono::steady_clock::now();
                 if (std::getenv("PYADAMAS_TIMING"))
                     std::fprintf(stderr, "[timing] codegen=%.1f ms\n",

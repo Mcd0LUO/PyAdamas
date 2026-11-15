@@ -259,6 +259,11 @@ void AsmGen::emit_function(const IRFunction& f, int fi) {
         out_bytes_ = outgoing_bytes(f);
         layout_frame(n_slots_ + n_vreg_slots_ + rec_words);
         build_operand_caches();
+        // 零开销异常（Z2-b2）：预扫本函数的 EH 标记、分配标签。fname 在这里
+        // 就要算出来——LSDA 的偏移基准是 FDE 起点（.cfi_startproc 的地址），
+        // 而 .LfN 与它之间隔着 .p2align 的填充，不能拿 .LfN 当基准。
+        const std::string fname = debug_func_symbol(fi, f.name);
+        prepare_eh_plan(f, fname);
         auto t_emit = std::chrono::steady_clock::now();
         alloc_ns_ += std::chrono::duration<double, std::nano>(t_emit - t_alloc).count();
         {
@@ -277,7 +282,7 @@ void AsmGen::emit_function(const IRFunction& f, int fi) {
             dbg_entries_.push_back({start, fi, 0});
         }
         // 可读的函数别名，供 addr2line / nm / gdb 定位；.LfN 仍是内部跳转名。
-        const std::string fname = debug_func_symbol(fi, f.name);
+        // （fname 在 prepare_eh_plan 之前就算好了，见上面的注释。）
         out_ += "\t.p2align 4\n";
         emit_type_func(fname);
         out_ += fname + ":\n";
@@ -286,6 +291,9 @@ void AsmGen::emit_function(const IRFunction& f, int fi) {
         // _Unwind_Backtrace 都不解析 prologue，只认这张表——缺了它们就
         // 展不过生成出来的帧。运行时的 traceback 仍走 rbp 链，不依赖 CFI。
         cfi(".cfi_startproc");
+        // 零开销异常：personality / LSDA 必须落在 .cfi_startproc 与
+        // .cfi_endproc 之间。空计划（老路径函数）什么也不发。
+        emit_eh_directives_for_current();
         // 帧里没有帧指针：CFA 全程由 rsp 定义。prologue 每动一次 sp 就把
         // 偏移记下来，gdb / _Unwind_Backtrace 才能从任意 PC 还原上一层帧。
         // 被保存的寄存器相对 CFA 的偏移不随 push 变化（CFA 也跟着涨）。

@@ -129,7 +129,7 @@ VReg Lowerer::lower_method_str(Attribute& at, Call& c, VReg recv) {
             br.target2 = bad_b;
             emit(std::move(br));
             switch_to(bad_b);
-            call_void(RtFn::Raise,
+            call_void(raise_rt(RtFn::Raise),
                       {const_str("ValueError"), const_str("substring not found")});
             Inst j;
             j.op = IrOp::Jump;

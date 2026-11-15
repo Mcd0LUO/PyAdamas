@@ -7,6 +7,7 @@
 #include <unistd.h>
 #include <cctype>
 #include <chrono>
+#include <cstdint>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -144,6 +145,150 @@ std::optional<ResolvedModule> resolve_module_path(const std::string& importer,
             return ResolvedModule{canonical_path(pkg.string()), true};
     }
     return std::nullopt;
+}
+
+// ── 模块表：内建模块与 stdlib Python 源的单一数据源 ───────────────
+// 每个可导入模块在这里占一行；import 文件解析（visit_unit）、类型检查
+// 用的模块接口（program_module）、check 模式的 import 图（check_load）
+// 都只查这张表，不再各自维护一份硬编码名单。
+//   Native       原生模块：接口由 builtin_sigs.cpp 提供，没有源文件。
+//   Python       纯 Python 源模块：由随编译器分发的 stdlib/<source> 提供。
+//   NativePython 原生模块 + stdlib 扩展源：导入时编译扩展源并执行其 init；
+//                原生名字优先，源文件里原生没有的名字合并进模块接口。
+// source 相对 stdlib/ 目录；deps 是登记用的依赖清单（真实依赖仍由 AST
+// 扫描得到），表自检会核对它们都已登记，防止改表时留下死引用。
+enum class ModuleKind : std::uint8_t { Native, Python, NativePython };
+
+struct ModuleEntry {
+    std::string_view name;
+    ModuleKind kind;
+    std::string_view source;
+    std::string_view deps;
+};
+
+inline constexpr ModuleEntry kModuleTable[] = {
+    // ── 原生模块 ──────────────────────────────────────────────
+    {"math", ModuleKind::Native, "", ""},
+    {"sys", ModuleKind::Native, "", ""},
+    {"asyncio", ModuleKind::Native, "", ""},
+    {"random", ModuleKind::Native, "", ""},
+    {"os", ModuleKind::Native, "", ""},
+    {"os.path", ModuleKind::Native, "", ""},
+    {"subprocess", ModuleKind::Native, "", ""},
+    {"time", ModuleKind::Native, "", ""},
+    {"itertools", ModuleKind::Native, "", ""},
+    {"collections", ModuleKind::Native, "", ""},
+    {"json", ModuleKind::Native, "", ""},
+    {"re", ModuleKind::Native, "", ""},
+    {"datetime", ModuleKind::Native, "", ""},
+    {"pathlib", ModuleKind::Native, "", ""},
+    {"operator", ModuleKind::Native, "", ""},
+    // ── 原生 + stdlib 扩展源（补 API 只改 stdlib/<source>，不用碰 src/）──
+    {"functools", ModuleKind::NativePython, "functools.py", ""},
+    // ── stdlib Python 源模块 ──────────────────────────────────
+    {"abc", ModuleKind::Python, "abc.py", ""},
+    {"base64", ModuleKind::Python, "base64.py", ""},
+    {"binascii", ModuleKind::Python, "binascii.py", ""},
+    {"bisect", ModuleKind::Python, "bisect.py", ""},
+    {"collections.abc", ModuleKind::Python, "collections/abc.py", ""},
+    {"csv", ModuleKind::Python, "csv.py", ""},
+    {"enum", ModuleKind::Python, "enum.py", ""},
+    {"fractions", ModuleKind::Python, "fractions.py", "math"},
+    {"glob", ModuleKind::Python, "glob.py", "os,os.path"},
+    {"hashlib", ModuleKind::Python, "hashlib.py", ""},
+    {"heapq", ModuleKind::Python, "heapq.py", ""},
+    {"hmac", ModuleKind::Python, "hmac.py", "hashlib"},
+    {"linalg", ModuleKind::Python, "linalg.py", ""},
+    {"logging", ModuleKind::Python, "logging.py", "sys"},
+    {"statistics", ModuleKind::Python, "statistics.py", "math"},
+    {"string", ModuleKind::Python, "string.py", ""},
+    {"textwrap", ModuleKind::Python, "textwrap.py", ""},
+    {"typing", ModuleKind::Python, "typing.py", ""},
+    {"uuid", ModuleKind::Python, "uuid.py", "random"},
+};
+
+const ModuleEntry* find_module_entry(std::string_view name) {
+    for (const auto& e : kModuleTable)
+        if (e.name == name) return &e;
+    return nullptr;
+}
+
+bool is_native_module(const ModuleEntry* e) { return e && e->kind == ModuleKind::Native; }
+
+// 表里登记的 stdlib 源路径（source 为相对 stdlib/ 的路径）。
+std::string module_source_path(const ModuleEntry& e) {
+    return canonical_path(
+        (std::filesystem::path(PYADAMAS_STDLIB_DIR) / std::string(e.source)).string());
+}
+
+bool path_under_stdlib(const std::string& path) {
+    static const std::string root = canonical_path(PYADAMAS_STDLIB_DIR);
+    return path.size() > root.size() && path.compare(0, root.size(), root) == 0 &&
+           path[root.size()] == '/';
+}
+
+// 解析一个 import 的源文件：
+// - 原生 + 扩展源：固定取随编译器分发的源，不允许同名用户文件劫持内建模块；
+// - 其余（纯 Python 源模块 / 用户模块）：走正常搜索路径（导入方目录、
+//   用户 -I 目录、最后 stdlib），保持既有的「用户可覆盖」语义。
+std::optional<ResolvedModule> resolve_import_source(const std::string& importer,
+                                                    const std::string& name,
+                                                    const std::vector<std::string>& include_dirs) {
+    const ModuleEntry* e = find_module_entry(name);
+    if (e && e->kind == ModuleKind::NativePython) {
+        std::string path = module_source_path(*e);
+        std::error_code ec;
+        if (!std::filesystem::is_regular_file(path, ec)) return std::nullopt;
+        bool is_pkg = std::string(e->source).ends_with("__init__.py");
+        return ResolvedModule{path, is_pkg};
+    }
+    return resolve_module_path(importer, name, include_dirs);
+}
+
+// 表格自检：登记了源的模块，源文件必须存在；deps 里的模块必须已登记。
+// 每次进程只跑一次；Release 构建跳过（避免给正式二进制增加启动 IO）。
+bool validate_module_table() {
+#ifdef NDEBUG
+    return true;
+#else
+    static const bool ok = [] {
+        bool good = true;
+        std::error_code ec;
+        for (const auto& e : kModuleTable) {
+            if (!e.source.empty()) {
+                auto p = std::filesystem::path(PYADAMAS_STDLIB_DIR) / std::string(e.source);
+                if (!std::filesystem::is_regular_file(p, ec)) {
+                    std::fprintf(stderr,
+                                 "error: module table: source for '%s' not found: %s\n",
+                                 std::string(e.name).c_str(), p.string().c_str());
+                    good = false;
+                }
+            } else if (e.kind != ModuleKind::Native) {
+                std::fprintf(stderr,
+                             "error: module table: '%s' is not native but registers no source\n",
+                             std::string(e.name).c_str());
+                good = false;
+            }
+            size_t start = 0;
+            while (!e.deps.empty()) {
+                size_t comma = e.deps.find(',', start);
+                std::string_view dep =
+                    e.deps.substr(start, comma == std::string_view::npos ? std::string_view::npos
+                                                                        : comma - start);
+                if (!dep.empty() && !find_module_entry(dep)) {
+                    std::fprintf(stderr,
+                                 "error: module table: '%s' depends on unregistered '%s'\n",
+                                 std::string(e.name).c_str(), std::string(dep).c_str());
+                    good = false;
+                }
+                if (comma == std::string_view::npos) break;
+                start = comma + 1;
+            }
+        }
+        return good;
+    }();
+    return ok;
+#endif
 }
 
 struct ImportReq {
@@ -318,6 +463,8 @@ struct Manifest {
     uint64_t source_hash = 0;
     int opt = -1;
     int fast_math = -1;
+    // 零开销异常开关。-1 = 旧清单没有这一行（缓存必然失效一次）。
+    int zero_cost_exc = -1;
     // 旧清单没有这一行：保守按「需要索引」处理。
     bool unknown_index = true;
     std::string toolchain;
@@ -357,6 +504,12 @@ std::optional<Manifest> read_manifest(const ModuleUnit& u) {
             auto o = parse_u64(v);
             if (!o) return std::nullopt;
             m.fast_math = static_cast<int>(*o);
+        } else if (tag == "zerocostexc") {
+            std::string v;
+            ss >> v;
+            auto o = parse_u64(v);
+            if (!o) return std::nullopt;
+            m.zero_cost_exc = static_cast<int>(*o);
         } else if (tag == "unknownindex") {
             std::string v;
             ss >> v;
@@ -385,6 +538,7 @@ void write_manifest(const Program& p, const ModuleUnit& u) {
     out << "source " << pyadamas::fnv1a64(u.source) << "\n";
     out << "opt " << p.opt << "\n";
     out << "fastmath " << (p.fast_math ? 1 : 0) << "\n";
+    out << "zerocostexc " << (p.zero_cost_exc ? 1 : 0) << "\n";
     out << "unknownindex " << (u.needs_unknown_index ? 1 : 0) << "\n";
     out << "toolchain " << toolchain_id() << "\n";
     for (auto& d : u.deps) {
@@ -474,22 +628,24 @@ bool visit_unit(Program& p, ModuleUnit& u, std::vector<ModuleUnit*>& stack) {
                    "'__entry__' is reserved for the entry module");
             return false;
         }
-        if (req.name == "math" || req.name == "sys" || req.name == "asyncio" ||
-            req.name == "random" || req.name == "os" || req.name == "os.path" ||
-            req.name == "subprocess" || req.name == "time" || req.name == "itertools" ||
-            req.name == "collections" || req.name == "json" || req.name == "re" ||
-            req.name == "functools" || req.name == "datetime" || req.name == "pathlib" ||
-            req.name == "operator") {
-            // 内置模块没有源文件/对象，只提供编译期接口。
-            continue;
-        }
-        auto found = resolve_module_path(u.path, req.name, p.include_dirs);
+        // 纯原生模块没有源文件/对象，只提供编译期接口；原生 + stdlib
+        // 扩展源的模块（functools）仍要按普通模块编译扩展源。
+        const ModuleEntry* entry = find_module_entry(req.name);
+        if (is_native_module(entry)) continue;
+        auto found = resolve_import_source(u.path, req.name, p.include_dirs);
         if (!found) {
             report(u.path, u.source, req.line, req.col,
                    std::format("cannot find module '{}'", req.name));
             return false;
         }
         std::string canonical = canonical_path(found->path);
+        // 单一数据源：随编译器分发的 stdlib 源必须在模块表里登记。
+        if (!entry && path_under_stdlib(canonical)) {
+            report(u.path, u.source, req.line, req.col,
+                   std::format("stdlib module '{}' is not registered in the builtin module table",
+                               req.name));
+            return false;
+        }
         auto it = p.units.find(req.name);
         ModuleUnit* dep = nullptr;
         if (it != p.units.end()) {
@@ -582,6 +738,7 @@ bool try_cache(Program& p, ModuleUnit& u) {
     if (m->toolchain != toolchain_id()) return false;  // 换了编译器/运行时
     if (m->opt != p.opt) return false;
     if (m->fast_math != (p.fast_math ? 1 : 0)) return false;
+    if (m->zero_cost_exc != (p.zero_cost_exc ? 1 : 0)) return false;
     if (m->deps.size() != u.deps.size()) return false;
     for (auto& d : u.deps) {
         auto it = m->deps.find(d);
@@ -606,15 +763,47 @@ bool try_cache(Program& p, ModuleUnit& u) {
     return true;
 }
 
+// 原生模块 + stdlib 扩展源：接口取并集，原生名字优先（扩展只能补新名字，
+// 不能悄悄改掉原生语义）。source_init/source_globals 记录给降级用。
+pyadamas::ModuleInfoPtr merge_extension_module(const pyadamas::ModuleInfoPtr& base,
+                                               const pyadamas::ModuleInfoPtr& ext) {
+    auto merged = std::make_shared<pyadamas::ModuleInfo>(*base);
+    merged->source_init = true;
+    for (auto& [name, ty] : ext->globals) {
+        // __name__/__file__ 之类由编译器统一给，不参与合并。
+        if (name.size() >= 2 && name[0] == '_' && name[1] == '_') continue;
+        if (merged->globals.count(name)) continue;
+        merged->globals[name] = ty;
+        merged->source_globals.insert(name);
+    }
+    for (auto& [name, ic] : ext->classes) {
+        if (merged->classes.count(name)) continue;
+        merged->classes[name] = ic;
+    }
+    return merged;
+}
+
 pyadamas::ModuleInfoPtr program_module(Program& p, const std::string& name) {
-    if (name == "math" || name == "sys" || name == "asyncio" || name == "random" ||
-        name == "os" || name == "os.path" || name == "subprocess" || name == "time" ||
-        name == "itertools" || name == "collections" || name == "json" || name == "re" ||
-        name == "functools" || name == "datetime" || name == "pathlib" ||
-        name == "operator")
-        return builtin_module(name);
-    auto it = p.units.find(name);
-    return it == p.units.end() ? nullptr : it->second->info;
+    auto unit_info = [&p, &name]() -> pyadamas::ModuleInfoPtr {
+        auto it = p.units.find(name);
+        return it == p.units.end() ? nullptr : it->second->info;
+    };
+    const ModuleEntry* e = find_module_entry(name);
+    if (!e) return unit_info();  // 未登记：用户模块 / 包内子模块
+    switch (e->kind) {
+        case ModuleKind::Native:
+            return builtin_module(name);
+        case ModuleKind::Python:
+            return unit_info();
+        case ModuleKind::NativePython: {
+            auto base = builtin_module(name);
+            if (auto ext = unit_info()) return merge_extension_module(base, ext);
+            // 扩展源还没建出接口（理论上不会出现在正常构建序里）：退回原生，
+            // 让类型检查按原生接口跑，别静默丢接口。
+            return base;
+        }
+    }
+    return unit_info();
 }
 
 bool build_unit(Program& p, ModuleUnit& u, bool emit_object, bool entry_ir) {
@@ -806,6 +995,7 @@ bool build_unit(Program& p, ModuleUnit& u, bool emit_object, bool entry_ir) {
     opt.is_entry = u.is_entry;
     opt.opt_level = p.opt;
     opt.fast_math = p.fast_math;
+    opt.zero_cost_exc = p.zero_cost_exc;
     opt.module_lookup = [&p](const std::string& name) -> pyadamas::ModuleInfoPtr {
         return program_module(p, name);
     };
@@ -834,7 +1024,8 @@ bool build_unit(Program& p, ModuleUnit& u, bool emit_object, bool entry_ir) {
     }
     if (!emit_object) return true;
 
-    u.asm_text = pyadamas::generate_asm(lr.mod, u.is_entry && !p.needs_unknown_index);
+    u.asm_text = pyadamas::generate_asm(lr.mod, u.is_entry && !p.needs_unknown_index,
+                                        p.zero_cost_exc);
     auto t3 = now();
     std::string err;
     if (!assemble_object(u, err)) {
@@ -886,15 +1077,6 @@ struct CheckCtx {
     // 否则接口里的 ClassInfo* 会悬空。
     std::vector<std::shared_ptr<pyadamas::TypeChecker>> keep_alive;
 };
-
-std::string check_builtin_name(const std::string& n) {
-    if (n == "math" || n == "sys" || n == "asyncio" || n == "random" || n == "os" ||
-        n == "os.path" || n == "subprocess" || n == "time" || n == "itertools" ||
-        n == "collections" || n == "json" || n == "re" || n == "functools" ||
-        n == "datetime" || n == "pathlib" || n == "operator")
-        return n;
-    return "";
-}
 
 // 把某个模块的类型检查结果压成扁平 ModuleInfo（类方法/字段按 MRO 拍平），
 // 和 build_unit 的接口导出逻辑保持一致，但不做编解码归一。
@@ -1000,54 +1182,89 @@ pyadamas::ModuleInfoPtr check_build_info(pyadamas::TypeChecker& tc,
 pyadamas::ModuleInfoPtr check_load(CheckCtx& ctx, const std::string& importer,
                                     const std::string& name);
 
+// 按文件解析一个模块、建出接口；ctx.loading 负责环检测。失败时记
+// missing 并返回 nullptr（调用方按 unknown 处理）。
+pyadamas::ModuleInfoPtr check_load_file(CheckCtx& ctx, const std::string& name,
+                                        const std::string& path) {
+    auto src = read_file(path);
+    if (!src) {
+        ctx.loading.erase(name);
+        ctx.missing.push_back(name);
+        return nullptr;
+    }
+    try {
+        pyadamas::Lexer lexer(*src);
+        pyadamas::Parser parser(lexer.run());
+        auto mod = parser.parse();
+        pyadamas::desugar_lambdas(*mod);
+        auto tc = std::make_shared<pyadamas::TypeChecker>(path);
+        std::string cap_name = name;
+        tc->set_module_lookup([&ctx, path, cap_name](const std::string& dep) {
+            return check_load(ctx, path, dep);
+        });
+        tc->set_lenient_imports(true);
+        tc->check(*mod);
+        ctx.keep_alive.push_back(tc);
+        auto info = check_build_info(*tc, name);
+        info->name = name;
+        info->source_path = path;
+        ctx.loading.erase(name);
+        return info;
+    } catch (...) {
+        ctx.loading.erase(name);
+        ctx.missing.push_back(name);
+        return nullptr;
+    }
+}
+
 pyadamas::ModuleInfoPtr check_load(CheckCtx& ctx, const std::string& importer,
                                     const std::string& name) {
     if (auto it = ctx.loaded.find(name); it != ctx.loaded.end()) return it->second;
-    if (auto b = check_builtin_name(name); !b.empty()) {
+    const ModuleEntry* entry = find_module_entry(name);
+    if (is_native_module(entry)) {
         auto m = pyadamas::builtin_module(name);
         ctx.loaded[name] = m;
         return m;
     }
+    if (entry && entry->kind == ModuleKind::NativePython) {
+        // 原生 + stdlib 扩展源：接口 = 原生接口 + 扩展新增名字。
+        std::string path = module_source_path(*entry);
+        std::error_code ec;
+        if (!std::filesystem::is_regular_file(path, ec) || ctx.loading.count(name)) {
+            ctx.missing.push_back(name);
+            ctx.loaded[name] = nullptr;
+            return nullptr;
+        }
+        ctx.loading.insert(name);
+        auto ext = check_load_file(ctx, name, path);
+        if (!ext) {
+            ctx.loaded[name] = nullptr;
+            return nullptr;
+        }
+        auto info = merge_extension_module(pyadamas::builtin_module(name), ext);
+        info->name = name;
+        info->source_path = path;
+        ctx.loaded[name] = info;
+        return info;
+    }
     if (ctx.loading.count(name)) return nullptr;  // 环：按 unknown
-    auto found = resolve_module_path(importer, name, ctx.include_dirs);
+    auto found = resolve_import_source(importer, name, ctx.include_dirs);
     if (!found) {
         ctx.missing.push_back(name);
         ctx.loaded[name] = nullptr;
         return nullptr;
     }
-    ctx.loading.insert(name);
-    auto src = read_file(found->path);
-    if (!src) {
-        ctx.loading.erase(name);
+    std::string path = canonical_path(found->path);
+    // 单一数据源：stdlib 目录里的 Python 源必须在模块表里登记。
+    if (!entry && path_under_stdlib(path)) {
         ctx.missing.push_back(name);
         ctx.loaded[name] = nullptr;
         return nullptr;
     }
-    try {
-    pyadamas::Lexer lexer(*src);
-    pyadamas::Parser parser(lexer.run());
-    auto mod = parser.parse();
-    pyadamas::desugar_lambdas(*mod);
-    auto tc = std::make_shared<pyadamas::TypeChecker>(found->path);
-    std::string cap_name = name;
-    tc->set_module_lookup([&ctx, found, cap_name](const std::string& dep) {
-        return check_load(ctx, found->path, dep);
-    });
-    tc->set_lenient_imports(true);
-    tc->check(*mod);
-    ctx.keep_alive.push_back(tc);
-    auto info = check_build_info(*tc, name);
-    info->name = name;
-    info->source_path = found->path;
-    ctx.loading.erase(name);
+    ctx.loading.insert(name);
+    auto info = check_load_file(ctx, name, path);
     ctx.loaded[name] = info;
     return info;
-    } catch (...) {
-        ctx.loading.erase(name);
-        ctx.missing.push_back(name);
-        ctx.loaded[name] = nullptr;
-        return nullptr;
-    }
 }
 
 }  // namespace
@@ -1081,6 +1298,7 @@ CheckLookup load_check_lookup(const std::string& entry_path,
 
 bool load_program(const std::string& entry_path, const std::vector<std::string>& include_dirs,
                   Program& p) {
+    if (!validate_module_table()) return false;
     p.include_dirs = include_dirs;
     // 随编译器分发的标准库源码目录：导入方同目录与用户 -I 优先，最后落这里。
     p.include_dirs.emplace_back(PYADAMAS_STDLIB_DIR);

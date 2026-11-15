@@ -62,7 +62,7 @@ VReg Lowerer::lower_builtin_seq(const std::string& name, Call& c) {
             br.target2 = ok;
             emit(std::move(br));
             switch_to(stop);
-            call_void(RtFn::Raise, {const_str("StopIteration"), const_str("")});
+            call_void(raise_rt(RtFn::Raise), {const_str("StopIteration"), const_str("")});
             Inst j;
             j.op = IrOp::Jump;
             j.target = ok;

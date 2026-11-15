@@ -190,6 +190,19 @@ void prune_unreachable(IRFunction& fn) {
     std::vector<char> reach(nb, 0);
     std::vector<int> work{0};
     reach[0] = 1;
+    // 零开销异常（--zero-cost-exc）：landing pad 块只有异常边，CFG 上没有
+    // 任何前驱；但它是 codegen 要发 pa_eh_land / except 分发的地方，绝不能
+    // 当死块删掉。这里按标记指令认块（而不是 IRFunction::eh_regions 里记的
+    // 块号）：内联等 pass 会重建块表，块号会过期，指令跟着块走才是稳的。
+    for (int b = 0; b < static_cast<int>(nb); ++b)
+        for (const auto& in : fn.blocks[static_cast<size_t>(b)].insts)
+            if (in.op == IrOp::EhLandingPad) {
+                if (!reach[static_cast<size_t>(b)]) {
+                    reach[static_cast<size_t>(b)] = 1;
+                    work.push_back(b);
+                }
+                break;
+            }
     while (!work.empty()) {
         int bi = work.back();
         work.pop_back();

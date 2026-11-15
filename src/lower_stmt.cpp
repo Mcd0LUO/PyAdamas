@@ -486,7 +486,7 @@ void Lowerer::lower_for_range_core(For& f, VReg start, VReg stop, VReg step_v, b
         brz.target2 = ok_blk;
         emit(std::move(brz));
         switch_to(zero_blk);
-        call_void(RtFn::Raise,
+        call_void(raise_rt(RtFn::Raise),
                   {const_str("ValueError"), const_str("range() arg 3 must not be zero")});
         Inst jz;
         jz.op = IrOp::Jump;

@@ -1,10 +1,12 @@
 // codegen.cpp —— IR → x86-64 汇编：数据段、函数遍历与总入口
 #include "codegen_impl.h"
 #include "codegen.h"
+#include "eh_emit.h"
 
 #include <cctype>
 #include <cstdio>
 #include <cstdlib>
+#include <stdexcept>
 
 namespace pyadamas {
 
@@ -48,6 +50,8 @@ std::string AsmGen::gen(const IRModule& m) {
         m_ = &m;
         opt_ = m.opt_level;
         out_.clear();
+        eh_plans_.clear();
+        eh_plan_active_ = false;
         dbg_on_ = !m.source_path.empty();
         dbg_entries_.clear();
         dbg_seq_ = 0;
@@ -463,6 +467,9 @@ std::string AsmGen::gen(const IRModule& m) {
             if (gnu_cfi()) out_ += "\t.cfi_endproc\n";
             emit_size_func("main");
         }
+        // 零开销异常（Z2-b2）：所有函数的 .gcc_except_table + 每个 TU 一份的
+        // DW.ref 间接指针槽。空计划（老路径）一个字节都不发。
+        emit_eh_tables();
         emit_gnu_stack_note();
 
         if (std::getenv("PYADAMAS_TIMING"))
@@ -471,9 +478,79 @@ std::string AsmGen::gen(const IRModule& m) {
         return render(out_);
     }
 
-std::string generate_asm(const IRModule& m, bool disable_unknown_index) {
+// ── 零开销异常（Z2-b2，--zero-cost-exc）────────────────────────────────
+
+void AsmGen::prepare_eh_plan(const IRFunction& f, const std::string& fname) {
+    eh_begin_labels_.clear();
+    eh_end_labels_.clear();
+    eh_lp_labels_.clear();
+    eh_begin_seq_ = eh_end_seq_ = eh_lp_seq_ = 0;
+    eh_plan_active_ = false;
+    if (!zero_cost_exc_ || f.eh_regions.empty() || !gnu_cfi()) return;
+    // 预扫描顺序 = 块发射顺序 × 块内指令顺序；发射标记指令时按同样的顺序
+    // 取标签，一一对应。
+    for (const auto& b : f.blocks)
+        for (const auto& in : b.insts) {
+            if (in.op == IrOp::EhBegin) eh_begin_labels_.push_back(fresh_label("ehB"));
+            else if (in.op == IrOp::EhEnd) eh_end_labels_.push_back(fresh_label("ehE"));
+            else if (in.op == IrOp::EhLandingPad)
+                eh_lp_labels_.push_back(fresh_label("ehLP"));
+        }
+    // 第一刀：每个函数恰好一条保护区（lowering 的形状判定保证）。
+    if (eh_begin_labels_.size() != 1 || eh_end_labels_.size() != 1 ||
+        eh_lp_labels_.size() != 1)
+        throw std::logic_error("zero-cost EH: 期望每个函数恰好一条保护区");
+    EhPlanRec rec;
+    rec.func_label = fname;
+    rec.begin = eh_begin_labels_.front();
+    rec.end = eh_end_labels_.front();
+    rec.lp = eh_lp_labels_.front();
+    rec.lsda_index = static_cast<int>(eh_plans_.size());
+    eh_plans_.push_back(std::move(rec));
+    eh_plan_active_ = true;
+}
+
+void AsmGen::emit_eh_directives_for_current() {
+    if (!eh_plan_active_ || eh_plans_.empty()) return;
+    const EhPlanRec& rec = eh_plans_.back();
+    EhFuncPlan plan;
+    plan.lsda_index = rec.lsda_index;
+    plan.func_label = rec.func_label.c_str();
+    EhRange r;
+    r.begin_label = rec.begin.c_str();
+    r.end_label = rec.end.c_str();
+    r.lp_label = rec.lp.c_str();
+    r.is_handler = true;
+    plan.ranges.push_back(r);
+    std::string text;
+    emit_eh_func_directives(text, plan);
+    emit_raw(text);
+}
+
+void AsmGen::emit_eh_tables() {
+    if (eh_plans_.empty()) return;
+    std::string text;
+    for (const auto& rec : eh_plans_) {
+        EhFuncPlan plan;
+        plan.lsda_index = rec.lsda_index;
+        plan.func_label = rec.func_label.c_str();
+        EhRange r;
+        r.begin_label = rec.begin.c_str();
+        r.end_label = rec.end.c_str();
+        r.lp_label = rec.lp.c_str();
+        r.is_handler = true;
+        plan.ranges.push_back(r);
+        emit_eh_lsda(text, plan);
+    }
+    emit_eh_dwref(text);
+    emit_raw(text);
+}
+
+std::string generate_asm(const IRModule& m, bool disable_unknown_index,
+                         bool zero_cost_exc) {
     AsmGen g;
     g.set_disable_unknown_index(disable_unknown_index);
+    g.set_zero_cost_exc(zero_cost_exc);
     return g.gen(m);
 }
 

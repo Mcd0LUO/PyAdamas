@@ -12,6 +12,10 @@ namespace pyadamas {
 // 浮点走 xmm0-xmm7，超出部分压栈。
 // disable_unknown_index：整程序不用 unknown 时关掉存活堆索引维护，
 // 入口函数会多发一条 pa_disable_unknown_index 调用。
-std::string generate_asm(const IRModule& m, bool disable_unknown_index = false);
+// zero_cost_exc：--zero-cost-exc 总开关。开启后只有 IR 里带 EH 区域标记
+// （EhBegin/EhEnd/EhLandingPad）的函数才会发 personality/LSDA；关闭时输出
+// 与原来的 setjmp 路径逐字节一致。
+std::string generate_asm(const IRModule& m, bool disable_unknown_index = false,
+                         bool zero_cost_exc = false);
 
 }  // namespace pyadamas

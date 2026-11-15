@@ -2,6 +2,7 @@
 #include "lower_impl.h"
 
 #include "opt.h"
+#include "target_abi.h"
 
 namespace pyadamas {
 
@@ -466,6 +467,19 @@ int Lowerer::compile_function_body(FunctionDef& f, FuncInfoPtr info, const std::
     inc_params();
     create_cells();
 
+    // 零开销异常（Z2-b2）：--zero-cost-exc 打开时，先按 AST 判定本函数是否
+    // 满足最小形状（非可挂起 + 单个 catch-all try + 内部没有 return/break/
+    // continue 穿过保护区）。满足时才把唯一那条 try 降级成 LSDA/landing pad
+    // 路径；不满足的函数继续走 setjmp 路径，一条指令都不变。
+    if (opts_.zero_cost_exc && target_abi().gnu_cfi) {
+        if (const Try* zt = find_zero_cost_try(f)) {
+            st_->zero_cost_try = zt;
+            // 与老路径的 has_handlers 语义保持一致（docs/exc-semantics.md
+            // §5.2：Z2/Z3 期间不把「优化差异」混进语义回归）：函数里不再有
+            // HandlerPush，但槽位提升 / 序言清零 / 循环优化的门禁照旧。
+            irf->has_handlers = true;
+        }
+    }
     stmts(f.body);
     if (!terminated()) emit_return(kNoReg, nullptr);
     finalize_param_borrows();

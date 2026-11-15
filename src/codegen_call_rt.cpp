@@ -131,6 +131,11 @@ void AsmGen::gen_rt_subprocess_run(const Inst& in) {
 
 void AsmGen::gen_rt_args(const Inst& in, RtFn fn) {
     switch (fn) {
+        case RtFn::EhLand:
+            // landing pad 入口：展开包装指针由 personality 放进 %rax（GR0），
+            // 不占普通实参位；直接搬到第一个整型实参寄存器。
+            emit2("movq", "%rax", arg_reg_i(0));
+            break;
         case RtFn::StrFromNone:
         case RtFn::PanicDiv0:
         case RtFn::PanicOverflow:
@@ -138,6 +143,8 @@ void AsmGen::gen_rt_args(const Inst& in, RtFn fn) {
         case RtFn::PrintSep:
         case RtFn::PrintEnd:
         case RtFn::RcMark:
+        case RtFn::EhReraise:
+        case RtFn::EhRethrow:
         case RtFn::RcShutdown:
         case RtFn::GcShutdown:
         case RtFn::HandlerPush:
@@ -483,6 +490,8 @@ void AsmGen::gen_rt_args(const Inst& in, RtFn fn) {
         case RtFn::PopenCommunicate:
         case RtFn::AsyncioGather:
         case RtFn::AsyncioCreateTask:
+        case RtFn::EhRaise:
+        case RtFn::EhRaiseValueFrom:
             gen_rt_i2(in);
             break;
         case RtFn::FileSeek:

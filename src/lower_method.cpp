@@ -115,9 +115,11 @@ VReg Lowerer::lower_method_call(Attribute& at, Call& c) {
     if (auto* n = dynamic_cast<Name*>(at.value.get())) {
         if (tc_.cmodule(n->id)) return lower_cimport_call(at, c);
     }
-    // 内置模块的原生函数/常量。
+    // 内置模块的原生函数/常量。stdlib 扩展补进来的名字不在原生名单里，
+    // 跳过这段，落到下面按普通外部全局函数调用。
     if (auto* n = dynamic_cast<Name*>(at.value.get())) {
-        if (auto mod = resolve_module_alias(n->id); mod && mod->builtin) {
+        if (auto mod = resolve_module_alias(n->id);
+            mod && mod->builtin && !mod->source_globals.count(at.attr)) {
             if (mod->name == "asyncio") return lower_asyncio(at.attr, c);
             if (mod->name == "itertools") return lower_itertools(at.attr, c);
             if (mod->name == "operator") return lower_operator(at.attr, c);

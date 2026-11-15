@@ -255,6 +255,16 @@ enum class RtFn : uint16_t {
     RaiseValue,   // (excval*) -> void noreturn
     RaiseValueFrom, // (excval*, excval*|0) -> void noreturn
     Reraise,      // () -> void       noreturn  裸 raise
+    // ── 零开销异常（Z2-b2，--zero-cost-exc）：表驱动展开版本的抛出 ──
+    // 与上面的 Raise*/Reraise 一一对应，区别只在最后一步：把异常装进
+    // _Unwind_Exception 交给 _Unwind_RaiseException，而不是 longjmp。
+    // 只有「函数内没有 setjmp 兜底」的零开销 try 体里才会用到它们。
+    EhRaise,          // (str* type, str* msg) -> void noreturn
+    EhRaiseValueFrom, // (excval*, excval*|0) -> void noreturn
+    EhReraise,        // () -> void noreturn  裸 raise 的表驱动版
+    EhRethrow,        // () -> void noreturn  landing 分发不匹配时重抛同一个异常
+    EhLand,           // (unwind_exc*) -> void landing pad 入口：取回异常并收尾展开包装
+                      //   实参由 codegen 特殊处理（直接从 landing pad 入口的 %rax 取）
     AbsI64,       // (i64) -> i64
     ComplexNew,   // (f64 re, f64 im) -> complex*
     ComplexAdd, ComplexSub, ComplexMul, ComplexDiv, // (c*,c*) -> c*
@@ -718,6 +728,11 @@ inline const char* rt_name(RtFn f) {
         case RtFn::RaiseValue: return "pa_raise_value";
         case RtFn::RaiseValueFrom: return "pa_raise_value_from";
         case RtFn::Reraise: return "pa_reraise";
+        case RtFn::EhRaise: return "pa_eh_raise";
+        case RtFn::EhRaiseValueFrom: return "pa_eh_raise_value_from";
+        case RtFn::EhReraise: return "pa_eh_reraise";
+        case RtFn::EhRethrow: return "pa_eh_rethrow";
+        case RtFn::EhLand: return "pa_eh_land";
         case RtFn::MathSqrt: return "pa_math_sqrt";
         case RtFn::MathFloor: return "pa_math_floor";
         case RtFn::MathCeil: return "pa_math_ceil";
@@ -1106,6 +1121,13 @@ enum class IrOp : uint8_t {
     LoadExtern, // dst = <extern_vars[idx].symbol>；按声明宽度读取 C 全局变量
     StoreExtern, // <extern_vars[idx].symbol> = a；按声明宽度写回
     Setjmp,  // dst = setjmp(a)（a 是 handler 记录，异常跳回时返回非 0）
+    // ── 零开销异常（Z2-b2）：保护区 / landing pad 的位置标记 ───────
+    // 都是「不产出机器码（只发标签）/ 只发 landing pad 入口序列」的标记
+    // 指令，供 codegen 拼 .gcc_except_table 的 call-site 区间。它们没有
+    // dst、没有副作用，不在 terminated() 里。
+    EhBegin,  // 保护区起点：发 <begin> 标签
+    EhEnd,    // 保护区终点（开区间）：发 <end> 标签
+    EhLandingPad, // landing pad 入口：发 <lp> 标签；之后紧跟 CallRt EhLand
     ImportModule, // imm 是 imports 下标：确保模块已初始化
     SlotAddr,     // dst = &slots[idx]（栈槽或生成器帧槽的地址）
 
@@ -1171,6 +1193,9 @@ inline const char* irop_name(IrOp op) {
         case IrOp::LoadExtern: return "load.extern";
         case IrOp::StoreExtern: return "store.extern";
         case IrOp::Setjmp: return "setjmp";
+        case IrOp::EhBegin: return "eh.begin";
+        case IrOp::EhEnd: return "eh.end";
+        case IrOp::EhLandingPad: return "eh.landing.pad";
         case IrOp::ImportModule: return "import.module";
         case IrOp::SlotAddr: return "slot.addr";
         case IrOp::GenNew: return "gen.new";

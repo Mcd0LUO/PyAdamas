@@ -440,7 +440,9 @@ void Lowerer::lower_import(Import& im) {
             err(im.line, im.col, std::format("cannot resolve module '{}'", al.name));
             continue;
         }
-        if (!mod->builtin) ensure_module_init(mod);
+        // 原生 + stdlib 扩展源的模块也要跑扩展模块 init（原生模块自身没
+        // 有运行期对象，但扩展全局需要初始化）。
+        if (!mod->builtin || mod->source_init) ensure_module_init(mod);
         if (st_->is_module_top) module_aliases_[bind] = mod;
         else st_->modules[bind] = mod;
     }
@@ -461,7 +463,7 @@ void Lowerer::lower_import_from(ImportFrom& im) {
         err(im.line, im.col, std::format("cannot resolve module '{}'", im.module));
         return;
     }
-    if (!mod->builtin) ensure_module_init(mod);
+    if (!mod->builtin || mod->source_init) ensure_module_init(mod);
     if (im.names.size() == 1 && im.names[0].name == "*") {
         for (auto& [name, ty] : mod->globals) {
             if (name.empty() || name[0] == '_') continue;
@@ -488,6 +490,19 @@ void Lowerer::lower_import_from(ImportFrom& im) {
     for (auto& al : im.names) {
         std::string bind = al.asname.empty() ? al.name : al.asname;
         if (mod->builtin) {
+            // stdlib 扩展补进来的名字（原生没有）：没有原生降级路径，按
+            // 普通外部全局处理。
+            if (mod->source_globals.count(al.name)) {
+                auto it = mod->globals.find(al.name);
+                if (it != mod->globals.end()) {
+                    int gi = extern_global(module_global_symbol(mod->name, al.name),
+                                           std::format("{}.{}", mod->name, al.name), it->second);
+                    VReg v = load_global(gi, it->second);
+                    if (!it->second || it->second->kind == TyKind::Unknown) rc_inc_unknown(v);
+                    bind_name_value(bind, v, it->second);
+                    continue;
+                }
+            }
             if (native_fn(mod->name, al.name) || module_ctor(mod->name, al.name)) {
                 native_aliases_[bind] = NativeRef{mod->name, al.name};
                 continue;

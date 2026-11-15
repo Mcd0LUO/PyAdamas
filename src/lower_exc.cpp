@@ -3,6 +3,64 @@
 
 namespace pyadamas {
 
+namespace {
+
+// 深度优先遍历一个函数体里的语句树，pre 在进入子语句之前对每个语句调用。
+// 不进入嵌套 FunctionDef 的函数体（那是另一个函数）；但进入 ClassDef 的类体
+// ——类体语句是在当前函数帧里降级的，它的 try/with/return 都算在本函数头上。
+void walk_stmt_tree(std::vector<StmtPtr>& body, const std::function<void(Stmt&)>& pre) {
+    for (auto& sp : body) {
+        if (!sp) continue;
+        Stmt& s = *sp;
+        pre(s);
+        switch (s.kind) {
+            case StmtKind::FunctionDef:
+                break;
+            case StmtKind::Try: {
+                auto& t = static_cast<Try&>(s);
+                walk_stmt_tree(t.body, pre);
+                for (auto& h : t.handlers) walk_stmt_tree(h.body, pre);
+                walk_stmt_tree(t.orelse, pre);
+                walk_stmt_tree(t.finalbody, pre);
+                break;
+            }
+            case StmtKind::With:
+                walk_stmt_tree(static_cast<With&>(s).body, pre);
+                break;
+            case StmtKind::If: {
+                auto& i = static_cast<If&>(s);
+                for (auto& b : i.branches) walk_stmt_tree(b.body, pre);
+                walk_stmt_tree(i.orelse, pre);
+                break;
+            }
+            case StmtKind::While: {
+                auto& w = static_cast<While&>(s);
+                walk_stmt_tree(w.body, pre);
+                walk_stmt_tree(w.orelse, pre);
+                break;
+            }
+            case StmtKind::For: {
+                auto& f = static_cast<For&>(s);
+                walk_stmt_tree(f.body, pre);
+                walk_stmt_tree(f.orelse, pre);
+                break;
+            }
+            case StmtKind::Match: {
+                auto& m = static_cast<Match&>(s);
+                for (auto& c : m.cases) walk_stmt_tree(c.body, pre);
+                break;
+            }
+            case StmtKind::ClassDef:
+                walk_stmt_tree(static_cast<ClassDef&>(s).body, pre);
+                break;
+            default:
+                break;
+        }
+    }
+}
+
+}  // namespace
+
 // except `RichExc as e` 里的 RichExc 是不是富异常类（有字段/方法）。
 // 本模块类和跨模块导入的类都认：导入类靠接口里的 is_rich_exception 标记。
 const ClassInfo* Lowerer::rich_exc_handler(ExceptHandler* h) {
@@ -115,7 +173,7 @@ void Lowerer::lower_raise(Raise& r) {
             err(r.line, r.col, "'raise from' requires an exception");
             return;
         }
-        call_void(RtFn::Reraise, {});
+        call_void(raise_rt(RtFn::Reraise), {});
         return;
     }
     VReg cause = kNoReg;
@@ -146,7 +204,7 @@ void Lowerer::lower_raise(Raise& r) {
 
     if (xt && xt->kind == TyKind::Exception) {
         VReg v = expr(*r.exc);
-        call_void(RtFn::RaiseValueFrom, {v, cause == kNoReg ? const_int(0) : cause});
+        call_void(raise_rt(RtFn::RaiseValueFrom), {v, cause == kNoReg ? const_int(0) : cause});
         return;
     }
     std::string type;
@@ -216,10 +274,10 @@ void Lowerer::lower_raise(Raise& r) {
         in.imm = static_cast<int64_t>(RtFn::ExcValueNew);
         in.args = {const_str(type), const_int(0)};
         VReg v = def_heap(mk_exception(type), std::move(in));
-        call_void(RtFn::RaiseValueFrom, {v, cause});
+        call_void(raise_rt(RtFn::RaiseValueFrom), {v, cause});
         return;
     }
-    call_void(RtFn::Raise, {const_str(type), msg});
+    call_void(raise_rt(RtFn::Raise), {const_str(type), msg});
 }
 
 
@@ -235,6 +293,11 @@ void Lowerer::lower_try_core(Try& t) {
     if (t.handlers.empty()) {
         stmts(t.body);
         stmts(t.orelse);
+        return;
+    }
+    // 零开销异常（Z2-b2）：本函数被判成最小形状时，唯一那条 try 走新路径。
+    if (st_->zero_cost_try == &t) {
+        lower_try_zero_cost(t);
         return;
     }
 
@@ -522,7 +585,7 @@ void Lowerer::lower_assert(Assert& a) {
     } else {
         msg = const_str("assertion failed");
     }
-    call_void(RtFn::Raise, {const_str("AssertionError"), msg});
+    call_void(raise_rt(RtFn::Raise), {const_str("AssertionError"), msg});
     Inst jj;
     jj.op = IrOp::Jump;
     jj.target = ok;
@@ -668,5 +731,208 @@ void Lowerer::lower_delete(Delete& d) {
 }
 
 
+
+// ── 零开销异常（Z2-b2，--zero-cost-exc）───────────────────────────────
+//
+// 第一刀只接一种形状：非可挂起函数里的「单层 catch-all try」——
+//   - 函数体里恰好一条 Try、没有任何 With；
+//   - 那条 Try 恰好一个 handler，且是 catch-all（裸 except / except Exception），
+//     没有 else / finally；
+//   - try 体与 handler 体里没有 return / break / continue（第一刀要求「try
+//     之后才 return」：跨出保护区的早退暂时不接）；
+//   - try 体里的 raise 只用「无参 / 单位置参」形态，且不是富异常实例
+//     （多参 raise / 富异常实例走 RaiseArgs / RaiseInstance，第一刀不接）。
+// 其余函数（生成器/协程、with、finally、嵌套 try、多 handler）继续走 setjmp
+// 路径，一个字节都不变。
+const Try* Lowerer::find_zero_cost_try(FunctionDef& f) {
+    int try_count = 0;
+    int with_count = 0;
+    Try* only = nullptr;
+    walk_stmt_tree(f.body, [&](Stmt& s) {
+        if (s.kind == StmtKind::Try) {
+            ++try_count;
+            if (!only) only = &static_cast<Try&>(s);
+        } else if (s.kind == StmtKind::With) {
+            ++with_count;
+        }
+    });
+    if (try_count != 1 || with_count != 0 || !only) return nullptr;
+
+    Try& t = *only;
+    if (!t.finalbody.empty() || !t.orelse.empty() || t.handlers.size() != 1) return nullptr;
+    ExceptHandler& h = t.handlers.front();
+    if (h.type) {
+        if (h.type->kind != ExprKind::Name) return nullptr;
+        if (static_cast<Name&>(*h.type).id != "Exception") return nullptr;
+    }
+
+    bool bad = false;
+    auto check = [&](Stmt& s) {
+        if (bad) return;
+        switch (s.kind) {
+            case StmtKind::Return:
+            case StmtKind::Break:
+            case StmtKind::Continue:
+                // 跨出保护区的早退：旧路径靠 HandlerDiscard/HandlerLeave 处理，
+                // 表驱动第一刀不做，直接降级回 setjmp 路径。
+                bad = true;
+                break;
+            case StmtKind::Raise: {
+                auto& r = static_cast<Raise&>(s);
+                if (!r.exc) break;  // 裸 raise 由 pa_eh_reraise 支持
+                // 富异常实例：旧路径走 pa_raise_instance，第一刀没有 _Unwind 版。
+                TypePtr xt = tc_.type_of(r.exc.get());
+                if (xt && xt->kind == TyKind::Class && xt->cls &&
+                    xt->cls->is_rich_exception) {
+                    bad = true;
+                    break;
+                }
+                // 多参 raise：旧路径走 pa_raise_args，第一刀没有 _Unwind 版。
+                if (r.exc->kind == ExprKind::Call) {
+                    auto& c = static_cast<Call&>(*r.exc);
+                    if (c.args.size() > 1) bad = true;
+                    for (auto& a : c.args)
+                        if (a && a->kind == ExprKind::Starred) bad = true;
+                }
+                break;
+            }
+            case StmtKind::Try:
+            case StmtKind::With:
+                // 前面已经按函数体全局数过（恰好一条 try、零个 with）；
+                // 走到这里说明形状判断和遍历口径不一致，保守判定不接。
+                bad = true;
+                break;
+            default:
+                break;
+        }
+    };
+    walk_stmt_tree(t.body, check);
+    for (auto& hb : t.handlers) walk_stmt_tree(hb.body, check);
+    return bad ? nullptr : &t;
+}
+
+// 零开销 try 的降级。landing pad 只做两件事：pa_eh_land 把展开包装里的
+// 异常装回全局（与 longjmp 落地后逐项一致），然后 RcCleanup 复刻老路径
+// pa_handler_leave 的临时值水位清理；后面的 except 分发块与 old path 逐句
+// 相同（ExcMatches / ExcAcceptValue / ExcDone 一行不改）。
+void Lowerer::lower_try_zero_cost(Try& t) {
+    int body = new_block("try.body");
+
+    // 临时值水位：复刻 pa_handler_push 里 h->mark = pa_rc_mark() 的那一半。
+    VReg mark = call_runtime(RtFn::RcMark, t_int(), {});
+    int mark_slot = new_temp_slot(t_int());
+    store_slot(mark_slot, mark);
+    Inst jb;
+    jb.op = IrOp::Jump;
+    jb.target = body;
+    emit(std::move(jb));
+
+    switch_to(body);
+    IRFunction::EhRegion region;
+    region.begin_block = body;
+    {
+        Inst eb;
+        eb.op = IrOp::EhBegin;
+        emit(std::move(eb));
+    }
+    ++st_->zc_raise_depth;
+    stmts(t.body);
+    --st_->zc_raise_depth;
+
+    if (terminated()) {
+        // find_zero_cost_try 已经排除了 return/break/continue；走到这里说明
+        // 形状判定漏了东西。宁可报错，也不要生成一条没有终点标签的保护区。
+        err(t.line, t.col, "internal: zero-cost try body ended with a terminator");
+        return;
+    }
+
+    // 保护区终点单开一块：保证 .LEHE 标签物理上落在 try 体所有指令之后、
+    // landing pad 之前，且不把 landing pad 自己圈进保护区。
+    // 必须显式 jump 过去：opt_forward 的 prune_unreachable 只认 Jump/Branch
+    // 边、不吃 fallthrough，落空块会被当死块删掉。
+    int body_end = new_block("try.body.end");
+    int land = new_block("try.land");
+    int end = new_block("try.end");
+    Inst jbe;
+    jbe.op = IrOp::Jump;
+    jbe.target = body_end;
+    emit(std::move(jbe));
+    switch_to(body_end);
+    {
+        Inst ee;
+        ee.op = IrOp::EhEnd;
+        emit(std::move(ee));
+    }
+    call_void(RtFn::RcCleanup, {load_slot(mark_slot, t_int())});
+    Inst je;
+    je.op = IrOp::Jump;
+    je.target = end;
+    emit(std::move(je));
+
+    // landing pad 入口：personality 把 GR0（%rax）设成展开包装指针。
+    switch_to(land);
+    region.lp_block = land;
+    region.end_block = body_end;
+    st_->fn->eh_regions.push_back(region);
+    {
+        Inst lp;
+        lp.op = IrOp::EhLandingPad;
+        emit(std::move(lp));
+    }
+    call_void(RtFn::EhLand, {});
+    call_void(RtFn::RcCleanup, {load_slot(mark_slot, t_int())});
+
+    // except 分发：catch-all 只有一个 handler，结构与 lower_try_core 的
+    // land 块逐句对应（HandlerLeave → 上面的 RcCleanup；不匹配的
+    // ExcReraise → _Unwind 版 EhRethrow）。
+    ExceptHandler& h = t.handlers.front();
+    int hb = new_block("except.body");
+    if (h.type) {
+        VReg m = lower_exc_match(*h.type);
+        int next = new_block("except.next");
+        Inst cb;
+        cb.op = IrOp::Branch;
+        cb.a = m;
+        cb.target = hb;
+        cb.target2 = next;
+        emit(std::move(cb));
+        switch_to(next);
+        call_void(RtFn::EhRethrow, {});
+        end_unreachable();
+    } else {
+        Inst jj;
+        jj.op = IrOp::Jump;
+        jj.target = hb;
+        emit(std::move(jj));
+    }
+
+    switch_to(hb);
+    // catch-all 只可能是裸 except 或 except Exception：取扁平异常值即可
+    //（富异常在 find_zero_cost_try 里已经排除）。
+    TypePtr slot_ty = mk_exception("Exception");
+    VReg ev = call_runtime(RtFn::ExcAcceptValue, slot_ty, {});
+    int shadow = -1;
+    if (!h.name.empty()) {
+        shadow = st_->fn->new_slot(slot_ty);
+        comp_slots_.emplace_back();
+        comp_slots_.back()[h.name] = shadow;
+        store_slot(shadow, ev);
+    }
+    // 槽已经 retain 过；释放创建时的那一个引用（与 lower_try_core 同）。
+    rc_dec(ev);
+    stmts(h.body);
+    if (shadow >= 0) comp_slots_.pop_back();
+    if (terminated()) {
+        err(t.line, t.col, "internal: zero-cost except body ended with a terminator");
+        return;
+    }
+    call_void(RtFn::ExcDone, {});
+    Inst jj;
+    jj.op = IrOp::Jump;
+    jj.target = end;
+    emit(std::move(jj));
+
+    switch_to(end);
+}
 
 }  // namespace pyadamas

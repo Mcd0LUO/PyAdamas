@@ -118,7 +118,7 @@ VReg Lowerer::lower_minmax(Call& c, bool is_min) {
             be.target2 = done_b;
             emit(std::move(be));
             switch_to(empty_b);
-            call_void(RtFn::Raise, {const_str("ValueError"),
+            call_void(raise_rt(RtFn::Raise), {const_str("ValueError"),
                                     const_str(is_min ? "min() iterable argument is empty"
                                                      : "max() iterable argument is empty")});
             switch_to(done_b);
@@ -161,7 +161,7 @@ VReg Lowerer::lower_minmax(Call& c, bool is_min) {
         be.target2 = nonempty_b;
         emit(std::move(be));
         switch_to(empty_b);
-        call_void(RtFn::Raise, {const_str("ValueError"),
+        call_void(raise_rt(RtFn::Raise), {const_str("ValueError"),
                                 const_str(is_min ? "min() iterable argument is empty"
                                                  : "max() iterable argument is empty")});
         switch_to(nonempty_b);

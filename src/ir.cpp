@@ -144,6 +144,12 @@ std::string Inst::text() const {
             return std::format("store.extern v{}, {}", idx, vreg_str(a));
         case IrOp::Setjmp:
             return std::format("{} = setjmp {}", vreg_str(dst), vreg_str(a));
+        case IrOp::EhBegin:
+            return "eh.begin";
+        case IrOp::EhEnd:
+            return "eh.end";
+        case IrOp::EhLandingPad:
+            return "eh.landing.pad";
         case IrOp::ImportModule:
             return std::format("import.module m{}", imm);
         case IrOp::SlotAddr: return std::format("{} = slot.addr s{}", vreg_str(dst), idx);

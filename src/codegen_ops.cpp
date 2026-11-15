@@ -102,6 +102,9 @@ void AsmGen::gen_inst(const Inst& in) {
             case IrOp::LoadExtern: gen_load_extern(in); break;
             case IrOp::StoreExtern: gen_store_extern(in); break;
             case IrOp::Setjmp: gen_setjmp(in); break;
+            case IrOp::EhBegin: gen_eh_begin(); break;
+            case IrOp::EhEnd: gen_eh_end(); break;
+            case IrOp::EhLandingPad: gen_eh_landing_pad(); break;
             case IrOp::ImportModule: {
                 const std::string& name = m_->imports[static_cast<size_t>(in.imm)];
                 line(std::format("leaq {}(%rip), {}", module_ready_symbol(name), arg_reg_i(0)));
@@ -713,5 +716,24 @@ void AsmGen::gen_convert(const Inst& in) {
             return;
         }
     }
+
+
+// ── 零开销异常（Z2-b2）：保护区 / landing pad 标记的发射 ─────────────
+void AsmGen::gen_eh_begin() {
+    // 保护区起点：标签地址 = 紧随其后的第一条指令。
+    if (eh_begin_seq_ < eh_begin_labels_.size())
+        label(eh_begin_labels_[eh_begin_seq_++]);
+}
+
+void AsmGen::gen_eh_end() {
+    if (eh_end_seq_ < eh_end_labels_.size())
+        label(eh_end_labels_[eh_end_seq_++]);
+}
+
+void AsmGen::gen_eh_landing_pad() {
+    // landing pad 入口：%rax 是展开包装指针（personality 的 GR0）；紧随其后的
+    // CallRt EhLand 会把它作为第一个实参传给 pa_eh_land。
+    if (eh_lp_seq_ < eh_lp_labels_.size()) label(eh_lp_labels_[eh_lp_seq_++]);
+}
 
 }  // namespace pyadamas

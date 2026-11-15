@@ -303,3 +303,99 @@ static void pa_eh_phase2_frame_release(uint64_t ex_class, uintptr_t target_cfa) 
 static void __attribute__((constructor)) pa_eh_install_personality_hook(void) {
     pa_personality_frame_hook = pa_eh_phase2_frame_release;
 }
+
+/* ── codegen 接线（Z2-b2，--zero-cost-exc）─────────────────────────────
+ *
+ * 生成代码只在「零开销 try 体」里调用下面这些入口：
+ *   pa_eh_raise / pa_eh_raise_value_from / pa_eh_reraise  抛（_Unwind 版）
+ *   pa_eh_rethrow   landing 分发没有 handler 匹配时重抛同一个异常（重启 phase 1）
+ *   pa_eh_land      landing pad 入口：取回异常并收掉展开包装
+ *
+ * 为什么必须有这一层：旧的长跳版本 pa_raise* 最后一步是 exc_longjmp，而零开销
+ * 函数里没有 setjmp 兜底 —— 一旦 longjmp 就会穿过一个没有 handler 记录的帧，
+ * 落点是错的（甚至直接按未捕获退出）。所以这里逐项复刻 rt_exc.c 的「构造异常
+ * 对象 + 设全局」部分，只把最后一步换成 pa_eh_throw。异常对象的所有权 /
+ * 生命周期规则完全不变（见 rt_exc.c 文件头）。
+ *
+ * 已知限制（第一刀，见 tests/exc/z2_codegen/README.md）：只有**生成代码里的
+ * raise** 会走这里；C 运行时自己的 pa_raise_c 仍走 exc_longjmp（rt_exc.c 不在
+ * 本文件职责内），所以新路径 try 还抓不到 IndexError / ZeroDivisionError 这类
+ * 「运行时 C 代码内部抛出来」的异常。 */
+
+/* 抛出去；没人接（_URC_END_OF_STACK）时复刻 exc_longjmp 的无 handler 分支：
+   打印 traceback 后 exit(1)，不返回。 */
+static _Noreturn void pa_eh_throw_or_exit(PyAdamasException* e) {
+    int rc = pa_eh_throw(e);
+    if (rc == PA_EH_UNCAUGHT) {
+        exc_print_uncaught(pending_exc ? pending_exc : e);
+        exit(1);
+    }
+    panic_c("pa_eh_throw: _Unwind_RaiseException 内部错误");
+    exit(1); /* panic_c 的头文件声明不是 noreturn，补一条不可达兜底 */
+}
+
+/* 与 rt_exc.c 的 pa_raise 逐句对应，只把 exc_longjmp 换成抛展开。 */
+_Noreturn void pa_eh_raise(PyAdamasStr* type, PyAdamasStr* msg) {
+    char tn[128];
+    int64_t tn_len = type->len;
+    PyAdamasException* e;
+    if (tn_len < 0 || tn_len >= (int64_t)sizeof(tn)) panic_c("exception type name too long");
+    memcpy(tn, type->data, (size_t)tn_len);
+    tn[tn_len] = '\0';
+    exc_free(pending_exc);
+    e = (PyAdamasException*)malloc(sizeof(PyAdamasException));
+    if (!e) panic_c("out of memory");
+    e->type = (char*)malloc((size_t)tn_len + 1);
+    e->message = (char*)malloc((size_t)msg->len + 1);
+    if (!e->type || !e->message) panic_c("out of memory");
+    memcpy(e->type, tn, (size_t)tn_len + 1);
+    memcpy(e->message, msg->data, (size_t)msg->len);
+    e->message[msg->len] = '\0';
+    e->cause = NULL;
+    e->trace = NULL;
+    pending_exc = e;
+    pa_eh_throw_or_exit(e);
+}
+
+/* raise <异常值> / raise ... from ...：与 rt_exc.c 的 pa_raise_value_from 对应。
+   pa_exc_from_value 自己会登记异常载荷的 GC 根，这里只搬控制流。 */
+_Noreturn void pa_eh_raise_value_from(PyAdamasExcValue* v, PyAdamasExcValue* cause) {
+    exc_free(pending_exc);
+    pending_exc = pa_exc_from_value(v);
+    if (cause) {
+        exc_free(pending_exc->cause);
+        pending_exc->cause = pa_exc_from_value(cause);
+    }
+    pa_eh_throw_or_exit(pending_exc);
+}
+
+/* 裸 raise：与 rt_exc.c 的 pa_reraise 逐句对应。 */
+_Noreturn void pa_eh_reraise(void) {
+    if (current_exc) {
+        exc_free(pending_exc);
+        pending_exc = current_exc;
+        current_exc = NULL;
+    } else {
+        exc_free(pending_exc);
+        pending_exc = exc_new("RuntimeError", "No active exception to reraise");
+    }
+    pa_eh_throw_or_exit(pending_exc);
+}
+
+/* landing 分发没有匹配上（例如 except Exception 遇到 SystemExit）：把已经搬回
+   pending_exc 的同一个异常重新交给展开器，phase 1 会继续往外找 handler。 */
+_Noreturn void pa_eh_rethrow(void) {
+    if (!pending_exc) panic_c("pa_eh_rethrow: 没有待重抛的异常");
+    pa_eh_throw_or_exit(pending_exc);
+}
+
+/* landing pad 入口：personality 把展开包装指针放进 GR0（x86-64 = %rax）。
+   取回异常（装成与 longjmp 落地后逐项一致的全局状态）后立刻收掉包装：载荷已经
+   搬回 pending_exc / current_exc_inst / pending_exc_args，包装只剩壳，删掉不会
+   影响后续 ExcMatches / ExcAcceptValue / ExcDone 的任何行为。 */
+void pa_eh_land(void* unwound) {
+    PyAdamasException* e = pa_eh_landing(unwound);
+    if (!e) panic_c("pa_eh_land: 外来异常落到 PyAdamas landing pad（Z2 不支持）");
+    pa_eh_done();
+}
+

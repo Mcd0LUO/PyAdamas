@@ -9,6 +9,7 @@
 #include <expected>
 #include <map>
 #include <memory>
+#include <set>
 #include <string>
 
 #include "typecheck.h"
@@ -27,6 +28,12 @@ struct ModuleInfo {
     std::string name;
     std::string source_path;
     bool builtin = false;
+    // 原生模块带 stdlib Python 扩展源（当前是 functools）：导入时必须跑
+    // 扩展模块的 init，把扩展全局初始化出来。
+    bool source_init = false;
+    // 扩展源补进来的（原生没有的）全局名：降级时这些名字按普通外部全局
+    // 处理，其余名字继续走原生降级路径。原生名字优先，扩展不覆盖。
+    std::set<std::string> source_globals;
     std::string interface_hash;  // 二进制接口的 FNV-1a 64（hex）
     // 模块顶层名字 → 类型。函数本身就是 Func 类型的全局。
     // 类名单独放在 classes 里，不重复出现在 globals。

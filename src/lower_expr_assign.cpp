@@ -456,9 +456,12 @@ VReg Lowerer::expr(Expr& e) {
                     VReg bv;
                     TypePtr bty;
                     if (builtin_value(mod->name, a.attr, bv, bty)) return bv;
-                    err(e.line, e.col,
-                        std::format("native function '{}.{}' must be called", n->id, a.attr));
-                    return const_none();
+                    if (!mod->source_globals.count(a.attr)) {
+                        err(e.line, e.col,
+                            std::format("native function '{}.{}' must be called", n->id, a.attr));
+                        return const_none();
+                    }
+                    // stdlib 扩展的全局：继续走下面的外部全局加载。
                 }
             }
             if (auto* n = dynamic_cast<Name*>(a.value.get())) {

@@ -196,6 +196,13 @@ struct FuncCtx {
     VReg fn_mark = kNoReg;
     // 模块顶层函数：退出前释放全局变量并关掉临时栈。
     bool is_entry = false;
+    // 零开销异常（--zero-cost-exc）：本函数被判成最小形状时指向唯一那条
+    // try（AST 指针，只在本函数编译期间有效）；nullptr 表示整函数走
+    // setjmp 路径（默认）。
+    const Try* zero_cost_try = nullptr;
+    // 正在降级零开销 try 体：>0 时 raise 走 pa_eh_raise*（_Unwind 版）。
+    // 只有这个函数已经没有 setjmp 兜底时才会 >0（见 find_zero_cost_try）。
+    int zc_raise_depth = 0;
     // 表达式内部槽（and/or、条件表达式、链式比较）只是借用临时值，
     // 生命周期由临时栈负责；出口不能 dec，否则会重复释放。
     std::unordered_set<int> borrow_slots;
@@ -761,6 +768,25 @@ private:
     // except `RichExc as e` 是否富异常类（有字段/方法），是则返回那个类。
     const ClassInfo* rich_exc_handler(ExceptHandler* h);
     VReg raise_exception(const std::string& type, VReg msg);
+    // ── 零开销异常（Z2-b2，--zero-cost-exc）──────────────────────
+    // 在 AST 上判定函数是否满足「单个 catch-all try」的最小形状；满足时
+    // 返回那条 try 的指针，否则 nullptr。规则见 lower_exc.cpp 的实现注释。
+    const Try* find_zero_cost_try(FunctionDef& f);
+    // 零开销 try 的降级：发 EhBegin/EhEnd 保护区 + EhLandingPad；landing pad
+    // 取回异常后直接跳进现有的 except 分发块（ExcMatches/ExcAcceptValue/
+    // ExcDone 一行不改）。
+    void lower_try_zero_cost(Try& t);
+    // 零开销 try 体里的 raise：把老 RtFn 映射到 _Unwind 版本；其余地方原样
+    // 返回（老路径一个字都不变）。
+    RtFn raise_rt(RtFn f) const {
+        if (!st_ || st_->zc_raise_depth <= 0) return f;
+        switch (f) {
+            case RtFn::Raise: return RtFn::EhRaise;
+            case RtFn::RaiseValueFrom: return RtFn::EhRaiseValueFrom;
+            case RtFn::Reraise: return RtFn::EhReraise;
+            default: return f;
+        }
+    }
     void lower_funcdef(FunctionDef& f);
     // @functools.wraps(...)：没有运行期语义，装饰器链里整层跳过。
     bool is_wraps_decorator(const Expr* e) const;

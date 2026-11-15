@@ -54,7 +54,7 @@ VReg Lowerer::guard_not_none(VReg v, const std::string& what) {
     br.target2 = bad;
     emit(std::move(br));
     switch_to(bad);
-    call_void(RtFn::Raise,
+    call_void(raise_rt(RtFn::Raise),
               {const_str("AttributeError"), const_str("NoneType object has no " + what)});
     Inst j;
     j.op = IrOp::Jump;

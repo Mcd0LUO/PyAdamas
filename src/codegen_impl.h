@@ -154,6 +154,8 @@ public:
         // 整程序没有任何 unknown 值、也不涉及 asyncio/生成器运行时：入口
         // 关闭存活堆索引维护（unknown 保守 retain 用不到）。
         void set_disable_unknown_index(bool v) { disable_unknown_index_ = v; }
+        // 零开销异常总开关（--zero-cost-exc，默认关）。
+        void set_zero_cost_exc(bool v) { zero_cost_exc_ = v; }
 
 private:
     const std::string& global_label(int i) const {
@@ -515,6 +517,42 @@ private:
     bool dbg_on_ = false;
     std::string dbg_name_label(int fi) const { return std::format(".Lfnname{}", fi); }
     void emit_debug_sections(const IRModule& m);
+
+    // ── 零开销异常（Z2-b2，--zero-cost-exc）────────────────────────
+    //
+    // 每个函数的 EH 计划在 emit_function 开头按 IR 里的 EhBegin/EhEnd/
+    // EhLandingPad 标记**预扫描**出来（标签名也在那时按发射顺序分配好，
+    // 发射标记指令时按同一顺序取用）。.cfi_personality / .cfi_lsda 紧跟
+    // .cfi_startproc 发射；.gcc_except_table 与 DW.ref 指针槽等所有函数都
+    // 发完后在 gen() 尾部统一发。计划为空 = 老 setjmp 路径，一个字节不发。
+    struct EhPlanRec {
+        std::string func_label;  // FDE 起点（= .cfi_startproc 地址，不是 .LfN）
+        std::string begin;       // 保护区起点标签
+        std::string end;         // 保护区终点标签（开区间）
+        std::string lp;          // landing pad 标签
+        int lsda_index = 0;
+    };
+    std::vector<EhPlanRec> eh_plans_;
+    // 当前函数预扫描出来的标签（发射标记指令时按顺序取用）。
+    std::vector<std::string> eh_begin_labels_;
+    std::vector<std::string> eh_end_labels_;
+    std::vector<std::string> eh_lp_labels_;
+    size_t eh_begin_seq_ = 0;
+    size_t eh_end_seq_ = 0;
+    size_t eh_lp_seq_ = 0;
+    bool eh_plan_active_ = false;
+    // 总开关（--zero-cost-exc）。关闭时 prepare_eh_plan 直接返回，保证老
+    // 路径的汇编逐字节不变。
+    bool zero_cost_exc_ = false;
+    // 预扫描本函数的 EH 标记（fname 是 FDE 起点标签）；没有标记则不动作。
+    void prepare_eh_plan(const IRFunction& f, const std::string& fname);
+    // 发 .cfi_personality / .cfi_lsda（必须在 .cfi_startproc 之后调用）。
+    void emit_eh_directives_for_current();
+    // 发所有 LSDA + DW.ref（在 gen() 尾部、text 都发完之后）。
+    void emit_eh_tables();
+    void gen_eh_begin();
+    void gen_eh_end();
+    void gen_eh_landing_pad();
 
     // vreg 槽区里第 slot 个槽的偏移（vreg 槽紧挨着命名槽往上排）。
     int vreg_slot_off(int slot) const { return out_bytes_ + 8 * (n_slots_ + slot); }

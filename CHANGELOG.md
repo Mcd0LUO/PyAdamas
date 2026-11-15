@@ -4,6 +4,45 @@
 
 早期阶段没有逐条留痕，按阶段归纳；0.4 之后逐条记录。
 
+## [0.184] - 2026-11-16
+
+### 零开销异常 Z2-b2：codegen 接线打通（`--zero-cost-exc`，默认关闭）
+
+最小闭环完成。同一份 `.py` 用两条路径各编一次，核心证据：
+
+| | 老路径 | 新路径 |
+|---|---|---|
+| `call _setjmp` | 有 | **0 处** |
+| `call pa_handler_push` | 有 | **0 处** |
+| `.cfi_personality` / `.cfi_lsda` / `.gcc_except_table` | 无 | 齐全（GCC 同款 catch-all 形态） |
+| stdout | 基准 | **逐字节一致** |
+
+- 开关 `--zero-cost-exc` 默认关；关闭时 **187/187 个文件的 asm md5 与 HEAD 完全一致**
+  （隔离树 HEAD + 仅本补丁验证）。
+- 形状门禁（`lower_exc.cpp: find_zero_cost_try`）：非可挂起 + 恰好一条 try + 零 with +
+  单 catch-all handler + 无 else/finally + try/handler 体内无 return/break/continue。
+- IR 新增 `EhBegin/EhEnd/EhLandingPad` 标记与 5 个 `RtFn`；LP = `pa_eh_land` -> `RcCleanup` ->
+  **现有 except 分发块一行不改**；不匹配走 `pa_eh_rethrow` 重启 phase 1。
+- 新增 `tests/exc/z2_codegen/run.sh`：9 用例 × 11 断言 = 99 项全过。
+- 压力：10 万次跨两个被跳过帧的 throw/catch，新路径 0 setjmp / 2 LSDA，maxrss 11324KB
+  （老路径 11348KB）——方案 G 的帧清理接线正确、无泄漏。
+- 注意：**现有 177 个用例里没有任何函数满足第一刀门禁**，所以开关打开对现有套件零影响；
+  新路径目前只由专用夹具覆盖。
+
+### 模块注册表：从 3 处硬编码名单变成单一数据源
+
+- `src/driver_build.cpp` 新增 `kModuleTable`（36 行，`ModuleKind` = Native / Python / NativePython），
+  删除原来散在三处的重复名单（`program_module`、`check_builtin_name`，以及 `visit_unit` 里的
+  import 跳过名单）。
+- `NativePython` 语义：导入时把 `stdlib/<source>` 编成模块，对外接口 = 原生接口 ∪ 扩展源新增名字，
+  **原生名字优先**（扩展不允许覆盖原生，会破坏现有语义）。
+- **登记门**：`stdlib/` 里的 `.py` 未登记则直接报错，保证表是唯一来源；
+  Debug 构建每次 load 跑 `validate_module_table()` 自检源文件与依赖。
+- 证明：改动前的二进制跑新用例报 6 个错（`module 'functools' has no attribute 'cache'`…），
+  改动后输出与 CPython 一致。
+- 现在加一个新模块 = 表里 **1 行** + 一个 `.py`；给原生模块补 API = **0 行 C++**。
+
+验证：全量 194 ran ok / 0 fail；z1_rt 116、z2_rt 134、tests/eh 33 项全过。
 ## [0.183] - 2026-11-16
 
 ### GC：修复 54 个函数的「构造期对象不在 GC 根上」窗口（一整类 UAF）
