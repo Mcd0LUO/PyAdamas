@@ -1,15 +1,13 @@
 """textwrap 模块的 pyadamas 子集（纯 pyadamas 源码）。
 
-覆盖 wrap / fill / dedent / indent / shorten 的常用行为；接受
-initial_indent / subsequent_indent / break_long_words / break_on_hyphens
-参数但忽略后两个。不建模 TextWrapper 类。
+覆盖 wrap / fill / dedent / indent / shorten 与 TextWrapper 类的常用行为；
+接受 initial_indent / subsequent_indent / break_long_words / break_on_hyphens
+参数但忽略后两个（超长单词不拆分）。
 """
 
 
-def wrap(text: str, width: int = 70, initial_indent: str = "",
-         subsequent_indent: str = "", break_long_words: bool = True,
-         break_on_hyphens: bool = True) -> list[str]:
-    """按空白切词，贪心装行；超长单词不拆分。"""
+def _wrap_impl(text: str, width: int, initial_indent: str,
+               subsequent_indent: str) -> list[str]:
     if width <= 0:
         raise ValueError("width must be positive")
     words = text.split()
@@ -30,11 +28,49 @@ def wrap(text: str, width: int = 70, initial_indent: str = "",
     return lines
 
 
+def wrap(text: str, width: int = 70, initial_indent: str = "",
+         subsequent_indent: str = "", break_long_words: bool = True,
+         break_on_hyphens: bool = True) -> list[str]:
+    """按空白切词，贪心装行；超长单词不拆分。"""
+    return _wrap_impl(text, width, initial_indent, subsequent_indent)
+
+
 def fill(text: str, width: int = 70, initial_indent: str = "",
          subsequent_indent: str = "", break_long_words: bool = True,
          break_on_hyphens: bool = True) -> str:
-    return "\n".join(wrap(text, width, initial_indent, subsequent_indent,
-                           break_long_words, break_on_hyphens))
+    lines = _wrap_impl(text, width, initial_indent, subsequent_indent)
+    return "\n".join(lines)
+
+
+class TextWrapper:
+    """CPython TextWrapper 的常用子集：属性 + wrap()/fill()。
+
+    语义边界：break_long_words / break_on_hyphens 只保存不生效；
+    没有 max_lines / placeholder / expand_tabs / replace_whitespace。
+    """
+
+    width: int
+    initial_indent: str
+    subsequent_indent: str
+    break_long_words: bool
+    break_on_hyphens: bool
+
+    def __init__(self, width: int = 70, initial_indent: str = "",
+                 subsequent_indent: str = "",
+                 break_long_words: bool = True,
+                 break_on_hyphens: bool = True) -> None:
+        self.width = width
+        self.initial_indent = initial_indent
+        self.subsequent_indent = subsequent_indent
+        self.break_long_words = break_long_words
+        self.break_on_hyphens = break_on_hyphens
+
+    def wrap(self, text: str) -> list[str]:
+        return _wrap_impl(text, self.width, self.initial_indent,
+                          self.subsequent_indent)
+
+    def fill(self, text: str) -> str:
+        return "\n".join(self.wrap(text))
 
 
 def dedent(text: str) -> str:

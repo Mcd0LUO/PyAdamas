@@ -4,6 +4,35 @@
 
 早期阶段没有逐条留痕，按阶段归纳；0.4 之后逐条记录。
 
+## [0.180] - 2026-11-16
+
+### 标准库：新增 7 个模块 + 3 处补全，并给出覆盖缺口矩阵
+
+用 51 个常用 CPython 模块做了实测（`import` + 2~3 个常用 API），结论是
+**27 个原有可用 / 24 个完全缺失 / 0 个「能 import 但运行失败」**。矩阵与补齐成本见
+[`docs/stdlib-gaps.md`](docs/stdlib-gaps.md)。
+
+新增（全部是 `stdlib/*.py` 自举实现，不动 `src/` 与 `runtime/`）：
+`typing` / `enum` / `abc` / `collections.abc` / `glob` / `uuid` / `fractions`；
+补全 `textwrap`（`TextWrapper`）、`statistics`（`quantiles`）、`csv`（`DictReader`/`DictWriter`）。
+
+其中 `typing` 桩模块的收益被低估了：注解解析器（`src/typecheck.cpp`）本来就按名字特判 typing
+名字，所以一个纯桩模块就能解锁大量真实脚本的注解。
+
+新增 10 个用例（`tests/run/163`~`172`）。验证：191 项全过（基线 181 + 新增 10）。
+
+### 已知阻塞（需决策，未做）
+
+- **内建模块名单是硬编码的**（`src/driver_build.cpp:609-618` 与 `:890-897`），所以
+  `stdlib/functools.py` 这类会被挡住 —— 补 functools / itertools / collections 必须先把名单
+  改成数据表。
+- `dataclasses`：codegen 不合成 `__init__`，shim 会让 `P(1,2)` 静默变成 `0,0`，不能做。
+- `contextlib`：unknown 函数值的 `*args` 转发被编译器拒绝。
+
+### 顺带发现的既有编译器缺陷（非本次引入，已记入 stdlib-gaps.md）
+
+- 用户类定义 `__neg__` 后取负 **SIGSEGV（exit 139）**；
+- `list(obj)` 不能消费只有 `__iter__` 的用户类。
 ## [0.179] - 2026-11-16
 
 ### 汇编发射换成结构化 Machine 层（行为逐字节不变）

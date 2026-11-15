@@ -2,7 +2,12 @@
 
 reader(f) 一次读完整个文件，返回 list[list[str]]；writer(f) 是带
 writerow / writerows 的类。支持 delimiter / quotechar / quoting /
-lineterminator，不建模 dialect、DictReader / DictWriter。
+lineterminator。
+
+DictReader 是**函数**而不是类：返回 list[dict[str, str]]，因此
+`for row in csv.DictReader(f)` 和 `rows = list(csv.DictReader(f))` 都能用；
+但拿不到 .fieldnames 属性，也不支持显式 fieldnames（默认参数不能是 list）。
+DictWriter 是类，需要显式 fieldnames。
 """
 
 QUOTE_MINIMAL = 0
@@ -122,3 +127,57 @@ class writer:
         while i < len(rows):
             self.writerow(rows[i])
             i += 1
+
+
+class DictWriter:
+    """按 fieldnames 把 dict 写成行；缺字段写空串。"""
+
+    fieldnames: list[str]
+    _w: writer
+
+    def __init__(self, f: file, fieldnames: list[str], delimiter: str = ",",
+                 quotechar: str = '"', quoting: int = 0,
+                 lineterminator: str = "\r\n") -> None:
+        self.fieldnames = fieldnames
+        self._w = writer(f, delimiter, quotechar, quoting, lineterminator)
+
+    def writeheader(self) -> None:
+        self._w.writerow(self.fieldnames)
+
+    def writerow(self, row: dict[str, str]) -> None:
+        vals: list[str] = []
+        for k in self.fieldnames:
+            if k in row:
+                vals.append(row[k])
+            else:
+                vals.append("")
+        self._w.writerow(vals)
+
+    def writerows(self, rows: list[dict[str, str]]) -> None:
+        for row in rows:
+            self.writerow(row)
+
+
+def DictReader(f: file, delimiter: str = ",",
+               quotechar: str = '"') -> list[dict[str, str]]:
+    """把首行当表头，返回 list[dict[str, str]]（eager）。"""
+    table = reader(f, delimiter, quotechar)
+    rows: list[dict[str, str]] = []
+    if len(table) == 0:
+        return rows
+    header = table[0]
+    i = 1
+    while i < len(table):
+        src = table[i]
+        d: dict[str, str] = {}
+        j = 0
+        while j < len(header):
+            key = header[j]
+            if j < len(src):
+                d[key] = src[j]
+            else:
+                d[key] = ""
+            j += 1
+        rows.append(d)
+        i += 1
+    return rows

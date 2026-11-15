@@ -1,8 +1,8 @@
 """statistics 模块的 pyadamas 子集（纯 pyadamas 源码，随编译器分发）。
 
 覆盖 mean / fmean / median / median_low / median_high / mode /
-pvariance / variance / pstdev / stdev / harmonic_mean / quantiles 的
-常用行为，输入为 list[float]（mode 为 list[int]）。
+pvariance / variance / pstdev / stdev / harmonic_mean / geometric_mean /
+quantiles 的常用行为，输入为 list[float]（mode 为 list[int]）。
 """
 
 import math
@@ -120,3 +120,37 @@ def geometric_mean(data: list[float]) -> float:
             raise StatisticsError("geometric mean requires positive values")
         total += math.log(v)
     return math.exp(total / n)
+
+
+def quantiles(data: list[float], n: int = 4,
+              method: str = "exclusive") -> list[float]:
+    """把数据分成 n 个等概率区间，返回 n-1 个切分点。
+
+    method="exclusive"（默认，样本分位数）与 "inclusive"（总体分位数）
+    的插值公式与 CPython 一致；其它 method 抛 StatisticsError。
+    """
+    if n < 1:
+        raise StatisticsError("n must be at least 1")
+    xs = sorted(data)
+    if len(xs) < 2:
+        raise StatisticsError("must have at least two data points")
+    out: list[float] = []
+    if method == "exclusive":
+        m = len(xs) + 1
+        i = 1
+        while i < n:
+            j = i * m // n
+            delta = i * m - j * n
+            out.append((xs[j - 1] * (n - delta) + xs[j] * delta) / n)
+            i += 1
+        return out
+    if method == "inclusive":
+        m = len(xs) - 1
+        i = 1
+        while i < n:
+            j = i * m // n
+            delta = i * m - j * n
+            out.append((xs[j] * (n - delta) + xs[j + 1] * delta) / n)
+            i += 1
+        return out
+    raise StatisticsError("method must be exclusive or inclusive")
