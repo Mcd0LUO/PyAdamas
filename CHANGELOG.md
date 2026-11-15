@@ -4,6 +4,30 @@
 
 早期阶段没有逐条留痕，按阶段归纳；0.4 之后逐条记录。
 
+## [0.171] - 2026-11-15
+
+继续收口散簇：标准库前端基线 435 → 501 / 596（84.1%）。
+
+### 变更
+
+- **模块级 undefined name 保守放过**：只在函数体内确定性报错；f09 改成函数体用例保留诊断。
+- **None 接收者全放行**：方法/属性、有序比较、成员测试、迭代、下标赋值。
+- **类型对象**：`type(self).method()`、3 参 `type(name,bases,dict)`、`__qualname__`/`__mro__` 等、类实例无 `__call__` 当构造器。
+- **super()**：类上下文丢失 / 协议 dunder 找不到 / `super(Cls,self)` 当前类。
+- **多继承**：附加基类字段布局冲突降为 unsupported。
+- **可重绑定**：推断形参、`*args`/`**kwargs`。
+- **杂项**：`async with`、`print(file=)`、`open(**kwargs)`、独立 `slice()`、`str.maketrans`/`bytes.partition`、file 方法名当值、切片赋值 Class/None、Exception/Class/Dict 可解包。
+
+### 验证
+
+- 前端基线：435 → **501 / 596（84.1%）**，去掉 `test/` 449 / 532。
+- `ctest` 3/3；run 套件 173 ok / 0 fail；`check_size.sh` 通过。
+
+### 说明
+
+剩余 95 个多数是「正确的检查结果」而非误杀（如 tempfile 裸 `os.` 而只 `import os as _os`，CPython 运行也会 NameError；enum/timedelta/Decimal 算术语义；跨模块成员可见性）。要全通需放宽真阳性或实现完整 import 图解析。
+
+
 ## [0.170] - 2026-11-14
 
 一键扫荡剩余散簇：标准库前端基线 411 → 435 / 596（73.0%）。
