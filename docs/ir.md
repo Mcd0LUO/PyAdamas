@@ -18,21 +18,77 @@ Python 语义里变量天生可变，循环里反复赋值是常态。一上来�
 
 代价是同一个变量在循环里每轮走一次 `store.slot` / `load.slot`。等加了块内寄存器缓存，这些 load/store 大部分会被消掉。
 
+### 那为什么不干脆上 SSA（0.205–0.208 的取舍）
+
+把 IR 换成 SSA 是编译器领域的主流做法（LLVM、Cranelift、GCC GIMPLE 都走这条），
+但这个项目**决定不上**，理由是收益与代价不匹配：
+
+| 维度 | SSA 能带来 | 这里已经有的替代 |
+|---|---|---|
+| 优化遍不用重建数据流 | 是 | `IRFunction::uses_of` / `def_of` 索引（0.205） |
+| 值单一定义，语义清晰 | 是 | `Operand` 带 tag，索引语义自文档化（0.206） |
+| 跨块引用不会失效 | 是 | `Inst::id` / `Block::id` 稳定标识（0.205 / 0.208） |
+
+换句话说：**SSA 的三个主要好处，用「稳定 ID + 反向索引 + tag 操作数」
+这三样就拿到了大部分，而不用动前端降级和 phi 构造。**
+
+真正的分界线是「要不要做需要精确数据流的优化」：现在的优化遍（常量折叠、
+DCE、CSE、LICM、内联、边界版本化）都是局部或结构性的，索引表够用。
+等到要做全局值编号、图着色寄存器分配那一级时再考虑 SSA —— 那时也应该
+先评估「加一层 SSA 构造」而不是重写整个 IR。
+
 ## 数据结构
 
 `src/ir.h`。
 
 | 结构 | 说明 |
 |---|---|
-| `Inst` | 一条指令。`op` + 至多三个源操作数 `a/b/c` + `dst` + `imm/fimm/idx/target/target2` + `args` + `ty` + `line`（源码行，0 表示未知） |
-| `Block` | 名字 + 指令序列，`terminated()` 判断末尾是不是跳转/分支/返回 |
+| `Inst` | 一条指令。`id`（稳定标识）+ `op` + 至多三个源操作数 `a/b/c` + `dst` + `imm/fimm/idx`（`Operand`，带 tag）+ `target/target2` + `args` + `ty` + `line`（源码行，0 表示未知） |
+| `Block` | `id`（稳定标识）+ 名字 + 指令序列，`terminated()` 判断末尾是不是跳转/分支/返回 |
 | `IRFunction` | 名字、形参、返回类型、`slot_ty`（局部槽类型）、`vreg_ty`（每个 vreg 的类型）、基本块、`env_slot`（有捕获时存闭包指针的槽） |
 | `IRGlobal` | 一个全局变量；数据段里就是一个 `.quad`，初值 0 同时也是 `None` |
 | `IRClass` | 名字、vtable（槽 → 函数下标）、`vtable_ext`（来自导入基类的槽 → 导出方法符号）、字段数（含继承）、`field_heap`（每个字段是否堆类型，供析构器使用）、`qualname`（模块限定类名）、`mro`（C3 顺序；>=0 本地类下标，<0 表示 ext_bases 下标取反）、`ext_bases`（导入祖先的 vtable/own_slots 符号与限定名）、`own_slots`（本类声明的全部槽，含别名） |
 | `IRExtern` / `IRExternVar` | `cimport` 的 C 函数/全局变量：符号、`CKind` 形参与返回、结构体 ABI、回调签名下标、可变参数标记；同一符号可按调用点以不同 `CKind` 编组 |
 | `IRModule` | 函数表、全局表、字符串池、类表、C 互操作表（`externs` / `extern_vars` / `cb_sigs`）、`entry`（顶层代码编译成的函数下标） |
 
-`Inst` 里有个容易踩的点：**`idx` 的含义随 `op` 变**——`const.str` 是字符串池下标，`load.slot` 是槽号，`load.global` 是全局号，`func.addr` 是函数号。类型上看不出区别，读指令时要先看 `op`。
+### 稳定标识（0.205 / 0.208）
+
+`Inst::id` 和 `Block::id` 是**不随重排而变**的标识：
+
+- 指令 id 由 `IRFunction::next_inst_id` 分配，只增不减（删指令不回收），
+  所以任何时刻拿到的 id 都能查到「是否已删」。
+- 块 id 同理。`IRFunction::block_by_id` 维护 id -> 当前下标，
+  `block_index(id)` 返回 -1 表示块已删。
+
+为什么必须有：块内下标和块号都会被 `vector::insert/erase` 与新增块改变。
+0.203 的边界版本化就是栽在这上面 —— `version_bounds_loop` 插入 3+ 个新块后
+块号整体偏移，导致某一层循环被永久跳过，99 处边界检查一个没消。
+
+`rebuild_use_def()` 一次 O(指令数) 扫描重建 `inst_by_id` / `def_of` /
+`uses_of` / `block_by_id`，在结构改动的 pass 之后调用。
+
+### 索引操作数带 tag（0.206）
+
+`Inst::idx` 原来是裸 `int32_t`，含义随 `op` 变（`const.str` 是字符串池下标、
+`load.slot` 是槽号、`load.global` 是全局号、`func.addr` 是函数号……），
+填错编译器不管，只能靠测试和 dump 发现 —— 这是这套 IR 最容易踩的坑。
+
+现在换成 `Operand`：
+
+```cpp
+struct Operand {
+    enum Kind : uint8_t { None, Slot, Global, Str, Func, Class, Extern, Block, Field };
+    Kind kind = None;
+    int32_t value = -1;
+    static Operand slot(int32_t v);   // 每种一个构造器
+};
+```
+
+新增代码应写成 `in.idx = Operand::slot(i)` 而不是 `in.idx = i`，语义自文档化。
+`PYADAMAS_IR_CHECK=1` 会在 `Inst::text()` 里校验 op 与 kind 是否匹配。
+
+迁移期保留 `operator int32_t()` 隐式转换，让存量代码继续编译；等所有消费点
+都改成显式取 kind 后删掉它，漏写 kind 就会变成编译错误。
 
 `IRModule::add_func` 返回裸指针，函数表用 `vector<unique_ptr<IRFunction>>` 持有：降级过程中会不断新增函数（嵌套 `def`），`vector<IRFunction>` 扩容会让外部持有的指针失效。
 
