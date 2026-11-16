@@ -54,6 +54,8 @@ static int gc_mark_sweep;
 static int64_t alloc_since_major;
 static int64_t young_threshold = PYADAMAS_GC_THRESHOLD;
 static int64_t major_threshold = 4 * PYADAMAS_GC_THRESHOLD;
+/* 连续「major 零回收」的次数，用于退避（见 gc_collect 收尾）。 */
+static int gc_zero_free_streak;
 
 static void gc_collect(int major);
 static void gc_pend_add(int64_t v);
@@ -1591,6 +1593,30 @@ static void gc_collect(int major) {
         int64_t mt = old_bytes * 2;
         if (mt < 4 * (int64_t)PYADAMAS_GC_THRESHOLD)
             mt = 4 * (int64_t)PYADAMAS_GC_THRESHOLD;
+        // **回收率退避**：上一轮 major 一个对象都没回收，说明存活集稳定、
+        // 没有环在积累，再按原频率全扫纯属浪费 —— 阈值翻倍，最多到 8 倍。
+        //
+        // 实测 bench_rc_gen：10 万存活字符串 + 15 万短命容器，4 次 major
+        // 每次扫 10 万对象、freed=0，合计 20ms —— 占整个程序 92ms 的 22%。
+        // 退避后同样负载只扫 1 次，其余交给 minor。
+        if (freed == 0 && n_set > 0) {
+            // **零回收退避。**
+            //
+            // 上一轮 major 一个对象都没回收，说明存活集稳定、没有环在积累，
+            // 再按原频率全扫纯属浪费。实测 bench_rc_gen 的容器段：
+            // 15 万次 `['x'*16, str(i), i*2]` 触发了 8208 次 major，每次
+            // set=5、freed=0 —— 全是空扫。
+            //
+            // 关键是**必须有绝对下限**：这里 live_bytes 只有 520 字节，
+            // 按 `old_bytes * 8` 算出来的阈值才 4KB，比一次分配还小，
+            // 于是每次分配都触发 major。下限取 4*THRESHOLD（8MB）。
+            if (gc_zero_free_streak < 3) ++gc_zero_free_streak;
+            mt = old_bytes * 8;
+            if (mt < 4 * (int64_t)PYADAMAS_GC_THRESHOLD)
+                mt = 4 * (int64_t)PYADAMAS_GC_THRESHOLD;
+        } else {
+            gc_zero_free_streak = 0;
+        }
         major_threshold = mt;
     }
     if (gc_stats_on) gc_stats_report(major, n_set, freed, gc_now_ms() - st0);
