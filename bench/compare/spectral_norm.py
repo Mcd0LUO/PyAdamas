@@ -2,11 +2,11 @@
 N = 600
 
 
-def eval_a(i, j):
+def eval_a(i: int, j: int) -> float:
     return 1.0 / (((i + j) * (i + j + 1) // 2) + i + 1)
 
 
-def mul_ata(v, out, n):
+def mul_ata(v: list[float], out: list[float], n: int) -> None:
     for i in range(n):
         total = 0.0
         for j in range(n):
@@ -14,7 +14,7 @@ def mul_ata(v, out, n):
         out[i] = total
 
 
-def mul_a(u, out, n):
+def mul_a(u: list[float], out: list[float], n: int) -> None:
     for i in range(n):
         total = 0.0
         for j in range(n):

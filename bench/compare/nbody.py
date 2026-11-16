@@ -4,7 +4,7 @@ import math
 N = 50000
 
 
-def advance(b, dt, steps):
+def advance(b: list[float], dt: float, steps: int) -> None:
     for _ in range(steps):
         for i in range(5):
             for j in range(i + 1, 5):
@@ -25,7 +25,7 @@ def advance(b, dt, steps):
             b[i * 7 + 2] += dt * b[i * 7 + 5]
 
 
-def energy(b):
+def energy(b: list[float]) -> float:
     e = 0.0
     for i in range(5):
         e += 0.5 * b[i * 7 + 6] * (b[i * 7 + 3] * b[i * 7 + 3] +
