@@ -472,8 +472,8 @@ int Lowerer::compile_function_body(FunctionDef& f, FuncInfoPtr info, const std::
     // continue 穿过保护区）。满足时才把唯一那条 try 降级成 LSDA/landing pad
     // 路径；不满足的函数继续走 setjmp 路径，一条指令都不变。
     if (opts_.zero_cost_exc && target_abi().gnu_cfi) {
-        if (const Try* zt = find_zero_cost_try(f)) {
-            st_->zero_cost_try = zt;
+        collect_zero_cost_tries(f);
+        if (!st_->zero_cost_tries.empty()) {
             // 与老路径的 has_handlers 语义保持一致（docs/exc-semantics.md
             // §5.2：Z2/Z3 期间不把「优化差异」混进语义回归）：函数里不再有
             // HandlerPush，但槽位提升 / 序言清零 / 循环优化的门禁照旧。

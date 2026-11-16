@@ -285,7 +285,7 @@ void Lowerer::lower_try(Try& t) {
     // 零开销异常（Z2-b2 / Z4）：本函数被判成可接管的形状时，唯一那条 try 走
     // 新路径 —— 包括带 finally 的情形（lower_try_zero_cost 自己处理 finalbody）。
     // 这一判断必须排在 finally 分派之前，否则带 finally 的 try 永远进不了新路径。
-    if (st_->zero_cost_try == &t) {
+    if (st_->zero_cost_tries.count(&t) != 0) {
         lower_try_zero_cost(t);
         return;
     }
@@ -303,7 +303,7 @@ void Lowerer::lower_try_core(Try& t) {
         return;
     }
     // 零开销异常（Z2-b2）：本函数被判成最小形状时，唯一那条 try 走新路径。
-    if (st_->zero_cost_try == &t) {
+    if (st_->zero_cost_tries.count(&t) != 0) {
         lower_try_zero_cost(t);
         return;
     }
@@ -751,74 +751,56 @@ void Lowerer::lower_delete(Delete& d) {
 //     （多参 raise / 富异常实例走 RaiseArgs / RaiseInstance，第一刀不接）。
 // 其余函数（生成器/协程、with、finally、嵌套 try、多 handler）继续走 setjmp
 // 路径，一个字节都不变。
-const Try* Lowerer::find_zero_cost_try(FunctionDef& f) {
-    int try_count = 0;
-    int with_count = 0;
-    Try* only = nullptr;
+void Lowerer::collect_zero_cost_tries(FunctionDef& f) {
+    // 逐个 try 独立判定：满足形状的收进集合、走 LSDA 路径，其余留在 setjmp 路径。
+    // 嵌套时内外层可以分别选择路径（codegen 侧同一函数的多条保护区合成一份 LSDA）。
+    //
+    // 排除条件：
+    //   - 带 else（要求 try 体正常结束后才执行，需要在保护区终点插跳转）；
+    //   - 体内有 with（with 可能抑制异常，语义上是 cleanup 不是 catch）；
+    //   - 富异常实例 / 多参 raise（没有 _Unwind 版）。
+    std::vector<Try*> all;
     walk_stmt_tree(f.body, [&](Stmt& s) {
-        if (s.kind == StmtKind::Try) {
-            ++try_count;
-            if (!only) only = &static_cast<Try&>(s);
-        } else if (s.kind == StmtKind::With) {
-            ++with_count;
-        }
+        if (s.kind == StmtKind::Try) all.push_back(&static_cast<Try&>(s));
     });
-    if (try_count != 1 || with_count != 0 || !only) return nullptr;
 
-    Try& t = *only;
-    // 多 handler 已放开：landing pad 里的分派链与老路径逐句相同（见
-    // lower_try_zero_cost）。仍排除 finally / else —— 它们需要 cleanup
-    // landing pad 或 try 正常结束后跳转，是 Z4 的范围。
-    // finally 已放开（Z4）：正常路径在保护区外跑一遍 finalbody；异常路径在
-    // landing pad 里先跑 finalbody 再重抛。仍排除 else —— 它要求「try 体正常
-    // 结束后才执行」，需要在保护区终点插跳转，与 finally 正交，后续单独做。
-    if (!t.orelse.empty()) return nullptr;
-    // handler 类型不再限制为 catch-all：lower_try_zero_cost 的分派链会逐个
-    // lower_exc_match，不匹配的走 pa_eh_rethrow 重启 phase 1（与老路径的
-    // ExcReraise 等价）。富异常实例 / 多参 raise 仍由下面的 check 排除。
+    for (Try* tp : all) {
+        Try& t = *tp;
+        if (!t.orelse.empty()) continue;
 
-    bool bad = false;
-    auto check = [&](Stmt& s) {
-        if (bad) return;
-        switch (s.kind) {
-            case StmtKind::Return:
-            case StmtKind::Break:
-            case StmtKind::Continue:
-                // 早退已支持（Z4）：lower_try_zero_cost 注册了一条 ZeroCostEh
-                // 清理项，emit_cleanup_exits 在跳转前发 pa_eh_leave + 水位清理。
-                break;
-            case StmtKind::Raise: {
-                auto& r = static_cast<Raise&>(s);
-                if (!r.exc) break;  // 裸 raise 由 pa_eh_reraise 支持
-                // 富异常实例：旧路径走 pa_raise_instance，第一刀没有 _Unwind 版。
-                TypePtr xt = tc_.type_of(r.exc.get());
-                if (xt && xt->kind == TyKind::Class && xt->cls &&
-                    xt->cls->is_rich_exception) {
-                    bad = true;
+        bool bad = false;
+        auto check = [&](Stmt& s) {
+            if (bad) return;
+            switch (s.kind) {
+                case StmtKind::Raise: {
+                    auto& r = static_cast<Raise&>(s);
+                    if (!r.exc) break;  // 裸 raise 由 pa_eh_reraise 支持
+                    TypePtr xt = tc_.type_of(r.exc.get());
+                    if (xt && xt->kind == TyKind::Class && xt->cls &&
+                        xt->cls->is_rich_exception) {
+                        bad = true;
+                        break;
+                    }
+                    if (r.exc->kind == ExprKind::Call) {
+                        auto& c = static_cast<Call&>(*r.exc);
+                        if (c.args.size() > 1) bad = true;
+                        for (auto& a : c.args)
+                            if (a && a->kind == ExprKind::Starred) bad = true;
+                    }
                     break;
                 }
-                // 多参 raise：旧路径走 pa_raise_args，第一刀没有 _Unwind 版。
-                if (r.exc->kind == ExprKind::Call) {
-                    auto& c = static_cast<Call&>(*r.exc);
-                    if (c.args.size() > 1) bad = true;
-                    for (auto& a : c.args)
-                        if (a && a->kind == ExprKind::Starred) bad = true;
-                }
-                break;
+                case StmtKind::With:
+                    // with 可能抑制异常（__exit__ 返回 True），不是纯 cleanup。
+                    bad = true;
+                    break;
+                default:
+                    break;
             }
-            case StmtKind::Try:
-            case StmtKind::With:
-                // 前面已经按函数体全局数过（恰好一条 try、零个 with）；
-                // 走到这里说明形状判断和遍历口径不一致，保守判定不接。
-                bad = true;
-                break;
-            default:
-                break;
-        }
-    };
-    walk_stmt_tree(t.body, check);
-    for (auto& hb : t.handlers) walk_stmt_tree(hb.body, check);
-    return bad ? nullptr : &t;
+        };
+        walk_stmt_tree(t.body, check);
+        for (auto& hb : t.handlers) walk_stmt_tree(hb.body, check);
+        if (!bad) st_->zero_cost_tries.insert(&t);
+    }
 }
 
 // 零开销 try 的降级。landing pad 只做两件事：pa_eh_land 把展开包装里的
@@ -868,7 +850,7 @@ void Lowerer::lower_try_zero_cost(Try& t) {
     st_->cleanups.pop_back();
 
     if (terminated()) {
-        // find_zero_cost_try 已经排除了 return/break/continue；走到这里说明
+        // 早退由 ZeroCostEh 清理项处理；走到这里说明还有别的东西提前终止了控制流。
         // 形状判定漏了东西。宁可报错，也不要生成一条没有终点标签的保护区。
         err(t.line, t.col, "internal: zero-cost try body ended with a terminator");
         return;

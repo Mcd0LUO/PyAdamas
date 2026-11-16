@@ -527,11 +527,17 @@ private:
     // 发射标记指令时按同一顺序取用）。.cfi_personality / .cfi_lsda 紧跟
     // .cfi_startproc 发射；.gcc_except_table 与 DW.ref 指针槽等所有函数都
     // 发完后在 gen() 尾部统一发。计划为空 = 老 setjmp 路径，一个字节不发。
+    // 一个函数的所有保护区合成一份 LSDA（多条 call-site 记录）。
+    // 嵌套 try 时每个 region 各占一条记录，共用同一个 landing pad 分发入口
+    // （分发链按 handler 顺序逐个匹配，与老路径一致）。
     struct EhPlanRec {
         std::string func_label;  // FDE 起点（= .cfi_startproc 地址，不是 .LfN）
-        std::string begin;       // 保护区起点标签
-        std::string end;         // 保护区终点标签（开区间）
-        std::string lp;          // landing pad 标签
+        struct Range {
+            std::string begin;   // 保护区起点标签
+            std::string end;     // 保护区终点标签（开区间）
+            std::string lp;      // 该区间的 landing pad 标签
+        };
+        std::vector<Range> ranges;
         int lsda_index = 0;
     };
     std::vector<EhPlanRec> eh_plans_;

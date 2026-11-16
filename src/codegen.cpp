@@ -528,15 +528,16 @@ void AsmGen::prepare_eh_plan(const IRFunction& f, const std::string& fname) {
             else if (in.op == IrOp::EhLandingPad)
                 eh_lp_labels_.push_back(fresh_label("ehLP"));
         }
-    // 第一刀：每个函数恰好一条保护区（lowering 的形状判定保证）。
-    if (eh_begin_labels_.size() != 1 || eh_end_labels_.size() != 1 ||
-        eh_lp_labels_.size() != 1)
-        throw std::logic_error("zero-cost EH: 期望每个函数恰好一条保护区");
+    // 每个 EhBegin/EhEnd/EhLandingPad 三元组构成一条保护区（嵌套 try 有多条）。
+    // 它们共用同一份 LSDA（多条 call-site 记录）与同一个 landing pad 分发入口。
+    const size_t n_regions = eh_begin_labels_.size();
+    if (n_regions == 0 || eh_end_labels_.size() != n_regions ||
+        eh_lp_labels_.size() != n_regions)
+        throw std::logic_error("zero-cost EH: begin/end/landing-pad 标记数量不匹配");
     EhPlanRec rec;
     rec.func_label = fname;
-    rec.begin = eh_begin_labels_.front();
-    rec.end = eh_end_labels_.front();
-    rec.lp = eh_lp_labels_.front();
+    for (size_t k = 0; k < n_regions; ++k)
+        rec.ranges.push_back({eh_begin_labels_[k], eh_end_labels_[k], eh_lp_labels_[k]});
     rec.lsda_index = static_cast<int>(eh_plans_.size());
     eh_plans_.push_back(std::move(rec));
     eh_plan_active_ = true;
@@ -548,12 +549,14 @@ void AsmGen::emit_eh_directives_for_current() {
     EhFuncPlan plan;
     plan.lsda_index = rec.lsda_index;
     plan.func_label = rec.func_label.c_str();
-    EhRange r;
-    r.begin_label = rec.begin.c_str();
-    r.end_label = rec.end.c_str();
-    r.lp_label = rec.lp.c_str();
-    r.is_handler = true;
-    plan.ranges.push_back(r);
+    for (const auto& rg : rec.ranges) {
+        EhRange r;
+        r.begin_label = rg.begin.c_str();
+        r.end_label = rg.end.c_str();
+        r.lp_label = rg.lp.c_str();
+        r.is_handler = true;
+        plan.ranges.push_back(r);
+    }
     std::string text;
     emit_eh_func_directives(text, plan);
     emit_raw(text);
@@ -566,12 +569,14 @@ void AsmGen::emit_eh_tables() {
         EhFuncPlan plan;
         plan.lsda_index = rec.lsda_index;
         plan.func_label = rec.func_label.c_str();
-        EhRange r;
-        r.begin_label = rec.begin.c_str();
-        r.end_label = rec.end.c_str();
-        r.lp_label = rec.lp.c_str();
-        r.is_handler = true;
-        plan.ranges.push_back(r);
+        for (const auto& rg : rec.ranges) {
+            EhRange r;
+            r.begin_label = rg.begin.c_str();
+            r.end_label = rg.end.c_str();
+            r.lp_label = rg.lp.c_str();
+            r.is_handler = true;
+            plan.ranges.push_back(r);
+        }
         emit_eh_lsda(text, plan);
     }
     emit_eh_dwref(text);
