@@ -31,9 +31,11 @@ std::string ty_note(const TypePtr& t) {
 // 临时值，索引只服务「快速找到使用点」，不承担正确性判定。
 void IRFunction::rebuild_use_def() {
     inst_by_id.clear();
+    block_by_id.clear();
     def_of.clear();
     uses_of.clear();
     for (int b = 0; b < static_cast<int>(blocks.size()); ++b) {
+        block_by_id[ensure_block_id(blocks[static_cast<size_t>(b)])] = b;
         auto& insts = blocks[static_cast<size_t>(b)].insts;
         for (int k = 0; k < static_cast<int>(insts.size()); ++k) {
             Inst& in = insts[static_cast<size_t>(k)];

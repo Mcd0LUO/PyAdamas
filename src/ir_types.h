@@ -126,6 +126,10 @@ struct Inst {
 };
 
 struct Block {
+    // 稳定标识：与 Inst::id 同思路 —— 块在 vector 里的下标会因
+    // insert/erase 改变，跨 pass 保存的引用必须用 id。
+    // 0 = 未分配。
+    uint32_t id = 0;
     std::string name;
     std::vector<Inst> insts;
 
@@ -181,6 +185,21 @@ struct IRFunction {
     // 指令 id 的分配器。只增不减（删指令不回收 id），保证任何时刻
     // 拿到的 id 都还能在 inst_by_id 里查到是否已删。
     uint32_t next_inst_id = 1;
+    // 块 id 的分配器，同 inst_id 语义。
+    uint32_t next_block_id = 1;
+    // 块 id -> 当前块下标。rebuild_use_def() 时一并重建。
+    std::unordered_map<uint32_t, int> block_by_id;
+
+    // 给一个块分配 id（若尚未分配）。
+    uint32_t ensure_block_id(Block& b) {
+        if (b.id == 0) b.id = next_block_id++;
+        return b.id;
+    }
+    // 按 id 找当前下标；找不到返回 -1（块已被删）。
+    int block_index(uint32_t id) const {
+        auto it = block_by_id.find(id);
+        return it == block_by_id.end() ? -1 : it->second;
+    }
     // id -> 指令所在位置。指令被删时移除对应项。
     // 值类型是 (block, index)，两者都可能在重排后过期，所以它只用于
     // 「快速定位」，优化遍仍要以实际扫描为准。
@@ -214,9 +233,13 @@ struct IRFunction {
     // 三条标记指令为准（内联等 pass 会重建块表，这里的块号会过期，仅作
     // 记录/诊断用，不要拿它当索引）。
     struct EhRegion {
-        int begin_block = -1;
-        int end_block = -1;
-        int lp_block = -1;
+        // 用**块 id**而不是块号：内联、循环版本化等 pass 会重建块表，
+        // 块号随之过期（这正是 0.203 边界版本化失败的根因）。
+        // codegen 仍以 EhBegin/EhEnd/EhLandingPad 标记指令为准，这里
+        // 只作诊断记录 —— 但记录本身也不该是过期数据。
+        uint32_t begin_block = 0;
+        uint32_t end_block = 0;
+        uint32_t lp_block = 0;
     };
     std::vector<EhRegion> eh_regions;
 

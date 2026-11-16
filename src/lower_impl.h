@@ -327,7 +327,11 @@ private:
     Block& cur() { return st_->fn->blocks[st_->blk]; }
 
     int new_block(std::string name) {
-        st_->fn->blocks.push_back(Block{std::move(name), {}});
+        // 别用聚合初始化：Block 加了 id 字段后会错位（-Werror 会抓，
+        // 但更稳妥的是显式赋值）。
+        Block nb;
+        nb.name = std::move(name);
+        st_->fn->blocks.push_back(std::move(nb));
         return static_cast<int>(st_->fn->blocks.size()) - 1;
     }
 

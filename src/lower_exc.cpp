@@ -819,7 +819,7 @@ void Lowerer::lower_try_zero_cost(Try& t) {
 
     switch_to(body);
     IRFunction::EhRegion region;
-    region.begin_block = body;
+    region.begin_block = st_->fn->ensure_block_id(st_->fn->blocks[static_cast<size_t>(body)]);
     {
         Inst eb;
         eb.op = IrOp::EhBegin;
@@ -881,8 +881,8 @@ void Lowerer::lower_try_zero_cost(Try& t) {
 
     // landing pad 入口：personality 把 GR0（%rax）设成展开包装指针。
     switch_to(land);
-    region.lp_block = land;
-    region.end_block = body_end;
+    region.lp_block = st_->fn->ensure_block_id(st_->fn->blocks[static_cast<size_t>(land)]);
+    region.end_block = st_->fn->ensure_block_id(st_->fn->blocks[static_cast<size_t>(body_end)]);
     st_->fn->eh_regions.push_back(region);
     {
         Inst lp;
