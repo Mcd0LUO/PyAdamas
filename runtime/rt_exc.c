@@ -576,6 +576,20 @@ int64_t pa_exc_enter(int64_t* cur, int64_t* top) {
     return exc_node_depth;
 }
 
+/* 释放一条 PyAdamasExcSave 链。
+ *
+ * 用在「恢复异常上下文时当前链要被换掉」的地方：被换掉的那条如果还有
+ * 节点，就没人再引用它们了（pa_exc_accept_value 压的、或 pa_exc_enter 存的）。
+ * 不释放就是每层嵌套泄漏 sizeof(PyAdamasExcSave) 字节。
+ * ASan 实测 32_exception_value 泄漏 16 字节。 */
+static void free_save_chain(PyAdamasExcSave* s) {
+    while (s) {
+        PyAdamasExcSave* nx = s->up;
+        free(s);
+        s = nx;
+    }
+}
+
 void pa_exc_leave(int64_t* cur, int64_t* top, int64_t token) {
     *cur = (int64_t)(uintptr_t)current_exc;
     *top = (int64_t)(uintptr_t)exc_save_top;
@@ -584,6 +598,10 @@ void pa_exc_leave(int64_t* cur, int64_t* top, int64_t token) {
         PyAdamasExcNode* n = exc_node_top;
         exc_node_top = n->prev;
         --exc_node_depth;
+        // 恢复前把「当前链」还掉：它和 n->top 是两条独立的链，直接覆盖
+        // exc_save_top 会让当前那条永久丢失。
+        if (exc_save_top && exc_save_top != n->top) free_save_chain(exc_save_top);
+        exc_free(current_exc);
         current_exc = n->cur;
         exc_save_top = n->top;
         free(n);
@@ -600,6 +618,8 @@ void pa_exc_unwind(int64_t depth) {
         PyAdamasExcNode* n = exc_node_top;
         exc_node_top = n->prev;
         --exc_node_depth;
+        if (exc_save_top && exc_save_top != n->top) free_save_chain(exc_save_top);
+        exc_free(current_exc);
         current_exc = n->cur;
         exc_save_top = n->top;
         free(n);
@@ -656,6 +676,23 @@ void pa_reraise(void) {
 
 void pa_exc_reraise(void) {
     if (!pending_exc) panic_c("reraise without a pending exception");
+    /* 裸 `raise` 会直接 longjmp 到外层 handler，**跳过 except 块的正常收尾**
+     * （也就是 pa_exc_done）。而 pa_exc_accept_value 在进 except 体时压了一个
+     * PyAdamasExcSave 节点，那个节点必须在这里还掉 —— 否则每执行一次
+     * `except ...: raise` 就泄漏 16 字节（正好 sizeof(PyAdamasExcSave)）。
+     *
+     * ASan 实测 32_exception_value：`except ValueError as e: ... raise` 泄漏
+     * 16 字节，栈指向 pa_exc_accept_value。
+     *
+     * 恢复 current_exc 到外层值再抛：语义上等价于 pa_exc_done（除了不动
+     * pending_exc —— 它马上要重新抛出去）。 */
+    if (exc_save_top) {
+        PyAdamasExcSave* s = exc_save_top;
+        exc_save_top = s->up;
+        exc_free(current_exc);
+        current_exc = s->prev;
+        free(s);
+    }
     exc_longjmp();
 }
 
@@ -930,14 +967,6 @@ PyAdamasStr* pa_exc_value_str(PyAdamasExcValue* v) {
  * 顺序：先还挂起表里的记录（它们是从 freelist 之外单独 malloc 的），
  * 再还 freelist 本身，最后还登记表。 */
 void pa_exc_shutdown(void) {
-    if (getenv("PYADAMAS_EXCSD_DEBUG")) {
-        int ntop = 0, nsus = 0, nfree = 0;
-        for (PyAdamasHandler* q = handler_top; q; q = q->prev) ++ntop;
-        for (SuspendedNode* s = suspended_head; s; s = s->next) ++nsus;
-        for (PyAdamasHandler* q = handler_freelist; q; q = q->prev) ++nfree;
-        fprintf(stderr, "[excsd] handler_top=%d suspended=%d freelist=%d\n",
-                ntop, nsus, nfree);
-    }
     // 挂起表里的 handler 记录：整条链还掉。
     SuspendedNode* sn = suspended_head;
     while (sn) {
@@ -982,11 +1011,26 @@ void pa_exc_shutdown(void) {
         free(r->parent);
         free(r);
     }
-    // 异常上下文嵌套节点。
+    // 异常上下文嵌套节点。每个节点还**挂着一条 exc_save_top 链**
+    // （pa_exc_enter 把它从全局摘下来存进 n->top）。协程挂起后如果没恢复
+    // （被丢弃、或程序直接退出），那条链上的 PyAdamasExcSave 就丢了 ——
+    // 既不在 exc_save_top 上、也不在别处。
+    // ASan 实测 32_exception_value 泄漏 16 字节（正好 sizeof(PyAdamasExcSave)）。
     while (exc_node_top) {
         PyAdamasExcNode* n = exc_node_top;
         exc_node_top = n->prev;
+        while (n->top) {
+            PyAdamasExcSave* s = n->top;
+            n->top = s->up;
+            free(s);
+        }
         free(n);
+    }
+    // 全局那条链本身也要清（正常路径下它和节点链是互斥的两条）。
+    while (exc_save_top) {
+        PyAdamasExcSave* s = exc_save_top;
+        exc_save_top = s->up;
+        free(s);
     }
     exc_node_depth = 0;
 }

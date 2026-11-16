@@ -363,9 +363,11 @@ PyAdamasList* pa_os_path_split(PyAdamasStr* s) {
     pa_gc_pin(tail);
     PyAdamasList* out = pa_list_new(2, 1);
     pa_gc_pin(out);
-    pa_rc_inc(head);
+    // **不要再 inc。** str_new 返回的串本来就带 rc=1（产生者持有），
+    // 而 pa_list_append 只存指针、不加引用 —— 直接把那份产生者引用转给
+    // 列表即可。原来多 inc 一次，没人释放产生者那份：
+    // ASan 实测 81_os_extra 泄漏 120 字节（os.path.split 的 head/tail）。
     pa_list_append(out, (int64_t)head);
-    pa_rc_inc(tail);
     pa_list_append(out, (int64_t)tail);
     pa_gc_unpin(out);
     pa_gc_unpin(tail);

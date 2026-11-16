@@ -168,11 +168,24 @@ bool Lowerer::exc_class_name(Expr& e, std::string& out) {
 }
 
 void Lowerer::lower_raise(Raise& r) {
+    // raise 是退出路径，和 return / break / continue 一样必须先跑完活跃清理
+    // （except 块的 ExcDone、with 的 __exit__、finally 等）。
+    //
+    // 原来这里直接 call_void(Reraise) 就 return 了 —— 于是 `except ...: raise`
+    // 跳过 ExcDone，pa_exc_accept_value 压的 PyAdamasExcSave 节点永远不释放。
+    // ASan 实测 32_exception_value 泄漏 16 字节（正好 sizeof(PyAdamasExcSave)），
+    // 运行时计数也印证：accept=6 done=5 reraise=0。
     if (!r.exc) {
         if (r.cause) {
             err(r.line, r.col, "'raise from' requires an exception");
             return;
         }
+        // **不能在这里跑 emit_cleanup_exits**：裸 `raise` 重抛的正是
+        // `current_exc`，而清理项里的 ExcDone 会把它 free 掉，于是运行时
+        // 报 "No active exception to reraise"（实测 119_gen_except_suspend）。
+        //
+        // save 节点的释放交给 pa_exc_reraise 自己在 longjmp 前做 ——
+        // 那里能安全地恢复 current_exc 到外层值。
         call_void(raise_rt(RtFn::Reraise), {});
         return;
     }
@@ -197,7 +210,6 @@ void Lowerer::lower_raise(Raise& r) {
         VReg inst = expr(*r.exc);
 
         call_void(RtFn::RaiseInstance, {inst, const_str(xt->cls->name)});
-
         return;
 
     }
