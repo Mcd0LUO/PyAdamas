@@ -30,6 +30,8 @@
 
 #include "rt_internal.h"
 
+
+void pa_exc_drop_save(void);
 #include <stddef.h>
 #include <unwind.h>
 
@@ -330,6 +332,12 @@ static _Noreturn void pa_eh_throw_or_exit(PyAdamasException* e) {
     int rc = pa_eh_throw(e);
     if (rc == PA_EH_UNCAUGHT) {
         exc_print_uncaught(pending_exc ? pending_exc : e);
+        // 未捕获：打印后退出。异常对象和展开包装都还掉（见 rt_exc.c 的
+        // 同一处理），否则 LeakSanitizer 会报 Direct leak。
+        if (pending_exc) {
+            exc_free(pending_exc);
+            pending_exc = NULL;
+        }
         exit(1);
     }
     panic_c("pa_eh_throw: _Unwind_RaiseException 内部错误");
@@ -338,6 +346,7 @@ static _Noreturn void pa_eh_throw_or_exit(PyAdamasException* e) {
 
 /* 与 rt_exc.c 的 pa_raise 逐句对应，只把 exc_longjmp 换成抛展开。 */
 _Noreturn void pa_eh_raise(PyAdamasStr* type, PyAdamasStr* msg) {
+    pa_exc_drop_save();
     char tn[128];
     int64_t tn_len = type->len;
     PyAdamasException* e;
@@ -362,6 +371,20 @@ _Noreturn void pa_eh_raise(PyAdamasStr* type, PyAdamasStr* msg) {
 /* raise <异常值> / raise ... from ...：与 rt_exc.c 的 pa_raise_value_from 对应。
    pa_exc_from_value 自己会登记异常载荷的 GC 根，这里只搬控制流。 */
 _Noreturn void pa_eh_raise_value_from(PyAdamasExcValue* v, PyAdamasExcValue* cause) {
+    /* 这个函数是 _Noreturn，terminated() 认它，于是 lower_try 不会在 except
+     * 体后面补 ExcDone —— 收尾责任全在这里。要做两件事：
+     *
+     *   1. 还掉 except 块入口压的 PyAdamasExcSave（pa_exc_drop_save）；
+     *   2. **释放 current_exc** —— pa_exc_accept_value 把捕获到的异常
+     *      接管成了 current_exc，ExcDone 本来负责 free 它。跳过 ExcDone
+     *      就等于每执行一次 `except ...: raise X from e` 泄漏一整个
+     *      PyAdamasException（结构 32 + type + message，实测 45/47 字节）。
+     *
+     * 注意顺序：先 drop_save（它只还 save 节点、不动 current_exc），
+     * 再 free current_exc。 */
+    pa_exc_drop_save();
+    exc_free(current_exc);
+    current_exc = NULL;
     exc_free(pending_exc);
     pending_exc = pa_exc_from_value(v);
     if (cause) {
@@ -373,6 +396,7 @@ _Noreturn void pa_eh_raise_value_from(PyAdamasExcValue* v, PyAdamasExcValue* cau
 
 /* 裸 raise：与 rt_exc.c 的 pa_reraise 逐句对应。 */
 _Noreturn void pa_eh_reraise(void) {
+    pa_exc_drop_save();
     if (current_exc) {
         exc_free(pending_exc);
         pending_exc = current_exc;
@@ -386,7 +410,6 @@ _Noreturn void pa_eh_reraise(void) {
 
 /* landing 分发没有匹配上（例如 except Exception 遇到 SystemExit）：把已经搬回
    pending_exc 的同一个异常重新交给展开器，phase 1 会继续往外找 handler。 */
-void pa_exc_drop_save(void);
 _Noreturn void pa_eh_rethrow(void) {
     if (!pending_exc) panic_c("pa_eh_rethrow: 没有待重抛的异常");
     /* 零开销路径的裸 `raise` 同样会跳过 except 块的正常收尾（pa_exc_done），

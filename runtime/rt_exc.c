@@ -244,10 +244,17 @@ _Noreturn void exc_longjmp(void) {
         /* 走到这里说明没人接（_URC_END_OF_STACK）或展开器内部出错。
            与下面 setjmp 路径的「没 handler」分支同样处理：打印并退出。 */
         exc_print_uncaught(pending_exc);
+        // 未捕获异常：打印完就退出。先把异常对象还掉 —— 进程马上要
+        // exit，不还也不影响正确性，但 LeakSanitizer 会把它报成
+        // Direct leak（ASan 实测 34_exception_chain / 39_match_advanced）。
+        exc_free(pending_exc);
+        pending_exc = NULL;
         exit(1);
     }
     if (!handler_top) {
         exc_print_uncaught(pending_exc);
+        exc_free(pending_exc);
+        pending_exc = NULL;
         exit(1);
     }
     /* 跳过的帧不会再执行自己的出口清理：按记录把里面的堆引用释放掉。 */
@@ -887,7 +894,21 @@ PyAdamasException* pa_exc_from_value(PyAdamasExcValue* v) {
         pa_rc_inc(v->args);
         pending_exc_args = v->args;
     }
-    if (v->cause) e->cause = pa_exc_from_value(v->cause);
+    if (v->cause) {
+        /* 递归前把 pending_exc_args 摘下来，递归后装回去。
+         *
+         * 递归调用 pa_exc_from_value(v->cause) 会走到上面那段逻辑，把
+         * pending_exc_args 覆盖成内层的 args —— 外层刚 pa_rc_inc 的那份
+         * 引用就没人再指向它了（pending_exc_args 是它唯一的持有者）。
+         *
+         * ASan 实测 34_exception_chain：`raise RuntimeError(...) from e`
+         * 泄漏 45 字节（异常结构 32 + type 9 + message 4），栈指向 pa_raise。 */
+        PyAdamasList* saved_args = pending_exc_args;
+        pending_exc_args = NULL;
+        e->cause = pa_exc_from_value(v->cause);
+        if (pending_exc_args) pa_rc_dec(pending_exc_args);
+        pending_exc_args = saved_args;
+    }
     return e;
 }
 
