@@ -134,13 +134,40 @@ struct Block {
     std::vector<Inst> insts;
 
     bool terminated() const {
-        return !insts.empty() && (insts.back().op == IrOp::Jump ||
-                                  insts.back().op == IrOp::Branch ||
-                                  insts.back().op == IrOp::Return ||
-                                  insts.back().op == IrOp::GenYield ||
-                                  insts.back().op == IrOp::GenAwait ||
-                                  insts.back().op == IrOp::GenRethrow ||
-                                  insts.back().op == IrOp::GenDone);
+        if (insts.empty()) return false;
+        const IrOp op = insts.back().op;
+        if (op == IrOp::Jump || op == IrOp::Branch || op == IrOp::Return ||
+            op == IrOp::GenYield || op == IrOp::GenAwait ||
+            op == IrOp::GenRethrow || op == IrOp::GenDone)
+            return true;
+        // **不返回的运行时调用也算终止。**
+        //
+        // 漏掉这一类会让后续的收尾逻辑往它们后面追加指令 —— 那些指令永远
+        // 执行不到，但**会被当成活代码保留下来**，其中的清理动作（比如
+        // ExcDone）就静默丢失了。
+        //
+        // 实测 32_exception_value：`except ...: raise` 的裸 raise 生成
+        // pa_reraise（_Noreturn），但 terminated() 不认识它，于是 lower_try
+        // 又在后面补了 pa_exc_done + jump。ExcDone 永远执行不到，
+        // pa_exc_accept_value 压的 PyAdamasExcSave 泄漏 16 字节。
+        if (op == IrOp::CallRt) {
+            switch (static_cast<RtFn>(insts.back().imm)) {
+                case RtFn::ExcReraise:
+                case RtFn::Raise:
+                case RtFn::RaiseValue:
+                case RtFn::RaiseValueFrom:
+                case RtFn::RaiseInstance:
+                case RtFn::Reraise:
+                case RtFn::EhRaise:
+                case RtFn::EhRaiseValueFrom:
+                case RtFn::EhReraise:
+                case RtFn::EhRethrow:
+                    return true;
+                default:
+                    return false;
+            }
+        }
+        return false;
     }
 };
 

@@ -386,8 +386,19 @@ _Noreturn void pa_eh_reraise(void) {
 
 /* landing 分发没有匹配上（例如 except Exception 遇到 SystemExit）：把已经搬回
    pending_exc 的同一个异常重新交给展开器，phase 1 会继续往外找 handler。 */
+void pa_exc_drop_save(void);
 _Noreturn void pa_eh_rethrow(void) {
     if (!pending_exc) panic_c("pa_eh_rethrow: 没有待重抛的异常");
+    /* 零开销路径的裸 `raise` 同样会跳过 except 块的正常收尾（pa_exc_done），
+     * 而 pa_exc_accept_value 在进 except 体时压了一个 PyAdamasExcSave。
+     * 不还掉就是每执行一次 `except ...: raise` 泄漏 16 字节。
+     *
+     * 与 pa_exc_reraise（setjmp 路径）保持一致：恢复 current_exc 到外层值，
+     * 把 save 节点还回去，然后再抛。
+     *
+     * ASan 实测 32_exception_value：协程 except 体里的 `raise` 走这条路径，
+     * 泄漏 sizeof(PyAdamasExcSave)。 */
+    pa_exc_drop_save();
     pa_eh_throw_or_exit(pending_exc);
 }
 

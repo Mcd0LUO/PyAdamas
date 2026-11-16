@@ -531,6 +531,8 @@ PyAdamasStr* pa_exc_accept(void) {
 }
 
 void pa_exc_done(void) {
+    if (getenv("PYADAMAS_ACCDBG"))
+        fprintf(stderr, "[done] %p\n", __builtin_return_address(0));
     exc_free(current_exc);
     current_exc = NULL;
     if (current_exc_inst) { pa_rc_dec(current_exc_inst); current_exc_inst = NULL; }
@@ -662,7 +664,17 @@ void pa_raise(PyAdamasStr* type, PyAdamasStr* msg) {
     exc_longjmp();
 }
 
+void pa_exc_drop_save(void);
+
 void pa_reraise(void) {
+    /* 裸 `raise` 会直接 longjmp，跳过 except 块的正常收尾（pa_exc_done）。
+     * pa_exc_accept_value 在进 except 体时压了一个 PyAdamasExcSave，必须
+     * 在这里还掉 —— 否则每执行一次 `except ...: raise` 泄漏
+     * sizeof(PyAdamasExcSave) 字节。
+     *
+     * 注意 pending_exc 不能动（它就是马上要重抛的那个），只清 save 节点。
+     * ASan 实测 32_exception_value 泄漏 16 字节。 */
+    pa_exc_drop_save();
     if (current_exc) {
         exc_free(pending_exc);
         pending_exc = current_exc;
@@ -672,6 +684,24 @@ void pa_reraise(void) {
     exc_free(pending_exc);
     pending_exc = exc_new("RuntimeError", "No active exception to reraise");
     exc_longjmp();
+}
+
+/* 裸 raise 前调用：把 except 块入口压的 PyAdamasExcSave 还掉，
+ * 并把 current_exc 恢复成外层值。
+ *
+ * 两条 raise 路径（setjmp 的 pa_exc_reraise、零开销的 pa_eh_rethrow）
+ * 共用，保证行为一致。 */
+void pa_exc_drop_save(void) {
+    if (!exc_save_top) return;
+    PyAdamasExcSave* s = exc_save_top;
+    exc_save_top = s->up;
+    // **不动 current_exc**：裸 raise 正要重抛它。
+    //
+    // 原实现把它 exc_free 掉并恢复成 s->prev，结果 pa_reraise 拿到的
+    // current_exc 已经是 NULL/外层值，于是报
+    // "No active exception to reraise" 或抛错对象。
+    // 实测引入 119_gen_except_suspend / 32_exception_value 两个回归。
+    free(s);
 }
 
 void pa_exc_reraise(void) {
@@ -686,13 +716,7 @@ void pa_exc_reraise(void) {
      *
      * 恢复 current_exc 到外层值再抛：语义上等价于 pa_exc_done（除了不动
      * pending_exc —— 它马上要重新抛出去）。 */
-    if (exc_save_top) {
-        PyAdamasExcSave* s = exc_save_top;
-        exc_save_top = s->up;
-        exc_free(current_exc);
-        current_exc = s->prev;
-        free(s);
-    }
+    pa_exc_drop_save();
     exc_longjmp();
 }
 
@@ -928,6 +952,8 @@ PyAdamasExcValue* pa_exc_value_cause(PyAdamasExcValue* v) {
 }
 
 PyAdamasExcValue* pa_exc_accept_value(void) {
+    if (getenv("PYADAMAS_ACCDBG"))
+        fprintf(stderr, "[acc] %p\n", __builtin_return_address(0));
     PyAdamasExcSave* s = (PyAdamasExcSave*)malloc(sizeof(PyAdamasExcSave));
     if (!s) panic_c("out of memory");
     s->prev = current_exc;
