@@ -249,6 +249,21 @@ bool hoist_loop(IRFunction& fn, int h, const std::vector<char>& body,
             case IrOp::LoadSlot: {
                 if (in.idx < 0 || in.idx >= static_cast<int>(slot_written.size()))
                     return false;
+                // 堆槽（持有引用的槽）不搬。
+                //
+                // 两个理由：
+                //   1) 帧记录登记的是栈槽地址，异常展开按地址读值 ——
+                //      把堆指针提到寄存器会让栈槽里留下过期值；
+                //   2) 循环里可能有 IndexStore / RC 操作间接影响它，
+                //      「槽本身没被 StoreSlot 写过」不足以证明值不变。
+                //
+                // 实测：nbody 的 energy 把 `load.slot s0`（列表 b）提到
+                // licm.pre 之后，栈槽被别的 vreg 复用时读到垃圾指针 ——
+                // 段错误在 b[i*7]。这个 bug 在 HEAD 上就存在，只是栈槽
+                // 恰好没被覆盖才没暴露。
+                if (in.idx < static_cast<int>(fn.slot_ty.size()) &&
+                    ir_is_heap(fn.slot_ty[static_cast<size_t>(in.idx)]))
+                    return false;
                 return !slot_written[static_cast<size_t>(in.idx)] &&
                        !slot_addr[static_cast<size_t>(in.idx)];
             }

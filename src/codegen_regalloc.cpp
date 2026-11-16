@@ -65,6 +65,20 @@ void AsmGen::emit_epilogue() {
     // 复用**。跨块的值（尤其是循环头里被反复读取的）在静态上「已经用完」
     // 之后仍会在下一轮迭代被读，线性区间会把它的槽分给别人，然后循环
     // 第二次迭代就炸。这类值一律独占一个槽，区间拉满整个函数。
+// RcMark 的返回值必须**独占**一个栈槽，且不参与任何寄存器分配。
+//
+// 它是 RC 临时栈的水位：入口 mark、出口 cleanup，中间隔着任意多次调用。
+// 只要它被放进寄存器，某次 call 就会把它冲掉，cleanup 拿到错误水位 ——
+// 运行时直接 panic（invalid temporary stack mark）。
+static bool vreg_is_rc_mark(const IRFunction& f, VReg v) {
+    for (const auto& b : f.blocks)
+        for (const auto& in : b.insts)
+            if (in.op == IrOp::CallRt &&
+                static_cast<RtFn>(in.imm) == RtFn::RcMark && in.dst == v)
+                return true;
+    return false;
+}
+
 void AsmGen::assign_vreg_slots() {
         size_t nv = f_->vreg_ty.size();
         vreg_slot_.assign(nv, 0);
@@ -118,8 +132,10 @@ void AsmGen::assign_vreg_slots() {
             int d = def_pos[v];
             int fu = first_use[v];
             int lu = last_use[v];
+
             if (d < 0 && fu == kInf) continue;  // 既没定义也没使用
-            if (cross_block_[v] || def_count[v] > 1) {
+            if (cross_block_[v] || def_count[v] > 1 ||
+                vreg_is_rc_mark(*f_, static_cast<VReg>(v))) {
                 // 独占：区间覆盖整个函数，不会与任何人重叠
                 ranges.push_back({0, total_pos + 1, static_cast<int>(v)});
                 continue;
@@ -1148,6 +1164,7 @@ static std::vector<int> block_loop_depth(const IRFunction& f) {
     void AsmGen::assign_global_vreg_regs() {
         const size_t nv = f_->vreg_ty.size();
         vreg_reg_.assign(nv, std::string());
+
         block_temp_pool_.assign(target_abi().block_temps,
                                  target_abi().block_temps + target_abi().n_block_temps);
         global_imm_.clear();
@@ -1207,6 +1224,11 @@ static std::vector<int> block_loop_depth(const IRFunction& f) {
                 vt->kind == TyKind::Optional)
                 continue;
             if (use_count_[v] == 0 || def_block_[v] < 0) continue;
+            // RcMark 的值必须留在栈槽里：它是 RC 临时栈水位，跨整个函数
+            // 存活。放进 callee 寄存器看似安全，但它会和槽寄存器/其它
+            // vreg 的复用产生冲突，cleanup 拿到错水位 —— 实测 fasta 报
+            // invalid temporary stack mark、binary_trees 报 refcount 错误。
+            if (vreg_is_rc_mark(*f_, static_cast<VReg>(v))) continue;
             cands.push_back(Cand{static_cast<int>(v), static_cast<int>(weight[v])});
         }
         if (cands.empty()) return;
