@@ -279,7 +279,7 @@ VReg Lowerer::lower_builtin_seq(const std::string& name, Call& c) {
                 call.args = {ev};
                 kv = def_heap(kret, std::move(call));
             }
-            call_void(RtFn::ListAppend, {keys, kv});
+            call_void(RtFn::ListAppend, {keys, kv, heap_arg(kret)});
             Inst inc;
             inc.op = IrOp::Bin;
             inc.bop = BinKind::Add;

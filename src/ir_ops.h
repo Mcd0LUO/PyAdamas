@@ -62,7 +62,7 @@ inline const char* cmp_name(CmpKind k) {
 // 不经过符号查找，也不允许用户代码直接引用。
 enum class RtFn : uint16_t {
     ListNew,     // (i64 cap) -> list*
-    ListAppend,  // (list*, i64) -> void
+    ListAppend,  // (list*, i64 v, i64 heap) -> void  heap: 0 非堆 / 1 堆 / 2 unknown
     ListGet,     // (list*, i64) -> i64
     ListSet,     // (list*, i64, i64) -> void
     ListSetLen,  // (list*, i64) -> void

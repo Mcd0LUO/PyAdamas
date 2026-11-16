@@ -517,7 +517,7 @@ static int64_t jp_value(JP* s, const char* d, size_t n) {
             pa_gc_pin(out);
             for (;;) {
                 int64_t v = jp_value(s, cd, cn);
-                pa_list_append(out, v);
+                pa_list_append(out, v, 2);
                 jp_ws(s);
                 if (s->p < s->end && *s->p == ',') {
                     s->p++;
@@ -603,7 +603,7 @@ static int64_t jp_value(JP* s, const char* d, size_t n) {
                 {
                     size_t cl = desc_len(d + pos);
                     int64_t v = jp_value(s, d + pos, cl);
-                    pa_list_append(out, v);
+                    pa_list_append(out, v, 2);
                     pos += cl;
                 }
                 idx++;

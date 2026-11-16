@@ -43,7 +43,7 @@ std::vector<VReg> Lowerer::bind_args(Call& c, const FuncInfoPtr& info, FunctionD
     auto append_vararg = [&](VReg v, TypePtr vt) {
         v = coerce(v, vt, vty);
         retain_elem(v, vk);
-        call_void(RtFn::ListAppend, {vararg_list(), v});
+        call_void(RtFn::ListAppend, {vararg_list(), v, heap_arg(vty)});
     };
 
     // 已知长度的 tuple 可以静态展开，即使 callee 没有 *args。
@@ -462,7 +462,7 @@ VReg Lowerer::lower_call(Call& c) {
                     VReg raw = expr(*arg);
                     VReg sm = convert_to(raw, mt, t_str());
                     retain_elem(sm, 1);
-                    call_void(RtFn::ListAppend, {al, sm});
+                    call_void(RtFn::ListAppend, {al, sm, const_int(1)});
                 }
                 Inst in;
                 in.op = IrOp::CallRt;

@@ -280,7 +280,7 @@ VReg Lowerer::promote_container(VReg v, TypePtr from, TypePtr to) {
     get.b = load_slot(i_slot, t_int());
     VReg ev = def(se, std::move(get));
     VReg ce = convert_to(ev, se, de);
-    call_void(RtFn::ListAppend, {load_slot(out_slot, lt), ce});
+    call_void(RtFn::ListAppend, {load_slot(out_slot, lt), ce, heap_arg(de)});
     Inst inc;
     inc.op = IrOp::Bin;
     inc.bop = BinKind::Add;

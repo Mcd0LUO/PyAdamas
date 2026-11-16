@@ -300,7 +300,7 @@ PyAdamasList* pa_random_choices(PyAdamasRandom* r, PyAdamasList* seq, int64_t k)
         if (j >= n) j = n - 1;
         int64_t v = seq->data[j];
         pa_own_inc(seq->elem_kind, v);
-        pa_list_append(out, v);
+        pa_list_append(out, v, 2);
     }
     return out;
 }

@@ -188,7 +188,7 @@ int64_t pa_math_isclose(double a, double b) {
 static void math_tuple_push_f64(PyAdamasList* l, double v) {
     int64_t bits;
     memcpy(&bits, &v, sizeof bits);
-    pa_list_append(l, bits);
+    pa_list_append(l, bits, 2);
 }
 
 PyAdamasList* pa_math_frexp(double x) {
@@ -196,7 +196,7 @@ PyAdamasList* pa_math_frexp(double x) {
     double m = frexp(x, &e);
     PyAdamasList* l = pa_list_new(2, 0);
     math_tuple_push_f64(l, m);
-    pa_list_append(l, (int64_t)e);
+    pa_list_append(l, (int64_t)e, 2);
     return l;
 }
 
@@ -304,7 +304,7 @@ void pa_sys_set_args(int64_t argc, char** argv) {
     for (int64_t i = 0; i < argc; ++i) {
         const char* s = argv[i] ? argv[i] : "";
         PyAdamasStr* str = str_new(s, (int64_t)strlen(s));
-        pa_list_append(out, (int64_t)str);
+        pa_list_append(out, (int64_t)str, 2);
     }
 }
 

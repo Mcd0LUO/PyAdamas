@@ -487,7 +487,7 @@ PyAdamasList* pa_file_readlines(PyAdamasFile* f, int64_t hint) {
         PyAdamasStr* line = pa_file_readline(f, -1);
         if (line->len == 0) break;
         pa_rc_inc(line);
-        pa_list_append(out, (int64_t)line);
+        pa_list_append(out, (int64_t)line, 2);
         total += line->len;
         if (hint > 0 && total >= hint) break;
     }

@@ -75,7 +75,7 @@ void* pa_asyncio_create_task(void* coro, int64_t result_kind) {
     t->result_kind = result_kind;
     t->task_coro = (int64_t)coro;
     pa_rc_inc(coro);
-    pa_list_append(loop_pending, (int64_t)t);  // 持有 task 的引用
+    pa_list_append(loop_pending, (int64_t)t, 2);  // 持有 task 的引用
     p[7] = (int64_t)t;
     pa_rc_inc(t);
     p[1] = 4;
@@ -281,7 +281,7 @@ void pa_future_add_callback(void* fp, int64_t cb) {
         return;
     }
     if (!f->callbacks) f->callbacks = pa_list_new(2, 1);
-    pa_list_append(f->callbacks, cb);  // 接管 cb 的引用
+    pa_list_append(f->callbacks, cb, 2);  // 接管 cb 的引用
 }
 
 int64_t pa_future_done(void* fp) {
@@ -431,7 +431,7 @@ void* pa_event_wait(void* ep) {
         return f;
     }
     pa_rc_inc(f);
-    pa_list_append(e->waiters, (int64_t)f);
+    pa_list_append(e->waiters, (int64_t)f, 2);
     return f;
 }
 
@@ -455,7 +455,7 @@ void* pa_lock_acquire(void* lp) {
         return f;
     }
     pa_rc_inc(f);
-    pa_list_append(l->waiters, (int64_t)f);
+    pa_list_append(l->waiters, (int64_t)f, 2);
     return f;
 }
 
@@ -504,7 +504,7 @@ static void* queue_ready_future(void) {
 static void queue_push_item(PyAdamasQueue* q, int64_t v) {
     ++q->unfinished;
     if (q->kind) pa_rc_inc_unknown(v);
-    pa_list_append(q->items, v);
+    pa_list_append(q->items, v, 2);
 }
 
 void* pa_queue_put(void* qp, int64_t v) {
@@ -519,9 +519,9 @@ void* pa_queue_put(void* qp, int64_t v) {
     if (q->maxsize > 0 && q->items->len >= q->maxsize) {
         void* f = pa_asyncio_future_new();
         pa_rc_inc(f);
-        pa_list_append(q->putters, (int64_t)f);
+        pa_list_append(q->putters, (int64_t)f, 2);
         if (q->kind) pa_rc_inc_unknown(v);
-        pa_list_append(q->pvalues, v);
+        pa_list_append(q->pvalues, v, 2);
         return f;
     }
     queue_push_item(q, v);
@@ -550,7 +550,7 @@ void* pa_queue_get(void* qp) {
     void* f = pa_asyncio_future_new();
     ((PyAdamasAwait*)f)->result_kind = q->kind;
     pa_rc_inc(f);
-    pa_list_append(q->getters, (int64_t)f);
+    pa_list_append(q->getters, (int64_t)f, 2);
     return f;
 }
 
@@ -576,7 +576,7 @@ void* pa_queue_join(void* qp) {
     if (q->unfinished == 0) return queue_ready_future();
     void* f = pa_asyncio_future_new();
     pa_rc_inc(f);
-    pa_list_append(q->joiners, (int64_t)f);
+    pa_list_append(q->joiners, (int64_t)f, 2);
     return f;
 }
 
@@ -649,7 +649,7 @@ void* pa_taskgroup_add(void* gp, void* coro) {
     PyAdamasTaskGroup* g = (PyAdamasTaskGroup*)gp;
     void* t = pa_asyncio_create_task(coro, 2);  // TaskGroup 不消费结果，按 unknown 释放
     pa_rc_inc(t);                       // 调用方返回值持有一份
-    pa_list_append(g->tasks, (int64_t)t);  // 转移 create_task 的那份
+    pa_list_append(g->tasks, (int64_t)t, 2);  // 转移 create_task 的那份
     return t;
 }
 
@@ -662,7 +662,7 @@ void* pa_taskgroup_exit(void* gp) {
     for (int64_t i = 0; i < n; ++i) {
         int64_t t = g->tasks->data[i];
         pa_rc_inc((void*)t);
-        pa_list_append(L, t);
+        pa_list_append(L, t, 2);
     }
     /* gather 内部还要建 children/results 列表；L 只在本帧 C 局部变量里。 */
     pa_gc_pin(L);
@@ -712,7 +712,7 @@ void* pa_sem_acquire(void* sp) {
         return f;
     }
     pa_rc_inc(f);
-    pa_list_append(s->waiters, (int64_t)f);
+    pa_list_append(s->waiters, (int64_t)f, 2);
     return f;
 }
 

@@ -242,11 +242,34 @@ typedef struct {
    3 = 未定（只可能出现在空列表上，第一次写入时由 pa_list_prep 定型）。
    kind 1/2 的元素在写入时 retain（堆→rc_inc，unknown→rc_inc_unknown），
    覆盖/截断/销毁时 release（kind 2 走注册表判断，整数是空操作）。 */
+/* elem_kind: 0 = 全部非堆类型，1 = 全部堆类型，2 = 有 unknown / 混合，
+   3 = 未定（只可能出现在空列表上，第一次写入时由 pa_list_prep 定型）。
+   kind 1/2 的元素在写入时 retain（堆→rc_inc，unknown→rc_inc_unknown），
+   覆盖/截断/销毁时 release（kind 2 走注册表判断，整数是空操作）。
+
+   heap_bits：**逐元素「是否堆指针」位图**（方案 A）。
+
+   kind=2（混合）时，元素 release 需要判断「这个机器字是不是堆指针」。
+   原来只能查全局 rc_index（pa_rc_dec_unknown），那是 O(1) 哈希探测，
+   但实测 bench_rc_gen 有 46.7 万次 dec_unknown、占掉 21ms（总 84ms 的
+   25%）。而元素是不是堆指针在**写入那一刻**就知道了（写入点的静态
+   类型），完全没必要事后到全局索引里反查。
+
+   位图与 data 等长（cap 位），append 时按写入值的静态类型置位：
+     - 静态类型是堆（str/list/dict/…）→ 置 1；
+     - 静态类型是非堆（int/float/bool/None）→ 置 0；
+     - 静态类型是 unknown → 无法静态确定，标记为「需要回退查索引」
+       （用 heap_bits == NULL 表示整体回退，见下）。
+
+   heap_bits == NULL 表示这个列表无法逐元素跟踪（写入点类型未知），
+   release 时仍走 pa_rc_dec_unknown 的旧路径 —— 保证正确性不变。 */
 typedef struct {
     int64_t len;
     int64_t cap;
     int64_t* data;
     int64_t elem_kind;
+    uint64_t* heap_bits;   /* 逐元素堆位图，NULL = 不可跟踪（回退索引） */
+    int64_t bits_cap;      /* heap_bits 的字数（cap 会被缓冲池抬高，不能复用） */
 } PyAdamasList;
 
 /* range 是惰性对象：只存边界，元素按需算。和 CPython 的 range 一样，
@@ -886,7 +909,7 @@ int64_t pa_range_any(PyAdamasRange* r);
 int64_t pa_range_all(PyAdamasRange* r);
 PyAdamasList* pa_range_to_list(PyAdamasRange* r);
 PyAdamasStr* pa_range_repr(PyAdamasRange* r);
-void pa_list_append(PyAdamasList* l, int64_t v);
+void pa_list_append(PyAdamasList* l, int64_t v, int64_t heap);
 /* 空列表第一次写入前定型：vk = 0 非堆 / 1 堆 / 2 unknown；owned 非 0
    表示引用已经转给容器（新值），不再 retain。 */
 void pa_list_prep(PyAdamasList* l, int64_t v, int64_t vk, int64_t owned);

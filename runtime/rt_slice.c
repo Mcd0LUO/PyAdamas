@@ -67,7 +67,7 @@ PyAdamasList* pa_list_slice(PyAdamasList* src, int64_t start, int64_t stop, int6
     for (int64_t i = lo; st > 0 ? i < hi : i > hi; i += st) {
         int64_t v = src->data[i];
         pa_own_inc(src->elem_kind, v);
-        pa_list_append(out, v);
+        pa_list_append(out, v, 2);
     }
     return out;
 }
@@ -247,7 +247,7 @@ PyAdamasList* pa_str_to_list(PyAdamasStr* s) {
             memcpy((char*)ch->data, s->data + off, (size_t)n);
             ch->pub = 1;
         }
-        pa_list_append(out, (int64_t)ch);
+        pa_list_append(out, (int64_t)ch, 2);
         off += n;
     }
     pa_gc_unpin(out);
@@ -258,7 +258,7 @@ PyAdamasList* pa_str_to_list(PyAdamasStr* s) {
 PyAdamasList* pa_bytes_to_list(PyAdamasStr* s) {
     PyAdamasList* out = pa_list_new(s->len, 0);
     for (int64_t i = 0; i < s->len; ++i)
-        pa_list_append(out, (int64_t)(unsigned char)s->data[i]);
+        pa_list_append(out, (int64_t)(unsigned char)s->data[i], 2);
     return out;
 }
 
@@ -285,7 +285,7 @@ PyAdamasStr* pa_bytes_zeros(int64_t n) {
 PyAdamasList* pa_str_wrap_list(PyAdamasStr* s) {
     PyAdamasList* out = pa_list_new(1, 1);
     pa_rc_inc(s);
-    pa_list_append(out, (int64_t)s);
+    pa_list_append(out, (int64_t)s, 2);
     return out;
 }
 
@@ -380,7 +380,7 @@ int64_t pa_range_all(PyAdamasRange* r) {
 PyAdamasList* pa_range_to_list(PyAdamasRange* r) {
     PyAdamasList* out = pa_list_new(r->len, 0);
     for (int64_t i = 0; i < r->len; ++i)
-        pa_list_append(out, r->start + i * r->step);
+        pa_list_append(out, r->start + i * r->step, 2);
     return out;
 }
 

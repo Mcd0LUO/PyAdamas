@@ -175,7 +175,7 @@ PyAdamasList* pa_deque_to_list(PyAdamasDeque* d) {
     for (int64_t i = 0; i < d->len; ++i) {
         int64_t v = dq_at(d, i);
         pa_own_inc(d->elem_kind, v);
-        pa_list_append(out, v);
+        pa_list_append(out, v, 2);
     }
     return out;
 }

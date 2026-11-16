@@ -543,11 +543,11 @@ void AsmGen::gen_rt_args(const Inst& in, RtFn fn) {
         case RtFn::TimeDeltaNew:
         case RtFn::DateTimeAddDelta:
         case RtFn::DateNew:
+        case RtFn::ListAppend:   /* (list*, v, heap) */
             gen_rt_i3(in);
             break;
         case RtFn::ClassNew:
         case RtFn::ListPrep:
-        case RtFn::ListAppend:
         case RtFn::ListGet:
         case RtFn::ListSetLen:
         case RtFn::StrConcat:

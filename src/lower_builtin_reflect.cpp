@@ -520,7 +520,7 @@ VReg Lowerer::lower_builtin_reflect(const std::string& name, Call& c) {
         for (auto& n : names) {
             VReg s = const_str(n);
             retain_elem(s, 1);
-            call_void(RtFn::ListAppend, {l, s});
+            call_void(RtFn::ListAppend, {l, s, const_int(1)});
         }
         return l;
     }

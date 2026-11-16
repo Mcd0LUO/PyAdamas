@@ -189,7 +189,7 @@ VReg Lowerer::lower_method_match(Attribute& at, Call& c, VReg recv) {
                     VReg n = int_at(i);
                     s = call_runtime(RtFn::RegexGroup, t_str(), {recv, n});
                 }
-                call_void(RtFn::ListAppend, {l, s});
+                call_void(RtFn::ListAppend, {l, s, const_int(1)});
             }
             return retype(l, mk_tuple_rest(t_str()));
         }

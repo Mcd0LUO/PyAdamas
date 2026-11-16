@@ -134,7 +134,7 @@ VReg Lowerer::lower_method_native(Attribute& at, Call& c, VReg recv, TypePtr rec
                                        {const_int(6), const_int(0)});
             push_temp(fields);
             for (int i = 0; i < 6; ++i)
-                call_void(RtFn::ListAppend, {fields, const_int(-1)});
+                call_void(RtFn::ListAppend, {fields, const_int(-1), const_int(0)});
             for (auto& kw : c.keywords) {
                 int idx = -1;
                 for (int i = 0; i < 6; ++i)

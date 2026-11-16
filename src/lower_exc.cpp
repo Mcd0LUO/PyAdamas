@@ -258,7 +258,7 @@ void Lowerer::lower_raise(Raise& r) {
                 VReg raw = expr(*arg);
                 VReg sm = convert_to(raw, mt, t_str());
                 retain_elem(sm, 1);
-                call_void(RtFn::ListAppend, {arglist, sm});
+                call_void(RtFn::ListAppend, {arglist, sm, const_int(1)});
             }
             call_void(RtFn::RaiseArgs, {const_str(type), arglist});
             return;

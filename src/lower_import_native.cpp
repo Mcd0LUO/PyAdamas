@@ -340,7 +340,7 @@ VReg Lowerer::lower_itertools(const std::string& member, Call& c) {
         push_temp(seqs);
         for (size_t i = from; i < to; ++i) {
             VReg v = expr(*c.args[i]);
-            call_void(RtFn::ListAppend, {seqs, v});
+            call_void(RtFn::ListAppend, {seqs, v, const_int(2)});
         }
         return seqs;
     };

@@ -484,7 +484,7 @@ PyAdamasList* pa_path_parts(PyAdamasPath* p) {
     pa_gc_pin(out);
     int64_t i = 0;
     if (n > 0 && s->data[0] == '/') {
-        pa_list_append(out, (int64_t)str_new("/", 1));
+        pa_list_append(out, (int64_t)str_new("/", 1), 2);
         i = 1;
     }
     while (i < n) {
@@ -494,7 +494,7 @@ PyAdamasList* pa_path_parts(PyAdamasPath* p) {
         int64_t len = i - start;
         if (len == 0) continue;
         if (len == 1 && s->data[start] == '.') continue;
-        pa_list_append(out, (int64_t)str_new(s->data + start, len));
+        pa_list_append(out, (int64_t)str_new(s->data + start, len), 2);
     }
     pa_gc_unpin(out);
     return out;
@@ -698,7 +698,7 @@ static void path_list_push(PyAdamasList* out, const char* full) {
     memcpy((char*)s->data, full, n);
     str_seal(s);
     /* pa_path_new 返回的引用直接交给列表持有（list_destroy 负责 dec）。 */
-    pa_list_append(out, (int64_t)pa_path_new(s));
+    pa_list_append(out, (int64_t)pa_path_new(s), 2);
 }
 
 static int path_is_dot(const char* name) {

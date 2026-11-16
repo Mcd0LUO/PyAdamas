@@ -371,6 +371,13 @@ private:
 
     bool terminated() const { return st_->fn->blocks[st_->blk].terminated(); }
 
+    /* 按静态类型算 ListAppend 的 heap 参数：0 非堆 / 1 堆 / 2 unknown。 */
+    VReg heap_arg(TypePtr t) {
+        if (!t) return const_int(2);
+        if (t->kind == TyKind::Unknown) return const_int(2);
+        return const_int(ir_is_heap(t) ? 1 : 0);
+    }
+
     VReg const_int(int64_t v) {
         Inst in;
         in.op = IrOp::ConstInt;

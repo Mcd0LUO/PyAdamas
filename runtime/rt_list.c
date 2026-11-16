@@ -64,7 +64,20 @@ void list_destroy(void* p) {
     // kind 3 按约定是空列表；真出现元素（不变量被破坏）时按 2 保守释放。
     int kind = l->elem_kind == 3 ? 2 : (int)l->elem_kind;
     if (kind != 0)
-        for (int64_t i = 0; i < l->len; ++i) pa_own_dec(kind, l->data[i]);
+        for (int64_t i = 0; i < l->len; ++i) {
+            // kind 2 且位图可用时，按位图判断，跳过全局索引查询。
+            if (kind == 2 && l->heap_bits) {
+                if ((l->heap_bits[i >> 6] >> (i & 63)) & 1)
+                    pa_rc_dec((void*)(uintptr_t)l->data[i]);
+            } else {
+                pa_own_dec(kind, l->data[i]);
+            }
+        }
+    if (l->heap_bits) {
+        free(l->heap_bits);
+        l->heap_bits = NULL;
+        l->bits_cap = 0;
+    }
     list_buf_put(l->data, l->cap);
 }
 
@@ -74,7 +87,14 @@ void list_gc_release(void* p) {
     PyAdamasList* l = (PyAdamasList*)p;
     int kind = l->elem_kind == 3 ? 2 : (int)l->elem_kind;
     if (kind == 0 || !l->data) return;
-    for (int64_t i = 0; i < l->len; ++i) pa_own_gc_unref(kind, l->data[i]);
+    for (int64_t i = 0; i < l->len; ++i) {
+        if (kind == 2 && l->heap_bits) {
+            if ((l->heap_bits[i >> 6] >> (i & 63)) & 1)
+                pa_gc_unref_child((void*)(uintptr_t)l->data[i]);
+        } else {
+            pa_own_gc_unref(kind, l->data[i]);
+        }
+    }
 }
 
 PyAdamasList* pa_list_new(int64_t cap, int64_t elem_kind) {
@@ -87,6 +107,8 @@ PyAdamasList* pa_list_new(int64_t cap, int64_t elem_kind) {
     l->cap = cap;
     l->data = list_buf_get(&l->cap);
     l->elem_kind = elem_kind;
+    l->heap_bits = NULL;
+    l->bits_cap = 0;
     return l;
 }
 
@@ -116,13 +138,53 @@ void pa_list_prep(PyAdamasList* l, int64_t v, int64_t vk, int64_t owned) {
 
 /* 元素引用由生成代码在写入前 retain（kind 1/2 且源类型已知是堆），
    运行时不再重复 inc；kind 1 覆盖/截断/销毁时负责 release。 */
-void pa_list_append(PyAdamasList* l, int64_t v) {
+/* 位图容量（字数）。单独记，因为 l->cap 会被 list_buf_get 抬高到池块容量，
+   与位图实际分配的字数不再一致。 */
+static void list_bits_reserve(PyAdamasList* l, int64_t ncap) {
+    int64_t nwords = (ncap + 63) >> 6;
+    int64_t owords = l->bits_cap;
+    if (nwords <= owords) return;
+    uint64_t* nb = (uint64_t*)realloc(l->heap_bits, sizeof(uint64_t) * (size_t)nwords);
+    if (!nb) panic_c("out of memory");
+    for (int64_t i = owords; i < nwords; ++i) nb[i] = 0;
+    l->heap_bits = nb;
+    l->bits_cap = nwords;
+}
+
+/* 追加元素。
+ *
+ * heap 参数由 codegen 按**写入点的静态类型**给出：
+ *   0 = 确定非堆（int / float / bool / None）
+ *   1 = 确定堆（str / list / dict / tuple / 实例 …）
+ *   2 = unknown，静态不可知
+ *
+ * 前两种情况下逐元素位图是精确的，销毁时不必查全局索引；
+ * 一旦出现 2，整个列表退回 heap_bits == NULL 的旧路径（正确性优先）。 */
+void pa_list_append(PyAdamasList* l, int64_t v, int64_t heap) {
     if (l->len == l->cap) {
         int64_t ncap = l->cap ? l->cap * 2 : 4;
         int64_t* nd = (int64_t*)realloc(l->data, sizeof(int64_t) * (size_t)ncap);
         if (!nd) panic_c("out of memory");
         l->data = nd;
         l->cap = ncap;
+        if (l->heap_bits) list_bits_reserve(l, ncap);
+    }
+    // 维护位图：一旦遇到 unknown，放弃逐元素跟踪。
+    if (heap == 2) {
+        if (l->heap_bits) {
+            free(l->heap_bits);
+            l->heap_bits = NULL;
+            l->bits_cap = 0;
+        }
+    } else if (l->len == 0) {
+        // 第一个元素决定是否启用位图（空列表也启用，后续沿用）。
+        list_bits_reserve(l, l->cap);
+    }
+    if (l->heap_bits) {
+        uint64_t* w = &l->heap_bits[l->len >> 6];
+        uint64_t m = (uint64_t)1 << (l->len & 63);
+        if (heap == 1) *w |= m;
+        else *w &= ~m;
     }
     l->data[l->len++] = v;
 }
@@ -167,7 +229,8 @@ void pa_list_extend(PyAdamasList* dst, PyAdamasList* src) {
         int64_t v = sv[i];
         // 源是未定型（3）时只可能是空表，这里统一按 unknown 传给 prep。
         pa_list_prep(dst, v, sk == 3 ? 2 : sk, 0);
-        pa_list_append(dst, v);
+        // v 来自源列表，类型动态：按源 kind 决定。
+        pa_list_append(dst, v, sk == 1 ? 1 : (sk == 0 ? 0 : 2));
     }
     free(snap);
 }
@@ -184,7 +247,8 @@ PyAdamasList* pa_list_reversed(PyAdamasList* src) {
     for (int64_t i = n - 1; i >= 0; --i) {
         int64_t v = src->data[i];
         if (l->elem_kind != 0) pa_own_inc(src->elem_kind, v);
-        pa_list_append(l, v);
+        // 同上：源元素类型动态。
+        pa_list_append(l, v, src->elem_kind == 1 ? 1 : (src->elem_kind == 0 ? 0 : 2));
     }
     return l;
 }
@@ -465,7 +529,7 @@ PyAdamasList* pa_enumerate_list(PyAdamasList* seq) {
         pair->data[1] = ev;
         pa_own_inc(seq->elem_kind, ev);
         pa_rc_inc(pair);
-        pa_list_append(out, (int64_t)pair);
+        pa_list_append(out, (int64_t)pair, 1);
     }
     pa_gc_unpin(out);
     return out;
@@ -490,7 +554,7 @@ PyAdamasList* pa_zip2_list(PyAdamasList* a, PyAdamasList* b) {
             pa_own_inc(kb, y);
         }
         pa_rc_inc(pair);
-        pa_list_append(out, (int64_t)pair);
+        pa_list_append(out, (int64_t)pair, 1);
     }
     pa_gc_unpin(out);
     return out;

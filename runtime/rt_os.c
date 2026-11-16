@@ -111,7 +111,7 @@ PyAdamasList* pa_os_listdir(PyAdamasStr* path) {
     while ((e = readdir(d)) != NULL) {
         if (strcmp(e->d_name, ".") == 0 || strcmp(e->d_name, "..") == 0) continue;
         PyAdamasStr* s = str_new(e->d_name, (int64_t)strlen(e->d_name));
-        pa_list_append(out, (int64_t)s);
+        pa_list_append(out, (int64_t)s, 2);
     }
     closedir(d);
     pa_gc_unpin(out);
@@ -168,8 +168,8 @@ PyAdamasList* pa_os_path_splitext(PyAdamasStr* s) {
     pa_gc_pin(root);
     PyAdamasStr* ext = str_new(s->data + cut, s->len - cut);
     pa_gc_pin(ext);
-    pa_list_append(out, (int64_t)root);
-    pa_list_append(out, (int64_t)ext);
+    pa_list_append(out, (int64_t)root, 2);
+    pa_list_append(out, (int64_t)ext, 2);
     pa_gc_unpin(ext);
     pa_gc_unpin(root);
     pa_gc_unpin(out);
@@ -367,8 +367,8 @@ PyAdamasList* pa_os_path_split(PyAdamasStr* s) {
     // 而 pa_list_append 只存指针、不加引用 —— 直接把那份产生者引用转给
     // 列表即可。原来多 inc 一次，没人释放产生者那份：
     // ASan 实测 81_os_extra 泄漏 120 字节（os.path.split 的 head/tail）。
-    pa_list_append(out, (int64_t)head);
-    pa_list_append(out, (int64_t)tail);
+    pa_list_append(out, (int64_t)head, 2);
+    pa_list_append(out, (int64_t)tail, 2);
     pa_gc_unpin(out);
     pa_gc_unpin(tail);
     pa_gc_unpin(head);

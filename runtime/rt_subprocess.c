@@ -832,8 +832,8 @@ PyAdamasList* pa_popen_communicate(PyAdamasPopen* p, PyAdamasStr* input) {
     PyAdamasStr* so = str_new(obuf ? obuf : "", (int64_t)olen);
     pa_gc_pin(so);
     PyAdamasStr* se = str_new(ebuf ? ebuf : "", (int64_t)elen);
-    pa_list_append(out, (int64_t)so);
-    pa_list_append(out, (int64_t)se);
+    pa_list_append(out, (int64_t)so, 2);
+    pa_list_append(out, (int64_t)se, 2);
     pa_gc_unpin(so);
     pa_gc_unpin(out);
     free(obuf);
@@ -1386,8 +1386,8 @@ PyAdamasList* pa_popen_communicate(PyAdamasPopen* p, PyAdamasStr* input) {
     PyAdamasStr* so = str_new(obuf ? obuf : "", (int64_t)olen);
     pa_gc_pin(so);
     PyAdamasStr* se = str_new(ebuf ? ebuf : "", (int64_t)elen);
-    pa_list_append(out, (int64_t)so);
-    pa_list_append(out, (int64_t)se);
+    pa_list_append(out, (int64_t)so, 2);
+    pa_list_append(out, (int64_t)se, 2);
     pa_gc_unpin(so);
     pa_gc_unpin(out);
     free(obuf);

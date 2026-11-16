@@ -532,7 +532,7 @@ PyAdamasList* pa_list_new(int64_t cap, int64_t elem_kind);
 void pa_list_buf_pool_shutdown(void);
 void pa_sys_argv_shutdown(void);
 void pa_exc_shutdown(void);
-void pa_list_append(PyAdamasList* l, int64_t v);
+void pa_list_append(PyAdamasList* l, int64_t v, int64_t heap);
 
 void panic_c(const char* msg) {
     fprintf(stderr, "pyadamas: runtime error: %s\n", msg);
@@ -1413,6 +1413,9 @@ static void gc_free_body(PyAdamasRc* h) {
     if (h->kind == PYADAMAS_RC_LIST) {
         PyAdamasList* l = (PyAdamasList*)((char*)h + PYADAMAS_RC_HDR);
         free(l->data);
+        // 逐元素堆位图也是堆内存，必须一起还掉（GC 清扫路径不走 list_destroy）。
+        free(l->heap_bits);
+        l->heap_bits = NULL;
     } else if (h->kind == PYADAMAS_RC_DICT) {
         PyAdamasDict* d = (PyAdamasDict*)((char*)h + PYADAMAS_RC_HDR);
         free(d->entries);

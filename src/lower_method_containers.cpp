@@ -261,7 +261,7 @@ VReg Lowerer::lower_method_seq(Attribute& at, Call& c, VReg recv, TypePtr recv_t
         VReg v = expr(*c.args[0]);
         bool owned = move_fresh(v, et);
         store_list_elem(recv, recv_ty, v, owned);
-        call_void(RtFn::ListAppend, {recv, v});
+        call_void(RtFn::ListAppend, {recv, v, heap_arg(et)});
         return const_none();
     }
     if (at.attr == "extend" && is_list) {

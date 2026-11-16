@@ -144,7 +144,7 @@ void loop_ensure(void) {
     }
 }
 
-void ready_push(void* c) { pa_list_append(loop_ready, (int64_t)c); }
+void ready_push(void* c) { pa_list_append(loop_ready, (int64_t)c, 2); }
 
 void* ready_pop(void) {
     if (!loop_ready || loop_ready->len == 0) return NULL;
@@ -229,7 +229,7 @@ void gather_child_fail(PyAdamasAwait* g, PyAdamasException* e) {
 void start_gather(PyAdamasAwait* w, void* waiter) {
     w->waiter = (int64_t)waiter;
     pa_rc_inc(waiter);
-    pa_list_append(loop_pending, (int64_t)w);  // 接管调用方的引用
+    pa_list_append(loop_pending, (int64_t)w, 2);  // 接管调用方的引用
     w->starting = 1;
     for (int64_t i = 0; i < w->children->len; ++i) {
         void* child = (void*)w->children->data[i];
@@ -311,7 +311,7 @@ void pa_timeout_enter(void* tp) {
     }
     t->deadline_ms = now_ms() + ms;
     pa_rc_inc(t); /* 定时器表引用 */
-    pa_list_append(loop_timers, (int64_t)t);
+    pa_list_append(loop_timers, (int64_t)t, 2);
     to->timer = t;
 }
 
@@ -366,7 +366,7 @@ void* pa_asyncio_wait_for(void* aw, double secs) {
     if (secs > 0) ms = v > 9e15 ? (int64_t)9e15 : (int64_t)(v + 0.5);
     w->deadline_ms = now_ms() + ms;
     void* t = pa_asyncio_create_task(aw, 2);  // 内部 awaitable 类型不可见，按 unknown 释放
-    pa_list_append(w->children, (int64_t)t);  // 接管 create_task 的引用
+    pa_list_append(w->children, (int64_t)t, 2);  // 接管 create_task 的引用
     pa_gc_unpin(w);
     return w;
 }
@@ -436,7 +436,7 @@ void start_awaitable(void* obj, void* waiter) {
         }
         w->waiter = (int64_t)waiter;
         pa_rc_inc(waiter);
-        pa_list_append(loop_fds, (int64_t)w);  // 接管调用方的引用
+        pa_list_append(loop_fds, (int64_t)w, 2);  // 接管调用方的引用
         return;
     }
     if (w->kind == 5) {
@@ -449,10 +449,10 @@ void start_awaitable(void* obj, void* waiter) {
             return;
         }
         pa_rc_inc(waiter);
-        pa_list_append(w->waiters, (int64_t)waiter);
+        pa_list_append(w->waiters, (int64_t)waiter, 2);
         if (!w->pending) {
             w->pending = 1;
-            pa_list_append(loop_pending, (int64_t)w);  // 接管调用方的引用
+            pa_list_append(loop_pending, (int64_t)w, 2);  // 接管调用方的引用
         } else {
             pa_rc_dec(w);
         }
@@ -474,7 +474,7 @@ void start_awaitable(void* obj, void* waiter) {
         }
         w->waiter = (int64_t)waiter;
         pa_rc_inc(waiter);
-        pa_list_append(loop_pending, (int64_t)w);  // 接管调用方的引用
+        pa_list_append(loop_pending, (int64_t)w, 2);  // 接管调用方的引用
         // 驱动不递归执行：放到就绪队列，由事件循环下一步推进，
         // 避免在别人的 resume 栈上再跑协程/生成器。
         pa_rc_inc(w);
@@ -493,7 +493,7 @@ void start_awaitable(void* obj, void* waiter) {
         // Task 允许被多个协程同时 await；完成时逐个交付。
         if (!w->waiters) w->waiters = pa_list_new(4, 1);
         pa_rc_inc(waiter);
-        pa_list_append(w->waiters, (int64_t)waiter);
+        pa_list_append(w->waiters, (int64_t)waiter, 2);
         // task 由 loop_pending 持有，等它完成再清掉；这里的引用可以还掉。
         pa_rc_dec(w);
         return;
@@ -516,10 +516,10 @@ void start_awaitable(void* obj, void* waiter) {
         }
         w->waiter = (int64_t)waiter;
         pa_rc_inc(waiter);
-        pa_list_append(loop_pending, (int64_t)w);  // 接管调用方引用
+        pa_list_append(loop_pending, (int64_t)w, 2);  // 接管调用方引用
         w->pending = 1;
         pa_rc_inc(w);
-        pa_list_append(loop_timers, (int64_t)w);  // 定时器自己持有一份
+        pa_list_append(loop_timers, (int64_t)w, 2);  // 定时器自己持有一份
         if (w->children && w->children->len > 0) {
             void* t = (void*)(uintptr_t)w->children->data[0];
             pa_rc_inc(t);
@@ -546,7 +546,7 @@ void start_awaitable(void* obj, void* waiter) {
         } else {
             w->waiter = (int64_t)waiter;
             pa_rc_inc(waiter);
-            pa_list_append(loop_timers, (int64_t)w);  // 接管调用方的引用
+            pa_list_append(loop_timers, (int64_t)w, 2);  // 接管调用方的引用
         }
         return;
     }
@@ -887,8 +887,8 @@ void* pa_asyncio_gather(PyAdamasList* coros, int64_t result_kind) {
     for (int64_t i = 0; i < n; ++i) {
         int64_t v = coros->data[i];
         pa_rc_inc((void*)v);
-        pa_list_append(w->children, v);
-        pa_list_append(w->results, 0);
+        pa_list_append(w->children, v, 2);
+        pa_list_append(w->results, 0, 2);
     }
     w->remaining = n;
     pa_gc_unpin(w);

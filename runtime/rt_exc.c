@@ -793,7 +793,7 @@ PyAdamasExcValue* pa_exc_value_new(PyAdamasStr* type, PyAdamasStr* msg) {
     if (msg) {
         // args 拥有一个引用；消息字符串本身由调用方/临时栈持有。
         pa_rc_inc(msg);
-        pa_list_append(v->args, (int64_t)msg);
+        pa_list_append(v->args, (int64_t)msg, 2);
     }
     return v;
 }
@@ -864,7 +864,7 @@ PyAdamasExcValue* pa_exc_value_new_args(PyAdamasStr* type, PyAdamasList* args) {
         PyAdamasStr* s = (PyAdamasStr*)(uintptr_t)args->data[i];
         if (!s) continue;
         pa_rc_inc(s);
-        pa_list_append(v->args, (int64_t)s);
+        pa_list_append(v->args, (int64_t)s, 2);
     }
     return v;
 }
@@ -881,11 +881,11 @@ PyAdamasExcValue* pa_exc_value_from_exc(PyAdamasException* e) {
             PyAdamasStr* s = (PyAdamasStr*)(uintptr_t)pending_exc_args->data[i];
             if (!s) continue;
             pa_rc_inc(s);
-            pa_list_append(v->args, (int64_t)s);
+            pa_list_append(v->args, (int64_t)s, 2);
         }
     } else {
         PyAdamasStr* msg = str_new(e->message, (int64_t)strlen(e->message));
-        pa_list_append(v->args, (int64_t)msg);
+        pa_list_append(v->args, (int64_t)msg, 2);
     }
     if (e->cause) v->cause = pa_exc_value_from_exc(e->cause);
     exc_construct_end(v);

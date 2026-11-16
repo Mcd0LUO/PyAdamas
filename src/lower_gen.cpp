@@ -426,7 +426,7 @@ VReg Lowerer::gen_to_list(VReg gen, TypePtr gen_ty) {
 
     switch_to(body);
     retain_elem(ev, ko);
-    call_void(RtFn::ListAppend, {load_slot(l_slot, lt), ev});
+    call_void(RtFn::ListAppend, {load_slot(l_slot, lt), ev, const_int(ko)});
     // 元素引用已经转给列表，产生者的那份立即还掉，否则循环里一路累积。
     if (ir_is_heap(et)) call_void(RtFn::RcDec, {ev});
     Inst jb;

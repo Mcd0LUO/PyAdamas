@@ -378,7 +378,7 @@ PyAdamasList* pa_dict_keys(PyAdamasDict* d) {
     for (int64_t i = 0; i < d->len; ++i) {
         int64_t v = pa_dict_key_at(d, i);
         pa_own_inc(kind, v);
-        pa_list_append(out, v);
+        pa_list_append(out, v, 2);
     }
     return out;
 }
@@ -389,7 +389,7 @@ PyAdamasList* pa_dict_values(PyAdamasDict* d) {
     for (int64_t i = 0; i < d->len; ++i) {
         int64_t v = pa_dict_val_at(d, i);
         pa_own_inc(kind, v);
-        pa_list_append(out, v);
+        pa_list_append(out, v, 2);
     }
     return out;
 }
@@ -408,10 +408,10 @@ PyAdamasList* pa_dict_items(PyAdamasDict* d) {
         PyAdamasDictEntry e = d->entries[i];
         PyAdamasList* tup = pa_list_new(2, tk);
         pa_own_inc(d->key_own, e.key);
-        pa_list_append(tup, e.key);
+        pa_list_append(tup, e.key, 2);
         pa_own_inc(d->val_own, e.val);
-        pa_list_append(tup, e.val);
-        pa_list_append(out, (int64_t)tup);  // tuple 的初始引用交给外层 list
+        pa_list_append(tup, e.val, 2);
+        pa_list_append(out, (int64_t)tup, 2);  // tuple 的初始引用交给外层 list
     }
     pa_gc_unpin(out);
     return out;
@@ -566,9 +566,9 @@ PyAdamasList* pa_dict_popitem(PyAdamasDict* d) {
                  : ((d->key_own == 0 && d->val_own == 0) ? 0 : 2);
     PyAdamasList* tup = pa_list_new(2, tk);
     pa_own_inc(d->key_own, ent.key);
-    pa_list_append(tup, ent.key);
+    pa_list_append(tup, ent.key, 2);
     pa_own_inc(d->val_own, ent.val);
-    pa_list_append(tup, ent.val);
+    pa_list_append(tup, ent.val, 2);
     pa_own_dec(d->key_own, ent.key);
     pa_own_dec(d->val_own, ent.val);
     dict_erase(d, e);

@@ -359,7 +359,7 @@ static void sm_push_str(PyAdamasList* l, PyAdamasStr* s) {
         l->data[l->len++] = (int64_t)s;
         return;
     }
-    pa_list_append(l, (int64_t)s);
+    pa_list_append(l, (int64_t)s, 2);
 }
 
 static int sm_char_in_set(char c, PyAdamasStr* set) {

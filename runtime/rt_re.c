@@ -1315,7 +1315,7 @@ int64_t pa_re_groups(PyAdamasMatch* m) {
     if (m) {
         for (int64_t i = 1; i <= m->ngroups; ++i) {
             PyAdamasStr* s = group_str(m, i);
-            pa_list_append(out, (int64_t)s);
+            pa_list_append(out, (int64_t)s, 2);
         }
     }
     pa_gc_unpin(out);
@@ -1364,8 +1364,8 @@ int64_t pa_re_end(PyAdamasMatch* m, int64_t n) { return group_end(m, n); }
 
 int64_t pa_re_span(PyAdamasMatch* m, int64_t n) {
     PyAdamasList* out = pa_list_new(0, 0);
-    pa_list_append(out, group_start(m, n));
-    pa_list_append(out, group_end(m, n));
+    pa_list_append(out, group_start(m, n), 2);
+    pa_list_append(out, group_end(m, n), 2);
     return (int64_t)out;
 }
 
@@ -1401,8 +1401,7 @@ static PyAdamasList* finditer_impl(ReProg* g, PyAdamasStr* text) {
     int64_t* caps = (int64_t*)re_alloc(sizeof(int64_t) * (size_t)ncap);
     int64_t pos = 0;
     while (pos <= text->len && find_next(g, text, pos, caps)) {
-        pa_list_append(out,
-                         (int64_t)match_new(text, g->ngroups, caps, g->names, g->nnames));
+        pa_list_append(out, (int64_t)match_new(text, g->ngroups, caps, g->names, g->nnames), 2);
         if (caps[1] == caps[0]) pos = caps[1] + 1;
         else pos = caps[1];
     }
@@ -1438,7 +1437,7 @@ static void findall_push(PyAdamasList* out, PyAdamasStr* text, int64_t ngroups, 
             a = b = caps[0];
         }
     }
-    pa_list_append(out, (int64_t)str_new(text->data + a, b - a));
+    pa_list_append(out, (int64_t)str_new(text->data + a, b - a), 2);
 }
 
 int64_t pa_re_findall_str(PyAdamasStr* pat, PyAdamasStr* text, int64_t flags) {
@@ -1670,12 +1669,12 @@ int64_t pa_re_split_str(PyAdamasStr* pat, PyAdamasStr* text, int64_t maxsplit, i
     while (pos <= text->len && (maxsplit <= 0 || done < maxsplit) &&
            find_next(&g, text, pos, caps)) {
         PyAdamasStr* s = str_new(text->data + last, caps[0] - last);
-        pa_list_append(out, (int64_t)s);
+        pa_list_append(out, (int64_t)s, 2);
         for (int64_t gi = 1; gi <= g.ngroups; ++gi) {
             int64_t a = caps[2 * gi], b = caps[2 * gi + 1];
             pa_list_append(out, (int64_t)(a >= 0 && b >= a
                                                 ? str_new(text->data + a, b - a)
-                                                : str_new("", 0)));
+                                                : str_new("", 0)), 2);
         }
         done++;
         last = caps[1];
@@ -1686,7 +1685,7 @@ int64_t pa_re_split_str(PyAdamasStr* pat, PyAdamasStr* text, int64_t maxsplit, i
         }
     }
     PyAdamasStr* tail = str_new(text->data + last, text->len - last);
-    pa_list_append(out, (int64_t)tail);
+    pa_list_append(out, (int64_t)tail, 2);
     pa_gc_unpin(out);
     free(caps);
     prog_free(&g);
@@ -1703,12 +1702,12 @@ int64_t pa_re_split(PyAdamasRegex* re, PyAdamasStr* text, int64_t maxsplit) {
     while (pos <= text->len && (maxsplit <= 0 || done < maxsplit) &&
            find_next(&re->prog, text, pos, caps)) {
         PyAdamasStr* s = str_new(text->data + last, caps[0] - last);
-        pa_list_append(out, (int64_t)s);
+        pa_list_append(out, (int64_t)s, 2);
         for (int64_t gi = 1; gi <= re->prog.ngroups; ++gi) {
             int64_t a = caps[2 * gi], b = caps[2 * gi + 1];
             pa_list_append(out, (int64_t)(a >= 0 && b >= a
                                                 ? str_new(text->data + a, b - a)
-                                                : str_new("", 0)));
+                                                : str_new("", 0)), 2);
         }
         done++;
         last = caps[1];
@@ -1719,7 +1718,7 @@ int64_t pa_re_split(PyAdamasRegex* re, PyAdamasStr* text, int64_t maxsplit) {
         }
     }
     PyAdamasStr* tail = str_new(text->data + last, text->len - last);
-    pa_list_append(out, (int64_t)tail);
+    pa_list_append(out, (int64_t)tail, 2);
     pa_gc_unpin(out);
     free(caps);
     return (int64_t)out;

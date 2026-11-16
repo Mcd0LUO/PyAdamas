@@ -12,9 +12,27 @@ void AsmGen::gen_make_list(const Inst& in) {
         line("call pa_list_new");
         reload_fp_slots();
         emit2("movq", "%rax", dst_op(in.dst));
-        for (VReg a : in.args) {
+        // 第三个参数是**逐元素**的堆标记（0 非堆 / 1 堆 / 2 unknown），
+        // 运行时用它维护列表的 heap_bits 位图，销毁时按位图 dec，
+        // 不必再查全局 rc_index（实测省掉 bench_rc_gen 一半的 dec 成本）。
+        //
+        // in.imm 是容器整体的所有权类别，元素级别要按各自静态类型算：
+        //   - imm==0（全非堆）：每个元素都是 0；
+        //   - imm==1（全堆）：每个元素都是 1；
+        //   - imm==2（混合/unknown）：逐元素看 vreg_ty，拿不到就退回 2。
+        for (size_t ai = 0; ai < in.args.size(); ++ai) {
+            VReg a = in.args[ai];
+            int64_t hk = 2;
+            if (in.imm == 0) hk = 0;
+            else if (in.imm == 1) hk = 1;
+            else {
+                TypePtr et = ty_of(a);
+                if (et && et->kind != TyKind::Unknown)
+                    hk = ir_is_heap(et) ? 1 : 0;
+            }
             emit2("movq", dst_op(in.dst), arg_reg_i(0));
             emit2("movq", src_op(a), arg_reg_i(1));
+            emit_imm_op("movq", hk, arg_reg_i(2));
             spill_fp_slots();
             line("call pa_list_append");
             reload_fp_slots();

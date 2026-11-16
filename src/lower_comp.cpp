@@ -120,7 +120,7 @@ VReg Lowerer::lower_comp(Expr& e) {
             VReg acc_now = acc_val();
             bool owned = move_fresh(v, elem_ty);
             store_list_elem(acc_now, rty, v, owned);
-            call_void(RtFn::ListAppend, {acc_now, v});
+            call_void(RtFn::ListAppend, {acc_now, v, heap_arg(elem_ty)});
         }
     };
 
