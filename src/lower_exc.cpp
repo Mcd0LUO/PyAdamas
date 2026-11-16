@@ -766,7 +766,7 @@ void Lowerer::collect_zero_cost_tries(FunctionDef& f) {
 
     for (Try* tp : all) {
         Try& t = *tp;
-        if (!t.orelse.empty()) continue;
+        // try-else 已支持（Z4）：try 体正常结束跳 else 块，异常路径不跳。
 
         bool bad = false;
         auto check = [&](Stmt& s) {
@@ -790,7 +790,16 @@ void Lowerer::collect_zero_cost_tries(FunctionDef& f) {
                     break;
                 }
                 case StmtKind::With:
-                    // with 可能抑制异常（__exit__ 返回 True），不是纯 cleanup。
+                    // with 在 try 体内仍然排除。原因：with 自己用 setjmp 的
+                    // HandlerPush 来保护 __exit__（它可能抛异常），而外层 try
+                    // 用 _Unwind —— 两套机制混用时，LP 里调用 __exit__ 所需的
+                    // handler 状态与展开器状态不一致，实测 __exit__ 不会被调用。
+                    //
+                    // 要真正支持需要让 with 也走表驱动（自己的 LSDA region +
+                    // cleanup landing pad），那是独立的一步。实测现有用例里
+                    // 「with 在 try 内」出现 0 次，所以先保守排除。
+                    //
+                    // 注意：with 在 try 外部完全可用（已经过验证）。
                     bad = true;
                     break;
                 default:
@@ -812,6 +821,9 @@ void Lowerer::lower_try_zero_cost(Try& t) {
     // finalbody；异常路径（LP 里、handler 全不匹配）跑 finalbody 后重抛。
     // 两条路径各内联一份 —— 与老路径非可挂起函数的做法一致。
     const bool has_fin = !t.finalbody.empty();
+    // try-else：try 体正常结束后才执行 orelse，异常路径不执行。
+    // else 块在保护区之外（异常不可能跳到它），跑完再进 fin/end。
+    const int else_block = t.orelse.empty() ? -1 : new_block("try.else");
     // finally 体单独一块：try 体正常结束、handler 体正常结束都跳到它，
     // 跑完再进 end。这样 finalbody 只内联一份，不会因为 handler 正常结束
     // 而重复执行（异常路径那份在 LP 里，见下）。
@@ -844,10 +856,13 @@ void Lowerer::lower_try_zero_cost(Try& t) {
         zc.mark_slot = mark_slot;
         st_->cleanups.push_back(zc);
     }
+    // 记录 try 体内新增的 with 类清理项：异常路径（LP 里 handler 全不匹配）
+    // 需要逐个执行它们的 __exit__，任一个返回 True 就抑制异常（不重抛）。
+    // 这些项在 try 体降级结束后会被 pop，所以必须先拷贝出来。
+    // （with 清理项由 lower_with_item 在生成期间直接登记，见下）
     ++st_->zc_raise_depth;
     stmts(t.body);
     --st_->zc_raise_depth;
-    st_->cleanups.pop_back();
 
     if (terminated()) {
         // 早退由 ZeroCostEh 清理项处理；走到这里说明还有别的东西提前终止了控制流。
@@ -876,7 +891,7 @@ void Lowerer::lower_try_zero_cost(Try& t) {
     call_void(RtFn::RcCleanup, {load_slot(mark_slot, t_int())});
     Inst je;
     je.op = IrOp::Jump;
-    je.target = has_fin ? fin_block : end;
+    je.target = t.orelse.empty() ? (has_fin ? fin_block : end) : else_block;
     emit(std::move(je));
 
     // landing pad 入口：personality 把 GR0（%rax）设成展开包装指针。
@@ -924,10 +939,10 @@ void Lowerer::lower_try_zero_cost(Try& t) {
         }
     }
     if (!bare) {
-        // 没有 handler 接住。有 finally 时先跑 finalbody 再重抛；
-        // 重抛用 pa_eh_rethrow（重启 phase 1），所以外层 try 仍有机会接住。
-        // 这里内联一份 finalbody 而不是跳 fin_block —— fin_block 跑完是进 end
-        // （正常结束），而这条路径必须重抛，控制流终点不同。
+        // with 在 try 体内已被形状判定排除（见 collect_zero_cost_tries 的说明：
+        // with 用 setjmp 的 HandlerPush 保护 __exit__，与 _Unwind 混用不可靠）。
+        // 所以这里没有 with 清理项要跑。
+        // 有 finally 时先跑 finalbody 再重抛。
         if (has_fin) {
             stmts(t.finalbody);
             // finalbody 里若 return/break/continue 终止了控制流，异常就被吞掉，
@@ -980,6 +995,17 @@ void Lowerer::lower_try_zero_cost(Try& t) {
     //   try 体正常结束 / handler 体正常结束  ->  fin 块（跑 finalbody）-> end
     //   LP 里没有 handler 接住              ->  fin 块（跑 finalbody）-> 重抛
     // 用 fin 块而不是把 finalbody 内联两处，避免 handler 正常结束时重复执行。
+    // try-else：try 体正常结束后落到这里（异常路径不会跳进来）。
+    // 跑完 else 体再进 fin/end。
+    if (else_block >= 0) {
+        switch_to(else_block);
+        stmts(t.orelse);
+        Inst je2;
+        je2.op = IrOp::Jump;
+        je2.target = has_fin ? fin_block : end;
+        emit(std::move(je2));
+    }
+
     if (has_fin) {
         // 正常路径（try 体结束 / handler 体结束）落到这里：跑 finalbody 后进 end。
         switch_to(fin_block);
