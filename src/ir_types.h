@@ -212,12 +212,21 @@ struct IRExternVar {
     CKind kind = CKind::Int;
 };
 
+// 字符串字面量：kind=0 是 str（pub=码点数），kind=1 是 bytes（pub=字节数）。
+// 必须按 (kind, 内容) 去重——"中" 与 b"\xe4\xb8\xad" 字节相同但 pub 不同，
+// 共用一个静态对象必然有一方错。
+struct IRStringLit {
+    std::string text;
+    bool is_bytes = false;
+    int64_t pub = 0;   // str: 码点数；bytes: 字节数
+};
+
 struct IRModule {
     // 用 unique_ptr 持有：降级过程中会不断新增函数（嵌套 def），
     // vector<IRFunction> 扩容会让外面持有的指针失效。
     std::vector<std::unique_ptr<IRFunction>> funcs;
     std::vector<IRGlobal> globals;
-    std::vector<std::string> strings;
+    std::vector<IRStringLit> strings;
     std::vector<IRClass> classes;
     std::vector<IRGenerator> generators;
     // 模块编译：符号前缀、运行期 __name__、源路径、是否入口。
@@ -244,10 +253,28 @@ struct IRModule {
         return funcs.back().get();
     }
 
-    int intern_string(const std::string& s) {
+    // 数码点：非续字节（(b & 0xC0) != 0x80）的个数。与运行时的
+    // str_count_cp 同一口径（对非法字节也安全）。
+    static int64_t count_cp(const std::string& s) {
+        int64_t n = 0;
+        for (unsigned char c : s)
+            if ((c & 0xC0) != 0x80) ++n;
+        return n;
+    }
+
+    int intern_string(const std::string& s) { return intern_lit(s, false); }
+
+    int intern_bytes(const std::string& s) { return intern_lit(s, true); }
+
+    int intern_lit(const std::string& s, bool is_bytes) {
         for (size_t i = 0; i < strings.size(); ++i)
-            if (strings[i] == s) return static_cast<int>(i);
-        strings.push_back(s);
+            if (strings[i].is_bytes == is_bytes && strings[i].text == s)
+                return static_cast<int>(i);
+        IRStringLit lit;
+        lit.text = s;
+        lit.is_bytes = is_bytes;
+        lit.pub = is_bytes ? static_cast<int64_t>(s.size()) : count_cp(s);
+        strings.push_back(std::move(lit));
         return static_cast<int>(strings.size()) - 1;
     }
 };

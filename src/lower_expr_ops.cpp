@@ -17,7 +17,7 @@ VReg Lowerer::lower_constant(Constant& c) {
             return def_heap(t_complex(), std::move(in));
         }
         case Constant::CK::Str: return const_str(c.s);
-        case Constant::CK::Bytes: return const_str(c.s);
+        case Constant::CK::Bytes: return const_bytes(c.s);
         case Constant::CK::Ellipsis:
             err(c.line, c.col, "Ellipsis is not supported by the code generator");
             return const_none();
@@ -147,8 +147,8 @@ VReg Lowerer::lower_binop(BinOp& b) {
             return t && (t->kind == TyKind::Int || t->kind == TyKind::Bool);
         };
         auto seq_ty = [](const TypePtr& t) {
-            return t && (t->kind == TyKind::Str || t->kind == TyKind::List ||
-                         t->kind == TyKind::Tuple);
+            return t && (t->kind == TyKind::Str || t->kind == TyKind::Bytes ||
+                         t->kind == TyKind::List || t->kind == TyKind::Tuple);
         };
         if ((seq_ty(lt) && is_int_ty(rt)) || (is_int_ty(lt) && seq_ty(rt))) {
             VReg l = expr(*b.left);
@@ -157,7 +157,9 @@ VReg Lowerer::lower_binop(BinOp& b) {
             VReg base = left ? l : r;
             VReg n = coerce(left ? r : l, left ? rt : lt, t_int());
             TypePtr cty = left ? lt : rt;
-            RtFn fn = cty->kind == TyKind::Str ? RtFn::StrRepeat : RtFn::ListRepeat;
+            RtFn fn = cty->kind == TyKind::Str ? RtFn::StrRepeat
+                      : cty->kind == TyKind::Bytes ? RtFn::BytesRepeat
+                                                   : RtFn::ListRepeat;
             VReg v = call_runtime(fn, ty ? ty : cty, {base, n});
             push_temp(v);
             return v;

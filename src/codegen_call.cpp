@@ -593,7 +593,8 @@ void AsmGen::gen_call_extern(const Inst& in) {
         int sret_tmp = out_base() + stack_bytes + 40;
 
         // 取实参的机器值。str/可选 str 要先从 PyAdamasStr 里取出 data 字段
-        // （偏移 16）；Buf* 从 list/bytes 的 data 取指针；普通指针按整数直接传。
+        // （偏移 24：pub/len/hash 之后的第四个机器字）；Buf* 从 list/bytes 的
+        // data 取指针；普通指针按整数直接传。
         auto arg_into = [&](size_t i, const std::string& reg) {
             CKind k = kind_at(i);
             const std::string src = src_op(in.args[i]);
@@ -604,15 +605,23 @@ void AsmGen::gen_call_extern(const Inst& in) {
                 // 防御运行期出现的空值。
                 line("testq %r10, %r10");
                 line("je 1f");
-                line("movq 16(%r10), %r10");
+                line("movq 24(%r10), %r10");
                 line("1:");
                 emit2("movq", "%r10", reg);
-            } else if (k == CKind::BufF64 || k == CKind::BufI64 || k == CKind::BufBytes) {
-                // list/bytes 的 data 都在 +16（PyAdamasList / PyAdamasStr）。
+            } else if (k == CKind::BufF64 || k == CKind::BufI64) {
+                // list 的 data 在 +16（PyAdamasList）。
                 emit2("movq", src, "%r10");
                 line("testq %r10, %r10");
                 line("je 1f");
                 line("movq 16(%r10), %r10");
+                line("1:");
+                emit2("movq", "%r10", reg);
+            } else if (k == CKind::BufBytes) {
+                // bytes 的 data 在 +24（PyAdamasStr 的第四个机器字）。
+                emit2("movq", src, "%r10");
+                line("testq %r10, %r10");
+                line("je 1f");
+                line("movq 24(%r10), %r10");
                 line("1:");
                 emit2("movq", "%r10", reg);
             } else if (k == CKind::Callback) {

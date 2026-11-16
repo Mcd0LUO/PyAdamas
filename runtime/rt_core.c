@@ -701,12 +701,114 @@ void* pa_closure_new(int64_t code, int64_t n_caps) {
    值仍然是 8 字节指针（不是 tagged value），所以对象本身仍走 RC/GC。 */
 #define STR_INLINE_MAX 7
 
-PyAdamasStr* str_alloc(int64_t len) {
+/* ── UTF-8 工具 ────────────────────────────────────────────────
+   码点数 = 非续字节（(b & 0xC0) != 0x80）的个数。对合法 UTF-8 精确，
+   对非法字节也安全（「每个非续字节算 1 码点」的宽松定义），永远不会
+   越界或返回负值——二进制文件读进来的字节直通串靠这条兜住。 */
+int64_t str_count_cp(const char* p, int64_t n) {
+    int64_t k = 0;
+    for (int64_t i = 0; i < n; ++i)
+        if (((unsigned char)p[i] & 0xC0) != 0x80) ++k;
+    return k;
+}
+
+/* 首字节 b 领起的 UTF-8 序列长度；非法首字节按 1 处理（宽松兜底）。 */
+int str_seq_len(unsigned char b) {
+    if (b < 0x80) return 1;
+    if ((b & 0xE0) == 0xC0) return 2;
+    if ((b & 0xF0) == 0xE0) return 3;
+    if ((b & 0xF8) == 0xF0) return 4;
+    return 1;
+}
+
+/* 码点下标 cp -> 字节偏移（从头扫；cp == pub 时返回 len）。 */
+int64_t str_cp_to_byte(const PyAdamasStr* s, int64_t cp) {
+    if (s->pub == s->len) return cp;  /* 全 ASCII：码点下标就是字节偏移 */
+    int64_t off = 0;
+    while (cp > 0 && off < s->len) {
+        off += str_seq_len((unsigned char)s->data[off]);
+        --cp;
+    }
+    return off;
+}
+
+/* 从字节偏移 off 起取一个码点（返回码点值，*plen 填字节数）。 */
+uint32_t str_cp_at(const PyAdamasStr* s, int64_t off, int* plen) {
+    const unsigned char* p = (const unsigned char*)s->data + off;
+    unsigned char b = p[0];
+    int n = str_seq_len(b);
+    int64_t remain = s->len - off;
+    if (n > remain) n = (int)(remain > 0 ? remain : 1);
+    uint32_t cp;
+    switch (n) {
+        case 2: cp = ((uint32_t)(b & 0x1F) << 6) | (uint32_t)(p[1] & 0x3F); break;
+        case 3:
+            cp = ((uint32_t)(b & 0x0F) << 12) | ((uint32_t)(p[1] & 0x3F) << 6) |
+                 (uint32_t)(p[2] & 0x3F);
+            break;
+        case 4:
+            cp = ((uint32_t)(b & 0x07) << 18) | ((uint32_t)(p[1] & 0x3F) << 12) |
+                 ((uint32_t)(p[2] & 0x3F) << 6) | (uint32_t)(p[3] & 0x3F);
+            break;
+        default: cp = b; n = 1; break;
+    }
+    if (plen) *plen = n;
+    return cp;
+}
+
+/* 从字节偏移 off 回退到「前一个码点」的首字节（负步长切片用）。
+   off == 0 时返回 0（调用方保证不会用到）。 */
+int64_t str_prev_cp(const PyAdamasStr* s, int64_t off) {
+    if (off <= 0) return 0;
+    int64_t b = off - 1;
+    while (b > 0 && ((unsigned char)s->data[b] & 0xC0) == 0x80) --b;
+    return b;
+}
+
+/* 码点 -> UTF-8 字节数。 */
+int str_cp_bytes(uint32_t cp) {
+    if (cp < 0x80) return 1;
+    if (cp < 0x800) return 2;
+    if (cp < 0x10000) return 3;
+    return 4;
+}
+
+/* 码点 -> UTF-8 字节串（写入 out，返回字节数）。 */
+int str_cp_encode(uint32_t cp, char* out) {
+    if (cp < 0x80) {
+        out[0] = (char)cp;
+        return 1;
+    }
+    if (cp < 0x800) {
+        out[0] = (char)(0xC0 | (cp >> 6));
+        out[1] = (char)(0x80 | (cp & 0x3F));
+        return 2;
+    }
+    if (cp < 0x10000) {
+        out[0] = (char)(0xE0 | (cp >> 12));
+        out[1] = (char)(0x80 | ((cp >> 6) & 0x3F));
+        out[2] = (char)(0x80 | (cp & 0x3F));
+        return 3;
+    }
+    out[0] = (char)(0xF0 | (cp >> 18));
+    out[1] = (char)(0x80 | ((cp >> 12) & 0x3F));
+    out[2] = (char)(0x80 | ((cp >> 6) & 0x3F));
+    out[3] = (char)(0x80 | (cp & 0x3F));
+    return 4;
+}
+
+/* ── 构造 API ──────────────────────────────────────────────────
+   契约：str_alloc_raw 只分配并把 pub 置 -1（哨兵），调用方填完字符区
+   必须调 str_seal（扫描算码点数）或 str_seal_n（已知码点数，O(1)）。
+   漏了 seal 的对象 pub 会停在 -1，len() 立刻能看出来；PYADAMAS_STR_DEBUG=1
+   时消费者会 panic 而不是静默算错。 */
+PyAdamasStr* str_alloc_raw(int64_t len) {
     if (len < 0) panic_c("negative string length");
     if (len <= STR_INLINE_MAX) {
         PyAdamasStr* s =
             (PyAdamasStr*)rc_alloc((int64_t)sizeof(PyAdamasStr), NULL, NULL, PYADAMAS_RC_STR);
         s->len = len;
+        s->pub = -1;
         s->data = (const char*)&s->hash;
         ((char*)s->data)[len] = '\0';
         return s;
@@ -714,6 +816,7 @@ PyAdamasStr* str_alloc(int64_t len) {
     PyAdamasStr* s =
         (PyAdamasStr*)rc_alloc((int64_t)sizeof(PyAdamasStr) + len + 1, NULL, NULL, PYADAMAS_RC_STR);
     s->len = len;
+    s->pub = -1;
     s->hash = 0;
     char* p = (char*)(s + 1);
     p[len] = '\0';
@@ -721,9 +824,39 @@ PyAdamasStr* str_alloc(int64_t len) {
     return s;
 }
 
+/* 扫描字符区算码点数写进 pub。 */
+PyAdamasStr* str_seal(PyAdamasStr* s) {
+    s->pub = str_count_cp(s->data, s->len);
+    return s;
+}
+
+/* 已知码点数直接写（O(1)）；debug 下校验范围。 */
+PyAdamasStr* str_seal_n(PyAdamasStr* s, int64_t pub) {
+    if (pub < 0 || pub > s->len) panic_c("string seal: bad codepoint count");
+    s->pub = pub;
+    return s;
+}
+
+/* 默认 str 语义：复制后扫一遍算码点数（最安全，调用点无需知道内容）。 */
 PyAdamasStr* str_new(const char* p, int64_t len) {
-    PyAdamasStr* s = str_alloc(len);
+    PyAdamasStr* s = str_alloc_raw(len);
     memcpy((char*)s->data, p, (size_t)len);
+    return str_seal(s);
+}
+
+/* bytes 语义：pub == len == 字节数，O(1)。 */
+PyAdamasStr* str_new_bytes(const char* p, int64_t len) {
+    PyAdamasStr* s = str_alloc_raw(len);
+    memcpy((char*)s->data, p, (size_t)len);
+    s->pub = len;
+    return s;
+}
+
+/* 已知全 ASCII：pub == len，O(1)。 */
+PyAdamasStr* str_new_ascii(const char* p, int64_t len) {
+    PyAdamasStr* s = str_alloc_raw(len);
+    memcpy((char*)s->data, p, (size_t)len);
+    s->pub = len;
     return s;
 }
 
@@ -752,7 +885,7 @@ static PyAdamasStaticStr char_tab[256];
 static PyAdamasStaticStr kw_true_s, kw_false_s, kw_none_s;
 static int static_strs_ready;
 
-static void static_str_init(PyAdamasStaticStr* e, const char* p, int64_t n) {
+static void static_str_init(PyAdamasStaticStr* e, const char* p, int64_t n, int64_t pub) {
     e->h.next = NULL;
     e->h.prev = NULL;
     e->h.rc = PYADAMAS_RC_IMMORTAL;
@@ -762,6 +895,7 @@ static void static_str_init(PyAdamasStaticStr* e, const char* p, int64_t n) {
     e->h.kind = PYADAMAS_RC_STR;
     e->h.marked = PYADAMAS_RC_UNTRACKED;
     e->s.len = n;
+    e->s.pub = pub;
     e->s.hash = 0;
     memcpy(e->c, p, (size_t)n);
     e->c[n] = '\0';
@@ -770,13 +904,17 @@ static void static_str_init(PyAdamasStaticStr* e, const char* p, int64_t n) {
 }
 
 static void static_strs_init(void) {
+    /* 0x00-0x7F 是合法单码点 UTF-8；0x80-0xFF 的单字节序列不是合法 UTF-8，
+       不能当 str 暴露（bytes 不需要它们：bytes 下标是 int，bytes 切片走字节
+       实现）。这些槽仍然初始化成 pub=1 的对象，只为让 pa_char_str 的越界
+       调用有一个确定的对象可返回，代码里不再从 str 路径取到它们。 */
     for (int i = 0; i < 256; ++i) {
         char ch = (char)i;
-        static_str_init(&char_tab[i], &ch, 1);
+        static_str_init(&char_tab[i], &ch, 1, i < 0x80 ? 1 : 0);
     }
-    static_str_init(&kw_true_s, "True", 4);
-    static_str_init(&kw_false_s, "False", 5);
-    static_str_init(&kw_none_s, "None", 4);
+    static_str_init(&kw_true_s, "True", 4, 4);
+    static_str_init(&kw_false_s, "False", 5, 5);
+    static_str_init(&kw_none_s, "None", 4, 4);
     static_strs_ready = 1;
 }
 
@@ -784,9 +922,21 @@ static void static_strs_ensure(void) {
     if (!static_strs_ready) static_strs_init();
 }
 
+/* 单码点串：ASCII 走 256 项驻留表（零分配），其余码点现编 1-4 字节。
+   0x80-0xFF 不再是合法的单字节 str，ASCII 之外的码点必须走 pa_cp_str。 */
 PyAdamasStr* pa_char_str(int64_t c) {
     static_strs_ensure();
     return &char_tab[(int)(c & 0xff)].s;
+}
+
+PyAdamasStr* pa_cp_str(uint32_t cp) {
+    if (cp < 0x80) return pa_char_str((int64_t)cp);
+    char buf[4];
+    int n = str_cp_encode(cp, buf);
+    PyAdamasStr* s = str_alloc_raw(n);
+    memcpy((char*)s->data, buf, (size_t)n);
+    s->pub = 1;
+    return s;
 }
 
 PyAdamasStr* pa_str_true(void) {

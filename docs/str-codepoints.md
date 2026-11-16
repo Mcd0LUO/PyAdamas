@@ -1,6 +1,6 @@
 # 字符串码点语义设计（UTF-8 字节存储 + nchars 缓存）
 
-- 状态：**设计稿，未实现**（本文件是施工图，不含代码改动）
+- 状态：**S1+S2 已实现（0.185，分支 str-codepoints）**，S3 未做；实施偏差见文末 §8
 - 定案前提（[roadmap.md](roadmap.md:141)）：内部继续按 UTF-8 字节存储（不做 CPython 的
   PEP 393 定宽 1/2/4 字节表示），对外语义按码点：`len("中文") == 2`，下标/切片/迭代
   都按码点；`bytes` 类型语义不变（`len(b"中文") == 6`）。
@@ -822,3 +822,47 @@ S1 之后、S2 之前：`len("中文")==2` 但 `"中文"[0]` 仍是第一个字�
   （compatibility.md:287）——本设计不引入新 kind，维持现状。
 - unknown 裸值表示（roadmap.md:143「维持裸 i64」）——不做 shadow tag，本设计不依赖
   运行期类型标签。
+
+---
+
+## 8. 实施记录（S1+S2，0.185）
+
+### 8.1 与设计稿的偏差
+
+| 设计稿 | 实际实现 | 原因 |
+|---|---|---|
+| `str_alloc(len)` 保留 | 改成 `str_alloc_raw` + `str_seal`/`str_seal_n` 协议；`str_new` 默认扫描、`str_new_bytes`、`str_new_ascii` | `str_alloc` 后手工填充的 32 处必须显式给出 pub；把「分配」和「定长」拆开才能让漏写 pub 变成可见的 -1 哨兵 |
+| 稀疏索引表留 S4 | 确认不做 | 游标已经让顺序访问线性；随机访问维持 O(i)，文档化 |
+| `pa_str_slice` 拆 str/bytes | 拆成 `pa_str_slice`（码点）+ `pa_bytes_slice`（字节），降级按静态类型选 `RtFn::StrSlice` / `RtFn::BytesSlice` | 同设计稿 |
+| `pa_str_method` 加第 6 个 `is_bytes` 参数 | 拆成两个入口 `pa_str_method` / `pa_bytes_method`（`RtFn::StrMethod` / `RtFn::BytesMethod`） | 两个函数体语义差得多（strip 的字符集、宽度单位、find 下标），共享一个函数会让每个分支都要判类型，拆开更清楚且零运行期成本 |
+| `pa_str_concat` 加参数 | 拆 `pa_str_concat` / `pa_bytes_concat`（`gen_bin` 按 `in.ty` 选） | 同上 |
+| `pa_str_repeat` 加参数 | 拆 `pa_str_repeat` / `pa_bytes_repeat`；顺手补上 `bytes * int` 的降级缺口 | 设计稿 §1.4 末行说要补 |
+| `encode/decode` 用新 `RtFn` | `RtFn::StrEncode` / `RtFn::BytesDecode`，ASCII 零复制、非 ASCII 拷贝 | 同设计稿 §7.2 |
+| 游标「临时槽」 | 每个顺序迭代点分配**一对相邻 int64 槽**并取地址（`SlotAddr`），保证不被寄存器提升；运行时按 `PyAdamasStrCursor*` 读写 | `SlotAddr` 已经存在；取过地址的槽优化遍本来就不搬 |
+| 字面量 `\xNN` | str 编成 UTF-8、bytes 保持原始字节；bytes 的 `\u/\U/\N` 报错 | 设计稿 §7.4 |
+
+### 8.2 未做清单（S3）
+
+- `find/index/rfind/count` 的 **start/end 参数**已按码点换算（S2 顺手做了），但
+  `re` 的 `Match.start/end/span`、`finditer/findall` 位置仍是字节下标；
+- 格式化宽度：`pa_fmt_str` / `fmt_pad` / printf 风格 `%` 宽度与精度仍按字节；
+- `re`：点号 `.` / 字符类 / 起点仍按字节步进（`re.findall(".", "中文")` 仍给 6 个
+  乱匹配）；
+- 文件 I/O：`read(n)` / `readline(size)` / `readlines(hint)` / `tell` / `seek` 的
+  文本模式单位仍是字节；`write(s)` 返回字节数；
+- `repr()` 对不可打印 Unicode 不转 `\uNNNN`（与改动前一致）；
+- 非 ASCII 大小写映射与 Unicode 字符类别（`"中".isalpha()` 仍 `False`）；
+- `str.strip()` 默认空白仍只认 ASCII 六种。
+
+### 8.3 验收数据
+
+- 运行用例：194 → 200（新增 `176_codepoint_len` / `177_codepoint_index` /
+  `178_codepoint_intern` / `179_codepoint_methods` / `180_codepoint_perf` /
+  `181_cimport_codepoint`），全过；
+- `tests/exc/z1_rt` 116 项、`z2_rt` 134 项、`z2_codegen` 99 项、`tests/eh` 33 项，全过；
+- `len`：30 万次混取 8/100000/50000 字符的串，耗时与串长无关（读偏移 0）；
+- 迭代线性：`"中文abc"×N` 的 `for ch in s` 在 N=20000/40000/80000 时
+  2.7/5.3/10.8 ms（斜率 1.94 / 2.05）；
+- ASCII 热路径对比 b203e69 基线（编译后只计时执行，5 次取最小）：
+  `len` 1.00×、`for ch in s` 0.99×、下标 1.00×、拼接 1.05×、`split` 0.87×、
+  `find` 1.03×、dict 字符串 key 0.95×、`join` 0.97×。

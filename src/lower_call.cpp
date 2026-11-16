@@ -218,7 +218,7 @@ std::vector<VReg> Lowerer::bind_args(Call& c, const FuncInfoPtr& info, FunctionD
             case TyKind::Int: return const_int(cv.i);
             case TyKind::Float: return const_float(cv.f);
             case TyKind::Str: return const_str(cv.s);
-            case TyKind::Bytes: return retype(const_str(cv.s), t_bytes());
+            case TyKind::Bytes: return const_bytes(cv.s);
             default: return const_none();
         }
     };
@@ -497,7 +497,7 @@ VReg Lowerer::lower_call(Call& c) {
                 "open", "input", "iter", "isinstance", "getattr", "setattr", "hasattr",
                 "callable", "issubclass", "hash", "type", "id", "frozenset",
                 "slice", "vars", "dir", "__pa_capwords", "__pa_sha256", "__pa_sha256_hex",
-                "__pa_b64encode", "__pa_b64decode", "bytes",
+                "__pa_b64encode", "__pa_b64decode", "bytes", "len_bytes",
             };
             if (kBuiltins.count(n.id)) return lower_builtin_call(n.id, c);
             // 名字能解析但语义没实现的内置：以前会退化成调用空指针直接

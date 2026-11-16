@@ -97,6 +97,7 @@
 | 0.170 | 一键扫荡：2参 super、no-__init__ 带参实例化、unpack(generator/range/str/Optional)、type 元数据属性、异常值方法、推断形参可重绑定；基线 411 → 435 / 596 |
 | 0.169 | getattr 属性名非字面量放宽 + 内置异常多参构造/关键字：args 元组跨 raise 还原（pending_exc_args）；基线 374 → 411 / 596 |
 | 0.168 | isinstance/bytes：第二参数接受 `bytes`/`bytearray`/`type`/`slice`/`frozenset` 等与 `(A,B,...)` 元组/列表；运行期元组短路 OR、known 类型静态判定、unknown 带运行期标签内置判定；`bytes()` 2 参/可迭代-of-int、`bytes*int`、`decode` 0..2、`translate`、内置类型名当值；基线 348 → 374 / 596 |
+| 0.185 | **字符串码点语义 S1+S2**：`PyAdamasStr` 扩到 32 字节、`pub`（str 码点数 / bytes 字节数）放偏移 0，`len` 与真值判断的指令一行未改；字面量在编译期算好 `pub` 写进 `.data.rel.ro`；`intern_string` 按 `(kind, 内容)` 去重；下标/切片/迭代/方法/格式化宽度改码点语义，`bytes` 全部保持字节；新增内置 `len_bytes(s)`；顺序迭代加游标（`for`/`enumerate`/`zip`/推导式/生成器），全 ASCII 走快路径；`cimport` 取 `data` 偏移 16→24；str 的 `\xNN` 改成 U+00NN 编 UTF-8、bytes 的八进制/\xNN 保持原始字节 |
 | 许可证 | Apache-2.0（见 [LICENSE](../LICENSE) / [NOTICE](../NOTICE)） |
 
 ## 当前状态（0.174）
@@ -105,7 +106,7 @@
 
 - **语言面**：标量、字符串、`bytes`（含迭代与 `%` 格式化）、列表/元组/字典/集合、切片读写、闭包/lambda/`*args`/`**kwargs`/装饰器、推导式、`with`、异常值（`args`/`raise ... from`/自定义异常）、类（字段/方法/C3 多继承/零参 `super()`/`@staticmethod`/`@classmethod`/`@property`/类属性/类装饰器/类名当值）、`match/case`、`del`、复数字面量、f-string 格式说明、dunder 协议（含装饰 dunder、`__call__` 与方法值）、`Generator[Y, S, R]` 标注、`open`/`input`/`sys.stdin`、`struct` 值类型、`cimport`/`cdecl` C 互操作与跨模块继承。
 - **标准库**：`math`/`sys`/`asyncio`/`random`/`os`/`os.path`/`subprocess`/`time`/`itertools`/`collections`/`functools`/`json`/`string`/`re`/`datetime`/`pathlib`/`csv`/`base64`/`binascii`/`heapq`/`bisect`/`hashlib`/`hmac`/`logging`/`statistics`/`textwrap`/`operator`，以及封装 OpenBLAS 的 `linalg`。
-- **验证**：163 个运行用例、53 个反例、13 个模块目录；差分 runner 已自举，默认 840 例；`tests/bench/` 提供 pyadamas vs CPython 的标准库与 RC/GC 基准（`base64`/`hashlib` 已反超）。
+- **验证**：169 个运行用例、53 个反例、13 个模块目录；差分 runner 已自举，默认 840 例；`tests/bench/` 提供 pyadamas vs CPython 的标准库与 RC/GC 基准（`base64`/`hashlib` 已反超）。
 - **优化**：O2 有常量折叠/DCE/小函数内联/静态调用直接化/LICM/检查型下标外提/循环旋转/跨块 CSE；后端有拷贝合并、浮点临时寄存器与浮点比较分支融合（有序比较不再补 NaN 跳转）。
 - **asyncio**：Task 支持多等待者；`gather` 结果元素所有权按静态类型带入运行时；`from asyncio import ...` 保留调用点特化；`run`/`wait_for` 跨模块结果仍可能退化为 unknown。
 - **调试信息**：生成代码带 DWARF 行号、CFI（`.eh_frame`）与可读函数符号（`.type`/`.size`）；帧里没有 rbp，gdb、libgcc 的展开器和运行时自己的 traceback 都靠 CFI 逐帧还原。未捕获异常打印函数级 traceback，异步/生成器 resume 帧也会追加（仅函数名）。异常值对象仍不带 traceback。
@@ -138,7 +139,7 @@
 
 | 问题 | 定案 | 影响 |
 |---|---|---|
-| 字符串语义 | **UTF-8 字节存储 + 码点语义**：`len("中文") == 2`，索引/切片/迭代按码点；`bytes` 类型不变 | 表示层不做 CPython 那种定宽 1/2/4 字节；`len` 仍 O(1)（缓存码点数），`s[i]` 变成 O(i)，靠字面量常量折叠与稀疏索引表缓解。设计见 [str-codepoints.md](str-codepoints.md) |
+| 字符串语义 | **已完成（0.185，S1+S2）**：UTF-8 字节存储 + 码点语义，`len("中文") == 2`，索引/切片/迭代按码点；`bytes` 类型不变；字节长度出口 `len_bytes(s)`。S3（find/split/replace 下标换算、格式化宽度、re、文件 I/O）待做。设计见 [str-codepoints.md](str-codepoints.md) |
 | 整数溢出 | **维持回绕**（不加检查） | 保留一类静默算错；已在 compatibility.md 声明为有意差异 |
 | 值表示 | **维持裸 i64**（不加 tag） | 不做 `unknown` 的运行时分派；`unknown` 继续走保守 RC/GC 路径。要做也只在寄存器分配之后考虑 shadow tag |
 

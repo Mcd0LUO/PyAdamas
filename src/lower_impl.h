@@ -395,6 +395,14 @@ private:
         return def(t_str(), std::move(in));
     }
 
+    // bytes 字面量：与同内容的 str 字面量共用字节但 pub 不同，必须单独 intern。
+    VReg const_bytes(const std::string& s) {
+        Inst in;
+        in.op = IrOp::ConstStr;
+        in.idx = mod_.intern_bytes(s);
+        return def(t_bytes(), std::move(in));
+    }
+
     VReg const_literal(const LiteralValue& v);
 
     int new_temp_slot(TypePtr ty) { return st_->fn->new_slot(std::move(ty)); }
@@ -855,6 +863,43 @@ private:
     void exc_enter();
     void exc_leave();
     VReg slot_addr_of(int slot);
+
+    // str 顺序迭代游标：分配一对相邻的 int64 槽（cp / off），两个槽都取过
+    // 地址（保证不被寄存器提升，运行时直接按 PyAdamasStrCursor* 读写），
+    // 初始化为「无缓存」(-1, 0)。返回 cp 槽号；off 槽号是 cp+1。
+    int new_str_cursor() {
+        int cp = new_temp_slot(t_int());
+        int off = new_temp_slot(t_int());
+        VReg a1 = slot_addr_of(cp);
+        VReg a2 = slot_addr_of(off);
+        (void)a1;
+        (void)a2;
+        store_slot(cp, const_int(-1));
+        store_slot(off, const_int(0));
+        return cp;
+    }
+
+    // 取 str 的第 idx 个码点（1 码点串）。带游标时顺序访问是 O(1)；
+    // 非顺序访问回退到从头扫，与 pa_str_char_at 一致。
+    VReg str_char_at(VReg seq, VReg idx, int cur_slot) {
+        if (cur_slot < 0) {
+            Inst in;
+            in.op = IrOp::CallRt;
+            in.imm = static_cast<int64_t>(RtFn::StrCharAt);
+            in.args = {seq, idx};
+            VReg v = def(t_str(), std::move(in));
+            push_temp(v);
+            return v;
+        }
+        VReg curp = slot_addr_of(cur_slot);
+        Inst in;
+        in.op = IrOp::CallRt;
+        in.imm = static_cast<int64_t>(RtFn::StrCharAtCursor);
+        in.args = {seq, idx, curp};
+        VReg v = def(t_str(), std::move(in));
+        push_temp(v);
+        return v;
+    }
     // 生成器 resume 重进时 C 栈帧是新的：把跨挂起仍然活跃的 vreg
     // 在挂起前溢写到堆帧槽，恢复后再装回来（见 lower_gen.cpp）。
     void spill_across_suspends();

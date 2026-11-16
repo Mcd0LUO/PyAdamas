@@ -235,7 +235,7 @@ PyAdamasStr* pa_os_path_normpath(PyAdamasStr* s) {
         if (initial_slashes) return str_new("/", initial_slashes);
         return str_new(".", 1);
     }
-    PyAdamasStr* out = str_alloc(total);
+    PyAdamasStr* out = str_alloc_raw(total);
     char* q = (char*)out->data;
     int64_t pos = 0;
     for (int64_t k = 0; k < initial_slashes; ++k) q[pos++] = '/';
@@ -245,7 +245,7 @@ PyAdamasStr* pa_os_path_normpath(PyAdamasStr* s) {
         pos += comps[k].n;
     }
     free(comps);
-    return out;
+    return str_seal(out);
 }
 
 PyAdamasStr* pa_os_path_abspath(PyAdamasStr* s) {

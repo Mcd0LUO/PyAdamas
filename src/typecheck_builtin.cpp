@@ -63,6 +63,14 @@ TypePtr TypeChecker::builtin_call(const std::string& n, Call& c) {
             }
             return t_none();
         }
+        if (n == "len_bytes") {
+            if (a.size() != 1) return t_int();
+            if (!is_unknown(a[0]) && a[0]->kind != TyKind::Str && a[0]->kind != TyKind::Bytes)
+                err(c.line, c.col,
+                    std::format("len_bytes() expects a str or bytes, got '{}'",
+                                type_name(a[0])));
+            return t_int();
+        }
         if (n == "len") {
             if (a.size() != 1) return t_int();
             if (!is_unknown(a[0]) && a[0]->kind != TyKind::List && a[0]->kind != TyKind::Str &&

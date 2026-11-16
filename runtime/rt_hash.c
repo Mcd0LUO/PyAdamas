@@ -89,7 +89,7 @@ PyAdamasStr* pa_sha256_digest(PyAdamasStr* data) {
     sha256_block(h, tail);
     if (pad == 128) sha256_block(h, tail + 64);
 
-    PyAdamasStr* out = str_alloc(32);
+    PyAdamasStr* out = str_alloc_raw(32);
     char* d = (char*)out->data;
     for (int i = 0; i < 8; ++i) {
         d[i * 4] = (char)(h[i] >> 24);
@@ -97,7 +97,7 @@ PyAdamasStr* pa_sha256_digest(PyAdamasStr* data) {
         d[i * 4 + 2] = (char)(h[i] >> 8);
         d[i * 4 + 3] = (char)h[i];
     }
-    return out;
+    return str_seal_n(out, 32);  /* digest 是 bytes：pub == 字节数 */
 }
 
 /* 直接返回小写十六进制串，省掉 Python 侧的逐字节转换。 */
@@ -106,13 +106,14 @@ PyAdamasStr* pa_sha256_hex(PyAdamasStr* data) {
     PyAdamasStr* dig = pa_sha256_digest(data);
     /* digest 和 hex 串是两次分配，dig 只在本帧 C 局部变量里。 */
     pa_gc_pin(dig);
-    PyAdamasStr* out = str_alloc(64);
+    PyAdamasStr* out = str_alloc_raw(64);
     char* d = (char*)out->data;
     for (int i = 0; i < 32; ++i) {
         unsigned v = (unsigned char)dig->data[i];
         d[i * 2] = kHex[v >> 4];
         d[i * 2 + 1] = kHex[v & 15];
     }
+    str_seal_n(out, 64);  /* hex 串是 ASCII */
     pa_gc_unpin(dig);
     pa_rc_dec(dig);
     return out;

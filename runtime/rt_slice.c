@@ -72,25 +72,89 @@ PyAdamasList* pa_list_slice(PyAdamasList* src, int64_t start, int64_t stop, int6
     return out;
 }
 
+/* 从码点首字节 off 起推进 st 个码点（st 可负），返回新的码点首字节偏移。
+   调用方保证结果不越界（count 已由 slice_total 算好）。 */
+static int64_t cp_step(const PyAdamasStr* s, int64_t off, int64_t st) {
+    if (st > 0) {
+        for (int64_t k = 0; k < st && off < s->len; ++k)
+            off += str_seq_len((unsigned char)s->data[off]);
+        return off;
+    }
+    for (int64_t k = 0; k < -st && off > 0; ++k) off = str_prev_cp(s, off);
+    return off;
+}
+
+/* str 切片：边界在码点域归一化（slice_bounds 用 pub），再换算成字节偏移。
+   步长 1 用一次单调扫描（最多扫到 hi 对应的字节位置）；步长 != 1 按码点
+   逐个推进。复杂度 O(字节长) 扫描 + O(结果字节) 拷贝。 */
 PyAdamasStr* pa_str_slice(PyAdamasStr* src, int64_t start, int64_t stop, int64_t step) {
+    int64_t lo, hi, st;
+    slice_bounds(src->pub, start, stop, step, &lo, &hi, &st);
+    int64_t count = slice_total(lo, hi, st);
+    /* 整串切片和单元素切片都很常见：前者共享原串，后者直接取驻留字符。 */
+    if (st == 1 && lo == 0 && hi == src->pub) {
+        pa_rc_inc(src);
+        return src;
+    }
+    if (count == 1) {
+        int64_t off = str_cp_to_byte(src, lo);
+        int n = 0;
+        uint32_t cp = str_cp_at(src, off, &n);
+        if (cp < 0x80) return pa_char_str((int64_t)cp);
+        PyAdamasStr* one = str_alloc_raw(n);
+        memcpy((char*)one->data, src->data + off, (size_t)n);
+        return str_seal_n(one, 1);
+    }
+    if (count == 0) return str_new("", 0);
+    /* 先求两端字节偏移：一次从 lo 扫到 hi（st>0 时单调），避免每码点重扫。 */
+    int64_t blo = str_cp_to_byte(src, lo);
+    if (st == 1) {
+        int64_t bhi = str_cp_to_byte(src, hi);
+        PyAdamasStr* out = str_alloc_raw(bhi - blo);
+        memcpy((char*)out->data, src->data + blo, (size_t)(bhi - blo));
+        return str_seal_n(out, count);
+    }
+    /* 步长 != 1：先把结果字节数算出来（一遍），再逐码点拷（一遍）。
+       每个选中码点之间要跳过 |st| 个码点，不是 1 个。 */
+    int64_t need = 0;
+    {
+        int64_t off = blo;
+        for (int64_t k = 0; k < count; ++k) {
+            need += str_seq_len((unsigned char)src->data[off]);
+            off = cp_step(src, off, st);
+        }
+    }
+    PyAdamasStr* out = str_alloc_raw(need);
+    char* p = (char*)out->data;
+    int64_t j = 0;
+    int64_t off = blo;
+    for (int64_t k = 0; k < count; ++k) {
+        int n = str_seq_len((unsigned char)src->data[off]);
+        memcpy(p + j, src->data + off, (size_t)n);
+        j += n;
+        off = cp_step(src, off, st);
+    }
+    return str_seal_n(out, count);
+}
+
+/* bytes 切片：纯字节语义，与改动前完全一致（pub == len）。 */
+PyAdamasStr* pa_bytes_slice(PyAdamasStr* src, int64_t start, int64_t stop, int64_t step) {
     int64_t lo, hi, st;
     slice_bounds(src->len, start, stop, step, &lo, &hi, &st);
     int64_t count = slice_total(lo, hi, st);
-    /* 整串切片和单元素切片都很常见：前者共享原串，后者直接取驻留字符。 */
     if (st == 1 && lo == 0 && hi == src->len) {
         pa_rc_inc(src);
         return src;
     }
-    if (count == 1) return pa_char_str((unsigned char)src->data[lo]);
-    PyAdamasStr* out = str_alloc(count);
+    PyAdamasStr* out = str_alloc_raw(count);
     if (st == 1) {
         if (count) memcpy((char*)out->data, src->data + lo, (size_t)count);
-        return out;
+        return str_seal_n(out, count);
     }
     char* p = (char*)out->data;
     int64_t j = 0;
     for (int64_t i = lo; st > 0 ? i < hi : i > hi; i += st) p[j++] = src->data[i];
-    return out;
+    return str_seal_n(out, count);
 }
 
 /* 切片赋值。src 的元素引用由本函数接管：kind 1 时对新元素 inc、
@@ -166,10 +230,27 @@ void pa_list_slice_assign(PyAdamasList* dst, int64_t start, int64_t stop, int64_
     free(snap);
 }
 
+/* str -> list[str]：按码点拆。内部走单遍字节游标（O(n)），不要逐个
+   pa_str_char_at（那会每轮从头扫，退化 O(n^2)）。 */
 PyAdamasList* pa_str_to_list(PyAdamasStr* s) {
-    PyAdamasList* out = pa_list_new(s->len, 1);
-    for (int64_t i = 0; i < s->len; ++i)
-        pa_list_append(out, (int64_t)pa_str_char_at(s, i));
+    PyAdamasList* out = pa_list_new(s->pub, 1);
+    pa_gc_pin(out);
+    int64_t off = 0;
+    while (off < s->len) {
+        int n = 0;
+        uint32_t cp = str_cp_at(s, off, &n);
+        PyAdamasStr* ch;
+        if (cp < 0x80) {
+            ch = pa_char_str((int64_t)cp);
+        } else {
+            ch = str_alloc_raw(n);
+            memcpy((char*)ch->data, s->data + off, (size_t)n);
+            ch->pub = 1;
+        }
+        pa_list_append(out, (int64_t)ch);
+        off += n;
+    }
+    pa_gc_unpin(out);
     return out;
 }
 
@@ -184,20 +265,20 @@ PyAdamasList* pa_bytes_to_list(PyAdamasStr* s) {
 /* list[int] -> bytes；越界元素与 CPython 一样抛 ValueError。 */
 PyAdamasStr* pa_bytes_from_list(PyAdamasList* items) {
     int64_t n = items ? items->len : 0;
-    PyAdamasStr* s = str_alloc(n);
+    PyAdamasStr* s = str_alloc_raw(n);
     char* out = (char*)s->data;
     for (int64_t i = 0; i < n; ++i) {
         int64_t v = pa_list_get(items, i);
         if (v < 0 || v > 255) pa_raise_c("ValueError", "bytes must be in range(0, 256)");
         out[i] = (char)(unsigned char)v;
     }
-    return s;
+    return str_seal_n(s, n);  /* bytes：pub == 字节数 */
 }
 
 /* bytes(n)：n 个零字节。rc_alloc 已把 payload 清零。 */
 PyAdamasStr* pa_bytes_zeros(int64_t n) {
-    if (n <= 0) return str_alloc(0);
-    return str_alloc(n);
+    if (n <= 0) return str_new_bytes("", 0);
+    return str_seal_n(str_alloc_raw(n), n);
 }
 
 /* 把单个字符串包成 [s]：subprocess.Popen("cmd", shell=True) 这种写法用。 */
