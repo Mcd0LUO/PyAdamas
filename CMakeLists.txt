@@ -131,7 +131,49 @@ add_custom_command(
 )
 add_custom_target(pyadamas_rt ALL DEPENDS "${PYADAMAS_RT_OBJ}")
 
+# 插桩版运行时：给 `--asan` 用。
+#
+# 默认的 rt.o 不带任何 sanitizer 插桩，于是**运行时内部**（RC/GC/列表/
+# 字典的指针操作）的内存错误 ASan 完全看不到 —— 只有生成代码那一侧被检查。
+# 0.216 那个 bug 能抓到纯属运气：出错点在生成代码调 pa_rc_temp 的地方。
+#
+# 这里把同样的源文件用 -fsanitize=address 重编一遍，合成 rt_asan.o。
+# 编译器在 --asan 模式下链接它而不是 rt.o。
+set(PYADAMAS_RT_ASAN_OBJ "${CMAKE_BINARY_DIR}/rt_asan.o")
+set(PYADAMAS_RT_ASAN_OBJS "")
+foreach(part ${PYADAMAS_RT_PARTS})
+  set(rt_obj "${CMAKE_BINARY_DIR}/rt_asan_${part}.o")
+  add_custom_command(
+    OUTPUT "${rt_obj}"
+    # -Wno-clobbered：ASan + -O1 下 gcc 会对 setjmp 附近的局部变量报
+    # 「might be clobbered by longjmp」。运行时的生成器/协程确实在 setjmp
+    # 保护里用局部变量，但那是**有意**的（值都放在 jmp_buf 之外的帧槽），
+    # 而且普通 rt.o 用 -O2 不报。这里只对插桩版关掉这个噪音。
+    COMMAND ${CMAKE_C_COMPILER} -O1 -g -fsanitize=address -fno-omit-frame-pointer
+            -Wall -Wextra -Wno-clobbered ${PYADAMAS_RT_WERROR}
+            -I "${CMAKE_SOURCE_DIR}/runtime"
+            -c "${CMAKE_SOURCE_DIR}/runtime/rt_${part}.c" -o "${rt_obj}"
+    DEPENDS "${CMAKE_SOURCE_DIR}/runtime/rt_${part}.c"
+            "${CMAKE_SOURCE_DIR}/runtime/rt_internal.h"
+    COMMENT "Building pyadamas runtime rt_asan_${part}.o"
+    VERBATIM
+  )
+  list(APPEND PYADAMAS_RT_ASAN_OBJS "${rt_obj}")
+endforeach()
+add_custom_command(
+  OUTPUT "${PYADAMAS_RT_ASAN_OBJ}"
+  COMMAND ${CMAKE_LINKER} -r -o "${PYADAMAS_RT_ASAN_OBJ}" ${PYADAMAS_RT_ASAN_OBJS}
+  DEPENDS ${PYADAMAS_RT_ASAN_OBJS}
+  COMMENT "Combining pyadamas runtime rt_asan.o"
+  VERBATIM
+)
+add_custom_target(pyadamas_rt_asan ALL DEPENDS "${PYADAMAS_RT_ASAN_OBJ}")
+
+
 add_executable(pyadamas ${PYADAMAS_SOURCES})
+# 把插桩运行时的路径编进编译器，`--asan` 时链接它而不是 rt.o。
+target_compile_definitions(pyadamas PRIVATE
+  PYADAMAS_RT_ASAN_OBJ="${PYADAMAS_RT_ASAN_OBJ}")
 target_include_directories(pyadamas PRIVATE src)
 target_compile_options(pyadamas PRIVATE -Wall -Wextra)
 target_compile_definitions(pyadamas PRIVATE

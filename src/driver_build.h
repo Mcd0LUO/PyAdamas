@@ -73,5 +73,8 @@ bool load_program(const std::string& entry_path, const std::vector<std::string>&
                   Program& p);
 bool prepare_program(Program& p, bool emit_objects, bool entry_ir);
 bool link_program(Program& p, const std::string& output);
+// --asan 时改用插桩版运行时（rt_asan.o），让 RC/GC 内部的越界/UAF 也能被
+// AddressSanitizer 检查到。默认的 rt.o 不带插桩，只覆盖生成代码那一侧。
+void set_asan_runtime(bool on);
 
 }  // namespace pyadamas

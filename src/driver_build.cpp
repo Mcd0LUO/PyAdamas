@@ -55,6 +55,14 @@ namespace pyadamas {
 //
 // 编译和链接都要带同一套 flag（ASan 需要运行时库参与链接），所以两处
 // 共用这一个函数。
+// --asan 时改用插桩版运行时（rt_asan.o）。
+//
+// 默认的 rt.o 不带 sanitizer 插桩，**运行时内部**（RC/GC/列表/字典的指针
+// 操作）的内存错误 ASan 看不到 —— 只有生成代码那一侧被检查。
+// 由 main.cpp 在解析 --asan 时置位。
+static bool g_use_asan_runtime = false;
+void set_asan_runtime(bool on) { g_use_asan_runtime = on; }
+
 static std::string cc_extra_flags() {
     const char* f = std::getenv("PYADAMAS_CC_FLAGS");
     if (!f || !*f) return std::string();
@@ -1363,7 +1371,10 @@ bool link_program(Program& p, const std::string& output) {
     std::string cmd = "cc -o " + shell_quote(output) + " -Wl,--eh-frame-hdr" +
                       cc_extra_flags();
     for (auto* u : p.order) cmd += " " + shell_quote(u->obj_path);
-    cmd += " " + shell_quote(PYADAMAS_RT_OBJ) + " -lm";
+    // --asan：链接插桩版运行时，让 RC/GC 内部的越界/UAF 也能被检查到。
+    // 两个 rt 都带同样的符号，链接期只取一个。
+    cmd += " " + shell_quote(g_use_asan_runtime ? PYADAMAS_RT_ASAN_OBJ : PYADAMAS_RT_OBJ);
+    cmd += " -lm";
     for (auto& l : p.link_args) cmd += " " + shell_quote(l);
     if (std::system(cmd.c_str()) != 0) {
         std::fprintf(stderr, "error: link failed\n       command: %s\n", cmd.c_str());

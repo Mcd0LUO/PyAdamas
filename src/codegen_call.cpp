@@ -940,11 +940,37 @@ void AsmGen::gen_call_rt(const Inst& in) {
         line(std::format("call {}", rt_name(fn)));
         reload_fp_slots();
         if (!dst_unused(in)) {
-            // pa_dict_key_at 一律返回机器字；float 元素的位模式也从 rax
-            // 取，不能按 double 去读 xmm0。
-            bool raw_ret = fn == RtFn::DictKeyAt;
-            if (ir_is_float(in.ty) && !raw_ret) move_fp(dst_op(in.dst), "%xmm0");
-            else emit2("movq", "%rax", dst_op(in.dst));
+            // 有些运行时入口**总是返回机器字**（%rax），哪怕静态类型是 float
+            // —— 它们把 double 的位模式塞进 int64 返回（多态返回值、
+            // 按位取元素等）。这类不能按 double 去读 %xmm0。
+            //
+            //   * DictKeyAt：dict 的 key 一律机器字，float key 的位模式也
+            //     从 rax 取；
+            //   * JsonLoads：json.loads(text, sample) 的返回值类型由 sample
+            //     决定，运行时统一返回 int64 位模式（见 ir_ops.h 的
+            //     `(str* text, str* desc) -> i64`）。
+            //
+            // JsonLoads 漏在这里曾导致 `json.loads("2.5", 0.0)` 读出垃圾
+            // 浮点（-1.688e+260）：codegen 读 %xmm0，而实际值在 %rax。
+            // 这个 bug 在普通构建下被寄存器残留值掩盖，ASan 改变内存布局
+            // 后才稳定复现 —— 由 `PYADAMAS_TEST_ASAN=1` 的套件扫描发现。
+            bool raw_ret = fn == RtFn::DictKeyAt || fn == RtFn::JsonLoads;
+            if (raw_ret) {
+                // 位模式在 %rax 里。静态类型是 float 时把它搬到 %xmm0，
+                // 否则直接按整数落位。
+                if (ir_is_float(in.ty)) {
+                    // movsd 不能从通用寄存器取源操作数：先把位模式搬到
+                    // %xmm0（movq 的 GPR->XMM 形式），再按浮点落位。
+                    line("movq %rax, %xmm0");
+                    move_fp(dst_op(in.dst), "%xmm0");
+                } else {
+                    emit2("movq", "%rax", dst_op(in.dst));
+                }
+            } else if (ir_is_float(in.ty)) {
+                move_fp(dst_op(in.dst), "%xmm0");
+            } else {
+                emit2("movq", "%rax", dst_op(in.dst));
+            }
         }
     }
 

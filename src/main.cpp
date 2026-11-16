@@ -305,6 +305,8 @@ int main(int argc, char** argv) {
                 // ASAN_OPTIONS=detect_leaks=1 显式打开。
                 flags += " -fsanitize-address-use-after-scope";
             setenv("PYADAMAS_CC_FLAGS", flags.c_str(), 1);
+            // 链接插桩版运行时（见 driver_build 的 set_asan_runtime）。
+            pyadamas::set_asan_runtime(sanitize == "address");
         }
         prog.rebuild = rebuild;
         prog.verbose = verbose;
