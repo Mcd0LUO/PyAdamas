@@ -23,9 +23,24 @@ static size_t desc_len(const char* d) {
     return i;
 }
 
+/* 类型描述符的首字符表示这个位置该解析成什么：
+ *   i int / f float / b bool / n null / s str /
+ *   ( 嵌套 tuple 或容器（以 ( 开头）
+ *
+ * **注意 `t` 也是堆类型**（tuple），原来漏了它：
+ *
+ *   desc_heap("(tis)") 里的第一个元素是 `t` —— tuple，是堆对象。
+ *   旧实现只认 's' 和 '('，于是 `t` 被判成非堆，`all_heap` 变 0、
+ *   `any_heap` 变 1，pa_list_new 拿到 elem_kind=2（混合类型）。
+ *   而 exact-RC 模式下 kind=2 的元素释放走 pa_rc_dec_unknown，
+ *   那里依赖 rc_index（索引已关）—— 结果那个 tuple 永远不释放。
+ *
+ * ASan 实测：53_json 的 json.loads("[1, \"x\"]", (0, "")) 泄漏 96 字节，
+ * 79_datetime_pathlib 同类。补上 't' 之后 all_heap 正确为 1，
+ * elem_kind=1（全部是堆），走 pa_rc_dec 正常释放。 */
 static int desc_heap(const char* d, size_t n) {
     (void)n;
-    return *d == 's' || *d == '(';
+    return *d == 's' || *d == 't' || *d == '(';
 }
 
 /* ── 输出缓冲 ───────────────────────────────────────────────── */
@@ -287,10 +302,12 @@ static void jb_value(JBuf* b, int64_t v, const char* d, size_t n, int64_t depth)
 }
 
 PyAdamasStr* pa_json_dumps(int64_t v, PyAdamasStr* desc, int64_t indent, int64_t sort_keys) {
+
     JBuf b = {NULL, 0, 0, indent, sort_keys};
     jb_value(&b, v, desc->data, (size_t)desc->len, 0);
     PyAdamasStr* out = str_new(b.buf ? b.buf : "", (int64_t)b.len);
     free(b.buf);
+
     return out;
 }
 
