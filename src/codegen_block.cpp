@@ -747,7 +747,6 @@ void AsmGen::emit_closure_shim(const IRFunction& f, int fi) {
         // 间接调用点常常不知道真实签名（实参静态类型是 unknown），只能按统一
         // 约定装填；由这一层按真实签名重排，返回时再把真实返回值搬回 %rax。
         //
-        // 只处理参数个数 <= 6（无栈上实参）的签名，见 closure_needs_shim。
         line(std::format("{}:", shim_label(fi)));
         if (gnu_cfi()) line(".cfi_startproc");
 
@@ -770,21 +769,54 @@ void AsmGen::emit_closure_shim(const IRFunction& f, int fi) {
             return;
         }
 
-        // 慢路径：含浮点，需要真正的重排。
-        // 临时区：先把所有实参落栈，避免重排时互相覆盖。
-        // +8 让 rsp 在即将到来的 call 处 16 字节对齐（入口 rsp ≡ 8 mod 16）。
-        const int tmp = ((8 * n + 15) & ~15) + 8;
+        // 慢路径：需要真正的重排（签名含浮点，或参数超过 6 个有栈上实参）。
+        //
+        // 统一约定把第 i 个实参放在第 i 个整型寄存器（前 6 个）或溢出区
+        // out_base + (i-6)*8（其余）。真实 ABI 则是「整型/浮点各自计数、
+        // 超出各自寄存器数的走栈」。两者在含浮点时不兼容，所以这里要重排。
+        //
+        // 临时区布局：
+        //   [0, 8*n)          统一约定传来的 n 个实参（前 6 个从寄存器落栈，
+        //                     其余本来就在调用者的溢出区，这里一并搬进来）
+        //   [8*n, 8*n+8*sp)   真实 ABI 的栈传参区（sp = 走栈的实参个数）
+        // 重排完成后 rsp 调整到让 [8*n] 正好落在被调方期望的栈传参起点。
+        auto locs = classify(ptypes);
+        int nstack = 0;
+        for (const auto& l : locs)
+            if (l.stack_off >= 0) ++nstack;
+        const int spill = 8 * n;
+        const int stack_bytes = 8 * nstack;
+        // 让 call 时 rsp ≡ 0 mod 16（入口 rsp ≡ 8 mod 16，subq 后要补 8）。
+        const int tmp = ((spill + stack_bytes + 15) & ~15) + 8;
         line(std::format("subq ${}, %rsp", tmp));
         if (gnu_cfi()) line(std::format(".cfi_def_cfa_offset {}", 8 + tmp));
+        // 1) 把所有实参搬到临时区 [0, 8*n)。
         for (int i = 0; i < n; ++i) {
-            // 统一约定下第 i 个实参在第 i 个整型实参寄存器（两套 ABI 相同）。
-            emit2("movq", arg_reg_i(i), std::format("{}(%rsp)", 8 * i));
+            if (i < kMaxIntArgs()) {
+                emit2("movq", arg_reg_i(i), std::format("{}(%rsp)", 8 * i));
+            } else {
+                // 溢出实参：调用者放在 out_base + (i-6)*8（相对它执行 call 时
+                // 的 rsp）。**必须 +8**：call 压入了返回地址，所以进入 shim 时
+                // 调用者的溢出区整体后移 8 字节。
+                //
+                // 漏掉这个 +8 的后果：读到返回地址当第 1 个溢出实参，真正的
+                // 溢出区整体错位一格，最后一个实参永远读不到 —— 实测 10 个
+                // float 参数时 10.1 丢失（输出 49.5 而非 59.6）。
+                line(std::format("movq {}(%rsp), %rax",
+                                 tmp + 8 + out_base() + (i - kMaxIntArgs()) * 8));
+                line(std::format("movq %rax, {}(%rsp)", 8 * i));
+            }
         }
-
-        // 按真实签名重排：浮点形参读回后放 %xmm，整型照旧。
-        auto locs = classify(ptypes);
+        // 2) 按真实 ABI 重排到寄存器与栈传参区。
+        int sslot = 0;
         for (int i = 0; i < n; ++i) {
-            const auto& l = locs[i];
+            const auto& l = locs[static_cast<size_t>(i)];
+            if (l.stack_off >= 0) {
+                line(std::format("movq {}(%rsp), %rax", 8 * i));
+                line(std::format("movq %rax, {}(%rsp)", spill + sslot * 8));
+                ++sslot;
+                continue;
+            }
             if (l.fp) {
                 line(std::format("movsd {}(%rsp), %xmm{}", 8 * i, l.reg));
             } else {
@@ -793,11 +825,24 @@ void AsmGen::emit_closure_shim(const IRFunction& f, int fi) {
         }
         // 闭包环境指针：调用方已放在 %r10，临时区搬运不碰它，直接沿用。
 
+        // 栈传参区必须紧贴 call 的返回地址：把 rsp 抬到 spill 处。
+        // （重排后的栈实参在 [spill, spill+stack_bytes)，正好是 call 前
+        //  被调方看到的 (rsp+8) 起。）
+        if (spill > 0) {
+            line(std::format("addq ${}, %rsp", spill));
+            if (gnu_cfi()) line(std::format(".cfi_def_cfa_offset {}", 8 + tmp - spill));
+        }
+
         line(std::format("call {}", func_label(fi)));
 
         // 真实返回值 -> 统一约定：浮点在 %xmm0，搬到 %rax。
         if (ir_is_float(f.ret)) line("movq %xmm0, %rax");
 
+        // 恢复 rsp：call 前抬了 spill，这里补回。
+        if (spill > 0) {
+            line(std::format("subq ${}, %rsp", spill));
+            if (gnu_cfi()) line(std::format(".cfi_def_cfa_offset {}", 8 + tmp));
+        }
         line(std::format("addq ${}, %rsp", tmp));
         if (gnu_cfi()) line(std::format(".cfi_def_cfa_offset {}", 8));
         line("ret");
