@@ -353,6 +353,7 @@ private:
         in.dst = r;
         in.ty = ty;
         if (in.line == 0) in.line = cur_line_;
+        st_->fn->ensure_inst_id(in);
         if (!cur().terminated()) cur().insts.push_back(std::move(in));
         return r;
     }
@@ -360,6 +361,7 @@ private:
     void emit(Inst in) {
         in.dst = kNoReg;
         if (in.line == 0) in.line = cur_line_;
+        st_->fn->ensure_inst_id(in);
         if (!cur().terminated()) cur().insts.push_back(std::move(in));
     }
 

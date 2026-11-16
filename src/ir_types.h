@@ -5,6 +5,7 @@
 #include <memory>
 #include <ostream>
 #include <string>
+#include <unordered_map>
 #include <vector>
 
 #include "ir_ops.h"
@@ -20,6 +21,13 @@ inline bool ir_is_heap(const TypePtr& t);
 
 
 struct Inst {
+    // 稳定标识：在函数内唯一，且**不随块/指令重排而变**。
+    //
+    // 为什么需要它：优化遍（CSE / DCE / 版本化）要在指令之间建立引用
+    // （use-def 边、可用表达式、跳转目标），而块内下标与块号都会被
+    // vector::insert/erase 和新增块改变。用 id 做引用才不会失效。
+    // 0 表示「未分配」（降级时通过 IRFunction::next_inst_id 分配）。
+    uint32_t id = 0;
     IrOp op = IrOp::ConstNone;
     BinKind bop = BinKind::Add;
     UnKind uop = UnKind::Neg;
@@ -104,6 +112,28 @@ struct IRFunction {
     // 每个虚拟寄存器的类型，后端决定用 rax 还是 xmm 时查它
     std::vector<TypePtr> vreg_ty;
     std::vector<Block> blocks;
+
+    // ── 稳定 ID 与 use-def 索引 ────────────────────────────────────
+    // 指令 id 的分配器。只增不减（删指令不回收 id），保证任何时刻
+    // 拿到的 id 都还能在 inst_by_id 里查到是否已删。
+    uint32_t next_inst_id = 1;
+    // id -> 指令所在位置。指令被删时移除对应项。
+    // 值类型是 (block, index)，两者都可能在重排后过期，所以它只用于
+    // 「快速定位」，优化遍仍要以实际扫描为准。
+    std::unordered_map<uint32_t, std::pair<int, int>> inst_by_id;
+    // vreg -> 定义它的指令 id（单一定义；多次定义时取最后一次）。
+    std::unordered_map<VReg, uint32_t> def_of;
+    // vreg -> 使用它的指令 id 集合。
+    std::unordered_map<VReg, std::vector<uint32_t>> uses_of;
+
+    // 重新扫描整个函数，重建 inst_by_id / def_of / uses_of。
+    // 在块结构改动后调用（内联、循环版本化等），代价 O(指令数)。
+    void rebuild_use_def();
+    // 给一条指令分配 id（若尚未分配）。
+    uint32_t ensure_inst_id(Inst& in) {
+        if (in.id == 0) in.id = next_inst_id++;
+        return in.id;
+    }
     // 有捕获的函数：入口把 %r10 里的闭包指针存进这个槽。
     int env_slot = -1;
     // 含 setjmp 的函数关闭槽位寄存器提升：longjmp 会把 callee-saved

@@ -19,6 +19,37 @@ std::string ty_note(const TypePtr& t) {
 
 }  // namespace
 
+// 重新扫描整个函数，重建稳定 ID 与 use-def 索引。
+//
+// 触发时机：任何会改动块/指令结构的 pass 之后（内联、循环旋转、
+// 边界版本化、DCE 删除）。代价 O(指令数)，相对那些 pass 本身可忽略。
+//
+// 索引的语义（刻意保持简单）：
+//   def_of[v]   = 定义 v 的最后一条指令 id（多次定义只留最后一条）
+//   uses_of[v]  = 所有把 v 当操作数读的指令 id（按扫描顺序）
+// 不做 SSA 那套精确单定义检查 —— 这个 IR 的 vreg 本来就是可多次定义的
+// 临时值，索引只服务「快速找到使用点」，不承担正确性判定。
+void IRFunction::rebuild_use_def() {
+    inst_by_id.clear();
+    def_of.clear();
+    uses_of.clear();
+    for (int b = 0; b < static_cast<int>(blocks.size()); ++b) {
+        auto& insts = blocks[static_cast<size_t>(b)].insts;
+        for (int k = 0; k < static_cast<int>(insts.size()); ++k) {
+            Inst& in = insts[static_cast<size_t>(k)];
+            const uint32_t id = ensure_inst_id(in);
+            inst_by_id[id] = {b, k};
+            if (in.dst != kNoReg) def_of[in.dst] = id;
+            auto use = [&](VReg r) {
+                if (r != kNoReg) uses_of[r].push_back(id);
+            };
+            use(in.a);
+            use(in.b);
+            use(in.c);
+            for (VReg r : in.args) use(r);
+        }
+    }
+}
 std::string Inst::text() const {
     switch (op) {
         case IrOp::ConstInt: return std::format("{} = const.int {}", vreg_str(dst), imm);
