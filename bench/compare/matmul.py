@@ -9,20 +9,24 @@ def make(n: int) -> list:
     return out
 
 
-a = make(N)
-b = make(N)
-c = []
-for _ in range(N * N):
-    c.append(0)
+def run() -> int:
+    a = make(N)
+    b = make(N)
+    c = []
+    for _ in range(N * N):
+        c.append(0)
 
-for i in range(N):
-    for k in range(N):
-        aik = a[i * N + k]
-        if aik != 0:
-            for j in range(N):
-                c[i * N + j] += aik * b[k * N + j]
+    for i in range(N):
+        for k in range(N):
+            aik = a[i * N + k]
+            if aik != 0:
+                for j in range(N):
+                    c[i * N + j] += aik * b[k * N + j]
 
-total = 0
-for v in c:
-    total += v
-print(total)
+    total = 0
+    for v in c:
+        total += v
+    return total
+
+
+print(run())

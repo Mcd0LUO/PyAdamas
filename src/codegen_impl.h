@@ -217,6 +217,7 @@ private:
     std::vector<std::vector<uint64_t>> slot_live_in_;
     std::vector<std::vector<uint64_t>> slot_live_out_;
     std::vector<int> slot_reg_cand_;   // 参与分配的槽号（升序）
+    std::vector<char> slot_cand_is_fp_; // 与 slot_reg_cand_ 对齐：是否浮点槽
     std::vector<int> slot_reg_cand_idx_;  // 槽号 -> slot_reg_cand_ 下标，-1 = 不参与
     void build_slot_liveness();
     std::vector<char> fp_spill_mask_;  // 当前指令需要保存的槽
@@ -744,6 +745,10 @@ private:
     // 收益抵不上复杂度。
     void assign_slot_regs();
     void assign_slot_regs_linear();
+    // 通用线性扫描：给定活跃区间与寄存器池，返回 slot -> 寄存器名。
+    // 整型与浮点共用（R4：浮点也走线性扫描，不再按频次挑前 N 个）。
+    void linear_scan_pool(const std::vector<int>& cands, const char* const* regs,
+                          int nreg, std::vector<std::string>& out);
     void build_int_caller_mask(int block);
     bool slot_range_has_call(int64_t beg, int64_t end) const;
 
