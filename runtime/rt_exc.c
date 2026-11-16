@@ -438,8 +438,20 @@ void pa_handler_suspend(void* p) {
     PyAdamasHandler* h = (PyAdamasHandler*)p;
     if (handler_top != h) panic_c("handler stack corrupted on suspend");
     handler_top = h->prev;
-    if (gen_owner) {
-        h->suspend_owner = gen_owner;
+
+    /* 记录已经和 handler_top 脱钩了，必须**无条件**登记到挂起表 ——
+     *
+     * 原来只在 gen_owner 非空时登记，但实测很多 suspend 发生在
+     * gen_owner 为 NULL 的上下文（生成器被 pa_gen_next_opt 驱动时，
+     * owner 已经在上一轮 gen_run 结束时清掉了）。那些记录摘链之后
+     * 既不在 handler_top 上、也不在挂起表里 —— 永久丢失。
+     *
+     * ASan 实测 162_pep479：owner=NULL 的 suspend 有 10+ 次，泄漏 240 字节。
+     *
+     * owner 为 NULL 时挂在一个全局「孤儿」owner 上，由 pa_exc_shutdown
+     * 兜底清理；生成器销毁时按自己的 owner 找，不会误删孤儿记录。 */
+    h->suspend_owner = gen_owner ? gen_owner : (void*)&handler_top;
+    {
         SuspendedNode* n = suspended_pool;
         if (n)
             suspended_pool = n->next;
@@ -903,4 +915,78 @@ PyAdamasStr* pa_exc_value_str(PyAdamasExcValue* v) {
     if (!v || v->magic != PYADAMAS_EXCVAL_MAGIC)
         pa_raise_c("TypeError", "expected an exception instance");
     return str_new(v->message, (int64_t)strlen(v->message));
+}
+
+/* 进程退出时还掉异常子系统的全局内存。
+ *
+ * 三处都是**纯缓存/登记表**，不影响正确性（进程都要退出了），但会让
+ * LeakSanitizer 报 Direct leak，淹没真正有价值的信号：
+ *
+ *   * handler_freelist —— pa_handler_push 的复用池；
+ *   * suspended_head/pool —— 生成器挂起中的 handler 记录（0.219 引入）；
+ *   * exc_regs —— 异常继承关系登记（pa_exc_register）；
+ *   * exc_node_top —— 异常上下文嵌套节点。
+ *
+ * 顺序：先还挂起表里的记录（它们是从 freelist 之外单独 malloc 的），
+ * 再还 freelist 本身，最后还登记表。 */
+void pa_exc_shutdown(void) {
+    if (getenv("PYADAMAS_EXCSD_DEBUG")) {
+        int ntop = 0, nsus = 0, nfree = 0;
+        for (PyAdamasHandler* q = handler_top; q; q = q->prev) ++ntop;
+        for (SuspendedNode* s = suspended_head; s; s = s->next) ++nsus;
+        for (PyAdamasHandler* q = handler_freelist; q; q = q->prev) ++nfree;
+        fprintf(stderr, "[excsd] handler_top=%d suspended=%d freelist=%d\n",
+                ntop, nsus, nfree);
+    }
+    // 挂起表里的 handler 记录：整条链还掉。
+    SuspendedNode* sn = suspended_head;
+    while (sn) {
+        SuspendedNode* nx = sn->next;
+        if (sn->h && sn->h->heap_alloc) {
+            sn->h->prev = handler_freelist;
+            handler_freelist = sn->h;
+        }
+        free(sn);
+        sn = nx;
+    }
+    suspended_head = NULL;
+    // 空闲节点池。
+    sn = suspended_pool;
+    while (sn) {
+        SuspendedNode* nx = sn->next;
+        free(sn);
+        sn = nx;
+    }
+    suspended_pool = NULL;
+    // **还挂在 handler_top 链上的记录**：进程退出时生成器可能还停在某个
+    // 保护区里（`list(g_inner())` 消费到一半、生成器对象没销毁），那些
+    // 记录既不在挂起表、也不在 freelist，是最后一块泄漏。
+    // 它们都是堆分配的（栈记录的 heap_alloc=0，但栈记录不在这条链上 ——
+    // 链上的都是 pa_handler_push 压的）。
+    while (handler_top) {
+        PyAdamasHandler* h = handler_top;
+        handler_top = h->prev;
+        if (h->heap_alloc) free(h);
+    }
+    // handler freelist 本体。
+    while (handler_freelist) {
+        PyAdamasHandler* h = handler_freelist;
+        handler_freelist = h->prev;
+        free(h);
+    }
+    // 异常继承登记表（child/parent 是 malloc 的字符串）。
+    while (exc_regs) {
+        ExcReg* r = exc_regs;
+        exc_regs = r->next;
+        free(r->child);
+        free(r->parent);
+        free(r);
+    }
+    // 异常上下文嵌套节点。
+    while (exc_node_top) {
+        PyAdamasExcNode* n = exc_node_top;
+        exc_node_top = n->prev;
+        free(n);
+    }
+    exc_node_depth = 0;
 }

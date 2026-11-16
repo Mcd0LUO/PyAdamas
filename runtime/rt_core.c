@@ -491,6 +491,7 @@ void dict_gc_release(void* p);
 PyAdamasList* pa_list_new(int64_t cap, int64_t elem_kind);
 void pa_list_buf_pool_shutdown(void);
 void pa_sys_argv_shutdown(void);
+void pa_exc_shutdown(void);
 void pa_list_append(PyAdamasList* l, int64_t v);
 
 void panic_c(const char* msg) {
@@ -1577,6 +1578,10 @@ void pa_gc_shutdown(void) {
     }
     list_pool_count = 0;
     pa_list_buf_pool_shutdown();
+    // 异常子系统的全局表（handler freelist / 挂起表 / 登记表 / 嵌套节点）。
+    // 见 pa_exc_shutdown 的说明：都是缓存，但不清会让 LeakSanitizer 报一堆
+    // 没有信息量的 Direct leak。
+    pa_exc_shutdown();
 }
 
 /* 分模块编译：init 是模块顶层生成的 void(void)，ready 是模块 .bss 里的
