@@ -457,6 +457,9 @@ private:
     TypePtr dunder_binop_ret(Tok op, TypePtr l, TypePtr r);
     // 增量赋值优先看 __iadd__ 这类原地版本。
     TypePtr dunder_aug_ret(Tok op, TypePtr l, TypePtr r);
+    // 单参数 dunder（self 之外无形参）的声明返回类型：一元运算和 abs()
+    // 都按它定结果类型，没有实现时返回 nullptr。
+    TypePtr dunder_unary_ret(const char* name, TypePtr t);
     // 大小比较的 dunder 是否存在（含右操作数镜像版）。
     bool dunder_cmp_ok(CmpOp op, TypePtr l, TypePtr r);
 

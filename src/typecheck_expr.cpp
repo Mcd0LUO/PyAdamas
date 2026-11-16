@@ -163,18 +163,38 @@ TypePtr TypeChecker::expr(Expr& e) {
                     case Tok::KW_NOT: return t_bool();
                     case Tok::MINUS:
                     case Tok::PLUS:
-                        // 类实例 / 绑定方法可能重载了一元运算符（@property
-                        // 返回的数值最常见），静态上看不见
+                    case Tok::TILDE:
+                        // 用户类的一元运算走 __neg__/__pos__/__invert__，结果
+                        // 类型就是方法声明的返回类型。以前这里一律返回操作数
+                        // 自己的类型（Class），降级层于是把对象指针当整数取负，
+                        // 再按堆类型做引用计数——野指针，运行期 SIGSEGV。
+                        if (t && t->kind == TyKind::Class) {
+                            const char* dn = u.op == Tok::MINUS    ? "__neg__"
+                                             : u.op == Tok::PLUS   ? "__pos__"
+                                                                   : "__invert__";
+                            if (TypePtr r = dunder_unary_ret(dn, t)) return r;
+                            // 基类来源未知的开放类：静态看不见 dunder，交给
+                            // 降级层（那里同样会报错，不会静默算错）。
+                            if (t->cls && t->cls->is_open()) return t_unknown();
+                            err(u.line, u.col,
+                                std::format("bad operand type for unary {}: '{}'",
+                                            tok_name(u.op), type_name(t)));
+                            return t_unknown();
+                        }
+                        if (u.op == Tok::TILDE) {
+                            if (is_unknown(t) || t->kind == TyKind::Int ||
+                                t->kind == TyKind::Bool)
+                                return t_int();
+                            err(u.line, u.col, "bad operand type for '~': expected int");
+                            return t_unknown();
+                        }
+                        // 绑定方法可能重载了一元运算符（@property 返回的数值最
+                        // 常见），静态上看不见
                         if (is_unknown(t) || is_num(t) || t->kind == TyKind::Complex ||
-                            t->kind == TyKind::Class || t->kind == TyKind::BoundMethod ||
-                            t->kind == TyKind::TimeDelta)
+                            t->kind == TyKind::BoundMethod || t->kind == TyKind::TimeDelta)
                             return t;
                         err(u.line, u.col,
                             std::format("bad operand type for unary operator: '{}'", type_name(t)));
-                        return t_unknown();
-                    case Tok::TILDE:
-                        if (is_unknown(t) || t->kind == TyKind::Int) return t_int();
-                        err(u.line, u.col, "bad operand type for '~': expected int");
                         return t_unknown();
                     default: return t_unknown();
                 }
@@ -716,6 +736,17 @@ TypePtr TypeChecker::dunder_binop_ret(Tok op, TypePtr l, TypePtr r) {
     };
     if (TypePtr t = try_side(l, r, ref->fwd)) return t;
     return try_side(r, l, ref->rev);
+}
+
+// 单参数 dunder（self 之外没有形参）的声明返回类型。签名不可用时返回
+// nullptr，调用点退回「没有实现」的默认行为。
+TypePtr TypeChecker::dunder_unary_ret(const char* name, TypePtr t) {
+    if (!name || !t || t->kind != TyKind::Class || !t->cls) return nullptr;
+    const MethodInfo* m = t->cls->method(name);
+    if (!m || m->kind != MethodKind::Normal || !m->call_sig) return nullptr;
+    if (m->call_sig->varargs || m->call_sig->kwargs || !m->call_sig->pos.empty())
+        return nullptr;
+    return m->call_sig->ret ? m->call_sig->ret : t_unknown();
 }
 
 TypePtr TypeChecker::dunder_aug_ret(Tok op, TypePtr l, TypePtr r) {

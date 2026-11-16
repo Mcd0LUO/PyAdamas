@@ -4,6 +4,36 @@
 
 早期阶段没有逐条留痕，按阶段归纳；0.4 之后逐条记录。
 
+## [0.185] - 2026-11-16
+
+### 修用户类一元运算符的 SIGSEGV（`__neg__` 等）
+
+现象：用户类定义 `__neg__` 后取负直接 **SIGSEGV(139)**。
+
+**根因不是 dunder 查表缺失，而是「一元运算整条链都没做类实例分派」**：
+
+1. `typecheck_expr.cpp` 的 UnaryOp 对 MINUS/PLUS/TILDE 一律返回操作数自身类型（Class），
+   TILDE 还直接判死 `expected int`；
+2. `lower_expr_ops.cpp` 的 `lower_unary` 没有任何类分支，直接落 `IrOp::Un`（`negq`/`notq`
+   机器整数指令），**把对象指针取负**；
+3. 结果 vreg 的静态类型仍是 Class（`ir_is_heap` 为真），降级层对野指针 `pa_rc_inc` -> 崩溃。
+
+二元运算有 `lower_dunder_binop` / `dunder_binop_ret`，一元完全没有对应物。
+
+修复（9 个文件，+137/-12）：
+- 新增 `TypeChecker::dunder_unary_ret`：按 MRO 查单参 dunder 的声明返回类型；
+- MINUS/PLUS/TILDE 对 Class 走 `__neg__` / `__pos__` / `__invert__`，无实现且非开放类则报错
+  （不再静默）；`lower_unary` 加类分支走 `dunder_call`；
+- `abs()` 走 `__abs__`（原来把对象指针当 i64 取绝对值）；`operator.neg/pos/abs/invert` 同样走 dunder；
+- `AnnAssign` 到 `self.attr` 时补登记接收者类型（顺带修掉一个 `unsupported assignment target`）；
+- `dunder_len` 容忍 bool 返回、`dunder_bool` 容忍 int 返回（否则静默退回指针判空，结果相反）。
+
+`__pos__` / `__invert__` / `__abs__` 与 `__neg__` **完全同根因**，一并修；
+`__bool__` / `__len__` 根因不同（本来就有 dunder_call，但只认精确返回类型），也已修。
+
+验证：字面复现从 rc=139 变成 rc=0 且输出 `-3` 与 CPython 一致；新增
+`tests/run/176_unary_dunder.py`；全量 **195 ran ok / 0 FAILED / 0 OUTPUT DIFF**；
+z1_rt 116、z2_rt 134、z2_codegen 99、tests/eh 33、sem_baseline 42 全部无回退。
 ## [0.184] - 2026-11-16
 
 ### 零开销异常 Z2-b2：codegen 接线打通（`--zero-cost-exc`，默认关闭）

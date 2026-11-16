@@ -446,6 +446,19 @@ std::optional<TypePtr> TypeChecker::operator_call(const std::string& member, Cal
             member == "invert") {
             if (!want_args(1)) return t_unknown();
             TypePtr t = a[0];
+            // 用户类：和一元运算符一样走 __neg__/__pos__/__abs__/__invert__。
+            if (t && t->kind == TyKind::Class) {
+                const char* dn = member == "neg"    ? "__neg__"
+                                 : member == "pos"  ? "__pos__"
+                                 : member == "abs"  ? "__abs__"
+                                                    : "__invert__";
+                if (TypePtr r = dunder_unary_ret(dn, t)) return r;
+                if (t->cls && t->cls->is_open()) return t_unknown();
+                err(c.args[0]->line, c.args[0]->col,
+                    std::format("bad operand type for operator.{}(): '{}'", member,
+                                type_name(t)));
+                return t_unknown();
+            }
             if (member == "invert") {
                 if (t && !is_unknown(t) && t->kind != TyKind::Int &&
                     t->kind != TyKind::Bool)

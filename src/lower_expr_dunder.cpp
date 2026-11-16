@@ -13,11 +13,32 @@ VReg Lowerer::dunder_str(VReg v, TypePtr ty, bool prefer_repr) {
 }
 
 VReg Lowerer::dunder_len(VReg v, TypePtr ty) {
-    return dunder_call(v, ty, "__len__", {}, t_int());
+    VReg ln = dunder_call(v, ty, "__len__", {}, t_int());
+    if (ln != kNoReg) return ln;
+    // __len__ 返回 bool 也合法（bool 是 int 的子类，check_dunder_returns
+    // 同样放行）。以前这里只认 int，bool 版本被当成「没有 __len__」，
+    // 于是 len() 直接报错、真值判断退回指针判空——静默算错。
+    VReg bl = dunder_call(v, ty, "__len__", {}, t_bool());
+    if (bl != kNoReg) return retype(bl, t_int());
+    return kNoReg;
 }
 
 VReg Lowerer::dunder_bool(VReg v, TypePtr ty) {
-    return dunder_call(v, ty, "__bool__", {}, t_bool());
+    VReg b = dunder_call(v, ty, "__bool__", {}, t_bool());
+    if (b != kNoReg) return b;
+    // __bool__ 返回 int 时按非零判真（类型检查层把 bool/int 视为兼容）。
+    // 以前只认 bool，int 版本被当成「没有 __bool__」，真值退回 __len__ /
+    // 指针判空，bool(v) / not v 会给出相反的结果。
+    VReg i = dunder_call(v, ty, "__bool__", {}, t_int());
+    if (i != kNoReg) {
+        Inst c;
+        c.op = IrOp::Cmp;
+        c.cop = CmpKind::Ne;
+        c.a = i;
+        c.b = const_int(0);
+        return def(t_bool(), std::move(c));
+    }
+    return kNoReg;
 }
 
 VReg Lowerer::lower_dunder_eq(VReg l, TypePtr lt, VReg r, TypePtr rt, bool ne) {

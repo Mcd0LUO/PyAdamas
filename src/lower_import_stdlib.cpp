@@ -208,6 +208,20 @@ VReg Lowerer::lower_operator(const std::string& member, Call& c) {
         }
         VReg v = expr(*c.args[0]);
         TypePtr t = argty(0);
+        // 用户类：走 __neg__/__pos__/__abs__/__invert__，和一元运算符一致。
+        if (t && t->kind == TyKind::Class) {
+            const char* dn = member == "neg"    ? "__neg__"
+                             : member == "pos"  ? "__pos__"
+                             : member == "abs"  ? "__abs__"
+                                                : "__invert__";
+            TypePtr want = (rt && rt->kind != TyKind::Unknown) ? rt : nullptr;
+            VReg r = dunder_call(v, t, dn, {}, want);
+            if (r != kNoReg) return r;
+            err(c.args[0]->line, c.args[0]->col,
+                std::format("bad operand type for operator.{}(): '{}'", member,
+                            t->cls ? t->cls->name : "object"));
+            return const_none();
+        }
         if (member == "abs") {
             if (t && t->kind == TyKind::Float)
                 return call_runtime(RtFn::MathFabs, t_float(), {v});

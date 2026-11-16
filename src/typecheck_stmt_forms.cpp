@@ -67,6 +67,10 @@ void TypeChecker::stmt_ann_assign(AnnAssign& a) {
         } else if (auto* at = dynamic_cast<Attribute*>(a.target.get());
                    at && is_self_attr(*at)) {
             // `self.x: int = 0`：字段标注写在方法里，等价于类体标注
+            // 接收者自己也要过一遍表达式检查：降级层按 expr_types_ 查
+            // 接收者的类型来决定走字段存储还是运行期属性表，这里漏掉会让
+            // `self.x: int = x` 在代码生成期报「unsupported assignment target」。
+            (void)expr(*at->value);
             TypePtr want = (ann && !is_unknown(ann)) ? ann : (vt ? vt : t_unknown());
             if (!add_implicit_field(*at, want)) {
                 if (auto* f = cur_class_->field(at->attr);

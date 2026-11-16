@@ -121,6 +121,18 @@ VReg Lowerer::lower_builtin_misc(const std::string& name, Call& c) {
         }
         TypePtr t = tc_.type_of(c.args[0].get());
         VReg v = expr(*c.args[0]);
+        // 用户类走 __abs__（CPython 语义），否则下面会把对象指针当 i64
+        // 取绝对值——静默算错。
+        if (t && t->kind == TyKind::Class) {
+            TypePtr want = tc_.type_of(&c);
+            if (want && want->kind == TyKind::Unknown) want = nullptr;
+            VReg r = dunder_call(v, t, "__abs__", {}, want);
+            if (r != kNoReg) return r;
+            err(c.args[0]->line, c.args[0]->col,
+                std::format("bad operand type for abs(): '{}'",
+                            t->cls ? t->cls->name : "object"));
+            return const_none();
+        }
         if (t && t->kind == TyKind::Float)
             return call_runtime(RtFn::MathFabs, t_float(), {v});
         if (t && t->kind == TyKind::Complex)

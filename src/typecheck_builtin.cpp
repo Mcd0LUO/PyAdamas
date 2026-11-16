@@ -83,6 +83,14 @@ TypePtr TypeChecker::builtin_call(const std::string& n, Call& c) {
         }
         if (n == "abs") {
             if (a.empty()) return t_unknown();
+            // 用户类：__abs__ 的声明返回类型就是 abs() 的结果类型。
+            if (a[0] && a[0]->kind == TyKind::Class) {
+                if (TypePtr r = dunder_unary_ret("__abs__", a[0])) return r;
+                if (a[0]->cls && a[0]->cls->is_open()) return t_unknown();
+                err(c.line, c.col,
+                    std::format("bad operand type for abs(): '{}'", type_name(a[0])));
+                return t_unknown();
+            }
             if (!is_unknown(a[0]) && !is_num(a[0]) &&
                 (!a[0] || a[0]->kind != TyKind::Complex))
                 err(c.line, c.col,

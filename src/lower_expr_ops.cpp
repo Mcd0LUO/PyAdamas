@@ -236,9 +236,28 @@ VReg Lowerer::lower_binop(BinOp& b) {
 
 VReg Lowerer::lower_unary(UnaryOp& u) {
     TypePtr ty = tc_.type_of(&u);
+    TypePtr opnd_ty = tc_.type_of(u.operand.get());
     VReg v = expr(*u.operand);
-    // 类实例的 `not` 先按 __len__ 求值真值（没有 __len__ 时后端按指针判空）。
-    if (u.op == Tok::KW_NOT) v = truth_bool(v, tc_.type_of(u.operand.get()));
+    // 类实例的 `not` 先按 __bool__ / __len__ 求值真值（都没有时后端按指针判空）。
+    if (u.op == Tok::KW_NOT) v = truth_bool(v, opnd_ty);
+    // 用户类的一元运算：__neg__ / __pos__ / __invert__。以前这里直接落
+    // 到下面的机器整数指令，把对象指针取负后按结果的静态类型（Class）
+    // 做引用计数——野指针，运行期 SIGSEGV。
+    if (opnd_ty && opnd_ty->kind == TyKind::Class) {
+        const char* dn = u.op == Tok::MINUS    ? "__neg__"
+                         : u.op == Tok::PLUS   ? "__pos__"
+                         : u.op == Tok::TILDE  ? "__invert__"
+                                               : nullptr;
+        if (dn) {
+            TypePtr want = (ty && ty->kind != TyKind::Unknown) ? ty : nullptr;
+            VReg r = dunder_call(v, opnd_ty, dn, {}, want);
+            if (r != kNoReg) return r;
+            err(u.line, u.col,
+                std::format("bad operand type for unary {}: '{}'", tok_name(u.op),
+                            type_name(opnd_ty)));
+            return const_none();
+        }
+    }
     if (ty && ty->kind == TyKind::TimeDelta && u.op == Tok::MINUS) {
         VReg out = call_runtime(RtFn::TimeDeltaNeg, ty, {v});
         push_temp(out);
