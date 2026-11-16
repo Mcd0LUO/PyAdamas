@@ -76,23 +76,21 @@ void dce_function(IRFunction& fn) {
     bool changed = true;
     while (changed) {
         changed = false;
-        std::vector<int> uses(fn.vreg_ty.size(), 0);
-        auto touch = [&](VReg r) {
-            if (r != kNoReg && r < static_cast<VReg>(uses.size())) ++uses[r];
+        // 用函数级的 use-def 索引，不再每轮手工扫一遍全函数统计使用次数。
+        //
+        // 语义等价：uses_of[v].size() 就是 v 被读的次数。索引由
+        // rebuild_use_def() 一次 O(指令数) 重建，这里每轮复用；
+        // 删掉指令后重新建一次（删的是纯计算，不影响其他指令的 use）。
+        fn.rebuild_use_def();
+        auto use_count = [&](VReg r) -> size_t {
+            auto it = fn.uses_of.find(r);
+            return it == fn.uses_of.end() ? 0 : it->second.size();
         };
-        for (const auto& b : fn.blocks)
-            for (const auto& in : b.insts) {
-                touch(in.a);
-                touch(in.b);
-                touch(in.c);
-                for (VReg r : in.args) touch(r);
-            }
         for (auto& b : fn.blocks) {
             auto& v = b.insts;
             for (size_t i = 0; i < v.size();) {
                 const Inst& in = v[i];
-                bool dead = in.dst != kNoReg &&
-                            in.dst < static_cast<VReg>(uses.size()) && uses[in.dst] == 0 &&
+                bool dead = in.dst != kNoReg && use_count(in.dst) == 0 &&
                             inst_is_pure(in);
                 if (!dead) {
                     ++i;
