@@ -165,7 +165,7 @@ struct FuncCtx {
     std::vector<size_t> loop_cleanup_depth;    // 词法上活跃的清理动作，按从外到内排列。return/break/continue 和
     // 异常 landing 都从这里生成对应动作。
     struct Cleanup {
-        enum class Kind { With, AsyncWith, Finally, Handler, ExcDone, FileClose, LockRelease, TimeoutExit, TaskGroupCancel, SemRelease } kind;
+        enum class Kind { With, AsyncWith, Finally, Handler, ExcDone, FileClose, LockRelease, TimeoutExit, TaskGroupCancel, SemRelease, ZeroCostEh } kind;
         // With / Finally / Handler：handler 记录所在的槽
         int handler_slot = -1;
         // Handler/With/Finally：setjmp 非 0 时跳转的异常展开块
@@ -181,6 +181,8 @@ struct FuncCtx {
         ClassInfo* exit_cls = nullptr;
         // Finally
         std::vector<StmtPtr>* body = nullptr;
+        // ZeroCostEh：零开销 try 的临时值水位槽（早退时要 RcCleanup 到它）。
+        int mark_slot = -1;
         // finally 体词法上所属的循环：close 重放 break/continue 时恢复，
         // -1 表示不在循环里。
         int loop_brk = -1;

@@ -128,6 +128,14 @@ void Lowerer::emit_cleanup_exits(size_t down_to) {
                 call_void(RtFn::HandlerDiscard, {load_slot(c.handler_slot, t_int())});
                 call_void(RtFn::TaskGroupCancel, {load_slot(c.mgr_slot, t_unknown())});
                 break;
+            case FuncCtx::Cleanup::Kind::ZeroCostEh:
+                // 零开销 try 的早退（return/break/continue 穿过保护区）：
+                // 先退出表驱动展开区（pa_eh_leave，否则 pa_eh_depth 不归零，
+                // 之后抛出的异常会误走 _Unwind），再按水位清理临时值。
+                call_void(RtFn::EhLeave, {});
+                if (c.mark_slot >= 0)
+                    call_void(RtFn::RcCleanup, {load_slot(c.mark_slot, t_int())});
+                break;
             case FuncCtx::Cleanup::Kind::SemRelease:
                 call_void(RtFn::HandlerDiscard, {load_slot(c.handler_slot, t_int())});
                 call_void(RtFn::SemRelease, {load_slot(c.mgr_slot, t_unknown())});

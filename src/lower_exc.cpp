@@ -784,9 +784,8 @@ const Try* Lowerer::find_zero_cost_try(FunctionDef& f) {
             case StmtKind::Return:
             case StmtKind::Break:
             case StmtKind::Continue:
-                // 跨出保护区的早退：旧路径靠 HandlerDiscard/HandlerLeave 处理，
-                // 表驱动第一刀不做，直接降级回 setjmp 路径。
-                bad = true;
+                // 早退已支持（Z4）：lower_try_zero_cost 注册了一条 ZeroCostEh
+                // 清理项，emit_cleanup_exits 在跳转前发 pa_eh_leave + 水位清理。
                 break;
             case StmtKind::Raise: {
                 auto& r = static_cast<Raise&>(s);
@@ -854,9 +853,19 @@ void Lowerer::lower_try_zero_cost(Try& t) {
         eb.op = IrOp::EhBegin;
         emit(std::move(eb));
     }
+    // 注册一条清理项：try 体里若 return/break/continue 提前离开保护区，
+    // emit_cleanup_exits 会先 pa_eh_leave（退出表驱动展开区）再按水位清临时值。
+    // 没有这一条，早退会让 pa_eh_depth 一直 > 0，之后抛出的异常会误走 _Unwind。
+    {
+        FuncCtx::Cleanup zc;
+        zc.kind = FuncCtx::Cleanup::Kind::ZeroCostEh;
+        zc.mark_slot = mark_slot;
+        st_->cleanups.push_back(zc);
+    }
     ++st_->zc_raise_depth;
     stmts(t.body);
     --st_->zc_raise_depth;
+    st_->cleanups.pop_back();
 
     if (terminated()) {
         // find_zero_cost_try 已经排除了 return/break/continue；走到这里说明
@@ -970,8 +979,11 @@ void Lowerer::lower_try_zero_cost(Try& t) {
         stmts(hb.h->body);
         if (shadow >= 0) comp_slots_.pop_back();
         if (terminated()) {
-            err(t.line, t.col, "internal: zero-cost except body ended with a terminator");
-            return;
+            // except 体里 return/break/continue 是合法的：异常已经被这个 handler
+            // 接住并处理完，控制流正常离开。跳过 ExcDone 与跳到 end 的代码，
+            // 直接处理下一个 handler 体（它的块虽然不可达，但仍要生成，
+            // 因为分派链可能从别处跳进来）。
+            continue;
         }
         call_void(RtFn::ExcDone, {});
         Inst jj;
