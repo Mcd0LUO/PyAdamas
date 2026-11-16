@@ -744,9 +744,8 @@ void AsmGen::invalidate_slot(int slot) {
 
 void AsmGen::emit_closure_shim(const IRFunction& f, int fi) {
         // 统一调用约定：第 i 个实参放第 i 个整型实参寄存器，返回值放 %rax。
-        // 签名含浮点的函数需要这一层：间接调用点常常不知道真实签名（实参静态
-        // 类型是 unknown），只能按统一约定装填，由 shim 重排到真实位置；
-        // 返回时再把真实返回值（浮点在 %xmm0）搬回 %rax。
+        // 间接调用点常常不知道真实签名（实参静态类型是 unknown），只能按统一
+        // 约定装填；由这一层按真实签名重排，返回时再把真实返回值搬回 %rax。
         //
         // 只处理参数个数 <= 6（无栈上实参）的签名，见 closure_needs_shim。
         line(std::format("{}:", shim_label(fi)));
@@ -757,6 +756,21 @@ void AsmGen::emit_closure_shim(const IRFunction& f, int fi) {
         ptypes.reserve(f.params.size());
         for (auto& p : f.params) ptypes.push_back(p.ty);
 
+        // 快路径：签名里没有浮点。此时真实入口本来就按「第 i 个实参进第 i 个
+        // 整型寄存器、返回值在 %rax」收，与统一约定逐位相同 —— 直接跳过去即可，
+        // 省掉一次 call/ret。这是绝大多数函数的情形（202 个用例里 2180 个 shim
+        // 中绝大多数属于此类）。
+        bool any_fp = ir_is_float(f.ret);
+        for (const auto& t : ptypes)
+            if (ir_is_float(t)) any_fp = true;
+        if (!any_fp) {
+            // 跳转前不需要动栈：真实入口看到的栈状态与直接调用它时完全一致。
+            line(std::format("jmp {}", func_label(fi)));
+            if (gnu_cfi()) line(".cfi_endproc");
+            return;
+        }
+
+        // 慢路径：含浮点，需要真正的重排。
         // 临时区：先把所有实参落栈，避免重排时互相覆盖。
         // +8 让 rsp 在即将到来的 call 处 16 字节对齐（入口 rsp ≡ 8 mod 16）。
         const int tmp = ((8 * n + 15) & ~15) + 8;
