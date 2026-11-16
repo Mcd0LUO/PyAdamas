@@ -97,6 +97,17 @@ void Lowerer::release_slots() {
     for (size_t s = 0; s < st_->fn->slot_ty.size(); ++s) {
         if (st_->borrow_slots.count(static_cast<int>(s))) continue;
         TypePtr ty = st_->fn->slot_ty[s];
+        // 注意：unknown 槽**不能**在这里统一释放。
+        //
+        // 试过补齐成 `!ir_is_heap(ty) && !unk_ty`，结果 12 个用例报
+        // "refcount decrement on a freed object"（121_decorated_dunder、
+        // 126_decorated_slots、127_bound_method、144_operator…）。
+        // 原因是 unknown 槽里的值未必由 retain_for_store 加过引用：
+        // 装饰器回填、borrow_slots、帧槽别名等路径都会让 unknown 槽
+        // 持有「借来的」值，无条件 dec 就是 over-release。
+        //
+        // 要正确做，得给每个 unknown 槽记一个「是否 owned」的标记，
+        // 由写入点维护 —— 那是槽级所有权跟踪，不是这里一行能补的。
         if (!ir_is_heap(ty)) continue;
         VReg v = load_slot(static_cast<int>(s), ty);
         if (st_->fn->slot_unknown[s]) rc_dec_unknown(v);
@@ -130,7 +141,32 @@ void Lowerer::emit_return(VReg v, TypePtr vty) {
         rc_temp_take(v);
         moved = true;
     }
-    if (v != kNoReg && ir_is_heap(vty) && !moved) rc_inc(v);
+    // **unknown 返回值也必须加引用。**
+    //
+    // `ir_is_heap(vty)` 对 unknown 返回 false，于是这里什么都不做。但
+    // unknown 完全可能是堆对象：`def f(): return a[0]` 里 a 是 list[str]，
+    // `a[0]` 的元素类型在 lowering 时是 unknown，返回的就是一个借来的
+    // 字符串引用。
+    //
+    // 后果：caller 拿到这个指针后，被调函数的 rc_cleanup / 列表析构把它
+    // 的 rc 降到 0（字符串进池，内存还在但 rc=0），caller 之后对旧值做
+    // dec 时命中 `h->rc <= 0` —— panic "refcount decrement on a freed
+    // object"，或者更糟：读到已复用的内存。
+    //
+    // 实测（gc01_min_uaf / gc500）：
+    //     def f() -> str:
+    //         u = ident(["p" + str(i) for i in range(200)])
+    //         return u[0]
+    // 500 轮后 panic；PYADAMAS_GC_DISABLE=1 完全正常（因为关掉 GC 后
+    // 对象不会在池里被复用，问题被掩盖）。
+    //
+    // RcIncUnknown 先查堆索引确认是堆指针再 inc，整数安全。
+    if (v != kNoReg && !moved) {
+        if (ir_is_heap(vty))
+            rc_inc(v);
+        else if (!vty || vty->kind == TyKind::Unknown)
+            call_void(RtFn::RcIncUnknown, {v});
+    }
     if (st_->fn_mark != kNoReg && st_->rc_pushes > 0) rc_cleanup(st_->fn_mark);
     release_slots();
     if (st_->is_entry) {

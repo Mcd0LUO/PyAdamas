@@ -80,7 +80,10 @@ run_test() {
     name=$(basename "$f")
     res="$logdir/$name.res"
     local p="$logdir/$name.prog" o="$logdir/$name.out" e="$logdir/$name.exp"
-    if ! "$PYADAMAS" run --rebuild -o "$p" "$f" > "$o" 2>&1; then
+    # 输出加大小上限：用例卡进死循环时它会一直写，曾经留下 19G 的单个
+    # 日志文件（78_enumerate_zip.py.out），把 build 目录撑到 32G。
+    # 截断后 diff 必然不等，用例照样报 OUTPUT DIFF，不影响判定。
+    if ! "$PYADAMAS" run --rebuild -o "$p" "$f" 2>&1 | head -c 1048576 > "$o"; then
         { echo FAILED; sed -n '1,6p' "$o"; } > "$res"
         return
     fi
@@ -91,6 +94,11 @@ run_test() {
         { echo "OUTPUT DIFF"; diff "$e" "$o" | head -12; } > "$res"
     fi
 }
+
+# 兜底清理：异常退出（Ctrl-C、崩溃）时也要把日志目录删掉，否则
+# build/ 下会堆积 testlogs.<pid> 目录。
+cleanup_logs() { rm -rf "$logdir"; }
+trap cleanup_logs EXIT INT TERM
 
 for f in tests/run/*.py; do
     match "$f" || continue

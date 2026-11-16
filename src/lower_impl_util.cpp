@@ -201,12 +201,25 @@ VReg Lowerer::const_literal(const LiteralValue& v) {
 
 void Lowerer::retain_for_store(const TypePtr& dst, VReg v) {
     TypePtr src = vreg_ty(v);
+    const bool dst_unk = !dst || dst->kind == TyKind::Unknown;
+    const bool src_unk = !src || src->kind == TyKind::Unknown;
     if (ir_is_heap(dst)) {
         if (ir_is_heap(src)) rc_inc(v);
-        else if (!src || src->kind == TyKind::Unknown) rc_inc_unknown(v);
+        else if (src_unk) rc_inc_unknown(v);
     } else if (ir_is_heap(src)) {
         // 目标是 unknown：不知道将来按什么类型读，保守 retain。
         rc_inc(v);
+    } else if (dst_unk && src_unk) {
+        // 两边都是 unknown：也必须 retain。
+        //
+        // 这里原来是空的 —— `u = ident([...])` 这种「无标注函数返回未知
+        // 类型、存进未知槽」的赋值完全不增加引用，槽里拿到的是借来的
+        // 指针（产生者那份随后被 rc_cleanup 放掉），对象回收后槽仍指向
+        // 它 —— use-after-free。
+        //
+        // 实测（x01_only_u_root / gc02_uaf_junk）：堆元数据被写坏，报
+        // malloc_consolidate(): unaligned fastbin chunk detected。
+        rc_inc_unknown(v);
     }}
 
 }  // namespace pyadamas
