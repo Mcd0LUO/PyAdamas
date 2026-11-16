@@ -221,19 +221,7 @@ private:
     std::vector<int> slot_reg_cand_idx_;  // 槽号 -> slot_reg_cand_ 下标，-1 = 不参与
     void build_slot_liveness();
     std::vector<char> fp_spill_mask_;  // 当前指令需要保存的槽
-    // ── R3：caller-saved 寄存器池 ──────────────────────────────────
-    // r8–r11 是 caller-saved：任何 call 都会破坏它们。把它们也纳入槽位
-    // 分配，代价是**每个调用点**要把「活跃且当前在这些寄存器里」的槽
-    // 写回栈、调用后再读回。
-    //
-    // 与 callee 池的关键区别：callee 池的槽整函数常驻、零调用开销；
-    // caller 池的槽只在「不跨调用」的区间里划算。所以分配时优先把
-    // 生命周期跨越调用点的槽放进 callee 池，剩下的才用 caller 池。
-    std::vector<int> int_caller_slots_;      // 占用了 caller 池的槽号
-    std::vector<char> int_caller_mask_;      // 当前调用点要保存的槽（与上者对齐）
-    bool int_caller_mask_valid_ = false;
-    void spill_int_caller_slots();
-    void reload_int_caller_slots();
+
     bool fp_mask_valid_ = false;
     bool fp_live_off_ = false;  // PYADAMAS_NO_FPLIVE：退回全量 spill（A/B 用）
     void build_fp_liveness();
@@ -742,7 +730,6 @@ private:
     // 整型与浮点共用（R4：浮点也走线性扫描，不再按频次挑前 N 个）。
     void linear_scan_pool(const std::vector<int>& cands, const char* const* regs,
                           int nreg, std::vector<std::string>& out);
-    void build_int_caller_mask(int block);
     bool slot_range_has_call(int64_t beg, int64_t end) const;
 
     // 跨块 vreg 提升：局部变量没占满的 callee-saved 寄存器分给跨块

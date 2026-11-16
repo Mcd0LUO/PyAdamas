@@ -180,7 +180,6 @@ void AsmGen::assign_vreg_slots() {
 // 参数和临时），在每次会正常返回的 call 前后统一写回/读出栈槽。
 void AsmGen::spill_fp_slots() {
         // 整型 caller 池的槽也要在调用点写回（它们同样被 call 破坏）。
-        spill_int_caller_slots();
         for (size_t j = 0; j < fp_promoted_slots_.size(); ++j) {
             if (fp_mask_valid_ && j < fp_spill_mask_.size() && !fp_spill_mask_[j])
                 continue;
@@ -190,7 +189,6 @@ void AsmGen::spill_fp_slots() {
     }
 
 void AsmGen::reload_fp_slots() {
-        reload_int_caller_slots();
         for (size_t j = 0; j < fp_promoted_slots_.size(); ++j) {
             if (fp_mask_valid_ && j < fp_spill_mask_.size() && !fp_spill_mask_[j])
                 continue;
@@ -199,32 +197,6 @@ void AsmGen::reload_fp_slots() {
         }
     }
 
-
-// ── R3：caller-saved 池的调用点保存/恢复 ─────────────────────────
-//
-// 与浮点的 spill_fp_slots / reload_fp_slots 同构。区别：整型只在
-// int_caller_slots_ 非空时才动作（大多数函数用不到 caller 池）。
-void AsmGen::spill_int_caller_slots() {
-        if (int_caller_slots_.empty()) return;
-        for (size_t j = 0; j < int_caller_slots_.size(); ++j) {
-            if (int_caller_mask_valid_ && j < int_caller_mask_.size() &&
-                !int_caller_mask_[static_cast<size_t>(j)])
-                continue;
-            int slot = int_caller_slots_[j];
-            line(std::format("movq {}, {}", slot_reg_[static_cast<size_t>(slot)], smem(slot)));
-        }
-    }
-
-void AsmGen::reload_int_caller_slots() {
-        if (int_caller_slots_.empty()) return;
-        for (size_t j = 0; j < int_caller_slots_.size(); ++j) {
-            if (int_caller_mask_valid_ && j < int_caller_mask_.size() &&
-                !int_caller_mask_[static_cast<size_t>(j)])
-                continue;
-            int slot = int_caller_slots_[j];
-            line(std::format("movq {}, {}", smem(slot), slot_reg_[static_cast<size_t>(slot)]));
-        }
-    }
 // 浮点槽在调用点是否还需要：块级 live-in/live-out（只跟踪提升过的槽）。
 void AsmGen::build_fp_liveness() {
         const int nb = static_cast<int>(f_->blocks.size());
@@ -666,13 +638,22 @@ void AsmGen::assign_slot_regs_linear() {
             if (any) n_used = r + 1;
         }
         n_saved_regs_ = n_used;
+        // 只统计**整型**槽。浮点槽在调用方（assign_slot_regs）随后才分配，
+        // 此刻 slot_reg_ 里的浮点项还是空的。
+        //
+        // 这个统计以前写的是「slot_reg_ 里非空的个数」，把浮点算进去却
+        // 又没分配，于是长期输出「7/14 promoted」这种误导数字 —— 实际
+        // 浮点是 6/6 全提升，整型才是 7/14。排查时被它带偏过好几轮。
         if (std::getenv("PYADAMAS_RA_DEBUG")) {
-            int assigned = 0;
-            for (const auto& sr : slot_reg_)
-                if (!sr.empty()) ++assigned;
-            std::fprintf(stderr, "[ra] %s: %d/%d slots promoted (linear scan), %d regs\n",
-                         f_->name.c_str(), assigned,
-                         static_cast<int>(slot_reg_cand_.size()), n_used);
+            int int_assigned = 0, int_total = 0;
+            for (size_t ci = 0; ci < slot_reg_cand_.size(); ++ci) {
+                if (slot_cand_is_fp_[ci]) continue;
+                ++int_total;
+                if (!slot_reg_[static_cast<size_t>(slot_reg_cand_[ci])].empty())
+                    ++int_assigned;
+            }
+            std::fprintf(stderr, "[ra] %s: int %d/%d promoted, %d regs\n",
+                         f_->name.c_str(), int_assigned, int_total, n_used);
         }
     }
 
@@ -681,9 +662,6 @@ void AsmGen::assign_slot_regs() {
         slot_reg_.assign(ns, std::string());
         // R1：先把整型槽的块级活跃性算出来（R2 的线性扫描要用）。
         build_slot_liveness();
-        int_caller_slots_.clear();
-        int_caller_mask_.clear();
-        int_caller_mask_valid_ = false;
         slot_fpidx_.assign(ns, -1);
         fp_promoted_slots_.clear();
         n_saved_regs_ = 0;
