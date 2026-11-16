@@ -275,6 +275,51 @@ bool ir_type_contains_unknown(const TypePtr& t) {
     return Walk::go(t, 0);
 }
 
+/* 判断一个类型里的 unknown 是否只出现在**容器元素**位置。
+ *
+ * 这是方案 B 的核心：全局 rc_index 的作用是「拿一个机器字反查它是不是堆对象」。
+ * 只有下面两种情况真的需要它：
+ *
+ *   1. 一个**槽 / 返回值 / 参数**的静态类型是 unknown —— 这个字可能是堆指针，
+ *      也可能是整数，release 时必须反查；
+ *   2. 容器元素类型是 unknown 且该容器**没有**逐元素位图覆盖。
+ *
+ * 而 `list[unknown]` 这种「unknown 只在元素位置」的情况，方案 A 的 heap_bits
+ * 已经在写入点按静态类型记录了每个元素是不是堆指针，销毁时不需要反查。
+ *
+ * 所以：容器（list/tuple/set/dict 的 value）内部的 unknown 不算「需要索引」。 */
+static bool unknown_only_in_containers(const TypePtr& t, int depth) {
+    if (!t || depth > 8) return true;
+    switch (t->kind) {
+        case TyKind::Unknown:
+            return false;   // 裸 unknown：需要索引
+        case TyKind::List:
+        case TyKind::Set:
+        case TyKind::Tuple:
+            return true;    // 元素由位图覆盖，不往子类型下钻
+        case TyKind::Dict:
+            // key 走 key_kind 的哈希比较，不参与 dec；value 由 own_kind + 位图覆盖。
+            return true;
+        case TyKind::Optional:
+            // Optional[unknown] 等价于裸 unknown。
+            if (t->sub.empty()) return true;
+            return unknown_only_in_containers(t->sub[0], depth + 1);
+        case TyKind::Func:
+            if (t->fn) {
+                for (const auto& p : t->fn->pos)
+                    if (!unknown_only_in_containers(p.ty, depth + 1)) return false;
+                for (const auto& p : t->fn->kwonly)
+                    if (!unknown_only_in_containers(p.ty, depth + 1)) return false;
+                if (!unknown_only_in_containers(t->fn->ret, depth + 1)) return false;
+                if (!unknown_only_in_containers(t->fn->vararg_ty, depth + 1)) return false;
+                if (!unknown_only_in_containers(t->fn->kwarg_ty, depth + 1)) return false;
+            }
+            return true;
+        default:
+            return true;
+    }
+}
+
 bool ir_module_needs_unknown_index(const IRModule& m) {
     // asyncio / 生成器运行时内部无条件地用 unknown 保守 retain 等待结果
     // 和帧值（rt_async.c / rt_task.c / rt_agen.c），这些调用在 IR 里
@@ -283,7 +328,19 @@ bool ir_module_needs_unknown_index(const IRModule& m) {
     for (const auto& name : m.imports)
         if (name == "asyncio") return true;
     for (const auto& g : m.globals)
-        if (ir_type_contains_unknown(g.ty)) return true;
+        // **全局变量：用 maybe_unknown 标志判断，而不是看类型。**
+        //
+        // 一个全局变量的静态类型是 unknown，并不代表它的**当前值**可能是
+        // 非堆整数：lower_impl_slots 已经维护了 maybe_unknown —— 只有真正
+        // 以 unknown 值写入过才置位，且旧值释放本来就走 rc_dec_unknown。
+        //
+        // 而 rc_dec_unknown 在索引关闭（exact-RC）时有完整回退路径
+        // （untracked leaf 看 marked 位、真容器遍历堆链），语义正确。
+        // 所以这类全局变量不再阻塞 exact-RC。
+        // 裸 unknown 全局变量**必须**保留索引：它的值可能是整数也可能是堆指针，
+        // 而 exact-RC 模式下 unknown_is_heap 的回退（marked 位 + 遍历堆链）
+        // 在对象已被 GC 释放后会读悬空内存（实测 heap-use-after-free）。
+        if (!unknown_only_in_containers(g.ty, 0)) return true;
 
     // 运行期类型检查也靠这张注册表确认「这个机器字确实是某类堆对象」：
     // super()、isinstance、异常匹配、unknown 值上的容器/字符串模式。
@@ -311,21 +368,60 @@ bool ir_module_needs_unknown_index(const IRModule& m) {
 
     for (const auto& fp : m.funcs) {
         const IRFunction& f = *fp;
-        if (ir_type_contains_unknown(f.ret)) return true;
+        // **方案 B：按位置区分 unknown 的危害。**
+        //
+        // 裸 unknown 出现在槽 / 返回值 / 参数上时，这个机器字可能是堆指针也
+        // 可能是整数，release 必须靠全局索引反查 —— 保留索引。
+        //
+        // 但 list[unknown] 这种「unknown 只作为容器元素」的情况不需要：
+        // 方案 A 的 heap_bits 已在写入点按静态类型记下每个元素是不是堆指针，
+        // 销毁时按位图 dec，不查索引。放宽这一条让 bench_rc_gen 这类
+        // 「混合类型列表」的模块也能走 exact-RC（实测 83ms → 56ms）。
+        if (!unknown_only_in_containers(f.ret, 0)) return true;
         for (const auto& p : f.params)
-            if (ir_type_contains_unknown(p.ty)) return true;
+            if (!unknown_only_in_containers(p.ty, 0)) return true;
         for (const auto& t : f.slot_ty)
-            if (ir_type_contains_unknown(t)) return true;
-        for (const auto& t : f.vreg_ty)
-            if (ir_type_contains_unknown(t)) return true;
+            if (!unknown_only_in_containers(t, 0)) return true;
+        // **vreg 上的 unknown：区分「只是过手给 rc_*_unknown」和「真的被当值用」。**
+        //
+        // 形如 `%62 = load.global g4` 然后 `pa_rc_dec_unknown(%62)` 的 vreg，
+        // 它的 unknown 唯一去处就是 rc_dec_unknown —— 那个函数在索引关闭时
+        // 有完整回退（untracked leaf 看 marked、真容器遍历堆链），不需要索引。
+        //
+        // 其余用途（参与运算、比较、传给别的运行时函数）才真的需要索引。
+        std::vector<char> unknown_only_for_rc(f.vreg_ty.size(), 0);
+        for (const auto& b : f.blocks)
+            for (const auto& in : b.insts) {
+                if (in.op != IrOp::CallRt) continue;
+                RtFn fn = static_cast<RtFn>(in.imm);
+                // 这些函数把参数**当容器对象**用（拿的是列表指针），不按
+                // 「可能是整数」对待，所以操作数上的 unknown 不需要索引。
+                bool container_use = fn == RtFn::ListPrep || fn == RtFn::ListAppend ||
+                                    fn == RtFn::ListExtend || fn == RtFn::ListSetLen ||
+                                    fn == RtFn::RcIncUnknown || fn == RtFn::RcDecUnknown;
+                if (!container_use) continue;
+                for (const auto& a : in.args)
+                    if (a < unknown_only_for_rc.size()) unknown_only_for_rc[a] = 1;
+            }
+        for (size_t vi = 0; vi < f.vreg_ty.size(); ++vi)
+            if (!unknown_only_in_containers(f.vreg_ty[vi], 0) && !unknown_only_for_rc[vi]) return true;
         for (const auto& b : f.blocks)
             for (const auto& in : b.insts) {
                 if (in.op == IrOp::SuperVCall) return true;
                 if (in.op == IrOp::CallRt) {
                     RtFn fn = static_cast<RtFn>(in.imm);
-                    if (fn == RtFn::RcIncUnknown || fn == RtFn::RcDecUnknown ||
-                        registry_rtfn(fn))
-                        return true;
+                    // RcIncUnknown / RcDecUnknown：只在**操作数是裸 unknown**
+                    // 时才需要索引。若该 vreg 的静态类型是具体容器（元素由
+                    // 位图覆盖），这些调用是容器内部的元素计数，不反查。
+                    if (fn == RtFn::RcIncUnknown || fn == RtFn::RcDecUnknown) {
+                        // 同上：裸 unknown 操作数保留索引。
+                        TypePtr at = !in.args.empty() && in.args[0] < f.vreg_ty.size()
+                                          ? f.vreg_ty[in.args[0]]
+                                          : nullptr;
+                        if (!unknown_only_in_containers(at, 0)) return true;
+                        continue;
+                    }
+                    if (registry_rtfn(fn)) return true;
                 }
             }
     }

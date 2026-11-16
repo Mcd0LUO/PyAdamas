@@ -42,6 +42,12 @@ PyAdamasStr* pa_repr_tuple(PyAdamasList* t, int64_t kind) {
             s = pa_str_from_i64(v);
         }
         tuple_buf_put(&buf, &cap, &len, s->data, (size_t)s->len);
+        // **s 是这一轮新建的临时字符串，必须还掉。**
+        //
+        // exact-RC 模式下字符串是 untracked leaf：不进 GC 堆链，只能靠 RC
+        // 精确释放。漏掉这一句在保守模式（有全局索引）下会被 GC 兜住，
+        // 但 exact-RC 下直接泄漏 —— 实测 75_tuple_repr 漏 96 字节。
+        pa_rc_dec(s);
     }
     if (t->len == 1) tuple_buf_put(&buf, &cap, &len, ",", 1);
     tuple_buf_put(&buf, &cap, &len, ")", 1);

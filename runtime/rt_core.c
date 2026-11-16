@@ -498,6 +498,15 @@ void pa_rc_dec(void* p);
 static int unknown_is_heap(PyAdamasRc* h) {
     if (rc_index_has(h)) return 1;
     if (!rc_index_off) return 0;
+    // **先排除小整数。**
+    //
+    // 裸 unknown 值可能是任意 int64：下标、长度、循环变量、布尔结果。
+    // 减掉 64 字节头之后，这些小整数落在极低地址（几十到几千字节），
+    // 对齐检查**挡不住**（336 就是 16 的倍数），直接读 h->marked 会段错误。
+    //
+    // 堆对象一律来自 malloc，Linux 用户态不可能分配到 64KB 以下；
+    // 这个下限足以排除全部小整数，同时远低于任何真实堆地址。
+    if ((uintptr_t)h < 65536) return 0;
     if (((uintptr_t)h & 15) != 0) return 0;
     // exact-RC 模式下，字符串 / range / struct 是 untracked leaf：
     // 它们不进 GC 堆链（rc_link 里 rc_leaf_untracked 分支把 marked 设成
