@@ -374,6 +374,23 @@ static void path_destroy(void* p) {
     if (pp->path) pa_rc_dec(pp->path);
 }
 
+/* 接管一个**刚产生**的字符串（str_alloc_raw / str_seal 的结果，rc=1，
+ * 由调用方作为产生者持有），不额外 inc。
+ *
+ * 为什么需要它：pa_path_new 会 pa_rc_inc(s)，那是给「传进来的已有引用」
+ * 用的。如果传的是刚 str_alloc_raw 出来的串，那份产生者引用就没人放了 ——
+ * ASan 实测 147_pathlib_extra / 141_stdlib_pathlib_extra 各泄漏一条。
+ *
+ * 用法约定：str_alloc_raw / str_seal 之后直接 return pa_path_adopt(...)。 */
+static PyAdamasPath* pa_path_adopt(PyAdamasStr* s) {
+    pa_gc_pin(s);
+    PyAdamasPath* p = (PyAdamasPath*)rc_alloc((int64_t)sizeof(PyAdamasPath), path_destroy, NULL, PYADAMAS_RC_OBJ);
+    p->magic = PYADAMAS_PATH_MAGIC;
+    p->path = s;
+    pa_gc_unpin(s);
+    return p;
+}
+
 PyAdamasPath* pa_path_new(PyAdamasStr* s) {
     /* 调用方常把 str_alloc / str_new 的结果直接传进来，那个串只存在于 C
        局部变量或表达式临时值里。下面的 rc_alloc 若触发主收集，参数串不在
@@ -406,7 +423,7 @@ PyAdamasPath* pa_path_join(PyAdamasPath* p, PyAdamasStr* s) {
     int64_t k = an;
     if (sep) d[k++] = '/';
     if (bn) memcpy(d + k, s->data, (size_t)bn);
-    return pa_path_new(str_seal_n(out, (a ? a->pub : 0) + (s ? s->pub : 0) + (sep ? 1 : 0)));
+    return pa_path_adopt(str_seal_n(out, (a ? a->pub : 0) + (s ? s->pub : 0) + (sep ? 1 : 0)));
 }
 
 /* 最后一段的起点（跳过结尾的 '/'）。 */
@@ -456,7 +473,7 @@ PyAdamasPath* pa_path_with_suffix(PyAdamasPath* p, PyAdamasStr* suffix) {
     PyAdamasStr* out = str_alloc_raw(cut + sn);
     if (cut) memcpy((char*)out->data, s->data, (size_t)cut);
     if (sn) memcpy((char*)out->data + cut, suffix->data, (size_t)sn);
-    return pa_path_new(str_seal(out));
+    return pa_path_adopt(str_seal(out));
 }
 
 PyAdamasList* pa_path_parts(PyAdamasPath* p) {
@@ -506,7 +523,7 @@ PyAdamasPath* pa_path_parent(PyAdamasPath* p) {
     while (cut > 1 && s->data[cut - 1] == '/') --cut;
     PyAdamasStr* out = str_alloc_raw(cut);
     if (cut) memcpy((char*)out->data, s->data, (size_t)cut);
-    return pa_path_new(str_seal(out));
+    return pa_path_adopt(str_seal(out));
 }
 
 static char* path_cstr(PyAdamasPath* p) {
@@ -608,7 +625,7 @@ PyAdamasPath* pa_path_relative_to(PyAdamasPath* p, PyAdamasStr* base) {
     int64_t off = bn < n ? bn + 1 : n;
     PyAdamasStr* out = str_alloc_raw(n - off);
     if (n > off) memcpy((char*)out->data, sd + off, (size_t)(n - off));
-    return pa_path_new(str_seal(out));
+    return pa_path_adopt(str_seal(out));
 }
 
 /* 复制一份 Path（返回新引用，调用方负责释放）。 */
@@ -616,7 +633,7 @@ static PyAdamasPath* path_clone(PyAdamasPath* p) {
     PyAdamasStr* s = p->path;
     PyAdamasStr* cp = str_alloc_raw(s ? s->len : 0);
     if (s && s->len) memcpy((char*)cp->data, s->data, (size_t)s->len);
-    return pa_path_new(str_seal(cp));
+    return pa_path_adopt(str_seal(cp));
 }
 
 /* resolve / absolute：realpath 失败（路径不存在）时退回「cwd + 原路径」。 */
@@ -645,7 +662,7 @@ PyAdamasPath* pa_path_absolute(PyAdamasPath* p) {
     memcpy(d, cwd, cl);
     d[cl] = '/';
     if (n) memcpy(d + cl + 1, s->data, (size_t)n);
-    return pa_path_new(str_seal(out));
+    return pa_path_adopt(str_seal(out));
 }
 
 int64_t pa_path_touch(PyAdamasPath* p) {
