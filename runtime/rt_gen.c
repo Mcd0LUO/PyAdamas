@@ -31,6 +31,9 @@ void pa_exc_pep479(PyAdamasException* e, const char* msg) {
    （借用的观察指针，取消时靠它解绑）。 */
 
 void pa_gen_finalize(void* g);
+void pa_handler_discard_record(void* p);
+void pa_gen_set_handler_owner(void* g);
+void pa_gen_release_handlers(void* g);
 
 void gen_destroy(void* g) {
     /* 被引用计数抛弃：跑跨 yield 的 finally/with 清理。清理期间抛出的
@@ -45,6 +48,9 @@ void gen_destroy(void* g) {
         p[7] = 0;
     }
     pa_gen_finalize(g);
+    // finalize 之后生成器状态已是终态（p[1] != 0），不会再 resume。
+    // 把它名下挂起中的 handler 记录归还 freelist。
+    pa_gen_release_handlers(g);
     // out 里可能还留着生成器的 return 值：没人取走就在这里释放。
     if (p[3]) {
         pa_rc_dec_unknown(p[3]);
@@ -93,6 +99,8 @@ int64_t gen_run(void* g, int64_t sent, int* done) {
     h.prev = handler_top;
     h.mark = pa_rc_mark();
     h.frame = pa_frame_top;
+    h.suspend_owner = NULL;
+    h.heap_alloc = 0;  /* 栈记录：不能进 freelist */
     handler_top = &h;
     int64_t exc_depth0 = pa_exc_depth();
     /* 生成器体**永远**走 setjmp 路径（它有 C 级兜底，抓不到 _Unwind）。
@@ -103,7 +111,23 @@ int64_t gen_run(void* g, int64_t sent, int* done) {
     int saved_eh_depth = pa_eh_depth;
     pa_eh_depth = 0;
     if (PA_SETJMP(h.env) != 0) {
-        handler_top = h.prev;
+        // 异常从 resume 里一路 longjmp 出来：resume 内部压过的 handler
+        // 记录（try/finally/with 各一条）留在链上，但 handler_top 现在
+        // 直接跳回 h.prev —— 那些记录既不在链上、也没人归还，永久泄漏。
+        // ASan 实测 162_pep479 / 119_gen_except_suspend 各泄漏一条。
+        // 从 h.prev 到 handler_top 之间（不含两端）的记录都是这次 resume
+        // 压的，逐个归还。
+        // 先固定住「gen_run 自己的 handler」：h 是本函数的栈变量，
+        // 循环里不能反复读 h.prev —— handler_top 一变，那个比较就失去意义，
+        // 而且 h 自己也可能被误判成要回收的记录（stack-use-after-return）。
+        PyAdamasHandler* stop = h.prev;
+        while (handler_top && handler_top != stop) {
+            PyAdamasHandler* dead = handler_top;
+            handler_top = dead->prev;
+            dead->suspend_owner = NULL;
+            pa_handler_discard_record(dead);
+        }
+        handler_top = stop;
         p[1] = 2;
         p[5] = 0;
         p[2] = 0;
@@ -121,7 +145,9 @@ int64_t gen_run(void* g, int64_t sent, int* done) {
         pa_eh_depth = saved_eh_depth;
         exc_longjmp();
     }
+    pa_gen_set_handler_owner(g);
     ((void (*)(void*, int64_t))(uintptr_t)p[4])(g, sent);
+    pa_gen_set_handler_owner(NULL);
     handler_top = h.prev;
     pa_eh_depth = saved_eh_depth;
     pa_exc_unwind(exc_depth0);
@@ -246,6 +272,8 @@ void pa_gen_close(void* g) {
     h.prev = handler_top;
     h.mark = pa_rc_mark();
     h.frame = pa_frame_top;
+    h.suspend_owner = NULL;
+    h.heap_alloc = 0;  /* 栈记录：不能进 freelist */
     handler_top = &h;
     int64_t exc_depth0 = pa_exc_depth();
     /* close() 重放 finally 时同样走 setjmp：调用方若在零开销保护区里，
@@ -267,7 +295,9 @@ void pa_gen_close(void* g) {
         exc_longjmp();
     }
     p[5] = 1;
+    pa_gen_set_handler_owner(g);
     ((void (*)(void*, int64_t))(uintptr_t)p[4])(g, 0);
+    pa_gen_set_handler_owner(NULL);
     handler_top = h.prev;
     pa_exc_unwind(exc_depth0);
     pa_eh_depth = saved_eh_depth;
@@ -287,11 +317,15 @@ void pa_gen_finalize(void* g) {
     h.prev = handler_top;
     h.mark = pa_rc_mark();
     h.frame = pa_frame_top;
+    h.suspend_owner = NULL;
+    h.heap_alloc = 0;  /* 栈记录：不能进 freelist */
     handler_top = &h;
     int64_t exc_depth0 = pa_exc_depth();
     if (PA_SETJMP(h.env) == 0) {
         p[5] = 1;
+        pa_gen_set_handler_owner(g);
         ((void (*)(void*, int64_t))(uintptr_t)p[4])(g, 0);
+        pa_gen_set_handler_owner(NULL);
     } else {
         pa_exc_clear();
     }

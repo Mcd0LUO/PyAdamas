@@ -365,6 +365,14 @@ typedef struct PyAdamasHandler {
     /* 压 handler 时的帧栈顶：异常展开到这一层就停，当前帧的槽
        留给函数自己正常退出时释放。 */
     struct PyAdamasFrame* frame;
+    /* 生成器挂起时归属的生成器对象（NULL = 不在挂起表里）。
+       pa_handler_suspend 登记、pa_handler_rearm 注销，生成器销毁时
+       按 owner 找回并归还 freelist。记录本身在挂起期间保持有效 ——
+       因为 rearm 用的就是同一个地址（生成代码从帧槽里取）。 */
+    void* suspend_owner;
+    /* 是否由 pa_handler_push 从堆上分配。栈上的记录（gen_run / pa_gen_close
+       的本地 PyAdamasHandler）不能归还 freelist —— 那会往栈内存写。 */
+    int64_t heap_alloc;
 } PyAdamasHandler;
 
 typedef struct PyAdamasTraceFrame {

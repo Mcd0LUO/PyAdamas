@@ -263,6 +263,39 @@ _Noreturn void exc_longjmp(void) {
    最大嵌套深度，不会无限增长。 */
 static PyAdamasHandler* handler_freelist = NULL;
 
+typedef struct SuspendedNode {
+    PyAdamasHandler* h;
+    struct SuspendedNode* next;
+} SuspendedNode;
+
+static SuspendedNode* suspended_head;
+static SuspendedNode* suspended_pool;
+
+/* 把记录从挂起表里摘掉。leave / discard / rearm 都要调 —— 记录一旦
+ * 回到保护区（或直接被归还 freelist），挂起表里就不能再留着它，否则
+ * 生成器销毁时会去读一条已经复用/释放的记录（ASan 实测 heap-use-after-free）。 */
+static void unsuspend(PyAdamasHandler* h) {
+    // **按指针查找，不能先看 suspend_owner。**
+    //
+    // 记录被 handler_release 归还后会被 pa_handler_push 复用给别的
+    // handler，那时 suspend_owner 已经被重置成 NULL。如果这里以
+    // `!h->suspend_owner` 提前返回，旧节点就永远留在挂起表里 ——
+    // 生成器销毁时遍历到它，读 n->h->suspend_owner 就是读已释放内存
+    // （ASan 实测 heap-use-after-free，123_finally_yield / 119）。
+    SuspendedNode** pp = &suspended_head;
+    while (*pp) {
+        SuspendedNode* n = *pp;
+        if (n->h == h) {
+            *pp = n->next;
+            n->next = suspended_pool;
+            suspended_pool = n;
+            return;
+        }
+        pp = &n->next;
+    }
+    h->suspend_owner = NULL;
+}
+
 static void handler_release(PyAdamasHandler* h) {
     h->prev = handler_freelist;
     handler_freelist = h;
@@ -333,9 +366,11 @@ void* pa_handler_push(void) {
         h = (PyAdamasHandler*)malloc(sizeof(PyAdamasHandler));
         if (!h) panic_c("out of memory");
     }
+    h->heap_alloc = 1;
     h->prev = handler_top;
     h->mark = pa_rc_mark();
     h->frame = pa_frame_top;
+    h->suspend_owner = NULL;
     handler_top = h;
     return h;
 }
@@ -346,6 +381,7 @@ void pa_handler_leave(void* p) {
     if (handler_top != h) panic_c("handler stack corrupted on leave");
     handler_top = h->prev;
     pa_rc_cleanup(h->mark);
+    unsuspend(h);
     handler_release(h);
 }
 
@@ -355,20 +391,71 @@ void pa_handler_discard(void* p) {
     PyAdamasHandler* h = (PyAdamasHandler*)p;
     if (handler_top != h) panic_c("handler stack corrupted on discard");
     handler_top = h->prev;
+    unsuspend(h);
     handler_release(h);
 }
 
 /* 生成器在 yield 处返回：handler 记录必须从全局栈上摘下来，否则后面
    任何异常都会 longjmp 进已经返回的 resume 帧。重新 resume 时按原顺序
    压回去，并重新 setjmp（由生成代码的 Setjmp 指令完成）。 */
+/* 当前正在 resume 的生成器对象（gen_run / pa_gen_close / pa_gen_finalize
+   在调用 resume 前后设置）。suspend 用它给记录打上归属，销毁时按归属
+   找回并归还 freelist。 */
+static void* gen_owner;
+
+void pa_gen_set_handler_owner(void* g) { gen_owner = g; }
+
+/* 生成器销毁时调用：把它名下所有挂起中的 handler 记录归还 freelist。
+ *
+ * 记录在挂起期间**必须保持有效**（rearm 用的就是同一个地址，生成代码从
+ * 帧槽里取），所以不能提前 free。但生成器可能再也不会 resume —— 被
+ * close() 后丢弃、或 finally 里抛异常直接跳出 —— 那些记录就永久泄漏。
+ * ASan 实测 93_gen_exc_rc 里 300 个生成器泄漏 67200 字节。
+ *
+ * 归属信息直接存在记录里（suspend_owner），所以这里要扫整个 freelist
+ * 之外的所有记录 —— 用一个全局登记链维护「当前处于挂起状态的记录」。 */
+
+
+void pa_gen_release_handlers(void* g) {
+    if (!g) return;
+    SuspendedNode** pp = &suspended_head;
+    while (*pp) {
+        SuspendedNode* n = *pp;
+        if (n->h->suspend_owner != g) {
+            pp = &n->next;
+            continue;
+        }
+        *pp = n->next;
+        n->h->suspend_owner = NULL;
+        handler_release(n->h);
+        n->next = suspended_pool;
+        suspended_pool = n;
+    }
+}
+
+
 void pa_handler_suspend(void* p) {
     PyAdamasHandler* h = (PyAdamasHandler*)p;
     if (handler_top != h) panic_c("handler stack corrupted on suspend");
     handler_top = h->prev;
+    if (gen_owner) {
+        h->suspend_owner = gen_owner;
+        SuspendedNode* n = suspended_pool;
+        if (n)
+            suspended_pool = n->next;
+        else {
+            n = (SuspendedNode*)malloc(sizeof(SuspendedNode));
+            if (!n) panic_c("out of memory");
+        }
+        n->h = h;
+        n->next = suspended_head;
+        suspended_head = n;
+    }
 }
 
 void pa_handler_rearm(void* p) {
     PyAdamasHandler* h = (PyAdamasHandler*)p;
+    unsuspend(h);  // 重新进保护区，之后由 leave/discard 归还
     h->prev = handler_top;
     h->mark = pa_rc_mark();
     h->frame = pa_frame_top;
@@ -376,7 +463,38 @@ void pa_handler_rearm(void* p) {
 }
 
 /* 生成器 close：挂起期间记录不在栈上，直接 free。 */
-void pa_handler_free(void* p) { free(p); }
+/* 生成器 close / 销毁时释放挂起的 handler 记录。
+ *
+ * 原来是裸 `free(p)`，有两个问题：
+ *   1. 不归还 freelist —— 每次 close 都让池子少一个、多一次 malloc；
+ *   2. **不从挂起表摘除** —— 表里留着一条指向已 free 内存的节点，
+ *      生成器销毁时遍历到它就 heap-use-after-free。
+ *      （ASan 实测 123_finally_yield / 119_gen_except_suspend）
+ *
+ * 改成归还 freelist 并摘除节点。归还前确认它确实不在保护区里：
+ * 仍在 handler_top 链上的记录属于还没退出的 try 块，由 leave/discard 管。 */
+/* 归还一条已经从全局链上摘下来的记录（异常展开路径用）。
+   与 pa_handler_free 的区别：调用方已经把它从链上摘好了，这里只负责
+   摘挂起表 + 归还 freelist。 */
+void pa_handler_discard_record(void* p) {
+    PyAdamasHandler* h = (PyAdamasHandler*)p;
+    if (!h) return;
+    unsuspend(h);
+    if (h->heap_alloc) handler_release(h);
+}
+
+void pa_handler_free(void* p) {
+    PyAdamasHandler* h = (PyAdamasHandler*)p;
+    if (!h) return;
+    for (PyAdamasHandler* q = handler_top; q; q = q->prev)
+        if (q == h) return;  /* 还在保护区里 */
+    unsuspend(h);
+    // 栈上的记录（gen_run / pa_gen_close 的本地变量）不能进 freelist ——
+    // 那会把栈地址当成可复用块，后续 handler_push 从池里取到它再写就是
+    // stack-use-after-return（ASan 实测 123_finally_yield）。栈记录本来
+    // 就随函数返回自然消失，不需要归还。
+    if (h->heap_alloc) handler_release(h);
+}
 
 int64_t pa_exc_matches(PyAdamasStr* want) {
     if (!pending_exc) return 0;

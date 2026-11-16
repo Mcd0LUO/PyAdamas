@@ -751,6 +751,8 @@ void coro_step(void* c) {
     h.prev = handler_top;
     h.mark = pa_rc_mark();
     h.frame = pa_frame_top;
+    h.suspend_owner = NULL;
+    h.heap_alloc = 0;  /* 栈记录：不能进 freelist */
     handler_top = &h;
     void* prev_active = loop_active_coro;
     loop_active_coro = c;

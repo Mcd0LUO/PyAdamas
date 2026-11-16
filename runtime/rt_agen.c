@@ -153,6 +153,8 @@ void agen_drive(PyAdamasAwait* d) {
     h.prev = handler_top;
     h.mark = pa_rc_mark();
     h.frame = pa_frame_top;
+    h.suspend_owner = NULL;
+    h.heap_alloc = 0;  /* 栈记录：不能进 freelist */
     handler_top = &h;
     int64_t exc_depth0 = pa_exc_depth();
     /* 同 rt_gen.c / rt_async.c：异步生成器体永远走 setjmp 路径。 */
