@@ -181,6 +181,10 @@ struct FuncInfo {
     TypePtr kwarg_ty;         // **kwargs 的值类型
     TypePtr ret;              // nullptr 表示无返回值
     bool ret_declared = false;
+    // 函数名被当作值使用过（赋给变量、放进容器、当实参传、返回）。
+    // 间接调用点上调用方看不到签名，只能按统一约定装填；此时形参若靠
+    // 单态回填定 ABI，一旦实际实参类型与回填结果不符就会静默算错。
+    bool value_used = false;
     // 函数体尚未检查时，ret 还没推断出来。此时把它当 None 会让
     // 「先调用、后定义」的函数（互递归、typing.py 的辅助函数）返回 None，
     // 进而产生一堆 "None is not iterable" 的假错误。
