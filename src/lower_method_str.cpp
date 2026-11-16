@@ -23,9 +23,12 @@ VReg Lowerer::lower_method_str(Attribute& at, Call& c, VReg recv) {
         return coerce(v, tc_.type_of(c.args[i].get()), t_int());
     };
     if (at.attr == "encode") {
-        // 按字节的世界里编码就是改标类型；编码名参数忽略。
+        // str.encode()：真正的 str -> bytes 转换（ASCII 零复制，非 ASCII 拷字节）。
+        // 编码名参数继续忽略（现状如此）。
         for (auto& a : c.args) expr(*a);
-        return recv;
+        VReg v = call_runtime(RtFn::StrEncode, t_bytes(), {recv});
+        push_temp(v);
+        return v;
     }
     auto arg_count = [&](size_t lo, size_t hi) {
         if (c.args.size() >= lo && c.args.size() <= hi) return true;
@@ -187,10 +190,11 @@ VReg Lowerer::lower_method_str(Attribute& at, Call& c, VReg recv) {
 
 VReg Lowerer::lower_method_bytes(Attribute& at, Call& c, VReg recv) {
     if (at.attr == "decode") {
-        // bytes 和 str 同一套运行时表示，解码就是改标类型；
-        // 编码参数（utf-8 之类）在按字节的世界里没有意义，忽略。
+        // bytes.decode()：真正的 bytes -> str 转换（ASCII 零复制，非 ASCII 数码点）。
         for (auto& a : c.args) expr(*a);
-        return recv;
+        VReg v = call_runtime(RtFn::BytesDecode, t_str(), {recv});
+        push_temp(v);
+        return v;
     }
     // 其余方法在字节层面和 str 完全一致，借道 StrMethod；区别只在结果标成 bytes。
     // 注意：操作码要按方法名选，不能写死——写死成 0（= Upper）会让所有方法都变 upper。
@@ -217,7 +221,7 @@ VReg Lowerer::lower_method_bytes(Attribute& at, Call& c, VReg recv) {
     auto emit = [&](StrOp op, TypePtr ret, VReg a0, VReg a1, VReg a2) -> VReg {
         Inst in;
         in.op = IrOp::CallRt;
-        in.imm = static_cast<int64_t>(RtFn::StrMethod);
+        in.imm = static_cast<int64_t>(RtFn::BytesMethod);
         in.args = {recv, const_int(static_cast<int64_t>(op)),
                    a0 == kNoReg ? const_int(0) : a0,
                    a1 == kNoReg ? const_int(0) : a1,

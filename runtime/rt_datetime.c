@@ -400,13 +400,13 @@ PyAdamasPath* pa_path_join(PyAdamasPath* p, PyAdamasStr* s) {
     int64_t an = a ? a->len : 0;
     int64_t bn = s ? s->len : 0;
     int sep = an > 0 && bn > 0 && a->data[an - 1] != '/' && s->data[0] != '/';
-    PyAdamasStr* out = str_alloc(an + bn + (sep ? 1 : 0));
+    PyAdamasStr* out = str_alloc_raw(an + bn + (sep ? 1 : 0));
     char* d = (char*)out->data;
     if (an) memcpy(d, a->data, (size_t)an);
     int64_t k = an;
     if (sep) d[k++] = '/';
     if (bn) memcpy(d + k, s->data, (size_t)bn);
-    return pa_path_new(out);
+    return pa_path_new(str_seal_n(out, (a ? a->pub : 0) + (s ? s->pub : 0) + (sep ? 1 : 0)));
 }
 
 /* 最后一段的起点（跳过结尾的 '/'）。 */
@@ -453,10 +453,10 @@ PyAdamasPath* pa_path_with_suffix(PyAdamasPath* p, PyAdamasStr* suffix) {
             break;
         }
     int64_t sn = suffix ? suffix->len : 0;
-    PyAdamasStr* out = str_alloc(cut + sn);
+    PyAdamasStr* out = str_alloc_raw(cut + sn);
     if (cut) memcpy((char*)out->data, s->data, (size_t)cut);
     if (sn) memcpy((char*)out->data + cut, suffix->data, (size_t)sn);
-    return pa_path_new(out);
+    return pa_path_new(str_seal(out));
 }
 
 PyAdamasList* pa_path_parts(PyAdamasPath* p) {
@@ -504,9 +504,9 @@ PyAdamasPath* pa_path_parent(PyAdamasPath* p) {
     while (i > 0 && s->data[i - 1] != '/') --i;
     int64_t cut = i;
     while (cut > 1 && s->data[cut - 1] == '/') --cut;
-    PyAdamasStr* out = str_alloc(cut);
+    PyAdamasStr* out = str_alloc_raw(cut);
     if (cut) memcpy((char*)out->data, s->data, (size_t)cut);
-    return pa_path_new(out);
+    return pa_path_new(str_seal(out));
 }
 
 static char* path_cstr(PyAdamasPath* p) {
@@ -555,9 +555,12 @@ PyAdamasStr* pa_path_read_text(PyAdamasPath* p) {
     long sz = ftell(f);
     if (sz < 0) sz = 0;
     fseek(f, 0, SEEK_SET);
-    PyAdamasStr* out = str_alloc(sz);
+    PyAdamasStr* out = str_alloc_raw(sz);
     size_t got = sz ? fread((char*)out->data, 1, (size_t)sz, f) : 0;
     out->len = (int64_t)got;
+    /* Path.read_bytes 的静态类型是 bytes：pub = 字节数（内容可能不是
+       合法 UTF-8，绝不能按 str 数码点）。 */
+    out->pub = (int64_t)got;
     fclose(f);
     free(c);
     return out;
@@ -603,17 +606,17 @@ PyAdamasPath* pa_path_relative_to(PyAdamasPath* p, PyAdamasStr* base) {
     if (ok && n > bn && sd[bn] != '/') ok = 0;
     if (!ok) pa_raise_c("ValueError", "is not in the subpath of");
     int64_t off = bn < n ? bn + 1 : n;
-    PyAdamasStr* out = str_alloc(n - off);
+    PyAdamasStr* out = str_alloc_raw(n - off);
     if (n > off) memcpy((char*)out->data, sd + off, (size_t)(n - off));
-    return pa_path_new(out);
+    return pa_path_new(str_seal(out));
 }
 
 /* 复制一份 Path（返回新引用，调用方负责释放）。 */
 static PyAdamasPath* path_clone(PyAdamasPath* p) {
     PyAdamasStr* s = p->path;
-    PyAdamasStr* cp = str_alloc(s ? s->len : 0);
+    PyAdamasStr* cp = str_alloc_raw(s ? s->len : 0);
     if (s && s->len) memcpy((char*)cp->data, s->data, (size_t)s->len);
-    return pa_path_new(cp);
+    return pa_path_new(str_seal(cp));
 }
 
 /* resolve / absolute：realpath 失败（路径不存在）时退回「cwd + 原路径」。 */
@@ -636,13 +639,13 @@ PyAdamasPath* pa_path_absolute(PyAdamasPath* p) {
     if (n > 0 && s->data[0] == '/') return path_clone(p);
     char cwd[4096];
     if (!getcwd(cwd, sizeof cwd)) cwd[0] = '\0';
-    PyAdamasStr* out = str_alloc((int64_t)strlen(cwd) + 1 + n);
+    PyAdamasStr* out = str_alloc_raw((int64_t)strlen(cwd) + 1 + n);
     char* d = (char*)out->data;
     size_t cl = strlen(cwd);
     memcpy(d, cwd, cl);
     d[cl] = '/';
     if (n) memcpy(d + cl + 1, s->data, (size_t)n);
-    return pa_path_new(out);
+    return pa_path_new(str_seal(out));
 }
 
 int64_t pa_path_touch(PyAdamasPath* p) {
@@ -674,8 +677,9 @@ static char* path_join_cstr(const char* dir, const char* name) {
 
 static void path_list_push(PyAdamasList* out, const char* full) {
     size_t n = strlen(full);
-    PyAdamasStr* s = str_alloc((int64_t)n);
+    PyAdamasStr* s = str_alloc_raw((int64_t)n);
     memcpy((char*)s->data, full, n);
+    str_seal(s);
     /* pa_path_new 返回的引用直接交给列表持有（list_destroy 负责 dec）。 */
     pa_list_append(out, (int64_t)pa_path_new(s));
 }

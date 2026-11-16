@@ -52,7 +52,13 @@ inline void append_utf8(std::string& out, uint32_t cp) {
 // 解码一个转义序列。i 指向反斜杠，返回时指向序列之后。
 // 非法序列（\x 后不足两位十六进制等）返回 false，out 保持不变。
 // 说明：\N{NAME} 需要完整的 Unicode 名称表，这里按「未知转义」原样保留。
-inline bool decode_escape(std::string_view s, size_t& i, std::string& out) {
+//
+// is_bytes 决定 \xNN 与八进制转义的语义：
+//   str  ：\xNN 是 U+00NN，必须编成 UTF-8（保证 str 永远是合法 UTF-8）
+//   bytes：\xNN 与 \NNN 都是原始字节（CPython 语义）
+// \u/\U/\N 在 bytes 字面量里按 CPython 报错。
+inline bool decode_escape(std::string_view s, size_t& i, std::string& out,
+                          bool is_bytes = false) {
     if (i >= s.size() || s[i] != '\\') return false;
     size_t p = i + 1;
     if (p >= s.size()) {  // 末尾孤立的反斜杠
@@ -91,22 +97,26 @@ inline bool decode_escape(std::string_view s, size_t& i, std::string& out) {
         case 'x': {
             uint32_t v;
             if (!read_hex(2, v)) return false;
-            out.push_back(static_cast<char>(v));
+            if (is_bytes) out.push_back(static_cast<char>(v));
+            else append_utf8(out, v);  /* str：U+00NN 编成 UTF-8 */
             break;
         }
         case 'u': {
             uint32_t v;
             if (!read_hex(4, v)) return false;
+            if (is_bytes) return false;  /* bytes 字面量不允许 \u */
             append_utf8(out, v);
             break;
         }
         case 'U': {
             uint32_t v;
             if (!read_hex(8, v) || v > 0x10FFFF) return false;
+            if (is_bytes) return false;  /* bytes 字面量不允许 \U */
             append_utf8(out, v);
             break;
         }
         case 'N': {
+            if (is_bytes) return false;  /* bytes 字面量不允许 \N */
             // \N{NAME}：按名取 Unicode 字符。名字表太大，这里保留原文
             // （与「未知转义保留反斜杠」一致），但必须整体吃掉，
             // 否则 f-string 里 \N{...} 的花括号会被当成替换字段。
@@ -126,7 +136,12 @@ inline bool decode_escape(std::string_view s, size_t& i, std::string& out) {
             uint32_t v = static_cast<uint32_t>(e - '0');
             for (int k = 0; k < 2 && p < s.size() && s[p] >= '0' && s[p] <= '7'; ++k)
                 v = v * 8 + static_cast<uint32_t>(s[p++] - '0');
-            append_utf8(out, v);
+            if (is_bytes) {
+                if (v > 0xFF) return false;  /* CPython：bytes 里 \NNN 必须 <= 0o377 */
+                out.push_back(static_cast<char>(v));
+            } else {
+                append_utf8(out, v);
+            }
             break;
         }
         default:
@@ -138,12 +153,13 @@ inline bool decode_escape(std::string_view s, size_t& i, std::string& out) {
     return true;
 }
 
-inline bool decode_escapes(std::string_view raw, std::string& out) {
+inline bool decode_escapes(std::string_view raw, std::string& out,
+                           bool is_bytes = false) {
     out.reserve(raw.size());
     size_t i = 0;
     while (i < raw.size()) {
         if (raw[i] == '\\') {
-            if (!decode_escape(raw, i, out)) return false;
+            if (!decode_escape(raw, i, out, is_bytes)) return false;
         } else {
             out.push_back(raw[i++]);
         }
@@ -596,6 +612,7 @@ private:
         char quote = advance();
         bool triple = (peek() == quote && peek(1) == quote);
         if (triple) { advance(); advance(); }
+        is_bytes_ = is_bytes;
 
         // f-string 保留原文（字面量片段由 parser 解码，才能区分 rf"" 与 f""），
         // 普通字符串在词法层直接反转义。
@@ -632,6 +649,9 @@ private:
         if (triple) { advance(); advance(); }
     }
 
+    // 当前正在扫的字符串是否是 bytes 字面量（决定转义解码语义）。
+    bool is_bytes_ = false;
+
     std::string read_raw_body(char quote, bool triple) {
         std::string out;
         while (!at_end()) {
@@ -663,13 +683,14 @@ private:
 
     // 先按原文收集（同时维护行号），再统一解码。这样续行、八进制、
     // \x/\u/\U 都只有一份实现，f-string 也能复用。
+    // is_bytes_ 决定 \xNN 编成 UTF-8 还是原始字节（见 decode_escape）。
     std::string read_escaped_body(char quote, bool triple) {
         std::string raw;
         while (!at_end()) {
             if (at_triple_end(quote, triple)) {
                 consume_quote(quote, triple);
                 std::string out;
-                if (!decode_escapes(raw, out))
+                if (!decode_escapes(raw, out, is_bytes_))
                     throw LexError("invalid escape sequence in string literal", tok_line_, tok_col_);
                 return out;
             }

@@ -32,6 +32,16 @@ VReg Lowerer::lower_builtin_seq(const std::string& name, Call& c) {
         return def(t_int(), std::move(in));
     }
 
+    if (name == "len_bytes") {
+        // 字节长度出口：读 PyAdamasStr 的 +8（字节数），O(1)。
+        if (c.args.size() != 1) {
+            err(c.line, c.col, "len_bytes() takes exactly one argument");
+            return const_int(0);
+        }
+        VReg v = expr(*c.args[0]);
+        return call_runtime(RtFn::StrLenBytes, t_int(), {v});
+    }
+
     if (name == "next") {
         if (c.args.size() != 1) {
             err(c.line, c.col, "next() takes exactly one argument");

@@ -325,6 +325,7 @@ VReg Lowerer::lower_comp(Expr& e) {
 
         int idx = new_temp_slot(t_int());
         store_slot(idx, const_int(0));
+        int str_cur = sty->kind == TyKind::Str ? new_str_cursor() : -1;
 
         int cond = new_block("comp.cond");
         int body = new_block("comp.body");
@@ -377,12 +378,15 @@ VReg Lowerer::lower_comp(Expr& e) {
                 gen_load_blk = st_->blk;
                 gen_load_pos = st_->fn->blocks[gen_load_blk].insts.size();
             }
-            Inst get;
-            get.op = IrOp::IndexLoad;
-            get.a = seq_val();
-            get.b = iv2;
-            ev = sty->kind == TyKind::Str ? def_heap(ety, std::move(get))
-                                          : def(ety, std::move(get));
+            if (sty->kind == TyKind::Str) {
+                ev = str_char_at(seq_val(), iv2, str_cur);
+            } else {
+                Inst get;
+                get.op = IrOp::IndexLoad;
+                get.a = seq_val();
+                get.b = iv2;
+                ev = def(ety, std::move(get));
+            }
         }
         if (auto* tn = dynamic_cast<Name*>(g.target.get())) {
             int slot = comp_slot(tn->id);

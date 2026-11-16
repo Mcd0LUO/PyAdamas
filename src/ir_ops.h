@@ -179,6 +179,14 @@ enum class RtFn : uint16_t {
     ListSliceAssign, // (list*, i64 start, i64 stop, i64 step, list*) -> void
     ListDelIndex, // (list*, i64 index) -> void  del list[i]
     StrToList,    // (str*) -> list*
+    StrLenBytes,  // (str*) -> i64 字节长度（O(1)，读 +8）
+    StrCharAtCursor, // (str*, i64 i, strcursor*) -> str* 顺序访问 O(1)
+    BytesSlice,   // (bytes*, i64 start, i64 stop, i64 step) -> bytes*
+    BytesConcat,  // (bytes*, bytes*) -> bytes*
+    BytesRepeat,  // (bytes*, i64 n) -> bytes*
+    StrEncode,    // (str*) -> bytes*
+    BytesDecode,  // (bytes*) -> str*
+    BytesMethod,  // (bytes* self, i64 op, i64 a0, i64 a1, i64 a2) -> i64
     StrCapwords,  // (str*) -> str*  单遍 capwords
     StrRepeat,    // (str*, i64 n) -> str*
     ListRepeat,   // (list*, i64 n) -> list*
@@ -653,6 +661,14 @@ inline const char* rt_name(RtFn f) {
         case RtFn::ListSliceAssign: return "pa_list_slice_assign";
         case RtFn::ListDelIndex: return "pa_list_del_index";
         case RtFn::StrToList: return "pa_str_to_list";
+        case RtFn::StrLenBytes: return "pa_len_bytes";
+        case RtFn::StrCharAtCursor: return "pa_str_char_at_cursor";
+        case RtFn::BytesSlice: return "pa_bytes_slice";
+        case RtFn::BytesConcat: return "pa_bytes_concat";
+        case RtFn::BytesRepeat: return "pa_bytes_repeat";
+        case RtFn::StrEncode: return "pa_str_encode";
+        case RtFn::BytesDecode: return "pa_bytes_decode";
+        case RtFn::BytesMethod: return "pa_bytes_method";
         case RtFn::StrCapwords: return "pa_str_capwords";
         case RtFn::StrRepeat: return "pa_str_repeat";
         case RtFn::ListRepeat: return "pa_list_repeat";
@@ -1062,6 +1078,7 @@ enum class StrOp : int64_t {
     SplitWs, SplitSep, Join, Replace, Find, RFind, StartsWith, EndsWith, Count,
     ZFill, LJust, RJust, Center, Capitalize, Title, IsDigit, IsAlpha, IsSpace,
     IsUpper, IsLower, IsAlphaNum, RemovePrefix, RemoveSuffix, SplitLines,
+    Encode, Decode,
 };
 
 enum class IrOp : uint8_t {

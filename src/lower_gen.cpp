@@ -252,6 +252,7 @@ VReg Lowerer::lower_yield_from(YieldFrom& y) {
     store_slot(n_slot, n);
     int idx_slot = new_temp_slot(t_int());
     store_slot(idx_slot, const_int(0));
+    int str_cur = vt->kind == TyKind::Str ? new_str_cursor() : -1;
 
     int cond = new_block("yfrom.seq.cond");
     int body = new_block("yfrom.seq.body");
@@ -284,13 +285,15 @@ VReg Lowerer::lower_yield_from(YieldFrom& y) {
     VReg ev;
     if (vt->kind == TyKind::Dict || vt->kind == TyKind::Set) {
         ev = call_runtime(RtFn::DictKeyAt, et, {sv, iv2});
+    } else if (vt->kind == TyKind::Str) {
+        // 生成器里同样要游标：否则每轮从头扫码点，长串退化成 O(n^2)。
+        ev = str_char_at(sv, iv2, str_cur);
     } else {
         Inst get;
         get.op = IrOp::IndexLoad;
         get.a = sv;
         get.b = iv2;
-        ev = vt->kind == TyKind::Str ? def_heap(et, std::move(get))
-                                     : def(et, std::move(get));
+        ev = def(et, std::move(get));
     }
     emit_yield(ev, et);
     Inst jb;

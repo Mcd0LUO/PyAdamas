@@ -262,7 +262,8 @@ void AsmGen::gen_bin(const Inst& in) {
             emit2("movq", src_op(in.a), arg_reg_i(0));
             emit2("movq", src_op(in.b), arg_reg_i(1));
             spill_fp_slots();
-            line("call pa_str_concat");
+            // str 的 pub 相加、bytes 的 pub = 字节数，两个入口分开
+            line(ty->kind == TyKind::Bytes ? "call pa_bytes_concat" : "call pa_str_concat");
             reload_fp_slots();
             move_to(dst_op(in.dst), "%rax");
             return;

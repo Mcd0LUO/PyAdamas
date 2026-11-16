@@ -265,7 +265,8 @@ void dump_ir(const IRModule& m, std::ostream& os) {
         os << std::format("global g{} {} : {}\n", i, m.globals[i].name,
                           type_name(m.globals[i].ty));
     for (size_t i = 0; i < m.strings.size(); ++i)
-        os << std::format("string #{} = {}\n", i, Constant::quote(m.strings[i]));
+        os << std::format("string #{} = {} (pub {})\n", i,
+                          Constant::quote(m.strings[i].text), m.strings[i].pub);
     for (size_t i = 0; i < m.classes.size(); ++i) {
         const auto& c = m.classes[i];
         os << std::format("class c{} {} ({} fields, vtable:", i, c.name, c.n_fields);

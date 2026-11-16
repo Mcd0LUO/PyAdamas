@@ -686,6 +686,7 @@ void Lowerer::lower_for_enumerate(For& f, Call& c) {
 
     int idx = new_temp_slot(t_int());
     store_slot(idx, const_int(0));
+    int str_cur = sty->kind == TyKind::Str ? new_str_cursor() : -1;
 
     int cond = new_block("for.enum.cond");
     int body = new_block("for.enum.body");
@@ -728,13 +729,14 @@ void Lowerer::lower_for_enumerate(For& f, Call& c) {
     VReg ev;
     if (sty->kind == TyKind::Dict || sty->kind == TyKind::Set) {
         ev = call_runtime(RtFn::DictKeyAt, ety, {seq_val(), iv});
+    } else if (sty->kind == TyKind::Str) {
+        ev = str_char_at(seq_val(), iv, str_cur);
     } else {
         Inst get;
         get.op = IrOp::IndexLoad;
         get.a = seq_val();
         get.b = iv;
-        ev = sty->kind == TyKind::Str ? def_heap(ety, std::move(get))
-                                      : def(ety, std::move(get));
+        ev = def(ety, std::move(get));
     }
     assign_to(*tup.elts[1], ev, ety);
 
@@ -850,6 +852,8 @@ void Lowerer::lower_for_zip(For& f, Call& c) {
 
     int idx = new_temp_slot(t_int());
     store_slot(idx, const_int(0));
+    int a_cur = at->kind == TyKind::Str ? new_str_cursor() : -1;
+    int b_cur = bt->kind == TyKind::Str ? new_str_cursor() : -1;
 
     int cond = new_block("for.zip.cond");
     int body = new_block("for.zip.body");
@@ -891,23 +895,27 @@ void Lowerer::lower_for_zip(For& f, Call& c) {
     VReg va;
     if (at->kind == TyKind::Dict || at->kind == TyKind::Set) {
         va = call_runtime(RtFn::DictKeyAt, ea, {aval(), iv});
+    } else if (at->kind == TyKind::Str) {
+        va = str_char_at(aval(), iv, a_cur);
     } else {
         Inst g1;
         g1.op = IrOp::IndexLoad;
         g1.a = aval();
         g1.b = iv;
-        va = at->kind == TyKind::Str ? def_heap(ea, std::move(g1)) : def(ea, std::move(g1));
+        va = def(ea, std::move(g1));
     }
     assign_to(*tup.elts[0], va, ea);
     VReg vb;
     if (bt->kind == TyKind::Dict || bt->kind == TyKind::Set) {
         vb = call_runtime(RtFn::DictKeyAt, eb, {bval(), iv});
+    } else if (bt->kind == TyKind::Str) {
+        vb = str_char_at(bval(), iv, b_cur);
     } else {
         Inst g2;
         g2.op = IrOp::IndexLoad;
         g2.a = bval();
         g2.b = iv;
-        vb = bt->kind == TyKind::Str ? def_heap(eb, std::move(g2)) : def(eb, std::move(g2));
+        vb = def(eb, std::move(g2));
     }
     assign_to(*tup.elts[1], vb, eb);
 
@@ -1038,6 +1046,9 @@ void Lowerer::lower_for_seq(For& f) {
 
     int idx = new_temp_slot(t_int());
     store_slot(idx, const_int(0));
+    /* 遍历 str 时挂顺序游标：每轮 O(1) 取码点，整体 O(n)；
+       没有游标就是每轮从头扫（O(n^2)）。 */
+    int str_cur = seq_ty->kind == TyKind::Str ? new_str_cursor() : -1;
 
     int cond = new_block("for.cond");
     int body = new_block("for.body");
@@ -1095,14 +1106,17 @@ void Lowerer::lower_for_seq(For& f) {
     } else {
         load_blk = st_->blk;
         load_pos = st_->fn->blocks[load_blk].insts.size();
-        Inst get;
-        get.op = IrOp::IndexLoad;
-        get.a = sv;
-        get.b = iv2;
-        // 遍历字符串时每个下标是 pa_str_char_at 新造的单字节串；
-        // 遍历列表/元组时是容器内部的借用引用。
-        ev = seq_ty->kind == TyKind::Str ? def_heap(et, std::move(get))
-                                         : def(et, std::move(get));
+        if (seq_ty->kind == TyKind::Str) {
+            // 遍历字符串时每个下标是一个码点串（新分配，入临时栈）；
+            // 列表/元组是容器内部的借用引用。
+            ev = str_char_at(sv, iv2, str_cur);
+        } else {
+            Inst get;
+            get.op = IrOp::IndexLoad;
+            get.a = sv;
+            get.b = iv2;
+            ev = def(et, std::move(get));
+        }
     }
     assign_to(*f.target, ev, et);
 

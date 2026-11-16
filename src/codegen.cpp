@@ -67,7 +67,7 @@ std::string AsmGen::gen(const IRModule& m) {
             // 必须用可重定位的只读段。
             section_relro();
             for (size_t i = 0; i < m.strings.size(); ++i) {
-                const std::string& s = m.strings[i];
+                const std::string& s = m.strings[i].text;
                 out_ += "\t.align 8\n";
                 // 隐藏 RC 头（64 字节）：next/prev/rc/dtor/release/size/kind/marked。
                 // 字面量 rc = INT64_MIN 永生；启动时只登记进 RC 索引供
@@ -76,6 +76,9 @@ std::string AsmGen::gen(const IRModule& m) {
                 out_ += "\t.quad 0x8000000000000000\n";
                 out_ += "\t.quad 0\n\t.quad 0\n\t.quad 0\n\t.quad 0\n\t.quad 0\n";
                 out_ += std::format(".Lstr{}:\n", i);
+                // +0 pub：str 是码点数、bytes 是字节数；编译期就算好（RELRO 只读，
+                // 运行期不能懒缓存）。+8 字节数，+16 hash，+24 data。
+                out_ += std::format("\t.quad {}\n", m.strings[i].pub);
                 out_ += std::format("\t.quad {}\n", s.size());
                 if (s.size() > 7)
                     out_ += std::format("\t.quad 0x{:x}\n", str_literal_hash(s));

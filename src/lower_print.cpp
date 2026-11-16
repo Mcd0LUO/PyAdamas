@@ -691,6 +691,7 @@ VReg Lowerer::lower_print(Call& c) {
             store_slot(n_slot, n);
             int idx = new_temp_slot(t_int());
             store_slot(idx, const_int(0));
+            int str_cur = sty->kind == TyKind::Str ? new_str_cursor() : -1;
 
             int cond = new_block("print.star.cond");
             int body = new_block("print.star.body");
@@ -719,9 +720,11 @@ VReg Lowerer::lower_print(Call& c) {
             VReg sv = load_slot(seq_slot, sty);
             VReg iv = load_slot(idx, t_int());
             VReg ev;
-            if (sty->kind == TyKind::Dict || sty->kind == TyKind::Set)
+            if (sty->kind == TyKind::Dict || sty->kind == TyKind::Set) {
                 ev = call_runtime(RtFn::DictKeyAt, ety, {sv, iv});
-            else {
+            } else if (sty->kind == TyKind::Str) {
+                ev = str_char_at(sv, iv, str_cur);
+            } else {
                 Inst get;
                 get.op = (opts_.opt_level >= 1 &&
                           (sty->kind == TyKind::List || sty->kind == TyKind::Tuple))
@@ -729,8 +732,7 @@ VReg Lowerer::lower_print(Call& c) {
                              : IrOp::IndexLoad;
                 get.a = sv;
                 get.b = iv;
-                ev = sty->kind == TyKind::Str ? def_heap(ety, std::move(get))
-                                              : def(ety, std::move(get));
+                ev = def(ety, std::move(get));
             }
             print_value(ev, ety, arg->line, arg->col);
             after_item();

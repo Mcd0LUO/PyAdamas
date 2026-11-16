@@ -210,13 +210,26 @@ PyAdamasList* pa_itertools_accumulate(PyAdamasList* xs, int64_t is_float) {
 /* str * n / list * n：一次分配、批量拷贝（CPython 的重复语义）。 */
 PyAdamasStr* pa_str_repeat(PyAdamasStr* s, int64_t n) {
     int64_t len = s ? s->len : 0;
+    int64_t pub = s ? s->pub : 0;
     if (n < 0) n = 0;
     if (len == 0 || n == 0) return str_new("", 0);
     if (len > INT64_MAX / n) panic_c("string repeat: result too large");
-    PyAdamasStr* out = str_alloc(len * n);
+    PyAdamasStr* out = str_alloc_raw(len * n);
     char* d = (char*)out->data;
     for (int64_t i = 0; i < n; ++i) memcpy(d + i * len, s->data, (size_t)len);
-    return out;
+    return str_seal_n(out, pub * n);
+}
+
+/* bytes 重复：字节语义，pub == len == 字节数。 */
+PyAdamasStr* pa_bytes_repeat(PyAdamasStr* s, int64_t n) {
+    int64_t len = s ? s->len : 0;
+    if (n < 0) n = 0;
+    if (len == 0 || n == 0) return str_new_bytes("", 0);
+    if (len > INT64_MAX / n) panic_c("string repeat: result too large");
+    PyAdamasStr* out = str_alloc_raw(len * n);
+    char* d = (char*)out->data;
+    for (int64_t i = 0; i < n; ++i) memcpy(d + i * len, s->data, (size_t)len);
+    return str_seal_n(out, len * n);
 }
 
 PyAdamasList* pa_list_repeat(PyAdamasList* l, int64_t n) {
@@ -256,7 +269,7 @@ PyAdamasStr* pa_b64encode(PyAdamasStr* data, int64_t urlsafe) {
     int64_t n = data ? data->len : 0;
     const unsigned char* p = (const unsigned char*)(data && data->data ? data->data : "");
     int64_t rem = n % 3;
-    PyAdamasStr* out = str_alloc((n / 3) * 4 + (rem ? 4 : 0));
+    PyAdamasStr* out = str_alloc_raw((n / 3) * 4 + (rem ? 4 : 0));
     char* d = (char*)out->data;
     int64_t i = 0, oi = 0;
     while (i + 2 < n) {
@@ -280,13 +293,13 @@ PyAdamasStr* pa_b64encode(PyAdamasStr* data, int64_t urlsafe) {
         d[oi++] = tab[(v >> 6) & 63];
         d[oi++] = '=';
     }
-    return out;
+    return str_seal_n(out, oi);  /* base64 输出全是 ASCII */
 }
 
 PyAdamasStr* pa_b64decode(PyAdamasStr* data) {
     int64_t n = data ? data->len : 0;
     const unsigned char* p = (const unsigned char*)(data && data->data ? data->data : "");
-    PyAdamasStr* out = str_alloc((n / 4 + 1) * 3);
+    PyAdamasStr* out = str_alloc_raw((n / 4 + 1) * 3);
     char* d = (char*)out->data;
     int64_t oi = 0;
     uint32_t acc = 0;
@@ -305,7 +318,7 @@ PyAdamasStr* pa_b64decode(PyAdamasStr* data) {
         }
     }
     out->len = oi;
-    return out;
+    return str_seal_n(out, oi);  /* bytes：pub == 字节数 */
 }
 
 PyAdamasDict* pa_collections_counter(PyAdamasList* src, int64_t key_kind, int64_t key_own) {

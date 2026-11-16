@@ -550,6 +550,9 @@ void AsmGen::gen_rt_args(const Inst& in, RtFn fn) {
         case RtFn::ListSetLen:
         case RtFn::StrConcat:
         case RtFn::StrCharAt:
+        case RtFn::StrCharAtCursor:
+        case RtFn::BytesConcat:
+        case RtFn::BytesRepeat:
         case RtFn::ClosureNew:
         case RtFn::DictGet:
         case RtFn::DictSetDefaultFactory:
@@ -557,6 +560,9 @@ void AsmGen::gen_rt_args(const Inst& in, RtFn fn) {
         case RtFn::DictKeyAt:
         case RtFn::IsInstanceClass:
         case RtFn::StrContains:
+        case RtFn::StrLenBytes:
+        case RtFn::StrEncode:
+        case RtFn::BytesDecode:
         case RtFn::DictUpdate:
         case RtFn::ListExtend:
         case RtFn::ListDelIndex:
@@ -580,6 +586,7 @@ void AsmGen::gen_rt_args(const Inst& in, RtFn fn) {
         case RtFn::RegexSplitStr:
         case RtFn::ListSlice:
         case RtFn::StrSlice:
+        case RtFn::BytesSlice:
         case RtFn::RandRange:
         case RtFn::PathMkdir:
             gen_rt_i4(in);
@@ -587,6 +594,7 @@ void AsmGen::gen_rt_args(const Inst& in, RtFn fn) {
         case RtFn::DictNew:
         case RtFn::SetFromList:
         case RtFn::StrMethod:
+        case RtFn::BytesMethod:
             gen_rt_i5(in);
             break;
         case RtFn::JsonLoads:

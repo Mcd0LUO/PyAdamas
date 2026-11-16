@@ -39,12 +39,19 @@ VReg Lowerer::lower_minmax(Call& c, bool is_min) {
         else if (seq_ty->kind == TyKind::Bytes) elem_ty = t_int();
         else if (!seq_ty->sub.empty()) elem_ty = seq_ty->sub[0];
         // bytes 不能按下标当 list 读：先物化成 list[int] 再走通用路径。
+        // str 同理物化成 list[str]：逐下标回调 pa_str_char_at 是 O(n^2)，
+        // 一次物化是 O(n)，与今天 list 路径的成本一致。
         VReg seq_conv = kNoReg;
         if (seq_ty->kind == TyKind::Bytes) {
             seq_conv = call_runtime(RtFn::BytesToList, mk_list(t_int()), {expr(*c.args[0])});
             push_temp(seq_conv);
             seq_ty = mk_list(t_int());
             elem_ty = t_int();
+        } else if (seq_ty->kind == TyKind::Str) {
+            seq_conv = call_runtime(RtFn::StrToList, mk_list(t_str()), {expr(*c.args[0])});
+            push_temp(seq_conv);
+            seq_ty = mk_list(t_str());
+            elem_ty = t_str();
         }
 
         // range：按边界算，不物化。空 range 同样报 ValueError。
@@ -310,6 +317,12 @@ VReg Lowerer::lower_sum(Call& c) {
         push_temp(seq_conv);
         seq_ty = mk_list(t_int());
         elem_ty = t_int();
+    } else if (seq_ty->kind == TyKind::Str) {
+        // sum(str) 本来就是类型错误（元素是 str）；仍物化避免 O(n^2) 取元素。
+        seq_conv = call_runtime(RtFn::StrToList, mk_list(t_str()), {expr(*c.args[0])});
+        push_temp(seq_conv);
+        seq_ty = mk_list(t_str());
+        elem_ty = t_str();
     }
 
     // range：按边界流式累加，不物化。
@@ -479,6 +492,12 @@ VReg Lowerer::lower_anyall(Call& c, bool is_any) {
         push_temp(seq_conv);
         seq_ty = mk_list(t_int());
         elem_ty = t_int();
+    } else if (seq_ty->kind == TyKind::Str) {
+        // any/all 对 str 是「每个字符非空即真」；物化避免逐下标 O(n^2)。
+        seq_conv = call_runtime(RtFn::StrToList, mk_list(t_str()), {expr(*c.args[0])});
+        push_temp(seq_conv);
+        seq_ty = mk_list(t_str());
+        elem_ty = t_str();
     }
 
     // range：按边界算，不物化。

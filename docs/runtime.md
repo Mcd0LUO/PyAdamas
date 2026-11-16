@@ -26,7 +26,8 @@ typedef struct Py23Rc {
     int64_t marked;         /* 标记-清扫用 */
 } Py23Rc;                   /* 64 字节，位于负载之前，对象指针不指向它 */
 
-typedef struct { int64_t len; int64_t hash; const char* data; } Py23Str;
+/* pub：str 是码点数、bytes 是字节数；len 恒为 UTF-8 字节数 */
+typedef struct { int64_t pub; int64_t len; int64_t hash; const char* data; } PyAdamasStr;
 typedef struct { int64_t len; int64_t cap; int64_t* data; int64_t elem_kind; } Py23List;
 typedef struct {
     int64_t hash; int64_t key; int64_t val;
@@ -60,7 +61,14 @@ typedef struct {
 
 ### 字符串
 
-`len` 放在**偏移 0**，这是刻意的：`len(s)` 编译成一条 `movq (%rax), %rax`，`if s:` 也只是读这个字段。`hash` 现在有两种用途：≤7 字节的短串用它存内联字符；更长的串用它缓存字典哈希（FNV-1a + mix64）。
+**对外长度 `pub` 放在偏移 0**，这是刻意的：`len(s)` 编译成一条 `movq (%rax), %rax`，
+`if s:` 也只是读这个字段，对 str/bytes/容器通用——改成码点语义后这两条指令一行都
+不用改，`len(unknown)` 也自动正确。`pub` 对 `str` 是码点数、对 `bytes` 是字节数；
+`len`（偏移 8）恒为 UTF-8 字节数。不变量：str 满足 `0 <= pub <= len`（等号当且仅当
+全 ASCII），bytes 满足 `pub == len`。
+
+`hash` 有两种用途：≤7 字节的短串用它存内联字符；更长的串用它缓存字典哈希
+（FNV-1a + mix64）。`data` 在偏移 24（`pub/len/hash` 之后的第四个机器字）。
 
 字符串有两种来源，负载布局完全一致，运行时函数不需要区分：
 
@@ -84,11 +92,22 @@ RC 归零时不 `free`，而是回到同档池里，下一次同档分配直接�
 编译期算好**直接写进静态对象——`.data.rel.ro` 在 PIE + RELRO 下是只读的，
 运行时不能在上面做懒缓存。因此 `d["长键"]` 这类重复查找不再每次重扫整串。
 
-单字节字符串（`s[i]`、`for c in s`、`chr()`）和 `"True"/"False"/"None"`
-的转换结果是**静态永生对象**：256 个单字节串在首次使用时初始化并登记进
-RC 索引，取字符不再分配。字符串不可变，共享对象与 CPython 的行为一致；
+单码点字符串（`s[i]`、`for c in s`、`chr()`）和 `"True"/"False"/"None"`
+的转换结果是**静态永生对象**：0x00–0x7F 的 128 个单字节串在首次使用时初始化并
+登记进 RC 索引，取 ASCII 字符不再分配；非 ASCII 码点走 `pa_cp_str`，现编 1–4 字节
+（CPython 对 >U+00FF 也是新对象）。字符串不可变，共享对象与 CPython 的行为一致；
 `s[:]`、无变化的 `strip()`、`''.join([x])` 也按 CPython 的做法直接返回原串
 （inc 一次）。
+
+构造 API 收敛成：`str_new`（默认，扫描算码点数）、`str_new_bytes`（bytes，`pub=len`）、
+`str_new_ascii`（已知全 ASCII）、`str_alloc_raw` + `str_seal`/`str_seal_n`（先分配后
+填充，漏 seal 会留下 `pub == -1` 哨兵）。字面量的 `pub` 在**编译期**算好写进
+`.data.rel.ro`——RELRO 只读，运行期不能懒缓存。
+
+字符串迭代有**顺序游标**（`pa_str_char_at_cursor`）：降级器为 `for ch in s` /
+`enumerate` / `zip` / 推导式 / 生成器各分配一对 int64 槽，命中「紧接着上一个码点」
+时 O(1)，否则退回从头扫。没有游标时 `s[i]` 是 O(i)，长串顺序迭代会退化成 O(n²)。
+全 ASCII 串走快路径（码点下标即字节偏移），成本与改动前一致。
 
 ### 列表
 

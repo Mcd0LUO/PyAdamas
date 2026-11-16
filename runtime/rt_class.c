@@ -148,12 +148,12 @@ PyAdamasStr* pa_class_repr(void* cls) {
     const char* pre = "<class '";
     const char* post = "'>";
     int64_t plen = 8, slen = 2;
-    PyAdamasStr* s = str_alloc(plen + n + slen);
+    PyAdamasStr* s = str_alloc_raw(plen + n + slen);
     char* p = (char*)s->data;
     memcpy(p, pre, (size_t)plen);
     memcpy(p + plen, start, (size_t)n);
     memcpy(p + plen + n, post, (size_t)slen);
-    return s;
+    return str_seal(s);
 }
 
 int64_t pa_isinstance_class(void* obj, void* cls) {

@@ -214,11 +214,29 @@ extern void pa_win_longjmp(void* env, int val);
 #endif
 
 
+/* 字符串/字节串共用表示。str 与 bytes 的区别全部由静态类型决定，
+   运行期结构一样，只有 pub 的含义不同：
+     pub  +0  str: 码点数（nchars）；bytes: 字节数（与 len 相等）
+     len  +8  UTF-8 字节数（bytes 的字节数；既有字段语义不变）
+     hash +16 字节长度 <=7 时内联字符区（SSO），否则字典哈希缓存（0=未算）
+     data +24 字符区；SSO 时指向 &hash
+   pub 放偏移 0 是刻意的：IrOp::Len 与真值判断都只读偏移 0，str/bytes/容器
+   通用，改成码点语义后这两条指令一行都不用改，len(unknown) 也自动正确。
+   不变量：str 满足 0 <= pub <= len，等号当且仅当全 ASCII；bytes 满足 pub == len。 */
 typedef struct {
+    int64_t pub;
     int64_t len;
     int64_t hash;      /* 预留给字符串驻留 */
     const char* data;
 } PyAdamasStr;
+
+/* 字符串迭代游标：cp 是上次取出的码点下标，off 是它之后的下一个字节偏移。
+   顺序访问（i == cp+1）命中时只读一个码点，O(1)；否则退回从头扫。
+   降级器为每个 for/推导式循环分配一对 int64 槽，循环入口重置成 -1/0。 */
+typedef struct {
+    int64_t cp;
+    int64_t off;
+} PyAdamasStrCursor;
 
 /* elem_kind: 0 = 全部非堆类型，1 = 全部堆类型，2 = 有 unknown / 混合，
    3 = 未定（只可能出现在空列表上，第一次写入时由 pa_list_prep 定型）。
@@ -587,8 +605,22 @@ void pa_register_literals(void** objs, int64_t n);
 void closure_destroy(void* p);
 void closure_gc_release(void* p);
 void* pa_closure_new(int64_t code, int64_t n_caps);
-PyAdamasStr* str_alloc(int64_t len);
+PyAdamasStr* str_alloc_raw(int64_t len);
+PyAdamasStr* str_seal(PyAdamasStr* s);
+PyAdamasStr* str_seal_n(PyAdamasStr* s, int64_t pub);
 PyAdamasStr* str_new(const char* p, int64_t len);
+PyAdamasStr* str_new_bytes(const char* p, int64_t len);
+PyAdamasStr* str_new_ascii(const char* p, int64_t len);
+int64_t str_count_cp(const char* p, int64_t n);
+int str_seq_len(unsigned char b);
+int64_t str_prev_cp(const PyAdamasStr* s, int64_t off);
+int64_t str_cp_to_byte(const PyAdamasStr* s, int64_t cp);
+uint32_t str_cp_at(const PyAdamasStr* s, int64_t off, int* plen);
+int str_cp_bytes(uint32_t cp);
+int str_cp_encode(uint32_t cp, char* out);
+/* 迭代游标：顺序访问时把「上一个码点下标 + 下一个字节偏移」记在槽里，
+   命中 i == cp+1 就是 O(1)，否则退回从头扫。 */
+PyAdamasStr* pa_str_char_at_cursor(PyAdamasStr* s, int64_t i, PyAdamasStrCursor* cur);
 /* cimport 外部函数返回 char* 时复制成 PyAdamasStr；NULL 对前者视为空串，
    对后者返回 NULL（PyAdamas 的 None）。 */
 PyAdamasStr* pa_str_from_cstr(const char* p);
@@ -757,6 +789,13 @@ void format_double(char* buf, size_t n, double v);
 PyAdamasStr* pa_str_concat(PyAdamasStr* a, PyAdamasStr* b);
 PyAdamasStr* pa_repr_tuple(PyAdamasList* t, int64_t kind);
 PyAdamasStr* pa_str_char_at(PyAdamasStr* s, int64_t i);
+PyAdamasStr* pa_str_slice(PyAdamasStr* src, int64_t start, int64_t stop, int64_t step);
+PyAdamasStr* pa_bytes_slice(PyAdamasStr* src, int64_t start, int64_t stop, int64_t step);
+PyAdamasStr* pa_bytes_concat(PyAdamasStr* a, PyAdamasStr* b);
+PyAdamasStr* pa_bytes_repeat(PyAdamasStr* s, int64_t n);
+int64_t pa_len_bytes(PyAdamasStr* s);
+PyAdamasStr* pa_str_encode(PyAdamasStr* s);
+PyAdamasStr* pa_bytes_decode(PyAdamasStr* s);
 PyAdamasStr* pa_str_from_i64(int64_t v);
 /* unknown 值：堆字符串原样返回并补引用，其余按整数格式化。 */
 PyAdamasStr* pa_str_any(int64_t v);
@@ -774,6 +813,7 @@ int64_t pa_str_eq(PyAdamasStr* a, PyAdamasStr* b);
 int64_t pa_str_cmp(PyAdamasStr* a, PyAdamasStr* b);
 /* 字符串方法派发：op 序号与 src/ir.h 的 StrOp 一致；未用的参数传 0。 */
 int64_t pa_str_method(PyAdamasStr* s, int64_t op, int64_t a0, int64_t a1, int64_t a2);
+int64_t pa_bytes_method(PyAdamasStr* s, int64_t op, int64_t a0, int64_t a1, int64_t a2);
 
 /* 文件对象（布局只在 rt_obj.c 里定义） */
 typedef struct PyAdamasFile PyAdamasFile;
@@ -944,6 +984,7 @@ PyAdamasList* pa_str_to_list(PyAdamasStr* s);
 PyAdamasStr* pa_str_capwords(PyAdamasStr* s);
 /* 静态驻留字符串：256 个单字节串以及 "True"/"False"/"None"，均为永生对象。 */
 PyAdamasStr* pa_char_str(int64_t c);
+PyAdamasStr* pa_cp_str(uint32_t cp);
 PyAdamasStr* pa_str_true(void);
 PyAdamasStr* pa_str_false(void);
 PyAdamasStr* pa_str_none(void);

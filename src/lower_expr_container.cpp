@@ -19,8 +19,15 @@ VReg Lowerer::lower_subscript(Subscript& s) {
         VReg start = bound(sl.lower);
         VReg stop = bound(sl.upper);
         VReg step = bound(sl.step);
-        if (ot && (ot->kind == TyKind::Str || ot->kind == TyKind::Bytes)) {
+        if (ot && ot->kind == TyKind::Str) {
+            // str 切片按码点（运行时内部先换算字节偏移）
             VReg v = call_runtime(RtFn::StrSlice, ty, {obj, start, stop, step});
+            push_temp(v);
+            return v;
+        }
+        if (ot && ot->kind == TyKind::Bytes) {
+            // bytes 切片按字节，语义与改动前一致
+            VReg v = call_runtime(RtFn::BytesSlice, ty, {obj, start, stop, step});
             push_temp(v);
             return v;
         }

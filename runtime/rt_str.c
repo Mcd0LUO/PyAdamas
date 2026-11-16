@@ -49,18 +49,92 @@ PyAdamasStr* pa_repr_tuple(PyAdamasList* t, int64_t kind) {
     free(buf);
     return out;
 }
+/* str 拼接：pub 直接相加（O(1) 计长），字节照旧整段拷贝。 */
 PyAdamasStr* pa_str_concat(PyAdamasStr* a, PyAdamasStr* b) {
-    PyAdamasStr* s = str_alloc(a->len + b->len);
+    PyAdamasStr* s = str_alloc_raw(a->len + b->len);
     char* p = (char*)s->data;
     memcpy(p, a->data, (size_t)a->len);
     memcpy(p + a->len, b->data, (size_t)b->len);
-    return s;
+    return str_seal_n(s, a->pub + b->pub);
 }
 
+/* bytes 拼接：pub == len，字节语义不变。 */
+PyAdamasStr* pa_bytes_concat(PyAdamasStr* a, PyAdamasStr* b) {
+    PyAdamasStr* s = str_alloc_raw(a->len + b->len);
+    char* p = (char*)s->data;
+    memcpy(p, a->data, (size_t)a->len);
+    memcpy(p + a->len, b->data, (size_t)b->len);
+    return str_seal_n(s, a->len + b->len);
+}
+
+/* str 下标：按码点。负索引加 pub；ASCII 直接查驻留表，非 ASCII 现编。 */
 PyAdamasStr* pa_str_char_at(PyAdamasStr* s, int64_t i) {
-    if (i < 0) i += s->len;
-    if (i < 0 || i >= s->len) pa_raise_c("IndexError", "string index out of range");
-    return pa_char_str((unsigned char)s->data[i]);
+    if (i < 0) i += s->pub;
+    if (i < 0 || i >= s->pub) pa_raise_c("IndexError", "string index out of range");
+    if (s->pub == s->len) return pa_char_str((unsigned char)s->data[i]);  /* 全 ASCII 快路径 */
+    int64_t off = str_cp_to_byte(s, i);
+    int n = 0;
+    uint32_t cp = str_cp_at(s, off, &n);
+    if (cp < 0x80) return pa_char_str((int64_t)cp);
+    PyAdamasStr* out = str_alloc_raw(n);
+    memcpy((char*)out->data, s->data + off, (size_t)n);
+    return str_seal_n(out, 1);
+}
+
+/* 带游标的 str 下标：命中「紧接着上一次取出的码点」时 O(1)。
+   降级器在顺序迭代（for ch in s / enumerate / zip / 推导式）里挂游标，
+   否则朴素实现每轮从头扫，长串会退化成 O(n^2)。 */
+PyAdamasStr* pa_str_char_at_cursor(PyAdamasStr* s, int64_t i, PyAdamasStrCursor* cur) {
+    if (i < 0) i += s->pub;
+    if (i < 0 || i >= s->pub) pa_raise_c("IndexError", "string index out of range");
+    /* 全 ASCII 快路径：码点下标就是字节偏移，也不需要维护游标。
+       ASCII 是绝对主流，这条路径的成本与改动前完全一致。 */
+    if (s->pub == s->len) return pa_char_str((unsigned char)s->data[i]);
+    int64_t off;
+    if (cur && i == cur->cp + 1 && cur->off >= 0 && cur->off <= s->len) {
+        off = cur->off;
+    } else {
+        off = str_cp_to_byte(s, i);
+    }
+    int n = 0;
+    uint32_t cp = str_cp_at(s, off, &n);
+    if (cur) {
+        cur->cp = i;
+        cur->off = off + n;
+    }
+    if (cp < 0x80) return pa_char_str((int64_t)cp);
+    PyAdamasStr* out = str_alloc_raw(n);
+    memcpy((char*)out->data, s->data + off, (size_t)n);
+    return str_seal_n(out, 1);
+}
+
+/* 字节长度出口（O(1)）：len_bytes(s)。 */
+int64_t pa_len_bytes(PyAdamasStr* s) { return s ? s->len : 0; }
+
+/* str.encode()：bytes 语义的副本。全 ASCII 时 pub == len，两种语义同值，
+   直接共享同一个对象（零复制）；非 ASCII 复制字节并把 pub 改成字节数。 */
+PyAdamasStr* pa_str_encode(PyAdamasStr* s) {
+    if (!s) return str_new_bytes("", 0);
+    if (s->pub == s->len) {
+        pa_rc_inc(s);
+        return s;
+    }
+    return str_new_bytes(s->data, s->len);
+}
+
+/* bytes.decode()：str 语义的副本。全 ASCII 零复制，否则扫描算码点数。
+   注意不能拿 pub == len 当「全 ASCII」判据——bytes 的 pub 恒等于 len，
+   对非 ASCII 内容同样成立，必须真的检查每个字节。 */
+PyAdamasStr* pa_bytes_decode(PyAdamasStr* s) {
+    if (!s) return str_new("", 0);
+    int all_ascii = 1;
+    for (int64_t i = 0; i < s->len; ++i)
+        if ((unsigned char)s->data[i] >= 0x80) { all_ascii = 0; break; }
+    if (all_ascii) {
+        pa_rc_inc(s);
+        return s;
+    }
+    return str_new(s->data, s->len);
 }
 
 PyAdamasStr* pa_str_from_i64(int64_t v) {
@@ -181,15 +255,18 @@ double pa_str_to_f64(PyAdamasStr* s) {
 }
 
 int64_t pa_ord(PyAdamasStr* s) {
-    if (s->len != 1)
+    if (s->pub != 1)
         pa_raise_c("TypeError", "ord() expected a character, but string length differs");
-    return (int64_t)(unsigned char)s->data[0];
+    int n = 0;
+    return (int64_t)str_cp_at(s, 0, &n);
 }
 
 PyAdamasStr* pa_chr(int64_t c) {
-    /* 字节串：只支持 0..255（见 compatibility.md）。 */
-    if (c < 0 || c > 255) pa_raise_c("ValueError", "chr() arg not in range(256)");
-    return pa_char_str(c);
+    /* 码点语义：0..0x10FFFF；代理区无法编成 UTF-8，按 CPython 的
+       ValueError 口径拒绝（这是有意的差异，见 compatibility.md）。 */
+    if (c < 0 || c > 0x10FFFF || (c >= 0xD800 && c <= 0xDFFF))
+        pa_raise_c("ValueError", "chr() arg not in range(0x110000)");
+    return pa_cp_str((uint32_t)c);
 }
 
 PyAdamasStr* pa_int_to_base(int64_t v, int64_t base) {
@@ -291,6 +368,18 @@ static int sm_char_in_set(char c, PyAdamasStr* set) {
     return 0;
 }
 
+/* 码点是否在 chars 集合里（按码点比较，不按字节）。 */
+static int cp_in_cp_set(uint32_t cp, PyAdamasStr* set) {
+    int64_t off = 0;
+    while (off < set->len) {
+        int n = 0;
+        uint32_t c = str_cp_at(set, off, &n);
+        if (c == cp) return 1;
+        off += n;
+    }
+    return 0;
+}
+
 /* 在 base[0..n) 的 [from, n-m] 区间里找 pat[0..m)。先用 memchr 定位首字节，
    只对首字节命中的位置做整段 memcmp；m==1 时 memchr 的结果就是答案。 */
 int64_t pa_find_bytes(const char* base, int64_t n, const char* pat, int64_t m,
@@ -309,20 +398,33 @@ int64_t pa_find_bytes(const char* base, int64_t n, const char* pat, int64_t m,
     return -1;
 }
 
+/* 字节偏移 -> 码点下标。off 必须落在码点边界上（匹配结果天然满足）。 */
+static int64_t cp_index_of(const PyAdamasStr* s, int64_t off) {
+    if (s->pub == s->len) return off;
+    return str_count_cp(s->data, off);
+}
+
+/* find/rfind 的 start/end 按 CPython 是码点下标：先夹到 [0, pub]，再换算
+   成字节偏移去匹配；匹配到的字节下标再换算回码点下标返回。 */
 static int64_t sm_find_from(PyAdamasStr* s, PyAdamasStr* sub, int64_t start, int64_t end) {
-    if (start < 0) start += s->len;
+    if (start < 0) start += s->pub;
     if (start < 0) start = 0;
-    if (end < 0) end += s->len;
-    if (end > s->len) end = s->len;
+    if (end < 0) end += s->pub;
+    if (end > s->pub) end = s->pub;
     if (end < 0) end = 0;
     if (sub->len == 0) return start <= end ? start : -1;
-    return pa_find_bytes(s->data, end, sub->data, sub->len, start);
+    if (start > end) return -1;
+    int64_t bstart = str_cp_to_byte(s, start);
+    int64_t bend = str_cp_to_byte(s, end);
+    int64_t hit = pa_find_bytes(s->data, bend, sub->data, sub->len, bstart);
+    if (hit < 0) return -1;
+    return cp_index_of(s, hit);
 }
 
 /* 单遍 capwords：不建中间词表，直接写进一个输出字符串。
    语义与 string.capwords 一致：按 ASCII 空白切词，词首大写、其余小写。 */
 PyAdamasStr* pa_str_capwords(PyAdamasStr* s) {
-    PyAdamasStr* out = str_alloc(s->len);
+    PyAdamasStr* out = str_alloc_raw(s->len);
     char* p = (char*)out->data;
     int64_t i = 0;
     int64_t pos = 0;
@@ -346,18 +448,25 @@ PyAdamasStr* pa_str_capwords(PyAdamasStr* s) {
     }
     out->len = pos;
     p[pos] = '\0';
-    return out;
+    return str_seal(out);  /* 空白被折叠后码点数会变，扫描算 */
 }
+
+/* ── str 方法：码点语义 ────────────────────────────────────────
+   字节级的匹配（find/replace/split 的匹配本身）继续按字节做——对合法
+   UTF-8，合法 needle 的字节匹配位置必然落在码点边界上（多字节序列的
+   首字节不会是 0x80-0xBF）。需要换算的是「对外暴露/接收的下标」与
+   「输出串的 pub」。大小写/字符类别仍只认 ASCII（已知差异，见
+   compatibility.md）。 */
 
 int64_t pa_str_method(PyAdamasStr* s, int64_t op, int64_t a0, int64_t a1, int64_t a2) {
     switch (op) {
         case 0:   /* upper */
         case 1: { /* lower */
-            PyAdamasStr* out = str_alloc(s->len);
+            PyAdamasStr* out = str_alloc_raw(s->len);
             char* p = (char*)out->data;
             for (int64_t i = 0; i < s->len; ++i)
                 p[i] = op == 0 ? sm_upper(s->data[i]) : sm_lower(s->data[i]);
-            return (int64_t)out;
+            return (int64_t)str_seal_n(out, s->pub);
         }
         case 2:   /* strip */
         case 3:   /* lstrip */
@@ -368,21 +477,42 @@ int64_t pa_str_method(PyAdamasStr* s, int64_t op, int64_t a0, int64_t a1, int64_
             PyAdamasStr* chars = (PyAdamasStr*)a0;
             int left = op == 2 || op == 3 || op == 5 || op == 6;
             int right = op == 2 || op == 4 || op == 5 || op == 7;
-            int64_t b = 0, e = s->len;
-            if (left)
-                while (b < e && (chars ? sm_char_in_set(s->data[b], chars)
-                                       : sm_is_space(s->data[b])))
-                    ++b;
-            if (right)
-                while (e > b && (chars ? sm_char_in_set(s->data[e - 1], chars)
-                                       : sm_is_space(s->data[e - 1])))
-                    --e;
+            int64_t b = 0, e = s->len, nb = 0, ne = s->pub;
+            /* chars 按码点集合匹配：否则 strip("中") 永远剥不掉多字节字符。
+               默认空白仍只认 ASCII 六种（CPython 还认 Unicode 空白，属已知差异）。 */
+            if (left) {
+                while (b < e) {
+                    int n = 0;
+                    uint32_t cp = str_cp_at(s, b, &n);
+                    if (chars ? cp_in_cp_set(cp, chars) : (cp < 0x80 && sm_is_space((char)cp))) {
+                        b += n;
+                        ++nb;
+                    } else {
+                        break;
+                    }
+                }
+            }
+            if (right) {
+                while (e > b) {
+                    int64_t off = str_prev_cp(s, e);
+                    int n = 0;
+                    uint32_t cp = str_cp_at(s, off, &n);
+                    if (chars ? cp_in_cp_set(cp, chars) : (cp < 0x80 && sm_is_space((char)cp))) {
+                        e = off;
+                        --ne;
+                    } else {
+                        break;
+                    }
+                }
+            }
             /* 没有可剥离的字符时按 CPython 的做法直接共享原串。 */
             if (b == 0 && e == s->len) {
                 pa_rc_inc(s);
                 return (int64_t)s;
             }
-            return (int64_t)str_new(s->data + b, e - b);
+            PyAdamasStr* out = str_alloc_raw(e - b);
+            if (e > b) memcpy((char*)out->data, s->data + b, (size_t)(e - b));
+            return (int64_t)str_seal_n(out, ne - nb);
         }
         case 8: { /* split() 按空白 */
             // 先数一遍词数，按精确容量建表，避免 append 过程中的 realloc。
@@ -405,7 +535,7 @@ int64_t pa_str_method(PyAdamasStr* s, int64_t op, int64_t a0, int64_t a1, int64_
                 if (i >= s->len) break;
                 int64_t b = i;
                 while (i < s->len && !sm_is_space(s->data[i])) ++i;
-                sm_push_str(out, str_new(s->data + b, i - b));
+                sm_push_str(out, str_new(s->data + b, i - b));  /* str_new 扫描算 pub */
             }
             pa_gc_unpin(out);
             return (int64_t)out;
@@ -440,11 +570,17 @@ int64_t pa_str_method(PyAdamasStr* s, int64_t op, int64_t a0, int64_t a1, int64_
                 pa_rc_inc(only);
                 return (int64_t)only;
             }
-            int64_t total = 0;
-            for (int64_t i = 0; i < parts->len; ++i)
-                total += ((PyAdamasStr*)parts->data[i])->len;
-            if (parts->len > 1) total += s->len * (parts->len - 1);
-            PyAdamasStr* out = str_alloc(total);
+            int64_t total = 0, total_cp = 0;
+            for (int64_t i = 0; i < parts->len; ++i) {
+                PyAdamasStr* part = (PyAdamasStr*)parts->data[i];
+                total += part->len;
+                total_cp += part->pub;
+            }
+            if (parts->len > 1) {
+                total += s->len * (parts->len - 1);
+                total_cp += s->pub * (parts->len - 1);
+            }
+            PyAdamasStr* out = str_alloc_raw(total);
             char* p = (char*)out->data;
             int64_t pos = 0;
             for (int64_t i = 0; i < parts->len; ++i) {
@@ -456,16 +592,16 @@ int64_t pa_str_method(PyAdamasStr* s, int64_t op, int64_t a0, int64_t a1, int64_
                 memcpy(p + pos, part->data, (size_t)part->len);
                 pos += part->len;
             }
-            return (int64_t)out;
+            return (int64_t)str_seal_n(out, total_cp);
         }
         case 11: { /* replace(old, new, count) */
             PyAdamasStr* old = (PyAdamasStr*)a0;
             PyAdamasStr* nw = (PyAdamasStr*)a1;
             int64_t count = a2;
-            // 先数出现次数（空 old 特殊：在每对字符之间插入）
+            // 先数出现次数（空 old 特殊：在每对码点之间插入，所以是 pub+1 个位置）
             int64_t hits = 0;
             if (old->len == 0) {
-                hits = s->len + 1;
+                hits = s->pub + 1;
                 if (count >= 0 && hits > count) hits = count;
             } else {
                 int64_t i = 0;
@@ -480,17 +616,33 @@ int64_t pa_str_method(PyAdamasStr* s, int64_t op, int64_t a0, int64_t a1, int64_
             }
             int64_t newlen = s->len + hits * (nw->len - old->len);
             if (old->len == 0 && s->len > 0) newlen = s->len + hits * nw->len;
-            PyAdamasStr* out = str_alloc(newlen);
+            /* 码点数：非空 old 时命中次数与码点数无关，直接算；空 old 是逐码点
+               插入，码点数 = s->pub + hits×nw->pub。 */
+            int64_t newcp;
+            if (old->len == 0) newcp = s->pub + hits * nw->pub;
+            else newcp = s->pub + hits * (nw->pub - old->pub);
+            PyAdamasStr* out = str_alloc_raw(newlen);
             char* p = (char*)out->data;
             int64_t pos = 0, used = 0, i = 0;
             if (old->len == 0) {
-                for (int64_t k = 0; k <= s->len; ++k) {
+                /* 空 old：在每对码点之间插入 new（以前是逐字节，会把多字节
+                   序列切开）。 */
+                int64_t off = 0;
+                while (off < s->len) {
                     if (used < hits) {
                         memcpy(p + pos, nw->data, (size_t)nw->len);
                         pos += nw->len;
                         ++used;
                     }
-                    if (k < s->len) p[pos++] = s->data[k];
+                    int n = str_seq_len((unsigned char)s->data[off]);
+                    memcpy(p + pos, s->data + off, (size_t)n);
+                    pos += n;
+                    off += n;
+                }
+                if (used < hits) {
+                    memcpy(p + pos, nw->data, (size_t)nw->len);
+                    pos += nw->len;
+                    ++used;
                 }
             } else {
                 while (i < s->len) {
@@ -521,12 +673,406 @@ int64_t pa_str_method(PyAdamasStr* s, int64_t op, int64_t a0, int64_t a1, int64_
                     }
                 }
             }
-            return (int64_t)out;
+            return (int64_t)str_seal_n(out, newcp);
         }
         case 12: { /* find(sub, start, end) */
             return sm_find_from(s, (PyAdamasStr*)a0, a1, a2);
         }
         case 13: { /* rfind */
+            PyAdamasStr* sub = (PyAdamasStr*)a0;
+            int64_t start = a1, end = a2;
+            if (start < 0) start += s->pub;
+            if (start < 0) start = 0;
+            if (end < 0) end += s->pub;
+            if (end > s->pub) end = s->pub;
+            if (end < 0) end = 0;
+            if (sub->len == 0) return end >= start ? end : -1;
+            if (start > end) return -1;
+            int64_t bstart = str_cp_to_byte(s, start);
+            int64_t bend = str_cp_to_byte(s, end);
+            for (int64_t i = bend - sub->len; i >= bstart; --i) {
+                /* 起点必须落在码点边界上，否则会从续字节里开始比。 */
+                if (((unsigned char)s->data[i] & 0xC0) == 0x80) continue;
+                if (memcmp(s->data + i, sub->data, (size_t)sub->len) == 0)
+                    return cp_index_of(s, i);
+            }
+            return -1;
+        }
+        case 14:   /* startswith */
+        case 15: { /* endswith */
+            PyAdamasStr* affix = (PyAdamasStr*)a0;
+            if (affix->len > s->len) return 0;
+            if (op == 14)
+                return memcmp(s->data, affix->data, (size_t)affix->len) == 0 ? 1 : 0;
+            return memcmp(s->data + s->len - affix->len, affix->data,
+                          (size_t)affix->len) == 0
+                       ? 1
+                       : 0;
+        }
+        case 16: { /* count(sub) */
+            PyAdamasStr* sub = (PyAdamasStr*)a0;
+            if (sub->len == 0) return s->pub + 1;
+            int64_t n = 0, i = 0;
+            for (;;) {
+                int64_t j = pa_find_bytes(s->data, s->len, sub->data, sub->len, i);
+                if (j < 0) break;
+                ++n;
+                i = j + sub->len;
+            }
+            return n;
+        }
+        case 17: { /* zfill(width) */
+            int64_t width = a0;
+            if (width <= s->pub) return (int64_t)str_new(s->data, s->len);
+            int64_t pad = width - s->pub;
+            PyAdamasStr* out = str_alloc_raw(s->len + pad);
+            char* p = (char*)out->data;
+            int64_t pos = 0;
+            int64_t start = 0;
+            if (s->len > 0 && (s->data[0] == '+' || s->data[0] == '-')) {
+                p[pos++] = s->data[0];
+                start = 1;
+            }
+            for (int64_t i = 0; i < pad; ++i) p[pos++] = '0';
+            memcpy(p + pos, s->data + start, (size_t)(s->len - start));
+            return (int64_t)str_seal_n(out, width);
+        }
+        case 18:   /* ljust(width, fill) */
+        case 19:   /* rjust */
+        case 20: { /* center */
+            int64_t width = a0;
+            PyAdamasStr* fill = (PyAdamasStr*)a1;
+            char fbuf[4];
+            int flen = 1;
+            fbuf[0] = ' ';
+            if (fill) {
+                if (fill->pub != 1)
+                    pa_raise_c("TypeError", "The fill character must be exactly one character long");
+                flen = 0;
+                uint32_t cp = str_cp_at(fill, 0, &flen);
+                str_cp_encode(cp, fbuf);
+            }
+            if (width <= s->pub) return (int64_t)str_new(s->data, s->len);
+            int64_t pad = width - s->pub;
+            int64_t left = op == 18 ? 0 : op == 19 ? pad : pad / 2;
+            int64_t right = pad - left;
+            PyAdamasStr* out = str_alloc_raw(s->len + (int64_t)(left + right) * flen);
+            char* p = (char*)out->data;
+            int64_t pos = 0;
+            for (int64_t i = 0; i < left; ++i) {
+                memcpy(p + pos, fbuf, (size_t)flen);
+                pos += flen;
+            }
+            memcpy(p + pos, s->data, (size_t)s->len);
+            pos += s->len;
+            for (int64_t i = 0; i < right; ++i) {
+                memcpy(p + pos, fbuf, (size_t)flen);
+                pos += flen;
+            }
+            return (int64_t)str_seal_n(out, width);
+        }
+        case 21: { /* capitalize */
+            /* 只有 ASCII 字节会被改大小写；多字节序列的续字节 sm_upper 原样返回，
+               所以按字节循环不会破坏 UTF-8。pub 不变。 */
+            PyAdamasStr* out = str_alloc_raw(s->len);
+            char* p = (char*)out->data;
+            for (int64_t i = 0; i < s->len; ++i)
+                p[i] = i == 0 ? sm_upper(s->data[i]) : sm_lower(s->data[i]);
+            return (int64_t)str_seal_n(out, s->pub);
+        }
+        case 22: { /* title */
+            /* 必须逐码点判词边界：按字节时非 ASCII 的续字节会被当成「非字母」
+               反复重置词边界，多字节字符会被拆着改。 */
+            PyAdamasStr* out = str_alloc_raw(s->len);
+            char* p = (char*)out->data;
+            int word = 1;
+            int64_t off = 0;
+            while (off < s->len) {
+                int n = str_seq_len((unsigned char)s->data[off]);
+                if (n == 1) {
+                    char c = s->data[off];
+                    p[off] = word ? sm_upper(c) : sm_lower(c);
+                    word = !sm_is_alpha(c);
+                } else {
+                    memcpy(p + off, s->data + off, (size_t)n);
+                    word = 0;  /* 非 ASCII 码点按「非字母」处理（已知差异） */
+                }
+                off += n;
+            }
+            return (int64_t)str_seal_n(out, s->pub);
+        }
+        case 23:   /* isdigit */
+        case 24:   /* isalpha */
+        case 25:   /* isspace */
+        case 26:   /* isupper */
+        case 27:   /* islower */
+        case 28: { /* isalnum */
+            if (s->pub == 0) return 0;
+            int cased = 0;
+            int64_t off = 0;
+            while (off < s->len) {
+                int n = 0;
+                uint32_t cp = str_cp_at(s, off, &n);
+                /* 非 ASCII 码点按「非字母/非数字/非空白」处理（已知差异，
+                   见 compatibility.md）；对 isupper/islower 它不影响 cased。 */
+                char c = cp < 0x80 ? (char)cp : (char)1;
+                int ok = 0;
+                switch (op) {
+                    case 23: ok = sm_is_digit(c); break;
+                    case 24: ok = sm_is_alpha(c); break;
+                    case 25: ok = sm_is_space(c); break;
+                    case 26:
+                        if (sm_is_alpha(c)) {
+                            ++cased;
+                            ok = !(c >= 'a' && c <= 'z');
+                        } else {
+                            ok = 1;
+                        }
+                        break;
+                    case 27:
+                        if (sm_is_alpha(c)) {
+                            ++cased;
+                            ok = !(c >= 'A' && c <= 'Z');
+                        } else {
+                            ok = 1;
+                        }
+                        break;
+                    default: ok = sm_is_alnum(c); break;
+                }
+                if (!ok) return 0;
+                off += n;
+            }
+            if ((op == 26 || op == 27) && cased == 0) return 0;
+            return 1;
+        }
+        case 29:   /* removeprefix */
+        case 30: { /* removesuffix */
+            PyAdamasStr* affix = (PyAdamasStr*)a0;
+            if (affix->len > s->len) return (int64_t)str_new(s->data, s->len);
+            if (op == 29) {
+                if (memcmp(s->data, affix->data, (size_t)affix->len) != 0)
+                    return (int64_t)str_new(s->data, s->len);
+                PyAdamasStr* out = str_alloc_raw(s->len - affix->len);
+                if (s->len > affix->len)
+                    memcpy((char*)out->data, s->data + affix->len,
+                           (size_t)(s->len - affix->len));
+                return (int64_t)str_seal_n(out, s->pub - affix->pub);
+            }
+            if (memcmp(s->data + s->len - affix->len, affix->data,
+                       (size_t)affix->len) != 0)
+                return (int64_t)str_new(s->data, s->len);
+            PyAdamasStr* out = str_alloc_raw(s->len - affix->len);
+            if (s->len > affix->len)
+                memcpy((char*)out->data, s->data, (size_t)(s->len - affix->len));
+            return (int64_t)str_seal_n(out, s->pub - affix->pub);
+        }
+        case 31: { /* splitlines */
+            PyAdamasList* out = pa_list_new(4, 1);
+            /* 每个换行点一次 str_new：out 只在本帧 C 局部里，先 pin。 */
+            pa_gc_pin(out);
+            int64_t b = 0, i = 0;
+            while (i < s->len) {
+                char c = s->data[i];
+                if (c == '\n' || c == '\r') {
+                    sm_push_str(out, str_new(s->data + b, i - b));
+                    if (c == '\r' && i + 1 < s->len && s->data[i + 1] == '\n') ++i;
+                    ++i;
+                    b = i;
+                } else {
+                    ++i;
+                }
+            }
+            if (b < s->len) sm_push_str(out, str_new(s->data + b, s->len - b));
+            pa_gc_unpin(out);
+            return (int64_t)out;
+        }
+        case 32: /* encode：str -> bytes 的真实转换（S2） */
+            return (int64_t)pa_str_encode(s);
+        default:
+            pa_raise_c("ValueError", "unknown string method");
+    }
+    return 0;
+}
+
+/* ── bytes 方法：字节语义（与 str 分家） ────────────────────────
+   bytes 的 len/索引/切片/方法全部按字节，与改动前逐字节一致；pub 恒等于
+   字节数。大小写/字符类别本来就只有 ASCII 映射，字节版与码点版在 ASCII
+   上等价，但 strip(chars)/find 下标/宽度这些必须走字节口径。 */
+int64_t pa_bytes_method(PyAdamasStr* s, int64_t op, int64_t a0, int64_t a1, int64_t a2) {
+    switch (op) {
+        case 0:   /* upper */
+        case 1: { /* lower */
+            PyAdamasStr* out = str_alloc_raw(s->len);
+            char* p = (char*)out->data;
+            for (int64_t i = 0; i < s->len; ++i)
+                p[i] = op == 0 ? sm_upper(s->data[i]) : sm_lower(s->data[i]);
+            return (int64_t)str_seal_n(out, s->len);
+        }
+        case 2:   /* strip */
+        case 3:   /* lstrip */
+        case 4:   /* rstrip */
+        case 5:   /* strip(chars) */
+        case 6:   /* lstrip(chars) */
+        case 7: { /* rstrip(chars) */
+            PyAdamasStr* chars = (PyAdamasStr*)a0;
+            int left = op == 2 || op == 3 || op == 5 || op == 6;
+            int right = op == 2 || op == 4 || op == 5 || op == 7;
+            int64_t b = 0, e = s->len;
+            if (left)
+                while (b < e && (chars ? sm_char_in_set(s->data[b], chars)
+                                       : sm_is_space(s->data[b])))
+                    ++b;
+            if (right)
+                while (e > b && (chars ? sm_char_in_set(s->data[e - 1], chars)
+                                       : sm_is_space(s->data[e - 1])))
+                    --e;
+            if (b == 0 && e == s->len) {
+                pa_rc_inc(s);
+                return (int64_t)s;
+            }
+            return (int64_t)str_new_bytes(s->data + b, e - b);
+        }
+        case 8: { /* split() 按空白 */
+            int64_t count = 0;
+            int64_t i = 0;
+            while (i < s->len) {
+                while (i < s->len && sm_is_space(s->data[i])) ++i;
+                if (i >= s->len) break;
+                ++count;
+                while (i < s->len && !sm_is_space(s->data[i])) ++i;
+            }
+            PyAdamasList* out = pa_list_new(count, 1);
+            pa_gc_pin(out);
+            i = 0;
+            while (i < s->len) {
+                while (i < s->len && sm_is_space(s->data[i])) ++i;
+                if (i >= s->len) break;
+                int64_t b = i;
+                while (i < s->len && !sm_is_space(s->data[i])) ++i;
+                sm_push_str(out, str_new_bytes(s->data + b, i - b));
+            }
+            pa_gc_unpin(out);
+            return (int64_t)out;
+        }
+        case 9: { /* split(sep, maxsplit) */
+            PyAdamasStr* sep = (PyAdamasStr*)a0;
+            int64_t maxsplit = a1;
+            if (sep->len == 0) pa_raise_c("ValueError", "empty separator");
+            PyAdamasList* out = pa_list_new(8, 1);
+            pa_gc_pin(out);
+            int64_t i = 0;
+            int64_t done = 0;
+            while (i <= s->len) {
+                if (maxsplit >= 0 && done >= maxsplit) break;
+                int64_t j = pa_find_bytes(s->data, s->len, sep->data, sep->len, i);
+                if (j < 0) break;
+                sm_push_str(out, str_new_bytes(s->data + i, j - i));
+                i = j + sep->len;
+                ++done;
+            }
+            sm_push_str(out, str_new_bytes(s->data + i, s->len - i));
+            pa_gc_unpin(out);
+            return (int64_t)out;
+        }
+        case 10: { /* join(parts) */
+            PyAdamasList* parts = (PyAdamasList*)a0;
+            if (parts->len == 1 && s->len == 0) {
+                PyAdamasStr* only = (PyAdamasStr*)parts->data[0];
+                pa_rc_inc(only);
+                return (int64_t)only;
+            }
+            int64_t total = 0;
+            for (int64_t i = 0; i < parts->len; ++i)
+                total += ((PyAdamasStr*)parts->data[i])->len;
+            if (parts->len > 1) total += s->len * (parts->len - 1);
+            PyAdamasStr* out = str_alloc_raw(total);
+            char* p = (char*)out->data;
+            int64_t pos = 0;
+            for (int64_t i = 0; i < parts->len; ++i) {
+                if (i > 0) {
+                    memcpy(p + pos, s->data, (size_t)s->len);
+                    pos += s->len;
+                }
+                PyAdamasStr* part = (PyAdamasStr*)parts->data[i];
+                memcpy(p + pos, part->data, (size_t)part->len);
+                pos += part->len;
+            }
+            return (int64_t)str_seal_n(out, pos);
+        }
+        case 11: { /* replace(old, new, count) */
+            PyAdamasStr* old = (PyAdamasStr*)a0;
+            PyAdamasStr* nw = (PyAdamasStr*)a1;
+            int64_t count = a2;
+            int64_t hits = 0;
+            if (old->len == 0) {
+                hits = s->len + 1;
+                if (count >= 0 && hits > count) hits = count;
+            } else {
+                int64_t i = 0;
+                while (i + old->len <= s->len) {
+                    int64_t j = pa_find_bytes(s->data, s->len, old->data, old->len, i);
+                    if (j < 0) break;
+                    ++hits;
+                    if (count >= 0 && hits >= count) break;
+                    i = j + old->len;
+                }
+            }
+            int64_t newlen = s->len + hits * (nw->len - old->len);
+            if (old->len == 0 && s->len > 0) newlen = s->len + hits * nw->len;
+            PyAdamasStr* out = str_alloc_raw(newlen);
+            char* p = (char*)out->data;
+            int64_t pos = 0, used = 0, i = 0;
+            if (old->len == 0) {
+                for (int64_t k = 0; k <= s->len; ++k) {
+                    if (used < hits) {
+                        memcpy(p + pos, nw->data, (size_t)nw->len);
+                        pos += nw->len;
+                        ++used;
+                    }
+                    if (k < s->len) p[pos++] = s->data[k];
+                }
+            } else {
+                while (i < s->len) {
+                    if (used >= hits || i + old->len > s->len) {
+                        memcpy(p + pos, s->data + i, (size_t)(s->len - i));
+                        pos += s->len - i;
+                        break;
+                    }
+                    int64_t j = pa_find_bytes(s->data, s->len, old->data, old->len, i);
+                    if (j < 0) {
+                        memcpy(p + pos, s->data + i, (size_t)(s->len - i));
+                        pos += s->len - i;
+                        break;
+                    }
+                    if (j > i) {
+                        memcpy(p + pos, s->data + i, (size_t)(j - i));
+                        pos += j - i;
+                        i = j;
+                    }
+                    if (memcmp(s->data + i, old->data, (size_t)old->len) == 0) {
+                        memcpy(p + pos, nw->data, (size_t)nw->len);
+                        pos += nw->len;
+                        i += old->len;
+                        ++used;
+                    } else {
+                        p[pos++] = s->data[i++];
+                    }
+                }
+            }
+            return (int64_t)str_seal_n(out, pos);
+        }
+        case 12: { /* find(sub, start, end)：字节下标 */
+            PyAdamasStr* sub = (PyAdamasStr*)a0;
+            int64_t start = a1, end = a2;
+            if (start < 0) start += s->len;
+            if (start < 0) start = 0;
+            if (end < 0) end += s->len;
+            if (end > s->len) end = s->len;
+            if (end < 0) end = 0;
+            if (sub->len == 0) return start <= end ? start : -1;
+            return pa_find_bytes(s->data, end, sub->data, sub->len, start);
+        }
+        case 13: { /* rfind：字节下标 */
             PyAdamasStr* sub = (PyAdamasStr*)a0;
             int64_t start = a1, end = a2;
             if (start < 0) start += s->len;
@@ -562,124 +1108,14 @@ int64_t pa_str_method(PyAdamasStr* s, int64_t op, int64_t a0, int64_t a1, int64_
             }
             return n;
         }
-        case 17: { /* zfill(width) */
-            int64_t width = a0;
-            if (width <= s->len) return (int64_t)str_new(s->data, s->len);
-            int64_t pad = width - s->len;
-            PyAdamasStr* out = str_alloc(width);
-            char* p = (char*)out->data;
-            int64_t pos = 0;
-            int64_t start = 0;
-            if (s->len > 0 && (s->data[0] == '+' || s->data[0] == '-')) {
-                p[pos++] = s->data[0];
-                start = 1;
-            }
-            for (int64_t i = 0; i < pad; ++i) p[pos++] = '0';
-            memcpy(p + pos, s->data + start, (size_t)(s->len - start));
-            return (int64_t)out;
-        }
-        case 18:   /* ljust(width, fill) */
-        case 19:   /* rjust */
-        case 20: { /* center */
-            int64_t width = a0;
-            PyAdamasStr* fill = (PyAdamasStr*)a1;
-            char fc = ' ';
-            if (fill) {
-                if (fill->len == 0) pa_raise_c("ValueError", "empty fill character");
-                fc = fill->data[0];
-            }
-            if (width <= s->len) return (int64_t)str_new(s->data, s->len);
-            int64_t pad = width - s->len;
-            int64_t left = op == 18 ? 0 : op == 19 ? pad : pad / 2;
-            int64_t right = pad - left;
-            PyAdamasStr* out = str_alloc(width);
-            char* p = (char*)out->data;
-            int64_t pos = 0;
-            for (int64_t i = 0; i < left; ++i) p[pos++] = fc;
-            memcpy(p + pos, s->data, (size_t)s->len);
-            pos += s->len;
-            for (int64_t i = 0; i < right; ++i) p[pos++] = fc;
-            return (int64_t)out;
-        }
-        case 21: { /* capitalize */
-            PyAdamasStr* out = str_alloc(s->len);
-            char* p = (char*)out->data;
-            for (int64_t i = 0; i < s->len; ++i)
-                p[i] = i == 0 ? sm_upper(s->data[i]) : sm_lower(s->data[i]);
-            return (int64_t)out;
-        }
-        case 22: { /* title */
-            PyAdamasStr* out = str_alloc(s->len);
-            char* p = (char*)out->data;
-            int word = 1;
-            for (int64_t i = 0; i < s->len; ++i) {
-                char c = s->data[i];
-                p[i] = word ? sm_upper(c) : sm_lower(c);
-                word = !sm_is_alpha(c);
-            }
-            return (int64_t)out;
-        }
-        case 23:   /* isdigit */
-        case 24:   /* isalpha */
-        case 25:   /* isspace */
-        case 26:   /* isupper */
-        case 27:   /* islower */
-        case 28: { /* isalnum */
-            if (s->len == 0) return 0;
-            int cased = 0;
-            for (int64_t i = 0; i < s->len; ++i) {
-                char c = s->data[i];
-                int ok = 0;
-                switch (op) {
-                    case 23: ok = sm_is_digit(c); break;
-                    case 24: ok = sm_is_alpha(c); break;
-                    case 25: ok = sm_is_space(c); break;
-                    case 26:
-                        if (sm_is_alpha(c)) {
-                            ++cased;
-                            ok = !(c >= 'a' && c <= 'z');
-                        } else {
-                            ok = 1;
-                        }
-                        break;
-                    case 27:
-                        if (sm_is_alpha(c)) {
-                            ++cased;
-                            ok = !(c >= 'A' && c <= 'Z');
-                        } else {
-                            ok = 1;
-                        }
-                        break;
-                    default: ok = sm_is_alnum(c); break;
-                }
-                if (!ok) return 0;
-            }
-            if ((op == 26 || op == 27) && cased == 0) return 0;
-            return 1;
-        }
-        case 29:   /* removeprefix */
-        case 30: { /* removesuffix */
-            PyAdamasStr* affix = (PyAdamasStr*)a0;
-            if (affix->len > s->len) return (int64_t)str_new(s->data, s->len);
-            if (op == 29) {
-                if (memcmp(s->data, affix->data, (size_t)affix->len) != 0)
-                    return (int64_t)str_new(s->data, s->len);
-                return (int64_t)str_new(s->data + affix->len, s->len - affix->len);
-            }
-            if (memcmp(s->data + s->len - affix->len, affix->data,
-                       (size_t)affix->len) != 0)
-                return (int64_t)str_new(s->data, s->len);
-            return (int64_t)str_new(s->data, s->len - affix->len);
-        }
         case 31: { /* splitlines */
             PyAdamasList* out = pa_list_new(4, 1);
-            /* 每个换行点一次 str_new：out 只在本帧 C 局部里，先 pin。 */
             pa_gc_pin(out);
             int64_t b = 0, i = 0;
             while (i < s->len) {
                 char c = s->data[i];
                 if (c == '\n' || c == '\r') {
-                    sm_push_str(out, str_new(s->data + b, i - b));
+                    sm_push_str(out, str_new_bytes(s->data + b, i - b));
                     if (c == '\r' && i + 1 < s->len && s->data[i + 1] == '\n') ++i;
                     ++i;
                     b = i;
@@ -687,13 +1123,14 @@ int64_t pa_str_method(PyAdamasStr* s, int64_t op, int64_t a0, int64_t a1, int64_
                     ++i;
                 }
             }
-            if (b < s->len) sm_push_str(out, str_new(s->data + b, s->len - b));
+            if (b < s->len) sm_push_str(out, str_new_bytes(s->data + b, s->len - b));
             pa_gc_unpin(out);
             return (int64_t)out;
         }
+        case 32: /* decode：bytes -> str 的真实转换（S2） */
+            return (int64_t)pa_bytes_decode(s);
         default:
-            pa_raise_c("ValueError", "unknown string method");
+            pa_raise_c("ValueError", "unknown bytes method");
     }
     return 0;
 }
-

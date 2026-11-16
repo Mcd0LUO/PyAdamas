@@ -11,8 +11,6 @@ PyAdamas 不追求兼容 CPython：语义是按静态类型的需要重新定的
 | 整数溢出 | 回绕成 int64 | 自动升格为任意精度 | 静态类型的代价，也是性能的来源 |
 | `1 << 70` | `64` | `1180591620717411303424` | x86 的移位次数按 64 取模 |
 | `2 ** -1` | `0` | `0.5` | 整数幂走整数实现，负指数直接返 0 |
-| `len("中文")` | `6` | `2` | 字符串是**字节串**，`len` 是字节数 |
-| `"中文"[0]` | 单个字节（打印出来是乱码） | `"中"` | 索引按字节，不做 UTF-8 解码 |
 | `x: float = 1; print(x)` | `1.0` | `1` | 标注决定存储类型，int 在 float 位置被真的转成 double |
 | `print(a, b, end=f())` 的求值时机 | 边算边写，`f()` 最后求值 | 先把参数和关键字全算完再写 | `print` 是降级期展开的，不是函数调用 |
 | `assert x, "msg"` | 抛 `AssertionError("msg")`；无消息时 `assertion failed` | 同 Python（消息文本一致） | 消息只保留字符串内容 |
@@ -71,11 +69,27 @@ PyAdamas 不追求兼容 CPython：语义是按静态类型的需要重新定的
 | dict/set 方法 | `get`/`keys`/`values`/`items`/`update`/`add` 和删除类方法 `pop`/`remove`/`discard`/`clear`/`popitem` 可用 | 完整方法 | `keys()` 等返回 list 而不是视图；删除用墓碑 + 插入顺序双向链表，摊还 O(1)；`popitem` 固定 LIFO，`set.pop` 固定取最后插入项 |
 | `d.get(k)` 缺失 | 返回 `None` | 返回 `None` | PyAdamas 里 `None` 就是 `0`，值为 `0` 的项与缺失分不出来 |
 | `None` 与 `0` | 同一个表示：`0 is None` 为真、`None == 0` 为真 | 完全不同 | 值表示不带类型标签，是「没有 tag」的直接后果 |
-| 切片 | str 按字节；list/tuple 返回新容器，语义同 CPython | 同 Python | `step == 0` panic；未知元素类型只做保守 GC |
+| 切片 | str 按码点、bytes 按字节；list/tuple 返回新容器，语义同 CPython | 同 Python | `step == 0` panic；未知元素类型只做保守 GC |
 | 切片赋值 | 仅 list；step 1 可改变长度，扩展切片长度必须一致；右侧可为 str | 任意可变序列，任意可迭代右值 | 没有通用迭代协议；tuple 不可变，拒绝赋值 |
 | `range` | 惰性对象（`range[int]`），只存边界；不可变，赋值在编译期就报错 | 惰性对象，不可变，赋值是运行期 TypeError | 静态类型知道 range 不可变，直接拦在类型检查（消息与 CPython 一致） |
 
-字节串这条最容易被忽略：`len` 与索引都按字节，ASCII 之外的字符串会与 CPython 不一致。要不要改成码点语义（`len` 变成 O(n)、索引要解码）是个待定项，见 [roadmap.md](roadmap.md)。
+字符串已是 **UTF-8 存储 + 码点语义**：`len` / 索引 / 切片 / 迭代 / 方法 / 格式化
+宽度全部按码点，`len` 仍是 O(1)（码点数缓存在对象头里，字面量在编译期算好），
+`bytes` 全部按字节。字节长度出口是内置函数 **`len_bytes(s)`**（O(1)）。
+
+仍存在的差异（都只影响非 ASCII）：
+
+- 非 ASCII 的大小写映射与 Unicode 字符类别未实现（`"中".isalpha()` 仍 `False`，
+  `"中a文".title()` 的词边界按「非字母」处理）；
+- `str.strip()` 的默认空白仍只认 ASCII 六种，不认 Unicode 空白；
+- `re` 的 `\w` / 字符类 / 大小写折叠继续只认 ASCII；
+- `chr()` 拒绝代理码点（0xD800–0xDFFF，无法编成 UTF-8），CPython 允许；
+- `open(..., 'rb').read()` 仍按 `str` 返回原始字节（内容可能不是合法 UTF-8），
+  这类对象按「字节直通串」构造（`len` 等于字节数）；
+- `bytes` 与 `str` 比较是按字节比较（CPython 是 `False`），因为两者共用同一套
+  运行时表示、不带类型标签。
+
+设计见 [str-codepoints.md](str-codepoints.md)。
 
 ## 二、尚未实现的构造
 

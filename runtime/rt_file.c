@@ -75,13 +75,13 @@ static char* file_cstr(PyAdamasStr* s) {
 }
 
 static PyAdamasStr* file_norm_lower(PyAdamasStr* s) {
-    PyAdamasStr* out = str_alloc(s->len);
+    PyAdamasStr* out = str_alloc_raw(s->len);
     char* p = (char*)out->data;
     for (int64_t i = 0; i < s->len; ++i) {
         char c = s->data[i];
         p[i] = (c >= 'A' && c <= 'Z') ? (char)(c - 'A' + 'a') : c;
     }
-    return out;
+    return str_seal_n(out, s->pub);  /* ASCII 大小写不改变码点数 */
 }
 
 static int file_str_is(PyAdamasStr* s, const char* lit) {
@@ -408,7 +408,7 @@ PyAdamasStr* pa_file_read(PyAdamasFile* f, int64_t n) {
             if (n >= 0) remain -= (int64_t)got;
             if (got < want) break;
         }
-        PyAdamasStr* s = str_new(buf ? buf : "", len);
+        PyAdamasStr* s = str_new_bytes(buf ? buf : "", len);
         free(buf);
         return s;
     }
@@ -453,7 +453,7 @@ PyAdamasStr* pa_file_readline(PyAdamasFile* f, int64_t size) {
             buf[len++] = (char)c;
             if (c == '\n') break;
         }
-        PyAdamasStr* s = str_new(buf ? buf : "", len);
+        PyAdamasStr* s = str_new_bytes(buf ? buf : "", len);
         free(buf);
         return s;
     }
@@ -509,7 +509,7 @@ static PyAdamasStr* file_translate_write(PyAdamasFile* f, PyAdamasStr* s) {
     int64_t extra = 0;
     for (int64_t i = 0; i < s->len; ++i)
         if (s->data[i] == '\n') ++extra;
-    PyAdamasStr* out = str_alloc(s->len + extra);
+    PyAdamasStr* out = str_alloc_raw(s->len + extra);
     char* p = (char*)out->data;
     int64_t j = 0;
     for (int64_t i = 0; i < s->len; ++i) {
@@ -520,7 +520,7 @@ static PyAdamasStr* file_translate_write(PyAdamasFile* f, PyAdamasStr* s) {
             p[j++] = s->data[i];
         }
     }
-    return out;
+    return str_seal_n(out, s->pub + extra);  /* 每个 \n 换成 \r\n 只多一个 ASCII */
 }
 
 // 返回实际写出的字节数；出错按 errors 策略处理。
