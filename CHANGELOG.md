@@ -4,6 +4,283 @@
 
 早期阶段没有逐条留痕，按阶段归纳；0.4 之后逐条记录。
 
+## [0.233] - 2026-11-16
+
+### 混合容器元素在 exact-RC 模式下永远不释放（泄漏 1 → 0）
+
+- **根因**：`json.loads("[1, \"x\"]", (0, ""))` 的描述符 `(tis)` 推断出 `elem_kind=2`（混合），析构走 `pa_rc_dec_unknown`；而编译器判定程序「没有 unknown 值」时会调 `pa_disable_unknown_index()`，`rc_index_has` 恒返回 0 —— dec 被静默跳过，元素永久泄漏。
+- **修法**：`rc_index_off` 时用三条硬约束做回退判断，绝不误判整数——① 16 字节对齐（`rc_alloc` 走 malloc）；② `marked == PYADAMAS_RC_UNTRACKED`（exact-RC 下字符串 / range / struct 是 untracked leaf，`rc_link` 置 2 且不挂链）；③ 其余遍历 `heap_head` 确认链表成员。0.221 试过的「对象头自洽性」判据会段错误（整数很容易凑出看起来合法的头），已否决。
+- **tuple 异常安全**：`jp_value` 的 tuple 分支只有 `pa_gc_pin` 没有 `pa_rc_temp`（list/dict 分支都有），`jp_expect(']')` / 长度不匹配抛异常时容器泄漏；补齐并在正常返回点 take。
+- **定位方法**：分配序号 + 按时间顺序消费 RELEASE 的严格时序配对，不受地址复用干扰。
+验证：普通全量 205 ran ok；ASan 全量 205 ran ok；O0/O2 差分 188 用例 0 不一致；**泄漏扫描 0 处 / 188 用例**（从 0.217 的 23 处一路清零）。
+
+## [0.232] - 2026-11-16
+
+### json 解析器异常路径上的容器泄漏
+
+- **根因**：`jp_value` 创建 list/dict 后只做 `pa_gc_pin`（防 GC 清扫），**没有 `pa_rc_temp`**。`pa_gc_pin` 只影响 GC，异常展开时临时栈的 RC 清理看不到它 —— 抛异常跳过正常返回路径后容器永不释放。gdb 分配回溯给出确凿证据：`pa_list_new ← jp_value ← pa_json_loads ← __pa_main (53_json.py:24)`。
+- **修法**：容器创建后立刻 `pa_rc_temp(out)`，正常返回前 `pa_rc_temp_take(out)` 把所有权转给调用者。正常路径行为不变，异常路径由展开的 cleanup 释放。覆盖 list/dict 两个分支的 4 个返回点。
+- `34_exception_chain` 的 45 字节同类泄漏一并消失。
+验证：普通全量 205 ran ok；ASan 全量 205 ran ok；差分 188 用例 0 不一致；剩余泄漏 1 处（`53_json` 96 字节）。
+
+## [0.231] - 2026-11-16
+
+### 诊断工具改用线性扫描（修开放寻址导致的归属错乱）
+
+- **两类错乱**：① 插入时复用「地址不同」的 DEAD 槽，新记录落在 `hash(旧地址)+k`，而 `diag_find(新地址)` 从 `hash(新地址)` 起探测 —— 找不回来，表现为「刚 alloc 完，紧接着的 temp-push 报 UNTRACKED」；② 同地址遇到 LIVE 时原地复用，把还在世的对象挤出表，退出汇总漏报。
+- **修法**：活跃对象只有几十个，O(n) 线性扫描完全够，且没有开放寻址的不变量问题（只在诊断开启时走）。`diag_insert` 收紧为：同地址 + DEAD 原地复用；同地址 + LIVE **不复用**、分配新槽；地址不同 + DEAD 链尾兜底复用并计 overflow。
+- 顺带修：`temp-push` / `temp-pop` 原用 `what[0] == 'p'` 判断（两者都以 p 开头），改看第二个字符；`UNTRACKED` 现在打印 RC 头（kind/rc/size），用来区分「被 MIN/KIND 过滤掉」与「根本没走 rc_alloc」。
+验证：普通全量 205 ran ok；ASan 全量 205 ran ok；差分 188 用例 0 不一致；工具关闭时零 debug 输出。
+
+## [0.230] - 2026-11-16
+
+### 诊断工具补 temp 栈事件 + 两个陷阱的记录
+
+- **临时栈事件**（`temp-push` / `temp-pop`）：对象进栈后由 `pa_rc_cleanup` 统一释放，「进了栈却没人 pop」光看 alloc/free 看不出来，现在能直接看到配对是否完整。
+- **未追踪指针报警**：`temp-push` 收到不在表里的指针时明确报 `UNTRACKED`，不再静默跳过。
+- **`pa_diag_snapshot(when)`**：任意时刻快照存活对象数，区分「真的没人释放」与「由 shutdown 统一释放」。实测 `53_json`：`gc_shutdown` 前存活 5 个、之后 3 个 —— 2 个由 GC 释放，剩 3 个是 untracked leaf（不在 GC 堆链上），只能靠 RC。
+- **两个陷阱写进 docs/development.md**：① 地址复用会让事件归属错乱，怀疑某对象时要把**地址**拿去 grep 全部事件，看是否与其他对象生命周期重叠；② `cmake --build | grep error` 在 ninja 并行下会吃掉编译失败（`-Werror=unused-variable` 让 `rt_json.o` 一直是旧的），应该看 `tail` 或退出码。
+验证：普通全量 205 ran ok；ASan 全量 205 ran ok；差分 188 用例 0 不一致；泄漏 1 处（`53_json`）。
+
+## [0.229] - 2026-11-16
+
+### 运行时诊断工具独立成模块（rt_diag.c）
+
+- 0.227 的追踪代码塞在 `rt_exc.c` 里只管异常对象，这一版独立成 `runtime/rt_diag.c`，能力扩到所有 RC 对象。开关：`PYADAMAS_RC_TRACE=1` / `PYADAMAS_RC_TRACE_MIN=N` / `PYADAMAS_RC_TRACE_KIND=K`（str/list/dict/obj/struct）/ `PYADAMAS_EXC_TRACE=1` / `PYADAMAS_DIAG_DEPTH=N`（默认 3）。不设变量时零输出、零可测开销（一次 getenv + 一次自增）。
+- 输出直接给出归因：`[rc#20] alloc str 32B rc=1 <- str_alloc_raw <- str_new <- pa_json_loads <- __pa_main (53_json.py:20)`，退出时汇总未释放对象。
+- **四个设计决定**：① 外部哈希表，不改结构体布局（加字段会让对象 126 → 142 字节，ASan 数字跟着变、前后对照失效）；② 调用点归因走 `_Unwind_Backtrace`（`__builtin_return_address(n>0)` 要编译期常量且被 `-Werror=frame-address` 拦），按 `.eh_frame` 逐帧还原并用生成代码的 PC 表拿到文件名行号，链接加 `-rdynamic`；③ 表满不静默丢弃，溢出置标志并在退出时提示「结果不完整」；④ 地址复用不算新对象，同地址 DEAD 原地复用（否则误报 14 个），但绝不覆盖 LIVE 槽（否则真实泄漏消失）。
+- **踩到的坑：热路径上不能加钩子**。把悬挂指针检测放在 `pa_rc_inc` / `pa_rc_dec` 入口，`88_defaultdict` 的 `f["v"] += 1.5` 输出从 `1.5` 变成 `-1.6882786079646144e+260`。二分锁定到 `pa_diag_check_use`：它只是一个普通函数调用，但在这两个会被内联的极热函数里多一次调用就改变了寄存器分配，而生成代码对 `%xmm0` 的存活假设太脆弱。钩子只能放在非热路径（`rc_alloc` 入口、真正释放的那一支）。
+验证：普通全量 205 ran ok；ASan 全量 205 ran ok；差分 188 用例 0 不一致；工具关闭时零 debug 输出；泄漏 1 处（已精确定位到 `53_json.py:20`）。
+
+## [0.228] - 2026-11-16
+
+### 生成器帧槽里的异常对象没人释放（泄漏 2 → 1）
+
+- **诊断先定位再修**：`PYADAMAS_EXC_TRACE` 打出 `119_gen_except_suspend` 的轨迹 `alloc → leave(写进帧槽 s1) → leave(同槽再写) → LEAK`；帧槽快照显示生成器已正常终止（status=1）但 `s1`（exc_cur_slot）里仍存着异常对象。
+- **两处机制都漏了它**：① `gen_finish` 的顺序是 `release_slots()` 然后 `exc_leave()`，写回槽的那一刻释放已跑完，而 codegen 的帧销毁开头 `cmpq $1, 8(%rbx); je .Lgengcreldone` 对 status==1 短路跳过整块槽释放（对 RC 槽是对的，对异常槽不是）；② `exc_cur_slot` / `exc_top_slot` 类型被推断成 int（存裸指针），`lower_gen_async.cpp` 的 `if (!ir_is_heap(ty)) continue;` 跳过它们，`slot_heap` 为 0，释放循环也不生成代码。
+- **修法**：`exc_cur_slot` 标 `slot_heap=3`、`exc_top_slot` 标 `4`；codegen 把 `slot_heap >= 3` 的释放移到 status 检查**之前**无条件执行；`pa_gen_slot_release` 对 own==3 走 `exc_free`、own==4 走 `pa_exc_free_save_chain`（都不能 `pa_rc_dec`，那会按 RC 头读到 malloc 块前面）；`pa_rc_shutdown` 退出前把临时栈残留值 dec 干净。
+- **为什么前几轮失败**：0.226 之后在这个 126 字节上盲试三次（slot_heap 标记、生成器 owner 登记表、调整 gen_finish 顺序），每次都引入新的 heap-buffer-overflow / use-after-free 并回退。差别在于当时不知道对象在哪一步丢掉，只能猜所有权。
+验证：普通全量 205 ran ok；ASan 全量 205 ran ok；差分 188 用例 0 不一致；泄漏扫描 **1 处 / 188 用例**（`119_gen_except_suspend` 126 字节 → 0）。
+
+## [0.227] - 2026-11-16
+
+### 异常对象生命周期追踪工具（PYADAMAS_EXC_TRACE）
+
+- **动机**：0.226 后剩两处泄漏，盲试多轮（改 slot_heap 所有权标记、加生成器 owner 登记表、调整 gen_finish 顺序）每次都引入新内存错误并回退。结论：异常对象的所有权在 `pending_exc` / `current_exc` / 生成器帧槽 / 临时栈之间反复转移，光靠读代码和 ASan 的字节数推不出来。
+- **工具**：`PYADAMAS_EXC_TRACE=1` 把每个 `PyAdamasException` 的 `alloc` / `free` / `leave`（写回帧槽 = 所有权转移）/ `enter`（取回）逐条打到 stderr，退出汇总 `LEAK`。追踪表是外部表（指针 → 分配序号），不在结构体里加字段；不设变量时只有一次 getenv 和一次自增，实测全量测试与泄漏字节数与加入前完全一致。
+- **直接给出的结论**：`119_gen_except_suspend` 的两个泄漏对象轨迹是 `alloc → leave → leave → 再无任何事件`，即写进帧槽后再没被取回也没被释放 —— 问题确定在「生成器销毁时帧槽里的异常对象没人还」，排除了 RC 配平方向。
+验证：普通全量 205 ran ok；ASan 全量 205 ran ok；泄漏 2 处（与加入工具前一致）；docs/development.md 新增追踪一节。
+
+## [0.226] - 2026-11-16
+
+### 零开销 raise 路径的收尾责任（泄漏 3 → 2）
+
+- **根因**：0.225 让 `terminated()` 认出不返回的运行时调用后，`lower_try` 不再在 except 体后补 `ExcDone`（补了也是死代码）。这本身是对的，但**收尾责任落到那些 `_Noreturn` 函数身上**，而它们没做 `pa_exc_drop_save()`（还 except 入口压的 `PyAdamasExcSave`）和 `exc_free(current_exc)`（`pa_exc_accept_value` 接管成 `current_exc`，原由 `ExcDone` 负责 free）。运行时计数 `accept=7 done=5` 差 2 个。
+- **修法**：三个零开销入口都补收尾——`pa_eh_raise`、`pa_eh_raise_value_from`、`pa_eh_reraise`。（setjmp 路径的 `pa_reraise` 在 0.225 已修。）
+- `34_exception_chain` 45 B → 0、`39_match_advanced` 47 B → 0。
+- **回退的方案**：`pa_raise_value_from` 里保存/恢复 `pending_exc_args` 对 119 无效（126 字节不变），且 34/39 的修复不依赖它，保持最小改动。
+验证：全量 205 ran ok；差分 188 用例 0 不一致；泄漏扫描 188 用例 **2 处**（`119_gen_except_suspend` 126 B、`53_json` 96 B，均需改生成器销毁路径 / GC 交互，量级更大）。
+
+## [0.225] - 2026-11-16
+
+### terminated() 漏认不返回的运行时调用（死代码吞掉清理）
+
+- **根因**：`Block::terminated()` 只认控制流指令，而 `pa_reraise` / `pa_raise*` / `pa_eh_*` 都是 `_Noreturn`。于是 `lower_try` 认为「块还没终止」，在 `pa_reraise()` **后面**又追加 `pa_exc_done()` + `jump` —— 永远执行不到却被当活代码保留，其中的清理动作静默丢失。运行时计数 `accept=6 done=5 reraise=0`，尽管 IR 里明明有 5 处 reraise。
+- **修法**：① `terminated()`（ir_types.h）补上 `ExcReraise` / `Raise` / `RaiseValue` / `RaiseValueFrom` / `RaiseInstance` / `Reraise` / `EhRaise` / `EhRaiseValueFrom` / `EhReraise` / `EhRethrow`；② 新增 `pa_exc_drop_save()`，供 setjmp 的 `pa_reraise` 与零开销的 `pa_eh_rethrow` 在跳转前还掉 save 节点。
+- **踩过的坑**：`pa_exc_drop_save` 最初实现成「还 save 节点 + `exc_free(current_exc)` + 恢复外层值」，引入 2 个回归（`No active exception to reraise`、抛错对象）。裸 `raise` 重抛的**正是** `current_exc`，不能在它之前 free；改成只还 save 节点。
+- `32_exception_value` 16 B → 0。剩余 3 处经 `git stash` 验证在 HEAD 上同样存在，非本次引入。
+验证：普通全量 205 ran ok；差分 188 用例 0 不一致。
+
+## [0.224] - 2026-11-16
+
+### os.path.split / raise 收尾 / 异常上下文链（泄漏 5 → 2）
+
+- **① `pa_os_path_split` 多 inc 一次**（rt_os.c）：与 0.220 pathlib 同类，`str_new` 返回的串本来就带 rc=1（产生者持有），`pa_list_append` 只存指针不加引用，多 inc 的那份没人释放（`81_os_extra` 泄漏 120 字节，head/tail 各一条）。
+- **② `pa_exc_reraise` 不清理 save 节点**（rt_exc.c）：裸 `raise` 直接 `exc_longjmp`，跳过 except 块的 `pa_exc_done`，而 `pa_exc_accept_value` 进 except 体时压的 `PyAdamasExcSave` 必须在这里还掉，否则每执行一次 `except ...: raise` 泄漏 16 字节。
+- **③ 异常上下文链被覆盖丢失**：`pa_exc_enter` 把 `exc_save_top` 摘下存进 `n->top`，恢复时直接覆盖，当前那条非空链永久丢失；加 `free_save_chain` 在覆盖前还掉。
+- **走错又退回的一步**：给 `lower_raise` 加 `emit_cleanup_exits` 引入 11 个用例回归——有值 raise 的清理把要抛的异常值释放了（`refcount increment on a freed object`），裸 raise 的 ExcDone 把 `current_exc` free 了（`No active exception to reraise`）。结论：**raise 的收尾不能靠通用清理机制**，要抛的对象必须在清理之后仍然有效，正确做法是运行时在跳转前自己收拾。
+验证：普通全量 205 ran ok；ASan 全量 204 ok / 1 偶发（`180_codepoint_perf` 性能阈值在 ASan 下的时间抖动，连跑 5 次全过）；差分 188 用例 0 不一致；`81_os_extra` 216 B → 0、`119_gen_except_suspend` 207 B → 0。
+
+## [0.223] - 2026-11-16
+
+### 异常子系统 shutdown 审计（挂起 handler 记录丢失）
+
+- **审计方法**：盘点运行时所有 `static` 堆指针逐项检查清理点。`young_buf` / `gc_work_buf` / `gc_set_buf` / `gc_tab_buf` / `gc_pend` / `list_pool` 已有；`exc_regs` / `handler_freelist` / `suspended_head/pool` / `exc_node_top` 四块**无清理点**。
+- **修法 1**：新增 `pa_exc_shutdown`，统一还掉挂起表 → 空闲节点池 → handler freelist → 异常继承登记表 → 上下文嵌套节点，在 `pa_gc_shutdown` 末尾调用。
+- **修法 2（关键）**：`pa_handler_suspend` 原来只在 `gen_owner` 非空时登记，但很多 suspend 发生在 owner 为 NULL 的上下文（生成器被 `pa_gen_next_opt` 驱动时 owner 已在上一轮 `gen_run` 结束时清掉）。那些记录摘链后既不在 `handler_top` 也不在挂起表 —— 永久丢失（快照 `handler_top=0 suspended=0 freelist=3` 就是证据）。改成**无条件登记**，owner 为空时挂到「孤儿」owner 上由 shutdown 兜底，生成器销毁按自己的 owner 找，不会误删孤儿。
+- `162_pep479` 240 B → 0，总泄漏 5 处 → 4 处。
+验证：普通全量 205 ran ok；ASan 全量 205 ran ok；差分 188 用例 0 不一致。
+
+## [0.222] - 2026-11-16
+
+### 生成器 handler 清理统一到 unwind_handlers_to
+
+- 0.219 只在 `gen_run` 的异常路径加了清理循环，但生成器有**三个**退出点会留下 resume 内部压过的记录：`gen_run` 的 `PA_SETJMP != 0` 分支、`pa_gen_close` 的异常分支（finally 里再抛）、`pa_gen_close` / `pa_gen_finalize` 的正常路径。后两个只做 `handler_top = h.prev`，沿途记录既不在全局链上也没人归还。
+- 抽成 `unwind_handlers_to(stop)` 三处共用；`pa_handler_discard_record` 内部会摘挂起表 + 检查 `heap_alloc` 再归还 freelist，栈记录与已复用记录都安全。
+- **诚实说明**：这个重构让三条路径一致（此前只有一条对），但**没有消除剩下的生成器泄漏**——`162_pep479` / `119_gen_except_suspend` / `32_exception_value` 字节数不变。它们的泄漏栈都指向 `gen_run → pa_gen_next_opt`，说明生成器还在迭代中（`list(g_inner())` 消费到一半），记录挂在挂起表里、对象还没销毁程序就退出了，需要在 shutdown 里清空挂起表（0.223 做）。
+验证：普通全量 205 ran ok；ASan 全量 205 ran ok；差分 188 用例 0 不一致。
+
+## [0.221] - 2026-11-16
+
+### json 类型描述符漏认 tuple（混合类型容器元素泄漏）
+
+- **根因**：`desc_heap` 实现是 `return *d == 's' || *d == '(';`，而描述符首字符编码里 **`t`（tuple）漏了** —— tuple 也是堆对象。于是 `(tis)` 的 `all_heap` 变 0、`any_heap` 变 1，`pa_list_new` 拿到 `elem_kind=2`，析构走依赖 `rc_index` 的 `pa_rc_dec_unknown`；这类程序被判定「无 unknown 值」→ `pa_disable_unknown_index` → dec 静默跳过 → 元素永久泄漏。补 `'t'` 后 `elem_kind=1`，析构走 `pa_rc_dec` 正常释放。
+- **为什么不去改 `pa_rc_dec_unknown`**：让它在 `rc_index_off` 时靠对象头自洽性（kind/rc 范围 + marked 保留位）判断指针，试过**会段错误**（`53_json` / `89_bytes_final` 整个程序无输出）—— 整数很容易凑出看起来合法的对象头。要正确做需让混合容器在 exact-RC 下也维护元素类型信息（位图或标签），是容器布局级改动。补 `desc_heap` 是在**产生 elem_kind=2 的源头**上修。（0.233 最终用三条硬约束解决了这个分支。）
+- `79_datetime_pathlib` 120 B → 0，`141_stdlib_pathlib_extra` 同类问题一并消失，总泄漏 8 处 → 5 处。
+验证：全量 205 ran ok；差分 188 用例 0 不一致。
+
+## [0.220] - 2026-11-16
+
+### pathlib 返回值引用泄漏（str_alloc_raw 的产生者引用没人放）
+
+- **根因**：`pa_path_new` 的语义是「接管一个**已有**的字符串引用，内部 `pa_rc_inc` 补一份」，但 6 处调用传的是 `str_alloc_raw` / `str_seal` 的**刚产生**结果 —— 那个串本来就带 rc=1，再 inc 变成 2，产生者那份没人释放（`147_pathlib_extra` / `141_stdlib_pathlib_extra` 各泄漏 128 字节）。
+- **修法**：新增 `pa_path_adopt()` 接管刚产生的串、不额外 inc；6 处 fresh 串改用它，2 处传已有串的保持 `pa_path_new`。pin/unpin 两边一致，防止 `rc_alloc` 触发主收集时参数串被清扫。
+验证：两处 pathlib 泄漏 → 0；全量 205 ran ok。
+
+## [0.219] - 2026-11-16
+
+### 生成器 handler 记录的生命周期（泄漏 67200B → 0）
+
+- **根因**：handler 记录的完整生命周期是 `push → suspend（yield 时摘链）→ rearm（resume 时压回）→ leave/discard`，但生成器可能**再也不会 resume**（被 close 后丢弃、finally 里抛异常跳出），suspend 过的记录既不在全局链上也没人归还。更糟的是 `pa_handler_free` 是裸 `free(p)`，不进 freelist 也不摘登记表，留下悬空指针。
+- **四件事**：① `PyAdamasHandler` 加 `suspend_owner`，suspend 时记下所属生成器，销毁时按 owner 找回（记录在挂起期间保持有效，因为 rearm 用的就是同一地址）；② 全局挂起表，suspend 登记、rearm/leave/discard/free 都 `unsuspend()`；③ `pa_handler_free` 改为「摘挂起表 + 归还 freelist」，这是 123/119 的 use-after-free 根源；④ `gen_run` 异常路径先把 `h.prev` 到 `handler_top` 之间的记录逐个归还。
+- **容易踩的坑：栈记录 vs 堆记录**。`gen_run` / `pa_gen_close` / `pa_gen_finalize` / `rt_async` / `rt_agen` 里的 `PyAdamasHandler h` 是栈变量，进 freelist 会造成 stack-use-after-return。加 `heap_alloc` 标记（push 置 1、栈记录置 0，归还前检查），**且必须在所有栈记录处显式初始化** —— 漏一个就读到垃圾值，普通构建直接段错误，而 ASan 构建因内存清零反而看不出来（这个差异一度让 5 个用例只在普通模式失败）。
+- `93_gen_exc_rc` 67200 B → 0（300 个生成器 × 224 B）、`123_finally_yield` 224 → 0 并修掉一个 UAF、`162_pep479` 448 → 240，总泄漏 10 处 → 8 处。
+验证：普通全量 205 ran ok；ASan 全量 205 ran ok；差分 188 用例 0 不一致。
+
+## [0.218] - 2026-11-16
+
+### ASan 覆盖运行时内部 + 修 json.loads 浮点返回值错位
+
+- **运行时插桩**：之前 `--asan` 只给生成代码插桩，`rt.o` 是预编译零插桩，RC/GC/列表/字典这些**运行时内部**的指针错误完全看不到（0.216 能抓到纯属运气）。新增 CMake 目标 `rt_asan.o`：同样源文件用 `-O1 -g -fsanitize=address` 重编（79 个 ASan 符号），`--asan` 时链接它。代价：纯分配负载 16ms → 27ms（1.68×），测试套件不受影响。
+- **立刻抓到一个真 bug**：`PYADAMAS_TEST_ASAN=1` 全量扫描发现 `53_json.py` 输出 `-1.6882786079646144e+260` 而不是 `2.5`。根因在 `gen_call_rt` 的 `raw_ret` 只列了 `DictKeyAt`，而 `pa_json_loads` 的契约是**返回 i64 位模式**（浮点值也塞在 `%rax`），没在列表里于是 codegen 按 double 去读 `%xmm0` 的残留值。普通构建下被寄存器残留掩盖（恰好凑出正确结果），ASan 改变内存布局后稳定暴露。
+- **修法**：`raw_ret` 加上 `JsonLoads`；float 类型时先 `movq %rax, %xmm0` 搬位模式（`movsd` 不能直接从 GPR 取源）再按浮点落位。
+验证：普通全量 205 ran ok；**ASan 全量 205 ran ok**；差分 188 用例 0 不一致；7 个 GC 复现（gc01/gc02/x01/z01/g04/g05/d04）全部 ok。
+
+## [0.217] - 2026-11-16
+
+### ASan 成为一等公民（CLI + 测试框架 + 修掉 23 处假泄漏）
+
+- **CLI**：`--asan` / `--ubsan` 让生成可执行文件带检查器，编译和链接同时生效，底层仍是 `PYADAMAS_CC_FLAGS`。`ASAN_OPTIONS=detect_leaks=0` 是有意的默认——GC 程序里「故意留到进程退出」的对象很多，泄漏报告会淹没真正的 use-after-free。
+- **测试框架**：`PYADAMAS_TEST_ASAN=1 PYADAMAS_TEST_JOBS=4 bash tests/run_tests.sh`，188 个用例全跑 ASan，慢 3-5 倍，改动触及 RC/GC/lowering 时用。首次全量扫描 **0 处内存错误**。
+- **修掉 23 处假泄漏**：开 `detect_leaks=1` 扫 108 个用例报 23 处 Direct leak（各 120-464 字节），全是进程退出时还挂在分配器缓存里的块。两个来源：`str_pool` / `list_pool` / `list_buf_pool` 回收时不立刻 free；`sys.argv` 挂在全局根上永不 dec，而 exact-RC 下字符串**不进 GC 堆链**（`rc_link` 对叶子直接 return），`pa_gc_shutdown` 的 `while (heap_head)` 扫不到。修法：shutdown 清空三个池 + 新增 `pa_sys_argv_shutdown` 在释放堆之前交还 argv 引用。**23 处 → 5 处**。
+- **文档重写**：docs/development.md 的「内存 / UB 检查」整节删掉手工编 rt.o / cc 包装脚本 / 改 PATH 的老流程，改成三条命令，并把 0.216 的定位过程写进去当例子。
+验证：全量 205 ran ok；差分 188 用例 0 不一致。
+
+## [0.216] - 2026-11-16
+
+### unknown 槽被提升导致 GC 根缺失（use-after-free 完整修复）
+
+- **问题**：`def f(): u = ident([...]); return u[0]` 在 major GC 后堆损坏 / SEGV，`PYADAMAS_GC_DISABLE=1` 完全正常，`-O0` 也崩。
+- **根因（ASan 抓到第一现场）**：ASan 报 `SEGV on address 0xffffffffffffffe6`（= -26）在 `pa_rc_temp`。`u` 是 unknown 槽，被寄存器分配提升到 `%r12`，而帧记录登记的是栈槽 `48(%rsp)` —— 栈槽自序言清零后再没被写过，GC 读到 0 不标记，`u` 被回收，之后 `index.get` 从已释放列表取元素得到 -26。`PYADAMAS_GCSLOT_DEBUG` 实证：`s1 ty=unknown scan=1 reg=%r12`（该留内存却拿了寄存器）且与 `s3 ty=int` 撞同一个寄存器。
+- **三处修复**：① `build_slot_liveness` 候选表排除 unknown 槽（原来只排除堆槽 / 取过地址 / handler hazard）—— unknown 可能是堆指针，GC 要靠栈槽地址找根；② `gc_scan_slot_` 改在寄存器分配**之前**按静态类型算好，消除「先分配再登记」的循环依赖（槽一旦被提升就既不在栈槽也不在扫描清单里）；③ `can_fuse` 禁止融合被 GC 扫描的槽（融合会让栈槽从此不再更新）。
+- **顺带**：`driver_build.cpp` 的 `cc` 调用支持 `PYADAMAS_CC_FLAGS`，编译和链接共用。这个 bug 靠它才定位到 —— IR 层面完全看不出问题。
+验证：全量 205 ran ok；差分 188 用例 0 不一致；`/home/lenovo/wb_repro/` 的 7 个 GC 复现全部通过。
+
+## [0.215] - 2026-11-16
+
+### unknown 返回值的引用所有权缺失（use-after-free 根因）
+
+- **问题**：`def f(): return a[0]` 里 `a[0]` 静态类型是 unknown 时返回**不加引用**，调用方拿到借来的指针；被调函数返回后那份引用被临时栈清理放掉，对象被回收。`PYADAMAS_GC_DISABLE=1` 下完全正常（对象不在池里被复用，问题被掩盖）。
+- **两处同一类不对称**：① `emit_return`（lower_impl_slots.cpp）的 `ir_is_heap(unknown)` 是 false，unknown 返回值什么都不做 → 改走 `RcIncUnknown`（先查堆索引确认是堆指针再 inc，整数安全）；② `retain_for_store`（lower_impl_util.cpp）在 dst 与 src **都是 unknown** 时什么都不做 → 补 `rc_inc_unknown`。`u = ident([...])` 正是「无标注函数返回未知类型、存进未知槽」。
+- **效果**：6 个 GC 复现里 4 个修复（gc01_min_uaf、z01_global_root、g04/g05_unknown_root_hold），2 个从「堆元数据损坏 / 静默算错」变成可检测的 panic（gc02_uaf_junk、x01_only_u_root）。
+- **诚实说明剩余缺口**：`release_slots` 只释放 `ir_is_heap(ty)` 的槽、unknown 槽整个跳过（`release_globals` 是对称的）。直接补齐会让 12 个用例 over-release —— unknown 槽里的值未必被 retain 过（装饰器回填、borrow_slots、帧槽别名都会让它持有借来的值）。正确做法是槽级「是否 owned」标记，不在这一版做。
+- **顺带修测试框架撑爆磁盘**：`tests/run_tests.sh` 输出无大小限制（某次 `78_enumerate_zip.py` 死循环写了 **19G** 日志）+ `testlogs.$$` 从不清理，`build/dev` 涨到 **32G**。改为 `head -c 1048576` 截断（截断后 diff 必然不等，照样报 OUTPUT DIFF）+ `trap cleanup_logs EXIT INT TERM`。
+验证：全量 205 ran ok。
+
+## [0.214] - 2026-11-16
+
+### join(T, None) 返回 Optional[T] 而不是 unknown（4.7×）
+
+- **根因**：`join_into` 在 Optional 分支之后、兜底之前有一条 `if (a->kind == None || b->kind == None) return t_unknown();`，于是三元表达式、if-else 合并、列表字面量里**只要掺了 None 就全退化成 unknown**（`v = 1 if flag else None` 应为 `int | None`，`[1, None]` 应为 `list[int | None]`）。
+- **为什么是缺口不是权衡**：`Optional[T]` 本身完整支持——标注路径生成的 IR 正确、`is not None` 收窄也正确，只是推断的 join 没走它。改为 `mk_optional(b)` / `mk_optional(a)`。
+- **实测**：300 万次热循环（`v = i if i % 2 == 0 else None` + `is not None` 收窄）34-36ms → **6-7ms，约 4.7×**。asm 层面 `pa_rc_inc_unknown` / `pa_rc_dec_unknown` 从 16 处降到 0 —— unknown 走保守 RC 路径，每个操作都要额外调用查注册表。
+- **来源与后续**：team 的 type-auditor 审查 351 处 `t_unknown()` 时定位（B2）。同批的 B1（调用点缓存重查前的返回类型，3.7×）两种修法都失败回退：重跑模块体会让类定义处理两次生成两个 Type 对象（`cannot assign Point to Point`，47 个用例失败）；就地更新符号类型会破坏 12 个合法重绑定用例。B1 需要完整的「赋值点 → 类型版本」跟踪，是类型系统级改动；B3（hoist 的 unknown 占位污染分支合并）同理。
+验证：全量 205 ran ok；差分 188 用例 0 不一致。
+
+## [0.213] - 2026-11-16
+
+### 切片赋值缺少元素类型检查（导致垃圾指针读出）
+
+- **Bug**：`l: list[int] = [1, 2]; l[0:1] = ['hello']` 编译期不报错，`print(l[0])` 输出 `96042627193968` 这类垃圾且每次运行不同（CPython 输出 `hello`）。字符串指针被写进声明为 `list[int]` 的列表，后续按 int 读出就是未初始化内存。
+- **根因**：`typecheck_stmt.cpp` 的切片赋值分支只检查「对象是否可变」，注释写着「切片赋值在运行时才展开，类型层面只确认可变」——这个假设是错的；而紧随其后的单元素赋值分支有完整的 `merge_elem` 检查，切片赋值漏了。
+- **修法**：`list[T]` 的切片赋值在右值也是 `list[U]` 时比较 T 与 U，复用单元素赋值的 `merge_elem`，报 `cannot assign 'list[str]' to slice of 'list[int]'`。
+- **来源**：team 的 runtime-auditor 扫运行时内存管理时发现，独立复现后定位到类型检查器。
+验证：错误用例编译期报错；正确用例 `l[0:1] = [9, 8]` 输出 `[9, 8, 2, 3]` 与 CPython 一致；全量 205 ran ok；差分 188 用例 0 不一致。
+
+## [0.212] - 2026-11-16
+
+### 清理 R3 死代码 + 修正误导性的寄存器分配调试输出
+
+- **死代码（净删 35 行）**：`spill_int_caller_slots()` / `reload_int_caller_slots()` 依赖的 `int_caller_slots_` **只被 clear、从未 push_back**，两个函数永远空操作却挂在每个调用点的 spill/reload 路径上；`build_int_caller_mask()` 只有声明没有实现。一并删掉函数、调用点、成员变量、死声明。
+- **误导性调试输出（这才是真正浪费时间的）**：`assign_slot_regs_linear()` 末尾统计 `slot_reg_` 里全部非空项，但**浮点槽是在调用方随后才分配的**，此刻浮点项还是空的。于是长期输出 `advance_1: 7/14 slots promoted`，看起来「只提升了一半、还有大量空间」，实际是整型 7/8、浮点 6/6，**已接近饱和**。这个错误数字直接导致「寄存器分配还有很大优化空间」的误判，进而在 vreg 分配上连续多轮投入失败。修正后输出 `[ra] advance_1: int 7/8 promoted, 6 regs`。
+验证：全量 205 ran ok；差分 188 用例 0 不一致；删除的是死代码，行为完全不变。
+
+## [0.211] - 2026-11-16
+
+### 两处真实 bug：堆槽 LICM 外提 + RcMark 寄存器化
+
+在尝试重写 RC 临时栈 / 扩展 vreg 寄存器分配的过程中暴露出两个**既有**正确性 bug，平时不发作是因为依赖的栈槽恰好没被覆盖，分配策略一变就变成段错误或静默算错。
+
+- **Bug 1：LICM 把堆槽的 load.slot 提到循环外**。`hoist_loop` 的 `hoistable` 对 `LoadSlot` 只检查「槽本身没被 StoreSlot 写过」，但堆槽内容可以被循环里的 `IndexStore` 间接改写。实测 nbody 的 `energy()` 把 `load.slot s0`（列表 b）提到 `licm.pre`，栈槽被别的 vreg 复用后读到垃圾指针，段错误在 `b[i*7]`。修法：`LoadSlot` 对堆槽一律不外提。
+- **Bug 2：RcMark 的返回值被放进寄存器**。`pa_rc_mark()` 返回 RC 临时栈水位，入口 mark、出口 cleanup，中间隔着任意多次调用；它是普通 int vreg，会被按活跃区间复用栈槽或分到 callee 寄存器，一旦离开栈槽某次 call 就冲掉它，`pa_rc_cleanup(mark)` 拿到错误水位并 panic `invalid temporary stack mark`。修法：`vreg_is_rc_mark()` 识别这类 vreg，在 `assign_vreg_slots` 里强制独占栈槽（区间拉满整个函数）。
+- **本轮寄存器分配改动全部回退（有数据）**：块内 vreg 进 callee 池让 nbody 差 306、binary_trees 输出 25（应 8191）。根因是 `vreg_off()` 仍指向那个栈槽，任何读栈槽的路径（spill/reload、RC 调用）都拿到过期值 —— 要安全地做必须先重写 RC 临时栈与 vreg 栈槽的耦合，是另一个量级的改动。
+验证：全量 205 ran ok；差分 188 用例 0 不一致；z1_rt 116、z2_rt 134、z2_codegen 209、eh 33、sem 42/42 全过。
+
+## [0.210] - 2026-11-16
+
+### 参数 >6 且含浮点的间接调用丢实参（+ 差分测试工具）
+
+- **Bug**：10 个 float 形参的函数经间接调用时第 9、10 个实参丢失。`fargs(1.1..10.1)` 在 -O0/-O1 输出 8.8（只加到第 8 个），-O2 输出 59.6（内联掩盖了 bug），CPython 59.6。
+- **两层根因**：① `closure_needs_shim` 对 >6 参数直接 return false，注释写「暂不 shim（退回原行为）」，但原行为并不成立——统一约定是第 i 个实参进第 i 个**整型**寄存器（只有 6 个），真实 SysV ABI 是整型/浮点各自计数、浮点有 8 个寄存器，两者在「>6 参数且含浮点」时不一致，没有 shim 就没人做重排；② shim 读溢出区少算 8 字节——`call` 压入返回地址后调用者的溢出区整体后移 8，漏掉这个偏移就把返回地址当第 1 个溢出实参，最后一个实参永远读不到（正好是 59.6-49.5=10.1）。
+- **修法**：去掉 `params.size() > 6` 限制（所有非生成器函数都生成 shim，统一约定才自洽）；`emit_closure_shim` 支持栈上实参（临时区扩成 [0,8n) 存全部实参 + [8n,8n+8*sp) 放真实 ABI 栈传参区，重排后调整 rsp 让栈传参区紧贴返回地址）；溢出区读取补 `+8`。
+- **顺带：`tools/difftest.sh`** —— 同一份源码在 -O0 与 -O2 下输出必须一致。这个 bug 就是它抓到的（188 个用例里唯一一个不一致）。优化遍引入静默错误时常规测试未必发现，O0/O2 差分能。
+验证：差分 **188 用例 0 不一致**（修复前 1 个）；全量 205 ran ok；五套夹具 z1_rt 116、z2_rt 134、z2_codegen 209、eh 33、sem 42/42 全过。
+
+## [0.209] - 2026-11-16
+
+### IR 重构决策记录（稳定 ID / tag 操作数 / 暂不上 SSA）
+
+纯文档，无代码改动。把 0.205–0.208 四步重构的**理由**写进 docs/ir.md，特别是「为什么不上 SSA」这个容易被反复提起的问题。
+
+- 新增「那为什么不干脆上 SSA」章节：SSA 的三个主要好处（优化遍不用重建数据流、值单一定义、跨块引用不失效）分别由 `uses_of`/`def_of` 索引（0.205）、`Operand` 带 tag（0.206）、`Inst::id`/`Block::id`（0.205/0.208）拿到大部分，不用动前端降级和 phi 构造。真正的分界线是「要不要做需要精确数据流的优化」——现有的遍（折叠、DCE、CSE、LICM、内联、边界版本化）都是局部或结构性的，索引表够用。
+- 补充稳定标识章节（含 0.203 边界版本化栽在块号过期上的教训）、索引操作数带 tag 章节（`PYADAMAS_IR_CHECK=1` 校验、隐式转换是刻意的迁移期手段），数据结构表补 `id` 字段。
+- 同期另有一次 docs 提交修正 codegen.md 的寄存器分配与 SSA 过时描述，对齐 0.203–0.209。
+验证：前四步已各自提交并验证（全量 205 ran ok，五套夹具全过）。
+
+## [0.208] - 2026-11-16
+
+### 块稳定 ID，EhRegion 不再存块号（重构第 4 步）
+
+- **为什么必须做**：`IRFunction::EhRegion` 原存 `int begin_block / end_block / lp_block`（vector 下标），而字段自己的注释就写着「内联等 pass 会重建块表，这里的块号会过期，仅作记录/诊断用」——「明知会过期还存下来」是技术债。0.203 的边界版本化被同一类问题打垮：`version_bounds_loop` 每次插入 3+ 个新块，块号整体偏移，`h=9` 那层循环（含全部列表读写）被永久跳过，99 处边界检查一个没消。
+- **改动**：`Block::id`（uint32_t，0 = 未分配，分配器 `next_block_id` 只增不减）；`block_by_id`（id → 当前下标），`block_index(id)` 查不到返回 -1 表示块已删；`EhRegion` 三字段改存块 id，赋值处用 `ensure_block_id()`；`rebuild_use_def()` 顺带重建 `block_by_id`；`new_block()` 从聚合初始化改显式赋值（加字段后聚合初始化会错位）。
+验证：全量 205 ran ok；z1_rt 116、z2_rt 134、z2_codegen 209、eh 33、sem 42/42 全过。
+
+## [0.207] - 2026-11-16
+
+### DCE 改用 use-def 索引（重构第 3 步）
+
+- `fold_all()` 的死代码消除原来每轮手工扫全函数统计每个 vreg 的使用次数，现在直接用 `IRFunction::uses_of`（`uses_of[v].size()` 就是 v 被读的次数），语义等价。
+- **第 3 步的意义**：前两步（稳定 ID、tag 操作数）是铺路本身不产生收益，这一步才开始消费那套基础设施。后续 `opt_forward` 的 use_count、`opt_inline` 的 uses 计数都能同样接过来 —— 它们现在各自扫一遍，同一个函数在一条 pass 链上被扫十几次。
+验证：全量 205 ran ok；编译耗时 matmul 4ms / nbody 6ms / spectral_norm 4ms / nqueens 3ms；**生成代码 md5 与改造前一致**（索引只换统计方式，不应改变任何优化决策）。
+
+## [0.206] - 2026-11-16
+
+### IR 索引操作数带 tag（重构第 2 步）
+
+- `Inst::idx` 从裸 `int32_t` 换成带 tag 的 `Operand`（Kind: None/Slot/Global/Str/Func/Class/Extern/Block/Field）。这是那套 IR 最容易踩的坑：idx 的含义随 op 变（槽号/全局号/字符串号/函数号/类号/外部符号号/字段下标），填错编译器不管，只能靠测试和 dump 发现。
+- **隐式转换是刻意的过渡手段**：195 处使用点一次性改完风险太高，保留 `operator int32_t()` 与 `operator=(int32_t)` 让存量代码继续编译，同时 kind 能被记录和校验；等所有消费点改成显式取 kind 后删掉隐式转换，即可让「漏写 kind」变成编译错误。
+- **校验**：`idx_kind_ok(op, kind)` 在 `Inst::text()` 里做一致性检查，由 `PYADAMAS_IR_CHECK=1` 开启，迁移期 `kind == None` 放行。本次迁移 19 处降级侧赋值点改显式构造，覆盖 CallDirect / StoreExtern / LoadGlobal / GlobalAddr / SlotAddr / LoadSlot / StoreSlot / CallExtern / GenSetSlot；全量扫描 **0 处不匹配**。
+验证：全量 205 ran ok；z1_rt 116、z2_rt 134、z2_codegen 209、eh 33、sem 42/42 全过。
+
+## [0.205] - 2026-11-16
+
+### IR 稳定指令 ID + use-def 索引（重构第 1 步）
+
+- 给 IR 加「稳定标识 + 反向索引」基础设施。优化遍要在指令之间建立引用（可用表达式、死代码判定、循环版本化候选表），而**块内下标和块号都会被 `vector::insert/erase` 与新增块改变** —— 0.203 的边界版本化就是栽在这上面。
+- **新增**：`Inst::id`（uint32_t，0 = 未分配，函数内唯一、不随重排而变，分配器 `next_inst_id` 只增不减、删指令不回收，因此任何时刻拿到的 id 都能查到「是否已删」）；`IRFunction` 上三张表 `inst_by_id`（id → (block, index)）、`def_of`（vreg → 定义指令 id）、`uses_of`（vreg → 使用指令 id 列表）；`rebuild_use_def()` 一次 O(指令数) 扫描重建，在结构改动的 pass 之后调用。
+- **刻意取舍**：不做 SSA 判定（vreg 本来就可多次定义，`def_of` 只留最后一次定义，索引服务「快速找到使用点」不承担正确性判定）；`inst_by_id` 的位置值会过期，是快速定位而非权威来源，真正的稳定引用是 id 本身；id 只在 emit/def 分配，pass 新建指令走 `ensure_inst_id()`。
+验证：全量 205 ran ok（ID 分配不影响语义）；编译耗时 matmul 5ms / nbody 8ms，无可见开销。纯增量，不改变任何生成的代码。
+
 ## [0.204] - 2026-11-16
 
 ### R4 浮点线性扫描 + matmul 基准改函数形式

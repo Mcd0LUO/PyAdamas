@@ -18,9 +18,14 @@
 | [roadmap.md](roadmap.md) | 现在做到哪、下一步做什么、为什么是这个顺序 | — |
 | [zero-cost-exceptions.md](zero-cost-exceptions.md) | 零开销异常怎么做？LSDA / personality 的实测格式与 Z1-Z5 路线 | `runtime/rt_personality.c` `tests/exc/` `tools/lsda_ref/` |
 | [exc-semantics.md](exc-semantics.md) | 现行 try/except/finally/with 语义到底是什么？改成表驱动会丢什么？ | `runtime/rt_exc.c` `src/lower_exc.cpp` |
+| [exc-frame-cleanup.md](exc-frame-cleanup.md) | 展开 / longjmp 时被跳过帧的局部引用怎么回收？ | `runtime/rt_exc.c` `runtime/rt_core.c` |
+| [regalloc.md](regalloc.md) | 寄存器分配为什么没带来性能收益？下一步两条路线怎么选？ | `src/codegen_regalloc.cpp` |
+| [str-codepoints.md](str-codepoints.md) | 字符串码点语义 S1/S2 做了什么、S3 还剩什么？ | `runtime/rt_str.c` `src/lower_builtin.cpp` |
+| [stdlib-gaps.md](stdlib-gaps.md) | 51 个常用 CPython 模块哪些可用、哪些卡在编译器能力上？ | `stdlib/*.py` `src/driver_build.cpp` |
 | [archive/README.md](archive/README.md) | 已轮转出去的旧文档索引 | — |
 
-变更记录在根目录 [CHANGELOG.md](../CHANGELOG.md)（0.40 及更早归档在
+变更记录在根目录 [CHANGELOG.md](../CHANGELOG.md)（0.41–0.99 归档在
+[archive/changelog-0.41-0.99.md](archive/changelog-0.41-0.99.md)，0.40 及更早见
 [archive/changelog-0.40.md](archive/changelog-0.40.md)），参与开发的规矩见
 [CONTRIBUTING.md](../CONTRIBUTING.md)。
 
@@ -72,6 +77,6 @@
 
 ## 当前状态
 
-对应 CHANGELOG 的 0.204：流水线 `源码 → 词法 → AST → lambda 脱糖 → 类型检查 → IR → x86-64 汇编 → 可执行文件` 已打通。语言面支持标量、字符串、`bytes`、列表/元组/字典/集合、切片读写、闭包/lambda/`*args`/`**kwargs`/装饰器、推导式、生成器表达式（惰性）、`with`、异常值、类（字段/方法/C3 多继承/`super()`/各类装饰器/类名当值）、`match/case`、`del`、复数、f-string 格式说明、dunder 协议、`Generator[Y, S, R]` 标注、`async for` 自定义 `__aiter__`、`open`/`input`/`sys.stdin`、`struct` 值类型与 `cimport`/`cdecl` C 互操作；标准库内置 28+ 模块及封装 OpenBLAS 的 `linalg`。差分 runner 已自举（840 例）；运行用例 188 个、反例 53 个、未建模 1 个、严格用例 6 个、模块目录 15 个，另有 `tests/bench/` 标准库基准和 [四语言经典基准](bench/compare/RESULTS-release.md)。剩余主要缺口：asyncio 边角、异常对象 traceback / 列号 / `.debug_info`、模块顶层函数边界缺失（性能瓶颈，见 [regalloc.md](regalloc.md)）。GC 的保守性和回收时机见 [compatibility.md](compatibility.md)。
+对应 CHANGELOG 的 0.233：流水线 `源码 → 词法 → AST → lambda 脱糖 → 类型检查 → IR → x86-64 汇编 → 可执行文件` 已打通。语言面支持标量、字符串、`bytes`、列表/元组/字典/集合、切片读写、闭包/lambda/`*args`/`**kwargs`/装饰器、推导式、生成器表达式（惰性）、`with`、异常值、类（字段/方法/C3 多继承/`super()`/各类装饰器/类名当值）、`match/case`、`del`、复数、f-string 格式说明、dunder 协议、`Generator[Y, S, R]` 标注、`async for` 自定义 `__aiter__`、`open`/`input`/`sys.stdin`、`struct` 值类型与 `cimport`/`cdecl` C 互操作；标准库内置 28+ 模块及封装 OpenBLAS 的 `linalg`。差分 runner 已自举（840 例）；运行用例 188 个、正例 12 个、反例 53 个、未建模 1 个、严格用例 6 个、模块目录 15 个，`tests/run_tests.sh` 全量 **205 ran ok**（188 运行 + 15 模块 + 1 cdecl + 1 cfi）；另有 `tools/difftest.sh` 的 O0/O2 自差分、`tests/bench/` 标准库基准和 [四语言经典基准](bench/compare/RESULTS-release.md)。**内存层面：ASan 全量 205 ran ok，泄漏扫描 0 处 / 188 用例**（0.217 首次扫描为 23 处，0.233 清零），诊断工具见 `runtime/rt_diag.c` 与 [development.md](development.md)。剩余主要缺口：asyncio 边角、异常对象 traceback / 列号 / `.debug_info`、字符串码点语义 S3、依赖动态属性的 stdlib（`argparse`/`dataclasses`/`contextlib`，见 [stdlib-gaps.md](stdlib-gaps.md)）。性能瓶颈的归因已按实测修正为**顶层变量是全局、不参与寄存器分配**（不是「调用密度太高」），两条候选路线见 [regalloc.md](regalloc.md) 与 [roadmap.md](roadmap.md)。GC 的保守性和回收时机见 [compatibility.md](compatibility.md)。
 
-历次里程碑（完整版见 [CHANGELOG.md](../CHANGELOG.md)）：0.158–0.171 前端基线 281 → 501 / 596；0.172 修 handler 记录空闲链表；0.173 新增 Windows 目标；0.174–0.197 打通零开销异常 Z1–Z4；另有 GC 根扫描收窄、字符串码点语义（0.186）、间接调用统一 ABI（0.188）；0.198–0.202 完成 **Z5**：表驱动成为默认路径，`_setjmp` 670 → 361（-46%），可挂起函数永久保留 setjmp 是设计上的降级，`--no-zero-cost-exc` 可回退；0.203–0.204 落地寄存器分配 R1–R4（活跃性 + 线性扫描 + caller 池 + 浮点线性扫描），正确性收益明确但性能收益为零——根因是 `__pa_main` 调用密度过高（42 块 / 106 call），要提速需先解决模块顶层函数边界。同期恢复四语言经典基准（[结果](bench/compare/RESULTS-release.md)）：9 用例全部标注、输出与 CPython 逐字节一致。详见 [zero-cost-exceptions.md](zero-cost-exceptions.md)。
+历次里程碑（完整版见 [CHANGELOG.md](../CHANGELOG.md)）：0.158–0.171 前端基线 281 → 501 / 596；0.172 修 handler 记录空闲链表；0.173 新增 Windows 目标；0.174–0.197 打通零开销异常 Z1–Z4；另有 GC 根扫描收窄、字符串码点语义（0.186）、间接调用统一 ABI（0.188）；0.198–0.202 完成 **Z5**：表驱动成为默认路径，`_setjmp` 670 → 361（-46%），可挂起函数永久保留 setjmp 是设计上的降级，`--no-zero-cost-exc` 可回退；0.203–0.204 落地寄存器分配 R1–R4（活跃性 + 线性扫描 + caller 池 + 浮点线性扫描），正确性收益明确但性能收益为零；同期恢复四语言经典基准（[结果](bench/compare/RESULTS-release.md)）：9 用例全部标注、输出与 CPython 逐字节一致（详见 [zero-cost-exceptions.md](zero-cost-exceptions.md)）。0.205–0.209 IR 重构四步（稳定指令/块 ID、use-def 索引、tag 操作数、DCE 改用索引）并记录「暂不上 SSA」的取舍；0.210–0.213 修四个正确性 bug（>6 参数含浮点的间接调用丢实参、堆槽 LICM 外提、RcMark 寄存器化、切片赋值缺类型检查）；0.214 `join(T, None)` 返回 `Optional[T]`（热循环 4.7×）；0.215–0.216 根治两类 unknown 值 use-after-free；0.217–0.218 ASan 成为一等公民并覆盖运行时内部；0.219–0.233 **泄漏从 23 处清到 0**，新增 `rt_diag.c` 诊断模块。**性能归因修正**：原写的「`__pa_main` 调用密度过高（42 块 / 106 call）」描述的是 0.204 之前的 matmul，实测顶层调用几乎全是 `call.rt`（用户调用 0–2 个），真障碍是顶层变量为全局、不在只处理 slot 的分配器候选集里——见 [regalloc.md](regalloc.md)。
