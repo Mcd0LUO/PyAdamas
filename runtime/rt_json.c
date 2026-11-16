@@ -581,6 +581,12 @@ static int64_t jp_value(JP* s, const char* d, size_t n) {
             }
             int kind = all_heap ? 1 : (any_heap ? 2 : 0);
             PyAdamasList* out = pa_list_new(count, kind);
+            // **和 list/dict 分支一样入临时栈。**
+            //
+            // 下面 jp_expect / jp_fail（长度不匹配、缺 ']'）都可能抛异常，
+            // 异常展开跳过 return，out 只有局部变量持有 —— 永久泄漏。
+            // 之前 list/dict 分支都加了保护，唯独 tuple 漏了。
+            pa_rc_temp(out);
             jp_expect(s, '[');
             pos = 2;
             int64_t idx = 0;
@@ -588,6 +594,7 @@ static int64_t jp_value(JP* s, const char* d, size_t n) {
             if (s->p < s->end && *s->p == ']') {
                 if (count != 0) jp_fail(s, "tuple length mismatch");
                 s->p++;
+                pa_rc_temp_take(out);
                 return (int64_t)out;
             }
             pa_gc_pin(out);  /* 递归解析元组元素时会分配，out 必须先挂根 */
@@ -610,6 +617,7 @@ static int64_t jp_value(JP* s, const char* d, size_t n) {
             jp_expect(s, ']');
             if (idx != count) jp_fail(s, "tuple length mismatch");
             pa_gc_unpin(out);
+            pa_rc_temp_take(out);
             return (int64_t)out;
         }
         pa_raise_c("ValueError", "json: bad type descriptor");

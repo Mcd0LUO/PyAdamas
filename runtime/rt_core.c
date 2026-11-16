@@ -473,11 +473,49 @@ void pa_rc_dec(void* p);
 
 /* unknown 值的保守释放：先按注册表确认是堆指针，再走正常 dec。
    用于「结果类型静态不可知」的跨 await/gather 值。 */
+/* 判断 unknown 值 v 是不是一个「可以安全 dec」的堆对象。
+ *
+ * 常规路径查 rc_index（精确）。但 exact-RC 模式下索引被关掉
+ * （rc_index_off=1，省掉每个堆对象的插入/删除），此时索引恒不命中 ——
+ * 混合类型容器（elem_kind=2）里的堆元素就永远 dec 不掉，整批泄漏。
+ *
+ * 回退判断必须**绝不误判整数**，否则 dec 会按错误的对象头解引用而段错误
+ * （试过只用「对象头自洽性」，53_json / 89_bytes_final 直接崩）。
+ *
+ * 这里用两条硬约束：
+ *   1. 对齐：堆指针 16 字节对齐（rc_alloc 走 malloc，对齐是保证的）；
+ *   2. 必须**真的在 GC 堆链上** —— 遍历 heap_head 链表确认。
+ *
+ * 第 2 条是关键：链表上的每个节点都是 rc_link 挂进去的真实对象，
+ * 整数不可能出现在链表里。代价是 O(n) 遍历，只在 exact-RC 模式下
+ * 且只在 unknown dec 时走，测试规模可以接受。
+ *
+ * 注意 exact-RC 模式下字符串等叶子**不进链**（rc_leaf_untracked），
+ * 所以这条回退对它们无效 —— 那些对象的 dec 由容器自己的 elem_kind=1
+ * 路径（pa_rc_dec）负责，不经过这里。 */
+static int unknown_is_heap(PyAdamasRc* h) {
+    if (rc_index_has(h)) return 1;
+    if (!rc_index_off) return 0;
+    if (((uintptr_t)h & 15) != 0) return 0;
+    // exact-RC 模式下，字符串 / range / struct 是 untracked leaf：
+    // 它们不进 GC 堆链（rc_link 里 rc_leaf_untracked 分支把 marked 设成
+    // PYADAMAS_RC_UNTRACKED 且 prev/next 置 NULL）。这类对象的 marked
+    // 恰好就是 2，而链上对象的 marked 低位不含 UNTRACKED。
+    //
+    // 混合容器（elem_kind=2）里出现的堆元素绝大多数就是这种叶子，
+    // 先按 marked 精确命中，避免 O(n) 遍历。
+    if (h->marked == PYADAMAS_RC_UNTRACKED) return 1;
+    // 其余（真正的容器）在链上，遍历确认。
+    for (PyAdamasRc* p = heap_head; p; p = p->next)
+        if (p == h) return 1;
+    return 0;
+}
+
 void pa_rc_dec_unknown(int64_t v) {
     if (!v) return;
     if (rc_stats_on) stat_rc_dec_unknown++;
     PyAdamasRc* h = (PyAdamasRc*)(uintptr_t)((uint64_t)v - (uint64_t)PYADAMAS_RC_HDR);
-    if (!rc_index_has(h)) return;
+    if (!unknown_is_heap(h)) return;
     if (h->rc == PYADAMAS_RC_IMMORTAL) return;
     pa_rc_dec((void*)(uintptr_t)v);
 }
@@ -572,6 +610,10 @@ void* rc_alloc(int64_t size, void (*dtor)(void*), void (*release)(void*),
     // 诊断钩子放在这里、而不是 pa_rc_inc/dec：那两个函数会被内联到极热
     // 路径，多一次调用就改变寄存器分配（实测把 88_defaultdict 的 1.5 算成
     // 垃圾值）。rc_alloc 本来就要走 malloc/池，多一次调用无影响。
+    if (getenv("PYADAMAS_RETDBG") && kind == 0 && size == 32) {
+        static int64_t sq;
+        fprintf(stderr, "[retdbg] ALLOC#%lld p=%p\n", (long long)++sq, p);
+    }
     pa_diag_rc_alloc(p, size, (int32_t)kind);
     return p;
 }
