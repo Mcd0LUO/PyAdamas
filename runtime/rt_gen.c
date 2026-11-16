@@ -35,6 +35,22 @@ void pa_handler_discard_record(void* p);
 void pa_gen_set_handler_owner(void* g);
 void pa_gen_release_handlers(void* g);
 
+/* 把 handler_top 退回到 stop，沿途的记录逐个归还 freelist。
+ *
+ * 生成器在 yield / 异常 / close 时，resume 内部可能压过若干 handler 记录
+ * （try / finally / with 各一条）。这些记录是 pa_handler_push 从堆上分配
+ * 的，生成器退出时必须还回去，否则每跑一次泄漏几百字节。
+ *
+ * 只处理 (stop, handler_top] 这一段：更外层（调用方）的记录不能动。 */
+static void unwind_handlers_to(PyAdamasHandler* stop) {
+    while (handler_top && handler_top != stop) {
+        PyAdamasHandler* dead = handler_top;
+        handler_top = dead->prev;
+        pa_handler_discard_record(dead);
+    }
+    handler_top = stop;
+}
+
 void gen_destroy(void* g) {
     /* 被引用计数抛弃：跑跨 yield 的 finally/with 清理。清理期间抛出的
        异常（__exit__ 自己失败）在 finalize 里吞掉。 */
@@ -120,14 +136,7 @@ int64_t gen_run(void* g, int64_t sent, int* done) {
         // 先固定住「gen_run 自己的 handler」：h 是本函数的栈变量，
         // 循环里不能反复读 h.prev —— handler_top 一变，那个比较就失去意义，
         // 而且 h 自己也可能被误判成要回收的记录（stack-use-after-return）。
-        PyAdamasHandler* stop = h.prev;
-        while (handler_top && handler_top != stop) {
-            PyAdamasHandler* dead = handler_top;
-            handler_top = dead->prev;
-            dead->suspend_owner = NULL;
-            pa_handler_discard_record(dead);
-        }
-        handler_top = stop;
+        unwind_handlers_to(h.prev);
         p[1] = 2;
         p[5] = 0;
         p[2] = 0;
@@ -281,7 +290,7 @@ void pa_gen_close(void* g) {
     int saved_eh_depth = pa_eh_depth;
     pa_eh_depth = 0;
     if (PA_SETJMP(h.env) != 0) {
-        handler_top = h.prev;
+        unwind_handlers_to(h.prev);
         pa_gen_release_slots(g);
         pa_rc_cleanup(h.mark);
         p[1] = 2;
@@ -330,7 +339,7 @@ void pa_gen_finalize(void* g) {
         pa_exc_clear();
     }
     pa_exc_unwind(exc_depth0);
-    handler_top = h.prev;
+    unwind_handlers_to(h.prev);
     pa_rc_cleanup(h.mark);
     /* 正常跑完时槽已释放（空操作）；清理中途抛异常则在这里补一次。 */
     pa_gen_release_slots(g);
