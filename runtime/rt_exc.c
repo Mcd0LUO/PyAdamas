@@ -161,7 +161,7 @@ static void exc_trace_dump_leaks(void) {
         fprintf(stderr, "[exctrace] 全部异常对象已释放\n");
         return;
     }
-    fprintf(stderr, "[exctrace] %d 个异常对象未释放:\n", exc_trace_nlive);
+    fprintf(stderr, "[exctrace] %d 个异常对象未释放（按分配顺序）:\n", exc_trace_nlive);
     for (int i = 0; i < exc_trace_nlive; ++i) {
         PyAdamasException* e = exc_trace_live[i].e;
         fprintf(stderr, "  [exc#%lld] LEAK %-16s \"%s\"  at %p\n",
@@ -678,6 +678,15 @@ int64_t pa_exc_depth(void) { return exc_node_depth; }
 int64_t pa_exc_enter(int64_t* cur, int64_t* top) {
     PyAdamasException* gc = (PyAdamasException*)(uintptr_t)*cur;
     PyAdamasExcSave* gt = (PyAdamasExcSave*)(uintptr_t)*top;
+    // 轨迹：从帧槽取回异常对象。槽里是空的话也要记 —— 「本该有值却是空」
+    // 正是所有权断掉的地方。
+    if (exc_trace_enabled()) {
+        if (gc) {
+            pa_exc_trace_move(gc, "enter", (void*)cur);
+        } else {
+            fprintf(stderr, "[exc#-] enter  slot %p  EMPTY (no exception)\n", (void*)cur);
+        }
+    }
     // 两边都空时不用压节点：绝大多数 resume 都走这条快路径。
     if (current_exc || exc_save_top || gc || gt) {
         PyAdamasExcNode* n = (PyAdamasExcNode*)malloc(sizeof(PyAdamasExcNode));
@@ -701,7 +710,7 @@ int64_t pa_exc_enter(int64_t* cur, int64_t* top) {
  * 节点，就没人再引用它们了（pa_exc_accept_value 压的、或 pa_exc_enter 存的）。
  * 不释放就是每层嵌套泄漏 sizeof(PyAdamasExcSave) 字节。
  * ASan 实测 32_exception_value 泄漏 16 字节。 */
-static void free_save_chain(PyAdamasExcSave* s) {
+void pa_exc_free_save_chain(PyAdamasExcSave* s) {
     while (s) {
         PyAdamasExcSave* nx = s->up;
         free(s);
@@ -721,7 +730,7 @@ void pa_exc_leave(int64_t* cur, int64_t* top, int64_t token) {
         --exc_node_depth;
         // 恢复前把「当前链」还掉：它和 n->top 是两条独立的链，直接覆盖
         // exc_save_top 会让当前那条永久丢失。
-        if (exc_save_top && exc_save_top != n->top) free_save_chain(exc_save_top);
+        if (exc_save_top && exc_save_top != n->top) pa_exc_free_save_chain(exc_save_top);
         exc_free(current_exc);
         current_exc = n->cur;
         exc_save_top = n->top;
@@ -739,7 +748,7 @@ void pa_exc_unwind(int64_t depth) {
         PyAdamasExcNode* n = exc_node_top;
         exc_node_top = n->prev;
         --exc_node_depth;
-        if (exc_save_top && exc_save_top != n->top) free_save_chain(exc_save_top);
+        if (exc_save_top && exc_save_top != n->top) pa_exc_free_save_chain(exc_save_top);
         exc_free(current_exc);
         current_exc = n->cur;
         exc_save_top = n->top;

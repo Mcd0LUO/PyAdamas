@@ -623,6 +623,7 @@ int64_t temp_cap;
 
 int64_t pa_rc_mark(void) { return temp_len; }
 
+
 void pa_rc_temp(void* p) {
     if (rc_stats_on) stat_rc_temp++;
     if (!p) return;
@@ -670,6 +671,14 @@ void pa_rc_temp_unknown(int64_t v) {
 
 /* 程序退出前由入口函数调用：临时栈此时已经清空，把栈本身的存储还掉。 */
 void pa_rc_shutdown(void) {
+    // 临时栈里可能还有残留：正常路径上每个 mark/cleanup 都配对，
+    // 但进程退出前若栈非空（顶层表达式的临时值、异常展开中途退出等），
+    // 直接 free(temp_stack) 会让那些对象的引用计数永远停在 1 ——
+    // 它们是 untracked leaf（exact-RC 模式下不在 GC 堆链上），只能靠
+    // RC 释放，于是永久泄漏。
+    //
+    // ASan 实测 53_json 泄漏 96 字节（inline 短串，栈指向 pa_json_dumps）。
+    while (temp_len > 0) pa_rc_dec(temp_stack[--temp_len]);
     free(temp_stack);
     temp_stack = NULL;
     temp_len = 0;
@@ -1284,10 +1293,28 @@ void pa_gc_unref_child(void* p) {
 
 /* 生成器帧的堆槽释放（GC release 与异常逃出共用）：清扫阶段顺带清零，
    之后重复调用是空操作；trial/restore 阶段只调整计数、不动槽。 */
+typedef struct PyAdamasExcSave PyAdamasExcSave;
+void pa_exc_free_save_chain(PyAdamasExcSave* s);
+
 void pa_gen_slot_release(int64_t* slot, int64_t own) {
     int64_t v = *slot;
     if (!v) return;
     if (gc_phase == GC_PHASE_SWEEP) *slot = 0;
+    // own: 1 = 堆、2 = 可能非堆（注册表）、3 = 异常对象、4 = save 链。
+    //
+    // 3/4 是生成器 except 块里挂起时 exc_leave 写进帧槽的非 RC 对象：
+    // 3 是 PyAdamasException*（裸 malloc），4 是 PyAdamasExcSave* 链。
+    // 必须走各自的释放函数，不能 pa_rc_dec（那会按 RC 头读到 malloc 块前面）。
+    if (own == 3) {
+        exc_free((PyAdamasException*)(uintptr_t)v);
+        *slot = 0;
+        return;
+    }
+    if (own == 4) {
+        pa_exc_free_save_chain((PyAdamasExcSave*)(uintptr_t)v);
+        *slot = 0;
+        return;
+    }
     if (own == 2) pa_rc_dec_unknown(v);
     else pa_rc_dec((void*)(uintptr_t)v);
 }

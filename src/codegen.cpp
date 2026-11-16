@@ -345,10 +345,32 @@ std::string AsmGen::gen(const IRModule& m) {
             if (gnu_cfi()) out_ += "\t.cfi_offset %rbx, -16\n";
             out_ += "\tmovq " + tramp_a0 + ", %rbx\n";
             if (tramp_shadow) out_ += std::format("\tsubq ${}, %rsp\n", tramp_shadow);
+            // **异常上下文槽必须在 status 检查之前无条件释放。**
+            //
+            // status==1 表示生成器已正常终止，RC 槽在 gen_finish 里就释放过
+            // 了，所以下面整块跳过。但 exc_cur_slot / exc_top_slot 不同：
+            // gen_finish 的顺序是 release_slots() 然后 exc_leave() ——
+            // exc_leave 把 current_exc 写回槽，那一刻槽里才有值，而
+            // release_slots 已经跑完了。于是正常终止的生成器，帧槽里会
+            // 留下一个异常对象（或 save 链），而 status==1 又把释放整块跳过，
+            // 对象永远不还。
+            //
+            // 实测（PYADAMAS_EXC_TRACE + PYADAMAS_GRELDBG，119）：
+            //   [exc#5] leave  KeyError at 0x...2a8     ← 写进 s1
+            //   [grel]  g=0x...250 status=1 s1=0x...070  ← 销毁时 s1 仍有值
+            //   [exc#5] LEAK   KeyError                  ← 没人还
+            for (size_t s = 0; s < g.slot_heap.size(); ++s) {
+                if (g.slot_heap[s] < 3) continue;
+                const int off = 8 * (kGenHeader + static_cast<int>(s));
+                out_ += std::format("\tleaq {}(%rbx), {}\n", off, tramp_a0);
+                out_ += std::format("\tmovq ${}, {}\n",
+                                    static_cast<int>(g.slot_heap[s]), tramp_a1);
+                out_ += "\tcall pa_gen_slot_release\n";
+            }
             out_ += "\tcmpq $1, 8(%rbx)\n";
             out_ += std::format("\tje .Lgengcreldone{}\n", i);
             for (size_t s = 0; s < g.slot_heap.size(); ++s) {
-                if (!g.slot_heap[s]) continue;
+                if (!g.slot_heap[s] || g.slot_heap[s] >= 3) continue;
                 const int off = 8 * (kGenHeader + static_cast<int>(s));
                 // slot_heap: 1=堆，2=可能装着非堆值（unknown 流过堆槽）。
                 // 清零只在 GC 清扫阶段做；trial/restore 阶段运行时只调计数，

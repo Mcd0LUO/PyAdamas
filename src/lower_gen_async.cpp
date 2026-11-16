@@ -577,6 +577,25 @@ int Lowerer::compile_suspendable_function(FunctionDef& f, FuncInfoPtr info,
     gin.slot_heap.assign(static_cast<size_t>(gin.n_slots), 0);
     for (int s = 0; s < gin.n_slots; ++s) {
         if (st_->borrow_slots.count(s)) continue;
+        // **异常上下文槽：3 = PyAdamasException*，4 = PyAdamasExcSave* 链。**
+        //
+        // 两者都是裸 malloc 的非 RC 对象，槽的类型被推断成 int，下面那句
+        // `!ir_is_heap(ty)` 会把它们跳过。但生成器在 except 块里 yield 时
+        // emit_yield 的 exc_leave 会把 current_exc 写进 exc_cur_slot ——
+        // 正常终止的生成器帧销毁时必须把这些还掉。
+        //
+        // 追踪证据（PYADAMAS_EXC_TRACE + PYADAMAS_GRELDBG，119）：
+        //   [exc#5] leave  KeyError at 0x...2a8
+        //   [grel]  g=0x...250 status=1 s1=0x...070   ← 销毁时槽里仍有值
+        //   [exc#5] LEAK   KeyError
+        if (s == st_->exc_cur_slot) {
+            gin.slot_heap[static_cast<size_t>(s)] = 3;
+            continue;
+        }
+        if (s == st_->exc_top_slot) {
+            gin.slot_heap[static_cast<size_t>(s)] = 4;
+            continue;
+        }
         if (!ir_is_heap(irf->slot_ty[static_cast<size_t>(s)])) continue;
         // 2 = 可能装着非堆值：帧销毁/异常逃出释放时走注册表。
         gin.slot_heap[static_cast<size_t>(s)] =
