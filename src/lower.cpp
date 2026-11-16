@@ -337,6 +337,17 @@ void Lowerer::run(Module& ast) {
     st_->is_entry = opts_.is_entry;
     st_->fn_mark = rc_mark_at(st_->fn_mark_block, st_->fn_mark_pos);
 
+    // 零开销异常也覆盖模块顶层：__pa_main / __pa_init 是一个合成的函数，
+    // 模块级的 try 与函数体内的 try 走同一套形状判定与降级。
+    // （顶层不是生成器，也不可能有 yield，所以不需要额外排除。）
+    if (opts_.zero_cost_exc && target_abi().gnu_cfi) {
+        FunctionDef mod_fn;
+        mod_fn.body = std::move(ast.body);
+        collect_zero_cost_tries(mod_fn);
+        ast.body = std::move(mod_fn.body);
+        if (!st_->zero_cost_tries.empty()) entry->has_handlers = true;
+    }
+
     // __name__ / __file__：导入方也可能读它们，作为普通 str 全局存放。
     int name_gi = global_idx_as("__name__", t_str());
     store_global(name_gi, const_str(mod_.runtime_name));
