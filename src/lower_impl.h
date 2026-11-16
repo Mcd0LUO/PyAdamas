@@ -183,6 +183,8 @@ struct FuncCtx {
         std::vector<StmtPtr>* body = nullptr;
         // ZeroCostEh：零开销 try 的临时值水位槽（早退时要 RcCleanup 到它）。
         int mark_slot = -1;
+        // ZeroCostEh：早退时若有 finally，要把 finalbody 内联进来跑一遍。
+        // （body 字段复用上面的 Finally 定义）
         // finally 体词法上所属的循环：close 重放 break/continue 时恢复，
         // -1 表示不在循环里。
         int loop_brk = -1;

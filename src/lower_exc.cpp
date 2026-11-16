@@ -395,49 +395,24 @@ void Lowerer::lower_try_core(Try& t) {
 
         // except 体再抛异常时，也要先 ExcDone 再继续展开，避免
         // current 异常上下文和 save 节点累积。
-        int hh = push_handler();
-        VReg sj2 = setjmp_handler(hh);
-        int run = new_block("except.run");
-        int hland = new_block("except.land");
-        int hend = new_block("except.end");
-        Inst b2;
-        b2.op = IrOp::Branch;
-        b2.a = sj2;
-        b2.target = hland;
-        b2.target2 = run;
-        emit(std::move(b2));
-        switch_to(run);
-
-        FuncCtx::Cleanup hc;
-        hc.kind = FuncCtx::Cleanup::Kind::Handler;
-        hc.handler_slot = hh;
-        // 挂起后重挂 handler 时，异常要跳回 except 体自己的展开块
-        //（先 ExcDone 再继续向外抛），不能留 -1。
-        hc.land = hland;
-        st_->cleanups.push_back(hc);
-        FuncCtx::Cleanup done;
-        done.kind = FuncCtx::Cleanup::Kind::ExcDone;
-        st_->cleanups.push_back(done);
-        stmts(hb.h->body);
-        st_->cleanups.pop_back();
-        st_->cleanups.pop_back();
+        // except 体内部也走表驱动展开：`pa_eh_depth` 在这里仍然 > 0（保护区
+        // 还没退出），所以体里再抛的异常由 exc_longjmp 交给 _Unwind，展开器
+        // 会继续往外找 handler。**不能**在这里 push_handler/setjmp —— 那套是
+        // 旧路径的机制，和 _Unwind 混用会让帧记录与展开器状态不一致（实测表现
+        // 为 refcount 双重释放）。
+        //
+        // 只需要一条清理项：except 体若再抛异常，先 ExcDone 把当前异常上下文
+        // 收尾，再让展开继续。
+        {
+            FuncCtx::Cleanup done;
+            done.kind = FuncCtx::Cleanup::Kind::ExcDone;
+            st_->cleanups.push_back(done);
+            stmts(hb.h->body);
+            st_->cleanups.pop_back();
+        }
         if (shadow >= 0) comp_slots_.pop_back();
         if (!terminated()) {
-            call_void(RtFn::HandlerLeave, {load_slot(hh, t_int())});
             call_void(RtFn::ExcDone, {});
-            Inst j;
-            j.op = IrOp::Jump;
-            j.target = hend;
-            emit(std::move(j));
-        }
-
-        switch_to(hland);
-        call_void(RtFn::HandlerLeave, {load_slot(hh, t_int())});
-        call_void(RtFn::ExcDone, {});
-        call_void(RtFn::ExcReraise, {});
-        end_unreachable();
-        switch_to(hend);
-        if (!terminated()) {
             Inst j;
             j.op = IrOp::Jump;
             j.target = end;
@@ -752,6 +727,11 @@ void Lowerer::lower_delete(Delete& d) {
 // 其余函数（生成器/协程、with、finally、嵌套 try、多 handler）继续走 setjmp
 // 路径，一个字节都不变。
 void Lowerer::collect_zero_cost_tries(FunctionDef& f) {
+    // **可挂起函数整体排除**（生成器 / 协程 / 异步生成器）。它们有 5 处 C 级
+    // setjmp 兜底（rt_gen.c / rt_async.c / rt_agen.c），那些兜底抓不到 _Unwind
+    // 抛出的异常；而且挂起时展开器的上下文会失效。这是设计上的永久降级，
+    // 不是过渡状态 —— 让它们永久走 setjmp 路径。
+    if (st_->is_generator || st_->is_coroutine) return;
     // 逐个 try 独立判定：满足形状的收进集合、走 LSDA 路径，其余留在 setjmp 路径。
     // 嵌套时内外层可以分别选择路径（codegen 侧同一函数的多条保护区合成一份 LSDA）。
     //
@@ -854,6 +834,8 @@ void Lowerer::lower_try_zero_cost(Try& t) {
         FuncCtx::Cleanup zc;
         zc.kind = FuncCtx::Cleanup::Kind::ZeroCostEh;
         zc.mark_slot = mark_slot;
+        // 早退（return/break/continue）也要跑 finally。
+        zc.body = has_fin ? &t.finalbody : nullptr;
         st_->cleanups.push_back(zc);
     }
     // 记录 try 体内新增的 with 类清理项：异常路径（LP 里 handler 全不匹配）
@@ -863,13 +845,14 @@ void Lowerer::lower_try_zero_cost(Try& t) {
     ++st_->zc_raise_depth;
     stmts(t.body);
     --st_->zc_raise_depth;
-
-    if (terminated()) {
-        // 早退由 ZeroCostEh 清理项处理；走到这里说明还有别的东西提前终止了控制流。
-        // 形状判定漏了东西。宁可报错，也不要生成一条没有终点标签的保护区。
-        err(t.line, t.col, "internal: zero-cost try body ended with a terminator");
-        return;
-    }
+    // ZeroCostEh 清理项只服务于 try 体的早退，try 体降级完就撤掉 —— 否则
+    // handler 体里的 return 也会触发它（那时已在保护区外，多调一次 EhLeave +
+    // RcCleanup 会破坏临时值水位，实测表现为 refcount 双重释放）。
+    st_->cleanups.pop_back();
+    // try 体可能以 raise / return / break / continue 结尾（代码块终止）。
+    // 这完全合法：早退由 ZeroCostEh 清理项处理，raise 直接走 _Unwind。
+    // 唯一的要求是 .LEHE 标签必须落在一条真实指令上，所以这种情况单开一个
+    // 终点块承载标签（下面 switch_to(body_end) 会切过去），不能在这里报错。
 
     // 保护区终点单开一块：保证 .LEHE 标签物理上落在 try 体所有指令之后、
     // landing pad 之前，且不把 landing pad 自己圈进保护区。
@@ -878,10 +861,14 @@ void Lowerer::lower_try_zero_cost(Try& t) {
     int body_end = new_block("try.body.end");
     int land = new_block("try.land");
     int end = new_block("try.end");
-    Inst jbe;
-    jbe.op = IrOp::Jump;
-    jbe.target = body_end;
-    emit(std::move(jbe));
+    // try 体正常走到这里才需要跳；已终止（raise/return/break/continue 收尾）时
+    // 不能再发 Jump（前一块已终止，跳转是死代码），直接切到终点块发标签即可。
+    if (!terminated()) {
+        Inst jbe;
+        jbe.op = IrOp::Jump;
+        jbe.target = body_end;
+        emit(std::move(jbe));
+    }
     switch_to(body_end);
     {
         Inst ee;
@@ -905,6 +892,11 @@ void Lowerer::lower_try_zero_cost(Try& t) {
         emit(std::move(lp));
     }
     call_void(RtFn::EhLand, {});
+    // 异常路径同样要退出表驱动展开区：正常路径的 EhEnd 会调 pa_eh_leave，
+    // 但抛出时走不到那里。不补这一步，pa_eh_depth 会一直 > 0，之后**别的**
+    // 函数/模块级 try（走老路径的 setjmp）抛异常时会被误判成「在表驱动区里」，
+    // 从而错误地走 _Unwind —— 实测表现为后面的 with-try 直接未捕获退出。
+    call_void(RtFn::EhLeave, {});
     call_void(RtFn::RcCleanup, {load_slot(mark_slot, t_int())});
 
     // except 分发链：与 lower_try_core 的 land 块逐句对应（HandlerLeave → 上面的

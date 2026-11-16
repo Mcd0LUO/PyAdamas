@@ -95,6 +95,13 @@ int64_t gen_run(void* g, int64_t sent, int* done) {
     h.frame = pa_frame_top;
     handler_top = &h;
     int64_t exc_depth0 = pa_exc_depth();
+    /* 生成器体**永远**走 setjmp 路径（它有 C 级兜底，抓不到 _Unwind）。
+       如果调用方正在零开销 try 的保护区里（pa_eh_depth > 0），生成器内部
+       抛出的异常会被 exc_longjmp 误判成「走 _Unwind」，从而穿过这层 setjmp
+       直接展开到调用方 —— 语义错乱（实测：throw 之后生成器状态不对）。
+       所以进出生成器时把 pa_eh_depth 摘掉，出来再装回。 */
+    int saved_eh_depth = pa_eh_depth;
+    pa_eh_depth = 0;
     if (PA_SETJMP(h.env) != 0) {
         handler_top = h.prev;
         p[1] = 2;
@@ -111,13 +118,16 @@ int64_t gen_run(void* g, int64_t sent, int* done) {
            trace 挂载之前，未捕获时打印的仍是这一层的逻辑帧。 */
         pa_exc_pep479(pending_exc, "generator raised StopIteration");
         pa_trace_attach(pending_exc, g);
+        pa_eh_depth = saved_eh_depth;
         exc_longjmp();
     }
     ((void (*)(void*, int64_t))(uintptr_t)p[4])(g, sent);
     handler_top = h.prev;
+    pa_eh_depth = saved_eh_depth;
     pa_exc_unwind(exc_depth0);
     pa_rc_cleanup(h.mark);
     if (p[1]) {
+        pa_eh_depth = saved_eh_depth;
         *done = 1;
         return 0;
     }
@@ -238,6 +248,10 @@ void pa_gen_close(void* g) {
     h.frame = pa_frame_top;
     handler_top = &h;
     int64_t exc_depth0 = pa_exc_depth();
+    /* close() 重放 finally 时同样走 setjmp：调用方若在零开销保护区里，
+       必须临时摘掉 pa_eh_depth，否则 finally 里抛的异常会绕过这层 setjmp。 */
+    int saved_eh_depth = pa_eh_depth;
+    pa_eh_depth = 0;
     if (PA_SETJMP(h.env) != 0) {
         handler_top = h.prev;
         pa_gen_release_slots(g);
@@ -249,12 +263,14 @@ void pa_gen_close(void* g) {
         pa_exc_unwind(exc_depth0);
         /* close() 重放 finally 时逃出的 StopIteration 同样按 PEP 479 转。 */
         pa_exc_pep479(pending_exc, "generator raised StopIteration");
+        pa_eh_depth = saved_eh_depth;
         exc_longjmp();
     }
     p[5] = 1;
     ((void (*)(void*, int64_t))(uintptr_t)p[4])(g, 0);
     handler_top = h.prev;
     pa_exc_unwind(exc_depth0);
+    pa_eh_depth = saved_eh_depth;
     pa_rc_cleanup(h.mark);
     pa_gen_release_slots(g);
     p[1] = 1;

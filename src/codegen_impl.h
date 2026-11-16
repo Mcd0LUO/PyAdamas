@@ -551,7 +551,7 @@ private:
     bool eh_plan_active_ = false;
     // 总开关（--zero-cost-exc）。关闭时 prepare_eh_plan 直接返回，保证老
     // 路径的汇编逐字节不变。
-    bool zero_cost_exc_ = false;
+    bool zero_cost_exc_ = true;
     // 预扫描本函数的 EH 标记（fname 是 FDE 起点标签）；没有标记则不动作。
     void prepare_eh_plan(const IRFunction& f, const std::string& fname);
     // 发 .cfi_personality / .cfi_lsda（必须在 .cfi_startproc 之后调用）。

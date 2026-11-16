@@ -755,6 +755,11 @@ void coro_step(void* c) {
     void* prev_active = loop_active_coro;
     loop_active_coro = c;
     int64_t exc_depth0 = pa_exc_depth();
+    /* 协程体永远走 setjmp 路径（C 级兜底抓不到 _Unwind）。调用方若在零开销
+       try 的保护区里（pa_eh_depth > 0），协程内抛的异常会被 exc_longjmp 误判
+       成走 _Unwind，穿过这层 setjmp 展开到调用方。进出时摘掉/装回。 */
+    int saved_eh_depth = pa_eh_depth;
+    pa_eh_depth = 0;
     if (PA_SETJMP(h.env) != 0) {
         loop_active_coro = prev_active;
         handler_top = h.prev;
@@ -772,12 +777,14 @@ void coro_step(void* c) {
         // 异常跳过了 resume 的出口清理：帧里的堆槽当场释放。
         pa_gen_release_slots(c);
         pa_exc_unwind(exc_depth0);
+        pa_eh_depth = saved_eh_depth;
         coro_finish(c, 0, e);  // 异常逃出：交给等待者或事件循环根
         return;
     }
     ((void (*)(void*, int64_t))(uintptr_t)p[4])(c, 0);
     loop_active_coro = prev_active;
     pa_exc_unwind(exc_depth0);
+    pa_eh_depth = saved_eh_depth;
     handler_top = h.prev;
     pa_rc_cleanup(h.mark);
     p[5] = 0;

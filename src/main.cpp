@@ -128,7 +128,7 @@ int main(int argc, char** argv) {
                      "pyadamas —— Python 语法外壳的编译器\n"
                      "\n"
                      "usage: %s [tokens|ast|types|check|ir|asm|build|run|cdecl] [-O0|-O1|-O2] "
-                     "[--fast-math] [--zero-cost-exc] [--syntax] [-o out] <file.py>\n",
+                     "[--fast-math] [--no-zero-cost-exc] [--syntax] [-o out] <file.py>\n",
                      argv[0]);
         return 2;
     }
@@ -144,7 +144,10 @@ int main(int argc, char** argv) {
     bool rebuild = false;
     int opt_level = 2;
     bool fast_math = false;
-    bool zero_cost_exc = false;
+    // Z5（0.202）：表驱动展开是默认路径。可挂起函数（生成器/协程）仍然走
+    // setjmp —— 它们有 5 处 C 级 setjmp 兜底，抓不到 _Unwind，这是设计上的
+    // 永久降级。`--no-zero-cost-exc` 是回退开关（出问题时能一键退回旧路径）。
+    bool zero_cost_exc = true;
     bool resolve_imports = false;
 
     static const std::vector<std::string> kModes = {"tokens", "ast",     "check", "types",
@@ -158,6 +161,7 @@ int main(int argc, char** argv) {
         else if (a == "--rebuild") rebuild = true;
         else if (a == "--fast-math") fast_math = true;
         else if (a == "--zero-cost-exc") zero_cost_exc = true;
+        else if (a == "--no-zero-cost-exc") zero_cost_exc = false;
         else if (a == "-O0") opt_level = 0;
         else if (a == "-O1") opt_level = 1;
         else if (a == "-O2") opt_level = 2;

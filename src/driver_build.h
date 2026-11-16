@@ -53,7 +53,8 @@ struct Program {
     int opt = 2;
     bool fast_math = false;
     // 零开销异常（--zero-cost-exc）：编译选项，写进模块缓存清单参与失效。
-    bool zero_cost_exc = false;
+    // Z5：表驱动展开默认开启；--no-zero-cost-exc 可回退。
+    bool zero_cost_exc = true;
     // 任一模块需要 unknown 索引就保持开启；全都不需要时入口关掉维护。
     bool needs_unknown_index = false;
 };

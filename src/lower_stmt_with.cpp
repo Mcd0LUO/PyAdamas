@@ -128,14 +128,28 @@ void Lowerer::emit_cleanup_exits(size_t down_to) {
                 call_void(RtFn::HandlerDiscard, {load_slot(c.handler_slot, t_int())});
                 call_void(RtFn::TaskGroupCancel, {load_slot(c.mgr_slot, t_unknown())});
                 break;
-            case FuncCtx::Cleanup::Kind::ZeroCostEh:
+            case FuncCtx::Cleanup::Kind::ZeroCostEh: {
                 // 零开销 try 的早退（return/break/continue 穿过保护区）：
-                // 先退出表驱动展开区（pa_eh_leave，否则 pa_eh_depth 不归零，
-                // 之后抛出的异常会误走 _Unwind），再按水位清理临时值。
+                // 1) 先退出表驱动展开区（pa_eh_leave，否则 pa_eh_depth 不归零，
+                //    之后抛出的异常会误走 _Unwind）；
+                // 2) 按水位清理临时值；
+                // 3) 有 finally 时内联跑一遍 finalbody —— 早退也必须执行它
+                //    （与 CPython 一致：finally 在 return 之前跑）。
+                //    注意顺序：先 EhLeave/清理，再跑 finalbody，最后才 return。
                 call_void(RtFn::EhLeave, {});
                 if (c.mark_slot >= 0)
                     call_void(RtFn::RcCleanup, {load_slot(c.mark_slot, t_int())});
+                if (c.body) {
+                    // finalbody 里可能有 return/break/continue 跳出：
+                    // 与老路径 Finally 分支同样处理 —— 临时清空 cleanups，
+                    // 避免重入。
+                    auto saved = st_->cleanups;
+                    st_->cleanups.resize(i - 1);
+                    stmts(*c.body);
+                    st_->cleanups = std::move(saved);
+                }
                 break;
+            }
             case FuncCtx::Cleanup::Kind::SemRelease:
                 call_void(RtFn::HandlerDiscard, {load_slot(c.handler_slot, t_int())});
                 call_void(RtFn::SemRelease, {load_slot(c.mgr_slot, t_unknown())});

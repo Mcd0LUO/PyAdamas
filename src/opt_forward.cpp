@@ -194,9 +194,13 @@ void prune_unreachable(IRFunction& fn) {
     // 任何前驱；但它是 codegen 要发 pa_eh_land / except 分发的地方，绝不能
     // 当死块删掉。这里按标记指令认块（而不是 IRFunction::eh_regions 里记的
     // 块号）：内联等 pass 会重建块表，块号会过期，指令跟着块走才是稳的。
+    // 同理，含 EhEnd 的块也必须保留：它是保护区的终点，.LEHE 标签就发在它
+    // 第一条指令上。try 体以 raise/return 收尾、且所有 handler 体也都 return 时，
+    // 这个块在 CFG 上没有任何前驱（唯一入口那条 Jump 来自已终止的块，会被
+    // 删掉），但它承载的标记不能丢 —— 丢了 codegen 就会报 begin/end 数量不匹配。
     for (int b = 0; b < static_cast<int>(nb); ++b)
         for (const auto& in : fn.blocks[static_cast<size_t>(b)].insts)
-            if (in.op == IrOp::EhLandingPad) {
+            if (in.op == IrOp::EhLandingPad || in.op == IrOp::EhEnd) {
                 if (!reach[static_cast<size_t>(b)]) {
                     reach[static_cast<size_t>(b)] = 1;
                     work.push_back(b);

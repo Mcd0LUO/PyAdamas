@@ -31,7 +31,8 @@ struct LowerOptions {
     bool fast_math = false;
     // 零开销异常（Z2-b2）：只对满足最小形状（非可挂起 + 单层 catch-all try）
     // 的函数发 LSDA / landing pad 路径。默认关：关闭时输出与原来逐字节一致。
-    bool zero_cost_exc = false;
+    // Z5：表驱动展开默认开启（可挂起函数仍由形状判定排除）。
+    bool zero_cost_exc = true;
     ModuleLookup module_lookup;
 };
 

@@ -155,6 +155,9 @@ void agen_drive(PyAdamasAwait* d) {
     h.frame = pa_frame_top;
     handler_top = &h;
     int64_t exc_depth0 = pa_exc_depth();
+    /* 同 rt_gen.c / rt_async.c：异步生成器体永远走 setjmp 路径。 */
+    int saved_eh_depth = pa_eh_depth;
+    pa_eh_depth = 0;
     if (PA_SETJMP(h.env) != 0) {
         handler_top = h.prev;
         PyAdamasException* e = pending_exc;
@@ -168,6 +171,7 @@ void agen_drive(PyAdamasAwait* d) {
         // 异常跳过了 resume 的出口清理：帧里的堆槽当场释放。
         pa_gen_release_slots(g);
         pa_exc_unwind(exc_depth0);
+        pa_eh_depth = saved_eh_depth;
         /* PEP 479：StopIteration 逃出异步生成器帧 -> RuntimeError。 */
         pa_exc_pep479(e, "async generator raised StopIteration");
         pa_trace_attach(e, g);
@@ -182,6 +186,7 @@ void agen_drive(PyAdamasAwait* d) {
     ((void (*)(void*, int64_t))(uintptr_t)p[4])(g, sent);
     handler_top = h.prev;
     pa_exc_unwind(exc_depth0);
+    pa_eh_depth = saved_eh_depth;
     pa_rc_cleanup(h.mark);
     p[5] = 0;
     p[2] = 0;

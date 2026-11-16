@@ -45,7 +45,7 @@ for f in "$HERE"/cases/*.py; do
     off_s="$TMP/$name.off.s"
     on_s="$TMP/$name.on.s"
 
-    if ! "$PY" asm "$f" > "$off_s" 2> "$TMP/$name.off.asm.err"; then
+    if ! "$PY" asm --no-zero-cost-exc "$f" > "$off_s" 2> "$TMP/$name.off.asm.err"; then
         bad "$name：老路径 asm 失败"
         sed -n '1,5p' "$TMP/$name.off.asm.err"
         continue
@@ -101,7 +101,7 @@ for f in "$HERE"/cases/*.py; do
     on_prog="$TMP/$name.on.prog"
     off_out="$TMP/$name.off.out"
     on_out="$TMP/$name.on.out"
-    "$PY" run --rebuild -o "$off_prog" "$f" > "$off_out" 2>&1
+    "$PY" run --rebuild --no-zero-cost-exc -o "$off_prog" "$f" > "$off_out" 2>&1
     off_rc=$?
     "$PY" run --rebuild --zero-cost-exc -o "$on_prog" "$f" > "$on_out" 2>&1
     on_rc=$?

@@ -180,10 +180,12 @@ PyAdamasException* pa_eh_landing(void* unwound) {
          pending_exc       = 刚抛出的异常（分派代码 pa_exc_matches/accept 读它）
          current_exc_inst  = 富异常实例（except as e 的绑定对象）
          pending_exc_args  = 多参异常 args
-         current_exc / exc_save_top 不动：展开过程中没有执行任何生成代码
-         （Z2 没有 cleanup landing pad），它们仍是抛出时的值，正是 longjmp 落地
-         后 LP 应该看到的那份。Z4 的 cleanup pad 里若跑用户代码，由那个 pad 自己
-         用 pa_exc_enter/leave 维护，不属于这里的职责。 */
+         current_exc       = NULL
+         exc_save_top      = NULL
+       */
+    /* current_exc / exc_save_top 不动：展开过程中没有执行任何生成代码，
+       它们仍是抛出时的值 —— 正是 longjmp 落地后 LP 应该看到的那份。
+       （z2_rt 夹具对这两个全局有断言，改动会破坏它。） */
     if (pending_exc && pending_exc != w->exc) exc_free(pending_exc);
     pending_exc = w->exc;
     w->exc = NULL;
