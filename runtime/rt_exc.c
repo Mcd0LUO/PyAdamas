@@ -62,8 +62,117 @@ void pa_frame_unwind(PyAdamasFrame* target) {
     pa_frame_top = target;
 }
 
+/* ── 异常对象生命周期追踪（诊断工具） ──────────────────────────
+ *
+ * 用途：定位「异常对象该释放却没释放」这类所有权问题。开启后把每个
+ * PyAdamasException 从分配、到释放（或程序退出时仍存活）的完整轨迹
+ * 打到 stderr，并在退出时汇总所有未释放对象。
+ *
+ * 开关：环境变量 PYADAMAS_EXC_TRACE=1。
+ * 零成本：不设环境变量时只有一次 getenv 判断和一次自增。
+ *
+ * 输出示例（119_gen_except_suspend）：
+ *   [exc#5] alloc  KeyError  "inner"  at 0x...
+ *   [exc#5] LEAK   KeyError  "inner"  at 0x...   ← 退出时仍存活
+ *
+ * 实现要点：分配序号写进 e->trace_id；free 时打印并从存活表摘除；
+ * 退出时（atexit）打印存活表。存活表固定大小，溢出会提示。
+ */
+#define EXC_TRACE_MAX 8192
+
+static int exc_trace_on = -1;
+static int64_t exc_trace_seq;
+/* 存活对象表：指针 + 分配序号。用外部表而不是结构体字段，
+ * 这样不改变 PyAdamasException 的布局、不影响正常运行的分配大小。 */
+typedef struct {
+    PyAdamasException* e;
+    int64_t id;
+} ExcTraceSlot;
+static ExcTraceSlot exc_trace_live[EXC_TRACE_MAX];
+static int exc_trace_nlive;
+static int exc_trace_overflow;
+
+static void exc_trace_dump_leaks(void);
+
+static int exc_trace_enabled(void) {
+    if (exc_trace_on < 0) {
+        const char* v = getenv("PYADAMAS_EXC_TRACE");
+        exc_trace_on = (v && *v && *v != '0') ? 1 : 0;
+        if (exc_trace_on) atexit(exc_trace_dump_leaks);
+    }
+    return exc_trace_on;
+}
+
+void pa_exc_trace_move(PyAdamasException* e, const char* what, void* where);
+
+static int64_t exc_trace_id_of(PyAdamasException* e) {
+    for (int i = 0; i < exc_trace_nlive; ++i)
+        if (exc_trace_live[i].e == e) return exc_trace_live[i].id;
+    return 0;
+}
+
+void pa_exc_trace_alloc(PyAdamasException* e) {
+    if (!e) return;
+    if (!exc_trace_enabled()) return;
+    int64_t id = ++exc_trace_seq;
+    if (exc_trace_nlive < EXC_TRACE_MAX) {
+        exc_trace_live[exc_trace_nlive].e = e;
+        exc_trace_live[exc_trace_nlive].id = id;
+        ++exc_trace_nlive;
+    } else {
+        exc_trace_overflow = 1;
+    }
+    fprintf(stderr, "[exc#%lld] alloc  %-16s \"%s\"  at %p\n",
+            (long long)id, e->type, e->message, __builtin_return_address(0));
+}
+
+/* 记录一次所有权转移（写回槽、交给别的持有者），不是释放。 */
+void pa_exc_trace_move(PyAdamasException* e, const char* what, void* where) {
+    if (!exc_trace_enabled() || !e) return;
+    int64_t id = exc_trace_id_of(e);
+    if (id == 0) return;
+    fprintf(stderr, "[exc#%lld] %-6s %-16s at %p\n",
+            (long long)id, what, e->type ? e->type : "?", where);
+}
+
+static void exc_trace_free(PyAdamasException* e) {
+    if (!e || !exc_trace_enabled()) return;
+    int64_t id = 0;
+    for (int i = 0; i < exc_trace_nlive; ++i) {
+        if (exc_trace_live[i].e == e) {
+            id = exc_trace_live[i].id;
+            exc_trace_live[i] = exc_trace_live[--exc_trace_nlive];
+            break;
+        }
+    }
+    if (id == 0) {
+        fprintf(stderr, "[exc#?] free of UNTRACKED %-16s at %p (double free?)\n",
+                e->type ? e->type : "?", (void*)e);
+        return;
+    }
+    fprintf(stderr, "[exc#%lld] free   %-16s at %p\n",
+            (long long)id, e->type ? e->type : "?", (void*)e);
+}
+
+static void exc_trace_dump_leaks(void) {
+    if (exc_trace_overflow)
+        fprintf(stderr, "[exctrace] 存活表溢出（>%d），部分对象未记录\n", EXC_TRACE_MAX);
+    if (exc_trace_nlive == 0) {
+        fprintf(stderr, "[exctrace] 全部异常对象已释放\n");
+        return;
+    }
+    fprintf(stderr, "[exctrace] %d 个异常对象未释放:\n", exc_trace_nlive);
+    for (int i = 0; i < exc_trace_nlive; ++i) {
+        PyAdamasException* e = exc_trace_live[i].e;
+        fprintf(stderr, "  [exc#%lld] LEAK %-16s \"%s\"  at %p\n",
+                (long long)exc_trace_live[i].id, e->type ? e->type : "?",
+                e->message ? e->message : "", (void*)e);
+    }
+}
+
 void exc_free(PyAdamasException* e) {
     if (!e) return;
+    exc_trace_free(e);
     exc_free(e->cause);
     pa_trace_free(e->trace);
     free(e->type);
@@ -81,6 +190,7 @@ PyAdamasException* exc_new(const char* type, const char* msg) {
     strcpy(e->message, msg);
     e->cause = NULL;
     e->trace = NULL;
+    pa_exc_trace_alloc(e);
     return e;
 }
 
@@ -600,6 +710,8 @@ static void free_save_chain(PyAdamasExcSave* s) {
 }
 
 void pa_exc_leave(int64_t* cur, int64_t* top, int64_t token) {
+    // 轨迹：把 current_exc 写回帧槽（所有权留在槽里，不是释放）。
+    pa_exc_trace_move(current_exc, "leave", (void*)cur);
     *cur = (int64_t)(uintptr_t)current_exc;
     *top = (int64_t)(uintptr_t)exc_save_top;
     int64_t before = exc_node_depth;
@@ -667,6 +779,7 @@ void pa_raise(PyAdamasStr* type, PyAdamasStr* msg) {
     e->message[msg->len] = '\0';
     e->cause = NULL;
     e->trace = NULL;
+    pa_exc_trace_alloc(e);
     pending_exc = e;
     exc_longjmp();
 }
@@ -834,6 +947,7 @@ _Noreturn void pa_raise_args(PyAdamasStr* type, PyAdamasList* args) {
     strcpy(e->message, msg);
     e->cause = NULL;
     e->trace = NULL;
+    pa_exc_trace_alloc(e);
     free(msg);
     if (pending_exc_args) { pa_rc_dec(pending_exc_args); pending_exc_args = NULL; }
     if (args) { pa_rc_inc(args); pending_exc_args = args; }

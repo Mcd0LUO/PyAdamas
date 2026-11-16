@@ -32,6 +32,7 @@
 
 
 void pa_exc_drop_save(void);
+void pa_exc_trace_alloc(PyAdamasException* e);
 #include <stddef.h>
 #include <unwind.h>
 
@@ -364,6 +365,7 @@ _Noreturn void pa_eh_raise(PyAdamasStr* type, PyAdamasStr* msg) {
     e->message[msg->len] = '\0';
     e->cause = NULL;
     e->trace = NULL;
+    pa_exc_trace_alloc(e);
     pending_exc = e;
     pa_eh_throw_or_exit(e);
 }

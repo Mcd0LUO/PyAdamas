@@ -219,6 +219,52 @@ inc/dec 是配平的、`-O0` 也照样崩、关掉 GC 就好了。只有内存�
 
 **遇到 RC/GC/异常展开相关的「诡异」问题时，第一步就该跑这个。**
 
+### 异常对象生命周期追踪
+
+ASan 能告诉你「谁泄漏了多少字节」，但**说不出那个对象是怎么被漏掉的** ——
+尤其异常对象这种裸 `malloc` 的非 RC 对象，所有权会在 `pending_exc` /
+`current_exc` / 生成器帧槽 / 临时栈之间反复转移，光看代码很难跟。
+
+`PYADAMAS_EXC_TRACE=1` 打开运行时追踪，把每个 `PyAdamasException` 的
+完整轨迹打到 stderr，退出时汇总所有未释放对象：
+
+```bash
+./build/dev/pyadamas build -O2 -o /tmp/prog tests/run/119_gen_except_suspend.py
+PYADAMAS_EXC_TRACE=1 /tmp/prog 2>&1 | grep -E 'exc#|exctrace'
+```
+
+输出：
+
+```
+[exc#1] alloc  ValueError       "boom"  at 0x...
+[exc#1] free   ValueError       at 0x...
+...
+[exc#5] alloc  KeyError         "inner"  at 0x...
+[exc#5] leave  KeyError         at 0x...62a8   ← exc_leave 写回帧槽
+[exc#5] leave  KeyError         at 0x...62a8   ← 又写一次
+[exctrace] 2 个异常对象未释放:
+  [exc#5] LEAK KeyError "inner"  at 0x...6070   ← 退出时仍存活
+  [exc#6] LEAK RuntimeError "r" at 0x...dd70
+```
+
+字段含义：
+
+| 事件 | 含义 |
+|---|---|
+| `alloc` | 分配（`exc_new` / `pa_raise` / `pa_raise_args` / `pa_eh_raise`） |
+| `free` | `exc_free` 释放 |
+| `leave` | `pa_exc_leave` 把对象写回生成器帧槽（所有权转移，不是释放） |
+| `LEAK` | 程序退出时仍存活 |
+
+**设计要点**：追踪表是**外部表**（指针 → 分配序号），不在
+`PyAdamasException` 里加字段 —— 那样会改变对象布局、让 ASan 报的字节数
+变化，干扰对照。不设环境变量时只有一次 `getenv` 判断和一次自增，零成本。
+
+用它定位 `119_gen_except_suspend` 的 126 字节泄漏时，直接看出：
+`exc#5` 被 `exc_leave` 写进帧槽后**再没有任何事件** —— 既没 `free`、
+也没被 `exc_enter` 取回。说明问题在「生成器销毁时帧槽里的异常对象没人还」，
+而不是 RC 配平。
+
 #### 生成程序插桩（最常用）
 
 `--asan` / `--ubsan` 让生成的可执行文件带检查器，编译和链接同时生效：
