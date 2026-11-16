@@ -226,7 +226,26 @@ void exc_print_uncaught(PyAdamasException* e) {
         fprintf(stderr, "pyadamas: uncaught %s\n", e->type);
 }
 
+/* 表驱动展开（--zero-cost-exc）的嵌套深度。由生成代码在进入/离开零开销
+   try 时通过 pa_eh_enter()/pa_eh_leave() 维护；> 0 表示当前正处于这样的
+   保护区里，此时抛出必须走 _Unwind（setjmp 路径的 handler 栈抓不到它）。
+   用计数器而不是布尔：嵌套 try 时内层退出不能把外层的标记清掉。 */
+int pa_eh_depth;
+
+void pa_eh_enter(void) { ++pa_eh_depth; }
+void pa_eh_leave(void) { if (pa_eh_depth > 0) --pa_eh_depth; }
+
 _Noreturn void exc_longjmp(void) {
+    /* 表驱动区里抛出：交给 _Unwind 展开。这里不释放帧记录 —— 展开器会逐帧
+       走 personality，由方案 G 在 handler 帧上一次性把被跳过的帧清掉
+       （见 rt_eh.c / rt_personality.c）。 */
+    if (pa_eh_depth > 0) {
+        (void)pa_eh_throw(pending_exc);
+        /* 走到这里说明没人接（_URC_END_OF_STACK）或展开器内部出错。
+           与下面 setjmp 路径的「没 handler」分支同样处理：打印并退出。 */
+        exc_print_uncaught(pending_exc);
+        exit(1);
+    }
     if (!handler_top) {
         exc_print_uncaught(pending_exc);
         exit(1);

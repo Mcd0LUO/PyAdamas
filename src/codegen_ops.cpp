@@ -722,11 +722,18 @@ void AsmGen::gen_convert(const Inst& in) {
 // ── 零开销异常（Z2-b2）：保护区 / landing pad 标记的发射 ─────────────
 void AsmGen::gen_eh_begin() {
     // 保护区起点：标签地址 = 紧随其后的第一条指令。
+    //
+    // 同时标记「进入表驱动展开区」：C 运行时抛的异常（IndexError /
+    // ZeroDivisionError 等）走的是 exc_longjmp，它据此改走 _Unwind，
+    // 否则 setjmp 路径的 handler 栈抓不到这些异常。
     if (eh_begin_seq_ < eh_begin_labels_.size())
         label(eh_begin_labels_[eh_begin_seq_++]);
+    line("call pa_eh_enter");
 }
 
 void AsmGen::gen_eh_end() {
+    // 保护区终点。先退标记再落标签：标签之后的代码已不在保护区里。
+    line("call pa_eh_leave");
     if (eh_end_seq_ < eh_end_labels_.size())
         label(eh_end_labels_[eh_end_seq_++]);
 }

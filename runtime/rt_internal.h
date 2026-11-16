@@ -516,6 +516,12 @@ extern PyAdamasList* pending_exc_args;
    退出（与 rt_exc.c 的 exc_longjmp 无 handler 分支同一收尾，但这里不做，
    留给上层决定）。 */
 int pa_eh_throw(PyAdamasException* e);
+
+/* 表驱动展开（--zero-cost-exc）的进入/离开标记：生成代码在零开销 try 的
+   保护区入口/出口调用。> 0 时 exc_longjmp 改走 _Unwind，而不是 longjmp。 */
+void pa_eh_enter(void);
+void pa_eh_leave(void);
+extern int pa_eh_depth;
 /* landing pad 入口调用（%rax = 展开对象指针，即 LP 的第一个实参）：取回异常、
    装好 pending_exc / current_exc_inst / pending_exc_args 这些全局状态。
    返回取回的 PyAdamasException*（外来异常返回 NULL：不能按我们的语义分发）。 */

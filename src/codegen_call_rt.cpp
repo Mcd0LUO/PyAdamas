@@ -136,6 +136,8 @@ void AsmGen::gen_rt_args(const Inst& in, RtFn fn) {
             // 不占普通实参位；直接搬到第一个整型实参寄存器。
             emit2("movq", "%rax", arg_reg_i(0));
             break;
+        case RtFn::EhEnter:
+        case RtFn::EhLeave:
         case RtFn::StrFromNone:
         case RtFn::PanicDiv0:
         case RtFn::PanicOverflow:

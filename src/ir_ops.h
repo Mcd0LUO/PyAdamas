@@ -272,6 +272,8 @@ enum class RtFn : uint16_t {
     EhReraise,        // () -> void noreturn  裸 raise 的表驱动版
     EhRethrow,        // () -> void noreturn  landing 分发不匹配时重抛同一个异常
     EhLand,           // (unwind_exc*) -> void landing pad 入口：取回异常并收尾展开包装
+    EhEnter,          // () -> void 进入零开销 try 保护区（exc_longjmp 据此改走 _Unwind）
+    EhLeave,          // () -> void 离开保护区
                       //   实参由 codegen 特殊处理（直接从 landing pad 入口的 %rax 取）
     AbsI64,       // (i64) -> i64
     ComplexNew,   // (f64 re, f64 im) -> complex*
@@ -749,6 +751,8 @@ inline const char* rt_name(RtFn f) {
         case RtFn::EhReraise: return "pa_eh_reraise";
         case RtFn::EhRethrow: return "pa_eh_rethrow";
         case RtFn::EhLand: return "pa_eh_land";
+        case RtFn::EhEnter: return "pa_eh_enter";
+        case RtFn::EhLeave: return "pa_eh_leave";
         case RtFn::MathSqrt: return "pa_math_sqrt";
         case RtFn::MathFloor: return "pa_math_floor";
         case RtFn::MathCeil: return "pa_math_ceil";
