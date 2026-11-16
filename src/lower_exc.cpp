@@ -282,6 +282,13 @@ void Lowerer::lower_raise(Raise& r) {
 
 
 void Lowerer::lower_try(Try& t) {
+    // 零开销异常（Z2-b2 / Z4）：本函数被判成可接管的形状时，唯一那条 try 走
+    // 新路径 —— 包括带 finally 的情形（lower_try_zero_cost 自己处理 finalbody）。
+    // 这一判断必须排在 finally 分派之前，否则带 finally 的 try 永远进不了新路径。
+    if (st_->zero_cost_try == &t) {
+        lower_try_zero_cost(t);
+        return;
+    }
     if (!t.finalbody.empty()) {
         lower_finally(t);
         return;
@@ -762,7 +769,10 @@ const Try* Lowerer::find_zero_cost_try(FunctionDef& f) {
     // 多 handler 已放开：landing pad 里的分派链与老路径逐句相同（见
     // lower_try_zero_cost）。仍排除 finally / else —— 它们需要 cleanup
     // landing pad 或 try 正常结束后跳转，是 Z4 的范围。
-    if (!t.finalbody.empty() || !t.orelse.empty() || t.handlers.empty()) return nullptr;
+    // finally 已放开（Z4）：正常路径在保护区外跑一遍 finalbody；异常路径在
+    // landing pad 里先跑 finalbody 再重抛。仍排除 else —— 它要求「try 体正常
+    // 结束后才执行」，需要在保护区终点插跳转，与 finally 正交，后续单独做。
+    if (!t.orelse.empty()) return nullptr;
     // handler 类型不再限制为 catch-all：lower_try_zero_cost 的分派链会逐个
     // lower_exc_match，不匹配的走 pa_eh_rethrow 重启 phase 1（与老路径的
     // ExcReraise 等价）。富异常实例 / 多参 raise 仍由下面的 check 排除。
@@ -817,6 +827,14 @@ const Try* Lowerer::find_zero_cost_try(FunctionDef& f) {
 // pa_handler_leave 的临时值水位清理；后面的 except 分发块与 old path 逐句
 // 相同（ExcMatches / ExcAcceptValue / ExcDone 一行不改）。
 void Lowerer::lower_try_zero_cost(Try& t) {
+    // finally 存在时：正常路径（含 handler 体正常结束）在 end 块跑一遍
+    // finalbody；异常路径（LP 里、handler 全不匹配）跑 finalbody 后重抛。
+    // 两条路径各内联一份 —— 与老路径非可挂起函数的做法一致。
+    const bool has_fin = !t.finalbody.empty();
+    // finally 体单独一块：try 体正常结束、handler 体正常结束都跳到它，
+    // 跑完再进 end。这样 finalbody 只内联一份，不会因为 handler 正常结束
+    // 而重复执行（异常路径那份在 LP 里，见下）。
+    const int fin_block = has_fin ? new_block("try.finally") : -1;
     int body = new_block("try.body");
 
     // 临时值水位：复刻 pa_handler_push 里 h->mark = pa_rc_mark() 的那一半。
@@ -867,7 +885,7 @@ void Lowerer::lower_try_zero_cost(Try& t) {
     call_void(RtFn::RcCleanup, {load_slot(mark_slot, t_int())});
     Inst je;
     je.op = IrOp::Jump;
-    je.target = end;
+    je.target = has_fin ? fin_block : end;
     emit(std::move(je));
 
     // landing pad 入口：personality 把 GR0（%rax）设成展开包装指针。
@@ -915,8 +933,19 @@ void Lowerer::lower_try_zero_cost(Try& t) {
         }
     }
     if (!bare) {
-        call_void(RtFn::EhRethrow, {});
-        end_unreachable();
+        // 没有 handler 接住。有 finally 时先跑 finalbody 再重抛；
+        // 重抛用 pa_eh_rethrow（重启 phase 1），所以外层 try 仍有机会接住。
+        // 这里内联一份 finalbody 而不是跳 fin_block —— fin_block 跑完是进 end
+        // （正常结束），而这条路径必须重抛，控制流终点不同。
+        if (has_fin) {
+            stmts(t.finalbody);
+            // finalbody 里若 return/break/continue 终止了控制流，异常就被吞掉，
+            // 这与 CPython 的语义一致（finally 里的 return 会丢弃异常）。
+        }
+        if (!terminated()) {
+            call_void(RtFn::EhRethrow, {});
+            end_unreachable();
+        }
     }
 
     for (auto& hb : bodies) {
@@ -947,8 +976,24 @@ void Lowerer::lower_try_zero_cost(Try& t) {
         call_void(RtFn::ExcDone, {});
         Inst jj;
         jj.op = IrOp::Jump;
-        jj.target = end;
+        // 有 finally 时先跳 fin 块跑 finalbody（只跑一份，不在这里内联）；
+        // 没有 finally 直接进 end。
+        jj.target = has_fin ? fin_block : end;
         emit(std::move(jj));
+    }
+
+    // finally 结构（有 finally 时）：
+    //   try 体正常结束 / handler 体正常结束  ->  fin 块（跑 finalbody）-> end
+    //   LP 里没有 handler 接住              ->  fin 块（跑 finalbody）-> 重抛
+    // 用 fin 块而不是把 finalbody 内联两处，避免 handler 正常结束时重复执行。
+    if (has_fin) {
+        // 正常路径（try 体结束 / handler 体结束）落到这里：跑 finalbody 后进 end。
+        switch_to(fin_block);
+        stmts(t.finalbody);
+        Inst jf;
+        jf.op = IrOp::Jump;
+        jf.target = end;
+        emit(std::move(jf));
     }
 
     switch_to(end);
