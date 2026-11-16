@@ -16,6 +16,7 @@ import json
 import os
 import platform
 import re
+import shutil
 import subprocess
 import sys
 import time
@@ -25,7 +26,21 @@ ROOT = Path(__file__).resolve().parent
 WORK = Path("/tmp/pyadamas-compare")
 PYADAMAS_BIN = os.environ.get("PYADAMAS_BIN", "/w/build/dev/pyadamas")
 PYTHON_BIN = os.environ.get("PYTHON_BIN", "python3")
-GO_BIN = os.environ.get("GO_BIN", "go")
+def _find_go():
+    """找 go 可执行文件：优先 $GO_BIN / PATH，其次 Debian 的 /usr/lib/go-*/bin/go。"""
+    env = os.environ.get("GO_BIN")
+    if env:
+        return env
+    found = shutil.which("go")
+    if found:
+        return found
+    for cand in sorted(Path("/usr/lib").glob("go-*/bin/go"), reverse=True):
+        if os.access(cand, os.X_OK):
+            return str(cand)
+    return "go"  # 交给 subprocess 报 FileNotFoundError
+
+
+GO_BIN = _find_go()
 CXX_BIN = os.environ.get("CXX", "g++")
 
 LANGS = ["cpython", "pyadamas", "go", "cpp"]

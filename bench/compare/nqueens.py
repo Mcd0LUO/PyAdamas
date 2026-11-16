@@ -2,7 +2,7 @@
 N = 12
 
 
-def place(row, n, cols, d1, d2):
+def place(row: int, n: int, cols: list, d1: list, d2: list) -> int:
     if row == n:
         return 1
     total = 0
@@ -18,7 +18,7 @@ def place(row, n, cols, d1, d2):
     return total
 
 
-def count(n):
+def count(n: int) -> int:
     cols = []
     d1 = []
     d2 = []

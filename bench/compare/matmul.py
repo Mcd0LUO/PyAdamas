@@ -2,7 +2,7 @@
 N = 120
 
 
-def make(n):
+def make(n: int) -> list:
     out = []
     for i in range(n * n):
         out.append((i * 7 + 3) % 11)

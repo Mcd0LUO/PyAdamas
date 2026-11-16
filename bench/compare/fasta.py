@@ -2,7 +2,7 @@
 N = 40000
 
 
-def build(n):
+def build(n: int) -> str:
     seed = 42
     parts = []
     total = 0

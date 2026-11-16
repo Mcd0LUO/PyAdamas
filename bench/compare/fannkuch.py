@@ -2,7 +2,7 @@
 N = 8
 
 
-def fannkuch(n):
+def fannkuch(n: int) -> tuple:
     perm = []
     count = []
     i = 0

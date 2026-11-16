@@ -3,7 +3,7 @@ N = 350
 MAXITER = 50
 
 
-def run(size, maxiter):
+def run(size: int, maxiter: int) -> int:
     total = 0
     for y in range(size):
         ci = 2.0 * y / size - 1.0
