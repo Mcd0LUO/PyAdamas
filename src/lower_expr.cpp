@@ -55,7 +55,7 @@ VReg Lowerer::imported_class_object(const ImportedClass& ic) {
         int gi = extern_global(sym, sym, t_int());
         Inst ga;
         ga.op = IrOp::GlobalAddr;
-        ga.idx = gi;
+        ga.idx = Operand::global(gi);
         vtable = def(t_int(), std::move(ga));
     }
     VReg obj = call_runtime(RtFn::ClassNew, obj_ty,

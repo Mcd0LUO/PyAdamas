@@ -50,7 +50,47 @@ void IRFunction::rebuild_use_def() {
         }
     }
 }
+// 调试期校验：op 与 idx.kind 是否匹配。
+//
+// 这是 Operand 存在的**主要理由**：原来 idx 是裸 int32_t，op 说它是
+// 槽号、代码里却填了全局号，编译器完全不管。现在 kind 被记下来，
+// 这里能在 dump / 断言时抓出来。迁移期 kind 可能是 None（存量代码还没
+// 改成显式构造），所以 None 一律放行 —— 等迁移完成再收紧成必填。
+static bool idx_kind_ok(IrOp op, Operand::Kind k) {
+    if (k == Operand::None) return true;  // 迁移期放行
+    switch (op) {
+        case IrOp::LoadSlot:
+        case IrOp::StoreSlot:
+        case IrOp::SlotAddr:
+            return k == Operand::Slot;
+        case IrOp::LoadGlobal:
+        case IrOp::StoreGlobal:
+        case IrOp::GlobalAddr:
+            return k == Operand::Global;
+        case IrOp::ConstStr:
+            return k == Operand::Str;
+        case IrOp::FuncAddr:
+        case IrOp::FuncCode:
+        case IrOp::CallDirect:
+            return k == Operand::Func;
+        case IrOp::ClassAddr:
+            return k == Operand::Class;
+        case IrOp::CallExtern:
+        case IrOp::LoadExtern:
+        case IrOp::StoreExtern:
+            return k == Operand::Extern;
+        case IrOp::FieldLoad:
+        case IrOp::FieldStore:
+            return k == Operand::Field;
+        default:
+            return true;  // 该 op 不用 idx
+    }
+}
+
 std::string Inst::text() const {
+    if (std::getenv("PYADAMAS_IR_CHECK") && !idx_kind_ok(op, idx.kind))
+        std::fprintf(stderr, "[ir] op=%s idx.kind=%d 不匹配（值 %d）\n",
+                     irop_name(op), static_cast<int>(idx.kind), idx.value);
     switch (op) {
         case IrOp::ConstInt: return std::format("{} = const.int {}", vreg_str(dst), imm);
         case IrOp::ConstFloat: return std::format("{} = const.float {}", vreg_str(dst), fimm);

@@ -274,7 +274,7 @@ VReg Lowerer::lower_method_call(Attribute& at, Call& c) {
                 std::vector<VReg> args = bind_args(c, m->sig, m->def);
                 Inst cd;
                 cd.op = IrOp::CallDirect;
-                cd.idx = nvt[static_cast<size_t>(m->slot)];
+                cd.idx = Operand::func(nvt[static_cast<size_t>(m->slot)]);
                 for (VReg a : args) cd.args.push_back(a);
                 TypePtr rt = m->sig->ret ? m->sig->ret : t_none();
                 return def_heap(rt, std::move(cd));
@@ -314,7 +314,7 @@ VReg Lowerer::lower_method_call(Attribute& at, Call& c) {
             std::vector<VReg> args = bind_args(c, m->call_sig, m->def);
             Inst cd;
             cd.op = IrOp::CallDirect;
-            cd.idx = vt[m->slot];
+            cd.idx = Operand::func(vt[m->slot]);
             // 类方法的 cls 占第一个实参位：传所属类的 id，纯整数不参与 rc
             if (m->kind == MethodKind::ClassMethod) cd.args.push_back(const_int(cid->second));
             for (VReg a : args) cd.args.push_back(a);
@@ -421,7 +421,7 @@ VReg Lowerer::lower_method_call(Attribute& at, Call& c) {
                     if (callee && callee->env_slot < 0) {
                         Inst cd;
                         cd.op = IrOp::CallDirect;
-                        cd.idx = fidx;
+                        cd.idx = Operand::func(fidx);
                         // 只有普通方法传 self；静态方法和类方法都不占这个位置
                         if (m->kind == MethodKind::Normal) cd.args.push_back(recv);
                         for (VReg a : args) cd.args.push_back(a);
@@ -682,7 +682,7 @@ VReg Lowerer::lower_cimport_call(Attribute& at, Call& c) {
 
     Inst in;
     in.op = IrOp::CallExtern;
-    in.idx = idx;
+    in.idx = Operand::ext(idx);
     in.args = std::move(args);
     in.cargs = std::move(cargs);
     TypePtr rty = ckind_type(ex->ret);
@@ -849,7 +849,7 @@ VReg Lowerer::lower_method_value(Attribute& at) {
         if (class_recv) {
             Inst cd;
             cd.op = IrOp::CallDirect;
-            cd.idx = direct;
+            cd.idx = Operand::func(direct);
             cd.args = std::move(all);
             r = def_heap(rty, std::move(cd));
         } else {

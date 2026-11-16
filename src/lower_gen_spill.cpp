@@ -130,7 +130,7 @@ void Lowerer::spill_across_suspends() {
                 int slot = slot_for(v);
                 Inst ld;
                 ld.op = IrOp::LoadSlot;
-                ld.idx = slot;
+                ld.idx = Operand::slot(slot);
                 ld.ty = ty;
                 ld.dst = v;
                 post.push_back(std::move(ld));
@@ -151,7 +151,7 @@ void Lowerer::spill_across_suspends() {
                     post.push_back(std::move(zero));
                     Inst cl;
                     cl.op = IrOp::StoreSlot;
-                    cl.idx = slot;
+                    cl.idx = Operand::slot(slot);
                     cl.a = z;
                     post.push_back(std::move(cl));
                 } else if (!ty || ty->kind == TyKind::Unknown) {
@@ -197,7 +197,7 @@ void Lowerer::spill_across_suspends() {
             }
             Inst st;
             st.op = IrOp::StoreSlot;
-            st.idx = slot;
+            st.idx = Operand::slot(slot);
             st.a = v;
             pre.push_back(std::move(st));
         }

@@ -205,7 +205,7 @@ void Lowerer::assign_to(Expr& target, VReg v, TypePtr vty) {
                         v = coerce(v, src_ty, cvar_type(cv));
                         Inst si;
                         si.op = IrOp::StoreExtern;
-                        si.idx = extern_var_idx(cv);
+                        si.idx = Operand::ext(extern_var_idx(cv));
                         si.a = v;
                         emit(std::move(si));
                         break;
@@ -369,7 +369,7 @@ VReg Lowerer::expr(Expr& e) {
             if (st_->globals_decl.count(n.id) || !is_local(n.id)) {
                 Inst in;
                 in.op = IrOp::LoadGlobal;
-                in.idx = global_idx(n.id);
+                in.idx = Operand::global(global_idx(n.id));
                 in.ty = ty;
                 return def(ty, std::move(in));
             }
@@ -435,7 +435,7 @@ VReg Lowerer::expr(Expr& e) {
                         TypePtr vt = cvar_type(v);
                         Inst in;
                         in.op = IrOp::LoadExtern;
-                        in.idx = vidx;
+                        in.idx = Operand::ext(vidx);
                         in.ty = vt;
                         return def_heap(vt, std::move(in));
                     }

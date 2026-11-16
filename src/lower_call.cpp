@@ -386,7 +386,7 @@ VReg Lowerer::lower_construct(Call& c, const ClassInfoPtr& cls) {
                         if (callee && callee->env_slot < 0) {
                             Inst cd;
                             cd.op = IrOp::CallDirect;
-                            cd.idx = fidx;
+                            cd.idx = Operand::func(fidx);
                             cd.args.push_back(obj);
                             for (VReg a : args) cd.args.push_back(a);
                             TypePtr rt = im->call_sig->ret ? im->call_sig->ret : t_none();

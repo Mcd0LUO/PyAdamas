@@ -2,6 +2,7 @@
 #pragma once
 
 #include <cstdint>
+#include <format>
 #include <memory>
 #include <ostream>
 #include <string>
@@ -19,6 +20,69 @@ inline constexpr VReg kNoReg = 0xFFFFFFFFu;
 // 定义在文件末尾（依赖 TyKind 的完整列表）。
 inline bool ir_is_heap(const TypePtr& t);
 
+
+// ── 带 tag 的索引操作数 ─────────────────────────────────────────
+//
+// 原来 `Inst::idx` 是个裸 int32_t，含义随 op 变（槽号 / 全局号 /
+// 字符串号 / 函数号 / 类号 / 外部符号号）。写降级代码时搞错 op 对应的
+// 含义，编译器不会报错，只能靠测试和 dump 发现 —— 这是这套 IR 最容易
+// 踩的坑。
+//
+// Operand 把「它是哪一种索引」显式记下来：
+//   - 新增代码必须写明 kind（`Operand::slot(i)` 之类），语义自文档化；
+//   - codegen / 优化遍可以在 debug 构建里断言 kind 与 op 匹配；
+//   - 存量代码通过隐式转换继续工作（迁移期不强制一次改完）。
+//
+// 隐式转换是**刻意的过渡手段**：195 处使用点一次性改完风险太高，先让
+// kind 能被记录和校验，再逐块收紧。等所有消费点都改成显式取 kind 后，
+// 就可以删掉 operator int32_t()，那时漏写 kind 会变成编译错误。
+struct Operand {
+    enum Kind : uint8_t {
+        None = 0,   // 未使用
+        Slot,       // 局部槽号（LoadSlot/StoreSlot/SlotAddr）
+        Global,     // 全局变量号（LoadGlobal/StoreGlobal/GlobalAddr）
+        Str,        // 字符串池下标（ConstStr）
+        Func,       // 函数号（FuncAddr/FuncCode/CallDirect）
+        Class,      // 类号（ClassAddr）
+        Extern,     // 外部符号号（CallExtern/LoadExtern/StoreExtern）
+        Block,      // 基本块号（跳转目标，仅 target/target2 用）
+        Field,      // 字段下标（FieldLoad/FieldStore）
+    };
+    Kind kind = None;
+    int32_t value = -1;
+
+    Operand() = default;
+    Operand(Kind k, int32_t v) : kind(k), value(v) {}
+    // 迁移期隐式转换：让存量 `in.idx >= 0`、`in.idx = x` 继续工作。
+    Operand& operator=(int32_t v) {
+        value = v;
+        return *this;
+    }
+    operator int32_t() const { return value; }
+
+    static Operand slot(int32_t v) { return {Slot, v}; }
+    static Operand global(int32_t v) { return {Global, v}; }
+    static Operand str(int32_t v) { return {Str, v}; }
+    static Operand func(int32_t v) { return {Func, v}; }
+    static Operand cls(int32_t v) { return {Class, v}; }
+    static Operand ext(int32_t v) { return {Extern, v}; }
+    static Operand block(int32_t v) { return {Block, v}; }
+    static Operand field(int32_t v) { return {Field, v}; }
+};
+
+}  // namespace pyadamas
+
+// std::format 支持：直接打印数值，让存量的 `std::format("...{}", in.idx)`
+// 继续工作（迁移期必需）。
+template <>
+struct std::formatter<pyadamas::Operand> {
+    constexpr auto parse(std::format_parse_context& ctx) { return ctx.begin(); }
+    auto format(const pyadamas::Operand& o, std::format_context& ctx) const {
+        return std::format_to(ctx.out(), "{}", o.value);
+    }
+};
+
+namespace pyadamas {
 
 struct Inst {
     // 稳定标识：在函数内唯一，且**不随块/指令重排而变**。
@@ -38,7 +102,7 @@ struct Inst {
 
     int64_t imm = 0;
     double fimm = 0.0;
-    int32_t idx = -1;     // 槽号 / 全局号 / 字符串号 / 函数号
+    Operand idx;          // 带 tag 的索引（含义见 Operand::Kind）
     int32_t target = -1;  // 跳转目标块
     int32_t target2 = -1;
     // 生成指令对应的源码行（调试信息 / DWARF .loc）。0 = 无行信息。

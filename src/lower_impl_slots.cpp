@@ -81,14 +81,14 @@ VReg Lowerer::load_slot(int slot, TypePtr ty) {
         actual = st_->fn->slot_ty[slot];
     Inst in;
     in.op = IrOp::LoadSlot;
-    in.idx = slot;
+    in.idx = Operand::slot(slot);
     in.ty = actual;
     return def(actual ? actual : t_unknown(), std::move(in));}
 
 VReg Lowerer::load_global(int gi, TypePtr ty) {
     Inst in;
     in.op = IrOp::LoadGlobal;
-    in.idx = gi;
+    in.idx = Operand::global(gi);
     in.ty = ty;
     return def(ty ? ty : t_unknown(), std::move(in));}
 

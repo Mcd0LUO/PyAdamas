@@ -14,7 +14,7 @@ void Lowerer::cleanup_gen_mark() {
 VReg Lowerer::slot_addr_of(int slot) {
     Inst in;
     in.op = IrOp::SlotAddr;
-    in.idx = slot;
+    in.idx = Operand::slot(slot);
     return def(t_unknown(), std::move(in));
 }
 
@@ -408,7 +408,7 @@ VReg Lowerer::gen_to_list(VReg gen, TypePtr gen_ty) {
     switch_to(cond);
     Inst sa;
     sa.op = IrOp::SlotAddr;
-    sa.idx = ok_slot;
+    sa.idx = Operand::slot(ok_slot);
     VReg okp = def(t_unknown(), std::move(sa));
     Inst call;
     call.op = IrOp::CallRt;

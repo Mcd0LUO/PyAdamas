@@ -606,7 +606,7 @@ int Lowerer::compile_suspendable_function(FunctionDef& f, FuncInfoPtr info,
         if (ir_is_heap(p.ty)) rc_inc(v);
         Inst si;
         si.op = IrOp::GenSetSlot;
-        si.idx = p.slot;
+        si.idx = Operand::slot(p.slot);
         si.args = {gen, v};
         emit(std::move(si));
     }
@@ -615,7 +615,7 @@ int Lowerer::compile_suspendable_function(FunctionDef& f, FuncInfoPtr info,
         rc_inc(ev);
         Inst si;
         si.op = IrOp::GenSetSlot;
-        si.idx = env_slot;
+        si.idx = Operand::slot(env_slot);
         si.args = {gen, ev};
         emit(std::move(si));
     }
