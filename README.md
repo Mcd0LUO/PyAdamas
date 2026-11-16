@@ -156,13 +156,14 @@ tools/                    一次性脚本
 |---|---|---|
 | `tests/*.py` | 12 | 前端正例，覆盖语法与类型规则（按 AST 节点计：43 个函数 / 458 条语句 / 1714 个表达式） |
 | `tests/fail/*.py` | 53 | 反例，必须报出首行 `# expect:` 指定的错 |
-| `tests/run/*.py` | 163 | 编译 + 运行，输出与文件末尾的 `# --- expect ---` 逐行比对 |
+| `tests/run/*.py` | 186 | 编译 + 运行，输出与文件末尾的 `# --- expect ---` 逐行比对 |
 | `tests/unsupported/*.py` | 1 | `check` 必须打「没建模」标记，且 `build` 必须拒绝 |
-| `tests/strict/*.py` | 4 | 错误只在降级/构建期出现（`check` 看不到），必须 `build` 拒绝并给出指定消息 |
+| `tests/strict/*.py` | 6 | 错误只在降级/构建期出现（`check` 看不到），必须 `build` 拒绝并给出指定消息 |
 | Windows 目标 | 146 | `--target=win64` 产物在 Windows 上有 138 个用例输出与 POSIX 逐字节一致 |
 | `tests/diff/` | 7 个生成器 | 随机程序与 CPython 比 stdout，默认 3 种子 840 个程序 |
-| `tests/modules/` | 14 个目录 | 多模块编译 + 运行 + 二次构建缓存命中 |
+| `tests/modules/` | 15 个目录 | 多模块编译 + 运行 + 二次构建缓存命中 |
 | `tests/bench/` | 用例集 | 标准库与 RC/GC 基准：同一用例分别用 PyAdamas 与 CPython 跑，`python3 tests/bench/run_bench.py` |
+| 零开销异常 | 4 套夹具 | `tests/exc/`：`z1_rt` 116 项、`z2_rt` 134 项、`z2_codegen` 209 项；`tools/lsda_ref` 100+ 条字节断言。`--zero-cost-exc` 下非可挂起函数的 try 全程无 `_setjmp` |
 | 内存验收 | — | 16MB 地址空间限制下跑拼接 / 对象 / 闭包 / 容器 / 切片 / 删除 / 推导式 / 变长实参 / `with` / 装饰器 / 异常展开 / 生成器 / `yield from` / 协程 / Task / Future / fd 等待 / 异步生成器 / 异步推导式 / 环 / unknown 泄漏 |
 
 ```bash

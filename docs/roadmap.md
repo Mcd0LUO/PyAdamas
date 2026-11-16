@@ -100,7 +100,7 @@
 | 0.185 | **字符串码点语义 S1+S2**：`PyAdamasStr` 扩到 32 字节、`pub`（str 码点数 / bytes 字节数）放偏移 0，`len` 与真值判断的指令一行未改；字面量在编译期算好 `pub` 写进 `.data.rel.ro`；`intern_string` 按 `(kind, 内容)` 去重；下标/切片/迭代/方法/格式化宽度改码点语义，`bytes` 全部保持字节；新增内置 `len_bytes(s)`；顺序迭代加游标（`for`/`enumerate`/`zip`/推导式/生成器），全 ASCII 走快路径；`cimport` 取 `data` 偏移 16→24；str 的 `\xNN` 改成 U+00NN 编 UTF-8、bytes 的八进制/\xNN 保持原始字节 |
 | 许可证 | Apache-2.0（见 [LICENSE](../LICENSE) / [NOTICE](../NOTICE)） |
 
-## 当前状态（0.174）
+## 当前状态（0.197）
 
 流水线 `源码 → 词法 → AST → lambda 脱糖 → 类型检查 → IR → x86-64 汇编 → 可执行文件` 已打通。
 
@@ -116,9 +116,17 @@
   sysconf/timegm 映射到 Win32，subprocess 用 CreateProcess + 匿名管道；Setjmp 换成自带的
   `pa_win_setjmp`（不依赖展开信息，因为生成的汇编函数没有 `.pdata`）。覆盖面 138 / 146。
 - **主要缺口**：asyncio 边角；异常对象 traceback / 列号 / `.debug_info`；依赖动态属性的 stdlib（如 `argparse`，见「技术债」）。
-- **零开销异常（Z1 地基）**：`runtime/rt_personality.c`（通用 LSDA 解码 + 两阶段语义）与手写汇编夹具已打通，
-  `_Unwind_RaiseException` 能把控制转到 landing pad；LSDA 字节布局用 gcc 14.2 实测标定（`tools/lsda_ref/`）。
-  **尚未接入编译器**，Z2 起才会发 `.gcc_except_table`。设计见 [zero-cost-exceptions.md](zero-cost-exceptions.md)。
+- **零开销异常（Z1–Z4 已完成）**：Itanium ABI 表驱动展开，`--zero-cost-exc` 开关控制（默认关）。
+  非可挂起函数里的 try 在开关打开时**全程无 `_setjmp`**：personality routine + LSDA 发射器 +
+  运行时胶水（`pa_eh_throw`/`pa_eh_landing`/`pa_eh_rethrow`）+ codegen 接线。
+  支持单层与嵌套 try、多 typed handler、裸 except、finally、try-else、return/break/continue 穿过保护区、
+  Python `raise` 与 C 运行时异常（IndexError / ZeroDivisionError / KeyError）。
+  LSDA 字节布局用 gcc 14.2 实测标定（`tools/lsda_ref/`，100+ 条可复跑断言），
+  handler 判据与真 `__gxx_personality_v0` 交叉验证过。
+  四套夹具：`z1_rt` 116 项、`z2_rt` 134 项、`z2_codegen` 209 项、`tests/eh` 33 项。
+  **未接**：with 在 try 内（with 用 setjmp 保护 `__exit__`，与 `_Unwind` 混用不可靠，实测 0 用例用到）、
+  生成器/协程（5 处 C 级 setjmp 兜底抓不到 `_Unwind`，永久保留 setjmp）、Win64（SEH 是另一套机制）。
+  Z5（移除 setjmp、让表驱动成为默认）待做。设计见 [zero-cost-exceptions.md](zero-cost-exceptions.md)。
 - **GC 根扫描收窄（0.175）**：临时区保守扫描改为按 vreg 静态类型发射位图，
   纯标量帧整段不扫；全量 163 个用例合计临时区实扫字数 2901 -> 403、
   保守保留对象 92 个 / 8144 B -> 0。诊断 `PYADAMAS_GC_STATS=1`，回退 `PYADAMAS_GC_CONSERVATIVE=1`。
@@ -126,6 +134,19 @@
 ## 下一步
 
 语言与标准库的完备性优先；C 互操作与 BLAS 已在 0.110–0.120 落地（`cimport`、`ptr[T]` 缓冲区、`linalg` 封装 OpenBLAS），不再是下一步。
+
+### 0. 零开销异常收尾（Z5）
+
+Z1–Z4 已完成，`--zero-cost-exc` 下非可挂起函数的 try 全程无 `_setjmp`。Z5 是让它成为默认：
+
+- 非可挂起函数默认走表驱动，可挂起函数（生成器/协程/异步生成器）保留 setjmp ——
+  后者有 5 处 C 级 setjmp 兜底，抓不到 `_Unwind`，这是**设计上的永久降级**，不是过渡状态；
+- 删掉 `HandlerPush` / `Setjmp` / `HandlerLeave` 三个 IR 操作（只对非可挂起函数）；
+- 验收：全部 186 个运行用例通过，且非可挂起函数里 `_setjmp` 计数为 0。
+
+**注意依赖关系**：`docs/roadmap.md` 技术债 #10「含 handler 的函数没有寄存器提升」的根因是
+`longjmp` 会回滚 callee-saved 寄存器。Z5 完成后这个限制对非可挂起函数消失，
+**全局寄存器分配（技术债 #4）才有意义** —— 反过来做会推倒重来。
 
 ### 1. 工程收尾
 
@@ -153,7 +174,7 @@
 
 按「什么时候会疼」排序：
 
-1. **GC 的根只扫登记区，且 stop-the-world**：分代已落地（minor trial-deletion + major 标记-清扫）；GC 不再扫整段真实栈，只扫帧记录登记的 unknown 槽和 callee-saved 寄存器；0.175 起临时区按 vreg 静态类型发射位图、只扫「可能含指针」的字（纯标量帧整段不扫），保守保留实测从 92 个 / 8144 B 降到 0；仍没有增量/并发 GC，也没有完整栈映射（位图按字收，不按时刻收）
+1. **GC 的根只扫登记区，且 stop-the-world**：分代已落地（minor trial-deletion + major 标记-清扫）；GC 不再扫整段真实栈，只扫帧记录登记的 unknown 槽和 callee-saved 寄存器；0.175 起临时区按 vreg 静态类型发射位图、只扫「可能含指针」的字（纯标量帧整段不扫），保守保留实测从 92 个 / 8144 B 降到 0；0.181/0.183 修掉一整类「构造期对象不在 GC 根上」的 UAF（54 个函数 / 70 个 pin 点）；仍没有增量/并发 GC，也没有完整栈映射（位图按字收，不按时刻收）
 2. **unknown 引用的计数不精确**：容器 kind 2 元素、unknown 字段与全局已用 RC 索引精确释放（`pa_rc_dec_unknown`）；裸 `list` 的空容器已在第一次写入时定型；仍剩 unknown 类型的局部槽是借来的引用（不计入 rc），靠保守扫栈兜底
 3. **Optional 的收窄能力不足**：`x: Optional[str]` 在 `if x is None: ...` 之后、跨语句块或跨函数调用时仍按 Optional 处理；修它需要正经的数据流分析
 4. **优化遍仍不完整**：有常量折叠、DCE、小函数内联、静态调用直接化、LICM、下标版本化/免检查、循环旋转、跨块 CSE 与后端拷贝合并；没有强度削减、通用向量化和全局寄存器分配
