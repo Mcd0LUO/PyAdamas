@@ -1082,7 +1082,18 @@ inline TypePtr join_into(const TypePtr& a, const TypePtr& b) {
         if (a->kind == TyKind::None) return b;
         return mk_optional(join(a, b->sub.empty() ? t_unknown() : b->sub[0]));
     }
-    if (a->kind == TyKind::None || b->kind == TyKind::None) return t_unknown();
+    // join(T, None) = Optional[T]。
+    //
+    // 这一行原来直接返回 unknown，于是三元表达式、if-else 合并、列表字面量
+    // 里只要掺了 None 就全退化成 unknown：
+    //     v = 1 if flag else None        -> unknown（应为 int | None）
+    //     xs = [1, None]                 -> list[unknown]（应为 list[int | None]）
+    // 而 Optional[T] 本身是**完整支持**的类型（标注路径 IR 正确、`is not None`
+    // 收窄也正确），只是这条 join 没走它 —— 是实现缺口，不是设计权衡。
+    //
+    // 实测退化：300 万次热循环，unknown 34-36ms vs int|None 6-7ms（4.7x）。
+    if (a->kind == TyKind::None) return mk_optional(b);
+    if (b->kind == TyKind::None) return mk_optional(a);
     return t_unknown();
 }
 

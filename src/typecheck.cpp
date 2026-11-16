@@ -134,6 +134,7 @@ void TypeChecker::check(Module& m) {
         // 类型跟着刷新——降级层按它选流式迭代路径。
         for (auto& [ce, fi] : genexpr_call_sites_)
             if (fi && fi->ret) expr_types_[ce] = fi->ret;
+
         // 函数体都查完了，dunder 的返回类型此时才有定论。
         check_dunder_returns();
     }
