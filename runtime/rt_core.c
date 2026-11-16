@@ -116,6 +116,16 @@ static void gc_phase_dec(PyAdamasRc* h, void* p) {
    确认是堆指针）。整程序没有任何 unknown 时，入口会调用
    pa_disable_unknown_index 关掉它，省掉每个堆对象的插入/删除。 */
 static int rc_index_off;
+/* **只读模式**：索引维护关闭，但查询仍然工作（返回「不知道」）。
+ *
+ * 用途见 docs/roadmap.md 的方案 C：编译器能证明一个模块从不做「反查这个字
+ * 是不是堆对象」的操作时（纯同步容器代码、没有生成器/协程/异常类/unknown
+ * 槽），索引的插入和删除是纯开销 —— 实测 bench_rc_gen 里占 22ms（102 → 80）。
+ *
+ * 与 rc_index_off 的区别：rc_index_off 是「索引不存在」，所有查询都失败；
+ * rc_index_readonly 是「索引不更新」，查询也返回失败，但语义上调用方应该
+ * 已经知道不会有依赖索引的代码路径（由编译器保证）。 */
+static int rc_index_readonly;
 
 /* exact-RC 模式（= 索引关闭）下，字符串这类叶子对象不进 GC 堆链：
    RC 是精确的，不可达字符串在 rc 归零时就释放了，GC 永远不需要看到
@@ -391,7 +401,7 @@ void rc_index_rehash(size_t ncap) {
 }
 
 void rc_index_put(PyAdamasRc* h) {
-    if (rc_index_off) return;
+    if (rc_index_off || rc_index_readonly) return;
     if (rc_index_cap == 0) {
         rc_index_rehash(64);
     } else if ((rc_index_fill + 1) * 10 >= rc_index_cap * 7) {
@@ -416,7 +426,7 @@ void rc_index_put(PyAdamasRc* h) {
     rc_index_live++;
 }
 
-void rc_index_del(PyAdamasRc* h) {    if (rc_index_off) return;
+void rc_index_del(PyAdamasRc* h) {    if (rc_index_off || rc_index_readonly) return;
     if (rc_index_cap == 0) return;
     size_t s = rc_index_slot(h);
     while (rc_index[s]) {
@@ -1340,6 +1350,20 @@ void pa_rc_stats_init(void) {
 /* 整程序无 unknown 值、不涉及 asyncio/生成器时，入口调用这里关掉
    存活堆索引；此后 rc_index_put/del/has 都是空操作。RC 变精确后，
    字符串这类叶子对象也移出 GC 堆链（不可能成环，RC 归零即释放）。 */
+/* 编译器证明本模块不需要「反查这个字是不是堆对象」时调用。
+ *
+ * 与 pa_disable_unknown_index 的区别：
+ *   - disable：索引彻底不建，所有查询失败（exact-RC，要求代码里没有任何
+ *     unknown 值参与 dec —— 由编译器静态证明）；
+ *   - readonly：索引不维护，查询也返回失败，但**允许**代码里存在 unknown
+ *     值，只是那些 unknown 必须走容器位图 / 帧记录等不依赖索引的路径。
+ *
+ * 实测收益：bench_rc_gen 这类「大量短命容器 + 大存活堆」的负载，索引的
+ * 插入删除占 22ms（102ms → 80ms），而它一个查询都没用到。 */
+void pa_set_index_readonly(void) {
+    rc_index_readonly = 1;
+}
+
 void pa_disable_unknown_index(void) {
     rc_index_off = 1;
     gc_untracked_leaves = 1;

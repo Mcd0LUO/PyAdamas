@@ -504,6 +504,8 @@ std::string AsmGen::gen(const IRModule& m) {
             out_ += "\tcall pa_rc_stats_init\n";
             if (disable_unknown_index_)
                 out_ += "\tcall pa_disable_unknown_index\n";
+            else if (index_readonly_)
+                out_ += "\tcall pa_set_index_readonly\n";
             out_ += std::format("\tleaq .Lstrtab(%rip), {}\n", arg_reg_i(0));
             out_ += std::format("\tmovq ${}, {}\n", m.strings.size(), arg_reg_i(1));
             out_ += "\tcall pa_register_literals\n";
@@ -606,9 +608,10 @@ void AsmGen::emit_eh_tables() {
 }
 
 std::string generate_asm(const IRModule& m, bool disable_unknown_index,
-                         bool zero_cost_exc) {
+                         bool zero_cost_exc, bool index_readonly) {
     AsmGen g;
     g.set_disable_unknown_index(disable_unknown_index);
+    g.set_index_readonly(index_readonly);
     g.set_zero_cost_exc(zero_cost_exc);
     return g.gen(m);
 }

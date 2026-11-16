@@ -320,6 +320,96 @@ static bool unknown_only_in_containers(const TypePtr& t, int depth) {
     }
 }
 
+/* 判断模块能否关闭**索引维护**（方案 C）。
+ *
+ * 与 needs_unknown_index 的区别：
+ *   - needs_unknown_index=true  → 代码里有「反查这个字是不是堆对象」的
+ *     依赖，索引必须建；
+ *   - needs_unknown_index=false → exact-RC，索引完全不建；
+ *   - **本函数**回答第三种情况：代码里有 unknown 值，但那些值只走
+ *     「容器位图 / 帧记录」等不依赖索引的路径 —— 索引建了也没人查，
+ *     维护它是纯开销。
+ *
+ * 实测依据（关闭索引维护跑全量 205 个用例）：45 个失败全部集中在
+ * 生成器 / 协程 / 异常类 / 类对象 / 裸 unknown 槽这几类。反过来说，
+ * 不含这些特性的模块可以安全关闭 —— bench_rc_gen 正是这种，省 22ms。
+ *
+ * 保守起见这里只放行**明确安全**的特征组合，任何一项可疑都返回 false。 */
+bool ir_module_can_skip_index_maint(const IRModule& m) {
+    // 生成器 / 协程：运行时用 unknown 保守 retain 帧值，依赖索引。
+    if (!m.generators.empty()) return false;
+    // **只要不是纯内置运算就排除。**
+    //
+    // 运行时内部的实现细节会用 pa_rc_inc_unknown / pa_rc_dec_unknown 处理
+    // 动态值，那些调用在 IR 里只是一个普通 CallRt，看不出它依赖索引：
+    //   - 185_fnmatch / 186_copy → 列表元素丢失；
+    //   - 86_popen → 字符串被多包一层引号（IsStr 判断失效）。
+    //
+    // m.imports 记不到 subprocess 这类内置模块（它们不走 import 列表），
+    // 所以用更硬的判据：**全局变量只允许内置标量 / 容器类型**。
+    //
+    // 86_popen 的全局是 `subprocess.Popen`，它的运行时实现会调用 IsStr 之类
+    // 依赖索引的判定（表现为字符串被多包一层引号）。只放行纯内置类型的模块。
+    if (m.funcs.size() > 1) return false;
+    if (!m.imports.empty()) return false;
+    for (const auto& g : m.globals) {
+        if (!g.ty) continue;
+        switch (g.ty->kind) {
+            case TyKind::Unknown:
+            case TyKind::None:
+            case TyKind::Bool:
+            case TyKind::Int:
+            case TyKind::Float:
+            case TyKind::Str:
+            case TyKind::Bytes:
+            case TyKind::List:
+            case TyKind::Dict:
+            case TyKind::Tuple:
+            case TyKind::Set:
+            case TyKind::Range:
+            case TyKind::Optional:
+                break;
+            default:
+                // Class / File / Popen / Regex / DateTime … 都可能依赖索引。
+                return false;
+        }
+    }
+    for (const auto& fp : m.funcs) {
+        const IRFunction& f = *fp;
+        for (const auto& b : f.blocks)
+            for (const auto& in : b.insts) {
+                if (in.op != IrOp::CallRt) continue;
+                RtFn fn = static_cast<RtFn>(in.imm);
+                switch (fn) {
+                    // 类 / 异常 / 运行期类型检查：靠索引确认「这个字是哪个类」。
+                    case RtFn::IsInstance:
+                    case RtFn::IsInstanceClass:
+                    case RtFn::ClassNew:
+                    case RtFn::ClassName:
+                    case RtFn::ClassRepr:
+                    case RtFn::IsNamedClass:
+                    case RtFn::IsException:
+                    case RtFn::IsSeq:
+                    case RtFn::IsDict:
+                    case RtFn::IsStr:
+                    case RtFn::IsComplex:
+                    case RtFn::StrEqUnknown:
+                    case RtFn::ComplexEqUnknown:
+                        return false;
+                    default:
+                        break;
+                }
+            }
+        // 裸 unknown 的槽 / 返回值 / 参数：dec 时可能反查。
+        if (!unknown_only_in_containers(f.ret, 0)) return false;
+        for (const auto& p : f.params)
+            if (!unknown_only_in_containers(p.ty, 0)) return false;
+        for (const auto& t : f.slot_ty)
+            if (!unknown_only_in_containers(t, 0)) return false;
+    }
+    return true;
+}
+
 bool ir_module_needs_unknown_index(const IRModule& m) {
     // asyncio / 生成器运行时内部无条件地用 unknown 保守 retain 等待结果
     // 和帧值（rt_async.c / rt_task.c / rt_agen.c），这些调用在 IR 里

@@ -583,5 +583,6 @@ void dump_ir(const IRModule& m, std::ostream& os);
 // 省掉每个堆对象分配/释放时的哈希表插入和删除。
 bool ir_type_contains_unknown(const TypePtr& t);
 bool ir_module_needs_unknown_index(const IRModule& m);
+bool ir_module_can_skip_index_maint(const IRModule& m);
 
 }  // namespace pyadamas

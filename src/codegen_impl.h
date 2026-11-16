@@ -154,6 +154,7 @@ public:
         // 整程序没有任何 unknown 值、也不涉及 asyncio/生成器运行时：入口
         // 关闭存活堆索引维护（unknown 保守 retain 用不到）。
         void set_disable_unknown_index(bool v) { disable_unknown_index_ = v; }
+        void set_index_readonly(bool v) { index_readonly_ = v; }
         // 零开销异常总开关（默认开启；--no-zero-cost-exc 可回退）。
         void set_zero_cost_exc(bool v) { zero_cost_exc_ = v; }
 
@@ -177,6 +178,7 @@ private:
     // 生成代码优化等级：0 基础 / 1 常规 / 2 默认追加控制流与小函数优化。
     int opt_ = 2;
     bool disable_unknown_index_ = false;
+    bool index_readonly_ = false;
     int cur_block_ = -1;
     int n_slots_ = 0;
     int n_vreg_slots_ = 0;

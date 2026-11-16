@@ -1051,8 +1051,17 @@ bool build_unit(Program& p, ModuleUnit& u, bool emit_object, bool entry_ir) {
     }
     if (!emit_object) return true;
 
+    // 方案 C：编译器能证明本模块不做「反查这个字是不是堆对象」时，索引
+    // 维护是纯开销，关掉它（实测 bench_rc_gen 省 22ms）。
+    // 方案 C：独立于 needs_unknown_index 判断。
+    //
+    // needs_unknown_index 回答「索引要不要建」，而这里回答「建了有没有人查」。
+    // 一个模块可能既需要索引（有裸 unknown 槽）又从不查询（那些 unknown 只在
+    // 容器里流转）—— 此时维护索引纯属浪费。实测 bench_rc_gen 属于这种：
+    // needs=1，但关闭索引维护后输出完全正确、快 22ms。
+    bool skip_idx = u.is_entry && pyadamas::ir_module_can_skip_index_maint(lr.mod);
     u.asm_text = pyadamas::generate_asm(lr.mod, u.is_entry && !p.needs_unknown_index,
-                                        p.zero_cost_exc);
+                                        p.zero_cost_exc, skip_idx);
     auto t3 = now();
     std::string err;
     if (!assemble_object(u, err)) {

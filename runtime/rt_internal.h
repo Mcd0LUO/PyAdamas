@@ -1054,6 +1054,7 @@ void pa_gc_add_roots(void** roots, int64_t n_roots);
 void pa_gc_init(void** roots, int64_t n_roots, void* stack_top);
 void pa_rc_stats_init(void);
 void pa_disable_unknown_index(void);
+void pa_set_index_readonly(void);
 void pa_gc_unref_child(void* p);
 /* 生成器帧的堆槽释放：own 1 已知堆 / 2 可能是未知值。 */
 void pa_gen_slot_release(int64_t* slot, int64_t own);
