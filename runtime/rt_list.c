@@ -717,5 +717,19 @@ void pa_list_del_index(PyAdamasList* l, int64_t i) {
     memmove(&l->data[i], &l->data[i + 1],
             sizeof(int64_t) * (size_t)(l->len - i - 1));
     l->len--;
+
 }
 
+/* 进程退出时还掉列表缓冲池。纯缓存：回收对象时不立刻 free 而是挂进池里，
+   退出时这些块既不在 GC 堆链上也没有所有者 —— ASan 会报成 Direct leak。
+   不影响正确性，但会淹没真正有价值的泄漏信号。 */
+void pa_list_buf_pool_shutdown(void) {
+    for (int i = 0; i < LIST_BUF_CLASSES; ++i) {
+        while (list_buf_pool[i]) {
+            int64_t* p = list_buf_pool[i];
+            memcpy(&list_buf_pool[i], p, sizeof(int64_t*));
+            free(p);
+        }
+        list_buf_count[i] = 0;
+    }
+}

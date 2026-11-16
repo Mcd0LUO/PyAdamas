@@ -6,6 +6,12 @@
 #   PYADAMAS_TEST_FILTER='3[0-4]*' PYADAMAS_TEST_JOBS=8 bash tests/run_tests.sh build/dev build/dev/pyadamas
 #   PYADAMAS_TEST_FILTER 按 basename 匹配（shell glob），只跑选中的用例。
 #   PYADAMAS_TEST_JOBS 控制并行度，默认 nproc。
+#
+# 内存检查模式：
+#   PYADAMAS_TEST_ASAN=1 bash tests/run_tests.sh build/dev build/dev/pyadamas
+#   生成的程序带 AddressSanitizer 跑。RC/GC 类 bug 在 IR 层面看不出问题，
+#   只有内存检查器能抓到「谁第一个读已释放内存」。慢 3-5 倍，日常不用，
+#   改动触及 RC/GC/lowering 时跑一遍。
 set -u
 
 BUILD=${1:?build dir}
@@ -15,6 +21,17 @@ cd "$ROOT" || exit 1
 
 JOBS=${PYADAMAS_TEST_JOBS:-$(nproc 2>/dev/null || echo 4)}
 FILTER=${PYADAMAS_TEST_FILTER:-}
+ASAN=${PYADAMAS_TEST_ASAN:-0}
+# sanitizer 模式下的额外 build 参数与运行环境。
+if [ "$ASAN" = 1 ]; then
+    BUILD_FLAGS="--asan"
+    # 默认关 leak 检测：GC 程序里「留到进程退出」的对象很多，会淹没真正的
+    # use-after-free。要查泄漏时显式 ASAN_OPTIONS=detect_leaks=1。
+    RUN_ENV="ASAN_OPTIONS=detect_leaks=0:halt_on_error=1"
+else
+    BUILD_FLAGS=""
+    RUN_ENV=""
+fi
 match() {
     [ -z "$FILTER" ] && return 0
     case "$(basename "$1")" in
@@ -83,7 +100,9 @@ run_test() {
     # 输出加大小上限：用例卡进死循环时它会一直写，曾经留下 19G 的单个
     # 日志文件（78_enumerate_zip.py.out），把 build 目录撑到 32G。
     # 截断后 diff 必然不等，用例照样报 OUTPUT DIFF，不影响判定。
-    if ! "$PYADAMAS" run --rebuild -o "$p" "$f" 2>&1 | head -c 1048576 > "$o"; then
+    # run 子命令会 fork 出编译产物再执行；sanitizer 选项要靠环境变量传给
+    # 那个子进程，所以套一层 env。
+    if ! env $RUN_ENV "$PYADAMAS" $BUILD_FLAGS run --rebuild -o "$p" "$f" 2>&1 | head -c 1048576 > "$o"; then
         { echo FAILED; sed -n '1,6p' "$o"; } > "$res"
         return
     fi

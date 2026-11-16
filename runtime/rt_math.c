@@ -275,6 +275,19 @@ PyAdamasList* sys_argv_list;
 /* sys_argv_list 的根只登记一次；登记的是「槽的地址」。 */
 static int sys_argv_root_registered;
 
+/* 进程退出时释放 sys.argv。它挂在全局根上、永远不 dec，而 exact-RC 模式下
+   字符串不进 GC 堆链（rc_link 直接返回），所以 pa_gc_shutdown 的
+   `while (heap_head)` 扫不到它们 —— ASan 会把它们报成 Direct leak
+   （实测每个用例 112 字节左右，来自 argv[0]）。
+   退出前显式 dec 一次，把引用交还给 RC。 */
+void pa_sys_argv_shutdown(void) {
+    if (!sys_argv_list) return;
+    PyAdamasRc* h = (PyAdamasRc*)sys_argv_list - 1;
+    void* p = sys_argv_list;
+    sys_argv_list = NULL;
+    if (h->rc != PYADAMAS_RC_IMMORTAL) pa_rc_dec(p);
+}
+
 void pa_sys_set_args(int64_t argc, char** argv) {
     /* 先登记根再分配：pa_list_new / str_new 都走 rc_alloc，可能触发主收集。
        原顺序是「先分配列表、再登记根」，那一步的分配本身不会回收刚返回的

@@ -489,6 +489,8 @@ void pa_gc_add_roots(void** roots, int64_t n_roots);
 void dict_gc_release(void* p);
 
 PyAdamasList* pa_list_new(int64_t cap, int64_t elem_kind);
+void pa_list_buf_pool_shutdown(void);
+void pa_sys_argv_shutdown(void);
 void pa_list_append(PyAdamasList* l, int64_t v);
 
 void panic_c(const char* msg) {
@@ -1522,6 +1524,9 @@ void pa_gc_collect(void) { gc_collect(1); }
 
 // 程序退出：所有还活着的堆对象（包括环）一次性还给系统。
 void pa_gc_shutdown(void) {
+    // 先放掉全局根：sys.argv 的字符串在 exact-RC 模式下不在 GC 堆链上，
+    // 只能靠 RC 释放（见 pa_sys_argv_shutdown 的注释）。
+    pa_sys_argv_shutdown();
     gc_sweeping = 1;
     while (heap_head) gc_free_body(heap_head);
     gc_sweeping = 0;
@@ -1549,6 +1554,29 @@ void pa_gc_shutdown(void) {
     gc_pend = NULL;
     gc_pend_len = 0;
     gc_pend_cap = 0;
+    // 分配器缓存也要还掉。字符串池和列表 freelist 是**纯缓存**：
+    // 回收对象时不立刻 free，而是挂进池里等复用。进程退出时这些块
+    // 还挂在池里，既不在 GC 堆链上、也没有所有者 ——
+    // ASan 的 LeakSanitizer 会把它们报成「Direct leak」（实测每个用例
+    // 120-464 字节，来自 sys.argv 等全局字符串）。
+    //
+    // 这不影响正确性（进程都要退出了），但会让 ASan 的泄漏报告淹没有
+    // 价值的信号。顺手还掉，也顺便验证 shutdown 路径是完整的。
+    for (int i = 0; i < STR_POOL_CLASSES; ++i) {
+        while (str_pool[i]) {
+            PyAdamasRc* h = str_pool[i];
+            str_pool[i] = h->next;
+            free(h);
+        }
+        str_pool_count[i] = 0;
+    }
+    while (list_pool) {
+        PyAdamasRc* h = list_pool;
+        list_pool = h->next;
+        free(h);
+    }
+    list_pool_count = 0;
+    pa_list_buf_pool_shutdown();
 }
 
 /* 分模块编译：init 是模块顶层生成的 void(void)，ready 是模块 .bss 里的

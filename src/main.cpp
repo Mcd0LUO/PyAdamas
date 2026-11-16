@@ -128,7 +128,8 @@ int main(int argc, char** argv) {
                      "pyadamas —— Python 语法外壳的编译器\n"
                      "\n"
                      "usage: %s [tokens|ast|types|check|ir|asm|build|run|cdecl] [-O0|-O1|-O2] "
-                     "[--fast-math] [--no-zero-cost-exc] [--syntax] [-o out] <file.py>\n",
+                     "[--fast-math] [--no-zero-cost-exc] [--syntax] [--asan|--ubsan] "
+                     "[-o out] <file.py>\n",
                      argv[0]);
         return 2;
     }
@@ -149,6 +150,13 @@ int main(int argc, char** argv) {
     // 永久降级。`--no-zero-cost-exc` 是回退开关（出问题时能一键退回旧路径）。
     bool zero_cost_exc = true;
     bool resolve_imports = false;
+    // 生成程序的内存检查器。空 = 不启用。
+    //
+    // RC/GC 这类「堆被写坏」的 bug 在 IR 层面完全看不出问题 —— 只有内存
+    // 检查器能抓到第一现场（谁第一个读到已释放内存）。0.216 的 unknown 槽
+    // 提升 bug 就是靠 ASan 定位的：IR 配平、-O0 也崩、关 GC 就好，
+    // 单看代码无从下手。
+    std::string sanitize;
 
     static const std::vector<std::string> kModes = {"tokens", "ast",     "check", "types",
                                                     "ir",     "asm",     "build", "run",
@@ -160,6 +168,9 @@ int main(int argc, char** argv) {
         else if (a == "-v" || a == "--verbose") verbose = true;
         else if (a == "--rebuild") rebuild = true;
         else if (a == "--fast-math") fast_math = true;
+        else if (a == "--asan") sanitize = "address";
+        else if (a == "--ubsan") sanitize = "undefined";
+        else if (a.starts_with("--sanitize=")) sanitize = a.substr(11);
         else if (a == "--zero-cost-exc") zero_cost_exc = true;
         else if (a == "--no-zero-cost-exc") zero_cost_exc = false;
         else if (a == "-O0") opt_level = 0;
@@ -284,6 +295,17 @@ int main(int argc, char** argv) {
         }
 
         Program prog;
+        // 把 sanitizer 折成 cc 的编译/链接选项，通过 PYADAMAS_CC_FLAGS 传给
+        // driver_build（那里编译和链接共用同一套 flag）。
+        if (!sanitize.empty()) {
+            std::string flags = "-fsanitize=" + sanitize + " -g -fno-omit-frame-pointer";
+            if (sanitize == "address")
+                // 默认关掉 leak 检测：GC/RC 程序里「故意留到进程退出」的对象
+                // 很多，leak 报告会淹没真正的 use-after-free。要看泄漏时用
+                // ASAN_OPTIONS=detect_leaks=1 显式打开。
+                flags += " -fsanitize-address-use-after-scope";
+            setenv("PYADAMAS_CC_FLAGS", flags.c_str(), 1);
+        }
         prog.rebuild = rebuild;
         prog.verbose = verbose;
         prog.opt = opt_level;

@@ -208,40 +208,74 @@ print(p.returncode, resource.getrusage(resource.RUSAGE_CHILDREN).ru_maxrss)'   #
 
 ### 内存 / UB 检查
 
-```bash
-g++ -std=c++23 -O0 -g -fsanitize=address,undefined -fno-omit-frame-pointer -Isrc \
-    -DPYADAMAS_RT_OBJ="\"$PWD/build/dev/rt.o\"" src/*.cpp -o /tmp/PyAdamas-asan
+RC/GC 这一类「堆被写坏」的 bug，**在 IR 层面完全看不出问题** —— 生成代码的
+inc/dec 是配平的、`-O0` 也照样崩、关掉 GC 就好了。只有内存检查器能抓到
+第一现场：谁第一个读了已释放的内存。
 
-/tmp/PyAdamas-asan check tests/09_types.py
-/tmp/PyAdamas-asan run   tests/run/04_containers.py
-/tmp/PyAdamas-asan run   tests/run/09_class.py   # 类：字段偏移 / vtable / 对象分配
+0.216 的 unknown 槽提升 bug 就是这样定位的：ASan 报 `SEGV on address
+0xffffffffffffffe6`（= -26）在 `pa_rc_temp`，顺着调用栈才发现 `f()` 返回
+了一个从已释放列表里取出的元素。此前在帧记录、RC 配平上盲试了十几轮都
+没结果。
+
+**遇到 RC/GC/异常展开相关的「诡异」问题时，第一步就该跑这个。**
+
+#### 生成程序插桩（最常用）
+
+`--asan` / `--ubsan` 让生成的可执行文件带检查器，编译和链接同时生效：
+
+```bash
+./build/dev/pyadamas build --asan -O2 -o /tmp/prog tests/run/10_rc.py
+ASAN_OPTIONS=detect_leaks=0 /tmp/prog
 ```
 
-注意 ASan 下每层递归帧约 4KB，8MB 栈撑不住几千层。所以语法层对表达式嵌套设了硬上限：`parser.h` 的 `kMaxExprDepth` / `kMaxUnaryDepth`（目前 200），超了报 `expression nested too deeply`。这类保护必须在解析器里，因为类型检查和降级都是照 AST 递归的，树有多深它们就有多深。
-
-上面的命令只给**编译器**插桩，生成代码和 `rt.o` 不受检查。要验证引用计数
-路径，运行时的各个部分也要用同样的 sanitizer 编译再合成 `rt.o`，并在
-`PATH` 前面放一个给链接加 `-fsanitize=address,undefined` 的 `cc` 包装脚本：
+`detect_leaks=0` 是有意的默认：GC 程序里「故意留到进程退出」的对象很多，
+泄漏报告会淹没真正的 use-after-free。要查泄漏时显式打开：
 
 ```bash
-mkdir -p /tmp/rt_asan
-for f in runtime/rt_*.c; do
-    cc -O1 -g -fsanitize=address,undefined -Iruntime -c "$f" \
-       -o "/tmp/rt_asan/$(basename "$f" .c).o"
-done
-ld -r /tmp/rt_asan/*.o -o /tmp/rt_asan.o
-g++ -std=c++23 -O1 -g -fsanitize=address,undefined -Isrc \
-    -DPYADAMAS_RT_OBJ='"/tmp/rt_asan.o"' src/*.cpp -o /tmp/PyAdamas-asan
-mkdir -p /tmp/asancc
-printf '#!/bin/sh\nexec /usr/bin/cc -fsanitize=address,undefined "$@"\n' > /tmp/asancc/cc
-chmod +x /tmp/asancc/cc
-PATH=/tmp/asancc:$PATH ASAN_OPTIONS=detect_leaks=1 \
-    bash -c 'for t in 10_rc 11_closure 12_lambda 13_gc 14_dict 15_slice \
-        16_dict_del 17_slice_assign 18_starargs 19_comprehension 20_with 21_decorator \
-        22_exception; do \
-        /tmp/PyAdamas-asan run tests/run/$t.py || exit 1; done'
+ASAN_OPTIONS=detect_leaks=1 /tmp/prog
 ```
 
+底层是 `PYADAMAS_CC_FLAGS` 环境变量 —— 想传别的编译选项也用它：
+
+```bash
+PYADAMAS_CC_FLAGS='-fsanitize=undefined -fno-omit-frame-pointer' \
+    ./build/dev/pyadamas build -O2 -o /tmp/prog x.py
+```
+
+#### 整个测试套件跑 ASan
+
+```bash
+PYADAMAS_TEST_ASAN=1 PYADAMAS_TEST_JOBS=4 \
+    bash tests/run_tests.sh build/dev build/dev/pyadamas
+```
+
+比平时慢 3-5 倍，日常不用。**改动触及 RC / GC / lowering 时跑一遍** ——
+188 个用例全绿说明内存层面没有回归。
+
+#### 编译器自身插桩
+
+上面两步只给**生成代码**插桩。怀疑编译器自己（C++ 侧）有内存问题时用
+单独的构建目录：
+
+```bash
+cmake -S . -B build/asan -DCMAKE_BUILD_TYPE=RelWithDebInfo \
+    -DCMAKE_CXX_FLAGS='-fsanitize=address -fno-omit-frame-pointer -g' \
+    -DCMAKE_EXE_LINKER_FLAGS='-fsanitize=address'
+cmake --build build/asan -j4
+build/asan/pyadamas check tests/09_types.py
+```
+
+注意 ASan 下每层递归帧约 4KB，8MB 栈撑不住几千层。所以语法层对表达式嵌套
+设了硬上限：`parser.h` 的 `kMaxExprDepth` / `kMaxUnaryDepth`（目前 200），
+超了报 `expression nested too deeply`。这类保护必须在解析器里，因为类型检查
+和降级都是照 AST 递归的，树有多深它们就有多深。
+
+#### 历史上踩过的坑
+
+早期给生成程序插桩要手工编 `rt.o`（逐个 `cc -c` 加 sanitizer 再 `ld -r` 合并）、
+写一个给链接加 `-fsanitize` 的 `cc` 包装脚本、再把它放进 `PATH` 前面。现在
+`PYADAMAS_CC_FLAGS` 一处搞定 —— 编译和链接共用同一套 flag，`rt.o` 也一起
+重新编。
 ### 严格警告
 
 ```bash
