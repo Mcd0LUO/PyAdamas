@@ -4,6 +4,120 @@
 
 早期阶段没有逐条留痕，按阶段归纳；0.4 之后逐条记录。
 
+## [0.204] - 2026-11-16
+
+### R4 浮点线性扫描 + matmul 基准改函数形式
+
+- **R4**：抽出通用 `linear_scan_pool()`（整型/浮点共用），浮点不再「按频次挑前 8 个整函数常驻」；`slot_reg_cand_` 同时收两类候选，`slot_cand_is_fp_` 标记，GPR / xmm 两套池分别扫描。修掉一个自引入的严重 bug：区间计算用全局候选下标而传入的是子集，导致 nbody 输出错；改为按 `cands` 建「全局→局部」映射。
+- **matmul 基准**：热循环从模块顶层（循环变量是全局变量，分配器管不到）包进 `run()` 变成局部槽，可常驻寄存器。
+验证：全量 205 ran ok；四套异常夹具无回退。
+
+## [0.203] - 2026-11-16
+
+### 寄存器分配 R1–R3（活跃性 + 线性扫描 + caller 池）
+
+基于活跃区间给槽位做分配，替代按访问频次挑前 N 个常驻。**正确性收益明确，性能收益为零**：`__pa_main` 有 106 个 call / 42 个块，活跃区间几乎都跨调用点，caller 池条件命中不了，matmul / nbody / spectral_norm / fib / nqueens 的栈访问数一个没变。根因是模块顶层没有函数边界——要提速得先解决这个，而不是继续投入寄存器分配。
+- R1 `build_slot_liveness`：块级 live-in/out 位图（`PYADAMAS_RA_DEBUG=1` 可 dump）；R2 `assign_slot_regs_linear`：线性扫描 + 溢出「终点最远」区间；R3 caller 池：块内临时池缩到 r8/r9，r10/r11 只给不跨调用的槽，调用点 spill/reload。
+- 途中修两个真实 bug：区间用「首次/末次出现」在 CFG 顺序 + 循环回边下错误（3 挂起 + 4 段错误），改为扩展到 live-in/out 覆盖的整块；SysV 下 r8/r9 是参数寄存器、r10/r11 是闭包/环境指针，全当 caller 池导致 matmul 算错（43198080 → 420883）。
+验证：全量 205 ran ok；`PYADAMAS_NO_RA=1` 可回退旧分配器。设计见 [regalloc.md](docs/regalloc.md)。
+
+## [0.202] - 2026-11-16
+
+### Z5：表驱动展开成为默认路径
+
+`--zero-cost-exc` 从默认关闭变为默认路径，另留 `--no-zero-cost-exc` 回退。可挂起函数（生成器/协程）永久保留 setjmp（5 处 C 级兜底抓不到 `_Unwind`，设计上的降级）。收益：全量用例 `_setjmp` 670 → 361（-46%）。沿途修 6 个「两套机制混用」的真实 bug：handler 体里的 setjmp、try 体以 raise/return 结尾、EhEnd 块被当死块裁掉、LP 缺 `pa_eh_leave`、可挂起函数进出未屏蔽 `pa_eh_depth`、早退时 finally 不执行。验证：全量 205 ran ok；z1_rt 116 / z2_rt 134 / z2_codegen 209 / tests/eh 33 / sem_baseline 42/42 全过。
+
+## [0.201] - 2026-11-16
+
+### 基准用例全部补上类型标注
+
+9 个基准用例全部标注为 `list[float]` 等正确形式，输出与 CPython 逐字节一致（裸 `list` 会让元素退化成 unknown，是 nbody `math domain error`、spectral_norm 输出 0 的真正原因）。最终 release 基准见 [bench/compare/RESULTS-release.md](../bench/compare/RESULTS-release.md)：binary_trees 9.20×、fasta 13.14×、mandelbrot 24.16×、spectral_norm 26.51× 对 CPython。
+
+## [0.200] - 2026-11-16
+
+### 恢复四语言经典基准（CPython / PyAdamas / Go / C++）并重跑
+
+从旧提交恢复 `bench/compare/` 的 9 个用例与 `run_compare.py`，装 Go 1.27.4 并加自动探测。定位：与 Go 大致同档，binary_trees / fasta 略快于 Go；matmul / nbody / spectral_norm 落后 3–6×（当时根因归为无寄存器分配，0.203 证实迁移后收益为零，真正瓶颈是模块顶层函数边界）。
+
+## [0.199] - 2026-11-16
+
+### 标准库新增 fnmatch / copy
+
+- **fnmatch**：shell 通配翻译成正则，`*` / `?` / `[seq]` / `[!seq]` 全支持，四入口，8 项输出与 CPython 一致。
+- **copy**：静态类型下 `isinstance` 不能收窄成具体容器，提供按类型分开的显式入口 `copy_list` / `copy_dict` / `copy_set` / `deepcopy_list` / `deepcopy_dict`；deepcopy 用「内层长度 + `is` 身份」验证。未实现 `__copy__` / `__deepcopy__` 钩子、类实例字段递归、环检测。全量 205 ran ok；模块表 37 个条目。
+
+## [0.198] - 2026-11-16
+
+### Z5 第一步：模块顶层的 try 也走零开销路径
+
+`__pa_main` / `__pa_init` 是合成函数，模块级语句绕过 `collect_zero_cost_tries`。修复后在模块入口对顶层语句也跑形状判定。186 用例 `--zero-cost-exc` 下 `_setjmp` 582 → 429、仍有 setjmp 的用例 42 → 24；剩余里 22 个含 yield/async，非生成器只剩 with-in-try 与多参 raise 两个已知排除。全量 203 ran ok。
+
+## [0.197] - 2026-11-16
+
+### Z4 完成：try-else 接入；with 在 try 内明确排除
+
+try-else 新增保护区外 else 块，四路与老路径、CPython 一致。with 在 try 内明确排除（证明做不了）：LP 里 `__exit__` 虽生成了正确汇编但运行期没被调用——with 用 setjmp 保护 `__exit__`，与外层 `_Unwind` 混用状态不一致；实测 203 用例中该结构 0 次。z2_codegen 209 项全过。Z4 至此完成：finally、嵌套 try、早退、try-else 全部接入。
+
+## [0.196] - 2026-11-16
+
+### Z4：嵌套 try 接入零开销异常路径
+
+`zero_cost_try`（单指针）改成 `zero_cost_tries`（集合），逐个 try 独立判定；codegen `EhPlanRec` 从一条保护区改成一组 range，同函数多条保护区合成一份 LSDA。with 从「函数体里一个都不能有」改成「只拒绝含 with 的那个 try」。z2_codegen 176 → 198 项全过，全量 203 ran ok。
+
+## [0.195] - 2026-11-16
+
+### Z4：早退（return/break/continue）穿过零开销保护区
+
+`FuncCtx::Cleanup` 加 `ZeroCostEh`（带临时值水位槽），`emit_cleanup_exits` 遇到它发 `pa_eh_leave` + `pa_rc_cleanup`，否则 `pa_eh_depth` 不归零会导致后续异常误走 `_Unwind`。新增 `16_early_exit.py`，z2_codegen 165 → 176 项全过。
+
+## [0.194] - 2026-11-16
+
+### Z4：finally 接入零开销异常路径
+
+实测 112 处 try 里 finally 占 42（最大头）。两个关键 bug：带 finally 的 try 在 `lower_try` 里直接走 `lower_finally` 到不了新路径；finally 不能内联两份到同一落点。改成独立 fin 块，异常路径用 `pa_eh_rethrow` 重启 phase 1，外层仍接得住。z2_codegen 143 → 165 项全过。
+
+## [0.193] - 2026-11-16
+
+### itertools 补 6 个算子（stdlib 自举）
+
+`takewhile` / `dropwhile` / `filterfalse` / `compress` / `pairwise` / `groupby`；`kModuleTable` 里 itertools 从 `Native` 改成 `NativePython`。统一接收 `list`、返回 `list`（非惰性迭代器）。未提供 `starmap` / `count` / `cycle` / `tee`。顺带确认 `collections.namedtuple` 做不了（运行期生成类与编译期布局冲突）。全量 203 ran ok。
+
+## [0.192] - 2026-11-16
+
+### Z3：多 handler 分派链 + typed catch 接入零开销路径
+
+此前零开销只接「单层 try + 一个 catch-all」，185 用例里 0 个能走新路径。去掉 handler 数量/类型限制，except 改成链式分派，全不匹配走 `pa_eh_rethrow`（重启 phase 1，内层不匹配时外层仍接得住）。新增 3 用例，z2_codegen 110 → 143 项全过，全量 202 ran ok。
+
+## [0.191] - 2026-11-16
+
+### Z2-b3：C 运行时抛出的异常也能被零开销 try 抓到
+
+所有抛出点收口到 `rt_exc.c` 的 `exc_longjmp`，新增 `pa_eh_depth` + `pa_eh_enter` / `pa_eh_leave`，按深度二选一走 `pa_eh_throw` 或 `longjmp`。三条 C 运行时异常三方输出逐字一致，z2_codegen 110/110 PASS，全量 202 ran ok。
+
+## [0.190] - 2026-11-16
+
+### 签名无浮点的 shim 退化成单条 jmp
+
+签名无浮点时 shim 只发一条 `jmp .LfN`。间接调用 2000 万次 53ms → 46ms，`22_exception` 的 .text 从 +384 字节 → +64 字节。全量 202 ran ok。
+
+## [0.189] - 2026-11-16
+
+### 形参类型混用（float/非 float）改成编译期报错
+
+`bind_param` 回填分支在浮点/非浮点混用时报错要求标注，消除静默算错。全量 202 ran ok。
+
+## [0.188] - 2026-11-16
+
+### 间接调用统一 ABI 约定
+
+闭包 +0 指向 shim（非函数本体），所有间接调用走统一约定（实参进整型寄存器、返回值 `%rax`），修浮点经 unknown 函数值传递的静默算错。全量 202 ran ok；四套异常夹具无回退。
+
+## [0.186] - 2026-11-16
+
+### 字符串码点语义 S1+S2
+
+[str-codepoints.md](docs/str-codepoints.md) 的 S1+S2：`PyAdamasStr` 24 → 32 字节，`pub`（str 码点数 / bytes 字节数）放偏移 0，`len` 与真值判断指令一行未改；字面量编译期算好 pub；下标/切片/迭代/方法按码点，bytes 保持字节；顺序迭代游标 + 全 ASCII 快路径；新增 `len_bytes(s)`；cimport 取 data 偏移 16 → 24。性能对比 0.184 在 0.87–1.05×，迭代线性。全量 201 ran ok。S3 未做。
+
 ## [0.187] - 2026-11-16
 
 ### 修 `functools.reduce` 传浮点回调时的静默算错

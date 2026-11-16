@@ -1,7 +1,8 @@
 # 零开销异常 —— 设计草案
 
-状态：**Z1 已打通**（手写汇编 + 自己的 personality，`_Unwind_RaiseException` 能跳到 landing pad，
-两阶段顺序与 FORCE_UNWIND 行为都已实测）。LSDA 的字节布局已用本机 gcc 14.2 / binutils 2.44
+状态：**Z1–Z5 全部完成**（0.202 起表驱动展开是默认路径，`--no-zero-cost-exc` 可回退；非可挂起函数全程无 `_setjmp`，全量用例 `_setjmp` 670 → 361）。
+
+早期记录：手写汇编 + 自己的 personality，`_Unwind_RaiseException` 能跳到 landing pad，两阶段顺序与 FORCE_UNWIND 行为都已实测。LSDA 的字节布局已用本机 gcc 14.2 / binutils 2.44
 **实测标定**，权威数据在 [`tools/lsda_ref/FINDINGS.md`](../tools/lsda_ref/FINDINGS.md)，
 复核命令：`bash tools/lsda_ref/check.sh`。现有异常语义的逐条对照与改造边界在
 [`docs/exc-semantics.md`](exc-semantics.md)。本文只保留结论与路线；被实测推翻的早期猜测标了「订正」。
@@ -175,10 +176,10 @@ traceback 会直接崩或者跳到 landing pad 执行用户代码。Z1 已把这
 | 阶段 | 内容 | 验收 |
 |---|---|---|
 | **Z1** ✅ | personality routine + 手写带 LSDA 的汇编函数端到端验证（不接编译器） | 已打通：raise → LP，两阶段顺序、负向用例、FORCE_UNWIND 全覆盖 |
-| **Z2** | 编译器为**非可挂起函数**里的「catch-all 单层 try」发射 `.cfi_personality`/`.cfi_lsda`/`.gcc_except_table`；`--zero-cost-exc` 开关选择新路径 | 该用例输出与 setjmp 路径一致 |
-| **Z3** | **类型过滤放进 personality 的 phase 1**（见下），landing pad 只做分派 | 全部 177 个 POSIX 用例通过 |
-| **Z4** | 覆盖嵌套 try / finally / 异常对象 traceback | 异常相关的 30+ 用例全绿 |
-| **Z5** | 移除非可挂起函数的 setjmp 路径，删掉对应的 HandlerPush/Setjmp/HandlerLeave | 那些函数的汇编里不再出现 `_setjmp` |
+| **Z2** ✅ | 编译器为**非可挂起函数**发射 `.cfi_personality`/`.cfi_lsda`/`.gcc_except_table`（0.184/0.191） | 该用例输出与 setjmp 路径一致 |
+| **Z3** ✅ | **类型过滤放进 personality 的 phase 1**，landing pad 只做分派（0.192） | 多 handler / typed catch 分派正确，`_setjmp` 0 处 |
+| **Z4** ✅ | 覆盖嵌套 try / finally / 早退 / try-else（0.194–0.197）；异常对象 traceback 不在范围内 | z2_codegen 209 项、tests/eh 33 项全过 |
+| **Z5** ✅ | 表驱动成为默认路径（0.202）；非可挂起函数不再发 `HandlerPush`/`Setjmp`/`HandlerLeave`，可挂起函数永久保留 setjmp | 全量用例 `_setjmp` 670 → 361；`--no-zero-cost-exc` 可回退 |
 
 ### Z2 的三条范围收紧（都是实测结论，不是保守）
 

@@ -1,6 +1,6 @@
 # 现行异常语义清单（Z2/Z3 改造对照基线）
 
-状态：基于当前工作区（setjmp/longjmp 实现，`--zero-cost-exc` 开关尚不存在）。
+状态：**历史快照**——基于 Z2 改造前的工作区（setjmp/longjmp 实现，`--zero-cost-exc` 开关尚不存在）。Z1–Z5 已完成（0.202 起表驱动是默认路径、`--no-zero-cost-exc` 可回退），文中行号与「待办」描述的是当时状态，未逐条更新；当前实现见 [zero-cost-exceptions.md](zero-cost-exceptions.md)。
 用途：Z2/Z3/Z4 改造时逐条对照，改完用 `tests/exc/sem_baseline.sh` 回归。
 证据约定：`file:line` 均为当前工作区行号；标「实测」的结论来自 `build/dev/pyadamas`
 编译运行的真实输出（探针源码见各条说明，均可在任意临时目录复现）。

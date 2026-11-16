@@ -478,10 +478,10 @@ int Lowerer::compile_function_body(FunctionDef& f, FuncInfoPtr info, const std::
     inc_params();
     create_cells();
 
-    // 零开销异常（Z2-b2）：--zero-cost-exc 打开时，先按 AST 判定本函数是否
-    // 满足最小形状（非可挂起 + 单个 catch-all try + 内部没有 return/break/
-    // continue 穿过保护区）。满足时才把唯一那条 try 降级成 LSDA/landing pad
-    // 路径；不满足的函数继续走 setjmp 路径，一条指令都不变。
+    // 零开销异常（Z5，默认开启）：先按 AST 逐个判定本函数里的 try 是否适合
+    // 表驱动（非可挂起 + 无 with + 无富异常/多参 raise；嵌套/多 handler/
+    // finally/else/早退均已支持）。满足的降级成 LSDA/landing pad 路径，
+    // 其余留在 setjmp 路径。
     if (opts_.zero_cost_exc && target_abi().gnu_cfi) {
         collect_zero_cost_tries(f);
         if (!st_->zero_cost_tries.empty()) {

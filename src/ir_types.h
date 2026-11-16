@@ -114,8 +114,8 @@ struct IRFunction {
     // 生成器 resume：槽位不在栈上，而在堆帧里（%r15 指向帧负载）。
     // 入口按帧里的 state 分发到续跑块，参数已由创建包装写进帧。
     bool is_generator = false;
-    // 零开销异常（Z2-b2）的 EH 区域：目前只允许一条（单层 catch-all try）；
-    // 为空表示本函数走原来的 setjmp 路径。
+    // 零开销异常的 EH 区域（可多条：一份 LSDA 含多条 call-site 记录）；
+    // 为空表示本函数走 setjmp 路径。
     // 注意：codegen 与「不可达块裁剪」一律以 EhBegin/EhEnd/EhLandingPad
     // 三条标记指令为准（内联等 pass 会重建块表，这里的块号会过期，仅作
     // 记录/诊断用，不要拿它当索引）。

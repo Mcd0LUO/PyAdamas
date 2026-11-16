@@ -98,15 +98,33 @@
 | 0.169 | getattr 属性名非字面量放宽 + 内置异常多参构造/关键字：args 元组跨 raise 还原（pending_exc_args）；基线 374 → 411 / 596 |
 | 0.168 | isinstance/bytes：第二参数接受 `bytes`/`bytearray`/`type`/`slice`/`frozenset` 等与 `(A,B,...)` 元组/列表；运行期元组短路 OR、known 类型静态判定、unknown 带运行期标签内置判定；`bytes()` 2 参/可迭代-of-int、`bytes*int`、`decode` 0..2、`translate`、内置类型名当值；基线 348 → 374 / 596 |
 | 0.185 | **字符串码点语义 S1+S2**：`PyAdamasStr` 扩到 32 字节、`pub`（str 码点数 / bytes 字节数）放偏移 0，`len` 与真值判断的指令一行未改；字面量在编译期算好 `pub` 写进 `.data.rel.ro`；`intern_string` 按 `(kind, 内容)` 去重；下标/切片/迭代/方法/格式化宽度改码点语义，`bytes` 全部保持字节；新增内置 `len_bytes(s)`；顺序迭代加游标（`for`/`enumerate`/`zip`/推导式/生成器），全 ASCII 走快路径；`cimport` 取 `data` 偏移 16→24；str 的 `\xNN` 改成 U+00NN 编 UTF-8、bytes 的八进制/\xNN 保持原始字节 |
+| 0.186 | 字符串码点语义 S1+S2（详见 [str-codepoints.md](str-codepoints.md)） |
+| 0.188 | 间接调用统一 ABI 约定 + 每函数 shim，修浮点经 unknown 函数值传递的静默算错 |
+| 0.189 | 形参 float/非 float 混用改编译期报错 |
+| 0.190 | 无浮点签名 shim 退化成单条 `jmp` |
+| 0.191 | Z2-b3：C 运行时抛出的异常也能被零开销 try 抓到 |
+| 0.192 | Z3：多 handler 分派链 + typed catch 接入零开销路径 |
+| 0.193 | itertools 补 6 个算子（stdlib 自举） |
+| 0.194 | Z4：finally 接入 |
+| 0.195 | Z4：早退穿过零开销保护区 |
+| 0.196 | Z4：嵌套 try 接入；一份 LSDA 多条 call-site 记录 |
+| 0.197 | Z4：try-else 接入；with 在 try 内明确排除 |
+| 0.198 | Z5 第一步：模块顶层的 try 也走零开销路径（`_setjmp` 582 → 429） |
+| 0.199 | 标准库新增 `fnmatch` / `copy` |
+| 0.200 | 恢复四语言经典基准并重跑 |
+| 0.201 | 9 个基准用例全部补上类型标注 |
+| 0.202 | Z5 完成：表驱动成为默认路径，`_setjmp` 670 → 361 |
+| 0.203 | 寄存器分配 R1–R3；正确性收益明确、性能收益为零 |
+| 0.204 | R4 浮点线性扫描 + matmul 基准改函数形式 |
 | 许可证 | Apache-2.0（见 [LICENSE](../LICENSE) / [NOTICE](../NOTICE)） |
 
-## 当前状态（0.197）
+## 当前状态（0.204）
 
 流水线 `源码 → 词法 → AST → lambda 脱糖 → 类型检查 → IR → x86-64 汇编 → 可执行文件` 已打通。
 
 - **语言面**：标量、字符串、`bytes`（含迭代与 `%` 格式化）、列表/元组/字典/集合、切片读写、闭包/lambda/`*args`/`**kwargs`/装饰器、推导式、`with`、异常值（`args`/`raise ... from`/自定义异常）、类（字段/方法/C3 多继承/零参 `super()`/`@staticmethod`/`@classmethod`/`@property`/类属性/类装饰器/类名当值）、`match/case`、`del`、复数字面量、f-string 格式说明、dunder 协议（含装饰 dunder、`__call__` 与方法值）、`Generator[Y, S, R]` 标注、`open`/`input`/`sys.stdin`、`struct` 值类型、`cimport`/`cdecl` C 互操作与跨模块继承。
-- **标准库**：`math`/`sys`/`asyncio`/`random`/`os`/`os.path`/`subprocess`/`time`/`itertools`/`collections`/`functools`/`json`/`string`/`re`/`datetime`/`pathlib`/`csv`/`base64`/`binascii`/`heapq`/`bisect`/`hashlib`/`hmac`/`logging`/`statistics`/`textwrap`/`operator`，以及封装 OpenBLAS 的 `linalg`。
-- **验证**：169 个运行用例、53 个反例、13 个模块目录；差分 runner 已自举，默认 840 例；`tests/bench/` 提供 pyadamas vs CPython 的标准库与 RC/GC 基准（`base64`/`hashlib` 已反超）。
+- **标准库**：`math`/`sys`/`asyncio`/`random`/`os`/`os.path`/`subprocess`/`time`/`itertools`/`collections`/`functools`/`json`/`string`/`re`/`datetime`/`pathlib`/`csv`/`base64`/`binascii`/`heapq`/`bisect`/`hashlib`/`hmac`/`logging`/`statistics`/`textwrap`/`operator`/`fnmatch`/`copy`，以及封装 OpenBLAS 的 `linalg`。
+- **验证**：188 个运行用例、53 个反例、6 个严格用例、15 个模块目录；差分 runner 已自举，默认 840 例；`tests/bench/` 提供 pyadamas vs CPython 的标准库与 RC/GC 基准（`base64`/`hashlib` 已反超）。
 - **优化**：O2 有常量折叠/DCE/小函数内联/静态调用直接化/LICM/检查型下标外提/循环旋转/跨块 CSE；后端有拷贝合并、浮点临时寄存器与浮点比较分支融合（有序比较不再补 NaN 跳转）。
 - **asyncio**：Task 支持多等待者；`gather` 结果元素所有权按静态类型带入运行时；`from asyncio import ...` 保留调用点特化；`run`/`wait_for` 跨模块结果仍可能退化为 unknown。
 - **调试信息**：生成代码带 DWARF 行号、CFI（`.eh_frame`）与可读函数符号（`.type`/`.size`）；帧里没有 rbp，gdb、libgcc 的展开器和运行时自己的 traceback 都靠 CFI 逐帧还原。未捕获异常打印函数级 traceback，异步/生成器 resume 帧也会追加（仅函数名）。异常值对象仍不带 traceback。
@@ -115,39 +133,33 @@
   运行时通过 `rt_internal.h` 的平台层把 poll/clock_gettime/nanosleep/mkdir/realpath/
   sysconf/timegm 映射到 Win32，subprocess 用 CreateProcess + 匿名管道；Setjmp 换成自带的
   `pa_win_setjmp`（不依赖展开信息，因为生成的汇编函数没有 `.pdata`）。覆盖面 138 / 146。
-- **主要缺口**：asyncio 边角；异常对象 traceback / 列号 / `.debug_info`；依赖动态属性的 stdlib（如 `argparse`，见「技术债」）。
-- **零开销异常（Z1–Z4 已完成）**：Itanium ABI 表驱动展开，`--zero-cost-exc` 开关控制（默认关）。
-  非可挂起函数里的 try 在开关打开时**全程无 `_setjmp`**：personality routine + LSDA 发射器 +
+- **主要缺口**：asyncio 边角；异常对象 traceback / 列号 / `.debug_info`；依赖动态属性的 stdlib（如 `argparse`，见「技术债」）。性能瓶颈：模块顶层函数边界缺失（见「下一步」）。
+- **零开销异常（Z1–Z5 已完成）**：Itanium ABI 表驱动展开，**默认路径**（0.202，`--no-zero-cost-exc` 可回退）。
+  非可挂起函数里的 try **全程无 `_setjmp`**：personality routine + LSDA 发射器 +
   运行时胶水（`pa_eh_throw`/`pa_eh_landing`/`pa_eh_rethrow`）+ codegen 接线。
   支持单层与嵌套 try、多 typed handler、裸 except、finally、try-else、return/break/continue 穿过保护区、
   Python `raise` 与 C 运行时异常（IndexError / ZeroDivisionError / KeyError）。
   LSDA 字节布局用 gcc 14.2 实测标定（`tools/lsda_ref/`，100+ 条可复跑断言），
   handler 判据与真 `__gxx_personality_v0` 交叉验证过。
   四套夹具：`z1_rt` 116 项、`z2_rt` 134 项、`z2_codegen` 209 项、`tests/eh` 33 项。
-  **未接**：with 在 try 内（with 用 setjmp 保护 `__exit__`，与 `_Unwind` 混用不可靠，实测 0 用例用到）、
-  生成器/协程（5 处 C 级 setjmp 兜底抓不到 `_Unwind`，永久保留 setjmp）、Win64（SEH 是另一套机制）。
-  Z5（移除 setjmp、让表驱动成为默认）待做。设计见 [zero-cost-exceptions.md](zero-cost-exceptions.md)。
+  Z5 后全量用例 `_setjmp` 从 670 降到 361（-46%）。
+  **永久排除**：with 在 try 内（with 用 setjmp 保护 `__exit__`，与 `_Unwind` 混用不可靠，实测 0 用例用到）、
+  生成器/协程/异步生成器（5 处 C 级 setjmp 兜底抓不到 `_Unwind`，设计上的永久降级）、Win64（SEH 是另一套机制）。
+  设计见 [zero-cost-exceptions.md](zero-cost-exceptions.md)。
+- **寄存器分配（R1–R4，0.203–0.204）**：活跃性 + 线性扫描 + caller 池 + 浮点线性扫描，正确性收益明确但性能收益为零；根因见「下一步」。设计见 [regalloc.md](regalloc.md)。
 - **GC 根扫描收窄（0.175）**：临时区保守扫描改为按 vreg 静态类型发射位图，
   纯标量帧整段不扫；全量 163 个用例合计临时区实扫字数 2901 -> 403、
   保守保留对象 92 个 / 8144 B -> 0。诊断 `PYADAMAS_GC_STATS=1`，回退 `PYADAMAS_GC_CONSERVATIVE=1`。
 
 ## 下一步
 
-语言与标准库的完备性优先；C 互操作与 BLAS 已在 0.110–0.120 落地（`cimport`、`ptr[T]` 缓冲区、`linalg` 封装 OpenBLAS），不再是下一步。
+性能优化（先解决模块顶层函数边界）与语言/标准库完备性并行；C 互操作与 BLAS 已在 0.110–0.120 落地（`cimport`、`ptr[T]` 缓冲区、`linalg` 封装 OpenBLAS），不再是下一步。
 
-### 0. 零开销异常收尾（Z5）
+### 0. 性能瓶颈的结构性根因（下一步的核心问题）
 
-Z1–Z4 已完成，`--zero-cost-exc` 下非可挂起函数的 try 全程无 `_setjmp`。Z5 是让它成为默认：
+寄存器分配 R1–R4 已落地（0.203–0.204，见 [regalloc.md](regalloc.md)）：基于活跃区间的线性扫描、caller 池（r10/r11）、浮点也走线性扫描。正确性收益明确，但**性能收益为零**：`__pa_main` 有 106 个 call / 42 个块，活跃区间几乎都跨调用点，caller 池条件命中不了；matmul / nbody / spectral_norm / fib / nqueens 的栈访问数一个没变。
 
-- 非可挂起函数默认走表驱动，可挂起函数（生成器/协程/异步生成器）保留 setjmp ——
-  后者有 5 处 C 级 setjmp 兜底，抓不到 `_Unwind`，这是**设计上的永久降级**，不是过渡状态；
-- 删掉 `HandlerPush` / `Setjmp` / `HandlerLeave` 三个 IR 操作（只对非可挂起函数）；
-- 验收：全部 186 个运行用例通过，且非可挂起函数里 `_setjmp` 计数为 0。
-
-**注意依赖关系**：`docs/roadmap.md` 技术债 #10「含 handler 的函数没有寄存器提升」的根因是
-`longjmp` 会回滚 callee-saved 寄存器。Z5 完成后这个限制对非可挂起函数消失，
-**全局寄存器分配（技术债 #4）才有意义** —— 反过来做会推倒重来。
-
+根因是结构性的：模块顶层被塞进单个 `__pa_main`，调用密度极高，6 个 callee 寄存器就是全部可用变量寄存器。下一步要提速得先解决「顶层代码没有函数边界」，而不是继续在寄存器分配上投入。验收：给出一个能显著降低 `__pa_main` 调用密度的方案并实测缩小与 Go 的差距；全量 188 个运行用例无回退。
 ### 1. 工程收尾
 
 - 标准库前端基线 0.171 复测（Debian 3.13.5：本体 501 / 596，去掉 `test/` 449 / 532）；剩余失败已高度分散（undefined name、各类运算符、getattr 非字面量、跨模块类成员等）；原口径（CPython 3.11.1 + site-packages，38582 个文件）仍未重跑；

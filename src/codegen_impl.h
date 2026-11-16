@@ -154,7 +154,7 @@ public:
         // 整程序没有任何 unknown 值、也不涉及 asyncio/生成器运行时：入口
         // 关闭存活堆索引维护（unknown 保守 retain 用不到）。
         void set_disable_unknown_index(bool v) { disable_unknown_index_ = v; }
-        // 零开销异常总开关（--zero-cost-exc，默认关）。
+        // 零开销异常总开关（默认开启；--no-zero-cost-exc 可回退）。
         void set_zero_cost_exc(bool v) { zero_cost_exc_ = v; }
 
 private:
@@ -732,17 +732,10 @@ private:
     // 第二次迭代就炸。这类值一律独占一个槽，区间拉满整个函数。
     void assign_vreg_slots();
 
-    // 变量提升：按被读写次数排序，把最热的几个局部变量放进 callee-saved
-    // 寄存器。没提升的变量继续住栈槽，语义完全一样，所以这一步错了
-    // 最多是慢，不会算错。
-    //
-    // 不做活跃性分析——一个变量要么整函数在寄存器里，要么整函数在栈上。
-    // 分支汇合、循环回边都因此天然正确，不需要任何 spill 逻辑。代价是
-    // 寄存器被长期占着，但 Python 的局部变量本来就不多，这个代价基本
-    // 不存在。
-    //
-    // 浮点变量不参与：xmm 全是 caller-saved，跨调用要自己 save/restore，
-    // 收益抵不上复杂度。
+    // 变量提升（旧路径，PYADAMAS_NO_RA=1 回退用）：按被读写次数排序，把
+    // 最热的几个整型槽放进 callee-saved；浮点槽按 xmm8–15 处理。
+    // 默认路径是下面的活跃区间的线性扫描（assign_slot_regs_linear /
+    // linear_scan_pool），这里保留旧实现只为可回退对比。
     void assign_slot_regs();
     void assign_slot_regs_linear();
     // 通用线性扫描：给定活跃区间与寄存器池，返回 slot -> 寄存器名。

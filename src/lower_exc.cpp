@@ -282,7 +282,7 @@ void Lowerer::lower_raise(Raise& r) {
 
 
 void Lowerer::lower_try(Try& t) {
-    // 零开销异常（Z2-b2 / Z4）：本函数被判成可接管的形状时，唯一那条 try 走
+    // 零开销异常（默认开启）：本函数被判成可接管的形状时，这条 try 走
     // 新路径 —— 包括带 finally 的情形（lower_try_zero_cost 自己处理 finalbody）。
     // 这一判断必须排在 finally 分派之前，否则带 finally 的 try 永远进不了新路径。
     if (st_->zero_cost_tries.count(&t) != 0) {
@@ -302,7 +302,7 @@ void Lowerer::lower_try_core(Try& t) {
         stmts(t.orelse);
         return;
     }
-    // 零开销异常（Z2-b2）：本函数被判成最小形状时，唯一那条 try 走新路径。
+    // 零开销异常（默认开启）：这条 try 若被判成适合表驱动，就走新路径。
     if (st_->zero_cost_tries.count(&t) != 0) {
         lower_try_zero_cost(t);
         return;
@@ -714,18 +714,16 @@ void Lowerer::lower_delete(Delete& d) {
 
 
 
-// ── 零开销异常（Z2-b2，--zero-cost-exc）───────────────────────────────
+// ── 零开销异常（Z5，默认开启；--no-zero-cost-exc 可回退）──────────────
 //
-// 第一刀只接一种形状：非可挂起函数里的「单层 catch-all try」——
-//   - 函数体里恰好一条 Try、没有任何 With；
-//   - 那条 Try 恰好一个 handler，且是 catch-all（裸 except / except Exception），
-//     没有 else / finally；
-//   - try 体与 handler 体里没有 return / break / continue（第一刀要求「try
-//     之后才 return」：跨出保护区的早退暂时不接）；
-//   - try 体里的 raise 只用「无参 / 单位置参」形态，且不是富异常实例
-//     （多参 raise / 富异常实例走 RaiseArgs / RaiseInstance，第一刀不接）。
-// 其余函数（生成器/协程、with、finally、嵌套 try、多 handler）继续走 setjmp
-// 路径，一个字节都不变。
+// 逐个 try 独立判定形状：非可挂起函数里满足条件的 try 走表驱动路径，其余
+// 留在 setjmp 路径。当前支持单层与嵌套 try、多 handler / typed catch、
+// finally、try-else、return/break/continue 早退穿过保护区。
+//
+// 永久排除（设计降级，不是过渡状态）：
+//   - 生成器 / 协程 / 异步生成器（5 处 C 级 setjmp 兜底抓不到 _Unwind）；
+//   - with 在 try 体内（with 用 setjmp 保护 __exit__，与 _Unwind 混用不可靠）；
+//   - 富异常实例 / 多参 raise（没有 _Unwind 版）。
 void Lowerer::collect_zero_cost_tries(FunctionDef& f) {
     // **可挂起函数整体排除**（生成器 / 协程 / 异步生成器）。它们有 5 处 C 级
     // setjmp 兜底（rt_gen.c / rt_async.c / rt_agen.c），那些兜底抓不到 _Unwind

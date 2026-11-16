@@ -200,11 +200,9 @@ struct FuncCtx {
     VReg fn_mark = kNoReg;
     // 模块顶层函数：退出前释放全局变量并关掉临时栈。
     bool is_entry = false;
-    // 零开销异常（--zero-cost-exc）：本函数被判成最小形状时指向唯一那条
-    // try（AST 指针，只在本函数编译期间有效）；nullptr 表示整函数走
-    // setjmp 路径（默认）。
-    // 走零开销路径的那些 try（嵌套 try 时可能有多条）。每个都降级成
-    // LSDA/landing pad 保护区，同一函数的多个保护区合成一份 LSDA。
+    // 零开销异常（默认开启）：走表驱动路径的 try 集合（AST 指针，只在本函数
+    // 编译期间有效）。空集合表示本函数走 setjmp 路径。嵌套 try 时可能有多条，
+    // 每个都降级成 LSDA/landing pad 保护区，多条保护区合成一份 LSDA。
     std::unordered_set<const Try*> zero_cost_tries;
     // 正在降级零开销 try 体：>0 时 raise 走 pa_eh_raise*（_Unwind 版）。
     // 只有这个函数已经没有 setjmp 兜底时才会 >0（见 collect_zero_cost_tries）。
@@ -782,9 +780,9 @@ private:
     // except `RichExc as e` 是否富异常类（有字段/方法），是则返回那个类。
     const ClassInfo* rich_exc_handler(ExceptHandler* h);
     VReg raise_exception(const std::string& type, VReg msg);
-    // ── 零开销异常（Z2-b2，--zero-cost-exc）──────────────────────
-    // 在 AST 上判定函数是否满足「单个 catch-all try」的最小形状；满足时
-    // 返回那条 try 的指针，否则 nullptr。规则见 lower_exc.cpp 的实现注释。
+    // ── 零开销异常（Z5，默认开启；--no-zero-cost-exc 可回退）─────
+    // 在 AST 上逐个判定函数里的 try 是否适合表驱动路径，满足的收进
+    // st_->zero_cost_tries 集合（可多条）。规则见 lower_exc.cpp 的实现注释。
     void collect_zero_cost_tries(FunctionDef& f);
     // 零开销 try 的降级：发 EhBegin/EhEnd 保护区 + EhLandingPad；landing pad
     // 取回异常后直接跳进现有的 except 分发块（ExcMatches/ExcAcceptValue/

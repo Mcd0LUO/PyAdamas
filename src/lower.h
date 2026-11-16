@@ -29,9 +29,9 @@ struct LowerOptions {
     int opt_level = 2;
     // 允许浮点归约用 SIMD 分组求和（会改变舍入顺序）。
     bool fast_math = false;
-    // 零开销异常（Z2-b2）：只对满足最小形状（非可挂起 + 单层 catch-all try）
-    // 的函数发 LSDA / landing pad 路径。默认关：关闭时输出与原来逐字节一致。
-    // Z5：表驱动展开默认开启（可挂起函数仍由形状判定排除）。
+    // 零开销异常（Z5，默认开启）：非可挂起函数里的 try 走 LSDA / landing pad
+    // 表驱动路径；可挂起函数（生成器/协程）永久保留 setjmp。
+    // --no-zero-cost-exc 可回退（关闭时输出与老路径逐字节一致）。
     bool zero_cost_exc = true;
     ModuleLookup module_lookup;
 };
