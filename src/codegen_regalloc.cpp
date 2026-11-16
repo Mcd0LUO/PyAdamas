@@ -338,9 +338,17 @@ void AsmGen::build_slot_liveness() {
         // 浮点要求 opt_ >= 1（与旧逻辑一致）；整型无此限制。
         for (int s2 = 0; s2 < ns; ++s2) {
             if (ir_is_heap(f_->slot_ty[static_cast<size_t>(s2)])) continue;
+            // **unknown 槽不能提升。** 它可能装着堆指针，GC 要靠帧记录里的
+            // 栈槽地址找根。提升后栈槽不再更新，GC 读到序言清零的 0，
+            // 对象被提前回收 —— ASan 实测 SEGV（x_min.py 里 u 是 unknown 槽）。
+            TypePtr s2ty = f_->slot_ty[static_cast<size_t>(s2)];
+            if (!s2ty || s2ty->kind == TyKind::Unknown) continue;
+            // 被 GC 扫描 / 异常展开依赖的槽同样必须留在内存。
+            if (s2 < static_cast<int>(gc_scan_slot_.size()) && gc_scan_slot_[s2])
+                continue;
             if (addr_taken[static_cast<size_t>(s2)]) continue;
             if (hazard[static_cast<size_t>(s2)]) continue;
-            bool isfp = ir_is_float(f_->slot_ty[static_cast<size_t>(s2)]);
+            bool isfp = ir_is_float(s2ty);
             if (isfp && opt_ < 1) continue;
             slot_reg_cand_idx_[static_cast<size_t>(s2)] =
                 static_cast<int>(slot_reg_cand_.size());

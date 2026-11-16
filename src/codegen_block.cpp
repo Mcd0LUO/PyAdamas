@@ -221,13 +221,58 @@ void AsmGen::emit_function(const IRFunction& f, int fi) {
             fp_promoted_slots_.clear();
             n_saved_regs_ = 1;  // %r15 帧指针
         } else {
+            // **先算「哪些槽必须留在内存」，再分配寄存器。**
+            //
+            // 顺序不能反：GC 要靠帧记录里的栈槽地址找根，所以「会被 GC
+            // 扫描的槽」绝不能提升。而一个槽是否被扫描取决于它的静态类型
+            // （堆槽 / unknown 槽）和是否被取地址 —— 全是分配前就能确定的
+            // 信息，不需要看 slot_reg_。
+            //
+            // 之前的写法是「先分配寄存器，再把没提升的槽登记给 GC」，于是
+            // unknown 槽被提升后既不在栈槽里、也不在扫描清单里，GC 读到
+            // 序言清零的 0，对象被提前回收 —— ASan 实测 SEGV（x_min.py）。
+            gc_scan_slot_.assign(f.slot_ty.size(), 0);
+            {
+                std::vector<bool> addr_taken(f.slot_ty.size(), false);
+                for (const auto& bb : f.blocks)
+                    for (const auto& in : bb.insts)
+                        if (in.op == IrOp::SlotAddr && in.idx >= 0 &&
+                            in.idx < static_cast<int>(f.slot_ty.size()))
+                            addr_taken[static_cast<size_t>(in.idx)] = true;
+                for (size_t s = 0; s < f.slot_ty.size(); ++s) {
+                    TypePtr ty = f.slot_ty[s];
+                    // 堆槽：异常展开要按地址读它来 dec。
+                    // unknown 槽：可能装着堆指针，GC 要靠它找根。
+                    const bool heap = ir_is_heap(ty);
+                    const bool unk = !ty || ty->kind == TyKind::Unknown;
+                    if (heap || unk) gc_scan_slot_[s] = 1;
+                    (void)addr_taken;
+                }
+            }
             assign_slot_regs();
+
             // 持有引用的槽要按栈槽地址登记，异常 longjmp 跳过本帧时逐个
             // dec。生成器/协程的槽在堆帧里，由帧销毁负责，不走这条路径。
+            gc_scan_slot_.assign(f.slot_ty.size(), 0);
             const size_t n_owned =
                 std::min(f.slot_owned.size(), f.slot_ty.size());
+            // **被提升到寄存器的槽不能进 owned 清单。**
+            //
+            // 帧记录登记的是栈槽地址，GC / 异常展开从那里读值。槽一旦
+            // 提升到寄存器，栈槽里就是旧值（常常是序言清零留下的 0）：
+            //   * GC 读到 0 → 不标记 → 对象被提前回收（use-after-free）；
+            //   * 异常展开读到 0 → 不 dec → 泄漏。
+            //
+            // ASan 实测（x_min.py）：s1（u，200 元素列表）被提升到 %r12，
+            // 栈槽 48(%rsp) 自序言清零后再没写过。major GC 时读到 0，
+            // u 被回收，之后 `index.get` 从已释放的列表取元素得到 -26，
+            // 传给 pa_rc_temp 当场 SEGV。
+            //
+            // 提升槽由 gc_scan_registers 兜底（见下面 frame_scan_ 的注释）。
             for (size_t s = 0; s < n_owned; ++s)
-                if (f.slot_owned[s] && ir_is_heap(f.slot_ty[s])) {
+                if (f.slot_owned[s] && ir_is_heap(f.slot_ty[s]) &&
+                    slot_reg_[s].empty()) {
+                    if (s < gc_scan_slot_.size()) gc_scan_slot_[s] = 1;
                     frame_owned_.push_back(static_cast<int>(s));
                     frame_owned_unknown_.push_back(
                         s < f.slot_unknown.size() && f.slot_unknown[s]);
@@ -240,8 +285,10 @@ void AsmGen::emit_function(const IRFunction& f, int fi) {
                 bool owned_heap = f.slot_owned[s] && ir_is_heap(ty);
                 bool unk = s < f.slot_unknown.size() && f.slot_unknown[s];
                 bool unk_ty = !ty || ty->kind == TyKind::Unknown;
-                if (!owned_heap && (unk || unk_ty) && slot_reg_[s].empty())
+                if (!owned_heap && (unk || unk_ty) && slot_reg_[s].empty()) {
                     frame_scan_.push_back(static_cast<int>(s));
+                    if (s < gc_scan_slot_.size()) gc_scan_slot_[s] = 1;
+                }
             }
             // 临时区里可能流过 unknown 值：只有「可能装指针」的帧才登记
             // 临时区，纯 int/float 帧和纯类型化帧一个字节都不扫。
@@ -472,6 +519,20 @@ bool AsmGen::can_fuse(const Inst& in, const Inst& nx) const {
         if (in.dst == kNoReg) return false;
         if (in.op == IrOp::StoreSlot || in.op == IrOp::StoreGlobal) return false;
         if (nx.op != IrOp::StoreSlot || nx.a != in.dst) return false;
+        // **GC 要扫描的槽不能融合。**
+        //
+        // 融合会把 `store.slot s` 的目标替换成 dst_loc_（某个 vreg 寄存器或
+        // 临时槽），**栈槽 smem(s) 从此不再被写**。而帧记录登记的是
+        // smem(s) —— GC 和异常展开都从那里读值。结果是：
+        //   * GC 读到序言清零留下的 0 → 不标记 → 对象被回收；
+        //   * 之后从已释放对象取元素得到垃圾指针，当场 SEGV。
+        //
+        // ASan 实测（x_min.py）：s1（u，200 元素列表）的 store 被融合成
+        // `movq 224(%rsp), %r12`，48(%rsp) 自序言清零后再没写过；major GC
+        // 回收 u 后 `index.get` 取出 -26，传给 pa_rc_temp 崩溃。
+        if (nx.idx >= 0 && nx.idx < static_cast<int>(gc_scan_slot_.size()) &&
+            gc_scan_slot_[static_cast<size_t>(nx.idx)])
+            return false;
         if (nx.idx < 0 || nx.idx >= static_cast<int>(slot_reg_.size())) return false;
         // O0 只融合到提升过的寄存器；O1 起允许直接写变量栈槽。
         if (opt_ < 1 && slot_reg_[nx.idx].empty()) return false;

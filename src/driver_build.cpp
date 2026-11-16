@@ -45,6 +45,22 @@
 
 namespace pyadamas {
 
+// 给 `cc` 传的额外编译/链接选项，由环境变量提供。
+//
+// 用途：
+//   * `PYADAMAS_CC_FLAGS='-fsanitize=address -g'` —— 用 ASan 跑生成的程序，
+//     定位 RC/GC 这类「堆被写坏」的问题（编译器的 IR 层面看不出错误，
+//     只有内存检查器能抓到第一现场）；
+//   * `-fsanitize=undefined`、`-fno-omit-frame-pointer` 等。
+//
+// 编译和链接都要带同一套 flag（ASan 需要运行时库参与链接），所以两处
+// 共用这一个函数。
+static std::string cc_extra_flags() {
+    const char* f = std::getenv("PYADAMAS_CC_FLAGS");
+    if (!f || !*f) return std::string();
+    return std::string(" ") + f;
+}
+
 namespace {
 
 // 模块缓存写入必须原子：多个进程可能同时编译同一个模块（并行测试/构建），
@@ -713,7 +729,8 @@ bool assemble_object(const ModuleUnit& u, std::string& err) {
             return false;
         }
     }
-    std::string cmd = std::format("cc -c -o {} {}", shell_quote(tmp_obj), shell_quote(tmp_asm));
+    std::string cmd = std::format("cc -c -o {} {}{}", shell_quote(tmp_obj),
+                                shell_quote(tmp_asm), cc_extra_flags());
     if (std::system(cmd.c_str()) != 0) {
         std::filesystem::remove(tmp_obj, ec);
         std::filesystem::remove(tmp_asm, ec);
@@ -1338,11 +1355,13 @@ bool prepare_program(Program& p, bool emit_objects, bool entry_ir) {
     return true;
 }
 
+
 bool link_program(Program& p, const std::string& output) {
     // --eh-frame-hdr：运行时 traceback 用 _Unwind_Backtrace 找 FDE，
     // 可执行文件必须带 .eh_frame_hdr 索引。多数发行版默认就开，这里显式
     // 写死，免得换个链接器就退化成「只能打异常、打不出回溯」。
-    std::string cmd = "cc -o " + shell_quote(output) + " -Wl,--eh-frame-hdr";
+    std::string cmd = "cc -o " + shell_quote(output) + " -Wl,--eh-frame-hdr" +
+                      cc_extra_flags();
     for (auto* u : p.order) cmd += " " + shell_quote(u->obj_path);
     cmd += " " + shell_quote(PYADAMAS_RT_OBJ) + " -lm";
     for (auto& l : p.link_args) cmd += " " + shell_quote(l);

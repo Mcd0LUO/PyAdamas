@@ -587,6 +587,10 @@ private:
     std::vector<bool> frame_owned_unknown_;
     // 借来的 unknown 槽：只登记给 GC 扫描，异常展开不释放。
     std::vector<int> frame_scan_;
+    // 按槽号索引的「这个槽要给 GC 扫描」布尔表。
+    // 融合/别名优化据此判断能否绕过栈槽 —— 被扫描的槽必须让 smem(s)
+    // 保持权威副本，否则 GC 从帧记录读到旧值/0。
+    std::vector<char> gc_scan_slot_;
     // 需要保守扫描的临时区字数（0 表示这个帧的临时区一个字节都不扫）。
     int frame_scan_words_ = 0;
     // 临时区位图：bit i = 1 表示第 i 个字可能需 GC 保守扫描。空表示没有
