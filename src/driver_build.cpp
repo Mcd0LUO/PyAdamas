@@ -192,6 +192,8 @@ inline constexpr ModuleEntry kModuleTable[] = {
     {"bisect", ModuleKind::Python, "bisect.py", ""},
     {"collections.abc", ModuleKind::Python, "collections/abc.py", ""},
     {"csv", ModuleKind::Python, "csv.py", ""},
+    {"copy", ModuleKind::Python, "copy.py", ""},
+    {"fnmatch", ModuleKind::Python, "fnmatch.py", "re"},
     {"enum", ModuleKind::Python, "enum.py", ""},
     {"fractions", ModuleKind::Python, "fractions.py", "math"},
     {"glob", ModuleKind::Python, "glob.py", "os,os.path"},
