@@ -502,10 +502,15 @@ static int64_t jp_value(JP* s, const char* d, size_t n) {
             size_t cn = n - 3;
             int kind = desc_heap(cd, cn) ? 1 : 0;
             PyAdamasList* out = pa_list_new(0, kind);
+            // 入临时栈：递归解析后续可能抛异常（类型不匹配 / 语法错误），
+            // 异常展开会跳过本帧的正常返回，靠这个引用让 cleanup 释放它。
+            // 正常返回前用 temp_take 把所有权转给调用者。
+            pa_rc_temp(out);
             jp_expect(s, '[');
             jp_ws(s);
             if (s->p < s->end && *s->p == ']') {
                 s->p++;
+                pa_rc_temp_take(out);
                 return (int64_t)out;
             }
             /* 递归解析数组元素时还会分配，out 只在本帧 C 局部变量里。 */
@@ -522,6 +527,7 @@ static int64_t jp_value(JP* s, const char* d, size_t n) {
             }
             jp_expect(s, ']');
             pa_gc_unpin(out);
+            pa_rc_temp_take(out);
             return (int64_t)out;
         }
         if (k == 'd') {
@@ -529,10 +535,12 @@ static int64_t jp_value(JP* s, const char* d, size_t n) {
             size_t cn = n - 3;
             int vown = desc_heap(cd, cn) ? 1 : 0;
             PyAdamasDict* out = pa_dict_new(1, 1, vown, -1, -1);
+            pa_rc_temp(out);   // 同上：异常路径的所有权保护
             jp_expect(s, '{');
             jp_ws(s);
             if (s->p < s->end && *s->p == '}') {
                 s->p++;
+                pa_rc_temp_take(out);
                 return (int64_t)out;
             }
             /* 字典本身和 key 都只在本帧 C 局部变量里：递归解析值时若触发
@@ -554,6 +562,7 @@ static int64_t jp_value(JP* s, const char* d, size_t n) {
             }
             jp_expect(s, '}');
             pa_gc_unpin(out);
+            pa_rc_temp_take(out);
             return (int64_t)out;
         }
         if (k == 't') {
