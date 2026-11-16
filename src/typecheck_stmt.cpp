@@ -356,11 +356,30 @@ void TypeChecker::assign(Expr& target, TypePtr value, int line, int col) {
             auto ot = expr(*sub->value);
             auto st = expr(*sub->slice);
             if (sub->slice->kind == ExprKind::Slice) {
-                // 切片赋值在运行时才展开，类型层面只确认对象是可变的
+                // 切片赋值：运行时展开，但**元素类型必须检查**。
+                //
+                // 原实现只确认「对象可变」就放过，于是
+                //     l: list[int] = [1, 2]
+                //     l[0:1] = ['hello']
+                // 编译通过，运行时 pa_list_slice_assign 把字符串指针写进
+                // 一个声明为 int 的列表；后续 l[0] 按 int 读出来就是垃圾
+                // （实测输出 96042627193968 这种值，每次运行都不同）。
+                //
+                // 检查方式与单元素赋值（下面的 merge_elem）保持一致：
+                // 值是序列就逐个元素对；不是序列就整体对。
                 auto& sl = static_cast<SliceExpr&>(*sub->slice);
                 if (sl.lower) expr(*sl.lower);
                 if (sl.upper) expr(*sl.upper);
                 if (sl.step) expr(*sl.step);
+                if (ot->kind == TyKind::List && ot->sub.size() >= 1 &&
+                    !is_unknown(value) && value->kind == TyKind::List &&
+                    value->sub.size() >= 1 && !is_unknown(value->sub[0])) {
+                    // list 切片的右值也是 list：比较元素类型。
+                    if (!merge_elem(ot->sub[0], ot, value->sub[0], ot->locked))
+                        err(line, col,
+                            std::format("cannot assign '{}' to slice of '{}'",
+                                        type_name(value), type_name(ot)));
+                }
                 if (ot->kind == TyKind::Class) {
                     if (ot->cls && !ot->cls->is_open() &&
                         !ot->cls->method("__setitem__"))
