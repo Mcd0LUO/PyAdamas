@@ -759,12 +759,13 @@ const Try* Lowerer::find_zero_cost_try(FunctionDef& f) {
     if (try_count != 1 || with_count != 0 || !only) return nullptr;
 
     Try& t = *only;
-    if (!t.finalbody.empty() || !t.orelse.empty() || t.handlers.size() != 1) return nullptr;
-    ExceptHandler& h = t.handlers.front();
-    if (h.type) {
-        if (h.type->kind != ExprKind::Name) return nullptr;
-        if (static_cast<Name&>(*h.type).id != "Exception") return nullptr;
-    }
+    // 多 handler 已放开：landing pad 里的分派链与老路径逐句相同（见
+    // lower_try_zero_cost）。仍排除 finally / else —— 它们需要 cleanup
+    // landing pad 或 try 正常结束后跳转，是 Z4 的范围。
+    if (!t.finalbody.empty() || !t.orelse.empty() || t.handlers.empty()) return nullptr;
+    // handler 类型不再限制为 catch-all：lower_try_zero_cost 的分派链会逐个
+    // lower_exc_match，不匹配的走 pa_eh_rethrow 重启 phase 1（与老路径的
+    // ExcReraise 等价）。富异常实例 / 多参 raise 仍由下面的 check 排除。
 
     bool bad = false;
     auto check = [&](Stmt& s) {
@@ -882,55 +883,73 @@ void Lowerer::lower_try_zero_cost(Try& t) {
     call_void(RtFn::EhLand, {});
     call_void(RtFn::RcCleanup, {load_slot(mark_slot, t_int())});
 
-    // except 分发：catch-all 只有一个 handler，结构与 lower_try_core 的
-    // land 块逐句对应（HandlerLeave → 上面的 RcCleanup；不匹配的
-    // ExcReraise → _Unwind 版 EhRethrow）。
-    ExceptHandler& h = t.handlers.front();
-    int hb = new_block("except.body");
-    if (h.type) {
-        VReg m = lower_exc_match(*h.type);
-        int next = new_block("except.next");
-        Inst cb;
-        cb.op = IrOp::Branch;
-        cb.a = m;
-        cb.target = hb;
-        cb.target2 = next;
-        emit(std::move(cb));
-        switch_to(next);
+    // except 分发链：与 lower_try_core 的 land 块逐句对应（HandlerLeave → 上面的
+    // RcCleanup；不匹配的 ExcReraise → _Unwind 版 EhRethrow，它会重启 phase 1，
+    // 所以内层不匹配时外层 handler 仍有机会接住）。
+    struct ZcHBody {
+        ExceptHandler* h;
+        int block;
+    };
+    std::vector<ZcHBody> bodies;
+    bool bare = false;
+    for (auto& h : t.handlers) {
+        int hb = new_block("except.body");
+        bodies.push_back({&h, hb});
+        if (bare) continue;
+        if (h.type) {
+            VReg m = lower_exc_match(*h.type);
+            int next = new_block("except.next");
+            Inst cb;
+            cb.op = IrOp::Branch;
+            cb.a = m;
+            cb.target = hb;
+            cb.target2 = next;
+            emit(std::move(cb));
+            switch_to(next);
+        } else {
+            bare = true;
+            Inst j;
+            j.op = IrOp::Jump;
+            j.target = hb;
+            emit(std::move(j));
+        }
+    }
+    if (!bare) {
         call_void(RtFn::EhRethrow, {});
         end_unreachable();
-    } else {
-        Inst jj;
-        jj.op = IrOp::Jump;
-        jj.target = hb;
-        emit(std::move(jj));
     }
 
-    switch_to(hb);
-    // catch-all 只可能是裸 except 或 except Exception：取扁平异常值即可
-    //（富异常在 find_zero_cost_try 里已经排除）。
-    TypePtr slot_ty = mk_exception("Exception");
-    VReg ev = call_runtime(RtFn::ExcAcceptValue, slot_ty, {});
-    int shadow = -1;
-    if (!h.name.empty()) {
-        shadow = st_->fn->new_slot(slot_ty);
-        comp_slots_.emplace_back();
-        comp_slots_.back()[h.name] = shadow;
-        store_slot(shadow, ev);
+    for (auto& hb : bodies) {
+        switch_to(hb.block);
+        // 富异常（有字段/方法）的 except as e：取回真实例，类型是那个类；
+        // 否则照旧取扁平异常值。
+        const ClassInfo* rich = rich_exc_handler(hb.h);
+        TypePtr slot_ty = rich
+                              ? static_cast<TypePtr>(mk_class(const_cast<ClassInfo*>(rich)))
+                              : static_cast<TypePtr>(mk_exception("Exception"));
+        VReg ev = call_runtime(rich ? RtFn::ExcAcceptInstance : RtFn::ExcAcceptValue,
+                               slot_ty, {});
+        int shadow = -1;
+        if (!hb.h->name.empty()) {
+            shadow = st_->fn->new_slot(slot_ty);
+            comp_slots_.emplace_back();
+            comp_slots_.back()[hb.h->name] = shadow;
+            store_slot(shadow, ev);
+        }
+        // 槽已经 retain 过；释放创建时的那一个引用（与 lower_try_core 同）。
+        rc_dec(ev);
+        stmts(hb.h->body);
+        if (shadow >= 0) comp_slots_.pop_back();
+        if (terminated()) {
+            err(t.line, t.col, "internal: zero-cost except body ended with a terminator");
+            return;
+        }
+        call_void(RtFn::ExcDone, {});
+        Inst jj;
+        jj.op = IrOp::Jump;
+        jj.target = end;
+        emit(std::move(jj));
     }
-    // 槽已经 retain 过；释放创建时的那一个引用（与 lower_try_core 同）。
-    rc_dec(ev);
-    stmts(h.body);
-    if (shadow >= 0) comp_slots_.pop_back();
-    if (terminated()) {
-        err(t.line, t.col, "internal: zero-cost except body ended with a terminator");
-        return;
-    }
-    call_void(RtFn::ExcDone, {});
-    Inst jj;
-    jj.op = IrOp::Jump;
-    jj.target = end;
-    emit(std::move(jj));
 
     switch_to(end);
 }
