@@ -742,4 +742,51 @@ void AsmGen::invalidate_slot(int slot) {
             it = (it->second == r) ? alias_.erase(it) : std::next(it);
     }
 
+void AsmGen::emit_closure_shim(const IRFunction& f, int fi) {
+        // 统一调用约定：第 i 个实参放第 i 个整型实参寄存器，返回值放 %rax。
+        // 签名含浮点的函数需要这一层：间接调用点常常不知道真实签名（实参静态
+        // 类型是 unknown），只能按统一约定装填，由 shim 重排到真实位置；
+        // 返回时再把真实返回值（浮点在 %xmm0）搬回 %rax。
+        //
+        // 只处理参数个数 <= 6（无栈上实参）的签名，见 closure_needs_shim。
+        line(std::format("{}:", shim_label(fi)));
+        if (gnu_cfi()) line(".cfi_startproc");
+
+        const int n = static_cast<int>(f.params.size());
+        std::vector<TypePtr> ptypes;
+        ptypes.reserve(f.params.size());
+        for (auto& p : f.params) ptypes.push_back(p.ty);
+
+        // 临时区：先把所有实参落栈，避免重排时互相覆盖。
+        // +8 让 rsp 在即将到来的 call 处 16 字节对齐（入口 rsp ≡ 8 mod 16）。
+        const int tmp = ((8 * n + 15) & ~15) + 8;
+        line(std::format("subq ${}, %rsp", tmp));
+        if (gnu_cfi()) line(std::format(".cfi_def_cfa_offset {}", 8 + tmp));
+        for (int i = 0; i < n; ++i) {
+            // 统一约定下第 i 个实参在第 i 个整型实参寄存器（两套 ABI 相同）。
+            emit2("movq", arg_reg_i(i), std::format("{}(%rsp)", 8 * i));
+        }
+
+        // 按真实签名重排：浮点形参读回后放 %xmm，整型照旧。
+        auto locs = classify(ptypes);
+        for (int i = 0; i < n; ++i) {
+            const auto& l = locs[i];
+            if (l.fp) {
+                line(std::format("movsd {}(%rsp), %xmm{}", 8 * i, l.reg));
+            } else {
+                emit2("movq", std::format("{}(%rsp)", 8 * i), arg_reg_i(l.reg));
+            }
+        }
+        // 闭包环境指针：调用方已放在 %r10，临时区搬运不碰它，直接沿用。
+
+        line(std::format("call {}", func_label(fi)));
+
+        // 真实返回值 -> 统一约定：浮点在 %xmm0，搬到 %rax。
+        if (ir_is_float(f.ret)) line("movq %xmm0, %rax");
+
+        line(std::format("addq ${}, %rsp", tmp));
+        if (gnu_cfi()) line(std::format(".cfi_def_cfa_offset {}", 8));
+        line("ret");
+        if (gnu_cfi()) line(".cfi_endproc");
+    }
 }  // namespace pyadamas

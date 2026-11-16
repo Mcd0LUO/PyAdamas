@@ -475,6 +475,8 @@ private:
     }
 
     static std::string func_label(int i) { return std::format(".Lf{}", i); }
+    // 统一调用约定的 shim 入口标签（见 ir_types.h 的 closure_needs_shim）。
+    static std::string shim_label(int i) { return std::format(".Lshim{}", i); }
 
     std::string block_label(int bi) const { return block_labels_[static_cast<size_t>(bi)]; }
 
@@ -718,6 +720,8 @@ private:
     std::vector<ArgLoc> classify(const std::vector<TypePtr>& types) const;
 
     void emit_function(const IRFunction& f, int fi);
+    // 统一调用约定的 shim 入口（见 ir_types.h 的 closure_needs_shim）。
+    void emit_closure_shim(const IRFunction& f, int fi);
 
     // O2：只给可能「读在写之前」的槽做序言清零。
     std::vector<bool> slots_needing_zero() const;

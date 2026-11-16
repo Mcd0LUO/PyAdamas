@@ -45,6 +45,9 @@ static uint64_t str_literal_hash(const std::string& s) {
 static const char* const kCbReg64[6] = {"%rdi", "%rsi", "%rdx", "%rcx", "%r8", "%r9"};
 static const char* const kCbReg32[6] = {"%edi", "%esi", "%edx", "%ecx", "%r8d", "%r9d"};
 static const char* const kCbReg8[6] = {"%dil", "%sil", "%dl", "%cl", "%r8b", "%r9b"};
+// 统一调用约定的整型实参寄存器（与 kCbReg64 相同序列，语义不同：
+// 这里表示「第 i 个实参进第 i 个整型寄存器」，与 C ABI 的浮点槽无关。
+static const char* const kCbArgReg[6] = {"%rdi", "%rsi", "%rdx", "%rcx", "%r8", "%r9"};
 
 std::string AsmGen::gen(const IRModule& m) {
         m_ = &m;
@@ -233,7 +236,12 @@ std::string AsmGen::gen(const IRModule& m) {
                 out_ += "\t.quad 0x8000000000000000\n";
                 out_ += "\t.quad 0\n\t.quad 0\n\t.quad 0\n\t.quad 0\n\t.quad 0\n";
                 out_ += std::format(".Lclos{}:\n", i);
-                out_ += std::format("\t.quad {}\n", func_label(static_cast<int>(i)));
+                // 间接调用一律走统一约定：+0 指向 shim（签名含浮点的函数），
+                // 否则就是函数本体（统一约定与它的 ABI 恰好一致）。
+                if (closure_needs_shim(*m.funcs[i]))
+                    out_ += std::format("\t.quad {}\n", shim_label(static_cast<int>(i)));
+                else
+                    out_ += std::format("\t.quad {}\n", func_label(static_cast<int>(i)));
                 out_ += "\t.quad 0\n";
             }
         }
@@ -361,6 +369,12 @@ std::string AsmGen::gen(const IRModule& m) {
 
         for (size_t i = 0; i < m.funcs.size(); ++i) emit_function(*m.funcs[i], static_cast<int>(i));
 
+        // 统一调用约定的 shim：按真实签名把整型寄存器里的实参重排到
+        // %xmm / 栈，返回值也按真实签名放回 %rax。间接调用点不需要知道签名。
+        for (size_t i = 0; i < m.funcs.size(); ++i)
+            if (closure_needs_shim(*m.funcs[i]))
+                emit_closure_shim(*m.funcs[i], static_cast<int>(i));
+
         if (dbg_on_ && !dbg_entries_.empty()) {
             section_relro(); out_ += "\t.align 8\n";
             out_ += ".Ldbgtab:\n\t.quad .Ldbfile\n\t.quad .Ldbg_entries\n";
@@ -398,7 +412,22 @@ std::string AsmGen::gen(const IRModule& m) {
                         out_ += std::format("\tmovzbl {}, {}\n", kCbReg8[gi], kCbReg32[gi]);
                     ++gi;
                 }
-                out_ += "\tjmp *(%r10)\n";
+                // C 回调走真实 C ABI（浮点在 %xmm），而闭包 +0 指向统一约定入口。
+                // 这里把 C 侧实参按位置搬到统一约定的整型寄存器序列，再进 shim；
+                // 浮点返回值由 shim 放 %rax，这里搬回 %xmm0 满足 C 侧。
+                int ci = 0;
+                for (CKind k : m.cb_sigs[i].params) {
+                    if (k == CKind::Float)
+                        out_ += std::format("\tmovq %xmm{}, {}\n", ci, kCbArgReg[ci]);
+                    else
+                        out_ += std::format("\tmovq {}, {}\n", kCbReg64[ci], kCbArgReg[ci]);
+                    ++ci;
+                }
+                out_ += "\txorl %eax, %eax\n";
+                out_ += "\tcall *(%r10)\n";
+                if (m.cb_sigs[i].ret == CKind::Float)
+                    out_ += "\tmovq %rax, %xmm0\n";
+                out_ += "\tret\n";
                 if (gnu_cfi()) out_ += "\t.cfi_endproc\n";
             }
             out_ += "\t.bss\n\t.align 8\n";

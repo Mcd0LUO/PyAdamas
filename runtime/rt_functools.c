@@ -21,17 +21,7 @@ __asm__(
     "\tjmp *%r11\n"
     PA_SIZE_FUNC(pa_call2));
 
-__asm__(
-    ".text\n"
-    ".globl pa_call2_f\n"
-    PA_TYPE_FUNC(pa_call2_f)
-    "pa_call2_f:\n"
-    "\tmovq %rcx, %r10\n"
-    "\tmovq (%rcx), %r11\n"
-    "\tmovsd %xmm1, %xmm0\n"
-    "\tmovsd %xmm2, %xmm1\n"
-    "\tjmp *%r11\n"
-    PA_SIZE_FUNC(pa_call2_f));
+
 #else
 __asm__(
     ".text\n"
@@ -46,20 +36,50 @@ __asm__(
     "\tjmp *%r11\n"
     PA_SIZE_FUNC(pa_call2));
 
+
+#endif
+
+extern int64_t pa_call2(void* fn, int64_t a, int64_t b);
+extern double pa_call2_f(void* fn, double a, double b);
+/* pa_call2_f 与统一调用约定对齐：闭包里 +0 指向的入口（shim 或函数本体）
+   一律期望「第 i 个实参进第 i 个整型寄存器、返回值在 %rax」。C 侧传进来的
+   是 double（在 xmm 里），这里搬成位模式进整型寄存器；返回后再把 %rax 搬
+   回 %xmm0，维持本函数「返回 double」的 C 签名。 */
+#if defined(_WIN32)
 __asm__(
     ".text\n"
     ".globl pa_call2_f\n"
     PA_TYPE_FUNC(pa_call2_f)
     "pa_call2_f:\n"
+    "\tsubq $8, %rsp\n"
+    "\tmovq %rcx, %r10\n"
+    "\tmovq (%rcx), %r11\n"
+    "\tmovq %xmm1, %rcx\n"
+    "\tmovq %xmm2, %rdx\n"
+    "\txorl %eax, %eax\n"
+    "\tcall *%r11\n"
+    "\tmovq %rax, %xmm0\n"
+    "\taddq $8, %rsp\n"
+    "\tret\n"
+    PA_SIZE_FUNC(pa_call2_f));
+#else
+__asm__(
+    ".text\n"
+    ".globl pa_call2_f\n"
+    PA_TYPE_FUNC(pa_call2_f)
+    "pa_call2_f:\n"
+    "\tsubq $8, %rsp\n"
     "\tmovq %rdi, %r10\n"
     "\tmovq (%rdi), %r11\n"
+    "\tmovq %xmm0, %rdi\n"
+    "\tmovq %xmm1, %rsi\n"
     "\txorl %eax, %eax\n"
-    "\tjmp *%r11\n"
+    "\tcall *%r11\n"
+    "\tmovq %rax, %xmm0\n"
+    "\taddq $8, %rsp\n"
+    "\tret\n"
     PA_SIZE_FUNC(pa_call2_f));
 #endif
-
-extern int64_t pa_call2(void* fn, int64_t a, int64_t b);
-extern double pa_call2_f(void* fn, double a, double b);
 
 /* reduce(f, xs[, init])：折叠。acc 始终持有一份引用，每轮换手时释放
    旧的那份，堆元素不会在长列表上堆积。 */

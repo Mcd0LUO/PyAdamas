@@ -486,27 +486,31 @@ void AsmGen::gen_return(const Inst& in) {
 
 // ── 调用 ────────────────────────────────────────────────────
 void AsmGen::gen_call(const Inst& in) {
-        std::vector<TypePtr> types;
-        types.reserve(in.args.size());
-        for (VReg a : in.args) types.push_back(ty_of(a));
-        auto locs = classify(types);
-
-
-        // 函数值是闭包对象指针：+0 是代码地址。整个参数装配期间 %r11
-        // 一直握着闭包，最后既当环境指针传给被调函数，也从 +0 取地址调用。
+        // 间接调用走「统一调用约定」：第 i 个实参放第 i 个整型实参寄存器，
+        // 返回值从 %rax 取。闭包 +0 指向的入口要么是 shim（签名含浮点时由
+        // shim 重排到真实位置），要么是签名不含浮点的函数本体（统一约定与它
+        // 的 ABI 恰好一致）。这样调用点不需要知道被调函数的真实签名 ——
+        // 而在间接调用点上，实参类型常常是 unknown，本来就无从得知。
+        //
+        // 浮点实参按位模式搬进整型寄存器（movq），不改变位，由 shim 那边
+        // 读回后解释为 double。
         emit2("movq", src_op(in.a), "%r11");
         for (size_t i = 0; i < in.args.size(); ++i) {
-            if (locs[i].stack_off < 0) continue;
-            emit2("movq", src_op(in.args[i]), "%r10");
-            line(std::format("movq %r10, {}(%rsp)", locs[i].stack_off));
-        }
-        for (size_t i = 0; i < in.args.size(); ++i) {
-            const auto& l = locs[i];
-            if (l.stack_off >= 0) continue;
-            if (l.fp)
-                line(std::format("movsd {}, %xmm{}", src_op(in.args[i]), l.reg));
-            else
-                emit2("movq", src_op(in.args[i]), arg_reg_i(l.reg));
+            const auto& ty = ty_of(in.args[i]);
+            if (i < static_cast<size_t>(kMaxIntArgs())) {
+                if (ir_is_float(ty)) {
+                    // 浮点值在 %xmm 里，先搬到位模式再进整型寄存器。
+                    line(std::format("movq {}, %xmm15", src_op(in.args[i])));
+                    emit2("movq", "%xmm15", arg_reg_i(static_cast<int>(i)));
+                } else {
+                    emit2("movq", src_op(in.args[i]), arg_reg_i(static_cast<int>(i)));
+                }
+            } else {
+                // 超出寄存器个数：走栈。统一约定下按位置放在 out_base 之后。
+                emit2("movq", src_op(in.args[i]), "%r10");
+                line(std::format("movq %r10, {}(%rsp)",
+                                 out_base() + static_cast<int>(i - kMaxIntArgs()) * 8));
+            }
         }
         line("movq %r11, %r10");
         if (opt_ < 2) line("xorl %eax, %eax");
@@ -515,8 +519,13 @@ void AsmGen::gen_call(const Inst& in) {
         reload_fp_slots();
 
         if (!dst_unused(in)) {
-            if (ir_is_float(in.ty)) move_fp(dst_op(in.dst), "%xmm0");
-            else emit2("movq", "%rax", dst_op(in.dst));
+            // 统一约定下返回值在 %rax（浮点也是位模式）。
+            if (ir_is_float(in.ty)) {
+                line("movq %rax, %xmm0");
+                move_fp(dst_op(in.dst), "%xmm0");
+            } else {
+                emit2("movq", "%rax", dst_op(in.dst));
+            }
         }
     }
 

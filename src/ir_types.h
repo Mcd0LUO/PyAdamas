@@ -283,6 +283,36 @@ struct IRModule {
 
 inline bool ir_is_float(const TypePtr& t) { return t && t->kind == TyKind::Float; }
 
+/* ── 闭包的统一调用约定（间接调用） ─────────────────────────────
+   函数值（闭包）在间接调用点的实参类型常常是 unknown，调用方无法按真实
+   签名装填寄存器；而被调函数是按自己的签名编的 ABI。两边一旦对不上，
+   浮点实参/返回值就会被当成整数位模式传递（静默算错）。
+
+   办法：凡是签名里含浮点的函数，额外生成一个 shim 入口 —— shim 用「全部
+   实参都是原始 64 位整数寄存器 + 返回值放 %rax」的统一约定接收，再按真实
+   签名重排到 %rdi/%xmm 等位置。闭包 +0 指向 shim，于是所有间接调用都走
+   统一约定，无需运行期分派。签名不含浮点的函数不需要 shim（统一约定与
+   它自身的 ABI 恰好一致）。
+
+   限制：只处理「参数个数 <= 6 且不含栈上实参」的签名；超出时退回真实入口
+   （与改动前行为相同，不会更差）。生成器/协程的入口签名不同，一律不 shim。 */
+inline int closure_shim_nparams(const IRFunction& f) {
+    return static_cast<int>(f.params.size());
+}
+inline bool closure_needs_shim(const IRFunction& f) {
+    // 统一约定对**所有**间接调用的目标都成立：调用点不知道被调签名，
+    // 一律按「第 i 个实参进第 i 个整型寄存器、返回值在 %rax」装填与取值。
+    // 所以凡是可能被当作函数值使用的函数都需要 shim —— 不能只给「签名含
+    // 浮点」的做：实参类型由调用点决定，而调用点可能把浮点传给一个签名
+    // 里没有浮点的函数（例如 float 经 unknown 传给 int 函数）。
+    //
+    // 生成器/协程的入口签名不同（参数由创建包装写进堆帧），不 shim；
+    // 参数超过 6 个的签名要处理栈上实参，暂不 shim（退回原行为）。
+    if (f.is_generator) return false;
+    if (f.params.size() > 6) return false;
+    return true;
+}
+
 // 引用计数管理的堆类型。unknown 故意不算：它的机器表示可能是整数，
 // 按指针 dec 会直接段错误。宁可泄漏，不可误杀。
 inline bool ir_is_heap(const TypePtr& t) {
