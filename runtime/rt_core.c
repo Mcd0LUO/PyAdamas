@@ -566,6 +566,8 @@ void* rc_alloc(int64_t size, void (*dtor)(void*), void (*release)(void*),
     }
     void* p = (char*)h + sizeof(PyAdamasRc);
     memset(p, 0, (size_t)alloc_size);
+    // size 用调用方请求的字节数（不含 RC 头），和 ASan 报的口径一致，
+    // 方便两边对照。alloc_size 是池化后的容量，会偏大。
     return p;
 }
 
@@ -605,6 +607,7 @@ void pa_rc_dec(void* p) {
     if (h->rc <= 0) panic_c("refcount decrement on a freed object");
     if (--h->rc == 0) {
         if (rc_stats_on) stat_rc_free++;
+        pa_diag_rc_free(p, (int32_t)h->kind);
         rc_unlink(h);
         if (h->dtor) h->dtor(p);
         if (h->kind == PYADAMAS_RC_STR) str_pool_put(h);

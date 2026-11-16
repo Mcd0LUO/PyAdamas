@@ -478,6 +478,15 @@ extern void** temp_stack;
 extern int64_t temp_len;
 extern int64_t temp_cap;
 extern PyAdamasHandler* handler_top;
+
+/* 运行时诊断（rt_diag.c）。不设环境变量时全部是空操作。 */
+extern int pa_diag_rc_on;   /* -1=未初始化, 0=关闭, 1=开启 */
+void pa_diag_rc_alloc(void* p, int64_t size, int32_t kind);
+void pa_diag_rc_free(void* p, int32_t kind);
+void pa_diag_check_use(void* p, const char* what);
+void pa_exc_trace_alloc(PyAdamasException* e);
+void pa_exc_trace_move(PyAdamasException* e, const char* what, void* where);
+void pa_exc_trace_free(PyAdamasException* e);
 extern PyAdamasFrame* pa_frame_top;
 /* 异常 longjmp 前调用：释放 target 之上（更内层）所有帧里的堆槽引用。 */
 void pa_frame_unwind(PyAdamasFrame* target);

@@ -219,52 +219,112 @@ inc/dec 是配平的、`-O0` 也照样崩、关掉 GC 就好了。只有内存�
 
 **遇到 RC/GC/异常展开相关的「诡异」问题时，第一步就该跑这个。**
 
-### 异常对象生命周期追踪
+### 运行时诊断工具（rt_diag.c）
 
-ASan 能告诉你「谁泄漏了多少字节」，但**说不出那个对象是怎么被漏掉的** ——
-尤其异常对象这种裸 `malloc` 的非 RC 对象，所有权会在 `pending_exc` /
-`current_exc` / 生成器帧槽 / 临时栈之间反复转移，光看代码很难跟。
+RC/GC 的 bug 有一个共同点：**ASan 能告诉你漏了多少字节，但说不出那个对象
+是怎么被漏掉的**。异常对象、临时值、帧槽之间的所有权转移看不见，于是只能
+猜 —— 0.226 之前我在同一个 126 字节泄漏上盲试三轮，每次都引入新的内存错误。
 
-`PYADAMAS_EXC_TRACE=1` 打开运行时追踪，把每个 `PyAdamasException` 的
-完整轨迹打到 stderr，退出时汇总所有未释放对象：
+这个工具把「对象在哪一步丢掉」变成可以读出来的事实。
+
+#### 开关
+
+| 环境变量 | 作用 |
+|---|---|
+| `PYADAMAS_RC_TRACE=1` | 追踪所有 RC 对象的分配/释放 |
+| `PYADAMAS_RC_TRACE_MIN=N` | 只看分配字节数 >= N 的对象 |
+| `PYADAMAS_RC_TRACE_KIND=K` | 只看某类：`str` / `list` / `dict` / `obj` / `struct` |
+| `PYADAMAS_EXC_TRACE=1` | 只追踪异常对象（含所有权转移事件） |
+| `PYADAMAS_DIAG_DEPTH=N` | 调用链深度（默认 3，最大 8） |
+
+不设任何变量时：一次 `getenv` 判断 + 一次自增，**零输出、零可测开销**。
+
+#### 用法
 
 ```bash
-./build/dev/pyadamas build -O2 -o /tmp/prog tests/run/119_gen_except_suspend.py
-PYADAMAS_EXC_TRACE=1 /tmp/prog 2>&1 | grep -E 'exc#|exctrace'
+./build/dev/pyadamas build -O2 -o /tmp/prog tests/run/53_json.py
+PYADAMAS_RC_TRACE=1 PYADAMAS_RC_TRACE_KIND=str \
+PYADAMAS_RC_TRACE_MIN=25 PYADAMAS_DIAG_DEPTH=4 /tmp/prog
 ```
 
-输出：
+输出（每个对象一行分配、一行释放，退出时汇总未释放的）：
 
 ```
-[exc#1] alloc  ValueError       "boom"  at 0x...
-[exc#1] free   ValueError       at 0x...
-...
-[exc#5] alloc  KeyError         "inner"  at 0x...
-[exc#5] leave  KeyError         at 0x...62a8   ← exc_leave 写回帧槽
-[exc#5] leave  KeyError         at 0x...62a8   ← 又写一次
-[exctrace] 2 个异常对象未释放:
-  [exc#5] LEAK KeyError "inner"  at 0x...6070   ← 退出时仍存活
-  [exc#6] LEAK RuntimeError "r" at 0x...dd70
+[rc#20] alloc  str  32B rc=1  <- str_alloc_raw <- str_new <- pa_json_loads <- __pa_main (53_json.py:20)
+[rc#20] free   str  32B rc=0  <- pa_rc_cleanup <- __pa_main (53_json.py:20)
+[diag] 未释放 RC 对象 1 个，共 32 字节：
+  [rc#20] str 32B at 0x...
+        分配于 str_alloc_raw <- str_new <- pa_json_loads <- __pa_main (53_json.py:20)
 ```
 
-字段含义：
+最后那行直接给出了答案：**是 `53_json.py:20` 的 `json.loads` 产生的字符串
+没人释放** —— 不用猜。
 
-| 事件 | 含义 |
-|---|---|
-| `alloc` | 分配（`exc_new` / `pa_raise` / `pa_raise_args` / `pa_eh_raise`） |
-| `free` | `exc_free` 释放 |
-| `leave` | `pa_exc_leave` 把对象写回生成器帧槽（所有权转移，不是释放） |
-| `LEAK` | 程序退出时仍存活 |
+异常对象另有一套事件：`alloc` / `free` / `leave`（写回生成器帧槽，
+所有权转移，不是释放）/ `enter`（从帧槽取回）：
 
-**设计要点**：追踪表是**外部表**（指针 → 分配序号），不在
-`PyAdamasException` 里加字段 —— 那样会改变对象布局、让 ASan 报的字节数
-变化，干扰对照。不设环境变量时只有一次 `getenv` 判断和一次自增，零成本。
+```
+[exc#5] alloc  KeyError "inner"  <- pa_raise (rt_exc.c:660)
+[exc#5] leave  KeyError at 0x...e2a8      <- 写进帧槽 s1
+[exc#5] enter  KeyError at 0x...e2a8      <- 取回
+[exc#5] leave  KeyError at 0x...e2a8      <- 又写回去
+[exc#5] LEAK   KeyError                   <- 再没人还
+```
 
-用它定位 `119_gen_except_suspend` 的 126 字节泄漏时，直接看出：
-`exc#5` 被 `exc_leave` 写进帧槽后**再没有任何事件** —— 既没 `free`、
-也没被 `exc_enter` 取回。说明问题在「生成器销毁时帧槽里的异常对象没人还」，
-而不是 RC 配平。
+0.228 的修复就是靠这条轨迹定位的（写回槽后 status 短路跳过了释放）。
 
+#### 设计要点
+
+**外部哈希表，不改结构体布局。** 给 `PyAdamasException` 加一个追踪字段
+试过：对象从 126 字节变成 142，ASan 报的数字跟着变，前后对照就失效了。
+追踪信息全部放在 `rt_diag.c` 自己的表里。
+
+**调用点归因走 `_Unwind_Backtrace`。** `__builtin_return_address(n>0)`
+需要编译期常量、还会被 `-Werror=frame-address` 拦下。改用
+`_Unwind_Backtrace`（和 `rt_debug.c` 的 traceback 同一套机制），
+按 `.eh_frame` 逐帧还原，不依赖帧指针，并且能用生成代码的 PC 表拿到
+**文件名和行号**。链接时加 `-rdynamic`，运行时符号也能解析。
+
+**表满不静默丢弃。** 溢出时置标志，退出汇总明确打印「结果不完整」。
+诊断工具撒谎比不工作更糟。
+
+**地址复用不算新对象。** 哈希表插入时，同地址的 DEAD 记录原地复用（否则
+同一地址在表里出现多份，汇总把历史记录当泄漏 —— 实测误报 14 个对象）；
+但绝不覆盖 LIVE 槽（那会让真实泄漏从报告里消失 —— 实测漏报）。
+
+#### 一个必须记住的教训：不要在 `pa_rc_inc` / `pa_rc_dec` 里加钩子
+
+最初把「悬挂指针检测」放在这两个函数的入口：
+
+```c
+void pa_rc_inc(void* p) {
+    pa_diag_check_use(p, "inc");   // ← 这一行让 88_defaultdict 算错浮点
+    ...
+}
+```
+
+结果 `88_defaultdict` 的 `f["v"] += 1.5` 从 `1.5` 变成
+`-1.6882786079646144e+260` —— 一个纯浮点值被污染了。
+
+排查过程：先怀疑 `-rdynamic`（排除），再怀疑 `_Unwind_Backtrace`
+破坏浮点寄存器（排除），最后逐个钩子二分，锁定到 `pa_diag_check_use`。
+它只是**一个普通函数调用**，但在 `pa_rc_inc`/`pa_rc_dec` 这两个极热、
+会被内联的函数里，多一次调用就改变了寄存器分配，而生成的代码对
+`%xmm0` 的存活假设太脆弱，于是值被覆盖。
+
+**结论**：诊断钩子只能放在非热路径（`rc_alloc` 入口、真正释放的那一支）。
+想覆盖 `inc`/`dec`，只能用「先查一个全局标志、只在开启时才调函数」的
+形式，而且这个标志判断本身必须能被内联成一条 load + test。
+
+这个 bug 也顺带说明：**运行时对浮点寄存器生命期的依赖比想象中脆弱**，
+任何在热路径上新增的调用都可能踩到。
+#### 已知边界
+
+* 只在 `rc_alloc` / `pa_rc_dec` / `gc_free_body` 三个点埋钩子，绕过它们的
+  分配（裸 `malloc` 的异常对象、handler 记录等）不在 RC 追踪范围内 ——
+  那些用 `PYADAMAS_EXC_TRACE` 单独追。
+* 追踪表固定 65536 项，长跑程序会溢出（会提示）。
+* 有编译开销：每个分配点多一次函数调用 + `getenv` 缓存判断。只在诊断时开。
 #### 生成程序插桩（最常用）
 
 `--asan` / `--ubsan` 让生成的可执行文件带检查器，编译和链接同时生效：

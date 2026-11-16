@@ -103,7 +103,7 @@ else()
   set(PYADAMAS_RT_WERROR "")
 endif()
 
-set(PYADAMAS_RT_PARTS core exc eh gen async task fd agen str list dict slice class math complex format file random os subprocess time stdlib json re functools datetime deque hash debug personality)
+set(PYADAMAS_RT_PARTS core exc eh gen async task fd agen str list dict slice class math complex format file random os subprocess time stdlib json re functools datetime deque hash debug personality diag)
 set(PYADAMAS_RT_OBJS "")
 foreach(part ${PYADAMAS_RT_PARTS})
   set(rt_obj "${CMAKE_BINARY_DIR}/rt_${part}.o")
