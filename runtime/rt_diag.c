@@ -234,58 +234,55 @@ static int diag_exc_enabled(void) {
     return diag_exc_on;
 }
 
-/* 线性查找。表满时靠开放寻址太复杂，直接用指针哈希取模 + 线性探测。 */
-static size_t diag_hash(void* p) {
-    uintptr_t v = (uintptr_t)p;
-    v ^= v >> 17;
-    v *= (uintptr_t)0xed5ad4bbU;
-    v ^= v >> 11;
-    return (size_t)(v % DIAG_MAX);
-}
-
+/* 查找/插入都用**线性扫描**。
+ *
+ * 之前用开放寻址哈希，踩了两个坑：
+ *   1. 复用「地址不同」的 DEAD 槽时，新记录落在 hash(旧地址)+k 的位置，
+ *      而 diag_find(新地址) 从 hash(新地址) 开始探测 —— 找不到。表现是
+ *      「刚 alloc 完，紧接着的 temp-push 报 UNTRACKED」。
+ *   2. 地址复用后旧记录残留，事件归属错乱。
+ *
+ * 活跃对象只有几十个，O(n) 线性扫描完全够，而且没有这些不变量问题。
+ * 只有诊断开启时才走这条路，不影响正常运行。 */
 static DiagSlot* diag_find(void* p, int want_dead) {
-    size_t i = diag_hash(p);
-    for (size_t probe = 0; probe < 64; ++probe) {
-        DiagSlot* s = &diag_tab[(i + probe) % DIAG_MAX];
-        if (s->state == DIAG_FREE) return NULL;
+    for (size_t i = 0; i < DIAG_MAX; ++i) {
+        DiagSlot* s = &diag_tab[i];
+        if (s->state == DIAG_FREE) continue;
         if (s->ptr != p) continue;
-        if (s->state == DIAG_DEAD && !want_dead) return NULL;
+        if (s->state == DIAG_DEAD && !want_dead) continue;
         return s;
     }
     return NULL;
 }
 
-/* 找槽位插入。
- *
- * 三条规则，都是为了「报告不能撒谎」：
- *
- *   1. **同地址的 DEAD 记录原地复用**。地址会被 malloc 复用，这是正常的：
- *      上一个对象在 p 释放、下一个对象又在 p 分配。这时必须覆盖旧记录，
- *      否则同一个地址在表里出现多份，汇总时把历史记录当成泄漏（误报）。
- *
- *   2. **不碰 LIVE 槽**。探测链上遇到 LIVE 就继续找 —— 覆盖它会让一个
- *      真实存活的对象从报告里消失（漏报）。
- *
- *   3. 链尾仍无空位时，复用「地址不同」的 DEAD 并计 overflow ——
- *      明确告诉使用者结果不完整，而不是静默截断。 */
+/* 找槽位插入：同地址的旧记录（无论 LIVE/DEAD）原地复用，否则用第一个空位。
+ * 绝不覆盖「地址不同的 LIVE」——那会让真实泄漏从报告里消失。 */
 static DiagSlot* diag_insert(void* p) {
-    size_t i = diag_hash(p);
-    DiagSlot* reuse_dead = NULL;
-    for (size_t probe = 0; probe < 64; ++probe) {
-        DiagSlot* s = &diag_tab[(i + probe) % DIAG_MAX];
-        if (s->state == DIAG_FREE) return s;
-        if (s->state == DIAG_DEAD) {
-            if (s->ptr == p) {
-                --diag_dead;    /* 地址复用：旧记录作废 */
+    DiagSlot* empty = NULL;
+    DiagSlot* dead_other = NULL;
+    for (size_t i = 0; i < DIAG_MAX; ++i) {
+        DiagSlot* s = &diag_tab[i];
+        if (s->state == DIAG_FREE) {
+            if (!empty) empty = s;
+            continue;
+        }
+        if (s->ptr == p) {
+            /* 同地址：只有 DEAD 才能原地复用（地址被 malloc 回收再分配）。
+             * LIVE 说明**上一个同地址对象还没释放** —— 那是运行时 bug，
+             * 但工具不能因此把旧记录覆盖掉，否则两个对象混成一条，
+             * 事件归属全乱。给它新槽，让两条记录并存。 */
+            if (s->state == DIAG_DEAD) {
+                --diag_dead;
                 return s;
             }
-            if (!reuse_dead) reuse_dead = s;
+            continue;
         }
+        if (s->state == DIAG_DEAD && !dead_other) dead_other = s;
     }
-    if (reuse_dead) {
-        --diag_dead;
+    if (empty) return empty;
+    if (dead_other) {
         ++diag_overflow;
-        return reuse_dead;
+        return dead_other;
     }
     return NULL;
 }
@@ -355,18 +352,61 @@ void pa_diag_check_use(void* p, const char* what) {
 
 /* 临时栈事件：配合 RC 追踪看「进了栈却没被 pop」的对象。
  * 只在 PYADAMAS_RC_TRACE 开启时调用（rt_core 侧有全局标志短路）。 */
+/* 临时栈事件。
+ *
+ * **不能靠地址反查归属**：地址会被立刻复用，于是「旧对象的 push」会被算到
+ * 「刚在同一地址分配的新对象」头上，得出「push 了两次、只 pop 一次」这种
+ * 假象（实测 53_json 的 rc#20）。
+ *
+ * 正确做法是在 push 的那一刻就记下当时的分配序号，随栈项一起保存 ——
+ * 但 temp_stack 是 int64_t* 数组，塞不下额外字段。所以这里改为
+ * **按栈深+序号配对打印**：push 时记 (depth, id)，pop 时用同样的 depth
+ * 找最近一次同深的 push。两边都带 id，归属就不会错。 */
+typedef struct {
+    int64_t depth;
+    int64_t id;
+    int32_t kind;
+    int32_t used;
+} TempMark;
+#define TEMP_MARK_MAX 256
+static TempMark temp_marks[TEMP_MARK_MAX];
+
 void pa_diag_temp(const char* what, void* p, int64_t depth) {
     if (!p) return;
     DiagSlot* s = diag_find(p, 0);
     if (!s) {
-        /* 没追踪到：可能被 MIN/KIND 过滤掉，也可能根本没走 rc_alloc。
-         * 后者才是我们要找的 bug —— 明确报出来。 */
-        fprintf(stderr, "[diag] temp-%-4s UNTRACKED ptr=%p depth=%lld\n",
-                what, p, (long long)depth);
+        /* 不在表里：打印 RC 头，区分「被 MIN/KIND 过滤掉」（正常）和
+         * 「根本没走 rc_alloc」（真 bug）。 */
+        PyAdamasRc* h = (PyAdamasRc*)p - 1;
+        fprintf(stderr, "[diag] temp-%-4s UNTRACKED ptr=%p depth=%lld "
+                        "kind=%lld rc=%lld size=%lld\n",
+                what, p, (long long)depth, (long long)h->kind,
+                (long long)h->rc, (long long)h->size);
         return;
     }
-    fprintf(stderr, "[rc#%lld] temp-%-4s %s depth=%lld\n",
-            (long long)s->id, what, diag_kind_name(s->kind), (long long)depth);
+    if (what[1] == 'u') {   /* push（"push" 第 2 个字符是 u，"pop" 是 o） */
+        for (int i = 0; i < TEMP_MARK_MAX; ++i) {
+            if (temp_marks[i].used) continue;
+            temp_marks[i].used = 1;
+            temp_marks[i].depth = depth;
+            temp_marks[i].id = s->id;
+            temp_marks[i].kind = s->kind;
+            break;
+        }
+        fprintf(stderr, "[rc#%lld] temp-push %s depth=%lld\n",
+                (long long)s->id, diag_kind_name(s->kind), (long long)depth);
+    } else {                /* pop */
+        int64_t id = s->id;
+        for (int i = 0; i < TEMP_MARK_MAX; ++i) {
+            if (!temp_marks[i].used || temp_marks[i].depth != depth) continue;
+            id = temp_marks[i].id;
+            temp_marks[i].used = 0;
+            break;
+        }
+        fprintf(stderr, "[rc#%lld] temp-pop  %s depth=%lld%s\n",
+                (long long)id, diag_kind_name(s->kind), (long long)depth,
+                id != s->id ? "  [地址已复用，按 push 时的序号归属]" : "");
+    }
 }
 
 /* ── 异常对象追踪（0.227 能力，保留并加上分配点归因） ── */
