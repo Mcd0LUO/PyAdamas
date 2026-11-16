@@ -163,6 +163,8 @@ void AsmGen::assign_vreg_slots() {
 // 用 callee-saved GPR，调用天然安全；浮点用 xmm8–15（xmm0–7 留给
 // 参数和临时），在每次会正常返回的 call 前后统一写回/读出栈槽。
 void AsmGen::spill_fp_slots() {
+        // 整型 caller 池的槽也要在调用点写回（它们同样被 call 破坏）。
+        spill_int_caller_slots();
         for (size_t j = 0; j < fp_promoted_slots_.size(); ++j) {
             if (fp_mask_valid_ && j < fp_spill_mask_.size() && !fp_spill_mask_[j])
                 continue;
@@ -172,6 +174,7 @@ void AsmGen::spill_fp_slots() {
     }
 
 void AsmGen::reload_fp_slots() {
+        reload_int_caller_slots();
         for (size_t j = 0; j < fp_promoted_slots_.size(); ++j) {
             if (fp_mask_valid_ && j < fp_spill_mask_.size() && !fp_spill_mask_[j])
                 continue;
@@ -180,6 +183,32 @@ void AsmGen::reload_fp_slots() {
         }
     }
 
+
+// ── R3：caller-saved 池的调用点保存/恢复 ─────────────────────────
+//
+// 与浮点的 spill_fp_slots / reload_fp_slots 同构。区别：整型只在
+// int_caller_slots_ 非空时才动作（大多数函数用不到 caller 池）。
+void AsmGen::spill_int_caller_slots() {
+        if (int_caller_slots_.empty()) return;
+        for (size_t j = 0; j < int_caller_slots_.size(); ++j) {
+            if (int_caller_mask_valid_ && j < int_caller_mask_.size() &&
+                !int_caller_mask_[static_cast<size_t>(j)])
+                continue;
+            int slot = int_caller_slots_[j];
+            line(std::format("movq {}, {}", slot_reg_[static_cast<size_t>(slot)], smem(slot)));
+        }
+    }
+
+void AsmGen::reload_int_caller_slots() {
+        if (int_caller_slots_.empty()) return;
+        for (size_t j = 0; j < int_caller_slots_.size(); ++j) {
+            if (int_caller_mask_valid_ && j < int_caller_mask_.size() &&
+                !int_caller_mask_[static_cast<size_t>(j)])
+                continue;
+            int slot = int_caller_slots_[j];
+            line(std::format("movq {}, {}", smem(slot), slot_reg_[static_cast<size_t>(slot)]));
+        }
+    }
 // 浮点槽在调用点是否还需要：块级 live-in/live-out（只跟踪提升过的槽）。
 void AsmGen::build_fp_liveness() {
         const int nb = static_cast<int>(f_->blocks.size());
@@ -257,9 +286,408 @@ void AsmGen::build_fp_liveness() {
         }
     }
 
+
+// ── R1：整型槽的块级活跃性 ────────────────────────────────────────
+//
+// 目的：给 assign_slot_regs_linear 提供活跃区间。做法是标准的
+// live-in/live-out 数据流（与上面的 build_fp_liveness 同形状，但跟踪
+// 全部可提升的整型槽，且位图按槽号而不是按「提升过的下标」）。
+//
+// 排除条件与 assign_slot_regs 一致：堆槽（帧记录按地址读值，寄存器里
+// 的值 GC 看不见）、取过地址的槽（SlotAddr）、handler hazard 槽（longjmp
+// 会回滚 callee-saved）都不参与。
+void AsmGen::build_slot_liveness() {
+        const int nb = static_cast<int>(f_->blocks.size());
+        const int ns = static_cast<int>(f_->slot_ty.size());
+        slot_live_in_.assign(static_cast<size_t>(nb), {});
+        slot_live_out_.assign(static_cast<size_t>(nb), {});
+        slot_reg_cand_.clear();
+        slot_reg_cand_idx_.assign(static_cast<size_t>(ns), -1);
+        if (nb == 0 || ns == 0) return;
+
+        // 1) 排除：堆槽 / 取过地址 / handler hazard。
+        std::vector<bool> addr_taken(static_cast<size_t>(ns), false);
+        for (const auto& b : f_->blocks)
+            for (const auto& in : b.insts)
+                if (in.op == IrOp::SlotAddr && in.idx >= 0 && in.idx < ns)
+                    addr_taken[static_cast<size_t>(in.idx)] = true;
+
+        std::vector<bool> hazard(static_cast<size_t>(ns), false);
+        if (f_->has_handlers) {
+            std::vector<bool> in_handler(static_cast<size_t>(nb), false);
+            std::vector<int> open;
+            for (int b = 0; b < nb; ++b) {
+                for (const auto& in : f_->blocks[static_cast<size_t>(b)].insts) {
+                    if (in.op == IrOp::CallRt &&
+                        in.imm == static_cast<int64_t>(RtFn::HandlerPush))
+                        open.push_back(b);
+                    else if (in.op == IrOp::CallRt &&
+                             (in.imm == static_cast<int64_t>(RtFn::HandlerLeave) ||
+                              in.imm == static_cast<int64_t>(RtFn::HandlerDiscard))) {
+                        if (!open.empty()) open.pop_back();
+                    }
+                }
+                in_handler[static_cast<size_t>(b)] = !open.empty();
+            }
+            for (int s2 = 0; s2 < ns; ++s2) {
+                bool wrote = false;
+                bool read = false;
+                for (int b = 0; b < nb; ++b) {
+                    for (const auto& in : f_->blocks[static_cast<size_t>(b)].insts) {
+                        if (in.idx != s2) continue;
+                        if (in.op == IrOp::StoreSlot && in_handler[static_cast<size_t>(b)])
+                            wrote = true;
+                        else if (in.op == IrOp::LoadSlot)
+                            read = true;
+                    }
+                }
+                if (wrote && read) hazard[static_cast<size_t>(s2)] = true;
+            }
+        }
+
+        for (int s2 = 0; s2 < ns; ++s2) {
+            if (ir_is_heap(f_->slot_ty[static_cast<size_t>(s2)])) continue;
+            if (ir_is_float(f_->slot_ty[static_cast<size_t>(s2)])) continue;
+            if (addr_taken[static_cast<size_t>(s2)]) continue;
+            if (hazard[static_cast<size_t>(s2)]) continue;
+            slot_reg_cand_idx_[static_cast<size_t>(s2)] =
+                static_cast<int>(slot_reg_cand_.size());
+            slot_reg_cand_.push_back(s2);
+        }
+        const int nc = static_cast<int>(slot_reg_cand_.size());
+        if (nc == 0) return;
+        const int words = (nc + 63) / 64;
+        for (int b = 0; b < nb; ++b) {
+            slot_live_in_[static_cast<size_t>(b)].assign(static_cast<size_t>(words), 0);
+            slot_live_out_[static_cast<size_t>(b)].assign(static_cast<size_t>(words), 0);
+        }
+
+        // 2) 每块的 use / def（位图，按候选下标）。
+        std::vector<std::vector<uint64_t>> use(static_cast<size_t>(nb)),
+            def(static_cast<size_t>(nb));
+        for (int b = 0; b < nb; ++b) {
+            use[static_cast<size_t>(b)].assign(static_cast<size_t>(words), 0);
+            def[static_cast<size_t>(b)].assign(static_cast<size_t>(words), 0);
+            for (const auto& in : f_->blocks[static_cast<size_t>(b)].insts) {
+                if (in.idx < 0 || in.idx >= ns) continue;
+                int ci = slot_reg_cand_idx_[static_cast<size_t>(in.idx)];
+                if (ci < 0) continue;
+                uint64_t bit = 1ULL << (ci & 63);
+                size_t w = static_cast<size_t>(ci >> 6);
+                if (in.op == IrOp::LoadSlot) {
+                    // 块内先写后读不算 use（读的是本块定义的值）。
+                    if (!(def[static_cast<size_t>(b)][w] & bit))
+                        use[static_cast<size_t>(b)][w] |= bit;
+                } else if (in.op == IrOp::StoreSlot) {
+                    def[static_cast<size_t>(b)][w] |= bit;
+                }
+            }
+        }
+
+        // 3) 后继边。
+        std::vector<std::vector<int>> succ(static_cast<size_t>(nb));
+        for (int b = 0; b < nb; ++b) {
+            const auto& insts = f_->blocks[static_cast<size_t>(b)].insts;
+            auto add = [&](int t) {
+                if (t >= 0 && t < nb) succ[static_cast<size_t>(b)].push_back(t);
+            };
+            if (insts.empty()) {
+                add(b + 1);
+                continue;
+            }
+            switch (insts.back().op) {
+                case IrOp::Jump: add(insts.back().target); break;
+                case IrOp::Branch:
+                    add(insts.back().target);
+                    add(insts.back().target2);
+                    break;
+                case IrOp::Return:
+                case IrOp::GenYield:
+                case IrOp::GenAwait:
+                case IrOp::GenRethrow:
+                case IrOp::GenDone:
+                    break;
+                default: add(b + 1); break;
+            }
+        }
+
+        // 4) 迭代到不动点：in = use | (out & ~def)，out = ∪ in(succ)。
+        bool chg = true;
+        while (chg) {
+            chg = false;
+            for (int b = nb - 1; b >= 0; --b) {
+                std::vector<uint64_t> out(static_cast<size_t>(words), 0);
+                for (int sc : succ[static_cast<size_t>(b)])
+                    for (int w = 0; w < words; ++w)
+                        out[static_cast<size_t>(w)] |=
+                            slot_live_in_[static_cast<size_t>(sc)][static_cast<size_t>(w)];
+                std::vector<uint64_t> in(static_cast<size_t>(words), 0);
+                for (int w = 0; w < words; ++w)
+                    in[static_cast<size_t>(w)] =
+                        use[static_cast<size_t>(b)][static_cast<size_t>(w)] |
+                        (out[static_cast<size_t>(w)] &
+                         ~def[static_cast<size_t>(b)][static_cast<size_t>(w)]);
+                if (out != slot_live_out_[static_cast<size_t>(b)] ||
+                    in != slot_live_in_[static_cast<size_t>(b)]) {
+                    slot_live_out_[static_cast<size_t>(b)] = std::move(out);
+                    slot_live_in_[static_cast<size_t>(b)] = std::move(in);
+                    chg = true;
+                }
+            }
+        }
+
+        if (std::getenv("PYADAMAS_RA_DEBUG")) {
+            std::fprintf(stderr, "[ra] %s: %d blocks, %d cand slots, %d words\n",
+                         f_->name.c_str(), nb, nc, words);
+            for (int b = 0; b < nb; ++b) {
+                std::fprintf(stderr, "  bb%d in:", b);
+                for (int ci = 0; ci < nc; ++ci)
+                    if (slot_live_in_[static_cast<size_t>(b)]
+                            [static_cast<size_t>(ci >> 6)] >> (ci & 63) & 1)
+                        std::fprintf(stderr, " s%d", slot_reg_cand_[static_cast<size_t>(ci)]);
+                std::fprintf(stderr, "  out:");
+                for (int ci = 0; ci < nc; ++ci)
+                    if (slot_live_out_[static_cast<size_t>(b)]
+                            [static_cast<size_t>(ci >> 6)] >> (ci & 63) & 1)
+                        std::fprintf(stderr, " s%d", slot_reg_cand_[static_cast<size_t>(ci)]);
+                std::fprintf(stderr, "\n");
+            }
+        }
+    }
+
+// ── R2：按活跃区间的线性扫描分配 ─────────────────────────────────
+//
+// 与旧的 assign_slot_regs（按访问频次挑前 N 个）的区别：旧办法一个槽
+// 要么全程常驻、要么全程落栈；线性扫描允许**不同活跃区间的槽复用同一个
+// 寄存器**，所以在变量数超过寄存器数时覆盖率明显更高。
+//
+// 区间计算：对每个候选槽，取「第一次出现（定义或使用）」到「最后一次
+// 出现」之间的全部指令位置。这是保守的线性近似（真实的区间是活跃性
+// 集合，可能不连续），但实现简单且不会错 —— 只会让复用变少，不会让
+// 两个同时活跃的槽抢到同一个寄存器。
+//
+// 分配：区间按起点排序后线性扫描；寄存器用完时，把「当前终点最远」的
+// 区间溢出到栈（它是最后才会空出来的那个，溢出的机会成本最大）。
+
+// 判断一段线性位置区间内是否有调用类指令。caller-saved 寄存器只在
+// 「不跨调用」的区间里可以安全承载变量。
+//
+// 位置编码与 assign_slot_regs_linear 一致：块号 * kBlockStride + 块内下标。
+bool AsmGen::slot_range_has_call(int64_t beg, int64_t end) const {
+        const int64_t kBlockStride = 1 << 20;
+        const int64_t b0 = beg / kBlockStride;
+        const int64_t b1 = end / kBlockStride;
+        // 跨块一律保守判为「有调用」：块之间的跳转可能经过调用点。
+        if (b0 != b1) return true;
+        if (b0 < 0 || b0 >= static_cast<int64_t>(f_->blocks.size())) return true;
+        const auto& insts = f_->blocks[static_cast<size_t>(b0)].insts;
+        for (const auto& in : insts) {
+            switch (in.op) {
+                case IrOp::Call:
+                case IrOp::CallRt:
+                case IrOp::CallExtern:
+                case IrOp::CallPtr:
+                case IrOp::CallDirect:
+                case IrOp::VCall:
+                case IrOp::VCallStatic:
+                case IrOp::SuperVCall:
+                case IrOp::Setjmp:
+                    return true;
+                default:
+                    break;
+            }
+        }
+        return false;
+    }
+void AsmGen::assign_slot_regs_linear() {
+        const int nc = static_cast<int>(slot_reg_cand_.size());
+        if (nc == 0) return;
+        const int nreg = kMaxSlotRegs();
+        if (nreg <= 0) return;
+
+        // 1) 活跃区间。**不能**只取「首次/末次出现的位置」——
+        //    块在列表里的顺序与 CFG 顺序无关，循环回边会让「只在 latch 活跃」
+        //    和「只在 header 活跃」的两个槽区间不相交，从而被分到同一寄存器，
+        //    而它们在回边上其实是同时活跃的（实测：3 个用例挂起、4 个段错误）。
+        //
+        //    正确做法：把区间扩展到「该槽在 live-in / live-out 里的所有块」，
+        //    再加上实际读写它的块。这样只要两个槽在某个块里同时活跃，
+        //    它们的区间就一定相交，不会被误分到同一个寄存器。
+        const int64_t kBlockStride = 1 << 20;
+        std::vector<int64_t> first(static_cast<size_t>(nc), INT64_MAX);
+        std::vector<int64_t> last(static_cast<size_t>(nc), -1);
+        auto touch = [&](int ci, int64_t lo, int64_t hi) {
+            if (lo < first[static_cast<size_t>(ci)])
+                first[static_cast<size_t>(ci)] = lo;
+            if (hi > last[static_cast<size_t>(ci)])
+                last[static_cast<size_t>(ci)] = hi;
+        };
+        for (int b = 0; b < static_cast<int>(f_->blocks.size()); ++b) {
+            const int64_t blk_lo = static_cast<int64_t>(b) * kBlockStride;
+            const int64_t blk_hi =
+                blk_lo + static_cast<int64_t>(f_->blocks[static_cast<size_t>(b)].insts.size());
+            // (a) 块内有读写：按实际指令位置。
+            int64_t pos = blk_lo;
+            for (const auto& in : f_->blocks[static_cast<size_t>(b)].insts) {
+                if (in.idx >= 0 && in.idx < static_cast<int>(slot_reg_cand_idx_.size())) {
+                    int ci = slot_reg_cand_idx_[static_cast<size_t>(in.idx)];
+                    if (ci >= 0 && (in.op == IrOp::LoadSlot || in.op == IrOp::StoreSlot))
+                        touch(ci, pos, pos);
+                }
+                ++pos;
+            }
+            // (b) 在 live-in / live-out 里：整块都算进区间（保守）。
+            if (b < static_cast<int>(slot_live_in_.size())) {
+                for (int ci = 0; ci < nc; ++ci) {
+                    size_t w = static_cast<size_t>(ci >> 6);
+                    uint64_t bit = 1ULL << (ci & 63);
+                    if ((slot_live_in_[static_cast<size_t>(b)][w] & bit) ||
+                        (slot_live_out_[static_cast<size_t>(b)][w] & bit))
+                        touch(ci, blk_lo, blk_hi);
+                }
+            }
+        }
+        // 2) 只要真正出现过的槽。
+        struct Live {
+            int64_t beg;
+            int64_t end;
+            int slot;
+        };
+        std::vector<Live> lives;
+        for (int ci = 0; ci < nc; ++ci) {
+            if (last[static_cast<size_t>(ci)] < 0) continue;
+            lives.push_back({first[static_cast<size_t>(ci)],
+                             last[static_cast<size_t>(ci)],
+                             slot_reg_cand_[static_cast<size_t>(ci)]});
+        }
+        if (lives.empty()) return;
+        std::ranges::sort(lives, [](const Live& a, const Live& b) {
+            return a.beg != b.beg ? a.beg < b.beg : a.slot < b.slot;
+        });
+
+        // 3) 线性扫描。active 里按「终点」维护，方便溢出选择。
+        std::vector<Live> active;
+        std::vector<bool> used(static_cast<size_t>(nreg), false);
+        int assigned = 0;
+        for (const Live& lv : lives) {
+            bool placed = false;
+            // 释放已经结束的区间。
+            for (size_t i2 = 0; i2 < active.size();) {
+                if (active[i2].end < lv.beg) {
+                    // 找它占的寄存器并释放。
+                    for (int r = 0; r < nreg; ++r) {
+                        if (slot_reg_[active[i2].slot] == kSlotRegs()[r]) {
+                            used[static_cast<size_t>(r)] = false;
+                            break;
+                        }
+                    }
+                    active.erase(active.begin() + static_cast<long>(i2));
+                } else {
+                    ++i2;
+                }
+            }
+            int free_r = -1;
+            for (int r = 0; r < nreg; ++r)
+                if (!used[static_cast<size_t>(r)]) {
+                    free_r = r;
+                    break;
+                }
+            if (free_r >= 0) {
+                used[static_cast<size_t>(free_r)] = true;
+                slot_reg_[lv.slot] = kSlotRegs()[free_r];
+                active.push_back(lv);
+                ++assigned;
+                continue;
+            }
+            // 没有空闲 callee 寄存器：先试 caller 池（r8–r11）。
+            // 这些寄存器的代价是「每个调用点要保存/恢复」，但比全程落栈便宜。
+            // 只在槽的生命周期内**没有跨越调用点**时才划算；这里保守地
+            // 一律允许，由 int_caller_mask_ 在调用点按活跃性决定要不要真的存。
+            {
+                // SysV 下真正空闲的 caller-saved 寄存器分析：
+                //   %rax/%rcx/%rdx/%rsi/%rdi → 参数/返回/scratch，占死
+                //   %r8/%r9                  → 第 5/6 个整型参数寄存器
+                //   %r10/%r11                → 闭包指针与环境指针（调用序列专用）
+                // 结论：**没有**能跨调用的 caller 池。
+                //
+                // 但块内临时池已经从 4 个缩到 2 个（r8/r9），r10/r11 空出来了；
+                // 它们不能跨调用，但可以在**无调用的块**里承载变量。
+                // 这里只把「生命周期落在单个无调用块内」的槽放进去 ——
+                // 跨块的仍留给 callee 池或落栈。
+                static const char* const kCallerExtra[] = {"%r10", "%r11"};
+                constexpr int kNCallerExtra = 2;
+                for (int r = 0; r < kNCallerExtra; ++r) {
+                    bool taken = false;
+                    for (const auto& sr : slot_reg_)
+                        if (sr == kCallerExtra[r]) {
+                            taken = true;
+                            break;
+                        }
+                    if (taken) continue;
+                    // 只有「活跃区间不跨任何调用点」的槽才能用 caller 池。
+                    // 判定：该槽所在块区间内没有 call 类指令。保守起见，
+                    // 这里要求区间的起点与终点落在**同一个块**且该块无调用。
+                    if (!slot_range_has_call(lv.beg, lv.end)) {
+                        slot_reg_[lv.slot] = kCallerExtra[r];
+                        int_caller_slots_.push_back(lv.slot);
+                    } else {
+                        continue;  // 跨调用：试下一个 caller 寄存器
+                    }
+                    active.push_back(lv);
+                    ++assigned;
+                    placed = true;
+                    break;
+                }
+            }
+            if (placed) continue;
+            // 没有空闲寄存器：和 active 里终点最远的比，谁更长就溢出谁。
+            size_t worst = 0;
+            for (size_t i2 = 1; i2 < active.size(); ++i2)
+                if (active[i2].end > active[worst].end) worst = i2;
+            if (active[worst].end > lv.end) {
+                // 溢出那个更长的，把它的寄存器让给当前这个。
+                int freed = -1;
+                for (int r = 0; r < nreg; ++r)
+                    if (slot_reg_[active[worst].slot] == kSlotRegs()[r]) {
+                        freed = r;
+                        break;
+                    }
+                if (freed >= 0) {
+                    slot_reg_[active[worst].slot].clear();
+                    slot_reg_[lv.slot] = kSlotRegs()[freed];
+                    active[worst] = lv;
+                    ++assigned;
+                }
+            }
+            // 否则当前这个直接落栈（slot_reg_ 保持空）。
+        }
+
+        // 4) 统计实际用到的最高寄存器下标，供序言/尾声 push-pop 用。
+        int n_used = 0;
+        for (int r = 0; r < nreg; ++r) {
+            bool any = false;
+            for (const auto& sr : slot_reg_)
+                if (sr == kSlotRegs()[r]) {
+                    any = true;
+                    break;
+                }
+            if (any) n_used = r + 1;
+        }
+        n_saved_regs_ = n_used;
+
+        if (std::getenv("PYADAMAS_RA_DEBUG")) {
+            std::fprintf(stderr, "[ra] %s: %d/%d slots promoted (linear scan), %d regs\n",
+                         f_->name.c_str(), assigned, nc, n_used);
+        }
+    }
 void AsmGen::assign_slot_regs() {
         int ns = static_cast<int>(f_->slot_ty.size());
         slot_reg_.assign(ns, std::string());
+        // R1：先把整型槽的块级活跃性算出来（R2 的线性扫描要用）。
+        build_slot_liveness();
+        int_caller_slots_.clear();
+        int_caller_mask_.clear();
+        int_caller_mask_valid_ = false;
         slot_fpidx_.assign(ns, -1);
         fp_promoted_slots_.clear();
         n_saved_regs_ = 0;
@@ -366,6 +794,23 @@ void AsmGen::assign_slot_regs() {
         };
         std::ranges::sort(hot_int, hotter);
         std::ranges::sort(hot_fp, hotter);
+
+        // R2：线性扫描分配。默认启用；PYADAMAS_NO_RA=1 回退到旧的按频次分配。
+        //
+        // 两者只在整型槽上不同（浮点池仍走下面的按频次逻辑）。线性扫描的
+        // 优势是「不同活跃区间复用同一寄存器」，变量数超过寄存器数时覆盖率更高。
+        static const bool ra_off = std::getenv("PYADAMAS_NO_RA") != nullptr;
+        if (!ra_off) {
+            assign_slot_regs_linear();
+            // 浮点仍按频次分配（R2 只覆盖整型）。
+            int kf0 = std::min<int>(kMaxFpSlotRegs(), static_cast<int>(hot_fp.size()));
+            for (int i = 0; i < kf0; ++i) {
+                slot_reg_[hot_fp[i].second] = kFpSlotRegs()[i];
+                slot_fpidx_[hot_fp[i].second] = i;
+                fp_promoted_slots_.push_back(hot_fp[i].second);
+            }
+            return;
+        }
 
         int k = std::min<int>(kMaxSlotRegs(), static_cast<int>(hot_int.size()));
         for (int i = 0; i < k; ++i) slot_reg_[hot_int[i].second] = kSlotRegs()[i];

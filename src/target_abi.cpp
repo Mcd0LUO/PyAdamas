@@ -29,6 +29,9 @@ constexpr int kNFpPool = 8;
 
 // scratch：r8-r11 在 SysV 与 Win64 下都是易失寄存器。
 const char* const kScratch[] = {"%r8", "%r9", "%r10", "%r11"};
+// SysV 的块内临时池：只 r8/r9（r10/r11 留给变量分配）。
+const char* const kSysVBlockTemps[] = {"%r8", "%r9"};
+constexpr int kNSysVBlockTemps = 2;
 constexpr int kNScratch = 4;
 
 // Win64 的块内临时池：r10/r11 被内联下标检查当 scratch（长度/data 指针）
@@ -45,7 +48,10 @@ const TargetABI kX86_64SysV{
     kCalleePool, kNCalleePool,
     kFpPool, kNFpPool,
     kScratch, kNScratch,
-    kScratch, kNScratch,
+    // 块内临时池：只给 r8/r9。r10/r11 让给寄存器分配（R3 的 caller 池）——
+    // 与 Win64 的 kWin64BlockTemps 同口径。块内临时值本来就不会跨块，
+    // 两个寄存器够用；而 r10/r11 专供变量后，多出 2 个可分配的寄存器。
+    kSysVBlockTemps, kNSysVBlockTemps,
     16,
     0,
     true,

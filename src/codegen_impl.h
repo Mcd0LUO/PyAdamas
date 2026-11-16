@@ -205,7 +205,34 @@ private:
     std::vector<int> slot_fpidx_;      // slot → fp_promoted_slots_ 下标
     std::vector<uint8_t> fp_live_in_;  // nb 个块
     std::vector<uint8_t> fp_live_out_;
+
+    // ── 全局寄存器分配（R1：整型槽的块级活跃性）──────────────────
+    // slot_live_in_[b] / slot_live_out_[b] 是第 b 块入口/出口仍活跃的
+    // 整型槽集合（按槽号直接索引的位图，每槽一位）。R2 的线性扫描
+    // 分配器靠它算活跃区间。
+    //
+    // 只跟踪**可提升**的槽：堆槽（帧记录按地址读值）、取过地址的槽
+    // （SlotAddr）、handler hazard 槽都不参与 —— 与 assign_slot_regs
+    // 的排除条件保持一致，否则会分到一个永远不能用的寄存器。
+    std::vector<std::vector<uint64_t>> slot_live_in_;
+    std::vector<std::vector<uint64_t>> slot_live_out_;
+    std::vector<int> slot_reg_cand_;   // 参与分配的槽号（升序）
+    std::vector<int> slot_reg_cand_idx_;  // 槽号 -> slot_reg_cand_ 下标，-1 = 不参与
+    void build_slot_liveness();
     std::vector<char> fp_spill_mask_;  // 当前指令需要保存的槽
+    // ── R3：caller-saved 寄存器池 ──────────────────────────────────
+    // r8–r11 是 caller-saved：任何 call 都会破坏它们。把它们也纳入槽位
+    // 分配，代价是**每个调用点**要把「活跃且当前在这些寄存器里」的槽
+    // 写回栈、调用后再读回。
+    //
+    // 与 callee 池的关键区别：callee 池的槽整函数常驻、零调用开销；
+    // caller 池的槽只在「不跨调用」的区间里划算。所以分配时优先把
+    // 生命周期跨越调用点的槽放进 callee 池，剩下的才用 caller 池。
+    std::vector<int> int_caller_slots_;      // 占用了 caller 池的槽号
+    std::vector<char> int_caller_mask_;      // 当前调用点要保存的槽（与上者对齐）
+    bool int_caller_mask_valid_ = false;
+    void spill_int_caller_slots();
+    void reload_int_caller_slots();
     bool fp_mask_valid_ = false;
     bool fp_live_off_ = false;  // PYADAMAS_NO_FPLIVE：退回全量 spill（A/B 用）
     void build_fp_liveness();
@@ -716,6 +743,9 @@ private:
     // 浮点变量不参与：xmm 全是 caller-saved，跨调用要自己 save/restore，
     // 收益抵不上复杂度。
     void assign_slot_regs();
+    void assign_slot_regs_linear();
+    void build_int_caller_mask(int block);
+    bool slot_range_has_call(int64_t beg, int64_t end) const;
 
     // 跨块 vreg 提升：局部变量没占满的 callee-saved 寄存器分给跨块
     // 整型临时值。用 CFG 活跃性算区间（覆盖循环回边），定义支配所有
