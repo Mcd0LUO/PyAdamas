@@ -98,6 +98,20 @@ int pa_debug_lookup_pc(uintptr_t pc, const char** file, const char** func, int32
 
 static void diag_report(void);
 
+/* 在指定时刻快照「当前还活着」的对象。用来区分「真的没人释放」和
+ * 「由 shutdown 路径统一释放」—— 后者不算泄漏。
+ *
+ * 已知局限：记录按**地址**索引，地址复用后旧事件会归属到新对象。
+ * 排查长生命周期对象时要注意，必要时配合 PYADAMAS_EXC_TRACE 或
+ * 在分配点打日志交叉验证。 */
+void pa_diag_snapshot(const char* when) {
+    int64_t n = 0, bytes = 0;
+    for (size_t i = 0; i < DIAG_MAX; ++i)
+        if (diag_tab[i].state == DIAG_LIVE) { ++n; bytes += diag_tab[i].size; }
+    fprintf(stderr, "[diag] 快照 %s: 存活 %lld 个 / %lld 字节\n",
+            when, (long long)n, (long long)bytes);
+}
+
 static const char* diag_kind_name(int32_t k) {
     switch (k) {
         case PYADAMAS_RC_STR: return "str";
@@ -296,8 +310,10 @@ void pa_diag_rc_alloc(void* p, int64_t size, int32_t kind) {
     ++diag_nlive;
     diag_bytes_live += size;
     diag_callsite(s->alloc_site, sizeof s->alloc_site);
-    fprintf(stderr, "[rc#%lld] alloc  %-6s %lldB rc=1  <- %s\n",
-            (long long)s->id, diag_kind_name(kind), (long long)size, s->alloc_site);
+    fprintf(stderr, "[rc#%lld] alloc  %-6s %lldB rc=%lld marked=%lld  <- %s\n",
+            (long long)s->id, diag_kind_name(kind), (long long)size,
+            (long long)((PyAdamasRc*)p - 1)->rc,
+            (long long)((PyAdamasRc*)p - 1)->marked, s->alloc_site);
 }
 
 void pa_diag_rc_free(void* p, int32_t kind) {
@@ -335,6 +351,22 @@ void pa_diag_check_use(void* p, const char* what) {
         fprintf(stderr, "[rc#%lld] USE-AFTER-FREE %s %s at %p（分配于 %s）\n",
                 (long long)s->id, what, diag_kind_name(s->kind), p, alloc_sym);
     }
+}
+
+/* 临时栈事件：配合 RC 追踪看「进了栈却没被 pop」的对象。
+ * 只在 PYADAMAS_RC_TRACE 开启时调用（rt_core 侧有全局标志短路）。 */
+void pa_diag_temp(const char* what, void* p, int64_t depth) {
+    if (!p) return;
+    DiagSlot* s = diag_find(p, 0);
+    if (!s) {
+        /* 没追踪到：可能被 MIN/KIND 过滤掉，也可能根本没走 rc_alloc。
+         * 后者才是我们要找的 bug —— 明确报出来。 */
+        fprintf(stderr, "[diag] temp-%-4s UNTRACKED ptr=%p depth=%lld\n",
+                what, p, (long long)depth);
+        return;
+    }
+    fprintf(stderr, "[rc#%lld] temp-%-4s %s depth=%lld\n",
+            (long long)s->id, what, diag_kind_name(s->kind), (long long)depth);
 }
 
 /* ── 异常对象追踪（0.227 能力，保留并加上分配点归因） ── */

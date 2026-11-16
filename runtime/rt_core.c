@@ -568,6 +568,11 @@ void* rc_alloc(int64_t size, void (*dtor)(void*), void (*release)(void*),
     memset(p, 0, (size_t)alloc_size);
     // size 用调用方请求的字节数（不含 RC 头），和 ASan 报的口径一致，
     // 方便两边对照。alloc_size 是池化后的容量，会偏大。
+    //
+    // 诊断钩子放在这里、而不是 pa_rc_inc/dec：那两个函数会被内联到极热
+    // 路径，多一次调用就改变寄存器分配（实测把 88_defaultdict 的 1.5 算成
+    // 垃圾值）。rc_alloc 本来就要走 malloc/池，多一次调用无影响。
+    pa_diag_rc_alloc(p, size, (int32_t)kind);
     return p;
 }
 
@@ -640,12 +645,17 @@ void pa_rc_temp(void* p) {
         temp_cap = ncap;
     }
     temp_stack[temp_len++] = p;
+    if (pa_diag_rc_on > 0) pa_diag_temp("push", p, temp_len);
 }
 
 void pa_rc_cleanup(int64_t mark) {
     if (rc_stats_on) stat_rc_cleanup++;
     if (mark < 0 || mark > temp_len) panic_c("invalid temporary stack mark");
-    while (temp_len > mark) pa_rc_dec(temp_stack[--temp_len]);
+    while (temp_len > mark) {
+        void* q = temp_stack[--temp_len];
+        if (pa_diag_rc_on > 0) pa_diag_temp("pop", q, temp_len);
+        pa_rc_dec(q);
+    }
 }
 
 /* 把临时栈上的一个新值取走：所有权转给槽/字段/返回值，cleanup 不再

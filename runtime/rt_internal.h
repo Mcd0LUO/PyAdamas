@@ -483,6 +483,8 @@ extern PyAdamasHandler* handler_top;
 extern int pa_diag_rc_on;   /* -1=未初始化, 0=关闭, 1=开启 */
 void pa_diag_rc_alloc(void* p, int64_t size, int32_t kind);
 void pa_diag_rc_free(void* p, int32_t kind);
+void pa_diag_temp(const char* what, void* p, int64_t depth);
+void pa_diag_snapshot(const char* when);
 void pa_diag_check_use(void* p, const char* what);
 void pa_exc_trace_alloc(PyAdamasException* e);
 void pa_exc_trace_move(PyAdamasException* e, const char* what, void* where);
