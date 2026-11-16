@@ -176,7 +176,7 @@ inline constexpr ModuleEntry kModuleTable[] = {
     {"os.path", ModuleKind::Native, "", ""},
     {"subprocess", ModuleKind::Native, "", ""},
     {"time", ModuleKind::Native, "", ""},
-    {"itertools", ModuleKind::Native, "", ""},
+    {"itertools", ModuleKind::NativePython, "itertools.py", ""},
     {"collections", ModuleKind::Native, "", ""},
     {"json", ModuleKind::Native, "", ""},
     {"re", ModuleKind::Native, "", ""},
