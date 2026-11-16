@@ -404,7 +404,28 @@ VReg Lowerer::lower_functools(const std::string& member, Call& c) {
         VReg f = expr(*c.args[0]);
         TypePtr elem = t_unknown();
         VReg xs = seq_as_list(c.args[1].get(), elem);
-        bool use_fp = rt->kind == TyKind::Float;
+        // 回调的形参域决定折叠走哪套寄存器传参。只看结果域不够：
+        // reduce(fadd, xs) 的 xs 是裸 list 时结果域是 unknown，但回调
+        // 形参是 float，float 位模式会被当整数塞进整型实参寄存器。
+        // 两个形参都是 float 时，回调入口恰好是 xmm0/xmm1，double 版跳板
+        // 才对得上；元素域是 float/unknown/int 时都能按 double 读或提升。
+        bool cb_fp = false;
+        if (ft && ft->kind == TyKind::Func && ft->fn && ft->fn->pos.size() >= 2) {
+            const TypePtr& p0 = ft->fn->pos[0].ty;
+            const TypePtr& p1 = ft->fn->pos[1].ty;
+            cb_fp = p0 && p0->kind == TyKind::Float && p1 && p1->kind == TyKind::Float;
+        }
+        bool elem_fp_like = !elem || elem->kind == TyKind::Unknown ||
+                            elem->kind == TyKind::Float ||
+                            elem->kind == TyKind::Int || elem->kind == TyKind::Bool;
+        // 回调要 double 但元素是 str/类等非数值域：两套跳板都不对，
+        // 拒绝比静默算错好（CPython 这里也是运行期 TypeError）。
+        if (cb_fp && !elem_fp_like) {
+            err(c.args[1]->line, c.args[1]->col,
+                "reduce() over non-numeric elements cannot use a float callback");
+            return const_none();
+        }
+        bool use_fp = rt->kind == TyKind::Float || cb_fp;
         // 运行时按结果域读元素：float 版把列表当 double 数组，元素域必须
         // 一致，否则会读出错误的位模式。int 列表先逐元素提升成 float；
         // 但回调必须能按 double 调用（形参是 float/unknown），否则算错。

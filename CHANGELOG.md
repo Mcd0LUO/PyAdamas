@@ -4,6 +4,34 @@
 
 早期阶段没有逐条留痕，按阶段归纳；0.4 之后逐条记录。
 
+## [0.187] - 2026-11-16
+
+### 修 `functools.reduce` 传浮点回调时的静默算错
+
+现象：`reduce(fadd, [1.5, 2.5])` 输出 `4612811918334230528`（= `1.5` 的 IEEE-754 位模式）。
+
+**根因不是跳板缺失**（`pa_call2_f` 早就存在），而是**编译器选错了跳板**：
+`lower_functools` 只看结果类型来决定用整型版还是浮点版，而 `reduce` 的结果类型来自
+`functools_call` 的 `return elem`；当 `xs` 是裸 `list` 形参或没有标注返回时 `elem` 就是
+`unknown`，于是选了整型版 `pa_functools_reduce`，浮点元素的位模式被当整数塞进 `%rdi`。
+
+修复：
+- `typecheck_call_modules.cpp`：`reduce` 的结果类型改为按**回调形参类型**推导 ——
+  两个形参都是 `float` 且元素类型为 `float` / `unknown` / `int` / `bool` 时，结果类型为 `float`；
+- `lower_import_misc.cpp`：`use_fp = 结果类型为 float || 回调两个形参都是 float`；
+  元素类型为非数值时给出明确错误，而不是静默算错。
+
+验证：原始例子从位模式变成 `4.0`（带初值 `4.5`），与 CPython 一致；
+新增 `tests/run/182_dynamic_call_float.py`；全量 **202 ran ok / 0 FAILED / 0 OUTPUT DIFF**；
+四套异常夹具无回退。
+
+影响面已逐个核对（`pa_call1` / `pa_call2` 全部 4 个调用点）：只有 `reduce` 的整型版会传浮点，
+其余（Future 回调、`re.sub` 替换回调）形参类型固定，类型检查会拒绝 `float` 标注，无需改。
+
+**仍未修的架构性限制**（不在本任务范围，已在文档登记）：
+- `unknown` 形参的函数（`def f(a, b): return a+b`）本身按整数 ABI 编译，被浮点实参调用时仍算错；
+- 元素类型为 `unknown` 的裸 list 被按 double 读时，int 元素会读错（`fold([1,2])` 得到 `1.5e-323`）。
+  这两个都需要「元素域上的运行期信息」才能修，与 0.187 的选择问题不同源。
 ## [0.185] - 2026-11-16
 
 ### 修用户类一元运算符的 SIGSEGV（`__neg__` 等）

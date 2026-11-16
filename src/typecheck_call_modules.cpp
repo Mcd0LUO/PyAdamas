@@ -648,9 +648,35 @@ std::optional<TypePtr> TypeChecker::functools_call(const std::string& member, Ca
                 }
                 if (dirty) fi->sig_dirty = true;
             }
+            // 回调的形参域决定 reduce 用哪套寄存器传参：只要回调的形参里
+            // 有一个是 float（且没有具体非 float 形参），折叠就必须走 double
+            // 版——float 版把列表当 double 数组读、按 xmm 传参。否则浮点的
+            // 位模式会被当整数塞进整型实参寄存器，静默算错。
+            // 两个形参必须都是 float，回调的入口才恰好是 xmm0/xmm1；
+            // (float, unknown) 这种混合 ABI 是 xmm0+rdi，两套跳板都对不上。
+            bool cb_fp = false;
+            bool cb_mixed = false;
+            if (a[0] && a[0]->kind == TyKind::Func && a[0]->fn && a[0]->fn->pos.size() >= 2) {
+                const TypePtr& p0 = a[0]->fn->pos[0].ty;
+                const TypePtr& p1 = a[0]->fn->pos[1].ty;
+                bool f0 = p0 && p0->kind == TyKind::Float;
+                bool f1 = p1 && p1->kind == TyKind::Float;
+                cb_fp = f0 && f1;
+                cb_mixed = f0 != f1;
+            }
+            if (cb_mixed) {
+                err(c.args[0]->line, c.args[0]->col,
+                    "reduce() callback must take two float parameters or none");
+            }
+            // 元素域是 float、未知或整型（int 会被提升成 double），且回调要
+            // double 时，结果域是 float。
+            TypePtr base = elem;
+            if (cb_fp && (!elem || elem->kind == TyKind::Unknown ||
+                          elem->kind == TyKind::Int || elem->kind == TyKind::Bool))
+                base = t_float();
             // 有初始值时结果类型是元素类型与初始值的公共上界。
-            if (a.size() == 3) return join(elem, a[2]);
-            return elem;
+            if (a.size() == 3) return join(base, a[2]);
+            return base;
         }
         if (member == "wraps") {
             if (!c.keywords.empty()) {
