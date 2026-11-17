@@ -114,7 +114,19 @@ void AsmGen::gen_inst(const Inst& in) {
             case IrOp::ConstInt: gen_const_int(in); break;
             case IrOp::ConstFloat: gen_const_float(in); break;
             case IrOp::ConstStr:
-                line(std::format("leaq .Lstr{}(%rip), %rax", in.idx));
+                // 单字节 ASCII 的 str 字面量直接用驻留表里的对象。
+                //
+                // 字符串不可变，内容相同的单字节 str 在语义上无法区分，所以
+                // 共享对象是安全的；而一旦共享，`s[i] == "0"` 这种最常见的
+                // 逐字符比较就变成「两个指针相等」，pa_str_eq 的第一行直接
+                // 命中，连长度检查和 memcmp 都省了。CPython 对 latin1 也有
+                // 同样的驻留。bytes 字面量不参与（pub 语义不同）。
+                if (char_tab_literal(in.idx) >= 0) {
+                    line(std::format("movq pa_char_tab+{}(%rip), %rax",
+                                     char_tab_literal(in.idx) * 8));
+                } else {
+                    line(std::format("leaq .Lstr{}(%rip), %rax", in.idx));
+                }
                 move_to(dst_op(in.dst), "%rax");
                 break;
             case IrOp::ConstNone:
@@ -768,10 +780,28 @@ void AsmGen::gen_cmp(const Inst& in) {
             emit2("movq", src_op(in.a), arg_reg_i(0));
             emit2("movq", src_op(in.b), arg_reg_i(1));
             if (in.cop == CmpKind::Eq || in.cop == CmpKind::Ne) {
+                // 同一对象的快路径：字符串不可变，指针相等必然内容相等。
+                // 单字节字面量已经被接到运行时的驻留表上，所以
+                // `s[i] == "0"` 这类逐字符比较直接命中这里，完全不必进
+                // pa_str_eq（那种比较在 str_build 里每轮内层循环 60 次）。
+                const std::string da = arg_reg_i(0);
+                const std::string db = arg_reg_i(1);
+                const std::string same = fresh_label("streq");
+                const std::string done = fresh_label("streqd");
+                emit2("movq", src_op(in.a), da);
+                emit2("movq", src_op(in.b), db);
+                emit2("cmpq", db, da);
+                emit_jmp("je", same);
                 spill_fp_slots();
                 line("call pa_str_eq");
                 reload_fp_slots();
+                // != 是 == 的取反。**慢路径也要取反** —— 曾经只改了「指针
+                // 相等」那条快路径，非等指针的 != 直接返回了 == 的结果。
                 if (in.cop == CmpKind::Ne) line("xorq $1, %rax");
+                emit_jmp("jmp", done);
+                label(same);
+                line(in.cop == CmpKind::Eq ? "movq $1, %rax" : "movq $0, %rax");
+                label(done);
                 emit2("movq", "%rax", dst_op(in.dst));
                 return;
             }

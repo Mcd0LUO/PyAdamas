@@ -764,6 +764,17 @@ private:
         return mem(r);
     }
 
+    // 字符串字面量 idx 如果是「单字节 ASCII 的 str」，返回该字节值（0..127），
+    // 否则 -1。这类字面量在生成代码里直接取运行时驻留表 pa_char_tab 的对象，
+    // 于是和 s[i] 的结果是同一个指针（见 gen_inst 的 ConstStr 分支）。
+    int char_tab_literal(int idx) const {
+        if (!m_ || idx < 0 || idx >= static_cast<int>(m_->strings.size())) return -1;
+        const IRStringLit& lit = m_->strings[static_cast<size_t>(idx)];
+        if (lit.is_bytes || lit.text.size() != 1) return -1;
+        const unsigned char b = static_cast<unsigned char>(lit.text[0]);
+        return b < 0x80 ? static_cast<int>(b) : -1;
+    }
+
     TypePtr ty_of(VReg r) const {
         if (r >= f_->vreg_ty.size()) return t_unknown();
         return f_->vreg_ty[r];

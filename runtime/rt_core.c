@@ -1241,6 +1241,16 @@ static PyAdamasStaticStr char_tab[256];
 static PyAdamasStaticStr kw_true_s, kw_false_s, kw_none_s;
 static int static_strs_ready;
 
+/* 驻留表的**载荷指针**数组（256 项），供生成代码直接索引。
+ *
+ * 单字节 ASCII 字符串字面量会被 codegen 直接映射到这里 —— 于是
+ * `s[i] == "0"` 两边是同一个对象，pa_str_eq 的第一行 `a == b` 直接命中，
+ * 连长度检查和字节比较都不用做。这也和 CPython 的 latin1 驻留行为一致。
+ *
+ * 生成代码在 main 的序言里调 pa_static_strs_init() 保证这张表已填好，
+ * 所以函数体里不需要再判 static_strs_ready。 */
+PyAdamasStr* pa_char_tab[256];
+
 static void static_str_init(PyAdamasStaticStr* e, const char* p, int64_t n, int64_t pub) {
     e->h.next = NULL;
     e->h.prev = NULL;
@@ -1267,6 +1277,7 @@ static void static_strs_init(void) {
     for (int i = 0; i < 256; ++i) {
         char ch = (char)i;
         static_str_init(&char_tab[i], &ch, 1, i < 0x80 ? 1 : 0);
+        pa_char_tab[i] = &char_tab[i].s;
     }
     static_str_init(&kw_true_s, "True", 4, 4);
     static_str_init(&kw_false_s, "False", 5, 5);
@@ -1277,6 +1288,9 @@ static void static_strs_init(void) {
 static void static_strs_ensure(void) {
     if (!static_strs_ready) static_strs_init();
 }
+
+/* 生成代码在 main 序言里调用一次，保证 pa_char_tab 在函数体执行前可用。 */
+void pa_static_strs_init(void) { static_strs_ensure(); }
 
 /* 单码点串：ASCII 走 256 项驻留表（零分配），其余码点现编 1-4 字节。
    0x80-0xFF 不再是合法的单字节 str，ASCII 之外的码点必须走 pa_cp_str。 */

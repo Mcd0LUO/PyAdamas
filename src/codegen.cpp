@@ -490,6 +490,11 @@ std::string AsmGen::gen(const IRModule& m) {
             out_ += std::format("\tleaq .Lstrtab(%rip), {}\n", arg_reg_i(0));
             out_ += std::format("\tmovq ${}, {}\n", m.strings.size(), arg_reg_i(1));
             out_ += "\tcall pa_register_literals\n";
+            // 单字节 str 字面量在生成代码里直接引用运行时驻留表
+            // pa_char_tab（见 gen_inst 的 ConstStr），所以函数体之前必须
+            // 保证这张表已填好。放这里是因为它依赖 pa_disable_unknown_index
+            // 的结果（驻留对象要不要登记进 RC 索引）。
+            out_ += "\tcall pa_static_strs_init\n";
             if (dbg_on_ && !dbg_entries_.empty())
             out_ += std::format("\tleaq .Ldbgtab(%rip), {}\n\tcall pa_debug_register\n",
                                     arg_reg_i(0));
@@ -528,6 +533,7 @@ std::string AsmGen::gen(const IRModule& m) {
             out_ += std::format("\tleaq .Lstrtab(%rip), {}\n", arg_reg_i(0));
             out_ += std::format("\tmovq ${}, {}\n", m.strings.size(), arg_reg_i(1));
             out_ += "\tcall pa_register_literals\n";
+            out_ += "\tcall pa_static_strs_init\n";
             if (dbg_on_ && !dbg_entries_.empty())
             out_ += std::format("\tleaq .Ldbgtab(%rip), {}\n\tcall pa_debug_register\n",
                                     arg_reg_i(0));
