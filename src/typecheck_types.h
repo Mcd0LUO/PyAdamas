@@ -1031,9 +1031,24 @@ inline void fill_holes_recursive(const TypePtr& to, const TypePtr& from, int dep
 inline TypePtr join_into(const TypePtr& a, const TypePtr& b) {
     if (!a) return b;
     if (!b) return a;
-    // 一边是 unknown 说明信息已经丢了；合并结果只能是 unknown。
-    // 以前返回具体类型，会让「先像 int、后来又赋了类实例」的变量一直
-    // 被当成 int，后续属性访问全部误报。
+    // **洞（fresh_hole）参与 join 时不能退化成全局 unknown 单例。**
+    //
+    // 洞是「待填」，不是「推断失败」：它应该被另一边填上。原来的判据
+    // `is_unknown(a) || is_unknown(b)` 对两者一视同仁，于是洞一参与 join
+    // 就变成 t_unknown() 单例 —— 从此再也不能被 fill_hole 填上（fill_hole
+    // 显式跳过单例），洞被销毁。
+    //
+    // 典型后果：
+    //     out = []            # list[hole]
+    //     if c: out.append(1) # 分支合并时 join(list[hole], list[int])
+    //     else: out.append(2) # → 洞没了，变成 list[unknown]
+    //
+    // 判据：洞是「独占的、非单例的 Unknown」。单例 Unknown 仍是「信息已丢」，
+    // 遇到就退化成 unknown（原逻辑保留）。
+    const bool a_hole = a->kind == TyKind::Unknown && a.get() != t_unknown().get();
+    const bool b_hole = b->kind == TyKind::Unknown && b.get() != t_unknown().get();
+    if (a_hole && !b_hole) return b;
+    if (b_hole && !a_hole) return a;
     if (is_unknown(a) || is_unknown(b)) return t_unknown();
     if (type_eq(a, b)) return a;
     if (is_num(a) && is_num(b)) return t_float();
