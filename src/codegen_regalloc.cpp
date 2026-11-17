@@ -848,29 +848,42 @@ void AsmGen::assign_slot_regs_split() {
 
         std::vector<int> depth = block_loop_depth(*f_);
 
-        // 每个块独立贪心：块内读写次数最多的槽优先拿寄存器。
+        // **收益模型：split 的代价是每次 store 多一条 mov（双写栈）。**
+        //
+        // 所以只有当「块内读次数多于写次数」时才划算 —— 读走寄存器省一次
+        // load，写要多付一次 store。净收益 = reads - writes。
+        //
+        // 原来只按「读写总次数 × 循环深度」排序，把「写多读少」的槽也提升
+        // 了，那些槽净亏。实测 nbody split 比 base 慢 2ms。
         for (int b = 0; b < nb; ++b) {
-            std::vector<int64_t> w(static_cast<size_t>(ns), 0);
+            std::vector<int64_t> reads(static_cast<size_t>(ns), 0);
+            std::vector<int64_t> writes(static_cast<size_t>(ns), 0);
             int64_t dw = 1;
             for (int i = 0; i < depth[static_cast<size_t>(b)] && i < 4; ++i) dw *= 10;
             for (const auto& in : f_->blocks[static_cast<size_t>(b)].insts) {
-                if (in.idx >= 0 && in.idx < ns &&
-                    (in.op == IrOp::LoadSlot || in.op == IrOp::StoreSlot))
-                    w[static_cast<size_t>(in.idx)] += dw;
+                if (in.idx < 0 || in.idx >= ns) continue;
+                if (in.op == IrOp::LoadSlot) reads[static_cast<size_t>(in.idx)] += dw;
+                else if (in.op == IrOp::StoreSlot) writes[static_cast<size_t>(in.idx)] += dw;
             }
-            struct C { int s; int64_t w; };
+            struct C { int s; int64_t net; };
             std::vector<C> cands;
             for (int s = 0; s < ns; ++s) {
-                if (w[static_cast<size_t>(s)] == 0) continue;
+                const int64_t r = reads[static_cast<size_t>(s)];
+                const int64_t w = writes[static_cast<size_t>(s)];
+                if (r == 0 && w == 0) continue;
+                // **只处理默认分配没提升的槽**（split 是增量，不是替换）。
+                if (!slot_reg_[static_cast<size_t>(s)].empty()) continue;
+                const int64_t net = r - w;
+                if (net <= 0) continue;   // 不划算，留在栈上
                 TypePtr t = f_->slot_ty[static_cast<size_t>(s)];
                 if (!t || t->kind == TyKind::Unknown) continue;
                 if (ir_is_heap(t)) continue;
                 if (s < static_cast<int>(gc_scan_slot_.size()) && gc_scan_slot_[s]) continue;
-                cands.push_back(C{s, w[static_cast<size_t>(s)]});
+                cands.push_back(C{s, net});
             }
             if (cands.empty()) continue;
             std::ranges::sort(cands, [](const C& a, const C& c) {
-                return a.w != c.w ? a.w > c.w : a.s < c.s;
+                return a.net != c.net ? a.net > c.net : a.s < c.s;
             });
             int used_int = 0, used_fp = 0;
             for (const auto& cd : cands) {
@@ -888,9 +901,6 @@ void AsmGen::assign_slot_regs_split() {
         }
 
         // 块入口 reload：本块要用寄存器的槽，从栈装进去。
-        //
-        // 无条件 reload 是对的 —— store 双写保证栈永远是最新值，即使
-        // 前驱块把值放在寄存器里也一样（它同时写了栈）。
         for (int b = 0; b < nb; ++b) {
             for (int s = 0; s < ns; ++s) {
                 if (slot_loc_[static_cast<size_t>(b)][static_cast<size_t>(s)].empty()) continue;
@@ -1064,6 +1074,34 @@ void AsmGen::assign_slot_regs() {
         // 统一管理，并写进 manifest 的 rcsplit 行。
         static const bool use_split = rc_split_;
         if (use_split) {
+            // **先跑默认分配，再让 split 覆盖。**
+            //
+            // split 只应该「改进」而不是「替换」：默认分配已经把整函数活跃
+            // 的热变量放进寄存器（slot_reg_），split 的按块分配如果从零开始，
+            // 会把那些变量挤回栈上 —— 实测 mandelbrot 的循环变量 i 从 %r14
+            // 变成每次 mov 0x68(%rsp)，反而更慢。
+            //
+            // 做法：默认分配先填 slot_reg_，split 在此基础上只处理「默认
+            // 没提升、但本块内读多写少」的槽。
+            assign_slot_regs_linear();
+            std::vector<int> fp_cands;
+            for (size_t ci = 0; ci < slot_reg_cand_.size(); ++ci)
+                if (slot_cand_is_fp_[ci]) fp_cands.push_back(slot_reg_cand_[ci]);
+            if (!fp_cands.empty()) {
+                std::vector<std::string> fp_out(f_->slot_ty.size());
+                linear_scan_pool(fp_cands, kFpSlotRegs(), kMaxFpSlotRegs(), fp_out);
+                for (size_t i = 0; i < fp_out.size(); ++i) {
+                    if (fp_out[i].empty()) continue;
+                    slot_reg_[i] = fp_out[i];
+                }
+                fp_promoted_slots_.clear();
+                for (int i = 0; i < static_cast<int>(fp_out.size()); ++i) {
+                    if (fp_out[static_cast<size_t>(i)].empty()) continue;
+                    slot_fpidx_[static_cast<size_t>(i)] =
+                        static_cast<int>(fp_promoted_slots_.size());
+                    fp_promoted_slots_.push_back(i);
+                }
+            }
             assign_slot_regs_split();
             return;
         }

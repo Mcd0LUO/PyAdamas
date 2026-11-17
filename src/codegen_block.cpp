@@ -787,6 +787,29 @@ void AsmGen::gen_block(const Block& b) {
                     fp_spill_mask_[j] = static_cast<char>((m >> j) & 1);
                 fp_mask_valid_ = true;
             }
+            // **split 模式的块出口 spill 必须插在终止指令之前。**
+            //
+            // 终止指令（jump/branch/return）之后生成的代码永远不会执行，
+            // 所以不能放在循环外面。这里检测到「当前是最后一条指令」时先
+            // 把寄存器里的槽写回栈，再生成终止指令。
+            //
+            // 只 spill 「本块写过」的槽：没写过的槽栈里已经是最新值。
+            if (!slot_loc_.empty() && cur_block_ >= 0 &&
+                cur_block_ < static_cast<int>(slot_loc_.size()) &&
+                i + 1 >= b.insts.size()) {
+                const auto& locs = slot_loc_[static_cast<size_t>(cur_block_)];
+                for (int sl = 0; sl < static_cast<int>(locs.size()); ++sl) {
+                    if (locs[static_cast<size_t>(sl)].empty()) continue;
+                    if (!block_stores_.contains(sl)) continue;
+                    const std::string& rg = locs[static_cast<size_t>(sl)];
+                    const std::string& st = smem(sl);
+                    if (rg == st) continue;
+                    if (ir_is_float(f_->slot_ty[static_cast<size_t>(sl)]))
+                        line(std::format("movsd {}, {}", rg, st));
+                    else
+                        line(std::format("movq {}, {}", rg, st));
+                }
+            }
             gen_inst(in);
             fp_mask_valid_ = false;
             dst_loc_.clear();

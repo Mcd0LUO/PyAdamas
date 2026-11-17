@@ -647,6 +647,13 @@ private:
             const std::string& r =
                 slot_loc_[static_cast<size_t>(split_block_)][static_cast<size_t>(slot)];
             if (!r.empty()) return r;
+            // **本块没有 split 位置时，回落到默认分配的整函数寄存器。**
+            //
+            // 不能直接 return smem(slot)：那样会绕过 slot_reg_（默认分配
+            // 已把整函数活跃的热变量放进寄存器），把原本在寄存器里的值
+            // 强行读栈 —— 实测 mandelbrot 输出 0（值全是旧的）。
+            if (slot < static_cast<int>(slot_reg_.size()) && !slot_reg_[slot].empty())
+                return slot_reg_[slot];
             return smem(slot);
         }
         if (slot >= 0 && slot < static_cast<int>(slot_reg_.size()) && !slot_reg_[slot].empty())

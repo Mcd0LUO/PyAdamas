@@ -50,21 +50,17 @@ void AsmGen::gen_inst(const Inst& in) {
             case IrOp::LoadSlot: gen_load_slot(in); break;
             case IrOp::StoreSlot: {
                 // split 模式下位置按块查表（slot_op 内部处理）。
+                //
+                // **不做双写。** 块内只写寄存器，栈的同步交给块出口的
+                // spill（见 codegen_block.cpp 的 slot_spill_out_）。
+                //
+                // 双写方案实测有严重退化：spectral_norm 从 573ms 涨到
+                // 1006ms（+76%）。原因是双写把一次 store 变成两次内存操作，
+                // 而且打断 store-to-load forwarding。
                 const bool sp = !slot_loc_.empty();
                 const std::string& loc = slot_op(in.idx);
-                const std::string& stk = smem(in.idx);
                 move_to(loc, src_op(in.a));
-                // **split 模式：栈必须是权威副本。**
-                //
-                // 每个块独立选位置，后继块入口无条件从栈 reload。若 store
-                // 只写寄存器，后继块在栈上读到的就是旧值。所以这里双写。
-                // 默认模式下 loc == stk（都是 smem），不会多生成指令。
-                if (sp && loc != stk) {
-                    if (ir_is_float(f_->slot_ty[static_cast<size_t>(in.idx)]))
-                        line(std::format("movsd {}, {}", loc, stk));
-                    else
-                        line(std::format("movq {}, {}", loc, stk));
-                }
+                (void)sp;
                 invalidate_slot(in.idx);
                 break;
             }
@@ -228,7 +224,10 @@ void AsmGen::gen_load_slot(const Inst& in) {
         // 融合目标非空时**必须**真的写过去，不能走别名——别名只是
         // 让 %v 指向变量的位置，而 `store.slot s, %v` 已经被吞掉，
         // 变量的位置不会有任何变化，值就悄悄丢了。
-        if (dst_loc_.empty() && in.dst != kNoReg && in.dst < use_count_.size() &&
+        // split 模式下禁用别名优化：别名让 vreg 直接指向槽的位置，
+        // 而 split 的位置是**按块**的，跨块或块内 store 之后会失效。
+        if (slot_loc_.empty() && dst_loc_.empty() && in.dst != kNoReg &&
+            in.dst < use_count_.size() &&
             use_count_[in.dst] == 1 && !cross_block_[in.dst] &&
             (opt_ >= 1 || sop[0] == '%')) {
             // 读之后、第一次真正使用之前不能有对该变量的赋值。
