@@ -780,6 +780,8 @@ private:
     // 默认路径是下面的活跃区间的线性扫描（assign_slot_regs_linear /
     // linear_scan_pool），这里保留旧实现只为可回退对比。
     void assign_slot_regs();
+    // 精确区间诊断（PYADAMAS_LI_STATS）：对比精确区间 vs 粗近似。
+    void report_interval_precision();
     void assign_slot_regs_linear();
     // live range splitting：按块给变量槽分配寄存器。
     void assign_slot_regs_split();

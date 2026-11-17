@@ -75,6 +75,9 @@ set(PYADAMAS_SOURCES
   src/opt_rc.cpp
     src/opt_dict_bump.cpp
     src/opt_global_promote.cpp
+    src/spill_placement.cpp
+    src/live_interval.cpp
+    src/live_interval_build.cpp
   src/opt_fold.cpp
   src/opt_inline.cpp
   src/opt_loop.cpp

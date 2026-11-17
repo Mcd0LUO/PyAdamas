@@ -1,6 +1,8 @@
 // codegen_regalloc.cpp —— 寄存器/栈槽分配与函数帧
 #include "codegen_impl.h"
 
+#include "live_interval.h"
+
 namespace pyadamas {
 
 // 调用序列之外不会被指令生成器用到的临时寄存器（%r8–%r11）。
@@ -702,6 +704,33 @@ bool AsmGen::slot_range_has_call(int64_t beg, int64_t end) const {
 // slot_reg_」揉在一起，只服务整型。这里抽出纯扫描部分，让浮点也能复用 ——
 // 浮点原本是「按频次挑前 N 个整函数常驻」，在 nbody 这种同时活跃临时值
 // 超过 8 个的函数里浪费严重（实测 79 次 movsd 写栈 + 70 次读栈）。
+// ── 精确区间诊断（PYADAMAS_LI_STATS）────────────────────────────
+//
+// 对比「精确活跃区间」与「[first,last] 粗近似」的差距，用来验证
+// 阶段 A（精确 LiveInterval）到底能省多少。
+//
+// 输出：每个函数的总精确长度 / 总包络长度 / 浪费比例。
+// 浪费比例高 = 粗近似把大量不活跃位置算成了活跃 = 图着色/线性扫描
+// 会误判冲突。
+void AsmGen::report_interval_precision() {
+        if (!std::getenv("PYADAMAS_LI_STATS")) return;
+        auto ivs = build_precise_intervals(*f_);
+        int n_used = 0;
+        int64_t precise = 0, envelope = 0, wasted = 0;
+        for (const auto& li : ivs) {
+            if (li.empty()) continue;
+            ++n_used;
+            precise += li.totalLength();
+            envelope += li.lastPos() - li.firstPos();
+            wasted += li.wastedByEnvelope();
+        }
+        if (n_used == 0) return;
+        std::fprintf(stderr, "[li] %-24s slots=%2d precise=%6lld envelope=%6lld wasted=%5lld (%4.1f%%)\n",
+                     f_->name.c_str(), n_used, static_cast<long long>(precise),
+                     static_cast<long long>(envelope), static_cast<long long>(wasted),
+                     envelope > 0 ? 100.0 * static_cast<double>(wasted) / static_cast<double>(envelope) : 0.0);
+}
+
 void AsmGen::linear_scan_pool(const std::vector<int>& cands, const char* const* regs,
                               int nreg, std::vector<std::string>& out) {
         const int nc = static_cast<int>(cands.size());
@@ -1255,6 +1284,7 @@ void AsmGen::assign_slot_regs_linear() {
     }
 
 void AsmGen::assign_slot_regs() {
+        report_interval_precision();
         int ns = static_cast<int>(f_->slot_ty.size());
         slot_reg_.assign(ns, std::string());
         // R1：先把整型槽的块级活跃性算出来（R2 的线性扫描要用）。
