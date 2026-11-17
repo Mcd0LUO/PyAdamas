@@ -197,7 +197,10 @@ PyAdamasStr* pa_str_from_i64(int64_t v) {
     // 都是空操作。少一次 malloc + 一次 free + 一串 RC 记账。
     // 实测 str_build 每次外层迭代 60 次 str(i%10)，一共 396 万次分配，
     // 占该用例 __memmove/rc_alloc/str_alloc_raw 的相当一部分。
-    if ((uint64_t)v < 10u) return pa_char_str(v);
+    // 注意 pa_char_str 收的是**字符编码**不是数值：str(7) 要的是 '7'（0x37），
+    // 传 7 会拿到 BEL 控制字符。（这个 bug 差分测试没抓到 —— 那 187 个用例
+    // 里没有 str(单个数字) 后再比较/打印的，正好是用例盲区。）
+    if ((uint64_t)v < 10u) return pa_char_str((int64_t)('0' + v));
     // 手写十进制：snprintf 的格式解析在 str(i) 这种热路径上占大头。
     // 从缓冲区尾部往前写，负数补符号；INT64_MIN 用 -(v+1)+1 取绝对值。
     char buf[21];
