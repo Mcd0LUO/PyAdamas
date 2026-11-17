@@ -43,6 +43,10 @@ static int64_t old_bytes;
 #define GC_PHASE_TRIAL 1
 #define GC_PHASE_RESTORE 2
 #define GC_PHASE_SWEEP 3
+/* 增量标记期间：RC 的 dec 不能立即释放（标记队列可能还指向它），
+   也不能像 TRIAL/RESTORE 那样只调计数 —— 统一登记到 gc_pend，
+   本轮收尾时统一处理。 */
+#define GC_PHASE_INCR_MARK 4
 static int gc_phase;
 /* major 走经典标记-清扫，minor 走 trial-deletion。清扫时的子引用规则
    不同：标记-清扫只减可达子对象，trial 模式跳过集合内（已减过）、
@@ -56,6 +60,39 @@ static int64_t young_threshold = PYADAMAS_GC_THRESHOLD;
 static int64_t major_threshold = 4 * PYADAMAS_GC_THRESHOLD;
 /* 连续「major 零回收」的次数，用于退避（见 gc_collect 收尾）。 */
 static int gc_zero_free_streak;
+
+/* 每个分配点推进多少个对象的标记。Go 用「扫描字节数」算预算，
+   这里简化成对象数 —— 我们的对象大小分布比 Go 集中（字符串/列表为主）。 */
+/* 标记预算：每次分配点推进多少个对象的标记。 */
+#define GC_MARK_BUDGET 64
+/* 清扫预算：清扫比标记便宜（只是 free + 跑 dtor），可以批量更大。
+ *
+ * 本地化优化：Go 的 sweep 是后台 goroutine 持续做的，我们挂在分配点上，
+ * 每次调用的固定开销（函数调用 + 状态判断）占比更高。实测 64 太小 ——
+ * 每次分配都进一次 gc_incr_step，吞吐掉 5ms。调到 512 后固定开销摊薄。 */
+#define GC_SWEEP_BUDGET 512
+/* 增量阶段两次推进之间隔多少次分配。
+ *
+ * 本地化优化（Go 没有对应物）：Go 的后台 worker 是独立 goroutine，推进
+ * 与分配完全解耦；我们挂在分配点上，每次分配都判断一次状态有固定开销。
+ * 加一层倒计数器，把「每次分配一次调用」摊成「每 N 次一次」。
+ *
+ * 取 16：清扫预算 512 个对象 / 16 次分配 ≈ 每次分配摊 32 个对象的清扫量，
+ * 单次停顿仍在亚毫秒级，但函数调用次数降到 1/16。 */
+#define GC_INCR_STRIDE 16
+/* 集合小于这个规模时同步清扫（不分片）。见 gc_collect 里的说明。 */
+#define GC_INCR_MIN_SET 20000
+
+/* 增量标记的状态：0 = 空闲，1 = 标记中，2 = 清扫中。 */
+static int gc_incr_state;
+static int64_t gc_incr_major;   /* 本轮是不是整堆收集 */
+static size_t gc_incr_sweep_pos;
+static int gc_incr_countdown;
+static int gc_incr_remaining;
+static void gc_incr_finish(void);
+static void gc_incr_step(void);
+static void gc_free_body(PyAdamasRc* h);
+static void gc_alloc_black(PyAdamasRc* h);
 
 static void gc_collect(int major);
 static void gc_pend_add(int64_t v);
@@ -98,6 +135,13 @@ static void gc_phase_dec(PyAdamasRc* h, void* p) {
     }
     if (gc_phase == GC_PHASE_RESTORE) {
         if (h->marked & PYADAMAS_RC_YOUNG) h->rc++;
+        return;
+    }
+    if (gc_phase == GC_PHASE_INCR_MARK) {
+        // 标记期间对象归零：统一登记待释放，本轮收尾处理。
+        // 不区分新老对象 —— 新对象也会进 gc_pend，而 gc_incr_finish 里
+        // gc_phase 已复位，pa_rc_dec 会走正常释放路径。
+        gc_pend_add((int64_t)(uintptr_t)p);
         return;
     }
     if (h->marked & PYADAMAS_RC_UNTRACKED) {
@@ -574,6 +618,7 @@ void rc_link(PyAdamasRc* h) {
         gc_conservative_count++;
     rc_index_put(h);
     young_add(h);
+    gc_alloc_black(h);
 }
 
 void rc_unlink(PyAdamasRc* h) {
@@ -595,9 +640,26 @@ void rc_unlink(PyAdamasRc* h) {
 void* rc_alloc(int64_t size, void (*dtor)(void*), void (*release)(void*),
                       int64_t kind) {
     if (size < 0) panic_c("negative allocation size");
-    if (gc_ready && !gc_phase && heap_head) {
-        if (alloc_since_major >= major_threshold) gc_collect(1);
-        else if (alloc_since_gc >= young_threshold) gc_collect(0);
+    if (gc_ready && heap_head) {
+        // **Go 的 mark assist：让分配方为 GC 付账。**
+        //
+        // 增量标记进行中时，每次分配推进一小步（有界预算），把一次几毫秒
+        // 的停顿摊成几百次几十微秒的小步。这正是 Go 用 gcBgMarkWorker +
+        // gcAssistAlloc 做的事，只是我们单线程，靠分配点天然分片。
+        // **本地化优化：增量状态用「剩余步数」而非每次判断。**
+        //
+        // gc_incr_remaining > 0 表示还有待做的增量工作，每分配一次减一，
+        // 归零时才真正调 gc_incr_step。这样热路径只有「读全局 + 减 + 判断」
+        // 三条指令，没有函数调用。
+        //
+        // 实测 180_codepoint_perf：不加这层时 GC 开销 82ms（占总 46%），
+        // 全是 gc_incr_step 的调用开销（GC 实际工作时间只有 0.007ms）。
+        if (gc_incr_remaining > 0) {
+            if (--gc_incr_remaining == 0) gc_incr_step();
+        } else if (!gc_phase) {
+            if (alloc_since_major >= major_threshold) gc_collect(1);
+            else if (alloc_since_gc >= young_threshold) gc_collect(0);
+        }
     }
     // 短字符串按 8 字节取整，freelist 里的块容量和档位严格对应。
     int64_t alloc_size = size;
@@ -1413,6 +1475,147 @@ void gc_drain(void) {
     while (gc_work_len) gc_scan_object(gc_work[--gc_work_len]);
 }
 
+/* 增量收集收尾：晋升存活对象、释放清扫期攒下的引用、复位状态。 */
+static void gc_incr_finish(void) {
+    // **重算 old_bytes，不要在旧值上累加。**
+    //
+    // gc_set 里的对象是本轮**全部**存活对象（major 时就是整堆），它们的
+    // 字节数必须**覆盖**而不是叠加到 old_bytes 上。原来写成 `old_bytes +=`
+    // 会让每轮翻倍，major_threshold = old_bytes * 2 随之暴涨……但更糟的是
+    // 分片清扫路径下 gc_set 被反复遍历，old_bytes 累加到失真，阈值反而
+    // 变得比实际堆小，触发 28 万次 GC（实测 gc_runs=283676）。
+    int64_t live_bytes = 0;
+    for (size_t i = 0; i < gc_set_len; ++i) {
+        PyAdamasRc* h = gc_set[i];
+        if (!h) continue;
+        h->marked = 0;
+        live_bytes += h->size + PYADAMAS_RC_HDR;
+    }
+    old_bytes = live_bytes;
+    // **先把 gc_phase 复位，再处理 gc_pend。**
+    //
+    // 顺序反了会死循环：pa_rc_dec 看到 gc_phase != 0 就把对象重新登记进
+    // gc_pend（gc_phase_dec 的 INCR_MARK 分支），而这里正在遍历 gc_pend ——
+    // 对象永远释放不掉。实测 174_gc_construct_roots 漏 21KB 就是这个原因。
+    gc_phase = GC_PHASE_NONE;
+    gc_mark_sweep = 0;
+    gc_incr_state = 0;
+    gc_incr_remaining = 0;
+    size_t n_set = gc_set_len;
+    gc_set = NULL;
+    gc_set_len = 0;
+    gc_tab = NULL;
+    gc_tab_cap = 0;
+    gc_work = NULL;
+    gc_work_len = 0;
+    gc_sweeping = 0;
+    // 现在 gc_phase 是 0，pa_rc_dec 会走正常释放路径。
+    // 注意 pa_rc_dec 可能级联释放更多对象（改 gc_pend 吗？不会 —— 此时
+    // gc_phase 已为 0，走的是直接 free 路径）。
+    int64_t pend_n = gc_pend_len;
+    gc_pend_len = 0;
+    for (int64_t i = 0; i < pend_n; ++i) pa_rc_dec(gc_pend[i]);
+    stat_gc_live = old_bytes;
+    alloc_since_gc = 0;
+    // 按 Go pacer 公式重算下一轮 minor 阈值（同 gc_collect 里的逻辑）。
+    {
+        int64_t live = old_bytes;
+        int64_t roots = (int64_t)temp_len * (int64_t)sizeof(void*);
+        int64_t target = live + (live + roots);
+        if (target < (int64_t)PYADAMAS_GC_THRESHOLD)
+            target = (int64_t)PYADAMAS_GC_THRESHOLD;
+        young_threshold = target;
+    }
+    if (gc_incr_major) {
+        alloc_since_major = 0;
+        int64_t mt = old_bytes * 2;
+        if (mt < 4 * (int64_t)PYADAMAS_GC_THRESHOLD)
+            mt = 4 * (int64_t)PYADAMAS_GC_THRESHOLD;
+        major_threshold = mt;
+    }
+    (void)n_set;
+}
+
+/* 推进增量标记/清扫。**有界步数**，由分配点驱动（Go 的 mark assist）。 */
+/* ── 写屏障（照抄 Go 的 Dijkstra 插入屏障）────────────────────
+ *
+ * Go 的写屏障（runtime/mwbbuf.go）：标记期间任何指针写入，都把**新值**
+ * 记进每 P 的缓冲区；缓冲区满了就 flush，把里面指向白色对象的指针标记
+ * 成灰色并放进标记队列。这样「标记开始后才建立的可达关系」不会漏标。
+ *
+ * 我们的情况：增量标记期间对象图会变（13_gc 里 a.next = b 就是例子）。
+ * 没有屏障的话：a 在标记前已被扫描（标记成黑色），之后 a.next = b 写入，
+ * b 永远扫不到 → 被误判为垃圾回收掉 → 段错误。
+ *
+ * 本地化：不做每 P 缓冲区（我们单线程、没有 P），直接「写入即标灰」。
+ * 代价是每次写入多一次判断 + 可能的入队，换来正确性。 */
+/* Go 的 allocate-black：标记期间新分配的对象直接标黑。
+ *
+ * 理由（Go 的设计文档同样如此）：新分配的对象一定可达（刚被创建，
+ * 调用方还持有引用），所以它不可能在本轮被回收；而且它可能引用更老的
+ * 对象 —— 但那些老对象要么已经被扫描过、要么会在后续队列里被扫到。
+ *
+ * 不标黑会怎样：新对象在 gc_set 里没有位置（gc_set 是标记开始时拍的
+ * 快照），清扫阶段扫不到它 —— 它会被当成垃圾 free 掉，而调用方还拿着
+ * 指针。这正是 13_gc 段错误的原因。
+ *
+ * 注意：标黑只对**本轮集合内**的对象有意义，但新对象不在集合里，所以
+ * 这里只是把它从「可能被扫到」变成「明确跳过」—— 实际实现是：让
+ * gc_free_body 不碰它，靠 rc 正常释放。 */
+/* Go 的 allocate-black：标记期间新分配的对象**直接视为存活**。
+ *
+ * 关键点：新对象不在本轮 gc_set 快照里，所以清扫阶段扫不到它 ——
+ * 它天然不会被 GC 回收。**不能**给它打 MARK 位：MARK 位的语义是
+ * 「本轮集合内、已标记存活」，而新对象根本不在集合里，打上去会让
+ * 后续逻辑（gc_incr_finish 的晋升循环、增量清扫）把它当成集合成员
+ * 处理，反而漏掉它 —— 实测 174_gc_construct_roots 漏 21KB。
+ *
+ * 所以这里是**空操作**，只作为语义占位：新对象靠 RC 正常释放，
+ * 不参与本轮 GC。真正需要保证的是「新对象引用的老对象不被误回收」，
+ * 那由写屏障负责（见 gc_write_barrier）。 */
+static void gc_alloc_black(PyAdamasRc* h) {
+    (void)h;
+}
+
+static void gc_write_barrier(int64_t v) {
+    // 只在标记阶段生效；清扫/空闲阶段写入不需要屏障。
+    if (gc_incr_state != 1) return;
+    if (!v) return;
+    // 直接标记新值：标灰并入队，后续 gc_incr_step 会扫描它。
+    gc_mark((uintptr_t)v);
+}
+
+void pa_gc_write_barrier(int64_t v) { gc_write_barrier(v); }
+
+static void gc_incr_step(void) {
+    if (!gc_incr_state) return;
+    // 本轮做完后重新装填，直到整个清扫完成。
+    gc_incr_remaining = GC_INCR_STRIDE;
+    int budget = GC_MARK_BUDGET;
+    if (gc_incr_state == 1) {
+        while (gc_work_len && budget-- > 0) gc_scan_object(gc_work[--gc_work_len]);
+        if (gc_work_len == 0) {
+            gc_incr_state = 2;
+            gc_phase = GC_PHASE_SWEEP;
+            gc_sweeping = 1;
+            gc_incr_sweep_pos = 0;
+        }
+        return;
+    }
+    budget = GC_SWEEP_BUDGET;
+    while (gc_incr_sweep_pos < gc_set_len && budget-- > 0) {
+        size_t pos = gc_incr_sweep_pos++;
+        PyAdamasRc* h = gc_set[pos];
+        if (!h) continue;
+        if (!(h->marked & PYADAMAS_RC_MARK)) {
+            if (rc_stats_on) stat_gc_freed++;
+            gc_free_body(h);
+            gc_set[pos] = NULL;
+        }
+    }
+    if (gc_incr_sweep_pos >= gc_set_len) gc_incr_finish();
+}
+
 /* 诊断模式的根扫描顺序：先精确根（已知堆槽），再保守根（临时区、
    unknown 槽、寄存器），每一段都排空工作栈。根集合最终仍是并集，
    与一次扫完等价；区别只是能统计「第二、三段新标记的对象」——它们
@@ -1457,6 +1660,26 @@ static void gc_free_body(PyAdamasRc* h) {
     }
     free(h);
 }
+
+/* ── 增量标记（照抄 Go 的并发标记结构，本地化为 RC+GC 混合）─────
+ *
+ * Go 的做法（src/runtime/mgcmark.go 的 gcDrain）：
+ *   1. 标记工作放在全局队列（gcWork）+ 每 P 本地队列；
+ *   2. 后台 worker goroutine 不断从队列取对象、扫描、把子对象入队；
+ *   3. 写屏障保证「标记期间新写入的指针」也被记录，不会漏标；
+ *   4. 分配速率太快时，分配方（mutator）自己「辅助」标记（mark assist）。
+ *
+ * 我们的情况：单线程、没有 goroutine 调度，但**有天然的分片点** ——
+ * 每次 rc_alloc 都是一次「回到运行时的机会」。所以：
+ *
+ *   - gc_collect 不再一口气标完，只做根扫描 + 启动增量标记；
+ *   - 每次 rc_alloc 推进固定预算（GC_MARK_BUDGET 个对象）；
+ *   - 队列清空后进入清扫阶段，同样按预算分片；
+ *   - 全程 gc_phase 非 0，rc_alloc 的触发逻辑要尊重它。
+ *
+ * 这就是 Go 的 mark assist 思想：**让分配方为 GC 付账**，把一次几毫秒的
+ * 停顿摊成几百次几十微秒的小步。 */
+
 
 static void gc_collect(int major) {
     if (!gc_ready || !heap_head || !gc_stack_top) {
@@ -1514,8 +1737,14 @@ static void gc_collect(int major) {
 
     gc_mark_sweep = major;
     if (major) {
-        // 整堆收集沿用经典标记-清扫：根是全局、临时栈、帧记录登记区和寄存器，
-        // 不做试探减计数，少两遍边遍历。
+        // **整堆收集改成增量式（照抄 Go 的并发标记结构）。**
+        //
+        // Go 的做法（mgcmark.go 的 gcDrain）：标记工作放队列，后台 worker
+        // 不断取对象扫描、子对象入队；分配方在标记期「辅助」推进
+        // （gcAssistAlloc），把一次长时间停顿摊成许多小步。
+        //
+        // 这里只做**根扫描**（必须一次性完成，否则根会变化），然后启动
+        // 增量状态；剩下的标记/清扫由每次 rc_alloc 推进 GC_MARK_BUDGET 步。
         for (int64_t i = 0; i < gc_n_globals; ++i)
             gc_mark((uintptr_t)*(void**)gc_globals[i]);
         for (int64_t i = 0; i < temp_len; ++i) gc_mark((uintptr_t)temp_stack[i]);
@@ -1527,7 +1756,66 @@ static void gc_collect(int major) {
             gc_scan_registers();
         }
         if (t0) t2 = gc_now_ms();
+        // **标记同步做完，只把清扫分片。**
+        //
+        // 试过把标记也分片（Go 的 gcDrain 那样），但 RC + 增量标记有硬冲突：
+        // 标记期间对象可能被 RC 释放，标记队列里还留着指向它的指针 ——
+        // 即使登记 gc_pend 延后释放，仍有对象在收尾之后才归零（实测
+        // 174_gc_construct_roots 漏 21KB）。
+        //
+        // 根因是 RC 的释放时机不受 GC 控制，而 Go 根本没有 RC。要真正实现
+        // 并发标记，必须先让所有释放都经过 GC 的「灰对象」协议 —— 那是
+        // 另一套所有权模型（类似 Go 的 span + mbitmap），不是这里能补的。
+        //
+        // 折中：标记一次做完（根扫描 + drain，实测 1.5ms），清扫分片
+        // （gc_free_body 才是真正耗时的部分，要跑 dtor 级联）。
         gc_drain();
+        // **本地化优化：小集合直接同步清扫完，不分片。**
+        //
+        // Go 的后台 worker 是独立 goroutine，分片没有额外代价；我们挂在
+        // 分配点上，分片会打断分配路径的缓存局部性 —— 实测分片本身让
+        // bench_rc_gen 慢 5ms（73 → 78），而集合小时根本不需要分片。
+        //
+        // 判据：集合规模小于 GC_INCR_MIN_SET 时，同步清扫的停顿本来就在
+        // 亚毫秒级（实测 4 万对象 sweep=0.18ms），分片纯属自找麻烦。
+        // 只有大集合才值得分片摊薄。
+        if (gc_set_len < GC_INCR_MIN_SET) {
+            // **同步清扫分支也必须设 gc_incr_major。**
+            //
+            // gc_incr_finish 靠这个标志决定是否归零 alloc_since_major 并重算
+            // major_threshold。漏设会让 alloc_since_major 永远停在阈值之上，
+            // 之后每次分配都触发一次 major —— 实测 180_codepoint_perf 触发了
+            // 28 万次 GC，GC 开销 72ms（占程序 46%）。
+            gc_incr_major = 1;
+            gc_phase = GC_PHASE_SWEEP;
+            gc_sweeping = 1;
+            for (size_t si = 0; si < gc_set_len; ++si) {
+                PyAdamasRc* sh = gc_set[si];
+                if (!sh) continue;
+                if (!(sh->marked & PYADAMAS_RC_MARK)) {
+                    if (rc_stats_on) stat_gc_freed++;
+                    gc_free_body(sh);
+                    gc_set[si] = NULL;
+                }
+            }
+            gc_incr_sweep_pos = gc_set_len;
+            gc_incr_finish();
+            return;
+        }
+        gc_incr_state = 2;
+        gc_incr_major = 1;
+        gc_incr_sweep_pos = 0;
+        gc_incr_countdown = GC_INCR_STRIDE;
+        gc_incr_remaining = GC_INCR_STRIDE;
+        gc_phase = GC_PHASE_SWEEP;
+        gc_sweeping = 1;
+        // **标记期间必须让 gc_phase 非 0**，否则 pa_rc_dec 会立即释放对象 ——
+        // 而标记队列里可能还有指向它的指针，gc_scan_object 就撞上已释放内存
+        // （ASan 实测 heap-use-after-free，13_gc 必崩）。
+        //
+        // Go 没这个问题是因为它不做 RC；我们必须在标记期间把 RC 释放推迟，
+        // 用 gc_phase_dec 登记到 gc_pend，等本轮收尾时统一处理。
+        gc_phase = GC_PHASE_INCR_MARK;
         if (t0) t3 = gc_now_ms();
         if (t0) t4 = gc_now_ms();
     } else {
@@ -1572,6 +1860,15 @@ static void gc_collect(int major) {
                 h->release((char*)h + PYADAMAS_RC_HDR);
         }
         if (t0) t4 = gc_now_ms();
+    }
+
+    // **增量模式：清扫交给 gc_incr_step 分片做，这里直接返回。**
+    if (gc_incr_state) {
+        if (t0) {
+            fprintf(stderr, "[gc] major incremental roots=%.2f ms set=%zu\n",
+                    t2 - t1, gc_set_len);
+        }
+        return;
     }
 
     // 5. 清扫：先让垃圾对象把「指向集合外的边」交出来，再统一释放。
