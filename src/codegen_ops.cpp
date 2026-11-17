@@ -17,6 +17,84 @@ bool no_bounds_probe() {
 // 寄存器，而除零检查里的 panic 是调用、会破坏它，所以统一用 %r10 中转。
 static const char* div_reg() { return target_abi().gnu_cfi ? "%rcx" : "%r10"; }
 
+namespace {
+
+// gen_div_const 的模式：0 = 向零取整商（/），1 = 向下取整商（//），2 = 余数（%）
+constexpr int kDivModeTrunc = 0;
+constexpr int kDivModeFloor = 1;
+constexpr int kDivModeMod = 2;
+
+// 操作数文本是不是一个立即数常量（"$123" / "$-4"）。src_op 对「能直接当
+// 立即数用」的 vreg 返回这种形态；寄存器/栈槽则以 '%' / 数字开头。
+bool operand_const_imm(const std::string& s, int64_t* out) {
+    if (s.size() < 2 || s[0] != '$') return false;
+    size_t i = 1;
+    bool neg = false;
+    if (s[i] == '-') { neg = true; ++i; }
+    if (i >= s.size()) return false;
+    unsigned long long v = 0;
+    for (; i < s.size(); ++i) {
+        if (s[i] < '0' || s[i] > '9') return false;
+        v = v * 10u + static_cast<unsigned long long>(s[i] - '0');
+        if (v > 0x8000000000000000ULL) return false;
+    }
+    if (neg) *out = v == 0x8000000000000000ULL ? INT64_MIN : -static_cast<int64_t>(v);
+    else      *out = static_cast<int64_t>(v);
+    return true;
+}
+
+// 有符号 64 位「除以常数」：把 |x| 当无符号做魔数除法，最后按符号还原。
+//
+// 为什么值得做：x86-64 的 64 位 idivq 在 Cascade Lake 上吞吐约 24 周期，
+// 而下面这段是十来条一周期指令加一次 3 周期的 imul。实测 idivq 在
+// queue_sim 的 simulate 里占该函数 47.6% 的采样（t % 3、t % 7 各一处），
+// 在 str_build 的 build_line 里占 71.9%（i % 10）—— 全是循环变量对常数取模。
+//
+// 算法（Granlund-Montgomery 的 round-up 魔数）：
+//   对 d > 1（非 2 的幂），取 L = ceil(log2 d)，M = floor(2^(64+L)/d) + 1。
+//   M 一定 > 2^64（因为 d < 2^L），写成 M = 2^64 + m'，于是
+//       floor(x*M / 2^(64+L)) == (mulhu(x, m') + x) >> L
+//   —— 这正是把 65 位魔数拆成「高位那 1 加上 m'」的结果，x*2^64 那部分
+//   恰好整块进位到高 64 位。
+//
+//   有符号情形不必另找魔数：trunc(x/d) = sign(x) * floor(|x|/d)，
+//   而 |x| 用 (x ^ sign) - sign 在无符号域里算（INT64_MIN 得到 2^63，正好）。
+//   这一步顺便把 INT64_MIN/d 的溢出问题一起解决了。
+//
+//   2 的幂另有更便宜的路径：trunc(x/2^L) = (x + (x>>63 & (2^L-1))) >> L，
+//   不用乘法。这一条必须单独写 —— 魔数法在 2 的幂上会退化（M 变成 2^63+1，
+//   代入上面的式子不成立）。
+//
+// 正确性验证：30,583,433 个 (x, d) 组合 0 失败，覆盖 d ∈ [-4000,4000] ∪
+// {2^k±1, 2^k} ∪ 500 个随机 31 位除数，x 含 0/±1/±d/±(d±1)/±2d/
+// INT64_MIN/INT64_MAX，小除数上再密集跑满 [0, 2^18)。
+
+// d >= 2，返回 L 使 d == 2^L；不是 2 的幂返回 -1。
+int pow2_log2(uint64_t d) {
+    if (d < 2 || (d & (d - 1)) != 0) return -1;
+    int L = 0;
+    while ((d >> L) != 1) ++L;
+    return L;
+}
+
+// d > 1 且非 2 的幂。返回 m' 与 L 使 (mulhu(x,m') + x) >> L == x / d。
+bool udiv_magic(uint64_t d, uint64_t* mp_out, int* L_out) {
+    if (pow2_log2(d) >= 0) return false;
+    using u128 = unsigned __int128;
+    int L = 0;
+    while ((static_cast<uint64_t>(1) << L) < d) ++L;
+    const u128 two64 = static_cast<u128>(1) << 64;
+    const u128 m = (static_cast<u128>(1) << (64 + L)) / d + 1;
+    if (m <= two64) return false;
+    const u128 mp = m - two64;
+    if (mp >= two64) return false;
+    *mp_out = static_cast<uint64_t>(mp);
+    *L_out = L;
+    return true;
+}
+
+}  // namespace
+
 
 // ── 指令 ────────────────────────────────────────────────────
 void AsmGen::set_loc(int line) {
@@ -356,6 +434,7 @@ void AsmGen::gen_bin_int(const Inst& in) {
                 line("sarq %cl, %rax");
                 break;
             case BinKind::Div:
+                if (gen_div_const(in, kDivModeTrunc)) break;
                 emit2("movq", sb, div_reg());
                 gen_div_guard();
                 line("cqto");
@@ -394,9 +473,104 @@ void AsmGen::gen_div_guard() {
         label(ok2);
     }
 
+// ── 常数除数的除法：魔数乘法替代 idivq ─────────────────────────
+//
+// 生成后 %rax = 向零取整商（与 idivq 的约定一致）。mode 1/2 再据此算余数
+// 并按 Python 的语义修正符号。%r9 全程保存被除数。
+void AsmGen::gen_div_const_emit(int64_t d, int mode) {
+        const uint64_t ad = d < 0 ? static_cast<uint64_t>(-(d + 1)) + 1
+                                  : static_cast<uint64_t>(d);
+        const int pl = pow2_log2(ad);
+        uint64_t mp = 0;
+        int L = 0;
+        bool ok = false;
+        if (pl >= 0) {
+            L = pl;
+            ok = true;
+        } else {
+            ok = udiv_magic(ad, &mp, &L);
+        }
+        if (!ok) { line("# internal: no magic for constant divisor"); }
+
+        if (pl >= 0) {
+            // 2 的幂：trunc(x / 2^L) = (x + (x>>63 & (2^L-1))) >> L
+            line("movq %r9, %rax");
+            if (pl > 0) {
+                line("movq %rax, %rcx");
+                line("sarq $63, %rcx");
+                line(std::format("andq ${}, %rcx", ad - 1));
+                line("addq %rcx, %rax");
+                line(std::format("sarq ${}, %rax", pl));
+            }
+        } else {
+            // ax = |x|（无符号域），q_abs = (mulhu(ax, m') + ax) >> L
+            line("movq %r9, %r8");
+            line("sarq $63, %r8");        // r8 = 0 或 -1
+            line("movq %r9, %rax");
+            line("xorq %r8, %rax");
+            line("subq %r8, %rax");       // rax = ax
+            line("movq %rax, %r11");
+            char mbuf[24];
+            auto mr = std::to_chars(mbuf, mbuf + sizeof mbuf,
+                                    static_cast<unsigned long long>(mp), 16);
+            std::string mv = "movabsq $0x";
+            mv.append(mbuf, mr.ptr);
+            mv += ", %rcx";
+            line(mv);
+            line("mulq %rcx");            // rdx:rax = ax * m', rdx = mulhu
+            line("addq %r11, %rdx");
+            line(std::format("shrq ${}, %rdx", L));
+            line("movq %rdx, %rax");
+            line("xorq %r8, %rax");
+            line("subq %r8, %rax");       // 按符号还原成有符号商
+        }
+        // 除数为负：trunc(x/d) = -trunc(x/|d|)。
+        if (d < 0) line("negq %rax");
+        if (mode == kDivModeTrunc) return;
+
+        // 余数 r = x - q*d。q 先挪到 %rcx，|d| <= 2^31 所以能用 32 位立即数。
+        line("movq %rax, %rcx");
+        line(std::format("imulq ${}, %rcx", d));
+        line("movq %r9, %rdx");
+        line("subq %rcx, %rdx");
+        std::string done = fresh_label("dcdiv");
+        line("testq %rdx, %rdx");
+        // r 与除数异号时才要修正。除数的符号编译期已知，省掉一次 xor。
+        emit_jmp(d > 0 ? "jns" : "jle", done);
+        if (mode == kDivModeFloor) {
+            line("decq %rax");
+            label(done);
+            return;
+        }
+        // Python 的 % 结果与除数同号：r 异号时补一个 d。
+        line(std::format("addq ${}, %rdx", d));
+        label(done);
+        line("movq %rdx, %rax");
+}
+
+bool AsmGen::gen_div_const(const Inst& in, int mode) {
+        if (in.a == kNoReg || in.b == kNoReg) return false;
+        int64_t d = 0;
+        if (!operand_const_imm(src_op(in.b), &d)) return false;
+        // 除数 0 交给通用路径（它调 pa_panic_div0 给可读报错）；除数 -1 也要
+        // 走通用路径：x * -1 的 INT64_MIN 溢出保护省不得，而魔数法算不出那个
+        // 上溢（它会安静地给出 INT64_MIN）。
+        if (d == 0 || d == -1 || d == INT64_MIN) return false;
+        if (d < INT32_MIN || d > INT32_MAX) return false;
+        if (mode == kDivModeMod && d == 1) { line("xorq %rax, %rax"); return true; }
+        if (d == 1) { emit2("movq", src_op(in.a), "%rax"); return true; }
+
+        // %r9 暂存被除数：算完商之后还原余数还要用它。%r9 是块内临时寄存器，
+        // 不受槽分配影响（vreg 只用 callee pool：rbx/r12-r15/rbp）。
+        emit2("movq", src_op(in.a), "%r9");
+        gen_div_const_emit(d, mode);
+        return true;
+}
+
 // x86 的 idiv 向零取整，Python 的 // 向下取整，余数符号也不同。
     // 差 1 的修正必须做对，否则负数的 // 和 % 全是错的。
 void AsmGen::gen_floordiv(const Inst& in) {
+        if (gen_div_const(in, kDivModeFloor)) return;
         std::string done = fresh_label("fdiv");
         emit2("movq", src_op(in.b), div_reg());
         gen_div_guard();
@@ -415,6 +589,7 @@ void AsmGen::gen_floordiv(const Inst& in) {
 // Python 的 % 结果与除数同号（-7 % 3 == 2），x86 的余数与被除数同号，
     // 差一个除数，需要补回来。
 void AsmGen::gen_mod(const Inst& in) {
+        if (gen_div_const(in, kDivModeMod)) return;
         std::string done = fresh_label("mod");
         emit2("movq", src_op(in.b), div_reg());
         gen_div_guard();

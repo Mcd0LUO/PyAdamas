@@ -887,6 +887,11 @@ private:
     // idiv 在除数为 0、以及 INT64_MIN / -1 时都会触发 #DE，
     // 那个信号没法带任何上下文。提前挡掉，给一条能看懂的消息。
     void gen_div_guard();
+    // 常数除数的除法：能化简就生成「魔数乘法 + 符号修正」，结果留在 %rax
+    // （mode 1/2 还会在 %rdx 留下余数），返回 true 表示已生成。
+    // 除数为 0 / -1 / INT64_MIN 或不是编译期常量时返回 false，走 idivq。
+    bool gen_div_const(const Inst& in, int mode);
+    void gen_div_const_emit(int64_t d, int mode);
 
     // x86 的 idiv 向零取整，Python 的 // 向下取整，余数符号也不同。
     // 差 1 的修正必须做对，否则负数的 // 和 % 全是错的。
