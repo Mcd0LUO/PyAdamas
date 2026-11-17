@@ -74,6 +74,7 @@ set(PYADAMAS_SOURCES
   src/opt_cse.cpp
   src/opt_rc.cpp
     src/opt_dict_bump.cpp
+    src/opt_global_promote.cpp
   src/opt_fold.cpp
   src/opt_inline.cpp
   src/opt_loop.cpp

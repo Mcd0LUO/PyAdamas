@@ -214,6 +214,10 @@ void optimize_ir(IRModule& m, int opt_level) {
     // 放在内联之后（内联可能带进新形态）、CSE 之前。
     for (auto& fptr : m.funcs) fuse_dict_bump(*fptr);
 
+    // 循环内全局变量寄存器化：无调用的循环里把全局缓存到局部槽，
+    // 循环出口写回。实测全局访问比局部慢 8.7 倍。
+    for (auto& fptr : m.funcs) promote_globals_in_loops(*fptr, m.globals);
+
     // 循环内不变量的检查型下标：入口检一次边界，通过则走无检查的循环副本。
     for (auto& fptr : m.funcs) version_bounds_function(*fptr);
 
