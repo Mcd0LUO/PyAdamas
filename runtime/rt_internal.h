@@ -286,6 +286,15 @@ typedef struct {
     int64_t bits_cap;      /* heap_bits 的字数（cap 会被缓冲池抬高，不能复用） */
 } PyAdamasList;
 
+/* 小列表合并分配：容量 <= 8 元素的列表，data 缓冲直接内联在
+   「RC 头 + PyAdamasList」同一个 malloc 块的尾部（rt_core.c 的
+   list_inline_pool），建/销各省一次池操作。内联缓冲是块内指针，
+   **不能 realloc / free**：增长走 list_buf_grow 换外部块，销毁时
+   按 data 是否等于 list_inline_at(l) 判断。 */
+#define PYADAMAS_LIST_INLINE_CAP 8
+#define PYADAMAS_LIST_INLINE_BYTES ((int64_t)PYADAMAS_LIST_INLINE_CAP * (int64_t)sizeof(int64_t))
+static inline int64_t* list_inline_at(PyAdamasList* l) { return (int64_t*)(l + 1); }
+
 /* range 是惰性对象：只存边界，元素按需算。和 CPython 的 range 一样，
    range(10**9) 只占几十字节，不会当场造十亿个元素。 */
 typedef struct {
@@ -619,6 +628,12 @@ void rc_link(PyAdamasRc* h);
 void rc_unlink(PyAdamasRc* h);
 void* rc_alloc(int64_t size, void (*dtor)(void*), void (*release)(void*), int64_t kind);
 void* rc_alloc_untracked(int64_t size, void (*dtor)(void*), void (*release)(void*), int64_t kind);
+/* extra：payload 尾部额外内联的字节数（目前只用于小列表的 data 缓冲）。
+   h->size = size + extra，释放时按 size 路由回对应的池。 */
+void* rc_alloc_ex(int64_t size, void (*dtor)(void*), void (*release)(void*), int64_t kind,
+                  int64_t extra);
+void* rc_alloc_untracked_ex(int64_t size, void (*dtor)(void*), void (*release)(void*),
+                            int64_t kind, int64_t extra);
 /* ── 内联引用计数（方案 A：抄 Swift ARC 的编译期内联思路）──────
  *
  * 原来 inc/dec 都是跨编译单元的函数调用：实测 bench_rc_gen 有 30 万次
@@ -1030,6 +1045,9 @@ PyAdamasStr* pa_input(PyAdamasStr* prompt);
 PyAdamasFile* pa_sys_stream(int64_t which);
 void list_destroy(void* p);
 void list_gc_release(void* p);
+/* 把 data 缓冲增长到 ncap 个元素并更新 l->data / l->cap。
+   内联缓冲不能 realloc（块内指针），自动换成 malloc + memcpy。 */
+int64_t* list_buf_grow(PyAdamasList* l, int64_t ncap);
 PyAdamasList* pa_list_new(int64_t cap, int64_t elem_kind);
 /* 定长元组构造（元素个数 <= 4）。elem_kind == 0 时用 untracked 分配：
    元组不可变且元素全非堆 -> 不可能成环 -> 不必进 GC 堆链。 */

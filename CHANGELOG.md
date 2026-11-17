@@ -4,6 +4,17 @@
 
 早期阶段没有逐条留痕，按阶段归纳；0.4 之后逐条记录。
 
+## [0.271] - 2026-11-18
+
+### 小列表 header+buffer 合并分配（sort_struct −20.3%，queue_sim −3.8%，六用例合计 −4.0%）
+
+- **合并分配**：容量 <=8 元素的列表（含 `pa_list_new_filled` / `pa_tuple_new_filled` 定长快路径）把 `data` 缓冲内联在「RC 头 + PyAdamasList」同一个 malloc 块尾部（64+48+64=176 字节），新增 `list_inline_pool`（最多缓存 64 块）。建/销各从两次池操作（`list_pool_get` + `list_buf_get` / `list_buf_put` + `list_pool_put`）合成一次。`rc_alloc` 拆出 `rc_alloc_ex(size, ..., extra)`，`h->size = size + extra`，释放时按 size 路由回对应池；untracked 变体同步（`rc_alloc_untracked_ex`，kind 0 元组用）。GC 记账把内联缓冲计入（原先缓冲字节不入账）。
+- **内联缓冲是块内指针，不能 realloc / free**：新增 `list_buf_grow`，append / insert / 切片赋值三处增长统一走它 —— 内联时换 malloc + memcpy（内联区从此闲置，头块销毁时仍整块回内联池，下次复用重新启用），外部缓冲照旧 realloc。`list_destroy` 与 GC 清扫（`gc_free_body`）按 `data == list_inline_at(l)` 跳过块内指针的单独释放；shutdown 清空内联池，ASan 泄漏口径不变。
+- **实测（abbench 交替 9 轮中位数，绑核）**：`sort_struct` 335.91 → **267.74 ms（−20.3%**，p25 −21.1%）；`queue_sim` 295.25 → **284.01 ms（−3.8%**，p25 −2.8%）；`str_build` −0.9%、`dict_wordfreq` −1.2%、`obj_dispatch` −0.8%、`rec_memo` +0.6%（噪声）；六用例合计 2171.72 → 2084.95 ms（−4.0%）。quickbench 最好 7 次口径：queue_sim 283 ms、str_build 214 ms。queue_sim 新 profile：`list_buf_get` 从 8% 降到榜外，生成代码占比 47% → 54.4%，GC 仍 0.06%；剩余大头是 `rc_link`/`rc_unlink`（合计 7.1%）与生成代码里的逐元素 append/retain —— 交接文档 §5 的切片惯用法识别是下一步。
+- **验证**：新增 `tests/run/188_list_inline_buf.py`（append/insert/切片赋值三条增长路径越过内联边界、堆元素高频建/销复用、列表自环 + GC churn、元组快路径 kind 0/1、混合种类、大列表外部路径；输出与 CPython 逐行一致，单用例 ASan `detect_leaks=1` 干净）。差分测试 189 用例 / 0 不一致，release 套件与 ASan 套件各 207 ran ok / EXIT=0。
+- **工具修复**：`abbench.sh` 写死 `taskset -c 0`，在 cpuset 为 24-47,72-95 的容器里 taskset 直接失败，六个用例全量出 ~12.5 ms 的「失败开销」假数字。改成从 `/proc/self/status` 的 `Cpus_allowed_list` 取第一个可用 CPU，测量前自检 taskset 可用性，不可用就报错退出。
+- 文档：`docs/runtime.md` 列表节补合并分配布局与增长/销毁/GC 清扫的不变量。
+
 ## [0.270] - 2026-11-17
 
 ### 字符串/除法/RC 三条热路径内联，单字节 str 接运行期驻留表（queue_sim −32.9%，str_build −55.4%）

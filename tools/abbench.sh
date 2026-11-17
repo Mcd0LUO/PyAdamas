@@ -31,6 +31,16 @@ if [ ! -x "$CUR_BIN" ]; then
     exit 1
 fi
 
+# 绑核 CPU 取 cpuset 里第一个可用的：容器里 CPU 0 未必在允许集内。
+# 曾写死 taskset -c 0，在 cpuset 24-47,72-95 的容器里 taskset 直接失败，
+# 六个用例全量出 ~12.5ms 的「失败开销」，差点当成真实性能。
+PIN_CPU=$(awk '/Cpus_allowed_list/ {print $2}' /proc/self/status | tr ',' '\n' | head -1 | cut -d- -f1)
+PIN_CPU=${PIN_CPU:-0}
+if ! taskset -c "$PIN_CPU" true 2>/dev/null; then
+    echo "error: taskset -c $PIN_CPU 不可用（cpuset 限制？）" >&2
+    exit 1
+fi
+
 # 1) 基线：独立 worktree + 独立 build 目录。
 WT=/tmp/pyadamas-ab-base
 rm -rf "$WT"
@@ -78,18 +88,18 @@ done
 for rep in $(seq 1 "$REPS"); do
     for name in "${!A_BIN[@]}"; do
         s=$(date +%s%N)
-        taskset -c 0 "${A_BIN[$name]}" >/dev/null 2>&1
+        taskset -c "$PIN_CPU" "${A_BIN[$name]}" >/dev/null 2>&1
         e=$(date +%s%N)
         echo $(( (e - s) / 1000 )) >> "$OUT/ta_$name"
         s=$(date +%s%N)
-        taskset -c 0 "${B_BIN[$name]}" >/dev/null 2>&1
+        taskset -c "$PIN_CPU" "${B_BIN[$name]}" >/dev/null 2>&1
         e=$(date +%s%N)
         echo $(( (e - s) / 1000 )) >> "$OUT/tb_$name"
     done
 done
 
 # 5) 出表：中位数 + p25，单位 ms。
-echo "[4/4] 结果（中位数，交替 $REPS 轮，taskset -c 0）"
+echo "[4/4] 结果（中位数，交替 $REPS 轮，taskset -c $PIN_CPU）"
 echo ""
 printf '%-22s %10s %10s %9s %9s\n' "用例" "基线" "当前" "变化" "p25变化"
 printf '%-22s %10s %10s %9s %9s\n' "----" "----" "----" "----" "-------"

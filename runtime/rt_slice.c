@@ -201,10 +201,7 @@ void pa_list_slice_assign(PyAdamasList* dst, int64_t start, int64_t stop, int64_
         if (dst->len + delta > dst->cap) {
             int64_t ncap = dst->cap ? dst->cap : 4;
             while (ncap < dst->len + delta) ncap *= 2;
-            int64_t* nd = (int64_t*)realloc(dst->data, sizeof(int64_t) * (size_t)ncap);
-            if (!nd) panic_c("out of memory");
-            dst->data = nd;
-            dst->cap = ncap;
+            list_buf_grow(dst, ncap);
         }
         memmove(&dst->data[hi + delta], &dst->data[hi],
                 sizeof(int64_t) * (size_t)(dst->len - hi));

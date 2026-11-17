@@ -59,6 +59,25 @@ static void list_buf_put(int64_t* p, int64_t cap) {
     list_buf_count[c]++;
 }
 
+/* 增长 data 缓冲到 ncap 个元素。内联缓冲（合并分配，见 rt_internal.h）
+   是头块内部的指针，realloc/free 都非法 —— 换一次 malloc + memcpy，
+   内联区从此闲置，头块销毁时仍整块挂回 list_inline_pool 复用。
+   外部缓冲照旧 realloc。调用方负责随后的 heap_bits 扩容。 */
+int64_t* list_buf_grow(PyAdamasList* l, int64_t ncap) {
+    int64_t* nd;
+    if (l->data == list_inline_at(l)) {
+        nd = (int64_t*)malloc(sizeof(int64_t) * (size_t)ncap);
+        if (!nd) panic_c("out of memory");
+        memcpy(nd, l->data, sizeof(int64_t) * (size_t)l->cap);
+    } else {
+        nd = (int64_t*)realloc(l->data, sizeof(int64_t) * (size_t)ncap);
+        if (!nd) panic_c("out of memory");
+    }
+    l->data = nd;
+    l->cap = ncap;
+    return nd;
+}
+
 void list_destroy(void* p) {
     PyAdamasList* l = (PyAdamasList*)p;
     // kind 3 按约定是空列表；真出现元素（不变量被破坏）时按 2 保守释放。
@@ -78,7 +97,10 @@ void list_destroy(void* p) {
         l->heap_bits = NULL;
         l->bits_cap = 0;
     }
-    list_buf_put(l->data, l->cap);
+    // 内联缓冲随头块一起挂回 list_inline_pool（pa_rc_dec_slow 按 size 路由），
+    // 这里只还外部缓冲。非合并块不可能有 data == l+1：那个地址落在头块
+    // 自己的 malloc chunk 内部，分配器不会把它交给别的块。
+    if (l->data != list_inline_at(l)) list_buf_put(l->data, l->cap);
 }
 
 // GC 清扫前调用：只把「指向可达对象」的引用计数减掉。kind 2 的元素走
@@ -101,11 +123,22 @@ PyAdamasList* pa_list_new(int64_t cap, int64_t elem_kind) {
     if (cap < 0) panic_c("negative list capacity");
     if (elem_kind < 0 || elem_kind > 3) panic_c("invalid list element kind");
     if (cap < 4) cap = 4;
-    PyAdamasList* l = (PyAdamasList*)rc_alloc((int64_t)sizeof(PyAdamasList), list_destroy,
-                                      list_gc_release, PYADAMAS_RC_LIST);
+    PyAdamasList* l;
+    if (cap <= PYADAMAS_LIST_INLINE_CAP) {
+        // 合并分配：头 + 8 元素缓冲一次池操作（原来 list_pool_get +
+        // list_buf_get 两次）。queue_sim 每步建/销各一个列表，这是热路径。
+        l = (PyAdamasList*)rc_alloc_ex((int64_t)sizeof(PyAdamasList), list_destroy,
+                                       list_gc_release, PYADAMAS_RC_LIST,
+                                       PYADAMAS_LIST_INLINE_BYTES);
+        l->cap = PYADAMAS_LIST_INLINE_CAP;
+        l->data = list_inline_at(l);
+    } else {
+        l = (PyAdamasList*)rc_alloc((int64_t)sizeof(PyAdamasList), list_destroy,
+                                    list_gc_release, PYADAMAS_RC_LIST);
+        l->cap = cap;
+        l->data = list_buf_get(&l->cap);
+    }
     l->len = 0;
-    l->cap = cap;
-    l->data = list_buf_get(&l->cap);
     l->elem_kind = elem_kind;
     l->heap_bits = NULL;
     l->bits_cap = 0;
@@ -129,14 +162,15 @@ PyAdamasList* pa_list_new(int64_t cap, int64_t elem_kind) {
 PyAdamasList* pa_list_new_filled(int64_t n, int64_t elem_kind, int64_t a, int64_t b,
                                   int64_t c, int64_t d) {
     if (n < 0 || n > 4) panic_c("bad filled list size");
-    PyAdamasList* l = (PyAdamasList*)rc_alloc((int64_t)sizeof(PyAdamasList), list_destroy,
-                                              list_gc_release, PYADAMAS_RC_LIST);
+    PyAdamasList* l = (PyAdamasList*)rc_alloc_ex((int64_t)sizeof(PyAdamasList), list_destroy,
+                                               list_gc_release, PYADAMAS_RC_LIST,
+                                               PYADAMAS_LIST_INLINE_BYTES);
     l->len = n;
-    l->cap = n < 4 ? 4 : n;
+    l->cap = PYADAMAS_LIST_INLINE_CAP;
     l->elem_kind = elem_kind;
     l->heap_bits = NULL;
     l->bits_cap = 0;
-    l->data = list_buf_get(&l->cap);
+    l->data = list_inline_at(l);
     l->data[0] = a;
     if (n > 1) l->data[1] = b;
     if (n > 2) l->data[2] = c;
@@ -158,18 +192,20 @@ PyAdamasList* pa_tuple_new_filled(int64_t n, int64_t elem_kind, int64_t a, int64
     if (n < 0 || n > 4) panic_c("bad filled tuple size");
     PyAdamasList* l;
     if (elem_kind == 0) {
-        l = (PyAdamasList*)rc_alloc_untracked((int64_t)sizeof(PyAdamasList), list_destroy,
-                                             list_gc_release, PYADAMAS_RC_LIST);
+        l = (PyAdamasList*)rc_alloc_untracked_ex((int64_t)sizeof(PyAdamasList), list_destroy,
+                                               list_gc_release, PYADAMAS_RC_LIST,
+                                               PYADAMAS_LIST_INLINE_BYTES);
     } else {
-        l = (PyAdamasList*)rc_alloc((int64_t)sizeof(PyAdamasList), list_destroy,
-                                   list_gc_release, PYADAMAS_RC_LIST);
+        l = (PyAdamasList*)rc_alloc_ex((int64_t)sizeof(PyAdamasList), list_destroy,
+                                      list_gc_release, PYADAMAS_RC_LIST,
+                                      PYADAMAS_LIST_INLINE_BYTES);
     }
     l->len = n;
-    l->cap = n < 4 ? 4 : n;
+    l->cap = PYADAMAS_LIST_INLINE_CAP;
     l->elem_kind = elem_kind;
     l->heap_bits = NULL;
     l->bits_cap = 0;
-    l->data = list_buf_get(&l->cap);
+    l->data = list_inline_at(l);
     l->data[0] = a;
     if (n > 1) l->data[1] = b;
     if (n > 2) l->data[2] = c;
@@ -228,10 +264,7 @@ static void list_bits_reserve(PyAdamasList* l, int64_t ncap) {
 void pa_list_append(PyAdamasList* l, int64_t v, int64_t heap) {
     if (l->len == l->cap) {
         int64_t ncap = l->cap ? l->cap * 2 : 4;
-        int64_t* nd = (int64_t*)realloc(l->data, sizeof(int64_t) * (size_t)ncap);
-        if (!nd) panic_c("out of memory");
-        l->data = nd;
-        l->cap = ncap;
+        list_buf_grow(l, ncap);
         if (l->heap_bits) list_bits_reserve(l, ncap);
     }
     // 维护位图：一旦遇到 unknown，放弃逐元素跟踪。
@@ -331,10 +364,7 @@ void pa_list_insert(PyAdamasList* l, int64_t i, int64_t v) {
     if (i > l->len) i = l->len;
     if (l->len == l->cap) {
         int64_t ncap = l->cap ? l->cap * 2 : 4;
-        int64_t* nd = (int64_t*)realloc(l->data, sizeof(int64_t) * (size_t)ncap);
-        if (!nd) panic_c("out of memory");
-        l->data = nd;
-        l->cap = ncap;
+        list_buf_grow(l, ncap);
     }
     if (i < l->len)
         memmove(l->data + i + 1, l->data + i, sizeof(int64_t) * (size_t)(l->len - i));

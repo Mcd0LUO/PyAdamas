@@ -469,6 +469,35 @@ static void list_pool_put(PyAdamasRc* h) {
     list_pool_count++;
 }
 
+/* 小列表合并分配 freelist：RC 头 + PyAdamasList + 8 元素内联缓冲一块
+   （64 + 48 + 64 = 176 字节）。建表时一次池操作同时拿到头和缓冲，
+   销毁时整块挂回（缓冲是否还内联由 list_destroy 按指针判断）。
+   增长过的列表缓冲已换外部块，但头块仍是 176 字节，照样挂回这里，
+   下次复用时重新启用内联缓冲。 */
+#define LIST_INLINE_POOL_MAX 64
+static PyAdamasRc* list_inline_pool;
+static int list_inline_pool_count;
+
+static PyAdamasRc* list_inline_pool_get(void) {
+    PyAdamasRc* h = list_inline_pool;
+    if (h) {
+        list_inline_pool = h->next;
+        list_inline_pool_count--;
+    }
+    return h;
+}
+
+static void list_inline_pool_put(PyAdamasRc* h) {
+    if (list_inline_pool_count >= LIST_INLINE_POOL_MAX) {
+        free(h);
+        return;
+    }
+    h->next = list_inline_pool;
+    h->prev = NULL;
+    list_inline_pool = h;
+    list_inline_pool_count++;
+}
+
 /* exact-RC 模式下可以完全绕开 GC 的对象：没有任何堆字段（没有出边），
    不可能处在环里。字符串是典型；没有堆字段的类实例（生成代码不给
    dtor/release）同理。它们的生死完全由 RC 决定。 */
@@ -699,9 +728,9 @@ void panic_c(const char* msg) {
  *
  * 实现上先按普通路径分配（复用 freelist 与 GC 记账逻辑），再把自己从
  * 链上摘掉并置 UNTRACKED —— 与 rc_leaf_untracked 的字符串同款状态。 */
-void* rc_alloc_untracked(int64_t size, void (*dtor)(void*), void (*release)(void*),
-                         int64_t kind) {
-    void* p = rc_alloc(size, dtor, release, kind);
+void* rc_alloc_untracked_ex(int64_t size, void (*dtor)(void*), void (*release)(void*),
+                            int64_t kind, int64_t extra) {
+    void* p = rc_alloc_ex(size, dtor, release, kind, extra);
     PyAdamasRc* h = (PyAdamasRc*)p - 1;
     if (!(h->marked & PYADAMAS_RC_UNTRACKED)) {
         rc_unlink(h);
@@ -710,6 +739,11 @@ void* rc_alloc_untracked(int64_t size, void (*dtor)(void*), void (*release)(void
         h->marked = PYADAMAS_RC_UNTRACKED;
     }
     return p;
+}
+
+void* rc_alloc_untracked(int64_t size, void (*dtor)(void*), void (*release)(void*),
+                         int64_t kind) {
+    return rc_alloc_untracked_ex(size, dtor, release, kind, 0);
 }
 
 void rc_link(PyAdamasRc* h) {
@@ -756,6 +790,11 @@ void rc_unlink(PyAdamasRc* h) {
 
 void* rc_alloc(int64_t size, void (*dtor)(void*), void (*release)(void*),
                       int64_t kind) {
+    return rc_alloc_ex(size, dtor, release, kind, 0);
+}
+
+void* rc_alloc_ex(int64_t size, void (*dtor)(void*), void (*release)(void*),
+                      int64_t kind, int64_t extra) {
     if (size < 0) panic_c("negative allocation size");
     // **热路径优化：把 GC 相关判断合并成一个全局标志。**
     //
@@ -788,13 +827,14 @@ void* rc_alloc(int64_t size, void (*dtor)(void*), void (*release)(void*),
         }
     }
     // 短字符串按 8 字节取整，freelist 里的块容量和档位严格对应。
-    int64_t alloc_size = size;
+    // extra 是尾部内联缓冲（小列表合并分配），计入块容量与 GC 记账。
+    int64_t alloc_size = size + extra;
     if (kind == PYADAMAS_RC_STR && size > 0 && size <= STR_POOL_MAX_SIZE)
         alloc_size = (size + 7) & ~(int64_t)7;
     PyAdamasRc* h = NULL;
     if (kind == PYADAMAS_RC_STR) h = str_pool_get(alloc_size);
     else if (kind == PYADAMAS_RC_LIST && size == (int64_t)sizeof(PyAdamasList))
-        h = list_pool_get();
+        h = extra == PYADAMAS_LIST_INLINE_BYTES ? list_inline_pool_get() : list_pool_get();
     else if (kind == PYADAMAS_RC_DICT && size == (int64_t)sizeof(PyAdamasDict))
         h = dict_pool_get();
     if (!h) {
@@ -903,6 +943,9 @@ void pa_rc_dec_slow(void* p) {
         if (h->kind == PYADAMAS_RC_STR) str_pool_put(h);
         else if (h->kind == PYADAMAS_RC_LIST && h->size == (int64_t)sizeof(PyAdamasList))
             list_pool_put(h);
+        else if (h->kind == PYADAMAS_RC_LIST &&
+                 h->size == (int64_t)sizeof(PyAdamasList) + PYADAMAS_LIST_INLINE_BYTES)
+            list_inline_pool_put(h);
         else if (h->kind == PYADAMAS_RC_DICT && h->size == (int64_t)sizeof(PyAdamasDict))
             dict_pool_put(h);
         else free(h);
@@ -1875,7 +1918,8 @@ static void gc_free_body(PyAdamasRc* h) {
         free_attached_exception((char*)h + PYADAMAS_RC_HDR, h->size);
     if (h->kind == PYADAMAS_RC_LIST) {
         PyAdamasList* l = (PyAdamasList*)((char*)h + PYADAMAS_RC_HDR);
-        free(l->data);
+        // 合并分配的小列表：data 内联在头块尾部，随 free(h) 一起还掉。
+        if (l->data != list_inline_at(l)) free(l->data);
         // 逐元素堆位图也是堆内存，必须一起还掉（GC 清扫路径不走 list_destroy）。
         free(l->heap_bits);
         l->heap_bits = NULL;
@@ -2266,6 +2310,12 @@ void pa_gc_shutdown(void) {
         free(h);
     }
     list_pool_count = 0;
+    while (list_inline_pool) {
+        PyAdamasRc* h = list_inline_pool;
+        list_inline_pool = h->next;
+        free(h);
+    }
+    list_inline_pool_count = 0;
     // dict 池也要清空（每个块都是裸 malloc，必须 free）。
     while (dict_pool) {
         PyAdamasRc* h = dict_pool;

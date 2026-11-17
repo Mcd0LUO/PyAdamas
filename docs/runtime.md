@@ -148,6 +148,15 @@ exact-RC，必须等索引开关定下来再初始化）。于是单字节 ASCII
 每档最多 64 块。复用时 `cap` 按档容量对齐（只会变大），销毁时先 dec 元素再
 回收缓冲。
 
+**小列表合并分配**：容量 <=8 元素的列表（含定长构造快路径 `pa_list_new_filled` /
+`pa_tuple_new_filled`）把 `data` 缓冲内联在「RC 头 + 结构体」同一个 malloc 块
+尾部（`list_inline_pool`，64+48+64=176 字节，最多缓存 64 块），建/销各只需一次
+池操作。内联缓冲是块内指针，**不能 realloc / free**：append / insert / 切片赋值
+增长越过 8 时由 `list_buf_grow` 换 malloc + memcpy，内联区从此闲置；销毁时按
+`data == list_inline_at(l)` 判断是否还外部缓冲，头块按 `h->size`（48+64）整块
+挂回内联池，下次复用重新启用内联缓冲。GC 清扫路径（`gc_free_body`）同样不能
+单独 free 块内的 `data` 指针。
+
 `elem_kind` 是元素所有权类别，由降级器按容器静态类型算好：
 
 | kind | 含义 | 写入时 | 覆盖 / 截断 / 销毁时 |
@@ -157,7 +166,8 @@ exact-RC，必须等索引开关定下来再初始化）。于是单字节 ASCII
 | 2 | unknown 或混合 | 堆→`rc_inc`，unknown→`rc_inc_unknown` | 覆盖/截断走注册表；销毁 / GC 清扫有位图时按位图判，否则 `pa_rc_dec_unknown`（整数是空操作） |
 | 3 | 未定（只可能是空容器） | 第一次写入时定型并 retain | 沿用定型后的种类 |
 
-`pa_list_new(cap, elem_kind)` 最小容量 4；`append` 满了就翻倍。
+`pa_list_new(cap, elem_kind)` 最小容量 4；请求容量 <=8 走合并分配（实际
+容量 8），`append` 满了就翻倍。
 `pa_list_set` / `pa_list_set_len` / `del` / 销毁都按 `elem_kind` 释放旧元素；
 kind 2 的元素释放要么查全局 RC 索引（`pa_rc_dec_unknown`：先确认是堆指针
 再 dec，所以整数和「看起来像指针」的字面量都不会被误减），要么走**逐元素
