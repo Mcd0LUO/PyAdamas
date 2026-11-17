@@ -1096,6 +1096,87 @@ void AsmGen::gen_call_rt(const Inst& in) {
             move_fp(dst_op(in.dst), "%xmm0");
             return;
         }
+        // ── RC 记账的内联快路径 ──────────────────────────────────
+        //
+        // pa_rc_inc / pa_rc_dec / pa_rc_mark / pa_rc_cleanup 原来每次都
+        // 走 call。实测（perf 采样，queue_sim / str_build）：
+        //
+        //     pa_rc_cleanup  8.2% / 11.4%
+        //     pa_rc_inc      4.0% /  3.0%
+        //     pa_rc_dec      4.2% /  3.7%
+        //
+        // 这几个函数体本身只有 3~6 条指令，call/ret + 被调用者保存
+        // 的开销比它们干的活还大。这里照 rt_internal.h 里 pa_rc_inc_fast /
+        // pa_rc_dec_fast 的结构内联：慢路径（NULL、统计模式、GC 进行中、
+        // 引用计数归零）仍然落回原函数，语义逐条对齐。
+        //
+        // pa_rc_mark 更彻底：它就是 `return temp_len;`，一条 load 顶掉
+        // 一次 call。pa_rc_cleanup 只内联「水位没变就直接返回」这一条
+        // 快速出口 —— 那是最常见的情形，其余整体交给原函数。
+        if (fn == RtFn::RcMark) {
+            line("movq temp_len(%rip), %rax");
+            if (!dst_unused(in)) emit2("movq", "%rax", dst_op(in.dst));
+            return;
+        }
+        if (fn == RtFn::RcCleanup && in.args.size() == 1) {
+            emit2("movq", src_op(in.args[0]), "%rdi");
+            const std::string skip = fresh_label("cln");
+            line("cmpq temp_len(%rip), %rdi");
+            emit_jmp("je", skip);
+            spill_fp_slots();
+            line("call pa_rc_cleanup");
+            reload_fp_slots();
+            label(skip);
+            return;
+        }
+        if (fn == RtFn::RcInc && in.args.size() == 1) {
+            emit2("movq", src_op(in.args[0]), "%rdi");
+            const std::string slow = fresh_label("incslow");
+            const std::string done = fresh_label("incdone");
+            line("testq %rdi, %rdi");
+            emit_jmp("je", slow);            // p == NULL 走慢路径
+            line("movq -48(%rdi), %rax");    // h->rc，h = p - 64，rc 在 +16
+            line("movabsq $0x8000000000000000, %rcx");
+            line("cmpq %rcx, %rax");
+            emit_jmp("je", done);            // 永生对象（字面量）直接跳过
+            line("testq %rax, %rax");
+            emit_jmp("jle", slow);           // rc <= 0：让慢路径报错
+            line("addq $1, %rax");
+            line("movq %rax, -48(%rdi)");
+            emit_jmp("jmp", done);
+            label(slow);
+            // 慢路径真的会调运行时（可能触发析构），提升过的浮点要落盘。
+            // xmm 全是 caller-saved，不落盘就会被析构函数冲掉。
+            spill_fp_slots();
+            line("call pa_rc_inc_slow");
+            reload_fp_slots();
+            label(done);
+            return;
+        }
+        if (fn == RtFn::RcDec && in.args.size() == 1) {
+            emit2("movq", src_op(in.args[0]), "%rdi");
+            const std::string slow = fresh_label("decslow");
+            const std::string done = fresh_label("decdone");
+            line("testq %rdi, %rdi");
+            emit_jmp("je", slow);            // p == NULL
+            line("cmpl $0, pa_gc_phase_fast(%rip)");
+            emit_jmp("jne", slow);           // GC 进行中只登记边，不能重入释放
+            line("movq -48(%rdi), %rax");
+            line("movabsq $0x8000000000000000, %rcx");
+            line("cmpq %rcx, %rax");
+            emit_jmp("je", done);            // 永生对象
+            line("cmpq $1, %rax");
+            emit_jmp("jle", slow);           // 归零/非法：交给慢路径真正释放
+            line("subq $1, %rax");
+            line("movq %rax, -48(%rdi)");
+            emit_jmp("jmp", done);
+            label(slow);
+            spill_fp_slots();
+            line("call pa_rc_dec_slow");
+            reload_fp_slots();
+            label(done);
+            return;
+        }
         gen_rt_args(in, fn);
         spill_fp_slots();
         line(std::format("call {}", rt_name(fn)));
