@@ -1139,6 +1139,7 @@ PyAdamasStr* str_alloc_raw(int64_t len) {
             (PyAdamasStr*)rc_alloc((int64_t)sizeof(PyAdamasStr), NULL, NULL, PYADAMAS_RC_STR);
         s->len = len;
         s->pub = -1;
+        s->chash = 0;
         s->data = (const char*)&s->hash;
         ((char*)s->data)[len] = '\0';
         return s;
@@ -1148,6 +1149,7 @@ PyAdamasStr* str_alloc_raw(int64_t len) {
     s->len = len;
     s->pub = -1;
     s->hash = 0;
+    s->chash = 0;
     char* p = (char*)(s + 1);
     p[len] = '\0';
     s->data = p;

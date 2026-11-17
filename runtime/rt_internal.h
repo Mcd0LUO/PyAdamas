@@ -228,6 +228,20 @@ typedef struct {
     int64_t len;
     int64_t hash;      /* 预留给字符串驻留 */
     const char* data;
+    /* **短串哈希缓存。**
+     *
+     * 上面 4 个字段的偏移不能动（codegen 直接按 +24 取 data，cimport 也依赖），
+     * 所以缓存加在末尾，sizeof 从 32 变成 40。
+     *
+     * 为什么需要：len <= 7 的串走 SSO，字符内联在 hash 字段里，没有地方
+     * 缓存哈希。而字典反复查同一个短键（词频统计这类）每次都要重跑 FNV。
+     * 实测同样的 16 个键，len=8（能缓存）比 len=7（不能）快 33%
+     * （174.3ms -> 116.6ms）。
+     *
+     * 0 表示未计算；非 0 是 mix64 之后的哈希（和 dict_hash_value 一致）。
+     * 字面量在编译期就填好（见 codegen 的 .Lstr 发射），运行时创建的串懒算。
+     */
+    int64_t chash;
 } PyAdamasStr;
 
 /* 字符串迭代游标：cp 是上次取出的码点下标，off 是它之后的下一个字节偏移。

@@ -80,7 +80,12 @@ std::string AsmGen::gen(const IRModule& m) {
                 out_ += "\t.quad 0\n\t.quad 0\n\t.quad 0\n\t.quad 0\n\t.quad 0\n";
                 out_ += std::format(".Lstr{}:\n", i);
                 // +0 pub：str 是码点数、bytes 是字节数；编译期就算好（RELRO 只读，
-                // 运行期不能懒缓存）。+8 字节数，+16 hash，+24 data。
+                // 运行期不能懒缓存）。+8 字节数，+16 hash（SSO 字符区），
+                // +24 data，+32 chash（字典哈希缓存）。
+                //
+                // **chash 在编译期算好。** 字面量落在 .data.rel.ro，RELRO 之后
+                // 是只读的，运行期没法懒缓存 —— 所以必须在这里填。
+                // 这样字典查字面量键（if k == "abc" 之类）完全不用算哈希。
                 out_ += std::format("\t.quad {}\n", m.strings[i].pub);
                 out_ += std::format("\t.quad {}\n", s.size());
                 if (s.size() > 7)
@@ -88,6 +93,7 @@ std::string AsmGen::gen(const IRModule& m) {
                 else
                     out_ += "\t.quad 0\n";
                 out_ += std::format("\t.quad .Lstr{}_c\n", i);
+                out_ += std::format("\t.quad 0x{:x}\n", str_literal_hash(s));
                 out_ += std::format(".Lstr{}_c:\n", i);
                 out_ += std::format("\t.ascii \"{}\"\n", asm_escape(s));
                 out_ += "\t.byte 0\n";
