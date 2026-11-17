@@ -60,27 +60,45 @@ void AsmGen::gen_index_load(const Inst& in) {
         // list/tuple 共用 PyAdamasList 布局：+0 len，+16 data。
         // 实参一律走 ABI 寄存器；中间值用 ABI 提供的 scratch（必须避开
         // 实参寄存器，Win64 下 rcx/rdx/r8/r9 正好是前四个实参）。
+        //
+        // **热路径只留一次无符号比较。**
+        //
+        // 原实现每次索引访问 19 条指令：热路径 cmp+jb，然后 testq+js 判负，
+        // 负路径 addq+cmp+jb，两个分支各自 `call pa_list_get` + `ud2`。
+        // 而 pa_list_get 本身就完整处理了负索引和越界：
+        //     if (i < 0) i += l->len;
+        //     if (i < 0 || i >= l->len) pa_raise_c("IndexError", ...);
+        //     return l->data[i];
+        // 也就是说内联的热路径只是它的快速副本，慢路径完全可以整段交给它。
+        //
+        // 改成：`cmpq len, idx; jb fast` —— 无符号比较，`jb` 成立等价于
+        // `0 <= idx < len`（负数按无符号看是极大值，必然不成立）。
+        // 成立走 4 条内联取址；不成立直接 `call pa_list_get`，负索引、越界
+        // 全部由它处理。
+        //
+        // **两条路径都要按类型落位**：pa_list_get 返回 int64（浮点元素的
+        // 位模式在 %rax），热路径读的是 double 位模式。第一版只在热路径
+        // 做了浮点落位，冷路径直接落到 done —— 浮点列表走负索引时读到
+        // 垃圾（15_slice 打出 94858846548000，43_indexing SIGSEGV）。
         const std::string r0 = arg_reg_i(0), r1 = arg_reg_i(1);
         const std::string sl = target_abi().scratch_len;
         const std::string sp = target_abi().scratch_ptr;
         std::string fast = fresh_label("idxfast");
-        std::string neg = fresh_label("idxneg");
+        std::string done = fresh_label("idxdone");
         emit2("movq", src_op(in.a), r0);
         emit2("movq", src_op(in.b), r1);
         line(std::format("movq 0({}), {}", r0, sl));
         line(std::format("cmpq {}, {}", sl, r1));
         emit_jmp("jb", fast);
-        line(std::format("testq {}, {}", r1, r1));
-        emit_jmp("js", neg);
+        // 冷路径：负索引 / 越界 / 类型不确定，全交给运行时。
         line("call pa_list_get");
-        line("ud2");
-        label(neg);
-        line(std::format("addq {}, {}", sl, r1));
-        line(std::format("cmpq {}, {}", sl, r1));
-        emit_jmp("jb", fast);
-        line(std::format("movq {}, {}", sl, r1));
-        line("call pa_list_get");
-        line("ud2");
+        if (ir_is_float(in.ty)) {
+            line("movq %rax, %xmm0");
+            move_fp(dst_op(in.dst), "%xmm0");
+        } else {
+            move_to(dst_op(in.dst), "%rax");
+        }
+        emit_jmp("jmp", done);
         label(fast);
         line(std::format("movq 16({}), {}", r0, sp));
         if (ir_is_float(in.ty)) {
@@ -90,6 +108,7 @@ void AsmGen::gen_index_load(const Inst& in) {
             line(std::format("movq ({},{},8), %rax", sp, r1));
             move_to(dst_op(in.dst), "%rax");
         }
+        label(done);
     }
 
 void AsmGen::gen_index_unchecked_load(const Inst& in) {
