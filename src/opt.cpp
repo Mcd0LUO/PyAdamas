@@ -222,6 +222,10 @@ void optimize_ir(IRModule& m, int opt_level) {
     // 跨块 CSE：条件块算过的纯表达式（如循环条件里的 zr*zr）在体块里复用。
     for (auto& fptr : m.funcs) cse_function(*fptr);
 
+    // RC 冗余消除：降低器为异常安全发射的 temp/temp_take 有些会互相抵消。
+    // 放在所有 CFG 变换之后 —— 前面的内联/旋转会产生新的相邻形态。
+    for (auto& fptr : m.funcs) rc_redundant_pairs(*fptr);
+
     // 内联带进来的实参常量继续折；顺带清掉失效的 load.global / func.addr。
     fold_all();
 }

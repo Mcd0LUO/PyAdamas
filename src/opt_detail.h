@@ -33,6 +33,8 @@ bool rewrite_direct_calls(IRModule& m, IRFunction& fn,
                           const std::unordered_map<int, int>& gfunc);
 
 bool licm_function(IRFunction& fn, size_t n_globals);
+// RC 冗余消除：删掉互相抵消的 temp/temp_take 对。
+bool rc_redundant_pairs(IRFunction& fn);
 // 槽位转发与分支线程化：短路布尔值不再经临时槽往返，直接按比较结果分支。
 void forward_slot_loads(IRFunction& fn);
 bool version_bounds_function(IRFunction& fn);
