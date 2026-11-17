@@ -684,6 +684,9 @@ private:
     std::vector<std::vector<std::string>> slot_loc_;
     // 块 b 入口需要从栈装进寄存器的槽（前驱可能在栈上）。
     std::vector<std::vector<int>> slot_reload_in_;
+    // 块 b 出口要写回栈的槽（存在后继要从栈读）。
+    // split 模式不再双写 store，这里是栈副本唯一的更新点。
+    std::vector<std::vector<int>> slot_spill_out_;
     // 当前生成到哪个块（split 模式用）。
     int split_block_ = -1;
 

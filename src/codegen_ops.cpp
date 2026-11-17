@@ -63,12 +63,6 @@ void AsmGen::gen_inst(const Inst& in) {
                 // 本来就已经有 reload 开销，多一条 mov 换正确性是划算的。
                 const std::string& loc = slot_op(in.idx);
                 move_to(loc, src_op(in.a));
-                if (!slot_loc_.empty() && loc[0] == 0x25 && loc != smem(in.idx)) {
-                    if (ir_is_float(f_->slot_ty[static_cast<size_t>(in.idx)]))
-                        line(std::format("movsd {0}, {1}", loc, smem(in.idx)));
-                    else
-                        line(std::format("movq {0}, {1}", loc, smem(in.idx)));
-                }
                 invalidate_slot(in.idx);
                 break;
             }            case IrOp::LoadGlobal:

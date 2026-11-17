@@ -1037,9 +1037,13 @@ void AsmGen::assign_slot_regs_split() {
             // split 若从 0 开始会抢同一批寄存器 —— 实测 fib 输出 -960、
             // mandelbrot 输出 0、nqueens 被 Killed。
             const int base = n_saved_regs_;
+            // 实验开关：限制 split 能占用的寄存器数（0 = 完全不用 split 提升，
+            // 只保留机制本身的开销），用来分离「机制成本」与「分配质量」。
+            int split_cap = kMaxSlotRegs();
+            if (const char* e = std::getenv("PYADAMAS_SPLIT_MAXREG")) split_cap = std::atoi(e);
             for (size_t i = 0; i < cands.size(); ++i) {
                 const int idx = base + static_cast<int>(i);
-                if (idx < kMaxSlotRegs())
+                if (idx < kMaxSlotRegs() && static_cast<int>(i) < split_cap)
                     fixed[static_cast<size_t>(cands[i].s)] = idx;
             }
             for (int b = 0; b < nb; ++b)
@@ -1094,13 +1098,114 @@ void AsmGen::assign_slot_regs_split() {
                             fixed[static_cast<size_t>(s)];
                 }
         }
-        // 块入口 reload：本块要用寄存器的槽，从栈装进去。
-        for (int b = 0; b < nb; ++b) {
-            for (int s = 0; s < ns; ++s) {
-                if (slot_loc_[static_cast<size_t>(b)][static_cast<size_t>(s)].empty()) continue;
-                slot_reload_in_[static_cast<size_t>(b)].push_back(s);
+        // **精确 reload / spill 决策（取代「块入口无条件 reload + store 双写」）。**
+        //
+        // 旧方案：store.slot 双写栈 + 每个块入口无条件 reload。正确但昂贵 ——
+        // 双写让每次 store 多一次内存写，还打断 store-to-load forwarding。
+        // 实测 9 个基准 TOTAL +28.1%（matmul +42.9%、spectral_norm +37.9%）。
+        //
+        // 新方案：**只在寄存器集合的边界搬运**。
+        //
+        // 记 R(s) = { 块 b : slot_loc_[b][s] 非空 }（s 在 b 里住寄存器）。
+        // 关键不变量：b ∈ R(s) 时，那个寄存器在 b 内任何位置都是权威值
+        // （要么入口 reload 过，要么从全部在 R(s) 里的前驱带过来）。
+        //
+        //   reload(b,s)     ：b ∈ R(s) 且「b 无前驱且 b 用 s」或「∃前驱 p ∉ R(s)」。
+        //                     全部前驱都在 R(s) 时寄存器直接带过来，不需要重装。
+        //   need_stack(b,s) ：栈副本必须在 b 入口有效。
+        //                     = b ∈ R(s) ? reload(b,s)
+        //                                : (b 用 s || ∃后继 q: need_stack(q,s))
+        //                     b ∉ R(s) 时不碰寄存器，栈没被写就原样传递，
+        //                     所以「后继要栈」这个需求要穿过它往前传。
+        //   spill(b,s)      ：b ∈ R(s) 且 ∃后继 q: need_stack(q,s)。
+        //                     有后继要从栈读，才在 b 出口写回。
+        //
+        // 效果：循环体内相邻块之间零搬运；只有真正跨出寄存器集合的边界
+        // 才有一条 mov。store.slot 不再双写（栈在块出口统一写回）。
+        slot_spill_out_.assign(static_cast<size_t>(nb), {});
+        {
+            std::vector<std::vector<int>> preds(static_cast<size_t>(nb));
+            for (int b = 0; b < nb; ++b)
+                for (int q : succ[static_cast<size_t>(b)])
+                    preds[static_cast<size_t>(q)].push_back(b);
+
+            std::vector<std::vector<char>> uses(static_cast<size_t>(nb),
+                                                std::vector<char>(static_cast<size_t>(ns), 0));
+            for (int b = 0; b < nb; ++b)
+                for (const auto& in : f_->blocks[static_cast<size_t>(b)].insts)
+                    if (in.idx >= 0 && in.idx < ns &&
+                        (in.op == IrOp::LoadSlot || in.op == IrOp::StoreSlot))
+                        uses[static_cast<size_t>(b)][static_cast<size_t>(in.idx)] = 1;
+
+            std::vector<std::vector<char>> in_r(static_cast<size_t>(nb),
+                                               std::vector<char>(static_cast<size_t>(ns), 0));
+            for (int b = 0; b < nb; ++b)
+                for (int s = 0; s < ns; ++s)
+                    if (!slot_loc_[static_cast<size_t>(b)][static_cast<size_t>(s)].empty())
+                        in_r[static_cast<size_t>(b)][static_cast<size_t>(s)] = 1;
+
+            std::vector<std::vector<char>> reload(static_cast<size_t>(nb),
+                                                  std::vector<char>(static_cast<size_t>(ns), 0));
+            for (int b = 0; b < nb; ++b)
+                for (int s = 0; s < ns; ++s) {
+                    if (!in_r[static_cast<size_t>(b)][static_cast<size_t>(s)]) continue;
+                    bool need;
+                    if (preds[static_cast<size_t>(b)].empty()) {
+                        need = uses[static_cast<size_t>(b)][static_cast<size_t>(s)] != 0;
+                    } else {
+                        need = false;
+                        for (int p : preds[static_cast<size_t>(b)])
+                            if (!in_r[static_cast<size_t>(p)][static_cast<size_t>(s)]) {
+                                need = true;
+                                break;
+                            }
+                    }
+                    if (need) {
+                        reload[static_cast<size_t>(b)][static_cast<size_t>(s)] = 1;
+                        slot_reload_in_[static_cast<size_t>(b)].push_back(s);
+                    }
+                }
+
+            std::vector<std::vector<char>> need(static_cast<size_t>(nb),
+                                               std::vector<char>(static_cast<size_t>(ns), 0));
+            bool changed = true;
+            while (changed) {
+                changed = false;
+                for (int b = nb - 1; b >= 0; --b)
+                    for (int s = 0; s < ns; ++s) {
+                        if (need[static_cast<size_t>(b)][static_cast<size_t>(s)]) continue;
+                        bool v;
+                        if (in_r[static_cast<size_t>(b)][static_cast<size_t>(s)]) {
+                            v = reload[static_cast<size_t>(b)][static_cast<size_t>(s)] != 0;
+                        } else {
+                            v = uses[static_cast<size_t>(b)][static_cast<size_t>(s)] != 0;
+                            if (!v)
+                                for (int q : succ[static_cast<size_t>(b)])
+                                    if (need[static_cast<size_t>(q)][static_cast<size_t>(s)]) {
+                                        v = true;
+                                        break;
+                                    }
+                        }
+                        if (v) {
+                            need[static_cast<size_t>(b)][static_cast<size_t>(s)] = 1;
+                            changed = true;
+                        }
+                    }
             }
+
+            for (int b = 0; b < nb; ++b)
+                for (int s = 0; s < ns; ++s) {
+                    if (!in_r[static_cast<size_t>(b)][static_cast<size_t>(s)]) continue;
+                    bool v = false;
+                    for (int q : succ[static_cast<size_t>(b)])
+                        if (need[static_cast<size_t>(q)][static_cast<size_t>(s)]) {
+                            v = true;
+                            break;
+                        }
+                    if (v) slot_spill_out_[static_cast<size_t>(b)].push_back(s);
+                }
         }
+
         // **n_saved_regs_ 必须覆盖 split 实际用到的寄存器。**
         //
         // 序言按 n_saved_regs_ 压栈 callee-saved 寄存器，尾声按它弹栈。
@@ -2201,11 +2306,18 @@ void AsmGen::assign_global_vreg_regs() {
         // 实测 nqueens N=1 就抛 IndexError。
         int next = n_saved_regs_;
         size_t ci = 0;
-        if (!rc_split_) {
-            for (; ci < cands.size() && next < kMaxSlotRegs(); ++ci)
-                vreg_reg_[static_cast<size_t>(cands[ci].v)] = kSlotRegs()[next++];
-            n_saved_regs_ = next;
-        }
+        // **vreg 从 n_saved_regs_ 开始用，正好是 split 之后剩下的那部分。**
+        //
+        // split 的槽占 kSlotRegs()[base .. base+k)，而 n_saved_regs_ 已被
+        // 设成 base+k（见 assign_slot_regs_split 末尾的 max 逻辑）。所以从
+        // n_saved_regs_ 起分配不会与槽冲突。
+        //
+        // 曾经在 split 模式下整段跳过，结果跨块 vreg（LICM 提升的循环上界、
+        // 函数返回值等）只能落栈，每次使用要「load 到临时 + 再 store 临时」
+        // 两条指令 —— 这才是 split 慢 27% 的主因，不是双写。
+        for (; ci < cands.size() && next < kMaxSlotRegs(); ++ci)
+            vreg_reg_[static_cast<size_t>(cands[ci].v)] = kSlotRegs()[next++];
+        n_saved_regs_ = next;
 
         // 无调用函数里 %r8–%r11 也不会被任何指令破坏：再拿至多两个
         // 承载最热的跨块值，剩下的留给块内临时寄存器。

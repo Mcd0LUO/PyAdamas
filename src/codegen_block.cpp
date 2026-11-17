@@ -787,27 +787,29 @@ void AsmGen::gen_block(const Block& b) {
                     fp_spill_mask_[j] = static_cast<char>((m >> j) & 1);
                 fp_mask_valid_ = true;
             }
-            // **split 模式的块出口 spill 必须插在终止指令之前。**
+            // **split 模式的块出口 spill（必须插在终止指令之前）。**
             //
-            // 终止指令（jump/branch/return）之后生成的代码永远不会执行，
-            // 所以不能放在循环外面。这里检测到「当前是最后一条指令」时先
-            // 把寄存器里的槽写回栈，再生成终止指令。
+            // 终止指令（jump/branch/return）之后的代码永远不会执行，所以
+            // 不能放在循环外面。这里检测到「当前是最后一条指令」时先写回，
+            // 再生成终止指令。
             //
-            // 只 spill 「本块写过」的槽：没写过的槽栈里已经是最新值。
-            if (!slot_loc_.empty() && cur_block_ >= 0 &&
-                cur_block_ < static_cast<int>(slot_loc_.size()) &&
+            // 写回哪些槽由 slot_spill_out_ 精确给出（见 assign_slot_regs_split）：
+            // 只有「存在后继要从栈读」的块才写回。不再双写，所以这是栈副本
+            // 唯一的更新点。
+            if (!slot_spill_out_.empty() && cur_block_ >= 0 &&
+                cur_block_ < static_cast<int>(slot_spill_out_.size()) &&
                 i + 1 >= b.insts.size()) {
-                const auto& locs = slot_loc_[static_cast<size_t>(cur_block_)];
-                for (int sl = 0; sl < static_cast<int>(locs.size()); ++sl) {
-                    if (locs[static_cast<size_t>(sl)].empty()) continue;
-                    if (!block_stores_.contains(sl)) continue;
-                    const std::string& rg = locs[static_cast<size_t>(sl)];
+                for (int sl : slot_spill_out_[static_cast<size_t>(cur_block_)]) {
+                    if (sl < 0 || sl >= static_cast<int>(slot_loc_[static_cast<size_t>(cur_block_)].size()))
+                        continue;
+                    const std::string& rg = slot_loc_[static_cast<size_t>(cur_block_)][static_cast<size_t>(sl)];
+                    if (rg.empty()) continue;
                     const std::string& st = smem(sl);
                     if (rg == st) continue;
                     if (ir_is_float(f_->slot_ty[static_cast<size_t>(sl)]))
-                        line(std::format("movsd {}, {}", rg, st));
+                        line(std::format("movsd {0}, {1}", rg, st));
                     else
-                        line(std::format("movq {}, {}", rg, st));
+                        line(std::format("movq {0}, {1}", rg, st));
                 }
             }
             gen_inst(in);
