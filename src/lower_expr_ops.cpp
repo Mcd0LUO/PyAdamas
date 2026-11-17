@@ -161,7 +161,16 @@ VReg Lowerer::lower_binop(BinOp& b) {
                       : cty->kind == TyKind::Bytes ? RtFn::BytesRepeat
                                                    : RtFn::ListRepeat;
             VReg v = call_runtime(fn, ty ? ty : cty, {base, n});
+            // **必须同时登记 fresh_vregs。**
+            //
+            // 原来只 push_temp，漏了 fresh_vregs.insert —— 于是容器构造
+            // （lower_expr_container）里 `st_->fresh_vregs.count(v)` 为 0，
+            // 走了 retain_elem 分支，多发一次 pa_rc_inc。
+            //
+            // 实测 bench_rc_gen：`'x' * 16` 和 `str(i)` 都是这种，每轮
+            // 多 2 次 inc、2 次 dec，15 万轮 = 60 万次冗余 RC 操作。
             push_temp(v);
+            st_->fresh_vregs.insert(v);
             return v;
         }
     }
