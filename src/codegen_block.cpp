@@ -480,8 +480,25 @@ void AsmGen::emit_function(const IRFunction& f, int fi) {
         }
         for (size_t bi = 0; bi < f.blocks.size(); ++bi) {
             cur_block_ = static_cast<int>(bi);
+            split_block_ = static_cast<int>(bi);
             if (loop_header[bi]) line(".p2align 4");
             label(block_label(static_cast<int>(bi)));
+            // live range splitting 的块入口：本块要用寄存器的槽，从栈装进去。
+            //
+            // 无条件 reload 是对的 —— StoreSlot 双写保证栈永远是最新值，
+            // 即使前驱把值放在寄存器里也一样（它同时写了栈）。
+            if (bi < slot_reload_in_.size()) {
+                for (int s : slot_reload_in_[bi]) {
+                    const std::string& rg = slot_loc_[bi][static_cast<size_t>(s)];
+                    if (rg.empty()) continue;
+                    const std::string& st = smem(s);
+                    if (rg == st) continue;
+                    if (ir_is_float(f.slot_ty[static_cast<size_t>(s)]))
+                        line(std::format("movsd {}, {}", st, rg));
+                    else
+                        line(std::format("movq {}, {}", st, rg));
+                }
+            }
             gen_block(f.blocks[bi]);
         }
 

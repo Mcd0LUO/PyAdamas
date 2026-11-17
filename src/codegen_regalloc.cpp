@@ -816,6 +816,89 @@ void AsmGen::linear_scan_pool(const std::vector<int>& cands, const char* const* 
             }
         }
     }
+static std::vector<int> block_loop_depth(const IRFunction& f);
+
+/* ── live range splitting：按块分配变量槽的寄存器 ──────────────
+ *
+ * **问题**：`slot_reg_[s]` 是「整函数在寄存器」的布尔标记，代码生成器
+ * 在任意指令处看到非空就用寄存器，不做区间判断。所以只活跃一部分的
+ * 变量只能二选一：整函数占寄存器（区间外读到过期值）或整函数在栈上
+ * （热段落也走内存）。
+ *
+ * **做法**：每个基本块独立决定「本块用哪个寄存器」，块入口把值从栈
+ * 装进寄存器。栈始终是权威副本 —— `store.slot` 同时写寄存器和栈，
+ * 所以任何块入口 reload 都能拿到最新值，不需要精确的 spill-out。
+ *
+ * **正确性关键**：
+ *   1. store.slot 双写（寄存器 + 栈），栈永远最新；
+ *   2. 块入口 reload 本块要用的槽；
+ *   3. 块内所有 LoadSlot/StoreSlot 走 slot_op_at（查块表）。
+ *
+ * 代价：每次 store 多一条 mov（寄存器→栈）。收益：热块里的读全走寄存器。
+ * 多余的 store 后续可以由死存储消除去掉。 */
+void AsmGen::assign_slot_regs_split() {
+        const int nb = static_cast<int>(f_->blocks.size());
+        const int ns = static_cast<int>(f_->slot_ty.size());
+        slot_loc_.assign(static_cast<size_t>(nb), {});
+        slot_reload_in_.assign(static_cast<size_t>(nb), {});
+        if (nb == 0 || ns == 0) return;
+
+        for (int b = 0; b < nb; ++b)
+            slot_loc_[static_cast<size_t>(b)].assign(static_cast<size_t>(ns), std::string());
+
+        std::vector<int> depth = block_loop_depth(*f_);
+
+        // 每个块独立贪心：块内读写次数最多的槽优先拿寄存器。
+        for (int b = 0; b < nb; ++b) {
+            std::vector<int64_t> w(static_cast<size_t>(ns), 0);
+            int64_t dw = 1;
+            for (int i = 0; i < depth[static_cast<size_t>(b)] && i < 4; ++i) dw *= 10;
+            for (const auto& in : f_->blocks[static_cast<size_t>(b)].insts) {
+                if (in.idx >= 0 && in.idx < ns &&
+                    (in.op == IrOp::LoadSlot || in.op == IrOp::StoreSlot))
+                    w[static_cast<size_t>(in.idx)] += dw;
+            }
+            struct C { int s; int64_t w; };
+            std::vector<C> cands;
+            for (int s = 0; s < ns; ++s) {
+                if (w[static_cast<size_t>(s)] == 0) continue;
+                TypePtr t = f_->slot_ty[static_cast<size_t>(s)];
+                if (!t || t->kind == TyKind::Unknown) continue;
+                if (ir_is_heap(t)) continue;
+                if (s < static_cast<int>(gc_scan_slot_.size()) && gc_scan_slot_[s]) continue;
+                cands.push_back(C{s, w[static_cast<size_t>(s)]});
+            }
+            if (cands.empty()) continue;
+            std::ranges::sort(cands, [](const C& a, const C& c) {
+                return a.w != c.w ? a.w > c.w : a.s < c.s;
+            });
+            int used_int = 0, used_fp = 0;
+            for (const auto& cd : cands) {
+                TypePtr t = f_->slot_ty[static_cast<size_t>(cd.s)];
+                if (ir_is_float(t)) {
+                    if (used_fp >= kMaxFpSlotRegs()) continue;
+                    slot_loc_[static_cast<size_t>(b)][static_cast<size_t>(cd.s)] =
+                        kFpSlotRegs()[used_fp++];
+                } else {
+                    if (used_int >= kMaxSlotRegs()) continue;
+                    slot_loc_[static_cast<size_t>(b)][static_cast<size_t>(cd.s)] =
+                        kSlotRegs()[used_int++];
+                }
+            }
+        }
+
+        // 块入口 reload：本块要用寄存器的槽，从栈装进去。
+        //
+        // 无条件 reload 是对的 —— store 双写保证栈永远是最新值，即使
+        // 前驱块把值放在寄存器里也一样（它同时写了栈）。
+        for (int b = 0; b < nb; ++b) {
+            for (int s = 0; s < ns; ++s) {
+                if (slot_loc_[static_cast<size_t>(b)][static_cast<size_t>(s)].empty()) continue;
+                slot_reload_in_[static_cast<size_t>(b)].push_back(s);
+            }
+        }
+}
+
 void AsmGen::assign_slot_regs_linear() {
         // 只把**整型**候选交给通用扫描：浮点由调用方用独立的池扫（R4）。
         std::vector<int> int_cands;
@@ -974,6 +1057,11 @@ void AsmGen::assign_slot_regs() {
         //
         // 两者只在整型槽上不同（浮点池仍走下面的按频次逻辑）。线性扫描的
         // 优势是「不同活跃区间复用同一寄存器」，变量数超过寄存器数时覆盖率更高。
+        static const bool use_split = std::getenv("PYADAMAS_RA_SPLIT") != nullptr;
+        if (use_split) {
+            assign_slot_regs_split();
+            return;
+        }
         static const bool ra_off = std::getenv("PYADAMAS_NO_RA") != nullptr;
         if (!ra_off) {
             assign_slot_regs_linear();

@@ -632,10 +632,38 @@ private:
     // 变量的现在位置：寄存器（提升过）或栈槽。
     const std::string& slot_op(int slot) const {
         if (gen_) return gen_smem(slot);
+        // **split 模式：按当前块查表。**
+        //
+        // 放在 slot_reg_ 之前：split 模式下 slot_reg_ 不用（整函数固定位置
+        // 与按块分裂互斥）。`slot_loc_` 为空时（默认模式）整段跳过，
+        // 行为与原来完全一致。
+        if (!slot_loc_.empty() && split_block_ >= 0 &&
+            split_block_ < static_cast<int>(slot_loc_.size()) &&
+            slot >= 0 &&
+            slot < static_cast<int>(slot_loc_[static_cast<size_t>(split_block_)].size())) {
+            const std::string& r =
+                slot_loc_[static_cast<size_t>(split_block_)][static_cast<size_t>(slot)];
+            if (!r.empty()) return r;
+            return smem(slot);
+        }
         if (slot >= 0 && slot < static_cast<int>(slot_reg_.size()) && !slot_reg_[slot].empty())
             return slot_reg_[slot];
         return smem(slot);
     }
+
+    // ── live range splitting ───────────────────────────────────
+    //
+    // `slot_loc_[b][s]` 非空表示「槽 s 在块 b 里住在那个寄存器」。
+    // 与 `slot_reg_[s]`（整函数固定位置）互斥：split 模式用这张表，
+    // 默认模式用 slot_reg_。两者都为空时走栈（smem）。
+    //
+    // slot_op 里加了一个分支：slot_loc_ 非空时按块查表，否则走 slot_reg_
+    // （默认路径行为完全不变）。split 模式只在 PYADAMAS_RA_SPLIT=1 时启用。
+    std::vector<std::vector<std::string>> slot_loc_;
+    // 块 b 入口需要从栈装进寄存器的槽（前驱可能在栈上）。
+    std::vector<std::vector<int>> slot_reload_in_;
+    // 当前生成到哪个块（split 模式用）。
+    int split_block_ = -1;
 
     // 读一个 vreg 的操作数。块内别名优先（别名指向的就是它的当前值），
     // 其次是可以直接当立即数用的常量，最后退回它自己的栈槽。
@@ -738,6 +766,8 @@ private:
     // linear_scan_pool），这里保留旧实现只为可回退对比。
     void assign_slot_regs();
     void assign_slot_regs_linear();
+    // live range splitting：按块给变量槽分配寄存器。
+    void assign_slot_regs_split();
     // 通用线性扫描：给定活跃区间与寄存器池，返回 slot -> 寄存器名。
     // 整型与浮点共用（R4：浮点也走线性扫描，不再按频次挑前 N 个）。
     void linear_scan_pool(const std::vector<int>& cands, const char* const* regs,

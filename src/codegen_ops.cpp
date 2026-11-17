@@ -48,10 +48,26 @@ void AsmGen::gen_inst(const Inst& in) {
             case IrOp::Cmp: gen_cmp(in); break;
             case IrOp::Convert: gen_convert(in); break;
             case IrOp::LoadSlot: gen_load_slot(in); break;
-            case IrOp::StoreSlot:
-                move_to(slot_op(in.idx), src_op(in.a));
+            case IrOp::StoreSlot: {
+                // split 模式下位置按块查表（slot_op 内部处理）。
+                const bool sp = !slot_loc_.empty();
+                const std::string& loc = slot_op(in.idx);
+                const std::string& stk = smem(in.idx);
+                move_to(loc, src_op(in.a));
+                // **split 模式：栈必须是权威副本。**
+                //
+                // 每个块独立选位置，后继块入口无条件从栈 reload。若 store
+                // 只写寄存器，后继块在栈上读到的就是旧值。所以这里双写。
+                // 默认模式下 loc == stk（都是 smem），不会多生成指令。
+                if (sp && loc != stk) {
+                    if (ir_is_float(f_->slot_ty[static_cast<size_t>(in.idx)]))
+                        line(std::format("movsd {}, {}", loc, stk));
+                    else
+                        line(std::format("movq {}, {}", loc, stk));
+                }
                 invalidate_slot(in.idx);
                 break;
+            }
             case IrOp::LoadGlobal:
                 out_ += "\tmovq ";
                 out_ += global_label(in.idx);
@@ -207,6 +223,7 @@ void AsmGen::gen_inst(const Inst& in) {
     //   2. 这个临时值只被读一次，且读的时候中间没有对 x 的赋值
     // 都满足时，临时值直接指向 x 的寄存器，整条指令消失。
 void AsmGen::gen_load_slot(const Inst& in) {
+        // split 模式下位置按块查表；默认模式保持原行为。
         std::string sop = slot_op(in.idx);
         // 融合目标非空时**必须**真的写过去，不能走别名——别名只是
         // 让 %v 指向变量的位置，而 `store.slot s, %v` 已经被吞掉，
