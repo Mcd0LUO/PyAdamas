@@ -351,18 +351,58 @@ bool version_bounds_loop(IRFunction& fn, int h, const std::vector<char>& body,
     const int nb = static_cast<int>(fn.blocks.size());
     const auto in_loop = [&](int b) { return body[static_cast<size_t>(b)] != 0; };
 
-    // 循环体内有调用或下标写入时，长度/元素可能在迭代间变化。
+    // 循环体内的调用可能改变列表长度/元素，下标版本化就失效了。
+    //
+    // **但「纯数学运行时函数」不会碰容器** —— pa_math_sqrt / pa_math_sin
+    // 之类只算一个标量。实测 bench/compare/nbody.py：热循环里有
+    // `math.sqrt(d2)`，因为这条一刀切的判断，整个循环的版本化被放弃，
+    // 39 个 index.get + 44 个 index.set 全部带边界检查（18ms vs Go 5ms）。
+    //
+    // 这里放行「参数全是标量、返回值也是标量」的运行时函数。判据用 RtFn
+    // 白名单而不是黑名单 —— 漏放一个容器函数会静默算错，宁可保守。
+    auto rtfn_is_pure_scalar = [](RtFn f) {
+        switch (f) {
+            // 数学：只吃/吐标量
+            case RtFn::MathSqrt: case RtFn::MathSin: case RtFn::MathCos:
+            case RtFn::MathTan: case RtFn::MathAsin: case RtFn::MathAcos:
+            case RtFn::MathAtan: case RtFn::MathAtan2: case RtFn::MathExp:
+            case RtFn::MathLog: case RtFn::MathLog2: case RtFn::MathLog10:
+            case RtFn::MathPow: case RtFn::MathFabs: case RtFn::MathFloor:
+            case RtFn::MathCeil: case RtFn::MathTrunc: case RtFn::MathFmod:
+            case RtFn::MathHypot: case RtFn::MathCopysign:
+                return true;
+            // 引用计数 / 临时栈：只动计数，不改容器长度
+            case RtFn::RcInc: case RtFn::RcDec:
+            case RtFn::RcTemp: case RtFn::RcTempTake:
+            case RtFn::RcMark: case RtFn::RcCleanup:
+                return true;
+            default:
+                return false;
+        }
+    };
     for (int b = 0; b < nb; ++b) {
         if (!in_loop(b)) continue;
         for (const auto& in : fn.blocks[static_cast<size_t>(b)].insts) {
             switch (in.op) {
                 case IrOp::Call:
-                case IrOp::CallRt:
                 case IrOp::CallExtern:
                 case IrOp::CallDirect:
                 case IrOp::VCall:
                 case IrOp::VCallStatic:
                 case IrOp::SuperVCall:
+                    return false;
+                case IrOp::CallRt:
+                    if (!rtfn_is_pure_scalar(static_cast<RtFn>(in.imm))) return false;
+                    break;
+                // **IndexStore 必须放弃版本化。**
+                //
+                // 试过放行（理由：IndexStore 只改已有元素、不改 len），
+                // 但 `51_bounds_versioning.py` 立刻回归 —— 版本化把候选的
+                // IndexLoad 外提到循环入口，如果循环体里的写入改了同一个
+                // 位置，外提读到的就是**旧值**，算错。
+                //
+                // 要安全放行需要做「写后读依赖分析」，判定写入位置和候选
+                // 下标是否可能别名 —— 那是独立的一轮工作。
                 case IrOp::IndexStore:
                     return false;
                 default:

@@ -330,15 +330,32 @@ TypePtr TypeChecker::parse_annotation_impl(Expr* e, int line, int depth) {
                  base == "Collection" || base == "Container" || base == "Reversible") &&
                 args.size() == 1)
                 return t_unknown();
-            if ((base == "list" || base == "List" || base == "MutableSequence") &&
-                args.size() == 1)
-                return mk_list(args[0]);
+            // **裸 `list` / `set` / `dict` 标注：元素类型用 fresh_hole，
+            // 让后续的赋值/append/return 把它填上，而不是直接判成 unknown。**
+            //
+            // 原来只有带参数的形式（`list[int]`）才被识别，裸 `list` 落到
+            // 函数末尾 `return t_unknown()` —— 于是 `def make(n: int) -> list:`
+            // 的函数返回类型是 **unknown**，比完全不标注（能推断出 list[int]）
+            // 还差。
+            //
+            // 实测 bench/compare/matmul.py：`def make(n: int) -> list:` 让
+            // a/b/c 全退化成 list[unknown]，最内层循环的 index.get 变成
+            // unknown 路径、+= 走 pa_list_prep 的保守分支，11ms；
+            // 改成 `-> list[int]` 后 7ms（-36%）。裸 `list` 应该等价于
+            // 「是 list，元素类型待推断」，不能当成 unknown。
+            if (base == "list" || base == "List" || base == "MutableSequence" ||
+                base == "Sequence" || base == "Iterable") {
+                if (args.size() == 1) return mk_list(args[0]);
+                if (args.empty()) return mk_list(fresh_hole());
+            }
             if (base == "set" || base == "Set" || base == "FrozenSet" || base == "frozenset") {
                 if (args.size() == 1) return mk_set(args[0]);
+                if (args.empty()) return mk_set(fresh_hole());
             }
-            if ((base == "dict" || base == "Dict" || base == "Mapping" ||
-                 base == "MutableMapping") && args.size() == 2) {
-                return mk_dict(args[0], args[1]);
+            if (base == "dict" || base == "Dict" || base == "Mapping" ||
+                base == "MutableMapping") {
+                if (args.size() == 2) return mk_dict(args[0], args[1]);
+                if (args.empty()) return mk_dict(fresh_hole(), fresh_hole());
             }
             if (base == "tuple" || base == "Tuple") {
                 // tuple[int, ...]：省略号表示变长，元素类型只有 int

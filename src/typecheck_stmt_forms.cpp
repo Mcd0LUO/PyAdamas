@@ -95,9 +95,14 @@ void TypeChecker::stmt_return(Return& r) {
                 err(r.line, r.col,
                     std::format("function '{}' is declared to return '{}', got '{}'",
                                 cur_fn_->name, type_name(want), type_name(vt)));
-        } else if (rets_) {
-            rets_->push_back({vt, r.line, r.col});
         }
+        // **始终收集返回值类型**，即使标注了。
+        //
+        // 标注里可能含「待推断」空洞（裸 `list` / `set` / `dict` 解析成
+        // `list[hole]`），需要实际 return 的类型来填。原来只在
+        // `!ret_declared` 时收集，`-> list:` 的 hole 就永远填不上，
+        // 返回类型退化成 list[unknown] —— 比完全不标注还差。
+        if (rets_) rets_->push_back({vt, r.line, r.col});
         return;
     }
 

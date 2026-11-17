@@ -5,6 +5,15 @@
 
 namespace pyadamas {
 
+/* 递归检查类型里有没有 Unknown（含容器元素）。
+   用于「标注含待推断空洞时，用实际返回值收窄」的判断。 */
+static bool ty_has_unknown(const TypePtr& t, int depth) {
+    if (!t || depth > 6) return false;
+    if (t->kind == TyKind::Unknown) return true;
+    for (const auto& s : t->sub)
+        if (ty_has_unknown(s, depth + 1)) return true;
+    return false;
+}
 // C3 线性化：反复取各序列中「不在任何序列尾部」的头部。失败说明
 // 继承关系自相矛盾（典型是菱形里父类顺序冲突）。
 static bool c3_merge(std::vector<std::vector<ClassInfo*>>& seqs,
@@ -218,10 +227,13 @@ void TypeChecker::funcdef_impl(FunctionDef& f, const ClassInfoPtr& owner) {
         cur_cls_name_ = std::move(saved_cls_name);
 
         // 无标注函数：从所有 return 处推断返回类型
+        // 从所有 return 处推断返回值类型。
+        //
+        // **标注了也要算**：裸 `list` / `set` / `dict` 标注解析成含 hole 的
+        // 类型，需要这个推断结果去填（见下面的收窄逻辑）。原来只在
+        // `!ret_declared` 时计算，导致 `-> list:` 的 hole 永远填不上。
         TypePtr inferred = nullptr;
-        if (!info->ret_declared) {
-            for (auto& r : rets) inferred = inferred ? join(inferred, r.ty) : r.ty;
-        }
+        for (auto& r : rets) inferred = inferred ? join(inferred, r.ty) : r.ty;
 
         if (f.is_async) {
             // async def 调用得到协程对象，不是 return 标注里的值；
@@ -259,6 +271,27 @@ void TypeChecker::funcdef_impl(FunctionDef& f, const ClassInfoPtr& owner) {
             info->is_generator = true;
         } else if (!info->ret_declared) {
             info->ret = inferred;
+        } else if (info->ret && inferred) {
+            // **标注里含「待推断」空洞时，用实际 return 收窄。**
+            //
+            // 裸 `list` / `set` / `dict` 标注现在解析成 `list[hole]`（见
+            // typecheck.cpp 的 parse_annotation）。hole 需要由实际返回值填上，
+            // 否则 `def make(n: int) -> list:` 的返回类型永远是 list[unknown] ——
+            // 比完全不标注（能推断出 list[int]）还差。
+            //
+            // 实测 bench/compare/matmul.py：这条让 a/b/c 从 list[int] 退化到
+            // list[unknown]，最内层循环 11ms；收窄后 7ms（-36%）。
+            //
+            // 只在「标注结构相同、且标注侧含 Unknown」时收窄，避免把用户明确
+            // 写的 `-> list[str]` 改成别的类型。
+            if (ty_has_unknown(info->ret, 0) && info->ret->kind == inferred->kind) {
+                if (info->ret->kind == TyKind::List || info->ret->kind == TyKind::Set) {
+                    if (inferred->sub.size() == 1) info->ret = mk_list(inferred->sub[0]);
+                } else if (info->ret->kind == TyKind::Dict) {
+                    if (inferred->sub.size() == 2)
+                        info->ret = mk_dict(inferred->sub[0], inferred->sub[1]);
+                }
+            }
         }
         info->ret_known = true;
 
