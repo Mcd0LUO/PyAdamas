@@ -425,8 +425,8 @@ std::string AsmGen::gen(const IRModule& m) {
             out_ += "\n# ---- callback trampolines ----\n";
             for (size_t i = 0; i < m.cb_sigs.size(); ++i) {
                 out_ += std::format("\t.align 8\n.Lcbtramp{}:\n", i);
-                // 跳板自成一段 CFI 区域：它不动 rsp，C 的返回地址就在
-                // 栈顶，展开时直接按入口规则（CFA=rsp+8）继续往上走。
+                // 跳板自成一段 CFI 区域。入口 CFA=rsp+8；下发 call 前会
+                // subq $8 补对齐，CFA 相应变成 rsp+16，返回前恢复。
                 if (gnu_cfi()) out_ += "\t.cfi_startproc\n";
                 out_ += std::format("\tmovq .Lcbslot{}(%rip), %r10\n", i);
                 int gi = 0;
@@ -452,7 +452,20 @@ std::string AsmGen::gen(const IRModule& m) {
                     ++ci;
                 }
                 out_ += "\txorl %eax, %eax\n";
+                // **必须先补 8 字节再 call。**
+                //
+                // 跳板由 C 当普通函数调用：入口 rsp ≡ 8 (mod 16)。它自己要
+                // 再发一次 call，按 ABI 要求 call 时 rsp ≡ 0，所以要先 subq $8。
+                //
+                // 漏掉这 8 字节时，被调方（PyAdamas 函数或 closure shim）在
+                // misaligned 栈上执行；gcc 15 的运行时函数用 movaps 溢出 xmm
+                // 直接 #GP。实测：112_callbacks.py、113_qsort.py 在 gcc 15 上
+                // Illegal instruction。
+                out_ += "\tsubq $8, %rsp\n";
+                if (gnu_cfi()) out_ += "\t.cfi_def_cfa_offset 16\n";
                 out_ += "\tcall *(%r10)\n";
+                out_ += "\taddq $8, %rsp\n";
+                if (gnu_cfi()) out_ += "\t.cfi_def_cfa_offset 8\n";
                 if (m.cb_sigs[i].ret == CKind::Float)
                     out_ += "\tmovq %rax, %xmm0\n";
                 out_ += "\tret\n";

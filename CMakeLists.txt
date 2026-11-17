@@ -103,7 +103,7 @@ set(PYADAMAS_RT_OBJ "${CMAKE_BINARY_DIR}/rt.o")
 set(PYADAMAS_MODCACHE_DIR "${CMAKE_BINARY_DIR}/modcache")
 option(PYADAMAS_WERROR "把编译告警当作错误（默认开）" ON)
 
-# 运行时用 -mstackrealign：生成代码里存在调用点 %rsp 未按 16 字节对齐
+# 运行时用：生成代码里存在调用点 %rsp 未按 16 字节对齐
 # 的情况（协程/生成器路径）。GCC 15 在运行时函数里用 movaps 溢出 SSE，
 # 调用方不对齐就直接 #GP 崩溃（Debian 13 + gcc 15 实测 24_async SIGSEGV；
 # gcc 14 恰好没用 movaps，所以一直没暴露）。这是止血措施，根因仍需修
@@ -123,7 +123,7 @@ foreach(part ${PYADAMAS_RT_PARTS})
   set(rt_fp "")
   add_custom_command(
     OUTPUT "${rt_obj}"
-    COMMAND ${CMAKE_C_COMPILER} -O2 -Wall -Wextra -mstackrealign ${PYADAMAS_RT_WERROR} ${rt_fp}
+    COMMAND ${CMAKE_C_COMPILER} -O2 -Wall -Wextra ${PYADAMAS_RT_WERROR} ${rt_fp}
             -I "${CMAKE_SOURCE_DIR}/runtime"
             -c "${CMAKE_SOURCE_DIR}/runtime/rt_${part}.c" -o "${rt_obj}"
     DEPENDS "${CMAKE_SOURCE_DIR}/runtime/rt_${part}.c"

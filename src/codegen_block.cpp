@@ -926,8 +926,20 @@ void AsmGen::emit_closure_shim(const IRFunction& f, int fi) {
             if (l.stack_off >= 0) ++nstack;
         const int spill = 8 * n;
         const int stack_bytes = 8 * nstack;
-        // 让 call 时 rsp ≡ 0 mod 16（入口 rsp ≡ 8 mod 16，subq 后要补 8）。
-        const int tmp = ((spill + stack_bytes + 15) & ~15) + 8;
+        // 让 **call 那一刻** 的 rsp ≡ 0 mod 16。
+        //
+        // 这里的序列是：subq tmp → addq spill → call。入口 rsp ≡ 8，
+        // 所以要求 (8 - tmp + spill) ≡ 0 (mod 16)，即 tmp ≡ spill+8 (mod 16)。
+        //
+        // 原来写的是 tmp = align16(spill + stack_bytes) + 8，只保证了
+        // 「subq 之后、addq spill 之前」是 16 对齐；一旦 spill ≡ 8（n 为奇数），
+        // addq spill 就把 rsp 又推成 ≡ 8，call 时被调方看到 ≡ 0 —— 违反 ABI。
+        //
+        // 后果：gcc 15 的运行时函数在对齐溢出 xmm 时用 movaps，直接 #GP。
+        // 实测 24_async 里 float_one_32（1 个 float 参数 → spill=8）就是这样崩的。
+        // n 为偶数时 spill 是 16 的倍数，恰好没暴露，所以这个 bug 藏了很久。
+        int tmp = ((spill + stack_bytes + 15) & ~15);
+        while (((8 - tmp + spill) & 15) != 0) tmp += 8;
         line(std::format("subq ${}, %rsp", tmp));
         if (gnu_cfi()) line(std::format(".cfi_def_cfa_offset {}", 8 + tmp));
         // 1) 把所有实参搬到临时区 [0, 8*n)。

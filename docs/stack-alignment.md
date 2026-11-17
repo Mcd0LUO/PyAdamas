@@ -122,3 +122,74 @@ gdb 的 `bt` 在这一段给出一个无法符号化的 `#2` 帧，说明帧链�
 
 开关：`PYADAMAS_ALIGN_CHECK=1 ./build/release/pyadamas build -O0 file.py`
 会往每个生成函数入口插入 rsp 对齐自检（失败即 `ud2`）。
+
+## 9. 修复完成（2026-11-17）
+
+用 `PYADAMAS_ALIGN_CHECK` 自检把地图扫了两遍，找到**两处独立的 ABI 违规**：
+
+### Bug 1：closure shim 的栈对齐公式错
+
+`emit_closure_shim`（`codegen_block.cpp`）慢路径的序列是
+`subq tmp → addq spill → call`，其中 `spill = 8*n`（n=实参个数）。
+
+原来的 `tmp`：
+
+```cpp
+const int tmp = ((spill + stack_bytes + 15) & ~15) + 8;
+```
+
+只保证了「subq 之后、addq spill 之前」rsp 是 16 对齐。一旦 `spill ≡ 8`
+（n 为奇数），`addq spill` 又把 rsp 推成 ≡ 8，于是 `call` 时被调方看到
+≡ 0 —— 违反 ABI。
+
+n 为偶数时 spill 是 16 的倍数，恰好不出问题，所以这个 bug 藏了很久；
+`24_async` 里的 `float_one_32`（1 个 float 参数 → spill=8）正好踩中。
+
+修法：让 tmp 满足 **call 那一刻** 的对齐条件
+`(8 - tmp + spill) ≡ 0 (mod 16)`：
+
+```cpp
+int tmp = ((spill + stack_bytes + 15) & ~15);
+while (((8 - tmp + spill) & 15) != 0) tmp += 8;
+```
+
+### Bug 2：C 回调跳板没有补 8 字节
+
+`.LcbtrampN`（`codegen.cpp`）由 C 当普通函数调用（入口 rsp ≡ 8），它自己
+又要发一次 `call *(%r10)`，但**没有任何 rsp 调整**：
+
+```asm
+xorl %eax, %eax
+call *(%r10)     ; ← 这里 rsp 还是 ≡ 8，被调方看到 ≡ 0
+ret
+```
+
+修法：call 前 `subq $8, %rsp`、之后 `addq $8, %rsp`，CFI 相应
+`.cfi_def_cfa_offset` 8 → 16 → 8。
+
+这个 bug 影响所有「把 Python 函数传给 C 当回调」的代码 ——
+自检在 `112_callbacks.py`、`113_qsort.py` 上抓到 Illegal instruction。
+
+### 验证
+
+| 项目 | 结果 |
+|---|---|
+| `PYADAMAS_ALIGN_CHECK=1` difftest | **187 用例 / 0 不一致** |
+| `PYADAMAS_ALIGN_CHECK=1` 全量用例 | **205 / 0**（修复前 203，两个 Illegal instruction）|
+| 正常模式全量用例 | **205 / 0** |
+| 9 个经典基准 | 输出全部正确 |
+
+同时**撤掉了运行时的 `-mstackrealign`**（commit 2860da5 的缓解措施），
+证明根因确实修掉而不是被遮住。
+
+### 遗留
+
+- 生成函数的入口标签 `.LfN` 发在 `.p2align` **之前**，导致标签指向对齐
+  填充而不是函数首字节（两者差 4 字节时，靠「滑过 NOP」仍能工作，但不干净）
+  —— 待整理；
+- shim / trampoline 仍发在所有函数的 `.size` 之外，`nm`/`perf`/栈展开
+  看不见它们（本次排查就因此多花了几轮）—— 建议后续给它们补符号。
+
+自检开关保留：
+`PYADAMAS_ALIGN_CHECK=1 ./build/release/pyadamas build ...` 会在每个生成函数
+入口插入 rsp 对齐自检，失败即 `ud2`。
