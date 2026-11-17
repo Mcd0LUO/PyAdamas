@@ -710,11 +710,50 @@ static inline void pa_gc_pin(void* p) {
     pa_rc_inc(p);
     pa_rc_temp(p);
 }
+
+
 static inline void pa_gc_unpin(void* p) {
     if (!p) return;
     pa_rc_temp_take(p);
     pa_rc_dec(p);
 }
+
+/* ── RAII 作用域守卫（抄 C++/Rust 的 RAII 思路，用 GCC cleanup 属性）──
+ *
+ * 问题：现在每个「需要保命的对象」都要手工配对 pin/unpin。jp_value 有
+ * 11 个 return，其中 6 个需要清理 —— 靠人工保证「每条路径都配对」是
+ * 易错的，而且新加一条路径时很容易忘。
+ *
+ * RAII 的做法：让清理跟着**作用域**走，而不是跟着控制流走。
+ * C 没有析构函数，但 GCC/Clang 有 __attribute__((cleanup(fn)))：
+ * 变量离开作用域时（正常 return、break、甚至 longjmp 之外的任何方式）
+ * 自动调用 fn(&var)。
+ *
+ * 用法：
+ *     PyAdamasList* out = pa_list_new(0, 1);
+ *     PA_PIN_SCOPE(out);        // 自动 pin，离开作用域自动 unpin
+ *     ... 任意多条 return / 抛异常 ...
+ *     return out;               // 若要把所有权交出去，先 PA_PIN_RELEASE(out)
+ *
+ * 注意 longjmp：cleanup 属性**不会**在 longjmp 时执行（那是未定义行为）。
+ * 所以异常路径仍依赖临时值栈的 pa_rc_cleanup —— 这正是 pin 把引用挂到
+ * 临时栈的原因：两层保障，RAII 管正常路径，临时栈管异常路径。 */
+
+/* 内部：cleanup 回调。参数是变量地址。 */
+static inline void pa_pin_cleanup_(void* pp) {
+    void* p = *(void**)pp;
+    if (p) pa_gc_unpin(p);
+}
+
+/* 声明一个受 RAII 管理的指针变量并立即 pin。
+   变量名固定为 _pa_pin_<name>，避免与用户变量冲突。 */
+#define PA_PIN_SCOPE(var)                                            \
+    void* _pa_pin_##var __attribute__((cleanup(pa_pin_cleanup_), unused)) = \
+        (void*)(var);                                                \
+    pa_gc_pin((void*)(var))
+
+/* 放弃 RAII 管理（所有权已经转给别人，不该再 unpin）。 */
+#define PA_PIN_RELEASE(var) (_pa_pin_##var = NULL)
 void pa_rc_shutdown(void);
 void pa_register_literals(void** objs, int64_t n);
 void closure_destroy(void* p);

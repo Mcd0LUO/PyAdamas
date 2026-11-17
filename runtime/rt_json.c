@@ -502,19 +502,23 @@ static int64_t jp_value(JP* s, const char* d, size_t n) {
             size_t cn = n - 3;
             int kind = desc_heap(cd, cn) ? 1 : 0;
             PyAdamasList* out = pa_list_new(0, kind);
-            // 入临时栈：递归解析后续可能抛异常（类型不匹配 / 语法错误），
-            // 异常展开会跳过本帧的正常返回，靠这个引用让 cleanup 释放它。
-            // 正常返回前用 temp_take 把所有权转给调用者。
+            // **RAII：pin 跟着作用域走，不再手工配对。**
+            //
+            // 原来要手工保证「每条 return 路径都 unpin + temp_take」——
+            // 这个函数有 11 个 return，靠人工保证容易漏。现在：
+            //   - pa_rc_temp 挂临时栈（管异常路径）；
+            //   - PA_PIN_SCOPE 挂作用域守卫（管正常路径的任意出口）；
+            //   - 交出所有权时 PA_PIN_RELEASE + pa_rc_temp_take。
             pa_rc_temp(out);
+            PA_PIN_SCOPE(out);
             jp_expect(s, '[');
             jp_ws(s);
             if (s->p < s->end && *s->p == ']') {
                 s->p++;
+                PA_PIN_RELEASE(out);
                 pa_rc_temp_take(out);
                 return (int64_t)out;
             }
-            /* 递归解析数组元素时还会分配，out 只在本帧 C 局部变量里。 */
-            pa_gc_pin(out);
             for (;;) {
                 int64_t v = jp_value(s, cd, cn);
                 pa_list_append(out, v, 2);
@@ -526,7 +530,7 @@ static int64_t jp_value(JP* s, const char* d, size_t n) {
                 break;
             }
             jp_expect(s, ']');
-            pa_gc_unpin(out);
+            PA_PIN_RELEASE(out);
             pa_rc_temp_take(out);
             return (int64_t)out;
         }
@@ -535,24 +539,25 @@ static int64_t jp_value(JP* s, const char* d, size_t n) {
             size_t cn = n - 3;
             int vown = desc_heap(cd, cn) ? 1 : 0;
             PyAdamasDict* out = pa_dict_new(1, 1, vown, -1, -1);
-            pa_rc_temp(out);   // 同上：异常路径的所有权保护
+            // RAII：字典本体和每个 key 都由作用域守卫管理，不再手工配对。
+            // key 在循环体内声明，每轮离开作用域自动 unpin —— 比手工在
+            // 三条路径上各写一次 pa_gc_unpin(key) 可靠。
+            pa_rc_temp(out);
+            PA_PIN_SCOPE(out);
             jp_expect(s, '{');
             jp_ws(s);
             if (s->p < s->end && *s->p == '}') {
                 s->p++;
+                PA_PIN_RELEASE(out);
                 pa_rc_temp_take(out);
                 return (int64_t)out;
             }
-            /* 字典本身和 key 都只在本帧 C 局部变量里：递归解析值时若触发
-               主收集，两者都会被清扫，接着 pa_dict_set 就是写悬空指针。 */
-            pa_gc_pin(out);
             for (;;) {
                 PyAdamasStr* key = jp_string(s);
-                pa_gc_pin(key);
+                PA_PIN_SCOPE(key);
                 jp_expect(s, ':');
                 int64_t v = jp_value(s, cd, cn);
                 pa_dict_set(out, (int64_t)key, v);
-                pa_gc_unpin(key);
                 jp_ws(s);
                 if (s->p < s->end && *s->p == ',') {
                     s->p++;
@@ -561,7 +566,7 @@ static int64_t jp_value(JP* s, const char* d, size_t n) {
                 break;
             }
             jp_expect(s, '}');
-            pa_gc_unpin(out);
+            PA_PIN_RELEASE(out);
             pa_rc_temp_take(out);
             return (int64_t)out;
         }
@@ -587,6 +592,7 @@ static int64_t jp_value(JP* s, const char* d, size_t n) {
             // 异常展开跳过 return，out 只有局部变量持有 —— 永久泄漏。
             // 之前 list/dict 分支都加了保护，唯独 tuple 漏了。
             pa_rc_temp(out);
+            PA_PIN_SCOPE(out);
             jp_expect(s, '[');
             pos = 2;
             int64_t idx = 0;
@@ -594,10 +600,10 @@ static int64_t jp_value(JP* s, const char* d, size_t n) {
             if (s->p < s->end && *s->p == ']') {
                 if (count != 0) jp_fail(s, "tuple length mismatch");
                 s->p++;
+                PA_PIN_RELEASE(out);
                 pa_rc_temp_take(out);
                 return (int64_t)out;
             }
-            pa_gc_pin(out);  /* 递归解析元组元素时会分配，out 必须先挂根 */
             for (;;) {
                 if (idx >= count) jp_fail(s, "tuple length mismatch");
                 {
@@ -616,7 +622,7 @@ static int64_t jp_value(JP* s, const char* d, size_t n) {
             }
             jp_expect(s, ']');
             if (idx != count) jp_fail(s, "tuple length mismatch");
-            pa_gc_unpin(out);
+            PA_PIN_RELEASE(out);
             pa_rc_temp_take(out);
             return (int64_t)out;
         }
