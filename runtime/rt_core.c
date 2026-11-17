@@ -1,4 +1,5 @@
 // rt_core.c —— 引用计数、临时值栈、闭包、字符串分配、循环收集器
+#define PA_RC_NO_INLINE   /* 本文件提供 pa_rc_inc/dec 的外部符号 */
 #include "rt_internal.h"
 
 /* ── 引用计数 ─────────────────────────────────────────────────── */
@@ -47,7 +48,8 @@ static int64_t old_bytes;
    也不能像 TRIAL/RESTORE 那样只调计数 —— 统一登记到 gc_pend，
    本轮收尾时统一处理。 */
 #define GC_PHASE_INCR_MARK 4
-static int gc_phase;
+int pa_gc_phase_fast;   /* gc_phase 的公开别名，供内联 inc/dec 判断 */
+#define gc_phase pa_gc_phase_fast
 /* major 走经典标记-清扫，minor 走 trial-deletion。清扫时的子引用规则
    不同：标记-清扫只减可达子对象，trial 模式跳过集合内（已减过）、
    收集集合外的边。 */
@@ -179,7 +181,8 @@ static int gc_untracked_leaves;
 
 /* RC/GC 统计：PYADAMAS_RC_STATS=1 时在退出时打印。
    统计本身只是一个可预测的全局分支，不改变所有权语义。 */
-static int rc_stats_on;
+int pa_rc_stats_on_fast;   /* rc_stats_on 的公开别名（内联快路径要读） */
+#define rc_stats_on pa_rc_stats_on_fast
 static int64_t stat_rc_inc;
 static int64_t stat_rc_inc_unknown;
 static int64_t stat_rc_dec;
@@ -359,6 +362,7 @@ static PyAdamasRc* str_pool_get(int64_t size) {
 static void str_pool_put(PyAdamasRc* h) {
     int c = str_pool_class(h->size);
     if (c < 0 || str_pool_count[c] >= STR_POOL_MAX_PER_CLASS) {
+
         free(h);
         return;
     }
@@ -715,7 +719,15 @@ void pa_print_any(int64_t v) {
     pa_print_i64(v);
 }
 
-void pa_rc_inc(void* p) {
+/* 生成代码调用的是这两个符号（codegen 直接 emit call pa_rc_inc）。
+   头文件里另有同名 static inline 版本供运行时内部使用 —— C 语言里
+   static inline 不会产生外部符号，所以这里必须再定义一次。 */
+void pa_rc_inc(void* p);
+void pa_rc_dec(void* p);
+
+/* 慢路径：只在统计模式或异常计数时进入。
+   正常路径由头文件里的 pa_rc_inc 内联完成。 */
+void pa_rc_inc_slow(void* p) {
     if (rc_stats_on) stat_rc_inc++;
     if (!p) return;
     PyAdamasRc* h = (PyAdamasRc*)p - 1;
@@ -724,7 +736,9 @@ void pa_rc_inc(void* p) {
     h->rc++;
 }
 
-void pa_rc_dec(void* p) {
+/* 慢路径：计数归零时的真正释放，或收集期间的特殊处理。
+   正常路径（rc 从 N 减到 N-1，N-1 > 0）由头文件里的 pa_rc_dec 内联完成。 */
+void pa_rc_dec_slow(void* p) {
     if (rc_stats_on) stat_rc_dec++;
     if (!p) return;
     PyAdamasRc* h = (PyAdamasRc*)p - 1;
@@ -2054,3 +2068,24 @@ void pa_import_module(int64_t* ready, void (*init)(void)) {
     init();
 }
 
+/* 生成代码调用的入口（codegen 直接 emit call pa_rc_inc）。
+   运行时内部的其他 .c 用头文件里的 static inline 版本，不经过这里。 */
+void pa_rc_inc(void* p) {
+    if (!p) return;
+    PyAdamasRc* h = (PyAdamasRc*)p - 1;
+    if (h->rc == PYADAMAS_RC_IMMORTAL) return;
+    if (h->rc <= 0) { pa_rc_inc_slow(p); return; }
+    if (pa_rc_stats_on_fast) { pa_rc_inc_slow(p); return; }
+    h->rc++;
+}
+
+void pa_rc_dec(void* p) {
+    if (!p) return;
+    PyAdamasRc* h = (PyAdamasRc*)p - 1;
+    if (h->rc == PYADAMAS_RC_IMMORTAL) return;
+    if (pa_rc_stats_on_fast || pa_gc_phase_fast || h->rc <= 1) {
+        pa_rc_dec_slow(p);
+        return;
+    }
+    h->rc--;
+}

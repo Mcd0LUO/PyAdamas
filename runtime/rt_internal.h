@@ -604,8 +604,75 @@ void panic_c(const char* msg);
 void rc_link(PyAdamasRc* h);
 void rc_unlink(PyAdamasRc* h);
 void* rc_alloc(int64_t size, void (*dtor)(void*), void (*release)(void*), int64_t kind);
+/* ── 内联引用计数（方案 A：抄 Swift ARC 的编译期内联思路）──────
+ *
+ * 原来 inc/dec 都是跨编译单元的函数调用：实测 bench_rc_gen 有 30 万次
+ * inc + 96 万次 dec，每次都要 call/ret + 保存寄存器，开销可观。
+ *
+ * Swift 的 ARC 是编译器直接内联展开 inc/dec 的（没有运行时调用），
+ * CPython 的 Py_INCREF 也是 static inline。这里照做：
+ *
+ *   - 快路径（计数 > 1 且不在收集期）：头文件内联，几条指令完成；
+ *   - 慢路径（归零要释放 / 收集期 / 统计模式）：调 pa_rc_*_slow。
+ *
+ * 关键设计：快路径**不碰** rc_stats_on 和 gc_phase 之外的状态，
+ * 保证编译器能把整个判断序列放在调用点，不产生额外分支预测失败。 */
+void pa_rc_inc_slow(void* p);
+void pa_rc_dec_slow(void* p);
+extern int pa_rc_stats_on_fast;   /* rc_stats_on 的别名，供内联使用 */
+extern int pa_gc_phase_fast;      /* gc_phase 的别名 */
+
+#ifndef PA_RC_NO_INLINE
+static inline void pa_rc_inc_fast(void* p) {
+    if (__builtin_expect(pa_rc_stats_on_fast != 0, 0) ||
+        __builtin_expect(p == NULL, 0)) {
+        pa_rc_inc_slow(p);
+        return;
+    }
+    PyAdamasRc* h = (PyAdamasRc*)p - 1;
+    // 永生对象（字面量）：rc 是 INT64_MIN，直接跳过。
+    if (__builtin_expect(h->rc == PYADAMAS_RC_IMMORTAL, 0)) return;
+    if (__builtin_expect(h->rc <= 0, 0)) {
+        pa_rc_inc_slow(p);   /* 让慢路径报错 */
+        return;
+    }
+    h->rc++;
+}
+#endif /* !PA_RC_NO_INLINE */
+
+#ifndef PA_RC_NO_INLINE
+static inline void pa_rc_dec_fast(void* p) {
+    if (__builtin_expect(pa_rc_stats_on_fast != 0, 0) ||
+        __builtin_expect(pa_gc_phase_fast != 0, 0) ||
+        __builtin_expect(p == NULL, 0)) {
+        pa_rc_dec_slow(p);
+        return;
+    }
+    PyAdamasRc* h = (PyAdamasRc*)p - 1;
+    if (__builtin_expect(h->rc == PYADAMAS_RC_IMMORTAL, 0)) return;
+    // 快路径只处理「减完仍 > 0」的情况；归零必须走慢路径做释放。
+    if (__builtin_expect(h->rc > 1, 1)) {
+        h->rc--;
+        return;
+    }
+    pa_rc_dec_slow(p);
+}
+#endif /* !PA_RC_NO_INLINE */
+
+/* **内部调用走内联快路径。**
+ *
+ * 运行时自己的 .c 里有一千多处 pa_rc_inc/pa_rc_dec 调用，全部改成内联展开；
+ * 只有 rt_core.c（定义实体符号的地方）例外，它要提供生成代码调用的外部符号。
+ * 放在这里（而不是文件末尾）是因为下面的 pa_gc_pin 等 inline 函数也要用它。 */
+#ifndef PA_RC_NO_INLINE
+#define pa_rc_inc(p) pa_rc_inc_fast(p)
+#define pa_rc_dec(p) pa_rc_dec_fast(p)
+#else
+/* PA_RC_NO_INLINE（rt_core.c）：调用外部实体符号。 */
 void pa_rc_inc(void* p);
 void pa_rc_dec(void* p);
+#endif
+
 int64_t pa_rc_mark(void);
 void pa_rc_temp(void* p);
 void pa_rc_temp_unknown(int64_t v);
