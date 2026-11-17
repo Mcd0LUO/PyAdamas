@@ -341,7 +341,21 @@ static void rc_stats_dump(void) {
    一定 >= 请求大小（分配时向上取整到同一档），字符串仍按自己的 len 访问。 */
 #define STR_POOL_MAX_SIZE 128
 #define STR_POOL_CLASSES (STR_POOL_MAX_SIZE / 8)
+/* 每档最多缓存多少个块。
+ *
+ * 原来统一 64。实测 `text.split()` 场景：每轮创建 160 个内联短串
+ * （sizeof(PyAdamasStr)=32 字节，落在 class 3），池只能存 64 个 ——
+ * 360021 次放入里 **232082 次（64%）溢出**直接 free。
+ *
+ * 这里按档位区分：小档（<= 40 字节，覆盖内联串和短堆串）给更大容量，
+ * 大档保持 64（大对象缓存太多不值，内存代价高）。
+ *
+ * 内存代价：小档多缓存 (512-64) 个 × ~48 字节 ≈ 22KB/档，可接受。 */
 #define STR_POOL_MAX_PER_CLASS 64
+/* 小档（含内联字符串 32 字节）的容量上限。 */
+#define STR_POOL_MAX_SMALL 512
+/* 小档的上界字节数（含内联串的 32 + 短堆串的几十字节）。 */
+#define STR_POOL_SMALL_LIMIT 40
 static PyAdamasRc* str_pool[STR_POOL_CLASSES];
 static int str_pool_count[STR_POOL_CLASSES];
 
@@ -361,7 +375,9 @@ static PyAdamasRc* str_pool_get(int64_t size) {
 
 static void str_pool_put(PyAdamasRc* h) {
     int c = str_pool_class(h->size);
-    if (c < 0 || str_pool_count[c] >= STR_POOL_MAX_PER_CLASS) {
+    int64_t cap = ((c + 1) * 8 <= STR_POOL_SMALL_LIMIT) ? STR_POOL_MAX_SMALL
+                                                       : STR_POOL_MAX_PER_CLASS;
+    if (c < 0 || str_pool_count[c] >= cap) {
 
         free(h);
         return;
@@ -869,9 +885,31 @@ void* pa_closure_new(int64_t code, int64_t n_caps) {
    码点数 = 非续字节（(b & 0xC0) != 0x80）的个数。对合法 UTF-8 精确，
    对非法字节也安全（「每个非续字节算 1 码点」的宽松定义），永远不会
    越界或返回负值——二进制文件读进来的字节直通串靠这条兜住。 */
+/* 数 UTF-8 码点数。
+ *
+ * 原实现逐字节判断「是否续字节（0b10xxxxxx）」，n 次循环 + n 次分支。
+ * 实测这是 `text.split()` 的主要开销：text 有 880 字节、拆成 160 个词，
+ * 每个词都调一次 str_new → str_seal → 这里，累计扫 880 次。
+ *
+ * **本地化优化：先按机器字批量判断「整块是否全 ASCII」。**
+ * 纯 ASCII 时码点数 == 字节数，直接跳过逐字节扫描。英文文本绝大多数
+ * 是这种情况（基准里 text.split() 的每个词都是）。
+ *
+ * 判断方法：取 8 字节，检查最高位是否全为 0。`(w & 0x8080808080808080) == 0`
+ * 一次位运算就能排除 8 个字节。命中后整块直接算 8 个码点。 */
 int64_t str_count_cp(const char* p, int64_t n) {
     int64_t k = 0;
-    for (int64_t i = 0; i < n; ++i)
+    int64_t i = 0;
+    // 8 字节批量：整块全 ASCII 时直接 +8。
+    while (i + 8 <= n) {
+        uint64_t w;
+        memcpy(&w, p + i, sizeof w);
+        if (w & 0x8080808080808080ULL) break;   /* 有非 ASCII，退回逐字节 */
+        k += 8;
+        i += 8;
+    }
+    // 剩余（或遇到非 ASCII 之后）逐字节处理。
+    for (; i < n; ++i)
         if (((unsigned char)p[i] & 0xC0) != 0x80) ++k;
     return k;
 }
