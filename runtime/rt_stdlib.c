@@ -56,20 +56,27 @@ PyAdamasList* pa_itertools_product(PyAdamasList* seqs, int64_t elem_kind) {
         total *= len;
     }
     PyAdamasList* out = pa_list_new(total > (1 << 20) ? 0 : total, 1);
+    // RAII：out 的作用域守卫。循环里每次 iter_push_tuple 都分配元组，
+    // out 只在本帧 C 局部变量里，必须挂根 —— 但不再需要手工配对 unpin。
+    PA_PIN_SCOPE(out);
     if (n == 0) {
         int64_t none = 0;
         iter_push_tuple(out, &none, 0, elem_kind);
+        PA_PIN_RELEASE(out);
         return out;
     }
     // 任一源序列为空 → 笛卡尔积为空（混合进制进位在长度为 0 时不会终止）。
-    if (has_empty) return out;
+    if (has_empty) {
+        PA_PIN_RELEASE(out);
+        return out;
+    }
     int64_t* idx = (int64_t*)calloc((size_t)n, sizeof(int64_t));
     // calloc 而非 malloc：n==0 的边界已提前返回，但 GCC 证不出；
     // 且多一层防御，避免将来改逻辑时留下未初始化读取。
+    PA_FREE_SCOPE(idx);
     int64_t* vals = (int64_t*)calloc((size_t)n, sizeof(int64_t));
+    PA_FREE_SCOPE(vals);
     if (!idx || !vals) panic_c("out of memory");
-    /* 循环里每次 iter_push_tuple 都分配一个元组；out 只在本帧 C 局部变量里。 */
-    pa_gc_pin(out);
     while (1) {
         for (int64_t i = 0; i < n; ++i) vals[i] = iter_seq_at(seqs, i)->data[idx[i]];
         iter_push_tuple(out, vals, n, elem_kind);
@@ -80,9 +87,7 @@ PyAdamasList* pa_itertools_product(PyAdamasList* seqs, int64_t elem_kind) {
         }
         if (k < 0) break;
     }
-    pa_gc_unpin(out);
-    free(idx);
-    free(vals);
+    PA_PIN_RELEASE(out);
     return out;
 }
 

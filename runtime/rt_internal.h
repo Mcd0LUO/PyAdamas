@@ -754,6 +754,23 @@ static inline void pa_pin_cleanup_(void* pp) {
 
 /* 放弃 RAII 管理（所有权已经转给别人，不该再 unpin）。 */
 #define PA_PIN_RELEASE(var) (_pa_pin_##var = NULL)
+
+/* ── 通用 free 守卫：管理 malloc/calloc 出来的裸内存 ─────────────
+ *
+ * 和 PA_PIN_SCOPE 同样的思路，只是清理动作是 free 而不是 unpin。
+ * 用途：函数里有多条 return 路径、中途还有 malloc 的数组要释放时，
+ * 手工在每个出口 free 一遍容易漏（尤其是后加的出口）。 */
+static inline void pa_free_cleanup_(void* pp) {
+    void* p = *(void**)pp;
+    free(p);
+}
+
+#define PA_FREE_SCOPE(var)                                          \
+    void* _pa_free_##var __attribute__((cleanup(pa_free_cleanup_), unused)) = \
+        (void*)(var)
+
+/* 放弃 free 管理（所有权转移给调用方，或者已经被手工 free）。 */
+#define PA_FREE_RELEASE(var) (_pa_free_##var = NULL)
 void pa_rc_shutdown(void);
 void pa_register_literals(void** objs, int64_t n);
 void closure_destroy(void* p);

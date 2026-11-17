@@ -401,9 +401,9 @@ PyAdamasList* pa_dict_items(PyAdamasDict* d) {
                  ? 1
                  : ((d->key_own == 0 && d->val_own == 0) ? 0 : 2);
     PyAdamasList* out = pa_list_new(d->len, 1);
-    /* 循环内每个 pa_list_new(tup) 都是 GC 分配点；out 只在 C 局部变量里，
-       主收集落进循环就会把它当垃圾清扫，先 pin。 */
-    pa_gc_pin(out);
+    // RAII：循环内每个 pa_list_new(tup) 都是 GC 分配点，out 只在 C 局部
+    // 变量里，必须挂根 —— 作用域守卫管所有出口，不再手工配对 unpin。
+    PA_PIN_SCOPE(out);
     for (int32_t i = d->head; i >= 0; i = d->entries[i].next) {
         PyAdamasDictEntry e = d->entries[i];
         PyAdamasList* tup = pa_list_new(2, tk);
@@ -413,7 +413,7 @@ PyAdamasList* pa_dict_items(PyAdamasDict* d) {
         pa_list_append(tup, e.val, 2);
         pa_list_append(out, (int64_t)tup, 2);  // tuple 的初始引用交给外层 list
     }
-    pa_gc_unpin(out);
+    PA_PIN_RELEASE(out);
     return out;
 }
 
@@ -480,9 +480,9 @@ void pa_dict_update(PyAdamasDict* dst, PyAdamasDict* src) {
 PyAdamasDict* pa_dict_copy(PyAdamasDict* src) {
     PyAdamasDict* out = pa_dict_new(src->key_kind, src->key_own, src->val_own,
                                   src->hash_slot, src->eq_slot);
-    /* 键是类实例时 pa_dict_set 会调用户 __hash__/__eq__（还能再分配）；
-       out 只在本帧 C 局部变量里，先 pin。 */
-    pa_gc_pin(out);
+    // 键是类实例时 pa_dict_set 会调用户 __hash__/__eq__（还能再分配）；
+    // out 只在本帧 C 局部变量里，用 RAII 守卫挂根。
+    PA_PIN_SCOPE(out);
     out->default_factory = src->default_factory;
     for (int32_t i = src->head; i >= 0; i = src->entries[i].next) {
         PyAdamasDictEntry e = src->entries[i];
@@ -490,7 +490,7 @@ PyAdamasDict* pa_dict_copy(PyAdamasDict* src) {
         pa_own_inc(src->val_own, e.val);
         pa_dict_set(out, e.key, e.val);
     }
-    pa_gc_unpin(out);
+    PA_PIN_RELEASE(out);
     return out;
 }
 
