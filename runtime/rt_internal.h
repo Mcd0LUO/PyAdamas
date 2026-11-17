@@ -618,6 +618,7 @@ void panic_c(const char* msg);
 void rc_link(PyAdamasRc* h);
 void rc_unlink(PyAdamasRc* h);
 void* rc_alloc(int64_t size, void (*dtor)(void*), void (*release)(void*), int64_t kind);
+void* rc_alloc_untracked(int64_t size, void (*dtor)(void*), void (*release)(void*), int64_t kind);
 /* ── 内联引用计数（方案 A：抄 Swift ARC 的编译期内联思路）──────
  *
  * 原来 inc/dec 都是跨编译单元的函数调用：实测 bench_rc_gen 有 30 万次
@@ -1030,6 +1031,10 @@ PyAdamasFile* pa_sys_stream(int64_t which);
 void list_destroy(void* p);
 void list_gc_release(void* p);
 PyAdamasList* pa_list_new(int64_t cap, int64_t elem_kind);
+/* 定长元组构造（元素个数 <= 4）。elem_kind == 0 时用 untracked 分配：
+   元组不可变且元素全非堆 -> 不可能成环 -> 不必进 GC 堆链。 */
+PyAdamasList* pa_tuple_new_filled(int64_t n, int64_t elem_kind, int64_t a, int64_t b,
+                                  int64_t c, int64_t d);
 PyAdamasRange* pa_range_new(int64_t start, int64_t stop, int64_t step);
 int64_t pa_range_len(PyAdamasRange* r);
 int64_t pa_range_first(PyAdamasRange* r);

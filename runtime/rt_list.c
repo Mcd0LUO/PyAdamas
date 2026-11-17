@@ -144,6 +144,39 @@ PyAdamasList* pa_list_new_filled(int64_t n, int64_t elem_kind, int64_t a, int64_
     return l;
 }
 
+/* 定长元组构造：与 pa_list_new_filled 同形，但 elem_kind == 0 时**不进
+ * GC 堆链**。
+ *
+ * 依据：元组不可变（元素写成后不会再变），elem_kind == 0 表示所有元素
+ * 都是非堆值 —— 于是对象没有任何出边，不可能处于引用环里，GC 完全不必
+ * 看到它。RC 归零时 list_destroy 照常释放 data 缓冲。
+ *
+ * 实测 bench/realistic/queue_sim.py：每次 simulate 分配约 66 个
+ * tuple[int, int]，rc_link/rc_unlink 合计占 profile 的 7.9%。 */
+PyAdamasList* pa_tuple_new_filled(int64_t n, int64_t elem_kind, int64_t a, int64_t b,
+                                  int64_t c, int64_t d) {
+    if (n < 0 || n > 4) panic_c("bad filled tuple size");
+    PyAdamasList* l;
+    if (elem_kind == 0) {
+        l = (PyAdamasList*)rc_alloc_untracked((int64_t)sizeof(PyAdamasList), list_destroy,
+                                             list_gc_release, PYADAMAS_RC_LIST);
+    } else {
+        l = (PyAdamasList*)rc_alloc((int64_t)sizeof(PyAdamasList), list_destroy,
+                                   list_gc_release, PYADAMAS_RC_LIST);
+    }
+    l->len = n;
+    l->cap = n < 4 ? 4 : n;
+    l->elem_kind = elem_kind;
+    l->heap_bits = NULL;
+    l->bits_cap = 0;
+    l->data = list_buf_get(&l->cap);
+    l->data[0] = a;
+    if (n > 1) l->data[1] = b;
+    if (n > 2) l->data[2] = c;
+    if (n > 3) l->data[3] = d;
+    return l;
+}
+
 /* 探测 unknown 值是不是堆指针：只查存活索引、不解引用，任意 int64 都安全。
    和 pa_rc_inc_unknown 一致，静态字符串字面量（永生）也算堆。 */
 static int list_probe(int64_t v) {

@@ -688,6 +688,30 @@ void panic_c(const char* msg) {
     exit(1);
 }
 
+/* 分配一个「不可能成环」的对象：不进 GC 堆链，只由 RC 管理。
+ *
+ * 适用前提（由调用方保证）：对象没有任何堆字段，也不是可达环的一部分。
+ * 例子：元素全是非堆值的元组 —— 元组不可变，元素类别又固定为 0，
+ * 所以它永远不会有出边，谈不上环。
+ *
+ * 走这条路省掉 rc_link/rc_unlink、新生代登记和 GC 分配计数；对象在
+ * rc 归零时照常由 dtor 释放，GC 永远看不到它。
+ *
+ * 实现上先按普通路径分配（复用 freelist 与 GC 记账逻辑），再把自己从
+ * 链上摘掉并置 UNTRACKED —— 与 rc_leaf_untracked 的字符串同款状态。 */
+void* rc_alloc_untracked(int64_t size, void (*dtor)(void*), void (*release)(void*),
+                         int64_t kind) {
+    void* p = rc_alloc(size, dtor, release, kind);
+    PyAdamasRc* h = (PyAdamasRc*)p - 1;
+    if (!(h->marked & PYADAMAS_RC_UNTRACKED)) {
+        rc_unlink(h);
+        h->prev = NULL;
+        h->next = NULL;
+        h->marked = PYADAMAS_RC_UNTRACKED;
+    }
+    return p;
+}
+
 void rc_link(PyAdamasRc* h) {
     if (rc_leaf_untracked(h)) {
         h->prev = NULL;
