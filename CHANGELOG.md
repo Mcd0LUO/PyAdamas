@@ -4,6 +4,88 @@
 
 早期阶段没有逐条留痕，按阶段归纳；0.4 之后逐条记录。
 
+## [0.242] - 2026-11-17
+
+### RAII 推广到容器与字符串方法
+
+- 按「多出口 + 需要清理」筛选，转换 6 个函数：`jp_value`（list/dict/tuple 三分支）、`pa_itertools_product`、`pa_dict_items`、`pa_dict_copy`、`pa_str_method`、`pa_bytes_method`。合计 `PA_PIN_SCOPE` 13 处、`PA_FREE_SCOPE` 2 处，手工 `pa_gc_pin` 从 71 降到 62。
+- 新增 `PA_FREE_SCOPE`：同样的 RAII 思路但清理动作是 `free`，管理 calloc/malloc 的裸数组。`pa_itertools_product` 原来在末尾手工 `free(idx); free(vals);`，中途加提前返回就会漏。
+- 按标准跳过：`buf_append` 的 pin 是静态分析误报（实际是 `realloc`）、`pa_asyncio_create_task` pin 后只有一个 return、其余 62 处都是单出口或极短函数。
+
+## [0.241] - 2026-11-17
+
+### RAII 作用域守卫（GCC cleanup 属性）
+
+- **问题**：运行时「保命对象」要手工配对 `pa_gc_pin`/`pa_gc_unpin`。`jp_value` 有 11 个 return、4 处 pin，每条出口都要人工保证配对 —— 0.233 就漏过一处（tuple 分支），造成 96 字节泄漏。
+- **做法**：C 没有析构函数，但 GCC/Clang 有 `__attribute__((cleanup(fn)))` —— 变量离开作用域时自动调用。`PA_PIN_SCOPE(var)` 自动 pin，任意出口自动 unpin；`PA_PIN_RELEASE(var)` 交出所有权时解除守卫。
+- **两层保障**：RAII 管正常路径，临时栈管异常路径（longjmp 不触发 cleanup 属性，这是 C 语言限制）。
+- **效果**：`jp_value` 手工 `pa_gc_pin` 4 → 0。实验验证：故意漏写 `PA_PIN_RELEASE` 时 cleanup 仍自动兜住，不泄漏。
+- **代价实测**：性能零损失（`bench_json` 8ms vs 8ms）；代码 +4%（151 → 157 行）。
+
+## [0.240] - 2026-11-17
+
+### inc/dec 内联（抄 Swift ARC 的编译期内联思路）
+
+- `pa_rc_inc` / `pa_rc_dec` 从跨编译单元函数调用改成头文件 `static inline`：快路径（计数 > 1、不在收集期、非统计模式）内联展开，慢路径（归零释放 / 收集期 / 统计）调 `pa_rc_*_slow`。
+- 运行时内部上千处调用点通过宏 `pa_rc_inc(p) → pa_rc_inc_fast(p)` 重定向；`rt_core.c` 用 `PA_RC_NO_INLINE` 提供生成代码调用的外部符号。
+- **机制验证**：`rt.o` 里 `pa_rc_inc`/`pa_rc_dec` 未定义符号引用 **239/236 → 0**。
+- **性能**：`bench_rc_gen` 76ms → 75ms（约 1.3%）。幅度小，因为 RC 调用几乎全在运行时库内部（IR 里只有 5 个 inc / 12 个 dec，实际执行 30 万 / 95 万次）。
+- **试过无效**：方案 D 扩大对象池（64 → 512 → 2048）。class 3/6 溢出清零，但 class 5（size 41-48）仍 98% 溢出。单独跑 `s = 'x' * 16` 时溢出是 0 且快于 CPython（17ms vs 19ms）—— 问题是**释放时机**不是池容量。已回退。
+- **评估后放弃**：方案 C 静态消除冗余 inc/dec —— IR 里只有 5 个 `rc_inc` + 12 个 `rc_dec`，编译期能消除的上限是这 17 个操作，优化空间 < 0.001%。
+
+## [0.239] - 2026-11-17
+
+### 增量清扫（照抄 Go 并发 GC 结构）
+
+- 先读 Go 官方 [GC guide](https://go.dev/doc/gc-guide) 与 `src/runtime/mgcmark.go`、`mwbbuf.go` 源码，再动手。照抄三点：① 增量驱动（清扫拆成有界步数，挂在 `rc_alloc` 上，即 Go 的 mark assist 思想）；② allocate-black（标记期间新分配的对象不参与本轮）；③ 写屏障 `pa_gc_write_barrier`。
+- **本地化优化**（Go 没有对应物）：① **标记同步、只分片清扫** —— 试过标记也分片，但 RC + 增量标记有硬冲突：标记期间对象可能被 RC 释放、队列还指着它，即使登记 `gc_pend` 延后仍有对象在收尾后才归零（`174_gc_construct_roots` 漏 21KB）。Go 没这问题是因为它根本没有 RC。② 小集合（< 2 万）同步清扫，避免分片打断分配路径缓存局部性。③ 倒计数器，热路径只有三条指令。
+- **效果**：最大停顿 5.09ms → **1.68ms（-67%）**；GC 总时间 12.99ms → 0.62ms；吞吐 73ms → 75ms。
+- **过程中修的三个真 bug**：① `gc_incr_finish` 里 `old_bytes +=` 写成累加（gc_set 是本轮全部存活对象，必须覆盖）；② 同步清扫分支漏设 `gc_incr_major`，导致 `alloc_since_major` 永远停在阈值之上、**每次分配都触发 major**（`180_codepoint_perf` 触发 28 万次 GC、开销 72ms 占程序 46%）；③ `gc_pend` 处理必须在 `gc_phase` 复位**之后**，否则 `pa_rc_dec` 又登记回去形成自循环。
+
+## [0.238] - 2026-11-17
+
+### minor 阈值改用 Go pacer 公式
+
+- Go 的目标堆公式：`Target heap = Live heap + (Live heap + GC roots) * GOGC / 100`，即阈值应按存活堆比例算而非固定值。原来 `young_threshold` 写死 2MB。
+- 每轮收集收尾时重算：`target = live + (live + roots)`（GOGC=100），下限 2MB（对应 Go 的 4MiB 最小堆）。
+- **效果**：GC 次数 34 → 7（minor 31 → 4）。总耗时不变 —— 剩下的是 3 次 major，minor 本来只有 0.4ms/次。
+
+## [0.237] - 2026-11-17
+
+### 按需关闭索引维护（`bench_rc_gen` 0.75x → 0.90x）
+
+- 三步定位：① 关掉 GC 跑 73ms（GC 占 11ms）；② 关掉**索引维护**跑 80ms（原本 102ms，索引维护占 22ms）；③ 但直接关掉会让 45 个用例失败。
+- **做法**：新增 `ir_module_can_skip_index_maint()`，与 `needs_unknown_index` **正交** —— 后者回答「索引要不要建」，前者回答「建了有没有人查」。运行时加 `pa_set_index_readonly()`，只关维护不动查询语义。
+- **判据是试出来的**：只排除生成器/协程 → 45 个失败；+ 排除 stdlib 导入 → 4 个；+ 只放行单函数模块 → 1 个（`86_popen` 字符串被多包一层引号，`IsStr` 失效）；+ 全局变量只允许内置类型 → 0。最后一条关键：`86_popen` 的全局是 `subprocess.Popen`，`m.imports` 记不到内置模块。
+
+## [0.236] - 2026-11-17
+
+### 按位置放宽 exact-RC 判定（exact-RC 用例 41 → 50）
+
+- `ir_module_needs_unknown_index` 原来只要模块里任何位置出现 unknown 就整体退化。实测这个判定过宽：走 exact-RC 能快 33%（83ms → 56ms，追平 CPython）。
+- **按位置区分**：裸 unknown 在槽/返回值/参数上时必须保留索引；但 `list[unknown]` 这种「unknown 只在容器元素位置」的情况，0.235 的 `heap_bits` 已在写入点按静态类型记录了每个元素是不是堆指针，销毁时不需反查。
+- **试过但不安全（已回退）**：「`maybe_unknown` 的全局变量也可以放宽」—— `unknown_is_heap` 在索引关闭时靠 `marked` 位和遍历堆链判断，对象已被 GC 释放后读的是悬空内存，ASan 实测 `heap-use-after-free`。
+- **同时修的真 bug**：`pa_repr_tuple` 每轮拼接用的临时字符串 `s` 用完没 dec。保守模式下有 GC 兜底看不出来，exact-RC 下字符串是 untracked leaf 直接泄漏（`75_tuple_repr` 96 字节）。
+
+## [0.235] - 2026-11-17
+
+### 容器逐元素堆位图（`dec_unknown` 降 96%）
+
+- 给 `PyAdamasList` 加 `heap_bits`：写入时按**写入点的静态类型**记录「这个元素是不是堆指针」，销毁时按位图直接 `pa_rc_dec`/跳过，不必走全局 rc_index 反查。
+- 新增 `pa_list_append(l, v, heap)` 第三参数，由 codegen 按静态类型给出：0 非堆 / 1 堆 / 2 unknown。出现 2 时整个列表放弃位图退回旧路径。
+- **效果**：`bench_rc_gen` 的 `dec_unknown` **467613 → 17418（-96%）**。**但总耗时没有改善** —— 这否定了「哈希索引查询是瓶颈」的假设。之前测出的「跳过判定省 21ms」来自一个段错误的构建，计时无效，已作废。
+- **保留理由**：方案 B 需要这个能力（容器元素在没有全局索引时也要能正确 dec）。
+- **过程中修的两个真 bug**：① `gen_make_list` 直接发射 `pa_list_append` 但只设 2 个参数，第 3 个寄存器是垃圾值 → tuple 构造后按错误类型 dec，段错误；② `gc_free_body` 只 `free(l->data)` 漏了 `free(l->heap_bits)`，GC 清扫路径不走 `list_destroy`，15 个用例泄漏。
+
+## [0.234] - 2026-11-17
+
+### GC 零回收退避（容器段 major 从 8211 次降到 22 次）
+
+- `bench_rc_gen` 比 CPython 慢，但单独测三个组成段都不慢 —— 是 GC 的组合效应。开 `PYADAMAS_GC_STATS` 看到容器段 `runs=8211 minor=3 major=8208`，每次 `set=5`、`freed=0`。
+- **根因**：阈值算法 `mt = old_bytes * 2` 本该有 8MB 绝对下限，但容器段 `old_bytes` 只有 520 字节，每轮 major 都零回收，`alloc_since_major` 很快又越过阈值 —— 死循环式空扫。
+- **修法**：上一轮 major 零回收时阈值提到 `old_bytes * 8`，**同时保住 8MB 绝对下限**（没有下限时 `old_bytes*8` 算出来才 4KB，比一次分配还小，等于没退避）。
+- **效果**：容器段 `gc_runs 8211 → 22`，`total_ms 2.484 → 0.024`。
+
 ## [0.233] - 2026-11-16
 
 ### 混合容器元素在 exact-RC 模式下永远不释放（泄漏 1 → 0）

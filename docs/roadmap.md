@@ -122,9 +122,17 @@
 | 0.215–0.216 | unknown 值的两类 use-after-free 根治：返回值/存储的引用所有权缺失、unknown 槽被提升导致 GC 根缺失 |
 | 0.217–0.218 | ASan 成为一等公民：`--asan`/`--ubsan`、`PYADAMAS_TEST_ASAN=1` 整套件、运行时内部插桩 `rt_asan.o`；顺带修 `json.loads` 浮点返回值错位 |
 | 0.219–0.233 | **泄漏清零**：handler 记录生命周期、异常对象所有权、json/pathlib 引用、异常子系统 shutdown 审计；新增 `runtime/rt_diag.c` 诊断模块。188 用例泄漏 **23 处 → 0** |
+| 0.234 | GC 零回收退避：容器段 major 8211 → 22 次（阈值必须有绝对下限，否则退化成每次分配都触发） |
+| 0.235 | 容器逐元素堆位图：`dec_unknown` 467613 → 17418（-96%），但总耗时未变——否定了「索引查询是瓶颈」的假设 |
+| 0.236 | 按位置放宽 exact-RC：exact-RC 用例 41 → 50（unknown 只在容器元素位置时不必保留全局索引） |
+| 0.237 | 按需关闭索引维护：`ir_module_can_skip_index_maint` 与 `needs_unknown_index` 正交，`bench_rc_gen` 0.75x → 0.90x |
+| 0.238 | minor 阈值改用 Go pacer 公式（按存活堆比例算），GC 次数 34 → 7 |
+| 0.239 | 增量清扫（照抄 Go 并发 GC 结构）：最大停顿 5.09ms → **1.68ms（-67%）**，代价是吞吐 +2.7% |
+| 0.240 | inc/dec 内联（抄 Swift ARC）：`rt.o` 符号引用 239/236 → 0，性能 +1.3% |
+| 0.241–0.242 | RAII 作用域守卫（GCC `cleanup` 属性）：13 处 pin + 2 处 free 守卫，手工 `pa_gc_pin` 71 → 62 |
 | 许可证 | Apache-2.0（见 [LICENSE](../LICENSE) / [NOTICE](../NOTICE)） |
 
-## 当前状态（0.233）
+## 当前状态（0.242）
 
 流水线 `源码 → 词法 → AST → lambda 脱糖 → 类型检查 → IR → x86-64 汇编 → 可执行文件` 已打通。
 
@@ -211,10 +219,10 @@
 **注意 0.212 的教训**：判断「还有多少提升空间」必须看修正后的调试输出（整型与浮点分开统计）。此前的 `7/14 slots promoted` 是错的，实际已接近饱和——不要基于饱和的池子再承诺收益。
 ### 1. 工程收尾
 
-- **`tests/check_size.sh` 当前会失败**（0.233 实测）：硬限制 1200 行、`ALLOW_FILES` 为空，但 `src/driver_build.cpp` 1386、`src/codegen_regalloc.cpp` 1325、`src/typecheck_types.h` 1253、`src/ir_ops.h` 1241 行超限。按 [development.md](development.md) 的规矩清单只能删不能加，这四个必须拆。0.152–0.154 那轮拆分后的回弹主要来自寄存器分配（0.203–0.204）与 IR 基础设施（0.205–0.208）。
+- **`tests/check_size.sh` 当前会失败**（0.242 实测）：硬限制 1200 行、`ALLOW_FILES` 为空，5 个文件超限 —— `src/driver_build.cpp` 1395、`src/codegen_regalloc.cpp` 1325、`src/typecheck_types.h` 1253、`src/ir_ops.h` 1241、`src/lower_impl.h` 1207。按 [development.md](development.md) 的规矩清单只能删不能加，这五个必须拆。0.152–0.154 那轮拆分后的回弹主要来自寄存器分配（0.203–0.204）、IR 基础设施（0.205–0.208）和 0.234–0.242 的性能优化（`lower_impl.h` +7 是 RAII 宏，`driver_build.cpp` +9 是方案 C 的判定接入）。
 - 标准库前端基线 0.171 复测（Debian 3.13.5：本体 501 / 596，去掉 `test/` 449 / 532）；剩余失败已高度分散（undefined name、各类运算符、getattr 非字面量、跨模块类成员等）；原口径（CPython 3.11.1 + site-packages，38582 个文件）仍未重跑；
 - 保持 `docs/` 与 README 的验证表同步（运行用例、模块目录等数字按仓库实际统计）；
-- **CHANGELOG 轮转逾期**：现含 0.100–0.233 共 131 个版本 / 2500 行。既有约定是把旧区间整块移到 `docs/archive/`（已有 `changelog-0.40.md`、`changelog-0.41-0.99.md`），下一次轮转建议归档 0.100–0.199、保留 0.200–0.233，并同步 `docs/index.md` 与本文里指向被移动条目的链接。
+- **CHANGELOG 轮转逾期**：现含 0.100–0.242 共 140 个版本 / 2582 行。既有约定是把旧区间整块移到 `docs/archive/`（已有 `changelog-0.40.md`、`changelog-0.41-0.99.md`），下一次轮转建议归档 0.100–0.199、保留 0.200–0.242，并同步 `docs/index.md` 与本文里指向被移动条目的链接。
 - `tests/bench/` 标准库基准已固化（0.144）。
 
 ## 待决策

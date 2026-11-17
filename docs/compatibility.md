@@ -118,7 +118,7 @@ PyAdamas 不追求兼容 CPython：语义是按静态类型的需要重新定的
 | 内存 | 16MB `RLIMIT_AS` 下跑压力程序 | 拼接 / 对象 / 闭包 / 容器 / 切片 / 删除 / 推导式 / 变长实参 / `with` / 装饰器 / 异常展开 / `yield from` / 异步推导式 / 环 / unknown 泄漏 | 引用计数或 GC 漏插桩、重复释放、误回收 |
 | O0/O2 自差分 | `bash tools/difftest.sh` | 188 个运行用例 | 优化遍引入静默算错（野指针、越界、丢实参）；0.210 的间接调用 bug 就是它抓到的 |
 | ASan 全量 | `PYADAMAS_TEST_ASAN=1 bash tests/run_tests.sh` | 205 ran ok | 运行时内部的越界 / UAF / 双重释放（0.218 起 `rt_asan.o` 也插桩） |
-| 泄漏扫描 | `ASAN_OPTIONS=detect_leaks=1` + `PYADAMAS_RC_TRACE` / `PYADAMAS_EXC_TRACE` | **0 处 / 188 用例** | 所有权转移断链；0.217 首次扫描 23 处，0.233 清零 |
+| 泄漏扫描 | `ASAN_OPTIONS=detect_leaks=1` + `PYADAMAS_RC_TRACE` / `PYADAMAS_EXC_TRACE` | **0 处 / 188 用例** | 所有权转移断链；0.217 首次扫描 23 处，0.233 清零，0.234–0.242 保持 0 |
 | 随机程序差分 | `pyadamas build` 后运行 `tests/diff/run_diff.py`（自举），也可 `python3` 直接跑 | 默认 840 个程序 | 语义漂移、边界错误 |
 
 ### 四类测试的写法
