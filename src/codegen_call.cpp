@@ -953,6 +953,43 @@ void AsmGen::gen_setjmp(const Inst& in) {
 
 void AsmGen::gen_call_rt(const Inst& in) {
         auto fn = static_cast<RtFn>(in.imm);
+        // ── math.sqrt 内联 fast path ──────────────────────────────
+        //
+        // pa_math_sqrt 的语义是 x<0 抛 ValueError，其余返回 sqrt(x)。
+        // 现状每次都 call，实测 nbody 的内层循环里还要额外 3 条浮点
+        // spill/reload（调用点保存），而 Go 的 math.Sqrt 直接内联成
+        // 一条 SQRTSD + 冷路径 panic —— go tool objdump 确认 Go 的
+        // advance 里 0 次函数调用（20 个 CALL 全是冷路径 panicBounds）。
+        //
+        // 这里照同样结构做：comisd 判负 -> 非负走 sqrtsd（无调用、
+        // 无 spill），负数才落到原调用序列。语义完全一致。
+        //
+        // **必须整条路径自己发完**：gen_rt_args 只装参数，真正的 call
+        // 和结果写回在这个函数下面。若只在 gen_rt_args 里特判，外层
+        // 仍会再发一次 call 把结果覆盖掉 —— 实测 nbody 输出从
+        // -928502048 变成 -319441880。
+        if (fn == RtFn::MathSqrt && !in.args.empty() && ir_is_float(in.ty)) {
+            const std::string& x = src_op(in.args[0]);
+            // x 可能在内存里（栈槽），先装进 xmm 寄存器再比较。
+            if (x.find('(') != std::string::npos)
+                line(std::format("movsd {}, %xmm0", x));
+            else
+                line(std::format("movapd {}, %xmm0", x));
+            line("xorpd %xmm1, %xmm1");
+            line("comisd %xmm0, %xmm1");
+            const std::string cold = fresh_label("sqrtneg");
+            const std::string done = fresh_label("sqrtdone");
+            emit_jmp("ja", cold);
+            line("sqrtsd %xmm0, %xmm0");
+            emit_jmp("jmp", done);
+            label(cold);
+            spill_fp_slots();
+            line("call pa_math_sqrt");
+            reload_fp_slots();
+            label(done);
+            move_fp(dst_op(in.dst), "%xmm0");
+            return;
+        }
         gen_rt_args(in, fn);
         spill_fp_slots();
         line(std::format("call {}", rt_name(fn)));
