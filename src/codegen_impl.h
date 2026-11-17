@@ -654,9 +654,16 @@ private:
             if (!r.empty()) return r;
             // **本块没有 split 位置时，回落到默认分配的整函数寄存器。**
             //
-            // 不能直接 return smem(slot)：那样会绕过 slot_reg_（默认分配
-            // 已把整函数活跃的热变量放进寄存器），把原本在寄存器里的值
-            // 强行读栈 —— 实测 mandelbrot 输出 0（值全是旧的）。
+            // 安全性来自一个不变量：assign_slot_regs_split 只处理「不在
+            // slot_reg_ 里」的槽（if (!slot_reg_[s].empty()) continue;），
+            // 所以 slot_loc_ 与 slot_reg_ 的槽集合**天然互斥**。
+            //
+            // 回落只对「默认分配已整函数提升」的槽生效 —— 那些槽不走 split
+            // 的 reload/spill 编排，整函数一个位置，本来就自洽。
+            //
+            // （曾经错误地让 split 模式一律走栈：结果默认提升的浮点槽也被
+            // 拉回栈，而 spill_fp_slots 仍把从未写过的寄存器写回栈，覆盖了
+            // 真实值 —— matmul 浮点值被冲掉、生成程序死循环 OOM。）
             if (slot < static_cast<int>(slot_reg_.size()) && !slot_reg_[slot].empty())
                 return slot_reg_[slot];
             return smem(slot);

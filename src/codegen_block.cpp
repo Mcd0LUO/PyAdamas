@@ -816,6 +816,25 @@ void AsmGen::gen_block(const Block& b) {
             if (fp_temp) alias_[in.dst] = "%xmm1";
 
             if (fused_slot >= 0) {
+                // **融合路径也必须双写栈。**
+                //
+                // 融合把 `%22 = load.slot s7` + `store.slot s5, %22` 合成
+                // 一条 `movq %r12, %rbx`，直接写 dst_loc_，绕过了
+                // gen_inst(StoreSlot) 的双写逻辑。
+                //
+                // split 模式的块入口无条件 reload，前提是栈永远最新。
+                // 融合漏掉双写 -> 栈里是旧值 -> 后继块 reload 到旧值。
+                // 实测 nqueens：bb4 的 `s5 = s7` 没写栈，bb10 入口 reload
+                // s5 读到上一轮的旧值，index.set 越界。
+                if (!slot_loc_.empty() && fused_slot < static_cast<int>(slot_loc_[static_cast<size_t>(cur_block_)].size())) {
+                    const std::string& fl = slot_loc_[static_cast<size_t>(cur_block_)][static_cast<size_t>(fused_slot)];
+                    if (!fl.empty() && fl[0] == 0x25) {
+                        if (ir_is_float(f_->slot_ty[static_cast<size_t>(fused_slot)]))
+                            line(std::format("movsd {0}, {1}", fl, smem(fused_slot)));
+                        else
+                            line(std::format("movq {0}, {1}", fl, smem(fused_slot)));
+                    }
+                }
                 // 融合掉的 store.slot 仍然改了变量，指向它的别名要失效
                 invalidate_slot(fused_slot);
                 ++i;

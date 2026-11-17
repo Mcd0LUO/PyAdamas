@@ -49,22 +49,29 @@ void AsmGen::gen_inst(const Inst& in) {
             case IrOp::Convert: gen_convert(in); break;
             case IrOp::LoadSlot: gen_load_slot(in); break;
             case IrOp::StoreSlot: {
-                // split 模式下位置按块查表（slot_op 内部处理）。
+                // **split 模式：写寄存器后同步写回栈。**
                 //
-                // **不做双写。** 块内只写寄存器，栈的同步交给块出口的
-                // spill（见 codegen_block.cpp 的 slot_spill_out_）。
+                // 为什么必须双写：split 的块入口无条件 reload（见
+                // codegen_block.cpp），前提是**栈里永远是最新值**。
+                // 如果只写寄存器、靠块出口批量 spill，那么：
+                //   - 块中间有分支跳出时，出口 spill 走不到；
+                //   - 部分块提升时，未提升块的读写直接看栈，读到旧值。
                 //
-                // 双写方案实测有严重退化：spectral_norm 从 573ms 涨到
-                // 1006ms（+76%）。原因是双写把一次 store 变成两次内存操作，
-                // 而且打断 store-to-load forwarding。
-                const bool sp = !slot_loc_.empty();
+                // 0.262 曾给**所有**槽双写，spectral_norm 从 573ms 涨到
+                // 1006ms（+76%），所以回退了。但那次是所有槽都双写；
+                // 这里只对**本块确实用 split 寄存器**的槽双写 —— 那些槽
+                // 本来就已经有 reload 开销，多一条 mov 换正确性是划算的。
                 const std::string& loc = slot_op(in.idx);
                 move_to(loc, src_op(in.a));
-                (void)sp;
+                if (!slot_loc_.empty() && loc[0] == 0x25 && loc != smem(in.idx)) {
+                    if (ir_is_float(f_->slot_ty[static_cast<size_t>(in.idx)]))
+                        line(std::format("movsd {0}, {1}", loc, smem(in.idx)));
+                    else
+                        line(std::format("movq {0}, {1}", loc, smem(in.idx)));
+                }
                 invalidate_slot(in.idx);
                 break;
-            }
-            case IrOp::LoadGlobal:
+            }            case IrOp::LoadGlobal:
                 out_ += "\tmovq ";
                 out_ += global_label(in.idx);
                 out_ += "(%rip), %rax\n";

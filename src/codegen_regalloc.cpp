@@ -2,6 +2,7 @@
 #include "codegen_impl.h"
 
 #include "live_interval.h"
+#include "spill_placement.h"
 
 namespace pyadamas {
 
@@ -855,16 +856,31 @@ static std::vector<int> block_loop_depth(const IRFunction& f);
  * （热段落也走内存）。
  *
  * **做法**：每个基本块独立决定「本块用哪个寄存器」，块入口把值从栈
- * 装进寄存器。栈始终是权威副本 —— `store.slot` 同时写寄存器和栈，
- * 所以任何块入口 reload 都能拿到最新值，不需要精确的 spill-out。
+ * 装进寄存器，块出口写回。栈始终是权威副本。
  *
- * **正确性关键**：
- *   1. store.slot 双写（寄存器 + 栈），栈永远最新；
- *   2. 块入口 reload 本块要用的槽；
- *   3. 块内所有 LoadSlot/StoreSlot 走 slot_op_at（查块表）。
+ * **2026-11 改进（阶段 B）：用 SpillPlacement 取代逐块独立判断。**
  *
- * 代价：每次 store 多一条 mov（寄存器→栈）。收益：热块里的读全走寄存器。
- * 多余的 store 后续可以由死存储消除去掉。 */
+ * 原来每块只看自己：「本块 reads - writes > 0 就提升」。这没有全局视野 ——
+ * 相邻块都提升时本块跟着提升能省两次边界搬运；相邻块都不提升时本块单独
+ * 提升反而多付一次 spill + reload。实测 0.262 的失败就是这个（nbody 慢
+ * 56ms、spectral_norm 慢 56ms）。
+ *
+ * 现在用 LLVM 的 Hopfield 网络（src/spill_placement.cpp）先算「每个块的
+ * 入口/出口边界上该不该放寄存器」，代价模型是**块执行频率**，自动做到
+ * 「热块放寄存器、冷块放栈」。
+ *
+ * **只处理整型槽**（关键设计决定）：
+ *
+ *   GPR（%rbx/%r12-%r15/%rbp）是 callee-saved，跨函数调用天然安全。
+ *   而 xmm8-15 是 caller-saved —— 浮点槽放进 xmm 后，每个调用点都要
+ *   spill/reload，还得维护 fp_promoted_slots_ / fp_spill_mask_。
+ *
+ *   上一轮集成失败就是这个：让 split 也处理浮点槽，但没重建
+ *   fp_promoted_slots_，调用点不保存 -> 值被 call 破坏 ->
+ *   matmul 输出从 43198080 变 0、fannkuch 直接崩溃。
+ *
+ *   浮点池有 8 个 xmm，默认的整函数提升已经够用（实测 9 个基准全提升），
+ *   不需要 split 介入。所以这里只做整型，复杂度大幅降低。 */
 void AsmGen::assign_slot_regs_split() {
         const int nb = static_cast<int>(f_->blocks.size());
         const int ns = static_cast<int>(f_->slot_ty.size());
@@ -877,63 +893,255 @@ void AsmGen::assign_slot_regs_split() {
 
         std::vector<int> depth = block_loop_depth(*f_);
 
-        // **收益模型：split 的代价是每次 store 多一条 mov（双写栈）。**
-        //
-        // 所以只有当「块内读次数多于写次数」时才划算 —— 读走寄存器省一次
-        // load，写要多付一次 store。净收益 = reads - writes。
-        //
-        // 原来只按「读写总次数 × 循环深度」排序，把「写多读少」的槽也提升
-        // 了，那些槽净亏。实测 nbody split 比 base 慢 2ms。
+        // 块执行频率：10^depth 近似。LLVM 用 profile 数据，这里用循环深度 ——
+        // 内层循环体的执行次数就是比外层多一个量级，足够做相对比较。
+        std::vector<int64_t> freq(static_cast<size_t>(nb), 1);
         for (int b = 0; b < nb; ++b) {
-            std::vector<int64_t> reads(static_cast<size_t>(ns), 0);
-            std::vector<int64_t> writes(static_cast<size_t>(ns), 0);
-            int64_t dw = 1;
-            for (int i = 0; i < depth[static_cast<size_t>(b)] && i < 4; ++i) dw *= 10;
-            for (const auto& in : f_->blocks[static_cast<size_t>(b)].insts) {
-                if (in.idx < 0 || in.idx >= ns) continue;
-                if (in.op == IrOp::LoadSlot) reads[static_cast<size_t>(in.idx)] += dw;
-                else if (in.op == IrOp::StoreSlot) writes[static_cast<size_t>(in.idx)] += dw;
-            }
-            struct C { int s; int64_t net; };
-            std::vector<C> cands;
-            for (int s = 0; s < ns; ++s) {
-                const int64_t r = reads[static_cast<size_t>(s)];
-                const int64_t w = writes[static_cast<size_t>(s)];
-                if (r == 0 && w == 0) continue;
-                // **只处理默认分配没提升的槽**（split 是增量，不是替换）。
-                if (!slot_reg_[static_cast<size_t>(s)].empty()) continue;
-                const int64_t net = r - w;
-                if (net <= 0) continue;   // 不划算，留在栈上
-                TypePtr t = f_->slot_ty[static_cast<size_t>(s)];
-                if (!t || t->kind == TyKind::Unknown) continue;
-                if (ir_is_heap(t)) continue;
-                if (s < static_cast<int>(gc_scan_slot_.size()) && gc_scan_slot_[s]) continue;
-                cands.push_back(C{s, net});
-            }
-            if (cands.empty()) continue;
-            std::ranges::sort(cands, [](const C& a, const C& c) {
-                return a.net != c.net ? a.net > c.net : a.s < c.s;
-            });
-            int used_int = 0, used_fp = 0;
-            for (const auto& cd : cands) {
-                TypePtr t = f_->slot_ty[static_cast<size_t>(cd.s)];
-                if (ir_is_float(t)) {
-                    if (used_fp >= kMaxFpSlotRegs()) continue;
-                    slot_loc_[static_cast<size_t>(b)][static_cast<size_t>(cd.s)] =
-                        kFpSlotRegs()[used_fp++];
-                } else {
-                    if (used_int >= kMaxSlotRegs()) continue;
-                    slot_loc_[static_cast<size_t>(b)][static_cast<size_t>(cd.s)] =
-                        kSlotRegs()[used_int++];
-                }
+            int64_t f = 1;
+            for (int i = 0; i < depth[static_cast<size_t>(b)] && i < 4; ++i) f *= 10;
+            freq[static_cast<size_t>(b)] = f;
+        }
+
+        // 后继表（SpillPlacement 需要）。
+        std::vector<std::vector<int>> succ(static_cast<size_t>(nb));
+        for (int b = 0; b < nb; ++b) {
+            const auto& insts = f_->blocks[static_cast<size_t>(b)].insts;
+            auto add = [&](int t) {
+                if (t >= 0 && t < nb) succ[static_cast<size_t>(b)].push_back(t);
+            };
+            if (insts.empty()) { add(b + 1); continue; }
+            switch (insts.back().op) {
+                case IrOp::Jump: add(insts.back().target); break;
+                case IrOp::Branch:
+                    add(insts.back().target);
+                    add(insts.back().target2);
+                    break;
+                case IrOp::Return:
+                case IrOp::GenYield:
+                case IrOp::GenAwait:
+                case IrOp::GenRethrow:
+                case IrOp::GenDone:
+                    break;
+                default: add(b + 1); break;
             }
         }
 
+        SpillPlacement placement(succ, freq);
+
+        // 逐槽求解。**只做整型槽**（见上面的设计说明）。
+        for (int s = 0; s < ns; ++s) {
+            if (!slot_reg_[static_cast<size_t>(s)].empty()) continue;
+            TypePtr t = f_->slot_ty[static_cast<size_t>(s)];
+            if (!t || t->kind == TyKind::Unknown) continue;
+            if (ir_is_heap(t)) continue;
+            if (ir_is_float(t)) continue;   // 浮点槽交给默认提升
+            // **参数槽不能参与 split。**
+            //
+            // 序言的参数落位是 `move_to(slot_op(p.slot), arg_reg)`，而
+            // split 的块入口 reload 是 `movq smem(slot), reg`。两者顺序
+            // 是「先 reload（块入口）后落位（序言）」，于是：
+            //   - reload 从**未初始化的栈槽**读垃圾；
+            //   - 落位再把它覆盖成参数值。
+            // 看似最终正确，但 reload 的那条 mov 已经把 %rbx 写脏，且
+            // 若块入口在落位之前（entry 块本身就是 bb0），参数值直接丢。
+            //
+            // 实测 fib 输出 2178309 -> 0、binary_trees SIGSEGV。
+            // 参数槽本来就整函数活跃（函数体内一直可能用到），
+            // 交给默认的整函数提升即可，不需要 split。
+            bool is_param = false;
+            for (const auto& p : f_->params)
+                if (p.slot == s) { is_param = true; break; }
+            if (is_param) continue;
+            if (s < static_cast<int>(gc_scan_slot_.size()) && gc_scan_slot_[s]) continue;
+
+            std::vector<BlockConstraint> constraints;
+            for (int b = 0; b < nb; ++b) {
+                int64_t reads = 0, writes = 0;
+                for (const auto& in : f_->blocks[static_cast<size_t>(b)].insts) {
+                    if (in.idx != s) continue;
+                    if (in.op == IrOp::LoadSlot) ++reads;
+                    else if (in.op == IrOp::StoreSlot) ++writes;
+                }
+                if (reads == 0 && writes == 0) continue;
+                BlockConstraint c;
+                c.block = b;
+                if (reads > writes) {
+                    c.entry = BlockPref::PrefReg;
+                    c.exit = BlockPref::PrefReg;
+                } else if (writes > reads) {
+                    c.entry = BlockPref::PrefSpill;
+                    c.exit = BlockPref::PrefReg;
+                } else {
+                    c.entry = BlockPref::PrefReg;
+                    c.exit = BlockPref::PrefReg;
+                }
+                constraints.push_back(c);
+            }
+            if (constraints.empty()) continue;
+            if (!placement.solve(constraints)) continue;
+
+            for (int b = 0; b < nb; ++b) {
+                if (!placement.useRegAtEntry(b) && !placement.useRegAtExit(b)) continue;
+                bool used = false;
+                for (const auto& in : f_->blocks[static_cast<size_t>(b)].insts) {
+                    if (in.idx != s) continue;
+                    if (in.op == IrOp::LoadSlot || in.op == IrOp::StoreSlot) {
+                        used = true;
+                        break;
+                    }
+                }
+                if (!used) continue;
+                slot_loc_[static_cast<size_t>(b)][static_cast<size_t>(s)] = kSlotRegs()[0];
+            }
+        }
+
+        // **寄存器分配：每个槽全局固定一个寄存器。**
+        //
+        // 曾经的错误做法是「每个块内按使用次数排序，依次分配不同寄存器」。
+        // 那样同一个槽在不同块会拿到不同寄存器：
+        //
+        //     bb1: s7=%r12      bb3: s7=%rbx
+        //
+        // 而块出口 spill 用的是**本块**的寄存器（%r12），块入口 reload 也
+        // 只装本块的。如果 bb1 直接跳 bb3、中间没有 spill 点，s7 的值就
+        // 从 %r12 丢到了 %rbx（未初始化）—— 实测 nqueens 抛 IndexError、
+        // matmul 输出垃圾值。
+        //
+        // 正确做法：一个槽在所有块里必须是同一个物理寄存器。这样跨块
+        // 转移时即使中间没有 spill，值也一直在那个寄存器里（callee-saved，
+        // 跨调用也安全）。spill/reload 只在「进出寄存器集合」的边界需要。
+        {
+            // 按「全函数使用次数」排序，决定谁先拿到寄存器。
+            struct Use { int s; int64_t cnt; };
+            std::vector<Use> cands;
+            for (int s = 0; s < ns; ++s) {
+                int64_t cnt = 0;
+                bool any = false;
+                for (int b = 0; b < nb; ++b) {
+                    if (slot_loc_[static_cast<size_t>(b)][static_cast<size_t>(s)].empty())
+                        continue;
+                    any = true;
+                    for (const auto& in : f_->blocks[static_cast<size_t>(b)].insts)
+                        if (in.idx == s && (in.op == IrOp::LoadSlot || in.op == IrOp::StoreSlot))
+                            ++cnt;
+                }
+                if (any) cands.push_back(Use{s, cnt});
+            }
+            std::ranges::sort(cands, [](const Use& a, const Use& c) {
+                return a.cnt != c.cnt ? a.cnt > c.cnt : a.s < c.s;
+            });
+            // 前 kMaxSlotRegs 个拿到固定寄存器，其余全部退回栈。
+            std::vector<int> fixed(static_cast<size_t>(ns), -1);
+            // **从 n_saved_regs_ 开始，避开参数槽已占用的寄存器。**
+            // 参数槽先跑了线性扫描，用掉 kSlotRegs()[0..n_saved_regs_-1]。
+            // split 若从 0 开始会抢同一批寄存器 —— 实测 fib 输出 -960、
+            // mandelbrot 输出 0、nqueens 被 Killed。
+            const int base = n_saved_regs_;
+            for (size_t i = 0; i < cands.size(); ++i) {
+                const int idx = base + static_cast<int>(i);
+                if (idx < kMaxSlotRegs())
+                    fixed[static_cast<size_t>(cands[i].s)] = idx;
+            }
+            for (int b = 0; b < nb; ++b)
+                for (int s = 0; s < ns; ++s) {
+                    if (slot_loc_[static_cast<size_t>(b)][static_cast<size_t>(s)].empty())
+                        continue;
+                    const int fi = fixed[static_cast<size_t>(s)];
+                    slot_loc_[static_cast<size_t>(b)][static_cast<size_t>(s)] =
+                        fi >= 0 ? kSlotRegs()[fi] : std::string();
+                }
+        }
+        // **跨块一致性（在全局固定映射之后再做一次）。**
+        //
+        // 只要槽 s 被提升（拿到固定寄存器），**所有使用它的块**都必须
+        // 标记成同一位置。否则：
+        //
+        //     bb4: store.slot s5 -> %rbx（双写栈）
+        //     bb8: load.slot s5  -> smem(s5)（栈）
+        //
+        // bb8 读栈是对的（双写保证了栈最新），但如果 bb8 的**前驱**没有
+        // 写回栈，或者中间有别的块改了 s5 而没双写，就会读到旧值。
+        //
+        // 更重要的是：块入口 reload 只对 slot_loc_ 非空的槽做。bb8 没有
+        // slot_loc_[bb8][s5]，于是它不 reload —— 但它内部的 slot_op(s5)
+        // 又因为「本块无位置」回落到 slot_reg_ 或 smem，与 bb4 的 %rbx
+        // 分裂成两个副本。
+        //
+        // 实测 nqueens 抛 IndexError。
+        {
+            std::vector<std::string> fixed(static_cast<size_t>(ns));
+            for (int b = 0; b < nb; ++b)
+                for (int s = 0; s < ns; ++s) {
+                    const std::string& rg =
+                        slot_loc_[static_cast<size_t>(b)][static_cast<size_t>(s)];
+                    if (!rg.empty()) fixed[static_cast<size_t>(s)] = rg;
+                }
+            for (int b = 0; b < nb; ++b)
+                for (int s = 0; s < ns; ++s) {
+                    if (fixed[static_cast<size_t>(s)].empty()) continue;
+                    if (!slot_loc_[static_cast<size_t>(b)][static_cast<size_t>(s)].empty())
+                        continue;
+                    bool uses = false;
+                    for (const auto& in : f_->blocks[static_cast<size_t>(b)].insts) {
+                        if (in.idx != s) continue;
+                        if (in.op == IrOp::LoadSlot || in.op == IrOp::StoreSlot) {
+                            uses = true;
+                            break;
+                        }
+                    }
+                    if (uses)
+                        slot_loc_[static_cast<size_t>(b)][static_cast<size_t>(s)] =
+                            fixed[static_cast<size_t>(s)];
+                }
+        }
         // 块入口 reload：本块要用寄存器的槽，从栈装进去。
         for (int b = 0; b < nb; ++b) {
             for (int s = 0; s < ns; ++s) {
                 if (slot_loc_[static_cast<size_t>(b)][static_cast<size_t>(s)].empty()) continue;
                 slot_reload_in_[static_cast<size_t>(b)].push_back(s);
+            }
+        }
+        // **n_saved_regs_ 必须覆盖 split 实际用到的寄存器。**
+        //
+        // 序言按 n_saved_regs_ 压栈 callee-saved 寄存器，尾声按它弹栈。
+        // split 用 kSlotRegs()[0..k-1]，所以 n_saved_regs_ 要设成
+        // 「用到的最大序号 + 1」，否则用到 %r15/%rbp 却没压栈 ——
+        // 调用者的值被破坏（实测 fannkuch 抛 IndexError）。
+        {
+            int used = 0;
+            for (int r = 0; r < kMaxSlotRegs(); ++r) {
+                bool any = false;
+                for (int b = 0; b < nb && !any; ++b)
+                    for (int s = 0; s < ns; ++s)
+                        if (slot_loc_[static_cast<size_t>(b)][static_cast<size_t>(s)] ==
+                            kSlotRegs()[r]) {
+                            any = true;
+                            break;
+                        }
+                if (any) used = r + 1;
+            }
+            // **必须直接赋值，不能取 max。**
+            //
+            // split 独占整型分配后，slot_reg_ 里的整型槽是空的，
+            // n_saved_regs_ 在进入 split 前可能是线性扫描留下的残值。
+            // 取 max 会让「残值小于实际用量」的情况漏压栈 ——
+            // 实测 nqueens 用到 %rbp（第 6 个）却只压了 3 个，
+            // 循环上界被调用破坏，抛 IndexError。
+            // **取 max，不能直接赋值。**
+            //            // 参数槽可能已经用掉 kSlotRegs()[0..]，这里如果直接赋值成
+            // split 自己用到的数量，会把参数槽的压栈需求冲掉 ——
+            // 实测 fib 序言没有 pushq %rbx，递归后参数被破坏，输出 -960。
+            if (used > n_saved_regs_) n_saved_regs_ = used;
+            if (std::getenv("PYADAMAS_SPLIT_DBG")) {
+                std::fprintf(stderr, "[split] %s n_saved=%d\n", f_->name.c_str(), n_saved_regs_);
+                for (int b = 0; b < nb; ++b) {
+                    std::fprintf(stderr, "[split]   bb%d:", b);
+                    for (int s2 = 0; s2 < ns; ++s2)
+                        if (!slot_loc_[static_cast<size_t>(b)][static_cast<size_t>(s2)].empty())
+                            std::fprintf(stderr, " s%d=%s", s2,
+                                         slot_loc_[static_cast<size_t>(b)][static_cast<size_t>(s2)].c_str());
+                    std::fprintf(stderr, "\n");
+                }
             }
         }
 }
@@ -1412,16 +1620,64 @@ void AsmGen::assign_slot_regs() {
         }
         static const bool use_split = rc_split_;
         if (use_split) {
-            // **先跑默认分配，再让 split 覆盖。**
+            // **split 独占整型分配，不能先跑线性扫描。**
             //
-            // split 只应该「改进」而不是「替换」：默认分配已经把整函数活跃
-            // 的热变量放进寄存器（slot_reg_），split 的按块分配如果从零开始，
-            // 会把那些变量挤回栈上 —— 实测 mandelbrot 的循环变量 i 从 %r14
-            // 变成每次 mov 0x68(%rsp)，反而更慢。
+            // 曾经的做法是「先 linear 填 slot_reg_，再让 split 覆盖」。
+            // 那会抢寄存器：linear 用掉全部 6 个 GPR 给 slot_reg_ 的槽
+            // （实测 matmul.run_2 是 9/16 提升、6 regs），而 split 只处理
+            // **不在 slot_reg_ 里**的槽，却又去用 kSlotRegs()[0..] ——
+            // 同一个 %rbx 被两个分配器同时分给不同的槽，读写互相覆盖。
             //
-            // 做法：默认分配先填 slot_reg_，split 在此基础上只处理「默认
-            // 没提升、但本块内读多写少」的槽。
-            assign_slot_regs_linear();
+            // 实测后果：matmul 输出 43198080 -> 0、fannkuch 抛 IndexError、
+            // 有的用例直接死循环 OOM。
+            //
+            // 正确做法：split 模式下整型槽**全部**由 split 决定，
+            // slot_reg_ 里的整型槽留空，n_saved_regs_ 由 split 实际用的
+            // 寄存器数决定。浮点槽仍走线性扫描（xmm 池不与 GPR 冲突，
+            // 且需要 fp_promoted_slots_ 维护调用点 spill）。
+            // **先给参数槽做整函数提升，再让 split 处理其余槽。**
+            //
+            // 参数槽是整函数活跃的（函数体内随时可能用到），本来就该
+            // 整函数占一个寄存器。曾经把它们完全排除出 split 却没交给
+            // 线性扫描，结果只能落栈：递归函数（fib）每次调用多两次
+            // 内存访问，实测慢 47.3%。
+            //
+            // 这里只对**参数槽**跑线性扫描，其余整型槽仍由 split 独占，
+            // 两者用不相交的寄存器区间（split 从 n_saved_regs_ 之后开始用）。
+            {
+                std::vector<int> param_cands;
+                for (const auto& p : f_->params) {
+                    if (p.slot < 0 || p.slot >= static_cast<int>(slot_reg_.size())) continue;
+                    TypePtr pt = f_->slot_ty[static_cast<size_t>(p.slot)];
+                    if (!pt || pt->kind == TyKind::Unknown || ir_is_heap(pt)) continue;
+                    if (ir_is_float(pt)) continue;   // 浮点由下面的 fp 分支处理
+                    if (p.slot < static_cast<int>(gc_scan_slot_.size()) && gc_scan_slot_[p.slot]) continue;
+                    param_cands.push_back(p.slot);
+                }
+                if (!param_cands.empty()) {
+                    std::vector<std::string> pout(f_->slot_ty.size());
+                    linear_scan_pool(param_cands, kSlotRegs(), kMaxSlotRegs(), pout);
+                    for (size_t i = 0; i < pout.size(); ++i) {
+                        if (pout[i].empty()) continue;
+                        slot_reg_[i] = pout[i];
+                    }
+                    // **n_saved_regs_ 必须按「用到的最大寄存器序号 + 1」设置。**
+                    //                    // 不能简单数「有几个槽提升了」：linear_scan_pool 可能给                    // 不同槽分配 kSlotRegs()[0]、kSlotRegs()[2]，只提升 2 个                    // 却用到 3 号寄存器。按数量算会漏压栈。
+                    //                    // 实测 fib：1 个参数槽拿到 %rbx，n_saved 却算成 0，序言
+                    // 没 pushq %rbx，递归调用后参数被破坏，输出 -960。
+                    int used = 0;
+                    for (int r = 0; r < kMaxSlotRegs(); ++r) {
+                        for (const auto& rg : pout)
+                            if (!rg.empty() && rg == kSlotRegs()[r]) {
+                                used = r + 1;
+                                break;
+                            }
+                    }
+                    if (used > n_saved_regs_) n_saved_regs_ = used;
+                }
+            }
+            assign_slot_regs_split();
+            // 浮点：线性扫描 + 重建 fp_promoted_slots_。
             std::vector<int> fp_cands;
             for (size_t ci = 0; ci < slot_reg_cand_.size(); ++ci)
                 if (slot_cand_is_fp_[ci]) fp_cands.push_back(slot_reg_cand_[ci]);
@@ -1433,6 +1689,8 @@ void AsmGen::assign_slot_regs() {
                     slot_reg_[i] = fp_out[i];
                 }
                 fp_promoted_slots_.clear();
+                for (int i = 0; i < static_cast<int>(slot_fpidx_.size()); ++i)
+                    slot_fpidx_[static_cast<size_t>(i)] = -1;
                 for (int i = 0; i < static_cast<int>(fp_out.size()); ++i) {
                     if (fp_out[static_cast<size_t>(i)].empty()) continue;
                     slot_fpidx_[static_cast<size_t>(i)] =
@@ -1440,7 +1698,6 @@ void AsmGen::assign_slot_regs() {
                     fp_promoted_slots_.push_back(i);
                 }
             }
-            assign_slot_regs_split();
             return;
         }
         static const bool ra_off = std::getenv("PYADAMAS_NO_RA") != nullptr;
@@ -1922,11 +2179,33 @@ void AsmGen::assign_global_vreg_regs() {
         std::ranges::sort(cands, [](const Cand& a, const Cand& b) {
             return a.uses != b.uses ? a.uses > b.uses : a.v < b.v;
         });
+        // **split 模式下 vreg 不得使用 kSlotRegs() 池。**
+        //
+        // split 已经把这些寄存器独占分配给变量槽（slot_loc_），而且
+        // slot_reg_ 是空的（split 独占整型分配）—— 所以下面这段
+        // 「从 n_saved_regs_ 继续往 kSlotRegs() 分配」会把同一个物理
+        // 寄存器同时分给「槽」和「跨块 vreg」，两边互相覆盖。
+        //
+        // 实测 nqueens：循环上界槽拿到 %rbp，同一函数的跨块 vreg 又
+        // 拿到 %rbp，循环条件被写坏 -> IndexError。
+        //
+        // 正确做法：split 模式下跳过这一段，vreg 只走下面的
+        // %r8-%r11（block_temps，调用点会保存）等不与槽冲突的路径。
+        // split 模式下跳过 kSlotRegs() 分配（那些寄存器归槽所有），
+        // 但**不能直接 return** —— 后面还有 block_temps（%r8-%r11）
+        // 的分配路径，跨块 vreg 需要它。
+        //
+        // 曾经在这里 return，结果跨块 vreg（如 LICM 提升的循环上界）
+        // 拿不到任何寄存器，只能留在栈上被反复重载；更糟的是
+        // %r8-%r11 在调用点会被破坏，而那些 vreg 的栈副本没人维护 ——
+        // 实测 nqueens N=1 就抛 IndexError。
         int next = n_saved_regs_;
         size_t ci = 0;
-        for (; ci < cands.size() && next < kMaxSlotRegs(); ++ci)
-            vreg_reg_[static_cast<size_t>(cands[ci].v)] = kSlotRegs()[next++];
-        n_saved_regs_ = next;
+        if (!rc_split_) {
+            for (; ci < cands.size() && next < kMaxSlotRegs(); ++ci)
+                vreg_reg_[static_cast<size_t>(cands[ci].v)] = kSlotRegs()[next++];
+            n_saved_regs_ = next;
+        }
 
         // 无调用函数里 %r8–%r11 也不会被任何指令破坏：再拿至多两个
         // 承载最热的跨块值，剩下的留给块内临时寄存器。
