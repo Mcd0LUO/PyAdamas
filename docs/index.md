@@ -20,7 +20,7 @@
 | [zero-cost-exceptions.md](zero-cost-exceptions.md) | 零开销异常怎么做？LSDA / personality 的实测格式与 Z1-Z5 路线 | `runtime/rt_personality.c` `tests/exc/` `tools/lsda_ref/` |
 | [exc-semantics.md](exc-semantics.md) | 现行 try/except/finally/with 语义到底是什么？改成表驱动会丢什么？ | `runtime/rt_exc.c` `src/lower_exc.cpp` |
 | [exc-frame-cleanup.md](exc-frame-cleanup.md) | 展开 / longjmp 时被跳过帧的局部引用怎么回收？ | `runtime/rt_exc.c` `runtime/rt_core.c` |
-| [regalloc.md](regalloc.md) | 寄存器分配为什么没带来性能收益？下一步两条路线怎么选？ | `src/codegen_regalloc.cpp` |
+| [regalloc.md](regalloc.md) | 寄存器分配为什么没带来性能收益？三条路线（第三层 / 全局提升 / 块级分裂）各自为什么被判负？ | `src/codegen_regalloc.cpp` |
 | [regalloc-architecture.md](regalloc-architecture.md) | 精确 LiveInterval / SpillPlacement / SplitKit 三层怎么设计？池容量实验后为什么第三层正式放弃？ | `src/codegen_regalloc.cpp` |
 | [bounds-elimination-attempt.md](bounds-elimination-attempt.md) | 边界检查消除（ranged loop versioning）做到哪一步、克隆阶段为什么回退？上界收益是多少？ | `src/opt_loop.cpp` |
 | [heap-slot-promotion.md](heap-slot-promotion.md) | 堆槽进寄存器的 GC 障碍假设为什么是错的？放行后为什么反而慢 5.5%？ | `src/lower_impl_slots.cpp` `runtime/rt_core.c` |
