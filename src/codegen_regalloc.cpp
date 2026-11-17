@@ -1057,7 +1057,12 @@ void AsmGen::assign_slot_regs() {
         //
         // 两者只在整型槽上不同（浮点池仍走下面的按频次逻辑）。线性扫描的
         // 优势是「不同活跃区间复用同一寄存器」，变量数超过寄存器数时覆盖率更高。
-        static const bool use_split = std::getenv("PYADAMAS_RA_SPLIT") != nullptr;
+        // 用驱动传入的开关（参与模块缓存失效），不在这里重复读环境变量。
+        //
+        // 原来这里直接 getenv：切换开关后模块缓存键不变，仍命中旧产物 ——
+        // 实测连续几轮 A/B 测试拿到完全相同的二进制。现在由 Program::rc_split
+        // 统一管理，并写进 manifest 的 rcsplit 行。
+        static const bool use_split = rc_split_;
         if (use_split) {
             assign_slot_regs_split();
             return;

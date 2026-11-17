@@ -608,11 +608,12 @@ void AsmGen::emit_eh_tables() {
 }
 
 std::string generate_asm(const IRModule& m, bool disable_unknown_index,
-                         bool zero_cost_exc, bool index_readonly) {
+                         bool zero_cost_exc, bool index_readonly, bool rc_split) {
     AsmGen g;
     g.set_disable_unknown_index(disable_unknown_index);
     g.set_index_readonly(index_readonly);
     g.set_zero_cost_exc(zero_cost_exc);
+    g.set_rc_split(rc_split);
     return g.gen(m);
 }
 

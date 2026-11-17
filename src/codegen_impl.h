@@ -157,6 +157,8 @@ public:
         void set_index_readonly(bool v) { index_readonly_ = v; }
         // 零开销异常总开关（默认开启；--no-zero-cost-exc 可回退）。
         void set_zero_cost_exc(bool v) { zero_cost_exc_ = v; }
+        // live range splitting 开关：由驱动从 Program 传入（参与缓存失效）。
+        void set_rc_split(bool v) { rc_split_ = v; }
 
 private:
     const std::string& global_label(int i) const {
@@ -576,6 +578,7 @@ private:
     // 总开关（--zero-cost-exc）。关闭时 prepare_eh_plan 直接返回，保证老
     // 路径的汇编逐字节不变。
     bool zero_cost_exc_ = true;
+    bool rc_split_ = false;
     // 预扫描本函数的 EH 标记（fname 是 FDE 起点标签）；没有标记则不动作。
     void prepare_eh_plan(const IRFunction& f, const std::string& fname);
     // 发 .cfi_personality / .cfi_lsda（必须在 .cfi_startproc 之后调用）。

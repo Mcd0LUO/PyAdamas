@@ -16,6 +16,7 @@ namespace pyadamas {
 // （EhBegin/EhEnd/EhLandingPad）的函数才会发 personality/LSDA；关闭时输出
 // 与原来的 setjmp 路径逐字节一致。
 std::string generate_asm(const IRModule& m, bool disable_unknown_index = false,
-                         bool zero_cost_exc = true, bool index_readonly = false);
+                         bool zero_cost_exc = true, bool index_readonly = false,
+                         bool rc_split = false);
 
 }  // namespace pyadamas
