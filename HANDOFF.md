@@ -3,42 +3,62 @@
 > 这是一份**时点快照**，记录本轮结束时服务器上的可运行状态、怎么跑、
 > 以及下一步该做什么。它不属于架构文档，下次交接时直接覆盖。
 
+## 0. 路径约定
+
+仓库在服务器的 `/src/luo-proj/pyadamas`，但你**不需要记这个绝对路径**。
+下面所有命令都从仓库根出发，用相对路径。进入仓库：
+
+```bash
+R=/src/luo-proj/pyadamas          # 只在这里出现一次
+ssh porj "cd $R && ..."            # 其余命令都用相对路径
+```
+
+本地（Windows）侧的脚本也都不写死绝对路径：`tools/difftest.sh`、
+`tools/quickbench.sh`、`tools/abbench.sh` 都从脚本自身位置推导仓库根，
+换目录、换机器、换 checkout 都不用改。`tools/sync-server.sh` 的远端路径由
+`PYADAMAS_SYNC_TARGET` 覆盖（默认就是上面那个）。
+
 ## 1. 环境
 
 | 项 | 值 |
 |---|---|
-| 仓库 | `/src/luo-porj`（分支 `master`，HEAD `f079356`，与 origin 同步）|
+| 仓库 | `pyadamas`（分支 `master`，HEAD `f2c7d8c`，与 origin 同步）|
 | 服务器 | `root@110.42.51.202`，Debian 13 (trixie)，Xeon Gold 6252 @ 2.10GHz / 96 线程 / 123GB |
+| 服务器路径 | `/src/luo-proj/pyadamas` |
 | 工具链 | gcc 15.2、cmake 3.31.6、ninja 1.12.1、git 2.47.3、python 3.13.5 |
-| 客户端 | `C:\Windows\System32\OpenSSH\ssh.exe`，密钥 `C:\Users\lenovo\.ssh\id_ed25519_root_mc`，已配置别名 `porj` |
+| 客户端 | OpenSSH，密钥 `~/.ssh/id_ed25519_root_mc`，ssh 别名 `porj` |
 | 构建目录 | `build/release`（优化版）、`build/dev`（调试）、`build/asan`（插桩运行时）|
 
 **不要用本地 WSL**。所有构建、测试、基准都在服务器上跑。
 
 ## 2. 常用命令
 
+下面 `$R` 指仓库根。全部用相对路径，在 `cd "$R"` 之后执行。
+
 ```bash
+R=/src/luo-proj/pyadamas
+
 # 构建（-j32 比 -j96 快：-fmodules-ts 的模块编译是串行的，线程太多反而抢 CPU）
-ssh porj 'cd /src/luo-porj && cmake --build build/release -j32'
+ssh porj "cd $R && cmake --build build/release -j32"
 
 # 差分测试：同一份源码在 -O0 / -O2 下跑，比输出（188 个用例，约 6 秒）
-ssh porj 'cd /src/luo-porj && bash tools/difftest.sh'
-ssh porj 'cd /src/luo-porj && PYADAMAS_TEST_FILTER=nbody bash tools/difftest.sh'   # 只跑匹配的
+ssh porj "cd $R && bash tools/difftest.sh"
+ssh porj "cd $R && PYADAMAS_TEST_FILTER=nbody bash tools/difftest.sh"   # 只跑匹配的
 
 # 全量套件（206 个 ran ok；退出码 0 才算过）
-ssh porj 'cd /src/luo-porj && bash tests/run_tests.sh build/release build/release/pyadamas'
+ssh porj "cd $R && bash tests/run_tests.sh build/release build/release/pyadamas"
 
 # 单版本回归计时（最好 N 次；REP / PYADAMAS_BIN / OUT 可覆盖）
-ssh porj 'cd /src/luo-porj && REP=7 bash tools/quickbench.sh'
-ssh porj 'cd /src/luo-porj && bash tools/quickbench.sh nbody matmul spectral_norm'
+ssh porj "cd $R && REP=7 bash tools/quickbench.sh"
+ssh porj "cd $R && bash tools/quickbench.sh nbody matmul spectral_norm"
 
 # A/B 两版本对比（独立 worktree + 交替测量 + 中位数）
-ssh porj 'cd /src/luo-porj && bash tools/abbench.sh <旧ref> <新ref>'
+ssh porj "cd $R && bash tools/abbench.sh <旧ref> <新ref>"
 
-# 编译并手动跑单个程序
-ssh porj 'cd /src/luo-porj && build/release/pyadamas build -o /tmp/x bench/realistic/queue_sim.py && /tmp/x'
-ssh porj 'cd /src/luo-porj && build/release/pyadamas asm bench/realistic/queue_sim.py'   # 看生成的汇编
-ssh porj 'cd /src/luo-porj && build/release/pyadamas ir  bench/realistic/queue_sim.py'   # 看 IR
+# 编译并手动跑单个程序（产物放 /tmp，不要污染仓库）
+ssh porj "cd $R && build/release/pyadamas build -o /tmp/x bench/realistic/queue_sim.py && /tmp/x"
+ssh porj "cd $R && build/release/pyadamas asm bench/realistic/queue_sim.py"   # 看生成的汇编
+ssh porj "cd $R && build/release/pyadamas ir  bench/realistic/queue_sim.py"   # 看 IR
 ```
 
 **测量纪律**：服务器上还有别的租户（Minecraft 服等），负载在 3–22 之间波动。
@@ -77,6 +97,7 @@ str_build 已经接近和 Go 打平。queue_sim 还差 7 倍，瓶颈见 §5。
 | `16aefbf` | RC 记账内联从 `codegen_call.cpp` 搬到 `codegen_call_rt.cpp`（回到 1200 行以内）| 纯搬家 |
 | `e3f7315` | 文档漂移清理（codegen/runtime/str-codepoints/regalloc×2/stack-alignment/index/tools/bench/dev/roadmap/README）| — |
 | `f079356` | 补 CHANGELOG 0.244–0.269（26 个版本）+ ir.md 的 SSA 最终结论 | — |
+| `f2c7d8c` | 新增本文档 | — |
 
 ### 三个关键结论（都是实测得出，不要当假设）
 
@@ -128,14 +149,17 @@ queue_sim 每次循环迭代创建一个列表（`rest = []`）并销毁一个�
    不是现状数字，不要按它做判断。
 5. **`src/codegen_block.cpp:343` 的注释过时**：说「运行时 traceback 仍走 rbp 链」，
    实际早改成 CFI 展开器（`_Unwind_Backtrace`）。
+6. **移动仓库目录后必须重建构建目录**：`build/*/CMakeCache.txt` 里写死了源码绝对路径，
+   换路径后 `cmake --build` 会报 "source directory does not appear to contain CMakeLists.txt"。
+   处理：`rm -rf build/release && cmake -S . -B build/release -G Ninja -DCMAKE_BUILD_TYPE=Release`。
 
 ## 7. 版本号约定（踩过一次坑）
 
 `0.x` 阶段每个「能跑通新一层」算一个次版本。**每次提交前先**：
 
 ```bash
-git log --format="%s" -300 | grep -oE "0\\.(2[0-9]{2})" | sort -u -V | tail -3
-grep -oE "^## \\[0\\.[0-9]+\\]" CHANGELOG.md | head -1
+git log --format='%s' -300 | grep -oE '0\.[0-9]{3}' | sort -u -V | tail -3
+grep -oE '^## \[[0-9.]+\]' CHANGELOG.md | head -1
 ```
 
 两者应该一致。本轮一度按「CHANGELOG 顶格 0.242，下一个就是 0.243」编号，
@@ -152,6 +176,9 @@ grep -oE "^## \\[0\\.[0-9]+\\]" CHANGELOG.md | head -1
 | `tools/sync-server.sh` | rsync 同步到服务器，带排除表。`--dry-run` / `--pull` / `--build` |
 | `tools/irdump.cpp` | IrOp / RtFn 枚举编号 → 名字对照 |
 
+所有工具脚本都从**自身位置**推导仓库根（`ROOT=$(cd "$(dirname "$0")/.." && pwd)`），
+不写死绝对路径。新增工具请照这个约定。
+
 ## 9. 环境变量速查
 
 | 变量 | 作用 |
@@ -164,6 +191,7 @@ grep -oE "^## \\[0\\.[0-9]+\\]" CHANGELOG.md | head -1
 | `PYADAMAS_RC_STATS=1` | RC 统计（注意 §6.2 的盲区）|
 | `PYADAMAS_TEST_JOBS` / `PYADAMAS_TEST_FILTER` | difftest 并行度 / 用例过滤 |
 | `PYADAMAS_TEST_ASAN=1` | 用 ASan 插桩的运行时跑套件 |
+| `PYADAMAS_SYNC_TARGET` / `PYADAMAS_SYNC_KEY` | sync-server.sh 的目标与密钥 |
 
 ## 10. 仓库结构速查
 

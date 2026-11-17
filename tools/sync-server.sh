@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # sync-server.sh —— 把当前 checkout 同步到开发服务器（旧机与本地 WSL 都慢，
-# 日常开发放到 110.42.51.202:/src/luo-porj）。
+# 日常开发放到 110.42.51.202:/src/luo-proj/pyadamas）。
 #
 # **为什么需要它**：服务器连不上 GitHub，同步只能走 rsync；而 rsync 必须
 # 排除构建产物 —— 本地 build/ 有 3GB，传上去既慢，又会让服务器直接用
@@ -20,7 +20,7 @@ set -u
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
 cd "$ROOT" || exit 1
 
-TARGET=${PYADAMAS_SYNC_TARGET:-root@110.42.51.202:/src/luo-porj/}
+TARGET=${PYADAMAS_SYNC_TARGET:-root@110.42.51.202:/src/luo-proj/pyadamas/}
 KEY=${PYADAMAS_SYNC_KEY:-$HOME/.ssh/id_ed25519_root_mc}
 SSH="ssh -i $KEY -o BatchMode=yes -o StrictHostKeyChecking=accept-new"
 
