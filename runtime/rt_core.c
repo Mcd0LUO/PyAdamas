@@ -16,6 +16,9 @@
 PyAdamasRc* heap_head;
 int64_t alloc_since_gc;
 int gc_ready;
+/* 分配热路径的快速判断标志：0 = 什么都不用做（绝大多数情况）。
+   见 rc_alloc 里的说明。 */
+int gc_need_check;
 int gc_sweeping;
 /* 链上的对象数（叶子不进链，不计）。增量维护，收集时不用再数一遍。 */
 size_t gc_tracked_count;
@@ -91,6 +94,15 @@ static int64_t gc_incr_major;   /* 本轮是不是整堆收集 */
 static size_t gc_incr_sweep_pos;
 static int gc_incr_countdown;
 static int gc_incr_remaining;
+/* **增量工作的累计耗时**（毫秒）。
+ *
+ * 之前 gcstats 的 total_ms 只统计了 gc_collect 的墙钟时间，而增量模式下
+ * 真正的标记/清扫发生在 gc_incr_step 里 —— 由分配点驱动，散布在程序
+ * 各处，从未被计时。实测 bench_rc_gen 的 GC 成本是 12ms（GC 禁用对照），
+ * 但 gcstats 只报 0.644ms，差 19 倍就是这个原因。 */
+static double gc_incr_ms;
+static int64_t gc_incr_calls, gc_incr_objs;
+static double gc_now_ms(void);
 static void gc_incr_finish(void);
 static void gc_incr_step(void);
 static void gc_free_body(PyAdamasRc* h);
@@ -318,6 +330,10 @@ static void gc_stats_dump(void) {
             (long long)gc_stat_cons_bytes_total[1],
             (long long)gc_stat_cons_objs_total[2],
             (long long)gc_stat_cons_bytes_total[2]);
+    // **增量工作的单独统计。** total_ms 只含 gc_collect 的墙钟时间，
+    // 增量模式下真正的标记/清扫在 gc_incr_step 里，必须单独报。
+    fprintf(stderr, "[gcstats] incremental_ms=%.3f calls=%lld objs=%lld (真正的标记/清扫耗时)\n",
+            gc_incr_ms, (long long)gc_incr_calls, (long long)gc_incr_objs);
 }
 
 static void rc_stats_dump(void) {
@@ -706,7 +722,16 @@ void rc_unlink(PyAdamasRc* h) {
 void* rc_alloc(int64_t size, void (*dtor)(void*), void (*release)(void*),
                       int64_t kind) {
     if (size < 0) panic_c("negative allocation size");
-    if (gc_ready && heap_head) {
+    // **热路径优化：把 GC 相关判断合并成一个全局标志。**
+    //
+    // 原来这里要读 gc_ready、heap_head、gc_incr_remaining、alloc_since_major、
+    // alloc_since_gc、major_threshold、young_threshold —— 7 个全局变量。
+    // bench_rc_gen 有 65 万次分配，这就是 455 万次内存访问。
+    //
+    // 合并成 gc_need_check：值为 0 时直接跳过整块（绝大多数分配的路径），
+    // 非 0 时才进慢路径做完整判断。这个标志在「增量有待办」或「分配量接近
+    // 阈值」时置 1，其余时候保持 0。
+    if (__builtin_expect(gc_need_check, 0) && gc_ready && heap_head) {
         // **Go 的 mark assist：让分配方为 GC 付账。**
         //
         // 增量标记进行中时，每次分配推进一小步（有界预算），把一次几毫秒
@@ -752,6 +777,11 @@ void* rc_alloc(int64_t size, void (*dtor)(void*), void (*release)(void*),
     if (!rc_leaf_untracked(h)) {
         alloc_since_gc += alloc_size + PYADAMAS_RC_HDR;
         alloc_since_major += alloc_size + PYADAMAS_RC_HDR;
+        // 接近阈值时打开快速判断标志。用 7/8 作为提前量：这样真正的
+        // 阈值比较只在最后 1/8 的分配上做，而不是每次分配都做。
+        if (alloc_since_major >= (major_threshold - major_threshold / 8) ||
+            alloc_since_gc >= (young_threshold - young_threshold / 8))
+            gc_need_check = 1;
     }
     void* p = (char*)h + sizeof(PyAdamasRc);
     memset(p, 0, (size_t)alloc_size);
@@ -1603,6 +1633,7 @@ static void gc_incr_finish(void) {
     gc_mark_sweep = 0;
     gc_incr_state = 0;
     gc_incr_remaining = 0;
+    gc_need_check = 0;   /* 本轮增量做完，清标志 */
     size_t n_set = gc_set_len;
     gc_set = NULL;
     gc_set_len = 0;
@@ -1691,11 +1722,14 @@ void pa_gc_write_barrier(int64_t v) { gc_write_barrier(v); }
 
 static void gc_incr_step(void) {
     if (!gc_incr_state) return;
+    double _t0 = gc_stats_on ? gc_now_ms() : 0.0;
+    if (gc_stats_on) ++gc_incr_calls;
     // 本轮做完后重新装填，直到整个清扫完成。
     gc_incr_remaining = GC_INCR_STRIDE;
+    gc_need_check = 1;   /* 增量有待办 */
     int budget = GC_MARK_BUDGET;
     if (gc_incr_state == 1) {
-        while (gc_work_len && budget-- > 0) gc_scan_object(gc_work[--gc_work_len]);
+        while (gc_work_len && budget-- > 0) { gc_scan_object(gc_work[--gc_work_len]); if (gc_stats_on) ++gc_incr_objs; }
         if (gc_work_len == 0) {
             gc_incr_state = 2;
             gc_phase = GC_PHASE_SWEEP;
@@ -1708,6 +1742,7 @@ static void gc_incr_step(void) {
     while (gc_incr_sweep_pos < gc_set_len && budget-- > 0) {
         size_t pos = gc_incr_sweep_pos++;
         PyAdamasRc* h = gc_set[pos];
+        if (gc_stats_on) ++gc_incr_objs;
         if (!h) continue;
         if (!(h->marked & PYADAMAS_RC_MARK)) {
             if (rc_stats_on) stat_gc_freed++;
@@ -1716,6 +1751,7 @@ static void gc_incr_step(void) {
         }
     }
     if (gc_incr_sweep_pos >= gc_set_len) gc_incr_finish();
+    if (gc_stats_on) gc_incr_ms += gc_now_ms() - _t0;
 }
 
 /* 诊断模式的根扫描顺序：先精确根（已知堆槽），再保守根（临时区、
@@ -1909,6 +1945,7 @@ static void gc_collect(int major) {
         gc_incr_sweep_pos = 0;
         gc_incr_countdown = GC_INCR_STRIDE;
         gc_incr_remaining = GC_INCR_STRIDE;
+        gc_need_check = 1;   /* 增量有待办 */
         gc_phase = GC_PHASE_SWEEP;
         gc_sweeping = 1;
         // **标记期间必须让 gc_phase 非 0**，否则 pa_rc_dec 会立即释放对象 ——
