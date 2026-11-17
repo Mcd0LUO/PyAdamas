@@ -542,12 +542,14 @@ enum class RtFn : uint16_t {
     DequeInsert,           // (dq*, i, v) -> void
     DequeReverse,          // (dq*) -> void
     DequeCopy,             // (dq*) -> deque*
+    ListCopyRange,         // (list* dst, list* src, i64 lo, i64 hi, i64 heap) -> void
 };
 
 inline const char* rt_name(RtFn f) {
     switch (f) {
         case RtFn::ListNew: return "pa_list_new";
         case RtFn::ListAppend: return "pa_list_append";
+        case RtFn::ListCopyRange: return "pa_list_copy_range";
         case RtFn::ListGet: return "pa_list_get";
         case RtFn::ListSet: return "pa_list_set";
         case RtFn::ListSetLen: return "pa_list_set_len";

@@ -491,6 +491,7 @@ bool ir_module_needs_unknown_index(const IRModule& m) {
                 // 「可能是整数」对待，所以操作数上的 unknown 不需要索引。
                 bool container_use = fn == RtFn::ListPrep || fn == RtFn::ListAppend ||
                                     fn == RtFn::ListExtend || fn == RtFn::ListSetLen ||
+                                    fn == RtFn::ListCopyRange ||
                                     fn == RtFn::RcIncUnknown || fn == RtFn::RcDecUnknown;
                 if (!container_use) continue;
                 for (const auto& a : in.args)

@@ -38,6 +38,7 @@ set(PYADAMAS_SOURCES
   src/lower_impl_util.cpp
   src/lower_impl_slots.cpp
   src/lower_stmt.cpp
+  src/lower_idiom.cpp
   src/lower_stmt_with.cpp
   src/lower_stmt_async.cpp
   src/lower_exc.cpp

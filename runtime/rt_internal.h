@@ -1070,6 +1070,10 @@ int64_t pa_range_all(PyAdamasRange* r);
 PyAdamasList* pa_range_to_list(PyAdamasRange* r);
 PyAdamasStr* pa_range_repr(PyAdamasRange* r);
 void pa_list_append(PyAdamasList* l, int64_t v, int64_t heap);
+/* for k in range(lo, hi): dst.append(src[k]) 的批量版（降级器惯用法识别）。
+   heap 是源元素静态种类 0/1/2；语义与逐元素 prep+append 一致。 */
+void pa_list_copy_range(PyAdamasList* dst, PyAdamasList* src, int64_t lo, int64_t hi,
+                        int64_t heap);
 /* 空列表第一次写入前定型：vk = 0 非堆 / 1 堆 / 2 unknown；owned 非 0
    表示引用已经转给容器（新值），不再 retain。 */
 void pa_list_prep(PyAdamasList* l, int64_t v, int64_t vk, int64_t owned);

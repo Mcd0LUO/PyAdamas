@@ -4,6 +4,18 @@
 
 早期阶段没有逐条留痕，按阶段归纳；0.4 之后逐条记录。
 
+## [0.272] - 2026-11-18
+
+### 切片拷贝惯用法识别：range-append 循环批量化的（queue_sim −2.5%，收益低于预期，原因已定位）
+
+- **惯用法**：`for k in range(lo, hi): dst.append(src[k])`（单语句体、步长常量 1、无 else、dst/src 静态类型都是 list、k 不同于 dst/src）在降级器里识别，替换成一次 `pa_list_copy_range(dst, src, lo, hi, heap)` 调用，省掉逐元素 append 调用、容量检查和生成代码循环开销。新增 `src/lower_idiom.cpp`（纯 AST + 静态类型匹配，失败不发射任何 IR）；调用点在 `lower_for_range` 参数求值之前。
+- **为什么不直接改写成切片语法**：Python 切片对负索引归一化、越界静默截断；range 循环逐个取值、越界抛 IndexError，语义不同。运行时入口分两条路：快路径（0<=lo<=hi<=src->len）一次扩容 + memcpy —— kind0/heap0 纯值拷贝，kind1/heap1 拷贝后批量 retain，其余种类（未定 3 / 混合 2 / 静态冲突）逐元素 prep+append（定型、位图、保守 retain 全走原路径）；慢路径逐元素 pa_list_get+prep+append，负索引与 IndexError（部分结果保留）和原循环逐位一致。dst==src 别名安全：hi<=len 保证源区间整体在写入起点之下，扩容先于取指针，逐元素分支每轮重读 src->data。
+- **语义护栏**：批量版只在正常结束补 k=hi-1（条件分支：lo<hi 才写，零迭代保持原值），循环中途抛异常时 k 的中间进度无法还原 —— 所以只在分叉不可观测时匹配：当前位置不在任何 try/with/finally 里（cleanups 空，异常必然离开本函数），且 k 是普通局部槽（非全局 / 闭包 cell/env / 推导式槽）。
+- **注册**：RtFn::ListCopyRange 追加在枚举末尾（不移动既有编号）+ rt_name + gen_rt_i5（5 整型参数）+ ir.cpp container_use。ir_ops.h / lower_impl.h 只加注册行（+2/+1，两文件本已超限，逻辑全在新文件与 rt_list.c）。
+- **实测（abbench 交替 9 轮中位数，绑核）**：queue_sim 286.69 → **279.53 ms（−2.5%**，p25 −3.0%）；dict_wordfreq −1.4%、obj_dispatch +0.2%、rec_memo +0.5%、sort_struct −0.2%（噪声）；str_build +1.5% 是噪声 —— 该用例**零匹配**，生成二进制与基线完全相同。六用例合计 −0.2%。quickbench 最好 7 次口径：queue_sim 279 ms、str_build 211 ms。
+- **为什么低于交接预期的 20%+**：profile 定位 —— 旧拷贝循环只占 queue_sim 约 6%（生成代码 54.4% 里的一小块），批量版 pa_list_copy_range 现占 4.12%（其中 memcpy + 逐元素 retain 是必要工作），生成代码占比降到 50.8%。真正的大头仍是分配与 RC 生命周期：rc_alloc_ex 10.4%、pa_rc_dec_slow 7%、rc_link+rc_unlink 7.2%、list_destroy 5.7%、pa_tuple_new_filled 4%。下一步候选应瞄准这些（如元组/列表的分配合并、RC 慢路径），而不是继续在拷贝循环上挖。
+- **验证**：新增 `tests/run/189_copy_range_idiom.py`（对拍 CPython 逐行一致：跨内联边界、循环变量终值、负索引、越界异常部分结果、别名、非空 dst、裸列表定型、混合种类、求值顺序副作用、不匹配形态退回、生成器、GC churn；ASan detect_leaks=1 干净）。**全语料对照**：tests/run 全部用例分别用 0.271 基线编译器与本编译器编译运行，输出与退出码零差异 —— 惯用法在降级器（-O0/-O2 都生效），difftest 的 O0/O2 对照抓不到这类改动，必须对拍旧编译器或 CPython。差分 190/0，release 与 ASan 套件各 208 ran ok / EXIT=0。
+
 ## [0.271] - 2026-11-18
 
 ### 小列表 header+buffer 合并分配（sort_struct −20.3%，queue_sim −3.8%，六用例合计 −4.0%）

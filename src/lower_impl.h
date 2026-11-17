@@ -769,6 +769,8 @@ private:
     void lower_while(While& f);
     void lower_for(For& f);
     void lower_for_range(For& f, Call& c);
+    // 切片拷贝惯用法：for k in range(lo,hi): dst.append(src[k]) → 批量拷贝。
+    bool lower_copy_range_idiom(For& f, Call& c);
     void lower_for_range_obj(For& f, VReg r);
     void lower_for_range_core(For& f, VReg start, VReg stop, VReg step_v, bool dyn_step,
                                int64_t step, const Call* c);

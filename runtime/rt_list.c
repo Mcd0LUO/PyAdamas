@@ -294,6 +294,56 @@ void pa_list_append(PyAdamasList* l, int64_t v, int64_t heap) {
     l->data[l->len++] = v;
 }
 
+/* 切片拷贝惯用法：for k in range(lo, hi): dst.append(src[k]) 的批量版。
+   降级器识别后一次调用替代整个循环（省逐元素 append 调用 + 容量检查 +
+   生成代码循环开销）。语义与逐元素 prep+append 完全一致：
+
+   - 快路径（0 <= lo <= hi <= src->len）：一次扩容 + memcpy；
+     kind 0/heap 0 纯值拷贝，kind 1/heap 1 拷贝后批量 retain；
+     其余种类（未定 3 / 混合 2 / 静态与容器冲突）逐元素 prep+append，
+     定型、位图、保守 retain 全走原路径。
+   - 慢路径：逐元素 pa_list_get（负索引归一化、越界抛 IndexError，
+     已 append 的部分保留）——和原循环的异常行为逐位一致。
+   - dst == src 安全：快路径 hi <= len 保证源区间整体在目标写入起点
+     之下，memcpy 不重叠；扩容在取指针之前做；逐元素分支每轮重读
+     src->data（append 可能 realloc）。
+   - heap 是源元素静态种类（0/1/2），和 pa_list_append 的同名参数一致。 */
+void pa_list_copy_range(PyAdamasList* dst, PyAdamasList* src, int64_t lo, int64_t hi,
+                        int64_t heap) {
+    if (lo >= 0 && lo <= hi && hi <= src->len) {
+        int64_t n = hi - lo;
+        if (n == 0) return;
+        if (dst->len + n > dst->cap) {
+            int64_t ncap = dst->cap ? dst->cap : 4;
+            while (ncap < dst->len + n) ncap *= 2;
+            list_buf_grow(dst, ncap);
+            if (dst->heap_bits) list_bits_reserve(dst, ncap);
+        }
+        int kind = (int)dst->elem_kind;
+        if (kind == 0 && heap == 0) {
+            memcpy(dst->data + dst->len, src->data + lo, (size_t)n * sizeof(int64_t));
+            dst->len += n;
+        } else if (kind == 1 && heap == 1) {
+            int64_t* d = dst->data + dst->len;
+            memcpy(d, src->data + lo, (size_t)n * sizeof(int64_t));
+            for (int64_t i = 0; i < n; ++i) pa_rc_inc((void*)(uintptr_t)d[i]);
+            dst->len += n;
+        } else {
+            for (int64_t i = 0; i < n; ++i) {
+                int64_t v = src->data[lo + i];
+                pa_list_prep(dst, v, heap, 0);
+                pa_list_append(dst, v, heap);
+            }
+        }
+        return;
+    }
+    for (int64_t k = lo; k < hi; ++k) {
+        int64_t v = pa_list_get(src, k);
+        pa_list_prep(dst, v, heap, 0);
+        pa_list_append(dst, v, heap);
+    }
+}
+
 int64_t pa_list_get(PyAdamasList* l, int64_t i) {
     if (i < 0) i += l->len;
     if (i < 0 || i >= l->len) pa_raise_c("IndexError", "list index out of range");

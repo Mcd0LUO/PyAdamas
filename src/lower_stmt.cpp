@@ -408,6 +408,10 @@ void Lowerer::lower_for_range(For& f, Call& c) {
         return;
     }
 
+    // 切片拷贝惯用法：for k in range(lo,hi): dst.append(src[k]) → 一次批量
+    // 拷贝。必须在参数求值之前尝试：匹配失败不能留下已发射的 IR。
+    if (lower_copy_range_idiom(f, c)) return;
+
     VReg start, stop;
     int64_t step = 1;
     // 动态步长：方向（< 还是 >）在运行期定，循环里每轮多一个分支。
