@@ -898,6 +898,9 @@ private:
     // idiv 在除数为 0、以及 INT64_MIN / -1 时都会触发 #DE，
     // 那个信号没法带任何上下文。提前挡掉，给一条能看懂的消息。
     void gen_div_guard();
+    // RC 记账（inc/dec/mark/cleanup）的内联快路径。返回 true 表示指令已发完。
+    // 慢路径落回 pa_rc_*_slow，且会调运行时 —— 必须落盘提升过的浮点槽。
+    bool gen_rc_inline(const Inst& in, RtFn fn);
     // 常数除数的除法：能化简就生成「魔数乘法 + 符号修正」，结果留在 %rax
     // （mode 1/2 还会在 %rdx 留下余数），返回 true 表示已生成。
     // 除数为 0 / -1 / INT64_MIN 或不是编译期常量时返回 false，走 idivq。

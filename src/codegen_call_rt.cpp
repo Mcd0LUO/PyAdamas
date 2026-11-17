@@ -7,6 +7,99 @@
 
 namespace pyadamas {
 
+
+// ── RC 记账的内联快路径 ──────────────────────────────────────
+//
+// 生成代码里 inc/dec/mark/cleanup 的出现频率极高（内层循环一轮几次），
+// 但运行时那四个函数体分别只有 1~6 条指令：
+//
+//     pa_rc_mark()          -> return temp_len;                （1 条 load）
+//     pa_rc_cleanup(m)      -> if (m == temp_len) return; ...  （1 条 cmp）
+//     pa_rc_inc(p)          -> NULL/永生/rc<=0 判断 + h->rc++   （5 条）
+//     pa_rc_dec(p)          -> 同上 + gc_phase 判断 + h->rc--   （6 条）
+//
+// call/ret + 被调用者保存 + PLT 跳板比它们干的活贵一个数量级。perf 实测
+// （queue_sim / str_build 各自占比）：
+//
+//     pa_rc_cleanup  8.2% / 11.4%
+//     pa_rc_inc      4.0% /  3.0%
+//     pa_rc_dec      4.2% /  3.7%
+//
+// 内联结构照抄 rt_internal.h 的 pa_rc_inc_fast / pa_rc_dec_fast：慢路径
+// （NULL、统计模式、GC 进行中、rc<=0、归零）仍然落回 pa_rc_*_slow，语义
+// 逐条对齐。快路径不 clobber 任何寄存器，所以不需要落盘浮点槽；**慢路径
+// 必须** spill_fp_slots / reload_fp_slots —— 它会真的调用运行时，可能跑
+// 析构函数，而 xmm 全是 caller-saved。
+//
+// 返回 true 表示这条指令已经发完，gen_call_rt 不要再补 call。
+bool AsmGen::gen_rc_inline(const Inst& in, RtFn fn) {
+    if (fn == RtFn::RcMark) {
+        line("movq temp_len(%rip), %rax");
+        if (!dst_unused(in)) emit2("movq", "%rax", dst_op(in.dst));
+        return true;
+    }
+    if (fn == RtFn::RcCleanup && in.args.size() == 1) {
+        // 只内联「水位没变就直接返回」这一条出口 —— 它是最常见的情形，
+        // 其余（真的要逐个 dec）整段落回原函数。
+        emit2("movq", src_op(in.args[0]), "%rdi");
+        const std::string skip = fresh_label("cln");
+        line("cmpq temp_len(%rip), %rdi");
+        emit_jmp("je", skip);
+        spill_fp_slots();
+        line("call pa_rc_cleanup");
+        reload_fp_slots();
+        label(skip);
+        return true;
+    }
+    if (fn == RtFn::RcInc && in.args.size() == 1) {
+        emit2("movq", src_op(in.args[0]), "%rdi");
+        const std::string slow = fresh_label("incslow");
+        const std::string done = fresh_label("incdone");
+        line("testq %rdi, %rdi");
+        emit_jmp("je", slow);            // p == NULL
+        line("movq -48(%rdi), %rax");    // h->rc：h = p - 64，rc 在 +16
+        line("movabsq $0x8000000000000000, %rcx");
+        line("cmpq %rcx, %rax");
+        emit_jmp("je", done);            // 永生对象（字面量）直接跳过
+        line("testq %rax, %rax");
+        emit_jmp("jle", slow);           // rc <= 0：让慢路径报错
+        line("addq $1, %rax");
+        line("movq %rax, -48(%rdi)");
+        emit_jmp("jmp", done);
+        label(slow);
+        spill_fp_slots();
+        line("call pa_rc_inc_slow");
+        reload_fp_slots();
+        label(done);
+        return true;
+    }
+    if (fn == RtFn::RcDec && in.args.size() == 1) {
+        emit2("movq", src_op(in.args[0]), "%rdi");
+        const std::string slow = fresh_label("decslow");
+        const std::string done = fresh_label("decdone");
+        line("testq %rdi, %rdi");
+        emit_jmp("je", slow);            // p == NULL
+        line("cmpl $0, pa_gc_phase_fast(%rip)");
+        emit_jmp("jne", slow);           // 收集期只登记边，不能重入释放
+        line("movq -48(%rdi), %rax");
+        line("movabsq $0x8000000000000000, %rcx");
+        line("cmpq %rcx, %rax");
+        emit_jmp("je", done);            // 永生对象
+        line("cmpq $1, %rax");
+        emit_jmp("jle", slow);           // 归零/非法：慢路径真正释放
+        line("subq $1, %rax");
+        line("movq %rax, -48(%rdi)");
+        emit_jmp("jmp", done);
+        label(slow);
+        spill_fp_slots();
+        line("call pa_rc_dec_slow");
+        reload_fp_slots();
+        label(done);
+        return true;
+    }
+    return false;
+}
+
 void AsmGen::gen_rt_none(const Inst& in) {
         (void)in;
     }
