@@ -910,7 +910,18 @@ void pa_rc_cleanup(int64_t mark) {
 void pa_rc_temp_take(void* p) {
     if (rc_stats_on) stat_take_calls++;
     if (!p) return;
-    for (int64_t i = temp_len - 1; i >= 0; --i) {
+    // **栈顶快速路径**：最常见的模式是「刚 push 就 take」（容器构造时
+    // 每个元素都这样），这时 p 就在栈顶，一次比较就能命中。
+    //
+    // 实测 bench_rc_gen：30 万次 take 共 75 万步，平均 2.5 步 —— 说明
+    // 有相当一部分不在栈顶。拆出栈顶检查后，那部分仍走原循环，但栈顶
+    // 命中的不用进循环（省掉循环变量初始化、边界判断）。
+    if (temp_len > 0 && temp_stack[temp_len - 1] == p) {
+        --temp_len;
+        if (rc_stats_on) stat_take_steps++;
+        return;
+    }
+    for (int64_t i = temp_len - 2; i >= 0; --i) {
         if (rc_stats_on) stat_take_steps++;
         if (temp_stack[i] == p) {
             temp_stack[i] = temp_stack[--temp_len];
