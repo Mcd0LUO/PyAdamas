@@ -134,6 +134,9 @@ std::string Inst::text() const {
                                vreg_str(b));
         case IrOp::IndexStore:
             return std::format("index.set {}[{}] = {}", vreg_str(a), vreg_str(b), vreg_str(c));
+        case IrOp::IndexStoreUnchecked:
+            return std::format("index.set.unchecked {}[{}] = {}", vreg_str(a), vreg_str(b),
+                               vreg_str(c));
         case IrOp::Len: return std::format("{} = len {}", vreg_str(dst), vreg_str(a));
         case IrOp::ObjNew: return std::format("{} = obj.new c{}", vreg_str(dst), imm);
         case IrOp::FieldLoad:

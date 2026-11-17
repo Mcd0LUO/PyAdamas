@@ -3,6 +3,16 @@
 
 namespace pyadamas {
 
+namespace {
+// 测上界用：PYADAMAS_NO_BOUNDS=1 时所有索引访问都走无检查版本。
+// 只用于测量「边界检查全消掉能快多少」，不检查下标是否真的在范围内，
+// 因此绝不能用在正常编译里。
+bool no_bounds_probe() {
+    static const bool v = std::getenv("PYADAMAS_NO_BOUNDS") != nullptr;
+    return v;
+}
+}  // namespace
+
 // idiv 的除数必须在 %rcx。SysV 直接用它；Win64 下 %rcx 是第 1 个实参
 // 寄存器，而除零检查里的 panic 是调用、会破坏它，所以统一用 %r10 中转。
 static const char* div_reg() { return target_abi().gnu_cfi ? "%rcx" : "%r10"; }
@@ -89,9 +99,16 @@ void AsmGen::gen_inst(const Inst& in) {
                 break;
             case IrOp::MakeList: gen_make_list(in); break;
             case IrOp::MakeTuple: gen_make_list(in); break;
-            case IrOp::IndexLoad: gen_index_load(in); break;
+            case IrOp::IndexLoad:
+                if (no_bounds_probe()) gen_index_unchecked_load(in);
+                else gen_index_load(in);
+                break;
             case IrOp::IndexLoadUnchecked: gen_index_unchecked_load(in); break;
-            case IrOp::IndexStore: gen_index_store(in); break;
+            case IrOp::IndexStore:
+                if (no_bounds_probe()) gen_index_store_unchecked(in);
+                else gen_index_store(in);
+                break;
+            case IrOp::IndexStoreUnchecked: gen_index_store_unchecked(in); break;
             case IrOp::Len:
                 emit2("movq", src_op(in.a), "%rax");
                 line("movq (%rax), %rax");

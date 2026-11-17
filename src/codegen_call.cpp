@@ -240,6 +240,47 @@ void AsmGen::gen_index_store(const Inst& in) {
         reload_fp_slots();
         label(done);
     }
+void AsmGen::gen_index_store_unchecked(const Inst& in) {
+    // 调用方已证明 0 <= idx < len，跳过边界比较与负下标归一化，
+    // 只保留元素写和旧值的所有权释放。
+    const std::string r0 = arg_reg_i(0), r1 = arg_reg_i(1);
+    const std::string sl = target_abi().scratch_len;
+    const std::string sp = target_abi().scratch_ptr;
+    const std::string sv = target_abi().scratch_val;
+    const bool sv_is_rax = sv == std::string("%rax");
+    const std::string nv = sv_is_rax ? sl : "%rax";
+    const std::string kr = sv_is_rax ? sp : "%rax";
+    std::string decheap = fresh_label("idxudec");
+    std::string done = fresh_label("idxudone");
+    emit2("movq", src_op(in.a), r0);
+    emit2("movq", src_op(in.b), r1);
+    line(std::format("movq 16({}), {}", r0, sp));
+    line(std::format("movq ({},{},8), {}", sp, r1, sv));
+    if (is_fp(in.c)) {
+        emit2("movsd", src_op(in.c), "%xmm0");
+        line(std::format("movsd %xmm0, ({},{},8)", sp, r1));
+    } else {
+        emit2("movq", src_op(in.c), nv);
+        line(std::format("movq {}, ({},{},8)", nv, sp, r1));
+    }
+    line(std::format("movq 24({}), {}", r0, kr));
+    line(std::format("cmpq $1, {}", kr));
+    emit_jmp("je", decheap);
+    line(std::format("cmpq $2, {}", kr));
+    emit_jmp("jne", done);
+    line(std::format("movq {}, {}", sv, arg_reg_i(0)));
+    spill_fp_slots();
+    line("call pa_rc_dec_unknown");
+    reload_fp_slots();
+    emit_jmp("jmp", done);
+    label(decheap);
+    line(std::format("movq {}, {}", sv, arg_reg_i(0)));
+    spill_fp_slots();
+    line("call pa_rc_dec");
+    reload_fp_slots();
+    label(done);
+}
+
     // 属性访问因此是一条固定偏移的 movq，没有查表、没有哈希。
 void AsmGen::gen_obj_new(const Inst& in) {
         const IRClass& c = m_->classes[static_cast<size_t>(in.imm)];

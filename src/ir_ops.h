@@ -1119,6 +1119,7 @@ enum class IrOp : uint8_t {
     IndexLoad,  // dst = a[b]
     IndexLoadUnchecked, // dst = a[b]，调用方已证明 0 <= b < len(a)，不检查
     IndexStore, // a[b] = c
+    IndexStoreUnchecked, // a[b] = c，调用方已证明 0 <= b < len(a)，不检查
     Len,        // dst = len(a)
 
     // ── 对象 ──────────────────────────────────────────────
@@ -1197,6 +1198,7 @@ inline const char* irop_name(IrOp op) {
         case IrOp::IndexLoad: return "index.get";
         case IrOp::IndexLoadUnchecked: return "index.get.unchecked";
         case IrOp::IndexStore: return "index.set";
+        case IrOp::IndexStoreUnchecked: return "index.set.unchecked";
         case IrOp::Len: return "len";
         case IrOp::ObjNew: return "obj.new";
         case IrOp::FieldLoad: return "field.get";
