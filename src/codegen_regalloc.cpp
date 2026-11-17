@@ -979,6 +979,16 @@ void AsmGen::assign_slot_regs() {
             assign_slot_regs_linear();
             // R4：浮点也走线性扫描。整型与浮点用各自的池分别扫描 ——
             // 两套池不相交（GPR vs xmm），互不干扰。
+            //
+            // **试过改成「槽与跨块 vreg 统一按 spill cost 竞争」，失败**：
+            // `slot_reg_[s]` 是「整函数在寄存器」的布尔标记，代码生成器
+            // 不做区间判断。统一分配器让短区间槽（如 mandelbrot 的 s6，
+            // 只活跃 7 个位置）也拿到寄存器，区间外读到过期值 → 输出错。
+            // 而加「只收整函数活跃的槽」的限制后，覆盖的槽太少，
+            // spectral_norm 从 28ms 退化到 94ms。
+            //
+            // 要真正统一，必须先让代码生成器支持「区间边界插 move」，
+            // 即 live range splitting —— 那是独立的一轮工作。
             std::vector<int> fp_cands;
             for (size_t ci = 0; ci < slot_reg_cand_.size(); ++ci)
                 if (slot_cand_is_fp_[ci]) fp_cands.push_back(slot_reg_cand_[ci]);
@@ -1340,7 +1350,28 @@ static std::vector<int> block_loop_depth(const IRFunction& f) {
     //     例外（longjmp 会回滚），整函数跳过；
     //   - 不做支配性校验：IR 的 vreg 定义先于使用，整函数独占寄存器
     //     天然满足「定义后一直有效」。
-    void AsmGen::assign_global_vreg_regs() {
+    /* ── 失败记录：统一浮点寄存器分配 ────────────────────────────────
+ *
+ * 试过把「命名变量槽」和「跨块 vreg」放进同一个池、按 spill cost 竞争
+ * xmm8–15（取代原来 assign_slot_regs 先占满、assign_global_vreg_regs 捡剩
+ * 的两趟分配）。**失败**，两个原因：
+ *
+ * 1. `slot_reg_[s]` 是「整函数在寄存器」的布尔标记，代码生成器（slot_op）
+ *    在任意指令处看到非空就直接用寄存器，**不做区间判断、不在边界插 move**。
+ *    所以给「只活跃一小段」的槽分配寄存器是错的：区间外的读写会拿到过期
+ *    寄存器值。实测 mandelbrot 的 s6 只活跃 7 个位置，分到 %xmm12 后
+ *    输出从 2990360 变成 1。
+ *
+ * 2. 加「只收整函数活跃的槽」的限制后覆盖的槽太少 —— 实测 spectral_norm
+ *    从 28ms 退化到 94ms（3.4x）。而让不活跃的槽「参与竞争但不占位」
+ *    同样退化（93ms）。
+ *
+ * 结论：要真正统一，必须先让代码生成器支持「区间边界插 move」，即
+ * live range splitting。那是独立的一轮工作，不是分配器内部能解决的。
+ *
+ * 现状保留原版的两趟分配，跨块浮点 vreg 只在「无调用」函数里提升
+ * （那里没有调用点 spill 开销，纯赚）。 */
+void AsmGen::assign_global_vreg_regs() {
         // **每个函数都要清空**：这些是 AsmGen 的成员，跨函数累积。
         //
         // 原来只清 fp_promoted_slots_（在 assign_slot_regs 里），漏了
@@ -1449,51 +1480,44 @@ static std::vector<int> block_loop_depth(const IRFunction& f) {
                                         target_abi().block_temps + target_abi().n_block_temps);
 
         }
-        // ── 跨块浮点 vreg 提升（不要求无调用）──
+        // 跨块浮点 vreg 提升：只在「无调用」函数里做。
         //
-        // 原来这段只在 `call_free` 里做，理由是「xmm8–15 在 SysV 下是
-        // caller-saved，调用会破坏」。但 spill/reload 机制已经存在：
-        // `fp_promoted_vregs_` 里的值在每次调用前后写回/读出栈副本，
-        // 所以有调用也安全。
+        // SysV 下 xmm8–15 是 caller-saved，有调用的函数需要每个调用点",
+        // spill/reload。这套机制存在（fp_promoted_vregs_），但实测收益为
+        // 负：nbody 的 advance 有 7 个浮点变量 + 4 个跨块临时值竞争 8 个
+        // xmm，变量优先的分配已经是最优；把临时值也塞进来反而挤掉变量。
         //
-        // 实测 bench/compare/nbody.py 的 `advance`：热值是浮点（dx/dy/dz、
-        // b[...] 的元素），但函数里有 1 个 `math.sqrt` 调用 → call_free 为
-        // false → 浮点提升整段跳过 → 51 个长活跃区间全在栈上 → 栈帧 616
-        // 字节（Go 只有 24）。
-        {
-            // **必须按「哪些 xmm 已被占用」选，不能按 fp_promoted_slots_.size()。**
-            //
-            // 槽的浮点提升走 linear_scan_pool，会复用寄存器 —— 提升 5 个槽
-            // 可能只占用 2 个 xmm，而且不一定是 xmm8/xmm9。用 size() 当基数
-            // 会挑到已被占用的寄存器，两批值互相覆盖（实测 spectral_norm
-            // 汇编失败：movsd 两个操作数撞成同一寄存器）。
-            std::vector<char> fp_used(static_cast<size_t>(kMaxFpSlotRegs()), 0);
-            for (const auto& sr : slot_reg_) {
-                if (sr.empty()) continue;
-                for (int i = 0; i < kMaxFpSlotRegs(); ++i)
-                    if (sr == kFpSlotRegs()[i]) fp_used[static_cast<size_t>(i)] = 1;
-            }
-            std::vector<Cand> fcands;
-            for (size_t v = 0; v < nv; ++v) {
-                if (!cross_block_[v] || !vreg_reg_[v].empty()) continue;
-                TypePtr vt = f_->vreg_ty[v];
-                if (!vt || vt->kind != TyKind::Float) continue;
-                if (use_count_[v] == 0 || def_block_[v] < 0) continue;
-                fcands.push_back(Cand{static_cast<int>(v), static_cast<int>(weight[v])});
-            }
-            std::ranges::sort(fcands, [](const Cand& a, const Cand& b) {
-                return a.uses != b.uses ? a.uses > b.uses : a.v < b.v;
-            });
-            size_t ci2 = 0;
-            for (int i = 0; i < kMaxFpSlotRegs() && ci2 < fcands.size(); ++i) {
-                if (fp_used[static_cast<size_t>(i)]) continue;
-                vreg_reg_[static_cast<size_t>(fcands[ci2].v)] = kFpSlotRegs()[i];
-                fp_promoted_vregs_.push_back(fcands[ci2].v);
-                ++ci2;
+        // 保留无调用函数里的提升（那里没有调用点开销，纯赚）。
+        bool call_free_fp = true;
+        for (const auto& b : f_->blocks) {
+            for (const auto& in : b.insts)
+                if (!temp_reg_op_ok(in)) { call_free_fp = false; break; }
+            if (!call_free_fp) break;
+        }
+        if (call_free_fp) {
+            size_t fp_base = fp_promoted_slots_.size();
+            if (fp_base < static_cast<size_t>(kMaxFpSlotRegs())) {
+                std::vector<Cand> fcands;
+                for (size_t v = 0; v < nv; ++v) {
+                    if (!cross_block_[v] || !vreg_reg_[v].empty()) continue;
+                    TypePtr vt = f_->vreg_ty[v];
+                    if (!vt || vt->kind != TyKind::Float) continue;
+                    if (use_count_[v] == 0 || def_block_[v] < 0) continue;
+                    fcands.push_back(Cand{static_cast<int>(v), static_cast<int>(weight[v])});
+                }
+                std::ranges::sort(fcands, [](const Cand& a, const Cand& b) {
+                    return a.uses != b.uses ? a.uses > b.uses : a.v < b.v;
+                });
+                size_t used_fp = 0;
+                for (const auto& cd : fcands) {
+                    if (fp_base + used_fp >= static_cast<size_t>(kMaxFpSlotRegs())) break;
+                    vreg_reg_[static_cast<size_t>(cd.v)] = kFpSlotRegs()[fp_base + used_fp];
+                    fp_promoted_vregs_.push_back(cd.v);
+                    ++used_fp;
+                }
             }
         }
     }
-
 // ── 生成期字符串缓存 ────────────────────────────────────────
 void AsmGen::build_operand_caches() {
         block_labels_.resize(f_->blocks.size());
