@@ -4,6 +4,47 @@
 namespace pyadamas {
 
 void AsmGen::gen_make_list(const Inst& in) {
+        // **定长小元组的快路径。**
+        //
+        // `tuple.new{a, b}` 原本编译成 pa_list_new + N 次 pa_list_append：
+        // N+1 次函数调用，每次 append 还要走容量检查 + 位图维护。实测
+        // queue_sim 每次元组分配 265ns，函数调用开销占大头。
+        //
+        // 这里对「元素个数 <= 4 且全是不含浮点的整型机器字」的构造走一次
+        // 调用：pa_list_new_filled(n, kind, a, b, c, d)。条件不满足就退回
+        // 原路径 —— 浮点元素要走 xmm 寄存器、堆引用要逐元素传堆标记，都
+        // 不适合这个固定签名的入口。
+        //
+        // 正确性要点：
+        //   - 只在 elem_kind 是 0（全非堆）或 1（全堆）时走快路径；
+        //     kind 2（unknown）需要逐元素堆标记，保持原路径；
+        //   - 元素的类型必须全部是「非浮点的标量或堆指针」，浮点元素会
+        //     被 move 到 xmm，混进整型实参寄存器会算错；
+        //   - 所有权语义与 pa_list_append 一致：调用方已把引用转交给容器。
+        if (in.op == IrOp::MakeTuple && !in.args.empty() && in.args.size() <= 4 &&
+            (in.imm == 0 || in.imm == 1)) {
+            bool all_word = true;
+            for (VReg a : in.args) {
+                TypePtr t = ty_of(a);
+                if (!t || ir_is_float(t)) {
+                    all_word = false;
+                    break;
+                }
+            }
+            if (all_word) {
+                emit_imm_op("movq", static_cast<int64_t>(in.args.size()), arg_reg_i(0));
+                emit_imm_op("movq", in.imm, arg_reg_i(1));
+                for (size_t ai = 0; ai < 4; ++ai) {
+                    if (ai < in.args.size()) emit2("movq", src_op(in.args[ai]), arg_reg_i(2 + ai));
+                    else emit_imm_op("movq", 0, arg_reg_i(2 + ai));
+                }
+                spill_fp_slots();
+                line("call pa_list_new_filled");
+                reload_fp_slots();
+                emit2("movq", "%rax", dst_op(in.dst));
+                return;
+            }
+        }
         // imm 是元素所有权类别（0 非堆 / 1 堆 / 2 unknown 或混合），
         // 由降级器按容器类型算好，运行时据此决定覆盖和销毁时是否 dec。
         emit_imm_op("movq", in.args.size(), arg_reg_i(0));

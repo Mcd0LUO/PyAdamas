@@ -111,6 +111,38 @@ PyAdamasList* pa_list_new(int64_t cap, int64_t elem_kind) {
     l->bits_cap = 0;
     return l;
 }
+/* 一次调用构造「定长、无位图」列表/元组。
+ *
+ * `tuple.new{a, b}` 现在编译成 pa_list_new + N 次 pa_list_append，也就是
+ * N+1 次函数调用，每次 append 还要走位图维护和容量检查。实测 queue_sim
+ * 每次元组分配 265ns，其中函数调用开销占大头。
+ *
+ * 这里给「元素全是整型机器字（无浮点、无堆引用）」的小元组开一条快路径：
+ * 一次调用、一次缓冲分配、直接填 data、完全跳过 heap_bits（kind 0/1 的
+ * 位图本来就没人在读）。
+ *
+ * 约束（由 codegen 保证，运行时不校验）：
+ *   - n <= 4，元素已按值展开在通用寄存器里；
+ *   - elem_kind 只能是 0（全非堆）或 1（全堆）；
+ *   - 调用方负责这些引用的所有权转移（和 pa_list_append 语义一致）。
+ */
+PyAdamasList* pa_list_new_filled(int64_t n, int64_t elem_kind, int64_t a, int64_t b,
+                                  int64_t c, int64_t d) {
+    if (n < 0 || n > 4) panic_c("bad filled list size");
+    PyAdamasList* l = (PyAdamasList*)rc_alloc((int64_t)sizeof(PyAdamasList), list_destroy,
+                                              list_gc_release, PYADAMAS_RC_LIST);
+    l->len = n;
+    l->cap = n < 4 ? 4 : n;
+    l->elem_kind = elem_kind;
+    l->heap_bits = NULL;
+    l->bits_cap = 0;
+    l->data = list_buf_get(&l->cap);
+    l->data[0] = a;
+    if (n > 1) l->data[1] = b;
+    if (n > 2) l->data[2] = c;
+    if (n > 3) l->data[3] = d;
+    return l;
+}
 
 /* 探测 unknown 值是不是堆指针：只查存活索引、不解引用，任意 int64 都安全。
    和 pa_rc_inc_unknown 一致，静态字符串字面量（永生）也算堆。 */
@@ -176,8 +208,15 @@ void pa_list_append(PyAdamasList* l, int64_t v, int64_t heap) {
             l->heap_bits = NULL;
             l->bits_cap = 0;
         }
-    } else if (l->len == 0) {
-        // 第一个元素决定是否启用位图（空列表也启用，后续沿用）。
+    } else if (l->len == 0 && l->elem_kind == 2) {
+        // **只对 kind==2 的列表分配位图。**
+        //
+        // 位图只在销毁/GC 释放时被读，而那两个地方都是
+        // `if (kind == 2 && l->heap_bits)` —— kind 0/1 永远不读。
+        // 原实现无条件分配，于是 `tuple[int, int]`（kind=0）每次创建
+        // 都要多一次 realloc + 清零，而这份位图从头到尾没人看。
+        //
+        // 实测 queue_sim 每次元组分配 265ns，其中位图这条路占一部分。
         list_bits_reserve(l, l->cap);
     }
     if (l->heap_bits) {
