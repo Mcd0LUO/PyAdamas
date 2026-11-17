@@ -702,7 +702,14 @@ void rc_link(PyAdamasRc* h) {
     gc_tracked_count++;
     if (h->kind == PYADAMAS_RC_OBJ || h->kind == PYADAMAS_RC_INSTANCE)
         gc_conservative_count++;
-    rc_index_put(h);
+    // **内联判断 rc_index_off，避免热路径上的函数调用。**
+    //
+    // rc_index_put 内部第一件事就是 `if (rc_index_off || rc_index_readonly) return;`，
+    // 但函数调用本身的代价（call/ret + 寄存器保存）还在。exact-RC 模式下
+    // 索引全程关闭，这个调用纯属浪费 —— 实测 bench_rc_gen 有 65.6 万次分配，
+    // rc_link 占 gprof 采样的 50%。
+    if (__builtin_expect(rc_index_off == 0 && rc_index_readonly == 0, 1))
+        rc_index_put(h);
     young_add(h);
     gc_alloc_black(h);
 }
@@ -802,11 +809,15 @@ void* rc_alloc(int64_t size, void (*dtor)(void*), void (*release)(void*),
     // 诊断钩子放在这里、而不是 pa_rc_inc/dec：那两个函数会被内联到极热
     // 路径，多一次调用就改变寄存器分配（实测把 88_defaultdict 的 1.5 算成
     // 垃圾值）。rc_alloc 本来就要走 malloc/池，多一次调用无影响。
-    if (getenv("PYADAMAS_RETDBG") && kind == 0 && size == 32) {
-        static int64_t sq;
-        fprintf(stderr, "[retdbg] ALLOC#%lld p=%p\n", (long long)++sq, p);
-    }
-    pa_diag_rc_alloc(p, size, (int32_t)kind);
+    // **热路径内联判断，避免每次分配都进 pa_diag_rc_alloc。**
+    //
+    // 原来无条件调用 pa_diag_rc_alloc，它内部再调 diag_rc_enabled() 读
+    // 环境变量并判断。gprof 实测：bench_rc_gen 有 65.6 万次分配，
+    // diag_rc_enabled 被调用 130.6 万次（alloc + free 各一次）。
+    //
+    // pa_diag_rc_on 是公开变量（-1 = 未初始化，0 = 关，1 = 开）。
+    // 这里一次比较就能跳过，省掉函数调用 + 内部判断。 */
+    if (__builtin_expect(pa_diag_rc_on != 0, 0)) pa_diag_rc_alloc(p, size, (int32_t)kind);
     return p;
 }
 
@@ -856,8 +867,14 @@ void pa_rc_dec_slow(void* p) {
     if (h->rc <= 0) panic_c("refcount decrement on a freed object");
     if (--h->rc == 0) {
         if (rc_stats_on) stat_rc_free++;
-        pa_diag_rc_free(p, (int32_t)h->kind);
-        rc_unlink(h);
+        if (__builtin_expect(pa_diag_rc_on != 0, 0)) pa_diag_rc_free(p, (int32_t)h->kind);
+        // **untracked leaf 不在堆链上，跳过 rc_unlink 的函数调用。**
+        //
+        // rc_unlink 的第一行就是 `if (h->marked & UNTRACKED) return;`，
+        // 但函数调用本身（call/ret + 寄存器保存）已经付了。exact-RC 模式下
+        // 字符串/range/struct 全是 untracked leaf —— bench_rc_gen 的 65 万次
+        // 释放里绝大多数是字符串，每次省一次 61 条指令的函数调用。
+        if (!(h->marked & PYADAMAS_RC_UNTRACKED)) rc_unlink(h);
         if (h->dtor) h->dtor(p);
         if (h->kind == PYADAMAS_RC_STR) str_pool_put(h);
         else if (h->kind == PYADAMAS_RC_LIST && h->size == (int64_t)sizeof(PyAdamasList))
@@ -896,6 +913,15 @@ void pa_rc_temp(void* p) {
 
 void pa_rc_cleanup(int64_t mark) {
     if (rc_stats_on) stat_rc_cleanup++;
+    // **快速返回：栈水位没变时什么都不用做。**
+    //
+    // 实测 bench_rc_gen：cleanup 被调用 65.6 万次，但 temp 只 push 了 55 万次
+    // —— 至少 10 万次 cleanup 是空操作（`temp_len == mark`）。
+    // 原来这些也要走边界检查 + while 判断；提到最前面一次比较就能返回。
+    //
+    // 用 unsigned 比较同时覆盖 mark < 0（转成巨大值）和 mark > temp_len 两种
+    // 非法情况 —— 但为了保留原来的 panic 语义，正常路径只比较相等。
+    if (__builtin_expect((uint64_t)mark == (uint64_t)temp_len, 0)) return;
     if (mark < 0 || mark > temp_len) panic_c("invalid temporary stack mark");
     while (temp_len > mark) {
         void* q = temp_stack[--temp_len];
