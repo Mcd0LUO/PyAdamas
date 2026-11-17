@@ -101,6 +101,10 @@ static int gc_incr_remaining;
  * 各处，从未被计时。实测 bench_rc_gen 的 GC 成本是 12ms（GC 禁用对照），
  * 但 gcstats 只报 0.644ms，差 19 倍就是这个原因。 */
 static double gc_incr_ms;
+/* 逐函数计时（只在 PYADAMAS_PROF=1 时启用）。用 rdtsc 风格的轻量计数：
+   clock_gettime 本身约 25ns，对被计时的短函数有干扰，所以只在显式开启时用。 */
+
+
 static int64_t gc_incr_calls, gc_incr_objs;
 static double gc_now_ms(void);
 static void gc_incr_finish(void);
@@ -774,11 +778,18 @@ void* rc_alloc(int64_t size, void (*dtor)(void*), void (*release)(void*),
     h->marked = 0;
     rc_link(h);
     // 叶子对象不可能成环，exact-RC 模式下也不进链，不必驱动 GC 频率。
-    if (!rc_leaf_untracked(h)) {
+    // **分配计数只在 GC 启用时累加。**
+    //
+    // 原来这里无条件累加两个全局变量（每次分配 2 次内存读 + 2 次写 + 1 次
+    // rc_leaf_untracked 调用）。实测 bench_rc_gen 有 65 万次分配，这块占
+    // rc_alloc 总耗时的显著比例。
+    //
+    // gc_ready 为 0 时（GC 禁用）这些计数根本不会有人读 —— 直接跳过。
+    if (gc_ready && !rc_leaf_untracked(h)) {
         alloc_since_gc += alloc_size + PYADAMAS_RC_HDR;
         alloc_since_major += alloc_size + PYADAMAS_RC_HDR;
-        // 接近阈值时打开快速判断标志。用 7/8 作为提前量：这样真正的
-        // 阈值比较只在最后 1/8 的分配上做，而不是每次分配都做。
+        // 接近阈值时打开快速判断标志。用 7/8 作为提前量：真正的阈值比较
+        // 只在最后 1/8 的分配上做。
         if (alloc_since_major >= (major_threshold - major_threshold / 8) ||
             alloc_since_gc >= (young_threshold - young_threshold / 8))
             gc_need_check = 1;
@@ -1774,6 +1785,7 @@ static void gc_scan_roots_split(void) {
     gc_cons_phase = 0;
 }
 
+static double gc_now_ms(void);
 static double gc_now_ms(void) {
     struct timespec ts;
     clock_gettime(CLOCK_MONOTONIC, &ts);
