@@ -38,7 +38,25 @@ inline int kMaxFpArgs() { return target_abi().n_arg_fp; }
 // 寄存器角色统一由 TargetABI 描述（见 target_abi.h）：这是换目标的唯一
 // 接缝，取值在编译期定死，运行期零开销。
 inline const char* const* kSlotRegs() { return target_abi().callee_pool; }
-inline int kMaxSlotRegs() { return target_abi().n_callee_pool; }
+// 实验开关：PYADAMAS_RA_POOLCAP=N 把**槽寄存器池**限制到 N 个（N < 6）。
+//
+// 用途：量化「每多一个寄存器值多少」—— 如果缩小池子性能急剧恶化，说明寄存器
+// 容量是真正瓶颈（那么任何提升有效容量的方案都值得做）；如果曲线很平，说明
+// 分配质量/容量都不是瓶颈，不值得再往寄存器分配上投入。
+//
+// 只影响槽分配（n_saved_regs_ 也随之变小，序言压栈数跟着变），不影响 vreg
+// 路径。默认不设变量时行为完全不变。
+inline int kMaxSlotRegs() {
+    static const int capped = [] {
+        const int full = target_abi().n_callee_pool;
+        const char* e = std::getenv("PYADAMAS_RA_POOLCAP");
+        if (!e) return full;
+        const int v = std::atoi(e);
+        if (v <= 0) return full;
+        return v < full ? v : full;
+    }();
+    return capped;
+}
 
 // 浮点变量常驻寄存器。只用 xmm8–15：xmm0–7 是参数/临时寄存器，
 // 所有指令生成器都只把它们当 scratch。提升仅发生在函数没有任何

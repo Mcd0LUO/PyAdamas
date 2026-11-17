@@ -294,3 +294,46 @@ std::vector<std::vector<std::vector<SlotLoc>>> slot_loc_;
 - **SSA 化**：实测 vreg 已经是完全 SSA（202 个 vreg，0 个多次定义），
   slot 层不是瓶颈（slot 密集循环 10.4ms vs vreg 密集 15.1ms）。
   这条路没有收益。
+
+## 8. 结论：第三层不做（实验证据，2026-11-17）
+
+第三层（区间级所有权 / SplitKit + InlineSpiller）做不做，取决于「寄存器容量
+是不是真正的瓶颈」。为此加了一个**池容量扫描开关**：
+
+```bash
+PYADAMAS_RA_POOLCAP=N pyadamas build -O2 foo.py   # 把槽寄存器池限制到 N 个
+```
+
+把 6 个槽寄存器（%rbx/%r12-%r15/%rbp）逐级砍到 3 个，交替测量：
+
+| bench | cap6 | cap5 | cap4 | cap3 |
+|---|---|---|---|---|
+| nbody | 50ms | 46ms | 51ms | 53ms (+6%) |
+| matmul | 26ms | 26ms | 26ms | 28ms (+8%) |
+| spectral_norm | 145ms | 146ms | 149ms | 145ms (0%) |
+| nqueens | 114ms | 113ms | 113ms | 131ms (+15%) |
+| mandelbrot | 38ms | 32ms | 30ms | 34ms（反而更快）|
+| dict_wordfreq | 339ms | 335ms | 336ms | 345ms (+2%) |
+| queue_sim | 419ms | 426ms | 417ms | 419ms (0%) |
+| sort_struct | 379ms | 378ms | 378ms | 382ms (+1%) |
+
+**寄存器池腰斩（6 → 3），性能只掉 0-8%（平均约 3%）。**
+
+### 这说明什么
+
+1. **寄存器容量不是瓶颈**。如果它值钱，砍掉一半不可能只有 3% 的代价；
+2. 栈访问在 L1 里很便宜 —— 每次 spill/reload 的实际成本远低于我们假设；
+3. 第三层能带来的只是「更好的共享」（有效容量 6 → 7-8 左右），按上述斜率
+   上限是 **1-2%**，而工程量接近重写分配器；
+4. 也解释了为什么三次 split 实现全是负收益：在同一批寄存器上换主人，
+   换的收益（≈3% 斜率 × 1-2 个寄存器）付不起 reload/spill 的成本。
+
+### 因此
+
+`docs/regalloc-architecture.md` 的阶段 B（SpillPlacement）保留代码但默认关闭、
+阶段 C（区间级分配）**不再实施**。第一层（精确区间）保留为诊断工具
+（`PYADAMAS_LI_STATS` 打印峰值压力），它是这次得出「峰值 6-8 vs 池 6」这个
+关键数据的手段。
+
+瓶颈改判：**RC/GC 机制（占总时间 30-35%）与生成代码本身**，而不是寄存器分配。
+后续优化方向见 `docs/heap-slot-promotion.md` 与 perf profile。
