@@ -113,7 +113,7 @@ quickbench 最好 7 次（不绑核）：queue_sim **283 ms**、str_build **214 
 | 提交 | 内容 | 效果 |
 |---|---|---|
 | `27956ec` | 小列表 header+buffer 合并分配 + 回归用例 188 + abbench 绑核修复 + runtime.md | sort_struct −20.3%、queue_sim −3.8%、六用例合计 −4.0% |
-| `6a23bdc` | 覆盖本文档 | — |
+| （本提交） | 覆盖本文档（自引用不写死 hash，amend 会变） | — |
 
 实现要点：
 
