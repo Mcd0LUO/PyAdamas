@@ -1622,6 +1622,26 @@ static void gc_collect(int major) {
     gc_work_len = 0;
     stat_gc_live = old_bytes;
     alloc_since_gc = 0;
+    // **按 Go pacer 的思路算下一轮 minor 的触发阈值。**
+    //
+    // 原来 young_threshold 是固定 2MB，与存活堆大小无关：小堆上太保守
+    // （频繁扫描），大堆上又太激进（扫得贵却没换来回収量）。
+    //
+    // Go 的目标堆公式（docs/gc-guide 的 GOGC 一节）：
+    //     Target heap = Live heap + (Live heap + GC roots) * GOGC / 100
+    // 即「下次收集前允许再分配的新内存 ≈ 存活堆 * GOGC%」。
+    //
+    // 取 GOGC=100（新分配量达到存活堆一倍时再收集），下限 PYADAMAS_GC_THRESHOLD
+    // （2MB）—— 与 Go 的 4MiB 最小堆同理，避免小堆上阈值退化到几百字节、
+    // 每次分配都触发收集。
+    {
+        int64_t live = old_bytes;
+        int64_t roots = (int64_t)temp_len * (int64_t)sizeof(void*);
+        int64_t target = live + (live + roots);   /* GOGC=100 */
+        if (target < (int64_t)PYADAMAS_GC_THRESHOLD)
+            target = (int64_t)PYADAMAS_GC_THRESHOLD;
+        young_threshold = target;
+    }
     if (major) {
         alloc_since_major = 0;
         // major 比 minor 稀疏：老生代翻倍（至少 8MB）才全扫一次，含环的
