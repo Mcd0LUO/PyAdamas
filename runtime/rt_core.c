@@ -394,6 +394,41 @@ static void str_pool_put(PyAdamasRc* h) {
 static PyAdamasRc* list_pool;
 static int list_pool_count;
 
+/* ── dict 对象池 ───────────────────────────────────────────────
+ *
+ * `list_pool` 只收 `size == sizeof(PyAdamasList)` 的对象，而
+ * `sizeof(PyAdamasDict) == 136` —— dict 从来不进池，每次创建都 malloc、
+ * 每次销毁都 free。
+ *
+ * 实测 `bench_rc_literals`：每轮创建 1 list + 1 tuple + 1 dict，共 3 万次
+ * 容器分配；其中 1 万次 dict 全部走 malloc/free。单开一个 dict 池。
+ *
+ * 容量取 256：dict 对象大（136 字节），缓存 256 个约 35KB，可接受；
+ * 而热循环里同时存活的 dict 通常只有个位数。 */
+#define DICT_POOL_MAX 256
+static PyAdamasRc* dict_pool;
+static int dict_pool_count;
+
+static PyAdamasRc* dict_pool_get(void) {
+    PyAdamasRc* h = dict_pool;
+    if (h) {
+        dict_pool = h->next;
+        dict_pool_count--;
+    }
+    return h;
+}
+
+static void dict_pool_put(PyAdamasRc* h) {
+    if (dict_pool_count >= DICT_POOL_MAX) {
+        free(h);
+        return;
+    }
+    h->next = dict_pool;
+    h->prev = NULL;
+    dict_pool = h;
+    dict_pool_count++;
+}
+
 static PyAdamasRc* list_pool_get(void) {
     PyAdamasRc* h = list_pool;
     if (h) {
@@ -689,6 +724,8 @@ void* rc_alloc(int64_t size, void (*dtor)(void*), void (*release)(void*),
     if (kind == PYADAMAS_RC_STR) h = str_pool_get(alloc_size);
     else if (kind == PYADAMAS_RC_LIST && size == (int64_t)sizeof(PyAdamasList))
         h = list_pool_get();
+    else if (kind == PYADAMAS_RC_DICT && size == (int64_t)sizeof(PyAdamasDict))
+        h = dict_pool_get();
     if (!h) {
         h = (PyAdamasRc*)malloc(sizeof(PyAdamasRc) + (size_t)alloc_size);
         if (!h) panic_c("out of memory");
@@ -773,6 +810,8 @@ void pa_rc_dec_slow(void* p) {
         if (h->kind == PYADAMAS_RC_STR) str_pool_put(h);
         else if (h->kind == PYADAMAS_RC_LIST && h->size == (int64_t)sizeof(PyAdamasList))
             list_pool_put(h);
+        else if (h->kind == PYADAMAS_RC_DICT && h->size == (int64_t)sizeof(PyAdamasDict))
+            dict_pool_put(h);
         else free(h);
     }
 }
@@ -2090,6 +2129,13 @@ void pa_gc_shutdown(void) {
         free(h);
     }
     list_pool_count = 0;
+    // dict 池也要清空（每个块都是裸 malloc，必须 free）。
+    while (dict_pool) {
+        PyAdamasRc* h = dict_pool;
+        dict_pool = h->next;
+        free(h);
+    }
+    dict_pool_count = 0;
     pa_list_buf_pool_shutdown();
     // 异常子系统的全局表（handler freelist / 挂起表 / 登记表 / 嵌套节点）。
     // 见 pa_exc_shutdown 的说明：都是缓存，但不清会让 LeakSanitizer 报一堆
