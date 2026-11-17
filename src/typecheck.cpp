@@ -271,13 +271,23 @@ TypePtr TypeChecker::parse_annotation_impl(Expr* e, int line, int depth) {
             if (id == "Sequence" || id == "Iterable" || id == "Iterator" ||
                 id == "Collection" || id == "Container" || id == "Reversible")
                 return t_unknown();
+            // **裸容器标注用 fresh_hole，不用 t_unknown()。**
+            //
+            // t_unknown() 是「推断失败」的全局单例，`fill_hole` 会显式跳过它
+            // （原地写会把全程序的 unknown 一起改掉）。所以裸 `list` 写成
+            // `mk_list(t_unknown())` 之后，**洞永远填不上** —— 参数停在
+            // `list[unknown]`，比完全不标注（能靠调用点回填推出 list[int]）
+            // 还差。
+            //
+            // fresh_hole() 是可变的、独占的 Unknown 实例，能被调用点实参或
+            // 函数体用法填上。这才是「是 list，元素类型待推断」的正确表示。
             if (id == "list" || id == "List" || id == "MutableSequence")
-                return mk_list(t_unknown());
+                return mk_list(fresh_hole());
             if (id == "dict" || id == "Dict" || id == "Mapping" || id == "MutableMapping")
-                return mk_dict(t_unknown(), t_unknown());
-            if (id == "tuple" || id == "Tuple") return mk_tuple_rest(t_unknown());
+                return mk_dict(fresh_hole(), fresh_hole());
+            if (id == "tuple" || id == "Tuple") return mk_tuple_rest(fresh_hole());
             if (id == "set" || id == "Set" || id == "FrozenSet" || id == "frozenset")
-                return mk_set(t_unknown());
+                return mk_set(fresh_hole());
             if (id == "object" || id == "Any") return t_unknown();
             if (auto it = classes_.find(id); it != classes_.end()) return mk_class(it->second.get());
             if (auto it = structs_.find(id); it != structs_.end()) return mk_struct(it->second);

@@ -1000,6 +1000,34 @@ inline void fill_hole(const TypePtr& hole, const TypePtr& with) {
     *hole = *with;
 }
 
+/* 递归检查类型里有没有「类型洞」（可变的 Unknown，不是全局单例）。
+ *
+ * 裸 `list` / `set` / `dict` / `tuple` 标注解析成含 fresh_hole 的类型，
+ * 这些洞等着被调用点实参或函数体用法填上。判断时要排除 t_unknown()
+ * 单例 —— 那是「推断失败」，不是「待填」。 */
+inline bool ty_contains_hole(const TypePtr& t, int depth) {
+    if (!t || depth > 6) return false;
+    if (t->kind == TyKind::Unknown) return t.get() != t_unknown().get();
+    for (const auto& s : t->sub)
+        if (ty_contains_hole(s, depth + 1)) return true;
+    return false;
+}
+
+/* 把 `from` 里已知的容器元素类型递归填进 `to` 的类型洞里。
+ *
+ * 只填洞，不覆盖 `to` 已有的具体类型 —— 用户明确写的 `list[str]` 不会
+ * 被推断结果改掉。 */
+inline void fill_holes_recursive(const TypePtr& to, const TypePtr& from, int depth) {
+    if (!to || !from || depth > 6) return;
+    if (to->kind == TyKind::Unknown) {
+        fill_hole(to, from);
+        return;
+    }
+    if (to->kind != from->kind) return;
+    size_t n = to->sub.size() < from->sub.size() ? to->sub.size() : from->sub.size();
+    for (size_t i = 0; i < n; ++i) fill_holes_recursive(to->sub[i], from->sub[i], depth + 1);
+}
+
 inline TypePtr join_into(const TypePtr& a, const TypePtr& b) {
     if (!a) return b;
     if (!b) return a;

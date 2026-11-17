@@ -223,6 +223,35 @@ void TypeChecker::funcdef_impl(FunctionDef& f, const ClassInfoPtr& owner) {
         if (owner_is_cmethod && !info->pos.empty()) cur_cls_name_ = info->pos[0].name;
         // 嵌套函数不改它：闭包捕获的 self 还是外层那个名字
         stmts(f.body);
+        // **用函数体的实际用法回填参数标注里的类型洞。**
+        //
+        // 裸 `list` / `set` / `dict` / `tuple` 标注解析成带 fresh_hole 的类型。
+        // 返回位置的洞已经由 `inferred`（实际 return 值）填上了，但**参数位置
+        // 没有赋值来源** —— 洞永远填不上，参数就停在 `list[unknown]`。
+        //
+        // 而完全不标注时反而能推出精确类型：参数以 t_unknown() 进作用域，
+        // 函数体里的用法（`for x in xs` 把元素并进 xs、`total + x` 收窄 x）
+        // 会通过 merge_elem / join 把它收窄成 `list[int]`。
+        //
+        // 也就是说「标注裸 list」比「不标注」还差 —— 这是结构性缺陷，不是
+        // 某个具体分支的问题。修法：函数体检查完后，把作用域里参数的**实际
+        // 类型**回填到标注的洞上。这样裸标注至少和「不标注」等价，而不是更差。
+        //
+        // 实测 bench/compare/nqueens.py：`def place(..., cols: list, d1: list,
+        // d2: list)` 三个参数全是 list[unknown]，热循环里 3 处 index.get 走
+        // unknown 路径。
+        for (auto& p : info->pos) {
+            if (p.inferred) continue;   // 没标注的本来就是 unknown，不用回填
+            auto it = cur_->vars.find(p.name);
+            if (it == cur_->vars.end() || !it->second.ty) continue;
+            fill_holes_recursive(p.ty, it->second.ty, 0);
+        }
+        for (auto& p : info->kwonly) {
+            if (p.inferred) continue;
+            auto it = cur_->vars.find(p.name);
+            if (it == cur_->vars.end() || !it->second.ty) continue;
+            fill_holes_recursive(p.ty, it->second.ty, 0);
+        }
         cur_self_name_ = std::move(saved_self_name);
         cur_cls_name_ = std::move(saved_cls_name);
 
@@ -290,6 +319,20 @@ void TypeChecker::funcdef_impl(FunctionDef& f, const ClassInfoPtr& owner) {
                 } else if (info->ret->kind == TyKind::Dict) {
                     if (inferred->sub.size() == 2)
                         info->ret = mk_dict(inferred->sub[0], inferred->sub[1]);
+                } else if (info->ret->kind == TyKind::Tuple) {
+                    // 裸 `tuple` 标注解析成 `tuple[unknown, ...]`（变长、元素未知）。
+                    // 实际 return 若是定长元组，直接采用推断结果 —— 定长元组的
+                    // 每个元素类型都是精确的，比变长 unknown 强得多。
+                    //
+                    // 实测 bench/compare/fannkuch.py：`-> tuple` 让返回类型停在
+                    // tuple[unknown, ...]，调用方解包后全变 unknown；不标注反而
+                    // 能推出 tuple[int, int]。
+                    if (info->ret->variadic && !inferred->variadic)
+                        info->ret = inferred;
+                    else if (!info->ret->variadic && inferred->variadic)
+                        ;  // 标注更精确，保留
+                    else if (inferred->sub.size() == info->ret->sub.size())
+                        info->ret = inferred;
                 }
             }
         }

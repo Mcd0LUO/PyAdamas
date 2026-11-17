@@ -126,6 +126,26 @@ TypePtr TypeChecker::check_args(const FuncInfoPtr& fn, Call& c) {
                     return;
                 }
             }
+            // **标注里含类型洞（裸 `list` / `set` / `dict` / `tuple`）时，
+            // 也走调用点回填，而不是当成「已标注」直接比对。**
+            //
+            // 裸 `list` 解析成 `list[fresh_hole]`，kind 是 List 不是 Unknown，
+            // 原来会跳过下面这个回填分支、直接落到 assignable(p.ty, ty) ——
+            // assignable 对 `list[hole]` vs `list[int]` 返回 true（unknown 与任何
+            // 类型兼容），但**不回填**，于是洞永远是空的，参数停在 list[unknown]。
+            //
+            // 结果：`def f(xs: list)` 比 `def f(xs)` 还差 —— 后者 p.ty 是 Unknown，
+            // 能走回填分支拿到 list[int]。这是结构性缺陷。
+            //
+            // 修法：含洞时先递归填洞，再继续原有的 assignable 检查（填完就
+            // 等价于用户写了 `list[int]`，后续逻辑不变）。
+            const bool ty_has_hole = p.ty && p.ty->kind != TyKind::Unknown &&
+                                     ty_contains_hole(p.ty, 0);
+            if (ty_has_hole && ty && ty->kind != TyKind::Unknown) {
+                fill_holes_recursive(p.ty, ty, 0);
+                fn->sig_dirty = true;
+                sync();
+            }
             if (!p.ty || p.ty->kind == TyKind::Unknown) {
                 // 实参是 None 时不回填：None 是「没传 / 清空」的哨兵，不是
                 // 「这个形参就是 NoneType」。回填了会把 copy._reconstruct(x,
