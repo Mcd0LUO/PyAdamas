@@ -77,3 +77,48 @@ gdb 的 `bt` 在这一段给出一个无法符号化的 `#2` 帧，说明帧链�
 
 残留风险：生成代码直接调 **libc** 里用对齐 SSE 的函数时仍可能炸（概率低，
 但存在）。所以根因仍需按 §5 修掉。
+
+## 7. 根因定位（2026-11 更新）
+
+加了编译期开关 `PYADAMAS_ALIGN_CHECK` 后（见 §5 第 1 条，实现在
+`codegen_block.cpp` 的函数序言里），跑 24_async 立刻抓到：
+
+    Program received signal SIGILL
+    0x000055555556274b in pyadamas_fn_33float_one_32 () at 24_async.py:126
+
+也就是说 **`float_one_32` 被进入时 rsp ≡ 0 (mod 16)**（应为 8）。
+
+读 `(%rsp)` 拿到返回地址 → 文件偏移 `0xed3c`。用 `nm` 反查：
+
+    0xec50  size=119(0x77)  pyadamas_fn_35float_gather_34   → 结束于 0xecc7
+    0xed4a  size=100        main
+
+**0xed3c 不属于任何函数** —— 它落在一段无名代码里：
+
+    ed37:  e8 00 fa ff ff     call   e73c        ; 目标是 one_32(0xe740) 前 4 字节
+    ed3c:  48 83 ec 08        sub    $0x8,%rsp   ; ← 返回地址落在这里
+    ed40:  48 83 c4 18        add    $0x18,%rsp
+    ed44:  c3                 ret
+    ed45:  e9 02 ff ff ff     jmp    ec4c
+
+结论：**这是一段异常落地/冷路径 stub，它自己就是在「rsp ≡ 8」的状态下执行
+的**（否则被调方看不到 ≡0），所以它发 `call` 时违反 ABI。
+
+两个连带问题：
+1. 这段 stub **被发在函数 `.size` 之外**（`nm` 里没有符号归属），本身就
+   不合规 —— 调试器、perf、栈展开都不认识它；
+2. 它 `call` 的目标是 `0xe73c`，比 `float_one_32` 函数起点早 4 字节，
+   靠落在 `.p2align` 填充上「滑」进函数体。这两处都指向同一件事：
+   **落地块/冷路径的栈状态与调用约定没有按 ABI 维护**。
+
+## 8. 下一步（收敛后的）
+
+1. 在 `codegen_block.cpp` 里查落地块（EH landing pad）的生成路径：它进入时
+   的 rsp 偏移是否被显式建模（当前 prologue 的 `cfa_off_` 只覆盖线性代码）；
+2. 落地块发出的 `call` 前是否少了 `subq $8`/`addq $8` 平衡；
+3. 落地块应发在所属函数的 `.size` 之内（或显式给符号），否则 `nm`/
+   `perf`/栈展开都看不见；
+4. 修完后撤掉运行时的 `-mstackrealign`，跑 188/188 + 205/205 + 24_async。
+
+开关：`PYADAMAS_ALIGN_CHECK=1 ./build/release/pyadamas build -O0 file.py`
+会往每个生成函数入口插入 rsp 对齐自检（失败即 `ud2`）。

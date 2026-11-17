@@ -342,6 +342,20 @@ void AsmGen::emit_function(const IRFunction& f, int fi) {
         // _Unwind_Backtrace 都不解析 prologue，只认这张表——缺了它们就
         // 展不过生成出来的帧。运行时的 traceback 仍走 rbp 链，不依赖 CFI。
         cfi(".cfi_startproc");
+        // 栈对齐自检（PYADAMAS_ALIGN_CHECK=1）。
+        //
+        // SysV 要求函数入口 rsp ≡ 8 (mod 16)。生成代码里若有间接调用/尾跳
+        // 破坏了这个不变量，会在这里 ud2 当场暴露 —— 比等运行时函数里的
+        // movaps 崩在别处好定位得多（见 docs/stack-alignment.md）。
+        if (std::getenv("PYADAMAS_ALIGN_CHECK")) {
+            const std::string aok = fresh_label("alignok");
+            line("movq %rsp, %rax");
+            line("andl $15, %eax");
+            line("cmpl $8, %eax");
+            emit_jmp("je", aok);
+            line("ud2");
+            label(aok);
+        }
         // 零开销异常：personality / LSDA 必须落在 .cfi_startproc 与
         // .cfi_endproc 之间。空计划（老路径函数）什么也不发。
         emit_eh_directives_for_current();
