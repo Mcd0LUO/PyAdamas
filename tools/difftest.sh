@@ -6,7 +6,8 @@
 #   PYADAMAS_TEST_JOBS=8 bash tools/difftest.sh
 #   PYADAMAS_TEST_FILTER='3[0-4]*' bash tools/difftest.sh   # 只跑匹配的
 set -u
-cd /home/lenovo/cpp/cpy23 || exit 1
+ROOT=$(cd "$(dirname "$0")/.." && pwd)
+cd "$ROOT" || exit 1
 PY=${1:-build/dev/pyadamas}
 JOBS=${PYADAMAS_TEST_JOBS:-$(nproc 2>/dev/null || echo 4)}
 FILTER=${PYADAMAS_TEST_FILTER:-}
