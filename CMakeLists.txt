@@ -103,6 +103,11 @@ set(PYADAMAS_RT_OBJ "${CMAKE_BINARY_DIR}/rt.o")
 set(PYADAMAS_MODCACHE_DIR "${CMAKE_BINARY_DIR}/modcache")
 option(PYADAMAS_WERROR "把编译告警当作错误（默认开）" ON)
 
+# 运行时用 -mstackrealign：生成代码里存在调用点 %rsp 未按 16 字节对齐
+# 的情况（协程/生成器路径）。GCC 15 在运行时函数里用 movaps 溢出 SSE，
+# 调用方不对齐就直接 #GP 崩溃（Debian 13 + gcc 15 实测 24_async SIGSEGV；
+# gcc 14 恰好没用 movaps，所以一直没暴露）。这是止血措施，根因仍需修
+# codegen 的调用点对齐。
 if(PYADAMAS_WERROR)
   set(PYADAMAS_RT_WERROR -Werror)
 else()
@@ -118,7 +123,7 @@ foreach(part ${PYADAMAS_RT_PARTS})
   set(rt_fp "")
   add_custom_command(
     OUTPUT "${rt_obj}"
-    COMMAND ${CMAKE_C_COMPILER} -O2 -Wall -Wextra ${PYADAMAS_RT_WERROR} ${rt_fp}
+    COMMAND ${CMAKE_C_COMPILER} -O2 -Wall -Wextra -mstackrealign ${PYADAMAS_RT_WERROR} ${rt_fp}
             -I "${CMAKE_SOURCE_DIR}/runtime"
             -c "${CMAKE_SOURCE_DIR}/runtime/rt_${part}.c" -o "${rt_obj}"
     DEPENDS "${CMAKE_SOURCE_DIR}/runtime/rt_${part}.c"
@@ -155,7 +160,7 @@ foreach(part ${PYADAMAS_RT_PARTS})
     # 「might be clobbered by longjmp」。运行时的生成器/协程确实在 setjmp
     # 保护里用局部变量，但那是**有意**的（值都放在 jmp_buf 之外的帧槽），
     # 而且普通 rt.o 用 -O2 不报。这里只对插桩版关掉这个噪音。
-    COMMAND ${CMAKE_C_COMPILER} -O1 -g -fsanitize=address -fno-omit-frame-pointer
+    COMMAND ${CMAKE_C_COMPILER} -O1 -g -fsanitize=address -fno-omit-frame-pointer -mstackrealign
             -Wall -Wextra -Wno-clobbered ${PYADAMAS_RT_WERROR}
             -I "${CMAKE_SOURCE_DIR}/runtime"
             -c "${CMAKE_SOURCE_DIR}/runtime/rt_${part}.c" -o "${rt_obj}"

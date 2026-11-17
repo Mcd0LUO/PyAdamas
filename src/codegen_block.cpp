@@ -304,6 +304,10 @@ void AsmGen::emit_function(const IRFunction& f, int fi) {
         build_fp_liveness();
         // 槽位操作数是缓存好的字符串，偏移依赖帧布局，所以先定型再建缓存。
         out_bytes_ = outgoing_bytes(f);
+        if (std::getenv("PYADAMAS_FRAME_DBG"))
+            std::fprintf(stderr, "[frame] %-32s gen=%d n_saved=%d out=%d slots=%d\n",
+                         f.name.c_str(), static_cast<int>(gen_), n_saved_regs_, out_bytes_,
+                         n_slots_ + n_vreg_slots_ + rec_words);
         layout_frame(n_slots_ + n_vreg_slots_ + rec_words);
         build_operand_caches();
         // 零开销异常（Z2-b2）：预扫本函数的 EH 标记、分配标签。fname 在这里
