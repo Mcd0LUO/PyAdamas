@@ -79,76 +79,236 @@ static bool vreg_is_rc_mark(const IRFunction& f, VReg v) {
     return false;
 }
 
+// ── vreg 栈槽分配 ───────────────────────────────────────────
+//
+// 目标：把「vreg 总数」个栈槽压到「最大同时活跃数」。
+//
+// **必须用精确的活跃性分析，不能用朴素的位置区间。** 原因是循环：
+//
+//     pos 10:  A = ...          ← 循环外定义
+//     pos 50:  ... = A          ← 循环体内使用
+//     pos 55:  B = ...          ← 循环体内定义
+//     pos 58:  ... = B          ← 循环体内使用
+//
+// 朴素的 [定义, 最后使用] 给 A=[10,50]、B=[55,58]，两者不重叠 → 共享槽。
+// 但循环第二轮在 pos 50 读 A 时，槽里是 B 在 pos 58 写进去的值 —— 直接算错。
+//
+// 正确做法：A 在循环体末尾仍然 live（下一轮还要读），所以 live_out[循环体]
+// 含 A，A 的区间被扩展到块末尾，与 B 重叠 → 不共享。
+//
+// 这就是标准 linear scan 的 live interval：先做块级 live_in/live_out 数据流，
+// 再在块内从后往前扫出精确的活跃位置。
 void AsmGen::assign_vreg_slots() {
-        size_t nv = f_->vreg_ty.size();
+        const size_t nv = f_->vreg_ty.size();
         vreg_slot_.assign(nv, 0);
         n_vreg_slots_ = 0;
         use_count_.assign(nv, 0);
         cross_block_.assign(nv, false);
         def_block_.assign(nv, -1);
         if (nv == 0) return;
+        const int nb = static_cast<int>(f_->blocks.size());
+        if (nb == 0) return;
 
-        constexpr int kInf = INT32_MAX;
+        // ── 1. 逐指令扫描：使用计数、定义位置、块级 use/def ──
         std::vector<int> def_pos(nv, -1);
-        // 同一个 vreg 可能被定义多次：挂起点恢复时用 load.slot 把值
-        // 装回原来的 vreg（见 Lowerer::spill_across_suspends）。
         std::vector<int> def_count(nv, 0);
-        std::vector<int> first_use(nv, kInf), last_use(nv, -1);
-
-        auto touch = [&](VReg r, int bi) {
-            if (r == kNoReg || r >= nv) return;
-            ++use_count_[r];
-            if (pos_ < first_use[r]) first_use[r] = pos_;
-            last_use[r] = pos_;
-            // 定义在别的块，或者干脆还没定义（前向引用）→ 跨块
-            if (def_block_[r] != bi) cross_block_[r] = true;
-        };
-
-        pos_ = 0;
-        int bi = 0;
-        for (const auto& b : f_->blocks) {
-            for (const auto& in : b.insts) {
-                if (in.a != kNoReg) touch(in.a, bi);
-                if (in.b != kNoReg) touch(in.b, bi);
-                if (in.c != kNoReg) touch(in.c, bi);
-                for (VReg r : in.args) touch(r, bi);
-                if (in.dst != kNoReg && in.dst < nv) {
-                    def_pos[in.dst] = pos_;
-                    def_block_[in.dst] = bi;
-                    ++def_count[in.dst];
-                }
-                ++pos_;
-            }
-            ++bi;
+        std::vector<int> first_use(nv, INT32_MAX);
+        std::vector<int> last_use(nv, -1);
+        std::vector<int> block_start(static_cast<size_t>(nb), 0);
+        std::vector<std::vector<char>> blk_use(static_cast<size_t>(nb));
+        std::vector<std::vector<char>> blk_def(static_cast<size_t>(nb));
+        for (int b = 0; b < nb; ++b) {
+            blk_use[static_cast<size_t>(b)].assign(nv, 0);
+            blk_def[static_cast<size_t>(b)].assign(nv, 0);
         }
-        const int total_pos = pos_;
+        int pos = 0;
+        for (int b = 0; b < nb; ++b) {
+            block_start[static_cast<size_t>(b)] = pos;
+            auto& buse = blk_use[static_cast<size_t>(b)];
+            auto& bdef = blk_def[static_cast<size_t>(b)];
+            for (const auto& in : f_->blocks[static_cast<size_t>(b)].insts) {
+                auto touch = [&](VReg r) {
+                    if (r == kNoReg || r >= nv) return;
+                    ++use_count_[r];
+                    if (pos < first_use[r]) first_use[r] = pos;
+                    last_use[r] = pos;
+                    if (!bdef[r]) buse[r] = 1;  // 块内先使用后定义 → live-in
+                };
+                touch(in.a);
+                touch(in.b);
+                touch(in.c);
+                for (VReg r : in.args) touch(r);
+                if (in.dst != kNoReg && in.dst < nv) {
+                    def_pos[in.dst] = pos;
+                    def_block_[in.dst] = b;
+                    ++def_count[in.dst];
+                    bdef[in.dst] = 1;
+                }
+                ++pos;
+            }
+        }
+        const int total_pos = pos;
+        // 跨块判定：定义块 ≠ 使用块。
+        for (size_t v = 0; v < nv; ++v) {
+            if (def_pos[v] < 0) { cross_block_[v] = false; continue; }
+            bool cross = false;
+            for (int b = 0; b < nb && !cross; ++b) {
+                for (const auto& in : f_->blocks[static_cast<size_t>(b)].insts) {
+                    auto hit = [&](VReg r) {
+                        if (r == static_cast<VReg>(v) && b != def_block_[v]) cross = true;
+                    };
+                    hit(in.a); hit(in.b); hit(in.c);
+                    for (VReg r : in.args) hit(r);
+                }
+            }
+            cross_block_[v] = cross;
+        }
 
+        // ── 2. CFG 与块级活跃性（backward 数据流）──
+        std::vector<std::vector<int>> succ(static_cast<size_t>(nb));
+        for (int b = 0; b < nb; ++b) {
+            const auto& insts = f_->blocks[static_cast<size_t>(b)].insts;
+            if (insts.empty()) {
+                if (b + 1 < nb) succ[static_cast<size_t>(b)].push_back(b + 1);
+                continue;
+            }
+            const Inst& last = insts.back();
+            if (last.op == IrOp::Jump) {
+                if (last.target >= 0 && last.target < nb)
+                    succ[static_cast<size_t>(b)].push_back(last.target);
+            } else if (last.op == IrOp::Branch) {
+                if (last.target >= 0 && last.target < nb)
+                    succ[static_cast<size_t>(b)].push_back(last.target);
+                if (last.target2 >= 0 && last.target2 < nb)
+                    succ[static_cast<size_t>(b)].push_back(last.target2);
+            } else {
+                switch (last.op) {
+                    case IrOp::Return:
+                    case IrOp::GenYield:
+                    case IrOp::GenAwait:
+                    case IrOp::GenRethrow:
+                    case IrOp::GenDone:
+                        break;
+                    default:
+                        if (b + 1 < nb) succ[static_cast<size_t>(b)].push_back(b + 1);
+                        break;
+                }
+            }
+        }
+        std::vector<std::vector<char>> live_in(static_cast<size_t>(nb));
+        std::vector<std::vector<char>> live_out(static_cast<size_t>(nb));
+        for (int b = 0; b < nb; ++b) {
+            live_in[static_cast<size_t>(b)].assign(nv, 0);
+            live_out[static_cast<size_t>(b)].assign(nv, 0);
+        }
+        bool changed = true;
+        int guard = 0;
+        while (changed && guard++ < 2000) {
+            changed = false;
+            for (int b = nb - 1; b >= 0; --b) {
+                // out 每次都从空集重算：继承上一轮的值会让 live_out 单调
+                // 增长、永不收缩 —— 区间被越拉越长，最后所有 vreg 都变成
+                // 全函数活跃，复用彻底失效（且没有后继的块会残留脏值）。
+                std::vector<char> out(static_cast<size_t>(nv), 0);
+                for (int s : succ[static_cast<size_t>(b)]) {
+                    const auto& si = live_in[static_cast<size_t>(s)];
+                    for (size_t v = 0; v < nv; ++v)
+                        if (si[v]) out[v] = 1;
+                }
+                std::vector<char> in(static_cast<size_t>(nv), 0);
+                const auto& buse = blk_use[static_cast<size_t>(b)];
+                const auto& bdef = blk_def[static_cast<size_t>(b)];
+                for (size_t v = 0; v < nv; ++v)
+                    if (buse[v] || (out[v] && !bdef[v])) in[v] = 1;
+                if (in != live_in[static_cast<size_t>(b)] ||
+                    out != live_out[static_cast<size_t>(b)]) {
+                    live_in[static_cast<size_t>(b)] = std::move(in);
+                    live_out[static_cast<size_t>(b)] = std::move(out);
+                    changed = true;
+                }
+            }
+        }
+
+        // ── 3. 精确 live interval（块内从后往前扫）──
+        std::vector<int> live_first(nv, INT32_MAX);
+        std::vector<int> live_last(nv, -1);
+        auto mark_live = [&](VReg v, int p) {
+            if (v >= nv) return;
+            if (p < live_first[v]) live_first[v] = p;
+            if (p > live_last[v]) live_last[v] = p;
+        };
+        for (int b = 0; b < nb; ++b) {
+            std::vector<char> cur(live_out[static_cast<size_t>(b)]);
+            const auto& insts = f_->blocks[static_cast<size_t>(b)].insts;
+            const int bstart = block_start[static_cast<size_t>(b)];
+            const int blen = static_cast<int>(insts.size());
+            // live-out 的值一直活到块末尾
+            if (blen > 0)
+                for (size_t v = 0; v < nv; ++v)
+                    if (cur[v]) mark_live(static_cast<VReg>(v), bstart + blen - 1);
+            for (int k = blen - 1; k >= 0; --k) {
+                const Inst& in = insts[static_cast<size_t>(k)];
+                const int p = bstart + k;
+                if (in.dst != kNoReg && in.dst < nv) cur[in.dst] = 0;
+                auto use = [&](VReg v) {
+                    if (v == kNoReg || v >= nv) return;
+                    cur[v] = 1;
+                    mark_live(v, p);
+                };
+                use(in.a);
+                use(in.b);
+                use(in.c);
+                for (VReg r : in.args) use(r);
+            }
+            for (size_t v = 0; v < nv; ++v)
+                if (cur[v]) mark_live(static_cast<VReg>(v), bstart);
+        }
+
+        // ── 4. 线性扫描 ──
         struct Range {
             int start, end, vreg;
         };
         std::vector<Range> ranges;
         ranges.reserve(nv);
+        std::vector<int> dead_vregs;
         for (size_t v = 0; v < nv; ++v) {
-            int d = def_pos[v];
-            int fu = first_use[v];
-            int lu = last_use[v];
-
-            if (d < 0 && fu == kInf) continue;  // 既没定义也没使用
-            if (cross_block_[v] || def_count[v] > 1 ||
-                vreg_is_rc_mark(*f_, static_cast<VReg>(v))) {
-                // 独占：区间覆盖整个函数，不会与任何人重叠
+            // **既没定义也没使用的 vreg 也必须占一个独立槽。**
+            //
+            // vreg_slot_ 的默认值是 0，跳过它们会让这些「死 vreg」全部
+            // 指向槽 0 —— 而槽 0 会被真实 vreg 用，于是同一个槽同时被
+            // 两批 vreg 认领。读死 vreg 时拿到的就是别人的值。
+            //
+            // 原版给每个 vreg 都压了区间（包括死的），所以从没暴露这个
+            // 问题；改成 live interval 后必须显式处理。
+            // 既没定义也没使用的 vreg：**不参与线性扫描**，最后统一给
+            // 一个哨兵槽。
+            //
+            // 它们出现在 vreg 表里但没有指令读写（降级器预留、死代码残留）。
+            // 原版给每个压全函数区间，槽数被抬高；给单点区间也不行 ——
+            // 它们全挤在位置 0、同时活跃。
+            if (def_pos[v] < 0 && first_use[v] == INT32_MAX) {
+                dead_vregs.push_back(static_cast<int>(v));
+                continue;
+            }
+            // rc_mark：水位值跨整个函数体（入口 mark、出口 cleanup），独占。
+            // 多次定义（生成器续跑 load.slot 回写）：区间不连续，独占。
+            // **实验：跨块 vreg 仍独占**，只让块内 vreg 用 live interval。
+            // 用来区分「live interval 算错」还是「跨块复用本身不安全」。
+            if (vreg_is_rc_mark(*f_, static_cast<VReg>(v)) || def_count[v] > 1) {
                 ranges.push_back({0, total_pos + 1, static_cast<int>(v)});
                 continue;
             }
-            int start = (d < 0) ? fu : (fu == kInf ? d : std::min(d, fu));
-            int end = std::max(d, lu);
+            int start = live_first[v] == INT32_MAX
+                            ? (def_pos[v] >= 0 ? def_pos[v] : 0)
+                            : live_first[v];
+            int end = live_last[v] >= 0 ? live_last[v] : start;
+            if (def_pos[v] >= 0 && def_pos[v] < start) start = def_pos[v];
+            if (last_use[v] > end) end = last_use[v];
             ranges.push_back({start, end, static_cast<int>(v)});
         }
         std::ranges::sort(ranges, [](const Range& a, const Range& b) {
             return a.start != b.start ? a.start < b.start : a.end < b.end;
         });
-
-        // 按结束位置维护活跃区间，释放已经过期的槽
         std::priority_queue<std::pair<int, int>, std::vector<std::pair<int, int>>,
                             std::greater<>>
             active;
@@ -167,6 +327,13 @@ void AsmGen::assign_vreg_slots() {
             }
             vreg_slot_[r.vreg] = s;
             active.push({r.end, s});
+        }
+        // 死 vreg 统一指向一个额外哨兵槽（在所有活槽之后）。
+        // 它们不被任何指令读写，内容无所谓；关键是**不能和活值共享槽** ——
+        // 否则读死 vreg 会拿到别人的值。
+        if (!dead_vregs.empty()) {
+            const int sentinel = n_vreg_slots_++;
+            for (int dv : dead_vregs) vreg_slot_[static_cast<size_t>(dv)] = sentinel;
         }
     }
 
