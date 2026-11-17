@@ -111,7 +111,24 @@ VReg Lowerer::lower_subscript(Subscript& s) {
         }
     }
     Inst in;
-    in.op = IrOp::IndexLoad;
+    // **固定元数的 tuple + 常量下标：静态可证在界内，免边界检查。**
+    //
+    // 元组的元数是静态类型的一部分（tuple[int, int] 的 sub.size() == 2），
+    // 而 tuple 不可变，所以运行期长度必然等于 arity；常量下标又静态已知，
+    // 于是 t[0] 的边界检查完全是多余的。
+    //
+    // 实测 bench/realistic/queue_sim.py：内层 while 每轮两次 tuple 下标
+    // （item[0] / item[1]），每次省掉「取 len + cmp + jcc」三条指令。
+    // 负下标不能走这条路径（Python 语义要回绕）。
+    bool static_idx_ok = false;
+    if (ot && ot->kind == TyKind::Tuple && !ot->variadic && !ot->sub.empty() &&
+        s.slice->kind == ExprKind::Constant) {
+        const auto& c = static_cast<const Constant&>(*s.slice);
+        if (c.ck == Constant::CK::Int && c.i >= 0 &&
+            c.i < static_cast<int64_t>(ot->sub.size()))
+            static_idx_ok = true;
+    }
+    in.op = static_idx_ok ? IrOp::IndexLoadUnchecked : IrOp::IndexLoad;
     in.a = obj;
     in.b = idx;
     // 只有「字符串下标」产生新串；list[str]/tuple[str] 返回的是容器内部的
