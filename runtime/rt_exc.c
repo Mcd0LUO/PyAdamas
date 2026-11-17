@@ -541,8 +541,6 @@ PyAdamasStr* pa_exc_accept(void) {
 }
 
 void pa_exc_done(void) {
-    if (getenv("PYADAMAS_ACCDBG"))
-        fprintf(stderr, "[done] %p\n", __builtin_return_address(0));
     exc_free(current_exc);
     current_exc = NULL;
     if (current_exc_inst) { pa_rc_dec(current_exc_inst); current_exc_inst = NULL; }
@@ -982,8 +980,6 @@ PyAdamasExcValue* pa_exc_value_cause(PyAdamasExcValue* v) {
 }
 
 PyAdamasExcValue* pa_exc_accept_value(void) {
-    if (getenv("PYADAMAS_ACCDBG"))
-        fprintf(stderr, "[acc] %p\n", __builtin_return_address(0));
     PyAdamasExcSave* s = (PyAdamasExcSave*)malloc(sizeof(PyAdamasExcSave));
     if (!s) panic_c("out of memory");
     s->prev = current_exc;
