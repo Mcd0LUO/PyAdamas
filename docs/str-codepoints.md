@@ -68,10 +68,18 @@
 | `src/codegen_ops.cpp:82-86` | `IrOp::Len` 无条件发 `movq (%rax), %rax`（读偏移 0）；list/tuple/dict/set/str/bytes 都靠它 | **布局按 §2.2 后一行不用改**：偏移 0 对 str 是码点数、对 bytes 仍是字节数 |
 | `src/codegen_ops.cpp:513-520` | `if s:` 也是读偏移 0 判非零 | 不变（空 ⇔ pub==0，与字节数是否为零等价） |
 | `src/lower_builtin_seq.cpp:6-33` | `len()`：`IrOp::Len`；range/deque 走运行时；类走 `__len__` | 语义直接变成码点数，**大量迭代/`range(len(s))` 代码自动跟着变**；`len(unknown)` 也自动正确（§2.2 的收益） |
-| `runtime/rt_str.c:245-249` | `pa_str_eq`：先比字节长度再 `memcmp` | 不变（字节相等 ⇔ 码点相等） |
-| `runtime/rt_str.c:251-259` | `pa_str_cmp`：`memcmp` 三路比较；注释已指出 UTF-8 字节序与码点序一致 | 不变（可继续用，是少有的「不用改」点） |
+| `runtime/rt_str.c:245-249`（现 `:393-403`） | `pa_str_eq`：先比指针（`a == b`）、再比字节长度，`len == 1` 时直接比一个字节，其余走 `sm_bytes_eq`（n ≤ 8 内联定长循环，n > 8 回落 `memcmp`） | 不变（字节相等 ⇔ 码点相等） |
+| `runtime/rt_str.c:251-259`（现 `:405-413`） | `pa_str_cmp`：`sm_bytes_cmp` 三路比较（n ≤ 8 内联，n > 8 回落 `memcmp`）；注释已指出 UTF-8 字节序与码点序一致 | 不变（可继续用，是少有的「不用改」点） |
 | `runtime/rt_dict.c:22-48` | 字典字符串 key 哈希 = 字节 FNV-1a + mix64；`s->len > 7` 时把哈希缓存进 `hash` | 不变（`len` 仍是字节数，阈值条件不用改）；hash 值与 CPython 本来就不同（compatibility.md） |
 | `runtime/rt_dict.c:59-68` | key 判等走 `pa_str_eq` | 不变 |
+
+**实现备注（S1+S2 之后，提交 `fdea7b8`）**：上表「按字节比较」的结论没有变，但实现已经
+不是直接 `memcmp` 了：`runtime/rt_str.c:18-48` 新增了 `sm_copy_bytes` / `sm_bytes_eq` /
+`sm_bytes_cmp` 三个短串内联助手——n ≤ 8 走定长循环（gcc 展开成几条 `mov`），n > 8 才回落
+libc。界取 8 是因为调用点的长度分布极偏：`join` 搬的是单字符元素、`s[i] == "0"` 比的是
+单字节，n 几乎总 ≤ 8，而每次 `memcpy`/`memcmp` 的 PLT 保存 + IFUNC 跳板比真正的工作还贵；
+长串上 libc 的向量化仍然最优，不能为了短串牺牲长串。`pa_str_eq` 另加了 `a == b` 指针快路径
+和 `len == 1` 的直比（`==`/`!=` 在 codegen 层还有一条指针快路径，见 §1.12）。
 
 ### 1.3 下标、切片、迭代
 
@@ -104,7 +112,7 @@
 | strip/lstrip/rstrip `:362-386` | `chars` 当**字节集合**（`sm_char_in_set` `:288-292`）剥；默认空白是 ASCII 六种 | `chars` 必须按**码点集合**匹配（否则 `strip("中")` 永远剥不掉）；剥离必须整码点前进；返回串 pub = 原 nchars − 剥掉码点数。默认空白仍只认 ASCII（CPython 剥 Unicode 空白 ⇒ 保留为已知差异） |
 | split() `:387-407` | 按 ASCII 空白字节切 | 切点都是 ASCII，字节边界天然是码点边界；每段 pub 需要数（切完每段各扫一次 = 总 O(n)） |
 | split(sep) `:408-426` | `pa_find_bytes` 找 sep；maxsplit 计数 | 匹配本身不用改（见 §1.5 的 UTF-8 自同步结论）；每段 pub 同样要数 |
-| join `:427-452` | 先累加字节总长，再 memcpy | pub = Σ 各元素 nchars + sep.pub×(k−1)，O(1) 合并；字节拷贝不动 |
+| join `:427-452`（现 `:666-687`；bytes `:1068-1082`） | 先累加字节总长，再 `sm_join_fill`（`rt_str.c:432-455`）一次拷完；空分隔符整个跳过拷贝 | pub = Σ 各元素 nchars + sep.pub×(k−1)，O(1) 合并；字节拷贝不动 |
 | replace `:453-517` | 非空 old 用字节 find；old 为空时**逐字节**插入 new | 非空 old 匹配不用改；pub = nchars + hits×(new.pub−old.pub)；**空 old 必须改成逐码点插入**（`:478-486` 的 `for k <= s->len` 是字节循环） |
 | find `:518-520`（`sm_find_from` `:312-320`） | start/end 按字节夹取；返回字节下标 | start/end 是**码点**下标（CPython 语义）⇒ 先换算成字节偏移；返回值再换算回码点下标（O(n)，find 本身也是 O(n)）；空子串 `start <= end` 的比较也要换成码点 |
 | rfind `:521-533` | 从字节尾部往前 `memcmp` | 同上；「往前」要按码点回退（从 lead byte 定位） |
@@ -119,6 +127,14 @@
 | splitlines `:666-682` | 只认 `\n`/`\r` 字节 | 不变（0x0A/0x0D 不可能出现在 UTF-8 多字节序列里）；CPython 还认 `\v \f \x1c-\x1e \u2028 \u2029`，差异保持 |
 | capwords `:324-350`（string.capwords 的 C 实现） | 逐字节 ASCII 切词/改大小写 | 逐码点；输出 pub 一边写一边数 |
 | `pa_str_repeat` `runtime/rt_stdlib.c:198-207` | `str_alloc(len*n)` 字节复制 | pub = pub×n，O(1)；**bytes 重复要分家**（降级 `src/lower_expr_ops.cpp:144-165` 的 `seq_ty` 里根本没有 Bytes，而类型层允许 `bytes*int`（`typecheck_expr.cpp:922-925`）——这是现存的降级缺口，S2 顺手补 `pa_bytes_repeat`） |
+
+**实现备注（提交 `fdea7b8`）**：`"".join(parts)` 是 join 最常见的形态，但原来第 2..n 个
+元素每个都做一次 `memcpy(dst, sep->data, 0)`——空拷贝不做事，照样走 PLT、保存被调用者
+寄存器、IFUNC 跳板，是 `str_build` 里最大的一笔浪费（每轮外层迭代 120 次 join、每次
+60 个元素，累计 792 万次纯跳板往返；perf 采样 8.8% 落在 `__memmove_evex_*`，其中绝大多数
+就是这种零长度拷贝和单字符拷贝）。现在 `sm_join_fill` 用 `slen > 0` 门控，空分隔符一次
+拷贝都不做；元素拷贝也
+顺带走 `sm_copy_bytes`（n ≤ 8 内联，见 §1.2 的实现备注）。
 
 ### 1.5 查找、包含、比较（内容级操作）
 
@@ -177,6 +193,7 @@
 | `runtime/rt_str.c:183-187` | `pa_ord`：要求 `len==1`（字节），返回 0–255 | 要求 pub==1，返回**码点**（0–0x10FFFF）；错误消息对齐 CPython |
 | `runtime/rt_str.c:189-193` | `pa_chr`：只接受 0–255 | 接受 0–0x10FFFF；代理区（0xD800–0xDFFF）与不合法码点抛 ValueError（我们的 str 必须是合法 UTF-8，见 §7.4） |
 | `runtime/rt_str.c:84-94` | `pa_str_any`（unknown 的 `str()`） | 不变；注意 unknown 若是 bytes 会原样返回（既有类型谎言，不扩大） |
+| `runtime/rt_str.c:192-224`（现实现） | `pa_str_from_i64`：手写十进制（不用 `snprintf`），`0 <= v < 10` 直接返回驻留单字节串 `pa_char_str('0' + v)`；其余走 `str_new_ascii`（数字+负号必然是 ASCII，`pub = len`，省掉 `str_seal` 的 `str_count_cp` 扫描） | 不变（产出恒为 ASCII ⇒ `pub == len`）；注意 `pa_char_str` 的参数是**字符编码**不是数值，见 §2.5 |
 
 ### 1.9 文件 I/O
 
@@ -224,7 +241,8 @@
 - `IrOp::Len` 读偏移 0：`src/codegen_ops.cpp:82-86`（布局方案的关键，§2.2）。
 - 真值读偏移 0：`src/codegen_ops.cpp:513-520`。
 - 下标：`src/codegen_call.cpp:24-34`（str → `pa_str_char_at`）。
-- 比较：`src/codegen_ops.cpp:552-580`（str/bytes 都走 `pa_str_eq/cmp`，不用改）。
+- 比较：`src/codegen_ops.cpp:777-824`（str/bytes 都走 `pa_str_eq/cmp`，不用改）；其中
+  `==`/`!=` 先 `cmpq` 比指针，相等直接出结果，不等才 `call pa_str_eq`（见 §2.5 的驻留表）。
 - 拼接：`src/codegen_ops.cpp:252-266`（要按 str/bytes 分家）。
 - 字面量：`src/codegen.cpp:60-87`（加 `pub`、按 kind 去重）。
 - 临时寄存器：`src/codegen_regalloc.cpp:403`（`Len` 纯）、`:413-418`（str 下标不许借寄存器）。
@@ -351,6 +369,33 @@
 - `char_tab` 的 0x80–0xFF 槽位：从「单字节 str」改为不再作为 str 使用（bytes 路径不再
   需要它们：bytes 下标是 int、bytes 切片用字节实现）。保留数组大小 256 只当 byte lookup 也行，
   但**禁止**把 0x80–0xFF 的单字节对象当 str 暴露。
+- **实现后的驻留表**（提交 `d48b842`；本节上几条的 `rt_core.c:787-790` 等行号是设计期的，
+  实际落在 `rt_core.c:1240-1325`）：`pa_char_str` 本身不做范围检查（`c & 0xff`），
+  0x80–0xFF 槽位仍初始化成 `pub = 0` 的占位对象，只为让越界调用有一个确定对象可返回——
+  真正的「只接受 ASCII」由调用方保证（`s[i]` 全 ASCII 快路径、`str_cp_at` 的 `cp < 0x80`
+  分支、`pa_cp_str` 的 ASCII 转交）。除 `char_tab[256]` 外还导出
+  `PyAdamasStr* pa_char_tab[256]`（`runtime/rt_core.c:1252`），存每个驻留串的**载荷指针**，
+  供生成代码直接索引。单字节 ASCII 的 str 字面量在 `ConstStr` 分支里发射成
+  `movq pa_char_tab+N(%rip), %rax`（`src/codegen_ops.cpp:117-129`，判定见
+  `char_tab_literal`，`src/codegen_impl.h:770-776`），于是字面量 `"0"` 和 `s[i]` 是
+  **同一个指针**：`s[i] == "0"` 在 codegen 层就是一条 `cmpq` 直接出结果
+  （`src/codegen_ops.cpp:782-806`），不必进 `pa_str_eq`；`pa_str_eq` 的 `a == b`
+  第一行也照样命中。字符串不可变，内容相同的单字节 str 语义上无法区分 ⇒ 共享对象是安全的，
+  CPython 对 latin1 也是同样的驻留。bytes 字面量不参与（pub 语义不同）。
+- 这张表由 `pa_static_strs_init()`（`runtime/rt_core.c:1293`）在 `main` 序言里显式初始化
+  （`src/codegen.cpp:536`；非入口模块的 init 函数里也调一次，`src/codegen.cpp:497`）。
+  它必须排在 `pa_disable_unknown_index` 之后（驻留对象要不要登记进 RC 索引取决于是否
+  exact-RC 模式），所以函数体里不必再判 `static_strs_ready`。
+- **驻留表的消费者：`str()` 的个位数快速路径**（提交 `fdea7b8`，修复 `455df2c`）：
+  `pa_str_from_i64`（`runtime/rt_str.c:192-224`）对 `0..9` 直接返回
+  `pa_char_str('0' + v)` 的驻留串——`str(int)`（静态 int 走 `IrOp::Convert` →
+  `pa_str_from_i64`，`src/codegen_ops.cpp:950-953`；unknown 走 `pa_str_any` 的非字符串
+  分支落到同一个函数）、元组 `repr` 里的整数也走它。`str_build` 每轮 60 次
+  `str(i % 10)`、累计 396 万次分配，换驻留后零分配、零 RC 记账。**注意
+  `pa_char_str` 的参数是字符编码不是数值**：这里真出过 bug——写成 `pa_char_str(v)` 时
+  `str(7)` 拿到的是 BEL（0x07）而不是 `'7'`（0x37），
+  且 `len()` 仍是 1，差分测试 187 个用例全过也没抓到（没有用例对 `str(单个数字)` 打印/比较，
+  刚好是盲区）。现在补了 `tests/run/187_str_smallint_divconst.py` 守这条路径。
 
 ### 2.6 字面量的编译期常量折叠
 
@@ -477,7 +522,8 @@ uint32 }），阈值 `pub >= 4096`，缓存上限（如 16 个对象、LRU），
 ### 3.3 s[i] 与负索引
 
 - `s[i]` 返回 **1 个码点**的 str（1–4 字节）。ASCII 走 `char_tab` 永生串（零分配，
-  与今天一致）；非 ASCII 每次新建（CPython 对 >U+00FF 也是新对象）。
+  与今天一致；单字节字面量也指向同一对象，所以 `s[i] == "0"` 是纯指针比较，见 §2.5）；
+  非 ASCII 每次新建（CPython 对 >U+00FF 也是新对象）。
 - 负索引：`i += pub` 后判界；「从尾部取」可以在实现里优化成从字符区尾往前找 lead byte
   （O(序列长度) 而不是全扫）。
 - 越界错误消息沿用 `IndexError: string index out of range`（`rt_str.c:62`）。
@@ -825,7 +871,7 @@ S1 之后、S2 之前：`len("中文")==2` 但 `"中文"[0]` 仍是第一个字�
 
 ---
 
-## 8. 实施记录（S1+S2，0.185）
+## 8. 实施记录（S1+S2，0.185；§8.4 为之后的字符串路径提交）
 
 ### 8.1 与设计稿的偏差
 
@@ -866,3 +912,24 @@ S1 之后、S2 之前：`len("中文")==2` 但 `"中文"[0]` 仍是第一个字�
 - ASCII 热路径对比 b203e69 基线（编译后只计时执行，5 次取最小）：
   `len` 1.00×、`for ch in s` 0.99×、下标 1.00×、拼接 1.05×、`split` 0.87×、
   `find` 1.03×、dict 字符串 key 0.95×、`join` 0.97×。
+
+### 8.4 S1+S2 之后的字符串路径提交
+
+S1+S2 合入后又落了三个提交（都在 master）：一个短串热路径优化、一个由它引入的 bug 修复、
+一个把单字节字面量接到驻留表。共同背景是「每次调 libc / 走 PLT 的固定成本比真正的
+工作还贵」，所以收益全在短串热路径上：
+
+| 提交 | 改了什么 | 为什么 | 结果 |
+|---|---|---|---|
+| `fdea7b8` | `rt_str.c` 新增 `sm_copy_bytes`/`sm_bytes_eq`/`sm_bytes_cmp`（n ≤ 8 内联，n > 8 回落 libc）；join 抽成 `sm_join_fill`、空分隔符整个跳过；`pa_str_eq` 加 `len == 1` 直比；`pa_str_from_i64` 个位数返回驻留串 | `str_build` 的 perf 采样里 8.8% 落在 `__memmove_evex_unaligned_erms`（绝大多数是空分隔符的零长度拷贝和单字符拷贝）、5.1% 落在 `__memcmp_evex_movbe`（全是 1 字节比较），固定成本远大于搬运本身 | str_build 496 → 310 ms（−37.5%） |
+| `455df2c` | `pa_char_str(v)` 改成 `pa_char_str('0' + v)`，并补 `tests/run/187_str_smallint_divconst.py` | `pa_char_str` 收的是字符编码不是数值；`str(0..9)` 拿到的是 0x00–0x09 控制字符，然而 `len()` 仍是 1，长度检查看不出来。差分用例里没有对 `str(单个数字)` 打印/比较的，187 个全过也没抓到（真实盲区），补用例后 difftest 187 → 188 | str(0..9) 恢复正确 |
+| `d48b842` | 导出 `pa_char_tab[256]` + `pa_static_strs_init()`；单字节 ASCII 字面量取驻留对象；str `==`/`!=` 加指针相等快路径 | `s[i]` 来自运行时驻留表、`"0"` 来自静态字面量，两份等价内容指针必然不同，`pa_str_eq` 的 `a == b` 永远不命中（该函数在 str_build 里占 10.2% 采样、约 4.2 ns/次，成本几乎全在 call/ret 和序言） | str_build 220 → 214 ms（−2.7%）、queue_sim 292 → 283 ms（−3.1%） |
+
+`d48b842` 还踩到一个坑：第一版只给「指针相等」快路径处理了 `!=`，慢路径忘了取反，于是
+内容不同的 `!=` 恒为假。差分测试 188 个用例全过也没发现，是同轮新加的
+`187_str_smallint_divconst.py` 抓到的（`line[i] != "3"` 的累加值从 91 变成 1）。
+
+这三个提交之外，本轮还有常数除数除法（`8b68271`）与 RC 记账内联（`89b41ee`）两个 codegen
+提交；五个合计 `str_build` 496 → 221 ms（−55.4%，与 Go 的差距 4.4× → 1.97×）、
+`queue_sim` 420 → 282 ms（−32.9%，10.5× → 7.05×）。差分测试 188 个用例 / 0 不一致，
+release 套件与 ASan 套件都是 EXIT=0。

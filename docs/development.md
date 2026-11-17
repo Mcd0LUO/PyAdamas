@@ -60,7 +60,7 @@ rm -rf build/dev                   # 连 CMake 中间产物一起清
 | `tests/run/*.py` | 必须编译运行成功，输出与末尾 `# --- expect ---` 逐行一致 | `NN_主题.py` |
 | `tests/unsupported/*.py` | `check -v` 必须打标记，`build` 必须拒绝 | `主题.py` |
 
-当前规模：正例 12 / 反例 53 / 运行 188 / 未建模 1 / 严格 6 / 模块 15。`ctest` 另含 `pyadamas_cache_race`：两进程并发 `--rebuild` 编译 hashlib/hmac，守模块缓存原子写；`cfi:unwind`（`tests/cfi/`）用 libgcc 的 `_Unwind_Backtrace` 数帧，守生成代码的 CFI。
+当前规模：正例 12 / 反例 53 / 运行 189 / 未建模 1 / 严格 6 / 模块 15。`ctest` 另含 `pyadamas_cache_race`：两进程并发 `--rebuild` 编译 hashlib/hmac，守模块缓存原子写；`cfi:unwind`（`tests/cfi/`）用 libgcc 的 `_Unwind_Backtrace` 数帧，守生成代码的 CFI。
 
 跑单个文件：
 
@@ -103,6 +103,8 @@ python3 tests/diff/run_diff.py --only repr  # 只测浮点转字符串
 
 生成的程序必须两端都能跑通、输出一致；已知的语义分歧不要测（列在 [compatibility.md](compatibility.md)），否则只是制造噪音。
 
+`tests/run` 的 -O0/-O2 输出自差分由 `tools/difftest.sh` 负责：默认按 CPU 核数并行（`PYADAMAS_TEST_JOBS` 调并行度），`PYADAMAS_TEST_FILTER` 只跑匹配的用例，自动跳过 `*_perf`（打印计时的用例）；当前 188 个用例 / 0 不一致。
+
 ### 性能 bench
 
 `bench/` 下是逐个内置函数的性能对比：同一份源码分别喂给 PyAdamas（编译成原生
@@ -117,6 +119,8 @@ cd /w && python3 bench/run_bench.py                   # 全量
 cd /w && python3 bench/run_bench.py 13_sum 32_sorted  # 只跑指定用例
 cd /w && python3 bench/run_bench.py --md /w/bench/RESULTS.md --json /w/bench/report.json
 ```
+
+单版本回归计时用 `tools/quickbench.sh`：对 `bench/realistic/` 下的用例重复 `REP=` 次取最好一次（默认 5 次，默认用例 `queue_sim` / `str_build`），`PYADAMAS_BIN=` 换构建目录（默认 `build/release/pyadamas`），`OUT=` 指定产物目录；参数可以换成 `bench/realistic` 里的其他用例名。两个版本对比用 `tools/abbench.sh`（独立 worktree + 交替测量 + 中位数）。
 
 用例在 `bench/builtins/<序号>_<内置名>.py`，第一行是 `N = <整数>`，驱动脚本
 按 CPython 的实测时间把它校准到 0.35 秒左右。三条规则让倍数有意义：
@@ -382,7 +386,7 @@ PYADAMAS_TEST_ASAN=1 PYADAMAS_TEST_JOBS=4 \
 ```
 
 比平时慢 3-5 倍，日常不用。**改动触及 RC / GC / lowering 时跑一遍** ——
-188 个用例全绿说明内存层面没有回归。
+189 个用例全绿说明内存层面没有回归。
 
 #### 编译器自身插桩
 
@@ -437,8 +441,7 @@ bash tests/check_size.sh
 
 规则：
 
-- **源文件超过 1200 行 → 失败**。当前 `ALLOW_FILES` 为空（所有源文件都已
-  拆到 1200 行以内）；清单只能删不能加，新增文件超限时必须拆分。
+- **源文件超过 1200 行 → 失败**。当前 `ALLOW_FILES` 为空，但仓库里仍有文件超限（`bash tests/check_size.sh` 目前会失败，超限清单见 [roadmap.md](roadmap.md) 的「工程收尾」）；清单只能删不能加，新增文件超限时必须拆分。
 - **单个函数超过 300 行 → 只警告**。函数长度是拆分提示，不阻塞提交；
   改到某个函数时顺手拆一下即可。
 

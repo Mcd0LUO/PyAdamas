@@ -12,6 +12,7 @@
 | [language.md](language.md) | 支持哪些语法？类型规则是什么？语义和 Python 哪里不一样？ | `lexer.h` `parser.cpp` `typecheck*.cpp` |
 | [ir.md](ir.md) | IR 长什么样？每条指令什么语义？AST 怎么降级成它？ | `ir.h` `lower*.cpp` |
 | [codegen.md](codegen.md) | 汇编怎么生成？栈帧和调用约定怎么定的？ | `codegen*.cpp` |
+| [stack-alignment.md](stack-alignment.md) | 栈对齐违规查到了哪两处 ABI 根因？`-mstackrealign` 为什么能撤掉？ | `src/codegen_block.cpp` `src/codegen.cpp` |
 | [runtime.md](runtime.md) | 编译产物运行时依赖什么？对象在内存里怎么摆？ | `runtime/rt_*.c` |
 | [compatibility.md](compatibility.md) | 和 CPython 的差异清单，以及正确性是怎么验证的 | `tests/` |
 | [development.md](development.md) | 怎么构建、怎么测、怎么调试、加功能要动哪几处 | `CMakeLists.txt` `tests/` |
@@ -20,9 +21,17 @@
 | [exc-semantics.md](exc-semantics.md) | 现行 try/except/finally/with 语义到底是什么？改成表驱动会丢什么？ | `runtime/rt_exc.c` `src/lower_exc.cpp` |
 | [exc-frame-cleanup.md](exc-frame-cleanup.md) | 展开 / longjmp 时被跳过帧的局部引用怎么回收？ | `runtime/rt_exc.c` `runtime/rt_core.c` |
 | [regalloc.md](regalloc.md) | 寄存器分配为什么没带来性能收益？下一步两条路线怎么选？ | `src/codegen_regalloc.cpp` |
+| [regalloc-architecture.md](regalloc-architecture.md) | 精确 LiveInterval / SpillPlacement / SplitKit 三层怎么设计？池容量实验后为什么第三层正式放弃？ | `src/codegen_regalloc.cpp` |
+| [bounds-elimination-attempt.md](bounds-elimination-attempt.md) | 边界检查消除（ranged loop versioning）做到哪一步、克隆阶段为什么回退？上界收益是多少？ | `src/opt_loop.cpp` |
+| [heap-slot-promotion.md](heap-slot-promotion.md) | 堆槽进寄存器的 GC 障碍假设为什么是错的？放行后为什么反而慢 5.5%？ | `src/lower_impl_slots.cpp` `runtime/rt_core.c` |
+| [ivsr-negative-result.md](ivsr-negative-result.md) | 归纳变量强度削减（IVSR）为什么在 nbody 上运行时间退步 15.7%？ | `src/opt_loop.cpp` |
 | [str-codepoints.md](str-codepoints.md) | 字符串码点语义 S1/S2 做了什么、S3 还剩什么？ | `runtime/rt_str.c` `src/lower_builtin.cpp` |
 | [stdlib-gaps.md](stdlib-gaps.md) | 51 个常用 CPython 模块哪些可用、哪些卡在编译器能力上？ | `stdlib/*.py` `src/driver_build.cpp` |
 | [archive/README.md](archive/README.md) | 已轮转出去的旧文档索引 | — |
+
+其中 [regalloc-architecture.md](regalloc-architecture.md) 的 §8、[bounds-elimination-attempt.md](bounds-elimination-attempt.md)、
+[heap-slot-promotion.md](heap-slot-promotion.md)、[ivsr-negative-result.md](ivsr-negative-result.md) 是**有意保留的负面结论**
+（方案未落地或已回退），不要当成待办去「补完」。
 
 变更记录在根目录 [CHANGELOG.md](../CHANGELOG.md)（0.41–0.99 归档在
 [archive/changelog-0.41-0.99.md](archive/changelog-0.41-0.99.md)，0.40 及更早见

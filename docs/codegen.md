@@ -451,7 +451,7 @@ a.speak()   →   a->vtable[0](a)   →   Dog::speak
 
 ### 整数除法：先挡信号
 
-`idiv` 在除数为 0 和 `INT64_MIN / -1` 时都触发 `#DE`，那个信号带不出任何上下文。所以先生成守卫：
+除数是运行期值时，`idiv` 在除数为 0 和 `INT64_MIN / -1` 时都触发 `#DE`，那个信号带不出任何上下文。所以通用路径先生成守卫：
 
 ```asm
         testq %rcx, %rcx
@@ -468,7 +468,7 @@ a.speak()   →   a->vtable[0](a)   →   Dog::speak
 
 ### 整除与取模：符号修正
 
-`idiv` 向零取整，Python 的 `//` 向下取整；余数也是 `idiv` 跟被除数同号，Python 跟除数同号。两者都在「余数非零且两操作数异号」时差一步：
+除数是运行期值时，`idiv` 向零取整，Python 的 `//` 向下取整；余数也是 `idiv` 跟被除数同号，Python 跟除数同号。两者都在「余数非零且两操作数异号」时差一步：
 
 ```asm
         cqto
@@ -506,6 +506,57 @@ nonzero:
 done:
 ```
 
+### 常数除数：魔数乘法
+
+上面的整数除法和取模走的是「除数是运行期值」的通用路径。除数是编译期常量时，`gen_bin` 先试
+`gen_div_const`（`src/codegen_ops.cpp`）：`operand_const_imm` 认出 `src_op` 给出的
+`$N` 形态立即数，`pow2_log2` 判断是不是 2 的幂，`udiv_magic` 求魔数，
+`gen_div_const_emit` 负责发指令。`/`、`//`、`%` 三个都走这套，不再发
+`cqto` + `idivq`。
+
+为什么值得：x86-64 的 64 位 `idivq` 在 Cascade Lake 上吞吐约 24 周期，而魔数法
+是十来条一周期指令加一次 3 周期的 `imul`。实测 `idivq` 在 queue_sim 的
+`simulate` 里占该函数 47.6% 的采样（`t % 3`、`t % 7` 各一处），在 str_build 的
+`build_line` 里占 71.9%（`i % 10`）——全是循环变量对常数取模。
+
+算法（Granlund-Montgomery 的 round-up 魔数）：对 `d > 1` 且非 2 的幂，取
+`L = ceil(log2 d)`、`M = floor(2^(64+L) / d) + 1`。`M` 一定 `> 2^64`（因为
+`d < 2^L`），写成 `M = 2^64 + m'`，于是
+
+    floor(x * M / 2^(64+L)) == (mulhu(x, m') + x) >> L
+
+—— 65 位魔数拆成「高位那 1 加上 m'」：`x * 2^64` 那部分恰好整块进到高 64 位，
+所以一条 `mulq` 拿到 `mulhu(x, m')`，再 `addq` 一次被乘数、右移 `L` 位就完事。
+有符号不必另找魔数：`trunc(x/d) = sign(x) · floor(|x|/d)`，`|x|` 用
+`(x ^ sign) - sign` 在无符号域算（`INT64_MIN` 得到 2^63，正好），顺手把
+`INT64_MIN / d` 的上溢一起解决；算完再按符号还原。除数为负时先按 `|d|` 算、
+最后 `negq`。
+
+2 的幂必须单独走，不能套魔数：`d = 2^L` 时 `M` 退化成 `2^63 + 1`，代入等式
+不成立。它另有更便宜的写法（`trunc` 语义）：
+
+```asm
+        movq %rax, %rcx
+        sarq $63, %rcx
+        andq $7, %rcx        # d-1；只有负 x 这一项非零
+        addq %rcx, %rax
+        sarq $3, %rax        # x / 8
+```
+
+`//` 和 `%` 由商反算余数：`r = x - q*d`（`imulq $d`，`d` 在 32 位立即数范围内），
+`r` 与除数异号时 `//` 商减一、`%` 余数加一个 `d`——通用路径里 `idivq` 之后那段
+符号修正，在这里并进了余数计算。
+
+不是所有常量除数都能走：`d == 0` 落回通用路径（`pa_panic_div0` 要给出可读
+报错）、`d == -1` 也落回（`INT64_MIN / -1` 的上溢保护省不得，魔数法算不出那个
+上溢，会安静地返回 `INT64_MIN`）、`d` 超出 `[INT32_MIN, INT32_MAX]` 同理（32 位
+立即数放不下，`d == INT64_MIN` 是其中一例）。`d == 1` 再特化：`/` 和 `//` 直接
+`movq`，`%` 直接给 0。
+
+正确性对拍：30,583,433 组 `(x, d)` 零失败——覆盖 `d ∈ [-4000, 4000] ∪
+{2^k±1, 2^k} ∪ 500 个随机 31 位除数`，`x` 含 0/±1/±d/±(d±1)/±2d/`INT64_MIN`/
+`INT64_MAX`，小除数上再密集跑满 `[0, 2^18)`。
+
 ### 浮点比较：NaN
 
 `ucomisd` 对无序（NaN）把 CF/ZF/PF 全置 1。规则分两条路径：
@@ -536,7 +587,26 @@ done:
 
 ### 字符串比较
 
-`==` / `!=` 走 `pa_str_eq`，大小比较走 `pa_str_cmp`（三路比较，返回 -1/0/1）。
+`==` / `!=` 先比指针：字符串（和 bytes）不可变，同一个对象必然相等，所以
+`cmpq` 相等就直接出结果（`==` 给 1、`!=` 给 0），不等才 `call pa_str_eq`。
+`!=` 的慢路径也要取反——这里曾经只改了快路径，非等指针时静默返回了 `==` 的
+结果。指针相等能命中，靠的是单字节 ASCII 字面量和 `s[i]` 共用同一批对象：
+这类字面量不生成 `.Lstr` 常量对象，而是直接取运行时驻留表
+
+```asm
+        movq pa_char_tab+384(%rip), %rax   # "0"：0x30 * 8
+```
+
+`pa_char_tab` 是 256 项载荷指针数组，指向运行时那批永生单字节串（`pa_char_str`
+返回的也是这些对象）；`pa_static_strs_init()` 在 `main` / 模块 init 的序言里
+把它填好——放在 `pa_register_literals` 之后，因为它依赖
+`pa_disable_unknown_index` 的结果（驻留对象要不要登记进 RC 索引）。只有
+`0x00–0x7F` 是合法单字节 str，生成代码也只对 `< 0x80` 的字节取驻留对象；
+`0x80–0xFF` 那些槽只为让 `pa_char_str` 的越界调用有个确定对象可返回。于是 `s[i] == "0"` 这种逐字符比较整个跳过
+`pa_str_eq`（str_build 里每轮内层循环 60 次）；bytes 字面量不参与（`pub` 语义
+不同）。
+
+大小比较走 `pa_str_cmp`（三路比较，返回 -1/0/1）。
 
 > 这里曾经有个静默 bug：大小比较只生成了一行注释、什么指令都没有，于是 `a < b` 拿到栈槽里的残留值，恒为 `False`。发现它的方式是对着 CPython 跑差分测试。
 
@@ -551,6 +621,17 @@ done:
 | `%al` 没清零 | 变参 ABI 要求 `%al` 是使用的 vector 寄存器个数 | 调用前 `xorl %eax, %eax` |
 | 局部区压到 push 的寄存器上 | 覆盖保存的 callee-saved，返回时把垃圾弹回调用方 | 局部区从 `out_bytes_(%rsp)` 起往上排，push 的寄存器在它上面 |
 | push 奇数个寄存器 | `call` 时 `rsp` 不是 16 对齐，被调用方一用 `movaps` 就段错误 | 帧大小把 push 的也算进去一起对齐 |
+
+表里最后一行的背后是一个不变量：`call` 那一刻 `rsp` 必须 ≡ 0 (mod 16)。这条
+不变量还在手写汇编里踩过两处更隐蔽的违规：C 回调跳板自己再 `call` 时漏了补那
+8 字节；closure shim 的 `subq tmp → addq spill → call` 序列里 tmp 的公式只保证
+了 `addq` 之前对齐（spill 是 8 的奇数倍时 `addq` 之后又歪回去）。gcc 14 恰好没在
+对齐敏感的位置用 SSE，所以一直潜伏；gcc 15 在运行时函数里用 `movaps` 溢出 xmm，
+才变成 SIGSEGV / SIGILL。两处都修掉后，普通运行时构建里的 `-mstackrealign` 缓解
+已撤掉（只有 ASan 插桩那份运行时对象还带着这个开关）；另外加了
+`PYADAMAS_ALIGN_CHECK=1` 自检——每个生成函数入口检查
+`rsp % 16 == 8`，不满足直接 `ud2`，把「崩在运行时别处」变成「精确停在违规函数
+的入口」。调查过程见 [stack-alignment.md](stack-alignment.md)。
 
 ## 调试
 
@@ -603,7 +684,10 @@ PC 下 CFA 是哪个寄存器加多少、被保存的寄存器各在哪个槽。
 `ret` 之后 CFI 状态退回函数体，后面的块（异常落地、另一条返回）继续按体
 规则展开。函数符号同时补了 `.type ..., @function` 和 `.size`。手写的那几段
 汇编（类析构器、GC release、生成器帧释放、C 回调跳板、模块 init 桩、`main`）
-也各自包了 `.cfi_startproc` / `.cfi_endproc`；跳板不动 `rsp`，只用到入口规则。
+也各自包了 `.cfi_startproc` / `.cfi_endproc`；C 回调跳板还要自己再发一次间接
+调用，`call` 前先 `subq $8` 把 `rsp` 补到 16 对齐、返回后 `addq $8`，CFI 的
+`def_cfa_offset` 也跟着在 8 / 16 之间切换（其余几段手写汇编不动 `rsp`，只用到
+入口规则）。
 
 ```bash
 readelf --debug-dump=frames prog | grep -c FDE   # 每个函数一段
@@ -623,9 +707,11 @@ CFI 一断深度就从 7 掉回 2。
 
 ## 引用计数在汇编层的代价
 
-RC 不新增 IR 指令，全部通过 `call.rt` 调运行时：
+RC 不新增 IR 指令，在 IR 里仍以 `call.rt` 的形式出现；不过 `RcInc` / `RcDec` /
+`RcMark` / `RcCleanup` 四个记账入口已经由生成端内联成快路径（见本节末
+「记账调用的内联」），不再每次都 `call`。RC 在汇编层的其余表现：
 
-- 字面量 rc = `INT64_MIN`，inc/dec 在运行时直接跳过；
+- 字面量 rc = `INT64_MIN`，inc/dec 碰到永生对象直接跳过；
 - 有堆字段的类才有 `.LdtorN` / `.LgcrelN`，没有堆字段的类传 `NULL`；
 - 分配量超过阈值才触发循环收集；阈值是「上次收集后的存活堆字节数」，
   下限 2MB——存活堆翻倍才扫一次，总扫描量是 O(live)，垃圾多时回落到
@@ -651,6 +737,35 @@ RC 不新增 IR 指令，全部通过 `call.rt` 调运行时：
   形参本来就是按值借用的：调用期间实参的引用在调用方手里，函数体只读
   就无需自己再持有一份。方法调用的 `self` 绝大多数属于这一类；
 - 调用结果没人读时（表达式语句里的调用），返回值不再搬回栈槽。
+
+### 记账调用的内联
+
+`gen_call_rt`（`src/codegen_call.cpp`）对 `RcMark` / `RcCleanup` / `RcInc` /
+`RcDec` 四个 RtFn 有专用发射：快路径就地展开，没走快路径时才落回运行时
+（`pa_rc_inc_slow` / `pa_rc_dec_slow`；`RcCleanup` 落回的是 `pa_rc_cleanup` 本体，
+它没有单独的 slow 变体；`RcMark` 干脆没有慢路径）。动因是 perf 采样：
+queue_sim / str_build 里 `pa_rc_cleanup` 占 8.2% / 11.4%，`pa_rc_inc` 占
+4.0% / 3.0%，`pa_rc_dec` 占 4.2% / 3.7%——这几个函数体本身只有 3~6 条指令，
+call/ret 加被调用者保存的开销比它们干的活还大。
+
+- `RcMark`：编译成一条 `movq temp_len(%rip), %rax`。临时栈水位就是个全局
+  变量，为一次 load 发一次调用不划算。
+- `RcCleanup`：只内联最常见的快速出口——`cmpq temp_len(%rip), <mark>` 相等
+  就直接跳过（绝大多数语句边界上水位根本没动过）；不等才整体交给
+  `pa_rc_cleanup`，由它逐个弹出并 dec。
+- `RcInc`：`p == NULL`、`rc <= 0` 落回慢路径；`rc == INT64_MIN`（字面量等
+  永生对象）直接跳过；否则把 `rc` 加一写回。`rc <= 0` 交给慢路径是为了报
+  `refcount increment on a freed object`，不是正常路径。
+- `RcDec`：比 inc 多一道 `pa_gc_phase_fast` 判断——收集进行中只登记边、绝不
+  重入释放，所以整个落回慢路径；`rc == INT64_MIN` 跳过；`rc <= 1` 也落回
+  慢路径，真正的析构、池归还在那里；只有「减完仍 > 0」才在生成代码里就地
+  减一。
+- `RcIncUnknown` / `RcDecUnknown` 没有内联：它们要先查堆索引确认机器字是不是
+  堆指针，仍然直接 `call`。
+
+慢路径**必须**先 `spill_fp_slots`、回来再 `reload_fp_slots`：xmm 全是
+caller-saved，慢路径会调运行时、可能一路走到析构函数，提升过的浮点值不落盘
+就被冲掉了。快路径不产生调用，浮点槽不必往返内存。
 
 ## 性能现状
 

@@ -117,14 +117,14 @@ runtime/
   rt_debug.c              调试表注册与未捕获异常 traceback
 tests/                    正例 / 反例 / 运行 / 差分 / 模块 / 基准
 docs/                     设计与参考文档（旧文档在 docs/archive/）
-tools/                    一次性脚本
+tools/                    工具脚本（差分 / 基准 / 同步 / IR dump）
 ```
 
 ## 设计要点
 
 一句话版，展开在文档里：
 
-- **不是 SSA**：Python 变量天生可变，先用「可变槽位 + vreg」，SSA 留给优化遍。→ [IR](docs/ir.md#为什么不是-ssa)
+- **不是 SSA**：Python 变量天生可变，先用「可变槽位 + vreg」；SSA 转换已评估并放弃（vreg 已全 SSA，零收益）。→ [IR](docs/ir.md#为什么不是-ssa)
 - **热变量常驻寄存器**：整型槽按活跃区间做线性扫描分配（0.203，callee-saved 寄存器 + 无调用区间借用 r10/r11），浮点槽在无调用函数里用 `xmm8`–`xmm15`；临时值按块做别名与融合。不做图着色，换来的是一条规则就能保证分支、循环、调用全都正确。详见 [regalloc.md](docs/regalloc.md)。→ [代码生成](docs/codegen.md#寄存器策略)
 - **前端宽、后端严**：`check` 对真实 Python 文件基本不误杀；`build` 才判断能不能真编译。→ [架构](docs/architecture.md#前端宽后端严)
 - **类型挂在指令上**：前端推完的类型一路带到后端，宽度选择不靠猜。
@@ -156,11 +156,12 @@ tools/                    一次性脚本
 |---|---|---|
 | `tests/*.py` | 12 | 前端正例，覆盖语法与类型规则（按 AST 节点计：43 个函数 / 458 条语句 / 1714 个表达式） |
 | `tests/fail/*.py` | 53 | 反例，必须报出首行 `# expect:` 指定的错 |
-| `tests/run/*.py` | 188 | 编译 + 运行，输出与文件末尾的 `# --- expect ---` 逐行比对 |
+| `tests/run/*.py` | 189 | 编译 + 运行，输出与文件末尾的 `# --- expect ---` 逐行比对 |
 | `tests/unsupported/*.py` | 1 | `check` 必须打「没建模」标记，且 `build` 必须拒绝 |
 | `tests/strict/*.py` | 6 | 错误只在降级/构建期出现（`check` 看不到），必须 `build` 拒绝并给出指定消息 |
 | Windows 目标 | 146 | `--target=win64` 产物在 Windows 上有 138 个用例输出与 POSIX 逐字节一致 |
 | `tests/diff/` | 7 个生成器 | 随机程序与 CPython 比 stdout，默认 3 种子 840 个程序 |
+| `tools/difftest.sh` | 188 个用例 | `tests/run` 的 -O0/-O2 输出自差分，并行（`PYADAMAS_TEST_JOBS` 调并行度），自动跳过 `*_perf`，0 不一致 |
 | `tests/modules/` | 15 个目录 | 多模块编译 + 运行 + 二次构建缓存命中 |
 | `tests/bench/` | 用例集 | 标准库与 RC/GC 基准：同一用例分别用 PyAdamas 与 CPython 跑，`python3 tests/bench/run_bench.py` |
 | 零开销异常 | 4 套夹具 | `tests/exc/`：`z1_rt` 116 项、`z2_rt` 134 项、`z2_codegen` 209 项；`tools/lsda_ref` 100+ 条字节断言。默认路径下非可挂起函数的 try 全程无 `_setjmp`（`--no-zero-cost-exc` 可回退） |

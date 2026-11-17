@@ -130,15 +130,19 @@
 | 0.239 | 增量清扫（照抄 Go 并发 GC 结构）：最大停顿 5.09ms → **1.68ms（-67%）**，代价是吞吐 +2.7% |
 | 0.240 | inc/dec 内联（抄 Swift ARC）：`rt.o` 符号引用 239/236 → 0，性能 +1.3% |
 | 0.241–0.242 | RAII 作用域守卫（GCC `cleanup` 属性）：13 处 pin + 2 处 free 守卫，手工 `pa_gc_pin` 71 → 62 |
+| 0.270 | 三条热路径内联：短串拷贝/比较内联 + `join` 跳过空分隔符 + 个位数驻留；常数除数除法改魔数乘法（3058 万组对拍零失败）；RC 记账（inc/dec/mark/cleanup）生成代码内联；单字节 `str` 字面量接运行期驻留表 + `str ==`/`!=` 指针快路径。`queue_sim` −32.9%、`str_build` −55.4% |
+| 栈对齐 | 修掉两处 ABI 违规（closure shim 的临时寄存器对齐公式、C 回调蹦床缺 `rsp` 调整），撤掉 `-mstackrealign`；根因与实测见 [stack-alignment.md](stack-alignment.md) |
+| 元组 | 全非堆元组（`elem_kind == 0`）不进 GC 堆链（`rc_alloc_untracked` + `pa_tuple_new_filled`），`sort_struct` −11.9% |
+| RC 记账 | 生成代码里的 inc/dec/mark/cleanup 改内联快路径（`gen_call_rt` 专用发射），慢路径才调 `pa_rc_*_slow` |
 | 许可证 | Apache-2.0（见 [LICENSE](../LICENSE) / [NOTICE](../NOTICE)） |
 
-## 当前状态（0.242）
+## 当前状态（0.270）
 
 流水线 `源码 → 词法 → AST → lambda 脱糖 → 类型检查 → IR → x86-64 汇编 → 可执行文件` 已打通。
 
 - **语言面**：标量、字符串、`bytes`（含迭代与 `%` 格式化）、列表/元组/字典/集合、切片读写、闭包/lambda/`*args`/`**kwargs`/装饰器、推导式、`with`、异常值（`args`/`raise ... from`/自定义异常）、类（字段/方法/C3 多继承/零参 `super()`/`@staticmethod`/`@classmethod`/`@property`/类属性/类装饰器/类名当值）、`match/case`、`del`、复数字面量、f-string 格式说明、dunder 协议（含装饰 dunder、`__call__` 与方法值）、`Generator[Y, S, R]` 标注、`open`/`input`/`sys.stdin`、`struct` 值类型、`cimport`/`cdecl` C 互操作与跨模块继承。
 - **标准库**：`math`/`sys`/`asyncio`/`random`/`os`/`os.path`/`subprocess`/`time`/`itertools`/`collections`/`functools`/`json`/`string`/`re`/`datetime`/`pathlib`/`csv`/`base64`/`binascii`/`heapq`/`bisect`/`hashlib`/`hmac`/`logging`/`statistics`/`textwrap`/`operator`/`fnmatch`/`copy`，以及封装 OpenBLAS 的 `linalg`。
-- **验证**：188 个运行用例、53 个反例、12 个正例、6 个严格用例、1 个未建模、15 个模块目录；`tests/run_tests.sh` 全量 **205 ran ok**（= 188 运行 + 15 模块 + 1 cdecl + 1 cfi），exit 0。差分 runner 已自举，默认 840 例；另有 `tools/difftest.sh` 做 O0/O2 自差分（188 用例 0 不一致）。`tests/bench/` 提供 pyadamas vs CPython 的标准库与 RC/GC 基准（`base64`/`hashlib` 已反超）。
+- **验证**：189 个运行用例、53 个反例、12 个正例、6 个严格用例、1 个未建模、15 个模块目录；`tests/run_tests.sh` 全量 exit 0（= 189 运行 + 15 模块 + 1 cdecl + 1 cfi）。差分 runner 已自举，默认 840 例；另有 `tools/difftest.sh` 做 O0/O2 自差分（188 用例 0 不一致）。`tests/bench/` 提供 pyadamas vs CPython 的标准库与 RC/GC 基准（`base64`/`hashlib` 已反超）。
 - **内存正确性（0.215–0.233）**：ASan 全量 205 ran ok；**泄漏扫描 0 处 / 188 用例**（0.217 首次开 `detect_leaks=1` 时为 23 处）。两类 unknown 值的 use-after-free 已根治（返回值/存储所有权、unknown 槽被提升导致 GC 根缺失）。剩余已知不精确点见「技术债」第 2 条。
 - **诊断工具（0.227–0.231）**：`runtime/rt_diag.c` 独立模块，`PYADAMAS_RC_TRACE` / `PYADAMAS_RC_TRACE_MIN` / `PYADAMAS_RC_TRACE_KIND` / `PYADAMAS_EXC_TRACE` / `PYADAMAS_DIAG_DEPTH` 追踪对象分配、释放、临时栈进出与异常所有权转移，退出汇总未释放对象并给出源码行归因。关闭时零输出、零可测开销。用法与两个陷阱见 [development.md](development.md)。
 - **IR 基础设施（0.205–0.209）**：`Inst::id` / `Block::id` 稳定标识（不随 `vector::insert/erase` 与新增块失效）、`uses_of` / `def_of` / `inst_by_id` / `block_by_id` 反向索引、`Operand` 带 tag（`PYADAMAS_IR_CHECK=1` 校验 op 与 kind 一致性）。`EhRegion` 不再存会过期的块号。**明确不上 SSA**，理由见 [ir.md](ir.md)。
@@ -150,7 +154,7 @@
   运行时通过 `rt_internal.h` 的平台层把 poll/clock_gettime/nanosleep/mkdir/realpath/
   sysconf/timegm 映射到 Win32，subprocess 用 CreateProcess + 匿名管道；Setjmp 换成自带的
   `pa_win_setjmp`（不依赖展开信息，因为生成的汇编函数没有 `.pdata`）。覆盖面 138 / 146。
-- **主要缺口**：asyncio 边角；异常对象 traceback / 列号 / `.debug_info`；依赖动态属性的 stdlib（如 `argparse`，见「技术债」）；字符串码点语义 S3（格式化宽度、`re`、文件 I/O，见 [str-codepoints.md](str-codepoints.md)）。性能瓶颈：**顶层变量是全局、不参与寄存器分配**（见「下一步」，归因已按 0.233 后的实测修正）。
+- **主要缺口**：asyncio 边角；异常对象 traceback / 列号 / `.debug_info`；依赖动态属性的 stdlib（如 `argparse`，见「技术债」）；字符串码点语义 S3（格式化宽度、`re`、文件 I/O，见 [str-codepoints.md](str-codepoints.md)）。性能瓶颈：**顶层变量是全局、不参与寄存器分配**（见「下一步」；全局提升已评估放弃——循环内全局缓存的窄版本微基准 −84%，但真实基准无收益）。
 - **零开销异常（Z1–Z5 已完成）**：Itanium ABI 表驱动展开，**默认路径**（0.202，`--no-zero-cost-exc` 可回退）。
   非可挂起函数里的 try **全程无 `_setjmp`**：personality routine + LSDA 发射器 +
   运行时胶水（`pa_eh_throw`/`pa_eh_landing`/`pa_eh_rethrow`）+ codegen 接线。
@@ -172,7 +176,7 @@
 
 性能优化（先解决模块顶层函数边界）与语言/标准库完备性并行；C 互操作与 BLAS 已在 0.110–0.120 落地（`cimport`、`ptr[T]` 缓冲区、`linalg` 封装 OpenBLAS），不再是下一步。
 
-### 0. 性能瓶颈的根因（归因已按实测修正，路线待决策）
+### 0. 性能瓶颈的根因（归因已按实测修正；全局提升已评估放弃）
 
 寄存器分配 R1–R4 已落地（0.203–0.204，见 [regalloc.md](regalloc.md)）：基于活跃区间的线性扫描、caller 池（r10/r11）、浮点也走线性扫描。正确性收益明确，但**性能收益为零**。
 
@@ -205,16 +209,16 @@
 
 0.204 手工把 matmul 包进 `run()` 就见效，侧面印证症结是「变量是不是局部槽」，而不是「调用有多少」。
 
-#### 两条候选路线（尚未定案）
+#### 两条候选路线（全局提升已评估放弃，B 尚未定案）
 
 | 路线 | 做法 | 代价与风险 |
 |---|---|---|
 | **A. 标量全局提升** | 把分配器候选集从 slot 扩到**标量** global，复用现有活跃区间 + 线性扫描 | 不改程序结构，语义 / traceback / 异常路径零风险。标量不是 GC 根，提升到 callee-saved 后不需要在 `call.rt` 前写回，绕开 R4 列的 GC / 展开耦合。**主要工作量是审计一份「哪些 `call.rt` 会回调用户代码」的白名单**（sort 比较器、生成器 resume、`__exit__`、C 回调跳板），这些必须保守写回。堆全局先不碰。收益上限仍受 6 个 callee 寄存器约束，且只覆盖顶层 |
 | **B. 顶层热循环 outlining** | 把顶层循环包成合成函数，诱导变量变局部槽（等价于自动化 0.204 对 matmul 的手工改造） | 更通用，覆盖未来任意顶层代码。但要处理 try 保护区切割、traceback 的 PC→函数表、GC 帧记录链与控制流边界，风险与工作量高一档 |
 
-**倾向 A 先做**：风险确定低、直接打实测到的主要成本（spectral_norm 的 39 次 `load.global`），且可带 `PYADAMAS_NO_GLOBAL_RA=1` 之类回退开关。B 留到 A 实测证明 callee 池仍是瓶颈之后再评估。
+**A 路线：全局提升已评估并放弃。** 先做了一个窄版本实验：对循环体内没有任何 `call.*` 的循环，把读写的标量全局缓存进新分配的局部槽、循环出口写回（`src/opt_global_promote.cpp` 的 `promote_globals_in_loops`，提交 `89885a0`，已接进优化管线）。结果是**微基准 −84%、真实基准无收益**——所以按 A 的完整形态（把分配器候选集扩到标量 global）继续做的预期收益不成立，这条方向不再作为下一步。B（顶层热循环 outlining）仍未定案，后续若做需先给出实测证据。
 
-**验收（两条路线通用）**：spectral_norm / fannkuch / fasta 的 `load.global` + `store.global` 数明显下降，四语言基准实测缩小与 Go 的差距（同机 A/B、`--rebuild`、交替多轮取中位数）；全量 205 ran ok + ASan 全量 + O0/O2 差分 188 用例 + 四套异常夹具 + 泄漏扫描 0 处，全部无回退。
+**验收（B 路线）**：spectral_norm / fannkuch / fasta 的 `load.global` + `store.global` 数明显下降，四语言基准实测缩小与 Go 的差距（同机 A/B、`--rebuild`、交替多轮取中位数）；全量 `tests/run_tests.sh` 通过 + ASan 全量 + O0/O2 差分 188 用例 + 四套异常夹具 + 泄漏扫描 0 处，全部无回退。
 
 **注意 0.212 的教训**：判断「还有多少提升空间」必须看修正后的调试输出（整型与浮点分开统计）。此前的 `7/14 slots promoted` 是错的，实际已接近饱和——不要基于饱和的池子再承诺收益。
 ### 1. 工程收尾
@@ -248,7 +252,7 @@
 1. **GC 的根只扫登记区，且 stop-the-world**：分代已落地（minor trial-deletion + major 标记-清扫）；GC 不再扫整段真实栈，只扫帧记录登记的 unknown 槽和 callee-saved 寄存器；0.175 起临时区按 vreg 静态类型发射位图、只扫「可能含指针」的字（纯标量帧整段不扫），保守保留实测从 92 个 / 8144 B 降到 0；0.181/0.183 修掉一整类「构造期对象不在 GC 根上」的 UAF（54 个函数 / 70 个 pin 点）；0.216 修掉「unknown 槽被提升到寄存器 → 帧记录登记的栈槽恒为 0 → GC 漏标记」这一类（unknown 槽禁止提升、`gc_scan_slot_` 改在分配之前算、被扫描的槽禁止融合）；仍没有增量/并发 GC，也没有完整栈映射（位图按字收，不按时刻收）
 2. **unknown 引用的计数不精确**：容器 kind 2 元素、unknown 字段与全局已用 RC 索引精确释放（`pa_rc_dec_unknown`）；裸 `list` 的空容器已在第一次写入时定型；0.215 补上 unknown 返回值与「unknown → unknown」存储的引用所有权；0.233 让 `rc_index_off`（exact-RC）时的混合容器元素也能精确释放（16 字节对齐 + `marked == UNTRACKED` + 堆链成员三条硬约束）。**仍剩 `release_slots` 跳过 unknown 槽**：直接补齐会让 12 个用例 over-release，因为 unknown 槽里的值未必被 retain 过（装饰器回填、borrow_slots、帧槽别名都会让它持有借来的值）。根治需要槽级「是否 owned」标记
 3. **Optional 的收窄能力不足**：`x: Optional[str]` 在 `if x is None: ...` 之后、跨语句块或跨函数调用时仍按 Optional 处理；修它需要正经的数据流分析
-4. **优化遍仍不完整**：有常量折叠、DCE、小函数内联、静态调用直接化、LICM、下标版本化/免检查、循环旋转、跨块 CSE 与后端拷贝合并；没有强度削减、通用向量化和全局寄存器分配
+4. **优化遍仍不完整**：有常量折叠、DCE、小函数内联、静态调用直接化、LICM、下标版本化/免检查、循环旋转、跨块 CSE 与后端拷贝合并；强度削减（IVSR）已评估并放弃（nbody 反而 +15.7%，负结论见 [ivsr-negative-result.md](ivsr-negative-result.md)）；暂无通用向量化和全局寄存器分配
 5. **`tuple` 与 `list` 表示相同**：tuple 也是可变的动态数组，语义上不严谨
 6. **诊断不带列区间**：只指向起点，长表达式不好定位
 7. **没有增量重编 Python 源码**：每次 `build` 都是全量编译，只有 import 模块有缓存

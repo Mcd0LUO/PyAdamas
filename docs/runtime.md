@@ -15,27 +15,33 @@
 ## 对象布局
 
 ```c
-typedef struct Py23Rc {
-    struct Py23Rc* next;    /* GC 注册表链 */
-    struct Py23Rc* prev;
+typedef struct PyAdamasRc {
+    struct PyAdamasRc* next;    /* GC 注册表链 */
+    struct PyAdamasRc* prev;
     int64_t rc;             /* INT64_MIN = 永生（字面量） */
     void (*dtor)(void*);    /* rc 归零：正常释放路径 */
     void (*release)(void*); /* GC 清扫：只减掉指向可达对象的引用 */
     int64_t size;           /* 负载字节数，GC 扫描范围 */
-    int64_t kind;           /* STR / LIST / OBJ / CLOSURE / DICT / INSTANCE */
-    int64_t marked;         /* 标记-清扫用 */
-} Py23Rc;                   /* 64 字节，位于负载之前，对象指针不指向它 */
+    int64_t kind;           /* STR=0 / LIST=1 / OBJ=2 / CLOSURE=3 / DICT=4 / INSTANCE=5 / RANGE=6 / STRUCT=7 */
+    int64_t marked;         /* 标记-清扫用；低位是状态标志：MARK=1 / UNTRACKED=2 / YOUNG=4 */
+} PyAdamasRc;                   /* 64 字节，位于负载之前，对象指针不指向它 */
 
-/* pub：str 是码点数、bytes 是字节数；len 恒为 UTF-8 字节数 */
-typedef struct { int64_t pub; int64_t len; int64_t hash; const char* data; } PyAdamasStr;
-typedef struct { int64_t len; int64_t cap; int64_t* data; int64_t elem_kind; } Py23List;
+/* pub：str 是码点数、bytes 是字节数；len 恒为 UTF-8 字节数。
+   hash：<=7 字节时是 SSO 字符区，否则不用；chash：字典哈希缓存（0 = 未算），
+   字面量在编译期填好。两者分开是因为 SSO 短串也需要哈希缓存。 */
+typedef struct { int64_t pub; int64_t len; int64_t hash; const char* data; int64_t chash; } PyAdamasStr;
+typedef struct {
+    int64_t len; int64_t cap; int64_t* data; int64_t elem_kind;
+    uint64_t* heap_bits;   /* kind 2 的逐元素「是否堆指针」位图；NULL = 不可跟踪 */
+    int64_t bits_cap;      /* 位图字数（cap 会被缓冲池抬高，不能复用） */
+} PyAdamasList;            /* 48 字节 */
 typedef struct {
     int64_t hash; int64_t key; int64_t val;
     int32_t prev, next;            /* 插入顺序双向链表（entry 下标，-1 结束） */
-} Py23DictEntry;
+} PyAdamasDictEntry;
 typedef struct {
     int64_t len; int64_t cap;      /* len 在偏移 0，len()/真值判断直接读 */
-    Py23DictEntry* entries;        /* 条目数组；存活项由 prev/next 串成插入顺序 */
+    PyAdamasDictEntry* entries;        /* 条目数组；存活项由 prev/next 串成插入顺序 */
     int32_t* order;                /* 链表快照：order[i] = 第 i 个存活项下标（懒重建） */
     int32_t* index;                /* 开放寻址索引：entry 下标 + 1，0 为空，-1 墓碑 */
     int64_t icap;                  /* 索引表容量（2 的幂） */
@@ -49,15 +55,18 @@ typedef struct {
     int64_t val_own;
     int64_t hash_slot, eq_slot;    /* 类 key 的 __hash__/__eq__ vtable 槽；-1 内建 */
     int64_t default_factory;       /* collections.defaultdict 工厂；0 普通 dict */
-} Py23Dict;
+} PyAdamasDict;
 /* 用户对象没有对应的 C struct：布局由编译器按类定义生成。
-   负载 +0 是 vtable 指针，字段从 +8 起，每个 8 字节；隐藏的 Py23Rc
+   负载 +0 是 vtable 指针，字段从 +8 起，每个 8 字节；隐藏的 PyAdamasRc
    头在负载前面，所以既有偏移一个都没变。 */
 ```
 
 分配统一走 `rc_alloc(size, dtor, release, kind)`，返回负载指针；
-`pa_rc_inc` / `pa_rc_dec` 从负载指针往前 64 字节找到头。`rc_dec`
-归零时先调 `dtor`，再释放整块内存。所有堆对象同时挂进 GC 注册表。
+`pa_rc_inc` / `pa_rc_dec` 从负载指针往前 64 字节找到头（`h->rc` 因此落在
+`p - 48`）。`rc_dec` 归零时先调 `dtor`，再释放整块内存。`rc_alloc` 把
+对象挂进 GC 注册表，但**不是所有堆对象都在链上**：`rc_alloc_untracked` 照常
+分配后 `rc_unlink` 并置 `marked = PYADAMAS_RC_UNTRACKED`，这类对象 GC 永远
+看不到、只能由 RC 精确释放（见「列表」的全非堆元组和「循环收集器」的不变量）。
 
 ### 字符串
 
@@ -67,37 +76,58 @@ typedef struct {
 `len`（偏移 8）恒为 UTF-8 字节数。不变量：str 满足 `0 <= pub <= len`（等号当且仅当
 全 ASCII），bytes 满足 `pub == len`。
 
-`hash` 有两种用途：≤7 字节的短串用它存内联字符；更长的串用它缓存字典哈希
-（FNV-1a + mix64）。`data` 在偏移 24（`pub/len/hash` 之后的第四个机器字）。
+`hash` 只服务 SSO：≤7 字节的短串把字符内联在这 8 字节里（留 1 字节 NUL），
+`data` 指向 `&hash`，长串 `data` 指向结构体后面的字符区。字典哈希缓存在
+偏移 32 的 `chash`（FNV-1a + mix64，`0` = 未算）——SSO 短串和长串都能缓存。
+`data` 在偏移 24（`pub/len/hash` 之后的第四个机器字）。
 
 字符串有两种来源，负载布局完全一致，运行时函数不需要区分：
 
 | 来源 | 分配方式 | 生命周期 |
 |---|---|---|
 | 字面量 | codegen 在 `.data.rel.ro` 里静态构造，前置 `rc = INT64_MIN` | 与进程同寿，inc/dec 直接跳过 |
-| 拼接 / 转换 | `rc_alloc(sizeof(Py23Str) + len + 1, NULL)`，字符区紧跟结构体 | 引用计数归零时释放 |
+| 拼接 / 转换 | `rc_alloc(sizeof(PyAdamasStr) + len + 1, NULL, NULL, PYADAMAS_RC_STR)`，字符区紧跟结构体；≤7 字节只分配结构体本身，字符走 SSO | 引用计数归零时释放 |
 
 堆分配的字符串尾部补 `\0`，方便调试时直接当 C 字符串看；但长度以 `len` 为准，内嵌 `\0` 是合法的。
 
-<=128 字节的字符串走 freelist：按 8 字节分 16 档，每档最多缓存 64 块；
-RC 归零时不 `free`，而是回到同档池里，下一次同档分配直接复用。池块在
-进程退出时仍然持有（静态根，不触发泄漏报告），上限约 192KB。
+<=128 字节的字符串走 freelist：按 8 字节分 16 档；小档（<=40 字节，覆盖
+内联串和短堆串）每档最多缓存 512 块，其余档 64 块——`text.split()` 这类场景
+全是内联短串，按 64 个的容量实测 64% 的放入直接溢出去 `free` 了。RC 归零时
+不 `free`，而是回到同档池里，下一次同档分配直接复用。池块在进程退出时仍然
+持有（静态根，不触发泄漏报告），总量由「16 档 × 每档上限」封顶（小档
+512 块 × 5 档 + 其余档 64 块 × 11 档，百 KB 量级）。
 
-<=7 字节的短串把字符内联在 `Py23Str::hash` 的 8 字节里（留 1 字节 NUL），
+<=7 字节的短串把字符内联在 `PyAdamasStr::hash` 的 8 字节里（留 1 字节 NUL），
 `data` 指向这段内联区；长串仍用结构体后面的字符区。值仍然是裸指针，对象
-本身仍走 RC/GC，所以这不是 tagged-value 级别的 SSO，只是省掉短串的尾部
-字符区。
+本身仍走 RC（exact-RC 模式下串是 untracked leaf，不进 GC 链），所以这不是
+tagged-value 级别的 SSO，只是省掉短串的尾部字符区。
 
-长串的哈希在第一次被字典使用时算好写进 `hash`；**长串字面量的哈希在
-编译期算好**直接写进静态对象——`.data.rel.ro` 在 PIE + RELRO 下是只读的，
-运行时不能在上面做懒缓存。因此 `d["长键"]` 这类重复查找不再每次重扫整串。
+串的哈希在第一次被字典使用时算好写进 `chash`（所有长度都能缓存，SSO
+短串也一样）；**字面量的哈希在编译期算好**直接写进静态对象——`.data.rel.ro`
+在 PIE + RELRO 下是只读的，运行时不能在上面做懒缓存。因此 `d["长键"]` 这类
+重复查找不再每次重扫整串。
 
 单码点字符串（`s[i]`、`for c in s`、`chr()`）和 `"True"/"False"/"None"`
-的转换结果是**静态永生对象**：0x00–0x7F 的 128 个单字节串在首次使用时初始化并
-登记进 RC 索引，取 ASCII 字符不再分配；非 ASCII 码点走 `pa_cp_str`，现编 1–4 字节
-（CPython 对 >U+00FF 也是新对象）。字符串不可变，共享对象与 CPython 的行为一致；
-`s[:]`、无变化的 `strip()`、`''.join([x])` 也按 CPython 的做法直接返回原串
-（inc 一次）。
+的转换结果是**静态永生对象**：`char_tab[256]` 一次性初始化好全部 256 个槽位
+（索引开启时同时登记进 RC 索引），其中 0x00–0x7F 是合法单码点 UTF-8
+（`pub = 1`），取 ASCII 字符
+不再分配；0x80–0xFF 的单字节序列不是合法 UTF-8，这些槽位 `pub = 0`，只是给
+`pa_char_str` 的低 8 位调用留一个确定对象，str 路径不会取到。非 ASCII 码点走
+`pa_cp_str`，现编 1–4 字节（CPython 对 >U+00FF 也是新对象）。
+
+**驻留表也导出给生成代码。** `PyAdamasStr* pa_char_tab[256]` 是上表 256 个载荷
+指针，由 `pa_static_strs_init()` 填好；生成的 `main` 在序言里调它（顺序在
+`pa_register_literals` 之后：驻留对象要不要登记进 RC 索引取决于是否走
+exact-RC，必须等索引开关定下来再初始化）。于是单字节 ASCII 的 str 字面量直接
+生成 `movq pa_char_tab+N(%rip), %rax`，和 `s[i]` 返回的是**同一个指针**——
+`s[i] == "0"` 这类逐字符比较退化成一次 `cmpq`，连长度检查和字节比较都不用
+做（生成代码里 `str ==` / `!=` 先比指针，不等才 `call pa_str_eq`；
+`pa_str_eq` 自己第一行也是 `a == b`）。bytes 字面量不参与（`pub` 语义不同）。
+`pa_char_str` 收的参数是**字符编码**不是数值：`str(7)` 要传 `'7'`（0x37），
+传 7 会拿到 BEL 控制字符。
+
+字符串不可变，共享对象与 CPython 的行为一致；`s[:]`、无变化的 `strip()`、
+`''.join([x])` 也按 CPython 的做法直接返回原串（inc 一次）。
 
 构造 API 收敛成：`str_new`（默认，扫描算码点数）、`str_new_bytes`（bytes，`pub=len`）、
 `str_new_ascii`（已知全 ASCII）、`str_alloc_raw` + `str_seal`/`str_seal_n`（先分配后
@@ -113,9 +143,10 @@ RC 归零时不 `free`，而是回到同档池里，下一次同档分配直接�
 
 `cap` 是已分配容量，`len` 是有效元素数，`data` 是 8 字节槽数组。元素统一占 8 字节：整数直接放，浮点放位模式（`memcpy` 转换），指针放地址。**没有运行时类型标签**——取值时按什么类型解释由编译期决定。
 
-`Py23List` 结构体（32 字节）和 <=512 字节的 `data` 缓冲也走 freelist：
-结构体最多缓存 64 个；`data` 按 64 字节分 8 档，每档最多 64 块。复用时
-`cap` 按档容量对齐（只会变大），销毁时先 dec 元素再回收缓冲。
+`PyAdamasList` 结构体（48 字节，多了 `heap_bits`/`bits_cap`）和 <=512 字节的
+`data` 缓冲也走 freelist：结构体最多缓存 64 个；`data` 按 64 字节分 8 档，
+每档最多 64 块。复用时 `cap` 按档容量对齐（只会变大），销毁时先 dec 元素再
+回收缓冲。
 
 `elem_kind` 是元素所有权类别，由降级器按容器静态类型算好：
 
@@ -123,20 +154,41 @@ RC 归零时不 `free`，而是回到同档池里，下一次同档分配直接�
 |---|---|---|---|
 | 0 | 全部非堆类型 | 不 retain | 不 release |
 | 1 | 全部堆类型 | 生成代码 retain | 运行时 release |
-| 2 | unknown 或混合 | 堆→`rc_inc`，unknown→`rc_inc_unknown` | `pa_rc_dec_unknown`（注册表判断，整数是空操作） |
+| 2 | unknown 或混合 | 堆→`rc_inc`，unknown→`rc_inc_unknown` | 覆盖/截断走注册表；销毁 / GC 清扫有位图时按位图判，否则 `pa_rc_dec_unknown`（整数是空操作） |
 | 3 | 未定（只可能是空容器） | 第一次写入时定型并 retain | 沿用定型后的种类 |
 
 `pa_list_new(cap, elem_kind)` 最小容量 4；`append` 满了就翻倍。
 `pa_list_set` / `pa_list_set_len` / `del` / 销毁都按 `elem_kind` 释放旧元素；
-kind 2 统一走 `pa_rc_dec_unknown`：先查 RC 索引确认是堆指针再 dec，
-所以整数和「看起来像指针」的字面量都不会被误减。目标容器原本是 kind 1、
-但接入了 unknown/混合元素时，运行期把 `elem_kind` 提升为 2。
+kind 2 的元素释放要么查全局 RC 索引（`pa_rc_dec_unknown`：先确认是堆指针
+再 dec，所以整数和「看起来像指针」的字面量都不会被误减），要么走**逐元素
+堆位图**。
+
+位图 `heap_bits` 是方案 A：元素「是不是堆指针」在**写入那一刻**就知道（写入点
+的静态类型），没必要事后到全局索引里反查。生成代码给每个元素多传一个
+`heap` 标记（0 非堆 / 1 堆 / 2 unknown），`pa_list_append` 据此置位；一旦遇到
+unknown（`heap == 2`）就把整个位图丢掉（`heap_bits = NULL`），退回索引反查的
+旧路径——正确性优先。位图只给 kind 2 分配：kind 0/1 的销毁路径从不读它，
+无条件分配等于给 `tuple[int, int]` 每次创建多一次 `realloc` + 清零。
+
+目标容器原本是 kind 1、但接入了 unknown/混合元素时，运行期把 `elem_kind`
+提升为 2。
 
 kind 3 只出现在空容器上：`pa_list_prep(l, v, vk, owned)` 在第一次写入前
 定型——`vk` 是值的静态种类（0/1/2），unknown 值查一次 RC 索引判断是不是
 堆指针；静态种类和现有 kind 冲突时降级为 2。生成代码只在容器未定型、
 种类冲突或值是 unknown 时调用它（`store_list_elem`），其余写入仍按静态
 种类直接 retain。
+
+**全非堆元组不进 GC 堆链。** 元组不可变，`elem_kind == 0` 表示元素全是非堆
+值——对象没有任何出边，不可能处在引用环里，GC 完全不必看到它。codegen 对
+元素个数 <=4 且全是整型机器字的 `tuple.new{a, b}` 走 `pa_tuple_new_filled`
+（`n, elem_kind, a, b, c, d` 一次调用）：`elem_kind == 0` 时用
+`rc_alloc_untracked` 分配——省掉 `rc_link` / `rc_unlink`、新生代登记和 GC
+分配计数，RC 归零时照常由 `list_destroy` 释放 `data` 缓冲。元素全是堆引用
+的元组（`elem_kind == 1`）仍走普通 `rc_alloc`（同形的 `pa_list_new_filled`），
+因为出边必须被 GC 看见。实测 `bench/realistic/queue_sim.py` 每次
+`simulate` 分配约 66 个 `tuple[int, int]`，`rc_link`/`rc_unlink` 合计占
+profile 的 7.9%；这个提交让 `sort_struct` 快 11.9%。
 
 ### 字典 / 集合
 
@@ -178,7 +230,7 @@ kind 3 只出现在空容器上：`pa_list_prep(l, v, vk, owned)` 在第一次�
 - 正/负步长、负索引、越界夹取；`step == 0` 抛 ValueError；
 - list/tuple 结果新建同 `elem_kind` 的列表，kind 1/2 元素按源类别逐个 retain；
 - str 结果新建字节串，按字节复制；
-- 结果是新堆对象，正常进入 RC/GC。
+- 结果是新堆对象，正常走 RC（exact-RC 模式下 range/str/struct 这类叶子不进 GC 链）。
 
 `pa_list_slice_assign(dst, start, stop, step, src)` 处理写切片：
 `step == 1` 时用 `memmove` 支持长度变化（替换 / 插入 / 删除），扩展切片
@@ -195,7 +247,8 @@ typedef struct { int64_t start; int64_t stop; int64_t step; int64_t len; } PyAda
 
 `pa_range_new` 只分配这 32 字节负载，元素按 `start + i * step` 现算；`len`
 在构造时算好，`len()` / 下标 / `in` / 归约都不物化。`list(r)` / `tuple(r)`
-才建列表。range 是不可变堆对象，正常走 RC/GC。
+才建列表。range 是不可变堆对象，没有堆字段（出边为零），exact-RC 模式下按
+`rc_leaf_untracked` 当叶子处理：不进 GC 链，只由 RC 释放。
 
 ### 用户对象
 
@@ -254,7 +307,7 @@ cell 不是新的运行时类型，就是一个**单元素列表** `list[T]`：�
   展开时释放），3 awaiting，4 已排队；
 - `kind`：0 生成器，`PYADAMAS_CORO_MAGIC` 协程，`PYADAMAS_AGEN_MAGIC` 异步生成器；
 - `waiter` 是等待本对象的协程/gather/task（持有一个引用）；
-- `exc` 是待注入的 `Py23Exception*`；
+- `exc` 是待注入的 `PyAdamasException*`；
 - `cur` 是当前等待的 awaitable（借用观察指针，取消时用来解绑）；
 - `out` 保存 yield/await 值或协程返回值，运行时读走后清零。
 
@@ -299,7 +352,7 @@ Python 代码，逐槽读到非空值就 `dec` + 清零。
 - `3`：`out` 是 awaitable，交给 `await_from_coro` 挂到事件循环；
 - `2`：异常交给 waiter；等待者下次恢复时走注入分发，在帧内重新抛出。
 
-awaitable 有六类：协程帧、`Py23Await` 的 sleep(1)/gather(2)/task(3)、
+awaitable 有六类：协程帧、`PyAdamasAwait` 的 sleep(1)/gather(2)/task(3)、
 异步生成器驱动(4)、Future(5)、fd 等待(6)。协程/异步生成器/fd 只有一个
 `waiter`；Future 和 Task 用 `waiters` 列表支持多个等待者，Future 另用
 `callbacks` 列表保存
@@ -335,11 +388,11 @@ longjmp 回同步调用点。GC 清扫和进程退出不跑析构器，但会单
 
 异常不参与 RC/GC：handler 记录和异常对象都是 `malloc` 的普通内存。
 
-- **handler 记录**：`{jmp_buf env; Py23Handler* prev; int64_t mark; Py23Frame* frame}`，
+- **handler 记录**：`{jmp_buf env; PyAdamasHandler* prev; int64_t mark; PyAdamasFrame* frame}`，
   `env` 必须在开头，生成代码把记录指针直接交给 `setjmp`。全局
   `handler_top` 维护 LIFO 链；`mark` 是压入时刻的临时值栈水位，
   `frame` 是压入时刻的帧栈顶。
-- **帧记录**：普通函数在序言压一条 `Py23Frame {prev; n; void* slots[]}`
+- **帧记录**：普通函数在序言压一条 `PyAdamasFrame {prev; n; void* slots[]}`
   （槽地址数组），正常返回前弹栈，全局 `pa_frame_top` 串成链。
   `raise` 的 `exc_longjmp` 先调 `pa_frame_unwind(handler_top->frame)`
   沿链释放被跳过帧里持有引用的堆槽（先清空再 `rc_dec`，可重入），
@@ -356,26 +409,28 @@ longjmp 回同步调用点。GC 清扫和进程退出不跑析构器，但会单
 
 ## 函数表
 
-`RtFn` 枚举见 `src/ir.h`，名字映射见 `rt_name()`。生成代码按枚举直接 `call pa_xxx`，不做符号查找。
+`RtFn` 枚举与 `rt_name()` 都在 `src/ir_ops.h`（`ir.h` 只是把它 include 进来）。生成代码按枚举直接 `call pa_xxx`，不做符号查找。
 
 ### 列表
 
 | 函数 | 签名 | 语义 |
 |---|---|---|
-| `pa_list_new` | `(i64 cap, i64 elem_kind) -> Py23List*` | 建空表，容量至少 4；kind 3 表示元素种类未定 |
-| `pa_list_append` | `(Py23List*, i64) -> void` | 追加，满则翻倍 `realloc`；不隐式 retain |
-| `pa_list_prep` | `(Py23List*, i64 v, i64 vk, i64 owned) -> void` | 空表首次写入前定型并 retain（`owned` 非 0 则只定型） |
-| `pa_list_get` | `(Py23List*, i64) -> i64` | 负索引先加 `len`；越界抛 IndexError；返回借用。生成代码内联快路径，只有越界才进来 |
-| `pa_list_set` | `(Py23List*, i64, i64) -> void` | 同上，写入；按 elem_kind 释放旧元素（kind 2 走注册表）。生成代码内联快路径，运行期 elem_kind 决定是否释放 |
-| `pa_list_set_len` | `(Py23List*, i64) -> void` | 改 `len`；按 elem_kind 释放被截掉的元素 |
-| `pa_list_extend` | `(Py23List* dst, Py23List* src) -> void` | 追加 src 全部元素；按来源种类 retain，dst 原本是 kind 1 而源是 kind 2 时提升为 2，`src == dst` 先快照 |
-| `pa_list_repeat` | `(Py23List*, i64) -> Py23List*` | n 次重复；一次分配后按 `elem_kind` retain 追加，负次数返回空表 |
-| `pa_list_sum_i64` | `(Py23List*, i64 start) -> i64` | O2 归约；AVX2 4×int64 累加（按 uint64 回绕），否则标量 |
-| `pa_list_sum_f64` | `(Py23List*, f64 start) -> f64` | `--fast-math` + O2 时 AVX2 4 路 double 分组求和；否则标量顺序 |
-| `pa_list_min_i64` / `max_i64` | `(Py23List*) -> i64` | O2 归约；AVX2 compare+blend，空表抛 ValueError |
-| `pa_list_slice_assign` | `(Py23List*, i64, i64, i64, Py23List*) -> void` | 切片赋值；step 1 支持长度变化 |
-| `pa_str_to_list` | `(Py23Str*) -> Py23List*` | 按字节拆成 list[str]，每字符新串 |
-| `pa_bytes_to_list` | `(Py23Str*) -> Py23List*` | 按字节拆成 list[int]（0..255），`for c in b"..."` 用 |
+| `pa_list_new` | `(i64 cap, i64 elem_kind) -> PyAdamasList*` | 建空表，容量至少 4；kind 3 表示元素种类未定，kind 2 的列表在第一次 append 时分配 `heap_bits` |
+| `pa_list_new_filled` | `(i64 n, i64 elem_kind, i64 a, i64 b, i64 c, i64 d) -> PyAdamasList*` | 一次调用构造 n <= 4 的定长列表（元素已按值展开在寄存器里）；不建位图 |
+| `pa_tuple_new_filled` | 同上 | 同形，但 `elem_kind == 0` 时走 `rc_alloc_untracked`，不进 GC 堆链 |
+| `pa_list_append` | `(PyAdamasList*, i64 v, i64 heap) -> void` | 追加，满则翻倍 `realloc`；`heap` 是元素级堆标记（0 非堆 / 1 堆 / 2 unknown），用来维护 `heap_bits`；不隐式 retain |
+| `pa_list_prep` | `(PyAdamasList*, i64 v, i64 vk, i64 owned) -> void` | 空表首次写入前定型并 retain（`owned` 非 0 则只定型） |
+| `pa_list_get` | `(PyAdamasList*, i64) -> i64` | 负索引先加 `len`；越界抛 IndexError；返回借用。生成代码内联快路径，只有越界才进来 |
+| `pa_list_set` | `(PyAdamasList*, i64, i64) -> void` | 同上，写入；按 elem_kind 释放旧元素（kind 2 走注册表，覆盖路径不读 `heap_bits`）。生成代码内联快路径，运行期 elem_kind 决定是否释放 |
+| `pa_list_set_len` | `(PyAdamasList*, i64) -> void` | 改 `len`；按 elem_kind 释放被截掉的元素 |
+| `pa_list_extend` | `(PyAdamasList* dst, PyAdamasList* src) -> void` | 追加 src 全部元素；按来源种类 retain，dst 原本是 kind 1 而源是 kind 2 时提升为 2，`src == dst` 先快照 |
+| `pa_list_repeat` | `(PyAdamasList*, i64) -> PyAdamasList*` | n 次重复；一次分配后按 `elem_kind` retain 追加，负次数返回空表 |
+| `pa_list_sum_i64` | `(PyAdamasList*, i64 start) -> i64` | O2 归约；AVX2 4×int64 累加（按 uint64 回绕），否则标量 |
+| `pa_list_sum_f64` | `(PyAdamasList*, f64 start) -> f64` | `--fast-math` + O2 时 AVX2 4 路 double 分组求和；否则标量顺序 |
+| `pa_list_min_i64` / `max_i64` | `(PyAdamasList*) -> i64` | O2 归约；AVX2 compare+blend，空表抛 ValueError |
+| `pa_list_slice_assign` | `(PyAdamasList*, i64, i64, i64, PyAdamasList*) -> void` | 切片赋值；step 1 支持长度变化 |
+| `pa_str_to_list` | `(PyAdamasStr*) -> PyAdamasList*` | 按字节拆成 list[str]，每字符新串 |
+| `pa_bytes_to_list` | `(PyAdamasStr*) -> PyAdamasList*` | 按字节拆成 list[int]（0..255），`for c in b"..."` 用 |
 | `pa_range_new` | `(i64 start, i64 stop, i64 step) -> PyAdamasRange*` | 分配惰性 range（只存边界与 len）；step 0 抛 ValueError |
 | `pa_range_len` / `pa_range_get` / `pa_range_contains` | `(PyAdamasRange*[, i64]) -> i64` | `len` / 下标 / `in`，越界 panic |
 | `pa_range_sum_i64` / `sum_f64` / `min_i64` / `max_i64` / `any` | `(PyAdamasRange*, i64 start) -> i64` 或 `(PyAdamasRange*) -> i64/f64` | 归约，不物化 |
@@ -385,28 +440,28 @@ longjmp 回同步调用点。GC 清扫和进程退出不跑析构器，但会单
 
 | 函数 | 签名 | 语义 |
 |---|---|---|
-| `pa_dict_new` | `(i64 key_kind, i64 key_own, i64 val_own, i64 hash_slot, i64 eq_slot) -> Py23Dict*` | 空表，初始 8 槽；set 传 `val_own = 0`。`hash_slot`/`eq_slot` ≥ 0 时类键的哈希/相等走 vtable（`__hash__`/`__eq__`），-1 表示按 `key_kind` 走内建哈希 |
-| `pa_dict_set` | `(Py23Dict*, i64 key, i64 val) -> void` | 插入/更新；更新时释放新 key 引用并 dec 旧 value |
-| `pa_dict_get` | `(Py23Dict*, i64 key) -> i64` | 缺失抛 KeyError；defaultdict 设了工厂时先造默认值、插入再返回。返回借用 |
-| `pa_dict_set_default_factory` | `(Py23Dict*, i64 factory) -> void` | 设置 defaultdict 的内置工厂编码（0 = 普通 dict） |
-| `pa_dict_contains` | `(Py23Dict*, i64 key) -> i64` | `in` 用，返回 0/1 |
-| `pa_dict_key_at` | `(Py23Dict*, i64 index) -> i64` | 按插入顺序取 key，遍历用（order 快照失效时先重建） |
-| `pa_dict_val_at` | `(Py23Dict*, i64 index) -> i64` | 按插入顺序取 value，遍历用 |
-| `pa_dict_get_or` | `(Py23Dict*, i64 key, i64 def) -> i64` | 缺失返回默认值 |
-| `pa_dict_keys` | `(Py23Dict*) -> Py23List*` | 新 list，按插入顺序装 key |
-| `pa_dict_values` | `(Py23Dict*) -> Py23List*` | 新 list，按插入顺序装 value |
-| `pa_dict_items` | `(Py23Dict*) -> Py23List*` | 新 list，元素是 `(key, value)` 二元组 |
-| `pa_dict_update` | `(Py23Dict*, Py23Dict*) -> void` | 逐项复制；先 retain，再 dict_set |
-| `pa_dict_copy` | `(Py23Dict*) -> Py23Dict*` | 同所有权类别的浅拷贝（match 的 `**rest`） |
-| `pa_dict_pop` | `(Py23Dict*, i64 key, i64 has_default, i64 def) -> i64` | 删除并返回值；缺失且有默认值返回默认值，否则抛 KeyError |
-| `pa_dict_popitem` | `(Py23Dict*) -> Py23List*` | 删除最后插入项，返回 `(key, value)` 二元组 |
-| `pa_dict_pop_last` | `(Py23Dict*) -> i64` | 删除最后插入项并返回 key（set.pop） |
-| `pa_dict_remove` | `(Py23Dict*, i64 key, i64 missing_ok) -> void` | remove/discard；缺失时抛 KeyError 或按 missing_ok 忽略 |
-| `pa_dict_clear` | `(Py23Dict*) -> void` | 释放全部 key/value 引用并清空表 |
-| `pa_list_contains` | `(Py23List*, i64 value, i64 cmp_kind) -> i64` | list/tuple 的 `in`；0 int / 1 str / 2 float / 3 raw |
-| `pa_str_contains` | `(Py23Str*, Py23Str*) -> i64` | 子串查找 |
-| `pa_list_slice` | `(Py23List*, i64 start, i64 stop, i64 step) -> Py23List*` | 新列表；kind 1 元素 retain |
-| `pa_str_slice` | `(Py23Str*, i64 start, i64 stop, i64 step) -> Py23Str*` | 新字节串 |
+| `pa_dict_new` | `(i64 key_kind, i64 key_own, i64 val_own, i64 hash_slot, i64 eq_slot) -> PyAdamasDict*` | 空表，初始 8 槽；set 传 `val_own = 0`。`hash_slot`/`eq_slot` ≥ 0 时类键的哈希/相等走 vtable（`__hash__`/`__eq__`），-1 表示按 `key_kind` 走内建哈希 |
+| `pa_dict_set` | `(PyAdamasDict*, i64 key, i64 val) -> void` | 插入/更新；更新时释放新 key 引用并 dec 旧 value |
+| `pa_dict_get` | `(PyAdamasDict*, i64 key) -> i64` | 缺失抛 KeyError；defaultdict 设了工厂时先造默认值、插入再返回。返回借用 |
+| `pa_dict_set_default_factory` | `(PyAdamasDict*, i64 factory) -> void` | 设置 defaultdict 的内置工厂编码（0 = 普通 dict） |
+| `pa_dict_contains` | `(PyAdamasDict*, i64 key) -> i64` | `in` 用，返回 0/1 |
+| `pa_dict_key_at` | `(PyAdamasDict*, i64 index) -> i64` | 按插入顺序取 key，遍历用（order 快照失效时先重建） |
+| `pa_dict_val_at` | `(PyAdamasDict*, i64 index) -> i64` | 按插入顺序取 value，遍历用 |
+| `pa_dict_get_or` | `(PyAdamasDict*, i64 key, i64 def) -> i64` | 缺失返回默认值 |
+| `pa_dict_keys` | `(PyAdamasDict*) -> PyAdamasList*` | 新 list，按插入顺序装 key |
+| `pa_dict_values` | `(PyAdamasDict*) -> PyAdamasList*` | 新 list，按插入顺序装 value |
+| `pa_dict_items` | `(PyAdamasDict*) -> PyAdamasList*` | 新 list，元素是 `(key, value)` 二元组 |
+| `pa_dict_update` | `(PyAdamasDict*, PyAdamasDict*) -> void` | 逐项复制；先 retain，再 dict_set |
+| `pa_dict_copy` | `(PyAdamasDict*) -> PyAdamasDict*` | 同所有权类别的浅拷贝（match 的 `**rest`） |
+| `pa_dict_pop` | `(PyAdamasDict*, i64 key, i64 has_default, i64 def) -> i64` | 删除并返回值；缺失且有默认值返回默认值，否则抛 KeyError |
+| `pa_dict_popitem` | `(PyAdamasDict*) -> PyAdamasList*` | 删除最后插入项，返回 `(key, value)` 二元组 |
+| `pa_dict_pop_last` | `(PyAdamasDict*) -> i64` | 删除最后插入项并返回 key（set.pop） |
+| `pa_dict_remove` | `(PyAdamasDict*, i64 key, i64 missing_ok) -> void` | remove/discard；缺失时抛 KeyError 或按 missing_ok 忽略 |
+| `pa_dict_clear` | `(PyAdamasDict*) -> void` | 释放全部 key/value 引用并清空表 |
+| `pa_list_contains` | `(PyAdamasList*, i64 value, i64 cmp_kind) -> i64` | list/tuple 的 `in`；0 int / 1 str / 2 float / 3 raw |
+| `pa_str_contains` | `(PyAdamasStr*, PyAdamasStr*) -> i64` | 子串查找 |
+| `pa_list_slice` | `(PyAdamasList*, i64 start, i64 stop, i64 step) -> PyAdamasList*` | 新列表；kind 1 元素 retain |
+| `pa_str_slice` | `(PyAdamasStr*, i64 start, i64 stop, i64 step) -> PyAdamasStr*` | 新字节串 |
 
 ### 模式匹配
 
@@ -420,11 +475,13 @@ longjmp 回同步调用点。GC 清扫和进程退出不跑析构器，但会单
 | `pa_is_dict` | `(void*) -> i64` | 是不是 dict/set 载体（映射模式的前置检查） |
 | `pa_is_str` / `pa_is_complex` | `(void*) -> i64` | unknown 值上的 `str()` / `complex()` 类型模式 |
 | `pa_str_eq_unknown` / `pa_complex_eq_unknown` | `(void*, lit*) -> i64` | unknown 值上的字符串/复数模式比较 |
-| `pa_dict_copy` | `(Py23Dict*) -> Py23Dict*` | `**rest` 的浅拷贝，随后用 `dict_remove` 删掉已匹配 key |
+| `pa_dict_copy` | `(PyAdamasDict*) -> PyAdamasDict*` | `**rest` 的浅拷贝，随后用 `dict_remove` 删掉已匹配 key |
 
 静态字符串字面量 rc 为 `INT64_MIN`，不进 GC 堆链；模块入口先调用
 `pa_register_literals` 把它们登记进 RC 索引，unknown 类型检查才能安全
-确认「这个机器字确实指向 Py23Str」。
+确认「这个机器字确实指向 PyAdamasStr」。紧接着还要调
+`pa_static_strs_init` 填好 256 项驻留表——单字节 ASCII 字面量在生成代码里
+直接索引 `pa_char_tab`，函数体执行前这张表必须是有效的。
 
 类模式的字段仍按编译期偏移直接 `field.get`：子类沿用父类字段前缀，所以模式类
 自身的字段偏移对所有子类实例都成立。
@@ -436,13 +493,13 @@ longjmp 回同步调用点。GC 清扫和进程退出不跑析构器，但会单
 | `pa_handler_push` | `() -> handler*` | 压入 handler 记录，保存临时栈水位与帧栈顶 |
 | `pa_handler_leave` | `(handler*) -> void` | 弹出记录并 `rc_cleanup` 到水位 |
 | `pa_handler_discard` | `(handler*) -> void` | 只弹出记录，不清临时值（提前退出用） |
-| `pa_frame_unwind` | `(Py23Frame* target) -> void` | 释放 target 之上所有帧记录的堆槽引用 |
+| `pa_frame_unwind` | `(PyAdamasFrame* target) -> void` | 释放 target 之上所有帧记录的堆槽引用 |
 | `pa_exc_matches` | `(str* type) -> i64` | 当前异常是否属于该类型（含继承） |
 | `pa_exc_accept` | `() -> str*` | pending 转 current，返回消息新字符串 |
 | `pa_exc_accept_value` | `() -> excval*` | pending 转 current，返回异常值（`except as e`） |
 | `pa_exc_value_new` | `(str* type, str* msg) -> excval*` | 构造异常值，msg 为 NULL 表示无参数 |
-| `pa_exc_value_from_exc` | `(Py23Exception*) -> excval*` | 从控制流异常复制一个值对象 |
-| `pa_exc_from_value` | `(excval*) -> Py23Exception*` | 转成 malloc 的 pending 异常 |
+| `pa_exc_value_from_exc` | `(PyAdamasException*) -> excval*` | 从控制流异常复制一个值对象 |
+| `pa_exc_from_value` | `(excval*) -> PyAdamasException*` | 转成 malloc 的 pending 异常 |
 | `pa_exc_value_args` | `(excval*) -> tuple*` | `e.args`（借用，args[0] 是消息） |
 | `pa_exc_value_str` | `(excval*) -> str*` | `str(e)` / `print(e)` 的消息字符串 |
 | `pa_raise_value` | `(excval*) -> void` | 抛异常值（noreturn） |
@@ -624,19 +681,56 @@ longjmp 回同步调用点。GC 清扫和进程退出不跑析构器，但会单
 
 ### 引用计数
 
+**生成代码已经不再 `call pa_rc_inc` / `pa_rc_dec` 了。** `gen_call_rt` 对
+`RcInc` / `RcDec` / `RcMark` / `RcCleanup` 四个 RtFn 有专用发射，结构照抄
+`rt_internal.h` 里的 `pa_rc_inc_fast` / `pa_rc_dec_fast`：只有慢路径才
+`call pa_rc_inc_slow` / `pa_rc_dec_slow`。inc 的内联判据是 NULL、永生字面量
+（`rc == INT64_MIN`，直接跳过）、`rc <= 0`（走慢路径报错）；dec 是 NULL、
+`pa_gc_phase_fast != 0`（收集中只登记边，不能重入释放）、永生、以及
+`rc <= 1`（归零必须走慢路径真正释放）。统计模式只在运行时函数的内联版
+（`*_fast`）里当慢路径判据，生成代码不查它。实测这四个函数在
+queue_sim / str_build 的 perf 采样里分别占 8.2%/11.4%（cleanup）、
+4.0%/3.0%（inc）、4.2%/3.7%（dec），而函数体本身只有 3~6 条指令——call/ret +
+被调用者保存的开销比它们干的活还大。
+
+`pa_rc_mark` 内联得更彻底：它就是 `return temp_len;`，生成代码一条
+`movq temp_len(%rip), %rax` 顶掉一次 call。`pa_rc_cleanup` 只内联「水位没变就
+直接返回」这条最常见的出口，其余整体交给原函数。慢路径落回运行时函数时
+**必须**补 `spill_fp_slots` / `reload_fp_slots`：xmm 全是 caller-saved，慢路径
+可能触发析构函数，不落盘就会被冲掉。
+
+运行时自己的 `.c` 里也走内联：头文件把 `pa_rc_inc` / `pa_rc_dec` 宏成
+`*_fast`，只有 `rt_core.c`（`PA_RC_NO_INLINE`）提供外部实体符号——C 的
+`static inline` 不产生外部符号，所以生成代码调的那两个符号必须单独定义一次。
+快路径只碰 `h->rc` 和两个全局别名，编译器能把整个判断序列摊在调用点。
+
+**临时值栈**：全局 `void** temp_stack; int64_t temp_len, temp_cap;`。
+`pa_rc_temp(p)` 入栈但**不增加计数**——栈接管的是产生者本来就持有的那一个
+引用（永生对象直接跳过，不入栈）；`pa_rc_mark()` 直接 `return temp_len;`，
+`pa_rc_cleanup(mark)` 把水位弹到 mark 并逐个 `dec`，水位相等时一次比较就返回
+（实测 65.6 万次 cleanup 里至少 10 万次是空操作），mark 越界才 panic。
+`pa_rc_temp_take(p)` 把栈上那个新值**取走**、所有权转给槽/字段/返回值，之后
+cleanup 不再释放它：先看栈顶（容器构造时「刚 push 就 take」是主流模式），
+不中再从 `temp_len-2` 往前找，命中就与栈顶交换。`pa_rc_temp_unknown(v)` 是
+unknown 值的版本：先查 RC 索引确认是堆对象，才入栈。
+
 | 函数 | 签名 | 语义 |
 |---|---|---|
-| `pa_rc_inc` | `(void*) -> void` | 引用 +1；空指针和永生字面量跳过 |
-| `pa_rc_inc_unknown` | `(i64) -> i64` | unknown 值按堆注册表保守 retain；不是堆指针就什么也不做 |
+| `pa_rc_inc` | `(void*) -> void` | 引用 +1；空指针和永生字面量跳过（运行时内部走 `pa_rc_inc_fast` 内联） |
+| `pa_rc_inc_slow` | `(void*) -> void` | 慢路径：统计计数、NULL、`rc <= 0` 报错 |
+| `pa_rc_inc_unknown` | `(i64) -> i64` | unknown 值按堆注册表保守 retain；不是堆指针就什么也不做（先按 `< 65536` 排除小整数） |
 | `pa_rc_dec_unknown` | `(i64) -> void` | unknown 值按堆注册表保守释放；不是堆指针就什么也不做 |
-| `pa_rc_dec` | `(void*) -> void` | 引用 -1；归零时调 `dtor` 并释放整块 |
-| `pa_rc_temp` | `(void*) -> void` | 表达式临时值入栈，接管产生者的引用 |
+| `pa_rc_dec` | `(void*) -> void` | 引用 -1；归零时调 `dtor` 并释放整块（运行时内部走 `pa_rc_dec_fast` 内联） |
+| `pa_rc_dec_slow` | `(void*) -> void` | 慢路径：统计、GC 期间只登记边、归零时 `rc_unlink` + `dtor` + 回收（untracked 对象跳过 `rc_unlink`） |
+| `pa_rc_temp` | `(void*) -> void` | 表达式临时值入栈，接管产生者的引用（不 inc；永生对象不入栈） |
+| `pa_rc_temp_unknown` | `(i64) -> void` | unknown 值的入栈版本：查注册表确认是堆对象才入栈 |
 | `pa_rc_temp_take` | `(void*) -> void` | 把临时栈上的新值取走，所有权转给槽/字段/返回值 |
-| `pa_rc_mark` | `() -> i64` | 返回临时值栈当前水位 |
-| `pa_rc_cleanup` | `(i64 mark) -> void` | 释放到指定水位 |
+| `pa_rc_mark` | `() -> i64` | 返回临时值栈当前水位（生成代码内联成一条 load） |
+| `pa_rc_cleanup` | `(i64 mark) -> void` | 释放到指定水位；水位不变直接返回，越界 panic |
 | `pa_rc_stats_init` | `() -> void` | 入口按 `PYADAMAS_RC_STATS` 打开统计，退出时打印 `[rc] ...` |
-| `pa_rc_shutdown` | `() -> void` | 入口函数退出时释放临时栈自身存储 |
+| `pa_rc_shutdown` | `() -> void` | 入口函数退出前把栈里残留的临时值逐个 `dec` 再释放栈存储（exact-RC 下残留的 untracked leaf 只能靠 RC 释放，直接 free 会永久泄漏） |
 | `pa_register_literals` | `(void** objs, i64 n) -> void` | 把模块的静态字符串字面量登记进 RC 索引（只登记，不挂 GC 链） |
+| `pa_static_strs_init` | `() -> void` | 填好 256 项驻留表 `pa_char_tab`；生成的 `main` 在序言里调，单字节字面量直接索引它 |
 | `pa_closure_new` | `(i64 code, i64 n_caps) -> closure*` | 分配闭包负载并挂 cell 析构器 |
 
 ### 循环收集
@@ -644,9 +738,9 @@ longjmp 回同步调用点。GC 清扫和进程退出不跑析构器，但会单
 | 函数 | 签名 | 语义 |
 |---|---|---|
 | `pa_gc_init` | `(void** roots, i64 n, void* stack_top) -> void` | 注册全局根表与栈顶，生成的 `main` 调一次；顺带按 `PYADAMAS_GC_STATS` / `PYADAMAS_GC_CONSERVATIVE` 打开诊断与收窄回退（各读一次环境变量） |
-| `pa_gc_collect` | `() -> void` | 分配量超过 2MB 时由 `rc_alloc` 自动触发 |
+| `pa_gc_collect` | `() -> void` | 由 `rc_alloc` 在分配量超过阈值时自动触发（minor 初始 2MB / major 初始 8MB）；大集合 major 的清扫由后续分配推进 |
 | `pa_gc_unref_child` | `(void*) -> void` | GC 清扫用：对象可达时把引用计数减一 |
-| `pa_gc_shutdown` | `() -> void` | 程序退出，释放所有剩余堆对象（含环） |
+| `pa_gc_shutdown` | `() -> void` | 程序退出，释放链上所有剩余堆对象（含环）；untracked 对象不在链上，必须此前由 RC 归零（入口的 shutdown 顺序负责） |
 
 ### 字符串
 
@@ -654,16 +748,16 @@ longjmp 回同步调用点。GC 清扫和进程退出不跑析构器，但会单
 |---|---|---|
 | `pa_str_concat` | `(str*, str*) -> str*` | 新建对象，两次 `memcpy` |
 | `pa_str_repeat` | `(str*, i64) -> str*` | n 次重复；一次分配 + `memcpy`，负次数返回空串 |
-| `pa_str_char_at` | `(str*, i64) -> str*` | 负索引先加 `len`；越界抛 IndexError；返回驻留的单字节串（不分配） |
-| `pa_char_str` | `(i64) -> str*` | 取 256 个静态驻留单字节串之一（按低 8 位） |
-| `pa_str_from_i64` | `(i64) -> str*` | 手写十进制，不经过 `snprintf` |
+| `pa_str_char_at` | `(str*, i64) -> str*` | 负索引先加 `pub`（码点数）；越界抛 IndexError；ASCII 返回驻留表单字节串（不分配），非 ASCII 现编 1–4 字节 |
+| `pa_char_str` | `(i64) -> str*` | 按**字符编码**取 256 项驻留表（`c & 0xff`，不是数值）；0x00–0x7F 才是合法单字节串，其余槽位 `pub = 0` |
+| `pa_str_from_i64` | `(i64) -> str*` | 手写十进制，不经过 `snprintf`；0..9 直接返回驻留的数字字符（`pa_char_str('0' + v)`，零分配） |
 | `pa_str_any` | `(i64) -> str*` | unknown 值：堆字符串原样返回并补引用，否则按整数格式化 |
 | `pa_str_from_f64` | `(double) -> str*` | CPython `repr` 规则，见下 |
 | `pa_str_from_bool` | `(i64) -> str*` | 静态驻留的 `"True"` / `"False"` |
 | `pa_str_from_none` | `() -> str*` | 静态驻留的 `"None"` |
 | `pa_find_bytes` | `(const char*, i64, const char*, i64, i64) -> i64` | `memchr` 找首字节 + `memcmp` 校验；`find`/`count`/`replace`/`split`/`in` 共用 |
-| `pa_str_eq` | `(str*, str*) -> i64` | 逐字节相等，返回 0/1 |
-| `pa_str_cmp` | `(str*, str*) -> i64` | 三路比较，返回 -1/0/1 |
+| `pa_str_eq` | `(str*, str*) -> i64` | 同一对象先命中（`a == b`）；再比长度、单字节/批量字节；返回 0/1 |
+| `pa_str_cmp` | `(str*, str*) -> i64` | 三路比较，返回 -1/0/1；<=8 字节走内联循环，更长 `memcmp` |
 | `pa_str_capwords` | `(str*) -> str*` | 单遍 `string.capwords`：按 ASCII 空白切词、词首大写/其余小写，只分配一个输出串 |
 | `pa_percent_format` | `(str* pat, list* args, str* desc, i64 is_bytes) -> str*` | printf 风格 `%`；`desc` 每个字节描述实参域（`i` int、`b` bool、`f` float、`s` str/bytes、`n` None），非法组合抛 TypeError |
 
@@ -723,6 +817,7 @@ PC → (函数, 行号) 表的帧才打印；没有表（旧产物/无调试信�
 | `pa_pow_i64` | `gen_bin_int` 的 `Pow` | 快速幂；**负指数返回 0**（CPython 返回 float） |
 | `pa_abs_i64` | `abs(int)` | 整数绝对值，回绕语义 |
 | `pa_str_eq` / `pa_str_cmp` | `gen_cmp` | 参数形态固定，没必要进枚举 |
+| `pa_static_strs_init` | 生成的 `main` 序言 / 模块 init | 填好 `pa_char_tab` 与 `"True"/"False"/"None"` 驻留对象；必须晚于索引开关（驻留对象要不要登记进 RC 索引取决于它） |
 | `floor` / `fmod` / `pow` | libm | 浮点 `//`、`%`、`**` 直接用 libm |
 
 ## 浮点转字符串
@@ -741,7 +836,7 @@ PC → (函数, 行号) 表的帧才打印；没有表（旧产物/无调试信�
 ## 内存模型
 
 **引用计数。** 每个堆对象（字符串、列表、元组、字典、集合、类实例、闭包）带隐藏的
-`Py23Rc` 头；所有权约定：
+`PyAdamasRc` 头；所有权约定：
 
 - 槽 / 全局 / 字段 / kind 1 列表元素持有引用；
 - `load` / `field.get` / `list.get` 只借用，不增加计数；
@@ -755,15 +850,17 @@ PC → (函数, 行号) 表的帧才打印；没有表（旧产物/无调试信�
   推导式在构造成功后同样转移元素引用。
 
 临时值栈让降级器不用做活跃性分析：就算某个分支、`continue`、`break`
-跳过一条清理路径，下一层边界也会兜底。代价是纯堆操作会多几条调用；
-完全不含临时堆值的语句、循环和函数会把 mark/cleanup 在降级期删掉，
-所以整数代码的生成结果与 0.6.1 完全相同。
+跳过一条清理路径，下一层边界也会兜底。代价是纯堆操作会多几条指令
+（mark/cleanup/inc/dec 的快路径都已内联，见「引用计数」）；完全不含临时
+堆值的语句、循环和函数会把 mark/cleanup 在降级期删掉，所以整数代码的
+生成结果与 0.6.1 完全相同。
 
 引用计数处理不了两类东西：**环**和**类型看不见的引用**。它们交给下面的
 循环收集器：
 
-- 对象自环、相互递归闭包形成的 cell 环：分配量超过 2MB 时被标记-清扫；
-  进程退出时也会清空整个堆。
+- 对象自环、相互递归闭包形成的 cell 环：分配量超过新生代阈值（初始 2MB）
+  触发 minor（trial-deletion），超过 major 阈值（初始 8MB，随后按老生代存活
+  量自适应）触发 major（标记-清扫）；进程退出时也会清空整个堆。
 - `unknown` 容器元素、unknown 字段/全局：写入时用 `pa_rc_inc_unknown`
   （或已知堆类型时 `pa_rc_inc`）持有，覆盖/销毁时用 `pa_rc_dec_unknown`
   释放。注册表先确认机器字确实指向堆对象，因此整数和静态字面量都不会
@@ -773,7 +870,9 @@ PC → (函数, 行号) 表的帧才打印；没有表（旧产物/无调试信�
 - 注册表维护一份开放寻址索引（墓碑复用、按存活数决定扩容或原地压缩），
   索引本身只随存活对象数增长。
 - 唯一的「回收静默性」：没有 `__del__`/弱引用，对象什么时候真正释放
-  不可观察；GC 是 stop-the-world 的分代收集，没有增量/并发。
+  不可观察；GC 是单线程的分代收集，没有并发收集。major 的**清扫**已经按
+  集合规模分片（集合 >= `GC_INCR_MIN_SET` = 20000 个对象时，清扫摊到后续
+  每次 `rc_alloc` 上按预算推进，见「循环收集器」），标记仍一次性做完。
 
 静态类型的好处是 RC 插桩位置是确定的：赋值、传参、返回、容器写入都是
 明确的增减引用点。GC 只是兜底，不替代 RC。
@@ -794,6 +893,13 @@ landing pad 会把这段临时值精确清掉；异常路径不会泄漏已 reta
 代），`alloc_since_major` 超过「老生代翻倍 / 8MB」触发 major（集合 =
 整堆）。
 
+**不在链上的对象不参与收集。** `rc_alloc_untracked` 分出去的对象（全非堆
+元组；exact-RC 模式下连字符串 / range / struct 这类叶子也走
+`rc_leaf_untracked`）不在 GC 堆链上，GC 既不扫描也不清扫，只由 RC 归零时
+`dtor` 释放。这条捷径的正确性来自一个不变量：**untracked 对象没有任何
+出边（或出边只指向同样 untracked 的叶子），因此不可能参与引用环**——
+环一旦形成就必须由 GC 回收，所以只有能证明这一点的对象才走 untracked。
+
 **minor（trial-deletion）**：
 
 1. 试探减计数：对集合内每个对象执行 `release` 回调，把每条出边从子对象
@@ -809,7 +915,12 @@ landing pad 会把这段临时值精确清掉；异常路径不会泄漏已 reta
    回合对象后再按正常 RC 处理这些边，避免清扫期重入释放。
 
 **major（标记-清扫）**：集合是整堆，根是全局根表、临时值栈、帧记录登记
-的地址和 callee-saved 寄存器；标记后清扫不可达对象。地址表按「本轮集合」建，minor
+的地址和 callee-saved 寄存器；标记同步做完，然后清扫不可达对象。大集合
+（>= `GC_INCR_MIN_SET` = 20000 个对象）的清扫分片：`gc_collect` 只记状态，
+真实清理由后续每次 `rc_alloc` 推进 `gc_incr_step`（每次 `GC_SWEEP_BUDGET`
+个对象）。分片期间 `gc_phase` 保持非 0，`pa_rc_dec` 只登记 `gc_pend`、
+不立即释放——否则清扫中重入释放会撞上还在队列里的指针。小集合直接同步清完：
+分片会打断分配路径的缓存局部性，实测反而更慢。地址表按「本轮集合」建，minor
 时只有新生代那么大，比给整堆建表便宜。
 
 收集现场用全局 `gc_phase` 把 `pa_rc_dec` 分流：trial/restore 只调整集合内
@@ -912,8 +1023,8 @@ print(p.returncode, resource.getrusage(resource.RUSAGE_CHILDREN).ru_maxrss)'
 
 ## 加一个运行时函数
 
-1. `src/ir.h`：`RtFn` 加枚举项 + 注释写签名
-2. `src/ir.h` 的 `rt_name()`：加 `case` 返回符号名
+1. `src/ir_ops.h`：`RtFn` 加枚举项 + 注释写签名
+2. `src/ir_ops.h` 的 `rt_name()`：加 `case` 返回符号名
 3. `src/codegen_call.cpp` 的 `gen_call_rt`：按参数形态把实参搬进 `%rdi/%rsi/%rdx/%xmm0`（`-Wswitch` 会强制你加）
 4. `runtime/rt_*.c`（先看 `rt_internal.h` 选文件）：实现，函数名与第 2 步一致，参数用 `int64_t` / `double`
 5. `docs/runtime.md`：函数表加一行
@@ -927,7 +1038,12 @@ print(p.returncode, resource.getrusage(resource.RUSAGE_CHILDREN).ru_maxrss)'
 - **更精确的根**：帧记录已经把 unknown 槽的扫描收窄到登记地址，临时区
   也按静态类型位图收窄（见「GC 诊断与临时区扫描收窄」）。剩下的空间是
   活跃性：位图按「字」收、不按「时刻」收，不活跃的 unknown 字仍会被扫，
-  这需要栈映射 / 活跃性分析。增量或并发收集是更远的目标。
+  这需要栈映射 / 活跃性分析。增量**清扫**已经落地（大集合 major 的清扫
+  按分配点分片），但**标记**仍是一次做完的：RC 的释放时机不受 GC 控制，
+  标记期间对象可能被 RC 释放、标记队列里还留着指向它的指针（登记
+  `gc_pend` 延后释放也挡不住收尾后才归零的对象，实测
+  `174_gc_construct_roots` 漏 21KB）。要真正并发标记，得先让所有释放都
+  经过 GC 的灰对象协议——那是另一套所有权模型。
 - **unknown 局部槽**：容器元素、字段和全局已经用 RC 索引精确释放
   （`pa_rc_dec_unknown`），表达式临时值也由 `pa_rc_temp_unknown` 持有并
   释放；只有 unknown 类型的局部槽仍是借来的引用（不计入 rc），靠保守扫栈

@@ -18,6 +18,9 @@ bash tools/difftest.sh build/release/pyadamas # 指定编译器
 
 每个用例用独立临时目录，并行时不会互相覆盖产物。
 
+反例组（`f*`）和 `*_perf` 用例会被自动跳过：前者本来就预期编译失败，后者的
+`-O0` / `-O2` 墙钟时间天然不同，不适合做输出比对。
+
 ## abbench.sh —— A/B 性能对比
 
 对比「当前工作区」与「某个 git 版本」的性能。固定了三件事，都是踩过坑的：
@@ -47,6 +50,22 @@ obj_dispatch          287.43ms  288.17ms   +0.3%   +3.7%
 ```
 
 噪声在 ±2% 内。超过这个幅度才算真实变化。
+
+## quickbench.sh —— 单版本回归计时
+
+对一个构建目录跑「最好 N 次」的最短耗时，用来回答「这次改动之后变快还是变慢」。
+默认跑 `queue_sim` / `str_build` 两个 realistic 用例，参数可以换成
+`bench/realistic/` 里的其它用例名。
+
+```bash
+bash tools/quickbench.sh                        # 默认 queue_sim str_build
+bash tools/quickbench.sh dict_wordfreq rec_memo # 指定用例
+PYADAMAS_BIN=build/dev/pyadamas REP=9 bash tools/quickbench.sh
+```
+
+环境变量：`REP=` 重复次数（默认 5）、`PYADAMAS_BIN=` 换构建目录（默认
+`build/release/pyadamas`）、`OUT=` 中间产物目录（默认 `/tmp/pyadamas-quickbench`）。
+每个用例打印最短耗时和输出的前 40 字节；用例不存在或构建失败时退出码非 0。
 
 ## irdump.cpp —— 枚举编号对照
 
@@ -84,6 +103,38 @@ $ /tmp/irdump rt 58
 ```
 
 不放进 CMake 是刻意的：它是开发期辅助工具，不该影响主构建的依赖图。
+
+## sync-server.sh —— 同步到开发服务器
+
+本地改完推服务器上编译验证。rsync 前按排除表过滤，**构建产物一律不传**：
+本地 `build/` 有 3GB，而且用本地工具链（gcc 14）编出来的 `.o` 拿到服务器
+（gcc 15）上链接，结果不可信。排除项：`build/`、`build*/`、`modcache/`、`*.o`、
+`*.a`、`*.so`、`prog.tmp`、`out.txt`、`exp.txt`、`*.log`、`__pycache__/`、
+`.cache/`、`a.out`，以及 `.vscode/`、`.idea/`、`*~` 这类编辑器噪音。
+
+```bash
+tools/sync-server.sh              # 默认：推送当前 checkout 到服务器
+tools/sync-server.sh --dry-run    # 只列出会传哪些文件，不实际传
+tools/sync-server.sh --pull       # 反向：把服务器上的改动拉回本地
+tools/sync-server.sh --build      # 推送后顺带在服务器上增量构建 + difftest
+```
+
+目标与密钥可覆盖：`PYADAMAS_SYNC_TARGET=user@host:/path`、`PYADAMAS_SYNC_KEY=~/.ssh/key`。
+
+## split_class.py —— 拆超大源文件
+
+把一个 header-only 的类拆成 `.h`（声明）+ `.cpp`（定义）。保留规则是「宁可少拆，
+不可拆错」：函数体与签名同行、函数体不超过 4 行、模板成员一律留在头里
+（这几类多在热路径，跨 TU 无法内联）。
+
+```bash
+python3 tools/split_class.py <src.h> <ClassName> <out.h> <out.cpp>
+```
+
+## 其它
+
+- `lsda_ref/` —— LSDA 字节格式的参考实现；
+- `win/` —— Windows 移植相关文件。
 
 ## 环境注意
 
