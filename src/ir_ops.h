@@ -141,6 +141,7 @@ enum class RtFn : uint16_t {
     ListEq,       // (list*, list*, i64 cmp_kind) -> i64
     StrContains,  // (str*, str*) -> i64
     DictGetOr,    // (dict*, i64 key, i64 default) -> i64
+    DictBump,     // (dict*, i64 key, i64 def, i64 delta) -> void  融合 get+add+set
     DictGetOpt,   // (dict*, i64 key) -> i64  缺失时返回 None
     DictKeys,     // (dict*) -> list*
     DictValues,   // (dict*) -> list*
@@ -627,6 +628,7 @@ inline const char* rt_name(RtFn f) {
         case RtFn::SetEq: return "pa_set_eq";
         case RtFn::StrContains: return "pa_str_contains";
         case RtFn::DictGetOr: return "pa_dict_get_or";
+        case RtFn::DictBump: return "pa_dict_bump";
         case RtFn::DictGetOpt: return "pa_dict_get_opt";
         case RtFn::DictKeys: return "pa_dict_keys";
         case RtFn::DictValues: return "pa_dict_values";

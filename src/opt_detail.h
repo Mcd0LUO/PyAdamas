@@ -37,6 +37,8 @@ bool licm_function(IRFunction& fn, size_t n_globals);
 bool rc_redundant_pairs(IRFunction& fn);
 // 槽位转发与分支线程化：短路布尔值不再经临时槽往返，直接按比较结果分支。
 void forward_slot_loads(IRFunction& fn);
+// `d[k] = d.get(k, def) + delta` 融合成一次 pa_dict_bump（省一次哈希+探测）。
+bool fuse_dict_bump(IRFunction& fn);
 bool version_bounds_function(IRFunction& fn);
 // 循环旋转：把条件计算复制到循环体之后，回边直接走 latch，消掉每次
 // 迭代的无条件跳转（代码生成会把「跳到下一块」的 jmp 省掉）。

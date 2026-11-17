@@ -210,6 +210,10 @@ void optimize_ir(IRModule& m, int opt_level) {
     // 短路布尔值经临时槽往返的形态：转发 + 分支线程化，让 cmp+branch 融合。
     for (auto& fptr : m.funcs) forward_slot_loads(*fptr);
 
+    // 字典计数器模式融合：`d[k] = d.get(k, def) + delta` 一次搞定。
+    // 放在内联之后（内联可能带进新形态）、CSE 之前。
+    for (auto& fptr : m.funcs) fuse_dict_bump(*fptr);
+
     // 循环内不变量的检查型下标：入口检一次边界，通过则走无检查的循环副本。
     for (auto& fptr : m.funcs) version_bounds_function(*fptr);
 

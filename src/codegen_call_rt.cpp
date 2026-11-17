@@ -509,6 +509,9 @@ void AsmGen::gen_rt_args(const Inst& in, RtFn fn) {
         case RtFn::ListEq:
         case RtFn::DictEq:
         case RtFn::ListSortedBy:
+        case RtFn::DictBump:
+            gen_rt_i4(in);
+            break;
         case RtFn::DictGetOr:
         case RtFn::DictRemove:
         case RtFn::RangeNew:

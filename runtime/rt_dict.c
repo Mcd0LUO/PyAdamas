@@ -617,3 +617,41 @@ void pa_dict_clear(PyAdamasDict* d) {
     d->tail = -1;
     memset(d->index, 0, sizeof(int32_t) * (size_t)d->icap);
 }
+
+/* `d[k] = d.get(k, def) + delta` 的融合版本。
+ *
+ * 这是词频统计 / 计数器最经典的写法，IR 里是三条指令：
+ *     %a = call.rt pa_dict_get_or(d, k, def)
+ *     %b = bin.add %a, delta
+ *     call.rt pa_dict_set(d, k, %b)          (+ 两次 rc_inc)
+ *
+ * 每次 dict 操作都要算一次哈希 + 一次开放寻址探测。同一个 key 连续做
+ * get 和 set，两次哈希完全是重复劳动（chash 缓存之后哈希本身便宜了，
+ * 但 dict_lookup 的探测仍要做两遍）。
+ *
+ * 这里合成一次：算一次哈希、做一次查找，命中就原地改值，未命中就插入。
+ *
+ * **语义等价性**（必须逐条对上 pa_dict_get_or + pa_dict_set 的组合）：
+ *   - 命中：新值 = 旧值 + delta，写回。旧值的引用要 dec（dict 不再持有它）；
+ *     新值 val 由调用方持有并转移给 dict，**不再 inc**（省掉那对 inc/dec）。
+ *   - 未命中：新值 = def + delta，插入。key 由调用方转移给 dict。
+ *   - val 的堆标记沿用 d->val_own；key 沿用 d->key_own。
+ *
+ * 与分开调用的唯一行为差异是**求值顺序**：分开时 get 与 set 之间若有
+ * 副作用（比如 delta 表达式抛异常）能看到中间状态。这里 delta 已经是
+ * 算好的值，def 也是常量，没有可观测的中间状态。
+ */
+void pa_dict_bump(PyAdamasDict* d, int64_t key, int64_t def, int64_t delta) {
+    int64_t h = dict_hash_key(d, key);
+    int64_t e = dict_lookup(d, key, h);
+    if (e >= 0) {
+        int64_t old = d->entries[e].val;
+        /* 加法用整数语义 —— 与 IR 里 bin.add 在 unknown 类型上的处理一致
+         * （gen_bin_int 直接 addq，不做运行时类型分派）。 */
+        int64_t nv = old + delta;
+        pa_own_dec(d->val_own, old);
+        d->entries[e].val = nv;
+        return;
+    }
+    pa_dict_set(d, key, def + delta);
+}
