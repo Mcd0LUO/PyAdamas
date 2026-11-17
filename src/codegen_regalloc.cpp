@@ -726,10 +726,39 @@ void AsmGen::report_interval_precision() {
             wasted += li.wastedByEnvelope();
         }
         if (n_used == 0) return;
-        std::fprintf(stderr, "[li] %-24s slots=%2d precise=%6lld envelope=%6lld wasted=%5lld (%4.1f%%)\n",
+        // **峰值压力对比：精确区间 vs 包络。**
+        //
+        // 这是「区间级分配能带来多少收益」的上限判据：
+        //   - 精确峰值 <= 6（GPR 数）   -> 洞感知分配能让所有槽常驻寄存器；
+        //   - 包络峰值 > 6               -> 现在的整函数分配必然溢出。
+        // 两者差距越大，重写的价值越大。
+        auto peak = [](const std::vector<LiveInterval>& v, bool use_env) {
+            std::vector<std::pair<int64_t, int>> ev;
+            for (const auto& li : v) {
+                if (li.empty()) continue;
+                if (use_env) {
+                    ev.emplace_back(li.firstPos(), 1);
+                    ev.emplace_back(li.lastPos(), -1);
+                } else {
+                    for (const auto& r : li.ranges) {
+                        ev.emplace_back(r.start, 1);
+                        ev.emplace_back(r.end, -1);
+                    }
+                }
+            }
+            std::ranges::sort(ev, [](const auto& x, const auto& y) {
+                return x.first != y.first ? x.first < y.first : x.second < y.second;
+            });
+            int cur = 0, mx = 0;
+            for (const auto& e : ev) { cur += e.second; mx = std::max(mx, cur); }
+            return mx;
+        };
+        std::fprintf(stderr,
+                     "[li] %-20s slots=%2d precise=%6lld env=%6lld waste=%4.1f%%  peak: precise=%d env=%d\n",
                      f_->name.c_str(), n_used, static_cast<long long>(precise),
-                     static_cast<long long>(envelope), static_cast<long long>(wasted),
-                     envelope > 0 ? 100.0 * static_cast<double>(wasted) / static_cast<double>(envelope) : 0.0);
+                     static_cast<long long>(envelope),
+                     envelope > 0 ? 100.0 * static_cast<double>(wasted) / static_cast<double>(envelope) : 0.0,
+                     peak(ivs, false), peak(ivs, true));
 }
 
 void AsmGen::linear_scan_pool(const std::vector<int>& cands, const char* const* regs,
