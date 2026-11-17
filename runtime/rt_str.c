@@ -1,6 +1,52 @@
 // rt_str.c —— 字符串与字符串方法
 #include "rt_internal.h"
 
+/* ── 短串内联拷贝 / 比较 ────────────────────────────────────────
+   字符串方法里最常见的形态是「对每个元素做一次 memcpy/memcmp」——
+   join、逐字符比较、startswith、find 都是。元素长度分布极偏：
+   拼接单字符、跟字面量比单字符，n 几乎总是 <= 8。
+
+   这种情形走 PLT 调 libc 的固定成本（保存被调用者寄存器 + IFUNC 跳板 +
+   长度分派）比真正的搬运贵一个数量级。实测 str_build：
+   8.8% 的采样落在 __memmove_evex_unaligned_erms 上，其中**绝大多数是
+   n == 0 的空分隔符拷贝**和 n == 1 的单字符拷贝 —— 每次都在付跳板钱。
+   5.1% 落在 __memcmp_evex_movbe 上，全是 1 字节比较。
+
+   这里给 n <= 8 的内联路径：小 n 用定长循环，gcc 展开成几条 mov，
+   比 PLT 调用便宜；n > 8 才回落到 libc（长串上 libc 的向量化仍然是
+   最优的，不能为了短串牺牲长串）。 */
+static inline void sm_copy_bytes(char* dst, const char* src, int64_t n) {
+    if (n <= 0) return;
+    if (n <= 8) {
+        for (int64_t i = 0; i < n; ++i) dst[i] = src[i];
+        return;
+    }
+    memcpy(dst, src, (size_t)n);
+}
+
+static inline int sm_bytes_eq(const char* a, const char* b, int64_t n) {
+    if (n <= 0) return 1;
+    if (n <= 8) {
+        for (int64_t i = 0; i < n; ++i)
+            if (a[i] != b[i]) return 0;
+        return 1;
+    }
+    return memcmp(a, b, (size_t)n) == 0;
+}
+
+/* 返回 -1 / 0 / +1（调用方只判符号，不必是 memcmp 的原始差值）。 */
+static inline int sm_bytes_cmp(const char* a, const char* b, int64_t n) {
+    if (n <= 0) return 0;
+    if (n <= 8) {
+        for (int64_t i = 0; i < n; ++i) {
+            unsigned char x = (unsigned char)a[i], y = (unsigned char)b[i];
+            if (x != y) return x < y ? -1 : 1;
+        }
+        return 0;
+    }
+    return memcmp(a, b, (size_t)n);
+}
+
 /* 元组的 repr：CPython 打印 (1, 2)，单元素带尾逗号 (1,)。
    元素按静态类型渲染：kind 0 int / 1 float / 2 str / 3 bool / 4 None。
    长度事先不知道，用可增长缓冲区拼。 */
@@ -144,6 +190,14 @@ PyAdamasStr* pa_bytes_decode(PyAdamasStr* s) {
 }
 
 PyAdamasStr* pa_str_from_i64(int64_t v) {
+    // **个位数直接返回驻留单字节串。**
+    //
+    // str() 的结果里单个数字占比极高（str(i % 10)、str(len(x)) 之类），
+    // 而 pa_char_str 对 0x00-0x7F 是 256 项驻留表：零分配、永生、rc_inc/dec
+    // 都是空操作。少一次 malloc + 一次 free + 一串 RC 记账。
+    // 实测 str_build 每次外层迭代 60 次 str(i%10)，一共 396 万次分配，
+    // 占该用例 __memmove/rc_alloc/str_alloc_raw 的相当一部分。
+    if ((uint64_t)v < 10u) return pa_char_str(v);
     // 手写十进制：snprintf 的格式解析在 str(i) 这种热路径上占大头。
     // 从缓冲区尾部往前写，负数补符号；INT64_MIN 用 -(v+1)+1 取绝对值。
     char buf[21];
@@ -334,16 +388,22 @@ int64_t pa_round_i64(int64_t v, int64_t ndigits) {
 }
 
 int64_t pa_str_eq(PyAdamasStr* a, PyAdamasStr* b) {
+    // 同一对象（字面量自比、驻留单字符自比）直接命中。
     if (a == b) return 1;
-    if (a->len != b->len) return 0;
-    return memcmp(a->data, b->data, (size_t)a->len) == 0;
+    const int64_t n = a->len;
+    if (n != b->len) return 0;
+    // 单字节是最常见的情形：下标取字符后跟单字符字面量比较（s[i] == "0"
+    // 这类），一次字节比较就够，连循环都不用建。str_build 里这条路径
+    // 每轮迭代命中 60 次。
+    if (n == 1) return a->data[0] == b->data[0];
+    return sm_bytes_eq(a->data, b->data, n);
 }
 
 /* 三路比较，供 `<` / `<=` / `>` / `>=` 用。
    UTF-8 的字节序与码点序一致，所以 memcmp 的结果就是 Python 的结果。 */
 int64_t pa_str_cmp(PyAdamasStr* a, PyAdamasStr* b) {
     int64_t n = a->len < b->len ? a->len : b->len;
-    int c = memcmp(a->data, b->data, (size_t)n);
+    int c = sm_bytes_cmp(a->data, b->data, n);
     if (c != 0) return c < 0 ? -1 : 1;
     if (a->len == b->len) return 0;
     return a->len < b->len ? -1 : 1;
@@ -364,6 +424,31 @@ static char sm_lower(char c) {
 }
 static char sm_upper(char c) {
     return (c >= 'a' && c <= 'z') ? (char)(c - 'a' + 'A') : c;
+}
+
+/* join 的公共填充逻辑（str / bytes 两版共用）。
+   返回写入的字节数；码点数由调用方另外累加。
+
+   **两个关键点：**
+   1. 空分隔符（"".join 是最常见的写法）要整个跳过拷贝 —— 原来对第 2..n 个
+      元素都做一次 memcpy(dst, sep->data, 0)，即 n-1 次纯 PLT 往返。
+      str_build 每轮 120 次，是 8.8% memmove 采样的主因。
+   2. 元素拷贝走 sm_copy_bytes：单字符元素占绝对多数，内联几次 mov 即可，
+      不必每次调 libc。 */
+static int64_t sm_join_fill(PyAdamasStr* out, PyAdamasList* parts, PyAdamasStr* sep) {
+    char* p = (char*)out->data;
+    const int64_t slen = sep->len;
+    int64_t pos = 0;
+    for (int64_t i = 0; i < parts->len; ++i) {
+        if (i > 0 && slen > 0) {
+            sm_copy_bytes(p + pos, sep->data, slen);
+            pos += slen;
+        }
+        PyAdamasStr* part = (PyAdamasStr*)parts->data[i];
+        sm_copy_bytes(p + pos, part->data, part->len);
+        pos += part->len;
+    }
+    return pos;
 }
 
 static void sm_push_str(PyAdamasList* l, PyAdamasStr* s) {
@@ -594,17 +679,7 @@ int64_t pa_str_method(PyAdamasStr* s, int64_t op, int64_t a0, int64_t a1, int64_
                 total_cp += s->pub * (parts->len - 1);
             }
             PyAdamasStr* out = str_alloc_raw(total);
-            char* p = (char*)out->data;
-            int64_t pos = 0;
-            for (int64_t i = 0; i < parts->len; ++i) {
-                if (i > 0) {
-                    memcpy(p + pos, s->data, (size_t)s->len);
-                    pos += s->len;
-                }
-                PyAdamasStr* part = (PyAdamasStr*)parts->data[i];
-                memcpy(p + pos, part->data, (size_t)part->len);
-                pos += part->len;
-            }
+            sm_join_fill(out, parts, s);
             return (int64_t)str_seal_n(out, total_cp);
         }
         case 11: { /* replace(old, new, count) */
@@ -999,17 +1074,7 @@ int64_t pa_bytes_method(PyAdamasStr* s, int64_t op, int64_t a0, int64_t a1, int6
                 total += ((PyAdamasStr*)parts->data[i])->len;
             if (parts->len > 1) total += s->len * (parts->len - 1);
             PyAdamasStr* out = str_alloc_raw(total);
-            char* p = (char*)out->data;
-            int64_t pos = 0;
-            for (int64_t i = 0; i < parts->len; ++i) {
-                if (i > 0) {
-                    memcpy(p + pos, s->data, (size_t)s->len);
-                    pos += s->len;
-                }
-                PyAdamasStr* part = (PyAdamasStr*)parts->data[i];
-                memcpy(p + pos, part->data, (size_t)part->len);
-                pos += part->len;
-            }
+            int64_t pos = sm_join_fill(out, parts, s);
             return (int64_t)str_seal_n(out, pos);
         }
         case 11: { /* replace(old, new, count) */
