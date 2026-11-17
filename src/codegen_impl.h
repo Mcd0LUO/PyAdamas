@@ -204,6 +204,12 @@ private:
     // 只把「调用后仍存活」的槽写回/读出（块级活跃性在 build_fp_liveness
     // 里算好，按指令取 live-after 掩码）。
     std::vector<int> fp_promoted_slots_;
+    // 提升到 xmm 的**跨块 vreg**（临时值，不是命名槽）。
+    //
+    // 与 fp_promoted_slots_ 平行：槽用 smem(slot) 做栈副本，vreg 用
+    // vreg_mem_[v]（即 vreg_off(v)）。两者在调用点都要 spill/reload ——
+    // SysV 下 xmm8–15 是 caller-saved，call 会破坏它们。
+    std::vector<int> fp_promoted_vregs_;
     std::vector<int> slot_fpidx_;      // slot → fp_promoted_slots_ 下标
     std::vector<uint8_t> fp_live_in_;  // nb 个块
     std::vector<uint8_t> fp_live_out_;

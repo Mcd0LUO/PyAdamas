@@ -292,9 +292,19 @@ void AsmGen::assign_vreg_slots() {
             }
             // rc_mark：水位值跨整个函数体（入口 mark、出口 cleanup），独占。
             // 多次定义（生成器续跑 load.slot 回写）：区间不连续，独占。
-            // **实验：跨块 vreg 仍独占**，只让块内 vreg 用 live interval。
-            // 用来区分「live interval 算错」还是「跨块复用本身不安全」。
-            if (vreg_is_rc_mark(*f_, static_cast<VReg>(v)) || def_count[v] > 1) {
+            //
+            // **跨块浮点 vreg 也必须独占。**
+            //
+            // 它们会被 assign_global_vreg_regs 提升进 xmm8–15，而调用点的
+            // spill/reload 按 `vreg_off(v)` 写回栈副本。若两个 vreg 因活跃
+            // 区间不重叠而共享槽，两个寄存器就会写到同一栈地址 ——
+            // 实测 spectral_norm 生成 `movsd %xmm10, 80(%rsp)` 与
+            // `movsd %xmm11, 80(%rsp)`，reload 时全读到后写的那个值。
+            //
+            // 数量上限是浮点池大小（8），代价可接受。
+            if (vreg_is_rc_mark(*f_, static_cast<VReg>(v)) || def_count[v] > 1 ||
+                (cross_block_[v] && f_->vreg_ty[v] &&
+                 f_->vreg_ty[v]->kind == TyKind::Float)) {
                 ranges.push_back({0, total_pos + 1, static_cast<int>(v)});
                 continue;
             }
@@ -353,6 +363,17 @@ void AsmGen::spill_fp_slots() {
             int slot = fp_promoted_slots_[j];
             line(std::format("movsd {}, {}", slot_reg_[slot], smem(slot)));
         }
+        // 跨块 vreg 同样要写回：SysV 下 xmm8–15 是 caller-saved。
+        // 它们没有块级掩码（活跃性按整个函数算），一律写回。
+        //
+        // 栈副本必须用 `vreg_off(v)` 直接算，不能用 `mem(v)` —— 后者在
+        // vreg 已被提升到寄存器时返回寄存器本身，`movsd %xmm8, %xmm8`
+        // 是非法操作数组合（实测 spectral_norm 汇编失败）。
+        for (int v : fp_promoted_vregs_) {
+            const std::string& rg = vreg_reg_[static_cast<size_t>(v)];
+            if (rg.empty()) continue;
+            line(std::format("movsd {}, {}(%rsp)", rg, vreg_off(static_cast<VReg>(v))));
+        }
     }
 
 void AsmGen::reload_fp_slots() {
@@ -361,6 +382,11 @@ void AsmGen::reload_fp_slots() {
                 continue;
             int slot = fp_promoted_slots_[j];
             line(std::format("movsd {}, {}", smem(slot), slot_reg_[slot]));
+        }
+        for (int v : fp_promoted_vregs_) {
+            const std::string& rg = vreg_reg_[static_cast<size_t>(v)];
+            if (rg.empty()) continue;
+            line(std::format("movsd {}(%rsp), {}", vreg_off(static_cast<VReg>(v)), rg));
         }
     }
 
@@ -1315,6 +1341,14 @@ static std::vector<int> block_loop_depth(const IRFunction& f) {
     //   - 不做支配性校验：IR 的 vreg 定义先于使用，整函数独占寄存器
     //     天然满足「定义后一直有效」。
     void AsmGen::assign_global_vreg_regs() {
+        // **每个函数都要清空**：这些是 AsmGen 的成员，跨函数累积。
+        //
+        // 原来只清 fp_promoted_slots_（在 assign_slot_regs 里），漏了
+        // fp_promoted_vregs_ —— 于是上一个函数提升的 vreg 编号会带到下一个
+        // 函数，而 vreg 编号是函数内局部的：同一个编号在下一个函数里可能
+        // 是整型，spill 就生成 `movsd %r9, 80(%rsp)`（%r9 不是 xmm）。
+        // 实测 spectral_norm 的 mul_ata_2 把 v=39（int）当浮点写回。
+        fp_promoted_vregs_.clear();
         const size_t nv = f_->vreg_ty.size();
         vreg_reg_.assign(nv, std::string());
 
@@ -1414,26 +1448,48 @@ static std::vector<int> block_loop_depth(const IRFunction& f) {
                 block_temp_pool_.assign(target_abi().block_temps + used,
                                         target_abi().block_temps + target_abi().n_block_temps);
 
-            // 无调用函数里 xmm8–15 也不会被破坏：空闲的拿走放跨块浮点值。
-            size_t fp_base = fp_promoted_slots_.size();
-            if (fp_base < static_cast<size_t>(kMaxFpSlotRegs())) {
-                std::vector<Cand> fcands;
-                for (size_t v = 0; v < nv; ++v) {
-                    if (!cross_block_[v] || !vreg_reg_[v].empty()) continue;
-                    TypePtr vt = f_->vreg_ty[v];
-                    if (!vt || vt->kind != TyKind::Float) continue;
-                    if (use_count_[v] == 0 || def_block_[v] < 0) continue;
-                    fcands.push_back(Cand{static_cast<int>(v), static_cast<int>(weight[v])});
-                }
-                std::ranges::sort(fcands, [](const Cand& a, const Cand& b) {
-                    return a.uses != b.uses ? a.uses > b.uses : a.v < b.v;
-                });
-                size_t used_fp = 0;
-                for (const auto& cd : fcands) {
-                    if (fp_base + used_fp >= static_cast<size_t>(kMaxFpSlotRegs())) break;
-                    vreg_reg_[static_cast<size_t>(cd.v)] = kFpSlotRegs()[fp_base + used_fp];
-                    ++used_fp;
-                }
+        }
+        // ── 跨块浮点 vreg 提升（不要求无调用）──
+        //
+        // 原来这段只在 `call_free` 里做，理由是「xmm8–15 在 SysV 下是
+        // caller-saved，调用会破坏」。但 spill/reload 机制已经存在：
+        // `fp_promoted_vregs_` 里的值在每次调用前后写回/读出栈副本，
+        // 所以有调用也安全。
+        //
+        // 实测 bench/compare/nbody.py 的 `advance`：热值是浮点（dx/dy/dz、
+        // b[...] 的元素），但函数里有 1 个 `math.sqrt` 调用 → call_free 为
+        // false → 浮点提升整段跳过 → 51 个长活跃区间全在栈上 → 栈帧 616
+        // 字节（Go 只有 24）。
+        {
+            // **必须按「哪些 xmm 已被占用」选，不能按 fp_promoted_slots_.size()。**
+            //
+            // 槽的浮点提升走 linear_scan_pool，会复用寄存器 —— 提升 5 个槽
+            // 可能只占用 2 个 xmm，而且不一定是 xmm8/xmm9。用 size() 当基数
+            // 会挑到已被占用的寄存器，两批值互相覆盖（实测 spectral_norm
+            // 汇编失败：movsd 两个操作数撞成同一寄存器）。
+            std::vector<char> fp_used(static_cast<size_t>(kMaxFpSlotRegs()), 0);
+            for (const auto& sr : slot_reg_) {
+                if (sr.empty()) continue;
+                for (int i = 0; i < kMaxFpSlotRegs(); ++i)
+                    if (sr == kFpSlotRegs()[i]) fp_used[static_cast<size_t>(i)] = 1;
+            }
+            std::vector<Cand> fcands;
+            for (size_t v = 0; v < nv; ++v) {
+                if (!cross_block_[v] || !vreg_reg_[v].empty()) continue;
+                TypePtr vt = f_->vreg_ty[v];
+                if (!vt || vt->kind != TyKind::Float) continue;
+                if (use_count_[v] == 0 || def_block_[v] < 0) continue;
+                fcands.push_back(Cand{static_cast<int>(v), static_cast<int>(weight[v])});
+            }
+            std::ranges::sort(fcands, [](const Cand& a, const Cand& b) {
+                return a.uses != b.uses ? a.uses > b.uses : a.v < b.v;
+            });
+            size_t ci2 = 0;
+            for (int i = 0; i < kMaxFpSlotRegs() && ci2 < fcands.size(); ++i) {
+                if (fp_used[static_cast<size_t>(i)]) continue;
+                vreg_reg_[static_cast<size_t>(fcands[ci2].v)] = kFpSlotRegs()[i];
+                fp_promoted_vregs_.push_back(fcands[ci2].v);
+                ++ci2;
             }
         }
     }
