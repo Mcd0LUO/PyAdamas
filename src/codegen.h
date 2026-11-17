@@ -17,6 +17,6 @@ namespace pyadamas {
 // 与原来的 setjmp 路径逐字节一致。
 std::string generate_asm(const IRModule& m, bool disable_unknown_index = false,
                          bool zero_cost_exc = true, bool index_readonly = false,
-                         bool rc_split = false);
+                         bool rc_split = false, bool ra_graph = false);
 
 }  // namespace pyadamas

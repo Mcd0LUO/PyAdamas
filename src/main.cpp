@@ -311,6 +311,8 @@ int main(int argc, char** argv) {
         prog.rebuild = rebuild;
         // live range splitting 开关（实验特性）：读一次环境变量，写进缓存清单。
         prog.rc_split = std::getenv("PYADAMAS_RA_SPLIT") != nullptr;
+        // 图着色分配器开关（实验特性）：读一次环境变量，写进缓存清单。
+        prog.ra_graph = std::getenv("PYADAMAS_RA_GRAPH") != nullptr;
         prog.verbose = verbose;
         prog.opt = opt_level;
         prog.fast_math = fast_math;
@@ -326,7 +328,7 @@ int main(int argc, char** argv) {
                 auto a = std::chrono::steady_clock::now();
                 std::string asm_text = pyadamas::generate_asm(
                     *prog.entry->ir, !prog.needs_unknown_index, prog.zero_cost_exc,
-                    false, prog.rc_split);
+                    false, prog.rc_split, prog.ra_graph);
                 auto b = std::chrono::steady_clock::now();
                 if (std::getenv("PYADAMAS_TIMING"))
                     std::fprintf(stderr, "[timing] codegen=%.1f ms\n",

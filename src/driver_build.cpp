@@ -500,6 +500,8 @@ struct Manifest {
     // 清单就会出现「切了开关仍命中旧产物」—— 实测导致连续几轮 A/B
     // 测试拿到完全相同的二进制，性能结论全错。
     int rc_split = -1;
+    // 图着色分配器开关。-1 = 旧清单没有这一行（缓存必然失效一次）。
+    int ra_graph = -1;
     std::string toolchain;
     std::map<std::string, std::string> deps;
 };
@@ -555,6 +557,12 @@ std::optional<Manifest> read_manifest(const ModuleUnit& u) {
             auto o = parse_u64(v);
             if (!o) return std::nullopt;
             m.rc_split = static_cast<int>(*o);
+        } else if (tag == "ragraph") {
+            std::string v;
+            ss >> v;
+            auto o = parse_u64(v);
+            if (!o) return std::nullopt;
+            m.ra_graph = static_cast<int>(*o);
         } else if (tag == "toolchain") {
             ss >> m.toolchain;
         } else if (tag == "dep") {
@@ -580,6 +588,7 @@ void write_manifest(const Program& p, const ModuleUnit& u) {
     out << "zerocostexc " << (p.zero_cost_exc ? 1 : 0) << "\n";
     out << "unknownindex " << (u.needs_unknown_index ? 1 : 0) << "\n";
     out << "rcsplit " << (p.rc_split ? 1 : 0) << "\n";
+    out << "ragraph " << (p.ra_graph ? 1 : 0) << "\n";
     out << "toolchain " << toolchain_id() << "\n";
     for (auto& d : u.deps) {
         auto it = p.units.find(d);
@@ -781,6 +790,7 @@ bool try_cache(Program& p, ModuleUnit& u) {
     if (m->fast_math != (p.fast_math ? 1 : 0)) return false;
     if (m->zero_cost_exc != (p.zero_cost_exc ? 1 : 0)) return false;
     if (m->rc_split != (p.rc_split ? 1 : 0)) return false;
+    if (m->ra_graph != (p.ra_graph ? 1 : 0)) return false;
     if (m->deps.size() != u.deps.size()) return false;
     for (auto& d : u.deps) {
         auto it = m->deps.find(d);
@@ -1076,7 +1086,8 @@ bool build_unit(Program& p, ModuleUnit& u, bool emit_object, bool entry_ir) {
     // needs=1，但关闭索引维护后输出完全正确、快 22ms。
     bool skip_idx = u.is_entry && pyadamas::ir_module_can_skip_index_maint(lr.mod);
     u.asm_text = pyadamas::generate_asm(lr.mod, u.is_entry && !p.needs_unknown_index,
-                                        p.zero_cost_exc, skip_idx, p.rc_split);
+                                        p.zero_cost_exc, skip_idx, p.rc_split,
+                                        p.ra_graph);
     auto t3 = now();
     std::string err;
     if (!assemble_object(u, err)) {

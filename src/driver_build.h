@@ -58,6 +58,9 @@ struct Program {
     // live range splitting（PYADAMAS_RA_SPLIT）：会改变代码生成结果，
     // 必须写进模块缓存清单参与失效 —— 否则切换开关后仍命中旧产物。
     bool rc_split = false;
+    // 图着色分配器（PYADAMAS_RA_GRAPH）：同样会改变代码生成结果，必须
+    // 参与模块缓存失效，否则 A/B 测试会命中旧产物拿到假数据。
+    bool ra_graph = false;
     // 任一模块需要 unknown 索引就保持开启；全都不需要时入口关掉维护。
     bool needs_unknown_index = false;
 };

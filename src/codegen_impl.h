@@ -159,6 +159,8 @@ public:
         void set_zero_cost_exc(bool v) { zero_cost_exc_ = v; }
         // live range splitting 开关：由驱动从 Program 传入（参与缓存失效）。
         void set_rc_split(bool v) { rc_split_ = v; }
+        // 图着色分配器开关（PYADAMAS_RA_GRAPH）：同样由驱动传入并参与缓存失效。
+        void set_ra_graph(bool v) { ra_graph_ = v; }
 
 private:
     const std::string& global_label(int i) const {
@@ -579,6 +581,9 @@ private:
     // 路径的汇编逐字节不变。
     bool zero_cost_exc_ = true;
     bool rc_split_ = false;
+    // 图着色分配器开关（PYADAMAS_RA_GRAPH）。开启后 assign_slot_regs 走
+    // assign_slot_regs_graph，用精确冲突图取代线性扫描的区间近似。
+    bool ra_graph_ = false;
     // 预扫描本函数的 EH 标记（fname 是 FDE 起点标签）；没有标记则不动作。
     void prepare_eh_plan(const IRFunction& f, const std::string& fname);
     // 发 .cfi_personality / .cfi_lsda（必须在 .cfi_startproc 之后调用）。
@@ -778,6 +783,12 @@ private:
     void assign_slot_regs_linear();
     // live range splitting：按块给变量槽分配寄存器。
     void assign_slot_regs_split();
+    // 图着色分配器（PYADAMAS_RA_GRAPH）：用精确冲突图取代线性扫描的区间
+    // 近似，Chaitin-Briggs 简化 + 乐观着色。整型与浮点两套池分开着色。
+    void assign_slot_regs_graph();
+    // 单个池的着色：cands 是槽号列表（同属一个池），结果写进 out[槽号]。
+    void color_slot_pool(const std::vector<int>& cands, const char* const* regs,
+                         int nreg, std::vector<std::string>& out);
     // 通用线性扫描：给定活跃区间与寄存器池，返回 slot -> 寄存器名。
     // 整型与浮点共用（R4：浮点也走线性扫描，不再按频次挑前 N 个）。
     void linear_scan_pool(const std::vector<int>& cands, const char* const* regs,
