@@ -219,12 +219,28 @@ static void dict_erase(PyAdamasDict* d, int64_t e) {
     d->free_head = e;
 }
 
+/* 0.302：entry 写入探针。own==2 的键/值若是堆指针就置 saw_heap（sticky，
+   只置不清）。标量只做两次比较、不写内存 —— 0.283 的 STLF 教训：不要每
+   set 必写标志形成循环携带 store→load 依赖。探针与 dec_unknown 共用
+   pa_unknown_is_heap（rt_core.c），判定逐位一致：写入时探针说 0 的值，
+   销毁时 pa_own_dec(2,·) 必然空操作，跳过链游不会漏释放。 */
+static inline __attribute__((always_inline))
+void dict_note_heap(PyAdamasDict* d, int64_t key, int64_t val) {
+    if (d->saw_heap) return;
+    if (d->key_own == 2 && pa_unknown_is_heap(key)) { d->saw_heap = 1; return; }
+    if (d->val_own == 2 && pa_unknown_is_heap(val)) d->saw_heap = 1;
+}
+
 void dict_destroy(void* p) {
     PyAdamasDict* d = (PyAdamasDict*)p;
     // 0.285：标量键值（own==0）没有 RC 可做，整条链_walk 跳过 ——
     // rec_memo 的 dict[int,int] 每轮销毁 25 项，链游是循环携带指针
     // 追逐，占运行时 11.6%。缓冲仍由 dict_pool_put 处置。
     if (d->key_own == 0 && d->val_own == 0) return;
+    // 0.302：own==(2,2) 且从未存过堆值 —— 全部 entry 是标量，无 RC 可做。
+    // rec_memo 的模块级 memo={} 推成 dict[unknown,unknown]，0.285 的
+    // (0,0) 跳过从不命中，每轮 25 项白走链游 + 探测（dict_destroy 13%）。
+    if (d->key_own == 2 && d->val_own == 2 && !d->saw_heap) return;
     for (int32_t i = d->head; i >= 0; i = d->entries[i].next) {
         PyAdamasDictEntry e = d->entries[i];
         pa_own_dec(d->key_own, e.key);
@@ -237,6 +253,8 @@ void dict_destroy(void* p) {
 void dict_gc_release(void* p) {
     PyAdamasDict* d = (PyAdamasDict*)p;
     if (d->key_own == 0 && d->val_own == 0) return;
+    // 0.302：同 dict_destroy —— 纯标量的 unknown dict 无引用可 unref。
+    if (d->key_own == 2 && d->val_own == 2 && !d->saw_heap) return;
     for (int32_t i = d->head; i >= 0; i = d->entries[i].next) {
         PyAdamasDictEntry e = d->entries[i];
         pa_own_gc_unref(d->key_own, e.key);
@@ -285,12 +303,17 @@ PyAdamasDict* pa_dict_new(int64_t key_kind, int64_t key_own, int64_t val_own,
     d->hash_slot = hash_slot;
     d->eq_slot = eq_slot;
     d->default_factory = 0;
+    // 空表无堆 entry（池命中时 payload 已被 memset 清零，这里显式归零）。
+    d->saw_heap = 0;
     return d;
 }
 
 /* 调用方已经把 key/value 的「入表引用」retain 好；更新已有 key 时
    释放这份多余的新 key 引用，字典继续保留原来的 key 对象。 */
 void pa_dict_set(PyAdamasDict* d, int64_t key, int64_t val) {
+    // 插入与覆盖两条路径都从这里走，统一探针（覆盖时旧值已 dec，新值
+    // 可能是堆；键对象沿用插入时已探针的原 key）。
+    dict_note_heap(d, key, val);
     int64_t h = dict_hash_key(d, key);
     int64_t place;
     int64_t e = dict_lookup_place(d, key, h, &place);
@@ -532,8 +555,15 @@ void pa_dict_update(PyAdamasDict* dst, PyAdamasDict* src) {
     if (dst == src) return;
     // 所有权类别向源靠拢：两边不一致时统一升级为 2（unknown/混合），
     // 保证目标既有的键值也不会被按错误类别释放——kind 2 对整数是空操作。
+    // 0.302：既有 entry 是按旧 own retain 的。1->2 升级时表里已持有从未
+    // 探针过的堆引用（own==1 路径不探针），必须保守置 saw_heap，否则销毁
+    // 跳过链游会漏释放。0->2 升级表里只有标量，无需置位。src 的新 entry
+    // 走 pa_dict_set 探针。空表（len==0，墓碑不在链上）无需置位。
+    int ok = dst->key_own, ov = dst->val_own;
     if (src->key_own != dst->key_own) dst->key_own = 2;
     if (src->val_own != dst->val_own) dst->val_own = 2;
+    if (dst->len && ((dst->key_own == 2 && ok == 1) || (dst->val_own == 2 && ov == 1)))
+        dst->saw_heap = 1;
     int kr = dst->key_own;
     int vr = dst->val_own;
     for (int32_t i = src->head; i >= 0; i = src->entries[i].next) {
@@ -553,6 +583,8 @@ PyAdamasDict* pa_dict_copy(PyAdamasDict* src) {
     // out 只在本帧 C 局部变量里，用 RAII 守卫挂根。
     PA_PIN_SCOPE(out);
     out->default_factory = src->default_factory;
+    // 0.302：保守传播 sticky 标志（逐 entry 的 pa_dict_set 也会探针）。
+    out->saw_heap = src->saw_heap;
     for (int32_t i = src->head; i >= 0; i = src->entries[i].next) {
         PyAdamasDictEntry e = src->entries[i];
         pa_own_inc(src->key_own, e.key);
@@ -663,13 +695,17 @@ void pa_dict_remove(PyAdamasDict* d, int64_t key, int64_t missing_ok) {
 }
 
 void pa_dict_clear(PyAdamasDict* d) {
-    if (!(d->key_own == 0 && d->val_own == 0)) {
+    // 0.302：纯标量的 unknown dict 同样跳过链游（判定同 dict_destroy）。
+    if (!(d->key_own == 0 && d->val_own == 0) &&
+        !(d->key_own == 2 && d->val_own == 2 && !d->saw_heap)) {
         for (int32_t i = d->head; i >= 0; i = d->entries[i].next) {
             PyAdamasDictEntry e = d->entries[i];
             pa_own_dec(d->key_own, e.key);
             pa_own_dec(d->val_own, e.val);
         }
     }
+    // 清空后是空表：sticky 标志归零，后续写入重新探针。
+    d->saw_heap = 0;
     d->len = 0;
     d->ord_len = 0;
     d->nent = 0;
@@ -711,6 +747,8 @@ void pa_dict_bump(PyAdamasDict* d, int64_t key, int64_t def, int64_t delta) {
         /* 加法用整数语义 —— 与 IR 里 bin.add 在 unknown 类型上的处理一致
          * （gen_bin_int 直接 addq，不做运行时类型分派）。 */
         int64_t nv = old + delta;
+        // 0.302：bump 命中路径直接写 val，不经 pa_dict_set —— 单独探针。
+        if (!d->saw_heap && d->val_own == 2 && pa_unknown_is_heap(nv)) d->saw_heap = 1;
         pa_own_dec(d->val_own, old);
         d->entries[e].val = nv;
         return;

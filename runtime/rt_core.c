@@ -700,7 +700,11 @@ void pa_rc_dec(void* p);
  * 注意 exact-RC 模式下字符串等叶子**不进链**（rc_leaf_untracked），
  * 所以这条回退对它们无效 —— 那些对象的 dec 由容器自己的 elem_kind=1
  * 路径（pa_rc_dec）负责，不经过这里。 */
-static int unknown_is_heap(PyAdamasRc* h) {
+/* always_inline（0.302，0.285 同款教训）：共享探针 pa_unknown_is_heap_slow
+   让它多了第二个调用点，gcc 把它从 dec_unknown 里 outline 成公共函数，
+   大值 dec_unknown 每次多一层 call/ret。强制内联恢复紧形态。 */
+static inline __attribute__((always_inline))
+int unknown_is_heap(PyAdamasRc* h) {
     if (rc_index_has(h)) return 1;
     if (!rc_index_off) return 0;
     // **先排除小整数。**
@@ -727,13 +731,22 @@ static int unknown_is_heap(PyAdamasRc* h) {
     return 0;
 }
 
+/* 0.302：共享探针实体 —— 与 dec_unknown 的「该不该 dec」判定逐位一致
+   （含 exact-RC 回退）。dict 的 saw_heap 用它判断「这个值销毁时是否值得
+   RC 做工」：探针说 0 的值，dec_unknown 必然空操作，跳过链游安全。
+   头文件里的内联包装先排除小整数，标量不进这个调用。 */
+int pa_unknown_is_heap_slow(int64_t v) {
+    PyAdamasRc* h = (PyAdamasRc*)(uintptr_t)((uint64_t)v - (uint64_t)PYADAMAS_RC_HDR);
+    return unknown_is_heap(h);
+}
+
 void pa_rc_dec_unknown(int64_t v) {
     if (!v) return;
     // 同 inc_unknown：先廉价排除小整数（见那里的说明）。
     if ((uint64_t)v < 65536) return;
     if (rc_stats_on) stat_rc_dec_unknown++;
+    if (!pa_unknown_is_heap(v)) return;
     PyAdamasRc* h = (PyAdamasRc*)(uintptr_t)((uint64_t)v - (uint64_t)PYADAMAS_RC_HDR);
-    if (!unknown_is_heap(h)) return;
     if (h->rc == PYADAMAS_RC_IMMORTAL) return;
     pa_rc_dec((void*)(uintptr_t)v);
 }

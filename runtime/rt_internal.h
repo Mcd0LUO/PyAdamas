@@ -341,6 +341,11 @@ typedef struct {
     /* collections.defaultdict 的内置工厂；0 表示普通 dict。
        只记录工厂种类，缺省下标读取时才创建值，不影响 get()/in。 */
     int64_t default_factory;
+    /* 0.302：sticky 堆标志。own==2 的 entry 写入路径探测到键/值是堆指针
+       就置 1（只置不清；clear/new 归零）。key_own==val_own==2 且它为 0 时
+       全部 entry 都是标量，destroy/gc_release/clear 跳过链游。追加在结构体
+       尾部，既有字段偏移不动（codegen 只按偏移 0 读 len，无硬编码尺寸）。 */
+    int64_t saw_heap;
 } PyAdamasDict;
 
 
@@ -626,6 +631,16 @@ void rc_index_del(PyAdamasRc* h);
 int rc_index_has(PyAdamasRc* h);
 int64_t pa_rc_inc_unknown(int64_t v);
 void pa_rc_dec_unknown(int64_t v);
+/* 0.302：unknown 值的共享堆探针（实体在 rt_core.c）。与 pa_rc_dec_unknown
+   的「该不该 dec」判定逐位一致：常规模式查 rc_index，exact-RC 模式走
+   对齐 + 堆链回退。dict 的 saw_heap 与 dec_unknown 共用这一份判定，
+   不复制逻辑。内联快路廉价排除小整数（与 inc/dec_unknown 同阈值），
+   标量不进函数调用。 */
+int pa_unknown_is_heap_slow(int64_t v);
+static inline int pa_unknown_is_heap(int64_t v) {
+    if (!v || (uint64_t)v < 65536) return 0;
+    return pa_unknown_is_heap_slow(v);
+}
 void panic_c(const char* msg);
 void rc_link(PyAdamasRc* h);
 void rc_unlink(PyAdamasRc* h);

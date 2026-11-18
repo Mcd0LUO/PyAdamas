@@ -4,6 +4,20 @@
 
 早期阶段没有逐条留痕，按阶段归纳；0.4 之后逐条记录。
 
+## [0.302] - 2026-11-19
+
+### unknown dict 的标量-only 销毁跳过（rec_memo −12.8%，realistic 合计 −2.5%）
+
+- **取证**：rec_memo 的模块级 `memo={}` IR 类型是 dict[unknown,unknown]（pa_dict_new 传 own=2,2），虽然实参形参都是 int，运行时所有权标志仍是 unknown —— 0.285 的标量销毁跳过（key_own==0 && val_own==0）从不命中。perf：dict_destroy 13.1%（逐 entry 调 pa_rc_dec_unknown）+ pa_rc_dec_unknown 族 4.7%，每轮 25 个 entry 白走链游 + 探测。
+- **发射（运行时-only）**：PyAdamasDict 尾部追加 sticky 标志 saw_heap（既有字段偏移不动；grep 核实 src/ 无 PyAdamasDict 硬编码尺寸/尾部偏移，codegen 只按偏移 0 读 len；sizeof 136→144 由 sizeof 表达式自动跟随，dict 池路由不受影响）。own==2 的 entry 写入路径探测键/值是否堆指针，是则置 1（只置不清；clear/new 归零）。dict_destroy / dict_gc_release / pa_dict_clear 在 (key_own==2 && val_own==2 && !saw_heap) 时跳过链游 —— 从未存过堆值，全部 entry 是标量，无 RC 可做。0.285 的 (0,0) 跳过保留。
+- **共享探针（安全核心）**：rt_core.c 暴露 pa_unknown_is_heap_slow + 头文件内联包装 pa_unknown_is_heap，与 pa_rc_dec_unknown 的「该不该 dec」判定**逐位一致**（常规模式 rc_index；exact-RC 模式对齐 + 堆链回退；阈值 <65536 与 inc/dec_unknown 同款 —— 取证描述里的 4096 是 list_probe 的阈值，未采用）。探针说 0 的值销毁时必然空操作，跳过不会漏释放。dec_unknown 改为共用该探针，不复制两份逻辑。内联包装先排除小整数，标量不进函数调用。
+- **写入路径全枚举（grep entries 写入点逐一核对，rt_dict.c 外无 entry 写入）**：pa_dict_set 插入/覆盖（函数入口统一探针）；pa_dict_bump 命中直写 val（单独探针 nv）、未命中走 set；update/copy/from_pairs/set_from_list/defaultdict 缺省创建/class 属性表/stdlib/json/re 全部经 pa_dict_set。**update 的 1→2 升级洞**：dst 既有 entry 按旧 own==1 retain（不探针），升级后必须保守置 saw_heap=1（len>0 时），否则跳过链游漏释放；0→2 升级表里只有标量无需置位。copy 保守传播 src->saw_heap。覆盖/删除不减位（sticky 保守）。GC 标记（gc_scan_object）不读 saw_heap，照常逐 entry 扫描。
+- **pa_dict_set 的标量快路**：saw_heap 已置位直接返回；标量只做 own 比较 + <65536 比较，**不写内存**（0.283 STLF 教训：不要每 set 必写标志形成循环携带 store→load 依赖）。
+- **内联扰动修复（0.285 同款）**：共享探针让 unknown_is_heap 多了第二个调用点，gcc 把它从 dec_unknown 里 outline（objdump 证实多一层 call/ret）——加 always_inline 恢复紧形态（dec_unknown 内 0 处 call unknown_is_heap）。
+- **实测（对 1ce2d21 绑核交替 15 轮，BURST=5）**：rec_memo **268.01 → 233.72 ms（−12.8%，p25 −12.8%）**；str_build −1.8%（p25 −2.1%）；dict_wordfreq +0.1%、obj_dispatch −0.0% 中性；queue_sim +0.9%（p25 +0.8%）；sort_struct **+2.5%**（p25 +2.4%）。六项合计 **1282.45 → 1249.84 ms（−2.5%）**。perf 证实机制命中：rec_memo 里 dict_destroy 11.1% + dec_unknown 族 4.7% 整体跌出 profile。
+- **回归诊断（DSB 布局，非算法）**：sort_struct 不执行任何 dict 代码，perf stat 指令 455.208M → 455.198M（−0.002%，逐位级持平）、cycles +2.2%、idq.dsb_uops −12.7%（280.5M → 245.0M）、idq.mite_uops +19.3%（171.0M → 204.0M）—— rt_dict.c/rt_core.c 尺寸变化把热区 uop 挤出 DSB 窗口，与 0.282/0.289/0.301 同族（权衡接受，未放宽守卫）。queue_sim 无 dict，指令 +0.5%、cycles +0.24%（perf stat 单次）、DSB +4.8%/MITE −7.0%，噪声级布局代价。
+- **验证**：新增 205 覆盖 {} 推 unknown 的标量 dict 销毁（含 fib(25)=75025 ≥65536 的大标量探针路径）、存堆值（str/list/dict 嵌套）后销毁真释放、堆→标量与标量→堆覆盖、update 的 (2,2)/(1,1)→(2,2)/(0,0)→(2,2) 三种升级、copy 传播、clear 归零后再探针、pop/del/setdefault/bump/from_pairs/set/defaultdict(list/int/str)、unknown dict 自环与标量 dict 经列表进 GC 环。O0/O1/O2 对拍 CPython 一致；ASan detect_leaks=1 干净（漏探针即泄漏，LSan 抓）。差分 206/0；0.271 原有语料零差异（201/202/203 为 0.299/0.300 新增，oracle 早于其语法）；普通与 ASan 套件各 **224** ran ok / EXIT=0；泄漏抽查 13_gc / 88_defaultdict / 192_dict_cache / 66_genexpr / 119_gen_except_suspend / 204 / 205 全干净；规模检查仍只有原有 5 处超限。
+
 ## [0.301] - 2026-11-19
 
 ### 列表缓冲池扩容 + 内联头池扩容（sort_struct −42.2%，realistic 合计 −6.1%）
