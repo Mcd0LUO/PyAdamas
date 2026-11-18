@@ -340,7 +340,8 @@ void AsmGen::emit_function(const IRFunction& f, int fi) {
         // CFI（.eh_frame 里的栈展开规则）：从「rsp 指向返回地址」到「帧指针
         // 就位」的每一步都写下来。gdb 的 DWARF 展开器和 libgcc 的
         // _Unwind_Backtrace 都不解析 prologue，只认这张表——缺了它们就
-        // 展不过生成出来的帧。运行时的 traceback 仍走 rbp 链，不依赖 CFI。
+        // 展不过生成出来的帧。运行时 traceback 同样走 CFI（rt_debug.c 用
+        // _Unwind_Backtrace 按 .eh_frame 逐帧还原，不依赖帧指针）。
         cfi(".cfi_startproc");
         // 栈对齐自检（PYADAMAS_ALIGN_CHECK=1）。
         //
