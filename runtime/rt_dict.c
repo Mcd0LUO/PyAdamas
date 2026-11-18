@@ -103,7 +103,11 @@ static int64_t dict_hash_key(PyAdamasDict* d, int64_t key) {
     return dict_hash_value(d->key_kind, key);
 }
 
-static int dict_key_matches(PyAdamasDict* d, int64_t a, int64_t b) {
+/* always_inline：探测循环每步都调它。新增 dict_lookup_place 后 gcc 的
+   内联预算把它 outline 成公共函数（两处调用共享），wordfreq 实测每次
+   探测多一层 call/ret，指令 +6.3%。强制内联恢复紧探测循环（0.285）。 */
+static inline __attribute__((always_inline))
+int dict_key_matches(PyAdamasDict* d, int64_t a, int64_t b) {
     if (d->eq_slot >= 0) return dunder_call2((void*)a, b, d->eq_slot) != 0;
     return dict_key_eq(d->key_kind, a, b);
 }
@@ -119,6 +123,34 @@ static int64_t dict_lookup(PyAdamasDict* d, int64_t key, int64_t hash) {
             int64_t e = (int64_t)slot - 1;
             if (d->entries[e].hash == hash && dict_key_matches(d, d->entries[e].key, key))
                 return e;
+        }
+        i = (i + 1) & mask;
+    }
+}
+
+/* 0.285：查找与可写槽一次探测完成。set 原来先 dict_lookup 找已有
+   key，未命中再 dict_place_slot 从同一 hash 重新探测找空槽/墓碑 ——
+   新键插入走两遍探测链。这里合并：探测路上顺带记第一个墓碑，命中
+   返回 entry，未命中把可写槽写进 *place（与 dict_place_slot 逐位
+   一致：优先链上第一个墓碑，否则第一个空槽）。reindex 会重建索引，
+   调用方须在 reindex 后重算 place。 */
+static int64_t dict_lookup_place(PyAdamasDict* d, int64_t key, int64_t hash,
+                                 int64_t* place) {
+    int64_t mask = d->icap - 1;
+    int64_t i = (int64_t)((uint64_t)hash & (uint64_t)mask);
+    int64_t tomb = -1;
+    for (;;) {
+        int32_t slot = d->index[i];
+        if (!slot) {
+            *place = tomb >= 0 ? tomb : i;
+            return -1;
+        }
+        if (slot > 0) {
+            int64_t e = (int64_t)slot - 1;
+            if (d->entries[e].hash == hash && dict_key_matches(d, d->entries[e].key, key))
+                return e;
+        } else if (tomb < 0) {
+            tomb = i;
         }
         i = (i + 1) & mask;
     }
@@ -189,6 +221,10 @@ static void dict_erase(PyAdamasDict* d, int64_t e) {
 
 void dict_destroy(void* p) {
     PyAdamasDict* d = (PyAdamasDict*)p;
+    // 0.285：标量键值（own==0）没有 RC 可做，整条链_walk 跳过 ——
+    // rec_memo 的 dict[int,int] 每轮销毁 25 项，链游是循环携带指针
+    // 追逐，占运行时 11.6%。缓冲仍由 dict_pool_put 处置。
+    if (d->key_own == 0 && d->val_own == 0) return;
     for (int32_t i = d->head; i >= 0; i = d->entries[i].next) {
         PyAdamasDictEntry e = d->entries[i];
         pa_own_dec(d->key_own, e.key);
@@ -200,6 +236,7 @@ void dict_destroy(void* p) {
 
 void dict_gc_release(void* p) {
     PyAdamasDict* d = (PyAdamasDict*)p;
+    if (d->key_own == 0 && d->val_own == 0) return;
     for (int32_t i = d->head; i >= 0; i = d->entries[i].next) {
         PyAdamasDictEntry e = d->entries[i];
         pa_own_gc_unref(d->key_own, e.key);
@@ -255,7 +292,8 @@ PyAdamasDict* pa_dict_new(int64_t key_kind, int64_t key_own, int64_t val_own,
    释放这份多余的新 key 引用，字典继续保留原来的 key 对象。 */
 void pa_dict_set(PyAdamasDict* d, int64_t key, int64_t val) {
     int64_t h = dict_hash_key(d, key);
-    int64_t e = dict_lookup(d, key, h);
+    int64_t place;
+    int64_t e = dict_lookup_place(d, key, h, &place);
     if (e >= 0) {
         pa_own_dec(d->key_own, key);
         pa_own_dec(d->val_own, d->entries[e].val);
@@ -268,6 +306,7 @@ void pa_dict_set(PyAdamasDict* d, int64_t key, int64_t val) {
             dict_reindex(d, d->icap * 2);
         else
             dict_reindex(d, d->icap);
+        place = dict_place_slot(d, h);
     }
     int64_t idx;
     if (d->free_head >= 0) {
@@ -300,9 +339,8 @@ void pa_dict_set(PyAdamasDict* d, int64_t key, int64_t val) {
         d->order[d->ord_len++] = (int32_t)idx;
     }
     ++d->len;
-    int64_t s = dict_place_slot(d, h);
-    if (d->index[s] < 0) --d->itomb;
-    d->index[s] = (int32_t)(idx + 1);
+    if (d->index[place] < 0) --d->itomb;
+    d->index[place] = (int32_t)(idx + 1);
 }
 
 /* default_factory 的编码与 lower_collections 保持一致。这里只实现内置
@@ -625,10 +663,12 @@ void pa_dict_remove(PyAdamasDict* d, int64_t key, int64_t missing_ok) {
 }
 
 void pa_dict_clear(PyAdamasDict* d) {
-    for (int32_t i = d->head; i >= 0; i = d->entries[i].next) {
-        PyAdamasDictEntry e = d->entries[i];
-        pa_own_dec(d->key_own, e.key);
-        pa_own_dec(d->val_own, e.val);
+    if (!(d->key_own == 0 && d->val_own == 0)) {
+        for (int32_t i = d->head; i >= 0; i = d->entries[i].next) {
+            PyAdamasDictEntry e = d->entries[i];
+            pa_own_dec(d->key_own, e.key);
+            pa_own_dec(d->val_own, e.val);
+        }
     }
     d->len = 0;
     d->ord_len = 0;

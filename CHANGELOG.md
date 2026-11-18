@@ -4,6 +4,17 @@
 
 早期阶段没有逐条留痕，按阶段归纳；0.4 之后逐条记录。
 
+## [0.285] - 2026-11-18
+
+### dict set 单探测 + 标量销毁快路径（wordfreq −1.7%；两条方法论教训）
+
+- **set 单探测**：pa_dict_set 原来先 dict_lookup 找已有 key，未命中再 dict_place_slot 从同一 hash 重探一遍找空槽/墓碑 —— 新键插入走两遍探测链。新增 dict_lookup_place：探测路上顺带记第一个墓碑，命中返回 entry，未命中把可写槽写进 out 参（与 place_slot 逐位一致）。reindex 会重建索引，触发后重算 place。bump 未命中路径也从「lookup+lookup+place」三探降到两探。
+- **标量销毁快路径**：dict_destroy / dict_gc_release / pa_dict_clear 在 key_own==0 && val_own==0 时跳过整条 entry 链游（无 RC 可做）。rec_memo 的 dict[int,int] 每轮 25 项链游是循环携带指针追逐。
+- **教训一 —— gcc 内联扰动**：新增 dict_lookup_place 后 gcc 的内联预算把 dict_key_matches 从 dict_lookup 里 outline 成公共函数（两处调用共享），wordfreq 每次探测多一层 call/ret，**指令 +6.3%、cycles +4.5%**（perf stat + objdump 证实：old lookup 94 行内联形态 → new 63 行带 call）。修复：dict_key_matches 加 always_inline，恢复紧探测循环。**同一翻译单元里加函数可能改变既有热函数的内联决策，性能回归要先看 objdump 再怀疑算法。**
+- **教训二 —— perf 占比 ≠ 边际成本**：销毁链游在 perf 里占 rec_memo 11.6%，跳过后指令 −5.3% 但 **cycles ±0**（abbench 15 轮 p25 +0.0%）—— 链游的 L1 依赖加载全落在其它延迟的阴影里，OoO 把它完全隐藏。perf 的采样占比（含 skid）不能直接当「省掉就赚」的依据，必须 A/B 验证。
+- **实测（15 轮）**：dict_wordfreq **−1.7%**（p25 −2.5%；perf stat cycles −6%、指令 −5%）；rec_memo 中性；其余中性；套件合计 −0.2%。
+- **验证**：差分 193/0；全语料对 0.271 基线零差异；release 与 ASan 套件各 211 ran ok / EXIT=0；ASan detect_leaks=1 干净（13_gc / 88_defaultdict / 192_dict_cache 抽查）。
+
 ## [0.284] - 2026-11-18
 
 ### contains+get 双查找 IR 层融合（rec_memo −11.8%，套件 −2.0%）
