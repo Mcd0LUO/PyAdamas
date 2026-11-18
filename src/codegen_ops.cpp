@@ -211,7 +211,9 @@ void AsmGen::gen_inst(const Inst& in) {
             case IrOp::FieldStore: gen_field_store(in); break;
             case IrOp::PtrLoad: gen_ptr_load(in); break;
             case IrOp::PtrStore: gen_ptr_store(in); break;
-            case IrOp::VCall: gen_vcall(in); break;
+            case IrOp::VCall:
+                if (!gen_guarded_vcall(in)) gen_vcall(in);
+                break;
             case IrOp::VCallStatic: gen_vcall_static(in); break;
             case IrOp::SuperVCall: gen_super_vcall(in); break;
             case IrOp::CallDirect: gen_call_direct(in); break;

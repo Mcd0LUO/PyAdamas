@@ -961,6 +961,7 @@ private:
     // 函数地址在装参数之前取到 %r11 —— %r11 不在参数序列里，
     // 装参数的过程不会碰它。
     void gen_vcall(const Inst& in);
+    bool gen_guarded_vcall(const Inst& in);
 
     void gen_vcall_static(const Inst& in);
 
