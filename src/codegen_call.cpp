@@ -365,9 +365,8 @@ void AsmGen::gen_struct_copy(const Inst& in) {
         move_to(dst_op(in.dst), "%rax");
     }
 
-// 虚调用：self 固定占第一个整数参数（%rdi），其余实参照常分类。
-    // 函数地址在装参数之前取到 %r11 —— %r11 不在参数序列里，
-    // 装参数的过程不会碰它。
+// 虚调用：self 只装入 ABI 的第一个整数实参寄存器一次，随后从中读
+// vtable。槽地址直接作为间接 call 的内存操作数，不另取函数指针。
 void AsmGen::gen_vcall(const Inst& in) {
         std::vector<TypePtr> types;
         types.reserve(in.args.size() + 1);
@@ -375,18 +374,14 @@ void AsmGen::gen_vcall(const Inst& in) {
         for (VReg a : in.args) types.push_back(ty_of(a));
         auto locs = classify(types);
 
-
-        emit2("movq", src_op(in.a), "%r10");
-        line("movq (%r10), %r11");
-        line(std::format("movq {}(%r11), %r11", in.imm * 8));
-
         for (size_t i = 0; i < in.args.size(); ++i) {
             const auto& l = locs[i + 1];
             if (l.stack_off < 0) continue;
             emit2("movq", src_op(in.args[i]), "%r10");
             line(std::format("movq %r10, {}(%rsp)", l.stack_off));
         }
-        emit2("movq", src_op(in.a), arg_reg_i(0));
+        move_to(arg_reg_i(0), src_op(in.a));
+        line(std::format("movq ({}), %r11", arg_reg_i(0)));
         for (size_t i = 0; i < in.args.size(); ++i) {
             const auto& l = locs[i + 1];
             if (l.stack_off >= 0) continue;
@@ -398,7 +393,7 @@ void AsmGen::gen_vcall(const Inst& in) {
         line("xorl %r10d, %r10d");
         if (opt_ < 2) line("xorl %eax, %eax");
         spill_fp_slots();
-        line("call *%r11");
+        line(std::format("call *{}(%r11)", in.imm * 8));
         reload_fp_slots();
 
         if (!dst_unused(in)) {
