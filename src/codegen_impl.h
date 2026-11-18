@@ -875,6 +875,8 @@ private:
     void gen_cmp_branch_fp(const Inst& in, const Inst& br);
 
         void gen_block(const Block& b);
+    bool try_forward_global_across_rc(const Block& b, size_t at, size_t& load_pos,
+                                      bool& forward_to_receiver);
 
         bool single_use_in_block(VReg v) const;
 
@@ -905,6 +907,9 @@ private:
     // RC 记账（inc/dec/mark/cleanup）的内联快路径。返回 true 表示指令已发完。
     // 慢路径落回 pa_rc_*_slow，且会调运行时 —— 必须落盘提升过的浮点槽。
     bool gen_rc_inline(const Inst& in, RtFn fn);
+    // 带全局读的版本：冷路永远重新装载，热路从已发布的操作数转发。
+    void gen_rc_dec(const Inst& in, const std::string& src = {},
+                    const std::string& dst = {}, int global = -1);
     // 常数除数的除法：能化简就生成「魔数乘法 + 符号修正」，结果留在 %rax
     // （mode 1/2 还会在 %rdx 留下余数），返回 true 表示已生成。
     // 除数为 0 / -1 / INT64_MIN 或不是编译期常量时返回 false，走 idivq。

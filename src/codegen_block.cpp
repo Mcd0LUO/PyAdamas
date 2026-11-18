@@ -740,6 +740,51 @@ void AsmGen::gen_cmp_branch_fp(const Inst& in, const Inst& br) {
         }
     }
 
+// 保留原 IR 和活跃性。只融合相邻的「读旧全局、发布、释放、再读」，
+// 中间至多跨过一个不同全局的整数读，且它不能覆盖融合的结果位置。
+bool AsmGen::try_forward_global_across_rc(const Block& b, size_t at, size_t& load_pos,
+                                         bool& forward_to_receiver) {
+    if (opt_ < 2 || gen_ || at < 2 || at + 1 >= b.insts.size()) return false;
+    const auto& old = b.insts[at - 2];
+    const auto& store = b.insts[at - 1];
+    const auto& dec = b.insts[at];
+    if (old.op != IrOp::LoadGlobal || store.op != IrOp::StoreGlobal || old.idx != store.idx ||
+        dec.op != IrOp::CallRt || dec.imm != static_cast<int64_t>(RtFn::RcDec) ||
+        dec.dst != kNoReg || dec.args.size() != 1 || dec.args[0] != old.dst ||
+        !ir_is_heap(old.ty) || old.dst == kNoReg || store.a == kNoReg || store.a == old.dst)
+        return false;
+    const auto& next = b.insts[at + 1];
+    // 不能跨越 EH 标记、其他释放、写入或可能重入的操作。
+    const bool across_scalar = next.op == IrOp::LoadGlobal && next.idx != store.idx &&
+                               next.ty && next.ty->kind == TyKind::Int;
+    const size_t pos = at + 1 + across_scalar;
+    if (pos + 1 >= b.insts.size()) return false; // 原块末的 spill 不能跳过。
+    const auto& load = b.insts[pos];
+    if (load.op != IrOp::LoadGlobal || load.idx != store.idx ||
+        !single_use_in_block(load.dst) || !ir_is_heap(load.ty) ||
+        !type_eq(ty_of(store.a), load.ty)) return false;
+    const auto& use = b.insts[pos + 1];
+    const bool receiver = use.op == IrOp::VCall && use.a == load.dst && use.args.empty();
+    const bool gen_next = use.op == IrOp::CallRt &&
+                          use.imm == static_cast<int64_t>(RtFn::GenNext) &&
+                          use.args.size() == 1 && use.args[0] == load.dst;
+    if (!receiver && (!gen_next || across_scalar)) return false;
+
+    // 从已发布值的栈位置读，只在没有运行时调用的那一支使用；慢路
+    // 可能释放该对象，返回后不得再读 src，必须按当前全局内容写回。
+    const auto src = src_op(store.a);
+    if (!is_mem_operand(src) || src != mem(store.a) || alias_.contains(store.a)) return false;
+    const std::string dst = receiver ? arg_reg_i(0) : mem(load.dst);
+    if (!receiver && !is_mem_operand(dst)) return false;
+    set_loc(dec.line);
+    comment(dec.text() + " -> conditional global forwarding");
+    gen_rc_dec(dec, src, dst, load.idx);
+    load_pos = pos;
+    // 只有紧邻且不带其他实参的 VCall 可以直接消费 arg0；别名到调用后失效。
+    forward_to_receiver = receiver;
+    return true;
+}
+
 void AsmGen::gen_block(const Block& b) {
         alias_.clear();
         const_val_.clear();
@@ -781,12 +826,21 @@ void AsmGen::gen_block(const Block& b) {
             }
         }
 
+        size_t forwarded_load = b.insts.size();
+        bool forward_to_receiver = false;
         size_t i = 0;
         while (i < b.insts.size()) {
             const Inst& in = b.insts[i];
             dst_loc_.clear();
 
             cur_pos_ = static_cast<int>(i);
+            if (i == forwarded_load) {
+                set_loc(in.line);
+                comment(in.text());
+                if (forward_to_receiver) alias_[in.dst] = arg_reg_i(0);
+                ++i;
+                continue;
+            }
 
             // 比较 + 分支连在一起时不需要把布尔值真的算出来
             if (i + 1 < b.insts.size() && can_fuse_branch(in, b.insts[i + 1])) {
@@ -867,7 +921,12 @@ void AsmGen::gen_block(const Block& b) {
                         line(std::format("movq {0}, {1}", rg, st));
                 }
             }
-            gen_inst(in);
+            if (!try_forward_global_across_rc(b, i, forwarded_load, forward_to_receiver))
+                gen_inst(in);
+            if (forward_to_receiver && i == forwarded_load + 1) {
+                alias_.erase(b.insts[forwarded_load].dst);
+                forward_to_receiver = false;
+            }
             fp_mask_valid_ = false;
             dst_loc_.clear();
             if (fp_temp) alias_[in.dst] = "%xmm1";

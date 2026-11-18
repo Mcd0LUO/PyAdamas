@@ -8,6 +8,53 @@
 namespace pyadamas {
 
 
+void AsmGen::gen_rc_dec(const Inst& in, const std::string& src,
+                        const std::string& dst, int global) {
+    const std::string p = arg_reg_i(0);
+    move_to(p, src_op(in.args[0]));
+    const std::string at_most_one = fresh_label("decle1");
+    const std::string slow = fresh_label("decslow");
+    const std::string done = fresh_label("decdone");
+    const bool forward = global >= 0;
+    const bool copy = forward && src != dst;
+    const std::string fast = copy ? fresh_label("decforward") : done;
+    line(std::format("testq {0}, {0}", p));
+    emit_jmp("je", slow);            // p == NULL
+    line("cmpl $0, pa_gc_phase_fast(%rip)");
+    emit_jmp("jne", slow);           // 收集期只登记边，不能重入释放
+    line(std::format("movq -48({}), %rax", p));
+    TypePtr t = ty_of(in.args[0]);
+    const bool check_first = t && (t->kind == TyKind::Str || t->kind == TyKind::Bytes);
+    if (check_first) {
+        emit_imm_op("movabsq", INT64_MIN, target_abi().scratch_len);
+        emit2("cmpq", target_abi().scratch_len, "%rax");
+        emit_jmp("je", fast);
+        line("cmpq $1, %rax");
+        emit_jmp("jle", slow);
+    }
+    // sub 同时计算新值和旧 rc 与 1 的有符号比较。仅 rc > 1 时写回。
+    line("subq $1, %rax");
+    if (!check_first) emit_jmp("jle", at_most_one);
+    line(std::format("movq %rax, -48({})", p));
+    emit_jmp("jmp", fast);
+    if (!check_first) {
+        label(at_most_one);
+        // jle 不改标志位，OF 仍来自 sub；仅 INT64_MIN - 1 溢出，不写回。
+        emit_jmp("jo", fast);
+    }
+    label(slow);
+    spill_fp_slots();
+    line("call pa_rc_dec_slow");
+    reload_fp_slots();
+    if (forward) move_to(dst, global_label(global) + "(%rip)");
+    if (copy) {
+        emit_jmp("jmp", done);
+        label(fast);
+        move_to(dst, src);
+    }
+    label(done);
+}
+
 // ── RC 记账的内联快路径 ──────────────────────────────────────
 //
 // 生成代码里 inc/dec/mark/cleanup 的出现频率极高（内层循环一轮几次），
@@ -93,37 +140,7 @@ bool AsmGen::gen_rc_inline(const Inst& in, RtFn fn) {
         return true;
     }
     if (fn == RtFn::RcDec && in.args.size() == 1) {
-        const std::string p = arg_reg_i(0);
-        move_to(p, src_op(in.args[0]));
-        const std::string at_most_one = fresh_label("decle1");
-        const std::string slow = fresh_label("decslow");
-        const std::string done = fresh_label("decdone");
-        line(std::format("testq {0}, {0}", p));
-        emit_jmp("je", slow);            // p == NULL
-        line("cmpl $0, pa_gc_phase_fast(%rip)");
-        emit_jmp("jne", slow);           // 收集期只登记边，不能重入释放
-        line(std::format("movq -48({}), %rax", p));
-        const bool check_first = immortal_first();
-        if (check_first) {
-            skip_immortal(done);
-            line("cmpq $1, %rax");
-            emit_jmp("jle", slow);
-        }
-        // sub 同时计算新值和旧 rc 与 1 的有符号比较。仅 rc > 1 时写回。
-        line("subq $1, %rax");
-        if (!check_first) emit_jmp("jle", at_most_one);
-        line(std::format("movq %rax, -48({})", p));
-        emit_jmp("jmp", done);
-        if (!check_first) {
-            label(at_most_one);
-            // jle 不改标志位，OF 仍来自 sub；仅 INT64_MIN - 1 溢出，不写回。
-            emit_jmp("jo", done);
-        }
-        label(slow);
-        spill_fp_slots();
-        line("call pa_rc_dec_slow");
-        reload_fp_slots();
-        label(done);
+        gen_rc_dec(in);
         return true;
     }
     // ── 临时栈 push/take 内联（0.286）─────────────────────────────
