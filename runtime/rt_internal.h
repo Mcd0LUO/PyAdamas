@@ -637,13 +637,26 @@ void pa_rc_dec_unknown(int64_t v);
    不复制逻辑。内联快路廉价排除小整数（与 inc/dec_unknown 同阈值），
    标量不进函数调用。 */
 int pa_unknown_is_heap_slow(int64_t v);
+/* exact-RC 模式标志（rt_core.c）：索引关闭时探针要走堆链回退。 */
+extern int rc_index_off;
 static inline int pa_unknown_is_heap(int64_t v) {
     if (!v || (uint64_t)v < 65536) return 0;
+    /* 0.303：常规模式快路内联 —— 直接查索引，命中即返回，与旧 list_probe
+       同形态（一层调用）。否则 prep/append 每次探针多一层 slow 调用，
+       str_build 8M 次 append 实测 +1.4% 指令 / +5.9% 耗时。判定与 slow
+       逐位一致：slow 入口同样先查索引，exact-RC 才进回退。 */
+    PyAdamasRc* h = (PyAdamasRc*)(uintptr_t)((uint64_t)v - (uint64_t)PYADAMAS_RC_HDR);
+    if (rc_index_has(h)) return 1;
+    if (!rc_index_off) return 0;
     return pa_unknown_is_heap_slow(v);
 }
 void panic_c(const char* msg);
 void rc_link(PyAdamasRc* h);
 void rc_unlink(PyAdamasRc* h);
+/* 0.303：把 untracked 对象（kind0 小元组）补进 GC 堆链。kind0 容器经
+   unknown 写入升级成 kind2 后有了堆出边，可能成环，GC 必须能看到它。
+   已 tracked 的对象是空操作。不做 retain —— 只改 GC 可见性。 */
+void pa_rc_track(void* p);
 void* rc_alloc(int64_t size, void (*dtor)(void*), void (*release)(void*), int64_t kind);
 void* rc_alloc_untracked(int64_t size, void (*dtor)(void*), void (*release)(void*), int64_t kind);
 /* extra：payload 尾部额外内联的字节数（目前只用于小列表的 data 缓冲）。
@@ -1099,7 +1112,19 @@ void pa_list_copy_range(PyAdamasList* dst, PyAdamasList* src, int64_t lo, int64_
    表示引用已经转给容器（新值），不再 retain。 */
 void pa_list_prep(PyAdamasList* l, int64_t v, int64_t vk, int64_t owned);
 int64_t pa_list_get(PyAdamasList* l, int64_t i);
-void pa_list_set(PyAdamasList* l, int64_t i, int64_t v);
+/* 0.303：heap 是新值的静态种类（0 非堆 / 1 堆 / 2 unknown）。写入时维护
+   elem_kind / heap_bits：静态容器类型是 unknown 时降级器不做 prep，运行期
+   kind 可能与新值冲突（kind1 列表存标量），不升级会在销毁时把标量当堆指针
+   dec。heap==2 才运行期探针（pa_unknown_is_heap），已知标量不探针 ——
+   大整数/浮点位模式可能恰好等于某个堆地址，探针会误判。 */
+void pa_list_set(PyAdamasList* l, int64_t i, int64_t v, int64_t heap);
+/* 下标类写入（set/insert）共用的种类/位图维护。不做 retain/release，
+   所有权由调用方负责。kind 冲突升级 2；kind0 untracked 容器补进 GC 链；
+   kind2 带位图时按新值堆性更新第 i 位。 */
+void pa_list_store_kind(PyAdamasList* l, int64_t i, int64_t v, int64_t heap);
+/* 丢弃 kind2 的逐元素位图（回退注册表判断）。切片赋值/insert/del/reverse/
+   sort/shuffle 会移动或覆盖元素，位图无法逐位维护时保守丢弃。 */
+void pa_list_drop_bits(PyAdamasList* l);
 void pa_list_set_len(PyAdamasList* l, int64_t n);
 void pa_list_extend(PyAdamasList* dst, PyAdamasList* src);
 PyAdamasList* pa_list_copy(PyAdamasList* src);
@@ -1114,7 +1139,8 @@ void pa_list_sort(PyAdamasList* l, int64_t kind);
 PyAdamasList* pa_sorted_list(PyAdamasList* src, int64_t kind);
 int64_t pa_list_index(PyAdamasList* l, int64_t v, int64_t kind);
 int64_t pa_list_count(PyAdamasList* l, int64_t v, int64_t kind);
-void pa_list_insert(PyAdamasList* l, int64_t i, int64_t v);
+/* 0.303：heap 同 pa_list_set —— 新值静态种类，插入时维护种类/位图。 */
+void pa_list_insert(PyAdamasList* l, int64_t i, int64_t v, int64_t heap);
 void pa_list_reverse(PyAdamasList* l);
 int64_t pa_int_bit_length(int64_t v);
 PyAdamasList* pa_enumerate_list(PyAdamasList* seq);

@@ -64,7 +64,7 @@ enum class RtFn : uint16_t {
     ListNew,     // (i64 cap) -> list*
     ListAppend,  // (list*, i64 v, i64 heap) -> void  heap: 0 非堆 / 1 堆 / 2 unknown
     ListGet,     // (list*, i64) -> i64
-    ListSet,     // (list*, i64, i64) -> void
+    ListSet,     // (list*, i64, i64, i64 heap) -> void（0.303 种类维护）
     ListSetLen,  // (list*, i64) -> void
     ListPrep,    // (list*, i64 v, i64 vk, i64 owned) -> void  空列表首次写入定型
     StrConcat,   // (str*, str*) -> str*
@@ -212,7 +212,7 @@ enum class RtFn : uint16_t {
     ListSortedBy, // (list* src, list* keys, i64 kind) -> list*  按键排序的副本
     ListIndex,    // (list*, i64 v, i64 kind) -> i64  找不到抛 ValueError
     ListCount,    // (list*, i64 v, i64 kind) -> i64
-    ListInsert,   // (list*, i64 idx, i64 v) -> void
+    ListInsert,   // (list*, i64 idx, i64 v, i64 heap) -> void（0.303）
     ListReverse,  // (list*) -> void  原地反转
     IntBitLength, // (i64) -> i64
     EnumerateList,// (list*) -> list*  元素是 [i, v] 对

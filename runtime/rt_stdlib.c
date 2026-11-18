@@ -16,7 +16,7 @@ PyAdamasList* pa_itertools_repeat(int64_t v, int64_t n, int64_t elem_kind) {
     PyAdamasList* out = pa_list_new(n, elem_kind);
     for (int64_t i = 0; i < n; ++i) {
         pa_own_inc(elem_kind, v);
-        pa_list_append(out, v, 2);
+        pa_list_append(out, v, elem_kind);  /* 0.303：种类即堆性 */
     }
     return out;
 }
@@ -28,9 +28,9 @@ static void iter_push_tuple(PyAdamasList* out, const int64_t* vals, int64_t n,
     PyAdamasList* tup = pa_list_new(n, elem_kind);
     for (int64_t i = 0; i < n; ++i) {
         pa_own_inc(elem_kind, vals[i]);
-        pa_list_append(tup, vals[i], 2);
+        pa_list_append(tup, vals[i], elem_kind);  /* 0.303 */
     }
-    pa_list_append(out, (int64_t)tup, 2);
+    pa_list_append(out, (int64_t)tup, 1);  /* 0.303：元组必是堆 */
 }
 
 // 源列表数组：seqs 是调用点临时构造的 kind 0 列表，data 里装源列表指针。
@@ -207,7 +207,7 @@ PyAdamasList* pa_itertools_accumulate(PyAdamasList* xs, int64_t is_float) {
         acc += xs->data[i];
         // 元素类别非 0 时列表销毁会 dec，写入前必须配一次 inc。
         pa_own_inc(out->elem_kind, acc);
-        pa_list_append(out, acc, 2);
+        pa_list_append(out, acc, 0);  /* 0.303：acc 是整数 */
     }
     return out;
 }
@@ -249,7 +249,7 @@ PyAdamasList* pa_list_repeat(PyAdamasList* l, int64_t n) {
         for (int64_t i = 0; i < len; ++i) {
             int64_t v = l->data[i];
             pa_own_inc(kind, v);
-            pa_list_append(out, v, 2);
+            pa_list_append(out, v, kind == 3 ? 2 : kind);  /* 0.303 */
         }
     }
     return out;
@@ -374,11 +374,12 @@ PyAdamasList* pa_collections_most_common(PyAdamasDict* d, int64_t n) {
     pa_gc_pin(out);
     for (int64_t i = 0; i < take; ++i) {
         PyAdamasList* tup = pa_list_new(2, tk);
+        int th = tk == 2 ? 2 : tk;  /* 0.303：同 pa_dict_items，避免位图 churn */
         pa_own_inc(d->key_own, arr[i].key);
-        pa_list_append(tup, arr[i].key, 2);
+        pa_list_append(tup, arr[i].key, th);
         pa_own_inc(d->val_own, arr[i].val);
-        pa_list_append(tup, arr[i].val, 2);
-        pa_list_append(out, (int64_t)tup, 2);
+        pa_list_append(tup, arr[i].val, th);
+        pa_list_append(out, (int64_t)tup, 1);  /* 0.303 */
     }
     pa_gc_unpin(out);
     free(arr);

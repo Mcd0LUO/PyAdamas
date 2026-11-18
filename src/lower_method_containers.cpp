@@ -287,7 +287,8 @@ VReg Lowerer::lower_method_seq(Attribute& at, Call& c, VReg recv, TypePtr recv_t
         VReg v = elem_arg(1);
         bool owned = move_fresh(v, et);
         store_list_elem(recv, recv_ty, v, owned);
-        call_void(RtFn::ListInsert, {recv, idx, v});
+        // 0.303：heap 参数让运行时维护种类/位图（静态 unknown 容器不 prep）。
+        call_void(RtFn::ListInsert, {recv, idx, v, heap_arg(et)});
         return const_none();
     }
     if (at.attr == "remove" && is_list) {

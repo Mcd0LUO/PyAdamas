@@ -64,10 +64,13 @@ PyAdamasList* pa_list_slice(PyAdamasList* src, int64_t start, int64_t stop, int6
     slice_bounds(src->len, start, stop, step, &lo, &hi, &st);
     int64_t count = slice_total(lo, hi, st);
     PyAdamasList* out = pa_list_new(count, src->elem_kind);
+    /* 0.303：heap 提示用源的运行期种类（准确），避免 append 的种类维护
+       对 kind0/1 列表逐元素探针。 */
+    int sk = src->elem_kind == 1 ? 1 : (src->elem_kind == 0 ? 0 : 2);
     for (int64_t i = lo; st > 0 ? i < hi : i > hi; i += st) {
         int64_t v = src->data[i];
         pa_own_inc(src->elem_kind, v);
-        pa_list_append(out, v, 2);
+        pa_list_append(out, v, sk);
     }
     return out;
 }
@@ -182,6 +185,13 @@ void pa_list_slice_assign(PyAdamasList* dst, int64_t start, int64_t stop, int64_
         if (dk == 3) dst->elem_kind = sk;
         else if (dk != sk) dst->elem_kind = 2;
     }
+    /* 0.303：切片赋值移动/覆盖元素，kind2 位图无法逐位维护，保守丢弃
+       回退注册表（源是空表时也成立 —— 收缩同样移动尾部元素）。
+       kind0 untracked 容器升级成 2 后补进 GC 链（可能成环）。 */
+    if (dst->elem_kind == 2) {
+        pa_list_drop_bits(dst);
+        if (dk == 0) pa_rc_track(dst);
+    }
     int kind = (int)dst->elem_kind;
     if (st != 1) {
         if (slen != n) pa_raise_c("ValueError", "cannot assign sequence of different size to extended slice");
@@ -244,7 +254,7 @@ PyAdamasList* pa_str_to_list(PyAdamasStr* s) {
             memcpy((char*)ch->data, s->data + off, (size_t)n);
             ch->pub = 1;
         }
-        pa_list_append(out, (int64_t)ch, 2);
+        pa_list_append(out, (int64_t)ch, 1);  /* 0.303：字符必是堆串 */
         off += n;
     }
     pa_gc_unpin(out);
@@ -255,7 +265,7 @@ PyAdamasList* pa_str_to_list(PyAdamasStr* s) {
 PyAdamasList* pa_bytes_to_list(PyAdamasStr* s) {
     PyAdamasList* out = pa_list_new(s->len, 0);
     for (int64_t i = 0; i < s->len; ++i)
-        pa_list_append(out, (int64_t)(unsigned char)s->data[i], 2);
+        pa_list_append(out, (int64_t)(unsigned char)s->data[i], 0);  /* 0.303 */
     return out;
 }
 
@@ -282,7 +292,7 @@ PyAdamasStr* pa_bytes_zeros(int64_t n) {
 PyAdamasList* pa_str_wrap_list(PyAdamasStr* s) {
     PyAdamasList* out = pa_list_new(1, 1);
     pa_rc_inc(s);
-    pa_list_append(out, (int64_t)s, 2);
+    pa_list_append(out, (int64_t)s, 1);  /* 0.303 */
     return out;
 }
 
@@ -377,7 +387,7 @@ int64_t pa_range_all(PyAdamasRange* r) {
 PyAdamasList* pa_range_to_list(PyAdamasRange* r) {
     PyAdamasList* out = pa_list_new(r->len, 0);
     for (int64_t i = 0; i < r->len; ++i)
-        pa_list_append(out, r->start + i * r->step, 2);
+        pa_list_append(out, r->start + i * r->step, 0);  /* 0.303 */
     return out;
 }
 

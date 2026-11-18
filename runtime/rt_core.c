@@ -176,8 +176,10 @@ static void gc_phase_dec(PyAdamasRc* h, void* p) {
 
 /* 存活堆索引只服务 unknown 值的保守 retain/dec（值可能是整数，必须先
    确认是堆指针）。整程序没有任何 unknown 时，入口会调用
-   pa_disable_unknown_index 关掉它，省掉每个堆对象的插入/删除。 */
-static int rc_index_off;
+   pa_disable_unknown_index 关掉它，省掉每个堆对象的插入/删除。
+   0.303：非 static —— rt_internal.h 的共享探针快路要读它判断是否
+   exact-RC 模式（常规模式 rc_index_has 命中即返回，省一层函数调用）。 */
+int rc_index_off;
 /* **只读模式**：索引维护关闭，但查询仍然工作（返回「不知道」）。
  *
  * 用途见 docs/roadmap.md 的方案 C：编译器能证明一个模块从不做「反查这个字
@@ -835,6 +837,20 @@ void rc_unlink(PyAdamasRc* h) {
     if (h->kind == PYADAMAS_RC_OBJ || h->kind == PYADAMAS_RC_INSTANCE)
         gc_conservative_count--;
     rc_index_del(h);
+}
+
+/* 0.303：把 untracked 对象补进 GC 堆链（kind0 小元组经 unknown 写入升级
+   成 kind2 后有了堆出边，可能成环）。与 rc_alloc_core 的 tracked 分支同
+   形态：清 UNTRACKED 位再 rc_link（堆链 + 索引 + 新生代）。young_add 不
+   改 rc，gc_alloc_black 是占位空操作 —— 存活对象的引用计数不受影响。
+   收集期间用户代码不运行，写入路径不会在 gc_phase 里调到这里；即使增量
+   标记进行中，新入链对象不在本轮 gc_set 快照里，不会被清扫（与新生对象
+   同一安全性论证，见 gc_alloc_black 注释）。已 tracked 时空操作。 */
+void pa_rc_track(void* p) {
+    PyAdamasRc* h = (PyAdamasRc*)p - 1;
+    if (!(h->marked & PYADAMAS_RC_UNTRACKED)) return;
+    h->marked = 0;
+    rc_link(h);
 }
 
 void* rc_alloc(int64_t size, void (*dtor)(void*), void (*release)(void*),

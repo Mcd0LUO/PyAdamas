@@ -722,6 +722,7 @@ void AsmGen::gen_rt_args(const Inst& in, RtFn fn) {
         case RtFn::GenSendOpt:
         case RtFn::GenThrowOpt:
         case RtFn::ListSet:
+        case RtFn::ListInsert:   /* 0.303：(list*, i, v, heap) */
         case RtFn::DictSet:
         case RtFn::ListContains:
         case RtFn::ListEq:
@@ -736,7 +737,6 @@ void AsmGen::gen_rt_args(const Inst& in, RtFn fn) {
         case RtFn::RangeNew:
         case RtFn::ListIndex:
         case RtFn::ListCount:
-        case RtFn::ListInsert:
         case RtFn::RegexCompile:
         case RtFn::RegexFindAll:
         case RtFn::RegexGroup:
@@ -992,9 +992,25 @@ void AsmGen::gen_tuple_inline(const Inst& in) {
 // 就是 data[len++]=v。RC retain 不在这条指令里 —— 生成代码在 append 前
 // 单独发 pa_rc_inc（见 lower_method_containers），语义不变。
 // 守卫任一不满足落回 pa_list_append 原调用（扩容/位图/定型全在那边）。
+// 0.303：静态 heap 0/1 时还要求运行期 elem_kind 与它一致 —— 不一致时
+// 运行时要升级种类（kind1 存标量 / kind0 存堆值），内联路径不做探针，
+// 直接落回。heap 参数是编译期常量（heap_arg），按立即数比较，热路径
+// （kind0+0 / kind1+1）只多一条 cmp+jne。
+// heap==2（unknown）不需要额外守卫：降级器对 heap2 的 append 必先调
+// pa_list_prep（store_list_elem 的 lk==3 / vk==2 分支；其余 heap2 发射点
+// 的目标表建表即 kind2），prep 已把 kind0/1 与新值堆性调和一致，kind2/3
+// 由下面的 jae 守卫落回运行时（str_build 的 parts.append(str(...)) 全靠
+// 这条快路径，恒落回会 +5.8%）。运行时 pa_list_append 的种类维护仍兜底
+// 非 prep 调用方。
 void AsmGen::gen_append_inline(const Inst& in) {
     const std::string lr = arg_reg_i(0);
     const std::string vr = arg_reg_i(1);
+    // heap 参数形态：src_op 对常量 vreg 返回 "$N"。
+    int64_t heap = -1;
+    const std::string hs = src_op(in.args[2]);
+    if (hs.size() >= 2 && hs[0] == '$') {
+        heap = static_cast<int64_t>(strtoll(hs.c_str() + 1, nullptr, 10));
+    }
     std::string slow = fresh_label("appslow");
     std::string done = fresh_label("appdone");
     emit2("movq", src_op(in.args[0]), lr);
@@ -1004,8 +1020,24 @@ void AsmGen::gen_append_inline(const Inst& in) {
     emit_jmp("jge", slow);
     line(std::format("cmpq $0, 32({})", lr));
     emit_jmp("jne", slow);
-    line(std::format("cmpq $2, 24({})", lr));
-    emit_jmp("je", slow);
+    if (heap == 0 || heap == 1) {
+        // kind 必须与静态 heap 完全一致 —— 一条比较同时排除 kind2（位图）、
+        // kind3（未定型）与冲突种类（0.303 种类维护）。与 0.282 守卫同指令
+        // 数（只是立即数从 $2 变成 $heap），str_build 热路径零额外开销。
+        line(std::format("cmpq ${}, 24({})", heap, lr));
+        emit_jmp("jne", slow);
+    } else {
+        // heap==2（unknown）：kind0/1 已由紧邻的 prep 与新值堆性调和
+        // （见函数头注释），kind2/3 落回运行时。
+        line(std::format("cmpq $2, 24({})", lr));
+        emit_jmp("jae", slow);
+        if (heap != 2) {
+            // 非常量 heap 参数（正常降级不会发生）：运行期比较。
+            line(std::format("movq {}, %r10", src_op(in.args[2])));
+            line(std::format("cmpq 24({}), %r10", lr));
+            emit_jmp("jne", slow);
+        }
+    }
     line(std::format("movq 16({}), %r10", lr));
     line(std::format("movq {}, (%r10,%rax,8)", vr));
     line(std::format("incq ({})", lr));

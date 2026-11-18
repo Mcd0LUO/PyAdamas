@@ -169,6 +169,8 @@ double pa_random_uniform(PyAdamasRandom* r, double a, double b) {
 }
 
 void pa_random_shuffle(PyAdamasRandom* r, PyAdamasList* seq) {
+    /* 0.303：洗牌交换元素位置，kind2 位图无法跟随，保守丢弃。 */
+    if (seq->elem_kind == 2) pa_list_drop_bits(seq);
     for (int64_t i = seq->len - 1; i > 0; --i) {
         uint64_t j = mt_randbelow(r, (uint64_t)(i + 1));
         int64_t tmp = seq->data[i];

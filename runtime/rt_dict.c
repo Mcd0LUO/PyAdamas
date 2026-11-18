@@ -470,7 +470,7 @@ PyAdamasList* pa_dict_keys(PyAdamasDict* d) {
     for (int64_t i = 0; i < d->len; ++i) {
         int64_t v = pa_dict_key_at(d, i);
         pa_own_inc(kind, v);
-        pa_list_append(out, v, 2);
+        pa_list_append(out, v, kind);  /* 0.303：种类即堆性 */
     }
     return out;
 }
@@ -481,7 +481,7 @@ PyAdamasList* pa_dict_values(PyAdamasDict* d) {
     for (int64_t i = 0; i < d->len; ++i) {
         int64_t v = pa_dict_val_at(d, i);
         pa_own_inc(kind, v);
-        pa_list_append(out, v, 2);
+        pa_list_append(out, v, kind);  /* 0.303 */
     }
     return out;
 }
@@ -499,11 +499,16 @@ PyAdamasList* pa_dict_items(PyAdamasDict* d) {
     for (int32_t i = d->head; i >= 0; i = d->entries[i].next) {
         PyAdamasDictEntry e = d->entries[i];
         PyAdamasList* tup = pa_list_new(2, tk);
+        /* 0.303：tk==2 的短命元组用 heap2（不建位图，销毁走注册表）——
+           按 own 传 0/1 会让 kind2 元组在首元素时分配位图，items 每对
+           一次 alloc/free churn（dict_wordfreq 实测 +4.7%）。tk 0/1 时
+           传准确种类，免探针。 */
+        int th = tk == 2 ? 2 : tk;
         pa_own_inc(d->key_own, e.key);
-        pa_list_append(tup, e.key, 2);
+        pa_list_append(tup, e.key, th);
         pa_own_inc(d->val_own, e.val);
-        pa_list_append(tup, e.val, 2);
-        pa_list_append(out, (int64_t)tup, 2);  // tuple 的初始引用交给外层 list
+        pa_list_append(tup, e.val, th);
+        pa_list_append(out, (int64_t)tup, 1);  // tuple 的初始引用交给外层 list（0.303：堆提示 1）
     }
     PA_PIN_RELEASE(out);
     return out;

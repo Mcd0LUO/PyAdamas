@@ -148,7 +148,7 @@ VReg Lowerer::lower_method_native(Attribute& at, Call& c, VReg recv, TypePtr rec
                     continue;
                 }
                 VReg v = coerce(expr(*kw.value), tc_.type_of(kw.value.get()), t_int());
-                call_void(RtFn::ListSet, {fields, const_int(idx), v});
+                call_void(RtFn::ListSet, {fields, const_int(idx), v, const_int(0)});
             }
             TypePtr rt = tc_.type_of(&c);
             if (!rt || rt->kind != TyKind::DateTime) rt = new_ty(TyKind::DateTime);

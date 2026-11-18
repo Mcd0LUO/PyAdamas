@@ -260,27 +260,32 @@ PyAdamasList* pa_tuple_new_filled(int64_t n, int64_t elem_kind, int64_t a, int64
     return l;
 }
 
-/* 探测 unknown 值是不是堆指针：只查存活索引、不解引用，任意 int64 都安全。
-   和 pa_rc_inc_unknown 一致，静态字符串字面量（永生）也算堆。 */
-static int list_probe(int64_t v) {
-    if (v <= 4096) return 0;
-    PyAdamasRc* h = (PyAdamasRc*)(uintptr_t)((uint64_t)v - (uint64_t)PYADAMAS_RC_HDR);
-    return rc_index_has(h) ? 1 : 0;
-}
-
 /* 列表元素类别定型。kind 3 的空列表在这里采用第一个写入值的种类；静态
    种类和值冲突时降级为 2（混合，销毁走注册表）。vk 是值的静态种类，
-   unknown 时只能运行期探测一次。owned 非 0 表示引用已经转给容器。 */
+   unknown 时只能运行期探测一次。owned 非 0 表示引用已经转给容器。
+   0.303：探针改用共享的 pa_unknown_is_heap（与 dec_unknown 逐位一致，
+   含 exact-RC 回退 —— 旧 list_probe 只查 rc_index，exact-RC 模式下索引
+   关闭，kind0 列表存 unknown 堆值会漏升级）。0→2 升级补 GC 链：kind0
+   小元组是 untracked 分配，有了堆出边就必须让 GC 看到。 */
 void pa_list_prep(PyAdamasList* l, int64_t v, int64_t vk, int64_t owned) {
     int kind = (int)l->elem_kind;
     if (kind == 3) {
-        kind = vk == 2 ? list_probe(v) : (int)vk;
+        kind = vk == 2 ? pa_unknown_is_heap(v) : (int)vk;
+        l->elem_kind = kind;
     } else if (vk == 2) {
-        if ((kind == 1) != (list_probe(v) != 0)) kind = 2;
+        /* 0.303：kind2 无需探针（种类恒 2）；冲突才升级，track 放冷分支 ——
+           热路径（kind1 存堆 / kind0 存标量）与 0.302 逐指令同形态，
+           无条件升级写法会让 gcc 给整个函数加 push/spill（str_build 教训）。 */
+        if (kind != 2 && (kind == 1) != (pa_unknown_is_heap(v) != 0)) {
+            if (kind == 0) pa_rc_track(l);
+            kind = 2;
+            l->elem_kind = 2;
+        }
     } else if (kind != vk) {
+        if (kind == 0) pa_rc_track(l);
         kind = 2;
+        l->elem_kind = 2;
     }
-    l->elem_kind = kind;
     if (!owned) pa_own_inc(kind, v);
 }
 
@@ -307,6 +312,41 @@ static void list_bits_reserve(PyAdamasList* l, int64_t ncap) {
     l->bits_cap = bcap;
 }
 
+/* 0.303：丢弃逐元素位图，回退注册表判断（销毁/GC 释放的 kind2 无位图
+   分支）。位图块归还缓冲池。用于无法逐位维护的写入/重排路径。 */
+void pa_list_drop_bits(PyAdamasList* l) {
+    if (l->heap_bits) {
+        list_buf_put((int64_t*)l->heap_bits, l->bits_cap);
+        l->heap_bits = NULL;
+        l->bits_cap = 0;
+    }
+}
+
+/* 0.303：下标类写入（set/insert）的种类/位图维护。heap 是新值静态种类
+   （0/1/2），2 才探针 —— 已知标量绝不探针：大整数/浮点位模式可能恰好等于
+   某个存活堆地址，探针会误判成堆。kind 冲突升级 2（0→2 补 GC 链）；
+   kind2 带位图按新值堆性更新第 i 位；kind2 无位图无需动作（销毁走注册表）。
+   不做 retain/release —— 新值引用由降级器/调用方在写入前 retain，旧值
+   release 由调用方按**写入前**的 kind 做。 */
+void pa_list_store_kind(PyAdamasList* l, int64_t i, int64_t v, int64_t heap) {
+    int kind = (int)l->elem_kind;
+    if (kind == 3) { l->elem_kind = 2; kind = 2; }  /* 防御：kind3 只应是空表 */
+    if (kind == 2) {
+        if (l->heap_bits) {
+            int vh = heap == 2 ? pa_unknown_is_heap(v) : (int)heap;
+            uint64_t m = (uint64_t)1 << (i & 63);
+            if (vh) l->heap_bits[i >> 6] |= m;
+            else l->heap_bits[i >> 6] &= ~m;
+        }
+        return;
+    }
+    int vh = heap == 2 ? pa_unknown_is_heap(v) : (int)heap;
+    if (kind != vh) {
+        l->elem_kind = 2;
+        if (kind == 0) pa_rc_track(l);
+    }
+}
+
 /* 追加元素。
  *
  * heap 参数由 codegen 按**写入点的静态类型**给出：
@@ -315,13 +355,28 @@ static void list_bits_reserve(PyAdamasList* l, int64_t ncap) {
  *   2 = unknown，静态不可知
  *
  * 前两种情况下逐元素位图是精确的，销毁时不必查全局索引；
- * 一旦出现 2，整个列表退回 heap_bits == NULL 的旧路径（正确性优先）。 */
+ * 一旦出现 2，整个列表退回 heap_bits == NULL 的旧路径（正确性优先）。
+ *
+ * 0.303：种类维护。静态容器类型是 unknown 时降级器不调 prep，运行期
+ * kind 可能与写入值冲突（kind1 列表 append 标量）；kind3 空表也要在这里
+ * 定型（同 prep）。热路径（kind0+heap0 / kind1+heap1 / kind2）只多一次
+ * kind 装载 + 两次比较，不探针、不写内存。 */
 void pa_list_append(PyAdamasList* l, int64_t v, int64_t heap) {
     if (l->len == l->cap) {
         int64_t ncap = l->cap ? l->cap * 2 : 4;
         list_buf_grow(l, ncap);
         // 按增长后的真实 cap 扩位图：池可能把 cap 抬高到 > ncap。
         if (l->heap_bits) list_bits_reserve(l, l->cap);
+    }
+    int kind = (int)l->elem_kind;
+    if (kind != 2 && kind != heap) {
+        int vh = heap == 2 ? pa_unknown_is_heap(v) : (int)heap;
+        if (kind == 3) {
+            l->elem_kind = vh;
+        } else if (kind != vh) {
+            l->elem_kind = 2;
+            if (kind == 0) pa_rc_track(l);
+        }
     }
     // 维护位图：一旦遇到 unknown，放弃逐元素跟踪。
     if (heap == 2) {
@@ -376,10 +431,13 @@ void pa_list_copy_range(PyAdamasList* dst, PyAdamasList* src, int64_t lo, int64_
             if (dst->heap_bits) list_bits_reserve(dst, dst->cap);
         }
         int kind = (int)dst->elem_kind;
-        if (kind == 0 && heap == 0) {
+        /* 0.303：快路径还要求源的**运行期**种类与静态 heap 一致 ——
+           unknown 别名能让 static list[str] 的变量装着 kind2 混合表，
+           此时 memcpy+批量 inc 会把标量当堆指针。不一致落逐元素慢路径。 */
+        if (kind == 0 && heap == 0 && src->elem_kind == 0) {
             memcpy(dst->data + dst->len, src->data + lo, (size_t)n * sizeof(int64_t));
             dst->len += n;
-        } else if (kind == 1 && heap == 1) {
+        } else if (kind == 1 && heap == 1 && src->elem_kind == 1) {
             int64_t* d = dst->data + dst->len;
             memcpy(d, src->data + lo, (size_t)n * sizeof(int64_t));
             for (int64_t i = 0; i < n; ++i) pa_rc_inc((void*)(uintptr_t)d[i]);
@@ -406,12 +464,16 @@ int64_t pa_list_get(PyAdamasList* l, int64_t i) {
     return l->data[i];
 }
 
-void pa_list_set(PyAdamasList* l, int64_t i, int64_t v) {
+/* 0.303：写入时维护 elem_kind / heap_bits（pa_list_store_kind）。旧值按
+   **写入前**的 kind 释放；新值引用由调用方在写入前 retain（降级器）。
+   heap 是新值静态种类，见 rt_internal.h 的说明。 */
+void pa_list_set(PyAdamasList* l, int64_t i, int64_t v, int64_t heap) {
     if (i < 0) i += l->len;
     if (i < 0 || i >= l->len) pa_raise_c("IndexError", "list assignment index out of range");
     int kind = l->elem_kind == 3 ? 2 : (int)l->elem_kind;
     int64_t old = l->data[i];
     l->data[i] = v;
+    pa_list_store_kind(l, i, v, heap);
     pa_own_dec(kind, old);
 }
 
@@ -464,7 +526,9 @@ PyAdamasList* pa_list_reversed(PyAdamasList* src) {
     return l;
 }
 
-void pa_list_insert(PyAdamasList* l, int64_t i, int64_t v) {
+/* 0.303：insert 与 set 同族 —— 维护种类（heap 是新值静态种类），且插入
+   会整体右移元素，kind2 位图无法逐位跟随，保守丢弃回退注册表。 */
+void pa_list_insert(PyAdamasList* l, int64_t i, int64_t v, int64_t heap) {
     if (i < 0) i += l->len;
     if (i < 0) i = 0;
     if (i > l->len) i = l->len;
@@ -472,6 +536,8 @@ void pa_list_insert(PyAdamasList* l, int64_t i, int64_t v) {
         int64_t ncap = l->cap ? l->cap * 2 : 4;
         list_buf_grow(l, ncap);
     }
+    if (l->elem_kind == 2) pa_list_drop_bits(l);
+    pa_list_store_kind(l, i, v, heap);
     if (i < l->len)
         memmove(l->data + i + 1, l->data + i, sizeof(int64_t) * (size_t)(l->len - i));
     l->data[i] = v;
@@ -479,6 +545,8 @@ void pa_list_insert(PyAdamasList* l, int64_t i, int64_t v) {
 }
 
 void pa_list_reverse(PyAdamasList* l) {
+    /* 0.303：反转交换元素位置，kind2 位图无法跟随，保守丢弃。 */
+    if (l->elem_kind == 2) pa_list_drop_bits(l);
     for (int64_t i = 0, j = l->len - 1; i < j; ++i, --j) {
         int64_t t = l->data[i];
         l->data[i] = l->data[j];
@@ -650,6 +718,8 @@ PYADAMAS_TIMSORT(str, LESS_STR)
 // kind：0 int/bool、1 float、2 str、其它按机器字比较。
 void pa_list_sort(PyAdamasList* l, int64_t kind) {
     if (l->len < 2) return;
+    /* 0.303：排序重排元素，kind2 位图无法跟随，保守丢弃。 */
+    if (l->elem_kind == 2) pa_list_drop_bits(l);
     if (kind == 2) sort_str(l->data, l->len);
     else if (kind == 1) sort_f64(l->data, l->len);
     else sort_i64(l->data, l->len);
@@ -987,12 +1057,15 @@ void pa_list_del_index(PyAdamasList* l, int64_t i) {
     if (!l) pa_raise_c("TypeError", "del: expected a list");
     if (i < 0) i += l->len;
     if (i < 0 || i >= l->len) pa_raise_c("IndexError", "list index out of range");
+    /* 0.303：删除左移元素，kind2 位图无法跟随，保守丢弃。kind3 防御性
+       按 2 释放（与 set/destroy 同口径）。 */
+    if (l->elem_kind == 2) pa_list_drop_bits(l);
+    int kind = l->elem_kind == 3 ? 2 : (int)l->elem_kind;
     int64_t v = l->data[i];
-    pa_own_dec(l->elem_kind, v);
+    pa_own_dec(kind, v);
     memmove(&l->data[i], &l->data[i + 1],
             sizeof(int64_t) * (size_t)(l->len - i - 1));
     l->len--;
-
 }
 
 /* 进程退出时还掉列表缓冲池。纯缓存：回收对象时不立刻 free 而是挂进池里，
