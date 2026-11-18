@@ -223,6 +223,20 @@ std::vector<VReg> Lowerer::bind_args(Call& c, const FuncInfoPtr& info, FunctionD
         }
     };
 
+    auto emit_default = [&](const Param& p, const ConstVal& cv) {
+        // With **mapping or a callable signature we cannot refine, the
+        // checker may not know which defaults are used. Check the final
+        // representation before materializing an argument for this slot.
+        if (ir_is_float(cv.ty) != ir_is_float(p.ty) &&
+            !(ir_is_float(p.ty) && is_num(cv.ty))) {
+            err(c.line, c.col, std::format(
+                "default for '{}' of '{}' has no compatible compiled parameter type",
+                p.name, info->name));
+            return const_none();
+        }
+        return emit_const(cv);
+    };
+
     for (size_t i = 0; i < npos; ++i) {
         if (bound[i] != kNoReg) continue;
         if (!info->pos[i].has_default) {
@@ -240,7 +254,7 @@ std::vector<VReg> Lowerer::bind_args(Call& c, const FuncInfoPtr& info, FunctionD
             bound[i] = const_none();
             continue;
         }
-        bound[i] = emit_const(*cv);
+        bound[i] = emit_default(info->pos[i], *cv);
     }
     for (size_t i = 0; i < nkw; ++i) {
         size_t bi = npos + i;
@@ -265,7 +279,7 @@ std::vector<VReg> Lowerer::bind_args(Call& c, const FuncInfoPtr& info, FunctionD
             bound[bi] = const_none();
             continue;
         }
-        bound[bi] = emit_const(*cv);
+        bound[bi] = emit_default(info->kwonly[i], *cv);
     }
 
     args = std::move(bound);

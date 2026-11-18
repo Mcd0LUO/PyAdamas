@@ -264,7 +264,9 @@ private:
     void check_once(Module& m);
     bool collect_result_hints();
     TypePtr observe_call_result(Call& c, const FuncInfoPtr& fn, TypePtr result);
-    std::unordered_map<FunctionDef*, ClassInfoPtr> func_owners_;
+    std::unordered_map<const FunctionDef*, ClassInfoPtr> func_owners_;
+    std::unordered_set<const FunctionDef*> methods_with_float_defaults_;
+    void check_inferred_default_overrides();
     std::unordered_map<std::string, ClassInfoPtr> classes_;
     // 正在检查方法体的类。`self.x = ...` 里 x 没声明过时，就地补成字段——
     // Python 的实例属性本来就是在 __init__ 里长出来的，要求先写标注会把

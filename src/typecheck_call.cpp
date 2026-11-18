@@ -4,7 +4,21 @@
 #include "module.h"
 
 namespace pyadamas {
+namespace {
 
+TypePtr literal_type(const LiteralValue& lit) {
+    switch (lit.kind) {
+        case LiteralValue::Kind::None: return t_none();
+        case LiteralValue::Kind::Bool: return t_bool();
+        case LiteralValue::Kind::Int: return t_int();
+        case LiteralValue::Kind::Float: return t_float();
+        case LiteralValue::Kind::Str: return t_str();
+        case LiteralValue::Kind::Bytes: return t_bytes();
+    }
+    return t_unknown();
+}
+
+}  // namespace
 
 TypePtr TypeChecker::call(Call& c) {
         // 按被调表达式形态分流：名字、属性、任意值。
@@ -34,16 +48,27 @@ TypePtr TypeChecker::check_args(const FuncInfoPtr& fn, Call& c) {
         }
         // 实参和关键字实参都只求值一次。之前关键字值在循环里被求了两次，
         // 一次的类型错误会重复报两遍。
-        std::vector<TypePtr> argtys;
-        argtys.reserve(c.args.size());
-        bool has_star = false;
+        struct PosArg {
+            TypePtr ty;
+            const Expr* source;
+            bool dynamic_star = false;
+        };
+        std::vector<PosArg> positional;
+        positional.reserve(c.args.size());
+        bool has_dynamic_star = false;
         for (auto& arg : c.args) {
-            if (arg->kind == ExprKind::Starred) {
-                has_star = true;
-                auto t = expr(*static_cast<Starred&>(*arg).value);
-                argtys.push_back(iter_elem(t, arg->line, arg->col));
+            if (arg->kind != ExprKind::Starred) {
+                positional.push_back({expr(*arg), arg.get()});
+                continue;
+            }
+            auto t = expr(*static_cast<Starred&>(*arg).value);
+            if (t && t->kind == TyKind::Tuple && !t->variadic) {
+                // Lowering expands a fixed tuple slot by slot. A joined
+                // element type loses both the arity and numeric ABI facts.
+                for (auto& elem : t->sub) positional.push_back({elem, arg.get()});
             } else {
-                argtys.push_back(expr(*arg));
+                has_dynamic_star = true;
+                positional.push_back({iter_elem(t, arg->line, arg->col), arg.get(), true});
             }
         }
         std::vector<std::pair<std::string, TypePtr>> kws;
@@ -60,10 +85,10 @@ TypePtr TypeChecker::check_args(const FuncInfoPtr& fn, Call& c) {
         for (auto& [name, ty] : kws)
             if (name.empty()) has_dstar = true;
 
-        if (!has_star && argtys.size() > npos && !fn->varargs) {
+        if (!has_dynamic_star && positional.size() > npos && !fn->varargs) {
             err(c.line, c.col,
                 std::format("function '{}' takes {} positional argument{} but {} were given",
-                            fn->name, npos, npos == 1 ? "" : "s", argtys.size()));
+                            fn->name, npos, npos == 1 ? "" : "s", positional.size()));
         }
 
         // cimport 的 ptr/ptr[T]：除原始地址外，还接受底层布局兼容的缓冲区。
@@ -93,20 +118,45 @@ TypePtr TypeChecker::check_args(const FuncInfoPtr& fn, Call& c) {
         // 未标注的形参用实参类型回填（单态化）。回填后函数体要按新签名
         // 重查；同一形参被多种类型调用则退回 unknown，不误杀 Python 的
         // 多态用法。
-        auto bind_param = [&](Param& p, size_t idx, TypePtr ty, int line, int col) {
-            // 方法调用走的是去掉 self 的 call_sig，回填要同步回含 self 的 sig，
-            // 否则方法体重查时仍是旧类型。
-            auto sync = [&]() {
-                if (!fn->outer) return;
+        auto bind_param = [&](Param& p, size_t idx, TypePtr ty, int line, int col,
+                              bool is_default = false) {
+            // Bound and unbound calls to a method must use the same evidence.
+            Param* source = nullptr;
+            if (fn->outer) {
                 auto& params = p.kwonly ? fn->outer->kwonly : fn->outer->pos;
                 const size_t k = p.kwonly ? idx : idx + fn->outer_off;
-                if (k >= params.size()) return;
-                Param& sp = params[k];
-                sp.ty = p.ty;
-                sp.inferred = p.inferred;
-                sp.multi = p.multi;
+                if (k < params.size() && params[k].name == p.name) source = &params[k];
+            }
+            auto copy_inference = [](Param& to, const Param& from) {
+                to.ty = from.ty;
+                to.inferred = from.inferred;
+                to.multi = from.multi;
+                to.omitted_none = from.omitted_none;
+            };
+            if (source) copy_inference(p, *source);
+            auto sync = [&]() {
+                if (!source) return;
+                copy_inference(*source, p);
                 fn->outer->sig_dirty = true;
             };
+            auto mixed_float = [&]() {
+                err(line, col,
+                    std::format("argument '{}' of '{}' is used with both float and "
+                                "non-float values; annotate the parameter type",
+                                p.name, fn->name));
+            };
+            if (is_default && ty && ty->kind == TyKind::None) {
+                if (p.ty && p.ty->kind == TyKind::Float) mixed_float();
+                if (is_unknown(p.ty) || p.inferred) {
+                    p.omitted_none = true;
+                    if (source) source->omitted_none = true;
+                }
+                return;
+            }
+            if (ty && ty->kind == TyKind::Float && (p.multi || p.omitted_none)) {
+                mixed_float();
+                return;
+            }
             if (p.multi) return;
             if (p.cptr) {
                 int r = cptr_buffer(p.cptr_elem, p.cptr_opaque, ty);
@@ -166,10 +216,7 @@ TypePtr TypeChecker::check_args(const FuncInfoPtr& fn, Call& c) {
             // orders before assignable(), which allows int -> float.
             if (p.inferred && !is_unknown(ty) &&
                 ((p.ty->kind == TyKind::Float) != (ty->kind == TyKind::Float))) {
-                err(line, col,
-                    std::format("argument '{}' of '{}' is used with both float and "
-                                "non-float values; annotate the parameter type",
-                                p.name, fn->name));
+                mixed_float();
                 return;
             }
             if (assignable(p.ty, ty)) return;
@@ -190,14 +237,19 @@ TypePtr TypeChecker::check_args(const FuncInfoPtr& fn, Call& c) {
                             type_name(p.ty), type_name(ty)));
         };
 
-        for (size_t i = 0; i < argtys.size(); ++i) {
-            if (i < npos) {
-                filled[i] = true;
-                bind_param(fn->pos[i], i, argtys[i], c.args[i]->line, c.args[i]->col);
-            } else if (fn->varargs && !assignable(fn->vararg_ty, argtys[i])) {
-                err(c.args[i]->line, c.args[i]->col,
+        size_t pos_i = 0;
+        bool uncertain_pos = false;
+        for (const auto& a : positional) {
+            if (a.dynamic_star && pos_i < npos) uncertain_pos = true;
+            if (uncertain_pos) continue;
+            if (pos_i < npos) {
+                filled[pos_i] = true;
+                bind_param(fn->pos[pos_i], pos_i, a.ty, a.source->line, a.source->col);
+                ++pos_i;
+            } else if (fn->varargs && !assignable(fn->vararg_ty, a.ty)) {
+                err(a.source->line, a.source->col,
                     std::format("'*{}' of '{}' expects '{}', got '{}'", fn->vararg_name,
-                                fn->name, type_name(fn->vararg_ty), type_name(argtys[i])));
+                                fn->name, type_name(fn->vararg_ty), type_name(a.ty)));
             }
         }
 
@@ -208,6 +260,7 @@ TypePtr TypeChecker::check_args(const FuncInfoPtr& fn, Call& c) {
             if (pit != fn->pos.end()) {
                 size_t idx = static_cast<size_t>(pit - fn->pos.begin());
                 if (idx < fn->n_posonly) {
+                    if (fn->kwargs) continue;  // The name belongs to **kwargs, not this slot.
                     err(c.line, c.col, std::format("'{}' is a positional-only argument of '{}'",
                                                    name, fn->name));
                     continue;
@@ -246,12 +299,42 @@ TypePtr TypeChecker::check_args(const FuncInfoPtr& fn, Call& c) {
             if (!missing.empty()) missing += ", ";
             missing += "'" + n + "'";
         };
-        if (!has_star && !has_dstar) {
-            for (size_t i = 0; i < npos; ++i)
-                if (!filled[i] && !fn->pos[i].has_default) add_missing(fn->pos[i].name);
+        auto bind_default = [&](Param& p, size_t idx) {
+            if (!p.has_default) {
+                add_missing(p.name);
+                return;
+            }
+            // Only a default actually used by this call is type evidence.
+            // Nonliteral defaults are not supported by the call lowerer.
+            if (!p.default_lit) return;
+            const auto* impl = fn->outer ? fn->outer : fn.get();
+            const auto it = signature_defs_.find(impl);
+            const bool can_recheck = it != signature_defs_.end() &&
+                (!func_owners_.contains(it->second) ||
+                 std::ranges::find(func_defs_, it->second) != func_defs_.end());
+            TypePtr ty = literal_type(*p.default_lit);
+            if (can_recheck) {
+                bind_param(p, idx, ty, c.line, c.col, true);
+                // The invocation may go through a vtable. Validate any newly
+                // inferred FP argument against the module's possible overrides.
+                if (ty->kind == TyKind::Float && p.inferred) {
+                    if (auto owner = func_owners_.find(it->second);
+                        owner != func_owners_.end() && owner->second)
+                        methods_with_float_defaults_.insert(it->second);
+                }
+            } else if ((ty->kind == TyKind::Float && (!p.ty || p.ty->kind != TyKind::Float)) ||
+                       (ty->kind == TyKind::None && p.ty && p.ty->kind == TyKind::Float)) {
+                err(c.line, c.col, std::format(
+                    "default for '{}' of '{}' has no compatible compiled parameter type",
+                    p.name, fn->name));
+            }
+        };
+        if (!has_dstar) {
+            if (!uncertain_pos)
+                for (size_t i = 0; i < npos; ++i)
+                    if (!filled[i]) bind_default(fn->pos[i], i);
             for (size_t i = 0; i < fn->kwonly.size(); ++i)
-                if (!kw_filled[i] && !fn->kwonly[i].has_default)
-                    add_missing(fn->kwonly[i].name);
+                if (!kw_filled[i]) bind_default(fn->kwonly[i], i);
         }
         if (!missing.empty())
             err(c.line, c.col,

@@ -161,6 +161,7 @@ struct Param {
     // 要退回 unknown，不能当成类型错误。
     bool inferred = false;
     bool multi = false;
+    bool omitted_none = false;  // None default observed; cannot enter a float slot.
     // cimport 的 ptr/ptr[T] 形参：额外接受 list/bytes 缓冲区实参。
     bool cptr = false;
     CKind cptr_elem = CKind::None;  // ptr[T] 的 T；None 表示无类型 ptr

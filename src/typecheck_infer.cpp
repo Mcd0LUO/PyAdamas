@@ -101,4 +101,38 @@ bool TypeChecker::collect_result_hints() {
     return changed;
 }
 
+void TypeChecker::check_inferred_default_overrides() {
+    auto is_float = [](const Param& p) { return p.ty && p.ty->kind == TyKind::Float; };
+    auto same_slots = [&](const auto& a, const auto& b) {
+        return a.size() == b.size() && std::ranges::equal(a, b, [&](const Param& x, const Param& y) {
+            return is_float(x) == is_float(y);
+        });
+    };
+    for (const auto* def : func_defs_) {
+        if (!methods_with_float_defaults_.contains(def) || def->name == "__init__") continue;
+        const ClassInfo* owner = func_owners_.at(def).get();
+        const auto& sig = func_infos_.at(def);
+        if (const auto* method = owner->own_method(def->name);
+            !method || method->kind == MethodKind::Static) continue;
+        for (const auto& cls : all_classes_) {
+            if (!cls || cls.get() == owner) continue;
+            if (!cls->is_subclass_of(owner) && !owner->is_subclass_of(cls.get())) continue;
+            const auto* method = cls->method(def->name);
+            if (!method || method->kind == MethodKind::Static ||
+                method->def == def || !method->sig) continue;
+            bool sig_float_return = sig->ret && sig->ret->kind == TyKind::Float;
+            bool override_float_return = method->sig->ret && method->sig->ret->kind == TyKind::Float;
+            if (!same_slots(sig->pos, method->sig->pos) ||
+                !same_slots(sig->kwonly, method->sig->kwonly) ||
+                sig_float_return != override_float_return) {
+                err(def->line, def->col, std::format(
+                    "default of '{}.{}' infers float slots incompatible with override '{}.{}'; "
+                    "use compatible parameter annotations", owner->name, def->name,
+                    cls->name, def->name));
+                break;
+            }
+        }
+    }
+}
+
 }  // namespace pyadamas

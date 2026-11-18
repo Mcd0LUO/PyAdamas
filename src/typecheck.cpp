@@ -69,6 +69,9 @@ void TypeChecker::check_once(Module& m) {
                         if (method.def != fd || !method.call_sig || method.decorated) continue;
                         method.call_sig->ret = method.sig->ret;
                         method.call_sig->ret_known = method.sig->ret_known;
+                        for (size_t i = 0; i < method.call_sig->pos.size(); ++i)
+                            method.call_sig->pos[i] = method.sig->pos[i + method.call_sig->outer_off];
+                        method.call_sig->kwonly = method.sig->kwonly;
                     }
                 }
                 // 重查可能把别的函数标脏（形参回填 / 装饰器 / 互递归）：
@@ -146,6 +149,7 @@ void TypeChecker::check_once(Module& m) {
             if (fi && fi->ret) expr_types_[ce] = fi->ret;
 
         // 函数体都查完了，dunder 的返回类型此时才有定论。
+        check_inferred_default_overrides();
         check_dunder_returns();
     }
 
