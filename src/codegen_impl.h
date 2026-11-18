@@ -293,6 +293,9 @@ private:
     // 块内临时寄存器可用池：无调用函数里被跨块提升占走的 %r8–%r11 会剔除。
     std::vector<std::string> block_temp_pool_;
     bool temp_reg_op_ok(const Inst& in) const;
+    // xmm3-7 浮点临时值的安全性（定义在 codegen_ops.cpp）：与 GPR 池
+    // 独立 —— 整数 div/mod/floordiv 只用 GPR scratch，不碰 xmm3-7。
+    bool fp_temp_op_ok(const Inst& in) const;
     void assign_block_temp_regs();
 
     // 生成期缓存：块标签、vreg/槽的内存操作数串。这些字符串在函数内

@@ -4,6 +4,16 @@
 
 早期阶段没有逐条留痕，按阶段归纳；0.4 之后逐条记录。
 
+## [0.279] - 2026-11-18
+
+### 浮点临时寄存器分配与 GPR 门控解耦（spectral_norm −19.9%）+ abbench 测量可靠性修复
+
+- **根因**：`assign_block_temp_regs` 用同一个安全门控管 GPR 池（r8-r11）和浮点池（xmm3-7）：spectral_norm 的 eval_a 内联进内层循环后含整数 `//2`（魔数序列用 GPR scratch）→ **整块被踢出临时分配**，所有浮点中间值被迫走栈往返（divsd/mulsd 读写内存，perf annotate 里 `mulsd 0x1d0(%rsp)` 一片）。
+- **修复**：新增 `fp_temp_op_ok` 独立门控（定义在 codegen_ops.cpp）：整数 div/mod/floordiv 只用 GPR scratch（panic 调用不返回）→ 浮点安全；浮点 FloorDiv/Mod/Pow 调 floor/fmod/pow 会正常返回 → 不安全；列表 IndexLoad 越界慢路径不返回 → 安全，字符串 IndexLoad 调 pa_str_char_at 会返回 → 不安全；CallRt（含 RC 慢路径）→ 不安全。xmm3-7 只被会正常返回的调用破坏；浮点算术 scratch 是 xmm0/1/2，与临时池不相交。两池独立门控后，含整数除法的浮点热块也能拿到 xmm 临时寄存器。
+- **实测（修复后的 abbench，15 轮）**：spectral_norm 74.79 → **59.93 ms（−19.9%**，p25 −20.0%）；其余 8 个 classic 用例生成二进制**逐字节相同**（cmp 证实），差值在噪声带内。
+- **abbench 可靠性修复（重要）**：对照实验（两侧同一编译器）发现短用例（<100ms）锁进机器周期性干扰的固定相位 —— 固定用例顺序 + A 恒先于 B，**同一份二进制量出 ±20% 假差**（fannkuch +19.7%、fasta +21.8%、fib −14.6%）。修复三条：每轮 `sort -R` 打乱用例顺序；奇偶轮交换 A/B 先后；`BURST=5` 连跑取平均（覆盖干扰周期）。修复后对照：全用例 ±3.5% 内、多数 ±1%。**历史短用例数据需用新工具复核**；长用例（queue_sim 等 >200ms）跨多个干扰周期，历史数据仍可信。
+- **验证**：差分 192/0；release 与 ASan 套件各 210 ran ok / EXIT=0。
+
 ## [0.278] - 2026-11-18
 
 ### 修 0.277 嵌套同名提示阴影洞；增量余数强度削减实测负收益，撤回

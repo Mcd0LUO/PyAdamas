@@ -24,6 +24,9 @@ cd "$ROOT" || exit 1
 BASE_REF=${1:-HEAD}
 SUITE=${2:-all}
 REPS=${3:-9}
+# 每次测量连跑 BURST 遍取平均：单次短跑（<100ms）落在机器周期性干扰的
+# 随机相位上，方差 ±20%；连跑覆盖整个干扰周期，把方差压到 ±1-2%。
+BURST=${BURST:-5}
 CUR_BIN=${PYADAMAS_BIN:-$ROOT/build/release/pyadamas}
 
 if [ ! -x "$CUR_BIN" ]; then
@@ -85,16 +88,23 @@ for name in "${!A_BIN[@]}"; do
     : > "$OUT/ta_$name"
     : > "$OUT/tb_$name"
 done
+# 每轮打乱用例顺序 + 奇偶轮交换 A/B 先后。短用例（<100ms）会锁进机器
+# 周期性干扰的固定相位：实测同一份二进制两侧量出 ±20% 假差（fannkuch
+# +19.7% / fib -14.6%），固定顺序的交替抵消不掉。打乱后相位随机化。
+mapfile -t ALL_NAMES < <(printf '%s\n' "${!A_BIN[@]}")
 for rep in $(seq 1 "$REPS"); do
-    for name in "${!A_BIN[@]}"; do
-        s=$(date +%s%N)
-        taskset -c "$PIN_CPU" "${A_BIN[$name]}" >/dev/null 2>&1
-        e=$(date +%s%N)
-        echo $(( (e - s) / 1000 )) >> "$OUT/ta_$name"
-        s=$(date +%s%N)
-        taskset -c "$PIN_CPU" "${B_BIN[$name]}" >/dev/null 2>&1
-        e=$(date +%s%N)
-        echo $(( (e - s) / 1000 )) >> "$OUT/tb_$name"
+    mapfile -t order < <(printf '%s\n' "${ALL_NAMES[@]}" | sort -R)
+    for name in "${order[@]}"; do
+        for side in $( (( rep % 2 )) && echo "a b" || echo "b a"); do
+            if [ "$side" = a ]; then bin=${A_BIN[$name]}; tf=$OUT/ta_$name
+            else bin=${B_BIN[$name]}; tf=$OUT/tb_$name; fi
+            s=$(date +%s%N)
+            for ((k = 0; k < BURST; k++)); do
+                taskset -c "$PIN_CPU" "$bin" >/dev/null 2>&1
+            done
+            e=$(date +%s%N)
+            echo $(( (e - s) / 1000 / BURST )) >> "$tf"
+        done
     done
 done
 

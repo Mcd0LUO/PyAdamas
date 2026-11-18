@@ -733,6 +733,51 @@ void AsmGen::gen_bin_fp(const Inst& in) {
         move_fp(dst_op(in.dst), "%xmm0");
     }
 
+// xmm3-7 浮点临时值只被「会正常返回的调用」和「使用 xmm3-7 的指令」
+// 破坏。与 GPR 临时池（r8-r11）的判定独立：整数 div/mod/floordiv 的
+// 魔数/idiv 序列只用 GPR scratch（panic 调用不返回），不碰 xmm ——
+// spectral_norm 的 eval_a 内联后含 //2，旧判定把整块踢出临时分配，
+// 所有浮点中间值被迫走栈往返。浮点 FloorDiv/Mod/Pow 调 floor/fmod/pow
+// 会正常返回 → 不安全；列表 IndexLoad 的越界慢路径不返回 → 安全，
+// 字符串 IndexLoad 调 pa_str_char_at 会返回 → 不安全。
+bool AsmGen::fp_temp_op_ok(const Inst& in) const {
+        switch (in.op) {
+            case IrOp::Bin: {
+                TypePtr t = in.ty;
+                if (t && t->kind == TyKind::Str) return false;
+                bool fp = t && ir_is_float(t);
+                switch (in.bop) {
+                    case BinKind::Add:
+                    case BinKind::Sub:
+                    case BinKind::Mul:
+                    case BinKind::BitAnd:
+                    case BinKind::BitOr:
+                    case BinKind::BitXor:
+                    case BinKind::Shl:
+                    case BinKind::Shr:
+                        return true;
+                    case BinKind::Div:
+                        return true;   // 浮点只用 xmm0；整数 GPR + 不返回的 panic
+                    case BinKind::Mod:
+                    case BinKind::FloorDiv:
+                        return !fp;    // 浮点调 fmod/floor（会返回）
+                    default:
+                        return false;  // Pow 调 pow/pa_pow_i64
+                }
+            }
+            case IrOp::IndexLoad: {
+                TypePtr bt = ty_of(in.a);
+                return !(bt && bt->kind == TyKind::Str);
+            }
+            case IrOp::Un:
+            case IrOp::Cmp:
+            case IrOp::Convert:
+                return true;   // 只用 xmm0/xmm1 或 GPR
+            default:
+                return temp_reg_op_ok(in);
+        }
+    }
+
 void AsmGen::gen_un(const Inst& in) {
         TypePtr ty = ty_of(in.a);
         if (in.uop == UnKind::Not) {

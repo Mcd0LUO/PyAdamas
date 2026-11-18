@@ -1955,13 +1955,15 @@ void AsmGen::assign_block_temp_regs() {
         if (opt_ < 1 || gen_) return;
 
         for (const auto& b : f_->blocks) {
-            bool safe = true;
-            for (const auto& in : b.insts)
-                if (!temp_reg_op_ok(in)) {
-                    safe = false;
-                    break;
-                }
-            if (!safe) continue;
+            // GPR 池（r8-r11）与浮点池（xmm3-7）独立门控：整数除法类
+            // 指令踢出 GPR 池但不踢浮点池（见 fp_temp_op_ok）。
+            bool safe = true, fp_safe = true;
+            for (const auto& in : b.insts) {
+                if (safe && !temp_reg_op_ok(in)) safe = false;
+                if (fp_safe && !fp_temp_op_ok(in)) fp_safe = false;
+                if (!safe && !fp_safe) break;
+            }
+            if (!safe && !fp_safe) continue;
 
             std::unordered_map<VReg, int> def_pos;
             std::unordered_map<VReg, const Inst*> def_inst;
@@ -2030,6 +2032,7 @@ void AsmGen::assign_block_temp_regs() {
                 }
             };
 
+            if (safe) {
             std::vector<Range> ranges;
             for (const auto& [v, d] : def_pos) {
                 if (v >= static_cast<VReg>(f_->vreg_ty.size())) continue;
@@ -2066,9 +2069,11 @@ void AsmGen::assign_block_temp_regs() {
                 }
             });
 
+            }
+            if (fp_safe) {
             // 浮点临时值单独用 xmm3–7：和整型池互不影响。只收块内产生、
             // 块内用完且确定是 float 的纯计算值；LoadSlot 有自己的别名
-            // 机制，调用类指令所在块根本进不到这里。
+            // 机制，会正常返回的调用类指令所在块进不到这里。
             std::vector<Range> fp_ranges;
             for (const auto& [v, d] : def_pos) {
                 if (v >= static_cast<VReg>(f_->vreg_ty.size())) continue;
@@ -2089,6 +2094,7 @@ void AsmGen::assign_block_temp_regs() {
                          return in.bop == BinKind::Add || in.bop == BinKind::Sub ||
                                 in.bop == BinKind::Mul || in.bop == BinKind::Div;
                      });
+            }
         }
     }
 
