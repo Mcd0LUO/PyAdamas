@@ -984,14 +984,20 @@ static void* rc_alloc_core(int64_t size, void (*dtor)(void*), void (*release)(vo
     return p;
 }
 
-// unknown 值的 print：先查 GC 的地址索引判断是不是堆对象，命中就按真实
-// 类型分派，否则按整数。索引只比对地址、不解引用，所以任意 int64 都安全。
-// 只认 str——int/bool/float 在 unknown 里本来就分不开，保持按整数输出。
+// unknown 值的 print：先查堆探针判断是不是堆对象，命中就按真实类型
+// 分派，否则按整数。探针与 dec_unknown 同一份判定（含 exact-RC 回退）。
+// str 原样输出；CPython 桥的 float 盒 / list / dict 走 pa_print_cpy_value
+// （rt_cpy.c）；int/bool 在 unknown 里分不开，保持按整数输出。
 void pa_print_any(int64_t v) {
-    if (v > 4096) {
+    if (pa_unknown_is_heap(v)) {
         PyAdamasRc* h = (PyAdamasRc*)((uintptr_t)v - (uintptr_t)PYADAMAS_RC_HDR);
-        if (rc_index_has(h) && h->kind == PYADAMAS_RC_STR) {
+        if (h->kind == PYADAMAS_RC_STR) {
             pa_print_str((PyAdamasStr*)(uintptr_t)v);
+            return;
+        }
+        if (h->kind == PYADAMAS_RC_CPYFLOAT || h->kind == PYADAMAS_RC_LIST ||
+            h->kind == PYADAMAS_RC_DICT) {
+            pa_print_cpy_value(v);
             return;
         }
     }

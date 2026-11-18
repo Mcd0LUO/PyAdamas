@@ -430,6 +430,9 @@ enum class RtFn : uint16_t {
     CollMostCommon,        // (dict*, i64 n) -> list*
     JsonDumps,             // (i64 value, str* desc) -> str*
     JsonLoads,             // (str* text, str* desc) -> i64
+    // CPython 桥：(str* module, str* attr, list* args, str* descs) -> i64 unknown
+    // 懒拉起 python3 worker 子进程，JSON 帧 IPC；见 runtime/rt_cpy.c。
+    CpyCall,
     RegexCompile,          // (str* pat, i64 flags) -> regex*
     RegexSearchStr,        // (str* pat, str* text, i64 flags, i64 mode) -> match*
     RegexSearch,           // (regex*, str* text, i64 mode) -> match*
@@ -967,6 +970,7 @@ inline const char* rt_name(RtFn f) {
         case RtFn::CollMostCommon: return "pa_collections_most_common";
         case RtFn::JsonDumps: return "pa_json_dumps";
         case RtFn::JsonLoads: return "pa_json_loads";
+        case RtFn::CpyCall: return "pa_cpy_call";
         case RtFn::RegexCompile: return "pa_re_compile";
         case RtFn::RegexSearchStr: return "pa_re_search_str";
         case RtFn::RegexSearch: return "pa_re_search";

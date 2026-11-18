@@ -115,11 +115,31 @@ VReg Lowerer::lower_method_call(Attribute& at, Call& c) {
     if (auto* n = dynamic_cast<Name*>(at.value.get())) {
         if (tc_.cmodule(n->id)) return lower_cimport_call(at, c);
     }
+    // cpyos.path.basename(...)：CPython 代理 + 点子模块链，编译期拼成
+    // 完整模块名（python.os.path），与单层代理同一条 IPC 降级路径。
+    {
+        Expr* base = at.value.get();
+        std::vector<std::string> chain;
+        while (auto* ba = dynamic_cast<Attribute*>(base)) {
+            chain.push_back(ba->attr);
+            base = ba->value.get();
+        }
+        auto* bn = dynamic_cast<Name*>(base);
+        if (bn && !chain.empty()) {
+            if (auto mod = resolve_module_alias(bn->id); mod && mod->cpy_proxy) {
+                std::string name = mod->name;
+                for (auto it = chain.rbegin(); it != chain.rend(); ++it)
+                    name += "." + *it;
+                return lower_cpy_call(name, at.attr, c);
+            }
+        }
+    }
     // 内置模块的原生函数/常量。stdlib 扩展补进来的名字不在原生名单里，
     // 跳过这段，落到下面按普通外部全局函数调用。
     if (auto* n = dynamic_cast<Name*>(at.value.get())) {
         if (auto mod = resolve_module_alias(n->id);
             mod && mod->builtin && !mod->source_globals.count(at.attr)) {
+            if (mod->cpy_proxy) return lower_cpy_call(mod->name, at.attr, c);
             if (mod->name == "asyncio") return lower_asyncio(at.attr, c);
             if (mod->name == "itertools") return lower_itertools(at.attr, c);
             if (mod->name == "operator") return lower_operator(at.attr, c);

@@ -34,6 +34,14 @@ pyadamas::ModuleInfoPtr builtin_module(const std::string& name) {
     auto info = std::make_shared<pyadamas::ModuleInfo>();
     info->name = name;
     info->builtin = true;
+    // CPython 桥代理：根 "python" 与任意 "python.<module>" 子代理都没有
+    // 签名表——属性/调用在 typecheck 里按 cpy_proxy 放行成 unknown。
+    // 子代理按需生成（模块名是开集：stdlib / 第三方包都可能）。
+    if (name == "python" || name.starts_with("python.")) {
+        info->cpy_proxy = true;
+        cache[name] = info;
+        return info;
+    }
     auto func = [&](const std::string& n, std::vector<pyadamas::TypePtr> args, pyadamas::TypePtr ret) {
         auto t = pyadamas::new_ty(pyadamas::TyKind::Func);
         t->fn = builtin_fn(n, args, ret);

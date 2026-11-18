@@ -307,6 +307,16 @@ TypePtr TypeChecker::expr(Expr& e) {
                 }
                 if (auto* vn = dynamic_cast<Name*>(a.value.get())) {
                     if (auto mod = lookup_module_alias(vn->id)) {
+                        // CPython 桥代理：先验阶段只支持调用（call_forms 里
+                        // 放行成 unknown）。裸属性读（math.pi / sys.version）
+                        // 需要 getattr 帧，明确拒绝，见设计文档后续工作。
+                        if (mod->cpy_proxy) {
+                            err(a.line, a.col,
+                                std::format("CPython module proxy '{}' supports calls only "
+                                            "in the prototype (attribute reads are future work)",
+                                            vn->id));
+                            return t_unknown();
+                        }
                         if (auto ci = mod->classes.find(a.attr); ci != mod->classes.end())
                             return mk_class_obj(mk_class(ci->second.cls.get()));
                         auto it = mod->globals.find(a.attr);

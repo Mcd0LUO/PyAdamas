@@ -801,6 +801,7 @@ void AsmGen::gen_rt_args(const Inst& in, RtFn fn) {
         case RtFn::IntToBase:
         case RtFn::RoundI64:
         case RtFn::FileOpen:
+        case RtFn::CpyCall:
         case RtFn::JsonDumps:
         case RtFn::FuncReduce:
         case RtFn::StrPercentFormat:

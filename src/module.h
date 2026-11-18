@@ -34,6 +34,10 @@ struct ModuleInfo {
     // 扩展源补进来的（原生没有的）全局名：降级时这些名字按普通外部全局
     // 处理，其余名字继续走原生降级路径。原生名字优先，扩展不覆盖。
     std::set<std::string> source_globals;
+    // CPython 桥模块代理（from python import <module>）：没有编译期签名表，
+    // 任意属性/调用都放行成 unknown，降级成 rt_cpy 的子进程 IPC 调用。
+    // 名字是 "python"（根，只用于 from-import 解析）或 "python.<module>"。
+    bool cpy_proxy = false;
     std::string interface_hash;  // 二进制接口的 FNV-1a 64（hex）
     // 模块顶层名字 → 类型。函数本身就是 Func 类型的全局。
     // 类名单独放在 classes 里，不重复出现在 globals。

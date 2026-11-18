@@ -381,6 +381,11 @@ void TypeChecker::stmt_import(Import& im) {
                     "dotted import needs 'as name' (or use from ... import)");
                 continue;
             }
+            if (al.name == "python" || al.name.starts_with("python.")) {
+                err(im.line, im.col,
+                    "use 'from python import <module>' instead of 'import python'");
+                continue;
+            }
             ModuleInfoPtr info = module_lookup_(al.name);
             if (info) {
                 cur_->modules[bind] = std::move(info);
@@ -514,6 +519,10 @@ void TypeChecker::stmt_import_from(ImportFrom& im) {
         }
         if (im.names.size() == 1 && im.names[0].name == "*") {
             ModuleInfoPtr info = module_lookup_(im.module);
+            if (info && info->cpy_proxy) {
+                err(im.line, im.col, "from python import * is not supported");
+                return;
+            }
             if (!info) {
                 star_import_ = true;
                 unsupported.push_back("import");
@@ -529,6 +538,21 @@ void TypeChecker::stmt_import_from(ImportFrom& im) {
             return;
         }
         ModuleInfoPtr info = module_lookup_(im.module);
+        if (info && info->cpy_proxy) {
+            // from python import <module> [as alias]：绑定 CPython 模块代理。
+            // 代理没有签名表，属性/调用按 unknown 放行（expr / call_forms）。
+            for (auto& al : im.names) {
+                std::string bind = al.asname.empty() ? al.name : al.asname;
+                ModuleInfoPtr child = module_lookup_(im.module + "." + al.name);
+                if (!child) {
+                    err(im.line, im.col,
+                        std::format("cannot resolve CPython module '{}'", al.name));
+                    continue;
+                }
+                cur_->modules[bind] = std::move(child);
+            }
+            return;
+        }
         for (auto& al : im.names) {
             std::string bind = al.asname.empty() ? al.name : al.asname;
             if (!info) {
