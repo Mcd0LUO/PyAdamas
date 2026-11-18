@@ -356,32 +356,14 @@ private:
         return r;
     }
 
-    bool nn(VReg v) const {
-        // VReg 无符号；kNoReg 是极大值，越界检查一并挡掉。
-        return static_cast<size_t>(v) < st_->fn->vreg_nonneg.size() &&
-               st_->fn->vreg_nonneg[static_cast<size_t>(v)] != 0;
-    }
-
-    // vreg 非负性的值来源规则。add/mul/sub 不在内：int64 加法静默回绕，
-    // 两个非负数相加可能溢出成负数，无界分析不能声称非负。循环计数器
-    // 的非负由循环结构证明（见 lower_for_range_core 的提示注释），经
-    // nonneg_slots 的 load 传递，不依赖 add 规则。
-    uint8_t nonneg_of(const Inst& in) {
-        switch (in.op) {
-            case IrOp::ConstInt: return in.imm >= 0 ? 1 : 0;
-            case IrOp::Len: return 1;
-            case IrOp::LoadSlot:
-                return st_->nonneg_slots.count(static_cast<int>(in.idx)) ? 1 : 0;
-            case IrOp::Bin:
-                if (in.bop == BinKind::BitAnd) return (nn(in.a) || nn(in.b)) ? 1 : 0;
-                if (in.bop == BinKind::Shr) return nn(in.a) ? 1 : 0;
-                // Python 的 % 结果与除数同号；除数非负时结果非负
-                //（除数为 0 抛异常，没有结果值）。
-                if (in.bop == BinKind::Mod) return nn(in.b) ? 1 : 0;
-                return 0;
-            default: return 0;
-        }
-    }
+    // 非负性判定与值来源规则（定义在 lower_idiom.cpp）。
+    bool nn(VReg v) const;
+    uint8_t nonneg_of(const Inst& in);
+    // 非负提示窗口（定义在 lower_idiom.cpp）：入口擦目标槽旧提示、
+    // 按条件打标；退出擦本层键。嵌套同名循环不得恢复外层提示。
+    bool enter_nonneg_window(For& f, VReg start, int ctr, bool dyn_step, int64_t step,
+                             int& target_slot);
+    void exit_nonneg_window(bool nn_hint, int ctr, int target_slot);
 
     VReg def(TypePtr ty, Inst in) {
         VReg r = alloc(ty);

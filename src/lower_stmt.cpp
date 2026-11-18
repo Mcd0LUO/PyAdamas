@@ -1,5 +1,6 @@
 // lower_stmt.cpp —— 语句降级：控制流与 for 的各种形态
 #include "lower_impl.h"
+#include "lower_idiom.h"
 
 namespace pyadamas {
 
@@ -499,6 +500,10 @@ void Lowerer::lower_for_range_core(For& f, VReg start, VReg stop, VReg step_v, b
         switch_to(ok_blk);
     }
 
+    // 非负提示窗口（lower_idiom.cpp）：入口擦目标槽旧提示，退出擦本层键。
+    int target_slot = -1;
+    bool nn_hint = enter_nonneg_window(f, start, ctr, dyn_step, step, target_slot);
+
     int cond = new_block("for.cond");
     int body = new_block("for.body");
     int incr = new_block("for.incr");
@@ -596,26 +601,6 @@ void Lowerer::lower_for_range_core(For& f, VReg start, VReg stop, VReg step_v, b
         }
     }
 
-    // 非负提示：start 可证非负且 step==1 时，私有计数器只取 [start, stop]
-    // 的值 —— 每次自增前都有 ctr<stop 守卫，从 <= INT64_MAX-1 加 1 不会
-    // 回绕；循环变量由计数器赋值，体内两者非负。标记两个槽，load.slot
-    // 给 vreg 打非负标，常数除数除法/取模据此走无符号魔数路径（省 |x|
-    // 与符号还原序列，2 的幂 mod 退化成一条 AND）。体内给循环变量槽写
-    // 非非负值会作废提示（store_slot_raw）；计数器槽私有，体内只有循环
-    // 头 assign_to 写它（值来自打标 load），不会作废。体结束后恢复外层
-    // 提示集（嵌套循环 / 同名变量）。step!=1 不标记：大 stop 下 ctr+step
-    // 可能回绕（既有边界，见 range 循环的 signed 比较），不建在其上。
-    bool nn_hint = false;
-    std::unordered_set<int> nn_saved;
-    if (opts_.opt_level >= 1 && !dyn_step && step == 1 && nn(start)) {
-        nn_saved = st_->nonneg_slots;
-        st_->nonneg_slots.insert(ctr);
-        auto& kn = static_cast<Name&>(*f.target);
-        auto sit = st_->slots.find(kn.id);
-        if (sit != st_->slots.end() && !is_cell(kn.id) && !is_env(kn.id))
-            st_->nonneg_slots.insert(sit->second);
-        nn_hint = true;
-    }
 
     switch_to(body);
     clean();
@@ -626,7 +611,7 @@ void Lowerer::lower_for_range_core(For& f, VReg start, VReg stop, VReg step_v, b
     int se_before_body = side_effect_seq_;
     if (have_bounds_hint) st_->bounds_hints.push_back(&bounds_hint);
     stmts(f.body);
-    if (nn_hint) st_->nonneg_slots = std::move(nn_saved);
+    exit_nonneg_window(nn_hint, ctr, target_slot);
     if (have_bounds_hint) st_->bounds_hints.pop_back();
     st_->loops.pop_back();
     st_->loop_cleanup_depth.pop_back();

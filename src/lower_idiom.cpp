@@ -109,4 +109,60 @@ bool Lowerer::lower_copy_range_idiom(For& f, Call& c) {
     return true;
 }
 
+
+
+// ── 非负打标（0.277）与提示窗口（0.278 阴影修复）─────────────────
+
+bool Lowerer::nn(VReg v) const {
+    // VReg 无符号；kNoReg 是极大值，越界检查一并挡掉。
+    return static_cast<size_t>(v) < st_->fn->vreg_nonneg.size() &&
+           st_->fn->vreg_nonneg[static_cast<size_t>(v)] != 0;
+}
+
+// vreg 非负性的值来源规则。add/mul/sub 不在内：int64 加法静默回绕，
+// 两个非负数相加可能溢出成负数，无界分析不能声称非负。循环计数器
+// 的非负由循环结构证明（ctr<stop 守卫 + step1 不回绕），经
+// nonneg_slots 的 load 传递，不依赖 add 规则。
+uint8_t Lowerer::nonneg_of(const Inst& in) {
+    switch (in.op) {
+        case IrOp::ConstInt: return in.imm >= 0 ? 1 : 0;
+        case IrOp::Len: return 1;
+        case IrOp::LoadSlot:
+            return st_->nonneg_slots.count(static_cast<int>(in.idx)) ? 1 : 0;
+        case IrOp::Bin:
+            if (in.bop == BinKind::BitAnd) return (nn(in.a) || nn(in.b)) ? 1 : 0;
+            if (in.bop == BinKind::Shr) return nn(in.a) ? 1 : 0;
+            // Python 的 % 结果与除数同号；除数非负时结果非负
+            //（除数为 0 抛异常，没有结果值）。
+            if (in.bop == BinKind::Mod) return nn(in.b) ? 1 : 0;
+            return 0;
+        default: return 0;
+    }
+}
+
+bool Lowerer::enter_nonneg_window(For& f, VReg start, int ctr, bool dyn_step, int64_t step,
+                                  int& target_slot) {
+    target_slot = -1;
+    auto& kn = static_cast<Name&>(*f.target);
+    auto sit = st_->slots.find(kn.id);
+    if (sit != st_->slots.end() && !is_cell(kn.id) && !is_env(kn.id))
+        target_slot = sit->second;
+    // 入口擦旧提示：嵌套同名循环会重写该槽，外层提示从这一刻作废，
+    // 内层退出后不得恢复（0.277 save/restore 的洞，见 CHANGELOG 0.278）。
+    if (target_slot >= 0) st_->nonneg_slots.erase(target_slot);
+    if (opts_.opt_level >= 1 && !dyn_step && step == 1 && nn(start) && target_slot >= 0) {
+        st_->nonneg_slots.insert(ctr);
+        st_->nonneg_slots.insert(target_slot);
+        return true;
+    }
+    return false;
+}
+
+void Lowerer::exit_nonneg_window(bool nn_hint, int ctr, int target_slot) {
+    if (nn_hint) {
+        st_->nonneg_slots.erase(ctr);
+        st_->nonneg_slots.erase(target_slot);
+    }
+}
+
 }  // namespace pyadamas
