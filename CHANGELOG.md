@@ -4,6 +4,15 @@
 
 早期阶段没有逐条留痕，按阶段归纳；0.4 之后逐条记录。
 
+## [0.289] - 2026-11-18
+
+### Bin+StoreGlobal 融合（obj_dispatch −5.7%，套件 −1.5%）
+
+- **取证**：obj_dispatch 的 `total += s.area()` 内层 64M 轮，每轮把 add 结果写进 vreg 栈槽再读回来写全局（`mov %rax,0xf8(%rsp)` + `mov 0xf8(%rsp),%rax` 的 STLF 往返，annotate 里合计 ~10%）。
+- **can_fuse_global**：整数 Bin（Add/Sub/Mul/位运算/移位）+ StoreGlobal，结果块内只用一次且不跨块 → bin 结果留在 %rax，紧跟一条 `movq %rax, global`，省掉栈槽往返。StoreGlobal 是纯 store（RC 由降低器单独发 inc/dec），全局根本身就是那个符号，无 GC 帧扫描问题（与 StoreSlot 融合的坑不同），任意类型安全。
+- **实测（15 轮）**：obj_dispatch 540.29 → **509.55 ms（−5.7%**，p25 −5.6%）；rec_memo +1.8%（perf stat：指令 −0.5% 但 cycles +1.6%，DSB 近平 —— 函数尺寸变化的布局效应，权衡接受）；wordfreq +0.9% 同类；str_build −0.2%；套件合计 **−1.5%**。
+- **验证**：差分 193/0；全语料对 0.271 基线零差异；release 与 ASan 套件各 211 ran ok / EXIT=0；ASan detect_leaks=1 干净（13_gc / 192 / 66_genexpr / 119_gen_except_suspend 抽查）。
+
 ## [0.288] - 2026-11-18
 
 ### str 相等单字节内容快路径（str_build −6.5%，套件 −0.8%）

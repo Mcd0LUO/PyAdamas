@@ -581,6 +581,34 @@ bool AsmGen::can_fuse(const Inst& in, const Inst& nx) const {
         return use_count_[in.dst] == 1 && !cross_block_[in.dst];
     }
 
+// 0.289：Bin(int) + StoreGlobal 融合。obj_dispatch 的 total += s.area()
+// 每轮把 add 结果写进 vreg 栈槽再读回来写全局（mov %rax,0xf8 +
+// mov 0xf8,%rax 的 STLF 往返，64M 轮）。结果只被这条 store 用时，
+// 让 bin 直接留在 %rax，紧跟一条 movq %rax, global 即可。
+// StoreGlobal 是纯 store（RC 由降低器单独发 inc/dec），无 GC 帧扫描
+// 问题（全局根本身就是那个符号），任意类型安全；这里只接整数 Bin。
+bool AsmGen::can_fuse_global(const Inst& in, const Inst& nx) const {
+        if (opt_ < 1) return false;
+        if (in.dst == kNoReg || in.op != IrOp::Bin) return false;
+        if (ir_is_float(in.ty)) return false;
+        switch (in.bop) {
+            case BinKind::Add:
+            case BinKind::Sub:
+            case BinKind::Mul:
+            case BinKind::BitAnd:
+            case BinKind::BitOr:
+            case BinKind::BitXor:
+            case BinKind::Shl:
+            case BinKind::Shr:
+                break;
+            default:
+                return false;
+        }
+        if (nx.op != IrOp::StoreGlobal || nx.a != in.dst) return false;
+        if (in.dst >= use_count_.size()) return false;
+        return use_count_[in.dst] == 1 && !cross_block_[in.dst];
+    }
+
 bool AsmGen::can_fuse_fp_temp(const Inst& in, const Inst& nx) const {
         if (opt_ < 1) return false;
         auto simple_bin = [](const Inst& x) {
@@ -768,6 +796,7 @@ void AsmGen::gen_block(const Block& b) {
             }
 
             int fused_slot = -1;
+            int fused_global = -1;
             bool fp_temp = false;
             // 拷贝合并：目标值和左操作数被分到同一个临时寄存器时，直接原地
             // 算就行，不必再借 %xmm1 中转（否则还要多一条 movsd）。
@@ -776,7 +805,10 @@ void AsmGen::gen_block(const Block& b) {
                 in.dst < static_cast<VReg>(vreg_reg_.size()) &&
                 in.a < static_cast<VReg>(vreg_reg_.size()) &&
                 !vreg_reg_[in.dst].empty() && vreg_reg_[in.dst] == vreg_reg_[in.a];
-            if (i + 1 < b.insts.size() && can_fuse(in, b.insts[i + 1])) {
+            if (i + 1 < b.insts.size() && can_fuse_global(in, b.insts[i + 1])) {
+                fused_global = b.insts[i + 1].idx;
+                dst_loc_ = "%rax";
+            } else if (i + 1 < b.insts.size() && can_fuse(in, b.insts[i + 1])) {
                 fused_slot = b.insts[i + 1].idx;
                 // 提升到寄存器的槽直接写寄存器；没提升的槽也可以把
                 // 结果直接落到变量内存，省掉「临时 vreg 槽 → 变量槽」。
@@ -861,6 +893,12 @@ void AsmGen::gen_block(const Block& b) {
                 }
                 // 融合掉的 store.slot 仍然改了变量，指向它的别名要失效
                 invalidate_slot(fused_slot);
+                ++i;
+            }
+            if (fused_global >= 0) {
+                out_ += "\tmovq %rax, ";
+                out_ += global_label(fused_global);
+                out_ += "(%rip)\n";
                 ++i;
             }
             ++i;

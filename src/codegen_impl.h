@@ -862,6 +862,7 @@ private:
 
     // 浮点二元结果只被紧邻的下一条浮点二元指令使用时，先留在 %xmm1，
     // 省掉「结果 → 临时槽 → 再读回」的一条存储和一条装载。
+    bool can_fuse_global(const Inst& in, const Inst& nx) const;
     bool can_fuse_fp_temp(const Inst& in, const Inst& nx) const;
 
         bool can_fuse_branch(const Inst& in, const Inst& nx) const;
