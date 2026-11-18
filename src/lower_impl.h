@@ -479,6 +479,14 @@ private:
         if (!ir_is_heap(dst) && !ir_is_heap(src)) return false;
         st_->fresh_vregs.erase(v);
         rc_temp_take(v);
+        // take 把引用移出临时栈，净 push 减一：stmt / 循环的 mark/cleanup
+        // 消除按净 push 判断，push 后立刻被槽/容器 take 的值（queue_sim 的
+        // 元组 append、rest = [] 赋值）不再留下水位脚手架。fresh_vregs 的
+        // 每个插入点都配对了 push_temp，计数不会下溢。异常路径不受影响：
+        // 被消的 cleanup 本来就不在展开路径上跑，push 与 take 之间抛异常
+        // 滞留的临时值由外层水位兜底（try 的 mark_slot landing pad、caller
+        // 的语句水位、入口 fn_mark）——与既有循环/推导式消除同款不变量。
+        --st_->rc_pushes;
         return true;
     }
     // 槽/字段/全局按「是否可能装着非堆值」选释放方式。

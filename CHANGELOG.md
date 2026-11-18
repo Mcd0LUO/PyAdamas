@@ -4,6 +4,16 @@
 
 早期阶段没有逐条留痕，按阶段归纳；0.4 之后逐条记录。
 
+## [0.275] - 2026-11-18
+
+### 净 push 计数消除 mark 脚手架 + 函数入口 32 字节对齐（queue_sim −7.6%，六用例全中性偏好，合计 −2.2%）
+
+- **净 push 计数**：`move_fresh`（槽/容器 take 新值的所有权交接）原来只发 `RcTempTake` 不减 `rc_pushes` —— push 后立刻被 take 的值仍让语句/循环的 mark/cleanup 被判为「有临时值」而保留。现在 take 减一，既有消除机制（stmt / 循环 / 推导式 / with 的 `rc_pushes == pushes_before` → `erase_mark`/`erase_cleanup`）自然生效：queue_sim 的 mark/cleanup **19 → 0**，temp/take 对被 opt_rc 相邻对消除全部删掉，热路径上 RC 水位脚手架整体消失。`fresh_vregs` 的每个插入点都配对 `push_temp`，计数不会下溢；异常路径不受影响 —— 被消的 cleanup 本来就不在展开路径上跑，push 与 take 之间抛异常滞留的临时值由外层水位兜底（try 的 mark_slot landing pad、caller 语句水位、入口 fn_mark），与既有循环/推导式消除同款不变量。
+- **布局回归与修复**：单独上消除时 obj_dispatch **+5.0%**（p25 +4.3%）。perf stat 证明是纯布局效应：指令数 / 分支数 / branch-misses 全部不变（被消脚手架在 obj_dispatch 的冷路径），cycles +5%，`frontend_retired.dsb_miss` 1.37M → 10.3M —— 代码缩短后热区跨 uop-cache 窗口，DSB→MITE 切换增多。试循环头 `.p2align 5` 无效；**函数入口 `.p2align 4` → 5**（32 字节，Cascade Lake DSB 窗口宽度）把 obj_dispatch 从 +5% 拉到 −2%，rec_memo（零消除、纯对齐效应）−1.1%。
+- **实测（abbench 交替 15 轮中位数，绑核）**：queue_sim 232.14 → **214.50 ms（−7.6%**，p25 −7.8%）；obj_dispatch −2.0%；sort_struct −2.4%；dict_wordfreq −1.6%；rec_memo −1.1%；str_build +0.6%（p25 +0.1%，中性）；**六用例全中性偏好，合计 1981.14 → 1938.53 ms（−2.2%）**。
+- **验证**：差分 190/0；全语料对 0.271 基线编译器输出/退出码零差异；release 与 ASan 套件各 208 ran ok / EXIT=0；GC/生成器/async/异常重用例（13/151/174/188/189/24/73/92/93/173/129/123/159）单独 ASan detect_leaks=1 干净。
+- **教训**：消除冷路径代码要警惕前端布局效应 —— 指令数不变 cycles 也能摆 ±5%；用 perf stat 的 `idq.dsb_uops` / `frontend_retired.dsb_miss` 诊断，别急着判语义回归。函数入口 32 字节对齐是便宜的稳定器。
+
 ## [0.274] - 2026-11-18
 
 ### kind-1 列表元素批量 dec：销毁循环内联快路径与元组释放（sort_struct −4.8%，str_build −2.7%，合计 −1.9%）

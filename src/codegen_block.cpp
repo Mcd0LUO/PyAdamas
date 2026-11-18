@@ -334,7 +334,7 @@ void AsmGen::emit_function(const IRFunction& f, int fi) {
         }
         // 可读的函数别名，供 addr2line / nm / gdb 定位；.LfN 仍是内部跳转名。
         // （fname 在 prepare_eh_plan 之前就算好了，见上面的注释。）
-        out_ += "\t.p2align 4\n";
+        out_ += "\t.p2align 5\n";
         emit_type_func(fname);
         out_ += fname + ":\n";
         // CFI（.eh_frame 里的栈展开规则）：从「rsp 指向返回地址」到「帧指针
