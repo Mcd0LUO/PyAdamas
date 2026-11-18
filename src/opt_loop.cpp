@@ -371,10 +371,11 @@ bool version_bounds_loop(IRFunction& fn, int h, const std::vector<char>& body,
             case RtFn::MathCeil: case RtFn::MathTrunc: case RtFn::MathFmod:
             case RtFn::MathHypot: case RtFn::MathCopysign:
                 return true;
-            // 引用计数 / 临时栈：只动计数，不改容器长度
-            case RtFn::RcInc: case RtFn::RcDec:
+            // 只允许不释放引用的记账。Dec 和 Cleanup 可能执行生成器
+            // finally，经用户代码改动容器或其元素。
+            case RtFn::RcInc:
             case RtFn::RcTemp: case RtFn::RcTempTake:
-            case RtFn::RcMark: case RtFn::RcCleanup:
+            case RtFn::RcMark:
                 return true;
             default:
                 return false;

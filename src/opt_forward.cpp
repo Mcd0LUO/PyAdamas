@@ -270,23 +270,18 @@ void drop_dead_slot_stores(IRFunction& fn) {
 // `s = shapes[i]; total += s.area()` 每轮 store g8 之后又 load g8 当
 // self（STLF 往返 + 一次全局读，64M 轮）。转发成直接用存入的 vreg。
 //
-// **安全论证**：用户全局只由生成代码的 StoreGlobal 写入。运行时函数
-// 不写用户全局；RC 族调用可能跑析构，但 pyadamas 不支持 __del__，
-// 析构全是运行时内部代码（list_destroy/dict_destroy 等），不碰用户
-// 全局。所以 store 与 load 之间只隔纯 IR 指令或 RC 族 CallRt 时可以
-// 转发；任何用户调用（Call/VCall/…）、CallExtern、GenYield（挂起期间
-// 别的代码可能写全局）都使映射失效。GlobalAddr 取地址同理失效。
+// 只跨过不会重入用户代码的 RC 记账。Dec/DecUnknown 和 Cleanup
+// 能释放生成器（包括经容器间接释放），执行 finally 并改写全局；不得
+// 跨这些调用转发。用户调用、FFI、挂起和全局取地址也使相关缓存失效。
 // 与槽转发一样要求装载结果块内只用一次（不延长跨块活跃区间），
 // 且类型一致。
 bool global_forward_safe(const Inst& in) {
     switch (in.op) {
         case IrOp::CallRt: {
             const RtFn f = static_cast<RtFn>(in.imm);
-            return f == RtFn::RcInc || f == RtFn::RcDec ||
-                   f == RtFn::RcIncUnknown || f == RtFn::RcDecUnknown ||
+            return f == RtFn::RcInc || f == RtFn::RcIncUnknown ||
                    f == RtFn::RcTemp || f == RtFn::RcTempTake ||
-                   f == RtFn::RcTempUnknown || f == RtFn::RcMark ||
-                   f == RtFn::RcCleanup;
+                   f == RtFn::RcTempUnknown || f == RtFn::RcMark;
         }
         case IrOp::Call:
         case IrOp::CallDirect:
