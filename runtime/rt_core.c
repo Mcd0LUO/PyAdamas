@@ -426,27 +426,58 @@ static int list_pool_count;
  * 容量取 256：dict 对象大（136 字节），缓存 256 个约 35KB，可接受；
  * 而热循环里同时存活的 dict 通常只有个位数。 */
 #define DICT_POOL_MAX 256
-static PyAdamasRc* dict_pool;
+/* 0.281：小 dict 的三块缓冲（entries/order/index）随头一起池化。
+   rec_memo 每轮新建 memo dict：3 次 malloc + 增长 reindex + 销毁 free，
+   malloc/free/reindex 合计占运行时 14%。缓冲保留后池命中零 malloc、
+   零增长（缓冲已是上一世的高水位）。缓冲指针寄存在池节点里 ——
+   payload 会被 rc_alloc_core 的 memset 清零，不能留在 payload；
+   cap>64 / icap>128 的大 dict 缓冲直接 free 不保留，防池囤内存。 */
+typedef struct {
+    PyAdamasRc* h;
+    PyAdamasDictEntry* entries;
+    int32_t* order;
+    int32_t* index;
+    int32_t cap, icap;
+} DictPoolNode;
+static DictPoolNode dict_pool[DICT_POOL_MAX];
 static int dict_pool_count;
+static DictPoolNode dict_last_got;
 
 static PyAdamasRc* dict_pool_get(void) {
-    PyAdamasRc* h = dict_pool;
-    if (h) {
-        dict_pool = h->next;
-        dict_pool_count--;
-    }
-    return h;
+    if (!dict_pool_count) return NULL;
+    DictPoolNode n = dict_pool[--dict_pool_count];
+    dict_last_got = n;
+    return n.h;
 }
 
 static void dict_pool_put(PyAdamasRc* h) {
+    PyAdamasDict* d = (PyAdamasDict*)(h + 1);
+    DictPoolNode n;
+    n.h = h;
+    if (d->entries && d->cap <= 64 && d->icap <= 128) {
+        n.entries = d->entries;
+        n.order = d->order;
+        n.index = d->index;
+        n.cap = (int32_t)d->cap;
+        n.icap = (int32_t)d->icap;
+    } else {
+        free(d->entries);
+        free(d->order);
+        free(d->index);
+        n.entries = NULL;
+        n.order = NULL;
+        n.index = NULL;
+        n.cap = 0;
+        n.icap = 0;
+    }
     if (dict_pool_count >= DICT_POOL_MAX) {
+        free(n.entries);
+        free(n.order);
+        free(n.index);
         free(h);
         return;
     }
-    h->next = dict_pool;
-    h->prev = NULL;
-    dict_pool = h;
-    dict_pool_count++;
+    dict_pool[dict_pool_count++] = n;
 }
 
 static PyAdamasRc* list_pool_get(void) {
@@ -848,6 +879,7 @@ static void* rc_alloc_core(int64_t size, void (*dtor)(void*), void (*release)(vo
         h = extra == PYADAMAS_LIST_INLINE_BYTES ? list_inline_pool_get() : list_pool_get();
     else if (kind == PYADAMAS_RC_DICT && size == (int64_t)sizeof(PyAdamasDict))
         h = dict_pool_get();
+    const int pooled = h != NULL;
     if (!h) {
         h = (PyAdamasRc*)malloc(sizeof(PyAdamasRc) + (size_t)alloc_size);
         if (!h) panic_c("out of memory");
@@ -906,6 +938,16 @@ static void* rc_alloc_core(int64_t size, void (*dtor)(void*), void (*release)(vo
     // [0, len)，append/filled 先写后读，池块里的陈旧内容永远不会被
     // 读到。省掉每次列表/元组分配的一次 memset（queue_sim 热路径）。
     if (kind != PYADAMAS_RC_LIST) memset(p, 0, (size_t)alloc_size);
+    // dict 池命中：把寄存的缓冲写回 payload（memset 刚清零）。entries
+    // 非空是 pa_dict_new 识别「带缓冲池命中」的判据；新块 memset 后恒空。
+    if (kind == PYADAMAS_RC_DICT && pooled && dict_last_got.entries) {
+        PyAdamasDict* d = (PyAdamasDict*)p;
+        d->entries = dict_last_got.entries;
+        d->order = dict_last_got.order;
+        d->index = dict_last_got.index;
+        d->cap = dict_last_got.cap;
+        d->icap = dict_last_got.icap;
+    }
     // size 用调用方请求的字节数（不含 RC 头），和 ASan 报的口径一致，
     // 方便两边对照。alloc_size 是池化后的容量，会偏大。
     //
@@ -2407,11 +2449,12 @@ void pa_gc_shutdown(void) {
         free(h);
     }
     pa_list_inline_pool_count = 0;
-    // dict 池也要清空（每个块都是裸 malloc，必须 free）。
-    while (dict_pool) {
-        PyAdamasRc* h = dict_pool;
-        dict_pool = h->next;
-        free(h);
+    // dict 池也要清空（头块和寄存的缓冲都是裸 malloc，必须 free）。
+    for (int i = 0; i < dict_pool_count; ++i) {
+        free(dict_pool[i].entries);
+        free(dict_pool[i].order);
+        free(dict_pool[i].index);
+        free(dict_pool[i].h);
     }
     dict_pool_count = 0;
     pa_list_buf_pool_shutdown();

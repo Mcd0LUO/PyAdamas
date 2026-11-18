@@ -52,7 +52,9 @@ int64_t dict_hash_value(int64_t kind, int64_t v) {
     } else {
         h = mix64((uint64_t)v);
     }
-    h = mix64(h);
+    // 0.281：单次 mix64 已是全雪崩双射，第二次纯浪费 —— int/float 键
+    // 双重 mix 占 rec_memo 运行时 17.6%。字符串路径在上面提前返回，
+    // 与编译期字面量哈希（FNV + 单次 mix64）本来就一致。
     return (int64_t)(h ? h : 1);
 }
 
@@ -192,9 +194,8 @@ void dict_destroy(void* p) {
         pa_own_dec(d->key_own, e.key);
         pa_own_dec(d->val_own, e.val);
     }
-    free(d->entries);
-    free(d->order);
-    free(d->index);
+    // 0.281：缓冲不在此 free —— dict_pool_put 决定保留（小 dict）
+    // 还是释放（大 dict）。GC 清扫走 gc_free_body 自己 free，不经这里。
 }
 
 void dict_gc_release(void* p) {
@@ -214,19 +215,33 @@ PyAdamasDict* pa_dict_new(int64_t key_kind, int64_t key_own, int64_t val_own,
     PyAdamasDict* d =
         (PyAdamasDict*)rc_alloc((int64_t)sizeof(PyAdamasDict), dict_destroy, dict_gc_release,
                             PYADAMAS_RC_DICT);
-    d->len = 0;
-    d->cap = 8;
-    d->icap = 8;
-    d->ord_len = 0;
-    d->nent = 0;
-    d->itomb = 0;
-    d->free_head = -1;
-    d->head = -1;
-    d->tail = -1;
-    d->entries = (PyAdamasDictEntry*)malloc(sizeof(PyAdamasDictEntry) * 8);
-    d->order = (int32_t*)malloc(sizeof(int32_t) * 8);
-    d->index = (int32_t*)calloc(8, sizeof(int32_t));
-    if (!d->entries || !d->order || !d->index) panic_c("out of memory");
+    if (d->entries) {
+        // 池命中且缓冲保留（0.281）：cap/icap 是上一世高水位，零 malloc、
+        // 零增长。状态重置 + index 清零即可复用；entries 陈旧内容只会被
+        // 新插入覆盖（nent=0、free_head=-1、index 全 0，读不到旧值）。
+        d->len = 0;
+        d->ord_len = 0;
+        d->nent = 0;
+        d->itomb = 0;
+        d->free_head = -1;
+        d->head = -1;
+        d->tail = -1;
+        memset(d->index, 0, sizeof(int32_t) * (size_t)d->icap);
+    } else {
+        d->len = 0;
+        d->cap = 8;
+        d->icap = 8;
+        d->ord_len = 0;
+        d->nent = 0;
+        d->itomb = 0;
+        d->free_head = -1;
+        d->head = -1;
+        d->tail = -1;
+        d->entries = (PyAdamasDictEntry*)malloc(sizeof(PyAdamasDictEntry) * 8);
+        d->order = (int32_t*)malloc(sizeof(int32_t) * 8);
+        d->index = (int32_t*)calloc(8, sizeof(int32_t));
+        if (!d->entries || !d->order || !d->index) panic_c("out of memory");
+    }
     d->key_kind = key_kind;
     d->key_own = key_own;
     d->val_own = val_own;

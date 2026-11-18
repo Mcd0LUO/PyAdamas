@@ -4,6 +4,16 @@
 
 早期阶段没有逐条留痕，按阶段归纳；0.4 之后逐条记录。
 
+## [0.281] - 2026-11-18
+
+### dict 缓冲池化 + 去掉双重 mix64（rec_memo −32.4%，套件合计 −8.4%）
+
+- **取证**：rec_memo（每轮新建 memo dict 跑 fib(25)，195000 轮）profile 里 dict_lookup 19.6% + dict_hash_value 17.6% + pa_dict_set 9.1% + dict_destroy 7.3% + dict_reindex 6.7% + malloc 4.7% + free 2.8% ≈ 75% 在字典路径。每个新 dict 三次 malloc（entries/order/index）+ 25 个键触发 3 次 reindex（icap 8→16→32→64，每次 calloc+free+重哈希）+ 销毁三次 free。
+- **缓冲池化**：dict_pool 原来只池化 RC 头块，dict_destroy 把三块缓冲 free 掉。改成**小 dict（cap≤64、icap≤128）缓冲随头一起保留**：缓冲指针寄存在池节点（数组栈，256 槽）里 —— payload 会被 rc_alloc_core 的 memset 清零，不能留在 payload；分配命中后 memset 之后写回。pa_dict_new 见 entries 非空即走复用路径：状态重置 + index 清零，**零 malloc、零增长**（缓冲已是上一世高水位，25 键的 memo 不再 reindex）。大 dict 缓冲直接 free 不保留，防池囤内存；GC 清扫路径（gc_free_body）自己 free 缓冲，不经池；shutdown drain 连缓冲一起 free（ASan 泄漏干净）。
+- **去双重 mix64**：int/float 键哈希原来 mix64 两次（单值路径一次 + 公共尾部又一次）—— 单次 mix64 已是全雪崩双射，第二次纯浪费。字符串路径提前返回不受影响，与编译期字面量哈希（FNV+单次 mix64）一致；hash() 内置与字典共用同一函数，同值同哈希不变。
+- **实测（15 轮）**：rec_memo 439.14 → **296.98 ms（−32.4%**，p25 −32.4%）；dict_wordfreq −2.9%；sort_struct −1.2%；queue_sim +1.2%（rc_alloc_core 多一个 DICT 池命中判断的分支/布局代价，权衡接受）；其余噪声。套件合计 **−8.4%**。profile 里 malloc/free/reindex 全部跌出前十，dict_hash_value 17.6% → 10.6%。
+- **验证**：差分 192/0；全语料对 0.271 基线零差异；release 与 ASan 套件各 210 ran ok / EXIT=0；ASan detect_leaks=1 干净（13_gc / 88_defaultdict / 66_genexpr / 119_gen_except_suspend 重点抽查）。
+
 ## [0.280] - 2026-11-18
 
 ### kind-0 元组分配内联快路径（queue_sim −16.5%）+ 四个潜在 bug 修复
