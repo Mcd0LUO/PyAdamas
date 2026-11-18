@@ -4,6 +4,15 @@
 
 早期阶段没有逐条留痕，按阶段归纳；0.4 之后逐条记录。
 
+## [0.282] - 2026-11-18
+
+### list.append 内联快路径 + 循环头 32 字节对齐（str_build −6.6%，套件 −1.2%）
+
+- **append 内联**：`pa_list_append` 在无扩容（len<cap）、无位图（heap_bits==NULL）、非 kind2（kind2 空表运行时会分配位图）时就是 `data[len++]=v` 一条 store，call/ret + 装填 + 运行时检查比活本身还贵（str_build profile 里 pa_list_append 14.6%）。三个守卫任一不满足落回原调用。RC retain 不在这条指令里（生成代码在 append 前单独发 pa_rc_inc），语义不变。
+- **重要发现 —— DSB（uop 缓存）布局敏感性**：append 内联初版让 obj_dispatch **+7.2%**。perf stat：指令 −0.5%、分支/branch-misses/L1-icache-misses 全不变、**cycles +9.4%**；`idq.dsb_uops` −228M / `idq.mite_uops` +176M —— 上游代码尺寸变化把热循环的 uop 挤出 DSB 窗口，落回 MITE 传统解码。循环头原来已 16 字节对齐（.p2align 4）但不够：**改 32 字节（.p2align 5，DSB 窗口粒度）后 obj_dispatch 大部分恢复**，且 queue_sim / dict_wordfreq 额外受益。64 字节无进一步收益（DSB 组冲突不由入口对齐单独解决）。**教训：codegen 小改动也可能通过 uop 缓存布局产生 ±10% 的远端效应；评估时看 idq.dsb_uops / idq.mite_uops，循环头对齐用 32B。**
+- **实测（15 轮）**：str_build 193.32 → **180.61 ms（−6.6%**，p25 −6.6%）；dict_wordfreq **−5.3%**；queue_sim **−2.7%**；sort_struct −1.2%；rec_memo 中性；obj_dispatch **+2.9%**（残余 DSB 组冲突，perf stat 证实非分支/非 icache，权衡接受）；套件合计 **−1.2%**。
+- **验证**：差分 192/0；全语料对 0.271 基线零差异；release 与 ASan 套件各 210 ran ok / EXIT=0；ASan detect_leaks=1 干净。
+
 ## [0.281] - 2026-11-18
 
 ### dict 缓冲池化 + 去掉双重 mix64（rec_memo −32.4%，套件合计 −8.4%）

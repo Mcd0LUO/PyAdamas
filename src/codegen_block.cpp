@@ -499,7 +499,11 @@ void AsmGen::emit_function(const IRFunction& f, int fi) {
         for (size_t bi = 0; bi < f.blocks.size(); ++bi) {
             cur_block_ = static_cast<int>(bi);
             split_block_ = static_cast<int>(bi);
-            if (loop_header[bi]) line(".p2align 4");
+            // 32 字节（DSB uop 缓存的窗口粒度）：16 字节对齐只稳定取指，
+            // 上游代码尺寸变化仍会把热循环的 uop 挤出 DSB（obj_dispatch
+            // 实测 MITE uops +176M、cycles +9%）；32 字节对齐后大部分恢复。
+            // 64 字节无进一步收益（DSB 组冲突不由入口对齐 alone 解决）。
+            if (loop_header[bi]) line(".p2align 5");
             label(block_label(static_cast<int>(bi)));
             // live range splitting 的块入口：本块要用寄存器的槽，从栈装进去。
             //

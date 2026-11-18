@@ -860,4 +860,36 @@ void AsmGen::gen_tuple_inline(const Inst& in) {
         return;
 }
 
+
+// list.append 内联快路径（0.282）：len<cap（不扩容）、heap_bits==NULL
+// （无位图维护）、elem_kind!=2（kind2 空表运行时会分配位图）时，append
+// 就是 data[len++]=v。RC retain 不在这条指令里 —— 生成代码在 append 前
+// 单独发 pa_rc_inc（见 lower_method_containers），语义不变。
+// 守卫任一不满足落回 pa_list_append 原调用（扩容/位图/定型全在那边）。
+void AsmGen::gen_append_inline(const Inst& in) {
+    const std::string lr = arg_reg_i(0);
+    const std::string vr = arg_reg_i(1);
+    std::string slow = fresh_label("appslow");
+    std::string done = fresh_label("appdone");
+    emit2("movq", src_op(in.args[0]), lr);
+    emit2("movq", src_op(in.args[1]), vr);
+    line(std::format("movq ({}), %rax", lr));
+    line(std::format("cmpq 8({}), %rax", lr));
+    emit_jmp("jge", slow);
+    line(std::format("cmpq $0, 32({})", lr));
+    emit_jmp("jne", slow);
+    line(std::format("cmpq $2, 24({})", lr));
+    emit_jmp("je", slow);
+    line(std::format("movq 16({}), %r10", lr));
+    line(std::format("movq {}, (%r10,%rax,8)", vr));
+    line(std::format("incq ({})", lr));
+    emit_jmp("jmp", done);
+    label(slow);
+    emit_arg(2, false, 2, src_op(in.args[2]));
+    spill_fp_slots();
+    line("call pa_list_append");
+    reload_fp_slots();
+    label(done);
+}
+
 }  // namespace pyadamas

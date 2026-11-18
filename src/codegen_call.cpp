@@ -1111,6 +1111,13 @@ void AsmGen::gen_call_rt(const Inst& in) {
         // gen_rc_inline（那边是「实参装填」专门文件，本来就集中放这类
         // 逐指令发射）。返回 true 表示已发完，外层不再补 call。
         if (gen_rc_inline(in, fn)) return;
+        // ── list.append 内联快路径（0.282）─────────────────────────
+        // 无扩容 + 无位图 + 非 kind2 时就是 data[len++]=v 一条 store，
+        // call/ret + 装填 + 运行时检查比活本身还贵（str_build 14.6%）。
+        if (fn == RtFn::ListAppend && opt_ >= 1 && in.args.size() == 3) {
+            gen_append_inline(in);
+            return;
+        }
         gen_rt_args(in, fn);
         spill_fp_slots();
         line(std::format("call {}", rt_name(fn)));
