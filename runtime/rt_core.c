@@ -723,22 +723,20 @@ void panic_c(const char* msg) {
  * 例子：元素全是非堆值的元组 —— 元组不可变，元素类别又固定为 0，
  * 所以它永远不会有出边，谈不上环。
  *
- * 走这条路省掉 rc_link/rc_unlink、新生代登记和 GC 分配计数；对象在
- * rc 归零时照常由 dtor 释放，GC 永远看不到它。
+ * 走这条路省掉 rc_link/rc_unlink、新生代登记；对象在 rc 归零时照常由
+ * dtor 释放，GC 永远看不到它。
  *
- * 实现上先按普通路径分配（复用 freelist 与 GC 记账逻辑），再把自己从
- * 链上摘掉并置 UNTRACKED —— 与 rc_leaf_untracked 的字符串同款状态。 */
+ * 实现上直接按 UNTRACKED 状态分配（复用 freelist 与 GC 记账逻辑），
+ * 不进堆链、不进 RC 索引、不进新生代 —— 与「先 link 再立刻 unlink」的
+ * 旧实现观察态完全一致（对象存活期间本来就不在索引/链上），但省掉
+ * 链插摘、索引 put/del（各一次哈希探测）、young add/del 的往返。
+ * 旧实现每个元组出生还在索引里留一个墓碑，现在连墓碑都没有。 */
+static void* rc_alloc_core(int64_t size, void (*dtor)(void*), void (*release)(void*),
+                           int64_t kind, int64_t extra, int untracked);
+
 void* rc_alloc_untracked_ex(int64_t size, void (*dtor)(void*), void (*release)(void*),
                             int64_t kind, int64_t extra) {
-    void* p = rc_alloc_ex(size, dtor, release, kind, extra);
-    PyAdamasRc* h = (PyAdamasRc*)p - 1;
-    if (!(h->marked & PYADAMAS_RC_UNTRACKED)) {
-        rc_unlink(h);
-        h->prev = NULL;
-        h->next = NULL;
-        h->marked = PYADAMAS_RC_UNTRACKED;
-    }
-    return p;
+    return rc_alloc_core(size, dtor, release, kind, extra, 1);
 }
 
 void* rc_alloc_untracked(int64_t size, void (*dtor)(void*), void (*release)(void*),
@@ -790,11 +788,16 @@ void rc_unlink(PyAdamasRc* h) {
 
 void* rc_alloc(int64_t size, void (*dtor)(void*), void (*release)(void*),
                       int64_t kind) {
-    return rc_alloc_ex(size, dtor, release, kind, 0);
+    return rc_alloc_core(size, dtor, release, kind, 0, 0);
 }
 
 void* rc_alloc_ex(int64_t size, void (*dtor)(void*), void (*release)(void*),
                       int64_t kind, int64_t extra) {
+    return rc_alloc_core(size, dtor, release, kind, extra, 0);
+}
+
+static void* rc_alloc_core(int64_t size, void (*dtor)(void*), void (*release)(void*),
+                           int64_t kind, int64_t extra, int untracked) {
     if (size < 0) panic_c("negative allocation size");
     // **热路径优化：把 GC 相关判断合并成一个全局标志。**
     //
@@ -847,7 +850,15 @@ void* rc_alloc_ex(int64_t size, void (*dtor)(void*), void (*release)(void*),
     h->release = release;
     h->kind = kind;
     h->marked = 0;
-    rc_link(h);
+    if (untracked) {
+        // 调用方保证无出边、不成环：直接置 UNTRACKED，跳过 link/unlink
+        // 往返（见 rc_alloc_untracked_ex 的说明）。
+        h->prev = NULL;
+        h->next = NULL;
+        h->marked = PYADAMAS_RC_UNTRACKED;
+    } else {
+        rc_link(h);
+    }
     // 叶子对象不可能成环，exact-RC 模式下也不进链，不必驱动 GC 频率。
     // **分配计数只在 GC 启用时累加。**
     //
@@ -866,7 +877,11 @@ void* rc_alloc_ex(int64_t size, void (*dtor)(void*), void (*release)(void*),
             gc_need_check = 1;
     }
     void* p = (char*)h + sizeof(PyAdamasRc);
-    memset(p, 0, (size_t)alloc_size);
+    // LIST 不清零：三个构造点（pa_list_new / pa_list_new_filled /
+    // pa_tuple_new_filled）都显式写满全部 6 个字段；data 缓冲只读
+    // [0, len)，append/filled 先写后读，池块里的陈旧内容永远不会被
+    // 读到。省掉每次列表/元组分配的一次 memset（queue_sim 热路径）。
+    if (kind != PYADAMAS_RC_LIST) memset(p, 0, (size_t)alloc_size);
     // size 用调用方请求的字节数（不含 RC 头），和 ASan 报的口径一致，
     // 方便两边对照。alloc_size 是池化后的容量，会偏大。
     //
@@ -932,6 +947,18 @@ void pa_rc_dec_slow(void* p) {
     if (--h->rc == 0) {
         if (rc_stats_on) stat_rc_free++;
         if (__builtin_expect(pa_diag_rc_on != 0, 0)) pa_diag_rc_free(p, (int32_t)h->kind);
+        // **untracked 小元组释放快路径**：kind 0 + 无位图 + 内联缓冲时
+        // list_destroy 是空操作（无元素可 dec、无位图可 free、无外部
+        // 缓冲可还），整块直接挂回内联池，省一次函数调用 + 三个分支。
+        // 条件不满足（增长过 / 混合种类）照走 dtor 原路径。
+        if (h->kind == PYADAMAS_RC_LIST && (h->marked & PYADAMAS_RC_UNTRACKED) &&
+            h->size == (int64_t)sizeof(PyAdamasList) + PYADAMAS_LIST_INLINE_BYTES) {
+            PyAdamasList* l = (PyAdamasList*)p;
+            if (l->elem_kind == 0 && !l->heap_bits && l->data == list_inline_at(l)) {
+                list_inline_pool_put(h);
+                return;
+            }
+        }
         // **untracked leaf 不在堆链上，跳过 rc_unlink 的函数调用。**
         //
         // rc_unlink 的第一行就是 `if (h->marked & UNTRACKED) return;`，

@@ -4,6 +4,17 @@
 
 早期阶段没有逐条留痕，按阶段归纳；0.4 之后逐条记录。
 
+## [0.273] - 2026-11-18
+
+### 分配/释放快路径：untracked 元组省 link/unlink 往返，列表省冗余清零（queue_sim −16.1%，sort_struct −12.6%）
+
+- **untracked 直接分配**：`rc_alloc_untracked_ex` 旧实现是「按普通路径分配（`rc_link`：堆链插入 + RC 索引 put + 新生代 add）再立刻 `rc_unlink`（链摘除 + 索引 del + 新生代 del）」—— 对象存活期间的观察态本来就是不在链/不在索引，往返纯属浪费，每个元组出生还在索引里留一个墓碑。`rc_alloc` / `rc_alloc_ex` 拆出 `rc_alloc_core(..., untracked)`，untracked 路径直接置 prev/next NULL + marked=UNTRACKED，跳过 link/unlink 往返。GC 分配记账口径不变（元组原本就计入）。queue_sim 的 rc_link+rc_unlink 从 7.2% 降到 2.7%（只剩被跟踪的列表）。
+- **LIST 跳过 memset**：三个列表构造点（pa_list_new / pa_list_new_filled / pa_tuple_new_filled）都显式写满全部 6 个字段；data 缓冲只读 [0, len)，append/filled 先写后读，池块里的陈旧内容永远不会被读到。`rc_alloc_core` 对 LIST kind 跳过 memset（其余 kind 不变）。profile 里 memset 2.6% 消失。diag 钩子只读 RC 头，不受影响。
+- **untracked 小元组释放快路径**：`pa_rc_dec_slow` 的 rc 归零分支里，kind LIST + UNTRACKED + size 112 + elem_kind 0 + 无位图 + 内联缓冲时 `list_destroy` 是空操作（无元素可 dec、无位图可 free、无外部缓冲可还），整块直接挂回内联池，省一次函数调用 + 三个分支；条件不满足（增长过 / 混合种类）照走 dtor 原路径。
+- **实测（abbench 交替 9 轮中位数，绑核）**：queue_sim 279.45 → **234.34 ms（−16.1%**，p25 −16.6%）；sort_struct 270.19 → **236.20 ms（−12.6%**，p25 −12.3%）；dict_wordfreq −2.2%；str_build / obj_dispatch / rec_memo 噪声级；六用例合计 −3.9%。分段测量：跳 link/unlink + 清零单独 queue_sim −14.6%、sort_struct −11.9%；释放快路径再补约 2%。queue_sim 累计 420 ms（0.269）→ 234 ms，对 Go 约 5.9×。
+- **新 profile**：生成代码 58%、rc_alloc_core 10.6%、list_destroy 6.8%（kind-1 列表逐元素 dec，必要工作）、pa_rc_dec_slow 5.8%、pa_tuple_new_filled 3.8%、copy_range 3.1%、append 2.9%。下一步候选：分配本体（池查找 + 头初始化 + 记账）与列表元素 dec 循环。
+- **验证**：差分 190/0；全语料对 0.271 基线编译器输出/退出码零差异；release 与 ASan 套件各 208 ran ok / EXIT=0；7 个 GC 重用例（13/151/160/161/174/188/189）单独 ASan detect_leaks=1 干净。
+
 ## [0.272] - 2026-11-18
 
 ### 切片拷贝惯用法识别：range-append 循环批量化的（queue_sim −2.5%，收益低于预期，原因已定位）
