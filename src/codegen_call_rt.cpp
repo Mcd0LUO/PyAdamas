@@ -51,21 +51,40 @@ bool AsmGen::gen_rc_inline(const Inst& in, RtFn fn) {
         label(skip);
         return true;
     }
+    // 字符串热点常操作驻留字符，优先检查永生哨兵；普通堆值则把哨兵
+    // 判断留到冷分支。两条路径接受完全相同的计数，不依赖类型保证。
+    const auto immortal_first = [&] {
+        TypePtr t = ty_of(in.args[0]);
+        return t && (t->kind == TyKind::Str || t->kind == TyKind::Bytes);
+    };
+    const auto skip_immortal = [&](const std::string& done) {
+        const std::string scratch = target_abi().scratch_len;
+        line(std::format("movabsq $0x8000000000000000, {}", scratch));
+        line(std::format("cmpq {}, %rax", scratch));
+        emit_jmp("je", done);
+    };
     if (fn == RtFn::RcInc && in.args.size() == 1) {
-        emit2("movq", src_op(in.args[0]), "%rdi");
+        const std::string p = arg_reg_i(0);
+        move_to(p, src_op(in.args[0]));
+        const std::string nonpos = fresh_label("incnonpos");
         const std::string slow = fresh_label("incslow");
         const std::string done = fresh_label("incdone");
-        line("testq %rdi, %rdi");
+        line(std::format("testq {0}, {0}", p));
         emit_jmp("je", slow);            // p == NULL
-        line("movq -48(%rdi), %rax");    // h->rc：h = p - 64，rc 在 +16
-        line("movabsq $0x8000000000000000, %rcx");
-        line("cmpq %rcx, %rax");
-        emit_jmp("je", done);            // 永生对象（字面量）直接跳过
+        line(std::format("movq -48({}), %rax", p)); // h->rc：h = p - 64，rc 在 +16
+        const bool check_first = immortal_first();
+        if (check_first) skip_immortal(done);
         line("testq %rax, %rax");
-        emit_jmp("jle", slow);           // rc <= 0：让慢路径报错
+        emit_jmp("jle", check_first ? slow : nonpos);
         line("addq $1, %rax");
-        line("movq %rax, -48(%rdi)");
+        line(std::format("movq %rax, -48({})", p));
         emit_jmp("jmp", done);
+        if (!check_first) {
+            label(nonpos);
+            // 只有 INT64_MIN（永生哨兵）取负会溢出；其余非法计数由慢路径报错。
+            line("negq %rax");
+            emit_jmp("jo", done);
+        }
         label(slow);
         spill_fp_slots();
         line("call pa_rc_inc_slow");
@@ -74,22 +93,32 @@ bool AsmGen::gen_rc_inline(const Inst& in, RtFn fn) {
         return true;
     }
     if (fn == RtFn::RcDec && in.args.size() == 1) {
-        emit2("movq", src_op(in.args[0]), "%rdi");
+        const std::string p = arg_reg_i(0);
+        move_to(p, src_op(in.args[0]));
+        const std::string at_most_one = fresh_label("decle1");
         const std::string slow = fresh_label("decslow");
         const std::string done = fresh_label("decdone");
-        line("testq %rdi, %rdi");
+        line(std::format("testq {0}, {0}", p));
         emit_jmp("je", slow);            // p == NULL
         line("cmpl $0, pa_gc_phase_fast(%rip)");
         emit_jmp("jne", slow);           // 收集期只登记边，不能重入释放
-        line("movq -48(%rdi), %rax");
-        line("movabsq $0x8000000000000000, %rcx");
-        line("cmpq %rcx, %rax");
-        emit_jmp("je", done);            // 永生对象
-        line("cmpq $1, %rax");
-        emit_jmp("jle", slow);           // 归零/非法：慢路径真正释放
+        line(std::format("movq -48({}), %rax", p));
+        const bool check_first = immortal_first();
+        if (check_first) {
+            skip_immortal(done);
+            line("cmpq $1, %rax");
+            emit_jmp("jle", slow);
+        }
+        // sub 同时计算新值和旧 rc 与 1 的有符号比较。仅 rc > 1 时写回。
         line("subq $1, %rax");
-        line("movq %rax, -48(%rdi)");
+        if (!check_first) emit_jmp("jle", at_most_one);
+        line(std::format("movq %rax, -48({})", p));
         emit_jmp("jmp", done);
+        if (!check_first) {
+            label(at_most_one);
+            // jle 不改标志位，OF 仍来自 sub；仅 INT64_MIN - 1 溢出，不写回。
+            emit_jmp("jo", done);
+        }
         label(slow);
         spill_fp_slots();
         line("call pa_rc_dec_slow");
