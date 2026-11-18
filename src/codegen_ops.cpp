@@ -862,8 +862,6 @@ void AsmGen::emit_truth(VReg r, const char* byte_reg) {
 void AsmGen::gen_cmp(const Inst& in) {
         TypePtr ty = ty_of(in.a);
         if (ty && (ty->kind == TyKind::Str || ty->kind == TyKind::Bytes)) {
-            emit2("movq", src_op(in.a), arg_reg_i(0));
-            emit2("movq", src_op(in.b), arg_reg_i(1));
             if (in.cop == CmpKind::Eq || in.cop == CmpKind::Ne) {
                 // 同一对象的快路径：字符串不可变，指针相等必然内容相等。
                 // 单字节字面量已经被接到运行时的驻留表上，所以
@@ -877,6 +875,24 @@ void AsmGen::gen_cmp(const Inst& in) {
                 emit2("movq", src_op(in.b), db);
                 emit2("cmpq", db, da);
                 emit_jmp("je", same);
+                // 0.288：单字节内容快路径。指针不等之后，双方 len==1 就
+                // 直接比 data[0]。str_build 的 c=="0" 有 9/10 是不等的
+                // 数字字符，原来每次都要为一个字节比较走完整 pa_str_eq
+                // 调用（占该用例 8.4%）。len 在 +8、data 在 +24，str/bytes
+                // 同布局；scratch 用 r10/r11 避开 Win64 实参寄存器。
+                const std::string slow = fresh_label("strslow");
+                line(std::format("cmpq $1, 8({})", da));
+                emit_jmp("jne", slow);
+                line(std::format("cmpq $1, 8({})", db));
+                emit_jmp("jne", slow);
+                line(std::format("movq 24({}), %r10", da));
+                line(std::format("movq 24({}), %r11", db));
+                line("movzbq (%r10), %rax");
+                line("cmpb (%r11), %al");
+                emit_jmp("je", same);
+                line(in.cop == CmpKind::Eq ? "movq $0, %rax" : "movq $1, %rax");
+                emit_jmp("jmp", done);
+                label(slow);
                 spill_fp_slots();
                 line("call pa_str_eq");
                 reload_fp_slots();
@@ -891,7 +907,9 @@ void AsmGen::gen_cmp(const Inst& in) {
                 return;
             }
             // 大小比较走三路比较。早先这里只留了一句注释、什么都不生成，
-            // 于是 `a < b` 静默拿到槽里的残留值——恒为 False。
+            // 于是 a < b 静默拿到槽里的残留值——恒为 False。
+            emit2("movq", src_op(in.a), arg_reg_i(0));
+            emit2("movq", src_op(in.b), arg_reg_i(1));
             spill_fp_slots();
             line("call pa_str_cmp");
             reload_fp_slots();
