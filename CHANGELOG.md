@@ -4,6 +4,18 @@
 
 早期阶段没有逐条留痕，按阶段归纳；0.4 之后逐条记录。
 
+## [0.280] - 2026-11-18
+
+### kind-0 元组分配内联快路径（queue_sim −16.5%）+ 四个潜在 bug 修复
+
+- **内联快路径**：`gen_make_list` 的 kind-0 元组（全非堆元素、n≤4）在池命中且 `gc_need_check==0`、diag 关闭时，直接在生成代码里弹池、初始化（0.276 不变量：池块 dtor/release/kind/size 恒定，只重置 rc/marked/prev/next + payload），省 call/ret + 参数装填 + 运行时检查；任一守卫不满足落回 `pa_tuple_new_filled` 原路径（GC 触发/assist 点语义不变）。perf 里 pa_tuple_new_filled 跌出前八。
+- **bug 1（发射，致命）**：内联路径返回 RC 头指针 h 而非 payload h+64 —— 槽里存了头指针，dec 的 p-1 落到前一个对象内部，池链被 interior 指针污染，级联破坏。调试实录：ASan heap-buffer-overflow（读 argv 块尾后 16 字节）→ gdb 池头/数据字段 watchpoint → 抓到 put 参数是 `__file__` 字符串内部 → 反推返回值差 64。修复：返回前 `leaq 64(%rax), %rax`。
+- **bug 2（发射，致命）**：守卫用 `cmpq`（8 字节）比较 4 字节 int 全局（gc_need_check / pa_diag_rc_on），把相邻 .bss 变量读进高 4 字节 → 永真 → 快路径从不命中（174 万个元组全走慢路径，计数器 fast=0 暴露）。gdb 单步 + eflags 证实 ZF=0 而 flag=0。修复：`cmpl`。
+- **bug 3（运行时，0.274 起潜在）**：`pa_rc_dec_heap_batch` 的元组快释放入池前没把 rc 归零（池不变量 rc==0，dec_slow 的「dec on freed」panic 靠它挡二次释放）——stray dec 会静默二次 free → 池重复块。修复：入池前 `h->rc = 0`。
+- **bug 4（运行时，潜在）**：`gc_need_check` 唯一清除点是 gc_incr_finish，小堆同步收集从不走增量 → 标志首次置 1 后永久滞留，每次分配白跑检查块（也挡住内联快路径）。修复：检查块无动作时清标志；记账在每次被跟踪分配接近 7/8 阈值时重新置 1、增量启动也置 1，触发时机不变（gc_runs=85 前后一致）。
+- **实测（15 轮，0.279 修复后的 abbench）**：queue_sim 188.59 → **157.55 ms（−16.5%**，p25 −16.6%）；str_build −1.8%；sort_struct **+2.2%**（perf stat：指令 −0.4% 但 cycles +2.6% —— 内联序列在小 key 函数里的分支/布局代价，权衡接受）；其余噪声级。queue_sim 对 Go 40ms：5.1× → **3.9×**。
+- **验证**：差分 192/0；全语料对 0.271 基线零差异；release 与 ASan 套件各 210 ran ok / EXIT=0；ASan detect_leaks=1 干净；最小复现（纯元组 churn、元组+列表循环）对拍 CPython 一致。
+
 ## [0.279] - 2026-11-18
 
 ### 浮点临时寄存器分配与 GPR 门控解耦（spectral_norm −19.9%）+ abbench 测量可靠性修复

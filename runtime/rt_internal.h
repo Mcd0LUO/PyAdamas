@@ -372,6 +372,9 @@ typedef struct PyAdamasRc {
 
 #define PYADAMAS_RC_IMMORTAL INT64_MIN
 #define PYADAMAS_RC_HDR ((int64_t)sizeof(PyAdamasRc))
+/* 内联池头/计数：导出给生成代码的元组分配快路径（0.280）。 */
+extern PyAdamasRc* pa_list_inline_pool;
+extern int pa_list_inline_pool_count;
 _Static_assert(sizeof(PyAdamasRc) == 64, "codegen literal headers must match PyAdamasRc size");
 
 #define PYADAMAS_GC_THRESHOLD (2 * 1024 * 1024)

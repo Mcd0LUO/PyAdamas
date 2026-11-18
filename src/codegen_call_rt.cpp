@@ -796,4 +796,68 @@ void AsmGen::gen_rt_args(const Inst& in, RtFn fn) {
     }
 }
 
+
+// kind-0 元组分配内联快路径（0.280）：池命中 + gc_need_check==0 + diag 关
+// 时直接在生成代码弹池初始化，省 call/ret + 装填 + 运行时检查；否则落回
+// pa_tuple_new_filled。池块 dtor/release/kind/size 恒定（0.276 不变量）。
+void AsmGen::gen_tuple_inline(const Inst& in) {
+        const size_t n = in.args.size();
+        std::string slow = fresh_label("tupslow");
+        std::string done = fresh_label("tupdone");
+        for (size_t ai = 0; ai < n; ++ai)
+            emit2("movq", src_op(in.args[ai]), arg_reg_i(2 + ai));
+        // 注意 cmpl：gc_need_check / pa_diag_rc_on 是 4 字节 int，
+        // cmpq 会连同相邻 .bss 变量一起读，高 4 字节非零时永真。
+        line("cmpl $0, gc_need_check(%rip)");
+        emit_jmp("jne", slow);
+        line("cmpl $0, pa_diag_rc_on(%rip)");
+        emit_jmp("jne", slow);
+        line("movq pa_list_inline_pool(%rip), %rax");
+        line("testq %rax, %rax");
+        emit_jmp("jz", slow);
+        line("movq (%rax), %r10");
+        line("movq %r10, pa_list_inline_pool(%rip)");
+        line("decl pa_list_inline_pool_count(%rip)");
+        // RC 头：next(+0)/prev(+8)/rc(+16)/marked(+56)=UNTRACKED(2)
+        line("movq $0, (%rax)");
+        line("movq $0, 8(%rax)");
+        line("movq $1, 16(%rax)");
+        line("movq $2, 56(%rax)");
+        // payload(+64..)：len/cap=8/data=h+112/elem_kind=0/
+        // heap_bits=0/bits_cap=0
+        line(std::format("movq ${}, 64(%rax)", n));
+        line("movq $8, 72(%rax)");
+        line("leaq 112(%rax), %r10");
+        line("movq %r10, 80(%rax)");
+        line("movq $0, 88(%rax)");
+        line("movq $0, 96(%rax)");
+        line("movq $0, 104(%rax)");
+        for (size_t ai = 0; ai < n; ++ai) {
+            std::string aop = arg_reg_i(2 + ai);
+            if (aop.starts_with("%")) {
+                line(std::format("movq {}, {}(%rax)", aop, 112 + 8 * ai));
+            } else {
+                line(std::format("movq {}, %r10", aop));
+                line(std::format("movq %r10, {}(%rax)", 112 + 8 * ai));
+            }
+        }
+        // 返回值是 payload（h+64），不是 RC 头 —— 运行时
+        // rc_alloc_core 返回 h+1，内联路径必须一致。漏了这
+        // 步会把头指针当对象值存进槽，dec 时 p-1 落到前一个
+        // 对象内部，池链被Interior指针污染（0.280 调试实录）。
+        line("leaq 64(%rax), %rax");
+        emit_jmp("jmp", done);
+        label(slow);
+        emit_imm_op("movq", static_cast<int64_t>(n), arg_reg_i(0));
+        emit_imm_op("movq", 0, arg_reg_i(1));
+        for (size_t ai = n; ai < 4; ++ai)
+            emit_imm_op("movq", 0, arg_reg_i(2 + ai));
+        spill_fp_slots();
+        line("call pa_tuple_new_filled");
+        reload_fp_slots();
+        label(done);
+        emit2("movq", "%rax", dst_op(in.dst));
+        return;
+}
+
 }  // namespace pyadamas

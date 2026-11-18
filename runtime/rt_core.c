@@ -475,27 +475,29 @@ static void list_pool_put(PyAdamasRc* h) {
    增长过的列表缓冲已换外部块，但头块仍是 176 字节，照样挂回这里，
    下次复用时重新启用内联缓冲。 */
 #define LIST_INLINE_POOL_MAX 64
-static PyAdamasRc* list_inline_pool;
-static int list_inline_pool_count;
+/* 导出给生成代码：kind-0 元组分配内联快路径直接弹这个池（0.280）。
+   不变量见 rc_alloc_core：池块的 dtor/release/kind/size 恒定。 */
+PyAdamasRc* pa_list_inline_pool;
+int pa_list_inline_pool_count;
 
 static PyAdamasRc* list_inline_pool_get(void) {
-    PyAdamasRc* h = list_inline_pool;
+    PyAdamasRc* h = pa_list_inline_pool;
     if (h) {
-        list_inline_pool = h->next;
-        list_inline_pool_count--;
+        pa_list_inline_pool = h->next;
+        pa_list_inline_pool_count--;
     }
     return h;
 }
 
 static void list_inline_pool_put(PyAdamasRc* h) {
-    if (list_inline_pool_count >= LIST_INLINE_POOL_MAX) {
+    if (pa_list_inline_pool_count >= LIST_INLINE_POOL_MAX) {
         free(h);
         return;
     }
-    h->next = list_inline_pool;
+    h->next = pa_list_inline_pool;
     h->prev = NULL;
-    list_inline_pool = h;
-    list_inline_pool_count++;
+    pa_list_inline_pool = h;
+    pa_list_inline_pool_count++;
 }
 
 /* exact-RC 模式下可以完全绕开 GC 的对象：没有任何堆字段（没有出边），
@@ -827,6 +829,12 @@ static void* rc_alloc_core(int64_t size, void (*dtor)(void*), void (*release)(vo
         } else if (!gc_phase) {
             if (alloc_since_major >= major_threshold) gc_collect(1);
             else if (alloc_since_gc >= young_threshold) gc_collect(0);
+            else gc_need_check = 0;
+            // 无动作就清标志：唯一的旧清除点是 gc_incr_finish，小堆同步
+            // 收集从不走增量 → 标志首次置 1 后永久滞留，每次分配都白跑
+            // 检查块（也挡住生成代码的元组内联快路径）。清掉是安全的：
+            // 记账在每次被跟踪分配接近 7/8 阈值时重新置 1，增量启动也会
+            // 置 1，触发时机不变。
         }
     }
     // 短字符串按 8 字节取整，freelist 里的块容量和档位严格对应。
@@ -1022,6 +1030,11 @@ void pa_rc_dec_heap_batch(int64_t* vals, int64_t n) {
             h->size == (int64_t)sizeof(PyAdamasList) + PYADAMAS_LIST_INLINE_BYTES) {
             PyAdamasList* t = (PyAdamasList*)(h + 1);
             if (t->elem_kind == 0 && !t->heap_bits && t->data == list_inline_at(t)) {
+                // 必须归零再入池：池块的不变量是 rc==0（dec_slow 的
+                // 「dec on freed」panic 靠它挡二次释放；留着 rc==1 会让
+                //  stray dec 静默二次 free → 池里出现重复块 → 两个活对象
+                // 共享一块内存）。0.274 引入时漏了这一步。
+                h->rc = 0;
                 list_inline_pool_put(h);
                 continue;
             }
@@ -2388,12 +2401,12 @@ void pa_gc_shutdown(void) {
         free(h);
     }
     list_pool_count = 0;
-    while (list_inline_pool) {
-        PyAdamasRc* h = list_inline_pool;
-        list_inline_pool = h->next;
+    while (pa_list_inline_pool) {
+        PyAdamasRc* h = pa_list_inline_pool;
+        pa_list_inline_pool = h->next;
         free(h);
     }
-    list_inline_pool_count = 0;
+    pa_list_inline_pool_count = 0;
     // dict 池也要清空（每个块都是裸 malloc，必须 free）。
     while (dict_pool) {
         PyAdamasRc* h = dict_pool;
@@ -2438,3 +2451,4 @@ void pa_rc_dec(void* p) {
     }
     h->rc--;
 }
+

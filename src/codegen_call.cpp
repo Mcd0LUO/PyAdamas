@@ -32,6 +32,11 @@ void AsmGen::gen_make_list(const Inst& in) {
                 }
             }
             if (all_word) {
+                // kind-0 元组内联快路径（定义在 codegen_call_rt.cpp）。
+                if (in.op == IrOp::MakeTuple && in.imm == 0) {
+                    gen_tuple_inline(in);
+                    return;
+                }
                 emit_imm_op("movq", static_cast<int64_t>(in.args.size()), arg_reg_i(0));
                 emit_imm_op("movq", in.imm, arg_reg_i(1));
                 for (size_t ai = 0; ai < 4; ++ai) {
@@ -39,12 +44,8 @@ void AsmGen::gen_make_list(const Inst& in) {
                     else emit_imm_op("movq", 0, arg_reg_i(2 + ai));
                 }
                 spill_fp_slots();
-                // 全非堆的元组走 untracked 分配入口：元组不可变 + 元素全非堆
-                // => 不可能成环 => 不必进 GC 堆链（省 rc_link/rc_unlink）。
-                if (in.op == IrOp::MakeTuple && in.imm == 0)
-                    line("call pa_tuple_new_filled");
-                else
-                    line("call pa_list_new_filled");
+                // 全堆元素的定长列表仍走运行时（tracked，需要 rc_link）。
+                line("call pa_list_new_filled");
                 reload_fp_slots();
                 emit2("movq", "%rax", dst_op(in.dst));
                 return;
