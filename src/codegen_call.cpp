@@ -367,7 +367,7 @@ void AsmGen::gen_struct_copy(const Inst& in) {
 
 // 虚调用：self 只装入 ABI 的第一个整数实参寄存器一次，随后从中读
 // vtable。槽地址直接作为间接 call 的内存操作数，不另取函数指针。
-void AsmGen::gen_vcall(const Inst& in) {
+void AsmGen::gen_vcall(const Inst& in, bool keep_int_result) {
         std::vector<TypePtr> types;
         types.reserve(in.args.size() + 1);
         types.push_back(t_unknown());  // self：指针，非浮点
@@ -396,7 +396,7 @@ void AsmGen::gen_vcall(const Inst& in) {
         line(std::format("call *{}(%r11)", in.imm * 8));
         reload_fp_slots();
 
-        if (!dst_unused(in)) {
+        if (!keep_int_result && !dst_unused(in)) {
             if (ir_is_float(in.ty)) move_fp(dst_op(in.dst), "%xmm0");
             else emit2("movq", "%rax", dst_op(in.dst));
         }

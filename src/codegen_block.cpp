@@ -921,7 +921,9 @@ void AsmGen::gen_block(const Block& b) {
                         line(std::format("movq {0}, {1}", rg, st));
                 }
             }
-            if (!try_forward_global_across_rc(b, i, forwarded_load, forward_to_receiver))
+            const bool fused_vcall_add = try_fuse_guarded_vcall_add(b, i);
+            if (!fused_vcall_add &&
+                !try_forward_global_across_rc(b, i, forwarded_load, forward_to_receiver))
                 gen_inst(in);
             if (forward_to_receiver && i == forwarded_load + 1) {
                 alias_.erase(b.insts[forwarded_load].dst);
@@ -929,6 +931,10 @@ void AsmGen::gen_block(const Block& b) {
             }
             fp_mask_valid_ = false;
             dst_loc_.clear();
+            if (fused_vcall_add) {
+                i += 3;
+                continue;
+            }
             if (fp_temp) alias_[in.dst] = "%xmm1";
 
             if (fused_slot >= 0) {

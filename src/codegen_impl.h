@@ -965,8 +965,9 @@ private:
     // 虚调用：self 固定占第一个整数参数（%rdi），其余实参照常分类。
     // 函数地址在装参数之前取到 %r11 —— %r11 不在参数序列里，
     // 装参数的过程不会碰它。
-    void gen_vcall(const Inst& in);
-    bool gen_guarded_vcall(const Inst& in);
+    void gen_vcall(const Inst& in, bool keep_int_result = false);
+    bool gen_guarded_vcall(const Inst& in, bool keep_int_result = false);
+    bool try_fuse_guarded_vcall_add(const Block& b, size_t pos);
 
     void gen_vcall_static(const Inst& in);
 

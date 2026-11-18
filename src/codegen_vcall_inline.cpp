@@ -51,7 +51,30 @@ std::optional<IntLeaf> int_leaf(const IRFunction& f, const IRClass& cls) {
 
 }  // namespace
 
-bool AsmGen::gen_guarded_vcall(const Inst& in) {
+// 只融合已存在的整数全局累加形态。LHS 是调用前的快照，不能
+// 在慢调用之后读全局（方法可能已经更改它）。EH 和调用 ABI 照旧。
+bool AsmGen::try_fuse_guarded_vcall_add(const Block& b, size_t pos) {
+    if (opt_ < 2 || pos + 3 >= b.insts.size()) return false;
+    const auto& call = b.insts[pos];
+    const auto& add = b.insts[pos + 1];
+    const auto& store = b.insts[pos + 2];
+    if (call.op != IrOp::VCall || !call.args.empty() || !is_int(call.ty) ||
+        !single_use_in_block(call.dst) || add.op != IrOp::Bin ||
+        add.bop != BinKind::Add || !is_int(add.ty) || add.b != call.dst ||
+        !is_int(ty_of(add.a)) || alias_.contains(add.a) || !can_fuse_global(add, store))
+        return false;
+    const std::string lhs = src_op(add.a);
+    if (lhs.find("%rax") != std::string::npos) return false;
+    set_loc(call.line);
+    if (!gen_guarded_vcall(call, true)) return false;
+    set_loc(add.line);
+    comment(add.text() + " -> " + store.text());
+    emit2("addq", lhs, "%rax");
+    emit2("movq", "%rax", global_label(store.idx) + "(%rip)");
+    return true;
+}
+
+bool AsmGen::gen_guarded_vcall(const Inst& in, bool keep_int_result) {
     if (opt_ < 2 || !in.args.empty() || !is_int(in.ty) || in.imm < 0) return false;
     TypePtr recv = ty_of(in.a);
     if (!recv || recv->kind != TyKind::Class || !recv->cls || recv->cls->imported())
@@ -82,6 +105,7 @@ bool AsmGen::gen_guarded_vcall(const Inst& in) {
     }
     if (candidates.empty()) return false;
 
+    if (keep_int_result) comment(in.text() + " -> guarded return in %rax");
     const std::string self = arg_reg_i(0);
     move_to(self, src_op(in.a));
     line(std::format("movq ({}), %r11", self));
@@ -96,7 +120,7 @@ bool AsmGen::gen_guarded_vcall(const Inst& in) {
         line("cmpq %r10, %r11");
         emit_jmp("je", it->second);
     }
-    gen_vcall(in);
+    gen_vcall(in, keep_int_result);
     emit_jmp("jmp", done);
     for (const auto& c : candidates) {
         auto hit = targets.find(c.function);
@@ -115,7 +139,7 @@ bool AsmGen::gen_guarded_vcall(const Inst& in) {
                     line(std::format("{} {}({}), %rax", op, leaf.b, self));
                 }
             }
-            move_to(dst_op(in.dst), "%rax");
+            if (!keep_int_result) move_to(dst_op(in.dst), "%rax");
         }
         emit_jmp("jmp", done);
     }
