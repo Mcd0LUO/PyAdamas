@@ -4,6 +4,17 @@
 
 早期阶段没有逐条留痕，按阶段归纳；0.4 之后逐条记录。
 
+## [0.283] - 2026-11-18
+
+### dict 末次查找缓存：尝试 → 实测负收益 → 撤回（STLF 串行化诊断）
+
+- **尝试**：rec_memo 的 `if n in memo: return memo[n]` 是 contains+get 双查找（dict_lookup 占运行时 27%）。给 PyAdamasDict 加末次查找缓存（cache_key/hash/entry/valid，+32 字节）：同键连续查找命中直接返回 entry 下标，省 hash+probe；插入/擦除/reindex 失效。正确性通过 20000 步确定性伪随机操作对拍 CPython + 边界用例（del+空闲 entry 复用、扩容、墓碑清理、相等异指针 str 键、±0.0、pop/clear/update）。
+- **实测负收益**：rec_memo **+8.8%**（abbench 15 轮，p25 +8.7%），dict_wordfreq 中性，其余噪声。撤回。
+- **判别实验诊断**：保留缓存写入、禁用命中检查的变体 cycles=945M，完整缓存 886M，基线约 800M —— 命中确实省了 ~59M cycles，但**每次查找的缓存写入花掉 ~145M（≈7.6 cycles/次）**。根因：缓存字段在 dict payload 第三条 cache line，**相邻两次查找经缓存字段形成循环携带的 store→load 依赖（STLF ~5-7 cycles 串行）**——本来独立的查找被串成链。与 0.278 余数旋转同一族教训（OoO 下内存依赖链比指令数更致命）。
+- **结论**：运行时内存驻留的查找缓存是死路；可行的融合路径在 codegen 层（寄存器驻留的 found/value 对，如 DictGetOpt IR  op），留作后续候选。
+- **保留**：`tests/run/192_dict_cache.py` 作为字典语义回归（含 expect 段）。首版测试曾因 LCG 乘法溢出 int64 与 CPython 大整数语义分叉而假失败——改 32 位 LCG（乘积 <2^61）后两边序列一致；这不是缓存 bug，是测试 bug，记录以免再犯。
+- **验证（撤回后）**：差分 193/0；release 与 ASan 套件各 **211** ran ok / EXIT=0；abbench 对 0.282 全噪声级（运行时与 0.282 逐位一致）。
+
 ## [0.282] - 2026-11-18
 
 ### list.append 内联快路径 + 循环头 32 字节对齐（str_build −6.6%，套件 −1.2%）
