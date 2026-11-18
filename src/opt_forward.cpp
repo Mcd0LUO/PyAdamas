@@ -263,7 +263,111 @@ void drop_dead_slot_stores(IRFunction& fn) {
     }
 }
 
+
 }  // namespace
+
+// 0.290：块内 store.global → load.global 转发。obj_dispatch 的
+// `s = shapes[i]; total += s.area()` 每轮 store g8 之后又 load g8 当
+// self（STLF 往返 + 一次全局读，64M 轮）。转发成直接用存入的 vreg。
+//
+// **安全论证**：用户全局只由生成代码的 StoreGlobal 写入。运行时函数
+// 不写用户全局；RC 族调用可能跑析构，但 pyadamas 不支持 __del__，
+// 析构全是运行时内部代码（list_destroy/dict_destroy 等），不碰用户
+// 全局。所以 store 与 load 之间只隔纯 IR 指令或 RC 族 CallRt 时可以
+// 转发；任何用户调用（Call/VCall/…）、CallExtern、GenYield（挂起期间
+// 别的代码可能写全局）都使映射失效。GlobalAddr 取地址同理失效。
+// 与槽转发一样要求装载结果块内只用一次（不延长跨块活跃区间），
+// 且类型一致。
+bool global_forward_safe(const Inst& in) {
+    switch (in.op) {
+        case IrOp::CallRt: {
+            const RtFn f = static_cast<RtFn>(in.imm);
+            return f == RtFn::RcInc || f == RtFn::RcDec ||
+                   f == RtFn::RcIncUnknown || f == RtFn::RcDecUnknown ||
+                   f == RtFn::RcTemp || f == RtFn::RcTempTake ||
+                   f == RtFn::RcTempUnknown || f == RtFn::RcMark ||
+                   f == RtFn::RcCleanup;
+        }
+        case IrOp::Call:
+        case IrOp::CallDirect:
+        case IrOp::CallPtr:
+        case IrOp::CallExtern:
+        case IrOp::VCall:
+        case IrOp::VCallStatic:
+        case IrOp::SuperVCall:
+        case IrOp::GenYield:
+        case IrOp::GenAwait:
+            return false;
+        default:
+            return true;
+    }
+}
+
+void forward_global_loads(IRFunction& fn) {
+    const size_t nb = fn.blocks.size();
+    std::unordered_map<VReg, std::vector<int>> use_blocks;
+    for (size_t bi = 0; bi < nb; ++bi) {
+        for (const auto& in : fn.blocks[bi].insts) {
+            auto note = [&](VReg r) {
+                if (r != kNoReg) use_blocks[r].push_back(static_cast<int>(bi));
+            };
+            note(in.a);
+            note(in.b);
+            note(in.c);
+            for (VReg r : in.args) note(r);
+        }
+    }
+    auto local_only = [&](VReg v, size_t bi) {
+        auto it = use_blocks.find(v);
+        if (it == use_blocks.end() || it->second.empty()) return false;
+        for (int b : it->second)
+            if (b != static_cast<int>(bi)) return false;
+        return true;
+    };
+    for (size_t bi = 0; bi < nb; ++bi) {
+        auto& insts = fn.blocks[bi].insts;
+        std::unordered_map<int, VReg> global_val;
+        std::unordered_map<VReg, VReg> resolve;
+        std::vector<Forward> fwds;
+        auto resolve_v = [&](VReg v) {
+            for (int guard = 0; guard < 64; ++guard) {
+                auto it = resolve.find(v);
+                if (it == resolve.end()) break;
+                v = it->second;
+            }
+            return v;
+        };
+        for (size_t i = 0; i < insts.size(); ++i) {
+            const Inst& in = insts[i];
+            if (in.op == IrOp::StoreGlobal && in.idx >= 0 && in.a != kNoReg) {
+                global_val[in.idx] = resolve_v(in.a);
+            } else if (in.op == IrOp::GlobalAddr && in.idx >= 0) {
+                global_val.erase(in.idx);
+            } else if (in.op == IrOp::LoadGlobal && in.dst != kNoReg && in.idx >= 0) {
+                auto it = global_val.find(in.idx);
+                if (it == global_val.end() || it->second == kNoReg) continue;
+                if (!local_only(in.dst, bi)) continue;
+                VReg to = resolve_v(it->second);
+                if (to == in.dst || to == kNoReg) continue;
+                TypePtr dt = in.dst < fn.vreg_ty.size() ? fn.vreg_ty[in.dst] : nullptr;
+                TypePtr st = to < fn.vreg_ty.size() ? fn.vreg_ty[to] : nullptr;
+                if (!dt || !st || !type_eq(dt, st)) continue;
+                resolve[in.dst] = to;
+                fwds.push_back(Forward{i, in.dst, to});
+            } else if (!global_forward_safe(in)) {
+                global_val.clear();
+            }
+        }
+        if (fwds.empty()) continue;
+        for (const auto& f : fwds)
+            for (size_t j = f.pos + 1; j < insts.size(); ++j)
+                replace_uses(insts[j], f.from, f.to);
+        for (auto it = fwds.rbegin(); it != fwds.rend(); ++it)
+            insts.erase(insts.begin() + static_cast<std::ptrdiff_t>(it->pos));
+    }
+}
+
+
 
 void forward_slot_loads(IRFunction& fn) {
     if (fn.blocks.empty()) return;

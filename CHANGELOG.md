@@ -4,6 +4,16 @@
 
 早期阶段没有逐条留痕，按阶段归纳；0.4 之后逐条记录。
 
+## [0.290] - 2026-11-18
+
+### store.global→load.global 转发（obj_dispatch −13.7%，套件 −4.8%）
+
+- **取证**：obj_dispatch 的模块级 `for s in shapes: total += s.area()` —— s 是全局 g8，每轮 store g8 之后又 load g8 当 vcall 的 self（STLF 往返 + 一次全局读，内层 64M 轮）。0.289 的 annotate 里全局读/写合计 ~25%。
+- **forward_global_loads**（opt_forward.cpp）：块内 load.global 读到刚被 store.global 写入的全局，且中间只隔纯 IR 指令或 RC 族 CallRt → 直接转发到存入的 vreg，删除 load。要求装载结果块内只用一次（不延长跨块活跃区间）+ 类型一致；GlobalAddr / 用户调用（Call/VCall/…）/ CallExtern / GenYield 使映射失效。
+- **安全论证**：用户全局只由生成代码的 StoreGlobal 写入；pyadamas 不支持 `__del__`（全仓库 grep 核实），RC 析构全是运行时内部代码（list_destroy/dict_destroy 等），不碰用户全局；sort 的 key 在生成循环里预算好（ListSortedBy 收 keys 列表），运行时会调用户代码的入口（FuncReduce 族等）不在 RC 白名单里，一律失效映射。
+- **实测（15 轮）**：obj_dispatch 508.73 → **439.15 ms（−13.7%**，p25 −13.9%）；rec_memo −0.8%、str_build −0.6%（模块级赋值即读形态同样受益）；其余中性；套件合计 **−4.8%**。
+- **验证**：差分 193/0；全语料对 0.271 基线零差异；release 与 ASan 套件各 211 ran ok / EXIT=0；ASan detect_leaks=1 干净（13_gc / 192 / 66_genexpr / 119_gen_except_suspend 抽查）。
+
 ## [0.289] - 2026-11-18
 
 ### Bin+StoreGlobal 融合（obj_dispatch −5.7%，套件 −1.5%）
