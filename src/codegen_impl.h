@@ -905,7 +905,7 @@ private:
     // （mode 1/2 还会在 %rdx 留下余数），返回 true 表示已生成。
     // 除数为 0 / -1 / INT64_MIN 或不是编译期常量时返回 false，走 idivq。
     bool gen_div_const(const Inst& in, int mode);
-    void gen_div_const_emit(int64_t d, int mode);
+    void gen_div_const_emit(int64_t d, int mode, bool a_nonneg);
 
     // x86 的 idiv 向零取整，Python 的 // 向下取整，余数符号也不同。
     // 差 1 的修正必须做对，否则负数的 // 和 % 全是错的。

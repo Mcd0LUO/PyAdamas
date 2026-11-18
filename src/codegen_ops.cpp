@@ -489,7 +489,7 @@ void AsmGen::gen_div_guard() {
 //
 // 生成后 %rax = 向零取整商（与 idivq 的约定一致）。mode 1/2 再据此算余数
 // 并按 Python 的语义修正符号。%r9 全程保存被除数。
-void AsmGen::gen_div_const_emit(int64_t d, int mode) {
+void AsmGen::gen_div_const_emit(int64_t d, int mode, bool a_nonneg) {
         const uint64_t ad = d < 0 ? static_cast<uint64_t>(-(d + 1)) + 1
                                   : static_cast<uint64_t>(d);
         const int pl = pow2_log2(ad);
@@ -503,6 +503,42 @@ void AsmGen::gen_div_const_emit(int64_t d, int mode) {
             ok = udiv_magic(ad, &mp, &L);
         }
         if (!ok) { line("# internal: no magic for constant divisor"); }
+
+        // 被除数可证非负且除数为正：|x| == x，商非负，余数天然落在
+        // [0, d) —— 省掉 abs/符号还原（4 条）与余数符号修正（test+jns+
+        // add，3 条）。2 的幂：商是逻辑右移，mod 退化成一条 AND。
+        // 魔数本来就按无符号域算（udiv_magic），x>=0 时直接复用。
+        if (a_nonneg && d > 0) {
+            if (pl >= 0) {
+                line("movq %r9, %rax");
+                if (mode == kDivModeMod) {
+                    if (pl > 0) line(std::format("andq ${}, %rax", ad - 1));
+                } else if (pl > 0) {
+                    line(std::format("shrq ${}, %rax", pl));
+                }
+                return;
+            }
+            line("movq %r9, %r11");
+            char nbuf[24];
+            auto nr = std::to_chars(nbuf, nbuf + sizeof nbuf,
+                                    static_cast<unsigned long long>(mp), 16);
+            std::string nv = "movabsq $0x";
+            nv.append(nbuf, nr.ptr);
+            nv += ", %rcx";
+            line(nv);
+            line("mulq %rcx");            // rdx = mulhu(x, m')
+            line("addq %r11, %rdx");
+            line(std::format("shrq ${}, %rdx", L));
+            if (mode != kDivModeMod) {
+                line("movq %rdx, %rax");  // trunc == floor（x>=0, d>0）
+                return;
+            }
+            line("movq %rdx, %rcx");
+            line(std::format("imulq ${}, %rcx", d));
+            line("movq %r9, %rax");
+            line("subq %rcx, %rax");      // r = x - q*d ∈ [0, d)
+            return;
+        }
 
         if (pl >= 0) {
             // 2 的幂：trunc(x / 2^L) = (x + (x>>63 & (2^L-1))) >> L
@@ -575,7 +611,11 @@ bool AsmGen::gen_div_const(const Inst& in, int mode) {
         // %r9 暂存被除数：算完商之后还原余数还要用它。%r9 是块内临时寄存器，
         // 不受槽分配影响（vreg 只用 callee pool：rbx/r12-r15/rbp）。
         emit2("movq", src_op(in.a), "%r9");
-        gen_div_const_emit(d, mode);
+        // 被除数可证非负（降级期打标）→ 无符号魔数路径。优化遍新建的
+        // vreg 没有标（越界按 false），保守走有符号路径。
+        bool a_nn = static_cast<size_t>(in.a) < f_->vreg_nonneg.size() &&
+                    f_->vreg_nonneg[static_cast<size_t>(in.a)] != 0;
+        gen_div_const_emit(d, mode, a_nn);
         return true;
 }
 

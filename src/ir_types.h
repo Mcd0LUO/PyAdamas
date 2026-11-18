@@ -206,6 +206,11 @@ struct IRFunction {
     std::vector<bool> slot_unknown;
     // 每个虚拟寄存器的类型，后端决定用 rax 还是 xmm 时查它
     std::vector<TypePtr> vreg_ty;
+    // 每个 vreg 是否可证非负（降级期按值来源打标：非负常量 / len /
+    // 非负槽的 load / 非负操作数的 and/shr/mod 等）。常数除数的除法/
+    // 取模据此走无符号魔数路径。优化遍新建的 vreg 不打标（越界读按
+    // false 处理），保守正确。
+    std::vector<uint8_t> vreg_nonneg;
     std::vector<Block> blocks;
 
     // ── 稳定 ID 与 use-def 索引 ────────────────────────────────────

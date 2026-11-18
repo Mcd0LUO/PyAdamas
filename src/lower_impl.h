@@ -155,6 +155,9 @@ struct FuncCtx {
         std::vector<std::pair<int, size_t>> patches;  // 待改成 unchecked 的位置
     };
     std::vector<BoundsHint*> bounds_hints;
+    // 当前词法作用域内可证非负的槽（range 循环计数器/循环变量提示）。
+    // load.slot 命中时给 vreg 打非负标；写入非非负值时作废（store_slot_raw）。
+    std::unordered_set<int> nonneg_slots;
     // 嵌套函数直接引用自己的名字：用当前闭包指针，不需要 self cell。
     const FunctionDef* self_def = nullptr;
     TypePtr self_type;
@@ -349,11 +352,40 @@ private:
     VReg alloc(TypePtr ty) {
         VReg r = static_cast<VReg>(st_->fn->vreg_ty.size());
         st_->fn->vreg_ty.push_back(ty ? std::move(ty) : t_unknown());
+        st_->fn->vreg_nonneg.push_back(0);
         return r;
+    }
+
+    bool nn(VReg v) const {
+        // VReg 无符号；kNoReg 是极大值，越界检查一并挡掉。
+        return static_cast<size_t>(v) < st_->fn->vreg_nonneg.size() &&
+               st_->fn->vreg_nonneg[static_cast<size_t>(v)] != 0;
+    }
+
+    // vreg 非负性的值来源规则。add/mul/sub 不在内：int64 加法静默回绕，
+    // 两个非负数相加可能溢出成负数，无界分析不能声称非负。循环计数器
+    // 的非负由循环结构证明（见 lower_for_range_core 的提示注释），经
+    // nonneg_slots 的 load 传递，不依赖 add 规则。
+    uint8_t nonneg_of(const Inst& in) {
+        switch (in.op) {
+            case IrOp::ConstInt: return in.imm >= 0 ? 1 : 0;
+            case IrOp::Len: return 1;
+            case IrOp::LoadSlot:
+                return st_->nonneg_slots.count(static_cast<int>(in.idx)) ? 1 : 0;
+            case IrOp::Bin:
+                if (in.bop == BinKind::BitAnd) return (nn(in.a) || nn(in.b)) ? 1 : 0;
+                if (in.bop == BinKind::Shr) return nn(in.a) ? 1 : 0;
+                // Python 的 % 结果与除数同号；除数非负时结果非负
+                //（除数为 0 抛异常，没有结果值）。
+                if (in.bop == BinKind::Mod) return nn(in.b) ? 1 : 0;
+                return 0;
+            default: return 0;
+        }
     }
 
     VReg def(TypePtr ty, Inst in) {
         VReg r = alloc(ty);
+        st_->fn->vreg_nonneg[static_cast<size_t>(r)] = nonneg_of(in);
         in.dst = r;
         in.ty = ty;
         if (in.line == 0) in.line = cur_line_;
@@ -441,6 +473,8 @@ private:
     void store_slot_raw(int slot, VReg v) {
         for (auto* h : st_->bounds_hints)
             if (h->seq_slot == slot || h->idx_slot == slot) h->valid = false;
+        // 写入不可证非负的值 → 作废该槽的非负提示（后续 load 不再打标）。
+        if (st_->nonneg_slots.count(slot) && !nn(v)) st_->nonneg_slots.erase(slot);
         Inst in;
         in.op = IrOp::StoreSlot;
         in.idx = slot;
