@@ -39,6 +39,7 @@ bool rc_redundant_pairs(IRFunction& fn);
 void forward_slot_loads(IRFunction& fn);
 // `d[k] = d.get(k, def) + delta` 融合成一次 pa_dict_bump（省一次哈希+探测）。
 bool fuse_dict_bump(IRFunction& fn);
+bool fuse_dict_tryget(IRFunction& fn);
 // 循环内全局变量寄存器化：无调用的循环里把全局缓存到局部槽。
 bool promote_globals_in_loops(IRFunction& fn, const std::vector<IRGlobal>& globals);
 bool version_bounds_function(IRFunction& fn);

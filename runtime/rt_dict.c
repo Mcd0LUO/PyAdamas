@@ -332,6 +332,13 @@ void pa_dict_set_default_factory(PyAdamasDict* d, int64_t factory) {
     d->default_factory = factory;
 }
 
+int64_t pa_dict_try_get(PyAdamasDict* d, int64_t key, int64_t* out) {
+    int64_t e = dict_lookup(d, key, dict_hash_key(d, key));
+    if (e < 0) return 0;
+    *out = d->entries[e].val;
+    return 1;
+}
+
 int64_t pa_dict_get(PyAdamasDict* d, int64_t key) {
     int64_t h = dict_hash_key(d, key);
     int64_t e = dict_lookup(d, key, h);

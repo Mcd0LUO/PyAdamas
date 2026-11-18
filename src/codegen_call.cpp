@@ -1118,6 +1118,19 @@ void AsmGen::gen_call_rt(const Inst& in) {
             gen_append_inline(in);
             return;
         }
+        // ── DictTryGet：一次查找两个结果（0.284）──────────────────
+        // found 在 rax（0/1）落 dst（原 contains 的 bool）；值由运行时
+        // 写入 idx 指定的帧槽（借用，无 RC）。槽地址 leaq 作第三实参。
+        if (fn == RtFn::DictTryGet && in.args.size() == 2) {
+            emit_arg(0, false, 0, src_op(in.args[0]));
+            emit_arg(1, false, 1, src_op(in.args[1]));
+            line(std::format("leaq {}, {}", smem(static_cast<int>(in.idx)), arg_reg_i(2)));
+            spill_fp_slots();
+            line("call pa_dict_try_get");
+            reload_fp_slots();
+            if (!dst_unused(in)) emit2("movq", "%rax", dst_op(in.dst));
+            return;
+        }
         gen_rt_args(in, fn);
         spill_fp_slots();
         line(std::format("call {}", rt_name(fn)));

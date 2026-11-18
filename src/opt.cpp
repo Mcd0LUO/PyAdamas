@@ -214,6 +214,10 @@ void optimize_ir(IRModule& m, int opt_level) {
     // 放在内联之后（内联可能带进新形态）、CSE 之前。
     for (auto& fptr : m.funcs) fuse_dict_bump(*fptr);
 
+    // contains+get 双查找融合：一次查找，found 进寄存器、值经帧槽。
+    // 放在内联之后（形态可能来自内联体）、bump 之后（互不重叠）。
+    for (auto& fptr : m.funcs) fuse_dict_tryget(*fptr);
+
     // 循环内全局变量寄存器化：无调用的循环里把全局缓存到局部槽，
     // 循环出口写回。实测全局访问比局部慢 8.7 倍。
     for (auto& fptr : m.funcs) promote_globals_in_loops(*fptr, m.globals);

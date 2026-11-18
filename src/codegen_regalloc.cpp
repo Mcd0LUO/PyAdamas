@@ -490,12 +490,20 @@ void AsmGen::build_slot_liveness() {
         slot_reg_cand_idx_.assign(static_cast<size_t>(ns), -1);
         if (nb == 0 || ns == 0) return;
 
-        // 1) 排除：堆槽 / 取过地址 / handler hazard。
+        // 1) 排除：堆槽 / 取过地址 / handler hazard / 运行时直写槽。
         std::vector<bool> addr_taken(static_cast<size_t>(ns), false);
         for (const auto& b : f_->blocks)
-            for (const auto& in : b.insts)
+            for (const auto& in : b.insts) {
                 if (in.op == IrOp::SlotAddr && in.idx >= 0 && in.idx < ns)
                     addr_taken[static_cast<size_t>(in.idx)] = true;
+                // DictTryGet 由运行时把值写进栈槽（不是 StoreSlot）：提升后
+                // 寄存器不会跟着更新，且无 StoreSlot 定义让块入口重载逻辑
+                // 误以为前驱寄存器里已有值。一律留在内存（0.284）。
+                if (in.op == IrOp::CallRt &&
+                    in.imm == static_cast<int64_t>(RtFn::DictTryGet) &&
+                    in.idx >= 0 && in.idx < ns)
+                    addr_taken[static_cast<size_t>(in.idx)] = true;
+            }
 
         std::vector<bool> hazard(static_cast<size_t>(ns), false);
         if (f_->has_handlers) {

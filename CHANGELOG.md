@@ -4,6 +4,17 @@
 
 早期阶段没有逐条留痕，按阶段归纳；0.4 之后逐条记录。
 
+## [0.284] - 2026-11-18
+
+### contains+get 双查找 IR 层融合（rec_memo −11.8%，套件 −2.0%）
+
+- **0.283 的运行时末次查找缓存因 STLF 串行化撤回后，这版在 IR 层做融合**：新 pass `opt_dict_fuse` 识别 `%c = DictContains(d,k); branch %c, T, F` + T 的纯前缀后的 `DictGet(d2,k2)`（d/k 同槽），改写成 `DictTryGet(d,k)`（idx=新帧槽 S，found 落 %c 直接进分支寄存器）+ T 里 `load.slot S`。一次哈希+探测替代两次；值经帧槽中转但**同一迭代内一写一读，无跨迭代依赖链**（与失败缓存的本质区别）。
+- **守卫**：T 的唯一前驱是 B 且 F≠T（别的路径进 T 会读到未写的槽）；contains→分支、T 入口→get 之间都是纯指令（调用/存储可能改 dict）；get 的值只在 T 内用（SSA 保证）；不匹配 `not in`（条件经 Un）等变形，保守。
+- **新运行时入口 pa_dict_try_get**：命中写借用值到 *out 返回 1，缺失返回 0 不写 out、不创建 default（与 contains 守卫下的 get 逐位等价；defaultdict 的缺省创建只发生在真 get，这里缺失走 F 分支，语义不变）。
+- **开发中修掉的坑**：值槽没有 StoreSlot 定义 → 寄存器提升的活跃分析视其为入口 live-in，块入口重载逻辑见「所有前驱都持有寄存器」就不重载 —— 运行时写栈后提升寄存器不更新，读陈旧值（rec_memo 输出 390000、difftest 两例红）。修复：DictTryGet 的值槽与 SlotAddr 一样排除提升，一律留在内存（堆类型槽本就不提升，整型槽才受影响）。
+- **实测（15 轮）**：rec_memo 297.69 → **262.57 ms（−11.8%**，p25 −12.1%）；profile 里 pa_dict_contains / pa_dict_get 消失，pa_dict_try_get 8.3%，dict_lookup 27% → 22.7%；其余用例中性；套件合计 **−2.0%**。
+- **验证**：差分 193/0；全语料对 0.271 基线零差异；release 与 ASan 套件各 211 ran ok / EXIT=0；ASan detect_leaks=1 干净（13_gc / 88_defaultdict / 192_dict_cache / 90_functools_final / 39_match_advanced 重点抽查）。
+
 ## [0.283] - 2026-11-18
 
 ### dict 末次查找缓存：尝试 → 实测负收益 → 撤回（STLF 串行化诊断）

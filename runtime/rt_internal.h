@@ -1122,6 +1122,9 @@ PyAdamasDict* pa_dict_new(int64_t key_kind, int64_t key_own, int64_t val_own,
 void pa_dict_set(PyAdamasDict* d, int64_t key, int64_t val);
 int64_t pa_dict_get(PyAdamasDict* d, int64_t key);
 void pa_dict_set_default_factory(PyAdamasDict* d, int64_t factory);
+/* 0.284：contains+get 融合。命中返回 1 并把借用值写入 *out；缺失返回 0
+   不写 out。值所有权留在 dict（与 pa_dict_get 的借用语义一致）。 */
+int64_t pa_dict_try_get(PyAdamasDict* d, int64_t key, int64_t* out);
 int64_t pa_dict_contains(PyAdamasDict* d, int64_t key);
 int64_t pa_dict_key_at(PyAdamasDict* d, int64_t i);
 int64_t pa_dict_val_at(PyAdamasDict* d, int64_t i);

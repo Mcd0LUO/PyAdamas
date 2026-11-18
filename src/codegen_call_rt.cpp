@@ -603,6 +603,7 @@ void AsmGen::gen_rt_args(const Inst& in, RtFn fn) {
         case RtFn::DictEq:
         case RtFn::ListSortedBy:
         case RtFn::DictBump:
+        case RtFn::DictTryGet:  // 实际在 gen_call_rt 特判发射，这里只为穷尽
             gen_rt_i4(in);
             break;
         case RtFn::DictGetOr:
