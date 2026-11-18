@@ -4,6 +4,16 @@
 
 早期阶段没有逐条留痕，按阶段归纳；0.4 之后逐条记录。
 
+## [0.287] - 2026-11-18
+
+### str 下标 ASCII 快路径内联（str_build −6.2%，套件 −0.6%）
+
+- **取证**：str_build 逐字符下标走 pa_str_char_at（5.3%）+ pa_char_str（7%）两层 call。ASCII 字符命中 256 项驻留表（零分配、永生），调用开销纯浪费。
+- **gen_index_load 的 Str 分支内联快路径**（提取为 gen_str_index_inline，避免 codegen_call.cpp 超限）：`0<=i<pub` 且 `pub==len`（str 不变量：等号当且仅当全 ASCII）且字节 <0x80 → 直接查 pa_char_tab（main 序言已初始化）。负索引/越界/非 ASCII 落回 pa_str_char_at（归一化、IndexError、UTF-8 码点路径语义不变）；高字节守卫是防御性的。
+- **ABI**：s/i 走 arg_reg_i，scratch 用 rax/r10（两 ABI 均 volatile 且避开实参寄存器）；快路径不碰 xmm，慢路径 spill/reload。
+- **实测（15 轮）**：str_build 171.10 → **160.49 ms（−6.2%**，p25 −6.0%）；queue_sim −0.5%；其余中性；套件合计 **−0.6%**。
+- **验证**：差分 193/0；全语料对 0.271 基线零差异；release 与 ASan 套件各 211 ran ok / EXIT=0；ASan detect_leaks=1 干净；unicode（héllo世界）/负索引/越界 IndexError/空串边界对拍 CPython 逐行一致。
+
 ## [0.286] - 2026-11-18
 
 ### 临时栈 push/take 内联快路径（str_build −5.3%，套件 −0.6%）

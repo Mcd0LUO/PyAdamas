@@ -935,6 +935,7 @@ private:
         void gen_make_list(const Inst& in);
     void gen_tuple_inline(const Inst& in);
     void gen_append_inline(const Inst& in);
+    void gen_str_index_inline(const Inst& in);
 
         void gen_index_load(const Inst& in);
 

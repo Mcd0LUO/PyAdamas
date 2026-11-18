@@ -972,4 +972,38 @@ void AsmGen::gen_append_inline(const Inst& in) {
     label(done);
 }
 
+
+// str 下标 ASCII 快路径（0.287，gen_index_load 的 Str 分支）：
+// 0<=i<pub 且 pub==len（全 ASCII）且字节<0x80 → 查 pa_char_tab 驻留表；
+// 负索引/越界/非 ASCII 落回 pa_str_char_at（语义不变）。
+void AsmGen::gen_str_index_inline(const Inst& in) {
+        const std::string sr = arg_reg_i(0);
+        const std::string ir = arg_reg_i(1);
+        std::string slow = fresh_label("idxstrslow");
+        std::string done = fresh_label("idxstrdone");
+        emit2("movq", src_op(in.a), sr);
+        emit2("movq", src_op(in.b), ir);
+        line(std::format("testq {}, {}", ir, ir));
+        emit_jmp("js", slow);
+        line(std::format("movq ({}), %rax", sr));
+        line(std::format("cmpq %rax, {}", ir));
+        emit_jmp("jae", slow);
+        line(std::format("cmpq 8({}), %rax", sr));
+        emit_jmp("jne", slow);
+        line(std::format("movq 24({}), %r10", sr));
+        line(std::format("movzbq (%r10,{}), %rax", ir));
+        line("cmpq $0x80, %rax");
+        emit_jmp("jae", slow);
+        line("leaq pa_char_tab(%rip), %r10");
+        line("movq (%r10,%rax,8), %rax");
+        emit_jmp("jmp", done);
+        label(slow);
+        spill_fp_slots();
+        line("call pa_str_char_at");
+        reload_fp_slots();
+        label(done);
+        emit2("movq", "%rax", dst_op(in.dst));
+        return;
+}
+
 }  // namespace pyadamas

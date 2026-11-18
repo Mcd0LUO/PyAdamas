@@ -89,6 +89,15 @@ void AsmGen::gen_make_list(const Inst& in) {
 void AsmGen::gen_index_load(const Inst& in) {
         TypePtr ot = ty_of(in.a);
         if (ot && ot->kind == TyKind::Str) {
+            // ── str 下标 ASCII 快路径内联（0.287）──────────────────
+            // 0 <= i < pub 且 pub==len（全 ASCII 不变量）且字节 <0x80
+            // 时直接查 pa_char_tab 驻留表（main 序言已初始化），省两层
+            // call（char_at + char_str）。负索引/越界/非 ASCII 落回运行
+            // 时（归一化、IndexError、UTF-8 码点路径语义不变）。
+            if (opt_ >= 1) {
+                gen_str_index_inline(in);
+                return;
+            }
             emit2("movq", src_op(in.a), arg_reg_i(0));
             emit2("movq", src_op(in.b), arg_reg_i(1));
             spill_fp_slots();
