@@ -226,6 +226,17 @@ void AsmGen::gen_index_store(const Inst& in) {
         line("ud2");
         label(fast);
         line(std::format("movq 16({}), {}", r0, sp));
+        // 只针对浮点写入。静态 list[float] 不证明旧元素的所有权：
+        // 必须确认运行时 kind 0，才可跳过读旧值和释放。其他种类完全照旧。
+        if (is_fp(in.c)) {
+            const std::string owned = fresh_label("idxsowned");
+            line(std::format("cmpq $0, 24({})", r0));
+            emit_jmp("jne", owned);
+            emit2("movsd", src_op(in.c), "%xmm0");
+            line(std::format("movsd %xmm0, ({},{},8)", sp, r1));
+            emit_jmp("jmp", done);
+            label(owned);
+        }
         line(std::format("movq ({},{},8), {}", sp, r1, sv));
         if (is_fp(in.c)) {
             emit2("movsd", src_op(in.c), "%xmm0");
