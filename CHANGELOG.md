@@ -4,6 +4,18 @@
 
 早期阶段没有逐条留痕，按阶段归纳；0.4 之后逐条记录。
 
+## [0.301] - 2026-11-19
+
+### 列表缓冲池扩容 + 内联头池扩容（sort_struct −42.2%，realistic 合计 −6.1%）
+
+- **取证**：sort_struct（3900 轮 × 500 元素 list[tuple[int,int,int]] 建表→sort→聚合→丢弃）perf 里 glibc malloc/free 合计约 27%。初判三个来源：list_buf_pool 只覆盖 <=512B（64 元素），500 元素缓冲 4000B 超档，增长链与销毁全走裸 malloc/realloc/free；kind-2 位图每次增长 realloc；排序临时区每轮 malloc((n/2+1)*8)。
+- **发射（运行时-only，rt_list.c）**：① list_buf_pool 覆盖扩到 8192B（1024 元素），小档（<=512B）每档仍 64 块、大档每档 8 块防囤内存；请求档为空时按 128 位非空位图 O(1) 向上取第一个非空档（容量只会变大，cap_io 回写真实容量），找不到才 malloc。② list_buf_grow 池内尺寸先试池：get 新块 + memcpy 旧内容 + 旧外部块 put 归还（内联块不动）；>8192B 保留原 malloc/realloc fallback。③ heap_bits 位图入同一池（字数即 8 字节单位 cap）：增长复制旧字 [0,owords)、新字 [owords,bcap) 全清零（比旧实现清零范围只大不小），bits_cap 记池块真实字数；销毁/unknown 降级 put 代替 free。增长后位图扩容改按 l->cap（池可能把 cap 抬高到 > ncap，按 ncap 会漏扩）。④ timsort 临时区入池（n/2+1 元素）。**排序期间不执行用户代码**：plain sort 比较是运行时宏（LESS_STR 只调 pa_str_cmp）；sorted(key=) 的 key 在生成循环预算好（lower_builtin_seq.cpp），ListSortedBy 只收 keys 列表；list.sort(key=) 不支持（lower_method_containers.cpp 报错）。get/put 纯缓冲操作、无 RC/GC 副作用，即使重入也安全。临时区 OOM 改走运行时统一 panic（与 list_buf_grow 一致），不再退化为插入排序。
+- **取证修正（关键）**：只做缓冲池化时 abbench sort_struct 仅 −2.0%。perf 复查发现 malloc 大头不在缓冲链而在**元组 RC 头块**：每轮 500 个元组同时存活，list_inline_pool 上限 64，每轮 ~436 个头块走裸 malloc（_int_malloc 9% 全在 rc_alloc_core）/free（_int_free 族 15% 全在 pa_rc_dec_heap_batch）。**内联头池上限 64 -> 512**（rt_core.c，512×176B≈90KB 缓存上限）后第二轮起头块零 malloc，perf 里 malloc/free 跌出前十（_int_malloc 0.15%）。缓冲池化本身确已生效（增长链 malloc 消失），只是边际占比小。
+- **不变量保持**：GC 清扫（gc_free_body）不经池、直接 free data/位图（池块是普通 malloc 块，直接 free 合法）；shutdown drain 释放所有档（含非空位图清零）；池块复用不携带旧数据语义（data 只读 [0,len) 先写后读，位图按上文清零/复制）；bits_cap 独立记账语义保持；同池 dtor/release/kind/size 恒定、入池 rc 归零（0.276/0.280 不变量）不受影响。
+- **实测（对 85cb1e5 绑核交替 15 轮，BURST=5）**：sort_struct **194.90 → 112.56 ms（−42.2%，p25 −42.4%）**；str_build **−2.7%**（p25 −2.6%）；dict_wordfreq −0.5%；obj_dispatch −0.1%；queue_sim +0.5%（p25 +0.4%，噪声级）；rec_memo **+1.4%**（p25 +1.4%）。六项合计 **1365.60 → 1282.32 ms（−6.1%）**。
+- **rec_memo +1.4% 诊断（DSB 布局，非算法）**：perf stat 指令 −0.07%（1943.8M → 1942.5M，逐位级持平）、cycles +1.9%、idq.dsb_uops −2.1%（1253M → 1226M）、idq.mite_uops +4.6%（646M → 676M）——rt_list.c 尺寸变化把热区 uop 挤出 DSB 窗口、传统解码增多，与 0.289 的 rec_memo +1.8% 同族（权衡接受，未放宽任何守卫）。
+- **验证**：新增 204 覆盖跨档增长/cap 抬高/位图复用后 kind-2 正确性（list[object] 混合表 + 清空再增长）/排序结果（int/float/str，0/1/2/64/65/500 边界）/sorted(key=) 稳定性/超大表（3000 元素）池外 fallback/extend 与切片赋值增长/GC 环列表（自环混合表 30000 轮）。O0/O1/O2 对拍 CPython 一致（元组排序按机器字序是既有语义，校验和取顺序无关量），ASan/LSan 通过。差分 205/0；0.271 原有语料零差异（201/202/203 是 0.299/0.300 新增用例，oracle 早于其语法，rc 1 vs 0 属预期）；普通与 ASan 套件各 **223** ran ok / EXIT=0；ASan detect_leaks=1 抽查 13_gc / 88_defaultdict / 192_dict_cache / 66_genexpr / 119_gen_except_suspend / 204 全部干净；规模检查仍只有原有 5 处超限。
+
 ## [0.300] - 2026-11-18
 
 ### 按实际绑定的实参推断类型（不新增语法）

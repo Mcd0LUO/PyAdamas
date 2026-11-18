@@ -7,18 +7,43 @@
 
 /* ── 列表 ─────────────────────────────────────────────────────── */
 
-/* 列表 data 缓冲按 64 字节分档（<=512 字节），每档最多缓存 64 块。
-   空块的头 8 字节存下一块的指针；复用时容量只会变大，调用方按 cap 使用。 */
-#define LIST_BUF_MAX 512
+/* 列表缓冲池（0.301 扩容）：data 缓冲、heap_bits 位图、排序临时区共用，
+   按 64 字节分档，覆盖 <=8192 字节（1024 元素）。小档（<=512B）每档最多
+   缓存 64 块；大档（>512B）每档最多 8 块，防囤内存。空块的头 8 字节存
+   下一块的指针；复用时容量只会变大，cap_io 回写真实容量，调用方按 cap
+   使用。请求档为空时向上找第一个非空档（128 位非空位图，O(1)），找不到
+   才 malloc。块内容不携带语义：data 只读 [0,len)（先写后读），位图由
+   list_bits_reserve 复制旧字 + 清零新字，排序临时区先 memcpy 再读。
+   GC 清扫（gc_free_body）不经池、直接 free；shutdown 释放所有档。 */
+#define LIST_BUF_MAX 8192
 #define LIST_BUF_ALIGN 64
 #define LIST_BUF_CLASSES (LIST_BUF_MAX / LIST_BUF_ALIGN)
 #define LIST_BUF_MAX_PER_CLASS 64
+#define LIST_BUF_MAX_PER_CLASS_BIG 8
+/* 大档起点：bytes > 512 即档号 >= 8。 */
+#define LIST_BUF_BIG_CLASS (512 / LIST_BUF_ALIGN)
 static int64_t* list_buf_pool[LIST_BUF_CLASSES];
 static int list_buf_count[LIST_BUF_CLASSES];
+/* 位 i = 1 表示档 i 非空。向上取档用 ctz 一次定位，避免空池线性扫。 */
+static uint64_t list_buf_avail[LIST_BUF_CLASSES / 64];
 
 static int list_buf_class(int64_t bytes) {
     if (bytes <= 0 || bytes > LIST_BUF_MAX) return -1;
     return (int)((bytes + LIST_BUF_ALIGN - 1) / LIST_BUF_ALIGN) - 1;
+}
+
+static int list_buf_class_limit(int c) {
+    return c < LIST_BUF_BIG_CLASS ? LIST_BUF_MAX_PER_CLASS : LIST_BUF_MAX_PER_CLASS_BIG;
+}
+
+/* 第一个 >= c 的非空档；没有返回 -1。 */
+static int list_buf_find_up(int c) {
+    for (int w = c >> 6; w < LIST_BUF_CLASSES / 64; ++w) {
+        uint64_t m = list_buf_avail[w];
+        if (w == (c >> 6)) m &= ~UINT64_C(0) << (c & 63);
+        if (m) return (w << 6) + __builtin_ctzll(m);
+    }
+    return -1;
 }
 
 static int64_t* list_buf_get(int64_t* cap_io) {
@@ -26,13 +51,19 @@ static int64_t* list_buf_get(int64_t* cap_io) {
     int64_t bytes = cap * (int64_t)sizeof(int64_t);
     int c = list_buf_class(bytes);
     if (c >= 0) {
+        // 请求档为空时向上取档：容量只会变大，cap_io 回写真实容量。
+        if (!list_buf_pool[c]) {
+            int f = list_buf_find_up(c);
+            if (f >= 0) c = f;
+        }
         // 同一档的块一律按档容量分配，复用后 cap 与真实容量严格一致。
         int64_t class_bytes = (int64_t)(c + 1) * LIST_BUF_ALIGN;
         int64_t* p;
         if (list_buf_pool[c]) {
             p = list_buf_pool[c];
             list_buf_pool[c] = (int64_t*)p[0];
-            list_buf_count[c]--;
+            if (--list_buf_count[c] == 0)
+                list_buf_avail[c >> 6] &= ~(UINT64_C(1) << (c & 63));
         } else {
             p = (int64_t*)malloc((size_t)class_bytes);
             if (!p) panic_c("out of memory");
@@ -50,31 +81,44 @@ static void list_buf_put(int64_t* p, int64_t cap) {
     if (!p) return;
     int64_t bytes = cap * (int64_t)sizeof(int64_t);
     int c = list_buf_class(bytes);
-    if (c < 0 || list_buf_count[c] >= LIST_BUF_MAX_PER_CLASS) {
+    if (c < 0 || list_buf_count[c] >= list_buf_class_limit(c)) {
         free(p);
         return;
     }
     p[0] = (int64_t)list_buf_pool[c];
     list_buf_pool[c] = p;
     list_buf_count[c]++;
+    list_buf_avail[c >> 6] |= UINT64_C(1) << (c & 63);
 }
 
-/* 增长 data 缓冲到 ncap 个元素。内联缓冲（合并分配，见 rt_internal.h）
-   是头块内部的指针，realloc/free 都非法 —— 换一次 malloc + memcpy，
-   内联区从此闲置，头块销毁时仍整块挂回 list_inline_pool 复用。
-   外部缓冲照旧 realloc。调用方负责随后的 heap_bits 扩容。 */
+/* 增长 data 缓冲到至少 ncap 个元素（0.301：池内尺寸先试池）。
+   内联缓冲（合并分配，见 rt_internal.h）是头块内部的指针，realloc/free
+   都非法 —— 内联区从此闲置，头块销毁时仍整块挂回 list_inline_pool 复用。
+   <=LIST_BUF_MAX：list_buf_get 取新块（可能向上取档，cap 回写真实容量）
+   + memcpy 旧内容 + 旧外部块 list_buf_put 归还。sort_struct 第二轮起首次
+   增长就弹出上一轮销毁归还的大块，cap 一次到位，整轮零增长零 malloc。
+   >LIST_BUF_MAX：池外大块保留原路径（内联换 malloc+memcpy，外部 realloc）。
+   调用方负责随后的 heap_bits 扩容 —— 必须按增长后的 l->cap（可能被池
+   抬高到 > ncap），不能按 ncap。 */
 int64_t* list_buf_grow(PyAdamasList* l, int64_t ncap) {
     int64_t* nd;
-    if (l->data == list_inline_at(l)) {
+    if (ncap * (int64_t)sizeof(int64_t) <= LIST_BUF_MAX) {
+        int64_t gcap = ncap;
+        nd = list_buf_get(&gcap);
+        memcpy(nd, l->data, sizeof(int64_t) * (size_t)l->cap);
+        if (l->data != list_inline_at(l)) list_buf_put(l->data, l->cap);
+        l->cap = gcap;
+    } else if (l->data == list_inline_at(l)) {
         nd = (int64_t*)malloc(sizeof(int64_t) * (size_t)ncap);
         if (!nd) panic_c("out of memory");
         memcpy(nd, l->data, sizeof(int64_t) * (size_t)l->cap);
+        l->cap = ncap;
     } else {
         nd = (int64_t*)realloc(l->data, sizeof(int64_t) * (size_t)ncap);
         if (!nd) panic_c("out of memory");
+        l->cap = ncap;
     }
     l->data = nd;
-    l->cap = ncap;
     return nd;
 }
 
@@ -96,7 +140,7 @@ void list_destroy(void* p) {
             }
         }
     if (l->heap_bits) {
-        free(l->heap_bits);
+        list_buf_put((int64_t*)l->heap_bits, l->bits_cap);
         l->heap_bits = NULL;
         l->bits_cap = 0;
     }
@@ -243,16 +287,24 @@ void pa_list_prep(PyAdamasList* l, int64_t v, int64_t vk, int64_t owned) {
 /* 元素引用由生成代码在写入前 retain（kind 1/2 且源类型已知是堆），
    运行时不再重复 inc；kind 1 覆盖/截断/销毁时负责 release。 */
 /* 位图容量（字数）。单独记，因为 l->cap 会被 list_buf_get 抬高到池块容量，
-   与位图实际分配的字数不再一致。 */
+   与位图实际分配的字数不再一致。0.301：位图块也走缓冲池（uint64_t 字数组，
+   字数即 8 字节单位 cap）。bits_cap 记池块真实字数；复用块的旧位内容不
+   携带语义 —— 增长复制旧字 [0,owords)，新字 [owords,bcap) 全部清零（池块
+   陈旧内容的清零范围比旧实现的 [owords,nwords) 只大不小）；新建列表首次
+   位图 owords==0，整块清零，与旧 realloc(NULL)+清零 语义逐位一致。 */
 static void list_bits_reserve(PyAdamasList* l, int64_t ncap) {
     int64_t nwords = (ncap + 63) >> 6;
     int64_t owords = l->bits_cap;
     if (nwords <= owords) return;
-    uint64_t* nb = (uint64_t*)realloc(l->heap_bits, sizeof(uint64_t) * (size_t)nwords);
-    if (!nb) panic_c("out of memory");
-    for (int64_t i = owords; i < nwords; ++i) nb[i] = 0;
+    int64_t bcap = nwords;
+    uint64_t* nb = (uint64_t*)list_buf_get(&bcap);
+    if (l->heap_bits) {
+        memcpy(nb, l->heap_bits, sizeof(uint64_t) * (size_t)owords);
+        list_buf_put((int64_t*)l->heap_bits, owords);
+    }
+    for (int64_t i = owords; i < bcap; ++i) nb[i] = 0;
     l->heap_bits = nb;
-    l->bits_cap = nwords;
+    l->bits_cap = bcap;
 }
 
 /* 追加元素。
@@ -268,12 +320,13 @@ void pa_list_append(PyAdamasList* l, int64_t v, int64_t heap) {
     if (l->len == l->cap) {
         int64_t ncap = l->cap ? l->cap * 2 : 4;
         list_buf_grow(l, ncap);
-        if (l->heap_bits) list_bits_reserve(l, ncap);
+        // 按增长后的真实 cap 扩位图：池可能把 cap 抬高到 > ncap。
+        if (l->heap_bits) list_bits_reserve(l, l->cap);
     }
     // 维护位图：一旦遇到 unknown，放弃逐元素跟踪。
     if (heap == 2) {
         if (l->heap_bits) {
-            free(l->heap_bits);
+            list_buf_put((int64_t*)l->heap_bits, l->bits_cap);
             l->heap_bits = NULL;
             l->bits_cap = 0;
         }
@@ -320,7 +373,7 @@ void pa_list_copy_range(PyAdamasList* dst, PyAdamasList* src, int64_t lo, int64_
             int64_t ncap = dst->cap ? dst->cap : 4;
             while (ncap < dst->len + n) ncap *= 2;
             list_buf_grow(dst, ncap);
-            if (dst->heap_bits) list_bits_reserve(dst, ncap);
+            if (dst->heap_bits) list_bits_reserve(dst, dst->cap);
         }
         int kind = (int)dst->elem_kind;
         if (kind == 0 && heap == 0) {
@@ -544,11 +597,14 @@ static inline double f64_of(int64_t v) {
             return;                                                            \
         }                                                                      \
         int64_t mr = minrun_##NAME(n);                                         \
-        int64_t* tmp = (int64_t*)malloc((size_t)(n / 2 + 1) * sizeof(int64_t)); \
-        if (!tmp) {                                                            \
-            bin_ins_##NAME(a, 0, n);                                           \
-            return;                                                            \
-        }                                                                      \
+        /* 0.301：临时区入缓冲池。排序期间不执行用户代码：plain sort 的比较   \
+           是运行时宏（LESS_STR 只调 pa_str_cmp）；sorted(key=) 的 key 在生成 \
+           循环里预算好（lower_builtin_seq.cpp），ListSortedBy 只收 keys 列表；\
+           list.sort(key=) 不支持（lower_method_containers.cpp 报错）。        \
+           get/put 是纯缓冲操作，无 RC/GC 副作用，即使重入也安全。OOM 走运行   \
+           时统一 panic（与 list_buf_grow 一致），不再退化为插入排序。 */      \
+        int64_t tcap = n / 2 + 1;                                              \
+        int64_t* tmp = list_buf_get(&tcap);                                    \
         run_##NAME st[128];                                                    \
         int sp = 0;                                                            \
         int64_t lo = 0;                                                        \
@@ -579,7 +635,7 @@ static inline double f64_of(int64_t v) {
             lo += r;                                                           \
         }                                                                      \
         while (sp > 1) merge_at_##NAME(a, st, &sp, sp - 1, tmp);               \
-        free(tmp);                                                             \
+        list_buf_put(tmp, tcap);                                               \
     }
 
 #define LESS_I64(a, b) ((a) < (b))
@@ -951,4 +1007,5 @@ void pa_list_buf_pool_shutdown(void) {
         }
         list_buf_count[i] = 0;
     }
+    for (int i = 0; i < LIST_BUF_CLASSES / 64; ++i) list_buf_avail[i] = 0;
 }

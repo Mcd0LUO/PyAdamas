@@ -504,8 +504,13 @@ static void list_pool_put(PyAdamasRc* h) {
    （64 + 48 + 64 = 176 字节）。建表时一次池操作同时拿到头和缓冲，
    销毁时整块挂回（缓冲是否还内联由 list_destroy 按指针判断）。
    增长过的列表缓冲已换外部块，但头块仍是 176 字节，照样挂回这里，
-   下次复用时重新启用内联缓冲。 */
-#define LIST_INLINE_POOL_MAX 64
+   下次复用时重新启用内联缓冲。
+   0.301：上限 64 -> 512。sort_struct 每轮 500 个元组同时存活，旧上限
+   64 让每轮 ~436 个头块走裸 malloc/free（perf：_int_malloc 9% 全在
+   rc_alloc_core、_int_free 族 15% 全在 pa_rc_dec_heap_batch）——列表
+   data 缓冲入池后它们才是 malloc 大头。512 覆盖 500 元素表，第二轮起
+   头块零 malloc；512×176B≈90KB 缓存上限，shutdown 全部释放。 */
+#define LIST_INLINE_POOL_MAX 512
 /* 导出给生成代码：kind-0 元组分配内联快路径直接弹这个池（0.280）。
    不变量见 rc_alloc_core：池块的 dtor/release/kind/size 恒定。 */
 PyAdamasRc* pa_list_inline_pool;
