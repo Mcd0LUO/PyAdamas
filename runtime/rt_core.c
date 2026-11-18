@@ -1136,6 +1136,10 @@ void pa_rc_cleanup(int64_t mark) {
 void pa_rc_temp_take(void* p) {
     if (rc_stats_on) stat_take_calls++;
     if (!p) return;
+    // 0.286：永生值从不入栈（pa_rc_temp 跳过），无可取 —— 省掉整条
+    // 栈扫描。str_build 的字符串 take 原来每次白扫一遍。
+    PyAdamasRc* hh = (PyAdamasRc*)p - 1;
+    if (hh->rc == PYADAMAS_RC_IMMORTAL) return;
     // **栈顶快速路径**：最常见的模式是「刚 push 就 take」（容器构造时
     // 每个元素都这样），这时 p 就在栈顶，一次比较就能命中。
     //

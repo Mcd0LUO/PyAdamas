@@ -4,6 +4,16 @@
 
 早期阶段没有逐条留痕，按阶段归纳；0.4 之后逐条记录。
 
+## [0.286] - 2026-11-18
+
+### 临时栈 push/take 内联快路径（str_build −5.3%，套件 −0.6%）
+
+- **取证**：str_build 逐字符循环里 pa_rc_temp 占 6.8%。字符串是永生值（256 项驻留表），push 读 rc 比较 INT64_MIN 就返回；take 更要把整条栈白扫一遍（永生值从不入栈，永远找不到）。call/ret + 扫描全是浪费。
+- **gen_rc_inline 扩展 RcTemp / RcTempTake**（仿 inc/dec 先例）：永生 push/take 5 条指令（null 检查 + rc 加载 + INT64_MIN 比较）；非永生 push 12 条（stats/diag/扩容守卫落回原函数）；take 内联栈顶命中 + 从后往前扫描 + swap-remove，与运行时逐位一致。运行时 pa_rc_temp_take 同步加永生早退（语义等价：pa_rc_temp 跳过永生值，栈上不可能有）。
+- **寄存器安全**：CallRt 所在块本就没有 GPR/FP 临时值（既有门控）；快路径不碰 xmm，慢路径 spill/reload_fp_slots（析构可能跑，遵循 inc/dec 先例）。
+- **实测（15 轮）**：str_build 180.36 → **170.79 ms（−5.3%**，p25 −5.4%）；其余中性；套件合计 **−0.6%**。RC stats 模式输出一致（temp=132000 / cleanup=132000 平衡；take=0 因 opt_rc 后 str_build IR 已无 take 指令，push/cleanup 配对）。
+- **验证**：差分 193/0；全语料对 0.271 基线零差异；release 与 ASan 套件各 211 ran ok / EXIT=0；ASan detect_leaks=1 干净（13_gc / 66_genexpr / 119_gen_except_suspend / 192_dict_cache 抽查）。
+
 ## [0.285] - 2026-11-18
 
 ### dict set 单探测 + 标量销毁快路径（wordfreq −1.7%；两条方法论教训）

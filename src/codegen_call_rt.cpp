@@ -97,6 +97,85 @@ bool AsmGen::gen_rc_inline(const Inst& in, RtFn fn) {
         label(done);
         return true;
     }
+    // ── 临时栈 push/take 内联（0.286）─────────────────────────────
+    // str_build 逐字符循环里 pa_rc_temp 占 6.8%：字符串是永生值，push
+    // 读 rc 比较 INT64_MIN 就返回，take 更要把整条栈扫一遍（永生值从
+    // 不入栈）。call/ret + 扫描全是浪费。快路径把这两个形态变成 5 条
+    // 指令；非永生 push 也就 12 条。stats/diag/扩容落回原函数。
+    if (fn == RtFn::RcTemp && in.args.size() == 1) {
+        emit2("movq", src_op(in.args[0]), "%rdi");
+        const std::string slow = fresh_label("tmpslow");
+        const std::string done = fresh_label("tmpdone");
+        line("testq %rdi, %rdi");
+        emit_jmp("je", done);
+        line("movq -48(%rdi), %rax");
+        line("movabsq $0x8000000000000000, %rcx");
+        line("cmpq %rcx, %rax");
+        emit_jmp("je", done);            // 永生：不入栈
+        line("cmpl $0, pa_rc_stats_on_fast(%rip)");
+        emit_jmp("jne", slow);
+        line("cmpl $0, pa_diag_rc_on(%rip)");
+        emit_jmp("jg", slow);            // diag>0 要记录（-1 视同 0，与运行时一致）
+        line("movq temp_len(%rip), %rax");
+        line("cmpq temp_cap(%rip), %rax");
+        emit_jmp("jge", slow);           // 扩容
+        line("movq temp_stack(%rip), %rcx");
+        line("movq %rdi, (%rcx,%rax,8)");
+        line("incq temp_len(%rip)");
+        emit_jmp("jmp", done);
+        label(slow);
+        spill_fp_slots();
+        line("call pa_rc_temp");
+        reload_fp_slots();
+        label(done);
+        return true;
+    }
+    if (fn == RtFn::RcTempTake && in.args.size() == 1) {
+        emit2("movq", src_op(in.args[0]), "%rdi");
+        const std::string slow = fresh_label("tkslow");
+        const std::string scan = fresh_label("tkscan");
+        const std::string loop = fresh_label("tkloop");
+        const std::string found = fresh_label("tkfound");
+        const std::string done = fresh_label("tkdone");
+        line("testq %rdi, %rdi");
+        emit_jmp("je", done);
+        line("movq -48(%rdi), %rax");
+        line("movabsq $0x8000000000000000, %rcx");
+        line("cmpq %rcx, %rax");
+        emit_jmp("je", done);            // 永生：从不入栈，无可取（运行时同判）
+        line("cmpl $0, pa_rc_stats_on_fast(%rip)");
+        emit_jmp("jne", slow);
+        line("movq temp_len(%rip), %rax");
+        line("testq %rax, %rax");
+        emit_jmp("jle", done);
+        line("movq temp_stack(%rip), %rcx");
+        line("cmpq %rdi, -8(%rcx,%rax,8)");
+        emit_jmp("jne", scan);
+        line("decq temp_len(%rip)");     // 栈顶命中
+        emit_jmp("jmp", done);
+        label(scan);
+        line("subq $2, %rax");           // i = len-2，从后往前找
+        label(loop);
+        line("testq %rax, %rax");
+        emit_jmp("jl", done);            // 找不到：与运行时一样静默返回
+        line("cmpq %rdi, (%rcx,%rax,8)");
+        emit_jmp("je", found);
+        line("decq %rax");
+        emit_jmp("jmp", loop);
+        label(found);
+        line("movq temp_len(%rip), %rdx");
+        line("decq %rdx");
+        line("movq %rdx, temp_len(%rip)");
+        line("movq (%rcx,%rdx,8), %rdx");
+        line("movq %rdx, (%rcx,%rax,8)");
+        emit_jmp("jmp", done);
+        label(slow);
+        spill_fp_slots();
+        line("call pa_rc_temp_take");
+        reload_fp_slots();
+        label(done);
+        return true;
+    }
     return false;
 }
 
