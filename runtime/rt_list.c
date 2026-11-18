@@ -82,7 +82,10 @@ void list_destroy(void* p) {
     PyAdamasList* l = (PyAdamasList*)p;
     // kind 3 按约定是空列表；真出现元素（不变量被破坏）时按 2 保守释放。
     int kind = l->elem_kind == 3 ? 2 : (int)l->elem_kind;
-    if (kind != 0)
+    if (kind == 1) {
+        // 全堆元素：批量 dec（内联快路径 + untracked 元组释放）。
+        pa_rc_dec_heap_batch(l->data, l->len);
+    } else if (kind != 0)
         for (int64_t i = 0; i < l->len; ++i) {
             // kind 2 且位图可用时，按位图判断，跳过全局索引查询。
             if (kind == 2 && l->heap_bits) {

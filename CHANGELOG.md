@@ -4,6 +4,16 @@
 
 早期阶段没有逐条留痕，按阶段归纳；0.4 之后逐条记录。
 
+## [0.274] - 2026-11-18
+
+### kind-1 列表元素批量 dec：销毁循环内联快路径与元组释放（sort_struct −4.8%，str_build −2.7%，合计 −1.9%）
+
+- **`pa_rc_dec_heap_batch`**：`list_destroy` 的 kind-1（全堆）元素释放原来逐元素 `pa_own_dec` → `pa_rc_dec_fast` 内联判断 + rc==1 时 `pa_rc_dec_slow` 调用。新批量入口把 dec 快路径与 0.273 的 untracked 小元组释放快路径内联进循环，模式开关（统计 / 收集期 / 诊断）提到循环外 —— 任一开启就逐元素走 `pa_rc_dec` 原路径，语义逐位一致（含 rc<=0 panic、永生跳过、NULL 跳过）。queue_sim 的 pending 每步销毁一批 rc==1 的元组，常见情形零调用。
+- `list_destroy` 的 kind 1 分派到批量；kind 2（位图/注册表）与 kind 0 不变；`list_gc_release`（GC 试探 unref）不变。顺手：`rc_alloc_core` untracked 分支不再先写 marked=0 再写 UNTRACKED（省一次冗余 store）。
+- **实测（abbench 交替 9 轮中位数，绑核）**：sort_struct 236.26 → **225.01 ms（−4.8%**，p25 −4.2%）；str_build 223.43 → **217.41 ms（−2.7%**，p25 −2.4%）；queue_sim 233.20 → 231.20 ms（−0.9%，p25 −1.6%）；dict_wordfreq 中位 −4.8% / p25 −0.7%（噪声偏大）；rec_memo −1.0%；obj_dispatch 持平；六用例合计 −1.9%。
+- **profile 变化**：list_destroy 6.8% → 1.0%，工作移进 pa_rc_dec_heap_batch 2.6% + list_inline_pool_put 0.9%；pa_rc_dec_slow 5.8% → 4.4%。queue_sim 剩余大头：生成代码 59%、rc_alloc_core 12%、copy_range 4%、dec_unknown 2.8%。
+- **验证**：差分 190/0；全语料对 0.271 基线编译器输出/退出码零差异；release 与 ASan 套件各 208 ran ok / EXIT=0；8 个 GC/列表重用例单独 ASan detect_leaks=1 干净；PYADAMAS_RC_STATS=1 回退路径计数正常（dec=481 万 / free=276 万）。
+
 ## [0.273] - 2026-11-18
 
 ### 分配/释放快路径：untracked 元组省 link/unlink 往返，列表省冗余清零（queue_sim −16.1%，sort_struct −12.6%）

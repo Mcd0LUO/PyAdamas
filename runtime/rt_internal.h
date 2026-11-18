@@ -1045,6 +1045,9 @@ PyAdamasStr* pa_input(PyAdamasStr* prompt);
 PyAdamasFile* pa_sys_stream(int64_t which);
 void list_destroy(void* p);
 void list_gc_release(void* p);
+/* kind-1 容器元素批量 dec：内联快路径 + untracked 元组释放；
+   统计/收集/诊断模式自动回退逐元素原路径。 */
+void pa_rc_dec_heap_batch(int64_t* vals, int64_t n);
 /* 把 data 缓冲增长到 ncap 个元素并更新 l->data / l->cap。
    内联缓冲不能 realloc（块内指针），自动换成 malloc + memcpy。 */
 int64_t* list_buf_grow(PyAdamasList* l, int64_t ncap);

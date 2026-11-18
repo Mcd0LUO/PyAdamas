@@ -849,7 +849,6 @@ static void* rc_alloc_core(int64_t size, void (*dtor)(void*), void (*release)(vo
     h->dtor = dtor;
     h->release = release;
     h->kind = kind;
-    h->marked = 0;
     if (untracked) {
         // 调用方保证无出边、不成环：直接置 UNTRACKED，跳过 link/unlink
         // 往返（见 rc_alloc_untracked_ex 的说明）。
@@ -857,6 +856,7 @@ static void* rc_alloc_core(int64_t size, void (*dtor)(void*), void (*release)(vo
         h->next = NULL;
         h->marked = PYADAMAS_RC_UNTRACKED;
     } else {
+        h->marked = 0;
         rc_link(h);
     }
     // 叶子对象不可能成环，exact-RC 模式下也不进链，不必驱动 GC 频率。
@@ -976,6 +976,41 @@ void pa_rc_dec_slow(void* p) {
         else if (h->kind == PYADAMAS_RC_DICT && h->size == (int64_t)sizeof(PyAdamasDict))
             dict_pool_put(h);
         else free(h);
+    }
+}
+
+/* kind-1 容器元素的批量释放：元素全是堆指针（静态类型保证），把
+   pa_rc_dec_fast 的判断序列和 untracked 小元组的释放快路径内联进循环，
+   模式开关（统计 / 收集期 / 诊断）提到循环外 —— 任一开启就逐元素走
+   pa_rc_dec 原路径，语义与旧实现逐位一致。queue_sim 的 pending 列表
+   每步销毁都要 dec 一批 rc==1 的元组，原来每个元素两层调用
+  （pa_rc_dec_fast 内联 + pa_rc_dec_slow），现在常见情形零调用。 */
+void pa_rc_dec_heap_batch(int64_t* vals, int64_t n) {
+    if (__builtin_expect(pa_rc_stats_on_fast != 0 || pa_gc_phase_fast != 0 ||
+                         pa_diag_rc_on != 0, 0)) {
+        for (int64_t i = 0; i < n; ++i) pa_rc_dec((void*)(uintptr_t)vals[i]);
+        return;
+    }
+    for (int64_t i = 0; i < n; ++i) {
+        int64_t v = vals[i];
+        if (!v) continue;
+        PyAdamasRc* h = (PyAdamasRc*)(uintptr_t)v - 1;
+        if (h->rc == PYADAMAS_RC_IMMORTAL) continue;
+        if (__builtin_expect(h->rc > 1, 1)) {
+            h->rc--;
+            continue;
+        }
+        if (h->rc <= 0) panic_c("refcount decrement on a freed object");
+        // rc == 1：untracked 小元组直接挂回内联池（条件与 dec_slow 一致）。
+        if (h->kind == PYADAMAS_RC_LIST && (h->marked & PYADAMAS_RC_UNTRACKED) &&
+            h->size == (int64_t)sizeof(PyAdamasList) + PYADAMAS_LIST_INLINE_BYTES) {
+            PyAdamasList* t = (PyAdamasList*)(h + 1);
+            if (t->elem_kind == 0 && !t->heap_bits && t->data == list_inline_at(t)) {
+                list_inline_pool_put(h);
+                continue;
+            }
+        }
+        pa_rc_dec_slow((void*)(uintptr_t)v);
     }
 }
 
