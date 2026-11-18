@@ -17,7 +17,7 @@ TypeChecker::~TypeChecker() {
         if (st) st->alive = false;
 }
 
-void TypeChecker::check(Module& m) {
+void TypeChecker::check_once(Module& m) {
         auto mod = std::make_unique<Scope>();
         mod->is_module = true;
         module_ = mod.get();
@@ -58,9 +58,19 @@ void TypeChecker::check(Module& m) {
                 if (auto nit = nested_recheck_parent_.find(fd);
                     nit != nested_recheck_parent_.end())
                     cur_ = nit->second;
-                funcdef_impl(*fd,
-                             oit == func_owners_.end() ? nullptr : oit->second);
+                auto owner = oit == func_owners_.end() ? nullptr : oit->second;
+                auto* saved_class = cur_class_;
+                cur_class_ = owner.get();
+                funcdef_impl(*fd, owner);
+                cur_class_ = saved_class;
                 cur_ = saved_cur;
+                if (owner) {
+                    for (auto& method : owner->methods) {
+                        if (method.def != fd || !method.call_sig || method.decorated) continue;
+                        method.call_sig->ret = method.sig->ret;
+                        method.call_sig->ret_known = method.sig->ret_known;
+                    }
+                }
                 // 重查可能把别的函数标脏（形参回填 / 装饰器 / 互递归）：
                 // 把所有新脏的重新入队。没有 call graph，按全表扫一遍，
                 // 只对 dirty 且未入队的入队——摊还下来仍是收敛级。
@@ -435,6 +445,7 @@ void TypeChecker::collect_toplevel(std::vector<StmtPtr>& body) {
                     continue;
                 }
                 auto info = build_sig(*f);
+                signature_defs_[info.get()] = f;
                 auto t = new_ty(TyKind::Func);
                 t->fn = info;
                 module_->vars[f->name] = Symbol{t, f->line, true, false};

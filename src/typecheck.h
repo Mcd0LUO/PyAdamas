@@ -253,6 +253,17 @@ private:
     // 调用合成生成器函数的位置：重查后返回类型从 Generator[unknown] 变成
     // Generator[T]，这里要同步刷新调用点缓存的表达式类型。
     std::unordered_map<const Expr*, FuncInfoPtr> genexpr_call_sites_;
+    struct CallResult {
+        const FunctionDef* def;
+        TypePtr ty;
+    };
+    // Hints survive a clean replay; observed calls and signatures do not.
+    std::unordered_map<const Call*, CallResult> result_hints_;
+    std::unordered_map<const Call*, CallResult> observed_results_;
+    std::unordered_map<const FuncInfo*, const FunctionDef*> signature_defs_;
+    void check_once(Module& m);
+    bool collect_result_hints();
+    TypePtr observe_call_result(Call& c, const FuncInfoPtr& fn, TypePtr result);
     std::unordered_map<FunctionDef*, ClassInfoPtr> func_owners_;
     std::unordered_map<std::string, ClassInfoPtr> classes_;
     // 正在检查方法体的类。`self.x = ...` 里 x 没声明过时，就地补成字段——

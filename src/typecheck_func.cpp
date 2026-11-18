@@ -5,15 +5,41 @@
 
 namespace pyadamas {
 
-/* 递归检查类型里有没有 Unknown（含容器元素）。
-   用于「标注含待推断空洞时，用实际返回值收窄」的判断。 */
-static bool ty_has_unknown(const TypePtr& t, int depth) {
-    if (!t || depth > 6) return false;
-    if (t->kind == TyKind::Unknown) return true;
-    for (const auto& s : t->sub)
-        if (ty_has_unknown(s, depth + 1)) return true;
+// Align tuple elements correctly: a variadic annotation has one element
+// type, not a slot corresponding to the first item of a fixed tuple.
+static TypePtr refine_return_holes(const TypePtr& to, const TypePtr& from, int depth = 0) {
+    if (!to || !from || depth > 6) return to;
+    if (to->kind == TyKind::Unknown)
+        return to != t_unknown() && !is_unknown(from) ? from : to;
+    if (to->kind != from->kind || to->variadic != from->variadic ||
+        to->sub.size() != from->sub.size() || !ty_contains_hole(to, depth)) return to;
+    auto result = std::make_shared<Type>(*to);
+    // A bare mutable container permits widening after the call, even if
+    // we now know which element type this invocation starts with.
+    if (std::ranges::all_of(to->sub, [](const TypePtr& sub) {
+            return is_unknown(sub) && sub != t_unknown();
+        })) result->locked = false;
+    for (size_t i = 0; i < to->sub.size(); ++i)
+        result->sub[i] = refine_return_holes(to->sub[i], from->sub[i], depth + 1);
+    return result;
+}
+
+// Scalar return coercion does not rewrite elements of an existing container.
+// Don't publish a newly refined container signature if a fixed annotation
+// would make the caller reinterpret an integer slot as float (or vice versa).
+static bool return_slot_mismatch(const TypePtr& want, const TypePtr& actual, int depth = 0) {
+    if (depth > 6 || is_unknown(want) || is_unknown(actual)) return false;
+    if (want->kind == TyKind::Optional && !want->sub.empty() && actual->kind != TyKind::Optional)
+        return actual->kind != TyKind::None && return_slot_mismatch(want->sub[0], actual, depth + 1);
+    if (depth > 0 && (want->kind == TyKind::Float) != (actual->kind == TyKind::Float))
+        return true;
+    if (want->kind != actual->kind || want->variadic != actual->variadic ||
+        want->sub.size() != actual->sub.size()) return false;
+    for (size_t i = 0; i < want->sub.size(); ++i)
+        if (return_slot_mismatch(want->sub[i], actual->sub[i], depth + 1)) return true;
     return false;
 }
+
 // C3 线性化：反复取各序列中「不在任何序列尾部」的头部。失败说明
 // 继承关系自相矛盾（典型是菱形里父类顺序冲突）。
 static bool c3_merge(std::vector<std::vector<ClassInfo*>>& seqs,
@@ -123,6 +149,9 @@ void TypeChecker::funcdef_impl(FunctionDef& f, const ClassInfoPtr& owner) {
             }
         }
 
+        if (f.returns && info->ret_known && !info->is_async && !info->is_generator)
+            info->ret = parse_annotation(f.returns.get(), f.line);
+
         if (!owner)
             if (auto* sym = lookup(f.name)) sym->from_def = true;
 
@@ -168,12 +197,13 @@ void TypeChecker::funcdef_impl(FunctionDef& f, const ClassInfoPtr& owner) {
         cur_ = sc.get();
         func_scopes_[&f] = sc.get();
         func_infos_[&f] = info;
+        signature_defs_[info.get()] = &f;
         auto* prev_fn_def = cur_fn_def_;
         auto* prev_fn_scope = cur_fn_scope_;
         cur_fn_ = info;
         cur_fn_def_ = &f;
         cur_fn_scope_ = sc.get();
-        loop_depth_ = 0;
+        int saved_loop_depth = std::exchange(loop_depth_, 0);
         auto saved_globals = std::move(global_decl_);
         auto saved_nonlocals = std::move(nonlocal_decl_);
         global_decl_.clear();
@@ -300,40 +330,23 @@ void TypeChecker::funcdef_impl(FunctionDef& f, const ClassInfoPtr& owner) {
             info->is_generator = true;
         } else if (!info->ret_declared) {
             info->ret = inferred;
-        } else if (info->ret && inferred) {
-            // **标注里含「待推断」空洞时，用实际 return 收窄。**
-            //
-            // 裸 `list` / `set` / `dict` 标注现在解析成 `list[hole]`（见
-            // typecheck.cpp 的 parse_annotation）。hole 需要由实际返回值填上，
-            // 否则 `def make(n: int) -> list:` 的返回类型永远是 list[unknown] ——
-            // 比完全不标注（能推断出 list[int]）还差。
-            //
-            // 实测 bench/compare/matmul.py：这条让 a/b/c 从 list[int] 退化到
-            // list[unknown]，最内层循环 11ms；收窄后 7ms（-36%）。
-            //
-            // 只在「标注结构相同、且标注侧含 Unknown」时收窄，避免把用户明确
-            // 写的 `-> list[str]` 改成别的类型。
-            if (ty_has_unknown(info->ret, 0) && info->ret->kind == inferred->kind) {
-                if (info->ret->kind == TyKind::List || info->ret->kind == TyKind::Set) {
-                    if (inferred->sub.size() == 1) info->ret = mk_list(inferred->sub[0]);
-                } else if (info->ret->kind == TyKind::Dict) {
-                    if (inferred->sub.size() == 2)
-                        info->ret = mk_dict(inferred->sub[0], inferred->sub[1]);
-                } else if (info->ret->kind == TyKind::Tuple) {
-                    // 裸 `tuple` 标注解析成 `tuple[unknown, ...]`（变长、元素未知）。
-                    // 实际 return 若是定长元组，直接采用推断结果 —— 定长元组的
-                    // 每个元素类型都是精确的，比变长 unknown 强得多。
-                    //
-                    // 实测 bench/compare/fannkuch.py：`-> tuple` 让返回类型停在
-                    // tuple[unknown, ...]，调用方解包后全变 unknown；不标注反而
-                    // 能推出 tuple[int, int]。
-                    if (info->ret->variadic && !inferred->variadic)
-                        info->ret = inferred;
-                    else if (!info->ret->variadic && inferred->variadic)
-                        ;  // 标注更精确，保留
-                    else if (inferred->sub.size() == info->ret->sub.size())
-                        info->ret = inferred;
-                }
+        } else if (ty_contains_hole(info->ret, 0) && inferred) {
+            // Refine only holes; explicit Any and concrete siblings are not holes.
+            const auto& decl = info->ret;
+            for (auto& r : rets) {
+                if (return_slot_mismatch(decl, r.ty))
+                    err(r.line, r.col, std::format(
+                        "return of '{}' has incompatible float storage: declared '{}', got '{}'",
+                        f.name, type_name(decl), type_name(r.ty)));
+            }
+            if (decl->kind == TyKind::Tuple && decl->variadic &&
+                inferred->kind == TyKind::Tuple && !inferred->variadic &&
+                decl->sub.size() == 1 && is_unknown(decl->sub[0]) &&
+                decl->sub[0] != t_unknown()) {
+                // A bare tuple does not fix the arity. Keep a known shape.
+                info->ret = inferred;
+            } else {
+                info->ret = refine_return_holes(decl, inferred);
             }
         }
         info->ret_known = true;
@@ -345,6 +358,7 @@ void TypeChecker::funcdef_impl(FunctionDef& f, const ClassInfoPtr& owner) {
         saw_yield_ = prev_yield;
         yields_ = prev_yields;
         rets_ = prev_rets;
+        loop_depth_ = saved_loop_depth;
         global_decl_ = std::move(saved_globals);
         nonlocal_decl_ = std::move(saved_nonlocals);
         // 保留函数作用域：IR 降级要按名字查最终类型
@@ -835,6 +849,7 @@ void TypeChecker::classdef(ClassDef& c) {
             }
             // 方法体检查复用这份签名，返回类型才会回填到同一个对象上
             func_infos_[&f] = m.sig;
+            signature_defs_[m.sig.get()] = &f;
             cls->methods.push_back(std::move(m));
         }
         cls->has_init = cls->method("__init__") != nullptr;

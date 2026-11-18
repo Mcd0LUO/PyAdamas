@@ -98,9 +98,10 @@ TypePtr TypeChecker::check_args(const FuncInfoPtr& fn, Call& c) {
             // 否则方法体重查时仍是旧类型。
             auto sync = [&]() {
                 if (!fn->outer) return;
-                size_t k = idx + fn->outer_off;
-                if (k >= fn->outer->pos.size()) return;
-                Param& sp = fn->outer->pos[k];
+                auto& params = p.kwonly ? fn->outer->kwonly : fn->outer->pos;
+                const size_t k = p.kwonly ? idx : idx + fn->outer_off;
+                if (k >= params.size()) return;
+                Param& sp = params[k];
                 sp.ty = p.ty;
                 sp.inferred = p.inferred;
                 sp.multi = p.multi;
@@ -160,25 +161,21 @@ TypePtr TypeChecker::check_args(const FuncInfoPtr& fn, Call& c) {
                 }
                 return;
             }
+            // Inferred float is not permission to convert an integer: float
+            // and non-float calls need distinct representations. Check both
+            // orders before assignable(), which allows int -> float.
+            if (p.inferred && !is_unknown(ty) &&
+                ((p.ty->kind == TyKind::Float) != (ty->kind == TyKind::Float))) {
+                err(line, col,
+                    std::format("argument '{}' of '{}' is used with both float and "
+                                "non-float values; annotate the parameter type",
+                                p.name, fn->name));
+                return;
+            }
             if (assignable(p.ty, ty)) return;
             if (p.inferred) {
-                // 形参类型是从调用点实参回填的（不是标注），现在同一形参又收到
-                // 一个不兼容的类型。退回 unknown 会让函数体按整数 ABI 编译，而
-                // 实际实参可能是浮点 —— 这就是静默算错的来源。
-                //
-                // 判据：两侧一边是浮点、另一边不是，就必然算错（浮点走 %xmm、
-                // 整数走 %rdi，位模式对不上）。其余不兼容组合（如 str vs int）
-                // 仍按原逻辑退回 unknown —— 它们在 ABI 上都是指针/整数，不会
-                // 静默算错，只是类型信息退化。
-                const bool mix_fp = (p.ty && p.ty->kind == TyKind::Float) !=
-                                    (ty && ty->kind == TyKind::Float);
-                if (mix_fp) {
-                    err(line, col,
-                        std::format("argument '{}' of '{}' is used with both float and "
-                                    "non-float values; annotate the parameter type",
-                                  p.name, fn->name));
-                    return;
-                }
+                // Keep the existing fallback for other incompatible types.
+                // Sharing a register class is not general dynamic dispatch.
                 p.ty = t_unknown();
                 p.inferred = false;
                 p.multi = true;
@@ -266,9 +263,9 @@ TypePtr TypeChecker::check_args(const FuncInfoPtr& fn, Call& c) {
             // 还是 unknown，重查后才是 Generator[T]。调用点缓存的表达式
             // 类型要在重查结束后刷新一次，降级层才能按 T 选迭代路径。
             if (fn->name.rfind("__pyadamas$gen_", 0) == 0) genexpr_call_sites_[&c] = fn;
-            return fn->ret;
         }
-        return fn->ret_known ? t_none() : t_unknown();
+        return observe_call_result(c, fn, fn->ret ? fn->ret
+                                      : fn->ret_known ? t_none() : t_unknown());
     }
 
 bool TypeChecker::is_exception_type(const std::string& n) {
