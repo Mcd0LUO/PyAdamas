@@ -844,11 +844,20 @@ static void* rc_alloc_core(int64_t size, void (*dtor)(void*), void (*release)(vo
         h = (PyAdamasRc*)malloc(sizeof(PyAdamasRc) + (size_t)alloc_size);
         if (!h) panic_c("out of memory");
         h->size = alloc_size;
+        h->dtor = dtor;
+        h->release = release;
+        h->kind = kind;
     }
+    // **池命中不重写 dtor/release/kind/size**：每个池按 kind 路由
+    // （dec_slow / gc_free_body），同池块的这四个字段恒定 ——
+    //   str_pool:        STR / NULL / NULL（str 分配点全在 rt_core，恒 NULL）
+    //   list_pool(48):   LIST / list_destroy / list_gc_release
+    //   list_inline(112):同上
+    //   dict_pool:       DICT / dict_destroy / dict_gc_release
+    // 运行期没有任何代码改写活对象的这四个头字段（已 grep 核实），
+    // GC 清扫直接 free 不回池，所以复用块带着上一世的正确值。
+    // 新增池化分配点必须维持「同池同 dtor/release/kind」不变量。
     h->rc = 1;
-    h->dtor = dtor;
-    h->release = release;
-    h->kind = kind;
     if (untracked) {
         // 调用方保证无出边、不成环：直接置 UNTRACKED，跳过 link/unlink
         // 往返（见 rc_alloc_untracked_ex 的说明）。
@@ -867,7 +876,14 @@ static void* rc_alloc_core(int64_t size, void (*dtor)(void*), void (*release)(vo
     // rc_alloc 总耗时的显著比例。
     //
     // gc_ready 为 0 时（GC 禁用）这些计数根本不会有人读 —— 直接跳过。
-    if (gc_ready && !rc_leaf_untracked(h)) {
+    //
+    // **untracked 对象不入 GC 记账**：调用方保证无出边、不成环，生死全由
+    // RC 管理，GC 永远收不到它们。让它们驱动 GC 频率纯属浪费 —— queue_sim
+    // 实测 gc_runs=231 而 gc_freed=0，全是元组churn 触发的空收集。排除后
+    // GC 只由被跟踪对象的分配量驱动（环只可能出现在被跟踪对象之间）。
+    // 入口的 gc_need_check 检查块不受影响：untracked 分配点仍是 mark
+    // assist / 收集的触发点，只是不再累加阈值计数。
+    if (gc_ready && !untracked && !rc_leaf_untracked(h)) {
         alloc_since_gc += alloc_size + PYADAMAS_RC_HDR;
         alloc_since_major += alloc_size + PYADAMAS_RC_HDR;
         // 接近阈值时打开快速判断标志。用 7/8 作为提前量：真正的阈值比较

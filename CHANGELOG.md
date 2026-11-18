@@ -4,6 +4,15 @@
 
 早期阶段没有逐条留痕，按阶段归纳；0.4 之后逐条记录。
 
+## [0.276] - 2026-11-18
+
+### rc_alloc 本体瘦身：池命中不重写不变头字段，untracked 不入 GC 记账（queue_sim −4.6%，sort_struct −4.2%）
+
+- **池命中跳过 dtor/release/kind/size**：这四个头字段按池恒定 —— 池路由按 kind（dec_slow），str 池恒 STR/NULL/NULL（str 分配点全在 rt_core），两个列表池恒 LIST/list_destroy/list_gc_release，dict 池恒 DICT/dict_destroy/dict_gc_release；运行期没有任何代码改写活对象的这四个字段（grep 核实），GC 清扫直接 free 不回池。四个 store 移进 malloc 分支，池命中只重置 rc/marked（prev/next 由 link/untracked 路径写）。**新增池化分配点必须维持「同池同 dtor/release/kind」不变量。**
+- **untracked 对象不入 GC 记账**：调用方保证无出边、不成环，生死全由 RC 管理，GC 永远收不到它们 —— 让它们驱动 GC 频率纯属浪费。queue_sim 改前 gc_runs=231 / gc_freed=0（全是元组 churn 触发的空收集），改后 **gc_runs=85（−63%）**，RC inc/dec/free 计数逐位一致。入口的 gc_need_check 检查块不变：untracked 分配点仍是 mark assist / 收集的触发点，只是不再累加阈值计数；GC 频率只由被跟踪对象的分配量驱动（环只可能出现在被跟踪对象之间）。
+- **实测（abbench 交替 15 轮中位数，绑核）**：queue_sim 211.84 → **202.20 ms（−4.6%**，p25 −4.7%）；sort_struct 220.53 → **211.32 ms（−4.2%**，p25 −5.5%）；dict_wordfreq / obj_dispatch / rec_memo 持平；str_build +0.8%（p25 +0.2%，中性）；合计 −0.9%。rc_alloc_core profile 12.2% → 9.0%。queue_sim 累计 420 ms（0.269）→ 202 ms，对 Go 约 5.1×。
+- **验证**：差分 190/0；全语料对 0.271 基线编译器输出/退出码零差异；release 与 ASan 套件各 208 ran ok / EXIT=0；9 个 GC/异常重用例（13/151/160/161/174/188/189/92/93）单独 ASan detect_leaks=1 干净。
+
 ## [0.275] - 2026-11-18
 
 ### 净 push 计数消除 mark 脚手架 + 函数入口 32 字节对齐（queue_sim −7.6%，六用例全中性偏好，合计 −2.2%）
