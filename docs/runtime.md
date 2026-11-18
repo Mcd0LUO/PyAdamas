@@ -1058,3 +1058,13 @@ print(p.returncode, resource.getrusage(resource.RUSAGE_CHILDREN).ru_maxrss)'
   （`pa_rc_dec_unknown`），表达式临时值也由 `pa_rc_temp_unknown` 持有并
   释放；只有 unknown 类型的局部槽仍是借来的引用（不计入 rc），靠保守扫栈
   兜底。彻底解决需要给值加运行时标签，或者把 unknown 从语言里消掉。
+
+## 0.271–0.300 运行时改动（补记）
+
+- **dict 缓冲池化（0.281）**：cap≤64、icap≤128 的小 dict，三块缓冲（entries/order/index）随头一起保留在池节点数组栈（256 槽）里——缓冲指针寄存在池节点而不是 payload（payload 会被 `rc_alloc_core` 的 memset 清零）；分配命中后 memset 之后写回，状态重置 + index 清零，**零 malloc、零 reindex**（缓冲已是上一世高水位）。大 dict 缓冲直接 free 不保留，防池囤内存；GC 清扫路径（`gc_free_body`）自己 free 缓冲、不经池；shutdown drain 连缓冲一起 free。
+- **int/float 键单次 mix64（0.281）**：原哈希 mix64 两次（单值路径一次 + 公共尾部又一次），单次 mix64 已是全雪崩双射，第二次纯浪费；字符串路径提前返回不受影响，与编译期字面量哈希（FNV + 单次 mix64）一致，同值同哈希不变。
+- **`pa_dict_try_get`（0.284）**：`(PyAdamasDict*, i64 key, i64* out) -> i64`；命中写借用值到 *out 返回 1，缺失返回 0 不写 out、不创建 default——与 contains 守卫下的 get 逐位等价；defaultdict 的缺省创建只发生在真 get。
+- **dict set 单探测 `dict_lookup_place`（0.285）**：探测路上顺带记第一个墓碑，命中返回 entry，未命中把可写槽写进 out 参（与 `place_slot` 逐位一致）；reindex 触发后重算 place；新键插入从两遍探测降为一遍，bump 未命中路径从三探降到两探。
+- **标量 dict 销毁跳过 entry 链游（0.285）**：`dict_destroy` / `dict_gc_release` / `pa_dict_clear` 在 `key_own==0 && val_own==0` 时跳过整条 entry 链游（无 RC 可做）。
+- **`pa_rc_temp_take` 永生早退（0.286）**：永生值从不入临时栈（`pa_rc_temp` 跳过），take 碰到永生值直接返回，与原全栈扫描语义等价。
+- **str 下标 ASCII 快路径（0.287）**：ASCII 字符命中 256 项驻留表（零分配、永生），生成代码内联查 `pa_char_tab`，省掉 `pa_str_char_at` + `pa_char_str` 两层调用；负索引/越界/非 ASCII 仍落回 `pa_str_char_at`。

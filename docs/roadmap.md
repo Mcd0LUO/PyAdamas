@@ -135,14 +135,15 @@
 | 元组 | 全非堆元组（`elem_kind == 0`）不进 GC 堆链（`rc_alloc_untracked` + `pa_tuple_new_filled`），`sort_struct` −11.9% |
 | RC 记账 | 生成代码里的 inc/dec/mark/cleanup 改内联快路径（`gen_call_rt` 专用发射），慢路径才调 `pa_rc_*_slow` |
 | 许可证 | Apache-2.0（见 [LICENSE](../LICENSE) / [NOTICE](../NOTICE)） |
+| 0.271–0.300 | 池化+内联+融合+守卫去虚化+类型推断：dict 缓冲池化、元组/append/str 下标/临时栈内联快路径、contains+get IR 融合、Bin+StoreGlobal 融合、store.global→load.global 转发（0.295 起禁止跨可重入 RC 释放）、RC 热路径缩短、守卫整数叶子虚方法内联、浮点下标写入快路、返回类型与默认实参推断。realistic 六项合计约 1981ms（0.274）→1365ms（0.297），obj_dispatch 508.73→338ms。逐版实测与教训见 [CHANGELOG.md](../CHANGELOG.md) |
 
-## 当前状态（0.270）
+## 当前状态（0.300）
 
 流水线 `源码 → 词法 → AST → lambda 脱糖 → 类型检查 → IR → x86-64 汇编 → 可执行文件` 已打通。
 
 - **语言面**：标量、字符串、`bytes`（含迭代与 `%` 格式化）、列表/元组/字典/集合、切片读写、闭包/lambda/`*args`/`**kwargs`/装饰器、推导式、`with`、异常值（`args`/`raise ... from`/自定义异常）、类（字段/方法/C3 多继承/零参 `super()`/`@staticmethod`/`@classmethod`/`@property`/类属性/类装饰器/类名当值）、`match/case`、`del`、复数字面量、f-string 格式说明、dunder 协议（含装饰 dunder、`__call__` 与方法值）、`Generator[Y, S, R]` 标注、`open`/`input`/`sys.stdin`、`struct` 值类型、`cimport`/`cdecl` C 互操作与跨模块继承。
 - **标准库**：`math`/`sys`/`asyncio`/`random`/`os`/`os.path`/`subprocess`/`time`/`itertools`/`collections`/`functools`/`json`/`string`/`re`/`datetime`/`pathlib`/`csv`/`base64`/`binascii`/`heapq`/`bisect`/`hashlib`/`hmac`/`logging`/`statistics`/`textwrap`/`operator`/`fnmatch`/`copy`，以及封装 OpenBLAS 的 `linalg`。
-- **验证**：189 个运行用例、53 个反例、12 个正例、6 个严格用例、1 个未建模、15 个模块目录；`tests/run_tests.sh` 全量 exit 0（= 189 运行 + 15 模块 + 1 cdecl + 1 cfi）。差分 runner 已自举，默认 840 例；另有 `tools/difftest.sh` 做 O0/O2 自差分（188 用例 0 不一致）。`tests/bench/` 提供 pyadamas vs CPython 的标准库与 RC/GC 基准（`base64`/`hashlib` 已反超）。
+- **验证**：205 个运行用例、64 个反例、12 个正例、6 个严格用例、1 个未建模、15 个模块目录；`tests/run_tests.sh` 全量 exit 0（222 ran ok = 205 运行 + 15 模块 + 1 cdecl + 1 cfi，release 与 ASan 各一遍）。差分 runner 已自举，默认 840 例；另有 `tools/difftest.sh` 做 O0/O2 自差分（204 用例 0 不一致，跳过 1 个 perf 用例）。`tests/bench/` 提供 pyadamas vs CPython 的标准库与 RC/GC 基准（`base64`/`hashlib` 已反超）。
 - **内存正确性（0.215–0.233）**：ASan 全量 205 ran ok；**泄漏扫描 0 处 / 188 用例**（0.217 首次开 `detect_leaks=1` 时为 23 处）。两类 unknown 值的 use-after-free 已根治（返回值/存储所有权、unknown 槽被提升导致 GC 根缺失）。剩余已知不精确点见「技术债」第 2 条。
 - **诊断工具（0.227–0.231）**：`runtime/rt_diag.c` 独立模块，`PYADAMAS_RC_TRACE` / `PYADAMAS_RC_TRACE_MIN` / `PYADAMAS_RC_TRACE_KIND` / `PYADAMAS_EXC_TRACE` / `PYADAMAS_DIAG_DEPTH` 追踪对象分配、释放、临时栈进出与异常所有权转移，退出汇总未释放对象并给出源码行归因。关闭时零输出、零可测开销。用法与两个陷阱见 [development.md](development.md)。
 - **IR 基础设施（0.205–0.209）**：`Inst::id` / `Block::id` 稳定标识（不随 `vector::insert/erase` 与新增块失效）、`uses_of` / `def_of` / `inst_by_id` / `block_by_id` 反向索引、`Operand` 带 tag（`PYADAMAS_IR_CHECK=1` 校验 op 与 kind 一致性）。`EhRegion` 不再存会过期的块号。**明确不上 SSA**，理由见 [ir.md](ir.md)。
@@ -218,7 +219,7 @@
 
 **A 路线：全局提升已评估并放弃。** 先做了一个窄版本实验：对循环体内没有任何 `call.*` 的循环，把读写的标量全局缓存进新分配的局部槽、循环出口写回（`src/opt_global_promote.cpp` 的 `promote_globals_in_loops`，提交 `89885a0`，已接进优化管线）。结果是**微基准 −84%、真实基准无收益**——所以按 A 的完整形态（把分配器候选集扩到标量 global）继续做的预期收益不成立，这条方向不再作为下一步。B（顶层热循环 outlining）仍未定案，后续若做需先给出实测证据。
 
-**验收（B 路线）**：spectral_norm / fannkuch / fasta 的 `load.global` + `store.global` 数明显下降，四语言基准实测缩小与 Go 的差距（同机 A/B、`--rebuild`、交替多轮取中位数）；全量 `tests/run_tests.sh` 通过 + ASan 全量 + O0/O2 差分 188 用例 + 四套异常夹具 + 泄漏扫描 0 处，全部无回退。
+**验收（B 路线）**：spectral_norm / fannkuch / fasta 的 `load.global` + `store.global` 数明显下降，四语言基准实测缩小与 Go 的差距（同机 A/B、`--rebuild`、交替多轮取中位数）；全量 `tests/run_tests.sh` 通过 + ASan 全量 + O0/O2 差分 204 用例 + 四套异常夹具 + 泄漏扫描 0 处，全部无回退。
 
 **注意 0.212 的教训**：判断「还有多少提升空间」必须看修正后的调试输出（整型与浮点分开统计）。此前的 `7/14 slots promoted` 是错的，实际已接近饱和——不要基于饱和的池子再承诺收益。
 ### 1. 工程收尾

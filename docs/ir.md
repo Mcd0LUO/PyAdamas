@@ -145,6 +145,7 @@ struct Operand {
 | `call.ptr dst, a, args...` | `a: 裸代码地址` | 间接调用 `a(args...)`（类对象 vtable 分派） | `call *%r11`，`%r10` 清零 |
 | `call dst, a, args...` | `a: 函数值` | 间接调用 | `call *%r11` |
 | `call.rt args..., imm` | `imm: RtFn` | 调运行时函数 | `call pa_xxx` |
+| `call.rt`（`RtFn::DictTryGet`，0.284） | `imm: RtFn`；`args: dict, key`；`idx: 值槽` | contains+get 融合形态：一次哈希+探测，命中写借用值到值槽、返回 1，缺失返回 0 不创建 default；由 `fuse_dict_tryget` 产出，真分支里的 get 改写为 `load.slot` 值槽 | `call pa_dict_try_get` |
 | `call.extern args..., imm` | `imm: externs 下标`；实参按 `cargs` 的 `CKind` 编组 | 调 `cimport` 声明的 C 函数；`ptr[T]` 接缓冲区时取 `data` | 按 SysV C ABI 编组（含结构体分类、回调跳板、变参 `%al`） |
 | `load.extern dst, imm` | `imm: extern_vars 下标` | 读 C 全局变量，按声明宽度 | `movq` / `movl` / `movzbq` 取符号 |
 | `store.extern imm, a` | 同上 | 写 C 全局变量，按声明宽度 | 按宽度写回符号 |
@@ -244,6 +245,8 @@ O2 在降级完成后运行 `optimize_ir`（O0/O1 不运行）：
   参与：它常和紧跟的分支融合成 `cmp+jcc`，融合后不会真的写出布尔值，
   跨块复用那个 vreg 会读到没写过的寄存器。CSE 在循环旋转之后运行，随后
   再跑一遍常量折叠 + DCE。
+- **槽位/全局装载转发**（`forward_slot_loads`，0.155；`forward_global_loads`，0.290，`src/opt_forward.cpp`）：前者转发短路布尔值经临时槽的往返（循环旋转后再跑一遍，收掉新的 load+branch 形态）；后者把块内读到刚被 store.global 写入的全局的 load.global 直接转发到存入的 vreg 并删除 load——中间只隔纯 IR 指令或 RC 族 CallRt，要求装载结果块内只用一次且类型一致；GlobalAddr / 用户调用（Call/VCall/…）/ CallExtern / GenYield 使映射失效。**0.295 起 RcDec / RcDecUnknown / RcCleanup 也使全局转发失效**：释放旧生成器会执行用户 finally 并重入改写刚发布的全局——0.290「RC 析构全是运行时内部代码」的安全论证已被 197 用例的 heap-use-after-free 推翻，勿沿用旧论证。
+- **字典模式融合**（`fuse_dict_bump`，0.268，`src/opt_dict_bump.cpp`；`fuse_dict_tryget`，0.284，`src/opt_dict_fuse.cpp`）：bump 把 `d[k] = d.get(k, def) + delta` 计数器更新融合成一次哈希查找 + 原地写回（`RtFn::DictBump`）；tryget 把 `DictContains + branch` 与真分支纯前缀后的 `DictGet`（同 dict 同 key）改写成 `DictTryGet`（found 直接进分支寄存器，值经新帧槽中转，真分支的 get 变 load.slot），一次哈希+探测替代两次。守卫：真分支唯一前驱是分支块、contains→分支与分支入口→get 之间都是纯指令、值只在真分支内用；值槽与 SlotAddr 一样排除寄存器提升，一律留在内存。两者放在内联之后、CSE 之前。
 
 ## 后端的局部优化
 
