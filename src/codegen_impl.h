@@ -315,6 +315,105 @@ private:
     std::vector<std::string> func_labels_;
     void build_operand_caches();
 
+    // ── P3 shadow tag（0.327，docs/p3-tagged-union-design.md）─────────
+    //
+    // unknown 值仍是 8B i64（float 仍装箱），平行 tag 字跟值走：tag 是
+    // RC/分派快路径的判据，UNK(0) 一律回退探针 —— 正确性不依赖传播完备。
+    // 门控 tags_enabled_ = 模块含 AnyArithT/AnyCmpT/AnyNegT（封闭活跃域）；
+    // 门控关的模块（含 26 个热基准）不进任何 tag 分支，asm 逐字节不变。
+    // tag 编码与 runtime/rt_any.c 的 PA_TAG_* 逐字对应。堆 ⇔ tag>=3。
+    enum PaTag {
+        kTagUnk = 0, kTagInt = 1, kTagFraw = 2,
+        kTagFbox = 3, kTagStr = 4, kTagHeap = 5,
+    };
+    bool tags_enabled_ = false;
+    int n_tag_words_ = 0;                 // 帧内平行 tag 区字数
+    std::vector<int> vreg_tag_;           // vreg -> tag 字号（-1 无）
+    std::vector<int> slot_tag_;           // 命名槽 -> tag 字号（-1 无）
+    std::vector<std::string> vreg_tag_mem_;
+    std::vector<std::string> slot_tag_mem_;
+    // tag 区在 vreg 栈槽区之上、帧记录之下（rec_off 按 locals_ 自动让位）。
+    int tag_off(int w) const {
+        return out_bytes_ + 8 * (n_slots_ + n_vreg_slots_ + w);
+    }
+    static bool is_unk_ty(const TypePtr& t) {
+        return !t || t->kind == TyKind::Unknown;
+    }
+    bool unk_vreg(VReg r) const {
+        return r != kNoReg && r < f_->vreg_ty.size() && is_unk_ty(f_->vreg_ty[r]);
+    }
+    bool unk_slot(int s) const {
+        return s >= 0 && s < static_cast<int>(f_->slot_ty.size()) &&
+               is_unk_ty(f_->slot_ty[static_cast<size_t>(s)]);
+    }
+    // 全局 tag 健全性：只有「别的模块写不到」的 unknown 全局才配 tag 字。
+    // 外部全局（存储属对方）与非入口模块的导出全局（可能被 import 方写入，
+    // 对方不维护本模块 tag）一律 UNK 回退。入口模块 __entry__ 不可被 import。
+    bool global_tag_eligible(int gi) const {
+        if (gi < 0 || gi >= static_cast<int>(m_->globals.size())) return false;
+        const IRGlobal& g = m_->globals[static_cast<size_t>(gi)];
+        return !g.external && is_unk_ty(g.ty) &&
+               (g.symbol.empty() || m_->is_entry);
+    }
+    std::string global_tag_label(int gi) const {
+        return global_label(gi) + "$t";
+    }
+    // 静态类型导出的 tag 常量（typed vreg 作 unknown 实参/存储源时用）。
+    // Optional 的机器表示是「内层值或 0」，内层可能是指针也可能是标量，
+    // 保守 UNK。Bytes/Complex/Struct 等堆对象按 HEAP。
+    static int64_t static_tag_of(const TypePtr& t) {
+        if (!t) return kTagUnk;
+        switch (t->kind) {
+            case TyKind::Int: case TyKind::Bool: case TyKind::None:
+                return kTagInt;
+            case TyKind::Float: return kTagFraw;
+            case TyKind::Str: return kTagStr;
+            case TyKind::Unknown: case TyKind::Optional: return kTagUnk;
+            default: return ir_is_heap(t) ? kTagHeap : kTagUnk;
+        }
+    }
+    bool vreg_tagged(VReg r) const {
+        return tags_enabled_ && r != kNoReg &&
+               r < vreg_tag_.size() && vreg_tag_[r] >= 0;
+    }
+    bool slot_tagged(int s) const {
+        return tags_enabled_ && s >= 0 &&
+               s < static_cast<int>(slot_tag_.size()) && slot_tag_[s] >= 0;
+    }
+    const std::string& tag_mem(VReg r) const {
+        if (r < vreg_tag_mem_.size() && !vreg_tag_mem_[r].empty())
+            return vreg_tag_mem_[r];
+        static const std::string kZero = "$0";
+        return kZero;
+    }
+    const std::string& slot_tag_op(int s) const {
+        if (s >= 0 && s < static_cast<int>(slot_tag_mem_.size()) &&
+            !slot_tag_mem_[static_cast<size_t>(s)].empty())
+            return slot_tag_mem_[static_cast<size_t>(s)];
+        static const std::string kZero = "$0";
+        return kZero;
+    }
+    // vreg 的 tag 源操作数：有 tag 字读字，没有按静态类型导常量。
+    std::string tag_src(VReg r) const {
+        if (vreg_tagged(r)) return tag_mem(r);
+        return "$" + std::to_string(static_tag_of(ty_of(r)));
+    }
+    // 写 dst 的 tag（常量）。
+    void emit_tag_imm(VReg r, int64_t t) {
+        if (vreg_tagged(r)) emit_imm_op("movq", t, tag_mem(r));
+    }
+    // 调用返回的 unknown dst 落 tag：除已知生产者外一律 UNK（探针回退）。
+    void emit_call_dst_tag(const Inst& in);
+    // AnyArithT/AnyNegT 的复用匹配（设计 §4）：结果被存回 S 且某实参恰是
+    // 同块对 S 的装载、装载到存储之间无对 S 的其它写入 → 1，否则 0。
+    int64_t any_reuse_ok(const Inst& in);
+    void gen_any_tagged(const Inst& in, RtFn fn);
+    void gen_rc_unknown_tagged(const Inst& in, RtFn fn);
+    void gen_append_tagged(const Inst& in);
+    void gen_index_store_tagged(const Inst& in, bool unchecked);
+    void gen_index_load_tag(const Inst& in, bool have_regs);
+    void emit_heap_from_tag(VReg v, const std::string& dst_reg);
+
     // 当前块内的位置索引，gen_block 开头重建。
     std::unordered_map<int, std::vector<int>> block_stores_;
     std::unordered_map<VReg, int> block_first_use_;

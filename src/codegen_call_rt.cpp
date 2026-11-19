@@ -80,6 +80,15 @@ void AsmGen::gen_rc_dec(const Inst& in, const std::string& src,
 //
 // 返回 true 表示这条指令已经发完，gen_call_rt 不要再补 call。
 bool AsmGen::gen_rc_inline(const Inst& in, RtFn fn) {
+    // P3：unknown RC 三入口的 tag 判别（设计 §3.3）。tag>=3 直接
+    // inc/dec/temp（免探针）；INT/FRAW 跳过；UNK 回退旧探针调用。
+    if (tags_enabled_ &&
+        (fn == RtFn::RcIncUnknown || fn == RtFn::RcDecUnknown ||
+         fn == RtFn::RcTempUnknown) &&
+        in.args.size() == 1 && vreg_tagged(in.args[0])) {
+        gen_rc_unknown_tagged(in, fn);
+        return true;
+    }
     if (fn == RtFn::RcMark) {
         line("movq temp_len(%rip), %rax");
         if (!dst_unused(in)) emit2("movq", "%rax", dst_op(in.dst));
@@ -617,6 +626,13 @@ void AsmGen::gen_rt_args(const Inst& in, RtFn fn) {
         case RtFn::AttrDict:
         case RtFn::AnyIterList:
         case RtFn::ReprAny:
+        // P3 tag 版：实际在 gen_call_rt 里由 gen_any_tagged 整段发射
+        // （tag 装填 + 双字返回），这里只为 switch 穷尽。
+        case RtFn::AnyToF64T:
+        case RtFn::AnyToI64T:
+        case RtFn::AnyIsFloatT:
+        case RtFn::AnyLoadTag:
+        case RtFn::AnyNegT:
             gen_rt_i1(in);
             break;
         case RtFn::ListNew:
@@ -790,6 +806,9 @@ void AsmGen::gen_rt_args(const Inst& in, RtFn fn) {
         case RtFn::ListAppend:   /* (list*, v, heap) */
         case RtFn::ListSort:     /* 0.312：(list*, kind, desc) */
         case RtFn::SortedList:   /* 0.312：(list*, kind, desc) */
+        // P3 tag 版（IR 实参 {op,a,b}）：gen_any_tagged 整段发射。
+        case RtFn::AnyArithT:
+        case RtFn::AnyCmpT:
             gen_rt_i3(in);
             break;
         case RtFn::AnyArith:     /* (op, a, b, desc_a, desc_b) */

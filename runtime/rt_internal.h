@@ -495,6 +495,21 @@ int64_t pa_any_to_i64(int64_t v);
 int64_t pa_any_arith(int64_t op, int64_t a, int64_t b, int64_t da, int64_t db);
 int64_t pa_any_neg(int64_t v, int64_t dv);
 int64_t pa_any_cmp(int64_t op, int64_t a, int64_t b, int64_t da, int64_t db);
+/* P3 第一阶段（0.327，docs/p3-tagged-union-design.md）：shadow tag 版入口。
+   tag 编码与 src/codegen_impl.h 的 PaTag 逐字对应：0 UNK / 1 INT / 2 FRAW /
+   3 FBOX / 4 STR / 5 HEAP（堆 ⇔ >=3）。tag 是 RC/分派快路径判据，UNK 回退
+   探针；值仍是旧 unknown i64（float 仍装箱），边界丢 tag 只损失性能。
+   PaAnyPair 按 SysV {i64,i64} 返回：%rax=payload，%rdx=tag。 */
+typedef struct { int64_t v; int64_t tag; } PaAnyPair;
+int64_t pa_any_load_tag(int64_t v);
+PaAnyPair pa_any_arith_t(int64_t op, int64_t a, int64_t tag_a,
+                         int64_t b, int64_t tag_b, int64_t reuse_ok);
+PaAnyPair pa_any_neg_t(int64_t v, int64_t tag, int64_t reuse_ok);
+int64_t pa_any_cmp_t(int64_t op, int64_t a, int64_t tag_a,
+                     int64_t b, int64_t tag_b);
+int64_t pa_any_is_float_t(int64_t v, int64_t tag);
+double pa_any_to_f64_t(int64_t v, int64_t tag);
+int64_t pa_any_to_i64_t(int64_t v, int64_t tag);
 void pa_print_any_repr(int64_t v);
 PyAdamasStr* pa_fmt_i64(int64_t v, PyAdamasStr* spec);
 PyAdamasStr* pa_fmt_bool(int64_t v, PyAdamasStr* spec);

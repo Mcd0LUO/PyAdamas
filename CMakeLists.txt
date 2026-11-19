@@ -26,6 +26,7 @@ endif()
 
 set(PYADAMAS_SOURCES
   src/main.cpp
+  src/codegen_tag.cpp
   src/target_abi.cpp
   src/driver_util.cpp
   src/driver_link.cpp

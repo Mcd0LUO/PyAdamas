@@ -64,6 +64,20 @@ std::string AsmGen::gen(const IRModule& m) {
                                     ? ".Lg" + std::to_string(i)
                                     : m.globals[i].symbol;
 
+        // P3 门控（设计 §3.4）：模块含 unknown 动态算术/比较才启用 shadow
+        // tag。26 个热基准全部不含 pa_any_* → 门控关 → 不进任何 tag 分支。
+        // 降级器仍发旧 AnyArith/AnyCmp/AnyNeg，gen_call_rt 在门控内拦截
+        // 改发 tag 版（pa_any_*_t）；门控关时逐字旧路径。
+        tags_enabled_ = false;
+        for (const auto& fp : m.funcs)
+            for (const auto& b : fp->blocks)
+                for (const auto& in : b.insts)
+                    if (in.op == IrOp::CallRt &&
+                        (in.imm == static_cast<int64_t>(RtFn::AnyArith) ||
+                         in.imm == static_cast<int64_t>(RtFn::AnyCmp) ||
+                         in.imm == static_cast<int64_t>(RtFn::AnyNeg)))
+                        tags_enabled_ = true;
+
         if (!m.strings.empty()) {
             // 字符串对象里有一个指向自身字符区的绝对地址。放在 .rodata
             // 会让 PIE 链接器报 "relocation in read-only section"，
@@ -115,6 +129,14 @@ std::string AsmGen::gen(const IRModule& m) {
                 if (!m.globals[i].symbol.empty())
                     out_ += "\t.globl " + m.globals[i].symbol + "\n";
                 out_ += std::format("{}:\n\t.zero 8\n", global_label(static_cast<int>(i)));
+                // P3：unknown 全局的平行 tag 字（仅门控内、且别的模块写不到
+                // 的全局，见 global_tag_eligible）。初值 0 = UNK 探针回退。
+                if (tags_enabled_ && global_tag_eligible(static_cast<int>(i))) {
+                    if (!m.globals[i].symbol.empty())
+                        out_ += "\t.globl " + global_tag_label(static_cast<int>(i)) + "\n";
+                    out_ += std::format("{}:\n\t.zero 8\n",
+                                        global_tag_label(static_cast<int>(i)));
+                }
             }
 
             // GC 根表：所有本模块全局槽的地址；外部全局的存储属于对方模块。

@@ -29,6 +29,11 @@ static int idx_store_heap_kind(TypePtr ct) {
 
 void AsmGen::gen_index_store(const Inst& in) {
     const int hk = idx_store_heap_kind(ty_of(in.c));
+    // P3：unknown 新值带 tag → 堆标志从 tag 导出交运行时（位图精确维护）。
+    if (tags_enabled_ && hk == 2 && vreg_tagged(in.c)) {
+        gen_index_store_tagged(in, false);
+        return;
+    }
     if (opt_ < 1) {
         emit2("movq", src_op(in.a), arg_reg_i(0));
         emit2("movq", src_op(in.b), arg_reg_i(1));
@@ -163,6 +168,11 @@ void AsmGen::gen_index_store_unchecked(const Inst& in) {
     // 调用方已证明 0 <= idx < len，跳过边界比较与负下标归一化，
     // 种类/位图维护与 gen_index_store 完全一致（0.303）。
     const int hk = idx_store_heap_kind(ty_of(in.c));
+    // P3：同 gen_index_store 的 tag 路由。
+    if (tags_enabled_ && hk == 2 && vreg_tagged(in.c)) {
+        gen_index_store_tagged(in, true);
+        return;
+    }
     const std::string r0 = arg_reg_i(0), r1 = arg_reg_i(1);
     const std::string sl = target_abi().scratch_len;
     const std::string sp = target_abi().scratch_ptr;

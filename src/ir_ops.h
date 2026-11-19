@@ -582,10 +582,19 @@ enum class RtFn : uint16_t {
     AnyArith,              // (op, a, b, desc_a, desc_b) -> i64 动态算术
     AnyNeg,                // (a, desc_a) -> i64 动态一元负
     AnyCmp,                // (op, a, b, desc_a, desc_b) -> i64 动态比较
-    // 动态属性 dict 视图（vars() 合并用）——追加在末尾，不改既有编号。
+    // 动态属性 dict 视图（vars() 合并用，stdlib1）——追加在末尾，不改既有编号。
     AttrDict,              // (obj*) -> dict*  实例动态属性表（可能 NULL，借用）
     AnyIterList,           // (i64) -> list*  unknown 物化成可迭代列表（+1）
     ReprAny,               // (i64) -> str*  repr(unknown)（pa_repr_any，+1）
+    // P3 第一阶段（0.327）：shadow tag 版（docs/p3-tagged-union-design.md）。
+    // tag 由 codegen 从平行 tag 区/静态类型装填；UNK(0) 回退探针。
+    AnyArithT,             // (op, a, tag_a, b, tag_b, reuse_ok) -> {rax=i64, rdx=tag}
+    AnyNegT,               // (a, tag_a, reuse_ok) -> {rax=i64, rdx=tag}
+    AnyCmpT,               // (op, a, tag_a, b, tag_b) -> i64 bool
+    AnyIsFloatT,           // (a, tag_a) -> i64
+    AnyToF64T,             // (a, tag_a) -> f64
+    AnyToI64T,             // (a, tag_a) -> i64
+    AnyLoadTag,            // (i64) -> i64 tag  无 tag 来源的 unknown 字一次探针定 tag
 };
 
 inline const char* rt_name(RtFn f) {
@@ -609,6 +618,13 @@ inline const char* rt_name(RtFn f) {
         case RtFn::AnyArith: return "pa_any_arith";
         case RtFn::AnyNeg: return "pa_any_neg";
         case RtFn::AnyCmp: return "pa_any_cmp";
+        case RtFn::AnyArithT: return "pa_any_arith_t";
+        case RtFn::AnyNegT: return "pa_any_neg_t";
+        case RtFn::AnyCmpT: return "pa_any_cmp_t";
+        case RtFn::AnyIsFloatT: return "pa_any_is_float_t";
+        case RtFn::AnyToF64T: return "pa_any_to_f64_t";
+        case RtFn::AnyToI64T: return "pa_any_to_i64_t";
+        case RtFn::AnyLoadTag: return "pa_any_load_tag";
         case RtFn::ListGet: return "pa_list_get";
         case RtFn::ListSet: return "pa_list_set";
         case RtFn::ListSetLen: return "pa_list_set_len";
