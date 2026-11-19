@@ -28,6 +28,7 @@ set(PYADAMAS_SOURCES
   src/main.cpp
   src/target_abi.cpp
   src/driver_util.cpp
+  src/driver_link.cpp
   src/driver_build.cpp
   src/builtin_sigs.cpp
   src/parser.cpp
@@ -234,6 +235,73 @@ target_compile_definitions(pyadamas PRIVATE
   PYADAMAS_STDLIB_DIR="${CMAKE_SOURCE_DIR}/stdlib"
 )
 add_dependencies(pyadamas pyadamas_rt)
+
+# ── 直接调用 ld 链接（吞吐）────────────────────────────────────────
+#
+# 一次 build 的链接是 36 ms：ld.bfd 25 ms + gcc 驱动（specs 解析/库搜索/
+# 两次 exec）11 ms。驱动那部分对「每次编译都链一次短命程序」是纯开销，
+# 这里在配置期用 -print-file-name / -print-search-dirs 复刻出 gcc 实际
+# 传给 ld 的命令行（crt 文件、-L 目录、-pie -z now -z relro --build-id），
+# 运行期直接 exec ld。探测不到就留空前缀，驱动自动回退 cc（行为不变）。
+option(PYADAMAS_DIRECT_LD "直接调用 ld 链接生成程序（省 gcc 驱动开销；探测失败自动回退 cc）" ON)
+if(PYADAMAS_DIRECT_LD)
+  find_program(PYADAMAS_LD_EXECUTABLE NAMES ld ld.bfd)
+  if(PYADAMAS_LD_EXECUTABLE)
+    set(_pa_crt_ok TRUE)
+    foreach(_pa_crt Scrt1.o crti.o crtbeginS.o crtendS.o crtn.o)
+      execute_process(COMMAND ${CMAKE_C_COMPILER} -print-file-name=${_pa_crt}
+                      OUTPUT_VARIABLE _pa_p OUTPUT_STRIP_TRAILING_WHITESPACE)
+      if(_pa_p STREQUAL _pa_crt OR NOT EXISTS "${_pa_p}")
+        set(_pa_crt_ok FALSE)
+      endif()
+      set(_pa_${_pa_crt} "${_pa_p}")
+    endforeach()
+    # 汇编器路径（直调 as 省一次 gcc 驱动；找不到就用 cc -c）。
+    execute_process(COMMAND ${CMAKE_C_COMPILER} -print-prog-name=as
+                    OUTPUT_VARIABLE _pa_as OUTPUT_STRIP_TRAILING_WHITESPACE)
+    if(_pa_as AND EXISTS "${_pa_as}")
+      get_filename_component(PYADAMAS_AS_EXECUTABLE "${_pa_as}" REALPATH)
+    endif()
+    # 装载器路径必须与 gcc 写进 .interp 的逐字节一致（否则二进制不同）：
+    # gcc 的 specs 固定用 /lib64/ld-linux-x86-64.so.2。-print-file-name 返回的
+    # 是未经归一化的长路径（/usr/lib/gcc/.../../../../x86_64-linux-gnu/...），
+    # 直接用它会让 .interp 变长、后续所有段偏移都变。
+    if(EXISTS "/lib64/ld-linux-x86-64.so.2")
+      set(_pa_loader "/lib64/ld-linux-x86-64.so.2")
+    else()
+      execute_process(COMMAND ${CMAKE_C_COMPILER} -print-file-name=ld-linux-x86-64.so.2
+                      OUTPUT_VARIABLE _pa_loader OUTPUT_STRIP_TRAILING_WHITESPACE)
+      get_filename_component(_pa_loader "${_pa_loader}" REALPATH)
+    endif()
+    execute_process(COMMAND ${CMAKE_C_COMPILER} -print-search-dirs
+                    OUTPUT_VARIABLE _pa_dirs)
+    set(_pa_libdirs "")
+    if(_pa_dirs MATCHES "libraries: =([^\n]+)")
+      string(REPLACE ":" ";" _pa_list "${CMAKE_MATCH_1}")
+      foreach(_pa_d IN LISTS _pa_list)
+        if(EXISTS "${_pa_d}")
+          string(APPEND _pa_libdirs " -L${_pa_d}")
+        endif()
+      endforeach()
+    endif()
+    if(_pa_crt_ok AND EXISTS "${_pa_loader}")
+      set(PYADAMAS_LD_FLAGS
+          "--eh-frame-hdr --build-id -m elf_x86_64 --hash-style=gnu --as-needed -dynamic-linker ${_pa_loader} -pie -z now -z relro${_pa_libdirs} ${_pa_Scrt1.o} ${_pa_crti.o} ${_pa_crtbeginS.o}")
+      set(PYADAMAS_LD_TAIL
+          "-lgcc --push-state --as-needed -lgcc_s --pop-state -lc -lgcc --push-state --as-needed -lgcc_s --pop-state ${_pa_crtendS.o} ${_pa_crtn.o}")
+      message(STATUS "pyadamas: 直接 ld 链接已启用（${PYADAMAS_LD_EXECUTABLE}）")
+    else()
+      message(STATUS "pyadamas: 直接 ld 链接探测失败，继续用 cc 链接")
+    endif()
+  endif()
+endif()
+# 探测结果编进编译器（driver_link.cpp 用；探测失败时为空串 → 回退 cc）。
+target_compile_definitions(pyadamas PRIVATE
+  PYADAMAS_AS_EXECUTABLE="${PYADAMAS_AS_EXECUTABLE}"
+  PYADAMAS_LD_EXECUTABLE="${PYADAMAS_LD_EXECUTABLE}"
+  PYADAMAS_LD_FLAGS="${PYADAMAS_LD_FLAGS}"
+  PYADAMAS_LD_TAIL="${PYADAMAS_LD_TAIL}"
+)
 
 # 静态链接 libstdc++（吞吐）：编译器每次被调用都要经动态装载器解析
 # libstdc++.so.6 的 ~800 个符号（实测占进程启动 ~1.2 ms，占一次

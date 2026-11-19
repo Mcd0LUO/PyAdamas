@@ -4,6 +4,16 @@
 
 早期阶段没有逐条留痕，按阶段归纳；0.4 之后逐条记录。
 
+## [0.311] - 2026-11-19
+
+### 编译吞吐：直调 as/ld（build 全程 −9.4%，累计对 0.309 −11.6%）
+
+- **取证**：build 的墙钟按模式阶梯拆开（无参启动 / check / ir / asm / build，绑核 11 次中位）：nbody 启动 2.4 + 类型检查 1.5 + 降级+优化 3.0 + 代码生成 3.3 = 前端 10.2 ms，build 54.9 ms ⇒ **cc 占 44.7 ms（81%）**；dict_wordfreq 41.4/48.3 ms（86%）；含 6 个 stdlib 模块的 140_stdlib_batch 124.1/134.5 ms（92%）。strace -f -e execve 显示每次 build 的 cc 链路是 `pyadamas → sh → cc → as`（汇编）与 `pyadamas → sh → cc → collect2 → ld`（链接）——**双重 fork/exec + sh**；`cc --version` 单独就 3.0 ms（/bin/true 1.4 ms），链接期 gcc 驱动（specs 解析/库搜索/两次 exec）约 11 ms，ld.bfd 25 ms。
+- **优化（配置期复刻 gcc 命令行，运行期直调）**：CMake 在 configure 时用 `-print-file-name` / `-print-prog-name` / `-print-search-dirs` 探测出 gcc 实际传给 as 与 ld 的命令行（crt*.o、-L 目录、-pie -z now -z relro --hash-style=gnu --build-id --eh-frame-hdr、装载器路径、-lgcc/-lgcc_s/-lc 次序），编成 PYADAMAS_AS_EXECUTABLE / PYADAMAS_LD_FLAGS / PYADAMAS_LD_TAIL；driver 运行时直接 exec **as --64 -c** 与 **ld**（省掉 cc 驱动与 collect2 两层）。新文件 src/driver_link.cpp（71 行）+ driver_link.h，driver_build.cpp 只加 ~10 行接线。**五重回退保行为不变**：探测失败 → cc；PYADAMAS_CC_FLAGS 非空（--asan 等）→ cc；目标非 x86_64-sysv（Win64 交叉汇编）→ cc；link 参数含 .c/.其它非产物（cimport 的 structabi/callbacks/c_float32/cdecl/cfi 会现编 C 源）→ cc；直调 ld 失败 → 再走 cc 一次。环境变量 PYADAMAS_NO_DIRECT_LD=1 可整体关闭（A/B 与排障用）。
+- **踩坑（都被验证抓住）**：① .interp 必须逐字节等于 gcc 写的 /lib64/ld-linux-x86-64.so.2——用 -print-file-name 得到的 /usr/lib/gcc/.../../../../x86_64-linux-gnu/... 会长 0x34 字节，段偏移全变（cmp 立刻发现）；② 链接参数里的 .c 源文件 ld 当链接脚本读，套件 108_structabi/112_callbacks/215_c_float32/cdecl/cfi 五项 OUTPUT DIFF，加 direct_ld_args_ok() 过滤后全绿；③ 直调 as 在带 -fsanitize 时会被喂无法识别的选项，故 PYADAMAS_CC_FLAGS 非空一律回退。
+- **实测（交替 A/B、打乱顺序、绑核 24，7 轮中位；A=0.310 二进制，B=本轮）**：build -O2 --rebuild 11 个负载合计 **676.49→613.14 ms（−9.4%）**，单项 −7.3%~−10.9%（nbody −7.3%、spectral −10.5%、rec_memo −10.6%、queue_sim −9.5%），含 6 模块的 stdlib_batch −8.0%、stdlib54 −10.9%；**对 0.309 原点累计 711.79→629.56 ms（−11.6%）**。前端 asm 未动（10 负载合计 69.63→69.20 ms，−0.6%，噪声内）——本轮省的全是编译器之外的进程链。
+- **验证**：行为零变化——21 个 bench/语料可执行文件「直调 as/ld」与「PYADAMAS_NO_DIRECT_LD=1 走 cc」链接结果 **cmp 逐字节相同**（含 .note.gnu.build-id）；243 个语料的 asm 输出与 0.309 逐字节一致；difftest **226/0**；普通与 ASan 套件各 **244 ran ok / EXIT=0**（--asan 走 cc 回退，插桩链接不受影响）；0.271 oracle 语料零差异（仅 201-229 新增用例 rc 差为已知预期）；规模检查仍只有原有 5 处超限（driver_build.cpp 1438→1461 行仍在既有名单内，新文件 driver_link.cpp 71 行）。
+- **同一轮撤回的尝试**：gen_block 预扫描的两张 unordered_map（block_stores_/block_first_use_）改扁平数组 + 脏列表，calibrate 后 asm 合计 69.28→69.07 ms（−0.3%，噪声级），确认分配点不是当前瓶颈后退回（diff 保留在会话记录，不进仓库）。
 ## [0.310] - 2026-11-19
 
 ### 编译吞吐：静态 libstdc++ + 两处 O(n²) 编译期扫描（前端 −12.9%，语料 check 逐文件 −23.1%）

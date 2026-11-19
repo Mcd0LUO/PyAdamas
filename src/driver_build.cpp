@@ -1,6 +1,7 @@
 // driver_build.cpp —— 多模块解析、增量缓存、汇编与链接
 #include "driver_build.h"
 #include "driver_util.h"
+#include "target_abi.h"
 
 #include <algorithm>
 #include <atomic>
@@ -12,6 +13,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <expected>
+#include <string_view>
 #include <filesystem>
 #include <format>
 #include <fstream>
@@ -29,6 +31,7 @@
 #include "ast.h"
 #include "codegen.h"
 #include "desugar.h"
+#include "driver_link.h"
 #include "ir.h"
 #include "lexer.h"
 #include "lower.h"
@@ -767,8 +770,17 @@ bool assemble_object(const ModuleUnit& u, std::string& err) {
             return false;
         }
     }
-    std::string cmd = std::format("cc -c -o {} {}{}", shell_quote(tmp_obj),
-                                shell_quote(tmp_asm), cc_extra_flags());
+    // 汇编走 as_prefix()：配置期拿到 as 路径时直接 exec as（省 gcc 驱动的
+    // 一次进程链），否则仍是 "cc -c"。目标 ABI 为 Win64 时生成的是 COFF
+    // 汇编，必须交给 gcc 交叉汇编器，不能直调 as。
+    const bool elf_target = std::string_view(target_abi().name) == "x86_64-sysv";
+    // 带额外 flag（--asan 的 -fsanitize=... 等）时必须继续走 cc：那些不是
+    // 汇编器选项，直调 as 会直接失败。
+    const char* extra = std::getenv("PYADAMAS_CC_FLAGS");
+    const bool plain = (extra == nullptr || *extra == '\0');
+    std::string cmd = std::format("{} -o {} {}{}", (elf_target && plain) ? as_prefix() : "cc -c",
+                                  shell_quote(tmp_obj), shell_quote(tmp_asm),
+                                  cc_extra_flags());
     if (std::system(cmd.c_str()) != 0) {
         std::filesystem::remove(tmp_obj, ec);
         std::filesystem::remove(tmp_asm, ec);
@@ -1418,16 +1430,27 @@ bool link_program(Program& p, const std::string& output) {
     // --eh-frame-hdr：运行时 traceback 用 _Unwind_Backtrace 找 FDE，
     // 可执行文件必须带 .eh_frame_hdr 索引。多数发行版默认就开，这里显式
     // 写死，免得换个链接器就退化成「只能打异常、打不出回溯」。
-    std::string cmd = "cc -o " + shell_quote(output) + " -Wl,--eh-frame-hdr" +
-                      cc_extra_flags();
-    for (auto* u : p.order) cmd += " " + shell_quote(u->obj_path);
+    //
+    // 链接有两条路（见 driver_link.cpp）：配置期成功复刻出 gcc 的 ld 命令行
+    // 时直接 exec ld，省掉 gcc 驱动 + collect2 的 11 ms 固定开销；否则回退
+    // 到 cc。两条路生成的二进制逐字节相同（--build-id 由输入决定）。
+    std::string objs;
+    for (auto* u : p.order) objs += " " + shell_quote(u->obj_path);
     // --asan：链接插桩版运行时，让 RC/GC 内部的越界/UAF 也能被检查到。
     // 两个 rt 都带同样的符号，链接期只取一个。
-    cmd += " " + shell_quote(g_use_asan_runtime ? PYADAMAS_RT_ASAN_OBJ : PYADAMAS_RT_OBJ);
+    objs += " " + shell_quote(g_use_asan_runtime ? PYADAMAS_RT_ASAN_OBJ : PYADAMAS_RT_OBJ);
     // -ldl：rt_cffi 的 dlopen/dlsym（glibc 2.34+ 已并入 libc，-ldl 是空壳，
     // 旧 glibc 仍需要）。Win64 目前只做交叉汇编验证，不走这条链接路径。
-    cmd += " -lm -ldl";
-    for (auto& l : p.link_args) cmd += " " + shell_quote(l);
+    objs += " -lm -ldl";
+    for (auto& l : p.link_args) objs += " " + shell_quote(l);
+    const bool elf_target = std::string_view(target_abi().name) == "x86_64-sysv";
+    if (elf_target && direct_ld_available() && direct_ld_args_ok(p.link_args)) {
+        std::string ld_cmd = direct_ld_prefix() + " -o " + shell_quote(output) + objs + " " +
+                             direct_ld_tail();
+        if (std::system(ld_cmd.c_str()) == 0) return true;
+        // ld 直接链接失败（环境差异）：不报错，回退 cc 再试一次。
+    }
+    std::string cmd = "cc -o " + shell_quote(output) + " -Wl,--eh-frame-hdr" + cc_extra_flags() + objs;
     if (std::system(cmd.c_str()) != 0) {
         std::fprintf(stderr, "error: link failed\n       command: %s\n", cmd.c_str());
         return false;
