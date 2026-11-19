@@ -132,6 +132,11 @@ typedef struct {
     int64_t ncap;
     int64_t steps;
     int err;
+    // 无推进循环保护：当前正在展开的循环 SPLIT 的 (pc, pos)。递归又回到
+    // 同一 SPLIT 且位置没动 => 这一轮体匹配了空串，停止重复（CPython 的
+    // repeat 在无推进时 break）。只在 RE_SPLIT 的循环分支里维护。
+    int ep_pc;
+    int64_t ep_pos;
 } ReCtx;
 
 static void* re_alloc(size_t n) {
@@ -600,7 +605,14 @@ static ReNode* parse_atom(ReParser* P) {
                     }
                     P->pos++;
                     P->flags = saved;
-                    return child;
+                    // **保留一层 N_GROUP（group = -1，不产生 SAVE）**：
+                    // CPython 的量词语法把组当成一个 item，`(?:\b)+`
+                    // 合法（只有直接量化锚点才是 nothing to repeat）。
+                    // 透明返回 child 会让 `(?:\b)+` 被误判成直接量化 \b。
+                    ReNode* grp = node_new(N_GROUP);
+                    grp->group = -1;
+                    grp->a = child ? child : node_new(N_EMPTY);
+                    return grp;
                 }
                 perr(P, "bad inline flags");
                 return node_new(N_EMPTY);
@@ -626,7 +638,16 @@ static ReNode* parse_atom(ReParser* P) {
             a->a = child;
             return a;
         }
-        if (group < 0) return child;
+        if (group < 0) {
+            // 非捕获组 / 内联标志组：**保留包装层**（group = -1，不产生
+            // SAVE）。CPython 的量词语法把组当成一个 item —— `(?:\b)+`
+            // 合法，只有直接量化锚点（`\b+`）才是 nothing to repeat。
+            // 透明返回 child 会让前者被误判成后者。
+            ReNode* grp = node_new(N_GROUP);
+            grp->group = -1;
+            grp->a = child ? child : node_new(N_EMPTY);
+            return grp;
+        }
         ReNode* g = node_new(N_GROUP);
         g->group = group;
         g->a = child;
@@ -699,10 +720,33 @@ static ReNode* parse_atom(ReParser* P) {
     return n;
 }
 
+// CPython 的 _parser 在量词作用于 AT（零宽锚点：反斜杠 b / B、^、$、
+// 反斜杠 A / Z）时直接报 "nothing to repeat"（断言组 (?=...) 可以量化，
+// 不在此列）。不拦的话直接量化锚点会在 VM 里无限递归 —— 循环体不推进
+// 位置，栈溢出 SIGSEGV（0.322 P0：re.findall(r'\\b+', 'ab') 崩溃）。
+static int atom_is_anchor(const ReNode* n) {
+    if (!n) return 1;
+    switch (n->kind) {
+        case N_BOL:
+        case N_EOL:
+        case N_WORDB:
+        case N_BOS:
+        case N_EOS: return 1;
+        case N_EMPTY: return 1;  // (?:) 之类：CPython 同样按 nothing to repeat
+        default: return 0;
+    }
+}
+
 static ReNode* parse_term(ReParser* P) {
     ReNode* atom = parse_atom(P);
     skip_ws(P);
     int c = peek(P);
+    if ((c == '*' || c == '+' || c == '?') && atom_is_anchor(atom)) {
+        perr(P, "nothing to repeat");
+        node_free(atom);
+        P->pos++;
+        return node_new(N_EMPTY);
+    }
     if (c == '*' || c == '+' || c == '?') {
         P->pos++;
         int lazy = 0, poss = 0;
@@ -773,6 +817,11 @@ static ReNode* parse_term(ReParser* P) {
         } else if (peek(P) == '+') {
             P->pos++;
             poss = 1;
+        }
+        if (atom_is_anchor(atom)) {
+            perr(P, "nothing to repeat");
+            node_free(atom);
+            return node_new(N_EMPTY);
         }
         ReNode* r = node_new(N_REPEAT);
         r->a = atom;
@@ -874,6 +923,10 @@ static void compile_node(ReProg* g, ReNode* n) {
                 break;
             }
             case N_GROUP: {
+                if (n->group < 0) {  // (?:...) 包装层：不产生捕获
+                    compile_node(g, n->a);
+                    break;
+                }
                 int s0 = emit(g, RE_SAVE);
                 g->code[s0].x = 2 * n->group;
                 compile_node(g, n->a);
@@ -918,6 +971,10 @@ static void compile_node(ReProg* g, ReNode* n) {
                 int after = g->n;
                 g->code[sp].x = n->greedy ? body : after;
                 g->code[sp].y = n->greedy ? after : body;
+                // ch 标记「这是循环分隔」（1 贪婪 / 2 惰性）：体可能匹配空串
+                // 时 run 靠它做无推进保护（见 RE_SPLIT）。RE_LOOP 快路径
+                // 不读 ch，语义不变。
+                g->code[sp].ch = n->greedy ? 1 : 2;
                 break;
             }
             case N_PLUS: {
@@ -927,6 +984,7 @@ static void compile_node(ReProg* g, ReNode* n) {
                 int after = g->n;
                 g->code[sp].x = n->greedy ? body : after;
                 g->code[sp].y = n->greedy ? after : body;
+                g->code[sp].ch = n->greedy ? 1 : 2;
                 break;
             }
             case N_OPT: {
@@ -1528,6 +1586,38 @@ static int run(ReProg* g, int pc, ReCtx* c) {
             }
             case RE_SPLIT: {
                 int64_t save = c->pos;
+                if (in->ch) {
+                    // 循环分隔（ch: 1 贪婪 / 2 惰性）。体匹配空串时
+                    // `(...)+` 会无限递归，`(...)*?` 会死循环 —— 同一循环在
+                    // 同一位置再次进入 = 本轮没有推进，按 CPython 口径停止
+                    // 重复、走出口分支。
+                    int greedy = in->ch == 1;
+                    int body_pc = greedy ? in->x : in->y;
+                    int exit_pc = greedy ? in->y : in->x;
+                    if (c->ep_pc == pc && c->ep_pos == save) {
+                        pc = exit_pc;
+                        break;
+                    }
+                    int opc = c->ep_pc;
+                    int64_t opos = c->ep_pos;
+                    if (!greedy) {
+                        // 惰性：先试出口（原顺序），失败再进体。
+                        if (run(g, exit_pc, c)) return 1;
+                        c->pos = save;
+                    }
+                    c->ep_pc = pc;
+                    c->ep_pos = save;
+                    int r = run(g, body_pc, c);
+                    c->ep_pc = opc;
+                    c->ep_pos = opos;
+                    if (r) return 1;
+                    c->pos = save;
+                    if (greedy) {
+                        pc = exit_pc;
+                        break;
+                    }
+                    return 0;
+                }
                 if (run(g, in->x, c)) return 1;
                 c->pos = save;
                 pc = in->y;
@@ -1923,6 +2013,23 @@ static void findall_push(PyAdamasList* out, PyAdamasStr* text, int64_t ngroups, 
     pa_list_append(out, (int64_t)str_new(text->data + a, b - a), 2);
 }
 
+// 两个及以上捕获组：CPython 的 findall 每个元素是「各组匹配串」元组
+// （未参与的组为空串）。只在调用点静态知道组数 >= 2 时用（见 lowering 的
+// re.findall 特化）；Pattern.findall 的静态类型仍是 list[str]，维持旧口径。
+static void findall_push_tuple(PyAdamasList* out, PyAdamasStr* text, int64_t ngroups,
+                               const int64_t* caps) {
+    PyAdamasList* t = pa_list_new(ngroups, 1);
+    pa_gc_pin(t);
+    for (int64_t gi = 1; gi <= ngroups; ++gi) {
+        int64_t ga = caps[2 * gi], gb = caps[2 * gi + 1];
+        PyAdamasStr* gs = (ga >= 0 && gb >= ga) ? str_new(text->data + ga, gb - ga)
+                                               : str_new("", 0);
+        pa_list_append(t, (int64_t)gs, 1);
+    }
+    pa_gc_unpin(t);
+    pa_list_append(out, (int64_t)t, 2);
+}
+
 int64_t pa_re_findall_str(PyAdamasStr* pat, PyAdamasStr* text, int64_t flags) {
     const char* err = NULL;
     int lease = -1;
@@ -1938,6 +2045,29 @@ int64_t pa_re_findall_str(PyAdamasStr* pat, PyAdamasStr* text, int64_t flags) {
     int64_t pos = 0;
     while (pos <= text->len && find_next(g, text, pos, caps)) {
         findall_push(out, text, g->ngroups, caps);
+        if (caps[1] == caps[0]) pos = caps[1] + 1;
+        else pos = caps[1];
+    }
+    pa_gc_unpin(out);
+    caps_drop(caps, stackcaps);
+    re_prog_release(g, lease);
+    return (int64_t)out;
+}
+
+int64_t pa_re_findall_groups_str(PyAdamasStr* pat, PyAdamasStr* text, int64_t flags) {
+    const char* err = NULL;
+    int lease = -1;
+    ReProg* g = re_prog_acquire((const unsigned char*)pat->data, (int)pat->len, flags, &err,
+                                &lease);
+    if (!g) pa_raise_c("ValueError", err ? err : "bad pattern");
+    PyAdamasList* out = pa_list_new(0, 1);
+    pa_gc_pin(out);
+    int64_t ncap = 2 * (int64_t)(g->ngroups + 1);
+    int64_t stackcaps[RE_CAPS_STACK];
+    int64_t* caps = caps_take(ncap, stackcaps);
+    int64_t pos = 0;
+    while (pos <= text->len && find_next(g, text, pos, caps)) {
+        findall_push_tuple(out, text, g->ngroups, caps);
         if (caps[1] == caps[0]) pos = caps[1] + 1;
         else pos = caps[1];
     }

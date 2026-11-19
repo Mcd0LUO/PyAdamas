@@ -661,6 +661,12 @@ PyAdamasStr* pa_exc_type_name(void) {
     return str_new(t, (int64_t)strlen(t));
 }
 
+PyAdamasStr* pa_exc_value_type_name(PyAdamasExcValue* v) {
+    const char* t = v ? v->type : "";
+    return str_new(t, (int64_t)strlen(t));
+}
+
+
 PyAdamasStr* pa_exc_message(void) {
     const char* m = pending_exc ? pending_exc->message : "";
     return str_new(m, (int64_t)strlen(m));

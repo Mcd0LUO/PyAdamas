@@ -345,9 +345,15 @@ TypePtr TypeChecker::check_args(const FuncInfoPtr& fn, Call& c) {
 
         if (fn->ret) {
             // 合成生成器函数的返回类型跟着形参回填走：第一次检查时形参
-            // 还是 unknown，重查后才是 Generator[T]。调用点缓存的表达式
-            // 类型要在重查结束后刷新一次，降级层才能按 T 选迭代路径。
-            if (fn->name.rfind("__pyadamas$gen_", 0) == 0) genexpr_call_sites_[&c] = fn;
+            // 还是 unknown，重查后才是 Generator[T]。
+            if (fn->name.rfind("__pyadamas$gen_", 0) == 0) {
+                genexpr_call_sites_[&c] = fn;
+                // **同步重查**：`for v in (x for x in xs)` 的循环变量类型
+                // 取 iter_elem(调用结果)；如果等到 worklist 末尾再刷新，
+                // 调用点早已按 Generator[unknown] 给 v 定过型（0.322 P0：
+                // 生成器表达式丢浮点元素类型，打印 double 位模式）。
+                recheck_synth_gen(fn);
+            }
         }
         return observe_call_result(c, fn, fn->ret ? fn->ret
                                       : fn->ret_known ? t_none() : t_unknown());

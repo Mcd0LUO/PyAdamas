@@ -174,6 +174,26 @@ VReg Lowerer::lower_binop(BinOp& b) {
             return v;
         }
     }
+    // set 的非原地集合运算：`s | t` / `s & t` / `s - t` / `s ^ t` 返回新 set
+    // （CPython 语义）。原先落到下面的「后端不支持」拦截。
+    if (lt && rt && lt->kind == TyKind::Set && rt->kind == TyKind::Set) {
+        RtFn fn = RtFn::SetUnion;
+        bool ok = true;
+        switch (b.op) {
+            case Tok::VBAR: fn = RtFn::SetUnion; break;
+            case Tok::AMPER: fn = RtFn::SetIntersect; break;
+            case Tok::MINUS: fn = RtFn::SetDifference; break;
+            case Tok::CIRCUMFLEX: fn = RtFn::SetSymDiff; break;
+            default: ok = false; break;
+        }
+        if (ok) {
+            VReg l = expr(*b.left);
+            VReg r = expr(*b.right);
+            VReg v = call_runtime(fn, ty ? ty : lt, {l, r});
+            push_temp(v);
+            return v;
+        }
+    }
     // 类型检查允许但后端还做不了的组合，在这里一次性拦住。
     // 放过去的话 codegen 会走「按整数处理」的兜底路径，指针相加不报错，
     // 只是算出一个野值——这类静默错误比编译失败难查得多。

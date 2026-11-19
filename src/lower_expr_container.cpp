@@ -259,14 +259,25 @@ VReg Lowerer::lower_ifexp(IfExp& e) {
     emit(std::move(br));
 
     switch_to(then_b);
-    store_borrow_slot(tmp, expr(*e.body));
+    {
+        // 分支值要按整个 if 表达式的类型落槽：`2.5 if c else 3` 的 else
+        // 分支是 int，直接塞进 float 借槽会生成 `movq $3, %xmm8`（汇编器
+        // 直接报 operand type mismatch）。
+        VReg bv = expr(*e.body);
+        bv = coerce(bv, tc_.type_of(e.body.get()), ty);
+        store_borrow_slot(tmp, bv);
+    }
     Inst j1;
     j1.op = IrOp::Jump;
     j1.target = end;
     emit(std::move(j1));
 
     switch_to(else_b);
-    store_borrow_slot(tmp, expr(*e.orelse));
+    {
+        VReg ov = expr(*e.orelse);
+        ov = coerce(ov, tc_.type_of(e.orelse.get()), ty);
+        store_borrow_slot(tmp, ov);
+    }
     Inst j2;
     j2.op = IrOp::Jump;
     j2.target = end;

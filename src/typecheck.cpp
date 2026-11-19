@@ -153,6 +153,26 @@ void TypeChecker::check_once(Module& m) {
         check_dunder_returns();
     }
 
+void TypeChecker::recheck_synth_gen(const FuncInfoPtr& fn) {
+    if (!fn || !fn->sig_dirty) return;
+    for (auto* fd : func_defs_) {
+        auto it = func_infos_.find(fd);
+        if (it == func_infos_.end() || it->second != fn) continue;
+        fn->sig_dirty = false;
+        Scope* saved_cur = cur_;
+        if (auto nit = nested_recheck_parent_.find(fd); nit != nested_recheck_parent_.end())
+            cur_ = nit->second;
+        auto oit = func_owners_.find(fd);
+        auto owner = oit == func_owners_.end() ? nullptr : oit->second;
+        auto* saved_class = cur_class_;
+        cur_class_ = owner.get();
+        funcdef_impl(*fd, owner);
+        cur_class_ = saved_class;
+        cur_ = saved_cur;
+        return;
+    }
+}
+
 std::vector<std::pair<std::string, std::string>> TypeChecker::top_symbols() const {
         std::vector<std::pair<std::string, std::string>> out;
         if (!module_) return out;

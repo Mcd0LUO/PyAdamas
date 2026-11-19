@@ -192,6 +192,15 @@ VReg Lowerer::lower_builtin_reflect(const std::string& name, Call& c) {
                         (classes_.count(id) || imported_classes_.count(id) ||
                          TypeChecker::is_builtin_name(id));
         }
+        // 异常值：type(e) 的类名是运行期的（except Exception 捕获到的可能
+        // 是任意子类）。求值一次 e，再从异常值对象里取真实类名。
+        if (t && t->kind == TyKind::Exception) {
+            VReg ev = skip_eval ? kNoReg : expr(*arg);
+            if (ev == kNoReg) ev = expr(*arg);
+            VReg s = call_runtime(RtFn::ExcValueTypeName, t_str(), {ev});
+            push_temp(s);
+            return retype(s, mk_typeobj(t));
+        }
         if (!skip_eval) (void)expr(*arg);  // 保留求值副作用
         VReg s = const_str(py_type_name(t));
         return retype(s, mk_typeobj(t ? t : t_unknown()));

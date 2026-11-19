@@ -204,6 +204,10 @@ enum class RtFn : uint16_t {
     StrWrapList,  // (str*) -> list*（单元素，subprocess 用）
     ListExtend,   // (list* dst, list* src) -> void
     ListInplaceRepeat,  // (list* l, i64 n) -> void；`l *= n` 原地重复（CPython __imul__）
+    SetUnion,             // (set*, set*) -> set*
+    SetIntersect,         // (set*, set*) -> set*
+    SetDifference,        // (set*, set*) -> set*
+    SetSymDiff,           // (set*, set*) -> set*
     SetIntersectUpdate,  // (set* s, set* t) -> void；`s &= t`
     SetDifferenceUpdate, // (set* s, set* t) -> void；`s -= t`
     SetSymdiffUpdate,    // (set* s, set* t) -> void；`s ^= t`
@@ -243,6 +247,7 @@ enum class RtFn : uint16_t {
     RangeToList,  // (range*) -> list*
     RangeRepr,    // (range*) -> str*
     ReprTuple,    // (tuple*, i64 kind) -> str*
+    ReprDictAny,  // (dict*, ) -> str*  异构 dict 的通用 repr（key/value 走 unknown repr）
     HandlerPush,  // () -> handler*   压入异常 handler，记录临时栈水位
     HandlerLeave, // (handler*) -> void 弹出并清理临时栈
     HandlerDiscard, // (handler*) -> void 只弹出，不清理临时值
@@ -258,6 +263,7 @@ enum class RtFn : uint16_t {
     ExcTakeValue, // () -> excval*    取出待处理异常（复制成异常值），清空全局
     ExcReraiseValueIf, // (excval*) -> void  非空时重新抛出（复制后 longjmp）
     ExcTypeName,  // () -> str*
+    ExcValueTypeName, // (exc_value*) -> str*  （type(e).__name__ 用）
     ExcMessage,   // () -> str*
     ExcValueArgs, // (excval*) -> tuple*
     ExcValueStr,  // (excval*) -> str*
@@ -444,6 +450,7 @@ enum class RtFn : uint16_t {
     RegexSearchStr,        // (str* pat, str* text, i64 flags, i64 mode) -> match*
     RegexSearch,           // (regex*, str* text, i64 mode) -> match*
     RegexFindAllStr,       // (str* pat, str* text, i64 flags) -> list*
+    RegexFindAllGroupsStr, // (str* pat, str* text, i64 flags) -> list[tuple] （>=2 捕获组）
     RegexFindAll,          // (regex*, str* text) -> list*
     RegexSubStr,           // (str* pat, str* repl, str* text, i64 count, i64 flags) -> str*
     RegexSub,              // (regex*, str* repl, str* text, i64 count) -> str*
@@ -723,6 +730,10 @@ inline const char* rt_name(RtFn f) {
         case RtFn::StrWrapList: return "pa_str_wrap_list";
         case RtFn::ListExtend: return "pa_list_extend";
         case RtFn::ListInplaceRepeat: return "pa_list_inplace_repeat";
+        case RtFn::SetUnion: return "pa_set_union";
+        case RtFn::SetIntersect: return "pa_set_intersection";
+        case RtFn::SetDifference: return "pa_set_difference";
+        case RtFn::SetSymDiff: return "pa_set_symdiff";
         case RtFn::SetIntersectUpdate: return "pa_set_intersect_update";
         case RtFn::SetDifferenceUpdate: return "pa_set_difference_update";
         case RtFn::SetSymdiffUpdate: return "pa_set_symdiff_update";
@@ -761,6 +772,7 @@ inline const char* rt_name(RtFn f) {
         case RtFn::RangeToList: return "pa_range_to_list";
         case RtFn::RangeRepr: return "pa_range_repr";
         case RtFn::ReprTuple: return "pa_repr_tuple";
+        case RtFn::ReprDictAny: return "pa_repr_dict_any";
         case RtFn::HandlerPush: return "pa_handler_push";
         case RtFn::HandlerLeave: return "pa_handler_leave";
         case RtFn::HandlerDiscard: return "pa_handler_discard";
@@ -776,6 +788,7 @@ inline const char* rt_name(RtFn f) {
         case RtFn::ExcTakeValue: return "pa_exc_take_value";
         case RtFn::ExcReraiseValueIf: return "pa_exc_reraise_value_if";
         case RtFn::ExcTypeName: return "pa_exc_type_name";
+        case RtFn::ExcValueTypeName: return "pa_exc_value_type_name";
         case RtFn::ExcMessage: return "pa_exc_message";
         case RtFn::ExcValueArgs: return "pa_exc_value_args";
         case RtFn::ExcValueStr: return "pa_exc_value_str";
@@ -1009,6 +1022,7 @@ inline const char* rt_name(RtFn f) {
         case RtFn::RegexSearchStr: return "pa_re_search_str";
         case RtFn::RegexSearch: return "pa_re_search";
         case RtFn::RegexFindAllStr: return "pa_re_findall_str";
+        case RtFn::RegexFindAllGroupsStr: return "pa_re_findall_groups_str";
         case RtFn::RegexFindAll: return "pa_re_findall";
         case RtFn::RegexSubStr: return "pa_re_sub_str";
         case RtFn::RegexSub: return "pa_re_sub";

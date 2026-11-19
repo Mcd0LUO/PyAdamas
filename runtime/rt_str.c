@@ -64,6 +64,108 @@ static void tuple_buf_put(char** buf, size_t* cap, size_t* len, const char* p, s
     (*buf)[*len] = 0;
 }
 
+/* ── unknown 值的通用 repr（异形容器打印用）──────────────────────
+   unknown 里分不开 int/float，只能按堆探针分派：堆对象按真实种类递归
+   （str 带引号、list/dict 递归），非堆值一律按 int。这是 0.317 记录过的
+   固有边界（没有运行期类型标签）；对常见的「int/str 混合」已足够。 */
+typedef struct {
+    char* p;
+    size_t n, cap;
+} AnyReprBuf;
+
+static void ar_put(AnyReprBuf* b, const char* p, size_t n) {
+    if (b->n + n + 1 > b->cap) {
+        size_t cap = b->cap ? b->cap : 64;
+        while (b->n + n + 1 > cap) cap *= 2;
+        char* q = (char*)realloc(b->p, cap);
+        if (!q) panic_c("out of memory");
+        b->p = q;
+        b->cap = cap;
+    }
+    memcpy(b->p + b->n, p, n);
+    b->n += n;
+    b->p[b->n] = 0;
+}
+
+static void ar_cstr(AnyReprBuf* b, const char* s) { ar_put(b, s, strlen(s)); }
+
+static void repr_any_into(AnyReprBuf* b, int64_t v);
+
+/* dict 的 unknown repr：{key: value, ...}。键值都可能又是容器。 */
+static void repr_any_dict_into(AnyReprBuf* b, PyAdamasDict* d) {
+    ar_cstr(b, "{");
+    for (int64_t i = 0; i < d->len; ++i) {
+        if (i) ar_cstr(b, ", ");
+        repr_any_into(b, pa_dict_key_at(d, i));
+        ar_cstr(b, ": ");
+        repr_any_into(b, pa_dict_val_at(d, i));
+    }
+    ar_cstr(b, "}");
+}
+
+static void repr_any_into(AnyReprBuf* b, int64_t v) {
+    if (!pa_unknown_is_heap(v)) {
+        PyAdamasStr* s = pa_str_from_i64(v);
+        ar_put(b, s->data, (size_t)s->len);
+        pa_rc_dec(s);
+        return;
+    }
+    PyAdamasRc* h = (PyAdamasRc*)(uintptr_t)((uint64_t)v - (uint64_t)PYADAMAS_RC_HDR);
+    switch (h->kind) {
+        case PYADAMAS_RC_STR: {
+            PyAdamasStr* s = pa_repr_str((PyAdamasStr*)(uintptr_t)v);
+            ar_put(b, s->data, (size_t)s->len);
+            pa_rc_dec(s);
+            return;
+        }
+        case PYADAMAS_RC_LIST: {
+            PyAdamasList* l = (PyAdamasList*)(uintptr_t)v;
+            ar_cstr(b, "[");
+            for (int64_t i = 0; i < l->len; ++i) {
+                if (i) ar_cstr(b, ", ");
+                repr_any_into(b, l->data[i]);
+            }
+            ar_cstr(b, "]");
+            return;
+        }
+        case PYADAMAS_RC_DICT:
+            repr_any_dict_into(b, (PyAdamasDict*)(uintptr_t)v);
+            return;
+        case PYADAMAS_RC_CPYFLOAT: {
+            double d;
+            memcpy(&d, (void*)(uintptr_t)v, sizeof d);
+            char tmp[64];
+            format_double(tmp, sizeof tmp, d);
+            ar_cstr(b, tmp);
+            return;
+        }
+        default: {
+            PyAdamasStr* s = pa_str_from_i64(v);
+            ar_put(b, s->data, (size_t)s->len);
+            pa_rc_dec(s);
+            return;
+        }
+    }
+}
+
+PyAdamasStr* pa_repr_any(int64_t v) {
+    AnyReprBuf b = {NULL, 0, 0};
+    ar_cstr(&b, "");
+    repr_any_into(&b, v);
+    PyAdamasStr* out = str_new(b.p ? b.p : "", (int64_t)b.n);
+    free(b.p);
+    return out;
+}
+
+PyAdamasStr* pa_repr_dict_any(PyAdamasDict* d) {
+    AnyReprBuf b = {NULL, 0, 0};
+    ar_cstr(&b, "");
+    repr_any_dict_into(&b, d);
+    PyAdamasStr* out = str_new(b.p ? b.p : "", (int64_t)b.n);
+    free(b.p);
+    return out;
+}
+
 PyAdamasStr* pa_repr_tuple(PyAdamasList* t, int64_t kind) {
     size_t cap = 64, len = 0;
     char* buf = (char*)malloc(cap);

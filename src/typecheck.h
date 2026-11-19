@@ -253,6 +253,8 @@ private:
     // 调用合成生成器函数的位置：重查后返回类型从 Generator[unknown] 变成
     // Generator[T]，这里要同步刷新调用点缓存的表达式类型。
     std::unordered_map<const Expr*, FuncInfoPtr> genexpr_call_sites_;
+    // 合成生成器函数在形参回填后同步重查一次（见 typecheck_call.cpp）。
+    void recheck_synth_gen(const FuncInfoPtr& fn);
     struct CallResult {
         const FunctionDef* def;
         TypePtr ty;

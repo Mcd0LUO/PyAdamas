@@ -893,6 +893,7 @@ PyAdamasExcValue* pa_exc_value_cause(PyAdamasExcValue* v);
 void pa_exc_register(PyAdamasStr* child, PyAdamasStr* parent);
 PyAdamasList* pa_exc_value_args(PyAdamasExcValue* v);
 PyAdamasStr* pa_exc_value_str(PyAdamasExcValue* v);
+PyAdamasStr* pa_exc_value_type_name(PyAdamasExcValue* v);
 void pa_exc_done(void);
 // 生成器/协程 resume 的异常上下文切换：进入时把调用方的 current_exc /
 // exc_save_top 压栈并装上本帧保存的；挂起/退出时反过来。token 是进入时
@@ -1027,6 +1028,8 @@ int64_t pa_asyncio_run(void* coro);
 void format_double(char* buf, size_t n, double v);
 PyAdamasStr* pa_str_concat(PyAdamasStr* a, PyAdamasStr* b);
 PyAdamasStr* pa_repr_tuple(PyAdamasList* t, int64_t kind);
+PyAdamasStr* pa_repr_any(int64_t v);
+PyAdamasStr* pa_repr_dict_any(PyAdamasDict* d);
 PyAdamasStr* pa_str_char_at(PyAdamasStr* s, int64_t i);
 PyAdamasStr* pa_str_slice(PyAdamasStr* src, int64_t start, int64_t stop, int64_t step);
 PyAdamasStr* pa_bytes_slice(PyAdamasStr* src, int64_t start, int64_t stop, int64_t step);
@@ -1194,6 +1197,10 @@ void pa_dict_update(PyAdamasDict* dst, PyAdamasDict* src);
 /* set 的原地运算（`s &= t` / `s -= t` / `s ^= t`）：set 复用 dict。 */
 void pa_set_intersect_update(PyAdamasDict* s, PyAdamasDict* t);
 void pa_set_difference_update(PyAdamasDict* s, PyAdamasDict* t);
+PyAdamasDict* pa_set_union(PyAdamasDict* a, PyAdamasDict* b);
+PyAdamasDict* pa_set_intersection(PyAdamasDict* a, PyAdamasDict* b);
+PyAdamasDict* pa_set_difference(PyAdamasDict* a, PyAdamasDict* b);
+PyAdamasDict* pa_set_symdiff(PyAdamasDict* a, PyAdamasDict* b);
 void pa_set_symdiff_update(PyAdamasDict* s, PyAdamasDict* t);
 PyAdamasDict* pa_dict_copy(PyAdamasDict* src);
 int64_t pa_isinstance(void* obj, int64_t class_id);
@@ -1558,6 +1565,7 @@ int64_t pa_re_start(PyAdamasMatch* m, int64_t n);
 int64_t pa_re_end(PyAdamasMatch* m, int64_t n);
 int64_t pa_re_span(PyAdamasMatch* m, int64_t n);
 int64_t pa_re_findall_str(PyAdamasStr* pat, PyAdamasStr* text, int64_t flags);
+int64_t pa_re_findall_groups_str(PyAdamasStr* pat, PyAdamasStr* text, int64_t flags);
 int64_t pa_re_findall(PyAdamasRegex* re, PyAdamasStr* text);
 int64_t pa_re_sub_str(PyAdamasStr* pat, PyAdamasStr* repl, PyAdamasStr* text, int64_t count,
                         int64_t flags);

@@ -99,11 +99,15 @@ class writer:
         self.quoting = quoting
         self.lineterminator = lineterminator
 
-    def writerow(self, row: list[str]) -> None:
+    def writerow(self, row: list[object]) -> None:
+        # CPython 的 csv.writer 接受任意可迭代对象，逐字段 str()；这里收
+        # list[object]，用 str(row[i]) 做运行期分派（int/str 都正确）。
+        # 0.322 之前签名是 list[str]，收 list[unknown] 的混合行时按 str
+        # 指针读 int 元素，直接段错误。
         parts: list[str] = []
         i: int = 0
         while i < len(row):
-            field: str = row[i]
+            field: str = str(row[i])
             need: bool = self.quoting == QUOTE_ALL or self.quoting == QUOTE_NONNUMERIC
             if not need:
                 if self.delimiter in field or self.quotechar in field:
@@ -122,7 +126,7 @@ class writer:
             i += 1
         self.f.write(self.delimiter.join(parts) + self.lineterminator)
 
-    def writerows(self, rows: list[list[str]]) -> None:
+    def writerows(self, rows: list[list[object]]) -> None:
         i: int = 0
         while i < len(rows):
             self.writerow(rows[i])

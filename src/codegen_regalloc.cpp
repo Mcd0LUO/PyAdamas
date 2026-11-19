@@ -399,31 +399,30 @@ void AsmGen::reload_fp_slots() {
 void AsmGen::build_fp_liveness() {
         const int nb = static_cast<int>(f_->blocks.size());
         const size_t kf = fp_promoted_slots_.size();
-        fp_live_in_.assign(static_cast<size_t>(nb), 0);
-        fp_live_out_.assign(static_cast<size_t>(nb), 0);
+        fp_live_in_.assign(static_cast<size_t>(nb), std::vector<uint8_t>(kf, 0));
+        fp_live_out_.assign(static_cast<size_t>(nb), std::vector<uint8_t>(kf, 0));
         fp_live_off_ = std::getenv("PYADAMAS_NO_FPLIVE") != nullptr;
         if (kf == 0 || nb == 0 || fp_live_off_) return;
 
-        std::vector<uint8_t> use(static_cast<size_t>(nb), 0);
-        std::vector<uint8_t> def(static_cast<size_t>(nb), 0);
+        std::vector<std::vector<uint8_t>> use(static_cast<size_t>(nb),
+                                              std::vector<uint8_t>(kf, 0));
+        std::vector<std::vector<uint8_t>> def(static_cast<size_t>(nb),
+                                              std::vector<uint8_t>(kf, 0));
         for (int b = 0; b < nb; ++b) {
             // 只把「块内先读后写」的读算作 use：先 store 再 load 是本块
             // 自己定义的值，不构成对入口值的活跃需求。
-            uint8_t defined = 0;
-            uint8_t used = 0;
+            std::vector<uint8_t>& defined = def[static_cast<size_t>(b)];
+            std::vector<uint8_t>& used = use[static_cast<size_t>(b)];
             for (const auto& in : f_->blocks[static_cast<size_t>(b)].insts) {
                 if (in.idx < 0 || in.idx >= static_cast<int>(slot_fpidx_.size())) continue;
                 int fi = slot_fpidx_[static_cast<size_t>(in.idx)];
-                if (fi < 0) continue;
-                uint8_t bit = static_cast<uint8_t>(1u << fi);
+                if (fi < 0 || static_cast<size_t>(fi) >= kf) continue;
                 if (in.op == IrOp::LoadSlot) {
-                    if (!(defined & bit)) used |= bit;
+                    if (!defined[static_cast<size_t>(fi)]) used[static_cast<size_t>(fi)] = 1;
                 } else if (in.op == IrOp::StoreSlot) {
-                    defined |= bit;
+                    defined[static_cast<size_t>(fi)] = 1;
                 }
             }
-            use[static_cast<size_t>(b)] = used;
-            def[static_cast<size_t>(b)] = defined;
         }
 
         std::vector<std::vector<int>> succ(static_cast<size_t>(nb));
@@ -456,12 +455,16 @@ void AsmGen::build_fp_liveness() {
         while (chg) {
             chg = false;
             for (int b = nb - 1; b >= 0; --b) {
-                uint8_t out = 0;
-                for (int s : succ[static_cast<size_t>(b)])
-                    out |= fp_live_in_[static_cast<size_t>(s)];
-                uint8_t in = static_cast<uint8_t>(
-                    use[static_cast<size_t>(b)] |
-                    (out & ~def[static_cast<size_t>(b)]));
+                std::vector<uint8_t> out(kf, 0);
+                for (int s : succ[static_cast<size_t>(b)]) {
+                    const auto& li = fp_live_in_[static_cast<size_t>(s)];
+                    for (size_t j = 0; j < kf; ++j) out[j] = out[j] | li[j];
+                }
+                std::vector<uint8_t> in(kf, 0);
+                const auto& ub = use[static_cast<size_t>(b)];
+                const auto& db = def[static_cast<size_t>(b)];
+                for (size_t j = 0; j < kf; ++j)
+                    in[j] = ub[j] | (out[j] & static_cast<uint8_t>(~db[j]));
                 if (out != fp_live_out_[static_cast<size_t>(b)] ||
                     in != fp_live_in_[static_cast<size_t>(b)]) {
                     fp_live_out_[static_cast<size_t>(b)] = out;
