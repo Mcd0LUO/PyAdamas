@@ -4,6 +4,101 @@
 
 早期阶段没有逐条留痕，按阶段归纳；0.4 之后逐条记录。
 
+## [0.328] - 2026-11-20
+
+> p3next 分支合入：unknown 表示层 **P3-1b**（接续 0.327 P3 一期）。先于
+> stdlib2 集成，定版 0.328（stdlib2 顺延 0.329）。落地记录
+> docs/p3-1b-landing.md；设计总纲 docs/p3-tagged-union-design.md §7 已更新。
+>
+> 判据延续一期：静态已知路径 asm 逐字节不变（26 基准 **26/26 全同**，每块
+> 增量后 cmp）；门控关模块零影响；UNK 回退探针保正确性（不依赖传播完备）；
+> 异构对拍 CPython；ASan leak 干净；check_size 无新增超限。
+
+### P3-1b 实现（四块增量，逐块构建验证）
+
+- **tag 过直调形参/返回（旁路双字 ABI + 双入口 shim）**：payload 的 classify
+  落位逐字不变（值 ABI 零变化）；unknown 形参 tag 经平行数组 + %r11 指针通道
+  （数组在出参区栈实参之后，outgoing_bytes 扩容），call 被调 .LfN$pt 入口；
+  旧入口（闭包/vtable/间接/跨模块全部既有引用）先清零 %r11 再进同一函数体，
+  形参 tag 全 UNK 回退。unknown 返回经 %rdx 带 tag（旧调用方忽略 rdx，无兼容
+  问题）。资格按形参**槽类型**（槽升级会让 object 形参槽定型，argparse
+  add_argument 实测）。被调内 RC/AnyArithT 按形参 tag 免探针，调用方按返回
+  tag 免探针。
+- **dict 值/类字段一次探针导 tag**：DictGet/GetOr/GetOpt/Pop/PopLast、
+  FieldLoad、DictTryGet 融合直写槽——装载发一次 pa_any_load_tag，后续 RC/
+  算术免探针（容器/对象布局零变化）。
+- **生成器 resume vreg tag**：一期整函数禁 tag 的两根因修复（tag 清零挪到
+  g.entry 块头，每次 resume 都走；GenSent 写 UNK）。unknown vreg 启用 tag；
+  堆帧命名槽仍无 tag（装载 UNK 回退，列剩余）。
+- **send/throw 值装箱**：float 裸位模式进 gen.sent 被当整数（基线已存在）→
+  coerce 到 unknown。
+
+### 基线 leak/UAF 根治（stdlib-batch1 §四半移交 + 本轮新发现）
+
+- **unknown 调用结果所有权洞**（j12 str 104B / m5 盒 72B / print(object 调用)
+  144B/2obj）：def_heap 只给静态堆类型结果登记临时栈，unknown 调用结果那份
+  调用方所有的引用直接消费时无人释放 → 对 Call/CallDirect/VCall* 的 unknown
+  结果补 push_temp_unknown（只限用户调用 op，借用结果不登记）。
+- **leaf×unknown RC 探针对称**：inc_unknown/temp_unknown 改用与 dec_unknown
+  逐位一致的 pa_unknown_is_heap（含 exact-RC 回退）；常规模式行为逐字不变。
+- **object 槽升级 RC 洞**（新发现，UAF 链）：显式 object/Any 标注槽禁止
+  unknown→typed 升级（按标注 AST 精确判定，不用 sym.annotated+unknown——
+  typecheck 对循环内 j: int 也给该组合，误标会改 3 个基准 asm）；兜底
+  de-upgrade（unknown/堆值流入已升级非堆槽 → 回退 unknown 走 retain/释放）。
+- **yield unknown 消费份额**（配套）：next/__next__/send/throw/for-gen/
+  list(gen)/genfor 七个消费点补 push_temp_unknown / RcDecUnknown（基线靠
+  「槽升级裸存→盒提前释放→池复用」UAF 链掩盖，槽修复后暴露为干净泄漏）。
+
+### 性能（绑核 24，交替 7 轮中位；同一运行时，仅生成代码不同）
+
+| 用例 | 0.327 | 本分支 | 变化 |
+|---|---|---|---|
+| u4_call_tag（新，40 万轮 object 调用累加） | 73.3 ms | 48.3 ms | **−34.2%** |
+| u5_dict_multiuse（新，40 万轮小 dict 多使用） | 67.0 ms | 58.4 ms | **−12.9%** |
+| u1_hetero_list | 48.5 ms | 48.9 ms | +0.8%（噪声级，11 轮） |
+| u3_unknown_arith | 35.5 ms | 35.6 ms | +0.0%（噪声级，11 轮） |
+| u2_hetero_dict | 135.8 ms | 136.2 ms | +0.3%（噪声级） |
+
+u1/u3 无用户调用、u2 被字符串拼接/大表哈希主导——新收益面在调用边界与
+dict 多使用，符合设计预期；一期成果（u1 −38% / u3 −44.7% vs 0.325）保持。
+
+### P3-2/P3-3 评估（本轮不做，记录路径）
+
+- **P3-2（FBOX→FLOAT 内联）**：新事实——GC 保守扫描用 gc_tab_find 查表标记，
+  不对 unknown 字解引用，裸 double 位模式天然安全；EH 释放走探针/tag 跳过也
+  安全。真正代价：FRAW payload 不再是合法旧 unknown i64，约 20 处无 tag 消费
+  边界必须先装箱（漏一处=静默值损坏，正确性前提从「探针回退」变成「边界装箱
+  完备」）；收益只剩 72B/盒内存+一次解盒间接（churn 已被一期复用消除）。
+  风险/收益不划算 → 下一轮先落边界装箱审计表再灰度（landing §6）。
+- **P3-3（跨模块 ABI 版本化 + None/bool 盒）**：跨模块 tag ABI 需接口版本
+  bump + 导出 $pt 符号 + 门控协调，收益面小；None/bool 盒是语义工程。长期。
+
+### 验证
+
+- tests/run/262–266（新增 5 个）：调用结果所有权形态、直调 tag（8 形参栈实参
+  共存/混合类型/递归/嵌套/函数值间接回退）、dict/字段 tag（含 miss 默认值/
+  pop/覆写旧值 tag 保持/DictTryGet）、object 槽升级（累加器 return/形参重赋值/
+  生成器/类字段/闭包）、门控生成器 vreg tag + send 装箱。全部 CPython 对拍 +
+  O0/O1/O2 + ASan detect_leaks=1 干净。
+- 26 热基准 asm 逐字节 cmp：每块增量后 26/26 IDENTICAL。
+- difftest 257 用例 0 不一致；普通套件 + ASan 套件 ran ok EXIT=0
+  （PYADAMAS_TEST_JOBS=8）。
+- ASan detect_leaks=1 抽查：247/248/13_gc/231/262/263/264/265/266 全 0；
+  j12/m5/pf3/pf5 leak 复现族全 0。
+- 生成器回归：118/119/122/123/124/128/129/131/133/136 全过（一期 SIGSEGV
+  修复保持）。
+- check_size：无新增超限（发射集中 codegen_tag.cpp 382 行；codegen_call.cpp
+  1199 / codegen_block.cpp 1200 / lower_stmt.cpp 1200；既有 5 处超限文件不变）。
+
+### 已知边界（列剩余，landing §8）
+
+1. 生成器堆帧命名槽无平行 tag（rt_gen.c 帧布局 + yield/resume 存还原）。
+2. P3-2 边界装箱审计表 + FRAW 灰度。
+3. 跨模块 tag ABI 版本化。
+4. 独立 bug 移交：dict 值里 list[unknown] 的 print repr 把 boxed float 按整数
+   打（基线已存在）；253 fallback 32B 异常对象泄漏（stdlib-batch1 移交）。
+5. 复用匹配仍限同块直接形态（一期 §9.4 维持）。
+
 ## [0.327] - 2026-11-20
 
 > p3union 分支：unknown 表示层 **P3 封闭 tagged union 第一阶段**（p3union 分支合入）。

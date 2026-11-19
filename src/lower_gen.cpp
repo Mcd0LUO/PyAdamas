@@ -428,7 +428,9 @@ VReg Lowerer::gen_to_list(VReg gen, TypePtr gen_ty) {
     retain_elem(ev, ko);
     call_void(RtFn::ListAppend, {load_slot(l_slot, lt), ev, const_int(ko)});
     // 元素引用已经转给列表，产生者的那份立即还掉，否则循环里一路累积。
+    // unknown 元素同口径（retain_elem 已按探针补了列表那份）。
     if (ir_is_heap(et)) call_void(RtFn::RcDec, {ev});
+    else if (is_unknown(et)) call_void(RtFn::RcDecUnknown, {ev});
     Inst jb;
     jb.op = IrOp::Jump;
     jb.target = cond;
@@ -481,6 +483,7 @@ void Lowerer::emit_gen_for_each(VReg gen, TypePtr gen_ty,
     int ev_slot = new_temp_slot(et);
     store_slot(ev_slot, ev);
     if (ir_is_heap(et)) call_void(RtFn::RcDec, {ev});
+    else if (is_unknown(et)) call_void(RtFn::RcDecUnknown, {ev});
     body(load_slot(ev_slot, et), et, cond, end);
     if (!terminated()) {
         Inst jb;
@@ -527,6 +530,7 @@ void Lowerer::lower_for_gen(For& f, VReg seq, TypePtr seq_ty) {
     VReg ev = def(t_unknown(), std::move(call));
     ev = retype(ev, et);
     if (ir_is_heap(et)) push_temp(ev);
+    else if (is_unknown(et)) push_temp_unknown(ev);
     VReg ok = load_slot(ok_slot, t_int());
     Inst br;
     br.op = IrOp::Branch;

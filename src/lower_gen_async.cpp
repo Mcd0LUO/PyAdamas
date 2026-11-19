@@ -237,6 +237,7 @@ int Lowerer::compile_suspendable_function(FunctionDef& f, FuncInfoPtr info,
     auto add_param = [&](const Param& p) {
         TypePtr T = p.ty ? p.ty : t_unknown();
         int s = irf->new_slot(T);
+        if (p.ann_unknown) st_->ann_unknown_slots.insert(s);
         irf->params.push_back(IRParam{p.name, T, s});
         if (meta && meta->cell_index.count(p.name)) {
             int cs = irf->new_slot(mk_list(T));

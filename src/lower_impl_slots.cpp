@@ -11,11 +11,25 @@ void Lowerer::store_slot(int slot, VReg v) {
     // 才能按 float/int 正确选指令。retain_for_store 从这一刻起
     // 按堆槽的规则 retain/dec，槽也进入帧记录的释放清单。
     bool upgraded = false;
-    if (dst && dst->kind == TyKind::Unknown && src && src->kind != TyKind::Unknown) {
+    if (dst && dst->kind == TyKind::Unknown && src && src->kind != TyKind::Unknown &&
+        !st_->ann_unknown_slots.count(slot)) {
         // 之前可能以 unknown 值写入过这个槽：旧值不一定是堆指针。
         st_->fn->slot_unknown[si] = true;
         st_->fn->slot_ty[slot] = dst = src;
         upgraded = true;
+    }
+    // P3-1b（0.328）：unknown/堆值流入「已升级的非堆槽」→ 特化失效，回退
+    // unknown。object 槽首存 int 被升级成 int 槽；随后 s = s + x（unknown）
+    // 若按非堆槽裸存：不 retain、旧值不释放、load.slot 还按 int 读回 ——
+    // float 盒被 cleanup 提前释放成野指针、指针按整数打印（函数内累加器
+    // 形态，0.327 基线已存在）。回退 unknown 后走下面的 retain/释放口径，
+    // 装载按动态分派。int 特化收益保留到首次 unknown/堆写入为止（此前已
+    // 发射的 typed load 仍然有效）。旧值是 int/bool 标量，dec_unknown 探针
+    // 空操作；常规/readonly 模式探针只查索引不解引用，安全。
+    if (dst && !ir_is_heap(dst) && dst->kind != TyKind::Unknown &&
+        ((!src || src->kind == TyKind::Unknown) || ir_is_heap(src))) {
+        st_->fn->slot_ty[slot] = dst = t_unknown();
+        st_->fn->slot_unknown[si] = true;
     }
     const bool borrow = st_->borrow_slots.count(slot) != 0;
     bool moved = !borrow && move_fresh(v, dst);

@@ -481,6 +481,7 @@ VReg Lowerer::lower_method_generator(Attribute& at, Call& c, VReg recv, TypePtr 
         VReg v = def(t_unknown(), std::move(in));
         v = retype(v, et);
         if (ir_is_heap(et)) push_temp(v);
+        else if (is_unknown(et)) push_temp_unknown(v);
         return v;
     }
     if (at.attr == "send") {
@@ -488,7 +489,9 @@ VReg Lowerer::lower_method_generator(Attribute& at, Call& c, VReg recv, TypePtr 
             err(c.line, c.col, "generator.send() takes exactly one argument");
             return const_none();
         }
-        VReg sv = expr(*c.args[0]);
+        // P3-1b：send 值进 unknown 域要装箱（float 裸位模式会被 gen.sent
+        // 当整数，0.327 基线已存在）；同步 resume 内消费，调用方临时份够用。
+        VReg sv = coerce(expr(*c.args[0]), tc_.type_of(c.args[0].get()), t_unknown());
         Inst in;
         in.op = IrOp::CallRt;
         in.imm = static_cast<int64_t>(RtFn::GenSend);
@@ -496,6 +499,7 @@ VReg Lowerer::lower_method_generator(Attribute& at, Call& c, VReg recv, TypePtr 
         VReg v = def(t_unknown(), std::move(in));
         v = retype(v, et);
         if (ir_is_heap(et)) push_temp(v);
+        else if (is_unknown(et)) push_temp_unknown(v);
         return v;
     }
     if (at.attr == "throw") {
@@ -513,7 +517,7 @@ VReg Lowerer::lower_method_generator(Attribute& at, Call& c, VReg recv, TypePtr 
             ctor.args = {const_str(cn), const_int(0)};
             ev = def_heap(mk_exception(cn), std::move(ctor));
         } else {
-            ev = expr(*c.args[0]);
+            ev = coerce(expr(*c.args[0]), tc_.type_of(c.args[0].get()), t_unknown());
         }
         Inst in;
         in.op = IrOp::CallRt;
@@ -522,6 +526,7 @@ VReg Lowerer::lower_method_generator(Attribute& at, Call& c, VReg recv, TypePtr 
         VReg v = def(t_unknown(), std::move(in));
         v = retype(v, et);
         if (ir_is_heap(et)) push_temp(v);
+        else if (is_unknown(et)) push_temp_unknown(v);
         return v;
     }
     if (at.attr == "close") {
@@ -615,6 +620,7 @@ VReg Lowerer::lower_method_task(Attribute& at, Call& c, VReg recv, TypePtr recv_
         in.args = {recv};
         VReg v = def(t_unknown(), std::move(in));
         if (ir_is_heap(et)) push_temp(v);
+        else if (is_unknown(et)) push_temp_unknown(v);
         return v;
     }
     if (at.attr == "exception") {
@@ -682,6 +688,7 @@ VReg Lowerer::lower_method_future(Attribute& at, Call& c, VReg recv, TypePtr rec
         in.args = {recv};
         VReg v = def(t_unknown(), std::move(in));
         if (ir_is_heap(et)) push_temp(v);
+        else if (is_unknown(et)) push_temp_unknown(v);
         return v;
     }
     if (at.attr == "exception") {
