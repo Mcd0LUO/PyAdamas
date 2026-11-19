@@ -1101,6 +1101,10 @@ void AsmGen::gen_call_rt(const Inst& in) {
             //
             //   * DictKeyAt：dict 的 key 一律机器字，float key 的位模式也
             //     从 rax 取；
+            //   * dict 取值全家（DictGet/DictGetOr/DictGetOpt/DictPop/
+            //     DictPopLast）：运行时签名统一 int64_t pa_dict_*(...)，
+            //     float 值按位模式存在 entry.val、原样从 rax 返回。
+            //     dict[str,float] 的下标读 / get / pop / set.pop 全走这里；
             //   * JsonLoads：json.loads(text, sample) 的返回值类型由 sample
             //     决定，运行时统一返回 int64 位模式（见 ir_ops.h 的
             //     `(str* text, str* desc) -> i64`）。
@@ -1109,7 +1113,18 @@ void AsmGen::gen_call_rt(const Inst& in) {
             // 浮点（-1.688e+260）：codegen 读 %xmm0，而实际值在 %rax。
             // 这个 bug 在普通构建下被寄存器残留值掩盖，ASan 改变内存布局
             // 后才稳定复现 —— 由 `PYADAMAS_TEST_ASAN=1` 的套件扫描发现。
-            bool raw_ret = fn == RtFn::DictKeyAt || fn == RtFn::JsonLoads;
+            //
+            // dict 取值漏在这里是同款 bug 的更大面积版本（0.313 修复）：
+            // d.get(k, 0.0) 对存在键也返默认值（const.float 默认值经
+            // %xmm0 物化，调用后 %xmm0 恰好还是它）；d[k] 读回 %xmm0
+            // 残留（上次浮点物化/运行时调用的 leftovers）。非字面量 float
+            // 「存储后读回损坏/累加失效」的存储本身逐位正确，坏的是读路径；
+            // O0/O2 同病，只是残留值不同。DictTryGet 融合路径不受影响：
+            // 值由运行时 movq 直写帧槽，load.slot 按位读回。
+            bool raw_ret = fn == RtFn::DictKeyAt || fn == RtFn::JsonLoads ||
+                           fn == RtFn::DictGet || fn == RtFn::DictGetOr ||
+                           fn == RtFn::DictGetOpt || fn == RtFn::DictPop ||
+                           fn == RtFn::DictPopLast;
             if (raw_ret) {
                 // 位模式在 %rax 里。静态类型是 float 时把它搬到 %xmm0，
                 // 否则直接按整数落位。
