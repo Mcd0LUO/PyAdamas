@@ -477,6 +477,19 @@ std::string AsmGen::gen(const IRModule& m) {
             out_ += "\t.text\n";
         }
 
+        // 免写直调（from c import / cdll 句柄调用）：符号名 C 字符串 +
+        // 默认句柄的解析缓存槽。名字表按符号去重，槽在首次调用时填。
+        if (!m.c_lazy_syms.empty()) {
+            section_relro();
+            for (size_t i = 0; i < m.c_lazy_syms.size(); ++i)
+                out_ += std::format(".Lcsymstr{}:\n\t.asciz \"{}\"\n", i,
+                                    asm_escape(m.c_lazy_syms[i]));
+            out_ += "\t.bss\n\t.align 8\n";
+            for (size_t i = 0; i < m.c_lazy_syms.size(); ++i)
+                out_ += std::format(".Lcsym{}:\n\t.zero 8\n", i);
+            out_ += "\t.text\n";
+        }
+
         if (!m.is_entry && !m.module_symbol.empty() && m.entry >= 0) {
             out_ += "\t.globl " + module_init_symbol(m.module_symbol) + "\n";
             emit_type_func(module_init_symbol(m.module_symbol));

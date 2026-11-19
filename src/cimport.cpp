@@ -111,6 +111,7 @@ std::optional<CKind> parse_ckind(const std::string& text) {
     if (t == "int32") return CKind::Int32;
     if (t == "uint32") return CKind::UInt32;
     if (t == "float") return CKind::Float;
+    if (t == "float32") return CKind::Float32;
     if (t == "bool") return CKind::Bool;
     if (t == "str") return CKind::Str;
     if (t == "ptr") return CKind::Ptr;

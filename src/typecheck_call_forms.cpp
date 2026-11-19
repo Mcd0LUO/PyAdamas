@@ -348,6 +348,8 @@ TypePtr TypeChecker::call_attr(Attribute& a, Call& c) {
             return t_unknown();
         }
         auto ot = expr(*a.value);
+        // cdll 句柄的属性调用：lib.sym(...) 免写直调，符号经 dlsym(句柄) 解析。
+        if (ot && ot->kind == TyKind::CDLL) return check_c_lazy(c, a.attr);
         if (ot && ot->kind == TyKind::TypeObj) {
             // type(self).method(...)：类型对象上的动态方法调用（__lt__ 等），
             // 静态没有方法表，conservative 返回 unknown。

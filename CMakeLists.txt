@@ -56,6 +56,7 @@ set(PYADAMAS_SOURCES
   src/lower_expr_dunder.cpp
   src/lower_comp.cpp
   src/lower_call.cpp
+  src/lower_c_lazy.cpp
   src/lower_builtin.cpp
   src/lower_builtin_reflect.cpp
   src/lower_builtin_seq.cpp
@@ -120,7 +121,7 @@ else()
   set(PYADAMAS_RT_WERROR "")
 endif()
 
-set(PYADAMAS_RT_PARTS core exc eh gen async task fd agen str list dict slice class math complex format file random os subprocess time stdlib json re functools datetime deque hash debug personality diag cpy)
+set(PYADAMAS_RT_PARTS core exc eh gen async task fd agen str list dict slice class math complex format file random os subprocess time stdlib json re functools datetime deque hash debug personality diag cpy cffi)
 set(PYADAMAS_RT_OBJS "")
 foreach(part ${PYADAMAS_RT_PARTS})
   set(rt_obj "${CMAKE_BINARY_DIR}/rt_${part}.o")

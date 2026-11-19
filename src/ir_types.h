@@ -353,6 +353,12 @@ struct IRExtern {
     std::vector<int> param_cb;
     // C 可变参数函数：调用前要设置 %al（使用的 xmm 寄存器数）。
     bool varargs = false;
+    // 免写直调的绑定方式：0 = 链接期符号（cimport，call symbol）；
+    // 1 = dlsym(RTLD_DEFAULT)（from c import，首次调用解析并缓存）；
+    // 2 = dlsym(句柄)（cdll 句柄属性调用，句柄在 Inst::a，每次解析）。
+    int lazy = 0;
+    // lazy != 0 时指向 IRModule::c_lazy_syms 的符号名字符串下标。
+    int sym_name = -1;
 };
 
 // .cpya 的 extern 变量：只记录符号与加载宽度。
@@ -393,6 +399,9 @@ struct IRModule {
     std::vector<IRExternVar> extern_vars;
     // cimport 回调签名表：生成的跳板/闭包槽按这里的下标命名。
     std::vector<IRCallbackSig> cb_sigs;
+    // 免写直调的符号名表：IRExtern::sym_name 指向这里，codegen 为每个
+    // 名字发射 .Lcsymstr<N>（asciz）与 .Lcsym<N>（解析缓存槽）。
+    std::vector<std::string> c_lazy_syms;
     int entry = -1;  // 模块顶层代码编译成的函数下标
 
     IRFunction* add_func(std::string name) {

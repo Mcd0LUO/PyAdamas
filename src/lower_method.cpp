@@ -111,6 +111,11 @@ VReg Lowerer::lower_method_call(Attribute& at, Call& c) {
             return lower_super_call(at, c);
         }
     }
+    // cdll 句柄的属性调用：lib.sym(...) 免写直调，符号经 dlsym(句柄) 解析。
+    if (TypePtr vt = tc_.type_of(at.value.get()); vt && vt->kind == TyKind::CDLL) {
+        VReg h = expr(*at.value);
+        return lower_c_lazy_call(c, at.attr, h);
+    }
     // cimport 外部函数：alias.fname(...) 直接生成 CallExtern。
     if (auto* n = dynamic_cast<Name*>(at.value.get())) {
         if (tc_.cmodule(n->id)) return lower_cimport_call(at, c);
@@ -649,7 +654,8 @@ VReg Lowerer::lower_cimport_call(Attribute& at, Call& c) {
             continue;
         }
         switch (k) {
-            case CKind::Float: v = coerce(v, aty, t_float()); break;
+            case CKind::Float:
+            case CKind::Float32: v = coerce(v, aty, t_float()); break;
             case CKind::Str: v = coerce(v, aty, t_str()); break;
             case CKind::Bool: v = coerce(v, aty, t_bool()); break;
             case CKind::OptStr:

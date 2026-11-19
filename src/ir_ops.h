@@ -520,6 +520,8 @@ enum class RtFn : uint16_t {
     OsChmod,               // (str*, i64) -> void
     OsAccess,              // (str*, i64) -> i64
     OsMakedirs,            // (str*, i64 exist_ok) -> void
+    CDLLLoad,              // (str* path) -> i64 dlopen 句柄
+    CDLLClose,             // (i64 handle) -> i64 dlclose 结果
     OsPathRealpath,        // (str*) -> str*
     OsPathGetsize,         // (str*) -> i64
     OsPathGetmtime,        // (str*) -> f64
@@ -1056,6 +1058,8 @@ inline const char* rt_name(RtFn f) {
         case RtFn::OsChmod: return "pa_os_chmod";
         case RtFn::OsAccess: return "pa_os_access";
         case RtFn::OsMakedirs: return "pa_os_makedirs";
+        case RtFn::CDLLLoad: return "pa_cdll_load";
+        case RtFn::CDLLClose: return "pa_cdll_close";
         case RtFn::OsPathRealpath: return "pa_os_path_realpath";
         case RtFn::OsPathGetsize: return "pa_os_path_getsize";
         case RtFn::OsPathGetmtime: return "pa_os_path_getmtime";

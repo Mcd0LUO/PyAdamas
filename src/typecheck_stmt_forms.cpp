@@ -52,12 +52,47 @@ void TypeChecker::stmt_aug_assign(AugAssign& a) {
         return;
     }
 
+// 免写直调可用标注定返回 ABI 的类型：标量 + 可空 str/ptr。
+static bool c_abi_annotation(const TypePtr& t) {
+    if (!t) return false;
+    switch (t->kind) {
+        case TyKind::Float:
+        case TyKind::Int:
+        case TyKind::Str:
+        case TyKind::Bool:
+        case TyKind::None: return true;
+        case TyKind::Optional:
+            return !t->sub.empty() &&
+                   (t->sub[0]->kind == TyKind::Str || t->sub[0]->kind == TyKind::Int);
+        default: return false;
+    }
+}
+
+bool TypeChecker::is_c_lazy_call(const Expr* e) const {
+    if (!e || e->kind != ExprKind::Call) return false;
+    const auto& c = static_cast<const Call&>(*e);
+    if (c.func->kind == ExprKind::Name) {
+        TypePtr ft = type_of(c.func.get());
+        return ft && ft->kind == TyKind::Func && ft->fn && ft->fn->c_lazy;
+    }
+    if (c.func->kind == ExprKind::Attribute) {
+        const auto& at = static_cast<const Attribute&>(*c.func);
+        TypePtr rt = type_of(at.value.get());
+        return rt && rt->kind == TyKind::CDLL;
+    }
+    return false;
+}
+
 void TypeChecker::stmt_ann_assign(AnnAssign& a) {
         auto ann = parse_annotation(a.annotation.get(), a.line);
         TypePtr vt;
         if (a.value) {
             vt = expr(*a.value);
-            if (ann && !assignable(ann, vt))
+            if (ann && is_c_lazy_call(a.value.get()) && c_abi_annotation(ann)) {
+                // 标注定返回 ABI：覆盖调用点推断（调用方对 ABI 负责）。
+                vt = ann;
+                expr_types_[a.value.get()] = ann;
+            } else if (ann && !assignable(ann, vt))
                 err(a.line, a.col,
                     std::format("annotated as '{}' but assigned '{}'", type_name(ann),
                                 type_name(vt)));
@@ -88,6 +123,14 @@ void TypeChecker::stmt_return(Return& r) {
         if (!cur_fn_) {
             err(r.line, r.col, "'return' outside function");
             return;
+        }
+        // 免写直调：声明的返回标注同样可以定返回 ABI。
+        if (r.value && cur_fn_->ret_declared && is_c_lazy_call(r.value.get())) {
+            TypePtr want = cur_fn_->is_async ? cur_fn_->async_result : cur_fn_->ret;
+            if (c_abi_annotation(want)) {
+                vt = want;
+                expr_types_[r.value.get()] = want;
+            }
         }
         if (cur_fn_->ret_declared) {
             TypePtr want = cur_fn_->is_async ? cur_fn_->async_result : cur_fn_->ret;
@@ -490,6 +533,33 @@ void TypeChecker::stmt_cimport(CImport& ci) {
     }
 
 void TypeChecker::stmt_import_from(ImportFrom& im) {
+        // from c import X：免写直调。X 绑定成「惰性 C 函数」——没有 .cpya
+        // 声明，参数编组由调用点实参类型推断，返回类型按推断/标注，符号
+        // 在运行期经 dlsym(RTLD_DEFAULT) 解析。调用方对 ABI 负责。
+        if (im.level == 0 && im.module == "c") {
+            for (auto& al : im.names) {
+                if (al.name == "*") {
+                    err(im.line, im.col,
+                        "'from c import *' is not supported; import C symbols explicitly");
+                    continue;
+                }
+                std::string bind = al.asname.empty() ? al.name : al.asname;
+                // 名字可能已被 hoist_module_bindings 预绑定成 unknown 占位，
+                // 与普通 from-import 一样直接 declare 覆盖。
+                auto fi = std::make_shared<FuncInfo>();
+                fi->name = bind;
+                fi->c_lazy = true;
+                fi->c_symbol = al.name;
+                fi->is_extern = true;
+                fi->varargs = true;  // 参数个数/种类由调用点决定
+                fi->vararg_ty = t_unknown();
+                fi->ret_known = false;
+                auto ft = new_ty(TyKind::Func);
+                ft->fn = fi;
+                declare(bind, ft, im.line);
+            }
+            return;
+        }
         if (!module_lookup_) {
             for (auto& al : im.names) {
                 std::string bind = al.asname.empty() ? al.name : al.asname;

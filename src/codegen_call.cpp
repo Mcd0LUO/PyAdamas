@@ -586,7 +586,8 @@ void AsmGen::gen_call_extern(const Inst& in) {
             Place& p = ps[i];
             const IRStructABI* abi = i < ex.params.size() ? abi_at(i) : nullptr;
             if (!abi) {
-                bool fp = kind_at(i) == CKind::Float;
+                CKind kk = kind_at(i);
+                bool fp = kk == CKind::Float || kk == CKind::Float32;
                 p.fp = fp;
                 if (fp && fi < kMaxFpArgs()) {
                     p.reg = fi++;
@@ -618,6 +619,7 @@ void AsmGen::gen_call_extern(const Inst& in) {
         int int_tmp0 = out_base() + stack_bytes + 8, int_tmp1 = out_base() + stack_bytes + 16;
         int fp_tmp0 = out_base() + stack_bytes + 24, fp_tmp1 = out_base() + stack_bytes + 32;
         int sret_tmp = out_base() + stack_bytes + 40;
+        int fn_tmp = out_base() + stack_bytes + 48;
 
         // 取实参的机器值。str/可选 str 要先从 PyAdamasStr 里取出 data 字段
         // （偏移 24：pub/len/hash 之后的第四个机器字）；Buf* 从 list/bytes 的
@@ -660,6 +662,10 @@ void AsmGen::gen_call_extern(const Inst& in) {
                     line(std::format("leaq .Lcbtramp{}(%rip), %r10", sig));
                 }
                 emit2("movq", "%r10", reg);
+            } else if (k == CKind::Float32) {
+                // 栈上的 C float 实参：double 收窄成单精度，位模式进 8 字节槽。
+                line(std::format("cvtsd2ss {}, %xmm0", src));
+                emit2("movq", "%xmm0", reg);
             } else {
                 emit2("movq", src, reg);
             }
@@ -689,6 +695,31 @@ void AsmGen::gen_call_extern(const Inst& in) {
             line("call pa_struct_new");
             reload_fp_slots();
             emit2("movq", "%rax", std::format("{}(%rsp)", sret_tmp));
+        }
+
+        // 免写直调：先把 C 函数地址解析到 fn_tmp，再装配实参（解析调用
+        // 会破坏参数寄存器）。lazy==1 走进程默认符号表并缓存到静态槽；
+        // lazy==2 每次按运行期句柄 dlsym（句柄在 in.a）。
+        if (ex.lazy) {
+            spill_fp_slots();
+            if (ex.lazy == 1) {
+                line(std::format("movq .Lcsym{}(%rip), %r11", ex.sym_name));
+                line("testq %r11, %r11");
+                std::string hit = fresh_label("csymhit");
+                emit_jmp("jne", hit);
+                line(std::format("leaq .Lcsymstr{}(%rip), {}", ex.sym_name, arg_reg_i(0)));
+                line("call pa_c_sym_default");
+                line("movq %rax, %r11");
+                line(std::format("movq %r11, .Lcsym{}(%rip)", ex.sym_name));
+                label(hit);
+            } else {
+                emit2("movq", src_op(in.a), arg_reg_i(0));
+                line(std::format("leaq .Lcsymstr{}(%rip), {}", ex.sym_name, arg_reg_i(1)));
+                line("call pa_c_sym_handle");
+                line("movq %rax, %r11");
+            }
+            line(std::format("movq %r11, {}(%rsp)", fn_tmp));
+            reload_fp_slots();
         }
 
         // slot_off >= 0 表示整块走栈，否则按 chunk 分散到寄存器。
@@ -729,7 +760,10 @@ void AsmGen::gen_call_extern(const Inst& in) {
             if (p.is_struct) {
                 struct_arg(i, p, -1);
             } else if (p.fp) {
-                line(std::format("movsd {}, %xmm{}", src_op(in.args[i]), p.reg));
+                if (kind_at(i) == CKind::Float32)
+                    line(std::format("cvtsd2ss {}, %xmm{}", src_op(in.args[i]), p.reg));
+                else
+                    line(std::format("movsd {}, %xmm{}", src_op(in.args[i]), p.reg));
             } else {
                 arg_into(i, arg_reg_i(p.reg));
             }
@@ -737,10 +771,17 @@ void AsmGen::gen_call_extern(const Inst& in) {
         if (hidden) emit2("movq", std::format("{}(%rsp)", sret_tmp), arg_reg_i(0));
         // 可变参数函数要求 %al = 使用的向量寄存器数；非可变参数沿用
         // 原有的清空做法。
-        if (ex.varargs) line(std::format("movl ${}, %eax", fi));
+        // %al 是「用到的向量寄存器数」，ABI 上限 8：溢出的浮点实参走栈，
+        // 不能把 fi 原样塞进去（>8 会让 va_arg 的寄存器保存区读越界）。
+        if (ex.varargs) line(std::format("movl ${}, %eax", fi > 8 ? 8 : fi));
         else if (opt_ < 2) line("xorl %eax, %eax");
         spill_fp_slots();
-        line("call " + ex.symbol);
+        if (ex.lazy) {
+            line(std::format("movq {}(%rsp), %r11", fn_tmp));
+            line("call *%r11");
+        } else {
+            line("call " + ex.symbol);
+        }
         reload_fp_slots();
 
         if (!dst_unused(in)) {
@@ -788,6 +829,10 @@ void AsmGen::gen_call_extern(const Inst& in) {
                     case CKind::None:
                         break;
                     case CKind::Float:
+                        emit2("movsd", "%xmm0", dst);
+                        break;
+                    case CKind::Float32:
+                        line("cvtss2sd %xmm0, %xmm0");
                         emit2("movsd", "%xmm0", dst);
                         break;
                     case CKind::Int32:
@@ -845,6 +890,11 @@ void AsmGen::gen_load_extern(const Inst& in) {
                 line("movsd " + sym + ", %xmm0");
                 emit2("movsd", "%xmm0", dst);
                 break;
+            case CKind::Float32:
+                line("movss " + sym + ", %xmm0");
+                line("cvtss2sd %xmm0, %xmm0");
+                emit2("movsd", "%xmm0", dst);
+                break;
             case CKind::Int32:
                 line("movslq " + sym + ", %rax");
                 move_to(dst, "%rax");
@@ -882,6 +932,11 @@ void AsmGen::gen_store_extern(const Inst& in) {
                 emit2("movsd", src_op(in.a), "%xmm0");
                 line("movsd %xmm0, " + sym);
                 break;
+            case CKind::Float32:
+                emit2("movsd", src_op(in.a), "%xmm0");
+                line("cvtsd2ss %xmm0, %xmm0");
+                line("movss %xmm0, " + sym);
+                break;
             case CKind::Int32:
             case CKind::UInt32:
                 emit2("movq", src_op(in.a), "%rax");
@@ -906,7 +961,13 @@ void AsmGen::gen_ptr_load(const Inst& in) {
         line(std::format("leaq (%rax,%r11,{}), %rax", in.imm));
         const std::string dst = dst_op(in.dst);
         if (ir_is_float(in.ty)) {
-            line("movsd (%rax), %xmm0");
+            if (in.fwidth == 4) {
+                // ptr[float32]：单精度装载后提升成 double。
+                line("movss (%rax), %xmm0");
+                line("cvtss2sd %xmm0, %xmm0");
+            } else {
+                line("movsd (%rax), %xmm0");
+            }
             emit2("movsd", "%xmm0", dst);
             return;
         }
@@ -929,7 +990,12 @@ void AsmGen::gen_ptr_store(const Inst& in) {
         line(std::format("leaq (%rax,%r11,{}), %rax", in.imm));
         if (ir_is_float(in.ty)) {
             emit2("movsd", src_op(in.c), "%xmm0");
-            line("movsd %xmm0, (%rax)");
+            if (in.fwidth == 4) {
+                line("cvtsd2ss %xmm0, %xmm0");
+                line("movss %xmm0, (%rax)");
+            } else {
+                line("movsd %xmm0, (%rax)");
+            }
             return;
         }
         emit2("movq", src_op(in.c), "%r10");

@@ -573,6 +573,11 @@ VReg Lowerer::lower_call(Call& c) {
             FuncInfoPtr info = (ft && ft->kind == TyKind::Func) ? ft->fn : nullptr;
             return call_native(it->second.module, it->second.member, c, info);
         }
+        // 免写直调：from c import X —— 符号经 dlsym(RTLD_DEFAULT) 解析。
+        if (TypePtr ft = tc_.type_of(c.func.get());
+            ft && ft->kind == TyKind::Func && ft->fn && ft->fn->c_lazy)
+            return lower_c_lazy_call(c, ft->fn->c_symbol.empty() ? n.id : ft->fn->c_symbol,
+                                     kNoReg);
     }
 
     // 实例调用：静态类型是类实例（类名构造已在上面拦掉），调用走 __call__。

@@ -18,6 +18,7 @@ enum class CKind : uint8_t {
     Int32,    // int
     UInt32,   // unsigned
     Float,    // double
+    Float32,  // C float（单精度）：PyAdamas 侧仍是 double，边界做 cvt 转换
     Bool,     // _Bool
     Str,      // char*（非空）
     Ptr,      // void* / T*
@@ -120,7 +121,8 @@ inline int ckind_width(CKind k) {
     switch (k) {
         case CKind::Bool: return 1;
         case CKind::Int32:
-        case CKind::UInt32: return 4;
+        case CKind::UInt32:
+        case CKind::Float32: return 4;
         default: return 8;
     }
 }

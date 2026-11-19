@@ -5,6 +5,7 @@
 
 int global_counter = 7;
 double global_ratio = 2.5;
+float global_ratiof = 1.25f;
 
 int add(int a, int b) { return a + b; }
 
@@ -17,6 +18,8 @@ long sum_ptrs(const long *xs, int n) {
 }
 
 double scale(double x, double k) { return x * k; }
+
+float scalef(float x, float k) { return x * k; }
 
 const char *name_of(int id) { return id == 0 ? "zero" : "other"; }
 
