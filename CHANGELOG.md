@@ -4,6 +4,51 @@
 
 早期阶段没有逐条留痕，按阶段归纳；0.4 之后逐条记录。
 
+## [0.325] - 2026-11-19
+
+> p2tag 分支：unknown 表示层 **P2 容器级域 tag 评估**（0.324 后续，与 stdlib
+> 轮并行；集成时 CHANGELOG 编号按实际落地顺序重排）。**结论：P2 容器域 tag
+> 单独落地收益不抵复杂度，建议直接 P3 封闭 tagged union。** 未改运行时/
+> 编译器（尝试均已回退），仅新增评估文档 docs/p2-container-tag-eval.md。
+> 不推 master、不动主树。
+
+### 评估结论（docs/p2-container-tag-eval.md）
+
+- **成本主体在标量 unknown 侧，不在容器侧**：perf 剖析 u1 的 rc_index_has
+  占 ~40%（pa_rc_inc_unknown / dec_unknown / temp_unknown / any_decode 的
+  探针），u3 的探针 ~25% + float 结果盒分配/回收 churn ~24%（rc_alloc_core /
+  rc_link / rc_index_put / del / pa_rc_dec_slow）。这些来自 for 循环变量 v、
+  累加器 total/acc 等**标量 unknown 槽**每轮 retain/release 与结果装箱。
+  容器域 tag 管不到取出后的标量（设计文档 §4.3「tag 属于容器，取出即丢」），
+  故对 u1/u3 主体成本无效。
+- **硬阻塞（asm 约束）**：降装箱频率需「裸 float 内联 + 2-bit 域 tag」，
+  必须改 kind2 下标写入的生成代码（src/codegen_index.cpp 内联 `btsq/btrq`
+  1-bit 位图维护）。26 个热基准里 **8 个**（b1/b4/d2/d4/d6/fannkuch/matmul/
+  nqueens）含这条内联路径，改它破坏「26 基准 asm 逐字节不变」（约束 ①）。
+  2-bit 升级原型实测令 206_list_store_kind SIGSEGV（内联 1-bit 置位写花
+  2-bit 域字，销毁把整数当堆指针 dec），已回退。
+- **可行但复杂的替代**（独立 dom 数组 + 编译器「可能含 float」路由）理论上
+  asm 安全，但需数据流分析 + 写入/读取路由 + 裸 float 释放/传播，复杂度中高，
+  且 u1 标量成本仍在 → 收益不抵复杂度。
+- **旁证**：探针「叶子位图优先」重排（运行时-only，asm 安全）实测 u1 −1.7% /
+  u3 −1.1%（噪声内），u2（dict 探针密集）显著下降——印证 u1/u3 成本在探针/
+  装箱**次数**（标量侧），非探针顺序。实验已回退。
+
+### 给 P3 的输入
+
+- P3 封闭 tagged union（{i8 tag, 8B payload} 内联，tag 跟值走）才能同时消掉
+  标量槽探针与 float 结果装箱 churn；容器元素域 tag 作为 P3 子集自然导出，
+  避免与现有内联 1-bit heap_bits 冲突。静态已知路径仍零开销（26 基准 asm
+  均无 pa_any_* 调用，P3 对其影响可控）。
+
+### 验证（干净基线 fdeea25 复核）
+
+- 2.1 的 2-bit 尝试与探针重排均回退，worktree 相对 fdeea25 仅新增本文档与
+  本 CHANGELOG 条目。
+- tests/run/206_list_store_kind.py 对拍 expect 一致；普通套件 ran ok /
+  EXIT=0、difftest 全 0（PYADAMAS_TEST_JOBS=8）。0.324 异构 print/算术正确性
+  （247_unknown_float_tag）保持不变。
+
 ## [0.324] - 2026-11-19
 
 > typetag 分支：unknown/动态值表示层对齐 codon 的"带标签方向"——先做设计
