@@ -1107,6 +1107,10 @@ private:
     VReg lower_method_value(Attribute& at);
     // 按接收者类型拆开的方法调用降级（lower_method_*.cpp）。
     VReg lower_method_native(Attribute& at, Call& c, VReg recv, TypePtr recv_ty, bool opt);
+    // vthread 先验（lower_vthread.cpp）
+    VReg lower_go(Expr& e);
+    VReg lower_builtin_vthread(const std::string& name, Call& c);
+    VReg lower_method_chan(Attribute& at, Call& c, VReg recv, TypePtr recv_ty);
     VReg lower_method_generator(Attribute& at, Call& c, VReg recv, TypePtr recv_ty);
     VReg lower_method_async_generator(Attribute& at, Call& c, VReg recv, TypePtr recv_ty);
     VReg lower_method_task(Attribute& at, Call& c, VReg recv, TypePtr recv_ty);

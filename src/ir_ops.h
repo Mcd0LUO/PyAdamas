@@ -549,6 +549,16 @@ enum class RtFn : uint16_t {
     DequeReverse,          // (dq*) -> void
     DequeCopy,             // (dq*) -> deque*
     ListCopyRange,         // (list* dst, list* src, i64 lo, i64 hi, i64 heap) -> void
+    // 虚拟线程先验（runtime/rt_vthread.c，docs/vthread-design.md）
+    VtSpawn,               // (i64 closure) -> vt*；接管闭包引用
+    VtJoin,                // (vt*) -> void；阻塞让出，异常重抛
+    VtSleep,               // (i64 ms) -> void；阻塞让出
+    VtShutdown,            // () -> void；入口退出 drain
+    ChanNew,               // (i64 elem_kind, i64 cap) -> chan*
+    ChanSend,              // (chan*, i64 v) -> void；heap 种类接管引用
+    ChanRecv,              // (chan*) -> i64；heap 种类交出引用
+    ChanSendF,             // (chan*, f64 v) -> void
+    ChanRecvF,             // (chan*) -> f64
 };
 
 inline const char* rt_name(RtFn f) {
@@ -556,6 +566,15 @@ inline const char* rt_name(RtFn f) {
         case RtFn::ListNew: return "pa_list_new";
         case RtFn::ListAppend: return "pa_list_append";
         case RtFn::ListCopyRange: return "pa_list_copy_range";
+        case RtFn::VtSpawn: return "pa_vt_spawn";
+        case RtFn::VtJoin: return "pa_vt_join";
+        case RtFn::VtSleep: return "pa_vt_sleep";
+        case RtFn::VtShutdown: return "pa_vt_shutdown";
+        case RtFn::ChanNew: return "pa_chan_new";
+        case RtFn::ChanSend: return "pa_chan_send";
+        case RtFn::ChanRecv: return "pa_chan_recv";
+        case RtFn::ChanSendF: return "pa_chan_send_f";
+        case RtFn::ChanRecvF: return "pa_chan_recv_f";
         case RtFn::ListGet: return "pa_list_get";
         case RtFn::ListSet: return "pa_list_set";
         case RtFn::ListSetLen: return "pa_list_set_len";

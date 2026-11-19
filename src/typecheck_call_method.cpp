@@ -26,6 +26,8 @@ bool TypeChecker::has_method(const TypePtr& t, const std::string& m) {
                 return m == "done" || m == "cancel" || m == "cancelled" ||
                        m == "result" || m == "exception" || m == "set_result" ||
                        m == "set_exception" || m == "add_done_callback";
+            case TyKind::Chan:
+                return m == "send" || m == "recv";
             case TyKind::Str: {
                 static const std::unordered_set<std::string> ms = {
                     "upper",    "lower",     "strip",  "lstrip", "rstrip", "split",
@@ -335,6 +337,24 @@ TypePtr TypeChecker::method_call(TypePtr recv, const std::string& name, Call& c,
                 return mk_optional(mk_exception("Exception"));
             }
             err(c.line, c.col, std::format("'future' object has no method '{}'", name));
+            return t_unknown();
+        }
+
+        if (recv->kind == TyKind::Chan) {
+            if (name == "send") {
+                argc(1, 1);
+                TypePtr et = elem();
+                if (a.size() == 1 && a[0] && !is_unknown(a[0]) && !is_unknown(et) &&
+                    !assignable(et, a[0]))
+                    err(c.line, c.col,
+                        std::format("send() expects {}, got {}", type_name(et), type_name(a[0])));
+                return t_none();
+            }
+            if (name == "recv") {
+                argc(0, 0);
+                return elem();
+            }
+            err(c.line, c.col, std::format("'chan' object has no method '{}'", name));
             return t_unknown();
         }
 

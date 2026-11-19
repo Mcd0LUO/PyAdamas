@@ -1604,3 +1604,24 @@ static inline void pa_own_gc_unref(int64_t own, int64_t v) {
     if (own == 1) pa_gc_unref_child((void*)v);
     else if (own == 2) pa_rc_dec_unknown(v);
 }
+
+/* ── 虚拟线程（Go 式无色并发，M=1 协作调度；docs/vthread-design.md）──
+   handle/chan 都是 RC OBJ，magic 校验。spawn 接管闭包的一份引用；
+   chan send 接管 heap 种类值的一份引用，recv 交出一份。 */
+void* pa_vt_spawn(int64_t fn);
+void pa_vt_join(int64_t h);
+void pa_vt_sleep(int64_t ms);
+void pa_vt_shutdown(void);
+void pa_vt_gc_scan(void);
+void* pa_chan_new(int64_t kind, int64_t cap);
+void pa_chan_send(void* c, int64_t v);
+int64_t pa_chan_recv(void* c);
+void pa_chan_send_f(void* c, double v);
+double pa_chan_recv_f(void* c);
+/* GC 跨栈扫描导出（rt_core.c）：挂起 vthread 的帧链精确扫描 + 单字标记。 */
+struct PyAdamasFrame;
+void pa_gc_scan_frames_from(PyAdamasFrame* top);
+void pa_gc_mark_word(uintptr_t v);
+/* 异常上下文水位 save/load（rt_exc.c，vthread 切换用）。 */
+void pa_exc_ctx_save(void** top, int64_t* depth);
+void pa_exc_ctx_load(void* top, int64_t depth);

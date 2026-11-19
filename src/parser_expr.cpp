@@ -475,6 +475,13 @@ ExprPtr Parser::parse_atom() {
             }
             case Tok::NAME: {
                 auto t = advance();
+                // go 是软关键字：只有「go NAME…」才按 spawn 表达式解析，
+                // go = 1 / go() / go[0] 里的 go 仍是普通名字。
+                if (t.text == "go" && check(Tok::NAME)) {
+                    auto g = node_at<GoExpr>(ln, cl);
+                    g->call = parse_primary();
+                    return g;
+                }
                 auto n = std::make_unique<Name>(t.text);
                 n->line = t.line;
                 n->col = t.col;

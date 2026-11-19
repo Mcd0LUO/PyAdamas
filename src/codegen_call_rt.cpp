@@ -390,6 +390,7 @@ void AsmGen::gen_rt_args(const Inst& in, RtFn fn) {
         case RtFn::TimeMonotonic:
         case RtFn::TimePerfCounter:
         case RtFn::OsGetpid:
+        case RtFn::VtShutdown:
             gen_rt_none(in);
             break;
         case RtFn::RegexGroups:
@@ -442,6 +443,11 @@ void AsmGen::gen_rt_args(const Inst& in, RtFn fn) {
         case RtFn::EnumerateList:
         case RtFn::ListReverse:
         case RtFn::IntBitLength:
+        case RtFn::VtSpawn:
+        case RtFn::VtJoin:
+        case RtFn::VtSleep:
+        case RtFn::ChanRecv:
+        case RtFn::ChanRecvF:
         case RtFn::FileClose:
         case RtFn::FileFlush:
         case RtFn::FileTell:
@@ -712,6 +718,8 @@ void AsmGen::gen_rt_args(const Inst& in, RtFn fn) {
         case RtFn::PopenCommunicate:
         case RtFn::AsyncioGather:
         case RtFn::AsyncioCreateTask:
+        case RtFn::ChanNew:
+        case RtFn::ChanSend:
         case RtFn::EhRaise:
         case RtFn::EhRaiseValueFrom:
             gen_rt_i2(in);
@@ -897,6 +905,7 @@ void AsmGen::gen_rt_args(const Inst& in, RtFn fn) {
         case RtFn::AsyncioWaitFor:
         case RtFn::RandExpovariate:
         case RtFn::PopenWait:
+        case RtFn::ChanSendF:
             gen_rt_i1f1(in);
             break;
         case RtFn::RandUniform:

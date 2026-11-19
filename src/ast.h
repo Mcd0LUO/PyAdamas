@@ -30,6 +30,7 @@ enum class ExprKind : uint8_t {
     ListComp, SetComp, DictComp, GeneratorExp, Comprehension,
     Lambda, IfExp, Starred, NamedExpr,
     Await, Yield, YieldFrom, JoinedStr,
+    Go,  // go f(args)：spawn 虚拟线程，值是 handle（vthread 先验）
 };
 
 // 比较运算符。`is` / `is not` / `not in` 必须与 `==` / `!=` / `in` 分开：
@@ -493,6 +494,15 @@ struct Await : Expr {
     void dump(std::ostream& os, int ind) const override {
         pad(os, ind); os << "Await\n";
         value->dump(os, ind + 1);
+    }
+};
+
+struct GoExpr : Expr {
+    ExprPtr call;  // 必须是 Call（typecheck 校验）
+    GoExpr() : Expr(ExprKind::Go) {}
+    void dump(std::ostream& os, int ind) const override {
+        pad(os, ind); os << "Go\n";
+        call->dump(os, ind + 1);
     }
 };
 

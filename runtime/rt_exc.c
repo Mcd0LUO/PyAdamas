@@ -566,6 +566,17 @@ static int64_t exc_node_depth;
 
 int64_t pa_exc_depth(void) { return exc_node_depth; }
 
+/* vthread 切换用：异常上下文节点链也是栈水位全局（节点 malloc，链全局）。
+   挂起 vthread 的 except 上下文必须随切换保存/恢复（rt_vthread.c）。 */
+void pa_exc_ctx_save(void** top, int64_t* depth) {
+    *top = (void*)exc_node_top;
+    *depth = exc_node_depth;
+}
+void pa_exc_ctx_load(void* top, int64_t depth) {
+    exc_node_top = (PyAdamasExcNode*)top;
+    exc_node_depth = depth;
+}
+
 int64_t pa_exc_enter(int64_t* cur, int64_t* top) {
     PyAdamasException* gc = (PyAdamasException*)(uintptr_t)*cur;
     PyAdamasExcSave* gt = (PyAdamasExcSave*)(uintptr_t)*top;

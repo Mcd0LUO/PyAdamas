@@ -47,6 +47,7 @@ set(PYADAMAS_SOURCES
   src/lower_import_native.cpp
   src/lower_import_stdlib.cpp
   src/lower_import_misc.cpp
+  src/lower_vthread.cpp
   src/lower_cpy.cpp
   src/lower_match.cpp
   src/lower_expr.cpp
@@ -121,7 +122,7 @@ else()
   set(PYADAMAS_RT_WERROR "")
 endif()
 
-set(PYADAMAS_RT_PARTS core exc eh gen async task fd agen str list dict slice class math complex format file random os subprocess time stdlib json re functools datetime deque hash debug personality diag cpy cffi)
+set(PYADAMAS_RT_PARTS core exc eh gen async task fd agen str list dict slice class math complex format file random os subprocess time stdlib json re functools datetime deque hash debug personality diag cpy cffi vthread)
 set(PYADAMAS_RT_OBJS "")
 foreach(part ${PYADAMAS_RT_PARTS})
   set(rt_obj "${CMAKE_BINARY_DIR}/rt_${part}.o")

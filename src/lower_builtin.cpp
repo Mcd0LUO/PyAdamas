@@ -17,6 +17,7 @@ VReg Lowerer::lower_builtin_call(const std::string& name, Call& c) {
     if (VReg r = lower_builtin_container(name, c); r != kNoReg) return r;
     if (VReg r = lower_builtin_text(name, c); r != kNoReg) return r;
     if (VReg r = lower_builtin_misc(name, c); r != kNoReg) return r;
+    if (VReg r = lower_builtin_vthread(name, c); r != kNoReg) return r;
 
     err(c.line, c.col, std::format("builtin '{}' is not supported by the code generator yet", name));
     return const_none();

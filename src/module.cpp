@@ -293,6 +293,9 @@ void enc_type(Enc& e, const TypePtr& t) {
         case TyKind::StructPtr:
         // dylib 句柄不跨模块传递：按 unknown 处理。
         case TyKind::DYLIB:
+        // vthread handle / chan 跨模块签名暂不支持：按 unknown 处理。
+        case TyKind::VThread:
+        case TyKind::Chan:
             e.u8(0);
             break;
         case TyKind::Bytes: e.u8(12); break;

@@ -408,6 +408,7 @@ VReg Lowerer::expr(Expr& e) {
         }
         case ExprKind::Yield: return lower_yield(e);
         case ExprKind::Await: return lower_await(e);
+        case ExprKind::Go: return lower_go(e);
         case ExprKind::YieldFrom:
             return lower_yield_from(static_cast<YieldFrom&>(e));
         case ExprKind::FormattedValue: {

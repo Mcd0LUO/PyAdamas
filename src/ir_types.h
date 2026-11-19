@@ -519,6 +519,8 @@ inline bool ir_is_heap(const TypePtr& t) {
         case TyKind::Path:
         case TyKind::Deque:
         case TyKind::Struct:
+        case TyKind::VThread:
+        case TyKind::Chan:
             return true;
         case TyKind::Optional:
             return !t->sub.empty() && ir_is_heap(t->sub[0]);
@@ -570,6 +572,8 @@ inline bool ir_is_ref(const TypePtr& t) {
         case TyKind::TimeDelta:
         case TyKind::Path:
         case TyKind::Deque:
+        case TyKind::VThread:
+        case TyKind::Chan:
             return true;
         default:
             return false;

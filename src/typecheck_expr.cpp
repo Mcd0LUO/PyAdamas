@@ -613,6 +613,38 @@ TypePtr TypeChecker::expr(Expr& e) {
                     std::format("'{}' object is not awaitable", type_name(vt)));
                 return t_unknown();
             }
+            case ExprKind::Go: {
+                auto& g = static_cast<GoExpr&>(e);
+                (void)expr(*g.call);
+                auto* call = dynamic_cast<Call*>(g.call.get());
+                if (!call) {
+                    err(e.line, e.col, "go expects a function call, e.g. 'go f(args)'");
+                    return mk_vthread();
+                }
+                TypePtr ft = expr(*call->func);
+                if (!ft || ft->kind != TyKind::Func || !ft->fn) {
+                    err(e.line, e.col,
+                        "go expects a function value with a known signature");
+                    return mk_vthread();
+                }
+                FuncInfoPtr fn = ft->fn;
+                if (fn->unchecked)
+                    err(e.line, e.col, "go expects a user-defined function");
+                if (fn->is_generator || fn->is_async || fn->is_async_generator)
+                    err(e.line, e.col,
+                        "go cannot spawn a generator or coroutine (use plain functions)");
+                if (fn->varargs || fn->kwargs)
+                    err(e.line, e.col,
+                        "go does not support functions with *args/**kwargs yet");
+                if (!call->keywords.empty())
+                    err(e.line, e.col, "go does not support keyword arguments yet");
+                size_t nparams = fn->pos.size() + fn->kwonly.size();
+                if (call->args.size() != nparams)
+                    err(e.line, e.col,
+                        std::format("go requires all {} arguments explicitly (defaults not supported yet)",
+                                    nparams));
+                return mk_vthread();
+            }
             case ExprKind::Yield: {
                 saw_yield_ = true;
                 auto& y = static_cast<Yield&>(e);
