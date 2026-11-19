@@ -4,6 +4,120 @@
 
 早期阶段没有逐条留痕，按阶段归纳；0.4 之后逐条记录。
 
+## [0.326] - 2026-11-20
+
+> stdlib1 分支：标准库拓宽第一批（需求驱动，日常脚本刚需）——**argparse /
+> configparser / gzip（+zlib 支撑层）**。与 P2（容器表示层）/P3（rt_any.c）
+> 并行开发，**不改主树、不推 master**；集成时编号按落地顺序重排（0.325
+> 留给并行轮）。方法：差分基建先行，每个 API 对拍 CPython 3.14（正常/边界/
+> 错误路径），错误路径（argparse 退出码 2 + usage）用自子进程对拍。
+> 选型理由/API 覆盖/差异/桥接兜底清单见 **docs/stdlib-batch1.md**。
+>
+> 未做（评估记录在案）：decimal/fractions 深化需任意精度 BigInt（深，另票）；
+> sqlite3 需外部库 + 完整游标/事务语义（cimport 路径已验证可行，性价比低）；
+> zipfile/pathlib 补全后续批次。
+
+### 模块交付（stdlib/，模块表登记）
+
+- **argparse.py**：ArgumentParser/Namespace/ArgumentTypeError/ArgumentError。
+  actions（store/store_true/store_false/store_const/append/append_const/
+  count/help）、nargs（None/?/*/+/N）、type/choices/default/required/metavar/
+  dest、位置参数、--long=value、短选项 bundling（-abc/-fval/-f=val）、-- 分隔、
+  唯一前缀缩写、parse_args/parse_known_args、usage/help 排版（默认
+  HelpFormatter 口径：帮助列 min(最长调用+4,24)、宽度 78、usage 超长折行同
+  CPython get_lines）、error/exit。错误消息逐字对齐（expected one argument /
+  invalid int value / invalid choice / ambiguous option / unrecognized
+  arguments / required / conflicting option string 等）。
+- **configparser.py**：ConfigParser + 11 个异常类。read/read_string/read_file、
+  sections/options/has_*/get/getint/getfloat/getboolean（raw/fallback/vars）、
+  items/set/add_section/remove_*/defaults/write、optionxform 可覆盖、DEFAULT、
+  续行/空行/整行注释、BasicInterpolation %(key)s（%% 转义/10 层深度/
+  before_set 校验）。异常消息逐字对齐（含 [line %2d] 与 repr(line)）。
+  多行值合并用「带标注局部 dict 整体写入字段」口径（避开 DictGet 借用嵌套
+  dict 的下标存值路径）。
+- **gzip.py + zlib.py + _gzipio.py + zlib.cpya + gzip_glue.c**：系统 zlib
+  原生（cimport，link z + C 胶水，z_stream 留 C 侧）。gzip.compress **字节级
+  同 CPython**（XFL/OS/mtime=0 默认）；decompress 多 member/零填充/
+  FEXTRA/FNAME/FCOMMENT/FHCRC/CRC/ISIZE 校验；GzipFile rb/wb/rt/wt 整读整写 +
+  上下文管理 + 通用换行；zlib compress/decompress/crc32/adler32。错误消息对齐
+  （BadGzipFile/EOFError/Error -3/-5）。_gzipio 单独成模块是因为 gzip.py 的
+  open 遮蔽内置 open。
+
+### 前端使能（argparse 前提，通用语言修复，各带回归用例）
+
+- **F1 跨模块动态属性**：模块接口导出 needs_dict（格式 v11→v12，旧 modcache
+  自动失效）；getattr 字面量名/属性直写尊重 needs_dict。导入类实例 args.x
+  直读直写/getattr/setattr/hasattr/vars 全通（257）。
+- **F2 setattr 非字面量名**：值 coerce 进 unknown（补 float 装箱漏路）（257）。
+- **F3 显式 object/Any 形参保持 unknown 域**：不回填单态化，float 实参调用点
+  装箱；接口序列化 ann_unknown；负数字面量默认值（-1/-2.5，literal_of_expr/
+  as_const 收一元负/正）（258）。
+- **F4 类型名当值**：int/float/str 等是 TypeObj（机器表示＝类型名字符串），
+  同一性/相等/print/str/容器/isinstance/issubclass/type(x) 全通；str(类型对象)
+  = "<class 'name'>"；类型对象值当被调者明确拒绝（259）。
+- **B1 空容器字面量类型洞按目标填**：字段赋值/重赋值（declare）、dict/list
+  下标存与 append（merge_elem）、return（stmt_return）、实参（bind_param）。
+  修复 str 键退化成指针哈希、内容相同的键查不回（260）。**异构列表改用
+  unknown 单例（不可填）**：[1, "x"] 的 fresh_hole 会被目标单态化成 list[str]，
+  字面量按 kind1 建表、int 元素当堆指针 dec → 段错误（206 回归 + 260 新增
+  异构用例；该单例化同时修掉基线已有的同族崩溃）。
+- **B2 is/is not 对 unknown/Optional 操作数补 Mov 到机器字**：修复 cmp.eq 按
+  底层 str 走内容比较、None 当 NULL 解引用段错误（261）。
+- **B3 unknown 迭代/物化**：for/推导式/list()/tuple() 经 pa_any_iter_list 按
+  运行期种类展开（list 零拷贝+1、str 拆码点、dict 取键）。**放 rt_class.c，
+  刻意不动 rt_any.c（P3 并行）**（257/261）。
+- **B4 vars() 合并动态属性 dict**（AttrDict 借用 + DictUpdate）（257）。
+- **B5 repr(unknown)**（ReprAny → pa_repr_any）（261）。
+- **B6 int()/float() 错误消息 CPython 口径**（with base %d: %r / could not
+  convert string to float: %r，exc_new 复制后释放临时缓冲，longjmp 前无泄漏）
+  （261）。
+- **B7 cimport link "file.c"**：cwd 找不到时回退 .cpya 所在目录（转绝对路径），
+  stdlib 分发不依赖用户 cwd（255/256）。
+- RtFn 新增（AttrDict/AnyIterList/ReprAny）**全部追加枚举末尾**，不改既有编号。
+
+### 回归用例（tests/run/250–261，12 个，先对拍 CPython 再钉 expect）
+
+250 argparse 基本 / 251 argparse 错误（自子进程）/ 252 argparse help 排版 /
+253 configparser 基本 / 254 configparser 错误 / 255 gzip 字节级往返 /
+256 GzipFile / 257 跨模块动态属性 / 258 object 形参 / 259 类型值 /
+260 类型洞填充 / 261 is-None 与消息。O0/O1/O2 逐字节一致。
+
+### 已知问题（差分 harness 新发现，**基线 fdeea25 已验证复现**，非本批引入）
+
+leaf 值（str/bytes/float 盒）× unknown 域 RC 不对称：0.321 leaf-str 不进索引，
+探针 inc/dec 对 leaf 失效，与直接 inc/dec 混用时引用计数不对称 → 小泄漏。
+最小复现 j12（def f(s: str) -> object: return s.lower()，104B）/ m5
+（print(f() * 2)，f -> object 返回 float，72B 盒）；PYADAMAS_GC_CONSERVATIVE=1
+全消、GC_DISABLE 仍漏（与收集无关）。绕行：object 调用结果先赋带标注局部变量
+（j14 口径）。根治属 P2/P3 unknown 表示层工作流，本批不做表示层改动，记录移交。
+详见 docs/stdlib-batch1.md §四半。
+
+### 验证
+
+- difftest **251 / 0**（239 + 12）。
+- 普通套件 **269 ran ok / EXIT=0**；ASan 套件 **269 ran ok / EXIT=0**
+  （PYADAMAS_TEST_JOBS=8）。
+- ASan detect_leaks=1 抽查 12 新用例（pty 口径，LSan die 路径会丢缓冲
+  stdout）：**12/12 程序输出逐字节正确**；251/252/254/255/260 零泄漏；
+  250/253/256/257/258/259/261 有小泄漏（72–3040B/用例），出自上述基线已
+  验证的 leaf×unknown 机制。保守口径（PYADAMAS_GC_CONSERVATIVE=1）下
+  leaf×unknown 泄漏全消（256/258 等归零）；253 余 1 处 32B 异常对象泄漏
+  （fallback 路径 raise→catch→丢弃，rt_exc.c 本批未改，最小复现 j17/j18
+  不漏、需更多上下文，属异常路径 RC 既有问题，另录移交）。
+- check_size：仍只有原有 5 处超限，**无新增**（lower_stmt.cpp 精确压到 1200；
+  新增 stdlib/*.py 与 runtime 函数不在 src/ 1200 行规则内）。
+
+### 分支与集成建议
+
+- 分支 **stdlib1**，基于 fdeea25（0.324）；不推 master，主树与主树 build 未触碰。
+- 与 P2/P3 并行：未动 rt_any.c（pa_any_iter_list 在 rt_class.c）；RtFn 追加
+  末尾，集成按落地顺序重排编号（rt_name 同步）；模块接口 v12 与 P2 的接口
+  改动合并时注意 enc/dec 字段顺序。
+- 合入前重跑：difftest → 250–261 → 普通+ASan 套件 → leak 抽查 → check_size。
+  若主树期间改过 lower_expr_ops/lower_builtin_reflect/typecheck_call/
+  typecheck_types.h（merge_elem）/module.cpp 相邻代码，重点复核 is-None 的
+  Mov 路径、bind_param 的 ann_unknown 早退、merge_elem 的洞填充分支。
+
 ## [0.324] - 2026-11-19
 
 > typetag 分支：unknown/动态值表示层对齐 codon 的"带标签方向"——先做设计

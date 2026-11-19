@@ -134,6 +134,8 @@ void TypeChecker::stmt_return(Return& r) {
         }
         if (cur_fn_->ret_declared) {
             TypePtr want = cur_fn_->is_async ? cur_fn_->async_result : cur_fn_->ret;
+            // return {}：空字面量的洞按声明返回类型填。
+            if (vt && ty_contains_hole(vt, 0)) fill_holes_recursive(vt, want, 0);
             if (!assignable(want, vt))
                 err(r.line, r.col,
                     std::format("function '{}' is declared to return '{}', got '{}'",

@@ -1031,6 +1031,12 @@ void Lowerer::lower_for_seq(For& f) {
         lower_for_gen(f, seq, seq_ty);
         return;
     }
+    // unknown（动态属性读出的列表等）：运行期按种类物化成 list[unknown]。
+    if (!seq_ty || seq_ty->kind == TyKind::Unknown) {
+        seq = call_runtime(RtFn::AnyIterList, mk_list(t_unknown()), {seq});
+        push_temp(seq);
+        seq_ty = mk_list(t_unknown());
+    }
     if (!seq_ty || (seq_ty->kind != TyKind::List && seq_ty->kind != TyKind::Tuple &&
                     seq_ty->kind != TyKind::Str && seq_ty->kind != TyKind::Dict &&
                     seq_ty->kind != TyKind::Set)) {

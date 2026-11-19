@@ -564,8 +564,8 @@ VReg Lowerer::lower_compare(Compare& c) {
         if ((lto || rto) && (op0 == CmpOp::Eq || op0 == CmpOp::Ne ||
                              op0 == CmpOp::Is || op0 == CmpOp::IsNot)) {
             auto operand_name = [&](Expr* e, TypePtr t) -> std::optional<std::string> {
-                if (t && t->kind == TyKind::TypeObj)
-                    return py_type_name(t->sub.empty() ? t_unknown() : t->sub[0]);
+                if (t && t->kind == TyKind::TypeObj && !t->sub.empty() && t->sub[0])
+                    return py_type_name(t->sub[0]);
                 if (e && e->kind == ExprKind::Name) {
                     auto& id = static_cast<Name*>(e)->id;
                     if (!is_bound_here(id)) {
@@ -614,7 +614,12 @@ VReg Lowerer::lower_compare(Compare& c) {
         // 而 None 就是 0，`x is None` 当场段错误。
         if (op == CmpOp::Is || op == CmpOp::IsNot) {
             auto as_bits = [&](VReg v, TypePtr t) -> VReg {
-                if (!t || !ir_is_heap(t)) return v;  // 标量本身就是位模式
+                // 同一性比较必须按机器字比：堆类型要 Mov 成 int，否则
+                // codegen 按 vreg 的底层类型（str）走内容比较，None 当
+                // NULL 解引用。unknown 同样要 Mov——槽里可能躺着 str，
+                // 不 Mov 会让 cmp.eq 按槽的 str 类型走 pa_str_eq。
+                TypePtr bt = strip_optional(t);
+                if (bt && !ir_is_heap(bt) && bt->kind != TyKind::Unknown) return v;
                 Inst mv;
                 mv.op = IrOp::Mov;
                 mv.a = v;

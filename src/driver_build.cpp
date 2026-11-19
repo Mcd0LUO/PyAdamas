@@ -221,16 +221,20 @@ inline constexpr ModuleEntry kModuleTable[] = {
     {"functools", ModuleKind::NativePython, "functools.py", ""},
     // ── stdlib Python 源模块 ──────────────────────────────────
     {"abc", ModuleKind::Python, "abc.py", ""},
+    {"argparse", ModuleKind::Python, "argparse.py", "sys,os.path"},
     {"base64", ModuleKind::Python, "base64.py", ""},
     {"binascii", ModuleKind::Python, "binascii.py", ""},
     {"bisect", ModuleKind::Python, "bisect.py", ""},
     {"collections.abc", ModuleKind::Python, "collections/abc.py", ""},
+    {"configparser", ModuleKind::Python, "configparser.py", "os.path"},
     {"csv", ModuleKind::Python, "csv.py", ""},
     {"copy", ModuleKind::Python, "copy.py", ""},
     {"fnmatch", ModuleKind::Python, "fnmatch.py", "re"},
     {"enum", ModuleKind::Python, "enum.py", ""},
     {"fractions", ModuleKind::Python, "fractions.py", "math"},
     {"glob", ModuleKind::Python, "glob.py", "os,os.path"},
+    {"gzip", ModuleKind::Python, "gzip.py", "zlib,_gzipio"},
+    {"_gzipio", ModuleKind::Python, "_gzipio.py", ""},
     {"hashlib", ModuleKind::Python, "hashlib.py", ""},
     {"heapq", ModuleKind::Python, "heapq.py", ""},
     {"hmac", ModuleKind::Python, "hmac.py", "hashlib"},
@@ -241,6 +245,7 @@ inline constexpr ModuleEntry kModuleTable[] = {
     {"textwrap", ModuleKind::Python, "textwrap.py", ""},
     {"typing", ModuleKind::Python, "typing.py", ""},
     {"uuid", ModuleKind::Python, "uuid.py", "random"},
+    {"zlib", ModuleKind::Python, "zlib.py", ""},
 };
 
 const ModuleEntry* find_module_entry(std::string_view name) {
@@ -938,6 +943,10 @@ bool build_unit(Program& p, ModuleUnit& u, bool emit_object, bool entry_ir) {
                 flat->has_init = cls->has_init;
                 flat->has_field_defaults = cls->has_field_defaults;
                 flat->open = cls->is_open();
+                // 动态属性槽标记跟着接口走：导入方才能放行 args.x 直读/
+                // 直写/getattr（运行期 dict_off 在定义模块的 vtable 上）。
+                for (const pyadamas::ClassInfo* k = cls; k; k = k->base)
+                    if (k->needs_dict) { flat->needs_dict = true; break; }
                 // 异常类标记要跟着接口走，导入方才能放行 except/raise 名字。
                 flat->is_exception_class = cls->is_exception_class;
                 flat->is_rich_exception = cls->is_rich_exception;

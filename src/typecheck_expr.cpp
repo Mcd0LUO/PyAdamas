@@ -5,6 +5,23 @@
 
 namespace pyadamas {
 
+// 类型名在值位置（argparse 的 type=int、[int, str]、t is int）：
+// 类型对象携带它命名的类型；机器表示是类型名字符串（与 type(x) 一致）。
+// object/type/bytearray 没有对应内部类型，sub 留空，名字取字面量。
+static TypePtr type_name_value(const std::string& id) {
+    if (id == "int") return mk_typeobj(t_int());
+    if (id == "float") return mk_typeobj(t_float());
+    if (id == "str") return mk_typeobj(t_str());
+    if (id == "bool") return mk_typeobj(t_bool());
+    if (id == "bytes") return mk_typeobj(t_bytes());
+    if (id == "complex") return mk_typeobj(t_complex());
+    if (id == "list") return mk_typeobj(mk_list(t_unknown()));
+    if (id == "dict") return mk_typeobj(mk_dict(t_unknown(), t_unknown()));
+    if (id == "tuple") return mk_typeobj(mk_tuple_rest(t_unknown()));
+    if (id == "set" || id == "frozenset") return mk_typeobj(mk_set(t_unknown()));
+    return mk_typeobj(nullptr);
+}
+
 TypePtr TypeChecker::expr(Expr& e) {
         TypePtr t = expr_impl(e);
         expr_types_[&e] = t;
@@ -68,6 +85,9 @@ TypePtr TypeChecker::expr(Expr& e) {
                 }
                 // 先看内置值（__name__ / __file__ / Ellipsis ...），再看可调用对象
                 if (auto vt = builtin_value_type(n.id)) return vt;
+                // 类型名当值用：类型对象（不是函数签名）。直接调用 int(x)
+                // 仍按名字分派（call_name），不受影响。
+                if (is_type_name(n.id)) return type_name_value(n.id);
                 if (is_builtin_callable(n.id)) return builtin_type(n.id);
                 if (is_exception_name(n.id)) return t_unknown();
                 if (n.id.starts_with("__") && n.id.ends_with("__")) return t_unknown();
@@ -102,7 +122,6 @@ TypePtr TypeChecker::expr(Expr& e) {
                 auto& l = static_cast<ListExpr&>(e);
                 if (l.elts.empty()) return mk_list(fresh_hole());
                 TypePtr acc = expr(*l.elts[0]);
-                TypePtr hole = fresh_hole();
                 bool all_same = true;
                 for (size_t i = 1; i < l.elts.size(); ++i) {
                     auto t = expr(*l.elts[i]);
@@ -110,7 +129,12 @@ TypePtr TypeChecker::expr(Expr& e) {
                     acc = join(acc, t);
                 }
                 (void)all_same;
-                if (is_unknown(acc)) return mk_list(hole);
+                // 异构列表用 unknown 单例（不可填），不用 fresh_hole：
+                // 洞会被目标类型单态化（形参回填/下标写入），把 [1, "x"]
+                // 变成 list[str] 后字面量按 kind1 建表，int 元素当堆指针
+                // dec → 段错误（206_list_store_kind 实测）。混合内容本来
+                // 就不该被单态化。
+                if (is_unknown(acc)) return mk_list(t_unknown());
                 return mk_list(acc);
             }
             case ExprKind::Tuple: {

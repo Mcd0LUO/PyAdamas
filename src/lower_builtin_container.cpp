@@ -35,11 +35,18 @@ VReg Lowerer::lower_builtin_container(const std::string& name, Call& c) {
             push_temp(xs);
             return xs;
         }
-        if (!xt || (xt->kind != TyKind::List && xt->kind != TyKind::Tuple &&
-                    xt->kind != TyKind::Str && xt->kind != TyKind::Bytes &&
-                    xt->kind != TyKind::Dict &&
-                    xt->kind != TyKind::Set && xt->kind != TyKind::File &&
-                    xt->kind != TyKind::Range && xt->kind != TyKind::Generator)) {
+        // unknown（动态属性读出的容器等）：运行期按种类物化。
+        if (!xt || xt->kind == TyKind::Unknown) {
+            VReg x = expr(*c.args[0]);
+            VReg l = call_runtime(RtFn::AnyIterList, mk_list(t_unknown()), {x});
+            push_temp(l);
+            return retype(l, result_ty());
+        }
+        if (xt->kind != TyKind::List && xt->kind != TyKind::Tuple &&
+            xt->kind != TyKind::Str && xt->kind != TyKind::Bytes &&
+            xt->kind != TyKind::Dict &&
+            xt->kind != TyKind::Set && xt->kind != TyKind::File &&
+            xt->kind != TyKind::Range && xt->kind != TyKind::Generator) {
             err(c.args[0]->line, c.args[0]->col,
                 std::format("{}() cannot iterate over '{}'", name, type_name(xt)));
             return const_none();

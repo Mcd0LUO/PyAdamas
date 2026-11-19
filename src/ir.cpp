@@ -500,6 +500,8 @@ bool ir_module_needs_unknown_index(const IRModule& m) {
             case RtFn::AnyCmp:
             case RtFn::AnyNeg:
             case RtFn::AnyIsFloat:
+            case RtFn::AnyIterList:
+            case RtFn::ReprAny:
             case RtFn::RcTempUnknown:
                 return true;
             default:

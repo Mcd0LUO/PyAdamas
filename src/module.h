@@ -48,7 +48,10 @@ struct ModuleInfo {
 // 11：类记录追加 is_exception_class / is_rich_exception / exc_parent。
 // 跨模块的 except/raise 名字位置要靠它判断「这个导入类是不是异常类」，
 // 否则只能在导入方报 except requires an exception name。
-inline constexpr uint16_t kModuleFormatVersion = 11;
+// 12：类记录追加 needs_dict（动态属性槽是否开启）；签名形参追加
+// ann_unknown（显式 object/Any 标注）。导入方据此放行 args.x 直读/
+// 直写/getattr，并保持 object 形参的 unknown 域（float 实参装箱）。
+inline constexpr uint16_t kModuleFormatVersion = 12;
 inline constexpr uint16_t kModuleAbiVersion = 1;
 
 std::expected<std::string, std::string> encode_module_interface(const ModuleInfo& info);

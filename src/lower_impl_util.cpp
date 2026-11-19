@@ -15,6 +15,7 @@ std::string Lowerer::py_type_name(const TypePtr& t) {
         case TyKind::Float: return "float";
         case TyKind::Complex: return "complex";
         case TyKind::Str: return "str";
+        case TyKind::Bytes: return "bytes";
         case TyKind::List: return "list";
         case TyKind::Range: return "range";
         case TyKind::Set: return "set";

@@ -582,6 +582,10 @@ enum class RtFn : uint16_t {
     AnyArith,              // (op, a, b, desc_a, desc_b) -> i64 动态算术
     AnyNeg,                // (a, desc_a) -> i64 动态一元负
     AnyCmp,                // (op, a, b, desc_a, desc_b) -> i64 动态比较
+    // 动态属性 dict 视图（vars() 合并用）——追加在末尾，不改既有编号。
+    AttrDict,              // (obj*) -> dict*  实例动态属性表（可能 NULL，借用）
+    AnyIterList,           // (i64) -> list*  unknown 物化成可迭代列表（+1）
+    ReprAny,               // (i64) -> str*  repr(unknown)（pa_repr_any，+1）
 };
 
 inline const char* rt_name(RtFn f) {
@@ -1148,6 +1152,9 @@ inline const char* rt_name(RtFn f) {
         case RtFn::DequeInsert: return "pa_deque_insert";
         case RtFn::DequeReverse: return "pa_deque_reverse";
         case RtFn::DequeCopy: return "pa_deque_copy";
+        case RtFn::AttrDict: return "pa_attr_dict_view";
+        case RtFn::AnyIterList: return "pa_any_iter_list";
+        case RtFn::ReprAny: return "pa_repr_any";
     }
     return "?";
 }

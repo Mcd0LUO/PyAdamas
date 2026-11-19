@@ -614,6 +614,9 @@ void AsmGen::gen_rt_args(const Inst& in, RtFn fn) {
         case RtFn::AnyToF64:
         case RtFn::AnyToI64:
         case RtFn::AnyIsFloat:
+        case RtFn::AttrDict:
+        case RtFn::AnyIterList:
+        case RtFn::ReprAny:
             gen_rt_i1(in);
             break;
         case RtFn::ListNew:

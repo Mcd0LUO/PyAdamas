@@ -34,7 +34,25 @@ struct ConstVal {
 };
 
 inline std::optional<ConstVal> as_const(const Expr* e) {
-    if (!e || e->kind != ExprKind::Constant) return std::nullopt;
+    if (!e) return std::nullopt;
+    // 负数字面量默认值（def f(size=-1)）：与 literal_of_expr 同口径。
+    if (e->kind == ExprKind::UnaryOp) {
+        const auto& u = static_cast<const UnaryOp&>(*e);
+        if (u.op != Tok::MINUS && u.op != Tok::PLUS) return std::nullopt;
+        auto inner = as_const(u.operand.get());
+        if (!inner) return std::nullopt;
+        if (u.op == Tok::PLUS) return inner;
+        if (inner->ty->kind == TyKind::Int) {
+            inner->i = -inner->i;
+            return inner;
+        }
+        if (inner->ty->kind == TyKind::Float) {
+            inner->f = -inner->f;
+            return inner;
+        }
+        return std::nullopt;
+    }
+    if (e->kind != ExprKind::Constant) return std::nullopt;
     const auto& c = static_cast<const Constant&>(*e);
     ConstVal v;
     switch (c.ck) {
