@@ -1139,8 +1139,9 @@ PyAdamasStr* pa_sha256_hex(PyAdamasStr* data);
 PyAdamasStr* pa_b64encode(PyAdamasStr* data, int64_t urlsafe);
 PyAdamasStr* pa_b64decode(PyAdamasStr* data);
 PyAdamasList* pa_list_reversed(PyAdamasList* src);
-void pa_list_sort(PyAdamasList* l, int64_t kind);
-PyAdamasList* pa_sorted_list(PyAdamasList* src, int64_t kind);
+/* 0.312：kind 4 = 容器元素按 desc 字典序（描述符串常量，标量种类传空串）。 */
+void pa_list_sort(PyAdamasList* l, int64_t kind, PyAdamasStr* desc);
+PyAdamasList* pa_sorted_list(PyAdamasList* src, int64_t kind, PyAdamasStr* desc);
 int64_t pa_list_index(PyAdamasList* l, int64_t v, int64_t kind);
 int64_t pa_list_count(PyAdamasList* l, int64_t v, int64_t kind);
 /* 0.303：heap 同 pa_list_set —— 新值静态种类，插入时维护种类/位图。 */
@@ -1238,7 +1239,8 @@ int64_t chain_list_eq(PyAdamasList* a, PyAdamasList* b, const uint8_t* chain, in
 int64_t chain_dict_eq(PyAdamasDict* a, PyAdamasDict* b, const uint8_t* chain, int64_t len,
                       int64_t depth);
 int64_t pa_list_contains(PyAdamasList* l, int64_t v, int64_t kind);
-PyAdamasList* pa_list_sorted_by(PyAdamasList* src, PyAdamasList* keys, int64_t kind);
+PyAdamasList* pa_list_sorted_by(PyAdamasList* src, PyAdamasList* keys, int64_t kind,
+                                PyAdamasStr* desc);
 int64_t pa_list_eq(PyAdamasList* a, PyAdamasList* b, PyAdamasStr* chain);
 int64_t pa_str_contains(PyAdamasStr* hay, PyAdamasStr* needle);
 void slice_bounds(int64_t len, int64_t start, int64_t stop, int64_t step, int64_t* out_start, int64_t* out_stop, int64_t* out_step);

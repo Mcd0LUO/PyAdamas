@@ -384,7 +384,7 @@ VReg Lowerer::lower_method_seq(Attribute& at, Call& c, VReg recv, TypePtr recv_t
             err(c.line, c.col, "list.sort() key=/reverse= are not supported yet");
             return const_none();
         }
-        call_void(RtFn::ListSort, {recv, const_int(sort_kind(et))});
+        call_void(RtFn::ListSort, {recv, const_int(sort_kind(et)), const_str(sort_desc(et))});
         return const_none();
     }
     err(c.line, c.col, std::format("method '{}' is not supported by the code generator yet",

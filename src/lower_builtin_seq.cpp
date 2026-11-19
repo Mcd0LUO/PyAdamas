@@ -297,7 +297,7 @@ VReg Lowerer::lower_builtin_seq(const std::string& name, Call& c) {
             Inst in2;
             in2.op = IrOp::CallRt;
             in2.imm = static_cast<int64_t>(RtFn::ListSortedBy);
-            in2.args = {x, keys, const_int(sort_kind(kret))};
+            in2.args = {x, keys, const_int(sort_kind(kret)), const_str(sort_desc(kret))};
             in2.ty = ty;
             l = def(ty, std::move(in2));
             push_temp(l);
@@ -307,7 +307,10 @@ VReg Lowerer::lower_builtin_seq(const std::string& name, Call& c) {
             in.imm = static_cast<int64_t>(name == "sorted" ? RtFn::SortedList
                                                            : RtFn::ListReversed);
             in.args = {x};
-            if (name == "sorted") in.args.push_back(const_int(sort_kind(se)));
+            if (name == "sorted") {
+                in.args.push_back(const_int(sort_kind(se)));
+                in.args.push_back(const_str(sort_desc(se)));
+            }
             in.ty = ty;
             l = def(ty, std::move(in));
             push_temp(l);

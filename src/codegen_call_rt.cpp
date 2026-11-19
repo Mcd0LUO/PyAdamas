@@ -611,8 +611,6 @@ void AsmGen::gen_rt_args(const Inst& in, RtFn fn) {
             gen_rt_i1(in);
             break;
         case RtFn::ListNew:
-        case RtFn::ListSort:
-        case RtFn::SortedList:
         case RtFn::ClassMethod:
         case RtFn::Zip2List:
         case RtFn::MathGcd:
@@ -776,6 +774,8 @@ void AsmGen::gen_rt_args(const Inst& in, RtFn fn) {
         case RtFn::DateTimeAddDelta:
         case RtFn::DateNew:
         case RtFn::ListAppend:   /* (list*, v, heap) */
+        case RtFn::ListSort:     /* 0.312：(list*, kind, desc) */
+        case RtFn::SortedList:   /* 0.312：(list*, kind, desc) */
             gen_rt_i3(in);
             break;
         case RtFn::ClassNew:

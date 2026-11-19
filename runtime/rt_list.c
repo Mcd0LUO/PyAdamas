@@ -666,8 +666,9 @@ static inline double f64_of(int64_t v) {
         }                                                                      \
         int64_t mr = minrun_##NAME(n);                                         \
         /* 0.301：临时区入缓冲池。排序期间不执行用户代码：plain sort 的比较   \
-           是运行时宏（LESS_STR 只调 pa_str_cmp）；sorted(key=) 的 key 在生成 \
-           循环里预算好（lower_builtin_seq.cpp），ListSortedBy 只收 keys 列表；\
+           是运行时宏（LESS_STR/LESS_CMP 只调 pa_str_cmp/纯 C 描述符比较，见  \
+           0.312 sort_desc_cmp）；sorted(key=) 的 key 在生成循环里预算好       \
+           （lower_builtin_seq.cpp），ListSortedBy 只收 keys 列表；            \
            list.sort(key=) 不支持（lower_method_containers.cpp 报错）。        \
            get/put 是纯缓冲操作，无 RC/GC 副作用，即使重入也安全。OOM 走运行   \
            时统一 panic（与 list_buf_grow 一致），不再退化为插入排序。 */      \
@@ -715,27 +716,120 @@ PYADAMAS_TIMSORT(i64, LESS_I64)
 PYADAMAS_TIMSORT(f64, LESS_F64)
 PYADAMAS_TIMSORT(str, LESS_STR)
 
-// kind：0 int/bool、1 float、2 str、其它按机器字比较。
-void pa_list_sort(PyAdamasList* l, int64_t kind) {
+/* ── 0.312：元组/容器元素的字典序排序 ─────────────────────────────
+   此前元组落 kind 3（机器字比较）：比的是堆地址，池分配地址≈分配
+   顺序≈原顺序，sort 看起来是 no-op（sort_struct / 204_list_buf_pool
+   的顺序无关校验和长期掩盖了这个洞）。现在容器元素走 kind 4，编译
+   器按静态类型附描述符（见 Lowerer::append_sort_desc）——自定界前
+   缀树：
+     i / f / s / x = int / float / str / 机器字；
+     l + 子描述符 = list / 变长元组：逐元素字典序，前缀相等短者小；
+     t + arity 字节 + 逐位置描述符 = 定长元组：逐位置比。
+   描述符是编译期串常量（永生），无 RC/GC 问题；比较是纯 C（pa_str_cmp
+   不分配），排序期间不执行用户代码，与上面宏注释的纪律一致。 */
+
+static const uint8_t* g_cmp_desc = 0;  /* plain sort 描述符，单线程，同 g_sort_keys 模式 */
+
+static int sort_word_cmp(int64_t a, int64_t b) { return (a > b) - (a < b); }
+
+/* 跳过一个描述符（不比较），用于定位子描述符末尾。 */
+static void sort_desc_skip(const uint8_t** pp) {
+    int c = *(*pp)++;
+    if (c == 'l') {
+        sort_desc_skip(pp);
+    } else if (c == 't') {
+        int n = *(*pp)++;
+        for (int i = 0; i < n; ++i) sort_desc_skip(pp);
+    }
+}
+
+/* 按描述符三路比较。*pp 是游标：返回 0 时保证已消费完当前描述符；
+   非 0 时整条比较逐层回退，游标状态不再重要。depth 防病态嵌套（超
+   限退机器字，但仍消费描述符，保持外层游标对齐）。 */
+static int sort_desc_cmp(int64_t a, int64_t b, const uint8_t** pp, int depth) {
+    int c = *(*pp)++;
+    if (c == 'f') {
+        double x = f64_of(a), y = f64_of(b);
+        return (x > y) - (x < y);  /* NaN 与一切相等，同 LESS_F64 口径 */
+    }
+    if (c == 's') {
+        int64_t r = pa_str_cmp((PyAdamasStr*)(uintptr_t)a, (PyAdamasStr*)(uintptr_t)b);
+        return r < 0 ? -1 : r > 0 ? 1 : 0;
+    }
+    if (c != 'l' && c != 't') return sort_word_cmp(a, b);  /* i / x / 防御 */
+    int n = -1;                  /* t：arity；l：-1 */
+    const uint8_t* child = *pp;  /* l：子描述符起点，逐元素复用 */
+    if (c == 't') n = *(*pp)++;
+    else sort_desc_skip(pp);
+    if (depth >= 32 || !a || !b) {
+        if (c == 't') for (int i = 0; i < n; ++i) sort_desc_skip(pp);
+        return sort_word_cmp(a, b);
+    }
+    PyAdamasList* A = (PyAdamasList*)(uintptr_t)a;
+    PyAdamasList* B = (PyAdamasList*)(uintptr_t)b;
+    int64_t la = A->len, lb = B->len;
+    int64_t m = la < lb ? la : lb;
+    if (A == B) {
+        if (c == 't') for (int i = 0; i < n; ++i) sort_desc_skip(pp);
+        return 0;
+    }
+    if (c == 't') {
+        int64_t k = m < n ? m : n;
+        for (int64_t i = 0; i < k; ++i) {
+            int r = sort_desc_cmp(A->data[i], B->data[i], pp, depth + 1);
+            if (r) return r;
+        }
+        for (int64_t i = k; i < n; ++i) sort_desc_skip(pp);
+        /* 防御：运行期长度超出静态 arity 时多余位置按机器字比。 */
+        for (int64_t i = n; i < m; ++i) {
+            int r = sort_word_cmp(A->data[i], B->data[i]);
+            if (r) return r;
+        }
+    } else {
+        for (int64_t i = 0; i < m; ++i) {
+            const uint8_t* p = child;
+            int r = sort_desc_cmp(A->data[i], B->data[i], &p, depth + 1);
+            if (r) return r;
+        }
+    }
+    return (la > lb) - (la < lb);  /* 前缀相等：短者小（CPython 口径） */
+}
+
+static int cmp_desc_lt(int64_t a, int64_t b) {
+    const uint8_t* p = g_cmp_desc;
+    return sort_desc_cmp(a, b, &p, 0) < 0;
+}
+#define LESS_CMP(a, b) cmp_desc_lt(a, b)
+PYADAMAS_TIMSORT(cmp, LESS_CMP)
+
+// kind：0 int/bool、1 float、2 str、4 容器元素（desc 字典序）、其它机器字。
+// desc：编译期描述符串常量，仅 kind 4 读取；标量种类传空串，不读。
+void pa_list_sort(PyAdamasList* l, int64_t kind, PyAdamasStr* desc) {
     if (l->len < 2) return;
     /* 0.303：排序重排元素，kind2 位图无法跟随，保守丢弃。 */
     if (l->elem_kind == 2) pa_list_drop_bits(l);
     if (kind == 2) sort_str(l->data, l->len);
     else if (kind == 1) sort_f64(l->data, l->len);
-    else sort_i64(l->data, l->len);
+    else if (kind == 4 && desc && desc->len > 0) {
+        g_cmp_desc = (const uint8_t*)desc->data;
+        sort_cmp(l->data, l->len);
+        g_cmp_desc = 0;
+    } else sort_i64(l->data, l->len);
 }
 
-PyAdamasList* pa_sorted_list(PyAdamasList* src, int64_t kind) {
+PyAdamasList* pa_sorted_list(PyAdamasList* src, int64_t kind, PyAdamasStr* desc) {
     PyAdamasList* l = pa_list_copy(src);
-    pa_list_sort(l, kind);
+    pa_list_sort(l, kind, desc);
     return l;
 }
 
 /* 按 keys 给 vals 排序：keys 与 vals 一一对应，key 的比较类别是 kind
-   （0 int/bool、1 float、2 str、其它按机器字）。用下标数组 + qsort：
-   比较函数通过静态指针读键表——pyadamas 是单线程的，不会并发踩。 */
+   （0 int/bool、1 float、2 str、4 容器按 desc 字典序、其它按机器字）。
+   用下标数组 + qsort：比较函数通过静态指针读键表——pyadamas 是单线程
+   的，不会并发踩。 */
 static const int64_t* g_sort_keys = 0;
 static int64_t g_sort_kind = 0;
+static const uint8_t* g_sort_desc = 0;  /* 0.312：key 是容器（kind 4）时的描述符 */
 
 /* 键的种类未知时（函数的返回类型推不出来），退到机器字比较。这里再加一条
    启发式：两边看起来都是字符串对象就按字符串比——键是 str 时顺序才对。 */
@@ -748,6 +842,12 @@ static int key_is_str(int64_t v) {
 static int cmp_sort_by_idx(const void* pa, const void* pb) {
     int64_t ia = *(const int64_t*)pa, ib = *(const int64_t*)pb;
     int64_t x = g_sort_keys[ia], y = g_sort_keys[ib];
+    if (g_sort_kind == 4 && g_sort_desc) {
+        const uint8_t* p = g_sort_desc;
+        int c = sort_desc_cmp(x, y, &p, 0);
+        /* qsort 不保证稳定：相等 key 退回原下标，钉住稳定性（CPython 口径）。 */
+        return c ? c : sort_word_cmp(ia, ib);
+    }
     if (g_sort_kind == 2) {
         int64_t c = pa_str_cmp((PyAdamasStr*)x, (PyAdamasStr*)y);
         return c < 0 ? -1 : c > 0 ? 1 : 0;
@@ -765,25 +865,28 @@ static int cmp_sort_by_idx(const void* pa, const void* pb) {
     return x < y ? -1 : x > y ? 1 : 0;
 }
 
-PyAdamasList* pa_list_sorted_by(PyAdamasList* src, PyAdamasList* keys, int64_t kind) {
+PyAdamasList* pa_list_sorted_by(PyAdamasList* src, PyAdamasList* keys, int64_t kind,
+                                PyAdamasStr* desc) {
     PyAdamasList* l = pa_list_copy(src);
     int64_t n = l->len;
     if (n < 2) return l;
     /* 键对不上（不该发生）就退回普通排序，别给错结果 */
     if (!keys || keys->len != n) {
-        pa_list_sort(l, kind);
+        pa_list_sort(l, kind, desc);
         return l;
     }
     int64_t* idx = (int64_t*)malloc(sizeof(int64_t) * (size_t)n);
     if (!idx) {
-        pa_list_sort(l, kind);
+        pa_list_sort(l, kind, desc);
         return l;
     }
     for (int64_t i = 0; i < n; ++i) idx[i] = i;
     g_sort_keys = keys->data;
     g_sort_kind = kind;
+    g_sort_desc = (kind == 4 && desc && desc->len > 0) ? (const uint8_t*)desc->data : 0;
     qsort(idx, (size_t)n, sizeof(int64_t), cmp_sort_by_idx);
     g_sort_keys = 0;
+    g_sort_desc = 0;
     int64_t* tmp = (int64_t*)malloc(sizeof(int64_t) * (size_t)n);
     if (tmp) {
         for (int64_t i = 0; i < n; ++i) tmp[i] = l->data[idx[i]];

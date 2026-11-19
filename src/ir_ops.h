@@ -207,9 +207,10 @@ enum class RtFn : uint16_t {
     ListMaxI64,   // (list*) -> i64
     ListCopy,     // (list*) -> list*
     ListReversed, // (list*) -> list*  倒序副本
-    ListSort,     // (list*, i64 kind) -> void  原地排序
-    SortedList,   // (list*, i64 kind) -> list*  排序副本
-    ListSortedBy, // (list* src, list* keys, i64 kind) -> list*  按键排序的副本
+    ListSort,     // (list*, i64 kind, str* desc) -> void  原地排序
+    SortedList,   // (list*, i64 kind, str* desc) -> list*  排序副本
+    ListSortedBy, // (list* src, list* keys, i64 kind, str* desc) -> list*  按键排序的副本
+                  // 0.312：kind 4 = 容器元素按 desc 字典序；标量种类 desc 传空串
     ListIndex,    // (list*, i64 v, i64 kind) -> i64  找不到抛 ValueError
     ListCount,    // (list*, i64 v, i64 kind) -> i64
     ListInsert,   // (list*, i64 idx, i64 v, i64 heap) -> void（0.303）

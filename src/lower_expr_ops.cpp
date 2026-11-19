@@ -393,6 +393,52 @@ void Lowerer::append_elem_chain(TypePtr container, std::string& chain) {
     }
 }
 
+// 排序描述符（0.312）：与相等链（每层一个字符、同质）不同，排序要支持
+// 定长异构元组的逐位置字典序，所以描述符是自定界前缀树：
+//   i/f/s/x = int/bool/None、float、str、机器字（unknown/其它）；
+//   l + 子描述符 = list / 变长元组（逐元素字典序 + 短者小）；
+//   t + arity 字节 + 逐位置描述符 = 定长元组。
+// 运行时 sort_desc_cmp 按同一格式消费（rt_list.c）。深度/长度预算防
+// 病态类型；超限返回 false，调用方退 "x"（机器字，修复前行为）。
+bool Lowerer::append_sort_desc(TypePtr t, std::string& d, int depth) {
+    if (depth > 12 || d.size() > 400) return false;
+    if (!t) { d += 'x'; return true; }
+    switch (t->kind) {
+        case TyKind::Int:
+        case TyKind::Bool:
+        case TyKind::None:
+            d += 'i';
+            return true;
+        case TyKind::Float:
+            d += 'f';
+            return true;
+        case TyKind::Str:
+            d += 's';
+            return true;
+        case TyKind::List: {
+            d += 'l';
+            TypePtr et = t->sub.empty() ? t_unknown() : t->sub[0];
+            return append_sort_desc(et, d, depth + 1);
+        }
+        case TyKind::Tuple: {
+            if (t->variadic || t->sub.empty()) {
+                d += 'l';
+                TypePtr et = t->sub.empty() ? t_unknown() : t->sub[0];
+                return append_sort_desc(et, d, depth + 1);
+            }
+            if (t->sub.size() > 255) return false;
+            d += 't';
+            d += static_cast<char>(static_cast<unsigned char>(t->sub.size()));
+            for (const auto& s : t->sub)
+                if (!append_sort_desc(s, d, depth + 1)) return false;
+            return true;
+        }
+        default:
+            d += 'x';
+            return true;
+    }
+}
+
 VReg Lowerer::lower_container_eq(VReg l, TypePtr lt, VReg r, TypePtr rt) {
     if (!lt || !rt) return kNoReg;
     auto is_seq = [](TypePtr t) {

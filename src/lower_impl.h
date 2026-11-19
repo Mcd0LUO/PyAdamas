@@ -619,13 +619,24 @@ private:
         return 0;
     }
 
-    // 排序比较器的种类：0 int/bool、1 float、2 str、其它按机器字。
+    // 排序比较器的种类：0 int/bool、1 float、2 str、4 元组（desc 字典序）、
+    // 其它按机器字。0.312 前元组落 3：比堆地址≈分配顺序，sort 是 no-op。
     static int sort_kind(const TypePtr& t) {
         if (!t) return 3;
         if (t->kind == TyKind::Int || t->kind == TyKind::Bool) return 0;
         if (t->kind == TyKind::Float) return 1;
         if (t->kind == TyKind::Str) return 2;
+        if (t->kind == TyKind::Tuple) return 4;
         return 3;
+    }
+
+    // 排序描述符（仅 kind 4 有意义，标量种类给空串，运行时不读）。
+    // 生成失败（病态深度/长度）退 "x"：机器字比较，即修复前行为。
+    std::string sort_desc(const TypePtr& t) {
+        if (sort_kind(t) != 4) return "";
+        std::string d;
+        if (!append_sort_desc(t, d, 0)) return "x";
+        return d;
     }
 
     // 内置序列构造（list/sorted/enumerate/...）的入参规整成运行时列表：
@@ -1089,6 +1100,10 @@ private:
     VReg lower_container_eq(VReg l, TypePtr lt, VReg r, TypePtr rt);
     // 容器元素的比较链：每个字符说明该层元素怎么比（i/s/f/x/l/d/t）。
     void append_elem_chain(TypePtr container, std::string& chain);
+    // 排序描述符（0.312）：自定界前缀树，定长异构元组逐位置比。
+    // i/f/s/x 标量；l+子描述符 list/变长元组；t+arity 字节+逐位置描述符。
+    // 超出深度/长度预算返回 false，调用方整体退机器字。
+    bool append_sort_desc(TypePtr t, std::string& d, int depth);
     VReg lower_call(Call& c);
     VReg lower_builtin_call(const std::string& name, Call& c);
     // 按内建函数类别拆开的降级入口（lower_builtin_*.cpp）；

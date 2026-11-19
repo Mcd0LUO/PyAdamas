@@ -22,8 +22,8 @@ def churn_tuples(rounds: int) -> int:
         xs.sort()
         if len(xs) != 500:
             return -1
-        # 元组排序按机器字（指针）序，与 CPython 字典序不同（既有语义，
-        # sort_struct 同款）——校验和必须与顺序无关。
+        # 0.312：元组排序已按元素字典序（修复前落机器字/指针序≈no-op，
+        # sort_struct 同款）——校验和与顺序无关，修复前后输出不变。
         for t in xs:
             s += t[0] + t[1] + t[2]
     return s
