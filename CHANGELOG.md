@@ -4,6 +4,26 @@
 
 早期阶段没有逐条留痕，按阶段归纳；0.4 之后逐条记录。
 
+## [0.314] - 2026-11-19
+
+> jsonopt 分支（基于 0.311 e855662），与 0.312/0.313 并行开发；集成时 rebase 到
+> master，冲突面预期仅 rt_json.c（独立文件，0.312 fixdict 未触及）+ CHANGELOG 同位追加。
+
+### 健壮化：json 对拍 CPython 语义（审计矩阵 114 案，修 9 类真实差异）
+
+- **审计方法**：逐案对拍 CPython 3.14.4（键强制转换 / ensure_ascii / indent / separators / allow_nan / float 最短往返 repr / loads 严格性 / 错误消息与位置 / 嵌套深度 / int64 边界 / 重复键 / 控制字符）。float repr 另对 339 个值（含 300 个随机 double 位模式）逐字节对拍，零差异（format_double 本就符合 CPython repr 规则）。重复键 last-wins、控制字符严格拒绝、NaN/Infinity 默认输出原已正确。
+- **修复 1（已知洞）dumps dict 键强制转换**：旧实现编译期拒绝非 str 键（"json dict keys must be str"），CPython 自动转 str。描述符文法 (d<v>) 扩为 (d<k><v>)（k=s/i/f/b/n，与桥的 cpy_desc 文法同形但解析器各自独立，rt_cpy.c 未动）：int→十进制、float→floatstr（repr，NaN/Infinity/-Infinity）、True/False→"true"/"false"、None→"null"。sort_keys 按 CPython 口径在转 str **之前**按原键排序（int/float/bool 数值序，{10,2}→{"2","10"}）。loads 样例键仍必须 str——CPython loads 永远返回 str 键，不做逆向转换（编译期明确报错）。
+- **修复 2 ensure_ascii kwarg**（默认 True 不变）：False 时 >=0x80 字节原样输出（控制字符/引号/反斜杠仍转义）。同时修 True 口径的 DEL(0x7f) 漏转义洞（CPython ESCAPE_ASCII 是 [^\ -~]，0x7f 在范围外，旧实现原样输出）。
+- **修复 3 separators kwarg**：tuple[str, str]（字面量或变量均可，静态类型检查），默认紧凑 (", ", ": ") / 缩进 (",", ": ") 与 CPython 一致；元素数不对时运行期消息对齐 CPython 的 unpack ValueError。自定义分隔符可含非 ASCII（CPython 原样插入，不走 ensure_ascii）。
+- **修复 4 allow_nan kwarg**（默认 True 不变）：False 遇 NaN/±Inf（值或 float 键）抛 ValueError "Out of range float values are not JSON compliant: nan/inf/-inf"，消息逐字对齐 CPython。
+- **修复 5 indent=0/负数语义**：CPython indent=0 输出换行但不缩进、负数同（' '*负数==''），只有 None 紧凑；旧实现把 <=0 一律当紧凑。用 INT64_MIN 哨兵表示 None（lower_json 对 indent=None 特判），0/负数走换行路径；indent>65536 拒绝（防巨量缩进挂死）。
+- **修复 6 loads 严格数字文法**：旧 jp_number_token 把 [+\-0-9.eE] 一锅端给 strtoll/strtod，接受 CPython 拒绝的 +1/01/00/0123/.5/1./0./十六进制浮点/小写 inf/nan。改为严格 JSON 文法 -?(0|[1-9]\d*)(\.\d+)?([eE][+-]?\d+)? 的最长前缀扫描：非法尾缀不消费，由外层报 Extra data / Expecting ',' delimiter——与 CPython 扫描器的接受集/错误位置逐案对齐（0e0 合法、1e 只扫出 1）。int 样例遇浮点 token 仍按类型口径报错（CPython 返回 float，静态样例设计差异）。
+- **修复 7 语法错误消息对齐 CPython JSONDecodeError**："what: line L column C (char N)"（N 为 0 基字节偏移），覆盖 Expecting value / Expecting ',' delimiter / Expecting ':' delimiter / Expecting property name enclosed in double quotes / Unterminated string starting at（指向开引号）/ Invalid control character at / Invalid \escape（指向反斜杠）/ Invalid \uXXXX escape（指向 u，低代理坏 hex 指向低 u，与 CPython 一致）/ Extra data / Illegal trailing comma before end of array|object（3.14 新消息，指向逗号）。pyadamas 无 JSONDecodeError 内置名，按桥的映射口径抛 ValueError。类型导向失配（样例类型 vs 文本类型，CPython 无对应错误）保留 "json: ... at offset N" 格式。
+- **修复 8 int64 边界口径**：loads 溢出抛 ValueError "json: integer out of int64 range"（不回绕；CPython 大整数无限精度，政策差异钉进 232）。±2^63 边界值正常。
+- **修复 9 前端接线**：typecheck json_call 与 lower_json 接受 indent/sort_keys/ensure_ascii/separators/allow_nan；运行期签名 pa_json_dumps(v, desc, indent, flags, seps)，flags 打包 bit0 sort_keys / bit1 ensure_ascii / bit2 allow_nan（IR Bin 位运算合成，常量折叠后默认 0b110），JsonDumps 分组 i4→i5。
+- **政策差异（记录不修）**：① 嵌套深度受 parser kMaxExprDepth=200 限制（loads 样例与 dumps 值都须静态类型字面量，编译期即拒；CPython 3.14 C 扫描器实测接受 20000+ 层）——静态样例设计的固有边界，运行期描述符深度因此有界，无需运行期深度守卫；② 孤立 \ud800 代理拒绝（pyadamas str 是 UTF-8 字节串无法表示；CPython 接受含代理码点的 str）；③ indent=str（如 '\t'）/skipkeys/default/cls/check_circular 不支持（编译期报错）；④ float NaN 键的 sort_keys 顺序 CPython 本身未定义，视为相等；⑤ {1:'a',True:'b'} 的键折叠是 CPython dict 语义（True==1），pyadamas 静态键类型不混用。
+- **验证（健壮轮）**：difftest **228/0**；53/82/232/208 对拍 expect 全过（232 O0/O1/O2 一致）；桥 207–211 全过（rt_cpy.c 未动，描述符解析器独立）；普通与 ASan 套件各 **246 ran ok / EXIT=0**（244+232+233；233 是优化轮的正确性哨兵，提前引入，在未优化运行时上同样通过——优化轮以它为基线哨兵）；ASan detect_leaks=1 抽查 232/53/82/208 全干净；审计矩阵 99 MATCH，剩余 DIFF 全为上述政策项。新增 tests/run/232_json_hard.py（expect 钉自 CPython 3.14.4；int64 溢出/孤立代理两段为 pyadamas 政策口径，注释标明）。tools/difftest.sh 的 *_perf 跳过改为只跳 180_codepoint_perf（233 只钉正确性不打印时间，参与差分）。
+
 ## [0.311] - 2026-11-19
 
 ### 编译吞吐：直调 as/ld（build 全程 −9.4%，累计对 0.309 −11.6%）

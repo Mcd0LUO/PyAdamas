@@ -963,7 +963,8 @@ private:
     VReg lower_random_extra(const std::string& member, Call& c);
     VReg lower_json(const std::string& member, Call& c);
     // 把静态类型编码成 json 运行时描述符；不支持的类型就地报错。
-    bool json_desc(const TypePtr& t, std::string& out, int line, int col);
+    bool json_desc(const TypePtr& t, std::string& out, int line, int col,
+                   bool for_loads = false);
     // CPython 桥（from python import）：参数类型描述符 + 调用降级。
     bool cpy_desc(const TypePtr& t, std::string& out, int line, int col);
     VReg lower_cpy_call(const std::string& proxy_name, const std::string& attr, Call& c);

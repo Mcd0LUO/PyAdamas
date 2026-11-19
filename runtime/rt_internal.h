@@ -1524,7 +1524,10 @@ PyAdamasDict* pa_collections_counter(PyAdamasList* src, int64_t key_kind, int64_
 PyAdamasList* pa_collections_most_common(PyAdamasDict* d, int64_t n);
 
 /* ── json：静态类型描述符 ───────────────────────────────────────── */
-PyAdamasStr* pa_json_dumps(int64_t value, PyAdamasStr* desc, int64_t indent, int64_t sort_keys);
+/* flags: bit0 sort_keys / bit1 ensure_ascii / bit2 allow_nan；
+ * indent: INT64_MIN = None（紧凑）；seps: NULL 或 tuple[str,str]（借用）。 */
+PyAdamasStr* pa_json_dumps(int64_t value, PyAdamasStr* desc, int64_t indent,
+                           int64_t flags, PyAdamasList* seps);
 int64_t pa_json_loads(PyAdamasStr* text, PyAdamasStr* desc);
 
 /* ── re：回溯 VM 与 Pattern/Match ──────────────────────────────── */

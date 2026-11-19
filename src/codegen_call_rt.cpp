@@ -812,7 +812,6 @@ void AsmGen::gen_rt_args(const Inst& in, RtFn fn) {
         case RtFn::RoundI64:
         case RtFn::FileOpen:
         case RtFn::CpyCall:
-        case RtFn::JsonDumps:
         case RtFn::FuncReduce:
         case RtFn::StrPercentFormat:
         case RtFn::RegexSearchStr:
@@ -831,6 +830,7 @@ void AsmGen::gen_rt_args(const Inst& in, RtFn fn) {
         case RtFn::StrMethod:
         case RtFn::BytesMethod:
         case RtFn::ListCopyRange:
+        case RtFn::JsonDumps:
             gen_rt_i5(in);
             break;
         case RtFn::JsonLoads:

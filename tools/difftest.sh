@@ -54,9 +54,10 @@ LIST=$WORK/list.txt
 i=0
 for f in tests/run/*.py; do
     name=$(basename "$f" .py)
-    # f*：反例组（预期编译失败）；*_perf：打印 wall-clock 时间，
-# -O0/-O2 计时天然不同，不适合做输出比对（180_codepoint_perf）。
-case "$name" in f*) continue ;; *_perf) continue ;; esac
+    # f*：反例组（预期编译失败）；180_codepoint_perf 打印 wall-clock
+# 时间，-O0/-O2 计时天然不同，不适合做输出比对。233_json_perf 只钉
+# 正确性（不打印时间），参与差分。
+case "$name" in f*) continue ;; 180_codepoint_perf) continue ;; esac
     match "$f" || continue
     i=$((i+1))
     printf '%s\t%s\n' "$i" "$f" >> "$LIST"

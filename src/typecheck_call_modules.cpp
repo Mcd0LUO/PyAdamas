@@ -850,9 +850,13 @@ bool TypeChecker::is_lru_cache_expr(const Expr* e) {
 
 std::optional<TypePtr> TypeChecker::json_call(const std::string& member, Call& c) {
         if (member != "dumps" && member != "loads") return std::nullopt;
-        // dumps 收 indent= / sort_keys= 两个关键字，其它不收。
+        // dumps 收 indent= / sort_keys= / ensure_ascii= / separators= /
+        // allow_nan= 关键字，其它不收。
         for (auto& kw : c.keywords) {
-            if (member == "dumps" && (kw.arg == "indent" || kw.arg == "sort_keys")) {
+            if (member == "dumps" &&
+                (kw.arg == "indent" || kw.arg == "sort_keys" ||
+                 kw.arg == "ensure_ascii" || kw.arg == "separators" ||
+                 kw.arg == "allow_nan")) {
                 expr(*kw.value);
                 continue;
             }
