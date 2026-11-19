@@ -814,7 +814,6 @@ void AsmGen::gen_rt_args(const Inst& in, RtFn fn) {
         case RtFn::StrToI64:
         case RtFn::IntToBase:
         case RtFn::RoundI64:
-        case RtFn::FileOpen:
         case RtFn::CpyCall:
         case RtFn::JsonDumps:
         case RtFn::FuncReduce:
@@ -842,6 +841,13 @@ void AsmGen::gen_rt_args(const Inst& in, RtFn fn) {
         case RtFn::DictFromPairs:
         case RtFn::DateTimeNew:
         case RtFn::PopenNew:
+            gen_rt_i6(in);
+            break;
+        case RtFn::FileOpen:
+            // (path, fd, mode, buffering, newline, closefd) —— 六个实参。
+            // 原来误放在 i4 组：newline/closefd 没进寄存器，运行时读到的是
+            // 上一次调用留下的垃圾（newline 恒 0 → 写侧换行翻译从不生效，
+            // closefd 随机）—— 这就是 N2。
             gen_rt_i6(in);
             break;
         case RtFn::AsyncioSleep:

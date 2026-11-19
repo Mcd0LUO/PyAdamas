@@ -101,17 +101,23 @@ static double mt_next_double(PyAdamasRandom* r) {
     return ((double)a * 67108864.0 + (double)b) * (1.0 / 9007199254740992.0);
 }
 
+/* CPython _randommodule.c 的 getrandbits：k<=32 走快路（uint32 右移），
+   否则按 32 位字逐个生成、最后一个字右移（32 - k%32）。**取多少字必须
+   与 CPython 完全一致**——下游 randrange/sample/choice 的序列全靠这个
+   对齐。返回值按 uint64 截断（PyAdamas 没有大整数，k>64 丢高位，但抽
+   取的字数仍与 CPython 相同，后续序列不漂）。 */
 static uint64_t mt_getrandbits(PyAdamasRandom* r, int64_t k) {
     if (k <= 0) return 0;
     if (k <= 32) return (uint64_t)(mt_next32(r) >> (32 - k));
     uint64_t res = 0;
-    int64_t i = 0;
-    while (k > 0) {
+    int64_t left = k;
+    int64_t shift = 0;
+    while (left > 0) {
         uint32_t rv = mt_next32(r);
-        if (k < 32) rv >>= (32 - k);
-        res |= (uint64_t)rv << i;
-        i += 32;
-        k -= 32;
+        if (left < 32) rv >>= (32 - left);
+        if (shift < 64) res |= (uint64_t)rv << shift;
+        shift += 32;
+        left -= 32;
     }
     return res;
 }
@@ -226,16 +232,20 @@ int64_t pa_random_randrange(PyAdamasRandom* r, int64_t a, int64_t b, int64_t ste
         if (b >= a) pa_raise_c("ValueError", "empty range for randrange()");
         n = (a - b + (-step) - 1) / (-step);
     }
-    int64_t k = (int64_t)(mt_next_double(g) * (double)n);
-    if (k >= n) k = n - 1;
+    /* CPython randrange：start + step * _randbelow(width)。用 getrandbits
+       的拒绝采样，不是 random()*n —— 两者序列不同，语料对拍会分叉。 */
+    int64_t k = (int64_t)mt_randbelow(g, (uint64_t)n);
     return a + step * k;
 }
 
 int64_t pa_random_getrandbits(PyAdamasRandom* r, int64_t k) {
     if (k <= 0) pa_raise_c("ValueError", "number of bits must be greater than zero");
-    if (k > 62) k = 62;
-    int64_t v = (int64_t)(mt_next_double(rng_of(r)) * (double)((uint64_t)1 << k));
-    return v;
+    /* 与 CPython 同一算法、同一消耗：抽取的字数逐字对齐，所以后续序列
+       不漂。PyAdamas 没有无符号/大整数，k>63 时只保留低 63 位（非负）——
+       128 位的 uuid4 因此是 63 位随机（字符串仍是合法 32 位 hex，只是熵
+       少于 CPython，已在 stdlib 文档声明边界）。 */
+    uint64_t bits = mt_getrandbits(rng_of(r), k);
+    return (int64_t)(bits & 0x7fffffffffffffffULL);
 }
 
 double pa_random_gauss(PyAdamasRandom* r, double mu, double sigma) {
@@ -270,20 +280,66 @@ double pa_random_triangular(PyAdamasRandom* r, double low, double high, double m
     return low + (high - low) * sqrt(u * c);
 }
 
-/* 无放回采样：复制一份再部分洗牌，取前 k 个。 */
+/* CPython sample() 的两条算法路径按同一门槛选择：种群小就整表洗牌取前 k，
+   大就用「已选下标集合」重抽。门槛、抽数方式都一样，序列才逐位对得上。 */
+static int64_t sample_setsize(int64_t k) {
+    if (k <= 5) return 21;
+    double x = log((double)k * 3.0) / log(4.0);
+    int64_t c = (int64_t)ceil(x);
+    int64_t p = 1;
+    for (int64_t i = 0; i < c && p < (INT64_MAX / 4); ++i) p *= 4;
+    return 21 + p;
+}
+
+/* 无放回采样：复制一份再部分洗牌，取前 k 个（CPython 的 pool 分支）。 */
 PyAdamasList* pa_random_sample(PyAdamasRandom* r, PyAdamasList* seq, int64_t k) {
     int64_t n = seq ? seq->len : 0;
     if (k < 0) pa_raise_c("ValueError", "sample size must be non-negative");
     if (k > n) pa_raise_c("ValueError", "sample larger than population");
     PyAdamasRandom* g = rng_of(r);
-    PyAdamasList* pool = pa_list_copy(seq);
-    for (int64_t i = 0; i < k; ++i) {
-        int64_t j = i + (int64_t)(mt_next_double(g) * (double)(n - i));
-        if (j >= n) j = n - 1;
-        int64_t t = pool->data[i];
-        pool->data[i] = pool->data[j];
-        pool->data[j] = t;
+    if (n > sample_setsize(k)) {
+        /* 大种群：CPython 用 set 记录已选下标，重复就重抽；这里用同构的
+           开地址集合（下标都是非负 int64，-1 表示空）。 */
+        int64_t cap = 8;
+        while (cap < k * 2) cap *= 2;
+        int64_t* tab = (int64_t*)malloc(sizeof(int64_t) * (size_t)cap);
+        if (!tab) panic_c("out of memory");
+        for (int64_t i = 0; i < cap; ++i) tab[i] = -1;
+        PyAdamasList* out = pa_list_new(k, seq->elem_kind);
+        pa_gc_pin(out);
+        for (int64_t i = 0; i < k; ++i) {
+            int64_t j = (int64_t)mt_randbelow(g, (uint64_t)n);
+            for (;;) {
+                int64_t h = (int64_t)(((uint64_t)j * 0x9e3779b97f4a7c15ULL) >> 40) & (cap - 1);
+                while (tab[h] != -1 && tab[h] != j) h = (h + 1) & (cap - 1);
+                if (tab[h] == -1) {
+                    tab[h] = j;
+                    break;
+                }
+                j = (int64_t)mt_randbelow(g, (uint64_t)n);
+            }
+            int64_t v = seq->data[j];
+            pa_own_inc(seq->elem_kind, v);
+            pa_list_append(out, v, seq->elem_kind == 3 ? 2 : (int)seq->elem_kind);
+        }
+        pa_gc_unpin(out);
+        free(tab);
+        return out;
     }
+    /* CPython 3.11+ 的 pool 分支：不变量是「未选中项都在 pool[0:n-i]」。
+       每轮抽 j ∈ [0, n-i)，取走 pool[j]，把尾部未选中项填进空位。
+       选中项先落临时区，循环结束后再搬到表头 —— 边抽边写表头会覆盖还
+       没抽到的候选（n 与 k 接近时）。 */
+    PyAdamasList* pool = pa_list_copy(seq);
+    int64_t* sel = k > 0 ? (int64_t*)malloc(sizeof(int64_t) * (size_t)k) : NULL;
+    if (k > 0 && !sel) panic_c("out of memory");
+    for (int64_t i = 0; i < k; ++i) {
+        int64_t j = (int64_t)mt_randbelow(g, (uint64_t)(n - i));
+        sel[i] = pool->data[j];
+        pool->data[j] = pool->data[n - i - 1];
+    }
+    for (int64_t i = 0; i < k; ++i) pool->data[i] = sel[i];
+    free(sel);
     // 截断掉 [k, n) 的副本引用，否则无条件复制会让多余元素泄漏。
     for (int64_t i = k; i < n; ++i) pa_own_dec(pool->elem_kind, pool->data[i]);
     pool->len = k;

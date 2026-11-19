@@ -4,6 +4,21 @@
 
 早期阶段没有逐条留痕，按阶段归纳；0.4 之后逐条记录。
 
+## [0.316] - 2026-11-19
+
+### 正确性修复：日常语料的四个静默语义差（N2/N3/N4/N5）+ try 里 return 的 RC 顺序
+
+四条「不崩但答案不同」的语义差，加一个同族崩溃。五条最小复现现在都与 CPython 逐字节一致。
+
+- **N2（文本写文件忽略 `newline=`，csv 默认写出 LF）**：`open(p,"w",newline="")` 写 `a\r\nb` 得到 `a\nb`，`newline="\r\n"` 不转换。**根因不在写侧**：`pa_file_open` 的实参被放在 `gen_rt_i4` 组（按 4 个寄存器发射），而运行时签名是 6 参 `(path, fd, mode, buffering, newline, closefd)` —— newline/closefd 从没进寄存器，运行时读到上一次调用残留（newline 恒 0 = 通用换行，写侧翻译因此从不生效；closefd 随机）。修：`FileOpen` 移到 `gen_rt_i6`。四种 newline 形态（None / "" / "\r" / "\r\n"）与读侧通用换行、`csv.writer` 默认 CRLF 全部对齐 CPython（csv 默认行终止符现在真的写 `\r\n`）。
+- **N3（`getrandbits(k>=31)` 及 randrange/sample 序列分叉）**：`getrandbits` 原来是 `random()*2^k`（还钳到 62 位），CPython 是「k<=32 取一个 uint32 右移；否则按 32 位字逐字组装、最后一字右移」。randrange 用 `random()*n`、sample 用 `random()*(n-i)`，CPython 用 `_randbelow`（getrandbits + 拒绝采样）。逐条改成 CPython 算法：`mt_getrandbits` 按字组装（顺带修掉旧实现 k=64 时右移 32 位的未定义行为）、`randrange` → `_randbelow(width)`、`sample` → 3.11 的两条分支（小种群 `result[i]=pool[j]; pool[j]=pool[n-i-1]`；大种群已选下标集合重抽，门槛 `21+4**ceil(log(k*3,4))` 同 CPython）。**int64 边界**：结果保留低 63 位（PyAdamas 没有无符号/大整数），抽取字数与 CPython 完全一致所以后续序列不漂；`uuid4` 的 128 位因此是 63 位熵（合法 32 位 hex，已在 stdlib 文档声明）。
+- **N4（浮点 `','` 分组与 `'#'` 交替形式被静默忽略）**：`fmt_parse` 解析了 `#` 却直接丢弃，浮点路径从不看 `grouping`。修：`PyAdamasFmt` 增加 `alternate` / `group_char`；浮点走 printf 的 `#` 标志（`#.0f` → `1235.`、`#.3g` → `1.00e+20`，repr 形态补小数点 `1e+20` → `1.e+20`）；整数 `#` 加前缀 `0x/0o/0b`（零填充插在前缀之后：`#08x` → `0x0000ff`，靠新的 `fmt_pad_parts` 前缀槽实现）；分组统一成 `fmt_group_n`（十进制 3 位、十六/二进制 4 位、`','`+非十进制按 CPython 报 ValueError）；浮点只给整数部分分组（`12,345,678.90`、`1_234.57`），指数形式与 inf/nan 不动。
+- **N5（strftime 的星期/年积日与 naive 时区）**：`tm_wday`/`tm_yday` 从未计算（一直是 0）→ `%a/%A/%w/%u/%j/%U/%W` 全错；naive datetime 的 `%z/%Z` 被 glibc 填成本地时区。修：用 Howard Hinnant 的 `days_from_civil` 算出 `tm_wday`（1970-01-01 周四）与 `tm_yday`；`%z/%Z` 在格式串预处理里换成哨兵字符（正确处理 `%%` 与 `%E/%O` 修饰），strftime 输出后剥掉 —— naive 值现在与 CPython 一样是空串。
+- **附带（同族崩溃，语料未覆盖）**：`try: return s + "!"` 这样的形态退出时 panic「refcount decrement on a freed object」。`Return` 原来先 `emit_cleanup_exits(0)`（清理会释放临时栈上方的值）再 `rc_temp_take` 返回值 —— 返回值本身就是其中之一，取到的是已释放对象。修：新增 `own_return_value`（新值 take / 借用值 inc，struct 走拷贝），在清理**之前**接管返回值，`emit_return` 加 `already_owned` 参数跳过重复接管。
+- **回归用例**：新增 tests/run/238_daily_semantics.py（先对拍 CPython 再钉 expect，O0/O1/O2 全一致）：四种 newline 写形态 + 通用换行读 + csv 默认/自定义行终止符、getrandbits(8/16/31/32/63) + randrange/randint/sample 三形态/choices/shuffle/choice/uniform/random、浮点与整数的 `,`/`_`/`#` 组合（含 `#08x`、`#.3g`、`#_x`、`#_b`、`#` repr 形态）、strftime 全部字母指令与四个边界日期（含闰年、年积日 366）、try 里 return 新值/借用值/列表下标。
+- **验证**：difftest **231/0**；普通与 ASan 套件各 **249 ran ok / EXIT=0**（PYADAMAS_TEST_JOBS=8）；ASan detect_leaks=1 抽查 238 / 237 / 13_gc 全干净；0.271 oracle 语料零意外差异（201-229 共 23 例 oracle 编译 rc 差、230/231/236/237/238 新用例时代差、206 oracle 侧 SIGSEGV 既有现象，其余逐字节一致）；规模检查仍只有原有 5 处超限。
+- **abbench（对 99c30e6 realistic 绑核交替 15 轮）**：dict_wordfreq +0.1%、obj_dispatch +0.1%、queue_sim −0.2%、rec_memo +0.2%、sort_struct −0.5%、str_build −0.5%，合计 **1639.28→1636.73ms（−0.2%）**——五处修复都不在六个热路径用例的代码路径上（FileOpen 参数表、random 采样算法、格式说明符解析、strftime、Return 的清理顺序）。
+- **同批发现、未修（记录备查）**：`type(e).__name__` 对运行时内置异常一律返回 `"Exception"`（`except ValueError as e` 里拿不到真实类名）；`csv.writer.writerow` 传 `[str, int]` 混合列表会段错误（`list[str]` 形参收 `list[int]` 值的隐式转换洞，与 N17 同族但更深，需要元素级转换或编译期拒绝）。
 ## [0.315] - 2026-11-19
 
 ### 正确性修复：容器 RC 崩溃批（N10 / N16 / N17 / N18）+ set 原地运算

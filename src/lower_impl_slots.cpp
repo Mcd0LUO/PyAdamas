@@ -130,7 +130,39 @@ void Lowerer::release_globals() {
             rc_dec(load_global(static_cast<int>(gi), g.ty));
     }}
 
-void Lowerer::emit_return(VReg v, TypePtr vty) {
+VReg Lowerer::own_return_value(VReg v, TypePtr vty) {
+    if (v == kNoReg) return v;
+    // 值语义：返回 struct 时复制 payload，caller 拿到的是独立对象。
+    if (vty && vty->kind == TyKind::Struct && vty->st) v = struct_copy(v, vty->st);
+    // 刚产生、还没存过的新值直接把临时栈上的引用转给 caller。
+    if (vty && ir_is_heap(vty) && st_->fresh_vregs.count(v)) {
+        st_->fresh_vregs.erase(v);
+        rc_temp_take(v);
+        return v;
+    }
+    if (ir_is_heap(vty)) rc_inc(v);
+    else if (!vty || vty->kind == TyKind::Unknown)
+        call_void(RtFn::RcIncUnknown, {v});
+    return v;
+}
+
+void Lowerer::emit_return(VReg v, TypePtr vty, bool already_owned) {
+    if (already_owned) {
+        // 调用方已在清理之前接管了返回值，这里只做出口的槽/全局释放。
+        if (st_->fn_mark != kNoReg && st_->rc_pushes > 0) rc_cleanup(st_->fn_mark);
+        release_slots();
+        if (st_->is_entry) {
+            call_void(RtFn::VtShutdown, {});
+            release_globals();
+            call_void(RtFn::GcShutdown, {});
+            call_void(RtFn::RcShutdown, {});
+        }
+        Inst in;
+        in.op = IrOp::Return;
+        in.a = v;
+        emit(std::move(in));
+        return;
+    }
     // 值语义：返回 struct 时复制 payload，caller 拿到的是独立对象。
     if (v != kNoReg && vty && vty->kind == TyKind::Struct && vty->st)
         v = struct_copy(v, vty->st);

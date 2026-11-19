@@ -172,9 +172,21 @@ void Lowerer::stmt(Stmt& s) {
             VReg v = r.value ? expr(*r.value) : kNoReg;
             // `def f() -> float: return 1` 要在返回处转成 double
             if (v != kNoReg && st_->fn->ret) v = coerce(v, vreg_ty(v), st_->fn->ret);
-            // return 也是退出路径：先跑完所有活跃清理动作。
+            // **先接管返回值，再跑清理。**
+            //
+            // 清理（emit_cleanup_exits / rc_cleanup）会把临时栈上方的值全部
+            // 释放 —— 而 return 值本身常常就是其中之一：
+            //     def f(s: str) -> str:
+            //         try: return s + "!"
+            //         except ValueError: return "x"
+            // `s + "!"` 是新堆值且在临时栈上，先清理再 take，取到的是已经
+            // 释放的对象：caller 一 dec 就 panic "refcount decrement on a
+            // freed object"（try 里 return 任何拼接/调用结果都会踩）。
+            // 借用值同理：清理可能释放它的属主，先 inc 才是安全的。
+            TypePtr rt = v != kNoReg ? vreg_ty(v) : nullptr;
+            v = own_return_value(v, rt);
             emit_cleanup_exits(0);
-            emit_return(v, v != kNoReg ? vreg_ty(v) : nullptr);
+            emit_return(v, rt, v != kNoReg);
             break;
         }
         case StmtKind::Break: {

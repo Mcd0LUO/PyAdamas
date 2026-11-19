@@ -10,7 +10,9 @@ typedef struct {
     char type;
     int width;
     int prec;
-    int grouping;
+    int grouping;     /* ',' 或 '_' */
+    char group_char;
+    int alternate;    /* '#' 交替形式（前缀 / 保留小数点） */
 } PyAdamasFmt;
 
 static void fmt_parse(PyAdamasStr* spec, PyAdamasFmt* f, int is_str) {
@@ -21,6 +23,8 @@ static void fmt_parse(PyAdamasStr* spec, PyAdamasFmt* f, int is_str) {
     f->width = 0;
     f->prec = -1;
     f->grouping = 0;
+    f->group_char = ',';
+    f->alternate = 0;
     const char* p = spec ? spec->data : "";
     int n = spec ? (int)spec->len : 0;
     int i = 0;
@@ -37,7 +41,10 @@ static void fmt_parse(PyAdamasStr* spec, PyAdamasFmt* f, int is_str) {
         i++;
     }
     if (i < n && (p[i] == '+' || p[i] == '-' || p[i] == ' ')) f->sign = p[i++];
-    if (i < n && p[i] == '#') i++;
+    if (i < n && p[i] == '#') {
+        f->alternate = 1;
+        i++;
+    }
     if (i < n && p[i] == '0') {
         f->fill = '0';
         if (!explicit_align) f->align = '=';
@@ -46,6 +53,7 @@ static void fmt_parse(PyAdamasStr* spec, PyAdamasFmt* f, int is_str) {
     while (i < n && p[i] >= '0' && p[i] <= '9') f->width = f->width * 10 + (p[i++] - '0');
     if (i < n && (p[i] == ',' || p[i] == '_')) {
         f->grouping = 1;
+        f->group_char = p[i];
         i++;
     }
     if (i < n && p[i] == '.') {
@@ -57,16 +65,22 @@ static void fmt_parse(PyAdamasStr* spec, PyAdamasFmt* f, int is_str) {
     if (i != n) pa_raise_c("ValueError", "Invalid format specifier");
 }
 
-static PyAdamasStr* fmt_pad(const char* sign, const char* body, const PyAdamasFmt* f) {
+/* prefix 是 '#' 交替形式的前缀（"0x" / "0o" / "0b"）：零填充必须插在
+   前缀**之后**（Python 的 `format(255, '#08x')` 是 '0x0000ff'），所以
+   它不能简单拼进 body。 */
+static PyAdamasStr* fmt_pad_parts(const char* sign, const char* prefix,
+                                  const char* body, const PyAdamasFmt* f) {
     size_t sl = sign ? 1 : 0;
+    size_t pl = prefix ? strlen(prefix) : 0;
     size_t bl = strlen(body);
-    size_t total = sl + bl;
+    size_t total = sl + pl + bl;
     char* out;
     if (f->width <= (int)total) {
         out = (char*)malloc(total + 1);
         if (!out) panic_c("out of memory");
         if (sl) out[0] = *sign;
-        memcpy(out + sl, body, bl);
+        if (pl) memcpy(out + sl, prefix, pl);
+        memcpy(out + sl + pl, body, bl);
         out[total] = '\0';
         PyAdamasStr* s = str_new(out, (int64_t)total);
         free(out);
@@ -79,6 +93,7 @@ static PyAdamasStr* fmt_pad(const char* sign, const char* body, const PyAdamasFm
     if (f->align == '>') {
         for (int i = 0; i < pad; ++i) *q++ = f->fill;
         if (sl) *q++ = *sign;
+        if (pl) { memcpy(q, prefix, pl); q += pl; }
         memcpy(q, body, bl);
         q += bl;
     } else if (f->align == '^') {
@@ -86,16 +101,19 @@ static PyAdamasStr* fmt_pad(const char* sign, const char* body, const PyAdamasFm
         int right = pad - left;
         for (int i = 0; i < left; ++i) *q++ = f->fill;
         if (sl) *q++ = *sign;
+        if (pl) { memcpy(q, prefix, pl); q += pl; }
         memcpy(q, body, bl);
         q += bl;
         for (int i = 0; i < right; ++i) *q++ = f->fill;
     } else if (f->align == '=') {
         if (sl) *q++ = *sign;
+        if (pl) { memcpy(q, prefix, pl); q += pl; }
         for (int i = 0; i < pad; ++i) *q++ = f->fill;
         memcpy(q, body, bl);
         q += bl;
     } else {
         if (sl) *q++ = *sign;
+        if (pl) { memcpy(q, prefix, pl); q += pl; }
         memcpy(q, body, bl);
         q += bl;
         for (int i = 0; i < pad; ++i) *q++ = f->fill;
@@ -104,6 +122,10 @@ static PyAdamasStr* fmt_pad(const char* sign, const char* body, const PyAdamasFm
     PyAdamasStr* s = str_new(out, (int64_t)(q - out));
     free(out);
     return s;
+}
+
+static PyAdamasStr* fmt_pad(const char* sign, const char* body, const PyAdamasFmt* f) {
+    return fmt_pad_parts(sign, NULL, body, f);
 }
 
 static void fmt_uint(uint64_t v, unsigned base, int upper, char* out) {
@@ -121,17 +143,51 @@ static void fmt_uint(uint64_t v, unsigned base, int upper, char* out) {
     out[n] = '\0';
 }
 
-static void fmt_group(char* body) {
-    char tmp[96];
+/* 按 group_size 位一组插分隔符（十进制 3、十六/二进制 4）。 */
+static void fmt_group_n(char* body, size_t cap, char sep, int group_size) {
+    char tmp[256];
     int n = (int)strlen(body);
     int j = 0;
     for (int i = 0; i < n; ++i) {
         int left = n - i;
+        if (j + 2 >= (int)sizeof tmp) break;
         tmp[j++] = body[i];
-        if (left > 1 && (left - 1) % 3 == 0) tmp[j++] = ',';
+        if (left > 1 && group_size > 0 && (left - 1) % group_size == 0)
+            tmp[j++] = sep;
     }
     tmp[j] = '\0';
-    strcpy(body, tmp);
+    if ((size_t)j < cap) memcpy(body, tmp, (size_t)j + 1);
+}
+
+/* 浮点：只给整数部分分组（Python 的 ',.2f'）。指数形式（1.00e+20）与
+   inf/nan 不动 —— CPython 同样不分组。 */
+static void fmt_group_float(char* body, size_t cap, char sep) {
+    const char* e = strpbrk(body, "eE");
+    size_t end = e ? (size_t)(e - body) : strlen(body);
+    if (end == 0 || body[0] < '0' || body[0] > '9') return;
+    size_t dot = end;
+    for (size_t i = 0; i < end; ++i)
+        if (body[i] == '.') {
+            dot = i;
+            break;
+        }
+    if (dot <= 3) return;
+    char tmp[256];
+    size_t j = 0;
+    for (size_t i = 0; i < dot; ++i) {
+        if (i > 0 && (dot - i) % 3 == 0) {
+            if (j + 1 >= sizeof tmp) return;
+            tmp[j++] = sep;
+        }
+        if (j + 1 >= sizeof tmp) return;
+        tmp[j++] = body[i];
+    }
+    for (size_t i = dot; i < strlen(body); ++i) {
+        if (j + 1 >= sizeof tmp) return;
+        tmp[j++] = body[i];
+    }
+    tmp[j] = '\0';
+    if (j < cap) memcpy(body, tmp, j + 1);
 }
 
 PyAdamasStr* pa_fmt_i64(int64_t v, PyAdamasStr* spec) {
@@ -163,8 +219,24 @@ PyAdamasStr* pa_fmt_i64(int64_t v, PyAdamasStr* spec) {
     }
     char body[96];
     fmt_uint(mag, base, upper, body);
-    if (f.grouping && base == 10) fmt_group(body);
-    return fmt_pad(sign ? &sign : NULL, body, &f);
+    if (f.grouping) {
+        if (base == 10)
+            fmt_group_n(body, sizeof body, f.group_char, 3);
+        else if (f.group_char == '_')
+            fmt_group_n(body, sizeof body, '_', 4);
+        else
+            pa_raise_c("ValueError",
+                       "Cannot specify ',' with 'x', 'X', 'o' or 'b'.");
+    }
+    /* '#' 交替形式：二进制/八进制/十六进制加前缀（十进制无前缀）。 */
+    const char* prefix = NULL;
+    if (f.alternate) {
+        if (f.type == 'b') prefix = "0b";
+        else if (f.type == 'o') prefix = "0o";
+        else if (f.type == 'x') prefix = "0x";
+        else if (f.type == 'X') prefix = "0X";
+    }
+    return fmt_pad_parts(sign ? &sign : NULL, prefix, body, &f);
 }
 
 PyAdamasStr* pa_fmt_bool(int64_t v, PyAdamasStr* spec) {
@@ -201,17 +273,35 @@ PyAdamasStr* pa_fmt_f64(double v, PyAdamasStr* spec) {
     if (type == '%') mag *= 100.0;
     char body[256];
     int prec = f.prec;
+    /* '#' 交替形式交给 printf 的 # 标志：它对 f/e/g 都保证结果里有小数点，
+       对 g 还保留尾随零（CPython 的 '#.3g' → '1.00e+20'）。 */
+    int iprec = prec < 0 ? 6 : prec;
     if (type == 'f' || type == 'F' || type == '%') {
-        snprintf(body, sizeof body, "%.*f", prec < 0 ? 6 : prec, mag);
-    } else if (type == 'e' || type == 'E') {
-        snprintf(body, sizeof body, type == 'e' ? "%.*e" : "%.*E", prec < 0 ? 6 : prec, mag);
-    } else if (type == 'g' || type == 'G') {
-        snprintf(body, sizeof body, type == 'g' ? "%.*g" : "%.*G", prec < 0 ? 6 : prec, mag);
+        char cfmt[16];
+        snprintf(cfmt, sizeof cfmt, "%%%s.*%c", f.alternate ? "#" : "",
+                 type == 'F' ? 'F' : 'f');
+        snprintf(body, sizeof body, cfmt, iprec, mag);
+    } else if (type) {
+        char cfmt[16];
+        snprintf(cfmt, sizeof cfmt, "%%%s.*%c", f.alternate ? "#" : "", type);
+        snprintf(body, sizeof body, cfmt, iprec, mag);
     } else if (prec >= 0) {
-        snprintf(body, sizeof body, "%.*g", prec, mag);
+        char cfmt[16];
+        snprintf(cfmt, sizeof cfmt, "%%%s.*g", f.alternate ? "#" : "");
+        snprintf(body, sizeof body, cfmt, prec, mag);
     } else {
         format_double(body, sizeof body, mag);
+        if (f.alternate && !strchr(body, '.')) {
+            /* '#': repr 形态也要保证有小数点（CPython: 1e+20 → 1.e+20）。 */
+            const char* e = strpbrk(body, "eE");
+            size_t at = e ? (size_t)(e - body) : strlen(body);
+            if (at + 1 < sizeof body) {
+                memmove(body + at + 1, body + at, strlen(body + at) + 1);
+                body[at] = '.';
+            }
+        }
     }
+    if (f.grouping) fmt_group_float(body, sizeof body, f.group_char);
     if (type == '%') {
         size_t n = strlen(body);
         if (n + 2 < sizeof body) {

@@ -103,11 +103,48 @@ PyAdamasStr* pa_datetime_isoformat(PyAdamasDateTime* dt) {
     return str_new(buf, n);
 }
 
+/* 公历日期 → 1970-01-01 起的天数（Howard Hinnant 的 days_from_civil）。
+   用来算出 strftime 需要的 tm_wday / tm_yday —— 原来这两个字段一直是 0，
+   于是 %a/%A/%w/%u/%j/%U/%W 全错（2026-11-19 说成 Sunday、%j 是 001）。 */
+static int64_t dt_days_from_civil(int64_t y, int64_t m, int64_t d) {
+    y -= m <= 2;
+    int64_t era = (y >= 0 ? y : y - 399) / 400;
+    int64_t yoe = y - era * 400;
+    int64_t doy = (153 * (m + (m > 2 ? -3 : 9)) + 2) / 5 + d - 1;
+    int64_t doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    return era * 146097 + doe - 719468;
+}
+
 PyAdamasStr* pa_datetime_strftime(PyAdamasDateTime* dt, PyAdamasStr* fmt) {
-    char* f = (char*)malloc((size_t)fmt->len + 1);
+    /* 先扫一遍格式串：%z / %Z 对**naive** datetime 在 CPython 里是空串，
+       而 glibc 的 strftime 会填本地时区（CST / +0000）。这两个指令换成
+       哨兵字符，让 strftime 原样复制，最后统一剥掉。 */
+    const char* src = fmt ? fmt->data : "";
+    int64_t slen = fmt ? fmt->len : 0;
+    char* f = (char*)malloc((size_t)slen * 2 + 1);
     if (!f) panic_c("out of memory");
-    memcpy(f, fmt->data, (size_t)fmt->len);
-    f[fmt->len] = '\0';
+    int64_t fi = 0;
+    for (int64_t i = 0; i < slen; ++i) {
+        if (src[i] != '%') {
+            f[fi++] = src[i];
+            continue;
+        }
+        if (i + 1 < slen && src[i + 1] == '%') {
+            f[fi++] = '%';
+            f[fi++] = '%';
+            ++i;
+            continue;
+        }
+        int64_t j = i + 1;
+        if (j < slen && (src[j] == 'E' || src[j] == 'O')) ++j;
+        if (j < slen && (src[j] == 'z' || src[j] == 'Z')) {
+            f[fi++] = '\x01';
+            i = j;
+            continue;
+        }
+        f[fi++] = src[i];
+    }
+    f[fi] = '\0';
     struct tm tmv;
     memset(&tmv, 0, sizeof tmv);
     tmv.tm_year = (int)dt->year - 1900;
@@ -116,10 +153,19 @@ PyAdamasStr* pa_datetime_strftime(PyAdamasDateTime* dt, PyAdamasStr* fmt) {
     tmv.tm_hour = (int)dt->hour;
     tmv.tm_min = (int)dt->minute;
     tmv.tm_sec = (int)dt->second;
-    char buf[512];
+    int64_t days = dt_days_from_civil(dt->year, dt->month, dt->day);
+    tmv.tm_wday = (int)((days + 4) % 7);   /* 1970-01-01 是周四 */
+    if (tmv.tm_wday < 0) tmv.tm_wday += 7;
+    tmv.tm_yday = (int)(days - dt_days_from_civil(dt->year, 1, 1));
+    tmv.tm_isdst = 0;
+    char buf[1024];
     size_t n = strftime(buf, sizeof buf, f, &tmv);
     free(f);
-    return str_new(buf, (int64_t)n);
+    /* 剥掉 %z/%Z 的哨兵（没有时是原样返回）。 */
+    size_t w = 0;
+    for (size_t i = 0; i < n; ++i)
+        if (buf[i] != '\x01') buf[w++] = buf[i];
+    return str_new(buf, (int64_t)w);
 }
 
 /* ── datetime.timedelta ────────────────────────────────────── */

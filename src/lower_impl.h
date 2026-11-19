@@ -689,7 +689,10 @@ private:
 
     void release_globals();
 
-    void emit_return(VReg v, TypePtr vty);
+    void emit_return(VReg v, TypePtr vty, bool already_owned = false);
+    // 把返回值变成 caller 拥有的引用（新值从临时栈取走，借用值补引用）。
+    // **必须在跑清理之前调用**，否则清理可能先把返回值本身释放掉。
+    VReg own_return_value(VReg v, TypePtr vty);
 
     // ── 名字解析 ────────────────────────────────────────────────
 
