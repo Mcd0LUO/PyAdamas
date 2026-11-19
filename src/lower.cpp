@@ -89,10 +89,15 @@ void Lowerer::scan_globals(Stmt& s, bool enter_functions) {
         case StmtKind::Import:
             // import m 只绑定编译期模块别名，不占运行时全局槽。
             break;
-        case StmtKind::ImportFrom:
-            for (auto& a : static_cast<ImportFrom&>(s).names)
+        case StmtKind::ImportFrom: {
+            auto& imf = static_cast<ImportFrom&>(s);
+            // from python import m 只绑定编译期 CPython 代理别名，不占
+            // 运行时全局槽（与 Import 同口径）。
+            if (imf.module == "python") break;
+            for (auto& a : imf.names)
                 if (a.name != "*") global_idx(a.asname.empty() ? a.name : a.asname);
             break;
+        }
         default:
             break;
     }

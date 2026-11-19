@@ -194,6 +194,18 @@ TypePtr TypeChecker::call_attr(Attribute& a, Call& c) {
                 return t_unknown();
             }
             if (auto mod = lookup_module_alias(vn->id)) {
+                if (mod->cpy_proxy) {
+                    // CPython 桥调用：签名编译期不可知，实参照常求值，
+                    // 结果 unknown。关键字参数先验阶段不支持（marshalling
+                    // 协议只带位置参数；见 docs/cpybridge-design.md）。
+                    for (auto& arg : c.args) expr(*arg);
+                    if (!c.keywords.empty())
+                        err(c.line, c.col,
+                            std::format("CPython bridge call '{}.{}()' does not support "
+                                        "keyword arguments yet", vn->id, a.attr));
+                    for (auto& kw : c.keywords) expr(*kw.value);
+                    return t_unknown();
+                }
                 if (mod->builtin && mod->name == "asyncio") {
                     if (auto r = asyncio_call(a.attr, c)) return *r;
                 }
@@ -243,6 +255,28 @@ TypePtr TypeChecker::call_attr(Attribute& a, Call& c) {
                 for (auto& kw : c.keywords) expr(*kw.value);
                 err(c.line, c.col, "module attribute is not callable");
                 return t_unknown();
+            }
+        }
+        // cpyos.path.basename(...)：CPython 代理 + 点子模块链。整条链
+        // 编译期拼成模块名（os.path），调用口径与单层代理一致。裸读
+        // 中间属性（cpyos.path 当值用）仍在 expr 里拒绝。
+        {
+            Expr* base = a.value.get();
+            std::vector<std::string> chain;
+            while (auto* ba = dynamic_cast<Attribute*>(base)) {
+                chain.push_back(ba->attr);
+                base = ba->value.get();
+            }
+            auto* bn = dynamic_cast<Name*>(base);
+            if (bn && !chain.empty()) {
+                if (auto mod = lookup_module_alias(bn->id); mod && mod->cpy_proxy) {
+                    for (auto& arg : c.args) expr(*arg);
+                    if (!c.keywords.empty())
+                        err(c.line, c.col,
+                            "CPython bridge call does not support keyword arguments yet");
+                    for (auto& kw : c.keywords) expr(*kw.value);
+                    return t_unknown();
+                }
             }
         }
         // super().m(...)：按定义类的 MRO 找下一实现，至少能检查签名。

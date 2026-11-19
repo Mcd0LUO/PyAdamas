@@ -399,6 +399,12 @@ bool ir_module_can_skip_index_maint(const IRModule& m) {
                     case RtFn::StrEqUnknown:
                     case RtFn::ComplexEqUnknown:
                         return false;
+                    // CPython 桥：结果是 unknown 机器字，float 盒/容器在
+                    // 运行时分配，必须进存活索引才能被探针/print/temp 认出。
+                    // 索引只读（skip maint）会让这些对象「看不见」。
+                    case RtFn::CpyCall:
+                    case RtFn::RcTempUnknown:
+                        return false;
                     default:
                         break;
                 }
@@ -453,6 +459,10 @@ bool ir_module_needs_unknown_index(const IRModule& m) {
             case RtFn::ComplexEqUnknown:
             case RtFn::IsStr:
             case RtFn::IsComplex:
+            // CPython 桥结果是 unknown 机器字（可能是堆对象）：
+            // RcTempUnknown / print / marshalling 探针都靠注册表，
+            // 用了桥的模块必须保留索引。
+            case RtFn::CpyCall:
                 return true;
             default:
                 return false;

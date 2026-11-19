@@ -207,6 +207,9 @@ inline constexpr ModuleEntry kModuleTable[] = {
     {"datetime", ModuleKind::Native, "", ""},
     {"pathlib", ModuleKind::Native, "", ""},
     {"operator", ModuleKind::Native, "", ""},
+    // CPython 桥：from python import <module>。纯编译期代理，无源文件、
+    // 无运行期模块对象；调用降级成 rt_cpy 子进程 IPC（见 docs/cpybridge-design.md）。
+    {"python", ModuleKind::Native, "", ""},
     // ── 原生 + stdlib 扩展源（补 API 只改 stdlib/<source>，不用碰 src/）──
     {"functools", ModuleKind::NativePython, "functools.py", ""},
     // ── stdlib Python 源模块 ──────────────────────────────────
@@ -840,6 +843,8 @@ pyadamas::ModuleInfoPtr program_module(Program& p, const std::string& name) {
         auto it = p.units.find(name);
         return it == p.units.end() ? nullptr : it->second->info;
     };
+    // CPython 桥子代理（python.<module>）是开集，不进模块表，按需生成。
+    if (name.starts_with("python.")) return builtin_module(name);
     const ModuleEntry* e = find_module_entry(name);
     if (!e) return unit_info();  // 未登记：用户模块 / 包内子模块
     switch (e->kind) {
@@ -1282,6 +1287,12 @@ pyadamas::ModuleInfoPtr check_load_file(CheckCtx& ctx, const std::string& name,
 pyadamas::ModuleInfoPtr check_load(CheckCtx& ctx, const std::string& importer,
                                     const std::string& name) {
     if (auto it = ctx.loaded.find(name); it != ctx.loaded.end()) return it->second;
+    // CPython 桥子代理：与 build 端 program_module 同口径。
+    if (name.starts_with("python.")) {
+        auto m = pyadamas::builtin_module(name);
+        ctx.loaded[name] = m;
+        return m;
+    }
     const ModuleEntry* entry = find_module_entry(name);
     if (is_native_module(entry)) {
         auto m = pyadamas::builtin_module(name);

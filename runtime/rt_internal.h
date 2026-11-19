@@ -362,6 +362,10 @@ enum {
     PYADAMAS_RC_RANGE = 6,
     /* 值类型 struct：payload 就是 C 结构体，字段只有标量，无出边。 */
     PYADAMAS_RC_STRUCT = 7,
+    /* CPython 桥的 float 盒：unknown 机器字分不开 int/float，桥返回的
+       float 装进 8 字节 payload（double 位模式）的无出边对象。
+       print/探针按 kind 识别。见 runtime/rt_cpy.c。 */
+    PYADAMAS_RC_CPYFLOAT = 8,
 };
 
 typedef struct PyAdamasRc {
@@ -1340,6 +1344,12 @@ PyAdamasList* pa_sys_argv(void);
 void pa_sys_exit(int64_t code);
 void pa_print_i64(int64_t v);
 void pa_print_any(int64_t v);
+/* CPython 桥结果的打印分派（float 盒 / list / dict 的 repr），rt_cpy.c。 */
+void pa_print_cpy_value(int64_t v);
+/* CPython 桥调用：(str* module, str* attr, list* args, str* descs) -> unknown。
+   args 是 kind 0 借用打包列表；descs 是逐参数拼接的自定界类型描述符。 */
+int64_t pa_cpy_call(PyAdamasStr* module, PyAdamasStr* attr, PyAdamasList* args,
+                    PyAdamasStr* descs);
 int rc_index_has(PyAdamasRc* h);
 void pa_print_f64(double v);
 void pa_print_bool(int64_t v);

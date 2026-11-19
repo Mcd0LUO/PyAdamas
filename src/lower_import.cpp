@@ -426,6 +426,11 @@ void Lowerer::lower_import(Import& im) {
     // 模块 init 会执行任意用户代码，可能改动容器。
     ++side_effect_seq_;
     for (auto& al : im.names) {
+        if (al.name == "python" || al.name.starts_with("python.")) {
+            err(im.line, im.col,
+                "use 'from python import <module>' instead of 'import python'");
+            continue;
+        }
         if (al.name.find('.') != std::string::npos && al.asname.empty()) {
             err(im.line, im.col, "dotted import needs 'as name' (or use from ... import)");
             continue;
@@ -464,6 +469,26 @@ void Lowerer::lower_import_from(ImportFrom& im) {
         return;
     }
     if (!mod->builtin || mod->source_init) ensure_module_init(mod);
+    if (mod->cpy_proxy) {
+        // from python import <module>：登记 CPython 模块代理别名。没有
+        // 运行期模块对象，不发 ImportModule；调用走 lower_cpy_call。
+        if (im.names.size() == 1 && im.names[0].name == "*") {
+            err(im.line, im.col, "from python import * is not supported");
+            return;
+        }
+        for (auto& al : im.names) {
+            std::string bind = al.asname.empty() ? al.name : al.asname;
+            auto child = opts_.module_lookup(mod->name + "." + al.name);
+            if (!child) {
+                err(im.line, im.col,
+                    std::format("cannot resolve CPython module '{}'", al.name));
+                continue;
+            }
+            if (st_->is_module_top) module_aliases_[bind] = child;
+            else st_->modules[bind] = child;
+        }
+        return;
+    }
     if (im.names.size() == 1 && im.names[0].name == "*") {
         for (auto& [name, ty] : mod->globals) {
             if (name.empty() || name[0] == '_') continue;

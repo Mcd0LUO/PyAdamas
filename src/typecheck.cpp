@@ -619,9 +619,15 @@ void TypeChecker::bind_target(Expr& target, Scope* sc) {
                     // import m 绑定的是模块别名，不进普通变量表；
                     // 否则 lookup_module_alias 会被一个 unknown 变量抢先命中。
                     break;
-                case StmtKind::ImportFrom:
-                    for (auto& al : static_cast<ImportFrom&>(*s).names) bind_alias(al);
+                case StmtKind::ImportFrom: {
+                    auto& imf = static_cast<ImportFrom&>(*s);
+                    // from python import m 绑定的是编译期 CPython 代理别名，
+                    // 不进普通变量表（与 Import 同口径）：否则
+                    // lookup_module_alias 会被一个 unknown 变量抢先命中。
+                    if (imf.level == 0 && imf.module == "python") break;
+                    for (auto& al : imf.names) bind_alias(al);
                     break;
+                }
                 default:
                     break;
             }

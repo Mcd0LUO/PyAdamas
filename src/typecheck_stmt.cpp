@@ -438,6 +438,12 @@ void TypeChecker::assign(Expr& target, TypePtr value, int line, int col) {
         if (auto* at = dynamic_cast<Attribute*>(&target)) {
             if (auto* vn = dynamic_cast<Name*>(at->value.get())) {
                 if (auto mod = lookup_module_alias(vn->id)) {
+                    if (mod->cpy_proxy) {
+                        err(line, col,
+                            std::format("cannot assign to attribute of CPython module proxy '{}'",
+                                        vn->id));
+                        return;
+                    }
                     auto it = mod->globals.find(at->attr);
                     if (it == mod->globals.end()) {
                         err(line, col,
