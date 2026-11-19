@@ -383,6 +383,16 @@ std::optional<CImportDecl> load_cpya(const std::string& name, const std::string&
             std::string rest = trim(text.substr(4));
             if (rest.empty()) return fail(lineno, "'link' requires an argument");
             std::string arg = normalize_link(rest);
+            // 引号给的 .c 源文件（link "glue.c"） historically 按 cwd 解析；
+            // stdlib 分发的 .cpya 不能依赖用户 cwd：cwd 下找不到时回退到
+            // .cpya 所在目录（转绝对路径），两种口径都保住。
+            if (!arg.empty() && arg[0] != '-' && arg.ends_with(".c")) {
+                std::error_code ec;
+                if (!fs::exists(arg, ec)) {
+                    fs::path cand = found.parent_path() / arg;
+                    if (fs::exists(cand, ec)) arg = fs::absolute(cand).string();
+                }
+            }
             if (seen_links.insert(arg).second) decl.links.push_back(arg);
             continue;
         }

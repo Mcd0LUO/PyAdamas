@@ -147,6 +147,11 @@ TypePtr TypeChecker::check_args(const FuncInfoPtr& fn, Call& c) {
                                 "non-float values; annotate the parameter type",
                                 p.name, fn->name));
             };
+            // 显式 object/Any 标注：故意保持 unknown 域，不回填、不报
+            // float 混用——调用点对 float 实参装箱（AnyFromF64），callee
+            // 按 unknown 动态分派。这是 argparse.add_argument(default=...)
+            // 这类异构 API 的前提。
+            if (p.ann_unknown && !p.inferred) return;
             if (is_default && ty && ty->kind == TyKind::None) {
                 if (p.ty && p.ty->kind == TyKind::Float) mixed_float();
                 if (is_unknown(p.ty) || p.inferred) {
@@ -199,6 +204,10 @@ TypePtr TypeChecker::check_args(const FuncInfoPtr& fn, Call& c) {
                 fn->sig_dirty = true;
                 sync();
             }
+            // 实参是带洞容器、形参具体（f({}) 传 dict[str,str]）：把形参
+            // 类型填进实参的洞，空字面量才按正确的键/值种类建表。
+            if (ty && p.ty && ty_contains_hole(ty, 0) && !ty_contains_hole(p.ty, 0))
+                fill_holes_recursive(ty, p.ty, 0);
             if (!p.ty || p.ty->kind == TyKind::Unknown) {
                 // 实参是 None 时不回填：None 是「没传 / 清空」的哨兵，不是
                 // 「这个形参就是 NoneType」。回填了会把 copy._reconstruct(x,
@@ -324,8 +333,9 @@ TypePtr TypeChecker::check_args(const FuncInfoPtr& fn, Call& c) {
                         owner != func_owners_.end() && owner->second)
                         methods_with_float_defaults_.insert(it->second);
                 }
-            } else if ((ty->kind == TyKind::Float && (!p.ty || p.ty->kind != TyKind::Float)) ||
-                       (ty->kind == TyKind::None && p.ty && p.ty->kind == TyKind::Float)) {
+            } else if (!p.ann_unknown &&
+                       ((ty->kind == TyKind::Float && (!p.ty || p.ty->kind != TyKind::Float)) ||
+                        (ty->kind == TyKind::None && p.ty && p.ty->kind == TyKind::Float))) {
                 err(c.line, c.col, std::format(
                     "default for '{}' of '{}' has no compatible compiled parameter type",
                     p.name, fn->name));

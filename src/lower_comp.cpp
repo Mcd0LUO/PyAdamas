@@ -286,6 +286,13 @@ VReg Lowerer::lower_comp(Expr& e) {
             return;
         }
 
+        // unknown 迭代源：运行期按种类物化成 list[unknown]（同 for-in）。
+        if (!sty || sty->kind == TyKind::Unknown) {
+            VReg xs = call_runtime(RtFn::AnyIterList, mk_list(t_unknown()), {seq});
+            push_temp(xs);
+            seq = xs;
+            sty = mk_list(t_unknown());
+        }
         bool ok = sty && (sty->kind == TyKind::List || sty->kind == TyKind::Tuple ||
                           sty->kind == TyKind::Str || sty->kind == TyKind::Dict ||
                           sty->kind == TyKind::Set || sty->kind == TyKind::Range);

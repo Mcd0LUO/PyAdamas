@@ -3,6 +3,12 @@
 > 结论：**51 个常用 CPython 模块中，34 个实测可用（27 个原有 + 阶段二补齐 7 个），17 个仍然缺失；0 个「能 import 但运行失败」。** 缺失模块里绝大多数卡在编译器/运行时能力上，纯 PyAdamas 源码补不了；能自举的已按阻塞概率补齐（见第五节）。
 >
 > 本文件是评估 + 阶段二交付记录。所有「现状」结论都来自实测，不是读源码猜的。
+>
+> **0.326 更新（stdlib1 分支）**：argparse/configparser/gzip/zlib 已交付，
+> 选型理由/API 覆盖/CPython 差异/桥接兜底见 [stdlib-batch1.md](stdlib-batch1.md)。
+> argparse 的「Namespace 动态属性无解」结论已被推翻：0.165 的动态属性 +
+> 0.326 的跨模块使能（接口导出 needs_dict）足够自举。decimal/fractions
+> 深化需任意精度 BigInt、sqlite3 需外部库 + 完整游标语义，评估后仍不做。
 
 ## 一、方法与证据
 
@@ -65,7 +71,10 @@
 | **io** | **缺失** | StringIO 可写纯类，但 `open` 写只收 str、二进制 IO 不支持，与 csv 等不互通 | 编译失败 |
 | **queue** | **缺失** | 单线程版可写；没线程，语义价值低 | 编译失败 |
 | **pprint** | **缺失** | unknown 容器无法内省元素，做不出有意义的 pformat | 编译失败 |
-| **argparse** | **缺失** | 卡在 `Namespace` 动态属性（`args.x` 编译期没有字段） | 编译失败 |
+| **argparse** | **Python 源（0.326 交付）** | 跨模块动态属性使能后自举；CLI 面覆盖见 docs/stdlib-batch1.md | 通过（250–252） |
+| **configparser** | **Python 源（0.326 交付）** | INI 解析/插值/错误消息逐字对齐；SectionProxy 下标等长尾不做 | 通过（253–254） |
+| **gzip** | **Python 源 + C 胶水（0.326 交付）** | 系统 zlib（cimport）；compress 字节级同 CPython；GzipFile 整读整写 | 通过（255–256） |
+| **zlib** | **Python 源 + C 胶水（0.326 交付）** | compress/decompress/crc32/adler32；wbits 固定 15 | 通过（255） |
 | **struct** | **缺失** | 需要原生 pack/unpack；且 File 写只收 str，bytes 二进制 IO 不可用 | 编译失败 |
 | **shutil** | **缺失** | 二进制 IO 不支持、rmtree 缺 walk，性价比低 | 编译失败 |
 | **tempfile** | **缺失** | 需要 mkstemp/mkdtemp 原生原语（os 没有） | 编译失败 |
@@ -105,7 +114,9 @@
 | — | dataclasses | 高 | **需语言特性**（codegen 合成 `__init__`） | 纯 shim 静默丢实参，宁可先不做 | 需 lead 决策 |
 | — | contextlib | 中 | **需语言特性**（unknown 函数值 `*args` 转发） | 只能做 nullcontext 之类无用子集 | 需 lead 决策 |
 | — | functools/itertools/collections 补全 | 中-高 | **需改 src**（内建名单硬编码） | 同时动 builtin_sigs + typecheck + lower | 需 lead 决策 |
-| — | argparse | 中 | **需语言特性**（Namespace 动态属性） | 无解；脚本得改用 dict 手解析 | 暂缓 |
+| 10 | argparse | 中 | 纯 Python 源 + 前端使能（跨模块动态属性/object 形参/类型值） | 0.326 交付，见 docs/stdlib-batch1.md | 已交付 |
+| 11 | configparser | 中 | 纯 Python 源 | 0.326 交付 | 已交付 |
+| 12 | gzip/zlib | 中 | Python 源 + cimport zlib + C 胶水 | 0.326 交付 | 已交付 |
 | — | struct/tempfile/shutil | 中-低 | **需原生原语** | rt_os/rt_file 加二进制 IO、mkstemp、stat | 暂缓 |
 | — | decimal/unicodedata/threading/weakref/inspect/traceback/pickle/copy/pprint | 低 | **需运行时能力** | 见矩阵 | 暂缓 |
 

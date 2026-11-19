@@ -184,6 +184,14 @@ VReg Lowerer::convert_to(VReg v, TypePtr from, TypePtr to) {
             return s;
         }
     }
+    // str(类型对象)："<class 'name'>"（值本身就是类型名字符串）。
+    if (from && from->kind == TyKind::TypeObj && to->kind == TyKind::Str) {
+        VReg a = call_runtime(RtFn::StrConcat, t_str(), {const_str("<class '"), v});
+        push_temp(a);
+        VReg b = call_runtime(RtFn::StrConcat, t_str(), {a, const_str("'>")});
+        push_temp(b);
+        return b;
+    }
     // Path → str：拿底层路径字符串
     if (from && from->kind == TyKind::Path && to->kind == TyKind::Str) {
         VReg s = call_runtime(RtFn::PathStr, t_str(), {v});

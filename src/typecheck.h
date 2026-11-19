@@ -134,6 +134,14 @@ public:
     // 名字是否是「内置可调用」。降级阶段用它把「能解析但没实现」的内置
     // 变成明确诊断，而不是退化成调用空指针。
     static bool is_builtin_name(const std::string& n) { return is_builtin_callable(n); }
+    // 内置类型名：值位置是类型对象（type_name_value），标注位置按类型解析。
+    static bool is_type_name(const std::string& n) {
+        static const std::unordered_set<std::string> names = {
+            "int", "float", "str", "bool", "list", "dict", "tuple", "set",
+            "bytes", "bytearray", "object", "type", "frozenset", "complex",
+        };
+        return names.count(n) > 0;
+    }
 
     // 表达式推断出的类型。IR 降级阶段要用它决定槽宽和指令选择，
     // 不能靠 ast 重新推一遍——两套推断迟早会分叉。
@@ -309,15 +317,6 @@ private:
     // 值类型 struct：名字 → 布局；vector 保证 Type::st 的裸指针长期有效。
     std::unordered_map<std::string, StructInfo*> structs_;
     std::vector<std::unique_ptr<StructInfo>> all_structs_;
-
-    // 内置类型名：作为值使用时（str.capitalize、int.bit_length）没有承载物
-    static bool is_type_name(const std::string& n) {
-        static const std::unordered_set<std::string> names = {
-            "int", "float", "str", "bool", "list", "dict", "tuple", "set",
-            "bytes", "bytearray", "object", "type", "frozenset", "complex",
-        };
-        return names.count(n) > 0;
-    }
 
     void err(int line, int col, std::string msg) {
         diags_.push_back({line, col, std::move(msg)});

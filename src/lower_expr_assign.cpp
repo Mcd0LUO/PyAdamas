@@ -380,6 +380,17 @@ VReg Lowerer::expr(Expr& e) {
             }
             // 类名在值位置：取类定义点写好的运行期类对象单例。
             if (!is_local(n.id) && classes_.count(n.id)) return local_class_object(n.id);
+            // 类型名在值位置：机器表示是类型名字符串（与 type(x) 同口径），
+            // 不能 LoadGlobal 读一个不存在的空槽（那会让 int/float 值全为 0，
+            // `t is int` 恒真）。用户自定义的同名绑定优先。
+            if (TypeChecker::is_type_name(n.id) && !is_local(n.id) &&
+                !st_->globals_decl.count(n.id) &&
+                !(st_->scope && st_->scope->vars.count(n.id)) &&
+                !(tc_.module_scope() && tc_.module_scope()->vars.count(n.id))) {
+                TypePtr tt = tc_.type_of(&e);
+                if (!tt || tt->kind != TyKind::TypeObj) tt = mk_typeobj(nullptr);
+                return retype(const_str(n.id), tt);
+            }
             TypePtr ty = name_ty(n.id);
             if (st_->globals_decl.count(n.id) || !is_local(n.id)) {
                 Inst in;

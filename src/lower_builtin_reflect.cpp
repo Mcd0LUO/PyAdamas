@@ -34,6 +34,14 @@ VReg Lowerer::lower_builtin_reflect(const std::string& name, Call& c) {
             TypePtr st = strip_optional(vt0);
             std::string builtin;
             if (tt && tt->kind == TyKind::Func && tt->fn) builtin = tt->fn->name;
+            // 类型名现在是 TypeObj 值（不再是 Func 签名）：名字优先取
+            // 字面量（frozenset/bytearray 等保留原名），否则按内部类型名。
+            if (builtin.empty() && tt && tt->kind == TyKind::TypeObj) {
+                if (c.args[1]->kind == ExprKind::Name)
+                    builtin = static_cast<Name&>(*c.args[1]).id;
+                else if (!tt->sub.empty() && tt->sub[0])
+                    builtin = py_type_name(tt->sub[0]);
+            }
             if (!builtin.empty()) {
                 if (builtin == "object") return const_bool(true);
                 // bytearray / memoryview 在 pyadamas 里根本没有独立表示
@@ -283,15 +291,19 @@ VReg Lowerer::lower_builtin_reflect(const std::string& name, Call& c) {
         TypePtr a1 = tc_.type_of(c.args[1].get());
         if (a0 && a0->kind == TyKind::ClassObj && !a0->sub.empty()) a0 = a0->sub[0];
         if (a1 && a1->kind == TyKind::ClassObj && !a1->sub.empty()) a1 = a1->sub[0];
-        auto builtin = [](const TypePtr& t) -> std::string {
+        auto builtin = [](const TypePtr& t, Expr* e) -> std::string {
             if (t && t->kind == TyKind::Func && t->fn && t->fn->unchecked)
                 return t->fn->name;
+            if (t && t->kind == TyKind::TypeObj) {
+                if (e && e->kind == ExprKind::Name) return static_cast<Name&>(*e).id;
+                if (!t->sub.empty() && t->sub[0]) return py_type_name(t->sub[0]);
+            }
             return std::string();
         };
         ClassInfo* ca = a0 && a0->kind == TyKind::Class ? a0->cls : nullptr;
         ClassInfo* cb = a1 && a1->kind == TyKind::Class ? a1->cls : nullptr;
-        std::string ba = builtin(a0);
-        std::string bb = builtin(a1);
+        std::string ba = builtin(a0, c.args[0].get());
+        std::string bb = builtin(a1, c.args[1].get());
         if ((!ca && ba.empty()) || (!cb && bb.empty())) {
             err(c.line, c.col,
                 "issubclass() arguments must be classes or builtin types");
@@ -341,7 +353,8 @@ VReg Lowerer::lower_builtin_reflect(const std::string& name, Call& c) {
                 if (name == "hasattr")
                     return call_runtime(RtFn::AttrHas, t_bool(), {obj, nm});
                 if (name == "setattr") {
-                    VReg v = expr(*c.args[2]);
+                    // 与字面量名路径同口径：float 装箱进 unknown，堆值 retain。
+                    VReg v = coerce(expr(*c.args[2]), tc_.type_of(c.args[2].get()), t_unknown());
                     call_void(RtFn::AttrSet, {obj, nm, v});
                     return const_none();
                 }
@@ -489,6 +502,36 @@ VReg Lowerer::lower_builtin_reflect(const std::string& name, Call& c) {
                 retain_elem(v, 2);
                 call_void(RtFn::DictSet, {d, const_str(f.name), v});
             }
+        }
+        // 动态属性（setattr 挂的成员）也要进 vars()：合并运行期 dict。
+        // AttrDict 返回借用引用（可能 NULL＝从没 setattr 过），DictUpdate
+        // 自己 retain 元素，这里不 push_temp、不 dec。
+        bool dyn = false;
+        for (const ClassInfo* p = ot->cls; p; p = p->base)
+            if (p->needs_dict) { dyn = true; break; }
+        if (dyn) {
+            VReg ad = call_runtime(RtFn::AttrDict, mk_dict(t_str(), t_unknown()), {obj});
+            Inst cmp;
+            cmp.op = IrOp::Cmp;
+            cmp.cop = CmpKind::Ne;
+            cmp.a = retype(ad, t_int());
+            cmp.b = const_int(0);
+            VReg nz = def(t_bool(), std::move(cmp));
+            int merge_bb = new_block("vars.dyn");
+            int end_bb = new_block("vars.dyn.end");
+            Inst br;
+            br.op = IrOp::Branch;
+            br.a = nz;
+            br.target = merge_bb;
+            br.target2 = end_bb;
+            emit(std::move(br));
+            switch_to(merge_bb);
+            call_void(RtFn::DictUpdate, {d, ad});
+            Inst j;
+            j.op = IrOp::Jump;
+            j.target = end_bb;
+            emit(std::move(j));
+            switch_to(end_bb);
         }
         return d;
     }

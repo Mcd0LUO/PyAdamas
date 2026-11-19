@@ -301,6 +301,36 @@ int64_t pa_attr_get(void* obj, PyAdamasStr* name, int64_t dflt) {
     return pa_dict_get_or(d, (int64_t)(uintptr_t)name, dflt);
 }
 
+/* vars() 合并用：返回实例的动态属性表（借用，可能 NULL）。 */
+PyAdamasDict* pa_attr_dict_view(void* obj) {
+    return attr_dict(obj);
+}
+
+/* for x in unknown / list(unknown)：按运行期种类物化成 list[unknown]。
+   list/tuple 原样 +1 返回（零拷贝）；str 拆码点；dict/set 取键。
+   返回的列表带一份引用（调用方 push_temp 接管）。bytes 与 str 同形
+   （无运行期标签），按 str 口径拆——文档化边界。
+   放在 rt_class.c（与动态属性同族），不动 rt_any.c（P3 并行在改）。 */
+PyAdamasList* pa_any_iter_list(int64_t v) {
+    if (!pa_unknown_is_heap(v)) {
+        if (v == 0) pa_raise_c("TypeError", "'NoneType' object is not iterable");
+        pa_raise_c("TypeError", "'int' object is not iterable");
+    }
+    PyAdamasRc* h = (PyAdamasRc*)(uintptr_t)((uint64_t)v - (uint64_t)PYADAMAS_RC_HDR);
+    switch (h->kind) {
+        case PYADAMAS_RC_LIST:
+            pa_rc_inc((void*)(uintptr_t)v);
+            return (PyAdamasList*)(uintptr_t)v;
+        case PYADAMAS_RC_STR:
+            return pa_str_to_list((PyAdamasStr*)(uintptr_t)v);
+        case PYADAMAS_RC_DICT:
+            return pa_dict_keys((PyAdamasDict*)(uintptr_t)v);
+        default:
+            pa_raise_c("TypeError", "object is not iterable");
+            return NULL;
+    }
+}
+
 void pa_attr_set(void* obj, PyAdamasStr* name, int64_t value) {
     void** s = attr_slot(obj);
     if (!name || !s) panic_c("setattr() on an object without dynamic attributes");

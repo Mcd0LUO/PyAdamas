@@ -228,7 +228,7 @@ std::vector<VReg> Lowerer::bind_args(Call& c, const FuncInfoPtr& info, FunctionD
         // checker may not know which defaults are used. Check the final
         // representation before materializing an argument for this slot.
         if (ir_is_float(cv.ty) != ir_is_float(p.ty) &&
-            !(ir_is_float(p.ty) && is_num(cv.ty))) {
+            !(ir_is_float(p.ty) && is_num(cv.ty)) && !is_unknown(p.ty)) {
             err(c.line, c.col, std::format(
                 "default for '{}' of '{}' has no compatible compiled parameter type",
                 p.name, info->name));
@@ -629,6 +629,18 @@ VReg Lowerer::lower_call(Call& c) {
     if (c.func->kind == ExprKind::Attribute)
         return lower_method_call(static_cast<Attribute&>(*c.func), c);
 
+    // 类型对象值当被调者：机器表示是类型名字符串，不是闭包；间接调用
+    // 会把字符串头当代码指针解引用。按名字的直调（int(x)）已在上面拦掉，
+    // 这里明确拒绝动态调用，别静默崩溃。
+    if (TypePtr ft0 = tc_.type_of(c.func.get()); ft0 && ft0->kind == TyKind::TypeObj) {
+        err(c.line, c.col,
+            "calling a type object value is not supported yet; call the type by name "
+            "(e.g. int(x))");
+        for (auto& a : c.args) expr(*a);
+        for (auto& kw : c.keywords) expr(*kw.value);
+        return const_none();
+    }
+
     // 普通调用：按签名重排参数
     VReg callee = expr(*c.func);
     TypePtr ft = tc_.type_of(c.func.get());
@@ -697,6 +709,12 @@ VReg Lowerer::value_as_list(VReg x, TypePtr xt, TypePtr& elem_out) {
         case TyKind::Generator: {
             elem_out = xt->sub.empty() ? t_unknown() : xt->sub[0];
             return gen_to_list(x, xt);
+        }
+        case TyKind::Unknown: {
+            // list(unknown) / sum(unknown) 等：运行期按种类物化。
+            VReg l = call_runtime(RtFn::AnyIterList, mk_list(t_unknown()), {x});
+            push_temp(l);
+            return l;
         }
         default:
             return x;

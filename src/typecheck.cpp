@@ -252,6 +252,8 @@ void TypeChecker::declare(const std::string& name, TypePtr ty, int line, int col
             }
             // 给有标注的变量赋 None 当「清空」用，这是 Python 里的常见写法，
             // 真当成类型错误会大面积误杀；保持原类型，不收窄也不报错。
+            // 空容器字面量重赋值（cur = {}）：洞按已有标注填。
+            if (ty && ty_contains_hole(ty, 0)) fill_holes_recursive(ty, sym.ty, 0);
             if (!assigning_none && !assignable(sym.ty, ty))
                 err(line, col,
                     std::format("cannot assign '{}' to '{}' variable '{}'", type_name(ty),
@@ -264,6 +266,8 @@ void TypeChecker::declare(const std::string& name, TypePtr ty, int line, int col
         // 后续检查自动放行 —— 宁可漏报，不可误杀。
         if (sym.ty && sym.ty->kind == TyKind::None) { sym.ty = ty; return; }
         if (is_unknown(sym.ty)) { sym.ty = ty; return; }
+        // 空容器字面量重赋值：洞按已推出的类型填（否则建表种类退化）。
+        if (ty && ty_contains_hole(ty, 0)) fill_holes_recursive(ty, sym.ty, 0);
         if (assignable(sym.ty, ty)) {
             // 来源 unknown 时不要死守旧类型：变量可能已经换了一种东西
             if (is_unknown(ty)) sym.ty = t_unknown();
@@ -840,7 +844,25 @@ bool stmt_has_yield(const Stmt& s) {
 }  // namespace
 
 std::optional<LiteralValue> literal_of_expr(const Expr* e) {
-    if (!e || e->kind != ExprKind::Constant) return std::nullopt;
+    if (!e) return std::nullopt;
+    // 负数字面量默认值（def f(size=-1)）：一元负/正包数字常量也是字面量。
+    if (e->kind == ExprKind::UnaryOp) {
+        const auto& u = static_cast<const UnaryOp&>(*e);
+        if (u.op != Tok::MINUS && u.op != Tok::PLUS) return std::nullopt;
+        auto inner = literal_of_expr(u.operand.get());
+        if (!inner) return std::nullopt;
+        if (u.op == Tok::PLUS) return inner;
+        if (inner->kind == LiteralValue::Kind::Int) {
+            inner->i = -inner->i;
+            return inner;
+        }
+        if (inner->kind == LiteralValue::Kind::Float) {
+            inner->f = -inner->f;
+            return inner;
+        }
+        return std::nullopt;
+    }
+    if (e->kind != ExprKind::Constant) return std::nullopt;
     auto& c = static_cast<const Constant&>(*e);
     LiteralValue v;
     switch (c.ck) {
@@ -885,6 +907,7 @@ FuncInfoPtr TypeChecker::build_sig(FunctionDef& f) {
             Param p;
             p.name = arg.name;
             p.ty = parse_annotation(arg.annotation.get(), f.line);
+            p.ann_unknown = arg.annotation && p.ty && p.ty->kind == TyKind::Unknown;
             size_t idx = info->pos.size();
             p.has_default = idx + ndef >= total_pos;
             p.kwonly = false;
@@ -905,6 +928,7 @@ FuncInfoPtr TypeChecker::build_sig(FunctionDef& f) {
             Param p;
             p.name = a.kwonly[i].name;
             p.ty = parse_annotation(a.kwonly[i].annotation.get(), f.line);
+            p.ann_unknown = a.kwonly[i].annotation && p.ty && p.ty->kind == TyKind::Unknown;
             p.has_default = i < a.kw_defaults.size() && a.kw_defaults[i] != nullptr;
             p.kwonly = true;
             if (i < a.kw_defaults.size()) {

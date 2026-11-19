@@ -1249,6 +1249,8 @@ int64_t pa_is_str(void* obj);
 int64_t pa_attr_get(void* obj, PyAdamasStr* name, int64_t dflt);
 void pa_attr_set(void* obj, PyAdamasStr* name, int64_t value);
 int64_t pa_attr_has(void* obj, PyAdamasStr* name);
+PyAdamasDict* pa_attr_dict_view(void* obj);
+PyAdamasList* pa_any_iter_list(int64_t v);
 int64_t pa_is_complex(void* obj);
 void dict_rebuild(PyAdamasDict* d);
 int dict_take(PyAdamasDict* d, int64_t key, int64_t* val_out);

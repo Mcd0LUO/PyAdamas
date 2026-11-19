@@ -431,6 +431,9 @@ TypePtr TypeChecker::builtin_call(const std::string& n, Call& c) {
 
                 return a[2];
             }
+            // 类已开启动态属性（本模块或定义模块 setattr 过）：字面量名
+            // 的 getattr 也落运行期 dict，与直接读 args.x 同口径。
+            if (n == "getattr" && ot->cls->needs_dict) return t_unknown();
             err(c.line, c.col,
                 std::format("'{}' object has no field '{}'", ot->cls->name, *an));
             return n == "getattr" ? t_unknown() : t_none();

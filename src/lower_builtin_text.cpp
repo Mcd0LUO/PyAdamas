@@ -325,6 +325,12 @@ VReg Lowerer::lower_builtin_text(const std::string& name, Call& c) {
             VReg s = dunder_str(v, t, true);
             return s != kNoReg ? s : class_default_str(t);
         }
+        // unknown：运行期按种类 repr（str 加引号、容器递归、CPYFLOAT 按 double）。
+        if (!t || t->kind == TyKind::Unknown) {
+            VReg s = call_runtime(RtFn::ReprAny, t_str(), {v});
+            push_temp(s);
+            return s;
+        }
         err(c.line, c.col,
             std::format("repr() of '{}' is not supported by the code generator yet",
                         type_name(t)));

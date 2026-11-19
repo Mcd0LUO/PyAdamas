@@ -546,6 +546,10 @@ void TypeChecker::assign(Expr& target, TypePtr value, int line, int col) {
                 // `self.x = ...` 且 x 没声明过：就地补成字段，类型不再苛求
                 if (add_implicit_field(*at, value)) return;
                 if (auto* f = ot->cls->field(at->attr)) {
+                    // self.d = {}：空字面量的洞按字段标注填（否则运行时
+                    // 按 unknown 种类建表，str 键变指针哈希）。
+                    if (value && ty_contains_hole(value, 0))
+                        fill_holes_recursive(value, f->ty, 0);
                     if (!assignable(f->ty, value))
                         err(line, col,
                             std::format("field '{}' has type '{}', cannot assign '{}'", at->attr,
@@ -581,6 +585,8 @@ void TypeChecker::assign(Expr& target, TypePtr value, int line, int col) {
                     unsupported.push_back("assignment to a class attribute through an instance");
                     return;
                 }
+                // 动态属性已开启：obj.x = v 落运行期 dict（AttrSet）。
+                if (ot->cls->needs_dict) return;
                 err(line, col,
                     std::format("'{}' object has no attribute '{}'", ot->cls->name, at->attr));
                 return;

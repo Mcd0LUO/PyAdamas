@@ -165,6 +165,9 @@ struct Param {
     bool inferred = false;
     bool multi = false;
     bool omitted_none = false;  // None default observed; cannot enter a float slot.
+    // 显式 object/Any 标注（不是「没标注」也不是回填来的 unknown）：
+    // 形参故意留在 unknown 域，不做调用点单态化；float 实参在调用点装箱。
+    bool ann_unknown = false;
     // cimport 的 ptr/ptr[T] 形参：额外接受 list/bytes 缓冲区实参。
     bool cptr = false;
     CKind cptr_elem = CKind::None;  // ptr[T] 的 T；None 表示无类型 ptr
@@ -1283,6 +1286,11 @@ inline bool merge_elem(TypePtr& slot, const TypePtr& container, const TypePtr& v
     }
     if (assignable(slot, value)) {
         if (is_unknown(slot)) fill_hole(slot, value);
+        // 槽位具体、值带洞（d[k] = {} / xs.append({}) 这类空字面量）：
+        // 把槽位类型填进值的洞，否则空容器按 unknown 种类建表，str 键
+        // 退化成指针哈希，内容相同的键查不回来（configparser 实测）。
+        else if (value && ty_contains_hole(value, 0))
+            fill_holes_recursive(value, slot, 0);
         return true;
     }
     if (!locked) widen_slot(slot, container, value);

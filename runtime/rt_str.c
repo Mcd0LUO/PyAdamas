@@ -379,6 +379,27 @@ static int is_space(char c) {
     return c == ' ' || c == '\t' || c == '\n' || c == '\r' || c == '\v' || c == '\f';
 }
 
+/* CPython 口径：invalid literal for int() with base %d: %r。
+   exc_new 会复制消息，临时缓冲在 longjmp 前释放，不留泄漏。 */
+static _Noreturn void int_literal_error(PyAdamasStr* s, int base) {
+    PyAdamasStr* r = pa_repr_str(s);
+    char head[64];
+    int hn = snprintf(head, sizeof head, "invalid literal for int() with base %d: ", base);
+    if (hn < 0) hn = 0;
+    size_t total = (size_t)hn + (size_t)r->len + 1;
+    char* msg = (char*)malloc(total);
+    if (!msg) panic_c("out of memory");
+    memcpy(msg, head, (size_t)hn);
+    memcpy(msg + hn, r->data, (size_t)r->len);
+    msg[total - 1] = '\0';
+    PyAdamasException* e = exc_new("ValueError", msg);
+    free(msg);
+    pa_rc_dec(r);
+    exc_free(pending_exc);
+    pending_exc = e;
+    exc_longjmp();
+}
+
 int64_t pa_str_to_i64(PyAdamasStr* s, int64_t base) {
     if (base != 0 && (base < 2 || base > 36))
         pa_raise_c("ValueError", "int() base must be >= 2 and <= 36");
@@ -396,7 +417,7 @@ int64_t pa_str_to_i64(PyAdamasStr* s, int64_t base) {
          p[1] == 'B')) {
         int pref = p[1] == 'x' || p[1] == 'X' ? 16 : p[1] == 'o' || p[1] == 'O' ? 8 : 2;
         if (base != 0 && base != pref)
-            pa_raise_c("ValueError", "invalid literal for int()");
+            int_literal_error(s, (int)base);
         b = pref;
         p += 2;
     }
@@ -416,7 +437,7 @@ int64_t pa_str_to_i64(PyAdamasStr* s, int64_t base) {
         ++p;
     }
     while (p < end && is_space(*p)) ++p;
-    if (!any || p != end) pa_raise_c("ValueError", "invalid literal for int()");
+    if (!any || p != end) int_literal_error(s, b);
     return neg ? (int64_t)(0 - acc) : (int64_t)acc;
 }
 
@@ -435,7 +456,24 @@ double pa_str_to_f64(PyAdamasStr* s) {
     while (endp && *endp && is_space(*endp)) ++endp;
     if (endp && *endp) bad = 1;
     if (buf != stackbuf) free(buf);
-    if (bad) pa_raise_c("ValueError", "could not convert string to float");
+    if (bad) {
+        /* CPython 口径：could not convert string to float: %r */
+        PyAdamasStr* r = pa_repr_str(s);
+        const char* head = "could not convert string to float: ";
+        size_t hn = strlen(head);
+        size_t total = hn + (size_t)r->len + 1;
+        char* msg = (char*)malloc(total);
+        if (!msg) panic_c("out of memory");
+        memcpy(msg, head, hn);
+        memcpy(msg + hn, r->data, (size_t)r->len);
+        msg[total - 1] = '\0';
+        PyAdamasException* e = exc_new("ValueError", msg);
+        free(msg);
+        pa_rc_dec(r);
+        exc_free(pending_exc);
+        pending_exc = e;
+        exc_longjmp();
+    }
     return v;
 }
 
