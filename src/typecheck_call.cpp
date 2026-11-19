@@ -427,6 +427,8 @@ bool TypeChecker::is_builtin_callable(const std::string& n) {
             "quit", "exit", "copyright", "credits", "license",
             // 字节长度出口：len 返回码点数，len_bytes 返回 UTF-8 字节数（O(1)）
             "len_bytes",
+            // 虚拟线程先验（docs/vthread-design.md）：join/sleep/make_chan
+            "join", "sleep", "make_chan",
         };
         return names.count(n) > 0;
     }

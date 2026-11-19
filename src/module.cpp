@@ -291,6 +291,9 @@ void enc_type(Enc& e, const TypePtr& t) {
         // struct 的布局不跨模块序列化：按 unknown 处理。
         case TyKind::Struct:
         case TyKind::StructPtr:
+        // vthread handle / chan 跨模块签名暂不支持：按 unknown 处理。
+        case TyKind::VThread:
+        case TyKind::Chan:
             e.u8(0);
             break;
         case TyKind::Bytes: e.u8(12); break;

@@ -1710,6 +1710,31 @@ PYADAMAS_NO_ASAN static void gc_scan_registers(void) {
 #define GC_FRAMES_SLOTS_EXACT 2
 #define GC_FRAMES_SLOTS_CONS 3
 
+/* 从指定帧链头做完整扫描（临时区位图 + 槽）。vthread 挂起栈的精确根
+   扫描复用这一份逻辑（rt_vthread.c 的 pa_vt_gc_scan 逐 VT 调用）。 */
+void pa_gc_scan_frames_from(PyAdamasFrame* top) {
+    for (PyAdamasFrame* f = top; f; f = f->prev) {
+        if (f->scan_words > 0 && f->scan_base) {
+            if (f->scan_mask && !gc_conservative)
+                gc_scan_masked(f->scan_base, f->scan_mask, f->scan_words);
+            else
+                gc_scan_range(f->scan_base,
+                              (char*)f->scan_base +
+                                  sizeof(uintptr_t) * (size_t)f->scan_words);
+        }
+        for (int64_t i = 0; i < f->n; ++i) {
+            uintptr_t addr = (uintptr_t)f->slots[i];
+            int64_t v = *(int64_t*)(addr & ~(uintptr_t)3);
+            if (!v) continue;
+            if (addr & 3) gc_mark((uintptr_t)v);
+            else gc_mark_direct((uintptr_t)v);
+        }
+    }
+}
+
+/* 保守标记一个机器字（vthread temp 栈扫描用）。 */
+void pa_gc_mark_word(uintptr_t v) { gc_mark(v); }
+
 /* 保守根只扫帧记录登记过的地址：
    - 借来的 unknown 槽（bit1，只扫描不释放）；
    - 带 unknown 标志的拥有槽（bit0）；
@@ -2203,6 +2228,7 @@ static void gc_collect(int major) {
             gc_scan_frames(GC_FRAMES_ALL);
             gc_scan_registers();
         }
+        pa_vt_gc_scan();   /* 挂起 vthread 的帧链 + temp 栈 */
         if (t0) t2 = gc_now_ms();
         // **标记同步做完，只把清扫分片。**
         //
@@ -2294,6 +2320,7 @@ static void gc_collect(int major) {
                 gc_scan_frames(GC_FRAMES_ALL);
                 gc_scan_registers();
             }
+            pa_vt_gc_scan();   /* 挂起 vthread 的帧链 + temp 栈 */
         } else if (gc_stats_on) {
             // exact-RC 模式：所有引用都归槽/临时值/容器所有，没有保守根。
             gc_stats_roots(0);

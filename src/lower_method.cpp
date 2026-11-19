@@ -492,6 +492,8 @@ VReg Lowerer::lower_method_call(Attribute& at, Call& c) {
 
     if (recv_ty && recv_ty->kind == TyKind::Future) return lower_method_future(at, c, recv, recv_ty);
 
+    if (recv_ty && recv_ty->kind == TyKind::Chan) return lower_method_chan(at, c, recv, recv_ty);
+
     if (recv_ty && recv_ty->kind == TyKind::Dict) return lower_method_dict(at, c, recv, recv_ty);
 
     if (recv_ty && recv_ty->kind == TyKind::Set) return lower_method_set(at, c, recv, recv_ty);

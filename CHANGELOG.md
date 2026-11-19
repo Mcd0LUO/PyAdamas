@@ -4,6 +4,22 @@
 
 早期阶段没有逐条留痕，按阶段归纳；0.4 之后逐条记录。
 
+## [0.305] - 2026-11-19
+
+### Go 式无色虚拟线程先验（M=1 协作调度 + 有栈切换 + channel，vthread 分支薄原型）
+
+- **模型**：单 OS 线程跑专用调度器（独立 mmap 栈，libco 式）+ 全部虚拟线程。RC/GC/池/temp_stack 等 119 个单线程 static 全局态零改动、零原子零锁——M=1 是先验绕过线程安全大山的关键。`go f(args)` spawn 任意普通函数（无 async 颜色，被调函数零标注），阻塞原语（chan send/recv、sleep、join）在运行时内部让出，调用链无感。每 vthread 一块 mmap 栈（默认 256KB + 4KB PROT_NONE guard，池化上限 256 块），切换 asm 存恢复 rsp+8/callee-saved/rip（.cfi_undefined 禁跨栈展开）；生成代码全 %rsp 相对帧，任意栈透明运行。现有 async/await/生成器（rt_gen.c 无栈状态机）完全不动。
+- **调度器形态（第一版对称 inline 调度撤回）**：所有 vthread 阻塞/死亡切回同一个 sched 上下文，run queue（PyAdamasList 借用指针 + 每 VT 一份 spawn→死亡的调度器引用保活）+ intrusive 定时器链。第一版让每个阻塞者就地跑调度循环、被 resume 者记 ret 指针，ping-pong 形成循环 ret 链，一方死亡后另一方 ret 指向死栈再切换踩空（「dead vthread resumed」实测）——专用上下文从结构上消灭环。切换另修三个实测坑：sp 存 rsp+8（jmp 恢复不弹返回地址，存原始 rsp 每次恢复低 8 字节踩坏调用者 canary）；唤醒返回路径 rq_discard(self)（wake 方入队 + 自身 woken 检查返回留下幽灵条目 → 自切换）；还栈推迟到 sched 循环（池满 munmap 若在将死栈上执行，10k 死亡潮踩空）。
+- **栈水位全局随切换 save/load**：pa_frame_top / handler_top / pa_eh_depth / temp 三件套（**每 vthread 独立 temp 数组**，语句内阻塞 temp_len 可非零）/ 异常上下文（rt_exc.c 新增 pa_exc_ctx_save/load accessor 暴露 static 节点链）/ exc_save_top / current_exc / current_exc_inst / pending_exc_args / pending_exc。root（主流程）用 OS 主栈，其 temp 数组即进程全局那份，退出时所有权收进 root 再清全局指针（否则 vt_destroy + pa_rc_shutdown 双重释放，ASan 实测）。
+- **GC 跨栈**：gc_collect 根扫描阶段调 pa_vt_gc_scan（major 必扫，minor 与既有保守根同门禁）：挂起栈按保存的帧链头走 pa_gc_scan_frames_from（rt_core.c 导出，与 gc_scan_frames 同一份 scan_mask 精确逻辑——**比原方案的逐字保守探针更精确**，帧记录物理上还在未退役的 mmap 栈上）+ 每 VT temp 数组逐字标记；callee-saved 寄存器/fn 闭包/chan 寄存值在 VT payload 里由既有 OBJ 保守扫描覆盖（误钉不精确性文档写明）；VT 经 all_next 链保守互钉，生命周期仍归 RC。channel 缓冲是 PyAdamasList（LIST 精确扫描），等待队列值在 VT payload。225 用例：只被挂起 vthread 持有的 list[str] + 自环 list 经 40000 轮 churn 强制多次 major GC 后存活，ASan detect_leaks=1 干净。
+- **异常双路径**：跳板 pa_vt_body_invoke（asm 外壳 + catch-all LSDA，形态与 eh_emit 一致：LPStart omit / TType 0x9b null 项 / filter=1）接零开销 _Unwind 逃出（personality 方案 G 钩子先清 body 帧记录）；pa_vt_invoke_inner 的 setjmp 接 longjmp 路径（gen_run 同款纪律）。异常存 VT，join 克隆重抛（先克隆再 dec 等待引用，避免级联释放 exc 本体后读悬空）；未 join 死亡异常在 handle 释放/退出 drain 时打印 stderr。224 用例 O0/O2/ASan 验证。
+- **语法薄切片**：go 软关键字（go NAME… 才解析，go=1/go()/go[0] 仍是名字），ExprKind::Go + TyKind::VThread/Chan（枚举尾追加，存量值不位移）；builtin join/sleep(ms)/make_chan(T,cap)（T=int/float/str/unknown，第 0 参编译期类型名特殊形式）；chan.send/recv 方法表。降级 src/lower_vthread.cpp：go 合成包装闭包 __pa_go_N（build_lru_wrapper 同款：cell=[f,args…]，体调 f 丢弃返回值），VtSpawn 接管闭包引用；chan send retain 转移引用、recv heap 结果 def_heap / unknown 结果 RcTempUnknown 探针入栈；float 走 ChanSendF/RecvF（i1f1 组）。入口退出 release_globals 前插 VtShutdown：**确定性 drain**（跑完剩余 vthread、放弃永久阻塞者、打印未 join 异常），与 Go「main 返回即杀」不同，方便 expect 钉输出（文档写明）。死锁全阻塞 → panic exit 1（Go 口径）。
+- **ASan 纤维注解**：切换包装 __sanitizer_start/finish_switch_fiber（仅 __SANITIZE_ADDRESS__），新生栈入口 finish(NULL)；root 主栈区间 pthread_getattr_np 实测捕获（传 NULL 会清零 ASan 主栈记录，root 栈 longjmp 触发 no_return 警告污染 expect——224/228 实测后修）。警告消失，220–229 ASan detect_leaks=1 全干净。
+- **实测（Debug 编译器 -O2 产物，Xeon Gold 6252 @ 2.10GHz）**：无缓冲握手往返 **~150–300 ns/round**（100k 轮乒乓，每轮 2 切换 + 2 chan 操作；多租户服务器负载敏感，空闲 152/155、负载下 291/399）；spawn+join **~1.0 µs/对**（20k 空函数，栈池复用）；缓冲 channel **~69 ns/item**（cap 64，300k int）；**10k 并发阻塞 vthread：RSS ≈ 5.0 KB/个（合计 ~49MB），VSZ ≈ 2.5GB**（10k×260KB mmap 惰性触达），唤醒收尾后 RSS ~14MB。量级与 Go goroutine/channel 同级。内存账与限制详见 docs/vthread-design.md。
+- **限制（先验，文档 §8）**：协作饥饿（纯标量死循环不让出，无异步抢占）；M=1 无多核；固定栈深（溢出 SIGSEGV 撞 guard，无增长）；无 select/close；缓冲 FIFO take_at(0) O(n)；go 不支持默认值省略/kwargs/varargs/generator/方法；chan 丢弃时阻塞者永久等待（退出放弃）；调度器栈上 dec 级联里再 spawn/join 不支持；Windows panic 桩；跨模块 handle/chan 签名按 unknown；VT payload 保守扫描误钉（既有 OBJ 同款哲学）；GC_STATS 分裂根统计不含挂起栈部分。
+- **后续（文档 §9，记录绕行不做）**：M>1 隔离堆、prange 数据并行、select/close/超时、异步抢占、可增长栈、async 改基到 vthread 调度器、退出语义开关。
+- **验证**：新增 220–229 十个端到端用例（go+join/嵌套、无缓冲生产消费、缓冲 ping-pong 50 轮 + 满/空阻塞、sleep 交错确定性、join 异常传播 + 自捕获、挂起栈 GC 存活、1000 churn + 嵌套 20 层、float/str/unknown channel、退出 drain + 未 join 异常打印、多阻塞 FIFO 唤醒），expect 段钉输出，**O0/O2 逐字一致**；ASan detect_leaks=1 全干净。C 夹具（不经过前端，链接 rt.o/rt_asan.o）另验 temp 栈唯一引用过双 major GC、死锁 panic、drain。差分 **222/0**；普通套件 **238 ran ok**（118/154 为 0.304 已记录的 Debug 编译器既有崩溃，base 同款，与本轮无关）；ASan 套件低并发复跑除 118/154 外全过（27_runtime/180 在高并发下为负载敏感用例，单跑与首轮均过）；规模检查仍只有原有 5 处超限（ir_ops.h 1253→1272 / lower_impl.h 1236→1240 / typecheck_types.h 1297→1316，无新增超限文件；新文件 rt_vthread.c 936 行 / lower_vthread.cpp 200 行）。abbench 性能中性复核留集成时按纪律补（未用 go/chan 的模块不发射新运行时调用，rt_vthread.o 并入 rt.o 的 DSB 布局效应未测）。
+
 ## [0.304] - 2026-11-19
 
 ### CPython 互操作先验（from python import 子进程 IPC，合入 cpybridge）

@@ -39,6 +39,8 @@ std::string Lowerer::py_type_name(const TypePtr& t) {
         case TyKind::AsyncTimeout: return "Timeout";
         case TyKind::AsyncTaskGroup: return "TaskGroup";
         case TyKind::AsyncSemaphore: return "Semaphore";
+        case TyKind::VThread: return "vthread";
+        case TyKind::Chan: return "chan";
         case TyKind::Optional:
             return t->sub.empty() ? "object" : py_type_name(t->sub[0]);
         default: return "object";

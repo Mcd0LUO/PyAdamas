@@ -4,6 +4,27 @@
 namespace pyadamas {
 
 TypePtr TypeChecker::builtin_call(const std::string& n, Call& c) {
+        // make_chan 的第 0 实参是类型名（编译期特殊形式），不能按值求类型：
+        // unknown/Any 作为名字并不存在。单独分支处理。
+        if (n == "make_chan") {
+            if (c.args.size() != 2 || !c.keywords.empty()) {
+                err(c.line, c.col, "make_chan() expects (elem_type, capacity)");
+                return mk_chan(t_unknown());
+            }
+            TypePtr elem = t_unknown();
+            auto* nm = dynamic_cast<Name*>(c.args[0].get());
+            std::string tn = nm ? nm->id : "";
+            if (tn == "int" || tn == "bool") elem = t_int();
+            else if (tn == "float") elem = t_float();
+            else if (tn == "str") elem = t_str();
+            else if (tn == "unknown" || tn == "Any") elem = t_unknown();
+            else err(c.args[0]->line, c.args[0]->col,
+                     "make_chan() element type must be int/float/str/unknown");
+            TypePtr ct = expr(*c.args[1]);
+            if (!is_unknown(ct) && ct && ct->kind != TyKind::Int && ct->kind != TyKind::Bool)
+                err(c.args[1]->line, c.args[1]->col, "make_chan() capacity must be int");
+            return mk_chan(elem);
+        }
         std::vector<TypePtr> a;
         for (auto& arg : c.args) a.push_back(expr(*arg));
         // 关键字的值在这里求一次就够了，下面按名字分派时只查类型。
@@ -70,6 +91,20 @@ TypePtr TypeChecker::builtin_call(const std::string& n, Call& c) {
                     std::format("len_bytes() expects a str or bytes, got '{}'",
                                 type_name(a[0])));
             return t_int();
+        }
+        if (n == "join") {
+            if (!need(1, 1)) return t_none();
+            if (!is_unknown(a[0]) && a[0] && a[0]->kind != TyKind::VThread)
+                err(c.line, c.col,
+                    std::format("join() expects a vthread handle, got '{}'", type_name(a[0])));
+            return t_none();
+        }
+        if (n == "sleep") {
+            if (!need(1, 1)) return t_none();
+            if (!is_unknown(a[0]) && a[0] && a[0]->kind != TyKind::Int && a[0]->kind != TyKind::Bool)
+                err(c.line, c.col,
+                    std::format("sleep() expects milliseconds (int), got '{}'", type_name(a[0])));
+            return t_none();
         }
         if (n == "len") {
             if (a.size() != 1) return t_int();

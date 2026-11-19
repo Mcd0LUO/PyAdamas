@@ -512,6 +512,7 @@ VReg Lowerer::lower_call(Call& c) {
                 "callable", "issubclass", "hash", "type", "id", "frozenset",
                 "slice", "vars", "dir", "__pa_capwords", "__pa_sha256", "__pa_sha256_hex",
                 "__pa_b64encode", "__pa_b64decode", "bytes", "len_bytes",
+                "join", "sleep", "make_chan",
             };
             if (kBuiltins.count(n.id)) return lower_builtin_call(n.id, c);
             // 名字能解析但语义没实现的内置：以前会退化成调用空指针直接

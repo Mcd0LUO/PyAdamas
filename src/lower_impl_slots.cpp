@@ -170,6 +170,9 @@ void Lowerer::emit_return(VReg v, TypePtr vty) {
     if (st_->fn_mark != kNoReg && st_->rc_pushes > 0) rc_cleanup(st_->fn_mark);
     release_slots();
     if (st_->is_entry) {
+        // vthread 先验：退出前 drain 剩余 vthread、打印未 join 异常、
+        // 放弃永久阻塞者（docs/vthread-design.md §退出语义）。
+        call_void(RtFn::VtShutdown, {});
         release_globals();
         call_void(RtFn::GcShutdown, {});
         call_void(RtFn::RcShutdown, {});

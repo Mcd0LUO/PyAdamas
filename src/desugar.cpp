@@ -468,6 +468,8 @@ private:
             case ExprKind::Constant:
             case ExprKind::Name:
                 return false;
+            case ExprKind::Go:
+                return has_lambda(static_cast<const GoExpr&>(*e).call.get());
             case ExprKind::FormattedValue: {
                 auto& f = static_cast<const FormattedValue&>(*e);
                 return has_lambda(f.value.get()) || has_lambda(f.format_spec.get());
@@ -630,6 +632,9 @@ private:
         switch (e->kind) {
             case ExprKind::Constant:
             case ExprKind::Name:
+                break;
+            case ExprKind::Go:
+                desugar_expr(static_cast<GoExpr&>(*e).call, pre);
                 break;
             case ExprKind::FormattedValue: {
                 auto& f = static_cast<FormattedValue&>(*e);
