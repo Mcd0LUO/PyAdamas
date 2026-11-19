@@ -231,6 +231,11 @@ struct FuncCtx {
     // 表达式内部槽（and/or、条件表达式、链式比较）只是借用临时值，
     // 生命周期由临时栈负责；出口不能 dec，否则会重复释放。
     std::unordered_set<int> borrow_slots;
+    // 显式 object/Any 标注的槽（局部 sym.annotated / 形参 ann_unknown）：
+    // 禁止 store_slot 的 unknown→typed 升级。标注就是「故意留在 unknown
+    // 域」，升级成 int 后后续 unknown 写入既不走 RC、装载又按 int 读回
+    // （函数内累加器野指针形态，0.327 基线已存在）。
+    std::unordered_set<int> ann_unknown_slots;
     // 本函数内产生、尚未被槽/全局/字段/返回值接管的堆值：所有权还在
     // 临时栈上，写入目标时可以「移动」而不必 inc 后再等 cleanup dec。
     std::unordered_set<VReg> fresh_vregs;

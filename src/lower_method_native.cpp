@@ -481,6 +481,7 @@ VReg Lowerer::lower_method_generator(Attribute& at, Call& c, VReg recv, TypePtr 
         VReg v = def(t_unknown(), std::move(in));
         v = retype(v, et);
         if (ir_is_heap(et)) push_temp(v);
+        else if (is_unknown(et)) push_temp_unknown(v);
         return v;
     }
     if (at.attr == "send") {
@@ -496,6 +497,7 @@ VReg Lowerer::lower_method_generator(Attribute& at, Call& c, VReg recv, TypePtr 
         VReg v = def(t_unknown(), std::move(in));
         v = retype(v, et);
         if (ir_is_heap(et)) push_temp(v);
+        else if (is_unknown(et)) push_temp_unknown(v);
         return v;
     }
     if (at.attr == "throw") {
@@ -522,6 +524,7 @@ VReg Lowerer::lower_method_generator(Attribute& at, Call& c, VReg recv, TypePtr 
         VReg v = def(t_unknown(), std::move(in));
         v = retype(v, et);
         if (ir_is_heap(et)) push_temp(v);
+        else if (is_unknown(et)) push_temp_unknown(v);
         return v;
     }
     if (at.attr == "close") {
@@ -615,6 +618,7 @@ VReg Lowerer::lower_method_task(Attribute& at, Call& c, VReg recv, TypePtr recv_
         in.args = {recv};
         VReg v = def(t_unknown(), std::move(in));
         if (ir_is_heap(et)) push_temp(v);
+        else if (is_unknown(et)) push_temp_unknown(v);
         return v;
     }
     if (at.attr == "exception") {
@@ -682,6 +686,7 @@ VReg Lowerer::lower_method_future(Attribute& at, Call& c, VReg recv, TypePtr rec
         in.args = {recv};
         VReg v = def(t_unknown(), std::move(in));
         if (ir_is_heap(et)) push_temp(v);
+        else if (is_unknown(et)) push_temp_unknown(v);
         return v;
     }
     if (at.attr == "exception") {

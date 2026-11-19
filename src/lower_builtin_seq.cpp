@@ -91,10 +91,12 @@ VReg Lowerer::lower_builtin_seq(const std::string& name, Call& c) {
         in.imm = static_cast<int64_t>(RtFn::GenNext);
         in.args = {g};
         // 运行时按位返回（浮点也是整数寄存器），vreg 类型记为 unknown；
-        // 堆元素才入临时栈。
+        // 堆元素入临时栈；unknown 元素同样要登记（yield 为消费方保留的
+        // 那份引用靠它释放，P3-1b）。
         VReg v = def(t_unknown(), std::move(in));
         v = retype(v, et);
         if (ir_is_heap(et)) push_temp(v);
+        else if (is_unknown(et)) push_temp_unknown(v);
         return v;
     }
 

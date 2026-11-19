@@ -69,6 +69,19 @@ void Lowerer::stmt(Stmt& s) {
             break;
         case StmtKind::AnnAssign: {
             auto& a = static_cast<AnnAssign&>(s);
+            // P3-1b（0.328）：显式 object/Any 标注的局部槽禁止 store_slot
+            // 升级（标注就是「故意留在 unknown 域」）。按标注 AST 精确判定：
+            // sym.annotated+unknown 不可靠——typecheck 对循环内 j: int 也会
+            // 给出 annotated+unknown，误标会改变 d4_primes 等基准 asm。
+            if (a.target->kind == ExprKind::Name &&
+                a.annotation->kind == ExprKind::Name) {
+                const std::string& aid = static_cast<Name&>(*a.annotation).id;
+                if (aid == "object" || aid == "Any") {
+                    auto it = st_->slots.find(static_cast<Name&>(*a.target).id);
+                    if (it != st_->slots.end())
+                        st_->ann_unknown_slots.insert(it->second);
+                }
+            }
             if (!a.value) break;  // 纯声明：槽本来就是 0（None）
             TypePtr vt = tc_.type_of(a.value.get());
             // `x: list[float] = [1, 2]`：字面量必须按标注的元素类型构造。
