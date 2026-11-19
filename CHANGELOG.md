@@ -4,6 +4,14 @@
 
 早期阶段没有逐条留痕，按阶段归纳；0.4 之后逐条记录。
 
+## [0.320] - 2026-11-19
+
+### 日常脚本语料库（bench/daily/，23 脚本）+ 对拍报告
+
+- **dailycorpus 分支合入**：23 个自包含日常脚本（快速往返 5 / 字符串 5 / csv 5 / 数值 6 / 已知 bug 覆盖 2），四类均衡、带类型标注、确定性数据（int64 安全 LCG）。配套 docs/daily-corpus.md 报告、_tools 计时 harness（run_daily.py + results.json + perf_hotspots.txt）、_bugs 13 个最小复现。
+- **价值**：纯运行全类胜 CPython 3.14（数值 7.68×、CLI 6.25×、csv 3.51×、字符串 2.72×，matmul 11.46×）；compile+run 一次性场景全负（编译 42–83ms ≫ CPython 启动 ~18ms，收益在产物复用/长运行）。字符串/分配密集类 RC/GC 占 30–50%，实证 str tracked 叶子是性能天花板（后续优化方向）。本语料挖出 13 个正确性 bug，已由 0.314–0.317 修复（N19b 余半 O2 amortize 循环为既有洞，另票）。
+- **口径**：语料在 bench/daily/（非 tests/run，不进套件/difftest）；_bugs 含已修 bug 的历史复现快照。集成时 0.318 json / 0.319 re 已先落地，本条按序编号。
+
 ## [0.319] - 2026-11-19
 
 ### re 性能：模式编译缓存 + 起点剪枝 + 单指令循环紧扫（基准合计 −46%）
