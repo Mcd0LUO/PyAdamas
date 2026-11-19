@@ -64,39 +64,9 @@ void Lowerer::stmt(Stmt& s) {
             for (auto& t : a.targets) assign_to(*t, v, vt);
             break;
         }
-        case StmtKind::AugAssign: {
-            auto& a = static_cast<AugAssign&>(s);
-            VReg cur_v = expr(*a.target);
-            TypePtr cur_t = tc_.type_of(a.target.get());
-            VReg rhs = expr(*a.value);
-            TypePtr rhs_t = tc_.type_of(a.value.get());
-            TypePtr ty = tc_.type_of(a.target.get());
-            if (ty && ty->kind == TyKind::Float) {
-                if (!ir_is_float(cur_t)) cur_v = convert_to(cur_v, cur_t, t_float());
-                if (!ir_is_float(rhs_t)) rhs = convert_to(rhs, rhs_t, t_float());
-            }
-            // 类实例的增量赋值：__iadd__ 优先，其次普通 __add__，
-            // 右侧是类时还有反射版 __radd__。
-            bool cls_involved = (cur_t && cur_t->kind == TyKind::Class) ||
-                                (rhs_t && rhs_t->kind == TyKind::Class);
-            if (cls_involved) {
-                VReg dr = lower_dunder_binop(cur_v, cur_t, rhs, rhs_t, a.op, true);
-                if (dr != kNoReg) {
-                    assign_to(*a.target, dr, vreg_ty(dr));
-                    break;
-                }
-            }
-            Inst in;
-            in.op = IrOp::Bin;
-            in.bop = map_bin(aug_to_bin(a.op));
-            in.a = cur_v;
-            in.b = rhs;
-            VReg r = def_heap(ty, std::move(in));
-            // 下标目标会重新求值一次下标；Python 只求一次。
-            // 纯下标表达式没有副作用，先这样，等有优化遍再消。
-            assign_to(*a.target, r, ty);
+        case StmtKind::AugAssign:
+            lower_aug_assign(static_cast<AugAssign&>(s));
             break;
-        }
         case StmtKind::AnnAssign: {
             auto& a = static_cast<AnnAssign&>(s);
             if (!a.value) break;  // 纯声明：槽本来就是 0（None）
@@ -113,6 +83,23 @@ void Lowerer::stmt(Stmt& s) {
                                   want->kind == TyKind::Dict || want->kind == TyKind::Set);
             // `q: asyncio.Queue[float] = asyncio.Queue()`：构造调用本身只
             // 推出 Queue[unknown]，把标注的目标类型交给 lower_asyncio。
+            // `s: set[str] = set()` / `d: dict[str, int] = dict()`：空构造
+            // 调用自己推不出元素类型，把标注挂给 lower_builtin_container。
+            // （容器的字面量形态已由下面的 typed_literal 处理。）
+            if (want && a.value->kind == ExprKind::Call &&
+                (want->kind == TyKind::Set || want->kind == TyKind::Dict ||
+                 want->kind == TyKind::List)) {
+                auto& call0 = static_cast<Call&>(*a.value);
+                bool bare = call0.func->kind == ExprKind::Name;
+                if (bare) {
+                    const std::string& cn = static_cast<Name&>(*call0.func).id;
+                    bool same = (want->kind == TyKind::Set &&
+                                 (cn == "set" || cn == "frozenset")) ||
+                                (want->kind == TyKind::Dict && cn == "dict") ||
+                                (want->kind == TyKind::List && cn == "list");
+                    if (same && call0.args.empty()) pending_ctor_ty_ = want;
+                }
+            }
             if (want && want->kind == TyKind::AsyncQueue &&
                 a.value->kind == ExprKind::Call) {
                 auto& call = static_cast<Call&>(*a.value);
@@ -145,6 +132,7 @@ void Lowerer::stmt(Stmt& s) {
             else
                 v = expr(*a.value);
             pending_queue_ty_ = nullptr;
+            pending_ctor_ty_ = nullptr;
             comp_ctx_node_ = nullptr;
             assign_to(*a.target, v, want ? want : vt);
             break;

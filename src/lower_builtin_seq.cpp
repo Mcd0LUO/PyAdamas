@@ -227,6 +227,11 @@ VReg Lowerer::lower_builtin_seq(const std::string& name, Call& c) {
             TypePtr pty = kt0->fn->pos.empty() ? t_unknown() : kt0->fn->pos[0].ty;
 
             VReg fn = expr(*key_expr);
+            // 键表按「元素静态种类」建：kret 可能是 unknown（返回类型没
+            // 标注/推断不出来），而实际返回的是堆 str 时，unknown 表销毁
+            // 走注册表是安全的；反过来标的堆类型也一致。历史上这里传的是
+            // own_kind(kret) 且列表 append 之后没有 take，堆键每轮被
+            // 双重释放（N18：sorted(key=返回 str) 规模化 rc 崩）。
             VReg keys = call_runtime(RtFn::ListNew, mk_list(kret),
                                       {const_int(0), const_int(own_kind(kret))});
             push_temp(keys);
@@ -279,6 +284,13 @@ VReg Lowerer::lower_builtin_seq(const std::string& name, Call& c) {
                 call.args = {ev};
                 kv = def_heap(kret, std::move(call));
             }
+            // 键表的元素所有权：和普通容器写入同一条纪律（先 take/prep
+            // 再 append），不能只 append —— 键表销毁时会按元素种类 dec，
+            // 少了这次 retain 就是「双重释放」（N18）。kret 是 unknown
+            // 时 store_list_elem 走运行时探针定型。
+            TypePtr keys_ty = mk_list(kret);
+            bool kowned = move_fresh(kv, kret);
+            store_list_elem(keys, keys_ty, kv, kowned);
             call_void(RtFn::ListAppend, {keys, kv, heap_arg(kret)});
             Inst inc;
             inc.op = IrOp::Bin;

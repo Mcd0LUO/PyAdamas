@@ -201,6 +201,10 @@ enum class RtFn : uint16_t {
     BytesZeros,   // (i64) -> bytes*     bytes(n)
     StrWrapList,  // (str*) -> list*（单元素，subprocess 用）
     ListExtend,   // (list* dst, list* src) -> void
+    ListInplaceRepeat,  // (list* l, i64 n) -> void；`l *= n` 原地重复（CPython __imul__）
+    SetIntersectUpdate,  // (set* s, set* t) -> void；`s &= t`
+    SetDifferenceUpdate, // (set* s, set* t) -> void；`s -= t`
+    SetSymdiffUpdate,    // (set* s, set* t) -> void；`s ^= t`
     ListSumI64,   // (list*, i64 start) -> i64
     ListSumF64,   // (list*, f64 start) -> f64
     ListMinI64,   // (list*) -> i64  空表抛 ValueError
@@ -714,6 +718,10 @@ inline const char* rt_name(RtFn f) {
         case RtFn::BytesZeros: return "pa_bytes_zeros";
         case RtFn::StrWrapList: return "pa_str_wrap_list";
         case RtFn::ListExtend: return "pa_list_extend";
+        case RtFn::ListInplaceRepeat: return "pa_list_inplace_repeat";
+        case RtFn::SetIntersectUpdate: return "pa_set_intersect_update";
+        case RtFn::SetDifferenceUpdate: return "pa_set_difference_update";
+        case RtFn::SetSymdiffUpdate: return "pa_set_symdiff_update";
         case RtFn::ListSumI64: return "pa_list_sum_i64";
         case RtFn::ListSumF64: return "pa_list_sum_f64";
         case RtFn::ListMinI64: return "pa_list_min_i64";

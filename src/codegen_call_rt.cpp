@@ -799,6 +799,10 @@ void AsmGen::gen_rt_args(const Inst& in, RtFn fn) {
         case RtFn::BytesDecode:
         case RtFn::DictUpdate:
         case RtFn::ListExtend:
+        case RtFn::ListInplaceRepeat:
+        case RtFn::SetIntersectUpdate:
+        case RtFn::SetDifferenceUpdate:
+        case RtFn::SetSymdiffUpdate:
         case RtFn::ListDelIndex:
         case RtFn::ListSumI64:
         case RtFn::IsInstance:

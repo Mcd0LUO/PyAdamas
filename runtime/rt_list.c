@@ -508,6 +508,33 @@ void pa_list_extend(PyAdamasList* dst, PyAdamasList* src) {
     free(snap);
 }
 
+/* `l *= n`：原地重复。CPython 的 list.__imul__ 改的是同一个对象
+   （`a = l; l *= 2` 之后 a 也变长），所以不能走 pa_list_repeat + 重新
+   赋值。元素引用按元素种类给新增位置补一份；n<=0 清空。 */
+void pa_list_inplace_repeat(PyAdamasList* l, int64_t n) {
+    int64_t len = l->len;
+    if (n <= 0) {
+        pa_list_set_len(l, 0);
+        return;
+    }
+    if (len == 0 || n == 1) return;
+    if (len > INT64_MAX / n) panic_c("list repeat: result too large");
+    int64_t total = len * n;
+    int kind = l->elem_kind == 3 ? 2 : (int)l->elem_kind;
+    if (total > l->cap) list_buf_grow(l, total);
+    for (int64_t rep = 1; rep < n; ++rep) {
+        int64_t base = rep * len;
+        for (int64_t i = 0; i < len; ++i) {
+            int64_t v = l->data[i];
+            pa_own_inc(kind, v);
+            l->data[base + i] = v;
+        }
+    }
+    l->len = total;
+    /* 位图（kind2 的逐元素跟踪）重复后无法逐位对应，保守丢弃回退注册表。 */
+    if (kind == 2) pa_list_drop_bits(l);
+}
+
 PyAdamasList* pa_list_copy(PyAdamasList* src) {
     PyAdamasList* l = pa_list_new(src->len, src->elem_kind);
     pa_list_extend(l, src);

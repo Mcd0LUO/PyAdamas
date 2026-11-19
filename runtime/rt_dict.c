@@ -581,6 +581,64 @@ void pa_dict_update(PyAdamasDict* dst, PyAdamasDict* src) {
 
 /* 同 kind 的浅拷贝：所有权类别也复制过去，键值按需 retain。
    供 match 的 `**rest` 使用，随后再删掉显式匹配过的 key。 */
+/* ── set 的原地集合运算（`s &= t` / `s -= t` / `s ^= t`）─────────────
+   set 复用 dict（值恒 0），所以按键集合做交/差/对称差。遍历自己的键，
+   命不命中 t 决定去留；删除走 pa_dict_remove（同 del d[k]）。
+   键列表是快照（pa_dict_keys 新建），删除期间遍历安全。 */
+void pa_set_intersect_update(PyAdamasDict* s, PyAdamasDict* t) {
+    if (s == t) return;
+    PyAdamasList* ks = pa_dict_keys(s);
+    if (!ks) return;
+    pa_gc_pin(ks);
+    for (int64_t i = 0; i < ks->len; ++i) {
+        int64_t k = ks->data[i];
+        if (!pa_dict_contains(t, k)) pa_dict_remove(s, k, 1);
+    }
+    pa_gc_unpin(ks);
+    pa_rc_dec(ks);
+}
+
+void pa_set_difference_update(PyAdamasDict* s, PyAdamasDict* t) {
+    if (s == t) {
+        pa_dict_clear(s);
+        return;
+    }
+    PyAdamasList* ks = pa_dict_keys(s);
+    if (!ks) return;
+    pa_gc_pin(ks);
+    for (int64_t i = 0; i < ks->len; ++i) {
+        int64_t k = ks->data[i];
+        if (pa_dict_contains(t, k)) pa_dict_remove(s, k, 1);
+    }
+    pa_gc_unpin(ks);
+    pa_rc_dec(ks);
+}
+
+void pa_set_symdiff_update(PyAdamasDict* s, PyAdamasDict* t) {
+    if (s == t) {
+        pa_dict_clear(s);
+        return;
+    }
+    /* 趟一遍 t 就够：交集项从 s 删掉，差集项补进 s。s 独有的键不动
+       —— 这正好是对称差（不能先删交集再从 t 补差集：补的时候那些键
+       已经不在 s 里了，会被当成差集重新加回来）。 */
+    PyAdamasList* ks = pa_dict_keys(t);
+    if (!ks) return;
+    pa_gc_pin(ks);
+    int ko = (int)s->key_own;
+    for (int64_t i = 0; i < ks->len; ++i) {
+        int64_t k = ks->data[i];
+        if (pa_dict_contains(s, k)) {
+            pa_dict_remove(s, k, 1);
+        } else {
+            pa_own_inc(ko, k);
+            pa_dict_set(s, k, 0);
+        }
+    }
+    pa_gc_unpin(ks);
+    pa_rc_dec(ks);
+}
+
 PyAdamasDict* pa_dict_copy(PyAdamasDict* src) {
     PyAdamasDict* out = pa_dict_new(src->key_kind, src->key_own, src->val_own,
                                   src->hash_slot, src->eq_slot);

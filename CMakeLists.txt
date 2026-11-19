@@ -55,6 +55,7 @@ set(PYADAMAS_SOURCES
   src/lower_idiom.cpp
   src/lower_stmt_with.cpp
   src/lower_stmt_async.cpp
+  src/lower_stmt_assign.cpp
   src/lower_exc.cpp
   src/lower_import.cpp
   src/lower_import_native.cpp

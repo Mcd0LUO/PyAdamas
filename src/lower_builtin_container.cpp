@@ -58,6 +58,10 @@ VReg Lowerer::lower_builtin_container(const std::string& name, Call& c) {
 
     if (name == "dict") {
         TypePtr ty = tc_.type_of(&c);
+        // `d: dict[str, int] = dict()`：同 set()，标注决定 key/value 种类。
+        if (pending_ctor_ty_ && pending_ctor_ty_->kind == TyKind::Dict) {
+            ty = pending_ctor_ty_;
+        }
         if (!ty || ty->kind != TyKind::Dict) ty = mk_dict(t_unknown(), t_unknown());
         TypePtr kt = t_unknown(), vt = t_unknown();
         if (!ty->sub.empty()) kt = ty->sub[0];
@@ -115,6 +119,11 @@ VReg Lowerer::lower_builtin_container(const std::string& name, Call& c) {
 
     if (name == "set" || name == "frozenset") {
         TypePtr ty = tc_.type_of(&c);
+        // `s: set[str] = set()`：调用推断只有 set[unknown]，标注带来的
+        // 元素类型由 AnnAssign 经 pending_ctor_ty_ 挂过来（N17）。
+        if (pending_ctor_ty_ && pending_ctor_ty_->kind == TyKind::Set) {
+            ty = pending_ctor_ty_;
+        }
         if (!ty || ty->kind != TyKind::Set) ty = mk_set(t_unknown());
         TypePtr et = ty->sub.empty() ? t_unknown() : ty->sub[0];
         int kk = key_kind(et), ko = own_kind(et);

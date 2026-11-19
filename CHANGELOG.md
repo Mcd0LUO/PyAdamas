@@ -4,6 +4,21 @@
 
 早期阶段没有逐条留痕，按阶段归纳；0.4 之后逐条记录。
 
+## [0.315] - 2026-11-19
+
+### 正确性修复：容器 RC 崩溃批（N10 / N16 / N17 / N18）+ set 原地运算
+
+日常语料挖出的四个崩溃级 bug，同族但根因各异（都在降级器的容器所有权 / 原地语义上）。四条最小复现现在都与 CPython 逐字节一致，退出码 0。
+
+- **N10（list 原地 `+=` / `*=` 段错误）**：`l: list[int]=[1,2]; l += [3,4]` → SIGSEGV（`*=` 同）。`AugAssign` 对所有类型一律降成 `IrOp::Bin`，而 list 的 `bin.add` 是「后端不支持」分支（显式 `list+list` 有编译期拦截，`+=` 从旁边漏过去），codegen 按整数加法把两个列表指针相加 → 野指针。修复：`+=` → `pa_list_extend`（typecheck 早已按 `list.__iadd__` 接受任意 iterable 的 list/Tuple 形态）、`*=` → 新增 `pa_list_inplace_repeat`（真·原地：CPython `__imul__` 改同一个对象，`a=l; l*=2` 之后 a 也变长；元素引用按元素种类补；n<=0 清空；kind2 位图保守丢弃）。
+- **N16（`dict.setdefault(k, [])` 双重释放）**：退出时「refcount decrement on a freed object」。原降级是 `DictContains` → 分支 → `DictSet` → 再 `DictGet`，且返回的既有值**没有补引用**就 `push_temp` —— 临时栈按「持有」记账，所以 dict 里的那个对象被多 dec 一次；同时 key 的 `__hash__/__eq__` 被调用两次（CPython 只一次）。修复：改走 0.284 已实现的 `pa_dict_try_get`（一次查找、命中即把值写进帧槽），三处语义一起归位：命中路径把借用值补成新引用（`rc_inc` + `push_temp` + `fresh_vregs`）、未命中路径返回默认值本身（同一对象，dict 与新引用各持一份）、键只哈希一次。`out_slot` 是借用槽（不入 `slot_owned`），读完立刻写回 0，避免帧出口二次 dec。
+- **N17（空 `set[str]=set()` 不认标注）**：动态串不去重（按指针比较）+ 退出 RC 崩。`set()`/`dict()` 的空构造调用只能推出 `set[unknown]` / `dict[unknown,unknown]`，AnnAssign 的标注（`set[str]`）没有传下去，运行时拿到 key_kind=3（指针比较）、元素 own=2，于是两个等值不同对象的串都留下、销毁时按注册表 dec 两次。修复：AnnAssign 对「裸 `set`/`frozenset`/`dict`/`list` 空构造 + 同种类标注」挂 `pending_ctor_ty_`，`lower_builtin_container` 取用该标注建容器。标注现在真正决定 key_kind / own_kind（`dict()` 空构造同病同修）。
+- **N18（`sorted(key=返回堆 str)` 规模化双重释放）**：输出正确但退出 rc 1。key 物化循环 `f(e)` 的结果是 fresh 堆值（已在临时栈里），却只做了裸 `pa_list_append(keys, kv, heap_arg)` —— 既没 `move_fresh` 也没 `retain_elem`，而键表销毁时按元素种类 dec，于是每轮少一次引用 ⇒ 双重释放。修复：与所有容器写入同一条纪律——`store_list_elem(keys, list(kret), kv, kowned)` 先定型/补引用，再 append。**同族一并解决**：0.312 遗留的「key 返回元组崩溃」随之消失（`sorted(key=返回 tuple)` 现在走 0.312 已实现的 kind-4 字典序比较路径，结果与 CPython 一致）。
+- **顺带（同族静默错，语料未覆盖）**：`s |= t` / `s &= t` / `s -= t` / `s ^= t` / `d |= t` 原来也落到 bin op——后端没有 set 的 bin 运算，`s |= {2}` 把哈希表指针当整数算，打出 `set()` 并 rc 崩。现按 CPython `__ior__` 语义分派：`|=`/`+=` → `pa_dict_update`（同 `set.update`），`&=`/`-=`/`^=` → 新增 `pa_set_intersect_update` / `pa_set_difference_update` / `pa_set_symdiff_update`（`^=` 对 t 单趟：交集删、差集补，只删不补会漏）；dict 只有 `|=`。非原地集合运算（`s | t`）仍按既有口径报「后端不支持」。
+- **回归用例**：新增 tests/run/237_rc_container_ops.py（先对拍 CPython 再钉 expect，O0/O1/O2 全一致）：list `+=`/`*=`（别名可见性、tuple 右操作数、0/负倍数、堆元素重复、循环内反复追加）、setdefault 四条路径（链式 append、命中绑定、未命中返回同一对象、非字面量默认可变对象共享、defaultdict 对照）、空 `set[str]` 动态串去重 + `dict()` 空构造、`sorted(key=堆 str)` 2000 元素规模化 + 稳定性 + key=len + key 返回元组、set/dict 四种原地集合运算（含对称差双向、空集、堆元素）。
+- **验证**：difftest **230/0**；普通与 ASan 套件各 **248 ran ok / EXIT=0**（PYADAMAS_TEST_JOBS=8）；ASan detect_leaks=1 抽查 237 / 236 / 13_gc 全干净；0.271 oracle 语料零意外差异（201-229 共 23 例 oracle 编译 rc 差、230/231/236/237 新用例时代差、206 oracle 侧 SIGSEGV 既有现象，其余逐字节一致）；规模检查仍只有原有 5 处超限——**lower_stmt.cpp 因本批涨到 1242 行（新超限），已把 AugAssign 降级整体拆到新文件 src/lower_stmt_assign.cpp（约 90 行）**，lower_stmt.cpp 回到 1182 行，超限清单恢复为原 5 个。
+- **abbench（对 f89112b realistic 绑核交替 15 轮）**：dict_wordfreq −0.7%（p25 −1.3%）、obj_dispatch −0.1%、queue_sim −0.3%、rec_memo −0.5%、sort_struct −0.0%、str_build +0.3%，合计 **1644.07→1640.33ms（−0.2%）**——四条修复都不在热路径上（setdefault/sorted(key=)/list += 语料里本就绕开），新增的 `pa_list_inplace_repeat` / set 原地运算只在对应语法出现时链接调用。
+- **一条测量噪声的如实记录**：首次并行跑套件（同时跑 difftest）时 174_gc_construct_roots 出现一次 OUTPUT DIFF（`100005` vs `16390`），随后同二进制连跑 3 次 + 8 路并发都无法复现；该用例是「构造期对象不在根上」的 GC 压力用例（输出是分配量相关的整数和），本轮四个修复都不碰 GC 根扫描路径，按既有纪律记为负载/时序敏感噪声，未做代码改动。
 ## [0.314] - 2026-11-19
 
 ### 正确性修复：浮点累加器跨调用被踩（N19a 静默误编译，调用点 spill 掩码漏别名 load）

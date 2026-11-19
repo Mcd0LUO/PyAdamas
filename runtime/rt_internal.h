@@ -1131,6 +1131,9 @@ void pa_list_store_kind(PyAdamasList* l, int64_t i, int64_t v, int64_t heap);
 void pa_list_drop_bits(PyAdamasList* l);
 void pa_list_set_len(PyAdamasList* l, int64_t n);
 void pa_list_extend(PyAdamasList* dst, PyAdamasList* src);
+/* `l *= n`：原地重复（CPython list.__imul__ 语义：同一个对象扩容，
+   别名也看得见）。n<=0 清空。 */
+void pa_list_inplace_repeat(PyAdamasList* l, int64_t n);
 PyAdamasList* pa_list_copy(PyAdamasList* src);
 PyAdamasList* pa_list_repeat(PyAdamasList* src, int64_t n);
 PyAdamasStr* pa_str_repeat(PyAdamasStr* s, int64_t n);
@@ -1185,6 +1188,10 @@ int64_t chain_set_eq(PyAdamasDict* a, PyAdamasDict* b, const uint8_t* chain, int
                      int64_t depth);
 int64_t pa_set_eq(PyAdamasDict* a, PyAdamasDict* b);
 void pa_dict_update(PyAdamasDict* dst, PyAdamasDict* src);
+/* set 的原地运算（`s &= t` / `s -= t` / `s ^= t`）：set 复用 dict。 */
+void pa_set_intersect_update(PyAdamasDict* s, PyAdamasDict* t);
+void pa_set_difference_update(PyAdamasDict* s, PyAdamasDict* t);
+void pa_set_symdiff_update(PyAdamasDict* s, PyAdamasDict* t);
 PyAdamasDict* pa_dict_copy(PyAdamasDict* src);
 int64_t pa_isinstance(void* obj, int64_t class_id);
 int64_t pa_obj_class_id(void* obj);

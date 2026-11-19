@@ -123,28 +123,57 @@ VReg Lowerer::lower_method_dict(Attribute& at, Call& c, VReg recv, TypePtr recv_
         }
         VReg key = expr(*c.args[0]);
         key = coerce(key, tc_.type_of(c.args[0].get()), kt);
-        VReg def = expr(*c.args[1]);
-        def = coerce(def, tc_.type_of(c.args[1].get()), vt);
+        VReg dflt = expr(*c.args[1]);
+        dflt = coerce(dflt, tc_.type_of(c.args[1].get()), vt);
+        // 0.315：改成「一次查找 + 命中标记」——原来先 DictContains 再
+        // 到最后再 DictGet，一共探三次，而且**调用了两次用户 key 的
+        // __hash__/__eq__**（CPython 只调用一次）。pa_dict_try_get 命中
+        // 时把值写进 out 槽并返回 1；未命中才插入默认值。
+        //
+        // RC 纪律：默认值 def 是表达式结果（新引用仍在临时栈里），插入
+        // 前补一份引用给 dict；未命中时返回的也是 def 本身（同一个对象），
+        // 再补一份给调用方的新引用（调用点负责入临时栈/落槽）。
+        // DictTryGet 的值出口用指令的 idx（帧槽），与 0.284 的 contains+get
+        // 融合同一条通路：运行时 movq 直写槽，不经过 vreg/RC。
+        //
+        // 命中时槽里是 dict 持有的**借用**引用，只供本语句内读用，不参与
+        // RC——所以用完必须显式 dec（借用变持有）或归还，不能留着让帧的
+        // slot_owned 在出口再 dec 一次（那正是 0.315 之前的双重释放）。
+        int out_slot = new_temp_slot(vt);
+        Inst tg;
+        tg.op = IrOp::CallRt;
+        tg.imm = static_cast<int64_t>(RtFn::DictTryGet);
+        tg.args = {recv, key};
+        tg.idx = out_slot;
+        VReg hit = def(t_bool(), std::move(tg));
         int add_b = new_block("dict.setdefault.add");
         int done_b = new_block("dict.setdefault.done");
-        VReg has = call_runtime(RtFn::DictContains, t_bool(), {recv, key});
         Inst br;
         br.op = IrOp::Branch;
-        br.a = has;
+        br.a = hit;
         br.target = done_b;
         br.target2 = add_b;
         emit(std::move(br));
         switch_to(add_b);
         retain_elem(key, own_kind(kt));
-        retain_elem(def, own_kind(vt));
-        call_void(RtFn::DictSet, {recv, key, def});
+        retain_elem(dflt, own_kind(vt));
+        call_void(RtFn::DictSet, {recv, key, dflt});
+        // 命中路径由运行时写值槽；未命中路径自己写，两边汇合后统一读。
+        store_slot_raw(out_slot, dflt);
         Inst j;
         j.op = IrOp::Jump;
         j.target = done_b;
         emit(std::move(j));
         switch_to(done_b);
-        VReg v = call_runtime(RtFn::DictGet, vt, {recv, key});
-        if (ir_is_heap(vt)) push_temp(v);
+        VReg v = load_slot(out_slot, vt);
+        store_slot_raw(out_slot, const_int(0));
+        if (ir_is_heap(vt)) {
+            // 交出「新引用」的惯用形态（同 def_heap）：调用方按 fresh 值
+            // 处理（move_fresh 直接接手，或 retain 后由语句水位释放）。
+            rc_inc(v);
+            push_temp(v);
+            st_->fresh_vregs.insert(v);
+        }
         return v;
     }
     if (at.attr == "copy") {

@@ -284,6 +284,11 @@ private:
     // `q: asyncio.Queue[float] = asyncio.Queue()`：构造调用自己推不出元素
     // 类型，由带标注的赋值把目标类型暂存到这里。
     TypePtr pending_queue_ty_;
+    // `x: set[str] = set()` / `d: dict[str, int] = dict()`：构造调用自己
+    // 推不出元素类型（实参为空），AnnAssign 把标注下的容器类型挂在这里，
+    // 由 lower_builtin_container 取用。不传下去的话运行时拿到的是 unknown
+    // 种类：str 键按指针比较（动态串查不回来/不去重），元素引用还会双释放（N17）。
+    TypePtr pending_ctor_ty_;
 
     std::unordered_map<std::string, int> global_ids_;
     std::unordered_map<std::string, FunctionDef*> func_defs_;
@@ -815,6 +820,7 @@ private:
     void lower_for_enumerate(For& f, Call& c);
     void lower_for_zip(For& f, Call& c);
     void lower_for_file(For& f);
+    void lower_aug_assign(AugAssign& a);
     void lower_with(With& w);
     void lower_with_item(With& w, size_t idx);
     void emit_cleanup_exits(size_t down_to);
