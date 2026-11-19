@@ -24,11 +24,13 @@ enum Color { RED, GREEN = 5, BLUE };
 
 extern int global_counter;
 extern double global_ratio;
+extern float global_ratiof;
 
 int add(int a, int b);
 unsigned mix(unsigned a, unsigned b);
 long sum_ptrs(const long *xs, int n);
 double scale(double x, double k);
+float scalef(float x, float k);
 const char *name_of(int id);
 void fill_buffer(int *buf, int n, int v);
 Point make_point(int x, int y);

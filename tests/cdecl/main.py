@@ -12,6 +12,8 @@ print(c.mix(3, 5))
 xs = [10, 20, 30]
 print(c.sum_ptrs(xs, 3))
 print(c.scale(2.0, 1.5))
+# C float（单精度）：cdecl 生成 float32，边界做 double↔float 转换
+print(c.scalef(2.0, 1.5))
 print(c.name_of(0))
 print(c.name_of(1))
 
@@ -27,6 +29,7 @@ print(c.global_counter)
 c.global_counter = 9
 print(c.global_counter)
 print(c.global_ratio)
+print(c.global_ratiof)
 
 # --- expect ---
 # 42
@@ -37,6 +40,7 @@ print(c.global_ratio)
 # 3
 # 60
 # 3.0
+# 3.0
 # zero
 # other
 # 3 4
@@ -44,3 +48,4 @@ print(c.global_ratio)
 # 7
 # 9
 # 2.5
+# 1.25

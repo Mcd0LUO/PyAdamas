@@ -68,6 +68,9 @@ void Lowerer::print_value(VReg v, TypePtr ty, int line, int col) {
         case TyKind::Deque:
             call_void(RtFn::PrintStr, {const_str("<deque object>")});
             break;
+        case TyKind::CDLL:
+            call_void(RtFn::PrintStr, {const_str("<cdll handle>")});
+            break;
         case TyKind::Exception: {
             VReg s = call_runtime(RtFn::ExcValueStr, t_str(), {v});
             push_temp(s);

@@ -131,6 +131,11 @@ static bool module_ctor(const std::string& module, const std::string& name) {
 }
 
 std::optional<RtFn> Lowerer::native_fn(const std::string& module, const std::string& member) {
+    if (module == "cdll") {
+        if (member == "load") return RtFn::CDLLLoad;
+        if (member == "close") return RtFn::CDLLClose;
+        return std::nullopt;
+    }
     if (module == "asyncio") {
         // 只为 from-import 登记别名；真正降级走 lower_asyncio。
         if (member == "run") return RtFn::AsyncioRun;
@@ -450,6 +455,9 @@ void Lowerer::lower_import(Import& im) {
 
 void Lowerer::lower_import_from(ImportFrom& im) {
     ++side_effect_seq_;
+    // from c import X：免写直调不产生运行期绑定——调用点在 lower_call
+    // 按 FuncInfo::c_lazy 拦截，符号地址在首次调用时经 dlsym 解析。
+    if (im.level == 0 && im.module == "c") return;
     if (im.level != 0 || im.module.empty()) {
         err(im.line, im.col, "relative imports are not supported yet");
         return;

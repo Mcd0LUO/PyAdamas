@@ -384,6 +384,9 @@ private:
     void stmt_assign(Assign& a);
     void stmt_aug_assign(AugAssign& a);
     void stmt_ann_assign(AnnAssign& a);
+    // 免写直调（from c import / cdll 句柄调用）：调用点推断返回 ABI。
+    TypePtr check_c_lazy(Call& c, const std::string& sym);
+    bool is_c_lazy_call(const Expr* e) const;
     void stmt_return(Return& a);
     void stmt_if(If& a);
     void stmt_while(While& a);

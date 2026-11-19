@@ -175,9 +175,7 @@ std::optional<std::string> cpya_type(const CType& t, bool param, std::string& wh
         case CType::U64:
         case CType::I64: return std::string("int");
         case CType::Double: return std::string("float");
-        case CType::Float:
-            why = "C float is not representable (.cpya float is double)";
-            return std::nullopt;
+        case CType::Float: return std::string("float32");
         case CType::Struct: return t.name;
         case CType::Union:
             why = "union by value is not supported";
@@ -200,6 +198,17 @@ std::optional<std::string> cpya_type(const CType& t, bool param, std::string& wh
             return std::string("ptr");
         }
         case CType::Func: {
+            // 回调跳板暂不做单精度提升：含 C float 的回调签名整体跳过，
+            // 避免生成 .cpya 无法解析的 fn(float32, ...)。
+            for (const auto& p : t.ps)
+                if (p.k == CType::Float) {
+                    why = "C float in callback signature";
+                    return std::nullopt;
+                }
+            if (t.ret && t.ret->k == CType::Float) {
+                why = "C float callback return";
+                return std::nullopt;
+            }
             std::string s = "fn(";
             for (size_t i = 0; i < t.ps.size(); ++i) {
                 std::string why2;
@@ -789,11 +798,6 @@ struct Cdecl {
         size_t rpos = parse_base_type(d, 0, alias, ret);
         rpos = consume_stars(d, rpos, ret);
         fn.ret = std::make_shared<CType>(ret);
-        if (ret.k == CType::Float) {
-            warn(d[0], std::format("skipped '{}': C float return is not representable", name));
-            ++skipped;
-            return;
-        }
         if (!parse_params(d, lp + 1, rp, fn, d[ni])) {
             warn(d[0], std::format("skipped function '{}'", name));
             ++skipped;

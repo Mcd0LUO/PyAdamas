@@ -207,6 +207,10 @@ inline constexpr ModuleEntry kModuleTable[] = {
     {"datetime", ModuleKind::Native, "", ""},
     {"pathlib", ModuleKind::Native, "", ""},
     {"operator", ModuleKind::Native, "", ""},
+    // 免写直调的伪模块：c 提供 from c import <symbol>（任意符号名，
+    // 签名由调用点推断）；cdll 提供 dlopen/dlsym 动态库句柄。
+    {"c", ModuleKind::Native, "", ""},
+    {"cdll", ModuleKind::Native, "", ""},
     // ── 原生 + stdlib 扩展源（补 API 只改 stdlib/<source>，不用碰 src/）──
     {"functools", ModuleKind::NativePython, "functools.py", ""},
     // ── stdlib Python 源模块 ──────────────────────────────────
@@ -1409,7 +1413,9 @@ bool link_program(Program& p, const std::string& output) {
     // --asan：链接插桩版运行时，让 RC/GC 内部的越界/UAF 也能被检查到。
     // 两个 rt 都带同样的符号，链接期只取一个。
     cmd += " " + shell_quote(g_use_asan_runtime ? PYADAMAS_RT_ASAN_OBJ : PYADAMAS_RT_OBJ);
-    cmd += " -lm";
+    // -ldl：rt_cffi 的 dlopen/dlsym（glibc 2.34+ 已并入 libc，-ldl 是空壳，
+    // 旧 glibc 仍需要）。Win64 目前只做交叉汇编验证，不走这条链接路径。
+    cmd += " -lm -ldl";
     for (auto& l : p.link_args) cmd += " " + shell_quote(l);
     if (std::system(cmd.c_str()) != 0) {
         std::fprintf(stderr, "error: link failed\n       command: %s\n", cmd.c_str());

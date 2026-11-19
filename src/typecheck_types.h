@@ -66,6 +66,7 @@ enum class TyKind : uint8_t {
     Deque,        // collections.deque
     Struct,       // 值类型 struct 的实例，st 指向编译期布局
     StructPtr,    // addr(struct) 得到的指针；机器表示与 Struct 相同
+    CDLL,         // cdll.load() 的动态库句柄；机器表示是 dlopen 返回的整数地址
 };
 
 struct Type;
@@ -192,6 +193,11 @@ struct FuncInfo {
     bool ret_known = false;
     bool unchecked = false;   // 内置函数：参数规则在 builtin_call 里按名字分派
     bool is_extern = false;   // cimport 外部函数：参数/返回值按 C ABI 编组
+    // 免写直调（from c import X / cdll 句柄属性调用）：没有 .cpya 声明，
+    // 参数编组由调用点实参类型推断，返回类型由推断/标注决定。
+    // c_symbol 是 C 侧符号名（别名导入时与 name 不同）。
+    bool c_lazy = false;
+    std::string c_symbol;
     // 函数体里有 yield：调用得到生成器对象，return 标注描述的是元素类型
     // 之外的东西。不能只看 ret 是不是 Generator——返回生成器的普通函数
     // （工厂）也会是 Generator，但它们本身不是生成器函数。
@@ -606,6 +612,10 @@ inline const TypePtr& t_match() {
     static TypePtr v = new_ty(TyKind::Match);
     return v;
 }
+inline const TypePtr& t_cdll() {
+    static TypePtr v = new_ty(TyKind::CDLL);
+    return v;
+}
 
 // 可变的类型洞：容器元素类型未知时用它占位，后续插入时原地填上
 inline TypePtr fresh_hole() { return new_ty(TyKind::Unknown); }
@@ -670,7 +680,8 @@ inline TypePtr mk_struct_ptr(StructInfo* s) {
 inline TypePtr ckind_type(CKind k) {
     switch (k) {
         case CKind::None: return t_none();
-        case CKind::Float: return t_float();
+        case CKind::Float:
+        case CKind::Float32: return t_float();
         case CKind::Bool: return t_bool();
         case CKind::Str: return t_str();
         case CKind::OptStr: return mk_optional(t_str());
@@ -690,7 +701,8 @@ inline TypePtr ckind_type(CKind k) {
 }
 inline TypePtr cptr_elem_type(CKind k) {
     switch (k) {
-        case CKind::Float: return t_float();
+        case CKind::Float:
+        case CKind::Float32: return t_float();
         case CKind::Bool: return t_bool();
         default: return t_int();
     }
@@ -958,6 +970,7 @@ inline std::string type_name_impl(const TypePtr& t, int depth) {
         case TyKind::TimeDelta: return "timedelta";
         case TyKind::Path: return "pathlib.Path";
         case TyKind::Deque: return "collections.deque";
+        case TyKind::CDLL: return "cdll";
     }
     return "?";
 }

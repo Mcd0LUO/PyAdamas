@@ -116,9 +116,10 @@ int AsmGen::outgoing_bytes(const IRFunction& f) const {
                     need = 8 * (static_cast<int>(in.args.size()) + 2);
                     break;
                 case IrOp::CallExtern: {
-                    // C 调用还多一块暂存：返回值分块暂存 + sret 指针共 48 字节。
+                    // C 调用还多一块暂存：返回值分块暂存 + sret 指针 +
+                    // 免写直调的函数地址暂存，共 56 字节。
                     const IRExtern& ex = m_->externs[static_cast<size_t>(in.idx)];
-                    need = 48 + 16;
+                    need = 56 + 16;
                     for (size_t i = 0; i < in.args.size(); ++i) {
                         int64_t sz = 8;
                         if (i < ex.param_abi.size() && ex.param_abi[i].size > sz)

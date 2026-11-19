@@ -46,6 +46,8 @@ TypePtr TypeChecker::check_args(const FuncInfoPtr& fn, Call& c) {
         if (fn && fn->name.starts_with("functools.")) {
             if (auto r = functools_call(fn->name.substr(10), c)) return *r;
         }
+        if (fn && fn->c_lazy)
+            return check_c_lazy(c, fn->c_symbol.empty() ? fn->name : fn->c_symbol);
         // 实参和关键字实参都只求值一次。之前关键字值在循环里被求了两次，
         // 一次的类型错误会重复报两遍。
         struct PosArg {
@@ -429,6 +431,31 @@ bool TypeChecker::is_builtin_callable(const std::string& n) {
             "len_bytes",
         };
         return names.count(n) > 0;
+    }
+
+// 免写直调的调用点检查：没有声明可查，只求实参类型并推断返回 ABI。
+// 规则（ctypes 式契约，调用方负责）：有 float 实参 → 返回按 double；
+// 否则按 int。标量标注（x: float = f(...) / -> float 的 return）覆盖推断。
+TypePtr TypeChecker::check_c_lazy(Call& c, const std::string& sym) {
+        if (!c.keywords.empty()) {
+            err(c.line, c.col,
+                std::format("C function '{}' without a declaration does not take keyword "
+                            "arguments", sym));
+            for (auto& kw : c.keywords) expr(*kw.value);
+        }
+        bool any_float = false;
+        for (auto& arg : c.args) {
+            if (arg->kind == ExprKind::Starred) {
+                err(arg->line, arg->col,
+                    std::format("'*args' is not supported for C function '{}' without a "
+                                "declaration", sym));
+                expr(*static_cast<Starred&>(*arg).value);
+                continue;
+            }
+            TypePtr t = expr(*arg);
+            if (t && t->kind == TyKind::Float) any_float = true;
+        }
+        return any_float ? t_float() : t_int();
     }
 
 TypePtr TypeChecker::builtin_type(const std::string& n) {
