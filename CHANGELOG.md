@@ -4,6 +4,16 @@
 
 早期阶段没有逐条留痕，按阶段归纳；0.4 之后逐条记录。
 
+## [0.308] - 2026-11-19
+
+### 编译器构建速度优化（ccache + 模块扫描关闭 + release -O1）
+
+- **集成**：speed 分支（8563c03）合入 0.307。测量报告随分支合入：docs/compile-speed.md（基线/top TU/-ftime-report：53% 时间逐 TU 模板实例化、29% 重载决议、预处理仅 3%；逐项 A/B 与放弃记录）。冲突仅 CMakeLists RT_PARTS 一处：保留 master 的 vthread + speed 的 launcher 接线。
+- **生效手段**：① 关 CMake4 的 C++23 模块扫描（项目无 modules 却被注入 -fmodules-ts + 89 遍 -E 扫描，ccache 见之 100% 拒缓存）——墙钟中性，是 ccache 的前提，-DPYADAMAS_MODULE_SCAN=ON 可恢复；② ccache 自动探测（-DPYADAMAS_USE_CCACHE=OFF 可关）+ 接线 68 个运行时 custom command（不继承 launcher）；③ release preset -O3→-O1 -DNDEBUG——吞吐三层测量（pyadamas build 6 负载、重负载×10、216 用例纯前端 check）O1/O2/O3 全部中性（dev -O0 才慢 27%），取最大构建收益；保守退路 -O2（−10.1%）一行可改。
+- **实测**（-j32 clean 全量，交替轮转抗噪 ×3 中位，负载 ~27-30 平稳窗口）：dev warm 全量 ~48s→**3.47s（13.9×**）；release cold 58.45s→**41.10s（−29.7%**）；release warm ~58s→**0.45s（130×**）；cold 无惩罚；真实源码改动的增量不变（改动 TU 必然 miss）。configure ~1.4s、链接 dev 3s/release 0.3s 均非瓶颈。Top1 重 TU driver_build.cpp（预处理 145k 行；全项目 89 TU 共 1050 万行，95% 标准库）。
+- **放弃/记录**：lld/mold 仅 bfd 无安装权限且链接占比小；UNITY_BUILD 匿名命名空间同名 helper 跨文件 ODR 冲突（opt_dict_bump/fuse 的 is_rt/same_slot）；PCH 按配置匹配 -O 机制修好（dev 137MB/release 126MB 独立 .gch）但全量仍≈0（实例化不省）——保留默认 OFF 的 option（增量 −14/−18%）；std modules（GCC15 import std 实测可行，BMI 15.7s/30MB）是唯一根治实例化重复的方向，集成太深记录不做。typecheck_types.h 被 74/89 TU 间接包含，<format>/<ranges>/<expected> 最重扩散源。
+- **验证**：行为零变化——分支口径（0.306 基）release 最终配置与 dev -Og 各 234 ran ok EXIT=0 + difftest 216/0；合入 0.307 后复核 difftest **226/0**、普通与 ASan 套件各 **244 ran ok EXIT=0**。裸 -O0 dev 的 118/154 两失败与原配置基线完全一致（既有 Debug 断言，另票）。build/release（0.271 oracle）未触碰；release preset 新旗标在分支已验证，合并未改 preset 内容。CI 装 ccache 并持久化 CCACHE_DIR 可拿满 warm 收益。
+
 ## [0.307] - 2026-11-19
 
 ### Go 式无色虚拟线程（go/channel/join，M=1 协作调度，合入 vthread）
