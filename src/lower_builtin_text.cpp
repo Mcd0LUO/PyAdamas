@@ -442,6 +442,11 @@ VReg Lowerer::lower_builtin_text(const std::string& name, Call& c) {
             push_temp(s);
             return s;
         }
+        // 显式 int(unknown) / float(unknown)：解盒（float 盒）或按 int 解释。
+        if (from && from->kind == TyKind::Unknown && to->kind == TyKind::Int)
+            return call_runtime(RtFn::AnyToI64, t_int(), {v});
+        if (from && from->kind == TyKind::Unknown && to->kind == TyKind::Float)
+            return call_runtime(RtFn::AnyToF64, t_float(), {v});
         return convert_to(v, from, to);
     }
 

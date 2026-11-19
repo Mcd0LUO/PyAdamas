@@ -717,8 +717,14 @@ VReg Lowerer::lower_cimport_call(Attribute& at, Call& c) {
     if (ex->ret == CKind::Struct) {
         if (StructInfo* st = tc_.struct_info(ex->ret_struct)) rty = mk_struct(st);
     }
-    in.ty = rty;
-    return def_heap(in.ty, std::move(in));
+    // **先把类型取出来再 move in。** 同一实参列表里 in.ty 与 std::move(in)
+    // 的求值顺序未指定；GCC 会先构造 by-value 的 Inst 参数（移走 in.ty），
+    // 再读 in.ty 就得到空指针，vreg 被记成 unknown。cimport 返回 float 的
+    // 调用点因此长期是「机器值在 xmm、静态类型 unknown」，0.324 的
+    // unknown -> float 解盒第一次把它暴露成数值错误。
+    TypePtr out_ty = rty;
+    in.ty = out_ty;
+    return def_heap(out_ty, std::move(in));
 }
 
 

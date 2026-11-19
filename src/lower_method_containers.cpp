@@ -287,7 +287,10 @@ VReg Lowerer::lower_method_seq(Attribute& at, Call& c, VReg recv, TypePtr recv_t
             return const_none();
         }
         // 运行时不再做隐式 retain：容器元素的所有权由降级器按静态类型决定。
+        // 实参要按元素类型做数值域转换（空列表推断成 list[float] 后
+        // append(1) 必须把 1 变成 1.0；float 进 unknown 元素要装箱）。
         VReg v = expr(*c.args[0]);
+        v = coerce(v, tc_.type_of(c.args[0].get()), et);
         bool owned = move_fresh(v, et);
         store_list_elem(recv, recv_ty, v, owned);
         call_void(RtFn::ListAppend, {recv, v, heap_arg(et)});

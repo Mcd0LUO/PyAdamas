@@ -332,9 +332,21 @@ PyAdamasStr* pa_str_any(int64_t v) {
     if (v > 4096) {
         PyAdamasRc* h = (PyAdamasRc*)(uintptr_t)((uint64_t)v -
                                                 (uint64_t)PYADAMAS_RC_HDR);
-        if (rc_index_has(h) && h->kind == PYADAMAS_RC_STR) {
-            pa_rc_inc((void*)(uintptr_t)v);
-            return (PyAdamasStr*)(uintptr_t)v;
+        if (rc_index_has(h)) {
+            if (h->kind == PYADAMAS_RC_STR) {
+                pa_rc_inc((void*)(uintptr_t)v);
+                return (PyAdamasStr*)(uintptr_t)v;
+            }
+            /* 0.324：unknown 域的 float 用 CPYFLOAT 盒携带标签。
+               str(float) 与 CPython 一致走双精度格式化。 */
+            if (h->kind == PYADAMAS_RC_CPYFLOAT) {
+                double d;
+                memcpy(&d, (void*)(uintptr_t)v, sizeof d);
+                return pa_str_from_f64(d);
+            }
+            /* str(list) == repr(list)，str(dict) == repr(dict)。 */
+            if (h->kind == PYADAMAS_RC_LIST || h->kind == PYADAMAS_RC_DICT)
+                return pa_repr_any(v);
         }
     }
     return pa_str_from_i64(v);

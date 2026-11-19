@@ -930,8 +930,13 @@ TypePtr TypeChecker::method_call(TypePtr recv, const std::string& name, Call& c,
                     err(c.line, c.col,
                         std::format("dict key type is '{}', got '{}'", type_name(kt),
                                     type_name(a[0])));
-                // 只有一个参数时可能缺失，返回类型是 Optional[值类型]
-                return a.size() == 1 ? mk_optional(vt) : vt;
+                // 只有一个参数时可能缺失，返回类型是 Optional[值类型]。
+                // 两参数形式的缺省值本身就是返回类型的一部分：空 dict 的值
+                // 类型还是「洞」时，用 join(值类型, 缺省值类型) 把洞填成
+                // 缺省值的域（counts.get(w, 0) + 1 这类计数器惯用法因此
+                // 留在 int 快路径，不必落到 unknown 的动态算术）。
+                if (a.size() == 1) return mk_optional(vt);
+                return join(vt, a[1]);
             }
             if (name == "keys") { argc(0, 0); return mk_list(kt); }
             if (name == "values") { argc(0, 0); return mk_list(vt); }

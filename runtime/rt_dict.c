@@ -860,5 +860,11 @@ void pa_dict_bump(PyAdamasDict* d, int64_t key, int64_t def, int64_t delta) {
         d->entries[e].val = nv;
         return;
     }
+    /* **新键要由 dict 持有引用。** 融合前的 IR 是
+         RcInc(key); DictSet(d, key, val)
+       融合把这两条都删了，所有权必须在这里补上，否则动态构造的键
+       （b1 的日志字段、b5 的邮箱等）插入后立刻被调用方释放，留下
+       悬空键指针，后续一次 rc_inc 就打到已释放对象。 */
+    pa_own_inc(d->key_own, key);
     pa_dict_set(d, key, def + delta);
 }

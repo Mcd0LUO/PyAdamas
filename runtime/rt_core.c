@@ -521,6 +521,33 @@ static PyAdamasRc* list_pool_get(void) {
     return h;
 }
 
+/* CPYFLOAT（8 字节 double payload）盒子池：unknown 域的动态 float 结果
+   每算一次就要一个盒。盒子无出边、大小固定，回收时挂 freelist，复用
+   时由 rc_alloc_core 重新 rc_link/rc_index_put（与 list/dict 池同款）。 */
+#define FLOAT_BOX_POOL_MAX 1024
+static PyAdamasRc* float_box_pool;
+static int float_box_pool_count;
+
+static PyAdamasRc* float_box_pool_get(void) {
+    PyAdamasRc* h = float_box_pool;
+    if (h) {
+        float_box_pool = h->next;
+        float_box_pool_count--;
+    }
+    return h;
+}
+
+static void float_box_pool_put(PyAdamasRc* h) {
+    if (float_box_pool_count >= FLOAT_BOX_POOL_MAX) {
+        free(h);
+        return;
+    }
+    h->next = float_box_pool;
+    h->prev = NULL;
+    float_box_pool = h;
+    float_box_pool_count++;
+}
+
 static void list_pool_put(PyAdamasRc* h) {
     if (list_pool_count >= LIST_POOL_MAX) {
         free(h);
@@ -577,6 +604,7 @@ static void rc_leaf_free(PyAdamasRc* h, void* p) {
     rc_unlink(h);
     if (h->dtor) h->dtor(p);
     if (h->kind == PYADAMAS_RC_STR) str_pool_put(h);
+    else if (h->kind == PYADAMAS_RC_CPYFLOAT) float_box_pool_put(h);
     else free(h);
 }
 
@@ -586,6 +614,8 @@ static void rc_leaf_free(PyAdamasRc* h, void* p) {
 static int rc_leaf_untracked(const PyAdamasRc* h) {
     if (!gc_untracked_leaves) return 0;
     if (h->kind == PYADAMAS_RC_STR) return 1;
+    // 0.324：unknown 域的 float 盒无出边、不可变，按叶子处理。
+    if (h->kind == PYADAMAS_RC_CPYFLOAT) return 1;
     // range 只存边界，没有堆字段（出边为零），不可能处在环里。
     if (h->kind == PYADAMAS_RC_RANGE) return 1;
     // 值类型 struct：payload 只有标量字段，同样没有出边。
@@ -789,7 +819,9 @@ void rc_index_rehash(size_t ncap) {
    地址对齐 + kind，put/del 严格一致；has 不能读 kind（h 可能是整数减出来
    的地址），所以主索引未命中时无条件再查一次位图。 */
 static inline int rc_index_is_leaf_obj(const PyAdamasRc* h) {
-    return gc_leaf_mode && h->kind == PYADAMAS_RC_STR && leaf_slot_ok((uintptr_t)h);
+    return gc_leaf_mode &&
+           (h->kind == PYADAMAS_RC_STR || h->kind == PYADAMAS_RC_CPYFLOAT) &&
+           leaf_slot_ok((uintptr_t)h);
 }
 
 void rc_index_put(PyAdamasRc* h) {
@@ -1021,7 +1053,8 @@ void rc_link(PyAdamasRc* h) {
     }
     // 索引叶子（str/bytes）：不进链、不进新生代、不参与 GC 记账，但必须
     // 留在存活堆索引里（unknown 探针的识别依据）。见 PYADAMAS_RC_LEAF。
-    if (gc_leaf_mode && h->kind == PYADAMAS_RC_STR) {
+    if (gc_leaf_mode &&
+        (h->kind == PYADAMAS_RC_STR || h->kind == PYADAMAS_RC_CPYFLOAT)) {
         h->prev = NULL;
         h->next = NULL;
         h->marked = PYADAMAS_RC_LEAF;
@@ -1139,6 +1172,8 @@ static void* rc_alloc_core(int64_t size, void (*dtor)(void*), void (*release)(vo
         alloc_size = (size + 7) & ~(int64_t)7;
     PyAdamasRc* h = NULL;
     if (kind == PYADAMAS_RC_STR) h = str_pool_get(alloc_size);
+    else if (kind == PYADAMAS_RC_CPYFLOAT && size == (int64_t)sizeof(int64_t))
+        h = float_box_pool_get();
     else if (kind == PYADAMAS_RC_LIST && size == (int64_t)sizeof(PyAdamasList))
         h = extra == PYADAMAS_LIST_INLINE_BYTES ? list_inline_pool_get() : list_pool_get();
     else if (kind == PYADAMAS_RC_DICT && size == (int64_t)sizeof(PyAdamasDict))
@@ -1307,6 +1342,7 @@ void pa_rc_dec_slow(void* p) {
         if (!(h->marked & PYADAMAS_RC_UNTRACKED)) rc_unlink(h);
         if (h->dtor) h->dtor(p);
         if (h->kind == PYADAMAS_RC_STR) str_pool_put(h);
+        else if (h->kind == PYADAMAS_RC_CPYFLOAT) float_box_pool_put(h);
         else if (h->kind == PYADAMAS_RC_LIST && h->size == (int64_t)sizeof(PyAdamasList))
             list_pool_put(h);
         else if (h->kind == PYADAMAS_RC_LIST &&
@@ -2701,6 +2737,10 @@ void pa_gc_shutdown(void) {
     // 先放掉全局根：sys.argv 的字符串在 exact-RC 模式下不在 GC 堆链上，
     // 只能靠 RC 释放（见 pa_sys_argv_shutdown 的注释）。
     pa_sys_argv_shutdown();
+    // 常量 float 盒缓存持有引用：必须**在堆链清扫之前**归还。默认（索引
+    // 叶子模式）盒不在链上，但 PYADAMAS_GC_CONSERVATIVE=1 时盒是 tracked
+    // 对象、随链 free；清扫后再 dec 会读已释放的头。池本身留到最后清。
+    pa_any_float_cache_shutdown();
     // **先按「整堆都是垃圾」的 sweep 口径把出边交出来，再统一 free。**
     //
     // 字符串（以及 exact-RC 模式的其它叶子）不在堆链上，只靠 RC 释放：
@@ -2780,6 +2820,13 @@ void pa_gc_shutdown(void) {
         free(h);
     }
     pa_list_inline_pool_count = 0;
+    // float 盒 freelist：缓存引用已在入口归还，清扫过程也可能把盒挂进来。
+    while (float_box_pool) {
+        PyAdamasRc* h = float_box_pool;
+        float_box_pool = h->next;
+        free(h);
+    }
+    float_box_pool_count = 0;
     // dict 池也要清空（头块和寄存的缓冲都是裸 malloc，必须 free）。
     for (int i = 0; i < dict_pool_count; ++i) {
         free(dict_pool[i].entries);

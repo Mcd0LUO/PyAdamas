@@ -4,6 +4,130 @@
 
 早期阶段没有逐条留痕，按阶段归纳；0.4 之后逐条记录。
 
+## [0.324] - 2026-11-19
+
+> typetag 分支：unknown/动态值表示层对齐 codon 的"带标签方向"——先做设计
+> 评估（docs/unknown-repr-design.md，7 方案矩阵），再落第一阶段原型：
+> 推断消 unknown + 真 unknown 的 float 最小判别（复用 CPYFLOAT 盒）+ 若干
+> 被原型暴露出来的既有洞。**不推 master、不改主树、不动主树 build**；
+> 全量 NaN-boxing 评估为不可行（信息论边界，见设计文档 §2/§4.1），未做。
+>
+> 判据：静态已知路径零开销（26 个基准 asm 逐字节对比，22 个完全相同、
+> 4 个更少指令）；标签成本只落在真 unknown 冷路径；8 字节容器槽不变宽。
+
+### 设计与结论（docs/unknown-repr-design.md，新增 429 行）
+
+- 对比 NaN-boxing / codon 式 tagged union / 旁路 tag / 装箱 / 指针低位 tag /
+  推断优先 / 混合，给出正确性、内存、热/冷路径、ABI、复杂度、开放封闭矩阵。
+- **核心边界**：int64 与 double 都占满 2^64，64 位内不可能同时保留全 int64、
+  全 double 再塞类型 tag。任何 in-band 方案都要牺牲一个值域（或依赖指针
+  规范化假设），与 pyadamas 文档化的 int64 回绕/完整 NaN 语义冲突；全量
+  NaN-boxing ABI 重构因此不做，记录理由。
+- **推荐分阶段**：P0 推断消 unknown（最大杠杆，零运行期成本）→ P1 真 unknown
+  最小 float 判别（装箱，本阶段）→ P2 容器级 2-bit 域 tag / dict entry tag →
+  P3 显式 union/封闭 tagged union（16B 仅用于 union 容器）→ P4 None/bool/
+  整型的通用装箱。开放 unknown 与封闭可推断部分分治；与 codon 的
+  UnionType（codon/cir/type.h:572、llvisitor.cpp:2776）和 PyObject
+  （llvisitor.cpp:851）逐项对照。
+
+### 推断 / 降级（P0，零运行期成本）
+
+- **dict.get 两参数形式把缺省值类型 join 进值类型洞**：空 dict 的计数器
+  counts[w] = counts.get(w,0)+1 从 dict[str, unknown] 推断成 dict[str, int]，
+  回到纯 addq 路径并重新触发 dict_bump 融合；dict_wordfreq A/B **−8.78%**。
+- **list.append 按元素类型 coerce**：修掉空列表先 append(int)、后 append(float)
+  时首元素按 int 位模式存进 list[float]（打印 5e-324）的老 bug。
+- **for 元组解包的目标类型优先取源 tuple 的 sub[i]**（不再依赖可能停在
+  unknown 的符号表类型）：fannkuch 整函数摆脱 unknown 帧扫描/索引，帧
+  144B→96B，A/B **−2.62%**。
+- **dict_bump 融合接受 6/7 指令两种形态**（值类型是 int 时没有 RcIncUnknown
+  那条 retain）；b1_log_parse / b5_re_extract 的计数器重新命中融合（2/1 处），
+  A/B −1.14% / +0.14%。
+
+### unknown 的 float 最小判别（P1，runtime/rt_any.c 新增）
+
+- **float 进入 unknown 时装箱成 PYADAMAS_RC_CPYFLOAT**（64B RC 头 + 8B
+  double payload）；unknown 仍是 i64，ABI 不变。int/None/bool/普通堆指针
+  保持裸机器字。只装 float：int/str/容器本来就能靠机器字 + RC/kind 探针
+  区分，全量装箱会反噬 0.321 的字符串成果。
+- 新增运行时入口：pa_any_from_f64 / pa_any_to_f64 / pa_any_to_i64 /
+  pa_any_arith（int/float/str 分派，保持 int64 回绕与 Python 的 //、% 语义）/
+  pa_any_neg / pa_any_cmp（数值提升 double、str 字节序、异类型 Eq/Ne）/
+  pa_any_is_float。实参静态域用 'i'/'f'/'s'/'o'/'x' 描述符传给运行时，
+  静态已知的实参跳过堆探针。
+- 降级层：float<->unknown 走装箱/解盒（只在这两个域）；unknown->int/bool
+  保持裸机器字直通（避免把 fannkuch 这类下标/计数变成调用）；unknown 上的
+  算术/一元负/比较走动态分派；list.append/insert 的元素 coerce；
+  显式 int(unknown)/float(unknown) 解盒；isinstance(unknown, float) 精确判定。
+- print/repr/str/f-string/csv 全部打通：pa_str_any 支持 CPYFLOAT 与
+  容器 repr；异构 dict/list 的 float 打印/算术、混合 csv 行不再打位模式。
+- **冷路径成本控制**：CPYFLOAT 按索引叶子处理（0.321 的 4KB 页位图，
+  不进 GC 链、不驱动阈值）；1024 槽 freelist 复用动态结果盒；256 槽常量
+  float 盒缓存（重复写同一字面量零分配）。合成负载从 +1471% 降到 +316%
+  （u1），u2 +7.3%，最坏形态 u3 +373%（累加器每轮产生新 double）。
+- 内存：盒 72B/个，缓存上界 256 盒 ≈18KB、池 1024 盒 ≈74KB，退出归还；
+  容器槽不变宽（仍 8B），没有 16B tagged 槽。
+
+### 被原型暴露并修复的既有洞
+
+- **cimport/extern 返回 float 的 vreg 被记成 unknown**：
+  def_heap(in.ty, std::move(in)) 在同一实参列表里读 in.ty，求值顺序未指定；
+  GCC 先构造 by-value 参数移走 in.ty。改成先取 TypePtr 再 move
+  （lower_method.cpp / lower_c_lazy.cpp）。unknown->float 解盒第一次把
+  "机器值在 xmm、静态类型 unknown"的长期不一致暴露成数值错误。
+- **dict.keys/values/items 在 exact-RC 下 SIGSEGV**：运行时按 key_own/val_own
+  混合种类以 heap=2 追加元素，值为 int/float 标量时会走 unknown 探针；
+  索引关闭后 exact-RC 回退把对齐的 double 位模式当指针解引用
+  （231_float_dict 实测）。把 DictKeys/DictValues/DictItems 以及 0.324 的
+  AnyFromF64/AnyToF64/AnyArith/AnyCmp/RcTempUnknown 等加入"必须保留索引"
+  集合（src/ir.cpp）。
+- **pa_dict_bump 插入新键不 retain**：融合删掉了 IR 里的 RcInc(key)，但运行时
+  miss 分支没有补引用；计数器推断成 int 后 b1/b5 第一次触发该融合，动态
+  构造的键插入即被释放，留下悬空键（"refcount increment on a freed object"）。
+  修：miss 分支 pa_own_inc(key_own, key)。
+
+### 回归用例
+
+- 新增 tests/run/247_unknown_float_tag.py（167 行，先对拍 CPython 3.14 再钉
+  expect，O0/O1/O2 全一致）：异构 list/dict 的 float 打印/str/f-string；
+  unknown 上的 + - * / // % 与六种比较、一元负、int()/float()/bool()；
+  unknown 形参/返回/object 字段/循环变量；空容器 append 推断；
+  嵌套 list[object]/dict[str, object]；csv 混合行（str+int+float，含
+  list[object] 行）。已知边界（None/bool 仍裸 0/1、嵌套具体容器无域 tag、
+  extend/+= 不逐元素装箱、f-string 格式说明）在设计文档 §10 列明。
+
+### 验证
+
+- difftest **239 / 0**（238 + 247）。
+- 普通套件 **257 ran ok / EXIT=0**；ASan 套件 **257 ran ok / EXIT=0**
+  （PYADAMAS_TEST_JOBS=8）。
+- ASan detect_leaks=1 抽查 247 / 231_float_dict / t9 装箱 churn 负载：
+  无 leak/ERROR，输出与 expect 一致。
+- 热路径 asm：26 个基准（9 个 compare 数值 + realistic 6 + daily 11）逐字节
+  对比，22 个完全相同；4 个更少指令（dict_wordfreq、b1、b5、fannkuch，均为
+  推断/类型修正的收益）。
+- A/B（绑核 24，7 轮交替 + 奇偶交换 + BURST=3）：dict_wordfreq −8.78%、
+  fannkuch −2.62%、b1 −1.14%，其余 ±0.4% 内（d1 +1.07% 是 3.3ms 短用例
+  噪声，asm 相同）；nbody/spectral/matmul ≤0.2%。字符串类 b2/b3/b4/b5
+  −0.29%~+0.34%，0.321 成果保住。
+- unknown 冷路径（bench/unknown/，合成）：u1 +316%、u2 +7.3%、u3 +373%，
+  设计文档 §7.3 给出解读与后续优化目标。
+- tests/check_size.sh 仍只有原有 5 处超限，无新增超限文件；新增
+  runtime/rt_any.c 363 行（运行时文件不在 src/ 1200 行规则内）。
+
+### 分支与集成建议
+
+- 分支 **typetag**，基于 8248c21；不推 master。主树 /src/luo-proj/pyadamas
+  与主树 build 未触碰；本 worktree 用独立 build。
+- 集成顺序建议：先合 0.323 之后的性能轮，再 rebase 本条；CHANGELOG 编号按
+  实际落地顺序重排。合入前重跑：difftest → 247 → 普通+ASan 套件 → ASan
+  leak 抽查 → check_size → 26 基准 asm → abbench。若主树期间改过
+  lower_expr_ops/lower_expr_dunder/opt_dict_bump/ir.cpp 的相邻代码，重点
+  复核 RtFn 分组（新增 enum 必须在末尾）和 dict_bump 6/7 形态。
+- 风险：装箱冷路径成本（u3 最坏），以及新增的 256/1024 进程级缓存；
+  所有缓存退出时归还，ASan 已验证。设计文档 §10 的已知边界需要在语言
+  文档/用户可见说明里同步（尤其 None/bool 与嵌套具体容器）。
+
 ## [0.323] - 2026-11-19
 
 > 遗留 bug 修复轮：0.321 记录的「unknown 元素双 inc 泄漏」与 re 空匹配推进

@@ -611,6 +611,9 @@ void AsmGen::gen_rt_args(const Inst& in, RtFn fn) {
         case RtFn::PopenStdin:
         case RtFn::PopenKill:
         case RtFn::PopenTerminate:
+        case RtFn::AnyToF64:
+        case RtFn::AnyToI64:
+        case RtFn::AnyIsFloat:
             gen_rt_i1(in);
             break;
         case RtFn::ListNew:
@@ -745,6 +748,9 @@ void AsmGen::gen_rt_args(const Inst& in, RtFn fn) {
         case RtFn::DictTryGet:  // 实际在 gen_call_rt 特判发射，这里只为穷尽
             gen_rt_i4(in);
             break;
+        case RtFn::AnyNeg:
+            gen_rt_i2(in);
+            break;
         case RtFn::DictGetOr:
         case RtFn::DictRemove:
         case RtFn::RangeNew:
@@ -782,6 +788,10 @@ void AsmGen::gen_rt_args(const Inst& in, RtFn fn) {
         case RtFn::ListSort:     /* 0.312：(list*, kind, desc) */
         case RtFn::SortedList:   /* 0.312：(list*, kind, desc) */
             gen_rt_i3(in);
+            break;
+        case RtFn::AnyArith:     /* (op, a, b, desc_a, desc_b) */
+        case RtFn::AnyCmp:
+            gen_rt_i5(in);
             break;
         case RtFn::ClassNew:
         case RtFn::ListPrep:
@@ -892,6 +902,7 @@ void AsmGen::gen_rt_args(const Inst& in, RtFn fn) {
         case RtFn::MathExp2:
         case RtFn::MathExpm1:
         case RtFn::MathLog1p:
+        case RtFn::AnyFromF64:
         case RtFn::MathErf:
         case RtFn::MathErfc:
         case RtFn::MathGamma:

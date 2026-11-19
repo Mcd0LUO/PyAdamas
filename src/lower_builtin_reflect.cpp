@@ -83,6 +83,8 @@ VReg Lowerer::lower_builtin_reflect(const std::string& name, Call& c) {
                 else if (builtin == "list" || builtin == "tuple") fn = RtFn::IsSeq;
                 else if (builtin == "dict") fn = RtFn::IsDict;
                 else if (builtin == "complex") fn = RtFn::IsComplex;
+                // 0.324：float 在 unknown 里有 CPYFLOAT 标签，可精确判定。
+                else if (builtin == "float") fn = RtFn::AnyIsFloat;
                 else has_tag = false;
                 // 没有运行期类型标签的内置（int/float/bool/bytes 等）在
                 // unknown 值上无法判定：保守返回 false（tuple 的 OR 场景

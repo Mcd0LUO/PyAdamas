@@ -158,6 +158,32 @@ VReg Lowerer::class_default_str(TypePtr ty) {
 VReg Lowerer::convert_to(VReg v, TypePtr from, TypePtr to) {
     if (!to) return v;
     if (from && type_eq(from, to)) return v;
+    // ── unknown 域的进出（0.324）────────────────────────────────
+    // float 进入 unknown 时装箱成 CPYFLOAT（8 字节 payload），这样
+    // int / float / 堆指针在 unknown 里可以靠「堆探针 + kind」分开。
+    // 反向（unknown → float/int/bool/str）解盒或走保守分派。
+    // 这些分支只在静态类型是 unknown 的表达式上发射，热路径零调用。
+    if (to->kind == TyKind::Unknown && from && from->kind == TyKind::Float) {
+        VReg r = call_runtime(RtFn::AnyFromF64, t_unknown(), {v});
+        push_temp_any_heap(r);
+        return r;
+    }
+    if (from && from->kind == TyKind::Unknown) {
+        if (to->kind == TyKind::Float)
+            return call_runtime(RtFn::AnyToF64, t_float(), {v});
+        if (to->kind == TyKind::Int)
+            return call_runtime(RtFn::AnyToI64, t_int(), {v});
+        if (to->kind == TyKind::Bool)
+            return call_runtime(RtFn::TruthAny, t_bool(), {v});
+        if (to->kind == TyKind::Str) {
+            // str(unknown)：堆字符串原样、CPYFLOAT 按 double、容器按 repr、
+            // 其余按整数。与 print(unknown) 的口径一致。
+            VReg s = call_runtime(RtFn::StrAny, t_str(), {v});
+            push_temp(s);
+            st_->fresh_vregs.insert(s);
+            return s;
+        }
+    }
     // Path → str：拿底层路径字符串
     if (from && from->kind == TyKind::Path && to->kind == TyKind::Str) {
         VReg s = call_runtime(RtFn::PathStr, t_str(), {v});
@@ -238,6 +264,18 @@ VReg Lowerer::convert_to(VReg v, TypePtr from, TypePtr to) {
 VReg Lowerer::coerce(VReg v, TypePtr from, TypePtr to) {
     if (!from || !to) return v;
     if (type_eq(from, to)) return v;
+    // unknown 与 float 的互转不是机器字直通：float -> unknown 要装箱
+    // （CPYFLOAT），unknown -> float 要解盒。放在数值域判断之前，因为
+    // unknown 不属于 num 域。其余「unknown 与具体非数值类型」仍按原样
+    // 直通（指针/整数机器字），保持旧行为。
+    if (to->kind == TyKind::Unknown && from->kind == TyKind::Float)
+        return convert_to(v, from, to);
+    // **只做 float 的解盒**：unknown -> int/bool 保持裸机器字直通。
+    // 这两类目标绝大多数是下标/计数/长度（unknown 实际上是 int），
+    // 每次插一条解盒调用会把 fannkuch 这类热循环拖慢；显式 int(x)/
+    // bool(x) 在各自的内置调用点单独处理。
+    if (from->kind == TyKind::Unknown && to->kind == TyKind::Float)
+        return convert_to(v, from, to);
     auto num = [](TyKind k) { return k == TyKind::Int || k == TyKind::Bool || k == TyKind::Float; };
     if (!num(from->kind) || !num(to->kind)) return v;
     bool from_int = from->kind != TyKind::Float;

@@ -573,6 +573,15 @@ enum class RtFn : uint16_t {
     ChanRecv,              // (chan*) -> i64；heap 种类交出引用
     ChanSendF,             // (chan*, f64 v) -> void
     ChanRecvF,             // (chan*) -> f64
+    // unknown 域最小判别（runtime/rt_any.c，0.324）——只有静态类型是
+    // unknown 的表达式会用这些入口，静态类型路径零调用。
+    AnyFromF64,            // (f64) -> i64  float 装进 CPYFLOAT 盒，返回 unknown 字
+    AnyIsFloat,            // (i64) -> i64  isinstance(unknown, float)
+    AnyToF64,              // (i64) -> f64  unknown -> double（解盒或 int 提升）
+    AnyToI64,              // (i64) -> i64  unknown -> int（解盒后截断）
+    AnyArith,              // (op, a, b, desc_a, desc_b) -> i64 动态算术
+    AnyNeg,                // (a, desc_a) -> i64 动态一元负
+    AnyCmp,                // (op, a, b, desc_a, desc_b) -> i64 动态比较
 };
 
 inline const char* rt_name(RtFn f) {
@@ -589,6 +598,13 @@ inline const char* rt_name(RtFn f) {
         case RtFn::ChanRecv: return "pa_chan_recv";
         case RtFn::ChanSendF: return "pa_chan_send_f";
         case RtFn::ChanRecvF: return "pa_chan_recv_f";
+        case RtFn::AnyFromF64: return "pa_any_from_f64";
+        case RtFn::AnyIsFloat: return "pa_any_is_float";
+        case RtFn::AnyToF64: return "pa_any_to_f64";
+        case RtFn::AnyToI64: return "pa_any_to_i64";
+        case RtFn::AnyArith: return "pa_any_arith";
+        case RtFn::AnyNeg: return "pa_any_neg";
+        case RtFn::AnyCmp: return "pa_any_cmp";
         case RtFn::ListGet: return "pa_list_get";
         case RtFn::ListSet: return "pa_list_set";
         case RtFn::ListSetLen: return "pa_list_set_len";

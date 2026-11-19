@@ -532,6 +532,22 @@ private:
         call_void(RtFn::RcTemp, {v});
     }
 
+    // unknown 域的动态结果：可能是 int 也可能是堆盒，只能走保守的
+    // RcTempUnknown（运行时先按注册表确认是堆对象）。**不进 fresh_vregs**：
+    // 容器构造的 take 快路径假设值一定是堆，int 会被当指针解引用。
+    void push_temp_unknown(VReg v) {
+        ++st_->rc_pushes;
+        call_void(RtFn::RcTempUnknown, {v});
+    }
+
+    // 确定是新分配的堆对象、但静态类型是 unknown（float 装箱盒）：
+    // 与 def_heap 同口径，容器构造可以 take 走这份引用。
+    void push_temp_any_heap(VReg v) {
+        ++st_->rc_pushes;
+        call_void(RtFn::RcTempUnknown, {v});
+        st_->fresh_vregs.insert(v);
+    }
+
     void erase_mark(int block, size_t pos, VReg mark) {
         auto& ins = st_->fn->blocks[block].insts;
         if (pos < ins.size() && ins[pos].op == IrOp::CallRt &&

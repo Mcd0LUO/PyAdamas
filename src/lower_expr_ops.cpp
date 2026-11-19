@@ -3,6 +3,46 @@
 
 namespace pyadamas {
 
+// unknown 域动态算术/比较的操作码：与 runtime/rt_any.c 的 PA_ANY_* 逐字对应。
+static int any_arith_op(Tok op) {
+    switch (op) {
+        case Tok::PLUS: return 0;
+        case Tok::MINUS: return 1;
+        case Tok::STAR: return 2;
+        case Tok::SLASH: return 3;
+        case Tok::DOUBLESLASH: return 4;
+        case Tok::PERCENT: return 5;
+        default: return -1;
+    }
+}
+
+static int any_cmp_op(CmpOp op) {
+    switch (op) {
+        case CmpOp::Eq: return 0;
+        case CmpOp::Ne: return 1;
+        case CmpOp::Lt: return 2;
+        case CmpOp::Le: return 3;
+        case CmpOp::Gt: return 4;
+        case CmpOp::Ge: return 5;
+        default: return -1;
+    }
+}
+
+// 动态算术/比较的实参静态域描述符（与 rt_any.c 的 any_decode_typed 对应）。
+// 静态域已知的实参让运行时跳过堆探针；float 以位模式放进整型实参寄存器
+// （movq xmm->gpr），不改变任何代码生成形态。
+static int64_t any_desc(const TypePtr& t) {
+    if (!t || t->kind == TyKind::Unknown) return 'x';
+    switch (t->kind) {
+        case TyKind::Float: return 'f';
+        case TyKind::Str: return 's';
+        case TyKind::Int:
+        case TyKind::Bool:
+        case TyKind::None: return 'i';
+        default: return ir_is_heap(t) ? 'o' : 'i';
+    }
+}
+
 VReg Lowerer::lower_constant(Constant& c) {
     switch (c.ck) {
         case Constant::CK::None: return const_none();
@@ -251,6 +291,19 @@ VReg Lowerer::lower_binop(BinOp& b) {
         if (lt && lt->kind == TyKind::Exception) l = convert_to(l, lt, t_str());
         if (rt && rt->kind == TyKind::Exception) r = convert_to(r, rt, t_str());
     }
+    // unknown 域的动态算术：结果静态类型是 unknown 且有一侧 unknown 时，
+    // 两侧可能是 int / boxed float / str，按运行期标签分派（rt_any.c）。
+    // 静态类型已知的表达式不会进入这里，热路径零调用。
+    if (ty && ty->kind == TyKind::Unknown && (is_unknown(lt) || is_unknown(rt))) {
+        int aop = any_arith_op(b.op);
+        if (aop >= 0) {
+            VReg res = call_runtime(RtFn::AnyArith, t_unknown(),
+                                    {const_int(aop), l, r, const_int(any_desc(lt)),
+                                     const_int(any_desc(rt))});
+            push_temp_unknown(res);
+            return res;
+        }
+    }
     // int / int 的结果是 float，两个操作数都得先转；int + float 同理。
     // 放在这里做，codegen 就不用每条浮点指令都猜操作数是什么类型。
     if (ty && ty->kind == TyKind::Float) {
@@ -303,6 +356,13 @@ VReg Lowerer::lower_unary(UnaryOp& u) {
             in.args = {v};
             return def_heap(ty, std::move(in));
         }
+    }
+    // unknown 的一元负：可能是 int 也可能是 boxed float，按标签分派。
+    if (u.op == Tok::MINUS && is_unknown(opnd_ty)) {
+        VReg r = call_runtime(RtFn::AnyNeg, t_unknown(),
+                              {v, const_int(any_desc(opnd_ty))});
+        push_temp_unknown(r);
+        return r;
     }
     Inst in;
     in.op = IrOp::Un;
@@ -666,6 +726,15 @@ VReg Lowerer::lower_compare(Compare& c) {
             un.uop = UnKind::Not;
             un.a = eq;
             return def(t_bool(), std::move(un));
+        }
+        // unknown 域的动态比较：任一侧 unknown 时按运行期标签分派
+        // （int / boxed float / str 混比；静态类型已知的路径不进这里）。
+        if (is_unknown(lt) || is_unknown(rt)) {
+            int cop = any_cmp_op(op);
+            if (cop >= 0)
+                return call_runtime(RtFn::AnyCmp, t_bool(),
+                                    {const_int(cop), l, r, const_int(any_desc(lt)),
+                                     const_int(any_desc(rt))});
         }
         // 混合数值比较统一到 float：codegen 按左操作数的类型选指令
         if ((ir_is_float(lt) || ir_is_float(rt)) && is_num(lt) && is_num(rt)) {

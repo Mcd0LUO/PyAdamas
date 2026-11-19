@@ -120,8 +120,11 @@ VReg Lowerer::lower_c_lazy_call(Call& c, const std::string& symbol, VReg handle)
     in.a = handle;  // lazy==2：运行期 dlopen 句柄
     in.args = std::move(args);
     in.cargs = std::move(cargs);
-    in.ty = ckind_type(rk);
-    return def_heap(in.ty, std::move(in));
+    // 同 lower_cimport_call：类型先取出来，别在 std::move(in) 的同一实参
+    // 列表里读 in.ty（求值顺序未指定，GCC 会读到被移走的空指针）。
+    TypePtr out_ty = ckind_type(rk);
+    in.ty = out_ty;
+    return def_heap(out_ty, std::move(in));
 }
 
 }  // namespace pyadamas

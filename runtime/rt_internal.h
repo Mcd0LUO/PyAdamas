@@ -485,6 +485,16 @@ int64_t pa_complex_eq(PyAdamasComplex* a, PyAdamasComplex* b);
 int64_t pa_complex_truth(PyAdamasComplex* a);
 /* unknown 值的 Python 真值/ repr 打印（rt_core.c）。 */
 int64_t pa_truth_unknown(int64_t v);
+/* unknown 域的最小判别支持（rt_any.c，0.324）：float 装箱/拆箱 +
+   动态算术/比较。只有静态类型是 unknown 的表达式会调用这些入口。 */
+int64_t pa_any_from_f64(double v);
+int64_t pa_any_is_float(int64_t v);
+void pa_any_float_cache_shutdown(void);
+double pa_any_to_f64(int64_t v);
+int64_t pa_any_to_i64(int64_t v);
+int64_t pa_any_arith(int64_t op, int64_t a, int64_t b, int64_t da, int64_t db);
+int64_t pa_any_neg(int64_t v, int64_t dv);
+int64_t pa_any_cmp(int64_t op, int64_t a, int64_t b, int64_t da, int64_t db);
 void pa_print_any_repr(int64_t v);
 PyAdamasStr* pa_fmt_i64(int64_t v, PyAdamasStr* spec);
 PyAdamasStr* pa_fmt_bool(int64_t v, PyAdamasStr* spec);

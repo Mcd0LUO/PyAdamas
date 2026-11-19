@@ -410,6 +410,15 @@ bool ir_module_can_skip_index_maint(const IRModule& m) {
                     // 索引只读（skip maint）会让这些对象「看不见」。
                     case RtFn::CpyCall:
                     case RtFn::RcTempUnknown:
+                    // dict 的 keys/values/items 在运行时按 key_own/val_own 的
+                    // 混合种类（2）追加元素；ty=float/int 的标量会以 heap=2
+                    // 走 unknown 探针。索引关闭时探针走「16 字节对齐 + 读
+                    // marked」的 exact-RC 回退，任意 double 位模式都可能
+                    // 恰好对齐并被当指针解引用（231_float_dict 实测 SIGSEGV）。
+                    // 这些入口只放行到「索引照建」的模式。
+                    case RtFn::DictItems:
+                    case RtFn::DictValues:
+                    case RtFn::DictKeys:
                         return false;
                     default:
                         break;
@@ -475,6 +484,23 @@ bool ir_module_needs_unknown_index(const IRModule& m) {
             // RcTempUnknown / print / marshalling 探针都靠注册表，
             // 用了桥的模块必须保留索引。
             case RtFn::CpyCall:
+            // dict 的 keys/values/items 在运行时按 key_own/val_own 混合种类
+            // 以 heap=2 追加元素；值为 int/float 时这些字会被 unknown 探针
+            // 检查。索引关闭后 exact-RC 回退会把对齐的 double 位模式当指针
+            // 解引用（231_float_dict 实测 SIGSEGV）。必须保留索引。
+            case RtFn::DictItems:
+            case RtFn::DictValues:
+            case RtFn::DictKeys:
+            // 0.324 unknown 域 float 盒：创建（AnyFromF64）后要靠索引被探针
+            // 认出；解盒/动态算术/比较/真值也都要查索引。
+            case RtFn::AnyFromF64:
+            case RtFn::AnyToF64:
+            case RtFn::AnyToI64:
+            case RtFn::AnyArith:
+            case RtFn::AnyCmp:
+            case RtFn::AnyNeg:
+            case RtFn::AnyIsFloat:
+            case RtFn::RcTempUnknown:
                 return true;
             default:
                 return false;

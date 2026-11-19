@@ -77,7 +77,22 @@ void Lowerer::assign_to(Expr& target, VReg v, TypePtr vty) {
                         "starred unpacking is not supported by the code generator yet");
                     continue;
                 }
+                // 元素类型优先取**源序列**里的静态类型。模块级
+                // for k, v in d.items() 的目标变量可能因全局预绑定/join 在
+                // 符号表里停在 unknown，而源类型是 tuple[str, float]。
+                // 0.324 的 unknown->float 解盒把这个不一致暴露成数值错误
+                // （v 被当成裸 int 位模式解盒）；按源类型取元素既更精确，
+                // 也让后面的 store 直接走静态 float 路径。
                 TypePtr et = tc_.type_of(elts[i].get());
+                if (src_ty && src_ty->kind == TyKind::Tuple) {
+                    if (src_ty->variadic) {
+                        if (!src_ty->sub.empty()) et = src_ty->sub[0];
+                    } else if (i < src_ty->sub.size()) {
+                        et = src_ty->sub[i];
+                    }
+                } else if (src_ty && src_ty->kind == TyKind::List && !src_ty->sub.empty()) {
+                    et = src_ty->sub[0];
+                }
                 Inst in;
                 in.op = IrOp::IndexLoad;
                 in.a = v;

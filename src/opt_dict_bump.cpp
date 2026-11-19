@@ -76,14 +76,30 @@ bool fuse_dict_bump(IRFunction& fn) {
     bool changed = false;
     for (auto& b : fn.blocks) {
         auto& ins = b.insts;
-        for (size_t i = 0; i + 6 < ins.size();) {
+        for (size_t i = 0; i + 5 < ins.size();) {
             Inst& get = ins[i];
             Inst& add = ins[i + 1];
             Inst& ld1 = ins[i + 2];
             Inst& ld2 = ins[i + 3];
             Inst& inck = ins[i + 4];
-            Inst& incv = ins[i + 5];
-            Inst& set = ins[i + 6];
+            // 「值的 retain」是可选的：值类型是 unknown 时是 RcIncUnknown，
+            // 是 int 时根本没有 retain（int 不持有引用），dict.get 缺省值
+            // 推断后计数器的值类型就是 int —— 两种形态都要能融合。
+            size_t incv_i = SIZE_MAX;
+            size_t set_i = i + 5;
+            if (i + 6 < ins.size()) {
+                Inst& cand = ins[i + 5];
+                if ((is_rt(cand, RtFn::RcIncUnknown) || is_rt(cand, RtFn::RcInc)) &&
+                    cand.args.size() == 1 && cand.args[0] == add.dst) {
+                    incv_i = i + 5;
+                    set_i = i + 6;
+                }
+            }
+            if (set_i >= ins.size()) {
+                ++i;
+                continue;
+            }
+            Inst& set = ins[set_i];
 
             const bool match =
                 is_rt(get, RtFn::DictGetOr) && get.args.size() == 3 &&
@@ -91,8 +107,6 @@ bool fuse_dict_bump(IRFunction& fn) {
                 is_int_or_unknown(add.ty) &&
                 ld1.op == IrOp::LoadSlot && ld2.op == IrOp::LoadSlot &&
                 is_rt(inck, RtFn::RcInc) && inck.args.size() == 1 &&
-                is_rt(incv, RtFn::RcIncUnknown) && incv.args.size() == 1 &&
-                incv.args[0] == add.dst &&
                 is_rt(set, RtFn::DictSet) && set.args.size() == 3 &&
                 set.args[2] == add.dst &&
                 same_slot(fn, get.args[0], set.args[0]) &&
@@ -103,9 +117,16 @@ bool fuse_dict_bump(IRFunction& fn) {
                 continue;
             }
 
-            const Inst* allowed[7] = {&get, &add, &ld1, &ld2, &inck, &incv, &set};
-            if (!only_used_by(fn, get.dst, allowed, 7) ||
-                !only_used_by(fn, add.dst, allowed, 7)) {
+            const bool has_incv = incv_i != SIZE_MAX;
+            const Inst* allowed[7] = {&get, &add, &ld1, &ld2, &inck, &set, nullptr};
+            int nallowed = 6;
+            if (has_incv) {
+                allowed[5] = &ins[incv_i];
+                allowed[6] = &set;
+                nallowed = 7;
+            }
+            if (!only_used_by(fn, get.dst, allowed, nallowed) ||
+                !only_used_by(fn, add.dst, allowed, nallowed)) {
                 ++i;
                 continue;
             }
@@ -117,7 +138,6 @@ bool fuse_dict_bump(IRFunction& fn) {
             bump.imm = static_cast<int64_t>(RtFn::DictBump);
             bump.args = {ld1.dst, ld2.dst, get.args[2], add.b};
             bump.ty = nullptr;
-            ins[i] = std::move(get);
             // 原地改：i 位置换成 ld1，i+1 换成 ld2，i+2 换成 bump
             // 这样不用 erase/insert，索引稳定。
             Inst keep1 = std::move(ld1);
@@ -125,8 +145,9 @@ bool fuse_dict_bump(IRFunction& fn) {
             ins[i] = std::move(keep1);
             ins[i + 1] = std::move(keep2);
             ins[i + 2] = std::move(bump);
+            const size_t erase_end = has_incv ? i + 7 : i + 6;
             ins.erase(ins.begin() + static_cast<std::ptrdiff_t>(i + 3),
-                      ins.begin() + static_cast<std::ptrdiff_t>(i + 7));
+                      ins.begin() + static_cast<std::ptrdiff_t>(erase_end));
             changed = true;
             i += 3;
         }
