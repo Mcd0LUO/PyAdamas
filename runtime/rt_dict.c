@@ -639,6 +639,50 @@ void pa_set_symdiff_update(PyAdamasDict* s, PyAdamasDict* t) {
     pa_rc_dec(ks);
 }
 
+/* ── set 的非原地集合运算（`s | t` / `s & t` / `s - t` / `s ^ t`）──────
+   返回新 set，左右操作数不动。set 复用 dict（值恒 0）。 */
+PyAdamasDict* pa_set_union(PyAdamasDict* a, PyAdamasDict* b) {
+    PyAdamasDict* out = pa_dict_copy(a);
+    pa_gc_pin(out);
+    pa_dict_update(out, b);
+    pa_gc_unpin(out);
+    return out;
+}
+
+PyAdamasDict* pa_set_intersection(PyAdamasDict* a, PyAdamasDict* b) {
+    PyAdamasDict* out = pa_dict_new(a->key_kind, a->key_own, 0, a->hash_slot, a->eq_slot);
+    pa_gc_pin(out);
+    PyAdamasList* ks = pa_dict_keys(a);
+    pa_gc_pin(ks);
+    int ko = (int)a->key_own;
+    for (int64_t i = 0; i < ks->len; ++i) {
+        int64_t k = ks->data[i];
+        if (!pa_dict_contains(b, k)) continue;
+        pa_own_inc(ko, k);
+        pa_dict_set(out, k, 0);
+    }
+    pa_gc_unpin(ks);
+    pa_rc_dec(ks);
+    pa_gc_unpin(out);
+    return out;
+}
+
+PyAdamasDict* pa_set_difference(PyAdamasDict* a, PyAdamasDict* b) {
+    PyAdamasDict* out = pa_dict_copy(a);
+    pa_gc_pin(out);
+    pa_set_difference_update(out, b);
+    pa_gc_unpin(out);
+    return out;
+}
+
+PyAdamasDict* pa_set_symdiff(PyAdamasDict* a, PyAdamasDict* b) {
+    PyAdamasDict* out = pa_dict_copy(a);
+    pa_gc_pin(out);
+    pa_set_symdiff_update(out, b);
+    pa_gc_unpin(out);
+    return out;
+}
+
 PyAdamasDict* pa_dict_copy(PyAdamasDict* src) {
     PyAdamasDict* out = pa_dict_new(src->key_kind, src->key_own, src->val_own,
                                   src->hash_slot, src->eq_slot);

@@ -505,10 +505,16 @@ void Lowerer::print_dict(VReg v, TypePtr ty, bool to_file, int line, int col) {
     if (!ty) ty = t_unknown();
     TypePtr kt = ty->sub.empty() ? t_unknown() : ty->sub[0];
     TypePtr vt = ty->sub.size() > 1 ? ty->sub[1] : t_unknown();
-    // 元素类型未知（异构容器）时没法确定怎么打印每个值：运行时又不带类型标签，
-    // 分不清 float 和 int。与其打错，不如保持原来的占位符。空的不受影响。
+    // 元素类型未知（异构容器）：交给运行时的通用 repr（堆探针分派）。
+    // int/str 混合能正确打印（0.322 修 `<dict object>`）；unknown 里分不开
+    // int/float，float 值仍按位模式打印——项目既有的类型标签边界。
     if (kt->kind == TyKind::Unknown || vt->kind == TyKind::Unknown) {
-        print_empty_or_placeholder(v, "{}", "<dict object>", to_file);
+        VReg s = call_runtime(RtFn::ReprDictAny, t_str(), {v});
+        push_temp(s);
+        if (to_file)
+            call_void(RtFn::FileWrite, {load_slot(print_file_slot_, t_file()), s});
+        else
+            call_void(RtFn::PrintStr, {s});
         return;
     }
     print_write("{", to_file);

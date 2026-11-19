@@ -821,8 +821,9 @@ void AsmGen::gen_block(const Block& b) {
         std::vector<uint8_t> fp_after;
         if (!fp_promoted_slots_.empty() && !fp_live_off_ &&
             cur_block_ >= 0 && static_cast<size_t>(cur_block_) < fp_live_out_.size()) {
-            fp_after.assign(b.insts.size(), 0);
-            std::vector<uint8_t> fp_alias_use(b.insts.size(), 0);
+            const size_t kf = fp_promoted_slots_.size();
+            fp_after.assign(b.insts.size() * kf, 0);
+            std::vector<uint8_t> fp_alias_use(b.insts.size() * kf, 0);
             if (slot_loc_.empty()) {
                 for (int k = 0; k < static_cast<int>(b.insts.size()); ++k) {
                     const Inst& x = b.insts[static_cast<size_t>(k)];
@@ -830,7 +831,7 @@ void AsmGen::gen_block(const Block& b) {
                     if (x.idx < 0 || x.idx >= static_cast<int>(slot_fpidx_.size()))
                         continue;
                     const int fi = slot_fpidx_[static_cast<size_t>(x.idx)];
-                    if (fi < 0 || fi >= 8) continue;
+                    if (fi < 0 || static_cast<size_t>(fi) >= kf) continue;
                     // 别名只发生在单次使用上；跨块值/多次使用的值，load
                     // 会真的写寄存器或内存，寄存器此后无人读。
                     if (x.dst >= use_count_.size() || use_count_[x.dst] != 1 ||
@@ -846,23 +847,24 @@ void AsmGen::gen_block(const Block& b) {
                                                    stv->second.end(), k);
                         if (it != stv->second.end() && *it < us->second) continue;
                     }
-                    fp_alias_use[static_cast<size_t>(us->second)] |=
-                        static_cast<uint8_t>(1u << fi);
+                    fp_alias_use[static_cast<size_t>(us->second) * kf +
+                                 static_cast<size_t>(fi)] = 1;
                 }
             }
-            uint8_t cur = fp_live_out_[static_cast<size_t>(cur_block_)];
+            std::vector<uint8_t> cur = fp_live_out_[static_cast<size_t>(cur_block_)];
             for (int k = static_cast<int>(b.insts.size()) - 1; k >= 0; --k) {
-                fp_after[static_cast<size_t>(k)] = cur;
-                cur = static_cast<uint8_t>(cur |
-                                           fp_alias_use[static_cast<size_t>(k)]);
+                const size_t row = static_cast<size_t>(k) * kf;
+                std::memcpy(&fp_after[row], cur.data(), kf);
+                for (size_t j = 0; j < kf; ++j)
+                    if (fp_alias_use[row + j]) cur[j] = 1;
                 const Inst& x = b.insts[static_cast<size_t>(k)];
                 if (x.idx >= 0 && x.idx < static_cast<int>(slot_fpidx_.size())) {
                     int fi = slot_fpidx_[static_cast<size_t>(x.idx)];
-                    if (fi >= 0) {
+                    if (fi >= 0 && static_cast<size_t>(fi) < kf) {
                         if (x.op == IrOp::StoreSlot)
-                            cur = static_cast<uint8_t>(cur & ~(1u << fi));
+                            cur[static_cast<size_t>(fi)] = 0;
                         else if (x.op == IrOp::LoadSlot)
-                            cur = static_cast<uint8_t>(cur | (1u << fi));
+                            cur[static_cast<size_t>(fi)] = 1;
                     }
                 }
             }
@@ -933,9 +935,9 @@ void AsmGen::gen_block(const Block& b) {
 
             if (!fp_after.empty()) {
                 fp_spill_mask_.assign(fp_promoted_slots_.size(), 0);
-                uint8_t m = fp_after[i];
+                const size_t row = i * fp_promoted_slots_.size();
                 for (size_t j = 0; j < fp_spill_mask_.size(); ++j)
-                    fp_spill_mask_[j] = static_cast<char>((m >> j) & 1);
+                    fp_spill_mask_[j] = static_cast<char>(fp_after[row + j]);
                 fp_mask_valid_ = true;
             }
             // **split 模式的块出口 spill（必须插在终止指令之前）。**

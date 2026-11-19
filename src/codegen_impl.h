@@ -233,8 +233,15 @@ private:
     // SysV 下 xmm8–15 是 caller-saved，call 会破坏它们。
     std::vector<int> fp_promoted_vregs_;
     std::vector<int> slot_fpidx_;      // slot → fp_promoted_slots_ 下标
-    std::vector<uint8_t> fp_live_in_;  // nb 个块
-    std::vector<uint8_t> fp_live_out_;
+    // 块级活跃掩码：**每个提升槽一个字节**（不是位图）。
+    //
+    // 原来这里是 uint8_t 位图，隐含「提升槽 ≤ 8 个」的假设 —— 那是
+    // 「整函数提升 + 寄存器不复用」时代的口径。R4 的线性扫描会按活跃
+    // 区间复用寄存器（13 个浮点槽跑在 8 个 xmm 上是常态），提升槽数
+    // 可以超过 8；位图第 8 位之后静默丢失，调用点不 spill 被调方要踩
+    // 的槽（0.322 的 N19b 余半：amortize 的 pay 读成 0）。
+    std::vector<std::vector<uint8_t>> fp_live_in_;   // [块][提升槽]
+    std::vector<std::vector<uint8_t>> fp_live_out_;
 
     // ── 全局寄存器分配（R1：整型槽的块级活跃性）──────────────────
     // slot_live_in_[b] / slot_live_out_[b] 是第 b 块入口/出口仍活跃的

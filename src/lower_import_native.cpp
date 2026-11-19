@@ -1,6 +1,8 @@
 // lower_import_native.cpp —— 标准库原生调用：random/popen/itertools
 #include "lower_impl.h"
 
+#include "re_groups.h"
+
 namespace pyadamas {
 
 VReg Lowerer::lower_random_extra(const std::string& member, Call& c) {
@@ -303,6 +305,19 @@ VReg Lowerer::call_native(const std::string& module, const std::string& member, 
             rc_inc(v);
             push_temp(v);
         }
+        return v;
+    }
+    // re.findall 的返回类型随捕获组数变化：字面量模式且 >= 2 组时每个
+    // 元素是 tuple[str, ...]（CPython 语义），走专用运行时入口；其余保持
+    // 旧的 list[str] 口径（动态模式 / 单组 / 无组）。
+    if (module == "re" && member == "findall" && !c.args.empty() &&
+        re_literal_group_count(c.args[0].get()) >= 2) {
+        std::vector<VReg> args = bind_args(c, info, nullptr);
+        TypePtr rt = tc_.type_of(&c);
+        if (!rt || rt->kind == TyKind::Unknown)
+            rt = mk_list(mk_tuple(std::vector<TypePtr>{}));
+        VReg v = call_runtime(RtFn::RegexFindAllGroupsStr, rt, std::move(args));
+        if (ir_is_heap(rt)) push_temp(v);
         return v;
     }
     std::vector<VReg> args = bind_args(c, info, nullptr);

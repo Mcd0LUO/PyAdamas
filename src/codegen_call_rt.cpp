@@ -468,6 +468,7 @@ void AsmGen::gen_rt_args(const Inst& in, RtFn fn) {
         case RtFn::HandlerLeave:
         case RtFn::HandlerDiscard:
         case RtFn::ExcMatches:
+        case RtFn::ExcValueTypeName:
         case RtFn::ExcValueArgs:
         case RtFn::ExcValueStr:
         case RtFn::ExcValueCause:
@@ -672,6 +673,7 @@ void AsmGen::gen_rt_args(const Inst& in, RtFn fn) {
         case RtFn::SetEq:
         case RtFn::DictGetOpt:
         case RtFn::RangeGet:
+        case RtFn::ReprDictAny:
         case RtFn::ReprTuple:
         case RtFn::RangeContains:
         case RtFn::RangeEq:
@@ -726,6 +728,7 @@ void AsmGen::gen_rt_args(const Inst& in, RtFn fn) {
             break;
         case RtFn::FileSeek:
         case RtFn::RegexSearch:
+        case RtFn::RegexFindAllGroupsStr:
         case RtFn::RegexFindAllStr:
         case RtFn::RegexFindIterStr:
         case RtFn::RegexSplit:
@@ -802,6 +805,10 @@ void AsmGen::gen_rt_args(const Inst& in, RtFn fn) {
         case RtFn::DictUpdate:
         case RtFn::ListExtend:
         case RtFn::ListInplaceRepeat:
+        case RtFn::SetUnion:
+        case RtFn::SetIntersect:
+        case RtFn::SetDifference:
+        case RtFn::SetSymDiff:
         case RtFn::SetIntersectUpdate:
         case RtFn::SetDifferenceUpdate:
         case RtFn::SetSymdiffUpdate:

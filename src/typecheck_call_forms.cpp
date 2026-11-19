@@ -1,6 +1,8 @@
 // typecheck_call_forms.cpp —— call 按被调表达式形态拆分
 #include "typecheck.h"
 
+#include "re_groups.h"
+
 #include "module.h"
 
 namespace pyadamas {
@@ -250,7 +252,22 @@ TypePtr TypeChecker::call_attr(Attribute& a, Call& c) {
                     return t_unknown();
                 }
                 auto mt = it->second;
-                if (mt && mt->kind == TyKind::Func) return check_args(mt->fn, c);
+                if (mt && mt->kind == TyKind::Func) {
+                    // re.findall：字面量模式有 >= 2 个捕获组时返回
+                    // list[tuple[str, ...]]（CPython 口径）。参数检查照走。
+                    if (mod->builtin && mod->name == "re" && a.attr == "findall" &&
+                        !c.args.empty()) {
+                        int ng = re_literal_group_count(c.args[0].get());
+                        if (ng >= 2) {
+                            check_args(mt->fn, c);
+                            std::vector<TypePtr> elems;
+                            elems.reserve(static_cast<size_t>(ng));
+                            for (int k = 0; k < ng; ++k) elems.push_back(t_str());
+                            return mk_list(mk_tuple(std::move(elems)));
+                        }
+                    }
+                    return check_args(mt->fn, c);
+                }
                 for (auto& arg : c.args) expr(*arg);
                 for (auto& kw : c.keywords) expr(*kw.value);
                 err(c.line, c.col, "module attribute is not callable");

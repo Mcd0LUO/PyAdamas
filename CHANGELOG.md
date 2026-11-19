@@ -4,6 +4,53 @@
 
 早期阶段没有逐条留痕，按阶段归纳；0.4 之后逐条记录。
 
+## [0.322] - 2026-11-19
+
+> bugfix2 分支（基于 cedca8c / 0.320），与主树性能轮并行开发。性能轮 0.321
+> （86d9c6b）改的是 runtime/rt_core.c（str/bytes 叶子 GC 记账）+ rt_file.c +
+> 新增 tests/run/240；本批改 rt_re.c / rt_dict.c / rt_str.c / rt_exc.c 与
+> src/codegen_* / lower_* / typecheck_* / stdlib/csv.py。**源码无共同文件**
+> （rt_str.c 本批只在 pa_repr_tuple 前追加新函数，0.321 未动它），rebase 的
+> 唯一冲突点是 CHANGELOG 顶部的插入位置（0.321 与 0.322 相邻），按落地顺序
+> 排列即可。
+
+### 正确性修复（P0 崩溃/误编译）：N19b 浮点副本槽、生成器表达式元素类型、csv 混合行、re 零宽量化
+
+- **N19b 余半（O2 下 amortize 循环把 pay 读成 0，静默误编译；基线 2aae2ac 同复现）**：N19a（0.314）只补了「别名 load 的 use 点」，没动掩码本身的宽度。**根因**：调用点浮点 spill 掩码 `fp_live_in_/out_`、每指令 live-after 掩码都是 `uint8_t` 位图（每提升槽一位），隐含「提升槽 ≤ 8」的假设 —— 那是「整函数提升 + 寄存器不复用」时代的口径。R4 的线性扫描按活跃区间**复用** xmm8-15 后，提升槽数可以超过 8（amortize 13 个浮点槽跑在 8 个 xmm 上）；位图第 8 位之后静默丢失（`1u << fi` 截断/移位为 0），调用点不 spill 被调方要踩的槽。被内联的 `monthly_payment` 里 `r` 因此被 `pa_math_pow` 破坏，外层 `pay` 变成 0。**修**：三处掩码全部改成「每提升槽一字节」的 `vector`（`fp_live_in_/out_` 为 [块][提升槽]，live-after 为 [指令][提升槽]，alias-use 扫描同步），`fi` 不再限制 < 8；溢写/重读仍只处理 mask 置位的槽。≤ 8 个提升槽的函数生成的汇编逐字节不变（见验证）。
+- **生成器表达式元素类型丢浮点**：`for v in (x for x in list[float])` 打印 double 位模式、`sum(x for x in list[float])` 按 int 累加。**根因**：合成生成器函数靠单态化回填形参类型，回填后要等 worklist 末尾才刷新调用点类型；但 `for` 的循环变量在第一次检查时已经按 `Generator[unknown]` 定型，之后再没人更新它（`v` 的符号停在 unknown）。**修**：调用点识别 `__pyadamas$gen_*` 且 `sig_dirty` 时**同步重查**合成函数（`TypeChecker::recheck_synth_gen`，与 worklist 同样的作用域/owner 保存恢复），拿到最终 `Generator[T]` 后再返回，`for` 变量因此按 T 定型。
+- **csv.writer 收 [str, int] 混合行段错误**：`writerow(list[str])` 收到 `list[unknown]`（混合字面量）时按 str 指针读 int 元素，`delimiter in field` 直接 SIGSEGV。**修**：stdlib/csv.py 的 `writerow` 改收 `list[object]`，每字段 `str(row[i])`（unknown→str 走运行时 `pa_str_any`：堆字符串原样、int 十进制，与 CPython 的 `str()` 口径一致）；`writerows` 同步 `list[list[object]]`。现在 `w.writerow(["x", 1])` 与 CPython 一样写 `x,1`。**已知边界**：unknown 里分不开 float（0.317 记录的类型标签缺失），混合行里的 float 会按位模式字符串化 —— 原来是段错误，现在是「浮点已知限制」，纯 int/str 混合行完全正确。
+- **re 量化零宽 SIGSEGV（`re.findall(r'\b+', 'ab')`，base/current 同崩）**：两条根因。① 解析器接受直接量化零宽锚点（`\b+`/`\b*`/`\b?`/`\b{2}`/`^+`…），CPython 在 _parser 里对 `AT` 一律报 `nothing to repeat`；这些模式在 VM 的 plus 循环里体不推进位置，形成无限递归 → 栈溢出。② 组形态 `(\b)+` / `(?:\b)+` / `(a*)+` / `(?=a)+` 是**合法**的（CPython 允许），但循环体同样可以匹配空串，plain SPLIT 没有「无推进」保护。**修**：解析器按 CPython 口径拒绝直接量化锚点（N_BOL/N_EOL/N_WORDB/N_BOS/N_EOS/N_EMPTY，含 `{m,n}` 形式），非捕获组/内联标志组保留一层 `N_GROUP(group=-1)` 包装（不产生 SAVE，让 `(?:\b)+` 合法，与 CPython 的量词 item 语义一致）；编译期为 N_STAR/N_PLUS 的 SPLIT 打标记（`ch=1` 贪婪 / `ch=2` 惰性），VM 在「同一循环、同一位置再次进入」时判定本轮体匹配空串，停止重复走出口（等价 CPython repeat 的 no-progress break）；贪婪/惰性分支顺序与原 SPLIT 逐条一致。RE_LOOP 紧扫快路径不读 ch，语义不变。
+- **附带修复（同批踩到的既有汇编失败）**：`2.5 if c else 3` 这类「分支类型不同、整体类型是 float」的 IfExp，else 分支的 int 直接落进 float 借槽，生成 `movq $3, %xmm8`（汇编器 operand type mismatch，整个程序编译失败）。**修**：`lower_ifexp` 两个分支按表达式类型 `coerce` 后落槽。
+
+### 语义修复（P1）
+
+- **re 多捕获 findall 返回 tuple**：`re.findall(r'(a)(b)', s)` 原来返回整段匹配字符串；CPython 在 >= 2 个捕获组时每个元素是各组匹配串的元组（未参与的组为空串）。**修**：模式是**字面量**且扫描出 >= 2 组时，typecheck 返回 `list[tuple[str, ...]]`，lowering 走新的 `pa_re_findall_groups_str`（每组一个 str，`pa_list_new + pa_list_append` 组元组，GC pin 住中间元组）。**已知边界**：动态模式（变量/f-string）与 `Pattern.findall` 仍维持旧的 `list[str]` 口径（返回整段匹配）—— 静态类型与运行时行为保持一致，不会像「运行时一律 tuple」那样把 tuple 指针当 str 读；要修需要 Regex 类型携带组数，另立一项。
+- **type(e).__name__ 恒为 Exception**：`except Exception as e` 里 `type(e)` 的类名是编译期常量（静态类型是基类 Exception），拿不到实际子类。**修**：静态类型是 Exception 时，`type(e)` 求值 e 后调用新的 `pa_exc_value_type_name(e)`（`PyAdamasExcValue->type` 就是运行时真实类名），仍按 TypeObj 参与后续 `__name__`/`<class '...'>` 打印；非异常值路径不变。参数在 codegen 的 RtFn 分派里属于 1 参数组（i1），不能放错到 0 参数组（会读到上一个调用的残留寄存器 —— 本批初版就踩过）。
+- **异构 dict repr 仍打 `<dict object>`**：`{"a": 1, "b": "x"}` 的静态类型是 `dict[str, unknown]`，print_dict 对 unknown 值直接打占位符。**修**：新增运行时 `pa_repr_dict_any` / `pa_repr_any`（rt_str.c，堆探针递归：str 走 `pa_repr_str` 带引号、list/dict 递归、CPYFLOAT 按 double、非堆按 int），lower_print 对未知元素的 dict 调用它，stdout 与 `print(file=...)` 两条路径都走；空 dict 仍打 `{}`。**已知边界**：unknown 里 float/int 无标签（0.317 记录的固有边界），异构 dict 里的 float 值仍按位模式打印。
+- **非原地集合运算 `s | t` / `s & t` / `s - t` / `s ^ t` 报「后端不支持」**：0.315 只做了原地 `|=`/`&=`/`-=`/\^=`。**修**：新增 `pa_set_union` / `pa_set_intersection` / `pa_set_difference` / `pa_set_symdiff`（rt_dict.c；set 复用 dict，返回新 set，左右操作数不动，键按 key_own 补引用）+ 四个 RtFn + `lower_expr_ops` 的 set×set 分派（VBAR/AMPER/MINUS/CIRCUMFLEX）。
+
+### P2（评估后不做，记录绕行）
+
+- **statistics.mean 精确求和**：CPython 3.12+ 的 `statistics.mean` 用 `Fraction` 做**精确有理数**累加再除以 n（`mean([0.1,0.2,0.3])` = 0.2）。对齐需要大整数/有理数（double 的分母可达 2^1074，中间分子远超 int64），PyAdamas 只有 int64；`math.fsum(xs)/len(xs)` 也不够（该例仍给 0.19999999999999998）。代价是引入任意精度整数（或专门的精确有理数累加器），超出本批范围，**未改代码**。绕行：对逐位一致性有要求时用整数/定点数据（如 daily 语料的「金额用 int 分」），或接受 1 ulp 差异。
+
+### 回归用例
+
+- 新增 `tests/run/245_regressions.py`（先对拍 CPython 3.14 再钉 expect，O0/O1/O2 全一致；64 行输出）：csv 混合行（字面量 `["x",1]`、`list[object]` 变量、writerows、默认 CRLF/自定义行终止符）、re 零宽（`\b+`/`\b*`/`\b{2}` 被拒；`(\b)+`/`(?:\b)+`/`(?:\b)*`/`(a*)+`/`(?=a)+`/`(?<=a)+`/`(\b|b)`/惰性空循环）、findall 多捕获（2/3 组、可选组未参与、for 解包、`list[tuple[str,str]]` 注解、0/1 组对照）、`type(e).__name__`（ZeroDivisionError/KeyError/IndexError/ValueError/具体类捕获）、异构 dict repr（嵌套 list/dict、空 dict、`print(..., file=)`）、集合四种非原地运算（int/str/空集/操作数不变）、生成器表达式 float（for/sum/推导式）、N19b amortize 全量行 + monthly_payment、IfExp int→float 分支。
+
+### 验证
+
+- difftest **236 / 0**。
+- 普通套件 **254 ran ok / EXIT=0**；ASan 套件 **254 ran ok / EXIT=0**（`PYADAMAS_TEST_JOBS=8`）。180_codepoint_perf 是 wall-clock 用例，并行跑套件时偶发 `gen_slope_ok False`；单独跑 2/2 通过，非本批回归。
+- ASan `detect_leaks=1` 抽查 245_regressions / 13_gc / 236_fp_spill_call / 237_rc_container_ops 全干净（无 leak/ERROR 输出）。
+- 0.271 oracle 语料：35 条差异**全为时代差**（201-229 共 22 例 oracle 编译不了、206 oracle 侧 SIGSEGV 为既有现象、230/231/232/236/237/238/239/245 新用例、47/66/162/185 是 0.313-0.317 自身修复的 expect 变更），无意外差异。
+- `tests/check_size.sh` 仍只有原有 5 处超限（codegen_regalloc.cpp / driver_build.cpp / ir_ops.h / lower_impl.h / typecheck_types.h），无新增超限文件；新增 `src/re_groups.h` 59 行。
+- 浮点热路径**中性**：以 cedca8c 独立 worktree 构建基线，对 nbody / spectral_norm / matmul + realistic 六案（queue_sim / str_build / rec_memo / obj_dispatch / dict_wordfreq / sort_struct）逐案 `pyadamas asm -O2` 比较，生成汇编 **cmp 逐字节相同**（≤ 8 提升槽的函数掩码宽度改造不产生任何指令差异），因此未再跑 abbench。
+
+### 与主树性能轮的并行说明
+
+- 本批改 `runtime/rt_re.c`（+134 行）、`rt_dict.c`（+44）、`rt_str.c`（+102，纯追加）、`rt_exc.c`（+6）、`rt_internal.h`、`src/codegen_block/regalloc/impl`、`src/lower_*`、`src/typecheck_*`、`stdlib/csv.py`；0.321 性能轮改 `rt_core.c` / `rt_file.c`。**源码无共同文件**（rt_str.c 未被 0.321 触碰），rebase 冲突面只有 CHANGELOG 顶部条目顺序；master 新增的 tests/run/240 与本批 245 不冲突。
+- 集成建议：性能轮落地后 `git rebase master`；CHANGELOG 条目按实际落地顺序重编号（本条预留 0.322）；若性能轮先到 0.322，本条顺延。回归按「difftest → 245 → 普通+ASan 套件 → oracle 语料 → check_size → asm 中性对比」重跑一遍。
+
 ## [0.321] - 2026-11-19
 
 ### 性能：str/bytes 索引叶子 —— 字符串脚本 RC/GC 记账优化（日常字符串脚本合计 −11.8%）
