@@ -4,6 +4,19 @@
 
 早期阶段没有逐条留痕，按阶段归纳；0.4 之后逐条记录。
 
+## [0.313] - 2026-11-19
+
+### 正确性修复：float 值 dict 的 get/下标读回损坏（fixdict 分支，与主树 0.312 元组排序修复并行）
+
+> 并行说明：本条在独立 worktree 的 fixdict 分支（基于 e855662/0.311）完成，编号 0.313 预留；
+> 主树另一代理的 0.312（元组排序）落地后 rebase 到其之上，条目顺序按落地先后调整。
+
+- **现象（O0/O1/O2 同病）**：`d: dict[str,float]={}; d["x"]=1.5` 后 `d.get("x",0.0)` 返 0.0（存在键返默认值）；非字面量 float 经下标「存储后读回损坏」（`lat_sum[path]=lat_sum[path]+lat` 累加失效，读回 0/-nan/垃圾小浮点）；`pop`/`set.pop` 读回垃圾。字面量初始化 dict 的直接读+算术「看似正常」只是寄存器残留恰好等于该值。int 值 dict 完全正常。
+- **根因（单一，读路径）**：dict 取值运行时签名统一 `int64_t pa_dict_*(...)`——float 值按 IEEE-754 位模式存在 `entry.val`、原样从 **%rax** 返回；而 `gen_call_rt`（src/codegen_call.cpp）对静态类型 float 的结果一律按 double 读 **%xmm0**。`raw_ret` 白名单此前只有 DictKeyAt/JsonLoads（同款 bug 的两处前科，见该处注释），dict 取值全家漏网。于是：① get 的 const.float 默认值经 %xmm0 物化，调用后 %xmm0 恰好还是它 → 「存在键也返默认值」；② 下标读回的是 %xmm0 残留（上次浮点物化/运行时调用的 leftovers）→ 读回 0/-nan/垃圾。**存储路径逐位正确**（DictSet 实参走 movq 位模式；O2 融合 DictTryGet 由运行时 movq 直写帧槽、load.slot 按位读回，实测本来就正确）——「存储损坏」实为读损坏喂给累加再存储的二次污染（O0/O1 无融合，累加循环因此把垃圾写回表；O2 融合路径的累加本身正确，坏的是融合外的 DictGet 读）。typecheck 对 dict[str,float] 的 get 返回类型推断正确（float），无需改。
+- **修复（一处，+16/−1 行）**：`raw_ret` 白名单补齐 dict 取值全家：DictGet（下标读/setdefault）、DictGetOr（get 带默认）、DictGetOpt（get 单参，ty=Optional 实为防御性纳入）、DictPop（pop）、DictPopLast（set.pop）。float 结果走既有 `movq %rax,%xmm0` + move_fp 落位；非 float 结果 movq %rax 与原行为逐位相同（int dict 零影响）。opt_dict_bump 只匹配 int/unknown 加法，float 不融合，无交集。
+- **验证**：新增 tests/run/231_float_dict.py（get 存在/缺失/默认、非字面量默认、单参 get 返 None、非字面量 float 下标存储读回（含后续算术改 xmm0 残留）、contains+get 与 get 默认值两种累加循环、float 覆盖、推导/拷贝、pop/setdefault、values/items 迭代、跨函数借用读、defaultdict(float)、float 键、set[float].pop 成员资格、int dict 对照、40 键 reindex 大表、f-string 格式化），先对拍 CPython 再钉 expect，O0/O1/O2 全一致。difftest **227/0**（Debug 与 Release 各一遍）；Release 普通与 ASan 套件各 **245 ran ok / EXIT=0**；ASan detect_leaks=1 抽查 231/13_gc/88_defaultdict 全干净（--asan 插桩确认、输出与 expect 一致）；0.271 oracle 语料零意外差异（244 文件：201-229 共 23 例 oracle 编译 rc 差、206 oracle SIGSEGV 为 0.303 新增用例的时代差、231 oracle 带本 bug 输出差——均已知预期，其余逐字节一致）。Debug（-O0 dev）套件 118/154 两失败为既有 Debug 断言（0.308 已记录、另票），已在**未改动的基线 Debug 构建**上复现确认与本轮无关；180_codepoint_perf 负载敏感，Release 套件（含 ASan）内通过，Debug 低并发单跑亦过。
+- **已知边界（不在本轮）**：`d.get(k)` 单参对「存储的 0.0/0」与「缺失返 None」不可区分（None 就是 0 的既有表示设计，int dict 同款）；`d.get(k, 3)` 的 int 默认值按静态值类型转 float（CPython 原样返回 int）——两者均为先于本轮的语义设计，非损坏。
+
 ## [0.311] - 2026-11-19
 
 ### 编译吞吐：直调 as/ld（build 全程 −9.4%，累计对 0.309 −11.6%）
