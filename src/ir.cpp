@@ -501,6 +501,14 @@ bool ir_module_needs_unknown_index(const IRModule& m) {
             case RtFn::AnyNeg:
             case RtFn::AnyIsFloat:
             case RtFn::RcTempUnknown:
+            // P3 tag 版入口：tag==UNK 回退探针，同样依赖索引。
+            case RtFn::AnyArithT:
+            case RtFn::AnyCmpT:
+            case RtFn::AnyNegT:
+            case RtFn::AnyIsFloatT:
+            case RtFn::AnyToF64T:
+            case RtFn::AnyToI64T:
+            case RtFn::AnyLoadTag:
                 return true;
             default:
                 return false;

@@ -361,3 +361,255 @@ int64_t pa_any_cmp(int64_t op, int64_t a, int64_t b, int64_t desc_a, int64_t des
         default: return 0;
     }
 }
+
+/* ══════════════════════════════════════════════════════════════════
+   P3 第一阶段（0.327）：shadow tag 跟值走 + float 盒原位复用。
+   设计见 docs/p3-tagged-union-design.md。要点：
+     * 值仍是旧 unknown i64（float 仍装箱），tag 是 RC/分派快路径的判据；
+       tag==UNK(0) 一律回退上面的探针路径 —— 正确性不依赖 tag 传播完备。
+     * 只有「封闭活跃域」模块（含动态算术/比较，codegen 门控）才会调这些
+       入口；静态已知路径与 26 个热基准不产生任何调用。
+   ══════════════════════════════════════════════════════════════════ */
+
+/* tag 编码：与 src/codegen_impl.h 的 PaTag 常量逐字对应。
+   堆 ⇔ tag>=3。FRAW 是「静态 float 实参的裸位模式」（未装箱），非堆。 */
+enum {
+    PA_TAG_UNK  = 0,
+    PA_TAG_INT  = 1,
+    PA_TAG_FRAW = 2,
+    PA_TAG_FBOX = 3,
+    PA_TAG_STR  = 4,
+    PA_TAG_HEAP = 5,
+};
+
+/* 双字返回：SysV 下 {i64,i64} 按 INTEGER/INTEGER 分类，v 进 %rax、tag 进
+   %rdx —— 生成代码按这个约定落盘（codegen_call_rt.cpp）。
+   PaAnyPair 定义在 rt_internal.h（此处勿重复 typedef，匿名 struct 会冲突）。 */
+
+/* 按 tag 解码。tag 健全性由传播规则保证（设计 §3.3）：>=3 必为活堆指针，
+   可以直接解引用头/kind，不需要探针。UNK 回退 any_decode（探针）。 */
+static void any_decode_tag(int64_t v, int64_t tag, AnyVal* o) {
+    o->i = v;
+    o->f = 0.0;
+    o->s = NULL;
+    switch (tag) {
+        case PA_TAG_INT:
+            o->kind = ANY_INT;
+            return;
+        case PA_TAG_FRAW:
+            o->kind = ANY_FLOAT;
+            memcpy(&o->f, &v, sizeof o->f);
+            return;
+        case PA_TAG_FBOX:
+            o->kind = ANY_FLOAT;
+            memcpy(&o->f, (void*)(uintptr_t)v, sizeof o->f);
+            return;
+        case PA_TAG_STR:
+            o->kind = ANY_STR;
+            o->s = (PyAdamasStr*)(uintptr_t)v;
+            return;
+        case PA_TAG_HEAP: {
+            /* 位图/容器只知道「是堆」，种类读头（一次加载，免探针）。 */
+            PyAdamasRc* h = (PyAdamasRc*)(uintptr_t)((uint64_t)v - (uint64_t)PYADAMAS_RC_HDR);
+            if (h->kind == PYADAMAS_RC_CPYFLOAT) {
+                o->kind = ANY_FLOAT;
+                memcpy(&o->f, (void*)(uintptr_t)v, sizeof o->f);
+            } else if (h->kind == PYADAMAS_RC_STR) {
+                o->kind = ANY_STR;
+                o->s = (PyAdamasStr*)(uintptr_t)v;
+            } else {
+                o->kind = ANY_OTHER;
+            }
+            return;
+        }
+        default:
+            any_decode(v, o);
+            return;
+    }
+}
+
+/* i64 -> tag：容器/字段等无 tag 来源的 unknown 字，一次探针 + kind 得到
+   tag（比「每次使用都探针」少）。非堆一律 INT（unknown 域里 float 已装箱，
+   裸位模式不会从这些来源出现）。 */
+int64_t pa_any_load_tag(int64_t v) {
+    if (!pa_unknown_is_heap(v)) return PA_TAG_INT;
+    PyAdamasRc* h = (PyAdamasRc*)(uintptr_t)((uint64_t)v - (uint64_t)PYADAMAS_RC_HDR);
+    if (h->kind == PYADAMAS_RC_CPYFLOAT) return PA_TAG_FBOX;
+    if (h->kind == PYADAMAS_RC_STR) return PA_TAG_STR;
+    return PA_TAG_HEAP;
+}
+
+/* float 盒原位复用（设计 §4）：结果应为 float、reuse_ok（codegen 已证明
+   该实参就是即将被结果覆盖的槽的当前值）、实参 tag==FBOX（tag 健全性保证
+   可安全解引用）、盒 rc==1（唯一持有者就是那个槽；常量缓存盒/列表共享盒
+   rc>=2 一律不复用）→ 原位写新 double，返回同指针并 rc++（调用方拿独立
+   一份，槽的那份不动）。引用计数证明见设计 §4。 */
+static int64_t any_reuse_float_box(int64_t v, int64_t tag, double d, int64_t reuse_ok) {
+    if (!reuse_ok || tag != PA_TAG_FBOX) return 0;
+    if (pa_rc_stats_on_fast || gc_sweeping) return 0;
+    PyAdamasRc* h = (PyAdamasRc*)(uintptr_t)((uint64_t)v - (uint64_t)PYADAMAS_RC_HDR);
+    if (h->kind != PYADAMAS_RC_CPYFLOAT || h->rc != 1) return 0;
+    memcpy((void*)(uintptr_t)v, &d, sizeof d);
+    h->rc = 2; /* 槽的 1 + 产生者的 1 */
+    return v;
+}
+
+static PaAnyPair any_pair_i64(int64_t v) { PaAnyPair p = {v, PA_TAG_INT}; return p; }
+static PaAnyPair any_pair_f64(double d) {
+    PaAnyPair p = {any_float_box(d), PA_TAG_FBOX};
+    return p;
+}
+
+/* 动态算术（tag 版）：op/a/tag_a/b/tag_b/reuse_ok。返回 {%rax=payload,
+   %rdx=tag}。语义与 pa_any_arith 逐条一致（int 回绕、//、%、str 拼接、
+   异类型报错），只是解码免探针、float 结果可原位复用。 */
+PaAnyPair pa_any_arith_t(int64_t op, int64_t a, int64_t tag_a,
+                         int64_t b, int64_t tag_b, int64_t reuse_ok) {
+    AnyVal x, y;
+    any_decode_tag(a, tag_a, &x);
+    any_decode_tag(b, tag_b, &y);
+
+    if (x.kind == ANY_STR || y.kind == ANY_STR) {
+        if (op != PA_ANY_ADD || x.kind != ANY_STR || y.kind != ANY_STR)
+            pa_raise_c("TypeError", "unsupported operand type(s) for str");
+        PyAdamasStr* s = pa_str_concat(x.s, y.s);
+        PaAnyPair p = {(int64_t)(uintptr_t)s, PA_TAG_STR};
+        return p;
+    }
+
+    bool numeric = (x.kind == ANY_INT || x.kind == ANY_FLOAT) &&
+                   (y.kind == ANY_INT || y.kind == ANY_FLOAT);
+    if (!numeric) pa_raise_c("TypeError", "unsupported operand type(s)");
+
+    int use_float = (x.kind == ANY_FLOAT || y.kind == ANY_FLOAT);
+    if (op == PA_ANY_DIV) use_float = 1;
+
+    if (!use_float) {
+        switch (op) {
+            case PA_ANY_ADD: return any_pair_i64(x.i + y.i);
+            case PA_ANY_SUB: return any_pair_i64(x.i - y.i);
+            case PA_ANY_MUL: return any_pair_i64(x.i * y.i);
+            case PA_ANY_FLOORDIV: return any_pair_i64(any_int_floordiv(x.i, y.i));
+            case PA_ANY_MOD: return any_pair_i64(any_int_mod(x.i, y.i));
+            default: break;
+        }
+    }
+
+    double da = x.kind == ANY_FLOAT ? x.f : (double)x.i;
+    double db = y.kind == ANY_FLOAT ? y.f : (double)y.i;
+    double r = 0.0;
+    switch (op) {
+        case PA_ANY_ADD: r = da + db; break;
+        case PA_ANY_SUB: r = da - db; break;
+        case PA_ANY_MUL: r = da * db; break;
+        case PA_ANY_DIV:
+            if (db == 0.0) pa_raise_c("ZeroDivisionError", "float division by zero");
+            r = da / db; break;
+        case PA_ANY_FLOORDIV:
+            if (db == 0.0) pa_raise_c("ZeroDivisionError", "float floor division by zero");
+            r = any_floor_div_d(da, db); break;
+        case PA_ANY_MOD:
+            if (db == 0.0) pa_raise_c("ZeroDivisionError", "float modulo");
+            r = any_mod_d(da, db); break;
+        default: break;
+    }
+    /* 原位复用：先试左实参（acc + x 的 acc），再试右实参（x + acc）。 */
+    int64_t reused = any_reuse_float_box(a, tag_a, r, reuse_ok);
+    if (!reused) reused = any_reuse_float_box(b, tag_b, r, reuse_ok);
+    if (reused) { PaAnyPair p = {reused, PA_TAG_FBOX}; return p; }
+    return any_pair_f64(r);
+}
+
+PaAnyPair pa_any_neg_t(int64_t v, int64_t tag, int64_t reuse_ok) {
+    AnyVal a;
+    any_decode_tag(v, tag, &a);
+    if (a.kind == ANY_FLOAT) {
+        int64_t reused = any_reuse_float_box(v, tag, -a.f, reuse_ok);
+        if (reused) { PaAnyPair p = {reused, PA_TAG_FBOX}; return p; }
+        return any_pair_f64(-a.f);
+    }
+    if (a.kind == ANY_INT) return any_pair_i64((int64_t)(0u - (uint64_t)a.i));
+    pa_raise_c("TypeError", "bad operand type for unary -");
+    return any_pair_i64(0);
+}
+
+/* 动态比较（tag 版）：语义与 pa_any_cmp 逐条一致。 */
+int64_t pa_any_cmp_t(int64_t op, int64_t a, int64_t tag_a,
+                     int64_t b, int64_t tag_b) {
+    AnyVal x, y;
+    any_decode_tag(a, tag_a, &x);
+    any_decode_tag(b, tag_b, &y);
+    int eq = 0, lt = 0, gt = 0;
+    bool x_num = (x.kind == ANY_INT || x.kind == ANY_FLOAT);
+    bool y_num = (y.kind == ANY_INT || y.kind == ANY_FLOAT);
+    if (x_num && y_num) {
+        double da = x.kind == ANY_FLOAT ? x.f : (double)x.i;
+        double db = y.kind == ANY_FLOAT ? y.f : (double)y.i;
+        eq = da == db;
+        lt = da < db;
+        gt = da > db;
+    } else if (x.kind == ANY_STR && y.kind == ANY_STR) {
+        int64_t c = pa_str_cmp(x.s, y.s);
+        eq = c == 0;
+        lt = c < 0;
+        gt = c > 0;
+    } else {
+        if (op != PA_ANY_EQ && op != PA_ANY_NE)
+            pa_raise_c("TypeError", "unsupported comparison between different types");
+        eq = (a == b);
+    }
+    switch (op) {
+        case PA_ANY_EQ: return eq;
+        case PA_ANY_NE: return !eq;
+        case PA_ANY_LT: return lt;
+        case PA_ANY_LE: return lt || eq;
+        case PA_ANY_GT: return gt;
+        case PA_ANY_GE: return gt || eq;
+        default: return 0;
+    }
+}
+
+int64_t pa_any_is_float_t(int64_t v, int64_t tag) {
+    if (tag == PA_TAG_FBOX || tag == PA_TAG_FRAW) return 1;
+    if (tag == PA_TAG_HEAP) {
+        PyAdamasRc* h = (PyAdamasRc*)(uintptr_t)((uint64_t)v - (uint64_t)PYADAMAS_RC_HDR);
+        return h->kind == PYADAMAS_RC_CPYFLOAT ? 1 : 0;
+    }
+    if (tag == PA_TAG_UNK) return pa_any_is_float(v);
+    return 0;
+}
+
+double pa_any_to_f64_t(int64_t v, int64_t tag) {
+    AnyVal a;
+    any_decode_tag(v, tag, &a);
+    switch (a.kind) {
+        case ANY_FLOAT: return a.f;
+        case ANY_INT: return (double)a.i;
+        case ANY_STR:
+            pa_raise_c("TypeError", "must be real number, not str");
+            return 0.0;
+        default:
+            pa_raise_c("TypeError", "must be real number, not object");
+            return 0.0;
+    }
+}
+
+int64_t pa_any_to_i64_t(int64_t v, int64_t tag) {
+    AnyVal a;
+    any_decode_tag(v, tag, &a);
+    switch (a.kind) {
+        case ANY_FLOAT:
+            if (!isfinite(a.f) || a.f >= 9223372036854775808.0 ||
+                a.f < -9223372036854775808.0)
+                pa_raise_c("OverflowError", "cannot convert float to integer");
+            return (int64_t)a.f;
+        case ANY_INT: return a.i;
+        case ANY_STR:
+            pa_raise_c("TypeError", "int() argument must be a number, not str");
+            return 0;
+        default:
+            pa_raise_c("TypeError", "int() argument must be a number, not object");
+            return 0;
+    }
+}
+

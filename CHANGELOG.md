@@ -4,6 +4,107 @@
 
 早期阶段没有逐条留痕，按阶段归纳；0.4 之后逐条记录。
 
+## [0.327] - 2026-11-20
+
+> p3union 分支：unknown 表示层 **P3 封闭 tagged union 第一阶段**（0.324/0.325
+> 后续，与 stdlib 轮并行；集成时 CHANGELOG 编号按实际落地顺序重排）。
+> 设计文档 docs/p3-tagged-union-design.md：选型 B「平行 shadow tag 跟值走」
+> +「float 盒原位复用」混合，按模块门控（封闭活跃域）。不推 master、不动主树。
+>
+> 判据：静态已知路径 asm 逐字节不变（26 基准 **26/26 全同**，门控按构造
+> 保证）；不撞 kind2 内联 1-bit heap_bits（位图格式/bts/btr 逐字不动）；
+> 0.321 字符串 RC 成果保持；tag 丢失一律回退探针，正确性不依赖传播完备。
+
+### 设计选型（docs/p3-tagged-union-design.md）
+
+- **A 加宽槽 {i8 tag,8B payload}→16B**：float 内联免盒最干净，但值宽 ABI
+  全量重构（形参/返回/槽/容器/EH/GC/生成器帧），一轮做不完且半做态不可
+  验证；其收益主体（免探针+免 churn）B 已覆盖，增量只剩 72B/盒内存与一次
+  解盒间接 → 列第二阶段（P3-2，在 B 的 tag 传播地基上把 FBOX 换内联 FLOAT）。
+- **B 平行 shadow tag 跟值走（本阶段采用）**：值仍是 8B i64（float 仍装箱），
+  平行 tag 字（UNK0/INT1/FRAW2/FBOX3/STR4/HEAP5，堆⇔>=3）随值传播到标量
+  槽/全局/vreg/容器边界；RC 与动态算子按 tag 免探针，UNK 回退旧路径。
+  解决 P2 指出的「取出落标量槽 tag 丢失」：tag 跟值走，不跟容器。
+- **C 指针低位 tag**：解决不了 int/float 判别（信息论边界），指针掩码面与
+  约束①冲突 → 否决（0.324 §4.5 同结论）。
+- **float 盒原位复用**：acc = acc + x 形态，codegen 同块匹配「load S →
+  arith → store S」+ 单使用守卫，运行时验 tag==FBOX && rc==1（唯一所有权）
+  才原位改写并 rc++（引用计数证明见设计 §4）；常量缓存盒/共享盒 rc>=2
+  一律不复用。消 u3 每轮新盒分配/回收 churn。
+- **门控（封闭/开放分治）**：模块含 unknown 动态算术/比较才启用 tag；
+  26 热基准全部不含 pa_any_* → 门控关 → 不进任何 tag 分支（asm 按构造
+  逐字节不变）。开放 unknown（无动态算术的模块/容器无位图/字段/形参/
+  生成器）= UNK 探针+盒兜底，与 codon「封闭 union + PyObject 桥」同构。
+
+### 实现
+
+- runtime/rt_any.c：pa_any_arith_t/neg_t（{rax=payload,rdx=tag} 双字返回 +
+  原位复用）、pa_any_cmp_t/is_float_t/to_f64_t/to_i64_t、pa_any_load_tag
+  （i64→tag 一次探针）；旧入口全保留。rt_internal.h 声明 + PaAnyPair。
+- src/codegen_tag.cpp（新文件，从 codegen_call_rt.cpp 拆出守 1200 行限制）：
+  tag 版算子装填/双字落盘、复用匹配器、unknown RC 三入口 tag 内联
+  （>=3 直接 inc/dec/temp，1/2 跳过，0 回退）、heap 标志从 tag 导出
+  （append/make_list/index_store 传 0/1 保住 kind2 位图）、下标装载按
+  elem_kind/位图导 tag（无位图一次探针）。
+- codegen：模块门控扫描、帧内平行 tag 区（unknown vreg/槽专属字，序言
+  清零）、unknown 全局平行 tag 符号（健全性规则：外部全局与非入口导出
+  全局一律 UNK——防跨模块写坏 tag；入口 __entry__ 不可被 import 豁免）、
+  Mov/Load/Store/Const/Global tag 搬运、unknown 禁别名/常量折叠/融合、
+  DictTryGet 直写 unknown 槽清 tag、生成器 resume 整函数无 tag（序言清零
+  不走常规路径，垃圾 tag 会误 dec——118/124/128/133 实测修复）。
+- 不动：容器布局/位图格式/内联 bts/btr、临时栈、EH 帧记录与展开、GC 扫描、
+  生成器堆帧、类字段、闭包统一约定、cimport/C ABI、降级器（仍发旧 Any
+  入口，codegen 门控内拦截改发 tag 版）、推断/单态化。
+
+### 性能（绑核 24，交替 7 轮中位；同一运行时，仅生成代码不同）
+
+| 用例 | 基线 0.325 | 本分支 | 变化 |
+|---|---|---|---|
+| u1_hetero_list | 71 ms | 44 ms | **−38.0%** |
+| u3_unknown_arith | 57 ms | 31.5 ms | **−44.7%** |
+
+- u1：标量槽探针（inc/dec/temp）+ 算术解码探针消除，累加器盒复用，
+  append 堆标志从 tag 导出保住位图 → 元素装载免探针。
+- u3：探针 ~25% + 盒 churn ~24% 两大成本结构性消除（P2 §1 剖析的目标）。
+- 26 热基准 asm 逐字节 cmp：**26/26 IDENTICAL**（含 nbody/spectral/matmul
+  数值循环）。门控关模块逐字旧路径。
+
+### 验证
+
+- tests/run/248_p3_shadow_tag.py（新增）：复用命中/安全边界（旧值别名、
+  共享盒、acc+acc、常量缓存盒）、异构遍历+isinstance、tag 回退（dict/
+  形参/字段/生成器）、一元负/混合算术/比较/str 拼接、下标写入+冷路径；
+  O0/O1/O2 与 CPython 逐字一致。
+- difftest 240 用例 0 不一致；普通套件 258 ran ok EXIT=0；ASan 套件
+  258 ran ok EXIT=0（PYADAMAS_TEST_JOBS=8）。
+- ASan detect_leaks=1 抽查 247/248/13_gc/231：无泄漏。
+- check_size：无新增超限（P3 发射拆 codegen_tag.cpp 276 行，
+  codegen_call_rt.cpp 回落 1148 行；既有 5 处不变）。
+
+### 已知边界（本阶段明确不做，列后续）
+
+1. tag 不过调用边界（形参/返回 UNK 回退）——P3-1b。
+2. 生成器堆帧/类字段/dict 值无 tag（UNK 回退，性能持平）——P3-1b。
+3. float 仍装箱（72B/盒），复用只消 churn 不消内存——P3-2 内联。
+4. 复用只匹配同块「load S → arith → store S」直接形态 + 单使用守卫；
+   Mov 链/跨块/多使用不匹配（正确，只是不复用）。
+5. 统计模式复用路径少计一次 alloc/free；GC-sweep 期禁用复用。
+6. 多态生成器 yield（float+int+str 混合）是 0.325 基线已存在的边界
+   （基线/本分支输出逐字相同，248 注释标注），不在本阶段范围。
+7. None/bool 仍裸 0/1（0.324 边界不变）。
+8. 直接 print(object 函数调用) 形态命中 0.325 基线已存在的 unknown 调用
+   结果所有权洞（inline/indirect 两形态基线/本分支均泄漏 144B/2obj，IR
+   逐字相同）；结果先落 object 槽再打印则无泄漏（247/248 采用形态）。
+   非本阶段引入，列后续修复。
+
+### 后续阶段
+
+- P3-1b：tag 过直调形参/返回（双字 ABI + 闭包 shim 适配）；DictGet/字段/
+  生成器帧 tag 化。
+- P3-2：A 内联——封闭域 FBOX→FLOAT 内联（16B 仅 unknown 槽/vreg，容器仍
+  8B+边界装箱）；容器元素域 tag 由本阶段位图+tag 自然导出。
+- P3-3：跨模块 ABI 版本化；None/bool 盒；开放 unknown 的 PyObject 式通用盒。
+
 ## [0.325] - 2026-11-19
 
 > p2tag 分支：unknown 表示层 **P2 容器级域 tag 评估**（0.324 后续，与 stdlib

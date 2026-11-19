@@ -1,0 +1,276 @@
+// codegen_tag.cpp —— P3 shadow tag 发射（0.327，docs/p3-tagged-union-design.md）
+//
+// 从 codegen_call_rt.cpp 拆出（文件规模硬限制 1200 行）：tag 版动态算子
+// 装填/双字返回落盘、复用匹配、unknown RC tag 内联、堆标志导出、下标
+// 装载/写入的 tag 路由。门控 tags_enabled_ 关时这些函数不被调用。
+#include "codegen_impl.h"
+
+namespace pyadamas {
+
+// ── P3 shadow tag：tag 版动态算子发射（0.327，设计 §3/§4）─────────────
+//
+// 降级器仍发旧 AnyArith/AnyCmp/AnyNeg（IR 实参 {op,a,b,desc_a,desc_b} /
+// {a,desc}）；门控内这里拦截改发 pa_any_*_t：tag 从平行 tag 区/静态类型
+// 装填，desc 不再需要（tag  subsumes it；UNK tag 运行时回退探针）。
+// AnyArithT/AnyNegT 返回 PaAnyPair：SysV {i64,i64} → %rax=payload、
+// %rdx=tag，分别落 dst 的 payload 槽与 tag 字。
+
+void AsmGen::emit_call_dst_tag(const Inst& in) {
+    if (!vreg_tagged(in.dst) || dst_unused(in)) return;
+    int64_t t = kTagUnk;
+    if (in.op == IrOp::CallRt) {
+        RtFn fn = static_cast<RtFn>(in.imm);
+        if (fn == RtFn::AnyFromF64) t = kTagFbox;
+        else if (fn == RtFn::StrAny) t = kTagStr;
+    }
+    emit_tag_imm(in.dst, t);
+}
+
+// 复用匹配（设计 §4）：结果 dst 被存回 S（同块 StoreSlot/StoreGlobal），
+// 且某实参恰是同块对 S 的装载、单使用（只被本算子读）、装载到存储之间
+// 无对 S 的其它写入 → 该实参就是「即将被覆盖的槽值」，可作复用提示。
+// 运行时再验 tag==FBOX && rc==1（唯一所有权）才原位改写。
+int64_t AsmGen::any_reuse_ok(const Inst& in) {
+    if (!tags_enabled_ || opt_ < 1 || cur_block_ < 0 ||
+        cur_block_ >= static_cast<int>(f_->blocks.size()))
+        return 0;
+    const Block& b = f_->blocks[static_cast<size_t>(cur_block_)];
+    int store_pos = -1, store_idx = -1;
+    bool store_global = false;
+    for (int j = cur_pos_ + 1; j < static_cast<int>(b.insts.size()); ++j) {
+        const Inst& nx = b.insts[static_cast<size_t>(j)];
+        if (nx.op == IrOp::StoreSlot && nx.a == in.dst) {
+            store_pos = j; store_idx = nx.idx; break;
+        }
+        if (nx.op == IrOp::StoreGlobal && nx.a == in.dst) {
+            store_pos = j; store_idx = nx.idx; store_global = true; break;
+        }
+        if (nx.op == IrOp::Jump || nx.op == IrOp::Branch ||
+            nx.op == IrOp::Return || nx.op == IrOp::GenYield ||
+            nx.op == IrOp::GenAwait || nx.op == IrOp::GenDone)
+            break;
+    }
+    if (store_pos < 0) return 0;
+    auto check = [&](VReg v) -> bool {
+        if (v == kNoReg || v >= use_count_.size() || use_count_[v] != 1)
+            return false;
+        int dp = -1;
+        for (int j = cur_pos_ - 1; j >= 0; --j)
+            if (b.insts[static_cast<size_t>(j)].dst == v) { dp = j; break; }
+        if (dp < 0) return false;
+        const Inst& def = b.insts[static_cast<size_t>(dp)];
+        bool ok = store_global
+            ? (def.op == IrOp::LoadGlobal && def.idx == store_idx)
+            : (def.op == IrOp::LoadSlot && def.idx == store_idx);
+        if (!ok) return false;
+        for (int j = dp + 1; j < store_pos; ++j) {
+            const Inst& mx = b.insts[static_cast<size_t>(j)];
+            if ((mx.op == IrOp::StoreSlot || mx.op == IrOp::StoreGlobal) &&
+                mx.idx == store_idx)
+                return false;
+        }
+        return true;
+    };
+    RtFn fn = static_cast<RtFn>(in.imm);
+    if (fn == RtFn::AnyArith)
+        return (check(in.args[1]) || check(in.args[2])) ? 1 : 0;
+    return check(in.args[0]) ? 1 : 0;
+}
+
+void AsmGen::gen_any_tagged(const Inst& in, RtFn fn) {
+    if (fn == RtFn::AnyArith || fn == RtFn::AnyCmp) {
+        // IR: {op, a, b, desc_a, desc_b} → C: (op, a, tag_a, b, tag_b[, reuse])
+        emit_arg(0, false, 0, src_op(in.args[0]));
+        emit_arg(1, false, 1, src_op(in.args[1]));
+        emit_arg(2, false, 2, tag_src(in.args[1]));
+        emit_arg(3, false, 3, src_op(in.args[2]));
+        emit_arg(4, false, 4, tag_src(in.args[2]));
+        if (fn == RtFn::AnyArith)
+            emit_imm_op("movq", any_reuse_ok(in), arg_reg_i(5));
+        spill_fp_slots();
+        line(std::format("call {}", fn == RtFn::AnyArith ? "pa_any_arith_t"
+                                                         : "pa_any_cmp_t"));
+        reload_fp_slots();
+        if (!dst_unused(in)) {
+            emit2("movq", "%rax", dst_op(in.dst));
+            // AnyArithT 双字返回：%rdx=tag 落 tag 字；AnyCmpT 返回 bool。
+            if (fn == RtFn::AnyArith && vreg_tagged(in.dst))
+                emit2("movq", "%rdx", tag_mem(in.dst));
+        }
+        return;
+    }
+    if (fn == RtFn::AnyNeg) {
+        // IR: {a, desc} → C: (a, tag_a, reuse_ok)
+        emit_arg(0, false, 0, src_op(in.args[0]));
+        emit_arg(1, false, 1, tag_src(in.args[0]));
+        emit_imm_op("movq", any_reuse_ok(in), arg_reg_i(2));
+        spill_fp_slots();
+        line("call pa_any_neg_t");
+        reload_fp_slots();
+        if (!dst_unused(in)) {
+            emit2("movq", "%rax", dst_op(in.dst));
+            if (vreg_tagged(in.dst)) emit2("movq", "%rdx", tag_mem(in.dst));
+        }
+        return;
+    }
+    // 单操作数：AnyIsFloat / AnyToF64 / AnyToI64 → (a, tag_a)。
+    emit_arg(0, false, 0, src_op(in.args[0]));
+    emit_arg(1, false, 1, tag_src(in.args[0]));
+    spill_fp_slots();
+    line(std::format("call {}", fn == RtFn::AnyIsFloat ? "pa_any_is_float_t"
+                     : fn == RtFn::AnyToF64 ? "pa_any_to_f64_t"
+                                            : "pa_any_to_i64_t"));
+    reload_fp_slots();
+    if (!dst_unused(in)) {
+        if (fn == RtFn::AnyToF64) move_fp(dst_op(in.dst), "%xmm0");
+        else emit2("movq", "%rax", dst_op(in.dst));
+    }
+}
+
+
+// P3：unknown RC 三入口 tag 判别内联。门控内且操作数带 tag 字时：
+//   tag==0(UNK) → 旧 pa_rc_*_unknown（探针，逐字旧语义）
+//   tag 1/2     → 非堆标量，空操作
+//   tag>=3      → 堆指针，直接 pa_rc_inc/dec/temp（免探针）
+void AsmGen::gen_rc_unknown_tagged(const Inst& in, RtFn fn) {
+    VReg v = in.args[0];
+    const std::string fb = fresh_label("rcut_fb");
+    const std::string done = fresh_label("rcut_done");
+    emit2("movq", tag_mem(v), "%rax");
+    line("testq %rax, %rax");
+    emit_jmp("je", fb);
+    line("cmpq $3, %rax");
+    emit_jmp("jl", done);
+    emit2("movq", src_op(v), arg_reg_i(0));
+    spill_fp_slots();
+    line(fn == RtFn::RcIncUnknown ? "call pa_rc_inc"
+         : fn == RtFn::RcDecUnknown ? "call pa_rc_dec"
+                                    : "call pa_rc_temp");
+    reload_fp_slots();
+    emit_jmp("jmp", done);
+    label(fb);
+    emit2("movq", src_op(v), arg_reg_i(0));
+    spill_fp_slots();
+    line(std::format("call {}", rt_name(fn)));
+    reload_fp_slots();
+    label(done);
+}
+
+
+// P3：tag -> 堆标志（0 非堆 / 1 堆 / 2 unknown 回退）。append/make_list/
+// index_store 用它在门控内导出精确堆性：append 传 0/1 保住 kind2 位图
+// （设计 §1.5），元素侧装载就能从位图直接得 tag，免探针。
+void AsmGen::emit_heap_from_tag(VReg v, const std::string& dst) {
+    const std::string h1 = fresh_label("hft_h1");
+    const std::string h2 = fresh_label("hft_h2");
+    const std::string go = fresh_label("hft_go");
+    emit2("movq", tag_src(v), "%rax");
+    line("cmpq $3, %rax");
+    emit_jmp("jae", h1);
+    line("testq %rax, %rax");
+    emit_jmp("je", h2);
+    emit_imm_op("movq", 0, dst);
+    emit_jmp("jmp", go);
+    label(h1);
+    emit_imm_op("movq", 1, dst);
+    emit_jmp("jmp", go);
+    label(h2);
+    emit_imm_op("movq", 2, dst);
+    label(go);
+}
+
+// P3：unknown 值的 append（门控内）：堆标志从 tag 导出，整段交运行时。
+void AsmGen::gen_append_tagged(const Inst& in) {
+    emit2("movq", src_op(in.args[0]), arg_reg_i(0));
+    emit2("movq", src_op(in.args[1]), arg_reg_i(1));
+    emit_heap_from_tag(in.args[1], arg_reg_i(2));
+    spill_fp_slots();
+    line("call pa_list_append");
+    reload_fp_slots();
+}
+
+// P3：kind2 下标写入（门控内、新值带 tag）：堆标志从 tag 导出交运行时，
+// 位图按精确堆性维护。内联 bts/btr 路径（静态 hk）完全不涉及。
+void AsmGen::gen_index_store_tagged(const Inst& in, bool unchecked) {
+    const std::string r0 = arg_reg_i(0), r1 = arg_reg_i(1);
+    const std::string sl = target_abi().scratch_len;
+    emit2("movq", src_op(in.a), r0);
+    emit2("movq", src_op(in.b), r1);
+    if (!unchecked) {
+        const std::string fast = fresh_label("ixst_fast");
+        const std::string neg = fresh_label("ixst_neg");
+        line(std::format("movq 0({}), {}", r0, sl));
+        line(std::format("cmpq {}, {}", sl, r1));
+        emit_jmp("jb", fast);
+        line(std::format("testq {}, {}", r1, r1));
+        emit_jmp("js", neg);
+        line(std::format("xorl {}, {}", reg32(arg_reg_i(2)), reg32(arg_reg_i(2))));
+        emit_imm_op("movq", 2, arg_reg_i(3));
+        line("call pa_list_set");
+        line("ud2");
+        label(neg);
+        line(std::format("addq {}, {}", sl, r1));
+        line(std::format("cmpq {}, {}", sl, r1));
+        emit_jmp("jb", fast);
+        line(std::format("movq {}, {}", sl, r1));
+        line(std::format("xorl {}, {}", reg32(arg_reg_i(2)), reg32(arg_reg_i(2))));
+        emit_imm_op("movq", 2, arg_reg_i(3));
+        line("call pa_list_set");
+        line("ud2");
+        label(fast);
+    }
+    emit2("movq", src_op(in.c), arg_reg_i(2));
+    emit_heap_from_tag(in.c, arg_reg_i(3));
+    spill_fp_slots();
+    line("call pa_list_set");
+    reload_fp_slots();
+}
+
+// P3：unknown 元素装载的 tag 导出（设计 §3.3）。have_regs：快路径 r0/r1
+// （list 指针/归一化下标）仍活，可按 elem_kind/位图内联导 tag；冷路径
+// （运行时 pa_list_get 返回后）寄存器已死，走一次探针 pa_any_load_tag。
+//   kind0 → INT（全标量；unknown 域 float 已装箱，裸位模式不会出现在
+//           kind0 的 unknown 装载里）
+//   kind1 → HEAP（全堆）
+//   kind2 有位图 → 读位：1→HEAP（种类由算子解码头，免探针）/ 0→INT
+//   kind2 无位图 → 探针定 tag（比「每次使用都探针」少）
+void AsmGen::gen_index_load_tag(const Inst& in, bool have_regs) {
+    if (!vreg_tagged(in.dst)) return;
+    TypePtr ot = ty_of(in.a);
+    bool listish = ot && (ot->kind == TyKind::List || ot->kind == TyKind::Tuple);
+    const std::string tint = fresh_label("ixlt_int");
+    const std::string theap = fresh_label("ixlt_heap");
+    const std::string tprobe = fresh_label("ixlt_probe");
+    const std::string tdone = fresh_label("ixlt_done");
+    if (have_regs && listish) {
+        const std::string r0 = arg_reg_i(0), r1 = arg_reg_i(1);
+        line(std::format("movq 24({}), %rax", r0));
+        line("testq %rax, %rax");
+        emit_jmp("je", tint);
+        line("cmpq $1, %rax");
+        emit_jmp("je", theap);
+        line(std::format("movq 32({}), %rax", r0));
+        line("testq %rax, %rax");
+        emit_jmp("je", tprobe);
+        line(std::format("btq {}, (%rax)", r1));
+        emit_jmp("jc", theap);
+        emit_jmp("jmp", tint);
+    } else {
+        emit_jmp("jmp", tprobe);
+    }
+    label(tint);
+    emit_tag_imm(in.dst, kTagInt);
+    emit_jmp("jmp", tdone);
+    label(theap);
+    emit_tag_imm(in.dst, kTagHeap);
+    emit_jmp("jmp", tdone);
+    label(tprobe);
+    emit2("movq", dst_op(in.dst), arg_reg_i(0));
+    spill_fp_slots();
+    line("call pa_any_load_tag");
+    reload_fp_slots();
+    emit2("movq", "%rax", tag_mem(in.dst));
+    label(tdone);
+}
+
+}  // namespace pyadamas

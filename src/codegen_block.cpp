@@ -214,6 +214,23 @@ void AsmGen::emit_function(const IRFunction& f, int fi) {
         cur_loc_line_ = 0;
         auto t_alloc = std::chrono::steady_clock::now();
         assign_vreg_slots();
+        // P3：平行 tag 字分配（设计 §3.2）。每个 unknown vreg / unknown 命名
+        // 槽一个专属字（不复用，避免陈旧 tag）。生成器堆帧里的命名槽不加 tag
+        // （装载得 UNK 回退探针）；vreg 仍在常规帧，照常分配。
+        vreg_tag_.assign(f_->vreg_ty.size(), -1);
+        slot_tag_.assign(f_->slot_ty.size(), -1);
+        n_tag_words_ = 0;
+        if (tags_enabled_ && !gen_) {
+            // 生成器/协程 resume 函数不加 tag：序言清零不走常规路径，
+            // GenSent 等入口也不写 tag，垃圾 tag 会把整数当堆指针 dec
+            // （118/124/128/133 实测 SIGSEGV）。整函数回退 UNK 探针路径。
+            for (size_t s = 0; s < f_->slot_ty.size(); ++s)
+                if (is_unk_ty(f_->slot_ty[s]))
+                    slot_tag_[s] = n_tag_words_++;
+            for (size_t v = 0; v < f_->vreg_ty.size(); ++v)
+                if (is_unk_ty(f_->vreg_ty[v]))
+                    vreg_tag_[static_cast<VReg>(v)] = n_tag_words_++;
+        }
         if (gen_) {
             slot_reg_.assign(f.slot_ty.size(), std::string());
             // 生成器帧不提升槽位，但必须清掉上一个函数留下的浮点提升状态，
@@ -315,7 +332,7 @@ void AsmGen::emit_function(const IRFunction& f, int fi) {
             std::fprintf(stderr, "[frame] %-32s gen=%d n_saved=%d out=%d slots=%d\n",
                          f.name.c_str(), static_cast<int>(gen_), n_saved_regs_, out_bytes_,
                          n_slots_ + n_vreg_slots_ + rec_words);
-        layout_frame(n_slots_ + n_vreg_slots_ + rec_words);
+        layout_frame(n_slots_ + n_vreg_slots_ + n_tag_words_ + rec_words);
         build_operand_caches();
         // 零开销异常（Z2-b2）：预扫本函数的 EH 标记、分配标签。fname 在这里
         // 就要算出来——LSDA 的偏移基准是 FDE 起点（.cfi_startproc 的地址），
@@ -409,6 +426,10 @@ void AsmGen::emit_function(const IRFunction& f, int fi) {
                     else
                         emit2("movq", "$0", loc);
                 }
+            // P3：tag 区清零（UNK=0 探针回退）。unknown 形参槽的 tag 保持 0：
+            // 第一阶段调用约定仍传 i64，形参 tag 不过边界（设计 §3.3）。
+            for (int w = 0; w < n_tag_words_; ++w)
+                emit2("movq", "$0", std::format("{}(%rsp)", tag_off(w)));
 
             // 形参落位
             std::vector<TypePtr> ptypes;
@@ -566,6 +587,8 @@ bool AsmGen::can_fuse(const Inst& in, const Inst& nx) const {
         if (in.dst == kNoReg) return false;
         if (in.op == IrOp::StoreSlot || in.op == IrOp::StoreGlobal) return false;
         if (nx.op != IrOp::StoreSlot || nx.a != in.dst) return false;
+        // P3：unknown 结果不融合 —— 融合绕过 StoreSlot 的 tag 搬运。
+        if (tags_enabled_ && is_unk_ty(ty_of(in.dst))) return false;
         // **GC 要扫描的槽不能融合。**
         //
         // 融合会把 `store.slot s` 的目标替换成 dst_loc_（某个 vreg 寄存器或
@@ -613,6 +636,11 @@ bool AsmGen::can_fuse_global(const Inst& in, const Inst& nx) const {
                 return false;
         }
         if (nx.op != IrOp::StoreGlobal || nx.a != in.dst) return false;
+        // P3：unknown 全局不融合 —— 融合绕过 StoreGlobal 的 tag 搬运。
+        if (tags_enabled_ && nx.idx >= 0 &&
+            nx.idx < static_cast<int>(m_->globals.size()) &&
+            is_unk_ty(m_->globals[static_cast<size_t>(nx.idx)].ty))
+            return false;
         if (in.dst >= use_count_.size()) return false;
         return use_count_[in.dst] == 1 && !cross_block_[in.dst];
     }
@@ -1027,6 +1055,8 @@ bool AsmGen::single_use_in_block(VReg v) const {
 
 bool AsmGen::is_deferable_const(const Inst& in) const {
         if (in.dst == kNoReg) return false;
+        // P3：unknown dst 的常量不折叠 —— 折叠会跳过 tag 字写入。
+        if (tags_enabled_ && is_unk_ty(ty_of(in.dst))) return false;
         if (in.op == IrOp::ConstNone) return true;
         if (in.op != IrOp::ConstInt) return false;
         return in.imm >= INT32_MIN && in.imm <= INT32_MAX;

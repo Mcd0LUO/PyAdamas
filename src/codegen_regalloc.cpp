@@ -2281,9 +2281,13 @@ void AsmGen::assign_global_vreg_regs() {
                 is_const[static_cast<size_t>(in.dst)] = 1;
             }
         for (size_t v = 0; v < nv; ++v) {
-            if (is_const[v])
-                global_imm_[static_cast<VReg>(v)] =
-                    std::format("${}", const_imm[v]);
+            if (!is_const[v]) continue;
+            // P3：unknown dst 的常量不折叠（跳过 tag 写入）。
+            if (tags_enabled_ && v < f_->vreg_ty.size() &&
+                is_unk_ty(f_->vreg_ty[v]))
+                continue;
+            global_imm_[static_cast<VReg>(v)] =
+                std::format("${}", const_imm[v]);
         }
 
         struct Cand {
@@ -2441,6 +2445,16 @@ void AsmGen::build_operand_caches() {
         for (size_t s = 0; s < gen_smem_cache_.size(); ++s)
             gen_smem_cache_[s] =
                 std::format("{}(%r15)", 8 * (kGenHeader + static_cast<int>(s)));
+        // P3：平行 tag 区操作数缓存（设计 §3.2）。必须在 tag 字分配
+        // （emit_function 开头）与 layout_frame 之后构建。
+        vreg_tag_mem_.assign(f_->vreg_ty.size(), std::string());
+        slot_tag_mem_.assign(f_->slot_ty.size(), std::string());
+        for (size_t v = 0; v < vreg_tag_.size(); ++v)
+            if (vreg_tag_[v] >= 0)
+                vreg_tag_mem_[v] = std::format("{}(%rsp)", tag_off(vreg_tag_[v]));
+        for (size_t s = 0; s < slot_tag_.size(); ++s)
+            if (slot_tag_[s] >= 0)
+                slot_tag_mem_[s] = std::format("{}(%rsp)", tag_off(slot_tag_[s]));
     }
 
 // ── 函数 ────────────────────────────────────────────────────

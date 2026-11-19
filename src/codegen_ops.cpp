@@ -128,9 +128,12 @@ void AsmGen::gen_inst(const Inst& in) {
                     line(std::format("leaq .Lstr{}(%rip), %rax", in.idx));
                 }
                 move_to(dst_op(in.dst), "%rax");
+                emit_tag_imm(in.dst, kTagStr);
                 break;
             case IrOp::ConstNone:
                 move_to(dst_op(in.dst), "$0");
+                // None 在 unknown 域仍是裸 0（0.324 边界），tag 按 INT。
+                emit_tag_imm(in.dst, kTagInt);
                 break;
             case IrOp::FuncAddr:
                 line(std::format("leaq .Lclos{}(%rip), %rax", in.imm));
@@ -142,6 +145,8 @@ void AsmGen::gen_inst(const Inst& in) {
                 break;
             case IrOp::Mov:
                 move_to(dst_op(in.dst), src_op(in.a));
+                // P3：unknown dst 的搬运同时搬 tag（tag 跟值走，设计 §3.3）。
+                if (vreg_tagged(in.dst)) move_to(tag_mem(in.dst), tag_src(in.a));
                 break;
             case IrOp::Bin: gen_bin(in); break;
             case IrOp::Un: gen_un(in); break;
@@ -163,6 +168,8 @@ void AsmGen::gen_inst(const Inst& in) {
                 // 本来就已经有 reload 开销，多一条 mov 换正确性是划算的。
                 const std::string& loc = slot_op(in.idx);
                 move_to(loc, src_op(in.a));
+                // P3：unknown 槽写入同时写 tag 字。
+                if (slot_tagged(in.idx)) move_to(slot_tag_op(in.idx), tag_src(in.a));
                 invalidate_slot(in.idx);
                 break;
             }            case IrOp::LoadGlobal:
@@ -170,12 +177,29 @@ void AsmGen::gen_inst(const Inst& in) {
                 out_ += global_label(in.idx);
                 out_ += "(%rip), %rax\n";
                 move_to(dst_op(in.dst), "%rax");
+                // P3：unknown 全局装载同时装 tag；无 tag 字的全局（外部/
+                // 非入口导出）落 UNK 回退探针。
+                if (vreg_tagged(in.dst)) {
+                    if (global_tag_eligible(in.idx)) {
+                        out_ += "\tmovq " + global_tag_label(in.idx) + "(%rip), %rax\n";
+                        move_to(tag_mem(in.dst), "%rax");
+                    } else {
+                        emit_tag_imm(in.dst, kTagUnk);
+                    }
+                }
                 break;
             case IrOp::StoreGlobal:
                 emit2("movq", src_op(in.a), "%rax");
                 out_ += "\tmovq %rax, ";
                 out_ += global_label(in.idx);
                 out_ += "(%rip)\n";
+                // P3：unknown 全局写入同时写 tag 字（仅 eligible 全局）。
+                if (tags_enabled_ && in.idx >= 0 &&
+                    in.idx < static_cast<int>(m_->globals.size()) &&
+                    is_unk_ty(m_->globals[static_cast<size_t>(in.idx)].ty) &&
+                    global_tag_eligible(in.idx)) {
+                    move_to(global_tag_label(in.idx) + "(%rip)", tag_src(in.a));
+                }
                 break;
             case IrOp::GlobalAddr:
                 out_ += "\tleaq ";
@@ -329,6 +353,16 @@ void AsmGen::gen_inst(const Inst& in) {
     //   2. 这个临时值只被读一次，且读的时候中间没有对 x 的赋值
     // 都满足时，临时值直接指向 x 的寄存器，整条指令消失。
 void AsmGen::gen_load_slot(const Inst& in) {
+        // P3：unknown 槽不走别名优化（别名只搬 payload 会丢 tag），
+        // 老老实实搬 payload + tag 两个字。冷路径，正确性优先。
+        if (slot_tagged(in.idx)) {
+            move_to(dst_op(in.dst), slot_op(in.idx));
+            if (vreg_tagged(in.dst))
+                move_to(tag_mem(in.dst), slot_tag_op(in.idx));
+            else
+                emit_tag_imm(in.dst, kTagUnk);
+            return;
+        }
         // split 模式下位置按块查表；默认模式保持原行为。
         std::string sop = slot_op(in.idx);
         // 融合目标非空时**必须**真的写过去，不能走别名——别名只是
@@ -358,6 +392,7 @@ void AsmGen::gen_load_slot(const Inst& in) {
 
 void AsmGen::gen_const_int(const Inst& in) {
         const std::string& d = dst_op(in.dst);
+        emit_tag_imm(in.dst, kTagInt);
         if (in.imm >= INT32_MIN && in.imm <= INT32_MAX) {
             emit_imm_op("movq", in.imm, d);
         } else {

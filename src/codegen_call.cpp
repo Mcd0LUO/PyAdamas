@@ -79,7 +79,11 @@ void AsmGen::gen_make_list(const Inst& in) {
             }
             emit2("movq", dst_op(in.dst), arg_reg_i(0));
             emit2("movq", src_op(a), arg_reg_i(1));
-            emit_imm_op("movq", hk, arg_reg_i(2));
+            // P3：unknown 元素带 tag 时堆标志从 tag 导出（保住位图）。
+            if (tags_enabled_ && hk == 2 && vreg_tagged(a))
+                emit_heap_from_tag(a, arg_reg_i(2));
+            else
+                emit_imm_op("movq", hk, arg_reg_i(2));
             spill_fp_slots();
             line("call pa_list_append");
             reload_fp_slots();
@@ -154,6 +158,7 @@ void AsmGen::gen_index_load(const Inst& in) {
         } else {
             move_to(dst_op(in.dst), "%rax");
         }
+        gen_index_load_tag(in, false);
         emit_jmp("jmp", done);
         label(fast);
         line(std::format("movq 16({}), {}", r0, sp));
@@ -164,6 +169,7 @@ void AsmGen::gen_index_load(const Inst& in) {
             line(std::format("movq ({},{},8), %rax", sp, r1));
             move_to(dst_op(in.dst), "%rax");
         }
+        gen_index_load_tag(in, true);
         label(done);
     }
 
@@ -182,6 +188,7 @@ void AsmGen::gen_index_unchecked_load(const Inst& in) {
             line(std::format("movq ({},{},8), %rax", sp, r1));
             move_to(dst_op(in.dst), "%rax");
         }
+        gen_index_load_tag(in, true);
     }
 
 
@@ -1070,10 +1077,29 @@ void AsmGen::gen_call_rt(const Inst& in) {
         // gen_rc_inline（那边是「实参装填」专门文件，本来就集中放这类
         // 逐指令发射）。返回 true 表示已发完，外层不再补 call。
         if (gen_rc_inline(in, fn)) return;
+        // ── P3：门控内拦截旧 Any 算术/比较/一元负，改发 tag 版 ────────
+        // tag 从平行 tag 区/静态类型装填；双字返回 {rax=payload,rdx=tag}。
+        // 门控关（含 26 个热基准）不进这里，逐字旧路径。
+        if (tags_enabled_ &&
+            (fn == RtFn::AnyArith || fn == RtFn::AnyCmp || fn == RtFn::AnyNeg)) {
+            gen_any_tagged(in, fn);
+            return;
+        }
+        // P3：单操作数 Any 入口同样改 tag 版（免探针解码）。
+        if (tags_enabled_ && in.args.size() == 1 && vreg_tagged(in.args[0]) &&
+            (fn == RtFn::AnyIsFloat || fn == RtFn::AnyToF64 || fn == RtFn::AnyToI64)) {
+            gen_any_tagged(in, fn);
+            return;
+        }
         // ── list.append 内联快路径（0.282）─────────────────────────
         // 无扩容 + 无位图 + 非 kind2 时就是 data[len++]=v 一条 store，
         // call/ret + 装填 + 运行时检查比活本身还贵（str_build 14.6%）。
         if (fn == RtFn::ListAppend && opt_ >= 1 && in.args.size() == 3) {
+            // P3：unknown 值带 tag 时堆标志从 tag 导出（保住 kind2 位图）。
+            if (tags_enabled_ && vreg_tagged(in.args[1])) {
+                gen_append_tagged(in);
+                return;
+            }
             gen_append_inline(in);
             return;
         }
@@ -1087,6 +1113,10 @@ void AsmGen::gen_call_rt(const Inst& in) {
             spill_fp_slots();
             line("call pa_dict_try_get");
             reload_fp_slots();
+            // P3：运行时直写 unknown 槽的 payload，tag 字必须清成 UNK
+            // （否则陈旧 tag 会让 RC 跳过 retain/release）。
+            if (slot_tagged(static_cast<int>(in.idx)))
+                emit2("movq", "$0", slot_tag_op(static_cast<int>(in.idx)));
             if (!dst_unused(in)) emit2("movq", "%rax", dst_op(in.dst));
             return;
         }
@@ -1141,6 +1171,8 @@ void AsmGen::gen_call_rt(const Inst& in) {
             } else {
                 emit2("movq", "%rax", dst_op(in.dst));
             }
+            // P3：unknown dst 落 tag（AnyFromF64→FBOX、StrAny→STR、其余 UNK）。
+            emit_call_dst_tag(in);
         }
     }
 
