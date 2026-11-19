@@ -436,6 +436,8 @@ private:
     void emit_ptag_param_load();
     // Return 的 %rdx tag（unknown 返回 + 门控 + 非生成器；否则空操作）。
     void emit_ret_tag(const Inst& in);
+    // P3-1b：无 tag 来源的 unknown 装载（dict 值/字段）一次探针导 tag。
+    void emit_tag_probe(const std::string& payload_op, const std::string& tag_op);
     // 调用方：在出参区栈实参之后写 tag 数组，返回数组的 rsp 偏移。
     int emit_ptag_array(const Inst& in, const std::vector<ArgLoc>& locs);
 

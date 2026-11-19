@@ -22,8 +22,25 @@ void AsmGen::emit_call_dst_tag(const Inst& in) {
         RtFn fn = static_cast<RtFn>(in.imm);
         if (fn == RtFn::AnyFromF64) t = kTagFbox;
         else if (fn == RtFn::StrAny) t = kTagStr;
+        else if (fn == RtFn::DictGet || fn == RtFn::DictGetOr ||
+                 fn == RtFn::DictGetOpt || fn == RtFn::DictPop ||
+                 fn == RtFn::DictPopLast) {
+            // P3-1b：dict 值无 tag 来源 → 一次探针导 tag，后续 RC/算术
+            // 免探针（比「每次使用都探针」少；设计 §3.3 取出侧同款）。
+            emit_tag_probe(dst_op(in.dst), tag_mem(in.dst));
+            return;
+        }
     }
     emit_tag_imm(in.dst, t);
+}
+
+void AsmGen::emit_tag_probe(const std::string& payload_op,
+                            const std::string& tag_op) {
+    emit2("movq", payload_op, arg_reg_i(0));
+    spill_fp_slots();
+    line("call pa_any_load_tag");
+    reload_fp_slots();
+    emit2("movq", "%rax", tag_op);
 }
 
 // 复用匹配（设计 §4）：结果 dst 被存回 S（同块 StoreSlot/StoreGlobal），

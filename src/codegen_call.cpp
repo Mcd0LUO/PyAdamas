@@ -226,6 +226,8 @@ void AsmGen::gen_field_load(const Inst& in) {
         else
             line(std::format("movq {}(%rax), %rax", in.imm));
         move_to(dst_op(in.dst), "%rax");
+        // P3-1b：unknown 字段装载一次探针导 tag（窄字段是 C 结构体 typed）。
+        if (vreg_tagged(in.dst)) emit_tag_probe(dst_op(in.dst), tag_mem(in.dst));
     }
 
 void AsmGen::gen_field_store(const Inst& in) {
@@ -1131,11 +1133,11 @@ void AsmGen::gen_call_rt(const Inst& in) {
             spill_fp_slots();
             line("call pa_dict_try_get");
             reload_fp_slots();
-            // P3：运行时直写 unknown 槽的 payload，tag 字必须清成 UNK
-            // （否则陈旧 tag 会让 RC 跳过 retain/release）。
-            if (slot_tagged(static_cast<int>(in.idx)))
-                emit2("movq", "$0", slot_tag_op(static_cast<int>(in.idx)));
             if (!dst_unused(in)) emit2("movq", "%rax", dst_op(in.dst));
+            // P3-1b：一次探针导槽 tag（miss 槽留旧值，探针与旧 payload 一致）。
+            if (slot_tagged(static_cast<int>(in.idx)))
+                emit_tag_probe(smem(static_cast<int>(in.idx)),
+                               slot_tag_op(static_cast<int>(in.idx)));
             return;
         }
         gen_rt_args(in, fn);
