@@ -8,6 +8,18 @@ set(CMAKE_C_STANDARD 11)
 set(CMAKE_C_STANDARD_REQUIRED ON)
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
+# ccache：透明加速重复编译（clean 重建/切分支/CI/worktree 初始化实测 13×）。
+# 自动探测，-DPYADAMAS_USE_CCACHE=OFF 可关。不改编译 flags，行为零变化；
+# 真实源码改动的增量不受影响（改动 TU 必然 miss）。详见 docs/compile-speed.md。
+option(PYADAMAS_USE_CCACHE "用 ccache 加速重复编译（自动探测，可关）" ON)
+if(PYADAMAS_USE_CCACHE)
+  find_program(PYADAMAS_CCACHE_EXECUTABLE ccache)
+  if(PYADAMAS_CCACHE_EXECUTABLE)
+    set(CMAKE_C_COMPILER_LAUNCHER "${PYADAMAS_CCACHE_EXECUTABLE}")
+    set(CMAKE_CXX_COMPILER_LAUNCHER "${PYADAMAS_CCACHE_EXECUTABLE}")
+  endif()
+endif()
+
 if(NOT CMAKE_BUILD_TYPE AND NOT CMAKE_CONFIGURATION_TYPES)
   set(CMAKE_BUILD_TYPE Debug CACHE STRING "Build type" FORCE)
 endif()
@@ -122,6 +134,12 @@ else()
 endif()
 
 set(PYADAMAS_RT_PARTS core exc eh gen async task fd agen str list dict slice class math complex format file random os subprocess time stdlib json re functools datetime deque hash debug personality diag cpy cffi)
+# add_custom_command 不会自动继承 CMAKE_<LANG>_COMPILER_LAUNCHER；
+# 手动把 ccache 之类的 launcher 接到运行时编译上（未设置时展开为空，行为不变）。
+set(PYADAMAS_RT_LAUNCHER "")
+if(CMAKE_C_COMPILER_LAUNCHER)
+  set(PYADAMAS_RT_LAUNCHER ${CMAKE_C_COMPILER_LAUNCHER})
+endif()
 set(PYADAMAS_RT_OBJS "")
 foreach(part ${PYADAMAS_RT_PARTS})
   set(rt_obj "${CMAKE_BINARY_DIR}/rt_${part}.o")
@@ -130,7 +148,7 @@ foreach(part ${PYADAMAS_RT_PARTS})
   set(rt_fp "")
   add_custom_command(
     OUTPUT "${rt_obj}"
-    COMMAND ${CMAKE_C_COMPILER} -O2 -Wall -Wextra ${PYADAMAS_RT_WERROR} ${rt_fp}
+    COMMAND ${PYADAMAS_RT_LAUNCHER} ${CMAKE_C_COMPILER} -O2 -Wall -Wextra ${PYADAMAS_RT_WERROR} ${rt_fp}
             -I "${CMAKE_SOURCE_DIR}/runtime"
             -c "${CMAKE_SOURCE_DIR}/runtime/rt_${part}.c" -o "${rt_obj}"
     DEPENDS "${CMAKE_SOURCE_DIR}/runtime/rt_${part}.c"
@@ -167,7 +185,7 @@ foreach(part ${PYADAMAS_RT_PARTS})
     # 「might be clobbered by longjmp」。运行时的生成器/协程确实在 setjmp
     # 保护里用局部变量，但那是**有意**的（值都放在 jmp_buf 之外的帧槽），
     # 而且普通 rt.o 用 -O2 不报。这里只对插桩版关掉这个噪音。
-    COMMAND ${CMAKE_C_COMPILER} -O1 -g -fsanitize=address -fno-omit-frame-pointer -mstackrealign
+    COMMAND ${PYADAMAS_RT_LAUNCHER} ${CMAKE_C_COMPILER} -O1 -g -fsanitize=address -fno-omit-frame-pointer -mstackrealign
             -Wall -Wextra -Wno-clobbered ${PYADAMAS_RT_WERROR}
             -I "${CMAKE_SOURCE_DIR}/runtime"
             -c "${CMAKE_SOURCE_DIR}/runtime/rt_${part}.c" -o "${rt_obj}"
@@ -188,7 +206,22 @@ add_custom_command(
 add_custom_target(pyadamas_rt_asan ALL DEPENDS "${PYADAMAS_RT_ASAN_OBJ}")
 
 
+option(PYADAMAS_PCH "预编译公共标准库头（每个配置独立 PCH，flags 自动匹配）" OFF)
+option(PYADAMAS_MODULE_SCAN "C++23 模块扫描（项目未用 C++ modules；默认关：省 89 遍 -E 扫描、去掉 -fmodules-ts 注入、兼容 ccache）" OFF)
+
 add_executable(pyadamas ${PYADAMAS_SOURCES})
+if(PYADAMAS_PCH)
+  # 只预编译标准库头（src/pch_std.h）。CMake 按 target 的编译 flags 为每个
+  # 配置生成独立 PCH（dev/release 的 -O 各自匹配），不会重蹈跨 -O 复用
+  # 被 GCC 静默拒绝的覆辙。全量收益≈0、增量 -14~-18%，见 docs/compile-speed.md。
+  target_precompile_headers(pyadamas PRIVATE src/pch_std.h)
+endif()
+if(NOT PYADAMAS_MODULE_SCAN)
+  # 源码里没有任何 C++ module 声明/import。CMake 4 对 C++23 默认开模块扫描：
+  # 每个 TU 多一遍 -E 扫描（89 遍），编译命令注入 -fmodules-ts/-fmodule-mapper，
+  # 且 ccache 见 -fmodules-ts 一律拒缓存。显式关闭对行为零影响。
+  set_target_properties(pyadamas PROPERTIES CXX_SCAN_FOR_MODULES OFF)
+endif()
 # 把插桩运行时的路径编进编译器，`--asan` 时链接它而不是 rt.o。
 target_compile_definitions(pyadamas PRIVATE
   PYADAMAS_RT_ASAN_OBJ="${PYADAMAS_RT_ASAN_OBJ}")
