@@ -273,4 +273,93 @@ void AsmGen::gen_index_load_tag(const Inst& in, bool have_regs) {
     label(tdone);
 }
 
+// ── P3-1b：直调 tag ABI（0.328）─────────────────────────────────────
+//
+// 双字 ABI 的「旁路」形态：payload 的寄存器/栈落位逐字不变（classify
+// 原样），tag 走平行数组 + %r11 指针通道。被调两个入口：
+//   .LfN（旧入口，既有全部引用：闭包/vtable/间接/跨模块）：
+//       xorl %r11d, %r11d; jmp .LfN$pb
+//   .LfN$pt（tag 入口，仅门控内直调引用）：
+//       （%r11 = 调用方 tag 数组指针，直通函数体）
+// 函数体序言在 tag 区清零后按 %r11 装载形参 tag；%r11==0 → 全 UNK。
+// 正确性不依赖传播完备：任何旧约定调用都落旧入口，tag 丢失=探针回退。
+
+// 形参是否配 tag 字：**按槽类型**而不是形参声明类型。槽升级
+// （store_slot 把 unknown 槽定型成 bool/str 等）会让 p.ty=unknown 的形参
+// 槽变成静态类型槽 —— 那种槽没有 tag 字（tag 分配按 slot_ty），tag 数组
+// 必须与 tag 字一一对应，否则序言往 $0 里 movq（argparse add_argument 实测）。
+static bool ptag_param(const IRFunction& f, const IRParam& p) {
+    return p.slot >= 0 && p.slot < static_cast<int>(f.slot_ty.size()) &&
+           is_unknown(f.slot_ty[static_cast<size_t>(p.slot)]);
+}
+
+int AsmGen::func_ptag_words() const {
+    if (!tags_enabled_ || gen_) return 0;
+    int n = 0;
+    for (const auto& p : f_->params)
+        if (ptag_param(*f_, p)) ++n;
+    return n;
+}
+
+int AsmGen::call_ptag_words(const Inst& in) const {
+    if (!tags_enabled_ || in.op != IrOp::CallDirect) return 0;
+    if (in.idx < 0 || in.idx >= static_cast<int>(m_->funcs.size())) return 0;
+    const IRFunction& c = *m_->funcs[static_cast<size_t>(in.idx)];
+    if (c.is_generator) return 0;
+    // 实参/形参个数不一致（可变参数等）：tag 数组对不上号，回退旧约定。
+    if (in.args.size() != c.params.size()) return 0;
+    int n = 0;
+    for (const auto& p : c.params)
+        if (ptag_param(c, p)) ++n;
+    return n;
+}
+
+bool AsmGen::func_ret_tag(const IRFunction& f) const {
+    return tags_enabled_ && !f.is_generator && is_unk_ty(f.ret);
+}
+
+void AsmGen::emit_ptag_entry(int fi) {
+    line("xorl %r11d, %r11d");
+    emit_jmp("jmp", func_label(fi) + "$pb");
+    label(ptag_label(fi));
+    label(func_label(fi) + "$pb");
+}
+
+void AsmGen::emit_ret_tag(const Inst& in) {
+    if (!func_ret_tag(*f_)) return;
+    // 无值返回/浮点 vreg（unknown 返回正常已被降级器装箱）保守 UNK。
+    if (in.a == kNoReg || is_fp(in.a)) line("xorl %edx, %edx");
+    else emit2("movq", tag_src(in.a), "%rdx");
+}
+
+void AsmGen::emit_ptag_param_load() {
+    const std::string skip = fresh_label("ptp_skip");
+    line("testq %r11, %r11");
+    emit_jmp("je", skip);
+    int k = 0;
+    for (const auto& p : f_->params) {
+        if (!ptag_param(*f_, p)) continue;
+        line(std::format("movq {}(%r11), %rax", 8 * k));
+        emit2("movq", "%rax", slot_tag_op(p.slot));
+        ++k;
+    }
+    label(skip);
+}
+
+int AsmGen::emit_ptag_array(const Inst& in, const std::vector<ArgLoc>& locs) {
+    int nstack = 0;
+    for (const auto& l : locs)
+        if (l.stack_off >= 0) ++nstack;
+    // 数组紧跟本调用点的栈实参之后；outgoing_bytes 已按 tag 字数扩容。
+    const int base = out_base() + 8 * nstack;
+    const IRFunction& c = *m_->funcs[static_cast<size_t>(in.idx)];
+    int k = 0;
+    for (size_t i = 0; i < c.params.size(); ++i) {
+        if (!ptag_param(c, c.params[i])) continue;
+        move_to(std::format("{}(%rsp)", base + 8 * k), tag_src(in.args[i]));
+        ++k;
+    }
+    return base;
+}
+
 }  // namespace pyadamas

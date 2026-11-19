@@ -107,13 +107,18 @@ int AsmGen::outgoing_bytes(const IRFunction& f) const {
             switch (in.op) {
                 case IrOp::Call:
                 case IrOp::CallPtr:
-                case IrOp::CallDirect:
                 case IrOp::CallRt:
                 case IrOp::VCall:
                 case IrOp::VCallStatic:
                 case IrOp::SuperVCall:
                     // 寄存器用完的实参逐个占 8 字节；+16 兜住隐藏指针和对齐。
                     need = 8 * (static_cast<int>(in.args.size()) + 2);
+                    break;
+                case IrOp::CallDirect:
+                    // P3-1b：tag ABI 调用还要在栈实参之后放 unknown 形参
+                    // 的平行 tag 数组（门控关恒 0，逐字旧布局）。
+                    need = 8 * (static_cast<int>(in.args.size()) + 2) +
+                           8 * call_ptag_words(in);
                     break;
                 case IrOp::CallExtern: {
                     // C 调用还多一块暂存：返回值分块暂存 + sret 指针 +
@@ -384,6 +389,8 @@ void AsmGen::emit_function(const IRFunction& f, int fi) {
         // 零开销异常：personality / LSDA 必须落在 .cfi_startproc 与
         // .cfi_endproc 之间。空计划（老路径函数）什么也不发。
         emit_eh_directives_for_current();
+        // P3-1b：直调 tag ABI 双入口（发射细节见 codegen_tag.cpp）。
+        if (func_ptag_words() > 0) emit_ptag_entry(fi);
         // 帧里没有帧指针：CFA 全程由 rsp 定义。prologue 每动一次 sp 就把
         // 偏移记下来，gdb / _Unwind_Backtrace 才能从任意 PC 还原上一层帧。
         // 被保存的寄存器相对 CFA 的偏移不随 push 变化（CFA 也跟着涨）。
@@ -426,10 +433,11 @@ void AsmGen::emit_function(const IRFunction& f, int fi) {
                     else
                         emit2("movq", "$0", loc);
                 }
-            // P3：tag 区清零（UNK=0 探针回退）。unknown 形参槽的 tag 保持 0：
-            // 第一阶段调用约定仍传 i64，形参 tag 不过边界（设计 §3.3）。
+            // P3：tag 区清零（UNK=0 探针回退）。
             for (int w = 0; w < n_tag_words_; ++w)
                 emit2("movq", "$0", std::format("{}(%rsp)", tag_off(w)));
+            // P3-1b：tag 入口装载形参 tag（%r11==0 → 保持 UNK 回退）。
+            if (func_ptag_words() > 0) emit_ptag_param_load();
 
             // 形参落位
             std::vector<TypePtr> ptypes;
