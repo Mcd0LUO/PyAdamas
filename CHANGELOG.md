@@ -4,6 +4,17 @@
 
 早期阶段没有逐条留痕，按阶段归纳；0.4 之后逐条记录。
 
+## [0.310] - 2026-11-19
+
+### 编译吞吐：静态 libstdc++ + 两处 O(n²) 编译期扫描（前端 −12.9%，语料 check 逐文件 −23.1%）
+
+- **阶段占比（先量化，Xeon Gold 6252 绑核 24，多租户负载 3-5；单次 build 总耗时占比）**：cc 汇编（cc -c）≈ 17%（dict_wordfreq 8.2/51 ms），**链接（cc -o）≈ 70%**（36/51 ms：ld.bfd 25 ms 不可压缩 + gcc 驱动 11 ms），编译器前端（词法/解析/类型检查/降级/IR 优化/codegen/渲染）≈ 19%；逐阶段 PYADAMAS_TIMING：check 0.2-0.5 / lower 0.6-7.1 / asm 0.7-6.3 / cc 5.3-11.2 ms。语料批处理（tests/run 227 例逐文件 check）则是**进程启动占主导**：单进程 3.87 ms 里 1.24 ms 是动态装载器解析 libstdc++.so.6 的 ~800 个符号（LD_DEBUG=statistics：1972 次重定位 / 43 万拍，其中 1720 次来自符号查找缓存），语料本身平均只占 ~0.6 ms。perf（--children，整条 build 链）证实：链接期 bfd_link_hash_traverse 12.7% / bfd_elf_link_add_symbols 5.1% / bfd_hash_lookup 4.9%（全部在 ld 内；-z now、PIE、reflink、--threads（bfd 不支持）、strip 局部符号、输出到 tmpfs、-O1 逐项 A/B 均为 0 或不可用，本机无 lld/mold）；前端则 _int_malloc + _int_free ≈ 13%、assign_vreg_slots 6.3%、汇编行重解析（parse_instr + parse_operand）5.5%、rebuild_use_def 4.5%、std::vformat 2.1%。
+- **优化 1（链接/启动，一行）**：-static-libstdc++（新 CMake 选项 PYADAMAS_STATIC_LIBSTDCXX，默认开）。编译器每次被调用都要装载 6.9 MB 的 libstdc++.so.6 并解析其符号；静态链接后进程启动 **5.01M→3.19M 条指令（−36%）、43.1 万→31.4 万拍（−27%）**，tests/run 逐文件 check 227 例 473.9→365.9 ms。不改生成代码/运行时（用户程序仍动态链接），二进制 5.2→7.0 MB（页缓存只读）。
+- **优化 2（codegen）**：AsmGen::assign_vreg_slots 的跨块判定原本是「每个 vreg 扫全函数每条指令的 a/b/c/args（含内层 lambda 分配）」= O(vreg × 指令)，nbody 的 simulate/advance 各 3000+ 指令 × 4000+ vreg；改成一趟顺扫：对每条指令的每个操作数，若「所在块 ≠ 定义块」则置 cross_block_[r]。语义与原实现**逐位相同**（原来是「命中第一个非定义块的使用点即置位，之后保持」），243 个语料 asm 逐字节比对确认零差异。
+- **优化 3（opt）**：dce_function 每轮 rebuild_use_def() 重建三张 unordered_map（inst_by_id/def_of/uses_of，逐指令哈希插入 = profile 里 _int_malloc 与 _Map_base::operator[] 的大头），而 DCE 只需要「某 vreg 被读了几次」。改为一次性线性 vector<uint32_t> 计数 + 删除时精确递减（删纯指令只会让计数变小，等价于下一轮重建），并保留外层不动点循环，保证「删除后**前面**已扫过的指令变死」的连锁与旧实现一致（首版漏了这一点，32_exception_value / 39_match_advanced 的 asm 多留一条 const.int -1，被逐字节比对抓出后修好）。
+- **实测（同负载交替 A/B、打乱顺序、绑核，7-9 轮中位）**：前端 asm（10 个负载合计，排除 cc）**79.21→68.99 ms（−12.9%）**，单项 −11.1%~−14.6%，其中 −6.2% 来自静态 libstdc++（启动）、−4.8% 来自两处 O(n²) 扫描；build -O2 --rebuild（11 个负载合计，含 cc 汇编+链接）**654.3→633.9 ms（−3.1%）**，单项 −1.6%~−4.4%（前端只占 ~19%，故绝对值有限），stdlib_batch −3.8%、stdlib54 −3.8%；语料逐文件 check（bash 循环 227 文件）**474.8→365.1 ms（−23.1%，2.09→1.61 ms/次）**，--imports 525.2→412.8 ms（−21.4%）。
+- **验证**：行为零变化——243 个语料（bench realistic/compare 11 + tests/run 227 + 其它）的 pyadamas asm 输出与 0.309 逐字节一致；difftest **226/0**；普通与 ASan 套件各 **244 ran ok / EXIT=0**；ASan detect_leaks=1 抽查 13_gc/88_defaultdict/192_dict_cache/66_genexpr/119_gen_except_suspend 全干净；0.271 oracle 语料零差异（build/release 未触碰；201-229 等新增用例 rc 差为已知预期）；规模检查仍只有原有 5 处超限（codegen_regalloc.cpp 2475→2477 行、driver_build.cpp 1438、ir_ops.h 1276、lower_impl.h 1242、typecheck_types.h 1329，无新增超限文件）。
+- **未做（如实记录）**：链接占 build 总耗时 ~70%，其中 ld.bfd 的 25 ms 由「gcc 链接 rt.o（2064 个符号、~350 段、17 MB .bss）+ -z now 全符号绑定」决定；能砍掉它的只有换链接器（本机无 lld/mold，实测 clang -fuse-ld=lld 36→23 ms，但 /usr/bin/ld 只有 bfd 与 ld.so，lld 未安装）或缩 rt.o（运行时职责，超出前端范围），故本轮不硬优化前端之外的部分。
 ## [0.309] - 2026-11-19
 
 ### release preset -O1→-O2（保守退路）

@@ -152,19 +152,21 @@ void AsmGen::assign_vreg_slots() {
         }
         const int total_pos = pos;
         // 跨块判定：定义块 ≠ 使用块。
-        for (size_t v = 0; v < nv; ++v) {
-            if (def_pos[v] < 0) { cross_block_[v] = false; continue; }
-            bool cross = false;
-            for (int b = 0; b < nb && !cross; ++b) {
-                for (const auto& in : f_->blocks[static_cast<size_t>(b)].insts) {
-                    auto hit = [&](VReg r) {
-                        if (r == static_cast<VReg>(v) && b != def_block_[v]) cross = true;
-                    };
-                    hit(in.a); hit(in.b); hit(in.c);
-                    for (VReg r : in.args) hit(r);
-                }
+        //
+        // 一趟顺扫（语义与原「逐 vreg 扫全表」逐位相同：对每个 vreg，命中
+        // 第一个「不是定义块」的使用点即置位，之后保持）：把 O(nv × 指令数)
+        // 的重复遍历降到 O(指令数)。大函数上这是 assign_vreg_slots 的主要
+        // 开销（nbody 的 simulate/advance 各 3000+ 指令 × 4000+ vreg）。
+        for (int b = 0; b < nb; ++b) {
+            for (const auto& in : f_->blocks[static_cast<size_t>(b)].insts) {
+                auto hit = [&](VReg r) {
+                    if (r == kNoReg || r >= nv) return;
+                    if (def_pos[r] < 0) return;  // 未定义：与旧逻辑一样保持 false
+                    if (b != def_block_[r]) cross_block_[r] = true;
+                };
+                hit(in.a); hit(in.b); hit(in.c);
+                for (VReg r : in.args) hit(r);
             }
-            cross_block_[v] = cross;
         }
 
         // ── 2. CFG 与块级活跃性（backward 数据流）──

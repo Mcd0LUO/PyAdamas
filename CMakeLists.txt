@@ -235,6 +235,16 @@ target_compile_definitions(pyadamas PRIVATE
 )
 add_dependencies(pyadamas pyadamas_rt)
 
+# 静态链接 libstdc++（吞吐）：编译器每次被调用都要经动态装载器解析
+# libstdc++.so.6 的 ~800 个符号（实测占进程启动 ~1.2 ms，占一次
+# "pyadamas check" 的 ~30%）。静态链接后启动指令数 5.0M→3.2M、cycles
+# -27%，tests/run 227 例逐文件 check 473.9→365.9 ms（-22.8%）。
+# 不改任何代码生成/运行时行为（生成的程序仍动态链接），-DPYADAMAS_STATIC_LIBSTDCXX=OFF 可关。
+option(PYADAMAS_STATIC_LIBSTDCXX "静态链接 libstdc++，省编译器进程启动的符号解析" ON)
+if(PYADAMAS_STATIC_LIBSTDCXX AND CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
+  target_link_options(pyadamas PRIVATE -static-libstdc++)
+endif()
+
 
 if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
   target_compile_options(pyadamas PRIVATE -Wshadow -Wnon-virtual-dtor

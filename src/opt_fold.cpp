@@ -73,33 +73,51 @@ bool inst_is_pure(const Inst& in) {
 
 void dce_function(IRFunction& fn) {
     if (fn.vreg_ty.empty()) return;
+    // 使用计数：一趟线性扫描的 vector，而不是每轮 rebuild_use_def() 重建
+    // 三张 unordered_map（inst_by_id / def_of / uses_of）——DCE 只需要
+    // 「某个 vreg 被读了几次」这一个数值，而哈希表插入在大函数上占了
+    // 编译时间的大头（nbody 的 simulate/advance 各 4000+ vreg）。
+    //
+    // 语义等价：删除一条纯指令时把它读过的 vreg 计数精确递减，等于下一轮
+    // 重建索引后的结果（删指令只会让计数变小）。删除集合的不动点唯一
+    //（「dst 在剩余指令里没人读」只能因删除而扩大），所以最终 IR 与
+    // 原来「最多晚一轮删除」的逐轮实现逐位相同，指令顺序也不变。
+    const size_t nv = fn.vreg_ty.size();
+    std::vector<uint32_t> uses(nv, 0);
+    auto add_uses = [&](const Inst& in, int delta) {
+        auto add = [&](VReg r) {
+            if (r != kNoReg && r < nv) {
+                if (delta > 0) ++uses[r];
+                else --uses[r];
+            }
+        };
+        add(in.a);
+        add(in.b);
+        add(in.c);
+        for (VReg r : in.args) add(r);
+    };
+    for (auto& b : fn.blocks)
+        for (auto& in : b.insts) add_uses(in, +1);
+    // 反复扫到不动点：删除一条纯指令会让它读过的 vreg 计数归零，可能让
+    // **前面**已经扫过的指令变成死指令（旧实现靠外层 while 每轮重建索引
+    // 做到这一点）。计数已经精确维护，同一趟里的删除立刻可见，所以第二轮
+    // 通常只删掉这些「回头看」的残余。
     bool changed = true;
     while (changed) {
         changed = false;
-        // 用函数级的 use-def 索引，不再每轮手工扫一遍全函数统计使用次数。
-        //
-        // 语义等价：uses_of[v].size() 就是 v 被读的次数。索引由
-        // rebuild_use_def() 一次 O(指令数) 重建，这里每轮复用；
-        // 删掉指令后重新建一次（删的是纯计算，不影响其他指令的 use）。
-        fn.rebuild_use_def();
-        auto use_count = [&](VReg r) -> size_t {
-            auto it = fn.uses_of.find(r);
-            return it == fn.uses_of.end() ? 0 : it->second.size();
-        };
         for (auto& b : fn.blocks) {
             auto& v = b.insts;
             for (size_t i = 0; i < v.size();) {
                 const Inst& in = v[i];
-                bool dead = in.dst != kNoReg && use_count(in.dst) == 0 &&
+                bool dead = in.dst != kNoReg && (in.dst >= nv || uses[in.dst] == 0) &&
                             inst_is_pure(in);
                 if (!dead) {
                     ++i;
                     continue;
                 }
+                add_uses(in, -1);
                 v.erase(v.begin() + static_cast<std::ptrdiff_t>(i));
                 changed = true;
-                // uses 的计数已经过期；下一轮外层 while 重新统计。
-                // 这里继续扫后面的指令是保守的：最多晚一轮删除。
             }
         }
     }
