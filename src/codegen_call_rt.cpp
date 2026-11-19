@@ -567,8 +567,8 @@ void AsmGen::gen_rt_args(const Inst& in, RtFn fn) {
         case RtFn::DequeReverse:
         case RtFn::DequeCopy:
         case RtFn::OsChdir:
-        case RtFn::CDLLLoad:
-        case RtFn::CDLLClose:
+        case RtFn::DYLIBLoad:
+        case RtFn::DYLIBClose:
         case RtFn::OsPathRealpath:
         case RtFn::OsPathGetsize:
         case RtFn::OsPathGetmtime:

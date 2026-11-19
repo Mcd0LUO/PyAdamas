@@ -79,9 +79,9 @@ pyadamas::ModuleInfoPtr builtin_module(const std::string& name) {
     if (name == "c") {
         // 免写直调：符号名集合在编译期不可知（from c import 任意名字），
         // globals 留空；绑定与调用检查在 stmt_import_from / check_c_lazy。
-    } else if (name == "cdll") {
-        func("load", {pyadamas::t_str()}, pyadamas::t_cdll());
-        func("close", {pyadamas::t_cdll()}, pyadamas::t_int());
+    } else if (name == "dylib") {
+        func("load", {pyadamas::t_str()}, pyadamas::t_dylib());
+        func("close", {pyadamas::t_dylib()}, pyadamas::t_int());
     } else if (name == "math") {
         info->globals["pi"] = pyadamas::t_float();
         info->globals["e"] = pyadamas::t_float();

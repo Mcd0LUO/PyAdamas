@@ -1496,8 +1496,8 @@ PyAdamasList* pa_os_path_split(PyAdamasStr* s);
 int64_t pa_os_path_samefile(PyAdamasStr* a, PyAdamasStr* b);
 
 /* ── cffi：免写直调 / 动态库句柄（rt_cffi.c）───────────────────── */
-int64_t pa_cdll_load(PyAdamasStr* path);
-int64_t pa_cdll_close(int64_t handle);
+int64_t pa_dylib_load(PyAdamasStr* path);
+int64_t pa_dylib_close(int64_t handle);
 int64_t pa_c_sym_default(const char* name);
 int64_t pa_c_sym_handle(int64_t handle, const char* name);
 

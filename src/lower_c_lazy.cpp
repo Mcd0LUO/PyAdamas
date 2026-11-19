@@ -1,6 +1,6 @@
 // lower_c_lazy.cpp —— 免写直调：调用点推断 C 编组，dlsym 后端解析符号
 //
-// from c import X（默认句柄）与 cdll 句柄的属性调用 lib.sym(...) 共享
+// from c import X（默认句柄）与 dylib 句柄的属性调用 lib.sym(...) 共享
 // 这条路径：没有 .cpya 声明，参数种类按实参静态类型推断，返回种类按
 // 调用点推断/标注。契约是 ctypes 式的——调用方对 ABI 负责。
 #include "lower_impl.h"

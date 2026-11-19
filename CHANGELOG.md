@@ -4,6 +4,14 @@
 
 早期阶段没有逐条留痕，按阶段归纳；0.4 之后逐条记录。
 
+## [0.306] - 2026-11-19
+
+### cdll 改名 dylib（平台中性命名）
+
+- **理据**：DLL 是 Windows 术语（Linux .so / macOS .dylib），本功能是 dlopen/LoadLibrary 的跨平台 facade，cdll 让人误以为只管 Windows。ctypes 的 cdll 本意是调用约定命名空间（cdecl vs windll/stdcall），本项目无此区分，借来的名字连原始理据都不成立。用户拍板 dylib。
+- **范围**：纯机械重命名，零语义变化——TyKind::CDLL→DYLIB、RtFn::CDLLLoad/Close→DYLIBLoad/Close、pa_cdll_*→pa_dylib_*、t_cdll→t_dylib、kModuleTable 条目、用户可见字符串（dylib.load: cannot open / in dylib handle / <dylib handle> / Windows NotImplementedError 文案）、tests/cdll/→tests/dylib/、213_cdll.py→213_dylib.py、214 错误路径 expect 同步、docs/cffi-design.md 示例与标识符同步（顶部加改名注记）。不留 cdll 别名（0.305 刚落地，无外部用户）。0.305 条目作为历史记录保留（其中 cdll 字样是当时命名）。
+- **验证**：212–215 O2 单跑 OK；差分 216/0；普通与 ASan 套件各 234 ran ok / EXIT=0；abbench 对 f5d57b8 realistic 绑核交替 15 轮中性（合计 1262.59→1261.37ms，−0.1%，六项 ±0.3% 内）；规模检查无新增超限。
+
 ## [0.305] - 2026-11-19
 
 ### C FFI 免写直调与动态库（from c import / cdll.load，合入 cffi）

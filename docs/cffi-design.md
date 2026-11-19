@@ -1,5 +1,7 @@
 # C FFI 下一步先验：免写直调 + dlopen（审计 / 设计 / 薄原型）
 
+> **0.306 改名**：`cdll` → `dylib`（平台中性命名——DLL 是 Windows 术语，本功能是 dlopen/LoadLibrary 的跨平台 facade；ctypes 的 cdll 本意是 cdecl/stdcall 调用约定区分，本项目无此区分，名字理据不成立）。下文示例与标识符均已更新；测试目录 tests/dylib/、用例 213_dylib.py。
+
 分支 `cffi`（基于 f0a4af4 / 0.303），独立 worktree 先验，未推送。
 目标三件：① 健壮化现有 cimport/cdecl；② 免写声明直调 C 函数；③ dlopen/dlsym
 动态库能力。本文是审计结论 + 设计 + 原型实测 + 坑位清单；原型薄但端到端
@@ -74,7 +76,7 @@ codon 没有 cimport 关键字，C 互操作全在 import 语法里：
   （parser/visitors/typecheck/import.cpp）：合成带 Attr::C 的函数声明，
   LLVM 直发符号调用（链接期绑定）。**签名必须写在 import 处**。
 - `from C import foo: int` → C 变量（LinkType / ExprExternVar）。
-- `from C import lib.foo(int) -> float` → transformCDLLImport：
+- `from C import lib.foo(int) -> float` → transformDYLIBImport：
   `_dlsym_c(lib, "foo", Fn=Function[[int], float])`。
 - stdlib/internal/dlopen.codon：用 `from C import dlopen/dlsym/dlclose/dlerror`
   自举包装；dlsym 返回 `Fn(fn)`（指针→函数类型转换），错误抛 CError(dlerror())；
@@ -110,25 +112,25 @@ print(sqrt(2.0))                  # 1.4142135623730951
 ### 3.2 dlopen 动态库
 
 ```python
-import cdll
-lib = cdll.load("./libprobe.so")  # dlopen(RTLD_NOW|RTLD_LOCAL) → 句柄
+import dylib
+lib = dylib.load("./libprobe.so")  # dlopen(RTLD_NOW|RTLD_LOCAL) → 句柄
 print(lib.probe_add(2, 3))        # 句柄属性调用 = dlsym(句柄, "probe_add")
 s: str = lib.probe_greet("hi")    # char* 返回用标注定 ABI
-print(cdll.close(lib))            # dlclose → 0
+print(dylib.close(lib))            # dlclose → 0
 ```
 
-- `cdll` 伪模块：load(str)→CDLL 句柄、close(CDLL)→int，走原生函数
-  管线（native_fn → RtFn::CDLLLoad/CDLLClose → rt_cffi.c）。
-  `from cdll import load` 同样可用（native_aliases_）。
-- 句柄类型 TyKind::CDLL：**标量整数地址**（非堆、无 RC），可存容器、
-  可传参；print 输出 `<cdll handle>`；不跨模块序列化（enc_type→unknown）。
+- `dylib` 伪模块：load(str)→DYLIB 句柄、close(DYLIB)→int，走原生函数
+  管线（native_fn → RtFn::DYLIBLoad/DYLIBClose → rt_cffi.c）。
+  `from dylib import load` 同样可用（native_aliases_）。
+- 句柄类型 TyKind::DYLIB：**标量整数地址**（非堆、无 RC），可存容器、
+  可传参；print 输出 `<dylib handle>`；不跨模块序列化（enc_type→unknown）。
 - 句柄属性调用与 from c import 共享 lower_c_lazy_call / CallExtern /
   gen_call_extern，仅绑定方式不同：IRExtern.lazy=2，句柄值在 Inst::a，
   每次调用 `dlsym(handle, name)`（原型不做 (handle,symbol) 缓存）。
 - 错误路径（全部 OSError，消息点名符号/路径，绝不静默跳空指针）：
-  - 库不存在：`cdll.load: cannot open '<path>': <dlerror>`
+  - 库不存在：`dylib.load: cannot open '<path>': <dlerror>`
   - 默认符号不存在：`undefined C symbol '<name>' (dlsym RTLD_DEFAULT)`
-  - 句柄符号不存在：`undefined C symbol '<name>' in cdll handle`
+  - 句柄符号不存在：`undefined C symbol '<name>' in dylib handle`
   - dlsym 的 NULL 用 dlerror() 区分（符号值合法为 0 的边界）。
 
 ## 4. 类型规则与 ABI 契约
@@ -194,24 +196,24 @@ fi>8（浮点实参溢出到栈）时 %al 原样塞 fi 会让 va_arg 寄存器�
 
 | 层 | 文件 | 内容 |
 | --- | --- | --- |
-| 类型 | typecheck_types.h | TyKind::CDLL / t_cdll / FuncInfo.c_lazy+c_symbol / ckind_type(Float32) |
+| 类型 | typecheck_types.h | TyKind::DYLIB / t_dylib / FuncInfo.c_lazy+c_symbol / ckind_type(Float32) |
 | 类型检查 | typecheck_stmt_forms.cpp | from c import 绑定；标注覆盖（ann_assign/return） |
-| 类型检查 | typecheck_call.cpp / typecheck_call_forms.cpp | check_c_lazy；CDLL 接收者属性调用 |
-| 模块 | driver_build.cpp / builtin_sigs.cpp / lower_import.cpp | c/cdll 伪模块登记；native_fn；-ldl |
+| 类型检查 | typecheck_call.cpp / typecheck_call_forms.cpp | check_c_lazy；DYLIB 接收者属性调用 |
+| 模块 | driver_build.cpp / builtin_sigs.cpp / lower_import.cpp | c/dylib 伪模块登记；native_fn；-ldl |
 | 降级 | lower_c_lazy.cpp（新）/ lower_call.cpp / lower_method.cpp / lower_import_native.cpp | 调用点编组推断 + 分派 |
-| IR | ir_types.h / ir_ops.h / codegen_call_rt.cpp | IRExtern.lazy/sym_name；IRModule.c_lazy_syms；RtFn::CDLLLoad/Close |
+| IR | ir_types.h / ir_ops.h / codegen_call_rt.cpp | IRExtern.lazy/sym_name；IRModule.c_lazy_syms；RtFn::DYLIBLoad/Close |
 | 发射 | codegen_call.cpp / codegen.cpp / codegen_block.cpp | dlsym 解析序列 + 间接 call；float32 编组；符号串/缓存槽；暂存上界 |
 | 运行时 | rt_cffi.c（新）/ rt_internal.h / CMakeLists.txt | dlopen/dlsym 后端（Win32 给 NotImplementedError 桩） |
-| 序列化 | module.cpp | CDLL 跨模块按 unknown |
-| 测试 | tests/run/212–215、tests/cdll/probe.c、tests/fail/f27、tests/strict/s04、tests/cdecl/sample.* | 见下 |
+| 序列化 | module.cpp | DYLIB 跨模块按 unknown |
+| 测试 | tests/run/212–215、tests/dylib/probe.c、tests/fail/f27、tests/strict/s04、tests/cdecl/sample.* | 见下 |
 
 ### 6.2 实测（Debug 编译器，生成程序 O0/O2 均验证）
 
 - **212_c_lazy**：from c import sqrt/pow/strlen/labs/getpid，零声明。
   `sqrt(2.0)` → `1.4142135623730951`（O0==O2）；别名、标注、函数返回
   标注、循环内重复调用（缓存槽）均正确。
-- **213_cdll**：subprocess 现场 `cc -shared -fPIC -O2 tests/cdll/probe.c`
-  建 .so（构建说明在 probe.c 头部），cdll.load → probe_add(2,3)=5、
+- **213_dylib**：subprocess 现场 `cc -shared -fPIC -O2 tests/dylib/probe.c`
+  建 .so（构建说明在 probe.c 头部），dylib.load → probe_add(2,3)=5、
   probe_scale(4.0)=10.0、**int/str 混合** probe_mix(10,"hello")=15、
   str 标注 probe_greet→"hi"、close→0。
 - **214_c_lazy_errors**：三类错误路径消息（§3.2），O0==O2。
@@ -253,8 +255,8 @@ load+test+jne（缓存命中）与间接 call（vs 链接期直 call）——分
    （泄漏到进程退出，ctypes 同语义）；RTLD_GLOBAL/flags 参数未暴露。
 6. **Windows**：rt_cffi.c 给 NotImplementedError 桩；正式需
    LoadLibrary/GetProcAddress + Win64 调用约定（影子空间已有基础设施）。
-7. **CDLL 跨模块**：enc_type 按 unknown 序列化，跨模块传句柄会丢类型；
-   需要时给 CDLL 一个稳定编码。
+7. **DYLIB 跨模块**：enc_type 按 unknown 序列化，跨模块传句柄会丢类型；
+   需要时给 DYLIB 一个稳定编码。
 8. **标注覆盖的上下文**：目前只覆盖 AnnAssign 与 return 标注；
    `float(sqrt(2))` 这类转换包装、容器元素标注不传播（推断默认兜底）。
 9. **既有 Debug 断言**（118/154，vreg_nonneg OOB）：与 FFI 无关，base 复现，
@@ -264,7 +266,7 @@ load+test+jne（缓存命中）与间接 call（vs 链接期直 call）——分
 
 ## 8. 集成建议
 
-- 与 CPython 桥（207–211）无冲突：c/cdll 是独立伪模块，测试编号 212+ 已避让；
+- 与 CPython 桥（207–211）无冲突：c/dylib 是独立伪模块，测试编号 212+ 已避让；
   本轮未动 CHANGELOG（避免与主树集成冲突），合并时补 0.30x 条目。
 - 合并顺序建议：CPython 桥先落（主树在集成），cffi 分支 rebase 后跑全套件；
   关注 driver_build.cpp（kModuleTable/link_program）与 builtin_sigs.cpp 的

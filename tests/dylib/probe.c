@@ -1,10 +1,10 @@
-/* probe.c —— cdll（dlopen/dlsym）端到端测试库
+/* probe.c —— dylib（dlopen/dlsym）端到端测试库
  *
- * 构建说明（tests/run/213_cdll.py 会用 subprocess 自动执行同一命令）：
- *   cc -shared -fPIC -O2 tests/cdll/probe.c -o <out>.so
+ * 构建说明（tests/run/213_dylib.py 会用 subprocess 自动执行同一命令）：
+ *   cc -shared -fPIC -O2 tests/dylib/probe.c -o <out>.so
  * 然后 pyadamas 侧：
- *   import cdll
- *   lib = cdll.load("<out>.so")
+ *   import dylib
+ *   lib = dylib.load("<out>.so")
  *   lib.probe_add(2, 3)
  *
  * 签名故意覆盖：int/int→int、double→double、int/str 混合、char* 返回

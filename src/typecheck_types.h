@@ -66,7 +66,7 @@ enum class TyKind : uint8_t {
     Deque,        // collections.deque
     Struct,       // 值类型 struct 的实例，st 指向编译期布局
     StructPtr,    // addr(struct) 得到的指针；机器表示与 Struct 相同
-    CDLL,         // cdll.load() 的动态库句柄；机器表示是 dlopen 返回的整数地址
+    DYLIB,         // dylib.load() 的动态库句柄；机器表示是 dlopen 返回的整数地址
 };
 
 struct Type;
@@ -193,7 +193,7 @@ struct FuncInfo {
     bool ret_known = false;
     bool unchecked = false;   // 内置函数：参数规则在 builtin_call 里按名字分派
     bool is_extern = false;   // cimport 外部函数：参数/返回值按 C ABI 编组
-    // 免写直调（from c import X / cdll 句柄属性调用）：没有 .cpya 声明，
+    // 免写直调（from c import X / dylib 句柄属性调用）：没有 .cpya 声明，
     // 参数编组由调用点实参类型推断，返回类型由推断/标注决定。
     // c_symbol 是 C 侧符号名（别名导入时与 name 不同）。
     bool c_lazy = false;
@@ -612,8 +612,8 @@ inline const TypePtr& t_match() {
     static TypePtr v = new_ty(TyKind::Match);
     return v;
 }
-inline const TypePtr& t_cdll() {
-    static TypePtr v = new_ty(TyKind::CDLL);
+inline const TypePtr& t_dylib() {
+    static TypePtr v = new_ty(TyKind::DYLIB);
     return v;
 }
 
@@ -970,7 +970,7 @@ inline std::string type_name_impl(const TypePtr& t, int depth) {
         case TyKind::TimeDelta: return "timedelta";
         case TyKind::Path: return "pathlib.Path";
         case TyKind::Deque: return "collections.deque";
-        case TyKind::CDLL: return "cdll";
+        case TyKind::DYLIB: return "dylib";
     }
     return "?";
 }

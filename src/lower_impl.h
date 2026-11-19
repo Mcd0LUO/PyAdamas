@@ -1122,7 +1122,7 @@ private:
     VReg lower_method_file(Attribute& at, Call& c, VReg recv);
     VReg lower_method_int(Call& c, VReg recv);
     VReg lower_cimport_call(Attribute& at, Call& c);
-    // 免写直调：handle == kNoReg 走默认符号表，否则按 cdll 句柄 dlsym。
+    // 免写直调：handle == kNoReg 走默认符号表，否则按 dylib 句柄 dlsym。
     VReg lower_c_lazy_call(Call& c, const std::string& symbol, VReg handle);
     VReg lower_super_call(Attribute& at, Call& c);
     // 协议 dunder：__str__/__repr__/__eq__/__ne__/__len__。

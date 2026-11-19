@@ -131,9 +131,9 @@ static bool module_ctor(const std::string& module, const std::string& name) {
 }
 
 std::optional<RtFn> Lowerer::native_fn(const std::string& module, const std::string& member) {
-    if (module == "cdll") {
-        if (member == "load") return RtFn::CDLLLoad;
-        if (member == "close") return RtFn::CDLLClose;
+    if (module == "dylib") {
+        if (member == "load") return RtFn::DYLIBLoad;
+        if (member == "close") return RtFn::DYLIBClose;
         return std::nullopt;
     }
     if (module == "asyncio") {

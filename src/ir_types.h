@@ -355,7 +355,7 @@ struct IRExtern {
     bool varargs = false;
     // 免写直调的绑定方式：0 = 链接期符号（cimport，call symbol）；
     // 1 = dlsym(RTLD_DEFAULT)（from c import，首次调用解析并缓存）；
-    // 2 = dlsym(句柄)（cdll 句柄属性调用，句柄在 Inst::a，每次解析）。
+    // 2 = dlsym(句柄)（dylib 句柄属性调用，句柄在 Inst::a，每次解析）。
     int lazy = 0;
     // lazy != 0 时指向 IRModule::c_lazy_syms 的符号名字符串下标。
     int sym_name = -1;

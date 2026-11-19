@@ -78,7 +78,7 @@ bool TypeChecker::is_c_lazy_call(const Expr* e) const {
     if (c.func->kind == ExprKind::Attribute) {
         const auto& at = static_cast<const Attribute&>(*c.func);
         TypePtr rt = type_of(at.value.get());
-        return rt && rt->kind == TyKind::CDLL;
+        return rt && rt->kind == TyKind::DYLIB;
     }
     return false;
 }

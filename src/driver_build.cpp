@@ -211,9 +211,9 @@ inline constexpr ModuleEntry kModuleTable[] = {
     // 无运行期模块对象；调用降级成 rt_cpy 子进程 IPC（见 docs/cpybridge-design.md）。
     {"python", ModuleKind::Native, "", ""},
     // 免写直调的伪模块：c 提供 from c import <symbol>（任意符号名，
-    // 签名由调用点推断）；cdll 提供 dlopen/dlsym 动态库句柄。
+    // 签名由调用点推断）；dylib 提供 dlopen/dlsym 动态库句柄。
     {"c", ModuleKind::Native, "", ""},
-    {"cdll", ModuleKind::Native, "", ""},
+    {"dylib", ModuleKind::Native, "", ""},
     // ── 原生 + stdlib 扩展源（补 API 只改 stdlib/<source>，不用碰 src/）──
     {"functools", ModuleKind::NativePython, "functools.py", ""},
     // ── stdlib Python 源模块 ──────────────────────────────────

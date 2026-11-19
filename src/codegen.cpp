@@ -477,7 +477,7 @@ std::string AsmGen::gen(const IRModule& m) {
             out_ += "\t.text\n";
         }
 
-        // 免写直调（from c import / cdll 句柄调用）：符号名 C 字符串 +
+        // 免写直调（from c import / dylib 句柄调用）：符号名 C 字符串 +
         // 默认句柄的解析缓存槽。名字表按符号去重，槽在首次调用时填。
         if (!m.c_lazy_syms.empty()) {
             section_relro();

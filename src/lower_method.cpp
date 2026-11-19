@@ -111,8 +111,8 @@ VReg Lowerer::lower_method_call(Attribute& at, Call& c) {
             return lower_super_call(at, c);
         }
     }
-    // cdll 句柄的属性调用：lib.sym(...) 免写直调，符号经 dlsym(句柄) 解析。
-    if (TypePtr vt = tc_.type_of(at.value.get()); vt && vt->kind == TyKind::CDLL) {
+    // dylib 句柄的属性调用：lib.sym(...) 免写直调，符号经 dlsym(句柄) 解析。
+    if (TypePtr vt = tc_.type_of(at.value.get()); vt && vt->kind == TyKind::DYLIB) {
         VReg h = expr(*at.value);
         return lower_c_lazy_call(c, at.attr, h);
     }
