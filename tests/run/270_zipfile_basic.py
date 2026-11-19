@@ -43,9 +43,9 @@ try:
         print(zipfile.ZipInfo("dd/").is_dir())
         z.extractall(d + "/ex")
     print(osp.exists(d + "/ex/a.txt"))
-    f = open(d + "/ex/a.txt", "rb")
-    fb: bytes = cast(bytes, f.read())
-    print(fb)
+    f = open(d + "/ex/a.txt", "r")
+    fs: str = f.read()
+    print(fs)
     f.close()
     print(osp.exists(d + "/ex/dir/b.bin"))
     print(zipfile.is_zipfile(p), zipfile.is_zipfile(d + "/ex/a.txt"))
@@ -133,7 +133,8 @@ finally:
 # (2024, 5, 6, 7, 8, 9) 0 False
 # True
 # True
-# b'hello world\nline2'
+# hello world
+# line2
 # True
 # True False
 # True

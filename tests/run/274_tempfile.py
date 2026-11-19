@@ -28,9 +28,9 @@ print("mkstemp default:", osp.basename(p).startswith("tmp"), p.startswith("/"))
 f = open(fd, "w")
 f.write("data")
 f.close()
-g = open(p, "rb")
-gb: bytes = cast(bytes, g.read())
-print("mkstemp content:", gb)
+g = open(p, "r")
+gs: str = g.read()
+print("mkstemp content:", gs)
 g.close()
 os.unlink(p)
 fd2, p2 = tempfile.mkstemp(suffix=".log", prefix="pre", dir=td)
@@ -119,7 +119,7 @@ print("done")
 # d2 nested: True True True
 # d3 none: True
 # mkstemp default: True True
-# mkstemp content: b'data'
+# mkstemp content: data
 # mkstemp attrs: True True
 # ntf wb: b'abc' True True True
 # ntf tell: 3

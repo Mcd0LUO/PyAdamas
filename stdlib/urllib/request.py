@@ -183,7 +183,7 @@ def urlopen(url: object, data: object = None, timeout: float = -1.0, *,
         if method is None:
             req_method = rq.method
     else:
-        u = cast(str, url)
+        u = url
     pos = u.find("://")
     if pos <= 0:
         raise ValueError("unknown url type: '" + u + "'")
@@ -192,11 +192,11 @@ def urlopen(url: object, data: object = None, timeout: float = -1.0, *,
         raise URLError("unknown url type: " + scheme)
     m = ""
     if not (req_method is None):
-        m = cast(str, req_method)
+        m = req_method
     body = b""
     blen = -1
     if not (req_data is None):
-        body = cast(bytes, req_data)
+        body = req_data
         blen = len_bytes(body)
         if len(m) == 0:
             m = "POST"

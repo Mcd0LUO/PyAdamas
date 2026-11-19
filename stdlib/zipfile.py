@@ -180,7 +180,7 @@ class ZipInfo:
                   *, strict_timestamps: bool = True) -> "ZipInfo":
         an = filename
         if not (arcname is None):
-            an = cast(str, arcname)
+            an = arcname
         an = _osp.normpath(an)
         while an.startswith("/"):
             an = an[1:]
@@ -345,7 +345,8 @@ class ZipFile:
     def _resolve(self, name: object) -> ZipInfo:
         if isinstance(name, ZipInfo):
             return name
-        return self.getinfo(cast(str, name))
+        s: str = name
+        return self.getinfo(s)
 
     def read(self, name: object, pwd: object = None) -> bytes:
         if self.closed:
@@ -447,7 +448,7 @@ class ZipFile:
         cl = self._compresslevel
         if compresslevel >= -1:
             cl = compresslevel
-        b = cast(bytes, data)
+        b: bytes = data
         self._store(zi, b, ct, cl)
 
     def _extract_member(self, member: object, targetpath: str, pwd: object) -> str:
@@ -474,7 +475,7 @@ class ZipFile:
             raise ValueError("extract() on closed ZipFile")
         tp = "."
         if not (path is None):
-            tp = cast(str, path)
+            tp = path
         return self._extract_member(member, tp, pwd)
 
     def extractall(self, path: object = None, members: object = None, pwd: object = None) -> None:
@@ -482,7 +483,7 @@ class ZipFile:
             raise ValueError("extractall() on closed ZipFile")
         tp = "."
         if not (path is None):
-            tp = cast(str, path)
+            tp = path
         if members is None:
             for zi in self._entries:
                 self._extract_member(zi, tp, pwd)
@@ -562,7 +563,8 @@ class ZipFile:
             return _ZipExtFile(self, zi, False)
         if mode == "w":
             self._check_open_write()
-            zi = ZipInfo(cast(str, name))
+            s: str = name
+            zi = ZipInfo(s)
             zi.compress_type = self._compression
             return _ZipExtFile(self, zi, True)
         raise ValueError("open() requires mode 'r' or 'w'")
@@ -675,7 +677,7 @@ class _ZipExtFile:
             raise ValueError("I/O operation on closed file")
         if not self._wmode:
             raise OSError("write() on read-only ZipExtFile")
-        b = cast(bytes, data)
+        b: bytes = data
         self._wparts.append(b)
         return len(b)
 

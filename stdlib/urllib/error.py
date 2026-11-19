@@ -68,7 +68,7 @@ class HTTPMessage:
         return out
 
     def __contains__(self, name: object) -> bool:
-        s: str = cast(str, name)
+        s: str = name
         low = s.lower()
         for p in self._pairs:
             if p[0].lower() == low:

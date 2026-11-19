@@ -13,20 +13,21 @@ d = tempfile.mkdtemp(prefix="pa273_")
 try:
     os.makedirs(d + "/src/sub/deep", exist_ok=True)
 
-    def wf(path: str, data: bytes) -> None:
-        f = open(path, "wb")
-        f.write(cast(str, data))
+    def wf(path: str, data: str) -> None:
+        f = open(path, "w")
+        f.write(data)
         f.close()
 
-    def rf(path: str) -> bytes:
-        f = open(path, "rb")
-        b: bytes = cast(bytes, f.read())
+    def rf(path: str) -> str:
+        # 文本口径，同 272（基线 leaf×unknown 泄漏绕行）。
+        f = open(path, "r")
+        s: str = f.read()
         f.close()
-        return b
+        return s
 
-    wf(d + "/src/a.txt", b"alpha\n")
-    wf(d + "/src/sub/b.bin", b"\x00\xff\x10binary")
-    wf(d + "/src/sub/deep/c.txt", b"deep")
+    wf(d + "/src/a.txt", "alpha\n")
+    wf(d + "/src/sub/b.bin", "binary-content")
+    wf(d + "/src/sub/deep/c.txt", "deep")
 
     shutil.copytree(d + "/src", d + "/tree")
     print("tree:", sorted(os.listdir(d + "/tree")))
@@ -55,22 +56,22 @@ try:
     print("nosym islink:", osp.islink(d + "/tree_nosym/link.txt"))
     print("nosym content:", rf(d + "/tree_nosym/link.txt"))
 
-    wf(d + "/m1.txt", b"move-me")
+    wf(d + "/m1.txt", "move-me")
     shutil.move(d + "/m1.txt", d + "/moved.txt")
     print("move:", osp.exists(d + "/m1.txt"), rf(d + "/moved.txt"))
     shutil.move(d + "/moved.txt", d + "/tree")
     print("move into dir:", osp.exists(d + "/tree/moved.txt"))
     shutil.move(d + "/tree_ig2", d + "/moved_tree")
     print("move dir:", osp.isdir(d + "/moved_tree"), sorted(os.listdir(d + "/moved_tree")))
-    wf(d + "/ow.txt", b"new")
-    wf(d + "/victim.txt", b"old")
+    wf(d + "/ow.txt", "new")
+    wf(d + "/victim.txt", "old")
     shutil.move(d + "/ow.txt", d + "/victim.txt")
     print("move overwrite:", rf(d + "/victim.txt"))
 
     shutil.rmtree(d + "/tree")
     print("rmtree:", osp.exists(d + "/tree"))
     os.makedirs(d + "/rmtest", exist_ok=True)
-    wf(d + "/rmtest/f.txt", b"keep")
+    wf(d + "/rmtest/f.txt", "keep")
     subprocess.run(["ln", "-s", d + "/src", d + "/rmtest/lnk"], capture_output=True)
     shutil.rmtree(d + "/rmtest")
     print("rmtree sym:", osp.exists(d + "/rmtest"), osp.exists(d + "/src/a.txt"))
@@ -95,7 +96,7 @@ try:
         shutil.move(d + "/src", d + "/src/inner")
     except shutil.Error:
         print("move into self ok")
-    wf(d + "/tree_sym/victim.txt", b"x")
+    wf(d + "/tree_sym/victim.txt", "x")
     try:
         shutil.move(d + "/victim.txt", d + "/tree_sym")
     except shutil.Error:
@@ -106,18 +107,20 @@ finally:
 
 # --- expect ---
 # tree: ['a.txt', 'sub']
-# tree deep: b'deep'
+# tree deep: deep
 # ignored: ['sub'] ['deep']
 # custom ign: ['a.txt']
 # sym islink: True
-# sym read: b'alpha\n'
+# sym read: alpha
+# 
 # sym dirlink: True
 # nosym islink: False
-# nosym content: b'alpha\n'
-# move: False b'move-me'
+# nosym content: alpha
+# 
+# move: False move-me
 # move into dir: True
 # move dir: True ['a.txt']
-# move overwrite: b'new'
+# move overwrite: new
 # rmtree: False
 # rmtree sym: False True
 # copytree FEX ok

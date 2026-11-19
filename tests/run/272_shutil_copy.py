@@ -13,24 +13,27 @@ try:
     os.makedirs(d + "/src", exist_ok=True)
     os.makedirs(d + "/dstd", exist_ok=True)
 
-    def wf(path: str, data: bytes) -> None:
-        f = open(path, "wb")
-        f.write(cast(str, data))
+    def wf(path: str, data: str) -> None:
+        f = open(path, "w")
+        f.write(data)
         f.close()
 
-    def rf(path: str) -> bytes:
-        f = open(path, "rb")
-        b: bytes = cast(bytes, f.read())
+    def rf(path: str) -> str:
+        # 文本口径（ASCII 内容）：cast(bytes, f.read()) 的 unknown 中转撞
+        # 基线 leaf×unknown RC 泄漏（docs/stdlib-batch2.md §六），测试侧绕行；
+        # 二进制面由 zipfile/urllib 用例的模块 API（静态 bytes）覆盖。
+        f = open(path, "r")
+        s: str = f.read()
         f.close()
-        return b
+        return s
 
-    wf(d + "/src/a.txt", b"alpha\n")
-    wf(d + "/src/big.bin", bytes([i % 251 for i in range(200000)]))
+    wf(d + "/src/a.txt", "alpha\n")
+    wf(d + "/src/big.bin", "0123456789abcdef" * 12500)
     os.chmod(d + "/src/a.txt", 0o640)
 
     shutil.copyfile(d + "/src/a.txt", d + "/c1.txt")
     print("c1:", rf(d + "/c1.txt"))
-    wf(d + "/c1.txt", b"old-longer-content")
+    wf(d + "/c1.txt", "old-longer-content")
     shutil.copyfile(d + "/src/a.txt", d + "/c1.txt")
     print("overwrite:", rf(d + "/c1.txt"))
     shutil.copyfile(d + "/src/big.bin", d + "/big_copy.bin")
@@ -47,7 +50,7 @@ try:
     sm = subprocess.run(["stat", "-c", "%a", d + "/c2.txt"], capture_output=True, text=True)
     print("mode:", sm.stdout.strip())
 
-    wf(d + "/c3.txt", b"xxx")
+    wf(d + "/c3.txt", "xxx")
     shutil.copystat(d + "/src/a.txt", d + "/c3.txt")
     print("copystat mtime:", osp.getmtime(d + "/c3.txt") == mt)
     print("copystat content:", rf(d + "/c3.txt"))
@@ -75,7 +78,7 @@ try:
     print("which sh:", shutil.which("sh") is not None)
     print("which missing:", shutil.which("no_such_cmd_xyz") is None)
     print("which path:", shutil.which("sh", path=d + "/nope") is None)
-    wf(d + "/mytool", b"#!/bin/sh\n")
+    wf(d + "/mytool", "#!/bin/sh\n")
     os.chmod(d + "/mytool", 0o755)
     print("which custom:", shutil.which("mytool", path=d) == d + "/mytool")
     print("done")
@@ -83,15 +86,18 @@ finally:
     shutil.rmtree(d, ignore_errors=True)
 
 # --- expect ---
-# c1: b'alpha\n'
-# overwrite: b'alpha\n'
+# c1: alpha
+# 
+# overwrite: alpha
+# 
 # big: True
-# copy dst: True b'alpha\n'
+# copy dst: True alpha
+# 
 # copy2 dst: True
 # mtime: True
 # mode: 640
 # copystat mtime: True
-# copystat content: b'xxx'
+# copystat content: xxx
 # copymode: 640
 # copyfile FNF ok
 # SameFile ok

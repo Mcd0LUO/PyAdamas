@@ -61,19 +61,22 @@ def gettempdir() -> str:
 def _resolve_dir(dir: object) -> str:
     if dir is None:
         return gettempdir()
-    return cast(str, dir)
+    s: str = dir
+    return s
 
 
 def _norm_suffix(suffix: object) -> str:
     if suffix is None:
         return ""
-    return cast(str, suffix)
+    s: str = suffix
+    return s
 
 
 def _norm_prefix(prefix: object) -> str:
     if prefix is None:
         return "tmp"
-    return cast(str, prefix)
+    s: str = prefix
+    return s
 
 
 def _random_name() -> str:
@@ -148,7 +151,8 @@ class _TemporaryFileWrapper:
         self._closed = False
 
     def write(self, data: object) -> int:
-        return self.file.write(cast(str, data))
+        s: str = data
+        return self.file.write(s)
 
     def writelines(self, lines: list[str]) -> None:
         self.file.writelines(lines)

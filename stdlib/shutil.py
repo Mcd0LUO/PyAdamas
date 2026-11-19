@@ -280,7 +280,7 @@ def which(cmd: str, mode: int = 1, path: object = None) -> object:
     if path is None:
         p = os.getenv("PATH")
     else:
-        p = cast(str, path)
+        p = path
     if len(p) == 0:
         return None
     for d in p.split(":"):
