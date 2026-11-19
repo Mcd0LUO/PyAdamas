@@ -485,8 +485,18 @@ PyAdamasList* pa_file_readlines(PyAdamasFile* f, int64_t hint) {
     int64_t total = 0;
     for (;;) {
         PyAdamasStr* line = pa_file_readline(f, -1);
-        if (line->len == 0) break;
-        pa_rc_inc(line);
+        if (line->len == 0) {
+            // 文件末尾的空串没人持有：还掉。0.321 之前它靠 GC 堆链兜底
+            // （字符串是 tracked 叶子，退出时随链一起 free），字符串变成
+            // 索引叶子之后必须显式释放。
+            pa_rc_dec(line);
+            break;
+        }
+        // **append 只借用，列表拿走的是产生者的那一份引用，不再额外 inc。**
+        // 原来的 pa_rc_inc 让每行多留一个引用（rc 永不归零）：tracked 叶子
+        // 时代被 pa_gc_shutdown 的「沿链 free」掩盖，字符串不再进链之后
+        // 就是真实泄漏（ASan detect_leaks 实测 174_gc_construct_roots 漏
+        // 10MB / 10 万行）。
         pa_list_append(out, (int64_t)line, 2);
         total += line->len;
         if (hint > 0 && total >= hint) break;

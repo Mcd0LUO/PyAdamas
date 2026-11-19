@@ -4,6 +4,28 @@
 
 早期阶段没有逐条留痕，按阶段归纳；0.4 之后逐条记录。
 
+## [0.321] - 2026-11-19
+
+### 性能：str/bytes 索引叶子 —— 字符串脚本 RC/GC 记账优化（日常字符串脚本合计 −11.8%）
+
+> 任务给的取证是「B 类字符串脚本 GC 族 ≈28%、根因是 str tracked 叶子」。本轮先
+> 按测量纪律复核（HANDOFF §2：perf 占比 ≠ 边际成本、数字先对数量级），结果与取证
+> 不一致：**GC 族只有 ~1.4%，真正的天花板是存活堆索引**（字符串占主索引绝大多数
+> 条目）。下面按复核后的两个方向落地，两者都保留「字符串留在 rc_index」这条硬约束。
+
+- **测量先行（基线 cedca8c，绑核 24，perf record -F 4000 × 15 轮 / perf stat -r 5）**：b1_log_parse 的 flat 剖面 = 生成代码 run 29.0%；RC 族 rc_alloc_core 8.0% + rc_index_put 6.6% + rc_index_del 5.1% + pa_rc_dec_slow 5.1% + rc_link 2.7% + rc_unlink 1.6% + str_alloc_raw 2.3% + pa_rc_cleanup 1.8% ≈ **31%**；GC 族 gc_collect 0.5% + gc_scan_object 0.4% + gc_mark 0.2% + rc_index_rehash 0.3% ≈ **1.4%**（gcstats 独立佐证：b1 8 次收集共 0.216ms/30ms、b2 4 次 0.184ms/20ms、b4 1 次 0.549ms/20ms）。**与取证不符的原因**：语料脚本存活串少（gc_live 769KB / 512KB），收集触发由分配字节数决定、集合也不大 —— 字符串确实在驱动阈值与集合规模，但绝对开销远小于 28%。
+- **str_build 是 exact-RC 模式**（objdump：有 `call pa_disable_unknown_index`、无索引维护调用；gc_live 352B、9 次收集共 0.012ms）：字符串本来就是 untracked 叶子，**不参与 GC 记账** —— 本轮对它不可能有收益，实测中性（见下，两侧生成汇编逐字节相同，差异纯属运行时布局）。
+- **优化 1（`PYADAMAS_RC_LEAF`：叶子不进 GC 记账，但保留索引成员资格）**：str/bytes 是不可变叶子（零出边、不可能成环），生死完全由 RC 决定。它们不再进 GC 堆链 / 新生代 / 本轮集合，也不累加 alloc_since_gc / alloc_since_major（同 0.276「untracked 元组不入 GC 记账」的思路，区别是**必须留索引**：unknown 值探针 pa_rc_inc_unknown / pa_rc_dec_unknown 靠 rc_index_has 识别堆指针，整体 untrack 会让 unknown 槽里的字符串漏释放）。实现：rc_link 走叶子分支（marked=LEAF，prev/next 置空，rc_index_put），rc_unlink 只撤索引，gc_phase_dec 的 trial/restore 跳过、sweep 时就地归零释放（rc_leaf_free：索引 del → dtor → str freelist），阈值记账按 marked 位排除；pa_gc_shutdown 增加「先按 major sweep 口径交出边、再 free 链」的一遍（否则环垃圾持有的字符串没人减引用，ASan 会报 Direct leak）；`PYADAMAS_GC_CONSERVATIVE=1` 时整个叶子模式关闭，回到旧的「字符串全跟踪」口径（排障 / 行为对照）。
+- **优化 2（索引叶子改「4KB 页 × 16 字节槽位图」，攻击真正的天花板）**：叶子不进主索引，改按页登记：页基址哈希到 2048 桶，每页 256 个 16 字节槽 → 32 字节位图 + 活对象计数；put/del 退化成「页哈希 + 置/清一位」，has 不解引用对象。**精确性与主索引逐元素相同**（不是概率结构）：位图标记「这个 16B 槽位上恰好有一个活着的字符串头」，堆块来自 malloc（ABI 16 字节对齐）且不会两个块落在同一槽；释放清位，之后落在这个地址的整数（v=addr+64）与主索引一样不命中；8 字节对齐的静态驻留串（`PyAdamasStaticStr` 表项 104 字节排布，一半落在 8 mod 16）无法用槽位表示，仍走主索引 —— 路由判据只依赖「地址对齐 + kind」，put/del/has 三处一致。atexit 还掉页节点（必须晚于 pa_rc_shutdown，它还会释放临时栈上的字符串）。实测 b1 剖面 rc_index_put 6.6%→4.4%、rc_index_del 5.1%→4.0%（位图内联进这两个函数），主索引条目数骤降（只剩容器/闭包/异常/8 字节对齐静态串）。
+- **优化 3（顺带修：pa_file_readlines 每行多一次 pa_rc_inc 的既有引用泄漏）**：readlines 对刚产生的字符串（rc=1）多加一次引用又不释放，每行泄漏一个引用；tracked 叶子时代它被 pa_gc_shutdown 的「沿链逐个 free」掩盖，字符串变成索引叶子后 ASan detect_leaks 立刻抓出来（174_gc_construct_roots 漏 10MB / 10 万行）。改为 append 直接拿走产生者那一份引用（与 store_list_elem 的 fresh 分支同口径），文件末尾那个空串显式 dec。
+- **实测（abbench，15 轮交替中位，绑核 24，基线 cedca8c）**：
+  - **日常字符串脚本**：b1_log_parse 26.66→23.82ms（**−10.6%**，p25 −11.4%）、b2_normalize 20.53→17.52ms（**−14.7%**）、b3_template 10.88→9.78ms（**−10.2%**）、b4_wordfreq 24.67→21.01ms（**−14.8%**）、b5_re_extract 26.91→24.55ms（**−8.7%**）；**合计 109.65→96.68ms（−11.8%）**。
+  - **perf stat（-r 5）**：b1 instructions 115.1M→101.2M（−12.1%）、cycles 55.8M→48.7M（−12.7%）；b2 81.5M→69.6M / 40.8M→31.0M（−14.6% / −23.9%）；b4 86.7M→79.1M / 48.4M→40.1M（−8.8% / −17.1%）；b5 137.6M→127.5M / 56.5M→51.0M（−7.3% / −9.8%）。
+  - **realistic 6 案**：dict_wordfreq **−5.7%**（词频 dict 的键全是堆串，直接受益）、obj_dispatch −0.0%、queue_sim +0.3%、rec_memo +0.4%、sort_struct −0.4%、str_build **+2.0%**（p25 +1.7%）；**合计 1638.37→1624.05ms（−0.9%）**。str_build 的 +2% 是纯运行时布局效应：**两侧生成汇编逐字节相同**（`pyadamas asm` + cmp），instructions 1132.8M→1131.2M（−0.1%），只有 cycles 变化（+1.5%）—— 与 HANDOFF §6.4「gcc 内联/布局扰动」同款；exact-RC 下字符串本来就不参与任何 GC 记账，本轮没有可受益路径。
+  - **GC 侧证据**：b1/b2/b4 的 gcstats 从 8/4/1 次收集（0.216/0.184/0.549ms）降到 **0 次**（字符串不再驱动阈值，容器分配量又低于 2MB 门槛）；str_build（exact 模式）保持 9 次 / 0.012ms 不变，证明改动只落在「索引维护开启」的字符串脚本上。
+- **验证（终态）**：difftest **236/0**（235 + 新增 240）；普通与 ASan 套件各 **254 ran ok / EXIT=0**（PYADAMAS_TEST_JOBS=8）；ASan detect_leaks=1 抽查 13_gc / 66_genexpr / 119_gen_except_suspend / 88_defaultdict / 192_dict_cache / 174_gc_construct_roots / 237_rc_container_ops / 240_str_leaf_gc 全干净且输出与 expect 一致；0.271 oracle 语料对比零意外差异（只剩 4 个**既有**时代差，用 cedca8c 基线逐条 `--rebuild` 复核，基线/oracle 的差异与当前/oracle 完全一致：47_float_sum_order、66_genexpr 是 0.317 的 CPython 口径修正；206_list_store_kind 与 237_rc_container_ops 是 oracle 侧 SIGSEGV —— 前者 0.312 起就记录在案、后者是 0.315 新用例）；规模检查仍是原有 5 处超限（rt_core.c 2825 行是运行时文件，不在 src/ 的 1200 行规则内；新用例 240_str_leaf_gc.py 127 行）。
+- **新增**：tests/run/240_str_leaf_gc.py（先对拍 CPython 3.14 再钉 expect，O0/O1/O2 + `PYADAMAS_GC_CONSERVATIVE=1` 四种口径输出一致）：字符串密集 churn、unknown 容器元素/unknown 槽持字符串跨多次 GC（含 4 次 major）、类实例持字符串成环的真收集（gc_freed>0）与存活环、字符串键 dict、bytes 叶子、unknown 返回值的两条分支。
+- **同批发现、未修（记录备查）**：降级器在「unknown 元素赋给槽 / for 循环变量」时会连发两次 `pa_rc_inc_unknown`（`for v in list[object]: ...` 与 `v: object = xs[i]` 都是），每元素多留一个引用。这是**既有 bug**（cedca8c 基线的 IR 与 rc 计数完全相同，不是本轮引入），tracked 叶子时代被「退出时沿 GC 链 free」掩盖；字符串变成索引叶子后 LeakSanitizer 会把它报出来。240 用例因此改用下标直取 + print（无槽赋值）覆盖 unknown 探针路径，并在注释里写明原因。修它需要动降级器的 unknown 所有权口径，另票。
 ## [0.320] - 2026-11-19
 
 ### 日常脚本语料库（bench/daily/，23 脚本）+ 对拍报告

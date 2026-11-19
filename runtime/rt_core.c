@@ -32,6 +32,21 @@ size_t gc_conservative_count;
 /* 诊断模式专用：该对象首次是在保守根扫描阶段被发现的（没有精确根能到
    它）。只用于统计误报保留量，正常模式下永远不置位。 */
 #define PYADAMAS_RC_CONS 8
+/* **索引叶子**（0.321）：对象不进 GC 堆链、不进新生代、不进本轮集合，
+   但仍留在存活堆索引里（unknown 值探针靠索引识别堆指针，不能整体
+   untrack，否则 unknown 槽里的字符串会漏释放）。
+
+   适用对象：str / bytes（PYADAMAS_RC_STR）。字符串不可变、没有出边，
+   不可能处在环里，生死完全由 RC 决定 —— GC 永远收不到它们。让它们
+   参与 GC 记账（堆链、新生代、阈值计数、mark/sweep 遍历）是纯开销：
+   b1_log_parse 实测字符串分配把 GC 触发次数从 0 抬到 8 次，堆链/新生代
+   的插摘又是每次分配一笔（见 CHANGELOG 0.321 的取证）。
+
+   与 UNTRACKED 的区别：UNTRACKED 是 exact-RC 模式（索引整体关闭）的
+   叶子，连索引都不进；LEAF 保留索引成员资格，只是不参与 GC 记账。
+   与 0.276「kind-0 元组 rc_alloc_untracked」同思路，区别是元组连索引
+   都不需要（它们只出现在静态类型已知的槽里）。 */
+#define PYADAMAS_RC_LEAF 16
 
 /* ── 分代收集状态（分配热路径和 rc_link 都要用） ──────────────
    young_buf 是上次收集后分配、还没晋升的对象；marked 高位是它在数组里
@@ -111,6 +126,7 @@ static void gc_incr_finish(void);
 static void gc_incr_step(void);
 static void gc_free_body(PyAdamasRc* h);
 static void gc_alloc_black(PyAdamasRc* h);
+static void rc_leaf_free(PyAdamasRc* h, void* p);
 
 static void gc_collect(int major);
 static void gc_pend_add(int64_t v);
@@ -166,6 +182,14 @@ static void gc_phase_dec(PyAdamasRc* h, void* p) {
         if (h->rc > 0 && --h->rc == 0) free(h);
         return;
     }
+    // 索引叶子：不在本轮集合里，trial/restore 不会碰它（marked 没有
+    // YOUNG 位）；清扫阶段容器交出引用时按普通 RC 就地归零释放 ——
+    // 与 exact-RC 的 untracked 叶子同一套论证，只是还要维护索引成员资格、
+    // 走 freelist 回收（str_pool）。
+    if (h->marked & PYADAMAS_RC_LEAF) {
+        if (h->rc > 0 && --h->rc == 0) rc_leaf_free(h, p);
+        return;
+    }
     if (gc_mark_sweep) {
         if ((h->marked & PYADAMAS_RC_MARK) && h->rc > 0) h->rc--;
         return;
@@ -196,6 +220,12 @@ static int rc_index_readonly;
    它们；而它们又不可能成环。标记没进链的对象用 marked=2 区分，
    清扫垃圾容器时对这类子对象直接走正常 RC 释放。 */
 static int gc_untracked_leaves;
+
+/* **索引叶子模式**（PYADAMAS_RC_LEAF，0.321）：索引维护开启时（非
+   exact-RC），str/bytes 也不进 GC 记账，只在索引里留成员资格。
+   PYADAMAS_GC_CONSERVATIVE=1 时关掉，回到旧的「字符串全跟踪」口径，
+   作为行为对照 / 排障回退。入口 pa_gc_init 里一次性设定。 */
+static int gc_leaf_mode;
 
 /* RC/GC 统计：PYADAMAS_RC_STATS=1 时在退出时打印。
    统计本身只是一个可预测的全局分支，不改变所有权语义。 */
@@ -538,6 +568,18 @@ static void list_inline_pool_put(PyAdamasRc* h) {
     pa_list_inline_pool_count++;
 }
 
+/* 索引叶子的「归零释放」：普通 RC 路径走 dec_slow 的 rc==0 分支，
+   收集期（容器交出引用）走这里。口径与 dec_slow 一致 ——
+   撤销索引成员资格 → dtor → freelist 回收。 */
+static void rc_leaf_free(PyAdamasRc* h, void* p) {
+    if (rc_stats_on) stat_rc_free++;
+    if (__builtin_expect(pa_diag_rc_on != 0, 0)) pa_diag_rc_free(p, (int32_t)h->kind);
+    rc_unlink(h);
+    if (h->dtor) h->dtor(p);
+    if (h->kind == PYADAMAS_RC_STR) str_pool_put(h);
+    else free(h);
+}
+
 /* exact-RC 模式下可以完全绕开 GC 的对象：没有任何堆字段（没有出边），
    不可能处在环里。字符串是典型；没有堆字段的类实例（生成代码不给
    dtor/release）同理。它们的生死完全由 RC 决定。 */
@@ -553,6 +595,160 @@ static int rc_leaf_untracked(const PyAdamasRc* h) {
 }
 
 void panic_c(const char* msg);
+
+/* ── 索引叶子的分页登记表（0.321）─────────────────────────────
+ *
+ * 字符串是索引叶子（PYADAMAS_RC_LEAF）：不进 GC 记账，但必须留在「这个
+ * 机器字是不是堆对象」的注册表里 —— unknown 值的 rc_inc_unknown /
+ * dec_unknown 靠它识别堆指针。
+ *
+ * **为什么不放主索引**：主索引是「每对象一个槽」的开放寻址哈希表，字符
+ * 串密集脚本每分配/释放一次字符串就要探一次哈希（b1 实测 rc_index_put
+ * 6.6% + rc_index_del 5.1%，是运行时最大的一块）。字符串地址高度聚集，
+ * 用「页 + 位图」表示同样精确：4KB 页 → 256 个 16 字节槽 → 32 字节
+ * 位图，整个工作集只有几十 KB（主表要几百 KB），put/del 退化成
+ * 「页哈希 + 置/清一位」，命中判定不需要解引用对象。
+ *
+ * **精确性**（与主索引逐元素相同的集合，不是概率结构）：
+ *   - 位图标记的是「这个 16 字节槽位上恰好有一个活着的字符串头」；
+ *   - 堆对象头都来自 malloc（ABI 保证 16 字节对齐），两个堆块不会落在
+ *     同一 16 字节槽里，所以位与对象一一对应；
+ *   - 释放时清位，之后落在这个地址的整数（v = addr + 64）与主索引一样
+ *     不会命中（主索引靠删除 + 墓碑保证同一件事）；
+ *   - 8 字节对齐的静态驻留串（表项按 104 字节排布，一半落在 8 mod 16）
+ *     无法用 16 字节槽表示，仍走主索引 —— 路由判据只依赖地址对齐与
+ *     kind，put/del/has 三处一致。
+ *
+ * 开关：gc_leaf_mode（PYADAMAS_GC_CONSERVATIVE=1 时关闭，回到全跟踪 +
+ * 全量主索引口径）。 */
+
+#define LEAF_PAGE_SHIFT 12
+#define LEAF_PAGE_BYTES ((uintptr_t)1 << LEAF_PAGE_SHIFT)
+#define LEAF_PAGE_MASK (LEAF_PAGE_BYTES - 1)
+#define LEAF_PAGE_SLOTS (LEAF_PAGE_BYTES / 16)        /* 256 个 16 字节槽 */
+#define LEAF_PAGE_WORDS (LEAF_PAGE_SLOTS / 64)        /* 4 个 64 位字 */
+#define LEAF_BUCKET_BITS 11
+#define LEAF_BUCKETS ((size_t)1 << LEAF_BUCKET_BITS)
+#define LEAF_BUCKET_MASK (LEAF_BUCKETS - 1)
+/* 空页节点回收上限：字符串在页之间来回时避免反复 malloc/free。 */
+#define LEAF_PAGE_CACHE_MAX 64
+
+typedef struct PyAdamasLeafPage {
+    struct PyAdamasLeafPage* next;
+    uintptr_t base;                     /* 页基址（addr & ~4095） */
+    int32_t live;                       /* 本页活着的字符串个数 */
+    uint64_t bits[LEAF_PAGE_WORDS];     /* 16 字节槽位图 */
+} PyAdamasLeafPage;
+
+static PyAdamasLeafPage* leaf_page_tab[LEAF_BUCKETS];
+static PyAdamasLeafPage* leaf_page_cache;
+static int leaf_page_cache_count;
+
+static inline size_t leaf_bucket(uintptr_t base) {
+    uint64_t x = (uint64_t)(base >> LEAF_PAGE_SHIFT);
+    x *= 0x9e3779b97f4a7c15ull;
+    x ^= x >> 32;
+    return (size_t)x & LEAF_BUCKET_MASK;
+}
+
+static PyAdamasLeafPage* leaf_page_new(void) {
+    PyAdamasLeafPage* p = leaf_page_cache;
+    if (p) {
+        leaf_page_cache = p->next;
+        leaf_page_cache_count--;
+        return p;
+    }
+    p = (PyAdamasLeafPage*)malloc(sizeof(PyAdamasLeafPage));
+    if (!p) panic_c("out of memory");
+    return p;
+}
+
+static void leaf_page_release(PyAdamasLeafPage* p) {
+    if (leaf_page_cache_count >= LEAF_PAGE_CACHE_MAX) {
+        free(p);
+        return;
+    }
+    p->next = leaf_page_cache;
+    leaf_page_cache = p;
+    leaf_page_cache_count++;
+}
+
+/* 字符串头 h 能不能用 16 字节槽位表示（见上面的精确性说明）。 */
+static inline int leaf_slot_ok(uintptr_t h) { return (h & 15) == 0; }
+
+static void leaf_index_put(PyAdamasRc* h) {
+    uintptr_t a = (uintptr_t)h;
+    uintptr_t base = a & ~LEAF_PAGE_MASK;
+    size_t b = leaf_bucket(base);
+    PyAdamasLeafPage* pg = leaf_page_tab[b];
+    while (pg && pg->base != base) pg = pg->next;
+    if (!pg) {
+        pg = leaf_page_new();
+        pg->base = base;
+        pg->live = 0;
+        memset(pg->bits, 0, sizeof pg->bits);
+        pg->next = leaf_page_tab[b];
+        leaf_page_tab[b] = pg;
+    }
+    size_t slot = (a & LEAF_PAGE_MASK) >> 4;
+    uint64_t bit = (uint64_t)1 << (slot & 63);
+    if (!(pg->bits[slot >> 6] & bit)) {
+        pg->bits[slot >> 6] |= bit;
+        pg->live++;
+    }
+}
+
+static void leaf_index_del(PyAdamasRc* h) {
+    uintptr_t a = (uintptr_t)h;
+    uintptr_t base = a & ~LEAF_PAGE_MASK;
+    size_t b = leaf_bucket(base);
+    PyAdamasLeafPage** pp = &leaf_page_tab[b];
+    PyAdamasLeafPage* pg = *pp;
+    while (pg && pg->base != base) {
+        pp = &pg->next;
+        pg = pg->next;
+    }
+    if (!pg) return;
+    size_t slot = (a & LEAF_PAGE_MASK) >> 4;
+    uint64_t bit = (uint64_t)1 << (slot & 63);
+    if (!(pg->bits[slot >> 6] & bit)) return;
+    pg->bits[slot >> 6] &= ~bit;
+    if (--pg->live == 0) {
+        *pp = pg->next;
+        leaf_page_release(pg);
+    }
+}
+
+/* 注意：h 可能是任意整数减过头的地址，**不能解引用**。 */
+static int leaf_index_has(const PyAdamasRc* h) {
+    uintptr_t a = (uintptr_t)h;
+    uintptr_t base = a & ~LEAF_PAGE_MASK;
+    PyAdamasLeafPage* pg = leaf_page_tab[leaf_bucket(base)];
+    while (pg && pg->base != base) pg = pg->next;
+    if (!pg) return 0;
+    size_t slot = (a & LEAF_PAGE_MASK) >> 4;
+    return (int)((pg->bits[slot >> 6] >> (slot & 63)) & 1);
+}
+
+/* 进程退出时还掉页节点（atexit：必须晚于 pa_rc_shutdown —— 它可能还会
+   释放临时栈上的字符串，触发 leaf_index_del）。 */
+static void leaf_index_shutdown(void) {
+    for (size_t i = 0; i < LEAF_BUCKETS; ++i) {
+        PyAdamasLeafPage* pg = leaf_page_tab[i];
+        while (pg) {
+            PyAdamasLeafPage* nx = pg->next;
+            free(pg);
+            pg = nx;
+        }
+        leaf_page_tab[i] = NULL;
+    }
+    while (leaf_page_cache) {
+        PyAdamasLeafPage* p = leaf_page_cache;
+        leaf_page_cache = p->next;
+        free(p);
+    }
+    leaf_page_cache_count = 0;
+}
 
 /* 存活堆对象索引：unknown 值的静态类型看不见，不能直接 rc_inc（可能
    是整数），先按 payload 查注册表；查到才说明它真是堆对象。索引只用于
@@ -588,8 +784,20 @@ void rc_index_rehash(size_t ncap) {
     free(old);
 }
 
+/* 注册表路由：索引叶子（16 字节对齐的 str/bytes）进分页位图，其余
+   （容器 / 闭包 / 异常 / 8 字节对齐的静态驻留串…）进主索引。判据只依赖
+   地址对齐 + kind，put/del 严格一致；has 不能读 kind（h 可能是整数减出来
+   的地址），所以主索引未命中时无条件再查一次位图。 */
+static inline int rc_index_is_leaf_obj(const PyAdamasRc* h) {
+    return gc_leaf_mode && h->kind == PYADAMAS_RC_STR && leaf_slot_ok((uintptr_t)h);
+}
+
 void rc_index_put(PyAdamasRc* h) {
     if (rc_index_off || rc_index_readonly) return;
+    if (rc_index_is_leaf_obj(h)) {
+        leaf_index_put(h);
+        return;
+    }
     if (rc_index_cap == 0) {
         rc_index_rehash(64);
     } else if ((rc_index_fill + 1) * 10 >= rc_index_cap * 7) {
@@ -615,6 +823,10 @@ void rc_index_put(PyAdamasRc* h) {
 }
 
 void rc_index_del(PyAdamasRc* h) {    if (rc_index_off || rc_index_readonly) return;
+    if (rc_index_is_leaf_obj(h)) {
+        leaf_index_del(h);
+        return;
+    }
     if (rc_index_cap == 0) return;
     size_t s = rc_index_slot(h);
     while (rc_index[s]) {
@@ -629,15 +841,18 @@ void rc_index_del(PyAdamasRc* h) {    if (rc_index_off || rc_index_readonly) ret
 
 int rc_index_has(PyAdamasRc* h) {
     if (rc_index_off) return 0;
-    if (rc_index_cap == 0) return 0;
     // RC_TOMB 是墓碑哨兵（(PyAdamasRc*)-1）。unknown 值 v 减去 64 字节头后
     // 可能正好等于它（v == 63），探测时不能把墓碑当成命中。
     if (h == RC_TOMB) return 0;
-    size_t s = rc_index_slot(h);
-    while (rc_index[s]) {
-        if (rc_index[s] == h) return 1;
-        s = (s + 1) & (rc_index_cap - 1);
+    if (rc_index_cap) {
+        size_t s = rc_index_slot(h);
+        while (rc_index[s]) {
+            if (rc_index[s] == h) return 1;
+            s = (s + 1) & (rc_index_cap - 1);
+        }
     }
+    // 索引叶子（字符串）不在主索引里，位图是精确的第二半。
+    if (gc_leaf_mode) return leaf_index_has(h);
     return 0;
 }
 
@@ -804,6 +1019,16 @@ void rc_link(PyAdamasRc* h) {
         h->marked = PYADAMAS_RC_UNTRACKED;
         return;
     }
+    // 索引叶子（str/bytes）：不进链、不进新生代、不参与 GC 记账，但必须
+    // 留在存活堆索引里（unknown 探针的识别依据）。见 PYADAMAS_RC_LEAF。
+    if (gc_leaf_mode && h->kind == PYADAMAS_RC_STR) {
+        h->prev = NULL;
+        h->next = NULL;
+        h->marked = PYADAMAS_RC_LEAF;
+        if (__builtin_expect(rc_index_off == 0 && rc_index_readonly == 0, 1))
+            rc_index_put(h);
+        return;
+    }
     h->prev = NULL;
     h->next = heap_head;
     if (heap_head) heap_head->prev = h;
@@ -825,6 +1050,11 @@ void rc_link(PyAdamasRc* h) {
 
 void rc_unlink(PyAdamasRc* h) {
     if (h->marked & PYADAMAS_RC_UNTRACKED) return;
+    // 索引叶子不在堆链 / 新生代上，只需要撤销索引成员资格。
+    if (h->marked & PYADAMAS_RC_LEAF) {
+        rc_index_del(h);
+        return;
+    }
     // 正常 RC 释放时把新生代 O(1) 摘掉；收集期间由收集器统一收尾。
     if (!gc_phase) {
         if (h->marked & PYADAMAS_RC_YOUNG) young_del(h);
@@ -957,7 +1187,10 @@ static void* rc_alloc_core(int64_t size, void (*dtor)(void*), void (*release)(vo
     // GC 只由被跟踪对象的分配量驱动（环只可能出现在被跟踪对象之间）。
     // 入口的 gc_need_check 检查块不受影响：untracked 分配点仍是 mark
     // assist / 收集的触发点，只是不再累加阈值计数。
-    if (gc_ready && !untracked && !rc_leaf_untracked(h)) {
+    // 叶子（exact-RC 的 UNTRACKED / 非 exact 的 LEAF）都不驱动 GC 频率：
+    // 它们不可能成环，GC 永远收不到，计数它们只会制造空收集。
+    if (gc_ready && !untracked &&
+        !(h->marked & (PYADAMAS_RC_UNTRACKED | PYADAMAS_RC_LEAF))) {
         alloc_since_gc += alloc_size + PYADAMAS_RC_HDR;
         alloc_since_major += alloc_size + PYADAMAS_RC_HDR;
         // 接近阈值时打开快速判断标志。用 7/8 作为提前量：真正的阈值比较
@@ -1856,6 +2089,9 @@ void pa_gc_init(void** roots, int64_t n_roots, void* stack_top) {
         atexit(gc_stats_dump);
     }
     if (getenv("PYADAMAS_GC_CONSERVATIVE")) gc_conservative = 1;
+    // 索引叶子模式：保守回退关掉（字符串回到旧的全跟踪口径）。
+    gc_leaf_mode = !gc_conservative;
+    if (gc_leaf_mode) atexit(leaf_index_shutdown);
     gc_globals = NULL;
     gc_n_globals = 0;
     gc_globals_cap = 0;
@@ -2465,8 +2701,32 @@ void pa_gc_shutdown(void) {
     // 先放掉全局根：sys.argv 的字符串在 exact-RC 模式下不在 GC 堆链上，
     // 只能靠 RC 释放（见 pa_sys_argv_shutdown 的注释）。
     pa_sys_argv_shutdown();
+    // **先按「整堆都是垃圾」的 sweep 口径把出边交出来，再统一 free。**
+    //
+    // 字符串（以及 exact-RC 模式的其它叶子）不在堆链上，只靠 RC 释放：
+    // 如果直接 free 容器，它们引用着的字符串永远到不了 rc==0，LeakSanitizer
+    // 会报 Direct leak。以前字符串全在链上、随链一起 free 所以看不出来；
+    // 0.321 起字符串是索引叶子，必须在释放容器之前减掉这些边。
+    //
+    // 语义与 major sweep 完全一致（gc_mark_sweep=1：集合内子对象本来就要
+    // 跟着 free，不参与 dec；集合外叶子由 gc_phase_dec 的就地释放 / gc_pend
+    // 处理），只是这里没有 trial/mark —— 退出时一切皆垃圾。
     gc_sweeping = 1;
+    gc_mark_sweep = 1;
+    gc_phase = GC_PHASE_SWEEP;
+    for (PyAdamasRc* h = heap_head; h; h = h->next) {
+        if (h->release) h->release((char*)h + PYADAMAS_RC_HDR);
+    }
+    gc_phase = GC_PHASE_NONE;
+    gc_mark_sweep = 0;
     while (heap_head) gc_free_body(heap_head);
+    // 清扫期攒下的「集合外」引用：此时 gc_phase 已复位，按正常 RC 释放
+    // （可能级联释放更多叶子）。
+    {
+        size_t pn = gc_pend_len;
+        gc_pend_len = 0;
+        for (size_t i = 0; i < pn; ++i) pa_rc_dec(gc_pend[i]);
+    }
     gc_sweeping = 0;
     alloc_since_gc = 0;
     alloc_since_major = 0;
@@ -2565,4 +2825,3 @@ void pa_rc_dec(void* p) {
     }
     h->rc--;
 }
-
