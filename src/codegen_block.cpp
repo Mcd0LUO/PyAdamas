@@ -807,13 +807,54 @@ void AsmGen::gen_block(const Block& b) {
 
         // 每条指令执行后仍存活的浮点提升槽（live-after），调用点只保存
         // 这些槽。从块末尾倒推，遇到 store 清位、load 置位。
+        //
+        // **别名 load 的 use 点也是槽寄存器的一次读。**
+        //
+        // gen_load_slot 对「单次使用 + 块内 + 读后无赋值」的 load 不发
+        // 指令，直接把 vreg 别名到槽寄存器。于是这个值在寄存器里一直活到
+        // vreg 的**使用点**，而槽级活跃性只看见 load 那一点：s = s + f(x)
+        // 的 load 在调用前、真正 readsd 在调用后，调用点掩码因此漏掉累加器，
+        // 被调用者（自己也用 xmm8-15 提升）踩掉 —— 0.314 的 N19a：
+        // det4(单位阵) 静默算成 0.0。这里把别名 vreg 的使用点补成一次读，
+        // 位在「使用点之前、最近一次 store 之后」整段置位（store 仍清位，
+        // 因为 store 会重写寄存器）。块内没有别名的 load 不置位。
         std::vector<uint8_t> fp_after;
         if (!fp_promoted_slots_.empty() && !fp_live_off_ &&
             cur_block_ >= 0 && static_cast<size_t>(cur_block_) < fp_live_out_.size()) {
             fp_after.assign(b.insts.size(), 0);
+            std::vector<uint8_t> fp_alias_use(b.insts.size(), 0);
+            if (slot_loc_.empty()) {
+                for (int k = 0; k < static_cast<int>(b.insts.size()); ++k) {
+                    const Inst& x = b.insts[static_cast<size_t>(k)];
+                    if (x.op != IrOp::LoadSlot || x.dst == kNoReg) continue;
+                    if (x.idx < 0 || x.idx >= static_cast<int>(slot_fpidx_.size()))
+                        continue;
+                    const int fi = slot_fpidx_[static_cast<size_t>(x.idx)];
+                    if (fi < 0 || fi >= 8) continue;
+                    // 别名只发生在单次使用上；跨块值/多次使用的值，load
+                    // 会真的写寄存器或内存，寄存器此后无人读。
+                    if (x.dst >= use_count_.size() || use_count_[x.dst] != 1 ||
+                        cross_block_[x.dst])
+                        continue;
+                    auto us = block_first_use_.find(x.dst);
+                    if (us == block_first_use_.end() || us->second <= k) continue;
+                    // 使用点前有对该槽的赋值 → gen_load_slot 判定 clobbered，
+                    // 不会别名（真的发了一次 mov），寄存器此后无人读。
+                    auto stv = block_stores_.find(x.idx);
+                    if (stv != block_stores_.end()) {
+                        auto it = std::upper_bound(stv->second.begin(),
+                                                   stv->second.end(), k);
+                        if (it != stv->second.end() && *it < us->second) continue;
+                    }
+                    fp_alias_use[static_cast<size_t>(us->second)] |=
+                        static_cast<uint8_t>(1u << fi);
+                }
+            }
             uint8_t cur = fp_live_out_[static_cast<size_t>(cur_block_)];
             for (int k = static_cast<int>(b.insts.size()) - 1; k >= 0; --k) {
                 fp_after[static_cast<size_t>(k)] = cur;
+                cur = static_cast<uint8_t>(cur |
+                                           fp_alias_use[static_cast<size_t>(k)]);
                 const Inst& x = b.insts[static_cast<size_t>(k)];
                 if (x.idx >= 0 && x.idx < static_cast<int>(slot_fpidx_.size())) {
                     int fi = slot_fpidx_[static_cast<size_t>(x.idx)];

@@ -4,6 +4,17 @@
 
 早期阶段没有逐条留痕，按阶段归纳；0.4 之后逐条记录。
 
+## [0.314] - 2026-11-19
+
+### 正确性修复：浮点累加器跨调用被踩（N19a 静默误编译，调用点 spill 掩码漏别名 load）
+
+- **现象（O1/O2 错，O0 对）**：日常语料挖出的 N19a——函数内「浮点累加器 + 嵌套调用」循环静默算错，`det4(单位阵)` 返 0.0（应 1.0）、`det4(diag(1,2,3,4))` 返 0.0（应 24.0）、`det4(m4)` 返 5.0（应 0.0），不崩不报错。Heisenbug：同一份代码在模块级、整数版、以及被调函数能被内联时都正确，随寄存器压力变化；`PYADAMAS_NO_FPLIVE=1`（调用点全量 spill）后立刻正确——**指针直指调用点浮点 spill 掩码**。
+- **根因（`gen_block` 的 fp_after 预扫描与 `gen_load_slot` 的别名优化交互）**：浮点局部变量提升到 xmm8-15 后，每个调用点按「块内 live-after」只 spill 还要再读的槽（0.279 起，spectral_norm 靠它）。`gen_load_slot` 对「单次使用 + 块内 + 读后无赋值」的 load **不发指令**，直接把 vreg 别名到槽寄存器；于是 `s = s + f(x)` 的真实形态是「load 在调用前（无指令）、readsd 在调用后」，而槽级活跃性把 **load 那一点**当成最后一次读：`store.slot s` 在块尾倒推时清位，调用点在 load 之后、store 之前，掩码里就没有累加器 → 被调用者（自己也在用 xmm8-15 提升）踩掉 → 静默算错。O0 不做浮点槽提升，所以 difftest（O0 vs O2）也是绿的——**这是 0.312/0.313 一路带过来的洞**。
+- **修复（一处，+41 行，src/codegen_block.cpp）**：别名 load 的 **use 点**补成槽寄存器的一次读——预扫描里收集「单次使用 + 块内 + use 在 load 之后 + 两者之间无对该槽的 store（与 `gen_load_slot` 的 clobber 判定同口径）」的 load，把它的 bit 置在 use 点上，倒推扫描时 `cur |= 别名 use 位`，于是位在「use 之前、最近一次 store 之后」整段成立，区间内的调用点一律 spill/reload。原有的 load 置位、store 清位、块级 live_in/out（跨块读）**逐条不动**，未别名的 load（被融合、跨块、多次使用）不置位。没有调用、或调用点不在「load→use」区间的块，生成的汇编逐字节不变（abbench 实测中性）。
+- **回归用例**：新增 tests/run/236_fp_spill_call.py，先对拍 CPython 再钉 expect，O0/O1/O2 全一致。覆盖：最小形态（递归被调防内联的累加循环，acc(0/1/5/9)）、原报 4×4 余子式（unit/diag/m4 三个行列式 + minor/det3 中间量）、累加器在 if/else 两支里读而调用在支外（跨块掩码）、同块两个调用夹住累加器且只在最后使用（最紧形态）、store 之后继续累加、整数累加器对照。**用改为修复前的 `codegen_block.cpp` 构建验证过：该用例 7 行输出与 CPython 分叉（1.0→2.0、24.0→0.0 等），修复后逐字节一致**。
+- **验证**：difftest **229/0**；普通与 ASan 套件各 **247 ran ok / EXIT=0**（PYADAMAS_TEST_JOBS=8）；ASan detect_leaks=1 抽查 236_fp_spill_call / 13_gc / 88_defaultdict 全干净；0.271 oracle 语料零意外差异（201-229 共 22 例 oracle 编译 rc 差、230 真排序/231 float dict/236 新用例的时代差、206_list_store_kind oracle 侧 SIGSEGV 为既有现象，其余逐字节一致）；规模检查仍只有原有 5 处超限（codegen_block.cpp 1112→1153，无新增超限文件）；**abbench 对 2aae2ac realistic 绑核交替 15 轮**：dict_wordfreq +0.7%（p25 +1.3%）、obj_dispatch −0.0%、queue_sim +0.2%、rec_memo −0.2%、sort_struct −0.0%、str_build −0.2%，合计 **1643.68→1645.06ms（+0.1%）**——掩码只多了「别名 load 的 use 点在区间内」这一种置位，六个热路径用例的生成代码不变。
+- **同批未改（既有设计，均在此之前就存在）**：`xmm3-7` 块内浮点临时池与 GPR 池的门控（`fp_temp_op_ok`）本轮未动；`PYADAMAS_NO_FPLIVE=1` 仍保留为排障开关（全量 spill，天然正确）。
+
 ## [0.313] - 2026-11-19
 
 ### 正确性修复：float 值 dict 的 get/下标读回损坏（fixdict 分支合入，0.312 之后）
