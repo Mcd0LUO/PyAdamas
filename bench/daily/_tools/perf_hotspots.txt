@@ -1,0 +1,24 @@
+# perf hotspots (single pinned-core run, -F 99999, --no-children self time)
+# Captured 2026-11-19 on Xeon Gold 6252, core 24, pyadamas 0.311 -O2.
+
+## b1_log_parse (string+re, run speedup 2.19x) -- RC/GC ~36%, alloc ~11%
+run 22.60% | rc_alloc_core 10.10% | rc_index_put 8.10% | pa_rc_dec_slow 7.11%
+memmove 4.77% | cfree 4.39% | gen_logs 4.32% | rc_unlink 4.13% | rc_index_del 4.02%
+gc_collect 3.61% | pa_rc_cleanup 2.88% | pa_dict_get_or 2.28% | malloc 2.08%
+
+## b5_re_extract (re-heavy, run speedup 1.91x) -- generated 49%, RC ~20%, re ~7%
+run 49.23% | rc_index_put 6.85% | rc_alloc_core 6.35% | find_from 5.10%
+pa_rc_dec_slow 3.01% | cfree 2.22% | pa_re_findall 2.05% | pa_rc_cleanup 1.88%
+gen_records 1.74% | rc_index_del 1.71% | memmove 1.68% | pa_str_from_i64 1.55%
+
+## b2_normalize (str-alloc-heavy, run speedup 2.72x) -- RC ~33%, str alloc ~11%
+run 13.40% | rc_alloc_core 10.90% | rc_index_put 10.29% | normalize 9.02%
+pa_rc_dec_slow 5.70% | str_new 5.19% | gen_phrases 4.41% | memset 4.32%
+str_alloc_raw 3.41% | rc_link 3.34% | rc_unlink 3.24% | gc_collect 2.59%
+pa_str_method 2.55% | find_from 2.34%
+
+## d1_matrix n=64 (numeric, run speedup 11.46x) -- short run, startup-noisy
+matmul 31.71% | gen_matrix 11.43% | pa_math_fsum 7.04% | (kernel/ld-linux ~40% startup)
+
+## d1_matrix n=160 heavier (clean numeric contrast) -- ~94% compute, ~0% RC/GC
+matmul 75.68% | pa_math_fsum 9.32% | gen_matrix 6.60% | transpose 2.19%
