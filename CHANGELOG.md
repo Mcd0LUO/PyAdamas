@@ -4,6 +4,22 @@
 
 早期阶段没有逐条留痕，按阶段归纳；0.4 之后逐条记录。
 
+## [0.315] - 2026-11-19
+
+### re 性能：模式编译缓存 + 起点剪枝 + 单指令循环紧扫（基准合计 −46%）
+
+> 与 0.314（json）并行；本条目只动 runtime/rt_re.c（+ 基准/工具/回归用例），
+> 不触碰前端与其它运行时文件，合并面独立。
+
+- **测量先行（绑核 24、交替 A/B、奇偶轮交换、多轮中位；基线 = 2aae2ac 独立 worktree 构建）**：新基准 bench/re/bench_re.py 覆盖 20 个用例（字面量/字符类/量词/分组/交替/锚定/病态回溯 × match/search/fullmatch/findall/finditer/split/sub/compile，另有「同模式反复调用」的短行负载与编译后 Pattern 对照），A/B 驱动 tools/rebench.py（两侧各自 --rebuild，交替 + 奇偶轮交换）。最终 15 轮：基线合计 **532.1ms → 283.6ms（−46.7%）**；更早一轮负载较低时同套用例 483.0→230.3ms（−52.3%），方向一致。绝对值随多租户负载漂移，看比值。
+- **热点 breakdown（perf + 用例内拆分）**：① 大文本 `re.findall(r"[0-9]+", 20KB)` 61.4ms 中，`run` 占 48%、`find_from` 10%，其余是每次匹配的 str_new/list_append 分配；② 短行反复调用里**编译占 25~49%**（编译后 Pattern 对照：lines_match 1.48ms → 0.52ms、lines_split 1.24→0.57ms），`prog_build` 每个 AST 节点一次 malloc 是主因；③ `re.findall("literal", text)` 39.8ms 全是 VM 逐位尝试——纯字面量完全没有快路径；④ `re.search("zzz", text)` 20ms 是「每个起点都进一次递归 VM」；⑤ `\w+`/`\d+` 这类「单指令体量词」是递归最深也最常走的路径（每字符一次 `run` 递归），占 `run` 的 70%。
+- **优化 1（模式编译缓存，最便宜最大收益）**：模块级 API（findall/split/sub/search/finditer 的 `_str` 入口）按 (pattern 字节, flags) 缓存编译产物，8 槽 LRU + 借用期 pin（用户回调里再调 re 不会挤掉外层程序；8 槽全 pin 时退回现编现用）。键用 (len, bytes) 不用 strlen——模式串可以含 NUL。命中只做字节比较，免去整棵 AST 的 malloc/free。`re.compile` 的对象仍各自独占编译产物（语义不变），分析结果按需惰性生成。
+- **优化 2（编译期分析 + 起点剪枝，语义零风险）**：编译后算三样只用于**排除必然失败的起点**的信息——纯字面量、首字节集（首个消费指令是字符/类/`.`，含 IGNORECASE 折叠；`|` 两支都有首字节集时取并集）、起点约束（`\A` / 非 MULTILINE `^` → 只有 pos 0；MULTILINE `^` → 只有行首）。分析保守：零宽断言、后向引用、宽子程序一律放弃退回逐位尝试。纯字面量模式 search 走 memchr+memcmp 的朴素子串查找（不用 GNU memmem，保留 Windows 可移植性）、match 走 `memcmp`；其余按首字节集整段跳过不可能命中的起点。
+- **优化 3（单指令体循环紧扫 + 一阶失败剪枝）**：`X*` / `X+`（X 是字符/类/`.`）编译期识别成固定布局，把模型里「每字符一次 `run` 递归」换成一次按指令种类特化的紧循环（类→位图、字符→直比、`.`→换行判断），再在出口处按原顺序逐个回溯（贪婪从右往左、惰性从左往右），**语义与递归展开逐位等价**；紧扫的字节数按原口径一次性记入步数上限（否则超长 subject 上本该 RuntimeError 的场景会静默成功）。贪婪侧再加一阶剪枝：若循环后紧跟「一个消费指令 + MATCH」（`X*Y` 这类相邻匹配，Y 必然吃掉一个字节），先把「Y 不可能匹配」的回溯点整段跳过。仅对「循环后紧跟收尾」的形状启用——嵌套量词（`(a+)+b`）没有收尾可剪，开启纯多付扫描开销（实测 +17%），保持原递归展开。
+- **实测（15 轮中位，基线 2aae2ac）**：findall_literal 40.16→2.59ms（−93.6%）、search_miss 19.42→0.115ms（−99.4%）、search_literal_hit 0.393→0.035ms（−91.0%）、findall_alt 68.81→12.73ms（−81.5%）、sub_group 43.35→7.96ms（−81.6%）、sub_digits 38.02→16.65ms（−56.2%，原 38.02ms 里含 120 次编译）、findall_class 75.58→50.85ms（−32.7%）、split_ws 82.57→60.98ms（−26.1%）、finditer 45.62→32.85ms（−28.0%）、findall_word 89.17→73.87ms（−17.2%）；短行负载 lines_match −58.9%、lines_search −63.7%、lines_findall −48.7%、lines_split −41.3%、lines_sub −46.7%、lines_fullmatch −60.5%；**编译后 Pattern 对照** lines_findall_pat −29.0%、lines_split_pat −24.4%、lines_sub_pat −29.1%、lines_match_pat +1.5%（已到 VM/分配极限）。病态回溯两例（`(a+)+b`、`(a|aa)+$`）**中性**（+1.6% / −0.4%，perf stat 指令数 +0.1%），未做记忆化，见下。
+- **负收益/撤回记录（都是 abbench 判死的，profile 阶段看不出来）**：① 「所有简单循环」都上紧扫在 `(a+)+b` 上 **+17%**（多一次 O(n) 扫描、没有收尾可剪），改为仅「循环后紧跟 MATCH」启用，信号来自编译期 opcode 替换而不是运行期判断；② 贪婪回退时「跳过字节不满足 X 的回溯点」的证明剪枝实测无收益（±1%，噪声级）且证明链条依赖出口程序只读该位置字节，为省风险撤回；③ **内联扰动**：把紧扫快路径内联进 `run()` 让递归 VM 栈帧从 0x6d5 涨到 0xaa4，嵌套量词路径指令 +4.3%/cycles +8.6%（`run` 是递归 VM 的核心，栈帧变大直接变慢）；抽出 `run_loop` 并 `noinline` 后回到 +0.1% 指令/−0.7% 时间——与 HANDOFF §6.4「gcc 内联扰动」同款。
+- **未做（记录方向）**：DFA/JIT 本轮不做；**灾难性回溯记忆化**（位置×状态去重）未做——要保证与 CPython 的捕获组/贪婪口径一致，需要把 caps 快照纳入去重键（否则会漏掉「同一状态不同捕获」的分支），内存与语义风险都超出本轮，保留 2 亿步上限兜底；回溯 VM 仍是递归实现，深模式/量化零宽断言（如 `\b+`）依旧会吃栈——fuzz 里 `re.findall("\\b+", "ab")` 在 **base 与当前版本同款 SIGSEGV**（既有问题，非本轮引入，另票）。
+- **验证**：行为零变化——**随机差分 fuzz**（/tmp 生成器，6 个 seed × 60 个随机模式 × {search/match/fullmatch/findall/split/sub}，覆盖字符类/量词/分组/交替/锚定/内联标志/贪婪惰性）：base 与当前输出**逐字节相同**（每 seed 250+ 行断言，两边 rc 均 0）；新增 tests/run/234_re_opt.py（82 行断言，先对拍 CPython 再钉 expect，覆盖字面量子串快路径、IGNORECASE 折叠、首字节剪枝、`\A`/`^`/MULTILINE、`.*`/DOTALL、`X*Y` 一阶剪枝、`$`/`\b` 收尾、空匹配尾巴轮、Pattern 惰性分析、后向引用/断言保守回退、缓存多模式轮换）；difftest **229/0**；普通与 ASan 套件各 **247 ran ok / EXIT=0**（PYADAMAS_TEST_JOBS=8）；ASan detect_leaks=1 抽查 234_re_opt / 13_gc 全干净且输出与 expect 一致；0.271 oracle 语料对比（229 文件）：23 个 rc 差全为时代差（201-203 推断、207-215 cpy/cffi、220-229 vthread，oracle 编译不了；206 oracle SIGSEGV 为 0.312 已记录现象），输出级差异只有 230_tuple_sort / 231_float_dict（0.312/0.313 自身的修复），其余逐字节一致；规模检查仍只有原有 5 处超限，rt_re.c 2217 行（运行时文件不在 src/ 的 1200 行规则内），新文件 bench/re/bench_re.py 264 行 / tools/rebench.py 108 行 / tests/run/234_re_opt.py 238 行。
 ## [0.313] - 2026-11-19
 
 ### 正确性修复：float 值 dict 的 get/下标读回损坏（fixdict 分支合入，0.312 之后）
