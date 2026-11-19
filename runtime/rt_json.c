@@ -70,30 +70,48 @@ typedef struct {
     size_t key_sep_len;
 } JBuf;
 
-static void jb_raw(JBuf* b, const char* p, size_t n) {
-    if (b->len + n + 1 > b->cap) {
-        size_t cap = b->cap ? b->cap : 128;
-        while (b->len + n + 1 > cap) cap *= 2;
-        char* nb = (char*)realloc(b->buf, cap);
-        if (!nb) panic_c("out of memory");
-        b->buf = nb;
-        b->cap = cap;
-    }
-    memcpy(b->buf + b->len, p, n);
-    b->len += n;
-    b->buf[b->len] = '\0';
+/* 增长是冷路径（容量翻倍），单独 outline，让追加热路径留在调用点内联。
+ * 追加不再每次写 NUL：str_alloc_raw 分配时自带终止符，中间态没有人把
+ * 缓冲当 C 串读（旧实现每字符一次 NUL store 是白付的）。 */
+static __attribute__((noinline)) void jb_grow(JBuf* b, size_t need) {
+    size_t cap = b->cap ? b->cap : 128;
+    while (need > cap) cap *= 2;
+    char* nb = (char*)realloc(b->buf, cap);
+    if (!nb) panic_c("out of memory");
+    b->buf = nb;
+    b->cap = cap;
 }
 
-static void jb_ch(JBuf* b, char c) { jb_raw(b, &c, 1); }
+static inline void jb_raw(JBuf* b, const char* p, size_t n) {
+    if (b->len + n + 1 > b->cap) jb_grow(b, b->len + n + 1);
+    char* dst = b->buf + b->len;
+    if (n <= 8) {
+        for (size_t i = 0; i < n; ++i) dst[i] = p[i];
+    } else {
+        memcpy(dst, p, n);
+    }
+    b->len += n;
+}
+
+static inline void jb_ch(JBuf* b, char c) {
+    if (b->len + 2 > b->cap) jb_grow(b, b->len + 2);
+    b->buf[b->len++] = c;
+}
 
 static void jb_cstr(JBuf* b, const char* s) { jb_raw(b, s, strlen(s)); }
 
 static void jb_u4(JBuf* b, uint32_t cp) {
-    char tmp[8];
-    /* cp 由调用方保证 <= 0xFFFF（4 位十六进制），格式串固定 6 字节；
-       用 snprintf 返回值确认没截断，比让 -Wformat-truncation 去猜可靠。 */
-    int wn = snprintf(tmp, sizeof tmp, "\\u%04x", (unsigned)cp);
-    if (wn < 0 || wn >= (int)sizeof tmp) panic_c("json: unicode escape overflow");
+    /* cp 由调用方保证 <= 0xFFFF。手写 4 位小写十六进制（与 %04x
+     * 逐字节一致），省掉每个转义字符一次 snprintf（ensure_ascii
+     * 的非 ASCII 密集路径上 perf 可见 __printf_buffer 残留）。 */
+    static const char hex[] = "0123456789abcdef";
+    char tmp[6];
+    tmp[0] = '\\';
+    tmp[1] = 'u';
+    tmp[2] = hex[(cp >> 12) & 0xF];
+    tmp[3] = hex[(cp >> 8) & 0xF];
+    tmp[4] = hex[(cp >> 4) & 0xF];
+    tmp[5] = hex[cp & 0xF];
     jb_raw(b, tmp, 6);
 }
 
@@ -117,6 +135,29 @@ static void jb_str(JBuf* b, PyAdamasStr* s) {
     int64_t n = s->len;
     int64_t i = 0;
     while (i < n) {
+        /* 快路径：成段搬运无需转义的 ASCII（ensure_ascii=False 时
+         * >=0x80 的字节也原样输出，一并入段）。逐字符 jb_ch 的容量
+         * 检查/调用开销在字符串密集 payload 里是大头（perf 实测
+         * jb_raw 15% + jb_str 9%）。 */
+        int64_t run = i;
+        if (b->ensure_ascii) {
+            while (run < n) {
+                unsigned char c = p[run];
+                if (c < 0x20 || c == '"' || c == '\\' || c >= 0x7f) break;
+                run++;
+            }
+        } else {
+            while (run < n) {
+                unsigned char c = p[run];
+                if (c < 0x20 || c == '"' || c == '\\') break;
+                run++;
+            }
+        }
+        if (run > i) {
+            jb_raw(b, (const char*)p + i, (size_t)(run - i));
+            i = run;
+            if (i >= n) break;
+        }
         unsigned char c = p[i];
         if (c == '"') {
             jb_raw(b, "\\\"", 2);
@@ -192,6 +233,21 @@ static void jb_str(JBuf* b, PyAdamasStr* s) {
     jb_ch(b, '"');
 }
 
+/* int64 → 十进制，手写 itoa（snprintf 的 %lld 在 int 密集 payload 里
+ * 占 ~17% cycles：__printf_buffer + _itoa_word + 驱动开销）。
+ * INT64_MIN 用 -(v+1)+1 取绝对值，避免 -INT64_MIN 溢出。 */
+static void jb_i64(JBuf* b, int64_t v) {
+    char tmp[24];
+    char* p = tmp + sizeof tmp;
+    uint64_t u = v < 0 ? (uint64_t)(-(v + 1)) + 1u : (uint64_t)v;
+    do {
+        *--p = (char)('0' + (u % 10));
+        u /= 10;
+    } while (u);
+    if (v < 0) *--p = '-';
+    jb_raw(b, p, (size_t)(tmp + sizeof tmp - p));
+}
+
 static void jb_f64(JBuf* b, double v) {
     if (v != v) {
         if (!b->allow_nan)
@@ -225,7 +281,11 @@ static void jb_nl(JBuf* b, int64_t depth) {
     if (b->indent == J_INDENT_NONE) return;
     jb_ch(b, '\n');
     int64_t n = b->indent > 0 ? b->indent * depth : 0;
-    for (int64_t i = 0; i < n; ++i) jb_ch(b, ' ');
+    if (n > 0) {
+        if (b->len + (size_t)n + 1 > b->cap) jb_grow(b, b->len + (size_t)n + 1);
+        memset(b->buf + b->len, ' ', (size_t)n);
+        b->len += (size_t)n;
+    }
 }
 
 /* sort_keys 用：按 key 给 entry 下标排序（单线程，用静态指针传 dict）。
@@ -262,9 +322,7 @@ static int jb_cmp_order(const void* pa, const void* pb) {
  * 输出不带引号，调用方补。 */
 static void jb_key_scalar(JBuf* b, int64_t kv, char kk) {
     if (kk == 'i') {
-        char buf[24];
-        int len = snprintf(buf, sizeof buf, "%lld", (long long)kv);
-        jb_raw(b, buf, (size_t)len);
+        jb_i64(b, kv);
         return;
     }
     if (kk == 'b') {
@@ -357,9 +415,7 @@ static void jb_value(JBuf* b, int64_t v, const char* d, size_t n, int64_t depth)
         pa_raise_c("ValueError", "json: bad type descriptor");
     }
     if (t == 'i') {
-        char buf[24];
-        int len = snprintf(buf, sizeof buf, "%lld", (long long)v);
-        jb_raw(b, buf, (size_t)len);
+        jb_i64(b, v);
         return;
     }
     if (t == 'b') {
@@ -386,11 +442,77 @@ static void jb_value(JBuf* b, int64_t v, const char* d, size_t n, int64_t depth)
     pa_raise_c("ValueError", "json: bad type descriptor");
 }
 
+/* allow_nan=False 的预检：在写任何输出之前按描述符走一遍值树，
+ * 遇到非有限 float（值或键）立即抛 ValueError。输出缓冲是 malloc
+ * 的裸内存，longjmp 不会释放它（cleanup 属性不在 longjmp 时执行）——
+ * 预检保证抛异常时还没有分配。只在 allow_nan=False（罕见）时多走
+ * 一遍，默认路径零开销。 */
+static void jb_check_nan(int64_t v, const char* d, size_t n) {
+    char t = d[0];
+    if (t == '(') {
+        char k = d[1];
+        if (k == 'l') {
+            PyAdamasList* l = (PyAdamasList*)v;
+            for (int64_t i = 0; i < l->len; ++i)
+                jb_check_nan(l->data[i], d + 2, n - 3);
+            return;
+        }
+        if (k == 'd') {
+            PyAdamasDict* m = (PyAdamasDict*)v;
+            char kk = d[2];
+            for (int64_t i = 0; i < m->len; ++i) {
+                if (kk == 'f') {
+                    union { int64_t i; double d; } u;
+                    u.i = pa_dict_key_at(m, i);
+                    if (u.d != u.d || u.d > 1.7976931348623157e308 ||
+                        u.d < -1.7976931348623157e308) {
+                        const char* what = u.d != u.d ? "nan"
+                                           : (u.d > 0 ? "inf" : "-inf");
+                        char msg[96];
+                        snprintf(msg, sizeof msg,
+                                 "Out of range float values are not JSON compliant: %s",
+                                 what);
+                        pa_raise_c("ValueError", msg);
+                    }
+                }
+                jb_check_nan(pa_dict_val_at(m, i), d + 3, n - 4);
+            }
+            return;
+        }
+        if (k == 't') {
+            PyAdamasList* l = (PyAdamasList*)v;
+            size_t pos = 2;
+            int64_t idx = 0;
+            while (pos + 1 < n) {
+                size_t cl = desc_len(d + pos);
+                jb_check_nan(l->data[idx], d + pos, cl);
+                pos += cl;
+                idx++;
+            }
+            return;
+        }
+        return;
+    }
+    if (t == 'f') {
+        union { int64_t i; double d; } u;
+        u.i = v;
+        if (u.d != u.d || u.d > 1.7976931348623157e308 ||
+            u.d < -1.7976931348623157e308) {
+            const char* what = u.d != u.d ? "nan" : (u.d > 0 ? "inf" : "-inf");
+            char msg[96];
+            snprintf(msg, sizeof msg,
+                     "Out of range float values are not JSON compliant: %s", what);
+            pa_raise_c("ValueError", msg);
+        }
+    }
+}
+
 /* flags: bit0 sort_keys / bit1 ensure_ascii / bit2 allow_nan。
  * seps: NULL = 默认分隔符（紧凑 ", "/": "，缩进 ","/": "）；
  *       否则是 tuple[str, str]（运行期 PyAdamasList，借用不 retain）。 */
 PyAdamasStr* pa_json_dumps(int64_t v, PyAdamasStr* desc, int64_t indent,
                            int64_t flags, PyAdamasList* seps) {
+    if (!(flags & 4)) jb_check_nan(v, desc->data, (size_t)desc->len);
     JBuf b = {0};
     b.indent = indent;
     b.sort_keys = (flags & 1) != 0;
@@ -426,7 +548,14 @@ PyAdamasStr* pa_json_dumps(int64_t v, PyAdamasStr* desc, int64_t indent,
     if (indent != J_INDENT_NONE && indent > 65536)
         pa_raise_c("ValueError", "json: indent too large");
     jb_value(&b, v, desc->data, (size_t)desc->len, 0);
-    PyAdamasStr* out = str_new(b.buf ? b.buf : "", (int64_t)b.len);
+    /* ensure_ascii=True 且默认分隔符时输出保证全 ASCII（jb_str 把
+     * >=0x7f 全转义），pub==len 免掉 str_seal 的整串码点扫描。
+     * 自定义分隔符可能含非 ASCII（CPython 原样插入），走常规扫描。 */
+    PyAdamasStr* out;
+    if (b.ensure_ascii && !seps)
+        out = str_new_ascii(b.buf ? b.buf : "", (int64_t)b.len);
+    else
+        out = str_new(b.buf ? b.buf : "", (int64_t)b.len);
     free(b.buf);
 
     return out;
@@ -521,8 +650,22 @@ static void jp_utf8_put(JBuf* b, uint32_t cp) {
     }
 }
 
+static int jp_hexval(char h) {
+    if (h >= '0' && h <= '9') return h - '0';
+    if (h >= 'a' && h <= 'f') return h - 'a' + 10;
+    if (h >= 'A' && h <= 'F') return h - 'A' + 10;
+    return -1;
+}
+
 /* key_ctx：dict 键位置——期望双引号的失败消息是
- * "Expecting property name enclosed in double quotes"（CPython 口径）。 */
+ * "Expecting property name enclosed in double quotes"（CPython 口径）。
+ *
+ * 两遍结构（0.314）：第一遍只校验 + 统计解码长度，**不分配**——
+ * 旧实现边解码边建 JBuf，中途遇到非法转义抛异常时 malloc 的缓冲
+ * 随 longjmp 丢失（cleanup 属性不在 longjmp 时执行，ASan 实测 232
+ * 漏 3×128B）。校验通过后第二遍才分配（一次 jb_grow 到精确容量）
+ * 并解码，解码路径不再可能抛异常。无转义串直接从输入切片建 str，
+ * 全 ASCII 用 str_new_ascii 免码点扫描。 */
 static PyAdamasStr* jp_string(JP* s, int key_ctx) {
     jp_ws(s);
     const char* strstart = s->p;
@@ -535,81 +678,121 @@ static PyAdamasStr* jp_string(JP* s, int key_ctx) {
         jp_fail_at(s, s->p, "Expecting value");
     }
     s->p++;
-    JBuf b = {0};
-    while (s->p < s->end) {
-        unsigned char c = (unsigned char)*s->p++;
-        if (c == '"') {
-            PyAdamasStr* r = str_new(b.buf ? b.buf : "", (int64_t)b.len);
-            free(b.buf);
-            return r;
-        }
+    const char* body = s->p;
+    /* ── 第一遍：校验 ── */
+    const char* q = body;
+    int has_esc = 0;
+    int has_high = 0;
+    size_t dlen = 0;
+    while (q < s->end) {
+        unsigned char c = (unsigned char)*q;
+        if (c == '"') break;
+        if (c < 0x20) jp_fail_at(s, q, "Invalid control character at");
         if (c == '\\') {
-            if (s->p >= s->end)
+            has_esc = 1;
+            /* 类型口径错误（孤立代理等）的位置指向转义的反斜杠。 */
+            s->p = q;
+            if (q + 1 >= s->end)
                 jp_fail_at(s, strstart, "Unterminated string starting at");
-            const char* escpos = s->p - 1;
-            char e = *s->p++;
-            switch (e) {
-                case '"': jb_ch(&b, '"'); break;
-                case '\\': jb_ch(&b, '\\'); break;
-                case '/': jb_ch(&b, '/'); break;
-                case 'b': jb_ch(&b, '\b'); break;
-                case 'f': jb_ch(&b, '\f'); break;
-                case 'n': jb_ch(&b, '\n'); break;
-                case 'r': jb_ch(&b, '\r'); break;
-                case 't': jb_ch(&b, '\t'); break;
-                case 'u': {
-                    const char* upos = s->p - 1;
-                    if (s->end - s->p < 4)
-                        jp_fail_at(s, upos, "Invalid \\uXXXX escape");
-                    uint32_t cp = 0;
-                    for (int i = 0; i < 4; ++i) {
-                        char h = s->p[i];
-                        int d;
-                        if (h >= '0' && h <= '9') d = h - '0';
-                        else if (h >= 'a' && h <= 'f') d = h - 'a' + 10;
-                        else if (h >= 'A' && h <= 'F') d = h - 'A' + 10;
-                        else jp_fail_at(s, upos, "Invalid \\uXXXX escape");
-                        cp = cp * 16 + (uint32_t)d;
-                    }
-                    s->p += 4;
-                    if (cp >= 0xD800 && cp <= 0xDBFF) {
-                        if (s->end - s->p >= 6 && s->p[0] == '\\' && s->p[1] == 'u') {
-                            s->p += 2;
-                            if (s->end - s->p < 4)
-                                jp_fail_at(s, upos, "Invalid \\uXXXX escape");
-                            uint32_t lo = 0;
-                            for (int i = 0; i < 4; ++i) {
-                                char h = s->p[i];
-                                int d;
-                                if (h >= '0' && h <= '9') d = h - '0';
-                                else if (h >= 'a' && h <= 'f') d = h - 'a' + 10;
-                                else if (h >= 'A' && h <= 'F') d = h - 'A' + 10;
-                                else jp_fail_at(s, upos, "Invalid \\uXXXX escape");
-                                lo = lo * 16 + (uint32_t)d;
-                            }
-                            s->p += 4;
-                            if (lo < 0xDC00 || lo > 0xDFFF)
-                                jp_fail_type(s, "invalid surrogate pair");
-                            cp = 0x10000 + ((cp - 0xD800) << 10) + (lo - 0xDC00);
-                        } else {
-                            /* CPython 接受孤立代理（返回含代理码点的 str）；
-                             * pyadamas str 是 UTF-8 字节串，无法表示，拒绝。 */
-                            jp_fail_type(s, "unpaired surrogate");
+            char e = q[1];
+            if (e == 'u') {
+                const char* upos = q + 1;
+                if (s->end - (q + 2) < 4)
+                    jp_fail_at(s, upos, "Invalid \\uXXXX escape");
+                uint32_t cp = 0;
+                for (int i = 0; i < 4; ++i) {
+                    int d = jp_hexval(q[2 + i]);
+                    if (d < 0) jp_fail_at(s, upos, "Invalid \\uXXXX escape");
+                    cp = cp * 16 + (uint32_t)d;
+                }
+                q += 6;
+                if (cp >= 0xD800 && cp <= 0xDBFF) {
+                    if (s->end - q >= 6 && q[0] == '\\' && q[1] == 'u') {
+                        const char* lpos = q + 1;
+                        uint32_t lo = 0;
+                        for (int i = 0; i < 4; ++i) {
+                            int d = jp_hexval(q[2 + i]);
+                            if (d < 0)
+                                jp_fail_at(s, lpos, "Invalid \\uXXXX escape");
+                            lo = lo * 16 + (uint32_t)d;
                         }
-                    } else if (cp >= 0xDC00 && cp <= 0xDFFF) {
+                        if (lo < 0xDC00 || lo > 0xDFFF)
+                            jp_fail_type(s, "invalid surrogate pair");
+                        q += 6;
+                        dlen += 4;
+                    } else {
+                        /* CPython 接受孤立代理（返回含代理码点的 str）；
+                         * pyadamas str 是 UTF-8 字节串，无法表示，拒绝。 */
                         jp_fail_type(s, "unpaired surrogate");
                     }
-                    jp_utf8_put(&b, cp);
-                    break;
+                } else if (cp >= 0xDC00 && cp <= 0xDFFF) {
+                    jp_fail_type(s, "unpaired surrogate");
+                } else {
+                    dlen += cp < 0x80 ? 1 : (cp < 0x800 ? 2 : 3);
                 }
-                default: jp_fail_at(s, escpos, "Invalid \\escape");
+            } else if (e == '"' || e == '\\' || e == '/' || e == 'b' ||
+                       e == 'f' || e == 'n' || e == 'r' || e == 't') {
+                q += 2;
+                dlen += 1;
+            } else {
+                jp_fail_at(s, q, "Invalid \\escape");
             }
             continue;
         }
-        if (c < 0x20) jp_fail_at(s, s->p - 1, "Invalid control character at");
-        jb_ch(&b, (char)c);
+        if (c >= 0x80) has_high = 1;
+        dlen += 1;
+        q++;
     }
-    jp_fail_at(s, strstart, "Unterminated string starting at");
+    if (q >= s->end) jp_fail_at(s, strstart, "Unterminated string starting at");
+    s->p = q + 1;
+    /* ── 无转义：切片直建 ── */
+    if (!has_esc) {
+        return has_high ? str_new(body, (int64_t)(q - body))
+                        : str_new_ascii(body, (int64_t)(q - body));
+    }
+    /* ── 第二遍：解码（已校验，不会抛异常）── */
+    JBuf b = {0};
+    jb_grow(&b, dlen + 1);
+    const char* r = body;
+    while (r < q) {
+        if ((unsigned char)*r != '\\') {
+            const char* run = r + 1;
+            while (run < q && (unsigned char)*run != '\\') run++;
+            jb_raw(&b, r, (size_t)(run - r));
+            r = run;
+            continue;
+        }
+        char e = r[1];
+        r += 2;
+        switch (e) {
+            case '"': jb_ch(&b, '"'); break;
+            case '\\': jb_ch(&b, '\\'); break;
+            case '/': jb_ch(&b, '/'); break;
+            case 'b': jb_ch(&b, '\b'); break;
+            case 'f': jb_ch(&b, '\f'); break;
+            case 'n': jb_ch(&b, '\n'); break;
+            case 'r': jb_ch(&b, '\r'); break;
+            case 't': jb_ch(&b, '\t'); break;
+            default: {
+                uint32_t cp = 0;
+                for (int i = 0; i < 4; ++i)
+                    cp = cp * 16 + (uint32_t)jp_hexval(r[i]);
+                r += 4;
+                if (cp >= 0xD800 && cp <= 0xDBFF) {
+                    uint32_t lo = 0;
+                    for (int i = 0; i < 4; ++i)
+                        lo = lo * 16 + (uint32_t)jp_hexval(r[2 + i]);
+                    r += 6;
+                    cp = 0x10000 + ((cp - 0xD800) << 10) + (lo - 0xDC00);
+                }
+                jp_utf8_put(&b, cp);
+                break;
+            }
+        }
+    }
+    PyAdamasStr* out = str_new(b.buf, (int64_t)b.len);
+    free(b.buf);
+    return out;
 }
 
 /* 严格 JSON 数字文法的最长前缀扫描：
@@ -660,18 +843,20 @@ static int64_t jp_int(JP* s) {
     }
     if (isfloat) jp_fail_type(s, "expected integer");
     /* int64 最多 19 位数字 + 符号；超长必然溢出（CPython 返回大整数，
-     * pyadamas 是 int64 语言，按口径报 ValueError 而不是回绕）。 */
-    if (n >= 21) jp_fail_type(s, "integer out of int64 range");
-    char buf[24];
-    memcpy(buf, start, n);
-    buf[n] = '\0';
-    errno = 0;
-    char* endp = NULL;
-    long long v = strtoll(buf, &endp, 10);
-    if (errno == ERANGE || !endp || *endp != '\0')
-        jp_fail_type(s, "integer out of int64 range");
+     * pyadamas 是 int64 语言，按口径报 ValueError 而不是回绕）。
+     * 手写累加代替 strtoll（perf 实测 strtoll 4.3% + token 拷贝）：
+     * 19 位数字 < 2^64，uint64 累加不会回绕，边界用 limit 判。 */
+    int neg = start[0] == '-';
+    size_t digits = n - (neg ? 1u : 0u);
+    if (digits > 19) jp_fail_type(s, "integer out of int64 range");
+    uint64_t u = 0;
+    for (size_t i = neg ? 1u : 0u; i < n; ++i)
+        u = u * 10 + (uint64_t)(start[i] - '0');
+    uint64_t limit = neg ? 9223372036854775808ULL : 9223372036854775807ULL;
+    if (u > limit) jp_fail_type(s, "integer out of int64 range");
     s->p = start + n;
-    return (int64_t)v;
+    /* neg 且 u==2^63 时 -(int64_t)(u-1)-1 == INT64_MIN，全程无溢出。 */
+    return neg ? -(int64_t)(u - 1) - 1 : (int64_t)u;
 }
 
 static double jp_float(JP* s) {
@@ -758,7 +943,10 @@ static int64_t jp_value(JP* s, const char* d, size_t n) {
             }
             for (;;) {
                 int64_t v = jp_value(s, cd, cn);
-                pa_list_append(out, v, 2);
+                /* 描述符静态已知元素堆性（kind 0/1），传准确 heap 提示
+                 * 免掉逐元素 pa_unknown_is_heap 探针（0.303 内部 append
+                 * 同款口径）。 */
+                pa_list_append(out, v, kind);
                 jp_ws(s);
                 if (s->p < s->end && *s->p == ',') {
                     const char* comma = s->p;
@@ -864,7 +1052,7 @@ static int64_t jp_value(JP* s, const char* d, size_t n) {
                 {
                     size_t cl = desc_len(d + pos);
                     int64_t v = jp_value(s, d + pos, cl);
-                    pa_list_append(out, v, 2);
+                    pa_list_append(out, v, kind);
                     pos += cl;
                 }
                 idx++;
