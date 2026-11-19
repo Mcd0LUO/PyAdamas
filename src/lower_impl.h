@@ -712,6 +712,8 @@ private:
     // （源类型未知就漏掉 inc，出口却照常 dec）。unknown 源用运行时
     // 保守 inc，整数在这里是安全的 no-op。
     void retain_for_store(const TypePtr& dst, VReg v);
+    // P3-1b：object/Any 标注局部槽登记禁升级（见 lower_impl_util.cpp）。
+    void mark_ann_unknown_slot(AnnAssign& a);
 
     void store_slot(int slot, VReg v);
 

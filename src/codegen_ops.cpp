@@ -313,6 +313,9 @@ void AsmGen::gen_inst(const Inst& in) {
             case IrOp::GenSent:
                 line("movq 16(%r15), %rax");
                 move_to(dst_op(in.dst), "%rax");
+                // P3-1b：send 边界无 tag 来源 → UNK 探针回退（不写会残留
+                // 上一轮的陈旧 tag）。
+                emit_tag_imm(in.dst, kTagUnk);
                 break;
             case IrOp::GenYield:
                 if (in.a != kNoReg) emit2("movq", src_op(in.a), "%rax");

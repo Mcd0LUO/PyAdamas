@@ -489,7 +489,9 @@ VReg Lowerer::lower_method_generator(Attribute& at, Call& c, VReg recv, TypePtr 
             err(c.line, c.col, "generator.send() takes exactly one argument");
             return const_none();
         }
-        VReg sv = expr(*c.args[0]);
+        // P3-1b：send 值进 unknown 域要装箱（float 裸位模式会被 gen.sent
+        // 当整数，0.327 基线已存在）；同步 resume 内消费，调用方临时份够用。
+        VReg sv = coerce(expr(*c.args[0]), tc_.type_of(c.args[0].get()), t_unknown());
         Inst in;
         in.op = IrOp::CallRt;
         in.imm = static_cast<int64_t>(RtFn::GenSend);
@@ -515,7 +517,7 @@ VReg Lowerer::lower_method_generator(Attribute& at, Call& c, VReg recv, TypePtr 
             ctor.args = {const_str(cn), const_int(0)};
             ev = def_heap(mk_exception(cn), std::move(ctor));
         } else {
-            ev = expr(*c.args[0]);
+            ev = coerce(expr(*c.args[0]), tc_.type_of(c.args[0].get()), t_unknown());
         }
         Inst in;
         in.op = IrOp::CallRt;

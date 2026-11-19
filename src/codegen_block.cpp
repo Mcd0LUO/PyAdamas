@@ -221,17 +221,16 @@ void AsmGen::emit_function(const IRFunction& f, int fi) {
         assign_vreg_slots();
         // P3：平行 tag 字分配（设计 §3.2）。每个 unknown vreg / unknown 命名
         // 槽一个专属字（不复用，避免陈旧 tag）。生成器堆帧里的命名槽不加 tag
-        // （装载得 UNK 回退探针）；vreg 仍在常规帧，照常分配。
+        // （装载得 UNK 回退探针）；vreg 在常规帧，生成器也分配（P3-1b：
+        // 清零挪到 g.entry 块头，每次 resume 都走；GenSent 写 UNK）。
         vreg_tag_.assign(f_->vreg_ty.size(), -1);
         slot_tag_.assign(f_->slot_ty.size(), -1);
         n_tag_words_ = 0;
-        if (tags_enabled_ && !gen_) {
-            // 生成器/协程 resume 函数不加 tag：序言清零不走常规路径，
-            // GenSent 等入口也不写 tag，垃圾 tag 会把整数当堆指针 dec
-            // （118/124/128/133 实测 SIGSEGV）。整函数回退 UNK 探针路径。
-            for (size_t s = 0; s < f_->slot_ty.size(); ++s)
-                if (is_unk_ty(f_->slot_ty[s]))
-                    slot_tag_[s] = n_tag_words_++;
+        if (tags_enabled_) {
+            if (!gen_)
+                for (size_t s = 0; s < f_->slot_ty.size(); ++s)
+                    if (is_unk_ty(f_->slot_ty[s]))
+                        slot_tag_[s] = n_tag_words_++;
             for (size_t v = 0; v < f_->vreg_ty.size(); ++v)
                 if (is_unk_ty(f_->vreg_ty[v]))
                     vreg_tag_[static_cast<VReg>(v)] = n_tag_words_++;
@@ -411,6 +410,11 @@ void AsmGen::emit_function(const IRFunction& f, int fi) {
             }
         }
         frame_alloc();
+        // P3：tag 区清零（UNK=0 探针回退）。非生成器在常规序言；生成器
+        // 这里就是 g.entry 块头——每次 resume 都经过，垃圾 tag 不会跨
+        // resume 残留（P3-1b，118/124/128/133 回归钉住）。
+        for (int w = 0; w < n_tag_words_; ++w)
+            emit2("movq", "$0", std::format("{}(%rsp)", tag_off(w)));
 
         if (!gen_) {
             // 非参数变量清零。`x: int` 这种纯声明在 lower 里不生成任何指令，
@@ -433,9 +437,6 @@ void AsmGen::emit_function(const IRFunction& f, int fi) {
                     else
                         emit2("movq", "$0", loc);
                 }
-            // P3：tag 区清零（UNK=0 探针回退）。
-            for (int w = 0; w < n_tag_words_; ++w)
-                emit2("movq", "$0", std::format("{}(%rsp)", tag_off(w)));
             // P3-1b：tag 入口装载形参 tag（%r11==0 → 保持 UNK 回退）。
             if (func_ptag_words() > 0) emit_ptag_param_load();
 
