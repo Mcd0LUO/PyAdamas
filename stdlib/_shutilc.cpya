@@ -1,0 +1,10 @@
+# shutil C 绑定：stat/utime/symlink/readlink（os 原生面没有这些）。
+# 错误归一化成负码（见 shutil_glue.c），Python 侧映射异常类型。
+cmodule _shutilc
+link "shutil_glue.c"
+
+extern def "pa_shutil_stat" as stat(path: str, follow: int, out: ptr[int]) -> int
+extern def "pa_shutil_utime" as utime(path: str, at_sec: int, at_nsec: int, mt_sec: int, mt_nsec: int, follow: int) -> int
+extern def "pa_shutil_readlink" as readlink(path: str, buf: ptr, cap: int) -> int
+extern def "pa_shutil_symlink" as symlink(target: str, linkpath: str) -> int
+extern def "pa_shutil_strerror" as strerror(code: int) -> str

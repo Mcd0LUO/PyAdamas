@@ -4,6 +4,85 @@
 
 早期阶段没有逐条留痕，按阶段归纳；0.4 之后逐条记录。
 
+## [0.329] - 2026-11-20
+
+> stdlib2 分支合入：标准库拓宽第二批（需求驱动，**轻量标尺**）——**zipfile /
+> shutil / tempfile / urllib.request（系统 libcurl 原生）**。接 p3next
+> 0.328 之后集成，定版 0.329。
+>
+> 轻量标尺（用户明确纠正一批的过度对齐）：同参数同功能同结果即可——
+> 错误类型对、消息合理不逐字；格式合法（zip 能读能解压、HTTP 响应正确）
+> 不字节级；差分只钉功能输出。选型理由/API 覆盖/差异/桥接兜底/已知问题见
+> **docs/stdlib-batch2.md**。
+>
+> 未做（记录在案）：pathlib 补全（原生类方法要动 builtin_sigs/lower，
+> NativePython 扩展加不了类方法）/ io.StringIO（csv 等收 f: file 静态类型，
+> 互通要 file 协议泛化）→ 后续批次；decimal/fractions 深化（BigInt）/
+> sqlite3 维持一批评估结论。
+
+### 模块交付（stdlib/，模块表登记）
+
+- **zipfile**：ZipFile r/w/a/x（namelist/infolist/getinfo/read/write/writestr/
+  extract/extractall 路径净化/testzip/open(r/w)/comment/上下文）、ZipInfo
+  常用字段面 + from_file、is_zipfile、BadZipFile/LargeZipFile。stored/deflated
+  复用一批 zlib 胶水；读 CPython 流式 data-descriptor 产物、写 CPython 可读
+  产物（互操作 fixture 内嵌测试）。整读整写；Zip64/bzip2/lzma/加密文档化拒绝。
+- **shutil**：copyfile/copy/copy2/copymode/copystat（权限位+atime/mtime 纳秒）/
+  move（跨设备回退）/rmtree（符号链接安全）/copytree（symlinks/ignore/
+  dirs_exist_ok）/ignore_patterns/which + Error/SameFileError/SpecialFileError。
+  stat/utime/symlink 走小 C 胶水（错误归一化负码）。
+- **tempfile**：mkstemp（O_EXCL 0600 胶水 + 随机名重试）/mkdtemp/
+  NamedTemporaryFile（file 全方法面代理，delete 语义）/TemporaryDirectory
+  （cleanup 幂等）/gettempdir（候选探测+缓存）/gettempprefix/tempdir。
+- **urllib.request**（lead 追加，libcurl 8.18 原生）：urlopen(url|Request,
+  data, timeout, headers, method) → Response（status/read/readline/headers/
+  geturl/getcode/info/上下文）；Request/HTTPMessage（大小写不敏感）；
+  URLError(OSError)/HTTPError(URLError 带响应面)；GET/POST/自定义头/超时/
+  重定向/HTTPS（系统 CA 默认验证）。C 胶水封装 easy API 全流程，缓冲所有权
+  交 Python；超时按连接阶段区分 URLError/TimeoutError（同 CPython）。
+  链接顺序 glue 在前 -lcurl 在后（Ubuntu --as-needed）。
+
+### 前端/运行时使能（最小修复，均基线问题）
+
+- **E1** open() errno → FileNotFoundError/FileExistsError/PermissionError/
+  NotADirectoryError/IsADirectoryError（rt_file.c，此前一律 OSError）。
+- **E2** os.close(fd) + os.unlink 别名（RtFn **OsClose 枚举尾部**）。
+- **E3** os.makedirs exist_ok 关键字此前被降级静默丢弃（lower_import_native.cpp）。
+- **E4** os.path.islink（RtFn **OsPathIslink 枚举尾部**）。
+- **F1** cmp+branch 融合排除 Bytes（同 Str）：bytes 切片 eq/ne 在循环条件里
+  被融合成指针比较恒不等（基线 0.327 复现，顶层"碰巧对"是常量折叠成同一
+  驻留字面量）——can_fuse_branch 一行修复。
+
+### 已知问题（基线已验证，绕行记录在 docs/stdlib-batch2.md §六）
+
+嵌套 try/finally mark 夹层抛异常 → 临时栈 mark 校验失败（copyfile 单层化绕行）；
+复杂帧 cimport ptr 装填错（urllib._perform 独立小帧绕行）；cast 到容器类型
+IndexError（直接标注赋值绕行）；类实例 __call__ unknown 间接调用 SEGV
+（ignore_patterns 闭包化绕行）。均 **pristine 1501040 重建复现**（主树
+release 二进制是旧物位且主树已进 0.328，不能当 0.327 基线），非本批引入，移交。
+
+leaf×unknown RC 泄漏（一批移交）：模块内 object→容器/字符串改直接标注赋值
+（j14 口径，实测 cast 漏标注不漏），测试侧二进制助手改文本口径；剩余小量
+（118B–9.4KB/用例）属一批 _gzipio cast + 基线容器临时洞，记录不硬修，
+p3next 0.328 集成后预期收敛。
+
+### 验证
+
+- tests/run/270–277（8 个）：先对拍 CPython 3.14 再钉 expect，O0/O1/O2
+  逐字节一致（271 含 2 行文档化 NI 边界手工钉入）。网络用例自起本地
+  http.server 子进程（18326/18327），不打外网。
+- 普通套件 **278 ran ok EXIT=0**（PYADAMAS_TEST_JOBS=8）。
+- ASan 套件 **278 ran ok EXIT=0**（PYADAMAS_TEST_JOBS=8，detect_leaks=0 口径）。
+- difftest（O0/O2 自差分）：**260 用例 0 不一致**。
+- ASan detect_leaks=1 抽查 270–277（--asan -O2）：**274/275 CLEAN**；
+  270 9379B/29obj、271 3939B/22obj、272 256B/2obj、273 118B/3obj、
+  276 712B/6obj、277 120B/1obj——均基线 leaf×unknown/容器临时 RC 机制
+  （pristine 1501040 重建同复现），绕行与分类见 docs/stdlib-batch2.md §六.5；
+  测试侧 cast 中转已清（272 由 600987B 降至 256B），模块内 j14 标注赋值已落。
+- check_size：**无新增超限**（既有 5 处不变：codegen_regalloc/driver_build/
+  ir_ops.h/lower_impl.h/typecheck_types.h；driver_build +6 行模块登记、
+  ir_ops.h +6 行 RtFn 尾部追加，均既有超限文件最小增量）。
+
 ## [0.328] - 2026-11-20
 
 > p3next 分支合入：unknown 表示层 **P3-1b**（接续 0.327 P3 一期）。先于

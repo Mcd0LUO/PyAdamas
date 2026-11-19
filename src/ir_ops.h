@@ -595,6 +595,10 @@ enum class RtFn : uint16_t {
     AnyToF64T,             // (a, tag_a) -> f64
     AnyToI64T,             // (a, tag_a) -> i64
     AnyLoadTag,            // (i64) -> i64 tag  无 tag 来源的 unknown 字一次探针定 tag
+    // stdlib2（0.329）：os.close(fd)——tempfile.mkstemp 的裸 fd 关闭。
+    // 追加在末尾，不改既有编号（集成时按落地顺序重排）。
+    OsClose,               // (i64 fd) -> void
+    OsPathIslink,          // (str* path) -> i64 bool  lstat S_ISLNK（stdlib2）
 };
 
 inline const char* rt_name(RtFn f) {
@@ -1171,6 +1175,8 @@ inline const char* rt_name(RtFn f) {
         case RtFn::AttrDict: return "pa_attr_dict_view";
         case RtFn::AnyIterList: return "pa_any_iter_list";
         case RtFn::ReprAny: return "pa_repr_any";
+        case RtFn::OsClose: return "pa_os_close";
+        case RtFn::OsPathIslink: return "pa_os_path_islink";
     }
     return "?";
 }

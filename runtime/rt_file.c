@@ -89,6 +89,26 @@ static int file_str_is(PyAdamasStr* s, const char* lit) {
     return s && s->len == (int64_t)n && memcmp(s->data, lit, n) == 0;
 }
 
+/* fopen 失败按 errno 映射到 OSError 子类（与 rt_os.c os_raise 同口径，
+ * stdlib2：zipfile/shutil/tempfile 需要 FileNotFoundError/FileExistsError
+ * 等具体类型）。消息带 errno 与路径，口径合理即可，不逐字对齐 CPython。 */
+static void file_open_raise(PyAdamasStr* path, int err) {
+    const char* type = "OSError";
+    switch (err) {
+        case ENOENT: type = "FileNotFoundError"; break;
+        case EEXIST: type = "FileExistsError"; break;
+        case EACCES:
+        case EPERM: type = "PermissionError"; break;
+        case ENOTDIR: type = "NotADirectoryError"; break;
+        case EISDIR: type = "IsADirectoryError"; break;
+        default: break;
+    }
+    char buf[1200];
+    snprintf(buf, sizeof buf, "[Errno %d] %s: '%.*s'", err, strerror(err),
+             path ? (int)path->len : 0, path ? path->data : "");
+    pa_raise_c(type, buf);
+}
+
 PyAdamasFile* pa_file_open(PyAdamasStr* path, int64_t fd, PyAdamasStr* mode, int64_t buffering,
                          int64_t newline, int64_t closefd) {
     char base = 0;
@@ -149,7 +169,7 @@ PyAdamasFile* pa_file_open(PyAdamasStr* path, int64_t fd, PyAdamasStr* mode, int
             fp = fopen(p, cmode);
         }
         free(p);
-        if (!fp) pa_raise_c("OSError", "cannot open file");
+        if (!fp) file_open_raise(path, errno);
         fdnum = fileno(fp);
     }
 

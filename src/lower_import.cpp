@@ -233,6 +233,8 @@ std::optional<RtFn> Lowerer::native_fn(const std::string& module, const std::str
         if (member == "mkdir") return RtFn::OsMkdir;
         if (member == "rmdir") return RtFn::OsRmdir;
         if (member == "remove") return RtFn::OsRemove;
+        if (member == "unlink") return RtFn::OsRemove;
+        if (member == "close") return RtFn::OsClose;
         if (member == "rename") return RtFn::OsRename;
         if (member == "getcwd") return RtFn::OsGetcwd;
         if (member == "cpu_count") return RtFn::OsCpuCount;
@@ -259,6 +261,7 @@ std::optional<RtFn> Lowerer::native_fn(const std::string& module, const std::str
         if (member == "getmtime") return RtFn::OsPathGetmtime;
         if (member == "split") return RtFn::OsPathSplit;
         if (member == "samefile") return RtFn::OsPathSamefile;
+        if (member == "islink") return RtFn::OsPathIslink;
     } else if (module == "subprocess") {
         if (member == "run") return RtFn::SubprocessRun;
         // 只为 from-import 登记别名；真正降级走 lower_popen。

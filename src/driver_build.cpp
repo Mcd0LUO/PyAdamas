@@ -240,11 +240,17 @@ inline constexpr ModuleEntry kModuleTable[] = {
     {"hmac", ModuleKind::Python, "hmac.py", "hashlib"},
     {"linalg", ModuleKind::Python, "linalg.py", ""},
     {"logging", ModuleKind::Python, "logging.py", "sys"},
+    {"shutil", ModuleKind::Python, "shutil.py", "os,os.path,fnmatch"},
     {"statistics", ModuleKind::Python, "statistics.py", "math"},
     {"string", ModuleKind::Python, "string.py", ""},
+    {"tempfile", ModuleKind::Python, "tempfile.py", "os,os.path,random,shutil"},
     {"textwrap", ModuleKind::Python, "textwrap.py", ""},
     {"typing", ModuleKind::Python, "typing.py", ""},
+    {"urllib", ModuleKind::Python, "urllib/__init__.py", ""},
+    {"urllib.error", ModuleKind::Python, "urllib/error.py", ""},
+    {"urllib.request", ModuleKind::Python, "urllib/request.py", "urllib.error"},
     {"uuid", ModuleKind::Python, "uuid.py", "random"},
+    {"zipfile", ModuleKind::Python, "zipfile.py", "zlib,_gzipio,os,os.path"},
     {"zlib", ModuleKind::Python, "zlib.py", ""},
 };
 

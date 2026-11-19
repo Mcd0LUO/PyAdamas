@@ -559,6 +559,8 @@ void AsmGen::gen_rt_args(const Inst& in, RtFn fn) {
         case RtFn::OsMkdir:
         case RtFn::OsRmdir:
         case RtFn::OsRemove:
+        case RtFn::OsClose:
+        case RtFn::OsPathIslink:
         case RtFn::OsPathJoin:
         case RtFn::OsPathExists:
         case RtFn::OsPathIsdir:

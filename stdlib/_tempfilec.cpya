@@ -1,0 +1,6 @@
+# tempfile C 绑定：独占创建（mkstemp 原语）。错误归一化负码见 tempfile_glue.c。
+cmodule _tempfilec
+link "tempfile_glue.c"
+
+extern def "pa_tempfile_open_excl" as open_excl(path: str) -> int
+extern def "pa_tempfile_strerror" as strerror(code: int) -> str

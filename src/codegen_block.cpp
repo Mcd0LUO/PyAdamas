@@ -671,10 +671,10 @@ bool AsmGen::can_fuse_branch(const Inst& in, const Inst& nx) const {
         if (in.op != IrOp::Cmp || nx.op != IrOp::Branch) return false;
         if (in.dst == kNoReg || nx.a != in.dst) return false;
         if (!single_use_in_block(in.dst)) return false;
-        // 字符串走三路比较，没有能直接用的条件跳转；浮点交给
-        // gen_cmp_branch_fp（有序比较用 ja/jae 把 NaN 归到假分支，== 再补 jp）。
+        // str/bytes 走内容比较（pa_str_eq 慢路径），融合成指针 cmpq 会静默判不等
+        // （zipfile magic 校验，基线 0.327 已存在）；浮点交给 gen_cmp_branch_fp（ja/jae 归 NaN 假分支，== 补 jp）。
         TypePtr t = ty_of(in.a);
-        if (t && t->kind == TyKind::Str) return false;
+        if (t && (t->kind == TyKind::Str || t->kind == TyKind::Bytes)) return false;
         return true;
     }
 

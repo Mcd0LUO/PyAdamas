@@ -282,6 +282,11 @@ VReg Lowerer::call_native(const std::string& module, const std::string& member, 
         VReg ok = const_bool(false);
         if (c.args.size() == 2)
             ok = coerce(expr(*c.args[1]), tc_.type_of(c.args[1].get()), t_bool());
+        // stdlib2：exist_ok 关键字此前被静默丢弃（签名声明了但降级只装
+        // 位置参），copytree(dirs_exist_ok=True) 因此恒报 FileExistsError。
+        for (auto& kw : c.keywords)
+            if (kw.arg == "exist_ok")
+                ok = coerce(expr(*kw.value), tc_.type_of(kw.value.get()), t_bool());
         call_void(RtFn::OsMakedirs, {p, ok});
         return const_none();
     }

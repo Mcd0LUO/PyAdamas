@@ -1,0 +1,27 @@
+# libcurl C 绑定：urllib.request 的热路径（系统 libcurl，link curl）。
+# CURL 句柄/回调/缓冲增长全在 curl_glue.c 侧；Python 只传字符串与出参数组。
+cmodule _curlc
+# glue 在前、-lcurl 在后的顺序重要：Ubuntu gcc 默认 --as-needed，
+# 库在引用它的目标文件之前出现会被丢弃（undefined reference）。
+link "curl_glue.c"
+link curl
+
+const CURLE_OK: int = 0
+const CURLE_UNSUPPORTED_PROTOCOL: int = 1
+const CURLE_URL_MALFORMAT: int = 3
+const CURLE_COULDNT_RESOLVE_PROXY: int = 5
+const CURLE_COULDNT_RESOLVE_HOST: int = 6
+const CURLE_COULDNT_CONNECT: int = 7
+const CURLE_REMOTE_ACCESS_DENIED: int = 9
+const CURLE_HTTP2: int = 16
+const CURLE_OPERATION_TIMEDOUT: int = 28
+const CURLE_SSL_CONNECT_ERROR: int = 35
+const CURLE_TOO_MANY_REDIRECTS: int = 47
+const CURLE_PEER_FAILED_VERIFICATION: int = 51
+const CURLE_GOT_NOTHING: int = 52
+const CURLE_SSL_CACERT: int = 60
+const CURLE_WRITE_ERROR: int = 23
+
+extern def "pa_curl_request" as request(url: str, method: str, body: ptr, body_len: int, headers: str, timeout_ms: int, follow: int, out: ptr[int], errbuf: ptr, errcap: int, effbuf: ptr, effcap: int) -> int
+extern def "pa_curl_copy" as copy(dst: ptr, src: int, n: int) -> None
+extern def "pa_curl_free" as free(p: int) -> None
