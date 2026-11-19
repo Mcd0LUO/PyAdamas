@@ -247,6 +247,7 @@ inline constexpr ModuleEntry kModuleTable[] = {
     {"textwrap", ModuleKind::Python, "textwrap.py", ""},
     {"typing", ModuleKind::Python, "typing.py", ""},
     {"uuid", ModuleKind::Python, "uuid.py", "random"},
+    {"zipfile", ModuleKind::Python, "zipfile.py", "zlib,_gzipio,os,os.path"},
     {"zlib", ModuleKind::Python, "zlib.py", ""},
 };
 
