@@ -406,6 +406,8 @@ void AsmGen::gen_rt_args(const Inst& in, RtFn fn) {
         case RtFn::StrFromBool:
         case RtFn::PrintI64:
         case RtFn::PrintAny:
+        case RtFn::PrintAnyRepr:
+        case RtFn::TruthAny:
         case RtFn::PrintBool:
         case RtFn::Panic:
         case RtFn::RcInc:

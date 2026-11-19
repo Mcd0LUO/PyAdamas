@@ -357,6 +357,15 @@ void Lowerer::print_elem(VReg ev, TypePtr et, bool to_file, int line, int col) {
             call_void(RtFn::FileWrite, {load_slot(print_file_slot_, t_file()), cs});
         else
             call_void(RtFn::PrintStr, {cs});
+    } else if (!et || et->kind == TyKind::Unknown) {
+        // unknown 元素按 repr 语义打印：字符串要带引号（CPython 打印
+        // 容器用元素 repr）。原来落到 pa_print_any 的「str 原样输出」，
+        // 于是 [1, "a"] 打成 [1, a]。
+        if (to_file) {
+            print_value_to_file(ev, et, line, col);
+        } else {
+            call_void(RtFn::PrintAnyRepr, {ev});
+        }
     } else if (to_file) {
         print_value_to_file(ev, et, line, col);
     } else {

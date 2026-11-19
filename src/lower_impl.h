@@ -631,7 +631,7 @@ private:
         if (t->kind == TyKind::Int || t->kind == TyKind::Bool) return 0;
         if (t->kind == TyKind::Float) return 1;
         if (t->kind == TyKind::Str) return 2;
-        if (t->kind == TyKind::Tuple) return 4;
+        if (t->kind == TyKind::Tuple || t->kind == TyKind::List) return 4;
         return 3;
     }
 

@@ -398,6 +398,12 @@ bool ir_module_can_skip_index_maint(const IRModule& m) {
                     case RtFn::IsComplex:
                     case RtFn::StrEqUnknown:
                     case RtFn::ComplexEqUnknown:
+                    // unknown 真值 / repr 打印 / 通用打印都要靠索引确认
+                    // 「这个机器字确实是堆对象」；索引只读（跳过维护）会让
+                    // 字面量 str 探不到（空串恒真、打印出地址）。
+                    case RtFn::TruthAny:
+                    case RtFn::PrintAny:
+                    case RtFn::PrintAnyRepr:
                         return false;
                     // CPython 桥：结果是 unknown 机器字，float 盒/容器在
                     // 运行时分配，必须进存活索引才能被探针/print/temp 认出。
@@ -459,6 +465,12 @@ bool ir_module_needs_unknown_index(const IRModule& m) {
             case RtFn::ComplexEqUnknown:
             case RtFn::IsStr:
             case RtFn::IsComplex:
+            // unknown 的真值判断与 repr 打印都要靠注册表确认「这个机器字
+            // 确实是堆对象」：索引一关，字面量 str 会被当成整数（真值恒真、
+            // 打印出地址）—— filter(None, 异构列表) 的静默错就来自这里。
+            case RtFn::TruthAny:
+            case RtFn::PrintAny:
+            case RtFn::PrintAnyRepr:
             // CPython 桥结果是 unknown 机器字（可能是堆对象）：
             // RcTempUnknown / print / marshalling 探针都靠注册表，
             // 用了桥的模块必须保留索引。

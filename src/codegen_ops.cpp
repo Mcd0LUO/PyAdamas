@@ -850,6 +850,18 @@ void AsmGen::emit_truth(VReg r, const char* byte_reg) {
             line("orb %cl, %al");
             return;
         }
+        // 静态类型 unknown：可能是整数、空串、空容器、None —— 必须按
+        // Python 真值判断（0/0.0/空串/空容器为假）。按整数比较会把
+        // 空串（非空指针）当成真，filter(None, 异构列表) 因此保留空串。
+        if (!ty || ty->kind == TyKind::Unknown) {
+            emit2("movq", src_op(r), arg_reg_i(0));
+            spill_fp_slots();
+            line("call pa_truth_unknown");
+            reload_fp_slots();
+            line("testq %rax, %rax");
+            line("setne %al");
+            return;
+        }
         std::string s = src_op(r);
         // 立即数不能直接进 cmpq 的源位置：先落 %rax。常量条件一般会被
         // 分支折叠吃掉，这里只兜底（如 bool(x) 的 x 是常量）。

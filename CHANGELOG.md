@@ -4,6 +4,21 @@
 
 早期阶段没有逐条留痕，按阶段归纳；0.4 之后逐条记录。
 
+## [0.317] - 2026-11-19
+
+### 正确性修复：P3 三件 + list[list] 自然排序（N6/N7/N9/同族）
+
+- **N6（`dict(x=1, y=2)` 静态类型丢成 dict[unknown, unknown]）**：关键字构造只推 `dict[unknown, unknown]`，于是打印是 `<dict object>`、下标读回只能走 unknown 路径。修：typecheck 对「无位置实参 + 有关键字」的 `dict()` 返回 `dict[str, join(各关键字值类型)]`（键恒为 str）。同类型关键字值现在与字面量一致（`dict(a=1,b=2)` → `{'a': 1, 'b': 2}`）。
+- **N7（`filter(None, 异构列表)` 保留空串 + 元素无 repr 引号）**：两层。
+  ① 真值：`truth_bool` 对 unknown 直接返回原值，branch 只测「非零」，空串/空容器恒真。改为对 unknown 调 `pa_truth_unknown`（0/0.0/空串/空容器/None 为假，CPython 语义；CPyFloat 盒按 double 判零），`emit_truth` 的 unknown 分支同样走它。
+  ② 打印：`print_elem` 对 unknown 元素改调 `pa_print_any_repr`（字符串带引号）。同时把 `PrintAny`/`PrintAnyRepr`/`TruthAny` 加进「索引必需」与「索引有人查」两张分析表 —— 原来程序只做 unknown 打印时索引会被判定「没人查」而只读化，字面量 str 探不到（打印成地址、真值恒真）。
+- **N9（`sum(list[float])` 朴素累加）**：CPython 3.12+ 用 Neumaier（改进 Kahan-Babuska）补偿求和。运行时 `pa_list_sum_f64` 改成 Neumaier（AVX2 分批累加删除 —— SIMD 归约与 CPython 的串行补偿顺序不同，病态数据必然分叉）；降级层把「list/tuple 元素与累加器都是 float」的 `sum()` 一律路由到该入口（原来只有 `--ffast-math` 才走运行时，默认落到标量朴素循环，且 O0/O2 分叉）。实测 `sum([0.1]*10)=1.0`、`sum([1e16,1,-1e16])=1.0`、`sum([1e300,1e300,-1e300])=1e300` 全部与 CPython 逐位一致。
+- **list[list] 自然排序（0.312 遗留的 kind-3 机器字）**：`sort_kind` 把 List 也映射到 kind 4（描述符 `l`+子描述符，运行时 `sort_desc_cmp` 早已支持），于是 `list[list[int]]`/`list[list[str]]`/`list[list[list[int]]]` 的 `sort()`/`sorted()` 从「比堆地址≈分配顺序」变成真字典序（前缀相等短者小）。
+- **回归用例**：新增 tests/run/239_p3_minor.py（先对拍 CPython 再钉 expect，O0/O1/O2 全一致）：dict 关键字构造（int/str 值、下标读回、`dict()` 空、`.keys()`）、`filter(None, 异构)` + `bool(unknown)` 全形态、Neumaier 六个病态/常态求和、list[list] 四种形状的自然排序。
+- **同时把三处「按旧行为钉的 expect」改成 CPython 口径**（本轮修复让它们与 CPython 一致，属预期变化）：`185_fnmatch` 的 `['a.py', 'c.py']`、`66_genexpr` 的 `('a', 'b')`、`162_pep479` 的 `[1, 'caught', 3]` —— 原来钉的是「unknown 元素打印无引号」的旧限制（docs/language.md §7 记录过）；`47_float_sum_order` 的期望值从朴素求和结果 `...343` 改成 CPython 的 `...345`。
+- **验证**：difftest **232/0**；普通与 ASan 套件各 **250 ran ok / EXIT=0**（PYADAMAS_TEST_JOBS=8）；ASan detect_leaks=1 抽查 239 / 238 / 13_gc 全干净；0.271 oracle 语料零意外差异；规模检查仍只有原有 5 处超限。
+- **abbench（对 ec35fb6 realistic 绑核交替 15 轮）**：dict_wordfreq −1.0%、obj_dispatch +0.0%、queue_sim −1.2%、rec_memo +0.3%、sort_struct −0.1%、str_build −0.4%，合计 **1640.49→1635.32ms（−0.3%）**。**踩坑如实记录**：第一版把 `pa_truth_unknown` / `pa_print_any_repr` 写在 rt_core.c（rc_alloc/inc/dec 的家），abbench 立刻报 str_build **+3.7%**（p25 +3.5%）；把这两个函数搬到 rt_format.c、rt_core.c 逐字节复原后，同一负载回到 −0.4% —— 又一次「gcc 内联/布局扰动」（HANDOFF §6.4）：新增运行时函数不要往热文件里塞。
+- **同批发现、未修（记录备查）**：① `statistics.mean` 仍是朴素求和（CPython 用精确有理数；`mean([0.1,0.2,0.3])` 仍差 1 ulp）—— 要对齐需要精确有理数累加（PyAdamas 只有 int64），记录为已知边界；② **生成器表达式的元素类型推断丢浮点**：`for v in (x for x in list[float])` 打印出的是 double 位模式（`4609434218613702656`），`sum(x for x in list[float])` 把元素转成 int 再累加（1.5+2.5 → 3）—— 这是独立于本轮的既有洞，单独立项；③ 异构 dict（值类型 unknown）仍打印 `<dict object>`（需要带类型标签的通用 repr，未做）。
 ## [0.316] - 2026-11-19
 
 ### 正确性修复：日常语料的四个静默语义差（N2/N3/N4/N5）+ try 里 return 的 RC 顺序

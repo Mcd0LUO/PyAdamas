@@ -219,7 +219,7 @@ except RuntimeError as e:
 # close RuntimeError: generator raised StopIteration
 # sub 1
 # sub RuntimeError: generator raised StopIteration
-# inner [1, caught, 3]
+# inner [1, 'caught', 3]
 # inner2 [0, 1, 2]
 # asyncfor 1
 # asyncfor RuntimeError: async generator raised StopIteration
@@ -229,7 +229,7 @@ except RuntimeError as e:
 # athrow RuntimeError: async generator raised StopIteration
 # aclose1 1
 # aclose RuntimeError: async generator raised StopIteration
-# ag inner [1, caught, 3]
+# ag inner [1, 'caught', 3]
 # coro RuntimeError: coroutine raised StopIteration
 # yf 1
 # yf RuntimeError: generator raised StopIteration

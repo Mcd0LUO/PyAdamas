@@ -596,3 +596,42 @@ PyAdamasStr* pa_percent_format(PyAdamasStr* pat, PyAdamasList* args, PyAdamasStr
     return res;
 }
 
+/* unknown 值的真值（Python 语义）：0/0.0/空串/空容器/None 都是假。
+   emit_truth 对静态类型 unknown 的操作数走这里 —— 原来按整数比较，
+   空串（非空指针）因此被当成真，filter(None, 异构列表) 会保留空串（N7）。 */
+int64_t pa_truth_unknown(int64_t v) {
+    if (!v) return 0;
+    if (!pa_unknown_is_heap(v)) return 1; /* 非零标量 */
+    PyAdamasRc* h = (PyAdamasRc*)(uintptr_t)((uint64_t)v - (uint64_t)PYADAMAS_RC_HDR);
+    switch (h->kind) {
+        case PYADAMAS_RC_STR: return ((PyAdamasStr*)(uintptr_t)v)->len > 0 ? 1 : 0;
+        case PYADAMAS_RC_LIST: return ((PyAdamasList*)(uintptr_t)v)->len > 0 ? 1 : 0;
+        case PYADAMAS_RC_DICT: return ((PyAdamasDict*)(uintptr_t)v)->len > 0 ? 1 : 0;
+        case PYADAMAS_RC_CPYFLOAT: {
+            double d;
+            memcpy(&d, (void*)(uintptr_t)v, sizeof d);
+            return d != 0.0 ? 1 : 0;
+        }
+        default: return 1;
+    }
+}
+
+/* unknown 值的 repr 打印：容器内部的元素按 repr 语义（字符串带引号），
+   与 print_elem 对已知 str 的处理一致。 */
+void pa_print_any_repr(int64_t v) {
+    if (pa_unknown_is_heap(v)) {
+        PyAdamasRc* h = (PyAdamasRc*)(uintptr_t)((uint64_t)v - (uint64_t)PYADAMAS_RC_HDR);
+        if (h->kind == PYADAMAS_RC_STR) {
+            PyAdamasStr* r = pa_repr_str((PyAdamasStr*)(uintptr_t)v);
+            pa_print_str(r);
+            pa_rc_dec(r);
+            return;
+        }
+        if (h->kind == PYADAMAS_RC_CPYFLOAT || h->kind == PYADAMAS_RC_LIST ||
+            h->kind == PYADAMAS_RC_DICT) {
+            pa_print_cpy_value(v);
+            return;
+        }
+    }
+    pa_print_i64(v);
+}

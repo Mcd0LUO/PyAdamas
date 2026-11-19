@@ -483,6 +483,9 @@ double pa_complex_abs(PyAdamasComplex* a);
 PyAdamasStr* pa_complex_str(PyAdamasComplex* a);
 int64_t pa_complex_eq(PyAdamasComplex* a, PyAdamasComplex* b);
 int64_t pa_complex_truth(PyAdamasComplex* a);
+/* unknown 值的 Python 真值/ repr 打印（rt_core.c）。 */
+int64_t pa_truth_unknown(int64_t v);
+void pa_print_any_repr(int64_t v);
 PyAdamasStr* pa_fmt_i64(int64_t v, PyAdamasStr* spec);
 PyAdamasStr* pa_fmt_bool(int64_t v, PyAdamasStr* spec);
 PyAdamasStr* pa_fmt_f64(double v, PyAdamasStr* spec);

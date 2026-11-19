@@ -1000,18 +1000,8 @@ static uint64_t list_sum_u64_avx2(const int64_t* d, int64_t n) {
     return s;
 }
 
-__attribute__((target("avx2")))
-static double list_sum_f64_avx2(const double* d, int64_t n) {
-    __m256d acc = _mm256_setzero_pd();
-    int64_t i = 0;
-    for (; i + 4 <= n; i += 4)
-        acc = _mm256_add_pd(acc, _mm256_loadu_pd(d + i));
-    double lanes[4];
-    _mm256_storeu_pd(lanes, acc);
-    double s = lanes[0] + lanes[1] + lanes[2] + lanes[3];
-    for (; i < n; ++i) s += d[i];
-    return s;
-}
+/* 浮点 sum 不再用 AVX2：CPython 的 Neumaier 补偿求和是串行的，
+   SIMD 分批累加会在病态数据上给出不同结果（对拍分叉）。 */
 
 __attribute__((target("avx2")))
 static int64_t list_min_i64_avx2(const int64_t* d, int64_t n) {
@@ -1074,15 +1064,22 @@ int64_t pa_list_sum_i64(PyAdamasList* l, int64_t start) {
     return (int64_t)s;
 }
 
+/* sum(list[float], start)：CPython 3.12+ 的 Neumaier（改进 Kahan-Babuska）
+   补偿求和。朴素求和在病态数据上与 CPython 逐位不同（sum([0.1]*10) 差 1 ulp、
+   sum([1e16,1,-1e16]) 直接变 0），破坏对拍。注意 CPython 只对**浮点元素**
+   做补偿，这里元素本来就是 float，口径一致；start 折进 f 初值。 */
 double pa_list_sum_f64(PyAdamasList* l, double start) {
-#if defined(__x86_64__) && defined(__GNUC__)
-    if (pa_has_avx2())
-        return start + list_sum_f64_avx2((const double*)l->data, l->len);
-#endif
-    double s = start;
+    double f = start;
+    double c = 0.0;
     const double* d = (const double*)l->data;
-    for (int64_t i = 0; i < l->len; ++i) s += d[i];
-    return s;
+    for (int64_t i = 0; i < l->len; ++i) {
+        double x = d[i];
+        double t = f + x;
+        if (fabs(f) >= fabs(x)) c += (f - t) + x;
+        else c += (x - t) + f;
+        f = t;
+    }
+    return f + c;
 }
 
 int64_t pa_list_min_i64(PyAdamasList* l) {

@@ -234,6 +234,17 @@ TypePtr TypeChecker::builtin_call(const std::string& n, Call& c) {
                     return mk_dict(et->sub[0], et->sub[1]);
                 if (et && et->kind == TyKind::Str) return mk_dict(t_str(), t_str());
             }
+            // dict(x=1, y=2)：关键字构造的键恒为 str，值类型按关键字值求
+            // 并集。原来一律退 unknown 双参 —— 静态类型看不见，打印只剩
+            // "<dict object>"，下标读回也只能走 unknown 路径（N6）。
+            if (a.empty() && !c.keywords.empty()) {
+                TypePtr vt = kwt.empty() ? t_unknown() : kwt[0];
+                for (size_t i = 1; i < kwt.size(); ++i) {
+                    if (!vt || !kwt[i] || type_eq(vt, kwt[i])) continue;
+                    vt = join(vt, kwt[i]);
+                }
+                return mk_dict(t_str(), vt ? vt : t_unknown());
+            }
             return mk_dict(t_unknown(), t_unknown());
         }
         if (n == "ord") return t_int();

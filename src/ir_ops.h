@@ -109,6 +109,8 @@ enum class RtFn : uint16_t {
     SysStream,   // (i64 which 0/1/2) -> file*  sys.stdin/stdout/stderr
     PrintI64,
     PrintAny,    // (i64) -> void
+    PrintAnyRepr,  // (i64) -> void  容器内 unknown 元素：repr 语义
+    TruthAny,      // (i64) -> i64   unknown 值的 Python 真值
     PrintF64,    // (f64) -> void
     PrintBool,   // (i64) -> void
     PrintStr,
@@ -626,6 +628,8 @@ inline const char* rt_name(RtFn f) {
         case RtFn::SysStream: return "pa_sys_stream";
         case RtFn::PrintI64: return "pa_print_i64";
         case RtFn::PrintAny: return "pa_print_any";
+        case RtFn::PrintAnyRepr: return "pa_print_any_repr";
+        case RtFn::TruthAny: return "pa_truth_unknown";
         case RtFn::PrintF64: return "pa_print_f64";
         case RtFn::PrintBool: return "pa_print_bool";
         case RtFn::PrintStr: return "pa_print_str";

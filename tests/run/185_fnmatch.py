@@ -16,6 +16,6 @@ print(fnmatch.fnmatchcase("abc", "abc"))
 # True
 # True
 # True
-# [a.py, c.py]
+# ['a.py', 'c.py']
 # False
 # True

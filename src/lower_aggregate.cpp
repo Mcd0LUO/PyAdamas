@@ -358,13 +358,14 @@ VReg Lowerer::lower_sum(Call& c) {
 
     // SIMD 归约：只覆盖同域 list/tuple[int|bool] 与 float；混合数值
     // （如 int 列表 + float start）继续走标量循环保持转换语义。
-    if (opts_.opt_level >= 2 &&
-        (seq_ty->kind == TyKind::List || seq_ty->kind == TyKind::Tuple) &&
+    if ((seq_ty->kind == TyKind::List || seq_ty->kind == TyKind::Tuple) &&
         !seq_ty->sub.empty() && acc_ty) {
         bool ints = (elem_ty->kind == TyKind::Int || elem_ty->kind == TyKind::Bool) &&
                     (acc_ty->kind == TyKind::Int || acc_ty->kind == TyKind::Bool);
-        bool floats = opts_.fast_math && elem_ty->kind == TyKind::Float &&
-                      acc_ty->kind == TyKind::Float;
+        // 浮点：一律走运行时（CPython 3.12+ 的 Neumaier 补偿求和）。原来只有
+        // --ffast-math 才走 SIMD 归约，默认落到标量朴素累加，与 CPython 有
+        // 1 ulp 甚至量级差（sum([1e16,1,-1e16]) 是 0 而不是 1）。
+        bool floats = elem_ty->kind == TyKind::Float && acc_ty->kind == TyKind::Float;
         if (ints || floats) {
             VReg seq = seq_conv != kNoReg ? seq_conv : expr(*c.args[0]);
             VReg start = floats ? const_float(0.0) : const_int(0);

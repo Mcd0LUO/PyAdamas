@@ -135,6 +135,11 @@ VReg Lowerer::truth_bool(VReg v, TypePtr ty) {
     // CPython：先 __bool__，没有再按 __len__ 是否非零；都没有时按指针判空。
     VReg b = dunder_bool(v, ty);
     if (b != kNoReg) return b;
+    // **unknown 必须走运行期真值**：机器字可能是整数、空串、空容器、None。
+    // 直接把它当布尔用（branch 只测非零）会让空串/空容器恒真 ——
+    // filter(None, 异构列表) 保留空串就是这个洞（N7）。
+    if (!ty || ty->kind == TyKind::Unknown)
+        return call_runtime(RtFn::TruthAny, t_bool(), {v});
     VReg ln = dunder_len(v, ty);
     if (ln == kNoReg) return v;
     Inst c;
