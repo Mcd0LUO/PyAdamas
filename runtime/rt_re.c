@@ -33,6 +33,7 @@ enum {
     RE_BACKREF,  // x = 组号
     RE_ASSERT,   // x = 种类, y = 子程序, ch = 之后, aux = 最大宽度
     RE_ATOMIC,   // x = 子程序, y = 之后
+    RE_LOOP,     // 单指令体 X*/X+ 的 SPLIT（aux 预计算，见 loop_precompute）
 };
 
 // 断言种类
@@ -52,6 +53,17 @@ typedef struct {
     int group;
 } ReName;
 
+// 编译期分析结果（只用于剪枝，不改变匹配语义；见 prog_analyze）。
+// 单独一块、按需分配：re.compile 的对象不匹配就不付这笔内存。
+//   first_kind = 0 未知 / 1 首字节集 / 2 仅 pos 0 / 3 行首（^ + M）
+//   lit/litlen：纯字面量模式的匹配串副本（litlen == 0 表示不是纯字面量）
+typedef struct {
+    int first_kind;
+    int litlen;
+    unsigned char first[32];
+    unsigned char* lit;
+} ReAnalysis;
+
 typedef struct {
     ReInst* code;
     int n, cap;
@@ -59,6 +71,7 @@ typedef struct {
     int flags;
     ReName* names;
     int nnames;
+    ReAnalysis* an;  // NULL = 还没分析（惰性，见 find_from）
 } ReProg;
 
 enum {
@@ -958,6 +971,95 @@ static void prog_free(ReProg* g) {
     free(g->names);
     g->names = NULL;
     g->nnames = 0;
+    if (g->an) {
+        free(g->an->lit);
+        free(g->an);
+        g->an = NULL;
+    }
+}
+
+// 纯字面量查找：memchr + memcmp 的朴素实现。不用 GNU 的 memmem——保留
+// 平台可移植性（Windows 运行时有独立的移植层，见 WIN_PORT_CONTEXT.md）。
+static const unsigned char* lit_find(const unsigned char* h, size_t hn,
+                                     const unsigned char* n, size_t nn) {
+    if (nn == 0) return h;
+    if (nn > hn) return NULL;
+    const unsigned char* p = h;
+    size_t left = hn - nn + 1;
+    while (left > 0) {
+        const unsigned char* q = (const unsigned char*)memchr(p, n[0], left);
+        if (!q) return NULL;
+        if (memcmp(q, n, nn) == 0) return q;
+        left -= (size_t)(q - p) + 1;
+        p = q + 1;
+    }
+    return NULL;
+}
+
+// ── 编译期分析：为「搜索起点剪枝」与「纯字面量」两条快路径取证 ──
+//
+// 分析只看程序前端的形状，结果只用于**排除不可能匹配的起点**，不参与
+// 匹配本身，因此不改变任何语义（漏分析只是退回慢路径）。结论有四类：
+//   first_kind 0  未知（含零宽断言/后向引用/宽子程序）→ 逐位尝试
+//   first_kind 1  首个消费指令是字面字符/类/. → 首字节集 first[32]
+//   first_kind 2  程序以 \A 或非 MULTILINE 的 ^ 开头 → 只有 pos 0 可能
+//   first_kind 3  MULTILINE 的 ^ → 只有行首可能
+// lit/litlen：整条模式是纯字面量（可整体走 memmem）。
+static void first_all(unsigned char* s) { memset(s, 0xFF, 32); }
+
+// 返回 1 表示已确定起点约束（kind 2/3）或首字节集（kind 1），0 表示未知。
+// 从程序入口线性走到第一个「消费或锚定」指令；只认 SAVE/JMP 这些零成本
+// 转运，遇到零宽断言/后向引用/宽子程序就放弃（保守）。
+static int prog_first(ReProg* g, int pc, unsigned char* out, int* kind, int depth) {
+    if (depth > 64) return 0;
+    for (int guard = 0; guard < 4096; ++guard) {
+        if (pc < 0 || pc >= g->n) return 0;
+        ReInst* in = &g->code[pc];
+        switch (in->op) {
+            case RE_SAVE: pc++; continue;
+            case RE_JMP: pc = in->x; continue;
+            case RE_BOS:
+                *kind = 2;
+                return 1;
+            case RE_BOL:
+                *kind = (in->flags & RE_M) ? 3 : 2;
+                return 1;
+            case RE_CHAR:
+                *kind = 1;
+                set_bit(out, in->ch);
+                if (in->flags & RE_I) {
+                    if (in->ch >= 'A' && in->ch <= 'Z') set_bit(out, in->ch - 'A' + 'a');
+                    if (in->ch >= 'a' && in->ch <= 'z') set_bit(out, in->ch - 'a' + 'A');
+                }
+                return 1;
+            case RE_ANY:
+                *kind = 1;
+                first_all(out);
+                if (!(in->flags & RE_S)) {
+                    out['\n' >> 3] &= (unsigned char)~(1u << ('\n' & 7));
+                }
+                return 1;
+            case RE_CLASS:
+                *kind = 1;
+                memcpy(out, in->cls, 32);
+                return 1;
+            case RE_SPLIT: {
+                unsigned char l[32], r[32];
+                int lk = 0, rk = 0;
+                memset(l, 0, sizeof l);
+                memset(r, 0, sizeof r);
+                if (!prog_first(g, in->x, l, &lk, depth + 1)) return 0;
+                if (!prog_first(g, in->y, r, &rk, depth + 1)) return 0;
+                if (lk != 1 || rk != 1) return 0;  // 锚定/未知分支不合并
+                *kind = 1;
+                for (int i = 0; i < 32; ++i) out[i] |= l[i];
+                for (int i = 0; i < 32; ++i) out[i] |= r[i];
+                return 1;
+            }
+            default: return 0;
+        }
+    }
+    return 0;
 }
 
 static int prog_build(ReProg* g, const unsigned char* pat, int len, int flags, const char** err) {
@@ -994,6 +1096,141 @@ static int prog_build(ReProg* g, const unsigned char* pat, int len, int flags, c
     return 1;
 }
 
+static void loop_precompute(ReProg* g);
+
+// 编译完成后的一次性分析：首字节集/锚定约束 + 纯字面量判定。
+static void prog_analyze(ReProg* g) {
+    ReAnalysis* an = (ReAnalysis*)re_alloc(sizeof(ReAnalysis));
+    memset(an, 0, sizeof *an);
+    g->an = an;
+    unsigned char f[32];
+    int kind = 0;
+    memset(f, 0, sizeof f);
+    if (prog_first(g, 0, f, &kind, 0)) {
+        an->first_kind = kind;
+        memcpy(an->first, f, sizeof f);
+    }
+    loop_precompute(g);
+    // 纯字面量形态：SAVE0, RE_CHAR+（同一 flags、无 IGNORECASE）, SAVE1, MATCH。
+    if (g->n >= 4 && g->code[0].op == RE_SAVE && g->code[0].x == 0) {
+        int i = 1, lit0 = 1, flags0 = g->code[1].flags;
+        while (i < g->n && g->code[i].op == RE_CHAR && g->code[i].flags == flags0 &&
+               g->code[i].ch >= 0 && g->code[i].ch <= 255)
+            i++;
+        int nlit = i - lit0;
+        if (nlit > 0 && i + 2 == g->n && g->code[i].op == RE_SAVE && g->code[i].x == 1 &&
+            g->code[i + 1].op == RE_MATCH && !(flags0 & RE_I)) {
+            an->lit = (unsigned char*)re_alloc((size_t)nlit);
+            for (int k = 0; k < nlit; ++k)
+                an->lit[k] = (unsigned char)g->code[lit0 + k].ch;
+            an->litlen = nlit;
+        }
+    }
+}
+
+// ── 模式编译缓存 ────────────────────────────────────────────────────
+//
+// 模块级 API（re.findall/re.split/re.sub/re.search...）每次调用都把模式
+// 字符串重新解析+编译一遍，而实际负载几乎总是同一批固定模式反复调用。
+// 这里按 (pattern 字节, flags) 缓存编译产物（小 LRU，8 槽）：
+//   - 命中只比较字节 + flags，不解析；
+//   - 槽位在借用期间 pin 住，用户回调（sub 的 repl 函数）里再调 re 不会
+//     把外层正在用的程序挤掉；8 槽全被 pin 时退回「现编现用」；
+//   - 单线程假设：与运行时其余 119 个 static 全局态一致（M=1）。
+//
+// 模式串可以含 NUL，所以键是 (len, bytes)，不用 strlen。
+#define RE_CACHE_SLOTS 8
+
+typedef struct {
+    unsigned char* key;
+    int keylen;
+    int64_t flags;
+    ReProg prog;
+    int used;
+    int pin;
+    unsigned long stamp;
+} ReCacheEnt;
+
+static ReCacheEnt re_cache[RE_CACHE_SLOTS];
+static unsigned long re_cache_stamp;
+
+static int cache_lookup(const unsigned char* pat, int len, int64_t flags) {
+    for (int i = 0; i < RE_CACHE_SLOTS; ++i) {
+        ReCacheEnt* e = &re_cache[i];
+        if (e->used && e->flags == flags && e->keylen == len &&
+            (len == 0 || memcmp(e->key, pat, (size_t)len) == 0)) {
+            e->stamp = ++re_cache_stamp;
+            return i;
+        }
+    }
+    return -1;
+}
+
+static int cache_slot_for_insert(void) {
+    int victim = -1;
+    unsigned long oldest = 0;
+    for (int i = 0; i < RE_CACHE_SLOTS; ++i) {
+        ReCacheEnt* e = &re_cache[i];
+        if (!e->used) return i;
+        if (e->pin == 0 && (victim < 0 || e->stamp < oldest)) {
+            victim = i;
+            oldest = e->stamp;
+        }
+    }
+    return victim;
+}
+
+// 取一个已分析好的程序：命中缓存则 pin 住，否则编译并尝试入缓存。
+// lease >= 0 表示借用槽位，-1 表示调用方独占（用完 free_prog_lease）。
+static ReProg* re_prog_acquire(const unsigned char* pat, int len, int64_t flags,
+                               const char** err, int* lease) {
+    int hit = cache_lookup(pat, len, flags);
+    if (hit >= 0) {
+        re_cache[hit].pin++;
+        *lease = hit;
+        return &re_cache[hit].prog;
+    }
+    ReProg tmp;
+    memset(&tmp, 0, sizeof tmp);
+    if (!prog_build(&tmp, pat, len, (int)flags, err)) {
+        prog_free(&tmp);
+        return NULL;
+    }
+    prog_analyze(&tmp);
+    int slot = cache_slot_for_insert();
+    if (slot < 0) {
+        ReProg* g = (ReProg*)re_alloc(sizeof(ReProg));
+        *g = tmp;
+        *lease = -1;
+        return g;
+    }
+    ReCacheEnt* e = &re_cache[slot];
+    if (e->used) {
+        prog_free(&e->prog);
+        free(e->key);
+    }
+    e->prog = tmp;
+    e->key = (unsigned char*)re_alloc((size_t)len + 1);
+    if (len > 0) memcpy(e->key, pat, (size_t)len);
+    e->key[len] = 0;
+    e->keylen = len;
+    e->flags = flags;
+    e->used = 1;
+    e->pin = 1;
+    e->stamp = ++re_cache_stamp;
+    *lease = slot;
+    return &e->prog;
+}
+
+static void re_prog_release(ReProg* g, int lease) {
+    if (lease >= 0) {
+        if (re_cache[lease].pin > 0) re_cache[lease].pin--;
+    } else {
+        prog_free(g);
+        free(g);
+    }
+}
+
 static int is_word(int c) {
     return (c >= '0' && c <= '9') || (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') ||
            c == '_';
@@ -1003,6 +1240,164 @@ static int fold_eq(int a, int b) {
     if (a >= 'A' && a <= 'Z') a += 32;
     if (b >= 'A' && b <= 'Z') b += 32;
     return a == b;
+}
+
+// 单指令「消费型」字节码：只吃一个字节，不碰 caps/pos 之外的状态。
+static int is_consumer(const ReInst* in) {
+    return in->op == RE_CHAR || in->op == RE_CLASS || in->op == RE_ANY;
+}
+
+static int consumer_match(const ReInst* in, int ch) {
+    switch (in->op) {
+        case RE_CHAR:
+            if (in->flags & RE_I) return fold_eq(ch, in->ch);
+            return ch == in->ch;
+        case RE_CLASS: return test_bit(in->cls, ch);
+        case RE_ANY: return (in->flags & RE_S) || ch != '\n';
+        default: return 0;
+    }
+}
+
+// 识别「X* / X+ 且 X 是单指令消费」的循环形状（编译器按 N_STAR/N_PLUS 生成
+// 的固定布局）。识别成功返回 1 并给出体指令/出口 pc/贪婪性。
+//   X*: pc=SPLIT, pc+1=X, pc+2=JMP->pc, pc+3=after
+//   X+: pc-1=X,  pc=SPLIT, pc+1=after
+static int loop_shape(ReProg* g, int pc, int* body, int* after, int* greedy) {
+    if (pc + 2 < g->n) {
+        int b = pc + 1;
+        if (is_consumer(&g->code[b]) && g->code[b + 1].op == RE_JMP &&
+            g->code[b + 1].x == pc && pc + 3 < g->n) {
+            if (g->code[pc].x == b && g->code[pc].y == b + 2) {
+                *body = b;
+                *after = b + 2;
+                *greedy = 1;
+                return 1;
+            }
+            if (g->code[pc].y == b && g->code[pc].x == b + 2) {
+                *body = b;
+                *after = b + 2;
+                *greedy = 0;
+                return 1;
+            }
+        }
+    }
+    if (pc >= 1) {
+        int b = pc - 1;
+        if (is_consumer(&g->code[b]) && pc + 1 < g->n) {
+            if (g->code[pc].x == b && g->code[pc].y == pc + 1) {
+                *body = b;
+                *after = pc + 1;
+                *greedy = 1;
+                return 1;
+            }
+            if (g->code[pc].y == b && g->code[pc].x == pc + 1) {
+                *body = b;
+                *after = pc + 1;
+                *greedy = 0;
+                return 1;
+            }
+        }
+    }
+    return 0;
+}
+
+// 把循环形状预计算进 SPLIT 指令的 aux（见 prog_analyze）：
+//   aux == 0 不是简单循环；否则 low32 = body+1，high32 = after。
+// greedy 由 SPLIT 的 x 是否指向 body 决定（贪婪时 x = body）。
+static void loop_precompute(ReProg* g) {
+    for (int pc = 0; pc < g->n; ++pc) {
+        ReInst* in = &g->code[pc];
+        if (in->op != RE_SPLIT) continue;
+        // 只在「循环后紧跟收尾（after+1 是 MATCH）」时启用：这时末段扫描与
+        // 一阶失败剪枝的收益最大；嵌套量词（(a+)+b 之类）没有收尾可剪，
+        // 开启只会多付扫描开销（实测 +17%），保持原递归展开。
+        int body, after, greedy;
+        if (loop_shape(g, pc, &body, &after, &greedy) && after + 1 < g->n &&
+            g->code[after + 1].op == RE_MATCH) {
+            in->aux = (int64_t)(((uint64_t)(uint32_t)after << 32) |
+                                (uint64_t)(uint32_t)(body + 1));
+            // 换成专用 op：普通 SPLIT 的热路径不背这个判断（嵌套量词上
+            // 每个字符都走 SPLIT，多一次 aux 测试实测 +4% 指令）。
+            in->op = RE_LOOP;
+        }
+    }
+}
+
+static int run(ReProg* g, int pc, ReCtx* c);
+
+// 单指令体循环的快路径单独成函数并禁止内联：把它内联进 run() 会让递归
+// VM 的栈帧变大、热寄存器分配变差（实测嵌套量词路径 +4% 指令），而快路径
+// 本身只在「循环后紧跟收尾」的形状上命中，独立函数没有损失。
+static __attribute__((noinline)) int run_loop(ReProg* g, const ReInst* in, int pc,
+                                              ReCtx* c) {
+    // 简单循环快路径：单指令体的 X*/X+ 用紧循环吃完再逐位回溯。
+    // 等价于原递归展开（每个回溯点都调用 run(after)），只是把
+    // 「每字符一次递归」换成一次循环 + 出口处的逐位调用。
+    int64_t ls = in->aux;
+    int body = (int)(uint32_t)(ls & 0xffffffffULL) - 1;
+    int after = (int)(uint32_t)((uint64_t)ls >> 32);
+    int greedy = (g->code[pc].x == body);
+    int64_t p = c->pos, e = p;
+    int64_t len = c->len;
+    const unsigned char* s = c->s;
+    ReInst* bi = &g->code[body];
+    // 按指令种类特化紧循环（字节级扫描的最内层）。
+    if (bi->op == RE_CLASS) {
+        const unsigned char* cls = bi->cls;
+        while (e < len && test_bit(cls, s[e])) e++;
+    } else if (bi->op == RE_CHAR) {
+        int ch = bi->ch;
+        if (bi->flags & RE_I) {
+            while (e < len && fold_eq(s[e], ch)) e++;
+        } else {
+            while (e < len && s[e] == ch) e++;
+        }
+    } else {
+        int dotall = bi->flags & RE_S;
+        while (e < len && (dotall || s[e] != '\n')) e++;
+    }
+    // 步数上限是「兜底 runaway 回溯」的护栏：线性扫描也要按扫描字节数
+    // 一次性记入，否则超长 subject 上原本会触发 RuntimeError 的场景会
+    // 变成静默成功（异常路径与慢路径保持同一口径）。
+    c->steps += e - p;
+    if (c->steps > RE_STEP_LIMIT) {
+        c->err = 1;
+        return 0;
+    }
+    if (greedy) {
+        // 一阶快速失败：出口处是「一个消费指令 + MATCH」（X*Y 这类相邻
+        // 匹配，Y 必然吃掉一个字节），先把「Y 不可能匹配」的回溯点整段
+        // 跳过，剩下的交给逐位 run——只跳过必然失败的尝试。
+        int64_t k0 = -1;
+        if (after + 1 < g->n && is_consumer(&g->code[after]) &&
+            g->code[after + 1].op == RE_MATCH) {
+            const ReInst* yi = &g->code[after];
+            while (e >= p) {
+                if (e >= len) {
+                    e--;
+                    continue;
+                }
+                if (consumer_match(yi, s[e])) {
+                    k0 = e;
+                    break;
+                }
+                e--;
+            }
+        }
+        for (int64_t k = e; k >= p && k >= k0; --k) {
+            c->pos = k;
+            if (run(g, after, c)) return 1;
+            if (c->err) return 0;
+        }
+    } else {
+        for (int64_t k = p; k <= e; ++k) {
+            c->pos = k;
+            if (run(g, after, c)) return 1;
+            if (c->err) return 0;
+        }
+    }
+    c->pos = p;
+    return 0;
 }
 
 static int run(ReProg* g, int pc, ReCtx* c) {
@@ -1138,6 +1533,7 @@ static int run(ReProg* g, int pc, ReCtx* c) {
                 pc = in->y;
                 break;
             }
+            case RE_LOOP: return run_loop(g, in, pc, c);
             case RE_JMP: pc = in->x; break;
             case RE_SAVE: {
                 int64_t old = c->caps[in->x];
@@ -1152,19 +1548,103 @@ static int run(ReProg* g, int pc, ReCtx* c) {
     }
 }
 
+// 栈上 caps：小分组（<= 64 槽 = 32 组）不 malloc。热循环里每次 API
+// 调用都 malloc/free 一次 caps 是白花的开销。
+#define RE_CAPS_STACK 64
+
+static int64_t* caps_take(int64_t ncap, int64_t* stack) {
+    return ncap <= RE_CAPS_STACK ? stack : (int64_t*)re_alloc(sizeof(int64_t) * (size_t)ncap);
+}
+
+static void caps_drop(int64_t* caps, int64_t* stack) {
+    if (caps != stack) free(caps);
+}
+
+static void caps_fill(int64_t* caps, int64_t ncap, int64_t v) {
+    for (int64_t i = 0; i < ncap; ++i) caps[i] = v;
+}
+
 // 从 start 起尝试一次匹配。mode: 0 search / 1 match / 2 fullmatch。
+//
+// 快路径（都不改变语义，只跳过必然失败的起点）：
+//   1. 纯字面量模式：search 用 lit_find 定位，match 用 memcmp；
+//   2. 编译期求出的首字节集：起点字节不在集合里就不进 VM；
+//   3. \A / 非 MULTILINE ^ / MULTILINE ^：起点约束直接判死。
 static int find_from(ReProg* g, PyAdamasStr* text, int64_t start, int mode, int64_t* caps) {
+    if (!g->an) prog_analyze(g);  // re.compile 的对象首次使用时才分析
+    const ReAnalysis* an = g->an;
     int64_t ncap = 2 * (int64_t)(g->ngroups + 1);
-    for (int64_t s = start; s <= text->len; ++s) {
-        for (int64_t i = 0; i < ncap; ++i) caps[i] = -1;
-        ReCtx c = {(const unsigned char*)text->data, text->len, s, g->flags, caps, ncap, 0, 0};
+    const unsigned char* s = (const unsigned char*)text->data;
+    int64_t len = text->len;
+    if (start < 0) start = 0;
+    if (start > len) return 0;
+
+    if (an->lit && an->litlen > 0 && mode != 2) {
+        int64_t L = an->litlen;
+        if (L > len - start) return 0;
+        if (mode == 1) {
+            if (memcmp(s + start, an->lit, (size_t)L) != 0) return 0;
+        } else if (L <= len - start) {
+            const unsigned char* p =
+                lit_find(s + start, (size_t)(len - start), an->lit, (size_t)L);
+            if (!p) return 0;
+            start = (int64_t)(p - s);
+        }
+        caps_fill(caps, ncap, -1);
+        caps[0] = start;
+        caps[1] = start + L;
+        return 1;
+    }
+
+    // 扫描循环只建一次上下文；每个起点的 caps/steps/err 复位，pos 直接
+    // 用绝对偏移（VM 里的 \b/^/$ 一律看绝对位置）。
+    ReCtx c;
+    memset(&c, 0, sizeof c);
+    c.flags = g->flags;
+    c.caps = caps;
+    c.ncap = ncap;
+    // 末尾单点：start == len 时唯一候选就是空匹配（各处调用方的尾巴轮），
+    // 直接试一次，不必再进入扫描循环。first_kind 约束照旧生效。
+    // 注意 mode==1/2（match/fullmatch）从 start=0 起，走不到这里。
+    if (start == len) {
+        if (an->first_kind == 2) return 0;  // \A / ^ 只可能 pos 0
+        if (an->first_kind == 3 && len > 0 && s[len - 1] != '\n') return 0;
+        caps_fill(caps, ncap, -1);
+        c.s = s;
+        c.len = len;
+        c.pos = len;
+        c.steps = 0;
+        c.err = 0;
+        if (!run(g, 0, &c)) {
+            if (c.err) pa_raise_c("RuntimeError", "regex step limit exceeded");
+            return 0;
+        }
+        return 1;
+    }
+
+    const unsigned char* fb = an->first;
+    for (int64_t s0 = start; s0 <= len; ++s0) {
+        if (an->first_kind == 2) {
+            if (s0 > 0) return 0;  // 只有 pos 0 可能
+        } else if (an->first_kind == 3) {
+            if (s0 > 0 && s[s0 - 1] != '\n') continue;
+        } else if (an->first_kind == 1 && s0 < len) {
+            // 首字节剪枝：把 s0 推到下一个「首字节可能在集合里」的起点。
+            // 每个被跳过的起点都由首字节集判定必然在第一条消费指令上失败。
+            while (s0 < len && !((fb[s[s0] >> 3] >> (s[s0] & 7)) & 1)) s0++;
+            if (s0 > len) break;
+        }
+        caps_fill(caps, ncap, -1);
+        c.s = s;
+        c.len = len;
+        c.pos = s0;
+        c.steps = 0;
+        c.err = 0;
         if (run(g, 0, &c)) {
-            if (mode == 2 && caps[1] != text->len) return 0;
+            if (mode == 2 && caps[1] != len) return 0;
             return 1;
         }
-        if (c.err) {
-            pa_raise_c("RuntimeError", "regex step limit exceeded");
-        }
+        if (c.err) pa_raise_c("RuntimeError", "regex step limit exceeded");
         if (mode != 0) return 0;
     }
     return 0;
@@ -1268,29 +1748,31 @@ int64_t pa_re_pattern_str(PyAdamasRegex* re) {
 }
 
 int64_t pa_re_search_str(PyAdamasStr* pat, PyAdamasStr* text, int64_t flags, int64_t mode) {
-    ReProg g;
     const char* err = NULL;
-    if (!prog_build(&g, (const unsigned char*)pat->data, (int)pat->len, (int)flags, &err)) {
-        pa_raise_c("ValueError", err ? err : "bad pattern");
-    }
-    int64_t ncap = 2 * (int64_t)(g.ngroups + 1);
-    int64_t* caps = (int64_t*)re_alloc(sizeof(int64_t) * (size_t)ncap);
-    int ok = find_from(&g, text, 0, (int)mode, caps);
-    PyAdamasMatch* m = ok ? match_new(text, g.ngroups, caps, g.names, g.nnames) : NULL;
-    free(caps);
-    prog_free(&g);
+    int lease = -1;
+    ReProg* g = re_prog_acquire((const unsigned char*)pat->data, (int)pat->len, flags, &err,
+                                &lease);
+    if (!g) pa_raise_c("ValueError", err ? err : "bad pattern");
+    int64_t ncap = 2 * (int64_t)(g->ngroups + 1);
+    int64_t stackcaps[RE_CAPS_STACK];
+    int64_t* caps = caps_take(ncap, stackcaps);
+    int ok = find_from(g, text, 0, (int)mode, caps);
+    PyAdamasMatch* m = ok ? match_new(text, g->ngroups, caps, g->names, g->nnames) : NULL;
+    caps_drop(caps, stackcaps);
+    re_prog_release(g, lease);
     return (int64_t)m;
 }
 
 int64_t pa_re_search(PyAdamasRegex* re, PyAdamasStr* text, int64_t mode) {
     if (!re) pa_raise_c("AttributeError", "NoneType has no regex method");
     int64_t ncap = 2 * (int64_t)(re->prog.ngroups + 1);
-    int64_t* caps = (int64_t*)re_alloc(sizeof(int64_t) * (size_t)ncap);
+    int64_t stackcaps[RE_CAPS_STACK];
+    int64_t* caps = caps_take(ncap, stackcaps);
     int ok = find_from(&re->prog, text, 0, (int)mode, caps);
     PyAdamasMatch* m = ok ? match_new(text, re->prog.ngroups, caps, re->prog.names,
                                   re->prog.nnames)
                       : NULL;
-    free(caps);
+    caps_drop(caps, stackcaps);
     return (int64_t)m;
 }
 
@@ -1398,7 +1880,8 @@ static PyAdamasList* finditer_impl(ReProg* g, PyAdamasStr* text) {
     /* 循环里每次 match_new 都是主收集触发点；out 只在 C 局部变量里。 */
     pa_gc_pin(out);
     int64_t ncap = 2 * (int64_t)(g->ngroups + 1);
-    int64_t* caps = (int64_t*)re_alloc(sizeof(int64_t) * (size_t)ncap);
+    int64_t stackcaps[RE_CAPS_STACK];
+    int64_t* caps = caps_take(ncap, stackcaps);
     int64_t pos = 0;
     while (pos <= text->len && find_next(g, text, pos, caps)) {
         pa_list_append(out, (int64_t)match_new(text, g->ngroups, caps, g->names, g->nnames), 2);
@@ -1406,7 +1889,7 @@ static PyAdamasList* finditer_impl(ReProg* g, PyAdamasStr* text) {
         else pos = caps[1];
     }
     pa_gc_unpin(out);
-    free(caps);
+    caps_drop(caps, stackcaps);
     return out;
 }
 
@@ -1416,13 +1899,13 @@ int64_t pa_re_finditer(PyAdamasRegex* re, PyAdamasStr* text) {
 }
 
 int64_t pa_re_finditer_str(PyAdamasStr* pat, PyAdamasStr* text, int64_t flags) {
-    ReProg g;
     const char* err = NULL;
-    if (!prog_build(&g, (const unsigned char*)pat->data, (int)pat->len, (int)flags, &err)) {
-        pa_raise_c("ValueError", err ? err : "bad pattern");
-    }
-    PyAdamasList* out = finditer_impl(&g, text);
-    prog_free(&g);
+    int lease = -1;
+    ReProg* g = re_prog_acquire((const unsigned char*)pat->data, (int)pat->len, flags, &err,
+                                &lease);
+    if (!g) pa_raise_c("ValueError", err ? err : "bad pattern");
+    PyAdamasList* out = finditer_impl(g, text);
+    re_prog_release(g, lease);
     return (int64_t)out;
 }
 
@@ -1441,25 +1924,26 @@ static void findall_push(PyAdamasList* out, PyAdamasStr* text, int64_t ngroups, 
 }
 
 int64_t pa_re_findall_str(PyAdamasStr* pat, PyAdamasStr* text, int64_t flags) {
-    ReProg g;
     const char* err = NULL;
-    if (!prog_build(&g, (const unsigned char*)pat->data, (int)pat->len, (int)flags, &err)) {
-        pa_raise_c("ValueError", err ? err : "bad pattern");
-    }
+    int lease = -1;
+    ReProg* g = re_prog_acquire((const unsigned char*)pat->data, (int)pat->len, flags, &err,
+                                &lease);
+    if (!g) pa_raise_c("ValueError", err ? err : "bad pattern");
     PyAdamasList* out = pa_list_new(0, 1);
     /* findall_push 内部 str_new 逐个产出匹配串；out 只在本帧 C 局部变量里。 */
     pa_gc_pin(out);
-    int64_t ncap = 2 * (int64_t)(g.ngroups + 1);
-    int64_t* caps = (int64_t*)re_alloc(sizeof(int64_t) * (size_t)ncap);
+    int64_t ncap = 2 * (int64_t)(g->ngroups + 1);
+    int64_t stackcaps[RE_CAPS_STACK];
+    int64_t* caps = caps_take(ncap, stackcaps);
     int64_t pos = 0;
-    while (pos <= text->len && find_next(&g, text, pos, caps)) {
-        findall_push(out, text, g.ngroups, caps);
+    while (pos <= text->len && find_next(g, text, pos, caps)) {
+        findall_push(out, text, g->ngroups, caps);
         if (caps[1] == caps[0]) pos = caps[1] + 1;
         else pos = caps[1];
     }
     pa_gc_unpin(out);
-    free(caps);
-    prog_free(&g);
+    caps_drop(caps, stackcaps);
+    re_prog_release(g, lease);
     return (int64_t)out;
 }
 
@@ -1468,7 +1952,8 @@ int64_t pa_re_findall(PyAdamasRegex* re, PyAdamasStr* text) {
     PyAdamasList* out = pa_list_new(0, 1);
     pa_gc_pin(out);  /* 同 pa_re_findall_str：循环内的分配点会清扫无根的 out */
     int64_t ncap = 2 * (int64_t)(re->prog.ngroups + 1);
-    int64_t* caps = (int64_t*)re_alloc(sizeof(int64_t) * (size_t)ncap);
+    int64_t stackcaps[RE_CAPS_STACK];
+    int64_t* caps = caps_take(ncap, stackcaps);
     int64_t pos = 0;
     while (pos <= text->len && find_next(&re->prog, text, pos, caps)) {
         findall_push(out, text, re->prog.ngroups, caps);
@@ -1476,7 +1961,7 @@ int64_t pa_re_findall(PyAdamasRegex* re, PyAdamasStr* text) {
         else pos = caps[1];
     }
     pa_gc_unpin(out);
-    free(caps);
+    caps_drop(caps, stackcaps);
     return (int64_t)out;
 }
 
@@ -1551,24 +2036,25 @@ int64_t pa_re_expand(PyAdamasMatch* m, PyAdamasStr* tmpl) {
 
 int64_t pa_re_sub_str(PyAdamasStr* pat, PyAdamasStr* repl, PyAdamasStr* text, int64_t count,
                         int64_t flags) {
-    ReProg g;
     const char* err = NULL;
-    if (!prog_build(&g, (const unsigned char*)pat->data, (int)pat->len, (int)flags, &err)) {
-        pa_raise_c("ValueError", err ? err : "bad pattern");
-    }
-    int64_t ncap = 2 * (int64_t)(g.ngroups + 1);
-    int64_t* caps = (int64_t*)re_alloc(sizeof(int64_t) * (size_t)ncap);
+    int lease = -1;
+    ReProg* g = re_prog_acquire((const unsigned char*)pat->data, (int)pat->len, flags, &err,
+                                &lease);
+    if (!g) pa_raise_c("ValueError", err ? err : "bad pattern");
+    int64_t ncap = 2 * (int64_t)(g->ngroups + 1);
+    int64_t stackcaps[RE_CAPS_STACK];
+    int64_t* caps = caps_take(ncap, stackcaps);
     ReBuf b = {NULL, 0, 0};
     int64_t pos = 0, done = 0;
-    while (pos <= text->len && (count <= 0 || done < count) && find_next(&g, text, pos, caps)) {
+    while (pos <= text->len && (count <= 0 || done < count) && find_next(g, text, pos, caps)) {
         buf_add(&b, text->data + pos, (size_t)(caps[0] - pos));
         PyAdamasMatch tmp;
         memset(&tmp, 0, sizeof tmp);
         tmp.text = text;
-        tmp.ngroups = g.ngroups;
+        tmp.ngroups = g->ngroups;
         tmp.caps = caps;
-        tmp.names = g.names;
-        tmp.nnames = g.nnames;
+        tmp.names = g->names;
+        tmp.nnames = g->nnames;
         add_repl(&b, repl->data, repl->len, &tmp);
         done++;
         if (caps[1] == caps[0]) {
@@ -1581,15 +2067,16 @@ int64_t pa_re_sub_str(PyAdamasStr* pat, PyAdamasStr* repl, PyAdamasStr* text, in
     if (pos < text->len) buf_add(&b, text->data + pos, (size_t)(text->len - pos));
     PyAdamasStr* out = str_new(b.p ? b.p : "", (int64_t)b.n);
     free(b.p);
-    free(caps);
-    prog_free(&g);
+    caps_drop(caps, stackcaps);
+    re_prog_release(g, lease);
     return (int64_t)out;
 }
 
 int64_t pa_re_sub(PyAdamasRegex* re, PyAdamasStr* repl, PyAdamasStr* text, int64_t count) {
     if (!re) pa_raise_c("AttributeError", "NoneType has no regex method");
     int64_t ncap = 2 * (int64_t)(re->prog.ngroups + 1);
-    int64_t* caps = (int64_t*)re_alloc(sizeof(int64_t) * (size_t)ncap);
+    int64_t stackcaps[RE_CAPS_STACK];
+    int64_t* caps = caps_take(ncap, stackcaps);
     ReBuf b = {NULL, 0, 0};
     int64_t pos = 0, done = 0;
     while (pos <= text->len && (count <= 0 || done < count) &&
@@ -1614,7 +2101,7 @@ int64_t pa_re_sub(PyAdamasRegex* re, PyAdamasStr* repl, PyAdamasStr* text, int64
     if (pos < text->len) buf_add(&b, text->data + pos, (size_t)(text->len - pos));
     PyAdamasStr* out = str_new(b.p ? b.p : "", (int64_t)b.n);
     free(b.p);
-    free(caps);
+    caps_drop(caps, stackcaps);
     return (int64_t)out;
 }
 
@@ -1623,7 +2110,8 @@ int64_t pa_re_sub_fn(PyAdamasRegex* re, int64_t closure, PyAdamasStr* text, int6
     if (!re) pa_raise_c("AttributeError", "NoneType has no regex method");
     ReProg* g = &re->prog;
     int64_t ncap = 2 * (int64_t)(g->ngroups + 1);
-    int64_t* caps = (int64_t*)re_alloc(sizeof(int64_t) * (size_t)ncap);
+    int64_t stackcaps[RE_CAPS_STACK];
+    int64_t* caps = caps_take(ncap, stackcaps);
     ReBuf b = {NULL, 0, 0};
     int64_t pos = 0, done = 0;
     while (pos <= text->len && (count <= 0 || done < count) && find_next(g, text, pos, caps)) {
@@ -1650,27 +2138,28 @@ int64_t pa_re_sub_fn(PyAdamasRegex* re, int64_t closure, PyAdamasStr* text, int6
     if (pos < text->len) buf_add(&b, text->data + pos, (size_t)(text->len - pos));
     PyAdamasStr* out = str_new(b.p ? b.p : "", (int64_t)b.n);
     free(b.p);
-    free(caps);
+    caps_drop(caps, stackcaps);
     return (int64_t)out;
 }
 
 int64_t pa_re_split_str(PyAdamasStr* pat, PyAdamasStr* text, int64_t maxsplit, int64_t flags) {
-    ReProg g;
     const char* err = NULL;
-    if (!prog_build(&g, (const unsigned char*)pat->data, (int)pat->len, (int)flags, &err)) {
-        pa_raise_c("ValueError", err ? err : "bad pattern");
-    }
-    int64_t ncap = 2 * (int64_t)(g.ngroups + 1);
-    int64_t* caps = (int64_t*)re_alloc(sizeof(int64_t) * (size_t)ncap);
+    int lease = -1;
+    ReProg* g = re_prog_acquire((const unsigned char*)pat->data, (int)pat->len, flags, &err,
+                                &lease);
+    if (!g) pa_raise_c("ValueError", err ? err : "bad pattern");
+    int64_t ncap = 2 * (int64_t)(g->ngroups + 1);
+    int64_t stackcaps[RE_CAPS_STACK];
+    int64_t* caps = caps_take(ncap, stackcaps);
     PyAdamasList* out = pa_list_new(0, 1);
     /* 每个分段/捕获组一次 str_new；out 只在本帧 C 局部变量里。 */
     pa_gc_pin(out);
     int64_t pos = 0, last = 0, done = 0;
     while (pos <= text->len && (maxsplit <= 0 || done < maxsplit) &&
-           find_next(&g, text, pos, caps)) {
+           find_next(g, text, pos, caps)) {
         PyAdamasStr* s = str_new(text->data + last, caps[0] - last);
         pa_list_append(out, (int64_t)s, 2);
-        for (int64_t gi = 1; gi <= g.ngroups; ++gi) {
+        for (int64_t gi = 1; gi <= g->ngroups; ++gi) {
             int64_t a = caps[2 * gi], b = caps[2 * gi + 1];
             pa_list_append(out, (int64_t)(a >= 0 && b >= a
                                                 ? str_new(text->data + a, b - a)
@@ -1687,15 +2176,16 @@ int64_t pa_re_split_str(PyAdamasStr* pat, PyAdamasStr* text, int64_t maxsplit, i
     PyAdamasStr* tail = str_new(text->data + last, text->len - last);
     pa_list_append(out, (int64_t)tail, 2);
     pa_gc_unpin(out);
-    free(caps);
-    prog_free(&g);
+    caps_drop(caps, stackcaps);
+    re_prog_release(g, lease);
     return (int64_t)out;
 }
 
 int64_t pa_re_split(PyAdamasRegex* re, PyAdamasStr* text, int64_t maxsplit) {
     if (!re) pa_raise_c("AttributeError", "NoneType has no regex method");
     int64_t ncap = 2 * (int64_t)(re->prog.ngroups + 1);
-    int64_t* caps = (int64_t*)re_alloc(sizeof(int64_t) * (size_t)ncap);
+    int64_t stackcaps[RE_CAPS_STACK];
+    int64_t* caps = caps_take(ncap, stackcaps);
     PyAdamasList* out = pa_list_new(0, 1);
     pa_gc_pin(out);  /* 同 pa_re_split_str：循环里的 str_new 会清扫无根的 out */
     int64_t pos = 0, last = 0, done = 0;
@@ -1720,7 +2210,7 @@ int64_t pa_re_split(PyAdamasRegex* re, PyAdamasStr* text, int64_t maxsplit) {
     PyAdamasStr* tail = str_new(text->data + last, text->len - last);
     pa_list_append(out, (int64_t)tail, 2);
     pa_gc_unpin(out);
-    free(caps);
+    caps_drop(caps, stackcaps);
     return (int64_t)out;
 }
 
