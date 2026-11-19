@@ -913,8 +913,13 @@ int64_t pa_rc_inc_unknown(int64_t v) {
     // 全部被这道短路拦下。
     if ((uint64_t)v < 65536) return 0;
     if (rc_stats_on) stat_rc_inc_unknown++;
+    /* P3-1b（0.328）：与 dec_unknown 同一份判定（pa_unknown_is_heap，含
+       exact-RC 回退）。原来只查 rc_index_has：exact-RC 模式下索引关闭，
+       leaf（str/bytes/float 盒）的 inc 恒空操作而 dec 走回退会真 dec ——
+       保留/释放不对称（stdlib-batch1 §四半移交的 leaf×unknown 洞）。
+       常规模式行为逐字不变（索引命中即返回，未命中且索引开着同样否掉）。 */
+    if (!pa_unknown_is_heap(v)) return 0;
     PyAdamasRc* h = (PyAdamasRc*)(uintptr_t)((uint64_t)v - (uint64_t)PYADAMAS_RC_HDR);
-    if (!rc_index_has(h)) return 0;
     if (h->rc == PYADAMAS_RC_IMMORTAL) return 1;
     if (gc_sweeping) {
         if (h->marked) h->rc++;
@@ -1473,8 +1478,9 @@ void pa_rc_temp_take(void* p) {
    unknown 里可能是整数，直接 pa_rc_temp 会按指针读头部。 */
 void pa_rc_temp_unknown(int64_t v) {
     if (!v) return;
-    PyAdamasRc* h = (PyAdamasRc*)(uintptr_t)((uint64_t)v - (uint64_t)PYADAMAS_RC_HDR);
-    if (!rc_index_has(h)) return;
+    /* 与 inc/dec_unknown 同一份判定（P3-1b）：exact-RC 模式下 leaf 也要
+       能入临时栈，否则产生者那份引用无人接管（同族所有权洞）。 */
+    if (!pa_unknown_is_heap(v)) return;
     pa_rc_temp((void*)(uintptr_t)v);
 }
 

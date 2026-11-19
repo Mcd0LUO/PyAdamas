@@ -414,6 +414,33 @@ private:
     void gen_index_load_tag(const Inst& in, bool have_regs);
     void emit_heap_from_tag(VReg v, const std::string& dst_reg);
 
+    // ── P3-1b：直调 tag ABI（0.328，设计 §7 P3-1b）─────────────────
+    // 值 ABI 不变（payload 仍按 classify 落位）：unknown 形参的 tag 经
+    // 平行 tag 数组传递，调用方把数组指针放 %r11、call 被调的 $pt 入口；
+    // 旧入口（闭包/间接/跨模块/vtable）先把 %r11 清零再进同一函数体，
+    // 形参 tag 全 UNK 回退探针。unknown 返回经 %rdx 带 tag（旧调用方
+    // 忽略 rdx，无兼容问题）。门控关/生成器一律不进。
+    static std::string ptag_label(int i) { return std::format(".Lf{}$pt", i); }
+    // 本函数 unknown 形参个数（>0 才发双入口；生成器/门控关恒 0）。
+    int func_ptag_words() const;
+    // CallDirect 的 tag 数组字数（0 = 不走 tag ABI：门控关/跨模块/生成器/
+    // 实参数与形参数不一致）。
+    int call_ptag_words(const Inst& in) const;
+    // 函数是否经 %rdx 返回 tag（unknown 返回 + 门控 + 非生成器）。
+    bool func_ret_tag(const IRFunction& f) const;
+    // 被调双入口 gadget：旧入口清零 %r11 跳函数体，$pt 入口直通。
+    // gadget 不动 rsp（CFI CFA=rsp+8 不变）；LSDA 按标签差解析自动让位。
+    void emit_ptag_entry(int fi);
+    // 被调序言：从 %r11 tag 数组装载 unknown 形参 tag（0 → 保持 UNK）。
+    // %r11 从入口到此只经 push/subq/movq $0（都不碰它）。
+    void emit_ptag_param_load();
+    // Return 的 %rdx tag（unknown 返回 + 门控 + 非生成器；否则空操作）。
+    void emit_ret_tag(const Inst& in);
+    // P3-1b：无 tag 来源的 unknown 装载（dict 值/字段）一次探针导 tag。
+    void emit_tag_probe(const std::string& payload_op, const std::string& tag_op);
+    // 调用方：在出参区栈实参之后写 tag 数组，返回数组的 rsp 偏移。
+    int emit_ptag_array(const Inst& in, const std::vector<ArgLoc>& locs);
+
     // 当前块内的位置索引，gen_block 开头重建。
     std::unordered_map<int, std::vector<int>> block_stores_;
     std::unordered_map<VReg, int> block_first_use_;

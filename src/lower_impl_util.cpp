@@ -225,4 +225,17 @@ void Lowerer::retain_for_store(const TypePtr& dst, VReg v) {
         rc_inc_unknown(v);
     }}
 
+// P3-1b（0.328）：显式 object/Any 标注的局部槽禁止 store_slot 升级（标注
+// 就是「故意留在 unknown 域」）。按标注 AST 精确判定：sym.annotated+unknown
+// 不可靠——typecheck 对循环内 j: int 也会给出 annotated+unknown，误标会
+// 改变 d4_primes 等基准 asm。形参的同类标记在 add_param（Param.ann_unknown）。
+void Lowerer::mark_ann_unknown_slot(AnnAssign& a) {
+    if (a.target->kind != ExprKind::Name ||
+        a.annotation->kind != ExprKind::Name) return;
+    const std::string& aid = static_cast<Name&>(*a.annotation).id;
+    if (aid != "object" && aid != "Any") return;
+    auto it = st_->slots.find(static_cast<Name&>(*a.target).id);
+    if (it != st_->slots.end()) st_->ann_unknown_slots.insert(it->second);
+}
+
 }  // namespace pyadamas

@@ -228,9 +228,9 @@ rc==1 再验唯一所有权。匹配失败/跨块/Mov 链 → 提示 0 → 正�
 | 阶段 | 内容 | 风险 | 状态 |
 |---|---|---|---|
 | P3-1（本阶段） | B 平行 shadow tag 跟值走（槽/全局/vreg/容器边界）+ 盒原位复用 + 模块门控；Any*T 运行时；移除解盒-再装箱特例 | 中低（值语义零变化，tag 可回退） | 本分支落地 |
-| P3-1b | tag 过直调形参/返回传播（双字 ABI，闭包 shim 适配）；DictGet/字段/生成器帧 tag 化 | 中 | 计划 |
-| P3-2 | A 内联：封闭域 FBOX→FLOAT 内联（16B {tag,payload} 仅 unknown 槽/vreg，容器仍 8B+边界装箱）；容器元素域 tag 由本阶段位图+tag 自然导出 | 中高（值宽 ABI，门控域内） | 计划 |
-| P3-3 | 跨模块 ABI 版本化；None/bool 盒/小整数 tag；开放 unknown 的 PyObject 式通用盒（对齐 codon Generic 桥） | 高 | 长期 |
+| P3-1b | tag 过直调形参/返回传播（双字 ABI，闭包 shim 适配）；DictGet/字段/生成器帧 tag 化 | 中 | **0.328 落地（p3next，docs/p3-1b-landing.md）**：直调旁路双字 ABI（值 ABI 零变化 + 双入口 shim）、dict/字段一次探针导 tag、生成器 vreg tag（堆帧槽列剩余）；顺带根治三个基线 leak/UAF |
+| P3-2 | A 内联：封闭域 FBOX→FLOAT 内联（16B {tag,payload} 仅 unknown 槽/vreg，容器仍 8B+边界装箱）；容器元素域 tag 由本阶段位图+tag 自然导出 | 中高（值宽 ABI，门控域内） | 0.328 评估：GC 查表标记对 FRAW 天然安全（新事实），但边界装箱完备性取代探针回退成为正确性前提，收益只剩 72B/盒+一次间接 → 本轮不做，路径见 p3-1b-landing.md §6 |
+| P3-3 | 跨模块 ABI 版本化；None/bool 盒/小整数 tag；开放 unknown 的 PyObject 式通用盒（对齐 codon Generic 桥） | 高 | 长期（0.328 评估记录见 p3-1b-landing.md §7） |
 
 P3-2 的前置条件已由 P3-1 铺好：tag 传播链、门控域、边界装拆点、复用证明。
 届时 float 内联只改「FBOX 的生产/消费」为「FLOAT 内联」，探针回退链不变。

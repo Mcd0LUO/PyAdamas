@@ -65,10 +65,10 @@ void Lowerer::stmt(Stmt& s) {
             break;
         }
         case StmtKind::AugAssign:
-            lower_aug_assign(static_cast<AugAssign&>(s));
-            break;
+            lower_aug_assign(static_cast<AugAssign&>(s)); break;
         case StmtKind::AnnAssign: {
             auto& a = static_cast<AnnAssign&>(s);
+            mark_ann_unknown_slot(a);  // P3-1b：object/Any 标注槽禁升级
             if (!a.value) break;  // 纯声明：槽本来就是 0（None）
             TypePtr vt = tc_.type_of(a.value.get());
             // `x: list[float] = [1, 2]`：字面量必须按标注的元素类型构造。

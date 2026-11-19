@@ -226,6 +226,8 @@ void AsmGen::gen_field_load(const Inst& in) {
         else
             line(std::format("movq {}(%rax), %rax", in.imm));
         move_to(dst_op(in.dst), "%rax");
+        // P3-1b：unknown 字段装载一次探针导 tag（窄字段是 C 结构体 typed）。
+        if (vreg_tagged(in.dst)) emit_tag_probe(dst_op(in.dst), tag_mem(in.dst));
     }
 
 void AsmGen::gen_field_store(const Inst& in) {
@@ -383,6 +385,8 @@ void AsmGen::gen_call_direct(const Inst& in) {
         types.reserve(in.args.size());
         for (VReg a : in.args) types.push_back(ty_of(a));
         auto locs = classify(types);
+        // P3-1b：门控内直调本地非生成器且形参对齐 → tag ABI（>0 才启用）。
+        const int ptag_words = call_ptag_words(in);
 
         for (size_t i = 0; i < in.args.size(); ++i) {
             const auto& l = locs[i];
@@ -390,6 +394,9 @@ void AsmGen::gen_call_direct(const Inst& in) {
             emit2("movq", src_op(in.args[i]), "%r10");
             line(std::format("movq %r10, {}(%rsp)", l.stack_off));
         }
+        // P3-1b：unknown 形参的平行 tag 数组（栈实参之后、出参区内）。
+        int ptag_base = -1;
+        if (ptag_words > 0) ptag_base = emit_ptag_array(in, locs);
         for (size_t i = 0; i < in.args.size(); ++i) {
             const auto& l = locs[i];
             if (l.stack_off >= 0) continue;
@@ -406,11 +413,22 @@ void AsmGen::gen_call_direct(const Inst& in) {
         if (!callee || callee->env_slot >= 0) line("xorl %r10d, %r10d");
         if (opt_ < 2) line("xorl %eax, %eax");
         spill_fp_slots();
-        line(std::format("call {}", func_label(in.idx)));
+        if (ptag_words > 0) {
+            // tag 数组指针最后装填（此前所有指令都不碰 %r11），call tag 入口。
+            line(std::format("leaq {}(%rsp), %r11", ptag_base));
+            line(std::format("call {}", ptag_label(in.idx)));
+        } else {
+            line(std::format("call {}", func_label(in.idx)));
+        }
         reload_fp_slots();
         if (!dst_unused(in)) {
             if (ir_is_float(in.ty)) move_fp(dst_op(in.dst), "%xmm0");
             else emit2("movq", "%rax", dst_op(in.dst));
+            // P3-1b：unknown 返回的 tag 在 %rdx（被调 gen_return 发射；
+            // 旧入口调用也发，读到的一定是有效 tag 或 UNK）。
+            if (vreg_tagged(in.dst) && is_unk_ty(in.ty) && callee &&
+                func_ret_tag(*callee))
+                emit2("movq", "%rdx", tag_mem(in.dst));
         }
     }
 
@@ -506,6 +524,8 @@ void AsmGen::gen_return(const Inst& in) {
         } else {
             emit2("movq", src_op(in.a), "%rax");
         }
+        // P3-1b：unknown 返回经 %rdx 带 tag（门控关/生成器空操作）。
+        emit_ret_tag(in);
         emit_epilogue();
     }
 
@@ -1113,11 +1133,11 @@ void AsmGen::gen_call_rt(const Inst& in) {
             spill_fp_slots();
             line("call pa_dict_try_get");
             reload_fp_slots();
-            // P3：运行时直写 unknown 槽的 payload，tag 字必须清成 UNK
-            // （否则陈旧 tag 会让 RC 跳过 retain/release）。
-            if (slot_tagged(static_cast<int>(in.idx)))
-                emit2("movq", "$0", slot_tag_op(static_cast<int>(in.idx)));
             if (!dst_unused(in)) emit2("movq", "%rax", dst_op(in.dst));
+            // P3-1b：一次探针导槽 tag（miss 槽留旧值，探针与旧 payload 一致）。
+            if (slot_tagged(static_cast<int>(in.idx)))
+                emit_tag_probe(smem(static_cast<int>(in.idx)),
+                               slot_tag_op(static_cast<int>(in.idx)));
             return;
         }
         gen_rt_args(in, fn);
