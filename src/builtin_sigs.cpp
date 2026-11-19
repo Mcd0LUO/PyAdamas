@@ -657,6 +657,8 @@ pyadamas::ModuleInfoPtr builtin_module(const std::string& name) {
         func("mkdir", {pyadamas::t_str()}, pyadamas::t_none());
         func("rmdir", {pyadamas::t_str()}, pyadamas::t_none());
         func("remove", {pyadamas::t_str()}, pyadamas::t_none());
+        func("unlink", {pyadamas::t_str()}, pyadamas::t_none());
+        func("close", {pyadamas::t_int()}, pyadamas::t_none());
         func("rename", {pyadamas::t_str(), pyadamas::t_str()}, pyadamas::t_none());
         func("getcwd", {}, pyadamas::t_str());
         func("cpu_count", {}, pyadamas::t_int());
@@ -716,6 +718,7 @@ pyadamas::ModuleInfoPtr builtin_module(const std::string& name) {
         func("exists", {pyadamas::t_str()}, pyadamas::t_bool());
         func("isdir", {pyadamas::t_str()}, pyadamas::t_bool());
         func("isfile", {pyadamas::t_str()}, pyadamas::t_bool());
+        func("islink", {pyadamas::t_str()}, pyadamas::t_bool());
         for (auto& n : {"basename", "dirname", "normpath", "abspath", "expanduser"})
             func(n, {pyadamas::t_str()}, pyadamas::t_str());
         func("splitext", {pyadamas::t_str()}, pyadamas::mk_tuple({pyadamas::t_str(), pyadamas::t_str()}));

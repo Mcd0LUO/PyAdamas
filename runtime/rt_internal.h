@@ -1515,6 +1515,8 @@ PyAdamasList* pa_random_choices(PyAdamasRandom* r, PyAdamasList* seq, int64_t k)
 void pa_os_mkdir(PyAdamasStr* path);
 void pa_os_rmdir(PyAdamasStr* path);
 void pa_os_remove(PyAdamasStr* path);
+void pa_os_close(int64_t fd);
+int64_t pa_os_path_islink(PyAdamasStr* path);
 void pa_os_rename(PyAdamasStr* from, PyAdamasStr* to);
 PyAdamasStr* pa_os_getcwd(void);
 int64_t pa_os_cpu_count(void);

@@ -35,6 +35,16 @@ void pa_os_remove(PyAdamasStr* path) {
     if (unlink(path->data) != 0) os_raise("remove", errno);
 }
 
+int64_t pa_os_path_islink(PyAdamasStr* path) {
+    struct stat st;
+    if (lstat(path->data, &st) != 0) return 0;
+    return S_ISLNK(st.st_mode) ? 1 : 0;
+}
+
+void pa_os_close(int64_t fd) {
+    if (close((int)fd) != 0) os_raise("close", errno);
+}
+
 void pa_os_rename(PyAdamasStr* from, PyAdamasStr* to) {
     if (rename(from->data, to->data) != 0) os_raise("rename", errno);
 }

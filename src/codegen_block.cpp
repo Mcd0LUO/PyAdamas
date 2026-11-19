@@ -664,8 +664,11 @@ bool AsmGen::can_fuse_branch(const Inst& in, const Inst& nx) const {
         if (!single_use_in_block(in.dst)) return false;
         // 字符串走三路比较，没有能直接用的条件跳转；浮点交给
         // gen_cmp_branch_fp（有序比较用 ja/jae 把 NaN 归到假分支，== 再补 jp）。
+        // bytes 与 str 同口径：eq/ne 是内容比较（gen_cmp 的 pa_str_eq 慢路径），
+        // 融合成指针 cmpq 会把「内容相等的新切片 vs 字面量」静默判不等
+        // （stdlib2 发现：zipfile 循环里 magic 校验恒失败；基线 0.327 已存在）。
         TypePtr t = ty_of(in.a);
-        if (t && t->kind == TyKind::Str) return false;
+        if (t && (t->kind == TyKind::Str || t->kind == TyKind::Bytes)) return false;
         return true;
     }
 
