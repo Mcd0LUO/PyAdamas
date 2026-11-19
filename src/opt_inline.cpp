@@ -223,7 +223,8 @@ void inline_at(IRFunction& fn, size_t bi, size_t ii, const IRFunction& callee,
                      callee.slot_owned[static_cast<size_t>(s)];
         bool unk = static_cast<size_t>(s) < callee.slot_unknown.size() &&
                    callee.slot_unknown[static_cast<size_t>(s)];
-        if (ir_is_heap(sty) && owned) {
+        const bool unk_ty = !sty || sty->kind == TyKind::Unknown;
+        if ((ir_is_heap(sty) || unk_ty) && owned) {
             // 槽里可能还留着上一次执行内联体的值（调用点在循环里时很常见），
             // 直接清零会把那份引用丢掉。先按槽类型释放再清零；槽在函数序言
             // 已清零，第一次执行 dec(0) 是空操作。借用槽只清零不释放。
@@ -237,7 +238,7 @@ void inline_at(IRFunction& fn, size_t bi, size_t ii, const IRFunction& callee,
             entry_insts.push_back(std::move(ld));
             Inst dc;
             dc.op = IrOp::CallRt;
-            dc.imm = static_cast<int64_t>(unk ? RtFn::RcDecUnknown : RtFn::RcDec);
+            dc.imm = static_cast<int64_t>((unk || unk_ty) ? RtFn::RcDecUnknown : RtFn::RcDec);
             dc.args = {old};
             entry_insts.push_back(std::move(dc));
         }
@@ -258,7 +259,8 @@ void inline_at(IRFunction& fn, size_t bi, size_t ii, const IRFunction& callee,
                      callee.slot_owned[static_cast<size_t>(param.slot)];
         bool unk = static_cast<size_t>(param.slot) < callee.slot_unknown.size() &&
                    callee.slot_unknown[static_cast<size_t>(param.slot)];
-        if (ir_is_heap(pty) && owned) {
+        const bool p_unk_ty = !pty || pty->kind == TyKind::Unknown;
+        if ((ir_is_heap(pty) || p_unk_ty) && owned) {
             // 上一次执行内联体时形参槽里的引用可能还在：调用方自己的
             // handler 捕获异常时不会走帧展开，覆盖前必须先释放。
             VReg old = static_cast<VReg>(fn.vreg_ty.size());
@@ -271,7 +273,7 @@ void inline_at(IRFunction& fn, size_t bi, size_t ii, const IRFunction& callee,
             entry_insts.push_back(std::move(ld));
             Inst dc;
             dc.op = IrOp::CallRt;
-            dc.imm = static_cast<int64_t>(unk ? RtFn::RcDecUnknown : RtFn::RcDec);
+            dc.imm = static_cast<int64_t>((unk || p_unk_ty) ? RtFn::RcDecUnknown : RtFn::RcDec);
             dc.args = {old};
             entry_insts.push_back(std::move(dc));
         }

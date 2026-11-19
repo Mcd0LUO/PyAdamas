@@ -570,6 +570,11 @@ int Lowerer::compile_suspendable_function(FunctionDef& f, FuncInfoPtr info,
         emit(std::move(j));
     }
 
+    // unknown 形参：包装在调用它时 retain 一份写进帧槽（见下面的
+    // GenSetSlot 循环），所以形参槽归帧所有，正常终止由 release_slots
+    // 释放、异常/GC 销毁由 slot_heap 的 2 类释放。
+    for (auto& p : irf->params)
+        if (!p.ty || p.ty->kind == TyKind::Unknown) irf->slot_owned[p.slot] = true;
     IRGenerator gin;
     gin.resume = ridx;
     gin.n_slots = static_cast<int>(irf->slot_ty.size());
@@ -596,7 +601,16 @@ int Lowerer::compile_suspendable_function(FunctionDef& f, FuncInfoPtr info,
             gin.slot_heap[static_cast<size_t>(s)] = 4;
             continue;
         }
-        if (!ir_is_heap(irf->slot_ty[static_cast<size_t>(s)])) continue;
+        TypePtr sty = irf->slot_ty[static_cast<size_t>(s)];
+        const bool unk_ty = !sty || sty->kind == TyKind::Unknown;
+        if (!ir_is_heap(sty)) {
+            // 0.323：owned 的 unknown 槽也持有引用，帧销毁必须按注册表
+            // 释放（未标记 owned 的 unknown 槽是借来的，保持跳过）。
+            if (unk_ty && static_cast<size_t>(s) < irf->slot_owned.size() &&
+                irf->slot_owned[static_cast<size_t>(s)])
+                gin.slot_heap[static_cast<size_t>(s)] = 2;
+            continue;
+        }
         // 2 = 可能装着非堆值：帧销毁/异常逃出释放时走注册表。
         gin.slot_heap[static_cast<size_t>(s)] =
             (static_cast<size_t>(s) < irf->slot_unknown.size() &&
@@ -623,6 +637,7 @@ int Lowerer::compile_suspendable_function(FunctionDef& f, FuncInfoPtr info,
     for (auto& p : cw->params) {
         VReg v = load_slot(p.slot, p.ty);
         if (ir_is_heap(p.ty)) rc_inc(v);
+        else if (!p.ty || p.ty->kind == TyKind::Unknown) rc_inc_unknown(v);
         Inst si;
         si.op = IrOp::GenSetSlot;
         si.idx = Operand::slot(p.slot);

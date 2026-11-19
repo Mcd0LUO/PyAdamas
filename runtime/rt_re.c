@@ -17,6 +17,17 @@
 #define RE_X 64
 #define RE_STEP_LIMIT 200000000LL
 
+// CPython 3.7+ 的 finditer/findall 空匹配口径：上一次匹配是空串时，下次
+// 搜索仍从同一位置开始，但该位置上的空匹配必须被拒绝，让引擎回溯去试
+// 同起点的非空分支（re.findall(r'\\b|a', 'ab') 首次空匹配后还能取到 'a'）。
+// 放在文件级而不是 ReCtx：ReCtx 在 find_from 里 memset、在递归 run 里被
+// 热访问，加字段会改变热函数代码布局（实测 re 基准 +8%）；这些标记只在
+// findall/finditer 的空匹配重试里短暂置位，运行时单线程、re 调用不挂起。
+// 注意判定放在 RE_MATCH_TOP（整段程序的最终 MATCH），断言/原子组子程序
+// 内部的 RE_MATCH 完全不受影响（保持原样的单条 return 1）。
+static int re_no_empty;          // 当前搜索是否拒绝起始位置的空匹配
+static int64_t re_no_empty_pos;  // 要拒绝的起始位置
+
 enum {
     RE_CHAR = 1,
     RE_ANY,
@@ -25,6 +36,7 @@ enum {
     RE_JMP,
     RE_SAVE,
     RE_MATCH,
+    RE_MATCH_TOP,  // 整段程序的最终 MATCH：参与 findall 空匹配重试判断
     RE_BOL,
     RE_EOL,
     RE_WORDB,
@@ -1149,7 +1161,7 @@ static int prog_build(ReProg* g, const unsigned char* pat, int len, int flags, c
     compile_node(g, root);
     int s1 = emit(g, RE_SAVE);
     g->code[s1].x = 1;
-    emit(g, RE_MATCH);
+    emit(g, RE_MATCH_TOP);
     node_free(root);
     return 1;
 }
@@ -1177,7 +1189,8 @@ static void prog_analyze(ReProg* g) {
             i++;
         int nlit = i - lit0;
         if (nlit > 0 && i + 2 == g->n && g->code[i].op == RE_SAVE && g->code[i].x == 1 &&
-            g->code[i + 1].op == RE_MATCH && !(flags0 & RE_I)) {
+            (g->code[i + 1].op == RE_MATCH || g->code[i + 1].op == RE_MATCH_TOP) &&
+            !(flags0 & RE_I)) {
             an->lit = (unsigned char*)re_alloc((size_t)nlit);
             for (int k = 0; k < nlit; ++k)
                 an->lit[k] = (unsigned char)g->code[lit0 + k].ch;
@@ -1371,7 +1384,7 @@ static void loop_precompute(ReProg* g) {
         // 开启只会多付扫描开销（实测 +17%），保持原递归展开。
         int body, after, greedy;
         if (loop_shape(g, pc, &body, &after, &greedy) && after + 1 < g->n &&
-            g->code[after + 1].op == RE_MATCH) {
+            (g->code[after + 1].op == RE_MATCH || g->code[after + 1].op == RE_MATCH_TOP)) {
             in->aux = (int64_t)(((uint64_t)(uint32_t)after << 32) |
                                 (uint64_t)(uint32_t)(body + 1));
             // 换成专用 op：普通 SPLIT 的热路径不背这个判断（嵌套量词上
@@ -1428,7 +1441,7 @@ static __attribute__((noinline)) int run_loop(ReProg* g, const ReInst* in, int p
         // 跳过，剩下的交给逐位 run——只跳过必然失败的尝试。
         int64_t k0 = -1;
         if (after + 1 < g->n && is_consumer(&g->code[after]) &&
-            g->code[after + 1].op == RE_MATCH) {
+            (g->code[after + 1].op == RE_MATCH || g->code[after + 1].op == RE_MATCH_TOP)) {
             const ReInst* yi = &g->code[after];
             while (e >= p) {
                 if (e >= len) {
@@ -1633,6 +1646,13 @@ static int run(ReProg* g, int pc, ReCtx* c) {
                 return 0;
             }
             case RE_MATCH: return 1;
+            case RE_MATCH_TOP:
+                // 上一次匹配为空串时，同一位置上的空匹配要失败，让回溯
+                // 继续尝试同起点的非空分支（CPython 3.7+ 口径）。
+                if (__builtin_expect(re_no_empty, 0) && c->pos == re_no_empty_pos &&
+                    c->caps[0] == c->pos)
+                    return 0;
+                return 1;
             default: return 0;
         }
     }
@@ -1660,8 +1680,11 @@ static void caps_fill(int64_t* caps, int64_t ncap, int64_t v) {
 //   1. 纯字面量模式：search 用 lit_find 定位，match 用 memcmp；
 //   2. 编译期求出的首字节集：起点字节不在集合里就不进 VM；
 //   3. \A / 非 MULTILINE ^ / MULTILINE ^：起点约束直接判死。
-static int find_from(ReProg* g, PyAdamasStr* text, int64_t start, int mode, int64_t* caps) {
+static int find_from(ReProg* g, PyAdamasStr* text, int64_t start, int mode, int64_t* caps,
+                     int must_advance) {
     if (!g->an) prog_analyze(g);  // re.compile 的对象首次使用时才分析
+    // 顶层搜索从干净的标记开始（异常 longjmp 可能跳过下面的复位）。
+    re_no_empty = 0;
     const ReAnalysis* an = g->an;
     int64_t ncap = 2 * (int64_t)(g->ngroups + 1);
     const unsigned char* s = (const unsigned char*)text->data;
@@ -1697,7 +1720,13 @@ static int find_from(ReProg* g, PyAdamasStr* text, int64_t start, int mode, int6
     // 直接试一次，不必再进入扫描循环。first_kind 约束照旧生效。
     // 注意 mode==1/2（match/fullmatch）从 start=0 起，走不到这里。
     if (start == len) {
-        if (an->first_kind == 2) return 0;  // \A / ^ 只可能 pos 0
+        // 空匹配重试到达文本末尾：上一轮已经把末尾的空匹配取走，
+        // CPython 在 finditer 到 end 后直接收尾，不再产生匹配。
+        if (must_advance) return 0;
+        // 起点约束 2 = \A / 非 MULTILINE ^ 只可能 pos 0。start == len
+        // 且 start == 0 时 pos 0 正是这个位置（空 subject 上 ^/\A 合法），
+        // 不能一律判死（旧漏洞：re.findall(r'^', '') 返回空表）。
+        if (an->first_kind == 2 && start > 0) return 0;
         if (an->first_kind == 3 && len > 0 && s[len - 1] != '\n') return 0;
         caps_fill(caps, ncap, -1);
         c.s = s;
@@ -1713,6 +1742,42 @@ static int find_from(ReProg* g, PyAdamasStr* text, int64_t start, int mode, int6
     }
 
     const unsigned char* fb = an->first;
+    // CPython 3.7+ 的空匹配重试：上一次匹配为空串时，先在同一位置试一次
+    // 「拒绝同位置空匹配」的匹配；失败再从下一个起点继续普通扫描。
+    // 这条冷路径单独成段，普通搜索的扫描循环不背任何 must-advance 判断
+    // （re 基准中性：热循环与原实现逐条一致）。
+    if (must_advance) {
+        if (mode != 0) return 0;
+        int64_t s0 = start;
+        bool try_here = true;
+        if (an->first_kind == 2) {
+            try_here = s0 == 0;
+        } else if (an->first_kind == 3) {
+            try_here = s0 == 0 || s[s0 - 1] == '\n';
+        } else if (an->first_kind == 1 && s0 < len &&
+                   !((fb[s[s0] >> 3] >> (s[s0] & 7)) & 1)) {
+            try_here = false;
+        }
+        if (try_here) {
+            caps_fill(caps, ncap, -1);
+            c.s = s;
+            c.len = len;
+            c.pos = s0;
+            c.steps = 0;
+            c.err = 0;
+            re_no_empty = 1;
+            re_no_empty_pos = s0;
+            int matched = run(g, 0, &c);
+            re_no_empty = 0;
+            if (matched) {
+                if (mode == 2 && caps[1] != len) return 0;
+                return 1;
+            }
+            if (c.err) pa_raise_c("RuntimeError", "regex step limit exceeded");
+        }
+        ++start;
+        if (start > len) return 0;
+    }
     for (int64_t s0 = start; s0 <= len; ++s0) {
         if (an->first_kind == 2) {
             if (s0 > 0) return 0;  // 只有 pos 0 可能
@@ -1846,7 +1911,7 @@ int64_t pa_re_search_str(PyAdamasStr* pat, PyAdamasStr* text, int64_t flags, int
     int64_t ncap = 2 * (int64_t)(g->ngroups + 1);
     int64_t stackcaps[RE_CAPS_STACK];
     int64_t* caps = caps_take(ncap, stackcaps);
-    int ok = find_from(g, text, 0, (int)mode, caps);
+    int ok = find_from(g, text, 0, (int)mode, caps, 0);
     PyAdamasMatch* m = ok ? match_new(text, g->ngroups, caps, g->names, g->nnames) : NULL;
     caps_drop(caps, stackcaps);
     re_prog_release(g, lease);
@@ -1858,7 +1923,7 @@ int64_t pa_re_search(PyAdamasRegex* re, PyAdamasStr* text, int64_t mode) {
     int64_t ncap = 2 * (int64_t)(re->prog.ngroups + 1);
     int64_t stackcaps[RE_CAPS_STACK];
     int64_t* caps = caps_take(ncap, stackcaps);
-    int ok = find_from(&re->prog, text, 0, (int)mode, caps);
+    int ok = find_from(&re->prog, text, 0, (int)mode, caps, 0);
     PyAdamasMatch* m = ok ? match_new(text, re->prog.ngroups, caps, re->prog.names,
                                   re->prog.nnames)
                       : NULL;
@@ -1960,8 +2025,11 @@ static void buf_add(ReBuf* b, const char* p, size_t n) {
 
 static void buf_ch(ReBuf* b, char c) { buf_add(b, &c, 1); }
 
-static int find_next(ReProg* g, PyAdamasStr* text, int64_t from, int64_t* caps) {
-    return find_from(g, text, from, 0, caps);
+// finditer/findall 的下一轮：must_advance=1 表示上一轮是空匹配，本轮
+// 同位置的空匹配要拒绝（CPython 3.7+）。
+static int find_next(ReProg* g, PyAdamasStr* text, int64_t from, int64_t* caps,
+                     int must_advance) {
+    return find_from(g, text, from, 0, caps, must_advance);
 }
 
 // finditer 返回 list[Match]（pyadamas 没有惰性迭代器，按列表给，语义等价）。
@@ -1973,10 +2041,14 @@ static PyAdamasList* finditer_impl(ReProg* g, PyAdamasStr* text) {
     int64_t stackcaps[RE_CAPS_STACK];
     int64_t* caps = caps_take(ncap, stackcaps);
     int64_t pos = 0;
-    while (pos <= text->len && find_next(g, text, pos, caps)) {
+    int adv = 0;
+    while (pos <= text->len && find_next(g, text, pos, caps, adv)) {
         pa_list_append(out, (int64_t)match_new(text, g->ngroups, caps, g->names, g->nnames), 2);
-        if (caps[1] == caps[0]) pos = caps[1] + 1;
-        else pos = caps[1];
+        // 空匹配后不跳过字符：下一轮从同一位置重搜，靠 must-advance
+        // 拒绝同位置的空匹配（CPython 3.7+；旧口径 pos+1 会漏掉同起点
+        // 的非空分支，re.findall(r'\\b|a', 'ab') 少一项）。
+        adv = caps[1] == caps[0];
+        pos = caps[1];
     }
     pa_gc_unpin(out);
     caps_drop(caps, stackcaps);
@@ -2043,10 +2115,11 @@ int64_t pa_re_findall_str(PyAdamasStr* pat, PyAdamasStr* text, int64_t flags) {
     int64_t stackcaps[RE_CAPS_STACK];
     int64_t* caps = caps_take(ncap, stackcaps);
     int64_t pos = 0;
-    while (pos <= text->len && find_next(g, text, pos, caps)) {
+    int adv = 0;
+    while (pos <= text->len && find_next(g, text, pos, caps, adv)) {
         findall_push(out, text, g->ngroups, caps);
-        if (caps[1] == caps[0]) pos = caps[1] + 1;
-        else pos = caps[1];
+        adv = caps[1] == caps[0];
+        pos = caps[1];
     }
     pa_gc_unpin(out);
     caps_drop(caps, stackcaps);
@@ -2066,10 +2139,11 @@ int64_t pa_re_findall_groups_str(PyAdamasStr* pat, PyAdamasStr* text, int64_t fl
     int64_t stackcaps[RE_CAPS_STACK];
     int64_t* caps = caps_take(ncap, stackcaps);
     int64_t pos = 0;
-    while (pos <= text->len && find_next(g, text, pos, caps)) {
+    int adv = 0;
+    while (pos <= text->len && find_next(g, text, pos, caps, adv)) {
         findall_push_tuple(out, text, g->ngroups, caps);
-        if (caps[1] == caps[0]) pos = caps[1] + 1;
-        else pos = caps[1];
+        adv = caps[1] == caps[0];
+        pos = caps[1];
     }
     pa_gc_unpin(out);
     caps_drop(caps, stackcaps);
@@ -2085,10 +2159,11 @@ int64_t pa_re_findall(PyAdamasRegex* re, PyAdamasStr* text) {
     int64_t stackcaps[RE_CAPS_STACK];
     int64_t* caps = caps_take(ncap, stackcaps);
     int64_t pos = 0;
-    while (pos <= text->len && find_next(&re->prog, text, pos, caps)) {
+    int adv = 0;
+    while (pos <= text->len && find_next(&re->prog, text, pos, caps, adv)) {
         findall_push(out, text, re->prog.ngroups, caps);
-        if (caps[1] == caps[0]) pos = caps[1] + 1;
-        else pos = caps[1];
+        adv = caps[1] == caps[0];
+        pos = caps[1];
     }
     pa_gc_unpin(out);
     caps_drop(caps, stackcaps);
@@ -2176,7 +2251,7 @@ int64_t pa_re_sub_str(PyAdamasStr* pat, PyAdamasStr* repl, PyAdamasStr* text, in
     int64_t* caps = caps_take(ncap, stackcaps);
     ReBuf b = {NULL, 0, 0};
     int64_t pos = 0, done = 0;
-    while (pos <= text->len && (count <= 0 || done < count) && find_next(g, text, pos, caps)) {
+    while (pos <= text->len && (count <= 0 || done < count) && find_next(g, text, pos, caps, 0)) {
         buf_add(&b, text->data + pos, (size_t)(caps[0] - pos));
         PyAdamasMatch tmp;
         memset(&tmp, 0, sizeof tmp);
@@ -2210,7 +2285,7 @@ int64_t pa_re_sub(PyAdamasRegex* re, PyAdamasStr* repl, PyAdamasStr* text, int64
     ReBuf b = {NULL, 0, 0};
     int64_t pos = 0, done = 0;
     while (pos <= text->len && (count <= 0 || done < count) &&
-           find_next(&re->prog, text, pos, caps)) {
+           find_next(&re->prog, text, pos, caps, 0)) {
         buf_add(&b, text->data + pos, (size_t)(caps[0] - pos));
         PyAdamasMatch tmp;
         memset(&tmp, 0, sizeof tmp);
@@ -2244,7 +2319,7 @@ int64_t pa_re_sub_fn(PyAdamasRegex* re, int64_t closure, PyAdamasStr* text, int6
     int64_t* caps = caps_take(ncap, stackcaps);
     ReBuf b = {NULL, 0, 0};
     int64_t pos = 0, done = 0;
-    while (pos <= text->len && (count <= 0 || done < count) && find_next(g, text, pos, caps)) {
+    while (pos <= text->len && (count <= 0 || done < count) && find_next(g, text, pos, caps, 0)) {
         buf_add(&b, text->data + pos, (size_t)(caps[0] - pos));
         PyAdamasMatch* m = match_new(text, g->ngroups, caps, g->names, g->nnames);
         /* 回调是用户代码，内部必然大量分配：m 只在本帧 C 局部变量里，
@@ -2286,7 +2361,7 @@ int64_t pa_re_split_str(PyAdamasStr* pat, PyAdamasStr* text, int64_t maxsplit, i
     pa_gc_pin(out);
     int64_t pos = 0, last = 0, done = 0;
     while (pos <= text->len && (maxsplit <= 0 || done < maxsplit) &&
-           find_next(g, text, pos, caps)) {
+           find_next(g, text, pos, caps, 0)) {
         PyAdamasStr* s = str_new(text->data + last, caps[0] - last);
         pa_list_append(out, (int64_t)s, 2);
         for (int64_t gi = 1; gi <= g->ngroups; ++gi) {
@@ -2320,7 +2395,7 @@ int64_t pa_re_split(PyAdamasRegex* re, PyAdamasStr* text, int64_t maxsplit) {
     pa_gc_pin(out);  /* 同 pa_re_split_str：循环里的 str_new 会清扫无根的 out */
     int64_t pos = 0, last = 0, done = 0;
     while (pos <= text->len && (maxsplit <= 0 || done < maxsplit) &&
-           find_next(&re->prog, text, pos, caps)) {
+           find_next(&re->prog, text, pos, caps, 0)) {
         PyAdamasStr* s = str_new(text->data + last, caps[0] - last);
         pa_list_append(out, (int64_t)s, 2);
         for (int64_t gi = 1; gi <= re->prog.ngroups; ++gi) {

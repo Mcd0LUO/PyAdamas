@@ -6,27 +6,59 @@ namespace pyadamas {
 void Lowerer::store_slot(int slot, VReg v) {
     TypePtr dst = st_->fn->slot_ty[slot];
     TypePtr src = vreg_ty(v);
+    const size_t si = static_cast<size_t>(slot);
     // 未知槽位第一次收到已知类型的值时补上类型；后续 load.slot
     // 才能按 float/int 正确选指令。retain_for_store 从这一刻起
     // 按堆槽的规则 retain/dec，槽也进入帧记录的释放清单。
+    bool upgraded = false;
     if (dst && dst->kind == TyKind::Unknown && src && src->kind != TyKind::Unknown) {
         // 之前可能以 unknown 值写入过这个槽：旧值不一定是堆指针。
-        st_->fn->slot_unknown[static_cast<size_t>(slot)] = true;
+        st_->fn->slot_unknown[si] = true;
         st_->fn->slot_ty[slot] = dst = src;
-        st_->fn->slot_owned[static_cast<size_t>(slot)] = ir_is_heap(src);
+        upgraded = true;
     }
-    bool moved = !st_->borrow_slots.count(slot) && move_fresh(v, dst);
+    const bool borrow = st_->borrow_slots.count(slot) != 0;
+    bool moved = !borrow && move_fresh(v, dst);
     if (!moved) retain_for_store(dst, v);
     if (ir_is_heap(dst)) {
         // 堆槽收到 unknown/None 等非堆值后，槽里可能装着整数：之后
         // 所有旧值释放都改用注册表判断，避免把整数当指针 dec。
         if (!ir_is_heap(src))
-            st_->fn->slot_unknown[static_cast<size_t>(slot)] = true;
+            st_->fn->slot_unknown[si] = true;
+        st_->fn->slot_owned[si] = true;
         VReg old = load_slot(slot, dst);
         store_slot_raw(slot, v);
-        if (st_->fn->slot_unknown[static_cast<size_t>(slot)]) rc_dec_unknown(old);
+        if (st_->fn->slot_unknown[si]) rc_dec_unknown(old);
         else rc_dec(old);
+    } else if (!borrow && dst && dst->kind == TyKind::Unknown) {
+        // **unknown 槽的所有权口径：槽持有 retain 过的那一份引用。**
+        //
+        // 0.323 之前这里只写不释放：store_slot 的 retain_for_store 给
+        // unknown 槽补了引用，出口 release_slots 却因为「unknown 槽可能
+        // 是借来的」整类跳过 —— 每写一次就泄漏一份。字符串还是 tracked
+        // 叶子时被退出时沿链 free 掩盖，0.321 改成索引叶子后 LSan 立刻
+        // 报出来（for v in list[object]、v: object = xs[i] 每元素一份）。
+        //
+        // 现在按槽记账：写入时 retain 过（moved / 堆源 / unknown 源）就
+        // 把 slot_owned 置位，覆盖前按注册表释放旧值，出口 release_slots
+        // 按同一个标记释放。标记只置不清（同一槽在不同分支可能写堆也可能
+        // 写标量，保守释放对标量是空操作，反向则会漏）。
+        const bool owns = moved || ir_is_heap(src) || !src || src->kind == TyKind::Unknown;
+        // 旧值无条件按注册表释放：槽在函数序言/生成器帧创建时清零，
+        // 第一次 store 读到 0 是空操作。不能按 slot_owned 的静态值
+        // 跳过——同一条 store 指令在循环里要执行多次，覆盖的是上一轮
+        // 写进去的那份引用（0.323 首版就是这样每轮漏一份）。
+        VReg old = load_slot(slot, dst);
+        store_slot_raw(slot, v);
+        rc_dec_unknown(old);
+        if (owns) st_->fn->slot_owned[si] = true;
+        st_->fn->slot_unknown[si] = true;
     } else {
+        // 未知槽位升级成已知非堆类型：旧值可能还是 retained 过的堆指针。
+        if (upgraded && !borrow && st_->fn->slot_owned[si]) {
+            VReg old = load_slot(slot, dst);
+            rc_dec_unknown(old);
+        }
         store_slot_raw(slot, v);
     }}
 
@@ -41,8 +73,12 @@ void Lowerer::store_global(int gi, VReg v) {
         IRGlobal& g = mod_.globals[gi];
         if (unknown) {
             g.maybe_unknown = true;
-            // unknown 源可能是堆指针：补一份引用，出口按注册表释放。
-            if (src && src->kind == TyKind::Unknown) rc_inc_unknown(v);
+            // 注意：所有权已经由上面统一的一次 retain_for_store 处理
+            //（unknown 源走 rc_inc_unknown、堆源走 rc_inc、fresh 值
+            // 走 move_fresh 转移临时栈那份）。0.323 之前这里又对
+            // unknown 源补了一次 rc_inc_unknown，于是全局每写一次就多
+            // 留一个引用；release_globals 只释放一次，泄漏那一份在
+            // 字符串改成索引叶子后被 LSan 抓出来。
         } else if (!ir_is_heap(src)) {
             g.maybe_unknown = true;
         }
@@ -58,11 +94,10 @@ void Lowerer::store_field(TypePtr fty, VReg obj, int off, VReg v) {
     bool moved = move_fresh(v, fty);
     if (!moved) retain_for_store(fty, v);
     bool unknown = fty && fty->kind == TyKind::Unknown;
-    if (unknown) {
-        TypePtr src = vreg_ty(v);
-        // unknown 字段自己持有一份引用，析构时按注册表释放。
-        if (src && src->kind == TyKind::Unknown) rc_inc_unknown(v);
-    }
+    // unknown 字段自己持有一份引用，析构时按注册表释放。这份引用由
+    // 上面统一的 retain_for_store / move_fresh 给出，这里不能再补一次：
+    // 0.323 之前对 unknown 源又 rc_inc_unknown 了一遍，字段析构只 dec
+    // 一次，每写一个 unknown 元素就漏一份引用。
     if (ir_is_heap(fty) || unknown) {
         VReg old = field_load(obj, off, fty);
         field_store(obj, off, v);
@@ -97,21 +132,27 @@ void Lowerer::release_slots() {
     for (size_t s = 0; s < st_->fn->slot_ty.size(); ++s) {
         if (st_->borrow_slots.count(static_cast<int>(s))) continue;
         TypePtr ty = st_->fn->slot_ty[s];
-        // 注意：unknown 槽**不能**在这里统一释放。
+        const bool unk = !ty || ty->kind == TyKind::Unknown;
+        // unknown 槽按 slot_owned 释放：0.323 起写入点（store_slot）和
+        // 未知形参入口（inc_params）都会把引用登记成槽所有，覆盖时也按
+        // 同一标记释放旧值，所以出口可以对称释放。
         //
-        // 试过补齐成 `!ir_is_heap(ty) && !unk_ty`，结果 12 个用例报
-        // "refcount decrement on a freed object"（121_decorated_dunder、
-        // 126_decorated_slots、127_bound_method、144_operator…）。
-        // 原因是 unknown 槽里的值未必由 retain_for_store 加过引用：
-        // 装饰器回填、borrow_slots、帧槽别名等路径都会让 unknown 槽
-        // 持有「借来的」值，无条件 dec 就是 over-release。
-        //
-        // 要正确做，得给每个 unknown 槽记一个「是否 owned」的标记，
-        // 由写入点维护 —— 那是槽级所有权跟踪，不是这里一行能补的。
-        if (!ir_is_heap(ty)) continue;
-        VReg v = load_slot(static_cast<int>(s), ty);
-        if (st_->fn->slot_unknown[s]) rc_dec_unknown(v);
-        else rc_dec(v);
+        // slot_owned 是槽的静态属性（可能有多个 return 路径），这里不能
+        // 在第一条 return 之后清掉它，否则后面的 return/帧记录会漏释放。
+        // 仍然跳过的两类：borrow_slots（借来的，见上）；以及没被任何
+        // 写入点标记 owned 的 unknown 槽（未经 store_slot 的裸写，例如
+        // DictTryGet 的值出口槽），它们始终是借用。
+        if (unk) {
+            if (!st_->fn->slot_owned[s]) continue;
+            VReg v = load_slot(static_cast<int>(s), ty);
+            rc_dec_unknown(v);
+        } else if (ir_is_heap(ty)) {
+            VReg v = load_slot(static_cast<int>(s), ty);
+            if (st_->fn->slot_unknown[s]) rc_dec_unknown(v);
+            else rc_dec(v);
+        } else {
+            continue;
+        }
         if (zero == kNoReg) zero = const_int(0);
         store_slot_raw(static_cast<int>(s), zero);
     }}

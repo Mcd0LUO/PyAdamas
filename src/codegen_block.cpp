@@ -270,23 +270,29 @@ void AsmGen::emit_function(const IRFunction& f, int fi) {
             // 传给 pa_rc_temp 当场 SEGV。
             //
             // 提升槽由 gc_scan_registers 兜底（见下面 frame_scan_ 的注释）。
-            for (size_t s = 0; s < n_owned; ++s)
-                if (f.slot_owned[s] && ir_is_heap(f.slot_ty[s]) &&
+            for (size_t s = 0; s < n_owned; ++s) {
+                TypePtr ty = f.slot_ty[s];
+                bool unk_ty = !ty || ty->kind == TyKind::Unknown;
+                // 0.323：unknown 槽也按 slot_owned 记账（写入点 retain、
+                // 出口释放），所以「持有引用」的清单不再只限堆槽。异常
+                // 展开时这些槽要按注册表 dec，和堆槽一样登记。
+                if (f.slot_owned[s] && (ir_is_heap(ty) || unk_ty) &&
                     slot_reg_[s].empty()) {
                     if (s < gc_scan_slot_.size()) gc_scan_slot_[s] = 1;
                     frame_owned_.push_back(static_cast<int>(s));
                     frame_owned_unknown_.push_back(
-                        s < f.slot_unknown.size() && f.slot_unknown[s]);
+                        unk_ty || (s < f.slot_unknown.size() && f.slot_unknown[s]));
                 }
-            // 借来的 unknown 引用（unknown 局部/形参）只登记给 GC 扫描，
-            // 异常展开不能释放。提升到 callee-saved 寄存器的槽不在内存里，
-            // 由 GC 的寄存器扫描兜住。
+            }
+            // 借来的 unknown 引用（unknown 形参/未标记 owned 的槽）只登记
+            // 给 GC 扫描，异常展开不能释放。提升到 callee-saved 寄存器的
+            // 槽不在内存里，由 GC 的寄存器扫描兜住。
             for (size_t s = 0; s < n_owned; ++s) {
                 TypePtr ty = f.slot_ty[s];
-                bool owned_heap = f.slot_owned[s] && ir_is_heap(ty);
                 bool unk = s < f.slot_unknown.size() && f.slot_unknown[s];
                 bool unk_ty = !ty || ty->kind == TyKind::Unknown;
-                if (!owned_heap && (unk || unk_ty) && slot_reg_[s].empty()) {
+                bool owned = f.slot_owned[s] && (ir_is_heap(ty) || unk_ty);
+                if (!owned && (unk || unk_ty) && slot_reg_[s].empty()) {
                     frame_scan_.push_back(static_cast<int>(s));
                     if (s < gc_scan_slot_.size()) gc_scan_slot_[s] = 1;
                 }

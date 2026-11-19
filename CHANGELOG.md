@@ -4,6 +4,141 @@
 
 早期阶段没有逐条留痕，按阶段归纳；0.4 之后逐条记录。
 
+## [0.323] - 2026-11-19
+
+> 遗留 bug 修复轮：0.321 记录的「unknown 元素双 inc 泄漏」与 re 空匹配推进
+> 旧口径两项 P0；P1 的 unknown→具体元素重解释洞评估后记录边界；P2 两项
+> （unknown 值类型标签 / statistics.mean 精确求和）给出设计与影响评估，延期。
+> 不触碰 README/docs；build/release（0.271 oracle）未重建。
+
+### 正确性修复（P0）：unknown 槽所有权泄漏 + re.findall/finditer 空匹配推进
+
+- **unknown 元素写入 unknown 全局/字段连发两次 `pa_rc_inc_unknown`（每个元素漏一个引用）**：
+  `store_global` / `store_field` 在统一的所有权入口 `retain_for_store`（unknown 源走
+  `rc_inc_unknown`、堆源走 `rc_inc`、fresh 值走 `move_fresh` 转移临时栈那份）之后，
+  又对 unknown 源显式补了一次 `rc_inc_unknown`。全局出口 `release_globals` 和字段
+  析构只释放一次，于是 `for v in list[object]` 的循环变量（模块级是全局）和
+  `v: object = xs[i]` 每写一次就多留一个引用。字符串还是 tracked 叶子时被退出时
+  沿链 free 掩盖，0.321 改成索引叶子后被 LeakSanitizer 直接抓出（240 用例当时
+  只能绕开槽赋值）。**修**：删除这两处重复 inc，所有权只由 `retain_for_store` /
+  `move_fresh` 给出一次。gdb 断点复核：修复前每个 unknown 全局写入两次
+  `pa_rc_inc_unknown`，修复后一次。
+- **unknown 局部槽 / for 变量「只 retain 不释放」（同族泄漏，0.321 只记了全局/字段口径）**：
+  `release_slots` 历史上整类跳过 unknown 槽（注释记录了试过无条件释放导致 12 个
+  用例 over-release：装饰器回填、borrow_slots、帧槽别名等路径的 unknown 槽可能
+  持有借来的值）。但 `retain_for_store` 自 0.215 起确实会给 unknown 槽补引用，
+  两边口径不一致 → 每个 unknown 局部变量/循环变量泄漏一份。**修（槽级所有权记账）**：
+  - `store_slot` 的 unknown 分支：覆盖前**无条件**按注册表释放旧值（槽在函数序言 /
+    生成器帧创建时清零，第一次 `dec_unknown(0)` 是空操作；同一条 store 在循环里
+    执行多次，不能按 `slot_owned` 的静态值跳过，否则每轮漏上一轮那份）；写入时
+    retain 过（moved / 堆源 / unknown 源）就置 `slot_owned`，只置不清。
+  - `release_slots`：owned 的 unknown 槽出口 `rc_dec_unknown` + 清零；borrow 槽和
+    未经 `store_slot` 的裸写槽（如 `DictTryGet` 的值出口）保持跳过。
+  - `inc_params`：unknown 形参入口 `rc_inc_unknown` 并置 owned，出口对称释放 ——
+    否则「形参槽在某些分支未被覆盖」时静态 owned 标记会导致 over-release。
+  - codegen 帧记录：owned unknown 槽进 `frame_owned`（异常展开按注册表 dec），
+    借来的才进 `frame_scan`；生成器/协程包装对 unknown 形参 `rc_inc_unknown`，
+    `slot_heap` 的 2 类覆盖 owned unknown 槽（正常终止由 `release_slots` 释放并
+    清零，异常/GC 销毁由 `pa_gen_slot_release` 幂等释放）。
+  - 内联：entry 释放旧值的条件从「堆槽」扩到「堆槽或 unknown 槽」且 owned，
+    dec 选 `RcDecUnknown`；形参复制同样处理。
+- **`re.findall(r'\b|a', 'ab')` 比 CPython 3.7+ 少一项（空匹配后推进旧口径）**：
+  旧实现空匹配后 `pos = end + 1`，直接跳过同起点的非空分支。CPython 3.7+ 的
+  finditer 是「下一次仍从同一位置搜，但同位置的空匹配必须失败」，让引擎回溯去
+  试 `a` 分支：`(0,0)`、`(0,1)`、`(2,2)`。**修**：VM 增加 must-advance 口径。
+  - 新增 `RE_MATCH_TOP` opcode 用于整段程序的最终 MATCH（断言/原子组子程序内部
+    的 `RE_MATCH` 保持原样 `return 1`，不受影响）；判定用文件级
+    `re_no_empty`/`re_no_empty_pos`，不往 ReCtx 加字段。
+  - `find_from` 增加 `must_advance`：空匹配重试时先在同一位置做一次带标记的
+    尝试，失败才从下一位置继续普通扫描；普通扫描循环逐条保持原实现（热路径
+    不背 must-advance 判断）。`findall`/`finditer`/`Pattern.findall` 循环改为
+    `adv = (caps[1] == caps[0])`、`pos = caps[1]`。
+  - 附带修：空 subject 上 `^`/`\A`（`first_kind == 2` 在 `start == len == 0` 被
+    误判死）。`re.findall(r'^', '')` 从 `[]` 改为 `['']`，与 CPython 一致；
+    0.271 oracle 同款旧行为。
+  - `re.split` / `re.sub` 仍传 `must_advance=0`，维持旧口径 —— 它们的零宽语义
+    不在本轮范围（单独记录）。
+
+### 回归用例
+
+- 新增 `tests/run/246_unknown_rc_re_empty.py`（先对拍 CPython 3.14 再钉 expect，
+  O0/O1/O2 全一致）：局部/全局 `list[object]` 的槽赋值与 `for` 循环变量、unknown
+  字段（类级标注 `v: object`，`__init__` 里的 `self.v` 会被首赋值收窄成 int，测不到
+  unknown 字段路径）、unknown 形参、re 空匹配（`\b|a` / `|a` / `a*|b` / `\b|ab` /
+  前瞻与后顾 / `(\b)+` / `(a*)+` / finditer spans / 空 subject 的 `^` `\A` `$`）。
+
+### 验证
+
+- difftest **238 / 0**；普通套件 **256 ran ok / EXIT=0**；ASan 套件 **256 ran ok /
+  EXIT=0**（`PYADAMAS_TEST_JOBS=8`）。
+- ASan `detect_leaks=1` 抽查 246 / 13_gc / 174_gc_construct_roots 全干净（无
+  leak/ERROR 输出，输出与 expect 一致）；修复前 246 的最小复现（局部 for 变量 +
+  全局 + 字段）各报 4–5 对象 Direct leak。
+- 0.271 oracle 语料：36 条差异，**全部为时代差**（201–229 共 23 例 oracle 编译
+  不了、206/237 oracle 侧 SIGSEGV 为既有现象、230/231/232/236/238/239/245 新用例、
+  47/66/162/185 是 0.313–0.317 自身修复的 expect 变更、246 为 0.323 新用例且
+  oracle 侧 SIGSEGV）；无意外差异。
+- `tests/check_size.sh` 仍只有原有 5 处超限（codegen_regalloc.cpp / driver_build.cpp /
+  ir_ops.h / lower_impl.h / typecheck_types.h），无新增超限文件；lower_impl.h 从
+  1233 → 1278 行仍属既有超限项。
+- re 基准（`tools/rebench.py`，9 轮交替 + 奇偶交换，基线 54ab489 独立 worktree）：
+  **TOTAL 279.140ms → 279.199ms（+0.0%）**；perf stat（-r 5）instructions
+  2284.0M → 2286.2M（+0.1%）、cycles 783.6M → 785.1M（+0.2%），判中性；个别
+  短用例 ±4% 属布局/噪声（同轮 sub_group −3.4%、findall_alt −3.4%）。
+  **负收益记录**：第一版把 must-advance 字段加进 ReCtx 并在 `run()` 的 RE_MATCH
+  里判定，re 基准合计 **+8.4%**（关闭判定仍 +8.1%，根因是 ReCtx 布局/热函数
+  代码位移）；改成「文件级标记 + RE_MATCH_TOP 冷判定 + 热扫描循环逐条不变」后
+  回到 0.0%。
+- 浮点/现实热路径：对 nbody / spectral_norm / matmul / fannkuch + realistic 四案
+  与基线 54ab489 逐案 `pyadamas asm -O2` 比较，生成汇编 **cmp 逐字节相同**；
+  unknown 形参的入口 inc 只落在未标注签名的函数上，不触及浮点寄存器分配。
+
+### P1 评估（本轮不做，记录边界）
+
+- **unknown→具体元素隐式重解释**（`list[object]` 实参传给 `list[str]` 形参）：
+  0.322 曾尝试在编译期拒绝，误杀 `bisect(list[unknown])` / `copy.copy_list` 等
+  合法泛型用法后回退。本轮复核：光看「实参元素 unknown、形参元素具体」无法
+  区分两种情形 —— 泛型函数是**单态化**的，`T` 可能在更早的调用点已经被回填成
+  `str`，之后同一个 `list[unknown]` 实参与「真正的重解释」在签名比较处完全同形；
+  而 bisect/copy_list 内部只做比较/搬运，不按 `str` 指针解引用。要精确守卫需要
+  「按调用点重新单态化」或「元素级运行期类型标签」（见下 P2），二者都超出局部
+  修复范围。**延期**，已知边界与 0.322 相同：把 `list[object]` 传给具体元素标注的
+  形参仍可能被按具体类型读（混合容器优先用 `list[object]` 全程承载）。
+
+- **同批发现、未修（既有，基线同款）**：非内联的 `-> object` / 未标注返回函数，
+  调用结果的那份引用没有进临时栈。`def f(x: object, flag: bool) -> object` 在循环里
+  调用并赋给 unknown 全局时，0.271 / 54ab489 基线与 0.323 同样每轮漏一份（ASan
+  4 对象 / 416B）。它与本轮 P0 的「槽/全局重复 inc」不是同一层（调用结果所有权
+  本身没入临时栈，store 再 inc 就多一份），修它要改 `def_heap` 对 unknown 返回值
+  的临时栈口径，影响面大于 P0，另票。本轮 246 的 unknown 形参函数在内联后
+  不产生这条路径，LSan 干净。
+
+### P2 专项设计（评估后延期，不半做）
+
+- **unknown 值无类型标签（异构 dict / 混合 csv 行里 float 打位模式）**：
+  现状 unknown 是裸 64 位字，堆性靠 rc 索引/叶子索引探针，int 与 double 位模式
+  不可区分；`pa_repr_any`、csv 混合行、异构 dict 打印都只能把 float 当整数。
+  三条路线：① **NaN-boxing**：把 int/指针/float 全部打包进 64 位（指针/整数加标签），
+  改动表示层与所有寄存器/栈槽/容器/GC 出边识别，影响全部 codegen 与运行时 ABI，
+  属根本性重构；② **每元素旁路 tag**：kind2 列表已有 `heap_bits`，可再加每元素
+  1 字节 tag（或扩展位图）区分 int/float/str；dict 条目借助现有 flags 扩展；
+  unknown 帧槽需要并行 tag 数组并进 GC/异常展开口径。内存 +1B/元素（仅混合
+  容器）、热路径在 kind2 上多一次 tag 读写，需 abbench 验证；③ **装箱 float**
+  （推荐分阶段）：unknown 边界上的 float 统一转成现有 `PYADAMAS_RC_CPYFLOAT`
+  盒（8 字节 payload 存 double），读回具体 float 上下文时拆箱。表示局部、不动
+  ABI；代价是 unknown 浮点流的分配/RC（只在未标注/混合路径），且能直接让
+  print/csv/异构 dict 拿到值语义。**方案③为首个专项轮候选**，②作为性能回退
+  备选；①不建议。预估影响面：rt_list/rt_dict/rt_cpy/rt_format + lower 的
+  unknown 装箱/拆箱点 + 回归；1–2 个专项轮。
+- **statistics.mean 精确求和**：CPython 3.12+ 用 `Fraction` 精确有理数累加再除以 n
+  （`mean([0.1,0.2,0.3]) == 0.2`）。double 的分母可达 2^1074，n 个值求和的中间
+  分子远超 int64；int 输入的精确和也无上界。方案：专用定点大整数累加器
+  （~2176 位 = 34×64 位，覆盖全部 double 指数 + log2(n) 进位）按最小指数对齐
+  求和，再正确舍入到 double；int 路径仍需真 BigInt（无上界）。`math.fsum(xs)/len(xs)`
+  不够（该例仍给 0.19999999999999998）。代价：约 300–500 行运行时 + 舍入/溢出
+  边界 + 对拍，超出本轮，**延期**；绕行仍是整数/定点数据（金额用 int 分）或
+  接受 1 ulp 差异。
+
 ## [0.322] - 2026-11-19
 
 > bugfix2 分支（基于 cedca8c / 0.320），与主树性能轮并行开发。性能轮 0.321

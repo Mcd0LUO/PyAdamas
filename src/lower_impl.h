@@ -667,8 +667,19 @@ private:
     void store_field(TypePtr fty, VReg obj, int off, VReg v);
 
     void inc_params() {
-        for (auto& p : st_->fn->params)
-            if (ir_is_heap(p.ty)) rc_inc(load_slot(p.slot, p.ty));
+        for (auto& p : st_->fn->params) {
+            if (ir_is_heap(p.ty)) {
+                rc_inc(load_slot(p.slot, p.ty));
+            } else if (!p.ty || p.ty->kind == TyKind::Unknown) {
+                // unknown 形参也归形参槽所有：否则出口无法区分「槽里是
+                // 调用方借来的实参」和「函数体写入并 retain 过的值」，
+                // release_slots 只能整类跳过 unknown 槽（0.323 之前的
+                // 口径），导致函数体写入的引用泄漏。保守 inc 的代价是
+                // 每次调用一对注册表探测，标量实参在探针里是空操作。
+                rc_inc_unknown(load_slot(p.slot, p.ty));
+                st_->fn->slot_owned[static_cast<size_t>(p.slot)] = true;
+            }
+        }
     }
 
     // 函数出口释放所有堆槽：形参在入口 retain 过，局部变量在写入时 retain
