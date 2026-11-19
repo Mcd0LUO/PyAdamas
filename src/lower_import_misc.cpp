@@ -3,7 +3,8 @@
 
 namespace pyadamas {
 
-bool Lowerer::json_desc(const TypePtr& t, std::string& out, int line, int col) {
+bool Lowerer::json_desc(const TypePtr& t, std::string& out, int line, int col,
+                        bool for_loads) {
     if (!t || t->kind == TyKind::Unknown) {
         err(line, col, "json needs a statically known type");
         return false;
@@ -20,7 +21,7 @@ bool Lowerer::json_desc(const TypePtr& t, std::string& out, int line, int col) {
                 return false;
             }
             std::string inner;
-            if (!json_desc(t->sub[0], inner, line, col)) return false;
+            if (!json_desc(t->sub[0], inner, line, col, for_loads)) return false;
             out = "(l" + inner + ")";
             return true;
         }
@@ -29,14 +30,38 @@ bool Lowerer::json_desc(const TypePtr& t, std::string& out, int line, int col) {
                 err(line, col, "json: dict type is unknown");
                 return false;
             }
-            if (t->sub[0] && t->sub[0]->kind != TyKind::Str) {
+            // 键描述符：dumps 按 CPython json 规则把 int/float/bool/None 键
+            // 强制转 str（运行期 jb_key_scalar）；loads 的样例键必须是 str
+            // ——CPython loads 永远返回 str 键，不做逆向转换。
+            char kc = 0;
+            if (t->sub[0]) {
+                switch (t->sub[0]->kind) {
+                    case TyKind::Str: kc = 's'; break;
+                    case TyKind::Int: kc = 'i'; break;
+                    case TyKind::Float: kc = 'f'; break;
+                    case TyKind::Bool: kc = 'b'; break;
+                    case TyKind::None: kc = 'n'; break;
+                    default: break;
+                }
+            }
+            if (!kc) {
                 err(line, col,
-                    std::format("json dict keys must be str, got '{}'", type_name(t->sub[0])));
+                    std::format("json dict keys must be str/int/float/bool/None, got '{}'",
+                                type_name(t->sub[0])));
+                return false;
+            }
+            if (for_loads && kc != 's') {
+                err(line, col,
+                    "json.loads() sample dict keys must be str "
+                    "(CPython loads always returns str keys)");
                 return false;
             }
             std::string inner;
-            if (!json_desc(t->sub[1], inner, line, col)) return false;
-            out = "(d" + inner + ")";
+            if (!json_desc(t->sub[1], inner, line, col, for_loads)) return false;
+            out = "(d";
+            out += kc;
+            out += inner;
+            out += ")";
             return true;
         }
         case TyKind::Tuple: {
@@ -47,7 +72,7 @@ bool Lowerer::json_desc(const TypePtr& t, std::string& out, int line, int col) {
             std::string s = "(t";
             for (auto& sub : t->sub) {
                 std::string inner;
-                if (!json_desc(sub, inner, line, col)) return false;
+                if (!json_desc(sub, inner, line, col, for_loads)) return false;
                 s += inner;
             }
             s += ")";
@@ -631,7 +656,8 @@ VReg Lowerer::lower_pathlib(const std::string& member, Call& c) {
 }
 
 VReg Lowerer::lower_json(const std::string& member, Call& c) {
-    // dumps 收 indent= / sort_keys=，其它几个不收关键字。
+    // dumps 收 indent= / sort_keys= / ensure_ascii= / separators= / allow_nan=，
+    // 其它几个不收关键字。
     if (!c.keywords.empty() && member != "dumps") {
         err(c.line, c.col, std::format("json.{}() does not take keyword arguments", member));
     }
@@ -641,26 +667,61 @@ VReg Lowerer::lower_json(const std::string& member, Call& c) {
                 std::format("json.dumps() expects 1 positional argument, got {}", c.args.size()));
             return const_none();
         }
-        // indent= / sort_keys= 是关键字参数；indent 用 0 表示紧凑（对应 None）。
-        VReg indent = const_int(0);
+        // indent 用 INT64_MIN 哨兵表示 None（紧凑）；0/负数是「换行不缩进」，
+        // 与 CPython 一致。flags 打包：bit0 sort_keys / bit1 ensure_ascii /
+        // bit2 allow_nan（默认 0b110）。seps 传 tuple[str,str] 指针或 0。
+        VReg indent = const_int(INT64_MIN);
         VReg sort_keys = const_int(0);
+        VReg ensure_ascii = const_int(1);
+        VReg allow_nan = const_int(1);
+        VReg seps = const_int(0);
         for (auto& kw : c.keywords) {
             if (kw.arg == "indent") {
-                indent = coerce(expr(*kw.value), tc_.type_of(kw.value.get()), t_int());
+                TypePtr kt = tc_.type_of(kw.value.get());
+                if (kt && kt->kind == TyKind::None) {
+                    indent = const_int(INT64_MIN);
+                } else {
+                    indent = coerce(expr(*kw.value), kt, t_int());
+                }
             } else if (kw.arg == "sort_keys") {
                 sort_keys = coerce(expr(*kw.value), tc_.type_of(kw.value.get()), t_bool());
+            } else if (kw.arg == "ensure_ascii") {
+                ensure_ascii = coerce(expr(*kw.value), tc_.type_of(kw.value.get()), t_bool());
+            } else if (kw.arg == "allow_nan") {
+                allow_nan = coerce(expr(*kw.value), tc_.type_of(kw.value.get()), t_bool());
+            } else if (kw.arg == "separators") {
+                TypePtr st = tc_.type_of(kw.value.get());
+                if (!st || st->kind != TyKind::Tuple || st->variadic ||
+                    st->sub.size() != 2 || !st->sub[0] ||
+                    st->sub[0]->kind != TyKind::Str || !st->sub[1] ||
+                    st->sub[1]->kind != TyKind::Str) {
+                    err(kw.value->line, kw.value->col,
+                        "json.dumps() separators must be a tuple[str, str]");
+                }
+                seps = expr(*kw.value);
             } else {
                 err(kw.value->line, kw.value->col,
                     std::format("json.dumps() got an unexpected keyword argument '{}'", kw.arg));
             }
         }
+        auto bin = [&](BinKind k, VReg a, VReg b) {
+            Inst in;
+            in.op = IrOp::Bin;
+            in.bop = k;
+            in.a = a;
+            in.b = b;
+            return def(t_int(), std::move(in));
+        };
+        VReg flags = bin(BinKind::BitOr, sort_keys,
+                         bin(BinKind::Shl, ensure_ascii, const_int(1)));
+        flags = bin(BinKind::BitOr, flags, bin(BinKind::Shl, allow_nan, const_int(2)));
         TypePtr vt = tc_.type_of(c.args[0].get());
         std::string desc;
         if (!json_desc(vt, desc, c.args[0]->line, c.args[0]->col)) return const_none();
         if (vt && vt->kind == TyKind::None) return const_str("null");
         VReg v = expr(*c.args[0]);
         VReg s = call_runtime(RtFn::JsonDumps, t_str(),
-                              {v, const_str(desc), indent, sort_keys});
+                              {v, const_str(desc), indent, flags, seps});
         push_temp(s);
         return s;
     }
@@ -674,7 +735,8 @@ VReg Lowerer::lower_json(const std::string& member, Call& c) {
         // 样例值只提供类型，运行时不求值（类型检查阶段已经检查过）。
         TypePtr sample = tc_.type_of(c.args[1].get());
         std::string desc;
-        if (!json_desc(sample, desc, c.args[1]->line, c.args[1]->col)) return const_none();
+        if (!json_desc(sample, desc, c.args[1]->line, c.args[1]->col, /*for_loads=*/true))
+            return const_none();
         VReg text = expr(*c.args[0]);
         VReg v = call_runtime(RtFn::JsonLoads, sample, {text, const_str(desc)});
         if (ir_is_heap(sample)) push_temp(v);

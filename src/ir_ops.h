@@ -435,7 +435,7 @@ enum class RtFn : uint16_t {
     FuncReduceF,           // (fn*, list* xs, f64 init, i64 has_init) -> f64
     CollCounter,           // (list* items, i64 key_kind, i64 key_own) -> dict*
     CollMostCommon,        // (dict*, i64 n) -> list*
-    JsonDumps,             // (i64 value, str* desc) -> str*
+    JsonDumps,             // (i64 value, str* desc, i64 indent, i64 flags, list* seps) -> str*
     JsonLoads,             // (str* text, str* desc) -> i64
     // CPython 桥：(str* module, str* attr, list* args, str* descs) -> i64 unknown
     // 懒拉起 python3 worker 子进程，JSON 帧 IPC；见 runtime/rt_cpy.c。
