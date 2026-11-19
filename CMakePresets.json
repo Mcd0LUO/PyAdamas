@@ -19,12 +19,12 @@
     },
     {
       "name": "release",
-      "displayName": "pyadamas release (Release -O1 + Ninja)",
+      "displayName": "pyadamas release (Release -O2 + Ninja)",
       "generator": "Ninja",
       "binaryDir": "${sourceDir}/build/release",
       "cacheVariables": {
         "CMAKE_BUILD_TYPE": "Release",
-        "CMAKE_CXX_FLAGS_RELEASE": "-O1 -DNDEBUG",
+        "CMAKE_CXX_FLAGS_RELEASE": "-O2 -DNDEBUG",
         "CMAKE_EXPORT_COMPILE_COMMANDS": "ON"
       }
     },

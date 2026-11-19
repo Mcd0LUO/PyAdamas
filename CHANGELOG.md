@@ -4,6 +4,13 @@
 
 早期阶段没有逐条留痕，按阶段归纳；0.4 之后逐条记录。
 
+## [0.309] - 2026-11-19
+
+### release preset -O1→-O2（保守退路）
+
+- 0.308 的 release -O1 经三层吞吐测量中性，用户选择保守 -O2：构建收益仍有约 −10%（compile-speed.md 实测 −10.1%），编译器二进制运行余量更足。一行 CMAKE_CXX_FLAGS_RELEASE 改动。
+- 生成代码与运行时不受影响（用户代码 -O2、rt.o -O2 本就独立于 preset）；build/lead 口径不用 release preset，行为无关，验证沿用 0.308 终态（226/0、244×2）。build/release（0.271 oracle）仍未触碰——release preset 的 binaryDir 指向它，重建会覆盖 oracle，需新 oracle 时另开目录。
+
 ## [0.308] - 2026-11-19
 
 ### 编译器构建速度优化（ccache + 模块扫描关闭 + release -O1）
