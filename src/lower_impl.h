@@ -583,10 +583,24 @@ private:
 
     // 产生一个堆值：把它交给临时栈，调用方不需要再管这个初始引用。
     VReg def_heap(TypePtr ty, Inst in) {
+        // P3-1b（0.328）：用户调用（Call/CallDirect/VCall*）的 unknown 返回
+        // 也带一份调用方所有的引用（emit_return 对 unknown 返回 RcIncUnknown /
+        // fresh take），必须同样登记进临时栈，否则直接消费（print/算术）时
+        // 那份引用无人释放 —— 0.325 基线已存在的「print(object 调用结果)」
+        // 所有权洞（j12 str 104B / m5 float 盒 72B / 144B 双盒形态）。
+        // 只限用户调用 op：CallRt/Bin/IndexLoad 等 unknown 结果是借用或裸
+        // 机器字，登记会误 dec。不进 fresh_vregs：值可能是整数，容器 take
+        // 快路径假设一定是堆（与 push_temp_unknown 同口径）。
+        const bool user_call =
+            in.op == IrOp::Call || in.op == IrOp::CallDirect ||
+            in.op == IrOp::VCall || in.op == IrOp::VCallStatic ||
+            in.op == IrOp::SuperVCall;
         VReg v = def(ty ? ty : t_unknown(), std::move(in));
         if (ir_is_heap(ty)) {
             push_temp(v);
             st_->fresh_vregs.insert(v);
+        } else if (user_call && is_unknown(ty)) {
+            push_temp_unknown(v);
         }
         return v;
     }

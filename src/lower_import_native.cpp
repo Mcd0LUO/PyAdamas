@@ -536,6 +536,10 @@ VReg Lowerer::build_itemgetter(Call& c, TypePtr fty) {
         mk.imm = 2;
         mk.args = std::move(vals);
         out = def_heap(t_unknown(), std::move(mk));
+        // 新元组是堆对象但静态类型 unknown：def_heap 的堆分支不登记，
+        // 这里补临时栈（与 push_temp_any_heap 同口径），否则调用方那份
+        // 引用泄漏（P3-1b 所有权洞同族）。
+        push_temp_any_heap(out);
     }
     emit_return(out, t_unknown());
     pop_frame();
