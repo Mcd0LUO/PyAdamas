@@ -87,6 +87,8 @@
 | R1 | SIMD 原型 spectral_norm reduction | 0.333 | ✅ cycles 4.36× / 墙钟 2.29×，逐位一致，集成 |
 | R2 | SIMD 扩展 nbody+matmul | 0.334 | ✅ matmul 5.94× / nbody 4.32×，**反超 Go**（0.48×/0.70×），集成 |
 | R3 | 循环 RC 消除（块内对消除） | — | ❌ **负面**：正确但≈0 加速（RC 密集循环开销主体是必要所有权转移，非冗余对）。循环外提/borrow 细化收益不抵风险。**跳过不集成**。真正杠杆=borrow 细化（只读借用循环变量槽），需独立专项轮（slot_owned/帧释放/异常展开协同 + 跨迭代值 identity 分析）。rc1 分支留档未合。 |
+| R4 | 整数循环 BCE+跳转线程化 | 0.335 | ✅ matmul −25% / nqueens −8.9%（关键：BCE 去 call 非去 cmp，消块内 spill）；fannkuch 中性保守跳过；P3 dedup 负面。集成 | |
+| R5 | regalloc 只读槽别名+跨调用提升 | 0.336 | ✅ modest：mandelbrot +4.3% / fasta +3.3% / nqueens 栈触碰 21→6.6%（墙钟 +1.4%）；**fib/matmul 负面**（fib 自递归 callee-saved 净负需 shrink-wrap；matmul 容量bound）。命门 bug：P2 别名需寄存器全函数单射（语料压出 run_diff 漏的 9 错）。集成 |
 
 ### 优先级调整（据实测）
 - 数值核（spectral_norm/nbody/matmul）已反超 Go → SIMD 主线告一段落（通用化 P4 / AVX2 P5 留后续）。
