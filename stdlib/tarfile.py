@@ -1,0 +1,449 @@
+"""tarfile 模块的 pyadamas 子集（纯 pyadamas 源码，无新增 C 胶水）。
+
+读写 tar 归档：ustar（POSIX.1-1988）头解析/生成，512 字节块，八进制
+校验和；读写经 fileobj（BytesIO/真 file）或路径，gzip 透明（r:gz/w:gz
+经 stdlib/gzip）。纯源码实现：数值字段八进制整数算法、校验和逐字节求和、
+长名 prefix 拆分；只读文件的字节面走 _gzipio，stat/readlink/symlink 复用
+既有 stdlib/_shutilc 胶水（不新增 C）。
+
+覆盖：TarInfo（字段 + isfile/isdir/issym/islnk/isdev 等 + frombuf/tobuf）、
+TarFile（r/w/a/x、getmembers/getnames/getmember、extractfile、add/addfile/
+gettarinfo、extract/extractall、close、上下文管理、迭代）、open/is_tarfile、
+USTAR_FORMAT/GNU_FORMAT/PAX_FORMAT 常量、TarError/ReadError/CompressionError/
+ExtractError/HeaderError 异常族。
+
+语义边界（轻量标尺）：
+- **整读整写**（同 zipfile/GzipFile 口径）：读一次性把归档载入内存，写把
+  全部块攒在内存、close 时一次落盘（含两块全零尾 + 补齐到 RECORDSIZE）。
+  内存与归档大小成正比；超大归档请走 from python import tarfile 桥接。
+- **只写 ustar**：默认 format=USTAR_FORMAT（CPython 默认 PAX_FORMAT）。GNU/
+  PAX 的扩展头（长名 L/K、pax x/g）**不写**；长名按 ustar 的 prefix(155) +
+  name(100) 在 '/' 处拆分，拆不开抛 ValueError("name is too long")。
+  读侧支持 ustar + GNU 长名/长链接（L/K）与最小 pax（path/linkpath/size/
+  mtime/uid/gid/uname/gname）；稀疏文件（S）不支持。
+- **压缩只做 gzip**：r/w/x 的 ":gz" 后缀（用 stdlib/gzip，压出的字节流
+  mtime=0、非 CPython 字节级对齐，退回可读）；bz2/xz/zst 抛
+  CompressionError。r:*/r 按魔数嗅探 gzip。
+- **数值字段是 int64**：头里的 size/mtime 用八进制 ustar 字段（8^11 上限），
+  读 base-256 编码（0o200/0o377 前导字节）时按 int64 收，超过 63 位抛
+  InvalidHeaderError；CPython 是任意精度。
+- **元数据取自 lstat 的可见面**：_shutilc.stat 只给 mode/mtime/size/kind，
+  uid/gid 一律 0、uname/gname 空（CPython 填真实属主）；add() 不做硬链接
+  合并（没有 inode 可比），LNKTYPE 只在手写 TarInfo 时出现。
+- **解压过滤不做**：CPython 3.12+ 默认 data_filter（extractall）不做，
+  filter=/numeric_owner= 参数收下不生效（extract 直接按 ustar 名字落盘，
+  但会剥绝对路径前导 '/' 与 ".." 段，口径同 zipfile）。
+- **流式模式**：r|/w| 按普通 r/w 处理（整读整写），不模拟 _Stream 的分块
+  语义；错误时机也随之前移（坏归档在 open 而非 getmembers 抛 ReadError）。
+- **错误类型对齐、消息不逐字**：ReadError/CompressionError/ExtractError 等
+  类型与 CPython 同名同继承；异常消息是合理文本，不逐字复刻 CPython。
+"""
+
+import os
+import os.path as _osp
+import _gzipio
+cimport _shutilc as _sc
+from typing import cast
+
+
+# ── 常量（与 CPython 3.14 同值；type 常量是 bytes）─────────────────
+NUL: bytes = b"\x00"
+BLOCKSIZE: int = 512
+RECORDSIZE: int = BLOCKSIZE * 20
+
+GNU_MAGIC: bytes = b"ustar  \x00"
+POSIX_MAGIC: bytes = b"ustar\x00" + b"00"
+
+LENGTH_NAME: int = 100
+LENGTH_LINK: int = 100
+LENGTH_PREFIX: int = 155
+
+REGTYPE: bytes = b"0"
+AREGTYPE: bytes = b"\x00"
+LNKTYPE: bytes = b"1"
+SYMTYPE: bytes = b"2"
+CHRTYPE: bytes = b"3"
+BLKTYPE: bytes = b"4"
+DIRTYPE: bytes = b"5"
+FIFOTYPE: bytes = b"6"
+CONTTYPE: bytes = b"7"
+
+GNUTYPE_LONGNAME: bytes = b"L"
+GNUTYPE_LONGLINK: bytes = b"K"
+GNUTYPE_SPARSE: bytes = b"S"
+
+XHDTYPE: bytes = b"x"
+XGLTYPE: bytes = b"g"
+
+USTAR_FORMAT: int = 0
+GNU_FORMAT: int = 1
+PAX_FORMAT: int = 2
+# 与 CPython 同值（PAX）：短 ASCII 名成员的默认写入与 CPython 字节级一致；
+# 但本实现只有 ustar 编码一种（不写 pax 扩展头），见模块文档。
+DEFAULT_FORMAT: int = PAX_FORMAT
+
+ENCODING: str = "utf-8"
+
+# 视为「普通文件数据」的类型。
+REGULAR_TYPES: tuple[bytes, bytes, bytes, bytes] = (REGTYPE, AREGTYPE, CONTTYPE, GNUTYPE_SPARSE)
+SUPPORTED_TYPES: tuple[bytes, bytes, bytes, bytes, bytes, bytes, bytes, bytes, bytes, bytes, bytes, bytes] = (
+    REGTYPE, AREGTYPE, LNKTYPE, SYMTYPE, DIRTYPE, FIFOTYPE,
+    CONTTYPE, CHRTYPE, BLKTYPE, GNUTYPE_LONGNAME, GNUTYPE_LONGLINK, GNUTYPE_SPARSE,
+)
+
+
+# pa 的 bytes-in-tuple 对「切片产出的 bytes」判不相等（native 快路径按
+# 指针/长度比；docs 记的既有运行时问题），所以内部一律用显式 == 比较，
+# 不用 in。下面的谓词就是为此存在的。
+def _is_regular_type(t: bytes) -> bool:
+    return t == REGTYPE or t == AREGTYPE or t == CONTTYPE or t == GNUTYPE_SPARSE
+
+
+def _is_supported_type(t: bytes) -> bool:
+    return (t == REGTYPE or t == AREGTYPE or t == LNKTYPE or t == SYMTYPE
+            or t == DIRTYPE or t == FIFOTYPE or t == CONTTYPE or t == CHRTYPE
+            or t == BLKTYPE or t == GNUTYPE_LONGNAME or t == GNUTYPE_LONGLINK
+            or t == GNUTYPE_SPARSE)
+
+# 数值字段（名字, 宽度）；与 CPython USTAR_FORMAT 的字段偏移一致。
+_FIELD_NAMES: tuple[str, str, str, str, str, str, str, str, str, str, str, str, str, str, str] = (
+    "name", "mode", "uid", "gid", "size", "mtime", "chksum", "typeflag",
+    "linkname", "magic", "version", "uname", "gname", "devmajor", "devminor",
+)
+
+
+# ── 异常族 ────────────────────────────────────────────────────────
+class TarError(Exception):
+    pass
+
+
+class ReadError(TarError):
+    pass
+
+
+class CompressionError(TarError):
+    pass
+
+
+class StreamError(TarError):
+    pass
+
+
+class ExtractError(TarError):
+    pass
+
+
+class HeaderError(TarError):
+    pass
+
+
+class InvalidHeaderError(HeaderError):
+    pass
+
+
+class EmptyHeaderError(HeaderError):
+    pass
+
+
+class TruncatedHeaderError(HeaderError):
+    pass
+
+
+class EOFHeaderError(HeaderError):
+    pass
+
+
+# ── 字段编解码 ────────────────────────────────────────────────────
+def _stn(s: str, length: int) -> bytes:
+    """str -> 定长 NUL 填充字节串（超长按字节截断）。"""
+    enc: bytes = s.encode(ENCODING)
+    n: int = len_bytes(enc)
+    if n > length:
+        return enc[:length]
+    if n < length:
+        return enc + NUL * (length - n)
+    return enc
+
+
+def _nts(b: bytes) -> str:
+    """定长 NUL 终止字节串 -> str（非法 UTF-8 按 replace）。"""
+    p: int = b.find(NUL)
+    if p >= 0:
+        b = b[:p]
+    return b.decode(ENCODING, "replace")
+
+
+def _nti(b: bytes) -> int:
+    """数值字段 -> int：八进制 ASCII，或 0o200/0o377 前导的 base-256。"""
+    n: int = len_bytes(b)
+    if n == 0:
+        return 0
+    c: int = b[0]
+    if c == 0o200 or c == 0o377:
+        digits: int = n - 1
+        if digits > 7:
+            raise InvalidHeaderError("base-256 number field out of int64 range")
+        v: int = 0
+        i: int = 1
+        while i < n:
+            v = (v << 8) + b[i]
+            i += 1
+        if c == 0o377:
+            v = v - (1 << (8 * digits))
+        return v
+    s: str = _nts(b).strip()
+    if len(s) == 0:
+        return 0
+    try:
+        return int(s, 8)
+    except ValueError:
+        raise InvalidHeaderError("invalid header")
+
+
+def _oct(v: int, width: int) -> str:
+    """非负 int -> width 位八进制串（pa 的 % 不支持动态宽度）。"""
+    s: str = ""
+    x: int = v
+    while x > 0:
+        s = str(x % 8) + s
+        x = x // 8
+    if len(s) == 0:
+        s = "0"
+    while len(s) < width:
+        s = "0" + s
+    return s
+
+
+def _itn(v: int, digits: int) -> bytes:
+    """int -> 八进制数值字段（digits 含结尾 NUL）。溢出抛 ValueError。"""
+    limit: int = 8 ** (digits - 1)
+    if v < 0 or v >= limit:
+        raise ValueError("overflow in number field")
+    return _oct(v, digits - 1).encode("ascii") + NUL
+
+
+def _stn_magic() -> bytes:
+    return POSIX_MAGIC
+
+
+def _calc_chksums(buf: bytes) -> tuple[int, int]:
+    """(无符号校验和, 有符号校验和)：跳过 148..156 的 chksum 字段。"""
+    unsigned: int = 0
+    signed: int = 0
+    i: int = 0
+    n: int = len_bytes(buf)
+    while i < n:
+        if i < 148 or i > 155:
+            c: int = buf[i]
+            unsigned += c
+            if c > 127:
+                signed += c - 256
+            else:
+                signed += c
+        i += 1
+    # chksum 字段按 8 个空格计入。
+    unsigned += 8 * 32
+    signed += 8 * 32
+    return (unsigned, signed)
+
+
+def _roundup(n: int, bs: int) -> int:
+    blocks: int = n // bs
+    if n % bs > 0:
+        blocks += 1
+    return blocks * bs
+
+
+def _posix_split_name(name: str) -> tuple[str, str]:
+    """长名按 '/' 拆成 (prefix <= 155, name <= 100)；拆不开抛 ValueError。"""
+    components: list[str] = name.split("/")
+    i: int = 1
+    prefix: str = ""
+    rest: str = name
+    while i < len(components):
+        prefix = "/".join(components[:i])
+        rest = "/".join(components[i:])
+        if len_bytes(prefix.encode(ENCODING)) <= LENGTH_PREFIX and \
+                len_bytes(rest.encode(ENCODING)) <= LENGTH_NAME:
+            return (prefix, rest)
+        i += 1
+    raise ValueError("name is too long")
+
+
+class TarInfo:
+    """tar 成员元数据（CPython TarInfo 的常用面）。"""
+
+    name: str = ""
+    mode: int = 0o644
+    uid: int = 0
+    gid: int = 0
+    size: int = 0
+    mtime: int = 0
+    chksum: int = 0
+    type: bytes = REGTYPE
+    linkname: str = ""
+    uname: str = ""
+    gname: str = ""
+    devmajor: int = 0
+    devminor: int = 0
+    offset: int = 0
+    offset_data: int = 0
+
+    def __init__(self, name: str = "") -> None:
+        self.name = name
+        self.mode = 0o644
+        self.uid = 0
+        self.gid = 0
+        self.size = 0
+        self.mtime = 0
+        self.chksum = 0
+        self.type = REGTYPE
+        self.linkname = ""
+        self.uname = ""
+        self.gname = ""
+        self.devmajor = 0
+        self.devminor = 0
+        self.offset = 0
+        self.offset_data = 0
+
+    # ── 类型谓词 ────────────────────────────────────────────────
+    def isfile(self) -> bool:
+        return _is_regular_type(self.type)
+
+    def isreg(self) -> bool:
+        return _is_regular_type(self.type)
+
+    def islnk(self) -> bool:
+        return self.type == LNKTYPE
+
+    def issym(self) -> bool:
+        return self.type == SYMTYPE
+
+    def isdir(self) -> bool:
+        return self.type == DIRTYPE
+
+    def isdev(self) -> bool:
+        return self.type == CHRTYPE or self.type == BLKTYPE or self.type == FIFOTYPE
+
+    def ischr(self) -> bool:
+        return self.type == CHRTYPE
+
+    def isblk(self) -> bool:
+        return self.type == BLKTYPE
+
+    def isfifo(self) -> bool:
+        return self.type == FIFOTYPE
+
+    def iscont(self) -> bool:
+        return self.type == CONTTYPE
+
+    def issparse(self) -> bool:
+        return self.type == GNUTYPE_SPARSE
+
+    # ── 头解析/生成 ─────────────────────────────────────────────
+    @classmethod
+    def frombuf(cls, buf: bytes, encoding: str = "utf-8", errors: str = "replace") -> "TarInfo":
+        """512 字节头 -> TarInfo（校验和不符抛 InvalidHeaderError）。"""
+        n: int = len_bytes(buf)
+        if n == 0:
+            raise EmptyHeaderError("empty header")
+        if n != BLOCKSIZE:
+            raise TruncatedHeaderError("truncated header")
+        if buf == NUL * BLOCKSIZE:
+            raise EOFHeaderError("end of file header")
+
+        chksum: int = _nti(buf[148:156])
+        sums: tuple[int, int] = _calc_chksums(buf)
+        if chksum != sums[0] and chksum != sums[1]:
+            raise InvalidHeaderError("bad checksum")
+
+        obj = cls()
+        obj.name = _nts(buf[0:100])
+        obj.mode = _nti(buf[100:108])
+        obj.uid = _nti(buf[108:116])
+        obj.gid = _nti(buf[116:124])
+        obj.size = _nti(buf[124:136])
+        obj.mtime = _nti(buf[136:148])
+        obj.chksum = chksum
+        obj.type = buf[156:157]
+        obj.linkname = _nts(buf[157:257])
+        obj.uname = _nts(buf[265:297])
+        obj.gname = _nts(buf[297:329])
+        obj.devmajor = _nti(buf[329:337])
+        obj.devminor = _nti(buf[337:345])
+        prefix: str = _nts(buf[345:500])
+
+        # 老 V7 格式用「名字带尾斜杠的普通文件头」表示目录。
+        if obj.type == AREGTYPE and obj.name.endswith("/"):
+            obj.type = DIRTYPE
+        if len_bytes(prefix) > 0:
+            obj.name = prefix + "/" + obj.name
+        if obj.isdir():
+            obj.name = obj.name.rstrip("/")
+        return obj
+
+    def tobuf(self, format: int = 0, encoding: str = "utf-8", errors: str = "replace") -> bytes:
+        """TarInfo -> 512 字节 ustar 头（只写 ustar；format 参数收下不区分）。"""
+        name: str = self.name
+        # CPython get_info()：目录名在头里补尾斜杠（读回时又剥掉）。
+        if self.type == DIRTYPE and not name.endswith("/"):
+            name = name + "/"
+        prefix: str = ""
+        if len_bytes(name.encode(ENCODING)) > LENGTH_NAME:
+            prefix, name = _posix_split_name(name)
+        if len_bytes(self.linkname.encode(ENCODING)) > LENGTH_LINK:
+            raise ValueError("linkname is too long")
+
+        filetype: bytes = self.type
+        devmajor: bytes = NUL * 8
+        devminor: bytes = NUL * 8
+        if filetype == CHRTYPE or filetype == BLKTYPE:
+            devmajor = _itn(self.devmajor, 8)
+            devminor = _itn(self.devminor, 8)
+
+        parts: list[bytes] = []
+        parts.append(_stn(name, 100))
+        parts.append(_itn(self.mode & 0o7777, 8))
+        parts.append(_itn(self.uid, 8))
+        parts.append(_itn(self.gid, 8))
+        parts.append(_itn(self.size, 12))
+        parts.append(_itn(self.mtime, 12))
+        parts.append(b"        ")  # chksum 占位（8 空格）
+        parts.append(filetype[:1] if len_bytes(filetype) > 0 else REGTYPE)
+        parts.append(_stn(self.linkname, 100))
+        parts.append(POSIX_MAGIC)
+        parts.append(_stn(self.uname, 32))
+        parts.append(_stn(self.gname, 32))
+        parts.append(devmajor)
+        parts.append(devminor)
+        parts.append(_stn(prefix, 155))
+        body: bytes = b""
+        for p in parts:
+            body = body + p
+        body = body + NUL * (BLOCKSIZE - len_bytes(body))
+        chksum: int = _calc_chksums(body)[0]
+        ck: bytes = _oct(chksum, 6).encode("ascii") + NUL
+        return body[:148] + ck + body[155:]
+
+    def get_info(self) -> dict[str, object]:
+        """属性字典（CPython get_info；目录名补尾斜杠）。"""
+        info: dict[str, object] = {}
+        info["name"] = self.name
+        info["mode"] = self.mode & 0o7777
+        info["uid"] = self.uid
+        info["gid"] = self.gid
+        info["size"] = self.size
+        info["mtime"] = self.mtime
+        info["chksum"] = self.chksum
+        info["type"] = self.type
+        info["linkname"] = self.linkname
+        info["uname"] = self.uname
+        info["gname"] = self.gname
+        info["devmajor"] = self.devmajor
+        info["devminor"] = self.devminor
+        if self.type == DIRTYPE and not self.name.endswith("/"):
+            info["name"] = self.name + "/"
+        return info
+
+    def __repr__(self) -> str:
+        return "<TarInfo " + repr(self.name) + ">"
