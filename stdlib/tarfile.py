@@ -42,6 +42,8 @@ ExtractError/HeaderError 异常族。
 import os
 import os.path as _osp
 import _gzipio
+import gzip as _gzip
+from io import BytesIO
 cimport _shutilc as _sc
 from typing import cast
 
@@ -447,3 +449,387 @@ class TarInfo:
 
     def __repr__(self) -> str:
         return "<TarInfo " + repr(self.name) + ">"
+
+class TarFile:
+    """tar 归档句柄（整读整写口径，见模块文档）。"""
+
+    name: str = ""
+    mode: str = "r"
+    format: int = PAX_FORMAT
+    encoding: str = "utf-8"
+    errors: str = "replace"
+    debuglevel: int = 0
+    dereference: bool = False
+    ignore_zeros: bool = False
+    errorlevel: int = 1
+    closed: bool = False
+
+    members: list[TarInfo]
+    fileobj: file
+    offset: int = 0
+
+    _comp: str
+    _data: bytes
+    _wparts: list[bytes]
+    _compresslevel: int
+
+    def __init__(self, name: str = "", mode: str = "r", fileobj: file = None,
+                 format: int = PAX_FORMAT, encoding: str = "utf-8",
+                 errors: str = "replace", compresslevel: int = 9) -> None:
+        self.name = name
+        self.format = format
+        self.encoding = encoding
+        self.errors = errors
+        self.debuglevel = 0
+        self.dereference = False
+        self.ignore_zeros = False
+        self.errorlevel = 1
+        self.closed = False
+        self.members = []
+        self.fileobj = fileobj
+        self.offset = 0
+        self._data = b""
+        self._wparts = []
+        self._compresslevel = compresslevel
+
+        filemode: str = mode
+        comp: str = ""
+        if ":" in mode:
+            parts: list[str] = mode.split(":", 1)
+            filemode = parts[0]
+            comp = parts[1]
+            if len(filemode) == 0:
+                filemode = "r"
+            if len(comp) == 0:
+                comp = "tar"
+        elif "|" in mode:
+            # 流式模式按整读整写处理（文档化边界）。
+            parts = mode.split("|", 1)
+            filemode = parts[0]
+            if len(filemode) == 0:
+                filemode = "r"
+            comp = "tar"
+        if len(comp) == 0:
+            comp = "tar"
+        self._comp = comp
+        self.mode = filemode
+
+        if filemode != "r" and filemode != "w" and filemode != "x" and filemode != "a":
+            raise ValueError("mode must be 'r', 'a', 'w' or 'x'")
+        if filemode != "r" and (comp == "gz" or comp == "*"):
+            pass
+        if filemode == "a" and (comp == "gz" or comp == "bz2"):
+            raise CompressionError("'a' mode is not allowed for compressed archives")
+
+        if filemode == "r":
+            self._read_all(comp)
+            self._parse()
+
+    # ── 读：取字节、解压、解析 ───────────────────────────────────
+    def _read_all(self, comp: str) -> None:
+        raw: bytes = b""
+        if self.fileobj is not None:
+            raw = cast(bytes, self.fileobj.read())
+        elif len(self.name) > 0:
+            raw = _gzipio.read_bin(self.name)
+        else:
+            raise ValueError("nothing to open")
+        self._data = self._decompress(raw, comp)
+
+    def _decompress(self, raw: bytes, comp: str) -> bytes:
+        if comp == "*":
+            if len_bytes(raw) >= 2 and raw[0] == 0x1F and raw[1] == 0x8B:
+                comp = "gz"
+            else:
+                comp = "tar"
+        if comp == "gz":
+            try:
+                return _gzip.decompress(raw)
+            except OSError as e:
+                raise ReadError("not a gzip file")
+            except EOFError as e:
+                raise ReadError("not a gzip file")
+        if comp == "tar" or len(comp) == 0:
+            return raw
+        raise CompressionError("unknown compression type " + repr(comp))
+
+    def _parse(self) -> None:
+        data: bytes = self._data
+        total: int = len_bytes(data)
+        pos: int = 0
+        while pos + BLOCKSIZE <= total:
+            buf: bytes = data[pos:pos + BLOCKSIZE]
+            if buf == NUL * BLOCKSIZE:
+                return
+            ti: TarInfo = TarInfo.frombuf(buf, self.encoding, self.errors)
+            ti.offset = pos
+            pos += BLOCKSIZE
+            ti = self._proc_header(ti, pos)
+            # _proc_header 返回的是「真成员」头，数据区相对它自己的头。
+            hdr_end: int = ti.offset + BLOCKSIZE
+            ti.offset_data = hdr_end
+            if ti.isreg() or not _is_supported_type(ti.type):
+                end: int = hdr_end + _roundup(ti.size, BLOCKSIZE)
+                if end > total:
+                    raise ReadError("unexpected end of data")
+                pos = end
+            else:
+                pos = hdr_end
+            self.members.append(ti)
+        if pos < total:
+            # 尾部残留不足一个块：只有全零才算正常结束。
+            rest: bytes = data[pos:total]
+            k: int = 0
+            while k < len_bytes(rest) and rest[k] == 0:
+                k += 1
+            if k < len_bytes(rest):
+                raise ReadError("unexpected end of data")
+
+    def _proc_header(self, ti: TarInfo, data_pos: int) -> TarInfo:
+        """处理 GNU 长名/长链接与 pax 扩展头，返回真成员头（可能重读）。"""
+        data: bytes = self._data
+        total: int = len_bytes(data)
+        if ti.type == GNUTYPE_LONGNAME or ti.type == GNUTYPE_LONGLINK:
+            if data_pos + ti.size > total:
+                raise ReadError("unexpected end of data")
+            g_payload: bytes = data[data_pos:data_pos + ti.size]
+            g_npos: int = data_pos + _roundup(ti.size, BLOCKSIZE)
+            if g_npos + BLOCKSIZE > total:
+                raise ReadError("unexpected end of data")
+            g_nbuf: bytes = data[g_npos:g_npos + BLOCKSIZE]
+            if g_nbuf == NUL * BLOCKSIZE:
+                raise ReadError("unexpected end of data")
+            g_nxt: TarInfo = TarInfo.frombuf(g_nbuf, self.encoding, self.errors)
+            g_nxt.offset = g_npos
+            if ti.type == GNUTYPE_LONGNAME:
+                g_nxt.name = _nts(g_payload)
+            else:
+                g_nxt.linkname = _nts(g_payload)
+            return self._proc_header(g_nxt, g_npos + BLOCKSIZE)
+        if ti.type == XHDTYPE or ti.type == XGLTYPE:
+            if data_pos + ti.size > total:
+                raise ReadError("unexpected end of data")
+            x_payload: bytes = data[data_pos:data_pos + ti.size]
+            x_npos: int = data_pos + _roundup(ti.size, BLOCKSIZE)
+            hdrs: dict[str, str] = _parse_pax(x_payload)
+            if ti.type == XHDTYPE:
+                if x_npos + BLOCKSIZE > total:
+                    raise ReadError("unexpected end of data")
+                x_nbuf: bytes = data[x_npos:x_npos + BLOCKSIZE]
+                if x_nbuf == NUL * BLOCKSIZE:
+                    raise ReadError("unexpected end of data")
+                x_nxt: TarInfo = TarInfo.frombuf(x_nbuf, self.encoding, self.errors)
+                x_nxt.offset = x_npos
+                _apply_pax(x_nxt, hdrs)
+                return self._proc_header(x_nxt, x_npos + BLOCKSIZE)
+            return self._proc_header(ti, x_npos + BLOCKSIZE)
+        return ti
+
+    # ── 公共读接口 ──────────────────────────────────────────────
+    def _check(self, allow: str) -> None:
+        # CPython 3.14：关闭后与模式不符都是 OSError（不是 ValueError）。
+        if self.closed:
+            raise OSError("TarFile is closed")
+        if len(allow) > 0 and not (self.mode in allow):
+            raise OSError("bad operation for mode " + repr(self.mode))
+
+    def _find_index(self, nm: str) -> int:
+        i: int = len(self.members) - 1
+        while i >= 0:
+            if self.members[i].name == nm:
+                return i
+            i -= 1
+        return -1
+
+    def getmembers(self) -> list[TarInfo]:
+        self._check("")
+        return self.members
+
+    def getnames(self) -> list[str]:
+        out: list[str] = []
+        for m in self.getmembers():
+            out.append(m.name)
+        return out
+
+    def getmember(self, name: str) -> TarInfo:
+        i: int = self._find_index(name.rstrip("/"))
+        if i < 0:
+            raise KeyError("filename " + repr(name) + " not found")
+        return self.members[i]
+
+    def extractfile(self, member: object) -> BytesIO:
+        """普通文件返回 BytesIO 视图；目录/设备等非数据成员返回空 BytesIO
+        （CPython 返回 None，见模块文档的边界）。"""
+        self._check("r")
+        if isinstance(member, TarInfo):
+            ti: TarInfo = cast(TarInfo, member)
+        else:
+            ti = self.getmember(cast(str, member))
+        return self._extractfile_ti(ti)
+
+    def _extractfile_ti(self, ti: TarInfo) -> BytesIO:
+        if ti.isreg() or not _is_supported_type(ti.type):
+            start: int = ti.offset_data
+            end: int = start + ti.size
+            if end > len_bytes(self._data):
+                raise ReadError("unexpected end of data")
+            return BytesIO(self._data[start:end])
+        if ti.islnk() or ti.issym():
+            tgt: TarInfo = self._find_link_target(ti)
+            return self._extractfile_ti(tgt)
+        return BytesIO(b"")
+
+    def _find_link_target(self, ti: TarInfo) -> TarInfo:
+        nm: str = ti.name
+        depth: int = 0
+        cur: TarInfo = ti
+        while cur.islnk() or cur.issym():
+            nm = cur.linkname
+            depth += 1
+            if depth > 32:
+                raise ExtractError("link cycle detected")
+            cur = self.getmember(nm)
+        return cur
+
+    def __iter__(self) -> list[TarInfo]:
+        return self.getmembers()
+
+    # ── 写接口 ──────────────────────────────────────────────────
+    def addfile(self, tarinfo: TarInfo, fileobj: file = None) -> None:
+        self._check("awx")
+        if fileobj is None and tarinfo.isreg() and tarinfo.size != 0:
+            raise ValueError("fileobj not provided for non zero-size regular file")
+        buf: bytes = tarinfo.tobuf(self.format, self.encoding, self.errors)
+        self._wparts.append(buf)
+        self.offset += len_bytes(buf)
+        if fileobj is not None:
+            chunk: bytes = cast(bytes, fileobj.read(tarinfo.size))
+            if len_bytes(chunk) != tarinfo.size:
+                raise ReadError("unexpected end of data")
+            self._wparts.append(chunk)
+            rem: int = tarinfo.size % BLOCKSIZE
+            if rem > 0:
+                self._wparts.append(NUL * (BLOCKSIZE - rem))
+            self.offset += _roundup(tarinfo.size, BLOCKSIZE)
+        self.members.append(tarinfo)
+
+    def addfile_bytes(self, tarinfo: TarInfo, data: bytes) -> None:
+        """pa 便利口：直接给字节（CPython 走 fileobj）。"""
+        self.addfile(tarinfo, BytesIO(data))
+
+    # ── 收尾 ────────────────────────────────────────────────────
+    def close(self) -> None:
+        if self.closed:
+            return
+        self.closed = True
+        if self.mode == "r":
+            return
+        self._wparts.append(NUL * (BLOCKSIZE * 2))
+        self.offset += BLOCKSIZE * 2
+        rem: int = self.offset % RECORDSIZE
+        if rem > 0:
+            self._wparts.append(NUL * (RECORDSIZE - rem))
+        payload: bytes = b""
+        for p in self._wparts:
+            payload = payload + p
+        if self._comp == "gz":
+            try:
+                payload = _gzip.compress(payload, self._compresslevel)
+            except OSError as e:
+                raise CompressionError("gzip compression failed")
+        if self.fileobj is not None:
+            self.fileobj.write(cast(str, payload))
+            self.fileobj.flush()
+        elif len(self.name) > 0:
+            _gzipio.write_bin(self.name, payload)
+
+    def __enter__(self) -> "TarFile":
+        return self
+
+    def __exit__(self, exc_type: object, exc_val: object, exc_tb: object) -> bool:
+        self.close()
+        return False
+
+
+def _parse_pax(payload: bytes) -> dict[str, str]:
+    """pax 扩展头（"<len> key=value\n" 记录）-> 字典。"""
+    hdrs: dict[str, str] = {}
+    blob: str = payload.decode("utf-8", "replace")
+    while len(blob) > 0:
+        sp: int = blob.find(" ")
+        if sp <= 0:
+            break
+        rec_len: int = 0
+        try:
+            rec_len = int(blob[:sp])
+        except ValueError:
+            break
+        if rec_len <= 0 or rec_len > len(blob):
+            break
+        rec: str = blob[sp + 1:rec_len - 1]
+        eq: int = rec.find("=")
+        if eq > 0:
+            hdrs[rec[:eq]] = rec[eq + 1:]
+        blob = blob[rec_len:]
+    return hdrs
+
+
+def _apply_pax(ti: TarInfo, hdrs: dict[str, str]) -> None:
+    if "path" in hdrs:
+        ti.name = hdrs["path"]
+    if "linkpath" in hdrs:
+        ti.linkname = hdrs["linkpath"]
+    if "size" in hdrs:
+        try:
+            ti.size = int(hdrs["size"])
+        except ValueError:
+            pass
+    if "mtime" in hdrs:
+        try:
+            ti.mtime = int(float(hdrs["mtime"]))
+        except ValueError:
+            pass
+    if "uid" in hdrs:
+        try:
+            ti.uid = int(hdrs["uid"])
+        except ValueError:
+            pass
+    if "gid" in hdrs:
+        try:
+            ti.gid = int(hdrs["gid"])
+        except ValueError:
+            pass
+    if "uname" in hdrs:
+        ti.uname = hdrs["uname"]
+    if "gname" in hdrs:
+        ti.gname = hdrs["gname"]
+
+
+def is_tarfile(name: str) -> bool:
+    try:
+        data: bytes = _gzipio.read_bin(name)
+    except OSError:
+        return False
+    if len_bytes(data) >= 2 and data[0] == 0x1F and data[1] == 0x8B:
+        try:
+            data = _gzip.decompress(data)
+        except OSError:
+            return False
+        except EOFError:
+            return False
+    if len_bytes(data) < BLOCKSIZE:
+        return False
+    try:
+        TarInfo.frombuf(data[0:BLOCKSIZE])
+        return True
+    except TarError:
+        return False
+
+
+def open(name: str = "", mode: str = "r", fileobj: file = None,
+         format: int = PAX_FORMAT, encoding: str = "utf-8",
+         errors: str = "replace", compresslevel: int = 9) -> "TarFile":
+    """打开 tar 归档（r/w/x/a，可带 :gz；fileobj 或路径二选一）。"""
+    if len(name) == 0 and fileobj is None:
+        raise ValueError("nothing to open")
+    return TarFile(name, mode, fileobj, format, encoding, errors, compresslevel)
