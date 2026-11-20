@@ -263,94 +263,6 @@ void AsmGen::gen_struct_copy(const Inst& in) {
         move_to(dst_mop(in.dst), mreg_operand(kRax));
     }
 
-void AsmGen::gen_vcall_static(const Inst& in) {
-        std::vector<TypePtr> types;
-        types.reserve(in.args.size());
-        for (VReg a : in.args) types.push_back(ty_of(a));
-        auto locs = classify(types);
-
-        emit2(MOp::kMovq, src_mop(in.a), kR10);
-        emit2(MOp::kMovq, op_mem(kR10), kR11);
-        emit2(MOp::kMovq, op_mem(kR11, in.imm * 8), kR11);
-
-        for (size_t i = 0; i < in.args.size(); ++i) {
-            const auto& l = locs[i];
-            if (l.stack_off < 0) continue;
-            emit2(MOp::kMovq, src_mop(in.args[i]), kR10);
-            emit2(MOp::kMovq, kR10, op_mem(kRsp, l.stack_off));
-        }
-        for (size_t i = 0; i < in.args.size(); ++i) {
-            const auto& l = locs[i];
-            if (l.stack_off >= 0) continue;
-            if (l.fp)
-                emit2(MOp::kMovsd, src_mop(in.args[i]), static_cast<MReg>(kXmm0 + l.reg));
-            else
-                emit2(MOp::kMovq, src_mop(in.args[i]), arg_reg_i(l.reg));
-        }
-        line("xorl %r10d, %r10d");
-        if (type_tags_) {
-            line("movq $0, pa_ptag_in(%rip)");
-            line("movq $0, pa_ptag_len(%rip)");
-        }
-        if (opt_ < 2) line("xorl %eax, %eax");
-        spill_fp_slots();
-        line("call *%r11");
-        reload_fp_slots();
-        if (!dst_unused(in)) {
-            if (ir_is_float(in.ty)) move_fp(dst_mop(in.dst), mreg_operand(kXmm0));
-            else emit2(MOp::kMovq, kRax, dst_mop(in.dst));
-        }
-    }
-
-void AsmGen::gen_super_vcall(const Inst& in) {
-        // 运行期沿实例的动态 MRO 找 after 类之后的下一实现。查找要先做，
-        // 因为它会走一次普通调用；找到的函数地址放 %r11 再装实参。
-        emit2(MOp::kMovq, src_mop(in.a), arg_reg_i(0));
-        emit2(MOp::kMovq, src_mop(in.c), arg_reg_i(1));
-        emit_imm(MOp::kMovq, in.imm, arg_reg_i(2));
-        emit2(MOp::kMovq, src_mop(in.b), arg_reg_i(3));
-        spill_fp_slots();
-        line("call pa_super_lookup");
-        reload_fp_slots();
-        line("movq %rax, %r11");
-
-        std::vector<TypePtr> types;
-        types.reserve(in.args.size() + 1);
-        types.push_back(t_unknown());
-        for (VReg a : in.args) types.push_back(ty_of(a));
-        auto locs = classify(types);
-
-        for (size_t i = 0; i < in.args.size(); ++i) {
-            const auto& l = locs[i + 1];
-            if (l.stack_off < 0) continue;
-            emit2(MOp::kMovq, src_mop(in.args[i]), kR10);
-            emit2(MOp::kMovq, kR10, op_mem(kRsp, l.stack_off));
-        }
-        emit2(MOp::kMovq, src_mop(in.a), arg_reg_i(0));
-        for (size_t i = 0; i < in.args.size(); ++i) {
-            const auto& l = locs[i + 1];
-            if (l.stack_off >= 0) continue;
-            if (l.fp)
-                emit2(MOp::kMovsd, src_mop(in.args[i]), static_cast<MReg>(kXmm0 + l.reg));
-            else
-                emit2(MOp::kMovq, src_mop(in.args[i]), arg_reg_i(l.reg));
-        }
-        line("xorl %r10d, %r10d");
-        if (type_tags_) {
-            line("movq $0, pa_ptag_in(%rip)");
-            line("movq $0, pa_ptag_len(%rip)");
-        }
-        if (opt_ < 2) line("xorl %eax, %eax");
-        spill_fp_slots();
-        line("call *%r11");
-        reload_fp_slots();
-
-        if (!dst_unused(in)) {
-            if (ir_is_float(in.ty)) move_fp(dst_mop(in.dst), mreg_operand(kXmm0));
-            else emit2(MOp::kMovq, kRax, dst_mop(in.dst));
-        }
-    }
-
 void AsmGen::gen_call_direct(const Inst& in) {
         std::vector<TypePtr> types;
         types.reserve(in.args.size());
@@ -418,44 +330,6 @@ void AsmGen::gen_call_direct(const Inst& in) {
             if (vreg_tagged(in.dst) && is_unk_ty(in.ty) && callee &&
                 func_ret_tag(*callee))
                 emit2(MOp::kMovq, kRdx, tag_mop(in.dst));
-        }
-    }
-
-void AsmGen::gen_call_ptr(const Inst& in) {
-        // 裸代码地址调用（类对象 vtable 分派）：没有闭包环境，%r10 清零。
-        std::vector<TypePtr> types;
-        types.reserve(in.args.size());
-        for (VReg a : in.args) types.push_back(ty_of(a));
-        auto locs = classify(types);
-
-        emit2(MOp::kMovq, src_mop(in.a), kR11);
-        for (size_t i = 0; i < in.args.size(); ++i) {
-            const auto& l = locs[i];
-            if (l.stack_off < 0) continue;
-            emit2(MOp::kMovq, src_mop(in.args[i]), kR10);
-            emit2(MOp::kMovq, kR10, op_mem(kRsp, l.stack_off));
-        }
-        for (size_t i = 0; i < in.args.size(); ++i) {
-            const auto& l = locs[i];
-            if (l.stack_off >= 0) continue;
-            if (l.fp)
-                emit2(MOp::kMovsd, src_mop(in.args[i]), static_cast<MReg>(kXmm0 + l.reg));
-            else
-                emit2(MOp::kMovq, src_mop(in.args[i]), arg_reg_i(l.reg));
-        }
-        line("xorl %r10d, %r10d");
-        if (type_tags_) {
-            line("movq $0, pa_ptag_in(%rip)");
-            line("movq $0, pa_ptag_len(%rip)");
-        }
-        if (opt_ < 2) line("xorl %eax, %eax");
-        spill_fp_slots();
-        line("call *%r11");
-        reload_fp_slots();
-
-        if (!dst_unused(in)) {
-            if (ir_is_float(in.ty)) move_fp(dst_mop(in.dst), mreg_operand(kXmm0));
-            else emit2(MOp::kMovq, kRax, dst_mop(in.dst));
         }
     }
 

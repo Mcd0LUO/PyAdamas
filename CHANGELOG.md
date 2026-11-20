@@ -4,6 +4,75 @@
 
 早期阶段没有逐条留痕，按阶段归纳；0.4 之后逐条记录。
 
+## [0.340] - 2026-11-20（预留，集成时重编号）
+
+> types1 分支：**P2 unknown 运行期类型标签——解锁 isinstance/repr/pprint**
+> （stdlib-b3 取证的根本缺口）。门控 `PYADAMAS_TYPE_TAGS=1` **默认 0**；
+> flag-off 生成 asm 逐字节不变（117 个基准/语料文件 cmp 全同，含 P3 的 5 个
+> unknown 基准）。tag 值分配**不改动 P3 既有取值**（0..5 逐字不变），只追加：
+> NONE=6 / BOOL=7（非堆标量，RC 跳过）与 TUPLE=8 / SET=9 / BYTES=10 /
+> CLASS=11 / BIG=12（堆子类，预留 BigInt）；门控开时堆 ⇔ 3..5 或 >=8，
+> 门控关时逐字沿用 P3「堆 ⇔ tag>=3」。设计/边界/负面结论见
+> docs/numeric-types-design.md §2 与 docs/type-tags-landing.md。
+
+### 新增
+
+- **tag 扩展**（codegen_impl.h/tag_defs.h、runtime/rt_internal.h）：P3 的
+  PaTag 保持 0..5 不变，追加非堆标量 NONE/BOOL 与精确堆子类 TUPLE/SET/
+  BYTES/CLASS/BIG。None/Bool 产生点发专 tag（ConstNone、bool 常量、静态
+  类型导出、直调形参/返回传播）；Tuple/Set/Bytes/类对象按静态类型导 tag
+  ——这些子类在对象头 kind 里分不开（tuple 与 list 同为 LIST、set 与 dict
+  同为 DICT、bytes 与 str 同为 STR、类对象藏在 OBJ），静态类型是唯一来源。
+- **运行期类型码**（runtime/rt_any.c）：`pa_any_type(v,tag)` →
+  NONE/BOOL/INT/FLOAT/STR/BYTES/LIST/DICT/TUPLE/SET/OBJECT/CLASS/OTHER；
+  有精确 tag 用 tag，否则 HEAP/UNK 读头 kind（UNK 先探针）。`pa_any_type_is
+  (v,tag,code)` 是 isinstance 谓词（object 匹配一切、int 接受 bool，CPython
+  口径）。
+- **tag 版 repr/print**（runtime/rt_str.c）：`pa_repr_any_t` /
+  `pa_print_any_repr_t` 按类型码分派：None→None、bool→True/False、
+  tuple→(...)、set→{...}/set()、bytes→b'...'（CPython 的定界符选择与
+  \xNN 转义）、类对象→<class '...'>；HEAP/UNK 回退旧探针路径。
+- **isinstance 降级**（lower_builtin_reflect.cpp）：unknown 值的
+  int/bool/float/str/bytes/list/dict/tuple/set/object 判定改发
+  `pa_any_type_is`（P2 之前这些一律保守 false）。
+- **跨调用 tag 传递**（codegen_tag.cpp/codegen_call.cpp/codegen_block.cpp）：
+  直调 tag 数组布局改成「第 i 个形参 = 第 i 个字、长度 = 形参个数」（被调
+  按自己的形参个数校验，不匹配整体忽略——错位 tag 会让 RC 按错误堆性
+  inc/dec）。跨模块/间接调用（导入函数、函数值、闭包）用 `pa_ptag_in/
+  pa_ptag_len` 侧信道传 tag：`%r11` 仍归目标地址，旧入口 gadget/vtable/
+  闭包布局逐字不变，运行时回调（vthread/生成器 resume）读到 0 即回退 UNK。
+  unknown 返回值的 tag 从 %rdx 落 dst（静态签名不含浮点时；含浮点走 shim
+  重排不取）。
+- **stdlib/pprint.py**（新模块，注册进 kModuleTable）：pformat/pprint/
+  PrettyPrinter；单行 repr 放得下就用它，放不下按 CPython 的断行缩进/
+  dict 键值对齐/单元素 tuple 尾逗号口径。内部 intrinsic
+  `__pa_any_items`（unknown dict 的 (key,value) 对物化，未知值不支持方法
+  调用）与 `pa_any_iter_list_t`（带 tag 迭代，未进 RC 索引的标量元组也
+  能迭代）。
+- **回归用例 328-331**（tests/run，文件头 `# pyadamas: type-tags` 由
+  runners 自动以 PYADAMAS_TYPE_TAGS=1 编译；tests/run_tests.sh 与
+  tools/difftest.sh 支持该指令）：328 isinstance 全类型矩阵、329 repr
+  全类型（None/True/tuple/set/bytes/嵌套）、330 pprint（CPython 逐字节
+  对拍，含断行）、331 RC 压力（tag 导出堆性维护位图、unknown 槽反复改写、
+  直调 tag 参数/返回值；ASan detect_leaks=1 为 0）。
+
+### 已知边界 / 负面结论
+
+- **容器元素没有逐元素 tag**（容器只存 8B 值 + 1-bit 堆位图）：从容器/
+  字段取出的值只能按头 kind 判型 —— 嵌套的 bool/None 退化成 int、
+  tuple/set/bytes 退化成 list/dict/str。顶层值与静态类型已知的边界不受
+  影响。
+- **虚调用（vtable）不传 tag**（调用点没有可信的静态方法签名）：类方法
+  形参一律 UNK 回退；因此 pprint.PrettyPrinter 的方法版 pformat/pprint
+  对 tuple/set/bytes 参数退化成探针口径（模块函数版正常）。
+- **异常类当值仍不可用**：内建异常类在 pa 运行时只有名字（无类对象），
+  unknown 里退化成 0，contextlib.suppress 仍不通（P4/traceback 一起做）。
+- **pprint 不排序 dict 键**（CPython 默认 sort_dicts=True）：按插入顺序
+  输出；需要 CPython 顺序时用键已排好序的字面量。
+- **既有 leak（非本版引入，flag-off 同样复现）**：list 在 len>0 时从
+  「全堆(kind1)」转「混合(kind2)」不新建位图，销毁回退探针，未进 RC 索引
+  的标量元组漏 dec。328-331 已规避该形状；修复属 list 运行时核心，另案。
+
 ## [0.339] - 2026-11-20
 
 > borrow1 分支：**borrow 细化——只读借用循环变量槽免每轮 inc/dec**（R3 取证
