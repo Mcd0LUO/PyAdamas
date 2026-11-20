@@ -113,6 +113,7 @@
 | tarfile | stdlib/tarfile.py 纯 pa 自举（ustar 读写/gz/GNU L-K/pax x-g 读/流式 BytesIO） | 0.347 | ✅ ustar 头字节同 CPython 3.14；5 用例字节同+跨实现互操作；src 仅 +1 行（复用既有 _shutilc）；pax/GNU 写保守跳过。集成 |
 | 重构 | 拆 5 个超 1200 行文件（regalloc/driver/typecheck_types/ir_ops/lower_impl） | 0.348 | ✅ **check_size 超限 5→0**；纯代码移动（逐行多重集核对 0 缺失）；asm 38/38 不变；cache_race 仍安全。集成 |
 | P1收尾 | u64 大字面量（词法）/定宽容器元素 coerce/u64 无符号排序/C FFI 窄无符号映射 | 0.349 | ✅ 默认 int 行为不变（hex/oct/bin 逐字不动）；超范围编译报错不静默窄化；int_promote 一字未改（332-335 全过）；asm 120/120。集成 |
+| stdlib5 | textwrap（CPython 3.14 口径全参数面）/string（Template/capwords/常量）/pprint sort_dicts+参数面 | 0.350 | ✅ 纯 stdlib 无 src 改动；pprint 1926 行 0 diff、textwrap 8490 行、string 1481 行对拍；pprint 无递归检测（无 id()）/容器元素退化（P2 边界）负面记录。集成 |
 
 ### 夜间小结
 - **17 版集成推送（0.333-0.349）**，单槽位顺序（收回 4 代理并行减少早夭混乱）；harness 间歇早夭频繁，send_message 恢复套路管用。
