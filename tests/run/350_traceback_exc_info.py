@@ -67,6 +67,14 @@ class MyErr(ValueError):
     pass
 
 
+class Ctx:
+    def __enter__(self):
+        return self
+
+    def __exit__(self, et, ev, tb):
+        return False
+
+
 def show():
     print(traceback.format_exc(), end="")
     print("===")
@@ -149,6 +157,27 @@ else:
     print(traceback.format_exc(), end="")
     print(len(traceback.extract_tb(tb)))
 
+    # ── with 块穿过的异常（with 帧不进 tb，CPython 口径）─────────
+    try:
+        with Ctx():
+            f()
+    except ValueError:
+        show()
+
+    # ── tb 跨 GC：持有 tb 期间大量分配（含环）触发主收集，帧链仍可读 ──
+    try:
+        f()
+    except ValueError:
+        t, v, tb = sys.exc_info()
+        keep: list[unknown] = []
+        for i in range(3000):
+            cyc: list[unknown] = [i]
+            cyc.append(cyc)
+            keep.append(cyc)
+        frames = traceback.extract_tb(tb)
+        print(len(frames))
+        print(frames[-1][2])
+
     # ── print_exc（子进程 stderr，153 同款自执行口径）────────────
     # CPython 下 argv[0] 是 .py（不可执行），经 sys.executable 重入；
     # pa 下 argv[0] 就是编译产物，直接重入。
@@ -162,7 +191,7 @@ else:
     print("ValueError: boom" in r.stderr)
 # --- expect ---
 # Traceback (most recent call last):
-#   File "/tmp/wt-lang2/tests/run/350_traceback_exc_info.py", line 82, in <module>
+#   File "/tmp/wt-lang2/tests/run/350_traceback_exc_info.py", line 90, in <module>
 #     h()
 #   File "/tmp/wt-lang2/tests/run/350_traceback_exc_info.py", line 22, in h
 #     g()
@@ -173,14 +202,14 @@ else:
 # ValueError: boom
 # ===
 # Traceback (most recent call last):
-#   File "/tmp/wt-lang2/tests/run/350_traceback_exc_info.py", line 87, in <module>
+#   File "/tmp/wt-lang2/tests/run/350_traceback_exc_info.py", line 95, in <module>
 #     C().m()
 #   File "/tmp/wt-lang2/tests/run/350_traceback_exc_info.py", line 27, in m
 #     raise ValueError("method")
 # ValueError: method
 # ===
 # Traceback (most recent call last):
-#   File "/tmp/wt-lang2/tests/run/350_traceback_exc_info.py", line 92, in <module>
+#   File "/tmp/wt-lang2/tests/run/350_traceback_exc_info.py", line 100, in <module>
 #     reraise_mid()
 #   File "/tmp/wt-lang2/tests/run/350_traceback_exc_info.py", line 32, in reraise_mid
 #     f()
@@ -196,23 +225,23 @@ else:
 # ValueError: boom
 # ===
 # Traceback (most recent call last):
-#   File "/tmp/wt-lang2/tests/run/350_traceback_exc_info.py", line 102, in <module>
+#   File "/tmp/wt-lang2/tests/run/350_traceback_exc_info.py", line 110, in <module>
 #     raise e
-#   File "/tmp/wt-lang2/tests/run/350_traceback_exc_info.py", line 99, in <module>
+#   File "/tmp/wt-lang2/tests/run/350_traceback_exc_info.py", line 107, in <module>
 #     f()
 #   File "/tmp/wt-lang2/tests/run/350_traceback_exc_info.py", line 14, in f
 #     raise ValueError("boom")
 # ValueError: boom
 # ===
 # Traceback (most recent call last):
-#   File "/tmp/wt-lang2/tests/run/350_traceback_exc_info.py", line 107, in <module>
+#   File "/tmp/wt-lang2/tests/run/350_traceback_exc_info.py", line 115, in <module>
 #     for v in gen():
 #   File "/tmp/wt-lang2/tests/run/350_traceback_exc_info.py", line 50, in gen
 #     raise ValueError("gen")
 # ValueError: gen
 # ===
 # Traceback (most recent call last):
-#   File "/tmp/wt-lang2/tests/run/350_traceback_exc_info.py", line 113, in <module>
+#   File "/tmp/wt-lang2/tests/run/350_traceback_exc_info.py", line 121, in <module>
 #     with_finally()
 #   File "/tmp/wt-lang2/tests/run/350_traceback_exc_info.py", line 55, in with_finally
 #     f()
@@ -221,7 +250,7 @@ else:
 # ValueError: boom
 # ===
 # Traceback (most recent call last):
-#   File "/tmp/wt-lang2/tests/run/350_traceback_exc_info.py", line 118, in <module>
+#   File "/tmp/wt-lang2/tests/run/350_traceback_exc_info.py", line 126, in <module>
 #     rec(2)
 #   File "/tmp/wt-lang2/tests/run/350_traceback_exc_info.py", line 63, in rec
 #     rec(n - 1)
@@ -232,7 +261,7 @@ else:
 # ValueError: deep
 # ===
 # Traceback (most recent call last):
-#   File "/tmp/wt-lang2/tests/run/350_traceback_exc_info.py", line 123, in <module>
+#   File "/tmp/wt-lang2/tests/run/350_traceback_exc_info.py", line 131, in <module>
 #     raise MyErr("custom")
 # MyErr: custom
 # ===
@@ -249,6 +278,15 @@ else:
 # True True True
 # NoneType: None
 # 0
+# Traceback (most recent call last):
+#   File "/tmp/wt-lang2/tests/run/350_traceback_exc_info.py", line 163, in <module>
+#     f()
+#   File "/tmp/wt-lang2/tests/run/350_traceback_exc_info.py", line 14, in f
+#     raise ValueError("boom")
+# ValueError: boom
+# ===
+# 2
+# f
 # True
 # True
 # True

@@ -343,6 +343,12 @@
 7. **生成器挂起跨 finally 重抛的陈旧 CFA**：extra 链 CFA 来自旧栈，锚点
    校验失败时整链保留（宁多勿删）；帧可能多于 CPython。
 8. **门控关时 exc_info**：类值/异常值可用，tb 帧链恒空（不捕获）。
+9. **async 协程 await 链帧**：挂起的协程不在物理栈上，其帧无法捕获——
+   tb 只有抛出帧与接住帧（如 asyncio.run(outer()) 里 inner 抛：tb =
+   [module, inner]，缺 outer 的 await 行）；pa 的 asyncio 是原生 C，
+   CPython 的 runners/base_events 内部帧也没有对应物。with 块穿过的异常
+   帧链与 CPython 一致（350 钉住）。协程逻辑帧的旧 trace 链
+   （pa_trace_attach）不受影响。
 
 ### 块4 dataclass 编译期展开（已落地）
 
@@ -403,8 +409,14 @@
   detect_leaks=1 全过全 0。
 - 350/351：O0/O1/O2 与 CPython 3.14 逐字节一致（350 用
   PYTHONNODEBUGRANGES=1 口径）；ASan detect_leaks=1 为 0。
-- 全套件 normal/ASan（JOBS=1）、语料 gate ON vs OFF、difftest、
-  check_size 终数见 CHANGELOG 0.346。
+- 全套件 normal（JOBS=1）**338 ran ok EXIT=0**；ASan（JOBS=1）
+  **338 ran ok EXIT=0**。
+- difftest O0 vs O2：**319 用例 0 不一致 EXIT=0**（JOBS=4）。
+- 语料 gate ON vs OFF（440 文件）：**431 逐字节同 + 4 门控用例对 expect
+  一致 + 5 计时基准仅计时列**（浮点归一化后逐字节同）。
+- check_size 无新增超限（基线 5 个）。
+- 350 含 with 穿过帧链 + tb 跨 GC（3000 环引用分配触发主收集后帧链仍可读）
+  钉子；async 协程 await 链帧边界见上。
 
 ### 其它剩余（stdlib-b3 跳过清单）
 

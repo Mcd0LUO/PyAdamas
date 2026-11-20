@@ -55,8 +55,13 @@
 - 异常/生成器钉子 **92/93/94/119/153**：门控关/开 × ASan detect_leaks=1
   **10/10 全 0**；350/351 ASan detect_leaks=1 为 0。
 - 350/351 O0/O1/O2 与 CPython 3.14 逐字节一致。
-- 全套件 normal（JOBS=1）**338 ran ok EXIT=0**；ASan（JOBS=1）EXIT=0
-  （终数待补）；difftest O0/O2（终数待补）；语料 gate ON vs OFF（终数待补）。
+- 全套件 normal（JOBS=1）**338 ran ok EXIT=0**；ASan（PYADAMAS_TEST_ASAN=1，
+  JOBS=1）**338 ran ok EXIT=0**（336 基线含 350 + 351 + dc_dataclass 模块）。
+- difftest O0 vs O2：**319 用例 0 不一致 EXIT=0**（JOBS=4）。
+- 语料 gate ON vs OFF（tests/run + bench 全量 440 文件）：**431 逐字节同 +
+  4 门控用例（340/341/350/351）对 expect 一致 + 5 计时基准仅计时列差异**
+  （cpy_ipc/bench_re/chan_throughput/spawn_latency/switch_latency，浮点
+  归一化后逐字节同——本征非确定，计数/标签列全同）。
 - check_size 无新增超限（超限仍是基线 5 个文件）。
 
 ### 负面 / 边界（文档化，docs/lang-gaps-landing.md §8）
