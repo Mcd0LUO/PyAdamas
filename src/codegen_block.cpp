@@ -467,42 +467,42 @@ void AsmGen::emit_function(const IRFunction& f, int fi) {
             if (rec_words > 0) {
                 frame_rec_ = true;
                 line("movq pa_frame_top(%rip), %rax");
-                emit2("movq", "%rax", rec_mem(0));
-                emit_imm_op("movq", static_cast<int64_t>(rec_entries), rec_mem(1));
+                emit2(MOp::kMovq, kRax, rec_mem(0));
+                emit_imm(MOp::kMovq, static_cast<int64_t>(rec_entries), rec_mem(1));
                 if (frame_scan_words_ > 0) {
                     // 临时区从第一个 vreg 槽开始，往高地址扫 scan_words 个字。
                     line(std::format("leaq {}(%rsp), %rax", vreg_slot_off(0)));
-                    emit2("movq", "%rax", rec_mem(2));
+                    emit2(MOp::kMovq, kRax, rec_mem(2));
                 } else {
-                    emit_imm_op("movq", static_cast<int64_t>(0), rec_mem(2));
+                    emit_imm(MOp::kMovq, static_cast<int64_t>(0), rec_mem(2));
                 }
-                emit_imm_op("movq", static_cast<int64_t>(frame_scan_words_), rec_mem(3));
+                emit_imm(MOp::kMovq, static_cast<int64_t>(frame_scan_words_), rec_mem(3));
                 if (!frame_scan_mask_.empty()) {
                     // 位图是静态只读数据，地址编译期就能定。
                     line(std::format("leaq .Lscanmask{}(%rip), %rax", fi));
-                    emit2("movq", "%rax", rec_mem(4));
+                    emit2(MOp::kMovq, kRax, rec_mem(4));
                 } else {
-                    emit_imm_op("movq", static_cast<int64_t>(0), rec_mem(4));
+                    emit_imm(MOp::kMovq, static_cast<int64_t>(0), rec_mem(4));
                 }
                 int ri = 6;
                 for (size_t i = 0; i < frame_owned_.size(); ++i, ++ri) {
                     line(std::format("leaq {}, %rax", smem(frame_owned_[i])));
                     // 低位标记：该槽可能装着非堆值，展开时走注册表释放。
                     if (frame_owned_unknown_[i]) line("orq $1, %rax");
-                    emit2("movq", "%rax", rec_mem(ri));
+                    emit2(MOp::kMovq, kRax, rec_mem(ri));
                 }
                 for (int s : frame_scan_) {
                     line(std::format("leaq {}, %rax", smem(s)));
                     // bit1：只给 GC 扫描，异常展开不释放。
                     line("orq $2, %rax");
-                    emit2("movq", "%rax", rec_mem(ri++));
+                    emit2(MOp::kMovq, kRax, rec_mem(ri++));
                 }
                 // 本帧 CFA（= rsp + frame_bytes_ + 8，与 .cfi_def_cfa 同一口径）：
                 // 表驱动展开在 phase 2 的 handler 帧人格调用里按它批量释放更深
                 // 帧的记录，所以必须在进链之前写好。
                 line(std::format("leaq {}(%rsp), %rax", frame_bytes_ + 8));
-                emit2("movq", "%rax", rec_mem(5));
-                line(std::format("leaq {}, %rax", rec_mem(0)));
+                emit2(MOp::kMovq, kRax, rec_mem(5));
+                emit2(MOp::kLeaq, rec_mem(0), kRax);
                 line("movq %rax, pa_frame_top(%rip)");
             }
         }

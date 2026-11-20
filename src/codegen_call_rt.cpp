@@ -997,7 +997,7 @@ void AsmGen::gen_tuple_inline(const Inst& in) {
         std::string slow = fresh_label("tupslow");
         std::string done = fresh_label("tupdone");
         for (size_t ai = 0; ai < n; ++ai)
-            emit2("movq", src_op(in.args[ai]), arg_reg_i(2 + ai));
+            emit2(MOp::kMovq, src_mop(in.args[ai]), arg_reg_i(2 + ai));
         // 注意 cmpl：gc_need_check / pa_diag_rc_on 是 4 字节 int，
         // cmpq 会连同相邻 .bss 变量一起读，高 4 字节非零时永真。
         line("cmpl $0, gc_need_check(%rip)");
@@ -1017,7 +1017,7 @@ void AsmGen::gen_tuple_inline(const Inst& in) {
         line("movq $2, 56(%rax)");
         // payload(+64..)：len/cap=8/data=h+112/elem_kind=0/
         // heap_bits=0/bits_cap=0
-        line(std::format("movq ${}, 64(%rax)", n));
+        emit_imm(MOp::kMovq, static_cast<int64_t>(n), op_mem(kRax, 64));
         line("movq $8, 72(%rax)");
         line("leaq 112(%rax), %r10");
         line("movq %r10, 80(%rax)");
@@ -1025,12 +1025,13 @@ void AsmGen::gen_tuple_inline(const Inst& in) {
         line("movq $0, 96(%rax)");
         line("movq $0, 104(%rax)");
         for (size_t ai = 0; ai < n; ++ai) {
-            std::string aop = arg_reg_i(2 + ai);
-            if (aop.starts_with("%")) {
-                line(std::format("movq {}, {}(%rax)", aop, 112 + 8 * ai));
+            const MReg areg = mreg_from_name(arg_reg_i(2 + ai));
+            if (areg != kMRegNone) {
+                emit2(MOp::kMovq, areg, op_mem(kRax, 112 + 8 * ai));
             } else {
-                line(std::format("movq {}, %r10", aop));
-                line(std::format("movq %r10, {}(%rax)", 112 + 8 * ai));
+                std::string aop = arg_reg_i(2 + ai);
+                emit2("movq", aop, "%r10");
+                emit2(MOp::kMovq, kR10, op_mem(kRax, 112 + 8 * ai));
             }
         }
         // 返回值是 payload（h+64），不是 RC 头 —— 运行时
@@ -1040,15 +1041,15 @@ void AsmGen::gen_tuple_inline(const Inst& in) {
         line("leaq 64(%rax), %rax");
         emit_jmp("jmp", done);
         label(slow);
-        emit_imm_op("movq", static_cast<int64_t>(n), arg_reg_i(0));
-        emit_imm_op("movq", 0, arg_reg_i(1));
+        emit_imm(MOp::kMovq, static_cast<int64_t>(n), arg_reg_i(0));
+        emit_imm(MOp::kMovq, 0, arg_reg_i(1));
         for (size_t ai = n; ai < 4; ++ai)
-            emit_imm_op("movq", 0, arg_reg_i(2 + ai));
+            emit_imm(MOp::kMovq, 0, arg_reg_i(2 + ai));
         spill_fp_slots();
         line("call pa_tuple_new_filled");
         reload_fp_slots();
         label(done);
-        emit2("movq", "%rax", dst_op(in.dst));
+        emit2(MOp::kMovq, kRax, dst_mop(in.dst));
         return;
 }
 
@@ -1069,45 +1070,43 @@ void AsmGen::gen_tuple_inline(const Inst& in) {
 // 这条快路径，恒落回会 +5.8%）。运行时 pa_list_append 的种类维护仍兜底
 // 非 prep 调用方。
 void AsmGen::gen_append_inline(const Inst& in) {
-    const std::string lr = arg_reg_i(0);
-    const std::string vr = arg_reg_i(1);
-    // heap 参数形态：src_op 对常量 vreg 返回 "$N"。
+    const MReg lr = mreg_from_name(arg_reg_i(0));
+    const MReg vr = mreg_from_name(arg_reg_i(1));
+    // heap 参数形态：src_mop 对常量 vreg 返回 Imm 单元。
     int64_t heap = -1;
-    const std::string hs = src_op(in.args[2]);
-    if (hs.size() >= 2 && hs[0] == '$') {
-        heap = static_cast<int64_t>(strtoll(hs.c_str() + 1, nullptr, 10));
-    }
+    const MOperand& hs = src_mop(in.args[2]);
+    if (hs.kind == MOperandKind::Imm) heap = hs.imm;
     std::string slow = fresh_label("appslow");
     std::string done = fresh_label("appdone");
-    emit2("movq", src_op(in.args[0]), lr);
-    emit2("movq", src_op(in.args[1]), vr);
-    line(std::format("movq ({}), %rax", lr));
-    line(std::format("cmpq 8({}), %rax", lr));
-    emit_jmp("jge", slow);
-    line(std::format("cmpq $0, 32({})", lr));
-    emit_jmp("jne", slow);
+    emit2(MOp::kMovq, src_mop(in.args[0]), lr);
+    emit2(MOp::kMovq, src_mop(in.args[1]), vr);
+    emit2(MOp::kMovq, op_mem(lr), kRax);
+    emit2(MOp::kCmpq, op_mem(lr, 8), kRax);
+    emit_jmp(MOp::kJge, slow);
+    emit_imm(MOp::kCmpq, 0, op_mem(lr, 32));
+    emit_jmp(MOp::kJne, slow);
     if (heap == 0 || heap == 1) {
         // kind 必须与静态 heap 完全一致 —— 一条比较同时排除 kind2（位图）、
         // kind3（未定型）与冲突种类（0.303 种类维护）。与 0.282 守卫同指令
         // 数（只是立即数从 $2 变成 $heap），str_build 热路径零额外开销。
-        line(std::format("cmpq ${}, 24({})", heap, lr));
-        emit_jmp("jne", slow);
+        emit_imm(MOp::kCmpq, heap, op_mem(lr, 24));
+        emit_jmp(MOp::kJne, slow);
     } else {
         // heap==2（unknown）：kind0/1 已由紧邻的 prep 与新值堆性调和
         // （见函数头注释），kind2/3 落回运行时。
-        line(std::format("cmpq $2, 24({})", lr));
-        emit_jmp("jae", slow);
+        emit_imm(MOp::kCmpq, 2, op_mem(lr, 24));
+        emit_jmp(MOp::kJae, slow);
         if (heap != 2) {
             // 非常量 heap 参数（正常降级不会发生）：运行期比较。
-            line(std::format("movq {}, %r10", src_op(in.args[2])));
-            line(std::format("cmpq 24({}), %r10", lr));
-            emit_jmp("jne", slow);
+            emit2(MOp::kMovq, src_mop(in.args[2]), kR10);
+            emit2(MOp::kCmpq, op_mem(lr, 24), kR10);
+            emit_jmp(MOp::kJne, slow);
         }
     }
-    line(std::format("movq 16({}), %r10", lr));
-    line(std::format("movq {}, (%r10,%rax,8)", vr));
-    line(std::format("incq ({})", lr));
-    emit_jmp("jmp", done);
+    emit2(MOp::kMovq, op_mem(lr, 16), kR10);
+    emit2(MOp::kMovq, vr, op_mem(kR10, kRax, 8));
+    emit1(MOp::kIncq, op_mem(lr));
+    emit_jmp(MOp::kJmp, done);
     label(slow);
     emit_arg(2, false, 2, src_mop(in.args[2]));
     spill_fp_slots();
@@ -1121,21 +1120,21 @@ void AsmGen::gen_append_inline(const Inst& in) {
 // 0<=i<pub 且 pub==len（全 ASCII）且字节<0x80 → 查 pa_char_tab 驻留表；
 // 负索引/越界/非 ASCII 落回 pa_str_char_at（语义不变）。
 void AsmGen::gen_str_index_inline(const Inst& in) {
-        const std::string sr = arg_reg_i(0);
-        const std::string ir = arg_reg_i(1);
+        const MReg sr = mreg_from_name(arg_reg_i(0));
+        const MReg ir = mreg_from_name(arg_reg_i(1));
         std::string slow = fresh_label("idxstrslow");
         std::string done = fresh_label("idxstrdone");
-        emit2("movq", src_op(in.a), sr);
-        emit2("movq", src_op(in.b), ir);
-        line(std::format("testq {}, {}", ir, ir));
-        emit_jmp("js", slow);
-        line(std::format("movq ({}), %rax", sr));
-        line(std::format("cmpq %rax, {}", ir));
-        emit_jmp("jae", slow);
-        line(std::format("cmpq 8({}), %rax", sr));
-        emit_jmp("jne", slow);
-        line(std::format("movq 24({}), %r10", sr));
-        line(std::format("movzbq (%r10,{}), %rax", ir));
+        emit2(MOp::kMovq, src_mop(in.a), sr);
+        emit2(MOp::kMovq, src_mop(in.b), ir);
+        emit2(MOp::kTestq, ir, ir);
+        emit_jmp(MOp::kJs, slow);
+        emit2(MOp::kMovq, op_mem(sr), kRax);
+        emit2(MOp::kCmpq, kRax, ir);
+        emit_jmp(MOp::kJae, slow);
+        emit2(MOp::kCmpq, op_mem(sr, 8), kRax);
+        emit_jmp(MOp::kJne, slow);
+        emit2(MOp::kMovq, op_mem(sr, 24), kR10);
+        emit2(MOp::kMovzbq, op_mem(kR10, ir), kRax);
         line("cmpq $0x80, %rax");
         emit_jmp("jae", slow);
         line("leaq pa_char_tab(%rip), %r10");
@@ -1146,7 +1145,7 @@ void AsmGen::gen_str_index_inline(const Inst& in) {
         line("call pa_str_char_at");
         reload_fp_slots();
         label(done);
-        emit2("movq", "%rax", dst_op(in.dst));
+        emit2(MOp::kMovq, kRax, dst_mop(in.dst));
         return;
 }
 

@@ -35,6 +35,7 @@ enum class MOp : uint8_t {
     // ── 整数算术 ──
     kAddq, kSubq, kImulq, kIdivq, kDivq, kNegq, kNotq, kIncq, kDecq,
     kAndq, kOrq, kXorq, kCmpq, kTestq, kShlq, kSarq, kShrq, kSalq, kCqto, kCltq,
+    kBtsq, kBtrq,
     kAddl, kSubl, kCmpl, kAndl, kOrl, kXorl, kTestl, kAndb, kOrb, kXorb,
     // ── 栈与控制流 ──
     kPushq, kPopq, kCall, kJmp, kRet, kNop, kUd2, kLeave,

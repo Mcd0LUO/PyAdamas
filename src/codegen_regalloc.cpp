@@ -37,11 +37,11 @@ void AsmGen::emit_epilogue() {
         const int body_cfa = cfa_off_;
         // 先弹帧记录再退栈：记录本身在局部区底部，%rcx 此时是自由的。
         if (frame_rec_) {
-            line("movq " + rec_mem(0) + ", %rcx");
+            emit2(MOp::kMovq, rec_mem(0), kRcx);
             line("movq %rcx, pa_frame_top(%rip)");
         }
         if (frame_pad_ > 0) {
-            emit_imm_op("addq", frame_pad_, "%rsp");
+            emit_imm(MOp::kAddq, frame_pad_, kRsp);
             cfa_off_ -= frame_pad_;
             cfi(std::format(".cfi_def_cfa_offset {}", cfa_off_));
         }
@@ -2433,8 +2433,13 @@ void AsmGen::assign_global_vreg_regs() {
 // ── 生成期字符串缓存 ────────────────────────────────────────
 void AsmGen::build_operand_caches() {
         block_labels_.resize(f_->blocks.size());
-        for (size_t i = 0; i < block_labels_.size(); ++i)
-            block_labels_[i] = std::format(".Lf{}_b{}", fi_, i);
+        const std::string bp = num_label(".Lf", fi_);
+        for (size_t i = 0; i < block_labels_.size(); ++i) {
+            char buf[24];
+            auto r = std::to_chars(buf, buf + sizeof buf, i);
+            block_labels_[i] = bp + "_b";
+            block_labels_[i].append(buf, r.ptr);
+        }
         vreg_mem_.resize(f_->vreg_ty.size());
         for (size_t r = 0; r < vreg_mem_.size(); ++r)
             vreg_mem_[r] = std::format("{}(%rsp)", vreg_off(static_cast<VReg>(r)));

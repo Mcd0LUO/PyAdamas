@@ -87,6 +87,49 @@
         o.text += ')';
         return o;
     }
+    // "(%base,%index)" —— 无显式 scale（与历史文本 "(%r10,%rax)" 同字节）。
+    static MOperand op_mem(MReg base, MReg index) {
+        MOperand o;
+        o.kind = MOperandKind::Mem;
+        o.reg = base;
+        o.index = index;
+        o.text = "(";
+        o.text += mreg_name(base);
+        o.text += ',';
+        o.text += mreg_name(index);
+        o.text += ')';
+        return o;
+    }
+    // "(%base,%index,scale)" / "disp(%base,%index,scale)"
+    static MOperand op_mem(MReg base, MReg index, int scale) {
+        MOperand o;
+        o.kind = MOperandKind::Mem;
+        o.reg = base;
+        o.index = index;
+        o.scale = static_cast<uint8_t>(scale);
+        o.has_scale = true;
+        o.text = "(";
+        o.text += mreg_name(base);
+        o.text += ',';
+        o.text += mreg_name(index);
+        o.text += ',';
+        char buf[8];
+        auto r = std::to_chars(buf, buf + sizeof buf, scale);
+        o.text.append(buf, r.ptr);
+        o.text += ')';
+        return o;
+    }
+    static MOperand op_mem(MReg base, MReg index, int scale, int64_t disp) {
+        MOperand o = op_mem(base, index, scale);
+        o.imm = disp;
+        o.has_disp = true;
+        char buf[24];
+        auto r = std::to_chars(buf, buf + sizeof buf, disp);
+        std::string t(buf, r.ptr);
+        t += o.text;
+        o.text = std::move(t);
+        return o;
+    }
     // "(%base)"
     static MOperand op_mem(std::string base) {
         MOperand o;
@@ -229,9 +272,11 @@
     // 跳转/调用目标直建：目标是标签/符号字符串时免 parse_operand 文法扫描。
     // 含特殊字符（间接 '*'、内存 '(' 等）的目标退回解析路径，字节不变。
     void emit_jmp(MOp op, std::string_view target) {
+        // 裸符号/标签直建。'$' 允许出现在符号名里（.Lf6$pt 这类 mangled
+        // 标签）：历史路径经 line() 落 Raw，渲染同样是 tab+助记符+目标。
         bool bare = !target.empty();
         for (char c : target) {
-            if (c == ' ' || c == ',' || c == '(' || c == ')' || c == '$' || c == '*') {
+            if (c == ' ' || c == ',' || c == '(' || c == ')' || c == '*') {
                 bare = false;
                 break;
             }
@@ -248,8 +293,9 @@
             emit1(op, ot);
             return;
         }
+        // 兜底走 line()（带 tab），与历史 line(format("call ...")) 同字节。
         std::string text = mop_name(op);
         text += ' ';
         text += target;
-        out_.push_line(text);
+        line(text);
     }

@@ -425,7 +425,14 @@ private:
     // 旧入口（闭包/间接/跨模块/vtable）先把 %r11 清零再进同一函数体，
     // 形参 tag 全 UNK 回退探针。unknown 返回经 %rdx 带 tag（旧调用方
     // 忽略 rdx，无兼容问题）。门控关/生成器一律不进。
-    static std::string ptag_label(int i) { return std::format(".Lf{}$pt", i); }
+    static std::string ptag_label(int i) {
+        std::string s = ".Lf";
+        char buf[24];
+        auto r = std::to_chars(buf, buf + sizeof buf, i);
+        s.append(buf, r.ptr);
+        s += "$pt";
+        return s;
+    }
     // 本函数 unknown 形参个数（>0 才发双入口；生成器/门控关恒 0）。
     int func_ptag_words() const;
     // CallDirect 的 tag 数组字数（0 = 不走 tag ABI：门控关/跨模块/生成器/
@@ -589,13 +596,42 @@ private:
     }
 
 
-    std::string fresh_label(const char* tag) {
-        return std::format(".L{}_{}", tag, label_id_++);
+    // 数字后缀标签（.Lvt3 / .Ldtor2 这类）：to_chars 直拼。
+    static std::string num_label(const char* prefix, int64_t n) {
+        std::string s = prefix;
+        char buf[24];
+        auto r = std::to_chars(buf, buf + sizeof buf, n);
+        s.append(buf, r.ptr);
+        return s;
     }
 
-    static std::string func_label(int i) { return std::format(".Lf{}", i); }
+    // 标签工厂：to_chars 直拼，免 std::format（RC 序列每条 2-3 个标签，
+    // 是 vformat 热点的大头）。
+    std::string fresh_label(const char* tag) {
+        std::string s = ".L";
+        s += tag;
+        s += '_';
+        char buf[24];
+        auto r = std::to_chars(buf, buf + sizeof buf, label_id_++);
+        s.append(buf, r.ptr);
+        return s;
+    }
+
+    static std::string func_label(int i) {
+        std::string s = ".Lf";
+        char buf[24];
+        auto r = std::to_chars(buf, buf + sizeof buf, i);
+        s.append(buf, r.ptr);
+        return s;
+    }
     // 统一调用约定的 shim 入口标签（见 ir_types.h 的 closure_needs_shim）。
-    static std::string shim_label(int i) { return std::format(".Lshim{}", i); }
+    static std::string shim_label(int i) {
+        std::string s = ".Lshim";
+        char buf[24];
+        auto r = std::to_chars(buf, buf + sizeof buf, i);
+        s.append(buf, r.ptr);
+        return s;
+    }
 
     std::string block_label(int bi) const { return block_labels_[static_cast<size_t>(bi)]; }
 
@@ -619,7 +655,7 @@ private:
         int words = 6 + static_cast<int>(frame_owned_.size() + frame_scan_.size());
         return out_bytes_ + locals_ - 8 * (words - i);
     }
-    std::string rec_mem(int i) const { return std::format("{}(%rsp)", rec_off(i)); }
+    MOperand rec_mem(int i) const { return op_mem(kRsp, rec_off(i)); }
 
     // 本次代码生成是否压了帧记录（弹栈只在这个函数里发）。
     bool frame_rec_ = false;
@@ -636,7 +672,13 @@ private:
     std::vector<DbgEntry> dbg_entries_;
     int dbg_seq_ = 0;
     bool dbg_on_ = false;
-    std::string dbg_name_label(int fi) const { return std::format(".Lfnname{}", fi); }
+    std::string dbg_name_label(int fi) const {
+        std::string s = ".Lfnname";
+        char buf[24];
+        auto r = std::to_chars(buf, buf + sizeof buf, fi);
+        s.append(buf, r.ptr);
+        return s;
+    }
     void emit_debug_sections(const IRModule& m);
 
     // ── 零开销异常（Z2-b2，--zero-cost-exc）────────────────────────
