@@ -234,6 +234,8 @@ inline constexpr ModuleEntry kModuleTable[] = {
     {"contextlib", ModuleKind::Python, "contextlib.py", ""},
     {"csv", ModuleKind::Python, "csv.py", ""},
     {"copy", ModuleKind::Python, "copy.py", ""},
+    // P4 块4（lang_gaps）：@dataclass 编译期展开的运行期恒等装饰器。
+    {"dataclasses", ModuleKind::Python, "dataclasses.py", ""},
     {"fnmatch", ModuleKind::Python, "fnmatch.py", "re"},
     {"enum", ModuleKind::Python, "enum.py", ""},
     {"fractions", ModuleKind::Python, "fractions.py", "math"},

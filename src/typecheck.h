@@ -102,6 +102,11 @@ public:
     void check(Module& m);
     // 协议 dunder 的返回类型校验（在函数体推理完之后跑，见 typecheck_func.cpp）。
     void check_dunder_returns();
+    // P4 块4（lang_gaps，0.346）：@dataclass 编译期展开——类体字段收集完后
+    // 合成 __init__/__repr__/__eq__ 的 FunctionDef AST 注入类体，复用既有
+    // 方法收集/槽分配/降级。门控关不调用；v1 范围与负面见
+    // docs/lang-gaps-landing.md §8 块4。
+    void expand_dataclass(ClassDef& c, ClassInfoPtr& cls);
 
     // 多模块编译时由驱动注入：按模块名取已经加载的接口。
     // check 模式：import 图解析失败/属性缺失按 unknown 处理，不判死。

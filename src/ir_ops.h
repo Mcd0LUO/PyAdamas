@@ -627,6 +627,7 @@ enum class RtFn : uint16_t {
     LangGapsEnable,        // () -> void  运行期门控置 1（入口模块体首发，门控开才发射）
     ExcInfo,               // () -> list*  sys.exc_info() 三元组（+1；outside except 全 None）
     TbFrames,              // (tb*) -> list*  __pa_tb_frames：list[(file,line,func)]（+1）
+    ReprSet,               // (set*) -> str*  静态 set 的 repr（探针分不出 set/dict）
 };
 
 inline const char* rt_name(RtFn f) {
@@ -670,6 +671,7 @@ inline const char* rt_name(RtFn f) {
         case RtFn::LangGapsEnable: return "pa_lang_gaps_enable";
         case RtFn::ExcInfo: return "pa_exc_info";
         case RtFn::TbFrames: return "pa_tb_frames";
+        case RtFn::ReprSet: return "pa_repr_set";
         case RtFn::ListGet: return "pa_list_get";
         case RtFn::ListSet: return "pa_list_set";
         case RtFn::ListSetLen: return "pa_list_set_len";

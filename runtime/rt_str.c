@@ -189,6 +189,29 @@ PyAdamasStr* pa_repr_any(int64_t v) {
     return out;
 }
 
+/* P4 块4（lang_gaps）：静态 set 的 repr。set 的运行期表示是 dict（值恒 0），
+   探针口径（repr_any_into）分不出 set 与 {k: 0} 字典，会印成 {1: 0, ...}；
+   静态类型已知是 set 时走这里：按键迭代、元素按 unknown 探针 repr，
+   空集印 set()（CPython 口径）。元素是嵌套 set 时仍按字典印（探针边界，
+   与 P2 容器元素无 tag 口径一致）。 */
+PyAdamasStr* pa_repr_set(void* s) {
+    AnyReprBuf b = {NULL, 0, 0};
+    PyAdamasDict* d = (PyAdamasDict*)s;
+    if (!d || d->len == 0) {
+        ar_cstr(&b, "set()");
+    } else {
+        ar_cstr(&b, "{");
+        for (int64_t i = 0; i < d->len; ++i) {
+            if (i) ar_cstr(&b, ", ");
+            repr_any_into(&b, pa_dict_key_at(d, i));
+        }
+        ar_cstr(&b, "}");
+    }
+    PyAdamasStr* out = str_new(b.p ? b.p : "", (int64_t)b.n);
+    free(b.p);
+    return out;
+}
+
 
 /* ══════════════════════════════════════════════════════════════════
    P2（0.340）：带 tag 的 unknown repr（docs/numeric-types-design.md §2）
