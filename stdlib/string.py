@@ -88,16 +88,6 @@ def _invalid(template: str, pos: int) -> None:
                      + ", col " + str(colno))
 
 
-def _lookup(mapping: object, name: str) -> object:
-    """在 dict-like mapping 里按 key 找值；找不到抛 KeyError(name)。"""
-    if mapping is not None:
-        pairs: list[object] = __pa_any_items(mapping)
-        for p in pairs:
-            if p[0] == name:
-                return p[1]
-    raise KeyError(name)
-
-
 class Template:
     """支持 $ 替换的字符串模板（CPython string.Template 子集）。"""
 
