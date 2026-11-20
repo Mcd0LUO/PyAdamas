@@ -116,8 +116,6 @@ static int gc_incr_state;
    入口 pa_gc_init 读一次环境变量缓存成全局，热路径只读缓存。 */
 static int gc_incr_mark_on;
 int pa_gc_incr_mark_fast;   /* gc_incr_mark_on 的公开别名，供运行时写屏障门控 */
-static int gc_dbg;   /* 临时诊断（PYADAMAS_GC_DBG=1），定位后移除 */
-static int64_t gc_dbg_defer, gc_dbg_defer_swept, gc_dbg_pend_badrc;
 static int64_t gc_incr_major;   /* 本轮是不是整堆收集 */
 static size_t gc_incr_sweep_pos;
 static int gc_incr_countdown;
@@ -206,7 +204,6 @@ static void gc_phase_dec(PyAdamasRc* h, void* p) {
                 h->marked |= PYADAMAS_RC_DEFER;
                 gc_mark((uintptr_t)p);
                 gc_pend_add((int64_t)(uintptr_t)p);
-                if (gc_dbg) gc_dbg_defer++;
             }
             return;   /* rc 保持 1，保活到收尾 */
         }
@@ -2173,7 +2170,6 @@ void pa_gc_init(void** roots, int64_t n_roots, void* stack_top) {
        同步标记（现状）。只读 "1"，"0"/未设都关，flag-off 零变化。 */
     { const char* im = getenv("PYADAMAS_GC_INCR_MARK"); if (im && im[0] == '1') gc_incr_mark_on = 1; }
     pa_gc_incr_mark_fast = gc_incr_mark_on;
-    if (getenv("PYADAMAS_GC_DBG")) gc_dbg = 1;
     // 索引叶子模式：保守回退关掉（字符串回到旧的全跟踪口径）。
     gc_leaf_mode = !gc_conservative;
     if (gc_leaf_mode) atexit(leaf_index_shutdown);
@@ -2301,21 +2297,7 @@ static void gc_incr_finish(void) {
     // gc_phase 已为 0，走的是直接 free 路径）。
     int64_t pend_n = gc_pend_len;
     gc_pend_len = 0;
-    for (int64_t i = 0; i < pend_n; ++i) {
-        if (gc_dbg) {
-            PyAdamasRc* ph = (PyAdamasRc*)gc_pend[i] - 1;
-            if (ph->rc != 1) {   /* DEFER 位已被 finish 的 marked=0 循环清除，只查 rc */
-                gc_dbg_pend_badrc++;
-                fprintf(stderr, "[gcdbg] PEND-BADRC kind=%lld rc=%lld marked=%lld\n",
-                        (long long)ph->kind, (long long)ph->rc, (long long)ph->marked);
-            }
-        }
-        pa_rc_dec(gc_pend[i]);
-    }
-    if (gc_dbg)
-        fprintf(stderr, "[gcdbg] finish defer=%lld defer_swept=%lld pend_badrc=%lld pend_n=%lld\n",
-                (long long)gc_dbg_defer, (long long)gc_dbg_defer_swept,
-                (long long)gc_dbg_pend_badrc, (long long)pend_n);
+    for (int64_t i = 0; i < pend_n; ++i) pa_rc_dec(gc_pend[i]);
     stat_gc_live = old_bytes;
     alloc_since_gc = 0;
     // 按 Go pacer 公式重算下一轮 minor 阈值（同 gc_collect 里的逻辑）。
@@ -2471,11 +2453,6 @@ static double gc_now_ms(void) {
 }
 
 static void gc_free_body(PyAdamasRc* h) {
-    if (gc_dbg && (h->marked & PYADAMAS_RC_DEFER)) {
-        gc_dbg_defer_swept++;
-        fprintf(stderr, "[gcdbg] DEFER-SWEPT kind=%lld rc=%lld size=%lld\n",
-                (long long)h->kind, (long long)h->rc, (long long)h->size);
-    }
     rc_unlink(h);
     if (h->kind == PYADAMAS_RC_OBJ)
         free_attached_exception((char*)h + PYADAMAS_RC_HDR, h->size);
