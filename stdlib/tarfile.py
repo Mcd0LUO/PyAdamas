@@ -14,29 +14,47 @@ ExtractError/HeaderError 异常族。
 
 语义边界（轻量标尺）：
 - **整读整写**（同 zipfile/GzipFile 口径）：读一次性把归档载入内存，写把
-  全部块攒在内存、close 时一次落盘（含两块全零尾 + 补齐到 RECORDSIZE）。
-  内存与归档大小成正比；超大归档请走 from python import tarfile 桥接。
-- **只写 ustar**：默认 format=USTAR_FORMAT（CPython 默认 PAX_FORMAT）。GNU/
-  PAX 的扩展头（长名 L/K、pax x/g）**不写**；长名按 ustar 的 prefix(155) +
-  name(100) 在 '/' 处拆分，拆不开抛 ValueError("name is too long")。
-  读侧支持 ustar + GNU 长名/长链接（L/K）与最小 pax（path/linkpath/size/
-  mtime/uid/gid/uname/gname）；稀疏文件（S）不支持。
-- **压缩只做 gzip**：r/w/x 的 ":gz" 后缀（用 stdlib/gzip，压出的字节流
-  mtime=0、非 CPython 字节级对齐，退回可读）；bz2/xz/zst 抛
-  CompressionError。r:*/r 按魔数嗅探 gzip。
-- **数值字段是 int64**：头里的 size/mtime 用八进制 ustar 字段（8^11 上限），
-  读 base-256 编码（0o200/0o377 前导字节）时按 int64 收，超过 63 位抛
-  InvalidHeaderError；CPython 是任意精度。
+  全部块攒在内存、close 时一次落盘（两块全零尾 + 补齐到 RECORDSIZE，与
+  CPython 字节级一致）。内存与归档大小成正比；超大归档请走
+  `from python import tarfile` 桥接。
+- **只写 ustar**：DEFAULT_FORMAT 取 PAX_FORMAT（与 CPython 同值），但写入
+  永远产出 ustar 头（GNU/PAX 扩展头 L/K/x/g **不写**）。短 ASCII 名成员
+  与 CPython 的默认写出**逐字节一致**；长名按 prefix(155)+name(100) 在
+  '/' 处拆分（同 CPython USTAR_FORMAT），拆不开抛 ValueError("name is too
+  long")，linkname 超 100 字节同样抛 ValueError。读侧支持 ustar + GNU 长名
+  长链接（L/K，可连续叠加）+ pax x/g（path/linkpath/size/mtime/uid/gid/
+  uname/gname）；稀疏文件（S）与 Solaris X 头不解析（按未知类型处理）。
+- **压缩只做 gzip**：r/w/x/a 之外的 ":gz" 后缀（stdlib/gzip；写出 mtime=0
+  可复现，压缩字节不追求与 CPython 一致，但解压出的载荷逐字节相同）；
+  bz2/xz/zst 抛 CompressionError；r:*/r 按魔数嗅探。a:gz 不支持。
+- **数值字段是 int64**：写侧八进制 ustar 字段（8^(digits-1) 上限，超了抛
+  ValueError("overflow in number field")，CPython 在 GNU 格式下会转
+  base-256）；读侧接受 base-256（0o200/0o377 前导），但字段超过 63 位抛
+  InvalidHeaderError（CPython 任意精度）。pax 的 mtime 按 int 收（CPython
+  是 float）。
 - **元数据取自 lstat 的可见面**：_shutilc.stat 只给 mode/mtime/size/kind，
   uid/gid 一律 0、uname/gname 空（CPython 填真实属主）；add() 不做硬链接
   合并（没有 inode 可比），LNKTYPE 只在手写 TarInfo 时出现。
-- **解压过滤不做**：CPython 3.12+ 默认 data_filter（extractall）不做，
-  filter=/numeric_owner= 参数收下不生效（extract 直接按 ustar 名字落盘，
-  但会剥绝对路径前导 '/' 与 ".." 段，口径同 zipfile）。
-- **流式模式**：r|/w| 按普通 r/w 处理（整读整写），不模拟 _Stream 的分块
-  语义；错误时机也随之前移（坏归档在 open 而非 getmembers 抛 ReadError）。
-- **错误类型对齐、消息不逐字**：ReadError/CompressionError/ExtractError 等
-  类型与 CPython 同名同继承；异常消息是合理文本，不逐字复刻 CPython。
+- **解压过滤不做**：CPython 3.12+ 默认 data_filter 不做，filter=/
+  numeric_owner=/set_attrs 之外的过滤参数不存在（extract/extractall 都落
+  盘 + chmod + utime）。名字先净化（剥前导 '/'、丢 ''/'.'/'..' 段，同
+  zipfile），所以 `../x` 这种成员落到解压根下而不是抛 OutsideDestinationError
+  （CPython 默认 filter 抛 FilterError）。uid/gid 不落盘（无 chown）。
+- **流式模式**：r|/w| 按普通 r/w 处理（整读整写），不模拟 _Stream 分块语义。
+- **错误时机前移**：坏归档在 open（而非首次 getmembers）抛 ReadError；
+  r/r:* 把首个头错误包成 ReadError("file could not be opened successfully:
+  …")，r:/显式压缩模式保留原始 InvalidHeaderError（CPython 同口径）。
+  关闭后的操作抛 OSError("TarFile is closed")、模式不符抛
+  OSError("bad operation for mode 'w'")（同 CPython 3.14）。
+- **错误类型对齐、消息不逐字**：ReadError/CompressionError/ExtractError/
+  HeaderError 等类型与 CPython 同名同继承；消息是合理文本。is_tarfile 对
+  不存在的路径返回 False（CPython 3.14 会漏出 FileNotFoundError）。
+- **静态类型边界**（pa 语言面）：extractfile 的静态返回是 BytesIO，目录/
+  设备成员返回空 BytesIO（CPython 返回 None）；gettarinfo 对 fifo/设备/
+  socket 抛 ValueError（CPython 返回 None 让 add 跳过）。imported 类经模块
+  限定名的类方法调用（`tarfile.TarInfo.frombuf`）不受支持，请
+  `from tarfile import TarInfo` 后用 `TarInfo.frombuf`；同理形参别标成
+  导入类（`f: TarFile`），用局部变量或 object + cast。
 """
 
 import os
@@ -474,6 +492,7 @@ class TarFile:
     _compresslevel: int
     _auto: bool = False
     _end: int = 0
+    _pax_global: dict[str, str]
 
     def __init__(self, name: str = "", mode: str = "r", fileobj: file = None,
                  format: int = PAX_FORMAT, encoding: str = "utf-8",
@@ -492,6 +511,7 @@ class TarFile:
         self.offset = 0
         self._data = b""
         self._wparts = []
+        self._pax_global = {}
         self._compresslevel = compresslevel
 
         filemode: str = mode
@@ -587,6 +607,8 @@ class TarFile:
             first = False
             ti.offset = pos
             pos += BLOCKSIZE
+            if len(self._pax_global) > 0:
+                _apply_pax(ti, self._pax_global)
             ti = self._proc_header(ti, pos)
             # _proc_header 返回的是「真成员」头，数据区相对它自己的头。
             hdr_end: int = ti.offset + BLOCKSIZE
@@ -621,45 +643,61 @@ class TarFile:
                 raise
         return TarInfo.frombuf(buf, self.encoding, self.errors)
 
-    def _proc_header(self, ti: TarInfo, data_pos: int) -> TarInfo:
-        """处理 GNU 长名/长链接与 pax 扩展头，返回真成员头（可能重读）。"""
+    def _next_header(self, pos: int) -> TarInfo:
         data: bytes = self._data
         total: int = len_bytes(data)
-        if ti.type == GNUTYPE_LONGNAME or ti.type == GNUTYPE_LONGLINK:
-            if data_pos + ti.size > total:
-                raise ReadError("unexpected end of data")
-            g_payload: bytes = data[data_pos:data_pos + ti.size]
-            g_npos: int = data_pos + _roundup(ti.size, BLOCKSIZE)
-            if g_npos + BLOCKSIZE > total:
-                raise ReadError("unexpected end of data")
-            g_nbuf: bytes = data[g_npos:g_npos + BLOCKSIZE]
-            if g_nbuf == NUL * BLOCKSIZE:
-                raise ReadError("unexpected end of data")
-            g_nxt: TarInfo = TarInfo.frombuf(g_nbuf, self.encoding, self.errors)
-            g_nxt.offset = g_npos
-            if ti.type == GNUTYPE_LONGNAME:
-                g_nxt.name = _nts(g_payload)
-            else:
-                g_nxt.linkname = _nts(g_payload)
-            return self._proc_header(g_nxt, g_npos + BLOCKSIZE)
-        if ti.type == XHDTYPE or ti.type == XGLTYPE:
-            if data_pos + ti.size > total:
-                raise ReadError("unexpected end of data")
-            x_payload: bytes = data[data_pos:data_pos + ti.size]
-            x_npos: int = data_pos + _roundup(ti.size, BLOCKSIZE)
-            hdrs: dict[str, str] = _parse_pax(x_payload)
-            if ti.type == XHDTYPE:
-                if x_npos + BLOCKSIZE > total:
+        if pos + BLOCKSIZE > total:
+            raise ReadError("unexpected end of data")
+        buf: bytes = data[pos:pos + BLOCKSIZE]
+        if buf == NUL * BLOCKSIZE:
+            raise ReadError("unexpected end of data")
+        nxt: TarInfo = TarInfo.frombuf(buf, self.encoding, self.errors)
+        nxt.offset = pos
+        return nxt
+
+    def _proc_header(self, ti: TarInfo, data_pos: int) -> TarInfo:
+        """吃掉 GNU 长名/长链接与 pax 扩展头，返回真成员头。
+
+        GNU 会连续写 K（长 linkname）再 L（长 name）再真头，pax 的 x 头同理
+        可叠加，所以这里用循环累积待定字段而不是递归逐层覆盖。"""
+        data: bytes = self._data
+        total: int = len_bytes(data)
+        cur: TarInfo = ti
+        cur_pos: int = data_pos
+        pend_name: str = ""
+        pend_link: str = ""
+        pend_pax: dict[str, str] = {}
+        while True:
+            ty: bytes = cur.type
+            if ty == GNUTYPE_LONGNAME or ty == GNUTYPE_LONGLINK:
+                if cur_pos + cur.size > total:
                     raise ReadError("unexpected end of data")
-                x_nbuf: bytes = data[x_npos:x_npos + BLOCKSIZE]
-                if x_nbuf == NUL * BLOCKSIZE:
+                g_payload: bytes = data[cur_pos:cur_pos + cur.size]
+                g_pos: int = cur_pos + _roundup(cur.size, BLOCKSIZE)
+                g_nxt: TarInfo = self._next_header(g_pos)
+                if ty == GNUTYPE_LONGNAME:
+                    pend_name = _nts(g_payload)
+                else:
+                    pend_link = _nts(g_payload)
+                cur = g_nxt
+                cur_pos = g_pos + BLOCKSIZE
+                continue
+            if ty == XHDTYPE or ty == XGLTYPE:
+                if cur_pos + cur.size > total:
                     raise ReadError("unexpected end of data")
-                x_nxt: TarInfo = TarInfo.frombuf(x_nbuf, self.encoding, self.errors)
-                x_nxt.offset = x_npos
-                _apply_pax(x_nxt, hdrs)
-                return self._proc_header(x_nxt, x_npos + BLOCKSIZE)
-            return self._proc_header(ti, x_npos + BLOCKSIZE)
-        return ti
+                x_payload: bytes = data[cur_pos:cur_pos + cur.size]
+                x_pos: int = cur_pos + _roundup(cur.size, BLOCKSIZE)
+                hdrs: dict[str, str] = _parse_pax(x_payload)
+                if ty == XGLTYPE:
+                    for k in hdrs:
+                        self._pax_global[k] = hdrs[k]
+                else:
+                    for k in hdrs:
+                        pend_pax[k] = hdrs[k]
+                cur = self._next_header(x_pos)
+                cur_pos = x_pos + BLOCKSIZE
+                continue
+            return _finish_header(cur, pend_name, pend_link, pend_pax)
 
     # ── 公共读接口 ──────────────────────────────────────────────
     def _check(self, allow: str) -> None:
@@ -967,6 +1005,17 @@ def _parse_pax(payload: bytes) -> dict[str, str]:
             hdrs[rec[:eq]] = rec[eq + 1:]
         blob = blob[rec_len:]
     return hdrs
+
+
+def _finish_header(h: TarInfo, nm: str, ln: str, pax: dict[str, str]) -> TarInfo:
+    """把累积的长名/长链接/pax 字段落到真成员头上（pax 优先级最高）。"""
+    if len(nm) > 0:
+        h.name = nm
+    if len(ln) > 0:
+        h.linkname = ln
+    if len(pax) > 0:
+        _apply_pax(h, pax)
+    return h
 
 
 def _apply_pax(ti: TarInfo, hdrs: dict[str, str]) -> None:
