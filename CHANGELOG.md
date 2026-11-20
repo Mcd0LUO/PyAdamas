@@ -8,8 +8,8 @@
 
 > slim 分支合入：**单二进制瘦身** —— 运行时 -ffunction-sections/-fdata-sections +
 > 链接期 --gc-sections 剥掉用户程序未用到的运行时函数/数据。**零功能回归为最高
-> 不变量**；env 门控灰度 `PYADAMAS_GC_SECTIONS=0/1`（默认关，闸门全过后再议默认开，
-> 集成定）。**生成 asm 逐字节不变**（codegen 未触碰，1430 语料闸门钉死）。
+> 不变量**；env 门控 `PYADAMAS_GC_SECTIONS=0/1`（**默认开**，闸门全过；=0 显式关）。
+> **生成 asm 逐字节不变**（codegen 未触碰，1430 语料闸门钉死）。
 > 接 cgspeed 0.331 之后集成，定版 0.332（simd 顺延 0.333）。
 
 ### 变更

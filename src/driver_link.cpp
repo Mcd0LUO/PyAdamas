@@ -46,13 +46,15 @@ bool direct_ld_available() {
     return ok;
 }
 
-// --gc-sections 灰度门控（slim 轮）：PYADAMAS_GC_SECTIONS=1 开启，默认关。
-// 运行时已按 -ffunction-sections/-fdata-sections 编译（CMakeLists），开启后
-// 链接期按函数剥掉未引用的运行时段。只认精确的 "1"，其余值一律按关处理。
+// --gc-sections 门控（slim 轮，0.332 集成后默认开）：运行时已按
+// -ffunction-sections/-fdata-sections 编译（CMakeLists），链接期按函数剥掉
+// 未引用的运行时段（hello −81.7%）。默认开；PYADAMAS_GC_SECTIONS=0 显式关。
+// from c import（dlsym）程序由 link_program 整程序保守关 gc（见 driver_build）。
 bool gc_sections_enabled() {
     static const bool on = [] {
         const char* v = std::getenv("PYADAMAS_GC_SECTIONS");
-        return v && v[0] == '1' && v[1] == '\0';
+        if (!v) return true;
+        return !(v[0] == '0' && v[1] == '\0');
     }();
     return on;
 }
