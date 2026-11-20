@@ -4,6 +4,72 @@
 
 早期阶段没有逐条留痕，按阶段归纳；0.4 之后逐条记录。
 
+## [0.343] - 2026-11-21
+
+> lang1 分支：**P4 语言缺口 块1——异常类当值 + contextlib.suppress/closing**
+> （docs/numeric-types-design.md §3/§4 P4）。门控 `PYADAMAS_LANG_GAPS=1`
+> **默认 0**，开启时强制带上 P2 type_tags（CLASS tag=11 是表示基础）。
+> flag-off 生成 asm 逐字节不变（409 个基准/语料文件 cmp 全同）。0.342
+> 预留 big1（P3 BigInt+f32），集成时按落地顺序重编号。设计/边界/负面
+> 结论见 docs/lang-gaps-landing.md。
+
+### 新增
+
+- **内建异常类当值**：ValueError/IndexError 等名字在值位置得到 ClassObj
+  类型（内层 Exception[name]），降级成运行期类对象单例（rt_lang.c 按名
+  缓存，pa_class_new cid=-1/无 vtable，注册表持永久引用 + GC 根登记）。
+  过 unknown 带 CLASS tag=11 不退化成 0：同一性（is）、str/repr/print
+  （<class 'ValueError'>）、__name__、容器存储/迭代全链路。
+- **自定义异常类当值**：门控开时类名值位置统一 ClassObj（raise/except
+  名字机制不受影响）；pass-only 异常类补建单例（旧早退路径门控开且
+  value_used 时继续）。异常值构造取限定名末段（与 pa_exc_register 裸名
+  登记口径一致），except 匹配正确。repr 按 CPython 显示完整限定名
+  （<class '__main__.MyErr'>，判据=裸名在异常注册表；普通用户类 repr
+  保持既有末段口径）。
+- **isinstance/issubclass**：isinstance(e, ValueError)（e 是捕获的异常
+  值）按 exc_is_a 父子链；富异常实例按 MRO 类名（pa_is_exc INSTANCE
+  分支）。issubclass 异常类×异常类（含自定义×内建）运行期按名字判。
+- **raise 经类值**：E = ValueError; raise E / raise E("x") / raise M
+  （自定义）全链路；运行期读类名构造，不用静态内层名（形参回填可能
+  留着首个调用点的类型）。
+- **contextlib.suppress/closing**（stdlib/contextlib.py）：suppress 把
+  类值存进 unknown 元组，__exit__ 用内部 intrinsic __pa_exc_is_a(et, E)
+  按 with 协议的 et 名串判父子；closing 用 __pa_close(thing) 零参动态
+  .close()。
+- **方法名→槽运行期登记表**（rt_lang.c）：门控开时类定义点登记
+  「限定名.方法名→槽」（pa_method_register），pa_method_call0 沿实例
+  MRO 查表分派（尊重覆盖，与 pa_super_lookup 同元数据布局）；file
+  对象直调 pa_file_close。closing 的 .close() 与后续 file 协议泛化共用。
+- **探针路径识别类对象**：pa_str_any/pa_print_any/repr_any_into 按魔数
+  认出类对象印 <class '...'>（门控关时类对象不存在，分支永不命中）。
+- **类对象 GC release 回调**（pa_class_new）：字符串是索引叶子只靠 RC
+  释放；活到 GcShutdown 的类对象（异常类单例）无 release 则 name 串
+  泄漏。与 exc_value_gc_release 同模式，普通用户类纯加法。
+- **回归** tests/run/340_exc_class_value.py（53 行 expect 由 CPython
+  3.14 生成，O0/O1/O2 逐字节一致）；run_tests.sh/difftest.sh 支持
+  `# pyadamas: lang-gaps` 用例级指令。
+- **文件拆分**：typecheck_expr.cpp 的 Attribute case 逐字拆出
+  typecheck_expr_attr.cpp（1214→976 行，check_size 无新增超限）。
+
+### 闸门（实测）
+
+- flag-off asm 逐字节不变：**410/410 identical**（bench 全量 + tests/run）。
+- difftest O0/O2：**310 用例 0 不一致**；全套件 normal（JOBS=1）
+  **328 ran ok EXIT=0**；ASan（JOBS=1）**328 ran ok EXIT=0**。
+- ASan detect_leaks=1 钉子：13/174/92/93/94/119 flag-off/on **12/12 全 0**；
+  340 lang-gaps **0 泄漏**。
+- 语料对拍（LANG_GAPS on vs off，357 文件）：**355 逐字节同 + 1 门控用例
+  对 expect 一致**；bench_re 仅计时列（本征非确定）；180_codepoint_perf
+  计时跳过。277_urllib_errors 曾回归（富异常实例 str 被特判成类对象），
+  已修（删除 Class 型特判，实例走 dunder_str）。
+- CPython 对拍：340 逐字节一致（O0/O1/O2）。check_size 无新增超限。
+
+### 已知边界（详见 docs/lang-gaps-landing.md §5）
+
+- 多参异常 str() 不引号（pa 既有口径）；异常实例 e.__name__ 不支持；
+  closing.__enter__ 返回 unknown（as 绑定后不能调方法）；零参动态方法
+  调用仅限返回 None/标量的方法；门控关时 suppress 不可用（运行期
+  TypeError）。块2/3/4（file 协议/traceback/dataclass）后续落地。
 ## [0.341] - 2026-11-20
 
 > fixint1 分支：**P1 定宽整数——i8/i16/i32/i64 + u8/u16/u32/u64**
