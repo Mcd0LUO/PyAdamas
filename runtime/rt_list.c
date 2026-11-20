@@ -737,11 +737,15 @@ static inline double f64_of(int64_t v) {
     }
 
 #define LESS_I64(a, b) ((a) < (b))
+/* u64 元素：槽里是位模式，≥2^63 的值在 int64 视角是负数，必须按无符号比
+   （P1 收尾；kind 5，编译器按元素类型 U64 分派，见 Lowerer::sort_kind）。 */
+#define LESS_U64(a, b) ((uint64_t)(a) < (uint64_t)(b))
 #define LESS_F64(a, b) (f64_of(a) < f64_of(b))
 #define LESS_STR(a, b) \
     (pa_str_cmp((PyAdamasStr*)(uintptr_t)(a), (PyAdamasStr*)(uintptr_t)(b)) < 0)
 
 PYADAMAS_TIMSORT(i64, LESS_I64)
+PYADAMAS_TIMSORT(u64, LESS_U64)
 PYADAMAS_TIMSORT(f64, LESS_F64)
 PYADAMAS_TIMSORT(str, LESS_STR)
 
@@ -751,7 +755,7 @@ PYADAMAS_TIMSORT(str, LESS_STR)
    的顺序无关校验和长期掩盖了这个洞）。现在容器元素走 kind 4，编译
    器按静态类型附描述符（见 Lowerer::append_sort_desc）——自定界前
    缀树：
-     i / f / s / x = int / float / str / 机器字；
+     i / f / s / x = int / float / str / 机器字；u = u64（无符号）；
      l + 子描述符 = list / 变长元组：逐元素字典序，前缀相等短者小；
      t + arity 字节 + 逐位置描述符 = 定长元组：逐位置比。
    描述符是编译期串常量（永生），无 RC/GC 问题；比较是纯 C（pa_str_cmp
@@ -777,6 +781,10 @@ static void sort_desc_skip(const uint8_t** pp) {
    限退机器字，但仍消费描述符，保持外层游标对齐）。 */
 static int sort_desc_cmp(int64_t a, int64_t b, const uint8_t** pp, int depth) {
     int c = *(*pp)++;
+    if (c == 'u') {
+        uint64_t x = (uint64_t)a, y = (uint64_t)b;  /* u64 元素：无符号 */
+        return (x > y) - (x < y);
+    }
     if (c == 'f') {
         double x = f64_of(a), y = f64_of(b);
         return (x > y) - (x < y);  /* NaN 与一切相等，同 LESS_F64 口径 */
@@ -831,14 +839,15 @@ static int cmp_desc_lt(int64_t a, int64_t b) {
 #define LESS_CMP(a, b) cmp_desc_lt(a, b)
 PYADAMAS_TIMSORT(cmp, LESS_CMP)
 
-// kind：0 int/bool、1 float、2 str、4 容器元素（desc 字典序）、其它机器字。
-// desc：编译期描述符串常量，仅 kind 4 读取；标量种类传空串，不读。
+// kind：0 int/bool、1 float、2 str、4 容器元素（desc 字典序）、5 u64（无符号）、
+// 其它机器字。desc：编译期描述符串常量，仅 kind 4 读取；标量种类传空串，不读。
 void pa_list_sort(PyAdamasList* l, int64_t kind, PyAdamasStr* desc) {
     if (l->len < 2) return;
     /* 0.303：排序重排元素，kind2 位图无法跟随，保守丢弃。 */
     if (l->elem_kind == 2) pa_list_drop_bits(l);
     if (kind == 2) sort_str(l->data, l->len);
     else if (kind == 1) sort_f64(l->data, l->len);
+    else if (kind == 5) sort_u64(l->data, l->len);
     else if (kind == 4 && desc && desc->len > 0) {
         g_cmp_desc = (const uint8_t*)desc->data;
         sort_cmp(l->data, l->len);
@@ -853,7 +862,8 @@ PyAdamasList* pa_sorted_list(PyAdamasList* src, int64_t kind, PyAdamasStr* desc)
 }
 
 /* 按 keys 给 vals 排序：keys 与 vals 一一对应，key 的比较类别是 kind
-   （0 int/bool、1 float、2 str、4 容器按 desc 字典序、其它按机器字）。
+   （0 int/bool、1 float、2 str、4 容器按 desc 字典序、5 u64 无符号、
+   其它按机器字）。
    用下标数组 + qsort：比较函数通过静态指针读键表——pyadamas 是单线程
    的，不会并发踩。 */
 static const int64_t* g_sort_keys = 0;
@@ -885,6 +895,10 @@ static int cmp_sort_by_idx(const void* pa, const void* pb) {
         double a, b;
         memcpy(&a, &x, sizeof a);
         memcpy(&b, &y, sizeof b);
+        return a < b ? -1 : a > b ? 1 : 0;
+    }
+    if (g_sort_kind == 5) {  /* u64 键：无符号比较 */
+        uint64_t a = (uint64_t)x, b = (uint64_t)y;
         return a < b ? -1 : a > b ? 1 : 0;
     }
     if (g_sort_kind == 3 && key_is_str(x) && key_is_str(y)) {

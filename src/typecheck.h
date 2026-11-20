@@ -173,6 +173,13 @@ public:
         return it == func_infos_.end() ? nullptr : it->second;
     }
 
+    // 签名对应的源定义（含脱糖后的合成 lambda）。lower 用它看函数体形态
+    // （如 sorted(key=恒等函数) 的键域推断），没有定义时返回 nullptr。
+    const FunctionDef* signature_def(const FuncInfo* fn) const {
+        auto it = signature_defs_.find(fn);
+        return it == signature_defs_.end() ? nullptr : it->second;
+    }
+
     // functools.partial 的绑定计划；lower 用它生成转发函数。
     std::shared_ptr<PartialPlan> partial_plan(const Call* c) const {
         auto it = partial_plans_.find(c);

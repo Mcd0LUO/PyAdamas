@@ -497,6 +497,7 @@ void Lowerer::append_elem_chain(TypePtr container, std::string& chain) {
 // 排序描述符（0.312）：与相等链（每层一个字符、同质）不同，排序要支持
 // 定长异构元组的逐位置字典序，所以描述符是自定界前缀树：
 //   i/f/s/x = int/bool/None、float、str、机器字（unknown/其它）；
+//   u = u64（无符号比较，P1 收尾）；
 //   l + 子描述符 = list / 变长元组（逐元素字典序 + 短者小）；
 //   t + arity 字节 + 逐位置描述符 = 定长元组。
 // 运行时 sort_desc_cmp 按同一格式消费（rt_list.c）。深度/长度预算防
@@ -509,6 +510,11 @@ bool Lowerer::append_sort_desc(TypePtr t, std::string& d, int depth) {
         case TyKind::Bool:
         case TyKind::None:
             d += 'i';
+            return true;
+        case TyKind::U64:
+            // u64 元素按无符号比（≥2^63 的位模式是负数）。其余定宽落
+            // default 的 'x'：槽内规范值下机器字有符号比较逐例等价。
+            d += 'u';
             return true;
         case TyKind::Float:
             d += 'f';

@@ -33,6 +33,15 @@
   此前完全缺失的元素检查**（与 append 同口径；bench 无 insert 用例，asm
   不变）。空字面量保留既有洞回填路径；tuple 字面量 coerce 未开（留后续）。
   新增 tests/run/366（与 CPython 逐字节对拍）与反例 f73/f74/f75/f76。
+- **u64 列表无符号排序**（landing §6.4 修复）：sort()/sorted() 的比较器按
+  元素类型分派——sort_kind 新增 **5=u64**（运行时 LESS_U64 timsort），容器
+  排序描述符新增 **'u'** 字符（嵌套 list/tuple 里的 u64 元素同样无符号）；
+  sorted(key=) 的键比较同步支持 kind 5。窄定宽（i8/u8/…/u32）槽内规范值下
+  有符号机器字比较逐例等价，仍落 kind 0，**其它类型排序路径逐字不变**。
+  sorted(key=恒等函数)（lambda x: x / def k(x): return x）且元素是 u64 时，
+  键域跟随元素类型（无标注函数返回类型推不出的既有洞，只对 u64 开口）；
+  标注 -> u64 的键函数本来就走 kind 5。min/max 走 IR Cmp 早已无符号，不动。
+  新增 tests/run/367（与 CPython 逐字节对拍，含稳定性/嵌套/200 元素归并路径）。
 
 ## [0.348] - 2026-11-21
 

@@ -226,6 +226,23 @@ VReg Lowerer::lower_builtin_seq(const std::string& name, Call& c) {
             }
             TypePtr kret = (kt0->fn->ret_known && kt0->fn->ret) ? kt0->fn->ret
                                                                  : t_unknown();
+            // key 是恒等函数（lambda x: x / def k(x): return x，lambda 已
+            // 脱糖成合成 def）且元素是 u64：键域跟随元素类型走无符号比较。
+            // 无标注函数的返回类型推不出来，退机器字有符号比较会把 ≥2^63
+            // 的 u64 键排错（P1 收尾）。只对 u64 元素开这个口子——其它类型
+            // 的既有路径逐字不动。
+            if (is_unknown(kret) && se && se->kind == TyKind::U64 && !key_builtin) {
+                const FuncInfo* ksig = kt0->fn->outer ? kt0->fn->outer : kt0->fn.get();
+                const FunctionDef* kd = tc_.signature_def(ksig);
+                if (kd && kd->decorators.empty() && !kd->is_async &&
+                    kd->body.size() == 1 && kd->body[0]->kind == StmtKind::Return &&
+                    kt0->fn->pos.size() == 1 && !kt0->fn->varargs) {
+                    const auto& ret = static_cast<const Return&>(*kd->body[0]);
+                    if (ret.value && ret.value->kind == ExprKind::Name &&
+                        static_cast<const Name&>(*ret.value).id == kt0->fn->pos[0].name)
+                        kret = se;
+                }
+            }
             TypePtr pty = kt0->fn->pos.empty() ? t_unknown() : kt0->fn->pos[0].ty;
 
             VReg fn = expr(*key_expr);
