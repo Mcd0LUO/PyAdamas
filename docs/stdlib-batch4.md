@@ -188,5 +188,5 @@ a(); c3()
 | 全套件 normal（`PYADAMAS_TEST_JOBS=1`） | **EXIT=0，343 个 ran ok**，0 FAILED/DIFF |
 | 全套件 ASan（`PYADAMAS_TEST_ASAN=1`，JOBS=1） | **EXIT=0，343 个 ran ok**，0 FAILED/DIFF |
 | 现有程序 asm 不变 | **489/489 cmp 全同**（tests/run + tests/*.py + tests/modules + bench 全量，对基线 7924474 的独立 worktree 构建） |
-| check_size | 无**新增**超限文件（5 个超限文件基线就有：codegen_regalloc 2581、driver_build 1604（本批 +1 行）、ir_ops.h 1398、lower_impl.h 1356、typecheck_types.h 1593）；stdlib/tarfile.py 1130 行 |
+| check_size | 无**新增**超限文件（5 个超限文件基线就有：codegen_regalloc 2581、driver_build 1604（本批 +1 行）、ir_ops.h 1398、lower_impl.h 1356、typecheck_types.h 1593）；stdlib/tarfile.py 1143 行 |
 | 新用例 ASan detect_leaks=1 | 360/361/362/364 全 0；363 见第六节（两站点 RC 环） |

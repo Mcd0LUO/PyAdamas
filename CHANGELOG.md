@@ -15,7 +15,7 @@
 
 ### 新增
 
-- **stdlib/tarfile.py**（ustar 核心，1130 行纯源码）：
+- **stdlib/tarfile.py**（ustar 核心，1143 行纯源码）：
   - **TarInfo**：字段（name/mode/uid/gid/size/mtime/chksum/type/linkname/
     uname/gname/devmajor/devminor/offset/offset_data）+ 类型谓词
     （isfile/isreg/isdir/issym/islnk/isdev/ischr/isblk/isfifo/iscont/
@@ -71,7 +71,7 @@
   （PYADAMAS_TEST_ASAN=1，JOBS=1）**EXIT=0，343 个 ran ok**（0 FAILED/DIFF）。
 - 现有程序 asm 对基线逐字节不变：**489/489**（tests/run + tests/*.py +
   tests/modules + bench 全量与基线 7924474 的独立构建 cmp）。
-- check_size 无新增超限（基线 5 个；stdlib/tarfile.py 1130 行 < 1200）。
+- check_size 无新增超限（基线 5 个；stdlib/tarfile.py 1143 行 < 1200）。
 - ASan detect_leaks=1：360/361/362/364 全 0；363 命中既有「except 里 raise
   另一异常」两站点的 RC 环泄漏（单站点不复现，最小复现见
   docs/stdlib-batch4.md §6，修需动运行期异常/GC 链，不在本批）。
