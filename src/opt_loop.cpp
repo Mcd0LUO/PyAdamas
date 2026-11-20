@@ -222,13 +222,28 @@ bool hoist_loop(IRFunction& fn, int h, const std::vector<char>& body,
                 in.idx < static_cast<int>(slot_addr.size()))
                 slot_addr[static_cast<size_t>(in.idx)] = 1;
 
-    std::unordered_map<VReg, int> def_block;
-    std::unordered_set<VReg> multi_def;
+    // 定义块/多次定义用定长数组（原来是一张 unordered_map + 一个
+    // unordered_set）：hoist_loop 每个循环头调用一次、每次都要重建，
+    // perf 上「逐指令 emplace + 结点 malloc/free」占编译时间 ~14%。
+    // 语义完全一致：首定义块保留（emplace 不覆盖），后续定义打多次标记，
+    // 「有没有定义」等价于 def_block >= 0。
+    size_t nv = fn.vreg_ty.size();
+    std::vector<int> def_block(nv, -1);
+    std::vector<uint8_t> multi_def(nv, 0);
+    auto grow = [&](VReg r) {
+        if (static_cast<size_t>(r) < nv) return;
+        nv = static_cast<size_t>(r) + 1;
+        def_block.resize(nv, -1);
+        multi_def.resize(nv, 0);
+    };
     for (int b = 0; b < nb; ++b)
         for (const auto& in : fn.blocks[static_cast<size_t>(b)].insts)
             if (in.dst != kNoReg) {
-                auto [it, fresh] = def_block.emplace(in.dst, b);
-                if (!fresh) multi_def.insert(in.dst);
+                grow(in.dst);
+                if (def_block[in.dst] < 0)
+                    def_block[in.dst] = b;
+                else
+                    multi_def[in.dst] = 1;
             }
 
     std::vector<Inst> hoisted;
@@ -237,10 +252,9 @@ bool hoist_loop(IRFunction& fn, int h, const std::vector<char>& body,
     auto operand_ok = [&](VReg r) {
         if (r == kNoReg) return true;
         if (hoisted_dst.contains(r)) return true;
-        if (multi_def.contains(r)) return false;
-        auto it = def_block.find(r);
-        if (it == def_block.end()) return true;  // 形参等无定义值
-        int db = it->second;
+        if (static_cast<size_t>(r) < nv && multi_def[r]) return false;
+        const int db = static_cast<size_t>(r) < nv ? def_block[r] : -1;
+        if (db < 0) return true;  // 形参等无定义值
         if (in_loop(db)) return false;
         return dom_has(dom, h, db);
     };
@@ -448,30 +462,44 @@ bool version_bounds_loop(IRFunction& fn, int h, const std::vector<char>& body,
         }
     }
 
-    std::unordered_map<VReg, int> def_block;
-    std::unordered_set<VReg> multi_def;
-    std::unordered_set<VReg> used_outside;
+    // 同上：定义块/多次定义/循环外使用 三个集合改成定长数组。
+    size_t nv = fn.vreg_ty.size();
+    std::vector<int> def_block(nv, -1);
+    std::vector<uint8_t> multi_def(nv, 0);
+    std::vector<uint8_t> used_outside(nv, 0);
+    auto grow = [&](VReg r) {
+        if (static_cast<size_t>(r) < nv) return;
+        nv = static_cast<size_t>(r) + 1;
+        def_block.resize(nv, -1);
+        multi_def.resize(nv, 0);
+        used_outside.resize(nv, 0);
+    };
     for (int b = 0; b < nb; ++b) {
         for (const auto& in : fn.blocks[static_cast<size_t>(b)].insts) {
             auto touch = [&](VReg r) {
-                if (r != kNoReg && !in_loop(b)) used_outside.insert(r);
+                if (r == kNoReg || in_loop(b)) return;
+                grow(r);
+                used_outside[r] = 1;
             };
             touch(in.a);
             touch(in.b);
             touch(in.c);
             for (VReg r : in.args) touch(r);
             if (in.dst != kNoReg) {
-                auto [it, fresh] = def_block.emplace(in.dst, b);
-                if (!fresh) multi_def.insert(in.dst);
+                grow(in.dst);
+                if (def_block[in.dst] < 0)
+                    def_block[in.dst] = b;
+                else
+                    multi_def[in.dst] = 1;
             }
         }
     }
     auto invariant = [&](VReg r) {
-        if (r == kNoReg || multi_def.contains(r)) return false;
-        auto it = def_block.find(r);
-        if (it == def_block.end()) return true;
-        if (in_loop(it->second)) return false;
-        return dom_has(dom, h, it->second);
+        if (r == kNoReg || (static_cast<size_t>(r) < nv && multi_def[r])) return false;
+        const int db = static_cast<size_t>(r) < nv ? def_block[r] : -1;
+        if (db < 0) return true;
+        if (in_loop(db)) return false;
+        return dom_has(dom, h, db);
     };
 
     struct Cand {
@@ -486,7 +514,7 @@ bool version_bounds_loop(IRFunction& fn, int h, const std::vector<char>& body,
         if (!in_loop(b)) continue;
         for (const auto& in : fn.blocks[static_cast<size_t>(b)].insts) {
             if (in.op != IrOp::IndexLoad || in.dst == kNoReg) continue;
-            if (used_outside.contains(in.dst)) continue;
+            if (static_cast<size_t>(in.dst) < nv && used_outside[in.dst]) continue;
             if (!invariant(in.a) || !invariant(in.b)) continue;
             TypePtr bt = in.a < static_cast<VReg>(fn.vreg_ty.size())
                              ? fn.vreg_ty[in.a]
