@@ -74,6 +74,9 @@
   普通 r/w 处理（不模拟 _Stream 分块语义）。
 - `a`：读入既有归档 → 按解析出的成员末端截断 → 追加新成员。
 - `x`：目标已存在抛 `FileExistsError`。
+- `ignore_zeros`：`open(..., ignore_zeros=True)` 跳过零块继续读（整读整写
+  口径下解析在构造期完成，事后给 `tar_file.ignore_zeros = True` 无效）；
+  只做「跳过零块」，不做 CPython 的「跳过垃圾块」。
 
 ### 元数据与解压
 - `gettarinfo` 用 `_shutilc.stat`（`dereference=False` 走 lstat）：**uid/gid
@@ -132,7 +135,7 @@
 | 用例 | 对拍点 |
 |---|---|
 | 360 | 头字节 base64（普通/目录/长名/软链/非 ASCII）、frombuf 字段、5 类头错误、溢出/超长 ValueError |
-| 361 | 内存归档字节 base64、getnames/迭代/字段、extractfile（含软链跟随）、KeyError、关闭后 OSError、路径模式、is_tarfile |
+| 361 | 内存归档字节 base64、getnames/迭代/字段、extractfile（含软链跟随）、KeyError、关闭后 OSError、路径模式、is_tarfile、ignore_zeros |
 | 362 | add 递归顺序、gettarinfo 字段（mode 含 S_IFREG 位）、extractall/extract/members 子集、软链链式解压、硬链回退、mtime 保留、绝对路径净化 |
 | 363 | w:gz/r:gz 往返、r:* 嗅探、r: 显式、外部 gzip 包出来的 tar.gz 可读、gz 载荷 == 明文归档、a 追加、x 已存在、坏校验和/截断/非 tar/非 gz/未知压缩、空归档 |
 | 364 | GNU_FORMAT/PAX_FORMAT 写入往返、手搓 L/K 长名长链、手搓 pax（含 size 覆盖）、ustar prefix 长名整档 |

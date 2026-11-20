@@ -41,6 +41,9 @@ ExtractError/HeaderError 异常族。
   zipfile），所以 `../x` 这种成员落到解压根下而不是抛 OutsideDestinationError
   （CPython 默认 filter 抛 FilterError）。uid/gid 不落盘（无 chown）。
 - **流式模式**：r|/w| 按普通 r/w 处理（整读整写），不模拟 _Stream 分块语义。
+  `ignore_zeros` 只做「跳过零块继续读」（且要在 `open(..., ignore_zeros=True)`
+  时给，事后赋值无效——解析在构造期完成），「跳过垃圾块」的那半没做；
+  `debuglevel`/`errorlevel` 字段存在但不驱动输出（list() 未实现）。
 - **错误时机前移**：坏归档在 open（而非首次 getmembers）抛 ReadError；
   r/r:* 把首个头错误包成 ReadError("file could not be opened successfully:
   …")，r:/显式压缩模式保留原始 InvalidHeaderError（CPython 同口径）。
@@ -496,14 +499,17 @@ class TarFile:
 
     def __init__(self, name: str = "", mode: str = "r", fileobj: file = None,
                  format: int = PAX_FORMAT, encoding: str = "utf-8",
-                 errors: str = "replace", compresslevel: int = 9) -> None:
+                 errors: str = "replace", compresslevel: int = 9,
+                 ignore_zeros: bool = False) -> None:
         self.name = name
         self.format = format
         self.encoding = encoding
         self.errors = errors
         self.debuglevel = 0
         self.dereference = False
-        self.ignore_zeros = False
+        # 整读整写口径：解析在 __init__ 就完成，所以 ignore_zeros 必须经
+        # 构造参数传入（open(..., ignore_zeros=True)），事后赋值无效。
+        self.ignore_zeros = ignore_zeros
         self.errorlevel = 1
         self.closed = False
         self.members = []
@@ -601,6 +607,11 @@ class TarFile:
         while pos + BLOCKSIZE <= total:
             buf: bytes = data[pos:pos + BLOCKSIZE]
             if buf == NUL * BLOCKSIZE:
+                if self.ignore_zeros:
+                    # 同 CPython 的 ignore_zeros：跳过零块继续找下一个头
+                    # （不实现它「跳过垃圾块」的那一半）。
+                    pos += BLOCKSIZE
+                    continue
                 self._end = pos
                 return
             ti: TarInfo = self._header_at(data, pos, first)
@@ -1072,11 +1083,13 @@ def is_tarfile(name: str) -> bool:
 
 def open(name: str = "", mode: str = "r", fileobj: file = None,
          format: int = PAX_FORMAT, encoding: str = "utf-8",
-         errors: str = "replace", compresslevel: int = 9) -> "TarFile":
+         errors: str = "replace", compresslevel: int = 9,
+         ignore_zeros: bool = False) -> "TarFile":
     """打开 tar 归档（r/w/x/a，可带 :gz；fileobj 或路径二选一）。"""
     if len(name) == 0 and fileobj is None:
         raise ValueError("nothing to open")
-    return TarFile(name, mode, fileobj, format, encoding, errors, compresslevel)
+    return TarFile(name, mode, fileobj, format, encoding, errors, compresslevel,
+                   ignore_zeros)
 
 # ── 文件系统助手（_shutilc 胶水：stat/readlink/symlink/utime）────────
 def _os_error(what: str, rc: int, path: str) -> object:
