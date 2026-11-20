@@ -179,6 +179,8 @@ public:
         void set_rc_split(bool v) { rc_split_ = v; }
         // 图着色分配器开关（PYADAMAS_RA_GRAPH）：同样由驱动传入并参与缓存失效。
         void set_ra_graph(bool v) { ra_graph_ = v; }
+        // 浮点循环 SIMD 向量化开关（PYADAMAS_SIMD，默认关）：参与缓存失效。
+        void set_simd(bool v) { simd_enabled_ = v; }
 
 private:
     const std::string& global_label(int i) const {
@@ -747,6 +749,9 @@ private:
     // 图着色分配器开关（PYADAMAS_RA_GRAPH）。开启后 assign_slot_regs 走
     // assign_slot_regs_graph，用精确冲突图取代线性扫描的区间近似。
     bool ra_graph_ = false;
+    // 浮点循环 SIMD 向量化（PYADAMAS_SIMD，默认关）。开启后 gen_block
+    // 对匹配到的 reduction 热点循环发 SSE2 packed 向量体 + 标量尾循环。
+    bool simd_enabled_ = false;
     // 预扫描本函数的 EH 标记（fname 是 FDE 起点标签）；没有标记则不动作。
     void prepare_eh_plan(const IRFunction& f, const std::string& fname);
     // 发 .cfi_personality / .cfi_lsda（必须在 .cfi_startproc 之后调用）。
@@ -1051,6 +1056,11 @@ private:
     void gen_cmp_branch_fp(const Inst& in, const Inst& br);
 
         void gen_block(const Block& b);
+    // SIMD 向量化（codegen_simd.cpp，PYADAMAS_SIMD 门控）：识别 reduction
+    // 热点循环体块，匹配成功则发「守卫 + SSE2 向量循环 + 跳标量尾」前奏，
+    // 返回 true（随后 gen_block 照常发射原标量指令作为尾循环/fallback）。
+    // 不匹配返回 false，一个字节不发。设计见 docs/simd-vectorization-design.md。
+    bool try_simd_reduction(const Block& b);
     bool try_forward_global_across_rc(const Block& b, size_t at, size_t& load_pos,
                                       bool& forward_to_receiver);
 
