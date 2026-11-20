@@ -6,6 +6,11 @@
 
 ## [0.336] - 2026-11-20
 
+> **SIMD 默认开**（用户授权）：`PYADAMAS_SIMD` 默认值翻为 on（=0 显式关），数值核
+> （spectral_norm/nbody/matmul）反超 Go 的收益自动生效。仅 opt≥2 非生成器非 ra_graph
+> 非 tags 模块生效（codegen_simd 守卫），不满足整段标量 fallback，输出逐位一致；
+> 全套件 normal+ASan 301 ok、difftest 283/0。LOOP_OPT/RA_OPT 仍 opt-in。
+
 > ra1 分支：**寄存器分配改进——削减 spill/栈往返**（callee-saved 提升增强），
 > 测量先行（perf annotate 复核 fib/matmul/nqueens 栈流量热点再选优化）。
 > 门控 `PYADAMAS_RA_OPT=0/1` **默认 0**；flag-off 生成 asm 逐字节不变
