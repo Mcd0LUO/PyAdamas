@@ -1397,6 +1397,11 @@ inline TypePtr join_into(const TypePtr& a, const TypePtr& b) {
 
 inline TypePtr join(const TypePtr& a, const TypePtr& b) { return join_into(a, b); }
 
+// P4 门控（PYADAMAS_LANG_GAPS）的全局开关：assignable 是自由函数，拿不到
+// TypeChecker 成员；整个进程共享同一个门控值，由 set_lang_gaps 写入。
+// 门控关时恒 false，下面的 FileLike 放宽分支永不命中（asm/行为不变）。
+inline bool& lang_gaps_enabled() { static bool v = false; return v; }
+
 // 赋值的兼容性：允许 int -> float 的隐式提升，Unknown 与任何类型兼容
 inline bool assignable(const TypePtr& dst, const TypePtr& src) {
     if (is_unknown(dst) || is_unknown(src)) return true;
@@ -1503,6 +1508,13 @@ inline bool assignable(const TypePtr& dst, const TypePtr& src) {
     }
     // 容器字面量的空类型洞
     if (dst->kind == TyKind::Tuple && src->kind == TyKind::Tuple && src->sub.empty()) return true;
+    // P4（lang_gaps）file 协议泛化：file 槽收带 read/write 方法面的类实例
+    // （FileLike，io.StringIO/BytesIO 等）。运行期 pa_file_* 入口按值分派
+    // （真 file 直调 / 实例走方法名→槽登记表），静态类型仍是 file。
+    if (lang_gaps_enabled() && dst->kind == TyKind::File &&
+        src->kind == TyKind::Class && src->cls &&
+        src->cls->method("read") && src->cls->method("write"))
+        return true;
     return false;
 }
 

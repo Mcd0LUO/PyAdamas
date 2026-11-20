@@ -131,6 +131,21 @@ VReg Lowerer::lower_builtin_reflect(const std::string& name, Call& c) {
                 if (!has_tag) return const_bool(false);
                 return call_runtime(fn, t_bool(), {obj()});
             }
+            // P4（lang_gaps）：异常类对象当 isinstance 目标（isinstance(e,
+            // ValueError)，ValueError 是 ClassObj[Exception] 值）。运行期按
+            // 异常值的类型名走 exc_is_a 父子链；富异常实例由 pa_is_exc 的
+            // INSTANCE 分支按 MRO 类名判。静态已知非异常类型直接 false。
+            {
+                TypePtr et = tt;
+                if (et && et->kind == TyKind::ClassObj && !et->sub.empty()) et = et->sub[0];
+                if (et && et->kind == TyKind::Exception) {
+                    if (st && st->kind != TyKind::Unknown && st->kind != TyKind::Exception &&
+                        st->kind != TyKind::Class)
+                        return const_bool(false);
+                    return call_runtime(RtFn::IsException, t_bool(),
+                                        {obj(), const_str(et->name)});
+                }
+            }
             ClassInfo* target = class_of_target(tt);
             if (!target) {
                 err(c.args[1]->line, c.args[1]->col,
@@ -322,6 +337,21 @@ VReg Lowerer::lower_builtin_reflect(const std::string& name, Call& c) {
         TypePtr a1 = tc_.type_of(c.args[1].get());
         if (a0 && a0->kind == TyKind::ClassObj && !a0->sub.empty()) a0 = a0->sub[0];
         if (a1 && a1->kind == TyKind::ClassObj && !a1->sub.empty()) a1 = a1->sub[0];
+        // P4（lang_gaps）：两边都是异常类（内建 ClassObj[Exception] 值或
+        // 自定义异常类）→ 运行期按名字判父子（含变量持有的类值；静态名
+        // 可能因形参回填过期，不能编译期定死）。用户类名取限定名末段，
+        // 与 pa_exc_register 的裸名登记口径一致（rt_lang.c）。
+        {
+            auto exc_like = [](const TypePtr& t) {
+                return t && (t->kind == TyKind::Exception ||
+                             (t->kind == TyKind::Class && t->cls && t->cls->is_exception_class));
+            };
+            if (exc_like(a0) && exc_like(a1)) {
+                VReg ca = expr(*c.args[0]);
+                VReg cb = expr(*c.args[1]);
+                return call_runtime(RtFn::ExcSubclass, t_bool(), {ca, cb});
+            }
+        }
         auto builtin = [](const TypePtr& t, Expr* e) -> std::string {
             if (t && t->kind == TyKind::Func && t->fn && t->fn->unchecked)
                 return t->fn->name;
@@ -608,6 +638,26 @@ VReg Lowerer::lower_builtin_reflect(const std::string& name, Call& c) {
             call_void(RtFn::ListAppend, {l, s, const_int(1)});
         }
         return l;
+    }
+
+    // P4 内部 intrinsics（stdlib/contextlib.py 的 suppress/closing）。
+    if (name == "__pa_exc_is_a") {
+        if (c.args.size() != 2) {
+            err(c.line, c.col, "__pa_exc_is_a() takes exactly two arguments");
+            return const_bool(false);
+        }
+        VReg nm = expr(*c.args[0]);
+        VReg cls = expr(*c.args[1]);
+        return call_runtime(RtFn::ExcClassIsA, t_bool(), {nm, cls});
+    }
+    if (name == "__pa_close") {
+        if (c.args.size() != 1) {
+            err(c.line, c.col, "__pa_close() takes exactly one argument");
+            return const_none();
+        }
+        VReg obj = expr(*c.args[0]);
+        call_void(RtFn::MethodCall0, {obj, const_str("close")});
+        return const_none();
     }
 
     return kNoReg;

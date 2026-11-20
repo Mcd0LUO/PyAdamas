@@ -36,6 +36,10 @@ struct LowerOptions {
     // 运行期类型标签（PYADAMAS_TYPE_TAGS，默认 0 关）：isinstance/repr 的
     // unknown 分支改发带 tag 的运行期入口（docs/numeric-types-design.md §2）。
     bool type_tags = false;
+    // P4 语言缺口（PYADAMAS_LANG_GAPS，默认关）：异常类当值（ClassObj 单例 +
+    // CLASS tag）、file 协议泛化、traceback、dataclass 编译期展开。
+    // 开启时驱动已强制 type_tags=true（docs/numeric-types-design.md §3/§4）。
+    bool lang_gaps = false;
     // 允许浮点归约用 SIMD 分组求和（会改变舍入顺序）。
     bool fast_math = false;
     // 零开销异常（Z5，默认开启）：非可挂起函数里的 try 走 LSDA / landing pad

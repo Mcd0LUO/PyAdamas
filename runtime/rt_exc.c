@@ -120,6 +120,15 @@ void pa_exc_register(PyAdamasStr* child, PyAdamasStr* parent) {
     exc_regs = r;
 }
 
+/* P4（lang_gaps）：裸类名是不是注册过的自定义异常类。类对象 repr 用：
+   异常类按 CPython 显示完整限定名（<class '__main__.MyErr'>），普通用户类
+   保持 pa 既有的末段口径（门控关的程序行为不变）。 */
+int pa_exc_is_registered(const char* name) {
+    for (ExcReg* r = exc_regs; r; r = r->next)
+        if (strcmp(r->child, name) == 0) return 1;
+    return 0;
+}
+
 const char* exc_parent(const char* name) {
     for (ExcReg* r = exc_regs; r; r = r->next)
         if (strcmp(r->child, name) == 0) return r->parent;

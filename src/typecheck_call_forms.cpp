@@ -443,6 +443,21 @@ TypePtr TypeChecker::call_value(Call& c) {
     }
     bool class_value = ft->kind == TyKind::ClassObj;
     if (class_value && !ft->sub.empty() && ft->sub[0]) ft = ft->sub[0];
+    // P4（lang_gaps）：异常类对象值当构造器（E = ValueError; E("x")）→
+    // 异常值。类型名取内层 Exception[name]；运行期从类对象读名字构造。
+    if (class_value && ft->kind == TyKind::Exception) {
+        for (auto& arg : c.args) expr(*arg);
+        for (auto& kw : c.keywords) expr(*kw.value);
+        return mk_exception(ft->name);
+    }
+    // P4：自定义 pass-only 异常类对象值（M = MyErr; M("x")）→ 扁平异常值。
+    // 富异常类走下面的实例构造（vtable 对象）。
+    if (class_value && ft->kind == TyKind::Class && ft->cls &&
+        ft->cls->is_exception_class && !ft->cls->is_rich_exception) {
+        for (auto& arg : c.args) expr(*arg);
+        for (auto& kw : c.keywords) expr(*kw.value);
+        return mk_exception(ft->cls->name);
+    }
     if (ft->kind == TyKind::Class) {
         // 类类型既可能是类本身，也可能是实例值：类名以外的来源
         // （变量、调用结果）都是实例，调用走 __call__。

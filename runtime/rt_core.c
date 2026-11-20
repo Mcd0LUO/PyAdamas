@@ -1324,6 +1324,13 @@ void pa_print_any(int64_t v) {
             pa_print_cpy_value(v);
             return;
         }
+        /* P4（lang_gaps）：print(类对象) 按 <class '...'> 印（CPython 口径）。 */
+        if (pa_is_class_obj((void*)(uintptr_t)v)) {
+            PyAdamasStr* s = pa_class_repr((void*)(uintptr_t)v);
+            pa_print_str(s);
+            pa_rc_dec(s);
+            return;
+        }
     }
     pa_print_i64(v);
 }
