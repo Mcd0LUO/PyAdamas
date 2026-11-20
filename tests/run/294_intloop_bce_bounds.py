@@ -79,6 +79,32 @@ def store_ie(a: list[int], n: int) -> str:
     return "ok " + show(a)
 print(store_ie([0, 0, 0], 5))
 
+# 三候选循环（过摊销门槛）：守卫失败回退，IndexError 时机不变
+def three(a: list[int], b: list[int], n: int) -> str:
+    t = 0
+    try:
+        for i in range(n):
+            t += a[i] + b[i] + a[i]
+    except IndexError:
+        return "IE " + str(t)
+    return "ok " + str(t)
+print(three([1, 2, 3], [10, 20, 30], 5))
+print(three([1, 2, 3], [10, 20, 30], 3))
+print(three([1, 2, 3], [10, 20, 30], 0))
+print(three([], [], 2))
+
+# 常量 bound >= 8（过门槛）与 < 8（跳过）：越界时机都必须不变
+def const_bound(a: list[int]) -> str:
+    t = 0
+    try:
+        for i in range(10):
+            t += a[i] + a[i]
+    except IndexError:
+        return "IE " + str(t)
+    return "ok " + str(t)
+print(const_bound([1, 2, 3, 4, 5]))
+print(const_bound([1, 2, 3, 4, 5, 6, 7, 8, 9, 10]))
+
 # --- expect ---
 # IE after 3
 # IE after 0
@@ -92,3 +118,9 @@ print(store_ie([0, 0, 0], 5))
 # ok 15
 # ok 0
 # IE [0, 10, 20]
+# IE 72
+# ok 72
+# ok 0
+# IE 0
+# IE 30
+# ok 110

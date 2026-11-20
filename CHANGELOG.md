@@ -4,6 +4,103 @@
 
 早期阶段没有逐条留痕，按阶段归纳；0.4 之后逐条记录。
 
+## [0.335] - 2026-11-20
+
+> intloop 分支：**整数循环优化**（跳转线程化 + 仿射 IV 边界检查消除），
+> 测量先行（perf annotate 定位真实热点再选优化）。门控 `PYADAMAS_LOOP_OPT=0/1`
+> **默认 0**；flag-off 生成 asm 逐字节不变（104 基准 cmp 全过）。=1 开推荐子集
+> （掩码 3 = thread+bce）；bit2 同块 load 去重实测负收益，仅显式掩码开发用。
+> 设计/取证/负面结论见 docs/intloop-design.md。接 0.334 之后集成，定版 0.335
+> （集成重编号预留）。
+
+### 新增
+
+- **opt_intloop.cpp**（新文件，三个独立门控遍）：
+  - **P1 跳转线程化**（bit0）：多指令块的出边绕过单 jump 中转块直达链尾。
+    中转块**原样冻结**（不裁块、不重编号、不改向）——两条实测教训：prune
+    重编号扰动 regalloc 线性扫描区间坐标（matmul +9.7% 假回归）；清空/改向
+    中转块让 codegen 的「回边 jump → 循环头 .p2align 5」代理标记丢失
+    （matmul +8.2% / fannkuch +10.7%）。冻结后 nqueens continue 路径
+    bb4→bb7→bb5→bb3 三跳变一跳（perf 实测中转 jmp 占 9.09% 周期）。
+  - **P2 仿射 IV BCE**（bit1）：for-range 自然循环（单 IV、初值 0、步长 +1、
+    bound 不变），下标 idx=IV+off（off 不变，含副本槽链追踪）或 idx=off。
+    入口守卫 off>=0 && max>=off（回绕检测）&& max<len(base)，通过走
+    unchecked 克隆循环，失败回退原检查循环（IndexError 语义/时机不变）。
+    与旧 bounds-elimination-attempt 的关键区别：**克隆纯复制 + 候选翻
+    unchecked，无外提/重定向**（旧 cand_dsts/redirect 混用是 fannkuch 死循环
+    根因）；**允许 IndexStore**（不外提就没有读旧值问题）；只版本化最内层
+    循环（防嵌套克隆爆炸）；体内定义被体外使用/多定义 vreg/含调用 → 拒绝。
+    **kind0 证明存储**：循环内全 hk0 标量存储 + 入口 elem_kind==0 守卫 ⇒
+    克隆存储 imm=1 走纯 mov 快路径（无 kind 检查/旧值读/call）。**摊销门槛**：
+    常量 bound>=8 或运行时 bound 候选数>=3（fannkuch perm 旋转循环平均
+    ~3.5 轮摊不平守卫，实测 +1.7%，门槛后跳过）。
+  - **P3 同块 load 去重**（bit2，**不进默认**）：LoadSlot/LoadGlobal 块内
+    局部值编号 + 再跑 CSE。正确但实测负收益（见下）。
+- **codegen_index.cpp**：gen_index_store_unchecked 的 imm==1 && hk==0 快路径
+  （纯 mov，5 条指令，无 call）。降级器发的 unchecked 存储 imm 恒 0，不走这里。
+- **codegen_regalloc.cpp**：temp_reg_op_ok 接纳 imm==1 hk0 的
+  IndexStoreUnchecked（序列只用 r0/r1/scratch_ptr/nv，都在块内临时池
+  {r8,r9} 外）——**消掉冷路径 call 后块内临时值不再溢出，这是 matmul 收益
+  的关键（不是去 cmp，是去 call）**。
+- **门控管线**：Program.loop_opt → LowerOptions → optimize_ir；manifest 新增
+  `loopopt <mask>` 行参与缓存失效（同 simd/rcsplit/ragraph 纪律，防 A/B
+  命中旧产物）。PYADAMAS_LOOP_OPT：unset/0→0，1→3，其他整数→显式掩码。
+- **回归用例** tests/run/293_intloop_bce.py（仿射形状 N=0/1/奇数 + 副本槽 +
+  运行时偏移）/ 294_intloop_bce_bounds.py（命门：中途越界副作用已发生、
+  首轮越界、零次循环、负偏移回绕、INT64_MAX 偏移回绕检测、运行时 bound、
+  存储越界时机、三候选守卫失败、常量 bound 门槛上下）/ 295_intloop_thread.py
+  （nqueens 早退链 + continue/break + or 链）/ 296_intloop_dedup.py（跨写不得
+  合并）。expect 段全部 CPython 3.14 对拍生成，flag on/off 双模式通过。
+
+### 正确性口径
+
+- IV 范围证明：体内 S∈[0,BOUND-1]（初值 0、步长 +1、有符号 cmp.lt）；
+  S 不回绕（S<=BOUND-1<=INT64_MAX-1）。idx=IV+off∈[off,BOUND-1+off]，
+  守卫三条件 ⇒ idx∈[0,len)。max>=off 检测 BOUND-1+off 回绕。
+- len 不变：循环内无用户调用，CallRt 仅纯标量白名单 + RC 记账；
+  IndexStore 只改元素不改 len；base 槽体内无写、全函数无取地址。
+- kind0 不变：入口 elem_kind==0 + 循环内全 hk0 标量存储 ⇒ kind 恒 0；
+  旧值必是标量（无 RC），免读免 dec。
+- 异常时机：守卫只含不抛指令；unchecked 路径已证不越界；守卫失败走原
+  循环，IndexError 时机/负索引回绕语义不变。零次循环不多抛。
+- 克隆共享槽（两版互斥执行），RC 记账原样复制配平；块号平移用
+  rotate_one_loop 同款 bump（克隆紧跟循环体插入，保住槽区间紧凑——
+  追加函数末尾会拉爆线性扫描区间，实测 +10%）。
+
+### 测量（Xeon Gold 6252 / Cascade Lake，-O2 生成码，taskset 绑核交替 A/B 中位）
+
+- **perf annotate 取证**（基线）：nqueens 98.75% 在 place，~19.6% 周期在
+  continue 跳转链、~20% 在 row 栈重载（LICM 提升出 3 份独立 vreg 各自溢出）；
+  matmul 89.5% 在 run，内循环 ~40 条/轮含 ~14 条栈往返（检查型下标冷路径
+  call 迫使块内临时值全溢出）；fannkuch 65% 函数体 + RC ~8%；fib ~48% 栈 mov。
+- **flag-on（掩码 3）vs off，11 轮交替 BURST=5 中位**：
+  matmul 19.73→14.80ms（**-25.0%**）、nqueens 105.96→96.50ms（**-8.9%**）、
+  fasta -4.0%、fib -1.8%、nbody -1.1%、fannkuch +0.9%（噪声级，门槛后中性）、
+  binary_trees/mandelbrot/spectral_norm ±1.2% 内。
+- matmul flag-on perf：热点变为 imul 9.5% + 元素写 8.7% + 不变量重载
+  （i*N/k*N/aik 跨块 vreg 仍住栈——6 个 callee-saved 被槽占满），栈往返消失。
+- 闸门：difftest 280/0（off+on）；flag-off asm 逐字节 cmp 104/104；
+  套件 298 ran ok ×2（normal off+on）EXIT=0；ASan（JOBS=1）off+on EXIT=0；
+  语料 302 文件 flag-on==off 零差异；check_size 无新增超限（5 个既有超限不变）。
+
+### 负面结论（保留代码/结论，不默认开启）
+
+- **P3 同块 load 去重**：正确但 matmul BCE 收益被吃一半（-24.4%→-11.7%），
+  fannkuch -7.8%→-1.7%。机制：删 load 改变槽活跃区间 → 线性扫描重排 →
+  克隆热槽丢寄存器。nqueens 期望的「row 合并抢第 6 个 callee-saved」未发生
+  （-0.2%）。仅显式掩码 4-7 开发用。
+- **fannkuch flip 内循环**（while i<m，双 IV i+=1/m-=1，bound 每轮递减）：
+  本轮保守形状（单 IV + 不变 bound）匹配不上，跳过。对 C++ 2.4× 差距是
+  结构性的（RC 分配 ~8% + 双 IV swap + 栈往返），需双 IV 仿射分析或
+  regalloc 改进，独立一轮。
+- **fib 调用开销**（~48% 栈 mov）：assign_global_vreg_regs 只提升跨块 vreg，
+  同块跨调用活跃值（第一次递归结果）不在候选池 → 溢出。扩展候选池涉及
+  整函数独占寄存器与块内临时池交互，风险高，本轮跳过（Go 也 16.9ms，
+  C++ 7.3ms 靠内联/尾优化，非单纯 regalloc）。
+- **IVSR 历史教训验证**：本轮不建累加器（12 累加器悲剧），BCE 去 call
+  而非去 imul——matmul 的 imul 是业务乘法（aik*b），削不得；真正可削的
+  索引 imul（i*N）已被 LICM 外提，剩余成本在溢出而非乘法本身。
+
 ## [0.334] - 2026-11-20
 
 > simd2 分支：SIMD 向量化扩展到 **nbody（浮点逐元素 map + pairwise 力）与 matmul

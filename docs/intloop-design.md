@@ -143,6 +143,70 @@ callee-saved（%rbx），%r12-%r15 空闲。候选对策：把「同块但跨调
   try_cache 比对——与 simd/rcsplit/ragraph 同纪律，防 A/B 命中旧产物。
 - flag-off：optimize_ir 不进入任何新代码路径，asm 逐字节不变（38 热基准 cmp）。
 
-## 3. 实测结果（实现后填写）
+## 3. 实测结果
 
-（待填：abbench A/B 中位数、各闸门结果、负面结论）
+### 3.1 实现与迭代（测量驱动的三次修正）
+
+1. **P1 初版（prune 重编号）**：nqueens -6.4% 但 matmul +9.7%。objdump 对比
+   发现 prune 重编号扰动线性扫描区间坐标（块号×stride），克隆/中转块删除
+   让 s2/s6 丢寄存器。→ **不裁块不重编号**。
+2. **P1 二版（清空死块）**：matmul 仍 +8.2%、fannkuch +10.7%。根因：codegen
+   用「回边 jump」当循环头对齐代理（.p2align 5），清空/改向中转块让热 incr
+   块丢对齐。→ **单 jump 块原样冻结**，只改多指令块出边（直达链尾）。
+   修正后 nqueens -7~9%，matmul/fannkuch 中性。
+3. **P2 初版（追加克隆到函数末尾 + 仅去检查）**：matmul +10%。两个根因：
+   (a) 克隆共享槽但区间被拉成跨全函数 → 热槽丢寄存器；(b) **unchecked 存储
+   仍有 kind 冲突冷路径 call** → 块内临时值照旧溢出（temp_reg_op_ok 拒绝
+   IndexStoreUnchecked）。→ 克隆紧跟循环体插入（bump 块号）+ **kind0 证明
+   存储**（入口 elem_kind==0 守卫 + 循环内全 hk0 标量 ⇒ imm=1 纯 mov 快路径）
+   + temp_reg_op_ok 接纳该形态。修正后 **matmul -24.4%（BCE-only）**。
+4. **摊销门槛**：fannkuch perm 旋转循环（平均 ~3.5 轮）摊不平守卫（BCE-only
+   +1.7%）。常量 bound>=8 或运行时 bound 候选数>=3 才版本化。门槛后
+   fannkuch 中性（+0.9%，噪声级）。
+
+### 3.2 最终 A/B（掩码 3 = thread+bce，11 轮交替 BURST=5 绑核中位）
+
+| 用例 | off | on | 变化 |
+|---|---|---|---|
+| matmul | 19.73ms | 14.80ms | **-25.0%** |
+| nqueens | 105.96ms | 96.50ms | **-8.9%** |
+| fasta | 8.84ms | 8.48ms | -4.0% |
+| fib | 25.75ms | 25.29ms | -1.8% |
+| nbody | 39.91ms | 39.48ms | -1.1% |
+| fannkuch | 13.36ms | 13.48ms | +0.9%（噪声级） |
+| binary_trees | 8.65ms | 8.71ms | +0.8%（噪声级） |
+| mandelbrot | 24.01ms | 24.30ms | +1.2%（噪声级） |
+| spectral_norm | 59.76ms | 60.15ms | +0.6%（噪声级） |
+
+多租户负载窗口间 fannkuch 曾在 -3.9%~+3.5% 摆动（小效应+窗口敏感），
+门槛后稳定中性。matmul flag-on perf：imul 9.5% + 元素写 8.7% 主导，
+栈往返消失；剩余成本是跨块不变量（i*N/k*N/aik）重载——6 个 callee-saved
+被槽占满，跨块 vreg 无寄存器可用（后续方向）。
+
+### 3.3 闸门结果
+
+- flag-off asm 逐字节 cmp：**104/104** 基准与基线 c7a5103 一致。
+- difftest（O0 vs O2）：**280/0**，flag-off 与 flag-on 各一遍。
+- 全套件：**298 ran ok ×2**（normal off+on）EXIT=0；**ASan（JOBS=1）off+on
+  EXIT=0**。
+- 语料零差异：tests/run + bench/daily **302 文件 flag-on==off**（输出+rc）。
+- CPython 对拍：回归 293-296 expect 段由 CPython 3.14 生成，on/off 双模式
+  通过；四基准输出与 CPython 一致（14200 / -104936,22 / 43198080 / 2178309）。
+- check_size：无新增超限（5 个既有超限文件不变；opt_intloop.cpp 993 行 < 1200）。
+
+### 3.4 负面结论与剩余
+
+- **P3 同块 load 去重（bit2）**：正确但负收益——matmul BCE 收益被吃一半
+  （-24.4%→-11.7%），fannkuch -7.8%→-1.7%；nqueens 期望的 row 合并抢寄存器
+  未发生（-0.2%）。机制：删 load 改变槽活跃区间 → 线性扫描重排 → 克隆热槽
+  丢寄存器。**不进默认掩码**，代码保留供后续（与 regalloc 改进协同可能翻正）。
+- **fannkuch flip 循环**：双 IV（i+=1, m-=1）+ 非常量 bound，本轮形状不匹配。
+  对 C++ 2.4× 差距结构性（RC ~8% + swap 栈往返）。需双 IV 仿射分析，独立一轮。
+- **fib**：同块跨调用活跃值溢出（~48% 栈 mov），callee-saved 提升候选池扩展
+  风险高，跳过。Go 16.9ms 同样有调用开销；C++ 7.3ms 靠内联/尾优化。
+- **matmul 剩余**：跨块不变量住栈（槽占满 callee-saved）。方向：槽/vreg 统一
+  分配（需 live range splitting，见 regalloc 失败记录）或 SIMD 整数路径
+  （0.334 PYADAMAS_SIMD 已另行覆盖 matmul，门控独立）。
+- **nqueens 剩余**：row+c/row-c+n 每轮重算（LICM 提了 row 但加法仍在循环内，
+  因为 c 变）；place 递归调用阻止 BCE。对 Go 1.5× 差距主要在调用约定/帧
+  开销（0x148 字节帧 + 6 push），需帧布局/调用优化，独立一轮。
