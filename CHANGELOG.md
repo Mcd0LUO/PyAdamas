@@ -4,6 +4,57 @@
 
 早期阶段没有逐条留痕，按阶段归纳；0.4 之后逐条记录。
 
+## [0.344] - 2026-11-21
+
+> vect1 分支：**SIMD 通用化（P4 tractable 核心）——通用循环自动向量化器**
+> （docs/simd-vectorization-design.md §11）。新 codegen_vect.cpp，门控
+> `PYADAMAS_VECT=1` **默认 0**。与特化 matcher（0.333/0.334 认
+> spectral_norm/nbody/matmul 精确形状）互补：基于 **IR 结构 + 数据引用/别名
+> 分析**识别任意可数 for 循环的逐元素 map / reduction，**不依赖精确指令形状**。
+> 别名/依赖证不出保守跳过（标量 fallback）；浮点 reduction 保序累加逐位一致。
+> flag-off 生成 asm 逐字节不变（38 热基准 cmp 全同）。
+
+### 新增
+
+- **通用循环向量化器**（codegen_vect.cpp/.h）：分析先行发射在后（循环结构 →
+  槽分类 → 表达式 DAG → 别名/依赖 → 寄存器分配 dry-run 全过才发射，否则零字节）。
+  覆盖：可数 for（步长 1 结构判据）+ 浮点数组逐元素 map（out[j+c]=f(a[j+c'],
+  b[j+c''],不变量)，float add/sub/mul/div → SSE2 2-lane packed）+ 浮点 reduction
+  （s+=f(...)，保序提取累加 addsd 低/高 lane，与标量逐位一致）+ 整数数组 map
+  （add/sub → paddq/psubq 模 2^64 精确）+ 整数 reduction（paddq 2-lane + 出口
+  水平求和）+ 原地 map（读在写前同偏移）+ 偏移下标（j+c）+ 体局部临时槽 SSA 替换。
+- **别名/依赖安全判据**：不同 list 对象入口运行时两两判等守卫（循环版本化）；
+  同对象读+写只允许同偏移 0 且读在写前的逐元素原地 map；len>=n+maxoff（溢出
+  检查）&& kind==0 && j>=0 && j+1<n 守卫；循环变量副本槽外部有读 → 跳过。
+  向量循环零调用，IndexError/负索引/kind 升级语义与时机不变。
+- **规范化数组基址**：非内联函数体内 load.slot/load.global 解析到稳定来源，
+  同槽/全局不同 vreg 归并为同一逻辑数组；不变量广播 float/int 统一鲁棒化。
+- **尾循环**：向量循环退出 jmp cond（计数器精确等于标量 j==n），余 1 经 cond
+  回体块入口守卫失败走原标量体。门控写进模块缓存清单（manifest vect 行）。
+- 回归 344-349：非基准 map/reduction/原地/偏移/int map + 别名依赖负例 + 边界
+  （n=0/1/2/3、len<n IndexError 时机、kind 升级），CPython 对拍零差异。
+
+### 验证
+
+- flag-off asm 对 master 逐字节不变（38 热基准）；difftest vect-on 317/0；
+  全套件 normal vect-on/flag-off EXIT=0（335/334 ran ok）；**ASan vect-on
+  JOBS=1 EXIT=0（335 ran ok）**；check_size 无新增超限文件。
+- 非基准探针（saxpy+dot，N=200000×30）vect-on **1.89×** 加速，checksum 逐位
+  一致；spectral_norm/nbody/matmul 输出钉住不变、性能不回归（0.98/1.00/1.01×）。
+
+### 修复
+
+- 槽 read_before_store 顺序误判致 classify 自环栈溢出（编译器崩溃）：min_load_pos
+  完整扫描后统一判序 + classify visiting 环检测（编译器绝不崩溃）。
+
+### 负面 / 剩余路径
+
+- 本轮不做 AVX2（需 cpuid+xgetbv 检测 + ymm/xmm 提升池冲突重设计）；不做改序
+  float 水平求和（输出风险，保序已接近 2-lane 上限）；int 乘（pmuludq 组合+
+  守卫）/Convert int→float/多 reduction/写后读 forwarding/循环变量外读维护
+  留待后续（§11.7）。通用自动向量化是 gcc/clang 数年大功能，本轮交付结构判据
+  驱动、别名/依赖保守、门控默认关的安全通用核心。
+
 ## [0.343] - 2026-11-21
 
 > lang1 分支：**P4 语言缺口 块1+2——异常类当值 + contextlib.suppress/closing；file 协议泛化 + io.StringIO/BytesIO**

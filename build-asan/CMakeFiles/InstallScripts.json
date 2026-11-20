@@ -1,0 +1,7 @@
+{
+	"InstallScripts" : 
+	[
+		"/tmp/wt-vect1/build-asan/cmake_install.cmake"
+	],
+	"Parallel" : false
+}

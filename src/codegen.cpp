@@ -753,7 +753,7 @@ void AsmGen::emit_eh_tables() {
 std::string generate_asm(const IRModule& m, bool disable_unknown_index,
                          bool zero_cost_exc, bool index_readonly, bool rc_split,
                          bool ra_graph, bool simd, bool ra_opt,
-                         bool inline_opt, bool type_tags) {
+                         bool inline_opt, bool type_tags, bool vect) {
     AsmGen g;
     g.set_disable_unknown_index(disable_unknown_index);
     g.set_index_readonly(index_readonly);
@@ -764,6 +764,7 @@ std::string generate_asm(const IRModule& m, bool disable_unknown_index,
     g.set_ra_opt(ra_opt);
     g.set_inline_opt(inline_opt);
     g.set_type_tags(type_tags);
+    g.set_vect(vect);
     return g.gen(m);
 }
 

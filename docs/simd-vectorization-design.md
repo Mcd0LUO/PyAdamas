@@ -480,3 +480,126 @@ movapd+mulsd 自乘。教训：**浮点向量化回归必须用非退化初值**
 
 spectral_norm 的保序 addsd 链（0.333 §3.4）与 nbody 的标量 sqrt/div 链是同类
 剩余瓶颈：改序/加宽都必须先钉住输出（逐位或基准规模全验证），否则不启用。
+
+
+## 11. 0.344 通用化（P4 tractable 核心）：codegen_vect.cpp
+
+> 状态：**已落地**（vect1 分支）。门控 `PYADAMAS_VECT`，**默认 0**。与特化
+> matcher（§1-10，认 spectral_norm/nbody/matmul 精确形状）**互补**：gen_block
+> 先调特化 `try_simd_vectorize`，未命中再调通用 `try_vect_loop`。通用路径
+> **不依赖精确指令形状**，基于 IR 结构 + 数据引用/别名分析识别任意可数 for
+> 循环的逐元素 map / reduction（参照 gcc tree-vect / LLVM LoopVectorize 的
+> 依赖分析 + 循环版本化思路）。本轮做 tractable 通用核心，非一轮做完所有。
+
+### 11.1 架构：分析先行，发射在后
+
+正确性命门要求「证不出保守跳过，一个字节不发」。因此 `try_vect_loop` 分两阶段：
+**纯分析**（循环结构 → 槽分类 → 表达式 DAG 分类 → 别名/依赖 → 寄存器分配可行性
+dry-run）全部通过后才**发射**。任何一步失败立即 return false（标量 fallback）。
+另设 classify `visiting` 环检测：任何表达式环保守 Fail，**编译器绝不崩溃**
+（开发期曾踩 read_before_store 顺序误判致自环栈溢出，见 §11.6）。
+
+### 11.2 识别（结构判据，非基准形状）
+
+* **可数 for**：cond 块 `load.slot sJ; cmp.lt sJ,n; branch body,end`、incr 块
+  `load.slot sJ; bin.add sJ,1; store.slot sJ; jump cond`（步长 1）。所有
+  `for j in range(n)` 都降成这个形状——是结构判据，不是认某个基准。
+* **归纳变量 j 与副本槽**：sJ 及其「体块单写、写值来自 j-alias 装载、读全在
+  写后、无外部读、不取地址」的副本槽（j-alias 不动点）。读 j-alias ≡ j。
+* **表达式 DAG 分类**（memoized 递归）：InvF/InvI（常量/稳定槽/全局/跨块值，
+  setup 广播）、InvPtr（list 基址，透明）、J、VecF/VecI（逐 lane 2-lane 值）、
+  Acc（reduction 旧值）。float Bin add/sub/mul/div → packed SSE2（每 lane IEEE
+  与标量同）；int Bin add/sub → paddq/psubq（模 2^64 与 addq/subq 逐位一致）。
+* **仿射下标** j+c（c>=0 常量）：折叠进寻址位移 disp=c*8，不占向量整数运算。
+  下标计算 bin.add(j,c) 标记 Skip（不是向量值）。
+* **map**：`out[j+c]=f(a[j+c'],b[j+c''],不变量)`，list[float]/list[int] kind0。
+* **reduction**：槽 sT 体块恰一写一读，写值=读值+expr（或 expr+读值），expr
+  不含 acc。float **保序提取累加**（addsd 低 lane→movhlps→addsd 高 lane），
+  与标量逐位一致（不做改序水平求和，输出零风险）；int **paddq 2-lane** 累加
+  （模 2^64 结合律精确）+ 出口水平求和写回槽。
+* **体局部临时槽**：单写、读全在写后、无外部读、非堆、不取地址 → SSA 替换
+  （load≡所存值），跳过存储。用户变量 `t=a[i]*2; out[i]=t*t` 由此通用支持。
+* **规范化数组基址**：非内联函数在体内 `load.slot s0` 装载 list 指针；把
+  load.slot/load.global/Mov 解析到稳定来源（slot_mop/global_mop/src_mop），
+  同槽/全局的不同 vreg 归并为同一逻辑数组（list_key）。
+
+### 11.3 别名/依赖安全判据（宁保守跳过）
+
+* 循环内唯一内存写 = 下标写（map）+ 槽写（栈帧，不与堆别名）；**无调用、
+  无 store.global**（op 白名单）→ 向量循环零调用，list/data/不变量期间不可能
+  被 append/realloc/GC 改写。
+* **不同 list 对象**：data 数组必不相交（各自 malloc，无 view）→ 入口运行时
+  两两判等守卫（**循环版本化**）；相等 → 保守标量。
+* **同对象读+写**：只允许「全偏移 0 且读在写前」的逐元素原地 map
+  （`a[i]=f(a[i])`，跨迭代/跨 lane 无依赖证明）。写偏移非 0、读在写后
+  （`out[i]=...; s+=out[i]`）、跨迭代依赖（`a[i]=a[i+1]`）→ 跳过。
+* **范围守卫**：每 list `len>=n+maxoff`（addq 后 js 查溢出）&& `kind==0`
+  && `j>=0` && `j+1<n`。不满足整段标量，IndexError/负索引/kind 升级语义
+  与时机不变（冷路径仍由 pa_list_get/pa_list_set 处理）。
+* **循环变量外读**：副本槽外部有读（`for i: ...; print(i)`）→ 跳过（向量
+  路径不维护副本槽终值）。计数器 sJ 用 **jmp cond 出口**精确等于标量（j==n），
+  故 sJ 外部可读。
+
+### 11.4 lowering 与尾循环
+
+SSE2 2-lane（movupd/addpd/subpd/mulpd/divpd/paddq/psubq）。scratch 只用永不
+提升的 GPR（rax/rcx/rdx/rsi/rdi）与 xmm0-7；j 原地 addq $2 在提升 GPR 或 rsi
+工作+每轮写回；float acc 原地累加在提升 xmm8-15 或 scratch+每轮写回；data
+指针每 list 常驻一个 scratch GPR；不变量广播 setup 一次常驻。寄存器分配
+（持久不变量+acc 先占，临时值按末次使用线性扫描回收）在发射前 dry-run，
+放不下保守跳过。**尾循环**：向量循环退出 `jmp cond`——j==n 直接退出（计数器
+精确）；j==n-1 经 cond 回体块，入口 j+1<n 守卫失败 → gen_block 照常发射的
+原标量体处理余 1。int reduction 出口先水平求和写回槽再 jmp cond（标量尾/
+end 读最新）。
+
+### 11.5 门控与闸门
+
+`PYADAMAS_VECT=1` 开启（默认 0），写进模块缓存清单（manifest vect 行，
+read/write/try_cache 比对）。flag-off `vect_func_ok` 第一判断返回，一个字节
+不发。验收（vect1，基线 master d6aea9a）：
+
+* flag-off asm 对 master **逐字节不变**：38 热基准（realistic 6 + compare 9
+  + daily 23）cmp 全同。
+* difftest（O0/O2，vect-on）**317/0**。
+* 全套件 normal vect-on **EXIT=0（335 ran ok）**；normal flag-off EXIT=0（334）；
+  **ASan vect-on JOBS=1 EXIT=0（335 ran ok）**。
+* check_size 无新增超限文件（codegen_vect.cpp <1200；codegen_impl.h 保持 1200；
+  其余超限为 master 既有）。
+* 回归 344-349（非基准 map/reduction/原地/偏移/int map + 别名依赖负例 + 边界）
+  flag-off/vect-on 均 ran ok，CPython 对拍零差异。
+* spectral_norm/nbody/matmul flag-on 输出==flag-off（811972 / -928502048 /
+  43198080 钉住）；性能不回归（min-of-9 比值 0.98/1.00/1.01×）。
+
+### 11.6 性能实证（非基准）
+
+非基准探针 `saxpy`（out[i]=a[i]*1.5+b[i]）+ `dot`（s+=a[i]*b[i]），
+N=200000 × 30 轮，Xeon Gold 6252，min-of-9 交替绑核：
+
+| | flag-off | vect-on | 比值 |
+|---|---|---|---|
+| 墙钟 min | 49.2ms | 25.5ms | **1.93×** |
+| 墙钟 median | 49.3ms | 26.3ms | 1.87× |
+
+checksum 逐位一致（5318446）。2-lane 理论上限 2×，保序 addsd 链使 reduction
+部分略低于 2×，实测 1.93× 接近上限。**证明通用性**：任意浮点数组 map/reduction
+循环（非 spectral_norm/nbody/matmul）向量化成功并加速。
+
+开发期 bug 取证：read_before_store 按指令顺序扫描时，load 早于 store 而
+store_pos 尚未置位 → 漏判 → 把「读在写前」的槽误判临时槽 → classify 自环 →
+编译器栈溢出（50_licm/49_inline/298）。修复：min_load_pos 完整扫描后统一判
+序 + classify visiting 环检测。教训：**槽读写序判定必须在全量扫描后做**。
+
+### 11.7 剩余 / 通用化路径（更新 §9）
+
+| 阶段 | 内容 | 状态 |
+|---|---|---|
+| P4-core | 通用可数 for + float/int 逐元素 map + float/int reduction + 原地/偏移/临时槽 + 别名版本化 | **0.344 已落地** |
+| P4+ | Convert int→float（float(i)，需 int32 范围守卫 + [j,j+1] 向量）；int 乘（pmuludq 组合 + 不变量因子守卫，§10.1 已证）；多 reduction；float Un Neg（xorpd 符号掩码） | 待 |
+| P4++ | 写后读同数组（store-to-load forwarding）；循环变量外读（维护副本槽终值）；跨迭代依赖距离 >=VF 的安全判定；inv+j 行基址（matmul 形态通用化） | 待 |
+| P5 | AVX2/AVX-512 dispatch（cpuid+xgetbv 检测，ymm 与提升池冲突需重设计）；对齐 peel；向量 IR op + 类型 + regalloc（彻底通用化） | 待评估 |
+
+**负面结论**：本轮不做 AVX2（需运行时 CPU 检测 + ymm/xmm 提升池冲突重设计，
+收益不确定，§8 已评估）；不做改序 float 水平求和（输出风险，保序已 1.89×
+接近 2-lane 上限）；int 乘/Convert/多 reduction 复杂度高于本轮 tractable
+核心，保守跳过并留路径。通用自动向量化是 gcc/clang 数年的大功能，本轮交付
+的是**结构判据驱动、别名/依赖保守、门控默认关**的安全通用核心。

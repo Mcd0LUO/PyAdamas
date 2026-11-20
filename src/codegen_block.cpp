@@ -825,7 +825,7 @@ void AsmGen::gen_block(const Block& b) {
         // SIMD 向量化前奏（PYADAMAS_SIMD 门控，默认关）：匹配到热点循环体
         // （reduction/int map/nbody map/pair）则发「守卫 + SSE2 向量循环 +
         // 跳标量尾」，随后照常发射原标量指令作尾循环/fallback。不匹配零字节。
-        try_simd_vectorize(b);
+        if (!try_simd_vectorize(b)) try_vect_loop(b);
 
         // 预扫描：每个变量槽在本块内被 store 的位置，以及每个 vreg
         // 第一次被读的位置。LoadSlot 的别名只在「读之后、第一次赋值之前」
