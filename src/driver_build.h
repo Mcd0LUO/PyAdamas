@@ -83,6 +83,10 @@ struct Program {
     // 追加 NONE/BOOL/精确堆子类 tag，解锁 isinstance/repr/pprint。改变 IR
     // 与代码生成结果（也改变 tag 判定），必须参与模块缓存失效。
     bool type_tags = false;
+    // P4 语言缺口（PYADAMAS_LANG_GAPS，默认关）：异常类当值 / file 协议泛化 /
+    // traceback / dataclass 编译期展开。开启时强制 type_tags（CLASS tag=11
+    // 等精确堆子类标签是 P4 的表示基础）。改变 IR 与代码生成结果，参与缓存失效。
+    bool lang_gaps = false;
     // 任一模块需要 unknown 索引就保持开启；全都不需要时入口关掉维护。
     bool needs_unknown_index = false;
     // 任一模块用到 from c import（dlsym RTLD_DEFAULT）就置位：链接期

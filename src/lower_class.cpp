@@ -196,7 +196,10 @@ void Lowerer::lower_classdef(ClassDef& c) {
             return;
         }
         call_void(RtFn::ExcRegister, {const_str(ci->name), const_str(ci->exc_parent)});
-        if (!ci->is_rich_exception) return;
+        // P4（lang_gaps）：pass-only 异常类当值用时（suppress(MyErr) 等）
+        // 仍需运行期类对象单例——继续走下面的类对象创建（无方法/字段，
+        // vtable 计划为空）。门控关或没当值用时保持旧的早退，一字不变。
+        if (!ci->is_rich_exception && !(opts_.lang_gaps && ci->value_used)) return;
         // 富异常：继续建 vtable 实例布局。
     }
     // 类体语句在下面按执行语义降级；类命名空间未建模，赋值走模块全局。
@@ -339,6 +342,19 @@ void Lowerer::lower_classdef(ClassDef& c) {
         for (auto& [key, p] : plans) {
             if (!p.own || !own_fidx.count(key)) continue;
             for (int slot : p.slots) os.push_back(slot);
+        }
+    }
+
+    // P4（lang_gaps）：把本类声明的普通方法按「限定名.方法名→槽」登记进
+    // 运行期动态分派表（rt_lang.c）。closing 的 .close() / file 协议泛化
+    // 靠它在 unknown 实例上按 MRO 找实现。门控关时一条都不发射。
+    if (opts_.lang_gaps) {
+        std::string qual = mod_.runtime_name + "." + c.name;
+        for (auto& m : ci->methods) {
+            if (m.kind != MethodKind::Normal || m.decorated || m.slot < 0 || !m.def)
+                continue;
+            call_void(RtFn::MethodRegister,
+                      {const_str(qual), const_str(m.name), const_int(m.slot)});
         }
     }
 

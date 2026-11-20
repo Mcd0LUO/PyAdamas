@@ -146,7 +146,7 @@ else()
   set(PYADAMAS_RT_WERROR "")
 endif()
 
-set(PYADAMAS_RT_PARTS core exc eh gen async task fd agen str list dict slice class math complex format file random os subprocess time stdlib json re functools datetime deque hash debug personality diag cpy cffi vthread any)
+set(PYADAMAS_RT_PARTS core exc eh gen async task fd agen str list dict slice class math complex format file random os subprocess time stdlib json re functools datetime deque hash debug personality diag cpy cffi vthread any lang)
 # add_custom_command 不会自动继承 CMAKE_<LANG>_COMPILER_LAUNCHER；
 # 手动把 ccache 之类的 launcher 接到运行时编译上（未设置时展开为空，行为不变）。
 set(PYADAMAS_RT_LAUNCHER "")

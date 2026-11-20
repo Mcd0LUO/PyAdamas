@@ -717,6 +717,16 @@ int64_t pa_file_seekable(PyAdamasFile* f) {
 }
 int64_t pa_file_closed(PyAdamasFile* f) { return f ? f->closed : 1; }
 
+/* P4（lang_gaps）：unknown 字是不是 file 对象。file 没有魔数，按
+   RC 注册表 + kind OBJ + 精确尺寸判别（与 pa_is_exc 同口径）。只被
+   门控开时发射的动态分派调用（pa_method_call0 / filelike 包装）。 */
+int64_t pa_is_file(void* v) {
+    if (!v) return 0;
+    PyAdamasRc* h = (PyAdamasRc*)v - 1;
+    if (!rc_index_has(h)) return 0;
+    return h->kind == PYADAMAS_RC_OBJ && h->size == (int64_t)sizeof(PyAdamasFile) ? 1 : 0;
+}
+
 PyAdamasStr* pa_file_name(PyAdamasFile* f) {
     if (!f) return str_new("", 0);
     if (f->name) return str_new(f->name->data, f->name->len);

@@ -71,6 +71,12 @@ TypePtr TypeChecker::expr(Expr& e) {
                         if (sym->ty->cls) sym->ty->cls->value_used = true;
                         return mk_class_obj(sym->ty);
                     }
+                    // P4（lang_gaps）：异常类名保持 Class 类型（raise/except
+                    // 的名字机制不动），但标记 value_used——当值用（suppress
+                    // 实参 / issubclass）时运行期类对象单例必须存在。
+                    if (lang_gaps_ && sym->ty && sym->ty->kind == TyKind::Class &&
+                        name_is_class(n) && sym->ty->cls && sym->ty->cls->is_exception_class)
+                        sym->ty->cls->value_used = true;
                     return sym->ty;
                 }
                 if (lookup_module_alias(n.id)) {
@@ -89,7 +95,11 @@ TypePtr TypeChecker::expr(Expr& e) {
                 // 仍按名字分派（call_name），不受影响。
                 if (is_type_name(n.id)) return type_name_value(n.id);
                 if (is_builtin_callable(n.id)) return builtin_type(n.id);
-                if (is_exception_name(n.id)) return t_unknown();
+                // P4（lang_gaps）：内建异常类当值 → 运行期类对象（ClassObj，
+                // CLASS tag=11）。内层用 Exception[name] 记类型名（没有
+                // ClassInfo：内建异常无编译期布局）。门控关时仍是 unknown/0。
+                if (is_exception_name(n.id))
+                    return lang_gaps_ ? mk_class_obj(mk_exception(n.id)) : t_unknown();
                 if (n.id.starts_with("__") && n.id.ends_with("__")) return t_unknown();
                 // 有 from x import * 时无从知道导入了哪些名字，只能放行
                 if (star_import_) return t_unknown();
@@ -477,6 +487,10 @@ TypePtr TypeChecker::expr(Expr& e) {
                     err(a.line, a.col, std::format("re.Match has no attribute '{}'", a.attr));
                     return t_unknown();
                 }
+                // P4（lang_gaps）：异常类值的 __name__（运行期类对象单例）。
+                if (lang_gaps_ && ot && ot->kind == TyKind::Class && ot->cls &&
+                    ot->cls->is_exception_class && a.attr == "__name__")
+                    return t_str();
                 // 双下划线属性属于运行时的协议实现，静态上没有方法表
                 if (a.attr.size() > 4 && a.attr.starts_with("__") && a.attr.ends_with("__"))
                     return t_unknown();

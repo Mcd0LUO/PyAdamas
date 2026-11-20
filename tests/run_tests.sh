@@ -104,6 +104,11 @@ run_test() {
     if sed -n '1,8p' "$f" | grep -q '^# pyadamas: type-tags'; then
         extra="PYADAMAS_TYPE_TAGS=1"
     fi
+    # P4 语言缺口（lang-gaps）：异常类当值/file 协议/traceback/dataclass。
+    # 驱动侧 LANG_GAPS=1 会强制带上 TYPE_TAGS（CLASS tag 是表示基础）。
+    if sed -n '1,8p' "$f" | grep -q '^# pyadamas: lang-gaps'; then
+        extra="PYADAMAS_LANG_GAPS=1"
+    fi
     # 输出加大小上限：用例卡进死循环时它会一直写，曾经留下 19G 的单个
     # 日志文件（78_enumerate_zip.py.out），把 build 目录撑到 32G。
     # 截断后 diff 必然不等，用例照样报 OUTPUT DIFF，不影响判定。

@@ -10,9 +10,14 @@
   执行，异常本身原样向外抛（**从不吞异常**，也不用 throw 注回）。
 - 包装函数只转发 0~4 个**位置**参数：把 `*args` 转发给 unknown 被装饰者
   在 pa 里只能走定长实参，关键字参数会抛 TypeError。
-- suppress() / closing() 不在本模块：suppress 要把异常类作为普通值存起来
-  再和 with 协议的异常类比较，但异常类过 unknown 参数只剩 0（同一性丢失）；
-  closing 要在任意对象上调用 `.close()`，pa 对 unknown 值不支持方法调用。
+- suppress() / closing()（P4，PYADAMAS_LANG_GAPS=1）：异常类当值后
+  （ClassObj 单例 + CLASS tag=11），suppress 把类值存进 unknown 元组，
+  __exit__ 用内部 intrinsic __pa_exc_is_a(et, E) 按名字判父子（with 协议
+  的 et 是类型名串）；closing 用 __pa_close(thing) 做零参动态 .close()
+  （file 直调 / 类实例按运行期方法名→槽登记表沿 MRO 分派）。
+  边界：closing.__enter__ 返回 unknown，`as g` 拿到的值不支持方法调用，
+  请用原引用；门控关时异常类值退化成 0，suppress 不可用（运行期
+  __pa_exc_is_a 报 TypeError）。
 """
 
 
@@ -92,3 +97,48 @@ def contextmanager(func: unknown):
 
 
 ContextManager = _GeneratorContextManager
+
+
+class suppress:
+    """with 块里抑制指定异常（CPython contextlib.suppress 口径）。
+
+    异常类以运行期类对象值存进 unknown 元组；__exit__ 收到的 et 是
+    with 协议给的类型名串，__pa_exc_is_a 按 exc_is_a 父子链匹配。
+    不匹配的异常原样外抛；正常路径（et is None）不抑制。
+    """
+
+    _exceptions: unknown
+
+    def __init__(self, *exceptions) -> None:
+        self._exceptions = exceptions
+
+    def __enter__(self) -> None:
+        return None
+
+    def __exit__(self, et, ev, tb) -> bool:
+        if et is None:
+            return False
+        for E in self._exceptions:
+            if __pa_exc_is_a(et, E):
+                return True
+        return False
+
+
+class closing:
+    """with 块结束时保证 thing.close()（CPython contextlib.closing 口径）。
+
+    thing 过 unknown：file 对象由运行期直调 pa_file_close；类实例按
+    方法名→槽登记表沿 MRO 找 close 实现。不抑制异常（__exit__ 恒 False）。
+    """
+
+    thing: unknown
+
+    def __init__(self, thing) -> None:
+        self.thing = thing
+
+    def __enter__(self) -> unknown:
+        return self.thing
+
+    def __exit__(self, et, ev, tb) -> bool:
+        __pa_close(self.thing)
+        return False

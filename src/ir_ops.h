@@ -612,6 +612,15 @@ enum class RtFn : uint16_t {
     PrintU64,              // (u64) -> void
     FmtU64,                // (u64, str* spec) -> str*
     UIntToBase,            // (u64, base) -> str*  hex()/bin()/oct() 的无符号版
+    // P4 语言缺口（0.343，PYADAMAS_LANG_GAPS）：异常类当值 + 动态方法分派。
+    // 追加在末尾，不改既有编号（集成时按落地顺序重排）。
+    ExcClassObj,           // (str* name) -> class*  内建异常类单例（+1，CLASS tag）
+    ExcClassIsA,           // (str* name, class*) -> i64  异常名是否属于该类（suppress）
+    ExcSubclass,           // (class* a, class* b) -> i64  异常类对象间 issubclass
+    ExcClassValueNew,      // (class*, str* msg|0) -> excval*  类对象值构造异常值
+    ExcClassValueNewArgs,  // (class*, list* args) -> excval*  多参版
+    MethodRegister,        // (str* qual, str* method, i64 slot) -> void  方法名→槽登记
+    MethodCall0,           // (obj*, str* method) -> i64  动态零参方法调用（close 等）
 };
 
 inline const char* rt_name(RtFn f) {
@@ -644,6 +653,13 @@ inline const char* rt_name(RtFn f) {
         case RtFn::AnyLoadTag: return "pa_any_load_tag";
         case RtFn::AnyTypeIs: return "pa_any_type_is";
         case RtFn::AnyDictItems: return "pa_any_dict_items";
+        case RtFn::ExcClassObj: return "pa_exc_class_obj";
+        case RtFn::ExcClassIsA: return "pa_exc_class_is_a";
+        case RtFn::ExcSubclass: return "pa_exc_subclass";
+        case RtFn::ExcClassValueNew: return "pa_exc_class_value_new";
+        case RtFn::ExcClassValueNewArgs: return "pa_exc_class_value_new_args";
+        case RtFn::MethodRegister: return "pa_method_register";
+        case RtFn::MethodCall0: return "pa_method_call0";
         case RtFn::ListGet: return "pa_list_get";
         case RtFn::ListSet: return "pa_list_set";
         case RtFn::ListSetLen: return "pa_list_set_len";

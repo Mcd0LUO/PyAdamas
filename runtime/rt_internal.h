@@ -1306,6 +1306,17 @@ PyAdamasList* pa_any_iter_list(int64_t v);
 /* P2（0.340）：tag 版迭代物化 + unknown dict 的 (key,value) 对（rt_class.c）。 */
 PyAdamasList* pa_any_iter_list_t(int64_t v, int64_t tag);
 PyAdamasList* pa_any_dict_items(int64_t v, int64_t tag);
+/* P4（0.343，PYADAMAS_LANG_GAPS，rt_lang.c）：内建异常类当值 + 零参动态
+   方法分派。只被门控开时发射的代码调用；门控关的程序不碰这些入口。 */
+void* pa_exc_class_obj(PyAdamasStr* name);
+int64_t pa_exc_class_is_a(PyAdamasStr* name, void* cls);
+int64_t pa_exc_subclass(void* a, void* b);
+PyAdamasExcValue* pa_exc_class_value_new(void* cls, PyAdamasStr* msg);
+PyAdamasExcValue* pa_exc_class_value_new_args(void* cls, PyAdamasList* args);
+void pa_method_register(PyAdamasStr* qual, PyAdamasStr* meth, int64_t slot);
+int64_t pa_method_call0(void* obj, PyAdamasStr* name);
+int64_t pa_is_file(void* v);
+int64_t pa_is_class_obj(void* v);
 /* P2：tag 数组的跨调用侧信道（生成代码在 call 前写、被调序言读并清零）。 */
 extern int64_t pa_ptag_in;
 extern int64_t pa_ptag_len;

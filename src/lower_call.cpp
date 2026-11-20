@@ -512,6 +512,7 @@ VReg Lowerer::lower_call(Call& c) {
                 "callable", "issubclass", "hash", "type", "id", "frozenset",
                 "slice", "vars", "dir", "__pa_capwords", "__pa_sha256", "__pa_sha256_hex",
                 "__pa_b64encode", "__pa_b64decode", "__pa_any_items", "bytes", "len_bytes",
+                "__pa_exc_is_a", "__pa_close",
                 "join", "sleep", "make_chan",
                 // 定宽整数显式转换（P1）：cast_i8 … cast_u64
                 "cast_i8", "cast_i16", "cast_i32", "cast_i64", "cast_int",
@@ -616,6 +617,44 @@ VReg Lowerer::lower_call(Call& c) {
 
     // 类对象值当构造器：静态类型仍是 ClassObj[Class]，按原类展开构造。
     if (TypePtr ft0 = tc_.type_of(c.func.get()); ft0 && ft0->kind == TyKind::ClassObj) {
+        // P4（lang_gaps）：异常类对象值当构造器（E = ValueError; E("x")）。
+        // 运行期从类对象读名字构造异常值——不用静态内层名：Exception 的
+        // type_eq 不区分名字，形参回填可能留着首个调用点的类型。
+        if (!ft0->sub.empty() && ft0->sub[0] && ft0->sub[0]->kind == TyKind::Exception) {
+            TypePtr exc_ty = mk_exception(ft0->sub[0]->name);
+            VReg cls = expr(*c.func);
+            for (auto& kw : c.keywords) expr(*kw.value);
+            if (c.args.size() > 1) {
+                TypePtr lt = mk_list(t_str());
+                VReg al = call_runtime(RtFn::ListNew, lt,
+                                       {const_int(static_cast<int64_t>(c.args.size())),
+                                        const_int(list_kind_filled(lt))});
+                push_temp(al);
+                for (auto& arg : c.args) {
+                    TypePtr mt = tc_.type_of(arg.get());
+                    VReg raw = expr(*arg);
+                    VReg sm = convert_to(raw, mt, t_str());
+                    retain_elem(sm, 1);
+                    call_void(RtFn::ListAppend, {al, sm, const_int(1)});
+                }
+                Inst in;
+                in.op = IrOp::CallRt;
+                in.imm = static_cast<int64_t>(RtFn::ExcClassValueNewArgs);
+                in.args = {cls, al};
+                return def_heap(exc_ty, std::move(in));
+            }
+            VReg msg = const_int(0);
+            if (!c.args.empty()) {
+                TypePtr mt = tc_.type_of(c.args[0].get());
+                VReg raw = expr(*c.args[0]);
+                msg = convert_to(raw, mt, t_str());
+            }
+            Inst in;
+            in.op = IrOp::CallRt;
+            in.imm = static_cast<int64_t>(RtFn::ExcClassValueNew);
+            in.args = {cls, msg};
+            return def_heap(exc_ty, std::move(in));
+        }
         ClassInfo* cls = class_obj_cls(ft0);
         if (cls) {
             if (auto it = classes_.find(cls->name);

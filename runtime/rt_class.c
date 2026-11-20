@@ -221,6 +221,28 @@ int64_t pa_is_exc(void* obj, PyAdamasStr* type) {
     if (!obj || !type) return 0;
     PyAdamasRc* h = (PyAdamasRc*)obj - 1;
     if (!rc_index_has(h)) return 0;
+    /* P4（lang_gaps）：富异常实例（vtable 对象）也按异常类名判父子。
+       自定义异常类在 pa_exc_register 里登记的是裸类名，MRO 元数据存的是
+       限定名——取最后一段再走 exc_is_a。门控关时异常类当值不存在，
+       isinstance(x, ValueError) 的第二参是 0，到不了这条新分支。 */
+    if (h->kind == PYADAMAS_RC_INSTANCE) {
+        const int64_t* vt = *(const int64_t**)obj;
+        if (!vt) return 0;
+        const int64_t* meta = vt - 6;
+        const int64_t* mro = (const int64_t*)(uintptr_t)meta[0];
+        if (!mro || mro[0] < 1) return 0;
+        const int64_t* m = (const int64_t*)(uintptr_t)mro[1];
+        const char* cn = m ? (const char*)(uintptr_t)m[4] : NULL;
+        if (!cn) return 0;
+        const char* base = strrchr(cn, '.');
+        base = base ? base + 1 : cn;
+        char want[128];
+        int64_t n = type->len;
+        if (n < 0 || n >= (int64_t)sizeof(want)) return 0;
+        memcpy(want, type->data, (size_t)n);
+        want[n] = '\0';
+        return exc_is_a(base, want) ? 1 : 0;
+    }
     if (h->kind != PYADAMAS_RC_OBJ || h->size < (int64_t)sizeof(PyAdamasExcValue)) return 0;
     PyAdamasExcValue* v = (PyAdamasExcValue*)obj;
     if (v->magic != PYADAMAS_EXCVAL_MAGIC) return 0;
