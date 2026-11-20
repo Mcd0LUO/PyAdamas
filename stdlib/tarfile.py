@@ -472,6 +472,8 @@ class TarFile:
     _data: bytes
     _wparts: list[bytes]
     _compresslevel: int
+    _auto: bool = False
+    _end: int = 0
 
     def __init__(self, name: str = "", mode: str = "r", fileobj: file = None,
                  format: int = PAX_FORMAT, encoding: str = "utf-8",
@@ -521,20 +523,37 @@ class TarFile:
         if filemode == "a" and (comp == "gz" or comp == "bz2"):
             raise CompressionError("'a' mode is not allowed for compressed archives")
 
+        # "r"/"r:*" 走 CPython 的自动嗅探口径：首个头坏掉包成 ReadError。
+        self._auto = mode == "r" or mode == "r:*"
         if filemode == "r":
             self._read_all(comp)
             self._parse()
+        elif filemode == "a":
+            raw: bytes = self._read_raw()
+            self._data = raw
+            if len_bytes(raw) > 0:
+                self._parse()
+                self._wparts.append(raw[0:self._end])
+                self.offset = self._end
+        elif filemode == "x":
+            if len(name) > 0 and _osp.exists(name):
+                raise FileExistsError("File exists: " + repr(name))
 
     # ── 读：取字节、解压、解析 ───────────────────────────────────
-    def _read_all(self, comp: str) -> None:
-        raw: bytes = b""
+    def _read_raw(self) -> bytes:
         if self.fileobj is not None:
-            raw = cast(bytes, self.fileobj.read())
-        elif len(self.name) > 0:
-            raw = _gzipio.read_bin(self.name)
-        else:
-            raise ValueError("nothing to open")
-        self._data = self._decompress(raw, comp)
+            return cast(bytes, self.fileobj.read())
+        if len(self.name) > 0:
+            if not _osp.exists(self.name):
+                return b""
+            return _gzipio.read_bin(self.name)
+        raise ValueError("nothing to open")
+
+    def _read_all(self, comp: str) -> None:
+        like: bytes = self._read_raw()
+        if len_bytes(like) == 0 and len(self.name) > 0 and self.fileobj is None:
+            raise FileNotFoundError("No such file: " + repr(self.name))
+        self._data = self._decompress(like, comp)
 
     def _decompress(self, raw: bytes, comp: str) -> bytes:
         if comp == "*":
@@ -557,11 +576,15 @@ class TarFile:
         data: bytes = self._data
         total: int = len_bytes(data)
         pos: int = 0
+        first: bool = True
+        self._end = 0
         while pos + BLOCKSIZE <= total:
             buf: bytes = data[pos:pos + BLOCKSIZE]
             if buf == NUL * BLOCKSIZE:
+                self._end = pos
                 return
-            ti: TarInfo = TarInfo.frombuf(buf, self.encoding, self.errors)
+            ti: TarInfo = self._header_at(data, pos, first)
+            first = False
             ti.offset = pos
             pos += BLOCKSIZE
             ti = self._proc_header(ti, pos)
@@ -576,6 +599,7 @@ class TarFile:
             else:
                 pos = hdr_end
             self.members.append(ti)
+        self._end = pos
         if pos < total:
             # 尾部残留不足一个块：只有全零才算正常结束。
             rest: bytes = data[pos:total]
@@ -584,6 +608,18 @@ class TarFile:
                 k += 1
             if k < len_bytes(rest):
                 raise ReadError("unexpected end of data")
+
+    def _header_at(self, data: bytes, pos: int, first: bool) -> TarInfo:
+        """读一个头块；自动嗅探模式下首个头坏掉包成 ReadError（CPython 口径）。"""
+        buf: bytes = data[pos:pos + BLOCKSIZE]
+        if first:
+            try:
+                return TarInfo.frombuf(buf, self.encoding, self.errors)
+            except HeaderError as e:
+                if self._auto:
+                    raise ReadError("file could not be opened successfully: " + str(e))
+                raise
+        return TarInfo.frombuf(buf, self.encoding, self.errors)
 
     def _proc_header(self, ti: TarInfo, data_pos: int) -> TarInfo:
         """处理 GNU 长名/长链接与 pax 扩展头，返回真成员头（可能重读）。"""
