@@ -41,3 +41,22 @@ simd-general（SIMD 通用化，qwen）。big-int（P3）已停。
 - harness 间歇早夭频繁（本会话 4 代理起步全夭过）→恢复套路；若某代理反复夭（>3 次）
   且 WIP 有效，lead 复核后接管收尾（例外，非常态）。
 - 4 分支都改 codegen/typecheck，集成冲突按序解。
+
+## 自由发挥 backlog（主队列 P4/编译速度/SIMD通用化 完成后，用户授权随意发挥）
+
+按价值/tractable 自选，单槽位顺序，每轮同样闸门纪律：
+
+- **R5 重构（拆超限文件）**：6 个 >1200 文件拆回 ≤1200——codegen_regalloc(2539)/
+  driver_build(1587)/typecheck_types.h(1581)/ir_ops.h(1384)/lower_impl.h(1356)/codegen_impl.h(1221)。
+  纯代码移动，asm 逐字节不变命门，全套件复验。工程整洁，用户点名「重构也行」。
+- **R6 stdlib 扩展**：tarfile/traceback/dataclasses（依赖 P4 落地）/io.BytesIO/pathlib 补全/
+  threading·concurrent.futures 映射 vthread/secrets os.urandom/getrandom/pprint sort_dicts。
+- **R7 语言完善**：u64 大整数字面量（词法）/定宽容器元素 coerce/u64 列表无符号排序/
+  C FFI cimport char·short·unsigned 映射/异常类 __name__ 属性访问/traceback 模块完善。
+- **R8 优化深化**：SIMD AVX2+更多循环模式/borrow 扩根类型（ListSlice/split 新分配来源）/
+  devirt 深化（speculative+内联）/编译速度剩余热点（IR 注释 vformat/哈希）。
+- **R9 unknown 类型标签深化**：容器逐元素 tag（嵌套 bool/None/tuple/set 精确）/
+  vtable 调用传 tag（PrettyPrinter 方法版解锁）。
+- **R10 P3 big BigInt + f32**：任意精度运行时（用户暂缓，时间充裕再立项）。
+
+原则：通用性优先（非基准特化）；负面结果记录跳过；不堆无收益代码；每轮可回退。
