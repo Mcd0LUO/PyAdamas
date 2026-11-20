@@ -35,6 +35,7 @@
 #include "codegen_impl.h"
 
 #include <cstring>
+#include <unordered_set>
 
 namespace pyadamas {
 
@@ -109,7 +110,8 @@ bool AsmGen::try_vect_loop(const Block& b) {
     // ── 槽分析：j-alias / reduction / 体局部临时 / 其余写一律拒绝 ─────────
     // 收集三块内所有槽写/读位置。
     struct SlotInfo { int writers = 0; int store_pos = -1; VReg store_val = kNoReg;
-                      bool read_before_store = false; int loads = 0; bool outside_read = false; };
+                      bool read_before_store = false; int loads = 0; bool outside_read = false;
+                      int min_load_pos = 1 << 30; };
     std::unordered_map<int, SlotInfo> si;
     auto in_loop = [&](int bi) { return bi == cond_bi || bi == body_bi || bi == incr_bi; };
     for (int bi = 0; bi < static_cast<int>(f_->blocks.size()); ++bi)
@@ -126,14 +128,17 @@ bool AsmGen::try_vect_loop(const Block& b) {
                 auto& s = si[in.idx];
                 if (in_loop(bi)) {
                     ++s.loads;
-                    if (bi == body_bi && s.store_pos >= 0 &&
-                        static_cast<int>(&in - BI.data()) < s.store_pos)
-                        s.read_before_store = true;
+                    if (bi == body_bi)
+                        s.min_load_pos = std::min(s.min_load_pos, static_cast<int>(&in - BI.data()));
                 } else {
                     s.outside_read = true;
                 }
             }
         }
+    // 读在写前判定须在完整扫描后做（store_pos 此时才齐全）：任何体块装载
+    // 早于该槽的唯一存储 → read_before_store（否则误判临时槽 → classify 自环）。
+    for (auto& [slot, info] : si)
+        info.read_before_store = (info.store_pos >= 0 && info.min_load_pos < info.store_pos);
     // sJ：只被 incr 写一次。
     if (si[sJ].writers != 1) return false;
 
@@ -289,10 +294,12 @@ bool AsmGen::try_vect_loop(const Block& b) {
         return -1;
     };
 
+    std::unordered_set<VReg> visiting;
     std::function<VK(VReg)> classify = [&](VReg v) -> VK {
         if (v == kNoReg) return VK::Fail;
         auto it = cls.find(v);
         if (it != cls.end()) return it->second.kind;
+        if (!visiting.insert(v).second) return VK::Fail;  // 环 → 保守失败（防栈溢出）
         VClass c;
         const Inst* d = simd_def(v);
         if (!d) { cls[v] = c; return VK::Fail; }
