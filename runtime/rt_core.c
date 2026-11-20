@@ -47,6 +47,11 @@ size_t gc_conservative_count;
    与 0.276「kind-0 元组 rc_alloc_untracked」同思路，区别是元组连索引
    都不需要（它们只出现在静态类型已知的槽里）。 */
 #define PYADAMAS_RC_LEAF 16
+/* **延迟释放位**（GC 阶段1，0.330）：增量标记/清扫期 RC 归零的对象不立即
+   free，而是标灰保活、登记 gc_pend，本轮收尾统一释放。该位标记「已登记延迟
+   释放」，防止同一对象重复入 pend（收尾会二次释放）。仅 gc_incr_mark_on 时
+   使用；flag-off  legacy 路径不置位。收尾清空 marked 时一并清除。 */
+#define PYADAMAS_RC_DEFER 32
 
 /* ── 分代收集状态（分配热路径和 rc_link 都要用） ──────────────
    young_buf 是上次收集后分配、还没晋升的对象；marked 高位是它在数组里
@@ -105,6 +110,13 @@ static int gc_zero_free_streak;
 
 /* 增量标记的状态：0 = 空闲，1 = 标记中，2 = 清扫中。 */
 static int gc_incr_state;
+/* **增量标记总开关**（GC 阶段1，0.330）：PYADAMAS_GC_INCR_MARK=1 时 major
+   走「根扫描 → 分片标记（state=1）→ 分片清扫（state=2）」，配合 Yuasa 删除
+   屏障 + 门控插入屏障。默认 0 = 现状同步标记，flag-off 行为/asm/leak 逐字不变。
+   入口 pa_gc_init 读一次环境变量缓存成全局，热路径只读缓存。 */
+static int gc_incr_mark_on;
+static int gc_dbg;   /* 临时诊断（PYADAMAS_GC_DBG=1），定位后移除 */
+static int64_t gc_dbg_defer, gc_dbg_defer_swept, gc_dbg_pend_badrc;
 static int64_t gc_incr_major;   /* 本轮是不是整堆收集 */
 static size_t gc_incr_sweep_pos;
 static int gc_incr_countdown;
@@ -130,6 +142,7 @@ static void rc_leaf_free(PyAdamasRc* h, void* p);
 
 static void gc_collect(int major);
 static void gc_pend_add(int64_t v);
+void gc_mark(uintptr_t v);   /* 删除屏障 shade 用（定义在本文件后段） */
 
 static void young_add(PyAdamasRc* h) {
     if (young_len == young_cap) {
@@ -172,7 +185,31 @@ static void gc_phase_dec(PyAdamasRc* h, void* p) {
         return;
     }
     if (gc_phase == GC_PHASE_INCR_MARK) {
-        // 标记期间对象归零：统一登记待释放，本轮收尾处理。
+        if (gc_incr_mark_on) {
+            /* **Yuasa 删除屏障（shade-on-delete）**——GC 阶段1 核心。
+               标记期 mutator 的 RC 把对象最后一个引用删掉（rc 归零）时：
+               不能立即 free（标记队列/快照可能还指向它 → 13_gc UAF），
+               也不能只延后 free 而不标灰（白色对象会被清扫误收，且与
+               gc_pend 收尾二次释放 → 174 漏 21KB）。协议：
+                 1. rc>1 的 dec 正常减计数（对象仍活，无需屏障）；
+                 2. rc==1 的归零 dec：shade（标灰入 gc_work，标记器会扫到
+                    它并保住其子树），置 DEFER 位防重复入队，登记 gc_pend，
+                    **rc 保持 1 保活**到本轮标记排空 + gc_incr_finish 收尾。
+               收尾时 gc_phase 已复位，pa_rc_dec 把 rc 1→0 正常释放（跑 dtor
+               级联）。shade 用 gc_mark：集合内对象标灰入队；新对象不在快照
+               查表落空（no-op），靠 DEFER+pend 收尾释放，不被清扫（不在 set）。
+               归零对象必无环（环会保 rc>=1），故 shade 的子树与活对象共享时
+               由标记器保住，收尾 dtor 再正常 dec —— 不会误收活对象。 */
+            if (h->rc > 1) { h->rc--; return; }
+            if (!(h->marked & PYADAMAS_RC_DEFER)) {
+                h->marked |= PYADAMAS_RC_DEFER;
+                gc_mark((uintptr_t)p);
+                gc_pend_add((int64_t)(uintptr_t)p);
+                if (gc_dbg) gc_dbg_defer++;
+            }
+            return;   /* rc 保持 1，保活到收尾 */
+        }
+        // legacy（flag-off）：标记期间对象归零统一登记待释放，本轮收尾处理。
         // 不区分新老对象 —— 新对象也会进 gc_pend，而 gc_incr_finish 里
         // gc_phase 已复位，pa_rc_dec 会走正常释放路径。
         gc_pend_add((int64_t)(uintptr_t)p);
@@ -2131,6 +2168,10 @@ void pa_gc_init(void** roots, int64_t n_roots, void* stack_top) {
         atexit(gc_stats_dump);
     }
     if (getenv("PYADAMAS_GC_CONSERVATIVE")) gc_conservative = 1;
+    /* 增量标记总开关（0.330）：=1 启用分片标记 + 删除/插入屏障；默认 0
+       同步标记（现状）。只读 "1"，"0"/未设都关，flag-off 零变化。 */
+    { const char* im = getenv("PYADAMAS_GC_INCR_MARK"); if (im && im[0] == '1') gc_incr_mark_on = 1; }
+    if (getenv("PYADAMAS_GC_DBG")) gc_dbg = 1;
     // 索引叶子模式：保守回退关掉（字符串回到旧的全跟踪口径）。
     gc_leaf_mode = !gc_conservative;
     if (gc_leaf_mode) atexit(leaf_index_shutdown);
@@ -2258,7 +2299,21 @@ static void gc_incr_finish(void) {
     // gc_phase 已为 0，走的是直接 free 路径）。
     int64_t pend_n = gc_pend_len;
     gc_pend_len = 0;
-    for (int64_t i = 0; i < pend_n; ++i) pa_rc_dec(gc_pend[i]);
+    for (int64_t i = 0; i < pend_n; ++i) {
+        if (gc_dbg) {
+            PyAdamasRc* ph = (PyAdamasRc*)gc_pend[i] - 1;
+            if (ph->rc != 1) {   /* DEFER 位已被 finish 的 marked=0 循环清除，只查 rc */
+                gc_dbg_pend_badrc++;
+                fprintf(stderr, "[gcdbg] PEND-BADRC kind=%lld rc=%lld marked=%lld\n",
+                        (long long)ph->kind, (long long)ph->rc, (long long)ph->marked);
+            }
+        }
+        pa_rc_dec(gc_pend[i]);
+    }
+    if (gc_dbg)
+        fprintf(stderr, "[gcdbg] finish defer=%lld defer_swept=%lld pend_badrc=%lld pend_n=%lld\n",
+                (long long)gc_dbg_defer, (long long)gc_dbg_defer_swept,
+                (long long)gc_dbg_pend_badrc, (long long)pend_n);
     stat_gc_live = old_bytes;
     alloc_since_gc = 0;
     // 按 Go pacer 公式重算下一轮 minor 阈值（同 gc_collect 里的逻辑）。
@@ -2342,10 +2397,31 @@ static void gc_incr_step(void) {
     if (gc_incr_state == 1) {
         while (gc_work_len && budget-- > 0) { gc_scan_object(gc_work[--gc_work_len]); if (gc_stats_on) ++gc_incr_objs; }
         if (gc_work_len == 0) {
-            gc_incr_state = 2;
+            /* **标记排空 → 同步清扫**（GC 阶段1）。M=1 单线程：本次 gc_incr_step
+               调用内 mutator 不运行，清扫是原子的。阶段1 只把昂贵的标记分片
+               （~1.5ms 停顿摊薄），清扫保持原子 —— 避免「清扫切片间 mutator 把
+               已标记活对象 rc 减到 0、收尾再误释」的逻辑时序坑（实测 174 漏
+               8816B 即此）。先 release 交出垃圾→活边（mark_sweep 口径），再
+               gc_free_body，最后 gc_incr_finish 收尾释放 DEFER 保活对象。
+               清扫的进一步分片（与 mutator 交错）留待阶段2/3 线程安全边界。 */
             gc_phase = GC_PHASE_SWEEP;
             gc_sweeping = 1;
-            gc_incr_sweep_pos = 0;
+            for (size_t i = 0; i < gc_set_len; ++i) {
+                PyAdamasRc* h = gc_set[i];
+                if (h && !(h->marked & PYADAMAS_RC_MARK) && h->release)
+                    h->release((char*)h + PYADAMAS_RC_HDR);
+            }
+            for (size_t i = 0; i < gc_set_len; ++i) {
+                PyAdamasRc* h = gc_set[i];
+                if (!h) continue;
+                if (!(h->marked & PYADAMAS_RC_MARK)) {
+                    if (rc_stats_on) stat_gc_freed++;
+                    gc_free_body(h);
+                    gc_set[i] = NULL;
+                }
+            }
+            gc_incr_sweep_pos = gc_set_len;
+            gc_incr_finish();
         }
         return;
     }
@@ -2393,6 +2469,11 @@ static double gc_now_ms(void) {
 }
 
 static void gc_free_body(PyAdamasRc* h) {
+    if (gc_dbg && (h->marked & PYADAMAS_RC_DEFER)) {
+        gc_dbg_defer_swept++;
+        fprintf(stderr, "[gcdbg] DEFER-SWEPT kind=%lld rc=%lld size=%lld\n",
+                (long long)h->kind, (long long)h->rc, (long long)h->size);
+    }
     rc_unlink(h);
     if (h->kind == PYADAMAS_RC_OBJ)
         free_attached_exception((char*)h + PYADAMAS_RC_HDR, h->size);
@@ -2508,6 +2589,27 @@ static void gc_collect(int major) {
         }
         pa_vt_gc_scan();   /* 挂起 vthread 的帧链 + temp 栈 */
         if (t0) t2 = gc_now_ms();
+        if (gc_incr_mark_on) {
+            /* **增量标记接线（GC 阶段1，0.330）**：根扫描已一次性拍好一致
+               快照（M=1 单线程，切片间 mutator 才跑，根扫描天然原子）。这里
+               不再 gc_drain 同步标完，而是启动 state=1 分片标记：
+                 - gc_phase=INCR_MARK → 删除屏障（shade-on-delete）生效；
+                 - gc_incr_state=1 → 插入屏障（gc_write_barrier）生效；
+                 - 标记/清扫由 gc_incr_step 在分配点按 GC_MARK_BUDGET 推进，
+                   队列排空 → state1→2 转换（补 release pass）→ 分片清扫。
+               flag-off 不进此分支，下方 legacy 同步标记原样保留。 */
+            gc_incr_state = 1;
+            gc_incr_major = 1;
+            gc_incr_sweep_pos = 0;
+            gc_incr_countdown = GC_INCR_STRIDE;
+            gc_incr_remaining = GC_INCR_STRIDE;
+            gc_need_check = 1;
+            gc_phase = GC_PHASE_INCR_MARK;
+            if (t0)
+                fprintf(stderr, "[gc] major incr-mark roots=%.2f ms set=%zu\n",
+                        t2 - t1, gc_set_len);
+            return;
+        }
         // **标记同步做完，只把清扫分片。**
         //
         // 试过把标记也分片（Go 的 gcDrain 那样），但 RC + 增量标记有硬冲突：
