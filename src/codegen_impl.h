@@ -562,9 +562,28 @@ private:
     // 带前导 tab 的块内局部标签（"\t1:" 这种）。
     void label_block(const std::string& s) { out_.push_label(s, true); }
     // "\t# s"
-    void comment(const std::string& s) { out_.push(make_comment("\t# " + s)); }
+    // 复用 line_buf_ 拼前缀：原来是 "\t# " + s 造一个临时串再移动进 MItem，
+    // 每条注释一次多余分配（每条指令都有一条注释）。
+    void comment(std::string_view s) {
+        line_buf_.clear();
+        line_buf_ += "\t# ";
+        line_buf_.append(s);
+        out_.push(make_comment(line_buf_));
+    }
+    // 指令注释：text_into 直接写进复用缓冲，省掉 in.text() 的临时串。
+    void comment_inst(const Inst& in) {
+        line_buf_.clear();
+        line_buf_ += "\t# ";
+        in.text_into(line_buf_);
+        out_.push(make_comment(line_buf_));
+    }
     // 列 0 的注释行（"# ---- ... ----"）。
-    void comment0(const std::string& s) { out_.push(make_comment("# " + s)); }
+    void comment0(std::string_view s) {
+        line_buf_.clear();
+        line_buf_ += "# ";
+        line_buf_.append(s);
+        out_.push(make_comment(line_buf_));
+    }
     // "\t" + body + "\n"：.align/.quad/.section 这类汇编指示符。
     void directive(std::string_view body) { out_.push_directive(body); }
     // 空行。

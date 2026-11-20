@@ -123,6 +123,8 @@ struct Inst {
     bool funsigned = false;
 
     std::string text() const;
+    // 直接写进调用方缓冲区（注释热路径复用同一块缓冲，避免临时串）。
+    void text_into(std::string& buf) const;
 };
 
 struct Block {

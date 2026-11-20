@@ -915,7 +915,7 @@ void AsmGen::gen_block(const Block& b) {
             cur_pos_ = static_cast<int>(i);
             if (i == forwarded_load) {
                 set_loc(in.line);
-                comment(in.text());
+                comment_inst(in);
                 if (forward_to_receiver) alias_[in.dst] = arg_reg_i(0);
                 ++i;
                 continue;

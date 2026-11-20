@@ -112,7 +112,7 @@ void AsmGen::set_loc(int line) {
 
 void AsmGen::gen_inst(const Inst& in) {
         set_loc(in.line);
-        comment(in.text());
+        comment_inst(in);
         switch (in.op) {
             case IrOp::ConstInt: gen_const_int(in); break;
             case IrOp::ConstFloat: gen_const_float(in); break;
