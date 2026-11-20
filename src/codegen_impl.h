@@ -23,6 +23,7 @@
 #include "mach_instr.h"
 #include "target_abi.h"
 #include "module.h"
+#include "tag_defs.h"
 
 namespace pyadamas {
 
@@ -182,6 +183,10 @@ public:
         // 浮点循环 SIMD 向量化开关（PYADAMAS_SIMD，默认关）：参与缓存失效。
         void set_simd(bool v) { simd_enabled_ = v; }
         void set_inline_opt(bool v) { inline_opt_ = v; }  // PYADAMAS_INLINE_OPT，默认关
+        // 运行期类型标签（PYADAMAS_TYPE_TAGS，默认关，docs/numeric-types-design.md §2）：
+        // 在 P3 shadow tag 之上追加 NONE/BOOL 与精确堆子类 tag，解锁
+        // isinstance/repr/pprint。关闭时 tag 编号/判定逐字沿用 P3（asm 不变）。
+        void set_type_tags(bool v) { type_tags_ = v; }
 
 private:
     const std::string& global_label(int i) const {
@@ -330,12 +335,10 @@ private:
     // RC/分派快路径的判据，UNK(0) 一律回退探针 —— 正确性不依赖传播完备。
     // 门控 tags_enabled_ = 模块含 AnyArithT/AnyCmpT/AnyNegT（封闭活跃域）；
     // 门控关的模块（含 26 个热基准）不进任何 tag 分支，asm 逐字节不变。
-    // tag 编码与 runtime/rt_any.c 的 PA_TAG_* 逐字对应。堆 ⇔ tag>=3。
-    enum PaTag {
-        kTagUnk = 0, kTagInt = 1, kTagFraw = 2,
-        kTagFbox = 3, kTagStr = 4, kTagHeap = 5,
-    };
+    // tag 编码与静态类型映射见 tag_defs.h（含 P2 的 NONE/BOOL/堆子类扩展，
+    // 以及堆 ⇔ 3..5 或 >=8 的判定口径）。
     bool tags_enabled_ = false;
+    bool type_tags_ = false;              // PYADAMAS_TYPE_TAGS（默认关）
     int n_tag_words_ = 0;                 // 帧内平行 tag 区字数
     std::vector<int> vreg_tag_;           // vreg -> tag 字号（-1 无）
     std::vector<int> slot_tag_;           // 命名槽 -> tag 字号（-1 无）
@@ -367,19 +370,9 @@ private:
     std::string global_tag_label(int gi) const {
         return global_label(gi) + "$t";
     }
-    // 静态类型导出的 tag 常量（typed vreg 作 unknown 实参/存储源时用）。
-    // Optional 的机器表示是「内层值或 0」，内层可能是指针也可能是标量，
-    // 保守 UNK。Bytes/Complex/Struct 等堆对象按 HEAP。
-    static int64_t static_tag_of(const TypePtr& t) {
-        if (!t) return kTagUnk;
-        switch (t->kind) {
-            case TyKind::Int: case TyKind::Bool: case TyKind::None:
-                return kTagInt;
-            case TyKind::Float: return kTagFraw;
-            case TyKind::Str: return kTagStr;
-            case TyKind::Unknown: case TyKind::Optional: return kTagUnk;
-            default: return ir_is_heap(t) ? kTagHeap : kTagUnk;
-        }
+    // 静态类型导出的 tag（定义在 tag_defs.h；type_tags_ 决定 P2 扩展）。
+    int64_t static_tag_of(const TypePtr& t) const {
+        return pyadamas::static_tag_of(t, type_tags_);
     }
     bool vreg_tagged(VReg r) const {
         return tags_enabled_ && r != kNoReg &&
@@ -440,6 +433,8 @@ private:
         s += "$pt";
         return s;
     }
+    // 形参是否在 tag 数组里占一个字（type_tags_ 时按声明类型，否则按槽类型）。
+    bool ptag_param(const IRFunction& f, const IRParam& p) const;
     // 本函数 unknown 形参个数（>0 才发双入口；生成器/门控关恒 0）。
     int func_ptag_words() const;
     // CallDirect 的 tag 数组字数（0 = 不走 tag ABI：门控关/跨模块/生成器/

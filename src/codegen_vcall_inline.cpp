@@ -79,6 +79,11 @@ void AsmGen::gen_vcall(const Inst& in, bool keep_int_result, int direct_fn) {
             emit2(MOp::kMovq, src_mop(in.args[i]), arg_reg_i(l.reg));
     }
     line("xorl %r10d, %r10d");
+    // P2：虚调用点没有可信的静态签名 → 侧信道写 0（被调回退 UNK）。
+    if (type_tags_) {
+        line("movq $0, pa_ptag_in(%rip)");
+        line("movq $0, pa_ptag_len(%rip)");
+    }
     if (opt_ < 2) line("xorl %eax, %eax");
     spill_fp_slots();
     if (direct_fn >= 0) {

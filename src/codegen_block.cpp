@@ -95,53 +95,6 @@ static std::string debug_func_symbol(int fi, const std::string& name) {
     return s;
 }
 
-// 出参区：调用点把装不下的实参写在 rsp 下面那块地方。以前每个调用点
-// 自己 subq/addq，栈指针一动，槽位地址（相对 rsp）就跟着漂；现在整函数
-// 按最大用量一次性留在帧里，rsp 全程不动。这里只按「每个实参至多一个
-// 八字节、结构体按 ABI 尺寸、再加隐藏指针/暂存」估上界，宁大勿小。
-int AsmGen::outgoing_bytes(const IRFunction& f) const {
-    int worst = 16 + target_abi().shadow_space;  // 至少留两个槽：sret 隐藏指针 + 对齐；再加影子空间
-    for (const auto& b : f.blocks) {
-        for (const auto& in : b.insts) {
-            int need = 0;
-            switch (in.op) {
-                case IrOp::Call:
-                case IrOp::CallPtr:
-                case IrOp::CallRt:
-                case IrOp::VCall:
-                case IrOp::VCallStatic:
-                case IrOp::SuperVCall:
-                    // 寄存器用完的实参逐个占 8 字节；+16 兜住隐藏指针和对齐。
-                    need = 8 * (static_cast<int>(in.args.size()) + 2);
-                    break;
-                case IrOp::CallDirect:
-                    // P3-1b：tag ABI 调用还要在栈实参之后放 unknown 形参
-                    // 的平行 tag 数组（门控关恒 0，逐字旧布局）。
-                    need = 8 * (static_cast<int>(in.args.size()) + 2) +
-                           8 * call_ptag_words(in);
-                    break;
-                case IrOp::CallExtern: {
-                    // C 调用还多一块暂存：返回值分块暂存 + sret 指针 +
-                    // 免写直调的函数地址暂存，共 56 字节。
-                    const IRExtern& ex = m_->externs[static_cast<size_t>(in.idx)];
-                    need = 56 + 16;
-                    for (size_t i = 0; i < in.args.size(); ++i) {
-                        int64_t sz = 8;
-                        if (i < ex.param_abi.size() && ex.param_abi[i].size > sz)
-                            sz = ex.param_abi[i].size;
-                        need += static_cast<int>((sz + 7) & ~static_cast<int64_t>(7));
-                    }
-                    break;
-                }
-                default:
-                    continue;
-            }
-            if (need > worst) worst = need;
-        }
-    }
-    return (worst + 15) & ~15;
-}
-
 // ── GC 保守扫描范围（临时区） ──────────────────────────────────
 //
 // 判据里只有一条算「证明」：静态类型是 unknown（或没有类型）的字可能装
@@ -439,6 +392,14 @@ void AsmGen::emit_function(const IRFunction& f, int fi) {
                         emit_imm(MOp::kMovq, 0, loc);
                 }
             // P3-1b：tag 入口装载形参 tag（%r11==0 → 保持 UNK 回退）。
+            // P2（type_tags）：没有带 tag 形参的函数也要清一次侧信道 ——
+            // 被调若不读（无 tag 形参），调用点的 stale 值可能被之后的
+            // 运行时回调（vthread/生成器 resume）误读；每次进入生成代码
+            // 函数都归零，异常展开另在 landing pad / setjmp 返回点清理。
+            if (type_tags_ && func_ptag_words() == 0) {
+                line("movq $0, pa_ptag_in(%rip)");
+                line("movq $0, pa_ptag_len(%rip)");
+            }
             if (func_ptag_words() > 0) emit_ptag_param_load();
 
             // 形参落位

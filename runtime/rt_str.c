@@ -157,6 +157,138 @@ PyAdamasStr* pa_repr_any(int64_t v) {
     return out;
 }
 
+
+/* ══════════════════════════════════════════════════════════════════
+   P2（0.340）：带 tag 的 unknown repr（docs/numeric-types-design.md §2）
+   与 repr_any_into 的探针路径并存：有精确 tag 时按 tag 分派（None/True/
+   False/bytes/tuple/set/类对象都能印对），UNK 仍回退旧探针路径。
+   嵌套元素没有 tag 来源（容器只存 8B 值），仍按探针口径 —— 文档化边界。
+   ══════════════════════════════════════════════════════════════════ */
+
+/* bytes 的 repr：CPython 口径 b'...'（可打印 ASCII 原样，\t\n\r 用转义，
+   单引号/反斜杠转义，其余字节 \xNN）。 */
+static void repr_any_bytes_into(AnyReprBuf* b, PyAdamasStr* s) {
+    /* CPython 的定界符选择：内容含单引号且不含双引号时用双引号，否则用
+       单引号（内部单引号转义）。 */
+    const unsigned char* p = (const unsigned char*)s->data;
+    int has_single = 0, has_double = 0;
+    for (int64_t i = 0; i < s->len; ++i) {
+        if (p[i] == '\'') has_single = 1;
+        else if (p[i] == '"') has_double = 1;
+    }
+    const char quote = (has_single && !has_double) ? '"' : '\'';
+    ar_cstr(b, "b");
+    ar_put(b, &quote, 1);
+    for (int64_t i = 0; i < s->len; ++i) {
+        unsigned char c = p[i];
+        if (c == '\\') { ar_cstr(b, "\\\\"); continue; }
+        if (c == (unsigned char)quote) {
+            ar_cstr(b, quote == '"' ? "\\\"" : "\\'");
+            continue;
+        }
+        if (c == '\t') { ar_cstr(b, "\\t"); continue; }
+        if (c == '\n') { ar_cstr(b, "\\n"); continue; }
+        if (c == '\r') { ar_cstr(b, "\\r"); continue; }
+        if (c >= 0x20 && c < 0x7f) { ar_put(b, (const char*)&p[i], 1); continue; }
+        char tmp[8];
+        snprintf(tmp, sizeof tmp, "\\x%02x", (unsigned)c);
+        ar_cstr(b, tmp);
+    }
+    ar_put(b, &quote, 1);
+}
+
+/* tuple 的 repr：与 pa_repr_tuple 同口径（单元素带尾逗号），元素按未知
+   值探针渲染（容器里没有逐元素 tag）。 */
+static void repr_any_tuple_into(AnyReprBuf* b, PyAdamasList* t) {
+    ar_cstr(b, "(");
+    for (int64_t i = 0; i < t->len; ++i) {
+        if (i) ar_cstr(b, ", ");
+        repr_any_into(b, t->data[i]);
+    }
+    if (t->len == 1) ar_cstr(b, ",");
+    ar_cstr(b, ")");
+}
+
+/* set 的 repr：set 复用 dict（值恒 0），按键迭代；空集是 "set()"。 */
+static void repr_any_set_into(AnyReprBuf* b, PyAdamasDict* d) {
+    if (d->len == 0) { ar_cstr(b, "set()"); return; }
+    ar_cstr(b, "{");
+    for (int64_t i = 0; i < d->len; ++i) {
+        if (i) ar_cstr(b, ", ");
+        repr_any_into(b, pa_dict_key_at(d, i));
+    }
+    ar_cstr(b, "}");
+}
+
+static void repr_any_tag_into(AnyReprBuf* b, int64_t v, int64_t tag) {
+    switch (tag) {
+        case PA_TAG_NONE: ar_cstr(b, "None"); return;
+        case PA_TAG_BOOL: ar_cstr(b, v ? "True" : "False"); return;
+        case PA_TAG_INT: {
+            PyAdamasStr* s = pa_str_from_i64(v);
+            ar_put(b, s->data, (size_t)s->len);
+            pa_rc_dec(s);
+            return;
+        }
+        case PA_TAG_FRAW: {
+            double d;
+            memcpy(&d, &v, sizeof d);
+            char tmp[64];
+            format_double(tmp, sizeof tmp, d);
+            ar_cstr(b, tmp);
+            return;
+        }
+        case PA_TAG_FBOX: {
+            double d;
+            memcpy(&d, (void*)(uintptr_t)v, sizeof d);
+            char tmp[64];
+            format_double(tmp, sizeof tmp, d);
+            ar_cstr(b, tmp);
+            return;
+        }
+        case PA_TAG_STR: {
+            PyAdamasStr* s = pa_repr_str((PyAdamasStr*)(uintptr_t)v);
+            ar_put(b, s->data, (size_t)s->len);
+            pa_rc_dec(s);
+            return;
+        }
+        case PA_TAG_BYTES:
+            repr_any_bytes_into(b, (PyAdamasStr*)(uintptr_t)v);
+            return;
+        case PA_TAG_TUPLE:
+            repr_any_tuple_into(b, (PyAdamasList*)(uintptr_t)v);
+            return;
+        case PA_TAG_SET:
+            repr_any_set_into(b, (PyAdamasDict*)(uintptr_t)v);
+            return;
+        case PA_TAG_CLASS: {
+            PyAdamasStr* s = pa_class_repr((void*)(uintptr_t)v);
+            ar_put(b, s->data, (size_t)s->len);
+            pa_rc_dec(s);
+            return;
+        }
+        default:
+            /* HEAP / UNK：头 kind 分派（str 带引号、list/dict 递归、
+               CPYFLOAT 按 double；其余按旧口径）。 */
+            repr_any_into(b, v);
+            return;
+    }
+}
+
+PyAdamasStr* pa_repr_any_t(int64_t v, int64_t tag) {
+    AnyReprBuf b = {NULL, 0, 0};
+    ar_cstr(&b, "");
+    repr_any_tag_into(&b, v, tag);
+    PyAdamasStr* out = str_new(b.p ? b.p : "", (int64_t)b.n);
+    free(b.p);
+    return out;
+}
+
+void pa_print_any_repr_t(int64_t v, int64_t tag) {
+    PyAdamasStr* s = pa_repr_any_t(v, tag);
+    pa_print_str(s);
+    pa_rc_dec(s);
+}
 PyAdamasStr* pa_repr_dict_any(PyAdamasDict* d) {
     AnyReprBuf b = {NULL, 0, 0};
     ar_cstr(&b, "");

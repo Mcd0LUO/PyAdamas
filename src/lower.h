@@ -33,6 +33,9 @@ struct LowerOptions {
     bool inline_opt = false;
     // 只读借用槽细化（PYADAMAS_BORROW_OPT，默认 0 关）。见 lower_borrow.cpp。
     bool borrow_opt = false;
+    // 运行期类型标签（PYADAMAS_TYPE_TAGS，默认 0 关）：isinstance/repr 的
+    // unknown 分支改发带 tag 的运行期入口（docs/numeric-types-design.md §2）。
+    bool type_tags = false;
     // 允许浮点归约用 SIMD 分组求和（会改变舍入顺序）。
     bool fast_math = false;
     // 零开销异常（Z5，默认开启）：非可挂起函数里的 try 走 LSDA / landing pad

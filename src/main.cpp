@@ -344,6 +344,11 @@ int main(int argc, char** argv) {
         // 只读借用槽细化（默认关）：PYADAMAS_BORROW_OPT=1 开启，参与缓存失效。
         prog.borrow_opt = std::getenv("PYADAMAS_BORROW_OPT") != nullptr &&
                           std::string_view(std::getenv("PYADAMAS_BORROW_OPT")) != "0";
+        // 运行期类型标签（默认关）：PYADAMAS_TYPE_TAGS=1 开启，参与缓存失效。
+        // 开启后 unknown 值的 tag 追加 NONE/BOOL/精确堆子类，解锁
+        // isinstance/repr/pprint（docs/numeric-types-design.md §2）。
+        prog.type_tags = std::getenv("PYADAMAS_TYPE_TAGS") != nullptr &&
+                         std::string_view(std::getenv("PYADAMAS_TYPE_TAGS")) != "0";
         prog.verbose = verbose;
         prog.opt = opt_level;
         prog.fast_math = fast_math;
@@ -360,7 +365,7 @@ int main(int argc, char** argv) {
                 std::string asm_text = pyadamas::generate_asm(
                     *prog.entry->ir, !prog.needs_unknown_index, prog.zero_cost_exc,
                     false, prog.rc_split, prog.ra_graph, prog.simd, prog.ra_opt,
-                    prog.inline_opt);
+                    prog.inline_opt, prog.type_tags);
                 auto b = std::chrono::steady_clock::now();
                 if (std::getenv("PYADAMAS_TIMING"))
                     std::fprintf(stderr, "[timing] codegen=%.1f ms\n",

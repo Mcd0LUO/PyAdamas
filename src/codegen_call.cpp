@@ -263,86 +263,6 @@ void AsmGen::gen_struct_copy(const Inst& in) {
         move_to(dst_mop(in.dst), mreg_operand(kRax));
     }
 
-void AsmGen::gen_vcall_static(const Inst& in) {
-        std::vector<TypePtr> types;
-        types.reserve(in.args.size());
-        for (VReg a : in.args) types.push_back(ty_of(a));
-        auto locs = classify(types);
-
-        emit2(MOp::kMovq, src_mop(in.a), kR10);
-        emit2(MOp::kMovq, op_mem(kR10), kR11);
-        emit2(MOp::kMovq, op_mem(kR11, in.imm * 8), kR11);
-
-        for (size_t i = 0; i < in.args.size(); ++i) {
-            const auto& l = locs[i];
-            if (l.stack_off < 0) continue;
-            emit2(MOp::kMovq, src_mop(in.args[i]), kR10);
-            emit2(MOp::kMovq, kR10, op_mem(kRsp, l.stack_off));
-        }
-        for (size_t i = 0; i < in.args.size(); ++i) {
-            const auto& l = locs[i];
-            if (l.stack_off >= 0) continue;
-            if (l.fp)
-                emit2(MOp::kMovsd, src_mop(in.args[i]), static_cast<MReg>(kXmm0 + l.reg));
-            else
-                emit2(MOp::kMovq, src_mop(in.args[i]), arg_reg_i(l.reg));
-        }
-        line("xorl %r10d, %r10d");
-        if (opt_ < 2) line("xorl %eax, %eax");
-        spill_fp_slots();
-        line("call *%r11");
-        reload_fp_slots();
-        if (!dst_unused(in)) {
-            if (ir_is_float(in.ty)) move_fp(dst_mop(in.dst), mreg_operand(kXmm0));
-            else emit2(MOp::kMovq, kRax, dst_mop(in.dst));
-        }
-    }
-
-void AsmGen::gen_super_vcall(const Inst& in) {
-        // 运行期沿实例的动态 MRO 找 after 类之后的下一实现。查找要先做，
-        // 因为它会走一次普通调用；找到的函数地址放 %r11 再装实参。
-        emit2(MOp::kMovq, src_mop(in.a), arg_reg_i(0));
-        emit2(MOp::kMovq, src_mop(in.c), arg_reg_i(1));
-        emit_imm(MOp::kMovq, in.imm, arg_reg_i(2));
-        emit2(MOp::kMovq, src_mop(in.b), arg_reg_i(3));
-        spill_fp_slots();
-        line("call pa_super_lookup");
-        reload_fp_slots();
-        line("movq %rax, %r11");
-
-        std::vector<TypePtr> types;
-        types.reserve(in.args.size() + 1);
-        types.push_back(t_unknown());
-        for (VReg a : in.args) types.push_back(ty_of(a));
-        auto locs = classify(types);
-
-        for (size_t i = 0; i < in.args.size(); ++i) {
-            const auto& l = locs[i + 1];
-            if (l.stack_off < 0) continue;
-            emit2(MOp::kMovq, src_mop(in.args[i]), kR10);
-            emit2(MOp::kMovq, kR10, op_mem(kRsp, l.stack_off));
-        }
-        emit2(MOp::kMovq, src_mop(in.a), arg_reg_i(0));
-        for (size_t i = 0; i < in.args.size(); ++i) {
-            const auto& l = locs[i + 1];
-            if (l.stack_off >= 0) continue;
-            if (l.fp)
-                emit2(MOp::kMovsd, src_mop(in.args[i]), static_cast<MReg>(kXmm0 + l.reg));
-            else
-                emit2(MOp::kMovq, src_mop(in.args[i]), arg_reg_i(l.reg));
-        }
-        line("xorl %r10d, %r10d");
-        if (opt_ < 2) line("xorl %eax, %eax");
-        spill_fp_slots();
-        line("call *%r11");
-        reload_fp_slots();
-
-        if (!dst_unused(in)) {
-            if (ir_is_float(in.ty)) move_fp(dst_mop(in.dst), mreg_operand(kXmm0));
-            else emit2(MOp::kMovq, kRax, dst_mop(in.dst));
-        }
-    }
-
 void AsmGen::gen_call_direct(const Inst& in) {
         std::vector<TypePtr> types;
         types.reserve(in.args.size());
@@ -375,15 +295,33 @@ void AsmGen::gen_call_direct(const Inst& in) {
                 : nullptr;
         if (!callee || callee->env_slot >= 0) line("xorl %r10d, %r10d");
         if (opt_ < 2) line("xorl %eax, %eax");
-        spill_fp_slots();
-        if (ptag_words > 0) {
-            // tag 数组指针最后装填（此前所有指令都不碰 %r11），call tag 入口。
-            emit2(MOp::kLeaq, op_mem(kRsp, ptag_base), kR11);
-            emit_jmp(MOp::kCall, ptag_label(in.idx));
-        } else {
-            emit_jmp(MOp::kCall, entry_ref(in.idx));
+        // P2（type_tags）：tag 数组走 pa_ptag_in 侧信道（被调序言读走并清零），
+        // 不再占用 %r11 —— 与跨模块/间接调用共用同一套机制。门控关时仍是
+        // 0.328 的 %r11 + $pt 入口，逐字旧路径。
+        if (type_tags_ && ptag_words > 0) {
+            emit2(MOp::kLeaq, op_mem(kRsp, ptag_base), kR10);
+            line("movq %r10, pa_ptag_in(%rip)");
+            emit_imm(MOp::kMovq, ptag_words, "pa_ptag_len(%rip)");
+        } else if (type_tags_) {
+            line("movq $0, pa_ptag_in(%rip)");
+            line("movq $0, pa_ptag_len(%rip)");
         }
-        reload_fp_slots();
+        spill_fp_slots();
+        if (type_tags_) {
+            emit_jmp(MOp::kCall, entry_ref(in.idx));
+            reload_fp_slots();
+            line("movq $0, pa_ptag_in(%rip)");
+            line("movq $0, pa_ptag_len(%rip)");
+        } else {
+            if (ptag_words > 0) {
+                // tag 数组指针最后装填（此前所有指令都不碰 %r11），call tag 入口。
+                emit2(MOp::kLeaq, op_mem(kRsp, ptag_base), kR11);
+                emit_jmp(MOp::kCall, ptag_label(in.idx));
+            } else {
+                emit_jmp(MOp::kCall, entry_ref(in.idx));
+            }
+            reload_fp_slots();
+        }
         if (!dst_unused(in)) {
             if (ir_is_float(in.ty)) move_fp(dst_mop(in.dst), mreg_operand(kXmm0));
             else emit2(MOp::kMovq, kRax, dst_mop(in.dst));
@@ -392,40 +330,6 @@ void AsmGen::gen_call_direct(const Inst& in) {
             if (vreg_tagged(in.dst) && is_unk_ty(in.ty) && callee &&
                 func_ret_tag(*callee))
                 emit2(MOp::kMovq, kRdx, tag_mop(in.dst));
-        }
-    }
-
-void AsmGen::gen_call_ptr(const Inst& in) {
-        // 裸代码地址调用（类对象 vtable 分派）：没有闭包环境，%r10 清零。
-        std::vector<TypePtr> types;
-        types.reserve(in.args.size());
-        for (VReg a : in.args) types.push_back(ty_of(a));
-        auto locs = classify(types);
-
-        emit2(MOp::kMovq, src_mop(in.a), kR11);
-        for (size_t i = 0; i < in.args.size(); ++i) {
-            const auto& l = locs[i];
-            if (l.stack_off < 0) continue;
-            emit2(MOp::kMovq, src_mop(in.args[i]), kR10);
-            emit2(MOp::kMovq, kR10, op_mem(kRsp, l.stack_off));
-        }
-        for (size_t i = 0; i < in.args.size(); ++i) {
-            const auto& l = locs[i];
-            if (l.stack_off >= 0) continue;
-            if (l.fp)
-                emit2(MOp::kMovsd, src_mop(in.args[i]), static_cast<MReg>(kXmm0 + l.reg));
-            else
-                emit2(MOp::kMovq, src_mop(in.args[i]), arg_reg_i(l.reg));
-        }
-        line("xorl %r10d, %r10d");
-        if (opt_ < 2) line("xorl %eax, %eax");
-        spill_fp_slots();
-        line("call *%r11");
-        reload_fp_slots();
-
-        if (!dst_unused(in)) {
-            if (ir_is_float(in.ty)) move_fp(dst_mop(in.dst), mreg_operand(kXmm0));
-            else emit2(MOp::kMovq, kRax, dst_mop(in.dst));
         }
     }
 
@@ -520,11 +424,48 @@ void AsmGen::gen_call(const Inst& in) {
                       op_mem(kRsp, out_base() + static_cast<int>(i - kMaxIntArgs()) * 8));
             }
         }
+        if (type_tags_) {
+            // P2：间接调用（跨模块导入的函数 / 函数值 / 闭包）的 tag 数组
+            // 走 pa_ptag_in 侧信道（%r11 仍是闭包指针，ABI 逐字不变）。
+            // 布局按静态函数签名算；无 tag 或签名不可推导时写 0（回退 UNK）。
+            const int ntags = call_ptag_words(in);
+            if (ntags > 0) {
+                const int nstack = in.args.size() > static_cast<size_t>(kMaxIntArgs())
+                                       ? static_cast<int>(in.args.size()) - kMaxIntArgs()
+                                       : 0;
+                const int base = out_base() + 8 * nstack;
+                int k = 0;
+                TypePtr ft = ty_of(in.a);
+                const FuncInfo* fi = (ft && ft->kind == TyKind::Func) ? ft->fn.get() : nullptr;
+                for (size_t i = 0; i < in.args.size(); ++i) {
+                    if (!fi || i >= fi->pos.size()) continue;
+                    // **每个形参一个字**：被调按「第 i 个形参 = 第 i 个字」
+                    // 读，静态形参也要写（占位，被调按需忽略）。漏写会让
+                    // 后面的 unknown 形参整体错位（错 tag → 错误堆性 RC）。
+                    // tag_src 可能是内存操作数（槽 tag 字）→ move_to 走
+                    // scratch，不能直接 emit 成 mem→mem 的 movq。
+                    move_to(MOperand(std::format("{}(%rsp)", base + 8 * k)),
+                            MOperand(tag_src(in.args[i])));
+                    ++k;
+                }
+                emit2(MOp::kLeaq, op_mem(kRsp, base), kR10);
+                line("movq %r10, pa_ptag_in(%rip)");
+                emit_imm(MOp::kMovq, static_cast<int64_t>(in.args.size()),
+                         "pa_ptag_len(%rip)");
+            } else {
+                line("movq $0, pa_ptag_in(%rip)");
+                line("movq $0, pa_ptag_len(%rip)");
+            }
+        }
         line("movq %r11, %r10");
         if (opt_ < 2) line("xorl %eax, %eax");
         spill_fp_slots();
         line("call *(%r11)");
         reload_fp_slots();
+        if (type_tags_) {
+            line("movq $0, pa_ptag_in(%rip)");
+            line("movq $0, pa_ptag_len(%rip)");
+        }
 
         if (!dst_unused(in)) {
             // 统一约定下返回值在 %rax（浮点也是位模式）。
@@ -533,6 +474,22 @@ void AsmGen::gen_call(const Inst& in) {
                 move_fp(dst_op(in.dst), "%xmm0");
             } else {
                 emit2("movq", "%rax", dst_op(in.dst));
+            }
+            // P2：unknown 返回值的 tag 在被调的 %rdx（type_tags 构建里
+            // 所有非生成器函数都发）。间接调用点没有 IRFunction 可查，
+            // 用**静态签名**判断：签名不含浮点（闭包 +0 直指函数本体，
+            // 不走重排 shim）且返回 unknown 才读 —— shim 的重排会碰 %rdx。
+            if (type_tags_ && vreg_tagged(in.dst) && is_unk_ty(in.ty)) {
+                TypePtr ft = ty_of(in.a);
+                const FuncInfo* fi = (ft && ft->kind == TyKind::Func) ? ft->fn.get() : nullptr;
+                bool fp = false;
+                if (fi) {
+                    fp = ir_is_float(fi->ret);
+                    for (const auto& p : fi->pos)
+                        if (ir_is_float(p.ty)) fp = true;
+                }
+                if (fi && !fp && is_unk_ty(fi->ret))
+                    emit2("movq", "%rdx", tag_mop(in.dst));
             }
         }
     }
@@ -1005,6 +962,11 @@ void AsmGen::gen_setjmp(const Inst& in) {
         line(std::format("call {}", target_abi().setjmp_sym));
         line("movslq %eax, %rax");
         emit2("movq", "%rax", dst_op(in.dst));
+        // P2（type_tags）：longjmp 回到这里时清 tag 侧信道（理由同 landing pad）。
+        if (type_tags_) {
+            line("movq $0, pa_ptag_in(%rip)");
+            line("movq $0, pa_ptag_len(%rip)");
+        }
     }
 
 void AsmGen::gen_call_rt(const Inst& in) {
@@ -1072,6 +1034,56 @@ void AsmGen::gen_call_rt(const Inst& in) {
         if (tags_enabled_ && in.args.size() == 1 && vreg_tagged(in.args[0]) &&
             (fn == RtFn::AnyIsFloat || fn == RtFn::AnyToF64 || fn == RtFn::AnyToI64)) {
             gen_any_tagged(in, fn);
+            return;
+        }
+        // ── P2：类型内省入口带 tag（PYADAMAS_TYPE_TAGS）────────────────
+        // repr/print_repr/isinstance 的 unknown 分支：tag 从平行 tag 区装填，
+        // 运行期按类型码分派（免探针，且 None/bool/bytes/tuple/set 可区分）。
+        // 门控关时 lowering 不发这些新入口、旧入口逐字旧路径。
+        if (type_tags_ && (fn == RtFn::ReprAny || fn == RtFn::PrintAnyRepr) &&
+            in.args.size() == 1 && vreg_tagged(in.args[0])) {
+            emit_arg(0, false, 0, src_mop(in.args[0]));
+            emit_arg(1, false, 1, tag_src(in.args[0]));
+            spill_fp_slots();
+            line(fn == RtFn::ReprAny ? "call pa_repr_any_t"
+                                     : "call pa_print_any_repr_t");
+            reload_fp_slots();
+            if (!dst_unused(in) && fn == RtFn::ReprAny)
+                emit2("movq", "%rax", dst_op(in.dst));
+            return;
+        }
+        if (type_tags_ && fn == RtFn::AnyIterList && in.args.size() == 1 &&
+            vreg_tagged(in.args[0])) {
+            // P2：unknown 迭代物化带 tag（标量元组未进 RC 索引，探针会漏）。
+            emit_arg(0, false, 0, src_mop(in.args[0]));
+            emit_arg(1, false, 1, tag_src(in.args[0]));
+            spill_fp_slots();
+            line("call pa_any_iter_list_t");
+            reload_fp_slots();
+            if (!dst_unused(in)) emit2("movq", "%rax", dst_op(in.dst));
+            return;
+        }
+        if (type_tags_ && fn == RtFn::AnyDictItems && in.args.size() == 2 &&
+            vreg_tagged(in.args[0])) {
+            // P2：unknown dict 的 (key,value) 对物化（pprint 取键值用）。
+            // 门控关时 IR 的第二个实参是常量 0（UNK），走旧探针路径。
+            emit_arg(0, false, 0, src_mop(in.args[0]));
+            emit_arg(1, false, 1, tag_src(in.args[0]));
+            spill_fp_slots();
+            line("call pa_any_dict_items");
+            reload_fp_slots();
+            if (!dst_unused(in)) emit2("movq", "%rax", dst_op(in.dst));
+            return;
+        }
+        if (type_tags_ && fn == RtFn::AnyTypeIs && in.args.size() == 2 &&
+            vreg_tagged(in.args[0])) {
+            emit_arg(0, false, 0, src_mop(in.args[0]));
+            emit_arg(1, false, 1, tag_src(in.args[0]));
+            emit_arg(2, false, 2, src_mop(in.args[1]));   // 类型码常量
+            spill_fp_slots();
+            line("call pa_any_type_is");
+            reload_fp_slots();
+            if (!dst_unused(in)) emit2("movq", "%rax", dst_op(in.dst));
             return;
         }
         // ── list.append 内联快路径（0.282）─────────────────────────

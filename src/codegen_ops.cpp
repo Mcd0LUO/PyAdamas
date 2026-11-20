@@ -146,8 +146,10 @@ void AsmGen::gen_inst(const Inst& in) {
                 break;
             case IrOp::ConstNone:
                 move_to(dst_op(in.dst), "$0");
-                // None 在 unknown 域仍是裸 0（0.324 边界），tag 按 INT。
-                emit_tag_imm(in.dst, kTagInt);
+                // None 在 unknown 域仍是裸 0（0.324 边界）。P2（type_tags_）
+                // 给它专 tag，使 isinstance(x, type(None))/repr 能区分；
+                // 门控关时沿用 INT（与 0 不可分，旧行为）。
+                emit_tag_imm(in.dst, type_tags_ ? kTagNone : kTagInt);
                 break;
             case IrOp::FuncAddr: {
                 char b[24];
@@ -414,7 +416,10 @@ void AsmGen::gen_load_slot(const Inst& in) {
 
 void AsmGen::gen_const_int(const Inst& in) {
         const MOperand& d = dst_mop(in.dst);
-        emit_tag_imm(in.dst, kTagInt);
+        // P2：bool 常量（True/False 降级成 const.int ty=bool）发 BOOL tag。
+        TypePtr ct = ty_of(in.dst);
+        emit_tag_imm(in.dst, (type_tags_ && ct && ct->kind == TyKind::Bool)
+                                 ? kTagBool : kTagInt);
         if (in.imm >= INT32_MIN && in.imm <= INT32_MAX) {
             emit_imm(MOp::kMovq, in.imm, d);
         } else {
@@ -1141,6 +1146,12 @@ void AsmGen::gen_eh_landing_pad() {
     // landing pad 入口：%rax 是展开包装指针（personality 的 GR0）；紧随其后的
     // CallRt EhLand 会把它作为第一个实参传给 pa_eh_land。
     if (eh_lp_seq_ < eh_lp_labels_.size()) label(eh_lp_labels_[eh_lp_seq_++]);
+    // P2（type_tags）：异常展开落点清 tag 侧信道 —— 抛异常的调用可能没被
+    // 被调读走（被调无 tag 形参），stale 值不能被之后的回调误读。
+    if (type_tags_) {
+        line("movq $0, pa_ptag_in(%rip)");
+        line("movq $0, pa_ptag_len(%rip)");
+    }
 }
 
 }  // namespace pyadamas
