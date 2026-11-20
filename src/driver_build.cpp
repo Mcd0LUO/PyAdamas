@@ -234,6 +234,8 @@ inline constexpr ModuleEntry kModuleTable[] = {
     {"contextlib", ModuleKind::Python, "contextlib.py", ""},
     {"csv", ModuleKind::Python, "csv.py", ""},
     {"copy", ModuleKind::Python, "copy.py", ""},
+    // P4 块4（lang_gaps）：@dataclass 编译期展开的运行期恒等装饰器。
+    {"dataclasses", ModuleKind::Python, "dataclasses.py", ""},
     {"fnmatch", ModuleKind::Python, "fnmatch.py", "re"},
     {"enum", ModuleKind::Python, "enum.py", ""},
     {"fractions", ModuleKind::Python, "fractions.py", "math"},
@@ -254,6 +256,8 @@ inline constexpr ModuleEntry kModuleTable[] = {
     {"string", ModuleKind::Python, "string.py", ""},
     {"tempfile", ModuleKind::Python, "tempfile.py", "os,os.path,random,shutil"},
     {"textwrap", ModuleKind::Python, "textwrap.py", ""},
+    // P4 块3（lang_gaps）：traceback 格式化（sys.exc_info + __pa_tb_frames）。
+    {"traceback", ModuleKind::Python, "traceback.py", "sys"},
     {"typing", ModuleKind::Python, "typing.py", ""},
     {"urllib", ModuleKind::Python, "urllib/__init__.py", ""},
     {"urllib.error", ModuleKind::Python, "urllib/error.py", ""},

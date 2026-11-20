@@ -621,6 +621,14 @@ enum class RtFn : uint16_t {
     ExcClassValueNewArgs,  // (class*, list* args) -> excval*  多参版
     MethodRegister,        // (str* qual, str* method, i64 slot) -> void  方法名→槽登记
     MethodCall0,           // (obj*, str* method) -> i64  动态零参方法调用（close 等）
+    // P4 块3（0.346，PYADAMAS_LANG_GAPS）：traceback 对象 / sys.exc_info。
+    // 追加在末尾，不改既有编号（集成时按落地顺序重排）。
+    SysExecutable,         // () -> str*  sys.executable（argv[0]，编译产物路径）
+    LangGapsEnable,        // () -> void  运行期门控置 1（入口模块体首发，门控开才发射）
+    ExcInfo,               // () -> list*  sys.exc_info() 三元组（+1；outside except 全 None）
+    TbFrames,              // (tb*) -> list*  __pa_tb_frames：list[(file,line,func)]（+1）
+    ReprSet,               // (set*) -> str*  静态 set 的 repr（探针分不出 set/dict）
+    ReprBytes,             // (bytes*) -> str*  静态 bytes 的 repr（bytes/str 同表示）
 };
 
 inline const char* rt_name(RtFn f) {
@@ -660,6 +668,12 @@ inline const char* rt_name(RtFn f) {
         case RtFn::ExcClassValueNewArgs: return "pa_exc_class_value_new_args";
         case RtFn::MethodRegister: return "pa_method_register";
         case RtFn::MethodCall0: return "pa_method_call0";
+        case RtFn::SysExecutable: return "pa_sys_executable";
+        case RtFn::LangGapsEnable: return "pa_lang_gaps_enable";
+        case RtFn::ExcInfo: return "pa_exc_info";
+        case RtFn::TbFrames: return "pa_tb_frames";
+        case RtFn::ReprSet: return "pa_repr_set";
+        case RtFn::ReprBytes: return "pa_repr_bytes";
         case RtFn::ListGet: return "pa_list_get";
         case RtFn::ListSet: return "pa_list_set";
         case RtFn::ListSetLen: return "pa_list_set_len";

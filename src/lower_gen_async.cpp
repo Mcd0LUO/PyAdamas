@@ -209,6 +209,11 @@ int Lowerer::compile_suspendable_function(FunctionDef& f, FuncInfoPtr info,
     IRFunction* cw = mod_.add_func(label);
     int cidx = static_cast<int>(mod_.funcs.size()) - 1;
     if (owner) fn_owner_class_[irf] = owner;
+    // P4 块3：生成器/协程方法帧同样显示裸方法名（resume 与包装同口径）。
+    if (owner && opts_.lang_gaps) {
+        irf->debug_name = f.name;
+        cw->debug_name = f.name;
+    }
 
     irf->ret = t_none();
     irf->is_generator = true;

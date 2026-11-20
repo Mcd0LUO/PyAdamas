@@ -127,11 +127,19 @@ pyadamas::ModuleInfoPtr builtin_module(const std::string& name) {
              pyadamas::t_float());
     } else if (name == "sys") {
         info->globals["argv"] = pyadamas::mk_list(pyadamas::t_str());
+        info->globals["executable"] = pyadamas::t_str();
         info->globals["maxsize"] = pyadamas::t_int();
         info->globals["stdin"] = pyadamas::t_file();
         info->globals["stdout"] = pyadamas::t_file();
         info->globals["stderr"] = pyadamas::t_file();
         func("exit", {pyadamas::t_int()}, pyadamas::t_none());
+        // P4 块3（lang_gaps）：sys.exc_info() → (类值, 异常值, tb)。
+        // 类值位静态给 ClassObj（__name__ 可读，运行期是任意异常类单例）；
+        // 异常值/tb 位 unknown（outside except 是 None，unknown 才能按
+        // None 打印/判同一）。运行期三元组元素与静态类型只是提示关系。
+        func("exc_info", {},
+             pyadamas::mk_tuple({pyadamas::mk_class_obj(pyadamas::mk_exception("Exception")),
+                                 pyadamas::t_unknown(), pyadamas::t_unknown()}));
     } else if (name == "asyncio") {
         // run/create_task 的结果类型按实参在 typecheck 里特判；这里的签名
         // 只用于 from-import 的缺省检查和错误提示。

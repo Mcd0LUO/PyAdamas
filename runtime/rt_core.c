@@ -1331,6 +1331,14 @@ void pa_print_any(int64_t v) {
             pa_rc_dec(s);
             return;
         }
+        /* P4 块3（lang_gaps 门控开）：print(异常值) 印消息（CPython 口径）。 */
+        if (pa_lang_gaps_rt && h->kind == PYADAMAS_RC_OBJ &&
+            ((PyAdamasExcValue*)(uintptr_t)v)->magic == PYADAMAS_EXCVAL_MAGIC) {
+            PyAdamasStr* s = pa_exc_value_str((PyAdamasExcValue*)(uintptr_t)v);
+            pa_print_str(s);
+            pa_rc_dec(s);
+            return;
+        }
     }
     pa_print_i64(v);
 }

@@ -398,6 +398,10 @@ VReg Lowerer::lower_unary(UnaryOp& u) {
 }
 
 VReg Lowerer::lower_boolop(BoolOp& b) {
+    // 单值 BoolOp（语法分析器不会产生，编译期合成 AST 可能有，如 dataclass
+    // 单字段 __eq__）：直接求值，不建短路块——下面的循环从 i=1 起，单值时
+    // 一条跳转都不发射，当前块会悬空落进下一块（351 实测空列表 eq 恒 False）。
+    if (b.values.size() == 1) return expr(*b.values[0]);
     TypePtr ty = tc_.type_of(&b);
     int tmp = new_borrow_slot(ty);
 

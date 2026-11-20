@@ -56,6 +56,11 @@ void TypeChecker::check(Module& m) {
         next.lenient_imports_ = lenient_imports_;
         next.strict_module_names_ = strict_module_names_;
         next.cinclude_dirs_ = cinclude_dirs_;
+        // P4（lang_gaps）：门控必须随重查传递——否则重查轮里异常类名退回
+        // unknown/Class 旧口径，与首轮缓存的 ClassObj 分叉（递归函数触发
+        // result-hint 重查时，isinstance(e, ValueError) 在降级期报「第二参
+        // 不是类」，350 实测）。门控关时 false→false，逐字不变。
+        next.set_lang_gaps(lang_gaps_);
         next.result_hints_ = std::move(result_hints_);
         next.check_once(m);
         *this = std::move(next);

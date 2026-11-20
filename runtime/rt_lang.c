@@ -24,6 +24,13 @@
  */
 #include "rt_internal.h"
 
+/* ── P4 块3（0.346）：运行期门控 ─────────────────────────────────
+   生成代码门控开时入口模块体首发 LangGapsEnable → pa_lang_gaps_enable。
+   帧捕获（rt_debug.c）/富异常上下文接管（rt_exc.c）第一行判它；关时全是
+   空操作。门控是程序级 env，所有模块同门控，进程级一个变量足够。 */
+int pa_lang_gaps_rt;
+void pa_lang_gaps_enable(void) { pa_lang_gaps_rt = 1; }
+
 /* ── 内建异常类单例 ─────────────────────────────────────────── */
 
 typedef struct ExcClassReg {
@@ -351,6 +358,102 @@ PyAdamasStr* pa_fileinst_errors(void* v) {
     (void)v;
     pa_raise_c("AttributeError", "file-like object has no attribute 'errors'");
     return NULL;
+}
+
+/* ── P4 块3：traceback 对象 + sys.exc_info ─────────────────────
+ *
+ * tb 是 RC OBJ + 魔数，包一条 pa_trace_clone 来的物理帧链（malloc，
+ * 字符串是调试表 rodata 的借用指针，不占引用）。帧链不是 RC 对象，
+ * 没有 GC 出边，release 回调为 NULL；destroy 里 pa_trace_free 整链还掉。
+ * 门控关时 phys 恒 NULL，tb 帧链为空——exc_info 仍可用（类值/异常值
+ * 不依赖捕获），只是没有帧（与 suppress 的门控语义同口径）。 */
+
+#define PYADAMAS_TB_MAGIC 0x54424652414d4501LL  /* "TBFRAME" + 版本 1 */
+typedef struct PyAdamasTb {
+    int64_t magic;
+    PyAdamasTraceFrame* frames;  /* owned malloc 链，外→内 */
+} PyAdamasTb;
+
+static void tb_destroy(void* p) {
+    PyAdamasTb* tb = (PyAdamasTb*)p;
+    pa_trace_free(tb->frames);
+}
+
+static PyAdamasTb* tb_new(PyAdamasTraceFrame* frames) {
+    PyAdamasTb* tb = (PyAdamasTb*)rc_alloc((int64_t)sizeof(PyAdamasTb),
+                                           tb_destroy, NULL, PYADAMAS_RC_OBJ);
+    tb->magic = PYADAMAS_TB_MAGIC;
+    tb->frames = frames;
+    return tb;
+}
+
+static PyAdamasTb* tb_check(void* p) {
+    if (!p || !pa_unknown_is_heap((int64_t)(uintptr_t)p))
+        pa_raise_c("TypeError", "expected a traceback object");
+    PyAdamasTb* tb = (PyAdamasTb*)p;
+    if (tb->magic != PYADAMAS_TB_MAGIC)
+        pa_raise_c("TypeError", "expected a traceback object");
+    return tb;
+}
+
+/* sys.exc_info()：except 体里返回 (类值, 异常值, tb)；outside except →
+   (None, None, None)。类值复用块1 单例（pa_exc_class_obj，+1）；异常值
+   pa_exc_value_from_exc（+1，args/cause 同 except as e 口径）；tb 包
+   current_exc->phys 的克隆（+1）。三个引用都转交给三元组（kind 1）。 */
+PyAdamasList* pa_exc_info(void) {
+    if (!current_exc)
+        return pa_tuple_new_filled(3, 1, 0, 0, 0, 0);
+    /* 构造期可能触发 GC（str_new / rc_alloc）：三元组先挂临时栈保命，
+       元素引用在 append 前都是 C 局部，临时栈接管后逐个转移所有权。 */
+    PyAdamasStr* tn = str_new(current_exc->type, (int64_t)strlen(current_exc->type));
+    pa_rc_temp(tn);
+    void* cls = pa_exc_class_obj(tn);
+    pa_rc_temp(cls);
+    /* 单例自己持名字；tn 只是查表用。先取回所有权再 dec——temp 挂着时
+       dec 到 0 会当场销毁，temp_take 再读就是 UAF。 */
+    pa_rc_temp_take(tn);
+    pa_rc_dec(tn);
+    PyAdamasExcValue* val = pa_exc_value_from_exc(current_exc);
+    pa_rc_temp(val);
+    PyAdamasTb* tb = tb_new(pa_trace_clone(current_exc->phys));
+    pa_rc_temp(tb);
+    PyAdamasList* t = pa_tuple_new_filled(3, 1, (int64_t)(uintptr_t)cls,
+                                         (int64_t)(uintptr_t)val,
+                                         (int64_t)(uintptr_t)tb, 0);
+    /* filled 已接管三个引用；临时栈那份摘掉（temp_take 按值摘除，不 dec）。 */
+    pa_rc_temp_take(cls);
+    pa_rc_temp_take(val);
+    pa_rc_temp_take(tb);
+    return t;
+}
+
+/* __pa_tb_frames(tb) → list[(file, line, func)]，外→内物化。
+   None 按空表处理（stdlib/traceback.py 的 extract_tb(None) 口径）。
+   内层元组 (str, int, str) 混合种类 → kind 2；外层全堆 → kind 1。 */
+PyAdamasList* pa_tb_frames(void* p) {
+    if (!p) return pa_list_new(0, 1);
+    PyAdamasTb* tb = tb_check(p);
+    int64_t n = 0;
+    for (const PyAdamasTraceFrame* f = tb->frames; f; f = f->next) ++n;
+    PyAdamasList* out = pa_list_new(n, 1);
+    pa_rc_temp(out);
+    for (const PyAdamasTraceFrame* f = tb->frames; f; f = f->next) {
+        PyAdamasStr* fs = str_new(f->file, (int64_t)strlen(f->file));
+        pa_rc_temp(fs);
+        PyAdamasStr* fn = str_new(f->func, (int64_t)strlen(f->func));
+        pa_rc_temp(fn);
+        PyAdamasList* tup = pa_list_new(3, 2);
+        pa_rc_temp(tup);
+        pa_list_append(tup, (int64_t)(uintptr_t)fs, 1);
+        pa_list_append(tup, (int64_t)f->line, 0);
+        pa_list_append(tup, (int64_t)(uintptr_t)fn, 1);
+        pa_list_append(out, (int64_t)(uintptr_t)tup, 1);
+        pa_rc_temp_take(fs);
+        pa_rc_temp_take(fn);
+        pa_rc_temp_take(tup);
+    }
+    pa_rc_temp_take(out);
+    return out;
 }
 
 /* ── 退出清理 ─────────────────────────────────────────────────

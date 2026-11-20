@@ -90,6 +90,7 @@ static void ar_put(AnyReprBuf* b, const char* p, size_t n) {
 static void ar_cstr(AnyReprBuf* b, const char* s) { ar_put(b, s, strlen(s)); }
 
 static void repr_any_into(AnyReprBuf* b, int64_t v);
+static void repr_any_bytes_into(AnyReprBuf* b, PyAdamasStr* s);
 
 /* dict 的 unknown repr：{key: value, ...}。键值都可能又是容器。 */
 static void repr_any_dict_into(AnyReprBuf* b, PyAdamasDict* d) {
@@ -148,6 +149,30 @@ static void repr_any_into(AnyReprBuf* b, int64_t v) {
                 pa_rc_dec(s);
                 return;
             }
+            /* P4 块3（lang_gaps 门控开）：异常值过 unknown 的 repr →
+               CPython 口径 Name('arg', ...)。门控关逐字旧样（印机器字）。 */
+            if (pa_lang_gaps_rt && h->kind == PYADAMAS_RC_OBJ &&
+                ((PyAdamasExcValue*)(uintptr_t)v)->magic == PYADAMAS_EXCVAL_MAGIC) {
+                PyAdamasExcValue* ev = (PyAdamasExcValue*)(uintptr_t)v;
+                ar_cstr(b, ev->type);
+                ar_cstr(b, "(");
+                int64_t n = ev->args ? ev->args->len : 0;
+                /* 单空串 args 按无参印（raise E() 的 pa 表示是空消息串，
+                   与 CPython 无参构造同形；E("") 的 repr 差异文档化）。 */
+                if (n == 1) {
+                    PyAdamasStr* a0 = (PyAdamasStr*)(uintptr_t)ev->args->data[0];
+                    if (a0 && a0->len == 0) n = 0;
+                }
+                for (int64_t i = 0; i < n; ++i) {
+                    if (i) ar_cstr(b, ", ");
+                    PyAdamasStr* a = (PyAdamasStr*)(uintptr_t)ev->args->data[i];
+                    PyAdamasStr* r = pa_repr_str(a);
+                    ar_put(b, r->data, (size_t)r->len);
+                    pa_rc_dec(r);
+                }
+                ar_cstr(b, ")");
+                return;
+            }
             PyAdamasStr* s = pa_str_from_i64(v);
             ar_put(b, s->data, (size_t)s->len);
             pa_rc_dec(s);
@@ -160,6 +185,40 @@ PyAdamasStr* pa_repr_any(int64_t v) {
     AnyReprBuf b = {NULL, 0, 0};
     ar_cstr(&b, "");
     repr_any_into(&b, v);
+    PyAdamasStr* out = str_new(b.p ? b.p : "", (int64_t)b.n);
+    free(b.p);
+    return out;
+}
+
+/* P4 块4（lang_gaps）：静态 bytes 的 repr。bytes/str 同运行期表示（无标志
+   位），探针口径分不出，静态已知是 bytes 时走这里（b'...' + \xNN 转义，
+   CPython 口径；与带 tag 路径的 repr_any_bytes_into 同一实现）。 */
+PyAdamasStr* pa_repr_bytes(void* s) {
+    AnyReprBuf b = {NULL, 0, 0};
+    repr_any_bytes_into(&b, (PyAdamasStr*)s);
+    PyAdamasStr* out = str_new(b.p ? b.p : "", (int64_t)b.n);
+    free(b.p);
+    return out;
+}
+
+/* P4 块4（lang_gaps）：静态 set 的 repr。set 的运行期表示是 dict（值恒 0），
+   探针口径（repr_any_into）分不出 set 与 {k: 0} 字典，会印成 {1: 0, ...}；
+   静态类型已知是 set 时走这里：按键迭代、元素按 unknown 探针 repr，
+   空集印 set()（CPython 口径）。元素是嵌套 set 时仍按字典印（探针边界，
+   与 P2 容器元素无 tag 口径一致）。 */
+PyAdamasStr* pa_repr_set(void* s) {
+    AnyReprBuf b = {NULL, 0, 0};
+    PyAdamasDict* d = (PyAdamasDict*)s;
+    if (!d || d->len == 0) {
+        ar_cstr(&b, "set()");
+    } else {
+        ar_cstr(&b, "{");
+        for (int64_t i = 0; i < d->len; ++i) {
+            if (i) ar_cstr(&b, ", ");
+            repr_any_into(&b, pa_dict_key_at(d, i));
+        }
+        ar_cstr(&b, "}");
+    }
     PyAdamasStr* out = str_new(b.p ? b.p : "", (int64_t)b.n);
     free(b.p);
     return out;
@@ -504,6 +563,16 @@ PyAdamasStr* pa_str_any(int64_t v) {
             /* P4（lang_gaps）：str(类对象) == repr(类对象)（CPython 口径）。 */
             if (pa_is_class_obj((void*)(uintptr_t)v))
                 return pa_class_repr((void*)(uintptr_t)v);
+        }
+        /* P4 块3（lang_gaps 门控开）：str(异常值) == 消息（CPython 口径）。
+           用 pa_unknown_is_heap 而非 rc_index_has：exact-RC 模式（无索引）
+           也认得。门控关逐字旧样。 */
+        if (pa_lang_gaps_rt && pa_unknown_is_heap(v)) {
+            PyAdamasRc* h2 = (PyAdamasRc*)(uintptr_t)((uint64_t)v -
+                                                    (uint64_t)PYADAMAS_RC_HDR);
+            if (h2->kind == PYADAMAS_RC_OBJ &&
+                ((PyAdamasExcValue*)(uintptr_t)v)->magic == PYADAMAS_EXCVAL_MAGIC)
+                return pa_exc_value_str((PyAdamasExcValue*)(uintptr_t)v);
         }
     }
     return pa_str_from_i64(v);

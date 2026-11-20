@@ -298,6 +298,15 @@ static void pa_eh_phase2_frame_release(uint64_t ex_class, uintptr_t target_cfa) 
 #endif
         return;
     }
+    /* P4 块3（lang_gaps）：记下 handler 帧 CFA（展开器口径，与捕获链节点
+       CFA 同源），except 落地提交时按它裁剪待提交帧链。不在这里裁剪：
+       分发不匹配会 pa_eh_rethrow 继续向外展开，中途裁剪会丢掉中间帧；
+       每次 handler 帧人格调用都刷新，最终接住的那个才是准的。 */
+    if (pa_lang_gaps_rt && pa_eh_current) {
+        PaEhExc* w = (PaEhExc*)pa_eh_current;
+        if (w->magic == PA_EH_WRAPPER_MAGIC && w->exc)
+            w->exc->handler_cfa = target_cfa;
+    }
     pa_frame_unwind_to_cfa(target_cfa);
 }
 
@@ -365,8 +374,12 @@ _Noreturn void pa_eh_raise(PyAdamasStr* type, PyAdamasStr* msg) {
     e->message[msg->len] = '\0';
     e->cause = NULL;
     e->trace = NULL;
+    e->phys = NULL;
+    e->phys_extra = NULL;
+    e->handler_cfa = 0;
     pa_exc_trace_alloc(e);
     pending_exc = e;
+    pa_trace_capture(e, PA_CAP_NEW);
     pa_eh_throw_or_exit(e);
 }
 
@@ -393,6 +406,7 @@ _Noreturn void pa_eh_raise_value_from(PyAdamasExcValue* v, PyAdamasExcValue* cau
         exc_free(pending_exc->cause);
         pending_exc->cause = pa_exc_from_value(cause);
     }
+    pa_trace_capture(pending_exc, PA_CAP_VALUE);
     pa_eh_throw_or_exit(pending_exc);
 }
 
@@ -403,9 +417,11 @@ _Noreturn void pa_eh_reraise(void) {
         exc_free(pending_exc);
         pending_exc = current_exc;
         current_exc = NULL;
+        pa_trace_capture(pending_exc, PA_CAP_RERAISE);
     } else {
         exc_free(pending_exc);
         pending_exc = exc_new("RuntimeError", "No active exception to reraise");
+        pa_trace_capture(pending_exc, PA_CAP_NEW);
     }
     pa_eh_throw_or_exit(pending_exc);
 }

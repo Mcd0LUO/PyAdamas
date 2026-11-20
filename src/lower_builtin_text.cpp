@@ -317,6 +317,21 @@ VReg Lowerer::lower_builtin_text(const std::string& name, Call& c) {
             return s;
         }
         if (t && t->kind == TyKind::Tuple) return tuple_text(t, v);
+        // P4 块4（lang_gaps）：静态容器/bytes 的 repr 走运行期探针口径
+        // （dataclass 合成 __repr__ 的字段 repr 用；门控关时这些调用原本
+        // 就报「不支持」，既有程序 asm 不变）。
+        if (opts_.lang_gaps && t &&
+            (t->kind == TyKind::List || t->kind == TyKind::Dict ||
+             t->kind == TyKind::Set || t->kind == TyKind::Bytes)) {
+            // set 的运行期表示是 dict（值恒 0）、bytes 与 str 同表示，探针
+            // repr 都分不出；静态已知时走专用入口（set 按键迭代、bytes b'...'）。
+            RtFn fn = t->kind == TyKind::Set ? RtFn::ReprSet
+                    : t->kind == TyKind::Bytes ? RtFn::ReprBytes
+                    : RtFn::ReprAny;
+            VReg s = call_runtime(fn, t_str(), {v});
+            push_temp(s);
+            return s;
+        }
         if (t && t->kind == TyKind::ClassObj) {
             VReg s = call_runtime(RtFn::ClassRepr, t_str(), {v});
             push_temp(s);

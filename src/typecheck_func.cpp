@@ -639,6 +639,13 @@ void TypeChecker::classdef(ClassDef& c) {
             cls->fields.push_back(std::move(fi));
         }
 
+        // P4 块4（lang_gaps）：@dataclass 编译期展开——字段已收集，合成
+        // __init__/__repr__/__eq__ 注入类体，下面的方法登记/槽分配/体检查
+        // 与降级全部复用既有机制。门控关不调用（逐字旧样）。重查轮里已注入
+        // 的方法按名字判重，不会重复注入。
+        if (lang_gaps_enabled() && cls->is_dataclass)
+            expand_dataclass(c, cls);
+
         // __match_args__：位置形式类模式的字段顺序。class 体里的赋值仍然
         // 按模块全局执行（没有类命名空间），这里只额外抽一份编译期元数据。
         for (auto& s : c.body) {

@@ -492,7 +492,10 @@ void Lowerer::lower_classdef(ClassDef& c) {
                                 {const_int(cid), ctor, vtable,
                                  const_str(mod_.runtime_name + "." + ci->name)});
         push_temp(obj);
-        if (!c.decorators.empty()) {
+        // P4 块4（lang_gaps）：@dataclass 已在编译期展开（合成方法进类体），
+        // 运行期装饰器调用跳过——裸 @dataclass 名字没有运行期绑定，求值会
+        // 落到空全局；导入形则是恒等装饰器，调不调语义相同。门控关逐字旧样。
+        if (!c.decorators.empty() && !(opts_.lang_gaps && ci->is_dataclass)) {
             std::string hidden = "__pyadamas$classdeco$" + ci->name;
             bind_name_value(hidden, obj, obj_ty);
             for (auto dit = c.decorators.rbegin(); dit != c.decorators.rend(); ++dit) {

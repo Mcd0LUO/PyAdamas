@@ -325,6 +325,13 @@ TypePtr TypeChecker::builtin_call(const std::string& n, Call& c) {
             if (!need(1, 1)) return t_none();
             return t_none();
         }
+        if (n == "__pa_tb_frames") {
+            // P4 块3 内部 intrinsic（stdlib/traceback.py）：tb 对象 →
+            // list[(file, line, func)]，外→内。tb 过 unknown（sys.exc_info
+            // 的第三个位置）；None 运行期按空表处理。
+            if (!need(1, 1)) return mk_list(mk_tuple({t_str(), t_int(), t_str()}));
+            return mk_list(mk_tuple({t_str(), t_int(), t_str()}));
+        }
         if (n == "__pa_b64decode") {
             if (!need(1, 1)) return t_bytes();
             if (a[0] && a[0]->kind != TyKind::Bytes && a[0]->kind != TyKind::Unknown)

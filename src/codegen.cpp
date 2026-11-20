@@ -360,7 +360,11 @@ std::string AsmGen::gen(const IRModule& m) {
                 line_buf_ = "\t.Lfnname";
                 append_num(line_buf_, static_cast<int64_t>(i));
                 line_buf_ += ": .asciz \"";
-                line_buf_ += asm_escape(debug_display_name(m.funcs[i]->name));
+                // P4 块3：lowerer 填了显示名就用它（门控开：<module>/裸方法名），
+                // 否则旧口径（门控关恒空，逐字节不变）。
+                line_buf_ += asm_escape(m.funcs[i]->debug_name.empty()
+                                            ? debug_display_name(m.funcs[i]->name)
+                                            : m.funcs[i]->debug_name);
                 line_buf_ += "\"\n";
                 out_ += line_buf_;
             }
