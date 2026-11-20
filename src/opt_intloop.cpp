@@ -652,6 +652,20 @@ bool version_bounds_affine_loop(IRFunction& fn, int h, const std::vector<char>& 
     for (const auto& c : cands) if (c.is_store) ++n_store_cands;
     if (n_store_cands != n_checked_stores) return false;
 
+    // 摊销门槛：守卫成本 ≈ 8+6×去重守卫数 条指令/每次进入循环，每轮收益
+    // ≈ 3×候选数。fannkuch 的 perm 旋转循环平均 ~3.5 轮，摊不平守卫
+    // （实测 BCE-only +1.7%）。常量 bound>=8 保证摊销；运行时 bound 未知，
+    // 保守要求候选数>=3（matmul 内循环形态）。宁保守跳过。
+    {
+        bool const_bound = bound_v < nv && ndefs[bound_v] == 1 && defs[bound_v].in &&
+                           defs[bound_v].in->op == IrOp::ConstInt;
+        if (const_bound) {
+            if (defs[bound_v].in->imm < 8) return false;
+        } else if (cands.size() < 3) {
+            return false;
+        }
+    }
+
     // ── 循环外前驱（守卫块插在这些边上） ──
     std::vector<int> outside;
     for (int b = 0; b < nb; ++b) {
