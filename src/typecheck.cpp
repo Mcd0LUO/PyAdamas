@@ -298,6 +298,18 @@ TypePtr TypeChecker::parse_annotation_impl(Expr* e, int line, int depth) {
         if (auto* n = dynamic_cast<Name*>(e)) {
             const std::string& id = n->id;
             if (id == "int") return t_int();
+            // ── 定宽整数标注（P1，docs/numeric-types-design.md §1.1）──
+            // i64 与 int 是同一个类型（Int = i64 机器字）；long 是 C 口径的
+            // i64 别名（x86-64 long = 64 位）。char = i8 别名（C 式字节，
+            // x86 char 默认 signed），不是 Unicode 码点——码点用 i32/u32。
+            if (id == "i64" || id == "long") return t_int();
+            if (id == "i8" || id == "char") return t_i8();
+            if (id == "i16" || id == "short") return t_i16();
+            if (id == "i32") return t_i32();
+            if (id == "u8" || id == "uchar") return t_u8();
+            if (id == "u16" || id == "ushort") return t_u16();
+            if (id == "u32" || id == "uint") return t_u32();
+            if (id == "u64" || id == "ulong") return t_u64();
             if (id == "float") return t_float();
             if (id == "str") return t_str();
             if (id == "bytes") return t_bytes();

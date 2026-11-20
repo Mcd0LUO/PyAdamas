@@ -206,9 +206,8 @@ TypePtr TypeChecker::expr(Expr& e) {
                             return t_unknown();
                         }
                         if (u.op == Tok::TILDE) {
-                            if (is_unknown(t) || t->kind == TyKind::Int ||
-                                t->kind == TyKind::Bool)
-                                return t_int();
+                            if (is_fixed_int(t)) return t;  // 定宽保持宽度/符号
+                            if (is_unknown(t) || is_int_like(t)) return t_int();
                             err(u.line, u.col, "bad operand type for '~': expected int");
                             return t_unknown();
                         }
@@ -296,7 +295,7 @@ TypePtr TypeChecker::expr(Expr& e) {
                 // ptr[T] 解引用：Optional[int] 上带元素种类时支持 p[i]。
                 if (ot && ot->kind == TyKind::Optional && ot->celem != CKind::None &&
                     !ot->sub.empty() && ot->sub[0]->kind == TyKind::Int) {
-                    if (!is_unknown(it) && it->kind != TyKind::Int && it->kind != TyKind::Bool)
+                    if (!is_unknown(it) && !is_int_like(it))
                         err(s.line, s.col, "pointer index must be an integer");
                     return cptr_elem_type(ot->celem);
                 }
@@ -1042,15 +1041,16 @@ TypePtr TypeChecker::binop_type(Tok op, TypePtr l, TypePtr r, int line, int col)
             case Tok::AMPER:
             case Tok::VBAR:
             case Tok::CIRCUMFLEX:
-                if (l->kind == TyKind::Int && r->kind == TyKind::Int) return t_int();
                 if (l->kind == TyKind::Bool && r->kind == TyKind::Bool) return t_bool();
+                if (is_int_like(l) && is_int_like(r)) return promote(l, r);
                 if (l->kind == TyKind::Set && r->kind == TyKind::Set) return l;
                 if (l->kind == TyKind::Dict && r->kind == TyKind::Dict && op == Tok::VBAR)
                     return l;
                 return bad();
             case Tok::LSHIFT:
             case Tok::RSHIFT:
-                if (l->kind == TyKind::Int && r->kind == TyKind::Int) return t_int();
+                // 移位结果跟随左操作数；超宽按 pa 的回绕/清零语义（非 C UB）。
+                if (is_int_like(l) && is_int_like(r)) return int_shift_result(l);
                 return bad();
             default:
                 return bad();
@@ -1114,20 +1114,20 @@ TypePtr TypeChecker::subscript_type(TypePtr obj, TypePtr idx, int line, int col)
         if (is_unknown(obj) || obj->kind == TyKind::Optional) return t_unknown();
         switch (obj->kind) {
             case TyKind::List:
-                if (!is_unknown(idx) && idx->kind != TyKind::Int && idx->kind != TyKind::Bool)
+                if (!is_unknown(idx) && !is_int_like(idx))
                     err(line, col, std::format("list index must be int, got '{}'", type_name(idx)));
                 return obj->sub[0];
             case TyKind::Range:
-                if (!is_unknown(idx) && idx->kind != TyKind::Int && idx->kind != TyKind::Bool)
+                if (!is_unknown(idx) && !is_int_like(idx))
                     err(line, col, std::format("range index must be int, got '{}'", type_name(idx)));
                 return obj->sub.empty() ? t_int() : obj->sub[0];
             case TyKind::Str:
-                if (!is_unknown(idx) && idx->kind != TyKind::Int && idx->kind != TyKind::Bool)
+                if (!is_unknown(idx) && !is_int_like(idx))
                     err(line, col, std::format("string index must be int, got '{}'", type_name(idx)));
                 return t_str();
             case TyKind::Bytes:
                 // bytes 下标取的是那个字节的整数值，不是单字节切片
-                if (!is_unknown(idx) && idx->kind != TyKind::Int && idx->kind != TyKind::Bool)
+                if (!is_unknown(idx) && !is_int_like(idx))
                     err(line, col, std::format("bytes index must be int, got '{}'", type_name(idx)));
                 return t_int();
             case TyKind::Tuple:

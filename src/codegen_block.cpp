@@ -663,11 +663,26 @@ void AsmGen::gen_cmp_branch(const Inst& in, const Inst& br) {
         }
         MOp jcc = MOp::kJe;
         MOp inv = MOp::kJne;
+        // 无符号 64 位（P1 定宽 u64）用 ja/jb 族。宽度 < 64 的无符号槽内
+        // 值恒非负，jl/jg 与 jb/ja 结论相同（见 norm_int_rax 的不变量）。
+        const bool uns = ty_of(in.a) && ty_of(in.a)->kind == TyKind::U64;
         switch (in.cop) {
-            case CmpKind::Lt: jcc = MOp::kJl; inv = MOp::kJge; break;
-            case CmpKind::Le: jcc = MOp::kJle; inv = MOp::kJg; break;
-            case CmpKind::Gt: jcc = MOp::kJg; inv = MOp::kJle; break;
-            case CmpKind::Ge: jcc = MOp::kJge; inv = MOp::kJl; break;
+            case CmpKind::Lt:
+                jcc = uns ? MOp::kJb : MOp::kJl;
+                inv = uns ? MOp::kJae : MOp::kJge;
+                break;
+            case CmpKind::Le:
+                jcc = uns ? MOp::kJbe : MOp::kJle;
+                inv = uns ? MOp::kJa : MOp::kJg;
+                break;
+            case CmpKind::Gt:
+                jcc = uns ? MOp::kJa : MOp::kJg;
+                inv = uns ? MOp::kJbe : MOp::kJle;
+                break;
+            case CmpKind::Ge:
+                jcc = uns ? MOp::kJae : MOp::kJge;
+                inv = uns ? MOp::kJb : MOp::kJl;
+                break;
             case CmpKind::Eq: jcc = MOp::kJe; inv = MOp::kJne; break;
             case CmpKind::Ne: jcc = MOp::kJne; inv = MOp::kJe; break;
         }

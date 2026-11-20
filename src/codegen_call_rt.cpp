@@ -411,9 +411,11 @@ void AsmGen::gen_rt_args(const Inst& in, RtFn fn) {
         case RtFn::RegexPatternStr:
         case RtFn::RegexEscape:
         case RtFn::StrFromI64:
+        case RtFn::StrFromU64:  // P1 u64：同样只发第 0 个字，零扩展值
         case RtFn::StrAny:
         case RtFn::StrFromBool:
         case RtFn::PrintI64:
+        case RtFn::PrintU64:  // P1 u64：单个整型实参，无需额外编组
         case RtFn::PrintAny:
         case RtFn::PrintAnyRepr:
         case RtFn::TruthAny:
@@ -687,6 +689,7 @@ void AsmGen::gen_rt_args(const Inst& in, RtFn fn) {
         case RtFn::FutureSetExceptionValue:
         case RtFn::FutureAddCallback:
         case RtFn::FmtI64:
+        case RtFn::FmtU64:  // P1 u64：(值, spec) 两个实参，与 FmtI64 同形
         case RtFn::FmtBool:
         case RtFn::FmtStr:
         case RtFn::FmtComplex:
@@ -861,6 +864,7 @@ void AsmGen::gen_rt_args(const Inst& in, RtFn fn) {
         case RtFn::ComplexEqUnknown:
         case RtFn::StrToI64:
         case RtFn::IntToBase:
+        case RtFn::UIntToBase:  // P1 u64：与 IntToBase 同形（值 + 进制）
         case RtFn::RoundI64:
         case RtFn::CpyCall:
         case RtFn::FuncReduce:

@@ -52,7 +52,7 @@ TypePtr TypeChecker::check_args(const FuncInfoPtr& fn, Call& c) {
         // 一次的类型错误会重复报两遍。
         struct PosArg {
             TypePtr ty;
-            const Expr* source;
+            Expr* source;
             bool dynamic_star = false;
         };
         std::vector<PosArg> positional;
@@ -121,7 +121,7 @@ TypePtr TypeChecker::check_args(const FuncInfoPtr& fn, Call& c) {
         // 重查；同一形参被多种类型调用则退回 unknown，不误杀 Python 的
         // 多态用法。
         auto bind_param = [&](Param& p, size_t idx, TypePtr ty, int line, int col,
-                              bool is_default = false) {
+                              bool is_default = false, Expr* arg_expr = nullptr) {
             // Bound and unbound calls to a method must use the same evidence.
             Param* source = nullptr;
             if (fn->outer) {
@@ -230,6 +230,10 @@ TypePtr TypeChecker::check_args(const FuncInfoPtr& fn, Call& c) {
                 mixed_float();
                 return;
             }
+            // 定宽形参 + 字面量实参：范围内隐式 coerce（超范围在此报错）。
+            // 非字面量 int 实参窄化到定宽形参仍然要求显式 cast。
+            if (arg_expr && is_fixed_int(p.ty) && accept_literal_into(p.ty, arg_expr))
+                return;
             if (assignable(p.ty, ty)) return;
             if (p.inferred) {
                 // Keep the existing fallback for other incompatible types.
@@ -255,7 +259,8 @@ TypePtr TypeChecker::check_args(const FuncInfoPtr& fn, Call& c) {
             if (uncertain_pos) continue;
             if (pos_i < npos) {
                 filled[pos_i] = true;
-                bind_param(fn->pos[pos_i], pos_i, a.ty, a.source->line, a.source->col);
+                bind_param(fn->pos[pos_i], pos_i, a.ty, a.source->line, a.source->col,
+                           false, a.source);
                 ++pos_i;
             } else if (fn->varargs && !assignable(fn->vararg_ty, a.ty)) {
                 err(a.source->line, a.source->col,
@@ -324,6 +329,12 @@ TypePtr TypeChecker::check_args(const FuncInfoPtr& fn, Call& c) {
                 (!func_owners_.contains(it->second) ||
                  std::ranges::find(func_defs_, it->second) != func_defs_.end());
             TypePtr ty = literal_type(*p.default_lit);
+            // 定宽形参的整数字面量默认值：范围内的常量直接兼容
+            // （default_lit 里是编译期常量，降级按形参类型生成常量）。
+            if (p.ty && is_fixed_int(p.ty) &&
+                p.default_lit->kind == LiteralValue::Kind::Int &&
+                int_literal_fits(p.ty, p.default_lit->i))
+                return;
             if (can_recheck) {
                 bind_param(p, idx, ty, c.line, c.col, true);
                 // The invocation may go through a vtable. Validate any newly
@@ -449,6 +460,10 @@ bool TypeChecker::is_builtin_callable(const std::string& n) {
             "len_bytes",
             // 虚拟线程先验（docs/vthread-design.md）：join/sleep/make_chan
             "join", "sleep", "make_chan",
+            // 定宽整数显式转换（P1）：cast_i8/.../cast_u64。宽→窄的唯一
+            // 隐式途径之外的手段；语义是 C 式截断 + 回绕（见设计 §1.2/§1.3）。
+            "cast_i8", "cast_i16", "cast_i32", "cast_i64", "cast_int",
+            "cast_u8", "cast_u16", "cast_u32", "cast_u64",
         };
         return names.count(n) > 0;
     }

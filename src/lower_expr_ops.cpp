@@ -47,7 +47,14 @@ VReg Lowerer::lower_constant(Constant& c) {
     switch (c.ck) {
         case Constant::CK::None: return const_none();
         case Constant::CK::Bool: return const_bool(c.b);
-        case Constant::CK::Int: return const_int(c.i);
+        case Constant::CK::Int: {
+            // 定宽标注 / cast 把字面量的静态类型定成了 i8/u8/...（类型检查
+            // 已验过值域），常量必须按那个类型生成：codegen 的正常化与
+            // 无符号判定都看 vreg 类型。默认 int 路径逐字不变。
+            TypePtr ct = tc_.type_of(&c);
+            if (ct && is_fixed_int(ct)) return const_int_ty(c.i, ct);
+            return const_int(c.i);
+        }
         case Constant::CK::Float: return const_float(c.f);
         case Constant::CK::Complex: {
             Inst in;
@@ -75,7 +82,10 @@ VReg Lowerer::lower_percent_format(BinOp& b, TypePtr lt, TypePtr ty) {
     else argtys.push_back(rt);
     std::string desc;
     for (auto& t : argtys) {
-        if (t && t->kind == TyKind::Int) desc.push_back('i');
+        // 定宽整数（P1）：u64 用无符号描述符 'u'（≥ 2^63 的 %d 不能带负号），
+        // 其余定宽按 'i'（槽内值已是正确有符号/非负值）。
+        if (t && t->kind == TyKind::U64) desc.push_back('u');
+        else if (t && is_int_kind(t->kind)) desc.push_back('i');
         else if (t && t->kind == TyKind::Bool) desc.push_back('b');
         else if (t && t->kind == TyKind::Float) desc.push_back('f');
         else if (t && (t->kind == TyKind::Str || t->kind == TyKind::Bytes)) desc.push_back('s');
@@ -303,6 +313,13 @@ VReg Lowerer::lower_binop(BinOp& b) {
             push_temp_unknown(res);
             return res;
         }
+    }
+    // §1.2 提升：整数结果把两侧都转换到提升后的类型（定宽宽度与
+    // signedness 在这里定死，codegen 只看一个类型）。i8+int 的 int 侧
+    // 也是 int → 结果 int，转换是恒等；i8+i8 → i8，两侧无需转换。
+    if (ty && is_int_kind(ty->kind)) {
+        l = coerce(l, lt, ty);
+        r = coerce(r, rt, ty);
     }
     // int / int 的结果是 float，两个操作数都得先转；int + float 同理。
     // 放在这里做，codegen 就不用每条浮点指令都猜操作数是什么类型。
@@ -745,6 +762,16 @@ VReg Lowerer::lower_compare(Compare& c) {
         if ((ir_is_float(lt) || ir_is_float(rt)) && is_num(lt) && is_num(rt)) {
             if (!ir_is_float(lt)) l = convert_to(l, lt, t_float());
             if (!ir_is_float(rt)) r = convert_to(r, rt, t_float());
+        }
+        // §1.2：整数比较按**提升后的类型**比较（同宽 signed+unsigned →
+        // unsigned 等）。两侧必须先转换到同一类型：i32 -1 与 u32 1 比较时
+        // 若各按自己的机器字比，会拿符号扩展后的 -1 去比，结论正好相反。
+        {
+            TypePtr ct = int_promote(lt, rt);
+            if (ct && is_fixed_int(ct) && is_int_like(lt) && is_int_like(rt)) {
+                l = coerce(l, lt, ct);
+                r = coerce(r, rt, ct);
+            }
         }
         Inst in;
         in.op = IrOp::Cmp;

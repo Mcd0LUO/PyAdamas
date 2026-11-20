@@ -980,7 +980,8 @@ TypePtr TypeChecker::method_call(TypePtr recv, const std::string& name, Call& c,
                 return t_bool();
         }
 
-        if (recv->kind == TyKind::Int || recv->kind == TyKind::Float || recv->kind == TyKind::Bool) {
+        if (is_int_kind(recv->kind) || recv->kind == TyKind::Float ||
+            recv->kind == TyKind::Bool) {
             if (name == "bit_length") { argc(0, 0); return t_int(); }
             if (name == "as_integer_ratio") { argc(0, 0); return mk_tuple({t_int(), t_int()}); }
             if (name == "is_integer") { argc(0, 0); return t_bool(); }

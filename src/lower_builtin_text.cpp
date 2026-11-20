@@ -230,8 +230,13 @@ VReg Lowerer::lower_builtin_text(const std::string& name, Call& c) {
             return const_str("");
         }
         int64_t base = name == "hex" ? 16 : name == "bin" ? 2 : 8;
-        VReg v = coerce(expr(*c.args[0]), tc_.type_of(c.args[0].get()), t_int());
-        VReg s = call_runtime(RtFn::IntToBase, t_str(), {v, const_int(base)});
+        TypePtr at = tc_.type_of(c.args[0].get());
+        // u64 必须走无符号版（hex(cast_u64(-1)) == '0xffffffffffffffff'，
+        // 有符号版会打成 '-0x1'）。其余定宽值在槽内已是正确值，走有符号版。
+        bool uns = at && at->kind == TyKind::U64;
+        VReg v = coerce(expr(*c.args[0]), at, t_int());
+        VReg s = call_runtime(uns ? RtFn::UIntToBase : RtFn::IntToBase, t_str(),
+                              {v, const_int(base)});
         push_temp(s);
         return s;
     }
@@ -317,7 +322,8 @@ VReg Lowerer::lower_builtin_text(const std::string& name, Call& c) {
             push_temp(s);
             return s;
         }
-        if (t && (t->kind == TyKind::Int || t->kind == TyKind::Bool ||
+        // 定宽整数（P1）：repr 与 str 同形（十进制；u64 走无符号转换）。
+        if (t && (is_int_kind(t->kind) || t->kind == TyKind::Bool ||
                   t->kind == TyKind::Float || t->kind == TyKind::Complex ||
                   t->kind == TyKind::None))
             return convert_to(v, t, t_str());
@@ -360,9 +366,10 @@ VReg Lowerer::lower_builtin_text(const std::string& name, Call& c) {
         RtFn fn = RtFn::FmtI64;
         if (vt && vt->kind == TyKind::Float) fn = RtFn::FmtF64;
         else if (vt && vt->kind == TyKind::Bool) fn = RtFn::FmtBool;
+        else if (vt && vt->kind == TyKind::U64) fn = RtFn::FmtU64;  // P1：无符号
         else if (vt && vt->kind == TyKind::Str) fn = RtFn::FmtStr;
         else if (vt && vt->kind == TyKind::Complex) fn = RtFn::FmtComplex;
-        else if (!vt || (vt->kind != TyKind::Int && vt->kind != TyKind::Unknown)) {
+        else if (!vt || (!is_int_kind(vt->kind) && vt->kind != TyKind::Unknown)) {
             err(c.line, c.col,
                 std::format("format() of '{}' is not supported yet", type_name(vt)));
             return const_str("");
@@ -468,7 +475,16 @@ VReg Lowerer::lower_builtin_text(const std::string& name, Call& c) {
         if (vt) {
             switch (vt->kind) {
                 case TyKind::Bool: fn = RtFn::FmtBool; break;
-                case TyKind::Int: fn = RtFn::FmtI64; break;
+                case TyKind::Int:
+                // 定宽整数（P1）：窄宽度/无符号 8..32 的值在槽内已是
+                // 正确无符号十进制；u64 必须走无符号版（≥ 2^63 不能带负号）。
+                case TyKind::I8:
+                case TyKind::I16:
+                case TyKind::I32:
+                case TyKind::U8:
+                case TyKind::U16:
+                case TyKind::U32: fn = RtFn::FmtI64; break;
+                case TyKind::U64: fn = RtFn::FmtU64; break;
                 case TyKind::Float: fn = RtFn::FmtF64; break;
                 case TyKind::Str: fn = RtFn::FmtStr; break;
                 case TyKind::Complex: fn = RtFn::FmtComplex; break;

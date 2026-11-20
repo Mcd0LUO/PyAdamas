@@ -11,7 +11,15 @@ std::string Lowerer::py_type_name(const TypePtr& t) {
     switch (t->kind) {
         case TyKind::None: return "NoneType";
         case TyKind::Bool: return "bool";
-        case TyKind::Int: return "int";
+        case TyKind::Int:
+        // 定宽整数在 Python 语义里仍是 int（type(x).__name__ == 'int'）。
+        case TyKind::I8:
+        case TyKind::I16:
+        case TyKind::I32:
+        case TyKind::U8:
+        case TyKind::U16:
+        case TyKind::U32:
+        case TyKind::U64: return "int";
         case TyKind::Float: return "float";
         case TyKind::Complex: return "complex";
         case TyKind::Str: return "str";
@@ -99,10 +107,17 @@ int Lowerer::list_kind(const TypePtr& t) {
 int Lowerer::key_kind(const TypePtr& t) {
     if (!t) return 3;
     switch (t->kind) {
+        case TyKind::I8:
+        case TyKind::I16:
+        case TyKind::I32:
+        case TyKind::U8:
+        case TyKind::U16:
+        case TyKind::U32:
+        case TyKind::U64:
         case TyKind::Int:
         case TyKind::Bool:
         case TyKind::None:
-            return 0;
+            return 0;  // 定宽整数按机器字比较（值已正常化，与 int 同域）
         case TyKind::Str:
             return 1;
         case TyKind::Float:
@@ -115,6 +130,13 @@ VReg Lowerer::zero_value(TypePtr T) {
     if (!T) return const_none();
     switch (T->kind) {
         case TyKind::Int:
+        case TyKind::I8:
+        case TyKind::I16:
+        case TyKind::I32:
+        case TyKind::U8:
+        case TyKind::U16:
+        case TyKind::U32:
+        case TyKind::U64:
         case TyKind::Bool:
         case TyKind::None:
             return const_int(0);

@@ -516,7 +516,7 @@ VReg Lowerer::lower_method_call(Attribute& at, Call& c) {
 
     if (recv_ty && (recv_ty->kind == TyKind::List || recv_ty->kind == TyKind::Tuple)) return lower_method_seq(at, c, recv, recv_ty);
 
-    if (recv_ty && (recv_ty->kind == TyKind::Int || recv_ty->kind == TyKind::Bool) && at.attr == "bit_length") return lower_method_int(c, recv);
+    if (recv_ty && is_int_like(recv_ty) && at.attr == "bit_length") return lower_method_int(c, recv);
 
     err(c.line, c.col, std::format("method '{}' is not supported by the code generator yet",
                                    at.attr));

@@ -26,7 +26,18 @@ enum class TyKind : uint8_t {
     Unknown,  // 推断失败 / 放弃检查
     None,     // None
     Bool,
-    Int,
+    Int,  // 默认整数 = i64 机器字；定宽标注用下面的 I8..U64
+    // ── 定宽整数（P1，docs/numeric-types-design.md §1）──
+    // 机器表示统一 8 字节 i64 槽：有符号在槽内**符号扩展**，无符号**零扩展**。
+    // 运算按宽度截断回绕（C 式），不是 CPython 无限精度；要无限精度用 big（P3）。
+    // I64 不单列：Int 就是 i64（i64/long 标注解析成 Int）。
+    I8,   // i8 / char（char = i8 别名，C 式字节）
+    I16,  // i16 / short
+    I32,  // i32
+    U8,   // u8 / uchar
+    U16,  // u16
+    U32,  // u32
+    U64,  // u64（无符号 64 位：存储与 Int 同为 i64 槽，语义无符号）
     Float,
     Complex,
     Str,
@@ -577,6 +588,63 @@ inline const TypePtr& t_int() {
     static TypePtr v = new_ty(TyKind::Int);
     return v;
 }
+// 定宽整数单例。标注解析、提升结果、cast 目标都用它们，
+// 这样同一种宽度/符号在世界里只有一个 Type 节点（type_eq 走指针等值）。
+inline const TypePtr& t_i8() {
+    static TypePtr v = new_ty(TyKind::I8);
+    return v;
+}
+inline const TypePtr& t_i16() {
+    static TypePtr v = new_ty(TyKind::I16);
+    return v;
+}
+inline const TypePtr& t_i32() {
+    static TypePtr v = new_ty(TyKind::I32);
+    return v;
+}
+inline const TypePtr& t_u8() {
+    static TypePtr v = new_ty(TyKind::U8);
+    return v;
+}
+inline const TypePtr& t_u16() {
+    static TypePtr v = new_ty(TyKind::U16);
+    return v;
+}
+inline const TypePtr& t_u32() {
+    static TypePtr v = new_ty(TyKind::U32);
+    return v;
+}
+inline const TypePtr& t_u64() {
+    static TypePtr v = new_ty(TyKind::U64);
+    return v;
+}
+// 显式转换函数名（cast_i8 / cast_u8 / ...）→ 目标类型。不是 cast 名返回 nullptr。
+inline TypePtr cast_target_of(std::string_view n) {
+    if (n == "cast_i8") return t_i8();
+    if (n == "cast_i16") return t_i16();
+    if (n == "cast_i32") return t_i32();
+    if (n == "cast_i64" || n == "cast_int") return t_int();
+    if (n == "cast_u8") return t_u8();
+    if (n == "cast_u16") return t_u16();
+    if (n == "cast_u32") return t_u32();
+    if (n == "cast_u64") return t_u64();
+    return nullptr;
+}
+
+// 按 TyKind 取定宽单例；不是整数返回 nullptr。
+inline TypePtr int_ty_of(TyKind k) {
+    switch (k) {
+        case TyKind::I8: return t_i8();
+        case TyKind::I16: return t_i16();
+        case TyKind::I32: return t_i32();
+        case TyKind::Int: return t_int();
+        case TyKind::U8: return t_u8();
+        case TyKind::U16: return t_u16();
+        case TyKind::U32: return t_u32();
+        case TyKind::U64: return t_u64();
+        default: return nullptr;
+    }
+}
 inline const TypePtr& t_float() {
     static TypePtr v = new_ty(TyKind::Float);
     return v;
@@ -821,10 +889,148 @@ inline TypePtr mk_chan(TypePtr elem) {
     return t;
 }
 
+
+// ── 定宽整数分类（P1）────────────────────────────────────────────────
+//
+// 判定与提升规则集中在这里：**类型检查、降级、代码生成必须共用同一套
+// 判断**。提升规则是静默算错的重灾区（C 的 signed/unsigned 坑），
+// 三处各自写一份 if 迟早会漂移。
+
+struct IntInfo {
+    int width = 64;      // 8 / 16 / 32 / 64
+    bool is_signed = true;
+};
+
+// 定宽（非默认 Int）整数种类。
+inline bool is_fixed_int_kind(TyKind k) {
+    switch (k) {
+        case TyKind::I8:
+        case TyKind::I16:
+        case TyKind::I32:
+        case TyKind::U8:
+        case TyKind::U16:
+        case TyKind::U32:
+        case TyKind::U64:
+            return true;
+        default:
+            return false;
+    }
+}
+
+// 整数种类：默认 Int(i64) + 全部定宽。Bool 不算（单独判）。
+inline bool is_int_kind(TyKind k) {
+    return k == TyKind::Int || is_fixed_int_kind(k);
+}
+
+inline std::optional<IntInfo> int_info_of(TyKind k) {
+    switch (k) {
+        case TyKind::Int: return IntInfo{64, true};
+        case TyKind::I8: return IntInfo{8, true};
+        case TyKind::I16: return IntInfo{16, true};
+        case TyKind::I32: return IntInfo{32, true};
+        case TyKind::U8: return IntInfo{8, false};
+        case TyKind::U16: return IntInfo{16, false};
+        case TyKind::U32: return IntInfo{32, false};
+        case TyKind::U64: return IntInfo{64, false};
+        default: return std::nullopt;
+    }
+}
+
+inline std::optional<IntInfo> int_info_of(const TypePtr& t) {
+    if (!t) return std::nullopt;
+    return int_info_of(t->kind);
+}
+
+// 任意整数（含 bool）。索引/长度/计数的位置用它。
+inline bool is_int_like(const TypePtr& t) {
+    return t && (is_int_kind(t->kind) || t->kind == TyKind::Bool);
+}
+
+inline bool is_unsigned_int(const TypePtr& t) {
+    auto i = int_info_of(t);
+    return i && !i->is_signed;
+}
+
+inline bool is_fixed_int(const TypePtr& t) {
+    return t && is_fixed_int_kind(t->kind);
+}
+
+// 定宽整数的值域。字面量 coerce 的范围检查与 cast 语义都用它。
+inline void int_range_of(TyKind k, int64_t& lo, int64_t& hi) {
+    auto i = int_info_of(k);
+    if (!i) { lo = INT64_MIN; hi = INT64_MAX; return; }
+    if (i->is_signed) {
+        lo = -static_cast<int64_t>(static_cast<uint64_t>(1) << (i->width - 1));
+        hi = static_cast<int64_t>((static_cast<uint64_t>(1) << (i->width - 1)) - 1);
+    } else {
+        lo = 0;
+        hi = i->width == 64 ? INT64_MAX
+                            : static_cast<int64_t>((static_cast<uint64_t>(1) << i->width) - 1);
+    }
+}
+
+// 把 64 位宽的原始结果按定宽类型截断回绕成规范值（符号扩展/零扩展）。
+// 常量折叠（opt.cpp）与正常化路径共用同一套语义：回绕是 pa 的确定行为。
+inline int64_t int_narrow_value(const TypePtr& t, uint64_t v) {
+    auto ii = int_info_of(t);
+    if (!ii || ii->width == 64) return static_cast<int64_t>(v);
+    const uint64_t mask = (static_cast<uint64_t>(1) << ii->width) - 1;
+    uint64_t w = v & mask;
+    if (ii->is_signed && ii->width < 64) {
+        const uint64_t sign = static_cast<uint64_t>(1) << (ii->width - 1);
+        if (w & sign) w |= ~mask;
+    }
+    return static_cast<int64_t>(w);
+}
+
+// 字面量 v 能否隐式放进定宽类型 t（不截断、不回绕）。
+inline bool int_literal_fits(const TypePtr& t, int64_t v) {
+    if (!t || !is_int_kind(t->kind)) return true;
+    int64_t lo = 0, hi = 0;
+    int_range_of(t->kind, lo, hi);
+    return v >= lo && v <= hi;
+}
+
+// ── 提升规则（§1.2，定死）──────────────────────────────────────────
+//
+// 1. 任一 Float → float（F32 未实现，全部 f64）。
+// 2. Bool 参与 → 提升为对方的整数类型（bool+bool → int，CPython True+True==2）。
+// 3. 纯整数：取较宽宽度；**同宽 signed+unsigned → unsigned**（C 口径）；
+//    默认 int(i64) 与定宽混 → i64 最宽；i64+u64 同宽 → u64。
+// 4. 非数值域（unknown/Optional/None 混进来）→ int（旧行为，保守）。
+//
+// **下标/宽度/signedness 全部按提升后的类型定**，运算两侧在降级期被
+// 转换（normalize）到该类型，codegen 只按一个类型选指令。
+inline TypePtr int_promote(const TypePtr& l, const TypePtr& r) {
+    if (!l || !r) return t_int();
+    if (l->kind == TyKind::Float || r->kind == TyKind::Float) return t_float();
+    if (l->kind == TyKind::Bool && r->kind == TyKind::Bool) return t_int();
+    if (l->kind == TyKind::Bool) return is_int_kind(r->kind) ? r : t_int();
+    if (r->kind == TyKind::Bool) return is_int_kind(l->kind) ? l : t_int();
+    auto li = int_info_of(l->kind);
+    auto ri = int_info_of(r->kind);
+    if (!li || !ri) return t_int();
+    if (li->width > ri->width) return l;
+    if (ri->width > li->width) return r;
+    // 同宽：signed+unsigned → unsigned。宽度 64 的无符号只有 U64，
+    // 其余宽度 r 与 l 的种类相同，取 r 即可。
+    if (!li->is_signed || !ri->is_signed) return ri->width == 64 ? t_u64() : r;
+    return l;
+}
+
+// 移位：结果类型跟随**左**操作数（C：结果取提升后的左操作数类型）。
+// 计数不参与定宽：u8 << 3 仍是 u8（超宽移位按回绕/清零语义）。
+inline TypePtr int_shift_result(const TypePtr& l) {
+    if (!l) return t_int();
+    if (is_int_kind(l->kind)) return l;
+    return t_int();
+}
+
 // ── 判定与显示 ────────────────────────────────────────────────────
 
 inline bool is_num(const TypePtr& t) {
-    return t && (t->kind == TyKind::Int || t->kind == TyKind::Float || t->kind == TyKind::Bool);
+    return t && (is_int_kind(t->kind) || t->kind == TyKind::Float ||
+                 t->kind == TyKind::Bool);
 }
 inline bool is_unknown(const TypePtr& t) { return !t || t->kind == TyKind::Unknown; }
 
@@ -862,6 +1068,13 @@ inline std::string type_name_impl(const TypePtr& t, int depth) {
         case TyKind::None: return "None";
         case TyKind::Bool: return "bool";
         case TyKind::Int: return "int";
+        case TyKind::I8: return "i8";
+        case TyKind::I16: return "i16";
+        case TyKind::I32: return "i32";
+        case TyKind::U8: return "u8";
+        case TyKind::U16: return "u16";
+        case TyKind::U32: return "u32";
+        case TyKind::U64: return "u64";
         case TyKind::Float: return "float";
         case TyKind::Complex: return "complex";
         case TyKind::Str: return "str";
@@ -1080,7 +1293,16 @@ inline TypePtr join_into(const TypePtr& a, const TypePtr& b) {
     if (b_hole && !a_hole) return a;
     if (is_unknown(a) || is_unknown(b)) return t_unknown();
     if (type_eq(a, b)) return a;
-    if (is_num(a) && is_num(b)) return t_float();
+    if (is_num(a) && is_num(b)) {
+        // 定宽整数参与合并时走 §1.2 的整数提升（取较宽、同宽无符号胜出）。
+        // 其余数值组合保持旧行为（int/float 混 → float），**不要**顺手
+        // 改成整数提升：那会改变既有程序的分支合并结果与生成代码。
+        if (is_fixed_int(a) || is_fixed_int(b)) {
+            if (a->kind == TyKind::Float || b->kind == TyKind::Float) return t_float();
+            return int_promote(a, b);
+        }
+        return t_float();
+    }
     if (a->kind == TyKind::List && b->kind == TyKind::List)
         return mk_list(join(a->sub[0], b->sub[0]));
     if (a->kind == TyKind::Range && b->kind == TyKind::Range)
@@ -1179,9 +1401,31 @@ inline TypePtr join(const TypePtr& a, const TypePtr& b) { return join_into(a, b)
 inline bool assignable(const TypePtr& dst, const TypePtr& src) {
     if (is_unknown(dst) || is_unknown(src)) return true;
     if (type_eq(dst, src)) return true;
-    if (dst->kind == TyKind::Float && src->kind == TyKind::Int) return true;
+    if (dst->kind == TyKind::Float &&
+        (src->kind == TyKind::Int || is_fixed_int(src)))
+        return true;  // int/定宽整数 → float 提升
     // bool 是 int 的子类型（Python 里 True + 1 == 2）
-    if (dst->kind == TyKind::Int && src->kind == TyKind::Bool) return true;
+    if (is_int_kind(dst->kind) && src->kind == TyKind::Bool) return true;
+    // ── 定宽整数的隐式转换（P1）──────────────────────────────────
+    //
+    // 宽→窄**一律要显式 cast**（设计 §1.2：静默截断是最难查的算错）。
+    // 字面量在范围内的情形不靠这里：调用点（手里有表达式）先把字面量的
+    // 静态类型标成目标类型，所以那条路根本不进这条判断。
+    //
+    // 允许的隐式路径只有三条无信息损失的加宽：
+    //   i8/i16/i32 → int（默认 int 是 i64，任何定宽有符号都放得下）
+    //   窄无符号 → 宽无符号
+    //   窄有符号 → 宽有符号
+    // 其余组合（i32→i8、u8→i8、int→u8、u64←i64 等）要求 cast。
+    if (is_fixed_int(dst) || is_int_kind(src->kind)) {
+        auto di = int_info_of(dst->kind);
+        auto si = int_info_of(src->kind);
+        if (di && si) {
+            if (di->width == 64 && di->is_signed) return true;   // → int(i64)
+            if (di->width > si->width && di->is_signed == si->is_signed) return true;
+            return false;
+        }
+    }
     if (dst->kind == TyKind::Optional)
         return src->kind == TyKind::None ||
                (dst->sub.empty() ? true : assignable(dst->sub[0], src));

@@ -319,6 +319,9 @@ void pa_sys_exit(int64_t code) { exit((int)code); }
 
 void pa_print_i64(int64_t v) { printf("%lld", (long long)v); }
 
+/* 无符号 64 位（定宽 u64）：print() 用。 */
+void pa_print_u64(uint64_t v) { printf("%llu", (unsigned long long)v); }
+
 void pa_print_f64(double v) {
     char buf[64];
     format_double(buf, sizeof buf, v);

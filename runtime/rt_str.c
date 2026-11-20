@@ -457,6 +457,20 @@ PyAdamasStr* pa_str_from_i64(int64_t v) {
     return str_new_ascii(p, (int64_t)(end - p));
 }
 
+/* 无符号 64 位 → 十进制串（定宽 u64 的 str()/print() 用）。 */
+PyAdamasStr* pa_str_from_u64(uint64_t v) {
+    if (v < 10u) return pa_char_str((int64_t)('0' + v));
+    char buf[21];
+    char* end = buf + sizeof buf;
+    char* p = end;
+    uint64_t mag = v;
+    do {
+        *--p = (char)('0' + (int)(mag % 10));
+        mag /= 10;
+    } while (mag);
+    return str_new_ascii(p, (int64_t)(end - p));
+}
+
 /* unknown 值的 str()：先按 RC 索引确认是不是堆字符串；是就原样返回
    （补一份引用，调用方拿到的是新引用），否则按整数格式化。判定和
    pa_print_any 一致——unknown 里分不开 int 和指针，只能查注册表。 */
@@ -639,6 +653,28 @@ PyAdamasStr* pa_int_to_base(int64_t v, int64_t base) {
     char out[80];
     int k = 0;
     if (v < 0) out[k++] = '-';
+    for (const char* pp = prefix; *pp; ++pp) out[k++] = *pp;
+    memcpy(out + k, q, (size_t)n);
+    k += n;
+    return str_new(out, k);
+}
+
+/* 无符号 64 位 → 0x/0o/0b 串（定宽 u64 的 hex()/bin()/oct()）。
+   u64 的 ≥ 2^63 值在 pa_int_to_base 里会被解释成负数并加 '-'，语义错。 */
+PyAdamasStr* pa_uint_to_base(uint64_t v, int64_t base) {
+    static const char* digits = "0123456789abcdef";
+    char tmp[72];
+    char* q = tmp + sizeof tmp;
+    uint64_t mag = v;
+    int n = 0;
+    do {
+        *--q = digits[mag % (uint64_t)base];
+        mag /= (uint64_t)base;
+        ++n;
+    } while (mag);
+    const char* prefix = base == 16 ? "0x" : base == 8 ? "0o" : "0b";
+    char out[80];
+    int k = 0;
     for (const char* pp = prefix; *pp; ++pp) out[k++] = *pp;
     memcpy(out + k, q, (size_t)n);
     k += n;

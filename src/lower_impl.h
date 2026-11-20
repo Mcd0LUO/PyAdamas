@@ -428,6 +428,16 @@ private:
         return def(t_int(), std::move(in));
     }
 
+    // 带静态类型的整数常量：定宽标注的字面量（类型检查已验值域）与
+    // 无符号 64 位常量必须带自己的类型，否则 codegen 按 int 生成、
+    // 后续正常化/无符号判定都会看不见目标宽度。
+    VReg const_int_ty(int64_t v, TypePtr ty) {
+        Inst in;
+        in.op = IrOp::ConstInt;
+        in.imm = v;
+        return def(ty ? std::move(ty) : t_int(), std::move(in));
+    }
+
     VReg const_bool(bool v) {
         Inst in;
         in.op = IrOp::ConstInt;
@@ -690,7 +700,7 @@ private:
     // 其它按机器字。0.312 前元组落 3：比堆地址≈分配顺序，sort 是 no-op。
     static int sort_kind(const TypePtr& t) {
         if (!t) return 3;
-        if (t->kind == TyKind::Int || t->kind == TyKind::Bool) return 0;
+        if (is_int_like(t)) return 0;  // 定宽整数与 int 同一排序域
         if (t->kind == TyKind::Float) return 1;
         if (t->kind == TyKind::Str) return 2;
         if (t->kind == TyKind::Tuple || t->kind == TyKind::List) return 4;

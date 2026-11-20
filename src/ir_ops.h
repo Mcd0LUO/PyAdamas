@@ -605,6 +605,13 @@ enum class RtFn : uint16_t {
     // tag 从平行 tag 区装填，实际调用 pa_any_type_is(v, tag, code)。
     AnyTypeIs,             // (a, tag_a, code) -> i64 bool
     AnyDictItems,          // (a, tag_a) -> list*  unknown dict 的 (k,v) 对（+1）
+    // P1 定宽整数（0.341）：u64 的十进制输出。u64 的值 ≥ 2^63 时，
+    // 有符号版本的 print/str 会打出负数——必须走无符号入口。
+    // 追加在末尾，不改既有编号（集成时按落地顺序重排）。
+    StrFromU64,            // (u64) -> str*
+    PrintU64,              // (u64) -> void
+    FmtU64,                // (u64, str* spec) -> str*
+    UIntToBase,            // (u64, base) -> str*  hex()/bin()/oct() 的无符号版
 };
 
 inline const char* rt_name(RtFn f) {
@@ -645,6 +652,8 @@ inline const char* rt_name(RtFn f) {
         case RtFn::StrCharAt: return "pa_str_char_at";
         case RtFn::BytesAt: return "pa_bytes_at";
         case RtFn::StrFromI64: return "pa_str_from_i64";
+        case RtFn::StrFromU64: return "pa_str_from_u64";
+        case RtFn::UIntToBase: return "pa_uint_to_base";
         case RtFn::StrAny: return "pa_str_any";
         case RtFn::StrFromF64: return "pa_str_from_f64";
         case RtFn::StrFromBool: return "pa_str_from_bool";
@@ -682,6 +691,7 @@ inline const char* rt_name(RtFn f) {
         case RtFn::Input: return "pa_input";
         case RtFn::SysStream: return "pa_sys_stream";
         case RtFn::PrintI64: return "pa_print_i64";
+        case RtFn::PrintU64: return "pa_print_u64";
         case RtFn::PrintAny: return "pa_print_any";
         case RtFn::PrintAnyRepr: return "pa_print_any_repr";
         case RtFn::TruthAny: return "pa_truth_unknown";
@@ -873,6 +883,7 @@ inline const char* rt_name(RtFn f) {
         case RtFn::ComplexEq: return "pa_complex_eq";
         case RtFn::ComplexTruth: return "pa_complex_truth";
         case RtFn::FmtI64: return "pa_fmt_i64";
+        case RtFn::FmtU64: return "pa_fmt_u64";
         case RtFn::FmtBool: return "pa_fmt_bool";
         case RtFn::FmtF64: return "pa_fmt_f64";
         case RtFn::FmtStr: return "pa_fmt_str";

@@ -109,6 +109,7 @@ src/opt_intloop.cpp
   src/ra_opt.cpp
   src/codegen_block.cpp
   src/codegen_ops.cpp
+  src/codegen_int_fixed.cpp
   src/codegen_call.cpp
   src/codegen_call_abi.cpp
   src/codegen_index.cpp

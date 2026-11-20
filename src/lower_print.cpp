@@ -15,7 +15,15 @@ void Lowerer::print_value(VReg v, TypePtr ty, int line, int col) {
         case TyKind::Float: call_void(RtFn::PrintF64, {v}); break;
         case TyKind::Str: call_void(RtFn::PrintStr, {v}); break;
         case TyKind::Bytes: call_void(RtFn::PrintBytes, {v}); break;
-        case TyKind::Int: call_void(RtFn::PrintI64, {v}); break;
+        case TyKind::Int:
+        case TyKind::I8:
+        case TyKind::I16:
+        case TyKind::I32:
+        case TyKind::U8:
+        case TyKind::U16:
+        case TyKind::U32: call_void(RtFn::PrintI64, {v}); break;
+        // u64 必须按无符号打印：≥ 2^63 的值走 pa_print_i64 会打出负数。
+        case TyKind::U64: call_void(RtFn::PrintU64, {v}); break;
         case TyKind::List: print_seq(v, ty, false, false, line, col); break;
         case TyKind::Range: {
             // range 打印成 "range(0, 10)"，和 CPython 一样

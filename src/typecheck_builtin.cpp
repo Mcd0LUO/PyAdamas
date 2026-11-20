@@ -21,7 +21,7 @@ TypePtr TypeChecker::builtin_call(const std::string& n, Call& c) {
             else err(c.args[0]->line, c.args[0]->col,
                      "make_chan() element type must be int/float/str/unknown");
             TypePtr ct = expr(*c.args[1]);
-            if (!is_unknown(ct) && ct && ct->kind != TyKind::Int && ct->kind != TyKind::Bool)
+            if (!is_unknown(ct) && ct && !is_int_like(ct))
                 err(c.args[1]->line, c.args[1]->col, "make_chan() capacity must be int");
             return mk_chan(elem);
         }
@@ -32,6 +32,31 @@ TypePtr TypeChecker::builtin_call(const std::string& n, Call& c) {
         std::vector<TypePtr> kwt;
         for (auto& kw : c.keywords) kwt.push_back(expr(*kw.value));
 
+        // ── 定宽整数显式转换（P1）──────────────────────────────────────
+        //
+        // cast_i8(x) / cast_u8(x) / ...：显式窄化/换符号的唯一途径
+        // （设计 §1.2：宽→窄必须显式，静默截断是最难查的算错）。
+        // 语义按 C 的转换 + pa 的确定回绕：取低 N 位，有符号再符号扩展，
+        // 无符号再零扩展。超范围不是错误（这正是 cast 的意义），
+        // 与字面量 coerce（超范围编译报错）刻意不同。
+        if (n.starts_with("cast_")) {
+            TypePtr to = cast_target_of(n);
+            if (!to) {
+                err(c.line, c.col, std::format("unknown cast function '{}'", n));
+                return t_unknown();
+            }
+            if (c.args.size() != 1 || !c.keywords.empty()) {
+                err(c.line, c.col, std::format("'{}' expects exactly 1 argument", n));
+                return to;
+            }
+            TypePtr from = a.empty() ? t_unknown() : a[0];
+            if (from && !is_unknown(from) && !is_num(from)) {
+                // v1：只支持数值域之间的显式转换。str → 整数请先 int()。
+                err(c.args[0]->line, c.args[0]->col,
+                    std::format("cannot cast '{}' to '{}'", type_name(from), type_name(to)));
+            }
+            return to;
+        }
         auto need = [&](size_t lo, size_t hi) {
             if (a.size() < lo || a.size() > hi) {
                 err(c.line, c.col,
@@ -101,7 +126,7 @@ TypePtr TypeChecker::builtin_call(const std::string& n, Call& c) {
         }
         if (n == "sleep") {
             if (!need(1, 1)) return t_none();
-            if (!is_unknown(a[0]) && a[0] && a[0]->kind != TyKind::Int && a[0]->kind != TyKind::Bool)
+            if (!is_unknown(a[0]) && a[0] && !is_int_like(a[0]))
                 err(c.line, c.col,
                     std::format("sleep() expects milliseconds (int), got '{}'", type_name(a[0])));
             return t_none();
@@ -118,7 +143,7 @@ TypePtr TypeChecker::builtin_call(const std::string& n, Call& c) {
         }
         if (n == "range") {
             for (auto& t : a)
-                if (!is_unknown(t) && t->kind != TyKind::Int)
+                if (!is_unknown(t) && !is_int_like(t))
                     err(c.line, c.col,
                         std::format("'range' argument must be int, got '{}'", type_name(t)));
             // range 是惰性对象，不是列表：range(10**9) 不造十个亿元素。
@@ -139,6 +164,9 @@ TypePtr TypeChecker::builtin_call(const std::string& n, Call& c) {
                 err(c.line, c.col,
                     std::format("bad operand type for abs(): '{}'", type_name(a[0])));
             if (a[0] && a[0]->kind == TyKind::Complex) return t_float();
+            // 定宽整数按 C 的整数提升返回 int：abs(i8 的 -128) = 128，
+            // 而不是在 i8 里回绕成 -128（abs 是函数，不是定宽运算）。
+            if (is_fixed_int(a[0])) return t_int();
             return a[0];
         }
         if (n == "min" || n == "max") {
@@ -154,7 +182,8 @@ TypePtr TypeChecker::builtin_call(const std::string& n, Call& c) {
                 if (!is_unknown(e) && !is_num(e))
                     err(c.line, c.col,
                         std::format("sum() over non-numeric '{}'", type_name(e)));
-                TypePtr res = is_num(e) ? e : t_int();
+                // 定宽元素按 C 的整数提升累加到 int（避免 u8 的 255+1 静默回绕）。
+                TypePtr res = is_num(e) ? (is_fixed_int(e) ? t_int() : e) : t_int();
                 // start 参数参与数值域提升：sum([], 0.5) 是 float。
                 if (a.size() > 1 && is_num(a[1])) res = promote(res, a[1]);
                 return res;
@@ -527,7 +556,7 @@ TypePtr TypeChecker::builtin_call(const std::string& n, Call& c) {
                 return !t || is_unknown(t) || t->kind == TyKind::Int || t->kind == TyKind::Bool;
             };
             if (bound[0] && !is_unknown(bound[0]) && bound[0]->kind != TyKind::Str &&
-                bound[0]->kind != TyKind::Int && bound[0]->kind != TyKind::Bool)
+                !is_int_like(bound[0]))
                 err(c.line, c.col,
                     std::format("open() file must be a path string or file descriptor, got '{}'",
                                 type_name(bound[0])));

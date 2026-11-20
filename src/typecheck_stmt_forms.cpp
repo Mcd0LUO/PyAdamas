@@ -8,6 +8,58 @@
 
 namespace pyadamas {
 
+bool TypeChecker::literal_int_value(const Expr* e, int64_t& out) {
+    if (!e) return false;
+    if (e->kind == ExprKind::Constant) {
+        const auto& c = static_cast<const Constant&>(*e);
+        if (c.ck == Constant::CK::Int) {
+            out = c.i;
+            return true;
+        }
+        if (c.ck == Constant::CK::Bool) {
+            out = c.b ? 1 : 0;
+            return true;
+        }
+        return false;
+    }
+    if (e->kind == ExprKind::UnaryOp) {
+        const auto& u = static_cast<const UnaryOp&>(*e);
+        if (u.op != Tok::MINUS && u.op != Tok::PLUS) return false;
+        int64_t v = 0;
+        if (!literal_int_value(u.operand.get(), v)) return false;
+        // -INT64_MIN 在 int64 里不可表示（C++ 的 -INT64_MIN 是 UB）。
+        if (u.op == Tok::MINUS) {
+            if (v == INT64_MIN) return false;
+            out = -v;
+        } else {
+            out = v;
+        }
+        return true;
+    }
+    return false;
+}
+
+bool TypeChecker::accept_literal_into(const TypePtr& want, Expr* value) {
+    if (!want || !is_fixed_int(want) || !value) return false;
+    // float/bool 字面量的处理：bool 已是 int 子类型，assignable 放行；
+    // float 字面量窄化到定宽整数不在 v1 隐式允许范围（要 cast）。
+    int64_t v = 0;
+    if (!literal_int_value(value, v)) return false;
+    if (!int_literal_fits(want, v)) {
+        int64_t lo = 0, hi = 0;
+        int_range_of(want->kind, lo, hi);
+        err(value->line, value->col,
+            std::format("literal {} is out of range for '{}' (allowed {}..{})", v,
+                        type_name(want), lo, hi));
+        return true;  // 已经报错，调用方不要再叠加通用消息
+    }
+    // **把字面量的静态类型改写成目标类型。**
+    // 这样后续 assignable() 看到的是 i8→i8（不是 int→i8），降级层
+    // 生成常量时也按 i8 定型，值域已检查过，正常化是恒等。
+    expr_types_[value] = want;
+    return true;
+}
+
 void TypeChecker::stmt_assign(Assign& a) {
         // d = globals() 之后 d[k] = v 等价于模块级动态注入，记下别名
         if (a.value->kind == ExprKind::Call) {
@@ -19,7 +71,35 @@ void TypeChecker::stmt_assign(Assign& a) {
                         globals_aliases_.insert(tn->id);
         }
         auto vt = expr(*a.value);
-        for (auto& t : a.targets) assign(*t, vt, a.line, a.col);
+        for (auto& t : a.targets) {
+            // 定宽目标 + 字面量：范围内隐式 coerce（超范围报编译错误）。
+            TypePtr want;
+            if (auto* tn = dynamic_cast<Name*>(t.get())) {
+                if (auto* sym = lookup(tn->id); sym && sym->ty && is_fixed_int(sym->ty))
+                    want = sym->ty;
+            } else if (auto* at = dynamic_cast<Attribute*>(t.get())) {
+                // 定宽的类字段：赋值 c.n = 127 与 Name 目标同口径（范围内隐式）。
+                // 模块/cimport 的接收者不能求值：m.x = 1 里的 m 是模块，
+                // 求值路径会报「module cannot be used as a value」。
+                bool base_mod = false;
+                if (auto* bn = dynamic_cast<Name*>(at->value.get()))
+                    base_mod = lookup_module_alias(bn->id) != nullptr ||
+                               cmodules_.count(bn->id) > 0;
+                if (!base_mod) {
+                    TypePtr rt = expr(*at->value);
+                    if (rt && rt->kind == TyKind::Class && rt->cls) {
+                        if (const FieldInfo* f = rt->cls->field(at->attr);
+                            f && f->ty && is_fixed_int(f->ty))
+                            want = f->ty;
+                    }
+                }
+            }
+            if (want && accept_literal_into(want, a.value.get())) {
+                assign(*t, want, a.line, a.col);
+                continue;
+            }
+            assign(*t, vt, a.line, a.col);
+        }
         return;
     }
 
@@ -48,6 +128,10 @@ void TypeChecker::stmt_aug_assign(AugAssign& a) {
         }
         Tok bin = aug_to_bin(a.op);
         auto rt = binop_type(bin, cur_ty, vt, a.line, a.col);
+        // 定宽目标的复合赋值按 C 口径把结果**转换回目标类型**（隐式窄化）。
+        // x: u8; x += 1 是 u8 的 255+1 → 0，不是静默丢掉高位：
+        // 降级层在赋值点按目标类型正常化（回绕是 pa 的确定语义）。
+        if (is_fixed_int(cur_ty) && rt && is_int_kind(rt->kind)) rt = cur_ty;
         assign(*a.target, rt, a.line, a.col);
         return;
     }
@@ -92,10 +176,14 @@ void TypeChecker::stmt_ann_assign(AnnAssign& a) {
                 // 标注定返回 ABI：覆盖调用点推断（调用方对 ABI 负责）。
                 vt = ann;
                 expr_types_[a.value.get()] = ann;
+            } else if (ann && is_fixed_int(ann) && accept_literal_into(ann, a.value.get())) {
+                // 定宽标注 + 字面量：范围内 coerce，超范围已报错。
+                vt = ann;
             } else if (ann && !assignable(ann, vt))
                 err(a.line, a.col,
-                    std::format("annotated as '{}' but assigned '{}'", type_name(ann),
-                                type_name(vt)));
+                    std::format("annotated as '{}' but assigned '{}' (fixed-width needs an "
+                                "explicit cast, e.g. cast_{}(x))",
+                                type_name(ann), type_name(vt), type_name(ann)));
         }
         if (auto* n = dynamic_cast<Name*>(a.target.get())) {
             declare(n->id, ann ? ann : t_unknown(), a.line, a.col, true);
@@ -136,9 +224,14 @@ void TypeChecker::stmt_return(Return& r) {
             TypePtr want = cur_fn_->is_async ? cur_fn_->async_result : cur_fn_->ret;
             // return {}：空字面量的洞按声明返回类型填。
             if (vt && ty_contains_hole(vt, 0)) fill_holes_recursive(vt, want, 0);
-            if (!assignable(want, vt))
+            bool lit_ok = r.value && is_fixed_int(want) &&
+                          accept_literal_into(want, r.value.get());
+            if (lit_ok)
+                vt = want;
+            else if (!assignable(want, vt))
                 err(r.line, r.col,
-                    std::format("function '{}' is declared to return '{}', got '{}'",
+                    std::format("function '{}' is declared to return '{}', got '{}' "
+                                "(fixed-width needs an explicit cast)",
                                 cur_fn_->name, type_name(want), type_name(vt)));
         }
         // **始终收集返回值类型**，即使标注了。
