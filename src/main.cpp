@@ -316,9 +316,10 @@ int main(int argc, char** argv) {
         // callee-saved 提升增强（默认关）：PYADAMAS_RA_OPT=1 开启，参与缓存失效。
         prog.ra_opt = std::getenv("PYADAMAS_RA_OPT") != nullptr &&
                       std::string_view(std::getenv("PYADAMAS_RA_OPT")) != "0";
-        // 浮点循环 SIMD 向量化（默认关）：PYADAMAS_SIMD=1 开启，参与缓存失效。
-        prog.simd = std::getenv("PYADAMAS_SIMD") != nullptr &&
-                    std::string_view(std::getenv("PYADAMAS_SIMD")) != "0";
+        // 浮点循环 SIMD 向量化（0.336 后默认开）：PYADAMAS_SIMD=0 显式关，参与缓存失效。
+        // 仅 opt>=2 非生成器非 ra_graph 非 tags 模块生效（codegen_simd 守卫），fallback 安全。
+        const char* simd_env = std::getenv("PYADAMAS_SIMD");
+        prog.simd = !simd_env || std::string_view(simd_env) != "0";
         // 整数循环优化（默认关）：PYADAMAS_LOOP_OPT=1 开推荐子集（掩码 3 =
         // 跳转线程化 + 仿射 BCE）。bit2 同块 load 去重实测负收益（matmul
         // BCE 收益被吃掉一半，见 docs/intloop-design.md §3），不进默认，
