@@ -187,6 +187,7 @@ void AsmGen::emit_function(const IRFunction& f, int fi) {
         frame_scan_mask_.clear();
         cur_loc_line_ = 0;
         auto t_alloc = std::chrono::steady_clock::now();
+        build_rc_mark_vregs();
         assign_vreg_slots();
         // P3：平行 tag 字分配（设计 §3.2）。每个 unknown vreg / unknown 命名
         // 槽一个专属字（不复用，避免陈旧 tag）。生成器堆帧里的命名槽不加 tag

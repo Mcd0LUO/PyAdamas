@@ -1030,6 +1030,12 @@ private:
     // 之后仍会在下一轮迭代被读，线性区间会把它的槽分给别人，然后循环
     // 第二次迭代就炸。这类值一律独占一个槽，区间拉满整个函数。
     void assign_vreg_slots();
+    // 一次扫描给 RcMark 水位 vreg 打标（原来按 vreg 全函数扫是 O(n²)）。
+    void build_rc_mark_vregs();
+    bool rc_mark_vreg(VReg v) const {
+        return v < rc_mark_vreg_.size() && rc_mark_vreg_[v] != 0;
+    }
+    std::vector<uint8_t> rc_mark_vreg_;
 
     // 变量提升（旧路径，PYADAMAS_NO_RA=1 回退用）：按被读写次数排序，把
     // 最热的几个整型槽放进 callee-saved；浮点槽按 xmm8–15 处理。

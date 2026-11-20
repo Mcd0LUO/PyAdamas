@@ -74,13 +74,18 @@ void AsmGen::emit_epilogue() {
 // 它是 RC 临时栈的水位：入口 mark、出口 cleanup，中间隔着任意多次调用。
 // 只要它被放进寄存器，某次 call 就会把它冲掉，cleanup 拿到错误水位 ——
 // 运行时直接 panic（invalid temporary stack mark）。
-static bool vreg_is_rc_mark(const IRFunction& f, VReg v) {
-    for (const auto& b : f.blocks)
+//
+// 原来的判定是「对每个 vreg 扫全函数找 RcMark」：nv × 指令数是 O(n²)
+// （2150 vreg × 5000 指令的函数上实测占编译时间 3%+）。改成一次扫描
+// 打标，两处调用点查表；判定的 vreg 集合完全相同。
+void AsmGen::build_rc_mark_vregs() {
+    const size_t nv = f_->vreg_ty.size();
+    rc_mark_vreg_.assign(nv, 0);
+    for (const auto& b : f_->blocks)
         for (const auto& in : b.insts)
-            if (in.op == IrOp::CallRt &&
-                static_cast<RtFn>(in.imm) == RtFn::RcMark && in.dst == v)
-                return true;
-    return false;
+            if (in.op == IrOp::CallRt && static_cast<RtFn>(in.imm) == RtFn::RcMark &&
+                in.dst != kNoReg && in.dst < nv)
+                rc_mark_vreg_[in.dst] = 1;
 }
 
 // ── vreg 栈槽分配 ───────────────────────────────────────────
@@ -308,7 +313,7 @@ void AsmGen::assign_vreg_slots() {
             // `movsd %xmm11, 80(%rsp)`，reload 时全读到后写的那个值。
             //
             // 数量上限是浮点池大小（8），代价可接受。
-            if (vreg_is_rc_mark(*f_, static_cast<VReg>(v)) || def_count[v] > 1 ||
+            if (rc_mark_vreg(static_cast<VReg>(v)) || def_count[v] > 1 ||
                 (cross_block_[v] && f_->vreg_ty[v] &&
                  f_->vreg_ty[v]->kind == TyKind::Float)) {
                 ranges.push_back({0, total_pos + 1, static_cast<int>(v)});
@@ -2372,7 +2377,7 @@ void AsmGen::assign_global_vreg_regs() {
             // 存活。放进 callee 寄存器看似安全，但它会和槽寄存器/其它
             // vreg 的复用产生冲突，cleanup 拿到错水位 —— 实测 fasta 报
             // invalid temporary stack mark、binary_trees 报 refcount 错误。
-            if (vreg_is_rc_mark(*f_, static_cast<VReg>(v))) continue;
+            if (rc_mark_vreg(static_cast<VReg>(v))) continue;
             cands.push_back(Cand{static_cast<int>(v), static_cast<int>(weight[v])});
         }
         // RA_OPT（默认关）：P2 只读槽 load 别名 + P1 同块调用块候选。
