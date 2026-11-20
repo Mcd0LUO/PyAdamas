@@ -181,8 +181,7 @@ public:
         void set_ra_opt(bool v) { ra_opt_ = v; }
         // 浮点循环 SIMD 向量化开关（PYADAMAS_SIMD，默认关）：参与缓存失效。
         void set_simd(bool v) { simd_enabled_ = v; }
-        // 内联/devirt 深化开关（PYADAMAS_INLINE_OPT，默认关）：参与缓存失效。
-        void set_inline_opt(bool v) { inline_opt_ = v; }
+        void set_inline_opt(bool v) { inline_opt_ = v; }  // PYADAMAS_INLINE_OPT，默认关
 
 private:
     const std::string& global_label(int i) const {
@@ -660,6 +659,7 @@ private:
         s.append(buf, r.ptr);
         return s;
     }
+    std::string entry_ref(int i) const { return inline_opt_ ? func_label(i) + "e" : func_label(i); }
     // 统一调用约定的 shim 入口标签（见 ir_types.h 的 closure_needs_shim）。
     static std::string shim_label(int i) {
         std::string s = ".Lshim";
@@ -746,17 +746,14 @@ private:
     size_t eh_end_seq_ = 0;
     size_t eh_lp_seq_ = 0;
     bool eh_plan_active_ = false;
-    // 总开关（--zero-cost-exc）。关闭时 prepare_eh_plan 直接返回，保证老
-    // 路径的汇编逐字节不变。
+    // 总开关（--zero-cost-exc）：关闭时 prepare_eh_plan 直接返回，老路径 asm 不变。
     bool zero_cost_exc_ = true;
     bool rc_split_ = false;
     bool ra_graph_ = false;  // RA_GRAPH：图着色（assign_slot_regs_graph）
     bool ra_opt_ = false;    // RA_OPT：P1 跨调用提升 + P2 只读别名（ra_opt.cpp），默认关
     bool inline_opt_ = false;  // INLINE_OPT：内联/devirt 深化 + 入口对齐修复，默认关
-    // 预扫描本函数的 EH 标记（fname 是 FDE 起点标签）；没有标记则不动作。
-    void prepare_eh_plan(const IRFunction& f, const std::string& fname);
-    // 发 .cfi_personality / .cfi_lsda（必须在 .cfi_startproc 之后调用）。
-    void emit_eh_directives_for_current();
+    void prepare_eh_plan(const IRFunction& f, const std::string& fname);  // 预扫描 EH 标记
+    void emit_eh_directives_for_current();  // 发 .cfi_personality / .cfi_lsda
     // 发所有 LSDA + DW.ref（在 gen() 尾部、text 都发完之后）。
     void emit_eh_tables();
     void gen_eh_begin();
@@ -1149,8 +1146,9 @@ private:
     // 虚调用：self 固定占第一个整数参数（%rdi），其余实参照常分类。
     // 函数地址在装参数之前取到 %r11 —— %r11 不在参数序列里，
     // 装参数的过程不会碰它。
-    void gen_vcall(const Inst& in, bool keep_int_result = false);
+    void gen_vcall(const Inst& in, bool keep_int_result = false, int direct_fn = -1);
     bool gen_guarded_vcall(const Inst& in, bool keep_int_result = false);
+    bool gen_guarded_vcall_direct(const Inst& in, bool keep_int_result, int base, size_t slot);
     bool try_fuse_guarded_vcall_add(const Block& b, size_t pos);
 
     void gen_vcall_static(const Inst& in);

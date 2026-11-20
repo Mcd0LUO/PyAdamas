@@ -51,6 +51,50 @@ std::optional<IntLeaf> int_leaf(const IRFunction& f, const IRClass& cls) {
 
 }  // namespace
 
+// 虚调用：self 只装入 ABI 的第一个整数实参寄存器一次，随后从中读
+// vtable。槽地址直接作为间接 call 的内存操作数，不另取函数指针。
+// direct_fn >= 0：守卫命中路径的直调版本（INLINE_OPT P2）——装填/spill/
+// 结果落盘与间接版完全一致，只有 call 目标从虚表槽换成函数入口标签。
+void AsmGen::gen_vcall(const Inst& in, bool keep_int_result, int direct_fn) {
+    std::vector<TypePtr> types;
+    types.reserve(in.args.size() + 1);
+    types.push_back(t_unknown());  // self：指针，非浮点
+    for (VReg a : in.args) types.push_back(ty_of(a));
+    auto locs = classify(types);
+
+    for (size_t i = 0; i < in.args.size(); ++i) {
+        const auto& l = locs[i + 1];
+        if (l.stack_off < 0) continue;
+        emit2(MOp::kMovq, src_mop(in.args[i]), kR10);
+        emit2(MOp::kMovq, kR10, op_mem(kRsp, l.stack_off));
+    }
+    move_to(mreg_operand(mreg_from_name(arg_reg_i(0))), src_mop(in.a));
+    emit2(MOp::kMovq, op_mem(mreg_from_name(arg_reg_i(0))), kR11);
+    for (size_t i = 0; i < in.args.size(); ++i) {
+        const auto& l = locs[i + 1];
+        if (l.stack_off >= 0) continue;
+        if (l.fp)
+            emit2(MOp::kMovsd, src_mop(in.args[i]), static_cast<MReg>(kXmm0 + l.reg));
+        else
+            emit2(MOp::kMovq, src_mop(in.args[i]), arg_reg_i(l.reg));
+    }
+    line("xorl %r10d, %r10d");
+    if (opt_ < 2) line("xorl %eax, %eax");
+    spill_fp_slots();
+    if (direct_fn >= 0) {
+        line("call " + entry_ref(direct_fn));
+    } else {
+        MOperand vt = op_mem(kR11, in.imm * 8); vt.indirect = true;
+        emit1(MOp::kCall, vt);
+    }
+    reload_fp_slots();
+
+    if (!keep_int_result && !dst_unused(in)) {
+        if (ir_is_float(in.ty)) move_fp(dst_mop(in.dst), mreg_operand(kXmm0));
+        else emit2(MOp::kMovq, kRax, dst_mop(in.dst));
+    }
+}
+
 // 只融合已存在的整数全局累加形态。LHS 是调用前的快照，不能
 // 在慢调用之后读全局（方法可能已经更改它）。EH 和调用 ABI 照旧。
 bool AsmGen::try_fuse_guarded_vcall_add(const Block& b, size_t pos) {
@@ -75,7 +119,11 @@ bool AsmGen::try_fuse_guarded_vcall_add(const Block& b, size_t pos) {
 }
 
 bool AsmGen::gen_guarded_vcall(const Inst& in, bool keep_int_result) {
-    if (opt_ < 2 || !in.args.empty() || !is_int(in.ty) || in.imm < 0) return false;
+    if (opt_ < 2 || in.imm < 0) return false;
+    // 叶子路径只接零参整数返回；INLINE_OPT 开启时带实参/非整数返回的调用
+    // 允许走 P2 守卫直调（非叶子小方法），叶子候选仍按旧判据收集。
+    const bool leaf_ok = in.args.empty() && is_int(in.ty);
+    if (!inline_opt_ && !leaf_ok) return false;
     TypePtr recv = ty_of(in.a);
     if (!recv || recv->kind != TyKind::Class || !recv->cls || recv->cls->imported())
         return false;
@@ -97,13 +145,17 @@ bool AsmGen::gen_guarded_vcall(const Inst& in, bool keep_int_result) {
             continue;
         int fn = c.vtable[slot];
         if (fn < 0 || static_cast<size_t>(fn) >= m_->funcs.size()) continue;
+        if (!leaf_ok) continue;
         if (auto leaf = int_leaf(*m_->funcs[fn], c)) {
             // 小型多态点才值得展开；不对大层次堆一长串守卫。
             if (candidates.size() == 4) return false;
             candidates.push_back({i, fn, *leaf});
         }
     }
-    if (candidates.empty()) return false;
+    if (candidates.empty()) {
+        if (inline_opt_) return gen_guarded_vcall_direct(in, keep_int_result, base, slot);
+        return false;
+    }
 
     if (keep_int_result) comment(in.text() + " -> guarded return in %rax");
     const std::string self = arg_reg_i(0);
@@ -141,6 +193,67 @@ bool AsmGen::gen_guarded_vcall(const Inst& in, bool keep_int_result) {
             }
             if (!keep_int_result) move_to(dst_op(in.dst), "%rax");
         }
+        emit_jmp("jmp", done);
+    }
+    label(done);
+    return true;
+}
+
+
+// INLINE_OPT P2：非叶子小方法的守卫直调。守卫比较**实际虚表地址**（与叶子
+// 路径同构，不按类名/静态类型断言），命中 → call .LfN 直调（省一级虚表装载
+// + 间接分支），失败回退原 vcall —— 运行期子类/替换类全覆盖，语义不变。
+// 只接 monomorphic/dimorphic 调用点（≤2 候选）：方法体 ≤32 条指令、≤4 块、
+// 无 handler/EH 区域/生成器/闭包环境。慢路径原样保留；整个守卫序列发射在
+// VCall 指令位置，EH 区域标签（EhBegin/EhEnd）覆盖全部快/慢路径调用。
+bool AsmGen::gen_guarded_vcall_direct(const Inst& in, bool keep_int_result, int base,
+                                      size_t slot) {
+    if (in.args.size() > 2) return false;
+    struct Cand { int cls; int fn; };
+    std::vector<Cand> cands;
+    for (int i = 0; i < static_cast<int>(m_->classes.size()); ++i) {
+        const IRClass& c = m_->classes[i];
+        if (i != base && std::find(c.mro.begin(), c.mro.end(), base) == c.mro.end())
+            continue;
+        if (slot >= c.vtable.size() || (slot < c.vtable_ext.size() && !c.vtable_ext[slot].empty()))
+            continue;
+        int fn = c.vtable[slot];
+        if (fn < 0 || static_cast<size_t>(fn) >= m_->funcs.size()) continue;
+        const IRFunction& f = *m_->funcs[static_cast<size_t>(fn)];
+        if (f.is_generator || f.env_slot >= 0 || f.has_handlers || !f.eh_regions.empty())
+            continue;
+        if (f.params.size() != in.args.size() + 1 || f.blocks.empty()) continue;
+        int n = 0;
+        for (const auto& b : f.blocks) n += static_cast<int>(b.insts.size());
+        if (n > 32 || f.blocks.size() > 4) continue;
+        // 超过 2 个候选说明是多态热点，守卫链收益不抵代码增长，保守放弃。
+        if (cands.size() == 2) return false;
+        cands.push_back({i, fn});
+    }
+    if (cands.empty()) return false;
+
+    comment(in.text() + " -> guarded direct call");
+    const std::string self = arg_reg_i(0);
+    move_to(self, src_op(in.a));
+    line(std::format("movq ({}), %r11", self));
+    const std::string done = fresh_label("vdcallend");
+    // 同一函数被多个类继承时共享命中标签，但每个虚表仍单独比较。
+    std::unordered_map<int, std::string> targets;
+    for (const auto& c : cands) {
+        auto [it, inserted] = targets.try_emplace(c.fn);
+        if (inserted) it->second = fresh_label("vdcallhit");
+        line(std::format("leaq .Lvt{}(%rip), %r10", c.cls));
+        line("cmpq %r10, %r11");
+        emit_jmp("je", it->second);
+    }
+    gen_vcall(in, keep_int_result);
+    emit_jmp("jmp", done);
+    for (const auto& c : cands) {
+        auto hit = targets.find(c.fn);
+        if (hit == targets.end()) continue;
+        label(hit->second);
+        targets.erase(hit);
+        gen_vcall(in, keep_int_result, c.fn);
         emit_jmp("jmp", done);
     }
     label(done);

@@ -281,7 +281,7 @@ std::string AsmGen::gen(const IRModule& m) {
                     } else if (c.vtable[s] < 0) {
                         out_ += "\t.quad 0\n";
                     } else {
-                        quad_sym(out_, line_buf_, func_label(c.vtable[s]));
+                        quad_sym(out_, line_buf_, entry_ref(c.vtable[s]));
                     }
                 }
                 // 每个已填槽导出裸代码符号：导入方 vtable 需要函数地址，
@@ -294,7 +294,7 @@ std::string AsmGen::gen(const IRModule& m) {
                         if (!ext.empty())
                             impl = ext;
                         else if (c.vtable[s] >= 0)
-                            impl = func_label(c.vtable[s]);
+                            impl = entry_ref(c.vtable[s]);
                         if (impl.empty()) continue;
                         std::string sym =
                             module_class_method_symbol(m.module_symbol, c.name,
@@ -342,7 +342,7 @@ std::string AsmGen::gen(const IRModule& m) {
                 if (closure_needs_shim(*m.funcs[i]))
                     quad_sym(out_, line_buf_, shim_label(static_cast<int>(i)));
                 else
-                    quad_sym(out_, line_buf_, func_label(static_cast<int>(i)));
+                    quad_sym(out_, line_buf_, entry_ref(static_cast<int>(i)));
                 out_ += "\t.quad 0\n";
             }
         }
@@ -615,7 +615,7 @@ std::string AsmGen::gen(const IRModule& m) {
             if (gnu_cfi()) out_ += "\t.cfi_def_cfa %rsp, 8\n";
             // 尾跳进 __pa_main：返回地址原样留在栈顶，CFA 规则跟刚进
             // 本函数时一致，展开器在这里看到的仍是调用方的帧。
-            out_ += "\tjmp " + func_label(m.entry) + "\n";
+            out_ += "\tjmp " + entry_ref(m.entry) + "\n";
             if (gnu_cfi()) out_ += "\t.cfi_endproc\n";
         }
 
@@ -654,7 +654,7 @@ std::string AsmGen::gen(const IRModule& m) {
             out_ += std::format("\tmovq 8(%rsp), {}\n", arg_reg_i(1));
             out_ += "\tcall pa_sys_set_args\n";
             out_ += std::format("\taddq ${}, %rsp\n", out_base() + 16);
-            if (m.entry >= 0) out_ += std::format("\tcall {}\n", func_label(m.entry));
+            if (m.entry >= 0) out_ += std::format("\tcall {}\n", entry_ref(m.entry));
             out_ += "\tpopq %rbp\n";
             if (gnu_cfi()) out_ += "\t.cfi_def_cfa %rsp, 8\n";
             out_ += "\tret\n";
