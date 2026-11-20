@@ -187,7 +187,6 @@ void AsmGen::emit_function(const IRFunction& f, int fi) {
         frame_scan_mask_.clear();
         cur_loc_line_ = 0;
         auto t_alloc = std::chrono::steady_clock::now();
-        build_rc_mark_vregs();
         assign_vreg_slots();
         // P3：平行 tag 字分配（设计 §3.2）。每个 unknown vreg / unknown 命名
         // 槽一个专属字（不复用，避免陈旧 tag）。生成器堆帧里的命名槽不加 tag
@@ -832,13 +831,13 @@ void AsmGen::gen_block(const Block& b) {
         // 第一次被读的位置。LoadSlot 的别名只在「读之后、第一次赋值之前」
         // 成立；第一次赋值之后别名会读到新值。
         block_stores_.clear();
-        block_reset_first_use();
+        block_use_.reset_first_use();
         for (int i = 0; i < static_cast<int>(b.insts.size()); ++i) {
             const Inst& in = b.insts[i];
             if (in.op == IrOp::StoreSlot) block_stores_[in.idx].push_back(i);
             VReg ops[3] = {in.a, in.b, in.c};
-            for (VReg r : ops) block_mark_first_use(r, i);
-            for (VReg r : in.args) block_mark_first_use(r, i);
+            for (VReg r : ops) block_use_.mark_first_use(r, i);
+            for (VReg r : in.args) block_use_.mark_first_use(r, i);
         }
 
         // 每条指令执行后仍存活的浮点提升槽（live-after），调用点只保存
@@ -873,7 +872,7 @@ void AsmGen::gen_block(const Block& b) {
                     if (x.dst >= use_count_.size() || use_count_[x.dst] != 1 ||
                         cross_block_[x.dst])
                         continue;
-                    const int us = block_first_use(x.dst);
+                    const int us = block_use_.first_use(x.dst);
                     if (us < 0 || us <= k) continue;
                     // 使用点前有对该槽的赋值 → gen_load_slot 判定 clobbered，
                     // 不会别名（真的发了一次 mov），寄存器此后无人读。

@@ -78,15 +78,18 @@ void AsmGen::emit_epilogue() {
 // 原来的判定是「对每个 vreg 扫全函数找 RcMark」：nv × 指令数是 O(n²)
 // （2150 vreg × 5000 指令的函数上实测占编译时间 3%+）。改成一次扫描
 // 打标，两处调用点查表；判定的 vreg 集合完全相同。
-void AsmGen::build_rc_mark_vregs() {
-    const size_t nv = f_->vreg_ty.size();
-    rc_mark_vreg_.assign(nv, 0);
-    for (const auto& b : f_->blocks)
+namespace {
+// RcMark 水位 vreg 一次扫描打标（供栈槽分配与全局寄存器提升两处查表）。
+void collect_rc_marks(const IRFunction& f, BlockUseIndex& idx) {
+    const size_t nv = f.vreg_ty.size();
+    idx.rc_marks.assign(nv, 0);
+    for (const auto& b : f.blocks)
         for (const auto& in : b.insts)
             if (in.op == IrOp::CallRt && static_cast<RtFn>(in.imm) == RtFn::RcMark &&
                 in.dst != kNoReg && in.dst < nv)
-                rc_mark_vreg_[in.dst] = 1;
+                idx.rc_marks[in.dst] = 1;
 }
+}  // namespace
 
 // ── vreg 栈槽分配 ───────────────────────────────────────────
 //
@@ -109,6 +112,9 @@ void AsmGen::build_rc_mark_vregs() {
 // 再在块内从后往前扫出精确的活跃位置。
 void AsmGen::assign_vreg_slots() {
         const size_t nv = f_->vreg_ty.size();
+        // RcMark 水位 vreg 一次扫描打标（供本函数与 assign_global_vreg_regs
+        // 两处查表；原来是「每个 vreg 扫全函数」，O(n²)）。
+        collect_rc_marks(*f_, block_use_);
         vreg_slot_.assign(nv, 0);
         n_vreg_slots_ = 0;
         use_count_.assign(nv, 0);
@@ -313,7 +319,7 @@ void AsmGen::assign_vreg_slots() {
             // `movsd %xmm11, 80(%rsp)`，reload 时全读到后写的那个值。
             //
             // 数量上限是浮点池大小（8），代价可接受。
-            if (rc_mark_vreg(static_cast<VReg>(v)) || def_count[v] > 1 ||
+            if (block_use_.is_rc_mark(static_cast<VReg>(v)) || def_count[v] > 1 ||
                 (cross_block_[v] && f_->vreg_ty[v] &&
                  f_->vreg_ty[v]->kind == TyKind::Float)) {
                 ranges.push_back({0, total_pos + 1, static_cast<int>(v)});
@@ -2377,7 +2383,7 @@ void AsmGen::assign_global_vreg_regs() {
             // 存活。放进 callee 寄存器看似安全，但它会和槽寄存器/其它
             // vreg 的复用产生冲突，cleanup 拿到错水位 —— 实测 fasta 报
             // invalid temporary stack mark、binary_trees 报 refcount 错误。
-            if (rc_mark_vreg(static_cast<VReg>(v))) continue;
+            if (block_use_.is_rc_mark(static_cast<VReg>(v))) continue;
             cands.push_back(Cand{static_cast<int>(v), static_cast<int>(weight[v])});
         }
         // RA_OPT（默认关）：P2 只读槽 load 别名 + P1 同块调用块候选。

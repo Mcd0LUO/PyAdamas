@@ -19,6 +19,7 @@
 #include <unordered_map>
 #include <vector>
 
+#include "block_bitset.h"
 #include "ir.h"
 #include "mach_instr.h"
 #include "target_abi.h"
@@ -457,28 +458,8 @@ private:
 
     // 当前块内的位置索引，gen_block 开头重建。
     std::unordered_map<int, std::vector<int>> block_stores_;
-    // 块内每个 vreg 第一次被读的位置（-1 = 本块没读过）。原来是
-    // unordered_map<VReg, int>：每条指令对 a/b/c/args 做 find+insert，
-    // perf 显示哈希插入占编译时间 ~14%（含 malloc）。改成按 vreg 直接下标
-    // + 脏项列表（每块只重置本块碰过的项），语义与查找结果完全一致。
-    std::vector<int> block_use_pos_;
-    std::vector<VReg> block_use_touched_;
-    int block_first_use(VReg r) const {
-        return static_cast<size_t>(r) < block_use_pos_.size() ? block_use_pos_[r] : -1;
-    }
-    void block_mark_first_use(VReg r, int pos) {
-        if (r == kNoReg) return;
-        if (static_cast<size_t>(r) >= block_use_pos_.size())
-            block_use_pos_.resize(static_cast<size_t>(r) + 1, -1);
-        if (block_use_pos_[r] < 0) {
-            block_use_pos_[r] = pos;
-            block_use_touched_.push_back(r);
-        }
-    }
-    void block_reset_first_use() {
-        for (VReg r : block_use_touched_) block_use_pos_[r] = -1;
-        block_use_touched_.clear();
-    }
+    // 块内首次读位置 + RcMark 打标（见 block_bitset.h 里的 BlockUseIndex）
+    BlockUseIndex block_use_;
     int cur_pos_ = 0;  // 正在生成的指令在块内的下标
 
     // ── 输出辅助（结构化 Machine 层）──────────────────────────────
@@ -561,29 +542,8 @@ private:
     void label(const std::string& s) { out_.push_label(s, false); }
     // 带前导 tab 的块内局部标签（"\t1:" 这种）。
     void label_block(const std::string& s) { out_.push_label(s, true); }
-    // "\t# s"
-    // 复用 line_buf_ 拼前缀：原来是 "\t# " + s 造一个临时串再移动进 MItem，
-    // 每条注释一次多余分配（每条指令都有一条注释）。
-    void comment(std::string_view s) {
-        line_buf_.clear();
-        line_buf_ += "\t# ";
-        line_buf_.append(s);
-        out_.push(make_comment(line_buf_));
-    }
-    // 指令注释：text_into 直接写进复用缓冲，省掉 in.text() 的临时串。
-    void comment_inst(const Inst& in) {
-        line_buf_.clear();
-        line_buf_ += "\t# ";
-        in.text_into(line_buf_);
-        out_.push(make_comment(line_buf_));
-    }
-    // 列 0 的注释行（"# ---- ... ----"）。
-    void comment0(std::string_view s) {
-        line_buf_.clear();
-        line_buf_ += "# ";
-        line_buf_.append(s);
-        out_.push(make_comment(line_buf_));
-    }
+    // "\t# s" / 指令注释 / 列 0 注释行（"# ..."）。实现见 codegen_comment.cpp。
+    void comment(std::string_view s); void comment_inst(const Inst& in); void comment0(std::string_view s);
     // "\t" + body + "\n"：.align/.quad/.section 这类汇编指示符。
     void directive(std::string_view body) { out_.push_directive(body); }
     // 空行。
@@ -1030,12 +990,6 @@ private:
     // 之后仍会在下一轮迭代被读，线性区间会把它的槽分给别人，然后循环
     // 第二次迭代就炸。这类值一律独占一个槽，区间拉满整个函数。
     void assign_vreg_slots();
-    // 一次扫描给 RcMark 水位 vreg 打标（原来按 vreg 全函数扫是 O(n²)）。
-    void build_rc_mark_vregs();
-    bool rc_mark_vreg(VReg v) const {
-        return v < rc_mark_vreg_.size() && rc_mark_vreg_[v] != 0;
-    }
-    std::vector<uint8_t> rc_mark_vreg_;
 
     // 变量提升（旧路径，PYADAMAS_NO_RA=1 回退用）：按被读写次数排序，把
     // 最热的几个整型槽放进 callee-saved；浮点槽按 xmm8–15 处理。

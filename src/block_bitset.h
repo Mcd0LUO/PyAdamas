@@ -16,6 +16,8 @@
 #include <utility>
 #include <vector>
 
+#include "ir_types.h"
+
 namespace pyadamas {
 
 class BlockBits {
@@ -86,6 +88,40 @@ class BlockBits {
 
     size_t nbits_ = 0;
     std::vector<uint64_t> w_;
+};
+
+// 块内「首次读位置」索引 + RcMark 水位打标（codegen 的每块预扫描用）。
+//
+// 原来：block_first_use_ 是 unordered_map<VReg,int>（每条指令对 a/b/c/args
+// 做 find+insert），RcMark 判定是「每个 vreg 扫全函数」。两者都是按 vreg
+// 的全量哈希/全函数扫描，perf 上合计 ~17% 编译时间。
+// 现在：按 vreg 直接下标 + 本块脏项复位；RcMark 一次扫描打标后查表。
+// 语义完全一致：first_use 未命中返回 -1（调用方本来按 find()==end() 判）。
+struct BlockUseIndex {
+    std::vector<int> pos;       // vreg -> 本块首次读位置；-1 = 本块没读
+    std::vector<VReg> touched;  // 本块写过的项，块尾只复位这些
+    std::vector<uint8_t> rc_marks;  // RcMark 水位 vreg 打标（整函数一次）
+
+    int first_use(VReg r) const {
+        return static_cast<size_t>(r) < pos.size() ? pos[r] : -1;
+    }
+    void mark_first_use(VReg r, int at) {
+        if (r == kNoReg) return;
+        if (static_cast<size_t>(r) >= pos.size())
+            pos.resize(static_cast<size_t>(r) + 1, -1);
+        if (pos[r] < 0) {
+            pos[r] = at;
+            touched.push_back(r);
+        }
+    }
+    void reset_first_use() {
+        for (VReg r : touched) pos[r] = -1;
+        touched.clear();
+    }
+
+    bool is_rc_mark(VReg v) const {
+        return static_cast<size_t>(v) < rc_marks.size() && rc_marks[v] != 0;
+    }
 };
 
 }  // namespace pyadamas

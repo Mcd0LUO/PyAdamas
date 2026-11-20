@@ -395,7 +395,7 @@ void AsmGen::gen_load_slot(const Inst& in) {
             // 读之后、第一次真正使用之前不能有对该变量的赋值。
             bool clobbered = false;
             auto stv = block_stores_.find(in.idx);
-            const int us = block_first_use(in.dst);
+            const int us = block_use_.first_use(in.dst);
             if (stv != block_stores_.end() && us >= 0) {
                 auto it = std::upper_bound(stv->second.begin(), stv->second.end(), cur_pos_);
                 if (it != stv->second.end() && *it < us) clobbered = true;
