@@ -7,6 +7,7 @@
 // 逐个 asm）做 md5 全量比对，见任务报告。
 #include "mach_instr.h"
 
+#include <array>
 #include <charconv>
 
 namespace pyadamas {
@@ -104,6 +105,21 @@ constexpr NamedOp kOpNames[] = {
     {"setp", MOp::kSetp},
 };
 
+// 静态寄存器名表：下标 = MReg 编号。与 mach_instr.h 的枚举逐一对应。
+constexpr std::string_view kRegNames[] = {
+    "",  // kMRegNone
+    "%rax", "%rbx", "%rcx", "%rdx", "%rsi", "%rdi", "%rbp", "%rsp",
+    "%r8", "%r9", "%r10", "%r11", "%r12", "%r13", "%r14", "%r15",
+    "%eax", "%ebx", "%ecx", "%edx", "%esi", "%edi", "%ebp", "%esp",
+    "%r8d", "%r9d", "%r10d", "%r11d", "%r12d", "%r13d", "%r14d", "%r15d",
+    "%al", "%bl", "%cl", "%dl", "%sil", "%dil", "%bpl", "%spl",
+    "%r8b", "%r9b", "%r10b", "%r11b", "%r12b", "%r13b", "%r14b", "%r15b",
+    "%xmm0", "%xmm1", "%xmm2", "%xmm3", "%xmm4", "%xmm5", "%xmm6", "%xmm7",
+    "%xmm8", "%xmm9", "%xmm10", "%xmm11", "%xmm12", "%xmm13", "%xmm14", "%xmm15",
+    "%rip",
+};
+static_assert(std::size(kRegNames) == kMRegCount, "reg table out of sync");
+
 bool is_reg_name(std::string_view s) {
     if (s.size() < 2 || s[0] != '%') return false;
     for (size_t i = 1; i < s.size(); ++i) {
@@ -173,10 +189,21 @@ void append_hex(uint64_t v, std::string& out) {
     out.append(buf, static_cast<size_t>(r.ptr - buf));
 }
 
+// 十进制直写（to_chars，无 std::string 临时）。
+void append_dec(int64_t v, std::string& out) {
+    char buf[24];
+    auto r = std::to_chars(buf, buf + sizeof buf, v);
+    out.append(buf, static_cast<size_t>(r.ptr - buf));
+}
+
 void render_operand(const MOperand& op, std::string& out) {
     if (op.indirect) out += '*';
     switch (op.kind) {
         case MOperandKind::Reg:
+            // 静态表查名；表外名字（reg==kMRegNone）text 兜底。
+            if (op.reg != kMRegNone) out += mreg_name(op.reg);
+            else out += op.text;
+            break;
         case MOperandKind::Label:
         case MOperandKind::Sym:
         case MOperandKind::Raw:
@@ -188,23 +215,24 @@ void render_operand(const MOperand& op, std::string& out) {
                 out += "0x";
                 append_hex(static_cast<uint64_t>(op.imm), out);
             } else {
-                out += std::to_string(op.imm);
+                append_dec(op.imm, out);
             }
             break;
         case MOperandKind::Mem:
+            if (op.reg == kMRegNone) { out += op.text; break; }  // 表外基址兜底
             if (!op.sym.empty()) {
                 out += op.sym;
             } else if (op.has_disp) {
-                out += std::to_string(op.disp);
+                append_dec(op.imm, out);
             }
             out += '(';
-            out += op.base;
-            if (!op.index.empty()) {
+            out += mreg_name(op.reg);
+            if (op.index != kMRegNone) {
                 out += ',';
-                out += op.index;
+                out += mreg_name(op.index);
                 if (op.has_scale) {
                     out += ',';
-                    out += std::to_string(op.scale);
+                    append_dec(op.scale, out);
                 }
             }
             out += ')';
@@ -214,17 +242,36 @@ void render_operand(const MOperand& op, std::string& out) {
 
 }  // namespace
 
+// 枚举下标 → 名字：编译期从 kOpNames 生成，渲染期 O(1)。
+constexpr auto kOpNameByEnum = [] {
+    std::array<std::string_view, 128> a{};
+    for (const NamedOp& n : kOpNames) a[static_cast<size_t>(n.op)] = n.name;
+    return a;
+}();
+
 const char* mop_name(MOp op) {
-    for (const NamedOp& n : kOpNames)
-        if (n.op == op) return n.name;
-    return "";
+    const size_t i = static_cast<size_t>(op);
+    if (i >= kOpNameByEnum.size() || kOpNameByEnum[i].empty()) return "";
+    return kOpNameByEnum[i].data();
 }
 
 MOp mop_from_name(std::string_view name) {
+    if (name.empty()) return MOp::kRaw;
+    const char c0 = name[0];
     for (const NamedOp& n : kOpNames) {
+        if (n.name[0] != c0) continue;  // 首字符过滤，免多数 strlen
         if (name == n.name) return n.op;
     }
     return MOp::kRaw;
+}
+
+std::string_view mreg_name(MReg r) { return kRegNames[r]; }
+
+MReg mreg_from_name(std::string_view name) {
+    // 表小（65 条）：string_view 比较先比长度，多数候选一次整数比较即拒。
+    for (size_t i = 1; i < kMRegCount; ++i)
+        if (kRegNames[i] == name) return static_cast<MReg>(i);
+    return kMRegNone;
 }
 
 bool mop_is_branch(MOp op) {
@@ -271,11 +318,13 @@ bool parse_operand(std::string_view text, bool as_label, MOperand* out) {
         } else if (!parse_decimal(s, &op.imm)) {
             return false;
         }
+        op.text = std::string(s);
         *out = std::move(op);
         return true;
     }
     if (is_reg_name(s)) {
         op.kind = MOperandKind::Reg;
+        op.reg = mreg_from_name(s);  // 表外名字 kMRegNone，渲染走 text 兜底
         op.text = std::string(s);
         *out = std::move(op);
         return true;
@@ -295,27 +344,31 @@ bool parse_operand(std::string_view text, bool as_label, MOperand* out) {
                 start = i + 1;
             }
         }
-        if (np < 1 || !is_reg_name(parts[0])) return false;
+        if (np < 1) return false;
+        const MReg base = mreg_from_name(parts[0]);
+        if (base == kMRegNone) return false;  // 表外基址退化 Raw，字节不变
         op.kind = MOperandKind::Mem;
-        op.base = std::string(parts[0]);
+        op.reg = base;
         if (np == 2) {
-            if (!is_reg_name(parts[1])) return false;
-            op.index = std::string(parts[1]);
+            const MReg ix = mreg_from_name(parts[1]);
+            if (ix == kMRegNone) return false;
+            op.index = ix;
             op.scale = 1;
             op.has_scale = false;
         } else if (np == 3) {
-            if (!is_reg_name(parts[1])) return false;
+            const MReg ix = mreg_from_name(parts[1]);
+            if (ix == kMRegNone) return false;
             int64_t sc = 0;
             if (!parse_decimal(parts[2], &sc)) return false;
             if (sc != 1 && sc != 2 && sc != 4 && sc != 8) return false;
-            op.index = std::string(parts[1]);
+            op.index = ix;
             op.scale = static_cast<int>(sc);
             op.has_scale = true;
         }
         if (!disp.empty()) {
             int64_t d = 0;
             if (parse_decimal(disp, &d)) {
-                op.disp = d;
+                op.imm = d;
                 op.has_disp = true;
             } else {
                 // 符号位移（如 .Lstr0(%rip)）：原样保存，渲染时原样输出。
@@ -327,6 +380,7 @@ bool parse_operand(std::string_view text, bool as_label, MOperand* out) {
                 op.has_disp = false;
             }
         }
+        op.text = std::string(s);
         *out = std::move(op);
         return true;
     }
@@ -466,7 +520,7 @@ void MachFunc::push(MItem it) {
             break;
         case MItem::Instr:
             bytes += 16;
-            for (const MOperand& o : it.inst.ops) bytes += o.text.size() + o.sym.size() + 8;
+            for (const MOperand& o : it.inst.ops) bytes += o.text.size() + 8;
             break;
     }
     items.push_back(std::move(it));
@@ -523,7 +577,7 @@ void render_item(const MItem& it, std::string& out) {
             } else {
                 out += mop_name(it.inst.op);
             }
-            const std::vector<MOperand>& ops = it.inst.ops;
+            const MOpVec& ops = it.inst.ops;
             if (!ops.empty()) {
                 out += ' ';
                 for (size_t i = 0; i < ops.size(); ++i) {

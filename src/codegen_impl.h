@@ -497,10 +497,20 @@ private:
         out_.push_instr(std::move(ins));
     }
 
-    // 操作数工厂。寄存器第一阶段仍按名字存（op_reg("%rax")）。
+    // 操作数工厂。寄存器按编号存（op_reg(kRax)），名字查静态表；
+    // 按名字构造时查表得编号，表外名字渲染走 text 兜底。
+    // 所有工厂同时填 canonical text（与 render 逐字节一致），供字符串接口用。
+    static MOperand op_reg(MReg r) {
+        MOperand o;
+        o.kind = MOperandKind::Reg;
+        o.reg = r;
+        o.text = mreg_name(r);
+        return o;
+    }
     static MOperand op_reg(std::string name) {
         MOperand o;
         o.kind = MOperandKind::Reg;
+        o.reg = mreg_from_name(name);
         o.text = std::move(name);
         return o;
     }
@@ -508,6 +518,10 @@ private:
         MOperand o;
         o.kind = MOperandKind::Imm;
         o.imm = v;
+        char buf[24];
+        auto r = std::to_chars(buf, buf + sizeof buf, v);
+        o.text = "$";
+        o.text.append(buf, r.ptr);
         return o;
     }
     static MOperand op_imm_hex(uint64_t bits) {
@@ -515,6 +529,10 @@ private:
         o.kind = MOperandKind::Imm;
         o.imm = static_cast<int64_t>(bits);
         o.imm_hex = true;
+        char buf[24];
+        auto r = std::to_chars(buf, buf + sizeof buf, bits, 16);
+        o.text = "$0x";
+        o.text.append(buf, r.ptr);
         return o;
     }
     static MOperand op_label(std::string name) {
@@ -533,24 +551,35 @@ private:
     static MOperand op_mem(std::string base) {
         MOperand o;
         o.kind = MOperandKind::Mem;
-        o.base = std::move(base);
+        o.reg = mreg_from_name(base);
+        o.text = "(" + base + ")";
         return o;
     }
     // "disp(%base)"
     static MOperand op_mem(std::string base, int64_t disp) {
         MOperand o;
         o.kind = MOperandKind::Mem;
-        o.base = std::move(base);
-        o.disp = disp;
+        o.reg = mreg_from_name(base);
+        o.imm = disp;
         o.has_disp = true;
+        char buf[24];
+        auto r = std::to_chars(buf, buf + sizeof buf, disp);
+        o.text.assign(buf, r.ptr);
+        o.text += '(';
+        o.text += base;
+        o.text += ')';
         return o;
     }
     // "sym(%base)"
     static MOperand op_mem_sym(std::string sym, std::string base) {
         MOperand o;
         o.kind = MOperandKind::Mem;
-        o.sym = std::move(sym);
-        o.base = std::move(base);
+        o.reg = mreg_from_name(base);
+        o.sym = sym;
+        o.text = std::move(sym);
+        o.text += '(';
+        o.text += base;
+        o.text += ')';
         return o;
     }
 
