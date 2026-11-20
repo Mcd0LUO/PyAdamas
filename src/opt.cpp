@@ -94,8 +94,14 @@ void optimize_ir(IRModule& m, int opt_level, int loop_opt, bool inline_opt) {
                             case BinKind::BitXor: v = x ^ y; break;
                             default: break;
                         }
-                        set_const_int(in, static_cast<int64_t>(v));
-                        consts[in.dst] = CVal{false, static_cast<int64_t>(v), 0.0};
+                        // 定宽整数（P1）：折叠结果必须按结果类型回绕到规范值。
+                        // 否则 u8 的 250+10 会被折叠成 260 存进 u8 槽，
+                        // 后面的读取（print/比较）就拿到越界值——静默算错。
+                        int64_t fv = in.ty && is_fixed_int(in.ty)
+                                         ? int_narrow_value(in.ty, v)
+                                         : static_cast<int64_t>(v);
+                        set_const_int(in, fv);
+                        consts[in.dst] = CVal{false, fv, 0.0};
                     }
                     continue;
                 }
@@ -109,12 +115,15 @@ void optimize_ir(IRModule& m, int opt_level, int loop_opt, bool inline_opt) {
                         consts[in.dst] = CVal{true, 0, -x};
                     } else if (in.uop == UnKind::Neg) {
                         uint64_t x = static_cast<uint64_t>(ca->second.i);
-                        set_const_int(in, static_cast<int64_t>(uint64_t(0) - x));
-                        consts[in.dst] = CVal{false, static_cast<int64_t>(uint64_t(0) - x), 0.0};
+                        uint64_t v = uint64_t(0) - x;
+                        if (in.ty && is_fixed_int(in.ty)) v = static_cast<uint64_t>(int_narrow_value(in.ty, v));
+                        set_const_int(in, static_cast<int64_t>(v));
+                        consts[in.dst] = CVal{false, static_cast<int64_t>(v), 0.0};
                     } else if (in.uop == UnKind::BitNot) {
-                        int64_t v = ~ca->second.i;
-                        set_const_int(in, v);
-                        consts[in.dst] = CVal{false, v, 0.0};
+                        uint64_t v = static_cast<uint64_t>(~ca->second.i);
+                        if (in.ty && is_fixed_int(in.ty)) v = static_cast<uint64_t>(int_narrow_value(in.ty, v));
+                        set_const_int(in, static_cast<int64_t>(v));
+                        consts[in.dst] = CVal{false, static_cast<int64_t>(v), 0.0};
                     } else if (in.uop == UnKind::Not) {
                         bool x = ca->second.is_float ? (ca->second.f != 0.0) : (ca->second.i != 0);
                         set_const_int(in, x ? 0 : 1);
@@ -143,9 +152,28 @@ void optimize_ir(IRModule& m, int opt_level, int loop_opt, bool inline_opt) {
                         }
                         set_const_int(in, v);
                         consts[in.dst] = CVal{false, v, 0.0};
+                    } else if (is_fixed_int(to)) {
+                        // 定宽目标：先截断回绕（与 codegen 的 movsbq/movzbq 同语义）。
+                        uint64_t raw;
+                        if (ca->second.is_float) {
+                            double d = ca->second.f;
+                            if (!(d >= -9.2e18 && d <= 9.2e18)) continue;
+                            raw = static_cast<uint64_t>(static_cast<int64_t>(d));
+                        } else {
+                            raw = static_cast<uint64_t>(ca->second.i);
+                        }
+                        int64_t v = int_narrow_value(to, raw);
+                        set_const_int(in, v);
+                        consts[in.dst] = CVal{false, v, 0.0};
                     } else if (to->kind == TyKind::Float) {
-                        double v = ca->second.is_float ? ca->second.f
-                                                        : static_cast<double>(ca->second.i);
+                        // u64 → double 必须按无符号折叠（≥ 2^63 的有符号解释是错的）。
+                        TypePtr from_ty = in.a < fn.vreg_ty.size() ? fn.vreg_ty[in.a] : nullptr;
+                        double v = ca->second.is_float
+                                       ? ca->second.f
+                                       : (from_ty && from_ty->kind == TyKind::U64
+                                              ? static_cast<double>(static_cast<uint64_t>(
+                                                    ca->second.i))
+                                              : static_cast<double>(ca->second.i));
                         set_const_float(in, v);
                         consts[in.dst] = CVal{true, 0, v};
                     }
@@ -171,11 +199,16 @@ void optimize_ir(IRModule& m, int opt_level, int loop_opt, bool inline_opt) {
                     } else {
                         int64_t x = ca->second.i;
                         int64_t y = cb->second.i;
+                        // u64（P1）：按无符号比，否则 ≥ 2^63 的常量会被当负数。
+                        const bool uns = in.a < fn.vreg_ty.size() && fn.vreg_ty[in.a] &&
+                                         fn.vreg_ty[in.a]->kind == TyKind::U64;
+                        const uint64_t ux = static_cast<uint64_t>(x);
+                        const uint64_t uy = static_cast<uint64_t>(y);
                         switch (in.cop) {
-                            case CmpKind::Lt: res = x < y; break;
-                            case CmpKind::Le: res = x <= y; break;
-                            case CmpKind::Gt: res = x > y; break;
-                            case CmpKind::Ge: res = x >= y; break;
+                            case CmpKind::Lt: res = uns ? ux < uy : x < y; break;
+                            case CmpKind::Le: res = uns ? ux <= uy : x <= y; break;
+                            case CmpKind::Gt: res = uns ? ux > uy : x > y; break;
+                            case CmpKind::Ge: res = uns ? ux >= uy : x >= y; break;
                             case CmpKind::Eq: res = x == y; break;
                             case CmpKind::Ne: res = x != y; break;
                         }

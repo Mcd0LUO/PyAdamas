@@ -449,6 +449,17 @@ private:
 
     void assign(Expr& target, TypePtr value, int line, int col);
 
+    // ── 定宽整数字面量 coerce（P1）────────────────────────────────
+    //
+    // 整数字面量（含一元负号）的编译期值。不是字面量返回 false。
+    static bool literal_int_value(const Expr* e, int64_t& out);
+    // 目标类型是定宽整数、值表达式是字面量时：
+    //   范围内 → 把字面量的静态类型改写成目标类型并返回 true（调用方按
+    //   已兼容处理，降级按该类型生成常量，不会截断）；
+    //   超范围 → 报编译错误并返回 true（别再叠加一条通用类型错误）。
+    // 不是字面量/目标不是定宽整数返回 false（走普通 assignable 判断）。
+    bool accept_literal_into(const TypePtr& want, Expr* value);
+
     void unpack_assign(std::vector<ExprPtr>& targets, TypePtr value, int line, int col);
 
     // ── 表达式 ──────────────────────────────────────────────────
@@ -480,9 +491,10 @@ private:
     // 大小比较的 dunder 是否存在（含右操作数镜像版）。
     bool dunder_cmp_ok(CmpOp op, TypePtr l, TypePtr r);
 
+    // §1.2 提升规则集中在 typecheck_types.h 的 int_promote，类型检查/降级/
+    // codegen 共用同一份判断（定宽整数的 signed/unsigned 坑只允许有一处定义）。
     static TypePtr promote(const TypePtr& l, const TypePtr& r) {
-        if (l->kind == TyKind::Float || r->kind == TyKind::Float) return t_float();
-        return t_int();
+        return int_promote(l, r);
     }
 
     void compare_type(CmpOp op, TypePtr l, TypePtr r, int line, int col);

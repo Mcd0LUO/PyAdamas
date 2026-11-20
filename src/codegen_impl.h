@@ -1077,9 +1077,14 @@ private:
 
         void gen_bin_int(const Inst& in);
 
+        // P1 定宽整数（codegen_int_fixed.cpp）：按宽度回绕、u64 用无符号指令。
+        void gen_bin_int_fixed(const Inst& in);
+        void norm_int_rax(const TypePtr& t);  // 把 %rax 正常化到 t 的规范值
+        void gen_udiv64(const Inst& in);      // 商在 %rax、余数在 %rdx
+
     // idiv 在除数为 0、以及 INT64_MIN / -1 时都会触发 #DE，
     // 那个信号没法带任何上下文。提前挡掉，给一条能看懂的消息。
-    void gen_div_guard();
+    void gen_div_guard(bool check_overflow = true);
     // RC 记账（inc/dec/mark/cleanup）的内联快路径。返回 true 表示指令已发完。
     // 慢路径落回 pa_rc_*_slow，且会调运行时 —— 必须落盘提升过的浮点槽。
     bool gen_rc_inline(const Inst& in, RtFn fn);

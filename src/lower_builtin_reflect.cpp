@@ -65,7 +65,11 @@ VReg Lowerer::lower_builtin_reflect(const std::string& name, Call& c) {
                 };
                 if (known) {
                     bool r = false;
-                    if (builtin == "int") r = kind_is({TyKind::Int, TyKind::Bool});
+                    // 定宽整数（P1）在 Python 语义里也是 int。
+                    if (builtin == "int")
+                        r = kind_is({TyKind::Int, TyKind::Bool, TyKind::I8, TyKind::I16,
+                                     TyKind::I32, TyKind::U8, TyKind::U16, TyKind::U32,
+                                     TyKind::U64});
                     else if (builtin == "bool") r = kind_is({TyKind::Bool});
                     else if (builtin == "float") r = kind_is({TyKind::Float});
                     else if (builtin == "str") r = kind_is({TyKind::Str});

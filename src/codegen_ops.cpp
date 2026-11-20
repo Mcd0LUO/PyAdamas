@@ -1,5 +1,6 @@
 // codegen_ops.cpp —— 指令选择：算术/比较/转换
 #include "codegen_impl.h"
+#include "codegen_div.h"
 
 namespace pyadamas {
 
@@ -13,16 +14,9 @@ bool no_bounds_probe() {
 }
 }  // namespace
 
-// idiv 的除数必须在 %rcx。SysV 直接用它；Win64 下 %rcx 是第 1 个实参
-// 寄存器，而除零检查里的 panic 是调用、会破坏它，所以统一用 %r10 中转。
-static const char* div_reg() { return target_abi().gnu_cfi ? "%rcx" : "%r10"; }
-
 namespace {
 
 // gen_div_const 的模式：0 = 向零取整商（/），1 = 向下取整商（//），2 = 余数（%）
-constexpr int kDivModeTrunc = 0;
-constexpr int kDivModeFloor = 1;
-constexpr int kDivModeMod = 2;
 
 // 操作数文本是不是一个立即数常量（"$123" / "$-4"）。src_op 对「能直接当
 // 立即数用」的 vreg 返回这种形态；寄存器/栈槽则以 '%' / 数字开头。
@@ -459,7 +453,13 @@ void AsmGen::gen_bin(const Inst& in) {
         }
     }
 
+
 void AsmGen::gen_bin_int(const Inst& in) {
+        // 定宽整数（P1）走独立的宽度/符号路径；默认 int 的代码路径逐字不变。
+        if (in.ty && is_fixed_int(in.ty)) {
+            gen_bin_int_fixed(in);
+            return;
+        }
         // 结构化操作数直取（缓存单元引用，免字符串拷贝与回解析）。
         const MOperand& sa = src_mop(in.a);
         const MOperand& sb = src_mop(in.b);
@@ -530,26 +530,6 @@ void AsmGen::gen_bin_int(const Inst& in) {
 // idiv 在除数为 0、以及 INT64_MIN / -1 时都会触发 #DE，
     // 那个信号没法带任何上下文。提前挡掉，给一条能看懂的消息。
 
-void AsmGen::gen_div_guard() {
-        std::string ok = fresh_label("divok");
-        std::string ok2 = fresh_label("divok2");
-        emit2(MOp::kTestq, div_reg(), div_reg());
-        emit_jmp(MOp::kJne, ok);
-        line("call pa_panic_div0");
-        label(ok);
-        emit_imm(MOp::kCmpq, -1, div_reg());
-        emit_jmp(MOp::kJne, ok2);
-        line("movabsq $0x8000000000000000, %r8");
-        line("cmpq %r8, %rax");
-        emit_jmp("jne", ok2);
-        line("call pa_panic_overflow");
-        label(ok2);
-    }
-
-// ── 常数除数的除法：魔数乘法替代 idivq ─────────────────────────
-//
-// 生成后 %rax = 向零取整商（与 idivq 的约定一致）。mode 1/2 再据此算余数
-// 并按 Python 的语义修正符号。%r9 全程保存被除数。
 void AsmGen::gen_div_const_emit(int64_t d, int mode, bool a_nonneg) {
         const uint64_t ad = d < 0 ? static_cast<uint64_t>(-(d + 1)) + 1
                                   : static_cast<uint64_t>(d);
@@ -853,6 +833,10 @@ void AsmGen::gen_un(const Inst& in) {
             case UnKind::BitNot: emit1(MOp::kNotq, kRax); break;
             default: break;
         }
+        // 定宽：取负/取反后按宽度回绕（-(-128) → -128，~u8 200 → 55）。
+        if (in.ty && is_fixed_int(in.ty) &&
+            (in.uop == UnKind::Neg || in.uop == UnKind::BitNot))
+            norm_int_rax(in.ty);
         emit2(MOp::kMovq, kRax, dst_mop(in.dst));
     }
 
@@ -1007,11 +991,16 @@ void AsmGen::gen_cmp(const Inst& in) {
             emit2(MOp::kMovq, sa, kRax);
             emit2(MOp::kCmpq, sb, kRax);
         }
+        // 有符号 vs 无符号比较：只有 u64 需要换指令。宽度 < 64 的无符号值
+        // 在槽里零扩展、恒非负，jl/jg 与 jb/ja 结果逐例相同（不变量见
+        // docs/numeric-types-landing.md §3）。混宽/混符号的运算两侧在降级期
+        // 已按 §1.2 提升到同一类型，这里只看提升后的类型。
+        const bool uns = ty && ty->kind == TyKind::U64;
         switch (in.cop) {
-            case CmpKind::Lt: line("setl %al"); break;
-            case CmpKind::Le: line("setle %al"); break;
-            case CmpKind::Gt: line("setg %al"); break;
-            case CmpKind::Ge: line("setge %al"); break;
+            case CmpKind::Lt: line(uns ? "setb %al" : "setl %al"); break;
+            case CmpKind::Le: line(uns ? "setbe %al" : "setle %al"); break;
+            case CmpKind::Gt: line(uns ? "seta %al" : "setg %al"); break;
+            case CmpKind::Ge: line(uns ? "setae %al" : "setge %al"); break;
             case CmpKind::Eq: line("sete %al"); break;
             case CmpKind::Ne: line("setne %al"); break;
         }
@@ -1076,8 +1065,43 @@ void AsmGen::gen_convert(const Inst& in) {
                 emit2(MOp::kMovq, *sa, kRax);
                 sa = &mreg_operand(kRax);
             }
+            // u64 → f64：cvtsi2sdq 按**有符号**解释源，≥ 2^63 的 u64 会被
+            // 转成负数。按 gcc 的经典做法绕开：x >= 2^63 时先
+            // (x>>1)|(x&1) 再转换、最后乘 2，结果仍是正确舍入的双精度。
+            if (is_unsigned_int(from) && int_info_of(from)->width == 64) {
+                emit2(MOp::kMovq, *sa, kRax);
+                std::string small = fresh_label("u2dsm");
+                std::string done = fresh_label("u2dend");
+                emit2(MOp::kTestq, kRax, kRax);
+                emit_jmp(MOp::kJs, small);
+                emit2(MOp::kCvtsi2sdq, mreg_operand(kRax), kXmm0);
+                emit_jmp(MOp::kJmp, done);
+                label(small);
+                emit2(MOp::kMovq, kRax, kRcx);
+                emit_imm(MOp::kShrq, 1, kRax);
+                emit_imm(MOp::kAndq, 1, kRcx);
+                emit2(MOp::kOrq, kRcx, kRax);
+                emit2(MOp::kCvtsi2sdq, mreg_operand(kRax), kXmm0);
+                emit2(MOp::kAddsd, mreg_operand(kXmm0), kXmm0);
+                label(done);
+                move_fp(dst_mop(in.dst), mreg_operand(kXmm0));
+                return;
+            }
             emit2(MOp::kCvtsi2sdq, *sa, kXmm0);
             move_fp(dst_mop(in.dst), mreg_operand(kXmm0));
+            return;
+        }
+        // 定宽整数目标的转换（P1）：截断到宽度 + 按符号/零扩展。
+        // 这条路径是「宽→窄」的唯一落地点：字面量已在类型检查期验值域，
+        // cast_* 显式转换则按 C 语义回绕（结果确定，不是 UB）。
+        if (is_fixed_int(to)) {
+            if (ir_is_float(from)) {
+                emit2(MOp::kCvttsd2siq, src_mop(in.a), kRax);
+            } else {
+                emit2(MOp::kMovq, src_mop(in.a), kRax);
+            }
+            norm_int_rax(to);
+            emit2(MOp::kMovq, kRax, dst_mop(in.dst));
             return;
         }
         if (to->kind == TyKind::Int) {
@@ -1114,7 +1138,10 @@ void AsmGen::gen_convert(const Inst& in) {
             } else {
                 emit2(MOp::kMovq, src_mop(in.a), arg_reg_i(0));
                 spill_fp_slots();
-                line("call pa_str_from_i64");
+                // u64 的十进制要按无符号打印（≥ 2^63 的值用有符号版本会带负号）。
+                line(is_unsigned_int(from) && int_info_of(from)->width == 64
+                         ? "call pa_str_from_u64"
+                         : "call pa_str_from_i64");
                 reload_fp_slots();
             }
             emit2(MOp::kMovq, kRax, dst_mop(in.dst));

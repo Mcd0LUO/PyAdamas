@@ -284,11 +284,20 @@ VReg Lowerer::coerce(VReg v, TypePtr from, TypePtr to) {
     // bool(x) 在各自的内置调用点单独处理。
     if (from->kind == TyKind::Unknown && to->kind == TyKind::Float)
         return convert_to(v, from, to);
-    auto num = [](TyKind k) { return k == TyKind::Int || k == TyKind::Bool || k == TyKind::Float; };
+    // 定宽整数（P1）：**目标**是定宽整数时必须发转换（按宽度截断 +
+    // 符号/零扩展），不能像 int/bool 那样直通。这是「宽→窄」的唯一
+    // 落地指令；类型检查已经保证它只出现在允许的位置（字面量、cast、
+    // 复合赋值、按 §1.2 提升后的运算两侧）。
+    if (is_fixed_int(to)) return convert_to(v, from, to);
+    // 定宽 → float 需要 cvtsi2sd（u64 还要走无符号转换路径）。
+    if (to->kind == TyKind::Float && is_fixed_int(from)) return convert_to(v, from, to);
+    auto num = [](TyKind k) {
+        return is_int_kind(k) || k == TyKind::Bool || k == TyKind::Float;
+    };
     if (!num(from->kind) || !num(to->kind)) return v;
     bool from_int = from->kind != TyKind::Float;
     bool to_int = to->kind != TyKind::Float;
-    if (from_int == to_int) return v;  // int/bool 互换不用动，机器表示一样
+    if (from_int == to_int) return v;  // int/bool/定宽→i64：位模式已是规范值
     return convert_to(v, from, to);
 }
 
@@ -365,7 +374,16 @@ VReg Lowerer::lower_joined(JoinedStr& j) {
             } else {
                 switch (ct->kind) {
                     case TyKind::Bool: piece = fmt_call(RtFn::FmtBool); break;
-                    case TyKind::Int: piece = fmt_call(RtFn::FmtI64); break;
+                    case TyKind::Int:
+                    // 定宽整数（P1）：窄宽度/无符号 8..32 的值在槽内恒非负
+                    // 或已是正确有符号值，格式化走 i64 版本即可。
+                    case TyKind::I8:
+                    case TyKind::I16:
+                    case TyKind::I32:
+                    case TyKind::U8:
+                    case TyKind::U16:
+                    case TyKind::U32: piece = fmt_call(RtFn::FmtI64); break;
+                    case TyKind::U64: piece = fmt_call(RtFn::FmtU64); break;
                     case TyKind::Float: piece = fmt_call(RtFn::FmtF64); break;
                     case TyKind::Str: piece = fmt_call(RtFn::FmtStr); break;
                     case TyKind::Complex: piece = fmt_call(RtFn::FmtComplex); break;

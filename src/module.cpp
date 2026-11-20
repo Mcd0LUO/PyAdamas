@@ -307,6 +307,15 @@ void enc_type(Enc& e, const TypePtr& t) {
             e.u8(0);
             break;
         case TyKind::Bytes: e.u8(12); break;
+        // 定宽整数（P1）：跨模块保留宽度/符号，编码 17..23 为新码
+        // （0..16 逐字沿用，旧 modcache 解码不受影响）。
+        case TyKind::I8: e.u8(17); break;
+        case TyKind::I16: e.u8(18); break;
+        case TyKind::I32: e.u8(19); break;
+        case TyKind::U8: e.u8(20); break;
+        case TyKind::U16: e.u8(21); break;
+        case TyKind::U32: e.u8(22); break;
+        case TyKind::U64: e.u8(23); break;
         case TyKind::None: e.u8(1); break;
         case TyKind::Bool: e.u8(2); break;
         case TyKind::Int: e.u8(3); break;
@@ -386,6 +395,13 @@ TypePtr dec_type(Dec& d) {
             return t;
         }
         case 12: return t_bytes();
+        case 17: return t_i8();
+        case 18: return t_i16();
+        case 19: return t_i32();
+        case 20: return t_u8();
+        case 21: return t_u16();
+        case 22: return t_u32();
+        case 23: return t_u64();
         case 14: {
             TypePtr y = dec_type(d);
             TypePtr s = d.u8() ? dec_type(d) : nullptr;

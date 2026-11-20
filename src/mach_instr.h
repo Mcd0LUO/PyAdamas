@@ -31,6 +31,7 @@ enum class MOp : uint8_t {
     kRaw = 0,
     // ── 数据搬运 ──
     kMovq, kMovl, kMovw, kMovb, kMovabsq, kMovzbq, kMovzbl, kMovzwl, kMovslq, kMovswq,
+    kMovsbq,  // P1 定宽 i8 正常化：低字节符号扩展（只在新路径发射）
     kLeaq,
     // ── 整数算术 ──
     kAddq, kSubq, kImulq, kIdivq, kDivq, kNegq, kNotq, kIncq, kDecq,

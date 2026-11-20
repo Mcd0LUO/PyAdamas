@@ -190,24 +190,10 @@ static void fmt_group_float(char* body, size_t cap, char sep) {
     if (j < cap) memcpy(body, tmp, j + 1);
 }
 
-PyAdamasStr* pa_fmt_i64(int64_t v, PyAdamasStr* spec) {
-    PyAdamasFmt f;
-    fmt_parse(spec, &f, 0);
-    if (f.type && f.type != 'd' && f.type != 'b' && f.type != 'o' && f.type != 'x' &&
-        f.type != 'X' && f.type != 'n')
-        pa_raise_c("ValueError", "Invalid format specifier for int");
-    if (f.prec >= 0)
-        pa_raise_c("ValueError", "Precision not allowed in integer format specifier");
-    char sign = 0;
-    uint64_t mag;
-    if (v < 0) {
-        sign = '-';
-        mag = (uint64_t)(-(v + 1)) + 1;
-    } else {
-        mag = (uint64_t)v;
-        if (f.sign == '+') sign = '+';
-        else if (f.sign == ' ') sign = ' ';
-    }
+// 整数格式化的公共尾段：给定量值（无符号）与符号位，按格式说明符
+// 排版。pa_fmt_i64 / pa_fmt_u64 只在「怎么得到 sign/mag」上不同。
+static PyAdamasStr* fmt_int_mag(uint64_t mag, char sign, PyAdamasFmt* fp) {
+    PyAdamasFmt f = *fp;
     unsigned base = 10;
     int upper = 0;
     if (f.type == 'b') base = 2;
@@ -237,6 +223,43 @@ PyAdamasStr* pa_fmt_i64(int64_t v, PyAdamasStr* spec) {
         else if (f.type == 'X') prefix = "0X";
     }
     return fmt_pad_parts(sign ? &sign : NULL, prefix, body, &f);
+}
+
+PyAdamasStr* pa_fmt_i64(int64_t v, PyAdamasStr* spec) {
+    PyAdamasFmt f;
+    fmt_parse(spec, &f, 0);
+    if (f.type && f.type != 'd' && f.type != 'b' && f.type != 'o' && f.type != 'x' &&
+        f.type != 'X' && f.type != 'n')
+        pa_raise_c("ValueError", "Invalid format specifier for int");
+    if (f.prec >= 0)
+        pa_raise_c("ValueError", "Precision not allowed in integer format specifier");
+    char sign = 0;
+    uint64_t mag;
+    if (v < 0) {
+        sign = '-';
+        mag = (uint64_t)(-(v + 1)) + 1;
+    } else {
+        mag = (uint64_t)v;
+        if (f.sign == '+') sign = '+';
+        else if (f.sign == ' ') sign = ' ';
+    }
+    return fmt_int_mag(mag, sign, &f);
+}
+
+// 无符号 64 位：定宽 u64 的 f-string / format() 走这里（≥ 2^63 的值
+// 不能再按有符号打印）。格式校验与 pa_fmt_i64 完全相同。
+PyAdamasStr* pa_fmt_u64(uint64_t v, PyAdamasStr* spec) {
+    PyAdamasFmt f;
+    fmt_parse(spec, &f, 0);
+    if (f.type && f.type != 'd' && f.type != 'b' && f.type != 'o' && f.type != 'x' &&
+        f.type != 'X' && f.type != 'n')
+        pa_raise_c("ValueError", "Invalid format specifier for int");
+    if (f.prec >= 0)
+        pa_raise_c("ValueError", "Precision not allowed in integer format specifier");
+    char sign = 0;
+    if (f.sign == '+') sign = '+';
+    else if (f.sign == ' ') sign = ' ';
+    return fmt_int_mag(v, sign, &f);
 }
 
 PyAdamasStr* pa_fmt_bool(int64_t v, PyAdamasStr* spec) {
@@ -409,6 +432,8 @@ static PyAdamasStr* fmt_with(const char* spec, int n, int64_t raw, double d, PyA
     sp.data = spec;
     switch (kind) {
         case 'i': return pa_fmt_i64(raw, &sp);
+        // 'u'：定宽 u64（P1）。无符号量值，不带负号。
+        case 'u': return pa_fmt_u64((uint64_t)raw, &sp);
         case 'f': return pa_fmt_f64(d, &sp);
         case 's': return pa_fmt_str(s, &sp);
         default: return NULL;
@@ -497,7 +522,9 @@ PyAdamasStr* pa_percent_format(PyAdamasStr* pat, PyAdamasList* args, PyAdamasStr
             case 'u':
             case 'n':
                 spec[si] = 'd';
-                if (dt == 'i' || dt == 'b')
+                if (dt == 'u')
+                    piece = fmt_with(spec, si + 1, raw, 0.0, NULL, 'u');
+                else if (dt == 'i' || dt == 'b')
                     piece = fmt_with(spec, si + 1, raw, 0.0, NULL, 'i');
                 else if (dt == 'f')
                     piece = fmt_with(spec, si + 1, (int64_t)dv, 0.0, NULL, 'i');
@@ -507,10 +534,10 @@ PyAdamasStr* pa_percent_format(PyAdamasStr* pat, PyAdamasList* args, PyAdamasStr
             case 'x':
             case 'X':
             case 'o':
-                if (dt != 'i' && dt != 'b')
+                if (dt != 'i' && dt != 'b' && dt != 'u')
                     pa_raise_c("TypeError", "%%x format: an integer is required");
                 spec[si] = conv;
-                piece = fmt_with(spec, si + 1, raw, 0.0, NULL, 'i');
+                piece = fmt_with(spec, si + 1, raw, 0.0, NULL, dt == 'u' ? 'u' : 'i');
                 break;
             case 'f':
             case 'F':
@@ -518,7 +545,7 @@ PyAdamasStr* pa_percent_format(PyAdamasStr* pat, PyAdamasList* args, PyAdamasStr
             case 'E':
             case 'g':
             case 'G':
-                if (dt != 'f' && dt != 'i' && dt != 'b')
+                if (dt != 'f' && dt != 'i' && dt != 'b' && dt != 'u')
                     pa_raise_c("TypeError", "%%f format: a number is required");
                 spec[si] = conv;
                 piece = fmt_with(spec, si + 1, 0, dv, NULL, 'f');

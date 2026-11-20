@@ -4,6 +4,48 @@
 
 早期阶段没有逐条留痕，按阶段归纳；0.4 之后逐条记录。
 
+## [0.341] - 2026-11-20
+
+> fixint1 分支：**P1 定宽整数——i8/i16/i32/i64 + u8/u16/u32/u64**
+> （docs/numeric-types-design.md §1）。**无门控**：定宽是 opt-in 标注，
+> 默认 int 的代码路径与生成 asm 逐字节不变（bench 120 个文件 cmp 全同）。
+> 接 P2 0.340 之后集成，定版 0.341。设计/边界/负面结论见
+> docs/numeric-types-landing.md。
+
+### 新增
+
+- **新 TyKind**（typecheck_types.h）：I8/I16/I32/U8/U16/U32/U64，
+  Int 仍是 i64（i64/long/int 解析到 Int）。标注别名：char=i8、
+  short=i16、uchar/u8、ushort/u16、uint/u32、ulong/u64。存储统一 8 字节
+  i64 槽：有符号符号扩展、无符号零扩展（**不改**帧布局/RC 头/ABI）。
+- **提升规则一处实现**（typecheck_types.h int_promote）：浮点 > 较宽整数；
+  同宽 signed+unsigned → unsigned（C 口径，i64+u64→u64）；bool 提升为
+  对方；位运算同规则；移位跟随左操作数；比较先提升再比（结果 bool）。
+  类型检查、降级期两侧转换、常量折叠共用同一份判断。
+- **codegen 宽度/符号**（codegen_int_fixed.cpp，从 codegen_ops.cpp 拆出）：
+  结果按宽度回绕正常化（movsbq/movzbq/movslq/movl/移位扩展），
+  u64 用 divq/shrq 与 setb/seta（分支形 jb/ja），除零检查对 u64 跳过
+  INT64_MIN/−1 溢出误报；宽度 < 64 的无符号槽内值恒非负，signed 指令
+  逐例等价（不变量见文档 §3）。
+- **字面量 coerce + 显式 cast**：定宽目标 + 字面量范围内隐式（赋值/
+  声明/实参/默认参数/return/类字段），**超范围编译报错**；宽→窄必须
+  cast_i8…cast_u64（C 式截断 + pa 回绕）；复合赋值按 C 口径隐式转回。
+  abs/sum 对定宽按 C 整数提升返回 int。
+- **u64 无符号 I/O**（runtime）：pa_str_from_u64/pa_print_u64/pa_fmt_u64/
+  pa_uint_to_base（str/repr/f-string/format/printf-%d/hex/bin/oct），
+  u64→f64 走无符号折算；printf 描述符新增 'u'。
+- **跨模块类型编码** 17..23（0..16 逐字沿用，旧 modcache 兼容）。
+- **回归** tests/run/332-335（提升/回绕/符号/I-O/unknown 边界/控制流）+
+  反例 f67（字面量超范围）、f68（缺 cast）、f69（实参缺 cast）。
+
+### 闸门（实测）
+
+- 默认 int 程序 asm 逐字节不变：bench **120/120 identical**。
+- difftest O0/O2 309 用例 **0 不一致**；全套件 normal **327 ran ok EXIT=0**；
+  ASan（JOBS=1）**327 ran ok EXIT=0**；新用例 O0/O1/O2 输出一致。
+- CPython 对拍：332 逐字节一致；334 仅 §6.1 的 u64→unknown→−1 一行
+  差异（预期边界）；333 钉 pa 回绕语义（不与 CPython 对拍）。
+
 ## [0.340] - 2026-11-20
 
 > types1 分支：**P2 unknown 运行期类型标签——解锁 isinstance/repr/pprint**

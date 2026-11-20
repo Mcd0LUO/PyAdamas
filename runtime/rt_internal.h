@@ -539,6 +539,7 @@ int64_t pa_any_type_is(int64_t v, int64_t tag, int64_t code);
 PyAdamasStr* pa_repr_any_t(int64_t v, int64_t tag);
 void pa_print_any_repr_t(int64_t v, int64_t tag);
 PyAdamasStr* pa_fmt_i64(int64_t v, PyAdamasStr* spec);
+PyAdamasStr* pa_fmt_u64(uint64_t v, PyAdamasStr* spec);
 PyAdamasStr* pa_fmt_bool(int64_t v, PyAdamasStr* spec);
 PyAdamasStr* pa_fmt_f64(double v, PyAdamasStr* spec);
 PyAdamasStr* pa_fmt_str(PyAdamasStr* v, PyAdamasStr* spec);
@@ -1098,6 +1099,8 @@ int64_t pa_len_bytes(PyAdamasStr* s);
 PyAdamasStr* pa_str_encode(PyAdamasStr* s);
 PyAdamasStr* pa_bytes_decode(PyAdamasStr* s);
 PyAdamasStr* pa_str_from_i64(int64_t v);
+PyAdamasStr* pa_str_from_u64(uint64_t v);
+PyAdamasStr* pa_uint_to_base(uint64_t v, int64_t base);
 /* unknown 值：堆字符串原样返回并补引用，其余按整数格式化。 */
 PyAdamasStr* pa_str_any(int64_t v);
 PyAdamasStr* pa_str_from_f64(double v);
@@ -1429,6 +1432,7 @@ void pa_sys_set_args(int64_t argc, char** argv);
 PyAdamasList* pa_sys_argv(void);
 void pa_sys_exit(int64_t code);
 void pa_print_i64(int64_t v);
+void pa_print_u64(uint64_t v);
 void pa_print_any(int64_t v);
 /* CPython 桥结果的打印分派（float 盒 / list / dict 的 repr），rt_cpy.c。 */
 void pa_print_cpy_value(int64_t v);

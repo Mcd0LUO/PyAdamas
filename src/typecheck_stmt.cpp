@@ -395,7 +395,7 @@ void TypeChecker::assign(Expr& target, TypePtr value, int line, int col) {
             }
             if (ot->kind == TyKind::Optional && ot->celem != CKind::None && !ot->sub.empty() &&
                 ot->sub[0]->kind == TyKind::Int) {
-                if (!is_unknown(st) && st->kind != TyKind::Int && st->kind != TyKind::Bool)
+                if (!is_unknown(st) && !is_int_like(st))
                     err(line, col, "pointer index must be an integer");
                 TypePtr want = cptr_elem_type(ot->celem);
                 if (!assignable(want, value))
