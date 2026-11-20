@@ -352,6 +352,11 @@ void AsmGen::emit_function(const IRFunction& f, int fi) {
         }
 
         out_ += std::format("\n# ---- {} ({}) ----\n", f.name, type_name(f.ret));
+        // INLINE_OPT P0：对齐挪到 .LfN 之前。call.direct / FuncAddr / vtable
+        // 都引用 .LfN，旧布局每次调用先穿最多 31 字节 .p2align NOP 再进函数体
+        // （perf 实测 fib 8.4% 周期落在 NOP 雪橇上）。函数体 32B 对齐不变，
+        // EH/LSDA 基准是 fname（.cfi_startproc 处），ptag 双入口相对布局不变。
+        if (inline_opt_) out_ += "\t.p2align 5\n";
         label(func_label(fi));
         if (dbg_on_) {
             // 函数起点也登记一项：生成器/协程帧只保存 resume 代码地址，
@@ -362,7 +367,7 @@ void AsmGen::emit_function(const IRFunction& f, int fi) {
         }
         // 可读的函数别名，供 addr2line / nm / gdb 定位；.LfN 仍是内部跳转名。
         // （fname 在 prepare_eh_plan 之前就算好了，见上面的注释。）
-        out_ += "\t.p2align 5\n";
+        if (!inline_opt_) out_ += "\t.p2align 5\n";
         emit_type_func(fname);
         out_ += fname + ":\n";
         // CFI（.eh_frame 里的栈展开规则）：从「rsp 指向返回地址」到「帧指针
