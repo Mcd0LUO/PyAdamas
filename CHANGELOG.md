@@ -4,6 +4,50 @@
 
 早期阶段没有逐条留痕，按阶段归纳；0.4 之后逐条记录。
 
+## [0.348] - 2026-11-21
+
+> **代码整洁重构：拆分超 1200 行文件**（refactor1 分支，基线 master 2ce0820 /
+> 0.347）。**纯代码移动/拆分，生成 asm 逐字节不变**：5 个基线超限文件全部拆回
+> 硬限内，check_size.sh 超限清零。不改任何语义、不改函数体/签名/声明顺序。
+
+### 变更
+
+- **src/codegen_regalloc.cpp**（2581 行 → 904 行）按职责拆成三个 TU：
+  - codegen_regalloc.cpp：帧布局 / vreg 栈槽 / fp+slot 活跃性 / 通用线性扫描池；
+  - **codegen_regalloc_scan.cpp**（1019 行）：变量槽寄存器分配
+    （assign_slot_regs_split / graph / linear / 入口分派）；
+  - **codegen_regalloc_temp.cpp**（575 行）：块内临时寄存器 / 跨块 vreg 提升 /
+    操作数缓存 / classify；
+  - **regalloc_loop_depth.h**（123 行）：block_loop_depth 原为 static 工具函数，
+    拆分后两个 TU 共用，改 inline（函数体逐字移动）。
+- **src/driver_build.cpp**（1604 行 → 974 行）按职责拆成三个 TU：
+  - driver_build.cpp：构建 / 缓存 / manifest / 链接驱动；
+  - **driver_modules.cpp**（378 行）+ **driver_modules.h**（68 行）：模块表查询 /
+    import 源解析 / AST import 扫描 / 原生+扩展接口合并（原匿名名字空间函数
+    改外部链接，签名与函数体不变；模块表数据仍留在 cpp 匿名名字空间）；
+  - **driver_check.cpp**（269 行）：check 模式 import 图（只建接口不生成代码）。
+- **src/typecheck_types.h**（1593 行 → 899 行）按域拆成三个组成部分头
+  （由 typecheck_types.h 末尾按原顺序包含，声明顺序逐字不变）：
+  - **typecheck_promote.h**（148 行）：定宽整数分类与提升规则；
+  - **typecheck_query.h**（212 行）：类型判定与显示（is_num/type_eq/type_name）；
+  - **typecheck_join.h**（376 行）：类型合并 / 赋值兼容 / 容器元素合并。
+- **src/ir_ops.h**（1398 行 → 227 行）按域拆分：RtFn 枚举 + rt_name 名字表
+  移入 **ir_rtfn.h**（1177 行，ir_ops.h 名字空间内原位展开的组成部分头）；
+  IR 算子枚举（BinKind/UnKind/CmpKind/StrOp/IrOp）留在 ir_ops.h。
+- **src/lower_impl.h**（1356 行 → 1087 行）：class Lowerer 的引用计数成员声明
+  （271 行）移入 **lower_impl_rc.h**（276 行），在类体内原位置 #include 展开，
+  声明顺序与内容逐字不变。
+- CMakeLists.txt：新增 codegen_regalloc_scan.cpp / codegen_regalloc_temp.cpp /
+  driver_modules.cpp / driver_check.cpp 四个源文件。
+
+### 验证（每拆一个文件独立过一遍）
+
+- **38 热基准 asm 逐字节不变**（bench/realistic + compare + daily，cmp 基线
+  2ce0820 同 commit 构建）：每个拆分步骤 38/38 IDENTICAL。
+- 逐行核对：每个原文件的每一行都原样保留在新文件集合中（纯移动证明）。
+- difftest 324/0；全套件 normal + ASan EXIT=0（343 ran ok ×2，JOBS=1）。
+- tests/check_size.sh：超限文件 5 → 0（函数长度警告不变，仅警告）。
+
 ## [0.347] - 2026-11-21
 
 > **标准库自举第四批：tarfile**（tar1 分支，基线 master 7924474 / 0.346）。
