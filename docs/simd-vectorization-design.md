@@ -271,12 +271,56 @@ spectral_norm/nbody 打印输出在全部基准规模下与标量一致（钉住
    CPython 输出；新增回归用例钉住向量化 reduction 输出（含奇偶 n、n≤1、
    大 i+n 触发 fallback、len<n 触发 IndexError 等边界）。
 
-## 7. 实测（见 CHANGELOG 0.333 与完成报告）
+## 7. 实测（0.333 原型，Xeon Gold 6252 / Cascade Lake，-O2）
 
-原型完成后填：spectral_norm flag-on/off min-of-5 加速比、perf annotate 前后
-（packed SIMD 出现、标量 sd 占比下降）、divpd 收益实测（**不假设**：Cascade Lake
-divpd 吞吐可能与 divsd 不同，收益以 abbench 为准）、26 热基准 flag-off 无回归。
-若收益不抵复杂度，如实给负面结论（参照 P2）。
+### spectral_norm flag-on vs off（N=600，输出钉住 811972）
+
+perf stat min-of-7 交替（cycles / instructions）：
+
+| | cycles | instructions |
+|---|---|---|
+| flag-off | 148,806,626 | 376,673,721 |
+| flag-on | 34,112,939 | 85,393,946 |
+| **比值** | **4.36×** | **4.41×** |
+
+墙钟（Python perf_counter，15 轮交替，含 ~8ms 固定进程启动）：
+flag-off min 56.55ms / median 66.81ms；flag-on min 24.65ms / median 26.82ms
+→ **墙钟 min 2.29× / median 2.49×**。墙钟比 cycles 比值小，因为固定启动开销
+不随计算缩小；纯计算 cycles 缩 4.36×。基线 PA 54.4ms vs Go 15.9 / C++ 15.1
+（3.4×）→ flag-on 24.65ms ≈ 1.55× Go，差距大幅收窄（剩余主要是启动开销 +
+保序 addsd 链，见下）。
+
+### perf annotate 热点前后（pyadamas_fn_0__pa_main）
+
+* **flag-off**：0 条 packed SIMD；标量 sd 占 45.5%——addsd 9.36+8.43%、
+  divsd 8.42+3.08%、mulsd 5.84+3.27%（与 lead 0.331 profile 一致）。
+* **flag-on**：37 条 packed SIMD 占 45.4%——divpd 7.46+6.57%、psrlq 6.13%、
+  pshufd 5.92+5.47%、paddq 4.85%、movhlps 4.19+2.81%、mulpd…。标量 sd 降到
+  38.4%，且**集中在保序累加链** addsd 17.39+13.98%（§3.4 刻意保留的逐位一致
+  累加）。divsd/floordiv 展开/spill 流量基本消失。
+
+### divpd 收益实测（不假设）
+
+收益不是单靠 divpd：divsd→divpd（2 lane）+ floordiv 14 条整数展开→psrlq/pshufd/
+paddq 几条 + 每元素 ~6 次栈往返→每 2 元素 1 次 movupd，三者叠加使 instructions
+缩 4.41×、cycles 缩 4.36×。Cascade Lake divpd 吞吐实测足以支撑该收益（以
+perf stat 为准，未做微基准假设）。**当前瓶颈转移到保序 addsd 链**（31%）——
+阶段 2 若改 2-lane 累加 + 水平求和可再压，但须先钉住输出（§3.4）。
+
+### 正确性与回归闸门
+
+* flag-on 输出 == flag-off == CPython（spectral_norm 811972；nbody  likewise）。
+* flag-off asm 对 0.331 基线**逐字节不变**：spectral_norm/nbody/matmul + 全部
+  38 个热基准（realistic 6 + compare 9 + daily 23）asm cmp 全同 → flag-off 零回归
+  （字节相同 ⇒ 二进制相同 ⇒ 性能相同）。
+* difftest（O0/O2，flag-on）270/0；全套件 normal flag-off/on EXIT=0（288 ran ok）。
+* 回归用例 283（向量化路径，N=5 奇数尾）/284（标量 fallback/边界/大范围/IndexError）
+  normal+ASan flag-on/off 均 ran ok。
+* check_size 无新增超限（codegen_simd.cpp 313 行；codegen_impl.h 拆片段后 1198 行）。
+* ASan 全套件在 JOBS=8 高并行下偶发环境性 flake（网络超时/GC 时序/C 编译资源竞争，
+  失败用例每轮不同：277_urllib/174_gc/cfi_unwind/cdecl_sample），基线同样偶发；
+  降并行（JOBS=2）可复现干净 EXIT=0，且失败用例 standalone 输出 mine==base。
+
 
 ## 8. AVX2 评估（阶段 2+，本轮不做）
 
