@@ -36,6 +36,15 @@
   c s p / 计数前缀。浮点位级编解码（double/float32）纯算术实现，带符号零、
   次正规、inf/nan 都对；'s'/'p' 收 bytes 或 str（ASCII 一致）。没有
   pack_into（bytes 不可变，无写缓冲原语）；Q/L 高位按 int64 回绕。回归 324。
+- **queue**（stdlib/queue.py）：Queue / LifoQueue / PriorityQueue /
+  SimpleQueue + Empty / Full；put/get/put_nowait/get_nowait/qsize/empty/
+  full/task_done/join，maxsize 与 timeout 阻塞口径可用（time.sleep 轮询，
+  M=1 协作式无锁）. 回归 325。
+- **contextlib**（stdlib/contextlib.py）：nullcontext / @contextmanager /
+  _GeneratorContextManager。**异常注回做不到**（异常实例/类过 unknown 形参
+  退化成裸 8 字节），异常路径改用生成器 close()：清理照跑、异常不吞。
+  suppress()/closing() 跳过（异常类同一性 / unknown 值方法调用都是 pa 不支持
+  的能力）。回归 326。
 
 ## [0.337] - 2026-11-20
 
