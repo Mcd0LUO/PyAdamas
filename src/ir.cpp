@@ -4,12 +4,31 @@
 // 每条指令都带结果类型注释，能一眼看出前端推出来的类型对不对。
 #include "ir.h"
 
+#include <charconv>
+#include <iterator>
+#include <string_view>
+#include <vector>
+
 namespace pyadamas {
 namespace {
 
-std::string vreg_str(VReg r) {
-    if (r == kNoReg) return "_";
-    return std::format("%{}", r);
+// 注释热路径每指令要拿到 "	%N" 这样的 vreg 文本。原来每次 std::format
+// 一个新串（每条指令 3 个操作数 + 目标 → 3~4 次分配）；改成按 vreg 编号缓存，
+// 文本完全相同（"%N"，N 为十进制）。
+std::string_view vreg_str(VReg r) {
+    static constexpr std::string_view kNone = "_";
+    static std::vector<std::string> cache;
+    if (r == kNoReg) return kNone;
+    if (static_cast<size_t>(r) >= cache.size()) cache.resize(static_cast<size_t>(r) + 1);
+    std::string& s = cache[r];
+    if (s.empty()) {
+        char b[12];
+        auto rr = std::to_chars(b, b + sizeof b, r);
+        s.reserve(static_cast<size_t>(rr.ptr - b) + 1);
+        s += '%';
+        s.append(b, rr.ptr);
+    }
+    return s;
 }
 
 std::string ty_note(const TypePtr& t) {
@@ -30,27 +49,13 @@ std::string ty_note(const TypePtr& t) {
 // 不做 SSA 那套精确单定义检查 —— 这个 IR 的 vreg 本来就是可多次定义的
 // 临时值，索引只服务「快速找到使用点」，不承担正确性判定。
 void IRFunction::rebuild_use_def() {
-    inst_by_id.clear();
     block_by_id.clear();
-    def_of.clear();
-    uses_of.clear();
-    for (int b = 0; b < static_cast<int>(blocks.size()); ++b) {
+    for (int b = 0; b < static_cast<int>(blocks.size()); ++b)
         block_by_id[ensure_block_id(blocks[static_cast<size_t>(b)])] = b;
-        auto& insts = blocks[static_cast<size_t>(b)].insts;
-        for (int k = 0; k < static_cast<int>(insts.size()); ++k) {
-            Inst& in = insts[static_cast<size_t>(k)];
-            const uint32_t id = ensure_inst_id(in);
-            inst_by_id[id] = {b, k};
-            if (in.dst != kNoReg) def_of[in.dst] = id;
-            auto use = [&](VReg r) {
-                if (r != kNoReg) uses_of[r].push_back(id);
-            };
-            use(in.a);
-            use(in.b);
-            use(in.c);
-            for (VReg r : in.args) use(r);
-        }
-    }
+    // inst_by_id / def_of / uses_of 已无读者，不再重建（见 ir_types.h 注释）。
+    // 指令 id 本身仍要分配：pass 新建指令后 id 保持唯一、0 只表示未分配。
+    for (auto& blk : blocks)
+        for (Inst& in : blk.insts) ensure_inst_id(in);
 }
 // 调试期校验：op 与 idx.kind 是否匹配。
 //
@@ -89,169 +94,281 @@ static bool idx_kind_ok(IrOp op, Operand::Kind k) {
     }
 }
 
-std::string Inst::text() const {
-    if (std::getenv("PYADAMAS_IR_CHECK") && !idx_kind_ok(op, idx.kind))
+// 指令文本：直接写进调用方缓冲区。
+//
+// 每条指令在 codegen 里都会发一条 asm 注释（注释是 asm 输出的一部分，
+// 必须逐字节保留）。原实现每次都 std::format 出新串，调用方再拼前缀、
+// 再拷进 MItem：每指令 3~5 次堆分配。format_to 追加到复用缓冲区后，
+// 分配次数降到 1（MItem 自己那一份），文本逐字节相同。
+void Inst::text_into(std::string& buf) const {
+    static const bool ir_check = std::getenv("PYADAMAS_IR_CHECK") != nullptr;
+    if (ir_check && !idx_kind_ok(op, idx.kind))
         std::fprintf(stderr, "[ir] op=%s idx.kind=%d 不匹配（值 %d）\n",
                      irop_name(op), static_cast<int>(idx.kind), idx.value);
+    const auto out = std::back_inserter(buf);
     switch (op) {
-        case IrOp::ConstInt: return std::format("{} = const.int {}", vreg_str(dst), imm);
-        case IrOp::ConstFloat: return std::format("{} = const.float {}", vreg_str(dst), fimm);
-        case IrOp::ConstStr: return std::format("{} = const.str #{}", vreg_str(dst), idx);
-        case IrOp::ConstNone: return std::format("{} = const.none", vreg_str(dst));
-        case IrOp::FuncAddr: return std::format("{} = func.addr f{}", vreg_str(dst), imm);
-        case IrOp::FuncCode: return std::format("{} = func.code f{}", vreg_str(dst), imm);
-        case IrOp::Mov: return std::format("{} = mov {}", vreg_str(dst), vreg_str(a));
+        case IrOp::ConstInt:
+            std::format_to(out, "{} = const.int {}", vreg_str(dst), imm);
+            return;
+        case IrOp::ConstFloat:
+            std::format_to(out, "{} = const.float {}", vreg_str(dst), fimm);
+            return;
+        case IrOp::ConstStr:
+            std::format_to(out, "{} = const.str #{}", vreg_str(dst), idx);
+            return;
+        case IrOp::ConstNone:
+            std::format_to(out, "{} = const.none", vreg_str(dst));
+            return;
+        case IrOp::FuncAddr:
+            std::format_to(out, "{} = func.addr f{}", vreg_str(dst), imm);
+            return;
+        case IrOp::FuncCode:
+            std::format_to(out, "{} = func.code f{}", vreg_str(dst), imm);
+            return;
+        case IrOp::Mov:
+            std::format_to(out, "{} = mov {}", vreg_str(dst), vreg_str(a));
+            return;
         case IrOp::Bin:
-            return std::format("{} = bin.{} {}, {}", vreg_str(dst), bin_name(bop), vreg_str(a),
-                               vreg_str(b));
+            std::format_to(out, "{} = bin.{} {}, {}", vreg_str(dst), bin_name(bop), vreg_str(a),
+                           vreg_str(b));
+            return;
         case IrOp::Un:
-            return std::format("{} = un.{} {}", vreg_str(dst), un_name(uop), vreg_str(a));
+            std::format_to(out, "{} = un.{} {}", vreg_str(dst), un_name(uop), vreg_str(a));
+            return;
         case IrOp::Cmp:
-            return std::format("{} = cmp.{} {}, {}", vreg_str(dst), cmp_name(cop), vreg_str(a),
-                               vreg_str(b));
+            std::format_to(out, "{} = cmp.{} {}, {}", vreg_str(dst), cmp_name(cop), vreg_str(a),
+                           vreg_str(b));
+            return;
         case IrOp::Convert:
-            return std::format("{} = convert {}", vreg_str(dst), vreg_str(a));
-        case IrOp::LoadSlot: return std::format("{} = load.slot s{}", vreg_str(dst), idx);
-        case IrOp::StoreSlot: return std::format("store.slot s{}, {}", idx, vreg_str(a));
-        case IrOp::LoadGlobal: return std::format("{} = load.global g{}", vreg_str(dst), idx);
-        case IrOp::StoreGlobal: return std::format("store.global g{}, {}", idx, vreg_str(a));
-        case IrOp::GlobalAddr: return std::format("{} = global.addr g{}", vreg_str(dst), idx);
-        case IrOp::ClassAddr: return std::format("{} = class.addr c{}", vreg_str(dst), imm);
+            std::format_to(out, "{} = convert {}", vreg_str(dst), vreg_str(a));
+            return;
+        case IrOp::LoadSlot:
+            std::format_to(out, "{} = load.slot s{}", vreg_str(dst), idx);
+            return;
+        case IrOp::StoreSlot:
+            std::format_to(out, "store.slot s{}, {}", idx, vreg_str(a));
+            return;
+        case IrOp::LoadGlobal:
+            std::format_to(out, "{} = load.global g{}", vreg_str(dst), idx);
+            return;
+        case IrOp::StoreGlobal:
+            std::format_to(out, "store.global g{}, {}", idx, vreg_str(a));
+            return;
+        case IrOp::GlobalAddr:
+            std::format_to(out, "{} = global.addr g{}", vreg_str(dst), idx);
+            return;
+        case IrOp::ClassAddr:
+            std::format_to(out, "{} = class.addr c{}", vreg_str(dst), imm);
+            return;
         case IrOp::MakeList:
         case IrOp::MakeTuple: {
-            std::string s = std::format("{} = {}{{", vreg_str(dst),
-                                        op == IrOp::MakeList ? "list.new" : "tuple.new");
+            std::format_to(out, "{} = {}{{", vreg_str(dst),
+                           op == IrOp::MakeList ? "list.new" : "tuple.new");
             for (size_t i = 0; i < args.size(); ++i) {
-                if (i) s += ", ";
-                s += vreg_str(args[i]);
+                if (i) buf += ", ";
+                buf += vreg_str(args[i]);
             }
-            return s + "}";
+            buf += '}';
+            return;
         }
         case IrOp::IndexLoad:
-            return std::format("{} = index.get {}[{}]", vreg_str(dst), vreg_str(a), vreg_str(b));
+            std::format_to(out, "{} = index.get {}[{}]", vreg_str(dst), vreg_str(a), vreg_str(b));
+            return;
         case IrOp::IndexLoadUnchecked:
-            return std::format("{} = index.get.unchecked {}[{}]", vreg_str(dst), vreg_str(a),
-                               vreg_str(b));
+            std::format_to(out, "{} = index.get.unchecked {}[{}]", vreg_str(dst), vreg_str(a),
+                           vreg_str(b));
+            return;
         case IrOp::IndexStore:
-            return std::format("index.set {}[{}] = {}", vreg_str(a), vreg_str(b), vreg_str(c));
+            std::format_to(out, "index.set {}[{}] = {}", vreg_str(a), vreg_str(b), vreg_str(c));
+            return;
         case IrOp::IndexStoreUnchecked:
-            return std::format("index.set.unchecked {}[{}] = {}", vreg_str(a), vreg_str(b),
-                               vreg_str(c));
-        case IrOp::Len: return std::format("{} = len {}", vreg_str(dst), vreg_str(a));
-        case IrOp::ObjNew: return std::format("{} = obj.new c{}", vreg_str(dst), imm);
+            std::format_to(out, "index.set.unchecked {}[{}] = {}", vreg_str(a), vreg_str(b),
+                           vreg_str(c));
+            return;
+        case IrOp::Len:
+            std::format_to(out, "{} = len {}", vreg_str(dst), vreg_str(a));
+            return;
+        case IrOp::ObjNew:
+            std::format_to(out, "{} = obj.new c{}", vreg_str(dst), imm);
+            return;
         case IrOp::FieldLoad:
-            return std::format("{} = field.get {}+{}", vreg_str(dst), vreg_str(a), imm);
+            std::format_to(out, "{} = field.get {}+{}", vreg_str(dst), vreg_str(a), imm);
+            return;
         case IrOp::FieldStore:
-            return std::format("field.set {}+{} = {}", vreg_str(a), imm, vreg_str(b));
+            std::format_to(out, "field.set {}+{} = {}", vreg_str(a), imm, vreg_str(b));
+            return;
         case IrOp::PtrLoad:
-            return std::format("{} = ptr.load {}[{}]", vreg_str(dst), vreg_str(a), vreg_str(b));
+            std::format_to(out, "{} = ptr.load {}[{}]", vreg_str(dst), vreg_str(a), vreg_str(b));
+            return;
         case IrOp::PtrStore:
-            return std::format("ptr.store {}[{}] = {}", vreg_str(a), vreg_str(b), vreg_str(c));
+            std::format_to(out, "ptr.store {}[{}] = {}", vreg_str(a), vreg_str(b), vreg_str(c));
+            return;
         case IrOp::VCall: {
-            std::string s = std::format("{} = vcall {}[{}]({}", vreg_str(dst), vreg_str(a), imm,
-                                        vreg_str(a));
-            for (size_t i = 0; i < args.size(); ++i) s += ", " + vreg_str(args[i]);
-            return s + ")";
+            std::format_to(out, "{} = vcall {}[{}]({}", vreg_str(dst), vreg_str(a), imm,
+                           vreg_str(a));
+            for (size_t i = 0; i < args.size(); ++i) {
+                buf += ", ";
+                buf += vreg_str(args[i]);
+            }
+            buf += ')';
+            return;
         }
         case IrOp::VCallStatic: {
-            std::string s = std::format("{} = vcall.static {}[{}](", vreg_str(dst), vreg_str(a),
-                                        imm);
+            std::format_to(out, "{} = vcall.static {}[{}](", vreg_str(dst), vreg_str(a), imm);
             for (size_t i = 0; i < args.size(); ++i) {
-                if (i) s += ", ";
-                s += vreg_str(args[i]);
+                if (i) buf += ", ";
+                buf += vreg_str(args[i]);
             }
-            return s + ")";
+            buf += ')';
+            return;
         }
         case IrOp::SuperVCall: {
-            std::string s = std::format("{} = super[{}] {}[{}]({}", vreg_str(dst), idx,
-                                        vreg_str(a), imm, vreg_str(a));
-            for (size_t i = 0; i < args.size(); ++i) s += ", " + vreg_str(args[i]);
-            return s + ")";
+            std::format_to(out, "{} = super[{}] {}[{}]({}", vreg_str(dst), idx, vreg_str(a), imm,
+                           vreg_str(a));
+            for (size_t i = 0; i < args.size(); ++i) {
+                buf += ", ";
+                buf += vreg_str(args[i]);
+            }
+            buf += ')';
+            return;
         }
         case IrOp::CallDirect: {
-            std::string s = std::format("{} = call.direct f{}({}", vreg_str(dst), idx,
-                                        "");
+            std::format_to(out, "{} = call.direct f{}(", vreg_str(dst), idx);
             for (size_t i = 0; i < args.size(); ++i) {
-                if (i) s += ", ";
-                s += vreg_str(args[i]);
+                if (i) buf += ", ";
+                buf += vreg_str(args[i]);
             }
-            return s + ")";
+            buf += ')';
+            return;
         }
         case IrOp::CallPtr: {
-            std::string s = std::format("{} = call.ptr {}(", vreg_str(dst), vreg_str(a));
+            std::format_to(out, "{} = call.ptr {}(", vreg_str(dst), vreg_str(a));
             for (size_t i = 0; i < args.size(); ++i) {
-                if (i) s += ", ";
-                s += vreg_str(args[i]);
+                if (i) buf += ", ";
+                buf += vreg_str(args[i]);
             }
-            return s + ")";
+            buf += ')';
+            return;
         }
         case IrOp::StructNew:
-            return std::format("{} = struct.new {}", vreg_str(dst), imm);
+            std::format_to(out, "{} = struct.new {}", vreg_str(dst), imm);
+            return;
         case IrOp::StructCopy:
-            return std::format("{} = struct.copy {}, {}", vreg_str(dst), vreg_str(a), imm);
+            std::format_to(out, "{} = struct.copy {}, {}", vreg_str(dst), vreg_str(a), imm);
+            return;
         case IrOp::Call: {
-            std::string s = std::format("{} = call {}(", vreg_str(dst), vreg_str(a));
+            std::format_to(out, "{} = call {}(", vreg_str(dst), vreg_str(a));
             for (size_t i = 0; i < args.size(); ++i) {
-                if (i) s += ", ";
-                s += vreg_str(args[i]);
+                if (i) buf += ", ";
+                buf += vreg_str(args[i]);
             }
-            return s + ")";
+            buf += ')';
+            return;
         }
         case IrOp::CallRt: {
-            std::string s = std::format("{} = call.rt {}({}", vreg_str(dst),
-                                        rt_name(static_cast<RtFn>(imm)), "");
+            std::format_to(out, "{} = call.rt {}(", vreg_str(dst),
+                           rt_name(static_cast<RtFn>(imm)));
             for (size_t i = 0; i < args.size(); ++i) {
-                if (i) s += ", ";
-                s += vreg_str(args[i]);
+                if (i) buf += ", ";
+                buf += vreg_str(args[i]);
             }
-            return s + ")";
+            buf += ')';
+            return;
         }
         case IrOp::CallExtern: {
-            std::string s = std::format("{} = call.extern e{}(", vreg_str(dst), idx);
+            std::format_to(out, "{} = call.extern e{}(", vreg_str(dst), idx);
             for (size_t i = 0; i < args.size(); ++i) {
-                if (i) s += ", ";
-                s += vreg_str(args[i]);
+                if (i) buf += ", ";
+                buf += vreg_str(args[i]);
             }
-            return s + ")";
+            buf += ')';
+            return;
         }
         case IrOp::LoadExtern:
-            return std::format("{} = load.extern v{}", vreg_str(dst), idx);
+            std::format_to(out, "{} = load.extern v{}", vreg_str(dst), idx);
+            return;
         case IrOp::StoreExtern:
-            return std::format("store.extern v{}, {}", idx, vreg_str(a));
+            std::format_to(out, "store.extern v{}, {}", idx, vreg_str(a));
+            return;
         case IrOp::Setjmp:
-            return std::format("{} = setjmp {}", vreg_str(dst), vreg_str(a));
+            std::format_to(out, "{} = setjmp {}", vreg_str(dst), vreg_str(a));
+            return;
         case IrOp::EhBegin:
-            return "eh.begin";
+            buf += "eh.begin";
+            return;
         case IrOp::EhEnd:
-            return "eh.end";
+            buf += "eh.end";
+            return;
         case IrOp::EhLandingPad:
-            return "eh.landing.pad";
+            buf += "eh.landing.pad";
+            return;
         case IrOp::ImportModule:
-            return std::format("import.module m{}", imm);
-        case IrOp::SlotAddr: return std::format("{} = slot.addr s{}", vreg_str(dst), idx);
-        case IrOp::GenNew: return std::format("{} = gen.new g{}", vreg_str(dst), imm);
+            std::format_to(out, "import.module m{}", imm);
+            return;
+        case IrOp::SlotAddr:
+            std::format_to(out, "{} = slot.addr s{}", vreg_str(dst), idx);
+            return;
+        case IrOp::GenNew:
+            std::format_to(out, "{} = gen.new g{}", vreg_str(dst), imm);
+            return;
         case IrOp::GenSetSlot:
-            return std::format("gen.set {}, s{}, {}", args.empty() ? "_" : vreg_str(args[0]), idx,
-                               args.size() > 1 ? vreg_str(args[1]) : "_");
-        case IrOp::GenGetState: return std::format("{} = gen.state", vreg_str(dst));
-        case IrOp::GenClosing: return std::format("{} = gen.closing", vreg_str(dst));
-        case IrOp::GenSent: return std::format("{} = gen.sent", vreg_str(dst));
+            std::format_to(out, "gen.set {}, s{}, {}",
+                           args.empty() ? std::string_view("_") : vreg_str(args[0]), idx,
+                           args.size() > 1 ? vreg_str(args[1]) : std::string_view("_"));
+            return;
+        case IrOp::GenGetState:
+            std::format_to(out, "{} = gen.state", vreg_str(dst));
+            return;
+        case IrOp::GenClosing:
+            std::format_to(out, "{} = gen.closing", vreg_str(dst));
+            return;
+        case IrOp::GenSent:
+            std::format_to(out, "{} = gen.sent", vreg_str(dst));
+            return;
         case IrOp::GenYield:
-            return std::format("gen.yield {}, state={}", vreg_str(a), imm);
+            std::format_to(out, "gen.yield {}, state={}", vreg_str(a), imm);
+            return;
         case IrOp::GenAwait:
-            return std::format("gen.await {}, state={}", vreg_str(a), imm);
-        case IrOp::GenGetExc: return std::format("{} = gen.exc", vreg_str(dst));
-        case IrOp::GenTakeExc: return std::format("{} = gen.take.exc", vreg_str(dst));
-        case IrOp::GenRethrow: return "gen.rethrow";
+            std::format_to(out, "gen.await {}, state={}", vreg_str(a), imm);
+            return;
+        case IrOp::GenGetExc:
+            std::format_to(out, "{} = gen.exc", vreg_str(dst));
+            return;
+        case IrOp::GenTakeExc:
+            std::format_to(out, "{} = gen.take.exc", vreg_str(dst));
+            return;
+        case IrOp::GenRethrow:
+            buf += "gen.rethrow";
+            return;
         case IrOp::GenDone:
-            return a == kNoReg ? "gen.done" : std::format("gen.done {}", vreg_str(a));
-        case IrOp::Jump: return std::format("jump bb{}", target);
+            if (a == kNoReg) {
+                buf += "gen.done";
+            } else {
+                std::format_to(out, "gen.done {}", vreg_str(a));
+            }
+            return;
+        case IrOp::Jump:
+            std::format_to(out, "jump bb{}", target);
+            return;
         case IrOp::Branch:
-            return std::format("branch {}, bb{}, bb{}", vreg_str(a), target, target2);
+            std::format_to(out, "branch {}, bb{}, bb{}", vreg_str(a), target, target2);
+            return;
         case IrOp::Return:
-            return a == kNoReg ? "return none" : std::format("return {}", vreg_str(a));
+            if (a == kNoReg) {
+                buf += "return none";
+            } else {
+                std::format_to(out, "return {}", vreg_str(a));
+            }
+            return;
     }
-    return "?";
+    buf += '?';
+}
+
+std::string Inst::text() const {
+    std::string s;
+    s.reserve(64);
+    text_into(s);
+    return s;
 }
 
 bool ir_type_contains_unknown(const TypePtr& t) {

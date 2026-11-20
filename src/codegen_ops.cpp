@@ -112,7 +112,7 @@ void AsmGen::set_loc(int line) {
 
 void AsmGen::gen_inst(const Inst& in) {
         set_loc(in.line);
-        comment(in.text());
+        comment_inst(in);
         switch (in.op) {
             case IrOp::ConstInt: gen_const_int(in); break;
             case IrOp::ConstFloat: gen_const_float(in); break;
@@ -395,10 +395,10 @@ void AsmGen::gen_load_slot(const Inst& in) {
             // 读之后、第一次真正使用之前不能有对该变量的赋值。
             bool clobbered = false;
             auto stv = block_stores_.find(in.idx);
-            auto us = block_first_use_.find(in.dst);
-            if (stv != block_stores_.end() && us != block_first_use_.end()) {
+            const int us = block_use_.first_use(in.dst);
+            if (stv != block_stores_.end() && us >= 0) {
                 auto it = std::upper_bound(stv->second.begin(), stv->second.end(), cur_pos_);
-                if (it != stv->second.end() && *it < us->second) clobbered = true;
+                if (it != stv->second.end() && *it < us) clobbered = true;
             }
             if (!clobbered) {
                 alias_[in.dst] = sop;

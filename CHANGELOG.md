@@ -4,6 +4,57 @@
 
 早期阶段没有逐条留痕，按阶段归纳；0.4 之后逐条记录。
 
+## [0.342] - 2026-11-21
+
+> speed1 分支：**编译吞吐优化**（编译器自身运行速度，生成 asm 逐字节不变）。
+> 每块独立构建 + asm 全语料 sha256 对照 + 全套件/difftest 闸门。测量方法见
+> docs/compile-speed-throughput.md。
+
+### 变更（六块，逐块独立构建 + 闸门）
+
+1. **支配集位集化**（opt_loop.cpp compute_dom）：LICM/下标版本化的 dom[b]
+   从每块 nb 字节的 char 向量改成 64 位字位集。不动点迭代、交集顺序、
+   全 1 初始化都逐位保持，结果与原实现逐位相同。perf 热点 20.2% → 1.6%。
+2. **regalloc 活跃性位集化**（codegen_regalloc.cpp assign_vreg_slots）：
+   blk_use/blk_def/live_in/live_out 由每块 nv 字节 char 向量改位集
+   （新增 src/block_bitset.h）。热点 14.2% → 1.1%。
+3. **块内索引去哈希**：codegen 的 block_first_use_（VReg→块内首次读位置）
+   由 unordered_map 改按 vreg 直接下标 + 脏项复位；assign_block_temp_regs
+   的三张 per-block unordered_map<VReg,…> 同样改定长数组。原哈希插入 +
+   配套 malloc/free 合计 ~15% 归零。
+4. **去掉无读者的 IR 指令级索引**（ir.cpp rebuild_use_def）：inst_by_id /
+   def_of / uses_of 自 0.3xx DCE 改线性计数后已无读者（全仓库 grep 只有
+   写入），重建仍是逐指令哈希插入。只保留仍被 block_index() 读的
+   block_by_id；指令 id 照旧分配（唯一性语义不变）。将来要恢复指令级索引
+   应改成惰性显式入口。
+5. **LICM/下标版本化定义块索引定长数组**（opt_loop.cpp hoist_loop /
+   version_bounds_loop）：原来每个循环头调用一次就重建一遍
+   unordered_map<VReg,int> def_block + 两个集合，改定长数组 + 按 vreg 下标。
+6. **RcMark 水位打标 + 槽清零数据流位集 + 指令注释直写**：
+   - vreg_is_rc_mark 从「每个 vreg 扫全函数」改成入口一次扫描打标（O(n^2) → O(n)）；
+   - slots_needing_zero 的 must 数据流由每块 std::vector<bool> 改位集；
+   - Inst::text_into / comment_inst：指令注释 format_to 直写复用缓冲，
+     每条指令省掉 text() 临时串 + 前缀拼接 + 拷贝三次分配；vreg_str 按
+     编号缓存；PYADAMAS_IR_CHECK 的每指令 getenv 改成只读一次。
+
+### 实测
+
+- 编译吞吐（413 文件语料 ×2 遍，taskset 绑核，base/exp 交替 5 轮取中位，
+  load 6~15）：base **12.57s** → exp **6.87s**，**-45.3%**（单遍 5.68→2.99s）。
+- 单文件重负载 tests/run/234_re_opt.py（626 块/2150 vreg）：
+  **1.44s → 0.14s（10×）**。
+- 热点前后（同口径 perf，语料两遍）：compute_dom 20.2%→1.6%、
+  assign_vreg_slots 14.2%→1.1%、VReg 哈希插入（_M_insert_unique_node +
+  emplace_uniq）合计 14%→0。
+
+### 闸门
+
+- 生成 asm 逐字节不变：413 文件全语料 sha256 逐文件对照全同 + 40 个最重
+  文件 cmp 逐一相同；ir dump 60 文件逐字节相同。
+- 套件 normal 327 ran ok EXIT=0；ASan 套件 327 ran ok EXIT=0；
+  difftest 309 用例 0 不一致 EXIT=0；check_size 无新增超限文件。
+- 详细方法论/剩余方向见 docs/compile-speed-throughput.md。
+
 ## [0.341] - 2026-11-20
 
 > fixint1 分支：**P1 定宽整数——i8/i16/i32/i64 + u8/u16/u32/u64**
