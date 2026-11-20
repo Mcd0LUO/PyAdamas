@@ -17,6 +17,12 @@
 
 ## 1. 统一数值类型系统
 
+> **P1 已落地（0.341 预留，fixint1 分支）**：i8/i16/i32/i64 + u8/u16/u32/u64
+> + char=i8/short=i16/long=i64 别名、C 式提升、宽度回绕、字面量 coerce
+> 范围检查、cast_* 全部可用；默认 int 的 asm 逐字节不变。落地细节/边界/
+> 负面结论见 **docs/numeric-types-landing.md**（§1.3 的宽度选择落地为
+> 「64 位域计算 + 结果正常化」，见该文档 §8）。
+
 ### 1.1 类型阶梯（新增 TyKind）
 
 | 标注 | TyKind | 宽度 | 机器表示 | 溢出 |
@@ -99,7 +105,7 @@ pprint（递归 repr 按类型）、isinstance 全类型、动态分派、异常
 
 | 阶段 | 内容 | 工程量 | 收益 |
 |---|---|---|---|
-| **P1 定宽整数** | I8-I64/U8-U64/bool/char/short TyKind + 提升规则 + codegen 宽度选择 + 字面量 coerce | 中（机械 codegen + 提升规则要小心）| SIMD 干净/紧凑数组/C FFI |
+| **P1 定宽整数** | I8-I64/U8-U64/bool/char/short TyKind + 提升规则 + codegen 宽度选择 + 字面量 coerce | 中（机械 codegen + 提升规则要小心）| SIMD 干净/紧凑数组/C FFI。**0.341 落地，见 docs/numeric-types-landing.md** |
 | **P2 unknown 类型标签** | 扩 PaTag NONE/BOOL/堆子类 + pa_any_type/repr/isinstance + 跨模块 tag 侧信道 + stdlib/pprint | 中 | 解锁 pprint/isinstance；**0.340 落地，见 docs/type-tags-landing.md（异常类传递未做）** |
 | **P3 big BigInt + f32** | BigInt 运行时（任意精度算术 + RC）+ F32 codegen | 重 | CPython 无限精度兼容/精确金融密码学 |
 | **P4 file 协议/traceback/反射** | FileLike 泛化 + io.StringIO + traceback 对象 + dataclass 编译期展开 | 重 | 解锁 tarfile/traceback/dataclasses/io |
