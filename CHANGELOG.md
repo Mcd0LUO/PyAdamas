@@ -6,7 +6,7 @@
 
 ## [0.343] - 2026-11-21
 
-> lang1 分支：**P4 语言缺口 块1——异常类当值 + contextlib.suppress/closing**
+> lang1 分支：**P4 语言缺口 块1+2——异常类当值 + contextlib.suppress/closing；file 协议泛化 + io.StringIO/BytesIO**
 > （docs/numeric-types-design.md §3/§4 P4）。门控 `PYADAMAS_LANG_GAPS=1`
 > **默认 0**，开启时强制带上 P2 type_tags（CLASS tag=11 是表示基础）。
 > flag-off 生成 asm 逐字节不变（409 个基准/语料文件 cmp 全同）。0.342
@@ -50,26 +50,60 @@
   `# pyadamas: lang-gaps` 用例级指令。
 - **文件拆分**：typecheck_expr.cpp 的 Attribute case 逐字拆出
   typecheck_expr_attr.cpp（1214→976 行，check_size 无新增超限）。
+- **file 协议泛化（块2）**：门控开时 file 标注/形参收 FileLike——带
+  read/write 方法面的类实例（assignable 放宽，全局门控开关）。运行期
+  pa_file_* 入口对非 file 值委托实例侧分派（rt_lang.c pa_fileinst_*，
+  方法名→槽登记表沿 MRO 查表，尊重覆盖）——**零 codegen 改动**，门控关
+  asm 天然不变。read/readline/readlines/write/writelines/seek/tell/
+  truncate/close/flush/closed/fileno/isatty/readable/writable/seekable
+  全方法面；name/mode/encoding/errors 实例侧 AttributeError（CPython
+  StringIO 也没有）。print(file=...) 同口径收 FileLike。
+- **stdlib/io.py**（新模块，注册进 kModuleTable）：纯 pa StringIO/
+  BytesIO。CPython 口径：write 越界 NUL 填充、seek whence 1/2 只收
+  offset 0（非零报 OSError，消息逐字）、错误消息逐字（Negative seek
+  position N / Invalid whence (N, should be 0, 1 or 2) / I/O operation
+  on closed file）、with 协议、closed 属性、getvalue。
+- **csv 互操作**：csv.writer/reader 的 f: file 形参经同一分派直接收
+  StringIO（stdlib/csv.py 源码零改动）；属性 getter 也进方法登记表
+  （closed 面经 file 分派可读）。
+- **回归** tests/run/341_io_stringio.py（65 行 expect 由 CPython 3.14
+  生成，O0/O1/O2 逐字节一致，ASan detect_leaks=1 零泄漏）：StringIO/
+  BytesIO 全方法面 + 错误面 + csv  round-trip + print(file=) + file
+  形参分派（StringIO 与用户自定义 FileLike）+ for line in f + closing。
 
 ### 闸门（实测）
 
-- flag-off asm 逐字节不变：**410/410 identical**（bench 全量 + tests/run）。
-- difftest O0/O2：**310 用例 0 不一致**；全套件 normal（JOBS=1）
-  **328 ran ok EXIT=0**；ASan（JOBS=1）**328 ran ok EXIT=0**。
-- ASan detect_leaks=1 钉子：13/174/92/93/94/119 flag-off/on **12/12 全 0**；
-  340 lang-gaps **0 泄漏**。
-- 语料对拍（LANG_GAPS on vs off，357 文件）：**355 逐字节同 + 1 门控用例
-  对 expect 一致**；bench_re 仅计时列（本征非确定）；180_codepoint_perf
-  计时跳过。277_urllib_errors 曾回归（富异常实例 str 被特判成类对象），
-  已修（删除 Class 型特判，实例走 dunder_str）。
-- CPython 对拍：340 逐字节一致（O0/O1/O2）。check_size 无新增超限。
+- flag-off asm 逐字节不变：**410/410 identical**（bench 全量 + tests/run，
+  块2 后复验全同）。
+- difftest O0/O2：**311 用例 0 不一致**（JOBS=4；JOBS=8 时 277 网络时序
+  抖动一次，串行/低并行复验全过——固定端口 http.server 子进程本征负载
+  敏感，非本版引入）。
+- 全套件 normal（JOBS=1）与 ASan（JOBS=1）：见落地文档 §6（块2 修复后
+  复验）。ASan detect_leaks=1 钉子：13/174/92/93/94/119 flag-off/on
+  **12/12 全 0**；340/341 lang-gaps **0 泄漏**。
+- 语料对拍（LANG_GAPS on vs off，358 文件）：**353 逐字节同 + 2 门控
+  用例（340/341）对 expect 一致**；bench_re 仅计时列（本征非确定）；
+  180_codepoint_perf 计时跳过；277 负载抖动一次（单独跑过）。
+- CPython 对拍：340/341 逐字节一致（O0/O1/O2）。check_size 无新增超限。
+- **门控关回归修复**：pa_is_file 探针原用 rc_index_has + size==，无
+  unknown 值的程序跳过索引维护时真 file 查不到 → pa_file_write 误委托
+  实例分派（167_stdlib_glob/81_os_extra 门控关崩溃）。改
+  pa_unknown_is_heap（exact-RC 堆链回退）+ size>=sizeof（h->size 是池
+  对齐 alloc_size；File 是最大 OBJ 种类，下限唯一）。lang_as_class/
+  lang_method_fn 同步换探针。修后 167/81 对 expect 逐字节一致。
 
 ### 已知边界（详见 docs/lang-gaps-landing.md §5）
 
 - 多参异常 str() 不引号（pa 既有口径）；异常实例 e.__name__ 不支持；
-  closing.__enter__ 返回 unknown（as 绑定后不能调方法）；零参动态方法
-  调用仅限返回 None/标量的方法；门控关时 suppress 不可用（运行期
-  TypeError）。块2/3/4（file 协议/traceback/dataclass）后续落地。
+  closing.__enter__ 返回 unknown（as 绑定后不能调方法）；门控关时
+  suppress 不可用（运行期 TypeError）。
+- truncate(显式负参) 按默认处理（pa int 默认参只能是字面量，None 默认
+  与显式 0 在 int 槽不可分）；str repr 不转义控制字符（既有 pa 口径，
+  NUL 填充用 len/ord 验证）；BytesIO.write(str) 不抛 TypeError（bytes/str
+  同运行期表示）；file 形参的 name/mode/encoding/errors 属性实例侧
+  AttributeError。tarfile 模块本身未实现（FileLike+BytesIO 基础已就绪）。
+- 块3/4（traceback/sys.exc_info、dataclass 编译期展开）：设计就绪，
+  见 docs/lang-gaps-landing.md §8 剩余清单。
 ## [0.341] - 2026-11-20
 
 > fixint1 分支：**P1 定宽整数——i8/i16/i32/i64 + u8/u16/u32/u64**
