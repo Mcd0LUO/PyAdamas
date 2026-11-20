@@ -52,6 +52,9 @@ ExtractError/HeaderError 异常族。
 - **错误类型对齐、消息不逐字**：ReadError/CompressionError/ExtractError/
   HeaderError 等类型与 CPython 同名同继承；消息是合理文本。is_tarfile 对
   不存在的路径返回 False（CPython 3.14 会漏出 FileNotFoundError）。
+- **门控面**：模块源码在 `PYADAMAS_LANG_GAPS=1` 开/关都能编译；路径面
+  （open(路径)/add/extract/extractall/addfile_bytes/extractfile）门控关也
+  能用，只有 `fileobj=BytesIO`（file 协议泛化的实参放宽）需要门控开。
 - **静态类型边界**（pa 语言面）：extractfile 的静态返回是 BytesIO，目录/
   设备成员返回空 BytesIO（CPython 返回 None）；gettarinfo 对 fifo/设备/
   socket 抛 ValueError（CPython 返回 None 让 add 跳过）。imported 类经模块
@@ -780,27 +783,39 @@ class TarFile:
         return self.getmembers()
 
     # ── 写接口 ──────────────────────────────────────────────────
-    def addfile(self, tarinfo: TarInfo, fileobj: file = None) -> None:
-        self._check("awx")
-        if fileobj is None and tarinfo.isreg() and tarinfo.size != 0:
-            raise ValueError("fileobj not provided for non zero-size regular file")
+    def _write_member(self, tarinfo: TarInfo, data: bytes) -> None:
+        """写一个成员：头 + 数据块（data 必须恰好 tarinfo.size 字节）。"""
         buf: bytes = tarinfo.tobuf(self.format, self.encoding, self.errors)
         self._wparts.append(buf)
         self.offset += len_bytes(buf)
-        if fileobj is not None:
-            chunk: bytes = cast(bytes, fileobj.read(tarinfo.size))
-            if len_bytes(chunk) != tarinfo.size:
+        if tarinfo.size > 0:
+            if len_bytes(data) != tarinfo.size:
                 raise ReadError("unexpected end of data")
-            self._wparts.append(chunk)
+            self._wparts.append(data)
             rem: int = tarinfo.size % BLOCKSIZE
             if rem > 0:
                 self._wparts.append(NUL * (BLOCKSIZE - rem))
             self.offset += _roundup(tarinfo.size, BLOCKSIZE)
         self.members.append(tarinfo)
 
+    def addfile(self, tarinfo: TarInfo, fileobj: file = None) -> None:
+        """写成员；非零大小的普通文件必须给 fileobj（读 size 字节）。
+
+        内部走 _write_member 的字节面，这样模块在**门控关**时也能编译
+        （不往 file 形参塞 BytesIO）。"""
+        self._check("awx")
+        if fileobj is None:
+            if tarinfo.isreg() and tarinfo.size != 0:
+                raise ValueError("fileobj not provided for non zero-size regular file")
+            self._write_member(tarinfo, b"")
+            return
+        chunk: bytes = cast(bytes, fileobj.read(tarinfo.size))
+        self._write_member(tarinfo, chunk)
+
     def addfile_bytes(self, tarinfo: TarInfo, data: bytes) -> None:
         """pa 便利口：直接给字节（CPython 走 fileobj）。"""
-        self.addfile(tarinfo, BytesIO(data))
+        self._check("awx")
+        self._write_member(tarinfo, data)
 
     def gettarinfo(self, name: str = "", arcname: str = "") -> TarInfo:
         """按 lstat 建 TarInfo（uid/gid 恒 0，无 uname/gname，见模块文档）。"""
@@ -850,7 +865,7 @@ class TarFile:
         ti: TarInfo = self.gettarinfo(name, an)
         if ti.isreg():
             data: bytes = _gzipio.read_bin(name)
-            self.addfile(ti, BytesIO(data))
+            self._write_member(ti, data)
         elif ti.isdir():
             self.addfile(ti)
             if recursive:

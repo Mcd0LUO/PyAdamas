@@ -105,7 +105,13 @@
 - `is_tarfile` 对不存在的路径返回 False（CPython 3.14 会漏出
   FileNotFoundError）。
 
-### pa 语言面限制（影响用法，不影响功能）
+### 门控与 pa 语言面限制（影响用法，不影响功能）
+- **模块源码在 `PYADAMAS_LANG_GAPS=1` 开/关都能编译**：内部写入走
+  `_write_member` 的字节面（不往 `file` 形参塞 BytesIO），所以 `add`/
+  `addfile_bytes`/`addfile` 的 fileobj 面都不受门控影响。路径面
+  （`open(路径)/add/extract/extractall/extractfile`）门控关即可用；
+  **只有 `fileobj=BytesIO`/`addfile(ti, BytesIO(...))` 需要门控开**（那是
+  P4 块2「file 协议泛化」的 assignable 放宽，属于语言门控本身）。
 - `extractfile` 静态返回是 `BytesIO`（pa 的 Optional 窄化不支持方法调用），
   目录/设备成员返回**空 BytesIO**（CPython 返回 None）。
 - `gettarinfo` 对 fifo/设备/socket 抛 `ValueError`（CPython 返回 None）。
@@ -183,7 +189,7 @@ a(); c3()
 
 | 闸门 | 结果 |
 |---|---|
-| pa 编译（tarfile.py 在门控开/关两种模式都能编译） | ✅（门控关：TarInfo/TarFile 路径面无 fileobj 用法可编译；门控开：用例全跑） |
+| pa 编译（tarfile.py 在门控开/关两种模式都能编译） | ✅ 两种模式都编译；门控关时路径面实测可写/读/列/提取（fileobj 面才要门控） |
 | 新用例 360-364 CPython 3.14 对拍 | **5/5 逐字节一致** |
 | 全套件 normal（`PYADAMAS_TEST_JOBS=1`） | **EXIT=0，343 个 ran ok**，0 FAILED/DIFF |
 | 全套件 ASan（`PYADAMAS_TEST_ASAN=1`，JOBS=1） | **EXIT=0，343 个 ran ok**，0 FAILED/DIFF |
