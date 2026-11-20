@@ -1,4 +1,4 @@
-# P4 语言缺口 块1+2 —— 异常类当值 + suppress/closing；file 协议泛化 + io.StringIO/BytesIO 落地与闸门（0.343 预留，lang1 分支）
+# P4 语言缺口 块1-4 —— 异常类当值 + suppress/closing；file 协议泛化 + io.StringIO/BytesIO；traceback/sys.exc_info；dataclass 编译期展开（0.343 块1+2 / 0.346 块3+4）
 
 > 范围：docs/numeric-types-design.md §3/§4 P4 的第一块（最高 ROI、最自包含）。
 > 基线 master 9b4a6f9 / 0.341（含 P2 CLASS=11 预留），独立 worktree
@@ -231,64 +231,187 @@
 - `1ed9182` file 探针修 167/81 门控关回归 + 341 expect marker
 - （CHANGELOG 块2 扩展/文档定版：另一次提交）
 
-## 8. 剩余块（P4 块3/4：设计就绪，本轮未实现）
+## 8. 块3+4 落地（0.346，lang2 分支，基线 master 2ef0a9d / 0.345）
 
->  lead 指示：块1+2 已是实质 P4 成果，先交付；块3/4 复杂/风险高时
-> 文档化剩余。以下为代码取证后的具体方案与风险评估，供后续批次直接
-> 开工。**本轮未动块3/4 代码**（避免半截改动危及已绿闸门）。
+>  块3（traceback 对象 / sys.exc_info）与块4（dataclass 编译期展开）已
+> 实现并过闸门。门控仍是 `PYADAMAS_LANG_GAPS=1`（默认 0，强制
+> type_tags=true）；门控关时既有程序 asm 逐字节不变（448 个基准/语料
+> cmp 全同）。以下为落地机制、实测抓到的命门 bug 与已知边界。
 
-### 块3 traceback 对象 + sys.exc_info（方案就绪，工程量中）
+### 块3 traceback 对象 + sys.exc_info（已落地）
 
-- **帧捕获漏斗点已定位**：所有 setjmp 路径 raise 经 exc_longjmp
-  （rt_exc.c），所有 _Unwind 路径经 pa_eh_throw（rt_eh.c）——两点
-  前置捕获即可覆盖全部抛出。捕获用 _Unwind_Backtrace +
-  pa_debug_lookup_pc（rt_debug.c 既有 PC→(file,func,line) 表），
-  只留生成代码帧，挂到 pending_exc->trace（PyAdamasTraceFrame 链，
-  exc_free/pa_trace_free 既有生命周期）。生成器帧已有 pa_trace_attach
-  （rt_gen.c:153/rt_async.c:772/rt_agen.c:179），捕获链与之合并。
-- **门控**：运行期全局开关（生成代码门控开时在入口模块体首发
-  LangGapsEnable 调用——需新 RtFn + lower.cpp 模块体发射点）；
-  门控关不捕获，零行为/性能变化。
-- **sys.exc_info()**：sys 是原生模块（builtin_sigs.cpp:128 +
-  lower_import.cpp:409 成员分派）。pa_exc_info() 读 current_exc
-  （except 体内由 pa_exc_accept_value 设置），返回三元组：类值
-  （pa_exc_class_obj(e->type)，块1 机制复用）+ 异常值
-  （pa_exc_value_from_exc）+ tb 对象（新 RC OBJ+魔数，包 pa_trace_clone
-  的帧链）。outside except → (None,None,None)。
-- **tb 内省**：intrinsic __pa_tb_frames(tb) → list[(file,line,func)]
-  外→内物化；stdlib/traceback.py 纯 pa 格式化。
-- **CPython 逐字节风险（主要工程量）**：format_exc 要帧源行
-  （open(file).readlines() 运行期读源文件 + 缓存）、函数名映射
-  （pa 调试名 __pa_main→<module>；方法名 Cls_meth→meth 需 IRFunction
-  加 debug_name 字段，lowerer 门控开时填，codegen.cpp:363
-  debug_display_name 处消费）、行号归因核对。CPython 3.14 对
-  ZeroDivisionError 等运行时错误带 ~~~^^^ 锚点——逐字节对拍只用
-  显式 raise 用例，锚点场景文档化边界。
-- **钉子风险**：trace 链 malloc 生命周期跨 exc_free/exc_clone/
-  pa_exc_take_value（finally 复制）/生成器挂起——92/93/94/119 必复验。
+- **表示**：PyAdamasException 加两条 malloc 帧链（PyAdamasTraceFrame
+  复用，节点加 cfa 字段）：`phys` = 已提交链（sys.exc_info 的 tb 读它），
+  `phys_extra` = 待提交链。**不复用旧 trace 链**——那条是生成器逻辑帧
+  （pa_trace_attach），未捕获打印（pa_print_traceback + pa_trace_print）
+  门控关/开逐字不变是语料闸门要求，物理链独立才不污染它。
+  `handler_cfa` = 零开销展开的 handler 帧 CFA（见下）。
+- **捕获点**：不在 exc_longjmp/pa_eh_throw 漏斗里统一捕——各 raise 入口
+  按语义分三模式（rt_debug.c pa_trace_capture）：
+  - NEW（pa_raise/pa_raise_args/pa_raise_c/pa_raise_instance/pa_eh_raise）：
+    整条物理链入 phys_extra。
+  - VALUE（pa_raise_value_from/pa_eh_raise_value_from，即 raise e）：
+    整链前插旧 extra（CPython 实测：显式 raise e 加当前帧，旧 tb 原样接后）。
+  - RERAISE（pa_reraise/pa_exc_reraise/pa_eh_reraise，裸 raise）：去掉
+    最内层重抛帧再前插（CPython 实测：裸 raise 不加当前帧）。
+  - **不捕获**：生成器/协程/异步生成器兜底重抛（gen_run 等）、finally 重抛
+    （pa_exc_reraise_value_if 改为直接搬值重抛，不走 pa_raise_value）、
+    零开销分发不匹配重抛（pa_eh_rethrow）——它们是同一次展开的延续，
+    extra 原样保留。with 的 __exit__ 后重抛走 RERAISE，但「待提交链已含
+    本次全部帧（按 CFA 判子集）」时跳过，不重复前插。
+- **提交（命门）**：抛出时不知道会被谁接住，整链先记 extra；except 落地
+  （pa_exc_accept / pa_exc_accept_value / pa_exc_accept_instance →
+  pa_trace_commit）按 handler 帧 CFA 裁剪：cfa > handler 的帧（异常没走到
+  就被接住）丢弃，其余并入 phys。handler CFA 两条来源：
+  - 零开销：personality phase 2 钩子（rt_eh.c pa_eh_phase2_frame_release）
+    写 exc->handler_cfa。**不能在钩子里裁剪**——分发不匹配会 rethrow 继续
+    向外，中途裁剪丢中间帧；每次 handler 帧人格调用刷新，最终接住的才准。
+    落地时 handler 自己的帧记录已被方案 G 释放（cfa <= target 含等号），
+    pa_frame_top 是调用方记录，不能直接用——这是实测抓到的第一个坑。
+  - setjmp：pa_frame_top 就是 handler 记录，但记录 cfa = rsp+frame_bytes+8
+    比 DWARF CFA 少压栈寄存器段，不能直接比——用地址锚点：比记录地址大的
+    最小节点 CFA 即 handler 帧。
+  - 锚点不在链里：全节点更外层 → 裸 raise 被重抛帧自己的包围 try 接住
+    （CPython 口径：外层帧一个不加）→ 整链丢弃；CFA 混杂（生成器挂起后
+    恢复另一条栈，旧 CFA 失效）→ 整链保留不裁剪。
+- **行号归因**：_Unwind_Backtrace 给返回地址，查表用 **ip-1** 落回 call
+  指令所在行（call 是某行最后一条指令时返回地址顶着下一行 .Ldbg 标签）。
+  旧 pa_print_traceback 口径不动。内部包装帧（__pa_new_Cls 构造包装 /
+  __pa_bound_m 绑定方法 / lru/partial 包装）捕获时跳过——CPython 没有
+  对应帧（构造异常直接显示 __init__）。
+- **门控**：pa_lang_gaps_rt 运行期全局，入口模块体**首发** LangGapsEnable
+  （新 RtFn，lower.cpp run() 在 __name__ 存储前发射，仅 is_entry）。
+  关时捕获/提交第一行即返回，零分配零行为变化。
+- **O2 内联门控开时关**（lower_module 里 can_inline=false）：小函数内联
+  把被内联帧并进调用者（调试表按调用者函数索引归因），帧链与 CPython
+  对不上——实测 f→g→module 三层 raise 内联后只剩 <module> 一帧。
+  直接化保留（call 仍是 call，帧不丢）。门控关逐字沿用基线。
+- **debug_name**：IRFunction 新字段，门控开时 lowerer 填（入口 <module>、
+  方法裸名 Cls.meth→meth、生成器 resume 同口径），codegen.cpp 调试表
+  函数名处消费；空则旧 debug_display_name 口径（门控关恒空，asm 不变）。
+- **sys.exc_info()**：pa_exc_info（rt_lang.c）读 current_exc，返回
+  (类值, 异常值, tb)：类值 pa_exc_class_obj 单例（块1 复用，+1）；异常值
+  pa_exc_value_from_exc（+1）；tb = RC OBJ + PYADAMAS_TB_MAGIC，包
+  pa_trace_clone(phys)（malloc 链，destroy 里 pa_trace_free；帧字符串是
+  调试表 rodata 借用，无 GC 出边）。outside except → (None,None,None)。
+  静态类型 tuple[ClassObj[Exception], unknown, unknown]：类值位可读
+  __name__，异常值/tb 位 unknown 才能按 None 打印/判同一。
+- **富异常上下文接管**：pa_exc_accept_instance 门控开时补 pending→current
+  + save 节点（与 accept_value 同口径）——否则富异常 except 体里
+  exc_info 读不到、ExcDone 的 save 配对不完整。门控关逐字旧样。
+- **tb 内省**：__pa_tb_frames(tb) intrinsic → list[(file,line,func)]
+  外→内（内层元组 kind2 混合种类，外层 kind1）；None → 空表。
+- **stdlib/traceback.py**：纯 pa format_exc/print_exc/extract_tb。源行
+  运行期 open(file).readlines() + 模块级 dict 缓存，strip 后印（CPython
+  口径）；读不到省略源行。print_exc 写 sys.stderr。
+- **ExcValue 搬运**：PyAdamasExcValue 加 trace/trace_extra（malloc 链
+  owned）：value_from_exc 克隆、exc_from_value 搬回（move）、destroy
+  释放——finally 复制（pa_exc_take_value）/ raise e / 生成器挂起经值
+  搬运时 traceback 不丢。exc_clone 同步克隆两条链（async/task 投递）。
+- **unknown 域异常值 str/repr/print**（门控开）：pa_str_any/pa_print_any
+  加 ExcValue 魔数分支印消息；repr_any_into 印 Name('arg', ...)（单空串
+  args 按无参印）。门控关逐字旧样（印机器字）。
+- **sys.executable**：argv[0] 借用口径（同 sys.argv，不 inc）——153/350
+  的 print_exc 子进程自执行在 CPython/pa 两运行时同一套分支。
 
-### 块4 dataclass 编译期展开（方案就绪，工程量中重）
+**块3 实测抓到的 bug**：
+1. 重查轮不传门控（块1 遗留）：typecheck_infer.cpp check() 的 replay
+   TypeChecker 不复制 lang_gaps_，递归函数触发 result-hint 重查时异常类名
+   退回 unknown，isinstance(e, ValueError) 降级报「第二参不是类」。
+   修：next.set_lang_gaps(lang_gaps_)。
+2. 单值 BoolOp 悬空块（块4 合成单字段 __eq__ 暴露）：lower_boolop 循环
+   从 i=1 起，单值时一条跳转不发射，当前块落进下一块（eq 恒 False）。
+   修：单值直接求值。语法分析器不产生单值 BoolOp，基线程序不受影响。
+3. 提交裁剪的 handler CFA 口径（见上「提交」）：零开销落地 pa_frame_top
+   是调用方记录、setjmp 记录 cfa 与 DWARF CFA 差压栈段——两个都不能直接比。
 
-- **现状取证**：ClassInfo.is_dataclass 已标记（typecheck_func.cpp:514
-  识别 @dataclass/@dataclasses.dataclass/@dataclass(...)），
-  typecheck_call_forms.cpp:491 对 is_dataclass 类放行带参实例化，
-  但**运行期没有合成 __init__**——当前 @dataclass 带参构造实际不工作
-  （注释所谓「运行期合成」并不存在）。
-- **方案**：类型检查类体收尾后（字段已收集），门控开且 is_dataclass
-  且无用户 __init__ 时，按字段注解**合成 FunctionDef AST 注入类体**
-  （__init__ 逐字段赋值 + 默认参；__repr__ 拼 "Name(f=repr,...)"；
-  __eq__ 逐字段比较），复用既有方法收集/槽分配/降级机制（AST 所有权
-  挂 Module，ClassDef.body 是 vector<StmtPtr>）。非运行期反射。
-- **范围**：v1 只做单类 + 字面量默认值 + 标量/str/容器字段；继承
-  dataclass（父字段并入 __init__）、field() 描述符、frozen/order/
-  kw_only 保守跳过 + 负面结论。__repr__ 的字段 repr 走既有 dunder/
-  探针口径（容器元素 unknown 边界同 P2）。
-- **风险**：AST 注入时机与骨架类（complete 标志）/跨模块接口编码
-  （合成方法要进导出签名）交互；__eq__ 与既有哈希口径（定义 __eq__
-  无 __hash__ → unhashable，lower_builtin_reflect.cpp:280 已有规则）。
+**块3 已知边界**：
+1. **~~~^^^ 锚点**：CPython 3.13+ 给调用行加细粒度锚点（不止运行时错误，
+   显式 raise 的调用帧也有）。pa 调试表只有行号没有列范围——对拍用
+   PYTHONNODEBUGRANGES=1（-X no_debug_ranges）口径，锚点不复刻。
+2. **KeyError str 引号**：CPython str(KeyError('k')) = "'k'"（repr 口径），
+   pa 印消息 k（pa 全局口径，静态 str(e) 同样）。对拍避开 KeyError 消息。
+3. **多参异常 str**：pa join 口径（§5.1），exc_info 的异常值 args 在
+   except 体里按消息重建（pending_exc_args 已被 accept 释放）。
+4. **raise-from / 处理中再抛的链格式化**：format_exc 只格式化当前异常；
+   __cause__/__context__ 链（"The above exception was..."）不在本轮。
+5. **outside except 直接 print 三元组**：静态 ClassObj 位对 None 印
+   <class '?'>、unknown 位印 0（pa None-VCall 口径）——用解包 + is None
+   判断，不直接印元组。
+6. **with 的 __exit__ 体里 exc_info**：current_exc 只在 except 落地设置，
+   __exit__ 执行期间 pending 未接管 → (None,None,None)（CPython 有值）。
+7. **生成器挂起跨 finally 重抛的陈旧 CFA**：extra 链 CFA 来自旧栈，锚点
+   校验失败时整链保留（宁多勿删）；帧可能多于 CPython。
+8. **门控关时 exc_info**：类值/异常值可用，tb 帧链恒空（不捕获）。
+
+### 块4 dataclass 编译期展开（已落地）
+
+- **机制**：typecheck_dataclass.cpp expand_dataclass，classdef_impl 字段
+  收集完后调用（门控开 + is_dataclass）。按字段注解合成 FunctionDef AST
+  注入 ClassDef.body（StmtPtr 所有权归类体），之后的方法签名登记/槽分配/
+  体检查/降级/跨模块接口编码**全部复用既有机制**。重查轮按名字判重不重复
+  注入。用户已定义的 __init__/__repr__/__eq__ 逐方法跳过（CPython 口径）。
+- **合成形状**：
+  - __init__(self, f: T, g: T = lit) -> None：逐字段 self.f = f；默认参
+    克隆字段字面量（build_sig 的 default_lit 机制自动接管调用点填充与
+    跨模块编码）。
+  - __repr__(self) -> str："Name(f=" + repr(self.f) + ... + ")" 左结合
+    加法链；函数内类用 func.<locals>.Cls qualname（cur_fn_def_）。
+  - __eq__(self, other) -> bool：isinstance(other, Cls) 守卫（other 不
+    标注，运行期探针）+ 守卫内 `__pa_dc_o: Cls = other` 类型化局部绑定
+    （unknown 域没有属性面，容器 == 会退化指针比较——必须静态化）+
+    逐字段 == 的 and 链；异类 False。
+- **装饰器**：stdlib/dataclasses.py 恒等 dataclass + field() 运行期兜底
+  （NotImplementedError）；kModuleTable 登记。门控开时降级跳过装饰器
+  调用（裸 @dataclass 名字无运行期绑定，求值落空全局；导入形是恒等，
+  调不调语义相同）。门控关逐字旧样。
+- **v1 范围**：单类（无基类）+ 字面量默认（None/Bool/Int/Float/Str/Bytes）
+  + int/float/bool/str/bytes/list/dict/tuple/set 字段（容器递归查元素）。
+  以下门控开时**编译期明确报错**（tests/fail/352-358 钉住）：
+  frozen/order/kw_only/slots/unsafe_hash/init=False 等装饰器选项、
+  位置装饰器参、多装饰器、继承、field()/调用默认、可变字面量默认
+  （[]/{}/set()）、非字面量默认、默认参序违规、未解析/不支持标注、
+  字段名撞合成局部（self/other/__pa_dc_o）。
+- **unhashable**：合成 __eq__ 无 __hash__ → 既有规则
+  （lower_builtin_reflect.cpp hash()）编译期报 unhashable（CPython 是
+  运行期 TypeError，口径合理不逐字）。
+- **静态容器/bytes repr**（门控开）：repr(list/dict) 走 ReprAny 探针；
+  set 专用 pa_repr_set（运行期表示是 dict 值恒 0，探针分不出 set 与
+  {k:0}）；bytes 专用 pa_repr_bytes（bytes/str 同表示无标志位）。
+  门控关这些调用原本就报「不支持」，既有程序 asm 不变。
+- **跨模块**：合成方法进 cls->methods → encode_module_interface 自动
+  编码（签名/默认值/has_init）；导入方构造/eq/repr 全链路
+  （tests/modules/dc_dataclass 钉住，含缓存命中）。
+
+**块4 已知边界**：
+1. **None 默认进容器字段**：pa 一般类型规则拒绝（x: list[int] = None
+   报 cannot initialize field）；Optional 标注不在 v1 范围。CPython 允许。
+2. **函数内类的跨调用 eq**：pa 类静态编译一次，CPython 每次调用执行
+   class 语句（跨调用实例类对象不同 → eq False）。repr qualname 一致。
+3. **嵌套 set 元素 repr**：探针口径按 dict 印（P2 容器元素无 tag 边界）。
+4. **类类型字段 / Optional / 定宽整数 / 更深层嵌套 qualname**：v1 报错
+   或不完整（单层 func.<locals>.Cls）。
+5. **门控关时 @dataclass**：导入可用、恒等装饰器，但带参构造不合成
+   __init__（字段零初始化，基线口径）。
+
+### 块3+4 闸门（实测，终版 HEAD 见 CHANGELOG 0.346）
+
+- flag-off asm 逐字节不变：**448/448** 既有基准/语料文件 cmp 全同
+  （bench 全量 + tests/run + tests/modules；唯一 BASEFAIL_NEWOK 是新
+  回归 351，基线无 dataclasses 模块编不了）。
+- 异常/生成器钉子 92/93/94/119/153：门控关/开 × 普通/ASan
+  detect_leaks=1 全过全 0。
+- 350/351：O0/O1/O2 与 CPython 3.14 逐字节一致（350 用
+  PYTHONNODEBUGRANGES=1 口径）；ASan detect_leaks=1 为 0。
+- 全套件 normal/ASan（JOBS=1）、语料 gate ON vs OFF、difftest、
+  check_size 终数见 CHANGELOG 0.346。
 
 ### 其它剩余（stdlib-b3 跳过清单）
 
 - **tarfile**：FileLike+BytesIO 基础已就绪（块2），模块本身（ustar
   头解析/pax/GNU 长名/目录遍历）未实现。
 - **pprint**：P2 已解锁（0.340）。
+- **traceback 链格式化 / tb 属性面**：format_exception（cause/context
+  链）、TracebackType.tb_frame/tb_lineno 等属性面不在本轮（块3 边界4）。
+- **dataclass 进阶**：继承/field()/frozen/order/kw_only/slots/
+  default_factory/ClassVar/InitVar 不在 v1（块4 负面清单）。

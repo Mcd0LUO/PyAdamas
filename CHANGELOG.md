@@ -4,6 +4,72 @@
 
 早期阶段没有逐条留痕，按阶段归纳；0.4 之后逐条记录。
 
+## [0.346] - 2026-11-21
+
+> **P4 语言缺口 块3+4**（lang2 分支，基线 master 2ef0a9d / 0.345）：
+> **traceback 对象 / sys.exc_info + stdlib traceback** 与 **@dataclass
+> 编译期展开**。门控 `PYADAMAS_LANG_GAPS=1` **默认 0**（开启强制
+> type_tags=true）；门控关时既有程序生成 asm **逐字节不变**（448 个
+> 基准/语料 cmp 全同）。设计与边界详见 docs/lang-gaps-landing.md §8。
+
+### 新增
+
+- **块3 traceback / sys.exc_info**：抛出点 _Unwind_Backtrace 捕获生成码帧
+  （ip-1 行号归因，内部包装帧跳过），phys/phys_extra 双链 + except 落地按
+  handler 帧 CFA 裁剪提交（零开销走 personality 钩子，setjmp 走帧记录地址
+  锚点）——CPython 口径：tb 从接住帧开始、裸 raise 不加当前帧、raise e
+  整链前插、with/生成器/finally 重抛不重复捕获。运行期门控 LangGapsEnable
+  入口模块体首发；O2 内联门控开时关（帧归因）；IRFunction.debug_name
+  （<module>/裸方法名）。sys.exc_info() 三元组（类值单例复用块1 + 异常值 +
+  tb RC OBJ 包帧链克隆）；__pa_tb_frames intrinsic；stdlib/traceback.py
+  纯 pa format_exc/print_exc/extract_tb（源行运行期读+缓存）。ExcValue
+  携带帧链副本（finally 复制/raise e/生成器挂起不丢 tb）；富异常
+  accept_instance 门控开时补上下文接管；unknown 域异常值 str/repr/print
+  门控开分支；sys.executable（argv[0] 借用口径）。
+- **块4 @dataclass 编译期展开**：typecheck_dataclass.cpp 类体字段收集后
+  合成 __init__/__repr__/__eq__ AST 注入类体，复用既有方法登记/槽分配/
+  降级/跨模块接口编码（非运行期反射）。用户方法逐方法不覆盖；__eq__
+  isinstance 守卫 + 类型化局部绑定；__eq__ 无 __hash__ → unhashable 既有
+  规则。stdlib/dataclasses.py 恒等装饰器；门控开降级跳过装饰器调用。
+  v1：单类 + 字面量默认 + int/float/bool/str/bytes/list/dict/tuple/set；
+  frozen/order/kw_only/field()/继承/可变默认/默认序违规等 7 类编译期拒绝。
+  静态容器/bytes repr 门控开支持（set/bytes 专用入口，探针分不出表示）。
+- 回归：tests/run/350（traceback/exc_info，CPython 3.14
+  PYTHONNODEBUGRANGES=1 口径逐字节）、351（dataclass 逐字节）、
+  tests/fail/352-358（门控负面）、tests/modules/dc_dataclass（跨模块
+  合成方法导出 + 缓存）。run_tests.sh fail/strict/unsupported/modules
+  循环认 type-tags/lang-gaps 文件头指令（纯加法）。
+
+### 修复
+
+- **重查轮不传门控**（块1 遗留）：typecheck_infer replay TypeChecker 不
+  复制 lang_gaps_，递归触发 result-hint 重查时异常类名退回 unknown，
+  isinstance(e, ValueError) 降级报错。next.set_lang_gaps(lang_gaps_)。
+- **单值 BoolOp 悬空块**：lower_boolop 单值时不发射跳转，当前块落进下一块
+  （合成单字段 dataclass __eq__ 恒 False）。单值直接求值；语法分析器不
+  产生单值 BoolOp，基线程序不受影响。
+
+### 验证
+
+- flag-off asm 对基线逐字节不变：**448/448** 既有基准/语料 cmp 全同。
+- 异常/生成器钉子 **92/93/94/119/153**：门控关/开 × ASan detect_leaks=1
+  **10/10 全 0**；350/351 ASan detect_leaks=1 为 0。
+- 350/351 O0/O1/O2 与 CPython 3.14 逐字节一致。
+- 全套件 normal（JOBS=1）**338 ran ok EXIT=0**；ASan（JOBS=1）EXIT=0
+  （终数待补）；difftest O0/O2（终数待补）；语料 gate ON vs OFF（终数待补）。
+- check_size 无新增超限（超限仍是基线 5 个文件）。
+
+### 负面 / 边界（文档化，docs/lang-gaps-landing.md §8）
+
+- 块3：~~~^^^ 锚点不复刻（对拍用 no_debug_ranges 口径）；KeyError str
+  引号/多参 str 沿 pa 口径；raise-from 链格式化不在本轮；outside except
+  直接印三元组按 pa None 口径；__exit__ 体里 exc_info 为 None 三元组；
+  生成器跨挂起 finally 重抛的陈旧 CFA 宁多勿删。
+- 块4：None 默认进容器槽按 pa 一般类型规则拒绝；函数内类跨调用 eq
+  （pa 静态编译一次 vs CPython 每次执行 class 语句）；嵌套 set 元素 repr
+  探针口径；类类型字段/Optional/定宽整数/深层嵌套 qualname 不在 v1；
+  unhashable 是编译期报错（CPython 运行期 TypeError）。
+
 ## [0.345] - 2026-11-21
 
 > **修复编译器自身 heap-use-after-free**（0.342 编译速度轮引入，simd-general 轮 ASan 编译器构建暴露）：
