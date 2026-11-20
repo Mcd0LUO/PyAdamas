@@ -4,6 +4,89 @@
 
 早期阶段没有逐条留痕，按阶段归纳；0.4 之后逐条记录。
 
+## [0.337] - 2026-11-20
+
+> dv1 分支：**去虚拟化深化 + 函数内联扩展——削减调用开销**（fib/nqueens/
+> obj_dispatch），测量先行（perf annotate 三案取证，基线 0.336 绑核 24）。
+> 门控 `PYADAMAS_INLINE_OPT=0/1` **默认 0**；flag-off 生成 asm 逐字节不变
+> （92 基准 cmp 全过：compare+realistic+builtins+daily）。P0 入口别名/
+> P2 守卫直调在 codegen（entry_ref + codegen_vcall_inline.cpp），P3 自递归
+> 展开在 opt_inline.cpp。设计/取证/命门/负面结论见 docs/inline-devirt-design.md。
+> 接 0.336 之后集成，定版 0.337。
+
+### 新增
+
+- **P0 调用入口对齐修复（布局保持式）**：取证发现 call.direct/FuncAddr/
+  vtable/静态闭包/shim 都引用 .LfN，而 .LfN 发在 .p2align 5 之前——每次调用
+  先穿最多 31 字节 NOP 雪橇（perf 实测 fib 8.4% 周期落在 NOP 上，nqueens
+  递归调用同穿 10 字节）。在对齐后加 .LfNe 别名，引用经 entry_ref() 改指
+  .LfNe；**填充字节原样保留**（.text 与基线逐字节同位，只改分支目标位移），
+  避免 DSB 布局远端效应。EH/LSDA 基准 fname（.cfi_startproc）不变，ptag
+  双入口相对布局不变。v1 挪对齐方案撤回（见负面结论）。
+- **P2 devirt 深化（守卫直调）**：gen_guarded_vcall 整数叶子候选为空时，
+  对单态/双态（≤2 候选）小方法（≤32 条/≤4 块、无 handler/EH/生成器/闭包）
+  发射守卫命中 → 直调（gen_vcall 第三参 direct_fn，函数移入
+  codegen_vcall_inline.cpp），失败回退原 vcall。守卫比较**实际虚表地址**
+  （与 0.294 同构），继承共享函数共享命中标签、每个虚表单独比较。
+  obj_dispatch 热路径 area() 已被 0.294 叶子内联消除，P2 只命中冷 __init__
+  （实测中性）——机制交付，收益如实报零。
+- **P3 纯标量自递归单层展开（fib 形态，严格界）**：self_unroll_function——
+  ≤24 条/≤3 块、全槽/形参/返回 Int/Bool、无 handler/EH/生成器/闭包、体内
+  除自调用外无任何其它调用（白名单指令集，抛不出 Python 异常 → traceback
+  语义透明）时，≤2 个自调用点用展开前快照各内联一层（倒序内联保持位点
+  下标；先 DCE 清 rewrite_direct_calls 遗留死 LoadGlobal；克隆体内自调用
+  保留为 call，只此一遍）。调用计数 ~1/3，代码增长 ≤3×/≤64 条。
+- **PYADAMAS_INLINE_DBG** 诊断：[inline]/[unroll] 决策追踪。
+- **回归 300-303**（CPython 对拍钉 expect）：devirt 守卫语义（单态/双态/
+  继承共享/带实参非叶子/异常穿过 devirt 调用点/后定义子类回退/全局累加
+  融合形态）；内联与异常帧（helper raise + 递归 raise 不得跳过）；生成器
+  帧不可内联（yield/try-finally/close）；自递归展开（fib/fact/双参/深递归
+  + ackermann/list_sum/safe_rec 负例）。
+
+### 实测（交替 A/B 绑核 24，打乱+奇偶交换，中位/p25）
+
+- **fib 23.74 → 17.10 ms（−27.9%，p25 −27.5%）**（13 轮 BURST=10）；
+  高 BURST=20 复核 22.74 → 16.13 ms（−29.0%，p25 −28.5%）。对 C++ 比值
+  同相位交替 ~2.4× → ~1.7×。text +184 B（+0.3%）。
+- **nqueens +0.2%（中性）**：无可内联小 callee（place 自递归 ~200 条超界，
+  保守跳过）；text +0。
+- **obj_dispatch −0.0%（中性）**：vcall 已被 0.294 叶子内联消除，剩余头部
+  是 RC/全局流量（不在本轮范围）；text +64 B（+0.09%，P2 冷 __init__）。
+- 其余 12 案噪声带内（rec_memo −1.1% 小正面；短用例 BURST=10 的 +3~4%
+  经对照实验（±2.5% 噪声底）+ BURST=20 复测证伪为相位噪声）。
+- 合计 1811.97 → 1805.15 ms（−0.4%）。
+
+### 负面结论（撤回/不采纳）
+
+- **P1 放宽小函数判据（48→96 条/12→20 块/预算 40/640）**：语料无可测收益，
+  且 nqueens count(80 条)内联进 __pa_main 使热函数 place 布局位移，隔离
+  实验 +1.8%（去掉放宽 +0.1%）。判据回退 48/12/24/256，保留 DBG 诊断。
+- **P0-v1 挪对齐到 .LfN 前**：binary_trees DSB uops −32%、cycles +4.2%
+  （布局远端效应，HANDOFF §6.2 再验证）——撤回，改布局保持式 v2。
+- **nqueens 递归展开**：place 体 ~200 条含 list RC/运行时调用，超 P3 界，
+  收益不抵代码爆炸/异常语义风险，保守跳过。
+- **obj_dispatch devirt 深化收益 ≈ 0**：叶子内联比直调更彻底；剩余头部
+  rc_inc/dec + GC 相位检查（~25%+）与全局 s/total 流量（~10%），借用语义
+  迭代方向（HANDOFF §5.1）不在本轮范围。
+
+### 验证（闸门）
+
+- flag-off asm 逐字节不变：**92/92 cmp 全过**。
+- difftest（flag-on O0/O2）：**287/0**。
+- 套件 normal flag-on/off：**305 ran ok × 2，EXIT=0**；ASan flag-on
+  **JOBS=1：305 ran ok，EXIT=0**。
+- 语料零差异（flag-on vs off，输出+rc）：tests/run + 全部基准 **0 DIFF**。
+- ASan detect_leaks=1 钉子：13_gc / 88_defaultdict / 192_dict_cache /
+  66_genexpr / 119_gen_except_suspend / 92/93/94 / 300-303 **全 0**。
+- 异常/生成器/vthread 钉子：92/93/94/119/153_traceback flag-on ran ok；
+  220-229 vthread 全过。
+- CPython 对拍：300-303 expect 钉自真实 CPython；fib/nqueens/obj_dispatch
+  输出一致（2178309 / 14200 / 139011840000）。
+- check_size：无新增超限（codegen_block 1200 / codegen_impl.h 1200 /
+  codegen_call 1162；已知 5 超限不变）。
+- manifest 缓存键加 inlineopt（切开关必然失效，实测验证）；逐块独立构建
+  （c59c343 快照独立 worktree 构建 EXIT=0）。
+
 ## [0.336] - 2026-11-20
 
 > **SIMD 默认开**（用户授权）：`PYADAMAS_SIMD` 默认值翻为 on（=0 显式关），数值核

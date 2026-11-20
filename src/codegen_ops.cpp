@@ -159,7 +159,7 @@ void AsmGen::gen_inst(const Inst& in) {
                 break;
             }
             case IrOp::FuncCode:
-                emit2(MOp::kLeaq, op_mem_sym(func_label(static_cast<int>(in.imm)), "%rip"), kRax);
+                emit2(MOp::kLeaq, op_mem_sym(entry_ref(static_cast<int>(in.imm)), "%rip"), kRax);
                 move_to(dst_mop(in.dst), mreg_operand(kRax));
                 break;
             case IrOp::Mov:
@@ -298,7 +298,7 @@ void AsmGen::gen_inst(const Inst& in) {
                 // Win64 只有 4 个整型实参寄存器，这里正好用满；第 4 个在
                 // SysV 是 %rcx，在 Win64 是 %r9。
                 emit_imm_op("movq", g.n_slots, arg_reg_i(0));
-                line(std::format("leaq {}(%rip), {}", func_label(g.resume), arg_reg_i(1)));
+                line(std::format("leaq {}(%rip), {}", entry_ref(g.resume), arg_reg_i(1)));
                 line(std::format("leaq .Lgengcrel{}(%rip), {}", in.imm, arg_reg_i(2)));
                 emit_imm_op("movq", g.frame_kind, arg_reg_i(3));
                 line("call pa_gen_new");

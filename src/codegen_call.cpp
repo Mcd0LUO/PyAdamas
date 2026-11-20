@@ -263,44 +263,6 @@ void AsmGen::gen_struct_copy(const Inst& in) {
         move_to(dst_mop(in.dst), mreg_operand(kRax));
     }
 
-// 虚调用：self 只装入 ABI 的第一个整数实参寄存器一次，随后从中读
-// vtable。槽地址直接作为间接 call 的内存操作数，不另取函数指针。
-void AsmGen::gen_vcall(const Inst& in, bool keep_int_result) {
-        std::vector<TypePtr> types;
-        types.reserve(in.args.size() + 1);
-        types.push_back(t_unknown());  // self：指针，非浮点
-        for (VReg a : in.args) types.push_back(ty_of(a));
-        auto locs = classify(types);
-
-        for (size_t i = 0; i < in.args.size(); ++i) {
-            const auto& l = locs[i + 1];
-            if (l.stack_off < 0) continue;
-            emit2(MOp::kMovq, src_mop(in.args[i]), kR10);
-            emit2(MOp::kMovq, kR10, op_mem(kRsp, l.stack_off));
-        }
-        move_to(mreg_operand(mreg_from_name(arg_reg_i(0))), src_mop(in.a));
-        emit2(MOp::kMovq, op_mem(mreg_from_name(arg_reg_i(0))), kR11);
-        for (size_t i = 0; i < in.args.size(); ++i) {
-            const auto& l = locs[i + 1];
-            if (l.stack_off >= 0) continue;
-            if (l.fp)
-                emit2(MOp::kMovsd, src_mop(in.args[i]), static_cast<MReg>(kXmm0 + l.reg));
-            else
-                emit2(MOp::kMovq, src_mop(in.args[i]), arg_reg_i(l.reg));
-        }
-        line("xorl %r10d, %r10d");
-        if (opt_ < 2) line("xorl %eax, %eax");
-        spill_fp_slots();
-        MOperand vt = op_mem(kR11, in.imm * 8); vt.indirect = true;
-        emit1(MOp::kCall, vt);
-        reload_fp_slots();
-
-        if (!keep_int_result && !dst_unused(in)) {
-            if (ir_is_float(in.ty)) move_fp(dst_mop(in.dst), mreg_operand(kXmm0));
-            else emit2(MOp::kMovq, kRax, dst_mop(in.dst));
-        }
-    }
-
 void AsmGen::gen_vcall_static(const Inst& in) {
         std::vector<TypePtr> types;
         types.reserve(in.args.size());
@@ -419,7 +381,7 @@ void AsmGen::gen_call_direct(const Inst& in) {
             emit2(MOp::kLeaq, op_mem(kRsp, ptag_base), kR11);
             emit_jmp(MOp::kCall, ptag_label(in.idx));
         } else {
-            emit_jmp(MOp::kCall, func_label(in.idx));
+            emit_jmp(MOp::kCall, entry_ref(in.idx));
         }
         reload_fp_slots();
         if (!dst_unused(in)) {

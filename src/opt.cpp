@@ -8,7 +8,7 @@ namespace pyadamas {
 
 using namespace optdetail;
 
-void optimize_ir(IRModule& m, int opt_level, int loop_opt) {
+void optimize_ir(IRModule& m, int opt_level, int loop_opt, bool inline_opt) {
     if (opt_level < 2) return;
 
     // 常量折叠 + 常量分支化简 + DCE。内联会引入新的常量操作数，
@@ -197,12 +197,22 @@ void optimize_ir(IRModule& m, int opt_level, int loop_opt) {
     auto gfunc = collect_static_func_globals(m);
     auto recursive = recursive_functions(m, gfunc);
     for (size_t i = 0; i < m.funcs.size(); ++i)
-        inline_calls_in_function(m, *m.funcs[i], static_cast<int>(i), gfunc, recursive);
+        inline_calls_in_function(m, *m.funcs[i], static_cast<int>(i), gfunc, recursive,
+                                 inline_opt);
     for (auto& fptr : m.funcs) rewrite_direct_calls(m, *fptr, gfunc);
     // 直接化新产生的 call.direct 再给一轮内联机会：静态可解析的闭包调用
     // 现在也是直接下标了。调用图没变（只是边的种类变了），复用 recursive。
     for (size_t i = 0; i < m.funcs.size(); ++i)
-        inline_calls_in_function(m, *m.funcs[i], static_cast<int>(i), gfunc, recursive);
+        inline_calls_in_function(m, *m.funcs[i], static_cast<int>(i), gfunc, recursive,
+                                 inline_opt);
+
+    // INLINE_OPT P3：纯标量自递归单层展开（fib 形态）。放在两轮常规内联
+    // 之后、LICM 之前：展开只此一遍，克隆体里的自调用保留为 call，不会再
+    // 次命中（常规内联对递归 callee 本就跳过）。
+    if (inline_opt) {
+        for (size_t i = 0; i < m.funcs.size(); ++i)
+            self_unroll_function(m, *m.funcs[i], static_cast<int>(i));
+    }
 
     // 内联/直接化后的 CFG 再做循环不变量外提。
     for (auto& fptr : m.funcs) licm_function(*fptr, m.globals.size());

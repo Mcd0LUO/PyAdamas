@@ -29,6 +29,8 @@ struct LowerOptions {
     int opt_level = 2;
     // 整数循环优化位掩码（PYADAMAS_LOOP_OPT，默认 0 全关）。见 opt.h。
     int loop_opt = 0;
+    // 内联/devirt 深化开关（PYADAMAS_INLINE_OPT，默认 0 关）。见 opt.h。
+    bool inline_opt = false;
     // 允许浮点归约用 SIMD 分组求和（会改变舍入顺序）。
     bool fast_math = false;
     // 零开销异常（Z5，默认开启）：非可挂起函数里的 try 走 LSDA / landing pad
