@@ -399,7 +399,7 @@ bool AsmGen::simd_loop_ops_ok(int cond_bi, int body_bi, int incr_bi,
                     if (!allow_sqrt || static_cast<RtFn>(in.imm) != RtFn::MathSqrt)
                         return false;
                     break;
-                case IrOp::IndexStore:
+                case IrOp::IndexStore: case IrOp::IndexStoreUnchecked:
                     if (!allow_idxset) return false;
                     break;
                 default:

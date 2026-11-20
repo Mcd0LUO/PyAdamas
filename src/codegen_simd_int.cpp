@@ -42,7 +42,8 @@ bool AsmGen::try_simd_int_map(const Block& b) {
         (I[9].op != IrOp::IndexLoad && I[9].op != IrOp::IndexLoadUnchecked) ||
         !op_is(10, IrOp::Bin) || !op_is(11, IrOp::Bin) ||
         !op_is(12, IrOp::LoadSlot) || !op_is(13, IrOp::LoadSlot) ||
-        !op_is(14, IrOp::Bin) || !op_is(15, IrOp::IndexStore) ||
+        !op_is(14, IrOp::Bin) ||
+        (I[15].op != IrOp::IndexStore && I[15].op != IrOp::IndexStoreUnchecked) ||
         !op_is(16, IrOp::Jump))
         return false;
 

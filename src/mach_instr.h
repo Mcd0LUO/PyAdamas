@@ -53,6 +53,8 @@ enum class MOp : uint8_t {
     kMovupd, kMulpd, kAddpd, kSubpd, kDivpd,
     kPaddq, kPsubq, kPmuludq, kPsrlq, kPsllq, kPshufd,
     kCvtdq2pd, kMovlhps, kMovhlps, kUnpcklpd,
+    // 0.334 nbody pairwise：标量 sqrt 内联（与既有 sqrtsd fast path 同指令）。
+    kSqrtsd,
 };
 
 // 操作码 → 汇编助记符（kRaw 返回空串）。未登记的名字返回 MOp::kRaw。
