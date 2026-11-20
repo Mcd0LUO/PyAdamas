@@ -125,6 +125,7 @@ enum class RtFn : uint16_t {
     RcDec,       // (ptr) -> void
     RcIncUnknown,// (i64) -> i64  按堆注册表保守 retain（unknown 值）
     RcDecUnknown,// (i64) -> void 按堆注册表保守 release（unknown 值）
+    GcWriteBarrier, // (i64) -> void 增量标记插入屏障：标灰新值（0.330，门控发射）
     RcTemp,      // (ptr) -> void  表达式临时值入栈，接管产生者的引用
     RcTempUnknown, // (i64) -> void unknown 值入临时栈（先按注册表确认是堆对象）
     RcTempTake,  // (ptr) -> void  把临时栈上的新值所有权转给调用方
@@ -691,6 +692,7 @@ inline const char* rt_name(RtFn f) {
         case RtFn::RcDec: return "pa_rc_dec";
         case RtFn::RcIncUnknown: return "pa_rc_inc_unknown";
         case RtFn::RcDecUnknown: return "pa_rc_dec_unknown";
+        case RtFn::GcWriteBarrier: return "pa_gc_write_barrier";
         case RtFn::RcTemp: return "pa_rc_temp";
         case RtFn::RcTempUnknown: return "pa_rc_temp_unknown";
         case RtFn::RcTempTake: return "pa_rc_temp_take";

@@ -6,10 +6,10 @@
 
 ## [0.331] - 2026-11-20
 
-> cgspeed 分支：codegen 汇编发射路径提速（纯内部优化，**生成 asm 逐字节
+> cgspeed 分支合入：codegen 汇编发射路径提速（纯内部优化，**生成 asm 逐字节
 > 不变**为最高不变量）。参照 LLVM/GCC：操作数直建结构化、静态寄存器名表、
 > 直写缓冲、内联存储，消除「拼字符串→回解析」往返 + std::format + 分配
-> 抖动。0.330 由 gc1 分支占用，集成时重编号。
+> 抖动。接 gc1 0.330 之后集成，定版 0.331。
 
 ### 性能
 
@@ -50,6 +50,61 @@
 - 闸门：difftest 265 用例 0 不一致；全量套件 normal+ASan EXIT=0
   （283 项 ran ok）；CPython 对拍 840 程序 0 失败；check_size 无新增
   超限（codegen_emit.h 拆分承接发射器）。
+
+## [0.330] - 2026-11-20
+
+> **并发循环 GC 阶段 1（gc1 分支合入，定版 0.330；cgspeed 顺延 0.331）**：
+> 保留 RC + 确定性析构，补上作者退守的两块——**Yuasa 删除屏障 + M=1 增量标记**，
+> 修好历史撞墙用例 **13_gc（UAF）/ 174_gc_construct_roots（漏 21KB）**。**不开后台线程**
+> （后台 marker 是 C2/阶段 2）。设计硬文档（屏障覆盖审计表 / rc·marked 正确性论证 /
+> 门控方案 / free 路径审计 / 基线 bug 记录）见 **docs/gc-concurrent-mark-design.md**。
+>
+> 双门控，**flag-off 零变化（最高不变量）**：
+> - 运行时 `PYADAMAS_GC_INCR_MARK=0/1`（默认 0=现状同步标记）；
+> - 编译期 `PYADAMAS_GC_BARRIER=0/1`（默认 0=不发射屏障 IR，生成 asm 逐字不变）。
+
+### 运行时（runtime/rt_core.c 等）
+
+- **Yuasa 删除屏障（shade-on-delete）**：`gc_phase_dec` 的 INCR_MARK 分支按
+  `gc_incr_mark_on` 门控——标记期 RC 归零对象先 `gc_mark` 标灰入队（shade）保活、
+  置 `PYADAMAS_RC_DEFER` 位去重、登记 `gc_pend`，**rc 保持 1** 到本轮标记排空 +
+  收尾后再释放（灭 UAF + 灭漏释放）。rc>1 的 dec 正常减计数。legacy（flag-off）原样保留。
+- **增量标记接线**：major 根扫描（一次性原子）后 `gc_incr_state=1` / `gc_phase=INCR_MARK`，
+  `gc_incr_step` 按 `GC_MARK_BUDGET=64` 分片标记（分配点驱动）；**标记排空后同步
+  release+清扫+finish**（M=1 清扫原子，避免切片间 mutator 误释活对象——实测增量清扫会漏
+  8816B）。清扫与 mutator 交错的进一步分片留待阶段 2/3。
+- **Dijkstra 插入屏障**：`pa_list_append/set`、`pa_dict_set`、`pa_chan_send` 入口
+  `pa_gc_insert_barrier(v)`（`pa_gc_incr_mark_fast` 门控，flag-off 一次可预测分支跳过；
+  标量查集合表落空 no-op）。`pa_gc_incr_mark_fast` 公开别名。
+- **allocate-black 口径不变**：新对象不进 gc_set 快照、不打 MARK 位、靠 RC；插入屏障保护
+  新对象引用的老对象。
+
+### 编译器（src/）
+
+- `RtFn::GcWriteBarrier` → `pa_gc_write_barrier`；`Lowerer::gc_barrier` 在
+  `store_field` 堆/unknown 字段写后发射，编译期 `PYADAMAS_GC_BARRIER=1` 门控（默认关）。
+
+### 测试
+
+- 新增 **tests/run/278-282**：cycle churn / a.next=b 中途写+新引用老 / 深析构级联 /
+  生成器帧槽写 / 10k VT 挂起栈扫描压力。先 CPython 对拍钉 expect，O0/O1/O2 flag-on/off
+  全一致，ASan detect_leaks=1 全 0。
+
+### 闸门
+
+- 13_gc / 174 flag-ON normal + ASan detect_leaks=1 全过；全套 normal/ASan flag-off/on
+  EXIT=0；difftest 270/0；leak 钉子 11/11 全 0；**26 热基准 asm 26/26 IDENTICAL**（默认编译
+  vs lead 0.329）；check_size 无新增超限。
+- abbench（flag-on vs off）：bench_rc_gen −0.1% / 13_gc +0.6% / queue_sim −0.4%（噪声级）；
+  极端合成 cycle-churn 278 约 +3.6%（标记期屏障开销，文档化代价）。**标记停顿下降可测**：
+  174 同步 gc_drain 标记停顿 1.89/8.47/**32.09ms** → flag-on 根扫描 0.00ms + 64 对象分片
+  （32ms 同步标记停顿消除）。
+
+### 记录在案（独立基线 bug，flag-off 不改，移交）
+
+- flag-off 大集合增量清扫 `gc_incr_step` state-2 只 `gc_free_body` 不调 release →
+  垃圾容器→活叶子边漏 dec。取证：old-gen 环垃圾引用新串用例 flag-off ASan 漏 7.2MB/59998
+  allocs；flag-on（同步清扫补 release）全 0。13/174 flag-off 不触发此路径。
 
 ## [0.329] - 2026-11-20
 

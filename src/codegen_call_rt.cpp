@@ -427,6 +427,7 @@ void AsmGen::gen_rt_args(const Inst& in, RtFn fn) {
         case RtFn::RcCleanup:
         case RtFn::RcIncUnknown:
         case RtFn::RcDecUnknown:
+        case RtFn::GcWriteBarrier:
         case RtFn::DictKeys:
         case RtFn::DictValues:
         case RtFn::DictItems:

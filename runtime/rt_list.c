@@ -362,6 +362,7 @@ void pa_list_store_kind(PyAdamasList* l, int64_t i, int64_t v, int64_t heap) {
  * 定型（同 prep）。热路径（kind0+heap0 / kind1+heap1 / kind2）只多一次
  * kind 装载 + 两次比较，不探针、不写内存。 */
 void pa_list_append(PyAdamasList* l, int64_t v, int64_t heap) {
+    pa_gc_insert_barrier(v);   /* 插入屏障：标记期新元素标灰（0.330） */
     if (l->len == l->cap) {
         int64_t ncap = l->cap ? l->cap * 2 : 4;
         list_buf_grow(l, ncap);
@@ -468,6 +469,7 @@ int64_t pa_list_get(PyAdamasList* l, int64_t i) {
    **写入前**的 kind 释放；新值引用由调用方在写入前 retain（降级器）。
    heap 是新值静态种类，见 rt_internal.h 的说明。 */
 void pa_list_set(PyAdamasList* l, int64_t i, int64_t v, int64_t heap) {
+    pa_gc_insert_barrier(v);   /* 插入屏障：标记期新值标灰（0.330） */
     if (i < 0) i += l->len;
     if (i < 0 || i >= l->len) pa_raise_c("IndexError", "list assignment index out of range");
     int kind = l->elem_kind == 3 ? 2 : (int)l->elem_kind;
