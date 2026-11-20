@@ -151,9 +151,14 @@ foreach(part ${PYADAMAS_RT_PARTS})
   # 运行时不再依赖帧指针：traceback 走 .eh_frame（libgcc 的
   # _Unwind_Backtrace），由编译器自己决定要不要 rbp。
   set(rt_fp "")
+  # -ffunction-sections/-fdata-sections：每函数/每数据独立段（.text.foo /
+  # .data.foo），链接期 --gc-sections 才能按函数剥掉用户程序未用到的运行时
+  # （slim 轮；ld -r 合并保留段名粒度，已验证）。不带 --gc-sections 时链接器
+  # 照旧把这些段并进 .text/.data，功能零变化。
   add_custom_command(
     OUTPUT "${rt_obj}"
     COMMAND ${PYADAMAS_RT_LAUNCHER} ${CMAKE_C_COMPILER} -O2 -Wall -Wextra ${PYADAMAS_RT_WERROR} ${rt_fp}
+            -ffunction-sections -fdata-sections
             -I "${CMAKE_SOURCE_DIR}/runtime"
             -c "${CMAKE_SOURCE_DIR}/runtime/rt_${part}.c" -o "${rt_obj}"
     DEPENDS "${CMAKE_SOURCE_DIR}/runtime/rt_${part}.c"
@@ -191,6 +196,7 @@ foreach(part ${PYADAMAS_RT_PARTS})
     # 保护里用局部变量，但那是**有意**的（值都放在 jmp_buf 之外的帧槽），
     # 而且普通 rt.o 用 -O2 不报。这里只对插桩版关掉这个噪音。
     COMMAND ${PYADAMAS_RT_LAUNCHER} ${CMAKE_C_COMPILER} -O1 -g -fsanitize=address -fno-omit-frame-pointer -mstackrealign
+            -ffunction-sections -fdata-sections
             -Wall -Wextra -Wno-clobbered ${PYADAMAS_RT_WERROR}
             -I "${CMAKE_SOURCE_DIR}/runtime"
             -c "${CMAKE_SOURCE_DIR}/runtime/rt_${part}.c" -o "${rt_obj}"

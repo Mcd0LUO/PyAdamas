@@ -8,6 +8,9 @@ namespace pyadamas {
 
 // 配置期探测成功且未被环境变量/额外 flag 否决时为 true。
 bool direct_ld_available();
+// --gc-sections 灰度开关（slim 轮）：PYADAMAS_GC_SECTIONS=1 开启，默认关。
+// 两条链接路径（direct-ld / cc 回退）等价附加，保持逐字节一致不变量。
+bool gc_sections_enabled();
 // 链接附加参数（cimport 的 link 声明）是否全是 ld 认识的产物：.c 源文件
 // 只有 cc 驱动会现编，遇到就得分回退到 cc。
 bool direct_ld_args_ok(const std::vector<std::string>& link_args);

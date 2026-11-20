@@ -38,6 +38,9 @@ struct ModuleUnit {
     // 模块的 IR 是否用到 unknown 保守 retain（含 asyncio/生成器运行时）。
     // 写进缓存清单：命中缓存时也要参与整程序判断。
     bool needs_unknown_index = true;
+    // 模块是否用到 from c import（dlsym RTLD_DEFAULT）。写进缓存清单：
+    // 命中缓存时也要参与整程序判断（--gc-sections 安全性，见 link_program）。
+    bool uses_c_sym_default = false;
     int state = 0;  // 0 未访问 / 1 正在访问 / 2 完成
 };
 
@@ -66,6 +69,9 @@ struct Program {
     bool simd = false;
     // 任一模块需要 unknown 索引就保持开启；全都不需要时入口关掉维护。
     bool needs_unknown_index = false;
+    // 任一模块用到 from c import（dlsym RTLD_DEFAULT）就置位：链接期
+    // --gc-sections 无法静态覆盖运行期符号查找，整程序保守关 gc。
+    bool uses_c_sym_default = false;
 };
 
 // 内建模块（math/os/json/...）的签名表，实现在 builtin_sigs.cpp。
