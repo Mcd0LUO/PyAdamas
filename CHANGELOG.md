@@ -24,6 +24,13 @@
   randbelow / randbits / choice / compare_digest。**随机源是内建 random**
   （pa 没有 os.urandom/getrandom 原语），令牌强度弱于 CPython，接口与
   计算口径一致；randbits 走 int64（k<=63 为正）。回归 321。
+- **calendar**（stdlib/calendar.py）：isleap / leapdays / weekday /
+  monthrange / monthcalendar / timegm、day_name/day_abbr/month_name/
+  month_abbr、weekheader、firstweekday/setfirstweekday、month/prmonth、
+  calendar/prcal、mdays、error/IllegalMonthError/IllegalWeekdayError。
+  不依赖 datetime（自算 days_from_civil），文本日历与 CPython 逐字节一致
+  （含 str.center 的奇数补白规则）；day_name 等是普通 list，无 locale。
+  回归 322。
 
 ## [0.337] - 2026-11-20
 

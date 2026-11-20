@@ -226,6 +226,7 @@ inline constexpr ModuleEntry kModuleTable[] = {
     {"binascii", ModuleKind::Python, "binascii.py", ""},
     {"bisect", ModuleKind::Python, "bisect.py", ""},
     {"collections.abc", ModuleKind::Python, "collections/abc.py", ""},
+    {"calendar", ModuleKind::Python, "calendar.py", ""},
     {"configparser", ModuleKind::Python, "configparser.py", "os.path"},
     {"csv", ModuleKind::Python, "csv.py", ""},
     {"copy", ModuleKind::Python, "copy.py", ""},
