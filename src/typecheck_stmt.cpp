@@ -410,6 +410,9 @@ void TypeChecker::assign(Expr& target, TypePtr value, int line, int col) {
                         std::format("cannot store '{}' into '{}'", type_name(value),
                                     type_name(ot)));
             } else if (ot->kind == TyKind::Dict) {
+                // 定宽键 + 字面量下标（写路径）：与读路径/建表同口径 coerce。
+                if (is_fixed_int(ot->sub[0]) && accept_literal_into(ot->sub[0], sub->slice.get()))
+                    st = ot->sub[0];
                 if (!merge_elem(ot->sub[0], ot, st, ot->locked))
                     err(line, col,
                         std::format("dict key type is '{}', got '{}'", type_name(ot->sub[0]),

@@ -474,6 +474,12 @@ private:
     //   超范围 → 报编译错误并返回 true（别再叠加一条通用类型错误）。
     // 不是字面量/目标不是定宽整数返回 false（走普通 assignable 判断）。
     bool accept_literal_into(const TypePtr& want, Expr* value);
+    // 定宽元素的容器字面量（list/set/dict）：逐元素按元素类型做字面量
+    // coerce（范围内隐式、超范围报错，与标量赋值同口径），全部位置都是
+    // 字面量时把容器字面量的静态类型改写成目标类型并返回 true；否则一个
+    // 都不改写，返回 false 走普通 assignable 判断。空字面量返回 false
+    // （保留既有的洞回填路径）。
+    bool coerce_container_literal(const TypePtr& want, Expr* value);
     // u64 大字面量的登记/消费/收尾检查（见 expr_types_ 旁的成员注释）。
     void note_u64_literal(const Expr* e);
     // 运算/比较提升到 U64 时把 u64 字面量操作数的静态类型改写成 U64。

@@ -478,15 +478,26 @@ TypePtr TypeChecker::method_call(TypePtr recv, const std::string& name, Call& c,
             auto e = elem();
             if (name == "append") {
                 argc(1, 1);
-                if (a.size() == 1 && !merge_elem(recv->sub[0], recv, a[0], recv->locked))
-                    err(c.line, c.col,
-                        std::format("list element type is '{}', got '{}'", type_name(e),
-                                    type_name(a[0])));
+                if (a.size() == 1) {
+                    // 定宽元素 + 字面量实参：范围内隐式 coerce（与声明/赋值
+                    // 同口径），超范围 accept_literal_into 已报错。非字面量
+                    // 仍走 merge_elem（窄化要 cast，锁住就报错）。
+                    if (is_fixed_int(e) && accept_literal_into(e, c.args[0].get()))
+                        a[0] = e;
+                    if (!merge_elem(recv->sub[0], recv, a[0], recv->locked))
+                        err(c.line, c.col,
+                            std::format("list element type is '{}', got '{}'", type_name(e),
+                                        type_name(a[0])));
+                }
                 return t_none();
             }
             if (name == "extend") {
                 argc(1, 1);
                 if (a.size() == 1) {
+                    // 定宽元素 + 字面量列表实参：逐元素 coerce（同口径）。
+                    if (is_fixed_int(e) && c.args[0]->kind == ExprKind::List &&
+                        coerce_container_literal(recv, c.args[0].get()))
+                        a[0] = recv;
                     auto ie = iter_elem(a[0], c.line, c.col);
                     if (!merge_elem(recv->sub[0], recv, ie, recv->locked))
                         err(c.line, c.col,
@@ -495,7 +506,20 @@ TypePtr TypeChecker::method_call(TypePtr recv, const std::string& name, Call& c,
                 }
                 return t_none();
             }
-            if (name == "insert") { argc(2, 2); return t_none(); }
+            if (name == "insert") {
+                argc(2, 2);
+                // 元素检查与 append 同口径（此前 insert 完全没有元素检查，
+                // 定宽列表会被静默窄化；现在字面量 coerce、非字面量要 cast）。
+                if (a.size() == 2) {
+                    if (is_fixed_int(e) && accept_literal_into(e, c.args[1].get()))
+                        a[1] = e;
+                    if (!merge_elem(recv->sub[0], recv, a[1], recv->locked))
+                        err(c.line, c.col,
+                            std::format("list element type is '{}', got '{}'", type_name(e),
+                                        type_name(a[1])));
+                }
+                return t_none();
+            }
             if (name == "remove") { argc(1, 1); return t_none(); }
             if (name == "pop") { argc(0, 1); return e; }
             if (name == "index") { argc(1, 3); return t_int(); }
@@ -966,7 +990,13 @@ TypePtr TypeChecker::method_call(TypePtr recv, const std::string& name, Call& c,
 
         if (recv->kind == TyKind::Set) {
             auto e = elem();
-            if (name == "add") { argc(1, 1); return t_none(); }
+            if (name == "add") {
+                argc(1, 1);
+                // 定宽元素 + 字面量实参：范围内 coerce、超范围报错（与
+                // list.append 同口径）。非字面量的既有路径不动。
+                if (a.size() == 1 && is_fixed_int(e)) accept_literal_into(e, c.args[0].get());
+                return t_none();
+            }
             if (name == "remove" || name == "discard") { argc(1, 1); return t_none(); }
             if (name == "pop") { argc(0, 0); return e; }
             if (name == "clear") { argc(0, 0); return t_none(); }

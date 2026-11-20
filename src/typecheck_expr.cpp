@@ -319,6 +319,11 @@ TypePtr TypeChecker::expr(Expr& e) {
                         err(s.line, s.col, "pointer index must be an integer");
                     return cptr_elem_type(ot->celem);
                 }
+                // 定宽 dict 键 + 字面量下标（读路径）：范围内隐式 coerce，
+                // 与键的写入/字面量建表同口径。写路径在 assign() 里同法处理。
+                if (ot && ot->kind == TyKind::Dict && !ot->sub.empty() &&
+                    is_fixed_int(ot->sub[0]) && accept_literal_into(ot->sub[0], s.slice.get()))
+                    it = ot->sub[0];
                 return subscript_type(ot, it, s.line, s.col);
             }
             case ExprKind::Attribute:

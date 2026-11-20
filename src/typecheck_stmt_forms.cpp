@@ -81,6 +81,44 @@ bool TypeChecker::accept_literal_into(const TypePtr& want, Expr* value) {
     return true;
 }
 
+bool TypeChecker::coerce_container_literal(const TypePtr& want, Expr* value) {
+    if (!want || !value) return false;
+    // 收集 (元素表达式, 目标元素类型) 位置；目标不是定宽整数的位置不收。
+    std::vector<std::pair<Expr*, TypePtr>> slots;
+    if ((want->kind == TyKind::List && value->kind == ExprKind::List) ||
+        (want->kind == TyKind::Set && value->kind == ExprKind::Set)) {
+        if (want->sub.empty() || !is_fixed_int(want->sub[0])) return false;
+        auto& elts = value->kind == ExprKind::List
+                         ? static_cast<ListExpr*>(value)->elts
+                         : static_cast<SetExpr*>(value)->elts;
+        for (auto& el : elts) slots.emplace_back(el.get(), want->sub[0]);
+    } else if (want->kind == TyKind::Dict && value->kind == ExprKind::Dict) {
+        auto& d = static_cast<DictExpr&>(*value);
+        const bool kf = !want->sub.empty() && is_fixed_int(want->sub[0]);
+        const bool vf = want->sub.size() > 1 && is_fixed_int(want->sub[1]);
+        if (!kf && !vf) return false;
+        for (size_t i = 0; i < d.values.size(); ++i) {
+            if (kf && d.keys[i]) slots.emplace_back(d.keys[i].get(), want->sub[0]);
+            if (vf) slots.emplace_back(d.values[i].get(), want->sub[1]);
+        }
+    } else {
+        return false;
+    }
+    if (slots.empty()) return false;  // 空字面量走既有的洞回填路径
+    // 先整体判定：所有目标位置都必须是字面量（含 u64 大字面量），否则
+    // 一个都不改写——避免「半改写」状态（部分元素定了型、容器没定）。
+    for (auto& [el, ty] : slots) {
+        if (auto* c = dynamic_cast<const Constant*>(el);
+            c && c->ck == Constant::CK::Int && c->u64_lit)
+            continue;
+        int64_t v = 0;
+        if (!literal_int_value(el, v)) return false;
+    }
+    for (auto& [el, ty] : slots) accept_literal_into(ty, el);
+    expr_types_[value] = want;
+    return true;
+}
+
 void TypeChecker::note_u64_literal(const Expr* e) {
     u64_lit_pending_.insert(e);
 }
@@ -125,8 +163,28 @@ void TypeChecker::stmt_assign(Assign& a) {
             // 定宽目标 + 字面量：范围内隐式 coerce（超范围报编译错误）。
             TypePtr want;
             if (auto* tn = dynamic_cast<Name*>(t.get())) {
-                if (auto* sym = lookup(tn->id); sym && sym->ty && is_fixed_int(sym->ty))
-                    want = sym->ty;
+                if (auto* sym = lookup(tn->id); sym && sym->ty) {
+                    if (is_fixed_int(sym->ty)) want = sym->ty;
+                    else if (sym->ty->kind == TyKind::List || sym->ty->kind == TyKind::Set ||
+                             sym->ty->kind == TyKind::Dict)
+                        want = sym->ty;  // 容器字面量 coerce（元素定宽才生效）
+                }
+            } else if (auto* sub = dynamic_cast<Subscript*>(t.get())) {
+                // 定宽容器元素的下标写入：l[0] = 5 / d["k"] = 5 与 append 同口径。
+                // 只看 Name 接收者：复杂接收者不重复求值（副作用/重复报错）。
+                if (sub->slice && sub->slice->kind != ExprKind::Slice) {
+                    if (auto* rn = dynamic_cast<Name*>(sub->value.get())) {
+                        if (auto* sym = lookup(rn->id); sym && sym->ty) {
+                            const TypePtr& ot = sym->ty;
+                            if (ot->kind == TyKind::List && !ot->sub.empty() &&
+                                is_fixed_int(ot->sub[0]))
+                                want = ot->sub[0];
+                            else if (ot->kind == TyKind::Dict && ot->sub.size() > 1 &&
+                                     is_fixed_int(ot->sub[1]))
+                                want = ot->sub[1];
+                        }
+                    }
+                }
             } else if (auto* at = dynamic_cast<Attribute*>(t.get())) {
                 // 定宽的类字段：赋值 c.n = 127 与 Name 目标同口径（范围内隐式）。
                 // 模块/cimport 的接收者不能求值：m.x = 1 里的 m 是模块，
@@ -144,7 +202,8 @@ void TypeChecker::stmt_assign(Assign& a) {
                     }
                 }
             }
-            if (want && accept_literal_into(want, a.value.get())) {
+            if (want && (accept_literal_into(want, a.value.get()) ||
+                         coerce_container_literal(want, a.value.get()))) {
                 assign(*t, want, a.line, a.col);
                 continue;
             }
@@ -159,6 +218,8 @@ void TypeChecker::stmt_aug_assign(AugAssign& a) {
         // 和 list + tuple 是两回事（后者才非法）
         if (a.op == Tok::PLUSEQUAL && cur_ty && cur_ty->kind == TyKind::List) {
             auto vt = expr(*a.value);
+            // 定宽元素 += 字面量列表：逐元素 coerce，与 extend 同口径。
+            if (coerce_container_literal(cur_ty, a.value.get())) vt = cur_ty;
             auto ie = iter_elem(vt, a.line, a.col);
             if (!assignable(cur_ty->sub[0], ie)) {
                 if (cur_ty->locked)
@@ -231,6 +292,9 @@ void TypeChecker::stmt_ann_assign(AnnAssign& a) {
             } else if (ann && is_fixed_int(ann) && accept_literal_into(ann, a.value.get())) {
                 // 定宽标注 + 字面量：范围内 coerce，超范围已报错。
                 vt = ann;
+            } else if (ann && coerce_container_literal(ann, a.value.get())) {
+                // 定宽元素容器标注 + 字面量容器：逐元素 coerce（同口径）。
+                vt = ann;
             } else if (ann && !assignable(ann, vt))
                 err(a.line, a.col,
                     std::format("annotated as '{}' but assigned '{}' (fixed-width needs an "
@@ -278,6 +342,9 @@ void TypeChecker::stmt_return(Return& r) {
             if (vt && ty_contains_hole(vt, 0)) fill_holes_recursive(vt, want, 0);
             bool lit_ok = r.value && is_fixed_int(want) &&
                           accept_literal_into(want, r.value.get());
+            // 定宽元素容器返回标注 + 字面量容器：逐元素 coerce（同口径）。
+            if (!lit_ok && r.value && coerce_container_literal(want, r.value.get()))
+                lit_ok = true;
             if (lit_ok)
                 vt = want;
             else if (!assignable(want, vt))
