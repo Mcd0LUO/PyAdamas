@@ -1980,6 +1980,25 @@ bool AsmGen::temp_reg_op_ok(const Inst& in) const {
 void AsmGen::assign_block_temp_regs() {
         if (opt_ < 1 || gen_) return;
 
+        // 块内 def/use 位置索引。原来是每块新建三张 unordered_map<VReg, …>：
+        // 逐指令 find/insert + 每个结点一次 malloc，perf 显示
+        // _M_insert_unique_node + emplace_uniq + malloc/free 合计约 15% 编译
+        // 时间（大函数上）。改成按 vreg 直接下标 + 脏项复位：查询「存在/
+        // 不存在」与取值完全一致；ranges 的起点是定义位置、各不相同，
+        // 排序后与迭代顺序无关，因此分配结果不变。
+        size_t nv = f_->vreg_ty.size();
+        std::vector<int> def_pos(nv, -1);
+        std::vector<const Inst*> def_inst(nv, nullptr);
+        std::vector<int> last_use(nv, -1);
+        std::vector<VReg> touched;
+        auto ensure_slot = [&](VReg r) {
+            if (static_cast<size_t>(r) < nv) return;
+            nv = static_cast<size_t>(r) + 1;
+            def_pos.resize(nv, -1);
+            def_inst.resize(nv, nullptr);
+            last_use.resize(nv, -1);
+        };
+
         for (const auto& b : f_->blocks) {
             // GPR 池（r8-r11）与浮点池（xmm3-7）独立门控：整数除法类
             // 指令踢出 GPR 池但不踢浮点池（见 fp_temp_op_ok）。
@@ -1991,19 +2010,28 @@ void AsmGen::assign_block_temp_regs() {
             }
             if (!safe && !fp_safe) continue;
 
-            std::unordered_map<VReg, int> def_pos;
-            std::unordered_map<VReg, const Inst*> def_inst;
-            std::unordered_map<VReg, int> last_use;
+            // 上一块碰过的项复位 —— 等价于原来每块新建三张空表。
+            for (VReg r : touched) {
+                def_pos[r] = -1;
+                def_inst[r] = nullptr;
+                last_use[r] = -1;
+            }
+            touched.clear();
             int pos = 0;
             for (const auto& in : b.insts) {
                 auto touch = [&](VReg r) {
-                    if (r != kNoReg) last_use[r] = pos;
+                    if (r == kNoReg) return;
+                    ensure_slot(r);
+                    if (last_use[r] < 0 && def_pos[r] < 0) touched.push_back(r);
+                    last_use[r] = pos;
                 };
                 touch(in.a);
                 touch(in.b);
                 touch(in.c);
                 for (VReg r : in.args) touch(r);
                 if (in.dst != kNoReg) {
+                    ensure_slot(in.dst);
+                    if (last_use[in.dst] < 0 && def_pos[in.dst] < 0) touched.push_back(in.dst);
                     def_pos[in.dst] = pos;
                     def_inst[in.dst] = &in;
                 }
@@ -2032,11 +2060,11 @@ void AsmGen::assign_block_temp_regs() {
                 std::vector<int> until(pool.size(), -1);
                 for (const auto& r : ranges) {
                     int pick = -1;
-                    auto di = def_inst.find(r.v);
-                    if (di != def_inst.end() && in_place_ok(*di->second)) {
-                        VReg a = di->second->a;
-                        auto lu = last_use.find(a);
-                        if (a != kNoReg && lu != last_use.end() && lu->second == r.start &&
+                    const Inst* di = def_inst[r.v];
+                    if (di != nullptr && in_place_ok(*di)) {
+                        VReg a = di->a;
+                        const int lu = static_cast<size_t>(a) < nv ? last_use[a] : -1;
+                        if (a != kNoReg && lu >= 0 && lu == r.start &&
                             a < vreg_reg_.size() && !vreg_reg_[a].empty() && !cross_block_[a]) {
                             for (size_t i = 0; i < pool.size(); ++i)
                                 if (pool[i] == vreg_reg_[a] && until[i] <= r.start) {
@@ -2060,11 +2088,12 @@ void AsmGen::assign_block_temp_regs() {
 
             if (safe) {
             std::vector<Range> ranges;
-            for (const auto& [v, d] : def_pos) {
-                if (v >= static_cast<VReg>(f_->vreg_ty.size())) continue;
+            for (size_t v = 0; v < nv; ++v) {
+                const int d = def_pos[v];
+                if (d < 0) continue;
+                if (v >= f_->vreg_ty.size()) continue;
                 if (cross_block_[v]) continue;
-                auto lu = last_use.find(v);
-                if (lu == last_use.end()) continue;
+                if (last_use[v] < 0) continue;
                 // unknown 的机器表示可能是浮点位模式（元素类型丢失的下标装载），
                 // 浮点/可选类型同理：只给「确定是整数/指针」的值分配 GPR。
                 TypePtr vt = f_->vreg_ty[v];
@@ -2076,7 +2105,7 @@ void AsmGen::assign_block_temp_regs() {
                 // LoadSlot 有自己的别名机制；常量可以延迟成立即数，不用占寄存器。
                 if (op == IrOp::LoadSlot || op == IrOp::ConstInt || op == IrOp::ConstNone)
                     continue;
-                ranges.push_back(Range{d, lu->second, v});
+                ranges.push_back(Range{d, last_use[v], static_cast<VReg>(v)});
             }
             allocate(ranges, block_temp_pool_, [](const Inst& in) {
                 if (in.op != IrOp::Bin) return false;
@@ -2101,18 +2130,19 @@ void AsmGen::assign_block_temp_regs() {
             // 块内用完且确定是 float 的纯计算值；LoadSlot 有自己的别名
             // 机制，会正常返回的调用类指令所在块进不到这里。
             std::vector<Range> fp_ranges;
-            for (const auto& [v, d] : def_pos) {
-                if (v >= static_cast<VReg>(f_->vreg_ty.size())) continue;
+            for (size_t v = 0; v < nv; ++v) {
+                const int d = def_pos[v];
+                if (d < 0) continue;
+                if (v >= f_->vreg_ty.size()) continue;
                 if (cross_block_[v]) continue;
-                auto lu = last_use.find(v);
-                if (lu == last_use.end()) continue;
+                if (last_use[v] < 0) continue;
                 TypePtr vt = f_->vreg_ty[v];
                 if (!vt || vt->kind != TyKind::Float) continue;
                 IrOp op = def_inst[v]->op;
                 if (op != IrOp::Bin && op != IrOp::Un && op != IrOp::Convert &&
                     op != IrOp::ConstFloat && op != IrOp::Mov)
                     continue;
-                fp_ranges.push_back(Range{d, lu->second, v});
+                fp_ranges.push_back(Range{d, last_use[v], static_cast<VReg>(v)});
             }
             allocate(fp_ranges, std::vector<std::string>(kFpTempRegs, kFpTempRegs + kMaxFpTempRegs),
                      [](const Inst& in) {
