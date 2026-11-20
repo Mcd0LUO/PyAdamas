@@ -2347,11 +2347,12 @@ void AsmGen::assign_global_vreg_regs() {
         // RA_OPT（默认关）：P2 只读槽 load 别名 + P1 同块调用块候选。
         // 关闭时整段跳过，候选池与基线逐位相同（asm 逐字节不变）。
         // 门槛（opt_>=2 / 非生成器 / 非 has_handlers）由本函数入口统一把守。
+        std::vector<Cand> ra_extra;
         if (ra_opt_) {
             const std::vector<char> aliased = ra_opt_readonly_alias();
             for (const auto& [v, w] : ra_opt_call_block_cands(weight))
                 if (!aliased[static_cast<size_t>(v)])
-                    cands.push_back(Cand{v, w});
+                    ra_extra.push_back(Cand{v, w});
             // 已别名的 vreg 已有位置（槽寄存器），从候选池剔除，
             // 不再另占一个寄存器。
             std::erase_if(cands, [&](const Cand& c) {
@@ -2364,6 +2365,17 @@ void AsmGen::assign_global_vreg_regs() {
         std::ranges::sort(cands, [](const Cand& a, const Cand& b) {
             return a.uses != b.uses ? a.uses > b.uses : a.v < b.v;
         });
+        // **P1 只捡跨块候选挑剩的寄存器，不按权重插队。**
+        // 实测教训（nbody −1.5%）：P1 按权重混排会把已有跨块 vreg 挤出
+        // 寄存器落栈，weight（使用次数×10^深度）误判冷热时就是净回归。
+        // 排在跨块候选之后追加 → 现有分配一个不动，P1 只填真正的空位，
+        // 结构性保证「不劣化已有分配」。
+        if (ra_opt_ && !ra_extra.empty()) {
+            std::ranges::sort(ra_extra, [](const Cand& a, const Cand& b) {
+                return a.uses != b.uses ? a.uses > b.uses : a.v < b.v;
+            });
+            cands.insert(cands.end(), ra_extra.begin(), ra_extra.end());
+        }
         // **split 模式下 vreg 不得使用 kSlotRegs() 池。**
         //
         // split 已经把这些寄存器独占分配给变量槽（slot_loc_），而且

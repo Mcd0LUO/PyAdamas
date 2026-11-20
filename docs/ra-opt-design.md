@@ -127,6 +127,26 @@ difftest 0；全套件 normal+ASan（JOBS=1）EXIT=0；CPython 对拍零差异�
 flag-off 38 热基准 asm cmp 逐字节不变；异常/生成器/vthread 钉子
 （92/93/119/225 等）flag-on 通过；abbench 交替绑核 A/B。
 
+## 3.1 命门 bug 实录：P2 首版静默算错（已修复，回归钉死）
+
+首版 P2 假设「slot_reg_[s] 非空 ⇒ 整函数独占」——**错**。linear_scan_pool
+让活跃区间不重叠的槽**复用同一寄存器**（这正是它相对按频次分配的优势）。
+c2_inventory 的 gen_rows：s0（n）在入口 hoist load 后即死，%rbx 随即被
+循环里的 LCG 状态槽接管；别名让循环上界 cmp 读到 LCG 值，rows 600→1。
+同根因：204_list_buf_pool / 193_rc_inline / 205_dict_scalar_destroy /
+206_list_store_kind / 233_json_perf / 236_fp_spill_call + 9 个日常语料。
+
+**修复**：P2 只别名「全函数没有第二个槽认领同一寄存器」的槽
+（reg_users==1，ra_opt.cpp）。参数槽/整函数活跃槽天然满足；nqueens
+row/n 收益保留。跨块 vreg 提升（含 P1）不受此问题影响：那些寄存器从
+n_saved_regs_ 起独占分配，本就不与槽复用。
+
+教训：**「整函数布尔标记」的注释描述的是语义意图，不是分配器实现的
+保证**；线性扫描/图着色都复用寄存器。任何「值恒等于槽寄存器」的推理
+必须先证明寄存器单射。difftest（O0/O2）+ 日常语料对拍抓住了它；
+随机 run_diff 840 程序首版也 0 失败 —— 复用形状需要足够长的函数 +
+特定的死亡顺序，语料比随机生成更能压出这类 bug。
+
 ## 4. matmul 代价模型实验（独立门控位，可能负面结论）
 
 （实施后补实测数字与结论。）
