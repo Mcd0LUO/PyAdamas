@@ -232,17 +232,16 @@ struct IRFunction {
         auto it = block_by_id.find(id);
         return it == block_by_id.end() ? -1 : it->second;
     }
-    // id -> 指令所在位置。指令被删时移除对应项。
-    // 值类型是 (block, index)，两者都可能在重排后过期，所以它只用于
-    // 「快速定位」，优化遍仍要以实际扫描为准。
-    std::unordered_map<uint32_t, std::pair<int, int>> inst_by_id;
-    // vreg -> 定义它的指令 id（单一定义；多次定义时取最后一次）。
-    std::unordered_map<VReg, uint32_t> def_of;
-    // vreg -> 使用它的指令 id 集合。
-    std::unordered_map<VReg, std::vector<uint32_t>> uses_of;
-
-    // 重新扫描整个函数，重建 inst_by_id / def_of / uses_of。
-    // 在块结构改动后调用（内联、循环版本化等），代价 O(指令数)。
+    // 重新扫描整个函数，重建 block_by_id。
+    // 在块结构改动后调用（内联、循环版本化等），代价 O(块数)。
+    //
+    // 历史：0.205 起这里还重建 inst_by_id / def_of / uses_of 三张
+    // vreg/指令级 unordered_map。0.3xx 的 DCE 改成自己线性计数后
+    // （见 CHANGELOG 0.335 优化 3），这三张表已经**没有任何读者**，
+    // 但重建仍是「逐指令哈希插入」——perf 显示 _M_insert_unique_node +
+    // emplace_uniq + 配套 malloc/free 合计 ~20% 编译时间（大函数上）。
+    // 编译提速时把死索引去掉：唯一仍被读的 block_by_id 继续重建。
+    // 若将来要恢复指令级索引，应改成访问时惰性重建的显式入口。
     void rebuild_use_def();
     // 给一条指令分配 id（若尚未分配）。
     uint32_t ensure_inst_id(Inst& in) {

@@ -1,6 +1,7 @@
 // codegen_regalloc.cpp —— 寄存器/栈槽分配与函数帧
 #include "codegen_impl.h"
 
+#include "block_bitset.h"
 #include "live_interval.h"
 #include "spill_placement.h"
 
@@ -118,11 +119,15 @@ void AsmGen::assign_vreg_slots() {
         std::vector<int> first_use(nv, INT32_MAX);
         std::vector<int> last_use(nv, -1);
         std::vector<int> block_start(static_cast<size_t>(nb), 0);
-        std::vector<std::vector<char>> blk_use(static_cast<size_t>(nb));
-        std::vector<std::vector<char>> blk_def(static_cast<size_t>(nb));
+        // 块级 use/def 与下面的 live_in/live_out 都用字位集（block_bitset.h）。
+        // 原实现是每块 nv 字节的 char 向量：626 块 × 2150 vreg 的函数单趟
+        // 扫描就是 ~5MB 字节流量，不动点迭代还要乘轮数。只换容器，判定
+        // 逻辑与结果逐位不变。
+        std::vector<BlockBits> blk_use(static_cast<size_t>(nb));
+        std::vector<BlockBits> blk_def(static_cast<size_t>(nb));
         for (int b = 0; b < nb; ++b) {
-            blk_use[static_cast<size_t>(b)].assign(nv, 0);
-            blk_def[static_cast<size_t>(b)].assign(nv, 0);
+            blk_use[static_cast<size_t>(b)].reset(nv);
+            blk_def[static_cast<size_t>(b)].reset(nv);
         }
         int pos = 0;
         for (int b = 0; b < nb; ++b) {
@@ -135,7 +140,7 @@ void AsmGen::assign_vreg_slots() {
                     ++use_count_[r];
                     if (pos < first_use[r]) first_use[r] = pos;
                     last_use[r] = pos;
-                    if (!bdef[r]) buse[r] = 1;  // 块内先使用后定义 → live-in
+                    if (!bdef.test(r)) buse.set(r);  // 块内先使用后定义 → live-in
                 };
                 touch(in.a);
                 touch(in.b);
@@ -145,7 +150,7 @@ void AsmGen::assign_vreg_slots() {
                     def_pos[in.dst] = pos;
                     def_block_[in.dst] = b;
                     ++def_count[in.dst];
-                    bdef[in.dst] = 1;
+                    bdef.set(in.dst);
                 }
                 ++pos;
             }
@@ -200,11 +205,11 @@ void AsmGen::assign_vreg_slots() {
                 }
             }
         }
-        std::vector<std::vector<char>> live_in(static_cast<size_t>(nb));
-        std::vector<std::vector<char>> live_out(static_cast<size_t>(nb));
+        std::vector<BlockBits> live_in(static_cast<size_t>(nb));
+        std::vector<BlockBits> live_out(static_cast<size_t>(nb));
         for (int b = 0; b < nb; ++b) {
-            live_in[static_cast<size_t>(b)].assign(nv, 0);
-            live_out[static_cast<size_t>(b)].assign(nv, 0);
+            live_in[static_cast<size_t>(b)].reset(nv);
+            live_out[static_cast<size_t>(b)].reset(nv);
         }
         bool changed = true;
         int guard = 0;
@@ -214,19 +219,14 @@ void AsmGen::assign_vreg_slots() {
                 // out 每次都从空集重算：继承上一轮的值会让 live_out 单调
                 // 增长、永不收缩 —— 区间被越拉越长，最后所有 vreg 都变成
                 // 全函数活跃，复用彻底失效（且没有后继的块会残留脏值）。
-                std::vector<char> out(static_cast<size_t>(nv), 0);
-                for (int s : succ[static_cast<size_t>(b)]) {
-                    const auto& si = live_in[static_cast<size_t>(s)];
-                    for (size_t v = 0; v < nv; ++v)
-                        if (si[v]) out[v] = 1;
-                }
-                std::vector<char> in(static_cast<size_t>(nv), 0);
+                BlockBits out(nv, false);
+                for (int s : succ[static_cast<size_t>(b)]) out.or_with(live_in[static_cast<size_t>(s)]);
+                BlockBits in(nv, false);
                 const auto& buse = blk_use[static_cast<size_t>(b)];
                 const auto& bdef = blk_def[static_cast<size_t>(b)];
-                for (size_t v = 0; v < nv; ++v)
-                    if (buse[v] || (out[v] && !bdef[v])) in[v] = 1;
-                if (in != live_in[static_cast<size_t>(b)] ||
-                    out != live_out[static_cast<size_t>(b)]) {
+                in.andnot_or(out, bdef, buse);
+                if (!(in == live_in[static_cast<size_t>(b)]) ||
+                    !(out == live_out[static_cast<size_t>(b)])) {
                     live_in[static_cast<size_t>(b)] = std::move(in);
                     live_out[static_cast<size_t>(b)] = std::move(out);
                     changed = true;
@@ -243,21 +243,23 @@ void AsmGen::assign_vreg_slots() {
             if (p > live_last[v]) live_last[v] = p;
         };
         for (int b = 0; b < nb; ++b) {
-            std::vector<char> cur(live_out[static_cast<size_t>(b)]);
+            BlockBits cur(nv, false);
+            cur.assign(live_out[static_cast<size_t>(b)]);
             const auto& insts = f_->blocks[static_cast<size_t>(b)].insts;
             const int bstart = block_start[static_cast<size_t>(b)];
             const int blen = static_cast<int>(insts.size());
             // live-out 的值一直活到块末尾
             if (blen > 0)
-                for (size_t v = 0; v < nv; ++v)
-                    if (cur[v]) mark_live(static_cast<VReg>(v), bstart + blen - 1);
+                cur.for_each_set([&](size_t v) {
+                    mark_live(static_cast<VReg>(v), bstart + blen - 1);
+                });
             for (int k = blen - 1; k >= 0; --k) {
                 const Inst& in = insts[static_cast<size_t>(k)];
                 const int p = bstart + k;
-                if (in.dst != kNoReg && in.dst < nv) cur[in.dst] = 0;
+                if (in.dst != kNoReg && in.dst < nv) cur.clear(in.dst);
                 auto use = [&](VReg v) {
                     if (v == kNoReg || v >= nv) return;
-                    cur[v] = 1;
+                    cur.set(v);
                     mark_live(v, p);
                 };
                 use(in.a);
@@ -265,8 +267,7 @@ void AsmGen::assign_vreg_slots() {
                 use(in.c);
                 for (VReg r : in.args) use(r);
             }
-            for (size_t v = 0; v < nv; ++v)
-                if (cur[v]) mark_live(static_cast<VReg>(v), bstart);
+            cur.for_each_set([&](size_t v) { mark_live(static_cast<VReg>(v), bstart); });
         }
 
         // ── 4. 线性扫描 ──

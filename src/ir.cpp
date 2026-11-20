@@ -30,27 +30,13 @@ std::string ty_note(const TypePtr& t) {
 // 不做 SSA 那套精确单定义检查 —— 这个 IR 的 vreg 本来就是可多次定义的
 // 临时值，索引只服务「快速找到使用点」，不承担正确性判定。
 void IRFunction::rebuild_use_def() {
-    inst_by_id.clear();
     block_by_id.clear();
-    def_of.clear();
-    uses_of.clear();
-    for (int b = 0; b < static_cast<int>(blocks.size()); ++b) {
+    for (int b = 0; b < static_cast<int>(blocks.size()); ++b)
         block_by_id[ensure_block_id(blocks[static_cast<size_t>(b)])] = b;
-        auto& insts = blocks[static_cast<size_t>(b)].insts;
-        for (int k = 0; k < static_cast<int>(insts.size()); ++k) {
-            Inst& in = insts[static_cast<size_t>(k)];
-            const uint32_t id = ensure_inst_id(in);
-            inst_by_id[id] = {b, k};
-            if (in.dst != kNoReg) def_of[in.dst] = id;
-            auto use = [&](VReg r) {
-                if (r != kNoReg) uses_of[r].push_back(id);
-            };
-            use(in.a);
-            use(in.b);
-            use(in.c);
-            for (VReg r : in.args) use(r);
-        }
-    }
+    // inst_by_id / def_of / uses_of 已无读者，不再重建（见 ir_types.h 注释）。
+    // 指令 id 本身仍要分配：pass 新建指令后 id 保持唯一、0 只表示未分配。
+    for (auto& blk : blocks)
+        for (Inst& in : blk.insts) ensure_inst_id(in);
 }
 // 调试期校验：op 与 idx.kind 是否匹配。
 //

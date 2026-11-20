@@ -457,7 +457,28 @@ private:
 
     // 当前块内的位置索引，gen_block 开头重建。
     std::unordered_map<int, std::vector<int>> block_stores_;
-    std::unordered_map<VReg, int> block_first_use_;
+    // 块内每个 vreg 第一次被读的位置（-1 = 本块没读过）。原来是
+    // unordered_map<VReg, int>：每条指令对 a/b/c/args 做 find+insert，
+    // perf 显示哈希插入占编译时间 ~14%（含 malloc）。改成按 vreg 直接下标
+    // + 脏项列表（每块只重置本块碰过的项），语义与查找结果完全一致。
+    std::vector<int> block_use_pos_;
+    std::vector<VReg> block_use_touched_;
+    int block_first_use(VReg r) const {
+        return static_cast<size_t>(r) < block_use_pos_.size() ? block_use_pos_[r] : -1;
+    }
+    void block_mark_first_use(VReg r, int pos) {
+        if (r == kNoReg) return;
+        if (static_cast<size_t>(r) >= block_use_pos_.size())
+            block_use_pos_.resize(static_cast<size_t>(r) + 1, -1);
+        if (block_use_pos_[r] < 0) {
+            block_use_pos_[r] = pos;
+            block_use_touched_.push_back(r);
+        }
+    }
+    void block_reset_first_use() {
+        for (VReg r : block_use_touched_) block_use_pos_[r] = -1;
+        block_use_touched_.clear();
+    }
     int cur_pos_ = 0;  // 正在生成的指令在块内的下标
 
     // ── 输出辅助（结构化 Machine 层）──────────────────────────────

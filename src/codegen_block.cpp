@@ -815,15 +815,13 @@ void AsmGen::gen_block(const Block& b) {
         // 第一次被读的位置。LoadSlot 的别名只在「读之后、第一次赋值之前」
         // 成立；第一次赋值之后别名会读到新值。
         block_stores_.clear();
-        block_first_use_.clear();
+        block_reset_first_use();
         for (int i = 0; i < static_cast<int>(b.insts.size()); ++i) {
             const Inst& in = b.insts[i];
             if (in.op == IrOp::StoreSlot) block_stores_[in.idx].push_back(i);
             VReg ops[3] = {in.a, in.b, in.c};
-            for (VReg r : ops)
-                if (r != kNoReg && !block_first_use_.contains(r)) block_first_use_[r] = i;
-            for (VReg r : in.args)
-                if (!block_first_use_.contains(r)) block_first_use_[r] = i;
+            for (VReg r : ops) block_mark_first_use(r, i);
+            for (VReg r : in.args) block_mark_first_use(r, i);
         }
 
         // 每条指令执行后仍存活的浮点提升槽（live-after），调用点只保存
@@ -858,17 +856,17 @@ void AsmGen::gen_block(const Block& b) {
                     if (x.dst >= use_count_.size() || use_count_[x.dst] != 1 ||
                         cross_block_[x.dst])
                         continue;
-                    auto us = block_first_use_.find(x.dst);
-                    if (us == block_first_use_.end() || us->second <= k) continue;
+                    const int us = block_first_use(x.dst);
+                    if (us < 0 || us <= k) continue;
                     // 使用点前有对该槽的赋值 → gen_load_slot 判定 clobbered，
                     // 不会别名（真的发了一次 mov），寄存器此后无人读。
                     auto stv = block_stores_.find(x.idx);
                     if (stv != block_stores_.end()) {
                         auto it = std::upper_bound(stv->second.begin(),
                                                    stv->second.end(), k);
-                        if (it != stv->second.end() && *it < us->second) continue;
+                        if (it != stv->second.end() && *it < us) continue;
                     }
-                    fp_alias_use[static_cast<size_t>(us->second) * kf +
+                    fp_alias_use[static_cast<size_t>(us) * kf +
                                  static_cast<size_t>(fi)] = 1;
                 }
             }
