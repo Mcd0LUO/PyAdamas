@@ -122,14 +122,6 @@ void Lowerer::print_value(VReg v, TypePtr ty, int line, int col) {
             break;
         }
         case TyKind::Class: {
-            // P4（lang_gaps）：异常类当值时值是类对象单例，按 <class '...'>
-            // 印（CPython 口径），不是实例形状的 <Name object>。
-            if (opts_.lang_gaps && ty->cls && ty->cls->is_exception_class) {
-                VReg s = call_runtime(RtFn::ClassRepr, t_str(), {v});
-                push_temp(s);
-                call_void(RtFn::PrintStr, {s});
-                break;
-            }
             // 有 __str__（或只有 __repr__）就调它；否则按 CPython 的形状
             // 打一个 `<Point object>`。
             VReg s = dunder_str(v, ty, false);
@@ -209,13 +201,6 @@ void Lowerer::print_value_to_file(VReg v, TypePtr ty, int line, int col) {
             call_void(RtFn::FileWrite, {f, const_str("<deque object>")});
             return;
         case TyKind::Class: {
-            // P4（lang_gaps）：异常类值按 <class '...'> 写（同 print 口径）。
-            if (opts_.lang_gaps && ty->cls && ty->cls->is_exception_class) {
-                VReg s = call_runtime(RtFn::ClassRepr, t_str(), {v});
-                push_temp(s);
-                call_void(RtFn::FileWrite, {f, s});
-                return;
-            }
             VReg s = dunder_str(v, ty, false);
             if (s != kNoReg) {
                 call_void(RtFn::FileWrite, {f, s});

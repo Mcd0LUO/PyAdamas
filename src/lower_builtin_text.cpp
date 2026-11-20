@@ -327,13 +327,6 @@ VReg Lowerer::lower_builtin_text(const std::string& name, Call& c) {
                   t->kind == TyKind::Float || t->kind == TyKind::Complex ||
                   t->kind == TyKind::None))
             return convert_to(v, t, t_str());
-        // P4（lang_gaps）：异常类值的 repr 是 <class '...'>（类对象单例）。
-        if (opts_.lang_gaps && t && t->kind == TyKind::Class && t->cls &&
-            t->cls->is_exception_class) {
-            VReg s = call_runtime(RtFn::ClassRepr, t_str(), {v});
-            push_temp(s);
-            return s;
-        }
         if (t && t->kind == TyKind::Class) {
             VReg s = dunder_str(v, t, true);
             return s != kNoReg ? s : class_default_str(t);
@@ -436,13 +429,7 @@ VReg Lowerer::lower_builtin_text(const std::string& name, Call& c) {
             push_temp(s);
             return s;
         }
-        // P4（lang_gaps）：str(自定义异常类值) == repr（<class '...'>）。
-        if (to->kind == TyKind::Str && opts_.lang_gaps && from &&
-            from->kind == TyKind::Class && from->cls && from->cls->is_exception_class) {
-            VReg s = call_runtime(RtFn::ClassRepr, t_str(), {v});
-            push_temp(s);
-            return s;
-        }
+
         // 容器转标量没有定义（CPython 抛 TypeError）。以前这里直接把
         // 指针当数字用，会静默给出垃圾值——宁可报错。
         if (to->kind != TyKind::Bool && from &&
