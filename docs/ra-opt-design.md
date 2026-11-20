@@ -186,6 +186,23 @@ run_2 热区同时活跃 6 个整型槽（i/k/j/j副本/aik/total），线性扫
 中位 +1~2%（前几轮 1.020/1.021/1.013，本轮 1.008，多租户波动）。
 mandelbrot/fasta 收益稳定（p25 同向）。
 
+最终二进制三目标复核（9 轮 BURST=5 交替绑核）：
+
+| 用例 | off(us) | on(us) | 加速 | p25 |
+|---|---|---|---|---|
+| fib | 24318 | 24312 | 1.000 | 0.989 |
+| matmul | 18642 | 18243 | 1.022* | 1.036* |
+| nqueens | 104250 | 102812 | **1.014** | 1.022 |
+
+*matmul 两侧二进制逐字节相同（cmp 验证），1.022 是多租户噪声，真值 1.000。
+
+**nqueens perf 复核（flag-on）**：place_1 栈触碰周期占比 **21.2% → 6.6%**。
+9.06% 的 row 栈重载（mov 0x108(%rsp),%rax）变 reg-reg mov（mov %rbx,%rax，
+move elimination 零延迟）；2.77% 的 n 上界栈 cmp 变 cmp %r12,%r14。
+剩余 6.6% 是堆列表指针（cols/d1/d2，帧记录/GC 根，不可提升）与 row+1
+副本。墙钟 +1~2% 小于栈周期降幅：被消的 load 都是 L1 命中、与分支
+误判主导的执行重叠，循环是前端/分支 bound —— 如实报。
+
 ### 5.2 fib 负面结论（P1 的由来与限制）
 
 - 全提升 5 个同块值：0.938×（perf：push 27% / pop 15%，叶子白付税）。
@@ -197,6 +214,31 @@ mandelbrot/fasta 收益稳定（p25 同向）。
 
 ### 5.3 闸门（最终代码）
 
-（见 CHANGELOG 0.336 与完成报告：difftest 283/0、全套件 normal+ASan
-EXIT=0、run_diff 840/0、日常语料 23/23、flag-off 92 基准 asm 逐字节、
-leak 钉子 6/6、回归 297-299 双模式。）
+- difftest（O0/O2，flag-on）：283 用例 0 差异 EXIT=0（JOBS=6）。
+  277_urllib_errors 在 JOBS=12+ 并行负载下偶发 rc 抖动（固定端口
+  18327 的本地 http.server 启动竞争），单跑 5/5 干净，低并行全量 0 差异。
+- 全套件 normal flag-on：EXIT=0（301 ran ok，含 check/fail/strict/
+  unsupported/modules/cdecl/cfi 全组）。
+- 全套件 **ASan flag-on JOBS=1：EXIT=0**。
+- 随机 CPython 对拍 run_diff（seeds 3）：840 程序 0 失败。
+- 日常语料对拍 CPython（输出+rc）：23/23。
+- ASan detect_leaks=1 钉子 13/174/88/192/66/119：6/6 全 0。
+- flag-off asm 逐字节：92 基准（compare 9 + realistic 6 + builtins 54
+  + daily 23）对主树 build/lead 0.335 基线 cmp 全过，多轮复验。
+- 异常/生成器/vthread 钉子 92/93/94/119/225 + 回归 297-299：flag-on
+  全套件内通过；297-299 flag-on/off 双模式独立验证。
+- check_size：无新增超限（ra_opt.cpp 239 行；codegen_impl.h 压回 1199）。
+- 模式组合抽查：RA_GRAPH+RA_OPT、RA_SPLIT+RA_GRAPH+RA_OPT 全过；
+  **RA_SPLIT+RA_OPT 在 119/299（生成器+except）SIGSEGV —— 归因：
+  RA_SPLIT 单独（无 RA_OPT）同样 rc=139，主树 0.335 基线编译器亦
+  rc=139，是 split 实验门控的既有 bug，与 RA_OPT 无关**（加不加
+  RA_OPT 崩溃一致）。split 默认关，不在本轮修复范围。
+
+### 5.4 残留风险
+
+- P1 互递归（A↔B）无 call graph 分析，不在自递归 guard 内；leftover-only
+  保证不劣化已有分配，但新增寄存器仍可能有叶子税。门控默认关。
+- P2 单射校验是保守充分条件：寄存器复用但时序安全的形状不别名
+  （少赚不亏）。
+- fannkuch 初轮 −7% 复测证伪（1.013），但布局敏感性真实存在（本仓库
+  有 ±10-17% 布局位移先例）；flag-on 的逐基准收益以多轮中位为准。

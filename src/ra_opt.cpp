@@ -8,8 +8,9 @@
 //    它们 cross_block_=false 进不了跨块提升池，块内有调用又拿不到
 //    %r8-%r11 块临时池 —— fib 递归的 fib(n-1) 结果正是如此，每次调用
 //    前后 spill/reload（perf 实测递归块栈 mov 占函数周期 ~38%）。
-//    这里把它们按现有 weight（使用次数×10^循环深度）并入跨块候选池，
-//    从 n_saved_regs_ 起分剩下的 callee-saved。
+//    这里只收**活跃区间真跨过调用**的值（单定义），按 weight 排序后
+//    **追加在跨块候选之后**捡剩余 callee-saved（不按权重插队，不劣化
+//    已有分配）；自递归函数整函数跳过（叶子 push/pop 税，实测负收益）。
 //
 // P2 只读槽 load 别名：vreg 是「整函数驻留 GPR 且函数内从未被写」的槽
 //    的单次 LoadSlot —— 值恒等于槽寄存器，直接别名，不占新寄存器。
@@ -194,9 +195,9 @@ std::vector<char> AsmGen::ra_opt_readonly_alias() {
     return aliased;
 }
 
-// P1：同块调用块候选。返回 (vreg, weight)，由调用方并入跨块候选池一起
-// 排序分配。weight 沿用跨块池的「使用次数×10^循环深度」，内层循环的
-// 值自然优先。
+// P1：同块跨调用候选。返回 (vreg, weight)，由调用方排序后**追加在
+// 跨块候选之后**（leftover-only，见 codegen_regalloc.cpp 钩子注释）。
+// weight 沿用跨块池的「使用次数×10^循环深度」。
 std::vector<std::pair<int, int>> AsmGen::ra_opt_call_block_cands(
         const std::vector<int64_t>& weight) {
     std::vector<std::pair<int, int>> out;

@@ -58,8 +58,8 @@
 
 ### 闸门
 
-- difftest（O0/O2）283 用例 0 差异（277_urllib_errors 固定端口并行
-  竞争偶发 rc 抖动，单跑 5/5 干净，低并行复跑 0 差异）。
+- difftest（O0/O2）283 用例 0 差异 EXIT=0（277_urllib_errors 固定端口
+  并行竞争偶发 rc 抖动，单跑 5/5 干净，JOBS=6 全量复跑 0 差异）。
 - 全套件 normal flag-on EXIT=0；**ASan flag-on JOBS=1 EXIT=0**。
 - 随机 CPython 对拍 run_diff 840 程序 0 失败；日常语料 23/23（输出+rc）。
 - ASan detect_leaks=1 钉子 13/174/88/192/66/119 全 0。
