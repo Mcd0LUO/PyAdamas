@@ -538,6 +538,8 @@ struct Manifest {
     int loop_opt = -1;
     // 内联/devirt 深化开关。-1 = 旧清单没有这一行（缓存必然失效一次）。
     int inline_opt = -1;
+    // 只读借用槽细化开关。-1 = 旧清单没有这一行（缓存必然失效一次）。
+    int borrow_opt = -1;
     // 模块是否用到 from c import（dlsym RTLD_DEFAULT）。旧清单没有这一行：
     // 保守按「用到」处理（链接期关 --gc-sections，绝不冒误剥风险）。
     bool c_sym_default = true;
@@ -626,6 +628,12 @@ std::optional<Manifest> read_manifest(const ModuleUnit& u) {
             auto o = parse_u64(v);
             if (!o) return std::nullopt;
             m.inline_opt = static_cast<int>(*o);
+        } else if (tag == "borrowopt") {
+            std::string v;
+            ss >> v;
+            auto o = parse_u64(v);
+            if (!o) return std::nullopt;
+            m.borrow_opt = static_cast<int>(*o);
         } else if (tag == "csymdefault") {
             std::string v;
             ss >> v;
@@ -662,6 +670,7 @@ void write_manifest(const Program& p, const ModuleUnit& u) {
     out << "simd " << (p.simd ? 1 : 0) << "\n";
     out << "loopopt " << p.loop_opt << "\n";
     out << "inlineopt " << (p.inline_opt ? 1 : 0) << "\n";
+    out << "borrowopt " << (p.borrow_opt ? 1 : 0) << "\n";
     out << "csymdefault " << (u.uses_c_sym_default ? 1 : 0) << "\n";
     out << "toolchain " << toolchain_id() << "\n";
     for (auto& d : u.deps) {
@@ -878,6 +887,7 @@ bool try_cache(Program& p, ModuleUnit& u) {
     if (m->simd != (p.simd ? 1 : 0)) return false;
     if (m->loop_opt != p.loop_opt) return false;
     if (m->inline_opt != (p.inline_opt ? 1 : 0)) return false;
+    if (m->borrow_opt != (p.borrow_opt ? 1 : 0)) return false;
     if (m->deps.size() != u.deps.size()) return false;
     for (auto& d : u.deps) {
         auto it = m->deps.find(d);
@@ -1143,6 +1153,7 @@ bool build_unit(Program& p, ModuleUnit& u, bool emit_object, bool entry_ir) {
     opt.opt_level = p.opt;
     opt.loop_opt = p.loop_opt;
     opt.inline_opt = p.inline_opt;
+    opt.borrow_opt = p.borrow_opt;
     opt.fast_math = p.fast_math;
     opt.zero_cost_exc = p.zero_cost_exc;
     opt.module_lookup = [&p](const std::string& name) -> pyadamas::ModuleInfoPtr {

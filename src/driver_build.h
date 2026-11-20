@@ -76,6 +76,9 @@ struct Program {
     // 内联/devirt 深化（PYADAMAS_INLINE_OPT，默认 0 关）：改变 IR 优化与
     // 代码生成结果，必须写进模块缓存清单参与失效。
     bool inline_opt = false;
+    // 只读借用槽细化（PYADAMAS_BORROW_OPT，默认 0 关）：改变 IR 与代码生成
+    // 结果，必须写进模块缓存清单参与失效。
+    bool borrow_opt = false;
     // 任一模块需要 unknown 索引就保持开启；全都不需要时入口关掉维护。
     bool needs_unknown_index = false;
     // 任一模块用到 from c import（dlsym RTLD_DEFAULT）就置位：链接期

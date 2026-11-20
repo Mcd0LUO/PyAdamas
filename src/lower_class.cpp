@@ -621,6 +621,7 @@ int Lowerer::compile_ctor_wrapper(ClassDef& clsdef, const ClassInfoPtr& ci, int 
     }
     emit_return(obj, cls_ty);
     finalize_param_borrows();
+    finalize_borrow_slots();
     if (st_->rc_pushes == 0)
         erase_mark(st_->fn_mark_block, st_->fn_mark_pos, st_->fn_mark);
     pop_frame();

@@ -341,6 +341,9 @@ int main(int argc, char** argv) {
         // 内联/devirt 深化（默认关）：PYADAMAS_INLINE_OPT=1 开启，参与缓存失效。
         prog.inline_opt = std::getenv("PYADAMAS_INLINE_OPT") != nullptr &&
                           std::string_view(std::getenv("PYADAMAS_INLINE_OPT")) != "0";
+        // 只读借用槽细化（默认关）：PYADAMAS_BORROW_OPT=1 开启，参与缓存失效。
+        prog.borrow_opt = std::getenv("PYADAMAS_BORROW_OPT") != nullptr &&
+                          std::string_view(std::getenv("PYADAMAS_BORROW_OPT")) != "0";
         prog.verbose = verbose;
         prog.opt = opt_level;
         prog.fast_math = fast_math;
