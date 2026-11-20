@@ -56,6 +56,10 @@ enum class MOp : uint8_t {
     kCvtdq2pd, kMovlhps, kMovhlps, kUnpcklpd,
     // 0.334 nbody pairwise：标量 sqrt 内联（与既有 sqrtsd fast path 同指令）。
     kSqrtsd,
+    // 0.351 通用向量化深化：packed dword 算术右移（Convert i64→f64 折算
+    // 序列取 lo 符号掩码用；SSE2 无 psraq，64 位算术右移不存在）。
+    // 只登记助记符，现有发射点不引用 → flag-off 逐字节不变。
+    kPsrad,
 };
 
 // 操作码 → 汇编助记符（kRaw 返回空串）。未登记的名字返回 MOp::kRaw。
