@@ -248,6 +248,7 @@ inline constexpr ModuleEntry kModuleTable[] = {
     {"typing", ModuleKind::Python, "typing.py", ""},
     {"urllib", ModuleKind::Python, "urllib/__init__.py", ""},
     {"urllib.error", ModuleKind::Python, "urllib/error.py", ""},
+    {"urllib.parse", ModuleKind::Python, "urllib/parse.py", ""},
     {"urllib.request", ModuleKind::Python, "urllib/request.py", "urllib.error"},
     {"uuid", ModuleKind::Python, "uuid.py", "random"},
     {"zipfile", ModuleKind::Python, "zipfile.py", "zlib,_gzipio,os,os.path"},

@@ -4,6 +4,23 @@
 
 早期阶段没有逐条留痕，按阶段归纳；0.4 之后逐条记录。
 
+## [0.339] - 2026-11-20
+
+> stdlib3 分支：**纯 PyAdamas 标准库自举批**——把「纯字符串/纯算术就能做、
+> 不需要 C 胶水、不需要原生类方法、不需要 BigInt」的一批高频模块用 pa
+> 自己的语法写出来，随编译器分发（stdlib/<mod>.py），只做模块表登记，
+> 不动 lower/runtime/codegen。轻量标尺：同参数/同功能/同结果；错误类型对、
+> 消息合理但不逐字复刻 CPython；help/格式合法但不复刻算法。
+
+### 新增
+
+- **urllib.parse**（stdlib/urllib/parse.py）：urlparse / urlsplit /
+  urlunparse / urlunsplit / urljoin / urldefrag、quote / quote_plus /
+  quote_from_bytes / unquote / unquote_plus / unquote_to_bytes、urlencode /
+  parse_qs / parse_qsl + uses_relative/uses_netloc/uses_params 与
+  ParseResult/SplitResult/DefragResult。只收 str 输入；结果对象是普通类
+  （字段/下标/len/repr/geturl 可用，元组解包不做）。回归 320。
+
 ## [0.337] - 2026-11-20
 
 > dv1 分支：**去虚拟化深化 + 函数内联扩展——削减调用开销**（fib/nqueens/
