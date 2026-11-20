@@ -35,14 +35,14 @@
   pa_uint_to_base（str/repr/f-string/format/printf-%d/hex/bin/oct），
   u64→f64 走无符号折算；printf 描述符新增 'u'。
 - **跨模块类型编码** 17..23（0..16 逐字沿用，旧 modcache 兼容）。
-- **回归** tests/run/332-334（提升/回绕/符号/I-O/unknown 边界）+
+- **回归** tests/run/332-335（提升/回绕/符号/I-O/unknown 边界/控制流）+
   反例 f67（字面量超范围）、f68（缺 cast）、f69（实参缺 cast）。
 
 ### 闸门（实测）
 
 - 默认 int 程序 asm 逐字节不变：bench **120/120 identical**。
-- difftest O0/O2 308 用例 **0 不一致**；全套件 normal **326 ran ok EXIT=0**；
-  ASan（JOBS=1）**326 ran ok EXIT=0**；新用例 O0/O1/O2 输出一致。
+- difftest O0/O2 309 用例 **0 不一致**；全套件 normal **327 ran ok EXIT=0**；
+  ASan（JOBS=1）**327 ran ok EXIT=0**；新用例 O0/O1/O2 输出一致。
 - CPython 对拍：332 逐字节一致；334 仅 §6.1 的 u64→unknown→−1 一行
   差异（预期边界）；333 钉 pa 回绕语义（不与 CPython 对拍）。
 

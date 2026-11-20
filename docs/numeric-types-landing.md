@@ -140,11 +140,11 @@ pa_fmt_u64（format()/f-string 格式说明符）、pa_uint_to_base
 - **默认 int 程序的 asm 逐字节不变**：bench 全量 120 个 .py 文件
   pyadamas asm 输出与基线 ee68d5c 逐字节 cmp **120/120 identical**
   （其中 3 个本来就编译失败，空输出同样相同；117 个有效文件）。
-- **difftest（O0 vs O2）**：308 用例，**0 不一致**（新增 332-334 在内）。
-- **全套件 normal**：**326 ran ok EXIT=0**（基线 323；+332/333/334）。
+- **difftest（O0 vs O2）**：309 用例，**0 不一致**（新增 332-335 在内）。
+- **全套件 normal**：**327 ran ok EXIT=0**（基线 323；+332/333/334/335）。
   反例组 +3（f67/f68/f69）。
-- **全套件 ASan（JOBS=1）**：**326 ran ok EXIT=0**（见 §8 记录）。
-- **O0/O1/O2 一致**：332/333/334 三个用例三档输出逐字节相同。
+- **全套件 ASan（JOBS=1）**：**327 ran ok EXIT=0**（见 §8 记录）。
+- **O0/O1/O2 一致**：332/333/334/335 四个用例三档输出逐字节相同。
 - **CPython 对拍**：
   - 332（取值不溢出宽度，定宽在 Python 语义里仍是 int）：与 CPython
     **逐字节一致**（用 from __future__ import annotations + cast 桩）。
