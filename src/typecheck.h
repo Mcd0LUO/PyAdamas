@@ -505,6 +505,9 @@ private:
     void compare_type(CmpOp op, TypePtr l, TypePtr r, int line, int col);
 
     TypePtr subscript_type(TypePtr obj, TypePtr idx, int line, int col);
+    // 属性表达式的类型检查（typecheck_expr_attr.cpp，从 expr 的 Attribute
+    // case 逐字拆出，文件规模硬限制）。
+    TypePtr expr_attribute(Attribute& a);
 
     TypePtr iter_elem(TypePtr it, int line, int col);
 

@@ -226,16 +226,35 @@ void Lowerer::lower_raise(Raise& r) {
     }
     // P4（lang_gaps）：异常类对象值当 raise 目标（E = ValueError; raise E）。
     // 运行期从类对象读名字构造异常值再抛（静态内层名可能因形参回填过期）。
-    if (xt && xt->kind == TyKind::ClassObj && !xt->sub.empty() && xt->sub[0] &&
-        xt->sub[0]->kind == TyKind::Exception) {
-        VReg cls = expr(*r.exc);
-        Inst mk;
-        mk.op = IrOp::CallRt;
-        mk.imm = static_cast<int64_t>(RtFn::ExcClassValueNew);
-        mk.args = {cls, const_int(0)};
-        VReg v = def_heap(mk_exception(xt->sub[0]->name), std::move(mk));
-        call_void(raise_rt(RtFn::RaiseValueFrom), {v, cause == kNoReg ? const_int(0) : cause});
-        return;
+    // 内建异常类内层是 Exception[name]；自定义 pass-only 异常类内层是
+    // Class[异常类]（富异常类值走下面的实例构造分支）。
+    if (xt && xt->kind == TyKind::ClassObj && !xt->sub.empty() && xt->sub[0]) {
+        TypePtr inner = xt->sub[0];
+        ClassInfo* icls = inner->kind == TyKind::Class ? inner->cls : nullptr;
+        bool flat_exc = inner->kind == TyKind::Exception ||
+                        (icls && icls->is_exception_class && !icls->is_rich_exception);
+        if (flat_exc) {
+            VReg cls = expr(*r.exc);
+            Inst mk;
+            mk.op = IrOp::CallRt;
+            mk.imm = static_cast<int64_t>(RtFn::ExcClassValueNew);
+            mk.args = {cls, const_int(0)};
+            std::string en = inner->kind == TyKind::Exception ? inner->name : icls->name;
+            VReg v = def_heap(mk_exception(en), std::move(mk));
+            call_void(raise_rt(RtFn::RaiseValueFrom), {v, cause == kNoReg ? const_int(0) : cause});
+            return;
+        }
+        if (icls && icls->is_exception_class && icls->is_rich_exception &&
+            classes_.count(icls->name)) {
+            // 富异常类值裸 raise：零参构造实例后抛实例。
+            Call ctor;
+            ctor.line = r.line;
+            ctor.col = r.col;
+            ctor.func = std::make_unique<Name>(icls->name);
+            VReg inst = lower_construct(ctor, classes_[icls->name]);
+            call_void(RtFn::RaiseInstance, {inst, const_str(icls->name)});
+            return;
+        }
     }
     std::string type;
     VReg msg = kNoReg;

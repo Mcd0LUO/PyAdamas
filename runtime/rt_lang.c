@@ -115,19 +115,36 @@ int64_t pa_exc_subclass(void* a, void* b) {
 }
 
 /* 异常类对象值当构造器：E = ValueError; E("x")。名字从类对象读，
-   不用静态内层名（形参回填可能留着首个调用点的类型）。 */
+   不用静态内层名（形参回填可能留着首个调用点的类型）。用户类对象存
+   限定名（mod.MyErr），异常匹配登记的是裸名——取末段构造，否则
+   except MyErr 匹配不上（exc_is_a 按裸名查登记表）。 */
+static PyAdamasStr* lang_exc_type_name(PyAdamasClass* c) {
+    const char* plain = lang_plain_name(c->name->data);
+    return str_new(plain, (int64_t)strlen(plain));
+}
+
 PyAdamasExcValue* pa_exc_class_value_new(void* cls, PyAdamasStr* msg) {
     PyAdamasClass* c = lang_as_class(cls);
     if (!c || !c->name)
         pa_raise_c("TypeError", "exceptions must derive from BaseException");
-    return pa_exc_value_new(c->name, msg);
+    PyAdamasStr* tn = lang_exc_type_name(c);
+    pa_rc_temp(tn);   /* 构造期间可能触发 GC：临时栈保命 */
+    PyAdamasExcValue* v = pa_exc_value_new(tn, msg);
+    pa_rc_temp_take(tn);
+    pa_rc_dec(tn);
+    return v;
 }
 
 PyAdamasExcValue* pa_exc_class_value_new_args(void* cls, PyAdamasList* args) {
     PyAdamasClass* c = lang_as_class(cls);
     if (!c || !c->name)
         pa_raise_c("TypeError", "exceptions must derive from BaseException");
-    return pa_exc_value_new_args(c->name, args);
+    PyAdamasStr* tn = lang_exc_type_name(c);
+    pa_rc_temp(tn);
+    PyAdamasExcValue* v = pa_exc_value_new_args(tn, args);
+    pa_rc_temp_take(tn);
+    pa_rc_dec(tn);
+    return v;
 }
 
 /* ── 方法名→槽登记表（零参动态调用） ────────────────────────── */

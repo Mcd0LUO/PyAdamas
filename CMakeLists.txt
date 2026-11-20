@@ -41,6 +41,7 @@ set(PYADAMAS_SOURCES
   src/typecheck_stmt.cpp
   src/typecheck_stmt_forms.cpp
   src/typecheck_expr.cpp
+  src/typecheck_expr_attr.cpp
   src/typecheck_call.cpp
   src/typecheck_infer.cpp
   src/typecheck_call_forms.cpp

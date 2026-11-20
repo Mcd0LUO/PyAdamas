@@ -656,6 +656,44 @@ VReg Lowerer::lower_call(Call& c) {
             return def_heap(exc_ty, std::move(in));
         }
         ClassInfo* cls = class_obj_cls(ft0);
+        // P4（lang_gaps）：自定义 pass-only 异常类对象值 → 扁平异常值
+        // （与内建异常类同口径；运行期读类名，不用静态名）。富异常类
+        // 仍走实例构造。
+        if (cls && cls->is_exception_class && !cls->is_rich_exception) {
+            TypePtr exc_ty = mk_exception(cls->name);
+            VReg cv = expr(*c.func);
+            for (auto& kw : c.keywords) expr(*kw.value);
+            if (c.args.size() > 1) {
+                TypePtr lt = mk_list(t_str());
+                VReg al = call_runtime(RtFn::ListNew, lt,
+                                       {const_int(static_cast<int64_t>(c.args.size())),
+                                        const_int(list_kind_filled(lt))});
+                push_temp(al);
+                for (auto& arg : c.args) {
+                    TypePtr mt = tc_.type_of(arg.get());
+                    VReg raw = expr(*arg);
+                    VReg sm = convert_to(raw, mt, t_str());
+                    retain_elem(sm, 1);
+                    call_void(RtFn::ListAppend, {al, sm, const_int(1)});
+                }
+                Inst in;
+                in.op = IrOp::CallRt;
+                in.imm = static_cast<int64_t>(RtFn::ExcClassValueNewArgs);
+                in.args = {cv, al};
+                return def_heap(exc_ty, std::move(in));
+            }
+            VReg msg = const_int(0);
+            if (!c.args.empty()) {
+                TypePtr mt = tc_.type_of(c.args[0].get());
+                VReg raw = expr(*c.args[0]);
+                msg = convert_to(raw, mt, t_str());
+            }
+            Inst in;
+            in.op = IrOp::CallRt;
+            in.imm = static_cast<int64_t>(RtFn::ExcClassValueNew);
+            in.args = {cv, msg};
+            return def_heap(exc_ty, std::move(in));
+        }
         if (cls) {
             if (auto it = classes_.find(cls->name);
                 it != classes_.end() && it->second.get() == cls)
