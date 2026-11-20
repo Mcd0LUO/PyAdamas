@@ -322,4 +322,140 @@ bool AsmGen::try_simd_reduction(const Block& b) {
     return true;
 }
 
+
+// ── 0.334 共享判据与分发 ─────────────────────────────────────────────
+// 各模式（int map / nbody pos / nbody pair）复用的安全判据，口径与
+// try_simd_reduction 的内联检查一致。宁保守跳过，不误向量化。
+
+bool AsmGen::simd_func_ok() const {
+    if (!simd_enabled_ || opt_ < 2 || gen_ || ra_graph_ || tags_enabled_) return false;
+    if (!slot_loc_.empty()) return false;                 // 只做默认寄存器分配
+    if (std::string_view(target_abi().name) != "x86_64-sysv") return false;
+    if (f_->has_handlers) return false;                   // setjmp 函数形态不稳
+    return true;
+}
+
+const Inst* AsmGen::simd_def(VReg v) const {
+    return simd_def_inst(*f_, def_block_, v);
+}
+
+bool AsmGen::simd_const_int(VReg v, int64_t want) const {
+    const Inst* d = simd_def(v);
+    return d && d->op == IrOp::ConstInt && d->imm == want;
+}
+
+bool AsmGen::simd_core_body(const Block& b, size_t core_n, size_t max_total,
+                            std::vector<Inst>& core) const {
+    const auto& BI = b.insts;
+    if (BI.size() < core_n || BI.size() > max_total) return false;
+    if (BI.back().op != IrOp::Jump) return false;
+    core.clear();
+    core.reserve(BI.size());
+    for (const Inst& in : BI)
+        if (in.op != IrOp::ConstInt && in.op != IrOp::ConstFloat)
+            core.push_back(in);
+    return core.size() == core_n;
+}
+
+bool AsmGen::simd_incr_cond_ok(int incr_bi, int body_bi, int sJ,
+                               int& cond_bi, int& end_bi, VReg& n) const {
+    if (incr_bi < 0 || incr_bi >= static_cast<int>(f_->blocks.size()) || incr_bi == body_bi)
+        return false;
+    const auto& INC = f_->blocks[static_cast<size_t>(incr_bi)].insts;
+    if (INC.size() != 4 || INC[0].op != IrOp::LoadSlot || INC[0].idx != sJ ||
+        INC[1].op != IrOp::Bin || INC[1].bop != BinKind::Add || INC[1].a != INC[0].dst ||
+        INC[2].op != IrOp::StoreSlot || INC[2].idx != sJ || INC[2].a != INC[1].dst ||
+        INC[3].op != IrOp::Jump)
+        return false;
+    if (!simd_const_int(INC[1].b, 1)) return false;       // 步长必须 1
+    cond_bi = INC[3].target;
+    if (cond_bi < 0 || cond_bi >= static_cast<int>(f_->blocks.size()) ||
+        cond_bi == body_bi || cond_bi == incr_bi)
+        return false;
+    const auto& C = f_->blocks[static_cast<size_t>(cond_bi)].insts;
+    if (C.size() != 3 || C[0].op != IrOp::LoadSlot || C[0].idx != sJ ||
+        C[1].op != IrOp::Cmp || C[1].cop != CmpKind::Lt || C[1].a != C[0].dst ||
+        C[2].op != IrOp::Branch || C[2].a != C[1].dst || C[2].target != body_bi)
+        return false;
+    n = C[1].b;
+    end_bi = C[2].target2;
+    return end_bi >= 0 && end_bi != body_bi && end_bi != cond_bi && end_bi != incr_bi;
+}
+
+bool AsmGen::simd_loop_ops_ok(int cond_bi, int body_bi, int incr_bi,
+                              bool allow_sqrt, bool allow_idxset) const {
+    for (int bi : {cond_bi, body_bi, incr_bi})
+        for (const Inst& in : f_->blocks[static_cast<size_t>(bi)].insts) {
+            switch (in.op) {
+                case IrOp::LoadSlot: case IrOp::StoreSlot: case IrOp::Bin:
+                case IrOp::Cmp: case IrOp::Convert: case IrOp::Mov:
+                case IrOp::Branch: case IrOp::Jump: case IrOp::IndexLoad:
+                case IrOp::IndexLoadUnchecked: case IrOp::ConstInt:
+                case IrOp::ConstFloat: case IrOp::LoadGlobal:
+                    break;
+                case IrOp::CallRt:
+                    // 只放行数学 sqrt（体块形状另钉死位置与个数）；其余运行时
+                    // 调用可能碰容器/GC，一律拒绝。
+                    if (!allow_sqrt || static_cast<RtFn>(in.imm) != RtFn::MathSqrt)
+                        return false;
+                    break;
+                case IrOp::IndexStore: case IrOp::IndexStoreUnchecked:
+                    if (!allow_idxset) return false;
+                    break;
+                default:
+                    return false;
+            }
+        }
+    return true;
+}
+
+int AsmGen::simd_slot_writers(int slot, int cond_bi, int body_bi, int incr_bi) const {
+    int cnt = 0;
+    for (int bi : {cond_bi, body_bi, incr_bi})
+        for (const Inst& in : f_->blocks[static_cast<size_t>(bi)].insts)
+            if (in.op == IrOp::StoreSlot && in.idx == slot) ++cnt;
+    return cnt;
+}
+
+bool AsmGen::simd_slot_unaddressed(int slot) const {
+    for (const auto& bb : f_->blocks)
+        for (const Inst& in : bb.insts)
+            if (in.op == IrOp::SlotAddr && in.idx == slot) return false;
+    return true;
+}
+
+bool AsmGen::simd_outside(VReg v, int cond_bi, int body_bi, int incr_bi) const {
+    if (v == kNoReg || v >= static_cast<VReg>(def_block_.size())) return false;
+    int db = def_block_[static_cast<size_t>(v)];
+    return db >= 0 && db != cond_bi && db != body_bi && db != incr_bi;
+}
+
+bool AsmGen::simd_slot_stable(VReg v, int cond_bi, int body_bi, int incr_bi) const {
+    const Inst* d = simd_def(v);
+    if (!d) return false;
+    if (d->op != IrOp::LoadSlot) return true;             // SSA 跨块值：循环内无写
+    int sl = d->idx;
+    for (int bi : {cond_bi, body_bi, incr_bi})
+        for (const Inst& in : f_->blocks[static_cast<size_t>(bi)].insts)
+            if (in.op == IrOp::StoreSlot && in.idx == sl) return false;
+    return true;
+}
+
+bool AsmGen::simd_scratch_safe(const MOperand& o) {
+    if (o.kind != MOperandKind::Reg) return true;
+    MReg r = o.reg;
+    if (r == kRax || r == kRcx || r == kRdx || r == kRsi || r == kRdi) return false;
+    if (r >= kXmm0 && r <= kXmm7) return false;
+    return true;
+}
+
+bool AsmGen::try_simd_vectorize(const Block& b) {
+    if (!simd_enabled_) return false;
+    if (try_simd_reduction(b)) return true;
+    if (try_simd_int_map(b)) return true;
+    if (try_simd_nbody_pos(b)) return true;
+    if (try_simd_nbody_pair(b)) return true;
+    return false;
+}
+
 }  // namespace pyadamas

@@ -349,3 +349,134 @@ AVX2 `vmulpd/vaddpd/vdivpd ymm` 4 double/指令，理论再翻倍。但：
 **纪律**：每阶段独立门控、独立验收（逐位/钉住输出 + 全套件 + asm 字节不变）。
 别名/依赖判据宁保守跳过不可误向量化；浮点 reduction 改序必须先钉住基准输出。
 通用自动向量化是 gcc/clang 数年的大功能，不在一轮内尝试。
+
+## 10. 0.334 扩展实测：nbody（P2）+ matmul（P3）
+
+> 状态：**已落地**（simd2 分支）。门控沿用 `PYADAMAS_SIMD`，默认 0。
+> 三个新匹配器 + 共享判据，全部精确形状匹配（不做通用向量化器）。
+> 文件：codegen_simd_int.cpp（196 行）/ codegen_simd_nbody.cpp（206）/
+> codegen_simd_nbody_pair.cpp（397）/ codegen_simd.cpp 共享 helpers（461）。
+
+### 10.1 matmul 整数内循环（P3，codegen_simd_int.cpp）
+
+实际基准形态不是教科书 `sum += a[i][k]*b[k][j]`（k-reduction），而是循环重排后的
+**j 内循环逐元素 map**：`for j: c[i*N+j] += aik * b[k*N+j]`（aik 外提）。
+b/c 沿 j 连续 → movupd 一对取两元素，是理想的 2-lane 目标。17 条核心体精确匹配。
+
+**i64 语义关键事实**：pyadamas 整数是 **i64 回绕**（gen_bin_int 直发 imulq/addq，
+无溢出检查/ bigint 提升）。所以：
+
+* `paddq` 与 `addq` 模 2^64 逐位一致，**任意值**成立，c 无需守卫。
+* 乘法要重构 imulq 低 64 位。SSE2 无 packed 64×64→64；**pmulld（SSE4.1）是
+  32×32→32 低半，直接用会算错**（任务 caution 点名）。选用 **pmuludq 组合**：
+
+```
+设 aik ∈ [0, 2^31)（入口守卫），b = b_hi*2^32 + b_lo（b_lo = 低32无符号）：
+  aik*b mod 2^64 = aik*b_lo + ((aik*b_hi) mod 2^32) << 32
+向量体（每 2 元素）：
+  movapd b, t ; psrlq $32, t        ; t_lo32 = b_hi mod 2^32
+  pmuludq aik_vec, t                ; aik * (b_hi mod 2^32)，< 2^63 精确
+  psllq $32, t                      ; 交叉项 << 32（保留低32到高半）
+  pmuludq aik_vec, b                ; aik * b_lo，< 2^63 精确
+  paddq t, b                        ; prod（回绕 = imulq）
+```
+
+  对**任意 i64 b**（负数、≥2^32、INT64_MIN/MAX）逐位一致——b_hi 取 mod 2^32
+  后无符号乘的低 32 与有符号乘积 mod 2^32 相同。守卫只约束 aik（循环不变量，
+  入口一次）；b/c 元素**无逐元素守卫**（零开销）。aik<0 或 >=2^31 → 整段标量。
+* **别名守卫**：b 与 c 必须不同对象（入口指针判等）。同对象时写 c[iN+j] 可能
+  覆盖后续迭代读的 b[kN+j']（如 iN=kN+1），标量顺序语义被破坏 → 保守跳过。
+  不同 list 对象 data 数组必不相交（各自 malloc，无 view）。c 读/写基址
+  （IR 里是不同 vreg）运行时判等。
+* 范围守卫 j>=0、base>=0、base+n<=len（addq 后 js 查溢出）、kind==0 →
+  movupd 不越界、读裸 i64；不满足整段标量，IndexError/负索引时机不变。
+  kind0 写无 RC（旧值是裸标量，标量快路径同样不 dec）→ movupd  store 等价。
+
+**实测**（N=120，输出 43198080 == CPython）：cycles 34.46M→5.80M（**5.94×**），
+instructions 89.2M→16.6M。标量每元素 ~49 条（3 组边界检查 + kind 检查 + 栈往返）
+→ 向量每 2 元素 ~15 条。perf annotate：movupd 29.15% + pmuludq 14.18%。
+墙钟 min 12.76→5.95ms（含启动）；同窗口 Go 6.45ms → **PA-on 3.10ms = 0.48× Go**。
+
+### 10.2 nbody 位置更新 map（P2a，codegen_simd_nbody.cpp）
+
+`for i in range(5): b[i7+k] += dt*b[i7+k+3]`（k=0,1,2），34 条核心体。
+stride-7 逐元素 map：沿 i 轴取 (i,i+1) 两体，同分量相距 56 字节，SSE2 无 gather →
+movsd×2 + unpcklpd 拼对。dt*vel + pos 逐 lane IEEE 同标量，元素独立无 reduction。
+别名**结构判据**（无运行时守卫）：行距 7 > 最大偏移 5 → 两体行不相交；行内读
+{0..5} 写 {0,1,2} 分量先读后写；跨迭代行不相交。守卫 7n<=len（imulq $7 + js）、
+kind0、j>=0。只用 xmm0-4 → 不碰提升池，任何 fp 提升形态都安全。奇数 n 标量尾。
+
+### 10.3 nbody pairwise 力循环（P2b，codegen_simd_nbody_pair.cpp）
+
+113 条核心体精确匹配（dx/dy/dz → d2 → sqrt → mag → i 侧 3 减 + j 侧 3 加）。
+
+**向量化轴选择：分量轴 [x,y]+z 标量，不是 j 对轴。** 任务原设想 j 对轴
+（sqrtpd 一次算两体）需要 16 个 xmm（9 不变量 + 7 scratch）；advance 有 4 个
+fp 提升槽 + dt 提升 vreg 占 xmm8-12，只剩 12 个，**放不下**。分量轴只需 11 个
+（5 不变量 INV_XY/ZI/MIXY/ACCXY/ACCZ + 6 scratch），且步长 1 **无尾循环**。
+代价：sqrt/div 延迟未摊销（仍标量 sqrtsd/divsd 每对一次）——实测收益仍 4.32×，
+因为标量热点的大头是边界检查/槽 spill 流量而非 sqrt 吞吐（§10.5）。
+
+**逐位一致构造**：
+
+* dx/dy 成对 subpd；dz 标量 subsd。d2 **保序水平求和**：mulpd [dx²,dy²] →
+  movhlps+addsd 得 dx²+dy²（= 标量第一次加）→ +dz²（= 标量第二次加）。
+* sqrt：sqrtsd（与标量 fast path 同指令，IEEE 正确舍入）；**负数双保险守卫**
+  comisd d2,0 → ja 冷路径（写回 acc → 标量尾，pa_math_sqrt 抛 ValueError 时机
+  不变）。d2 是平方和理论上 >=0 或 NaN；NaN 时 comisd 无序不跳，sqrtsd(NaN)=NaN
+  与 pa_math_sqrt(NaN) 一致。
+* mag = dt/(d2*sqrt)：mulsd+divsd 标量，逐位同。
+* **i 侧 acc_x/acc_y 是独立累加器**（b[i7+3]/b[i7+4] 两个不同内存位置）→
+  subpd 双 lane 各自减，**无跨 lane 改序**；跨 j 的串行顺序逐轮保持（每向量
+  迭代 = 1 标量 j 迭代）。acc_z 标量 subsd。acc 提升 xmm 跨轮持有，**正常退出
+  与 sqrt 负数冷路径都先写回** b[i7+3..5] 再进 cond/标量尾。
+* j 侧逐元素：读旧值对 + addpd + movupd 写回（xy），z 标量。
+
+**别名结构判据**：守卫 j7>=i7+7（即 j>i，行距 7）→ i 行偏移 0..6 与 j 行偏移
+0..6 不相交；i 侧写 {3,4,5} 与 i 侧读 {0,1,2,6} 不相交；j 侧读 {0,1,2,6} 与写
+{3,4,5} 不相交；跨迭代 j 行不相交。→ b[i7+0..2,6] 循环不变，setup 一次装载
+（标量每迭代重载是因为 LICM 无法证明不别名，结构判据补上）。i7>=0、7n<=len、
+i7+6<len、kind0 守卫。向量循环零调用（sqrt 内联，冷路径跳标量尾才调用）。
+
+**空闲 xmm 发现**：扫描 slot_reg_/vreg_reg_ 收集被提升占用的 xmm8-15，其余 +
+xmm0-7 组成池；不变量优先占空闲高位，scratch 补 xmm0-7；池 <11 保守跳过。
+绝不写提升寄存器（标量尾的 LoadSlot 别名/spill-reload 依赖它们）；标量体所有
+fp 槽读都在体内写之后（dx/dy/dz/d2/mag 先 store 后 load），向量体不维护它们
+也安全——尾循环第一条起就重新计算。
+
+**实测**（N=50000，输出 -928502048 == flag-off == CPython；N=1 全 35 元素逐位
+比对通过）：cycles 89.87M→20.81M（**4.32×**），instructions 200.7M→55.7M。
+墙钟 min 34.66→7.91ms（4.38×）；同窗口 Go 12.17ms → **PA-on 8.49ms = 0.70× Go**。
+perf annotate：99.07% 在 advance_1，packed 14.0% + 标量 sd 19.3%（保序 d2 链 +
+sqrt/div + z 分量），其余是整数/控制/访存。
+
+**开发期 bug 取证**：dz² 误发 `mulsd DZ, T2`（T2 低 lane 还是 dy² → 算成
+dy²*dz）。零速度小测试（dy=dz=0）掩盖了它，全 3D 初值 N=1 即暴露 → 改
+movapd+mulsd 自乘。教训：**浮点向量化回归必须用非退化初值**（287 用基准全初值）。
+
+### 10.4 闸门汇总（0.334）
+
+* flag-off asm 对 0.333 基线逐字节不变：38 热基准 cmp 全同。
+* flag-on 只改 3 个基准（matmul 10 / nbody 35 / spectral_norm 36 条 packed），
+  其余 35 个热基准 asm 不变。
+* difftest flag-on 276/0；全套件 normal flag-off/on EXIT=0（294 ran ok）；
+  ASan JOBS=1 flag-off/on EXIT=0；285-288 normal+ASan 双 flag ran ok；
+  CPython 对拍 38 热基准双 flag 零差异；check_size 无新增超限。
+* 回归 285（int 向量路径）/286（int fallback：负 aik、aik>=2^31、别名、kind、
+  IndexError 时机、大 b 重构、溢出回绕）/287（nbody 向量路径 + 3/2/1 体）/
+  288（nbody fallback：len<7n、kind、d2=0、负 dt）。O0/O1/O2 一致。
+
+### 10.5 剩余路径（更新 §9）
+
+| 阶段 | 内容 | 状态 |
+|---|---|---|
+| P1 | spectral_norm reduction | 0.333 已落地 |
+| P2 | nbody 位置 map + pairwise 力（分量轴） | **0.334 已落地** |
+| P3 | matmul 整数内循环（pmuludq 组合 + 守卫） | **0.334 已落地** |
+| P2+ | nbody j 对轴 sqrtpd（摊销 sqrt/div 延迟）：需 16 xmm，先解决 fp 提升冲突（不变量 spill 到帧 / 提升池让位 / 帧扩展）。收益不确定（sqrt 链占比已小），**实测决定** | 待评估 |
+| P3+ | matmul 负 aik 修正项 / 全 64 emulation（无守卫，9 条/2 元素）；iN/kN 索引 imul 强度削减已在 LICM 外提 | 待评估 |
+| P4 | 通用化：向量 IR op + 类型 + regalloc + data-ref 分析 + 循环版本化 | 待 |
+| P5 | AVX2/AVX-512 dispatch（CPU 检测）、对齐 peel | 待 |
+
+spectral_norm 的保序 addsd 链（0.333 §3.4）与 nbody 的标量 sqrt/div 链是同类
+剩余瓶颈：改序/加宽都必须先钉住输出（逐位或基准规模全验证），否则不启用。

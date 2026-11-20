@@ -4,6 +4,94 @@
 
 早期阶段没有逐条留痕，按阶段归纳；0.4 之后逐条记录。
 
+## [0.334] - 2026-11-20
+
+> simd2 分支：SIMD 向量化扩展到 **nbody（浮点逐元素 map + pairwise 力）与 matmul
+> （整数内循环）**，建立在 0.333 codegen_simd.cpp 原型上。门控 `PYADAMAS_SIMD=0/1`
+> **默认 0**；flag-off 生成 asm 逐字节不变。正确性优先：全部逐位一致（整数 i64
+> 回绕语义精确重构、浮点保序），守卫不满足整段标量 fallback。设计见
+> docs/simd-vectorization-design.md §10。接 simd 0.333 之后集成，定版 0.334。
+
+### 新增
+
+- **codegen_simd_int.cpp**（P3）：matmul 整数内循环 `c[base+j] += aik*b[base2+j]`
+  （17 条核心体精确匹配）。SSE2 2-lane i64：movupd 取相邻两元素 → **pmuludq 组合
+  精确重构 imulq 低 64 位**（aik∈[0,2^31) 守卫下 prod = aik*b_lo + ((aik*b_hi)<<32)，
+  对任意 i64 b 含负数/≥2^32 逐位一致）→ paddq（=addq 回绕）→ movupd 写回。
+  守卫：j>=0、base>=0、base+n<=len（溢出检查）、**b!=c 对象别名守卫**、c 读/写
+  基址运行时判等、kind==0；aik 超范围整段标量。不做 pmulld 32 位截断（会算错）。
+- **codegen_simd_nbody.cpp**（P2a）：位置更新 stride-7 map `b[i7+k] += dt*b[i7+k+3]`
+  （34 条核心体）。沿 i 轴两体拼对（movsd×2+unpcklpd，SSE2 无 gather），dt*vel+pos
+  逐 lane 逐位一致；7n<=len/kind0 守卫；奇数标量尾。只用 xmm0-4，任何 fp 提升形态安全。
+- **codegen_simd_nbody_pair.cpp**（P2b）：pairwise 力循环（113 条核心体精确匹配）。
+  **分量轴 [x,y]+z 标量**（不是 j 对轴——j 对轴需 16 xmm，advance 有 4 个 fp 提升槽
+  占 xmm8-15 放不下；分量轴 11 个）。步长 1 无尾循环；d2 **保序水平求和**
+  （movhlps+addsd 先 dx²+dy² 再 +dz²）；sqrtsd/divsd 与标量 fast path 逐位一致；
+  i 侧 acc_x/acc_y 是独立累加器 → subpd 双 lane 不改序，acc 提升 xmm 跨轮持有，
+  **退出/sqrt 负数守卫路径先写回**。别名结构判据：j7>=i7+7 守卫 → i/j 行不相交、
+  行内读偏移{0,1,2,6}与写偏移{3,4,5}不相交 → b[i7+0..2,6] 循环不变 setup 一次装载。
+  sqrt 负数双保险守卫（d2<0 → 写回 acc → 标量尾 ValueError 时机不变；NaN 走
+  sqrtsd=NaN 与 pa_math_sqrt 一致）。**空闲 xmm 发现**：扫描 slot_reg_/vreg_reg_
+  排除提升占用，11 寄存器动态分配，不够保守跳过。
+- **共享判据**（codegen_simd.cpp）：simd_func_ok/simd_core_body/simd_incr_cond_ok/
+  simd_loop_ops_ok/simd_slot_writers/simd_outside/simd_slot_stable/simd_scratch_safe；
+  gen_block 挂钩改 try_simd_vectorize 分发（reduction → int map → nbody pos → pair）。
+- **机器层**：MOp 登记 sqrtsd（仅枚举+名字表，现有发射点不引用）。
+- **回归用例** tests/run/285_simd_int_map.py（向量路径 N=7/4/1，对拍 CPython）/
+  286_simd_int_map_scalar.py（负 aik/aik>=2^31/别名/kind 混合/IndexError 时机/n=0/
+  大 b pmuludq 重构/溢出回绕，on==off==O0==O1）/287_simd_nbody_map.py（5 体 25 步 +
+  3/2/1 体小 trip-count，对拍 CPython 逐位一致）/288_simd_nbody_scalar.py
+  （len<7n IndexError 时机/kind 混合/d2=0 inf-nan 语义/负 dt）。
+
+### 正确性口径
+
+- 整数：pyadamas i64 回绕语义（标量 imulq/addq 无溢出检查）→ paddq 逐位一致；
+  pmuludq 组合在 aik∈[0,2^31) 守卫下对**任意** b 精确（推导见设计文档 §10.2）。
+  溢出不是语义分歧点（回绕双方一致），守卫只保证乘法重构精确。
+- 浮点：逐 lane IEEE 同标量 + 保序（d2 水平求和按标量结合序、i 侧跨 j 串行顺序
+  逐轮保持、x/y 独立累加器无跨 lane 依赖）→ nbody 输出逐位一致
+  （-928502048 == flag-off == CPython；N=1 全 35 元素逐位比对通过）。
+- flag-on 只改匹配到的循环：38 热基准中仅 matmul/nbody/spectral_norm 出现 packed
+  SIMD（10/35/36 条），其余逐字节不变。
+
+### 测量（Xeon Gold 6252 / Cascade Lake，-O2）
+
+- **matmul**（N=120，输出 43198080 == CPython）perf stat min-of-7 交替：
+  cycles 34.46M→5.80M（**5.94×**）、instructions 89.2M→16.6M（5.36×）。
+  墙钟 15 轮交替 min 12.76→5.95ms（2.15×，含固定启动）/ median 20.71→6.42ms（3.22×）。
+  perf annotate：movupd 29.15% + pmuludq 14.18% 主导热点（flag-off 0 packed，
+  每元素 ~49 条标量含边界检查/栈往返 → 向量每 2 元素 ~15 条）。
+- **nbody**（N=50000，输出 -928502048 == CPython）perf stat min-of-7 交替：
+  cycles 89.87M→20.81M（**4.32×**）、instructions 200.7M→55.7M（3.60×）。
+  墙钟 15 轮交替 min 34.66→7.91ms（**4.38×**）/ median 48.84→19.36ms（2.52×）。
+  perf annotate：99.07% 在 advance_1，packed 14.0%（movupd/mulpd/subpd/addpd/
+  movlhps）+ 标量 sd 19.3%（保序 d2 链 + sqrt/div + z 分量）。
+- **同窗口 Go 对比**（min-of-9 交替，go build 参照）：nbody Go 12.17ms /
+  PA-off 32.80ms（2.69× Go）/ PA-on 8.49ms（**0.70× Go，反超 30%**）；
+  matmul Go 6.45ms / PA-off 25.04ms（3.88× Go）/ PA-on 3.10ms（**0.48× Go，快 2×**）。
+  0.331 差距（nbody 2.1× Go、matmul 2.4× Go）已消除并反超。
+
+### 闸门
+
+- flag-off asm 对 0.333 基线（build/lead）**逐字节不变**：38 热基准
+  （realistic 6 + compare 9 + daily 23）asm cmp 全同 → flag-off 零回归。
+- difftest（O0/O2，flag-on）**276/0**；全套件 normal flag-off/on **EXIT=0（294 ran ok）**；
+  **ASan JOBS=1 flag-off/on EXIT=0（294 ran ok）**（flag-off 首轮 277_urllib_errors
+  环境性 flake——与并行 CPython 对拍 job 资源竞争，standalone 双 flag ran ok，
+  无并行重跑全绿；基线同样偶发，见 0.333 闸门取证）；285-288 normal+ASan flag-on/off 均 ran ok；
+  CPython 对拍 38 热基准 flag-on/off 零差异；check_size 无新增超限
+  （codegen_simd.cpp 461 / int 196 / nbody 206 / pair 397 行，codegen_block.cpp 1199 不变）。
+
+### 剩余 / 通用化路径
+
+- nbody pairwise 的 sqrt/div 仍是标量延迟链（分量轴未摊销）；j 对轴（sqrtpd 2 体）
+  需 16 xmm，得先解决 fp 提升槽冲突（不变量 spill 到帧或提升池让位）——收益不确定，
+  实测决定（§10.4）。spectral_norm 保序 addsd 链同理（0.333 §3.4 阶段 2）。
+- 匹配器仍是精确形状匹配（17/34/113 条核心体），覆盖三个基准的热点形态；
+  通用化（向量 IR op + 依赖分析 + 循环版本化）见 §9 P4，不在本轮。
+- matmul aik<0 或 >=2^31 整段标量（pmuludq 组合守卫）；可扩展负 aik 修正项或
+  全 64 位 emulation（9 条/2 元素，无守卫）——实测收益不抵复杂度时保持保守。
+
 ## [0.333] - 2026-11-20
 
 > simd 分支：浮点循环 SIMD 向量化**原型**（设计 + spectral_norm 最小可行原型 +

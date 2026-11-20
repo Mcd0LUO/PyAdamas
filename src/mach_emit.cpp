@@ -111,6 +111,7 @@ constexpr NamedOp kOpNames[] = {
     {"movlhps", MOp::kMovlhps},
     {"movhlps", MOp::kMovhlps},
     {"unpcklpd", MOp::kUnpcklpd},
+    {"sqrtsd", MOp::kSqrtsd},
     {"seta", MOp::kSeta},
     {"setae", MOp::kSetae},
     {"setb", MOp::kSetb},
