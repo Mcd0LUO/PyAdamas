@@ -31,6 +31,8 @@ set(PYADAMAS_SOURCES
   src/driver_util.cpp
   src/driver_link.cpp
   src/driver_build.cpp
+  src/driver_modules.cpp
+  src/driver_check.cpp
   src/builtin_sigs.cpp
   src/parser.cpp
   src/parser_stmt.cpp
@@ -108,6 +110,8 @@ set(PYADAMAS_SOURCES
 src/opt_intloop.cpp
   src/codegen.cpp
   src/codegen_regalloc.cpp
+  src/codegen_regalloc_scan.cpp
+  src/codegen_regalloc_temp.cpp
   src/ra_opt.cpp
   src/codegen_block.cpp
   src/codegen_comment.cpp
