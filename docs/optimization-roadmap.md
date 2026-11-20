@@ -79,3 +79,17 @@
 - RC/GC 改动额外：13/174 flag-on + leak 干净。
 - CHANGELOG 版本递增（0.333 起），集成时定版；选择性 git add；推送走 SSH root@127.0.0.1。
 - build/release 是 0.271 oracle，**绝不重建**；主树 build/lead 是当前 release 对照。
+
+## 迭代日志（自主执行记录）
+
+| 轮 | 内容 | 版本 | 结果 |
+|---|---|---|---|
+| R1 | SIMD 原型 spectral_norm reduction | 0.333 | ✅ cycles 4.36× / 墙钟 2.29×，逐位一致，集成 |
+| R2 | SIMD 扩展 nbody+matmul | 0.334 | ✅ matmul 5.94× / nbody 4.32×，**反超 Go**（0.48×/0.70×），集成 |
+| R3 | 循环 RC 消除（块内对消除） | — | ❌ **负面**：正确但≈0 加速（RC 密集循环开销主体是必要所有权转移，非冗余对）。循环外提/borrow 细化收益不抵风险。**跳过不集成**。真正杠杆=borrow 细化（只读借用循环变量槽），需独立专项轮（slot_owned/帧释放/异常展开协同 + 跨迭代值 identity 分析）。rc1 分支留档未合。 |
+
+### 优先级调整（据实测）
+- 数值核（spectral_norm/nbody/matmul）已反超 Go → SIMD 主线告一段落（通用化 P4 / AVX2 P5 留后续）。
+- RC 对消除是死胡同（≈0）；borrow 细化是真正 RC 杠杆但高风险，列专项（R-borrow）。
+- **下一轮 R4 = 整数循环优化**（nqueens 1.6× Go / fannkuch 2.4× C++ / matmul 索引）：BCE + 展开 + 强度削减 + regalloc。
+- 待议：SIMD 默认开（当前 opt-in，门控全过；narrow matcher 仅匹配特定循环，fallback 安全）。
