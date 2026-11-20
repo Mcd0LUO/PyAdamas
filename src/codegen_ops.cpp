@@ -376,15 +376,15 @@ void AsmGen::gen_load_slot(const Inst& in) {
         // P3：unknown 槽不走别名优化（别名只搬 payload 会丢 tag），
         // 老老实实搬 payload + tag 两个字。冷路径，正确性优先。
         if (slot_tagged(in.idx)) {
-            move_to(dst_op(in.dst), slot_op(in.idx));
+            move_to(dst_mop(in.dst), slot_mop(in.idx));
             if (vreg_tagged(in.dst))
-                move_to(tag_mem(in.dst), slot_tag_op(in.idx));
+                move_to(tag_mop(in.dst), slot_tag_mop(in.idx));
             else
                 emit_tag_imm(in.dst, kTagUnk);
             return;
         }
         // split 模式下位置按块查表；默认模式保持原行为。
-        std::string sop = slot_op(in.idx);
+        const MOperand& sop = slot_mop(in.idx);
         // 融合目标非空时**必须**真的写过去，不能走别名——别名只是
         // 让 %v 指向变量的位置，而 `store.slot s, %v` 已经被吞掉，
         // 变量的位置不会有任何变化，值就悄悄丢了。
@@ -393,7 +393,7 @@ void AsmGen::gen_load_slot(const Inst& in) {
         if (slot_loc_.empty() && dst_loc_.empty() && in.dst != kNoReg &&
             in.dst < use_count_.size() &&
             use_count_[in.dst] == 1 && !cross_block_[in.dst] &&
-            (opt_ >= 1 || sop[0] == '%')) {
+            (opt_ >= 1 || sop.kind == MOperandKind::Reg)) {
             // 读之后、第一次真正使用之前不能有对该变量的赋值。
             bool clobbered = false;
             auto stv = block_stores_.find(in.idx);
@@ -407,7 +407,7 @@ void AsmGen::gen_load_slot(const Inst& in) {
                 return;
             }
         }
-        move_to(dst_op(in.dst), sop);
+        move_to(dst_mop(in.dst), sop);
     }
 
 void AsmGen::gen_const_int(const Inst& in) {

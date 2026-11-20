@@ -23,9 +23,9 @@ void AsmGen::layout_frame(int total_slots) {
     }
 
 void AsmGen::frame_alloc() {
-        if (frame_pad_ > 0) emit_imm_op("subq", frame_pad_, "%rsp");
+        if (frame_pad_ > 0) emit_imm(MOp::kSubq, frame_pad_, kRsp);
         cfa_off_ = frame_bytes_ + 8;
-        cfi(std::format(".cfi_def_cfa_offset {}", cfa_off_));
+        cfi_cfa_offset();
     }
 
 // 尾声：先退局部区，再逐个弹回 callee-saved，最后 ret。

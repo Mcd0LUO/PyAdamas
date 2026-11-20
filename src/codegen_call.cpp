@@ -37,28 +37,28 @@ void AsmGen::gen_make_list(const Inst& in) {
                     gen_tuple_inline(in);
                     return;
                 }
-                emit_imm_op("movq", static_cast<int64_t>(in.args.size()), arg_reg_i(0));
-                emit_imm_op("movq", in.imm, arg_reg_i(1));
+                emit_imm(MOp::kMovq, static_cast<int64_t>(in.args.size()), arg_reg_i(0));
+                emit_imm(MOp::kMovq, in.imm, arg_reg_i(1));
                 for (size_t ai = 0; ai < 4; ++ai) {
-                    if (ai < in.args.size()) emit2("movq", src_op(in.args[ai]), arg_reg_i(2 + ai));
-                    else emit_imm_op("movq", 0, arg_reg_i(2 + ai));
+                    if (ai < in.args.size()) emit2(MOp::kMovq, src_mop(in.args[ai]), arg_reg_i(2 + ai));
+                    else emit_imm(MOp::kMovq, 0, arg_reg_i(2 + ai));
                 }
                 spill_fp_slots();
                 // 全堆元素的定长列表仍走运行时（tracked，需要 rc_link）。
                 line("call pa_list_new_filled");
                 reload_fp_slots();
-                emit2("movq", "%rax", dst_op(in.dst));
+                emit2(MOp::kMovq, kRax, dst_mop(in.dst));
                 return;
             }
         }
         // imm 是元素所有权类别（0 非堆 / 1 堆 / 2 unknown 或混合），
         // 由降级器按容器类型算好，运行时据此决定覆盖和销毁时是否 dec。
-        emit_imm_op("movq", in.args.size(), arg_reg_i(0));
-        emit_imm_op("movq", in.imm, arg_reg_i(1));
+        emit_imm(MOp::kMovq, static_cast<int64_t>(in.args.size()), arg_reg_i(0));
+        emit_imm(MOp::kMovq, in.imm, arg_reg_i(1));
         spill_fp_slots();
         line("call pa_list_new");
         reload_fp_slots();
-        emit2("movq", "%rax", dst_op(in.dst));
+        emit2(MOp::kMovq, kRax, dst_mop(in.dst));
         // 第三个参数是**逐元素**的堆标记（0 非堆 / 1 堆 / 2 unknown），
         // 运行时用它维护列表的 heap_bits 位图，销毁时按位图 dec，
         // 不必再查全局 rc_index（实测省掉 bench_rc_gen 一半的 dec 成本）。
@@ -77,13 +77,13 @@ void AsmGen::gen_make_list(const Inst& in) {
                 if (et && et->kind != TyKind::Unknown)
                     hk = ir_is_heap(et) ? 1 : 0;
             }
-            emit2("movq", dst_op(in.dst), arg_reg_i(0));
-            emit2("movq", src_op(a), arg_reg_i(1));
+            emit2(MOp::kMovq, dst_mop(in.dst), arg_reg_i(0));
+            emit2(MOp::kMovq, src_mop(a), arg_reg_i(1));
             // P3：unknown 元素带 tag 时堆标志从 tag 导出（保住位图）。
             if (tags_enabled_ && hk == 2 && vreg_tagged(a))
                 emit_heap_from_tag(a, arg_reg_i(2));
             else
-                emit_imm_op("movq", hk, arg_reg_i(2));
+                emit_imm(MOp::kMovq, hk, arg_reg_i(2));
             spill_fp_slots();
             line("call pa_list_append");
             reload_fp_slots();
