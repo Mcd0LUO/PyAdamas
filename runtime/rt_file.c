@@ -784,13 +784,17 @@ int64_t pa_file_closed(PyAdamasFile* f) {
 }
 
 /* P4（lang_gaps）：unknown 字是不是 file 对象。file 没有魔数，按
-   RC 注册表 + kind OBJ + 精确尺寸判别（与 pa_is_exc 同口径）。只被
-   门控开时发射的动态分派调用（pa_method_call0 / filelike 包装）。 */
+   堆探针 + kind OBJ + 尺寸下限判别。两个坑（167/81 门控关回归实测）：
+   1) 不能用 rc_index_has——无 unknown 值的程序会跳过索引维护
+      （ir_module_can_skip_index_maint），真 file 也查不到；pa_unknown_is_heap
+      带 exact-RC 堆链回退，两种模式都认得。
+   2) h->size 是池对齐后的 alloc_size，不是请求尺寸——用 >= 而不是 ==。
+      File 是最大的 OBJ 种类（Class/ExcValue/Complex 都远小于它），
+      >= sizeof(PyAdamasFile) 在当前 OBJ 家族里唯一 identifies file。 */
 int64_t pa_is_file(void* v) {
-    if (!v) return 0;
+    if (!pa_unknown_is_heap((int64_t)(uintptr_t)v)) return 0;
     PyAdamasRc* h = (PyAdamasRc*)v - 1;
-    if (!rc_index_has(h)) return 0;
-    return h->kind == PYADAMAS_RC_OBJ && h->size == (int64_t)sizeof(PyAdamasFile) ? 1 : 0;
+    return h->kind == PYADAMAS_RC_OBJ && h->size >= (int64_t)sizeof(PyAdamasFile) ? 1 : 0;
 }
 
 PyAdamasStr* pa_file_name(PyAdamasFile* f) {

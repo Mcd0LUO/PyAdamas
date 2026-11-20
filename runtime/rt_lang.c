@@ -37,9 +37,7 @@ static ExcClassReg* exc_class_regs;
 /* 与 rt_class.c 的 as_class 同口径（那边是 static，这里复制一份）：
    先查 RC 注册表确认是堆对象，再验类魔数。任意 unknown 字都安全。 */
 static PyAdamasClass* lang_as_class(void* p) {
-    if (!p) return NULL;
-    PyAdamasRc* h = (PyAdamasRc*)p - 1;
-    if (!rc_index_has(h)) return NULL;
+    if (!pa_unknown_is_heap((int64_t)(uintptr_t)p)) return NULL;
     PyAdamasClass* c = (PyAdamasClass*)p;
     return c->magic == PYADAMAS_CLASS_MAGIC ? c : NULL;
 }
@@ -189,9 +187,9 @@ static const MethodReg* lang_method_lookup(const char* qual, const char* meth) {
    该类 own_slots 里（尊重覆盖）才返回该类 vtable 的实现。找不到报
    AttributeError。返回的函数指针按调用方口径 cast（零参/带参）。 */
 static void* lang_method_fn(void* obj, const char* meth) {
-    if (obj) {
+    if (pa_unknown_is_heap((int64_t)(uintptr_t)obj)) {
         PyAdamasRc* h = (PyAdamasRc*)obj - 1;
-        if (rc_index_has(h) && h->kind == PYADAMAS_RC_INSTANCE) {
+        if (h->kind == PYADAMAS_RC_INSTANCE) {
             const int64_t* vt = *(const int64_t**)obj;
             if (vt) {
                 const int64_t* meta = vt - 6;

@@ -183,7 +183,8 @@ print(bt.getvalue())
 with BytesIO(b"wctx") as bw:
     print(bw.read())
 print(bw.closed)
-print("done")# --- expect ---
+print("done")
+# --- expect ---
 # 5
 # 6
 # hello world
