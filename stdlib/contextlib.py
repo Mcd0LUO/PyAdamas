@@ -31,15 +31,6 @@ class nullcontext:
         return False
 
 
-def _resume(g: Generator[unknown]) -> bool:
-    """恢复生成器一次；结束返回 True，继续 yield 返回 False。"""
-    try:
-        next(g)
-    except StopIteration:
-        return True
-    return False
-
-
 class _GeneratorContextManager:
     """@contextmanager 包装出来的上下文对象。"""
 
@@ -55,8 +46,17 @@ class _GeneratorContextManager:
     def __exit__(self, et, ev, tb) -> bool:
         g: Generator[unknown] = self.gen
         if et is None:
-            if _resume(g):
+            # 用 for 循环推进生成器（而不是 next()+except StopIteration）：
+            # pa 的异常值对象在被 __exit__ 的 handler 接收后会留到进程退出，
+            # ASan detect_leaks=1 报 176 字节泄漏（见 docs/stdlib-batch3.md
+            # 已知问题）。for 循环的正常结束路径不建异常值，干净。
+            extra = False
+            for _ in g:
+                extra = True
+                break
+            if not extra:
                 return False
+            g.close()
             raise RuntimeError("generator didn't stop")
         # 异常注回做不到（见模块文档）：用 close() 跑生成器里的
         # finally/with 清理，异常本身原样向外抛（不吞）。

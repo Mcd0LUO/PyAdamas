@@ -20,13 +20,6 @@ with tag("a") as a:
         print("nested", a, b)
 
 @contextmanager
-def pair():
-    yield 1, 2
-
-with pair() as v:
-    print("pair", v[0], v[1])
-
-@contextmanager
 def add(a: int, b: int):
     yield a + b
 
@@ -64,6 +57,13 @@ except RuntimeError as e:
 print(log2)
 print("done")
 
+@contextmanager
+def pair():
+    yield 1, 2
+
+with pair() as v:
+    print("pair", v[0], v[1])
+
 
 # --- expect ---
 # null 5
@@ -76,7 +76,6 @@ print("done")
 # nested a b
 # exit b
 # exit a
-# pair 1 2
 # sum 5
 # many 6
 # start
@@ -89,3 +88,4 @@ print("done")
 # caught body
 # ['clean']
 # done
+# pair 1 2
