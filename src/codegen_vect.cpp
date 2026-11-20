@@ -239,6 +239,7 @@ bool AsmGen::try_vect_loop(const Block& b) {
     std::unordered_map<VReg, VClass> cls;
     std::vector<Access> accesses;
     std::vector<VReg> inv_floats;                         // 需要广播的不变量 float
+    std::vector<VReg> inv_ints;                          // 需要广播的不变量 int
     bool failed = false;
 
     // 下标仿射偏移：j → 0；j+c（c>=0 常量）→ c；否则 -1。
@@ -345,6 +346,9 @@ bool AsmGen::try_vect_loop(const Block& b) {
                 VK ka = classify(d->a), kb = classify(d->b);
                 bool fa = ir_is_float(ty_of(d->a)), fb = ir_is_float(ty_of(d->b));
                 auto float_ok = [](VK k) { return k == VK::InvF || k == VK::VecF; };
+                auto int_ok = [](VK k) { return k == VK::InvI || k == VK::VecI; };
+                bool ia = ty_of(d->a) && ty_of(d->a)->kind == TyKind::Int;
+                bool ib = ty_of(d->b) && ty_of(d->b)->kind == TyKind::Int;
                 if (fa && fb && float_ok(ka) && float_ok(kb)) {
                     switch (d->bop) {
                         case BinKind::Add: case BinKind::Sub:
@@ -352,8 +356,15 @@ bool AsmGen::try_vect_loop(const Block& b) {
                             c.kind = VK::VecF; break;
                         default: c.kind = VK::Fail;
                     }
+                } else if (ia && ib && int_ok(ka) && int_ok(kb) &&
+                           (d->bop == BinKind::Add || d->bop == BinKind::Sub)) {
+                    // int 逐元素加/减：paddq/psubq 模 2^64 与标量 addq/subq 逐位一致。
+                    // int 乘（需 pmuludq 组合 + 守卫）/除等本轮不支持 → 保守跳过。
+                    c.kind = VK::VecI;
+                    if (ka == VK::InvI) inv_ints.push_back(d->a);
+                    if (kb == VK::InvI) inv_ints.push_back(d->b);
                 } else {
-                    c.kind = VK::Fail;                    // int 运算在增量 2 支持
+                    c.kind = VK::Fail;
                 }
                 break;
             }
@@ -536,8 +547,15 @@ bool AsmGen::try_vect_loop(const Block& b) {
         for (VReg u : uniq_inv) if (u == r) dup = true;
         if (!dup) uniq_inv.push_back(r);
     }
+    for (VReg v : inv_ints) {
+        VReg r = resolve_src(v);
+        bool dup = false;
+        for (VReg u : uniq_inv) if (u == r) dup = true;
+        if (!dup) uniq_inv.push_back(r);
+    }
     std::unordered_map<VReg, MReg> inv_reg;
     for (VReg v : uniq_inv) {
+        if (!simd_scratch_safe(list_base_mop(v))) return false;  // 不变量来源不能落在 scratch
         MReg r = take(kMRegNone);
         if (r == kMRegNone) return false;
         inv_reg[v] = r;
@@ -631,15 +649,20 @@ bool AsmGen::try_vect_loop(const Block& b) {
             // 相等 → 不同 vreg 可能持同一对象，无法静态证明偏移安全 → 保守标量。
             emit_jmp(MOp::kJe, tail);
         }
-    // setup：不变量 float 广播。
+    // setup：不变量广播（float 用 movsd/位模式，int 用 movq）。
     for (VReg v : uniq_inv) {
         MReg rr = inv_reg[v];
         const Inst* d = simd_def(v);
         if (d && d->op == IrOp::ConstFloat) {
             emit_imm_hex(MOp::kMovq, f64_bits(d->fimm), kRax);
             emit2(MOp::kMovq, kRax, rr);
+        } else if (d && d->op == IrOp::ConstInt) {
+            emit_imm(MOp::kMovq, d->imm, kRax);
+            emit2(MOp::kMovq, kRax, rr);
+        } else if (ir_is_float(ty_of(v))) {
+            emit2(MOp::kMovsd, list_base_mop(v), rr);
         } else {
-            emit2(MOp::kMovsd, src_mop(v), rr);
+            emit2(MOp::kMovq, list_base_mop(v), rr);
         }
         emit2(MOp::kMovlhps, rr, rr);
     }
@@ -664,13 +687,22 @@ bool AsmGen::try_vect_loop(const Block& b) {
                 MReg ra = xmm_of(in.a), rb = xmm_of(in.b);
                 if (ra == kMRegNone || rb == kMRegNone) return false;  // 不应发生
                 if (rd != ra) emit2(MOp::kMovapd, ra, rd);
+                const bool is_int = ty_of(in.dst) && ty_of(in.dst)->kind == TyKind::Int;
                 MOp op = MOp::kAddpd;
-                switch (in.bop) {
-                    case BinKind::Add: op = MOp::kAddpd; break;
-                    case BinKind::Sub: op = MOp::kSubpd; break;
-                    case BinKind::Mul: op = MOp::kMulpd; break;
-                    case BinKind::Div: op = MOp::kDivpd; break;
-                    default: return false;
+                if (is_int) {
+                    switch (in.bop) {
+                        case BinKind::Add: op = MOp::kPaddq; break;
+                        case BinKind::Sub: op = MOp::kPsubq; break;
+                        default: return false;
+                    }
+                } else {
+                    switch (in.bop) {
+                        case BinKind::Add: op = MOp::kAddpd; break;
+                        case BinKind::Sub: op = MOp::kSubpd; break;
+                        case BinKind::Mul: op = MOp::kMulpd; break;
+                        case BinKind::Div: op = MOp::kDivpd; break;
+                        default: return false;
+                    }
                 }
                 emit2(op, rb, rd);
                 break;
