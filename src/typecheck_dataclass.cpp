@@ -281,7 +281,11 @@ void TypeChecker::expand_dataclass(ClassDef& c, ClassInfoPtr& cls) {
         Arg self; self.name = "self";
         fn->args.args.push_back(std::move(self));
         fn->returns = mk_name("str", line, col);
-        ExprPtr acc = mk_str(c.name + "(", line, col);
+        // CPython 的 dataclass repr 用 __qualname__：函数内定义的类是
+        // func.<locals>.Cls（单层嵌套；更深层嵌套的完整链不在 v1 范围）。
+        std::string qual = cur_fn_def_ ? cur_fn_def_->name + ".<locals>." + c.name
+                                       : c.name;
+        ExprPtr acc = mk_str(qual + "(", line, col);
         bool first = true;
         for (auto& f : cls->fields) {
             if (!first) acc = mk_add(std::move(acc), mk_str(", ", line, col), line, col);

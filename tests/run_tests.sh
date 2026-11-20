@@ -70,11 +70,24 @@ for f in tests/*.py; do
     fi
 done
 
+# 用例级编译开关（与 run_test 同口径）：fail/strict/unsupported 循环也认
+# 文件头的 type-tags / lang-gaps 指令（P4 块4 的门控负面用例需要）。
+test_extra_env() {
+    local extra=""
+    if sed -n '1,8p' "$1" | grep -q '^# pyadamas: type-tags'; then
+        extra="PYADAMAS_TYPE_TAGS=1"
+    fi
+    if sed -n '1,8p' "$1" | grep -q '^# pyadamas: lang-gaps'; then
+        extra="PYADAMAS_LANG_GAPS=1"
+    fi
+    printf '%s' "$extra"
+}
+
 for f in tests/fail/*.py; do
     match "$f" || continue
     name=$(basename "$f")
     want=$(head -1 "$f" | sed -n 's/^# expect: //p')
-    got=$("$PYADAMAS" check "$f" 2>&1 >/dev/null | head -1)
+    got=$(env $(test_extra_env "$f") "$PYADAMAS" check "$f" 2>&1 >/dev/null | head -1)
     printf '  %-28s ' "$name"
     if [ -z "$got" ]; then
         printf 'MISSED (expected: %s)\n' "$want"
@@ -165,12 +178,12 @@ for f in tests/unsupported/*.py; do
     match "$f" || continue
     name=$(basename "$f")
     want=$(head -1 "$f" | sed -n 's/^# unsupported: //p')
-    got=$("$PYADAMAS" check -v "$f" 2>&1 >/dev/null | head -1)
+    got=$(env $(test_extra_env "$f") "$PYADAMAS" check -v "$f" 2>&1 >/dev/null | head -1)
     printf '  %-28s ' "$name"
     if ! printf '%s' "$got" | grep -qF "$want"; then
         printf 'NOT MARKED (expected: %s)\n' "$want"
         fail=1
-    elif "$PYADAMAS" build -o "$prog" "$f" > /dev/null 2>&1; then
+    elif env $(test_extra_env "$f") "$PYADAMAS" build -o "$prog" "$f" > /dev/null 2>&1; then
         printf 'COMPILED ANYWAY\n'
         fail=1
     else
@@ -185,7 +198,7 @@ for f in tests/strict/*.py; do
     name=$(basename "$f")
     want=$(head -1 "$f" | sed -n 's/^# expect: //p')
     printf '  %-28s ' "$name"
-    got=$("$PYADAMAS" build -o "$prog" "$f" 2>&1 >/dev/null | head -1)
+    got=$(env $(test_extra_env "$f") "$PYADAMAS" build -o "$prog" "$f" 2>&1 >/dev/null | head -1)
     if [ -z "$got" ]; then
         printf 'COMPILED (expected refusal: %s)\n' "$want"
         fail=1
@@ -207,7 +220,7 @@ run_module() {
     name=$(basename "$d")
     res="$modlog/$name.res"
     local p="$modlog/$name.prog" o="$modlog/$name.out" e="$modlog/$name.exp" err="$modlog/$name.err"
-    if ! "$PYADAMAS" run --rebuild -o "$p" "$d/main.py" > "$o" 2>&1; then
+    if ! env $(test_extra_env "$d/main.py") "$PYADAMAS" run --rebuild -o "$p" "$d/main.py" > "$o" 2>&1; then
         { echo FAILED; sed -n '1,8p' "$o"; } > "$res"
         return
     fi
@@ -216,7 +229,7 @@ run_module() {
         { echo "OUTPUT DIFF"; diff "$e" "$o" | head -12; } > "$res"
         return
     fi
-    if ! "$PYADAMAS" run -v -o "$p" "$d/main.py" > /dev/null 2> "$err"; then
+    if ! env $(test_extra_env "$d/main.py") "$PYADAMAS" run -v -o "$p" "$d/main.py" > /dev/null 2> "$err"; then
         echo "SECOND RUN FAILED" > "$res"
         return
     fi
@@ -224,7 +237,7 @@ run_module() {
         echo "CACHE MISS" > "$res"
         return
     fi
-    if ! "$PYADAMAS" check --imports "$d/main.py" > "$modlog/$name.chk" 2>&1; then
+    if ! env $(test_extra_env "$d/main.py") "$PYADAMAS" check --imports "$d/main.py" > "$modlog/$name.chk" 2>&1; then
         { echo "CHECK --imports FAILED"; sed -n '1,6p' "$modlog/$name.chk"; } > "$res"
         return
     fi

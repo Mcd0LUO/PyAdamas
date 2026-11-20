@@ -323,9 +323,11 @@ VReg Lowerer::lower_builtin_text(const std::string& name, Call& c) {
         if (opts_.lang_gaps && t &&
             (t->kind == TyKind::List || t->kind == TyKind::Dict ||
              t->kind == TyKind::Set || t->kind == TyKind::Bytes)) {
-            // set 的运行期表示是 dict（值恒 0），探针 repr 会印成 {k: 0}；
-            // 静态 set 走专用入口按键迭代印 {elem, ...}。
-            RtFn fn = t->kind == TyKind::Set ? RtFn::ReprSet : RtFn::ReprAny;
+            // set 的运行期表示是 dict（值恒 0）、bytes 与 str 同表示，探针
+            // repr 都分不出；静态已知时走专用入口（set 按键迭代、bytes b'...'）。
+            RtFn fn = t->kind == TyKind::Set ? RtFn::ReprSet
+                    : t->kind == TyKind::Bytes ? RtFn::ReprBytes
+                    : RtFn::ReprAny;
             VReg s = call_runtime(fn, t_str(), {v});
             push_temp(s);
             return s;

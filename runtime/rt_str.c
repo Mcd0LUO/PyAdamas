@@ -90,6 +90,7 @@ static void ar_put(AnyReprBuf* b, const char* p, size_t n) {
 static void ar_cstr(AnyReprBuf* b, const char* s) { ar_put(b, s, strlen(s)); }
 
 static void repr_any_into(AnyReprBuf* b, int64_t v);
+static void repr_any_bytes_into(AnyReprBuf* b, PyAdamasStr* s);
 
 /* dict 的 unknown repr：{key: value, ...}。键值都可能又是容器。 */
 static void repr_any_dict_into(AnyReprBuf* b, PyAdamasDict* d) {
@@ -184,6 +185,17 @@ PyAdamasStr* pa_repr_any(int64_t v) {
     AnyReprBuf b = {NULL, 0, 0};
     ar_cstr(&b, "");
     repr_any_into(&b, v);
+    PyAdamasStr* out = str_new(b.p ? b.p : "", (int64_t)b.n);
+    free(b.p);
+    return out;
+}
+
+/* P4 块4（lang_gaps）：静态 bytes 的 repr。bytes/str 同运行期表示（无标志
+   位），探针口径分不出，静态已知是 bytes 时走这里（b'...' + \xNN 转义，
+   CPython 口径；与带 tag 路径的 repr_any_bytes_into 同一实现）。 */
+PyAdamasStr* pa_repr_bytes(void* s) {
+    AnyReprBuf b = {NULL, 0, 0};
+    repr_any_bytes_into(&b, (PyAdamasStr*)s);
     PyAdamasStr* out = str_new(b.p ? b.p : "", (int64_t)b.n);
     free(b.p);
     return out;

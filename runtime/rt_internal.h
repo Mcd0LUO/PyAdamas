@@ -1129,6 +1129,7 @@ PyAdamasStr* pa_str_concat(PyAdamasStr* a, PyAdamasStr* b);
 PyAdamasStr* pa_repr_tuple(PyAdamasList* t, int64_t kind);
 PyAdamasStr* pa_repr_any(int64_t v);
 PyAdamasStr* pa_repr_set(void* s);
+PyAdamasStr* pa_repr_bytes(void* s);
 PyAdamasStr* pa_repr_dict_any(PyAdamasDict* d);
 PyAdamasStr* pa_str_char_at(PyAdamasStr* s, int64_t i);
 PyAdamasStr* pa_str_slice(PyAdamasStr* src, int64_t start, int64_t stop, int64_t step);

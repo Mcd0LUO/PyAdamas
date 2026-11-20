@@ -559,6 +559,7 @@ void AsmGen::gen_rt_args(const Inst& in, RtFn fn) {
         case RtFn::ExcClassObj:   // P4：(name) -> class*
         case RtFn::TbFrames:      // P4 块3：(tb*) -> list*
         case RtFn::ReprSet:       // P4 块4：(set*) -> str*
+        case RtFn::ReprBytes:     // P4 块4：(bytes*) -> str*
         case RtFn::SysExit:
         case RtFn::PrintStr:
         case RtFn::PrintBytes:
