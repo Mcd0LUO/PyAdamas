@@ -54,12 +54,14 @@
 
 - flag-off asm 对 0.331 基线**逐字节不变**：spectral_norm/nbody/matmul + 全部 38
   热基准（realistic 6 + compare 9 + daily 23）asm cmp 全同 → flag-off 零回归。
-- difftest（O0/O2，flag-on）270/0；全套件 normal flag-off/on EXIT=0（288 ran ok）；
-  283/284 normal+ASan flag-on/off 均 ran ok；check_size 无新增超限
-  （codegen_simd.cpp 313 行、codegen_impl.h 拆片段后 1198 行）。
-- ASan 全套件 JOBS=8 高并行偶发环境性 flake（网络/GC/C 编译资源竞争，失败用例
-  每轮不同，基线同样偶发）；JOBS=2 降并行复现干净 EXIT=0，失败用例 standalone
-  输出 mine==base。
+- difftest（O0/O2，flag-on）270/0；全套件 normal flag-off/on EXIT=0（290 ran ok）；
+  **ASan JOBS=1 flag-off/on EXIT=0（290 ran ok）**；283/284 normal+ASan flag-on/off
+  均 ran ok；check_size 无新增超限（codegen_simd.cpp 325 行、codegen_impl.h 拆片段后
+  1198 行）。
+- ASan JOBS=8 高并行偶发环境性 flake（网络/GC/C 编译资源竞争，失败用例每轮不同，
+  基线同样偶发，cfi_unwind ASan standalone 对基线也 rc=1）；JOBS=1 干净 EXIT=0，
+  失败用例 standalone 输出 mine==base。flag-off asm 与基线逐字节相同（二进制差异
+  仅来自不同 build 目录的 rt_asan.o，与 codegen 无关）。
 
 ## [0.331] - 2026-11-20
 

@@ -317,9 +317,11 @@ perf stat 为准，未做微基准假设）。**当前瓶颈转移到保序 adds
 * 回归用例 283（向量化路径，N=5 奇数尾）/284（标量 fallback/边界/大范围/IndexError）
   normal+ASan flag-on/off 均 ran ok。
 * check_size 无新增超限（codegen_simd.cpp 313 行；codegen_impl.h 拆片段后 1198 行）。
-* ASan 全套件在 JOBS=8 高并行下偶发环境性 flake（网络超时/GC 时序/C 编译资源竞争，
-  失败用例每轮不同：277_urllib/174_gc/cfi_unwind/cdecl_sample），基线同样偶发；
-  降并行（JOBS=2）可复现干净 EXIT=0，且失败用例 standalone 输出 mine==base。
+* ASan 全套件 **JOBS=1 flag-off/on 均 EXIT=0（290 ran ok）**。JOBS=8 高并行下偶发
+  环境性 flake（网络超时/GC 时序/C 编译资源竞争，失败用例每轮不同：
+  277_urllib/174_gc/cfi_unwind/cdecl_sample），基线同样偶发（cfi_unwind 在 ASan 下
+  standalone 对基线也 rc=1）；失败用例 standalone 输出 mine==base，flag-off 生成
+  asm 与基线逐字节相同（二进制差异仅来自不同 build 目录的 rt_asan.o，与 codegen 无关）。
 
 
 ## 8. AVX2 评估（阶段 2+，本轮不做）
