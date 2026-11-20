@@ -34,6 +34,7 @@
 // 失败则一个字节不发。与标量发射机器衔接同特化原型（见 codegen_simd.cpp §4.2）。
 #include "codegen_impl.h"
 
+#include <algorithm>
 #include <cstring>
 #include <unordered_set>
 
@@ -175,10 +176,22 @@ bool AsmGen::try_vect_loop(const Block& b) {
         return false;
     };
 
-    // reduction 槽：float/int，体块内恰一写一读，写值 = 读值 + expr（或 expr +
-    // 读值），读在写前（SSA 必然），无其它循环内读；外部读允许（终值要维护）。
-    int red_slot = -1; VReg red_acc = kNoReg, red_expr = kNoReg, red_add = kNoReg;
-    bool red_float = false; int red_store_pos = -1;
+    // reduction 槽（可多个并行）：float/int，体块内恰一写一读，写值 = 读值 +
+    // expr（或 expr + 读值），读在写前（SSA 必然），无其它循环内读；外部读允许
+    // （终值要维护）。各累加器独立向量寄存器，出口各自写回（float 保序提取，
+    // int paddq 模 2^64 + 水平求和）。expr 含另一 acc 的读 → loads!=1 或
+    // classify Acc → 保守拒绝（跨累加器依赖不证）。
+    struct Red {
+        int slot = -1;
+        VReg acc = kNoReg, expr = kNoReg, add = kNoReg;
+        int store_pos = -1;
+        bool is_float = false;
+        MOperand loc{};                 // 槽位置
+        bool acc_stack = false;         // float acc 在栈（scratch+每轮写回）
+        MReg XT = kMRegNone;            // float acc 寄存器
+        MReg IACC = kMRegNone;          // int acc 寄存器
+    };
+    std::vector<Red> reds;
     for (auto& [slot, info] : si) {
         if (slot_is_jalias(slot) || slot == sJ) continue;
         if (info.writers != 1 || info.store_pos < 0 || info.loads != 1) continue;
@@ -203,17 +216,32 @@ bool AsmGen::try_vect_loop(const Block& b) {
         else if (add->b == acc) expr = add->a;
         else continue;
         if (expr == kNoReg || expr == acc) continue;
-        if (red_slot != -1) return false;                 // 本轮只支持单 reduction
-        red_slot = slot; red_acc = acc; red_expr = expr; red_add = st->a;
-        red_store_pos = static_cast<int>(st - BI.data());
-        red_float = ty->kind == TyKind::Float;
+        Red rd;
+        rd.slot = slot; rd.acc = acc; rd.expr = expr; rd.add = st->a;
+        rd.store_pos = static_cast<int>(st - BI.data());
+        rd.is_float = ty->kind == TyKind::Float;
+        reds.push_back(rd);
     }
+    // 确定性顺序（unordered_map 遍历序不影响正确性，但稳定 asm 便于比对）。
+    std::sort(reds.begin(), reds.end(), [](const Red& x, const Red& y) { return x.slot < y.slot; });
+    auto slot_is_red = [&](int slot) {
+        for (const Red& r : reds) if (r.slot == slot) return true;
+        return false;
+    };
+    auto red_of_slot = [&](int slot) -> Red* {
+        for (Red& r : reds) if (r.slot == slot) return &r;
+        return nullptr;
+    };
+    auto is_red_add = [&](VReg v) {
+        for (const Red& r : reds) if (r.add == v) return true;
+        return false;
+    };
 
     // 体局部临时槽：单写、读全在写后、无外部读、非堆、不取地址 → 跳过存储，
     // 其 load 替换为所存值。其余有循环内写的槽 → 拒绝（无法维护）。
     std::vector<int> temp_slots;
     for (auto& [slot, info] : si) {
-        if (slot == sJ || slot_is_jalias(slot) || slot == red_slot) continue;
+        if (slot == sJ || slot_is_jalias(slot) || slot_is_red(slot)) continue;
         if (info.writers == 0) continue;                  // 只读槽：不变量候选
         if (info.writers == 1 && info.store_pos >= 0 && !info.outside_read &&
             !info.read_before_store && simd_slot_unaddressed(slot)) {
@@ -349,7 +377,9 @@ bool AsmGen::try_vect_loop(const Block& b) {
                 break;
             case IrOp::LoadSlot: {
                 if (slot_is_jalias(d->idx)) { c.kind = VK::J; break; }
-                if (d->idx == red_slot && v == red_acc) { c.kind = VK::Acc; break; }
+                { bool is_acc = false;
+                  for (const Red& r : reds) if (d->idx == r.slot && v == r.acc) is_acc = true;
+                  if (is_acc) { c.kind = VK::Acc; break; } }
                 if (slot_is_temp(d->idx)) {
                     VReg sv = temp_store_val(d->idx);
                     c.kind = classify(sv);
@@ -457,7 +487,7 @@ bool AsmGen::try_vect_loop(const Block& b) {
                 role[i] = Role::Skip; break;
             case IrOp::StoreSlot:
                 if (slot_is_jalias(in.idx) || slot_is_temp(in.idx)) role[i] = Role::Skip;
-                else if (in.idx == red_slot) role[i] = Role::RedStore;
+                else if (slot_is_red(in.idx)) role[i] = Role::RedStore;
                 else role[i] = Role::Fail;
                 break;
             case IrOp::LoadSlot: {
@@ -482,7 +512,7 @@ bool AsmGen::try_vect_loop(const Block& b) {
                 break;
             }
             case IrOp::Bin: {
-                if (in.dst == red_add) { role[i] = Role::Skip; break; }  // reduction add 折叠进 RedStore
+                if (is_red_add(in.dst)) { role[i] = Role::Skip; break; }  // reduction add 折叠进 RedStore
                 if (index_off(in.dst) >= 0) { role[i] = Role::Skip; break; }  // 仿射下标计算折叠进寻址位移
                 VK k = classify(in.dst);
                 role[i] = (k == VK::VecF || k == VK::VecI) ? Role::Bin : Role::Fail;
@@ -514,15 +544,16 @@ bool AsmGen::try_vect_loop(const Block& b) {
         if (role[i] == Role::Fail) { failed = true; break; }
     }
     if (failed) return false;
-    // reduction expr 必须可向量化且不含 acc。
-    if (red_slot != -1) {
-        VK ke = classify(red_expr);
-        bool ok = red_float ? (ke == VK::VecF || ke == VK::InvF)
-                            : (ke == VK::VecI || ke == VK::InvI);
+    // 每个 reduction expr 必须可向量化且不含 acc（Acc 分类不在允许集 →
+    // 跨累加器依赖保守拒绝）。
+    for (const Red& r : reds) {
+        VK ke = classify(r.expr);
+        bool ok = r.is_float ? (ke == VK::VecF || ke == VK::InvF)
+                             : (ke == VK::VecI || ke == VK::InvI);
         if (!ok) return false;
     }
     // 至少要有一个 map 存储或 reduction（否则循环没有可向量化副作用）。
-    bool has_side = red_slot != -1;
+    bool has_side = !reds.empty();
     for (Role r : role) if (r == Role::MapStore) has_side = true;
     if (!has_side) return false;
     // 不变量广播清单补全：classify 只在 float 常量/float 槽/int Bin 操作数处
@@ -580,22 +611,23 @@ bool AsmGen::try_vect_loop(const Block& b) {
     std::unordered_map<std::string, MReg> data_reg;
     for (size_t i = 0; i < lists.size(); ++i) data_reg[lists[i]] = gpr_pool[i];
 
-    // float reduction acc 位置。
-    const MOperand tloc = red_slot != -1 ? slot_mop(red_slot) : MOperand{};
-    bool acc_stack = false; MReg XT = kXmm7;
-    if (red_slot != -1 && red_float) {
-        acc_stack = tloc.kind != MOperandKind::Reg;
-        if (!acc_stack) {
-            if (tloc.reg < kXmm8 || tloc.reg > kXmm15) return false;
-            XT = tloc.reg;
+    // 各 reduction acc 位置：float 提升 xmm8-15 原地累加，否则 scratch+每轮
+    // 写回；int 一律 2-lane xmm scratch + 出口水平求和写回槽。
+    bool any_int_red = false;
+    for (Red& r : reds) {
+        r.loc = slot_mop(r.slot);
+        if (r.is_float) {
+            r.acc_stack = r.loc.kind != MOperandKind::Reg;
+            if (!r.acc_stack) {
+                if (r.loc.reg < kXmm8 || r.loc.reg > kXmm15) return false;
+                r.XT = r.loc.reg;
+            }
+        } else {
+            any_int_red = true;
+            if (r.loc.kind == MOperandKind::Reg &&
+                (r.loc.reg < kRax || r.loc.reg > kR15)) return false;
         }
     }
-    // int reduction acc：2-lane xmm scratch + 出口水平求和写回槽。
-    bool red_int = red_slot != -1 && !red_float;
-    MReg IACC = kXmm7;
-    const MOperand iloc = red_int ? slot_mop(red_slot) : MOperand{};
-    if (red_int && iloc.kind == MOperandKind::Reg &&
-        (iloc.reg < kRax || iloc.reg > kR15)) return false;
 
     // xmm 池：xmm0-7。先分配持久不变量广播 + acc，再给临时值线性扫描。
     std::vector<MReg> xmm_pool{kXmm0, kXmm1, kXmm2, kXmm3, kXmm4, kXmm5, kXmm6, kXmm7};
@@ -647,8 +679,17 @@ bool AsmGen::try_vect_loop(const Block& b) {
         if (r == kMRegNone) return false;
         inv_reg[v] = r;
     }
-    if (red_float && acc_stack) { XT = take(kXmm7); if (XT == kMRegNone) return false; }
-    if (red_int) { IACC = take(kXmm7); if (IACC == kMRegNone) return false; }
+    for (Red& r : reds) {
+        if (r.is_float) {
+            if (r.acc_stack) { r.XT = take(kXmm7); if (r.XT == kMRegNone) return false; }
+        } else {
+            r.IACC = take(kXmm7); if (r.IACC == kMRegNone) return false;
+        }
+    }
+    // int reduction 出口水平求和 scratch：先占保证不与任何 IACC 冲突
+    //（多 int acc 时旧 xmm0/1 择一可能撞上另一个 IACC）。
+    MReg HSCR = kMRegNone;
+    if (any_int_red) { HSCR = take(kMRegNone); if (HSCR == kMRegNone) return false; }
 
     // 临时值线性扫描：按体块顺序，VecF/VecI 生产者分配 xmm，操作数末次使用后释放。
     std::unordered_map<VReg, int> last_use;
@@ -657,8 +698,26 @@ bool AsmGen::try_vect_loop(const Block& b) {
         VReg ops[3] = {in.a, in.b, in.c};
         for (VReg op : ops) if (op != kNoReg) last_use[resolve_src(op)] = static_cast<int>(i);
     }
-    // reduction expr 的末次使用在 RedStore（add 已折叠，不算独立使用点）。
-    if (red_slot != -1) last_use[resolve_src(red_expr)] = red_store_pos;
+    // reduction expr 的末次使用在 RedStore（add 已折叠，不算独立使用点）；
+    // 多 reduction 共享同一 expr 时取最晚的 store 位置。
+    for (const Red& r : reds) {
+        VReg er = resolve_src(r.expr);
+        auto lu = last_use.find(er);
+        int pos = (lu == last_use.end()) ? r.store_pos : std::max(lu->second, r.store_pos);
+        last_use[er] = pos;
+    }
+    // float 保序提取会 movhlps 破坏 expr 寄存器：expr 末次使用晚于本 RedStore
+    //（被另一 reduction/map 存储共享）时必须用 scratch 副本提取。先占 FSCR。
+    MReg FSCR = kMRegNone;
+    for (const Red& r : reds) {
+        if (!r.is_float) continue;
+        auto lu = last_use.find(resolve_src(r.expr));
+        if (lu != last_use.end() && lu->second > r.store_pos) {
+            FSCR = take(kMRegNone);
+            if (FSCR == kMRegNone) return false;
+            break;
+        }
+    }
     std::unordered_map<VReg, MReg> tmp_reg;
     auto xmm_of = [&](VReg v) -> MReg {
         VReg r = resolve_src(v);
@@ -696,8 +755,8 @@ bool AsmGen::try_vect_loop(const Block& b) {
     const std::string tail = fresh_label("vecttail");
     const std::string vec = fresh_label("vectvec");
     if (std::getenv("PYADAMAS_VECT_DBG"))
-        std::fprintf(stderr, "[vect] vectorize loop body bb%d (sJ=%d red=%d lists=%zu inv=%zu)\n",
-                     body_bi, sJ, red_slot, lists.size(), uniq_inv.size());
+        std::fprintf(stderr, "[vect] vectorize loop body bb%d (sJ=%d reds=%zu lists=%zu inv=%zu)\n",
+                     body_bi, sJ, reds.size(), lists.size(), uniq_inv.size());
     comment("VECT generic loop (PYADAMAS_VECT): SSE2 2-lane map/reduction");
     if (j_stack) emit2(MOp::kMovq, jloc, JREG);
 
@@ -758,11 +817,17 @@ bool AsmGen::try_vect_loop(const Block& b) {
         emit2(MOp::kMovq, kRax, TWO32);
         emit2(MOp::kMovlhps, TWO32, TWO32);
     }
-    if (red_float && acc_stack) emit2(MOp::kMovsd, tloc, XT);
-    // int acc 必须装载槽的**当前值**进低 lane（高 lane 自动清 0）：循环前累加器
-    // 可能非 0（t=49; for...: t+=n）。pxor 清 0 + 出口覆盖写会丢前值（静默算错）。
-    // 出口水平求和 = 前值 + 向量和（模 2^64 结合律精确），写回槽后标量尾续加。
-    if (red_int) emit2(MOp::kMovq, iloc, IACC);
+    for (const Red& r : reds) {
+        if (r.is_float) {
+            if (r.acc_stack) emit2(MOp::kMovsd, r.loc, r.XT);
+        } else {
+            // int acc 必须装载槽的**当前值**进低 lane（高 lane 自动清 0）：
+            // 循环前累加器可能非 0（t=49; for...: t+=n）。pxor 清 0 + 出口覆盖写
+            // 会丢前值（静默算错）。出口水平求和 = 前值 + 向量和（模 2^64 结合律
+            // 精确），写回槽后标量尾续加。
+            emit2(MOp::kMovq, r.loc, r.IACC);
+        }
+    }
 
     // pshufd 三操作数形式（本 GAS 不接受两操作数写法，同 codegen_simd.cpp）。
     auto pshufd = [&](int64_t imm, MReg r) {
@@ -880,17 +945,28 @@ bool AsmGen::try_vect_loop(const Block& b) {
                 break;
             }
             case Role::RedStore: {
-                MReg re = xmm_of(red_expr);
+                const Red* rp = red_of_slot(in.idx);
+                if (!rp) return false;                    // 不应发生
+                MReg re = xmm_of(rp->expr);
                 if (re == kMRegNone) return false;
-                if (red_float) {
+                if (rp->is_float) {
                     // 保序提取累加：acc += e0; acc += e1（与标量逐位一致）。
-                    emit2(MOp::kAddsd, re, XT);
-                    emit2(MOp::kMovhlps, re, re);
-                    emit2(MOp::kAddsd, re, XT);
-                    if (acc_stack) emit2(MOp::kMovsd, XT, tloc);
+                    // expr 被共享（末次使用晚于本 store）→ scratch 副本提取，
+                    // 不破坏后续使用者。
+                    MReg ex = re;
+                    auto lu = last_use.find(resolve_src(rp->expr));
+                    if (lu != last_use.end() && lu->second > rp->store_pos) {
+                        if (FSCR == kMRegNone) return false;  // 不应发生
+                        emit2(MOp::kMovapd, re, FSCR);
+                        ex = FSCR;
+                    }
+                    emit2(MOp::kAddsd, ex, rp->XT);
+                    emit2(MOp::kMovhlps, ex, ex);
+                    emit2(MOp::kAddsd, ex, rp->XT);
+                    if (rp->acc_stack) emit2(MOp::kMovsd, rp->XT, rp->loc);
                 } else {
                     // int：paddq 2-lane 累加（模 2^64 精确），出口水平求和。
-                    emit2(MOp::kPaddq, re, IACC);
+                    emit2(MOp::kPaddq, re, rp->IACC);
                 }
                 break;
             }
@@ -904,13 +980,14 @@ bool AsmGen::try_vect_loop(const Block& b) {
     emit2(MOp::kLeaq, op_mem(JREG, 1), kRax);
     emit2(MOp::kCmpq, n_op, kRax);
     emit_jmp(MOp::kJl, vec);
-    // 出口：int reduction 水平求和写回槽（标量尾/cond/end 读最新）。
-    if (red_int) {
-        const MReg hscratch = (IACC == kXmm0) ? kXmm1 : kXmm0;
-        emit2(MOp::kMovhlps, IACC, hscratch);
-        emit2(MOp::kPaddq, hscratch, IACC);
-        emit2(MOp::kMovq, IACC, kRax);
-        emit2(MOp::kMovq, kRax, iloc);
+    // 出口：各 int reduction 水平求和写回槽（标量尾/cond/end 读最新）。
+    // HSCR 先占且不与任何 IACC 冲突；逐个求和写回，相互独立。
+    for (const Red& r : reds) {
+        if (r.is_float) continue;
+        emit2(MOp::kMovhlps, r.IACC, HSCR);
+        emit2(MOp::kPaddq, HSCR, r.IACC);
+        emit2(MOp::kMovq, r.IACC, kRax);
+        emit2(MOp::kMovq, kRax, r.loc);
     }
     // jmp cond：j==n 精确退出；j==n-1 经 cond 回体块走标量尾（入口守卫失败）。
     emit_jmp(MOp::kJmp, block_label(cond_bi));
