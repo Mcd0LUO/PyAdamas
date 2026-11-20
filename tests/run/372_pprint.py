@@ -76,6 +76,20 @@ try:
     pprint.pformat([], depth=0)
 except ValueError as e:
     print("ValueError:", e)
+
+# PrettyPrinter 构造期校验（CPython 在 __init__ 里报，不等 pformat）
+try:
+    pprint.PrettyPrinter(width=0)
+except ValueError as e:
+    print("ValueError:", e)
+try:
+    pprint.PrettyPrinter(indent=-1)
+except ValueError as e:
+    print("ValueError:", e)
+try:
+    pprint.PrettyPrinter(depth=0)
+except ValueError as e:
+    print("ValueError:", e)
 # --- expect ---
 # {'a': [1, 2, 3], 'b': 1, 'c': {'y': [], 'z': 0}}
 # {'a': [1, 2, 3], 'b': 1, 'c': {'y': [], 'z': 0}}
@@ -139,6 +153,9 @@ except ValueError as e:
 #    [4,
 #     5]]]]
 # {'k0': 0, 'k1': 1, 'k2': 2}
+# ValueError: width must be != 0
+# ValueError: indent must be >= 0
+# ValueError: depth must be > 0
 # ValueError: width must be != 0
 # ValueError: indent must be >= 0
 # ValueError: depth must be > 0

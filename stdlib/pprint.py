@@ -481,6 +481,9 @@ class PrettyPrinter:
 
     def __init__(self, indent: int = 1, width: int = 80, depth: int = -1,
                  compact: bool = False, sort_dicts: bool = True) -> None:
+        # CPython 在构造期就校验参数（不是等到 pformat）；这里复用 _setup 的
+        # 校验与状态设置，错误类型/消息一致。
+        _setup(indent, width, depth, compact, sort_dicts)
         self.indent = indent
         self.width = width
         self.depth = depth
