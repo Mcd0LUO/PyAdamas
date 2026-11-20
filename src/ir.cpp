@@ -5,6 +5,7 @@
 #include "ir.h"
 
 #include <charconv>
+#include <deque>
 #include <iterator>
 #include <string_view>
 #include <vector>
@@ -17,7 +18,11 @@ namespace {
 // 文本完全相同（"%N"，N 为十进制）。
 std::string_view vreg_str(VReg r) {
     static constexpr std::string_view kNone = "_";
-    static std::vector<std::string> cache;
+    // deque 而非 vector：resize 在尾部追加元素**不失效已有元素的引用/指针**。
+    // vector resize 会重分配搬移所有 std::string，使先前返回的 string_view 悬空
+    // （text_into 单条 format_to 里多个 vreg_str 实参先求值，大 r 触发 resize
+    // 使小 r 的 view 失效 → heap-use-after-free，ASan 编译器构建实测）。
+    static std::deque<std::string> cache;
     if (r == kNoReg) return kNone;
     if (static_cast<size_t>(r) >= cache.size()) cache.resize(static_cast<size_t>(r) + 1);
     std::string& s = cache[r];
