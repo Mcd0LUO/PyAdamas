@@ -727,6 +727,7 @@ static int chan_heap_hint(PaChan* c) { return (int)c->elem_kind; }
 
 /* send 接管 heap 种类值的一份引用（调用方 retain 后转入）。 */
 void pa_chan_send(void* cp, int64_t v) {
+    pa_gc_insert_barrier(v);   /* 插入屏障：chan 缓冲/寄存值标灰（0.330） */
     PaChan* c = chan_check(cp, "send() expects a channel");
     if (c->recvq) {
         /* 直接交给第一个等待的接收者：引用转移，发送者不阻塞。 */

@@ -115,6 +115,7 @@ static int gc_incr_state;
    屏障 + 门控插入屏障。默认 0 = 现状同步标记，flag-off 行为/asm/leak 逐字不变。
    入口 pa_gc_init 读一次环境变量缓存成全局，热路径只读缓存。 */
 static int gc_incr_mark_on;
+int pa_gc_incr_mark_fast;   /* gc_incr_mark_on 的公开别名，供运行时写屏障门控 */
 static int gc_dbg;   /* 临时诊断（PYADAMAS_GC_DBG=1），定位后移除 */
 static int64_t gc_dbg_defer, gc_dbg_defer_swept, gc_dbg_pend_badrc;
 static int64_t gc_incr_major;   /* 本轮是不是整堆收集 */
@@ -2171,6 +2172,7 @@ void pa_gc_init(void** roots, int64_t n_roots, void* stack_top) {
     /* 增量标记总开关（0.330）：=1 启用分片标记 + 删除/插入屏障；默认 0
        同步标记（现状）。只读 "1"，"0"/未设都关，flag-off 零变化。 */
     { const char* im = getenv("PYADAMAS_GC_INCR_MARK"); if (im && im[0] == '1') gc_incr_mark_on = 1; }
+    pa_gc_incr_mark_fast = gc_incr_mark_on;
     if (getenv("PYADAMAS_GC_DBG")) gc_dbg = 1;
     // 索引叶子模式：保守回退关掉（字符串回到旧的全跟踪口径）。
     gc_leaf_mode = !gc_conservative;

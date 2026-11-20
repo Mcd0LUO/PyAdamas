@@ -5,6 +5,7 @@
 #pragma once
 
 #include <algorithm>
+#include <cstdlib>
 #include <format>
 #include <functional>
 #include <limits>
@@ -514,6 +515,14 @@ private:
     // unknown 值可能是整数也可能是堆指针，交给运行时按注册表判断。
     void rc_inc_unknown(VReg v) { call_void(RtFn::RcIncUnknown, {v}); }
     void rc_dec_unknown(VReg v) { call_void(RtFn::RcDecUnknown, {v}); }
+    /* 增量标记插入屏障（0.330）：编译期门控 PYADAMAS_GC_BARRIER=1 时对堆指针
+       写发射 pa_gc_write_barrier（标灰新值）。默认关 → 生成 asm 逐字不变
+       （26 热基准按构造保护）。运行期再由 gc_incr_state==1 决定是否生效。 */
+    void gc_barrier(VReg v) {
+        static const bool on = []{ const char* e = std::getenv("PYADAMAS_GC_BARRIER");
+                                   return e && e[0] == '1'; }();
+        if (on) call_void(RtFn::GcWriteBarrier, {v});
+    }
 
     // 把刚产生的堆值的所有权从临时栈转给目标。成功返回 true，调用方
     // 跳过 retain；目标类型和源类型都不是堆时返回 false（无需持有引用）。

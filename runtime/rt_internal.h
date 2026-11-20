@@ -714,6 +714,13 @@ void pa_rc_inc_slow(void* p);
 void pa_rc_dec_slow(void* p);
 extern int pa_rc_stats_on_fast;   /* rc_stats_on 的别名，供内联使用 */
 extern int pa_gc_phase_fast;      /* gc_phase 的别名 */
+extern int pa_gc_incr_mark_fast;  /* 增量标记总开关别名（写屏障门控，0.330） */
+void pa_gc_write_barrier(int64_t v);  /* Dijkstra 插入屏障：标灰新值（标记期生效） */
+/* 门控插入屏障：flag-off 一次可预测分支跳过（零调用）；flag-on 标灰新值。
+   非堆值（标量）进 pa_gc_write_barrier 后查集合表落空，安全 no-op。 */
+static inline void pa_gc_insert_barrier(int64_t v) {
+    if (__builtin_expect(pa_gc_incr_mark_fast != 0, 0)) pa_gc_write_barrier(v);
+}
 
 #ifndef PA_RC_NO_INLINE
 static inline void pa_rc_inc_fast(void* p) {
