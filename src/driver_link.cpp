@@ -46,6 +46,17 @@ bool direct_ld_available() {
     return ok;
 }
 
+// --gc-sections 灰度门控（slim 轮）：PYADAMAS_GC_SECTIONS=1 开启，默认关。
+// 运行时已按 -ffunction-sections/-fdata-sections 编译（CMakeLists），开启后
+// 链接期按函数剥掉未引用的运行时段。只认精确的 "1"，其余值一律按关处理。
+bool gc_sections_enabled() {
+    static const bool on = [] {
+        const char* v = std::getenv("PYADAMAS_GC_SECTIONS");
+        return v && v[0] == '1' && v[1] == '\0';
+    }();
+    return on;
+}
+
 std::string direct_ld_prefix() { return PYADAMAS_LD_EXECUTABLE " " PYADAMAS_LD_FLAGS; }
 
 // 汇编器前缀：配置期拿到 as 路径时直接 exec as（省一次 gcc 驱动 + 进程链），
