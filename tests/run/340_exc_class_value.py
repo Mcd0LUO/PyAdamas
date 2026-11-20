@@ -50,12 +50,11 @@ for c in xs:
 print(xs[1] is IndexError)
 
 # ── custom exception class as value ─────────────────────────────
-# repr(user class) shows the last name segment in pa (pre-existing
-# pa_class_repr behavior for ALL user classes) — not exercised here.
 print(MyErr.__name__)
+print(repr(MyErr))
 M = MyErr
 print(M is MyErr)
-print(show(MyErr.__name__))
+print(show(MyErr))
 
 # ── isinstance / issubclass ─────────────────────────────────────
 try:
@@ -189,8 +188,9 @@ print("done")
 # <class 'KeyError'>
 # True
 # MyErr
+# <class '__main__.MyErr'>
 # True
-# MyErr
+# <class '__main__.MyErr'>
 # True
 # False
 # True

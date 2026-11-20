@@ -95,9 +95,20 @@ static void class_destroy(void* p) {
     if (c->name) pa_rc_dec(c->name);
 }
 
+/* GC 清扫口径的出边归还（与 exc_value_gc_release 同模式）：字符串是
+   索引叶子，不在堆链上，只靠 RC 释放。类对象若活到 GcShutdown（P4 异常类
+   单例由注册表持永久引用），没有 release 回调的话 name 串永远到不了
+   rc==0 → LeakSanitizer Direct leak。普通用户类单例在模块退出时经 RC
+   先释放（走 class_destroy），这条回调对它们是纯加法。 */
+static void class_gc_release(void* p) {
+    PyAdamasClass* c = (PyAdamasClass*)p;
+    if (c->name) pa_gc_unref_child(c->name);
+}
+
 void* pa_class_new(int64_t cid, int64_t ctor, int64_t* vtable, PyAdamasStr* name) {
     PyAdamasClass* c = (PyAdamasClass*)rc_alloc((int64_t)sizeof(PyAdamasClass),
-                                                class_destroy, NULL, PYADAMAS_RC_OBJ);
+                                                class_destroy, class_gc_release,
+                                                PYADAMAS_RC_OBJ);
     c->magic = PYADAMAS_CLASS_MAGIC;
     c->cid = cid;
     c->ctor = ctor;
@@ -140,10 +151,15 @@ PyAdamasStr* pa_class_repr(void* cls) {
     PyAdamasClass* c = as_class(cls);
     const char* name = c && c->name ? c->name->data : "?";
     int64_t n = c && c->name ? c->name->len : 1;
-    /* 类对象存的是限定名；repr 与 __name__ 一样只显示最后一段。 */
+    /* 类对象存的是限定名；repr 与 __name__ 一样只显示最后一段。
+       P4（lang_gaps）例外：自定义异常类按 CPython 显示完整限定名
+       （<class '__main__.MyErr'>）。判据是裸名在异常注册表里——异常类
+       对象只在门控开时存在，普通用户类的 repr 口径一字不变。 */
     const char* start = name;
     for (int64_t i = 0; i < n; ++i)
         if (name[i] == '.') start = name + i + 1;
+    if (start != name && pa_exc_is_registered(start))
+        start = name;   /* 完整限定名 */
     n -= (int64_t)(start - name);
     const char* pre = "<class '";
     const char* post = "'>";
