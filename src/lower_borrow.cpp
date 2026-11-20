@@ -460,12 +460,14 @@ struct BorrowPass {
     }
 
     Root validate_slot_root(int p, int s) {
+        // 根不能是候选槽自身（先于缓存判定：缓存键不含 s）。
+        if (p == s) return Root{};
         long long key = (static_cast<long long>(p) << 1) | 0;
         auto it = root_cache.find(key);
         if (it != root_cache.end()) return it->second;
         Root r; r.idx = p;
         root_cache[key] = r;
-        if (p == s || p < 0 || p >= static_cast<int>(fn.slot_ty.size())) return r;
+        if (p < 0 || p >= static_cast<int>(fn.slot_ty.size())) return r;
         if (addr_taken.count(p)) return r;
         if (!is_container_ty(fn.slot_ty[static_cast<size_t>(p)])) return r;
         // 实写 = 非出口清零的 store（del/覆盖写都算实写 → 根不稳定）。

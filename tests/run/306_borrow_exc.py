@@ -85,6 +85,23 @@ print(exc_nested(xs, 24))
 print(exc_after_loop(xs, 20))
 print(exc_two_loops(xs, 12))
 
+
+# setjmp 路径（多参 raise 降级 setjmp）+ 显式标注避免 unknown 升级：
+# longjmp 展开按帧记录释放 owned 槽，借用槽不在清单（容器才是 owner）。
+def setjmp_borrow(xs: list[str], n: int) -> int:
+    total = 0
+    try:
+        for i in range(n):
+            s: str = xs[0]
+            total += len(s)
+            if i == 5:
+                raise ValueError("x", "y")
+    except ValueError:
+        total += 100
+    return total
+
+print(setjmp_borrow(xs, 50))
+
 # --- expect ---
 # 1019
 # 130
@@ -92,3 +109,4 @@ print(exc_two_loops(xs, 12))
 # 204
 # 51
 # 100
+# 130
