@@ -4,6 +4,53 @@
 
 早期阶段没有逐条留痕，按阶段归纳；0.4 之后逐条记录。
 
+## [0.331] - 2026-11-20
+
+> cgspeed 分支：codegen 汇编发射路径提速（纯内部优化，**生成 asm 逐字节
+> 不变**为最高不变量）。参照 LLVM/GCC：操作数直建结构化、静态寄存器名表、
+> 直写缓冲、内联存储，消除「拼字符串→回解析」往返 + std::format + 分配
+> 抖动。0.330 由 gc1 分支占用，集成时重编号。
+
+### 性能
+
+- **机器层**（mach_instr.h/mach_emit.cpp）：MReg 编号 + 编译期静态寄存器
+  名表（packed-key 二分查找）；MOperand 152B→56B（base/index 编号化、
+  canonical text、has_sym 标志）；MOpVec 两操作数内联 + 溢出 vector，
+  两操作数指令零堆分配；MachFunc 指令侧池，MItem 瘦成 40B 句柄；
+  mop_name O(1)；render 走结构化字段 + to_chars 直写。
+- **静态字面量行缓存**：line(const char*) 重载按内容缓存解析结果，
+  RC 内联序列等约 700 处固定指令模板进程内只解析一次。
+- **操作数缓存结构化**：vreg/槽/别名/常量缓存全部 MOperand 单元，
+  定义点解析一次、使用点直发；src_mop/dst_mop/slot_mop 等结构化访问器；
+  emit2/emit1/emit0/emit_imm/emit_imm_hex(MOp,…) 直发重载 + 预建寄存器
+  操作数表；op_mem 编号版工厂（含变址/比例/位移）。
+- **热路径迁移**：bin/cmp/convert/un/truth、index load/store、field
+  load/store、vcall/call_direct/call_ptr、tuple/append/str-index 内联、
+  RC inc/dec/temp/take、实参装填 emit_arg、序言/尾声 CFI、split
+  reload/spill、全局访问（模块级 rip 相对操作数缓存）。
+- **std::format 迁移**：标签工厂（fresh_label/func_label/shim/ptag/
+  dbg/num_label）、CFI 数字行、数据段（字面量/全局/vtable/闭包/调试名）
+  全部 to_chars 直拼 + 复用缓冲。
+- 历史发射怪癖逐字节保留：jo/jc/jz 与含 '$' mangled 符号操作数的文本
+  兜底是列 0 Raw（无 tab），结构化路径显式复刻（1444 语料闸门钉住）。
+
+### 测量（多租户，taskset 24-27 绑核，交替轮转取中位）
+
+- asm 语料 **1544/1544 逐字节 IDENTICAL**（bench/realistic+compare+
+  tests/run 全量 × O0/O1/O2/win64/no-zce/RA_SPLIT/RA_GRAPH + fast-math/
+  NO_RA/NO_FPLIVE/POOLCAP 变体，vs 0.329 oracle）。
+- perf self%：parse_operand 1.23→0.59、parse_instr 0.73→跌出前 22、
+  std::vformat 1.82→1.31（剩余主要是 IR 注释文本 in.text()）。
+- codegen 相位（PYADAMAS_TIMING，14 bench 合计）：各窗口 +8~19%，
+  最近 10 轮窗口 58.4→47.5ms（**+18.8%**）；逐文件 13/15 提升 3~25%
+  （dict_wordfreq +25%、nqueens +21%、fib +20%、nbody +18%）。
+- 整程序编译墙钟：最近 10 轮窗口 0.156→0.146s（**+6.3%**，9/10 轮胜）；
+  空闲轮次 0.077→0.064s（+17%）；高负载窗口中位持平（进程启动与
+  非 codegen 相位主导微基准语料，负载噪声 ±8%）。
+- 闸门：difftest 265 用例 0 不一致；全量套件 normal+ASan EXIT=0
+  （283 项 ran ok）；CPython 对拍 840 程序 0 失败；check_size 无新增
+  超限（codegen_emit.h 拆分承接发射器）。
+
 ## [0.329] - 2026-11-20
 
 > stdlib2 分支合入：标准库拓宽第二批（需求驱动，**轻量标尺**）——**zipfile /
