@@ -476,6 +476,52 @@ private:
         out_.push_line(line_buf_);
     }
 
+    // 静态字面量行（line("movq %rax, %rbx") 这类）：进程内只解析一次，
+    // 之后直接复制结构化结果——RC 内联序列等固定指令模板每次发射都重新
+    // parse_instr/parse_operand 是纯浪费。按内容做透明哈希键（字面量地址
+    // 可能被链接器合并/变化，内容才是稳定标识）。编译器单线程，静态缓存
+    // 无锁；键只来自字面量与 ABI 静态串，规模有界。
+    void line(const char* s) {
+        struct SvHash {
+            using is_transparent = void;
+            size_t operator()(std::string_view v) const {
+                return std::hash<std::string_view>{}(v);
+            }
+        };
+        struct Entry { MItem item; int32_t inst = -1; };
+        struct Cache {
+            std::unordered_map<std::string, Entry, SvHash, std::equal_to<>> map;
+            std::vector<MInstr> insts;  // 缓存指令池（Entry.inst 下标）
+        };
+        static Cache cache;
+        const std::string_view sv(s);
+        auto it = cache.map.find(sv);
+        if (it == cache.map.end()) {
+            Entry e;
+            if (sv.find('\n') != std::string_view::npos) {
+                e.item = make_raw("\t" + std::string(sv) + "\n");
+            } else {
+                line_buf_.clear();
+                line_buf_ += '\t';
+                line_buf_.append(sv);
+                MachFunc tmp;
+                parse_line_into(line_buf_, tmp);
+                e.item = std::move(tmp.items[0]);
+                if (e.item.kind == MItem::Instr) {
+                    e.inst = static_cast<int32_t>(cache.insts.size());
+                    cache.insts.push_back(std::move(tmp.insts[0]));
+                    e.item.inst = -1;  // 下标按目标函数重定位，缓存里不存
+                }
+            }
+            it = cache.map.emplace(std::string(sv), std::move(e)).first;
+        }
+        const Entry& e = it->second;
+        if (e.inst >= 0)
+            out_.push_cached(e.item, cache.insts[static_cast<size_t>(e.inst)]);
+        else
+            out_.push(e.item);
+    }
+
     // 列 0 的标签（函数标签、数据段符号）。
     void label(const std::string& s) { out_.push_label(s, false); }
     // 带前导 tab 的块内局部标签（"\t1:" 这种）。
@@ -497,91 +543,9 @@ private:
         out_.push_instr(std::move(ins));
     }
 
-    // 操作数工厂。寄存器按编号存（op_reg(kRax)），名字查静态表；
-    // 按名字构造时查表得编号，表外名字渲染走 text 兜底。
-    // 所有工厂同时填 canonical text（与 render 逐字节一致），供字符串接口用。
-    static MOperand op_reg(MReg r) {
-        MOperand o;
-        o.kind = MOperandKind::Reg;
-        o.reg = r;
-        o.text = mreg_name(r);
-        return o;
-    }
-    static MOperand op_reg(std::string name) {
-        MOperand o;
-        o.kind = MOperandKind::Reg;
-        o.reg = mreg_from_name(name);
-        o.text = std::move(name);
-        return o;
-    }
-    static MOperand op_imm(int64_t v) {
-        MOperand o;
-        o.kind = MOperandKind::Imm;
-        o.imm = v;
-        char buf[24];
-        auto r = std::to_chars(buf, buf + sizeof buf, v);
-        o.text = "$";
-        o.text.append(buf, r.ptr);
-        return o;
-    }
-    static MOperand op_imm_hex(uint64_t bits) {
-        MOperand o;
-        o.kind = MOperandKind::Imm;
-        o.imm = static_cast<int64_t>(bits);
-        o.imm_hex = true;
-        char buf[24];
-        auto r = std::to_chars(buf, buf + sizeof buf, bits, 16);
-        o.text = "$0x";
-        o.text.append(buf, r.ptr);
-        return o;
-    }
-    static MOperand op_label(std::string name) {
-        MOperand o;
-        o.kind = MOperandKind::Label;
-        o.text = std::move(name);
-        return o;
-    }
-    static MOperand op_sym(std::string name) {
-        MOperand o;
-        o.kind = MOperandKind::Sym;
-        o.text = std::move(name);
-        return o;
-    }
-    // "(%base)"
-    static MOperand op_mem(std::string base) {
-        MOperand o;
-        o.kind = MOperandKind::Mem;
-        o.reg = mreg_from_name(base);
-        o.text = "(" + base + ")";
-        return o;
-    }
-    // "disp(%base)"
-    static MOperand op_mem(std::string base, int64_t disp) {
-        MOperand o;
-        o.kind = MOperandKind::Mem;
-        o.reg = mreg_from_name(base);
-        o.imm = disp;
-        o.has_disp = true;
-        char buf[24];
-        auto r = std::to_chars(buf, buf + sizeof buf, disp);
-        o.text.assign(buf, r.ptr);
-        o.text += '(';
-        o.text += base;
-        o.text += ')';
-        return o;
-    }
-    // "sym(%base)"
-    static MOperand op_mem_sym(std::string sym, std::string base) {
-        MOperand o;
-        o.kind = MOperandKind::Mem;
-        o.reg = mreg_from_name(base);
-        o.sym = sym;
-        o.text = std::move(sym);
-        o.text += '(';
-        o.text += base;
-        o.text += ')';
-        return o;
-    }
+    // 操作数工厂 + 迷你发射器（emit2/emit_imm_op/emit_jmp）拆在 codegen_emit.h，
+    // 类体片段，就地展开（文件规模闸门）。
+#include "codegen_emit.h"
 
     // ── 目标相关的汇编指示符 ────────────────────────────────────
     // ELF/GNU as 的 .cfi_*、.type、.size、.note.GNU-stack 在 COFF 目标上
@@ -618,67 +582,6 @@ private:
     void emit_gnu_stack_note() {
         if (target_abi().gnu_cfi) directive(".section .note.GNU-stack,\"\",@progbits");
     }
-
-    // 热路径的迷你发射器：直接构造结构化指令，绕开 std::format。
-    // 助记符没进 MOp 枚举、或操作数文法不认识时退回文本路径（Raw，字节不变）。
-    void emit2(const char* mn, const std::string& a, const std::string& b) {
-        MOp op = mop_from_name(mn);
-        MOperand oa;
-        MOperand ob;
-        if (op != MOp::kRaw && parse_operand(a, false, &oa) && parse_operand(b, false, &ob)) {
-            MInstr ins;
-            ins.op = op;
-            ins.ops.push_back(std::move(oa));
-            ins.ops.push_back(std::move(ob));
-            out_.push_instr(std::move(ins));
-            return;
-        }
-        std::string text = mn;
-        text += ' ';
-        text += a;
-        text += ", ";
-        text += b;
-        out_.push_line(text);
-    }
-
-    void emit_imm_op(const char* mn, int64_t v, const std::string& b) {
-        MOp op = mop_from_name(mn);
-        MOperand ob;
-        if (op != MOp::kRaw && parse_operand(b, false, &ob)) {
-            MInstr ins;
-            ins.op = op;
-            ins.ops.push_back(op_imm(v));
-            ins.ops.push_back(std::move(ob));
-            out_.push_instr(std::move(ins));
-            return;
-        }
-        char buf[32];
-        auto r = std::to_chars(buf, buf + sizeof buf, v);
-        std::string text = mn;
-        text += " $";
-        text.append(buf, r.ptr);
-        text += ", ";
-        text += b;
-        out_.push_line(text);
-    }
-
-    void emit_jmp(const char* mn, const std::string& target) {
-        MOp op = mop_from_name(mn);
-        MOperand ot;
-        if (op != MOp::kRaw && parse_operand(target, mop_is_branch(op), &ot)) {
-            MInstr ins;
-            ins.op = op;
-            ins.ops.push_back(std::move(ot));
-            out_.push_instr(std::move(ins));
-            return;
-        }
-        std::string text = mn;
-        text += ' ';
-        text += target;
-        out_.push_line(text);
-    }
-
-    void emit_imm_mem(const std::string& mem, int64_t v) { emit_imm_op("movq", v, mem); }
 
 
     std::string fresh_label(const char* tag) {

@@ -96,15 +96,14 @@ struct MOperand {
     int64_t imm = 0;
     bool imm_hex = false;
     bool has_disp = false;    // 显式写了位移（含 "0(...)" 的 0）
-    int scale = 1;
     bool has_scale = false;   // 显式写了 ",scale"
+    bool has_sym = false;     // Mem：符号位移（.Lstr0(%rip)），渲染走 text
+    uint8_t scale = 1;
 
     // canonical 完整文本（不含 '*' 前缀），与 render 输出逐字节一致。
     // 给历史字符串接口（src_op/dst_op 等）当返回值；Reg/Label/Sym/Raw
-    // 渲染直接用它，Imm/Mem 渲染走结构化字段。
+    // 与符号位移 Mem 渲染直接用它，Imm/数值位移 Mem 走结构化字段。
     std::string text;
-    // Mem：符号位移（如 .Lstr0(%rip) 的 .Lstr0）
-    std::string sym;
 };
 
 // 操作数小向量：2 个内联 + 溢出 vector。x86 指令操作数 ≤3，
@@ -148,31 +147,39 @@ private:
 struct MInstr {
     MOp op = MOp::kRaw;
     MOpVec ops;
-    std::string mnemonic;  // op == kRaw 时的原始助记符
+    // kRaw 助记符不进结构化层：parse_instr 认不出的助记符整行退化 Raw，
+    // 所以这里不需要 mnemonic 字符串（省 32B + 每次拷贝）。
 };
 
 struct MItem {
     enum Kind : uint8_t { Label, Directive, Instr, Raw, Comment } kind = Raw;
     bool indented = false;  // Label：是否带前导 tab（块内数字局部标签 "\t1:"）
+    // Instr：指令在 MachFunc::insts 池里的下标（其余 kind 为 -1）。
+    // 指令单独存池：MItem 保持 40B 轻量，标签/注释/指示符不背操作数存储，
+    // items 向量 push/移动/render 遍历的流量比内嵌 MInstr 小一个量级。
+    int32_t inst = -1;
     // Label：标签名（不含冒号）；Directive：正文（不含前导 tab）；
     // Comment：整行文本（含缩进）；Raw：原样文本（含换行）
     std::string text;
-    MInstr inst;
 };
 
-// 一个可渲染的机器函数：顺序敏感的 MItem 列表。
+// 一个可渲染的机器函数：顺序敏感的 MItem 列表 + 指令池。
 // bytes 是已累计文本长度的估算，只给 reserve 当提示用。
 struct MachFunc {
     std::vector<MItem> items;
+    std::vector<MInstr> insts;
     size_t bytes = 0;
 
     void clear();
-    void reserve(size_t n) { items.reserve(n / 24 + 16); }
+    void reserve(size_t n) { items.reserve(n / 24 + 16); insts.reserve(n / 40 + 8); }
     size_t size() const { return bytes; }
     bool empty() const { return items.empty(); }
 
     void push(MItem it);
     void push_instr(MInstr ins);
+    // 静态行缓存命中：复制缓存的 item + 指令进本函数（指令下标重定位）。
+    // ins 按值收：调用方从缓存拷贝一次，这里 move 进池，免二次拷贝。
+    void push_cached(const MItem& it, MInstr ins);
     void push_line(std::string_view line);       // 解析完整一行（含 tab，不含换行）
     void push_body(std::string_view body);       // 解析 tab 之后的正文（line() 的入口）
     void push_directive(std::string_view body);  // "\t" + body + "\n"
@@ -190,17 +197,16 @@ MItem make_label(std::string name, bool indented = false);
 MItem make_directive(std::string body);
 MItem make_comment(std::string line);  // line 是整行文本（含 "\t# " 之类前缀）
 MItem make_raw(std::string text);
-MItem make_instr_item(MInstr ins);
 
 // 行/指令/操作数解析。解析器只认 codegen 实际会生成的文法；认不出的
 // 一律返回失败，由调用方退化成 Raw，保证字节不变。
-MItem parse_line(std::string_view line);  // 完整行（含缩进，不含换行），失败退化 Raw
-MItem parse_body(std::string_view body);  // tab 之后的正文，失败退化 Raw（带 tab 前缀）
+// 完整行（含缩进，不含换行）解析进 f：指令落 insts 池，item 记下标。
+void parse_line_into(std::string_view line, MachFunc& f);
 MInstr parse_instr(std::string_view body, bool* ok);           // body = "mnemonic op, op"
 bool parse_operand(std::string_view text, bool as_label, MOperand* out);
 
 // 渲染成汇编文本。必须与改动前的字符串拼接结果逐字节一致。
 std::string render(const MachFunc& f);
-void render_item(const MItem& it, std::string& out);
+void render_item(const MItem& it, const MachFunc& f, std::string& out);
 
 }  // namespace pyadamas
