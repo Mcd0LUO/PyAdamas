@@ -103,6 +103,8 @@ b = Bracketed(width=9)
 print(b.wrap("one two three four"))
 print(repr(b.fill("one two three four")))
 
+print(textwrap.wrap("foo bar baz qux", 10, max_lines=0))
+print(textwrap.wrap("foo bar baz qux", 10, max_lines=0, placeholder="..."))
 # ValueError 口径
 try:
     textwrap.wrap("x", 0)
@@ -170,5 +172,7 @@ except ValueError as e:
 # '  one two\n    three\n    four\n    five'
 # ['[one two]', '[three]', '[four]']
 # '[one two]\n[three]\n[four]'
+# ['foo [...]']
+# ['foo bar...']
 # ValueError: invalid width 0 (must be > 0)
 # ValueError: placeholder too large for max width

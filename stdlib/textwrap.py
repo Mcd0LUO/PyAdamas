@@ -14,8 +14,9 @@ max width")。
 已知边界（纯 pyadamas 表示所限，均有负面说明）：
 - 词字符按 ASCII 判（[A-Za-z0-9_]），CPython 的 \\w 对 str 是 Unicode 语义。
   纯 ASCII 文本逐字节一致；非 ASCII 词/连字符的断点可能与 CPython 不同。
-- max_lines/深度这类「None 表示不限」的参数用真 None 默认值；实参显式传
-  None 会被静态类型检查拒绝（CPython 允许的 W(None) 写法在 pa 侧编译报错）。
+- max_lines 用 -1 表示「不限」（CPython 的 None）。之所以不用 None 默认值：
+  pa 的可空 int 槽里 None 与 0 同形（都是 8B 0），max_lines=0 会被误当 None；
+  显式传 None 也会被静态类型检查拒绝。max_lines=0 的真实 CPython 语义保留。
 - indent 的换行集只覆盖 ASCII：\\n \\r \\r\\n \\v \\f \\x1c-\\x1e，
   不含 U+0085/U+2028/U+2029（pa 字符串没有这些码点的行分隔语义）。
 """
@@ -269,7 +270,7 @@ class TextWrapper:
                  fix_sentence_endings: bool = False,
                  break_long_words: bool = True, drop_whitespace: bool = True,
                  break_on_hyphens: bool = True, tabsize: int = 8,
-                 max_lines: int = None, placeholder: str = " [...]") -> None:
+                 max_lines: int = -1, placeholder: str = " [...]") -> None:
         self.width = width
         self.initial_indent = initial_indent
         self.subsequent_indent = subsequent_indent
@@ -328,7 +329,7 @@ class TextWrapper:
         if self.width <= 0:
             raise ValueError("invalid width " + repr(self.width)
                              + " (must be > 0)")
-        if self.max_lines is not None:
+        if self.max_lines != -1:
             if self.max_lines > 1:
                 indent: str = self.subsequent_indent
             else:
@@ -367,7 +368,7 @@ class TextWrapper:
                 cur_len = cur_len - len(cur_line[len(cur_line) - 1])
                 cur_line.pop()
             if len(cur_line) > 0:
-                if (self.max_lines is None
+                if (self.max_lines == -1
                         or len(lines) + 1 < self.max_lines
                         or ((len(rev) == 0
                              or (self.drop_whitespace and len(rev) == 1
@@ -421,7 +422,7 @@ def wrap(text: str, width: int = 70, initial_indent: str = "",
          replace_whitespace: bool = True, fix_sentence_endings: bool = False,
          break_long_words: bool = True, drop_whitespace: bool = True,
          break_on_hyphens: bool = True, tabsize: int = 8,
-         max_lines: int = None, placeholder: str = " [...]") -> list[str]:
+         max_lines: int = -1, placeholder: str = " [...]") -> list[str]:
     """折行，返回行列表（参数见 TextWrapper）。"""
     w = TextWrapper(width, initial_indent, subsequent_indent, expand_tabs,
                     replace_whitespace, fix_sentence_endings,
@@ -435,7 +436,7 @@ def fill(text: str, width: int = 70, initial_indent: str = "",
          replace_whitespace: bool = True, fix_sentence_endings: bool = False,
          break_long_words: bool = True, drop_whitespace: bool = True,
          break_on_hyphens: bool = True, tabsize: int = 8,
-         max_lines: int = None, placeholder: str = " [...]") -> str:
+         max_lines: int = -1, placeholder: str = " [...]") -> str:
     """折行并用换行符连接（参数见 TextWrapper）。"""
     w = TextWrapper(width, initial_indent, subsequent_indent, expand_tabs,
                     replace_whitespace, fix_sentence_endings,
