@@ -333,6 +333,8 @@ void Lowerer::run(Module& ast) {
 
     IRFunction* entry = mod_.add_func(opts_.is_entry ? "__pa_main" : "__pa_init");
     entry->ret = opts_.is_entry ? t_int() : t_none();
+    // P4 块3：模块体帧在 traceback 里显示 <module>（CPython 口径）。
+    if (opts_.lang_gaps) entry->debug_name = "<module>";
     mod_.entry = static_cast<int>(mod_.funcs.size()) - 1;
 
     push_frame(entry, tc_.module_scope());
@@ -341,6 +343,13 @@ void Lowerer::run(Module& ast) {
     switch_to(b);
     st_->is_entry = opts_.is_entry;
     st_->fn_mark = rc_mark_at(st_->fn_mark_block, st_->fn_mark_pos);
+
+    // P4 块3（lang_gaps）：运行期门控开关。入口模块体**首发**——早于任何
+    // import 的模块 init 与用户代码，保证全程序抛出都走帧捕获。门控关时
+    // 一条都不发射，生成 asm 逐字沿用基线。非入口模块不发（进程级一个开关，
+    // 入口先跑；驱动侧 LANG_GAPS 是程序级 env，所有模块同门控）。
+    if (opts_.lang_gaps && opts_.is_entry)
+        call_void(RtFn::LangGapsEnable, {});
 
     // 零开销异常也覆盖模块顶层：__pa_main / __pa_init 是一个合成的函数，
     // 模块级的 try 与函数体内的 try 走同一套形状判定与降级。
@@ -382,6 +391,8 @@ int Lowerer::compile_function_body(FunctionDef& f, FuncInfoPtr info, const std::
     IRFunction* irf = mod_.add_func(label);
     int fidx = static_cast<int>(mod_.funcs.size()) - 1;
     if (owner) fn_owner_class_[irf] = owner;
+    // P4 块3：方法帧显示裸方法名（CPython 口径 Cls.meth → meth）。
+    if (owner && opts_.lang_gaps) irf->debug_name = f.name;
 
     TypePtr ret = t_none();
     if (info && info->ret) ret = info->ret;
@@ -663,8 +674,15 @@ LowerResult lower_module(Module& ast, TypeChecker& tc, const std::string& file,
     Lowerer lw(res.mod, tc, file, options);
     lw.run(ast);
     res.errors = std::move(lw.errors());
-    if (res.errors.empty() && options.opt_level >= 2)
+    if (res.errors.empty() && options.opt_level >= 2) {
+        // P4 块3（lang_gaps）：O2 小函数内联会把被内联帧并进调用者（调试表
+        // 按调用者的函数索引归因），traceback 帧链与 CPython 对不上。门控开
+        // 时关掉内联候选（直接化保留——call 仍是 call，帧不丢）；门控关逐字
+        // 沿用基线。性能代价只落在门控开的程序上。
+        if (options.lang_gaps)
+            for (auto& f : res.mod.funcs) f->can_inline = false;
         optimize_ir(res.mod, options.opt_level, options.loop_opt, options.inline_opt);
+    }
     return res;
 }
 

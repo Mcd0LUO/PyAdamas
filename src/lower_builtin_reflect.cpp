@@ -659,6 +659,19 @@ VReg Lowerer::lower_builtin_reflect(const std::string& name, Call& c) {
         call_void(RtFn::MethodCall0, {obj, const_str("close")});
         return const_none();
     }
+    // P4 块3（stdlib/traceback.py）：tb 帧链物化。返回 list[(str,int,str)]，
+    // 堆返回值带 +1，push_temp 接管（与 ExcInfo 同口径）。
+    if (name == "__pa_tb_frames") {
+        if (c.args.size() != 1) {
+            err(c.line, c.col, "__pa_tb_frames() takes exactly one argument");
+            return const_none();
+        }
+        VReg tb = expr(*c.args[0]);
+        TypePtr rt = mk_list(mk_tuple({t_str(), t_int(), t_str()}));
+        VReg v = call_runtime(RtFn::TbFrames, rt, {tb});
+        push_temp(v);
+        return v;
+    }
 
     return kNoReg;
 }

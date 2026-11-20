@@ -458,6 +458,9 @@ typedef struct PyAdamasTraceFrame {
     const char* func;
     int32_t line;
     int32_t pad;
+    /* P4 块3（lang_gaps）：捕获时该帧的 CFA（0 = 未知，逻辑帧/旧链）。
+       except 落地时按 handler 帧 CFA 裁剪待提交链用（pa_trace_commit）。 */
+    uintptr_t cfa;
     struct PyAdamasTraceFrame* next;
 } PyAdamasTraceFrame;
 
@@ -467,6 +470,18 @@ typedef struct PyAdamasException {
     struct PyAdamasException* cause;  /* raise ... from，owned */
     /* 生成器/协程逃出的逻辑帧（最外层在前），malloc 链表。 */
     struct PyAdamasTraceFrame* trace;
+    /* P4 块3（lang_gaps 运行期门控）：抛出漏斗捕获的物理帧链（最外层在前）。
+       phys = 已提交（sys.exc_info 的 tb 读它）；phys_extra = 待提交——抛出时
+       还不知道会被哪个 handler 接住，先整链记下，except 落地（pa_exc_accept*）
+       时按 handler 帧 CFA 裁剪（CPython 口径：traceback 从接住帧开始）再并入
+       phys。两条都是 malloc 链：exc_free 释放、exc_clone 复制、ExcValue 搬运。
+       门控关时恒为 NULL，捕获/提交入口第一行判 pa_lang_gaps_rt 即返回。 */
+    struct PyAdamasTraceFrame* phys;
+    struct PyAdamasTraceFrame* phys_extra;
+    /* P4 块3：零开销展开的 handler 帧 CFA（personality phase 2 钩子写入）。
+       落地提交时按它裁剪 phys_extra；0 = 未设置（setjmp 路径用帧记录地址
+       锚点推 handler CFA）。提交后清零。 */
+    uintptr_t handler_cfa;
 } PyAdamasException;
 
 typedef struct PyAdamasExcSave {
@@ -483,6 +498,12 @@ typedef struct PyAdamasExcValue {
     char* message;
     PyAdamasList* args;             /* owned：args[0] 是 message 字符串 */
     struct PyAdamasExcValue* cause; /* __cause__，owned（RC 对象） */
+    /* P4 块3（lang_gaps）：扁平异常物理帧链的副本（malloc 链，owned）。
+       finally 复制（pa_exc_take_value）/ raise e 经 ExcValue 搬运时 traceback
+       不丢：value_from_exc 克隆进来，exc_from_value 搬回去（move）。
+       门控关时恒 NULL（源异常的 phys/phys_extra 本就是 NULL）。 */
+    struct PyAdamasTraceFrame* trace;
+    struct PyAdamasTraceFrame* trace_extra;
 } PyAdamasExcValue;
 
 /* 复数：re/im 两个 double，RC 对象；magic 用于运行时判别。 */
@@ -624,6 +645,23 @@ void pa_trace_attach(PyAdamasException* e, void* gen_frame);
 void pa_trace_print(const PyAdamasException* e);
 PyAdamasTraceFrame* pa_trace_clone(const PyAdamasTraceFrame* f);
 void pa_trace_free(PyAdamasTraceFrame* f);
+/* P4 块3（lang_gaps，0.346）：运行期门控 + 物理帧捕获/提交。
+   pa_lang_gaps_enable 由入口模块体首发的 LangGapsEnable 调用（门控开才发射）；
+   关时 pa_lang_gaps_rt=0，捕获/提交全是空操作，既有行为零变化。 */
+extern int pa_lang_gaps_rt;
+void pa_lang_gaps_enable(void);
+/* 捕获模式：NEW 新抛（整链）；VALUE raise e（整链前插旧链）；
+   RERAISE 裸 raise（去掉最内层重抛帧后前插——CPython 裸 raise 不加当前帧）。 */
+#define PA_CAP_NEW 0
+#define PA_CAP_VALUE 1
+#define PA_CAP_RERAISE 2
+void pa_trace_capture(PyAdamasException* e, int mode);
+/* except 落地提交：按 pa_frame_top->cfa（handler 帧）裁剪 phys_extra 并入 phys。 */
+void pa_trace_commit(PyAdamasException* e);
+/* sys.exc_info()：(类值, 异常值, tb) 三元组；outside except → (None,None,None)。 */
+PyAdamasList* pa_exc_info(void);
+/* __pa_tb_frames(tb)：list[(file,line,func)]，外→内。 */
+PyAdamasList* pa_tb_frames(void* tb);
 extern PyAdamasException* pending_exc;
 extern PyAdamasException* current_exc;
 /* 富异常（有字段/方法的自定义异常类）的实例；0 = 当前异常不是富实例。 */

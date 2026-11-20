@@ -195,6 +195,10 @@ struct IRGlobal {
 
 struct IRFunction {
     std::string name;
+    // P4 块3（lang_gaps，0.346）：traceback 显示名。门控开时 lowerer 填
+    // （入口 <module>、方法去掉类前缀的裸方法名）；空 = 沿用 codegen 的
+    // debug_display_name(name) 旧口径——门控关时恒空，asm 逐字节不变。
+    std::string debug_name;
     std::vector<IRParam> params;
     TypePtr ret;
     // 局部槽位（含形参），下标即槽号。参数槽排在最前面，后端按这个

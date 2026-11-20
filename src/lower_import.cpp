@@ -214,6 +214,8 @@ std::optional<RtFn> Lowerer::native_fn(const std::string& module, const std::str
         if (member == "dist") return RtFn::MathDist;
     } else if (module == "sys" && member == "exit") {
         return RtFn::SysExit;
+    } else if (module == "sys" && member == "exc_info") {
+        return RtFn::ExcInfo;
     } else if (module == "random") {
         if (member == "random") return RtFn::RandGNext;
         if (member == "seed") return RtFn::RandGSeed;

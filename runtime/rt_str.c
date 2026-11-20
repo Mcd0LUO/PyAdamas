@@ -148,6 +148,30 @@ static void repr_any_into(AnyReprBuf* b, int64_t v) {
                 pa_rc_dec(s);
                 return;
             }
+            /* P4 块3（lang_gaps 门控开）：异常值过 unknown 的 repr →
+               CPython 口径 Name('arg', ...)。门控关逐字旧样（印机器字）。 */
+            if (pa_lang_gaps_rt && h->kind == PYADAMAS_RC_OBJ &&
+                ((PyAdamasExcValue*)(uintptr_t)v)->magic == PYADAMAS_EXCVAL_MAGIC) {
+                PyAdamasExcValue* ev = (PyAdamasExcValue*)(uintptr_t)v;
+                ar_cstr(b, ev->type);
+                ar_cstr(b, "(");
+                int64_t n = ev->args ? ev->args->len : 0;
+                /* 单空串 args 按无参印（raise E() 的 pa 表示是空消息串，
+                   与 CPython 无参构造同形；E("") 的 repr 差异文档化）。 */
+                if (n == 1) {
+                    PyAdamasStr* a0 = (PyAdamasStr*)(uintptr_t)ev->args->data[0];
+                    if (a0 && a0->len == 0) n = 0;
+                }
+                for (int64_t i = 0; i < n; ++i) {
+                    if (i) ar_cstr(b, ", ");
+                    PyAdamasStr* a = (PyAdamasStr*)(uintptr_t)ev->args->data[i];
+                    PyAdamasStr* r = pa_repr_str(a);
+                    ar_put(b, r->data, (size_t)r->len);
+                    pa_rc_dec(r);
+                }
+                ar_cstr(b, ")");
+                return;
+            }
             PyAdamasStr* s = pa_str_from_i64(v);
             ar_put(b, s->data, (size_t)s->len);
             pa_rc_dec(s);
@@ -504,6 +528,16 @@ PyAdamasStr* pa_str_any(int64_t v) {
             /* P4（lang_gaps）：str(类对象) == repr(类对象)（CPython 口径）。 */
             if (pa_is_class_obj((void*)(uintptr_t)v))
                 return pa_class_repr((void*)(uintptr_t)v);
+        }
+        /* P4 块3（lang_gaps 门控开）：str(异常值) == 消息（CPython 口径）。
+           用 pa_unknown_is_heap 而非 rc_index_has：exact-RC 模式（无索引）
+           也认得。门控关逐字旧样。 */
+        if (pa_lang_gaps_rt && pa_unknown_is_heap(v)) {
+            PyAdamasRc* h2 = (PyAdamasRc*)(uintptr_t)((uint64_t)v -
+                                                    (uint64_t)PYADAMAS_RC_HDR);
+            if (h2->kind == PYADAMAS_RC_OBJ &&
+                ((PyAdamasExcValue*)(uintptr_t)v)->magic == PYADAMAS_EXCVAL_MAGIC)
+                return pa_exc_value_str((PyAdamasExcValue*)(uintptr_t)v);
         }
     }
     return pa_str_from_i64(v);

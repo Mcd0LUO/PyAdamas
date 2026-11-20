@@ -392,6 +392,8 @@ void AsmGen::gen_rt_args(const Inst& in, RtFn fn) {
         case RtFn::ExcMessage:
         case RtFn::Reraise:
         case RtFn::SysArgv:
+        case RtFn::LangGapsEnable:  // P4 块3：() -> void，运行期门控
+        case RtFn::ExcInfo:         // P4 块3：() -> list*（sys.exc_info）
         case RtFn::RandGNext:
         case RtFn::OsGetcwd:
         case RtFn::OsCpuCount:
@@ -554,6 +556,7 @@ void AsmGen::gen_rt_args(const Inst& in, RtFn fn) {
         case RtFn::ClassName:
         case RtFn::ClassRepr:
         case RtFn::ExcClassObj:   // P4：(name) -> class*
+        case RtFn::TbFrames:      // P4 块3：(tb*) -> list*
         case RtFn::SysExit:
         case RtFn::PrintStr:
         case RtFn::PrintBytes:

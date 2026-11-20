@@ -457,6 +457,8 @@ bool TypeChecker::is_builtin_callable(const std::string& n) {
             // 内部 intrinsics（P4）：stdlib/contextlib.py 的 suppress/closing。
             // 异常类当值后按名字判父子；unknown 值上的零参方法调用（close）。
             "__pa_exc_is_a", "__pa_close",
+            // 内部 intrinsic（P4 块3）：stdlib/traceback.py 取 tb 帧链。
+            "__pa_tb_frames",
             // site 模块注入的内置名（交互式退出），真实代码里也会用到
             "quit", "exit", "copyright", "credits", "license",
             // 字节长度出口：len 返回码点数，len_bytes 返回 UTF-8 字节数（O(1)）

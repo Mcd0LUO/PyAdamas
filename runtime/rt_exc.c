@@ -68,6 +68,8 @@ void exc_free(PyAdamasException* e) {
     pa_exc_trace_free(e);
     exc_free(e->cause);
     pa_trace_free(e->trace);
+    pa_trace_free(e->phys);
+    pa_trace_free(e->phys_extra);
     free(e->type);
     free(e->message);
     free(e);
@@ -83,6 +85,9 @@ PyAdamasException* exc_new(const char* type, const char* msg) {
     strcpy(e->message, msg);
     e->cause = NULL;
     e->trace = NULL;
+    e->phys = NULL;
+    e->phys_extra = NULL;
+    e->handler_cfa = 0;
     pa_exc_trace_alloc(e);
     return e;
 }
@@ -92,6 +97,9 @@ PyAdamasException* exc_clone(PyAdamasException* e) {
     PyAdamasException* c = exc_new(e->type, e->message);
     c->cause = exc_clone(e->cause);
     c->trace = pa_trace_clone(e->trace);
+    c->phys = pa_trace_clone(e->phys);
+    c->phys_extra = pa_trace_clone(e->phys_extra);
+    c->handler_cfa = 0;  /* 克隆体是新抛出上下文，旧 handler CFA 不沿用 */
     return c;
 }
 
@@ -545,6 +553,7 @@ PyAdamasStr* pa_exc_accept(void) {
     exc_save_top = s;
     current_exc = pending_exc;
     pending_exc = NULL;
+    pa_trace_commit(current_exc);
     const char* msg = current_exc ? current_exc->message : "";
     return str_new(msg, (int64_t)strlen(msg));
 }
@@ -698,8 +707,12 @@ void pa_raise(PyAdamasStr* type, PyAdamasStr* msg) {
     e->message[msg->len] = '\0';
     e->cause = NULL;
     e->trace = NULL;
+    e->phys = NULL;
+    e->phys_extra = NULL;
+    e->handler_cfa = 0;
     pa_exc_trace_alloc(e);
     pending_exc = e;
+    pa_trace_capture(e, PA_CAP_NEW);
     exc_longjmp();
 }
 
@@ -718,10 +731,12 @@ void pa_reraise(void) {
         exc_free(pending_exc);
         pending_exc = current_exc;
         current_exc = NULL;
+        pa_trace_capture(pending_exc, PA_CAP_RERAISE);
         exc_longjmp();
     }
     exc_free(pending_exc);
     pending_exc = exc_new("RuntimeError", "No active exception to reraise");
+    pa_trace_capture(pending_exc, PA_CAP_NEW);
     exc_longjmp();
 }
 
@@ -756,6 +771,7 @@ void pa_exc_reraise(void) {
      * 恢复 current_exc 到外层值再抛：语义上等价于 pa_exc_done（除了不动
      * pending_exc —— 它马上要重新抛出去）。 */
     pa_exc_drop_save();
+    pa_trace_capture(pending_exc, PA_CAP_RERAISE);
     exc_longjmp();
 }
 
@@ -763,6 +779,7 @@ void pa_exc_reraise(void) {
 void pa_raise_c(const char* type, const char* msg) {
     exc_free(pending_exc);
     pending_exc = exc_new(type, msg);
+    pa_trace_capture(pending_exc, PA_CAP_NEW);
     exc_longjmp();
 }
 
@@ -775,6 +792,8 @@ static void exc_value_destroy(void* p) {
     free(v->message);
     if (v->args) pa_rc_dec(v->args);
     if (v->cause) pa_rc_dec(v->cause);
+    pa_trace_free(v->trace);
+    pa_trace_free(v->trace_extra);
 }
 
 static void exc_value_gc_release(void* p) {
@@ -792,6 +811,8 @@ static PyAdamasExcValue* exc_value_alloc(const char* type, const char* msg) {
     v->message = NULL;
     v->args = NULL;
     v->cause = NULL;
+    v->trace = NULL;
+    v->trace_extra = NULL;
     /* 下面的 pa_list_new 走 rc_alloc，可能触发主收集；先把半成品挂成根。 */
     exc_construct_begin(v);
     size_t tn = strlen(type);
@@ -866,11 +887,15 @@ _Noreturn void pa_raise_args(PyAdamasStr* type, PyAdamasList* args) {
     strcpy(e->message, msg);
     e->cause = NULL;
     e->trace = NULL;
+    e->phys = NULL;
+    e->phys_extra = NULL;
+    e->handler_cfa = 0;
     pa_exc_trace_alloc(e);
     free(msg);
     if (pending_exc_args) { pa_rc_dec(pending_exc_args); pending_exc_args = NULL; }
     if (args) { pa_rc_inc(args); pending_exc_args = args; }
     pending_exc = e;
+    pa_trace_capture(e, PA_CAP_NEW);
     exc_longjmp();
 }
 
@@ -912,6 +937,10 @@ PyAdamasExcValue* pa_exc_value_from_exc(PyAdamasException* e) {
         pa_list_append(v->args, (int64_t)msg, 2);
     }
     if (e->cause) v->cause = pa_exc_value_from_exc(e->cause);
+    /* P4 块3：物理帧链随值搬运（finally 复制 / except as e / raise e 都经
+       这里）。克隆而非移动：源异常（current_exc）还要继续活到 ExcDone。 */
+    v->trace = pa_trace_clone(e->phys);
+    v->trace_extra = pa_trace_clone(e->phys_extra);
     exc_construct_end(v);
     return v;
 }
@@ -921,6 +950,12 @@ PyAdamasException* pa_exc_from_value(PyAdamasExcValue* v) {
     if (!v) pa_raise_c("TypeError", "expected an exception instance");
     if (v->magic != PYADAMAS_EXCVAL_MAGIC) pa_raise_c("TypeError", "expected an exception instance");
     PyAdamasException* e = exc_new(v->type, v->message);
+    /* P4 块3：帧链搬回扁平异常（move：值对象不再持有）。raise e / finally
+       重抛后 traceback 延续原链；抛出漏斗按 VALUE 模式前插新帧。 */
+    e->phys = v->trace;
+    v->trace = NULL;
+    e->phys_extra = v->trace_extra;
+    v->trace_extra = NULL;
     /* 把 ExcValue 的 args 存下来，except as e 重建时能还原多参。 */
     if (v->args && v->args->len >= 1) {
         if (pending_exc_args) { pa_rc_dec(pending_exc_args); pending_exc_args = NULL; }
@@ -952,6 +987,7 @@ void pa_raise_value_from(PyAdamasExcValue* v, PyAdamasExcValue* cause) {
         exc_free(pending_exc->cause);
         pending_exc->cause = pa_exc_from_value(cause);
     }
+    pa_trace_capture(pending_exc, PA_CAP_VALUE);
     exc_longjmp();
 }
 
@@ -972,12 +1008,27 @@ void pa_raise_instance(void* inst, PyAdamasStr* type) {
     pa_rc_inc(inst);
     current_exc_inst = inst;
     pending_exc = exc_new(tn, "");
+    pa_trace_capture(pending_exc, PA_CAP_NEW);
     exc_longjmp();
 }
 
 /* except 富异常 as e：取回实例，清空全局。若无富实例返回 0。
    调用方（except as e 绑定富类时）用它替代 pa_exc_accept_value。 */
 void* pa_exc_accept_instance(void) {
+    /* P4 块3（lang_gaps 门控开）：富异常 except 也做上下文接管（pending →
+       current + save 节点），与 accept_value 同口径——sys.exc_info 在富异常
+       except 体里才读得到，ExcDone 的 save 配对也才完整。门控关逐字旧样
+       （只取实例，不动全局），既有行为零变化。 */
+    if (pa_lang_gaps_rt) {
+        PyAdamasExcSave* s = (PyAdamasExcSave*)malloc(sizeof(PyAdamasExcSave));
+        if (!s) panic_c("out of memory");
+        s->prev = current_exc;
+        s->up = exc_save_top;
+        exc_save_top = s;
+        current_exc = pending_exc;
+        pending_exc = NULL;
+        pa_trace_commit(current_exc);
+    }
     void* inst = current_exc_inst;
     current_exc_inst = NULL;
     return inst;
@@ -996,7 +1047,13 @@ PyAdamasExcValue* pa_exc_take_value(void) {
    没有就正常返回，继续执行 try 之后的代码。 */
 void pa_exc_reraise_value_if(PyAdamasExcValue* v) {
     if (!v) return;
-    pa_raise_value(v);
+    /* P4 块3：finally 收尾重抛是**同一次展开的延续**——不走 pa_raise_value
+       （那会按 VALUE 模式再捕一条当前栈前插，重复帧）。直接搬值重抛，
+       phys/phys_extra 原样延续，落地时按 handler 帧裁剪。门控关时两条路径
+       逐字等价（phys/extra 恒 NULL，捕获本就是空操作）。 */
+    exc_free(pending_exc);
+    pending_exc = pa_exc_from_value(v);
+    exc_longjmp();
 }
 
 PyAdamasExcValue* pa_exc_value_cause(PyAdamasExcValue* v) {
@@ -1013,6 +1070,7 @@ PyAdamasExcValue* pa_exc_accept_value(void) {
     exc_save_top = s;
     current_exc = pending_exc;
     pending_exc = NULL;
+    pa_trace_commit(current_exc);
     if (!current_exc) return exc_value_alloc("Exception", "");
     PyAdamasExcValue* v = pa_exc_value_from_exc(current_exc);
     /* args 已被 ExcValue 各 rc_inc 复制走，释放暂存的列表。 */
