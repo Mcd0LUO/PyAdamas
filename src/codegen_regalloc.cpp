@@ -1919,6 +1919,18 @@ bool AsmGen::temp_reg_op_ok(const Inst& in) const {
             case IrOp::StoreGlobal:
             case IrOp::Len:
             case IrOp::IndexLoadUnchecked:
+            case IrOp::IndexStoreUnchecked:
+                // BCE kind0 证明快路径（imm==1，0.335）：纯 mov，无调用、
+                // 不碰 scratch_val（序列只用 r0/r1/scratch_ptr/nv=rax 或
+                // sl，都在块内临时池 {r8,r9} 外）→ 借池安全。普通 unchecked
+                // 存储仍有 kind 冲突慢路径（pa_list_set 会返回，破坏 r8-r11）
+                // → 不安全。降级器发的 unchecked 存储 imm 恒 0，不走这里。
+                if (in.op == IrOp::IndexStoreUnchecked) {
+                    if (in.imm != 1) return false;
+                    TypePtr ct = ty_of(in.c);
+                    return ct && !ir_is_heap(ct) && ct->kind != TyKind::Unknown;
+                }
+                return true;
             case IrOp::FieldLoad:
             case IrOp::PtrLoad:
             case IrOp::FieldStore:

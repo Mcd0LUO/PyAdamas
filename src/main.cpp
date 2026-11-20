@@ -316,6 +316,24 @@ int main(int argc, char** argv) {
         // 浮点循环 SIMD 向量化（默认关）：PYADAMAS_SIMD=1 开启，参与缓存失效。
         prog.simd = std::getenv("PYADAMAS_SIMD") != nullptr &&
                     std::string_view(std::getenv("PYADAMAS_SIMD")) != "0";
+        // 整数循环优化（默认关）：PYADAMAS_LOOP_OPT=1 开推荐子集（掩码 3 =
+        // 跳转线程化 + 仿射 BCE）。bit2 同块 load 去重实测负收益（matmul
+        // BCE 收益被吃掉一半，见 docs/intloop-design.md §3），不进默认，
+        // 仅显式掩码（4/5/6/7）开发期 A/B 用。参与缓存失效。
+        if (const char* lo = std::getenv("PYADAMAS_LOOP_OPT")) {
+            std::string_view sv(lo);
+            if (sv == "1") prog.loop_opt = 3;
+            else if (sv != "0" && !sv.empty()) {
+                int v = 0;
+                bool ok = true;
+                for (char ch : sv) {
+                    if (ch < '0' || ch > '9') { ok = false; break; }
+                    v = v * 10 + (ch - '0');
+                    if (v > 7) { ok = false; break; }
+                }
+                prog.loop_opt = ok ? v : 0;
+            }
+        }
         prog.verbose = verbose;
         prog.opt = opt_level;
         prog.fast_math = fast_math;

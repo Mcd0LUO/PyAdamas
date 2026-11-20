@@ -67,6 +67,9 @@ struct Program {
     // 浮点循环 SIMD 向量化（PYADAMAS_SIMD，默认关）：改变代码生成结果，
     // 必须写进模块缓存清单参与失效，否则切开关命中旧产物拿假数据。
     bool simd = false;
+    // 整数循环优化（PYADAMAS_LOOP_OPT，默认 0 全关）：改变 IR 优化结果，
+    // 同样必须写进模块缓存清单参与失效。位掩码见 opt.h。
+    int loop_opt = 0;
     // 任一模块需要 unknown 索引就保持开启；全都不需要时入口关掉维护。
     bool needs_unknown_index = false;
     // 任一模块用到 from c import（dlsym RTLD_DEFAULT）就置位：链接期

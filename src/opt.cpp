@@ -8,7 +8,7 @@ namespace pyadamas {
 
 using namespace optdetail;
 
-void optimize_ir(IRModule& m, int opt_level) {
+void optimize_ir(IRModule& m, int opt_level, int loop_opt) {
     if (opt_level < 2) return;
 
     // 常量折叠 + 常量分支化简 + DCE。内联会引入新的常量操作数，
@@ -236,6 +236,19 @@ void optimize_ir(IRModule& m, int opt_level) {
 
     // 跨块 CSE：条件块算过的纯表达式（如循环条件里的 zr*zr）在体块里复用。
     for (auto& fptr : m.funcs) cse_function(*fptr);
+
+    // 整数循环优化（PYADAMAS_LOOP_OPT 门控，默认 0 全关，flag-off 不进入）。
+    // 顺序：去重 → CSE 收合并后暴露的公共表达式 → 线程化 → 仿射 BCE。
+    if (loop_opt & 4) {
+        for (auto& fptr : m.funcs) dedup_block_loads(*fptr);
+        for (auto& fptr : m.funcs) cse_function(*fptr);
+    }
+    if (loop_opt & 1) {
+        for (auto& fptr : m.funcs) thread_jump_blocks(*fptr);
+    }
+    if (loop_opt & 2) {
+        for (auto& fptr : m.funcs) version_bounds_affine_function(*fptr);
+    }
 
     // RC 冗余消除：降低器为异常安全发射的 temp/temp_take 有些会互相抵消。
     // 放在所有 CFG 变换之后 —— 前面的内联/旋转会产生新的相邻形态。
