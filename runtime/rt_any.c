@@ -372,14 +372,25 @@ int64_t pa_any_cmp(int64_t op, int64_t a, int64_t b, int64_t desc_a, int64_t des
    ══════════════════════════════════════════════════════════════════ */
 
 /* tag 编码：与 src/codegen_impl.h 的 PaTag 常量逐字对应。
-   堆 ⇔ tag>=3。FRAW 是「静态 float 实参的裸位模式」（未装箱），非堆。 */
+   P3（默认）：堆 ⇔ tag>=3。FRAW 是「静态 float 实参的裸位模式」（未装箱），
+   非堆。
+   P2（PYADAMAS_TYPE_TAGS）：追加 6/7（NONE/BOOL，非堆标量）与 8..12
+   （TUPLE/SET/BYTES/CLASS/BIG，堆子类）；堆 ⇔ 3..5 或 >=8。本文件两种
+   编号都认识（运行时是与程序一起链接的同一份 rt.o）。 */
 enum {
-    PA_TAG_UNK  = 0,
-    PA_TAG_INT  = 1,
-    PA_TAG_FRAW = 2,
-    PA_TAG_FBOX = 3,
-    PA_TAG_STR  = 4,
-    PA_TAG_HEAP = 5,
+    PA_TAG_UNK   = 0,
+    PA_TAG_INT   = 1,
+    PA_TAG_FRAW  = 2,
+    PA_TAG_FBOX  = 3,
+    PA_TAG_STR   = 4,
+    PA_TAG_HEAP  = 5,
+    PA_TAG_NONE  = 6,   /* 非堆：None（payload 0） */
+    PA_TAG_BOOL  = 7,   /* 非堆：bool（payload 0/1） */
+    PA_TAG_TUPLE = 8,   /* 堆：tuple（头 kind 仍是 LIST） */
+    PA_TAG_SET   = 9,   /* 堆：set（头 kind 仍是 DICT） */
+    PA_TAG_BYTES = 10,  /* 堆：bytes（头 kind 仍是 STR） */
+    PA_TAG_CLASS = 11,  /* 堆：类对象（头 kind OBJ + class magic） */
+    PA_TAG_BIG   = 12,  /* 预留：BigInt（堆） */
 };
 
 /* 双字返回：SysV 下 {i64,i64} 按 INTEGER/INTEGER 分类，v 进 %rax、tag 进
@@ -407,6 +418,25 @@ static void any_decode_tag(int64_t v, int64_t tag, AnyVal* o) {
         case PA_TAG_STR:
             o->kind = ANY_STR;
             o->s = (PyAdamasStr*)(uintptr_t)v;
+            return;
+        case PA_TAG_NONE:
+            /* 算术域保持 P3 语义（None 就是裸 0）。类型内省另走 pa_any_type。 */
+            o->kind = ANY_INT;
+            o->i = 0;
+            return;
+        case PA_TAG_BOOL:
+            o->kind = ANY_INT;
+            return;
+        case PA_TAG_BYTES:
+            /* bytes 与 str 共用表示；算术域按 str 处理（拼接/比较口径一致）。 */
+            o->kind = ANY_STR;
+            o->s = (PyAdamasStr*)(uintptr_t)v;
+            return;
+        case PA_TAG_TUPLE:
+        case PA_TAG_SET:
+        case PA_TAG_CLASS:
+        case PA_TAG_BIG:
+            o->kind = ANY_OTHER;
             return;
         case PA_TAG_HEAP: {
             /* 位图/容器只知道「是堆」，种类读头（一次加载，免探针）。 */

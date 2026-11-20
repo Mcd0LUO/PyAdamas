@@ -182,6 +182,10 @@ public:
         // 浮点循环 SIMD 向量化开关（PYADAMAS_SIMD，默认关）：参与缓存失效。
         void set_simd(bool v) { simd_enabled_ = v; }
         void set_inline_opt(bool v) { inline_opt_ = v; }  // PYADAMAS_INLINE_OPT，默认关
+        // 运行期类型标签（PYADAMAS_TYPE_TAGS，默认关，docs/numeric-types-design.md §2）：
+        // 在 P3 shadow tag 之上追加 NONE/BOOL 与精确堆子类 tag，解锁
+        // isinstance/repr/pprint。关闭时 tag 编号/判定逐字沿用 P3（asm 不变）。
+        void set_type_tags(bool v) { type_tags_ = v; }
 
 private:
     const std::string& global_label(int i) const {
@@ -330,12 +334,26 @@ private:
     // RC/分派快路径的判据，UNK(0) 一律回退探针 —— 正确性不依赖传播完备。
     // 门控 tags_enabled_ = 模块含 AnyArithT/AnyCmpT/AnyNegT（封闭活跃域）；
     // 门控关的模块（含 26 个热基准）不进任何 tag 分支，asm 逐字节不变。
-    // tag 编码与 runtime/rt_any.c 的 PA_TAG_* 逐字对应。堆 ⇔ tag>=3。
+    // tag 编码与 runtime/rt_any.c 的 PA_TAG_* 逐字对应。
+    //
+    // P2（0.340，PYADAMAS_TYPE_TAGS）在**不改动 P3 既有取值**的前提下扩展：
+    //   非堆标量：NONE=6 / BOOL=7（None/Bool/Int 不再碰撞）
+    //   堆子类  ：TUPLE=8 / SET=9 / BYTES=10 / CLASS=11 / BIG=12（预留）
+    // 堆判定因此变成「3..5 或 >=8」。这些新 tag 只在 type_tags_ 下发；门控
+    // 关时 tag 编号与判定（堆 ⇔ tag>=3）逐字旧样，asm 逐字节不变。
     enum PaTag {
         kTagUnk = 0, kTagInt = 1, kTagFraw = 2,
         kTagFbox = 3, kTagStr = 4, kTagHeap = 5,
+        kTagNone = 6, kTagBool = 7,
+        kTagTuple = 8, kTagSet = 9, kTagBytes = 10, kTagClass = 11,
+        kTagBig = 12,  // 预留：P3 big BigInt 落地时用（堆）
     };
     bool tags_enabled_ = false;
+    bool type_tags_ = false;              // PYADAMAS_TYPE_TAGS（默认关）
+    static bool tag_is_heap_old(int64_t t) { return t >= 3; }
+    static bool tag_is_heap_ext(int64_t t) {
+        return (t >= kTagFbox && t <= kTagHeap) || t >= kTagTuple;
+    }
     int n_tag_words_ = 0;                 // 帧内平行 tag 区字数
     std::vector<int> vreg_tag_;           // vreg -> tag 字号（-1 无）
     std::vector<int> slot_tag_;           // 命名槽 -> tag 字号（-1 无）
@@ -369,17 +387,30 @@ private:
     }
     // 静态类型导出的 tag 常量（typed vreg 作 unknown 实参/存储源时用）。
     // Optional 的机器表示是「内层值或 0」，内层可能是指针也可能是标量，
-    // 保守 UNK。Bytes/Complex/Struct 等堆对象按 HEAP。
-    static int64_t static_tag_of(const TypePtr& t) {
+    // 保守 UNK。Complex/Struct 等堆对象按 HEAP。
+    //
+    // P2（type_tags_）：None/Bool 各得专 tag；Tuple/Set/Bytes/类对象得到
+    // 精确堆子类 tag —— 这些子类在运行期头 kind 里分不开（tuple 与 list
+    // 同为 LIST、set 与 dict 同为 DICT、bytes 与 str 同为 STR、类对象藏在
+    // OBJ 里），静态类型是唯一的可靠来源。门控关时逐字旧映射。
+    int64_t static_tag_of(const TypePtr& t) const {
         if (!t) return kTagUnk;
         switch (t->kind) {
-            case TyKind::Int: case TyKind::Bool: case TyKind::None:
-                return kTagInt;
+            case TyKind::Int: return kTagInt;
+            case TyKind::Bool: return type_tags_ ? kTagBool : kTagInt;
+            case TyKind::None: return type_tags_ ? kTagNone : kTagInt;
             case TyKind::Float: return kTagFraw;
             case TyKind::Str: return kTagStr;
             case TyKind::Unknown: case TyKind::Optional: return kTagUnk;
-            default: return ir_is_heap(t) ? kTagHeap : kTagUnk;
+            case TyKind::Tuple: if (type_tags_) return kTagTuple; break;
+            case TyKind::Set: if (type_tags_) return kTagSet; break;
+            case TyKind::Bytes: if (type_tags_) return kTagBytes; break;
+            case TyKind::ClassObj: case TyKind::TypeObj:
+                if (type_tags_) return kTagClass;
+                break;
+            default: break;
         }
+        return ir_is_heap(t) ? kTagHeap : kTagUnk;
     }
     bool vreg_tagged(VReg r) const {
         return tags_enabled_ && r != kNoReg &&

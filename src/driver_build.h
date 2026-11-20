@@ -79,6 +79,10 @@ struct Program {
     // 只读借用槽细化（PYADAMAS_BORROW_OPT，默认 0 关）：改变 IR 与代码生成
     // 结果，必须写进模块缓存清单参与失效。
     bool borrow_opt = false;
+    // 运行期类型标签（PYADAMAS_TYPE_TAGS，默认关）：在 P3 shadow tag 之上
+    // 追加 NONE/BOOL/精确堆子类 tag，解锁 isinstance/repr/pprint。改变 IR
+    // 与代码生成结果（也改变 tag 判定），必须参与模块缓存失效。
+    bool type_tags = false;
     // 任一模块需要 unknown 索引就保持开启；全都不需要时入口关掉维护。
     bool needs_unknown_index = false;
     // 任一模块用到 from c import（dlsym RTLD_DEFAULT）就置位：链接期

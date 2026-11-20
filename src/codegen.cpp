@@ -135,6 +135,11 @@ std::string AsmGen::gen(const IRModule& m) {
                          in.imm == static_cast<int64_t>(RtFn::AnyCmp) ||
                          in.imm == static_cast<int64_t>(RtFn::AnyNeg)))
                         tags_enabled_ = true;
+        // P2（0.340，PYADAMAS_TYPE_TAGS）：运行期类型标签需要 tag 区与传播
+        // 在所有模块都生效（pprint/isinstance 靠它跨调用边界带类型），
+        // 所以门控直接并上 type_tags_。type_tags_ 关时这一行是纯或 0，
+        // 既有 P3 门控与 asm 逐字节不变。
+        if (type_tags_) tags_enabled_ = true;
 
         if (!m.strings.empty()) {
             // 字符串对象里有一个指向自身字符区的绝对地址。放在 .rodata
@@ -748,7 +753,7 @@ void AsmGen::emit_eh_tables() {
 std::string generate_asm(const IRModule& m, bool disable_unknown_index,
                          bool zero_cost_exc, bool index_readonly, bool rc_split,
                          bool ra_graph, bool simd, bool ra_opt,
-                         bool inline_opt) {
+                         bool inline_opt, bool type_tags) {
     AsmGen g;
     g.set_disable_unknown_index(disable_unknown_index);
     g.set_index_readonly(index_readonly);
@@ -758,6 +763,7 @@ std::string generate_asm(const IRModule& m, bool disable_unknown_index,
     g.set_simd(simd);
     g.set_ra_opt(ra_opt);
     g.set_inline_opt(inline_opt);
+    g.set_type_tags(type_tags);
     return g.gen(m);
 }
 

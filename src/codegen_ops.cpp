@@ -146,8 +146,10 @@ void AsmGen::gen_inst(const Inst& in) {
                 break;
             case IrOp::ConstNone:
                 move_to(dst_op(in.dst), "$0");
-                // None 在 unknown 域仍是裸 0（0.324 边界），tag 按 INT。
-                emit_tag_imm(in.dst, kTagInt);
+                // None 在 unknown 域仍是裸 0（0.324 边界）。P2（type_tags_）
+                // 给它专 tag，使 isinstance(x, type(None))/repr 能区分；
+                // 门控关时沿用 INT（与 0 不可分，旧行为）。
+                emit_tag_imm(in.dst, type_tags_ ? kTagNone : kTagInt);
                 break;
             case IrOp::FuncAddr: {
                 char b[24];
@@ -414,7 +416,10 @@ void AsmGen::gen_load_slot(const Inst& in) {
 
 void AsmGen::gen_const_int(const Inst& in) {
         const MOperand& d = dst_mop(in.dst);
-        emit_tag_imm(in.dst, kTagInt);
+        // P2：bool 常量（True/False 降级成 const.int ty=bool）发 BOOL tag。
+        TypePtr ct = ty_of(in.dst);
+        emit_tag_imm(in.dst, (type_tags_ && ct && ct->kind == TyKind::Bool)
+                                 ? kTagBool : kTagInt);
         if (in.imm >= INT32_MIN && in.imm <= INT32_MAX) {
             emit_imm(MOp::kMovq, in.imm, d);
         } else {

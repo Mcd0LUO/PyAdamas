@@ -149,15 +149,28 @@ void AsmGen::gen_any_tagged(const Inst& in, RtFn fn) {
 //   tag==0(UNK) → 旧 pa_rc_*_unknown（探针，逐字旧语义）
 //   tag 1/2     → 非堆标量，空操作
 //   tag>=3      → 堆指针，直接 pa_rc_inc/dec/temp（免探针）
+// P2（type_tags_）：堆判定改成 3..5 或 >=8；6/7（NONE/BOOL）非堆跳过。
 void AsmGen::gen_rc_unknown_tagged(const Inst& in, RtFn fn) {
     VReg v = in.args[0];
     const std::string fb = fresh_label("rcut_fb");
     const std::string done = fresh_label("rcut_done");
+    const std::string heap = type_tags_ ? fresh_label("rcut_heap") : std::string();
     emit2("movq", tag_mem(v), "%rax");
     line("testq %rax, %rax");
     emit_jmp("je", fb);
-    line("cmpq $3, %rax");
-    emit_jmp("jl", done);
+    if (type_tags_) {
+        line("cmpq $3, %rax");
+        emit_jmp("jl", done);          // 0..2：非堆标量/裸位模式，跳过
+        line("cmpq $6, %rax");
+        emit_jmp("jl", heap);          // 3..5：堆
+        line("cmpq $8, %rax");
+        emit_jmp("jl", done);          // 6/7：NONE/BOOL，非堆
+        emit_jmp("jmp", heap);         // >=8：堆子类 tag
+        label(heap);
+    } else {
+        line("cmpq $3, %rax");
+        emit_jmp("jl", done);
+    }
     emit2("movq", src_op(v), arg_reg_i(0));
     spill_fp_slots();
     line(fn == RtFn::RcIncUnknown ? "call pa_rc_inc"
@@ -178,6 +191,33 @@ void AsmGen::gen_rc_unknown_tagged(const Inst& in, RtFn fn) {
 // index_store 用它在门控内导出精确堆性：append 传 0/1 保住 kind2 位图
 // （设计 §1.5），元素侧装载就能从位图直接得 tag，免探针。
 void AsmGen::emit_heap_from_tag(VReg v, const std::string& dst) {
+    if (type_tags_) {
+        // 堆 ⇔ 3..5 或 >=8；6/7（NONE/BOOL）与非 0 标量都导出 0。
+        const std::string l0 = fresh_label("hft_l0");
+        const std::string h1 = fresh_label("hft_h1");
+        const std::string h2 = fresh_label("hft_h2");
+        const std::string go = fresh_label("hft_go");
+        emit2("movq", tag_src(v), "%rax");
+        line("cmpq $3, %rax");
+        emit_jmp("jl", l0);
+        line("cmpq $6, %rax");
+        emit_jmp("jl", h1);            // 3..5：堆
+        line("cmpq $8, %rax");
+        emit_jmp("jl", l0);            // 6/7：非堆标量
+        emit_jmp("jmp", h1);           // >=8：堆子类
+        label(l0);
+        line("testq %rax, %rax");
+        emit_jmp("je", h2);            // 0 = UNK：回退堆标志 2
+        emit_imm_op("movq", 0, dst);
+        emit_jmp("jmp", go);
+        label(h1);
+        emit_imm_op("movq", 1, dst);
+        emit_jmp("jmp", go);
+        label(h2);
+        emit_imm_op("movq", 2, dst);
+        label(go);
+        return;
+    }
     const std::string h1 = fresh_label("hft_h1");
     const std::string h2 = fresh_label("hft_h2");
     const std::string go = fresh_label("hft_go");
