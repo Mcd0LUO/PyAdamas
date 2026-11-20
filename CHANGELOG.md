@@ -4,6 +4,116 @@
 
 早期阶段没有逐条留痕，按阶段归纳；0.4 之后逐条记录。
 
+## [0.338] - 2026-11-20
+
+> borrow1 分支：**borrow 细化——只读借用循环变量槽免每轮 inc/dec**（R3 取证
+> 定位的真正通用 RC 杠杆，压 RC 密集容器循环，真实日常语料受益）。门控
+> `PYADAMAS_BORROW_OPT=0/1` **默认 0**；flag-off 生成 asm 逐字节不变
+> （38 热基准 cmp 全同）；manifest 缓存键加 `borrowopt`。RC 正确性是命门
+> （历史多起 borrow UAF/leak）：fail-closed 白名单判定，可证安全才做，
+> 任何一条不确定整槽/整函数跳过。设计/安全论证/负面清单见
+> docs/borrow-loop-design.md。接 0.337 之后集成，定版 0.338（集成重编号）。
+
+### 新增
+
+- **lower_borrow.cpp `borrow_readonly_slots`**（门控，降级后 opt 前，与
+  finalize_param_borrows 同位置）：候选槽的每条 StoreSlot 精确匹配 retain
+  形状 [RcInc(v); old=LoadSlot; StoreSlot; RcDec(old)]，v 溯源到
+  IndexLoad（list/tuple 借用读），容器溯源到稳定根——PARAM（形参从不覆盖）/
+  GLOBAL（本函数从不写）/ FRESHLOCAL（唯一实写为新分配 MakeList/MakeTuple/
+  ListNew，分配值与 LoadSlot 只作纯读不逃逸）。全函数扫描：生成器/async/
+  vthread/chan/Class/unknown 槽/extern/ptr 整类跳过；用户调用仅 FRESHLOCAL
+  根允许（容器不逃逸够不着）；list 修改类接收者必须可证不与根别名
+  （dict/set/deque/file 修改运行时类型上不别名 list/tuple 根，故
+  `for w in words: d[w]=d.get(w,0)+1` 的 fresh dict 写入不影响 words 借用）；
+  CallRt 白名单 Pure/Dispatch（后者仅 FRESHLOCAL），**未知编号默认 Bad**。
+  借用值 use 分析（Mov 传播）：纯运算/len/容器读/分支/Return（先 inc）/
+  存入别处（先 retain）/白名单调用；RcDec/RcTemp* 显式禁止。出口 release
+  形状逐条匹配（清零常量可夹在 dec/store 之间），del 的 load/store0/dec
+  顺序不同自然失配。改写：删 inc/old-load/dec 与出口 load/dec，**保留出口
+  清零**，置 slot_owned=false。
+- **计数守恒**：容器持有元素那份引用贯穿函数体——基线循环期间 C+1、出口
+  dec 回 C；借用恒 C。任何对象计数任何时刻不降到 0，析构时机逐点不变。
+  **不需要跨迭代值 identity**（每轮借不同元素同样守恒）——R3 的 identity
+  分析是外提 retain 的前置，不是 borrow 的前置。
+- **协同**：slot_owned=false → codegen frame_owned_ 不含借用槽 → setjmp
+  longjmp 与零开销 _Unwind 展开都不 dec 借用槽（容器才是 owner）；GC 借元素
+  经容器根可达（形参根调用方帧持有/本地根帧记录/全局根表）；内联
+  slot_owned 随槽搬进调用方、入口对借用槽只清零不释放；临时栈不触碰
+  （IndexLoad 借用不入栈）。
+- **门控管线**：LowerOptions/Program.borrow_opt；main.cpp 读
+  PYADAMAS_BORROW_OPT；manifest 写/读/比对 borrowopt。
+  PYADAMAS_BORROW_OPT_STATS=1 打印命中槽数/删除指令数（诊断）。
+- **回归 304-310**（expect 钉死，CPython 对拍）：304 命中形态（for-range/
+  for-each/while/嵌套/tuple/fresh-local/str 方法/早退）；305 对抗（容器
+  append/set/del/sort/重赋值/别名修改/del s/自赋值/覆盖写/逃逸/unknown/
+  object 标注——须保守跳过或安全变换）；306 异常（IndexError/raise/finally
+  早退/嵌套/循环后读/双循环/**setjmp 多参 raise 展开**）；307 生成器跨挂起
+  借用+调用方挂起期改容器/genexpr/send/async；308 GC 压力（churn/环垃圾/
+  dict churn，借元素经根存活）；309 内联复用/交替实参/递归；310 vthread+chan。
+
+### 正确性口径
+
+- 历史教训（lower_impl_slots.cpp 注释）：0.323 unknown 槽每写漏一份、
+  gc02_uaf_junk 野指针。本轮防线：形状精确匹配（del/自赋值/None 覆盖/
+  temp_take 自然失配）、根不逃逸证明、修改接收者别名分析、use 白名单
+  fail-closed、未知 RtFn 默认 Bad、出口释放点全匹配（漏删即多 dec → 拒绝）。
+- 命中 7/38 热基准：dict_wordfreq（count_words）、sort_struct（aggregate）、
+  b1_log_parse（gen_logs 3 槽）、b2_normalize、b3_template、b5_re_extract
+  （2 槽）、d6_rec_memo。保守跳过负面清单见设计文档 §5（根修改/Class/
+  非堆元素/非新分配来源/tuple 变量下标 unknown/入口全局根/可挂起整类）。
+
+### 性能（abbench 式交替 A/B，flag-on vs off，taskset 绑核，如实报）
+
+三轮交替 A/B（B5×R9 → B20×R11 → B40×R13，打乱顺序 + 奇偶交换，中位数/p25）：
+
+- **dict_wordfreq（RC 密集主目标）：-4.1/-3.7 → -4.4/-4.5 → -4.6/-4.4，
+  稳健 ~-4.5%**（239ms→228ms）。count_words 借 w（形参 words 根 + fresh
+  dict 写入不别名 list 根）；静态 RC inc/dec 130→124（count_words 体
+  14→8）；动态 12000×400=480 万借用迭代 ×2 ≈ 960 万条 RC 调用消除。
+- **sort_struct：-1.6/-2.0 → -1.6/-1.6 → -1.8/-1.8，稳健 ~-1.7%**。
+- b1_log_parse（gen_logs 3 槽）~-1.2%、b3_template ~-1.4%（高精度两轮
+  方向一致；初轮 +1.5/+2.9 复测证伪）。b2_normalize/b5_re_extract 中性
+  （初轮 b2 -5.8% 证伪）。d6_rec_memo +1~2% 轻微回归方向一致（6ms 短案，
+  噪声带内，疑布局效应，如实报）。
+- **噪声标定**：未命中案 flag-on/off 产物 cmp 逐字节相同，初轮却量出
+  binary_trees +4.8%/d5_finance +11.0% → 纯机器噪声；短案噪声带 ±3%。
+- queue_sim/binary_trees/fasta/c1_ledger/d5_finance 未命中（根修改/Class/
+  str 下标新串/非新分配来源/非堆元素），二进制逐字节同，收益如实报零——
+  与 R3 一致：borrow 只压「稳定容器只读借用」一类，不是所有 RC 密集开销。
+- 净结论：通用杠杆成立（日常语料 b1/b3 受益，非基准特化），主目标 -4.5%
+  稳健可测；门控默认关，集成按语料净收益定默认值。详见设计文档 §8。
+
+### 闸门
+
+- ASan **detect_leaks=1** + UAF 钉子 13_gc/174_gc_construct_roots/
+  88_defaultdict/192_dict_cache/66_genexpr/119_gen_except_suspend/
+  92_exc_inline_rc/93_gen_exc_rc/94_suspend_positions/225_vthread_gc_suspend
+  + 新回归 304-310，flag-on/off 各一遍全 0（含 setjmp 展开借用案）。
+- 全套件 normal flag-on EXIT=0（312 ran ok，0 失败）；全套件 ASan flag-on
+  （JOBS=1）EXIT=0（312 ran ok，0 失败）。
+- difftest flag-on（O0 vs O2）294 用例 0 不一致。
+- 语料 353 案（tests/run + daily 23 + _bugs 13 + realistic 6 + compare 9 +
+  unknown 5 + json/re）flag-on vs off 输出+rc 零差异：351 逐字节同；
+  bench_re 仅计时列差异（语义列逐字节同，计时本征非确定）；
+  277_urllib_errors 并行端口竞争 flaky（产物 cmp 逐字节同，独跑 on/off
+  各 3 遍全 0，套件 ran ok）。
+- CPython 对拍：daily 23 案 flag-on 全同（a1/a3/a5 用 build+argv 对拍）。
+- flag-off 38 热基准 asm 对 lead 0.337 基线逐字节 cmp 38/38 IDENTICAL。
+- check_size 无新增超限（lower_borrow.cpp 738 行；既有 5 个超限文件与
+  基线同一组，driver_build 1540→1551 本就超限）。
+
+### 剩余/风险（负面结论，如实报）
+
+- 非堆元素循环（d5_finance list[float]）本就没有 RC churn，无 borrow 可做；
+  queue_sim/binary_trees/fasta 因根修改/Class/str 下标新串保守跳过——
+  RC 密集案里只有 dict_wordfreq 形态命中，其余「密集」开销不是可省记账。
+- 扩展方向（本轮不做）：新分配来源扩到 ListSlice/StrToList 等（c1_ledger
+  main 仅 800 对，收益微小徒增信任面）；unknown 槽（历史洞多不碰）；
+  dict/set 根（需键不被替换的修改分析）；append-only 根细化（queue_sim
+  实际伴随重赋值，细化后仍不命中）；入口全局根 CFG 分析（收益有限）。
+- 风险：改的是所有权记账，误判即 UAF/leak。门控默认关可回退；每块增量
+  过 ASan leak+UAF 与语料对拍；未知 RtFn/op fail-closed。
 ## [0.337] - 2026-11-20
 
 > dv1 分支：**去虚拟化深化 + 函数内联扩展——削减调用开销**（fib/nqueens/
