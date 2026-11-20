@@ -127,6 +127,7 @@ pyadamas::ModuleInfoPtr builtin_module(const std::string& name) {
              pyadamas::t_float());
     } else if (name == "sys") {
         info->globals["argv"] = pyadamas::mk_list(pyadamas::t_str());
+        info->globals["executable"] = pyadamas::t_str();
         info->globals["maxsize"] = pyadamas::t_int();
         info->globals["stdin"] = pyadamas::t_file();
         info->globals["stdout"] = pyadamas::t_file();

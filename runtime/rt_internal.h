@@ -1502,6 +1502,7 @@ int64_t pa_math_sumprod(PyAdamasList* a, PyAdamasList* b);
 double pa_math_dist(PyAdamasList* a, PyAdamasList* b);
 void pa_sys_set_args(int64_t argc, char** argv);
 PyAdamasList* pa_sys_argv(void);
+PyAdamasStr* pa_sys_executable(void);
 void pa_sys_exit(int64_t code);
 void pa_print_i64(int64_t v);
 void pa_print_u64(uint64_t v);

@@ -419,6 +419,11 @@ bool Lowerer::builtin_value(const std::string& module, const std::string& member
             out = call_runtime(RtFn::SysArgv, ty, {});
             return true;
         }
+        if (member == "executable") {
+            ty = t_str();
+            out = call_runtime(RtFn::SysExecutable, ty, {});
+            return true;
+        }
         if (member == "stdin" || member == "stdout" || member == "stderr") {
             int64_t which = member == "stdin" ? 0 : member == "stdout" ? 1 : 2;
             ty = t_file();

@@ -271,20 +271,27 @@ void pa_trace_commit(PyAdamasException* e) {
         for (const PyAdamasTraceFrame* f = e->phys_extra; f; f = f->next)
             if (f->cfa > rec && (!hcfa || f->cfa < hcfa)) hcfa = f->cfa;
     }
-    /* 锚点校验：handler 帧自己必须在待提交链里（抛出时它在栈上）。不在说明
-       上下文换过（典型：生成器挂起后恢复到另一条栈，CFA 已失效）——不裁剪，
-       整链保留，宁可多几帧也不按陈旧 CFA 误删。 */
-    int anchored = 0;
+    /* 锚点校验：handler 帧自己在待提交链里（抛出时它在栈上）→ 按 CFA 裁剪。
+       不在链里分两种：
+       - 全部节点都比 handler 更外层（cfa > hcfa）：裸 raise 被**重抛帧自己**
+         的包围 try 接住（CPython 实测：异常没离开当前帧，外层帧一个不加）
+         → 整链丢弃。
+       - 其余（CFA 混杂，典型：生成器挂起后恢复到另一条栈，旧 CFA 失效）
+         → 不裁剪整链保留，宁可多几帧也不按陈旧 CFA 误删。 */
+    int anchored = 0, all_outer = 1;
     if (hcfa) {
-        for (const PyAdamasTraceFrame* f = e->phys_extra; f; f = f->next)
-            if (f->cfa == hcfa) { anchored = 1; break; }
+        for (const PyAdamasTraceFrame* f = e->phys_extra; f; f = f->next) {
+            if (f->cfa == hcfa) anchored = 1;
+            if (f->cfa <= hcfa) all_outer = 0;
+        }
     }
+    int keep_all = !hcfa || (!anchored && !all_outer);
     PyAdamasTraceFrame* keep = NULL;
     PyAdamasTraceFrame** ktail = &keep;
     PyAdamasTraceFrame* f = e->phys_extra;
     while (f) {
         PyAdamasTraceFrame* nx = f->next;
-        if (!anchored || f->cfa <= hcfa) {
+        if (keep_all || f->cfa <= hcfa) {
             f->next = NULL;
             *ktail = f;
             ktail = &f->next;

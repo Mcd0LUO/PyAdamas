@@ -313,6 +313,17 @@ PyAdamasList* pa_sys_argv(void) {
     return sys_argv_list;
 }
 
+/* sys.executable：pa 口径是编译产物自身的路径（argv[0]），与 CPython
+   「解释器可执行文件」同概念——自执行重入（153/350 的 print_exc 子进程检查）
+   在两种运行时下都能用同一套分支逻辑。与 pa_sys_argv 同口径：借用全局
+   argv 列表里的字符串（活到 pa_sys_argv_shutdown），不 inc，调用方按
+   builtin_value 的既有约定消费（存槽时自己 retain）。 */
+PyAdamasStr* pa_sys_executable(void) {
+    PyAdamasList* l = pa_sys_argv();
+    if (l->len == 0) return str_new("", 0);
+    return (PyAdamasStr*)(uintptr_t)l->data[0];
+}
+
 void pa_sys_exit(int64_t code) { exit((int)code); }
 
 /* ── 输出 ─────────────────────────────────────────────────────── */

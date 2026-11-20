@@ -201,6 +201,7 @@ RtClass classify_rt(RtFn f, int& recv) {
         case RtFn::MathIsqrt: case RtFn::MathComb: case RtFn::MathPerm: case RtFn::MathProd:
         case RtFn::MathSumprod: case RtFn::MathDist:
         case RtFn::SysArgv: case RtFn::SysExit: case RtFn::SysStream:
+        case RtFn::SysExecutable:
         case RtFn::LangGapsEnable: case RtFn::ExcInfo: case RtFn::TbFrames:
         case RtFn::HandlerPush: case RtFn::HandlerLeave: case RtFn::HandlerDiscard:
         case RtFn::ExcMatches: case RtFn::ExcAccept: case RtFn::ExcAcceptValue:
