@@ -61,12 +61,18 @@ annotate 证实守卫链 ~10%（lea/cmp/je ×3 + vtable 装载），其余头部
 
 ## 2. 本轮实现（全部 PYADAMAS_INLINE_OPT 门控，默认关）
 
-- **P0 调用入口对齐修复**：.p2align 5 移到 .LfN 标签**之前**——调用不再
-  穿 NOP 雪橇，函数体对齐不变（DSB 32B 粒度保留）。EH/LSDA 基准是 fname
-  （.cfi_startproc 处），不受影响；ptag 双入口相对布局不变。
-- **P1 小函数内联扩展**：放宽 inline_cost（48→96 条、12→20 块、预算
-  24 位点/256 增长→40/640），加 PYADAMAS_INLINE_DBG 诊断。判据/RC/异常
-  护栏与现有内联完全一致（can_inline、非生成器、无 handler、非递归）。
+- **P0 调用入口对齐修复（v2，布局保持式）**：.p2align 填充字节**原样保留**，
+  只在对齐后加 .LfNe 别名；call/FuncAddr/vtable/静态闭包/shim 经 entry_ref()
+  改引 .LfNe —— 调用跳过 NOP 雪橇，但 .text 布局与基线逐字节同位（只改分支
+  目标位移）。EH/LSDA 基准 fname（.cfi_startproc 处）不变；ptag 双入口相对
+  布局不变。**v1（挪对齐到 .LfN 前）已撤回**：binary_trees 实测 DSB uops
+  −32%、cycles +4.2%（布局远端效应，HANDOFF §6.2 再验证）；v2 高 BURST
+  对照回到噪声带内。
+- **P1 小函数内联扩展（负面结论，判据不放宽）**：曾试 48→96 条/12→20 块/
+  预算 40 位点/640 增长——realistic+compare 语料无可测收益（各案 ±1% 噪声），
+  且 nqueens 的 count(80 条)内联进 __pa_main 使热函数 place 布局位移，隔离
+  实验 +1.8%（去掉放宽即 +0.1%）。**回退原判据 48/12/24/256**，保留
+  PYADAMAS_INLINE_DBG 诊断（[inline]/[unroll] 决策追踪）。
 - **P2 devirt 深化**：gen_guarded_vcall 在整数叶子匹配失败时，对「小方法」
   （≤32 条指令、≤4 块、无 handler/eh_regions、非生成器、无闭包环境）
   发射守卫命中 → **直接调用**（call .LfN），守卫失败回退原 vcall。
@@ -88,12 +94,72 @@ annotate 证实守卫链 ~10%（lea/cmp/je ×3 + vtable 装载），其余头部
 
 ## 4. 递归内联评估（如实）
 
-GCC 对 fib.cpp 的收益来自递归内联+部分迭代化；纯内联一层只能省调用计数
-（~2/3），栈 mov 大头（61.7%）仍在——P0+P3 合计预期 fib −15~25%，
-距 C++ 仍有差距（剩余是帧/栈流量，需 shrink-wrapping 或递归→迭代变换，
-本轮不做）。nqueens place 体 ~200 条指令，展开一层代码 ~3× 且含 list
-RC/handler 形态，收益不抵风险，**保守跳过**。
+GCC 对 fib.cpp 的收益来自递归内联+部分迭代化；纯内联一层省调用计数
+（~2/3）+ 内联边界的实参/结果栈往返。实测 P0+P3 合计 fib **−29%**
+（超出 §1 预估的 −15~25%：内联边界消掉的栈 mov 比预估多），对 C++
+比值从 ~2.4× 收窄到 ~1.7×（同相位交替；剩余差距是帧/栈流量，需
+shrink-wrapping 或递归→迭代变换，本轮不做）。
 
-## 5. 实测（待填）
+**边界如实记录**：P3 只接「抛不出 Python 异常」的纯标量自递归（白名单
+指令集）。nqueens place 体 ~200 条指令、含 list 下标 RC 与运行时调用，
+超界不展开——收益不抵代码爆炸/异常语义风险，**保守跳过**。含 handler
+的递归（153 的 rec）、heap 实参递归（list_sum）、自调用点 >2（ackermann）
+一律不展开（303 负例钉住）。栈深度减半：极端深度下栈溢出崩溃点后移
+（pyadamas 无 RecursionError 限制，CPython 对拍用例深度 ≤500 不受影响），
+opt-in 门控默认关。
 
-（实现后补：abbench 交替绑核 A/B、代码增长、各闸门结果。）
+## 5. 实测
+
+### 5.1 性能（交替 A/B 绑核 24，打乱+奇偶交换，中位数/p25）
+
+最终全量（13 轮 BURST=10，flag-on vs off，P1 已回退）：
+
+| 用例 | off ms | on ms | 变化 | p25 |
+|---|---|---|---|---|
+| **fib** | 23.74 | 17.10 | **−27.9%** | −27.5% |
+| nqueens | 103.65 | 103.87 | +0.2% | +0.5% |
+| obj_dispatch | 335.78 | 335.70 | −0.0% | +0.1% |
+| rec_memo | 218.09 | 215.65 | −1.1% | −0.8% |
+| binary_trees | 7.73 | 7.80 | +0.9% | −1.9% |
+| fannkuch | 10.46 | 10.85 | +3.8%* | +4.4%* |
+| fasta | 7.55 | 7.79 | +3.1%* | +3.6%* |
+| 其余 8 案 | — | — | ±0.7% 内 | — |
+| 合计 | 1811.97 | 1805.15 | −0.4% | — |
+
+fib 高 BURST 复核（13 轮 BURST=20）：22.74 → 16.13 ms（**−29.0%**，p25 −28.5%）。
+对 C++ 比值：同相位交替 ~2.4× → ~1.7×（g++ 15.2 -O2 本机 fib.cpp；绝对值随
+多租户负载相位漂移，只信交替比值）。
+
+*短用例（<15ms）BURST=10 相位噪声：对照实验（两侧同一二进制）噪声底 ±2.5%；
+fannkuch/fasta 高 BURST=20 复测 +0.4%/−1.1%（噪声带内）。这两案 flag-on 只有
+P0-v2 入口别名（布局逐字节同位、只改分支目标），无 P1/P2/P3 作用面，
+理论上不可能负收益——复测确认是测量噪声。
+
+### 5.2 代码增长（text 段）
+
+| 用例 | off | on | 增量 |
+|---|---|---|---|
+| fib | 59801 | 59985 | +184 B（+0.3%，P3 展开） |
+| nqueens | 67878 | 67878 | **0**（P1 回退后无内联） |
+| obj_dispatch | 72766 | 72830 | +64 B（+0.09%，P2 冷 __init__） |
+
+### 5.3 闸门（全过）
+
+- flag-off asm 逐字节不变：**92/92 cmp**（compare 9 + realistic 6 + builtins 54 + daily 23）。
+- difftest flag-on（O0/O2）：**287/0**。
+- 套件 normal flag-on/off：**305 ran ok × 2，EXIT=0**；ASan flag-on **JOBS=1：305 ran ok，EXIT=0**。
+- 语料零差异（flag-on vs off，输出+rc）：tests/run + 全部基准 **0 DIFF**。
+- ASan detect_leaks=1：13_gc / 88_defaultdict / 192_dict_cache / 66_genexpr /
+  119_gen_except_suspend / 92 / 93 / 94 / 300-303 **全 0**。
+- 异常/生成器/vthread 钉子：92/93/94/119/153_traceback flag-on ran ok；220-229 全过。
+- CPython 对拍：300-303 expect 钉自真实 CPython；fib/nqueens/obj_dispatch 输出一致。
+- check_size：无新增超限（codegen_block 1200 / codegen_impl.h 1200 / codegen_call 1162；
+  已知 5 超限不变）。
+- manifest inlineopt 缓存键：切开关必然失效（实测验证）。
+- 逐块独立构建：c59c343 快照独立 worktree 构建 EXIT=0。
+
+### 5.4 隔离实验（P1 负面结论证据）
+
+nqueens 三向交替（13 轮 BURST=20）：off vs 全包（含 P1 放宽）= **+1.8%**（p25 +2.0%）；
+off vs 去 P1（其余同）= **+0.1%**（p25 −0.1%）。count(80 条)内联进 __pa_main 使
+热函数 place 布局位移是回归源 → P1 判据回退 48/12/24/256。
