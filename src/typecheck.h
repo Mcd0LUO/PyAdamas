@@ -112,7 +112,7 @@ public:
     void set_strict_module_names(bool v) { strict_module_names_ = v; }
     // P4 语言缺口开关（PYADAMAS_LANG_GAPS）：内建异常名在值位置得到
     // ClassObj[Exception] 类型（运行期类对象），而不是退化成 unknown/0。
-    void set_lang_gaps(bool v) { lang_gaps_ = v; }
+    void set_lang_gaps(bool v) { lang_gaps_ = v; lang_gaps_enabled() = v; }
     bool lang_gaps() const { return lang_gaps_; }
     bool strict_module_names() const { return strict_module_names_; }
     bool lenient_imports() const { return lenient_imports_; }

@@ -351,8 +351,10 @@ void Lowerer::lower_classdef(ClassDef& c) {
     if (opts_.lang_gaps) {
         std::string qual = mod_.runtime_name + "." + c.name;
         for (auto& m : ci->methods) {
-            if (m.kind != MethodKind::Normal || m.decorated || m.slot < 0 || !m.def)
-                continue;
+            // 普通方法 + 属性 getter（closed 等零参读面经 file 分派用）；
+            // setter/deleter 需要带参动态调用，不在本轮。
+            bool reg = m.kind == MethodKind::Normal || m.kind == MethodKind::PropertyGetter;
+            if (!reg || m.decorated || m.slot < 0 || !m.def) continue;
             call_void(RtFn::MethodRegister,
                       {const_str(qual), const_str(m.name), const_int(m.slot)});
         }

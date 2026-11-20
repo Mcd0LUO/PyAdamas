@@ -204,6 +204,8 @@ inline constexpr ModuleEntry kModuleTable[] = {
     {"subprocess", ModuleKind::Native, "", ""},
     {"time", ModuleKind::Native, "", ""},
     {"itertools", ModuleKind::NativePython, "itertools.py", ""},
+    // P4 块2（lang_gaps）：内存流 StringIO/BytesIO（file 协议泛化）。
+    {"io", ModuleKind::Python, "io.py", ""},
     {"collections", ModuleKind::Native, "", ""},
     {"json", ModuleKind::Native, "", ""},
     {"re", ModuleKind::Native, "", ""},

@@ -1318,6 +1318,28 @@ void pa_method_register(PyAdamasStr* qual, PyAdamasStr* meth, int64_t slot);
 int64_t pa_method_call0(void* obj, PyAdamasStr* name);
 int64_t pa_is_file(void* v);
 int64_t pa_is_class_obj(void* v);
+/* P4 块2：file 协议泛化的实例侧分派（rt_lang.c）。rt_file.c 的 pa_file_*
+   入口在值不是真 file 时委托到这里（FileLike 类实例，方法名→槽登记表）。 */
+PyAdamasStr* pa_fileinst_read(void* v, int64_t n);
+PyAdamasStr* pa_fileinst_readline(void* v, int64_t n);
+PyAdamasList* pa_fileinst_readlines(void* v, int64_t hint);
+int64_t pa_fileinst_write(void* v, PyAdamasStr* s);
+void pa_fileinst_writelines(void* v, PyAdamasList* l);
+int64_t pa_fileinst_seek(void* v, int64_t off, int64_t whence);
+int64_t pa_fileinst_tell(void* v);
+int64_t pa_fileinst_truncate(void* v, int64_t size);
+void pa_fileinst_close(void* v);
+void pa_fileinst_flush(void* v);
+int64_t pa_fileinst_closed(void* v);
+int64_t pa_fileinst_fileno(void* v);
+int64_t pa_fileinst_isatty(void* v);
+int64_t pa_fileinst_readable(void* v);
+int64_t pa_fileinst_writable(void* v);
+int64_t pa_fileinst_seekable(void* v);
+PyAdamasStr* pa_fileinst_name(void* v);
+PyAdamasStr* pa_fileinst_mode(void* v);
+PyAdamasStr* pa_fileinst_encoding(void* v);
+PyAdamasStr* pa_fileinst_errors(void* v);
 /* P2：tag 数组的跨调用侧信道（生成代码在 call 前写、被调序言读并清零）。 */
 extern int64_t pa_ptag_in;
 extern int64_t pa_ptag_len;

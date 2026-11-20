@@ -639,7 +639,11 @@ VReg Lowerer::lower_print(Call& c) {
     int file_slot = -1;
     if (kw_file) {
         TypePtr ft = tc_.type_of(kw_file->value.get());
-        if (!ft || ft->kind != TyKind::File) {
+        // P4（lang_gaps）：print(file=...) 收 FileLike（read/write 方法面
+        // 的类实例，io.StringIO 等）；运行期 pa_file_write/flush 按值分派。
+        bool filelike = opts_.lang_gaps && ft && ft->kind == TyKind::Class &&
+                        ft->cls && ft->cls->method("read") && ft->cls->method("write");
+        if (!ft || (ft->kind != TyKind::File && !filelike)) {
             err(kw_file->value->line, kw_file->value->col,
                 "print() file must be an open file object");
         } else {

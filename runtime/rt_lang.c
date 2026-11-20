@@ -184,15 +184,51 @@ static const MethodReg* lang_method_lookup(const char* qual, const char* meth) {
     return NULL;
 }
 
-/* 零参动态方法调用。分派口径：
-   - file 对象（RC OBJ + sizeof(PyAdamasFile)，pa_is_file）：close 直调
-     pa_file_close；其它名字报 AttributeError。
-   - 类实例（RC INSTANCE）：沿 MRO 逐类查登记表，命中且槽在该类
-     own_slots 里（尊重覆盖）才调该类 vtable 的实现——与 pa_super_lookup
-     同一套元数据布局（meta=vt-6，m[2]=vtable / m[3]=own_slots / m[4]=名）。
-   - 其它：AttributeError。
-   返回值原样交出；只用于返回 None/标量的方法（close）。返回堆值的
-   方法在这里会丢引用——调用方（closing）只发 close，文档化边界。 */
+/* 沿实例 MRO 找方法实现（与 pa_super_lookup 同一套元数据布局：
+   meta=vt-6，m[2]=vtable / m[3]=own_slots / m[4]=限定名）。命中且槽在
+   该类 own_slots 里（尊重覆盖）才返回该类 vtable 的实现。找不到报
+   AttributeError。返回的函数指针按调用方口径 cast（零参/带参）。 */
+static void* lang_method_fn(void* obj, const char* meth) {
+    if (obj) {
+        PyAdamasRc* h = (PyAdamasRc*)obj - 1;
+        if (rc_index_has(h) && h->kind == PYADAMAS_RC_INSTANCE) {
+            const int64_t* vt = *(const int64_t**)obj;
+            if (vt) {
+                const int64_t* meta = vt - 6;
+                const int64_t* mro = (const int64_t*)(uintptr_t)meta[0];
+                int64_t n = mro ? mro[0] : 0;
+                for (int64_t i = 1; i <= n; ++i) {
+                    const int64_t* m = (const int64_t*)(uintptr_t)mro[i];
+                    if (!m) continue;
+                    const char* cn = (const char*)(uintptr_t)m[4];
+                    if (!cn) continue;
+                    const MethodReg* r = lang_method_lookup(cn, meth);
+                    if (!r) continue;
+                    const int64_t* own = (const int64_t*)(uintptr_t)m[3];
+                    int64_t k = own ? own[0] : 0;
+                    int found = 0;
+                    for (int64_t j = 1; j <= k; ++j)
+                        if (own[j] == r->slot) { found = 1; break; }
+                    if (!found) continue;
+                    const int64_t* ovt = (const int64_t*)(uintptr_t)m[2];
+                    if (!ovt) continue;
+                    void* fn = (void*)(uintptr_t)ovt[r->slot];
+                    if (fn) return fn;
+                }
+            }
+        }
+    }
+    char buf[192];
+    snprintf(buf, sizeof buf, "object has no attribute '%s'", meth);
+    pa_raise_c("AttributeError", buf);
+    return NULL;
+}
+
+/* 零参动态方法调用（closing 的 .close()）。分派口径：
+   - file 对象（pa_is_file）：close 直调 pa_file_close；其它 AttributeError。
+   - 类实例：lang_method_fn 沿 MRO 查表。
+   返回值原样交出；只用于返回 None/标量的方法。返回堆值的方法动态调
+   会丢引用——closing 只发 close，文档化边界。 */
 int64_t pa_method_call0(void* obj, PyAdamasStr* name) {
     char meth[128];
     if (!name || name->len < 0 || name->len >= (int64_t)sizeof(meth))
@@ -213,40 +249,110 @@ int64_t pa_method_call0(void* obj, PyAdamasStr* name) {
         snprintf(buf, sizeof buf, "'file' object has no attribute '%s'", meth);
         pa_raise_c("AttributeError", buf);
     }
-    PyAdamasRc* h = (PyAdamasRc*)obj - 1;
-    if (rc_index_has(h) && h->kind == PYADAMAS_RC_INSTANCE) {
-        const int64_t* vt = *(const int64_t**)obj;
-        if (vt) {
-            const int64_t* meta = vt - 6;
-            const int64_t* mro = (const int64_t*)(uintptr_t)meta[0];
-            int64_t n = mro ? mro[0] : 0;
-            for (int64_t i = 1; i <= n; ++i) {
-                const int64_t* m = (const int64_t*)(uintptr_t)mro[i];
-                if (!m) continue;
-                const char* cn = (const char*)(uintptr_t)m[4];
-                if (!cn) continue;
-                const MethodReg* r = lang_method_lookup(cn, meth);
-                if (!r) continue;
-                /* 槽必须在该类自己声明的槽表里：继承来的实现由声明类
-                   自己的登记负责，避免拿别类的槽号读本类 vtable。 */
-                const int64_t* own = (const int64_t*)(uintptr_t)m[3];
-                int64_t k = own ? own[0] : 0;
-                int found = 0;
-                for (int64_t j = 1; j <= k; ++j)
-                    if (own[j] == r->slot) { found = 1; break; }
-                if (!found) continue;
-                const int64_t* ovt = (const int64_t*)(uintptr_t)m[2];
-                if (!ovt) continue;
-                int64_t (*fn)(void*) = (int64_t (*)(void*))(uintptr_t)ovt[r->slot];
-                if (!fn) continue;
-                return fn(obj);
-            }
-        }
-    }
-    char buf[192];
-    snprintf(buf, sizeof buf, "object has no attribute '%s'", meth);
-    pa_raise_c("AttributeError", buf);
-    return 0;
+    int64_t (*fn)(void*) = (int64_t (*)(void*))lang_method_fn(obj, meth);
+    return fn(obj);
+}
+
+/* ── file 协议泛化（P4 块2）：实例侧分派 ─────────────────────────
+   rt_file.c 的 pa_file_* 入口在 !pa_is_file(v) 时委托到这里（门控关时
+   file 槽只可能是真 file，委托分支永不命中）。实例方法 ABI 与生成代码
+   一致：self 在第一个整型参寄存器，其余按签名；堆返回值带 +1 引用
+   （与 pa_file_read 同口径，调用方 push_temp 接管）。
+   只支持 int/str/指针参（file 协议面没有浮点参）；带默认参的方法由
+   调用方显式传规范默认值（read(-1)/seek(off,0)/truncate(-1)）。 */
+
+PyAdamasStr* pa_fileinst_read(void* v, int64_t n) {
+    PyAdamasStr* (*fn)(void*, int64_t) =
+        (PyAdamasStr* (*)(void*, int64_t))lang_method_fn(v, "read");
+    return fn(v, n);
+}
+PyAdamasStr* pa_fileinst_readline(void* v, int64_t n) {
+    PyAdamasStr* (*fn)(void*, int64_t) =
+        (PyAdamasStr* (*)(void*, int64_t))lang_method_fn(v, "readline");
+    return fn(v, n);
+}
+PyAdamasList* pa_fileinst_readlines(void* v, int64_t hint) {
+    PyAdamasList* (*fn)(void*, int64_t) =
+        (PyAdamasList* (*)(void*, int64_t))lang_method_fn(v, "readlines");
+    return fn(v, hint);
+}
+int64_t pa_fileinst_write(void* v, PyAdamasStr* s) {
+    int64_t (*fn)(void*, PyAdamasStr*) =
+        (int64_t (*)(void*, PyAdamasStr*))lang_method_fn(v, "write");
+    return fn(v, s);
+}
+void pa_fileinst_writelines(void* v, PyAdamasList* l) {
+    void (*fn)(void*, PyAdamasList*) =
+        (void (*)(void*, PyAdamasList*))lang_method_fn(v, "writelines");
+    fn(v, l);
+}
+int64_t pa_fileinst_seek(void* v, int64_t off, int64_t whence) {
+    int64_t (*fn)(void*, int64_t, int64_t) =
+        (int64_t (*)(void*, int64_t, int64_t))lang_method_fn(v, "seek");
+    return fn(v, off, whence);
+}
+int64_t pa_fileinst_tell(void* v) {
+    int64_t (*fn)(void*) = (int64_t (*)(void*))lang_method_fn(v, "tell");
+    return fn(v);
+}
+int64_t pa_fileinst_truncate(void* v, int64_t size) {
+    int64_t (*fn)(void*, int64_t) =
+        (int64_t (*)(void*, int64_t))lang_method_fn(v, "truncate");
+    return fn(v, size);
+}
+void pa_fileinst_close(void* v) {
+    void (*fn)(void*) = (void (*)(void*))lang_method_fn(v, "close");
+    fn(v);
+}
+void pa_fileinst_flush(void* v) {
+    void (*fn)(void*) = (void (*)(void*))lang_method_fn(v, "flush");
+    fn(v);
+}
+int64_t pa_fileinst_closed(void* v) {
+    int64_t (*fn)(void*) = (int64_t (*)(void*))lang_method_fn(v, "closed");
+    return fn(v);
+}
+int64_t pa_fileinst_fileno(void* v) {
+    int64_t (*fn)(void*) = (int64_t (*)(void*))lang_method_fn(v, "fileno");
+    return fn(v);
+}
+int64_t pa_fileinst_isatty(void* v) {
+    int64_t (*fn)(void*) = (int64_t (*)(void*))lang_method_fn(v, "isatty");
+    return fn(v);
+}
+int64_t pa_fileinst_readable(void* v) {
+    int64_t (*fn)(void*) = (int64_t (*)(void*))lang_method_fn(v, "readable");
+    return fn(v);
+}
+int64_t pa_fileinst_writable(void* v) {
+    int64_t (*fn)(void*) = (int64_t (*)(void*))lang_method_fn(v, "writable");
+    return fn(v);
+}
+int64_t pa_fileinst_seekable(void* v) {
+    int64_t (*fn)(void*) = (int64_t (*)(void*))lang_method_fn(v, "seekable");
+    return fn(v);
+}
+/* name/mode/encoding/errors：StringIO/BytesIO 在 CPython 里也没有这些
+   属性；实例侧统一 AttributeError（不读实例内存冒充 PyAdamasFile）。 */
+PyAdamasStr* pa_fileinst_name(void* v) {
+    (void)v;
+    pa_raise_c("AttributeError", "file-like object has no attribute 'name'");
+    return NULL;
+}
+PyAdamasStr* pa_fileinst_mode(void* v) {
+    (void)v;
+    pa_raise_c("AttributeError", "file-like object has no attribute 'mode'");
+    return NULL;
+}
+PyAdamasStr* pa_fileinst_encoding(void* v) {
+    (void)v;
+    pa_raise_c("AttributeError", "file-like object has no attribute 'encoding'");
+    return NULL;
+}
+PyAdamasStr* pa_fileinst_errors(void* v) {
+    (void)v;
+    pa_raise_c("AttributeError", "file-like object has no attribute 'errors'");
+    return NULL;
 }
 
 /* ── 退出清理 ─────────────────────────────────────────────────
