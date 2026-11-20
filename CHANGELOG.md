@@ -4,6 +4,15 @@
 
 早期阶段没有逐条留痕，按阶段归纳；0.4 之后逐条记录。
 
+## [0.345] - 2026-11-21
+
+> **修复编译器自身 heap-use-after-free**（0.342 编译速度轮引入，simd-general 轮 ASan 编译器构建暴露）：
+> `ir.cpp vreg_str` 的 vreg 文本缓存用 `std::vector<std::string>`，`resize` 重分配搬移所有
+> string 使先前返回的 `string_view` 悬空——`text_into` 单条 `format_to` 多个 `vreg_str`
+> 实参先求值，大 r 触发 resize 使小 r 的 view 失效 → UAF。改 `std::deque`（尾部 resize
+> 不失效已有元素引用）。生成 asm 逐字节不变（21 基准 cmp）、全套件 335 ok、ASan 编译器
+> 构建运行 exit 0 无 UAF。纯运行时正确性修复，非优化。
+
 ## [0.344] - 2026-11-21
 
 > vect1 分支：**SIMD 通用化（P4 tractable 核心）——通用循环自动向量化器**
