@@ -12,7 +12,9 @@
 
 语义边界（纯 pyadamas 表示所限）：
 - Template 只支持默认的 delimiter="$" / idpattern（ASCII 标识符，IGNORECASE）
-  与 braceidpattern=None；子类改 delimiter/idpattern/flags 不生效。
+  与 braceidpattern=None；子类改 delimiter/idpattern/flags 不生效。pa 不支持
+  类作用域的常量属性，所以没有 Template.delimiter/idpattern/pattern 这些类
+  属性（CPython 里可读），分隔符在实现里固定为 "$"。
 - substitute/safe_substitute 只收一个 mapping 实参（CPython 的 **kws 形式
   不支持）；mapping 需是 dict（走 __pa_any_items 线性查找）。
 - 查到的值用 str() 转换。受 P2「容器元素没有逐元素 tag」限制，从 mapping
@@ -91,7 +93,6 @@ def _invalid(template: str, pos: int) -> None:
 class Template:
     """支持 $ 替换的字符串模板（CPython string.Template 子集）。"""
 
-    delimiter: str
     template: str
 
     def __init__(self, template: str) -> None:
