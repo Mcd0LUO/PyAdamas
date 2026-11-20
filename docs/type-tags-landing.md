@@ -109,19 +109,34 @@ pprint 是独立模块，**它的函数形参 tag 来自 §2 的侧信道**；�
 
 ## 6. 闸门（实测）
 
-- **flag-off asm 逐字节不变**：117/117 文件 cmp IDENTICAL（bench/compare 9 +
-  realistic 6 + builtins 54 + daily 23 + unknown 5 + json/re 20）。
+- **flag-off asm 逐字节不变**：**117/117 文件 cmp IDENTICAL**（bench 全量
+  .py：compare 9 + realistic 6 + builtins 54 + daily 23 + unknown 5 +
+  json/re 20）。P3 的 5 个 unknown 基准也逐字节同（新 tag 只在门控开发射）。
 - **P3 不变量**：262-266 flag-on/flag-off 全 ran ok；bench/unknown u1/u3
   flag-on/off 输出一致（450000.0 / 1480000.0）。
 - **全套件**：normal flag-off **323 ran ok EXIT=0**；normal flag-on
-  **323 ran ok EXIT=0**；ASan JOBS=1 **见下**。
-- **difftest**：全 0。
-- **语料 rc 零差异**（输出 + PYADAMAS_RC_STATS 计数，flag-on vs off）：见下。
-- **ASan detect_leaks=1 钉子**（13/174/88/192/66/119）+ 新用例 328-331：全 0。
-- **CPython 对拍**：328-331 expect 逐行由 CPython 3.14 生成（含 pprint
-  断行输出），O0/O1/O2 输出一致。
-- **check_size**：无新增超限（codegen_impl.h 1193 < 1200；新文件 tag_defs.h
-  短小；既有 5 个超限文件与基线同一组）。
+  **323 ran ok EXIT=0**；ASan（PYADAMAS_TEST_ASAN=1，JOBS=1）**323 ran ok
+  EXIT=0**（含新用例 328-331，runners 按文件头指令自动带
+  PYADAMAS_TYPE_TAGS=1）。
+- **difftest（O0 vs O2）**：305 个用例，**0 不一致，EXIT=0**。
+- **语料对拍（flag-on vs off，350 文件：tests/run + bench/daily/realistic/
+  compare/unknown/json/re）**：**346/350 stdout 逐字节相同、退出码全 0**；
+  4 个新用例（328-331）在“裸 off”对照里因缺指令而按 0.339 语义输出（套件里
+  两者都带标签，已全过）。**rc 计数不逐字可比**：tag 快路径会把
+  pa_rc_*_unknown 换成 pa_rc_inc/dec 并跳过非堆标量（计数是“调用次数”），
+  这是设计使然；改为核对**实际释放数**：80 个计数差异文件的 free_on 全部
+  **>= free_off**（0 个回退；其中 144/140/162 等 free 更多 = 标签修掉了
+  探针漏判导致的潜在漏释放）。bench_re 仅计时列不同（本征非确定）。
+- **ASan detect_leaks=1 钉子**：13_gc / 174_gc_construct_roots /
+  88_defaultdict / 192_dict_cache / 66_genexpr / 119_gen_except_suspend，
+  flag-off 与 flag-on 各一遍 **12/12 全 0**；新用例 328-331 各
+  **4/4 全 0**。
+- **CPython 对拍**：328-331 的 expect 逐行由 CPython 3.14 生成（含 pprint
+  断行/缩进输出），O0/O1/O2 输出一致（difftest 0）。
+- **check_size**：**无新增超限**。新拆 `src/codegen_call_abi.cpp`（间接/
+  虚调用发射 + outgoing_bytes，194 行）；codegen_impl.h 1195、codegen_call
+  1169、codegen_block 1153 均 < 1200；超限文件仍是基线那 5 个
+  （codegen_regalloc/driver_build/ir_ops.h/lower_impl.h/typecheck_types.h）。
 - **缓存失效**：manifest 加 `typetags` 行；切换开关必然重建（否则旧产物
   tag 编号/判定混用会读错类型）。
 
@@ -131,3 +146,5 @@ pprint 是独立模块，**它的函数形参 tag 来自 §2 的侧信道**；�
 - `295fe31` 运行期类型码 + tag 版 repr/isinstance
 - `b6ba920` 跨模块/间接 tag 侧信道 + per-param 布局 + stdlib/pprint.py
 - `c365a48` 回归 328-331 + 用例级 type-tags 指令 + indirect unknown 返回 tag
+- `2c9d7e9` 拆 codegen_call_abi.cpp（文件规模不新增超限）
+- （文档/CHANGELOG：另一次提交）

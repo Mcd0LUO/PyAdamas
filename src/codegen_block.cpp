@@ -392,6 +392,14 @@ void AsmGen::emit_function(const IRFunction& f, int fi) {
                         emit_imm(MOp::kMovq, 0, loc);
                 }
             // P3-1b：tag 入口装载形参 tag（%r11==0 → 保持 UNK 回退）。
+            // P2（type_tags）：没有带 tag 形参的函数也要清一次侧信道 ——
+            // 被调若不读（无 tag 形参），调用点的 stale 值可能被之后的
+            // 运行时回调（vthread/生成器 resume）误读；每次进入生成代码
+            // 函数都归零，异常展开另在 landing pad / setjmp 返回点清理。
+            if (type_tags_ && func_ptag_words() == 0) {
+                line("movq $0, pa_ptag_in(%rip)");
+                line("movq $0, pa_ptag_len(%rip)");
+            }
             if (func_ptag_words() > 0) emit_ptag_param_load();
 
             // 形参落位

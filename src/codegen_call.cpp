@@ -962,6 +962,11 @@ void AsmGen::gen_setjmp(const Inst& in) {
         line(std::format("call {}", target_abi().setjmp_sym));
         line("movslq %eax, %rax");
         emit2("movq", "%rax", dst_op(in.dst));
+        // P2（type_tags）：longjmp 回到这里时清 tag 侧信道（理由同 landing pad）。
+        if (type_tags_) {
+            line("movq $0, pa_ptag_in(%rip)");
+            line("movq $0, pa_ptag_len(%rip)");
+        }
     }
 
 void AsmGen::gen_call_rt(const Inst& in) {

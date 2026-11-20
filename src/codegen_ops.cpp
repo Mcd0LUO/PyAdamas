@@ -1146,6 +1146,12 @@ void AsmGen::gen_eh_landing_pad() {
     // landing pad 入口：%rax 是展开包装指针（personality 的 GR0）；紧随其后的
     // CallRt EhLand 会把它作为第一个实参传给 pa_eh_land。
     if (eh_lp_seq_ < eh_lp_labels_.size()) label(eh_lp_labels_[eh_lp_seq_++]);
+    // P2（type_tags）：异常展开落点清 tag 侧信道 —— 抛异常的调用可能没被
+    // 被调读走（被调无 tag 形参），stale 值不能被之后的回调误读。
+    if (type_tags_) {
+        line("movq $0, pa_ptag_in(%rip)");
+        line("movq $0, pa_ptag_len(%rip)");
+    }
 }
 
 }  // namespace pyadamas
