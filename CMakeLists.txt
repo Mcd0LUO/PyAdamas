@@ -31,6 +31,8 @@ set(PYADAMAS_SOURCES
   src/driver_util.cpp
   src/driver_link.cpp
   src/driver_build.cpp
+  src/driver_modules.cpp
+  src/driver_check.cpp
   src/builtin_sigs.cpp
   src/parser.cpp
   src/parser_stmt.cpp
