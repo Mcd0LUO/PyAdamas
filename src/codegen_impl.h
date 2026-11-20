@@ -181,6 +181,8 @@ public:
         void set_ra_opt(bool v) { ra_opt_ = v; }
         // 浮点循环 SIMD 向量化开关（PYADAMAS_SIMD，默认关）：参与缓存失效。
         void set_simd(bool v) { simd_enabled_ = v; }
+        // 内联/devirt 深化开关（PYADAMAS_INLINE_OPT，默认关）：参与缓存失效。
+        void set_inline_opt(bool v) { inline_opt_ = v; }
 
 private:
     const std::string& global_label(int i) const {
@@ -750,6 +752,7 @@ private:
     bool rc_split_ = false;
     bool ra_graph_ = false;  // RA_GRAPH：图着色（assign_slot_regs_graph）
     bool ra_opt_ = false;    // RA_OPT：P1 跨调用提升 + P2 只读别名（ra_opt.cpp），默认关
+    bool inline_opt_ = false;  // INLINE_OPT：内联/devirt 深化 + 入口对齐修复，默认关
     // 预扫描本函数的 EH 标记（fname 是 FDE 起点标签）；没有标记则不动作。
     void prepare_eh_plan(const IRFunction& f, const std::string& fname);
     // 发 .cfi_personality / .cfi_lsda（必须在 .cfi_startproc 之后调用）。

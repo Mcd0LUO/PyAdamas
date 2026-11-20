@@ -662,7 +662,7 @@ LowerResult lower_module(Module& ast, TypeChecker& tc, const std::string& file,
     lw.run(ast);
     res.errors = std::move(lw.errors());
     if (res.errors.empty() && options.opt_level >= 2)
-        optimize_ir(res.mod, options.opt_level, options.loop_opt);
+        optimize_ir(res.mod, options.opt_level, options.loop_opt, options.inline_opt);
     return res;
 }
 

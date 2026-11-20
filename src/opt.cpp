@@ -8,8 +8,9 @@ namespace pyadamas {
 
 using namespace optdetail;
 
-void optimize_ir(IRModule& m, int opt_level, int loop_opt) {
+void optimize_ir(IRModule& m, int opt_level, int loop_opt, bool inline_opt) {
     if (opt_level < 2) return;
+    (void)inline_opt;  // P1/P3 门控遍在后续提交接入
 
     // 常量折叠 + 常量分支化简 + DCE。内联会引入新的常量操作数，
     // 所以在内联前后各跑一遍。

@@ -337,6 +337,9 @@ int main(int argc, char** argv) {
                 prog.loop_opt = ok ? v : 0;
             }
         }
+        // 内联/devirt 深化（默认关）：PYADAMAS_INLINE_OPT=1 开启，参与缓存失效。
+        prog.inline_opt = std::getenv("PYADAMAS_INLINE_OPT") != nullptr &&
+                          std::string_view(std::getenv("PYADAMAS_INLINE_OPT")) != "0";
         prog.verbose = verbose;
         prog.opt = opt_level;
         prog.fast_math = fast_math;
@@ -352,7 +355,8 @@ int main(int argc, char** argv) {
                 auto a = std::chrono::steady_clock::now();
                 std::string asm_text = pyadamas::generate_asm(
                     *prog.entry->ir, !prog.needs_unknown_index, prog.zero_cost_exc,
-                    false, prog.rc_split, prog.ra_graph, prog.simd, prog.ra_opt);
+                    false, prog.rc_split, prog.ra_graph, prog.simd, prog.ra_opt,
+                    prog.inline_opt);
                 auto b = std::chrono::steady_clock::now();
                 if (std::getenv("PYADAMAS_TIMING"))
                     std::fprintf(stderr, "[timing] codegen=%.1f ms\n",
