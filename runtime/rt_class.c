@@ -331,6 +331,79 @@ PyAdamasList* pa_any_iter_list(int64_t v) {
     }
 }
 
+
+/* P2（0.340，PYADAMAS_TYPE_TAGS）：带 tag 的迭代物化。tag 有精确信息时
+   免探针（关键收益：**未被 RC 索引跟踪的标量元组**也能迭代 —— 旧的
+   pa_any_iter_list 靠探针判堆，标量元组探针落空后报 'int' not iterable）。
+   tag 6/7（None/bool）与非堆标签按 CPython 口径报 TypeError；UNK 回退
+   旧探针路径。 */
+PyAdamasList* pa_any_iter_list_t(int64_t v, int64_t tag) {
+    switch (tag) {
+        case PA_TAG_TUPLE: {
+            pa_rc_inc((void*)(uintptr_t)v);
+            return (PyAdamasList*)(uintptr_t)v;
+        }
+        case PA_TAG_SET:
+            return pa_dict_keys((PyAdamasDict*)(uintptr_t)v);
+        case PA_TAG_STR:
+        case PA_TAG_BYTES:
+            return pa_str_to_list((PyAdamasStr*)(uintptr_t)v);
+        case PA_TAG_HEAP: {
+            PyAdamasRc* h = (PyAdamasRc*)(uintptr_t)((uint64_t)v - (uint64_t)PYADAMAS_RC_HDR);
+            switch (h->kind) {
+                case PYADAMAS_RC_LIST:
+                    pa_rc_inc((void*)(uintptr_t)v);
+                    return (PyAdamasList*)(uintptr_t)v;
+                case PYADAMAS_RC_DICT:
+                    return pa_dict_keys((PyAdamasDict*)(uintptr_t)v);
+                case PYADAMAS_RC_STR:
+                    return pa_str_to_list((PyAdamasStr*)(uintptr_t)v);
+                default:
+                    pa_raise_c("TypeError", "object is not iterable");
+                    return NULL;
+            }
+        }
+        case PA_TAG_NONE:
+            pa_raise_c("TypeError", "'NoneType' object is not iterable");
+            return NULL;
+        case PA_TAG_UNK:
+            return pa_any_iter_list(v);
+        default:
+            /* INT / BOOL / FRAW / FBOX / CLASS / BIG：不可迭代 */
+            if (tag == PA_TAG_BOOL)
+                pa_raise_c("TypeError", "'bool' object is not iterable");
+            else if (tag == PA_TAG_INT)
+                pa_raise_c("TypeError", "'int' object is not iterable");
+            else if (tag == PA_TAG_FRAW || tag == PA_TAG_FBOX)
+                pa_raise_c("TypeError", "'float' object is not iterable");
+            else
+                pa_raise_c("TypeError", "object is not iterable");
+            return NULL;
+    }
+}
+
+/* P2：unknown dict 的 (key, value) 对物化（pprint 递归取键值用）。
+   未知值不支持方法调用（.items() 在 unknown 上被 codegen 拒绝），所以
+   由运行时按类型码取表。只有 dict 可以；set 用迭代（键即元素）。 */
+PyAdamasList* pa_any_dict_items(int64_t v, int64_t tag) {
+    PyAdamasDict* d = NULL;
+    if (tag == PA_TAG_HEAP) {
+        PyAdamasRc* h = (PyAdamasRc*)(uintptr_t)((uint64_t)v - (uint64_t)PYADAMAS_RC_HDR);
+        if (h->kind == PYADAMAS_RC_DICT) d = (PyAdamasDict*)(uintptr_t)v;
+    } else if (tag == PA_TAG_UNK) {
+        if (pa_unknown_is_heap(v)) {
+            PyAdamasRc* h = (PyAdamasRc*)(uintptr_t)((uint64_t)v - (uint64_t)PYADAMAS_RC_HDR);
+            if (h->kind == PYADAMAS_RC_DICT) d = (PyAdamasDict*)(uintptr_t)v;
+        }
+    } else if (tag >= PA_TAG_FBOX && tag <= PA_TAG_STR) {
+        /* FBOX/STR 不可能是 dict；其它精确堆子类也不是 dict。 */
+    }
+    if (!d) {
+        pa_raise_c("TypeError", "object is not a dict");
+        return NULL;
+    }
+    return pa_dict_items(d);
+}
 void pa_attr_set(void* obj, PyAdamasStr* name, int64_t value) {
     void** s = attr_slot(obj);
     if (!name || !s) panic_c("setattr() on an object without dynamic attributes");

@@ -140,6 +140,7 @@ RtClass classify_rt(RtFn f, int& recv) {
         case RtFn::AnyArithT: case RtFn::AnyNegT: case RtFn::AnyCmpT:
         case RtFn::AnyIsFloatT: case RtFn::AnyToF64T: case RtFn::AnyToI64T:
         case RtFn::AnyLoadTag: case RtFn::AnyIterList: case RtFn::AnyTypeIs:
+        case RtFn::AnyDictItems:
         case RtFn::FuncReduce: case RtFn::FuncReduceF: case RtFn::RegexSubFn:
         case RtFn::JsonDumps: case RtFn::DYLIBLoad: case RtFn::DYLIBClose:
             return RtClass::Dispatch;

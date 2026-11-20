@@ -1300,6 +1300,12 @@ void pa_attr_set(void* obj, PyAdamasStr* name, int64_t value);
 int64_t pa_attr_has(void* obj, PyAdamasStr* name);
 PyAdamasDict* pa_attr_dict_view(void* obj);
 PyAdamasList* pa_any_iter_list(int64_t v);
+/* P2（0.340）：tag 版迭代物化 + unknown dict 的 (key,value) 对（rt_class.c）。 */
+PyAdamasList* pa_any_iter_list_t(int64_t v, int64_t tag);
+PyAdamasList* pa_any_dict_items(int64_t v, int64_t tag);
+/* P2：tag 数组的跨调用侧信道（生成代码在 call 前写、被调序言读并清零）。 */
+extern int64_t pa_ptag_in;
+extern int64_t pa_ptag_len;
 int64_t pa_is_complex(void* obj);
 void dict_rebuild(PyAdamasDict* d);
 int dict_take(PyAdamasDict* d, int64_t key, int64_t* val_out);

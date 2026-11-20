@@ -106,6 +106,11 @@ int AsmGen::outgoing_bytes(const IRFunction& f) const {
             int need = 0;
             switch (in.op) {
                 case IrOp::Call:
+                    // 寄存器用完的实参逐个占 8 字节；+16 兜住隐藏指针和对齐。
+                    // P2：间接调用在栈实参之后还要放 tag 数组（门控关恒 0）。
+                    need = 8 * (static_cast<int>(in.args.size()) + 2) +
+                           8 * call_ptag_words(in);
+                    break;
                 case IrOp::CallPtr:
                 case IrOp::CallRt:
                 case IrOp::VCall:

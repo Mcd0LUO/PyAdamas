@@ -433,6 +433,8 @@ private:
         s += "$pt";
         return s;
     }
+    // 形参是否在 tag 数组里占一个字（type_tags_ 时按声明类型，否则按槽类型）。
+    bool ptag_param(const IRFunction& f, const IRParam& p) const;
     // 本函数 unknown 形参个数（>0 才发双入口；生成器/门控关恒 0）。
     int func_ptag_words() const;
     // CallDirect 的 tag 数组字数（0 = 不走 tag ABI：门控关/跨模块/生成器/

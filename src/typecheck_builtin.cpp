@@ -277,6 +277,12 @@ TypePtr TypeChecker::builtin_call(const std::string& n, Call& c) {
                     std::format("b64encode() expects bytes, got '{}'", type_name(a[0])));
             return t_bytes();
         }
+        if (n == "__pa_any_items") {
+            // P2 内部 intrinsic（stdlib/pprint.py）：unknown dict 的
+            // (key,value) 对列表；未知值不支持方法调用，只能由运行时取表。
+            if (!need(1, 1)) return mk_list(t_unknown());
+            return mk_list(t_unknown());
+        }
         if (n == "__pa_b64decode") {
             if (!need(1, 1)) return t_bytes();
             if (a[0] && a[0]->kind != TyKind::Bytes && a[0]->kind != TyKind::Unknown)

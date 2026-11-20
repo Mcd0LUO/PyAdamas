@@ -374,6 +374,18 @@ int64_t pa_any_cmp(int64_t op, int64_t a, int64_t b, int64_t desc_a, int64_t des
 /* tag 编码 PA_TAG_* 定义在 rt_internal.h（rt_str.c 的 repr 也要用）：
    P3 默认堆 ⇔ tag>=3；P2（PYADAMAS_TYPE_TAGS）堆 ⇔ 3..5 或 >=8。 */
 
+/* P2（type_tags 构建）：unknown 形参 tag 数组的**跨调用侧信道**。
+   调用方在 call 前写这里（数组指针或 0），被调序言读走并立即清零。
+   用它而不是 %r11 是因为跨模块/间接调用点上 %r11 已被目标地址占用，
+   而运行时回调（vthread/生成器 resume）根本不会设置 %r11 —— 侧信道
+   在「每次生成代码的调用都显式写 0 或数组」下永远是干净的，回调里读到
+   0 即回退 UNK。vthread 是协作式单线程，所以进程级一个变量足够。 */
+int64_t pa_ptag_in;
+/* 侧信道数组长度（= 被调形参个数）。被调按自己的形参个数校验，不匹配
+   就整体忽略 —— 函数值/动态分派上签名不一致时宁可回退 UNK 也不能读错
+   tag（错 tag 会按堆指针 inc/dec，直接 UAF/leak）。 */
+int64_t pa_ptag_len;
+
 /* 双字返回：SysV 下 {i64,i64} 按 INTEGER/INTEGER 分类，v 进 %rax、tag 进
    %rdx —— 生成代码按这个约定落盘（codegen_call_rt.cpp）。
    PaAnyPair 定义在 rt_internal.h（此处勿重复 typedef，匿名 struct 会冲突）。 */

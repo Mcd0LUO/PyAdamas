@@ -124,6 +124,21 @@ VReg Lowerer::lower_builtin_container(const std::string& name, Call& c) {
         return d;
     }
 
+    if (name == "__pa_any_items") {
+        // P2 内部 intrinsic（stdlib/pprint.py）：unknown dict → [(k,v)...]。
+        // 第二个实参 0 是「无 tag」哨兵：PYADAMAS_TYPE_TAGS 开时 codegen 会
+        // 用运行期 tag 覆盖它；关时按探针口径。
+        if (c.args.size() != 1) {
+            err(c.line, c.col, "__pa_any_items() takes exactly one argument");
+            return const_none();
+        }
+        VReg v = expr(*c.args[0]);
+        TypePtr lt = mk_list(t_unknown());
+        VReg r = call_runtime(RtFn::AnyDictItems, lt, {v, const_int(0)});
+        push_temp(r);
+        return r;
+    }
+
     if (name == "set" || name == "frozenset") {
         TypePtr ty = tc_.type_of(&c);
         // `s: set[str] = set()`：调用推断只有 set[unknown]，标注带来的

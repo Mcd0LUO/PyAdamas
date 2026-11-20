@@ -341,17 +341,36 @@ void AsmGen::gen_index_load_tag(const Inst& in, bool have_regs) {
 // 函数体序言在 tag 区清零后按 %r11 装载形参 tag；%r11==0 → 全 UNK。
 // 正确性不依赖传播完备：任何旧约定调用都落旧入口，tag 丢失=探针回退。
 
-// 形参是否配 tag 字：**按槽类型**而不是形参声明类型。槽升级
-// （store_slot 把 unknown 槽定型成 bool/str 等）会让 p.ty=unknown 的形参
-// 槽变成静态类型槽 —— 那种槽没有 tag 字（tag 分配按 slot_ty），tag 数组
-// 必须与 tag 字一一对应，否则序言往 $0 里 movq（argparse add_argument 实测）。
-static bool ptag_param(const IRFunction& f, const IRParam& p) {
-    return p.slot >= 0 && p.slot < static_cast<int>(f.slot_ty.size()) &&
-           is_unknown(f.slot_ty[static_cast<size_t>(p.slot)]);
+// 形参是否在 tag 数组里占一个字：**按声明类型**（p.ty）而不是槽类型。
+//
+// 0.328 的 P3-1b 按槽类型（slot_ty）算，因为 tag 字按 slot_ty 分配。但
+// **目录 ABI 必须在被调定义之外也能推出来**：跨模块/间接调用的调用方只
+// 看得到函数签名（p.ty），看不到被调内部槽升级。所以 P2（type_tags_）
+// 把 tag 数组布局统一改成「声明为 unknown 的形参各占一字」：
+//   - 被调序言读到 tag 后，只在**该槽确实有 tag 字**（slot_tagged）时写入，
+//     槽升级成静态类型的形参直接丢弃 tag（它内部已按静态类型处理）；
+//   - 调用方按签名算数组长度，两边一致。
+// 槽升级不再影响 tag 数组长度 → 跨模块可传。门控关时该布局与 0.339 相同
+// （没有槽升级差异时）或更保守（升级过的形参多占一字但被调忽略）。
+bool AsmGen::ptag_param(const IRFunction& f, const IRParam& p) const {
+    if (p.slot < 0) return false;
+    // 门控关：逐字沿用 0.328 的槽类型口径（asm 不变）。
+    if (!type_tags_)
+        return p.slot < static_cast<int>(f.slot_ty.size()) &&
+               is_unknown(f.slot_ty[static_cast<size_t>(p.slot)]);
+    // P2：声明类型口径（跨模块可推导，见上方注释）。
+    return is_unknown(p.ty);
 }
 
 int AsmGen::func_ptag_words() const {
     if (!tags_enabled_ || gen_) return 0;
+    if (type_tags_) {
+        // P2：tag 数组按「第 i 个形参 = 第 i 个字」排布，长度 = 形参个数；
+        // 序言只要有一个形参带 tag 字就需要读（槽升级的形参读出来丢弃）。
+        for (const auto& p : f_->params)
+            if (slot_tagged(p.slot)) return static_cast<int>(f_->params.size());
+        return 0;
+    }
     int n = 0;
     for (const auto& p : f_->params)
         if (ptag_param(*f_, p)) ++n;
@@ -359,16 +378,38 @@ int AsmGen::func_ptag_words() const {
 }
 
 int AsmGen::call_ptag_words(const Inst& in) const {
-    if (!tags_enabled_ || in.op != IrOp::CallDirect) return 0;
-    if (in.idx < 0 || in.idx >= static_cast<int>(m_->funcs.size())) return 0;
-    const IRFunction& c = *m_->funcs[static_cast<size_t>(in.idx)];
-    if (c.is_generator) return 0;
-    // 实参/形参个数不一致（可变参数等）：tag 数组对不上号，回退旧约定。
-    if (in.args.size() != c.params.size()) return 0;
-    int n = 0;
-    for (const auto& p : c.params)
-        if (ptag_param(c, p)) ++n;
-    return n;
+    if (!tags_enabled_) return 0;
+    if (in.op == IrOp::CallDirect) {
+        if (in.idx < 0 || in.idx >= static_cast<int>(m_->funcs.size())) return 0;
+        const IRFunction& c = *m_->funcs[static_cast<size_t>(in.idx)];
+        if (c.is_generator) return 0;
+        // 实参/形参个数不一致（可变参数等）：tag 数组对不上号，回退旧约定。
+        if (in.args.size() != c.params.size()) return 0;
+        if (type_tags_) return static_cast<int>(c.params.size());
+        int n = 0;
+        for (const auto& p : c.params)
+            if (ptag_param(c, p)) ++n;
+        return n;
+    }
+    if (in.op == IrOp::Call && type_tags_) {
+        // P2：间接调用（跨模块导入的函数、函数值、闭包）按**静态函数签名**
+        // 推导 tag 数组布局 —— 被调同一次构建里也按声明类型排布（ptag_param）。
+        // 含浮点形参时走 closure shim 重排，tag 布局不保证 → 不传（0 回退）。
+        // 变参/关键字/个数对不上 → 不传。
+        const FuncInfo* fi = nullptr;
+        TypePtr ft = ty_of(in.a);
+        if (ft && ft->kind == TyKind::Func) fi = ft->fn.get();
+        if (!fi || fi->varargs || fi->kwargs) return 0;
+        if (fi->pos.size() != in.args.size()) return 0;
+        int n = 0;
+        for (const auto& p : fi->pos) {
+            if (ir_is_float(p.ty)) return 0;
+            if (type_tags_) ++n;      // P2：每形参一字（含静态形参的占位）
+            else if (is_unk_ty(p.ty)) ++n;
+        }
+        return n;
+    }
+    return 0;
 }
 
 bool AsmGen::func_ret_tag(const IRFunction& f) const {
@@ -376,6 +417,9 @@ bool AsmGen::func_ret_tag(const IRFunction& f) const {
 }
 
 void AsmGen::emit_ptag_entry(int fi) {
+    // type_tags 构建也保留清零 gadget：所有既有引用（闭包/vtable/导入
+    // 符号/间接调用）行为逐字不变，tag 数组走 pa_ptag_in 侧信道，不占
+    // 任何寄存器 —— 这是跨模块传递不破坏旧 ABI 的关键。
     line("xorl %r11d, %r11d");
     emit_jmp("jmp", func_label(fi) + "$pb");
     label(ptag_label(fi));
@@ -391,10 +435,29 @@ void AsmGen::emit_ret_tag(const Inst& in) {
 
 void AsmGen::emit_ptag_param_load() {
     const std::string skip = fresh_label("ptp_skip");
+    if (type_tags_) {
+        // P2：从侧信道读 tag 数组并立刻清零。长度校验（= 本函数形参个数）
+        // 不匹配就整体忽略 —— 错位 tag 会让 RC 按错误堆性 inc/dec。
+        line("movq pa_ptag_in(%rip), %r11");
+        line("movq $0, pa_ptag_in(%rip)");
+        line("movq pa_ptag_len(%rip), %rax");
+        line("movq $0, pa_ptag_len(%rip)");
+        line(std::format("cmpq ${}, %rax", static_cast<int64_t>(f_->params.size())));
+        emit_jmp("jne", skip);
+    }
     line("testq %r11, %r11");
     emit_jmp("je", skip);
     int k = 0;
     for (const auto& p : f_->params) {
+        if (type_tags_) {
+            // P2：第 i 个形参 = 第 i 个字；槽升级的形参读出来直接丢弃。
+            if (slot_tagged(p.slot)) {
+                line(std::format("movq {}(%r11), %rax", 8 * k));
+                emit2("movq", "%rax", slot_tag_op(p.slot));
+            }
+            ++k;
+            continue;
+        }
         if (!ptag_param(*f_, p)) continue;
         line(std::format("movq {}(%r11), %rax", 8 * k));
         emit2("movq", "%rax", slot_tag_op(p.slot));
@@ -412,6 +475,14 @@ int AsmGen::emit_ptag_array(const Inst& in, const std::vector<ArgLoc>& locs) {
     const IRFunction& c = *m_->funcs[static_cast<size_t>(in.idx)];
     int k = 0;
     for (size_t i = 0; i < c.params.size(); ++i) {
+        if (type_tags_) {
+            // P2：每个形参一个字（静态形参也写，被调按需忽略）—— 位置
+            // 与形参序号一一对应，跨模块/间接调用不会因为形参类型推断
+            // 差异而错位。
+            move_to(std::format("{}(%rsp)", base + 8 * k), tag_src(in.args[i]));
+            ++k;
+            continue;
+        }
         if (!ptag_param(c, c.params[i])) continue;
         move_to(std::format("{}(%rsp)", base + 8 * k), tag_src(in.args[i]));
         ++k;

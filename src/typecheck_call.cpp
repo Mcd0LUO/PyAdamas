@@ -441,6 +441,8 @@ bool TypeChecker::is_builtin_callable(const std::string& n) {
             // 内部 intrinsics：stdlib/base64.py 的 b64 编解码走 C 实现
             "__pa_b64encode",
             "__pa_b64decode",
+            // 内部 intrinsics：stdlib/pprint.py 取 unknown dict 的键值对
+            "__pa_any_items",
             // site 模块注入的内置名（交互式退出），真实代码里也会用到
             "quit", "exit", "copyright", "credits", "license",
             // 字节长度出口：len 返回码点数，len_bytes 返回 UTF-8 字节数（O(1)）

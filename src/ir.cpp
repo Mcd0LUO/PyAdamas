@@ -522,6 +522,7 @@ bool ir_module_needs_unknown_index(const IRModule& m) {
             case RtFn::AnyToI64T:
             case RtFn::AnyLoadTag:
             case RtFn::AnyTypeIs:   // P2：UNK tag 回退探针，依赖索引
+            case RtFn::AnyDictItems:
                 return true;
             default:
                 return false;
