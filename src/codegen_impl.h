@@ -314,6 +314,10 @@ private:
     std::vector<MOperand> smem_cache_;
     std::vector<MOperand> gen_smem_cache_;
     std::vector<std::string> global_labels_;
+    // rip 相对全局操作数按模块缓存：长 mangled 符号（pyadamas$...）每次
+    // 访问都建 canonical text 会堆分配，缓存后全局访问零分配。
+    std::vector<MOperand> global_mops_;
+    std::vector<MOperand> global_tag_mops_;
     std::vector<std::string> func_labels_;
     void build_operand_caches();
 

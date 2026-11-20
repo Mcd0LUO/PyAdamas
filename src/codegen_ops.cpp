@@ -192,13 +192,13 @@ void AsmGen::gen_inst(const Inst& in) {
                 invalidate_slot(in.idx);
                 break;
             }            case IrOp::LoadGlobal:
-                emit2(MOp::kMovq, op_mem_sym(global_label(in.idx), "%rip"), kRax);
+                emit2(MOp::kMovq, global_mop(in.idx), kRax);
                 move_to(dst_mop(in.dst), mreg_operand(kRax));
                 // P3：unknown 全局装载同时装 tag；无 tag 字的全局（外部/
                 // 非入口导出）落 UNK 回退探针。
                 if (vreg_tagged(in.dst)) {
                     if (global_tag_eligible(in.idx)) {
-                        emit2(MOp::kMovq, op_mem_sym(global_tag_label(in.idx), "%rip"), kRax);
+                        emit2(MOp::kMovq, global_tag_mop(in.idx), kRax);
                         move_to(tag_mop(in.dst), mreg_operand(kRax));
                     } else {
                         emit_tag_imm(in.dst, kTagUnk);
@@ -207,17 +207,19 @@ void AsmGen::gen_inst(const Inst& in) {
                 break;
             case IrOp::StoreGlobal:
                 emit2(MOp::kMovq, src_mop(in.a), kRax);
-                emit2(MOp::kMovq, kRax, op_mem_sym(global_label(in.idx), "%rip"));
+                emit2(MOp::kMovq, kRax, global_mop(in.idx));
                 // P3：unknown 全局写入同时写 tag 字（仅 eligible 全局）。
                 if (tags_enabled_ && in.idx >= 0 &&
                     in.idx < static_cast<int>(m_->globals.size()) &&
                     is_unk_ty(m_->globals[static_cast<size_t>(in.idx)].ty) &&
                     global_tag_eligible(in.idx)) {
+                    // 历史路径：含 '$' 的 mangled tag 符号 parse_operand 拒绝 →
+                    // emit2 文本兜底列 0 Raw。转换构造复刻该兜底，不能用缓存单元。
                     move_to(MOperand(global_tag_label(in.idx) + "(%rip)"), MOperand(tag_src(in.a)));
                 }
                 break;
             case IrOp::GlobalAddr:
-                emit2(MOp::kLeaq, op_mem_sym(global_label(in.idx), "%rip"), kRax);
+                emit2(MOp::kLeaq, global_mop(in.idx), kRax);
                 move_to(dst_mop(in.dst), mreg_operand(kRax));
                 break;
             case IrOp::ClassAddr: {

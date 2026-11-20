@@ -1045,7 +1045,7 @@ void AsmGen::gen_block(const Block& b) {
                 ++i;
             }
             if (fused_global >= 0) {
-                emit2(MOp::kMovq, kRax, op_mem_sym(global_label(fused_global), "%rip"));
+                emit2(MOp::kMovq, kRax, global_mop(fused_global));
                 ++i;
             }
             ++i;

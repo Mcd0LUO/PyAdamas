@@ -227,6 +227,10 @@
 
     void emit_imm_mem(const std::string& mem, int64_t v) { emit_imm_op("movq", v, mem); }
 
+    // 全局 rip 相对操作数（模块级缓存，见 global_mops_）。
+    const MOperand& global_mop(int i) const { return global_mops_[static_cast<size_t>(i)]; }
+    const MOperand& global_tag_mop(int i) const { return global_tag_mops_[static_cast<size_t>(i)]; }
+
     // ── 结构化直发（块B2：免「拼字符串→parse_operand 回解析」往返）──
     // 操作数已是 MOperand 单元（缓存直取 / 工厂直建），拷贝进内联存储即发。
     // MReg 便捷重载走预建静态操作数表，零构造。const char* 实参经

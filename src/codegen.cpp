@@ -115,6 +115,12 @@ std::string AsmGen::gen(const IRModule& m) {
             global_labels_[i] = m.globals[i].symbol.empty()
                                     ? ".Lg" + std::to_string(i)
                                     : m.globals[i].symbol;
+        global_mops_.resize(m.globals.size());
+        global_tag_mops_.resize(m.globals.size());
+        for (size_t i = 0; i < m.globals.size(); ++i) {
+            global_mops_[i] = op_mem_sym(global_labels_[i], "%rip");
+            global_tag_mops_[i] = op_mem_sym(global_labels_[i] + "$t", "%rip");
+        }
 
         // P3 门控（设计 §3.4）：模块含 unknown 动态算术/比较才启用 shadow
         // tag。26 个热基准全部不含 pa_any_* → 门控关 → 不进任何 tag 分支。
