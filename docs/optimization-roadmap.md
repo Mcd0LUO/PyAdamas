@@ -95,3 +95,29 @@
 - RC 对消除是死胡同（≈0）；borrow 细化是真正 RC 杠杆但高风险，列专项（R-borrow）。
 - **下一轮 R4 = 整数循环优化**（nqueens 1.6× Go / fannkuch 2.4× C++ / matmul 索引）：BCE + 展开 + 强度削减 + regalloc。
 - 待议：SIMD 默认开（当前 opt-in，门控全过；narrow matcher 仅匹配特定循环，fallback 安全）。
+
+## 夜间自主迭代续（0.337-0.349，用户睡前授权单槽位顺序 + 完成后自由发挥）
+
+| 轮 | 内容 | 版本 | 结果 |
+|---|---|---|---|
+| R6 | devirt 去虚化+递归展开 | 0.337 | ✅ fib −29%（递归展开，通用）；集成 |
+| R7 | borrow 只读借用循环槽 RC 消除 | 0.339 | ✅ dict_wordfreq −4.5%（~960 万 RC 调用消除，通用 RC 杠杆，非基准特化）；sort_struct −1.7%；ASan leak/UAF 34/34、语料 353 零差异；d6_rec_memo +1~2% 噪声带负面记录。集成 |
+| stdlib3 | urllib.parse/secrets/calendar/struct/queue/contextlib/difflib 自举 | 0.338 | ✅ 7 模块纯 pa；pprint 因 unknown 类型标签缺口跳过（→P2）；集成 |
+| P2 | unknown 运行期类型标签（NONE/BOOL/TUPLE/SET/BYTES/CLASS） | 0.340 | ✅ isinstance/repr/pprint 解锁（stdlib-b3 根本缺口）；P3 既有 tag 0-5 不变只追加；pprint 10 例字节同 CPython；flag-off asm 117/117。集成 |
+| P1 | 定宽整数 i8-i64/u8-u64/char/short | 0.341 | ✅ int_promote 提升规则 C 式定死；64 位域计算+宽度正常化；字面量 coerce 范围检查；抓常量折叠回绕 bug；现有 asm 120/120。集成 |
+| 编译速度 | 位集系列（compute_dom/regalloc 活跃性/哈希→定长数组/注释直写复用/RcMark 单扫） | 0.342 | ✅ **编译吞吐 −46.8%（≈1.88×）**，重案 234_re_opt 1.48s→0.15s（≈10×）；compute_dom 20.2%→1.6%、assign_vreg_slots 14.2%→1.1%、VReg 哈希 14%→0；asm 413 文件 sha256 全同。集成 |
+| P4块1+2 | 异常类当值（CLASS tag）+suppress/closing；file 协议泛化+io.StringIO/BytesIO+csv 互操作 | 0.343 | ✅ 修 custom 异常类 qualname except 匹配命门+repr 全限定名+GC name leak；file 零 codegen 改动源码分派；异常钉子 12/12 leak 0；CPython 340/341 字节同。集成 |
+| SIMD通用化 | 结构驱动通用循环向量化器 codegen_vect.cpp（map/reduction/原地/偏移/SSA） | 0.344 | ✅ **非基准探针 1.93×**（saxpy+dot，近 2-lane 上限）；别名/依赖保守跳过+循环版本化；基准不回归（spectral_norm 1.00×/nbody 0.98×/matmul 0.99×）；回应基准特化质疑。集成 |
+| UAF修 | ir.cpp vreg_str 缓存 vector→deque | 0.345 | ✅ 修 0.342 引入的 resize 重分配致 string_view 悬空 heap-UAF（ASan 编译器构建暴露）；asm 不变。集成 |
+| P4块3+4 | traceback 帧捕获+sys.exc_info+tb 对象+traceback.py；dataclass 编译期 AST 展开 | 0.346 | ✅ 修 3 命门 bug（重查轮门控传递/单值 BoolOp 悬空块/CFA 提交口径）；异常钉子 10/10 leak 0；CPython 350/351 字节同；dataclass 7 类保守拒绝钉住。集成 |
+| tarfile | stdlib/tarfile.py 纯 pa 自举（ustar 读写/gz/GNU L-K/pax x-g 读/流式 BytesIO） | 0.347 | ✅ ustar 头字节同 CPython 3.14；5 用例字节同+跨实现互操作；src 仅 +1 行（复用既有 _shutilc）；pax/GNU 写保守跳过。集成 |
+| 重构 | 拆 5 个超 1200 行文件（regalloc/driver/typecheck_types/ir_ops/lower_impl） | 0.348 | ✅ **check_size 超限 5→0**；纯代码移动（逐行多重集核对 0 缺失）；asm 38/38 不变；cache_race 仍安全。集成 |
+| P1收尾 | u64 大字面量（词法）/定宽容器元素 coerce/u64 无符号排序/C FFI 窄无符号映射 | 0.349 | ✅ 默认 int 行为不变（hex/oct/bin 逐字不动）；超范围编译报错不静默窄化；int_promote 一字未改（332-335 全过）；asm 120/120。集成 |
+
+### 夜间小结
+- **17 版集成推送（0.333-0.349）**，单槽位顺序（收回 4 代理并行减少早夭混乱）；harness 间歇早夭频繁，send_message 恢复套路管用。
+- **通用性兑现**：borrow（dict_wordfreq −4.5% 日常语料）+ SIMD 通用化（非基准 1.93×）回应基准特化质疑；编译速度 −46.8% 普惠所有编译。
+- **语言面大幅完善**：定宽整数全（P1+收尾）+ unknown 类型标签（P2，pprint 解锁）+ P4 全 4 块（异常类当值/file-io/traceback/dataclass）+ tarfile stdlib。
+- **代码整洁**：check_size 超限清零（重构）；ir.cpp UAF 修。
+- **暂缓**：P3 big BigInt（用户停，big1 有 rt_big.c partial 留档）；SIMD AVX2/改序 reduction（输出风险）；pax/GNU 写。
+- 测试规模 262→347+（含定宽/类型标签/语言缺口/tarfile/向量化回归）；difftest 328/0；语料零差异。
