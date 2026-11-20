@@ -761,6 +761,10 @@ private:
     //     只读形参意味着函数体里不会覆盖它，所以这种形态只可能是出口释放。
     // 不记录指令下标：降低过程中语句/循环的 mark 擦除会让下标失效。
     void finalize_param_borrows();
+    // 只读借用槽细化（门控 PYADAMAS_BORROW_OPT，默认关）：把「每轮从
+    // 稳定容器借用、只被读取」的槽改成 borrow，免每轮 inc/dec 与出口
+    // release。判定与安全论证见 lower_borrow.cpp / docs/borrow-loop-design.md。
+    void finalize_borrow_slots();
 
     void release_globals();
 

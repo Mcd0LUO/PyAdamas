@@ -364,6 +364,7 @@ void Lowerer::run(Module& ast) {
     if (!terminated())
         emit_return(opts_.is_entry ? const_int(0) : const_none(),
                     opts_.is_entry ? t_int() : t_none());
+    finalize_borrow_slots();
     if (st_->rc_pushes == 0)
         erase_mark(st_->fn_mark_block, st_->fn_mark_pos, st_->fn_mark);
 
@@ -500,6 +501,7 @@ int Lowerer::compile_function_body(FunctionDef& f, FuncInfoPtr info, const std::
     stmts(f.body);
     if (!terminated()) emit_return(kNoReg, nullptr);
     finalize_param_borrows();
+    finalize_borrow_slots();
     if (st_->rc_pushes == 0)
         erase_mark(st_->fn_mark_block, st_->fn_mark_pos, st_->fn_mark);
 

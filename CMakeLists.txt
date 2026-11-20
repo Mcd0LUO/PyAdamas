@@ -52,6 +52,7 @@ set(PYADAMAS_SOURCES
   src/lower_class.cpp
   src/lower_impl_util.cpp
   src/lower_impl_slots.cpp
+  src/lower_borrow.cpp
   src/lower_stmt.cpp
   src/lower_idiom.cpp
   src/lower_stmt_with.cpp

@@ -31,6 +31,8 @@ struct LowerOptions {
     int loop_opt = 0;
     // 内联/devirt 深化开关（PYADAMAS_INLINE_OPT，默认 0 关）。见 opt.h。
     bool inline_opt = false;
+    // 只读借用槽细化（PYADAMAS_BORROW_OPT，默认 0 关）。见 lower_borrow.cpp。
+    bool borrow_opt = false;
     // 允许浮点归约用 SIMD 分组求和（会改变舍入顺序）。
     bool fast_math = false;
     // 零开销异常（Z5，默认开启）：非可挂起函数里的 try 走 LSDA / landing pad
