@@ -179,6 +179,8 @@ public:
         void set_rc_split(bool v) { rc_split_ = v; }
         // 图着色分配器开关（PYADAMAS_RA_GRAPH）：同样由驱动传入并参与缓存失效。
         void set_ra_graph(bool v) { ra_graph_ = v; }
+        // 浮点循环 SIMD 向量化开关（PYADAMAS_SIMD，默认关）：参与缓存失效。
+        void set_simd(bool v) { simd_enabled_ = v; }
 
 private:
     const std::string& global_label(int i) const {
@@ -562,6 +564,8 @@ private:
     // 操作数工厂 + 迷你发射器（emit2/emit_imm_op/emit_jmp）拆在 codegen_emit.h，
     // 类体片段，就地展开（文件规模闸门）。
 #include "codegen_emit.h"
+    // SIMD 向量化成员/声明拆在 codegen_simd.h（类体片段，文件规模闸门）。
+#include "codegen_simd.h"
 
     // ── 目标相关的汇编指示符 ────────────────────────────────────
     // ELF/GNU as 的 .cfi_*、.type、.size、.note.GNU-stack 在 COFF 目标上

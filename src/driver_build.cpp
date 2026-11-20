@@ -523,6 +523,8 @@ struct Manifest {
     int rc_split = -1;
     // 图着色分配器开关。-1 = 旧清单没有这一行（缓存必然失效一次）。
     int ra_graph = -1;
+    // SIMD 向量化开关。-1 = 旧清单没有这一行（缓存必然失效一次）。
+    int simd = -1;
     // 模块是否用到 from c import（dlsym RTLD_DEFAULT）。旧清单没有这一行：
     // 保守按「用到」处理（链接期关 --gc-sections，绝不冒误剥风险）。
     bool c_sym_default = true;
@@ -587,6 +589,12 @@ std::optional<Manifest> read_manifest(const ModuleUnit& u) {
             auto o = parse_u64(v);
             if (!o) return std::nullopt;
             m.ra_graph = static_cast<int>(*o);
+        } else if (tag == "simd") {
+            std::string v;
+            ss >> v;
+            auto o = parse_u64(v);
+            if (!o) return std::nullopt;
+            m.simd = static_cast<int>(*o);
         } else if (tag == "csymdefault") {
             std::string v;
             ss >> v;
@@ -619,6 +627,7 @@ void write_manifest(const Program& p, const ModuleUnit& u) {
     out << "unknownindex " << (u.needs_unknown_index ? 1 : 0) << "\n";
     out << "rcsplit " << (p.rc_split ? 1 : 0) << "\n";
     out << "ragraph " << (p.ra_graph ? 1 : 0) << "\n";
+    out << "simd " << (p.simd ? 1 : 0) << "\n";
     out << "csymdefault " << (u.uses_c_sym_default ? 1 : 0) << "\n";
     out << "toolchain " << toolchain_id() << "\n";
     for (auto& d : u.deps) {
@@ -831,6 +840,7 @@ bool try_cache(Program& p, ModuleUnit& u) {
     if (m->zero_cost_exc != (p.zero_cost_exc ? 1 : 0)) return false;
     if (m->rc_split != (p.rc_split ? 1 : 0)) return false;
     if (m->ra_graph != (p.ra_graph ? 1 : 0)) return false;
+    if (m->simd != (p.simd ? 1 : 0)) return false;
     if (m->deps.size() != u.deps.size()) return false;
     for (auto& d : u.deps) {
         auto it = m->deps.find(d);
@@ -1137,7 +1147,7 @@ bool build_unit(Program& p, ModuleUnit& u, bool emit_object, bool entry_ir) {
     bool skip_idx = u.is_entry && pyadamas::ir_module_can_skip_index_maint(lr.mod);
     u.asm_text = pyadamas::generate_asm(lr.mod, u.is_entry && !p.needs_unknown_index,
                                         p.zero_cost_exc, skip_idx, p.rc_split,
-                                        p.ra_graph);
+                                        p.ra_graph, p.simd);
     auto t3 = now();
     std::string err;
     if (!assemble_object(u, err)) {

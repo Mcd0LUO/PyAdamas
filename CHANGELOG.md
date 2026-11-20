@@ -4,6 +4,65 @@
 
 早期阶段没有逐条留痕，按阶段归纳；0.4 之后逐条记录。
 
+## [0.333] - 2026-11-20
+
+> simd 分支：浮点循环 SIMD 向量化**原型**（设计 + spectral_norm 最小可行原型 +
+> 实测）。门控 `PYADAMAS_SIMD=0/1`，**默认 0**；flag-off 生成 asm 逐字节不变。
+> 本轮只证明一个循环模式（eval_A 的 `1/(i+j)` 除法 + 乘加累加 reduction）的收益，
+> 不做通用自动向量化器。正确性优先：保序累加 → 与标量**逐位一致**，基准输出钉住。
+> 设计见 docs/simd-vectorization-design.md。接 slim 0.332 之后集成，定版 0.333。
+
+### 新增
+
+- **设计文档** docs/simd-vectorization-design.md：循环模式识别判据、SSE2 packed
+  double 起步、对齐/尾循环/reduction、别名依赖安全判据、浮点 regalloc 减 spill、
+  与 cgspeed 结构化发射机器集成、门控、分阶段路径（P1 spectral_norm → P2 nbody
+  逐元素 → P3 matmul 整数 → P4 通用化 → P5 AVX2）。
+- **codegen_simd.cpp**（+类体片段 codegen_simd.h）：`gen_block` 挂钩识别 reduction
+  热点循环体（可数 for + 浮点数组逐元素 map + 乘加累加），发 SSE2 2-lane 向量体
+  （movupd/mulpd/divpd/paddq/pmuludq/psrlq/pshufd/cvtdq2pd/movlhps/movhlps）+ 标量
+  尾循环。覆盖 mul_ata（a_is_j=0）与 mul_a（a_is_j=1）两形态；j 可提升 GPR 或在栈
+  （%rsi 持有每轮写回）；匹配器容忍内联/外提常量。
+- **机器层**：MOp 登记 packed SSE2 助记符（仅枚举，现有发射点不引用）。
+- **门控**：PYADAMAS_SIMD 经 Program.simd → generate_asm → AsmGen::set_simd，
+  写进模块缓存清单参与失效（与 rc_split/ra_graph 同口径）。
+- **回归用例** tests/run/283_simd_reduction.py（向量化路径，N=5 奇数尾，钉住
+  794176）/284_simd_reduction_scalar.py（标量 fallback/边界 n/大范围守卫/len<n
+  IndexError 语义）。
+
+### 正确性口径
+
+- 保序提取累加（addsd 低 lane → movhlps → addsd 高 lane），total 与标量逐位一致，
+  spectral_norm 输出钉住 811972（flag-on == flag-off == CPython）。
+- 范围守卫 i>=0 && i+n<=46341（pmuludq 低32乘/psrlq //2/cvtdq2pd int32 精确）+
+  len>=n && kind==0 && j+1<n（movupd 不越界、读裸 double）；任一不满足整段标量
+  fallback，IndexError 等异常语义与时机不变。向量循环零调用 → 无 GC safepoint、
+  不变量不可被改写。
+
+### 测量（Xeon Gold 6252 / Cascade Lake，-O2）
+
+- spectral_norm（N=600）perf stat min-of-7 交替：cycles 148.8M→34.1M（**4.36×**）、
+  instructions 376.7M→85.4M（**4.41×**）。墙钟 15 轮交替 min 56.55→24.65ms
+  （**2.29×**，含 ~8ms 固定启动）/ median 66.81→26.82ms（2.49×）。基线 3.4× Go
+  → flag-on ≈1.55× Go。
+- perf annotate：flag-off 0 条 packed、标量 sd 45.5%（addsd/divsd/mulsd）；
+  flag-on 37 条 packed 45.4%（divpd/psrlq/pshufd/paddq/movhlps），标量 sd 降到
+  38.4% 且集中在保序 addsd 链（17.39+13.98%，阶段 2 目标）。divpd 收益实测成立
+  （叠加 floordiv 展开消除 + spill 削减），未做吞吐假设。
+
+### 闸门
+
+- flag-off asm 对 0.331 基线**逐字节不变**：spectral_norm/nbody/matmul + 全部 38
+  热基准（realistic 6 + compare 9 + daily 23）asm cmp 全同 → flag-off 零回归。
+- difftest（O0/O2，flag-on）270/0；全套件 normal flag-off/on EXIT=0（290 ran ok）；
+  **ASan JOBS=1 flag-off/on EXIT=0（290 ran ok）**；283/284 normal+ASan flag-on/off
+  均 ran ok；check_size 无新增超限（codegen_simd.cpp 325 行、codegen_impl.h 拆片段后
+  1198 行）。
+- ASan JOBS=8 高并行偶发环境性 flake（网络/GC/C 编译资源竞争，失败用例每轮不同，
+  基线同样偶发，cfi_unwind ASan standalone 对基线也 rc=1）；JOBS=1 干净 EXIT=0，
+  失败用例 standalone 输出 mine==base。flag-off asm 与基线逐字节相同（二进制差异
+  仅来自不同 build 目录的 rt_asan.o，与 codegen 无关）。
+
 ## [0.332] - 2026-11-20
 
 > slim 分支合入：**单二进制瘦身** —— 运行时 -ffunction-sections/-fdata-sections +
@@ -101,6 +160,7 @@ g_rng/pa_str_method/pa_percent_format 等未用运行时全部剥离。text 段
   且会改 asm 文本、动 1430 闸门，收益/风险比低）。
 - 已知边界：from c import 程序不瘦身（安全回退）；flag-off 二进制相对 0.331 有
   布局位移（段分组/对齐），功能与输出零变化。
+
 ## [0.331] - 2026-11-20
 
 > cgspeed 分支合入：codegen 汇编发射路径提速（纯内部优化，**生成 asm 逐字节

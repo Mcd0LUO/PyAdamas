@@ -48,6 +48,11 @@ enum class MOp : uint8_t {
     // ── 浮点 ──
     kMovsd, kMovapd, kMovss, kAddsd, kSubsd, kMulsd, kDivsd, kUcomisd, kComisd,
     kCvtsi2sdq, kCvtsi2sdl, kCvttsd2siq, kCvttsd2sil, kXorpd, kPxor,
+    // ── packed SIMD（SSE2，0.333 向量化原型；门控 PYADAMAS_SIMD，默认关）──
+    // 只登记助记符，现有发射点不引用 → flag-off 逐字节不变。
+    kMovupd, kMulpd, kAddpd, kSubpd, kDivpd,
+    kPaddq, kPsubq, kPmuludq, kPsrlq, kPsllq, kPshufd,
+    kCvtdq2pd, kMovlhps, kMovhlps, kUnpcklpd,
 };
 
 // 操作码 → 汇编助记符（kRaw 返回空串）。未登记的名字返回 MOp::kRaw。

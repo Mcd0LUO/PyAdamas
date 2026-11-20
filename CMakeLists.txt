@@ -109,6 +109,7 @@ set(PYADAMAS_SOURCES
   src/codegen_call.cpp
   src/codegen_index.cpp
   src/codegen_vcall_inline.cpp
+  src/codegen_simd.cpp
   src/codegen_call_rt.cpp
   src/mach_emit.cpp
   src/ir.cpp
