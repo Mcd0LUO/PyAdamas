@@ -1,5 +1,6 @@
 // lower_builtin_reflect.cpp —— 内置函数：反射与属性
 #include "lower_impl.h"
+#include "tag_defs.h"
 
 namespace pyadamas {
 
@@ -83,6 +84,32 @@ VReg Lowerer::lower_builtin_reflect(const std::string& name, Call& c) {
                         return const_bool(false);
                     }
                     return const_bool(r);
+                }
+                // P2（PYADAMAS_TYPE_TAGS）：unknown 值带运行期类型标签后，
+                // 内置类型的判定改交运行期 pa_any_type_is(v, tag, code)。
+                // 静态类型是 unknown 时这是唯一能分辨 None/bool/tuple/set/
+                // bytes 的途径（0.339 的探针口径只能认出 str/list/dict）。
+                if (opts_.type_tags) {
+                    int64_t code = -1;
+                    if (builtin == "int") code = kTypeInt;
+                    else if (builtin == "bool") code = kTypeBool;
+                    else if (builtin == "float") code = kTypeFloat;
+                    else if (builtin == "str") code = kTypeStr;
+                    else if (builtin == "bytes") code = kTypeBytes;
+                    else if (builtin == "list") code = kTypeList;
+                    else if (builtin == "dict") code = kTypeDict;
+                    else if (builtin == "tuple") code = kTypeTuple;
+                    else if (builtin == "set") code = kTypeSet;
+                    else if (builtin == "object") code = kTypeObject;
+                    if (code >= 0) {
+                        Inst in;
+                        in.op = IrOp::CallRt;
+                        in.imm = static_cast<int64_t>(RtFn::AnyTypeIs);
+                        in.args = {obj(), const_int(code)};
+                        in.ty = t_bool();
+                        return def(t_bool(), std::move(in));
+                    }
+                    // 其余内置（complex/range/type/...）保守走下面的旧口径。
                 }
                 // unknown 值：只有带运行期类型标签的容器/标量能查。
                 RtFn fn{};

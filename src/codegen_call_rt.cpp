@@ -773,6 +773,9 @@ void AsmGen::gen_rt_args(const Inst& in, RtFn fn) {
         case RtFn::AnyNeg:
             gen_rt_i2(in);
             break;
+        case RtFn::AnyTypeIs:  // P2：gen_call_rt 特判装填 (v, tag, code)，这里只为穷尽
+            gen_rt_i2(in);
+            break;
         case RtFn::DictGetOr:
         case RtFn::DictRemove:
         case RtFn::RangeNew:

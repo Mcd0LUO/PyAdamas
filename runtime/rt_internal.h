@@ -349,6 +349,26 @@ typedef struct {
 } PyAdamasDict;
 
 
+/* unknown 值平行 tag 的编码（与 src/tag_defs.h 的 PaTag 逐字对应）。
+   P3（默认）：堆 ⇔ tag>=3。P2（PYADAMAS_TYPE_TAGS）：追加 NONE/BOOL（非堆）
+   与 TUPLE/SET/BYTES/CLASS/BIG（堆），堆 ⇔ 3..5 或 >=8。运行时是同一份
+   rt.o，两种编号都要认识。 */
+enum {
+    PA_TAG_UNK   = 0,
+    PA_TAG_INT   = 1,
+    PA_TAG_FRAW  = 2,
+    PA_TAG_FBOX  = 3,
+    PA_TAG_STR   = 4,
+    PA_TAG_HEAP  = 5,
+    PA_TAG_NONE  = 6,   /* 非堆：None（payload 0） */
+    PA_TAG_BOOL  = 7,   /* 非堆：bool（payload 0/1） */
+    PA_TAG_TUPLE = 8,   /* 堆：tuple（头 kind 仍是 LIST） */
+    PA_TAG_SET   = 9,   /* 堆：set（头 kind 仍是 DICT） */
+    PA_TAG_BYTES = 10,  /* 堆：bytes（头 kind 仍是 STR） */
+    PA_TAG_CLASS = 11,  /* 堆：类对象（头 kind OBJ + class magic） */
+    PA_TAG_BIG   = 12,  /* 预留：BigInt（堆） */
+};
+
 enum {
     PYADAMAS_RC_STR = 0,
     PYADAMAS_RC_LIST = 1,
@@ -511,6 +531,13 @@ int64_t pa_any_is_float_t(int64_t v, int64_t tag);
 double pa_any_to_f64_t(int64_t v, int64_t tag);
 int64_t pa_any_to_i64_t(int64_t v, int64_t tag);
 void pa_print_any_repr(int64_t v);
+/* P2 第二阶段（0.340，PYADAMAS_TYPE_TAGS）：运行期类型码 + isinstance 谓词
+   + 带 tag 的 repr（rt_any.c / rt_str.c）。类型码与 src/tag_defs.h 的
+   PaTypeCode 逐字对应；tag 无精确信息时按头 kind 判型（边界见实现注释）。 */
+int64_t pa_any_type(int64_t v, int64_t tag);
+int64_t pa_any_type_is(int64_t v, int64_t tag, int64_t code);
+PyAdamasStr* pa_repr_any_t(int64_t v, int64_t tag);
+void pa_print_any_repr_t(int64_t v, int64_t tag);
 PyAdamasStr* pa_fmt_i64(int64_t v, PyAdamasStr* spec);
 PyAdamasStr* pa_fmt_bool(int64_t v, PyAdamasStr* spec);
 PyAdamasStr* pa_fmt_f64(double v, PyAdamasStr* spec);

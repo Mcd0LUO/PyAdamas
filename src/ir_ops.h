@@ -600,6 +600,10 @@ enum class RtFn : uint16_t {
     // 追加在末尾，不改既有编号（集成时按落地顺序重排）。
     OsClose,               // (i64 fd) -> void
     OsPathIslink,          // (str* path) -> i64 bool  lstat S_ISLNK（stdlib2）
+    // P2（0.340，PYADAMAS_TYPE_TAGS）：isinstance(unknown, 内置类型)。
+    // IR 实参 {v, code}：code 是 PaTypeCode（src/tag_defs.h）；codegen 把
+    // tag 从平行 tag 区装填，实际调用 pa_any_type_is(v, tag, code)。
+    AnyTypeIs,             // (a, tag_a, code) -> i64 bool
 };
 
 inline const char* rt_name(RtFn f) {
@@ -630,6 +634,7 @@ inline const char* rt_name(RtFn f) {
         case RtFn::AnyToF64T: return "pa_any_to_f64_t";
         case RtFn::AnyToI64T: return "pa_any_to_i64_t";
         case RtFn::AnyLoadTag: return "pa_any_load_tag";
+        case RtFn::AnyTypeIs: return "pa_any_type_is";
         case RtFn::ListGet: return "pa_list_get";
         case RtFn::ListSet: return "pa_list_set";
         case RtFn::ListSetLen: return "pa_list_set_len";

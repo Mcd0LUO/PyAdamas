@@ -371,27 +371,8 @@ int64_t pa_any_cmp(int64_t op, int64_t a, int64_t b, int64_t desc_a, int64_t des
        入口；静态已知路径与 26 个热基准不产生任何调用。
    ══════════════════════════════════════════════════════════════════ */
 
-/* tag 编码：与 src/codegen_impl.h 的 PaTag 常量逐字对应。
-   P3（默认）：堆 ⇔ tag>=3。FRAW 是「静态 float 实参的裸位模式」（未装箱），
-   非堆。
-   P2（PYADAMAS_TYPE_TAGS）：追加 6/7（NONE/BOOL，非堆标量）与 8..12
-   （TUPLE/SET/BYTES/CLASS/BIG，堆子类）；堆 ⇔ 3..5 或 >=8。本文件两种
-   编号都认识（运行时是与程序一起链接的同一份 rt.o）。 */
-enum {
-    PA_TAG_UNK   = 0,
-    PA_TAG_INT   = 1,
-    PA_TAG_FRAW  = 2,
-    PA_TAG_FBOX  = 3,
-    PA_TAG_STR   = 4,
-    PA_TAG_HEAP  = 5,
-    PA_TAG_NONE  = 6,   /* 非堆：None（payload 0） */
-    PA_TAG_BOOL  = 7,   /* 非堆：bool（payload 0/1） */
-    PA_TAG_TUPLE = 8,   /* 堆：tuple（头 kind 仍是 LIST） */
-    PA_TAG_SET   = 9,   /* 堆：set（头 kind 仍是 DICT） */
-    PA_TAG_BYTES = 10,  /* 堆：bytes（头 kind 仍是 STR） */
-    PA_TAG_CLASS = 11,  /* 堆：类对象（头 kind OBJ + class magic） */
-    PA_TAG_BIG   = 12,  /* 预留：BigInt（堆） */
-};
+/* tag 编码 PA_TAG_* 定义在 rt_internal.h（rt_str.c 的 repr 也要用）：
+   P3 默认堆 ⇔ tag>=3；P2（PYADAMAS_TYPE_TAGS）堆 ⇔ 3..5 或 >=8。 */
 
 /* 双字返回：SysV 下 {i64,i64} 按 INTEGER/INTEGER 分类，v 进 %rax、tag 进
    %rdx —— 生成代码按这个约定落盘（codegen_call_rt.cpp）。
@@ -460,7 +441,8 @@ static void any_decode_tag(int64_t v, int64_t tag, AnyVal* o) {
 
 /* i64 -> tag：容器/字段等无 tag 来源的 unknown 字，一次探针 + kind 得到
    tag（比「每次使用都探针」少）。非堆一律 INT（unknown 域里 float 已装箱，
-   裸位模式不会从这些来源出现）。 */
+   裸位模式不会从这些来源出现）。堆子类（tuple/set/bytes/类对象）在头 kind
+   里分不开，回落 PA_TAG_HEAP（形状由头 kind 判定，见 pa_any_type）。 */
 int64_t pa_any_load_tag(int64_t v) {
     if (!pa_unknown_is_heap(v)) return PA_TAG_INT;
     PyAdamasRc* h = (PyAdamasRc*)(uintptr_t)((uint64_t)v - (uint64_t)PYADAMAS_RC_HDR);
@@ -643,3 +625,81 @@ int64_t pa_any_to_i64_t(int64_t v, int64_t tag) {
     }
 }
 
+
+/* ══════════════════════════════════════════════════════════════════
+   P2（0.340）：运行期类型码与 isinstance 谓词
+   设计见 docs/numeric-types-design.md §2。类型码与 src/tag_defs.h 的
+   PaTypeCode 逐字对应。
+     * 有精确 tag（NONE/BOOL/FBOX/STR/BYTES/TUPLE/SET/CLASS）就直接用；
+     * tag==HEAP 读对象头 kind（list/dict/str/CPYFLOAT/INSTANCE/OBJ）；
+     * tag==UNK 先探针，再走头 kind。
+   边界（文档化，不是 bug）：容器元素/字段等无 tag 来源的堆值只能按头
+   kind 判型 —— tuple 与 list 同为 LIST、set 与 dict 同为 DICT、bytes 与
+   全 ASCII str 同为 STR，此时报 LIST/DICT/STR（与探针口径一致，不假装
+   知道）。非堆值无 tag 来源时一律 INT（None/bool/int 同形）。
+   ══════════════════════════════════════════════════════════════════ */
+enum {
+    PA_TYPE_NONE   = 0,
+    PA_TYPE_BOOL   = 1,
+    PA_TYPE_INT    = 2,
+    PA_TYPE_FLOAT  = 3,
+    PA_TYPE_STR    = 4,
+    PA_TYPE_BYTES  = 5,
+    PA_TYPE_LIST   = 6,
+    PA_TYPE_DICT   = 7,
+    PA_TYPE_TUPLE  = 8,
+    PA_TYPE_SET    = 9,
+    PA_TYPE_OBJECT = 10,
+    PA_TYPE_CLASS  = 11,
+    PA_TYPE_OTHER  = 12,
+};
+
+/* 堆指针 -> 类型码（一次头加载，不探针：调用方已确认它是活堆指针）。 */
+static int64_t any_type_from_heap(int64_t v) {
+    PyAdamasRc* h = (PyAdamasRc*)(uintptr_t)((uint64_t)v - (uint64_t)PYADAMAS_RC_HDR);
+    switch (h->kind) {
+        case PYADAMAS_RC_STR: return PA_TYPE_STR;
+        case PYADAMAS_RC_LIST: return PA_TYPE_LIST;
+        case PYADAMAS_RC_DICT: return PA_TYPE_DICT;
+        case PYADAMAS_RC_CPYFLOAT: return PA_TYPE_FLOAT;
+        case PYADAMAS_RC_INSTANCE: return PA_TYPE_OBJECT;
+        case PYADAMAS_RC_OBJ: {
+            /* 类对象藏在 OBJ 里（头有 magic/cid/ctor/vtable）；异常值等
+               其它 OBJ 负载不是类对象，按 OBJECT（异常类的 isinstance
+               由 pa_is_exc 的静态名字路径处理）。 */
+            if (h->size >= (int64_t)sizeof(PyAdamasClass)) {
+                PyAdamasClass* c = (PyAdamasClass*)(uintptr_t)v;
+                if (c->magic == PYADAMAS_CLASS_MAGIC) return PA_TYPE_CLASS;
+            }
+            return PA_TYPE_OBJECT;
+        }
+        default: return PA_TYPE_OBJECT;
+    }
+}
+
+int64_t pa_any_type(int64_t v, int64_t tag) {
+    switch (tag) {
+        case PA_TAG_NONE: return PA_TYPE_NONE;
+        case PA_TAG_BOOL: return PA_TYPE_BOOL;
+        case PA_TAG_INT: return PA_TYPE_INT;
+        case PA_TAG_FRAW: case PA_TAG_FBOX: return PA_TYPE_FLOAT;
+        case PA_TAG_STR: return PA_TYPE_STR;
+        case PA_TAG_BYTES: return PA_TYPE_BYTES;
+        case PA_TAG_TUPLE: return PA_TYPE_TUPLE;
+        case PA_TAG_SET: return PA_TYPE_SET;
+        case PA_TAG_CLASS: return PA_TYPE_CLASS;
+        case PA_TAG_HEAP: return any_type_from_heap(v);
+        default: /* PA_TAG_UNK：探针 + 头 kind（旧口径） */
+            if (!pa_unknown_is_heap(v)) return PA_TYPE_INT;
+            return any_type_from_heap(v);
+    }
+}
+
+/* isinstance(unknown, 内置类型)：code 是 PA_TYPE_*。CPython 口径：
+   object 匹配一切；int 接受 bool（bool 是 int 的子类）。 */
+int64_t pa_any_type_is(int64_t v, int64_t tag, int64_t code) {
+    if (code == PA_TYPE_OBJECT) return 1;
+    int64_t t = pa_any_type(v, tag);
+    if (code == PA_TYPE_INT) return (t == PA_TYPE_INT || t == PA_TYPE_BOOL) ? 1 : 0;
+    return t == code ? 1 : 0;
+}

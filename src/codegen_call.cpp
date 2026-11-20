@@ -1074,6 +1074,33 @@ void AsmGen::gen_call_rt(const Inst& in) {
             gen_any_tagged(in, fn);
             return;
         }
+        // ── P2：类型内省入口带 tag（PYADAMAS_TYPE_TAGS）────────────────
+        // repr/print_repr/isinstance 的 unknown 分支：tag 从平行 tag 区装填，
+        // 运行期按类型码分派（免探针，且 None/bool/bytes/tuple/set 可区分）。
+        // 门控关时 lowering 不发这些新入口、旧入口逐字旧路径。
+        if (type_tags_ && (fn == RtFn::ReprAny || fn == RtFn::PrintAnyRepr) &&
+            in.args.size() == 1 && vreg_tagged(in.args[0])) {
+            emit_arg(0, false, 0, src_mop(in.args[0]));
+            emit_arg(1, false, 1, tag_src(in.args[0]));
+            spill_fp_slots();
+            line(fn == RtFn::ReprAny ? "call pa_repr_any_t"
+                                     : "call pa_print_any_repr_t");
+            reload_fp_slots();
+            if (!dst_unused(in) && fn == RtFn::ReprAny)
+                emit2("movq", "%rax", dst_op(in.dst));
+            return;
+        }
+        if (type_tags_ && fn == RtFn::AnyTypeIs && in.args.size() == 2 &&
+            vreg_tagged(in.args[0])) {
+            emit_arg(0, false, 0, src_mop(in.args[0]));
+            emit_arg(1, false, 1, tag_src(in.args[0]));
+            emit_arg(2, false, 2, src_mop(in.args[1]));   // 类型码常量
+            spill_fp_slots();
+            line("call pa_any_type_is");
+            reload_fp_slots();
+            if (!dst_unused(in)) emit2("movq", "%rax", dst_op(in.dst));
+            return;
+        }
         // ── list.append 内联快路径（0.282）─────────────────────────
         // 无扩容 + 无位图 + 非 kind2 时就是 data[len++]=v 一条 store，
         // call/ret + 装填 + 运行时检查比活本身还贵（str_build 14.6%）。
