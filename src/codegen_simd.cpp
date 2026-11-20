@@ -45,8 +45,20 @@ bool AsmGen::try_simd_reduction(const Block& b) {
     if (f_->has_handlers) return false;                   // setjmp 函数形态不稳
     const int body_bi = cur_block_;
     if (body_bi < 0 || body_bi >= static_cast<int>(f_->blocks.size())) return false;
-    const auto& I = b.insts;
-    if (I.size() != 19) return false;                     // 精确 19 条体形态
+    // 体块可能把循环不变常量（const.int/const.float）内联在体内（LICM 未外提
+    // 时，如 spec(n) 参数形态），也可能外提到 preheader（spectral_norm 全局 N
+    // 形态）。过滤掉常量定义后必须恰为 19 条核心指令；常量值另经 simd_def_inst
+    // 校验（与定义位置无关）。其余非核心指令一律不匹配（保守跳过）。
+    const auto& BI = b.insts;
+    if (BI.size() < 19 || BI.size() > 32) return false;
+    if (BI.back().op != IrOp::Jump) return false;
+    std::vector<Inst> core;
+    core.reserve(BI.size());
+    for (const Inst& in : BI)
+        if (in.op != IrOp::ConstInt && in.op != IrOp::ConstFloat)
+            core.push_back(in);
+    const auto& I = core;
+    if (I.size() != 19) return false;                     // 精确 19 条核心体形态
 
     // ── 体块指令形状匹配（op + 操作数关系）────────────────────────
     auto op_is = [&](size_t k, IrOp o) { return I[k].op == o; };
