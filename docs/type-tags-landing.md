@@ -98,9 +98,16 @@ pprint 是独立模块，**它的函数形参 tag 来自 §2 的侧信道**；�
 3. **异常类当值不可用**：内建异常类在运行时只有名字（`pa_exc_register`
    只登记父子名），没有类对象；unknown 里仍是 0。contextlib.suppress 需要
    类值同一性 + 比较，与 traceback 对象一起属 P4。本轮跳过并如实报告。
-4. **pprint 不排序 dict 键**：CPython 默认 sort_dicts=True。pa 的 unknown
-   dict 取不到可排序的键视图（不支持方法调用、排序 unknown 元素按机器字），
-   所以按插入顺序输出；用例用已排好序的键。
+4. **pprint 不排序 dict 键**（**0.350 已解除**）：CPython 默认
+   sort_dicts=True。0.349 之前 pa 的 unknown dict 取不到可排序的键视图
+   （不支持方法调用、排序 unknown 元素按机器字），所以按插入顺序输出。
+   0.350 改成 `__pa_any_items` 拿 (key, value) 对 + 自写稳定归并排序
+   （比较器先试自然序 `<`，混类型不可比时按 (str(type), repr) 兜底，不依赖
+   sorted 的 unknown 比较路径），sort_dicts 默认 True；**单行 _safe_repr 与
+   断行两条路径都按排序后的键序**，另补 indent/width(allowance)/depth/
+   compact 与长字符串折行。容器元素无逐元素 tag 的边界不变（嵌套 bool/
+   None/tuple/set/bytes、同构 float 容器仍退化），且没有 id() 所以无递归
+   检测。细节见 stdlib/pprint.py 模块头与 CHANGELOG 0.350。
 5. **既有 leak（非本版引入）**：list 在 len>0 时从 kind1（全堆）转 kind2
    （混合）不新建位图，销毁回退全局索引探针，未进索引的**标量元组**漏
    dec。flag-off 基线同样复现（最小用例：`list[object]` 先 append 元组再
