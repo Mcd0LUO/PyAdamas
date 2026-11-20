@@ -185,6 +185,24 @@ void AsmGen::gen_index_store_unchecked(const Inst& in) {
     const MReg nv = sv_is_rax ? sl : kRax;
     const MReg kr = sv_is_rax ? sp : kRax;
     const MReg bp = sv_is_rax ? nv : sp;
+    // BCE kind0 证明快路径（0.335，PYADAMAS_LOOP_OPT）：imm==1 表示优化器
+    // 已证循环入口 elem_kind==0 且循环内全是 hk0 标量存储（kind 恒 0）。
+    // 纯 mov：无 kind 检查、无旧值读（kind0 旧值必是标量，无 RC）、无 call
+    // ——块内临时值因此不再被冷路径 call 迫使溢出（matmul 内循环实测）。
+    // 降级器发的 unchecked 存储 imm 恒 0，不走这里（flag-off 逐字节不变）。
+    if (in.imm == 1 && hk == 0) {
+        emit2(MOp::kMovq, src_mop(in.a), r0);
+        emit2(MOp::kMovq, src_mop(in.b), r1);
+        emit2(MOp::kMovq, op_mem(r0, 16), sp);
+        if (is_fp(in.c)) {
+            emit2(MOp::kMovsd, src_mop(in.c), kXmm0);
+            emit2(MOp::kMovsd, kXmm0, op_mem(sp, r1, 8));
+        } else {
+            emit2(MOp::kMovq, src_mop(in.c), nv);
+            emit2(MOp::kMovq, nv, op_mem(sp, r1, 8));
+        }
+        return;
+    }
     std::string done = fresh_label("idxudone");
     std::string slow = fresh_label("idxuslow");
     std::string k23 = fresh_label("idxuk23");

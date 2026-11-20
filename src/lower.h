@@ -27,6 +27,8 @@ struct LowerOptions {
     bool is_entry = true;
     // 0 基础 / 1 常规优化 / 2 默认（追加循环与控制流小优化）。
     int opt_level = 2;
+    // 整数循环优化位掩码（PYADAMAS_LOOP_OPT，默认 0 全关）。见 opt.h。
+    int loop_opt = 0;
     // 允许浮点归约用 SIMD 分组求和（会改变舍入顺序）。
     bool fast_math = false;
     // 零开销异常（Z5，默认开启）：非可挂起函数里的 try 走 LSDA / landing pad

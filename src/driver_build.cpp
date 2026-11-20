@@ -525,6 +525,8 @@ struct Manifest {
     int ra_graph = -1;
     // SIMD 向量化开关。-1 = 旧清单没有这一行（缓存必然失效一次）。
     int simd = -1;
+    // 整数循环优化位掩码。-1 = 旧清单没有这一行（缓存必然失效一次）。
+    int loop_opt = -1;
     // 模块是否用到 from c import（dlsym RTLD_DEFAULT）。旧清单没有这一行：
     // 保守按「用到」处理（链接期关 --gc-sections，绝不冒误剥风险）。
     bool c_sym_default = true;
@@ -595,6 +597,12 @@ std::optional<Manifest> read_manifest(const ModuleUnit& u) {
             auto o = parse_u64(v);
             if (!o) return std::nullopt;
             m.simd = static_cast<int>(*o);
+        } else if (tag == "loopopt") {
+            std::string v;
+            ss >> v;
+            auto o = parse_u64(v);
+            if (!o) return std::nullopt;
+            m.loop_opt = static_cast<int>(*o);
         } else if (tag == "csymdefault") {
             std::string v;
             ss >> v;
@@ -628,6 +636,7 @@ void write_manifest(const Program& p, const ModuleUnit& u) {
     out << "rcsplit " << (p.rc_split ? 1 : 0) << "\n";
     out << "ragraph " << (p.ra_graph ? 1 : 0) << "\n";
     out << "simd " << (p.simd ? 1 : 0) << "\n";
+    out << "loopopt " << p.loop_opt << "\n";
     out << "csymdefault " << (u.uses_c_sym_default ? 1 : 0) << "\n";
     out << "toolchain " << toolchain_id() << "\n";
     for (auto& d : u.deps) {
@@ -841,6 +850,7 @@ bool try_cache(Program& p, ModuleUnit& u) {
     if (m->rc_split != (p.rc_split ? 1 : 0)) return false;
     if (m->ra_graph != (p.ra_graph ? 1 : 0)) return false;
     if (m->simd != (p.simd ? 1 : 0)) return false;
+    if (m->loop_opt != p.loop_opt) return false;
     if (m->deps.size() != u.deps.size()) return false;
     for (auto& d : u.deps) {
         auto it = m->deps.find(d);
@@ -1104,6 +1114,7 @@ bool build_unit(Program& p, ModuleUnit& u, bool emit_object, bool entry_ir) {
     opt.source_path = u.path;
     opt.is_entry = u.is_entry;
     opt.opt_level = p.opt;
+    opt.loop_opt = p.loop_opt;
     opt.fast_math = p.fast_math;
     opt.zero_cost_exc = p.zero_cost_exc;
     opt.module_lookup = [&p](const std::string& name) -> pyadamas::ModuleInfoPtr {

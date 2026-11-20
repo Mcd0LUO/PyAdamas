@@ -44,6 +44,10 @@ void forward_global_loads(IRFunction& fn);
 // 循环内全局变量寄存器化：无调用的循环里把全局缓存到局部槽。
 bool promote_globals_in_loops(IRFunction& fn, const std::vector<IRGlobal>& globals);
 bool version_bounds_function(IRFunction& fn);
+// 整数循环优化（PYADAMAS_LOOP_OPT 门控，默认关）：见 opt_intloop.cpp。
+bool thread_jump_blocks(IRFunction& fn);
+bool dedup_block_loads(IRFunction& fn);
+bool version_bounds_affine_function(IRFunction& fn);
 // 循环旋转：把条件计算复制到循环体之后，回边直接走 latch，消掉每次
 // 迭代的无条件跳转（代码生成会把「跳到下一块」的 jmp 省掉）。
 bool rotate_loops_function(IRFunction& fn);
