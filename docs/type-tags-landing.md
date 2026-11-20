@@ -114,19 +114,22 @@ pprint 是独立模块，**它的函数形参 tag 来自 §2 的侧信道**；�
   json/re 20）。P3 的 5 个 unknown 基准也逐字节同（新 tag 只在门控开发射）。
 - **P3 不变量**：262-266 flag-on/flag-off 全 ran ok；bench/unknown u1/u3
   flag-on/off 输出一致（450000.0 / 1480000.0）。
-- **全套件**：normal flag-off **323 ran ok EXIT=0**；normal flag-on
-  **323 ran ok EXIT=0**；ASan（PYADAMAS_TEST_ASAN=1，JOBS=1）**323 ran ok
-  EXIT=0**（含新用例 328-331，runners 按文件头指令自动带
-  PYADAMAS_TYPE_TAGS=1）。
+- **全套件（清空 modcache 后串行跑，避免并发共享缓存干扰）**：
+  normal flag-off **323 ran ok EXIT=0**；normal flag-on **323 ran ok
+  EXIT=0**；ASan（PYADAMAS_TEST_ASAN=1，JOBS=1）**323 ran ok EXIT=0**
+  （含新用例 328-331，runners 按文件头指令自动带 PYADAMAS_TYPE_TAGS=1）。
 - **difftest（O0 vs O2）**：305 个用例，**0 不一致，EXIT=0**。
 - **语料对拍（flag-on vs off，350 文件：tests/run + bench/daily/realistic/
-  compare/unknown/json/re）**：**346/350 stdout 逐字节相同、退出码全 0**；
-  4 个新用例（328-331）在“裸 off”对照里因缺指令而按 0.339 语义输出（套件里
-  两者都带标签，已全过）。**rc 计数不逐字可比**：tag 快路径会把
-  pa_rc_*_unknown 换成 pa_rc_inc/dec 并跳过非堆标量（计数是“调用次数”），
-  这是设计使然；改为核对**实际释放数**：80 个计数差异文件的 free_on 全部
-  **>= free_off**（0 个回退；其中 144/140/162 等 free 更多 = 标签修掉了
-  探针漏判导致的潜在漏释放）。bench_re 仅计时列不同（本征非确定）。
+  compare/unknown/json/re）**：**343/350 stdout 逐字节相同、退出码全 0**。
+  7 个不同全部有解释：4 个新用例（328-331）在“裸 off”对照里因缺用例指令
+  而按 0.339 语义输出（套件里两者都带标签，323 全过）；bench_re 只差计时列
+  （本征非确定）；251/252 argparse 只差 usage 里的程序名（自建对照把
+  off/on 产物命名成两个不同的 -o 路径，属对照工具伪差；同路径手工比对逐
+  字节同）。**rc 计数不逐字可比**：tag 快路径会把 pa_rc_*_unknown 换成
+  pa_rc_inc/dec 并跳过非堆标量（计数是“调用次数”），这是设计使然；改为
+  核对**实际释放数**：除 4 个新用例（对照未带指令）外，free_on **0 个回退**，
+  且 140/144/162/183/185/188/189/237/239/247 等 free 更多 = 标签修掉了
+  探针漏判导致的潜在漏释放。
 - **ASan detect_leaks=1 钉子**：13_gc / 174_gc_construct_roots /
   88_defaultdict / 192_dict_cache / 66_genexpr / 119_gen_except_suspend，
   flag-off 与 flag-on 各一遍 **12/12 全 0**；新用例 328-331 各

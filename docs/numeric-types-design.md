@@ -100,7 +100,7 @@ pprint（递归 repr 按类型）、isinstance 全类型、动态分派、异常
 | 阶段 | 内容 | 工程量 | 收益 |
 |---|---|---|---|
 | **P1 定宽整数** | I8-I64/U8-U64/bool/char/short TyKind + 提升规则 + codegen 宽度选择 + 字面量 coerce | 中（机械 codegen + 提升规则要小心）| SIMD 干净/紧凑数组/C FFI |
-| **P2 unknown 类型标签** | 扩 PaTag NONE/BOOL/BIG + 堆 kind 内省 + pa_any_type/repr 分派 | 中 | 解锁 pprint/isinstance/异常类传递 |
+| **P2 unknown 类型标签** | 扩 PaTag NONE/BOOL/堆子类 + pa_any_type/repr/isinstance + 跨模块 tag 侧信道 + stdlib/pprint | 中 | 解锁 pprint/isinstance；**0.340 落地，见 docs/type-tags-landing.md（异常类传递未做）** |
 | **P3 big BigInt + f32** | BigInt 运行时（任意精度算术 + RC）+ F32 codegen | 重 | CPython 无限精度兼容/精确金融密码学 |
 | **P4 file 协议/traceback/反射** | FileLike 泛化 + io.StringIO + traceback 对象 + dataclass 编译期展开 | 重 | 解锁 tarfile/traceback/dataclasses/io |
 
