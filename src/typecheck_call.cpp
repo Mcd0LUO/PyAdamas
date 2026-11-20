@@ -234,6 +234,9 @@ TypePtr TypeChecker::check_args(const FuncInfoPtr& fn, Call& c) {
             // 非字面量 int 实参窄化到定宽形参仍然要求显式 cast。
             if (arg_expr && is_fixed_int(p.ty) && accept_literal_into(p.ty, arg_expr))
                 return;
+            // 定宽元素容器形参 + 字面量容器实参：逐元素 coerce（同口径）。
+            if (arg_expr && coerce_container_literal(p.ty, arg_expr))
+                return;
             if (assignable(p.ty, ty)) return;
             if (p.inferred) {
                 // Keep the existing fallback for other incompatible types.
@@ -333,7 +336,8 @@ TypePtr TypeChecker::check_args(const FuncInfoPtr& fn, Call& c) {
             // （default_lit 里是编译期常量，降级按形参类型生成常量）。
             if (p.ty && is_fixed_int(p.ty) &&
                 p.default_lit->kind == LiteralValue::Kind::Int &&
-                int_literal_fits(p.ty, p.default_lit->i))
+                (int_literal_fits(p.ty, p.default_lit->i) ||
+                 (p.ty->kind == TyKind::U64 && p.default_lit->u64)))
                 return;
             if (can_recheck) {
                 bind_param(p, idx, ty, c.line, c.col, true);

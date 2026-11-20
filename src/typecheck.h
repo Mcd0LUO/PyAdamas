@@ -173,6 +173,13 @@ public:
         return it == func_infos_.end() ? nullptr : it->second;
     }
 
+    // 签名对应的源定义（含脱糖后的合成 lambda）。lower 用它看函数体形态
+    // （如 sorted(key=恒等函数) 的键域推断），没有定义时返回 nullptr。
+    const FunctionDef* signature_def(const FuncInfo* fn) const {
+        auto it = signature_defs_.find(fn);
+        return it == signature_defs_.end() ? nullptr : it->second;
+    }
+
     // functools.partial 的绑定计划；lower 用它生成转发函数。
     std::shared_ptr<PartialPlan> partial_plan(const Call* c) const {
         auto it = partial_plans_.find(c);
@@ -260,6 +267,11 @@ private:
     bool dynamic_globals_ = false;
     std::unordered_set<std::string> globals_aliases_;
     std::unordered_map<const Expr*, TypePtr> expr_types_;
+    // u64 大字面量（>INT64_MAX 的十进制）：词法已解析成位模式，这里登记
+    // 待消费节点；只有 u64 上下文（coerce/提升后 U64 的运算）能消费。
+    // check_once 末尾未被消费的照旧报 too large for int64（默认 int 不变）。
+    std::unordered_set<const Expr*> u64_lit_pending_;
+    std::unordered_set<const Expr*> u64_lit_ok_;
     std::unordered_map<const Call*, std::shared_ptr<PartialPlan>> partial_plans_;
     std::unordered_map<const Stmt*, Scope*> func_scopes_;
     std::unordered_map<const Stmt*, FuncInfoPtr> func_infos_;
@@ -469,6 +481,17 @@ private:
     //   超范围 → 报编译错误并返回 true（别再叠加一条通用类型错误）。
     // 不是字面量/目标不是定宽整数返回 false（走普通 assignable 判断）。
     bool accept_literal_into(const TypePtr& want, Expr* value);
+    // 定宽元素的容器字面量（list/set/dict）：逐元素按元素类型做字面量
+    // coerce（范围内隐式、超范围报错，与标量赋值同口径），全部位置都是
+    // 字面量时把容器字面量的静态类型改写成目标类型并返回 true；否则一个
+    // 都不改写，返回 false 走普通 assignable 判断。空字面量返回 false
+    // （保留既有的洞回填路径）。
+    bool coerce_container_literal(const TypePtr& want, Expr* value);
+    // u64 大字面量的登记/消费/收尾检查（见 expr_types_ 旁的成员注释）。
+    void note_u64_literal(const Expr* e);
+    // 运算/比较提升到 U64 时把 u64 字面量操作数的静态类型改写成 U64。
+    void consume_u64_literal(const TypePtr& rt, Expr* e);
+    void check_u64_literals();
 
     void unpack_assign(std::vector<ExprPtr>& targets, TypePtr value, int line, int col);
 

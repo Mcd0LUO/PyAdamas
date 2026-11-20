@@ -4,6 +4,70 @@
 
 早期阶段没有逐条留痕，按阶段归纳；0.4 之后逐条记录。
 
+## [0.349] - 2026-11-21
+
+> **P1 定宽整数收尾打磨**（fixint2 分支，基线 master e570f9d / 0.348）。
+> 补 docs/numeric-types-landing.md §6 负面清单里 tractable 的三项：u64 大
+> 整数字面量、定宽容器元素字面量 coerce、u64 列表无符号排序，另加可选的
+> cimport 窄/无符号 C 类型映射。**现有程序（无定宽标注）的生成 asm 逐字节
+> 不变**（bench 全量 120 文件 cmp 全同，逐块复验）；提升规则/回绕语义不变
+> （332-335 回归全过）。
+>
+> 终验（JOBS=1）：全套件 normal **347 ran ok EXIT=0**、ASan **347 ran ok
+> EXIT=0**；difftest 328/0；语料零差异（tests/run 既有全量，基线 e570f9d
+> 原始构建 vs 当前，按文件头 type-tags/lang-gaps 环境，0 DIFF）；新增
+> 365-368 与 CPython/C 语义模型对拍一致、O0/O1/O2 逐字节相同；check_size
+> 通过。机制与负面清单详见 docs/numeric-types-landing.md §9。
+
+### 新增
+
+- **u64 范围十进制大字面量**（>INT64_MAX..2^64-1）：词法按无符号解析成位
+  模式并打 `u64_lit` 标记（token/AST 各加一个 bool），只有 u64 上下文消费：
+  标注声明/赋值/实参/默认值/return 五类 coerce 位置 + 容器元素位置 +
+  提升到 U64 的 binop/compare/augassign 操作数。未被消费的照旧报
+  "integer literal too large for int64"（**默认 int 字面量行为不变**，报错
+  从词法期移到类型检查收尾，消息逐字一致）；超 u64 范围仍在词法期报错。
+  进制前缀路径（0x/0o/0b）保持既有回绕行为逐字不动。u64 默认值跨模块
+  序列化用新 tag 8（旧缓存 tag 0..7 解码逐字不变；旧解码器读 tag 8 按
+  「有默认但不可表示」降级）。新增 tests/run/365（CPython 非回绕段对拍 +
+  pa 回绕钉子）与反例 f70/f71/f72。
+- **定宽容器元素的字面量 coerce**（landing §6.3 开口）：元素类型是定宽时，
+  字面量在容器位置按元素类型范围检查——范围内隐式（类型检查改写静态类型，
+  降级按元素类型发常量），**超范围编译报错，不静默窄化**。覆盖：
+  list.append/insert/extend、set.add、下标写入 l[0]=5 / d[k]=v、dict 键的
+  字面量下标（读/写）、list/set/dict 字面量（标注声明/赋值/实参/返回值/
+  +=）。非字面量仍走 merge_elem（窄化要 cast，锁住报错）。**insert 补齐了
+  此前完全缺失的元素检查**（与 append 同口径；bench 无 insert 用例，asm
+  不变）。空字面量保留既有洞回填路径；tuple 字面量 coerce 未开（留后续）。
+  新增 tests/run/366（与 CPython 逐字节对拍）与反例 f73/f74/f75/f76。
+- **u64 列表无符号排序**（landing §6.4 修复）：sort()/sorted() 的比较器按
+  元素类型分派——sort_kind 新增 **5=u64**（运行时 LESS_U64 timsort），容器
+  排序描述符新增 **'u'** 字符（嵌套 list/tuple 里的 u64 元素同样无符号）；
+  sorted(key=) 的键比较同步支持 kind 5。窄定宽（i8/u8/…/u32）槽内规范值下
+  有符号机器字比较逐例等价，仍落 kind 0，**其它类型排序路径逐字不变**。
+  sorted(key=恒等函数)（lambda x: x / def k(x): return x）且元素是 u64 时，
+  键域跟随元素类型（无标注函数返回类型推不出的既有洞，只对 u64 开口）；
+  标注 -> u64 的键函数本来就走 kind 5。min/max 走 IR Cmp 早已无符号，不动。
+  新增 tests/run/367（与 CPython 逐字节对拍，含稳定性/嵌套/200 元素归并路径）。
+- **cimport 窄/无符号 C 类型 → 定宽 TyKind**（可选任务，landing §6 补充）：
+  .cpya 新增 `char`/`int8`→i8、`short`/`int16`→i16、`uchar`/`uint8`→u8、
+  `ushort`/`uint16`→u16、`uint64`/`ulong`→u64（CKind 追加在枚举末尾，既有
+  值不变）。覆盖常量（u64 常量按无符号解析）、参数/返回、全局变量读写、
+  ptr[T] 解引用、按值结构体字段（1/2/8 字节宽，符号/零扩展）、回调跳板
+  （C 侧窄参数按宽度提升到 64 位）。字面量实参/赋值同口径 coerce，非字面量
+  窄化要 cast。**既有 int/int32/uint32 仍映射默认 int**（改它们会动既有程序
+  的提升语义，不做）；cdecl 生成器、varargs 定宽实参、list[i8]→char* 缓冲区
+  编组未开（留后续）。新增 tests/run/368（cfixedint.c 辅助库，C 语义模型
+  对拍）与反例 f77/f78。
+
+### 变更
+
+- **src/codegen_call.cpp**（1238 行 → 735 行）：C 互操作边界编组
+  （gen_call_extern / gen_load_extern / gen_store_extern / gen_ptr_load /
+  gen_ptr_store）拆入 **src/codegen_cffi.cpp**（516 行）。纯代码移动，函数体
+  逐字不变（本轮新增窄宽度编组后超 1200 行硬限，拆回限内，check_size 清零
+  状态保持）。
+
 ## [0.348] - 2026-11-21
 
 > **代码整洁重构：拆分超 1200 行文件**（refactor1 分支，基线 master 2ce0820 /

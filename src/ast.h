@@ -72,6 +72,9 @@ struct Constant : Expr {
     enum class CK : uint8_t { None, Bool, Int, Float, Str, Bytes, Complex, Ellipsis } ck = CK::None;
     bool b = false;
     int64_t i = 0;
+    // 十进制 u64 范围字面量（>INT64_MAX）：i 存无符号位模式，
+    // 只有 u64 上下文能消费它（见 TypeChecker::accept_literal_into）。
+    bool u64_lit = false;
     double f = 0.0;
     double im = 0.0;  // CK::Complex 的虚部，实部固定 0
     std::string s;
@@ -116,7 +119,10 @@ struct Constant : Expr {
         switch (ck) {
             case CK::None: os << "Constant(None)\n"; break;
             case CK::Bool: os << "Constant(" << (b ? "True" : "False") << ")\n"; break;
-            case CK::Int: os << "Constant(" << i << ")\n"; break;
+            case CK::Int:
+                if (u64_lit) os << "Constant(" << static_cast<uint64_t>(i) << "u64)\n";
+                else os << "Constant(" << i << ")\n";
+                break;
             case CK::Float: os << "Constant(" << f << ")\n"; break;
             case CK::Complex: os << "Constant(" << im << "j)\n"; break;
             case CK::Str: os << "Constant(" << quote(s) << ")\n"; break;

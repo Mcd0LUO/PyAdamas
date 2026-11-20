@@ -48,7 +48,11 @@ TypePtr TypeChecker::expr(Expr& e) {
                 switch (c.ck) {
                     case Constant::CK::None: return t_none();
                     case Constant::CK::Bool: return t_bool();
-                    case Constant::CK::Int: return t_int();
+                    case Constant::CK::Int:
+                        // u64 大字面量：静态类型仍按 int 登记（提升规则不变），
+                        // 收尾检查未被 u64 上下文消费的照旧报 too large。
+                        if (c.u64_lit) note_u64_literal(&e);
+                        return t_int();
                     case Constant::CK::Float: return t_float();
                     case Constant::CK::Complex: return t_complex();
                     case Constant::CK::Str: return t_str();
@@ -186,7 +190,11 @@ TypePtr TypeChecker::expr(Expr& e) {
                 }
                 auto l = expr(*b.left);
                 auto r = expr(*b.right);
-                return binop_type(b.op, l, r, b.line, b.col);
+                TypePtr bt = binop_type(b.op, l, r, b.line, b.col);
+                // 提升到 U64 的运算：u64 大字面量操作数按 U64 定型消费。
+                consume_u64_literal(bt, b.left.get());
+                consume_u64_literal(bt, b.right.get());
+                return bt;
             }
             case ExprKind::UnaryOp: {
                 auto& u = static_cast<UnaryOp&>(e);
@@ -245,6 +253,10 @@ TypePtr TypeChecker::expr(Expr& e) {
                 for (size_t i = 0; i < c.ops.size(); ++i) {
                     auto r = expr(*c.comparators[i]);
                     compare_type(c.ops[i], l, r, c.line, c.col);
+                    // 链式比较逐对提升：提升到 U64 时消费两侧的 u64 大字面量。
+                    TypePtr pt = promote(l, r);
+                    consume_u64_literal(pt, i == 0 ? c.left.get() : c.comparators[i - 1].get());
+                    consume_u64_literal(pt, c.comparators[i].get());
                     l = r;
                 }
                 return t_bool();
@@ -307,6 +319,11 @@ TypePtr TypeChecker::expr(Expr& e) {
                         err(s.line, s.col, "pointer index must be an integer");
                     return cptr_elem_type(ot->celem);
                 }
+                // 定宽 dict 键 + 字面量下标（读路径）：范围内隐式 coerce，
+                // 与键的写入/字面量建表同口径。写路径在 assign() 里同法处理。
+                if (ot && ot->kind == TyKind::Dict && !ot->sub.empty() &&
+                    is_fixed_int(ot->sub[0]) && accept_literal_into(ot->sub[0], s.slice.get()))
+                    it = ot->sub[0];
                 return subscript_type(ot, it, s.line, s.col);
             }
             case ExprKind::Attribute:

@@ -468,6 +468,14 @@ VReg Lowerer::expr(Expr& e) {
                             case CKind::Float: return const_float(k.f);
                             case CKind::Bool: return const_bool(k.b);
                             case CKind::Str: return const_str(k.s);
+                            case CKind::Int8:
+                            case CKind::Int16:
+                            case CKind::UInt8:
+                            case CKind::UInt16:
+                            case CKind::UInt64:
+                                // 定宽常量带自己的类型（u64 大字面量存位模式），
+                                // 与 ckind_type 的静态类型一致。
+                                return const_int_ty(k.i, ckind_type(k.kind));
                             default: return const_int(k.i);
                         }
                     }

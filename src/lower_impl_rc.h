@@ -189,10 +189,14 @@
     }
 
     // 排序比较器的种类：0 int/bool、1 float、2 str、4 元组（desc 字典序）、
-    // 其它按机器字。0.312 前元组落 3：比堆地址≈分配顺序，sort 是 no-op。
+    // 5 u64（无符号比较）、其它按机器字。0.312 前元组落 3：比堆地址≈分配
+    // 顺序，sort 是 no-op。窄定宽（i8/u8/…/u32）槽内值已是规范符号/零扩展，
+    // 有符号机器字比较与按宽度比较逐例等价，仍落 0；只有 u64 的 ≥2^63 值
+    // 位模式是负数，必须走无符号比较器（P1 收尾）。
     static int sort_kind(const TypePtr& t) {
         if (!t) return 3;
-        if (is_int_like(t)) return 0;  // 定宽整数与 int 同一排序域
+        if (t->kind == TyKind::U64) return 5;
+        if (is_int_like(t)) return 0;  // 其余定宽整数与 int 同一排序域
         if (t->kind == TyKind::Float) return 1;
         if (t->kind == TyKind::Str) return 2;
         if (t->kind == TyKind::Tuple || t->kind == TyKind::List) return 4;

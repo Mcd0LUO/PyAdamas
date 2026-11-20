@@ -32,6 +32,14 @@ enum class CKind : uint8_t {
     BufF64,   // list[float] -> double*
     BufI64,   // list[int] -> long*
     BufBytes, // bytes -> uint8_t*
+    // P1 收尾：窄/无符号 C 类型，PyAdamas 侧映射到定宽 TyKind（i8/i16/
+    // u8/u16/u64）。追加在末尾，既有枚举值不变。既有 int/int32/uint32
+    // 仍映射到默认 int（改它们会动既有程序的提升语义，不做）。
+    Int8,     // char / int8（x86 char 默认 signed）
+    Int16,    // short / int16
+    UInt8,    // unsigned char / uint8
+    UInt16,   // unsigned short / uint16
+    UInt64,   // unsigned long / uint64
 };
 
 struct CParam {
@@ -119,7 +127,11 @@ std::optional<CKind> parse_ckind(const std::string& text);
 // CKind 在调用边界/解引用时的机器宽度（字节）。
 inline int ckind_width(CKind k) {
     switch (k) {
-        case CKind::Bool: return 1;
+        case CKind::Bool:
+        case CKind::Int8:
+        case CKind::UInt8: return 1;
+        case CKind::Int16:
+        case CKind::UInt16: return 2;
         case CKind::Int32:
         case CKind::UInt32:
         case CKind::Float32: return 4;

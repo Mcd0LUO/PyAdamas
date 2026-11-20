@@ -65,6 +65,11 @@ StructInfo* TypeChecker::build_cstruct(const CStruct& cs) {
                 case CKind::Int:
                 case CKind::Int32: ft = t_int(); break;
                 case CKind::UInt32: ft = t_int(); unsig = true; break;
+                case CKind::Int8: ft = t_i8(); break;
+                case CKind::Int16: ft = t_i16(); break;
+                case CKind::UInt8: ft = t_u8(); unsig = true; break;
+                case CKind::UInt16: ft = t_u16(); unsig = true; break;
+                case CKind::UInt64: ft = t_u64(); unsig = true; break;
                 case CKind::Float: ft = t_float(); break;
                 case CKind::Bool: ft = t_bool(); break;
                 case CKind::Ptr: ft = mk_optional(t_int()); break;
@@ -410,6 +415,9 @@ void TypeChecker::assign(Expr& target, TypePtr value, int line, int col) {
                         std::format("cannot store '{}' into '{}'", type_name(value),
                                     type_name(ot)));
             } else if (ot->kind == TyKind::Dict) {
+                // 定宽键 + 字面量下标（写路径）：与读路径/建表同口径 coerce。
+                if (is_fixed_int(ot->sub[0]) && accept_literal_into(ot->sub[0], sub->slice.get()))
+                    st = ot->sub[0];
                 if (!merge_elem(ot->sub[0], ot, st, ot->locked))
                     err(line, col,
                         std::format("dict key type is '{}', got '{}'", type_name(ot->sub[0]),

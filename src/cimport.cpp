@@ -110,6 +110,12 @@ std::optional<CKind> parse_ckind(const std::string& text) {
     if (t == "int") return CKind::Int;
     if (t == "int32") return CKind::Int32;
     if (t == "uint32") return CKind::UInt32;
+    // P1 收尾：窄/无符号 C 类型 → 定宽 TyKind（见 ckind_type）。
+    if (t == "char" || t == "int8") return CKind::Int8;
+    if (t == "short" || t == "int16") return CKind::Int16;
+    if (t == "uchar" || t == "uint8") return CKind::UInt8;
+    if (t == "ushort" || t == "uint16") return CKind::UInt16;
+    if (t == "ulong" || t == "uint64") return CKind::UInt64;
     if (t == "float") return CKind::Float;
     if (t == "float32") return CKind::Float32;
     if (t == "bool") return CKind::Bool;
@@ -144,6 +150,11 @@ bool callback_kind_ok(CKind k) {
         case CKind::Int:
         case CKind::Int32:
         case CKind::UInt32:
+        case CKind::Int8:
+        case CKind::Int16:
+        case CKind::UInt8:
+        case CKind::UInt16:
+        case CKind::UInt64:
         case CKind::Float:
         case CKind::Bool:
         case CKind::Ptr: return true;
@@ -210,6 +221,11 @@ std::optional<CTypeRef> parse_ctype(
 bool cfield_layout(CKind k, int64_t& size, int64_t& align) {
     switch (k) {
         case CKind::Int: size = 8; align = 8; return true;      // long
+        case CKind::Int8: size = 1; align = 1; return true;     // char
+        case CKind::UInt8: size = 1; align = 1; return true;    // unsigned char
+        case CKind::Int16: size = 2; align = 2; return true;    // short
+        case CKind::UInt16: size = 2; align = 2; return true;   // unsigned short
+        case CKind::UInt64: size = 8; align = 8; return true;   // unsigned long
         case CKind::Int32: size = 4; align = 4; return true;    // int
         case CKind::UInt32: size = 4; align = 4; return true;   // unsigned
         case CKind::Float: size = 8; align = 8; return true;    // double
@@ -418,11 +434,28 @@ std::optional<CImportDecl> load_cpya(const std::string& name, const std::string&
             switch (*kind) {
                 case CKind::Int:
                 case CKind::Int32:
-                case CKind::UInt32: {
+                case CKind::UInt32:
+                case CKind::Int8:
+                case CKind::Int16:
+                case CKind::UInt8:
+                case CKind::UInt16: {
                     try {
                         size_t used = 0;
                         c.i = std::stoll(val_text, &used, 0);
                         if (used != val_text.size()) throw std::invalid_argument("trailing");
+                    } catch (...) {
+                        return fail(lineno, std::format("invalid integer literal '{}'", val_text));
+                    }
+                    break;
+                }
+                case CKind::UInt64: {
+                    // u64 常量按无符号解析（>INT64_MAX 存位模式；C 口径
+                    // 允许 -1 这类负写法，strtoull 自动回绕）。
+                    try {
+                        size_t used = 0;
+                        unsigned long long uv = std::stoull(val_text, &used, 0);
+                        if (used != val_text.size()) throw std::invalid_argument("trailing");
+                        c.i = static_cast<int64_t>(uv);
                     } catch (...) {
                         return fail(lineno, std::format("invalid integer literal '{}'", val_text));
                     }

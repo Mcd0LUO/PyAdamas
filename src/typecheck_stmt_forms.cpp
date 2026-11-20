@@ -1,6 +1,7 @@
 // typecheck_stmt_forms.cpp —— stmt 按语句形态拆分
 #include "typecheck.h"
 
+#include <algorithm>
 #include <filesystem>
 #include <set>
 
@@ -13,6 +14,10 @@ bool TypeChecker::literal_int_value(const Expr* e, int64_t& out) {
     if (e->kind == ExprKind::Constant) {
         const auto& c = static_cast<const Constant&>(*e);
         if (c.ck == Constant::CK::Int) {
+            // u64 大字面量的位模式在 int64 里是负数，不能按普通字面量取值
+            // （否则 -18446744073709551615 会被算成 1）。它由
+            // accept_literal_into 的 u64 分支单独处理。
+            if (c.u64_lit) return false;
             out = c.i;
             return true;
         }
@@ -41,6 +46,22 @@ bool TypeChecker::literal_int_value(const Expr* e, int64_t& out) {
 
 bool TypeChecker::accept_literal_into(const TypePtr& want, Expr* value) {
     if (!want || !is_fixed_int(want) || !value) return false;
+    // u64 大字面量（>INT64_MAX 的十进制，位模式存 i）：只有 U64 目标收得下；
+    // 其它定宽目标按无符号值报超范围。不走 literal_int_value（位模式是负数）。
+    if (auto* c = dynamic_cast<const Constant*>(value);
+        c && c->ck == Constant::CK::Int && c->u64_lit) {
+        u64_lit_ok_.insert(value);  // 已处理（收下或已报错），收尾不再叠加
+        if (want->kind == TyKind::U64) {
+            expr_types_[value] = want;
+            return true;
+        }
+        int64_t lo = 0, hi = 0;
+        int_range_of(want->kind, lo, hi);
+        err(value->line, value->col,
+            std::format("literal {} is out of range for '{}' (allowed {}..{})",
+                        static_cast<uint64_t>(c->i), type_name(want), lo, hi));
+        return true;
+    }
     // float/bool 字面量的处理：bool 已是 int 子类型，assignable 放行；
     // float 字面量窄化到定宽整数不在 v1 隐式允许范围（要 cast）。
     int64_t v = 0;
@@ -60,6 +81,73 @@ bool TypeChecker::accept_literal_into(const TypePtr& want, Expr* value) {
     return true;
 }
 
+bool TypeChecker::coerce_container_literal(const TypePtr& want, Expr* value) {
+    if (!want || !value) return false;
+    // 收集 (元素表达式, 目标元素类型) 位置；目标不是定宽整数的位置不收。
+    std::vector<std::pair<Expr*, TypePtr>> slots;
+    if ((want->kind == TyKind::List && value->kind == ExprKind::List) ||
+        (want->kind == TyKind::Set && value->kind == ExprKind::Set)) {
+        if (want->sub.empty() || !is_fixed_int(want->sub[0])) return false;
+        auto& elts = value->kind == ExprKind::List
+                         ? static_cast<ListExpr*>(value)->elts
+                         : static_cast<SetExpr*>(value)->elts;
+        for (auto& el : elts) slots.emplace_back(el.get(), want->sub[0]);
+    } else if (want->kind == TyKind::Dict && value->kind == ExprKind::Dict) {
+        auto& d = static_cast<DictExpr&>(*value);
+        const bool kf = !want->sub.empty() && is_fixed_int(want->sub[0]);
+        const bool vf = want->sub.size() > 1 && is_fixed_int(want->sub[1]);
+        if (!kf && !vf) return false;
+        for (size_t i = 0; i < d.values.size(); ++i) {
+            if (kf && d.keys[i]) slots.emplace_back(d.keys[i].get(), want->sub[0]);
+            if (vf) slots.emplace_back(d.values[i].get(), want->sub[1]);
+        }
+    } else {
+        return false;
+    }
+    if (slots.empty()) return false;  // 空字面量走既有的洞回填路径
+    // 先整体判定：所有目标位置都必须是字面量（含 u64 大字面量），否则
+    // 一个都不改写——避免「半改写」状态（部分元素定了型、容器没定）。
+    for (auto& [el, ty] : slots) {
+        if (auto* c = dynamic_cast<const Constant*>(el);
+            c && c->ck == Constant::CK::Int && c->u64_lit)
+            continue;
+        int64_t v = 0;
+        if (!literal_int_value(el, v)) return false;
+    }
+    for (auto& [el, ty] : slots) accept_literal_into(ty, el);
+    expr_types_[value] = want;
+    return true;
+}
+
+void TypeChecker::note_u64_literal(const Expr* e) {
+    u64_lit_pending_.insert(e);
+}
+
+void TypeChecker::consume_u64_literal(const TypePtr& rt, Expr* e) {
+    if (!rt || rt->kind != TyKind::U64 || !e) return;
+    auto* c = dynamic_cast<Constant*>(e);
+    if (c && c->ck == Constant::CK::Int && c->u64_lit) {
+        // 提升到 U64 的运算/比较：字面量按 U64 定型，降级直接发无符号
+        // 位模式常量（两侧转换到提升类型是恒等，回绕语义不变）。
+        expr_types_[e] = t_u64();
+        u64_lit_ok_.insert(e);
+    }
+}
+
+void TypeChecker::check_u64_literals() {
+    // 未被 u64 上下文消费的大字面量：默认 int 装不下，照旧报错。
+    // 按行列排序去重，保证诊断顺序确定（重查会重复登记同一节点）。
+    std::vector<const Expr*> rest;
+    for (const Expr* e : u64_lit_pending_)
+        if (!u64_lit_ok_.count(e)) rest.push_back(e);
+    std::sort(rest.begin(), rest.end(), [](const Expr* a, const Expr* b) {
+        return a->line != b->line ? a->line < b->line : a->col < b->col;
+    });
+    rest.erase(std::unique(rest.begin(), rest.end()), rest.end());
+    for (const Expr* e : rest)
+        err(e->line, e->col, "integer literal too large for int64");
+}
+
 void TypeChecker::stmt_assign(Assign& a) {
         // d = globals() 之后 d[k] = v 等价于模块级动态注入，记下别名
         if (a.value->kind == ExprKind::Call) {
@@ -75,16 +163,48 @@ void TypeChecker::stmt_assign(Assign& a) {
             // 定宽目标 + 字面量：范围内隐式 coerce（超范围报编译错误）。
             TypePtr want;
             if (auto* tn = dynamic_cast<Name*>(t.get())) {
-                if (auto* sym = lookup(tn->id); sym && sym->ty && is_fixed_int(sym->ty))
-                    want = sym->ty;
+                if (auto* sym = lookup(tn->id); sym && sym->ty) {
+                    if (is_fixed_int(sym->ty)) want = sym->ty;
+                    else if (sym->ty->kind == TyKind::List || sym->ty->kind == TyKind::Set ||
+                             sym->ty->kind == TyKind::Dict)
+                        want = sym->ty;  // 容器字面量 coerce（元素定宽才生效）
+                }
+            } else if (auto* sub = dynamic_cast<Subscript*>(t.get())) {
+                // 定宽容器元素的下标写入：l[0] = 5 / d["k"] = 5 与 append 同口径。
+                // 只看 Name 接收者：复杂接收者不重复求值（副作用/重复报错）。
+                if (sub->slice && sub->slice->kind != ExprKind::Slice) {
+                    if (auto* rn = dynamic_cast<Name*>(sub->value.get())) {
+                        if (auto* sym = lookup(rn->id); sym && sym->ty) {
+                            const TypePtr& ot = sym->ty;
+                            if (ot->kind == TyKind::List && !ot->sub.empty() &&
+                                is_fixed_int(ot->sub[0]))
+                                want = ot->sub[0];
+                            else if (ot->kind == TyKind::Dict && ot->sub.size() > 1 &&
+                                     is_fixed_int(ot->sub[1]))
+                                want = ot->sub[1];
+                        }
+                    }
+                }
             } else if (auto* at = dynamic_cast<Attribute*>(t.get())) {
                 // 定宽的类字段：赋值 c.n = 127 与 Name 目标同口径（范围内隐式）。
                 // 模块/cimport 的接收者不能求值：m.x = 1 里的 m 是模块，
                 // 求值路径会报「module cannot be used as a value」。
                 bool base_mod = false;
-                if (auto* bn = dynamic_cast<Name*>(at->value.get()))
+                if (auto* bn = dynamic_cast<Name*>(at->value.get())) {
                     base_mod = lookup_module_alias(bn->id) != nullptr ||
                                cmodules_.count(bn->id) > 0;
+                    // 定宽 C 变量 + 字面量：与标量赋值同口径 coerce（P1 收尾）。
+                    if (base_mod) {
+                        if (const CImportDecl* cd = cmodule(bn->id)) {
+                            for (auto& cv : cd->vars) {
+                                if (cv.py_name != at->attr) continue;
+                                TypePtr wt = ckind_type(cv.kind);
+                                if (is_fixed_int(wt)) want = wt;
+                                break;
+                            }
+                        }
+                    }
+                }
                 if (!base_mod) {
                     TypePtr rt = expr(*at->value);
                     if (rt && rt->kind == TyKind::Class && rt->cls) {
@@ -94,7 +214,8 @@ void TypeChecker::stmt_assign(Assign& a) {
                     }
                 }
             }
-            if (want && accept_literal_into(want, a.value.get())) {
+            if (want && (accept_literal_into(want, a.value.get()) ||
+                         coerce_container_literal(want, a.value.get()))) {
                 assign(*t, want, a.line, a.col);
                 continue;
             }
@@ -109,6 +230,8 @@ void TypeChecker::stmt_aug_assign(AugAssign& a) {
         // 和 list + tuple 是两回事（后者才非法）
         if (a.op == Tok::PLUSEQUAL && cur_ty && cur_ty->kind == TyKind::List) {
             auto vt = expr(*a.value);
+            // 定宽元素 += 字面量列表：逐元素 coerce，与 extend 同口径。
+            if (coerce_container_literal(cur_ty, a.value.get())) vt = cur_ty;
             auto ie = iter_elem(vt, a.line, a.col);
             if (!assignable(cur_ty->sub[0], ie)) {
                 if (cur_ty->locked)
@@ -128,6 +251,8 @@ void TypeChecker::stmt_aug_assign(AugAssign& a) {
         }
         Tok bin = aug_to_bin(a.op);
         auto rt = binop_type(bin, cur_ty, vt, a.line, a.col);
+        // u64 目标 += u64 大字面量：提升后是 U64，消费字面量（回绕语义不变）。
+        consume_u64_literal(rt, a.value.get());
         // 定宽目标的复合赋值按 C 口径把结果**转换回目标类型**（隐式窄化）。
         // x: u8; x += 1 是 u8 的 255+1 → 0，不是静默丢掉高位：
         // 降级层在赋值点按目标类型正常化（回绕是 pa 的确定语义）。
@@ -179,6 +304,9 @@ void TypeChecker::stmt_ann_assign(AnnAssign& a) {
             } else if (ann && is_fixed_int(ann) && accept_literal_into(ann, a.value.get())) {
                 // 定宽标注 + 字面量：范围内 coerce，超范围已报错。
                 vt = ann;
+            } else if (ann && coerce_container_literal(ann, a.value.get())) {
+                // 定宽元素容器标注 + 字面量容器：逐元素 coerce（同口径）。
+                vt = ann;
             } else if (ann && !assignable(ann, vt))
                 err(a.line, a.col,
                     std::format("annotated as '{}' but assigned '{}' (fixed-width needs an "
@@ -226,6 +354,9 @@ void TypeChecker::stmt_return(Return& r) {
             if (vt && ty_contains_hole(vt, 0)) fill_holes_recursive(vt, want, 0);
             bool lit_ok = r.value && is_fixed_int(want) &&
                           accept_literal_into(want, r.value.get());
+            // 定宽元素容器返回标注 + 字面量容器：逐元素 coerce（同口径）。
+            if (!lit_ok && r.value && coerce_container_literal(want, r.value.get()))
+                lit_ok = true;
             if (lit_ok)
                 vt = want;
             else if (!assignable(want, vt))

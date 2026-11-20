@@ -7,6 +7,7 @@
 #pragma once
 
 #include <cctype>
+#include <cerrno>
 #include <cstdint>
 #include <cstdlib>
 #include <stdexcept>
@@ -592,7 +593,17 @@ private:
             try {
                 t.ival = std::stoll(clean);
             } catch (const std::out_of_range&) {
-                throw LexError("integer literal too large for int64", tok_line_, tok_col_);
+                // u64 范围（INT64_MAX < v <= 2^64-1）的十进制字面量：按无符号
+                // 解析成位模式并打 u64_lit 标记，交给类型检查在 u64 上下文
+                // 消费（默认 int 上下文仍报 too large，行为不变）。超 u64
+                // 范围照旧报错。进制前缀路径保持原样（既有回绕行为不动）。
+                errno = 0;
+                char* endp = nullptr;
+                unsigned long long uv = std::strtoull(clean.c_str(), &endp, 10);
+                if (errno == ERANGE || uv > UINT64_MAX || !endp || *endp != '\0')
+                    throw LexError("integer literal too large for int64", tok_line_, tok_col_);
+                t.ival = static_cast<int64_t>(uv);
+                t.u64_lit = true;
             }
         }
         tokens_.push_back(std::move(t));
