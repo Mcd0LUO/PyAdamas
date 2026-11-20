@@ -220,7 +220,7 @@ private:
     // slot_reg_[s] 非空表示变量 s 常驻在这个寄存器里，栈槽作废。
     // 分配是函数级的、固定的：不做活跃性分析，一个变量要么整函数
     // 在寄存器里，要么整函数在栈上，规则简单到不会出隐蔽 bug。
-    std::vector<std::string> slot_reg_;
+    std::vector<MOperand> slot_reg_;   // 结构化单元：empty()=未提升，text=寄存器名
     int n_saved_regs_ = 0;  // 实际 push 了几个 callee-saved
     // 提升到 xmm8–15 的浮点槽。call 会破坏 caller-saved xmm，调用前后
     // 只把「调用后仍存活」的槽写回/读出（块级活跃性在 build_fp_liveness
@@ -271,18 +271,18 @@ private:
 
     // vreg → 它当前所在的物理位置（"%r13" 这种）。只在块内有效：
     // 块边界一律清空，所以跨块的值永远走栈槽，不会读到过期的寄存器。
-    std::unordered_map<VReg, std::string> alias_;
+    std::unordered_map<VReg, MOperand> alias_;
 
     // 能被写成立即数的常量。同样只在块内有效（保存 "$imm" 串）。
-    std::unordered_map<VReg, std::string> const_val_;
+    std::unordered_map<VReg, MOperand> const_val_;
 
     // 整函数范围的 const.int → "$imm"。跨块的常量不必占寄存器或栈槽，
     // 所有使用点直接用立即数；定义指令在 gen_block 里跳过。
-    std::unordered_map<VReg, std::string> global_imm_;
+    std::unordered_map<VReg, MOperand> global_imm_;
 
     // 本指令的 dst 该写到哪里。为空表示按 mem(dst)；非空是融合目标
     // （通常是一个变量寄存器），此时 mem(dst) 完全不参与。
-    std::string dst_loc_;
+    MOperand dst_loc_;
 
     std::vector<int> use_count_;
     std::vector<bool> cross_block_;
@@ -296,7 +296,7 @@ private:
 
     // 块内临时寄存器：整块没有会调用/占用 %r8–%r11 的指令时，块内定义、
     // 块内用完的临时值直接住在寄存器里，mem(v) 返回它。块边界清空。
-    std::vector<std::string> vreg_reg_;
+    std::vector<MOperand> vreg_reg_;
     // 块内临时寄存器可用池：无调用函数里被跨块提升占走的 %r8–%r11 会剔除。
     std::vector<std::string> block_temp_pool_;
     bool temp_reg_op_ok(const Inst& in) const;
@@ -308,10 +308,16 @@ private:
     // 生成期缓存：块标签、vreg/槽的内存操作数串。这些字符串在函数内
     // 固定不变，生成每条指令时反复 format 会占掉相当一部分编译时间。
     std::vector<std::string> block_labels_;
-    std::vector<std::string> vreg_mem_;
-    std::vector<std::string> smem_cache_;
-    std::vector<std::string> gen_smem_cache_;
+    // 操作数缓存是结构化 MOperand 单元：build_operand_caches 赋值时解析
+    // 一次，发射点直取免回解析；.text 仍是 canonical 操作数字符串。
+    std::vector<MOperand> vreg_mem_;
+    std::vector<MOperand> smem_cache_;
+    std::vector<MOperand> gen_smem_cache_;
     std::vector<std::string> global_labels_;
+    // rip 相对全局操作数按模块缓存：长 mangled 符号（pyadamas$...）每次
+    // 访问都建 canonical text 会堆分配，缓存后全局访问零分配。
+    std::vector<MOperand> global_mops_;
+    std::vector<MOperand> global_tag_mops_;
     std::vector<std::string> func_labels_;
     void build_operand_caches();
 
@@ -330,8 +336,8 @@ private:
     int n_tag_words_ = 0;                 // 帧内平行 tag 区字数
     std::vector<int> vreg_tag_;           // vreg -> tag 字号（-1 无）
     std::vector<int> slot_tag_;           // 命名槽 -> tag 字号（-1 无）
-    std::vector<std::string> vreg_tag_mem_;
-    std::vector<std::string> slot_tag_mem_;
+    std::vector<MOperand> vreg_tag_mem_;
+    std::vector<MOperand> slot_tag_mem_;
     // tag 区在 vreg 栈槽区之上、帧记录之下（rec_off 按 locals_ 自动让位）。
     int tag_off(int w) const {
         return out_bytes_ + 8 * (n_slots_ + n_vreg_slots_ + w);
@@ -380,19 +386,22 @@ private:
         return tags_enabled_ && s >= 0 &&
                s < static_cast<int>(slot_tag_.size()) && slot_tag_[s] >= 0;
     }
-    const std::string& tag_mem(VReg r) const {
+    // tag 操作数：结构化单元优先，字符串接口委托 .text。
+    const MOperand& tag_mop(VReg r) const {
         if (r < vreg_tag_mem_.size() && !vreg_tag_mem_[r].empty())
             return vreg_tag_mem_[r];
-        static const std::string kZero = "$0";
+        static const MOperand kZero = op_imm(0);
         return kZero;
     }
-    const std::string& slot_tag_op(int s) const {
+    const MOperand& slot_tag_mop(int s) const {
         if (s >= 0 && s < static_cast<int>(slot_tag_mem_.size()) &&
             !slot_tag_mem_[static_cast<size_t>(s)].empty())
             return slot_tag_mem_[static_cast<size_t>(s)];
-        static const std::string kZero = "$0";
+        static const MOperand kZero = op_imm(0);
         return kZero;
     }
+    const std::string& tag_mem(VReg r) const { return tag_mop(r).text; }
+    const std::string& slot_tag_op(int s) const { return slot_tag_mop(s).text; }
     // vreg 的 tag 源操作数：有 tag 字读字，没有按静态类型导常量。
     std::string tag_src(VReg r) const {
         if (vreg_tagged(r)) return tag_mem(r);
@@ -420,7 +429,14 @@ private:
     // 旧入口（闭包/间接/跨模块/vtable）先把 %r11 清零再进同一函数体，
     // 形参 tag 全 UNK 回退探针。unknown 返回经 %rdx 带 tag（旧调用方
     // 忽略 rdx，无兼容问题）。门控关/生成器一律不进。
-    static std::string ptag_label(int i) { return std::format(".Lf{}$pt", i); }
+    static std::string ptag_label(int i) {
+        std::string s = ".Lf";
+        char buf[24];
+        auto r = std::to_chars(buf, buf + sizeof buf, i);
+        s.append(buf, r.ptr);
+        s += "$pt";
+        return s;
+    }
     // 本函数 unknown 形参个数（>0 才发双入口；生成器/门控关恒 0）。
     int func_ptag_words() const;
     // CallDirect 的 tag 数组字数（0 = 不走 tag ABI：门控关/跨模块/生成器/
@@ -476,6 +492,52 @@ private:
         out_.push_line(line_buf_);
     }
 
+    // 静态字面量行（line("movq %rax, %rbx") 这类）：进程内只解析一次，
+    // 之后直接复制结构化结果——RC 内联序列等固定指令模板每次发射都重新
+    // parse_instr/parse_operand 是纯浪费。按内容做透明哈希键（字面量地址
+    // 可能被链接器合并/变化，内容才是稳定标识）。编译器单线程，静态缓存
+    // 无锁；键只来自字面量与 ABI 静态串，规模有界。
+    void line(const char* s) {
+        struct SvHash {
+            using is_transparent = void;
+            size_t operator()(std::string_view v) const {
+                return std::hash<std::string_view>{}(v);
+            }
+        };
+        struct Entry { MItem item; int32_t inst = -1; };
+        struct Cache {
+            std::unordered_map<std::string, Entry, SvHash, std::equal_to<>> map;
+            std::vector<MInstr> insts;  // 缓存指令池（Entry.inst 下标）
+        };
+        static Cache cache;
+        const std::string_view sv(s);
+        auto it = cache.map.find(sv);
+        if (it == cache.map.end()) {
+            Entry e;
+            if (sv.find('\n') != std::string_view::npos) {
+                e.item = make_raw("\t" + std::string(sv) + "\n");
+            } else {
+                line_buf_.clear();
+                line_buf_ += '\t';
+                line_buf_.append(sv);
+                MachFunc tmp;
+                parse_line_into(line_buf_, tmp);
+                e.item = std::move(tmp.items[0]);
+                if (e.item.kind == MItem::Instr) {
+                    e.inst = static_cast<int32_t>(cache.insts.size());
+                    cache.insts.push_back(std::move(tmp.insts[0]));
+                    e.item.inst = -1;  // 下标按目标函数重定位，缓存里不存
+                }
+            }
+            it = cache.map.emplace(std::string(sv), std::move(e)).first;
+        }
+        const Entry& e = it->second;
+        if (e.inst >= 0)
+            out_.push_cached(e.item, cache.insts[static_cast<size_t>(e.inst)]);
+        else
+            out_.push(e.item);
+    }
+
     // 列 0 的标签（函数标签、数据段符号）。
     void label(const std::string& s) { out_.push_label(s, false); }
     // 带前导 tab 的块内局部标签（"\t1:" 这种）。
@@ -497,62 +559,9 @@ private:
         out_.push_instr(std::move(ins));
     }
 
-    // 操作数工厂。寄存器第一阶段仍按名字存（op_reg("%rax")）。
-    static MOperand op_reg(std::string name) {
-        MOperand o;
-        o.kind = MOperandKind::Reg;
-        o.text = std::move(name);
-        return o;
-    }
-    static MOperand op_imm(int64_t v) {
-        MOperand o;
-        o.kind = MOperandKind::Imm;
-        o.imm = v;
-        return o;
-    }
-    static MOperand op_imm_hex(uint64_t bits) {
-        MOperand o;
-        o.kind = MOperandKind::Imm;
-        o.imm = static_cast<int64_t>(bits);
-        o.imm_hex = true;
-        return o;
-    }
-    static MOperand op_label(std::string name) {
-        MOperand o;
-        o.kind = MOperandKind::Label;
-        o.text = std::move(name);
-        return o;
-    }
-    static MOperand op_sym(std::string name) {
-        MOperand o;
-        o.kind = MOperandKind::Sym;
-        o.text = std::move(name);
-        return o;
-    }
-    // "(%base)"
-    static MOperand op_mem(std::string base) {
-        MOperand o;
-        o.kind = MOperandKind::Mem;
-        o.base = std::move(base);
-        return o;
-    }
-    // "disp(%base)"
-    static MOperand op_mem(std::string base, int64_t disp) {
-        MOperand o;
-        o.kind = MOperandKind::Mem;
-        o.base = std::move(base);
-        o.disp = disp;
-        o.has_disp = true;
-        return o;
-    }
-    // "sym(%base)"
-    static MOperand op_mem_sym(std::string sym, std::string base) {
-        MOperand o;
-        o.kind = MOperandKind::Mem;
-        o.sym = std::move(sym);
-        o.base = std::move(base);
-        return o;
-    }
+    // 操作数工厂 + 迷你发射器（emit2/emit_imm_op/emit_jmp）拆在 codegen_emit.h，
+    // 类体片段，就地展开（文件规模闸门）。
+#include "codegen_emit.h"
 
     // ── 目标相关的汇编指示符 ────────────────────────────────────
     // ELF/GNU as 的 .cfi_*、.type、.size、.note.GNU-stack 在 COFF 目标上
@@ -567,10 +576,36 @@ private:
 
     // 搬运第 pos 个（0 基）实参到 ABI 规定的位置。is_fp 表示浮点类；
     // cls_idx 是该类内的序号（SysV 按类型分计数时用）。
-    void emit_arg(int pos, bool is_fp, int cls_idx, const std::string& v);
+    void emit_arg(int pos, bool is_fp, int cls_idx, const MOperand& v);
 
     void cfi(const std::string& s) {
         if (target_abi().gnu_cfi) line(s);
+    }
+    // CFI 数字行直拼（to_chars）：序言/尾声每函数十几条，免 std::format。
+    // 走 directive() 直发，不复用 line()（避免 line_buf_ 自引用）。
+    void cfi_cfa_offset() {
+        if (!target_abi().gnu_cfi) return;
+        line_buf_ = ".cfi_def_cfa_offset ";
+        char buf[24];
+        auto r = std::to_chars(buf, buf + sizeof buf, cfa_off_);
+        line_buf_.append(buf, r.ptr);
+        directive(line_buf_);
+    }
+    void cfi_restore(const char* reg) {
+        if (!target_abi().gnu_cfi) return;
+        line_buf_ = ".cfi_restore ";
+        line_buf_ += reg;
+        directive(line_buf_);
+    }
+    void cfi_offset(const char* reg, int off) {
+        if (!target_abi().gnu_cfi) return;
+        line_buf_ = ".cfi_offset ";
+        line_buf_ += reg;
+        line_buf_ += ", -";
+        char buf[24];
+        auto r = std::to_chars(buf, buf + sizeof buf, off);
+        line_buf_.append(buf, r.ptr);
+        directive(line_buf_);
     }
     // relro 段：ELF 下是 .data.rel.ro，COFF 没有这个概念，退到 .rdata。
     void section_relro() {
@@ -590,75 +625,43 @@ private:
         if (target_abi().gnu_cfi) directive(".section .note.GNU-stack,\"\",@progbits");
     }
 
-    // 热路径的迷你发射器：直接构造结构化指令，绕开 std::format。
-    // 助记符没进 MOp 枚举、或操作数文法不认识时退回文本路径（Raw，字节不变）。
-    void emit2(const char* mn, const std::string& a, const std::string& b) {
-        MOp op = mop_from_name(mn);
-        MOperand oa;
-        MOperand ob;
-        if (op != MOp::kRaw && parse_operand(a, false, &oa) && parse_operand(b, false, &ob)) {
-            MInstr ins;
-            ins.op = op;
-            ins.ops.push_back(std::move(oa));
-            ins.ops.push_back(std::move(ob));
-            out_.push_instr(std::move(ins));
-            return;
-        }
-        std::string text = mn;
-        text += ' ';
-        text += a;
-        text += ", ";
-        text += b;
-        out_.push_line(text);
+
+    // 数字后缀标签（.Lvt3 / .Ldtor2 这类）：to_chars 直拼。
+    static std::string num_label(const char* prefix, int64_t n) {
+        std::string s = prefix;
+        char buf[24];
+        auto r = std::to_chars(buf, buf + sizeof buf, n);
+        s.append(buf, r.ptr);
+        return s;
     }
 
-    void emit_imm_op(const char* mn, int64_t v, const std::string& b) {
-        MOp op = mop_from_name(mn);
-        MOperand ob;
-        if (op != MOp::kRaw && parse_operand(b, false, &ob)) {
-            MInstr ins;
-            ins.op = op;
-            ins.ops.push_back(op_imm(v));
-            ins.ops.push_back(std::move(ob));
-            out_.push_instr(std::move(ins));
-            return;
-        }
-        char buf[32];
-        auto r = std::to_chars(buf, buf + sizeof buf, v);
-        std::string text = mn;
-        text += " $";
-        text.append(buf, r.ptr);
-        text += ", ";
-        text += b;
-        out_.push_line(text);
-    }
-
-    void emit_jmp(const char* mn, const std::string& target) {
-        MOp op = mop_from_name(mn);
-        MOperand ot;
-        if (op != MOp::kRaw && parse_operand(target, mop_is_branch(op), &ot)) {
-            MInstr ins;
-            ins.op = op;
-            ins.ops.push_back(std::move(ot));
-            out_.push_instr(std::move(ins));
-            return;
-        }
-        std::string text = mn;
-        text += ' ';
-        text += target;
-        out_.push_line(text);
-    }
-
-    void emit_imm_mem(const std::string& mem, int64_t v) { emit_imm_op("movq", v, mem); }
-
-
+    // 标签工厂：to_chars 直拼，免 std::format（RC 序列每条 2-3 个标签，
+    // 是 vformat 热点的大头）。
     std::string fresh_label(const char* tag) {
-        return std::format(".L{}_{}", tag, label_id_++);
+        std::string s = ".L";
+        s += tag;
+        s += '_';
+        char buf[24];
+        auto r = std::to_chars(buf, buf + sizeof buf, label_id_++);
+        s.append(buf, r.ptr);
+        return s;
     }
 
-    static std::string func_label(int i) { return std::format(".Lf{}", i); }
+    static std::string func_label(int i) {
+        std::string s = ".Lf";
+        char buf[24];
+        auto r = std::to_chars(buf, buf + sizeof buf, i);
+        s.append(buf, r.ptr);
+        return s;
+    }
     // 统一调用约定的 shim 入口标签（见 ir_types.h 的 closure_needs_shim）。
-    static std::string shim_label(int i) { return std::format(".Lshim{}", i); }
+    static std::string shim_label(int i) {
+        std::string s = ".Lshim";
+        char buf[24];
+        auto r = std::to_chars(buf, buf + sizeof buf, i);
+        s.append(buf, r.ptr);
+        return s;
+    }
 
     std::string block_label(int bi) const { return block_labels_[static_cast<size_t>(bi)]; }
 
@@ -682,7 +685,7 @@ private:
         int words = 6 + static_cast<int>(frame_owned_.size() + frame_scan_.size());
         return out_bytes_ + locals_ - 8 * (words - i);
     }
-    std::string rec_mem(int i) const { return std::format("{}(%rsp)", rec_off(i)); }
+    MOperand rec_mem(int i) const { return op_mem(kRsp, rec_off(i)); }
 
     // 本次代码生成是否压了帧记录（弹栈只在这个函数里发）。
     bool frame_rec_ = false;
@@ -699,7 +702,13 @@ private:
     std::vector<DbgEntry> dbg_entries_;
     int dbg_seq_ = 0;
     bool dbg_on_ = false;
-    std::string dbg_name_label(int fi) const { return std::format(".Lfnname{}", fi); }
+    std::string dbg_name_label(int fi) const {
+        std::string s = ".Lfnname";
+        char buf[24];
+        auto r = std::to_chars(buf, buf + sizeof buf, fi);
+        s.append(buf, r.ptr);
+        return s;
+    }
     void emit_debug_sections(const IRModule& m);
 
     // ── 零开销异常（Z2-b2，--zero-cost-exc）────────────────────────
@@ -769,31 +778,34 @@ private:
     // 按 vreg 静态类型算出临时区的保守扫描范围 / 位图（见 codegen_block.cpp）。
     void build_frame_scan_info(const IRFunction& f);
 
-    const std::string& mem(VReg r) const {
+    // vreg/槽的内存操作数：结构化单元优先（发射点直取免回解析），
+    // 字符串接口委托 .text（历史调用点零改动）。
+    const MOperand& mem_mop(VReg r) const {
         if (r < static_cast<VReg>(vreg_reg_.size()) && !vreg_reg_[r].empty())
             return vreg_reg_[r];
         if (r < static_cast<VReg>(vreg_mem_.size())) return vreg_mem_[r];
-        static const std::string kFallback = "0(%rsp)";
+        static const MOperand kFallback = op_mem("%rsp", 0);
         return kFallback;
     }
-
-    const std::string& smem(int slot) const {
+    const MOperand& smem_mop(int slot) const {
         if (slot >= 0 && slot < static_cast<int>(smem_cache_.size()))
             return smem_cache_[static_cast<size_t>(slot)];
-        static const std::string kFallback = "0(%rsp)";
+        static const MOperand kFallback = op_mem("%rsp", 0);
         return kFallback;
     }
-
-    const std::string& gen_smem(int slot) const {
+    const MOperand& gen_smem_mop(int slot) const {
         if (slot >= 0 && slot < static_cast<int>(gen_smem_cache_.size()))
             return gen_smem_cache_[static_cast<size_t>(slot)];
-        static const std::string kFallback = "0(%r15)";
+        static const MOperand kFallback = op_mem("%r15", 0);
         return kFallback;
     }
+    const std::string& mem(VReg r) const { return mem_mop(r).text; }
+    const std::string& smem(int slot) const { return smem_mop(slot).text; }
+    const std::string& gen_smem(int slot) const { return gen_smem_mop(slot).text; }
 
-    // 变量的现在位置：寄存器（提升过）或栈槽。
-    const std::string& slot_op(int slot) const {
-        if (gen_) return gen_smem(slot);
+    // 变量的现在位置：寄存器（提升过）或栈槽。结构化版本。
+    const MOperand& slot_mop(int slot) const {
+        if (gen_) return gen_smem_mop(slot);
         // **split 模式：按当前块查表。**
         //
         // 放在 slot_reg_ 之前：split 模式下 slot_reg_ 不用（整函数固定位置
@@ -803,7 +815,7 @@ private:
             split_block_ < static_cast<int>(slot_loc_.size()) &&
             slot >= 0 &&
             slot < static_cast<int>(slot_loc_[static_cast<size_t>(split_block_)].size())) {
-            const std::string& r =
+            const MOperand& r =
                 slot_loc_[static_cast<size_t>(split_block_)][static_cast<size_t>(slot)];
             if (!r.empty()) return r;
             // **本块没有 split 位置时，回落到默认分配的整函数寄存器。**
@@ -820,12 +832,13 @@ private:
             // 真实值 —— matmul 浮点值被冲掉、生成程序死循环 OOM。）
             if (slot < static_cast<int>(slot_reg_.size()) && !slot_reg_[slot].empty())
                 return slot_reg_[slot];
-            return smem(slot);
+            return smem_mop(slot);
         }
         if (slot >= 0 && slot < static_cast<int>(slot_reg_.size()) && !slot_reg_[slot].empty())
             return slot_reg_[slot];
-        return smem(slot);
+        return smem_mop(slot);
     }
+    const std::string& slot_op(int slot) const { return slot_mop(slot).text; }
 
     // ── live range splitting ───────────────────────────────────
     //
@@ -835,7 +848,7 @@ private:
     //
     // slot_op 里加了一个分支：slot_loc_ 非空时按块查表，否则走 slot_reg_
     // （默认路径行为完全不变）。split 模式只在 PYADAMAS_RA_SPLIT=1 时启用。
-    std::vector<std::vector<std::string>> slot_loc_;
+    std::vector<std::vector<MOperand>> slot_loc_;
     // 块 b 入口需要从栈装进寄存器的槽（前驱可能在栈上）。
     std::vector<std::vector<int>> slot_reload_in_;
     // 块 b 出口要写回栈的槽（存在后继要从栈读）。
@@ -846,8 +859,8 @@ private:
 
     // 读一个 vreg 的操作数。块内别名优先（别名指向的就是它的当前值），
     // 其次是可以直接当立即数用的常量，最后退回它自己的栈槽。
-    const std::string& src_op(VReg r) const {
-        static const std::string kZero = "$0";
+    const MOperand& src_mop(VReg r) const {
+        static const MOperand kZero = op_imm(0);
         if (r == kNoReg) return kZero;
         auto it = alias_.find(r);
         if (it != alias_.end()) return it->second;
@@ -855,8 +868,9 @@ private:
         if (ct != const_val_.end()) return ct->second;
         auto gi = global_imm_.find(r);
         if (gi != global_imm_.end()) return gi->second;
-        return mem(r);
+        return mem_mop(r);
     }
+    const std::string& src_op(VReg r) const { return src_mop(r).text; }
 
     // 把 src 搬进 dst 操作数。两个都是内存时 x86 没有 mem-to-mem，
     // 中间过一下 rax。
@@ -873,6 +887,21 @@ private:
             return;
         }
         emit2("movq", src, dst);
+    }
+
+    // 结构化搬运：操作数单元直发。mem-to-mem 判定与字符串版同口径
+    // （非 Reg 非 Imm 即「内存类」，含符号/标签兜底）。
+    static bool is_mem_mop(const MOperand& o) {
+        return o.kind != MOperandKind::Reg && o.kind != MOperandKind::Imm;
+    }
+    void move_to(const MOperand& dst, const MOperand& src) {
+        if (dst.text == src.text) return;
+        if (is_mem_mop(dst) && is_mem_mop(src)) {
+            emit2(MOp::kMovq, src, kRax);
+            emit2(MOp::kMovq, kRax, dst);
+            return;
+        }
+        emit2(MOp::kMovq, src, dst);
     }
 
     // 浮点搬运。寄存器之间用 movapd 做整 128 位拷贝：movsd 只写低 64 位，
@@ -894,11 +923,25 @@ private:
         emit2(dreg && sreg ? "movapd" : "movsd", src, dst);
     }
 
-    // 本指令 dst 的落点。
-    const std::string& dst_op(VReg r) const {
-        if (!dst_loc_.empty()) return dst_loc_;
-        return mem(r);
+    // 结构化浮点搬运（与字符串版同口径：%xmm 寄存器判据）。
+    void move_fp(const MOperand& dst, const MOperand& src) {
+        if (dst.text == src.text) return;
+        bool dreg = dst.kind == MOperandKind::Reg && dst.reg >= kXmm0 && dst.reg <= kXmm15;
+        bool sreg = src.kind == MOperandKind::Reg && src.reg >= kXmm0 && src.reg <= kXmm15;
+        if (!dreg && !sreg) {
+            emit2(MOp::kMovsd, src, kXmm0);
+            emit2(MOp::kMovsd, kXmm0, dst);
+            return;
+        }
+        emit2(dreg && sreg ? MOp::kMovapd : MOp::kMovsd, src, dst);
     }
+
+    // 本指令 dst 的落点。
+    const MOperand& dst_mop(VReg r) const {
+        if (!dst_loc_.empty()) return dst_loc_;
+        return mem_mop(r);
+    }
+    const std::string& dst_op(VReg r) const { return dst_mop(r).text; }
 
     // 字符串字面量 idx 如果是「单字节 ASCII 的 str」，返回该字节值（0..127），
     // 否则 -1。这类字面量在生成代码里直接取运行时驻留表 pa_char_tab 的对象，

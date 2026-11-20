@@ -41,6 +41,58 @@ static uint64_t str_literal_hash(const std::string& s) {
     return h ? h : 1;
 }
 
+// 数据段直写助手：to_chars + 复用缓冲，免每行 std::format 临时串。
+// buf 用 AsmGen::line_buf_（数据段发射不与 line() 嵌套）。
+static void quad_dec(MachFunc& out, std::string& buf, int64_t v) {
+    buf = "\t.quad ";
+    char b[24];
+    auto r = std::to_chars(b, b + sizeof b, v);
+    buf.append(b, r.ptr);
+    buf += '\n';
+    out += buf;
+}
+static void quad_hex(MachFunc& out, std::string& buf, uint64_t v) {
+    buf = "\t.quad 0x";
+    char b[24];
+    auto r = std::to_chars(b, b + sizeof b, v, 16);
+    buf.append(b, r.ptr);
+    buf += '\n';
+    out += buf;
+}
+static void quad_sym(MachFunc& out, std::string& buf, std::string_view s) {
+    buf = "\t.quad ";
+    buf += s;
+    buf += '\n';
+    out += buf;
+}
+static void append_num(std::string& buf, int64_t v) {
+    char t[24];
+    auto r = std::to_chars(t, t + sizeof t, v);
+    buf.append(t, r.ptr);
+}
+static void raw_label2(MachFunc& out, std::string& buf, const char* prefix, int64_t a, int64_t b) {
+    buf = prefix;
+    append_num(buf, a);
+    buf += '_';
+    append_num(buf, b);
+    buf += ":\n";
+    out += buf;
+}
+static void quad_sym2(MachFunc& out, std::string& buf, const char* prefix, int64_t a, int64_t b) {
+    buf = "\t.quad ";
+    buf += prefix;
+    append_num(buf, a);
+    buf += '_';
+    append_num(buf, b);
+    buf += '\n';
+    out += buf;
+}
+static void raw_label(MachFunc& out, std::string& buf, std::string_view name) {
+    buf = name;
+    buf += ":\n";
+    out += buf;
+}
+
 // 回调跳板做参数提升时用的寄存器名（SysV 整数参数寄存器）。
 static const char* const kCbReg64[6] = {"%rdi", "%rsi", "%rdx", "%rcx", "%r8", "%r9"};
 static const char* const kCbReg32[6] = {"%edi", "%esi", "%edx", "%ecx", "%r8d", "%r9d"};
@@ -63,6 +115,12 @@ std::string AsmGen::gen(const IRModule& m) {
             global_labels_[i] = m.globals[i].symbol.empty()
                                     ? ".Lg" + std::to_string(i)
                                     : m.globals[i].symbol;
+        global_mops_.resize(m.globals.size());
+        global_tag_mops_.resize(m.globals.size());
+        for (size_t i = 0; i < m.globals.size(); ++i) {
+            global_mops_[i] = op_mem_sym(global_labels_[i], "%rip");
+            global_tag_mops_[i] = op_mem_sym(global_labels_[i] + "$t", "%rip");
+        }
 
         // P3 门控（设计 §3.4）：模块含 unknown 动态算术/比较才启用 shadow
         // tag。26 个热基准全部不含 pa_any_* → 门控关 → 不进任何 tag 分支。
@@ -92,7 +150,7 @@ std::string AsmGen::gen(const IRModule& m) {
                 out_ += "\t.quad 0\n\t.quad 0\n";
                 out_ += "\t.quad 0x8000000000000000\n";
                 out_ += "\t.quad 0\n\t.quad 0\n\t.quad 0\n\t.quad 0\n\t.quad 0\n";
-                out_ += std::format(".Lstr{}:\n", i);
+                raw_label(out_, line_buf_, num_label(".Lstr", static_cast<int64_t>(i)));
                 // +0 pub：str 是码点数、bytes 是字节数；编译期就算好（RELRO 只读，
                 // 运行期不能懒缓存）。+8 字节数，+16 hash（SSO 字符区），
                 // +24 data，+32 chash（字典哈希缓存）。
@@ -100,16 +158,19 @@ std::string AsmGen::gen(const IRModule& m) {
                 // **chash 在编译期算好。** 字面量落在 .data.rel.ro，RELRO 之后
                 // 是只读的，运行期没法懒缓存 —— 所以必须在这里填。
                 // 这样字典查字面量键（if k == "abc" 之类）完全不用算哈希。
-                out_ += std::format("\t.quad {}\n", m.strings[i].pub);
-                out_ += std::format("\t.quad {}\n", s.size());
+                quad_dec(out_, line_buf_, m.strings[i].pub);
+                quad_dec(out_, line_buf_, static_cast<int64_t>(s.size()));
                 if (s.size() > 7)
-                    out_ += std::format("\t.quad 0x{:x}\n", str_literal_hash(s));
+                    quad_hex(out_, line_buf_, str_literal_hash(s));
                 else
                     out_ += "\t.quad 0\n";
-                out_ += std::format("\t.quad .Lstr{}_c\n", i);
-                out_ += std::format("\t.quad 0x{:x}\n", str_literal_hash(s));
-                out_ += std::format(".Lstr{}_c:\n", i);
-                out_ += std::format("\t.ascii \"{}\"\n", asm_escape(s));
+                quad_sym(out_, line_buf_, num_label(".Lstr", static_cast<int64_t>(i)) + "_c");
+                quad_hex(out_, line_buf_, str_literal_hash(s));
+                raw_label(out_, line_buf_, num_label(".Lstr", static_cast<int64_t>(i)) + "_c");
+                line_buf_ = "\t.ascii \"";
+                line_buf_ += asm_escape(s);
+                line_buf_ += "\"\n";
+                out_ += line_buf_;
                 out_ += "\t.byte 0\n";
             }
             // 静态字面量虽然永生，但 unknown 值的运行期类型检查要靠 RC
@@ -118,7 +179,7 @@ std::string AsmGen::gen(const IRModule& m) {
         section_relro();
         out_ += "\t.align 8\n.Lstrtab:\n";
         for (size_t i = 0; i < m.strings.size(); ++i)
-            out_ += std::format("\t.quad .Lstr{}\n", i);
+            quad_sym(out_, line_buf_, num_label(".Lstr", static_cast<int64_t>(i)));
         if (m.strings.empty()) out_ += "\t.quad 0\n";
 
         if (!m.globals.empty()) {
@@ -128,28 +189,34 @@ std::string AsmGen::gen(const IRModule& m) {
                 if (m.globals[i].external) continue;
                 if (!m.globals[i].symbol.empty())
                     out_ += "\t.globl " + m.globals[i].symbol + "\n";
-                out_ += std::format("{}:\n\t.zero 8\n", global_label(static_cast<int>(i)));
+                line_buf_ = global_label(static_cast<int>(i));
+                line_buf_ += ":\n\t.zero 8\n";
+                out_ += line_buf_;
                 // P3：unknown 全局的平行 tag 字（仅门控内、且别的模块写不到
                 // 的全局，见 global_tag_eligible）。初值 0 = UNK 探针回退。
                 if (tags_enabled_ && global_tag_eligible(static_cast<int>(i))) {
                     if (!m.globals[i].symbol.empty())
                         out_ += "\t.globl " + global_tag_label(static_cast<int>(i)) + "\n";
-                    out_ += std::format("{}:\n\t.zero 8\n",
-                                        global_tag_label(static_cast<int>(i)));
+                    line_buf_ = global_tag_label(static_cast<int>(i));
+                    line_buf_ += ":\n\t.zero 8\n";
+                    out_ += line_buf_;
                 }
             }
 
             // GC 根表：所有本模块全局槽的地址；外部全局的存储属于对方模块。
             section_relro();
             out_ += "\t.align 8\n";
-            out_ += std::format("{}:\n", roots_label());
+            raw_label(out_, line_buf_, roots_label());
             for (size_t i = 0; i < m.globals.size(); ++i) {
                 if (m.globals[i].external) continue;
-                out_ += std::format("\t.quad {}\n", global_label(static_cast<int>(i)));
+                quad_sym(out_, line_buf_, global_label(static_cast<int>(i)));
             }
         } else {
             section_relro();
-            out_ += std::format("\t.align 8\n{}:\n", roots_label());
+            line_buf_ = "\t.align 8\n";
+            line_buf_ += roots_label();
+            line_buf_ += ":\n";
+            out_ += line_buf_;
         }
 
         // 非入口模块的惰性初始化标志。
@@ -176,28 +243,31 @@ std::string AsmGen::gen(const IRModule& m) {
                 for (size_t j = 0; j < c.ext_bases.size(); ++j) {
                     const IRClassExtBase& e = c.ext_bases[j];
                     out_ += "\t.align 8\n";
-                    out_ += std::format(".Lvtmetaext{}_{}:\n", i, j);
+                    raw_label2(out_, line_buf_, ".Lvtmetaext", static_cast<int64_t>(i), static_cast<int64_t>(j));
                     out_ += "\t.quad 0\n";
                     out_ += "\t.quad -1\n";
-                    out_ += std::format("\t.quad {}\n", e.vtable_symbol);
-                    out_ += std::format("\t.quad {}\n", e.own_slots_symbol);
-                    out_ += std::format("\t.quad .Lcnameext{}_{}\n", i, j);
+                    quad_sym(out_, line_buf_, e.vtable_symbol);
+                    quad_sym(out_, line_buf_, e.own_slots_symbol);
+                    quad_sym2(out_, line_buf_, ".Lcnameext", static_cast<int64_t>(i), static_cast<int64_t>(j));
                     out_ += "\t.quad 0\n";  // 导入类没有动态属性槽
-                    out_ += std::format(".Lcnameext{}_{}:\n", i, j);
-                    out_ += std::format("\t.asciz \"{}\"\n", asm_escape(e.qualname));
+                    raw_label2(out_, line_buf_, ".Lcnameext", static_cast<int64_t>(i), static_cast<int64_t>(j));
+                    line_buf_ = "\t.asciz \"";
+                    line_buf_ += asm_escape(e.qualname);
+                    line_buf_ += "\"\n";
+                    out_ += line_buf_;
                 }
                 out_ += "\t.align 8\n";
-                out_ += std::format(".Lvtmeta{}:\n", i);
-                out_ += std::format("\t.quad .Lvtmro{}\n", i);
-                out_ += std::format("\t.quad {}\n", i);
-                out_ += std::format("\t.quad .Lvt{}\n", i);
-                out_ += std::format("\t.quad .Lvtown{}\n", i);
-                out_ += std::format("\t.quad .Lcname{}\n", i);
+                raw_label(out_, line_buf_, num_label(".Lvtmeta", static_cast<int64_t>(i)));
+                quad_sym(out_, line_buf_, num_label(".Lvtmro", static_cast<int64_t>(i)));
+                quad_dec(out_, line_buf_, static_cast<int64_t>(i));
+                quad_sym(out_, line_buf_, num_label(".Lvt", static_cast<int64_t>(i)));
+                quad_sym(out_, line_buf_, num_label(".Lvtown", static_cast<int64_t>(i)));
+                quad_sym(out_, line_buf_, num_label(".Lcname", static_cast<int64_t>(i)));
                 // 第 6 个字：动态属性槽偏移（0 = 没有）。
-                out_ += std::format("\t.quad {}\n", c.dict_off);
+                quad_dec(out_, line_buf_, c.dict_off);
                 bool export_cls = !m.is_entry && !m.module_symbol.empty() &&
                                   !c.name.empty() && last_cls[c.name] == i;
-                out_ += std::format(".Lvt{}:\n", i);
+                raw_label(out_, line_buf_, num_label(".Lvt", static_cast<int64_t>(i)));
                 if (export_cls) {
                     std::string sym = module_class_vtable_symbol(m.module_symbol, c.name);
                     out_ += std::format("\t.globl {}\n\t.hidden {}\n{}:\n", sym, sym, sym);
@@ -207,11 +277,11 @@ std::string AsmGen::gen(const IRModule& m) {
                     const std::string& ext =
                         s < c.vtable_ext.size() ? c.vtable_ext[s] : std::string();
                     if (!ext.empty()) {
-                        out_ += std::format("\t.quad {}\n", ext);
+                        quad_sym(out_, line_buf_, ext);
                     } else if (c.vtable[s] < 0) {
                         out_ += "\t.quad 0\n";
                     } else {
-                        out_ += std::format("\t.quad {}\n", func_label(c.vtable[s]));
+                        quad_sym(out_, line_buf_, func_label(c.vtable[s]));
                     }
                 }
                 // 每个已填槽导出裸代码符号：导入方 vtable 需要函数地址，
@@ -233,24 +303,27 @@ std::string AsmGen::gen(const IRModule& m) {
                                             sym, sym, sym, impl);
                     }
                 }
-                out_ += std::format(".Lvtmro{}:\n", i);
-                out_ += std::format("\t.quad {}\n", c.mro.size());
+                raw_label(out_, line_buf_, num_label(".Lvtmro", static_cast<int64_t>(i)));
+                quad_dec(out_, line_buf_, static_cast<int64_t>(c.mro.size()));
                 for (int a : c.mro) {
                     if (a >= 0)
-                        out_ += std::format("\t.quad .Lvtmeta{}\n", a);
+                        quad_sym(out_, line_buf_, num_label(".Lvtmeta", a));
                     else
-                        out_ += std::format("\t.quad .Lvtmetaext{}_{}\n", i, -a - 1);
+                        quad_sym2(out_, line_buf_, ".Lvtmetaext", static_cast<int64_t>(i), -a - 1);
                 }
-                out_ += std::format(".Lvtown{}:\n", i);
+                raw_label(out_, line_buf_, num_label(".Lvtown", static_cast<int64_t>(i)));
                 if (export_cls) {
                     std::string sym = module_class_own_slots_symbol(m.module_symbol, c.name);
                     out_ += std::format("\t.globl {}\n\t.hidden {}\n{}:\n", sym, sym, sym);
                 }
-                out_ += std::format("\t.quad {}\n", c.own_slots.size());
+                quad_dec(out_, line_buf_, static_cast<int64_t>(c.own_slots.size()));
                 for (int s : c.own_slots)
-                    out_ += std::format("\t.quad {}\n", s);
-                out_ += std::format(".Lcname{}:\n", i);
-                out_ += std::format("\t.asciz \"{}\"\n", asm_escape(c.qualname));
+                    quad_dec(out_, line_buf_, s);
+                raw_label(out_, line_buf_, num_label(".Lcname", static_cast<int64_t>(i)));
+                line_buf_ = "\t.asciz \"";
+                line_buf_ += asm_escape(c.qualname);
+                line_buf_ += "\"\n";
+                out_ += line_buf_;
             }
         }
 
@@ -263,13 +336,13 @@ std::string AsmGen::gen(const IRModule& m) {
                 out_ += "\t.quad 0\n\t.quad 0\n";
                 out_ += "\t.quad 0x8000000000000000\n";
                 out_ += "\t.quad 0\n\t.quad 0\n\t.quad 0\n\t.quad 0\n\t.quad 0\n";
-                out_ += std::format(".Lclos{}:\n", i);
+                raw_label(out_, line_buf_, num_label(".Lclos", static_cast<int64_t>(i)));
                 // 间接调用一律走统一约定：+0 指向 shim（签名含浮点的函数），
                 // 否则就是函数本体（统一约定与它的 ABI 恰好一致）。
                 if (closure_needs_shim(*m.funcs[i]))
-                    out_ += std::format("\t.quad {}\n", shim_label(static_cast<int>(i)));
+                    quad_sym(out_, line_buf_, shim_label(static_cast<int>(i)));
                 else
-                    out_ += std::format("\t.quad {}\n", func_label(static_cast<int>(i)));
+                    quad_sym(out_, line_buf_, func_label(static_cast<int>(i)));
                 out_ += "\t.quad 0\n";
             }
         }
@@ -278,9 +351,14 @@ std::string AsmGen::gen(const IRModule& m) {
             // 运行时 traceback 表引用的源路径与函数名。
             section_rodata();
             out_ += std::format("\t.Ldbfile: .asciz \"{}\"\n", asm_escape(m.source_path));
-            for (size_t i = 0; i < m.funcs.size(); ++i)
-                out_ += std::format("\t.Lfnname{}: .asciz \"{}\"\n", i,
-                                    asm_escape(debug_display_name(m.funcs[i]->name)));
+            for (size_t i = 0; i < m.funcs.size(); ++i) {
+                line_buf_ = "\t.Lfnname";
+                append_num(line_buf_, static_cast<int64_t>(i));
+                line_buf_ += ": .asciz \"";
+                line_buf_ += asm_escape(debug_display_name(m.funcs[i]->name));
+                line_buf_ += "\"\n";
+                out_ += line_buf_;
+            }
         }
         out_ += "\t.text\n";
         // 手写跳板（类析构器 / GC 释放 / 生成器帧释放）的实参寄存器与

@@ -356,7 +356,7 @@ void AsmGen::emit_function(const IRFunction& f, int fi) {
         if (dbg_on_) {
             // 函数起点也登记一项：生成器/协程帧只保存 resume 代码地址，
             // 回溯时用它找回函数名。
-            std::string start = std::format(".LdbgStart{}", fi);
+            std::string start = num_label(".LdbgStart", fi);
             out_ += start + ":\n";
             dbg_entries_.push_back({start, fi, 0});
         }
@@ -395,18 +395,18 @@ void AsmGen::emit_function(const IRFunction& f, int fi) {
         // 被保存的寄存器相对 CFA 的偏移不随 push 变化（CFA 也跟着涨）。
         cfa_off_ = 8;
         if (gen_) {
-            line("pushq %r15");
+            emit1(MOp::kPushq, kR15);
             cfa_off_ += 8;
-            cfi(std::format(".cfi_def_cfa_offset {}", cfa_off_));
+            cfi_cfa_offset();
             cfi(".cfi_offset %r15, -16");
             // 生成器/协程 resume 的第一个实参是生成器对象，按 ABI 位置取。
-            line(std::format("movq {}, %r15", arg_reg_i(0)));
+            emit2(MOp::kMovq, arg_reg_i(0), kR15);
         } else {
             for (int i = 0; i < n_saved_regs_; ++i) {
-                line(std::format("pushq {}", kSlotRegs()[i]));
+                emit1(MOp::kPushq, mreg_from_name(kSlotRegs()[i]));
                 cfa_off_ += 8;
-                cfi(std::format(".cfi_def_cfa_offset {}", cfa_off_));
-                cfi(std::format(".cfi_offset {}, -{}", kSlotRegs()[i], cfa_off_));
+                cfi_cfa_offset();
+                cfi_offset(kSlotRegs()[i], cfa_off_);
             }
         }
         frame_alloc();
@@ -414,7 +414,7 @@ void AsmGen::emit_function(const IRFunction& f, int fi) {
         // 这里就是 g.entry 块头——每次 resume 都经过，垃圾 tag 不会跨
         // resume 残留（P3-1b，118/124/128/133 回归钉住）。
         for (int w = 0; w < n_tag_words_; ++w)
-            emit2("movq", "$0", std::format("{}(%rsp)", tag_off(w)));
+            emit_imm(MOp::kMovq, 0, op_mem(kRsp, tag_off(w)));
 
         if (!gen_) {
             // 非参数变量清零。`x: int` 这种纯声明在 lower 里不生成任何指令，
@@ -431,11 +431,11 @@ void AsmGen::emit_function(const IRFunction& f, int fi) {
             }
             for (int s = 0; s < n_slots_; ++s)
                 if (!is_param[s] && (!need || (*need)[static_cast<size_t>(s)])) {
-                    std::string loc = slot_op(s);
-                    if (loc.starts_with("%xmm"))
-                        emit2("xorpd", loc, loc);
+                    const MOperand& loc = slot_mop(s);
+                    if (loc.kind == MOperandKind::Reg && loc.reg >= kXmm0 && loc.reg <= kXmm15)
+                        emit2(MOp::kXorpd, loc, loc);
                     else
-                        emit2("movq", "$0", loc);
+                        emit_imm(MOp::kMovq, 0, loc);
                 }
             // P3-1b：tag 入口装载形参 tag（%r11==0 → 保持 UNK 回退）。
             if (func_ptag_words() > 0) emit_ptag_param_load();
@@ -450,59 +450,59 @@ void AsmGen::emit_function(const IRFunction& f, int fi) {
                 const auto& l = locs[i];
                 if (l.stack_off >= 0) {
                     // 栈上实参在返回地址上面：rsp + 帧长 + 8 + 偏移。
-                    line(std::format("movq {}(%rsp), %rax", frame_bytes_ + 8 + l.stack_off));
-                    move_to(slot_op(p.slot), "%rax");
+                    emit2(MOp::kMovq, op_mem(kRsp, frame_bytes_ + 8 + l.stack_off), kRax);
+                    move_to(slot_mop(p.slot), mreg_operand(kRax));
                 } else if (l.fp) {
-                    line(std::format("movsd %xmm{}, {}", l.reg, slot_op(p.slot)));
+                    emit2(MOp::kMovsd, static_cast<MReg>(kXmm0 + l.reg), slot_mop(p.slot));
                 } else {
-                    move_to(slot_op(p.slot), arg_reg_i(l.reg));
+                    move_to(slot_mop(p.slot), mreg_operand(mreg_from_name(arg_reg_i(l.reg))));
                 }
             }
 
             // 有捕获的函数从 %r10 拿闭包环境；调用方在 call 前设置。
-            if (f.env_slot >= 0) emit2("movq", "%r10", slot_op(f.env_slot));
+            if (f.env_slot >= 0) emit2(MOp::kMovq, kR10, slot_mop(f.env_slot));
 
             // 压帧记录。槽地址在 %rsp 上是固定的（rsp 全程不动），异常
             // 展开时按地址读最新值即可；正常返回由 emit_epilogue 弹栈。
             if (rec_words > 0) {
                 frame_rec_ = true;
                 line("movq pa_frame_top(%rip), %rax");
-                emit2("movq", "%rax", rec_mem(0));
-                emit_imm_op("movq", static_cast<int64_t>(rec_entries), rec_mem(1));
+                emit2(MOp::kMovq, kRax, rec_mem(0));
+                emit_imm(MOp::kMovq, static_cast<int64_t>(rec_entries), rec_mem(1));
                 if (frame_scan_words_ > 0) {
                     // 临时区从第一个 vreg 槽开始，往高地址扫 scan_words 个字。
-                    line(std::format("leaq {}(%rsp), %rax", vreg_slot_off(0)));
-                    emit2("movq", "%rax", rec_mem(2));
+                    emit2(MOp::kLeaq, op_mem(kRsp, vreg_slot_off(0)), kRax);
+                    emit2(MOp::kMovq, kRax, rec_mem(2));
                 } else {
-                    emit_imm_op("movq", static_cast<int64_t>(0), rec_mem(2));
+                    emit_imm(MOp::kMovq, static_cast<int64_t>(0), rec_mem(2));
                 }
-                emit_imm_op("movq", static_cast<int64_t>(frame_scan_words_), rec_mem(3));
+                emit_imm(MOp::kMovq, static_cast<int64_t>(frame_scan_words_), rec_mem(3));
                 if (!frame_scan_mask_.empty()) {
                     // 位图是静态只读数据，地址编译期就能定。
-                    line(std::format("leaq .Lscanmask{}(%rip), %rax", fi));
-                    emit2("movq", "%rax", rec_mem(4));
+                    emit2(MOp::kLeaq, op_mem_sym(num_label(".Lscanmask", fi), "%rip"), kRax);
+                    emit2(MOp::kMovq, kRax, rec_mem(4));
                 } else {
-                    emit_imm_op("movq", static_cast<int64_t>(0), rec_mem(4));
+                    emit_imm(MOp::kMovq, static_cast<int64_t>(0), rec_mem(4));
                 }
                 int ri = 6;
                 for (size_t i = 0; i < frame_owned_.size(); ++i, ++ri) {
-                    line(std::format("leaq {}, %rax", smem(frame_owned_[i])));
+                    emit2(MOp::kLeaq, smem_mop(frame_owned_[i]), kRax);
                     // 低位标记：该槽可能装着非堆值，展开时走注册表释放。
                     if (frame_owned_unknown_[i]) line("orq $1, %rax");
-                    emit2("movq", "%rax", rec_mem(ri));
+                    emit2(MOp::kMovq, kRax, rec_mem(ri));
                 }
                 for (int s : frame_scan_) {
-                    line(std::format("leaq {}, %rax", smem(s)));
+                    emit2(MOp::kLeaq, smem_mop(s), kRax);
                     // bit1：只给 GC 扫描，异常展开不释放。
                     line("orq $2, %rax");
-                    emit2("movq", "%rax", rec_mem(ri++));
+                    emit2(MOp::kMovq, kRax, rec_mem(ri++));
                 }
                 // 本帧 CFA（= rsp + frame_bytes_ + 8，与 .cfi_def_cfa 同一口径）：
                 // 表驱动展开在 phase 2 的 handler 帧人格调用里按它批量释放更深
                 // 帧的记录，所以必须在进链之前写好。
-                line(std::format("leaq {}(%rsp), %rax", frame_bytes_ + 8));
-                emit2("movq", "%rax", rec_mem(5));
-                line(std::format("leaq {}, %rax", rec_mem(0)));
+                emit2(MOp::kLeaq, op_mem(kRsp, frame_bytes_ + 8), kRax);
+                emit2(MOp::kMovq, kRax, rec_mem(5));
+                emit2(MOp::kLeaq, rec_mem(0), kRax);
                 line("movq %rax, pa_frame_top(%rip)");
             }
         }
@@ -510,8 +510,8 @@ void AsmGen::emit_function(const IRFunction& f, int fi) {
         // 被导入模块的 init：先把自己的全局根表交给 GC，再跑顶层代码。
         if (!m_->is_entry && fi == m_->entry) {
             // 根表指针也是实参：Win64 的最内层实参寄存器是 %rcx。
-            line(std::format("leaq {}(%rip), {}", roots_label(), arg_reg_i(0)));
-            emit_imm_op("movq", local_global_count(), arg_reg_i(1));
+            emit2(MOp::kLeaq, op_mem_sym(roots_label(), "%rip"), arg_reg_i(0));
+            emit_imm(MOp::kMovq, static_cast<int64_t>(local_global_count()), arg_reg_i(1));
             spill_fp_slots();
             line("call pa_gc_add_roots");
             reload_fp_slots();
@@ -549,14 +549,14 @@ void AsmGen::emit_function(const IRFunction& f, int fi) {
             // 即使前驱把值放在寄存器里也一样（它同时写了栈）。
             if (bi < slot_reload_in_.size()) {
                 for (int s : slot_reload_in_[bi]) {
-                    const std::string& rg = slot_loc_[bi][static_cast<size_t>(s)];
+                    const MOperand& rg = slot_loc_[bi][static_cast<size_t>(s)];
                     if (rg.empty()) continue;
-                    const std::string& st = smem(s);
-                    if (rg == st) continue;
+                    const MOperand& st = smem_mop(s);
+                    if (rg.text == st.text) continue;
                     if (ir_is_float(f.slot_ty[static_cast<size_t>(s)]))
-                        line(std::format("movsd {}, {}", st, rg));
+                        emit2(MOp::kMovsd, st, rg);
                     else
-                        line(std::format("movq {}, {}", st, rg));
+                        emit2(MOp::kMovq, st, rg);
                 }
             }
             gen_block(f.blocks[bi]);
@@ -569,7 +569,7 @@ void AsmGen::emit_function(const IRFunction& f, int fi) {
             emit_epilogue();
         }
         if (dbg_on_) {
-            std::string end = std::format(".LdbgEnd{}", fi);
+            std::string end = num_label(".LdbgEnd", fi);
             out_ += end + ":\n";
             dbg_entries_.push_back({end, -1, 0});
         }
@@ -686,101 +686,97 @@ void AsmGen::gen_cmp_branch(const Inst& in, const Inst& br) {
             return;
         }
         comment(std::format("{} -> {}", in.text(), br.text()));
-        std::string sa = src_op(in.a);
-        std::string sb = src_op(in.b);
-        bool sa_mem = is_mem_operand(sa);
-        bool sb_mem = is_mem_operand(sb);
+        const MOperand& sa = src_mop(in.a);
+        const MOperand& sb = src_mop(in.b);
+        bool sa_mem = is_mem_mop(sa);
+        bool sb_mem = is_mem_mop(sb);
         if (sa_mem && sb_mem) {
-            emit2("movq", sa, "%rax");
-            emit2("cmpq", sb, "%rax");
-        } else if (sa_mem || sa[0] == '%') {
-            emit2("cmpq", sb, sa);
+            emit2(MOp::kMovq, sa, kRax);
+            emit2(MOp::kCmpq, sb, kRax);
+        } else if (sa_mem || sa.kind == MOperandKind::Reg) {
+            emit2(MOp::kCmpq, sb, sa);
         } else {
-            emit2("movq", sa, "%rax");
-            emit2("cmpq", sb, "%rax");
+            emit2(MOp::kMovq, sa, kRax);
+            emit2(MOp::kCmpq, sb, kRax);
         }
-        const char* jcc = "je";
-        const char* inv = "jne";
+        MOp jcc = MOp::kJe;
+        MOp inv = MOp::kJne;
         switch (in.cop) {
-            case CmpKind::Lt: jcc = "jl"; inv = "jge"; break;
-            case CmpKind::Le: jcc = "jle"; inv = "jg"; break;
-            case CmpKind::Gt: jcc = "jg"; inv = "jle"; break;
-            case CmpKind::Ge: jcc = "jge"; inv = "jl"; break;
-            case CmpKind::Eq: jcc = "je"; inv = "jne"; break;
-            case CmpKind::Ne: jcc = "jne"; inv = "je"; break;
+            case CmpKind::Lt: jcc = MOp::kJl; inv = MOp::kJge; break;
+            case CmpKind::Le: jcc = MOp::kJle; inv = MOp::kJg; break;
+            case CmpKind::Gt: jcc = MOp::kJg; inv = MOp::kJle; break;
+            case CmpKind::Ge: jcc = MOp::kJge; inv = MOp::kJl; break;
+            case CmpKind::Eq: jcc = MOp::kJe; inv = MOp::kJne; break;
+            case CmpKind::Ne: jcc = MOp::kJne; inv = MOp::kJe; break;
         }
         // O2：一边就是下一个块时，用反向条件跳走另一边，省掉无条件跳。
         if (opt_ >= 2 && br.target == cur_block_ + 1) {
-            line(std::format("{} {}", inv, block_label(br.target2)));
+            emit_jmp(inv, block_label(br.target2));
         } else if (opt_ >= 2 && br.target2 == cur_block_ + 1) {
-            line(std::format("{} {}", jcc, block_label(br.target)));
+            emit_jmp(jcc, block_label(br.target));
         } else {
-            line(std::format("{} {}", jcc, block_label(br.target)));
-            emit_jmp("jmp", block_label(br.target2));
+            emit_jmp(jcc, block_label(br.target));
+            emit_jmp(MOp::kJmp, block_label(br.target2));
         }
     }
 
 void AsmGen::gen_cmp_branch_fp(const Inst& in, const Inst& br) {
         comment(std::format("{} -> {}", in.text(), br.text()));
-        std::string sa = src_op(in.a);
-        std::string sb = src_op(in.b);
-        const char* jcc = "je";
-        const char* inv = "jne";
+        const MOperand* sa = &src_mop(in.a);
+        const MOperand* sb = &src_mop(in.b);
+        MOp jcc = MOp::kJe;
+        MOp inv = MOp::kJne;
         bool ordered = true;  // 无序（NaN）时 Python 的比较结果为假
         bool swap = false;
         // 四种有序比较换个操作数顺序就能把 NaN 归到「不满足」那一侧：
         // ucomisd 对无序置 CF=1，ja/jae 都不会跳，正好落到假分支，于是
         // 不用再补一条 jp（内层循环里省一条分支）。
         switch (in.cop) {
-            case CmpKind::Lt: swap = true; jcc = "ja"; inv = "jbe"; ordered = false; break;
-            case CmpKind::Le: swap = true; jcc = "jae"; inv = "jb"; ordered = false; break;
-            case CmpKind::Gt: jcc = "ja"; inv = "jbe"; ordered = false; break;
-            case CmpKind::Ge: jcc = "jae"; inv = "jb"; ordered = false; break;
-            case CmpKind::Eq: jcc = "je"; inv = "jne"; break;
-            case CmpKind::Ne: jcc = "jne"; inv = "je"; ordered = false; break;  // NaN 由下面的特例先跳真分支
+            case CmpKind::Lt: swap = true; jcc = MOp::kJa; inv = MOp::kJbe; ordered = false; break;
+            case CmpKind::Le: swap = true; jcc = MOp::kJae; inv = MOp::kJb; ordered = false; break;
+            case CmpKind::Gt: jcc = MOp::kJa; inv = MOp::kJbe; ordered = false; break;
+            case CmpKind::Ge: jcc = MOp::kJae; inv = MOp::kJb; ordered = false; break;
+            case CmpKind::Eq: jcc = MOp::kJe; inv = MOp::kJne; break;
+            case CmpKind::Ne: jcc = MOp::kJne; inv = MOp::kJe; ordered = false; break;  // NaN 由下面的特例先跳真分支
         }
-        if (swap) {
-            std::string t = sa;
-            sa = sb;
-            sb = t;
-        }
+        if (swap) std::swap(sa, sb);
         // ucomisd 的第二个操作数是 xmm；左操作数不在 xmm 里就先搬进 %xmm0。
-        if (sa.starts_with("%xmm")) {
-            emit2("ucomisd", sb, sa);
+        if (sa->kind == MOperandKind::Reg && sa->reg >= kXmm0 && sa->reg <= kXmm15) {
+            emit2(MOp::kUcomisd, *sb, *sa);
         } else {
-            emit2("movsd", sa, "%xmm0");
-            emit2("ucomisd", sb, "%xmm0");
+            emit2(MOp::kMovsd, *sa, kXmm0);
+            emit2(MOp::kUcomisd, *sb, kXmm0);
         }
         // NaN 时 PF=1：!= 的结果应为真，不能直接 je。单独把无序跳到真分支，
         // 再按 ZF 分真/假；其它比较的 jp 在下面按 ordered 处理。
         if (in.cop == CmpKind::Ne) {
             if (opt_ >= 2 && br.target == cur_block_ + 1) {
                 // 真块就是下一块：NaN 和不等都落到 fallthrough，相等跳假。
-                line(std::format("jp {}", block_label(br.target)));
-                line(std::format("je {}", block_label(br.target2)));
+                emit_jmp(MOp::kJp, block_label(br.target));
+                emit_jmp(MOp::kJe, block_label(br.target2));
             } else if (opt_ >= 2 && br.target2 == cur_block_ + 1) {
                 // 假块就是下一块：NaN 和不等跳真，相等 fallthrough 到假。
-                line(std::format("jp {}", block_label(br.target)));
-                line(std::format("jne {}", block_label(br.target)));
+                emit_jmp(MOp::kJp, block_label(br.target));
+                emit_jmp(MOp::kJne, block_label(br.target));
             } else {
-                line(std::format("jp {}", block_label(br.target)));
-                line(std::format("jne {}", block_label(br.target)));
-                emit_jmp("jmp", block_label(br.target2));
+                emit_jmp(MOp::kJp, block_label(br.target));
+                emit_jmp(MOp::kJne, block_label(br.target));
+                emit_jmp(MOp::kJmp, block_label(br.target2));
             }
             return;
         }
         // 有序比较的 ja/jae 本身已排除无序，ordered=false 时不需要 jp。
         // 之后的落点选择与整型版本一致，利用「目标块就是下一块」省掉无条件跳。
         if (opt_ >= 2 && br.target == cur_block_ + 1) {
-            if (ordered) emit_jmp("jp", block_label(br.target2));
-            line(std::format("{} {}", inv, block_label(br.target2)));
+            if (ordered) emit_jmp(MOp::kJp, block_label(br.target2));
+            emit_jmp(inv, block_label(br.target2));
         } else if (opt_ >= 2 && br.target2 == cur_block_ + 1) {
-            if (ordered) emit_jmp("jp", block_label(br.target2));
-            line(std::format("{} {}", jcc, block_label(br.target)));
+            if (ordered) emit_jmp(MOp::kJp, block_label(br.target2));
+            emit_jmp(jcc, block_label(br.target));
         } else {
-            if (ordered) emit_jmp("jp", block_label(br.target2));
-            line(std::format("{} {}", jcc, block_label(br.target)));
-            emit_jmp("jmp", block_label(br.target2));
+            if (ordered) emit_jmp(MOp::kJp, block_label(br.target2));
+            emit_jmp(jcc, block_label(br.target));
+            emit_jmp(MOp::kJmp, block_label(br.target2));
         }
     }
 
@@ -954,7 +950,7 @@ void AsmGen::gen_block(const Block& b) {
                 fused_slot = b.insts[i + 1].idx;
                 // 提升到寄存器的槽直接写寄存器；没提升的槽也可以把
                 // 结果直接落到变量内存，省掉「临时 vreg 槽 → 变量槽」。
-                dst_loc_ = slot_reg_[fused_slot].empty() ? slot_op(fused_slot)
+                dst_loc_ = slot_reg_[fused_slot].empty() ? slot_mop(fused_slot)
                                                          : slot_reg_[fused_slot];
             } else if (!dst_coalesced && i + 2 < b.insts.size() &&
                        can_fuse_fp_temp(in, b.insts[i + 1]) &&
@@ -971,7 +967,7 @@ void AsmGen::gen_block(const Block& b) {
             // assign_global_vreg_regs 记进 global_imm_，整函数范围生效。
             if (fused_slot < 0 && is_deferable_const(in) &&
                 (single_use_in_block(in.dst) || global_imm_.contains(in.dst))) {
-                const_val_[in.dst] = std::format("${}", in.imm);
+                const_val_[in.dst] = op_imm(in.imm);
                 ++i;
                 continue;
             }
@@ -998,14 +994,14 @@ void AsmGen::gen_block(const Block& b) {
                 for (int sl : slot_spill_out_[static_cast<size_t>(cur_block_)]) {
                     if (sl < 0 || sl >= static_cast<int>(slot_loc_[static_cast<size_t>(cur_block_)].size()))
                         continue;
-                    const std::string& rg = slot_loc_[static_cast<size_t>(cur_block_)][static_cast<size_t>(sl)];
+                    const MOperand& rg = slot_loc_[static_cast<size_t>(cur_block_)][static_cast<size_t>(sl)];
                     if (rg.empty()) continue;
-                    const std::string& st = smem(sl);
-                    if (rg == st) continue;
+                    const MOperand& st = smem_mop(sl);
+                    if (rg.text == st.text) continue;
                     if (ir_is_float(f_->slot_ty[static_cast<size_t>(sl)]))
-                        line(std::format("movsd {0}, {1}", rg, st));
+                        emit2(MOp::kMovsd, rg, st);
                     else
-                        line(std::format("movq {0}, {1}", rg, st));
+                        emit2(MOp::kMovq, rg, st);
                 }
             }
             const bool fused_vcall_add = try_fuse_guarded_vcall_add(b, i);
@@ -1036,12 +1032,12 @@ void AsmGen::gen_block(const Block& b) {
                 // 实测 nqueens：bb4 的 `s5 = s7` 没写栈，bb10 入口 reload
                 // s5 读到上一轮的旧值，index.set 越界。
                 if (!slot_loc_.empty() && fused_slot < static_cast<int>(slot_loc_[static_cast<size_t>(cur_block_)].size())) {
-                    const std::string& fl = slot_loc_[static_cast<size_t>(cur_block_)][static_cast<size_t>(fused_slot)];
-                    if (!fl.empty() && fl[0] == 0x25) {
+                    const MOperand& fl = slot_loc_[static_cast<size_t>(cur_block_)][static_cast<size_t>(fused_slot)];
+                    if (!fl.empty() && fl.kind == MOperandKind::Reg) {
                         if (ir_is_float(f_->slot_ty[static_cast<size_t>(fused_slot)]))
-                            line(std::format("movsd {0}, {1}", fl, smem(fused_slot)));
+                            emit2(MOp::kMovsd, fl, smem_mop(fused_slot));
                         else
-                            line(std::format("movq {0}, {1}", fl, smem(fused_slot)));
+                            emit2(MOp::kMovq, fl, smem_mop(fused_slot));
                     }
                 }
                 // 融合掉的 store.slot 仍然改了变量，指向它的别名要失效
@@ -1049,9 +1045,7 @@ void AsmGen::gen_block(const Block& b) {
                 ++i;
             }
             if (fused_global >= 0) {
-                out_ += "\tmovq %rax, ";
-                out_ += global_label(fused_global);
-                out_ += "(%rip)\n";
+                emit2(MOp::kMovq, kRax, global_mop(fused_global));
                 ++i;
             }
             ++i;
@@ -1073,10 +1067,10 @@ bool AsmGen::is_deferable_const(const Inst& in) const {
 
 void AsmGen::invalidate_slot(int slot) {
         if (slot < 0 || slot >= static_cast<int>(slot_reg_.size())) return;
-        const std::string& r = slot_reg_[slot];
+        const MOperand& r = slot_reg_[slot];
         if (r.empty()) return;
         for (auto it = alias_.begin(); it != alias_.end();)
-            it = (it->second == r) ? alias_.erase(it) : std::next(it);
+            it = (it->second.text == r.text) ? alias_.erase(it) : std::next(it);
     }
 
 void AsmGen::emit_closure_shim(const IRFunction& f, int fi) {

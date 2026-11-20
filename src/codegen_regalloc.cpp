@@ -23,9 +23,9 @@ void AsmGen::layout_frame(int total_slots) {
     }
 
 void AsmGen::frame_alloc() {
-        if (frame_pad_ > 0) emit_imm_op("subq", frame_pad_, "%rsp");
+        if (frame_pad_ > 0) emit_imm(MOp::kSubq, frame_pad_, kRsp);
         cfa_off_ = frame_bytes_ + 8;
-        cfi(std::format(".cfi_def_cfa_offset {}", cfa_off_));
+        cfi_cfa_offset();
     }
 
 // 尾声：先退局部区，再逐个弹回 callee-saved，最后 ret。
@@ -37,22 +37,22 @@ void AsmGen::emit_epilogue() {
         const int body_cfa = cfa_off_;
         // 先弹帧记录再退栈：记录本身在局部区底部，%rcx 此时是自由的。
         if (frame_rec_) {
-            line("movq " + rec_mem(0) + ", %rcx");
+            emit2(MOp::kMovq, rec_mem(0), kRcx);
             line("movq %rcx, pa_frame_top(%rip)");
         }
         if (frame_pad_ > 0) {
-            emit_imm_op("addq", frame_pad_, "%rsp");
+            emit_imm(MOp::kAddq, frame_pad_, kRsp);
             cfa_off_ -= frame_pad_;
-            cfi(std::format(".cfi_def_cfa_offset {}", cfa_off_));
+            cfi_cfa_offset();
         }
         for (int i = n_saved_regs_ - 1; i >= 0; --i) {
             const char* reg = gen_ ? "%r15" : kSlotRegs()[i];
-            line(std::format("popq {}", reg));
-            cfi(std::format(".cfi_restore {}", reg));
+            emit1(MOp::kPopq, mreg_from_name(reg));
+            cfi_restore(reg);
             cfa_off_ -= 8;
-            cfi(std::format(".cfi_def_cfa_offset {}", cfa_off_));
+            cfi_cfa_offset();
         }
-        line("ret");
+        emit0(MOp::kRet);
         cfi(".cfi_restore_state");
         cfa_off_ = body_cfa;
     }
@@ -366,7 +366,7 @@ void AsmGen::spill_fp_slots() {
             if (fp_mask_valid_ && j < fp_spill_mask_.size() && !fp_spill_mask_[j])
                 continue;
             int slot = fp_promoted_slots_[j];
-            line(std::format("movsd {}, {}", slot_reg_[slot], smem(slot)));
+            emit2(MOp::kMovsd, slot_reg_[slot], smem_mop(slot));
         }
         // 跨块 vreg 同样要写回：SysV 下 xmm8–15 是 caller-saved。
         // 它们没有块级掩码（活跃性按整个函数算），一律写回。
@@ -375,9 +375,9 @@ void AsmGen::spill_fp_slots() {
         // vreg 已被提升到寄存器时返回寄存器本身，`movsd %xmm8, %xmm8`
         // 是非法操作数组合（实测 spectral_norm 汇编失败）。
         for (int v : fp_promoted_vregs_) {
-            const std::string& rg = vreg_reg_[static_cast<size_t>(v)];
+            const MOperand& rg = vreg_reg_[static_cast<size_t>(v)];
             if (rg.empty()) continue;
-            line(std::format("movsd {}, {}(%rsp)", rg, vreg_off(static_cast<VReg>(v))));
+            emit2(MOp::kMovsd, rg, op_mem("%rsp", vreg_off(static_cast<VReg>(v))));
         }
     }
 
@@ -386,12 +386,12 @@ void AsmGen::reload_fp_slots() {
             if (fp_mask_valid_ && j < fp_spill_mask_.size() && !fp_spill_mask_[j])
                 continue;
             int slot = fp_promoted_slots_[j];
-            line(std::format("movsd {}, {}", smem(slot), slot_reg_[slot]));
+            emit2(MOp::kMovsd, smem_mop(slot), slot_reg_[slot]);
         }
         for (int v : fp_promoted_vregs_) {
-            const std::string& rg = vreg_reg_[static_cast<size_t>(v)];
+            const MOperand& rg = vreg_reg_[static_cast<size_t>(v)];
             if (rg.empty()) continue;
-            line(std::format("movsd {}(%rsp), {}", vreg_off(static_cast<VReg>(v)), rg));
+            emit2(MOp::kMovsd, op_mem("%rsp", vreg_off(static_cast<VReg>(v))), rg);
         }
     }
 
@@ -1286,7 +1286,7 @@ void AsmGen::assign_slot_regs_split() {
                     for (int s2 = 0; s2 < ns; ++s2)
                         if (!slot_loc_[static_cast<size_t>(b)][static_cast<size_t>(s2)].empty())
                             std::fprintf(stderr, " s%d=%s", s2,
-                                         slot_loc_[static_cast<size_t>(b)][static_cast<size_t>(s2)].c_str());
+                                         slot_loc_[static_cast<size_t>(b)][static_cast<size_t>(s2)].text.c_str());
                     std::fprintf(stderr, "\n");
                 }
             }
@@ -2433,8 +2433,13 @@ void AsmGen::assign_global_vreg_regs() {
 // ── 生成期字符串缓存 ────────────────────────────────────────
 void AsmGen::build_operand_caches() {
         block_labels_.resize(f_->blocks.size());
-        for (size_t i = 0; i < block_labels_.size(); ++i)
-            block_labels_[i] = std::format(".Lf{}_b{}", fi_, i);
+        const std::string bp = num_label(".Lf", fi_);
+        for (size_t i = 0; i < block_labels_.size(); ++i) {
+            char buf[24];
+            auto r = std::to_chars(buf, buf + sizeof buf, i);
+            block_labels_[i] = bp + "_b";
+            block_labels_[i].append(buf, r.ptr);
+        }
         vreg_mem_.resize(f_->vreg_ty.size());
         for (size_t r = 0; r < vreg_mem_.size(); ++r)
             vreg_mem_[r] = std::format("{}(%rsp)", vreg_off(static_cast<VReg>(r)));

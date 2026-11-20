@@ -16,6 +16,9 @@
 // 旧值占 scratch_val；新值临时 nv 与 kind 临时 kr 在 Win64 借 sl/sp（len
 // 与 data 在快路径后已死），SysV 都是 %rax（顺序复用，逐字节输出不变）。
 // 位图指针临时 bp 不能与 kr 冲突：Win64 借 nv，SysV 借 sp。
+//
+// 发射全走结构化 MOperand/MOp（块B2b）：寄存器编号 + op_mem 直建，
+// 免「拼字符串→回解析」。jz/jc 故意留文本 emit_jmp：历史兜底是列 0 Raw。
 #include "codegen_impl.h"
 
 namespace pyadamas {
@@ -35,21 +38,22 @@ void AsmGen::gen_index_store(const Inst& in) {
         return;
     }
     if (opt_ < 1) {
-        emit2("movq", src_op(in.a), arg_reg_i(0));
-        emit2("movq", src_op(in.b), arg_reg_i(1));
-        emit2("movq", src_op(in.c), arg_reg_i(2));
-        emit_imm_op("movq", hk, arg_reg_i(3));
+        emit2(MOp::kMovq, src_mop(in.a), arg_reg_i(0));
+        emit2(MOp::kMovq, src_mop(in.b), arg_reg_i(1));
+        emit2(MOp::kMovq, src_mop(in.c), arg_reg_i(2));
+        emit_imm(MOp::kMovq, hk, arg_reg_i(3));
         line("call pa_list_set");
         return;
     }
-    const std::string r0 = arg_reg_i(0), r1 = arg_reg_i(1);
-    const std::string sl = target_abi().scratch_len;
-    const std::string sp = target_abi().scratch_ptr;
-    const std::string sv = target_abi().scratch_val;
-    const bool sv_is_rax = sv == std::string("%rax");
-    const std::string nv = sv_is_rax ? sl : "%rax";  // 新值临时
-    const std::string kr = sv_is_rax ? sp : "%rax";  // kind 临时
-    const std::string bp = sv_is_rax ? nv : sp;      // 位图指针临时
+    const MReg r0 = mreg_from_name(arg_reg_i(0)), r1 = mreg_from_name(arg_reg_i(1));
+    const MReg sl = mreg_from_name(target_abi().scratch_len);
+    const MReg sp = mreg_from_name(target_abi().scratch_ptr);
+    const MReg sv = mreg_from_name(target_abi().scratch_val);
+    const bool sv_is_rax = sv == kRax;
+    const MReg nv = sv_is_rax ? sl : kRax;  // 新值临时
+    const MReg kr = sv_is_rax ? sp : kRax;  // kind 临时
+    const MReg bp = sv_is_rax ? nv : sp;    // 位图指针临时
+    const MReg a2d = mreg_from_name(reg32(arg_reg_i(2)));
     std::string fast = fresh_label("idxsf");
     std::string neg = fresh_label("idxsneg");
     std::string done = fresh_label("idxsdone");
@@ -57,24 +61,24 @@ void AsmGen::gen_index_store(const Inst& in) {
     std::string k23 = fresh_label("idxsk23");
     std::string decunk = fresh_label("idxsdu");
     std::string decheap = fresh_label("idxsdh");
-    emit2("movq", src_op(in.a), r0);
-    emit2("movq", src_op(in.b), r1);
-    line(std::format("movq 0({}), {}", r0, sl));
-    line(std::format("cmpq {}, {}", sl, r1));
-    emit_jmp("jb", fast);
-    line(std::format("testq {}, {}", r1, r1));
-    emit_jmp("js", neg);
-    line(std::format("xorl {}, {}", reg32(arg_reg_i(2)), reg32(arg_reg_i(2))));
-    emit_imm_op("movq", hk, arg_reg_i(3));
+    emit2(MOp::kMovq, src_mop(in.a), r0);
+    emit2(MOp::kMovq, src_mop(in.b), r1);
+    emit2(MOp::kMovq, op_mem(r0, 0), sl);
+    emit2(MOp::kCmpq, sl, r1);
+    emit_jmp(MOp::kJb, fast);
+    emit2(MOp::kTestq, r1, r1);
+    emit_jmp(MOp::kJs, neg);
+    emit2(MOp::kXorl, a2d, a2d);
+    emit_imm(MOp::kMovq, hk, arg_reg_i(3));
     line("call pa_list_set");
     line("ud2");
     label(neg);
-    line(std::format("addq {}, {}", sl, r1));
-    line(std::format("cmpq {}, {}", sl, r1));
-    emit_jmp("jb", fast);
-    line(std::format("movq {}, {}", sl, r1));
-    line(std::format("xorl {}, {}", reg32(arg_reg_i(2)), reg32(arg_reg_i(2))));
-    emit_imm_op("movq", hk, arg_reg_i(3));
+    emit2(MOp::kAddq, sl, r1);
+    emit2(MOp::kCmpq, sl, r1);
+    emit_jmp(MOp::kJb, fast);
+    emit2(MOp::kMovq, sl, r1);
+    emit2(MOp::kXorl, a2d, a2d);
+    emit_imm(MOp::kMovq, hk, arg_reg_i(3));
     line("call pa_list_set");
     line("ud2");
     label(fast);
@@ -82,81 +86,81 @@ void AsmGen::gen_index_store(const Inst& in) {
         // ── list[float] kind0 快路径（0.298，逐字节保留）──────────
         // 标量进 kind0：种类不变、无位图、旧值必是标量 —— 不读旧值不释放。
         std::string owned = fresh_label("idxsowned");
-        line(std::format("cmpq $0, 24({})", r0));
-        emit_jmp("jne", owned);
-        line(std::format("movq 16({}), {}", r0, sp));
-        emit2("movsd", src_op(in.c), "%xmm0");
-        line(std::format("movsd %xmm0, ({},{},8)", sp, r1));
-        emit_jmp("jmp", done);
+        emit_imm(MOp::kCmpq, 0, op_mem(r0, 24));
+        emit_jmp(MOp::kJne, owned);
+        emit2(MOp::kMovq, op_mem(r0, 16), sp);
+        emit2(MOp::kMovsd, src_mop(in.c), kXmm0);
+        emit2(MOp::kMovsd, kXmm0, op_mem(sp, r1, 8));
+        emit_jmp(MOp::kJmp, done);
         label(owned);
         // kind1/2：整段交运行时（升级/位图/旧值释放都在 pa_list_set）。
         // 浮点按位模式走整型实参寄存器。
-        emit2("movsd", src_op(in.c), "%xmm0");
-        line(std::format("movq %xmm0, {}", arg_reg_i(2)));
-        emit_imm_op("movq", hk, arg_reg_i(3));
+        emit2(MOp::kMovsd, src_mop(in.c), kXmm0);
+        emit2(MOp::kMovq, kXmm0, arg_reg_i(2));
+        emit_imm(MOp::kMovq, hk, arg_reg_i(3));
         spill_fp_slots();
         line("call pa_list_set");
         reload_fp_slots();
-        emit_jmp("jmp", done);
+        emit_jmp(MOp::kJmp, done);
         label(done);
         return;
     }
-    line(std::format("movq 24({}), {}", r0, kr));
+    emit2(MOp::kMovq, op_mem(r0, 24), kr);
     if (hk == 2) {
         // 静态 unknown 新值：只有 kind2 且无位图能留在内联（kind 恒 2，
         // 销毁走注册表，没有位要维护，不必探针）；其余交运行时探针。
-        line(std::format("cmpq $2, {}", kr));
-        emit_jmp("jne", slow);
-        line(std::format("cmpq $0, 32({})", r0));
-        emit_jmp("jne", slow);
+        emit_imm(MOp::kCmpq, 2, kr);
+        emit_jmp(MOp::kJne, slow);
+        emit_imm(MOp::kCmpq, 0, op_mem(r0, 32));
+        emit_jmp(MOp::kJne, slow);
     } else {
         // 静态已知标量/堆：冲突种类（kind1+标量 / kind0+堆）交运行时升级；
         // kind3 防御性交运行时（kind3 只应是空表，不变量破坏时按 2 处理）。
-        line(std::format("cmpq ${}, {}", hk == 0 ? 1 : 0, kr));
-        emit_jmp("je", slow);
-        line(std::format("cmpq $2, {}", kr));
-        emit_jmp("jae", k23);
+        emit_imm(MOp::kCmpq, hk == 0 ? 1 : 0, kr);
+        emit_jmp(MOp::kJe, slow);
+        emit_imm(MOp::kCmpq, 2, kr);
+        emit_jmp(MOp::kJae, k23);
     }
     // kind 与新值一致（或 hk2 的 kind2 无位图）：读旧值、写新值。
-    line(std::format("movq 16({}), {}", r0, sp));
-    line(std::format("movq ({},{},8), {}", sp, r1, sv));
-    emit2("movq", src_op(in.c), nv);
-    line(std::format("movq {}, ({},{},8)", nv, sp, r1));
-    if (hk == 2) emit_jmp("jmp", decunk);
-    else if (hk == 1) emit_jmp("jmp", decheap);
-    else emit_jmp("jmp", done);
+    emit2(MOp::kMovq, op_mem(r0, 16), sp);
+    emit2(MOp::kMovq, op_mem(sp, r1, 8), sv);
+    emit2(MOp::kMovq, src_mop(in.c), nv);
+    emit2(MOp::kMovq, nv, op_mem(sp, r1, 8));
+    if (hk == 2) emit_jmp(MOp::kJmp, decunk);
+    else if (hk == 1) emit_jmp(MOp::kJmp, decheap);
+    else emit_jmp(MOp::kJmp, done);
     if (hk != 2) {
         // kind2：读旧值、写新值、按新值堆性更新位图（有位图时）。
         label(k23);
-        line(std::format("cmpq $3, {}", kr));
-        emit_jmp("je", slow);
-        line(std::format("movq 16({}), {}", r0, sp));
-        line(std::format("movq ({},{},8), {}", sp, r1, sv));
-        emit2("movq", src_op(in.c), nv);
-        line(std::format("movq {}, ({},{},8)", nv, sp, r1));
-        line(std::format("movq 32({}), {}", r0, bp));
-        line(std::format("testq {}, {}", bp, bp));
+        emit_imm(MOp::kCmpq, 3, kr);
+        emit_jmp(MOp::kJe, slow);
+        emit2(MOp::kMovq, op_mem(r0, 16), sp);
+        emit2(MOp::kMovq, op_mem(sp, r1, 8), sv);
+        emit2(MOp::kMovq, src_mop(in.c), nv);
+        emit2(MOp::kMovq, nv, op_mem(sp, r1, 8));
+        emit2(MOp::kMovq, op_mem(r0, 32), bp);
+        emit2(MOp::kTestq, bp, bp);
         emit_jmp("jz", decunk);
         // bts/btr 内存位操作：位偏移取 r1（元素下标），自动按 64 位字寻址。
-        line(std::format("{} {}, ({})", hk == 1 ? "btsq" : "btrq", r1, bp));
-        emit_jmp("jmp", decunk);
+        emit2(hk == 1 ? MOp::kBtsq : MOp::kBtrq, r1, op_mem(bp));
+        emit_jmp(MOp::kJmp, decunk);
     }
     label(slow);
-    emit2("movq", src_op(in.c), arg_reg_i(2));
-    emit_imm_op("movq", hk, arg_reg_i(3));
+    emit2(MOp::kMovq, src_mop(in.c), arg_reg_i(2));
+    emit_imm(MOp::kMovq, hk, arg_reg_i(3));
     spill_fp_slots();
     line("call pa_list_set");
     reload_fp_slots();
-    emit_jmp("jmp", done);
+    emit_jmp(MOp::kJmp, done);
     label(decunk);
-    line(std::format("movq {}, {}", sv, arg_reg_i(0)));
+    emit2(MOp::kMovq, sv, arg_reg_i(0));
     spill_fp_slots();
     line("call pa_rc_dec_unknown");
     reload_fp_slots();
-    emit_jmp("jmp", done);
+    emit_jmp(MOp::kJmp, done);
     if (hk == 1) {
         label(decheap);
-        line(std::format("movq {}, {}", sv, arg_reg_i(0)));
+        emit2(MOp::kMovq, sv, arg_reg_i(0));
         spill_fp_slots();
         line("call pa_rc_dec");
         reload_fp_slots();
@@ -173,89 +177,89 @@ void AsmGen::gen_index_store_unchecked(const Inst& in) {
         gen_index_store_tagged(in, true);
         return;
     }
-    const std::string r0 = arg_reg_i(0), r1 = arg_reg_i(1);
-    const std::string sl = target_abi().scratch_len;
-    const std::string sp = target_abi().scratch_ptr;
-    const std::string sv = target_abi().scratch_val;
-    const bool sv_is_rax = sv == std::string("%rax");
-    const std::string nv = sv_is_rax ? sl : "%rax";
-    const std::string kr = sv_is_rax ? sp : "%rax";
-    const std::string bp = sv_is_rax ? nv : sp;
+    const MReg r0 = mreg_from_name(arg_reg_i(0)), r1 = mreg_from_name(arg_reg_i(1));
+    const MReg sl = mreg_from_name(target_abi().scratch_len);
+    const MReg sp = mreg_from_name(target_abi().scratch_ptr);
+    const MReg sv = mreg_from_name(target_abi().scratch_val);
+    const bool sv_is_rax = sv == kRax;
+    const MReg nv = sv_is_rax ? sl : kRax;
+    const MReg kr = sv_is_rax ? sp : kRax;
+    const MReg bp = sv_is_rax ? nv : sp;
     std::string done = fresh_label("idxudone");
     std::string slow = fresh_label("idxuslow");
     std::string k23 = fresh_label("idxuk23");
     std::string decunk = fresh_label("idxudu");
     std::string decheap = fresh_label("idxudh");
-    emit2("movq", src_op(in.a), r0);
-    emit2("movq", src_op(in.b), r1);
+    emit2(MOp::kMovq, src_mop(in.a), r0);
+    emit2(MOp::kMovq, src_mop(in.b), r1);
     if (is_fp(in.c)) {
         std::string owned = fresh_label("idxuowned");
-        line(std::format("cmpq $0, 24({})", r0));
-        emit_jmp("jne", owned);
-        line(std::format("movq 16({}), {}", r0, sp));
-        emit2("movsd", src_op(in.c), "%xmm0");
-        line(std::format("movsd %xmm0, ({},{},8)", sp, r1));
-        emit_jmp("jmp", done);
+        emit_imm(MOp::kCmpq, 0, op_mem(r0, 24));
+        emit_jmp(MOp::kJne, owned);
+        emit2(MOp::kMovq, op_mem(r0, 16), sp);
+        emit2(MOp::kMovsd, src_mop(in.c), kXmm0);
+        emit2(MOp::kMovsd, kXmm0, op_mem(sp, r1, 8));
+        emit_jmp(MOp::kJmp, done);
         label(owned);
-        emit2("movsd", src_op(in.c), "%xmm0");
-        line(std::format("movq %xmm0, {}", arg_reg_i(2)));
-        emit_imm_op("movq", hk, arg_reg_i(3));
+        emit2(MOp::kMovsd, src_mop(in.c), kXmm0);
+        emit2(MOp::kMovq, kXmm0, arg_reg_i(2));
+        emit_imm(MOp::kMovq, hk, arg_reg_i(3));
         spill_fp_slots();
         line("call pa_list_set");
         reload_fp_slots();
-        emit_jmp("jmp", done);
+        emit_jmp(MOp::kJmp, done);
         label(done);
         return;
     }
-    line(std::format("movq 24({}), {}", r0, kr));
+    emit2(MOp::kMovq, op_mem(r0, 24), kr);
     if (hk == 2) {
-        line(std::format("cmpq $2, {}", kr));
-        emit_jmp("jne", slow);
-        line(std::format("cmpq $0, 32({})", r0));
-        emit_jmp("jne", slow);
+        emit_imm(MOp::kCmpq, 2, kr);
+        emit_jmp(MOp::kJne, slow);
+        emit_imm(MOp::kCmpq, 0, op_mem(r0, 32));
+        emit_jmp(MOp::kJne, slow);
     } else {
-        line(std::format("cmpq ${}, {}", hk == 0 ? 1 : 0, kr));
-        emit_jmp("je", slow);
-        line(std::format("cmpq $2, {}", kr));
-        emit_jmp("jae", k23);
+        emit_imm(MOp::kCmpq, hk == 0 ? 1 : 0, kr);
+        emit_jmp(MOp::kJe, slow);
+        emit_imm(MOp::kCmpq, 2, kr);
+        emit_jmp(MOp::kJae, k23);
     }
-    line(std::format("movq 16({}), {}", r0, sp));
-    line(std::format("movq ({},{},8), {}", sp, r1, sv));
-    emit2("movq", src_op(in.c), nv);
-    line(std::format("movq {}, ({},{},8)", nv, sp, r1));
-    if (hk == 2) emit_jmp("jmp", decunk);
-    else if (hk == 1) emit_jmp("jmp", decheap);
-    else emit_jmp("jmp", done);
+    emit2(MOp::kMovq, op_mem(r0, 16), sp);
+    emit2(MOp::kMovq, op_mem(sp, r1, 8), sv);
+    emit2(MOp::kMovq, src_mop(in.c), nv);
+    emit2(MOp::kMovq, nv, op_mem(sp, r1, 8));
+    if (hk == 2) emit_jmp(MOp::kJmp, decunk);
+    else if (hk == 1) emit_jmp(MOp::kJmp, decheap);
+    else emit_jmp(MOp::kJmp, done);
     if (hk != 2) {
         label(k23);
-        line(std::format("cmpq $3, {}", kr));
-        emit_jmp("je", slow);
-        line(std::format("movq 16({}), {}", r0, sp));
-        line(std::format("movq ({},{},8), {}", sp, r1, sv));
-        emit2("movq", src_op(in.c), nv);
-        line(std::format("movq {}, ({},{},8)", nv, sp, r1));
-        line(std::format("movq 32({}), {}", r0, bp));
-        line(std::format("testq {}, {}", bp, bp));
+        emit_imm(MOp::kCmpq, 3, kr);
+        emit_jmp(MOp::kJe, slow);
+        emit2(MOp::kMovq, op_mem(r0, 16), sp);
+        emit2(MOp::kMovq, op_mem(sp, r1, 8), sv);
+        emit2(MOp::kMovq, src_mop(in.c), nv);
+        emit2(MOp::kMovq, nv, op_mem(sp, r1, 8));
+        emit2(MOp::kMovq, op_mem(r0, 32), bp);
+        emit2(MOp::kTestq, bp, bp);
         emit_jmp("jz", decunk);
-        line(std::format("{} {}, ({})", hk == 1 ? "btsq" : "btrq", r1, bp));
-        emit_jmp("jmp", decunk);
+        emit2(hk == 1 ? MOp::kBtsq : MOp::kBtrq, r1, op_mem(bp));
+        emit_jmp(MOp::kJmp, decunk);
     }
     label(slow);
-    emit2("movq", src_op(in.c), arg_reg_i(2));
-    emit_imm_op("movq", hk, arg_reg_i(3));
+    emit2(MOp::kMovq, src_mop(in.c), arg_reg_i(2));
+    emit_imm(MOp::kMovq, hk, arg_reg_i(3));
     spill_fp_slots();
     line("call pa_list_set");
     reload_fp_slots();
-    emit_jmp("jmp", done);
+    emit_jmp(MOp::kJmp, done);
     label(decunk);
-    line(std::format("movq {}, {}", sv, arg_reg_i(0)));
+    emit2(MOp::kMovq, sv, arg_reg_i(0));
     spill_fp_slots();
     line("call pa_rc_dec_unknown");
     reload_fp_slots();
-    emit_jmp("jmp", done);
+    emit_jmp(MOp::kJmp, done);
     if (hk == 1) {
         label(decheap);
-        line(std::format("movq {}, {}", sv, arg_reg_i(0)));
+        emit2(MOp::kMovq, sv, arg_reg_i(0));
         spill_fp_slots();
         line("call pa_rc_dec");
         reload_fp_slots();
