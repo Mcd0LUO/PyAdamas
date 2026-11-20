@@ -601,6 +601,22 @@ void AsmGen::gen_call(const Inst& in) {
             } else {
                 emit2("movq", "%rax", dst_op(in.dst));
             }
+            // P2：unknown 返回值的 tag 在被调的 %rdx（type_tags 构建里
+            // 所有非生成器函数都发）。间接调用点没有 IRFunction 可查，
+            // 用**静态签名**判断：签名不含浮点（闭包 +0 直指函数本体，
+            // 不走重排 shim）且返回 unknown 才读 —— shim 的重排会碰 %rdx。
+            if (type_tags_ && vreg_tagged(in.dst) && is_unk_ty(in.ty)) {
+                TypePtr ft = ty_of(in.a);
+                const FuncInfo* fi = (ft && ft->kind == TyKind::Func) ? ft->fn.get() : nullptr;
+                bool fp = false;
+                if (fi) {
+                    fp = ir_is_float(fi->ret);
+                    for (const auto& p : fi->pos)
+                        if (ir_is_float(p.ty)) fp = true;
+                }
+                if (fi && !fp && is_unk_ty(fi->ret))
+                    emit2("movq", "%rdx", tag_mop(in.dst));
+            }
         }
     }
 

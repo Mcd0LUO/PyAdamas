@@ -32,10 +32,16 @@ run_one() {
     name=$(basename "$f" .py)
     local d="$WORK/$idx"
     mkdir -p "$d"
-    local out0 out2 rc0 rc2
-    out0=$(timeout -s KILL 20 "$PY" build -O0 -o "$d/o0" "$f" >/dev/null 2>&1 && timeout -s KILL 20 "$d/o0" 2>&1)
+    local out0 out2 rc0 rc2 extra
+    # 用例级编译开关（与 tests/run_tests.sh 同一约定）：文件头声明
+    # 「# pyadamas: type-tags」时以 PYADAMAS_TYPE_TAGS=1 编译。
+    extra=""
+    if sed -n '1,8p' "$f" | grep -q '^# pyadamas: type-tags'; then
+        extra="PYADAMAS_TYPE_TAGS=1"
+    fi
+    out0=$(env $extra timeout -s KILL 20 "$PY" build -O0 -o "$d/o0" "$f" >/dev/null 2>&1 && timeout -s KILL 20 "$d/o0" 2>&1)
     rc0=$?
-    out2=$(timeout -s KILL 20 "$PY" build -O2 -o "$d/o2" "$f" >/dev/null 2>&1 && timeout -s KILL 20 "$d/o2" 2>&1)
+    out2=$(env $extra timeout -s KILL 20 "$PY" build -O2 -o "$d/o2" "$f" >/dev/null 2>&1 && timeout -s KILL 20 "$d/o2" 2>&1)
     rc2=$?
     if [ "$out0" != "$out2" ] || [ $rc0 -ne $rc2 ]; then
         printf 'DIFF\t%s\tO0 rc=%s: %s\tO2 rc=%s: %s\n' "$name" "$rc0" \

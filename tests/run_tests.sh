@@ -93,16 +93,23 @@ rm -rf "$logdir"
 mkdir -p "$logdir"
 
 run_test() {
-    local f=$1 name res
+    local f=$1 name res extra
     name=$(basename "$f")
     res="$logdir/$name.res"
     local p="$logdir/$name.prog" o="$logdir/$name.out" e="$logdir/$name.exp"
+    # 用例级编译开关：文件头出现「# pyadamas: type-tags」时以
+    # PYADAMAS_TYPE_TAGS=1 编译运行（P2 运行期类型标签，默认关；这些用例
+    # 的正确输出依赖标签，关着跑必然 OUTPUT DIFF）。
+    extra=""
+    if sed -n '1,8p' "$f" | grep -q '^# pyadamas: type-tags'; then
+        extra="PYADAMAS_TYPE_TAGS=1"
+    fi
     # 输出加大小上限：用例卡进死循环时它会一直写，曾经留下 19G 的单个
     # 日志文件（78_enumerate_zip.py.out），把 build 目录撑到 32G。
     # 截断后 diff 必然不等，用例照样报 OUTPUT DIFF，不影响判定。
     # run 子命令会 fork 出编译产物再执行；sanitizer 选项要靠环境变量传给
     # 那个子进程，所以套一层 env。
-    if ! env $RUN_ENV "$PYADAMAS" $BUILD_FLAGS run --rebuild -o "$p" "$f" 2>&1 | head -c 1048576 > "$o"; then
+    if ! env $RUN_ENV $extra "$PYADAMAS" $BUILD_FLAGS run --rebuild -o "$p" "$f" 2>&1 | head -c 1048576 > "$o"; then
         { echo FAILED; sed -n '1,6p' "$o"; } > "$res"
         return
     fi
