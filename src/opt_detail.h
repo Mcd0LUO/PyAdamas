@@ -28,9 +28,12 @@ std::vector<char> recursive_functions(const IRModule& m,
                                       const std::unordered_map<int, int>& gfunc);
 bool inline_calls_in_function(IRModule& m, IRFunction& fn, int fi,
                               const std::unordered_map<int, int>& gfunc,
-                              const std::vector<char>& recursive);
+                              const std::vector<char>& recursive,
+                              bool inline_opt = false);
 bool rewrite_direct_calls(IRModule& m, IRFunction& fn,
                           const std::unordered_map<int, int>& gfunc);
+// INLINE_OPT P3：纯标量自递归单层展开（严格界）。见 opt_inline.cpp。
+bool self_unroll_function(IRModule& m, IRFunction& fn, int fi);
 
 bool licm_function(IRFunction& fn, size_t n_globals);
 // RC 冗余消除：删掉互相抵消的 temp/temp_take 对。

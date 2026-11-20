@@ -542,14 +542,26 @@ std::vector<char> recursive_functions(const IRModule& m,
 
 bool inline_calls_in_function(IRModule& m, IRFunction& fn, int fi,
                               const std::unordered_map<int, int>& gfunc,
-                              const std::vector<char>& recursive) {
+                              const std::vector<char>& recursive,
+                              bool inline_opt) {
     // 生成器/协程帧的槽数在 gen.new 创建时已经固定，优化期再追加槽会越界。
     if (fn.is_generator) return false;
+
+    // INLINE_OPT P1（负面结论，判据不放宽）：曾试 48→96 条/12→20 块/预算
+    // 40 位点/640 增长——语料无可测收益（realistic 各案 ±1% 噪声），且
+    // nqueens 的 count(80 条)内联进 __pa_main 使热函数 place 布局位移，
+    // 隔离实验 +1.8%（去掉该放宽即 +0.1%）。保持 48/12/24/256 原判据。
+    (void)inline_opt;
+    const int max_inst = 48;
+    const int max_blocks = 12;
+    const int max_sites = 24;
+    const int max_growth = 256;
+    static const bool dbg = std::getenv("PYADAMAS_INLINE_DBG") != nullptr;
 
     bool any = false;
     int sites = 0;
     int growth = 0;
-    while (sites < 24 && growth < 256) {
+    while (sites < max_sites && growth < max_growth) {
         std::unordered_map<VReg, DefRef> defs;
         for (const auto& b : fn.blocks)
             for (const auto& in : b.insts)
@@ -584,9 +596,19 @@ bool inline_calls_in_function(IRModule& m, IRFunction& fn, int fi,
                     callee.blocks.empty() || callee.params.size() != call.args.size())
                     continue;
                 int n = function_inst_count(callee);
-                if (n > 48 || callee.blocks.size() > 12) continue;
+                if (n > max_inst || callee.blocks.size() > static_cast<size_t>(max_blocks)) {
+                    if (dbg && inline_opt)
+                        std::fprintf(stderr, "[inline] skip %s in %s: n=%d blocks=%zu\n",
+                                     callee.name.c_str(), fn.name.c_str(), n,
+                                     callee.blocks.size());
+                    continue;
+                }
 
                 InlineFacts facts = analyze_callee(callee);
+                if (dbg)
+                    std::fprintf(stderr, "[inline] %s -> %s (n=%d sites=%d growth=%d)\n",
+                                 callee.name.c_str(), fn.name.c_str(), n, sites + 1,
+                                 growth + n + 2);
                 inline_at(fn, bi, ii, callee, call, facts);
                 growth += n + 2;
                 ++sites;
@@ -634,6 +656,72 @@ bool rewrite_direct_calls(IRModule& m, IRFunction& fn,
         }
     }
     return changed;
+}
+
+
+// INLINE_OPT P3：纯标量自递归单层展开（严格界，fib 形态）。只接「不可能抛
+// Python 异常」的自递归函数：≤24 条指令、≤3 块、全槽/形参/返回 Int/Bool、
+// 无 handler/EH 区域/生成器/闭包，体内除自调用外**没有任何其它调用**
+// （白名单外的指令一律拒绝）。每个自调用点用展开前快照内联一层，克隆体
+// 里的自调用保留为 call —— 调用计数降至 ~1/3（每次调用做 3 个节点的工作），
+// 代码增长 ≤3× 且 ≤64 条。traceback 语义透明：这类函数抛不出 Python 异常；
+// 栈深度减半（极端深度下栈溢出崩溃点后移，opt-in 门控默认关，文档记录）。
+bool self_unroll_function(IRModule& m, IRFunction& fn, int fi) {
+    (void)m;
+    if (fn.is_generator || fn.env_slot >= 0 || fn.has_handlers || !fn.eh_regions.empty())
+        return false;
+    if (fn.blocks.empty() || fn.blocks.size() > 3) return false;
+    // rewrite_direct_calls 把递归 Call 直调化后留下的死 LoadGlobal 还在块里
+    //（末尾 fold_all 才 DCE）：先清一遍，白名单扫描才看到的是活指令。
+    dce_function(fn);
+    const int n = function_inst_count(fn);
+    if (n > 24) return false;
+    auto scalar = [](const TypePtr& t) {
+        return t && (t->kind == TyKind::Int || t->kind == TyKind::Bool);
+    };
+    if (!scalar(fn.ret)) return false;
+    for (const auto& t : fn.slot_ty)
+        if (!scalar(t)) return false;
+    for (const auto& p : fn.params)
+        if (!scalar(p.ty) || p.slot < 0) return false;
+
+    // 收集自调用点；白名单外的任何指令（含 CallRt/Call/VCall/访存/全局写）
+    // 都意味着可能抛异常或有副作用形态，保守跳过整个函数。
+    std::vector<std::pair<size_t, size_t>> sites;
+    for (size_t bi = 0; bi < fn.blocks.size(); ++bi) {
+        for (size_t ii = 0; ii < fn.blocks[bi].insts.size(); ++ii) {
+            const Inst& in = fn.blocks[bi].insts[ii];
+            if (in.op == IrOp::CallDirect && in.idx == fi) {
+                if (in.args.size() != fn.params.size()) return false;
+                sites.push_back({bi, ii});
+                continue;
+            }
+            switch (in.op) {
+                case IrOp::LoadSlot: case IrOp::StoreSlot: case IrOp::ConstInt:
+                case IrOp::Bin: case IrOp::Un: case IrOp::Cmp: case IrOp::Convert:
+                case IrOp::Branch: case IrOp::Jump: case IrOp::Return:
+                    break;
+                default:
+                    return false;
+            }
+        }
+    }
+    if (sites.empty() || sites.size() > 2) return false;
+    if (n * static_cast<int>(sites.size()) > 64) return false;
+    static const bool dbg = std::getenv("PYADAMAS_INLINE_DBG") != nullptr;
+    if (dbg)
+        std::fprintf(stderr, "[unroll] %s sites=%zu n=%d\n", fn.name.c_str(),
+                     sites.size(), n);
+
+    // 快照先于一切改写：inline_at 读 callee 的同时在改 fn，自内联必须解耦。
+    // 倒序内联（后位点先做），前面的位点下标不受块插入/尾部搬移影响。
+    IRFunction snap = fn;
+    InlineFacts facts = analyze_callee(snap);
+    for (auto it = sites.rbegin(); it != sites.rend(); ++it) {
+        const Inst call = fn.blocks[it->first].insts[it->second];
+        inline_at(fn, it->first, it->second, snap, call, facts);
+    }
+    return true;
 }
 
 }  // namespace optdetail
