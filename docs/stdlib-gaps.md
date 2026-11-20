@@ -4,6 +4,14 @@
 >
 > 本文件是评估 + 阶段二交付记录。所有「现状」结论都来自实测，不是读源码猜的。
 >
+> **0.350 更新（stdlib5 分支）**：矩阵里 **pprint「缺失」的结论作废**——
+> 已用纯 pa 源码自举（sort_dicts=True 默认 + indent/width/depth/compact +
+> 长字符串折行，与 CPython 3.14 对拍 0 diff）。同批还补齐 textwrap 的
+> TextWrapper 全参数面（break_long_words/break_on_hyphens/max_lines/
+> placeholder/expand_tabs 真实生效，断词按 3.14 的 wordsep 语义）与 string 的
+> Template（substitute/safe_substitute/is_valid/get_identifiers）+
+> capwords(sep)。选型/边界/对拍见 CHANGELOG 0.350 与三个模块的 docstring。
+>
 > **0.326 更新（stdlib1 分支）**：argparse/configparser/gzip/zlib 已交付，
 > 选型理由/API 覆盖/CPython 差异/桥接兜底见 [stdlib-batch1.md](stdlib-batch1.md)。
 > argparse 的「Namespace 动态属性无解」结论已被推翻：0.165 的动态属性 +

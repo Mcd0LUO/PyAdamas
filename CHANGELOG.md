@@ -4,6 +4,84 @@
 
 早期阶段没有逐条留痕，按阶段归纳；0.4 之后逐条记录。
 
+## [0.350] - 2026-11-21
+
+> **标准库自举第五批**（stdlib5 分支，基线 master b0e2f8b / 0.349）。纯
+> PyAdamas 源码补齐三个缺口：stdlib/textwrap.py 按 CPython 3.14 口径重写、
+> stdlib/string.py 补 Template 与 capwords(sep)、stdlib/pprint.py 补
+> **sort_dicts=True 默认**与 indent/width/depth/compact 参数面。**不碰
+> src/runtime/codegen、无 C 胶水、无模块表改动**（三个模块本来就在表里），
+> 因此编译器二进制与基线同源。
+>
+> 现有程序 asm（对基线 b0e2f8b 的独立 worktree 构建逐字节 cmp）：可比的
+> **459/459 全同、0 差异**，13 个文件两边都以同样方式不可编译（check-only
+> 夹具/环境门控脚本，非 asm 口径）；改动过的三个模块的既有使用者
+> （54/106/140/170/330）差异只来自被内联的 stdlib 模块代码本身。
+>
+> 终验（JOBS=1）：全套件 normal **350 ran ok EXIT=0**、ASan **350 ran ok
+> EXIT=0**（含新增 370-372）；check_size 无新增超限。
+
+### 新增
+
+- **stdlib/textwrap.py 重写**（CPython 3.14 口径）。旧实现只做「按空白切词
+  的贪心装行」，忽略 break_long_words/break_on_hyphens，没有 max_lines/
+  placeholder/expand_tabs/replace_whitespace/drop_whitespace/fix_sentence_endings。
+  新版：自写 ASCII 扫描器复刻 3.14 的 `wordsep_re`（空白段 / 词间 em-dash /
+  连字符断点，含 `(?<=lt{2}-)`|`(?<=lt-lt-)` 两种 lookbehind 与 `lt -? lt`
+  lookahead），`_wrap_chunks`/`_handle_long_word`/`_split_chunks`/
+  `_fix_sentence_endings` 逐条对齐（allowance=1 尾逗号预留、drop_whitespace、
+  max_lines 截断与 placeholder 回填）；dedent 换成 3.14 的 min/max 公共前缀
+  算法；indent 补 splitlines(keepends) 内实现（纯空白行不加前缀、行尾保留）；
+  shorten 走 `TextWrapper(max_lines=1)` 口径。ValueError 逐字一致
+  （`invalid width ... (must be > 0)` / `placeholder too large for max width`）。
+- **stdlib/string.py 补 Template 与 capwords(sep)**：`$$` 转义、`$identifier`、
+  `${identifier}`（ASCII 标识符 + IGNORECASE）、substitute（缺键 KeyError(name)）/
+  safe_substitute（缺键与非法占位符原样保留）/ is_valid / get_identifiers；
+  非法占位符 ValueError 的行列口径按 3.14 的 `_invalid` 公式（占位符后的位置
+  + splitlines(keepends)）。capwords 支持 sep（`sep=""` 与 CPython 一样抛
+  ValueError("empty separator")）。常量保持逐字节相同。
+- **stdlib/pprint.py 补 sort_dicts=True 与参数面**：dict 键排序后格式化
+  （**单行 _safe_repr 与断行两条路径都排序**）；indent（每层缩进 + 开头
+  (indent-1) 空格）、width（allowance 语义：非末项留 1 列给尾逗号）、depth
+  （level>=depth 截断 {...}/[...]/(...)，3.14 口径）、compact（_format_items
+  的宽度预算 + ", " 续行）；set 元素排序；长字符串按 _pprint_str 折行（含
+  多行字符串与 level==1 的括号包裹）。排序不依赖 sorted()：键值对走自写稳定
+  归并排序，比较器先试自然序 `<`，混类型不可比时按 (str(type), repr) 兜底
+  （CPython `_safe_key` 用 id 打破同类型名平局，地址序不可复现）。错误口径
+  indent<0 / depth<=0 / width==0 逐字一致，PrettyPrinter 也在构造期校验。
+- **回归**：tests/run/370_textwrap.py（CPython 逐行对拍，106 行输出）、
+  371_string.py（111 行）、372_pprint.py（106 行）；330 的边界注释同步更新。
+
+### CPython 3.14.4 对拍
+
+- textwrap：22 文本 × 13 宽度 × 14 参数组 + shorten/dedent/indent/谓词 的
+  **8490 行**输出逐行相同；只剩 2 行 `repr` 的 `\x0b/\x0c/\x1c` 未转义差异，
+  属运行期 repr 面（字符串本身相同）。
+- string：**1481 行**（38 模板 × 9 mapping + safe/is_valid/get_identifiers +
+  capwords 10 文本 × 5 sep + 常量）：27 行差异 = 1 行常量 repr 控制字符未转义
+  + 26 行 mapping 取值的 `str()` 退化（float/None/bool，见边界）。
+- pprint：**1926 行**（26 个值 × 17 组参数：width 1/5/10/20/40/80、indent
+  0/2/4、depth 1/2/3、compact、sort_dicts=False、混类型键、长/多行字符串、
+  PrettyPrinter、三条 ValueError）**逐行完全相同（0 diff）**。
+
+### 语义边界 / 负面（均有模块 docstring 记录）
+
+- textwrap：词字符按 ASCII 判（CPython 的 `\w` 对 str 是 Unicode 语义），
+  非 ASCII 连字符断点可能不同；indent 的换行集为 ASCII 子集；`max_lines`
+  用 **-1 哨兵**表示不限（CPython 的 None）——pa 的可空 int 槽里 None 与 0
+  同形，用 None 默认值会把 `max_lines=0` 误当不限（现在 0 的截断语义与
+  CPython 一致）；CPython 3.14 在「indent 比 width 宽 + 文本以空白开头」时
+  的死循环（CPython 自身 bug）在 pa 侧检测无进展即收手，不死循环。
+- string：Template 没有 `delimiter/idpattern/pattern` 类属性（pa 类体不支持
+  类作用域常量），分隔符固定 "$"；substitute 只收一个 mapping 实参（不支持
+  CPython 的 `**kws`），mapping 需是 dict；取值经 8B 元素（无逐元素 tag），
+  float/None/bool/容器值的 `str()` 会退化（要保持输出一致请传 str 或同构 int）。
+- pprint：**没有递归检测**（运行期没有 id()），自引用容器会无限递归
+  （CPython 打 `<Recursion on ...>`）；容器元素无逐元素 tag（嵌套 bool/None/
+  tuple/set/bytes 与同构 float 容器退化）；`saferepr/isreadable/isrecursive/pp`
+  未提供；bytes/bytearray 不折行；长字符串折行按 ASCII 空白；`depth` 用
+  **-1 哨兵**表示 CPython 的 None（原因同上；其余 depth<=0 照常报错）。
+
 ## [0.349] - 2026-11-21
 
 > **P1 定宽整数收尾打磨**（fixint2 分支，基线 master e570f9d / 0.348）。

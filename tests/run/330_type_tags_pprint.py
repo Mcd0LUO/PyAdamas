@@ -4,8 +4,9 @@
 # pprint 是独立模块：tag 必须跨模块调用边界（P2 的 pa_ptag_in/len 侧信道）。
 # 单行放得下时按 repr 口径（与 CPython 逐字节一致），放不下按 CPython 的
 # 断行缩进/键值对齐口径。
-# 文档化边界：不排序 dict 键（用例用已按 key 排好序的字面量）；容器元素
-# 无逐元素 tag，嵌套 bool/None/tuple/set/bytes 不在本用例范围。
+# 文档化边界：dict 键按 sort_dicts=True（CPython 默认）排序，本用例的字面量
+# 键序恰好与排序结果一致；容器元素无逐元素 tag，嵌套 bool/None/tuple/set/
+# bytes 不在本用例范围（sort_dicts/indent/compact 见 372_pprint.py）。
 import pprint
 
 pprint.pprint({"a": [1, 2, 3], "b": {"c": 4}})
