@@ -31,6 +31,11 @@
   不依赖 datetime（自算 days_from_civil），文本日历与 CPython 逐字节一致
   （含 str.center 的奇数补白规则）；day_name 等是普通 list，无 locale。
   回归 322。
+- **struct**（stdlib/struct.py）：pack / unpack / unpack_from / calcsize /
+  iter_unpack + error；格式前缀 < > ! = @ 与 x ? b B h H i I l L q Q f d
+  c s p / 计数前缀。浮点位级编解码（double/float32）纯算术实现，带符号零、
+  次正规、inf/nan 都对；'s'/'p' 收 bytes 或 str（ASCII 一致）。没有
+  pack_into（bytes 不可变，无写缓冲原语）；Q/L 高位按 int64 回绕。回归 324。
 
 ## [0.337] - 2026-11-20
 
