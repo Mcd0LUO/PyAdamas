@@ -177,6 +177,16 @@ tests/run/320-327（323 是 pprint 的空号，模块跳过所以未落地）：
 runtime），stdlib 侧改不掉；本批测试把 yield 元组的用例放在文件末尾规避，
 7 个新用例 detect_leaks=1 全干净。
 
-## 七、闸门
+## 七、闸门（stdlib3 分支最终状态）
 
-（见本次集成报告：normal/ASan 全套件、O0/O1/O2、difftest、check_size。）
+| 闸门 | 结果 |
+|---|---|
+| 全套件 normal（PYADAMAS_TEST_JOBS=8） | **EXIT=0，312 个 ran ok**（295 基线 + 7 新增 + 其它基线用例），0 FAILED/DIFF |
+| 全套件 ASan（PYADAMAS_TEST_ASAN=1，JOBS=1） | **EXIT=0，312 个 ran ok**，0 FAILED/DIFF |
+| 新用例 O0/O1/O2（320/321/322/324/325/326/327） | 三档输出与钉住的 expect **逐字节一致** |
+| 新用例 ASan detect_leaks=1 | 7/7 干净（无 LeakSanitizer 报告；见第六节的已知交互） |
+| difftest（tests/diff/run_diff.py，seeds=3） | **840 个程序，0 个失败** |
+| check_size | 无**新增**超限文件：5 个超限文件是基线就超的（codegen_regalloc 2539、driver_build 1540→1547、ir_ops.h 1350、lower_impl.h 1342、typecheck_types.h 1337）；本批 7 个新模块最大 564 行 |
+
+构建：`cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release` +
+`cmake --build build -j18`（只在本 worktree 的 build/，不碰主树）。

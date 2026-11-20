@@ -52,6 +52,17 @@
   unified_diff / get_grouped_opcodes 返回 list（CPython 是生成器）；内容行
   只加前缀不补 lineterm（同 CPython）。回归 327。
 
+### 未做（pa 子集不支持，见 docs/stdlib-batch3.md）
+
+- **pprint**：unknown 值没有运行期类型标签（bool/None/int 同为裸 8 字节、
+  tuple 无标签、set 被识别成 dict、bytes 与 str 混同），无法对任意对象正确
+  递归 repr；实测证据见文档。
+- **tarfile**：纯 py 侧没有 open()/文件对象（流式/seek 原语）。
+- **traceback**：异常值没有 traceback 对象、没有 sys.exc_info。
+- **dataclasses**：类布局编译期固定、无注解反射/动态类生成。
+- contextlib 的 **suppress/closing**（异常类过 unknown 参数退化成 0；
+  unknown 值不支持方法调用）。
+
 ## [0.337] - 2026-11-20
 
 > dv1 分支：**去虚拟化深化 + 函数内联扩展——削减调用开销**（fib/nqueens/
