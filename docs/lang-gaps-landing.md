@@ -181,9 +181,9 @@
     AttributeError（CPython StringIO 也没有这些）；closed 经 getter
     登记可读。fileno 实例侧需类自己定义（StringIO 未定义 →
     AttributeError，CPython 是 UnsupportedOperation，口径合理不逐字）。
-14. **tarfile 模块未实现**：FileLike + BytesIO 基础已就绪（fileobj
-    协议面可用），tarfile 本身的 ustar 头解析/目录遍历是独立模块工程，
-    留给后续批次（stdlib-b3 跳过清单的 tarfile 项部分解锁）。
+14. **tarfile 模块**：FileLike + BytesIO 基础已就绪（块2），模块本体已由
+    stdlib-batch4（0.347）补齐（ustar 读写 + gzip + GNU L/K + 最小 pax 读；
+    pax/GNU 写、稀疏文件仍是负面结论），详见 docs/stdlib-batch4.md。
 15. **动态方法调用带参/返回堆值**：pa_method_call0 只零参；fileinst
     分派族按固定签名带参（int/str/指针），返回堆值的方法经 fileinst
     族正确交引用（read/readlines），但经 pa_method_call0 的任意动态
@@ -420,8 +420,10 @@
 
 ### 其它剩余（stdlib-b3 跳过清单）
 
-- **tarfile**：FileLike+BytesIO 基础已就绪（块2），模块本身（ustar
-  头解析/pax/GNU 长名/目录遍历）未实现。
+- **tarfile**：已被 stdlib-batch4（0.347）落地——ustar 读写 + fileobj/
+  BytesIO + gzip + GNU L/K + 最小 pax 读面，见
+  [stdlib-batch4.md](stdlib-batch4.md)。剩余：pax/GNU**写**、稀疏文件、
+  bz2/xz、data_filter。
 - **pprint**：P2 已解锁（0.340）。
 - **traceback 链格式化 / tb 属性面**：format_exception（cause/context
   链）、TracebackType.tb_frame/tb_lineno 等属性面不在本轮（块3 边界4）。

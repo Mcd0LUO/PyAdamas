@@ -254,6 +254,7 @@ inline constexpr ModuleEntry kModuleTable[] = {
     {"statistics", ModuleKind::Python, "statistics.py", "math"},
     {"struct", ModuleKind::Python, "struct.py", "math"},
     {"string", ModuleKind::Python, "string.py", ""},
+    {"tarfile", ModuleKind::Python, "tarfile.py", "gzip,_gzipio,os,os.path"},
     {"tempfile", ModuleKind::Python, "tempfile.py", "os,os.path,random,shutil"},
     {"textwrap", ModuleKind::Python, "textwrap.py", ""},
     // P4 块3（lang_gaps）：traceback 格式化（sys.exc_info + __pa_tb_frames）。

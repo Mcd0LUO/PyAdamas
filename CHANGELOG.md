@@ -4,6 +4,78 @@
 
 早期阶段没有逐条留痕，按阶段归纳；0.4 之后逐条记录。
 
+## [0.347] - 2026-11-21
+
+> **标准库自举第四批：tarfile**（tar1 分支，基线 master 7924474 / 0.346）。
+> 纯 PyAdamas 源码：`stdlib/tarfile.py` + 模块表 +1 行，不碰 lower /
+> runtime / codegen，**不新增 C 胶水**。stdlib-b3 曾以「纯 py 侧没有
+> open()/通用文件对象」跳过 tarfile；P4 块2 的 file 协议泛化 +
+> io.BytesIO（0.343/0.346）落地后该理由不再成立。设计与边界详见
+> docs/stdlib-batch4.md。
+
+### 新增
+
+- **stdlib/tarfile.py**（ustar 核心，1158 行纯源码）：
+  - **TarInfo**：字段（name/mode/uid/gid/size/mtime/chksum/type/linkname/
+    uname/gname/devmajor/devminor/offset/offset_data）+ 类型谓词
+    （isfile/isreg/isdir/issym/islnk/isdev/ischr/isblk/isfifo/iscont/
+    issparse）+ get_info + frombuf/tobuf。头编解码按 ustar 512 字节布局：
+    name(100)/mode(8)/uid(8)/gid(8)/size(12)/mtime(12)/chksum(8)/
+    typeflag(1)/linkname(100)/magic(6+2)/uname(32)/gname(32)/devmajor(8)/
+    devminor(8)/prefix(155)/padding(12)；八进制数值字段纯整数算法
+    （`_oct`，不用 % 动态宽度）、chksum 双算（无符号/有符号）、
+    base-256 读侧（63 位内）、长名 prefix+name 拆分、目录尾斜杠归一。
+    type 常量按 CPython 3.14 是 **bytes**（b"0"/b"5"/b"2" …）。
+  - **TarFile**：mode r/w/a/x（含 :gz、r|/w| 按整读整写）、fileobj
+    （BytesIO/真 file）或路径、getmembers/getnames/getmember（末次同名
+    优先）、extractfile（普通文件返回 BytesIO、软/硬链接跟到目标）、
+    addfile/addfile_bytes、add（递归目录 + arcname）、gettarinfo（lstat
+    面）、extract/extractall（安全名净化 + chmod/utime + 目录属性延迟）、
+    close（两块全零尾 + RECORDSIZE 补齐，尺寸与 CPython 一致）、with、
+    __iter__。错误按 CPython 3.14 口径：关闭/模式不符抛 OSError，
+    KeyError 文本一致，r/r:* 首头坏掉包成 ReadError。
+  - **扩展头读面**：GNU 长名/长链接 L/K（**连续叠加**，K→L→真头用累积
+    循环而非递归）、pax x/g（path/linkpath/size/mtime/uid/gid/uname/
+    gname；x 覆盖下一个成员，g 对后续全体生效）。写侧只写 ustar。
+  - **gzip 透明**：r:gz/w:gz/x:gz 走 stdlib/gzip；r:*/r 魔数嗅探；
+    bz2/xz/zst 抛 CompressionError；a:gz 不支持。
+- **src/driver_build.cpp**：模块表加 tarfile（deps gzip,_gzipio,os,os.path，
+  1 行）。
+- **回归**：tests/run/360-364（TarInfo+头字节 / 内存面 / 磁盘面 /
+  gzip+错误面 / 扩展头+format），全部**同一份 .py 在 CPython 3.14.4 与 pa
+  下输出逐字节一致**，expect 由 CPython 输出钉死。
+
+### 语义边界（轻量标尺，详见 docs/stdlib-batch4.md §3）
+
+- 整读整写（内存与归档大小成正比）；只写 ustar（默认 format 与 CPython
+  同值 PAX_FORMAT，但产出 ustar 头：短 ASCII 名成员与 CPython 默认写出
+  **逐字节一致**）。
+- 数值字段 int64：写侧八进制溢出抛 ValueError，读侧 base-256 超 63 位抛
+  InvalidHeaderError（CPython 任意精度）。
+- uid/gid 恒 0、无 uname/gname（_shutilc.stat 没有属主；无 chown
+  落盘）；add 不做硬链接合并（没有 inode）；LNKTYPE 解压回退成复制。
+- 不做 CPython 3.12+ 的 data_filter（filter=/numeric_owner= 不存在），
+  名字按 zipfile 口径净化（绝对路径/上跳落到解压根下）。
+- extractfile 静态返回 BytesIO（目录成员返回空 BytesIO，CPython 是 None）；
+  imported 类的类方法经模块限定名调用需改成 from-import（pa 语言面）。
+- 稀疏文件（S）、Solaris X 头、pax/GNU **写**、bz2/xz/zst 是明确负面结论。
+
+### 验证
+
+- CPython 3.14 对拍：**360-364 共 5 个用例逐字节一致**（头字节 base64、
+  归档字节 base64、错误类型、字段/mtime/mode）。
+- 跨实现互操作（一次性手工验证）：pa 写的 .tar.gz 被 CPython 读出；CPython
+  写的 .tar.gz（默认 PAX）被 pa 读出；CPython 写 GNU/PAX 的 186 字节长名 +
+  长链接被 pa 读出；`tar -tzf` 能列 pa 的归档。
+- 全套件 normal（JOBS=1）**EXIT=0，343 个 ran ok**；ASan
+  （PYADAMAS_TEST_ASAN=1，JOBS=1）**EXIT=0，343 个 ran ok**（0 FAILED/DIFF）。
+- 现有程序 asm 对基线逐字节不变：**489/489**（tests/run + tests/*.py +
+  tests/modules + bench 全量与基线 7924474 的独立构建 cmp）。
+- check_size 无新增超限（基线 5 个；stdlib/tarfile.py 1158 行 < 1200）。
+- ASan detect_leaks=1：360/361/362/364 全 0；363 命中既有「except 里 raise
+  另一异常」两站点的 RC 环泄漏（单站点不复现，最小复现见
+  docs/stdlib-batch4.md §6，修需动运行期异常/GC 链，不在本批）。
+
 ## [0.346] - 2026-11-21
 
 > **P4 语言缺口 块3+4**（lang2 分支，基线 master 2ef0a9d / 0.345）：
