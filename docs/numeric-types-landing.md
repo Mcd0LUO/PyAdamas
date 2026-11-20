@@ -12,6 +12,10 @@
 > 其中 117 个成功编译，与 P2 口径一致）。明确未做：f32/big（P3）、
 > u64 大整数字面量、定宽容器元素的隐式字面量 coerce、u64 列表排序、
 > SIMD 通道化（见 §6）。
+>
+> **0.349 更新（fixint2 收尾）**：§6 的 2/3/4 三项（u64 大字面量、容器
+> 元素字面量 coerce、u64 列表排序）已落地，另加 cimport 窄/无符号类型
+> 映射；机制与**新的负面清单见 §9**。本文 §1-§8 保留 fixint1 轮原貌。
 
 ## 1. 类型与标注
 
@@ -121,13 +125,19 @@ pa_fmt_u64（format()/f-string 格式说明符）、pa_uint_to_base
 2. **u64 大整数字面量不可写**：词法把 INT 字面量解析进 int64，
    18446744073709551615 会报 "integer literal too large for int64"。
    用 cast_u64(-1) 等构造。要支持需改词法/常量表示，属后续。
+   **（0.349 已落地：十进制 u64 范围字面量可用，见 §9.1；进制前缀路径
+   仍保持旧行为。）**
 3. **定宽容器元素的插入需要显式 cast**：l: list[i8] 的 l.append(5)
    报 "cannot store 'int' into 'list[i8]'"，写 l.append(cast_i8(5))。
    容器元素位置没有「字面量表达式」上下文（merge_elem 只拿到类型），
    所以不开口子——宁可要求 cast，也不静默窄化。
+   **（0.349 已落地：字面量在容器位置按元素类型范围检查 coerce，见 §9.2；
+   非字面量仍要 cast，不静默窄化的纪律不变。）**
 4. **u64 列表排序**：sorted()/sort() 的 int kind 比较在运行时按 int64
    有符号比，u64 ≥ 2^63 会排错。min/max 走 IR Cmp（已无符号）正常。
    SIMD 通道化（u8×16/i32×4、i32 的 pmulld）留后续（本轮只保证标量语义）。
+   **（0.349 已修复：sort/sorted 按元素类型分派无符号比较器，见 §9.3；
+   SIMD 通道化仍未做。）**
 5. **移位计数沿用 pa 既有行为**：x86 按 64 取模（u8 << 8 在 8 位回绕后
    为 0），负数计数不报 ValueError（与默认 int 的现状一致）。
 6. **类型名/repr 仍是 int**：type(x).__name__ == 'int'、
@@ -176,3 +186,116 @@ pa_fmt_u64（format()/f-string 格式说明符）、pa_uint_to_base
   槽」这类静默算错（本轮实测抓到：u += 10 在全局常量传播后被折成 260；
   修复 = opt.cpp 的 Bin/Un/Convert/Cmp 折叠按类型回绕/无符号）。
 - 环境噪声：/tmp 下有 root 所有的旧日志文件，工作日志一律写 build/ 下。
+
+## 9. 0.349 收尾（fixint2 分支，基线 e570f9d / 0.348）
+
+> 范围：§6 负面清单里 tractable 的三项 + 可选的 cimport 映射。**命门不变**：
+> 现有程序（无定宽标注）asm 逐字节不变（bench 全量 120 文件 cmp 全同）；
+> 提升规则（typecheck_promote.h 的 int_promote）与回绕语义一字未动。
+> 逐块 commit：b166dc4（大字面量）→ 9fb56a5（容器 coerce）→ 2fed140
+> （u64 排序）→ ae62f52（cimport + codegen_cffi 拆分）。
+
+### 9.1 u64 范围十进制大字面量（§6.2 落地）
+
+- 词法：十进制 INT 超出 int64 时按 strtoull 解析，≤2^64-1 的存**无符号位
+  模式**进 ival 并打 `u64_lit` 标记（Token/Constant 各一个 bool）；超
+  2^64-1 照旧词法报错。**进制前缀路径（0x/0o/0b）逐字不动**——
+  0xFFFFFFFFFFFFFFFF 仍按旧行为回绕成 -1（改它会动既有程序）。
+- 类型检查：大字面量静态类型仍登记 int（提升规则不变），进 pending 表；
+  只有 u64 上下文能消费：五类 coerce 位置（accept_literal_into 的 u64
+  分支）+ 提升到 U64 的 binop/compare/augassign 操作数（consume_u64_literal）
+  + u64 形参默认值（def 点消费，函数可能永远不被调用）+ 容器元素位置
+  （§9.2）。check_once 收尾未被消费的照旧报 "integer literal too large
+  for int64"（消息逐字一致，报错位置从词法期移到类型检查收尾）。
+- 降级/codegen 零改动：消费即把字面量静态类型改写成 U64，lower_constant
+  按 const_int_ty 发位模式常量，gen_const_int 的 movabsq 本就发全 64 位。
+- 跨模块默认值：LiteralValue 加 u64 旗标，序列化新 tag 8；旧缓存 tag 0..7
+  解码逐字不变，旧解码器读 tag 8 按「有默认但不可表示」降级。
+- **负面/边界**：
+  - 默认 int 上下文（裸赋值/print/纯 int 运算）大字面量仍报错（保守，命门）。
+  - `-18446744073709551615` / `+18446744073709551615`（一元号包裹）报错：
+    负数装不进 u64，正号包裹不消费（保守）。
+  - `cast_u64(18446744073709551615)` 报错（cast 实参不是消费位置）；
+    构造位模式仍用 cast_u64(-1)。
+  - u64 变量 / 大字面量（真除，结果 float）报错：float 结果不消费字面量，
+    需要时先 cast_u64 到变量再除。
+  - 大字面量做 match 模式、下标、len 等非消费位置报错（保守）。
+  - 2^63 本身（9223372036854775808）就是 u64 字面量；INT64_MIN 的负号写法
+    -9223372036854775808 仍不可写（pa 既有行为，用 -9223372036854775807-1）。
+
+### 9.2 定宽容器元素的字面量 coerce（§6.3 落地）
+
+- 口径与标量声明/赋值完全一致：元素类型定宽时，**字面量**范围内隐式
+  （改写静态类型，降级按元素类型发常量），**超范围编译报错**（消息同
+  "literal N is out of range for 't'"），非字面量仍走 merge_elem（窄化要
+  cast，锁住报错）。绝不静默窄化。
+- 覆盖位置：list.append / insert / extend（字面量列表实参）、set.add、
+  下标写入 l[0]=5 / d[k]=v、dict 键的字面量下标（读/写）、list/set/dict
+  字面量（标注声明、赋值、实参、返回值、list +=）。coerce_container_literal
+  先整体判定「所有目标位置都是字面量」再改写，避免半改写状态；空字面量
+  保留既有洞回填路径。
+- **insert 补齐了此前完全缺失的元素检查**（与 append 同口径；此前
+  list[i8].insert(0, n:int) 会静默截断）。bench 无 insert 用例，asm 不变。
+- **负面/边界**：
+  - tuple 字面量、嵌套容器字面量（list[list[u64]] 的内层）不 coerce：
+    内层用标注声明（a: list[u64] = [...]）或 cast 构造。
+  - 切片赋值 l[0:1] = [5] 不 coerce（锁住时报错，要 cast）。
+  - set.add/update 的**非字面量**实参仍无元素检查（既有缺口，与 insert
+    修复前同类；开口需要 merge_elem 并会动开放集合的扩宽行为，留后续）。
+  - ptr[T] 元素写入 p[0]=5 要 cast_i8(5)（字面量 coerce 未接 ptr 写入路径）。
+  - dict 键大字面量做 `in` / .get() 不消费（报错，保守）。
+
+### 9.3 u64 列表无符号排序（§6.4 落地）
+
+- sort_kind 新增 **5=u64**：运行时 LESS_U64 timsort（独立宏实例，不动
+  i64/f64/str/cmp 实例）；容器排序描述符新增 **'u'** 字符（嵌套 list/tuple
+  里的 u64 元素同样无符号）；sorted(key=) 的键比较（cmp_sort_by_idx）
+  同步 kind 5。
+- 窄定宽（i8/u8/…/u32）槽内规范值下有符号机器字比较逐例等价，仍落
+  kind 0 / 'x'——**其它类型的排序路径逐字不变**。min/max 走 IR Cmp 早已
+  无符号，不动。
+- sorted(key=恒等函数)（lambda x: x / def k(x): return x，lambda 已脱糖成
+  合成 def）且元素是 u64：键域跟随元素类型（signature_def 看函数体形态，
+  单 return 参数名）。**只对 u64 元素开口**——其它类型键域未知仍退机器字
+  比较（既有行为，float 键同类缺口不动）。
+- **负面/边界**：非恒等的无标注键函数（如 lambda p: p[0]）键域推不出，
+  退机器字有符号比较，u64 键会排错——用标注键函数（def first(p: tuple[u64,int]) -> u64）。
+  list.sort(key=) 仍不支持（既有）。SIMD 通道化仍未做。
+
+### 9.4 cimport 窄/无符号 C 类型 → 定宽 TyKind（可选任务）
+
+- .cpya 新类型名：char/int8→I8、short/int16→I16、uchar/uint8→U8、
+  ushort/uint16→U16、uint64/ulong→U64。CKind 追加在枚举末尾（既有值不变）。
+- 覆盖：常量（u64 常量按无符号解析，允许 -1 回绕写法）、参数/返回
+  （movsbq/movzbq/movswq/movzwq 边界扩展）、全局变量读写（movb/movw）、
+  ptr[T] 解引用（符号/零扩展按元素类型）、按值结构体字段（1/2/8 字节宽，
+  cfield_layout 自动布局）、回调跳板（C 侧窄参数按宽度提升到 64 位再进
+  shim；movzwq 目标必须 64 位寄存器，实测抓过 %ecx 配 q 后缀的汇编错误）。
+- 字面量实参走 check_args 的 accept_literal_into（同口径 coerce）；C 变量
+  赋值 f.char_global = 100 在 stmt_assign 接了字面量 coerce；非字面量窄化
+  要 cast（反例 f77/f78）。
+- **既有 int/int32/uint32 仍映射默认 int**——改它们会动既有程序的提升
+  语义（uint32+uint32 会从 int 变 u32 回绕），不做。
+- codegen_call.cpp 新增编组后超 1200 行硬限：C 边界编组 5 函数纯移动拆入
+  **codegen_cffi.cpp**（735/516 行），check_size 清零状态保持。
+- **负面/边界**：cdecl（头文件→.cpya 生成器）未扩展新类型名；varargs 的
+  定宽实参仍报 "varargs argument type not supported"（既有）；list[i8]→char*
+  缓冲区编组（BufI8）未开；ptr[T] 元素写入要 cast（见 §9.2）。
+
+### 9.5 闸门（实测，最终 HEAD）
+
+- **asm 逐字节不变**：bench 全量 120 文件，基线 e570f9d 原始构建 vs 每块
+  提交后 cmp **120/120 identical**（含 codegen_cffi 拆分后复验）。
+- **332-335 回归全过**（提升/回绕语义未动的直接证据）。
+- **新增回归**：365（u64 大字面量，CPython 非回绕段逐字节对拍 + pa 回绕
+  钉子）、366（容器 coerce，与 CPython 逐字节对拍）、367（u64 排序，与
+  CPython 逐字节对拍，含稳定性/嵌套/200 元素归并路径）、368（cimport 定宽，
+  cfixedint.c 辅助库 + C 语义模型对拍）。反例 f70-f78。
+- **difftest（O0 vs O2）**：328 用例 0 不一致；365-368 各自 O0/O1/O2 输出
+  逐字节相同。
+- **全套件 normal + ASan（JOBS=1）**：见 CHANGELOG 0.349 与本轮工作日志
+  （build/gate-final-*.log）。
+- **语料零差异**：tests/run 既有全量（按文件头 type-tags/lang-gaps 环境），
+  基线 vs 当前输出与退出码全同（build/gate-corpus2.log，0 DIFF）。
+- **check_size**：通过（无新增超限；codegen_call.cpp 拆分后 735 行）。
+

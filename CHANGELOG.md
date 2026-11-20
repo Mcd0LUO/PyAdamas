@@ -8,9 +8,16 @@
 
 > **P1 定宽整数收尾打磨**（fixint2 分支，基线 master e570f9d / 0.348）。
 > 补 docs/numeric-types-landing.md §6 负面清单里 tractable 的三项：u64 大
-> 整数字面量、定宽容器元素字面量 coerce、u64 列表无符号排序。**现有程序
-> （无定宽标注）的生成 asm 逐字节不变**（bench 全量 120 文件 cmp 全同）；
-> 提升规则/回绕语义不变（332-335 回归全过）。
+> 整数字面量、定宽容器元素字面量 coerce、u64 列表无符号排序，另加可选的
+> cimport 窄/无符号 C 类型映射。**现有程序（无定宽标注）的生成 asm 逐字节
+> 不变**（bench 全量 120 文件 cmp 全同，逐块复验）；提升规则/回绕语义不变
+> （332-335 回归全过）。
+>
+> 终验（JOBS=1）：全套件 normal **347 ran ok EXIT=0**、ASan **347 ran ok
+> EXIT=0**；difftest 328/0；语料零差异（tests/run 既有全量，基线 e570f9d
+> 原始构建 vs 当前，按文件头 type-tags/lang-gaps 环境，0 DIFF）；新增
+> 365-368 与 CPython/C 语义模型对拍一致、O0/O1/O2 逐字节相同；check_size
+> 通过。机制与负面清单详见 docs/numeric-types-landing.md §9。
 
 ### 新增
 
