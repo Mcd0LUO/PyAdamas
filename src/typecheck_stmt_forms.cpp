@@ -190,9 +190,21 @@ void TypeChecker::stmt_assign(Assign& a) {
                 // 模块/cimport 的接收者不能求值：m.x = 1 里的 m 是模块，
                 // 求值路径会报「module cannot be used as a value」。
                 bool base_mod = false;
-                if (auto* bn = dynamic_cast<Name*>(at->value.get()))
+                if (auto* bn = dynamic_cast<Name*>(at->value.get())) {
                     base_mod = lookup_module_alias(bn->id) != nullptr ||
                                cmodules_.count(bn->id) > 0;
+                    // 定宽 C 变量 + 字面量：与标量赋值同口径 coerce（P1 收尾）。
+                    if (base_mod) {
+                        if (const CImportDecl* cd = cmodule(bn->id)) {
+                            for (auto& cv : cd->vars) {
+                                if (cv.py_name != at->attr) continue;
+                                TypePtr wt = ckind_type(cv.kind);
+                                if (is_fixed_int(wt)) want = wt;
+                                break;
+                            }
+                        }
+                    }
+                }
                 if (!base_mod) {
                     TypePtr rt = expr(*at->value);
                     if (rt && rt->kind == TyKind::Class && rt->cls) {

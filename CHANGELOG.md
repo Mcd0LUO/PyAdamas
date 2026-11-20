@@ -42,6 +42,24 @@
   键域跟随元素类型（无标注函数返回类型推不出的既有洞，只对 u64 开口）；
   标注 -> u64 的键函数本来就走 kind 5。min/max 走 IR Cmp 早已无符号，不动。
   新增 tests/run/367（与 CPython 逐字节对拍，含稳定性/嵌套/200 元素归并路径）。
+- **cimport 窄/无符号 C 类型 → 定宽 TyKind**（可选任务，landing §6 补充）：
+  .cpya 新增 `char`/`int8`→i8、`short`/`int16`→i16、`uchar`/`uint8`→u8、
+  `ushort`/`uint16`→u16、`uint64`/`ulong`→u64（CKind 追加在枚举末尾，既有
+  值不变）。覆盖常量（u64 常量按无符号解析）、参数/返回、全局变量读写、
+  ptr[T] 解引用、按值结构体字段（1/2/8 字节宽，符号/零扩展）、回调跳板
+  （C 侧窄参数按宽度提升到 64 位）。字面量实参/赋值同口径 coerce，非字面量
+  窄化要 cast。**既有 int/int32/uint32 仍映射默认 int**（改它们会动既有程序
+  的提升语义，不做）；cdecl 生成器、varargs 定宽实参、list[i8]→char* 缓冲区
+  编组未开（留后续）。新增 tests/run/368（cfixedint.c 辅助库，C 语义模型
+  对拍）与反例 f77/f78。
+
+### 变更
+
+- **src/codegen_call.cpp**（1238 行 → 735 行）：C 互操作边界编组
+  （gen_call_extern / gen_load_extern / gen_store_extern / gen_ptr_load /
+  gen_ptr_store）拆入 **src/codegen_cffi.cpp**（516 行）。纯代码移动，函数体
+  逐字不变（本轮新增窄宽度编组后超 1200 行硬限，拆回限内，check_size 清零
+  状态保持）。
 
 ## [0.348] - 2026-11-21
 

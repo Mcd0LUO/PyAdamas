@@ -119,6 +119,7 @@ src/opt_intloop.cpp
   src/codegen_int_fixed.cpp
   src/codegen_call.cpp
   src/codegen_call_abi.cpp
+  src/codegen_cffi.cpp
   src/codegen_index.cpp
   src/codegen_vcall_inline.cpp
   src/codegen_simd.cpp

@@ -97,6 +97,7 @@ static void raw_label(MachFunc& out, std::string& buf, std::string_view name) {
 static const char* const kCbReg64[6] = {"%rdi", "%rsi", "%rdx", "%rcx", "%r8", "%r9"};
 static const char* const kCbReg32[6] = {"%edi", "%esi", "%edx", "%ecx", "%r8d", "%r9d"};
 static const char* const kCbReg8[6] = {"%dil", "%sil", "%dl", "%cl", "%r8b", "%r9b"};
+static const char* const kCbReg16[6] = {"%di", "%si", "%dx", "%cx", "%r8w", "%r9w"};
 // 统一调用约定的整型实参寄存器（与 kCbReg64 相同序列，语义不同：
 // 这里表示「第 i 个实参进第 i 个整型寄存器」，与 C ABI 的浮点槽无关。
 static const char* const kCbArgReg[6] = {"%rdi", "%rsi", "%rdx", "%rcx", "%r8", "%r9"};
@@ -545,8 +546,14 @@ std::string AsmGen::gen(const IRModule& m) {
                         out_ += std::format("\tmovslq {}, {}\n", kCbReg32[gi], kCbReg64[gi]);
                     else if (k == CKind::UInt32)
                         out_ += std::format("\tmovl {}, {}\n", kCbReg32[gi], kCbReg32[gi]);
-                    else if (k == CKind::Bool)
+                    else if (k == CKind::Bool || k == CKind::UInt8)
                         out_ += std::format("\tmovzbl {}, {}\n", kCbReg8[gi], kCbReg32[gi]);
+                    else if (k == CKind::Int8)
+                        out_ += std::format("\tmovsbq {}, {}\n", kCbReg8[gi], kCbReg64[gi]);
+                    else if (k == CKind::Int16)
+                        out_ += std::format("\tmovswq {}, {}\n", kCbReg16[gi], kCbReg64[gi]);
+                    else if (k == CKind::UInt16)
+                        out_ += std::format("\tmovzwq {}, {}\n", kCbReg16[gi], kCbReg64[gi]);
                     ++gi;
                 }
                 // C 回调走真实 C ABI（浮点在 %xmm），而闭包 +0 指向统一约定入口。

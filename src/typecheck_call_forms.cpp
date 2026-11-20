@@ -141,6 +141,11 @@ TypePtr TypeChecker::call_attr(Attribute& a, Call& c) {
                         switch (k) {
                             case CKind::Float: return t_float();
                             case CKind::Bool: return t_bool();
+                            case CKind::Int8: return t_i8();
+                            case CKind::Int16: return t_i16();
+                            case CKind::UInt8: return t_u8();
+                            case CKind::UInt16: return t_u16();
+                            case CKind::UInt64: return t_u64();
                             default: return t_int();
                         }
                     };

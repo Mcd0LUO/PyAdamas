@@ -65,6 +65,11 @@ StructInfo* TypeChecker::build_cstruct(const CStruct& cs) {
                 case CKind::Int:
                 case CKind::Int32: ft = t_int(); break;
                 case CKind::UInt32: ft = t_int(); unsig = true; break;
+                case CKind::Int8: ft = t_i8(); break;
+                case CKind::Int16: ft = t_i16(); break;
+                case CKind::UInt8: ft = t_u8(); unsig = true; break;
+                case CKind::UInt16: ft = t_u16(); unsig = true; break;
+                case CKind::UInt64: ft = t_u64(); unsig = true; break;
                 case CKind::Float: ft = t_float(); break;
                 case CKind::Bool: ft = t_bool(); break;
                 case CKind::Ptr: ft = mk_optional(t_int()); break;

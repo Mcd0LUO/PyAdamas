@@ -52,7 +52,8 @@ VReg Lowerer::lower_subscript(Subscript& s) {
         in.b = idx;
         in.imm = ckind_width(ot->celem);
         in.fwidth = static_cast<uint8_t>(in.imm);
-        in.funsigned = ot->celem == CKind::UInt32;
+        in.funsigned = ot->celem == CKind::UInt32 || ot->celem == CKind::UInt8 ||
+                       ot->celem == CKind::UInt16 || ot->celem == CKind::UInt64;
         return def(cptr_elem_type(ot->celem), std::move(in));
     }
     if (ot && ot->kind == TyKind::Dict) {

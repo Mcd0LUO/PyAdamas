@@ -769,6 +769,13 @@ inline TypePtr ckind_type(CKind k) {
         case CKind::Int:
         case CKind::Int32:
         case CKind::UInt32: return t_int();
+        // P1 收尾：窄/无符号 C 类型映射到定宽 TyKind（边界按宽度符号/零
+        // 扩展）。既有 int/int32/uint32 仍映射默认 int，提升语义不动。
+        case CKind::Int8: return t_i8();
+        case CKind::Int16: return t_i16();
+        case CKind::UInt8: return t_u8();
+        case CKind::UInt16: return t_u16();
+        case CKind::UInt64: return t_u64();
         // 按值结构体需要作用域里的 StructInfo，调用方在结构体表命中时
         // 已提前返回 mk_struct，这里只作兜底。
         case CKind::Struct:
@@ -781,6 +788,11 @@ inline TypePtr cptr_elem_type(CKind k) {
         case CKind::Float:
         case CKind::Float32: return t_float();
         case CKind::Bool: return t_bool();
+        case CKind::Int8: return t_i8();
+        case CKind::Int16: return t_i16();
+        case CKind::UInt8: return t_u8();
+        case CKind::UInt16: return t_u16();
+        case CKind::UInt64: return t_u64();
         default: return t_int();
     }
 }
