@@ -4,7 +4,7 @@
 
 早期阶段没有逐条留痕，按阶段归纳；0.4 之后逐条记录。
 
-## [0.338] - 2026-11-20
+## [0.339] - 2026-11-20
 
 > borrow1 分支：**borrow 细化——只读借用循环变量槽免每轮 inc/dec**（R3 取证
 > 定位的真正通用 RC 杠杆，压 RC 密集容器循环，真实日常语料受益）。门控
@@ -12,7 +12,7 @@
 > （38 热基准 cmp 全同）；manifest 缓存键加 `borrowopt`。RC 正确性是命门
 > （历史多起 borrow UAF/leak）：fail-closed 白名单判定，可证安全才做，
 > 任何一条不确定整槽/整函数跳过。设计/安全论证/负面清单见
-> docs/borrow-loop-design.md。接 0.337 之后集成，定版 0.338（集成重编号）。
+> docs/borrow-loop-design.md。接 stdlib3 0.338 之后集成，定版 0.339。
 
 ### 新增
 
@@ -114,6 +114,67 @@
   实际伴随重赋值，细化后仍不命中）；入口全局根 CFG 分析（收益有限）。
 - 风险：改的是所有权记账，误判即 UAF/leak。门控默认关可回退；每块增量
   过 ASan leak+UAF 与语料对拍；未知 RtFn/op fail-closed。
+
+## [0.338] - 2026-11-20
+
+> stdlib3 分支：**纯 PyAdamas 标准库自举批**——把「纯字符串/纯算术就能做、
+> 不需要 C 胶水、不需要原生类方法、不需要 BigInt」的一批高频模块用 pa
+> 自己的语法写出来，随编译器分发（stdlib/<mod>.py），只做模块表登记，
+> 不动 lower/runtime/codegen。轻量标尺：同参数/同功能/同结果；错误类型对、
+> 消息合理但不逐字复刻 CPython；help/格式合法但不复刻算法。接 0.337 之后
+> 集成，定版 0.338（borrow 顺延 0.339）。
+
+### 新增
+
+- **urllib.parse**（stdlib/urllib/parse.py）：urlparse / urlsplit /
+  urlunparse / urlunsplit / urljoin / urldefrag、quote / quote_plus /
+  quote_from_bytes / unquote / unquote_plus / unquote_to_bytes、urlencode /
+  parse_qs / parse_qsl + uses_relative/uses_netloc/uses_params 与
+  ParseResult/SplitResult/DefragResult。只收 str 输入；结果对象是普通类
+  （字段/下标/len/repr/geturl 可用，元组解包不做）。回归 320。
+- **secrets**（stdlib/secrets.py）：token_bytes / token_hex / token_urlsafe /
+  randbelow / randbits / choice / compare_digest。**随机源是内建 random**
+  （pa 没有 os.urandom/getrandom 原语），令牌强度弱于 CPython，接口与
+  计算口径一致；randbits 走 int64（k<=63 为正）。回归 321。
+- **calendar**（stdlib/calendar.py）：isleap / leapdays / weekday /
+  monthrange / monthcalendar / timegm、day_name/day_abbr/month_name/
+  month_abbr、weekheader、firstweekday/setfirstweekday、month/prmonth、
+  calendar/prcal、mdays、error/IllegalMonthError/IllegalWeekdayError。
+  不依赖 datetime（自算 days_from_civil），文本日历与 CPython 逐字节一致
+  （含 str.center 的奇数补白规则）；day_name 等是普通 list，无 locale。
+  回归 322。
+- **struct**（stdlib/struct.py）：pack / unpack / unpack_from / calcsize /
+  iter_unpack + error；格式前缀 < > ! = @ 与 x ? b B h H i I l L q Q f d
+  c s p / 计数前缀。浮点位级编解码（double/float32）纯算术实现，带符号零、
+  次正规、inf/nan 都对；'s'/'p' 收 bytes 或 str（ASCII 一致）。没有
+  pack_into（bytes 不可变，无写缓冲原语）；Q/L 高位按 int64 回绕。回归 324。
+- **queue**（stdlib/queue.py）：Queue / LifoQueue / PriorityQueue /
+  SimpleQueue + Empty / Full；put/get/put_nowait/get_nowait/qsize/empty/
+  full/task_done/join，maxsize 与 timeout 阻塞口径可用（time.sleep 轮询，
+  M=1 协作式无锁）. 回归 325。
+- **contextlib**（stdlib/contextlib.py）：nullcontext / @contextmanager /
+  _GeneratorContextManager。**异常注回做不到**（异常实例/类过 unknown 形参
+  退化成裸 8 字节），异常路径改用生成器 close()：清理照跑、异常不吞。
+  suppress()/closing() 跳过（异常类同一性 / unknown 值方法调用都是 pa 不支持
+  的能力）。回归 326。
+- **difflib**（stdlib/difflib.py）：SequenceMatcher（find_longest_match /
+  get_matching_blocks / get_opcodes / get_grouped_opcodes / ratio /
+  quick_ratio / real_quick_ratio / set_seqs / set_seq1 / set_seq2，含 junk
+  与 autojunk popular 剔除）、Match、get_close_matches、unified_diff。
+  unified_diff / get_grouped_opcodes 返回 list（CPython 是生成器）；内容行
+  只加前缀不补 lineterm（同 CPython）。回归 327。
+
+### 未做（pa 子集不支持，见 docs/stdlib-batch3.md）
+
+- **pprint**：unknown 值没有运行期类型标签（bool/None/int 同为裸 8 字节、
+  tuple 无标签、set 被识别成 dict、bytes 与 str 混同），无法对任意对象正确
+  递归 repr；实测证据见文档。
+- **tarfile**：纯 py 侧没有 open()/文件对象（流式/seek 原语）。
+- **traceback**：异常值没有 traceback 对象、没有 sys.exc_info。
+- **dataclasses**：类布局编译期固定、无注解反射/动态类生成。
+- contextlib 的 **suppress/closing**（异常类过 unknown 参数退化成 0；
+  unknown 值不支持方法调用）。
+
 ## [0.337] - 2026-11-20
 
 > dv1 分支：**去虚拟化深化 + 函数内联扩展——削减调用开销**（fib/nqueens/
