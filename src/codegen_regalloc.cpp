@@ -43,16 +43,16 @@ void AsmGen::emit_epilogue() {
         if (frame_pad_ > 0) {
             emit_imm(MOp::kAddq, frame_pad_, kRsp);
             cfa_off_ -= frame_pad_;
-            cfi(std::format(".cfi_def_cfa_offset {}", cfa_off_));
+            cfi_cfa_offset();
         }
         for (int i = n_saved_regs_ - 1; i >= 0; --i) {
             const char* reg = gen_ ? "%r15" : kSlotRegs()[i];
-            line(std::format("popq {}", reg));
-            cfi(std::format(".cfi_restore {}", reg));
+            emit1(MOp::kPopq, mreg_from_name(reg));
+            cfi_restore(reg);
             cfa_off_ -= 8;
-            cfi(std::format(".cfi_def_cfa_offset {}", cfa_off_));
+            cfi_cfa_offset();
         }
-        line("ret");
+        emit0(MOp::kRet);
         cfi(".cfi_restore_state");
         cfa_off_ = body_cfa;
     }

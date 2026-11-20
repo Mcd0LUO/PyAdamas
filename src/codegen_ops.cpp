@@ -163,9 +163,9 @@ void AsmGen::gen_inst(const Inst& in) {
                 move_to(dst_mop(in.dst), mreg_operand(kRax));
                 break;
             case IrOp::Mov:
-                move_to(dst_op(in.dst), src_op(in.a));
+                move_to(dst_mop(in.dst), src_mop(in.a));
                 // P3：unknown dst 的搬运同时搬 tag（tag 跟值走，设计 §3.3）。
-                if (vreg_tagged(in.dst)) move_to(tag_mem(in.dst), tag_src(in.a));
+                if (vreg_tagged(in.dst)) move_to(tag_mop(in.dst), MOperand(tag_src(in.a)));
                 break;
             case IrOp::Bin: gen_bin(in); break;
             case IrOp::Un: gen_un(in); break;
@@ -185,46 +185,40 @@ void AsmGen::gen_inst(const Inst& in) {
                 // 1006ms（+76%），所以回退了。但那次是所有槽都双写；
                 // 这里只对**本块确实用 split 寄存器**的槽双写 —— 那些槽
                 // 本来就已经有 reload 开销，多一条 mov 换正确性是划算的。
-                const std::string& loc = slot_op(in.idx);
-                move_to(loc, src_op(in.a));
+                const MOperand& loc = slot_mop(in.idx);
+                move_to(loc, src_mop(in.a));
                 // P3：unknown 槽写入同时写 tag 字。
-                if (slot_tagged(in.idx)) move_to(slot_tag_op(in.idx), tag_src(in.a));
+                if (slot_tagged(in.idx)) move_to(slot_tag_mop(in.idx), MOperand(tag_src(in.a)));
                 invalidate_slot(in.idx);
                 break;
             }            case IrOp::LoadGlobal:
-                out_ += "\tmovq ";
-                out_ += global_label(in.idx);
-                out_ += "(%rip), %rax\n";
-                move_to(dst_op(in.dst), "%rax");
+                emit2(MOp::kMovq, op_mem_sym(global_label(in.idx), "%rip"), kRax);
+                move_to(dst_mop(in.dst), mreg_operand(kRax));
                 // P3：unknown 全局装载同时装 tag；无 tag 字的全局（外部/
                 // 非入口导出）落 UNK 回退探针。
                 if (vreg_tagged(in.dst)) {
                     if (global_tag_eligible(in.idx)) {
-                        out_ += "\tmovq " + global_tag_label(in.idx) + "(%rip), %rax\n";
-                        move_to(tag_mem(in.dst), "%rax");
+                        emit2(MOp::kMovq, op_mem_sym(global_tag_label(in.idx), "%rip"), kRax);
+                        move_to(tag_mop(in.dst), mreg_operand(kRax));
                     } else {
                         emit_tag_imm(in.dst, kTagUnk);
                     }
                 }
                 break;
             case IrOp::StoreGlobal:
-                emit2("movq", src_op(in.a), "%rax");
-                out_ += "\tmovq %rax, ";
-                out_ += global_label(in.idx);
-                out_ += "(%rip)\n";
+                emit2(MOp::kMovq, src_mop(in.a), kRax);
+                emit2(MOp::kMovq, kRax, op_mem_sym(global_label(in.idx), "%rip"));
                 // P3：unknown 全局写入同时写 tag 字（仅 eligible 全局）。
                 if (tags_enabled_ && in.idx >= 0 &&
                     in.idx < static_cast<int>(m_->globals.size()) &&
                     is_unk_ty(m_->globals[static_cast<size_t>(in.idx)].ty) &&
                     global_tag_eligible(in.idx)) {
-                    move_to(global_tag_label(in.idx) + "(%rip)", tag_src(in.a));
+                    move_to(MOperand(global_tag_label(in.idx) + "(%rip)"), MOperand(tag_src(in.a)));
                 }
                 break;
             case IrOp::GlobalAddr:
-                out_ += "\tleaq ";
-                out_ += global_label(in.idx);
-                out_ += "(%rip), %rax\n";
-                move_to(dst_op(in.dst), "%rax");
+                emit2(MOp::kLeaq, op_mem_sym(global_label(in.idx), "%rip"), kRax);
+                move_to(dst_mop(in.dst), mreg_operand(kRax));
                 break;
             case IrOp::ClassAddr: {
                 char b[24];
@@ -248,9 +242,9 @@ void AsmGen::gen_inst(const Inst& in) {
                 break;
             case IrOp::IndexStoreUnchecked: gen_index_store_unchecked(in); break;
             case IrOp::Len:
-                emit2("movq", src_op(in.a), "%rax");
-                line("movq (%rax), %rax");
-                move_to(dst_op(in.dst), "%rax");
+                emit2(MOp::kMovq, src_mop(in.a), kRax);
+                emit2(MOp::kMovq, op_mem(kRax), kRax);
+                move_to(dst_mop(in.dst), mreg_operand(kRax));
                 break;
             case IrOp::ObjNew: gen_obj_new(in); break;
             case IrOp::StructNew: gen_struct_new(in); break;
@@ -292,8 +286,8 @@ void AsmGen::gen_inst(const Inst& in) {
             case IrOp::Return: gen_return(in); break;
             case IrOp::SlotAddr: {
                 int slot = in.idx;
-                emit2("leaq", gen_ ? gen_smem(slot) : smem(slot), "%rax");
-                move_to(dst_op(in.dst), "%rax");
+                emit2(MOp::kLeaq, gen_ ? gen_smem_mop(slot) : smem_mop(slot), kRax);
+                move_to(dst_mop(in.dst), mreg_operand(kRax));
                 break;
             }
             case IrOp::GenNew: {
@@ -341,31 +335,31 @@ void AsmGen::gen_inst(const Inst& in) {
                 emit_tag_imm(in.dst, kTagUnk);
                 break;
             case IrOp::GenYield:
-                if (in.a != kNoReg) emit2("movq", src_op(in.a), "%rax");
-                else line("xorl %eax, %eax");
-                line("movq %rax, 24(%r15)");
-                emit_imm_mem("0(%r15)", in.imm);
-                line("xorl %eax, %eax");
+                if (in.a != kNoReg) emit2(MOp::kMovq, src_mop(in.a), kRax);
+                else emit2(MOp::kXorl, kEax, kEax);
+                emit2(MOp::kMovq, kRax, op_mem(kR15, 24));
+                emit_imm(MOp::kMovq, in.imm, op_mem(kR15, 0));
+                emit2(MOp::kXorl, kEax, kEax);
                 emit_epilogue();
                 break;
             case IrOp::GenAwait:
-                if (in.a != kNoReg) emit2("movq", src_op(in.a), "%rax");
-                else line("xorl %eax, %eax");
-                line("movq %rax, 24(%r15)");
-                emit_imm_mem("0(%r15)", in.imm);
+                if (in.a != kNoReg) emit2(MOp::kMovq, src_mop(in.a), kRax);
+                else emit2(MOp::kXorl, kEax, kEax);
+                emit2(MOp::kMovq, kRax, op_mem(kR15, 24));
+                emit_imm(MOp::kMovq, in.imm, op_mem(kR15, 0));
                 line("movq $3, 8(%r15)");
                 line("xorl %eax, %eax");
                 emit_epilogue();
                 break;
             case IrOp::GenRethrow:
-                line(std::format("movq %r15, {}", arg_reg_i(0)));
+                emit2(MOp::kMovq, kR15, arg_reg_i(0));
                 line("call pa_coro_rethrow");
                 line("ud2");
                 break;
             case IrOp::GenDone:
                 if (in.a != kNoReg) {
-                    emit2("movq", src_op(in.a), "%rax");
-                    line("movq %rax, 24(%r15)");
+                    emit2(MOp::kMovq, src_mop(in.a), kRax);
+                    emit2(MOp::kMovq, kRax, op_mem(kR15, 24));
                 }
                 line("movq $1, 8(%r15)");
                 line("xorl %eax, %eax");
@@ -442,13 +436,13 @@ void AsmGen::gen_bin(const Inst& in) {
                 line("# unsupported string operator");
                 return;
             }
-            emit2("movq", src_op(in.a), arg_reg_i(0));
-            emit2("movq", src_op(in.b), arg_reg_i(1));
+            emit2(MOp::kMovq, src_mop(in.a), arg_reg_i(0));
+            emit2(MOp::kMovq, src_mop(in.b), arg_reg_i(1));
             spill_fp_slots();
             // str 的 pub 相加、bytes 的 pub = 字节数，两个入口分开
             line(ty->kind == TyKind::Bytes ? "call pa_bytes_concat" : "call pa_str_concat");
             reload_fp_slots();
-            move_to(dst_op(in.dst), "%rax");
+            move_to(dst_mop(in.dst), mreg_operand(kRax));
             return;
         }
         if (ir_is_float(ty)) {
@@ -654,11 +648,11 @@ bool AsmGen::gen_div_const(const Inst& in, int mode) {
         if (d == 0 || d == -1 || d == INT64_MIN) return false;
         if (d < INT32_MIN || d > INT32_MAX) return false;
         if (mode == kDivModeMod && d == 1) { line("xorq %rax, %rax"); return true; }
-        if (d == 1) { emit2("movq", src_op(in.a), "%rax"); return true; }
+        if (d == 1) { emit2(MOp::kMovq, src_mop(in.a), kRax); return true; }
 
         // %r9 暂存被除数：算完商之后还原余数还要用它。%r9 是块内临时寄存器，
         // 不受槽分配影响（vreg 只用 callee pool：rbx/r12-r15/rbp）。
-        emit2("movq", src_op(in.a), "%r9");
+        emit2(MOp::kMovq, src_mop(in.a), kR9);
         // 被除数可证非负（降级期打标）→ 无符号魔数路径。优化遍新建的
         // vreg 没有标（越界按 false），保守走有符号路径。
         bool a_nn = static_cast<size_t>(in.a) < f_->vreg_nonneg.size() &&
@@ -672,7 +666,7 @@ bool AsmGen::gen_div_const(const Inst& in, int mode) {
 void AsmGen::gen_floordiv(const Inst& in) {
         if (gen_div_const(in, kDivModeFloor)) return;
         std::string done = fresh_label("fdiv");
-        emit2("movq", src_op(in.b), div_reg());
+        emit2(MOp::kMovq, src_mop(in.b), mreg_from_name(div_reg()));
         gen_div_guard();
         line("cqto");
         if (!target_abi().gnu_cfi) line("movq %r10, %rcx");
@@ -691,7 +685,7 @@ void AsmGen::gen_floordiv(const Inst& in) {
 void AsmGen::gen_mod(const Inst& in) {
         if (gen_div_const(in, kDivModeMod)) return;
         std::string done = fresh_label("mod");
-        emit2("movq", src_op(in.b), div_reg());
+        emit2(MOp::kMovq, src_mop(in.b), mreg_from_name(div_reg()));
         gen_div_guard();
         line("cqto");
         if (!target_abi().gnu_cfi) line("movq %r10, %rcx");
@@ -707,33 +701,34 @@ void AsmGen::gen_mod(const Inst& in) {
     }
 
 void AsmGen::gen_bin_fp(const Inst& in) {
-        std::string d = dst_op(in.dst);
+        const MOperand& d = dst_mop(in.dst);
         bool simple = in.bop == BinKind::Add || in.bop == BinKind::Sub ||
                       in.bop == BinKind::Mul || in.bop == BinKind::Div;
         // 结果直接落在提升过的浮点寄存器时，把左操作数装进目标寄存器
         // 就地算。累加 `s = s + ...` 因此只剩一条 addsd。
-        if (opt_ >= 1 && simple && d.starts_with("%xmm")) {
-            std::string sa = src_op(in.a);
-            if (sa != d) move_fp(d, sa);
+        if (opt_ >= 1 && simple && d.kind == MOperandKind::Reg &&
+            d.reg >= kXmm0 && d.reg <= kXmm15) {
+            const MOperand& sa = src_mop(in.a);
+            if (sa.text != d.text) move_fp(d, sa);
             switch (in.bop) {
-                case BinKind::Add: emit2("addsd", src_op(in.b), d); break;
-                case BinKind::Sub: emit2("subsd", src_op(in.b), d); break;
-                case BinKind::Mul: emit2("mulsd", src_op(in.b), d); break;
-                case BinKind::Div: emit2("divsd", src_op(in.b), d); break;
+                case BinKind::Add: emit2(MOp::kAddsd, src_mop(in.b), d); break;
+                case BinKind::Sub: emit2(MOp::kSubsd, src_mop(in.b), d); break;
+                case BinKind::Mul: emit2(MOp::kMulsd, src_mop(in.b), d); break;
+                case BinKind::Div: emit2(MOp::kDivsd, src_mop(in.b), d); break;
                 default: break;
             }
             return;
         }
-        move_fp("%xmm0", src_op(in.a));
+        move_fp(mreg_operand(kXmm0), src_mop(in.a));
         switch (in.bop) {
-            case BinKind::Add: emit2("addsd", src_op(in.b), "%xmm0"); break;
-            case BinKind::Sub: emit2("subsd", src_op(in.b), "%xmm0"); break;
-            case BinKind::Mul: emit2("mulsd", src_op(in.b), "%xmm0"); break;
-            case BinKind::Div: emit2("divsd", src_op(in.b), "%xmm0"); break;
+            case BinKind::Add: emit2(MOp::kAddsd, src_mop(in.b), kXmm0); break;
+            case BinKind::Sub: emit2(MOp::kSubsd, src_mop(in.b), kXmm0); break;
+            case BinKind::Mul: emit2(MOp::kMulsd, src_mop(in.b), kXmm0); break;
+            case BinKind::Div: emit2(MOp::kDivsd, src_mop(in.b), kXmm0); break;
             case BinKind::FloorDiv:
                 // floor(a / b)：先除再向下取整。roundsd 要 SSE4.1，
                 // 为了兼容性走 libm。
-                emit2("divsd", src_op(in.b), "%xmm0");
+                emit2(MOp::kDivsd, src_mop(in.b), kXmm0);
                 spill_fp_slots();
                 line("call floor");
                 reload_fp_slots();
@@ -745,15 +740,15 @@ void AsmGen::gen_bin_fp(const Inst& in) {
                 // 所以 -0.0 % 3.0 是 0.0 而不是 -0.0。
                 std::string done = fresh_label("fmod");
                 std::string nz = fresh_label("fmodnz");
-                emit2("movsd", src_op(in.b), "%xmm1");
+                emit2(MOp::kMovsd, src_mop(in.b), kXmm1);
                 spill_fp_slots();
                 line("call fmod");
                 reload_fp_slots();
-                emit2("movsd", src_op(in.b), "%xmm1");
+                emit2(MOp::kMovsd, src_mop(in.b), kXmm1);
                 line("xorpd %xmm2, %xmm2");
                 line("ucomisd %xmm2, %xmm0");
-                emit_jmp("jp", done);  // NaN 原样返回
-                emit_jmp("jne", nz);
+                emit_jmp(MOp::kJp, done);  // NaN 原样返回
+                emit_jmp(MOp::kJne, nz);
                 line("movq %xmm1, %rdx");
                 line("movabsq $0x8000000000000000, %rax");
                 line("andq %rdx, %rax");
@@ -763,13 +758,13 @@ void AsmGen::gen_bin_fp(const Inst& in) {
                 line("movq %xmm0, %rax");
                 line("movq %xmm1, %rdx");
                 line("xorq %rdx, %rax");
-                emit_jmp("jns", done);  // 同号，无需修正
+                emit_jmp(MOp::kJns, done);  // 同号，无需修正
                 line("addsd %xmm1, %xmm0");
                 label(done);
                 break;
             }
             case BinKind::Pow:
-                emit2("movsd", src_op(in.b), "%xmm1");
+                emit2(MOp::kMovsd, src_mop(in.b), kXmm1);
                 spill_fp_slots();
                 line("call pow");
                 reload_fp_slots();
@@ -778,7 +773,7 @@ void AsmGen::gen_bin_fp(const Inst& in) {
                 line("# unsupported float operator");
                 break;
         }
-        move_fp(dst_op(in.dst), "%xmm0");
+        move_fp(dst_mop(in.dst), mreg_operand(kXmm0));
     }
 
 // xmm3-7 浮点临时值只被「会正常返回的调用」和「使用 xmm3-7 的指令」
@@ -830,28 +825,28 @@ void AsmGen::gen_un(const Inst& in) {
         TypePtr ty = ty_of(in.a);
         if (in.uop == UnKind::Not) {
             emit_truth(in.a, "%al");
-            line("xorb $1, %al");
-            line("movzbq %al, %rax");
-            emit2("movq", "%rax", dst_op(in.dst));
+            emit_imm(MOp::kXorb, 1, kAl);
+            emit2(MOp::kMovzbq, kAl, kRax);
+            emit2(MOp::kMovq, kRax, dst_mop(in.dst));
             return;
         }
         if (ir_is_float(ty)) {
             if (in.uop == UnKind::Neg) {
-                move_fp("%xmm0", src_op(in.a));
+                move_fp(mreg_operand(kXmm0), src_mop(in.a));
                 line("movabsq $0x8000000000000000, %rax");
                 line("movq %rax, %xmm1");
                 line("xorpd %xmm1, %xmm0");
-                move_fp(dst_op(in.dst), "%xmm0");
+                move_fp(dst_mop(in.dst), mreg_operand(kXmm0));
             }
             return;
         }
-        emit2("movq", src_op(in.a), "%rax");
+        emit2(MOp::kMovq, src_mop(in.a), kRax);
         switch (in.uop) {
-            case UnKind::Neg: line("negq %rax"); break;
-            case UnKind::BitNot: line("notq %rax"); break;
+            case UnKind::Neg: emit1(MOp::kNegq, kRax); break;
+            case UnKind::BitNot: emit1(MOp::kNotq, kRax); break;
             default: break;
         }
-        emit2("movq", "%rax", dst_op(in.dst));
+        emit2(MOp::kMovq, kRax, dst_mop(in.dst));
     }
 
 // 把一个值算成 0/1 放进 %al。浮点的 NaN 视为真（Python 语义），
@@ -860,7 +855,7 @@ void AsmGen::emit_truth(VReg r, const char* byte_reg) {
         (void)byte_reg;
         TypePtr ty = ty_of(r);
         if (ir_is_float(ty)) {
-            move_fp("%xmm0", src_op(r));
+            move_fp(mreg_operand(kXmm0), src_mop(r));
             line("xorpd %xmm1, %xmm1");
             line("ucomisd %xmm1, %xmm0");
             line("setne %al");
@@ -871,27 +866,27 @@ void AsmGen::emit_truth(VReg r, const char* byte_reg) {
         if (ty && (ty->kind == TyKind::Str || ty->kind == TyKind::List ||
                    ty->kind == TyKind::Tuple || ty->kind == TyKind::Dict ||
                    ty->kind == TyKind::Set)) {
-            emit2("movq", src_op(r), "%rax");
-            line("cmpq $0, (%rax)");
-            line("setne %al");
+            emit2(MOp::kMovq, src_mop(r), kRax);
+            emit_imm(MOp::kCmpq, 0, op_mem(kRax));
+            emit1(MOp::kSetne, kAl);
             return;
         }
         if (ty && ty->kind == TyKind::Complex) {
-            emit2("movq", src_op(r), "%rax");
-            line("xorpd %xmm1, %xmm1");
-            line("ucomisd 8(%rax), %xmm1");
-            line("setne %al");
-            line("ucomisd 16(%rax), %xmm1");
+            emit2(MOp::kMovq, src_mop(r), kRax);
+            emit2(MOp::kXorpd, kXmm1, kXmm1);
+            emit2(MOp::kUcomisd, op_mem(kRax, 8), kXmm1);
+            emit1(MOp::kSetne, kAl);
+            emit2(MOp::kUcomisd, op_mem(kRax, 16), kXmm1);
             line("setne %cl");
             line("orb %cl, %al");
             return;
         }
         if (ty && ty->kind == TyKind::Complex) {
-            emit2("movq", src_op(r), "%rax");
-            line("xorpd %xmm1, %xmm1");
-            line("ucomisd 8(%rax), %xmm1");
-            line("setne %al");
-            line("ucomisd 16(%rax), %xmm1");
+            emit2(MOp::kMovq, src_mop(r), kRax);
+            emit2(MOp::kXorpd, kXmm1, kXmm1);
+            emit2(MOp::kUcomisd, op_mem(kRax, 8), kXmm1);
+            emit1(MOp::kSetne, kAl);
+            emit2(MOp::kUcomisd, op_mem(kRax, 16), kXmm1);
             line("setne %cl");
             line("orb %cl, %al");
             return;
@@ -900,7 +895,7 @@ void AsmGen::emit_truth(VReg r, const char* byte_reg) {
         // Python 真值判断（0/0.0/空串/空容器为假）。按整数比较会把
         // 空串（非空指针）当成真，filter(None, 异构列表) 因此保留空串。
         if (!ty || ty->kind == TyKind::Unknown) {
-            emit2("movq", src_op(r), arg_reg_i(0));
+            emit2(MOp::kMovq, src_mop(r), arg_reg_i(0));
             spill_fp_slots();
             line("call pa_truth_unknown");
             reload_fp_slots();
@@ -949,27 +944,27 @@ void AsmGen::gen_cmp(const Inst& in) {
                 emit2(MOp::kMovq, op_mem(db, 24), kR11);
                 line("movzbq (%r10), %rax");
                 line("cmpb (%r11), %al");
-                emit_jmp("je", same);
+                emit_jmp(MOp::kJe, same);
                 line(in.cop == CmpKind::Eq ? "movq $0, %rax" : "movq $1, %rax");
-                emit_jmp("jmp", done);
+                emit_jmp(MOp::kJmp, done);
                 label(slow);
                 spill_fp_slots();
                 line("call pa_str_eq");
                 reload_fp_slots();
                 // != 是 == 的取反。**慢路径也要取反** —— 曾经只改了「指针
                 // 相等」那条快路径，非等指针的 != 直接返回了 == 的结果。
-                if (in.cop == CmpKind::Ne) line("xorq $1, %rax");
-                emit_jmp("jmp", done);
+                if (in.cop == CmpKind::Ne) emit_imm(MOp::kXorq, 1, kRax);
+                emit_jmp(MOp::kJmp, done);
                 label(same);
                 line(in.cop == CmpKind::Eq ? "movq $1, %rax" : "movq $0, %rax");
                 label(done);
-                emit2("movq", "%rax", dst_op(in.dst));
+                emit2(MOp::kMovq, kRax, dst_mop(in.dst));
                 return;
             }
             // 大小比较走三路比较。早先这里只留了一句注释、什么都不生成，
             // 于是 a < b 静默拿到槽里的残留值——恒为 False。
-            emit2("movq", src_op(in.a), arg_reg_i(0));
-            emit2("movq", src_op(in.b), arg_reg_i(1));
+            emit2(MOp::kMovq, src_mop(in.a), arg_reg_i(0));
+            emit2(MOp::kMovq, src_mop(in.b), arg_reg_i(1));
             spill_fp_slots();
             line("call pa_str_cmp");
             reload_fp_slots();
@@ -981,8 +976,8 @@ void AsmGen::gen_cmp(const Inst& in) {
                 case CmpKind::Ge: line("setge %al"); break;
                 default: break;
             }
-            line("movzbq %al, %rax");
-            emit2("movq", "%rax", dst_op(in.dst));
+            emit2(MOp::kMovzbq, kAl, kRax);
+            emit2(MOp::kMovq, kRax, dst_mop(in.dst));
             return;
         }
         if (ir_is_float(ty)) {
@@ -992,18 +987,18 @@ void AsmGen::gen_cmp(const Inst& in) {
         // cmp 不写坏操作数，所以左操作数已经在寄存器/栈上时不必先搬进
         // rax。但有两个限制：cmp 不能两个操作数都在内存；立即数只能
         // 放在第一操作数，直接写会把减法方向搞反。
-        std::string sa = src_op(in.a);
-        std::string sb = src_op(in.b);
-        bool sa_mem = is_mem_operand(sa);
-        bool sb_mem = is_mem_operand(sb);
+        const MOperand& sa = src_mop(in.a);
+        const MOperand& sb = src_mop(in.b);
+        bool sa_mem = is_mem_mop(sa);
+        bool sb_mem = is_mem_mop(sb);
         if (sa_mem && sb_mem) {
-            emit2("movq", sa, "%rax");
-            emit2("cmpq", sb, "%rax");
-        } else if (sa_mem || sa[0] == '%') {
-            emit2("cmpq", sb, sa);
+            emit2(MOp::kMovq, sa, kRax);
+            emit2(MOp::kCmpq, sb, kRax);
+        } else if (sa_mem || sa.kind == MOperandKind::Reg) {
+            emit2(MOp::kCmpq, sb, sa);
         } else {
-            emit2("movq", sa, "%rax");
-            emit2("cmpq", sb, "%rax");
+            emit2(MOp::kMovq, sa, kRax);
+            emit2(MOp::kCmpq, sb, kRax);
         }
         switch (in.cop) {
             case CmpKind::Lt: line("setl %al"); break;
@@ -1013,13 +1008,13 @@ void AsmGen::gen_cmp(const Inst& in) {
             case CmpKind::Eq: line("sete %al"); break;
             case CmpKind::Ne: line("setne %al"); break;
         }
-        line("movzbq %al, %rax");
-        move_to(dst_op(in.dst), "%rax");
+        emit2(MOp::kMovzbq, kAl, kRax);
+        move_to(dst_mop(in.dst), mreg_operand(kRax));
     }
 
 void AsmGen::gen_cmp_fp(const Inst& in) {
-        move_fp("%xmm0", src_op(in.a));
-        emit2("ucomisd", src_op(in.b), "%xmm0");
+        move_fp(mreg_operand(kXmm0), src_mop(in.a));
+        emit2(MOp::kUcomisd, src_mop(in.b), kXmm0);
         switch (in.cop) {
             case CmpKind::Lt:
                 line("setb %al");
@@ -1048,8 +1043,8 @@ void AsmGen::gen_cmp_fp(const Inst& in) {
                 line("orb %cl, %al");
                 break;
         }
-        line("movzbq %al, %rax");
-        emit2("movq", "%rax", dst_op(in.dst));
+        emit2(MOp::kMovzbq, kAl, kRax);
+        emit2(MOp::kMovq, kRax, dst_mop(in.dst));
     }
 
 void AsmGen::gen_convert(const Inst& in) {
@@ -1058,50 +1053,50 @@ void AsmGen::gen_convert(const Inst& in) {
         if (!to) return;
         if (to->kind == TyKind::Bool) {
             emit_truth(in.a, "%al");
-            line("movzbq %al, %rax");
-            emit2("movq", "%rax", dst_op(in.dst));
+            emit2(MOp::kMovzbq, kAl, kRax);
+            emit2(MOp::kMovq, kRax, dst_mop(in.dst));
             return;
         }
         if (to->kind == TyKind::Float) {
             if (ir_is_float(from)) {
                 // 已经是 double，只搬一次
-                move_fp(dst_op(in.dst), src_op(in.a));
+                move_fp(dst_mop(in.dst), src_mop(in.a));
                 return;
             }
             // cvtsi2sd 的源必须是寄存器或内存，立即数不能直接转
-            std::string sa = src_op(in.a);
-            if (!is_mem_operand(sa) && sa[0] != '%') {
-                emit2("movq", sa, "%rax");
-                sa = "%rax";
+            const MOperand* sa = &src_mop(in.a);
+            if (sa->kind == MOperandKind::Imm) {
+                emit2(MOp::kMovq, *sa, kRax);
+                sa = &mreg_operand(kRax);
             }
-            emit2("cvtsi2sdq", sa, "%xmm0");
-            move_fp(dst_op(in.dst), "%xmm0");
+            emit2(MOp::kCvtsi2sdq, *sa, kXmm0);
+            move_fp(dst_mop(in.dst), mreg_operand(kXmm0));
             return;
         }
         if (to->kind == TyKind::Int) {
             if (ir_is_float(from)) {
-                emit2("cvttsd2siq", src_op(in.a), "%rax");
-                emit2("movq", "%rax", dst_op(in.dst));
+                emit2(MOp::kCvttsd2siq, src_mop(in.a), kRax);
+                emit2(MOp::kMovq, kRax, dst_mop(in.dst));
             } else {
-                emit2("movq", src_op(in.a), "%rax");
-                emit2("movq", "%rax", dst_op(in.dst));
+                emit2(MOp::kMovq, src_mop(in.a), kRax);
+                emit2(MOp::kMovq, kRax, dst_mop(in.dst));
             }
             return;
         }
         if (to->kind == TyKind::Str) {
             // 源类型已经是 str：什么都不用做，只补一条搬运
             if (from && from->kind == TyKind::Str) {
-                emit2("movq", src_op(in.a), "%rax");
-                emit2("movq", "%rax", dst_op(in.dst));
+                emit2(MOp::kMovq, src_mop(in.a), kRax);
+                emit2(MOp::kMovq, kRax, dst_mop(in.dst));
                 return;
             }
             if (ir_is_float(from)) {
-                move_fp("%xmm0", src_op(in.a));
+                move_fp(mreg_operand(kXmm0), src_mop(in.a));
                 spill_fp_slots();
                 line("call pa_str_from_f64");
                 reload_fp_slots();
             } else if (from && from->kind == TyKind::Bool) {
-                emit2("movq", src_op(in.a), arg_reg_i(0));
+                emit2(MOp::kMovq, src_mop(in.a), arg_reg_i(0));
                 spill_fp_slots();
                 line("call pa_str_from_bool");
                 reload_fp_slots();
@@ -1110,12 +1105,12 @@ void AsmGen::gen_convert(const Inst& in) {
                 line("call pa_str_from_none");
                 reload_fp_slots();
             } else {
-                emit2("movq", src_op(in.a), arg_reg_i(0));
+                emit2(MOp::kMovq, src_mop(in.a), arg_reg_i(0));
                 spill_fp_slots();
                 line("call pa_str_from_i64");
                 reload_fp_slots();
             }
-            emit2("movq", "%rax", dst_op(in.dst));
+            emit2(MOp::kMovq, kRax, dst_mop(in.dst));
             return;
         }
     }

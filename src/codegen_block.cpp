@@ -356,7 +356,7 @@ void AsmGen::emit_function(const IRFunction& f, int fi) {
         if (dbg_on_) {
             // 函数起点也登记一项：生成器/协程帧只保存 resume 代码地址，
             // 回溯时用它找回函数名。
-            std::string start = std::format(".LdbgStart{}", fi);
+            std::string start = num_label(".LdbgStart", fi);
             out_ += start + ":\n";
             dbg_entries_.push_back({start, fi, 0});
         }
@@ -395,18 +395,18 @@ void AsmGen::emit_function(const IRFunction& f, int fi) {
         // 被保存的寄存器相对 CFA 的偏移不随 push 变化（CFA 也跟着涨）。
         cfa_off_ = 8;
         if (gen_) {
-            line("pushq %r15");
+            emit1(MOp::kPushq, kR15);
             cfa_off_ += 8;
-            cfi(std::format(".cfi_def_cfa_offset {}", cfa_off_));
+            cfi_cfa_offset();
             cfi(".cfi_offset %r15, -16");
             // 生成器/协程 resume 的第一个实参是生成器对象，按 ABI 位置取。
-            line(std::format("movq {}, %r15", arg_reg_i(0)));
+            emit2(MOp::kMovq, arg_reg_i(0), kR15);
         } else {
             for (int i = 0; i < n_saved_regs_; ++i) {
-                line(std::format("pushq {}", kSlotRegs()[i]));
+                emit1(MOp::kPushq, mreg_from_name(kSlotRegs()[i]));
                 cfa_off_ += 8;
-                cfi(std::format(".cfi_def_cfa_offset {}", cfa_off_));
-                cfi(std::format(".cfi_offset {}, -{}", kSlotRegs()[i], cfa_off_));
+                cfi_cfa_offset();
+                cfi_offset(kSlotRegs()[i], cfa_off_);
             }
         }
         frame_alloc();
@@ -414,7 +414,7 @@ void AsmGen::emit_function(const IRFunction& f, int fi) {
         // 这里就是 g.entry 块头——每次 resume 都经过，垃圾 tag 不会跨
         // resume 残留（P3-1b，118/124/128/133 回归钉住）。
         for (int w = 0; w < n_tag_words_; ++w)
-            emit2("movq", "$0", std::format("{}(%rsp)", tag_off(w)));
+            emit_imm(MOp::kMovq, 0, op_mem(kRsp, tag_off(w)));
 
         if (!gen_) {
             // 非参数变量清零。`x: int` 这种纯声明在 lower 里不生成任何指令，
@@ -431,11 +431,11 @@ void AsmGen::emit_function(const IRFunction& f, int fi) {
             }
             for (int s = 0; s < n_slots_; ++s)
                 if (!is_param[s] && (!need || (*need)[static_cast<size_t>(s)])) {
-                    std::string loc = slot_op(s);
-                    if (loc.starts_with("%xmm"))
-                        emit2("xorpd", loc, loc);
+                    const MOperand& loc = slot_mop(s);
+                    if (loc.kind == MOperandKind::Reg && loc.reg >= kXmm0 && loc.reg <= kXmm15)
+                        emit2(MOp::kXorpd, loc, loc);
                     else
-                        emit2("movq", "$0", loc);
+                        emit_imm(MOp::kMovq, 0, loc);
                 }
             // P3-1b：tag 入口装载形参 tag（%r11==0 → 保持 UNK 回退）。
             if (func_ptag_words() > 0) emit_ptag_param_load();
@@ -450,17 +450,17 @@ void AsmGen::emit_function(const IRFunction& f, int fi) {
                 const auto& l = locs[i];
                 if (l.stack_off >= 0) {
                     // 栈上实参在返回地址上面：rsp + 帧长 + 8 + 偏移。
-                    line(std::format("movq {}(%rsp), %rax", frame_bytes_ + 8 + l.stack_off));
-                    move_to(slot_op(p.slot), "%rax");
+                    emit2(MOp::kMovq, op_mem(kRsp, frame_bytes_ + 8 + l.stack_off), kRax);
+                    move_to(slot_mop(p.slot), mreg_operand(kRax));
                 } else if (l.fp) {
-                    line(std::format("movsd %xmm{}, {}", l.reg, slot_op(p.slot)));
+                    emit2(MOp::kMovsd, static_cast<MReg>(kXmm0 + l.reg), slot_mop(p.slot));
                 } else {
-                    move_to(slot_op(p.slot), arg_reg_i(l.reg));
+                    move_to(slot_mop(p.slot), mreg_operand(mreg_from_name(arg_reg_i(l.reg))));
                 }
             }
 
             // 有捕获的函数从 %r10 拿闭包环境；调用方在 call 前设置。
-            if (f.env_slot >= 0) emit2("movq", "%r10", slot_op(f.env_slot));
+            if (f.env_slot >= 0) emit2(MOp::kMovq, kR10, slot_mop(f.env_slot));
 
             // 压帧记录。槽地址在 %rsp 上是固定的（rsp 全程不动），异常
             // 展开时按地址读最新值即可；正常返回由 emit_epilogue 弹栈。
@@ -471,7 +471,7 @@ void AsmGen::emit_function(const IRFunction& f, int fi) {
                 emit_imm(MOp::kMovq, static_cast<int64_t>(rec_entries), rec_mem(1));
                 if (frame_scan_words_ > 0) {
                     // 临时区从第一个 vreg 槽开始，往高地址扫 scan_words 个字。
-                    line(std::format("leaq {}(%rsp), %rax", vreg_slot_off(0)));
+                    emit2(MOp::kLeaq, op_mem(kRsp, vreg_slot_off(0)), kRax);
                     emit2(MOp::kMovq, kRax, rec_mem(2));
                 } else {
                     emit_imm(MOp::kMovq, static_cast<int64_t>(0), rec_mem(2));
@@ -479,20 +479,20 @@ void AsmGen::emit_function(const IRFunction& f, int fi) {
                 emit_imm(MOp::kMovq, static_cast<int64_t>(frame_scan_words_), rec_mem(3));
                 if (!frame_scan_mask_.empty()) {
                     // 位图是静态只读数据，地址编译期就能定。
-                    line(std::format("leaq .Lscanmask{}(%rip), %rax", fi));
+                    emit2(MOp::kLeaq, op_mem_sym(num_label(".Lscanmask", fi), "%rip"), kRax);
                     emit2(MOp::kMovq, kRax, rec_mem(4));
                 } else {
                     emit_imm(MOp::kMovq, static_cast<int64_t>(0), rec_mem(4));
                 }
                 int ri = 6;
                 for (size_t i = 0; i < frame_owned_.size(); ++i, ++ri) {
-                    line(std::format("leaq {}, %rax", smem(frame_owned_[i])));
+                    emit2(MOp::kLeaq, smem_mop(frame_owned_[i]), kRax);
                     // 低位标记：该槽可能装着非堆值，展开时走注册表释放。
                     if (frame_owned_unknown_[i]) line("orq $1, %rax");
                     emit2(MOp::kMovq, kRax, rec_mem(ri));
                 }
                 for (int s : frame_scan_) {
-                    line(std::format("leaq {}, %rax", smem(s)));
+                    emit2(MOp::kLeaq, smem_mop(s), kRax);
                     // bit1：只给 GC 扫描，异常展开不释放。
                     line("orq $2, %rax");
                     emit2(MOp::kMovq, kRax, rec_mem(ri++));
@@ -500,7 +500,7 @@ void AsmGen::emit_function(const IRFunction& f, int fi) {
                 // 本帧 CFA（= rsp + frame_bytes_ + 8，与 .cfi_def_cfa 同一口径）：
                 // 表驱动展开在 phase 2 的 handler 帧人格调用里按它批量释放更深
                 // 帧的记录，所以必须在进链之前写好。
-                line(std::format("leaq {}(%rsp), %rax", frame_bytes_ + 8));
+                emit2(MOp::kLeaq, op_mem(kRsp, frame_bytes_ + 8), kRax);
                 emit2(MOp::kMovq, kRax, rec_mem(5));
                 emit2(MOp::kLeaq, rec_mem(0), kRax);
                 line("movq %rax, pa_frame_top(%rip)");
@@ -510,8 +510,8 @@ void AsmGen::emit_function(const IRFunction& f, int fi) {
         // 被导入模块的 init：先把自己的全局根表交给 GC，再跑顶层代码。
         if (!m_->is_entry && fi == m_->entry) {
             // 根表指针也是实参：Win64 的最内层实参寄存器是 %rcx。
-            line(std::format("leaq {}(%rip), {}", roots_label(), arg_reg_i(0)));
-            emit_imm_op("movq", local_global_count(), arg_reg_i(1));
+            emit2(MOp::kLeaq, op_mem_sym(roots_label(), "%rip"), arg_reg_i(0));
+            emit_imm(MOp::kMovq, static_cast<int64_t>(local_global_count()), arg_reg_i(1));
             spill_fp_slots();
             line("call pa_gc_add_roots");
             reload_fp_slots();
@@ -549,14 +549,14 @@ void AsmGen::emit_function(const IRFunction& f, int fi) {
             // 即使前驱把值放在寄存器里也一样（它同时写了栈）。
             if (bi < slot_reload_in_.size()) {
                 for (int s : slot_reload_in_[bi]) {
-                    const std::string& rg = slot_loc_[bi][static_cast<size_t>(s)];
+                    const MOperand& rg = slot_loc_[bi][static_cast<size_t>(s)];
                     if (rg.empty()) continue;
-                    const std::string& st = smem(s);
-                    if (rg == st) continue;
+                    const MOperand& st = smem_mop(s);
+                    if (rg.text == st.text) continue;
                     if (ir_is_float(f.slot_ty[static_cast<size_t>(s)]))
-                        line(std::format("movsd {}, {}", st, rg));
+                        emit2(MOp::kMovsd, st, rg);
                     else
-                        line(std::format("movq {}, {}", st, rg));
+                        emit2(MOp::kMovq, st, rg);
                 }
             }
             gen_block(f.blocks[bi]);
@@ -569,7 +569,7 @@ void AsmGen::emit_function(const IRFunction& f, int fi) {
             emit_epilogue();
         }
         if (dbg_on_) {
-            std::string end = std::format(".LdbgEnd{}", fi);
+            std::string end = num_label(".LdbgEnd", fi);
             out_ += end + ":\n";
             dbg_entries_.push_back({end, -1, 0});
         }

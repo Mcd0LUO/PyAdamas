@@ -577,6 +577,32 @@ private:
     void cfi(const std::string& s) {
         if (target_abi().gnu_cfi) line(s);
     }
+    // CFI 数字行直拼（to_chars）：序言/尾声每函数十几条，免 std::format。
+    // 走 directive() 直发，不复用 line()（避免 line_buf_ 自引用）。
+    void cfi_cfa_offset() {
+        if (!target_abi().gnu_cfi) return;
+        line_buf_ = ".cfi_def_cfa_offset ";
+        char buf[24];
+        auto r = std::to_chars(buf, buf + sizeof buf, cfa_off_);
+        line_buf_.append(buf, r.ptr);
+        directive(line_buf_);
+    }
+    void cfi_restore(const char* reg) {
+        if (!target_abi().gnu_cfi) return;
+        line_buf_ = ".cfi_restore ";
+        line_buf_ += reg;
+        directive(line_buf_);
+    }
+    void cfi_offset(const char* reg, int off) {
+        if (!target_abi().gnu_cfi) return;
+        line_buf_ = ".cfi_offset ";
+        line_buf_ += reg;
+        line_buf_ += ", -";
+        char buf[24];
+        auto r = std::to_chars(buf, buf + sizeof buf, off);
+        line_buf_.append(buf, r.ptr);
+        directive(line_buf_);
+    }
     // relro 段：ELF 下是 .data.rel.ro，COFF 没有这个概念，退到 .rdata。
     void section_relro() {
         directive(target_abi().gnu_cfi ? ".section .data.rel.ro,\"aw\",@progbits"

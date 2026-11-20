@@ -231,7 +231,19 @@
     // 操作数已是 MOperand 单元（缓存直取 / 工厂直建），拷贝进内联存储即发。
     // MReg 便捷重载走预建静态操作数表，零构造。const char* 实参经
     // MOperand 转换构造解析一次（ABI 寄存器名等），仍比整行文本路径便宜。
+    // Raw 操作数（set_text 解析失败的兜底单元）复刻历史文本路径：
+    // push_line 无 tab → 列 0 Raw。mangled 符号含 '$'（pyadamas$...）
+    // 会触发 parse_operand 符号位移扫描拒绝，历史发射就是列 0。
     void emit2(MOp op, const MOperand& a, const MOperand& b) {
+        if (a.kind == MOperandKind::Raw || b.kind == MOperandKind::Raw) {
+            std::string text = mop_name(op);
+            text += ' ';
+            text += a.text;
+            text += ", ";
+            text += b.text;
+            out_.push_line(text);
+            return;
+        }
         MInstr ins;
         ins.op = op;
         ins.ops.push_back(a);
@@ -242,6 +254,13 @@
     void emit2(MOp op, const MOperand& a, MReg b) { emit2(op, a, mreg_operand(b)); }
     void emit2(MOp op, MReg a, MReg b) { emit2(op, mreg_operand(a), mreg_operand(b)); }
     void emit1(MOp op, const MOperand& a) {
+        if (a.kind == MOperandKind::Raw) {
+            std::string text = mop_name(op);
+            text += ' ';
+            text += a.text;
+            out_.push_line(text);
+            return;
+        }
         MInstr ins;
         ins.op = op;
         ins.ops.push_back(a);
@@ -254,6 +273,17 @@
         out_.push_instr(std::move(ins));
     }
     void emit_imm(MOp op, int64_t v, const MOperand& b) {
+        if (b.kind == MOperandKind::Raw) {
+            char buf[32];
+            auto r = std::to_chars(buf, buf + sizeof buf, v);
+            std::string text = mop_name(op);
+            text += " $";
+            text.append(buf, r.ptr);
+            text += ", ";
+            text += b.text;
+            out_.push_line(text);
+            return;
+        }
         MInstr ins;
         ins.op = op;
         ins.ops.push_back(op_imm(v));
