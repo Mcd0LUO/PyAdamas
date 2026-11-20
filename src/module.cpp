@@ -84,7 +84,8 @@ struct Dec {
 void enc_type(Enc& e, const TypePtr& t);
 TypePtr dec_type(Dec& d);
 
-// 默认值的公共编码：0 无默认，1..5/7 字面量，6 有默认但不可跨模块表示。
+// 默认值的公共编码：0 无默认，1..5/7 字面量，6 有默认但不可跨模块表示，
+// 8 u64 范围整数字面量（位模式；旧解码器按 6 的口径降级）。
 void enc_default_value(Enc& e, bool has_default,
                        const std::optional<LiteralValue>& lit) {
     if (!has_default) {
@@ -99,7 +100,12 @@ void enc_default_value(Enc& e, bool has_default,
     switch (v.kind) {
         case LiteralValue::Kind::None: e.u8(1); break;
         case LiteralValue::Kind::Bool: e.u8(2); e.u8(v.b ? 1 : 0); break;
-        case LiteralValue::Kind::Int: e.u8(3); e.i64(v.i); break;
+        case LiteralValue::Kind::Int:
+            // tag 8：u64 范围大字面量默认值（位模式）。旧解码器对 >7 的
+            // tag 按「有默认但不可跨模块表示」降级，不会误读。
+            if (v.u64) { e.u8(8); e.i64(v.i); }
+            else { e.u8(3); e.i64(v.i); }
+            break;
         case LiteralValue::Kind::Float: e.u8(4); e.f64(v.f); break;
         case LiteralValue::Kind::Str: e.u8(5); e.str(v.s); break;
         case LiteralValue::Kind::Bytes: e.u8(7); e.str(v.s); break;
@@ -114,7 +120,7 @@ DecodedDefault dec_default_value(Dec& d) {
     DecodedDefault out;
     uint8_t tag = d.u8();
     out.has = tag != 0;
-    if (tag >= 1 && tag <= 7) {
+    if (tag >= 1 && tag <= 8) {
         LiteralValue v;
         switch (tag) {
             case 1: v.kind = LiteralValue::Kind::None; break;
@@ -125,6 +131,11 @@ DecodedDefault dec_default_value(Dec& d) {
             case 3:
                 v.kind = LiteralValue::Kind::Int;
                 v.i = d.i64();
+                break;
+            case 8:
+                v.kind = LiteralValue::Kind::Int;
+                v.i = d.i64();
+                v.u64 = true;
                 break;
             case 4:
                 v.kind = LiteralValue::Kind::Float;

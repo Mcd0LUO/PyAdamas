@@ -260,6 +260,11 @@ private:
     bool dynamic_globals_ = false;
     std::unordered_set<std::string> globals_aliases_;
     std::unordered_map<const Expr*, TypePtr> expr_types_;
+    // u64 大字面量（>INT64_MAX 的十进制）：词法已解析成位模式，这里登记
+    // 待消费节点；只有 u64 上下文（coerce/提升后 U64 的运算）能消费。
+    // check_once 末尾未被消费的照旧报 too large for int64（默认 int 不变）。
+    std::unordered_set<const Expr*> u64_lit_pending_;
+    std::unordered_set<const Expr*> u64_lit_ok_;
     std::unordered_map<const Call*, std::shared_ptr<PartialPlan>> partial_plans_;
     std::unordered_map<const Stmt*, Scope*> func_scopes_;
     std::unordered_map<const Stmt*, FuncInfoPtr> func_infos_;
@@ -469,6 +474,11 @@ private:
     //   超范围 → 报编译错误并返回 true（别再叠加一条通用类型错误）。
     // 不是字面量/目标不是定宽整数返回 false（走普通 assignable 判断）。
     bool accept_literal_into(const TypePtr& want, Expr* value);
+    // u64 大字面量的登记/消费/收尾检查（见 expr_types_ 旁的成员注释）。
+    void note_u64_literal(const Expr* e);
+    // 运算/比较提升到 U64 时把 u64 字面量操作数的静态类型改写成 U64。
+    void consume_u64_literal(const TypePtr& rt, Expr* e);
+    void check_u64_literals();
 
     void unpack_assign(std::vector<ExprPtr>& targets, TypePtr value, int line, int col);
 

@@ -1,0 +1,2 @@
+# expect: literal 18446744073709551615 is out of range for 'u32'
+x: u32 = 18446744073709551615

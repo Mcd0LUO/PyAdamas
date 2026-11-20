@@ -161,6 +161,19 @@ void TypeChecker::funcdef_impl(FunctionDef& f, const ClassInfoPtr& owner) {
         for (auto& d : f.args.defaults) expr(*d);
         for (auto& d : f.args.kw_defaults)
             if (d) expr(*d);
+        // u64 大字面量默认值在 def 点消费（函数可能永远不被调用，等不到
+        // 调用点的 bind_default）。只认 u64 字面量——普通定宽默认值的既有
+        // 路径（调用点 int_literal_fits）逐字不动。
+        auto accept_u64_default = [&](Param& p) {
+            if (!p.has_default || !p.default_expr || !p.ty || p.ty->kind != TyKind::U64) return;
+            const auto* c = dynamic_cast<const Constant*>(p.default_expr);
+            if (c && c->ck == Constant::CK::Int && c->u64_lit) {
+                expr_types_[p.default_expr] = p.ty;
+                u64_lit_ok_.insert(p.default_expr);
+            }
+        };
+        for (auto& p : info->pos) accept_u64_default(p);
+        for (auto& p : info->kwonly) accept_u64_default(p);
         for (auto& dec : f.decorators)
             if (!owner) expr(*dec);
 

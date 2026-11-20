@@ -151,6 +151,8 @@ void TypeChecker::check_once(Module& m) {
         // 函数体都查完了，dunder 的返回类型此时才有定论。
         check_inferred_default_overrides();
         check_dunder_returns();
+        // u64 大字面量收尾：没被 u64 上下文消费的照旧报 too large for int64。
+        check_u64_literals();
     }
 
 void TypeChecker::recheck_synth_gen(const FuncInfoPtr& fn) {
@@ -865,6 +867,9 @@ std::optional<LiteralValue> literal_of_expr(const Expr* e) {
         if (!inner) return std::nullopt;
         if (u.op == Tok::PLUS) return inner;
         if (inner->kind == LiteralValue::Kind::Int) {
+            // -u64大字面量 不是可表示的默认值（负数装不进 u64）；
+            // 报错由 u64 字面量收尾检查负责（操作数已被 expr() 登记）。
+            if (inner->u64) return std::nullopt;
             inner->i = -inner->i;
             return inner;
         }
@@ -886,6 +891,7 @@ std::optional<LiteralValue> literal_of_expr(const Expr* e) {
         case Constant::CK::Int:
             v.kind = LiteralValue::Kind::Int;
             v.i = c.i;
+            v.u64 = c.u64_lit;
             break;
         case Constant::CK::Float:
             v.kind = LiteralValue::Kind::Float;

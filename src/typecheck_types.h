@@ -99,6 +99,10 @@ struct LiteralValue {
     enum class Kind : uint8_t { None, Bool, Int, Float, Str, Bytes } kind = Kind::None;
     bool b = false;
     int64_t i = 0;
+    // Kind::Int 且来自 u64 范围十进制字面量（>INT64_MAX）：i 是无符号位
+    // 模式，只有 u64 形参收得下。跨模块编码用独立 tag（旧解码器按「有默认
+    // 但不可表示」降级，旧缓存文件的 tag 0..7 逐字不变）。
+    bool u64 = false;
     double f = 0.0;
     std::string s;
 };

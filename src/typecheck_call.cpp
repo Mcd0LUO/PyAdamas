@@ -333,7 +333,8 @@ TypePtr TypeChecker::check_args(const FuncInfoPtr& fn, Call& c) {
             // （default_lit 里是编译期常量，降级按形参类型生成常量）。
             if (p.ty && is_fixed_int(p.ty) &&
                 p.default_lit->kind == LiteralValue::Kind::Int &&
-                int_literal_fits(p.ty, p.default_lit->i))
+                (int_literal_fits(p.ty, p.default_lit->i) ||
+                 (p.ty->kind == TyKind::U64 && p.default_lit->u64)))
                 return;
             if (can_recheck) {
                 bind_param(p, idx, ty, c.line, c.col, true);

@@ -1,6 +1,7 @@
 // typecheck_stmt_forms.cpp —— stmt 按语句形态拆分
 #include "typecheck.h"
 
+#include <algorithm>
 #include <filesystem>
 #include <set>
 
@@ -13,6 +14,10 @@ bool TypeChecker::literal_int_value(const Expr* e, int64_t& out) {
     if (e->kind == ExprKind::Constant) {
         const auto& c = static_cast<const Constant&>(*e);
         if (c.ck == Constant::CK::Int) {
+            // u64 大字面量的位模式在 int64 里是负数，不能按普通字面量取值
+            // （否则 -18446744073709551615 会被算成 1）。它由
+            // accept_literal_into 的 u64 分支单独处理。
+            if (c.u64_lit) return false;
             out = c.i;
             return true;
         }
@@ -41,6 +46,22 @@ bool TypeChecker::literal_int_value(const Expr* e, int64_t& out) {
 
 bool TypeChecker::accept_literal_into(const TypePtr& want, Expr* value) {
     if (!want || !is_fixed_int(want) || !value) return false;
+    // u64 大字面量（>INT64_MAX 的十进制，位模式存 i）：只有 U64 目标收得下；
+    // 其它定宽目标按无符号值报超范围。不走 literal_int_value（位模式是负数）。
+    if (auto* c = dynamic_cast<const Constant*>(value);
+        c && c->ck == Constant::CK::Int && c->u64_lit) {
+        u64_lit_ok_.insert(value);  // 已处理（收下或已报错），收尾不再叠加
+        if (want->kind == TyKind::U64) {
+            expr_types_[value] = want;
+            return true;
+        }
+        int64_t lo = 0, hi = 0;
+        int_range_of(want->kind, lo, hi);
+        err(value->line, value->col,
+            std::format("literal {} is out of range for '{}' (allowed {}..{})",
+                        static_cast<uint64_t>(c->i), type_name(want), lo, hi));
+        return true;
+    }
     // float/bool 字面量的处理：bool 已是 int 子类型，assignable 放行；
     // float 字面量窄化到定宽整数不在 v1 隐式允许范围（要 cast）。
     int64_t v = 0;
@@ -58,6 +79,35 @@ bool TypeChecker::accept_literal_into(const TypePtr& want, Expr* value) {
     // 生成常量时也按 i8 定型，值域已检查过，正常化是恒等。
     expr_types_[value] = want;
     return true;
+}
+
+void TypeChecker::note_u64_literal(const Expr* e) {
+    u64_lit_pending_.insert(e);
+}
+
+void TypeChecker::consume_u64_literal(const TypePtr& rt, Expr* e) {
+    if (!rt || rt->kind != TyKind::U64 || !e) return;
+    auto* c = dynamic_cast<Constant*>(e);
+    if (c && c->ck == Constant::CK::Int && c->u64_lit) {
+        // 提升到 U64 的运算/比较：字面量按 U64 定型，降级直接发无符号
+        // 位模式常量（两侧转换到提升类型是恒等，回绕语义不变）。
+        expr_types_[e] = t_u64();
+        u64_lit_ok_.insert(e);
+    }
+}
+
+void TypeChecker::check_u64_literals() {
+    // 未被 u64 上下文消费的大字面量：默认 int 装不下，照旧报错。
+    // 按行列排序去重，保证诊断顺序确定（重查会重复登记同一节点）。
+    std::vector<const Expr*> rest;
+    for (const Expr* e : u64_lit_pending_)
+        if (!u64_lit_ok_.count(e)) rest.push_back(e);
+    std::sort(rest.begin(), rest.end(), [](const Expr* a, const Expr* b) {
+        return a->line != b->line ? a->line < b->line : a->col < b->col;
+    });
+    rest.erase(std::unique(rest.begin(), rest.end()), rest.end());
+    for (const Expr* e : rest)
+        err(e->line, e->col, "integer literal too large for int64");
 }
 
 void TypeChecker::stmt_assign(Assign& a) {
@@ -128,6 +178,8 @@ void TypeChecker::stmt_aug_assign(AugAssign& a) {
         }
         Tok bin = aug_to_bin(a.op);
         auto rt = binop_type(bin, cur_ty, vt, a.line, a.col);
+        // u64 目标 += u64 大字面量：提升后是 U64，消费字面量（回绕语义不变）。
+        consume_u64_literal(rt, a.value.get());
         // 定宽目标的复合赋值按 C 口径把结果**转换回目标类型**（隐式窄化）。
         // x: u8; x += 1 是 u8 的 255+1 → 0，不是静默丢掉高位：
         // 降级层在赋值点按目标类型正常化（回绕是 pa 的确定语义）。

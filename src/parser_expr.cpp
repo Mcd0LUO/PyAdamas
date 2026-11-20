@@ -373,6 +373,7 @@ ExprPtr Parser::parse_atom() {
                 auto n = node_at<Constant>(ln, cl);
                 n->ck = Constant::CK::Int;
                 n->i = t.ival;
+                n->u64_lit = t.u64_lit;
                 return n;
             }
             case Tok::BYTES: {

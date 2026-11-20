@@ -58,6 +58,10 @@ struct Token {
     Tok kind = Tok::END;
     std::string text;   // NAME 的标识符、STRING/FSTRING 的内容、数字原文
     int64_t ival = 0;   // INT 的值
+    // 十进制 u64 范围字面量（>INT64_MAX..2^64-1）：ival 存无符号位模式。
+    // 只允许出现在 u64 上下文（类型检查在 coerce 位置改写类型）；默认 int
+    // 上下文仍按「too large for int64」报错。进制前缀路径不走这里。
+    bool u64_lit = false;
     double fval = 0.0;  // FLOAT 的值
     // 字符串是否带 r 前缀。FSTRING 需要它来决定字面量部分是否解码转义；
     // 普通字符串在词法层已经解码完，这个标记只对 f-string 有意义。
