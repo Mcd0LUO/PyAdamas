@@ -299,6 +299,27 @@ MReg mreg_from_name(std::string_view name) {
     return kMRegNone;
 }
 
+void MOperand::set_text(std::string_view s) {
+    *this = MOperand{};
+    if (!parse_operand(s, false, this)) {
+        kind = MOperandKind::Raw;
+        text = s;
+    }
+}
+
+const MOperand& mreg_operand(MReg r) {
+    static const std::array<MOperand, kMRegCount> tbl = [] {
+        std::array<MOperand, kMRegCount> a;
+        for (size_t i = 1; i < kMRegCount; ++i) {
+            a[i].kind = MOperandKind::Reg;
+            a[i].reg = static_cast<MReg>(i);
+            a[i].text = mreg_name(static_cast<MReg>(i));
+        }
+        return a;
+    }();
+    return tbl[r];
+}
+
 bool mop_is_branch(MOp op) {
     switch (op) {
         case MOp::kJmp:
@@ -334,6 +355,7 @@ bool parse_operand(std::string_view text, bool as_label, MOperand* out) {
     }
     if (s[0] == '$') {
         if (op.indirect) return false;
+        const std::string_view imm_text = s;  // canonical text 含 '$'
         s.remove_prefix(1);
         if (s.empty()) return false;
         op.kind = MOperandKind::Imm;
@@ -343,7 +365,7 @@ bool parse_operand(std::string_view text, bool as_label, MOperand* out) {
         } else if (!parse_decimal(s, &op.imm)) {
             return false;
         }
-        op.text = std::string(s);
+        op.text = std::string(imm_text);
         *out = std::move(op);
         return true;
     }

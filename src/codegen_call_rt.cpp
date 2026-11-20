@@ -10,37 +10,37 @@ namespace pyadamas {
 
 void AsmGen::gen_rc_dec(const Inst& in, const std::string& src,
                         const std::string& dst, int global) {
-    const std::string p = arg_reg_i(0);
-    move_to(p, src_op(in.args[0]));
+    const MReg p = mreg_from_name(arg_reg_i(0));
+    move_to(mreg_operand(p), src_mop(in.args[0]));
     const std::string at_most_one = fresh_label("decle1");
     const std::string slow = fresh_label("decslow");
     const std::string done = fresh_label("decdone");
     const bool forward = global >= 0;
     const bool copy = forward && src != dst;
     const std::string fast = copy ? fresh_label("decforward") : done;
-    line(std::format("testq {0}, {0}", p));
-    emit_jmp("je", slow);            // p == NULL
+    emit2(MOp::kTestq, p, p);
+    emit_jmp(MOp::kJe, slow);            // p == NULL
     line("cmpl $0, pa_gc_phase_fast(%rip)");
-    emit_jmp("jne", slow);           // 收集期只登记边，不能重入释放
-    line(std::format("movq -48({}), %rax", p));
+    emit_jmp(MOp::kJne, slow);           // 收集期只登记边，不能重入释放
+    emit2(MOp::kMovq, op_mem(p, -48), kRax);
     TypePtr t = ty_of(in.args[0]);
     const bool check_first = t && (t->kind == TyKind::Str || t->kind == TyKind::Bytes);
     if (check_first) {
-        emit_imm_op("movabsq", INT64_MIN, target_abi().scratch_len);
-        emit2("cmpq", target_abi().scratch_len, "%rax");
-        emit_jmp("je", fast);
-        line("cmpq $1, %rax");
-        emit_jmp("jle", slow);
+        emit_imm(MOp::kMovabsq, INT64_MIN, target_abi().scratch_len);
+        emit2(MOp::kCmpq, target_abi().scratch_len, kRax);
+        emit_jmp(MOp::kJe, fast);
+        emit_imm(MOp::kCmpq, 1, kRax);
+        emit_jmp(MOp::kJle, slow);
     }
     // sub 同时计算新值和旧 rc 与 1 的有符号比较。仅 rc > 1 时写回。
-    line("subq $1, %rax");
-    if (!check_first) emit_jmp("jle", at_most_one);
-    line(std::format("movq %rax, -48({})", p));
-    emit_jmp("jmp", fast);
+    emit_imm(MOp::kSubq, 1, kRax);
+    if (!check_first) emit_jmp(MOp::kJle, at_most_one);
+    emit2(MOp::kMovq, kRax, op_mem(p, -48));
+    emit_jmp(MOp::kJmp, fast);
     if (!check_first) {
         label(at_most_one);
         // jle 不改标志位，OF 仍来自 sub；仅 INT64_MIN - 1 溢出，不写回。
-        emit_jmp("jo", fast);
+        emit_jmp("jo", fast);  // jo 不在 MOp 表：历史发射是列 0 Raw（无 tab），保持字节不变
     }
     label(slow);
     spill_fp_slots();
@@ -91,13 +91,13 @@ bool AsmGen::gen_rc_inline(const Inst& in, RtFn fn) {
     }
     if (fn == RtFn::RcMark) {
         line("movq temp_len(%rip), %rax");
-        if (!dst_unused(in)) emit2("movq", "%rax", dst_op(in.dst));
+        if (!dst_unused(in)) emit2(MOp::kMovq, kRax, dst_mop(in.dst));
         return true;
     }
     if (fn == RtFn::RcCleanup && in.args.size() == 1) {
         // 只内联「水位没变就直接返回」这一条出口 —— 它是最常见的情形，
         // 其余（真的要逐个 dec）整段落回原函数。
-        emit2("movq", src_op(in.args[0]), "%rdi");
+        emit2(MOp::kMovq, src_mop(in.args[0]), kRdi);
         const std::string skip = fresh_label("cln");
         line("cmpq temp_len(%rip), %rdi");
         emit_jmp("je", skip);
@@ -114,32 +114,32 @@ bool AsmGen::gen_rc_inline(const Inst& in, RtFn fn) {
         return t && (t->kind == TyKind::Str || t->kind == TyKind::Bytes);
     };
     const auto skip_immortal = [&](const std::string& done) {
-        const std::string scratch = target_abi().scratch_len;
-        line(std::format("movabsq $0x8000000000000000, {}", scratch));
-        line(std::format("cmpq {}, %rax", scratch));
-        emit_jmp("je", done);
+        const char* scratch = target_abi().scratch_len;
+        emit_imm_hex(MOp::kMovabsq, 0x8000000000000000ULL, scratch);
+        emit2(MOp::kCmpq, scratch, kRax);
+        emit_jmp(MOp::kJe, done);
     };
     if (fn == RtFn::RcInc && in.args.size() == 1) {
-        const std::string p = arg_reg_i(0);
-        move_to(p, src_op(in.args[0]));
+        const MReg p = mreg_from_name(arg_reg_i(0));
+        move_to(mreg_operand(p), src_mop(in.args[0]));
         const std::string nonpos = fresh_label("incnonpos");
         const std::string slow = fresh_label("incslow");
         const std::string done = fresh_label("incdone");
-        line(std::format("testq {0}, {0}", p));
-        emit_jmp("je", slow);            // p == NULL
-        line(std::format("movq -48({}), %rax", p)); // h->rc：h = p - 64，rc 在 +16
+        emit2(MOp::kTestq, p, p);
+        emit_jmp(MOp::kJe, slow);            // p == NULL
+        emit2(MOp::kMovq, op_mem(p, -48), kRax); // h->rc：h = p - 64，rc 在 +16
         const bool check_first = immortal_first();
         if (check_first) skip_immortal(done);
-        line("testq %rax, %rax");
-        emit_jmp("jle", check_first ? slow : nonpos);
-        line("addq $1, %rax");
-        line(std::format("movq %rax, -48({})", p));
-        emit_jmp("jmp", done);
+        emit2(MOp::kTestq, kRax, kRax);
+        emit_jmp(MOp::kJle, check_first ? slow : nonpos);
+        emit_imm(MOp::kAddq, 1, kRax);
+        emit2(MOp::kMovq, kRax, op_mem(p, -48));
+        emit_jmp(MOp::kJmp, done);
         if (!check_first) {
             label(nonpos);
             // 只有 INT64_MIN（永生哨兵）取负会溢出；其余非法计数由慢路径报错。
-            line("negq %rax");
-            emit_jmp("jo", done);
+            emit1(MOp::kNegq, kRax);
+            emit_jmp("jo", done);  // 同上：列 0 Raw 兜底
         }
         label(slow);
         spill_fp_slots();
@@ -158,7 +158,7 @@ bool AsmGen::gen_rc_inline(const Inst& in, RtFn fn) {
     // 不入栈）。call/ret + 扫描全是浪费。快路径把这两个形态变成 5 条
     // 指令；非永生 push 也就 12 条。stats/diag/扩容落回原函数。
     if (fn == RtFn::RcTemp && in.args.size() == 1) {
-        emit2("movq", src_op(in.args[0]), "%rdi");
+        emit2(MOp::kMovq, src_mop(in.args[0]), kRdi);
         const std::string slow = fresh_label("tmpslow");
         const std::string done = fresh_label("tmpdone");
         line("testq %rdi, %rdi");
@@ -186,7 +186,7 @@ bool AsmGen::gen_rc_inline(const Inst& in, RtFn fn) {
         return true;
     }
     if (fn == RtFn::RcTempTake && in.args.size() == 1) {
-        emit2("movq", src_op(in.args[0]), "%rdi");
+        emit2(MOp::kMovq, src_mop(in.args[0]), kRdi);
         const std::string slow = fresh_label("tkslow");
         const std::string scan = fresh_label("tkscan");
         const std::string loop = fresh_label("tkloop");
@@ -246,7 +246,7 @@ void AsmGen::gen_rt_none(const Inst& in) {
 void AsmGen::gen_rt_args_n(const Inst& in, int n) {
     const int m = static_cast<int>(in.args.size());
     const int k = m < n ? m : n;
-    for (int i = 0; i < k; ++i) emit_arg(i, false, i, src_op(in.args[i]));
+    for (int i = 0; i < k; ++i) emit_arg(i, false, i, src_mop(in.args[i]));
 }
 
 void AsmGen::gen_rt_i1(const Inst& in) { gen_rt_args_n(in, 1); }
@@ -261,99 +261,99 @@ void AsmGen::gen_rt_i5(const Inst& in) { gen_rt_args_n(in, 5); }
 
 void AsmGen::gen_rt_i6(const Inst& in) { gen_rt_args_n(in, 6); }
 
-void AsmGen::emit_arg(int pos, bool is_fp, int cls_idx, const std::string& v) {
+void AsmGen::emit_arg(int pos, bool is_fp, int cls_idx, const MOperand& v) {
     const TargetABI& abi = target_abi();
     if (abi.positional_args) {
         // Win64：第 pos 个实参固定占第 pos 个槽，与类型无关；超过 4 个落栈。
         if (pos < 4) {
-            if (is_fp) emit2("movsd", v, abi.arg_fp[pos]);
-            else emit2("movq", v, abi.arg_int[pos]);
+            if (is_fp) emit2(MOp::kMovsd, v, abi.arg_fp[pos]);
+            else emit2(MOp::kMovq, v, abi.arg_int[pos]);
             return;
         }
         const int off = out_base() + 8 * (pos - 4);
         if (is_fp) {
-            line(std::format("movsd {}, {}(%rsp)", v, off));
-        } else if (v.find('(') != std::string::npos) {
+            emit2(MOp::kMovsd, v, op_mem(kRsp, off));
+        } else if (v.kind == MOperandKind::Mem) {
             /* 栈传实参的源操作数可能在内存里（mem-to-mem 非法）：借
                Win64 的 caller-saved scratch %r10 中转。实参寄存器只到
                %r9，%r10 不会和已装填的实参冲突。 */
-            emit2("movq", v, "%r10");
-            emit2("movq", "%r10", std::format("{}(%rsp)", off));
+            emit2(MOp::kMovq, v, kR10);
+            emit2(MOp::kMovq, kR10, op_mem(kRsp, off));
         } else {
-            emit2("movq", v, std::format("{}(%rsp)", off));
+            emit2(MOp::kMovq, v, op_mem(kRsp, off));
         }
         return;
     }
     // SysV：整型与浮点各一套独立计数器；该类寄存器用完后落栈。
     if (is_fp) {
-        if (cls_idx < abi.n_arg_fp) { emit2("movsd", v, abi.arg_fp[cls_idx]); return; }
-        line(std::format("movsd {}, {}(%rsp)", v, out_base() + 8 * cls_idx));
+        if (cls_idx < abi.n_arg_fp) { emit2(MOp::kMovsd, v, abi.arg_fp[cls_idx]); return; }
+        emit2(MOp::kMovsd, v, op_mem(kRsp, out_base() + 8 * cls_idx));
         return;
     }
-    if (cls_idx < abi.n_arg_int) { emit2("movq", v, abi.arg_int[cls_idx]); return; }
-    emit2("movq", v, std::format("{}(%rsp)", out_base() + 8 * cls_idx));
+    if (cls_idx < abi.n_arg_int) { emit2(MOp::kMovq, v, abi.arg_int[cls_idx]); return; }
+    emit2(MOp::kMovq, v, op_mem(kRsp, out_base() + 8 * cls_idx));
 }
 
-void AsmGen::gen_rt_f1(const Inst& in) { emit_arg(0, true, 0, src_op(in.args[0])); }
+void AsmGen::gen_rt_f1(const Inst& in) { emit_arg(0, true, 0, src_mop(in.args[0])); }
 
 void AsmGen::gen_rt_f2(const Inst& in) {
-        emit_arg(0, true, 0, src_op(in.args[0]));
-        emit_arg(1, true, 1, src_op(in.args[1]));
+        emit_arg(0, true, 0, src_mop(in.args[0]));
+        emit_arg(1, true, 1, src_mop(in.args[1]));
     }
 
 void AsmGen::gen_rt_f3(const Inst& in) {
-        emit_arg(0, true, 0, src_op(in.args[0]));
-        emit_arg(1, true, 1, src_op(in.args[1]));
-        emit_arg(2, true, 2, src_op(in.args[2]));
+        emit_arg(0, true, 0, src_mop(in.args[0]));
+        emit_arg(1, true, 1, src_mop(in.args[1]));
+        emit_arg(2, true, 2, src_mop(in.args[2]));
     }
 
 void AsmGen::gen_rt_i1f1(const Inst& in) {
-        emit_arg(0, false, 0, src_op(in.args[0]));
-        emit_arg(1, true, 0, src_op(in.args[1]));
+        emit_arg(0, false, 0, src_mop(in.args[0]));
+        emit_arg(1, true, 0, src_mop(in.args[1]));
     }
 
 void AsmGen::gen_rt_i1f2(const Inst& in) {
-        emit_arg(0, false, 0, src_op(in.args[0]));
-        emit_arg(1, true, 0, src_op(in.args[1]));
-        emit_arg(2, true, 1, src_op(in.args[2]));
+        emit_arg(0, false, 0, src_mop(in.args[0]));
+        emit_arg(1, true, 0, src_mop(in.args[1]));
+        emit_arg(2, true, 1, src_mop(in.args[2]));
     }
 
 void AsmGen::gen_rt_i1f3(const Inst& in) {
-        emit_arg(0, false, 0, src_op(in.args[0]));
-        emit_arg(1, true, 0, src_op(in.args[1]));
-        emit_arg(2, true, 1, src_op(in.args[2]));
-        emit_arg(3, true, 2, src_op(in.args[3]));
+        emit_arg(0, false, 0, src_mop(in.args[0]));
+        emit_arg(1, true, 0, src_mop(in.args[1]));
+        emit_arg(2, true, 1, src_mop(in.args[2]));
+        emit_arg(3, true, 2, src_mop(in.args[3]));
     }
 
 void AsmGen::gen_rt_f1i1(const Inst& in) {
-        emit_arg(0, true, 0, src_op(in.args[0]));
-        emit_arg(1, false, 0, src_op(in.args[1]));
+        emit_arg(0, true, 0, src_mop(in.args[0]));
+        emit_arg(1, false, 0, src_mop(in.args[1]));
     }
 
 void AsmGen::gen_rt_i4opt5(const Inst& in) {
-        emit_arg(0, false, 0, src_op(in.args[0]));
-        emit_arg(1, false, 1, src_op(in.args[1]));
-        emit_arg(2, false, 2, src_op(in.args[2]));
-        emit_arg(3, false, 3, src_op(in.args[3]));
+        emit_arg(0, false, 0, src_mop(in.args[0]));
+        emit_arg(1, false, 1, src_mop(in.args[1]));
+        emit_arg(2, false, 2, src_mop(in.args[2]));
+        emit_arg(3, false, 3, src_mop(in.args[3]));
         if (in.args.size() > 4)
-            emit_arg(4, false, 4, src_op(in.args[4]));
+            emit_arg(4, false, 4, src_mop(in.args[4]));
     }
 
 void AsmGen::gen_rt_reduce_f(const Inst& in) {
-        emit_arg(0, false, 0, src_op(in.args[0]));
-        emit_arg(1, false, 1, src_op(in.args[1]));
-        emit_arg(2, true, 0, src_op(in.args[2]));
-        emit_arg(3, false, 2, src_op(in.args[3]));
+        emit_arg(0, false, 0, src_mop(in.args[0]));
+        emit_arg(1, false, 1, src_mop(in.args[1]));
+        emit_arg(2, true, 0, src_mop(in.args[2]));
+        emit_arg(3, false, 2, src_mop(in.args[3]));
     }
 
 void AsmGen::gen_rt_subprocess_run(const Inst& in) {
-        emit_arg(0, false, 0, src_op(in.args[0]));
-        emit_arg(1, false, 1, src_op(in.args[1]));
-        emit_arg(2, false, 2, src_op(in.args[2]));
-        emit_arg(3, true, 0, src_op(in.args[3]));
-        emit_arg(4, false, 3, src_op(in.args[4]));
-        emit_arg(5, false, 4, src_op(in.args[5]));
-        emit_arg(6, false, 5, src_op(in.args[6]));
+        emit_arg(0, false, 0, src_mop(in.args[0]));
+        emit_arg(1, false, 1, src_mop(in.args[1]));
+        emit_arg(2, false, 2, src_mop(in.args[2]));
+        emit_arg(3, true, 0, src_mop(in.args[3]));
+        emit_arg(4, false, 3, src_mop(in.args[4]));
+        emit_arg(5, false, 4, src_mop(in.args[5]));
+        emit_arg(6, false, 5, src_mop(in.args[6]));
     }
 
 void AsmGen::gen_rt_args(const Inst& in, RtFn fn) {
@@ -1109,7 +1109,7 @@ void AsmGen::gen_append_inline(const Inst& in) {
     line(std::format("incq ({})", lr));
     emit_jmp("jmp", done);
     label(slow);
-    emit_arg(2, false, 2, src_op(in.args[2]));
+    emit_arg(2, false, 2, src_mop(in.args[2]));
     spill_fp_slots();
     line("call pa_list_append");
     reload_fp_slots();

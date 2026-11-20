@@ -97,10 +97,10 @@ int64_t AsmGen::any_reuse_ok(const Inst& in) {
 void AsmGen::gen_any_tagged(const Inst& in, RtFn fn) {
     if (fn == RtFn::AnyArith || fn == RtFn::AnyCmp) {
         // IR: {op, a, b, desc_a, desc_b} → C: (op, a, tag_a, b, tag_b[, reuse])
-        emit_arg(0, false, 0, src_op(in.args[0]));
-        emit_arg(1, false, 1, src_op(in.args[1]));
+        emit_arg(0, false, 0, src_mop(in.args[0]));
+        emit_arg(1, false, 1, src_mop(in.args[1]));
         emit_arg(2, false, 2, tag_src(in.args[1]));
-        emit_arg(3, false, 3, src_op(in.args[2]));
+        emit_arg(3, false, 3, src_mop(in.args[2]));
         emit_arg(4, false, 4, tag_src(in.args[2]));
         if (fn == RtFn::AnyArith)
             emit_imm_op("movq", any_reuse_ok(in), arg_reg_i(5));
@@ -118,7 +118,7 @@ void AsmGen::gen_any_tagged(const Inst& in, RtFn fn) {
     }
     if (fn == RtFn::AnyNeg) {
         // IR: {a, desc} → C: (a, tag_a, reuse_ok)
-        emit_arg(0, false, 0, src_op(in.args[0]));
+        emit_arg(0, false, 0, src_mop(in.args[0]));
         emit_arg(1, false, 1, tag_src(in.args[0]));
         emit_imm_op("movq", any_reuse_ok(in), arg_reg_i(2));
         spill_fp_slots();
@@ -131,7 +131,7 @@ void AsmGen::gen_any_tagged(const Inst& in, RtFn fn) {
         return;
     }
     // 单操作数：AnyIsFloat / AnyToF64 / AnyToI64 → (a, tag_a)。
-    emit_arg(0, false, 0, src_op(in.args[0]));
+    emit_arg(0, false, 0, src_mop(in.args[0]));
     emit_arg(1, false, 1, tag_src(in.args[0]));
     spill_fp_slots();
     line(std::format("call {}", fn == RtFn::AnyIsFloat ? "pa_any_is_float_t"

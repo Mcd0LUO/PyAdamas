@@ -40,6 +40,8 @@ enum class MOp : uint8_t {
     kPushq, kPopq, kCall, kJmp, kRet, kNop, kUd2, kLeave,
     // ── 条件跳转 ──
     kJa, kJae, kJb, kJbe, kJe, kJne, kJg, kJge, kJl, kJle, kJs, kJns, kJp,
+    // 注意 jo/jc/jz 故意不登记：历史 emit_jmp 对它们走文本兜底，push_line
+    // 收到无 tab 文本落列 0 Raw。结构化 Instr 渲染带 tab，会破坏字节不变。
     // ── 置位（比较结果 → 0/1） ──
     kSeta, kSetae, kSetb, kSetbe, kSete, kSetg, kSetge, kSetl, kSetle, kSetne, kSetnp, kSetp,
     // ── 浮点 ──
@@ -104,7 +106,28 @@ struct MOperand {
     // 给历史字符串接口（src_op/dst_op 等）当返回值；Reg/Label/Sym/Raw
     // 与符号位移 Mem 渲染直接用它，Imm/数值位移 Mem 走结构化字段。
     std::string text;
+
+    // ── 缓存单元兼容接口 ─────────────────────────────────────────
+    // 操作数缓存（vreg_mem_/slot_reg_/alias_ 等）从字符串换成 MOperand
+    // 单元：定义点赋值时解析一次成结构化，使用点直发免回解析。历史字符
+    // 串调用点经 implicit const string& 转换零改动读 canonical text。
+    MOperand() = default;
+    MOperand(const char* s) { set_text(s); }
+    MOperand(std::string s) { set_text(s); }
+    MOperand& operator=(const char* s) { set_text(s); return *this; }
+    MOperand& operator=(std::string s) { set_text(s); return *this; }
+    bool empty() const { return text.empty(); }
+    void clear() { *this = MOperand{}; }
+    operator const std::string&() const { return text; }
+    // 比较按 canonical text（与历史字符串比较同口径）。字符串实参经
+    // 转换构造参与比较（只这一个 == 重载，免与转换构造互相歧义）。
+    friend bool operator==(const MOperand& a, const MOperand& b) { return a.text == b.text; }
+    // 解析操作数字符串成结构化；认不出的文法退化 Raw（text 原样，字节不变）。
+    void set_text(std::string_view s);
 };
+
+// 预建寄存器操作数静态表：发射期按编号取，零构造（LLVM 静态 reg 表思路）。
+const MOperand& mreg_operand(MReg r);
 
 // 操作数小向量：2 个内联 + 溢出 vector。x86 指令操作数 ≤3，
 // 两操作数指令（绝大多数）整条零堆分配；三操作数 imulq 才溢出。

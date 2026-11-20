@@ -469,60 +469,60 @@ void AsmGen::gen_call_ptr(const Inst& in) {
 void AsmGen::gen_branch(const Inst& in) {
         TypePtr ty = ty_of(in.a);
         if (ir_is_float(ty)) {
-            emit2("movsd", src_op(in.a), "%xmm0");
-            line("xorpd %xmm1, %xmm1");
-            line("ucomisd %xmm1, %xmm0");
-            emit_jmp("jne", block_label(in.target));
-            emit_jmp("jp", block_label(in.target));
-            emit_jmp("jmp", block_label(in.target2));
+            emit2(MOp::kMovsd, src_mop(in.a), kXmm0);
+            emit2(MOp::kXorpd, kXmm1, kXmm1);
+            emit2(MOp::kUcomisd, kXmm1, kXmm0);
+            emit_jmp(MOp::kJne, block_label(in.target));
+            emit_jmp(MOp::kJp, block_label(in.target));
+            emit_jmp(MOp::kJmp, block_label(in.target2));
             return;
         }
         if (ty && (ty->kind == TyKind::Str || ty->kind == TyKind::List ||
                    ty->kind == TyKind::Tuple || ty->kind == TyKind::Dict ||
                    ty->kind == TyKind::Set)) {
-            emit2("movq", src_op(in.a), "%rax");
-            line("cmpq $0, (%rax)");
-            emit_jmp("jne", block_label(in.target));
-            emit_jmp("jmp", block_label(in.target2));
+            emit2(MOp::kMovq, src_mop(in.a), kRax);
+            emit_imm(MOp::kCmpq, 0, op_mem(kRax));
+            emit_jmp(MOp::kJne, block_label(in.target));
+            emit_jmp(MOp::kJmp, block_label(in.target2));
             return;
         }
         if (ty && ty->kind == TyKind::Complex) {
-            emit2("movq", src_op(in.a), "%rax");
-            line("xorpd %xmm1, %xmm1");
-            line("ucomisd 8(%rax), %xmm1");
-            emit_jmp("jne", block_label(in.target));
-            line("ucomisd 16(%rax), %xmm1");
-            emit_jmp("jne", block_label(in.target));
-            emit_jmp("jmp", block_label(in.target2));
+            emit2(MOp::kMovq, src_mop(in.a), kRax);
+            emit2(MOp::kXorpd, kXmm1, kXmm1);
+            emit2(MOp::kUcomisd, op_mem(kRax, 8), kXmm1);
+            emit_jmp(MOp::kJne, block_label(in.target));
+            emit2(MOp::kUcomisd, op_mem(kRax, 16), kXmm1);
+            emit_jmp(MOp::kJne, block_label(in.target));
+            emit_jmp(MOp::kJmp, block_label(in.target2));
             return;
         }
-        std::string sa = src_op(in.a);
+        const MOperand& sa = src_mop(in.a);
         // 被折叠成常量的条件（如 while True 的 1）不能进 cmpq 的立即数位置。
-        if (!sa.empty() && sa[0] == '$') {
-            long long v = std::strtoll(sa.c_str() + 1, nullptr, 10);
+        if (sa.kind == MOperandKind::Imm) {
+            long long v = static_cast<long long>(sa.imm);
             int tgt = v ? in.target : in.target2;
             if (!(opt_ >= 2 && tgt == cur_block_ + 1))
-                emit_jmp("jmp", block_label(tgt));
+                emit_jmp(MOp::kJmp, block_label(tgt));
             return;
         }
-        emit2("cmpq", "$0", sa);
+        emit_imm(MOp::kCmpq, 0, sa);
         if (opt_ >= 2 && in.target2 == cur_block_ + 1) {
-            emit_jmp("jne", block_label(in.target));
+            emit_jmp(MOp::kJne, block_label(in.target));
         } else if (opt_ >= 2 && in.target == cur_block_ + 1) {
-            emit_jmp("je", block_label(in.target2));
+            emit_jmp(MOp::kJe, block_label(in.target2));
         } else {
-            emit_jmp("jne", block_label(in.target));
-            emit_jmp("jmp", block_label(in.target2));
+            emit_jmp(MOp::kJne, block_label(in.target));
+            emit_jmp(MOp::kJmp, block_label(in.target2));
         }
     }
 
 void AsmGen::gen_return(const Inst& in) {
         if (in.a == kNoReg) {
-            line("xorl %eax, %eax");
+            emit2(MOp::kXorl, kEax, kEax);
         } else if (is_fp(in.a)) {
-            emit2("movsd", src_op(in.a), "%xmm0");
+            emit2(MOp::kMovsd, src_mop(in.a), kXmm0);
         } else {
-            emit2("movq", src_op(in.a), "%rax");
+            emit2(MOp::kMovq, src_mop(in.a), kRax);
         }
         // P3-1b：unknown 返回经 %rdx 带 tag（门控关/生成器空操作）。
         emit_ret_tag(in);
@@ -539,22 +539,22 @@ void AsmGen::gen_call(const Inst& in) {
         //
         // 浮点实参按位模式搬进整型寄存器（movq），不改变位，由 shim 那边
         // 读回后解释为 double。
-        emit2("movq", src_op(in.a), "%r11");
+        emit2(MOp::kMovq, src_mop(in.a), kR11);
         for (size_t i = 0; i < in.args.size(); ++i) {
             const auto& ty = ty_of(in.args[i]);
             if (i < static_cast<size_t>(kMaxIntArgs())) {
                 if (ir_is_float(ty)) {
                     // 浮点值在 %xmm 里，先搬到位模式再进整型寄存器。
-                    line(std::format("movq {}, %xmm15", src_op(in.args[i])));
-                    emit2("movq", "%xmm15", arg_reg_i(static_cast<int>(i)));
+                    emit2(MOp::kMovq, src_mop(in.args[i]), kXmm15);
+                    emit2(MOp::kMovq, kXmm15, arg_reg_i(static_cast<int>(i)));
                 } else {
-                    emit2("movq", src_op(in.args[i]), arg_reg_i(static_cast<int>(i)));
+                    emit2(MOp::kMovq, src_mop(in.args[i]), arg_reg_i(static_cast<int>(i)));
                 }
             } else {
                 // 超出寄存器个数：走栈。统一约定下按位置放在 out_base 之后。
-                emit2("movq", src_op(in.args[i]), "%r10");
-                line(std::format("movq %r10, {}(%rsp)",
-                                 out_base() + static_cast<int>(i - kMaxIntArgs()) * 8));
+                emit2(MOp::kMovq, src_mop(in.args[i]), kR10);
+                emit2(MOp::kMovq, kR10,
+                      op_mem(kRsp, out_base() + static_cast<int>(i - kMaxIntArgs()) * 8));
             }
         }
         line("movq %r11, %r10");
@@ -1127,8 +1127,8 @@ void AsmGen::gen_call_rt(const Inst& in) {
         // found 在 rax（0/1）落 dst（原 contains 的 bool）；值由运行时
         // 写入 idx 指定的帧槽（借用，无 RC）。槽地址 leaq 作第三实参。
         if (fn == RtFn::DictTryGet && in.args.size() == 2) {
-            emit_arg(0, false, 0, src_op(in.args[0]));
-            emit_arg(1, false, 1, src_op(in.args[1]));
+            emit_arg(0, false, 0, src_mop(in.args[0]));
+            emit_arg(1, false, 1, src_mop(in.args[1]));
             line(std::format("leaq {}, {}", smem(static_cast<int>(in.idx)), arg_reg_i(2)));
             spill_fp_slots();
             line("call pa_dict_try_get");

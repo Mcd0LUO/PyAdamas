@@ -686,101 +686,97 @@ void AsmGen::gen_cmp_branch(const Inst& in, const Inst& br) {
             return;
         }
         comment(std::format("{} -> {}", in.text(), br.text()));
-        std::string sa = src_op(in.a);
-        std::string sb = src_op(in.b);
-        bool sa_mem = is_mem_operand(sa);
-        bool sb_mem = is_mem_operand(sb);
+        const MOperand& sa = src_mop(in.a);
+        const MOperand& sb = src_mop(in.b);
+        bool sa_mem = is_mem_mop(sa);
+        bool sb_mem = is_mem_mop(sb);
         if (sa_mem && sb_mem) {
-            emit2("movq", sa, "%rax");
-            emit2("cmpq", sb, "%rax");
-        } else if (sa_mem || sa[0] == '%') {
-            emit2("cmpq", sb, sa);
+            emit2(MOp::kMovq, sa, kRax);
+            emit2(MOp::kCmpq, sb, kRax);
+        } else if (sa_mem || sa.kind == MOperandKind::Reg) {
+            emit2(MOp::kCmpq, sb, sa);
         } else {
-            emit2("movq", sa, "%rax");
-            emit2("cmpq", sb, "%rax");
+            emit2(MOp::kMovq, sa, kRax);
+            emit2(MOp::kCmpq, sb, kRax);
         }
-        const char* jcc = "je";
-        const char* inv = "jne";
+        MOp jcc = MOp::kJe;
+        MOp inv = MOp::kJne;
         switch (in.cop) {
-            case CmpKind::Lt: jcc = "jl"; inv = "jge"; break;
-            case CmpKind::Le: jcc = "jle"; inv = "jg"; break;
-            case CmpKind::Gt: jcc = "jg"; inv = "jle"; break;
-            case CmpKind::Ge: jcc = "jge"; inv = "jl"; break;
-            case CmpKind::Eq: jcc = "je"; inv = "jne"; break;
-            case CmpKind::Ne: jcc = "jne"; inv = "je"; break;
+            case CmpKind::Lt: jcc = MOp::kJl; inv = MOp::kJge; break;
+            case CmpKind::Le: jcc = MOp::kJle; inv = MOp::kJg; break;
+            case CmpKind::Gt: jcc = MOp::kJg; inv = MOp::kJle; break;
+            case CmpKind::Ge: jcc = MOp::kJge; inv = MOp::kJl; break;
+            case CmpKind::Eq: jcc = MOp::kJe; inv = MOp::kJne; break;
+            case CmpKind::Ne: jcc = MOp::kJne; inv = MOp::kJe; break;
         }
         // O2：一边就是下一个块时，用反向条件跳走另一边，省掉无条件跳。
         if (opt_ >= 2 && br.target == cur_block_ + 1) {
-            line(std::format("{} {}", inv, block_label(br.target2)));
+            emit_jmp(inv, block_label(br.target2));
         } else if (opt_ >= 2 && br.target2 == cur_block_ + 1) {
-            line(std::format("{} {}", jcc, block_label(br.target)));
+            emit_jmp(jcc, block_label(br.target));
         } else {
-            line(std::format("{} {}", jcc, block_label(br.target)));
-            emit_jmp("jmp", block_label(br.target2));
+            emit_jmp(jcc, block_label(br.target));
+            emit_jmp(MOp::kJmp, block_label(br.target2));
         }
     }
 
 void AsmGen::gen_cmp_branch_fp(const Inst& in, const Inst& br) {
         comment(std::format("{} -> {}", in.text(), br.text()));
-        std::string sa = src_op(in.a);
-        std::string sb = src_op(in.b);
-        const char* jcc = "je";
-        const char* inv = "jne";
+        const MOperand* sa = &src_mop(in.a);
+        const MOperand* sb = &src_mop(in.b);
+        MOp jcc = MOp::kJe;
+        MOp inv = MOp::kJne;
         bool ordered = true;  // 无序（NaN）时 Python 的比较结果为假
         bool swap = false;
         // 四种有序比较换个操作数顺序就能把 NaN 归到「不满足」那一侧：
         // ucomisd 对无序置 CF=1，ja/jae 都不会跳，正好落到假分支，于是
         // 不用再补一条 jp（内层循环里省一条分支）。
         switch (in.cop) {
-            case CmpKind::Lt: swap = true; jcc = "ja"; inv = "jbe"; ordered = false; break;
-            case CmpKind::Le: swap = true; jcc = "jae"; inv = "jb"; ordered = false; break;
-            case CmpKind::Gt: jcc = "ja"; inv = "jbe"; ordered = false; break;
-            case CmpKind::Ge: jcc = "jae"; inv = "jb"; ordered = false; break;
-            case CmpKind::Eq: jcc = "je"; inv = "jne"; break;
-            case CmpKind::Ne: jcc = "jne"; inv = "je"; ordered = false; break;  // NaN 由下面的特例先跳真分支
+            case CmpKind::Lt: swap = true; jcc = MOp::kJa; inv = MOp::kJbe; ordered = false; break;
+            case CmpKind::Le: swap = true; jcc = MOp::kJae; inv = MOp::kJb; ordered = false; break;
+            case CmpKind::Gt: jcc = MOp::kJa; inv = MOp::kJbe; ordered = false; break;
+            case CmpKind::Ge: jcc = MOp::kJae; inv = MOp::kJb; ordered = false; break;
+            case CmpKind::Eq: jcc = MOp::kJe; inv = MOp::kJne; break;
+            case CmpKind::Ne: jcc = MOp::kJne; inv = MOp::kJe; ordered = false; break;  // NaN 由下面的特例先跳真分支
         }
-        if (swap) {
-            std::string t = sa;
-            sa = sb;
-            sb = t;
-        }
+        if (swap) std::swap(sa, sb);
         // ucomisd 的第二个操作数是 xmm；左操作数不在 xmm 里就先搬进 %xmm0。
-        if (sa.starts_with("%xmm")) {
-            emit2("ucomisd", sb, sa);
+        if (sa->kind == MOperandKind::Reg && sa->reg >= kXmm0 && sa->reg <= kXmm15) {
+            emit2(MOp::kUcomisd, *sb, *sa);
         } else {
-            emit2("movsd", sa, "%xmm0");
-            emit2("ucomisd", sb, "%xmm0");
+            emit2(MOp::kMovsd, *sa, kXmm0);
+            emit2(MOp::kUcomisd, *sb, kXmm0);
         }
         // NaN 时 PF=1：!= 的结果应为真，不能直接 je。单独把无序跳到真分支，
         // 再按 ZF 分真/假；其它比较的 jp 在下面按 ordered 处理。
         if (in.cop == CmpKind::Ne) {
             if (opt_ >= 2 && br.target == cur_block_ + 1) {
                 // 真块就是下一块：NaN 和不等都落到 fallthrough，相等跳假。
-                line(std::format("jp {}", block_label(br.target)));
-                line(std::format("je {}", block_label(br.target2)));
+                emit_jmp(MOp::kJp, block_label(br.target));
+                emit_jmp(MOp::kJe, block_label(br.target2));
             } else if (opt_ >= 2 && br.target2 == cur_block_ + 1) {
                 // 假块就是下一块：NaN 和不等跳真，相等 fallthrough 到假。
-                line(std::format("jp {}", block_label(br.target)));
-                line(std::format("jne {}", block_label(br.target)));
+                emit_jmp(MOp::kJp, block_label(br.target));
+                emit_jmp(MOp::kJne, block_label(br.target));
             } else {
-                line(std::format("jp {}", block_label(br.target)));
-                line(std::format("jne {}", block_label(br.target)));
-                emit_jmp("jmp", block_label(br.target2));
+                emit_jmp(MOp::kJp, block_label(br.target));
+                emit_jmp(MOp::kJne, block_label(br.target));
+                emit_jmp(MOp::kJmp, block_label(br.target2));
             }
             return;
         }
         // 有序比较的 ja/jae 本身已排除无序，ordered=false 时不需要 jp。
         // 之后的落点选择与整型版本一致，利用「目标块就是下一块」省掉无条件跳。
         if (opt_ >= 2 && br.target == cur_block_ + 1) {
-            if (ordered) emit_jmp("jp", block_label(br.target2));
-            line(std::format("{} {}", inv, block_label(br.target2)));
+            if (ordered) emit_jmp(MOp::kJp, block_label(br.target2));
+            emit_jmp(inv, block_label(br.target2));
         } else if (opt_ >= 2 && br.target2 == cur_block_ + 1) {
-            if (ordered) emit_jmp("jp", block_label(br.target2));
-            line(std::format("{} {}", jcc, block_label(br.target)));
+            if (ordered) emit_jmp(MOp::kJp, block_label(br.target2));
+            emit_jmp(jcc, block_label(br.target));
         } else {
-            if (ordered) emit_jmp("jp", block_label(br.target2));
-            line(std::format("{} {}", jcc, block_label(br.target)));
-            emit_jmp("jmp", block_label(br.target2));
+            if (ordered) emit_jmp(MOp::kJp, block_label(br.target2));
+            emit_jmp(jcc, block_label(br.target));
+            emit_jmp(MOp::kJmp, block_label(br.target2));
         }
     }
 
@@ -954,7 +950,7 @@ void AsmGen::gen_block(const Block& b) {
                 fused_slot = b.insts[i + 1].idx;
                 // 提升到寄存器的槽直接写寄存器；没提升的槽也可以把
                 // 结果直接落到变量内存，省掉「临时 vreg 槽 → 变量槽」。
-                dst_loc_ = slot_reg_[fused_slot].empty() ? slot_op(fused_slot)
+                dst_loc_ = slot_reg_[fused_slot].empty() ? slot_mop(fused_slot)
                                                          : slot_reg_[fused_slot];
             } else if (!dst_coalesced && i + 2 < b.insts.size() &&
                        can_fuse_fp_temp(in, b.insts[i + 1]) &&
@@ -971,7 +967,7 @@ void AsmGen::gen_block(const Block& b) {
             // assign_global_vreg_regs 记进 global_imm_，整函数范围生效。
             if (fused_slot < 0 && is_deferable_const(in) &&
                 (single_use_in_block(in.dst) || global_imm_.contains(in.dst))) {
-                const_val_[in.dst] = std::format("${}", in.imm);
+                const_val_[in.dst] = op_imm(in.imm);
                 ++i;
                 continue;
             }
@@ -998,14 +994,14 @@ void AsmGen::gen_block(const Block& b) {
                 for (int sl : slot_spill_out_[static_cast<size_t>(cur_block_)]) {
                     if (sl < 0 || sl >= static_cast<int>(slot_loc_[static_cast<size_t>(cur_block_)].size()))
                         continue;
-                    const std::string& rg = slot_loc_[static_cast<size_t>(cur_block_)][static_cast<size_t>(sl)];
+                    const MOperand& rg = slot_loc_[static_cast<size_t>(cur_block_)][static_cast<size_t>(sl)];
                     if (rg.empty()) continue;
-                    const std::string& st = smem(sl);
-                    if (rg == st) continue;
+                    const MOperand& st = smem_mop(sl);
+                    if (rg.text == st.text) continue;
                     if (ir_is_float(f_->slot_ty[static_cast<size_t>(sl)]))
-                        line(std::format("movsd {0}, {1}", rg, st));
+                        emit2(MOp::kMovsd, rg, st);
                     else
-                        line(std::format("movq {0}, {1}", rg, st));
+                        emit2(MOp::kMovq, rg, st);
                 }
             }
             const bool fused_vcall_add = try_fuse_guarded_vcall_add(b, i);
@@ -1036,12 +1032,12 @@ void AsmGen::gen_block(const Block& b) {
                 // 实测 nqueens：bb4 的 `s5 = s7` 没写栈，bb10 入口 reload
                 // s5 读到上一轮的旧值，index.set 越界。
                 if (!slot_loc_.empty() && fused_slot < static_cast<int>(slot_loc_[static_cast<size_t>(cur_block_)].size())) {
-                    const std::string& fl = slot_loc_[static_cast<size_t>(cur_block_)][static_cast<size_t>(fused_slot)];
-                    if (!fl.empty() && fl[0] == 0x25) {
+                    const MOperand& fl = slot_loc_[static_cast<size_t>(cur_block_)][static_cast<size_t>(fused_slot)];
+                    if (!fl.empty() && fl.kind == MOperandKind::Reg) {
                         if (ir_is_float(f_->slot_ty[static_cast<size_t>(fused_slot)]))
-                            line(std::format("movsd {0}, {1}", fl, smem(fused_slot)));
+                            emit2(MOp::kMovsd, fl, smem_mop(fused_slot));
                         else
-                            line(std::format("movq {0}, {1}", fl, smem(fused_slot)));
+                            emit2(MOp::kMovq, fl, smem_mop(fused_slot));
                     }
                 }
                 // 融合掉的 store.slot 仍然改了变量，指向它的别名要失效
@@ -1049,9 +1045,7 @@ void AsmGen::gen_block(const Block& b) {
                 ++i;
             }
             if (fused_global >= 0) {
-                out_ += "\tmovq %rax, ";
-                out_ += global_label(fused_global);
-                out_ += "(%rip)\n";
+                emit2(MOp::kMovq, kRax, op_mem_sym(global_label(fused_global), "%rip"));
                 ++i;
             }
             ++i;
@@ -1073,10 +1067,10 @@ bool AsmGen::is_deferable_const(const Inst& in) const {
 
 void AsmGen::invalidate_slot(int slot) {
         if (slot < 0 || slot >= static_cast<int>(slot_reg_.size())) return;
-        const std::string& r = slot_reg_[slot];
+        const MOperand& r = slot_reg_[slot];
         if (r.empty()) return;
         for (auto it = alias_.begin(); it != alias_.end();)
-            it = (it->second == r) ? alias_.erase(it) : std::next(it);
+            it = (it->second.text == r.text) ? alias_.erase(it) : std::next(it);
     }
 
 void AsmGen::emit_closure_shim(const IRFunction& f, int fi) {

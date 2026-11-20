@@ -63,6 +63,30 @@
         o.text = std::move(name);
         return o;
     }
+    // "(%base)" / "disp(%base)" —— 寄存器编号版（零名字查找）。
+    static MOperand op_mem(MReg base) {
+        MOperand o;
+        o.kind = MOperandKind::Mem;
+        o.reg = base;
+        o.text = "(";
+        o.text += mreg_name(base);
+        o.text += ')';
+        return o;
+    }
+    static MOperand op_mem(MReg base, int64_t disp) {
+        MOperand o;
+        o.kind = MOperandKind::Mem;
+        o.reg = base;
+        o.imm = disp;
+        o.has_disp = true;
+        char buf[24];
+        auto r = std::to_chars(buf, buf + sizeof buf, disp);
+        o.text.assign(buf, r.ptr);
+        o.text += '(';
+        o.text += mreg_name(base);
+        o.text += ')';
+        return o;
+    }
     // "(%base)"
     static MOperand op_mem(std::string base) {
         MOperand o;
@@ -159,3 +183,73 @@
     }
 
     void emit_imm_mem(const std::string& mem, int64_t v) { emit_imm_op("movq", v, mem); }
+
+    // ── 结构化直发（块B2：免「拼字符串→parse_operand 回解析」往返）──
+    // 操作数已是 MOperand 单元（缓存直取 / 工厂直建），拷贝进内联存储即发。
+    // MReg 便捷重载走预建静态操作数表，零构造。const char* 实参经
+    // MOperand 转换构造解析一次（ABI 寄存器名等），仍比整行文本路径便宜。
+    void emit2(MOp op, const MOperand& a, const MOperand& b) {
+        MInstr ins;
+        ins.op = op;
+        ins.ops.push_back(a);
+        ins.ops.push_back(b);
+        out_.push_instr(std::move(ins));
+    }
+    void emit2(MOp op, MReg a, const MOperand& b) { emit2(op, mreg_operand(a), b); }
+    void emit2(MOp op, const MOperand& a, MReg b) { emit2(op, a, mreg_operand(b)); }
+    void emit2(MOp op, MReg a, MReg b) { emit2(op, mreg_operand(a), mreg_operand(b)); }
+    void emit1(MOp op, const MOperand& a) {
+        MInstr ins;
+        ins.op = op;
+        ins.ops.push_back(a);
+        out_.push_instr(std::move(ins));
+    }
+    void emit1(MOp op, MReg a) { emit1(op, mreg_operand(a)); }
+    void emit0(MOp op) {
+        MInstr ins;
+        ins.op = op;
+        out_.push_instr(std::move(ins));
+    }
+    void emit_imm(MOp op, int64_t v, const MOperand& b) {
+        MInstr ins;
+        ins.op = op;
+        ins.ops.push_back(op_imm(v));
+        ins.ops.push_back(b);
+        out_.push_instr(std::move(ins));
+    }
+    void emit_imm(MOp op, int64_t v, MReg b) { emit_imm(op, v, mreg_operand(b)); }
+    void emit_imm_hex(MOp op, uint64_t bits, const MOperand& b) {
+        MInstr ins;
+        ins.op = op;
+        ins.ops.push_back(op_imm_hex(bits));
+        ins.ops.push_back(b);
+        out_.push_instr(std::move(ins));
+    }
+    void emit_imm_hex(MOp op, uint64_t bits, MReg b) { emit_imm_hex(op, bits, mreg_operand(b)); }
+    // 跳转/调用目标直建：目标是标签/符号字符串时免 parse_operand 文法扫描。
+    // 含特殊字符（间接 '*'、内存 '(' 等）的目标退回解析路径，字节不变。
+    void emit_jmp(MOp op, std::string_view target) {
+        bool bare = !target.empty();
+        for (char c : target) {
+            if (c == ' ' || c == ',' || c == '(' || c == ')' || c == '$' || c == '*') {
+                bare = false;
+                break;
+            }
+        }
+        if (bare) {
+            MOperand ot;
+            ot.kind = mop_is_branch(op) ? MOperandKind::Label : MOperandKind::Sym;
+            ot.text = target;
+            emit1(op, ot);
+            return;
+        }
+        MOperand ot;
+        if (parse_operand(target, mop_is_branch(op), &ot)) {
+            emit1(op, ot);
+            return;
+        }
+        std::string text = mop_name(op);
+        text += ' ';
+        text += target;
+        out_.push_line(text);
+    }

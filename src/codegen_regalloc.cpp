@@ -366,7 +366,7 @@ void AsmGen::spill_fp_slots() {
             if (fp_mask_valid_ && j < fp_spill_mask_.size() && !fp_spill_mask_[j])
                 continue;
             int slot = fp_promoted_slots_[j];
-            line(std::format("movsd {}, {}", slot_reg_[slot], smem(slot)));
+            emit2(MOp::kMovsd, slot_reg_[slot], smem_mop(slot));
         }
         // 跨块 vreg 同样要写回：SysV 下 xmm8–15 是 caller-saved。
         // 它们没有块级掩码（活跃性按整个函数算），一律写回。
@@ -375,9 +375,9 @@ void AsmGen::spill_fp_slots() {
         // vreg 已被提升到寄存器时返回寄存器本身，`movsd %xmm8, %xmm8`
         // 是非法操作数组合（实测 spectral_norm 汇编失败）。
         for (int v : fp_promoted_vregs_) {
-            const std::string& rg = vreg_reg_[static_cast<size_t>(v)];
+            const MOperand& rg = vreg_reg_[static_cast<size_t>(v)];
             if (rg.empty()) continue;
-            line(std::format("movsd {}, {}(%rsp)", rg, vreg_off(static_cast<VReg>(v))));
+            emit2(MOp::kMovsd, rg, op_mem("%rsp", vreg_off(static_cast<VReg>(v))));
         }
     }
 
@@ -386,12 +386,12 @@ void AsmGen::reload_fp_slots() {
             if (fp_mask_valid_ && j < fp_spill_mask_.size() && !fp_spill_mask_[j])
                 continue;
             int slot = fp_promoted_slots_[j];
-            line(std::format("movsd {}, {}", smem(slot), slot_reg_[slot]));
+            emit2(MOp::kMovsd, smem_mop(slot), slot_reg_[slot]);
         }
         for (int v : fp_promoted_vregs_) {
-            const std::string& rg = vreg_reg_[static_cast<size_t>(v)];
+            const MOperand& rg = vreg_reg_[static_cast<size_t>(v)];
             if (rg.empty()) continue;
-            line(std::format("movsd {}(%rsp), {}", vreg_off(static_cast<VReg>(v)), rg));
+            emit2(MOp::kMovsd, op_mem("%rsp", vreg_off(static_cast<VReg>(v))), rg);
         }
     }
 
@@ -1286,7 +1286,7 @@ void AsmGen::assign_slot_regs_split() {
                     for (int s2 = 0; s2 < ns; ++s2)
                         if (!slot_loc_[static_cast<size_t>(b)][static_cast<size_t>(s2)].empty())
                             std::fprintf(stderr, " s%d=%s", s2,
-                                         slot_loc_[static_cast<size_t>(b)][static_cast<size_t>(s2)].c_str());
+                                         slot_loc_[static_cast<size_t>(b)][static_cast<size_t>(s2)].text.c_str());
                     std::fprintf(stderr, "\n");
                 }
             }

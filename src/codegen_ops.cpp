@@ -101,9 +101,18 @@ void AsmGen::set_loc(int line) {
     if (line <= 0 || line == cur_loc_line_ || !m_ || m_->source_path.empty()) return;
     cur_loc_line_ = line;
     // 行变化处放一个本地标签，运行时表把 PC 映射回 (函数, 行)。
-    std::string lab = std::format(".Ldbg{}", dbg_seq_++);
-    out_ += lab + ":\n";
-    out_ += std::format("\t.loc 1 {}\n", line);
+    // to_chars 直写：每行两次 std::format 临时串免掉。
+    char buf[24];
+    auto r = std::to_chars(buf, buf + sizeof buf, dbg_seq_++);
+    std::string lab = ".Ldbg";
+    lab.append(buf, r.ptr);
+    out_ += lab;
+    out_ += ":\n";
+    line_buf_ = "\t.loc 1 ";
+    auto r2 = std::to_chars(buf, buf + sizeof buf, line);
+    line_buf_.append(buf, r2.ptr);
+    line_buf_ += '\n';
+    emit_raw(line_buf_);
     dbg_entries_.push_back({lab, fi_, line});
 }
 
@@ -122,12 +131,17 @@ void AsmGen::gen_inst(const Inst& in) {
                 // 命中，连长度检查和 memcmp 都省了。CPython 对 latin1 也有
                 // 同样的驻留。bytes 字面量不参与（pub 语义不同）。
                 if (char_tab_literal(in.idx) >= 0) {
-                    line(std::format("movq pa_char_tab+{}(%rip), %rax",
-                                     char_tab_literal(in.idx) * 8));
+                    emit2(MOp::kMovq,
+                          op_mem_sym("pa_char_tab+" + std::to_string(char_tab_literal(in.idx) * 8), "%rip"),
+                          kRax);
                 } else {
-                    line(std::format("leaq .Lstr{}(%rip), %rax", in.idx));
+                    char b[24];
+                    auto rr = std::to_chars(b, b + sizeof b, in.idx);
+                    std::string sym = ".Lstr";
+                    sym.append(b, rr.ptr);
+                    emit2(MOp::kLeaq, op_mem_sym(std::move(sym), "%rip"), kRax);
                 }
-                move_to(dst_op(in.dst), "%rax");
+                move_to(dst_mop(in.dst), mreg_operand(kRax));
                 emit_tag_imm(in.dst, kTagStr);
                 break;
             case IrOp::ConstNone:
@@ -135,13 +149,18 @@ void AsmGen::gen_inst(const Inst& in) {
                 // None 在 unknown 域仍是裸 0（0.324 边界），tag 按 INT。
                 emit_tag_imm(in.dst, kTagInt);
                 break;
-            case IrOp::FuncAddr:
-                line(std::format("leaq .Lclos{}(%rip), %rax", in.imm));
-                move_to(dst_op(in.dst), "%rax");
+            case IrOp::FuncAddr: {
+                char b[24];
+                auto rr = std::to_chars(b, b + sizeof b, in.imm);
+                std::string sym = ".Lclos";
+                sym.append(b, rr.ptr);
+                emit2(MOp::kLeaq, op_mem_sym(std::move(sym), "%rip"), kRax);
+                move_to(dst_mop(in.dst), mreg_operand(kRax));
                 break;
+            }
             case IrOp::FuncCode:
-                line(std::format("leaq {}(%rip), %rax", func_label(static_cast<int>(in.imm))));
-                move_to(dst_op(in.dst), "%rax");
+                emit2(MOp::kLeaq, op_mem_sym(func_label(static_cast<int>(in.imm)), "%rip"), kRax);
+                move_to(dst_mop(in.dst), mreg_operand(kRax));
                 break;
             case IrOp::Mov:
                 move_to(dst_op(in.dst), src_op(in.a));
@@ -207,10 +226,15 @@ void AsmGen::gen_inst(const Inst& in) {
                 out_ += "(%rip), %rax\n";
                 move_to(dst_op(in.dst), "%rax");
                 break;
-            case IrOp::ClassAddr:
-                out_ += std::format("\tleaq .Lvt{}(%rip), %rax\n", in.imm);
-                move_to(dst_op(in.dst), "%rax");
+            case IrOp::ClassAddr: {
+                char b[24];
+                auto rr = std::to_chars(b, b + sizeof b, in.imm);
+                std::string sym = ".Lvt";
+                sym.append(b, rr.ptr);
+                emit2(MOp::kLeaq, op_mem_sym(std::move(sym), "%rip"), kRax);
+                move_to(dst_mop(in.dst), mreg_operand(kRax));
                 break;
+            }
             case IrOp::MakeList: gen_make_list(in); break;
             case IrOp::MakeTuple: gen_make_list(in); break;
             case IrOp::IndexLoad:
@@ -288,10 +312,9 @@ void AsmGen::gen_inst(const Inst& in) {
             case IrOp::GenSetSlot:
                 // 基址 %rax + 值暂存：值不能借实参寄存器（Win64 下 arg_reg_i(3)
                 // 是 %r9，而这里根本没有调用），走 ABI 的 scratch_field。
-                emit2("movq", src_op(in.args[0]), "%rax");
-                emit2("movq", src_op(in.args[1]), target_abi().scratch_field);
-                line(std::format("movq {}, {}(%rax)", target_abi().scratch_field,
-                                 8 * (10 + in.idx)));
+                emit2(MOp::kMovq, src_mop(in.args[0]), kRax);
+                emit2(MOp::kMovq, src_mop(in.args[1]), target_abi().scratch_field);
+                emit2(MOp::kMovq, target_abi().scratch_field, op_mem(kRax, 8 * (10 + in.idx)));
                 break;
             case IrOp::GenGetState:
                 line("movq 0(%r15), %rax");
@@ -394,26 +417,22 @@ void AsmGen::gen_load_slot(const Inst& in) {
     }
 
 void AsmGen::gen_const_int(const Inst& in) {
-        const std::string& d = dst_op(in.dst);
+        const MOperand& d = dst_mop(in.dst);
         emit_tag_imm(in.dst, kTagInt);
         if (in.imm >= INT32_MIN && in.imm <= INT32_MAX) {
-            emit_imm_op("movq", in.imm, d);
+            emit_imm(MOp::kMovq, in.imm, d);
         } else {
-            char buf[40];
-            auto r = std::to_chars(buf, buf + sizeof buf, static_cast<uint64_t>(in.imm), 16);
-            out_ += "\tmovabsq $0x";
-            out_.append(buf, r.ptr);
-            out_ += ", %rax\n";
-            emit2("movq", "%rax", d);
+            emit_imm_hex(MOp::kMovabsq, static_cast<uint64_t>(in.imm), kRax);
+            emit2(MOp::kMovq, kRax, d);
         }
     }
 
 void AsmGen::gen_const_float(const Inst& in) {
         uint64_t bits = 0;
         std::memcpy(&bits, &in.fimm, sizeof(bits));
-        line(std::format("movabsq $0x{:x}, %rax", bits));
-        line("movq %rax, %xmm0");
-        move_fp(dst_op(in.dst), "%xmm0");
+        emit_imm_hex(MOp::kMovabsq, bits, kRax);
+        emit2(MOp::kMovq, kRax, kXmm0);
+        move_fp(dst_mop(in.dst), mreg_operand(kXmm0));
     }
 
 void AsmGen::gen_bin(const Inst& in) {
@@ -440,70 +459,71 @@ void AsmGen::gen_bin(const Inst& in) {
     }
 
 void AsmGen::gen_bin_int(const Inst& in) {
-        const std::string sa = src_op(in.a);
-        const std::string sb = src_op(in.b);
-        std::string d = dst_op(in.dst);
+        // 结构化操作数直取（缓存单元引用，免字符串拷贝与回解析）。
+        const MOperand& sa = src_mop(in.a);
+        const MOperand& sb = src_mop(in.b);
+        const MOperand& d = dst_mop(in.dst);
 
         // 目标位置恰好装着左操作数时，可以就地算：`x = x + y` 变成
         // 一条 `addq y, x`。这是变量提升之后最常见的形状，省掉
         // 「搬到 rax、算、搬回去」两条指令。
-        if (d[0] == '%' && sa == d) {
+        if (d.kind == MOperandKind::Reg && sa.text == d.text) {
             switch (in.bop) {
-                case BinKind::Add: emit2("addq", sb, d); return;
-                case BinKind::Sub: emit2("subq", sb, d); return;
-                case BinKind::Mul: emit2("imulq", sb, d); return;
-                case BinKind::BitAnd: emit2("andq", sb, d); return;
-                case BinKind::BitOr: emit2("orq", sb, d); return;
-                case BinKind::BitXor: emit2("xorq", sb, d); return;
+                case BinKind::Add: emit2(MOp::kAddq, sb, d); return;
+                case BinKind::Sub: emit2(MOp::kSubq, sb, d); return;
+                case BinKind::Mul: emit2(MOp::kImulq, sb, d); return;
+                case BinKind::BitAnd: emit2(MOp::kAndq, sb, d); return;
+                case BinKind::BitOr: emit2(MOp::kOrq, sb, d); return;
+                case BinKind::BitXor: emit2(MOp::kXorq, sb, d); return;
                 // 移位量必须落在 %cl（x86 硬性要求），不能按实参位置装填：
                 // Win64 的 arg_reg_i(3) 是 %r9。SysV 下两者同为 %rcx。
                 case BinKind::Shl:
-                    emit2("movq", sb, "%rcx");
-                    emit2("shlq", "%cl", d);
+                    emit2(MOp::kMovq, sb, kRcx);
+                    emit2(MOp::kShlq, kCl, d);
                     return;
                 case BinKind::Shr:
-                    emit2("movq", sb, "%rcx");
-                    emit2("sarq", "%cl", d);
+                    emit2(MOp::kMovq, sb, kRcx);
+                    emit2(MOp::kSarq, kCl, d);
                     return;
                 default: break;  // 除法/取模/幂要用 rax/rdx，走通用路径
             }
         }
 
-        emit2("movq", sa, "%rax");
+        emit2(MOp::kMovq, sa, kRax);
         switch (in.bop) {
-            case BinKind::Add: emit2("addq", sb, "%rax"); break;
-            case BinKind::Sub: emit2("subq", sb, "%rax"); break;
-            case BinKind::Mul: emit2("imulq", sb, "%rax"); break;
-            case BinKind::BitAnd: emit2("andq", sb, "%rax"); break;
-            case BinKind::BitOr: emit2("orq", sb, "%rax"); break;
-            case BinKind::BitXor: emit2("xorq", sb, "%rax"); break;
+            case BinKind::Add: emit2(MOp::kAddq, sb, kRax); break;
+            case BinKind::Sub: emit2(MOp::kSubq, sb, kRax); break;
+            case BinKind::Mul: emit2(MOp::kImulq, sb, kRax); break;
+            case BinKind::BitAnd: emit2(MOp::kAndq, sb, kRax); break;
+            case BinKind::BitOr: emit2(MOp::kOrq, sb, kRax); break;
+            case BinKind::BitXor: emit2(MOp::kXorq, sb, kRax); break;
             case BinKind::Shl:
-                emit2("movq", sb, "%rcx");
-                line("shlq %cl, %rax");
+                emit2(MOp::kMovq, sb, kRcx);
+                emit2(MOp::kShlq, kCl, kRax);
                 break;
             case BinKind::Shr:
-                emit2("movq", sb, "%rcx");
-                line("sarq %cl, %rax");
+                emit2(MOp::kMovq, sb, kRcx);
+                emit2(MOp::kSarq, kCl, kRax);
                 break;
             case BinKind::Div:
                 if (gen_div_const(in, kDivModeTrunc)) break;
-                emit2("movq", sb, div_reg());
+                emit2(MOp::kMovq, sb, div_reg());
                 gen_div_guard();
-                line("cqto");
-                if (!target_abi().gnu_cfi) line("movq %r10, %rcx");
-                line("idivq %rcx");
+                emit0(MOp::kCqto);
+                if (!target_abi().gnu_cfi) emit2(MOp::kMovq, kR10, kRcx);
+                emit1(MOp::kIdivq, kRcx);
                 break;
             case BinKind::Mod: gen_mod(in); break;
             case BinKind::FloorDiv: gen_floordiv(in); break;
             case BinKind::Pow:
-                emit2("movq", sa, arg_reg_i(0));
-                emit2("movq", sb, arg_reg_i(1));
+                emit2(MOp::kMovq, sa, arg_reg_i(0));
+                emit2(MOp::kMovq, sb, arg_reg_i(1));
                 spill_fp_slots();
                 line("call pa_pow_i64");
                 reload_fp_slots();
                 break;
         }
-        move_to(d, "%rax");
+        move_to(d, mreg_operand(kRax));
     }
 
 // idiv 在除数为 0、以及 INT64_MIN / -1 时都会触发 #DE，
@@ -512,12 +532,12 @@ void AsmGen::gen_bin_int(const Inst& in) {
 void AsmGen::gen_div_guard() {
         std::string ok = fresh_label("divok");
         std::string ok2 = fresh_label("divok2");
-        line(std::format("testq {}, {}", div_reg(), div_reg()));
-        emit_jmp("jne", ok);
+        emit2(MOp::kTestq, div_reg(), div_reg());
+        emit_jmp(MOp::kJne, ok);
         line("call pa_panic_div0");
         label(ok);
-        line(std::format("cmpq $-1, {}", div_reg()));
-        emit_jmp("jne", ok2);
+        emit_imm(MOp::kCmpq, -1, div_reg());
+        emit_jmp(MOp::kJne, ok2);
         line("movabsq $0x8000000000000000, %r8");
         line("cmpq %r8, %rax");
         emit_jmp("jne", ok2);
@@ -552,31 +572,25 @@ void AsmGen::gen_div_const_emit(int64_t d, int mode, bool a_nonneg) {
             if (pl >= 0) {
                 line("movq %r9, %rax");
                 if (mode == kDivModeMod) {
-                    if (pl > 0) line(std::format("andq ${}, %rax", ad - 1));
+                    if (pl > 0) emit_imm(MOp::kAndq, static_cast<int64_t>(ad - 1), kRax);
                 } else if (pl > 0) {
-                    line(std::format("shrq ${}, %rax", pl));
+                    emit_imm(MOp::kShrq, pl, kRax);
                 }
                 return;
             }
-            line("movq %r9, %r11");
-            char nbuf[24];
-            auto nr = std::to_chars(nbuf, nbuf + sizeof nbuf,
-                                    static_cast<unsigned long long>(mp), 16);
-            std::string nv = "movabsq $0x";
-            nv.append(nbuf, nr.ptr);
-            nv += ", %rcx";
-            line(nv);
+            emit2(MOp::kMovq, kR9, kR11);
+            emit_imm_hex(MOp::kMovabsq, mp, kRcx);
             line("mulq %rcx");            // rdx = mulhu(x, m')
-            line("addq %r11, %rdx");
-            line(std::format("shrq ${}, %rdx", L));
+            emit2(MOp::kAddq, kR11, kRdx);
+            emit_imm(MOp::kShrq, L, kRdx);
             if (mode != kDivModeMod) {
                 line("movq %rdx, %rax");  // trunc == floor（x>=0, d>0）
                 return;
             }
-            line("movq %rdx, %rcx");
-            line(std::format("imulq ${}, %rcx", d));
-            line("movq %r9, %rax");
-            line("subq %rcx, %rax");      // r = x - q*d ∈ [0, d)
+            emit2(MOp::kMovq, kRdx, kRcx);
+            emit_imm(MOp::kImulq, d, kRcx);
+            emit2(MOp::kMovq, kR9, kRax);
+            emit2(MOp::kSubq, kRcx, kRax);      // r = x - q*d ∈ [0, d)
             return;
         }
 
@@ -584,11 +598,11 @@ void AsmGen::gen_div_const_emit(int64_t d, int mode, bool a_nonneg) {
             // 2 的幂：trunc(x / 2^L) = (x + (x>>63 & (2^L-1))) >> L
             line("movq %r9, %rax");
             if (pl > 0) {
-                line("movq %rax, %rcx");
-                line("sarq $63, %rcx");
-                line(std::format("andq ${}, %rcx", ad - 1));
-                line("addq %rcx, %rax");
-                line(std::format("sarq ${}, %rax", pl));
+                emit2(MOp::kMovq, kRax, kRcx);
+                emit_imm(MOp::kSarq, 63, kRcx);
+                emit_imm(MOp::kAndq, static_cast<int64_t>(ad - 1), kRcx);
+                emit2(MOp::kAddq, kRcx, kRax);
+                emit_imm(MOp::kSarq, pl, kRax);
             }
         } else {
             // ax = |x|（无符号域），q_abs = (mulhu(ax, m') + ax) >> L
@@ -597,17 +611,11 @@ void AsmGen::gen_div_const_emit(int64_t d, int mode, bool a_nonneg) {
             line("movq %r9, %rax");
             line("xorq %r8, %rax");
             line("subq %r8, %rax");       // rax = ax
-            line("movq %rax, %r11");
-            char mbuf[24];
-            auto mr = std::to_chars(mbuf, mbuf + sizeof mbuf,
-                                    static_cast<unsigned long long>(mp), 16);
-            std::string mv = "movabsq $0x";
-            mv.append(mbuf, mr.ptr);
-            mv += ", %rcx";
-            line(mv);
+            emit2(MOp::kMovq, kRax, kR11);
+            emit_imm_hex(MOp::kMovabsq, mp, kRcx);
             line("mulq %rcx");            // rdx:rax = ax * m', rdx = mulhu
-            line("addq %r11, %rdx");
-            line(std::format("shrq ${}, %rdx", L));
+            emit2(MOp::kAddq, kR11, kRdx);
+            emit_imm(MOp::kShrq, L, kRdx);
             line("movq %rdx, %rax");
             line("xorq %r8, %rax");
             line("subq %r8, %rax");       // 按符号还原成有符号商
@@ -618,7 +626,7 @@ void AsmGen::gen_div_const_emit(int64_t d, int mode, bool a_nonneg) {
 
         // 余数 r = x - q*d。q 先挪到 %rcx，|d| <= 2^31 所以能用 32 位立即数。
         line("movq %rax, %rcx");
-        line(std::format("imulq ${}, %rcx", d));
+        emit_imm(MOp::kImulq, d, kRcx);
         line("movq %r9, %rdx");
         line("subq %rcx, %rdx");
         std::string done = fresh_label("dcdiv");
@@ -631,7 +639,7 @@ void AsmGen::gen_div_const_emit(int64_t d, int mode, bool a_nonneg) {
             return;
         }
         // Python 的 % 结果与除数同号：r 异号时补一个 d。
-        line(std::format("addq ${}, %rdx", d));
+        emit_imm(MOp::kAddq, d, kRdx);
         label(done);
         line("movq %rdx, %rax");
 }
@@ -900,15 +908,15 @@ void AsmGen::emit_truth(VReg r, const char* byte_reg) {
             line("setne %al");
             return;
         }
-        std::string s = src_op(r);
+        const MOperand* s = &src_mop(r);
         // 立即数不能直接进 cmpq 的源位置：先落 %rax。常量条件一般会被
         // 分支折叠吃掉，这里只兜底（如 bool(x) 的 x 是常量）。
-        if (!s.empty() && s[0] == '$') {
-            emit2("movq", s, "%rax");
-            s = "%rax";
+        if (s->kind == MOperandKind::Imm) {
+            emit2(MOp::kMovq, *s, kRax);
+            s = &mreg_operand(kRax);
         }
-        emit2("cmpq", "$0", s);
-        line("setne %al");
+        emit_imm(MOp::kCmpq, 0, *s);
+        emit1(MOp::kSetne, kAl);
     }
 
 void AsmGen::gen_cmp(const Inst& in) {
@@ -919,26 +927,26 @@ void AsmGen::gen_cmp(const Inst& in) {
                 // 单字节字面量已经被接到运行时的驻留表上，所以
                 // `s[i] == "0"` 这类逐字符比较直接命中这里，完全不必进
                 // pa_str_eq（那种比较在 str_build 里每轮内层循环 60 次）。
-                const std::string da = arg_reg_i(0);
-                const std::string db = arg_reg_i(1);
+                const MReg da = mreg_from_name(arg_reg_i(0));
+                const MReg db = mreg_from_name(arg_reg_i(1));
                 const std::string same = fresh_label("streq");
                 const std::string done = fresh_label("streqd");
-                emit2("movq", src_op(in.a), da);
-                emit2("movq", src_op(in.b), db);
-                emit2("cmpq", db, da);
-                emit_jmp("je", same);
+                emit2(MOp::kMovq, src_mop(in.a), da);
+                emit2(MOp::kMovq, src_mop(in.b), db);
+                emit2(MOp::kCmpq, db, da);
+                emit_jmp(MOp::kJe, same);
                 // 0.288：单字节内容快路径。指针不等之后，双方 len==1 就
                 // 直接比 data[0]。str_build 的 c=="0" 有 9/10 是不等的
                 // 数字字符，原来每次都要为一个字节比较走完整 pa_str_eq
                 // 调用（占该用例 8.4%）。len 在 +8、data 在 +24，str/bytes
                 // 同布局；scratch 用 r10/r11 避开 Win64 实参寄存器。
                 const std::string slow = fresh_label("strslow");
-                line(std::format("cmpq $1, 8({})", da));
-                emit_jmp("jne", slow);
-                line(std::format("cmpq $1, 8({})", db));
-                emit_jmp("jne", slow);
-                line(std::format("movq 24({}), %r10", da));
-                line(std::format("movq 24({}), %r11", db));
+                emit_imm(MOp::kCmpq, 1, op_mem(da, 8));
+                emit_jmp(MOp::kJne, slow);
+                emit_imm(MOp::kCmpq, 1, op_mem(db, 8));
+                emit_jmp(MOp::kJne, slow);
+                emit2(MOp::kMovq, op_mem(da, 24), kR10);
+                emit2(MOp::kMovq, op_mem(db, 24), kR11);
                 line("movzbq (%r10), %rax");
                 line("cmpb (%r11), %al");
                 emit_jmp("je", same);
