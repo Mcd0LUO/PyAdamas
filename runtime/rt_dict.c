@@ -311,6 +311,8 @@ PyAdamasDict* pa_dict_new(int64_t key_kind, int64_t key_own, int64_t val_own,
 /* 调用方已经把 key/value 的「入表引用」retain 好；更新已有 key 时
    释放这份多余的新 key 引用，字典继续保留原来的 key 对象。 */
 void pa_dict_set(PyAdamasDict* d, int64_t key, int64_t val) {
+    pa_gc_insert_barrier(key);   /* 插入屏障：标记期新键/值标灰（0.330） */
+    pa_gc_insert_barrier(val);
     // 插入与覆盖两条路径都从这里走，统一探针（覆盖时旧值已 dec，新值
     // 可能是堆；键对象沿用插入时已探针的原 key）。
     dict_note_heap(d, key, val);

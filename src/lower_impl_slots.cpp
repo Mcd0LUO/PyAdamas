@@ -115,6 +115,7 @@ void Lowerer::store_field(TypePtr fty, VReg obj, int off, VReg v) {
     if (ir_is_heap(fty) || unknown) {
         VReg old = field_load(obj, off, fty);
         field_store(obj, off, v);
+        gc_barrier(v);   /* 插入屏障：标记期写入黑对象的新堆值标灰（0.330） */
         if (unknown) rc_dec_unknown(old);
         else rc_dec(old);
     } else {
