@@ -181,7 +181,9 @@ bool AsmGen::try_vect_loop(const Block& b) {
     for (auto& [slot, info] : si) {
         if (slot_is_jalias(slot) || slot == sJ) continue;
         if (info.writers != 1 || info.store_pos < 0 || info.loads != 1) continue;
-        if (info.read_before_store || !simd_slot_unaddressed(slot)) continue;
+        // acc 槽的读**必须**在写前（读旧值→写新值）；loads==1 保证无其它循环内读。
+        // 注意与临时槽判据相反：临时槽要求读全在写后（!read_before_store）。
+        if (!info.read_before_store || !simd_slot_unaddressed(slot)) continue;
         TypePtr ty = slot < static_cast<int>(f_->slot_ty.size())
                          ? f_->slot_ty[static_cast<size_t>(slot)] : nullptr;
         if (!ty || (ty->kind != TyKind::Float && ty->kind != TyKind::Int)) continue;
@@ -241,6 +243,7 @@ bool AsmGen::try_vect_loop(const Block& b) {
     std::vector<VReg> inv_floats;                         // 需要广播的不变量 float
     std::vector<VReg> inv_ints;                          // 需要广播的不变量 int
     bool failed = false;
+    bool has_int_mul = false;                            // int 乘 → pmuludq 重建需序列 scratch
 
     // 下标仿射偏移：j → 0；j+c（c>=0 常量）→ c；否则 -1。
     std::function<int64_t(VReg)> index_off = [&](VReg v) -> int64_t {
@@ -357,10 +360,14 @@ bool AsmGen::try_vect_loop(const Block& b) {
                         default: c.kind = VK::Fail;
                     }
                 } else if (ia && ib && int_ok(ka) && int_ok(kb) &&
-                           (d->bop == BinKind::Add || d->bop == BinKind::Sub)) {
+                           (d->bop == BinKind::Add || d->bop == BinKind::Sub ||
+                            d->bop == BinKind::Mul)) {
                     // int 逐元素加/减：paddq/psubq 模 2^64 与标量 addq/subq 逐位一致。
-                    // int 乘（需 pmuludq 组合 + 守卫）/除等本轮不支持 → 保守跳过。
+                    // int 乘：pmuludq 奇偶 lane 组合全 i64 重建（无需值域守卫，
+                    // 任意 i64 逐位等于 imulq 低 64 位，推导见发射处注释）。
+                    // int 除/位运算等不支持 → 保守跳过。
                     c.kind = VK::VecI;
+                    if (d->bop == BinKind::Mul) has_int_mul = true;
                     if (ka == VK::InvI) inv_ints.push_back(d->a);
                     if (kb == VK::InvI) inv_ints.push_back(d->b);
                 } else {
@@ -461,6 +468,15 @@ bool AsmGen::try_vect_loop(const Block& b) {
     bool has_side = red_slot != -1;
     for (Role r : role) if (r == Role::MapStore) has_side = true;
     if (!has_side) return false;
+    // 不变量广播清单补全：classify 只在 float 常量/float 槽/int Bin 操作数处
+    // 收集，但 ConstInt 还可直接出现在 map 存储值（c[i]=1）或 reduction expr
+    // （s+=1）——这些 InvI 同样要广播。漏收 → 发射期 xmm_of 查无寄存器 →
+    // 前奏已发却 return false → 悬空 tail 标签（链接失败）。统一扫 cls 补全，
+    // uniq_inv 去重；发射期寄存器查询从此不可能失败（dry-run 完备）。
+    for (auto& [v, c] : cls) {
+        if (c.kind == VK::InvF) inv_floats.push_back(v);
+        else if (c.kind == VK::InvI) inv_ints.push_back(v);
+    }
 
     // ── 别名/依赖分析 ────────────────────────────────────────────────────
     // 按 list 分组。同对象读+写：只允许全偏移 0 且读在写前（逐元素原地）。
@@ -532,6 +548,13 @@ bool AsmGen::try_vect_loop(const Block& b) {
         if (xmm_pool.empty()) return kMRegNone;
         MReg r = xmm_pool.front(); xmm_pool.erase(xmm_pool.begin()); return r;
     };
+    // int 乘 pmuludq 重建的 2 个序列 scratch：序列在单条 Bin 发射内原子完成，
+    // 跨指令不 live，先占使不变量/acc/临时值线性扫描不会占用。放不下保守跳过。
+    MReg SEQ1 = kMRegNone, SEQ2 = kMRegNone;
+    if (has_int_mul) {
+        SEQ1 = take(kMRegNone); SEQ2 = take(kMRegNone);
+        if (SEQ1 == kMRegNone || SEQ2 == kMRegNone) return false;
+    }
     // 去重不变量 float（Mov/临时槽别名解析到同一生产者）。
     auto resolve_src = [&](VReg v) -> VReg {
         while (true) {
@@ -667,7 +690,10 @@ bool AsmGen::try_vect_loop(const Block& b) {
         emit2(MOp::kMovlhps, rr, rr);
     }
     if (red_float && acc_stack) emit2(MOp::kMovsd, tloc, XT);
-    if (red_int) emit2(MOp::kPxor, IACC, IACC);
+    // int acc 必须装载槽的**当前值**进低 lane（高 lane 自动清 0）：循环前累加器
+    // 可能非 0（t=49; for...: t+=n）。pxor 清 0 + 出口覆盖写会丢前值（静默算错）。
+    // 出口水平求和 = 前值 + 向量和（模 2^64 结合律精确），写回槽后标量尾续加。
+    if (red_int) emit2(MOp::kMovq, iloc, IACC);
 
     // 向量循环体。
     label(vec);
@@ -690,6 +716,26 @@ bool AsmGen::try_vect_loop(const Block& b) {
                 const bool is_int = ty_of(in.dst) && ty_of(in.dst)->kind == TyKind::Int;
                 MOp op = MOp::kAddpd;
                 if (is_int) {
+                    if (in.bop == BinKind::Mul) {
+                        // 全 i64 乘重建（rd=A 已装好，rb=B 保持不动）：
+                        //   a*b mod 2^64 = a_lo*b_lo + ((a_lo*b_hi + a_hi*b_lo) mod 2^32)<<32
+                        // a_lo/a_hi 是 64 位 lane 的低/高 32 位（无符号拆半，对负数
+                        // 补码同样成立）。pmuludq 逐 lane 取低 32 位无符号乘 → 精确
+                        // 64 位积（<2^64）；paddq/psllq 的模 2^64/丢高位恰好实现上式
+                        // 的 mod 2^32 与 <<32 → 与标量 imulq 低 64 位逐位一致，
+                        // 任意 i64（含负数/INT64_MIN）无需值域守卫。
+                        emit2(MOp::kMovapd, rb, SEQ1);
+                        emit_imm(MOp::kPsrlq, 32, SEQ1);      // SEQ1 = b_hi
+                        emit2(MOp::kPmuludq, rd, SEQ1);       // SEQ1 = a_lo*b_hi
+                        emit2(MOp::kMovapd, rd, SEQ2);
+                        emit_imm(MOp::kPsrlq, 32, SEQ2);      // SEQ2 = a_hi
+                        emit2(MOp::kPmuludq, rb, SEQ2);       // SEQ2 = b_lo*a_hi
+                        emit2(MOp::kPaddq, SEQ2, SEQ1);       // 交叉项和（mod 2^64）
+                        emit_imm(MOp::kPsllq, 32, SEQ1);      // 只留低 32 并 <<32
+                        emit2(MOp::kPmuludq, rb, rd);         // rd = a_lo*b_lo（精确）
+                        emit2(MOp::kPaddq, SEQ1, rd);         // rd = a*b mod 2^64
+                        break;
+                    }
                     switch (in.bop) {
                         case BinKind::Add: op = MOp::kPaddq; break;
                         case BinKind::Sub: op = MOp::kPsubq; break;
