@@ -19,6 +19,7 @@
 #include <unordered_map>
 #include <vector>
 
+#include "block_bitset.h"
 #include "ir.h"
 #include "mach_instr.h"
 #include "target_abi.h"
@@ -457,7 +458,8 @@ private:
 
     // 当前块内的位置索引，gen_block 开头重建。
     std::unordered_map<int, std::vector<int>> block_stores_;
-    std::unordered_map<VReg, int> block_first_use_;
+    // 块内首次读位置 + RcMark 打标（见 block_bitset.h 里的 BlockUseIndex）
+    BlockUseIndex block_use_;
     int cur_pos_ = 0;  // 正在生成的指令在块内的下标
 
     // ── 输出辅助（结构化 Machine 层）──────────────────────────────
@@ -540,10 +542,8 @@ private:
     void label(const std::string& s) { out_.push_label(s, false); }
     // 带前导 tab 的块内局部标签（"\t1:" 这种）。
     void label_block(const std::string& s) { out_.push_label(s, true); }
-    // "\t# s"
-    void comment(const std::string& s) { out_.push(make_comment("\t# " + s)); }
-    // 列 0 的注释行（"# ---- ... ----"）。
-    void comment0(const std::string& s) { out_.push(make_comment("# " + s)); }
+    // "\t# s" / 指令注释 / 列 0 注释行（"# ..."）。实现见 codegen_comment.cpp。
+    void comment(std::string_view s); void comment_inst(const Inst& in); void comment0(std::string_view s);
     // "\t" + body + "\n"：.align/.quad/.section 这类汇编指示符。
     void directive(std::string_view body) { out_.push_directive(body); }
     // 空行。

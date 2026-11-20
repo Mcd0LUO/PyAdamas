@@ -1,6 +1,7 @@
 // codegen_regalloc.cpp —— 寄存器/栈槽分配与函数帧
 #include "codegen_impl.h"
 
+#include "block_bitset.h"
 #include "live_interval.h"
 #include "spill_placement.h"
 
@@ -73,14 +74,22 @@ void AsmGen::emit_epilogue() {
 // 它是 RC 临时栈的水位：入口 mark、出口 cleanup，中间隔着任意多次调用。
 // 只要它被放进寄存器，某次 call 就会把它冲掉，cleanup 拿到错误水位 ——
 // 运行时直接 panic（invalid temporary stack mark）。
-static bool vreg_is_rc_mark(const IRFunction& f, VReg v) {
+//
+// 原来的判定是「对每个 vreg 扫全函数找 RcMark」：nv × 指令数是 O(n²)
+// （2150 vreg × 5000 指令的函数上实测占编译时间 3%+）。改成一次扫描
+// 打标，两处调用点查表；判定的 vreg 集合完全相同。
+namespace {
+// RcMark 水位 vreg 一次扫描打标（供栈槽分配与全局寄存器提升两处查表）。
+void collect_rc_marks(const IRFunction& f, BlockUseIndex& idx) {
+    const size_t nv = f.vreg_ty.size();
+    idx.rc_marks.assign(nv, 0);
     for (const auto& b : f.blocks)
         for (const auto& in : b.insts)
-            if (in.op == IrOp::CallRt &&
-                static_cast<RtFn>(in.imm) == RtFn::RcMark && in.dst == v)
-                return true;
-    return false;
+            if (in.op == IrOp::CallRt && static_cast<RtFn>(in.imm) == RtFn::RcMark &&
+                in.dst != kNoReg && in.dst < nv)
+                idx.rc_marks[in.dst] = 1;
 }
+}  // namespace
 
 // ── vreg 栈槽分配 ───────────────────────────────────────────
 //
@@ -103,6 +112,9 @@ static bool vreg_is_rc_mark(const IRFunction& f, VReg v) {
 // 再在块内从后往前扫出精确的活跃位置。
 void AsmGen::assign_vreg_slots() {
         const size_t nv = f_->vreg_ty.size();
+        // RcMark 水位 vreg 一次扫描打标（供本函数与 assign_global_vreg_regs
+        // 两处查表；原来是「每个 vreg 扫全函数」，O(n²)）。
+        collect_rc_marks(*f_, block_use_);
         vreg_slot_.assign(nv, 0);
         n_vreg_slots_ = 0;
         use_count_.assign(nv, 0);
@@ -118,11 +130,15 @@ void AsmGen::assign_vreg_slots() {
         std::vector<int> first_use(nv, INT32_MAX);
         std::vector<int> last_use(nv, -1);
         std::vector<int> block_start(static_cast<size_t>(nb), 0);
-        std::vector<std::vector<char>> blk_use(static_cast<size_t>(nb));
-        std::vector<std::vector<char>> blk_def(static_cast<size_t>(nb));
+        // 块级 use/def 与下面的 live_in/live_out 都用字位集（block_bitset.h）。
+        // 原实现是每块 nv 字节的 char 向量：626 块 × 2150 vreg 的函数单趟
+        // 扫描就是 ~5MB 字节流量，不动点迭代还要乘轮数。只换容器，判定
+        // 逻辑与结果逐位不变。
+        std::vector<BlockBits> blk_use(static_cast<size_t>(nb));
+        std::vector<BlockBits> blk_def(static_cast<size_t>(nb));
         for (int b = 0; b < nb; ++b) {
-            blk_use[static_cast<size_t>(b)].assign(nv, 0);
-            blk_def[static_cast<size_t>(b)].assign(nv, 0);
+            blk_use[static_cast<size_t>(b)].reset(nv);
+            blk_def[static_cast<size_t>(b)].reset(nv);
         }
         int pos = 0;
         for (int b = 0; b < nb; ++b) {
@@ -135,7 +151,7 @@ void AsmGen::assign_vreg_slots() {
                     ++use_count_[r];
                     if (pos < first_use[r]) first_use[r] = pos;
                     last_use[r] = pos;
-                    if (!bdef[r]) buse[r] = 1;  // 块内先使用后定义 → live-in
+                    if (!bdef.test(r)) buse.set(r);  // 块内先使用后定义 → live-in
                 };
                 touch(in.a);
                 touch(in.b);
@@ -145,7 +161,7 @@ void AsmGen::assign_vreg_slots() {
                     def_pos[in.dst] = pos;
                     def_block_[in.dst] = b;
                     ++def_count[in.dst];
-                    bdef[in.dst] = 1;
+                    bdef.set(in.dst);
                 }
                 ++pos;
             }
@@ -200,11 +216,11 @@ void AsmGen::assign_vreg_slots() {
                 }
             }
         }
-        std::vector<std::vector<char>> live_in(static_cast<size_t>(nb));
-        std::vector<std::vector<char>> live_out(static_cast<size_t>(nb));
+        std::vector<BlockBits> live_in(static_cast<size_t>(nb));
+        std::vector<BlockBits> live_out(static_cast<size_t>(nb));
         for (int b = 0; b < nb; ++b) {
-            live_in[static_cast<size_t>(b)].assign(nv, 0);
-            live_out[static_cast<size_t>(b)].assign(nv, 0);
+            live_in[static_cast<size_t>(b)].reset(nv);
+            live_out[static_cast<size_t>(b)].reset(nv);
         }
         bool changed = true;
         int guard = 0;
@@ -214,19 +230,14 @@ void AsmGen::assign_vreg_slots() {
                 // out 每次都从空集重算：继承上一轮的值会让 live_out 单调
                 // 增长、永不收缩 —— 区间被越拉越长，最后所有 vreg 都变成
                 // 全函数活跃，复用彻底失效（且没有后继的块会残留脏值）。
-                std::vector<char> out(static_cast<size_t>(nv), 0);
-                for (int s : succ[static_cast<size_t>(b)]) {
-                    const auto& si = live_in[static_cast<size_t>(s)];
-                    for (size_t v = 0; v < nv; ++v)
-                        if (si[v]) out[v] = 1;
-                }
-                std::vector<char> in(static_cast<size_t>(nv), 0);
+                BlockBits out(nv, false);
+                for (int s : succ[static_cast<size_t>(b)]) out.or_with(live_in[static_cast<size_t>(s)]);
+                BlockBits in(nv, false);
                 const auto& buse = blk_use[static_cast<size_t>(b)];
                 const auto& bdef = blk_def[static_cast<size_t>(b)];
-                for (size_t v = 0; v < nv; ++v)
-                    if (buse[v] || (out[v] && !bdef[v])) in[v] = 1;
-                if (in != live_in[static_cast<size_t>(b)] ||
-                    out != live_out[static_cast<size_t>(b)]) {
+                in.andnot_or(out, bdef, buse);
+                if (!(in == live_in[static_cast<size_t>(b)]) ||
+                    !(out == live_out[static_cast<size_t>(b)])) {
                     live_in[static_cast<size_t>(b)] = std::move(in);
                     live_out[static_cast<size_t>(b)] = std::move(out);
                     changed = true;
@@ -243,21 +254,23 @@ void AsmGen::assign_vreg_slots() {
             if (p > live_last[v]) live_last[v] = p;
         };
         for (int b = 0; b < nb; ++b) {
-            std::vector<char> cur(live_out[static_cast<size_t>(b)]);
+            BlockBits cur(nv, false);
+            cur.assign(live_out[static_cast<size_t>(b)]);
             const auto& insts = f_->blocks[static_cast<size_t>(b)].insts;
             const int bstart = block_start[static_cast<size_t>(b)];
             const int blen = static_cast<int>(insts.size());
             // live-out 的值一直活到块末尾
             if (blen > 0)
-                for (size_t v = 0; v < nv; ++v)
-                    if (cur[v]) mark_live(static_cast<VReg>(v), bstart + blen - 1);
+                cur.for_each_set([&](size_t v) {
+                    mark_live(static_cast<VReg>(v), bstart + blen - 1);
+                });
             for (int k = blen - 1; k >= 0; --k) {
                 const Inst& in = insts[static_cast<size_t>(k)];
                 const int p = bstart + k;
-                if (in.dst != kNoReg && in.dst < nv) cur[in.dst] = 0;
+                if (in.dst != kNoReg && in.dst < nv) cur.clear(in.dst);
                 auto use = [&](VReg v) {
                     if (v == kNoReg || v >= nv) return;
-                    cur[v] = 1;
+                    cur.set(v);
                     mark_live(v, p);
                 };
                 use(in.a);
@@ -265,8 +278,7 @@ void AsmGen::assign_vreg_slots() {
                 use(in.c);
                 for (VReg r : in.args) use(r);
             }
-            for (size_t v = 0; v < nv; ++v)
-                if (cur[v]) mark_live(static_cast<VReg>(v), bstart);
+            cur.for_each_set([&](size_t v) { mark_live(static_cast<VReg>(v), bstart); });
         }
 
         // ── 4. 线性扫描 ──
@@ -307,7 +319,7 @@ void AsmGen::assign_vreg_slots() {
             // `movsd %xmm11, 80(%rsp)`，reload 时全读到后写的那个值。
             //
             // 数量上限是浮点池大小（8），代价可接受。
-            if (vreg_is_rc_mark(*f_, static_cast<VReg>(v)) || def_count[v] > 1 ||
+            if (block_use_.is_rc_mark(static_cast<VReg>(v)) || def_count[v] > 1 ||
                 (cross_block_[v] && f_->vreg_ty[v] &&
                  f_->vreg_ty[v]->kind == TyKind::Float)) {
                 ranges.push_back({0, total_pos + 1, static_cast<int>(v)});
@@ -1979,6 +1991,25 @@ bool AsmGen::temp_reg_op_ok(const Inst& in) const {
 void AsmGen::assign_block_temp_regs() {
         if (opt_ < 1 || gen_) return;
 
+        // 块内 def/use 位置索引。原来是每块新建三张 unordered_map<VReg, …>：
+        // 逐指令 find/insert + 每个结点一次 malloc，perf 显示
+        // _M_insert_unique_node + emplace_uniq + malloc/free 合计约 15% 编译
+        // 时间（大函数上）。改成按 vreg 直接下标 + 脏项复位：查询「存在/
+        // 不存在」与取值完全一致；ranges 的起点是定义位置、各不相同，
+        // 排序后与迭代顺序无关，因此分配结果不变。
+        size_t nv = f_->vreg_ty.size();
+        std::vector<int> def_pos(nv, -1);
+        std::vector<const Inst*> def_inst(nv, nullptr);
+        std::vector<int> last_use(nv, -1);
+        std::vector<VReg> touched;
+        auto ensure_slot = [&](VReg r) {
+            if (static_cast<size_t>(r) < nv) return;
+            nv = static_cast<size_t>(r) + 1;
+            def_pos.resize(nv, -1);
+            def_inst.resize(nv, nullptr);
+            last_use.resize(nv, -1);
+        };
+
         for (const auto& b : f_->blocks) {
             // GPR 池（r8-r11）与浮点池（xmm3-7）独立门控：整数除法类
             // 指令踢出 GPR 池但不踢浮点池（见 fp_temp_op_ok）。
@@ -1990,19 +2021,28 @@ void AsmGen::assign_block_temp_regs() {
             }
             if (!safe && !fp_safe) continue;
 
-            std::unordered_map<VReg, int> def_pos;
-            std::unordered_map<VReg, const Inst*> def_inst;
-            std::unordered_map<VReg, int> last_use;
+            // 上一块碰过的项复位 —— 等价于原来每块新建三张空表。
+            for (VReg r : touched) {
+                def_pos[r] = -1;
+                def_inst[r] = nullptr;
+                last_use[r] = -1;
+            }
+            touched.clear();
             int pos = 0;
             for (const auto& in : b.insts) {
                 auto touch = [&](VReg r) {
-                    if (r != kNoReg) last_use[r] = pos;
+                    if (r == kNoReg) return;
+                    ensure_slot(r);
+                    if (last_use[r] < 0 && def_pos[r] < 0) touched.push_back(r);
+                    last_use[r] = pos;
                 };
                 touch(in.a);
                 touch(in.b);
                 touch(in.c);
                 for (VReg r : in.args) touch(r);
                 if (in.dst != kNoReg) {
+                    ensure_slot(in.dst);
+                    if (last_use[in.dst] < 0 && def_pos[in.dst] < 0) touched.push_back(in.dst);
                     def_pos[in.dst] = pos;
                     def_inst[in.dst] = &in;
                 }
@@ -2031,11 +2071,11 @@ void AsmGen::assign_block_temp_regs() {
                 std::vector<int> until(pool.size(), -1);
                 for (const auto& r : ranges) {
                     int pick = -1;
-                    auto di = def_inst.find(r.v);
-                    if (di != def_inst.end() && in_place_ok(*di->second)) {
-                        VReg a = di->second->a;
-                        auto lu = last_use.find(a);
-                        if (a != kNoReg && lu != last_use.end() && lu->second == r.start &&
+                    const Inst* di = def_inst[r.v];
+                    if (di != nullptr && in_place_ok(*di)) {
+                        VReg a = di->a;
+                        const int lu = static_cast<size_t>(a) < nv ? last_use[a] : -1;
+                        if (a != kNoReg && lu >= 0 && lu == r.start &&
                             a < vreg_reg_.size() && !vreg_reg_[a].empty() && !cross_block_[a]) {
                             for (size_t i = 0; i < pool.size(); ++i)
                                 if (pool[i] == vreg_reg_[a] && until[i] <= r.start) {
@@ -2059,11 +2099,12 @@ void AsmGen::assign_block_temp_regs() {
 
             if (safe) {
             std::vector<Range> ranges;
-            for (const auto& [v, d] : def_pos) {
-                if (v >= static_cast<VReg>(f_->vreg_ty.size())) continue;
+            for (size_t v = 0; v < nv; ++v) {
+                const int d = def_pos[v];
+                if (d < 0) continue;
+                if (v >= f_->vreg_ty.size()) continue;
                 if (cross_block_[v]) continue;
-                auto lu = last_use.find(v);
-                if (lu == last_use.end()) continue;
+                if (last_use[v] < 0) continue;
                 // unknown 的机器表示可能是浮点位模式（元素类型丢失的下标装载），
                 // 浮点/可选类型同理：只给「确定是整数/指针」的值分配 GPR。
                 TypePtr vt = f_->vreg_ty[v];
@@ -2075,7 +2116,7 @@ void AsmGen::assign_block_temp_regs() {
                 // LoadSlot 有自己的别名机制；常量可以延迟成立即数，不用占寄存器。
                 if (op == IrOp::LoadSlot || op == IrOp::ConstInt || op == IrOp::ConstNone)
                     continue;
-                ranges.push_back(Range{d, lu->second, v});
+                ranges.push_back(Range{d, last_use[v], static_cast<VReg>(v)});
             }
             allocate(ranges, block_temp_pool_, [](const Inst& in) {
                 if (in.op != IrOp::Bin) return false;
@@ -2100,18 +2141,19 @@ void AsmGen::assign_block_temp_regs() {
             // 块内用完且确定是 float 的纯计算值；LoadSlot 有自己的别名
             // 机制，会正常返回的调用类指令所在块进不到这里。
             std::vector<Range> fp_ranges;
-            for (const auto& [v, d] : def_pos) {
-                if (v >= static_cast<VReg>(f_->vreg_ty.size())) continue;
+            for (size_t v = 0; v < nv; ++v) {
+                const int d = def_pos[v];
+                if (d < 0) continue;
+                if (v >= f_->vreg_ty.size()) continue;
                 if (cross_block_[v]) continue;
-                auto lu = last_use.find(v);
-                if (lu == last_use.end()) continue;
+                if (last_use[v] < 0) continue;
                 TypePtr vt = f_->vreg_ty[v];
                 if (!vt || vt->kind != TyKind::Float) continue;
                 IrOp op = def_inst[v]->op;
                 if (op != IrOp::Bin && op != IrOp::Un && op != IrOp::Convert &&
                     op != IrOp::ConstFloat && op != IrOp::Mov)
                     continue;
-                fp_ranges.push_back(Range{d, lu->second, v});
+                fp_ranges.push_back(Range{d, last_use[v], static_cast<VReg>(v)});
             }
             allocate(fp_ranges, std::vector<std::string>(kFpTempRegs, kFpTempRegs + kMaxFpTempRegs),
                      [](const Inst& in) {
@@ -2341,7 +2383,7 @@ void AsmGen::assign_global_vreg_regs() {
             // 存活。放进 callee 寄存器看似安全，但它会和槽寄存器/其它
             // vreg 的复用产生冲突，cleanup 拿到错水位 —— 实测 fasta 报
             // invalid temporary stack mark、binary_trees 报 refcount 错误。
-            if (vreg_is_rc_mark(*f_, static_cast<VReg>(v))) continue;
+            if (block_use_.is_rc_mark(static_cast<VReg>(v))) continue;
             cands.push_back(Cand{static_cast<int>(v), static_cast<int>(weight[v])});
         }
         // RA_OPT（默认关）：P2 只读槽 load 别名 + P1 同块调用块候选。

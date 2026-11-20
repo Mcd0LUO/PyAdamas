@@ -109,6 +109,7 @@ src/opt_intloop.cpp
   src/codegen_regalloc.cpp
   src/ra_opt.cpp
   src/codegen_block.cpp
+  src/codegen_comment.cpp
   src/codegen_ops.cpp
   src/codegen_int_fixed.cpp
   src/codegen_call.cpp
