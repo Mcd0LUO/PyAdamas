@@ -1,4 +1,5 @@
 // codegen_block.cpp —— 函数与基本块、融合与分支
+#include "block_bitset.h"
 #include "codegen_impl.h"
 
 #include <cctype>
@@ -34,51 +35,66 @@ std::vector<bool> AsmGen::slots_needing_zero() const {
         }
     }
 
-    std::vector<bool> entry_assigned(static_cast<size_t>(n_slots_), false);
+    // 槽级「入口是否已赋值」数据流用 64 位字位集（原来是每块一个
+    // std::vector<bool>，每轮还要整块拷贝一次：块数 × 槽数 × 轮数的位操作
+    // 加上分配，perf 里 slots_needing_zero 占 ~2%）。判定顺序与原实现
+    // 逐块一致，不动点结果逐位相同。
+    const size_t nsl = static_cast<size_t>(n_slots_);
+    BlockBits entry_assigned(nsl, false);
     for (const auto& p : f_->params)
-        if (p.slot >= 0 && p.slot < n_slots_) entry_assigned[p.slot] = true;
-    if (f_->env_slot >= 0 && f_->env_slot < n_slots_) entry_assigned[f_->env_slot] = true;
+        if (p.slot >= 0 && p.slot < n_slots_) entry_assigned.set(static_cast<size_t>(p.slot));
+    if (f_->env_slot >= 0 && f_->env_slot < n_slots_)
+        entry_assigned.set(static_cast<size_t>(f_->env_slot));
 
-    std::vector<std::vector<bool>> in(static_cast<size_t>(nb),
-                                      std::vector<bool>(static_cast<size_t>(n_slots_), true));
-    std::vector<std::vector<bool>> out(static_cast<size_t>(nb),
-                                       std::vector<bool>(static_cast<size_t>(n_slots_), true));
-    in[0] = entry_assigned;
-    out[0] = entry_assigned;
+    std::vector<BlockBits> blk_store(static_cast<size_t>(nb));
+    for (int b = 0; b < nb; ++b) {
+        blk_store[static_cast<size_t>(b)].reset(nsl);
+        for (const auto& inst : f_->blocks[b].insts)
+            if (inst.op == IrOp::StoreSlot && inst.idx >= 0 && inst.idx < n_slots_)
+                blk_store[static_cast<size_t>(b)].set(static_cast<size_t>(inst.idx));
+    }
+
+    std::vector<BlockBits> in(static_cast<size_t>(nb), BlockBits(nsl, true));
+    std::vector<BlockBits> out(static_cast<size_t>(nb), BlockBits(nsl, true));
+    in[0].assign(entry_assigned);
+    out[0].assign(entry_assigned);
 
     bool changed = true;
     while (changed) {
         changed = false;
         for (int b = 0; b < nb; ++b) {
-            std::vector<bool> o = in[b];
-            for (const auto& inst : f_->blocks[b].insts)
-                if (inst.op == IrOp::StoreSlot && inst.idx >= 0 && inst.idx < n_slots_)
-                    o[inst.idx] = true;
-            out[b] = std::move(o);
+            BlockBits o(nsl, false);
+            o.assign(in[static_cast<size_t>(b)]);
+            o.or_with(blk_store[static_cast<size_t>(b)]);
+            out[static_cast<size_t>(b)].assign(o);
             for (int s : succ[b]) {
                 if (s == 0 || s < 0 || s >= nb) continue;
-                for (int i = 0; i < n_slots_; ++i) {
-                    bool v = in[s][i] && out[b][i];
-                    if (v != in[s][i]) {
-                        in[s][i] = v;
-                        changed = true;
-                    }
+                BlockBits& ins = in[static_cast<size_t>(s)];
+                BlockBits want = ins;
+                // in[s] &= out[b]，逐位与；有位置被清掉才算变化。
+                uint64_t* w = want.words();
+                const uint64_t* ob = o.words();
+                for (size_t i = 0; i < want.word_count(); ++i) w[i] &= ob[i];
+                if (!(want == ins)) {
+                    ins.assign(want);
+                    changed = true;
                 }
             }
         }
     }
 
     for (int b = 0; b < nb; ++b) {
-        std::vector<bool> assigned = in[b];
+        BlockBits assigned(nsl, false);
+        assigned.assign(in[static_cast<size_t>(b)]);
         for (const auto& inst : f_->blocks[b].insts) {
             if (inst.op == IrOp::SlotAddr && inst.idx >= 0 && inst.idx < n_slots_) {
                 // 地址被取过：可能被间接读，保守清零。
                 need[inst.idx] = true;
             } else if (inst.op == IrOp::LoadSlot && inst.idx >= 0 && inst.idx < n_slots_ &&
-                       !assigned[inst.idx]) {
+                       !assigned.test(static_cast<size_t>(inst.idx))) {
                 need[inst.idx] = true;
             } else if (inst.op == IrOp::StoreSlot && inst.idx >= 0 && inst.idx < n_slots_) {
-                assigned[inst.idx] = true;
+                assigned.set(static_cast<size_t>(inst.idx));
             }
         }
     }
@@ -815,15 +831,13 @@ void AsmGen::gen_block(const Block& b) {
         // 第一次被读的位置。LoadSlot 的别名只在「读之后、第一次赋值之前」
         // 成立；第一次赋值之后别名会读到新值。
         block_stores_.clear();
-        block_first_use_.clear();
+        block_use_.reset_first_use();
         for (int i = 0; i < static_cast<int>(b.insts.size()); ++i) {
             const Inst& in = b.insts[i];
             if (in.op == IrOp::StoreSlot) block_stores_[in.idx].push_back(i);
             VReg ops[3] = {in.a, in.b, in.c};
-            for (VReg r : ops)
-                if (r != kNoReg && !block_first_use_.contains(r)) block_first_use_[r] = i;
-            for (VReg r : in.args)
-                if (!block_first_use_.contains(r)) block_first_use_[r] = i;
+            for (VReg r : ops) block_use_.mark_first_use(r, i);
+            for (VReg r : in.args) block_use_.mark_first_use(r, i);
         }
 
         // 每条指令执行后仍存活的浮点提升槽（live-after），调用点只保存
@@ -858,17 +872,17 @@ void AsmGen::gen_block(const Block& b) {
                     if (x.dst >= use_count_.size() || use_count_[x.dst] != 1 ||
                         cross_block_[x.dst])
                         continue;
-                    auto us = block_first_use_.find(x.dst);
-                    if (us == block_first_use_.end() || us->second <= k) continue;
+                    const int us = block_use_.first_use(x.dst);
+                    if (us < 0 || us <= k) continue;
                     // 使用点前有对该槽的赋值 → gen_load_slot 判定 clobbered，
                     // 不会别名（真的发了一次 mov），寄存器此后无人读。
                     auto stv = block_stores_.find(x.idx);
                     if (stv != block_stores_.end()) {
                         auto it = std::upper_bound(stv->second.begin(),
                                                    stv->second.end(), k);
-                        if (it != stv->second.end() && *it < us->second) continue;
+                        if (it != stv->second.end() && *it < us) continue;
                     }
-                    fp_alias_use[static_cast<size_t>(us->second) * kf +
+                    fp_alias_use[static_cast<size_t>(us) * kf +
                                  static_cast<size_t>(fi)] = 1;
                 }
             }
@@ -901,7 +915,7 @@ void AsmGen::gen_block(const Block& b) {
             cur_pos_ = static_cast<int>(i);
             if (i == forwarded_load) {
                 set_loc(in.line);
-                comment(in.text());
+                comment_inst(in);
                 if (forward_to_receiver) alias_[in.dst] = arg_reg_i(0);
                 ++i;
                 continue;

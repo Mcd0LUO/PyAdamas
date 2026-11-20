@@ -204,6 +204,8 @@ inline constexpr ModuleEntry kModuleTable[] = {
     {"subprocess", ModuleKind::Native, "", ""},
     {"time", ModuleKind::Native, "", ""},
     {"itertools", ModuleKind::NativePython, "itertools.py", ""},
+    // P4 块2（lang_gaps）：内存流 StringIO/BytesIO（file 协议泛化）。
+    {"io", ModuleKind::Python, "io.py", ""},
     {"collections", ModuleKind::Native, "", ""},
     {"json", ModuleKind::Native, "", ""},
     {"re", ModuleKind::Native, "", ""},
@@ -546,6 +548,9 @@ struct Manifest {
     // 运行期类型标签开关（PYADAMAS_TYPE_TAGS）。-1 = 旧清单没有这一行：
     // 缓存必然失效一次（tag 编号/判定不同，混用会读错类型）。
     int type_tags = -1;
+    // P4 语言缺口开关（PYADAMAS_LANG_GAPS）。-1 = 旧清单没有这一行：
+    // 缓存必然失效一次（异常类当值等改变 IR，混用会静默丢语义）。
+    int lang_gaps = -1;
     // 模块是否用到 from c import（dlsym RTLD_DEFAULT）。旧清单没有这一行：
     // 保守按「用到」处理（链接期关 --gc-sections，绝不冒误剥风险）。
     bool c_sym_default = true;
@@ -652,6 +657,12 @@ std::optional<Manifest> read_manifest(const ModuleUnit& u) {
             auto o = parse_u64(v);
             if (!o) return std::nullopt;
             m.type_tags = static_cast<int>(*o);
+        } else if (tag == "langgaps") {
+            std::string v;
+            ss >> v;
+            auto o = parse_u64(v);
+            if (!o) return std::nullopt;
+            m.lang_gaps = static_cast<int>(*o);
         } else if (tag == "csymdefault") {
             std::string v;
             ss >> v;
@@ -691,6 +702,7 @@ void write_manifest(const Program& p, const ModuleUnit& u) {
     out << "inlineopt " << (p.inline_opt ? 1 : 0) << "\n";
     out << "borrowopt " << (p.borrow_opt ? 1 : 0) << "\n";
     out << "typetags " << (p.type_tags ? 1 : 0) << "\n";
+    out << "langgaps " << (p.lang_gaps ? 1 : 0) << "\n";
     out << "csymdefault " << (u.uses_c_sym_default ? 1 : 0) << "\n";
     out << "toolchain " << toolchain_id() << "\n";
     for (auto& d : u.deps) {
@@ -910,6 +922,7 @@ bool try_cache(Program& p, ModuleUnit& u) {
     if (m->inline_opt != (p.inline_opt ? 1 : 0)) return false;
     if (m->borrow_opt != (p.borrow_opt ? 1 : 0)) return false;
     if (m->type_tags != (p.type_tags ? 1 : 0)) return false;
+    if (m->lang_gaps != (p.lang_gaps ? 1 : 0)) return false;
     if (m->deps.size() != u.deps.size()) return false;
     for (auto& d : u.deps) {
         auto it = m->deps.find(d);
@@ -993,6 +1006,7 @@ bool build_unit(Program& p, ModuleUnit& u, bool emit_object, bool entry_ir) {
     // build/run 会把模块编成机器码：模块级未定义名字必须当错误报，
     // 否则降级成初值 0 的全局，运行期静默算错。
     tc->set_strict_module_names(true);
+    tc->set_lang_gaps(p.lang_gaps);
     tc->check(*u.ast);
     auto t1 = now();
     if (!tc->diags().empty()) {
@@ -1177,6 +1191,7 @@ bool build_unit(Program& p, ModuleUnit& u, bool emit_object, bool entry_ir) {
     opt.inline_opt = p.inline_opt;
     opt.borrow_opt = p.borrow_opt;
     opt.type_tags = p.type_tags;
+    opt.lang_gaps = p.lang_gaps;
     opt.fast_math = p.fast_math;
     opt.zero_cost_exc = p.zero_cost_exc;
     opt.module_lookup = [&p](const std::string& name) -> pyadamas::ModuleInfoPtr {
@@ -1399,6 +1414,8 @@ pyadamas::ModuleInfoPtr check_load_file(CheckCtx& ctx, const std::string& name,
             return check_load(ctx, path, dep);
         });
         tc->set_lenient_imports(true);
+        tc->set_lang_gaps(std::getenv("PYADAMAS_LANG_GAPS") != nullptr &&
+                          std::string_view(std::getenv("PYADAMAS_LANG_GAPS")) != "0");
         tc->check(*mod);
         ctx.keep_alive.push_back(tc);
         auto info = check_build_info(*tc, name);

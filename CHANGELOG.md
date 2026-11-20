@@ -4,6 +4,158 @@
 
 早期阶段没有逐条留痕，按阶段归纳；0.4 之后逐条记录。
 
+## [0.343] - 2026-11-21
+
+> lang1 分支：**P4 语言缺口 块1+2——异常类当值 + contextlib.suppress/closing；file 协议泛化 + io.StringIO/BytesIO**
+> （docs/numeric-types-design.md §3/§4 P4）。门控 `PYADAMAS_LANG_GAPS=1`
+> **默认 0**，开启时强制带上 P2 type_tags（CLASS tag=11 是表示基础）。
+> flag-off 生成 asm 逐字节不变（410 个基准/语料文件 cmp 全同）。接编译速度
+> 0.342 之后集成，定版 0.343。设计/边界/负面
+> 结论见 docs/lang-gaps-landing.md。
+
+### 新增
+
+- **内建异常类当值**：ValueError/IndexError 等名字在值位置得到 ClassObj
+  类型（内层 Exception[name]），降级成运行期类对象单例（rt_lang.c 按名
+  缓存，pa_class_new cid=-1/无 vtable，注册表持永久引用 + GC 根登记）。
+  过 unknown 带 CLASS tag=11 不退化成 0：同一性（is）、str/repr/print
+  （<class 'ValueError'>）、__name__、容器存储/迭代全链路。
+- **自定义异常类当值**：门控开时类名值位置统一 ClassObj（raise/except
+  名字机制不受影响）；pass-only 异常类补建单例（旧早退路径门控开且
+  value_used 时继续）。异常值构造取限定名末段（与 pa_exc_register 裸名
+  登记口径一致），except 匹配正确。repr 按 CPython 显示完整限定名
+  （<class '__main__.MyErr'>，判据=裸名在异常注册表；普通用户类 repr
+  保持既有末段口径）。
+- **isinstance/issubclass**：isinstance(e, ValueError)（e 是捕获的异常
+  值）按 exc_is_a 父子链；富异常实例按 MRO 类名（pa_is_exc INSTANCE
+  分支）。issubclass 异常类×异常类（含自定义×内建）运行期按名字判。
+- **raise 经类值**：E = ValueError; raise E / raise E("x") / raise M
+  （自定义）全链路；运行期读类名构造，不用静态内层名（形参回填可能
+  留着首个调用点的类型）。
+- **contextlib.suppress/closing**（stdlib/contextlib.py）：suppress 把
+  类值存进 unknown 元组，__exit__ 用内部 intrinsic __pa_exc_is_a(et, E)
+  按 with 协议的 et 名串判父子；closing 用 __pa_close(thing) 零参动态
+  .close()。
+- **方法名→槽运行期登记表**（rt_lang.c）：门控开时类定义点登记
+  「限定名.方法名→槽」（pa_method_register），pa_method_call0 沿实例
+  MRO 查表分派（尊重覆盖，与 pa_super_lookup 同元数据布局）；file
+  对象直调 pa_file_close。closing 的 .close() 与后续 file 协议泛化共用。
+- **探针路径识别类对象**：pa_str_any/pa_print_any/repr_any_into 按魔数
+  认出类对象印 <class '...'>（门控关时类对象不存在，分支永不命中）。
+- **类对象 GC release 回调**（pa_class_new）：字符串是索引叶子只靠 RC
+  释放；活到 GcShutdown 的类对象（异常类单例）无 release 则 name 串
+  泄漏。与 exc_value_gc_release 同模式，普通用户类纯加法。
+- **回归** tests/run/340_exc_class_value.py（53 行 expect 由 CPython
+  3.14 生成，O0/O1/O2 逐字节一致）；run_tests.sh/difftest.sh 支持
+  `# pyadamas: lang-gaps` 用例级指令。
+- **文件拆分**：typecheck_expr.cpp 的 Attribute case 逐字拆出
+  typecheck_expr_attr.cpp（1214→976 行，check_size 无新增超限）。
+- **file 协议泛化（块2）**：门控开时 file 标注/形参收 FileLike——带
+  read/write 方法面的类实例（assignable 放宽，全局门控开关）。运行期
+  pa_file_* 入口对非 file 值委托实例侧分派（rt_lang.c pa_fileinst_*，
+  方法名→槽登记表沿 MRO 查表，尊重覆盖）——**零 codegen 改动**，门控关
+  asm 天然不变。read/readline/readlines/write/writelines/seek/tell/
+  truncate/close/flush/closed/fileno/isatty/readable/writable/seekable
+  全方法面；name/mode/encoding/errors 实例侧 AttributeError（CPython
+  StringIO 也没有）。print(file=...) 同口径收 FileLike。
+- **stdlib/io.py**（新模块，注册进 kModuleTable）：纯 pa StringIO/
+  BytesIO。CPython 口径：write 越界 NUL 填充、seek whence 1/2 只收
+  offset 0（非零报 OSError，消息逐字）、错误消息逐字（Negative seek
+  position N / Invalid whence (N, should be 0, 1 or 2) / I/O operation
+  on closed file）、with 协议、closed 属性、getvalue。
+- **csv 互操作**：csv.writer/reader 的 f: file 形参经同一分派直接收
+  StringIO（stdlib/csv.py 源码零改动）；属性 getter 也进方法登记表
+  （closed 面经 file 分派可读）。
+- **回归** tests/run/341_io_stringio.py（65 行 expect 由 CPython 3.14
+  生成，O0/O1/O2 逐字节一致，ASan detect_leaks=1 零泄漏）：StringIO/
+  BytesIO 全方法面 + 错误面 + csv  round-trip + print(file=) + file
+  形参分派（StringIO 与用户自定义 FileLike）+ for line in f + closing。
+
+### 闸门（实测）
+
+- flag-off asm 逐字节不变：**410/410 identical**（bench 全量 + tests/run，
+  块2 后复验全同）。
+- difftest O0/O2：**311 用例 0 不一致**（JOBS=4；JOBS=8 时 277 网络时序
+  抖动一次，串行/低并行复验全过——固定端口 http.server 子进程本征负载
+  敏感，非本版引入）。
+- 全套件 normal（JOBS=1）与 ASan（JOBS=1）：见落地文档 §6（块2 修复后
+  复验）。ASan detect_leaks=1 钉子：13/174/92/93/94/119 flag-off/on
+  **12/12 全 0**；340/341 lang-gaps **0 泄漏**。
+- 语料对拍（LANG_GAPS on vs off，358 文件）：**353 逐字节同 + 2 门控
+  用例（340/341）对 expect 一致**；bench_re 仅计时列（本征非确定）；
+  180_codepoint_perf 计时跳过；277 负载抖动一次（单独跑过）。
+- CPython 对拍：340/341 逐字节一致（O0/O1/O2）。check_size 无新增超限。
+- **门控关回归修复**：pa_is_file 探针原用 rc_index_has + size==，无
+  unknown 值的程序跳过索引维护时真 file 查不到 → pa_file_write 误委托
+  实例分派（167_stdlib_glob/81_os_extra 门控关崩溃）。改
+  pa_unknown_is_heap（exact-RC 堆链回退）+ size>=sizeof（h->size 是池
+  对齐 alloc_size；File 是最大 OBJ 种类，下限唯一）。lang_as_class/
+  lang_method_fn 同步换探针。修后 167/81 对 expect 逐字节一致。
+
+### 已知边界（详见 docs/lang-gaps-landing.md §5）
+
+- 多参异常 str() 不引号（pa 既有口径）；异常实例 e.__name__ 不支持；
+  closing.__enter__ 返回 unknown（as 绑定后不能调方法）；门控关时
+  suppress 不可用（运行期 TypeError）。
+- truncate(显式负参) 按默认处理（pa int 默认参只能是字面量，None 默认
+  与显式 0 在 int 槽不可分）；str repr 不转义控制字符（既有 pa 口径，
+  NUL 填充用 len/ord 验证）；BytesIO.write(str) 不抛 TypeError（bytes/str
+  同运行期表示）；file 形参的 name/mode/encoding/errors 属性实例侧
+  AttributeError。tarfile 模块本身未实现（FileLike+BytesIO 基础已就绪）。
+- 块3/4（traceback/sys.exc_info、dataclass 编译期展开）：设计就绪，
+  见 docs/lang-gaps-landing.md §8 剩余清单。
+
+## [0.342] - 2026-11-21
+
+> speed1 分支：**编译吞吐优化**（编译器自身运行速度，生成 asm 逐字节不变）。
+> 每块独立构建 + asm 全语料 sha256 对照 + 全套件/difftest 闸门。测量方法见
+> docs/compile-speed-throughput.md。
+
+### 变更（六块，逐块独立构建 + 闸门）
+
+1. **支配集位集化**（opt_loop.cpp compute_dom）：LICM/下标版本化的 dom[b]
+   从每块 nb 字节的 char 向量改成 64 位字位集。不动点迭代、交集顺序、
+   全 1 初始化都逐位保持，结果与原实现逐位相同。perf 热点 20.2% → 1.6%。
+2. **regalloc 活跃性位集化**（codegen_regalloc.cpp assign_vreg_slots）：
+   blk_use/blk_def/live_in/live_out 由每块 nv 字节 char 向量改位集
+   （新增 src/block_bitset.h）。热点 14.2% → 1.1%。
+3. **块内索引去哈希**：codegen 的 block_first_use_（VReg→块内首次读位置）
+   由 unordered_map 改按 vreg 直接下标 + 脏项复位；assign_block_temp_regs
+   的三张 per-block unordered_map<VReg,…> 同样改定长数组。原哈希插入 +
+   配套 malloc/free 合计 ~15% 归零。
+4. **去掉无读者的 IR 指令级索引**（ir.cpp rebuild_use_def）：inst_by_id /
+   def_of / uses_of 自 0.3xx DCE 改线性计数后已无读者（全仓库 grep 只有
+   写入），重建仍是逐指令哈希插入。只保留仍被 block_index() 读的
+   block_by_id；指令 id 照旧分配（唯一性语义不变）。将来要恢复指令级索引
+   应改成惰性显式入口。
+5. **LICM/下标版本化定义块索引定长数组**（opt_loop.cpp hoist_loop /
+   version_bounds_loop）：原来每个循环头调用一次就重建一遍
+   unordered_map<VReg,int> def_block + 两个集合，改定长数组 + 按 vreg 下标。
+6. **RcMark 水位打标 + 槽清零数据流位集 + 指令注释直写**：
+   - vreg_is_rc_mark 从「每个 vreg 扫全函数」改成入口一次扫描打标（O(n^2) → O(n)）；
+   - slots_needing_zero 的 must 数据流由每块 std::vector<bool> 改位集；
+   - Inst::text_into / comment_inst：指令注释 format_to 直写复用缓冲，
+     每条指令省掉 text() 临时串 + 前缀拼接 + 拷贝三次分配；vreg_str 按
+     编号缓存；PYADAMAS_IR_CHECK 的每指令 getenv 改成只读一次。
+
+### 实测
+
+- 编译吞吐（413 文件语料 ×2 遍，taskset 绑核，base/exp 交替 5 轮取中位，
+  load 6~15）：base **12.57s** → exp **6.87s**，**-45.3%**（单遍 5.68→2.99s）。
+- 单文件重负载 tests/run/234_re_opt.py（626 块/2150 vreg）：
+  **1.44s → 0.14s（10×）**。
+- 热点前后（同口径 perf，语料两遍）：compute_dom 20.2%→1.6%、
+  assign_vreg_slots 14.2%→1.1%、VReg 哈希插入（_M_insert_unique_node +
+  emplace_uniq）合计 14%→0。
+
+### 闸门
+
+- 生成 asm 逐字节不变：413 文件全语料 sha256 逐文件对照全同 + 40 个最重
+  文件 cmp 逐一相同；ir dump 60 文件逐字节相同。
+- 套件 normal 327 ran ok EXIT=0；ASan 套件 327 ran ok EXIT=0；
+  difftest 309 用例 0 不一致 EXIT=0；check_size 无新增超限文件。
+- 详细方法论/剩余方向见 docs/compile-speed-throughput.md。
+
 ## [0.341] - 2026-11-20
 
 > fixint1 分支：**P1 定宽整数——i8/i16/i32/i64 + u8/u16/u32/u64**

@@ -39,6 +39,10 @@ run_one() {
     if sed -n '1,8p' "$f" | grep -q '^# pyadamas: type-tags'; then
         extra="PYADAMAS_TYPE_TAGS=1"
     fi
+    # P4 语言缺口（与 run_tests.sh 同一约定）。
+    if sed -n '1,8p' "$f" | grep -q '^# pyadamas: lang-gaps'; then
+        extra="PYADAMAS_LANG_GAPS=1"
+    fi
     out0=$(env $extra timeout -s KILL 20 "$PY" build -O0 -o "$d/o0" "$f" >/dev/null 2>&1 && timeout -s KILL 20 "$d/o0" 2>&1)
     rc0=$?
     out2=$(env $extra timeout -s KILL 20 "$PY" build -O2 -o "$d/o2" "$f" >/dev/null 2>&1 && timeout -s KILL 20 "$d/o2" 2>&1)

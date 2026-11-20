@@ -429,6 +429,7 @@ VReg Lowerer::lower_builtin_text(const std::string& name, Call& c) {
             push_temp(s);
             return s;
         }
+
         // 容器转标量没有定义（CPython 抛 TypeError）。以前这里直接把
         // 指针当数字用，会静默给出垃圾值——宁可报错。
         if (to->kind != TyKind::Bool && from &&

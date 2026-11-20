@@ -312,6 +312,19 @@ TypePtr TypeChecker::builtin_call(const std::string& n, Call& c) {
             if (!need(1, 1)) return mk_list(t_unknown());
             return mk_list(t_unknown());
         }
+        if (n == "__pa_exc_is_a") {
+            // P4 内部 intrinsic（stdlib/contextlib.py suppress）：
+            // (异常类型名 str, 异常类对象 unknown) -> bool。with 协议的
+            // et 是名字串，类对象过 unknown 形参，运行期按名字判父子。
+            if (!need(2, 2)) return t_bool();
+            return t_bool();
+        }
+        if (n == "__pa_close") {
+            // P4 内部 intrinsic（stdlib/contextlib.py closing）：
+            // unknown 值上的零参 .close()（file / 带 close 方法的实例）。
+            if (!need(1, 1)) return t_none();
+            return t_none();
+        }
         if (n == "__pa_b64decode") {
             if (!need(1, 1)) return t_bytes();
             if (a[0] && a[0]->kind != TyKind::Bytes && a[0]->kind != TyKind::Unknown)

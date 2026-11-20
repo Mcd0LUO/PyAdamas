@@ -140,6 +140,14 @@ static void repr_any_into(AnyReprBuf* b, int64_t v) {
             return;
         }
         default: {
+            /* P4（lang_gaps）：类对象（异常类当值）→ <class '...'>。
+               门控关时类对象值不存在，探针不会命中魔数。 */
+            if (pa_is_class_obj((void*)(uintptr_t)v)) {
+                PyAdamasStr* s = pa_class_repr((void*)(uintptr_t)v);
+                ar_put(b, s->data, (size_t)s->len);
+                pa_rc_dec(s);
+                return;
+            }
             PyAdamasStr* s = pa_str_from_i64(v);
             ar_put(b, s->data, (size_t)s->len);
             pa_rc_dec(s);
@@ -493,6 +501,9 @@ PyAdamasStr* pa_str_any(int64_t v) {
             /* str(list) == repr(list)，str(dict) == repr(dict)。 */
             if (h->kind == PYADAMAS_RC_LIST || h->kind == PYADAMAS_RC_DICT)
                 return pa_repr_any(v);
+            /* P4（lang_gaps）：str(类对象) == repr(类对象)（CPython 口径）。 */
+            if (pa_is_class_obj((void*)(uintptr_t)v))
+                return pa_class_repr((void*)(uintptr_t)v);
         }
     }
     return pa_str_from_i64(v);

@@ -110,6 +110,8 @@ std::optional<Frontend> run_frontend(const std::string& path, const std::string&
 
     if (module_lookup) fe.tc.set_lenient_imports(true);
     if (module_lookup) fe.tc.set_module_lookup(std::move(module_lookup));
+    fe.tc.set_lang_gaps(std::getenv("PYADAMAS_LANG_GAPS") != nullptr &&
+                        std::string_view(std::getenv("PYADAMAS_LANG_GAPS")) != "0");
     fe.tc.check(*fe.mod);
     if (!fe.tc.diags().empty()) {
         for (const auto& d : fe.tc.diags()) report(path, source, d.line, d.col, d.msg);
@@ -353,6 +355,12 @@ int main(int argc, char** argv) {
         // isinstance/repr/pprint（docs/numeric-types-design.md §2）。
         prog.type_tags = std::getenv("PYADAMAS_TYPE_TAGS") != nullptr &&
                          std::string_view(std::getenv("PYADAMAS_TYPE_TAGS")) != "0";
+        // P4 语言缺口（默认关）：PYADAMAS_LANG_GAPS=1 开启，参与缓存失效。
+        // 异常类当值 / file 协议 / traceback / dataclass（设计 §3/§4）。
+        // CLASS tag=11 等精确标签是 P4 的表示基础，所以强制带上 type_tags。
+        prog.lang_gaps = std::getenv("PYADAMAS_LANG_GAPS") != nullptr &&
+                         std::string_view(std::getenv("PYADAMAS_LANG_GAPS")) != "0";
+        if (prog.lang_gaps) prog.type_tags = true;
         prog.verbose = verbose;
         prog.opt = opt_level;
         prog.fast_math = fast_math;

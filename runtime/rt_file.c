@@ -405,6 +405,10 @@ static int file_takec(PyAdamasFile* f) {
 }
 
 PyAdamasStr* pa_file_read(PyAdamasFile* f, int64_t n) {
+    /* P4（lang_gaps）file 协议泛化：非 file 值（FileLike 类实例，
+     io.StringIO 等）委托实例侧分派（rt_lang.c 方法名→槽登记表）。
+     门控关时 file 槽只可能是真 file，此分支永不命中。 */
+    if (f && !pa_is_file(f)) return pa_fileinst_read(f, n);
     FILE* fp = file_check(f);
     if (f->binary) {
         char* buf = NULL;
@@ -457,6 +461,10 @@ PyAdamasStr* pa_file_read(PyAdamasFile* f, int64_t n) {
 }
 
 PyAdamasStr* pa_file_readline(PyAdamasFile* f, int64_t size) {
+    /* P4（lang_gaps）file 协议泛化：非 file 值（FileLike 类实例，
+     io.StringIO 等）委托实例侧分派（rt_lang.c 方法名→槽登记表）。
+     门控关时 file 槽只可能是真 file，此分支永不命中。 */
+    if (f && !pa_is_file(f)) return pa_fileinst_readline(f, size);
     FILE* fp = file_check(f);
     if (f->binary) {
         char* buf = NULL;
@@ -499,6 +507,10 @@ PyAdamasStr* pa_file_readline(PyAdamasFile* f, int64_t size) {
 }
 
 PyAdamasList* pa_file_readlines(PyAdamasFile* f, int64_t hint) {
+    /* P4（lang_gaps）file 协议泛化：非 file 值（FileLike 类实例，
+     io.StringIO 等）委托实例侧分派（rt_lang.c 方法名→槽登记表）。
+     门控关时 file 槽只可能是真 file，此分支永不命中。 */
+    if (f && !pa_is_file(f)) return pa_fileinst_readlines(f, hint);
     PyAdamasList* out = pa_list_new(4, 1);
     /* 每行一次 pa_file_readline（内部 str_new）；out 只在本帧 C 局部变量里。 */
     pa_gc_pin(out);
@@ -607,6 +619,10 @@ static void file_sync_raw(PyAdamasFile* f) {
 }
 
 int64_t pa_file_write(PyAdamasFile* f, PyAdamasStr* s) {
+    /* P4（lang_gaps）file 协议泛化：非 file 值（FileLike 类实例，
+     io.StringIO 等）委托实例侧分派（rt_lang.c 方法名→槽登记表）。
+     门控关时 file 槽只可能是真 file，此分支永不命中。 */
+    if (f && !pa_is_file(f)) return pa_fileinst_write(f, s);
     FILE* fp = file_check(f);
     if (f->binary) {
         return (int64_t)fwrite(s->data, 1, (size_t)s->len, fp);
@@ -620,6 +636,10 @@ int64_t pa_file_write(PyAdamasFile* f, PyAdamasStr* s) {
 }
 
 void pa_file_writelines(PyAdamasFile* f, PyAdamasList* lines) {
+    /* P4（lang_gaps）file 协议泛化：非 file 值（FileLike 类实例，
+     io.StringIO 等）委托实例侧分派（rt_lang.c 方法名→槽登记表）。
+     门控关时 file 槽只可能是真 file，此分支永不命中。 */
+    if (f && !pa_is_file(f)) { pa_fileinst_writelines(f, lines); return; }
     for (int64_t i = 0; i < lines->len; ++i)
         pa_file_write(f, (PyAdamasStr*)lines->data[i]);
 }
@@ -653,6 +673,10 @@ static int64_t file_text_skip(PyAdamasFile* f, int64_t target) {
 }
 
 int64_t pa_file_seek(PyAdamasFile* f, int64_t off, int64_t whence) {
+    /* P4（lang_gaps）file 协议泛化：非 file 值（FileLike 类实例，
+     io.StringIO 等）委托实例侧分派（rt_lang.c 方法名→槽登记表）。
+     门控关时 file 槽只可能是真 file，此分支永不命中。 */
+    if (f && !pa_is_file(f)) return pa_fileinst_seek(f, off, whence);
     FILE* fp = file_check(f);
     if (!f->binary) {
         int64_t target;
@@ -687,12 +711,20 @@ int64_t pa_file_seek(PyAdamasFile* f, int64_t off, int64_t whence) {
 }
 
 int64_t pa_file_tell(PyAdamasFile* f) {
+    /* P4（lang_gaps）file 协议泛化：非 file 值（FileLike 类实例，
+     io.StringIO 等）委托实例侧分派（rt_lang.c 方法名→槽登记表）。
+     门控关时 file 槽只可能是真 file，此分支永不命中。 */
+    if (f && !pa_is_file(f)) return pa_fileinst_tell(f);
     FILE* fp = file_check(f);
     if (f->binary) return (int64_t)ftell(fp);
     return f->text_off;
 }
 
 int64_t pa_file_truncate(PyAdamasFile* f, int64_t size) {
+    /* P4（lang_gaps）file 协议泛化：非 file 值（FileLike 类实例，
+     io.StringIO 等）委托实例侧分派（rt_lang.c 方法名→槽登记表）。
+     门控关时 file 槽只可能是真 file，此分支永不命中。 */
+    if (f && !pa_is_file(f)) return pa_fileinst_truncate(f, size);
     FILE* fp = file_check(f);
     /* CPython 无参 truncate 用底层缓冲位置（文本预读后是原始偏移）；
        显式 size 按字节截断，先把逻辑位置对齐到底层句柄。 */
@@ -707,45 +739,119 @@ int64_t pa_file_truncate(PyAdamasFile* f, int64_t size) {
     return size;
 }
 
-int64_t pa_file_fileno(PyAdamasFile* f) { return (int64_t)fileno(file_check(f)); }
-int64_t pa_file_isatty(PyAdamasFile* f) { return isatty(fileno(file_check(f))) ? 1 : 0; }
-int64_t pa_file_readable(PyAdamasFile* f) { return f ? f->readable : 0; }
-int64_t pa_file_writable(PyAdamasFile* f) { return f ? f->writable : 0; }
+int64_t pa_file_fileno(PyAdamasFile* f) {
+    /* P4（lang_gaps）file 协议泛化：非 file 值（FileLike 类实例，
+     io.StringIO 等）委托实例侧分派（rt_lang.c 方法名→槽登记表）。
+     门控关时 file 槽只可能是真 file，此分支永不命中。 */
+    if (f && !pa_is_file(f)) return pa_fileinst_fileno(f);
+    return (int64_t)fileno(file_check(f));
+}
+int64_t pa_file_isatty(PyAdamasFile* f) {
+    /* P4（lang_gaps）file 协议泛化：非 file 值（FileLike 类实例，
+     io.StringIO 等）委托实例侧分派（rt_lang.c 方法名→槽登记表）。
+     门控关时 file 槽只可能是真 file，此分支永不命中。 */
+    if (f && !pa_is_file(f)) return pa_fileinst_isatty(f);
+    return isatty(fileno(file_check(f))) ? 1 : 0;
+}
+int64_t pa_file_readable(PyAdamasFile* f) {
+    /* P4（lang_gaps）file 协议泛化：非 file 值（FileLike 类实例，
+     io.StringIO 等）委托实例侧分派（rt_lang.c 方法名→槽登记表）。
+     门控关时 file 槽只可能是真 file，此分支永不命中。 */
+    if (f && !pa_is_file(f)) return pa_fileinst_readable(f);
+    return f ? f->readable : 0;
+}
+int64_t pa_file_writable(PyAdamasFile* f) {
+    /* P4（lang_gaps）file 协议泛化：非 file 值（FileLike 类实例，
+     io.StringIO 等）委托实例侧分派（rt_lang.c 方法名→槽登记表）。
+     门控关时 file 槽只可能是真 file，此分支永不命中。 */
+    if (f && !pa_is_file(f)) return pa_fileinst_writable(f);
+    return f ? f->writable : 0;
+}
 int64_t pa_file_seekable(PyAdamasFile* f) {
+    /* P4（lang_gaps）file 协议泛化：非 file 值（FileLike 类实例，
+     io.StringIO 等）委托实例侧分派（rt_lang.c 方法名→槽登记表）。
+     门控关时 file 槽只可能是真 file，此分支永不命中。 */
+    if (f && !pa_is_file(f)) return pa_fileinst_seekable(f);
     if (!f || !f->fp || f->closed) return 0;
     return fseek(f->fp, 0, SEEK_CUR) == 0 ? 1 : 0;
 }
-int64_t pa_file_closed(PyAdamasFile* f) { return f ? f->closed : 1; }
+int64_t pa_file_closed(PyAdamasFile* f) {
+    /* P4（lang_gaps）file 协议泛化：非 file 值（FileLike 类实例，
+     io.StringIO 等）委托实例侧分派（rt_lang.c 方法名→槽登记表）。
+     门控关时 file 槽只可能是真 file，此分支永不命中。 */
+    if (f && !pa_is_file(f)) return pa_fileinst_closed(f);
+    return f ? f->closed : 1;
+}
+
+/* P4（lang_gaps）：unknown 字是不是 file 对象。file 没有魔数，按
+   堆探针 + kind OBJ + 尺寸下限判别。两个坑（167/81 门控关回归实测）：
+   1) 不能用 rc_index_has——无 unknown 值的程序会跳过索引维护
+      （ir_module_can_skip_index_maint），真 file 也查不到；pa_unknown_is_heap
+      带 exact-RC 堆链回退，两种模式都认得。
+   2) h->size 是池对齐后的 alloc_size，不是请求尺寸——用 >= 而不是 ==。
+      File 是最大的 OBJ 种类（Class/ExcValue/Complex 都远小于它），
+      >= sizeof(PyAdamasFile) 在当前 OBJ 家族里唯一 identifies file。 */
+int64_t pa_is_file(void* v) {
+    if (!pa_unknown_is_heap((int64_t)(uintptr_t)v)) return 0;
+    PyAdamasRc* h = (PyAdamasRc*)v - 1;
+    return h->kind == PYADAMAS_RC_OBJ && h->size >= (int64_t)sizeof(PyAdamasFile) ? 1 : 0;
+}
 
 PyAdamasStr* pa_file_name(PyAdamasFile* f) {
+    /* P4（lang_gaps）file 协议泛化：非 file 值（FileLike 类实例，
+     io.StringIO 等）委托实例侧分派（rt_lang.c 方法名→槽登记表）。
+     门控关时 file 槽只可能是真 file，此分支永不命中。 */
+    if (f && !pa_is_file(f)) return pa_fileinst_name(f);
     if (!f) return str_new("", 0);
     if (f->name) return str_new(f->name->data, f->name->len);
     return pa_str_from_i64(f->fd);
 }
 
 PyAdamasStr* pa_file_mode(PyAdamasFile* f) {
+    /* P4（lang_gaps）file 协议泛化：非 file 值（FileLike 类实例，
+     io.StringIO 等）委托实例侧分派（rt_lang.c 方法名→槽登记表）。
+     门控关时 file 槽只可能是真 file，此分支永不命中。 */
+    if (f && !pa_is_file(f)) return pa_fileinst_mode(f);
     if (!f || !f->mode) return str_new("", 0);
     return str_new(f->mode->data, f->mode->len);
 }
 
 PyAdamasStr* pa_file_encoding(PyAdamasFile* f) {
+    /* P4（lang_gaps）file 协议泛化：非 file 值（FileLike 类实例，
+     io.StringIO 等）委托实例侧分派（rt_lang.c 方法名→槽登记表）。
+     门控关时 file 槽只可能是真 file，此分支永不命中。 */
+    if (f && !pa_is_file(f)) return pa_fileinst_encoding(f);
     if (!f || !f->encoding) return str_new("", 0);
     return str_new(f->encoding->data, f->encoding->len);
 }
 
 PyAdamasStr* pa_file_errors(PyAdamasFile* f) {
+    /* P4（lang_gaps）file 协议泛化：非 file 值（FileLike 类实例，
+     io.StringIO 等）委托实例侧分派（rt_lang.c 方法名→槽登记表）。
+     门控关时 file 槽只可能是真 file，此分支永不命中。 */
+    if (f && !pa_is_file(f)) return pa_fileinst_errors(f);
     if (!f || !f->errors) return str_new("", 0);
     return str_new(f->errors->data, f->errors->len);
 }
 
 void pa_file_close(PyAdamasFile* f) {
+    /* P4（lang_gaps）file 协议泛化：非 file 值（FileLike 类实例，
+     io.StringIO 等）委托实例侧分派（rt_lang.c 方法名→槽登记表）。
+     门控关时 file 槽只可能是真 file，此分支永不命中。 */
+    if (f && !pa_is_file(f)) { pa_fileinst_close(f); return; }
     if (!f || !f->fp) return;
     fclose(f->fp);
     f->fp = NULL;
     f->closed = 1;
 }
 
-void pa_file_flush(PyAdamasFile* f) { fflush(file_check(f)); }
+void pa_file_flush(PyAdamasFile* f) {
+    /* P4（lang_gaps）file 协议泛化：非 file 值（FileLike 类实例，
+     io.StringIO 等）委托实例侧分派（rt_lang.c 方法名→槽登记表）。
+     门控关时 file 槽只可能是真 file，此分支永不命中。 */
+    if (f && !pa_is_file(f)) { pa_fileinst_flush(f); return; }
+    fflush(file_check(f));
+}
 
 PyAdamasStr* pa_input(PyAdamasStr* prompt) {
     if (prompt && prompt->len > 0) {

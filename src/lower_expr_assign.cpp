@@ -391,6 +391,21 @@ VReg Lowerer::expr(Expr& e) {
                 if (!tt || tt->kind != TyKind::TypeObj) tt = mk_typeobj(nullptr);
                 return retype(const_str(n.id), tt);
             }
+            // P4（lang_gaps）：内建异常类在值位置 → 运行期类对象单例。
+            // 以前这里落到 LoadGlobal 读一个不存在的空槽（值退化成 0，
+            // contextlib.suppress 的同一性/比较全丢）。现在发 ExcClassObj：
+            // 运行期按名字缓存单例（+1 引用），静态类型 ClassObj 带 CLASS tag。
+            if (opts_.lang_gaps && TypeChecker::is_exception_type(n.id) && !is_local(n.id) &&
+                !st_->globals_decl.count(n.id) &&
+                !(st_->scope && st_->scope->vars.count(n.id)) &&
+                !(tc_.module_scope() && tc_.module_scope()->vars.count(n.id))) {
+                TypePtr tt = tc_.type_of(&e);
+                if (tt && tt->kind == TyKind::ClassObj) {
+                    VReg obj = call_runtime(RtFn::ExcClassObj, tt, {const_str(n.id)});
+                    push_temp(obj);
+                    return obj;
+                }
+            }
             TypePtr ty = name_ty(n.id);
             if (st_->globals_decl.count(n.id) || !is_local(n.id)) {
                 Inst in;
@@ -510,6 +525,15 @@ VReg Lowerer::expr(Expr& e) {
                     return s;
                 }
                 if (!ot->sub.empty()) ot = ot->sub[0];
+            }
+            // P4（lang_gaps）：自定义异常类静态类型仍是 Class（名字机制），
+            // 值是类对象单例；__name__ 走运行期类名。
+            if (opts_.lang_gaps && ot && ot->kind == TyKind::Class && ot->cls &&
+                ot->cls->is_exception_class && a.attr == "__name__") {
+                VReg cv = expr(*a.value);
+                VReg s = call_runtime(RtFn::ClassName, t_str(), {cv});
+                push_temp(s);
+                return s;
             }
             if (ot && (ot->kind == TyKind::Struct || ot->kind == TyKind::StructPtr)) {
                 const StructInfo* s = ot->st;

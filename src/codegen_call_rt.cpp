@@ -553,6 +553,7 @@ void AsmGen::gen_rt_args(const Inst& in, RtFn fn) {
         case RtFn::ClassCtor:
         case RtFn::ClassName:
         case RtFn::ClassRepr:
+        case RtFn::ExcClassObj:   // P4：(name) -> class*
         case RtFn::SysExit:
         case RtFn::PrintStr:
         case RtFn::PrintBytes:
@@ -752,6 +753,11 @@ void AsmGen::gen_rt_args(const Inst& in, RtFn fn) {
         case RtFn::ChanSend:
         case RtFn::EhRaise:
         case RtFn::EhRaiseValueFrom:
+        case RtFn::ExcClassIsA:        // P4：(name, cls)
+        case RtFn::ExcSubclass:        // P4：(cls_a, cls_b)
+        case RtFn::ExcClassValueNew:   // P4：(cls, msg|0)
+        case RtFn::ExcClassValueNewArgs: // P4：(cls, args)
+        case RtFn::MethodCall0:        // P4：(obj, method)
             gen_rt_i2(in);
             break;
         case RtFn::FileSeek:
@@ -803,6 +809,7 @@ void AsmGen::gen_rt_args(const Inst& in, RtFn fn) {
         case RtFn::AttrGet:
         case RtFn::AttrSet:
         case RtFn::AttrHas:
+        case RtFn::MethodRegister:  // P4：(qual, method, slot)
         case RtFn::DequeSet:
         case RtFn::DequeRemove:
         case RtFn::DequeCount:

@@ -110,6 +110,10 @@ public:
     // 必须严格。否则变量名打错会被降级成一个初值为 0 的全局，运行期
     // 静默算出 0 而不是抛 NameError —— 这是最难发现的静默错误。
     void set_strict_module_names(bool v) { strict_module_names_ = v; }
+    // P4 语言缺口开关（PYADAMAS_LANG_GAPS）：内建异常名在值位置得到
+    // ClassObj[Exception] 类型（运行期类对象），而不是退化成 unknown/0。
+    void set_lang_gaps(bool v) { lang_gaps_ = v; lang_gaps_enabled() = v; }
+    bool lang_gaps() const { return lang_gaps_; }
     bool strict_module_names() const { return strict_module_names_; }
     bool lenient_imports() const { return lenient_imports_; }
     void set_module_lookup(ModuleLookup lookup) { module_lookup_ = std::move(lookup); }
@@ -208,6 +212,7 @@ private:
     ModuleLookup module_lookup_;
     bool lenient_imports_ = false;
     bool strict_module_names_ = false;
+    bool lang_gaps_ = false;
     std::vector<std::string> cinclude_dirs_;
     // cimport 绑定名 → 声明；extern_by_fn_ 把类型系统里的 FuncInfo 指回
     // .cpya 声明，供降级阶段做 C ABI 编组。
@@ -500,6 +505,9 @@ private:
     void compare_type(CmpOp op, TypePtr l, TypePtr r, int line, int col);
 
     TypePtr subscript_type(TypePtr obj, TypePtr idx, int line, int col);
+    // 属性表达式的类型检查（typecheck_expr_attr.cpp，从 expr 的 Attribute
+    // case 逐字拆出，文件规模硬限制）。
+    TypePtr expr_attribute(Attribute& a);
 
     TypePtr iter_elem(TypePtr it, int line, int col);
 
