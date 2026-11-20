@@ -45,6 +45,12 @@
   退化成裸 8 字节），异常路径改用生成器 close()：清理照跑、异常不吞。
   suppress()/closing() 跳过（异常类同一性 / unknown 值方法调用都是 pa 不支持
   的能力）。回归 326。
+- **difflib**（stdlib/difflib.py）：SequenceMatcher（find_longest_match /
+  get_matching_blocks / get_opcodes / get_grouped_opcodes / ratio /
+  quick_ratio / real_quick_ratio / set_seqs / set_seq1 / set_seq2，含 junk
+  与 autojunk popular 剔除）、Match、get_close_matches、unified_diff。
+  unified_diff / get_grouped_opcodes 返回 list（CPython 是生成器）；内容行
+  只加前缀不补 lineterm（同 CPython）。回归 327。
 
 ## [0.337] - 2026-11-20
 

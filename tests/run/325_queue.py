@@ -74,4 +74,26 @@ tasks.join()
 print("join done")
 print(issubclass(queue.LifoQueue, queue.Queue))
 
+
 # --- expect ---
+# True 0 False
+# 3 False False
+# 1 2 3
+# True
+# empty
+# True 2
+# full
+# full2
+# full3
+# empty timeout
+# a b
+# 3 2 1
+# 1 2 3
+# 1 5
+# 2 x y True
+# simple empty
+# 2
+# False
+# task_done ValueError
+# join done
+# True
