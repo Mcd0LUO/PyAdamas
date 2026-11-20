@@ -434,6 +434,16 @@ bool ir_module_can_skip_index_maint(const IRModule& m) {
     return true;
 }
 
+bool ir_module_uses_c_sym_default(const IRModule& m) {
+    // from c import X 走 dlsym(RTLD_DEFAULT)：符号名是运行期字符串，可能
+    // 指向任何进程全局符号（包括运行时 pa_*）。链接期 --gc-sections 的静态
+    // 可达性看不见这种引用，会把「只被 dlsym 找」的函数剥掉。只要任一模块
+    // 用了这种绑定，整程序保守关 gc（link_program 读 Program 聚合标志）。
+    for (const auto& e : m.externs)
+        if (e.lazy == 1) return true;
+    return false;
+}
+
 bool ir_module_needs_unknown_index(const IRModule& m) {
     // asyncio / 生成器运行时内部无条件地用 unknown 保守 retain 等待结果
     // 和帧值（rt_async.c / rt_task.c / rt_agen.c），这些调用在 IR 里

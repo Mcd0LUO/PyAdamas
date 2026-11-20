@@ -602,5 +602,8 @@ void dump_ir(const IRModule& m, std::ostream& os);
 bool ir_type_contains_unknown(const TypePtr& t);
 bool ir_module_needs_unknown_index(const IRModule& m);
 bool ir_module_can_skip_index_maint(const IRModule& m);
+// 模块是否用到 from c import（dlsym RTLD_DEFAULT，lazy==1）：符号名是运行期
+// 字符串，链接期静态可达性无法覆盖，整程序须保守关闭 --gc-sections。
+bool ir_module_uses_c_sym_default(const IRModule& m);
 
 }  // namespace pyadamas

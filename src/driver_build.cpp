@@ -523,6 +523,9 @@ struct Manifest {
     int rc_split = -1;
     // 图着色分配器开关。-1 = 旧清单没有这一行（缓存必然失效一次）。
     int ra_graph = -1;
+    // 模块是否用到 from c import（dlsym RTLD_DEFAULT）。旧清单没有这一行：
+    // 保守按「用到」处理（链接期关 --gc-sections，绝不冒误剥风险）。
+    bool c_sym_default = true;
     std::string toolchain;
     std::map<std::string, std::string> deps;
 };
@@ -584,6 +587,12 @@ std::optional<Manifest> read_manifest(const ModuleUnit& u) {
             auto o = parse_u64(v);
             if (!o) return std::nullopt;
             m.ra_graph = static_cast<int>(*o);
+        } else if (tag == "csymdefault") {
+            std::string v;
+            ss >> v;
+            auto o = parse_u64(v);
+            if (!o) return std::nullopt;
+            m.c_sym_default = *o != 0;
         } else if (tag == "toolchain") {
             ss >> m.toolchain;
         } else if (tag == "dep") {
@@ -610,6 +619,7 @@ void write_manifest(const Program& p, const ModuleUnit& u) {
     out << "unknownindex " << (u.needs_unknown_index ? 1 : 0) << "\n";
     out << "rcsplit " << (p.rc_split ? 1 : 0) << "\n";
     out << "ragraph " << (p.ra_graph ? 1 : 0) << "\n";
+    out << "csymdefault " << (u.uses_c_sym_default ? 1 : 0) << "\n";
     out << "toolchain " << toolchain_id() << "\n";
     for (auto& d : u.deps) {
         auto it = p.units.find(d);
@@ -841,6 +851,8 @@ bool try_cache(Program& p, ModuleUnit& u) {
     }
     u.needs_unknown_index = m->unknown_index;
     p.needs_unknown_index |= u.needs_unknown_index;
+    u.uses_c_sym_default = m->c_sym_default;
+    p.uses_c_sym_default |= u.uses_c_sym_default;
     u.from_cache = true;
     return true;
 }
@@ -1099,6 +1111,8 @@ bool build_unit(Program& p, ModuleUnit& u, bool emit_object, bool entry_ir) {
     // A/B 诊断：强制保留存活堆索引（对照「关闭」带来的收益）。
     if (std::getenv("PYADAMAS_FORCE_UNKNOWN_INDEX")) u.needs_unknown_index = true;
     p.needs_unknown_index |= u.needs_unknown_index;
+    u.uses_c_sym_default = pyadamas::ir_module_uses_c_sym_default(lr.mod);
+    p.uses_c_sym_default |= u.uses_c_sym_default;
     if (entry_ir) {
         u.ir = std::move(lr.mod);
         if (timing) {
@@ -1459,13 +1473,21 @@ bool link_program(Program& p, const std::string& output) {
     objs += " -lm -ldl";
     for (auto& l : p.link_args) objs += " " + shell_quote(l);
     const bool elf_target = std::string_view(target_abi().name) == "x86_64-sysv";
+    // --gc-sections（slim 轮）：剥掉用户程序未引用的运行时函数/数据段。
+    // PYADAMAS_GC_SECTIONS=1 开启（默认关，灰度）；direct-ld 与 cc 回退两条
+    // 路等价附加，保持「direct-ld == cc 逐字节」不变量。
+    // from c import（dlsym RTLD_DEFAULT）的程序可能运行期查找任何运行时符号，
+    // 静态可达性覆盖不到 —— 整程序保守关 gc（uses_c_sym_default，见 ir.cpp）。
+    const bool gc = elf_target && gc_sections_enabled() && !p.uses_c_sym_default;
+    const std::string gc_ld = gc ? " --gc-sections" : "";
+    const std::string gc_cc = gc ? " -Wl,--gc-sections" : "";
     if (elf_target && direct_ld_available() && direct_ld_args_ok(p.link_args)) {
-        std::string ld_cmd = direct_ld_prefix() + " -o " + shell_quote(output) + objs + " " +
+        std::string ld_cmd = direct_ld_prefix() + gc_ld + " -o " + shell_quote(output) + objs + " " +
                              direct_ld_tail();
         if (std::system(ld_cmd.c_str()) == 0) return true;
         // ld 直接链接失败（环境差异）：不报错，回退 cc 再试一次。
     }
-    std::string cmd = "cc -o " + shell_quote(output) + " -Wl,--eh-frame-hdr" + cc_extra_flags() + objs;
+    std::string cmd = "cc -o " + shell_quote(output) + " -Wl,--eh-frame-hdr" + gc_cc + cc_extra_flags() + objs;
     if (std::system(cmd.c_str()) != 0) {
         std::fprintf(stderr, "error: link failed\n       command: %s\n", cmd.c_str());
         return false;

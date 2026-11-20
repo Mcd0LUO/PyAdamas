@@ -4,6 +4,103 @@
 
 早期阶段没有逐条留痕，按阶段归纳；0.4 之后逐条记录。
 
+## [0.332] - 2026-11-20
+
+> slim 分支合入：**单二进制瘦身** —— 运行时 -ffunction-sections/-fdata-sections +
+> 链接期 --gc-sections 剥掉用户程序未用到的运行时函数/数据。**零功能回归为最高
+> 不变量**；env 门控灰度 `PYADAMAS_GC_SECTIONS=0/1`（默认关，闸门全过后再议默认开，
+> 集成定）。**生成 asm 逐字节不变**（codegen 未触碰，1430 语料闸门钉死）。
+> 接 cgspeed 0.331 之后集成，定版 0.332（simd 顺延 0.333）。
+
+### 变更
+
+- **CMakeLists**：运行时编译（普通 -O2 与 ASan -O1 两版）加
+  `-ffunction-sections -fdata-sections`。ld -r 合并后段粒度保留（rt.o 1893 个
+  .text.*、rt_asan.o 2063 个，已验证）。不带 --gc-sections 时链接器照旧并入
+  .text/.data，功能零变化（布局因 hot/unlikely 分组与段对齐有位移，非逐字节同
+  0.331；direct-ld==cc 不变量保持）。
+- **driver_link / driver_build**：`PYADAMAS_GC_SECTIONS=1` 时两条链接路径等价
+  附加 --gc-sections（direct-ld 前缀 / cc 回退 -Wl,），重建「direct-ld==cc 逐字节」
+  不变量（12 代表程序 cmp 全同）。ASan 走 cc 回退同样带 gc。只认精确 "1"。
+- **from c import 安全回退**：dlsym(RTLD_DEFAULT) 的符号名是运行期字符串，静态
+  可达性覆盖不到（可能查找任何 pa_* 运行时符号）。新增
+  `ir_module_uses_c_sym_default`（扫 IRExtern.lazy==1）→ ModuleUnit/Program 聚合
+  标志 → 写进模块缓存清单（csymdefault，旧清单保守按用到处理）→ 这类程序整程序
+  关 gc（212_c_lazy 尺寸不变、行为不变）。dylib 句柄路径（lazy==2）不受影响。
+- **保留审计**（--gc-sections 误剥防线，逐项取证）：
+  - .init_array/.fini_array 构造器：ld 默认脚本 KEEP，pa_eh_install_personality_hook
+    实测保留（hello-gc nm 可见），钩子安装的 pa_eh_phase2_frame_release 随之可达；
+  - personality：生成 asm 的 DW.ref.pa_personality 槽在整体 .data 里随模块保留，
+    .quad 重定位拉住 pa_personality（exc_loop-gc nm 可见 T pa_personality）；
+    .eh_frame_hdr/.eh_frame/.gcc_except_table 齐全，未捕获异常 traceback 与
+    gc-off 逐字一致；
+  - atexit 回调（diag_report/gc_stats_dump/rc_stats_dump/leaf_index_shutdown 等）
+    经注册点直接引用保留；PYADAMAS_RC_TRACE/GC_STATS/RC_STATS 在剥离后的 hello
+    上实测正常输出；
+  - GC 根表 gc_globals/pa_gc_add_roots/gc_mark/gc_phase_dec 经调用链可达保留；
+    13_gc/174 flag-on（GC_BARRIER=1 + GC_INCR_MARK=1）normal+ASan 全过；
+  - 运行时内部函数指针表（AVX2 分派等）都是直接调用/重定位，可达性传递保留；
+  - 运行时无 weak 符号、无自定义段、无 TLS；diag 大 BSS 表经无条件调用点保留
+    （BSS 是虚拟空间，不计文件成本，本轮不动）。
+
+### 尺寸（同一编译器 A/B，-O2，gc off→on；文件字节）
+
+| 程序 | off | on | 缩减 |
+|---|---|---|---|
+| hello（print） | 481912 | 88072 | **−81.7%** |
+| fib | 482128 | 88328 | −81.7% |
+| nbody | 503184 | 114256 | −77.3% |
+| queue_sim | 486408 | 97576 | −79.9% |
+| dict_wordfreq | 491080 | 119792 | −75.6% |
+| json_bench | 499152 | 140512 | −71.9% |
+| bench_re | 570248 | 229280 | −59.8% |
+| dict_cache（192） | 499048 | 119144 | −76.1% |
+| 13_gc | 499696 | 111400 | −77.7% |
+| exc_loop（173） | 491000 | 115872 | −76.4% |
+| c_lazy（212，from c import） | 486520 | 486520 | 0（安全回退；off 口径含块1对齐 +4096） |
+| cpy_json（208） | 490256 | 128144 | −73.9% |
+
+hello 的 pa_* 文本符号 668 → 58（−91%）；cj_parse/cpy_decode/pa_subprocess_run/
+g_rng/pa_str_method/pa_percent_format 等未用运行时全部剥离。text 段
+409541 → 58906 B。BSS（GC arena 虚拟空间）基本不变。
+
+### 闸门（PYADAMAS_GC_SECTIONS=1）
+
+- difftest **270/0**；全量套件 normal **288 ran ok / EXIT=0**、ASan **288 ran ok /
+  EXIT=0**（PYADAMAS_TEST_JOBS=8）。
+- ASan detect_leaks=1 钉子 6/6 全 0（13_gc/174/88/192/66/119）；13/174 flag-on
+  （PYADAMAS_GC_BARRIER=1 + PYADAMAS_GC_INCR_MARK=1）normal+ASan 4/4 过。
+- 语料零差异：tests/run + bench/daily（292 程序）三路对拍（0.271 oracle vs gc-off
+  vs gc-on）：**GCDIFF=0**（gc 引入零差异）；ORACLEDIFF 66 全为既有差异（49 个
+  oracle 编不了 0.271 之后的新用例 rc 1vs0；14 个输出差异经 gc-off 复核同样存在，
+  系 0.271 之后有意的语义变更：tuple-sort/float-dict/pep479/fnmatch/Neumaier 等）。
+- asm 语料 **1430/1430 逐字节 IDENTICAL**（O0/O1/O2/win64/no-zce × bench+tests/run，
+  vs 改前基线）——codegen 零变化。
+- direct-ld==cc（带 gc）12 代表程序 cmp 全同；gc-off 与块1产物逐字节一致。
+- check_size 无新增超限（仍为基线既有 5 处：codegen_regalloc/driver_build/ir_ops/
+  lower_impl/typecheck_types，本轮 driver_build +22 行不新增超限文件）。
+- opt_levels（O0/O1/O2 + fast-math）EXIT=0；cache_race ok（gc-on）。
+- **abbench 无性能回归**（05680b7 基线 vs gc-on，38 案＝compare 9 + realistic 6 +
+  daily 23，交替 9 轮打乱 BURST=5 绑核 24）：总计 **−2.6%**（2162→2106ms）。
+  长案（>100ms，最可信）：sort_struct −7.8% / rec_memo −3.6% / dict_wordfreq −3.2% /
+  str_build −1.8% / obj_dispatch −0.2% / nqueens +0.2% / queue_sim +1.1%。
+  数值案：nbody +1.9% / mandelbrot +2.1% / fib +1.5% / fasta +2.1% / matmul +0.5% /
+  spectral −0.4% / fannkuch −2.8% / binary_trees −1.5%（p25 口径 nbody +2.1%、
+  mandelbrot +0.1%、fib −1.4%、fasta +0.7%）；短 daily 案 ±4.6% 内噪声主导。
+  边界案 15 轮复测（交替打乱 BURST=5 绑核）全部落回噪声级或转负：nbody +0.6%
+  （p25 +0.7%）/ queue_sim +1.0% / mandelbrot −1.3% / fib −1.0% / fasta −1.6% /
+  c2_inventory −2.1%（首轮 +4.4% 系短案噪声）。**结论：无性能回归**。
+  difftest gc-off 终版编译器复跑 270/0。
+
+### 分支与集成建议
+
+- 分支 **slim**，基于 05680b7（0.331）；不推 master，主树与主树 build 未触碰。
+- 默认开与否由 lead 集成定：门控 PYADAMAS_GC_SECTIONS=1 已全闸门通过；默认开只需
+  把 gc_sections_enabled() 的默认值翻成 on（或集成时改 CMake 探测注入）。
+- 生成码按函数分段（未用用户函数也可剥）是可选第二步，本轮未做（运行时是大头，
+  且会改 asm 文本、动 1430 闸门，收益/风险比低）。
+- 已知边界：from c import 程序不瘦身（安全回退）；flag-off 二进制相对 0.331 有
+  布局位移（段分组/对齐），功能与输出零变化。
 ## [0.331] - 2026-11-20
 
 > cgspeed 分支合入：codegen 汇编发射路径提速（纯内部优化，**生成 asm 逐字节
