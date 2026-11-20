@@ -241,6 +241,7 @@ inline constexpr ModuleEntry kModuleTable[] = {
     {"linalg", ModuleKind::Python, "linalg.py", ""},
     {"logging", ModuleKind::Python, "logging.py", "sys"},
     {"shutil", ModuleKind::Python, "shutil.py", "os,os.path,fnmatch"},
+    {"secrets", ModuleKind::Python, "secrets.py", "random,base64"},
     {"statistics", ModuleKind::Python, "statistics.py", "math"},
     {"string", ModuleKind::Python, "string.py", ""},
     {"tempfile", ModuleKind::Python, "tempfile.py", "os,os.path,random,shutil"},

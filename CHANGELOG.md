@@ -20,6 +20,10 @@
   parse_qs / parse_qsl + uses_relative/uses_netloc/uses_params 与
   ParseResult/SplitResult/DefragResult。只收 str 输入；结果对象是普通类
   （字段/下标/len/repr/geturl 可用，元组解包不做）。回归 320。
+- **secrets**（stdlib/secrets.py）：token_bytes / token_hex / token_urlsafe /
+  randbelow / randbits / choice / compare_digest。**随机源是内建 random**
+  （pa 没有 os.urandom/getrandom 原语），令牌强度弱于 CPython，接口与
+  计算口径一致；randbits 走 int64（k<=63 为正）。回归 321。
 
 ## [0.337] - 2026-11-20
 
