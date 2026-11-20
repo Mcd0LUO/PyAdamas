@@ -147,6 +147,22 @@ std::vector<char> AsmGen::ra_opt_readonly_alias() {
     std::vector<char> aliased(nv, 0);
     if (nv == 0 || ns == 0) return aliased;
     const RaOptInfo info = ra_opt_scan(*f_);
+    // **寄存器必须全函数单射：没有第二个槽用同一个寄存器。**
+    //
+    // 命门 bug（实测 c2_inventory rows 600→1、204_list_buf_pool 算错）：
+    // linear_scan_pool 会让**活跃区间不重叠的槽复用同一寄存器** ——
+    // slot_reg_[s] 非空只表示「s 活跃期间住这里」，不是整函数独占！
+    // gen_rows 的 s0（n）在入口 hoist load 之后就死了，%rbx 随即被
+    // 循环里的 LCG 状态槽接管；别名让循环上界 cmp 读到 LCG 值，
+    // 600 行变 1 行。跨块 vreg 提升没这个问题：那些寄存器从
+    // n_saved_regs_ 起独占分配，不与槽复用。P2 要安全，必须确认
+    // 该寄存器没有别的槽认领（参数槽/整函数活跃槽天然满足）。
+    std::vector<int> reg_users(static_cast<size_t>(kMaxSlotRegs()), 0);
+    for (size_t s2 = 0; s2 < ns; ++s2) {
+        if (slot_reg_[s2].empty()) continue;
+        for (int r = 0; r < kMaxSlotRegs(); ++r)
+            if (slot_reg_[s2].text == kSlotRegs()[r]) ++reg_users[static_cast<size_t>(r)];
+    }
     for (size_t v = 0; v < nv; ++v) {
         if (!vreg_reg_[v].empty()) continue;
         if (use_count_[v] == 0) continue;
@@ -157,6 +173,14 @@ std::vector<char> AsmGen::ra_opt_readonly_alias() {
         if (info.slot_write[static_cast<size_t>(s)]) continue;
         if (slot_reg_[static_cast<size_t>(s)].empty()) continue;
         if (slot_reg_[static_cast<size_t>(s)].kind != MOperandKind::Reg) continue;
+        {
+            bool exclusive = false;
+            for (int r = 0; r < kMaxSlotRegs(); ++r)
+                if (slot_reg_[static_cast<size_t>(s)].text == kSlotRegs()[r] &&
+                    reg_users[static_cast<size_t>(r)] == 1)
+                    exclusive = true;
+            if (!exclusive) continue;
+        }
         if (!ra_opt_int_ty(f_->slot_ty[static_cast<size_t>(s)])) continue;
         if (!ra_opt_int_ty(f_->vreg_ty[v])) continue;
         if (s < static_cast<int>(gc_scan_slot_.size()) &&
