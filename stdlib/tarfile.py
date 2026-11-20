@@ -717,6 +717,165 @@ class TarFile:
         """pa 便利口：直接给字节（CPython 走 fileobj）。"""
         self.addfile(tarinfo, BytesIO(data))
 
+    def gettarinfo(self, name: str = "", arcname: str = "") -> TarInfo:
+        """按 lstat 建 TarInfo（uid/gid 恒 0，无 uname/gname，见模块文档）。"""
+        self._check("awx")
+        an: str = arcname
+        if len(an) == 0:
+            an = name
+        an = an.replace(os.sep, "/")
+        while an.startswith("/"):
+            an = an[1:]
+        st: list[int] = _stat_path(name, self.dereference)
+        stmd: int = st[0]
+        kind: int = st[6]
+        typeflag: bytes = REGTYPE
+        linkname: str = ""
+        if (kind & 4) != 0 and not self.dereference:
+            typeflag = SYMTYPE
+            linkname = _readlink_path(name)
+        elif (kind & 2) != 0:
+            typeflag = DIRTYPE
+        elif (kind & 1) != 0:
+            typeflag = REGTYPE
+        else:
+            raise ValueError("unsupported file type: " + repr(name))
+        ti: TarInfo = TarInfo()
+        ti.name = an
+        ti.mode = stmd
+        ti.uid = 0
+        ti.gid = 0
+        if typeflag == REGTYPE:
+            ti.size = st[5]
+        else:
+            ti.size = 0
+        ti.mtime = st[1]
+        ti.type = typeflag
+        ti.linkname = linkname
+        return ti
+
+    def add(self, name: str, arcname: str = "", recursive: bool = True) -> None:
+        """把磁盘上的文件/目录（递归）加入归档。"""
+        self._check("awx")
+        an: str = arcname
+        if len(an) == 0:
+            an = name
+        if len(self.name) > 0 and _osp.abspath(name) == _osp.abspath(self.name):
+            return
+        ti: TarInfo = self.gettarinfo(name, an)
+        if ti.isreg():
+            data: bytes = _gzipio.read_bin(name)
+            self.addfile(ti, BytesIO(data))
+        elif ti.isdir():
+            self.addfile(ti)
+            if recursive:
+                entries: list[str] = sorted(os.listdir(name))
+                for e in entries:
+                    self.add(_osp.join(name, e), _osp.join(an, e), recursive)
+        else:
+            self.addfile(ti)
+
+    # ── 解压到磁盘 ──────────────────────────────────────────────
+    def _resolve_member(self, member: object) -> TarInfo:
+        if isinstance(member, TarInfo):
+            return cast(TarInfo, member)
+        return self.getmember(cast(str, member))
+
+    def extract(self, member: object, path: str = "", set_attrs: bool = True) -> None:
+        self._check("r")
+        ti: TarInfo = self._resolve_member(member)
+        base: str = path
+        if len(base) == 0:
+            base = "."
+        target: str = _osp.join(base, _safe_name(ti.name))
+        self._extract_member(ti, target, set_attrs)
+
+    def extractall(self, path: str = ".", members: object = None) -> None:
+        self._check("r")
+        dirs: list[TarInfo] = []
+        base: str = path
+        if len(base) == 0:
+            base = "."
+        chosen: list[TarInfo] = []
+        if members is None:
+            chosen = self.members
+        else:
+            ms: list[object] = list(members)
+            for m in ms:
+                chosen.append(self._resolve_member(m))
+        for ti in chosen:
+            target: str = _osp.join(base, _safe_name(ti.name))
+            if ti.isdir():
+                # 目录属性延迟到全部解完再补（解子项会重置 mtime）。
+                dirs.append(ti)
+                self._extract_member(ti, target, False)
+            else:
+                self._extract_member(ti, target, True)
+        i: int = len(dirs) - 1
+        while i >= 0:
+            d: TarInfo = dirs[i]
+            dp: str = _osp.join(base, _safe_name(d.name))
+            if _osp.isdir(dp):
+                self._chmod(d, dp)
+                self._utime(d, dp)
+            i -= 1
+
+    def _extract_member(self, ti: TarInfo, targetpath: str, set_attrs: bool) -> None:
+        tp: str = targetpath.rstrip("/")
+        tp = tp.replace("/", os.sep)
+        upper: str = _osp.dirname(tp)
+        if len(upper) > 0 and not _osp.exists(upper):
+            os.makedirs(upper, exist_ok=True)
+        if ti.isreg() or not _is_supported_type(ti.type):
+            self._makefile(ti, tp)
+        elif ti.isdir():
+            self._makedir(ti, tp)
+        elif ti.issym() or ti.islnk():
+            self._makelink(ti, tp)
+        else:
+            self._makefile(ti, tp)
+        if set_attrs:
+            if not ti.issym():
+                self._chmod(ti, tp)
+                self._utime(ti, tp)
+
+    def _makefile(self, ti: TarInfo, targetpath: str) -> None:
+        start: int = ti.offset_data
+        end: int = start + ti.size
+        if end > len_bytes(self._data):
+            raise ReadError("unexpected end of data")
+        _gzipio.write_bin(targetpath, self._data[start:end])
+
+    def _makedir(self, ti: TarInfo, targetpath: str) -> None:
+        try:
+            os.mkdir(targetpath)
+        except FileExistsError:
+            if not _osp.isdir(targetpath):
+                raise
+
+    def _makelink(self, ti: TarInfo, targetpath: str) -> None:
+        if ti.issym():
+            if _osp.islink(targetpath) or _osp.exists(targetpath):
+                os.unlink(targetpath)
+            rc: int = _sc.symlink(ti.linkname, targetpath)
+            if rc != 0:
+                _os_error("symlink", rc, targetpath)
+            return
+        # 硬链接（LNKTYPE）：pa 没有 os.link，按 CPython 的「链接建不出来
+        # 就复制内容」回退口径落成普通文件。
+        tgt: TarInfo = self._find_link_target(ti)
+        if _osp.islink(targetpath) or _osp.exists(targetpath):
+            os.unlink(targetpath)
+        self._makefile(tgt, targetpath)
+
+    def _chmod(self, ti: TarInfo, targetpath: str) -> None:
+        os.chmod(targetpath, ti.mode & 0o7777)
+
+    def _utime(self, ti: TarInfo, targetpath: str) -> None:
+        rc: int = _sc.utime(targetpath, ti.mtime, 0, ti.mtime, 0, 1)
+        if rc != 0:
+            _os_error("utime", rc, targetpath)
+
     # ── 收尾 ────────────────────────────────────────────────────
     def close(self) -> None:
         if self.closed:
@@ -833,3 +992,54 @@ def open(name: str = "", mode: str = "r", fileobj: file = None,
     if len(name) == 0 and fileobj is None:
         raise ValueError("nothing to open")
     return TarFile(name, mode, fileobj, format, encoding, errors, compresslevel)
+
+# ── 文件系统助手（_shutilc 胶水：stat/readlink/symlink/utime）────────
+def _os_error(what: str, rc: int, path: str) -> object:
+    msg: str = what + ": " + _sc.strerror(rc) + ": " + repr(path)
+    if rc == -1:
+        raise FileNotFoundError(msg)
+    if rc == -2:
+        raise FileExistsError(msg)
+    if rc == -3:
+        raise PermissionError(msg)
+    if rc == -4:
+        raise NotADirectoryError(msg)
+    if rc == -5:
+        raise IsADirectoryError(msg)
+    raise OSError(msg)
+
+
+def _stat_path(path: str, follow: bool) -> list[int]:
+    """lstat/stat -> [mode, mtime_s, mtime_ns, atime_s, atime_ns, size, kind]。"""
+    out: list[int] = [0, 0, 0, 0, 0, 0, 0]
+    f: int = 0
+    if follow:
+        f = 1
+    rc: int = _sc.stat(path, f, out)
+    if rc != 0:
+        _os_error("stat", rc, path)
+    return out
+
+
+def _readlink_path(path: str) -> str:
+    cap: int = 4096
+    while True:
+        buf: bytes = bytes(cap)
+        n: int = _sc.readlink(path, buf, cap)
+        if n >= 0:
+            return buf[:n].decode("utf-8", "replace")
+        if n == -1 and cap < 1048576:
+            cap = cap * 2
+            continue
+        _os_error("readlink", n, path)
+        return ""
+
+
+def _safe_name(name: str) -> str:
+    """成员名净化：剥前导 '/'、丢 ''/'.'/'..' 段（同 zipfile 口径）。"""
+    parts: list[str] = []
+    for p in name.split("/"):
+        if p == "" or p == "." or p == "..":
+            continue
+        parts.append(p)
+    return "/".join(parts)
