@@ -11,8 +11,11 @@
 //     非基准特化）；体块是纯算术/装载/槽写/下标读写的表达式 DAG。
 //   * 归纳变量 j 及其副本槽（j-alias）；循环不变量（常量/稳定槽/跨块值）。
 //   * 逐元素 map：out[j+c] = f(a[j+c'], b[j+c''], 不变量)，下标仿射 j+常量。
-//   * reduction：s += f(...)（float 保序提取累加，逐位一致；int paddq 2-lane
-//     模 2^64 精确 + 出口水平求和）。
+//   * reduction（可多个并行）：s += f(...)（float 保序提取累加，逐位一致；
+//     int paddq 2-lane 模 2^64 精确 + 出口水平求和；int acc 装载槽前值）。
+//   * int 乘：pmuludq 奇偶 lane 全 i64 重建（模 2^64 = imulq，任意 i64 无守卫）。
+//   * Convert plain i64→float：cvtdq2pd 折算（pshufd 聚 hi/lo dword，中间量
+//     全精确 + 末条单次舍入 = cvtsi2sdq，任意 i64 无守卫）。
 //   * 体局部临时槽（单写、读全在写后、无外部读、非堆）→ SSA 替换，跳过存储。
 //
 // 别名/依赖安全判据（宁保守跳过，不误向量化）：
@@ -24,7 +27,8 @@
 //   * len>=n+maxoff && kind==0 && j>=0 && j+1<n 守卫 → movupd 不越界、读裸
 //     标量；不满足整段标量，IndexError/负索引/kind 升级语义与时机不变。
 //
-//  lowering：SSE2 2-lane packed（movupd/addpd/subpd/mulpd/divpd）。尾循环：
+//  lowering：SSE2 2-lane packed（movupd/addpd/subpd/mulpd/divpd/paddq/psubq/
+// pmuludq 重建/cvtdq2pd 折算）。尾循环：
 // 向量循环退出 jmp cond——j==n 直接退出（计数器精确等于标量），j==n-1 经
 // cond 回体块，入口 j+1<n 守卫失败 → 原标量体处理余 1（gen_block 照常发射）。
 //

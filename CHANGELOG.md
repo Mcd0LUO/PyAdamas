@@ -4,6 +4,37 @@
 
 早期阶段没有逐条留痕，按阶段归纳；0.4 之后逐条记录。
 
+## [0.351] - 2026-11-21
+
+> **SIMD 通用化深化**（vect2 分支，基线 master faeb80d / 0.350）。扩展 0.344
+> 落地的通用循环向量化器（codegen_vect.cpp），补上 docs/simd-vectorization-design.md
+> §11.7 P4+ 的三项 tractable 路径：**int 乘 map/reduction**（pmuludq 奇偶 lane
+> 全 i64 重建，模 2^64 与 imulq 逐位一致，任意 i64 含负数/INT64_MIN **无需值域
+> 守卫**）、**Convert plain i64→float**（cvtdq2pd 折算 + pshufd 聚 dword，中间量
+> 全精确、末条 addpd 单次舍入 = cvtsi2sdq，>2^53/INT64_MIN/MAX 逐位一致）、
+> **多 reduction 并行累加器**（双 float/双 int/混合/三累加器，共享 expr 用
+> scratch 副本保序提取，出口各自写回）。设计 §11.8 记录完整推导。
+>
+> 门控 `PYADAMAS_VECT` **默认关**不变。同时修复五个潜伏 bug：通用 reduction
+> 路径自 0.344 fbc77a8 起实际是死代码（read_before_store 判据反用）；int acc
+> 出口覆盖写丢循环前累加器值（298 rw 形状静默算错）；ConstInt 不变量广播漏收
+> 致悬空 tail 标签（49_inline 链接失败）；LICM 外提值误判逐 lane 类；跨块装载
+> list 基址解析到被 RC move-from 清 0 的槽现值致 NULL 段错误（376 内联形态）。
+>
+> 闸门（基线 2c58a99 独立 worktree 对拍）：flag-off asm **38 热基准逐字节全同**；
+> difftest vect-on **335/0**；38 基准语料 flag-on/off 输出零差异；全套件 normal
+> vect-on/off 与 **ASan vect-on JOBS=1 均 EXIT=0（354 ran ok）**；check_size 无新增
+> 超限（codegen_vect.cpp 998 行）；spectral_norm/nbody/matmul 输出钉住
+> （811972 / -928502048 / 43198080）且 abbench 不回归。
+>
+> 回归 375-378（非基准，CPython 参考对拍零差异）：int 乘大值回绕/原地/临时槽/
+> dot/前值非 0；Convert 全值域/float(j)/float(j+c)/不变量/乘后折算/保序 reduction；
+> 多 reduction 10 形状；别名依赖负例（跨迭代/写后读/写偏移非 0/循环变量外读/
+> 运行时别名守卫/IndexError 时机）asm 零 VECT 保守跳过取证。
+>
+> 性能（非基准探针 N=200000×300 轮，min-of-9 交替绑核，整程序墙钟）：int 乘 map
+> **2.36×**、Convert map **2.34×**、多 reduction **1.38×**（checksum 逐位一致）。
+
 ## [0.350] - 2026-11-21
 
 > **标准库自举第五批**（stdlib5 分支，基线 master b0e2f8b / 0.349）。纯
