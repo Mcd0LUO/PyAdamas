@@ -175,10 +175,10 @@ public:
         void set_index_readonly(bool v) { index_readonly_ = v; }
         // 零开销异常总开关（默认开启；--no-zero-cost-exc 可回退）。
         void set_zero_cost_exc(bool v) { zero_cost_exc_ = v; }
-        // live range splitting 开关：由驱动从 Program 传入（参与缓存失效）。
+        // 分配器实验开关（驱动传入，参与缓存失效）：RA_SPLIT / RA_GRAPH / RA_OPT（默认关）。
         void set_rc_split(bool v) { rc_split_ = v; }
-        // 图着色分配器开关（PYADAMAS_RA_GRAPH）：同样由驱动传入并参与缓存失效。
         void set_ra_graph(bool v) { ra_graph_ = v; }
+        void set_ra_opt(bool v) { ra_opt_ = v; }
         // 浮点循环 SIMD 向量化开关（PYADAMAS_SIMD，默认关）：参与缓存失效。
         void set_simd(bool v) { simd_enabled_ = v; }
 
@@ -748,9 +748,8 @@ private:
     // 路径的汇编逐字节不变。
     bool zero_cost_exc_ = true;
     bool rc_split_ = false;
-    // 图着色分配器开关（PYADAMAS_RA_GRAPH）。开启后 assign_slot_regs 走
-    // assign_slot_regs_graph，用精确冲突图取代线性扫描的区间近似。
-    bool ra_graph_ = false;
+    bool ra_graph_ = false;  // RA_GRAPH：图着色（assign_slot_regs_graph）
+    bool ra_opt_ = false;    // RA_OPT：P1 跨调用提升 + P2 只读别名（ra_opt.cpp），默认关
     // 预扫描本函数的 EH 标记（fname 是 FDE 起点标签）；没有标记则不动作。
     void prepare_eh_plan(const IRFunction& f, const std::string& fname);
     // 发 .cfi_personality / .cfi_lsda（必须在 .cfi_startproc 之后调用）。
@@ -1019,10 +1018,12 @@ private:
                           int nreg, std::vector<std::string>& out);
     bool slot_range_has_call(int64_t beg, int64_t end) const;
 
-    // 跨块 vreg 提升：局部变量没占满的 callee-saved 寄存器分给跨块
-    // 整型临时值。用 CFG 活跃性算区间（覆盖循环回边），定义支配所有
-    // 使用的值才参与；调用不会破坏 callee-saved，所以跨调用也安全。
+    // 跨块 vreg 提升：槽没占满的 callee-saved 分给跨块整型临时值，
+    // 整函数独占；callee-saved 跨调用安全（CFG 活跃性见函数体注释）。
     void assign_global_vreg_regs();
+
+    std::vector<char> ra_opt_readonly_alias();
+    std::vector<std::pair<int, int>> ra_opt_call_block_cands(const std::vector<int64_t>& weight);
 
     // ── 函数 ────────────────────────────────────────────────────
     std::vector<ArgLoc> classify(const std::vector<TypePtr>& types) const;

@@ -313,6 +313,9 @@ int main(int argc, char** argv) {
         prog.rc_split = std::getenv("PYADAMAS_RA_SPLIT") != nullptr;
         // 图着色分配器开关（实验特性）：读一次环境变量，写进缓存清单。
         prog.ra_graph = std::getenv("PYADAMAS_RA_GRAPH") != nullptr;
+        // callee-saved 提升增强（默认关）：PYADAMAS_RA_OPT=1 开启，参与缓存失效。
+        prog.ra_opt = std::getenv("PYADAMAS_RA_OPT") != nullptr &&
+                      std::string_view(std::getenv("PYADAMAS_RA_OPT")) != "0";
         // 浮点循环 SIMD 向量化（默认关）：PYADAMAS_SIMD=1 开启，参与缓存失效。
         prog.simd = std::getenv("PYADAMAS_SIMD") != nullptr &&
                     std::string_view(std::getenv("PYADAMAS_SIMD")) != "0";
@@ -349,7 +352,7 @@ int main(int argc, char** argv) {
                 auto a = std::chrono::steady_clock::now();
                 std::string asm_text = pyadamas::generate_asm(
                     *prog.entry->ir, !prog.needs_unknown_index, prog.zero_cost_exc,
-                    false, prog.rc_split, prog.ra_graph, prog.simd);
+                    false, prog.rc_split, prog.ra_graph, prog.simd, prog.ra_opt);
                 auto b = std::chrono::steady_clock::now();
                 if (std::getenv("PYADAMAS_TIMING"))
                     std::fprintf(stderr, "[timing] codegen=%.1f ms\n",

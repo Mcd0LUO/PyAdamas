@@ -4,6 +4,68 @@
 
 早期阶段没有逐条留痕，按阶段归纳；0.4 之后逐条记录。
 
+## [0.336] - 2026-11-20
+
+> ra1 分支：**寄存器分配改进——削减 spill/栈往返**（callee-saved 提升增强），
+> 测量先行（perf annotate 复核 fib/matmul/nqueens 栈流量热点再选优化）。
+> 门控 `PYADAMAS_RA_OPT=0/1` **默认 0**；flag-off 生成 asm 逐字节不变
+> （92 基准 cmp 全过：compare+realistic+builtins+daily）。新逻辑在
+> src/ra_opt.cpp（codegen_regalloc.cpp 已超限不再加逻辑）。设计/取证/
+> 命门 bug 实录/负面结论见 docs/ra-opt-design.md。接 0.335 之后集成，定版 0.336。
+
+### 新增
+
+- **ra_opt.cpp**（新文件，两个门控分配改进，机制与现有跨块提升同构：
+  整函数独占 callee-saved，无区间判断、无调用点 spill）：
+  - **P2 只读槽 load 别名**：整函数驻留 GPR、函数内从未被写、且**寄存器
+    全函数单射**（没有第二个槽认领）的槽，其单次 LoadSlot vreg 直接别名
+    到槽寄存器（值恒等），不占新寄存器，load 指令整条消失。nqueens LICM
+    提升的 row/n 共 6 份独立副本全部别名（perf 实测 row 重载占函数周期
+    9.06%、n 上界 cmp 2.77%），place 栈 mov 78→68 条。mandelbrot +4.3%、
+    fasta +3.3%、nqueens +1~2%（11 轮交替绑核 A/B 中位）。
+  - **P1 同块跨调用 vreg 提升**：定义使用同块、活跃区间真跨过调用的
+    整型值（单定义、Int/Bool 白名单、RcMark 排除），**只捡跨块候选挑剩
+    的寄存器**（不按权重插队，结构性保证不劣化已有分配）。**自递归函数
+    整函数跳过**：fib 实测提升 1/5 个寄存器分别净回归 3.8%/6.2%——递归
+    每次调用（含叶子）都付 push/pop 税，perf 取证 push 27%/pop 15%。
+    递归 callee-saved 提升需 shrink-wrapping 才可能正收益，本轮保守不做。
+- **manifest 缓存键 raopt**（-1 = 旧清单失效一次），try_cache 校验，
+  切开关不再命中旧产物。
+- **回归 297-299**：P1 跨调用形状+递归 guard、P2 只读别名+重赋值负例、
+  异常/生成器/vthread 命门（flag-on/off 双模式过）。
+
+### 修复（开发期命门 bug，已钉死）
+
+- **P2 首版静默算错**：误信「slot_reg_[s] 非空 ⇒ 整函数独占」——
+  linear_scan_pool 让不重叠区间复用寄存器，c2_inventory 的 s0(n) 入口
+  hoist 后即死、%rbx 被 LCG 状态槽接管，别名让循环上界读错值（rows
+  600→1）；204/193/205/206/233/236 + 9 语料同根因。修复：寄存器单射
+  校验（reg_users==1）。教训：注释描述的语义意图 ≠ 分配器实现保证；
+  语料对拍比随机 run_diff 更能压出复用形状 bug（首版 run_diff 840/0
+  但语料 9 错）。
+- **P1 按 weight 插队回归**：nbody −1.5%（weight 误判把已有跨块 vreg
+  挤出寄存器落栈）。改 leftover-only 后 nbody asm 恢复逐字节不变。
+
+### 负面结论
+
+- **fib**：callee-saved 提升在自递归函数上净负（叶子税），guard 跳过；
+  GCC 对照是递归展开成迭代，非纯 regalloc 差距。
+- **matmul**：6 个 callee-saved 被热区同时活跃的 6 个槽占满（槽分配
+  本身最优），跨块不变量（i*N/k*N/aik副本）拿不到寄存器；P1/P2 无
+  候选，asm 不变。统一分配/live range splitting 是历史多次失败区
+  （codegen 不做区间判断），需独立一轮，本轮保守跳过。
+
+### 闸门
+
+- difftest（O0/O2）283 用例 0 差异 EXIT=0（277_urllib_errors 固定端口
+  并行竞争偶发 rc 抖动，单跑 5/5 干净，JOBS=6 全量复跑 0 差异）。
+- 全套件 normal flag-on EXIT=0；**ASan flag-on JOBS=1 EXIT=0**。
+- 随机 CPython 对拍 run_diff 840 程序 0 失败；日常语料 23/23（输出+rc）。
+- ASan detect_leaks=1 钉子 13/174/88/192/66/119 全 0。
+- flag-off 92 基准 asm 逐字节不变；异常/生成器/vthread 钉子
+  （92/93/119/225 等）flag-on 全套件内通过。
+- check_size 无新增超限（ra_opt.cpp < 1200 行）。
+
 ## [0.335] - 2026-11-20
 
 > intloop 分支：**整数循环优化**（跳转线程化 + 仿射 IV 边界检查消除），
