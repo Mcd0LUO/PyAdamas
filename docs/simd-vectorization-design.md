@@ -561,8 +561,8 @@ read/write/try_cache 比对）。flag-off `vect_func_ok` 第一判断返回，�
 * flag-off asm 对 master **逐字节不变**：38 热基准（realistic 6 + compare 9
   + daily 23）cmp 全同。
 * difftest（O0/O2，vect-on）**317/0**。
-* 全套件 normal vect-on **EXIT=0（334 ran ok）**；normal flag-off EXIT=0（334）；
-  **ASan vect-on JOBS=1 EXIT=0（334 ran ok）**。
+* 全套件 normal vect-on **EXIT=0（335 ran ok）**；normal flag-off EXIT=0（334）；
+  **ASan vect-on JOBS=1 EXIT=0（335 ran ok）**。
 * check_size 无新增超限文件（codegen_vect.cpp <1200；codegen_impl.h 保持 1200；
   其余超限为 master 既有）。
 * 回归 344-349（非基准 map/reduction/原地/偏移/int map + 别名依赖负例 + 边界）
@@ -577,11 +577,11 @@ N=200000 × 30 轮，Xeon Gold 6252，min-of-9 交替绑核：
 
 | | flag-off | vect-on | 比值 |
 |---|---|---|---|
-| 墙钟 min | 49.2ms | 26.1ms | **1.89×** |
-| 墙钟 median | 49.5ms | 26.3ms | 1.88× |
+| 墙钟 min | 49.2ms | 25.5ms | **1.93×** |
+| 墙钟 median | 49.3ms | 26.3ms | 1.87× |
 
 checksum 逐位一致（5318446）。2-lane 理论上限 2×，保序 addsd 链使 reduction
-部分略低于 2×，实测 1.89× 接近上限。**证明通用性**：任意浮点数组 map/reduction
+部分略低于 2×，实测 1.93× 接近上限。**证明通用性**：任意浮点数组 map/reduction
 循环（非 spectral_norm/nbody/matmul）向量化成功并加速。
 
 开发期 bug 取证：read_before_store 按指令顺序扫描时，load 早于 store 而
