@@ -108,6 +108,8 @@ set(PYADAMAS_SOURCES
 src/opt_intloop.cpp
   src/codegen.cpp
   src/codegen_regalloc.cpp
+  src/codegen_regalloc_scan.cpp
+  src/codegen_regalloc_temp.cpp
   src/ra_opt.cpp
   src/codegen_block.cpp
   src/codegen_comment.cpp
