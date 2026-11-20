@@ -80,22 +80,52 @@ Cfg build_cfg(const IRFunction& fn) {
 }
 
 // dom[b] 是 b 的支配块集合。
-std::vector<std::vector<char>> compute_dom(const Cfg& g) {
+//
+// 用按 64 位字打包的位集表示（语义与原逐字节向量完全相同：同一个不动点、
+// 同一次交集顺序、同样的 all-ones 初始化）。大函数上 nb 可达数百到上千，
+// 原来每块 nb 字节的逐字节 AND + 逐字节比较是 O(nb^3) 的字节流量，
+// 这里是 O(nb^3/64) 的字流量，支配计算结果逐位不变。
+class DomSet {
+  public:
+    DomSet() = default;
+    DomSet(size_t words, bool ones)
+        : w_(words, ones ? ~0ULL : 0ULL) {}
+
+    uint64_t* words() { return w_.data(); }
+    const uint64_t* words() const { return w_.data(); }
+    size_t nwords() const { return w_.size(); }
+    bool operator==(const DomSet& o) const { return w_ == o.w_; }
+    bool has(size_t b) const {
+        return b < w_.size() * 64 && ((w_[b >> 6] >> (b & 63)) & 1ULL) != 0;
+    }
+    // 末字只保留 nb 位有效位，其余清零，保证比较/与运算都一致。
+    void mask(size_t nb) {
+        if (w_.empty()) return;
+        const size_t tail = nb & 63;
+        if (tail != 0) w_.back() &= (~0ULL >> (64 - tail));
+    }
+
+  private:
+    std::vector<uint64_t> w_;
+};
+
+std::vector<DomSet> compute_dom(const Cfg& g) {
     const int nb = static_cast<int>(g.succ.size());
-    std::vector<std::vector<char>> dom(static_cast<size_t>(nb),
-                                       std::vector<char>(static_cast<size_t>(nb), 0));
+    const size_t words = (static_cast<size_t>(nb) + 63) / 64;
+    std::vector<DomSet> dom(static_cast<size_t>(nb), DomSet(words, false));
     for (int b = 0; b < nb; ++b)
-        if (g.reach[static_cast<size_t>(b)])
-            dom[static_cast<size_t>(b)].assign(static_cast<size_t>(nb), 1);
+        if (g.reach[static_cast<size_t>(b)]) dom[static_cast<size_t>(b)] = DomSet(words, true);
     if (nb == 0) return dom;
-    dom[0].assign(static_cast<size_t>(nb), 0);
-    dom[0][0] = 1;
+    for (auto& d : dom) d.mask(static_cast<size_t>(nb));
+    dom[0] = DomSet(words, false);
+    dom[0].words()[0] = 1ULL;
     bool changed = true;
     while (changed) {
         changed = false;
         for (int b = 1; b < nb; ++b) {
             if (!g.reach[static_cast<size_t>(b)]) continue;
-            std::vector<char> nd(static_cast<size_t>(nb), 1);
+            DomSet nd(words, true);
+            nd.mask(static_cast<size_t>(nb));
             bool first = true;
             for (int p : g.pred[static_cast<size_t>(b)]) {
                 if (!g.reach[static_cast<size_t>(p)]) continue;
@@ -104,11 +134,12 @@ std::vector<std::vector<char>> compute_dom(const Cfg& g) {
                     first = false;
                     continue;
                 }
-                const auto& dp = dom[static_cast<size_t>(p)];
-                for (size_t i = 0; i < nd.size(); ++i) nd[i] = nd[i] && dp[i];
+                const uint64_t* dp = dom[static_cast<size_t>(p)].words();
+                uint64_t* dst = nd.words();
+                for (size_t i = 0; i < words; ++i) dst[i] &= dp[i];
             }
-            nd[static_cast<size_t>(b)] = 1;
-            if (nd != dom[static_cast<size_t>(b)]) {
+            nd.words()[static_cast<size_t>(b) >> 6] |= 1ULL << (static_cast<size_t>(b) & 63);
+            if (!(nd == dom[static_cast<size_t>(b)])) {
                 dom[static_cast<size_t>(b)] = std::move(nd);
                 changed = true;
             }
@@ -117,13 +148,18 @@ std::vector<std::vector<char>> compute_dom(const Cfg& g) {
     return dom;
 }
 
+inline bool dom_has(const std::vector<DomSet>& dom, int h, int b) {
+    if (h < 0 || b < 0 || static_cast<size_t>(h) >= dom.size()) return false;
+    return dom[static_cast<size_t>(h)].has(static_cast<size_t>(b));
+}
+
 bool numeric_ty(const TypePtr& t) {
     return t && (t->kind == TyKind::Bool || t->kind == TyKind::Int ||
                  t->kind == TyKind::Float);
 }
 
 bool hoist_loop(IRFunction& fn, int h, const std::vector<char>& body,
-                const std::vector<std::vector<char>>& dom, size_t n_globals) {
+                const std::vector<DomSet>& dom, size_t n_globals) {
     const int nb = static_cast<int>(fn.blocks.size());
     const auto in_loop = [&](int b) { return body[static_cast<size_t>(b)] != 0; };
 
@@ -206,7 +242,7 @@ bool hoist_loop(IRFunction& fn, int h, const std::vector<char>& body,
         if (it == def_block.end()) return true;  // 形参等无定义值
         int db = it->second;
         if (in_loop(db)) return false;
-        return dom[static_cast<size_t>(h)][static_cast<size_t>(db)] != 0;
+        return dom_has(dom, h, db);
     };
     auto operand_numeric = [&](VReg r) {
         return r != kNoReg && r < static_cast<VReg>(fn.vreg_ty.size()) &&
@@ -347,7 +383,7 @@ bool hoist_loop(IRFunction& fn, int h, const std::vector<char>& body,
 // 不会因此多抛异常。
 
 bool version_bounds_loop(IRFunction& fn, int h, const std::vector<char>& body,
-                         const std::vector<std::vector<char>>& dom) {
+                         const std::vector<DomSet>& dom) {
     const int nb = static_cast<int>(fn.blocks.size());
     const auto in_loop = [&](int b) { return body[static_cast<size_t>(b)] != 0; };
 
@@ -435,7 +471,7 @@ bool version_bounds_loop(IRFunction& fn, int h, const std::vector<char>& body,
         auto it = def_block.find(r);
         if (it == def_block.end()) return true;
         if (in_loop(it->second)) return false;
-        return dom[static_cast<size_t>(h)][static_cast<size_t>(it->second)] != 0;
+        return dom_has(dom, h, it->second);
     };
 
     struct Cand {
@@ -705,8 +741,7 @@ bool licm_function(IRFunction& fn, size_t n_globals) {
         for (int n = 0; n < nb; ++n) {
             if (!g.reach[static_cast<size_t>(n)]) continue;
             for (int h : g.succ[static_cast<size_t>(n)]) {
-                if (h < 0 || h >= nb || !dom[static_cast<size_t>(n)][static_cast<size_t>(h)])
-                    continue;
+                if (h < 0 || h >= nb || !dom_has(dom, n, h)) continue;
                 auto& body = bodies[static_cast<size_t>(h)];
                 if (body.empty()) {
                     body.assign(static_cast<size_t>(nb), 0);
@@ -751,8 +786,7 @@ bool version_bounds_function(IRFunction& fn) {
         for (int n = 0; n < nb; ++n) {
             if (!g.reach[static_cast<size_t>(n)]) continue;
             for (int h : g.succ[static_cast<size_t>(n)]) {
-                if (h < 0 || h >= nb || !dom[static_cast<size_t>(n)][static_cast<size_t>(h)])
-                    continue;
+                if (h < 0 || h >= nb || !dom_has(dom, n, h)) continue;
                 auto& body = bodies[static_cast<size_t>(h)];
                 if (body.empty()) {
                     body.assign(static_cast<size_t>(nb), 0);
