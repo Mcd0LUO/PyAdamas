@@ -84,6 +84,7 @@ enum class RtFn : uint16_t {
     DictGet,      // (dict*, i64 key) -> i64
     DictSetDefaultFactory, // (dict*, i64 factory) -> void
     DictContains, // (dict*, i64 key) -> i64
+    DictVersion,  // (dict*) -> i64  迭代版本号（键集合变化的计数器）
     DictKeyAt,    // (dict*, i64 index) -> i64
     ListContains, // (list*, i64 value, i64 cmp_kind) -> i64
     ListEq,       // (list*, list*, i64 cmp_kind) -> i64

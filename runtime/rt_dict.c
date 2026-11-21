@@ -358,6 +358,7 @@ PyAdamasDict* pa_dict_new(int64_t key_kind, int64_t key_own, int64_t val_own,
     d->key_kind = key_kind;
     d->key_own = key_own;
     d->val_own = val_own;
+    d->version = 0;
     d->hash_slot = hash_slot;
     d->eq_slot = eq_slot;
     d->default_factory = 0;
@@ -391,6 +392,7 @@ void pa_dict_set(PyAdamasDict* d, int64_t key, int64_t val) {
             dict_reindex(d, d->icap);
         place = dict_place_slot(d, h);
     }
+    d->version++;   /* 新键插入：键集合变了 */
     int64_t idx;
     if (d->free_head >= 0) {
         idx = d->free_head;
@@ -853,13 +855,18 @@ int64_t pa_dict_pop_last(PyAdamasDict* d) {
 }
 
 void pa_dict_remove(PyAdamasDict* d, int64_t key, int64_t missing_ok) {
+    /* 版本号在真正摘掉一条时 +1（见下面的实现），这里先声明意图。 */
     int64_t v;
     if (!dict_take(d, key, &v)) {
         if (!missing_ok) pa_raise_c("KeyError", "key not found");
         return;
     }
+    d->version++;   /* 键被摘掉：键集合变了 */
     pa_own_dec(d->val_own, v);
 }
+
+/* 迭代版本号：for/enumerate/zip 的守卫用它捕捉「大小不变但键变了」。 */
+int64_t pa_dict_version(PyAdamasDict* d) { return d ? d->version : 0; }
 
 void pa_dict_clear(PyAdamasDict* d) {
     // 0.302：纯标量的 unknown dict 同样跳过链游（判定同 dict_destroy）。
@@ -873,6 +880,7 @@ void pa_dict_clear(PyAdamasDict* d) {
     }
     // 清空后是空表：sticky 标志归零，后续写入重新探针。
     d->saw_heap = 0;
+    d->version++;
     d->len = 0;
     d->ord_len = 0;
     d->nent = 0;

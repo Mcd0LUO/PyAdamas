@@ -169,6 +169,7 @@ RtClass classify_rt(RtFn f, int& recv) {
         case RtFn::ClosureNew:
         case RtFn::DictNew: case RtFn::DictSet: case RtFn::DictGet: case RtFn::DictGetOr:
         case RtFn::DictGetOpt: case RtFn::DictContains: case RtFn::DictKeyAt:
+        case RtFn::DictVersion:
         case RtFn::DictKeys: case RtFn::DictValues: case RtFn::DictItems: case RtFn::DictEq:
         case RtFn::DictCopy: case RtFn::DictFromPairs: case RtFn::DictPop: case RtFn::DictPopItem:
         case RtFn::DictPopLast: case RtFn::DictRemove: case RtFn::DictClear: case RtFn::DictUpdate:

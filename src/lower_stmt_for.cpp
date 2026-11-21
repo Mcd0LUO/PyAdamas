@@ -523,6 +523,16 @@ void Lowerer::lower_for_zip(For& f, Call& c) {
     int nb_slot = new_temp_slot(t_int());
     store_slot(na_slot, na);
     store_slot(nb_slot, nb);
+    // 版本号：捕捉「删一个再加一个」（大小不变、键集合变了）。
+    int va_slot = -1, vb_slot = -1;
+    if (at->kind == TyKind::Dict) {
+        va_slot = new_temp_slot(t_int());
+        store_slot(va_slot, call_runtime(RtFn::DictVersion, t_int(), {aval()}));
+    }
+    if (bt->kind == TyKind::Dict) {
+        vb_slot = new_temp_slot(t_int());
+        store_slot(vb_slot, call_runtime(RtFn::DictVersion, t_int(), {bval()}));
+    }
     int pick_a = new_block("for.zip.a");
     int pick_b = new_block("for.zip.b");
     int after = new_block("for.zip.min");
@@ -580,8 +590,12 @@ void Lowerer::lower_for_zip(For& f, Call& c) {
     switch_to(cond);
     if (at->kind == TyKind::Dict || at->kind == TyKind::Set ||
         bt->kind == TyKind::Dict || bt->kind == TyKind::Set) {
-        auto guard = [&](const TypePtr& ty, auto&& val, int entry_slot) {
+        auto guard = [&](const TypePtr& ty, auto&& val, int entry_slot, int ver_slot) {
             if (!ty || (ty->kind != TyKind::Dict && ty->kind != TyKind::Set)) return;
+            // 先比大小，再比版本：大小变了报 size，只有「大小不变但键变了」
+            // 才报 keys（del + add）。顺序反了会把 size 变形报成 keys。
+            int size_changed = new_block("for.zip.changed");
+            int after_size = new_block("for.zip.after_size");
             Inst lc;
             lc.op = IrOp::Len;
             lc.a = val();
@@ -591,27 +605,45 @@ void Lowerer::lower_for_zip(For& f, Call& c) {
             ne.cop = CmpKind::Ne;
             ne.a = cur;
             ne.b = load_slot(entry_slot, t_int());
-            VReg cc2 = def(t_bool(), std::move(ne));
-            int changed = new_block("for.zip.changed");
-            int ok_b = new_block("for.zip.ok");
             Inst bg;
             bg.op = IrOp::Branch;
-            bg.a = cc2;
-            bg.target = changed;
-            bg.target2 = ok_b;
+            bg.a = def(t_bool(), std::move(ne));
+            bg.target = size_changed;
+            bg.target2 = after_size;
             emit(std::move(bg));
-            switch_to(changed);
+            switch_to(size_changed);
             call_void(raise_rt(RtFn::Raise),
                       {const_str("RuntimeError"),
                        const_str(ty->kind == TyKind::Dict
                                      ? "dictionary changed size during iteration"
                                      : "Set changed size during iteration")});
-            switch_to(ok_b);
+            switch_to(after_size);
+            if (ty->kind == TyKind::Dict && ver_slot >= 0) {
+                VReg cur_v = call_runtime(RtFn::DictVersion, t_int(), {val()});
+                Inst ve;
+                ve.op = IrOp::Cmp;
+                ve.cop = CmpKind::Ne;
+                ve.a = cur_v;
+                ve.b = load_slot(ver_slot, t_int());
+                int kchanged = new_block("for.zip.keys_changed");
+                int kok = new_block("for.zip.keys_ok");
+                Inst vbr;
+                vbr.op = IrOp::Branch;
+                vbr.a = def(t_bool(), std::move(ve));
+                vbr.target = kchanged;
+                vbr.target2 = kok;
+                emit(std::move(vbr));
+                switch_to(kchanged);
+                call_void(raise_rt(RtFn::Raise),
+                          {const_str("RuntimeError"),
+                           const_str("dictionary keys changed during iteration")});
+                switch_to(kok);
+            }
         };
         // **顺序有意义**：zip 先问 a 再问 b。a 已经耗尽就直接结束，
         // 这时 b 里改东西不该报错（CPython 的 zip 根本不会碰 b）。
         // 0.366 第一版两个一起检查，于是「最后一次取元素之后改 b」误报。
-        guard(at, aval, na_slot);
+        guard(at, aval, na_slot, va_slot);
         {
             int next_ab = new_block("for.zip.chk_b");
             Inst c1;
@@ -626,7 +658,7 @@ void Lowerer::lower_for_zip(For& f, Call& c) {
             b1.target2 = orelse;
             emit(std::move(b1));
             switch_to(next_ab);
-            guard(bt, bval, nb_slot);
+            guard(bt, bval, nb_slot, vb_slot);
             {
                 int body_ab = new_block("for.zip.chk_ok");
                 Inst c2;

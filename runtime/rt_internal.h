@@ -338,6 +338,10 @@ typedef struct {
     /* 类 key 的 __hash__ / __eq__ vtable 槽号；-1 表示按机器字哈希/比较。 */
     int64_t hash_slot;
     int64_t eq_slot;
+    /* 迭代版本号：任何「插入新键」或「删除键」都 +1。
+       迭代守卫用它捕捉「删一个再加一个」——大小不变但键集合变了，
+       CPython 3.14 抛的是 "dictionary keys changed during iteration"。 */
+    int64_t version;
     /* collections.defaultdict 的内置工厂；0 表示普通 dict。
        只记录工厂种类，缺省下标读取时才创建值，不影响 get()/in。 */
     int64_t default_factory;
@@ -1185,6 +1189,8 @@ PyAdamasStr* pa_bytes_slice(PyAdamasStr* src, int64_t start, int64_t stop, int64
 PyAdamasStr* pa_bytes_concat(PyAdamasStr* a, PyAdamasStr* b);
 PyAdamasStr* pa_bytes_repeat(PyAdamasStr* s, int64_t n);
 int64_t pa_len_bytes(PyAdamasStr* s);
+/* 字典/集合的迭代版本号（插入新键或删除键时 +1）。 */
+int64_t pa_dict_version(PyAdamasDict* d);
 PyAdamasStr* pa_str_encode(PyAdamasStr* s);
 PyAdamasStr* pa_bytes_decode(PyAdamasStr* s);
 PyAdamasStr* pa_str_from_i64(int64_t v);

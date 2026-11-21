@@ -123,6 +123,7 @@ inline const char* rt_name(RtFn f) {
         case RtFn::DictGet: return "pa_dict_get";
         case RtFn::DictSetDefaultFactory: return "pa_dict_set_default_factory";
         case RtFn::DictContains: return "pa_dict_contains";
+        case RtFn::DictVersion: return "pa_dict_version";
         case RtFn::DictKeyAt: return "pa_dict_key_at";
         case RtFn::ListContains: return "pa_list_contains";
         case RtFn::ListEq: return "pa_list_eq";

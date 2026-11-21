@@ -854,6 +854,7 @@ void AsmGen::gen_rt_args(const Inst& in, RtFn fn) {
         case RtFn::DictGet:
         case RtFn::DictSetDefaultFactory:
         case RtFn::DictContains:
+        case RtFn::DictVersion:
         case RtFn::DictKeyAt:
         case RtFn::IsInstanceClass:
         case RtFn::StrContains:
