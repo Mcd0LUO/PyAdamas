@@ -119,13 +119,68 @@ class Context:
         self.prec = prec
         self.rounding = rounding
 
+    def copy(self) -> Context:
+        """复制一份上下文（CPython 的 Context.copy 口径）。"""
+        return Context(self.prec, self.rounding)
+
+    def create_decimal(self, value: unknown) -> Decimal:
+        """按**本**上下文构造 Decimal：构造后按 prec 舍入（CPython 口径）。"""
+        d: Decimal = Decimal(value)
+        d._apply_context(self)
+        return d
+
 
 _context: Context = Context()
 
 
 def getcontext() -> Context:
-    """返回模块级上下文（默认 prec=28, ROUND_HALF_EVEN）。"""
+    """返回当前上下文（默认 prec=28, ROUND_HALF_EVEN）。"""
     return _context
+
+
+def setcontext(ctx: Context) -> None:
+    """替换当前上下文（CPython 同口径：之后所有运算用新的 prec/rounding）。"""
+    global _context
+    _context = ctx
+
+
+class _LocalContext:
+    """localcontext() 的上下文管理器：进入时换上下文，退出时还原。
+
+    异常路径也要还原（__exit__ 无条件执行），否则一次异常会把模块级上下文
+    永久改掉。返回值 False 表示异常继续向上抛。
+    """
+
+    _saved: Context
+    _current: Context
+
+    def __init__(self, current: Context) -> None:
+        self._saved = Context()
+        self._current = current
+
+    def __enter__(self) -> Context:
+        global _context
+        self._saved = _context
+        _context = self._current
+        return _context
+
+    def __exit__(self, exc_type: unknown, exc: unknown, tb: unknown) -> bool:
+        global _context
+        _context = self._saved
+        return False
+
+
+def localcontext(ctx: unknown = 0) -> _LocalContext:
+    """临时上下文：`with localcontext() as c:` 用当前上下文的副本，
+    或在里面改 `c.prec`；`with localcontext(Context(5)):` 用给定上下文。
+    """
+    # 形参静态是 unknown，unknown 上既不能调用户方法也不能读属性（codegen
+    # 限制），所以显式传进来的 Context 直接沿用（CPython 会复制一份，这里有
+    # 细微差异：在 with 里改字段会改到调用方的对象）；无参时才复制当前上下文
+    # —— 那份必须复制，否则 with 里的修改会漏回外层。
+    if isinstance(ctx, Context):
+        return _LocalContext(ctx)
+    return _LocalContext(_context.copy())
 
 
 # ── big 上的整数工具 ──────────────────────────────────────────────
@@ -517,6 +572,16 @@ class Decimal:
             self._copy_from(value)
         else:
             self._parse(str(value))
+        # context 参数：CPython 3.14 实测对 str/int/big/Decimal 都不做精度
+        # 舍入（连 Decimal(float, ctx) 也不按 prec 舍），所以这里只接受、
+        # 不舍入；真正按上下文舍入的入口是 Context.create_decimal。
+        # 保留这个形参是为了签名兼容（Decimal(v, ctx) 到处都在用）。
+
+    def _apply_context(self, ctx: Context) -> None:
+        """按给定上下文舍入到 prec 位有效数字。"""
+        self._sign, self._coeff, self._exp = _round_parts(
+            self._sign, self._coeff, self._exp, ctx.prec, ctx.rounding)
+
 
     def _copy_from(self, o: Decimal) -> None:
         """复制构造：三元组原样拷贝（不经过字符串，指数与尾随零都保住）。"""
