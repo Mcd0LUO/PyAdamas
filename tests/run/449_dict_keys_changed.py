@@ -31,4 +31,4 @@ print(out)
 # --- expect ---
 # RE dictionary keys changed during iteration
 # RE2 dictionary changed size during iteration
-# ax
+# a

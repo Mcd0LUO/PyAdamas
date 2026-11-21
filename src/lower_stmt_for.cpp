@@ -373,6 +373,11 @@ void Lowerer::lower_for_enumerate(For& f, Call& c) {
 
     Inst j;
     j.op = IrOp::Jump;
+    int ver_slot = -1;
+    if (sty->kind == TyKind::Dict) {
+        ver_slot = new_temp_slot(t_int());
+        store_slot(ver_slot, call_runtime(RtFn::DictVersion, t_int(), {seq_val()}));
+    }
     j.target = cond;
     emit(std::move(j));
 
@@ -405,6 +410,27 @@ void Lowerer::lower_for_enumerate(For& f, Call& c) {
                                  ? "dictionary changed size during iteration"
                                  : "Set changed size during iteration")});
         switch_to(ok_b);
+        if (sty->kind == TyKind::Dict && ver_slot >= 0) {
+            VReg cur_v = call_runtime(RtFn::DictVersion, t_int(), {seq_val()});
+            Inst ve;
+            ve.op = IrOp::Cmp;
+            ve.cop = CmpKind::Ne;
+            ve.a = cur_v;
+            ve.b = load_slot(ver_slot, t_int());
+            int kchanged = new_block("for.iter.keys");
+            int kok = new_block("for.iter.keys_ok");
+            Inst vbr;
+            vbr.op = IrOp::Branch;
+            vbr.a = def(t_bool(), std::move(ve));
+            vbr.target = kchanged;
+            vbr.target2 = kok;
+            emit(std::move(vbr));
+            switch_to(kchanged);
+            call_void(raise_rt(RtFn::Raise),
+                      {const_str("RuntimeError"),
+                       const_str("dictionary keys changed during iteration")});
+            switch_to(kok);
+        }
     }
     Inst cmp;
     cmp.op = IrOp::Cmp;
@@ -896,6 +922,11 @@ void Lowerer::lower_for_seq(For& f) {
 
     Inst j;
     j.op = IrOp::Jump;
+    int ver_slot = -1;
+    if (seq_ty->kind == TyKind::Dict) {
+        ver_slot = new_temp_slot(t_int());
+        store_slot(ver_slot, call_runtime(RtFn::DictVersion, t_int(), {seq_val()}));
+    }
     j.target = cond;
     emit(std::move(j));
 
@@ -930,6 +961,27 @@ void Lowerer::lower_for_seq(For& f) {
                                  ? "dictionary changed size during iteration"
                                  : "Set changed size during iteration")});
         switch_to(ok_b);
+        if (seq_ty->kind == TyKind::Dict && ver_slot >= 0) {
+            VReg cur_v = call_runtime(RtFn::DictVersion, t_int(), {seq_val()});
+            Inst ve;
+            ve.op = IrOp::Cmp;
+            ve.cop = CmpKind::Ne;
+            ve.a = cur_v;
+            ve.b = load_slot(ver_slot, t_int());
+            int kchanged = new_block("for.iter.keys");
+            int kok = new_block("for.iter.keys_ok");
+            Inst vbr;
+            vbr.op = IrOp::Branch;
+            vbr.a = def(t_bool(), std::move(ve));
+            vbr.target = kchanged;
+            vbr.target2 = kok;
+            emit(std::move(vbr));
+            switch_to(kchanged);
+            call_void(raise_rt(RtFn::Raise),
+                      {const_str("RuntimeError"),
+                       const_str("dictionary keys changed during iteration")});
+            switch_to(kok);
+        }
     }
     VReg iv = load_slot(idx, t_int());
     Inst cmp;
