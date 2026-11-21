@@ -132,9 +132,11 @@ inline constexpr ModuleEntry kModuleTable[] = {
     {"copy", ModuleKind::Python, "copy.py", ""},
     // P4 块4（lang_gaps）：@dataclass 编译期展开的运行期恒等装饰器。
     {"dataclasses", ModuleKind::Python, "dataclasses.py", ""},
+    // 定点十进制：big 精确整数内核，边界见 stdlib/decimal.py 模块头。
+    {"decimal", ModuleKind::Python, "decimal.py", ""},
     {"fnmatch", ModuleKind::Python, "fnmatch.py", "re"},
     {"enum", ModuleKind::Python, "enum.py", ""},
-    {"fractions", ModuleKind::Python, "fractions.py", "math"},
+    {"fractions", ModuleKind::Python, "fractions.py", ""},
     {"glob", ModuleKind::Python, "glob.py", "os,os.path"},
     {"gzip", ModuleKind::Python, "gzip.py", "zlib,_gzipio"},
     {"_gzipio", ModuleKind::Python, "_gzipio.py", ""},
