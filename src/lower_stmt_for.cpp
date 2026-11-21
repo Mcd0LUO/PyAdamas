@@ -378,6 +378,35 @@ void Lowerer::lower_for_enumerate(For& f, Call& c) {
     emit(std::move(j));
 
     switch_to(cond);
+    // 迭代期间容器大小变化 → 可捕获的 RuntimeError，且在「还有没有下一个」之前
+    // 检查：删空之后仍要在下一次取元素时报错，而不是被下标上界悄悄结束。
+    if (sty->kind == TyKind::Dict || sty->kind == TyKind::Set) {
+        Inst lc;
+        lc.op = IrOp::Len;
+        lc.a = seq_val();
+        VReg cur_len = def(t_int(), std::move(lc));
+        Inst ne;
+        ne.op = IrOp::Cmp;
+        ne.cop = CmpKind::Ne;
+        ne.a = cur_len;
+        ne.b = load_slot(n_slot, t_int());
+        VReg ne_cc = def(t_bool(), std::move(ne));
+        int raise_b = new_block("for.iter.changed");
+        int ok_b = new_block("for.iter.ok");
+        Inst br2;
+        br2.op = IrOp::Branch;
+        br2.a = ne_cc;
+        br2.target = raise_b;
+        br2.target2 = ok_b;
+        emit(std::move(br2));
+        switch_to(raise_b);
+        call_void(raise_rt(RtFn::Raise),
+                  {const_str("RuntimeError"),
+                   const_str(sty->kind == TyKind::Dict
+                                 ? "dictionary changed size during iteration"
+                                 : "Set changed size during iteration")});
+        switch_to(ok_b);
+    }
     Inst cmp;
     cmp.op = IrOp::Cmp;
     cmp.cop = CmpKind::Lt;
@@ -747,6 +776,37 @@ void Lowerer::lower_for_seq(For& f) {
     emit(std::move(j));
 
     switch_to(cond);
+    // 迭代期间容器大小变化 → CPython 抛**可捕获**的 RuntimeError，且在
+    // 「还有没有下一个」之前检查：删到空之后仍要在下一次取元素时报错，
+    // 而不是被下标上界悄悄结束。放在 cond 也顺带覆盖「删一个再加一个」
+    // （大小不变，越界检查发现不了）。
+    if (seq_ty->kind == TyKind::Dict || seq_ty->kind == TyKind::Set) {
+        Inst lc;
+        lc.op = IrOp::Len;
+        lc.a = seq_val();
+        VReg cur_len = def(t_int(), std::move(lc));
+        Inst ne;
+        ne.op = IrOp::Cmp;
+        ne.cop = CmpKind::Ne;
+        ne.a = cur_len;
+        ne.b = n_val();
+        VReg ne_cc = def(t_bool(), std::move(ne));
+        int changed = new_block("for.iter.changed");
+        int ok_b = new_block("for.iter.ok");
+        Inst brc;
+        brc.op = IrOp::Branch;
+        brc.a = ne_cc;
+        brc.target = changed;
+        brc.target2 = ok_b;
+        emit(std::move(brc));
+        switch_to(changed);
+        call_void(raise_rt(RtFn::Raise),
+                  {const_str("RuntimeError"),
+                   const_str(seq_ty->kind == TyKind::Dict
+                                 ? "dictionary changed size during iteration"
+                                 : "Set changed size during iteration")});
+        switch_to(ok_b);
+    }
     VReg iv = load_slot(idx, t_int());
     Inst cmp;
     cmp.op = IrOp::Cmp;
