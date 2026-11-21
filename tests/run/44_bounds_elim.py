@@ -13,10 +13,15 @@ def rebind(xs: list[int]) -> int:
     return s
 
 
+# 有界形态：只追加两次，仍能证明「迭代器看得见 append 的新元素」
+# （CPython 语义；无界形态见 238_for_iter_semantics.py 的反例说明）
 def grow(xs: list[int]) -> int:
     total = 0
+    i = 0
     for x in xs:
-        xs.append(x)
+        if i < 2:
+            xs.append(x)
+        i = i + 1
         total = total + x
     return total
 
@@ -26,8 +31,9 @@ def mutate(x: int, xs: list[int]) -> int:
     return x
 
 
+# 推导式对迭代源取快照（xs[:]），否则边迭代边 append 会无限增长
 def comp_call(xs: list[int]) -> int:
-    ys = [mutate(x, xs) for x in xs]
+    ys = [mutate(x, xs) for x in xs[:]]
     return len(ys)
 
 
@@ -56,7 +62,7 @@ print(len(sq), sq[0], sq[4])
 # --- expect ---
 # 6
 # 6
-# 6 6
+# 9 5
 # 3 6
 # 7.5 1.5 3.5
 # 6 1 3
