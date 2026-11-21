@@ -289,6 +289,30 @@ void TypeChecker::declare(const std::string& name, TypePtr ty, int line, int col
         if (is_unknown(sym.ty)) { sym.ty = ty; return; }
         // 空容器字面量重赋值：洞按已推出的类型填（否则建表种类退化）。
         if (ty && ty_contains_hole(ty, 0)) fill_holes_recursive(ty, sym.ty, 0);
+        // **float 与「非数值」互串要说清楚**：float 在槽里是裸 double，
+        // 而 str/list/dict 是堆指针。同一个未标注变量先存 float 再存堆值（或
+        // 反过来），槽要么按 double 读指针、要么按指针 dec double —— 实测打印
+        // 位模式、甚至段错误。int/float/big 之间互串没问题（会按槽类型转换），
+        // 这里只拦「一边 float、另一边不是数值」的情况，宁可报错也不静默算错。
+        if (sym.ty && ty) {
+            auto num = [](const TypePtr& t) {
+                return t->kind == TyKind::Int || t->kind == TyKind::Bool ||
+                       t->kind == TyKind::Float || t->kind == TyKind::Big ||
+                       t->kind == TyKind::I8 || t->kind == TyKind::I16 ||
+                       t->kind == TyKind::I32 || t->kind == TyKind::U8 ||
+                       t->kind == TyKind::U16 || t->kind == TyKind::U32 ||
+                       t->kind == TyKind::U64;
+            };
+            bool float_mix = (sym.ty->kind == TyKind::Float) != (ty->kind == TyKind::Float);
+            if (float_mix && !(num(sym.ty) && num(ty))) {
+                err(line, col,
+                    std::format("variable '{}' holds '{}', cannot rebind to '{}' "
+                                "(a slot cannot hold both a float and a non-numeric value; "
+                                "annotate the variable if the types are intentional)",
+                                name, type_name(sym.ty), type_name(ty)));
+                return;
+            }
+        }
         if (assignable(sym.ty, ty)) {
             // 来源 unknown 时不要死守旧类型：变量可能已经换了一种东西
             if (is_unknown(ty)) sym.ty = t_unknown();
