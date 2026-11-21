@@ -29,6 +29,23 @@ static PyAdamasBig* dict_big_key(int64_t v) {
     return h->kind == PYADAMAS_RC_BIGINT ? (PyAdamasBig*)(uintptr_t)v : NULL;
 }
 
+/* big 是否放得进 int64：放得进就返回数值（raw 键与同值 big 必须同哈希）。 */
+static int dict_big_fits_i64(const PyAdamasBig* b, int64_t* out) {
+    int64_t n = b->nd < 0 ? -b->nd : b->nd;
+    if (n == 0) { *out = 0; return 1; }
+    if (n > 2) return 0;
+    uint64_t v = 0;
+    for (int64_t i = n - 1; i >= 0; --i) v = (v << 32) | (uint64_t)(uint32_t)b->d[i];
+    if (b->nd < 0) {
+        if (v > 0x8000000000000000ull) return 0;
+        *out = (int64_t)(0ull - v);
+        return 1;
+    }
+    if (v > 0x7fffffffffffffffull) return 0;
+    *out = (int64_t)v;
+    return 1;
+}
+
 static uint64_t dict_big_hash(const PyAdamasBig* b) {
     // Normalized BigInts have a unique signed limb count and limb sequence.
     uint64_t h = 1469598103934665603ull ^ (uint64_t)b->nd;
@@ -69,7 +86,12 @@ int64_t dict_hash_value(int64_t kind, int64_t v) {
         h = mix64((uint64_t)v);
     } else if (kind == DICT_KEY_RAW_OR_BIG) {
         PyAdamasBig* b = dict_big_key(v);
-        h = b ? dict_big_hash(b) : mix64((uint64_t)v);
+        int64_t bv = 0;
+        /* 放得进 int64 的 big 用**和 raw 键相同的哈希**，否则 `d[5]` 找不到
+           `d[big(5)]` 写的那个槽（值相等、哈希不同）。 */
+        if (!b) h = mix64((uint64_t)v);
+        else if (dict_big_fits_i64(b, &bv)) h = mix64((uint64_t)bv);
+        else h = dict_big_hash(b);
     } else {
         h = mix64((uint64_t)v);
     }
@@ -99,8 +121,16 @@ int dict_key_eq(int64_t kind, int64_t a, int64_t b) {
     if (a == b) return 1;
     if (kind == DICT_KEY_RAW_OR_BIG) {
         PyAdamasBig* x = dict_big_key(a);
-        PyAdamasBig* y = x ? dict_big_key(b) : NULL;
-        return y && pa_big_eq(x, y);
+        PyAdamasBig* y = dict_big_key(b);
+        if (x && y) return pa_big_eq(x, y);
+        if (x || y) {
+            /* 一边 big 一边 raw：按数值比（与上面的哈希口径配套）。 */
+            PyAdamasBig* big = x ? x : y;
+            int64_t raw = x ? b : a;
+            int64_t bv = 0;
+            return dict_big_fits_i64(big, &bv) && bv == raw;
+        }
+        return 0;
     }
     return 0;
 }
