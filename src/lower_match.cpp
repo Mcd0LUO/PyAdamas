@@ -184,7 +184,14 @@ void Lowerer::lower_pattern(Pattern& p, VReg value, TypePtr ty, int fail, bool i
     auto match_equal = [&](ExprPtr& lit) {
         TypePtr lt = tc_.type_of(lit.get());
         if (lt && lt->kind == TyKind::None) {
-            if (st && st->kind != TyKind::None && st->kind != TyKind::Unknown) {
+            // 主体静态类型是 Optional[T] 时，None 是一个真实可能的值
+            // （上面已经把 T 剥进 st，Optional 标记留在 optional 里）。此时
+            // 必须真的比较 value == 0（pa 的 None 就是 0）；原来只看剥完的
+            // st（int），一律 jump_fail，于是 int|None 主体传 None 永远落到
+            // case _（实测 f(None) 返回 "other"）。非 Optional 的 int 主体
+            // 仍然不匹配 None（与 CPython 一致）。
+            if (st && st->kind != TyKind::None && st->kind != TyKind::Unknown &&
+                !optional) {
                 jump_fail();
                 return;
             }
