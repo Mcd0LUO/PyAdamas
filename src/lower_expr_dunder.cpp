@@ -388,6 +388,15 @@ VReg Lowerer::coerce(VReg v, TypePtr from, TypePtr to) {
         if (from->kind == TyKind::Big && to->kind == TyKind::Unknown) return v;
         return convert_to(v, from, to);
     }
+    // complex 不是机器字直通：int/float → complex 要构造 16 字节复数对象
+    // （pa_complex_new）。三元/if 赋值按 join 出来的 complex 落槽时若塞
+    // 裸整数，打印时会把 1 当复数指针解引用（实测 c=True 的
+    // 1 if c else 1j 直接段错误）。
+    // 只处理「目标是 complex」：int/float/bool → complex 要构造 16 字节
+    // 复数对象（pa_complex_new）。反过来 complex → unknown 必须保持机器字
+    // 直通（复数就是堆指针），走 convert_to 的通用 Convert 会把它当数值
+    // 转换，unknown 参数收到坏值（42_match_corners 的 case 3j 实测失效）。
+    if (to->kind == TyKind::Complex) return convert_to(v, from, to);
     // 元组/列表的元素类型转换不是机器字直通（见 convert_to 的重建分支）。
     if (from->kind == TyKind::Tuple && to->kind == TyKind::Tuple &&
         !to->variadic && !from->variadic && from->sub.size() == to->sub.size())

@@ -94,6 +94,13 @@ inline TypePtr join_into(const TypePtr& a, const TypePtr& b) {
         }
         return t_float();
     }
+    // 数值塔：int/float/bool/big 与 complex 合并 → complex（CPython 的
+    // int + complex、float + complex 都是 complex）。原来直接落到末尾的
+    // t_unknown()：三元表达式/if 赋值把复数值塞进 8 字节的 unknown 槽，
+    // 打印时按整数读复数的堆指针，输出 9xxxxx 这种地址（CPython 是 1j）。
+    if ((a->kind == TyKind::Complex && is_num(b)) ||
+        (b->kind == TyKind::Complex && is_num(a)))
+        return t_complex();
     if (a->kind == TyKind::List && b->kind == TyKind::List)
         return mk_list(join(a->sub[0], b->sub[0]));
     if (a->kind == TyKind::Range && b->kind == TyKind::Range)
