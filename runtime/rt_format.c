@@ -262,6 +262,74 @@ PyAdamasStr* pa_fmt_u64(uint64_t v, PyAdamasStr* spec) {
     return fmt_int_mag(v, sign, &f);
 }
 
+/* P3 big 的 format()：与 pa_fmt_i64 同一套说明符文法（d/b/o/x/X/n、
+ * 填充/对齐/符号/宽度/#/分组），量值部分是任意长十进制/进制串。
+ * 分组用 malloc 版（fmt_group_n 的 256 字节栈缓冲对大数会截断）。 */
+static char* big_group_alloc(const char* body, char sep, int group_size) {
+    size_t n = strlen(body);
+    size_t cap = n + (group_size > 0 ? n / (size_t)group_size : 0) + 2;
+    char* out = (char*)malloc(cap);
+    if (!out) panic_c("out of memory");
+    size_t j = 0;
+    for (size_t i = 0; i < n; ++i) {
+        size_t left = n - i;
+        out[j++] = body[i];
+        if (left > 1 && group_size > 0 && (left - 1) % (size_t)group_size == 0)
+            out[j++] = sep;
+    }
+    out[j] = '\0';
+    return out;
+}
+
+PyAdamasStr* pa_big_fmt(PyAdamasBig* v, PyAdamasStr* spec) {
+    PyAdamasFmt f;
+    fmt_parse(spec, &f, 0);
+    if (f.type && f.type != 'd' && f.type != 'b' && f.type != 'o' && f.type != 'x' &&
+        f.type != 'X' && f.type != 'n')
+        pa_raise_c("ValueError", "Invalid format specifier for int");
+    if (f.prec >= 0)
+        pa_raise_c("ValueError", "Precision not allowed in integer format specifier");
+    bool radix = f.type == 'b' || f.type == 'o' || f.type == 'x' || f.type == 'X';
+    if (f.grouping && (f.type == 'n' || (radix && f.group_char == ',')))
+        pa_raise_c("ValueError", "Invalid grouping for integer format specifier");
+    char sign = 0;
+    if (v->nd < 0) sign = '-';
+    else if (f.sign == '+') sign = '+';
+    else if (f.sign == ' ') sign = ' ';
+    int base = f.type == 'b' ? 2 : f.type == 'o' ? 8
+             : (f.type == 'x' || f.type == 'X') ? 16 : 10;
+    PyAdamasBig* mag = pa_big_abs(v);
+    pa_gc_pin(mag);
+    PyAdamasStr* ds = base == 10 ? pa_big_str(mag) : pa_big_to_base(mag, base);
+    pa_gc_unpin(mag);
+    pa_rc_dec(mag);
+    /* 进制串带 0x/0o/0b 前缀：剥掉（前缀由 # 交替形式单独管）。 */
+    const char* d = ds->data;
+    int64_t dn = ds->len;
+    if (base != 10 && dn >= 2 && d[0] == '0') { d += 2; dn -= 2; }
+    char* body0 = (char*)malloc((size_t)dn + 1);
+    if (!body0) panic_c("out of memory");
+    PA_FREE_SCOPE(body0);
+    memcpy(body0, d, (size_t)dn);
+    body0[dn] = '\0';
+    pa_rc_dec(ds);
+    if (f.type == 'X')
+        for (char* p = body0; *p; ++p)
+            if (*p >= 'a' && *p <= 'f') *p = (char)(*p - 'a' + 'A');
+    // Validate before allocation: pa_raise_c uses longjmp, not C cleanup.
+    char* grp = f.grouping ? big_group_alloc(body0, f.group_char, base == 10 ? 3 : 4) : NULL;
+    PA_FREE_SCOPE(grp);
+    const char* body = grp ? grp : body0;
+    const char* prefix = NULL;
+    if (f.alternate) {
+        if (f.type == 'b') prefix = "0b";
+        else if (f.type == 'o') prefix = "0o";
+        else if (f.type == 'x') prefix = "0x";
+        else if (f.type == 'X') prefix = "0X";
+    }
+    return fmt_pad_parts(sign ? &sign : NULL, prefix, body, &f);
+}
+
 PyAdamasStr* pa_fmt_bool(int64_t v, PyAdamasStr* spec) {
     PyAdamasFmt f;
     fmt_parse(spec, &f, 0);
@@ -634,6 +702,7 @@ int64_t pa_truth_unknown(int64_t v) {
         case PYADAMAS_RC_STR: return ((PyAdamasStr*)(uintptr_t)v)->len > 0 ? 1 : 0;
         case PYADAMAS_RC_LIST: return ((PyAdamasList*)(uintptr_t)v)->len > 0 ? 1 : 0;
         case PYADAMAS_RC_DICT: return ((PyAdamasDict*)(uintptr_t)v)->len > 0 ? 1 : 0;
+        case PYADAMAS_RC_BIGINT: return pa_big_truth((PyAdamasBig*)(uintptr_t)v);
         case PYADAMAS_RC_CPYFLOAT: {
             double d;
             memcpy(&d, (void*)(uintptr_t)v, sizeof d);
@@ -652,6 +721,10 @@ void pa_print_any_repr(int64_t v) {
             PyAdamasStr* r = pa_repr_str((PyAdamasStr*)(uintptr_t)v);
             pa_print_str(r);
             pa_rc_dec(r);
+            return;
+        }
+        if (h->kind == PYADAMAS_RC_BIGINT) {
+            pa_print_any(v);
             return;
         }
         if (h->kind == PYADAMAS_RC_CPYFLOAT || h->kind == PYADAMAS_RC_LIST ||

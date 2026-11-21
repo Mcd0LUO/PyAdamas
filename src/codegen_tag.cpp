@@ -95,34 +95,42 @@ int64_t AsmGen::any_reuse_ok(const Inst& in) {
 }
 
 void AsmGen::gen_any_tagged(const Inst& in, RtFn fn) {
-    if (fn == RtFn::AnyArith || fn == RtFn::AnyCmp) {
+    if (fn == RtFn::AnyArith || fn == RtFn::AnyCmp || fn == RtFn::AnyBigBinary) {
         // IR: {op, a, b, desc_a, desc_b} → C: (op, a, tag_a, b, tag_b[, reuse])
+        auto arg_tag = [&](VReg v) {
+            TypePtr t = ty_of(v);
+            if (fn == RtFn::AnyBigBinary && t) {
+                if (t->kind == TyKind::U64) return std::string("$-1");
+                if (is_fixed_int(t)) return std::string("$1");
+            }
+            return tag_src(v);
+        };
         emit_arg(0, false, 0, src_mop(in.args[0]));
         emit_arg(1, false, 1, src_mop(in.args[1]));
-        emit_arg(2, false, 2, tag_src(in.args[1]));
+        emit_arg(2, false, 2, arg_tag(in.args[1]));
         emit_arg(3, false, 3, src_mop(in.args[2]));
-        emit_arg(4, false, 4, tag_src(in.args[2]));
+        emit_arg(4, false, 4, arg_tag(in.args[2]));
         if (fn == RtFn::AnyArith)
             emit_imm_op("movq", any_reuse_ok(in), arg_reg_i(5));
         spill_fp_slots();
         line(std::format("call {}", fn == RtFn::AnyArith ? "pa_any_arith_t"
-                                                         : "pa_any_cmp_t"));
+                          : fn == RtFn::AnyCmp ? "pa_any_cmp_t" : "pa_any_big_binary_t"));
         reload_fp_slots();
         if (!dst_unused(in)) {
             emit2("movq", "%rax", dst_op(in.dst));
             // AnyArithT 双字返回：%rdx=tag 落 tag 字；AnyCmpT 返回 bool。
-            if (fn == RtFn::AnyArith && vreg_tagged(in.dst))
+            if (fn != RtFn::AnyCmp && vreg_tagged(in.dst))
                 emit2("movq", "%rdx", tag_mem(in.dst));
         }
         return;
     }
-    if (fn == RtFn::AnyNeg) {
+    if (fn == RtFn::AnyNeg || fn == RtFn::AnyInvert) {
         // IR: {a, desc} → C: (a, tag_a, reuse_ok)
         emit_arg(0, false, 0, src_mop(in.args[0]));
         emit_arg(1, false, 1, tag_src(in.args[0]));
-        emit_imm_op("movq", any_reuse_ok(in), arg_reg_i(2));
+        if (fn == RtFn::AnyNeg) emit_imm_op("movq", any_reuse_ok(in), arg_reg_i(2));
         spill_fp_slots();
-        line("call pa_any_neg_t");
+        line(fn == RtFn::AnyNeg ? "call pa_any_neg_t" : "call pa_any_invert_t");
         reload_fp_slots();
         if (!dst_unused(in)) {
             emit2("movq", "%rax", dst_op(in.dst));

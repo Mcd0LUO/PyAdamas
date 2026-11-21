@@ -201,6 +201,10 @@ VReg Lowerer::lower_builtin_seq(const std::string& name, Call& c) {
         for (auto& kw : c.keywords)
             if (kw.arg == "key") key_expr = kw.value.get();
 
+        if (name == "sorted" && !key_expr && has_big_value(se)) {
+            err(c.line, c.col, "sorting big values is not supported");
+            return const_none();
+        }
         VReg l;
         if (key_expr) {
             TypePtr kt0 = tc_.type_of(key_expr);
@@ -242,6 +246,10 @@ VReg Lowerer::lower_builtin_seq(const std::string& name, Call& c) {
                         static_cast<const Name&>(*ret.value).id == kt0->fn->pos[0].name)
                         kret = se;
                 }
+            }
+            if (has_big_value(kret)) {
+                err(c.line, c.col, "sorting big keys is not supported");
+                return const_none();
             }
             TypePtr pty = kt0->fn->pos.empty() ? t_unknown() : kt0->fn->pos[0].ty;
 

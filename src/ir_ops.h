@@ -154,6 +154,9 @@ enum class IrOp : uint8_t {
     Jump,    // -> target
     Branch,  // a ? target : target2
     Return,  // return a（a == kNoReg 表示 None）
+
+    // ── P3 big ──────────────────────────────────────────────
+    ConstBig, // dst = bigs[idx]（永生 BigInt 静态对象，十进制串编译期转 limb）
 };
 
 inline const char* irop_name(IrOp op) {
@@ -162,6 +165,7 @@ inline const char* irop_name(IrOp op) {
         case IrOp::ConstFloat: return "const.float";
         case IrOp::ConstStr: return "const.str";
         case IrOp::ConstNone: return "const.none";
+        case IrOp::ConstBig: return "const.big";
         case IrOp::FuncAddr: return "func.addr";
         case IrOp::FuncCode: return "func.code";
         case IrOp::Mov: return "mov";

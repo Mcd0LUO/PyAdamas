@@ -1319,6 +1319,12 @@ void pa_print_any(int64_t v) {
             pa_print_str((PyAdamasStr*)(uintptr_t)v);
             return;
         }
+        if (h->kind == PYADAMAS_RC_BIGINT) {
+            PyAdamasStr* s = pa_big_str((PyAdamasBig*)(uintptr_t)v);
+            pa_print_str(s);
+            pa_rc_dec(s);
+            return;
+        }
         if (h->kind == PYADAMAS_RC_CPYFLOAT || h->kind == PYADAMAS_RC_LIST ||
             h->kind == PYADAMAS_RC_DICT) {
             pa_print_cpy_value(v);

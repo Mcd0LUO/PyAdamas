@@ -21,6 +21,7 @@ bool AsmGen::temp_reg_op_ok(const Inst& in) const {
             case IrOp::ConstFloat:
             case IrOp::ConstStr:
             case IrOp::ConstNone:
+            case IrOp::ConstBig:
             case IrOp::FuncAddr:
             case IrOp::FuncCode:
             case IrOp::Mov:

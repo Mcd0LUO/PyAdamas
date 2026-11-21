@@ -313,7 +313,7 @@ StmtPtr Parser::parse_simple_statement() {
             n->target = std::move(first);
             check_assignable(*n->target);
             advance();
-            n->annotation = parse_namedexpr();
+            n->annotation = parse_annotation_expr();
             if (match(Tok::EQUAL)) n->value = parse_expr_list();
             return n;
         }

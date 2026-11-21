@@ -36,6 +36,7 @@ struct LowerOptions {
     // 运行期类型标签（PYADAMAS_TYPE_TAGS，默认 0 关）：isinstance/repr 的
     // unknown 分支改发带 tag 的运行期入口（docs/numeric-types-design.md §2）。
     bool type_tags = false;
+    bool needs_dynamic_big = false;
     // P4 语言缺口（PYADAMAS_LANG_GAPS，默认关）：异常类当值（ClassObj 单例 +
     // CLASS tag）、file 协议泛化、traceback、dataclass 编译期展开。
     // 开启时驱动已强制 type_tags=true（docs/numeric-types-design.md §3/§4）。

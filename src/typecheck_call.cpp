@@ -14,6 +14,7 @@ TypePtr literal_type(const LiteralValue& lit) {
         case LiteralValue::Kind::Float: return t_float();
         case LiteralValue::Kind::Str: return t_str();
         case LiteralValue::Kind::Bytes: return t_bytes();
+        case LiteralValue::Kind::Big: return t_big();
     }
     return t_unknown();
 }
@@ -232,7 +233,8 @@ TypePtr TypeChecker::check_args(const FuncInfoPtr& fn, Call& c) {
             }
             // 定宽形参 + 字面量实参：范围内隐式 coerce（超范围在此报错）。
             // 非字面量 int 实参窄化到定宽形参仍然要求显式 cast。
-            if (arg_expr && is_fixed_int(p.ty) && accept_literal_into(p.ty, arg_expr))
+            if (arg_expr && (is_fixed_int(p.ty) || p.ty->kind == TyKind::Big) &&
+                accept_literal_into(p.ty, arg_expr))
                 return;
             // 定宽元素容器形参 + 字面量容器实参：逐元素 coerce（同口径）。
             if (arg_expr && coerce_container_literal(p.ty, arg_expr))
@@ -472,7 +474,7 @@ bool TypeChecker::is_builtin_callable(const std::string& n) {
             // 定宽整数显式转换（P1）：cast_i8/.../cast_u64。宽→窄的唯一
             // 隐式途径之外的手段；语义是 C 式截断 + 回绕（见设计 §1.2/§1.3）。
             "cast_i8", "cast_i16", "cast_i32", "cast_i64", "cast_int",
-            "cast_u8", "cast_u16", "cast_u32", "cast_u64",
+            "cast_u8", "cast_u16", "cast_u32", "cast_u64", "cast_big",
         };
         return names.count(n) > 0;
     }

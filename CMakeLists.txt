@@ -117,6 +117,7 @@ src/opt_intloop.cpp
   src/codegen_comment.cpp
   src/codegen_ops.cpp
   src/codegen_int_fixed.cpp
+  src/codegen_big.cpp
   src/codegen_call.cpp
   src/codegen_call_abi.cpp
   src/codegen_cffi.cpp
@@ -128,6 +129,7 @@ src/opt_intloop.cpp
   src/codegen_simd_nbody_pair.cpp
 src/codegen_vect.cpp
   src/codegen_call_rt.cpp
+  src/codegen_inline_containers.cpp
   src/mach_emit.cpp
   src/ir.cpp
   src/desugar.cpp
@@ -155,7 +157,7 @@ else()
   set(PYADAMAS_RT_WERROR "")
 endif()
 
-set(PYADAMAS_RT_PARTS core exc eh gen async task fd agen str list dict slice class math complex format file random os subprocess time stdlib json re functools datetime deque hash debug personality diag cpy cffi vthread any lang)
+set(PYADAMAS_RT_PARTS core exc eh gen async task fd agen str list dict slice class math complex format file random os subprocess time stdlib json re functools datetime deque hash debug personality diag cpy cffi vthread any lang big)
 # add_custom_command 不会自动继承 CMAKE_<LANG>_COMPILER_LAUNCHER；
 # 手动把 ccache 之类的 launcher 接到运行时编译上（未设置时展开为空，行为不变）。
 set(PYADAMAS_RT_LAUNCHER "")

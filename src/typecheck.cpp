@@ -313,6 +313,8 @@ TypePtr TypeChecker::parse_annotation_impl(Expr* e, int line, int depth) {
             if (id == "u32" || id == "uint") return t_u32();
             if (id == "u64" || id == "ulong") return t_u64();
             if (id == "float") return t_float();
+            // P3：big 任意精度整数（docs/numeric-types-design.md §1/§4）。
+            if (id == "big") return t_big();
             if (id == "str") return t_str();
             if (id == "bytes") return t_bytes();
             if (id == "file") return t_file();
@@ -877,6 +879,11 @@ std::optional<LiteralValue> literal_of_expr(const Expr* e) {
             inner->f = -inner->f;
             return inner;
         }
+        if (inner->kind == LiteralValue::Kind::Big) {
+            if (!inner->s.empty() && inner->s[0] == '-') inner->s.erase(0, 1);
+            else inner->s.insert(inner->s.begin(), '-');
+            return inner;
+        }
         return std::nullopt;
     }
     if (e->kind != ExprKind::Constant) return std::nullopt;
@@ -905,6 +912,10 @@ std::optional<LiteralValue> literal_of_expr(const Expr* e) {
             v.kind = LiteralValue::Kind::Bytes;
             v.s = c.s;
             break;
+        case Constant::CK::Big:
+            v.kind = LiteralValue::Kind::Big;
+            v.s = c.s;
+            break;
         default: return std::nullopt;
     }
     return v;
@@ -918,7 +929,18 @@ FuncInfoPtr TypeChecker::build_sig(FunctionDef& f) {
         size_t ndef = a.defaults.size();
 
         // 默认参数只收字面量；接口序列化需要不依赖 AST 的表示。
-        auto literal_of = literal_of_expr;
+        auto literal_of = [](const Expr* value, const TypePtr& ty) {
+            if (ty && ty->kind == TyKind::Big && value && value->kind == ExprKind::Constant) {
+                const auto& c = static_cast<const Constant&>(*value);
+                if (c.ck == Constant::CK::Int && c.u64_lit) {
+                    LiteralValue lit;
+                    lit.kind = LiteralValue::Kind::Big;
+                    lit.s = std::to_string(static_cast<uint64_t>(c.i));
+                    return std::optional<LiteralValue>(std::move(lit));
+                }
+            }
+            return literal_of_expr(value);
+        };
 
         // 默认值只作用于「最后 ndef 个位置参数」，与位置参数前缀无关
         auto add_pos = [&](Arg& arg, bool posonly) {
@@ -933,7 +955,7 @@ FuncInfoPtr TypeChecker::build_sig(FunctionDef& f) {
                 size_t di = idx - (total_pos - ndef);
                 if (di < a.defaults.size()) {
                     p.default_expr = a.defaults[di].get();
-                    p.default_lit = literal_of(p.default_expr);
+                    p.default_lit = literal_of(p.default_expr, p.ty);
                 }
             }
             info->pos.push_back(std::move(p));
@@ -951,7 +973,7 @@ FuncInfoPtr TypeChecker::build_sig(FunctionDef& f) {
             p.kwonly = true;
             if (i < a.kw_defaults.size()) {
                 p.default_expr = a.kw_defaults[i].get();
-                p.default_lit = literal_of(p.default_expr);
+                p.default_lit = literal_of(p.default_expr, p.ty);
             }
             info->kwonly.push_back(std::move(p));
         }

@@ -80,6 +80,8 @@ enum class TyKind : uint8_t {
     DYLIB,         // dylib.load() 的动态库句柄；机器表示是 dlopen 返回的整数地址
     VThread,      // go f(args) 返回的虚拟线程 handle（vthread 先验）
     Chan,         // make_chan(T, cap) 通道；sub[0] 是元素类型
+    // ── P3（docs/numeric-types-design.md §1/§4）──追加在尾部，既有编号不动。
+    Big,          // big：任意精度整数，BigInt 堆对象（rt_big.c），BIG tag=12
 };
 
 struct Type;
@@ -96,7 +98,7 @@ using ModuleLookup = std::function<ModuleInfoPtr(const std::string&)>;
 // 默认参数的可序列化字面量。跨模块接口不能带 AST 指针，
 // 只能保留这种最小的常量表示。
 struct LiteralValue {
-    enum class Kind : uint8_t { None, Bool, Int, Float, Str, Bytes } kind = Kind::None;
+    enum class Kind : uint8_t { None, Bool, Int, Float, Str, Bytes, Big } kind = Kind::None;
     bool b = false;
     int64_t i = 0;
     // Kind::Int 且来自 u64 范围十进制字面量（>INT64_MAX）：i 是无符号位
@@ -622,6 +624,8 @@ inline const TypePtr& t_u64() {
     static TypePtr v = new_ty(TyKind::U64);
     return v;
 }
+// P3 big 单例（t_big 定义在后面，先前向声明）。
+inline const TypePtr& t_big();
 // 显式转换函数名（cast_i8 / cast_u8 / ...）→ 目标类型。不是 cast 名返回 nullptr。
 inline TypePtr cast_target_of(std::string_view n) {
     if (n == "cast_i8") return t_i8();
@@ -632,6 +636,8 @@ inline TypePtr cast_target_of(std::string_view n) {
     if (n == "cast_u16") return t_u16();
     if (n == "cast_u32") return t_u32();
     if (n == "cast_u64") return t_u64();
+    // P3：cast_big（int/定宽/bool/float/str → big）。
+    if (n == "cast_big") return t_big();
     return nullptr;
 }
 
@@ -651,6 +657,11 @@ inline TypePtr int_ty_of(TyKind k) {
 }
 inline const TypePtr& t_float() {
     static TypePtr v = new_ty(TyKind::Float);
+    return v;
+}
+// P3：big 单例（与定宽单例同口径，type_eq 走指针等值）。
+inline const TypePtr& t_big() {
+    static TypePtr v = new_ty(TyKind::Big);
     return v;
 }
 inline const TypePtr& t_complex() {

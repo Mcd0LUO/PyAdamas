@@ -12,6 +12,11 @@ void Lowerer::lower_aug_assign(AugAssign& a) {
     VReg rhs = expr(*a.value);
     TypePtr rhs_t = tc_.type_of(a.value.get());
     TypePtr ty = tc_.type_of(a.target.get());
+    if (ty && ty->kind == TyKind::Big) {
+        VReg out = lower_big_binary(cur_v, cur_t, rhs, rhs_t, aug_to_bin(a.op), a.line, a.col);
+        assign_to(*a.target, out, vreg_ty(out));
+        return;
+    }
     if (ty && ty->kind == TyKind::Float) {
         if (!ir_is_float(cur_t)) cur_v = convert_to(cur_v, cur_t, t_float());
         if (!ir_is_float(rhs_t)) rhs = convert_to(rhs, rhs_t, t_float());
@@ -91,6 +96,13 @@ void Lowerer::lower_aug_assign(AugAssign& a) {
         // 原地操作没有新值；目标已就地更新，不需要再赋值。
         ++side_effect_seq_;
         return;
+    }
+    if (opts_.needs_dynamic_big && is_unknown(ty)) {
+        VReg out = lower_any_big_binary(cur_v, rhs, aug_to_bin(a.op));
+        if (out != kNoReg) {
+            assign_to(*a.target, out, t_unknown());
+            return;
+        }
     }
     Inst in;
     in.op = IrOp::Bin;

@@ -324,7 +324,7 @@ VReg Lowerer::build_lru_wrapper(const std::string& base, VReg fnv, TypePtr fty,
             int cs = new_temp_slot(next_ty);
             switch_to(miss);
             VReg nd = call_runtime(RtFn::DictNew, next_ty,
-                                   {const_int(key_kind(next_kt)),
+                                   {const_int(hash_key_kind(next_kt)),
                                     const_int(own_kind(next_kt)), const_int(2),
                                     const_int(-1), const_int(-1)});
             push_temp(nd);
@@ -388,7 +388,7 @@ VReg Lowerer::build_lru_wrapper(const std::string& base, VReg fnv, TypePtr fty,
 
     TypePtr t0 = fn_param_ty(fn, 0);
     VReg root = call_runtime(RtFn::DictNew, root_ty,
-                             {const_int(key_kind(t0)), const_int(own_kind(t0)),
+                             {const_int(hash_key_kind(t0)), const_int(own_kind(t0)),
                               const_int(2), const_int(-1), const_int(-1)});
     push_temp(root);
     Inst fc;

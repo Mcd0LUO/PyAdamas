@@ -134,7 +134,7 @@ void Lowerer::stmt(Stmt& s) {
             pending_queue_ty_ = nullptr;
             pending_ctor_ty_ = nullptr;
             comp_ctx_node_ = nullptr;
-            assign_to(*a.target, v, want ? want : vt);
+            assign_to(*a.target, v, want && want->kind != TyKind::Big ? want : vt);
             break;
         }
         case StmtKind::Return: {

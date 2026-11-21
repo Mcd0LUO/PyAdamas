@@ -19,6 +19,24 @@ uint64_t mix64(uint64_t x) {
     return x;
 }
 
+enum { DICT_KEY_RAW_OR_BIG = 9 };
+
+static PyAdamasBig* dict_big_key(int64_t v) {
+    // Only read a header after a successful probe. Kind 9 is emitted only
+    // with the live index kept on, including for immortal BigInt literals.
+    if (!pa_unknown_is_heap(v)) return NULL;
+    PyAdamasRc* h = (PyAdamasRc*)(uintptr_t)((uint64_t)v - PYADAMAS_RC_HDR);
+    return h->kind == PYADAMAS_RC_BIGINT ? (PyAdamasBig*)(uintptr_t)v : NULL;
+}
+
+static uint64_t dict_big_hash(const PyAdamasBig* b) {
+    // Normalized BigInts have a unique signed limb count and limb sequence.
+    uint64_t h = 1469598103934665603ull ^ (uint64_t)b->nd;
+    int64_t n = b->nd < 0 ? -b->nd : b->nd;
+    for (int64_t i = 0; i < n; ++i) h = (h ^ b->d[i]) * 1099511628211ull;
+    return mix64(h);
+}
+
 int64_t dict_hash_value(int64_t kind, int64_t v) {
     uint64_t h;
     if (kind == 1) {
@@ -49,6 +67,9 @@ int64_t dict_hash_value(int64_t kind, int64_t v) {
         memcpy(&d, &v, sizeof d);
         if (d == 0.0) v = 0;  /* 0.0 与 -0.0 同槽 */
         h = mix64((uint64_t)v);
+    } else if (kind == DICT_KEY_RAW_OR_BIG) {
+        PyAdamasBig* b = dict_big_key(v);
+        h = b ? dict_big_hash(b) : mix64((uint64_t)v);
     } else {
         h = mix64((uint64_t)v);
     }
@@ -75,7 +96,13 @@ int dict_key_eq(int64_t kind, int64_t a, int64_t b) {
         memcpy(&y, &b, sizeof y);
         return x == y;
     }
-    return a == b;
+    if (a == b) return 1;
+    if (kind == DICT_KEY_RAW_OR_BIG) {
+        PyAdamasBig* x = dict_big_key(a);
+        PyAdamasBig* y = x ? dict_big_key(b) : NULL;
+        return y && pa_big_eq(x, y);
+    }
+    return 0;
 }
 
 /* 类 key：__hash__ / __eq__ 的 vtable 槽在编译期分配好，槽里是生成的
@@ -264,7 +291,8 @@ void dict_gc_release(void* p) {
 
 PyAdamasDict* pa_dict_new(int64_t key_kind, int64_t key_own, int64_t val_own,
                         int64_t hash_slot, int64_t eq_slot) {
-    if (key_kind < 0 || key_kind > 3) panic_c("invalid dict key kind");
+    if ((key_kind < 0 || key_kind > 3) && key_kind != DICT_KEY_RAW_OR_BIG)
+        panic_c("invalid dict key kind");
     if (key_own < 0 || key_own > 2 || val_own < 0 || val_own > 2)
         panic_c("invalid dict ownership kind");
     PyAdamasDict* d =

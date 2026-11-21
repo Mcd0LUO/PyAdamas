@@ -47,6 +47,7 @@ struct Operand {
         Extern,     // 外部符号号（CallExtern/LoadExtern/StoreExtern）
         Block,      // 基本块号（跳转目标，仅 target/target2 用）
         Field,      // 字段下标（FieldLoad/FieldStore）
+        Big,        // big 字面量池下标（ConstBig，P3）
     };
     Kind kind = None;
     int32_t value = -1;
@@ -68,6 +69,7 @@ struct Operand {
     static Operand ext(int32_t v) { return {Extern, v}; }
     static Operand block(int32_t v) { return {Block, v}; }
     static Operand field(int32_t v) { return {Field, v}; }
+    static Operand big(int32_t v) { return {Big, v}; }
 };
 
 }  // namespace pyadamas
@@ -425,6 +427,15 @@ struct IRModule {
         return n;
     }
 
+    // P3 big 字面量：十进制串（可带负号），按内容去重。
+    std::vector<std::string> bigs;
+    int intern_big(const std::string& s) {
+        for (size_t i = 0; i < bigs.size(); ++i)
+            if (bigs[i] == s) return static_cast<int>(i);
+        bigs.push_back(s);
+        return static_cast<int>(bigs.size()) - 1;
+    }
+
     int intern_string(const std::string& s) { return intern_lit(s, false); }
 
     int intern_bytes(const std::string& s) { return intern_lit(s, true); }
@@ -526,6 +537,7 @@ inline bool ir_is_heap(const TypePtr& t) {
         case TyKind::Struct:
         case TyKind::VThread:
         case TyKind::Chan:
+        case TyKind::Big:   // P3：BigInt 堆对象（RC 管理，BIG tag=12）
             return true;
         case TyKind::Optional:
             return !t->sub.empty() && ir_is_heap(t->sub[0]);
@@ -579,6 +591,7 @@ inline bool ir_is_ref(const TypePtr& t) {
         case TyKind::Deque:
         case TyKind::VThread:
         case TyKind::Chan:
+        case TyKind::Big:   // P3：按地址传递（BigInt 堆指针）
             return true;
         default:
             return false;

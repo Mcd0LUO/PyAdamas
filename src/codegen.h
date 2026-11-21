@@ -20,6 +20,6 @@ std::string generate_asm(const IRModule& m, bool disable_unknown_index = false,
                          bool rc_split = false, bool ra_graph = false,
                          bool simd = false, bool ra_opt = false,
                          bool inline_opt = false, bool type_tags = false,
-                         bool vect = false);
+                         bool vect = false, bool needs_dynamic_big = false);
 
 }  // namespace pyadamas

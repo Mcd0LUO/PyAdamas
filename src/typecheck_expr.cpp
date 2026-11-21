@@ -53,6 +53,7 @@ TypePtr TypeChecker::expr(Expr& e) {
                         // 收尾检查未被 u64 上下文消费的照旧报 too large。
                         if (c.u64_lit) note_u64_literal(&e);
                         return t_int();
+                    case Constant::CK::Big: return t_big();   // P3：超 u64 字面量
                     case Constant::CK::Float: return t_float();
                     case Constant::CK::Complex: return t_complex();
                     case Constant::CK::Str: return t_str();
@@ -158,8 +159,12 @@ TypePtr TypeChecker::expr(Expr& e) {
             case ExprKind::Set: {
                 auto& s = static_cast<SetExpr&>(e);
                 if (s.elts.empty()) return mk_set(fresh_hole());
-                TypePtr acc = expr(*s.elts[0]);
-                for (size_t i = 1; i < s.elts.size(); ++i) acc = join(acc, expr(*s.elts[i]));
+                TypePtr acc;
+                for (auto& el : s.elts) {
+                    TypePtr et = expr(*el);
+                    if (has_big_value(et)) err(el->line, el->col, "big dictionary/set keys are not supported");
+                    acc = acc ? join(acc, et) : et;
+                }
                 return mk_set(acc);
             }
             case ExprKind::Dict: {
@@ -169,6 +174,8 @@ TypePtr TypeChecker::expr(Expr& e) {
                 for (size_t i = 0; i < d.keys.size(); ++i) {
                     if (d.keys[i]) {
                         auto k = expr(*d.keys[i]);
+                        if (has_big_value(k)) err(d.keys[i]->line, d.keys[i]->col,
+                                                  "big dictionary/set keys are not supported");
                         kt = kt ? join(kt, k) : k;
                     }
                     auto v = expr(*d.values[i]);
@@ -223,6 +230,7 @@ TypePtr TypeChecker::expr(Expr& e) {
                         }
                         if (u.op == Tok::TILDE) {
                             if (is_fixed_int(t)) return t;  // 定宽保持宽度/符号
+                            if (t && t->kind == TyKind::Big) return t;   // P3：~big
                             if (is_unknown(t) || is_int_like(t)) return t_int();
                             err(u.line, u.col, "bad operand type for '~': expected int");
                             return t_unknown();
@@ -241,10 +249,15 @@ TypePtr TypeChecker::expr(Expr& e) {
             case ExprKind::BoolOp: {
                 auto& b = static_cast<BoolOp&>(e);
                 TypePtr acc = nullptr;
+                bool has_big = false, has_other = false;
                 for (auto& v : b.values) {
                     auto t = expr(*v);
+                    has_big |= t->kind == TyKind::Big;
+                    has_other |= t->kind != TyKind::Big;
                     acc = acc ? join(acc, t) : t;
                 }
+                // and/or 保留被选中的值；不能把标量当成 big 指针。
+                if (has_big && has_other) return t_unknown();
                 return acc ? acc : t_unknown();
             }
             case ExprKind::Compare: {
@@ -671,6 +684,12 @@ bool TypeChecker::dunder_cmp_ok(CmpOp op, TypePtr l, TypePtr r) {
 }
 
 TypePtr TypeChecker::binop_type(Tok op, TypePtr l, TypePtr r, int line, int col) {
+        // unknown 计数可能不是整数，不能走机器字移位或一般的 big 转换。
+        if ((op == Tok::LSHIFT || op == Tok::RSHIFT) && l && l->kind == TyKind::Big &&
+            is_unknown(r)) {
+            err(line, col, "big shift requires a statically typed integer count; use cast_big(count)");
+            return t_unknown();
+        }
         if (is_unknown(l) || is_unknown(r)) {
             // 一侧 unknown（没标注的参数最常见）、另一侧是 float 时，结果
             // 仍然是 float：Python 先把另一侧提升成 double。以前这里一律
@@ -832,7 +851,10 @@ TypePtr TypeChecker::binop_type(Tok op, TypePtr l, TypePtr r, int line, int col)
             case Tok::VBAR:
             case Tok::CIRCUMFLEX:
                 if (l->kind == TyKind::Bool && r->kind == TyKind::Bool) return t_bool();
-                if (is_int_like(l) && is_int_like(r)) return promote(l, r);
+                // P3：big 参与位运算（无限补码语义，rt_big.c）。
+                if ((is_int_like(l) || l->kind == TyKind::Big) &&
+                    (is_int_like(r) || r->kind == TyKind::Big))
+                    return promote(l, r);
                 if (l->kind == TyKind::Set && r->kind == TyKind::Set) return l;
                 if (l->kind == TyKind::Dict && r->kind == TyKind::Dict && op == Tok::VBAR)
                     return l;
@@ -840,7 +862,14 @@ TypePtr TypeChecker::binop_type(Tok op, TypePtr l, TypePtr r, int line, int col)
             case Tok::LSHIFT:
             case Tok::RSHIFT:
                 // 移位结果跟随左操作数；超宽按 pa 的回绕/清零语义（非 C UB）。
-                if (is_int_like(l) && is_int_like(r)) return int_shift_result(l);
+                // P3：big << n / big >> n（计数也可以是 big，rt_big 校验非负）。
+                if (r->kind == TyKind::Big && l->kind != TyKind::Big) {
+                    err(line, col, "a big shift count requires a big left operand");
+                    return t_unknown();
+                }
+                if ((is_int_like(l) || l->kind == TyKind::Big) &&
+                    (is_int_like(r) || r->kind == TyKind::Big))
+                    return int_shift_result(l);
                 return bad();
             default:
                 return bad();
@@ -848,6 +877,16 @@ TypePtr TypeChecker::binop_type(Tok op, TypePtr l, TypePtr r, int line, int col)
     }
 
 void TypeChecker::compare_type(CmpOp op, TypePtr l, TypePtr r, int line, int col) {
+        auto container = [](const TypePtr& t) {
+            return t && (t->kind == TyKind::List || t->kind == TyKind::Tuple ||
+                         t->kind == TyKind::Dict || t->kind == TyKind::Set);
+        };
+        if (op != CmpOp::Is && op != CmpOp::IsNot &&
+            ((container(l) && has_big_value(l)) || (container(r) && has_big_value(r)) ||
+             ((op == CmpOp::In || op == CmpOp::NotIn) && container(r) && has_big_value(l)))) {
+            err(line, col, "container comparisons involving big are not supported");
+            return;
+        }
         if (is_unknown(l) || is_unknown(r)) return;
         if (l->kind == TyKind::Optional || r->kind == TyKind::Optional) return;
         switch (op) {
@@ -924,6 +963,8 @@ TypePtr TypeChecker::subscript_type(TypePtr obj, TypePtr idx, int line, int col)
                 // 长度不定的元组，下标拿到的就是元素类型
                 return obj->variadic && !obj->sub.empty() ? obj->sub[0] : t_unknown();
             case TyKind::Dict:
+                if (has_big_value(obj->sub[0]) || has_big_value(idx))
+                    err(line, col, "big dictionary/set keys are not supported");
                 if (!assignable(obj->sub[0], idx))
                     err(line, col,
                         std::format("dict key type is '{}', got '{}'", type_name(obj->sub[0]),

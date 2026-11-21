@@ -19,7 +19,8 @@ std::string Lowerer::py_type_name(const TypePtr& t) {
         case TyKind::U8:
         case TyKind::U16:
         case TyKind::U32:
-        case TyKind::U64: return "int";
+        case TyKind::U64:
+        case TyKind::Big: return "int";
         case TyKind::Float: return "float";
         case TyKind::Complex: return "complex";
         case TyKind::Str: return "str";
@@ -221,6 +222,7 @@ VReg Lowerer::const_literal(const LiteralValue& v) {
         case LiteralValue::Kind::Float: return const_float(v.f);
         case LiteralValue::Kind::Str: return const_str(v.s);
         case LiteralValue::Kind::Bytes: return const_bytes(v.s);
+        case LiteralValue::Kind::Big: return const_big(v.s);
     }
     return const_none();}
 

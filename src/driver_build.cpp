@@ -110,6 +110,7 @@ bool parse_unit(ModuleUnit& u) {
         pyadamas::Lexer lexer(u.source);
         pyadamas::Parser parser(lexer.run());
         u.ast = parser.parse();
+        u.mentions_big = parser.mentions_big();
         pyadamas::desugar_lambdas(*u.ast);
         return true;
     } catch (const pyadamas::LexError& e) {
@@ -186,6 +187,7 @@ struct Manifest {
     // 运行期类型标签开关（PYADAMAS_TYPE_TAGS）。-1 = 旧清单没有这一行：
     // 缓存必然失效一次（tag 编号/判定不同，混用会读错类型）。
     int type_tags = -1;
+    int dynamic_big = -1;  // 旧清单不能提供动态 big 安全语义
     // P4 语言缺口开关（PYADAMAS_LANG_GAPS）。-1 = 旧清单没有这一行：
     // 缓存必然失效一次（异常类当值等改变 IR，混用会静默丢语义）。
     int lang_gaps = -1;
@@ -295,6 +297,11 @@ std::optional<Manifest> read_manifest(const ModuleUnit& u) {
             auto o = parse_u64(v);
             if (!o) return std::nullopt;
             m.type_tags = static_cast<int>(*o);
+        } else if (tag == "dynamicbig") {
+            std::string v;
+            ss >> v;
+            if (v != "0" && v != "1") return std::nullopt;
+            m.dynamic_big = v == "1";
         } else if (tag == "langgaps") {
             std::string v;
             ss >> v;
@@ -340,6 +347,7 @@ void write_manifest(const Program& p, const ModuleUnit& u) {
     out << "inlineopt " << (p.inline_opt ? 1 : 0) << "\n";
     out << "borrowopt " << (p.borrow_opt ? 1 : 0) << "\n";
     out << "typetags " << (p.type_tags ? 1 : 0) << "\n";
+    out << "dynamicbig " << (p.needs_dynamic_big ? 1 : 0) << "\n";
     out << "langgaps " << (p.lang_gaps ? 1 : 0) << "\n";
     out << "csymdefault " << (u.uses_c_sym_default ? 1 : 0) << "\n";
     out << "toolchain " << toolchain_id() << "\n";
@@ -560,6 +568,7 @@ bool try_cache(Program& p, ModuleUnit& u) {
     if (m->inline_opt != (p.inline_opt ? 1 : 0)) return false;
     if (m->borrow_opt != (p.borrow_opt ? 1 : 0)) return false;
     if (m->type_tags != (p.type_tags ? 1 : 0)) return false;
+    if (m->dynamic_big != (p.needs_dynamic_big ? 1 : 0)) return false;
     if (m->lang_gaps != (p.lang_gaps ? 1 : 0)) return false;
     if (m->deps.size() != u.deps.size()) return false;
     for (auto& d : u.deps) {
@@ -809,6 +818,7 @@ bool build_unit(Program& p, ModuleUnit& u, bool emit_object, bool entry_ir) {
     opt.inline_opt = p.inline_opt;
     opt.borrow_opt = p.borrow_opt;
     opt.type_tags = p.type_tags;
+    opt.needs_dynamic_big = p.needs_dynamic_big;
     opt.lang_gaps = p.lang_gaps;
     opt.fast_math = p.fast_math;
     opt.zero_cost_exc = p.zero_cost_exc;
@@ -854,7 +864,7 @@ bool build_unit(Program& p, ModuleUnit& u, bool emit_object, bool entry_ir) {
     u.asm_text = pyadamas::generate_asm(lr.mod, u.is_entry && !p.needs_unknown_index,
                                         p.zero_cost_exc, skip_idx, p.rc_split,
                                         p.ra_graph, p.simd, p.ra_opt, p.inline_opt,
-                                        p.type_tags, p.vect);
+                                        p.type_tags, p.vect, p.needs_dynamic_big);
     auto t3 = now();
     std::string err;
     if (!assemble_object(u, err)) {
@@ -913,10 +923,19 @@ bool load_program(const std::string& entry_path, const std::vector<std::string>&
     p.entry = unit.get();
     p.units["@entry"] = std::move(unit);
     std::vector<ModuleUnit*> stack;
-    return visit_unit(p, *p.entry, stack);
+    if (!visit_unit(p, *p.entry, stack)) return false;
+    // 所有依赖都已解析（包括可能命中缓存的模块），先定全图模式再开始 lowering。
+    p.needs_dynamic_big = std::ranges::any_of(p.order, [](const ModuleUnit* u) {
+        return u->mentions_big;
+    });
+    return true;
 }
 
 bool prepare_program(Program& p, bool emit_objects, bool entry_ir) {
+    // 动态 big 模式下的 unknown 探针（AnyBigBinary/AnyInvert 与 key_kind 9）
+    // 都靠堆注册表确认「这个机器字确实是堆对象」。任一模块需要就整程序建表：
+    // 索引一旦关闭，探针恒假，等值 BigInt 会被当成两个不同指针。
+    if (p.needs_dynamic_big) p.needs_unknown_index = true;
     for (auto* u : p.order) {
         if (emit_objects && try_cache(p, *u)) {
             if (emit_objects && p.verbose)

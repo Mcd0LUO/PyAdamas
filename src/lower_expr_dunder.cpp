@@ -135,6 +135,14 @@ VReg Lowerer::truth_bool(VReg v, TypePtr ty) {
     // CPython：先 __bool__，没有再按 __len__ 是否非零；都没有时按指针判空。
     VReg b = dunder_bool(v, ty);
     if (b != kNoReg) return b;
+    // P3 big：真值按值（nd != 0），不能按指针判空（永生字面量地址恒非零）。
+    if (ty && ty->kind == TyKind::Big) {
+        Inst in;
+        in.op = IrOp::CallRt;
+        in.imm = static_cast<int64_t>(RtFn::BigTruth);
+        in.args = {v};
+        return def(t_bool(), std::move(in));
+    }
     // **unknown 必须走运行期真值**：机器字可能是整数、空串、空容器、None。
     // 直接把它当布尔用（branch 只测非零）会让空串/空容器恒真 ——
     // filter(None, 异构列表) 保留空串就是这个洞（N7）。
@@ -255,6 +263,61 @@ VReg Lowerer::convert_to(VReg v, TypePtr from, TypePtr to) {
         return const_str("<subprocess.CompletedProcess object>");
     if (to->kind == TyKind::Str && from && from->kind == TyKind::Popen)
         return const_str("<subprocess.Popen object>");
+    // ── P3 big 的转换（docs/numeric-types-design.md §1）─────────────
+    // 进 big：int/定宽/bool 加宽（pa_big_from_i64）、float 按 int(float)
+    // 截断（pa 格口径）、str 按十进制解析、unknown 运行期分派。
+    if (to->kind == TyKind::Big) {
+        if (from && from->kind == TyKind::Big) return v;
+        if (from && from->kind == TyKind::Unknown) {
+            VReg r = call_runtime(RtFn::AnyToBig, t_big(), {v});
+            push_temp(r);
+            st_->fresh_vregs.insert(r);
+            return r;
+        }
+        RtFn fn = RtFn::BigFromI64;
+        if (from && ir_is_float(from)) fn = RtFn::BigFromF64;
+        if (from && is_unsigned_int(from)) fn = RtFn::BigFromU64;
+        Inst in;
+        in.op = IrOp::CallRt;
+        in.imm = static_cast<int64_t>(fn);
+        in.args = {v};
+        if (from && from->kind == TyKind::Str) {
+            in.imm = static_cast<int64_t>(RtFn::BigFromStr);
+            in.args = {v, const_int(10)};
+        }
+        return def_heap(t_big(), std::move(in));
+    }
+    // 出 big：int/定宽是 cast 截断（低 64 位回绕 + 宽度正常化）、float
+    // 正确舍入、str 十进制、bool 真值。big → unknown 直通（堆指针）。
+    if (from && from->kind == TyKind::Big) {
+        if (to->kind == TyKind::Unknown) return v;
+        if (to->kind == TyKind::Int || is_fixed_int(to)) {
+            VReg w = call_runtime(RtFn::BigToI64, t_int(), {v});
+            if (is_fixed_int(to)) return convert_to(w, t_int(), to);
+            return w;
+        }
+        if (to->kind == TyKind::Float) {
+            Inst in;
+            in.op = IrOp::CallRt;
+            in.imm = static_cast<int64_t>(RtFn::BigToF64);
+            in.args = {v};
+            return def(t_float(), std::move(in));
+        }
+        if (to->kind == TyKind::Str) {
+            Inst in;
+            in.op = IrOp::CallRt;
+            in.imm = static_cast<int64_t>(RtFn::BigStr);
+            in.args = {v};
+            return def_heap(t_str(), std::move(in));
+        }
+        if (to->kind == TyKind::Bool) {
+            Inst in;
+            in.op = IrOp::CallRt;
+            in.imm = static_cast<int64_t>(RtFn::BigTruth);
+            in.args = {v};
+            return def(t_bool(), std::move(in));
+        }
+    }
     Inst in;
     in.op = IrOp::Convert;
     in.a = v;
@@ -291,6 +354,12 @@ VReg Lowerer::coerce(VReg v, TypePtr from, TypePtr to) {
     if (is_fixed_int(to)) return convert_to(v, from, to);
     // 定宽 → float 需要 cvtsi2sd（u64 还要走无符号转换路径）。
     if (to->kind == TyKind::Float && is_fixed_int(from)) return convert_to(v, from, to);
+    // P3 big：进出 big 都不是机器字直通（堆指针 ↔ 数值要调运行时）。
+    // big → unknown 例外：unknown 的堆值表示就是裸指针，直通。
+    if (to->kind == TyKind::Big || from->kind == TyKind::Big) {
+        if (from->kind == TyKind::Big && to->kind == TyKind::Unknown) return v;
+        return convert_to(v, from, to);
+    }
     auto num = [](TyKind k) {
         return is_int_kind(k) || k == TyKind::Bool || k == TyKind::Float;
     };
@@ -384,6 +453,7 @@ VReg Lowerer::lower_joined(JoinedStr& j) {
                     case TyKind::U16:
                     case TyKind::U32: piece = fmt_call(RtFn::FmtI64); break;
                     case TyKind::U64: piece = fmt_call(RtFn::FmtU64); break;
+                    case TyKind::Big: piece = fmt_call(RtFn::BigFmt); break;
                     case TyKind::Float: piece = fmt_call(RtFn::FmtF64); break;
                     case TyKind::Str: piece = fmt_call(RtFn::FmtStr); break;
                     case TyKind::Complex: piece = fmt_call(RtFn::FmtComplex); break;

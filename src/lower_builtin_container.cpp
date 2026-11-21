@@ -73,6 +73,10 @@ VReg Lowerer::lower_builtin_container(const std::string& name, Call& c) {
         TypePtr kt = t_unknown(), vt = t_unknown();
         if (!ty->sub.empty()) kt = ty->sub[0];
         if (ty->sub.size() > 1) vt = ty->sub[1];
+        if (has_big_value(kt)) {
+            err(c.line, c.col, "big dictionary/set keys are not supported");
+            return const_none();
+        }
         if (!c.args.empty()) {
             if (c.args.size() != 1 || !c.keywords.empty()) {
                 err(c.line, c.col, "dict() takes at most one positional argument");
@@ -90,7 +94,7 @@ VReg Lowerer::lower_builtin_container(const std::string& name, Call& c) {
             VReg xs = seq_as_list(c.args[0].get(), se);
             auto [hslot, eslot] = dunder_key_slots(kt);
             VReg d = call_runtime(RtFn::DictFromPairs, ty,
-                                  {xs, const_int(key_kind(kt)), const_int(own_kind(kt)),
+                                  {xs, const_int(hash_key_kind(kt)), const_int(own_kind(kt)),
                                    const_int(own_kind(vt)), const_int(hslot),
                                    const_int(eslot)});
             push_temp(d);
@@ -99,7 +103,7 @@ VReg Lowerer::lower_builtin_container(const std::string& name, Call& c) {
         if (c.keywords.empty()) {
             auto [hslot, eslot] = dunder_key_slots(kt);
             VReg d = call_runtime(RtFn::DictNew, ty,
-                                  {const_int(key_kind(kt)), const_int(own_kind(kt)),
+                                  {const_int(hash_key_kind(kt)), const_int(own_kind(kt)),
                                    const_int(own_kind(vt)), const_int(hslot),
                                    const_int(eslot)});
             push_temp(d);
@@ -148,7 +152,11 @@ VReg Lowerer::lower_builtin_container(const std::string& name, Call& c) {
         }
         if (!ty || ty->kind != TyKind::Set) ty = mk_set(t_unknown());
         TypePtr et = ty->sub.empty() ? t_unknown() : ty->sub[0];
-        int kk = key_kind(et), ko = own_kind(et);
+        if (has_big_value(et)) {
+            err(c.line, c.col, "big dictionary/set keys are not supported");
+            return const_none();
+        }
+        int kk = hash_key_kind(et), ko = own_kind(et);
         if (c.args.empty()) {
             auto [hslot, eslot] = dunder_key_slots(et);
             VReg d = call_runtime(RtFn::DictNew, ty,

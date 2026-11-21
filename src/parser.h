@@ -35,10 +35,13 @@ public:
     explicit Parser(std::vector<Token> toks) : toks_(std::move(toks)) {}
 
     std::unique_ptr<Module> parse();
+    bool mentions_big() const { return mentions_big_; }
 
 private:
     std::vector<Token> toks_;
     size_t pos_ = 0;
+    bool mentions_big_ = false;
+    ExprPtr parse_annotation_expr();
     int loop_depth_ = 0;
     int func_depth_ = 0;
     int suite_depth_ = 0;   // 嵌套语句块深度；cimport 只允许模块顶层

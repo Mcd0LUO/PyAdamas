@@ -69,7 +69,7 @@ inline void pad(std::ostream& os, int n) {
 }
 
 struct Constant : Expr {
-    enum class CK : uint8_t { None, Bool, Int, Float, Str, Bytes, Complex, Ellipsis } ck = CK::None;
+    enum class CK : uint8_t { None, Bool, Int, Float, Str, Bytes, Complex, Ellipsis, Big } ck = CK::None;
     bool b = false;
     int64_t i = 0;
     // 十进制 u64 范围字面量（>INT64_MAX）：i 存无符号位模式，
@@ -123,6 +123,7 @@ struct Constant : Expr {
                 if (u64_lit) os << "Constant(" << static_cast<uint64_t>(i) << "u64)\n";
                 else os << "Constant(" << i << ")\n";
                 break;
+            case CK::Big: os << "Constant(big " << s << ")\n"; break;
             case CK::Float: os << "Constant(" << f << ")\n"; break;
             case CK::Complex: os << "Constant(" << im << "j)\n"; break;
             case CK::Str: os << "Constant(" << quote(s) << ")\n"; break;
@@ -962,6 +963,19 @@ inline ExprPtr make_binop(Tok op, ExprPtr lhs, ExprPtr rhs, int line, int col) {
 }
 
 inline ExprPtr make_unary(Tok op, ExprPtr operand, int line, int col) {
+    // P3：±big 字面量折叠成带符号常量（-18446744073709551616 是一个 big
+    // 常量，不是运行期 neg）。只影响新的 CK::Big，既有常量路径逐字不变。
+    if (operand && operand->kind == ExprKind::Constant &&
+        (op == Tok::MINUS || op == Tok::PLUS)) {
+        auto& c = static_cast<Constant&>(*operand);
+        if (c.ck == Constant::CK::Big) {
+            if (op == Tok::MINUS) {
+                if (!c.s.empty() && c.s[0] == '-') c.s.erase(0, 1);
+                else c.s.insert(c.s.begin(), '-');
+            }
+            return operand;
+        }
+    }
     auto n = std::make_unique<UnaryOp>(op, std::move(operand));
     n->line = line;
     n->col = col;

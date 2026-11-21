@@ -137,6 +137,13 @@ VReg Lowerer::lower_builtin_misc(const std::string& name, Call& c) {
             return call_runtime(RtFn::MathFabs, t_float(), {v});
         if (t && t->kind == TyKind::Complex)
             return call_runtime(RtFn::ComplexAbs, t_float(), {v});
+        if (t && t->kind == TyKind::Big) {
+            Inst in;
+            in.op = IrOp::CallRt;
+            in.imm = static_cast<int64_t>(RtFn::BigAbs);
+            in.args = {v};
+            return def_heap(t_big(), std::move(in));
+        }
         return call_runtime(RtFn::AbsI64, t_int(), {v});
     }
 
@@ -176,6 +183,12 @@ VReg Lowerer::lower_builtin_misc(const std::string& name, Call& c) {
         TypePtr ty = tc_.type_of(&c);
         if (!ty || ty->kind == TyKind::Unknown) ty = t_int();
         if (c.args.size() == 3) {
+            for (auto& arg : c.args) {
+                if (tc_.type_of(arg.get())->kind == TyKind::Big) {
+                    err(c.line, c.col, "three-argument pow() with big is not supported");
+                    return const_none();
+                }
+            }
             VReg a = coerce(expr(*c.args[0]), tc_.type_of(c.args[0].get()), t_int());
             VReg b = coerce(expr(*c.args[1]), tc_.type_of(c.args[1].get()), t_int());
             VReg m = coerce(expr(*c.args[2]), tc_.type_of(c.args[2].get()), t_int());
@@ -195,6 +208,12 @@ VReg Lowerer::lower_builtin_misc(const std::string& name, Call& c) {
         VReg a = coerce(expr(*c.args[0]), tc_.type_of(c.args[0].get()), ty);
         VReg b = coerce(expr(*c.args[1]), tc_.type_of(c.args[1].get()), ty);
         Inst in;
+        if (ty->kind == TyKind::Big) {
+            in.op = IrOp::CallRt;
+            in.imm = static_cast<int64_t>(RtFn::BigPow);
+            in.args = {a, b};
+            return def_heap(ty, std::move(in));
+        }
         in.op = IrOp::Bin;
         in.bop = BinKind::Pow;
         in.a = a;

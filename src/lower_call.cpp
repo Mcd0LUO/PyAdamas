@@ -193,6 +193,7 @@ std::vector<VReg> Lowerer::bind_args(Call& c, const FuncInfoPtr& info, FunctionD
             case LiteralValue::Kind::Float: cv.ty = t_float(); cv.f = lv.f; break;
             case LiteralValue::Kind::Str: cv.ty = t_str(); cv.s = lv.s; break;
             case LiteralValue::Kind::Bytes: cv.ty = t_bytes(); cv.s = lv.s; break;
+            case LiteralValue::Kind::Big: cv.ty = t_big(); cv.s = lv.s; break;
         }
         return cv;
     };
@@ -219,6 +220,7 @@ std::vector<VReg> Lowerer::bind_args(Call& c, const FuncInfoPtr& info, FunctionD
             case TyKind::Float: return const_float(cv.f);
             case TyKind::Str: return const_str(cv.s);
             case TyKind::Bytes: return const_bytes(cv.s);
+            case TyKind::Big: return const_big(cv.s);
             default: return const_none();
         }
     };
@@ -516,7 +518,7 @@ VReg Lowerer::lower_call(Call& c) {
                 "join", "sleep", "make_chan",
                 // 定宽整数显式转换（P1）：cast_i8 … cast_u64
                 "cast_i8", "cast_i16", "cast_i32", "cast_i64", "cast_int",
-                "cast_u8", "cast_u16", "cast_u32", "cast_u64",
+                "cast_u8", "cast_u16", "cast_u32", "cast_u64", "cast_big",
             };
             if (kBuiltins.count(n.id)) return lower_builtin_call(n.id, c);
             // 名字能解析但语义没实现的内置：以前会退化成调用空指针直接

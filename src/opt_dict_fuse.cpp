@@ -49,6 +49,7 @@ bool pure_op(const Inst& in) {
         case IrOp::ConstFloat:
         case IrOp::ConstStr:
         case IrOp::ConstNone:
+        case IrOp::ConstBig:
         case IrOp::Mov:
         case IrOp::Bin:
         case IrOp::Un:

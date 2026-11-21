@@ -109,6 +109,8 @@ void enc_default_value(Enc& e, bool has_default,
         case LiteralValue::Kind::Float: e.u8(4); e.f64(v.f); break;
         case LiteralValue::Kind::Str: e.u8(5); e.str(v.s); break;
         case LiteralValue::Kind::Bytes: e.u8(7); e.str(v.s); break;
+        // P3：big 默认值按十进制串序列化（tag 9；旧解码器对 >8 降级）。
+        case LiteralValue::Kind::Big: e.u8(9); e.str(v.s); break;
     }
 }
 
@@ -120,7 +122,7 @@ DecodedDefault dec_default_value(Dec& d) {
     DecodedDefault out;
     uint8_t tag = d.u8();
     out.has = tag != 0;
-    if (tag >= 1 && tag <= 8) {
+    if (tag >= 1 && tag <= 9) {
         LiteralValue v;
         switch (tag) {
             case 1: v.kind = LiteralValue::Kind::None; break;
@@ -147,6 +149,10 @@ DecodedDefault dec_default_value(Dec& d) {
                 break;
             case 7:
                 v.kind = LiteralValue::Kind::Bytes;
+                v.s = d.str();
+                break;
+            case 9:
+                v.kind = LiteralValue::Kind::Big;
                 v.s = d.str();
                 break;
             default: break;
@@ -327,6 +333,8 @@ void enc_type(Enc& e, const TypePtr& t) {
         case TyKind::U16: e.u8(21); break;
         case TyKind::U32: e.u8(22); break;
         case TyKind::U64: e.u8(23); break;
+        // P3：big 跨模块编码 24（0..23 逐字沿用，旧 modcache 解码不变）。
+        case TyKind::Big: e.u8(24); break;
         case TyKind::None: e.u8(1); break;
         case TyKind::Bool: e.u8(2); break;
         case TyKind::Int: e.u8(3); break;
@@ -413,6 +421,7 @@ TypePtr dec_type(Dec& d) {
         case 21: return t_u16();
         case 22: return t_u32();
         case 23: return t_u64();
+        case 24: return t_big();
         case 14: {
             TypePtr y = dec_type(d);
             TypePtr s = d.u8() ? dec_type(d) : nullptr;

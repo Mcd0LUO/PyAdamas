@@ -196,7 +196,11 @@ VReg Lowerer::lower_dict(DictExpr& d, TypePtr ty) {
         if (ty->sub.size() > 1) vt = ty->sub[1];
     }
     TypePtr dtype = (ty && ty->kind == TyKind::Dict) ? ty : mk_dict(kt, vt);
-    int kk = key_kind(kt);
+    if (has_big_value(kt)) {
+        err(d.line, d.col, "big dictionary/set keys are not supported");
+        return const_none();
+    }
+    int kk = hash_key_kind(kt);
     int ko = own_kind(kt);
     int vo = own_kind(vt);
 
@@ -225,7 +229,11 @@ VReg Lowerer::lower_set(SetExpr& s, TypePtr ty) {
     TypePtr et = t_unknown();
     if (ty && ty->kind == TyKind::Set && !ty->sub.empty()) et = ty->sub[0];
     TypePtr stype = (ty && ty->kind == TyKind::Set) ? ty : mk_set(et);
-    int ek = key_kind(et);
+    if (has_big_value(et)) {
+        err(s.line, s.col, "big dictionary/set keys are not supported");
+        return const_none();
+    }
+    int ek = hash_key_kind(et);
     int eo = own_kind(et);
 
     auto [hslot, eslot] = dunder_key_slots(et);

@@ -69,6 +69,15 @@ inline bool is_unsigned_int(const TypePtr& t) {
     return i && !i->is_signed;
 }
 
+// Value-comparison gates for containers whose nested element domain is known.
+inline bool has_big_value(const TypePtr& t) {
+    if (!t) return false;
+    if (t->kind == TyKind::Big) return true;
+    for (const auto& member : t->sub)
+        if (has_big_value(member)) return true;
+    return false;
+}
+
 inline bool is_fixed_int(const TypePtr& t) {
     return t && is_fixed_int_kind(t->kind);
 }
@@ -121,6 +130,10 @@ inline bool int_literal_fits(const TypePtr& t, int64_t v) {
 // 转换（normalize）到该类型，codegen 只按一个类型选指令。
 inline TypePtr int_promote(const TypePtr& l, const TypePtr& r) {
     if (!l || !r) return t_int();
+    // P3 §1.2 规则 1：任一 Big → Big（格顶层，含 big+float：float 侧
+    // 按 int(float) 截断转 big——pa 格口径，与 CPython 的 int+float→float
+    // 不同，文档化边界，见 docs/big-landing.md）。
+    if (l->kind == TyKind::Big || r->kind == TyKind::Big) return t_big();
     if (l->kind == TyKind::Float || r->kind == TyKind::Float) return t_float();
     if (l->kind == TyKind::Bool && r->kind == TyKind::Bool) return t_int();
     if (l->kind == TyKind::Bool) return is_int_kind(r->kind) ? r : t_int();
@@ -141,6 +154,7 @@ inline TypePtr int_promote(const TypePtr& l, const TypePtr& r) {
 inline TypePtr int_shift_result(const TypePtr& l) {
     if (!l) return t_int();
     if (is_int_kind(l->kind)) return l;
+    if (l->kind == TyKind::Big) return l;   // P3：big << n 仍是 big
     return t_int();
 }
 

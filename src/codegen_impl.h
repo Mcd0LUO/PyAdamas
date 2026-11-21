@@ -32,6 +32,10 @@ namespace pyadamas {
 inline int kMaxIntArgs() { return target_abi().n_arg_int; }
 inline int kMaxFpArgs() { return target_abi().n_arg_fp; }
 
+// P3 big：十进制串 → 基 2^32 小端 limb（codegen_big.cpp），返回带符号
+// limb 数（PyAdamasBig.nd 口径）。静态 BigInt 字面量数据段发射用。
+int64_t big_literal_limbs(const std::string& dec, std::vector<uint32_t>& out);
+
 // 可用来长期持有变量的寄存器。全部是 callee-saved：被调用方保证
 // 返回时原样恢复，所以跨函数调用不需要把值挪回栈。
 // rsp 是栈指针，不在其中；rbp 在——生成函数的帧相对 rsp 寻址，不需要
@@ -1071,6 +1075,9 @@ private:
 
         void gen_const_int(const Inst& in);
 
+        // P3 big：永生静态 BigInt 字面量（docs/numeric-types-design.md §1/§4）。
+        void gen_const_big(const Inst& in);
+
         void gen_const_float(const Inst& in);
 
         void gen_bin(const Inst& in);
@@ -1132,17 +1139,13 @@ private:
     void gen_index_store_unchecked(const Inst& in);
 
     // ── 对象 ────────────────────────────────────────────────────
-
     // 对象布局：+0 是 vtable 指针，字段从 +8 开始，每个 8 字节。
     // 属性访问因此是一条固定偏移的 movq，没有查表、没有哈希。
     void gen_obj_new(const Inst& in);
     void gen_struct_new(const Inst& in);
     void gen_struct_copy(const Inst& in);
-
         void gen_field_load(const Inst& in);
-
         void gen_field_store(const Inst& in);
-
     // 虚调用：self 固定占第一个整数参数（%rdi），其余实参照常分类。
     // 函数地址在装参数之前取到 %r11 —— %r11 不在参数序列里，
     // 装参数的过程不会碰它。
@@ -1150,31 +1153,21 @@ private:
     bool gen_guarded_vcall(const Inst& in, bool keep_int_result = false);
     bool gen_guarded_vcall_direct(const Inst& in, bool keep_int_result, int base, size_t slot);
     bool try_fuse_guarded_vcall_add(const Block& b, size_t pos);
-
     void gen_vcall_static(const Inst& in);
-
     void gen_super_vcall(const Inst& in);
-
     void gen_call_direct(const Inst& in);
     void gen_call_ptr(const Inst& in);
-
         void gen_branch(const Inst& in);
-
         void gen_return(const Inst& in);
-
     // ── 调用 ────────────────────────────────────────────────────
     void gen_call(const Inst& in);
-
     void gen_call_extern(const Inst& in);
     void gen_load_extern(const Inst& in);
     void gen_store_extern(const Inst& in);
     void gen_ptr_load(const Inst& in);
     void gen_ptr_store(const Inst& in);
-
         void gen_setjmp(const Inst& in);
-
         void gen_call_rt(const Inst& in);
-
         // 运行期调用的实参装填：按实参形态分组，实现在 codegen_call_rt.cpp。
         void gen_rt_args(const Inst& in, RtFn fn);
         void gen_rt_none(const Inst& in);

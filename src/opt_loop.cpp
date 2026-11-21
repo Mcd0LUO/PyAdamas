@@ -269,6 +269,7 @@ bool hoist_loop(IRFunction& fn, int h, const std::vector<char>& body,
             case IrOp::ConstFloat:
             case IrOp::ConstStr:
             case IrOp::ConstNone:
+            case IrOp::ConstBig:
             case IrOp::FuncAddr:
                 return true;
             case IrOp::Mov:

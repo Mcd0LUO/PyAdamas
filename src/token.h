@@ -62,6 +62,9 @@ struct Token {
     // 只允许出现在 u64 上下文（类型检查在 coerce 位置改写类型）；默认 int
     // 上下文仍按「too large for int64」报错。进制前缀路径不走这里。
     bool u64_lit = false;
+    // P3：十进制整数字面量超 u64 → big（text 是去下划线的十进制串）。
+    // 进制前缀字面量溢出仍按旧口径回绕（门控：既有 asm 不变）。
+    bool is_big = false;
     double fval = 0.0;  // FLOAT 的值
     // 字符串是否带 r 前缀。FSTRING 需要它来决定字面量部分是否解码转义；
     // 普通字符串在词法层已经解码完，这个标记只对 f-string 有意义。

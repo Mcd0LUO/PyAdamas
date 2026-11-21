@@ -79,6 +79,8 @@ inline TypePtr join_into(const TypePtr& a, const TypePtr& b) {
         // 定宽整数参与合并时走 §1.2 的整数提升（取较宽、同宽无符号胜出）。
         // 其余数值组合保持旧行为（int/float 混 → float），**不要**顺手
         // 改成整数提升：那会改变既有程序的分支合并结果与生成代码。
+        // P3：big 顶层（big 与任何数值合并 → big）。
+        if (a->kind == TyKind::Big || b->kind == TyKind::Big) return t_big();
         if (is_fixed_int(a) || is_fixed_int(b)) {
             if (a->kind == TyKind::Float || b->kind == TyKind::Float) return t_float();
             return int_promote(a, b);
@@ -191,6 +193,15 @@ inline bool assignable(const TypePtr& dst, const TypePtr& src) {
     if (dst->kind == TyKind::Float &&
         (src->kind == TyKind::Int || is_fixed_int(src)))
         return true;  // int/定宽整数 → float 提升
+    // ── P3：big 的隐式转换 ─────────────────────────────────────
+    // int/定宽/bool → big：无信息损失的加宽（big 是格顶层）。
+    // big → int/定宽：必须显式 cast（cast_i64/cast_int 截断回绕）。
+    // big → float：Python int→float 隐式（有损但口径一致）。
+    // float → big：必须 cast_big（int(float) 截断）。
+    if (dst->kind == TyKind::Big &&
+        (src->kind == TyKind::Int || is_fixed_int(src) || src->kind == TyKind::Bool))
+        return true;
+    if (dst->kind == TyKind::Float && src->kind == TyKind::Big) return true;
     // bool 是 int 的子类型（Python 里 True + 1 == 2）
     if (is_int_kind(dst->kind) && src->kind == TyKind::Bool) return true;
     // ── 定宽整数的隐式转换（P1）──────────────────────────────────
