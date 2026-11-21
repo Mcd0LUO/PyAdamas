@@ -509,14 +509,21 @@ dry-run）全部通过后才**发射**。任何一步失败立即 return false�
 * **表达式 DAG 分类**（memoized 递归）：InvF/InvI（常量/稳定槽/全局/跨块值，
   setup 广播）、InvPtr（list 基址，透明）、J、VecF/VecI（逐 lane 2-lane 值）、
   Acc（reduction 旧值）。float Bin add/sub/mul/div → packed SSE2（每 lane IEEE
-  与标量同）；int Bin add/sub → paddq/psubq（模 2^64 与 addq/subq 逐位一致）。
+  与标量同）；int Bin add/sub → paddq/psubq（模 2^64 与 addq/subq 逐位一致）；
+  int Bin mul → pmuludq 奇偶 lane 全 i64 重建（0.351，§11.8，任意 i64 无守卫）；
+  Convert plain i64→float → cvtdq2pd 折算序列（0.351，§11.8，与 cvtsi2sdq
+  逐位一致）。跨块值（LICM 外提）按类型统一归不变量（0.351）。
 * **仿射下标** j+c（c>=0 常量）：折叠进寻址位移 disp=c*8，不占向量整数运算。
   下标计算 bin.add(j,c) 标记 Skip（不是向量值）。
 * **map**：`out[j+c]=f(a[j+c'],b[j+c''],不变量)`，list[float]/list[int] kind0。
-* **reduction**：槽 sT 体块恰一写一读，写值=读值+expr（或 expr+读值），expr
-  不含 acc。float **保序提取累加**（addsd 低 lane→movhlps→addsd 高 lane），
-  与标量逐位一致（不做改序水平求和，输出零风险）；int **paddq 2-lane** 累加
-  （模 2^64 结合律精确）+ 出口水平求和写回槽。
+* **reduction**（0.351 起支持**多个并行**）：槽 sT 体块恰一写一读，写值=读值
+  +expr（或 expr+读值），读在写前（SSA），expr 不含 acc（跨累加器依赖 →
+  loads!=1 或 Acc 分类 → 保守拒绝）。float **保序提取累加**（addsd 低 lane→
+  movhlps→addsd 高 lane），与标量逐位一致（不做改序水平求和，输出零风险）；
+  int **paddq 2-lane** 累加（模 2^64 结合律精确）+ 出口水平求和写回槽。
+  int acc setup 装载槽**前值**（低 lane，高 lane 清 0）——循环前累加器非 0
+  时 pxor+覆盖写会丢前值（0.351 修复）。共享 expr 的 float 提取用 scratch
+  副本（movhlps 破坏 expr，末次使用晚于本 store 时不得破坏）。
 * **体局部临时槽**：单写、读全在写后、无外部读、非堆、不取地址 → SSA 替换
   （load≡所存值），跳过存储。用户变量 `t=a[i]*2; out[i]=t*t` 由此通用支持。
 * **规范化数组基址**：非内联函数在体内 `load.slot s0` 装载 list 指针；把
@@ -594,12 +601,106 @@ store_pos 尚未置位 → 漏判 → 把「读在写前」的槽误判临时槽
 | 阶段 | 内容 | 状态 |
 |---|---|---|
 | P4-core | 通用可数 for + float/int 逐元素 map + float/int reduction + 原地/偏移/临时槽 + 别名版本化 | **0.344 已落地** |
-| P4+ | Convert int→float（float(i)，需 int32 范围守卫 + [j,j+1] 向量）；int 乘（pmuludq 组合 + 不变量因子守卫，§10.1 已证）；多 reduction；float Un Neg（xorpd 符号掩码） | 待 |
-| P4++ | 写后读同数组（store-to-load forwarding）；循环变量外读（维护副本槽终值）；跨迭代依赖距离 >=VF 的安全判定；inv+j 行基址（matmul 形态通用化） | 待 |
+| P4+ | int 乘（pmuludq 全 i64 重建，**无需值域守卫**）；Convert plain i64→float（cvtdq2pd 折算，**无需 int32 守卫**）；多 reduction 并行 | **0.351 已落地**（§11.8） |
+| P4+ 余 | float Un Neg（xorpd 符号掩码）；float→int Convert（cvttpd2dq 溢出语义与标量 cvttsd2siq 不同，需守卫）；定宽/unsigned Convert（标量走 norm/u64 绕道） | 待（保守跳过） |
+| P4++ | 写后读同数组（store-to-load forwarding）；循环变量外读（维护副本槽终值）；跨迭代依赖距离 >=VF 的安全判定；inv+j 行基址（matmul 形态通用化） | 待（0.351 评估：forwarding 需循环内值跟踪、inv+j 需二维基址+步长分析，命门风险高于收益，保守跳过留路径） |
 | P5 | AVX2/AVX-512 dispatch（cpuid+xgetbv 检测，ymm 与提升池冲突需重设计）；对齐 peel；向量 IR op + 类型 + regalloc（彻底通用化） | 待评估 |
 
-**负面结论**：本轮不做 AVX2（需运行时 CPU 检测 + ymm/xmm 提升池冲突重设计，
-收益不确定，§8 已评估）；不做改序 float 水平求和（输出风险，保序已 1.89×
-接近 2-lane 上限）；int 乘/Convert/多 reduction 复杂度高于本轮 tractable
-核心，保守跳过并留路径。通用自动向量化是 gcc/clang 数年的大功能，本轮交付
-的是**结构判据驱动、别名/依赖保守、门控默认关**的安全通用核心。
+**负面结论**：不做 AVX2（需运行时 CPU 检测 + ymm/xmm 提升池冲突重设计，
+收益不确定，§8 已评估）；不做改序 float 水平求和（输出风险，保序已接近
+2-lane 上限）。0.344 曾以「复杂度高于 tractable 核心」保守跳过 int 乘/
+Convert/多 reduction；0.351 证明三者均可在 SSE2 内**无值域守卫、逐位精确**
+落地（§11.8 推导），关键是 pmuludq 拆半重建与 cvtdq2pd 单舍入折算。通用
+自动向量化是 gcc/clang 数年的大功能，本路径交付的是**结构判据驱动、别名/
+依赖保守、门控默认关**的安全通用核心。
+
+### 11.8 0.351 深化（vect2 分支，基线 master faeb80d / 0.350）
+
+> 状态：**已落地**。门控 `PYADAMAS_VECT` 默认关不变；flag-off asm 38 热基准
+> 逐字节不变。本轮把 §11.7 P4+ 的三项 tractable 路径补上，并修复通用
+> reduction 路径自 0.344 起实际是**死代码**的潜伏 bug（见下）。
+
+**新覆盖模式**（全部非基准形状，结构判据识别）：
+
+1. **int 乘 map/reduction**：`out[j]=a[j]*b[j]` / `a[j]*k` / 原地平方 /
+   `s+=a[j]*b[j]`。pmuludq 逐 lane 取低 32 位无符号乘（精确 64 位积），
+   全 i64 重建：a*b mod 2^64 = a_lo*b_lo + ((a_lo*b_hi + a_hi*b_lo) mod 2^32)<<32
+   （a_lo/a_hi 为 64 位 lane 低/高 32 位无符号拆半，负数补码同样成立）。
+   paddq 的模 2^64 与 psllq 的丢高位恰好实现式中模运算 → 与标量 imulq
+   低 64 位**逐位一致，任意 i64（含负数/INT64_MIN）无需值域守卫**（比
+   §10.1 matmul 特化的 aik<2^31 守卫更通用）。9 条指令 + 2 序列 scratch
+   （发射前 dry-run 先占，与 Convert 共用）。
+2. **Convert plain i64→float**：`out[j]=float(a[j])` / `float(j)` /
+   `float(j+c)` / `float(不变量)` / `float(a[j]*b[j])` / `s+=float(...)`。
+   标量发 cvtsi2sdq；向量折算：x = hi_s*2^32 + lo_u。**cvtdq2pd 源是
+   m64（转 dword0/dword1，不是每 lane 低 32！）** → pshufd 0xDD 聚
+   [hi0,hi1]、0x88 聚 [lo0,lo1] 到低 64 位再转。hi_f 精确（|hi_s|<2^53）
+   ×2^32 幂缩放精确；lo 符号掩码 psrad 31 → cvtdq2pd(-1/0) ×2^32 →
+   lo_s_f 减之 = lo_u 精确（lo=0 时 +0-+0=+0）；末条 addpd 两精确操作数
+   之和恰为整数 x → **单次舍入 = cvtsi2sdq(x)**（中间量全精确，任何
+   MXCSR 舍入模式同理）。INT64_MIN：hi_s=-2^31, lo_u=0 → -2^63 精确。
+   任意 i64 无需范围守卫。j_src 发射期 leaq+movq+movlhps 构造
+   [j+off,j+off+1]。SSE2 **无 psraq**（AVX-512 才有）；本 GAS pshufd
+   要三操作数形式。定宽/unsigned 源（标量走 norm/u64 绕道）与 float→int
+   （cvttpd2dq 溢出给 i32 极值，与标量 cvttsd2siq 的 i64 极值不同）保守跳过。
+3. **多 reduction 并行**：一循环多累加器（双 float/双 int/混合/三累加器/
+   mul+add/map+reduction/前值非 0），各占独立向量寄存器，出口各自写回。
+   共享 expr（CSE）的 float 保序提取用先占 FSCR 副本（movhlps 破坏 expr）；
+   出口水平求和 scratch HSCR 先占保证不撞任何 IACC；reds 按槽号排序 →
+   asm 确定性。跨累加器依赖（s2+=s1）保守拒绝。
+
+**潜伏 bug 修复**（通用 reduction 路径复活后暴露——0.344 的 fbc77a8 修正
+read_before_store 后，reduction 检测仍用该标志做**跳过**判据，而 acc 槽
+SSA 必然读在写前 → 所有通用 reduction 被静默跳过，§11.6 的 dot 证据实为
+特化 matcher 所发）：
+
+1. reduction 检测改为**要求**读在写前（与临时槽判据相反）。
+2. int acc 出口覆盖写丢前值：pxor 清 0 + store 丢循环前累加器值
+   （t=49 后 for: t+=n → 静默算错，298 用例 rw 形状，difftest 抓出）。
+   改 setup movq 槽当前值进 IACC 低 lane（高 lane 清 0）。
+3. ConstInt 不变量广播清单补全：c[i]=1 / s+=1 的 InvI 未进 inv_ints →
+   发射期查无寄存器 → 前奏已发却 return false → 悬空 tail 标签链接失败
+   （49_inline）。统一扫 cls 补全，发射期寄存器查询从此完备（dry-run 不变量）。
+4. 跨块值（LICM 外提 Convert/Bin）按类型归不变量：此前结构分类误判
+   VecF → 体块不发射 → 无临时寄存器 → 悬空 tail（cvk 形态）。
+5. 跨块装载的 list 基址/不变量取 **vreg home** 而非槽现值：内联 RC
+   move-from 在装载后把槽清 0（store.slot s23,%468=0），mov 链解析到
+   slot_mop 取到 NULL → 守卫段错误（376 内联 cv 形态，gdb 取证）。
+   循环内装载仍取槽现值（循环期间稳定）；跨块 list_key 按 vreg 身份
+   不归并（同槽不同时刻装载可能不同值，免别名守卫失效）。
+
+**闸门**（基线 2c58a99，独立 worktree 构建对拍）：
+
+* flag-off asm 38 热基准（realistic 6 + compare 9 + daily 23）cmp **逐字节全同**。
+* difftest（O0/O2，vect-on）**335/0**；38 基准语料 flag-on/off 输出**零差异**。
+* 全套件 normal vect-on **EXIT=0（354 ran ok）**；normal flag-off **EXIT=0
+  （354）**；ASan vect-on JOBS=1 **EXIT=0（354 ran ok）**。
+* check_size 通过（codegen_vect.cpp 998 行 < 1200，无新增超限）。
+* 回归 375-378（非基准）：int 乘（mod 2^64 大值/负数/INT64_MIN、原地、
+  临时槽、dot、前值非 0）/ Convert（INT64_MIN/MAX、>2^53 舍入、float(j)/
+  float(j+2)/不变量/乘后折算/保序 reduction）/ 多 reduction（10 形状）/
+  别名依赖负例（跨迭代/写后读/写偏移非 0/循环变量外读/运行时别名守卫/
+  IndexError 时机）——CPython 参考对拍 flag-off/on **零差异**；负例 asm
+  零 VECT（保守跳过取证）。344-349 既有回归全 OK。
+* spectral_norm/nbody/matmul flag-on 输出==flag-off==基线（811972 /
+  -928502048 / 43198080 钉住）；abbench（vect-on 当前 vs 基线，9 轮交替
+  中位数）：spectral_norm +0.1% / nbody -4.9% / matmul +3.0%（总计 -1.0%）。
+  nbody/spectral 的 vect-on asm 与基线**逐字节相同**（-4.9% 纯噪声，标定
+  ±5% 噪声带）；matmul 仅辅助 checksum 求和循环被新生效的通用 int
+  reduction 向量化（热内循环特化 asm 不变），直接 A/B 11 轮复测中位数
+  +1.5%、分布重叠 → 噪声带内，**不回归**。
+
+**性能实证**（非基准探针，N=200000 × 300 轮，Xeon Gold 6252，min-of-9
+交替绑核 taskset -c 47，整程序墙钟含建表，checksum flag-off/on 逐位一致）：
+
+| 探针 | flag-off | vect-on | 比值（min） | 比值（median） |
+|---|---|---|---|---|
+| int 乘 map（大 i64 回绕） | 236ms | 100ms | **2.36×** | 2.36× |
+| Convert map（大 i64→f64） | 222ms | 95ms | **2.34×** | 2.30× |
+| 多 reduction（双 float 累加器） | 159ms | 115ms | **1.38×** | 1.39× |
+
+2-lane 理论上限 2× 指纯算术；map 比值 >2× 因向量路径同时消除了标量
+pa_list_get/set 的逐元素边界/kind 检查开销（入口守卫一次性证明）。
+reduction 保序 addsd 链使比值偏低（与 §11.6 一致），双累加器并行略补。
+int 乘 9 指令重建 / Convert 13 指令折算的指令开销在 map 形态被装载/存储
+摊薄，仍 >2×。
