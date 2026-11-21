@@ -356,6 +356,36 @@ VReg Lowerer::lower_comp(Expr& e) {
         emit(std::move(j));
 
         switch_to(cond);
+        // 推导式里迭代 dict/set 也要在容器大小变化时抛**可捕获**的
+        // RuntimeError（与语句级 for 同口径，0.363/0.366）。这里没有守卫的话
+        // 会落到 DictKeyAt 的越界 panic —— 进程直接退出，except 接不住。
+        if (sty->kind == TyKind::Dict || sty->kind == TyKind::Set) {
+            Inst lc;
+            lc.op = IrOp::Len;
+            lc.a = seq_val();
+            VReg cur_len = def(t_int(), std::move(lc));
+            Inst ne;
+            ne.op = IrOp::Cmp;
+            ne.cop = CmpKind::Ne;
+            ne.a = cur_len;
+            ne.b = n_val();
+            VReg ne_cc = def(t_bool(), std::move(ne));
+            int changed = new_block("comp.iter.changed");
+            int ok_b = new_block("comp.iter.ok");
+            Inst brc;
+            brc.op = IrOp::Branch;
+            brc.a = ne_cc;
+            brc.target = changed;
+            brc.target2 = ok_b;
+            emit(std::move(brc));
+            switch_to(changed);
+            call_void(raise_rt(RtFn::Raise),
+                      {const_str("RuntimeError"),
+                       const_str(sty->kind == TyKind::Dict
+                                     ? "dictionary changed size during iteration"
+                                     : "Set changed size during iteration")});
+            switch_to(ok_b);
+        }
         VReg iv = load_slot(idx, t_int());
         Inst cmp;
         cmp.op = IrOp::Cmp;
