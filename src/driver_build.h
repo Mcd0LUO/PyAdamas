@@ -62,9 +62,6 @@ struct Program {
     // live range splitting（PYADAMAS_RA_SPLIT）：会改变代码生成结果，
     // 必须写进模块缓存清单参与失效 —— 否则切换开关后仍命中旧产物。
     bool rc_split = false;
-    // 图着色分配器（PYADAMAS_RA_GRAPH）：同样会改变代码生成结果，必须
-    // 参与模块缓存失效，否则 A/B 测试会命中旧产物拿到假数据。
-    bool ra_graph = false;
     // callee-saved 提升增强（PYADAMAS_RA_OPT，默认关）：改变代码生成结果，
     // 必须写进模块缓存清单参与失效。
     bool ra_opt = false;

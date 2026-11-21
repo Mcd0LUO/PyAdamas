@@ -170,8 +170,6 @@ struct Manifest {
     // 清单就会出现「切了开关仍命中旧产物」—— 实测导致连续几轮 A/B
     // 测试拿到完全相同的二进制，性能结论全错。
     int rc_split = -1;
-    // 图着色分配器开关。-1 = 旧清单没有这一行（缓存必然失效一次）。
-    int ra_graph = -1;
     // callee-saved 提升增强开关。-1 = 旧清单没有这一行（缓存必然失效一次）。
     int ra_opt = -1;
     // SIMD 向量化开关。-1 = 旧清单没有这一行（缓存必然失效一次）。
@@ -249,12 +247,6 @@ std::optional<Manifest> read_manifest(const ModuleUnit& u) {
             auto o = parse_u64(v);
             if (!o) return std::nullopt;
             m.rc_split = static_cast<int>(*o);
-        } else if (tag == "ragraph") {
-            std::string v;
-            ss >> v;
-            auto o = parse_u64(v);
-            if (!o) return std::nullopt;
-            m.ra_graph = static_cast<int>(*o);
         } else if (tag == "raopt") {
             std::string v;
             ss >> v;
@@ -339,7 +331,6 @@ void write_manifest(const Program& p, const ModuleUnit& u) {
     out << "zerocostexc " << (p.zero_cost_exc ? 1 : 0) << "\n";
     out << "unknownindex " << (u.needs_unknown_index ? 1 : 0) << "\n";
     out << "rcsplit " << (p.rc_split ? 1 : 0) << "\n";
-    out << "ragraph " << (p.ra_graph ? 1 : 0) << "\n";
     out << "raopt " << (p.ra_opt ? 1 : 0) << "\n";
     out << "simd " << (p.simd ? 1 : 0) << "\n";
     out << "vect " << (p.vect ? 1 : 0) << "\n";
@@ -560,7 +551,6 @@ bool try_cache(Program& p, ModuleUnit& u) {
     if (m->fast_math != (p.fast_math ? 1 : 0)) return false;
     if (m->zero_cost_exc != (p.zero_cost_exc ? 1 : 0)) return false;
     if (m->rc_split != (p.rc_split ? 1 : 0)) return false;
-    if (m->ra_graph != (p.ra_graph ? 1 : 0)) return false;
     if (m->ra_opt != (p.ra_opt ? 1 : 0)) return false;
     if (m->simd != (p.simd ? 1 : 0)) return false;
     if (m->vect != (p.vect ? 1 : 0)) return false;
@@ -863,7 +853,7 @@ bool build_unit(Program& p, ModuleUnit& u, bool emit_object, bool entry_ir) {
     bool skip_idx = u.is_entry && pyadamas::ir_module_can_skip_index_maint(lr.mod);
     u.asm_text = pyadamas::generate_asm(lr.mod, u.is_entry && !p.needs_unknown_index,
                                         p.zero_cost_exc, skip_idx, p.rc_split,
-                                        p.ra_graph, p.simd, p.ra_opt, p.inline_opt,
+                                        p.simd, p.ra_opt, p.inline_opt,
                                         p.type_tags, p.vect, p.needs_dynamic_big);
     auto t3 = now();
     std::string err;

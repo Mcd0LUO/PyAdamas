@@ -71,7 +71,7 @@ for f in tests/*.py; do
 done
 
 # 用例级编译开关（与 run_test 同口径）：fail/strict/unsupported 循环也认
-# 文件头的 type-tags / lang-gaps 指令（P4 块4 的门控负面用例需要）。
+# 文件头的 type-tags / lang-gaps / loop-opt 指令（门控负面用例需要）。
 test_extra_env() {
     local extra=""
     if sed -n '1,8p' "$1" | grep -q '^# pyadamas: type-tags'; then
@@ -79,6 +79,11 @@ test_extra_env() {
     fi
     if sed -n '1,8p' "$1" | grep -q '^# pyadamas: lang-gaps'; then
         extra="PYADAMAS_LANG_GAPS=1"
+    fi
+    # 整数循环优化（仿射 BCE / 跳转线程化，默认关）：带这个指令的用例
+    # 必须打开门控编译，否则门控里的错代码一次都跑不到。
+    if sed -n '1,8p' "$1" | grep -q '^# pyadamas: loop-opt'; then
+        extra="$extra PYADAMAS_LOOP_OPT=1"
     fi
     printf '%s' "$extra"
 }
@@ -121,6 +126,10 @@ run_test() {
     # 驱动侧 LANG_GAPS=1 会强制带上 TYPE_TAGS（CLASS tag 是表示基础）。
     if sed -n '1,8p' "$f" | grep -q '^# pyadamas: lang-gaps'; then
         extra="PYADAMAS_LANG_GAPS=1"
+    fi
+    # 整数循环优化（loop-opt，默认关）：仿射 BCE 的回归用例必须带门控编译。
+    if sed -n '1,8p' "$f" | grep -q '^# pyadamas: loop-opt'; then
+        extra="$extra PYADAMAS_LOOP_OPT=1"
     fi
     # 输出加大小上限：用例卡进死循环时它会一直写，曾经留下 19G 的单个
     # 日志文件（78_enumerate_zip.py.out），把 build 目录撑到 32G。

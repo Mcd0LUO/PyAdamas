@@ -181,9 +181,8 @@ public:
         void set_index_readonly(bool v) { index_readonly_ = v; }
         // 零开销异常总开关（默认开启；--no-zero-cost-exc 可回退）。
         void set_zero_cost_exc(bool v) { zero_cost_exc_ = v; }
-        // 分配器实验开关（驱动传入，参与缓存失效）：RA_SPLIT / RA_GRAPH / RA_OPT（默认关）。
+        // 分配器实验开关（驱动传入，参与缓存失效）：RA_SPLIT / RA_OPT（默认关）。
         void set_rc_split(bool v) { rc_split_ = v; }
-        void set_ra_graph(bool v) { ra_graph_ = v; }
         void set_ra_opt(bool v) { ra_opt_ = v; }
         // 浮点循环 SIMD 向量化开关（PYADAMAS_SIMD，默认关）：参与缓存失效。
         void set_simd(bool v) { simd_enabled_ = v; }
@@ -748,7 +747,6 @@ private:
     // 总开关（--zero-cost-exc）：关闭时 prepare_eh_plan 直接返回，老路径 asm 不变。
     bool zero_cost_exc_ = true;
     bool rc_split_ = false;
-    bool ra_graph_ = false;  // RA_GRAPH：图着色（assign_slot_regs_graph）
     bool ra_opt_ = false;    // RA_OPT：P1 跨调用提升 + P2 只读别名（ra_opt.cpp），默认关
     bool inline_opt_ = false;  // INLINE_OPT：内联/devirt 深化 + 入口对齐修复，默认关
     void prepare_eh_plan(const IRFunction& f, const std::string& fname);  // 预扫描 EH 标记
@@ -1005,9 +1003,6 @@ private:
     void assign_slot_regs_linear();
     // live range splitting：按块给变量槽分配寄存器。
     void assign_slot_regs_split();
-    // 图着色分配器（PYADAMAS_RA_GRAPH）：用精确冲突图取代线性扫描的区间
-    // 近似，Chaitin-Briggs 简化 + 乐观着色。整型与浮点两套池分开着色。
-    void assign_slot_regs_graph();
     // 单个池的着色：cands 是槽号列表（同属一个池），结果写进 out[槽号]。
     void color_slot_pool(const std::vector<int>& cands, const char* const* regs,
                          int nreg, std::vector<std::string>& out);
