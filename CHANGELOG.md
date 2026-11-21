@@ -4,6 +4,73 @@
 
 早期阶段没有逐条留痕，按阶段归纳；0.4 之后逐条记录。
 
+## [0.374] - 2026-11-21
+
+> 第二轮扫描的最后两条非协程问题。
+>
+> ### 1. 未标注变量在 float 与堆值之间改类型（崩溃 + 静默错值）
+>
+> ```python
+> v = "x"; v = 1.5      # 以前打印 4609434218613702656（float 的位模式）
+> c = 1.5; c = "y"      # 以前打印 4.647e-310（每次不同的垃圾值）
+> ```
+>
+> 根因是**表示形式**：float 在槽里是裸 double，str/list/dict 是堆指针。同一个槽
+> 装不下两种，降级层只能按旧类型重新解释。int/float/big 互串没问题（会按槽类型
+> 转换，`x = 0; x = 0.0` 一直正确），所以只拦「一边 float、另一边不是数值」。
+>
+> 曾经试过在降级层把槽降级成 unknown —— **没用**：unknown 槽里的裸 double 和
+> 整数无法区分，print 仍按整数读。彻底的解法是装箱，但那是新机制；本轮按项目
+> 一贯的「宁可报错，不可静默算错」处理。
+>
+> 回归：`tests/fail/float_rebind_str.py`、`tests/fail/float_rebind_float.py`；
+> `docs/compatibility.md` 登记该差异。
+>
+> ### 2. `zip(dict)` 之后 `zip(set)` 的段错误 —— 已不再复现
+>
+> 扫描报告里的崩溃形态（`for pair in zip(dict, dict)` 让 `pair` 定型为
+> `tuple[str,str]`，再 `for pair in zip(set, set)` 时按旧元素类型建对象、释放时
+> 把 int 当指针 dec）在 0.373 让单名 zip 目标走快速路径之后**已经消失** ——
+> 每轮重新构造元组，槽里不会留下旧元素类型的对象。现在与 CPython 一致抛
+> `RuntimeError: Set changed size during iteration`。
+>
+> 闸门：difftest **400/0**；全套件 **421 ran ok**、exit 0；check_size 通过。
+>
+> ### 仍未修（唯一一条）
+>
+> **`async with` 中 task 被 cancel → 引用计数二次释放。**
+>
+> ```python
+> class CM:
+>     async def __aenter__(self) -> int:
+>         await asyncio.sleep(0)
+>         return 1
+>     async def __aexit__(self, t, v, tb) -> bool:
+>         return False
+>
+> async def worker() -> str:
+>     async with CM() as v:
+>         await asyncio.sleep(10)
+>     return "done"
+>
+> task = asyncio.create_task(worker()); await asyncio.sleep(0); task.cancel()
+> ```
+>
+> 实测 `pyadamas: runtime error: refcount decrement on a freed object`。
+> 回溯（`addr2line` 解析）：
+>
+> ```
+> pa_rc_dec_slow
+> pyadamas_fn_1CM___aenter___1_resume   ac.py:7   ← `await asyncio.sleep(0)`
+> coro_step
+> pa_asyncio_run
+> ```
+>
+> 已知事实：`suspend_on_awaitable` 先 `rc_inc(w)` 把 awaitable 交给事件循环，
+> 再 `cleanup_gen_mark()` 释放本帧临时值；取消时循环释放它自己那一份，恢复后
+> 帧里仍有一次对该对象的 dec。需要把「挂起时临时栈的归属」在取消路径上理清
+> （取消不经过正常 resume 的所有权协商）。这条需要单独一轮，不做盲改。
+
 ## [0.373] - 2026-11-21
 
 > 第二轮扫描余项的两条：`%` 格式化支持 big、zip 迭代检查顺序。
