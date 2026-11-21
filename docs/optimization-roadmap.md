@@ -115,6 +115,8 @@
 | P1收尾 | u64 大字面量（词法）/定宽容器元素 coerce/u64 无符号排序/C FFI 窄无符号映射 | 0.349 | ✅ 默认 int 行为不变（hex/oct/bin 逐字不动）；超范围编译报错不静默窄化；int_promote 一字未改（332-335 全过）；asm 120/120。集成 |
 | stdlib5 | textwrap（CPython 3.14 口径全参数面）/string（Template/capwords/常量）/pprint sort_dicts+参数面 | 0.350 | ✅ 纯 stdlib 无 src 改动；pprint 1926 行 0 diff、textwrap 8490 行、string 1481 行对拍；pprint 无递归检测（无 id()）/容器元素退化（P2 边界）负面记录。集成 |
 | SIMD深化 | int 乘 map（pmuludq 全 i64 重建无守卫）/Convert i64→float（cvtdq2pd 逐位）/多 reduction 并行累加器 | 0.351 | ✅ 非基准 int 乘 2.36×/Convert 2.34×/多 reduction 1.38×；**复活 0.344 起死代码 reduction 路径并修 5 潜伏 bug**（int acc 出口覆盖写静默算错/跨块 list 基址 RC move-from NULL 段错误等）；基准不回归噪声带。集成 |
+| stdlib6 | statistics（mean/median 家族/mode/离散度/geometric/harmonic/quantiles/covariance/correlation/linear_regression） | 0.352 | ✅ 纯 pa 无 src 改动；380-385 CPython 对拍（3 条浮点精度边界钉住，pa 无 big 精确分数中间量）；NormalDist/weights 保守跳过。集成 |
+| UB修2 | lower_impl.h def 非负提示先算右值再取左值引用+守 size | 0.353 | ✅ 修预存求值顺序 UB 堆越界（ASan 编译器 118_suspend_expr 暴露）；asm 不变；继 0.345 后第二处编译器内存安全 bug。集成 |
 
 ### 夜间小结
 - **17 版集成推送（0.333-0.349）**，单槽位顺序（收回 4 代理并行减少早夭混乱）；harness 间歇早夭频繁，send_message 恢复套路管用。
