@@ -20,6 +20,19 @@ VReg Lowerer::lower_minmax(Call& c, bool is_min) {
     }
     CmpKind cop = is_min ? CmpKind::Lt : CmpKind::Gt;
     int best = new_temp_slot(acc_ty);
+    // big 之间的大小关系是运行时函数 pa_big_cmp（返回 -1/0/1），裸 Cmp 的
+    // codegen 没有 big 路径，会把 big 指针当整数比。这里统一收口。
+    auto take_new = [&](VReg cand, const TypePtr& ty) -> VReg {
+        VReg cmp_val = cand;
+        if (ty && ty->kind == TyKind::Big)
+            cmp_val = call_runtime(RtFn::BigCmp, t_int(), {cand, load_slot(best, ty)});
+        Inst cmp;
+        cmp.op = IrOp::Cmp;
+        cmp.cop = cop;
+        cmp.a = cmp_val;
+        cmp.b = (ty && ty->kind == TyKind::Big) ? const_int(0) : load_slot(best, acc_ty);
+        return def(t_bool(), std::move(cmp));
+    };
 
     if (c.args.size() == 1) {
         TypePtr seq_ty = tc_.type_of(c.args[0].get());
@@ -219,12 +232,7 @@ VReg Lowerer::lower_minmax(Call& c, bool is_min) {
 
         switch_to(body);
         VReg ev = coerce(elem_at(load_slot(idx, t_int())), elem_ty, acc_ty);
-        Inst cmpb;
-        cmpb.op = IrOp::Cmp;
-        cmpb.cop = cop;
-        cmpb.a = ev;
-        cmpb.b = load_slot(best, acc_ty);
-        VReg take = def(t_bool(), std::move(cmpb));
+        VReg take = take_new(ev, acc_ty);
         Inst bt;
         bt.op = IrOp::Branch;
         bt.a = take;
@@ -258,12 +266,7 @@ VReg Lowerer::lower_minmax(Call& c, bool is_min) {
     store_slot(best, v0);
     for (size_t i = 1; i < c.args.size(); ++i) {
         VReg v = coerce(expr(*c.args[i]), tc_.type_of(c.args[i].get()), acc_ty);
-        Inst cmp;
-        cmp.op = IrOp::Cmp;
-        cmp.cop = cop;
-        cmp.a = v;
-        cmp.b = load_slot(best, acc_ty);
-        VReg take = def(t_bool(), std::move(cmp));
+        VReg take = take_new(v, acc_ty);
         int choose = new_block("minmax.choose");
         int next = new_block("minmax.next");
         Inst br;

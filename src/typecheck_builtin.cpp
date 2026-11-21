@@ -173,11 +173,16 @@ TypePtr TypeChecker::builtin_call(const std::string& n, Call& c) {
         }
         if (n == "min" || n == "max") {
             if (a.empty()) return t_unknown();
-            if (std::any_of(a.begin(), a.end(), has_big_value))
-                err(c.line, c.col, "min()/max() with big are not supported");
-            if (a.size() == 1) return iter_elem(a[0], c.line, c.col);
+            // big 是支持的：比较走运行时 pa_big_cmp（见 lower_minmax）。
+            bool any_big = std::any_of(a.begin(), a.end(), has_big_value);
+            if (a.size() == 1) {
+                TypePtr e = iter_elem(a[0], c.line, c.col);
+                return has_big_value(e) ? t_big() : e;
+            }
             TypePtr acc = a[0];
             for (size_t i = 1; i < a.size(); ++i) acc = join(acc, a[i]);
+            // 混了 big 就整体按 big（big 吸收其它整数/浮点域）。
+            if (any_big) return t_big();
             return acc;
         }
         if (n == "sum") {
