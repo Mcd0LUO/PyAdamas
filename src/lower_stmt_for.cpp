@@ -332,7 +332,6 @@ void Lowerer::lower_for_range_core(For& f, VReg start, VReg stop, VReg step_v, b
 // 语义等价于 CPython 的惰性 enumerate：循环体里改 xs 会看到新元素（以前
 // 是先把整张表建好，属于快照语义）。
 void Lowerer::lower_for_enumerate(For& f, Call& c) {
-    auto& tup = static_cast<TupleExpr&>(*f.target);
     VReg seq = expr(*c.args[0]);
     TypePtr sty = tc_.type_of(c.args[0].get());
     TypePtr ety = t_unknown();
@@ -423,7 +422,6 @@ void Lowerer::lower_for_enumerate(For& f, Call& c) {
     switch_to(body);
     clean();
     VReg iv = load_slot(idx, t_int());
-    assign_to(*tup.elts[0], iv, t_int());
     VReg ev;
     if (sty->kind == TyKind::Dict || sty->kind == TyKind::Set) {
         ev = call_runtime(RtFn::DictKeyAt, ety, {seq_val(), iv});
@@ -436,7 +434,7 @@ void Lowerer::lower_for_enumerate(For& f, Call& c) {
         get.b = iv;
         ev = def(ety, std::move(get));
     }
-    assign_to(*tup.elts[1], ev, ety);
+    bind_iter_pair(*f.target, iv, t_int(), ev, ety);
 
     st_->loops.push_back({end, incr});
     st_->loop_cleanup_depth.push_back(st_->cleanups.size());
@@ -486,7 +484,6 @@ void Lowerer::lower_for_enumerate(For& f, Call& c) {
 
 // for a, b in zip(xs, ys)：双游标，不建元组表。长度取两者较小值。
 void Lowerer::lower_for_zip(For& f, Call& c) {
-    auto& tup = static_cast<TupleExpr&>(*f.target);
     VReg a = expr(*c.args[0]);
     VReg b = expr(*c.args[1]);
     TypePtr at = tc_.type_of(c.args[0].get());
@@ -675,7 +672,7 @@ void Lowerer::lower_for_zip(For& f, Call& c) {
         g1.b = iv;
         va = def(ea, std::move(g1));
     }
-    assign_to(*tup.elts[0], va, ea);
+
     VReg vb;
     if (bt->kind == TyKind::Dict || bt->kind == TyKind::Set) {
         vb = call_runtime(RtFn::DictKeyAt, eb, {bval(), iv});
@@ -688,7 +685,7 @@ void Lowerer::lower_for_zip(For& f, Call& c) {
         g2.b = iv;
         vb = def(eb, std::move(g2));
     }
-    assign_to(*tup.elts[1], vb, eb);
+    bind_iter_pair(*f.target, va, ea, vb, eb);
 
     st_->loops.push_back({end, incr});
     st_->loop_cleanup_depth.push_back(st_->cleanups.size());
@@ -736,6 +733,22 @@ void Lowerer::lower_for_zip(For& f, Call& c) {
     }
 }
 
+
+// `for kv in enumerate(d)` / `for p in zip(a, b)` 这种**单个名字**的目标：
+// 快速路径要能把两个值绑成一个元组。可解构的目标仍走原来的逐元素赋值。
+void Lowerer::bind_iter_pair(Expr& target, VReg a, TypePtr aty, VReg b, TypePtr bty) {
+    if (target.kind == ExprKind::Name) {
+        TypePtr tt = mk_tuple({aty, bty});
+        std::vector<VReg> vals{a, b};
+        std::vector<TypePtr> tys{aty, bty};
+        VReg tupv = build_seq_vregs(std::move(vals), std::move(tys), tt, true);
+        assign_to(target, tupv, tt);
+        return;
+    }
+    auto& tup = static_cast<TupleExpr&>(target);
+    assign_to(*tup.elts[0], a, aty);
+    assign_to(*tup.elts[1], b, bty);
+}
 void Lowerer::lower_for_seq(For& f) {
     // for i, v in enumerate(xs) / for a, b in zip(xs, ys)：直接计数循环，
     // 不物化 [下标, 值] 的元组表——每个元素省一次堆分配。
@@ -743,14 +756,20 @@ void Lowerer::lower_for_seq(For& f) {
         auto& c = static_cast<Call&>(*f.iter);
         if (c.func->kind == ExprKind::Name && c.keywords.empty()) {
             const std::string& fn = static_cast<Name&>(*c.func).id;
+            // 目标是单个名字时也可以走快速路径（由 bind_iter_pair 把两个值
+            // 构成元组再赋值），这样 `for kv in enumerate(d)` 才有迭代守卫。
+            auto pair_target = [&]() {
+                return can_destructure(f.target.get(), 2) ||
+                       f.target->kind == ExprKind::Name;
+            };
             if (fn == "enumerate" && is_builtin("enumerate") && c.args.size() == 1 &&
-                can_destructure(f.target.get(), 2) &&
+                pair_target() &&
                 is_countable(tc_.type_of(c.args[0].get()))) {
                 lower_for_enumerate(f, c);
                 return;
             }
             if (fn == "zip" && is_builtin("zip") && c.args.size() == 2 &&
-                can_destructure(f.target.get(), 2) &&
+                pair_target() &&
                 is_countable(tc_.type_of(c.args[0].get())) &&
                 is_countable(tc_.type_of(c.args[1].get()))) {
                 lower_for_zip(f, c);

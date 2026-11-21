@@ -659,6 +659,7 @@ private:
     void lower_for_range_core(For& f, VReg start, VReg stop, VReg step_v, bool dyn_step,
                                int64_t step, const Call* c);
     void lower_for_seq(For& f);
+    void bind_iter_pair(Expr& target, VReg a, TypePtr aty, VReg b, TypePtr bty);
     // for i, v in enumerate(xs) / for a, b in zip(xs, ys)：直接计数循环，
     // 不物化 [下标, 值] 的元组表。
     void lower_for_enumerate(For& f, Call& c);
