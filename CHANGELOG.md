@@ -4,6 +4,42 @@
 
 早期阶段没有逐条留痕，按阶段归纳；0.4 之后逐条记录。
 
+## [0.365] - 2026-11-21
+
+> `except` 体里 `raise` 跳过同一 try 的 `finally` —— 0.364 之后剩下的那条。
+>
+> 进入 except 体时已经 `pa_eh_leave` 出了本 try 的保护区，**handler 体里再
+> raise 不会经过本 try 的 landing pad**，于是 finally 被整段跳过：
+>
+>     try:
+>         raise ValueError("v")
+>     except ValueError:
+>         raise KeyError("k")
+>     finally:
+>         print("A-fin")      # 以前不打印；CPython 会打印
+>
+> handler 体降级时会给 `Cleanup::FinallyBody` 登记一份内联的 finally 体，
+> `return`/`break`/`continue` 早就靠它跑（0.362 的修法）。`raise` 这条退出路径
+> 之前完全没接上。
+>
+> 修法与两个坑：
+>
+> - **显式 `raise X`**：找到**最内层**那一份 FinallyBody，用 `emit_cleanup_exits`
+>   跑到它（含）为止。第一版跑到底（`down_to = 0`），结果嵌套形态里外层 finally
+>   被内联一次、又被结构化展开跑一次，`C-outer-fin` 打印两遍 —— 只跑到最内层才对；
+> - **裸 `raise`（重抛）**：不能走 `emit_cleanup_exits`，因为清理项里的 `ExcDone`
+>   会把 `current_exc` free 掉（运行时 "No active exception to reraise"）。只内联
+>   那一份 FinallyBody 体（`stmts(*fbody)`，并把 `cleanups` 临时截断到它之前），
+>   其余清理项一律不碰。
+>
+> 回归 `tests/run/436_raise_in_except_finally.py`：显式 raise、裸重抛、嵌套两层
+> finally、`raise ... from`、以及 except 里 return 的对照，与 CPython 逐字节一致。
+>
+> 闸门：difftest **386/0**；普通与 ASan 套件各 **407 ran ok**、0 ASan 报告；
+> check_size 通过。
+>
+> 仍未修：`zip` 中迭代 dict 时改大小不报错（`for k in d` 与 `enumerate(d)` 已修）。
+
 ## [0.364] - 2026-11-21
 
 > `async with` 的 `__aexit__` 异常路径泄漏修掉（0.363 里定位到但没动的那条）。
