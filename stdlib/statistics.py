@@ -1,8 +1,9 @@
 """statistics 模块（pyadamas 自举，分阶段落地）。
 
-本阶段（集中趋势）：mean / fmean / median / median_low / median_high /
-median_grouped / mode / multimode。StatisticsError(ValueError)。后续阶段
-补离散度、分位数与二元关系。
+阶段一（集中趋势）：mean / fmean / median / median_low / median_high /
+median_grouped / mode / multimode。
+阶段二（离散度）：pvariance / variance / pstdev / stdev（可选 mu/xbar）。
+后续阶段补分位数与二元关系。
 
 精度口径：pa 无 BigInt/Fraction，统一 float + math.fsum 近似；与 CPython
 精确有理数中间量的差异见最终模块头（后续 commit 补齐）。
@@ -22,6 +23,60 @@ def _fmean(data: list[float]) -> float:
     if n < 1:
         raise StatisticsError("mean requires at least one data point")
     return math.fsum(data) / n
+
+
+def _center(data: list[float], mu: object) -> float:
+    if mu is None:
+        return _fmean(data)
+    return float(mu)
+
+
+def _ss(data: list[float], mu: object) -> float:
+    """sum((x - mu)**2)；mu 为 None 时用 fsum 均值。"""
+    n = len(data)
+    if n < 1:
+        return 0.0
+    c = _center(data, mu)
+    devs: list[float] = []
+    for v in data:
+        d = v - c
+        devs.append(d * d)
+    return math.fsum(devs)
+
+
+def _sqrtprod(x: float, y: float) -> float:
+    """sqrt(x*y)，带溢出/下溢缩放（同 CPython _sqrtprod 的思路）。"""
+    h = math.sqrt(x * y)
+    if not math.isfinite(h):
+        if math.isinf(h) and not math.isinf(x) and not math.isinf(y):
+            scale = math.pow(2.0, -512.0)
+            return _sqrtprod(scale * x, scale * y) / scale
+        return h
+    if h == 0.0:
+        if x != 0.0 and y != 0.0:
+            scale = math.pow(2.0, 537.0)
+            return _sqrtprod(scale * x, scale * y) / scale
+        return h
+    d = x * y - h * h
+    return h + d / (2.0 * h)
+
+
+def _rank(data: list[float], start: float) -> list[float]:
+    """平均并列秩（CPython _rank 的 ties='average' 口径）。"""
+    n = len(data)
+    out: list[float] = []
+    for i in range(n):
+        v = data[i]
+        less = 0
+        equal = 0
+        for j in range(n):
+            if data[j] < v:
+                less += 1
+            elif data[j] == v:
+                equal += 1
+        rank = start - 1.0 + less + (equal + 1.0) / 2.0
+        out.append(rank)
+    return out
 
 
 # ── 集中趋势 ──────────────────────────────────────────────────────────
@@ -134,3 +189,29 @@ def multimode(data: list[int]) -> list[int]:
             out.append(values[k])
         k += 1
     return out
+
+
+# ── 离散度 ────────────────────────────────────────────────────────────
+
+def pvariance(data: list[float], mu: object = None) -> float:
+    """总体方差；可选 mu 参数避免重复求均值。"""
+    n = len(data)
+    if n < 1:
+        raise StatisticsError("pvariance requires at least one data point")
+    return _ss(data, mu) / n
+
+
+def variance(data: list[float], xbar: object = None) -> float:
+    """样本方差（n-1 自由度）；可选 xbar 参数。"""
+    n = len(data)
+    if n < 2:
+        raise StatisticsError("variance requires at least two data points")
+    return _ss(data, xbar) / (n - 1)
+
+
+def pstdev(data: list[float], mu: object = None) -> float:
+    return math.sqrt(pvariance(data, mu))
+
+
+def stdev(data: list[float], xbar: object = None) -> float:
+    return math.sqrt(variance(data, xbar))
