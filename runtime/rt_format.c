@@ -493,6 +493,47 @@ static void pb_append(PBuf* b, const char* s, int64_t n) {
     b->p[b->len] = '\0';
 }
 
+// % 风格整数格式化：CPython 的 precision 是「最少位数」（左侧补 0），且
+// 给了 precision 时 0 标志**仍然生效**（C printf 会忽略 0 标志，两者不同：
+// "%08.5d" % -42 在 CPython 是 "-0000042"，printf 是 "   -00042"）。
+// 符号与 precision 的 0 都算在宽度之外（"%.5d" % -42 -> "-00042"）。
+// 只给 % 路径用：format()/f-string 的整数说明符给 precision 是 ValueError。
+static PyAdamasStr* pct_fmt_int(char conv, uint64_t mag, char sign, int left, int zero,
+                                int width, int prec) {
+    char digits[80];
+    unsigned base = (conv == 'x' || conv == 'X') ? 16 : (conv == 'o' ? 8 : 10);
+    fmt_uint(mag, base, conv == 'X', digits);
+    int dlen = (int)strlen(digits);
+    int ndig = prec > dlen ? prec : dlen;
+    int total = ndig + (sign ? 1 : 0);
+    int pad = width > total ? width - total : 0;
+    char* buf = (char*)malloc((size_t)(total + pad) + 1);
+    if (!buf) panic_c("out of memory");
+    int k = 0;
+    if (left) {
+        if (sign) buf[k++] = sign;
+        for (int i = ndig - dlen; i > 0; --i) buf[k++] = '0';
+        memcpy(buf + k, digits, (size_t)dlen);
+        k += dlen;
+        for (int i = 0; i < pad; ++i) buf[k++] = ' ';
+    } else if (zero) {
+        if (sign) buf[k++] = sign;
+        for (int i = 0; i < pad; ++i) buf[k++] = '0';
+        for (int i = ndig - dlen; i > 0; --i) buf[k++] = '0';
+        memcpy(buf + k, digits, (size_t)dlen);
+        k += dlen;
+    } else {
+        for (int i = 0; i < pad; ++i) buf[k++] = ' ';
+        if (sign) buf[k++] = sign;
+        for (int i = ndig - dlen; i > 0; --i) buf[k++] = '0';
+        memcpy(buf + k, digits, (size_t)dlen);
+        k += dlen;
+    }
+    PyAdamasStr* out = str_new(buf, k);
+    free(buf);
+    return out;
+}
+
 static PyAdamasStr* fmt_with(const char* spec, int n, int64_t raw, double d, PyAdamasStr* s, char kind) {
     PyAdamasStr sp;
     sp.len = n;
@@ -589,6 +630,27 @@ PyAdamasStr* pa_percent_format(PyAdamasStr* pat, PyAdamasList* args, PyAdamasStr
             case 'i':
             case 'u':
             case 'n':
+                if (prec >= 0) {
+                    uint64_t mag;
+                    char sign = 0;
+                    if (dt == 'u') {
+                        mag = (uint64_t)raw;
+                    } else if (dt == 'i' || dt == 'b' || dt == 'f') {
+                        int64_t iv = dt == 'f' ? (int64_t)dv : raw;
+                        if (iv < 0) {
+                            sign = '-';
+                            mag = (uint64_t)(-(iv + 1)) + 1;
+                        } else {
+                            mag = (uint64_t)iv;
+                            if (plus) sign = '+';
+                            else if (space) sign = ' ';
+                        }
+                    } else {
+                        pa_raise_c("TypeError", "%%d format: a number is required");
+                    }
+                    piece = pct_fmt_int('d', mag, sign, left, zero, width, prec);
+                    break;
+                }
                 spec[si] = 'd';
                 if (dt == 'u')
                     piece = fmt_with(spec, si + 1, raw, 0.0, NULL, 'u');
@@ -604,6 +666,22 @@ PyAdamasStr* pa_percent_format(PyAdamasStr* pat, PyAdamasList* args, PyAdamasStr
             case 'o':
                 if (dt != 'i' && dt != 'b' && dt != 'u')
                     pa_raise_c("TypeError", "%%x format: an integer is required");
+                if (prec >= 0) {
+                    uint64_t mag;
+                    char sign = 0;
+                    if (dt == 'u') {
+                        mag = (uint64_t)raw;
+                    } else if (raw < 0) {
+                        sign = '-';
+                        mag = (uint64_t)(-(raw + 1)) + 1;
+                    } else {
+                        mag = (uint64_t)raw;
+                        if (plus) sign = '+';
+                        else if (space) sign = ' ';
+                    }
+                    piece = pct_fmt_int(conv, mag, sign, left, zero, width, prec);
+                    break;
+                }
                 spec[si] = conv;
                 piece = fmt_with(spec, si + 1, raw, 0.0, NULL, dt == 'u' ? 'u' : 'i');
                 break;
