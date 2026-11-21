@@ -277,6 +277,10 @@ void TypeChecker::stmt_aug_assign(AugAssign& a) {
         // x += y：优先原地 dunder，没有再看普通 __add__ / __radd__。
         if (TypePtr irt = dunder_aug_ret(a.op, cur_ty, vt)) {
             assign(*a.target, irt, a.line, a.col);
+            // 注意：这里**不能**同步 expr_types_[target] —— 降级期
+            // lower_aug_assign 先用 target 的类型读左操作数（类实例要走
+            // __iadd__），同步成返回值类型会让读操作按 int 解引用对象指针
+            // （121_decorated_dunder 的 w += 2 实测垃圾值）。
             return;
         }
         Tok bin = aug_to_bin(a.op);
@@ -288,6 +292,13 @@ void TypeChecker::stmt_aug_assign(AugAssign& a) {
         // 降级层在赋值点按目标类型正常化（回绕是 pa 的确定语义）。
         if (is_fixed_int(cur_ty) && rt && is_int_kind(rt->kind)) rt = cur_ty;
         assign(*a.target, rt, a.line, a.col);
+        // 目标表达式在 stmt_aug_assign 开头被求值过，expr_types_ 里缓存的是
+        // **加宽前**的类型（int）。assign 已经把变量/元素/字段的槽加宽成
+        // 结果类型（int += float → float），但缓存不刷新的话，降级期读目标
+        // 还是按 int 读：列表/字典里实际存的是 double，读出来是 1.0 的位
+        // 模式 4607182418800017408（打印成 4.6e18），-O2 还会因为 int|double
+        // 混算让汇编失败。这里把缓存同步成赋值后的类型。
+        expr_types_[a.target.get()] = rt;
         return;
     }
 
