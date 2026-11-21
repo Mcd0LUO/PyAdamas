@@ -91,6 +91,13 @@ void Lowerer::print_value(VReg v, TypePtr ty, int line, int col) {
             call_void(RtFn::PrintStr, {s});
             break;
         }
+        case TyKind::Big: {
+            // P3 big：十进制输出（pa_big_str，任意长）。
+            VReg s = call_runtime(RtFn::BigStr, t_str(), {v});
+            push_temp(s);
+            call_void(RtFn::PrintStr, {s});
+            break;
+        }
         case TyKind::Optional: {
             TypePtr inner = ty->sub.empty() ? t_unknown() : ty->sub[0];
             int some = new_block("print.opt.some");

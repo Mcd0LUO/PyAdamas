@@ -946,6 +946,9 @@ private:
     VReg lower_unary(UnaryOp& u);
     VReg lower_boolop(BoolOp& b);
     VReg lower_compare(Compare& c);
+    // 单步比较的公共降级（P3：链式比较也按操作数静态类型分派）。
+    VReg lower_cmp_single(VReg l, TypePtr lt, VReg r, TypePtr rt, CmpOp op,
+                          int line, int col);
     // 容器相等：list/tuple 逐元素比，dict 按键值对（顺序无关），set 按键。
     // 元素类型在编译期已知，所以比较方式也能定下来；不适用时返回 kNoReg。
     VReg lower_container_eq(VReg l, TypePtr lt, VReg r, TypePtr rt);

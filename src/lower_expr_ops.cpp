@@ -300,6 +300,55 @@ VReg Lowerer::lower_binop(BinOp& b) {
         in.args = {l, r};
         return def_heap(ty, std::move(in));
     }
+    // ── P3 big：任意精度算术（与 Complex 同形态，降级期发 CallRt）──
+    // 两侧先转换到 big（int/bool 加宽、float 按 int(float) 截断——pa 格
+    // 口径，文档化边界），运算全在 rt_big.c（CPython 黄金标准）。
+    if (ty && ty->kind == TyKind::Big) {
+        auto as_big = [&](VReg v, TypePtr from) {
+            return (from && from->kind == TyKind::Big) ? v : convert_to(v, from, t_big());
+        };
+        l = as_big(l, lt);
+        r = as_big(r, rt);
+        RtFn fn = RtFn::BigAdd;
+        switch (b.op) {
+            case Tok::PLUS: fn = RtFn::BigAdd; break;
+            case Tok::MINUS: fn = RtFn::BigSub; break;
+            case Tok::STAR: fn = RtFn::BigMul; break;
+            case Tok::DOUBLESLASH: fn = RtFn::BigFloorDiv; break;
+            case Tok::PERCENT: fn = RtFn::BigMod; break;
+            case Tok::DOUBLESTAR: fn = RtFn::BigPow; break;
+            case Tok::AMPER: fn = RtFn::BigAnd; break;
+            case Tok::VBAR: fn = RtFn::BigOr; break;
+            case Tok::CIRCUMFLEX: fn = RtFn::BigXor; break;
+            case Tok::LSHIFT: fn = RtFn::BigLShift; break;
+            case Tok::RSHIFT: fn = RtFn::BigRShift; break;
+            default:
+                err(b.line, b.col,
+                    std::format("operator '{}' on big is not supported", tok_name(b.op)));
+                return const_none();
+        }
+        Inst in;
+        in.op = IrOp::CallRt;
+        in.imm = static_cast<int64_t>(fn);
+        in.args = {l, r};
+        return def_heap(ty, std::move(in));
+    }
+    // big 的真除：结果是 float，但必须按**精确整数商**正确舍入
+    // （pa_big_truediv），不能先转 double 再除（大数会丢精度）。
+    if (ty && ty->kind == TyKind::Float &&
+        ((lt && lt->kind == TyKind::Big) || (rt && rt->kind == TyKind::Big)) &&
+        b.op == Tok::SLASH) {
+        auto as_big = [&](VReg v, TypePtr from) {
+            return (from && from->kind == TyKind::Big) ? v : convert_to(v, from, t_big());
+        };
+        l = as_big(l, lt);
+        r = as_big(r, rt);
+        Inst in;
+        in.op = IrOp::CallRt;
+        in.imm = static_cast<int64_t>(RtFn::BigTrueDiv);
+        in.args = {l, r};
+        return def(t_float(), std::move(in));
+    }
     if (ty && ty->kind == TyKind::Str) {
         if (lt && lt->kind == TyKind::Exception) l = convert_to(l, lt, t_str());
         if (rt && rt->kind == TyKind::Exception) r = convert_to(r, rt, t_str());
@@ -373,6 +422,17 @@ VReg Lowerer::lower_unary(UnaryOp& u) {
             Inst in;
             in.op = IrOp::CallRt;
             in.imm = static_cast<int64_t>(RtFn::ComplexNeg);
+            in.args = {v};
+            return def_heap(ty, std::move(in));
+        }
+    }
+    // P3 big 的一元运算：-big / ~big（+big 恒等）。
+    if (ty && ty->kind == TyKind::Big) {
+        if (u.op == Tok::PLUS) return v;
+        if (u.op == Tok::MINUS || u.op == Tok::TILDE) {
+            Inst in;
+            in.op = IrOp::CallRt;
+            in.imm = static_cast<int64_t>(u.op == Tok::MINUS ? RtFn::BigNeg : RtFn::BigNot);
             in.args = {v};
             return def_heap(ty, std::move(in));
         }
@@ -584,47 +644,10 @@ VReg Lowerer::lower_container_eq(VReg l, TypePtr lt, VReg r, TypePtr rt) {
     return kNoReg;
 }
 
-VReg Lowerer::lower_compare(Compare& c) {
-    if (c.ops.size() == 1) {
-        CmpOp op0 = c.ops[0];
-        TypePtr lt0 = tc_.type_of(c.left.get());
-        TypePtr rt0 = tc_.type_of(c.comparators[0].get());
-        bool lto = lt0 && lt0->kind == TyKind::TypeObj;
-        bool rto = rt0 && rt0->kind == TyKind::TypeObj;
-        if ((lto || rto) && (op0 == CmpOp::Eq || op0 == CmpOp::Ne ||
-                             op0 == CmpOp::Is || op0 == CmpOp::IsNot)) {
-            auto operand_name = [&](Expr* e, TypePtr t) -> std::optional<std::string> {
-                if (t && t->kind == TyKind::TypeObj && !t->sub.empty() && t->sub[0])
-                    return py_type_name(t->sub[0]);
-                if (e && e->kind == ExprKind::Name) {
-                    auto& id = static_cast<Name*>(e)->id;
-                    if (!is_bound_here(id)) {
-                        if (auto cit = classes_.find(id);
-                            cit != classes_.end() && cit->second)
-                            return cit->second->name;
-                        if (auto iit = imported_classes_.find(id);
-                            iit != imported_classes_.end())
-                            return iit->second.cls ? iit->second.cls->name : id;
-                        if (TypeChecker::is_builtin_name(id)) return id;
-                    }
-                }
-                return std::nullopt;
-            };
-            auto ln = operand_name(c.left.get(), lt0);
-            auto rn = operand_name(c.comparators[0].get(), rt0);
-            if (ln && rn) {
-                if (lto) (void)expr(*c.left);  // 保留 type(x) 里 x 的求值副作用
-                if (rto) (void)expr(*c.comparators[0]);
-                bool eq = *ln == *rn;
-                if (op0 == CmpOp::Ne || op0 == CmpOp::IsNot) eq = !eq;
-                return const_bool(eq);
-            }
-        }
-        VReg l = expr(*c.left);
-        VReg r = expr(*c.comparators[0]);
-        CmpOp op = c.ops[0];
-        TypePtr lt = tc_.type_of(c.left.get());
-        TypePtr rt = tc_.type_of(c.comparators[0].get());
+// 单步比较的公共降级（单 op 与链式比较共用）：big/datetime/complex/
+// unknown/定宽提升都在这里分派，链式比较不再退化成机器字比。
+VReg Lowerer::lower_cmp_single(VReg l, TypePtr lt, VReg r, TypePtr rt, CmpOp op,
+                               int line, int col) {
         // datetime / timedelta 按值比较：调运行时的三路比较，再和 0 比。
         if (lt && rt && lt->kind == rt->kind &&
             (lt->kind == TyKind::DateTime || lt->kind == TyKind::TimeDelta) &&
@@ -693,7 +716,7 @@ VReg Lowerer::lower_compare(Compare& c) {
                 std::vector<TypePtr> tys{lt};
                 VReg cv = dunder_call(r, rt, "__contains__", {l}, t_bool(), &tys);
                 if (cv == kNoReg) {
-                    err(c.line, c.col,
+                    err(line, col,
                         std::format("'{}' does not support 'in' (no usable __contains__)",
                                     type_name(rt)));
                     return const_bool(false);
@@ -718,13 +741,13 @@ VReg Lowerer::lower_compare(Compare& c) {
             } else if (rt && (rt->kind == TyKind::Str || rt->kind == TyKind::Bytes)) {
                 if (lt && lt->kind != TyKind::Str && lt->kind != TyKind::Bytes &&
                     lt->kind != TyKind::Unknown) {
-                    err(c.line, c.col,
+                    err(line, col,
                         std::format("'in <str>' requires a string, got '{}'", type_name(lt)));
                     return const_bool(false);
                 }
                 flag = call_runtime(RtFn::StrContains, t_bool(), {r, l});
             } else {
-                err(c.line, c.col,
+                err(line, col,
                     std::format("'in' on '{}' is not supported by the code generator yet",
                                 type_name(rt)));
                 return const_bool(false);
@@ -740,7 +763,7 @@ VReg Lowerer::lower_compare(Compare& c) {
         }
         if ((lt && lt->kind == TyKind::Complex) || (rt && rt->kind == TyKind::Complex)) {
             if (op != CmpOp::Eq && op != CmpOp::Ne) {
-                err(c.line, c.col, "complex values are not orderable");
+                err(line, col, "complex values are not orderable");
                 return const_bool(false);
             }
             auto as_complex = [&](VReg v, TypePtr from) {
@@ -761,6 +784,60 @@ VReg Lowerer::lower_compare(Compare& c) {
             un.uop = UnKind::Not;
             un.a = eq;
             return def(t_bool(), std::move(un));
+        }
+        // ── P3 big 比较：big/big、big/int 走 pa_big_cmp（两侧先转 big）；
+        // big/float 用**精确**混比（CPython int/float 混比不走 double 近似）。
+        {
+            bool lb = lt && lt->kind == TyKind::Big;
+            bool rb = rt && rt->kind == TyKind::Big;
+            if ((lb || rb) && !is_unknown(lt) && !is_unknown(rt) &&
+                is_num(lt) && is_num(rt)) {
+                auto as_big = [&](VReg v, TypePtr from) {
+                    return (from && from->kind == TyKind::Big) ? v
+                                                               : convert_to(v, from, t_big());
+                };
+                if (ir_is_float(lt) || ir_is_float(rt)) {
+                    // NaN（cmp=-2）：除 != 外全 false。
+                    VReg bv = lb ? l : r;
+                    VReg fv = ir_is_float(lt) ? l : r;
+                    VReg cv = call_runtime(RtFn::BigCmpF64, t_int(), {bv, fv});
+                    if (op == CmpOp::Eq || op == CmpOp::Ne) {
+                        Inst in;
+                        in.op = IrOp::Cmp;
+                        in.cop = op == CmpOp::Eq ? CmpKind::Eq : CmpKind::Ne;
+                        in.a = cv;
+                        in.b = const_int(0);
+                        return def(t_bool(), std::move(in));
+                    }
+                    Inst in;
+                    in.op = IrOp::Cmp;
+                    in.cop = map_cmp(op);
+                    in.a = cv;
+                    in.b = const_int(0);
+                    VReg ord = def(t_bool(), std::move(in));
+                    Inst nn;
+                    nn.op = IrOp::Cmp;
+                    nn.cop = CmpKind::Ne;
+                    nn.a = cv;
+                    nn.b = const_int(-2);
+                    VReg notnan = def(t_bool(), std::move(nn));
+                    Inst an;
+                    an.op = IrOp::Bin;
+                    an.bop = BinKind::BitAnd;
+                    an.a = ord;
+                    an.b = notnan;
+                    return def(t_bool(), std::move(an));
+                }
+                l = as_big(l, lt);
+                r = as_big(r, rt);
+                VReg cv = call_runtime(RtFn::BigCmp, t_int(), {l, r});
+                Inst in;
+                in.op = IrOp::Cmp;
+                in.cop = map_cmp(op);
+                in.a = cv;
+                in.b = const_int(0);
+                return def(t_bool(), std::move(in));
+            }
         }
         // unknown 域的动态比较：任一侧 unknown 时按运行期标签分派
         // （int / boxed float / str 混比；静态类型已知的路径不进这里）。
@@ -792,6 +869,50 @@ VReg Lowerer::lower_compare(Compare& c) {
         in.a = l;
         in.b = r;
         return def(t_bool(), std::move(in));
+}
+
+VReg Lowerer::lower_compare(Compare& c) {
+    if (c.ops.size() == 1) {
+        CmpOp op0 = c.ops[0];
+        TypePtr lt0 = tc_.type_of(c.left.get());
+        TypePtr rt0 = tc_.type_of(c.comparators[0].get());
+        bool lto = lt0 && lt0->kind == TyKind::TypeObj;
+        bool rto = rt0 && rt0->kind == TyKind::TypeObj;
+        if ((lto || rto) && (op0 == CmpOp::Eq || op0 == CmpOp::Ne ||
+                             op0 == CmpOp::Is || op0 == CmpOp::IsNot)) {
+            auto operand_name = [&](Expr* e, TypePtr t) -> std::optional<std::string> {
+                if (t && t->kind == TyKind::TypeObj && !t->sub.empty() && t->sub[0])
+                    return py_type_name(t->sub[0]);
+                if (e && e->kind == ExprKind::Name) {
+                    auto& id = static_cast<Name*>(e)->id;
+                    if (!is_bound_here(id)) {
+                        if (auto cit = classes_.find(id);
+                            cit != classes_.end() && cit->second)
+                            return cit->second->name;
+                        if (auto iit = imported_classes_.find(id);
+                            iit != imported_classes_.end())
+                            return iit->second.cls ? iit->second.cls->name : id;
+                        if (TypeChecker::is_builtin_name(id)) return id;
+                    }
+                }
+                return std::nullopt;
+            };
+            auto ln = operand_name(c.left.get(), lt0);
+            auto rn = operand_name(c.comparators[0].get(), rt0);
+            if (ln && rn) {
+                if (lto) (void)expr(*c.left);  // 保留 type(x) 里 x 的求值副作用
+                if (rto) (void)expr(*c.comparators[0]);
+                bool eq = *ln == *rn;
+                if (op0 == CmpOp::Ne || op0 == CmpOp::IsNot) eq = !eq;
+                return const_bool(eq);
+            }
+        }
+        VReg l = expr(*c.left);
+        VReg r = expr(*c.comparators[0]);
+        CmpOp op = c.ops[0];
+        TypePtr lt = tc_.type_of(c.left.get());
+        TypePtr rt = tc_.type_of(c.comparators[0].get());
+        return lower_cmp_single(l, lt, r, rt, op, c.line, c.col);
     }
 
     for (auto op : c.ops) {
@@ -802,26 +923,23 @@ VReg Lowerer::lower_compare(Compare& c) {
     }
 
     // 链式比较：需要短路，用槽保存中间值。
+    // P3：每个比较数按**自己的静态类型**落借用槽（big/str 等必须按值
+    // 比；统一按 unknown 装载会退化成机器字比），每步走 lower_cmp_single。
     int res = new_temp_slot(t_bool());
-    // 槽类型取左操作数：链式比较里存的是同一个值，类型决定真值判断。
-    // 它只是借用在表达式内传递，生命周期由临时栈负责。
-    int cur_slot = new_borrow_slot(tc_.type_of(c.left.get()));
     store_slot(res, const_bool(true));
-    store_borrow_slot(cur_slot, expr(*c.left));
+    TypePtr prev_ty = tc_.type_of(c.left.get());
+    int prev_slot = new_borrow_slot(prev_ty);
+    store_borrow_slot(prev_slot, expr(*c.left));
 
     int fail = new_block("cmp.fail");
     int done = new_block("cmp.end");
 
     for (size_t i = 0; i < c.ops.size(); ++i) {
-        VReg l = load_slot(cur_slot, t_unknown());
+        VReg l = load_slot(prev_slot, prev_ty);
+        TypePtr rty = tc_.type_of(c.comparators[i].get());
         VReg r = expr(*c.comparators[i]);
         int cont = new_block("cmp.next");
-        Inst cmp;
-        cmp.op = IrOp::Cmp;
-        cmp.cop = map_cmp(c.ops[i]);
-        cmp.a = l;
-        cmp.b = r;
-        VReg cr = def(t_bool(), std::move(cmp));
+        VReg cr = lower_cmp_single(l, prev_ty, r, rty, c.ops[i], c.line, c.col);
         Inst br;
         br.op = IrOp::Branch;
         br.a = cr;
@@ -830,7 +948,9 @@ VReg Lowerer::lower_compare(Compare& c) {
         emit(std::move(br));
 
         switch_to(cont);
-        store_borrow_slot(cur_slot, r);
+        prev_slot = new_borrow_slot(rty);
+        store_borrow_slot(prev_slot, r);
+        prev_ty = rty;
         if (i + 1 == c.ops.size()) {
             Inst j;
             j.op = IrOp::Jump;

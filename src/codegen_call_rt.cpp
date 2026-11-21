@@ -1007,6 +1007,43 @@ void AsmGen::gen_rt_args(const Inst& in, RtFn fn) {
         case RtFn::SubprocessRun:
             gen_rt_subprocess_run(in);
             break;
+        // ── P3 big：指针/整数实参走整型寄存器，f64 实参走 xmm ──────
+        case RtFn::BigFromI64:
+        case RtFn::BigToI64:
+        case RtFn::BigToF64:
+        case RtFn::BigTruth:
+        case RtFn::BigNeg:
+        case RtFn::BigAbs:
+        case RtFn::BigNot:
+        case RtFn::BigStr:
+        case RtFn::AnyToBig:
+            gen_rt_i1(in);
+            break;
+        case RtFn::BigFromStr:
+        case RtFn::BigAdd:
+        case RtFn::BigSub:
+        case RtFn::BigMul:
+        case RtFn::BigFloorDiv:
+        case RtFn::BigMod:
+        case RtFn::BigPow:
+        case RtFn::BigTrueDiv:
+        case RtFn::BigCmp:
+        case RtFn::BigEq:
+        case RtFn::BigAnd:
+        case RtFn::BigOr:
+        case RtFn::BigXor:
+        case RtFn::BigLShift:
+        case RtFn::BigRShift:
+        case RtFn::BigToBase:
+        case RtFn::BigFmt:
+            gen_rt_i2(in);
+            break;
+        case RtFn::BigFromF64:
+            gen_rt_f1(in);
+            break;
+        case RtFn::BigCmpF64:
+            gen_rt_i1f1(in);
+            break;
     }
 }
 

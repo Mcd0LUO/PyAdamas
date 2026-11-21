@@ -574,6 +574,36 @@ enum class RtFn : uint16_t {
     TbFrames,              // (tb*) -> list*  __pa_tb_frames：list[(file,line,func)]（+1）
     ReprSet,               // (set*) -> str*  静态 set 的 repr（探针分不出 set/dict）
     ReprBytes,             // (bytes*) -> str*  静态 bytes 的 repr（bytes/str 同表示）
+    // ── P3 big（0.357，docs/numeric-types-design.md §1/§4）──────────
+    // 追加在末尾，不改既有编号。操作数是借用，返回值 rc=1（产生者引用）。
+    BigFromI64,            // (i64) -> big*
+    BigFromF64,            // (f64) -> big*  int(float) 向零截断
+    BigFromStr,            // (str*, i64 base) -> big*
+    BigToI64,              // (big*) -> i64  cast 语义：低 64 位回绕
+    BigToF64,              // (big*) -> f64  正确舍入；过大 OverflowError
+    BigAdd,                // (big*, big*) -> big*
+    BigSub,                // (big*, big*) -> big*
+    BigMul,                // (big*, big*) -> big*
+    BigFloorDiv,           // (big*, big*) -> big*  向下取整；除零 ZeroDivisionError
+    BigMod,                // (big*, big*) -> big*  余数与除数同号
+    BigPow,                // (big*, big*) -> big*  负指数 ValueError（文档化边界）
+    BigTrueDiv,            // (big*, big*) -> f64  正确舍入
+    BigCmp,                // (big*, big*) -> i64  -1/0/1
+    BigCmpF64,             // (big*, f64) -> i64  精确混比；NaN=-2
+    BigEq,                 // (big*, big*) -> i64 bool
+    BigTruth,              // (big*) -> i64 bool
+    BigNeg,                // (big*) -> big*
+    BigAbs,                // (big*) -> big*
+    BigNot,                // (big*) -> big*  ~a = -a-1（无限补码）
+    BigAnd,                // (big*, big*) -> big*
+    BigOr,                 // (big*, big*) -> big*
+    BigXor,                // (big*, big*) -> big*
+    BigLShift,             // (big*, big* cnt) -> big*
+    BigRShift,             // (big*, big* cnt) -> big*  算术右移（floor）
+    BigStr,                // (big*) -> str*  十进制（repr 同形）
+    BigToBase,             // (big*, i64 base) -> str*  2/8/10/16
+    BigFmt,                // (big*, str* spec) -> str*  format()/f-string
+    AnyToBig,              // (i64 unknown) -> big*  探针分派：big 原样/int 加宽/float 截断
 };
 
 inline const char* rt_name(RtFn f) {
@@ -1172,6 +1202,34 @@ inline const char* rt_name(RtFn f) {
         case RtFn::ReprAny: return "pa_repr_any";
         case RtFn::OsClose: return "pa_os_close";
         case RtFn::OsPathIslink: return "pa_os_path_islink";
+        case RtFn::BigFromI64: return "pa_big_from_i64";
+        case RtFn::BigFromF64: return "pa_big_from_f64";
+        case RtFn::BigFromStr: return "pa_big_from_str";
+        case RtFn::BigToI64: return "pa_big_to_i64";
+        case RtFn::BigToF64: return "pa_big_to_f64";
+        case RtFn::BigAdd: return "pa_big_add";
+        case RtFn::BigSub: return "pa_big_sub";
+        case RtFn::BigMul: return "pa_big_mul";
+        case RtFn::BigFloorDiv: return "pa_big_floordiv";
+        case RtFn::BigMod: return "pa_big_mod";
+        case RtFn::BigPow: return "pa_big_pow";
+        case RtFn::BigTrueDiv: return "pa_big_truediv";
+        case RtFn::BigCmp: return "pa_big_cmp";
+        case RtFn::BigCmpF64: return "pa_big_cmp_f64";
+        case RtFn::BigEq: return "pa_big_eq";
+        case RtFn::BigTruth: return "pa_big_truth";
+        case RtFn::BigNeg: return "pa_big_neg";
+        case RtFn::BigAbs: return "pa_big_abs";
+        case RtFn::BigNot: return "pa_big_not";
+        case RtFn::BigAnd: return "pa_big_and";
+        case RtFn::BigOr: return "pa_big_or";
+        case RtFn::BigXor: return "pa_big_xor";
+        case RtFn::BigLShift: return "pa_big_lshift";
+        case RtFn::BigRShift: return "pa_big_rshift";
+        case RtFn::BigStr: return "pa_big_str";
+        case RtFn::BigToBase: return "pa_big_to_base";
+        case RtFn::BigFmt: return "pa_big_fmt";
+        case RtFn::AnyToBig: return "pa_any_to_big";
     }
     return "?";
 }
