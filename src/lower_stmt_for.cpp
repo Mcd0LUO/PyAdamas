@@ -519,6 +519,13 @@ void Lowerer::lower_for_zip(For& f, Call& c) {
     lb.a = b;
     VReg nb = def(t_int(), std::move(lb));
     int n_slot = new_temp_slot(t_int());
+    // 迭代期间容器大小变化要抛可捕获的 RuntimeError（与 for k in d 同口径）。
+    // 存下两个操作数**各自**的入口长度：zip 用的是 min，删短其中一个会让两者
+    // 长度相对关系变化，只盯 min 发现不了。
+    int na_slot = new_temp_slot(t_int());
+    int nb_slot = new_temp_slot(t_int());
+    store_slot(na_slot, na);
+    store_slot(nb_slot, nb);
     int pick_a = new_block("for.zip.a");
     int pick_b = new_block("for.zip.b");
     int after = new_block("for.zip.min");
@@ -574,6 +581,39 @@ void Lowerer::lower_for_zip(For& f, Call& c) {
     emit(std::move(j));
 
     switch_to(cond);
+    if (at->kind == TyKind::Dict || at->kind == TyKind::Set ||
+        bt->kind == TyKind::Dict || bt->kind == TyKind::Set) {
+        auto guard = [&](const TypePtr& ty, auto&& val, int entry_slot) {
+            if (!ty || (ty->kind != TyKind::Dict && ty->kind != TyKind::Set)) return;
+            Inst lc;
+            lc.op = IrOp::Len;
+            lc.a = val();
+            VReg cur = def(t_int(), std::move(lc));
+            Inst ne;
+            ne.op = IrOp::Cmp;
+            ne.cop = CmpKind::Ne;
+            ne.a = cur;
+            ne.b = load_slot(entry_slot, t_int());
+            VReg cc2 = def(t_bool(), std::move(ne));
+            int changed = new_block("for.zip.changed");
+            int ok_b = new_block("for.zip.ok");
+            Inst bg;
+            bg.op = IrOp::Branch;
+            bg.a = cc2;
+            bg.target = changed;
+            bg.target2 = ok_b;
+            emit(std::move(bg));
+            switch_to(changed);
+            call_void(raise_rt(RtFn::Raise),
+                      {const_str("RuntimeError"),
+                       const_str(ty->kind == TyKind::Dict
+                                     ? "dictionary changed size during iteration"
+                                     : "Set changed size during iteration")});
+            switch_to(ok_b);
+        };
+        guard(at, aval, na_slot);
+        guard(bt, bval, nb_slot);
+    }
     Inst cmp;
     cmp.op = IrOp::Cmp;
     cmp.cop = CmpKind::Lt;
