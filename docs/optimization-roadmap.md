@@ -117,6 +117,7 @@
 | SIMD深化 | int 乘 map（pmuludq 全 i64 重建无守卫）/Convert i64→float（cvtdq2pd 逐位）/多 reduction 并行累加器 | 0.351 | ✅ 非基准 int 乘 2.36×/Convert 2.34×/多 reduction 1.38×；**复活 0.344 起死代码 reduction 路径并修 5 潜伏 bug**（int acc 出口覆盖写静默算错/跨块 list 基址 RC move-from NULL 段错误等）；基准不回归噪声带。集成 |
 | stdlib6 | statistics（mean/median 家族/mode/离散度/geometric/harmonic/quantiles/covariance/correlation/linear_regression） | 0.352 | ✅ 纯 pa 无 src 改动；380-385 CPython 对拍（3 条浮点精度边界钉住，pa 无 big 精确分数中间量）；NormalDist/weights 保守跳过。集成 |
 | UB修2 | lower_impl.h def 非负提示先算右值再取左值引用+守 size | 0.353 | ✅ 修预存求值顺序 UB 堆越界（ASan 编译器 118_suspend_expr 暴露）；asm 不变；继 0.345 后第二处编译器内存安全 bug。集成 |
+| stdlib7 | configparser（INI 解析/类型化取值/BasicInterpolation/修改/write/SectionProxy/错误族） | 0.354 | ✅ 纯 pa 853 行无 src 改动；253/254/390-394 CPython 7/7 字节同；ExtendedInterpolation/converters 保守跳过；异常跨函数 RC 环 leak 预存（tarfile 批同报）待修。集成 |
 
 ### 夜间小结
 - **17 版集成推送（0.333-0.349）**，单槽位顺序（收回 4 代理并行减少早夭混乱）；harness 间歇早夭频繁，send_message 恢复套路管用。
