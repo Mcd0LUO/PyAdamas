@@ -217,6 +217,14 @@ void Lowerer::lower_pattern(Pattern& p, VReg value, TypePtr ty, int fail, bool i
             test(call_runtime(RtFn::ComplexEq, t_bool(), {value, lv}));
             return;
         }
+        // True/False 是单例模式：CPython 用 is 比较，只有主体静态类型本身
+        // 是 bool 时才可能匹配。match 1: case True 恒不匹配（走 case _），
+        // pa 原来把 Bool 并入数值比较，1 命中 True（实测 h(1) 返回 "T"）。
+        if (lt && lt->kind == TyKind::Bool && st && st->kind != TyKind::Bool &&
+            st->kind != TyKind::Unknown) {
+            jump_fail();
+            return;
+        }
         bool ln = lt && (lt->kind == TyKind::Int || lt->kind == TyKind::Bool ||
                          lt->kind == TyKind::Float);
         bool sn = st && (st->kind == TyKind::Int || st->kind == TyKind::Bool ||
