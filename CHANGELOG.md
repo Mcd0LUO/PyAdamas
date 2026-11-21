@@ -4,6 +4,45 @@
 
 早期阶段没有逐条留痕，按阶段归纳；0.4 之后逐条记录。
 
+## [0.354] - 2026-11-21
+
+> **标准库自举第七批**（stdlib7 分支，基线 master 1589e34 / 0.353）。纯
+> PyAdamas 源码按 CPython 3.14 语义重写 stdlib/configparser.py；**不碰
+> src / runtime / codegen，无 C 胶水、无 BigInt**，模块表也未改
+> （configparser 在 0.326 已登记）。轻量标尺：同参数同功能同结果，错误
+> 类型正确、消息合理（253/254 钉住的路径仍逐字对齐）。
+>
+> 覆盖：read（单路径或路径列表）/ read_string / read_file / read_dict；
+> sections / options / defaults / has_section / has_option / items；get
+> （DEFAULT 继承 + vars 覆盖 + raw + fallback，含 fallback=None 返回 None）；
+> getint / getfloat / getboolean（8 种布尔字面量、ValueError）；set /
+> add_section / remove_section / remove_option（空节名与 "DEFAULT" 操作默认
+> 节）；write（space_around_delimiters、多行缩进、InvalidWriteError 键校验）；
+> 映射协议与 SectionProxy（下标读写/in/len/iter/get*/items/keys/values/
+> update/setdefault/pop/clear）；BasicInterpolation %(key)s（%% 转义、10 层
+> 深度、缺失/语法/深度三类错误）；RawConfigParser 与
+> ConfigParser(interpolation=None)。
+>
+> 语义要点：解析按 CPython _read 状态机（节头尾随文本、最左分隔符、缩进
+> 续行、空行计入多行值、注释行不计入、解析错误累积到文件末尾并先提交已解析
+> 部分、[DEFAULT] 可重复声明、strict=False 后者覆盖）；错误类型
+> Error/NoSectionError/DuplicateSectionError/DuplicateOptionError/
+> NoOptionError/Interpolation*Error/ParsingError/MissingSectionHeaderError
+> 同名同继承，另加 InvalidWriteError。
+>
+> pa 表示层边界（记录在模块头与 docs/stdlib-batch7.md）：默认参数只收字面
+> 常量，fallback 的「省略」用私有串哨兵 + _is_unset 双判；object 静态类型
+> 的 None/False 经 print 显示为 0（值比较正确），故 get 返回 object、
+> getboolean 标 bool；defaults/read_dict/vars 的值要求 str（CPython 会
+> str() 化）；c["s"] 静态类型 unknown，需
+> `from configparser import SectionProxy` 后标注变量；实例下标删除与
+> list(parser) 不支持，用 remove_section/pop 与 for 循环代替。
+>
+> 回归 390-394（CPython 3.14.4 跑同一源码逐行对拍，5/5 逐字节一致）；既有
+> 253/254 保持全同。全套件 normal 与 ASan（JOBS=1）EXIT=0；check_size 无
+> 新增超限；编译器零改动，既有程序 asm 与基线一致（详见 docs/stdlib-batch7.md
+> 第七节）。
+
 ## [0.353] - 2026-11-21
 
 > **修复编译器自身求值顺序 UB 堆越界**（预存 bug，stdlib6 轮 ASan 编译器构建 118_suspend_expr 暴露）：
