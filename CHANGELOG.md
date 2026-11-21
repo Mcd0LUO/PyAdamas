@@ -4,6 +4,33 @@
 
 早期阶段没有逐条留痕，按阶段归纳；0.4 之后逐条记录。
 
+## [0.366] - 2026-11-21
+
+> `zip` 迭代中改 dict/set 也抛可捕获的 `RuntimeError` —— 0.363/0.365 之后
+> 「迭代中改容器」这条线上的最后一格。
+>
+>     try:
+>         for k, v in zip(d, e):
+>             del d[k]        # 以前 panic（进程退出、except 接不住）
+>     except RuntimeError as err:
+>         ...                 # CPython 能接住，现在 PyAdamas 也能
+>
+> 这里有个容易踩的点：zip 的循环上界是入口算出的 **min(len a, len b)**，删短
+> 其中一个之后「min」可能**不变**（另一个本来就短），只盯 min 发现不了。所以
+> 两个操作数各存一份**自己的**入口长度，条件块里逐轮比对。
+>
+> 口径与 0.363 的 `for k in d` / `enumerate(d)` 一致：不等就抛 RuntimeError，
+> 文案与 CPython 相同（dict 是 `dictionary changed size during iteration`，
+> set 是 `Set changed size during iteration`）。
+>
+> 回归 `tests/run/437_zip_iter_mutation.py`：删第一个、删第二个、set 增元素、
+> 未修改的正常 zip（dict 与 list 各一），与 CPython 逐字节一致。
+>
+> 闸门：difftest **387/0**；普通与 ASan 套件各 **408 ran ok**、0 ASan 报告；
+> check_size 通过。
+>
+> 至此 0.362 列的「已确认未修」清空。
+
 ## [0.365] - 2026-11-21
 
 > `except` 体里 `raise` 跳过同一 try 的 `finally` —— 0.364 之后剩下的那条。
