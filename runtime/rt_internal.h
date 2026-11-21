@@ -332,7 +332,7 @@ typedef struct {
     int64_t free_head; /* 墓碑 entry 空闲链，-1 结束，next 复用 entry.key */
     int32_t head;      /* 插入顺序链表头/尾（entry 下标，-1 为空） */
     int32_t tail;
-    int64_t key_kind;  /* 0 int/bool, 1 str, 2 float, 3 raw */
+    int64_t key_kind;  /* 0 int/bool, 1 str, 2 float, 3 raw, 9 raw or BigInt */
     int64_t key_own;   /* 0 非堆, 1 堆, 2 unknown */
     int64_t val_own;   /* 0 非堆, 1 堆, 2 unknown */
     /* 类 key 的 __hash__ / __eq__ vtable 槽号；-1 表示按机器字哈希/比较。 */
@@ -576,6 +576,8 @@ double pa_any_to_f64(int64_t v);
 int64_t pa_any_to_i64(int64_t v);
 int64_t pa_any_arith(int64_t op, int64_t a, int64_t b, int64_t da, int64_t db);
 int64_t pa_any_neg(int64_t v, int64_t dv);
+int64_t pa_any_big_binary(int64_t op, int64_t a, int64_t b, int64_t da, int64_t db);
+int64_t pa_any_invert(int64_t v, int64_t dv);
 int64_t pa_any_cmp(int64_t op, int64_t a, int64_t b, int64_t da, int64_t db);
 /* P3 第一阶段（0.327，docs/p3-tagged-union-design.md）：shadow tag 版入口。
    tag 编码与 src/codegen_impl.h 的 PaTag 逐字对应：0 UNK / 1 INT / 2 FRAW /
@@ -588,6 +590,8 @@ PyAdamasBig* pa_any_to_big(int64_t v);
 PaAnyPair pa_any_arith_t(int64_t op, int64_t a, int64_t tag_a,
                          int64_t b, int64_t tag_b, int64_t reuse_ok);
 PaAnyPair pa_any_neg_t(int64_t v, int64_t tag, int64_t reuse_ok);
+PaAnyPair pa_any_big_binary_t(int64_t op, int64_t a, int64_t tag_a, int64_t b, int64_t tag_b);
+PaAnyPair pa_any_invert_t(int64_t v, int64_t tag);
 int64_t pa_any_cmp_t(int64_t op, int64_t a, int64_t tag_a,
                      int64_t b, int64_t tag_b);
 int64_t pa_any_is_float_t(int64_t v, int64_t tag);

@@ -35,6 +35,7 @@ struct ModuleUnit {
     bool is_package = false;
     std::string parent_name;
     bool from_cache = false;
+    bool mentions_big = false;  // 在构造 AST 时记录的语法特征
     // 模块的 IR 是否用到 unknown 保守 retain（含 asyncio/生成器运行时）。
     // 写进缓存清单：命中缓存时也要参与整程序判断。
     bool needs_unknown_index = true;
@@ -86,6 +87,8 @@ struct Program {
     // 追加 NONE/BOOL/精确堆子类 tag，解锁 isinstance/repr/pprint。改变 IR
     // 与代码生成结果（也改变 tag 判定），必须参与模块缓存失效。
     bool type_tags = false;
+    // 全图门控：无 big 的构建沿用旧 lowering 与 asm；模式参与缓存校验。
+    bool needs_dynamic_big = false;
     // P4 语言缺口（PYADAMAS_LANG_GAPS，默认关）：异常类当值 / file 协议泛化 /
     // traceback / dataclass 编译期展开。开启时强制 type_tags（CLASS tag=11
     // 等精确堆子类标签是 P4 的表示基础）。改变 IR 与代码生成结果，参与缓存失效。

@@ -134,7 +134,9 @@ std::string AsmGen::gen(const IRModule& m) {
                     if (in.op == IrOp::CallRt &&
                         (in.imm == static_cast<int64_t>(RtFn::AnyArith) ||
                          in.imm == static_cast<int64_t>(RtFn::AnyCmp) ||
-                         in.imm == static_cast<int64_t>(RtFn::AnyNeg)))
+                         in.imm == static_cast<int64_t>(RtFn::AnyNeg) ||
+                         (gnu_cfi() && (in.imm == static_cast<int64_t>(RtFn::AnyBigBinary) ||
+                                        in.imm == static_cast<int64_t>(RtFn::AnyInvert)))))
                         tags_enabled_ = true;
         // P2（0.340，PYADAMAS_TYPE_TAGS）：运行期类型标签需要 tag 区与传播
         // 在所有模块都生效（pprint/isinstance 靠它跨调用边界带类型），
@@ -789,10 +791,12 @@ void AsmGen::emit_eh_tables() {
 std::string generate_asm(const IRModule& m, bool disable_unknown_index,
                          bool zero_cost_exc, bool index_readonly, bool rc_split,
                          bool ra_graph, bool simd, bool ra_opt,
-                         bool inline_opt, bool type_tags, bool vect) {
+                         bool inline_opt, bool type_tags, bool vect, bool needs_dynamic_big) {
     AsmGen g;
-    g.set_disable_unknown_index(disable_unknown_index);
-    g.set_index_readonly(index_readonly);
+    // Erased big keys (and UNK shadow tags) rely on the live RC index, even
+    // if the module that creates the BigInt has no local dynamic operations.
+    g.set_disable_unknown_index(disable_unknown_index && !needs_dynamic_big);
+    g.set_index_readonly(index_readonly && !needs_dynamic_big);
     g.set_zero_cost_exc(zero_cost_exc);
     g.set_rc_split(rc_split);
     g.set_ra_graph(ra_graph);

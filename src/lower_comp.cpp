@@ -71,7 +71,7 @@ VReg Lowerer::lower_comp(Expr& e) {
         if (rty->sub.size() > 1) val_ty = rty->sub[1];
         auto [hslot, eslot] = dunder_key_slots(elem_ty);
         acc = call_runtime(RtFn::DictNew, rty,
-                           {const_int(key_kind(elem_ty)), const_int(own_kind(elem_ty)),
+                           {const_int(hash_key_kind(elem_ty)), const_int(own_kind(elem_ty)),
                             const_int(own_kind(val_ty)), const_int(hslot),
                             const_int(eslot)});
         push_temp(acc);
@@ -80,7 +80,7 @@ VReg Lowerer::lower_comp(Expr& e) {
         if (!rty->sub.empty()) elem_ty = rty->sub[0];
         auto [hslot, eslot] = dunder_key_slots(elem_ty);
         acc = call_runtime(RtFn::DictNew, rty,
-                           {const_int(key_kind(elem_ty)), const_int(own_kind(elem_ty)),
+                           {const_int(hash_key_kind(elem_ty)), const_int(own_kind(elem_ty)),
                             const_int(0), const_int(hslot), const_int(eslot)});
         push_temp(acc);
     } else {

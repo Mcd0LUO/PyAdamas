@@ -180,6 +180,11 @@
 
     // 哈希/比较类别：0 int/bool，1 str，2 float，3 其他（按机器字比较）。
     static int key_kind(const TypePtr& t);
+    // Hashed keys alone opt in to BigInt value semantics; sequence comparisons
+    // still use the old key_kind and are outside this change.
+    int hash_key_kind(const TypePtr& t) const {
+        return opts_.needs_dynamic_big && is_unknown(t) ? 9 : key_kind(t);
+    }
 
     // 所有权类别：0 非堆，1 堆，2 unknown（保守 retain，注册表释放）。
     static int own_kind(const TypePtr& t) {

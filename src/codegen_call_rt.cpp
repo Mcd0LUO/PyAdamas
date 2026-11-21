@@ -786,6 +786,7 @@ void AsmGen::gen_rt_args(const Inst& in, RtFn fn) {
             gen_rt_i4(in);
             break;
         case RtFn::AnyNeg:
+        case RtFn::AnyInvert:
             gen_rt_i2(in);
             break;
         case RtFn::AnyTypeIs:  // P2：gen_call_rt 特判装填 (v, tag, code)，这里只为穷尽
@@ -834,6 +835,7 @@ void AsmGen::gen_rt_args(const Inst& in, RtFn fn) {
         case RtFn::AnyCmpT:
             gen_rt_i3(in);
             break;
+        case RtFn::AnyBigBinary:
         case RtFn::AnyArith:     /* (op, a, b, desc_a, desc_b) */
         case RtFn::AnyCmp:
             gen_rt_i5(in);

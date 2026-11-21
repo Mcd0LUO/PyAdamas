@@ -94,7 +94,7 @@ VReg Lowerer::lower_builtin_container(const std::string& name, Call& c) {
             VReg xs = seq_as_list(c.args[0].get(), se);
             auto [hslot, eslot] = dunder_key_slots(kt);
             VReg d = call_runtime(RtFn::DictFromPairs, ty,
-                                  {xs, const_int(key_kind(kt)), const_int(own_kind(kt)),
+                                  {xs, const_int(hash_key_kind(kt)), const_int(own_kind(kt)),
                                    const_int(own_kind(vt)), const_int(hslot),
                                    const_int(eslot)});
             push_temp(d);
@@ -103,7 +103,7 @@ VReg Lowerer::lower_builtin_container(const std::string& name, Call& c) {
         if (c.keywords.empty()) {
             auto [hslot, eslot] = dunder_key_slots(kt);
             VReg d = call_runtime(RtFn::DictNew, ty,
-                                  {const_int(key_kind(kt)), const_int(own_kind(kt)),
+                                  {const_int(hash_key_kind(kt)), const_int(own_kind(kt)),
                                    const_int(own_kind(vt)), const_int(hslot),
                                    const_int(eslot)});
             push_temp(d);
@@ -156,7 +156,7 @@ VReg Lowerer::lower_builtin_container(const std::string& name, Call& c) {
             err(c.line, c.col, "big dictionary/set keys are not supported");
             return const_none();
         }
-        int kk = key_kind(et), ko = own_kind(et);
+        int kk = hash_key_kind(et), ko = own_kind(et);
         if (c.args.empty()) {
             auto [hslot, eslot] = dunder_key_slots(et);
             VReg d = call_runtime(RtFn::DictNew, ty,

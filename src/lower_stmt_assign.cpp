@@ -97,6 +97,13 @@ void Lowerer::lower_aug_assign(AugAssign& a) {
         ++side_effect_seq_;
         return;
     }
+    if (opts_.needs_dynamic_big && is_unknown(ty)) {
+        VReg out = lower_any_big_binary(cur_v, rhs, aug_to_bin(a.op));
+        if (out != kNoReg) {
+            assign_to(*a.target, out, t_unknown());
+            return;
+        }
+    }
     Inst in;
     in.op = IrOp::Bin;
     in.bop = map_bin(aug_to_bin(a.op));

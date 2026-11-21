@@ -19,6 +19,8 @@ inline const char* rt_name(RtFn f) {
         case RtFn::AnyToI64: return "pa_any_to_i64";
         case RtFn::AnyArith: return "pa_any_arith";
         case RtFn::AnyNeg: return "pa_any_neg";
+        case RtFn::AnyBigBinary: return "pa_any_big_binary";
+        case RtFn::AnyInvert: return "pa_any_invert";
         case RtFn::AnyCmp: return "pa_any_cmp";
         case RtFn::AnyArithT: return "pa_any_arith_t";
         case RtFn::AnyNegT: return "pa_any_neg_t";

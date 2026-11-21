@@ -605,5 +605,7 @@ enum class RtFn : uint16_t {
     BigFmt,                // (big*, str* spec) -> str*  format()/f-string
     BigFromU64,            // (u64) -> big*
     AnyToBig,              // (i64 unknown) -> big*  探针分派：big 原样/int 加宽/float 截断
+    AnyBigBinary,          // (op, a, b, desc_a, desc_b) -> unknown
+    AnyInvert,             // (a, desc_a) -> unknown
 };
 #include "ir_rtfn_names.h"

@@ -216,6 +216,8 @@ ExprPtr Parser::parse_primary() {
                 int ln = cur().line, cl = cur().col;
                 advance();
                 auto n = node_at<Call>(ln, cl);
+                if (auto* name = dynamic_cast<Name*>(e.get()); name && name->id == "cast_big")
+                    mentions_big_ = true;
                 n->func = std::move(e);
                 if (!check(Tok::RPAREN)) {
                     // 单个生成器表达式参数：f(x for x in y)
@@ -372,6 +374,7 @@ ExprPtr Parser::parse_atom() {
                 auto t = advance();
                 auto n = node_at<Constant>(ln, cl);
                 if (t.is_big) {
+                    mentions_big_ = true;
                     n->ck = Constant::CK::Big;
                     n->s = t.text;   // 去下划线的十进制串
                 } else {
@@ -863,6 +866,7 @@ std::unique_ptr<JoinedStr> Parser::parse_fstring(const Token& tok) {
             sub.func_depth_ = func_depth_;
             try {
                 fv->value = sub.parse_fstring_expr();
+                mentions_big_ |= sub.mentions_big();
             } catch (const ParseError& e) {
                 // 子解析器的行列是相对 f-string 内部源码的，直接冒泡会显示成
                 // 1:1。位置只能给到 f-string 起点，至少行号是对的。

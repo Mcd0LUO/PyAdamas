@@ -568,6 +568,85 @@ static int64_t any_reuse_float_box(int64_t v, int64_t tag, double d, int64_t reu
 }
 
 static PaAnyPair any_pair_i64(int64_t v) { PaAnyPair p = {v, PA_TAG_INT}; return p; }
+// Matches lower_any_big_binary. Do not use these opcodes with pa_any_arith.
+enum { PA_ANY_BIT_AND, PA_ANY_BIT_OR, PA_ANY_BIT_XOR, PA_ANY_BIT_POW,
+       PA_ANY_BIT_SHL, PA_ANY_BIT_SHR };
+
+static int64_t any_word_bitop(int64_t op, int64_t a, int64_t b) {
+    unsigned n = (unsigned)((uint64_t)b & 63);
+    switch (op) {
+        case PA_ANY_BIT_AND: return a & b;
+        case PA_ANY_BIT_OR: return a | b;
+        case PA_ANY_BIT_XOR: return a ^ b;
+        // x86 shlq/sarq mask the count, even when its signed value is negative.
+        case PA_ANY_BIT_SHL: return (int64_t)((uint64_t)a << n);
+        case PA_ANY_BIT_SHR:
+            return a >= 0 ? (int64_t)((uint64_t)a >> n)
+                          : ~(int64_t)(~(uint64_t)a >> n);
+        case PA_ANY_BIT_POW: return pa_pow_i64(a, b);
+        default: panic_c("invalid dynamic bit operator"); return 0;
+    }
+}
+
+static PaAnyPair any_big_binary(int64_t op, int64_t a, int64_t b, AnyVal x, AnyVal y,
+                                bool u64_a, bool u64_b) {
+    if (x.kind != ANY_BIG && y.kind != ANY_BIG)
+        return any_pair_i64(any_word_bitop(op, a, b));
+    if (!any_num(x) || !any_num(y) ||
+        (op != PA_ANY_BIT_POW && (x.kind == ANY_FLOAT || y.kind == ANY_FLOAT)))
+        pa_raise_c("TypeError", "unsupported operand type(s)");
+    int64_t mark = pa_rc_mark();
+    PyAdamasBig* p = u64_a ? pa_big_from_u64((uint64_t)a) : any_big_operand(x);
+    if (u64_a) pa_rc_temp(p);
+    PyAdamasBig* q = u64_b ? pa_big_from_u64((uint64_t)b) : any_big_operand(y);
+    if (u64_b) pa_rc_temp(q);
+    PyAdamasBig* r = NULL;
+    switch (op) {
+        case PA_ANY_BIT_AND: r = pa_big_and(p, q); break;
+        case PA_ANY_BIT_OR: r = pa_big_or(p, q); break;
+        case PA_ANY_BIT_XOR: r = pa_big_xor(p, q); break;
+        case PA_ANY_BIT_POW: r = pa_big_pow(p, q); break;
+        case PA_ANY_BIT_SHL: r = pa_big_lshift(p, q); break;
+        case PA_ANY_BIT_SHR: r = pa_big_rshift(p, q); break;
+        default: panic_c("invalid dynamic big operator");
+    }
+    pa_rc_cleanup(mark);
+    return (PaAnyPair){(int64_t)(uintptr_t)r, PA_TAG_BIG};
+}
+
+static PaAnyPair any_invert(int64_t v, AnyVal x) {
+    if (x.kind == ANY_BIG)
+        return (PaAnyPair){(int64_t)(uintptr_t)pa_big_not(any_big_ptr(x)), PA_TAG_BIG};
+    return any_pair_i64(~v);
+}
+
+int64_t pa_any_big_binary(int64_t op, int64_t a, int64_t b, int64_t da, int64_t db) {
+    AnyVal x, y;
+    any_decode_typed(a, da == 'u' ? 'i' : da, &x);
+    any_decode_typed(b, db == 'u' ? 'i' : db, &y);
+    return any_big_binary(op, a, b, x, y, da == 'u', db == 'u').v;
+}
+
+int64_t pa_any_invert(int64_t v, int64_t desc) {
+    AnyVal x;
+    any_decode_typed(v, desc, &x);
+    return any_invert(v, x).v;
+}
+
+PaAnyPair pa_any_big_binary_t(int64_t op, int64_t a, int64_t tag_a, int64_t b, int64_t tag_b) {
+    // -1 is an argument-only hint for statically u64 operands, not a stored tag.
+    AnyVal x, y;
+    any_decode_tag(a, tag_a == -1 ? PA_TAG_INT : tag_a, &x);
+    any_decode_tag(b, tag_b == -1 ? PA_TAG_INT : tag_b, &y);
+    return any_big_binary(op, a, b, x, y, tag_a == -1, tag_b == -1);
+}
+
+PaAnyPair pa_any_invert_t(int64_t v, int64_t tag) {
+    AnyVal x;
+    any_decode_tag(v, tag, &x);
+    return any_invert(v, x);
+}
+
 static PaAnyPair any_pair_f64(double d) {
     PaAnyPair p = {any_float_box(d), PA_TAG_FBOX};
     return p;

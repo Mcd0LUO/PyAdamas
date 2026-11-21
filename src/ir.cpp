@@ -636,6 +636,8 @@ bool ir_module_needs_unknown_index(const IRModule& m) {
             case RtFn::AnyArith:
             case RtFn::AnyCmp:
             case RtFn::AnyNeg:
+            case RtFn::AnyBigBinary:
+            case RtFn::AnyInvert:
             case RtFn::AnyIsFloat:
             case RtFn::AnyIterList:
             case RtFn::ReprAny:

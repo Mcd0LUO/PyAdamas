@@ -3,6 +3,45 @@
 
 namespace pyadamas {
 
+namespace {
+
+// Follow type positions, not ordinary uses of a variable named big.
+bool annotation_mentions_big(const Expr* e, int depth = 0) {
+    if (depth > 8 || !e) return false;
+    if (auto* n = dynamic_cast<const Name*>(e)) return n->id == "big";
+    if (auto* c = dynamic_cast<const Constant*>(e); c && c->ck == Constant::CK::Str) {
+        // The type checker treats quoted annotations as expressions too.
+        try {
+            Lexer lexer(c->s);
+            Parser parser(lexer.run());
+            return annotation_mentions_big(parser.parse_fstring_expr().get(), depth + 1);
+        } catch (const LexError&) {
+            return false;
+        } catch (const ParseError&) {
+            return false;
+        }
+    }
+    if (auto* s = dynamic_cast<const Subscript*>(e)) {
+        if (auto* t = dynamic_cast<const TupleExpr*>(s->slice.get()))
+            return std::ranges::any_of(t->elts, [&](const auto& elt) {
+                return annotation_mentions_big(elt.get(), depth);
+            });
+        return annotation_mentions_big(s->slice.get(), depth);
+    }
+    if (auto* b = dynamic_cast<const BinOp*>(e); b && b->op == Tok::VBAR)
+        return annotation_mentions_big(b->left.get(), depth) ||
+               annotation_mentions_big(b->right.get(), depth);
+    return false;
+}
+
+}  // namespace
+
+ExprPtr Parser::parse_annotation_expr() {
+    auto e = parse_namedexpr();
+    mentions_big_ = mentions_big_ || annotation_mentions_big(e.get());
+    return e;
+}
+
 StmtPtr Parser::parse_funcdef(std::vector<ExprPtr> decorators, bool is_async) {
         int ln = cur().line, cl = cur().col;
         advance();  // def
@@ -13,7 +52,7 @@ StmtPtr Parser::parse_funcdef(std::vector<ExprPtr> decorators, bool is_async) {
         expect(Tok::LPAREN, "'(' after function name");
         node->args = parse_arguments();
         expect(Tok::RPAREN, "')' after parameters");
-        if (match(Tok::RARROW)) node->returns = parse_namedexpr();
+        if (match(Tok::RARROW)) node->returns = parse_annotation_expr();
         expect(Tok::COLON, "':' after function signature");
         ++func_depth_;
         int saved_loop = loop_depth_;
@@ -37,7 +76,7 @@ Arguments Parser::parse_arguments() {
         auto parse_one = [&](std::vector<Arg>& dest) {
             Arg arg;
             arg.name = expect(Tok::NAME, "parameter name").text;
-            if (match(Tok::COLON)) arg.annotation = parse_namedexpr();
+            if (match(Tok::COLON)) arg.annotation = parse_annotation_expr();
             if (check(Tok::EQUAL)) {
                 if (kwonly_mode) {
                     advance();
@@ -67,7 +106,7 @@ Arguments Parser::parse_arguments() {
                 } else {
                     Arg va;
                     va.name = expect(Tok::NAME, "parameter name after '*'").text;
-                    if (match(Tok::COLON)) va.annotation = parse_namedexpr();
+                    if (match(Tok::COLON)) va.annotation = parse_annotation_expr();
                     a.vararg = std::make_unique<Arg>(std::move(va));
                     kwonly_mode = true;
                 }
@@ -75,7 +114,7 @@ Arguments Parser::parse_arguments() {
                 advance();
                 Arg ka;
                 ka.name = expect(Tok::NAME, "parameter name after '**'").text;
-                if (match(Tok::COLON)) ka.annotation = parse_namedexpr();
+                if (match(Tok::COLON)) ka.annotation = parse_annotation_expr();
                 a.kwarg = std::make_unique<Arg>(std::move(ka));
                 match(Tok::COMMA);  // 允许 **kwargs, 的尾逗号
                 if (!check(Tok::RPAREN)) throw err("'**' parameter must be last");

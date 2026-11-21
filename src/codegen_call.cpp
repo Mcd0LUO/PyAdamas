@@ -591,6 +591,12 @@ void AsmGen::gen_call_rt(const Inst& in) {
             gen_any_tagged(in, fn);
             return;
         }
+        // Win64 C ABI does not return a two-word struct in rax/rdx.
+        if (tags_enabled_ && gnu_cfi() &&
+            (fn == RtFn::AnyBigBinary || fn == RtFn::AnyInvert)) {
+            gen_any_tagged(in, fn);
+            return;
+        }
         // P3：单操作数 Any 入口同样改 tag 版（免探针解码）。
         if (tags_enabled_ && in.args.size() == 1 && vreg_tagged(in.args[0]) &&
             (fn == RtFn::AnyIsFloat || fn == RtFn::AnyToF64 || fn == RtFn::AnyToI64)) {

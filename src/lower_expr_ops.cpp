@@ -330,6 +330,10 @@ VReg Lowerer::lower_binop(BinOp& b) {
     // 两侧可能是 int / boxed float / str，按运行期标签分派（rt_any.c）。
     // 静态类型已知的表达式不会进入这里，热路径零调用。
     if (ty && ty->kind == TyKind::Unknown && (is_unknown(lt) || is_unknown(rt))) {
+        if (opts_.needs_dynamic_big) {
+            VReg res = lower_any_big_binary(l, r, b.op);
+            if (res != kNoReg) return res;
+        }
         int aop = any_arith_op(b.op);
         if (aop >= 0) {
             VReg res = call_runtime(RtFn::AnyArith, t_unknown(),
@@ -358,6 +362,28 @@ VReg Lowerer::lower_binop(BinOp& b) {
     in.a = l;
     in.b = r;
     return def_heap(ty, std::move(in));
+}
+
+// Opcode order matches PA_ANY_BIT_* in rt_any.c.
+VReg Lowerer::lower_any_big_binary(VReg l, VReg r, Tok op) {
+    int code;
+    switch (op) {
+        case Tok::AMPER: code = 0; break;
+        case Tok::VBAR: code = 1; break;
+        case Tok::CIRCUMFLEX: code = 2; break;
+        case Tok::DOUBLESTAR: code = 3; break;
+        case Tok::LSHIFT: code = 4; break;
+        case Tok::RSHIFT: code = 5; break;
+        default: return kNoReg;
+    }
+    auto desc = [&](VReg v) -> int64_t {
+        TypePtr t = vreg_ty(v);
+        return t && t->kind == TyKind::U64 ? 'u' : any_desc(t);
+    };
+    VReg out = call_runtime(RtFn::AnyBigBinary, t_unknown(),
+                            {const_int(code), l, r, const_int(desc(l)), const_int(desc(r))});
+    push_temp_unknown(out);
+    return out;
 }
 
 VReg Lowerer::lower_big_binary(VReg l, TypePtr lt, VReg r, TypePtr rt, Tok op,
@@ -443,6 +469,11 @@ VReg Lowerer::lower_unary(UnaryOp& u) {
             in.args = {v};
             return def_heap(ty, std::move(in));
         }
+    }
+    if (opts_.needs_dynamic_big && u.op == Tok::TILDE && is_unknown(opnd_ty)) {
+        VReg out = call_runtime(RtFn::AnyInvert, t_unknown(), {v, const_int(any_desc(opnd_ty))});
+        push_temp_unknown(out);
+        return out;
     }
     // unknown 的一元负：可能是 int 也可能是 boxed float，按标签分派。
     if (u.op == Tok::MINUS && is_unknown(opnd_ty)) {

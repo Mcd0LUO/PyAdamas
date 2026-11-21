@@ -377,7 +377,7 @@ int main(int argc, char** argv) {
                 std::string asm_text = pyadamas::generate_asm(
                     *prog.entry->ir, !prog.needs_unknown_index, prog.zero_cost_exc,
                     false, prog.rc_split, prog.ra_graph, prog.simd, prog.ra_opt,
-                    prog.inline_opt, prog.type_tags, prog.vect);
+                    prog.inline_opt, prog.type_tags, prog.vect, prog.needs_dynamic_big);
                 auto b = std::chrono::steady_clock::now();
                 if (std::getenv("PYADAMAS_TIMING"))
                     std::fprintf(stderr, "[timing] codegen=%.1f ms\n",

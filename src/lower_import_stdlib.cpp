@@ -384,7 +384,7 @@ VReg Lowerer::lower_collections(const std::string& member, Call& c) {
         VReg items = expr(*c.args[0]);
         TypePtr rt = tc_.type_of(&c);
         VReg v = call_runtime(RtFn::CollCounter, rt,
-                              {items, const_int(key_kind(et)), const_int(own_kind(et))});
+                              {items, const_int(hash_key_kind(et)), const_int(own_kind(et))});
         push_temp(v);
         return v;
     }

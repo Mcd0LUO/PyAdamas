@@ -943,6 +943,7 @@ private:
     VReg lower_constant(Constant& c);
     VReg lower_binop(BinOp& b);
     VReg lower_big_binary(VReg l, TypePtr lt, VReg r, TypePtr rt, Tok op, int line, int col);
+    VReg lower_any_big_binary(VReg l, VReg r, Tok op);
     VReg lower_percent_format(BinOp& b, TypePtr lt, TypePtr ty);
     VReg lower_unary(UnaryOp& u);
     VReg lower_boolop(BoolOp& b);
