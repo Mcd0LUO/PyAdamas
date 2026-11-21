@@ -41,6 +41,10 @@ big 上做精确整数运算，再按上下文精度舍入，不存在 i64 回�
   也不支持 `**`、`//`、`%`、`+`/`-` 一元正号、round()、math 函数。
 - 不实现 `__format__`（f-string 的小数格式），`as_tuple()` 返回普通 tuple
   而不是 DecimalTuple 具名元组，`compare()` 返回 int -1/0/1 而不是 Decimal。
+- 字符串解析是严格 ASCII 十进制：不接受首尾空白、下划线和 Unicode 数字
+  （CPython 容忍前两者）；指数不设上下限（CPython 有 Emax/Emin），超大
+  指数差会真的分配大整数。`prec` 字段不做合法性校验（CPython 会拒绝
+  < 1 的值）；未知舍入模式抛 ValueError（CPython 同样拒绝）。
 - 异常层次不建模：除零抛 ZeroDivisionError；非法字面量/非法运算
   （如 quantize 结果超出 prec）抛 ValueError，没有 decimal.DecimalException
   子类。
@@ -113,6 +117,9 @@ def _round_mag(q: big, drop: int, mode: str, sticky: bool) -> big:
     sticky 表示被丢弃部分之后还有非零尾巴（长除的余数非零），
     用于把「正好一半」判成「大于一半」。
     """
+    if (mode != ROUND_HALF_EVEN and mode != ROUND_HALF_UP
+            and mode != ROUND_DOWN and mode != ROUND_UP):
+        raise ValueError("invalid rounding mode: " + mode)
     if drop <= 0:
         return q
     p: big = _pow10(drop)
