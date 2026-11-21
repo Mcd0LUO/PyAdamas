@@ -4,6 +4,58 @@
 
 早期阶段没有逐条留痕，按阶段归纳；0.4 之后逐条记录。
 
+## [0.376] - 2026-11-21
+
+> 唯一未修的问题：协程取消时的引用计数。本轮把它**再缩小一层**。
+>
+> ### 触发条件（全部实测，无需 `async with`）
+>
+> | 形态 | 结果 |
+> |---|---|
+> | `await helper()` 前置 + finally 里 `await helper()` + cancel | 正常 |
+> | `await helper()` 前置 + finally 里 `await cm.close()` + cancel | 正常 |
+> | **`await cm.close()` 前置** + finally 里 `await helper()` + cancel | **崩** |
+> | **`await cm.close()` 前置** + finally 里 `await cm.close()` + cancel | **崩** |
+> | **`await cm.close()` 前置** + finally 里 `await cm2.close()`（不同实例） | **崩** |
+>
+> 也就是说：**第一个挂起只要 await 的是「方法协程」**（调用方传了接收者），后面
+> 再有任何挂起 + 取消就会崩；换成普通函数协程（`helper()`）就正常。
+>
+> ### 证据
+>
+> ASan（`run --asan`）：
+>
+> ```
+> heap-use-after-free, READ of size 8
+>   pa_rc_dec                    rt_core.c:2976
+>   pa_gen_slot_release          rt_core.c:2274   ← 帧的 gcrel 在放槽
+>   pa_gen_release_slots         rt_gen.c:109
+>   coro_step                    rt_async.c:780   ← 异常逃出协程的兜底
+> freed by: pa_rc_dec_slow ← pyadamas_fn_1CM_close_1_resume   c21.py:6
+> 区域 72 字节
+> ```
+>
+> 槽追踪（临时加 `PA_SLOT_TRACE`，已回退）把整帧 dump 出来：
+>
+> ```
+> [relslots] g=0x…b560 slots: [1]=2 [4]=… [10]=0x…b4c0 [11]=2 [17]=65 …
+> [relslots] g=0x…aeb0 slots: [0]=1 [1]=2 [4]=… [7]=0x…afa0 [11]=0x…b510
+>                            [12]=0x…b4c0 [13]=2   ← 崩在这里
+> ```
+>
+> 注意 `0x…b4c0` 在**两个帧**里都出现（g=…b560 的 [10] 与 g=…aeb0 的 [12]）：
+> 同一份引用被两个帧同时登记为 owned，第一个释放把它 free 掉，第二个就撞车。
+>
+> ### 下一步的怀疑点（未验证）
+>
+> 方法调用的降级是 `%3 = call.direct f8(%2)`，`%2` 从槽里**借**出接收者，没有
+> `rc_inc`。若被调方（`close`）的 `self` 形参槽被标成 owned，它返回时就会 dec
+> 这份借来的引用 —— 与调用方槽里的那份撞车。这与「freed by close_1_resume」
+> 完全吻合。验证方法：在 `lower_call` 里检查方法调用是否给接收者补了 retain，
+> 以及被调方形参槽的 `slot_owned` 是否该置位。
+>
+> 闸门：difftest **400/0**；全套件 **421 ran ok**、exit 0。
+
 ## [0.375] - 2026-11-21
 
 > 只剩一条：协程取消时的引用计数。本轮把它**缩小到可复现的最小形态**，
