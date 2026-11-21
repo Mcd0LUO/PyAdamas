@@ -4,6 +4,47 @@
 
 早期阶段没有逐条留痕，按阶段归纳；0.4 之后逐条记录。
 
+## [0.352] - 2026-11-21
+
+> **标准库自举第六批**（stdlib6 分支，基线 master f70d7e8 / 0.351）。纯
+> PyAdamas 源码补齐 stdlib/statistics.py 的 CPython 3.14 核心面；**不碰
+> src / runtime / codegen，无 C 胶水、无 BigInt，模块表也未改**（statistics
+> 原本已登记）。轻量标尺：同参数同功能同结果，错误类型正确、消息合理。
+>
+> 覆盖：mean / fmean / median / median_low / median_high / median_grouped /
+> mode / multimode / pvariance / variance / pstdev / stdev / geometric_mean /
+> harmonic_mean / quantiles / covariance / correlation / linear_regression；
+> StatisticsError 保持 ValueError 子类；linear_regression 返回
+> LinearRegression(slope, intercept) 轻量类（字段 + 同 CPython repr，非
+> namedtuple）。
+>
+> 语义要点：mode 并列返回**最先出现**的值（CPython 3.14 语义，3.8–3.10 的
+> “no unique mode” 抛错口径废弃）、multimode 按首现序；quantiles 对齐
+> CPython 3.14（单点数据返回 n-1 个该值、exclusive 的 j 钳制到 1..ld-1、
+> 未知 method 抛 ValueError）；variance/pvariance 支持 mu/xbar（object=None
+> 哨兵，显式 0.0 不被吞）；correlation 支持 linear/ranked；linear_regression
+> 支持 proportional。
+>
+> 精度边界（无 BigInt/Fraction，float+math.fsum 近似，tests 逐行钉住）：
+> mean([0.1,0.2,0.3]) 得 0.19999999999999998（CPython 0.2，double rounding）；
+> pvariance([1e50,1,-1e50]) 差 1 ulp；harmonic_mean([40,60]) 得
+> 47.99999999999999（CPython 48.0）。其余普通量级、[1e50,1,-1e50] 的
+> variance、covariance/correlation、quantiles、geometric_mean、
+> median_grouped 等与 CPython 逐位一致。int 保留性/0.0 vs 0/不能解包等
+> 类型差异记录在模块头与 docs/stdlib-batch6.md。
+>
+> 回归 380–385（CPython 3.14.4 跑同一源码逐行对拍；仅上述三条边界行不同，
+> 其余零差异）；171 更新为 CPython 3.14 quantiles 口径。既有程序 asm 对
+> 基线 f70d7e8 的同配置构建：342 个 tests/run 中 336 逐字节全同；差异只有
+> 105（pvariance 新增可选 mu 形参，调用点多传 None，属被内联模块签名本身）
+> 与 380/381/382/384/385（新用例在基线缺符号，按预期编译失败）。
+>
+> 闸门：全套件 normal 360 ran ok / ASan（--asan 运行期插桩，JOBS=1）
+> 360 ran ok / EXIT=0；O0/O1/O2 三档统计用例输出一致；check_size.sh 无新增超限。
+> （注：把编译器自身也做 ASan 插桩的 build-asan 会暴露 118_suspend_expr
+> 在 lower_impl.h:399 的**既有**求值顺序 UB 堆越界，与本批 stdlib 改动无关；
+> 本批 ASan 闸门用 --asan 的生成代码+运行时插桩口径。）
+
 ## [0.351] - 2026-11-21
 
 > **SIMD 通用化深化**（vect2 分支，基线 master faeb80d / 0.350）。扩展 0.344
