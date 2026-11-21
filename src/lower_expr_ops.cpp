@@ -551,13 +551,18 @@ VReg Lowerer::lower_boolop(BoolOp& b) {
         store_borrow_slot(tmp, acc);
 
     for (size_t i = 1; i < b.values.size(); ++i) {
-        VReg cur_v = load_slot(tmp, ty);
+        // 从槽里重载时按**操作数自己的类型**判真：结果槽的 join 类型常常是
+        // unknown，而 gen_branch 对 unknown 只做 cmpq $0 —— 空的 str/list/
+        // dict 是**非零**的堆指针，会被当成真（"" or 5 返回 ""）。float
+        // 结果槽里存的是转换后的 double，按 float 读。
+        TypePtr load_ty = (ty && ty->kind == TyKind::Float) ? ty : acc_ty;
+        VReg cur_v = load_slot(tmp, load_ty);
         int rhs = new_block(is_and ? "and.rhs" : "or.rhs");
         int next = (i + 1 < b.values.size()) ? new_block(is_and ? "and.next" : "or.next") : end;
 
         Inst br;
         br.op = IrOp::Branch;
-        br.a = truth_bool(cur_v, acc_ty);
+        br.a = truth_bool(cur_v, load_ty);
         // and: 真才继续算右边；or: 假才继续算右边
         br.target = is_and ? rhs : next;
         br.target2 = is_and ? next : rhs;
