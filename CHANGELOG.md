@@ -4,6 +4,64 @@
 
 早期阶段没有逐条留痕，按阶段归纳；0.4 之后逐条记录。
 
+## [0.372] - 2026-11-21
+
+> 第二轮扫描后续修复：**容器元素 int→big 加宽**、**raw/big 键哈希统一**、
+> **dict 键域不一致改为明确报错**。
+>
+> ### 1. `list[big] = <list[int]>` 段错误（崩溃）
+>
+> 类型检查允许 int→big 的容器加宽，但降级层只给 Tuple 做了逐元素重建。列表长度
+> 是动态的，不能按常量下标重建 —— 补一个拷贝循环：新建 `list[big]`，逐元素
+> `convert_to` 后 append；set 同理（新建 dict 容器 + 逐键转换）。
+>
+> `bad_elem` 的 `diff()` 原本只认 float-vs-非 float，加宽 big 时返回 false，
+> `promote_container` 根本没被调用 —— 补上 big 域判断。
+>
+> 两个坑：
+>
+> - 分支必须**只在目标元素是 big 时进入**，否则会顶掉后面的 `list[int]→list[float]`
+>   老路径（134/182/383 三个用例当场回归）；
+> - `pa_list_new` 是 `(cap, elem_kind)` 两参，漏了 kind 会 panic
+>   「invalid list element kind」。
+>
+> ### 2. raw 键与同值 big 键哈希不同（错值）
+>
+> kind 9 里 big 用 limb 哈希、raw int 用 `mix64`，于是 `d[5]` 找不到
+> `d[big(5)]` 写的槽。修法：放得进 int64 的 big 用**和 raw 完全相同的哈希**，
+> 等值判断补「一边 big 一边 raw 按数值比」。
+>
+> ### 3. dict 键域不一致改为明确报错
+>
+> `dict[int,str]` 赋给 `dict[big,str]` 时键不做转换，运行期按 big 哈希查 raw 键
+> 永远查不到（**静默 False**）。现在明确报「element type conversion is not
+> supported by the code generator yet」。这是降级（报错而非正确转换），但比
+> 静默算错好；真正的键转换待下一轮。
+>
+> ### 4. 工程
+>
+> `desugar.cpp` 涨到 1201 行超限：常量折叠辅助拆到 `src/desugar_fold.h`。
+>
+> 回归 `tests/run/444_container_elem_widen.py`（list/set 加宽 + 查找 + 求和）。
+>
+> 闸门：difftest **394/0**；普通与 ASan 套件各 **415 ran ok**、0 ASan 报告；
+> check_size 通过。
+>
+> ### 仍未修（第二轮扫描余项，按严重度）
+>
+> | 严重度 | 问题 |
+> |---|---|
+> | 崩溃 | 未标注名字换类型后槽沿用旧类型：`v = "x"; v = 1.5` 打印位模式；
+> | | 同源 `for pair in zip(...)` 改类型后释放时把 int 当指针 dec。**需要先在
+> | | 类型检查层定口径**（拒绝换类型 or 把 float 装箱），降级层补不动。 |
+> | 崩溃 | `async with` 中 task 被 cancel → 引用计数二次释放（ASan UAF） |
+> | 崩溃 | 推导式里迭代中改 dict → 不可捕获 panic（`for` 有守卫，`lower_comp.cpp` 没有） |
+> | 错值 | `"%d" % big` 抛 TypeError（`%` 的描述符没有 big 档） |
+> | 错值 | 超 `__int128` 的常量折叠（`2 ** 127`、`2 ** 200`）仍静默回绕 |
+> | 漏报 | dict「改键不改大小」（del+add）不报错（CPython 3.14 报 keys changed） |
+> | 漏报 | `enumerate(dict)` / `zip(dict,set)` 用**单名**目标时不检测迭代中改容器 |
+> | 误报 | `zip(d1,d2)` 在最后一次取元素后修改时误报（CPython 先问 d1 就 StopIteration） |
+
 ## [0.371] - 2026-11-21
 
 > 第二轮三代理扫描（基线 0.370）后的第一批修复。**这一轮暴露的问题比上一轮多**，
