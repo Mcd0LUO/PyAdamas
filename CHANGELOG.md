@@ -4,6 +4,52 @@
 
 早期阶段没有逐条留痕，按阶段归纳；0.4 之后逐条记录。
 
+## [0.370] - 2026-11-21
+
+> **big 容器专项收尾**：`in` / `index` / `count` / `remove` / `sorted` / `list.sort` /
+> 列表相等比较 / `dict[big]` 与 `set[big]` 键，全部打通。
+>
+> 三块共用一个事实：**这些比较都发生在运行时容器代码里**，编译器只传一个
+> 「怎么比」的种类。
+>
+> ### 1. 查找类（in / index / count / remove）
+>
+> `key_kind(big)` 新增 **4**，`list_value_eq` 按 `pa_big_cmp == 0` 判等。
+> 不能复用 3「其它/未知」—— 那是按机器字比指针的语义，两个数值相等的 big 会
+> 被判成不等。
+>
+> ### 2. 排序（sorted / list.sort）
+>
+> 两条链路都要改：`sort_kind(big)` 必须返回 4（走描述符路径），否则落到
+> `sort_i64` 按机器字比。实测漏改时 `sorted([2^70, 5, 2^70+1])` 出乱序、
+> `[3,1,2].sort()` 原地不动。描述符字符新增 `'b'`，`sort_desc_cmp` 用
+> `pa_big_cmp`。
+>
+> ### 3. dict / set 的 big 键
+>
+> `hash_key_kind(big)` 返回 **9**（raw-or-big）—— 运行时早就为动态 big 键实现了
+> 这一档（按值哈希 + `pa_big_eq`），静态 big 键直接复用。注意不能传 4：
+> `pa_dict_new` 只认 0..3 与 9。
+>
+> ### 4. 元素相等链
+>
+> 列表相等走字符链（`i/s/f/x/l/d/t`），新增 `'b'` → `pa_big_cmp`。
+>
+> 放开四处类型检查/降级拒绝，删掉两个已过时的负面用例（`tests/fail/big_dict_key.py`、
+> `tests/fail/big_list_compare.py`）。
+>
+> **仍然不支持（有意保留）**：两个 `dict`/`set` 之间的相等比较、容器的有序比较
+>（`<`/`>`）、`list.sort(key=...)`。
+>
+> 回归 `tests/run/441_big_containers.py`：查找、删除、排序、列表相等、dict 键与
+> set 成员共 17 项，与 CPython 逐字节一致。
+>
+> 闸门：difftest **391/0**；普通与 ASan 套件各 **412 ran ok**、0 ASan 报告；
+> check_size 通过。
+>
+> 至此 [`docs/iteration-roadmap.md`](iteration-roadmap.md) 里挂着的「big 容器专项」
+> 全部关闭。
+
 ## [0.369] - 2026-11-21
 
 > big 容器专项第二块：**`min()`/`max()` 支持 big**。
