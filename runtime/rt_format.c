@@ -552,6 +552,19 @@ static PyAdamasStr* fmt_with(const char* spec, int n, int64_t raw, double d, PyA
 /* desc 是编译期生成的类型描述：i=int/bool，f=float，s=str/bytes。
    数字格式（d/i/u/x/X/o/f/F/e/E/g/G）要求对应数值类型；s/r 可以
    格式化任意受支持的类型。返回新字符串，bytes 与 str 共用表示。 */
+/* big 的整数转换：把已拼好的 spec 加上转换字符交给 pa_big_fmt，
+   format() 与 % 共用同一套格式化（宽度/符号/补零/精度都在里面）。 */
+static PyAdamasStr* pct_big_int(int64_t raw, const char* spec, int si, char conv) {
+    char buf[80];
+    int n = si < 76 ? si : 76;
+    for (int i = 0; i < n; ++i) buf[i] = spec[i];
+    buf[n] = conv;
+    PyAdamasStr* sp = str_new(buf, (int64_t)n + 1);
+    PyAdamasStr* r = pa_big_fmt((PyAdamasBig*)(uintptr_t)raw, sp);
+    pa_rc_dec(sp);
+    return r;
+}
+
 PyAdamasStr* pa_percent_format(PyAdamasStr* pat, PyAdamasList* args, PyAdamasStr* desc, int64_t is_bytes) {
     (void)is_bytes;
     if (!pat) return str_new("", 0);
@@ -630,6 +643,10 @@ PyAdamasStr* pa_percent_format(PyAdamasStr* pat, PyAdamasList* args, PyAdamasStr
             case 'i':
             case 'u':
             case 'n':
+                if (dt == 'B') {
+                    piece = pct_big_int(raw, spec, si, 'd');
+                    break;
+                }
                 if (prec >= 0) {
                     uint64_t mag;
                     char sign = 0;
@@ -664,6 +681,10 @@ PyAdamasStr* pa_percent_format(PyAdamasStr* pat, PyAdamasList* args, PyAdamasStr
             case 'x':
             case 'X':
             case 'o':
+                if (dt == 'B') {
+                    piece = pct_big_int(raw, spec, si, conv == 'o' ? 'o' : conv);
+                    break;
+                }
                 if (dt != 'i' && dt != 'b' && dt != 'u')
                     pa_raise_c("TypeError", "%%x format: an integer is required");
                 if (prec >= 0) {
@@ -728,6 +749,11 @@ PyAdamasStr* pa_percent_format(PyAdamasStr* pat, PyAdamasList* args, PyAdamasStr
                         sv = tmp;
                         tmp_owned = 1;
                     }
+                } else if (dt == 'B') {
+                    /* big：%s / %r 用十进制表示（repr 同形）。 */
+                    tmp = pa_big_str((PyAdamasBig*)(uintptr_t)raw);
+                    sv = tmp;
+                    tmp_owned = 1;
                 } else if (dt == 'i') {
                     tmp = pa_str_from_i64(raw);
                     sv = tmp;

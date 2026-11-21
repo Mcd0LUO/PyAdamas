@@ -94,6 +94,7 @@ VReg Lowerer::lower_percent_format(BinOp& b, TypePtr lt, TypePtr ty) {
         else if (t && t->kind == TyKind::Float) desc.push_back('f');
         else if (t && (t->kind == TyKind::Str || t->kind == TyKind::Bytes)) desc.push_back('s');
         else if (t && t->kind == TyKind::None) desc.push_back('n');
+        else if (t && t->kind == TyKind::Big) desc.push_back('B');
         else desc.push_back('x');
     }
     VReg pat = expr(*b.left);
