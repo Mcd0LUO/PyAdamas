@@ -12,8 +12,8 @@ import subprocess
 import sys
 
 PA = "./build/pyadamas"
-GEN = "/tmp/wt-dec2/tmp_fuzz.py"
-GENC = "/tmp/wt-dec2/tmp_fuzz_cpy.py"
+GEN = "/tmp/pa_dec_fuzz.py"
+GENC = "/tmp/pa_dec_fuzz_cpy.py"
 
 SHIM = """from decimal import Decimal as _D, getcontext  # noqa: F401
 def Dec(v="0", ctx=None):
