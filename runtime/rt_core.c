@@ -2254,7 +2254,14 @@ void pa_exc_free_save_chain(PyAdamasExcSave* s);
 void pa_gen_slot_release(int64_t* slot, int64_t own) {
     int64_t v = *slot;
     if (!v) return;
-    if (gc_phase == GC_PHASE_SWEEP) *slot = 0;
+    // **非 trial/restore 阶段一律清零。**
+    //
+    // 原来只在 sweep 阶段清槽：普通销毁路径（协程异常收尾 + 正常收尾都跑
+    // gcrel）上槽里会留一个已释放的指针，第二次释放就撞野指针 ——
+    // `refcount decrement on a freed object`。
+    //
+    // 不能在 trial/restore 阶段清：那时只是试算计数，帧的内容之后还要用。
+    if (gc_phase != GC_PHASE_TRIAL && gc_phase != GC_PHASE_RESTORE) *slot = 0;
     // own: 1 = 堆、2 = 可能非堆（注册表）、3 = 异常对象、4 = save 链。
     //
     // 3/4 是生成器 except 块里挂起时 exc_leave 写进帧槽的非 RC 对象：
