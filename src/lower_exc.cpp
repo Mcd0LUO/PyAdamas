@@ -191,9 +191,46 @@ void Lowerer::lower_raise(Raise& r) {
         //
         // save 节点的释放交给 pa_exc_reraise 自己在 longjmp 前做 ——
         // 那里能安全地恢复 current_exc 到外层值。
+        //
+        // 但 handler 体里登记的内联 finally 体还是要跑（`except E: raise` 也要
+        // 走 finally，CPython 如此）。只跑 FinallyBody，绝不碰 ExcDone ——
+        // 前者不涉及 current_exc，后者会把它 free 掉。
+        int inner_fin = -1;
+        for (size_t i = 0; i < st_->cleanups.size(); ++i)
+            if (st_->cleanups[i].kind == FuncCtx::Cleanup::Kind::FinallyBody)
+                inner_fin = static_cast<int>(i);
+        if (inner_fin >= 0) {
+            const size_t idx = static_cast<size_t>(inner_fin);
+            auto* fbody = st_->cleanups[idx].body;
+            if (fbody) {
+                auto saved = st_->cleanups;
+                st_->cleanups.resize(idx);
+                stmts(*fbody);
+                st_->cleanups = std::move(saved);
+            }
+        }
         call_void(raise_rt(RtFn::Reraise), {});
         return;
     }
+    // 显式 `raise X` 在 **except/handler 体里**要先跑一遍待处理的 finally 体。
+    //
+    // 结构化的 finally 只覆盖「try 保护区里抛出来」的情况：进入 handler 时
+    // 已经 pa_eh_leave 出了保护区，handler 体里再 raise 就不会经过本 try 的
+    // landing pad 了。所以 handler 体降级时会给 `Cleanup::FinallyBody` 登记一份
+    // 内联的 finally 体（return/break/continue 靠它跑），raise 也必须用它，
+    // 否则 `except E: raise OtherError()` 会跳过 finally。
+    //
+    // 只在「确实登记了 FinallyBody」时才跑：普通 try 体里的 raise 由结构化
+    // 展开自己跑 finally，这里再跑一次就会打印两遍（实测过）。
+    // 只跑到**最内层那一份** FinallyBody 为止：更外层的 try 还在保护区里，
+    // 它们的 finally 会由结构化展开自己跑，这里顺手跑掉就会打印两遍
+    // （嵌套形态实测过：C-outer-fin 出现两次）。
+    int inner_fin = -1;
+    for (size_t i = 0; i < st_->cleanups.size(); ++i)
+        if (st_->cleanups[i].kind == FuncCtx::Cleanup::Kind::FinallyBody)
+            inner_fin = static_cast<int>(i);
+    if (inner_fin >= 0) emit_cleanup_exits(static_cast<size_t>(inner_fin));
+
     VReg cause = kNoReg;
     if (r.cause) {
         TypePtr ct = tc_.type_of(r.cause.get());
