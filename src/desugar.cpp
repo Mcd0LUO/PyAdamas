@@ -59,6 +59,12 @@ static int fold_int_const(const Expr* e, __int128& out, bool& any_i64,
     if (!e) return 0;
     if (auto* c = dynamic_cast<const Constant*>(e)) {
         if (c->ck != Constant::CK::Int) return 0;
+        // u64_lit：> INT64_MAX 的十进制字面量，i 里存的是无符号位模式。
+        // 这里按无符号读，否则 `-9223372036854775808` 会被算成 +2^63。
+        if (c->u64_lit) {
+            out = static_cast<__int128>(static_cast<uint64_t>(c->i));
+            return 1;
+        }
         out = static_cast<__int128>(c->i);
         return 1;
     }

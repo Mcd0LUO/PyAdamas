@@ -174,10 +174,13 @@ TypePtr TypeChecker::builtin_call(const std::string& n, Call& c) {
         if (n == "min" || n == "max") {
             if (a.empty()) return t_unknown();
             // big 是支持的：比较走运行时 pa_big_cmp（见 lower_minmax）。
-            bool any_big = std::any_of(a.begin(), a.end(), has_big_value);
+            // 只认「元素本身是 big」。has_big_value 会递归进容器，
+            // `list[tuple[big,str]]` 会被误判成 big → 拿堆指针当整数比。
+            auto direct_big = [](const TypePtr& t) { return t && t->kind == TyKind::Big; };
+            bool any_big = std::any_of(a.begin(), a.end(), direct_big);
             if (a.size() == 1) {
                 TypePtr e = iter_elem(a[0], c.line, c.col);
-                return has_big_value(e) ? t_big() : e;
+                return direct_big(e) ? t_big() : e;
             }
             TypePtr acc = a[0];
             for (size_t i = 1; i < a.size(); ++i) acc = join(acc, a[i]);
