@@ -439,6 +439,15 @@ VReg Lowerer::lower_joined(JoinedStr& j) {
             VReg spec = const_str("");
             if (fv.format_spec)
                 spec = lower_joined(static_cast<JoinedStr&>(*fv.format_spec));
+            // __format__ 已经用同一个 spec 产出最终字符串：**不能再套一次**
+            // 格式化。之前这里把 vt 改成 str 后仍走 FmtStr，等价于拿数值型
+            // 说明符去格式化一个字符串 —— f"{d:.0f}" 直接 ValueError，
+            // f"{d:<10}" 则重复补白（width 幂等所以看不出来）。
+            bool already_formatted = false;
+            // __format__ 已经用同一个 spec 产出最终字符串：**不能再套一次**
+            // 格式化。之前这里把 vt 改成 str 后仍走 FmtStr，等价于拿数值型
+            // 说明符去格式化一个字符串 —— f"{d:.0f}" 直接 ValueError，
+            // f"{d:<10}" 则重复补白（width 幂等所以看不出来）。
             // 没有 !s/!r 的普通格式化：有 __format__ 就用它（和 format() 一致），
             // 否则按 __str__ 转成字符串再走字符串的格式说明。
             // （无转换时 conversion 是 -1。）
@@ -448,6 +457,7 @@ VReg Lowerer::lower_joined(JoinedStr& j) {
                     r = dunder_call(raw, vt, "__format__", {spec}, t_str());
                 if (r != kNoReg) {
                     raw = r;
+                    already_formatted = true;
                 } else {
                     VReg s = dunder_str(raw, vt, false);
                     raw = s != kNoReg ? s : class_default_str(vt);
@@ -465,7 +475,10 @@ VReg Lowerer::lower_joined(JoinedStr& j) {
             TypePtr ct = vt;
             if (fv.conversion == 's' || fv.conversion == 'r' || fv.conversion == 'a')
                 ct = t_str();
-            if (!ct || ct->kind == TyKind::Unknown) {
+            if (already_formatted) {
+                // __format__ 已产出最终字符串，直接拼进结果（不能再套 FmtStr）。
+                piece = raw;
+            } else if (!ct || ct->kind == TyKind::Unknown) {
                 VReg s = convert_to(raw, ct, t_str());
                 Inst in;
                 in.op = IrOp::CallRt;
