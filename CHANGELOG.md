@@ -4,6 +4,31 @@
 
 早期阶段没有逐条留痕，按阶段归纳；0.4 之后逐条记录。
 
+## [0.369] - 2026-11-21
+
+> big 容器专项第二块：**`min()`/`max()` 支持 big**。
+>
+> 沿用 0.368 的经验 —— **big 的比较是运行时函数**（`pa_big_cmp` 返回 -1/0/1），
+> 裸 `Cmp` 的 codegen 没有 big 路径，会把 big 指针当整数比大小。
+>
+> 修法：`lower_minmax` 里把「候选 vs 当前最优」的比较收口成一个 `take_new()`：
+> big 先 `RtFn::BigCmp` 再与 0 比，其它类型原样发 `Cmp`。序列循环与多参数两条
+> 路径都改用它。类型检查侧去掉 `min()/max() with big are not supported`，并让
+> 结果类型在混入 big 时取 `big`（big 吸收其它整数/浮点域）。
+>
+> 回归 `tests/run/440_minmax_big.py`：`list[big]` 的 max/min、多参数混类型、
+> 负数 big，外加 int/float/str 三条不受影响的对照，与 CPython 逐字节一致。
+>
+> 闸门：difftest **390/0**；全套件 **411 ran ok**、exit 0。
+>
+> ### 专项剩余（同一层，需要运行时分派）
+>
+> `sorted()` / `list.sort()` / `in` / `index` / `count` / `remove` 以及
+> `dict[big]`、`set[big]` 键仍然拒绝。它们与上面两块不同：比较发生在**运行时**
+> 容器代码里（`pa_list_index` / 排序器 / 键哈希），不是编译器发一条 `Cmp` 就完
+> 事。需要给 `key_kind()` 增加 big 档（沿用动态容器键已有的 raw-or-big 思路），
+> 并在 `rt_list.c` / 排序器 / 键哈希三处按值比较。
+
 ## [0.368] - 2026-11-21
 
 > big 容器专项第一块：**`sum()` 支持 big 元素与 big 起始值**。
