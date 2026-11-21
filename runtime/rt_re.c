@@ -149,6 +149,10 @@ typedef struct {
     // repeat 在无推进时 break）。只在 RE_SPLIT 的循环分支里维护。
     int ep_pc;
     int64_t ep_pos;
+    /* fullmatch（mode 2）：只在消费到文本末尾时接受。放在 ctx 而不是全局，
+       嵌套调用/长跳转都不会残留状态；RE_MATCH（断言/原子组的子程序接受）
+       不看这个标志。 */
+    int full;
 } ReCtx;
 
 static void* re_alloc(size_t n) {
@@ -1647,6 +1651,12 @@ static int run(ReProg* g, int pc, ReCtx* c) {
             }
             case RE_MATCH: return 1;
             case RE_MATCH_TOP:
+                // fullmatch：整串必须被消费完。不满足就当这一条分支失败，
+                // 让 VM 自然回溯去试别的交替/量词分支 —— 这样
+                // fullmatch(r"a|ab", "ab") 才能落到 "ab"（CPython 口径）。
+                // 只在整段程序的最终接受处判：RE_MATCH（断言/原子组子程序
+                // 的接受）继续单条成功返回。
+                if (__builtin_expect(c->full, 0) && c->pos != c->len) return 0;
                 // 上一次匹配为空串时，同一位置上的空匹配要失败，让回溯
                 // 继续尝试同起点的非空分支（CPython 3.7+ 口径）。
                 if (__builtin_expect(re_no_empty, 0) && c->pos == re_no_empty_pos &&
@@ -1713,6 +1723,7 @@ static int find_from(ReProg* g, PyAdamasStr* text, int64_t start, int mode, int6
     // 用绝对偏移（VM 里的 \b/^/$ 一律看绝对位置）。
     ReCtx c;
     memset(&c, 0, sizeof c);
+    c.full = (mode == 2);
     c.flags = g->flags;
     c.caps = caps;
     c.ncap = ncap;
@@ -1796,6 +1807,8 @@ static int find_from(ReProg* g, PyAdamasStr* text, int64_t start, int mode, int6
         c.steps = 0;
         c.err = 0;
         if (run(g, 0, &c)) {
+            // c.full 已在上面的 RE_MATCH_TOP 里要求消费到 len，这里只是
+            // 兜底（caps[1] 必然 == len）。
             if (mode == 2 && caps[1] != len) return 0;
             return 1;
         }
