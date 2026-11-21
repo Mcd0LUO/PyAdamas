@@ -770,6 +770,46 @@ VReg Lowerer::lower_cmp_single(VReg l, TypePtr lt, VReg r, TypePtr rt, CmpOp op,
                 }
                 return ceq;
             }
+            // ── str/bytes 与其它类型的 == / != ─────────────────────────
+            // 生成器按**左操作数**的静态类型选比较指令：左边是 str/bytes
+            // 时会把右操作数当字符串对象解引用（读 len 走 +8）。typecheck
+            // 对 ==/!= 不限制类型对，于是 "a" == 1 把 1 当地址读、段错误
+            // （ASan: SEGV on 0x8）。
+            //
+            // CPython 的口径：str.__eq__(非字符串) 返回 NotImplemented，
+            // 对方也没有兼容的 __eq__ 时落到同一性比较，恒 False。所以
+            // 一边确定是 str/bytes、另一边确定不可能是 str/bytes 时给常量；
+            // 另一边是 Optional[str] 时走 pa_str_eq_unknown（它本身对
+            // NULL / 非字符串安全），否则 "a" == None 会读地址 8。
+            auto str_like = [](const TypePtr& t) {
+                return t && (t->kind == TyKind::Str || t->kind == TyKind::Bytes);
+            };
+            auto opt_str = [](const TypePtr& t) {
+                return t && t->kind == TyKind::Optional && !t->sub.empty() &&
+                       t->sub[0] &&
+                       (t->sub[0]->kind == TyKind::Str ||
+                        t->sub[0]->kind == TyKind::Bytes);
+            };
+            auto maybe_str = [&](const TypePtr& t) {
+                return !t || str_like(t) || opt_str(t) ||
+                       t->kind == TyKind::Unknown;
+            };
+            VReg seq = kNoReg;
+            if (str_like(lt) && opt_str(rt))
+                seq = call_runtime(RtFn::StrEqUnknown, t_bool(), {r, l});
+            else if (opt_str(lt) && str_like(rt))
+                seq = call_runtime(RtFn::StrEqUnknown, t_bool(), {l, r});
+            else if ((str_like(lt) && !maybe_str(rt)) ||
+                     (str_like(rt) && !maybe_str(lt)))
+                return const_bool(op == CmpOp::Ne);
+            if (seq != kNoReg) {
+                if (op == CmpOp::Eq) return seq;
+                Inst un;
+                un.op = IrOp::Un;
+                un.uop = UnKind::Not;
+                un.a = seq;
+                return def(t_bool(), std::move(un));
+            }
         }
         // 大小比较：__lt__/__le__/__gt__/__ge__（含右操作数的镜像版）。
         if (op == CmpOp::Lt || op == CmpOp::Le || op == CmpOp::Gt || op == CmpOp::Ge) {
