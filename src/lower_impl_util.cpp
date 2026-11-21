@@ -221,6 +221,7 @@ VReg Lowerer::const_literal(const LiteralValue& v) {
         case LiteralValue::Kind::Float: return const_float(v.f);
         case LiteralValue::Kind::Str: return const_str(v.s);
         case LiteralValue::Kind::Bytes: return const_bytes(v.s);
+        case LiteralValue::Kind::Big: return const_big(v.s);
     }
     return const_none();}
 

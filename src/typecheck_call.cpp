@@ -14,6 +14,7 @@ TypePtr literal_type(const LiteralValue& lit) {
         case LiteralValue::Kind::Float: return t_float();
         case LiteralValue::Kind::Str: return t_str();
         case LiteralValue::Kind::Bytes: return t_bytes();
+        case LiteralValue::Kind::Big: return t_big();
     }
     return t_unknown();
 }
@@ -232,7 +233,8 @@ TypePtr TypeChecker::check_args(const FuncInfoPtr& fn, Call& c) {
             }
             // 定宽形参 + 字面量实参：范围内隐式 coerce（超范围在此报错）。
             // 非字面量 int 实参窄化到定宽形参仍然要求显式 cast。
-            if (arg_expr && is_fixed_int(p.ty) && accept_literal_into(p.ty, arg_expr))
+            if (arg_expr && (is_fixed_int(p.ty) || p.ty->kind == TyKind::Big) &&
+                accept_literal_into(p.ty, arg_expr))
                 return;
             // 定宽元素容器形参 + 字面量容器实参：逐元素 coerce（同口径）。
             if (arg_expr && coerce_container_literal(p.ty, arg_expr))

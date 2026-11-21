@@ -42,6 +42,9 @@ inline int64_t static_tag_of(const TypePtr& t, bool type_tags) {
         case TyKind::Bool: return type_tags ? kTagBool : kTagInt;
         case TyKind::None: return type_tags ? kTagNone : kTagInt;
         case TyKind::Float: return kTagFraw;
+        // P3 big：BIG=12 在 P3（堆⇔>=3）与 P2（堆⇔3..5或>=8）两种口径下
+        // 都是堆 tag，无需门控——big 值只在 big 程序里出现，旧程序 asm 不变。
+        case TyKind::Big: return kTagBig;
         case TyKind::Str: return kTagStr;
         case TyKind::Unknown: case TyKind::Optional: return kTagUnk;
         case TyKind::Tuple: if (type_tags) return kTagTuple; break;

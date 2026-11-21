@@ -193,6 +193,7 @@ std::vector<VReg> Lowerer::bind_args(Call& c, const FuncInfoPtr& info, FunctionD
             case LiteralValue::Kind::Float: cv.ty = t_float(); cv.f = lv.f; break;
             case LiteralValue::Kind::Str: cv.ty = t_str(); cv.s = lv.s; break;
             case LiteralValue::Kind::Bytes: cv.ty = t_bytes(); cv.s = lv.s; break;
+            case LiteralValue::Kind::Big: cv.ty = t_big(); cv.s = lv.s; break;
         }
         return cv;
     };
@@ -219,6 +220,7 @@ std::vector<VReg> Lowerer::bind_args(Call& c, const FuncInfoPtr& info, FunctionD
             case TyKind::Float: return const_float(cv.f);
             case TyKind::Str: return const_str(cv.s);
             case TyKind::Bytes: return const_bytes(cv.s);
+            case TyKind::Big: return const_big(cv.s);
             default: return const_none();
         }
     };

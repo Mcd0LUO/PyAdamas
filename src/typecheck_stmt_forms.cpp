@@ -45,13 +45,22 @@ bool TypeChecker::literal_int_value(const Expr* e, int64_t& out) {
 }
 
 bool TypeChecker::accept_literal_into(const TypePtr& want, Expr* value) {
-    if (!want || !is_fixed_int(want) || !value) return false;
+    if (!want || (!is_fixed_int(want) && want->kind != TyKind::Big) || !value) return false;
     // u64 大字面量（>INT64_MAX 的十进制，位模式存 i）：只有 U64 目标收得下；
     // 其它定宽目标按无符号值报超范围。不走 literal_int_value（位模式是负数）。
-    if (auto* c = dynamic_cast<const Constant*>(value);
+    if (auto* c = dynamic_cast<Constant*>(value);
         c && c->ck == Constant::CK::Int && c->u64_lit) {
         u64_lit_ok_.insert(value);  // 已处理（收下或已报错），收尾不再叠加
         if (want->kind == TyKind::U64) {
+            expr_types_[value] = want;
+            return true;
+        }
+        if (want->kind == TyKind::Big) {
+            // P3：big 目标消费 u64 大字面量——改写成 CK::Big 十进制串
+            //（位模式按 i64 转 big 会带上负号，必须按无符号值转写）。
+            c->ck = Constant::CK::Big;
+            c->s = std::to_string(static_cast<uint64_t>(c->i));
+            c->u64_lit = false;
             expr_types_[value] = want;
             return true;
         }
@@ -124,12 +133,21 @@ void TypeChecker::note_u64_literal(const Expr* e) {
 }
 
 void TypeChecker::consume_u64_literal(const TypePtr& rt, Expr* e) {
-    if (!rt || rt->kind != TyKind::U64 || !e) return;
+    if (!rt || (rt->kind != TyKind::U64 && rt->kind != TyKind::Big) || !e) return;
     auto* c = dynamic_cast<Constant*>(e);
     if (c && c->ck == Constant::CK::Int && c->u64_lit) {
-        // 提升到 U64 的运算/比较：字面量按 U64 定型，降级直接发无符号
-        // 位模式常量（两侧转换到提升类型是恒等，回绕语义不变）。
-        expr_types_[e] = t_u64();
+        if (rt->kind == TyKind::Big) {
+            // P3：提升到 Big 的运算/比较：u64 大字面量改写成 CK::Big
+            // 十进制串（按无符号值，位模式直转会带负号）。
+            c->ck = Constant::CK::Big;
+            c->s = std::to_string(static_cast<uint64_t>(c->i));
+            c->u64_lit = false;
+            expr_types_[e] = t_big();
+        } else {
+            // 提升到 U64 的运算/比较：字面量按 U64 定型，降级直接发无符号
+            // 位模式常量（两侧转换到提升类型是恒等，回绕语义不变）。
+            expr_types_[e] = t_u64();
+        }
         u64_lit_ok_.insert(e);
     }
 }
@@ -209,7 +227,7 @@ void TypeChecker::stmt_assign(Assign& a) {
                     TypePtr rt = expr(*at->value);
                     if (rt && rt->kind == TyKind::Class && rt->cls) {
                         if (const FieldInfo* f = rt->cls->field(at->attr);
-                            f && f->ty && is_fixed_int(f->ty))
+                            f && f->ty && (is_fixed_int(f->ty) || f->ty->kind == TyKind::Big))
                             want = f->ty;
                     }
                 }
@@ -301,8 +319,9 @@ void TypeChecker::stmt_ann_assign(AnnAssign& a) {
                 // 标注定返回 ABI：覆盖调用点推断（调用方对 ABI 负责）。
                 vt = ann;
                 expr_types_[a.value.get()] = ann;
-            } else if (ann && is_fixed_int(ann) && accept_literal_into(ann, a.value.get())) {
-                // 定宽标注 + 字面量：范围内 coerce，超范围已报错。
+            } else if (ann && (is_fixed_int(ann) || ann->kind == TyKind::Big) &&
+                       accept_literal_into(ann, a.value.get())) {
+                // 定宽/big 标注 + 字面量：范围内 coerce，超范围已报错。
                 vt = ann;
             } else if (ann && coerce_container_literal(ann, a.value.get())) {
                 // 定宽元素容器标注 + 字面量容器：逐元素 coerce（同口径）。
@@ -352,7 +371,7 @@ void TypeChecker::stmt_return(Return& r) {
             TypePtr want = cur_fn_->is_async ? cur_fn_->async_result : cur_fn_->ret;
             // return {}：空字面量的洞按声明返回类型填。
             if (vt && ty_contains_hole(vt, 0)) fill_holes_recursive(vt, want, 0);
-            bool lit_ok = r.value && is_fixed_int(want) &&
+            bool lit_ok = r.value && (is_fixed_int(want) || want->kind == TyKind::Big) &&
                           accept_literal_into(want, r.value.get());
             // 定宽元素容器返回标注 + 字面量容器：逐元素 coerce（同口径）。
             if (!lit_ok && r.value && coerce_container_literal(want, r.value.get()))

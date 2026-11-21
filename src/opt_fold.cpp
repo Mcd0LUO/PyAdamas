@@ -44,6 +44,7 @@ bool inst_is_pure(const Inst& in) {
         case IrOp::ConstFloat:
         case IrOp::ConstStr:
         case IrOp::ConstNone:
+        case IrOp::ConstBig:
         case IrOp::FuncAddr:
         case IrOp::FuncCode:
         case IrOp::Mov:

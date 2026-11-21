@@ -32,6 +32,10 @@ namespace pyadamas {
 inline int kMaxIntArgs() { return target_abi().n_arg_int; }
 inline int kMaxFpArgs() { return target_abi().n_arg_fp; }
 
+// P3 big：十进制串 → 基 2^32 小端 limb（codegen_big.cpp），返回带符号
+// limb 数（PyAdamasBig.nd 口径）。静态 BigInt 字面量数据段发射用。
+int64_t big_literal_limbs(const std::string& dec, std::vector<uint32_t>& out);
+
 // 可用来长期持有变量的寄存器。全部是 callee-saved：被调用方保证
 // 返回时原样恢复，所以跨函数调用不需要把值挪回栈。
 // rsp 是栈指针，不在其中；rbp 在——生成函数的帧相对 rsp 寻址，不需要
@@ -1070,6 +1074,9 @@ private:
     void gen_load_slot(const Inst& in);
 
         void gen_const_int(const Inst& in);
+
+        // P3 big：永生静态 BigInt 字面量（docs/numeric-types-design.md §1/§4）。
+        void gen_const_big(const Inst& in);
 
         void gen_const_float(const Inst& in);
 

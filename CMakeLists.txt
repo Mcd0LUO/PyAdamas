@@ -117,6 +117,7 @@ src/opt_intloop.cpp
   src/codegen_comment.cpp
   src/codegen_ops.cpp
   src/codegen_int_fixed.cpp
+  src/codegen_big.cpp
   src/codegen_call.cpp
   src/codegen_call_abi.cpp
   src/codegen_cffi.cpp

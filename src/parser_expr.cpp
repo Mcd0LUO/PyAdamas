@@ -371,9 +371,14 @@ ExprPtr Parser::parse_atom() {
             case Tok::INT: {
                 auto t = advance();
                 auto n = node_at<Constant>(ln, cl);
-                n->ck = Constant::CK::Int;
-                n->i = t.ival;
-                n->u64_lit = t.u64_lit;
+                if (t.is_big) {
+                    n->ck = Constant::CK::Big;
+                    n->s = t.text;   // 去下划线的十进制串
+                } else {
+                    n->ck = Constant::CK::Int;
+                    n->i = t.ival;
+                    n->u64_lit = t.u64_lit;
+                }
                 return n;
             }
             case Tok::BYTES: {

@@ -600,10 +600,18 @@ private:
                 errno = 0;
                 char* endp = nullptr;
                 unsigned long long uv = std::strtoull(clean.c_str(), &endp, 10);
-                if (errno == ERANGE || uv > UINT64_MAX || !endp || *endp != '\0')
-                    throw LexError("integer literal too large for int64", tok_line_, tok_col_);
-                t.ival = static_cast<int64_t>(uv);
-                t.u64_lit = true;
+                if (errno == ERANGE) {
+                    // P3：超 u64 的十进制字面量 → big（任意精度，opt-in）。
+                    // 旧版这里报 "integer literal too large for int64"，没有
+                    // 合法程序依赖它；u64 范围与进制前缀路径逐字不动（asm 闸门）。
+                    t.is_big = true;
+                    t.text = clean;
+                } else {
+                    if (uv > UINT64_MAX || !endp || *endp != '\0')
+                        throw LexError("integer literal too large for int64", tok_line_, tok_col_);
+                    t.ival = static_cast<int64_t>(uv);
+                    t.u64_lit = true;
+                }
             }
         }
         tokens_.push_back(std::move(t));

@@ -165,9 +165,18 @@ void TypeChecker::funcdef_impl(FunctionDef& f, const ClassInfoPtr& owner) {
         // 调用点的 bind_default）。只认 u64 字面量——普通定宽默认值的既有
         // 路径（调用点 int_literal_fits）逐字不动。
         auto accept_u64_default = [&](Param& p) {
-            if (!p.has_default || !p.default_expr || !p.ty || p.ty->kind != TyKind::U64) return;
-            const auto* c = dynamic_cast<const Constant*>(p.default_expr);
+            if (!p.has_default || !p.default_expr || !p.ty) return;
+            if (p.ty->kind != TyKind::U64 && p.ty->kind != TyKind::Big) return;
+            // 改写 CK::Big 需要去 const：与 accept_literal_into 同口径，
+            // 字面量定型是类型检查期的合法 AST 改写。
+            auto* c = const_cast<Constant*>(dynamic_cast<const Constant*>(p.default_expr));
             if (c && c->ck == Constant::CK::Int && c->u64_lit) {
+                if (p.ty->kind == TyKind::Big) {
+                    // P3：big 形参默认值消费 u64 大字面量（按无符号值转写）。
+                    c->ck = Constant::CK::Big;
+                    c->s = std::to_string(static_cast<uint64_t>(c->i));
+                    c->u64_lit = false;
+                }
                 expr_types_[p.default_expr] = p.ty;
                 u64_lit_ok_.insert(p.default_expr);
             }

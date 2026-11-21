@@ -116,6 +116,7 @@ void AsmGen::gen_inst(const Inst& in) {
         switch (in.op) {
             case IrOp::ConstInt: gen_const_int(in); break;
             case IrOp::ConstFloat: gen_const_float(in); break;
+            case IrOp::ConstBig: gen_const_big(in); break;
             case IrOp::ConstStr:
                 // 单字节 ASCII 的 str 字面量直接用驻留表里的对象。
                 //

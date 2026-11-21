@@ -51,6 +51,11 @@ inline std::optional<ConstVal> as_const(const Expr* e) {
             inner->f = -inner->f;
             return inner;
         }
+        if (inner->ty->kind == TyKind::Big) {
+            if (!inner->s.empty() && inner->s[0] == '-') inner->s.erase(0, 1);
+            else inner->s.insert(inner->s.begin(), '-');
+            return inner;
+        }
         return std::nullopt;
     }
     if (e->kind != ExprKind::Constant) return std::nullopt;
@@ -64,6 +69,7 @@ inline std::optional<ConstVal> as_const(const Expr* e) {
         case Constant::CK::Complex: return std::nullopt;
         case Constant::CK::Str: v.ty = t_str(); v.s = c.s; return v;
         case Constant::CK::Bytes: v.ty = t_bytes(); v.s = c.s; return v;
+        case Constant::CK::Big: v.ty = t_big(); v.s = c.s; return v;
         case Constant::CK::Ellipsis: return std::nullopt;
     }
     return std::nullopt;
@@ -477,6 +483,15 @@ private:
         in.op = IrOp::ConstStr;
         in.idx = mod_.intern_bytes(s);
         return def(t_bytes(), std::move(in));
+    }
+
+    // P3：big 字面量 → 永生静态 BigInt 对象（与 str 字面量同口径：
+    // 借用、不入临时栈；存储时 rc_inc 对永生哨兵是空操作）。
+    VReg const_big(const std::string& s) {
+        Inst in;
+        in.op = IrOp::ConstBig;
+        in.idx = Operand::big(mod_.intern_big(s));
+        return def(t_big(), std::move(in));
     }
 
     VReg const_literal(const LiteralValue& v);

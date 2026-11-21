@@ -12,7 +12,7 @@ namespace pyadamas {
 
 inline bool is_num(const TypePtr& t) {
     return t && (is_int_kind(t->kind) || t->kind == TyKind::Float ||
-                 t->kind == TyKind::Bool);
+                 t->kind == TyKind::Bool || t->kind == TyKind::Big);
 }
 inline bool is_unknown(const TypePtr& t) { return !t || t->kind == TyKind::Unknown; }
 
@@ -57,6 +57,7 @@ inline std::string type_name_impl(const TypePtr& t, int depth) {
         case TyKind::U16: return "u16";
         case TyKind::U32: return "u32";
         case TyKind::U64: return "u64";
+        case TyKind::Big: return "big";
         case TyKind::Float: return "float";
         case TyKind::Complex: return "complex";
         case TyKind::Str: return "str";
@@ -194,6 +195,7 @@ inline std::string bare_type_name(const TypePtr& t) {
         case TyKind::None: return "NoneType";
         case TyKind::Bool: return "bool";
         case TyKind::Int: return "int";
+        case TyKind::Big: return "int";      // CPython 语义：big 是 int
         case TyKind::Float: return "float";
         case TyKind::Complex: return "complex";
         case TyKind::Str: return "str";

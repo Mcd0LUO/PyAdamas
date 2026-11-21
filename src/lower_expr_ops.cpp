@@ -53,8 +53,11 @@ VReg Lowerer::lower_constant(Constant& c) {
             // 无符号判定都看 vreg 类型。默认 int 路径逐字不变。
             TypePtr ct = tc_.type_of(&c);
             if (ct && is_fixed_int(ct)) return const_int_ty(c.i, ct);
+            // P3：big 标注上下文里的普通整数字面量直接发永生 big 常量。
+            if (ct && ct->kind == TyKind::Big) return const_big(std::to_string(c.i));
             return const_int(c.i);
         }
+        case Constant::CK::Big: return const_big(c.s);   // P3：超 u64 字面量
         case Constant::CK::Float: return const_float(c.f);
         case Constant::CK::Complex: {
             Inst in;

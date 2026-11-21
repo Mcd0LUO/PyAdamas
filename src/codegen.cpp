@@ -182,11 +182,36 @@ std::string AsmGen::gen(const IRModule& m) {
             // 静态字面量虽然永生，但 unknown 值的运行期类型检查要靠 RC
             // 注册表确认载荷类型。表在模块入口统一登记。
         }
+        // P3 big 字面量：永生 BigInt 静态对象。RC 头与 rt_big.c 的
+        // PyAdamasBig 布局逐位一致（size=8+4n，kind=9=BIGINT）；limb 在
+        // 编译期由十进制串算好。无 big 的程序这一段不发射（asm 闸门）。
+        if (!m.bigs.empty()) {
+            section_relro();
+            for (size_t i = 0; i < m.bigs.size(); ++i) {
+                std::vector<uint32_t> limbs;
+                int64_t nd = big_literal_limbs(m.bigs[i], limbs);
+                out_ += "\t.align 8\n";
+                out_ += "\t.quad 0\n\t.quad 0\n";               // next/prev
+                out_ += "\t.quad 0x8000000000000000\n";           // rc 永生
+                out_ += "\t.quad 0\n\t.quad 0\n";               // dtor/release
+                quad_dec(out_, line_buf_, 8 + static_cast<int64_t>(limbs.size()) * 4);
+                quad_dec(out_, line_buf_, 9);                       // kind BIGINT
+                out_ += "\t.quad 0\n";                            // marked
+                raw_label(out_, line_buf_, num_label(".Lbig", static_cast<int64_t>(i)));
+                quad_dec(out_, line_buf_, nd);
+                for (uint32_t l : limbs)
+                    out_ += std::format("\t.long {}\n", l);
+            }
+        }
         section_relro();
         out_ += "\t.align 8\n.Lstrtab:\n";
         for (size_t i = 0; i < m.strings.size(); ++i)
             quad_sym(out_, line_buf_, num_label(".Lstr", static_cast<int64_t>(i)));
-        if (m.strings.empty()) out_ += "\t.quad 0\n";
+        // big 字面量与 str 字面量共用登记表（pa_register_literals 只按
+        // RC 头登记索引，载荷类型由 kind 区分）。
+        for (size_t i = 0; i < m.bigs.size(); ++i)
+            quad_sym(out_, line_buf_, num_label(".Lbig", static_cast<int64_t>(i)));
+        if (m.strings.empty() && m.bigs.empty()) out_ += "\t.quad 0\n";
 
         if (!m.globals.empty()) {
             out_ += "\t.bss\n";
@@ -617,7 +642,7 @@ std::string AsmGen::gen(const IRModule& m) {
             out_ += "\tmovq %rsp, %rbp\n";
             if (gnu_cfi()) out_ += "\t.cfi_def_cfa_register %rbp\n";
             out_ += std::format("\tleaq .Lstrtab(%rip), {}\n", arg_reg_i(0));
-            out_ += std::format("\tmovq ${}, {}\n", m.strings.size(), arg_reg_i(1));
+            out_ += std::format("\tmovq ${}, {}\n", m.strings.size() + m.bigs.size(), arg_reg_i(1));
             out_ += "\tcall pa_register_literals\n";
             // 单字节 str 字面量在生成代码里直接引用运行时驻留表
             // pa_char_tab（见 gen_inst 的 ConstStr），所以函数体之前必须
@@ -660,7 +685,7 @@ std::string AsmGen::gen(const IRModule& m) {
             else if (index_readonly_)
                 out_ += "\tcall pa_set_index_readonly\n";
             out_ += std::format("\tleaq .Lstrtab(%rip), {}\n", arg_reg_i(0));
-            out_ += std::format("\tmovq ${}, {}\n", m.strings.size(), arg_reg_i(1));
+            out_ += std::format("\tmovq ${}, {}\n", m.strings.size() + m.bigs.size(), arg_reg_i(1));
             out_ += "\tcall pa_register_literals\n";
             out_ += "\tcall pa_static_strs_init\n";
             if (dbg_on_ && !dbg_entries_.empty())

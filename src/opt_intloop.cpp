@@ -321,7 +321,7 @@ bool il_rtfn_pure_scalar(RtFn f) {
 bool il_loop_op_safe(const Inst& in) {
     switch (in.op) {
         case IrOp::ConstInt: case IrOp::ConstFloat: case IrOp::ConstStr:
-        case IrOp::ConstNone: case IrOp::FuncAddr:
+        case IrOp::ConstNone: case IrOp::ConstBig: case IrOp::FuncAddr:
         case IrOp::Mov: case IrOp::LoadSlot: case IrOp::StoreSlot:
         case IrOp::LoadGlobal:
         case IrOp::Len:

@@ -81,6 +81,8 @@ static bool idx_kind_ok(IrOp op, Operand::Kind k) {
             return k == Operand::Global;
         case IrOp::ConstStr:
             return k == Operand::Str;
+        case IrOp::ConstBig:
+            return k == Operand::Big;
         case IrOp::FuncAddr:
         case IrOp::FuncCode:
         case IrOp::CallDirect:
@@ -123,6 +125,9 @@ void Inst::text_into(std::string& buf) const {
             return;
         case IrOp::ConstNone:
             std::format_to(out, "{} = const.none", vreg_str(dst));
+            return;
+        case IrOp::ConstBig:
+            std::format_to(out, "{} = const.big #{}", vreg_str(dst), idx);
             return;
         case IrOp::FuncAddr:
             std::format_to(out, "{} = func.addr f{}", vreg_str(dst), imm);

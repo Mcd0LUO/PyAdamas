@@ -313,6 +313,8 @@ TypePtr TypeChecker::parse_annotation_impl(Expr* e, int line, int depth) {
             if (id == "u32" || id == "uint") return t_u32();
             if (id == "u64" || id == "ulong") return t_u64();
             if (id == "float") return t_float();
+            // P3：big 任意精度整数（docs/numeric-types-design.md §1/§4）。
+            if (id == "big") return t_big();
             if (id == "str") return t_str();
             if (id == "bytes") return t_bytes();
             if (id == "file") return t_file();
@@ -877,6 +879,11 @@ std::optional<LiteralValue> literal_of_expr(const Expr* e) {
             inner->f = -inner->f;
             return inner;
         }
+        if (inner->kind == LiteralValue::Kind::Big) {
+            if (!inner->s.empty() && inner->s[0] == '-') inner->s.erase(0, 1);
+            else inner->s.insert(inner->s.begin(), '-');
+            return inner;
+        }
         return std::nullopt;
     }
     if (e->kind != ExprKind::Constant) return std::nullopt;
@@ -903,6 +910,10 @@ std::optional<LiteralValue> literal_of_expr(const Expr* e) {
             break;
         case Constant::CK::Bytes:
             v.kind = LiteralValue::Kind::Bytes;
+            v.s = c.s;
+            break;
+        case Constant::CK::Big:
+            v.kind = LiteralValue::Kind::Big;
             v.s = c.s;
             break;
         default: return std::nullopt;
