@@ -1096,6 +1096,9 @@ void Lowerer::lower_for_seq(For& f) {
     cmp.a = iv;
     cmp.b = n_val();
     VReg cc = def(t_bool(), std::move(cmp));
+    // 缓存长度的比较指令位置：循环体若有副作用（调用 / del / 切片赋值…）
+    // 可能改变列表长度，事后要把这里改成「每轮重读 len」（见下方补丁）。
+    const size_t cond_cmp_pos = st_->fn->blocks[static_cast<size_t>(cond)].insts.size() - 1;
     Inst br;
     br.op = IrOp::Branch;
     br.a = cc;
@@ -1143,6 +1146,47 @@ void Lowerer::lower_for_seq(For& f) {
     stmts(f.body);
     st_->loops.pop_back();
     st_->loop_cleanup_depth.pop_back();
+    // **循环体可能改变列表长度时，退回每轮重读 len。**
+    //
+    // CPython 的 list 迭代器每取一个元素都读当前 PyList_GET_SIZE：体内
+    // pop() 只会让它提前结束、append() 会让新元素也被遍历。缓存入口长度
+    // 会把这两种都算错（前者多报 IndexError，后者漏元素）。
+    //
+    // 判据复用 side_effect_seq_（调用/del/切片赋值/setter 都会 ++），所以
+    // 「体内没有任何副作用」的热循环仍然只读一次 len（连 IndexLoadUnchecked
+    // 优化也依赖同一个判定）。只有脏循环付每轮一次 len 的代价。
+    //
+    // 元组长度不可变，不需要补丁；str/dict/set 维持原口径（dict 的
+    // 「迭代中改大小」CPython 是 RuntimeError，属另一条语义，不在此列）。
+    if (seq_ty->kind == TyKind::List && side_effect_seq_ != se_before_body) {
+        auto& cinsts = st_->fn->blocks[static_cast<size_t>(cond)].insts;
+        if (cond_cmp_pos < cinsts.size() && cinsts[cond_cmp_pos].op == IrOp::Cmp) {
+            std::vector<Inst> pre;
+            VReg seq_cond = seq;
+            if (seq_slot >= 0) {
+                // 生成器：seq vreg 不跨挂起存活，从帧槽取回。
+                seq_cond = static_cast<VReg>(st_->fn->vreg_ty.size());
+                st_->fn->vreg_ty.push_back(seq_ty);
+                Inst ld;
+                ld.op = IrOp::LoadSlot;
+                ld.idx = seq_slot;
+                ld.dst = seq_cond;
+                ld.ty = seq_ty;
+                pre.push_back(std::move(ld));
+            }
+            VReg len_now = static_cast<VReg>(st_->fn->vreg_ty.size());
+            st_->fn->vreg_ty.push_back(t_int());
+            Inst ln2;
+            ln2.op = IrOp::Len;
+            ln2.a = seq_cond;
+            ln2.dst = len_now;
+            ln2.ty = t_int();
+            pre.push_back(std::move(ln2));
+            cinsts[cond_cmp_pos].b = len_now;
+            cinsts.insert(cinsts.begin() + static_cast<std::ptrdiff_t>(cond_cmp_pos),
+                          pre.begin(), pre.end());
+        }
+    }
     // 列表/元组按 0..len-1 遍历；循环体没有调用/del/切片赋值时
     // 长度不会变，元素下标可以免检查。生成器帧可能跨 yield 挂起，
     // 直接跳过。
