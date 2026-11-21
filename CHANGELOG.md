@@ -4,6 +4,44 @@
 
 早期阶段没有逐条留痕，按阶段归纳；0.4 之后逐条记录。
 
+## [0.364] - 2026-11-21
+
+> `async with` 的 `__aexit__` 异常路径泄漏修掉（0.363 里定位到但没动的那条）。
+>
+> 症状：协程里 `async with` 报错并逃离时，每次泄漏 **224 字节**（120 + 104，
+> 正好是 `pa_exc_type_name` 与 `pa_exc_message` 造的两个串）。
+>
+>     async def worker() -> None:
+>         async with CM():
+>             raise ValueError("boom")
+>
+> 根因有两层，缺一不可：
+>
+> 1. 异常分支要把 `(type, message)` 穿过 `await` 交给 `__aexit__`，所以先
+>    `ExcTypeName`/`ExcMessage` 造两个串、`push_temp` 再塞进临时槽 —— 但**挂起时
+>    临时栈被清空**（挂起前后不属于同一次 resume），push 的那两份就没了；
+> 2. 重抛分支调 `Raise` 是 noreturn，**longjmp 之后槽里的副本永远走不到释放点**。
+>
+> 修法：
+>
+> - 新增 `pa_raise_own(str*, str*)`：与 `pa_raise` 同构，但在把 type/message 拷进
+>   异常对象之后、longjmp 之前 **dec 掉这两个串**（真正的所有权转移）；对应
+>   `RtFn::RaiseOwn`，重抛分支改用它；
+> - `__aexit__` 返回真值（抑制异常）的分支显式释放两个槽并清零。
+>
+> 为什么不做成「`pa_raise` 统一接管所有权」：其余十几个 `Raise` 调用点依赖的是
+> 临时栈在作用域结束时释放，改 `pa_raise` 会双重释放。
+>
+> 回归 `tests/run/435_async_with_exception.py`：抑制路径、传播路径、嵌套
+> `async with`（内层抑制后外层继续），与 CPython 逐字节一致；`--asan` +
+> `detect_leaks=1` 下 rc=0、0 报告。
+>
+> 闸门：difftest **385/0**；普通与 ASan 套件各 **406 ran ok**、exit 0；check_size 通过。
+>
+> 仍未修：`except` 体内 `raise` 跳过同一 try 的 `finally`（return/break/continue
+> 已修，raise 走 setjmp 长跳不经清理项，需要给 handler 体单独保护区）；
+> `zip` 中迭代 dict 时改大小不报错。
+
 ## [0.363] - 2026-11-21
 
 > 0.362 之后把「已确认未修」里的两条自己修掉。
