@@ -191,10 +191,25 @@ static void release_inlined_slots_at_returns(IRFunction& fn,
             extra.push_back(std::move(st));
         }
         if (extra.empty()) continue;
-        Inst ret = b.insts.back();
-        b.insts.pop_back();
-        for (auto& e : extra) b.insts.push_back(std::move(e));
-        b.insts.push_back(std::move(ret));
+        // **插入点不能是 Return 之前**：entry 函数的 emit_return 在 Return 前
+        // 依次发 VtShutdown / release_globals / GcShutdown / RcShutdown，而
+        // pa_gc_shutdown 会把链上剩余对象**不管 rc** 直接 free。把 dec 放在
+        // Return 前会读到已被清扫的对象（ASan: heap-use-after-free in
+        // pa_rc_dec_slow，调用点 __pa_main 的 Return；-O2 下段错误）。
+        // 所以插在收尾序列的第一个 shutdown 调用之前。
+        size_t at = b.insts.size() - 1;  // 默认：Return 之前
+        for (size_t i = b.insts.size() - 1; i > 0; --i) {
+            const Inst& in = b.insts[i];
+            if (in.op != IrOp::CallRt) continue;
+            RtFn callee_fn = static_cast<RtFn>(in.imm);
+            if (callee_fn == RtFn::VtShutdown || callee_fn == RtFn::GcShutdown ||
+                callee_fn == RtFn::RcShutdown)
+                at = i;
+            else if (callee_fn != RtFn::RcDec && callee_fn != RtFn::RcDecUnknown)
+                break;
+        }
+        b.insts.insert(b.insts.begin() + static_cast<std::ptrdiff_t>(at), extra.begin(),
+                       extra.end());
     }
 }
 

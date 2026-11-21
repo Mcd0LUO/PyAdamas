@@ -57,8 +57,53 @@ def dict_local() -> int:
 
 print(dict_local())
 
+# ── 第二轮加固：非 str 叶子的同类路径（class 实例 / list+dict / bytes）──
+# 这些对象 kind 是 OBJ/LIST/DICT，**在 GC 堆链上**：entry 函数出口的
+# pa_gc_shutdown 会不管 rc 直接 free 它们，所以「补释放」必须发生在收尾
+# 序列之前（否则 dec 到已清扫对象：ASan heap-use-after-free / -O2 段错误）。
+class Node:
+    def __init__(self, n: int):
+        self.s = "v" + str(n)
+        self.n = n
+
+def raises_with_instance() -> int:
+    nd = Node(7)
+    raise ValueError("inst" + str(nd.n))
+
+def raises_with_containers() -> int:
+    xs = [1, 2, 3]
+    d = {"k": 1}
+    b: bytes = b"x" + b"y"
+    raise ValueError("containers" + str(len(xs) + len(d) + len(b)))
+
+def raises_in_generator() -> int:
+    s: str = "a" + "b"
+    yield 1
+    raise ValueError("gen" + s)
+
+def catch_all() -> int:
+    n = 0
+    try:
+        raises_with_instance()
+    except ValueError:
+        n += 1
+    try:
+        raises_with_containers()
+    except ValueError:
+        n += 1
+    it = raises_in_generator()
+    next(it)
+    try:
+        next(it)
+    except ValueError:
+        n += 1
+    return n
+
+print(catch_all())
+
 # --- expect ---
 # 4
 # a7
 # caught wrapped:boomx1
 # 1
+# 3
