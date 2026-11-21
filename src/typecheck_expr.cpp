@@ -684,6 +684,12 @@ bool TypeChecker::dunder_cmp_ok(CmpOp op, TypePtr l, TypePtr r) {
 }
 
 TypePtr TypeChecker::binop_type(Tok op, TypePtr l, TypePtr r, int line, int col) {
+        // unknown 计数可能不是整数，不能走机器字移位或一般的 big 转换。
+        if ((op == Tok::LSHIFT || op == Tok::RSHIFT) && l && l->kind == TyKind::Big &&
+            is_unknown(r)) {
+            err(line, col, "big shift requires a statically typed integer count; use cast_big(count)");
+            return t_unknown();
+        }
         if (is_unknown(l) || is_unknown(r)) {
             // 一侧 unknown（没标注的参数最常见）、另一侧是 float 时，结果
             // 仍然是 float：Python 先把另一侧提升成 double。以前这里一律

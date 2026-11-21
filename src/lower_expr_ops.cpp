@@ -431,8 +431,10 @@ VReg Lowerer::lower_unary(UnaryOp& u) {
             return def_heap(ty, std::move(in));
         }
     }
-    // P3 big 的一元运算：-big / ~big（+big 恒等）。
+    // 带符号的整数字面量可由上下文定型为 big，此时只有一元节点被
+    // 定型，操作数仍是机器字。进 big 运行时前必须先加宽。
     if (ty && ty->kind == TyKind::Big) {
+        v = coerce(v, opnd_ty, ty);
         if (u.op == Tok::PLUS) return v;
         if (u.op == Tok::MINUS || u.op == Tok::TILDE) {
             Inst in;
