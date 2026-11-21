@@ -611,8 +611,41 @@ void Lowerer::lower_for_zip(For& f, Call& c) {
                                      : "Set changed size during iteration")});
             switch_to(ok_b);
         };
+        // **顺序有意义**：zip 先问 a 再问 b。a 已经耗尽就直接结束，
+        // 这时 b 里改东西不该报错（CPython 的 zip 根本不会碰 b）。
+        // 0.366 第一版两个一起检查，于是「最后一次取元素之后改 b」误报。
         guard(at, aval, na_slot);
-        guard(bt, bval, nb_slot);
+        {
+            int next_ab = new_block("for.zip.chk_b");
+            Inst c1;
+            c1.op = IrOp::Cmp;
+            c1.cop = CmpKind::Lt;
+            c1.a = load_slot(idx, t_int());
+            c1.b = load_slot(na_slot, t_int());
+            Inst b1;
+            b1.op = IrOp::Branch;
+            b1.a = def(t_bool(), std::move(c1));
+            b1.target = next_ab;
+            b1.target2 = orelse;
+            emit(std::move(b1));
+            switch_to(next_ab);
+            guard(bt, bval, nb_slot);
+            {
+                int body_ab = new_block("for.zip.chk_ok");
+                Inst c2;
+                c2.op = IrOp::Cmp;
+                c2.cop = CmpKind::Lt;
+                c2.a = load_slot(idx, t_int());
+                c2.b = load_slot(nb_slot, t_int());
+                Inst b2;
+                b2.op = IrOp::Branch;
+                b2.a = def(t_bool(), std::move(c2));
+                b2.target = body_ab;
+                b2.target2 = orelse;
+                emit(std::move(b2));
+                switch_to(body_ab);
+            }
+        }
     }
     Inst cmp;
     cmp.op = IrOp::Cmp;
