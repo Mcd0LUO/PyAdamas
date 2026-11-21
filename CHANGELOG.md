@@ -4,6 +4,40 @@
 
 早期阶段没有逐条留痕，按阶段归纳；0.4 之后逐条记录。
 
+## [0.355] - 2026-11-21
+
+> **修复异常跨函数 raise/catch 的捕获异常泄漏**（预存运行期 bug，tarfile/
+> configparser 批 detect_leaks=1 暴露；**纯 runtime 改动，src/codegen 零改动**，
+> 门控关程序生成 asm 逐字节不变）。
+>
+> 机理（取证修正 batch4 §六 / batch7 的「RC 环」判断）：except 体里 raise 新
+> 异常会 longjmp/_Unwind 跳过 ExcDone，被 pa_exc_accept_value 接管成
+> current_exc 的那个**捕获异常**（含 phys/phys_extra 帧链）无人释放。setjmp
+> 漏斗 pa_raise / pa_raise_value_from / pa_raise_args 与零开销 pa_eh_raise 都
+> 漏了这步收尾（零开销 pa_eh_raise_value_from 早已正确实现 drop_save +
+> free current_exc）。单站点时泄漏对象仍被 current_exc 全局根可达、LSan 不报；
+> 多站点时早先的异常被埋进 exc_save 链 prev，退出 pa_exc_shutdown 释放 save
+> 链后不可达 → 报 Direct leak。**并非 RC 环、也不依赖周期 GC**（实测 GC
+> runs=0、PYADAMAS_GC_DISABLE 无影响；泄漏对象是 malloc 的 PyAdamasException）。
+>
+> 修复：上述漏斗对齐 pa_eh_raise_value_from —— pa_exc_drop_save +
+> exc_free(current_exc) + current_exc=NULL。捕获异常的 traceback 已克隆进
+> except as e 的 ExcValue，释放不丢内容；异常匹配/展开/finally 复制/生成器
+> 挂起/async 投递语义不变。
+>
+> 闸门：最小复现（gzip 两站点 except OSError→raise MyErr）与 363/390/391
+> detect_leaks=1 由漏转 0；异常/生成器钉子 92/93/94/119/153 门控关/开 × ASan
+> leak 全 0；sem_baseline 42/42；全套件 normal 与 ASan（JOBS=1）EXIT=0（365
+> ran ok，0 FAILED/DIFF）；O0/O2 语料差分 346/0；CPython 对拍 840/0；flag-off
+> asm 38 热基准逐字节全同；check_size 无新增超限。
+>
+> **负面结论（独立预存 bug，非本次异常修复范围）**：392/253 在 detect_leaks=1
+> 下仍各留字符串泄漏（392 624B/6 对象、253 208B/2 对象）。最小复现：
+> ConfigParser 读 `"[a]\nslash = %(third)s/%%plit\nthird = end"` 后
+> items("a")——**无异常参与、门控关也复现、GC 不参与**，是插值路径的字符串
+> refcount 泄漏，与异常 raise/catch 无关；batch7 将其归因「异常 RC 环」不准确。
+> 本次异常修复对其无影响（基线同值），留待单独修复。
+
 ## [0.354] - 2026-11-21
 
 > **标准库自举第七批**（stdlib7 分支，基线 master 1589e34 / 0.353）。纯
