@@ -4,6 +4,82 @@
 
 早期阶段没有逐条留痕，按阶段归纳；0.4 之后逐条记录。
 
+## [0.362] - 2026-11-21
+
+> **三个独立代理全项目扫描 + 各自修复**（前端 / 运行时 / 代码生成）。共修 18 个缺陷，
+> 其中 3 个是崩溃（含 1 个越界写、1 个 use-after-free）。
+>
+> ### 前端（10 条）
+>
+> - `"a" == 1` **段错误**：typecheck 对 `==`/`!=` 放行任意类型对，而 gen_cmp 按**左**操作数
+>   选指令，左边是 str 时把右值当字符串解引用（读 +8）。修法：一边确定 str/bytes、另
+>   一边不可能为 str 时直接给常量 False/True；`Optional[str]` 走 NULL 安全的
+>   `pa_str_eq_unknown`（顺带修好可选字符串的内容比较）。
+> - `and`/`or` 两侧 int 与 float 混合：结果槽是 float 却把 int 位模式直接落进去
+>   （`0.0 or 9` → O0 打 `4.4e-323`、O2 汇编失败）。先去 coerce 再落槽。
+> - **增量赋值把 int 加宽成 float 时不插转换**：`x = 1; x += 0.5` 得 `9.2e18`。根因是
+>   `stmt_aug_assign` 开头缓存了加宽前的目标类型；非 dunder 路径赋值后同步 `expr_types_`。
+> - `except` 里 `return`/`break`/`continue` 跳过同一 try 的 `finally`：新增
+>   `Cleanup::FinallyBody`，在 handler/else 体降级期间入栈。
+> - `match` 的 `case None` 永不匹配（Optional 被先剥成 int）；`case True/False` 按数值
+>   相等匹配（`match 1: case True` 命中）。两条都按 CPython 的 `is` 语义修正。
+> - `and`/`or` 的 unknown 结果把空串/空容器当真（`"" or 5` 打印空行）：重载时用操作数
+>   自己的类型判真，不再拿 join 后的 unknown 走 `cmpq $0`。
+> - `int | bool` 合并被 promote 成 float（`(1 if c else True)*2` → `2.0`；`-> int` 里直接
+>   编译失败）：Bool 也进整数提升分支。
+> - `int | complex`、`list | tuple` 合不上时退 unknown，打印出地址；int 分支未转复数还会
+>   段错误。join 增加数值+complex 规则，coerce 只对**目标** complex 发 `pa_complex_new`。
+> - gate 关时 `@dataclass` 只是恒等装饰器，但调用点仍放行实参 → `P(1)` 的字段静默为 0。
+>   改为 gate 关时报 `'P' takes no arguments (no __init__)`。
+>
+> ### 运行时 / 降级（5 条 + 1 条自引回归）
+>
+> - **内联体局部槽在异常/早退路径无人释放**（str 叶子 104B 泄漏）：IR 内联把 callee 槽搬
+>   进调用方帧，而调用方的 `release_slots` 是**内联之前**生成的。修法：内联后给调用方每个
+>   Return 补释放。**这个修复第一版插在 Return 前，而 entry 的 Return 前有
+>   `pa_gc_shutdown`（不管 rc 直接 free 堆链对象）→ -O2 段错误 / ASan heap-use-after-free**；
+>   第 5 个提交把它改插到「收尾序列第一个 shutdown 调用之前」，并补 class 实例、
+>   list+dict+bytes、生成器内 raise 三类回归。
+> - **`for x in list` 现在每轮查长度**（与 CPython 一致）：旧实现入口缓存 len，体内删元素
+>   会多报 `IndexError`、append 的新元素永不遍历。这是**有意的语义变更**，连带把
+>   `tests/run/44_bounds_elim.py` 里编码旧语义的 `grow()` 改成有界形态，新增
+>   `tests/run/238_for_iter_semantics.py` 锁住八种形态。
+> - `re.fullmatch` 顶层交替不回溯（`fullmatch(r"a|ab","ab")` 假阴性）：把「整串必须消费完」
+>   下沉到 VM 的 `RE_MATCH_TOP`，`match`/`search` 不受影响。
+> - `%` 的整数精度被忽略（`"%.3d" % 5` 应为 `005`）：新增只给 `%` 用的 `pct_fmt_int`。
+>
+> ### 代码生成（3 条）
+>
+> - **`LOOP_OPT=1` 的仿射 BCE 会越界写**：候选下标是「循环外预赋值的 IV 副本槽」时，
+>   `dom_check` 只查块级支配（同块恒真），守卫按 `i` 证明在界内、实际下标是 `j` 的旧值。
+>   新增 `slot_store_loop_pos[]`：跨块仍用支配，同块要求「写的位置 < 读的位置」。
+>   修前有 `SIGSEGV`/越界写，修后与 CPython 一样抛 `IndexError`。
+> - **删除图着色分配器 `RA_GRAPH`**：它在 -O2 下静默算错浮点（`236`/`204`/`384` 均错值），
+>   文档已判放弃。删除自足 300 行，默认路径 asm 逐字节不变；`PYADAMAS_RA_GRAPH=1` 现在
+>   **报错退出**而不是静默生成错代码。
+> - **`RA_SPLIT` 入口拒绝**：split 分配器会死循环/算错值，同样已声明放弃。它与
+>   `codegen_block` 的槽位置发射代码耦合太深，删除会波及默认路径，故改为设了环境变量
+>   就报错（`=0` 视为关闭，旧实现连 `=0` 都会打开）。
+>
+> ### 工程
+>
+> - `src/lower_stmt.cpp` 涨到 1244 行超出硬限制，把 for 家族拆到 `src/lower_stmt_for.cpp`
+>   （351 + 903 行）。
+>
+> ### 已确认但仍未修（本轮只报不改）
+>
+> - dict/set **迭代中删除**会 `panic_c` 直接退出（不可捕获），CPython 是可捕获的
+>   `RuntimeError: dictionary changed size during iteration`。
+> - `async with` 的 `__aexit__` 走异常路径泄漏 `pa_exc_type_name`+`pa_exc_message`（224B）。
+> - 模块级 `except` 捕获「运行时 C 代码抛出」的异常泄漏消息串（152B，同代码在函数里不漏）。
+> - `except` 体内 `raise` 仍跳过同一 try 的 `finally`（return/break/continue 已修；raise 走
+>   setjmp 长跳，不经清理项，需单独设计）。
+> - `-> complex` 标注不被识别（返回类型退化成 unknown）；`list | tuple` 仍退 unknown、
+>   打印地址。
+>
+> 闸门（合并后主线 build/lead 复验）：difftest **382/0**；普通与 ASan 套件各 **403 ran ok**、
+> exit 0；`check_size` 通过（拆分后）。
+
 ## [0.361] - 2026-11-21
 
 > **块内标注声明也遵守「一个名字一种类型」**。这是语言规则收紧，不碰代码生成。
