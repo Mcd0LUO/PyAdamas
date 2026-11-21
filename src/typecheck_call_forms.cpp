@@ -507,8 +507,12 @@ TypePtr TypeChecker::call_value(Call& c) {
             // __init__ 带参实例化」。真正的来源是 @dataclass（装饰器在
             // 运行期合成 __init__，静态看不到）。所以恢复检查，只对
             // dataclass 和基类来源未知（is_open）的类放行。
+            // @dataclass 的 __init__ 只有 lang-gaps 门控打开时才会在
+            // typecheck_dataclass.cpp 里合成。门控关时它只是一个恒等装饰器，
+            // 放行带参构造等于**静默丢参**（P(1) 得到 x == 0）。宁可在
+            // 编译期拒绝，也不要生成错值。
             if ((!c.args.empty() || !c.keywords.empty()) && !cls->is_open() &&
-                !cls->is_dataclass)
+                !(cls->is_dataclass && lang_gaps_enabled()))
                 err(c.line, c.col,
                     std::format("'{}' takes no arguments (no __init__)", cls->name));
             for (auto& arg : c.args) expr(*arg);
