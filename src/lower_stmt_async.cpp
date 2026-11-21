@@ -417,9 +417,18 @@ void Lowerer::lower_async_with_item(With& w, size_t idx) {
         // 用 RaiseOwn：这两个串存在临时槽里，Raise 是 noreturn，longjmp 之后
         // 槽永远走不到释放点（挂起前 push 的临时栈也随挂起丢了）→ 每次泄漏
         // type+message 两个串。RaiseOwn 拷进异常对象后自己 dec 掉它们。
-        call_void(RtFn::RaiseOwn, {load_slot(ts, t_str()), load_slot(msgs, t_str())});
-        store_slot(ts, const_int(0));
-        store_slot(msgs, const_int(0));
+        //
+        // **槽必须先「只写不清」地清掉**：RaiseOwn 已经 dec 过这两个串，
+        // 而异常一路 longjmp 到 coro_step 的 setjmp 兜底，那里会调
+        // pa_gen_release_slots 逐槽 dec —— 槽里若还留着已经 free 的指针就会
+        // 二次释放（实测 `refcount decrement on a freed object`）。
+        // 用 store_slot_raw 而不是 store_slot：后者会顺手 dec 旧值，
+        // 那就和 RaiseOwn 的那次 dec 撞车了。
+        VReg ex_type = load_slot(ts, t_str());
+        VReg ex_msg = load_slot(msgs, t_str());
+        store_slot_raw(ts, const_int(0));
+        store_slot_raw(msgs, const_int(0));
+        call_void(RtFn::RaiseOwn, {ex_type, ex_msg});
         end_unreachable();
     }
     switch_to(end);
