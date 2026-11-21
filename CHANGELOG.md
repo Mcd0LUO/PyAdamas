@@ -4,6 +4,54 @@
 
 早期阶段没有逐条留痕，按阶段归纳；0.4 之后逐条记录。
 
+## [0.377] - 2026-11-21
+
+> 继续追协程取消的引用计数。本轮确定了**被释放对象的身份**，但仍然没修好。
+>
+> ### 关键证据：被释放的是实例，不是协程帧
+>
+> 给 `CM` 加一个字段，ASan 报的释放区从 **72 → 80 字节**（恰好 +8），说明被
+> 提前释放的是 `CM` 的**实例**，不是协程帧对象：
+>
+> ```
+> 0x…0090 is located 16 bytes inside of 80-byte region   ← 有字段时
+> 0x…0090 is located 16 bytes inside of 72-byte region   ← 无字段时
+> freed by: pa_rc_dec_slow ← pyadamas_fn_2CM_close_2_resume   m5.py:9
+> ```
+>
+> 也就是说 `close()` 的协程帧在结束时 dec 了 `self`，而调用方（`worker` 的槽
+> s1）随后又 dec 一次 → 二次释放。最小复现已经缩到：
+>
+> ```python
+> async def worker() -> str:
+>     cm = CM()
+>     v: int = await cm.close()   # 方法协程，正常完成
+>     await asyncio.sleep(10)     # 在这里被 cancel
+>     return "done"
+> ```
+>
+> 换成 `await helper()`（普通函数协程）不崩。
+>
+> ### 还存在的矛盾（下一步要解开）
+>
+> 如果结论是「调用方没 retain，被调方却按 owned 释放」，那给实例额外加一份
+> 引用就应该能压住崩溃。实测**压不住**：
+>
+> ```python
+> keep: list[CM] = []
+> cm = CM()
+> keep.append(cm)          # 额外一份引用
+> v: int = await cm.close()
+> await asyncio.sleep(10)  # cancel → 仍崩
+> ```
+>
+> 另一种口径下也成立（「协程帧没有 retain 接收者」），但那样 `c = cm.close();
+> cm = CM(); await c` 就该崩 —— 实测**正常**（帧确实持有实例）。两条实验互相
+> 矛盾，说明还有第三条路径在记账，需要把 `close` 帧的 gcrel 与 worker 帧的
+> gcrel 各自的 own 位打出来逐帧核对。
+>
+> 闸门（本轮无代码改动）：difftest **400/0**；全套件 **421 ran ok**、exit 0。
+
 ## [0.376] - 2026-11-21
 
 > 唯一未修的问题：协程取消时的引用计数。本轮把它**再缩小一层**。
