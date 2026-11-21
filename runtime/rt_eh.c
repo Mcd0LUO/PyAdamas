@@ -357,6 +357,10 @@ static _Noreturn void pa_eh_throw_or_exit(PyAdamasException* e) {
 /* 与 rt_exc.c 的 pa_raise 逐句对应，只把 exc_longjmp 换成抛展开。 */
 _Noreturn void pa_eh_raise(PyAdamasStr* type, PyAdamasStr* msg) {
     pa_exc_drop_save();
+    /* 与 pa_eh_raise_value_from 对齐：drop_save 只还 save 节点，被接管的
+       current_exc 仍要释放，否则 except 体里 raise Type(msg) 泄漏捕获异常。 */
+    exc_free(current_exc);
+    current_exc = NULL;
     char tn[128];
     int64_t tn_len = type->len;
     PyAdamasException* e;
