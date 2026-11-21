@@ -41,54 +41,96 @@ static bool ann_is_big(const ExprPtr& ann) {
     return n && n->id == "big";
 }
 
-static bool fold_int_const(const Expr* e, __int128& out) {
-    if (!e) return false;
+// 折叠结果：0 = 不是常量整数表达式；1 = 已精确求出；2 = 超出 __int128 求值范围。
+//
+// `any_i64` 记录「求值过程中是否有中间值超出 int64」：即便最终结果落回 int64
+// （`2 ** 70 // 2 ** 69` 就是 2），也不能按 int 域求值 —— 子表达式会在**运行期**
+// 回绕（2**70 → 0、2**69 → 0 → 0//0 抛 ZeroDivisionError）。
+static int fold_int_const(const Expr* e, __int128& out, bool& any_i64,
+                          std::string* dec = nullptr);
+
+static void fold_note(__int128 v, bool& any_i64) {
+    if (v < static_cast<__int128>(INT64_MIN) || v > static_cast<__int128>(INT64_MAX))
+        any_i64 = true;
+}
+
+static int fold_int_const(const Expr* e, __int128& out, bool& any_i64,
+                          std::string* dec) {
+    if (!e) return 0;
     if (auto* c = dynamic_cast<const Constant*>(e)) {
-        if (c->ck != Constant::CK::Int) return false;
+        if (c->ck != Constant::CK::Int) return 0;
         out = static_cast<__int128>(c->i);
-        return true;
+        return 1;
     }
     if (auto* u = dynamic_cast<const UnaryOp*>(e)) {
-        __int128 v;
-        if (!fold_int_const(u->operand.get(), v)) return false;
-        if (u->op == Tok::MINUS) { out = -v; return true; }
-        if (u->op == Tok::PLUS) { out = v; return true; }
-        return false;
+        __int128 v = 0;
+        int st = fold_int_const(u->operand.get(), v, any_i64, dec);
+        if (st != 1) return st;
+        if (u->op == Tok::MINUS) { out = -v; fold_note(out, any_i64); return 1; }
+        if (u->op == Tok::PLUS) { out = v; fold_note(out, any_i64); return 1; }
+        return 0;
     }
     auto* b = dynamic_cast<const BinOp*>(e);
-    if (!b) return false;
+    if (!b) return 0;
     __int128 l = 0, r = 0;
-    if (!fold_int_const(b->left.get(), l) || !fold_int_const(b->right.get(), r)) return false;
-    // 用 __int128 的溢出内建判定，别自己设「差不多够大」的上限：
-    // 第一版把上限设成 2**126，于是 `2 ** 126 - 1` 在算 2**126 那步就被
-    // 判成超范围、退回 int 回绕 —— 用户看到的是 `d > 0` 为假。
+    int sl = fold_int_const(b->left.get(), l, any_i64, dec);
+    int sr = fold_int_const(b->right.get(), r, any_i64, dec);
+    if (sl == 0 || sr == 0) return 0;
+    if (sl == 2 || sr == 2) return 2;
     switch (b->op) {
-        case Tok::PLUS: return !__builtin_add_overflow(l, r, &out);
-        case Tok::MINUS: return !__builtin_sub_overflow(l, r, &out);
-        case Tok::STAR: return !__builtin_mul_overflow(l, r, &out);
-        case Tok::DOUBLESLASH: if (r == 0) return false; out = l / r; return true;
-        case Tok::PERCENT: if (r == 0) return false; out = l % r; return true;
+        case Tok::PLUS:
+            if (__builtin_add_overflow(l, r, &out)) return 2;
+            fold_note(out, any_i64);
+            return 1;
+        case Tok::MINUS:
+            if (__builtin_sub_overflow(l, r, &out)) return 2;
+            fold_note(out, any_i64);
+            return 1;
+        case Tok::STAR:
+            if (__builtin_mul_overflow(l, r, &out)) return 2;
+            fold_note(out, any_i64);
+            return 1;
+        case Tok::DOUBLESLASH: {
+            if (r == 0) return 0;   // 常量除零：留给运行期按 Python 语义抛
+            // **Python 是向下取整，C++ 是向零取整**：负数要减一。
+            __int128 q = l / r;
+            if ((l % r) != 0 && ((l < 0) != (r < 0))) --q;
+            out = q;
+            fold_note(out, any_i64);
+            return 1;
+        }
+        case Tok::PERCENT: {
+            if (r == 0) return 0;
+            __int128 q = l / r;
+            if ((l % r) != 0 && ((l < 0) != (r < 0))) --q;
+            out = l - q * r;   // 余数与除数同号（Python 口径）
+            fold_note(out, any_i64);
+            return 1;
+        }
         case Tok::DOUBLESTAR: {
-            if (r < 0 || r > 200) return false;
+            if (r < 0 || r > 4096) return 0;
             __int128 acc = 1;
             for (__int128 i = 0; i < r; ++i)
-                if (__builtin_mul_overflow(acc, l, &acc)) return false;
+                if (__builtin_mul_overflow(acc, l, &acc)) return 2;
             out = acc;
-            return true;
+            fold_note(out, any_i64);
+            return 1;
         }
         case Tok::LSHIFT:
-            if (r < 0 || r > 127) return false;
+            if (r < 0 || r > 127) return 2;
             out = l << static_cast<int>(r);
-            if (l != 0 && (out >> static_cast<int>(r)) != l) return false;
-            return true;
+            if (l != 0 && (out >> static_cast<int>(r)) != l) return 2;
+            fold_note(out, any_i64);
+            return 1;
         case Tok::RSHIFT:
-            if (r < 0 || r > 127) return false;
+            if (r < 0 || r > 127) return 2;
             out = l >> static_cast<int>(r);
-            return true;
-        case Tok::AMPER: out = l & r; return true;
-        case Tok::VBAR: out = l | r; return true;
-        case Tok::CIRCUMFLEX: out = l ^ r; return true;
-        default: return false;   // 真除等：结果未必是整数，交回原路径
+            fold_note(out, any_i64);
+            return 1;
+        case Tok::AMPER: out = l & r; fold_note(out, any_i64); return 1;
+        case Tok::VBAR: out = l | r; fold_note(out, any_i64); return 1;
+        case Tok::CIRCUMFLEX: out = l ^ r; fold_note(out, any_i64); return 1;
+        default: return 0;   // 真除等：结果未必是整数，交回原路径
     }
 }
 
@@ -998,15 +1040,35 @@ private:
                     // 这里按精确值折成 CK::Big 字面量（见上面的说明）。
                     if (ann_is_big(a.annotation)) {
                         __int128 v = 0;
-                        if (fold_int_const(a.value.get(), v) &&
-                            (v < static_cast<__int128>(INT64_MIN) ||
-                             v > static_cast<__int128>(INT64_MAX))) {
+                        bool any_i64 = false;
+                        std::string dec;
+                        int st = fold_int_const(a.value.get(), v, any_i64, &dec);
+                        if (st == 2 && !dec.empty()) {
+                            // __int128 装不下，但十进制串算出来了：直接当 big 字面量。
                             auto c = std::make_unique<Constant>();
                             c->line = a.value->line;
                             c->col = a.value->col;
                             c->ck = Constant::CK::Big;
-                            c->s = i128_to_dec(v);
+                            c->s = dec;
                             a.value = std::move(c);
+                        } else if (st == 1) {
+                            // 结果超出 int64，**或者**求值途中有子表达式超出 int64
+                            // （`2 ** 70 // 2 ** 69` 结果虽小，但子式会在运行期回绕）。
+                            auto c = std::make_unique<Constant>();
+                            c->line = a.value->line;
+                            c->col = a.value->col;
+                            c->ck = Constant::CK::Big;
+                            c->s = i128_to_dec(v < 0 ? -v : v);
+                            if (v < 0) {
+                                auto neg = std::make_unique<UnaryOp>();
+                                neg->line = c->line;
+                                neg->col = c->col;
+                                neg->op = Tok::MINUS;
+                                neg->operand = std::move(c);
+                                a.value = std::move(neg);
+                            } else {
+                                a.value = std::move(c);
+                            }
                         }
                     }
                     desugar_expr(a.value, pre);
