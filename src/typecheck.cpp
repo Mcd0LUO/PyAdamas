@@ -227,6 +227,25 @@ void TypeChecker::declare(const std::string& name, TypePtr ty, int line, int col
         // 也会把「先置 None、分支里再赋值」的代码判成 None 属性访问。
         bool assigning_none = ty && ty->kind == TyKind::None;
         Scope* sc = assign_target_scope(name);
+        // 函数作用域内一个名字只允许一种标注类型，**块内的声明也算**：
+        // Python 的名字是函数作用域，`if ...: c: str = ...` 与后面函数级的
+        // `c: big = ...` 指的是同一个槽。只按当前作用域查 vars 会漏掉已经
+        // 结束的块（块作用域是临时的），于是同一个名字被解释成两种类型，
+        // 后续按旧类型检查 → `c == 0` 恒假这类静默错型。
+        if (annotated && cur_fn_scope_ && ty && !assigning_none) {
+            auto& seen = cur_fn_scope_->ann_seen;
+            auto sit = seen.find(name);
+            if (sit == seen.end()) {
+                seen[name] = {ty, line};
+            } else if (!assignable(sit->second.first, ty)) {
+                err(line, col,
+                    std::format("cannot assign '{}' to '{}' variable '{}' "
+                                "(annotated at line {})",
+                                type_name(ty), type_name(sit->second.first), name,
+                                sit->second.second));
+                return;
+            }
+        }
         auto it = sc->vars.find(name);
         if (it == sc->vars.end()) {
             // 模块级 None 占位：函数体读它时，实际值取决于调用时机

@@ -70,6 +70,10 @@ struct Scope {
     // import m 绑定的模块别名；只用于属性/from 解析，不是运行时值。
     std::unordered_map<std::string, ModuleInfoPtr> modules;
     Scope* parent = nullptr;
+    // 函数作用域上累积的「标注过的名字 → (类型, 首次声明的行)」。块作用域
+    // 是临时的，光靠 vars 查不到已经结束的块里声明过什么；而 Python 的名字
+    // 是函数作用域，块里的 `c: str` 与函数级的 `c: big` 指的是同一个槽。
+    std::unordered_map<std::string, std::pair<TypePtr, int>> ann_seen;
     bool is_module = false;
     // 这个作用域属于哪个函数；模块 / 推导式 / 类作用域为 nullptr。
     // 闭包捕获靠它判断「名字是不是从外层函数来的」。
