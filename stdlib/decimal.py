@@ -216,20 +216,22 @@ def _div_parts(sa: int, ca: big, ea: int, sb: int, cb: big, eb: int,
         if _ndigits(q) >= prec + 1:
             break
         k = k + 1
-    nq: int = _ndigits(q)
+    exp: int = ideal - k
     if r == 0:
         # 精确商：按 CPython 的理想指数保留尾随零（不把指数抬到 ideal 之上）。
-        exp: int = ideal - k
         while exp < ideal and q % 10 == 0:
             q = q // 10
             exp = exp + 1
         if _ndigits(q) <= prec:
             return sign, q, exp
+    # 注意：精确分支可能已经除掉若干尾随零，位数与指数都要用**剥零之后**
+    # 的值重新算，否则会在错误的位置舍入（实测 29 位整数除以 1 掉一个数量级）。
+    nq: int = _ndigits(q)
     drop: int = nq - prec
     if drop < 0:
         drop = 0
     q2: big = _round_mag(q, drop, mode, r != 0)
-    exp2: int = ideal - k + drop
+    exp2: int = exp + drop
     if _ndigits(q2) > prec:
         q2 = q2 // 10
         exp2 = exp2 + 1
