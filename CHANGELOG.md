@@ -4,6 +4,49 @@
 
 早期阶段没有逐条留痕，按阶段归纳；0.4 之后逐条记录。
 
+## [0.371] - 2026-11-21
+
+> 第二轮三代理扫描（基线 0.370）后的第一批修复。**这一轮暴露的问题比上一轮多**，
+> 本文只记已修的四条；未修的列在末尾，按严重度排序。
+>
+> ### 已修
+>
+> 1. **常量折叠只在「结果超 i64」时替换**（0.367 的设计缺陷）：子表达式可能早已在
+>    int 域回绕 —— `x: big = (2**70) % 3` 的两个子式都超 i64，结果却是 1，以前得 0。
+>    改成只要折叠成功就**无条件**采用精确值。
+> 2. **`//` 与 `%` 用了 C++ 的向零截断**：`(2**70) // -3` 差一。改成 Python 的向下
+>    取整、余数与除数同号。
+> 3. **`(2**70) // (2**70)` 抛 ZeroDivisionError**：折叠中途失败 → 整式退回 int 域 →
+>    0//0。无条件折叠后正常得 1。
+> 4. **u64 范围字面量（2^63..2^64−1）在折叠里被当有符号读**：
+>    `x: big = -9223372036854775808` 得 +2^63。按 `u64_lit` 转无符号即可。
+> 5. **min/max 用 `has_big_value` 判 big，而它会递归进容器**：`list[tuple[big,str]]`
+>    被误判成 big，把堆指针当整数比并打印。改成只认「元素本身是 big」；tuple 元素的
+>    min/max 现在明确报错（CPython 支持，属已知限制 —— 但报错好过输出随机地址）。
+>
+> 回归：`tests/run/442_big_const_fold_semantics.py`、`tests/run/443_big_const_u64_lit.py`。
+>
+> 闸门：difftest **393/0**；全套件 **414 ran ok**、exit 0。
+>
+> ### 未修（第二轮扫描发现，按严重度）
+>
+> | 严重度 | 问题 | 位置 |
+> |---|---|---|
+> | **崩溃** | 未标注名字被赋成另一种类型后槽沿用旧类型：先 `for pair in zip(dict,dict)` |
+> | | 再 `for pair in zip(set,set)` 时按旧 tuple 类型建元素 → `rc_dec` 把 int 当指针 |
+> | | 解引用。同源纯错值形态：`v = "x"; v = 1.5` 打印 1.5 的位模式。 |
+> | | `src/lower_impl_slots.cpp:6`（已知→已知不重定型）+ `lower_expr_assign.cpp:52` |
+> | **崩溃** | `list[big] = <list[int]>` 元素不转换（类型检查放行 int→big 加宽，降级只给 |
+> | | Tuple 做逐元素重建）→ 段错误 | `typecheck_join.h:251` + `lower_expr_dunder.cpp:276` |
+> | **崩溃** | `async with` 中 task 被 cancel → 引用计数二次释放（ASan UAF） | `rt_gen.c:100` / `rt_async.c:780` |
+> | **崩溃** | 推导式里迭代中改 dict → 不可捕获 panic（`for` 有守卫，推导式没有） | `lower_comp.cpp` |
+> | 错值 | `dict[big]` 里写 int 键查不到（kind 9 的 raw 与 big 哈希不同） | `rt_dict.c:70-72,100-104` |
+> | 错值 | `"%d" % big` 抛 TypeError | `rt_format.c:649` |
+> | 错值 | 超 `__int128` 的常量折叠（`2 ** 127`、`2 ** 200`）仍静默回绕 | `desugar.cpp` |
+> | 漏报 | dict「改键不改大小」（del+add）不报错，CPython 3.14 报 keys changed | `lower_stmt_for.cpp:381` |
+> | 漏报 | `enumerate(dict)` / `zip(dict,set)` 用**单名**目标时不检测迭代中改容器 | `lower_stmt_for.cpp:713` |
+> | 误报 | `zip(d1,d2)` 在最后一次取元素后修改时误报（CPython 先问 d1 就 StopIteration） | `lower_stmt_for.cpp` |
+
 ## [0.370] - 2026-11-21
 
 > **big 容器专项收尾**：`in` / `index` / `count` / `remove` / `sorted` / `list.sort` /
