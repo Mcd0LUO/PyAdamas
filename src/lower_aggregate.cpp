@@ -328,7 +328,10 @@ VReg Lowerer::lower_sum(Call& c) {
     // range：按边界流式累加，不物化。
     if (seq_ty->kind == TyKind::Range) {
         VReg seq = expr(*c.args[0]);
-        VReg start = acc_ty && acc_ty->kind == TyKind::Float ? const_float(0.0) : const_int(0);
+        VReg start = acc_ty && acc_ty->kind == TyKind::Float
+                      ? const_float(0.0)
+                      : (acc_ty && acc_ty->kind == TyKind::Big ? const_big("0")
+                                                               : const_int(0));
         if (c.args.size() == 2)
             start = coerce(expr(*c.args[1]), tc_.type_of(c.args[1].get()), acc_ty);
         if (acc_ty && acc_ty->kind == TyKind::Float)
@@ -339,13 +342,21 @@ VReg Lowerer::lower_sum(Call& c) {
     // 生成器：流式累加，不建中间列表（这正是生成器表达式存在的意义）。
     if (seq_ty->kind == TyKind::Generator) {
         VReg seq = expr(*c.args[0]);
-        VReg start = acc_ty && acc_ty->kind == TyKind::Float ? const_float(0.0) : const_int(0);
+        VReg start = acc_ty && acc_ty->kind == TyKind::Float
+                      ? const_float(0.0)
+                      : (acc_ty && acc_ty->kind == TyKind::Big ? const_big("0")
+                                                               : const_int(0));
         if (c.args.size() == 2)
             start = coerce(expr(*c.args[1]), tc_.type_of(c.args[1].get()), acc_ty);
         int acc = new_temp_slot(acc_ty);
         store_slot(acc, start);
         emit_gen_for_each(seq, seq_ty, [&](VReg ev, TypePtr et, int, int) {
             VReg v = coerce(ev, et, acc_ty);
+            if (acc_ty && acc_ty->kind == TyKind::Big) {
+                store_slot(acc,
+                           call_runtime(RtFn::BigAdd, t_big(), {load_slot(acc, acc_ty), v}));
+                return;
+            }
             Inst add;
             add.op = IrOp::Bin;
             add.bop = BinKind::Add;
@@ -388,7 +399,10 @@ VReg Lowerer::lower_sum(Call& c) {
     int idx = new_temp_slot(t_int());
     store_slot(idx, const_int(0));
 
-    VReg start = acc_ty && acc_ty->kind == TyKind::Float ? const_float(0.0) : const_int(0);
+    VReg start = acc_ty && acc_ty->kind == TyKind::Float
+                      ? const_float(0.0)
+                      : (acc_ty && acc_ty->kind == TyKind::Big ? const_big("0")
+                                                               : const_int(0));
     if (c.args.size() == 2)
         start = coerce(expr(*c.args[1]), tc_.type_of(c.args[1].get()), acc_ty);
     int acc = new_temp_slot(acc_ty);
@@ -435,12 +449,18 @@ VReg Lowerer::lower_sum(Call& c) {
                                          : def(elem_ty, std::move(get));
     }
     ev = coerce(ev, elem_ty, acc_ty);
-    Inst add;
-    add.op = IrOp::Bin;
-    add.bop = BinKind::Add;
-    add.a = load_slot(acc, acc_ty);
-    add.b = ev;
-    store_slot(acc, def(acc_ty, std::move(add)));
+    if (acc_ty && acc_ty->kind == TyKind::Big) {
+        // big 加法是运行时函数，不是裸 Bin：Bin 的 codegen 没有 big 路径，
+        // 会把 big 指针当整数相加（实测段错误）。
+        store_slot(acc, call_runtime(RtFn::BigAdd, t_big(), {load_slot(acc, acc_ty), ev}));
+    } else {
+        Inst add;
+        add.op = IrOp::Bin;
+        add.bop = BinKind::Add;
+        add.a = load_slot(acc, acc_ty);
+        add.b = ev;
+        store_slot(acc, def(acc_ty, std::move(add)));
+    }
     Inst jin;
     jin.op = IrOp::Jump;
     jin.target = incr;

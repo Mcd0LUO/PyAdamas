@@ -182,9 +182,8 @@ TypePtr TypeChecker::builtin_call(const std::string& n, Call& c) {
         }
         if (n == "sum") {
             if (!a.empty()) {
+                // big 元素/起始值是支持的：累加走运行时 BigAdd（不是裸 Bin）。
                 auto e = iter_elem(a[0], c.line, c.col);
-                if (has_big_value(e) || (a.size() > 1 && has_big_value(a[1])))
-                    err(c.line, c.col, "sum() with big is not supported");
                 if (!is_unknown(e) && !is_num(e))
                     err(c.line, c.col,
                         std::format("sum() over non-numeric '{}'", type_name(e)));
@@ -192,6 +191,8 @@ TypePtr TypeChecker::builtin_call(const std::string& n, Call& c) {
                 TypePtr res = is_num(e) ? (is_fixed_int(e) ? t_int() : e) : t_int();
                 // start 参数参与数值域提升：sum([], 0.5) 是 float。
                 if (a.size() > 1 && is_num(a[1])) res = promote(res, a[1]);
+                // 任一侧是 big 就整体按 big 累加（精确，不回绕）。
+                if (has_big_value(e) || (a.size() > 1 && has_big_value(a[1]))) res = t_big();
                 return res;
             }
             return t_int();
