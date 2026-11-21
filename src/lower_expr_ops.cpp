@@ -538,10 +538,17 @@ VReg Lowerer::lower_boolop(BoolOp& b) {
     }
 
     VReg acc = expr(*b.values[0]);
-    store_borrow_slot(tmp, acc);
-    // 真值必须按操作数自己的类型判断：结果槽的类型是 join 出来的，
-    // 拿它去查 __bool__/__len__ 会漏掉类实例。
+    // 结果槽的类型是各分支 join 出来的（int|float → float）。操作数要先
+    // 转成结果类型再落槽：直接存原始机器字，槽里就是 int 的位模式，按
+    // float 读回来是 4.4e-323 这种垃圾；-O2 的常量折叠还会把 int 立即数
+    // 直接塞进 xmm 寄存器（movq $9, %xmm8），汇编器直接失败。
+    // 只对 float 结果做（big 路径在下面单独处理；unknown 结果不能在这里
+    // 装箱，否则真值判断会被 CPYFLOAT 指针带偏）。
     TypePtr acc_ty = tc_.type_of(b.values[0].get());
+    if (ty && ty->kind == TyKind::Float)
+        store_borrow_slot(tmp, coerce(acc, acc_ty, ty));
+    else
+        store_borrow_slot(tmp, acc);
 
     for (size_t i = 1; i < b.values.size(); ++i) {
         VReg cur_v = load_slot(tmp, ty);
@@ -558,8 +565,12 @@ VReg Lowerer::lower_boolop(BoolOp& b) {
 
         switch_to(rhs);
         VReg v = expr(*b.values[i]);
-        store_borrow_slot(tmp, v);
-        acc_ty = tc_.type_of(b.values[i].get());
+        TypePtr vt = tc_.type_of(b.values[i].get());
+        if (ty && ty->kind == TyKind::Float)
+            store_borrow_slot(tmp, coerce(v, vt, ty));
+        else
+            store_borrow_slot(tmp, v);
+        acc_ty = vt;
         Inst j;
         j.op = IrOp::Jump;
         j.target = next;
