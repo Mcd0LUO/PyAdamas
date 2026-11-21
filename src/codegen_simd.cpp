@@ -39,7 +39,7 @@ static const Inst* simd_def_inst(const IRFunction& f, const std::vector<int>& de
 
 bool AsmGen::try_simd_reduction(const Block& b) {
     // ── 门控与函数级前提 ──────────────────────────────────────────
-    if (!simd_enabled_ || opt_ < 2 || gen_ || ra_graph_ || tags_enabled_) return false;
+    if (!simd_enabled_ || opt_ < 2 || gen_ || tags_enabled_) return false;
     if (!slot_loc_.empty()) return false;                 // 只做默认寄存器分配
     if (std::string_view(target_abi().name) != "x86_64-sysv") return false;
     if (f_->has_handlers) return false;                   // setjmp 函数形态不稳
@@ -328,7 +328,7 @@ bool AsmGen::try_simd_reduction(const Block& b) {
 // try_simd_reduction 的内联检查一致。宁保守跳过，不误向量化。
 
 bool AsmGen::simd_func_ok() const {
-    if (!simd_enabled_ || opt_ < 2 || gen_ || ra_graph_ || tags_enabled_) return false;
+    if (!simd_enabled_ || opt_ < 2 || gen_ || tags_enabled_) return false;
     if (!slot_loc_.empty()) return false;                 // 只做默认寄存器分配
     if (std::string_view(target_abi().name) != "x86_64-sysv") return false;
     if (f_->has_handlers) return false;                   // setjmp 函数形态不稳

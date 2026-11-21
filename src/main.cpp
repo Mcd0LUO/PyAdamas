@@ -313,13 +313,23 @@ int main(int argc, char** argv) {
         prog.rebuild = rebuild;
         // live range splitting 开关（实验特性）：读一次环境变量，写进缓存清单。
         prog.rc_split = std::getenv("PYADAMAS_RA_SPLIT") != nullptr;
-        // 图着色分配器开关（实验特性）：读一次环境变量，写进缓存清单。
-        prog.ra_graph = std::getenv("PYADAMAS_RA_GRAPH") != nullptr;
+        // 图着色分配器（PYADAMAS_RA_GRAPH）已整段删除：它在 -O2 下会把
+        // 浮点累加器跨调用的活跃性算错（0.314 修过的 N19a 形态），静默算
+        // 错值；而它本来就是默认关的实验路径（docs/regalloc.md 已判放弃）。
+        // 留一个显式报错而不是静默忽略，免得 A/B 脚本以为自己在跑另一条
+        // 分配路径拿到假数据。
+        if (const char* rg = std::getenv("PYADAMAS_RA_GRAPH");
+            rg != nullptr && std::string_view(rg) != "0" && rg[0] != '\0') {
+            std::fprintf(stderr,
+                         "error: PYADAMAS_RA_GRAPH 已移除（图着色分配器会在 -O2 下"
+                         "生成错误代码，见 docs/regalloc.md）\n");
+            return 2;
+        }
         // callee-saved 提升增强（默认关）：PYADAMAS_RA_OPT=1 开启，参与缓存失效。
         prog.ra_opt = std::getenv("PYADAMAS_RA_OPT") != nullptr &&
                       std::string_view(std::getenv("PYADAMAS_RA_OPT")) != "0";
         // 浮点循环 SIMD 向量化（0.336 后默认开）：PYADAMAS_SIMD=0 显式关，参与缓存失效。
-        // 仅 opt>=2 非生成器非 ra_graph 非 tags 模块生效（codegen_simd 守卫），fallback 安全。
+        // 仅 opt>=2 非生成器非 tags 模块生效（codegen_simd 守卫），fallback 安全。
         const char* simd_env = std::getenv("PYADAMAS_SIMD");
         prog.simd = !simd_env || std::string_view(simd_env) != "0";
         // 通用循环自动向量化（默认关）：PYADAMAS_VECT=1 开启，参与缓存失效。
@@ -376,7 +386,7 @@ int main(int argc, char** argv) {
                 auto a = std::chrono::steady_clock::now();
                 std::string asm_text = pyadamas::generate_asm(
                     *prog.entry->ir, !prog.needs_unknown_index, prog.zero_cost_exc,
-                    false, prog.rc_split, prog.ra_graph, prog.simd, prog.ra_opt,
+                    false, prog.rc_split, prog.simd, prog.ra_opt,
                     prog.inline_opt, prog.type_tags, prog.vect, prog.needs_dynamic_big);
                 auto b = std::chrono::steady_clock::now();
                 if (std::getenv("PYADAMAS_TIMING"))
