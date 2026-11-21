@@ -395,6 +395,7 @@ bool version_bounds_affine_loop(IRFunction& fn, int h, const std::vector<char>& 
     std::vector<VReg> slot_store_out_val(ns, kNoReg);
     std::vector<char> slot_addr(ns, 0);
     std::vector<int> slot_store_loop_block(ns, -1);
+    std::vector<int> slot_store_loop_pos(ns, -1);
     std::vector<VReg> slot_store_loop_val(ns, kNoReg);
     for (int b = 0; b < nb; ++b) {
         const auto& insts = fn.blocks[static_cast<size_t>(b)].insts;
@@ -411,6 +412,7 @@ bool version_bounds_affine_loop(IRFunction& fn, int h, const std::vector<char>& 
                 if (in_loop(b)) {
                     ++slot_stores_loop[s];
                     slot_store_loop_block[s] = b;
+                    slot_store_loop_pos[s] = static_cast<int>(k);
                     slot_store_loop_val[s] = in.a;
                 } else {
                     ++slot_stores_out[s];
@@ -615,11 +617,16 @@ bool version_bounds_affine_loop(IRFunction& fn, int h, const std::vector<char>& 
             if (slot_addr[bs] || slot_stores_loop[bs] != 0) continue;
             IlAffine af = affine(in.b, 0);
             if (!af.ok) continue;
-            // 副本槽的写块必须支配候选块（保证读到的确实是本轮 IV 值）。
+            // 副本槽的写必须**支配读到它的那条 load**：既要在支配意义上
+            // 先于它，同块内还要在它前面。只按块支配检查是不够的 ——
+            //     for i in range(10):
+            //         a[j] = i      # 这里的 j 还是上一轮（或循环外）的值
+            //         j = i
+            // 里 store(j) 与 load(j) 同块、写在后，块级支配恒真，于是守卫
+            // 证明的是 i（本轮 IV）而不是实际下标的旧值，unchecked 越界写。
+            // 同块必须 pos(store) < pos(load)。
             if (af.coeff == 1) {
                 VReg ivv = in.b;
-                // 找到 idx 链里读 IV/副本槽的那条 load，检查其槽写块支配。
-                // 简化：对链上每个副本槽统一要求写块支配候选块。
                 std::function<bool(VReg, int)> dom_check = [&](VReg v, int depth) -> bool {
                     if (v == kNoReg || depth > 8) return true;
                     if (v >= nv || ndefs[v] != 1) return false;
@@ -629,8 +636,17 @@ bool version_bounds_affine_loop(IRFunction& fn, int h, const std::vector<char>& 
                         d.in->idx < static_cast<int>(ns)) {
                         size_t s = static_cast<size_t>(d.in->idx);
                         if (is_iv_copy[s] && s != static_cast<size_t>(iv_slot)) {
-                            if (!dom[static_cast<size_t>(b)][static_cast<size_t>(slot_store_loop_block[s])])
+                            const int sb = slot_store_loop_block[s];
+                            const int sp = slot_store_loop_pos[s];
+                            if (sb < 0 || sp < 0) return false;
+                            if (sb != d.block) {
+                                // 不同块：写块必须支配 load 所在块。
+                                if (!dom[static_cast<size_t>(d.block)][static_cast<size_t>(sb)])
+                                    return false;
+                            } else if (sp >= static_cast<int>(d.pos)) {
+                                // 同块：读在写前（或正是写自己）→ 读到的是旧值。
                                 return false;
+                            }
                         }
                         return true;
                     }
