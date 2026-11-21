@@ -69,6 +69,15 @@ inline bool is_unsigned_int(const TypePtr& t) {
     return i && !i->is_signed;
 }
 
+// Value-comparison gates for containers whose nested element domain is known.
+inline bool has_big_value(const TypePtr& t) {
+    if (!t) return false;
+    if (t->kind == TyKind::Big) return true;
+    for (const auto& member : t->sub)
+        if (has_big_value(member)) return true;
+    return false;
+}
+
 inline bool is_fixed_int(const TypePtr& t) {
     return t && is_fixed_int_kind(t->kind);
 }

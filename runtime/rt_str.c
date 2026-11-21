@@ -119,6 +119,12 @@ static void repr_any_into(AnyReprBuf* b, int64_t v) {
             pa_rc_dec(s);
             return;
         }
+        case PYADAMAS_RC_BIGINT: {
+            PyAdamasStr* s = pa_big_str((PyAdamasBig*)(uintptr_t)v);
+            ar_put(b, s->data, (size_t)s->len);
+            pa_rc_dec(s);
+            return;
+        }
         case PYADAMAS_RC_LIST: {
             PyAdamasList* l = (PyAdamasList*)(uintptr_t)v;
             ar_cstr(b, "[");
@@ -545,6 +551,8 @@ PyAdamasStr* pa_str_any(int64_t v) {
     if (v > 4096) {
         PyAdamasRc* h = (PyAdamasRc*)(uintptr_t)((uint64_t)v -
                                                 (uint64_t)PYADAMAS_RC_HDR);
+        if (pa_unknown_is_heap(v) && h->kind == PYADAMAS_RC_BIGINT)
+            return pa_big_str((PyAdamasBig*)(uintptr_t)v);
         if (rc_index_has(h)) {
             if (h->kind == PYADAMAS_RC_STR) {
                 pa_rc_inc((void*)(uintptr_t)v);

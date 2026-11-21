@@ -1072,6 +1072,12 @@ static void cpy_repr(CpyBuf* b, int64_t v) {
         cb_ch(b, '\'');
         return;
     }
+    if (h->kind == PYADAMAS_RC_BIGINT) {
+        PyAdamasStr* s = pa_big_str((PyAdamasBig*)(uintptr_t)v);
+        cb_cstr(b, s->data);
+        pa_rc_dec(s);
+        return;
+    }
     if (h->kind == PYADAMAS_RC_CPYFLOAT) {
         double d;
         memcpy(&d, (void*)(uintptr_t)v, sizeof d);

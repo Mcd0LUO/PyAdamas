@@ -159,8 +159,12 @@ TypePtr TypeChecker::expr(Expr& e) {
             case ExprKind::Set: {
                 auto& s = static_cast<SetExpr&>(e);
                 if (s.elts.empty()) return mk_set(fresh_hole());
-                TypePtr acc = expr(*s.elts[0]);
-                for (size_t i = 1; i < s.elts.size(); ++i) acc = join(acc, expr(*s.elts[i]));
+                TypePtr acc;
+                for (auto& el : s.elts) {
+                    TypePtr et = expr(*el);
+                    if (has_big_value(et)) err(el->line, el->col, "big dictionary/set keys are not supported");
+                    acc = acc ? join(acc, et) : et;
+                }
                 return mk_set(acc);
             }
             case ExprKind::Dict: {
@@ -170,6 +174,8 @@ TypePtr TypeChecker::expr(Expr& e) {
                 for (size_t i = 0; i < d.keys.size(); ++i) {
                     if (d.keys[i]) {
                         auto k = expr(*d.keys[i]);
+                        if (has_big_value(k)) err(d.keys[i]->line, d.keys[i]->col,
+                                                  "big dictionary/set keys are not supported");
                         kt = kt ? join(kt, k) : k;
                     }
                     auto v = expr(*d.values[i]);
@@ -243,10 +249,15 @@ TypePtr TypeChecker::expr(Expr& e) {
             case ExprKind::BoolOp: {
                 auto& b = static_cast<BoolOp&>(e);
                 TypePtr acc = nullptr;
+                bool has_big = false, has_other = false;
                 for (auto& v : b.values) {
                     auto t = expr(*v);
+                    has_big |= t->kind == TyKind::Big;
+                    has_other |= t->kind != TyKind::Big;
                     acc = acc ? join(acc, t) : t;
                 }
+                // and/or 保留被选中的值；不能把标量当成 big 指针。
+                if (has_big && has_other) return t_unknown();
                 return acc ? acc : t_unknown();
             }
             case ExprKind::Compare: {
@@ -846,6 +857,10 @@ TypePtr TypeChecker::binop_type(Tok op, TypePtr l, TypePtr r, int line, int col)
             case Tok::RSHIFT:
                 // 移位结果跟随左操作数；超宽按 pa 的回绕/清零语义（非 C UB）。
                 // P3：big << n / big >> n（计数也可以是 big，rt_big 校验非负）。
+                if (r->kind == TyKind::Big && l->kind != TyKind::Big) {
+                    err(line, col, "a big shift count requires a big left operand");
+                    return t_unknown();
+                }
                 if ((is_int_like(l) || l->kind == TyKind::Big) &&
                     (is_int_like(r) || r->kind == TyKind::Big))
                     return int_shift_result(l);
@@ -856,6 +871,16 @@ TypePtr TypeChecker::binop_type(Tok op, TypePtr l, TypePtr r, int line, int col)
     }
 
 void TypeChecker::compare_type(CmpOp op, TypePtr l, TypePtr r, int line, int col) {
+        auto container = [](const TypePtr& t) {
+            return t && (t->kind == TyKind::List || t->kind == TyKind::Tuple ||
+                         t->kind == TyKind::Dict || t->kind == TyKind::Set);
+        };
+        if (op != CmpOp::Is && op != CmpOp::IsNot &&
+            ((container(l) && has_big_value(l)) || (container(r) && has_big_value(r)) ||
+             ((op == CmpOp::In || op == CmpOp::NotIn) && container(r) && has_big_value(l)))) {
+            err(line, col, "container comparisons involving big are not supported");
+            return;
+        }
         if (is_unknown(l) || is_unknown(r)) return;
         if (l->kind == TyKind::Optional || r->kind == TyKind::Optional) return;
         switch (op) {
@@ -932,6 +957,8 @@ TypePtr TypeChecker::subscript_type(TypePtr obj, TypePtr idx, int line, int col)
                 // 长度不定的元组，下标拿到的就是元素类型
                 return obj->variadic && !obj->sub.empty() ? obj->sub[0] : t_unknown();
             case TyKind::Dict:
+                if (has_big_value(obj->sub[0]) || has_big_value(idx))
+                    err(line, col, "big dictionary/set keys are not supported");
                 if (!assignable(obj->sub[0], idx))
                     err(line, col,
                         std::format("dict key type is '{}', got '{}'", type_name(obj->sub[0]),

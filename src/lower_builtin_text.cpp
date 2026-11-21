@@ -62,7 +62,7 @@ VReg Lowerer::lower_builtin_text(const std::string& name, Call& c) {
             } else if (et && et->kind == TyKind::Range) {
                 piece = call_runtime(RtFn::RangeRepr, t_str(), {ev});
                 push_temp(piece);
-            } else if (et && et->kind == TyKind::Complex) {
+            } else if (et && (et->kind == TyKind::Complex || et->kind == TyKind::Big)) {
                 piece = convert_to(ev, et, t_str());
             } else if (et && et->kind == TyKind::Class) {
                 piece = dunder_str(ev, et, true);
@@ -234,8 +234,10 @@ VReg Lowerer::lower_builtin_text(const std::string& name, Call& c) {
         // u64 必须走无符号版（hex(cast_u64(-1)) == '0xffffffffffffffff'，
         // 有符号版会打成 '-0x1'）。其余定宽值在槽内已是正确值，走有符号版。
         bool uns = at && at->kind == TyKind::U64;
-        VReg v = coerce(expr(*c.args[0]), at, t_int());
-        VReg s = call_runtime(uns ? RtFn::UIntToBase : RtFn::IntToBase, t_str(),
+        bool big = at && at->kind == TyKind::Big;
+        VReg v = expr(*c.args[0]);
+        if (!big) v = coerce(v, at, t_int());
+        VReg s = call_runtime(big ? RtFn::BigToBase : uns ? RtFn::UIntToBase : RtFn::IntToBase, t_str(),
                               {v, const_int(base)});
         push_temp(s);
         return s;
@@ -339,7 +341,7 @@ VReg Lowerer::lower_builtin_text(const std::string& name, Call& c) {
         }
         // 定宽整数（P1）：repr 与 str 同形（十进制；u64 走无符号转换）。
         if (t && (is_int_kind(t->kind) || t->kind == TyKind::Bool ||
-                  t->kind == TyKind::Float || t->kind == TyKind::Complex ||
+                  t->kind == TyKind::Float || t->kind == TyKind::Complex || t->kind == TyKind::Big ||
                   t->kind == TyKind::None))
             return convert_to(v, t, t_str());
         if (t && t->kind == TyKind::Class) {
@@ -359,11 +361,13 @@ VReg Lowerer::lower_builtin_text(const std::string& name, Call& c) {
     }
 
     if (name == "format") {
+        TypePtr vt = c.args.empty() ? nullptr : tc_.type_of(c.args[0].get());
+        if (c.args.size() == 1 && vt && vt->kind == TyKind::Big)
+            return convert_to(expr(*c.args[0]), vt, t_str());
         if (c.args.size() != 2) {
             err(c.line, c.col, "format() takes exactly two arguments");
             return const_str("");
         }
-        TypePtr vt = tc_.type_of(c.args[0].get());
         if (vt && vt->kind == TyKind::Class && vt->cls &&
             vt->cls->method("__format__")) {
             VReg v = expr(*c.args[0]);
@@ -384,6 +388,7 @@ VReg Lowerer::lower_builtin_text(const std::string& name, Call& c) {
         else if (vt && vt->kind == TyKind::U64) fn = RtFn::FmtU64;  // P1：无符号
         else if (vt && vt->kind == TyKind::Str) fn = RtFn::FmtStr;
         else if (vt && vt->kind == TyKind::Complex) fn = RtFn::FmtComplex;
+        else if (vt && vt->kind == TyKind::Big) fn = RtFn::BigFmt;
         else if (!vt || (!is_int_kind(vt->kind) && vt->kind != TyKind::Unknown)) {
             err(c.line, c.col,
                 std::format("format() of '{}' is not supported yet", type_name(vt)));
@@ -425,6 +430,7 @@ VReg Lowerer::lower_builtin_text(const std::string& name, Call& c) {
         }
         VReg v = expr(*c.args[0]);
         TypePtr from = tc_.type_of(c.args[0].get());
+        if (name == "int" && from && from->kind == TyKind::Big) return v;
         // 字符串解析：以前走 Convert 会把字符串指针直接当数值，静默算错。
         if (name == "int" && from && from->kind == TyKind::Str)
             return call_runtime(RtFn::StrToI64, t_int(), {v, const_int(10)});

@@ -45,6 +45,7 @@ typedef enum {
     ANY_FLOAT = 1, /* CPYFLOAT 盒 */
     ANY_STR = 2,
     ANY_OTHER = 3, /* 其它堆对象（list/dict/类实例/...） */
+    ANY_BIG = 4,
 } AnyKind;
 
 typedef struct {
@@ -83,8 +84,9 @@ static void any_decode_typed(int64_t v, int64_t desc, AnyVal* o) {
             o->f = 0.0;
             o->s = (PyAdamasStr*)(uintptr_t)v;
             return;
+        case 'b':
         case 'o':
-            o->kind = ANY_OTHER;
+            o->kind = desc == 'b' ? ANY_BIG : ANY_OTHER;
             o->i = v;
             o->f = 0.0;
             o->s = NULL;
@@ -104,6 +106,9 @@ static void any_decode(int64_t v, AnyVal* o) {
     if (!pa_unknown_is_heap(v)) return;
     PyAdamasRc* h = (PyAdamasRc*)(uintptr_t)((uint64_t)v - (uint64_t)PYADAMAS_RC_HDR);
     switch (h->kind) {
+        case PYADAMAS_RC_BIGINT:
+            o->kind = ANY_BIG;
+            return;
         case PYADAMAS_RC_CPYFLOAT:
             o->kind = ANY_FLOAT;
             memcpy(&o->f, (void*)(uintptr_t)v, sizeof o->f);
@@ -188,6 +193,7 @@ double pa_any_to_f64(int64_t v) {
     switch (a.kind) {
         case ANY_FLOAT: return a.f;
         case ANY_INT: return (double)a.i;
+        case ANY_BIG: return pa_big_to_f64((PyAdamasBig*)(uintptr_t)a.i);
         case ANY_STR:
             pa_raise_c("TypeError", "must be real number, not str");
             return 0.0;
@@ -207,6 +213,7 @@ int64_t pa_any_to_i64(int64_t v) {
                 pa_raise_c("OverflowError", "cannot convert float to integer");
             return (int64_t)a.f;
         case ANY_INT: return a.i;
+        case ANY_BIG: return pa_big_to_i64((PyAdamasBig*)(uintptr_t)a.i);
         case ANY_STR:
             pa_raise_c("TypeError", "int() argument must be a number, not str");
             return 0;
@@ -214,6 +221,33 @@ int64_t pa_any_to_i64(int64_t v) {
             pa_raise_c("TypeError", "int() argument must be a number, not object");
             return 0;
     }
+}
+
+static PyAdamasBig* any_big_ptr(AnyVal a) {
+    return (PyAdamasBig*)(uintptr_t)a.i;
+}
+
+PyAdamasBig* pa_any_to_big(int64_t v) {
+    AnyVal a;
+    any_decode(v, &a);
+    switch (a.kind) {
+        case ANY_BIG:
+            pa_rc_inc(any_big_ptr(a));
+            return any_big_ptr(a);
+        case ANY_INT: return pa_big_from_i64(a.i);
+        case ANY_FLOAT: return pa_big_from_f64(a.f);
+        default: pa_raise_c("TypeError", "cannot convert object to big");
+    }
+    return NULL;
+}
+
+/* Fresh conversions transfer their initial reference to the temporary stack,
+   which protects them both against collection and exceptional exits. */
+static PyAdamasBig* any_big_operand(AnyVal a) {
+    if (a.kind == ANY_BIG) return any_big_ptr(a);
+    PyAdamasBig* b = a.kind == ANY_INT ? pa_big_from_i64(a.i) : pa_big_from_f64(a.f);
+    pa_rc_temp(b);
+    return b;
 }
 
 /* Python 的 // 向下取整、% 与除数同号；x86 的 idiv 向零取整。与 codegen
@@ -260,6 +294,48 @@ static double any_mod_d(double a, double b) {
     return r;
 }
 
+static bool any_num(AnyVal a) {
+    return a.kind == ANY_INT || a.kind == ANY_FLOAT || a.kind == ANY_BIG;
+}
+
+/* A big operand selects the same integer promotion as the static big path. */
+static PaAnyPair any_big_arith(int64_t op, AnyVal x, AnyVal y) {
+    if (!any_num(x) || !any_num(y)) pa_raise_c("TypeError", "unsupported operand type(s)");
+    int64_t mark = pa_rc_mark();
+    PyAdamasBig* a = any_big_operand(x);
+    PyAdamasBig* b = any_big_operand(y);
+    PyAdamasBig* r = NULL;
+    switch (op) {
+        case PA_ANY_ADD: r = pa_big_add(a, b); break;
+        case PA_ANY_SUB: r = pa_big_sub(a, b); break;
+        case PA_ANY_MUL: r = pa_big_mul(a, b); break;
+        case PA_ANY_FLOORDIV: r = pa_big_floordiv(a, b); break;
+        case PA_ANY_MOD: r = pa_big_mod(a, b); break;
+        case PA_ANY_DIV: {
+            double d = pa_big_truediv(a, b);
+            pa_rc_cleanup(mark);
+            return (PaAnyPair){any_float_box(d), PA_TAG_FBOX};
+        }
+        default: pa_raise_c("TypeError", "unsupported big arithmetic operation");
+    }
+    pa_rc_cleanup(mark);
+    return (PaAnyPair){(int64_t)(uintptr_t)r, PA_TAG_BIG};
+}
+
+static int64_t any_big_cmp(AnyVal x, AnyVal y) {
+    if (y.kind == ANY_FLOAT) return pa_big_cmp_f64(any_big_ptr(x), y.f);
+    if (x.kind == ANY_FLOAT) {
+        int64_t c = pa_big_cmp_f64(any_big_ptr(y), x.f);
+        return c == -2 ? c : -c;
+    }
+    int64_t mark = pa_rc_mark();
+    PyAdamasBig* a = any_big_operand(x);
+    PyAdamasBig* b = any_big_operand(y);
+    int64_t c = pa_big_cmp(a, b);
+    pa_rc_cleanup(mark);
+    return c;
+}
+
 /* 动态算术：op 见上面的 PA_ANY_*。返回值遵循 unknown 域的约定：
    int 结果直接返回机器字，float 结果返回新分配的 CPYFLOAT 盒（rc=1），
    str 结果返回新字符串（rc=1）。调用方（降级器）负责把这个初始引用交给
@@ -268,6 +344,8 @@ int64_t pa_any_arith(int64_t op, int64_t a, int64_t b, int64_t desc_a, int64_t d
     AnyVal x, y;
     any_decode_typed(a, desc_a, &x);
     any_decode_typed(b, desc_b, &y);
+
+    if (x.kind == ANY_BIG || y.kind == ANY_BIG) return any_big_arith(op, x, y).v;
 
     /* str 拼接：与 CPython 一致，只允许两边都是 str（str + 非 str 报错）。 */
     if (x.kind == ANY_STR || y.kind == ANY_STR) {
@@ -318,6 +396,7 @@ int64_t pa_any_arith(int64_t op, int64_t a, int64_t b, int64_t desc_a, int64_t d
 int64_t pa_any_neg(int64_t v, int64_t dv) {
     AnyVal a;
     any_decode_typed(v, dv, &a);
+    if (a.kind == ANY_BIG) return (int64_t)(uintptr_t)pa_big_neg(any_big_ptr(a));
     if (a.kind == ANY_FLOAT) return any_float_box(-a.f);
     if (a.kind == ANY_INT) return (int64_t)(0u - (uint64_t)a.i); /* 回绕语义 */
     pa_raise_c("TypeError", "bad operand type for unary -");
@@ -335,7 +414,12 @@ int64_t pa_any_cmp(int64_t op, int64_t a, int64_t b, int64_t desc_a, int64_t des
 
     bool x_num = (x.kind == ANY_INT || x.kind == ANY_FLOAT);
     bool y_num = (y.kind == ANY_INT || y.kind == ANY_FLOAT);
-    if (x_num && y_num) {
+    if (any_num(x) && any_num(y) && (x.kind == ANY_BIG || y.kind == ANY_BIG)) {
+        int64_t c = any_big_cmp(x, y);
+        eq = c == 0;
+        lt = c == -1;
+        gt = c == 1;
+    } else if (x_num && y_num) {
         double da = x.kind == ANY_FLOAT ? x.f : (double)x.i;
         double db = y.kind == ANY_FLOAT ? y.f : (double)y.i;
         eq = da == db;
@@ -428,8 +512,10 @@ static void any_decode_tag(int64_t v, int64_t tag, AnyVal* o) {
         case PA_TAG_TUPLE:
         case PA_TAG_SET:
         case PA_TAG_CLASS:
-        case PA_TAG_BIG:
             o->kind = ANY_OTHER;
+            return;
+        case PA_TAG_BIG:
+            o->kind = ANY_BIG;
             return;
         case PA_TAG_HEAP: {
             /* 位图/容器只知道「是堆」，种类读头（一次加载，免探针）。 */
@@ -437,6 +523,8 @@ static void any_decode_tag(int64_t v, int64_t tag, AnyVal* o) {
             if (h->kind == PYADAMAS_RC_CPYFLOAT) {
                 o->kind = ANY_FLOAT;
                 memcpy(&o->f, (void*)(uintptr_t)v, sizeof o->f);
+            } else if (h->kind == PYADAMAS_RC_BIGINT) {
+                o->kind = ANY_BIG;
             } else if (h->kind == PYADAMAS_RC_STR) {
                 o->kind = ANY_STR;
                 o->s = (PyAdamasStr*)(uintptr_t)v;
@@ -460,6 +548,7 @@ int64_t pa_any_load_tag(int64_t v) {
     PyAdamasRc* h = (PyAdamasRc*)(uintptr_t)((uint64_t)v - (uint64_t)PYADAMAS_RC_HDR);
     if (h->kind == PYADAMAS_RC_CPYFLOAT) return PA_TAG_FBOX;
     if (h->kind == PYADAMAS_RC_STR) return PA_TAG_STR;
+    if (h->kind == PYADAMAS_RC_BIGINT) return PA_TAG_BIG;
     return PA_TAG_HEAP;
 }
 
@@ -492,6 +581,8 @@ PaAnyPair pa_any_arith_t(int64_t op, int64_t a, int64_t tag_a,
     AnyVal x, y;
     any_decode_tag(a, tag_a, &x);
     any_decode_tag(b, tag_b, &y);
+
+    if (x.kind == ANY_BIG || y.kind == ANY_BIG) return any_big_arith(op, x, y);
 
     if (x.kind == ANY_STR || y.kind == ANY_STR) {
         if (op != PA_ANY_ADD || x.kind != ANY_STR || y.kind != ANY_STR)
@@ -552,6 +643,8 @@ PaAnyPair pa_any_neg_t(int64_t v, int64_t tag, int64_t reuse_ok) {
         if (reused) { PaAnyPair p = {reused, PA_TAG_FBOX}; return p; }
         return any_pair_f64(-a.f);
     }
+    if (a.kind == ANY_BIG)
+        return (PaAnyPair){(int64_t)(uintptr_t)pa_big_neg(any_big_ptr(a)), PA_TAG_BIG};
     if (a.kind == ANY_INT) return any_pair_i64((int64_t)(0u - (uint64_t)a.i));
     pa_raise_c("TypeError", "bad operand type for unary -");
     return any_pair_i64(0);
@@ -566,7 +659,12 @@ int64_t pa_any_cmp_t(int64_t op, int64_t a, int64_t tag_a,
     int eq = 0, lt = 0, gt = 0;
     bool x_num = (x.kind == ANY_INT || x.kind == ANY_FLOAT);
     bool y_num = (y.kind == ANY_INT || y.kind == ANY_FLOAT);
-    if (x_num && y_num) {
+    if (any_num(x) && any_num(y) && (x.kind == ANY_BIG || y.kind == ANY_BIG)) {
+        int64_t c = any_big_cmp(x, y);
+        eq = c == 0;
+        lt = c == -1;
+        gt = c == 1;
+    } else if (x_num && y_num) {
         double da = x.kind == ANY_FLOAT ? x.f : (double)x.i;
         double db = y.kind == ANY_FLOAT ? y.f : (double)y.i;
         eq = da == db;
@@ -609,6 +707,7 @@ double pa_any_to_f64_t(int64_t v, int64_t tag) {
     switch (a.kind) {
         case ANY_FLOAT: return a.f;
         case ANY_INT: return (double)a.i;
+        case ANY_BIG: return pa_big_to_f64((PyAdamasBig*)(uintptr_t)a.i);
         case ANY_STR:
             pa_raise_c("TypeError", "must be real number, not str");
             return 0.0;
@@ -628,6 +727,7 @@ int64_t pa_any_to_i64_t(int64_t v, int64_t tag) {
                 pa_raise_c("OverflowError", "cannot convert float to integer");
             return (int64_t)a.f;
         case ANY_INT: return a.i;
+        case ANY_BIG: return pa_big_to_i64((PyAdamasBig*)(uintptr_t)a.i);
         case ANY_STR:
             pa_raise_c("TypeError", "int() argument must be a number, not str");
             return 0;
@@ -664,6 +764,7 @@ enum {
     PA_TYPE_OBJECT = 10,
     PA_TYPE_CLASS  = 11,
     PA_TYPE_OTHER  = 12,
+    PA_TYPE_BIG    = 13,
 };
 
 /* 堆指针 -> 类型码（一次头加载，不探针：调用方已确认它是活堆指针）。 */
@@ -674,6 +775,7 @@ static int64_t any_type_from_heap(int64_t v) {
         case PYADAMAS_RC_LIST: return PA_TYPE_LIST;
         case PYADAMAS_RC_DICT: return PA_TYPE_DICT;
         case PYADAMAS_RC_CPYFLOAT: return PA_TYPE_FLOAT;
+        case PYADAMAS_RC_BIGINT: return PA_TYPE_BIG;
         case PYADAMAS_RC_INSTANCE: return PA_TYPE_OBJECT;
         case PYADAMAS_RC_OBJ: {
             /* 类对象藏在 OBJ 里（头有 magic/cid/ctor/vtable）；异常值等
@@ -700,6 +802,7 @@ int64_t pa_any_type(int64_t v, int64_t tag) {
         case PA_TAG_TUPLE: return PA_TYPE_TUPLE;
         case PA_TAG_SET: return PA_TYPE_SET;
         case PA_TAG_CLASS: return PA_TYPE_CLASS;
+        case PA_TAG_BIG: return PA_TYPE_BIG;
         case PA_TAG_HEAP: return any_type_from_heap(v);
         default: /* PA_TAG_UNK：探针 + 头 kind（旧口径） */
             if (!pa_unknown_is_heap(v)) return PA_TYPE_INT;
@@ -712,6 +815,6 @@ int64_t pa_any_type(int64_t v, int64_t tag) {
 int64_t pa_any_type_is(int64_t v, int64_t tag, int64_t code) {
     if (code == PA_TYPE_OBJECT) return 1;
     int64_t t = pa_any_type(v, tag);
-    if (code == PA_TYPE_INT) return (t == PA_TYPE_INT || t == PA_TYPE_BOOL) ? 1 : 0;
+    if (code == PA_TYPE_INT) return t == PA_TYPE_INT || t == PA_TYPE_BOOL || t == PA_TYPE_BIG;
     return t == code ? 1 : 0;
 }

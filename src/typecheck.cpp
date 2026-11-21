@@ -929,7 +929,18 @@ FuncInfoPtr TypeChecker::build_sig(FunctionDef& f) {
         size_t ndef = a.defaults.size();
 
         // 默认参数只收字面量；接口序列化需要不依赖 AST 的表示。
-        auto literal_of = literal_of_expr;
+        auto literal_of = [](const Expr* value, const TypePtr& ty) {
+            if (ty && ty->kind == TyKind::Big && value && value->kind == ExprKind::Constant) {
+                const auto& c = static_cast<const Constant&>(*value);
+                if (c.ck == Constant::CK::Int && c.u64_lit) {
+                    LiteralValue lit;
+                    lit.kind = LiteralValue::Kind::Big;
+                    lit.s = std::to_string(static_cast<uint64_t>(c.i));
+                    return std::optional<LiteralValue>(std::move(lit));
+                }
+            }
+            return literal_of_expr(value);
+        };
 
         // 默认值只作用于「最后 ndef 个位置参数」，与位置参数前缀无关
         auto add_pos = [&](Arg& arg, bool posonly) {
@@ -944,7 +955,7 @@ FuncInfoPtr TypeChecker::build_sig(FunctionDef& f) {
                 size_t di = idx - (total_pos - ndef);
                 if (di < a.defaults.size()) {
                     p.default_expr = a.defaults[di].get();
-                    p.default_lit = literal_of(p.default_expr);
+                    p.default_lit = literal_of(p.default_expr, p.ty);
                 }
             }
             info->pos.push_back(std::move(p));
@@ -962,7 +973,7 @@ FuncInfoPtr TypeChecker::build_sig(FunctionDef& f) {
             p.kwonly = true;
             if (i < a.kw_defaults.size()) {
                 p.default_expr = a.kw_defaults[i].get();
-                p.default_lit = literal_of(p.default_expr);
+                p.default_lit = literal_of(p.default_expr, p.ty);
             }
             info->kwonly.push_back(std::move(p));
         }

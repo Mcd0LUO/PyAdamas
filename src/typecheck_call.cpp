@@ -474,7 +474,7 @@ bool TypeChecker::is_builtin_callable(const std::string& n) {
             // 定宽整数显式转换（P1）：cast_i8/.../cast_u64。宽→窄的唯一
             // 隐式途径之外的手段；语义是 C 式截断 + 回绕（见设计 §1.2/§1.3）。
             "cast_i8", "cast_i16", "cast_i32", "cast_i64", "cast_int",
-            "cast_u8", "cast_u16", "cast_u32", "cast_u64",
+            "cast_u8", "cast_u16", "cast_u32", "cast_u64", "cast_big",
         };
         return names.count(n) > 0;
     }

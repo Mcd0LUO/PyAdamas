@@ -44,9 +44,15 @@ for i in range(N):
         q = a / b
         if q == q and abs(q) != float("inf"):
             add("truediv", a, b, "%.17g" % q)
+    if i % 17 == 0:
+        # Exercise the independent subnormal rounding grid, including halfway and signed zero.
+        n = random.randrange(1, 16) * (-1 if i % 2 else 1)
+        den = (1 << random.randrange(1020, 1090)) + random.randrange(0, 4)
+        add("truediv", n, den, "%.17g" % (n / den))
     if i % 3 == 0:
         d = random.choice([0.0, -0.5, 1.5, -3.25, 2.0**63, -(2.0**63),
                            1e30, -1e30, 5e-324, 1.7976931348623157e308,
+                           float("inf"), float("-inf"),
                            float(random.getrandbits(60)), -float(random.getrandbits(200))])
         add("cmpf", a, repr(d), (a > d) - (a < d))
     add("abs", a, 0, abs(a))
@@ -68,7 +74,6 @@ for i in range(N):
     add("parse", hex(a), 0, a)
 
 inp = "\n".join(f"{op} {a} {b}" for op, a, b, _ in cases) + "\n"
-open("build/fuzz_input.txt", "w").write(inp)
 import os
 env = dict(os.environ)
 p = subprocess.run([DRV], input=inp, capture_output=True, text=True, timeout=300, env=env)

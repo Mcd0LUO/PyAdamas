@@ -71,6 +71,18 @@ bool TypeChecker::accept_literal_into(const TypePtr& want, Expr* value) {
                         static_cast<uint64_t>(c->i), type_name(want), lo, hi));
         return true;
     }
+    if (is_fixed_int(want)) {
+        const Expr* magnitude = value;
+        while (auto* u = dynamic_cast<const UnaryOp*>(magnitude)) {
+            if (u->op != Tok::PLUS && u->op != Tok::MINUS) break;
+            magnitude = u->operand.get();
+        }
+        if (auto* c = dynamic_cast<const Constant*>(magnitude); c && c->ck == Constant::CK::Big) {
+            err(value->line, value->col,
+                std::format("integer literal too large for int64; does not fit '{}'", type_name(want)));
+            return true;
+        }
+    }
     // float/bool 字面量的处理：bool 已是 int 子类型，assignable 放行；
     // float 字面量窄化到定宽整数不在 v1 隐式允许范围（要 cast）。
     int64_t v = 0;

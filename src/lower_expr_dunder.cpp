@@ -276,6 +276,7 @@ VReg Lowerer::convert_to(VReg v, TypePtr from, TypePtr to) {
         }
         RtFn fn = RtFn::BigFromI64;
         if (from && ir_is_float(from)) fn = RtFn::BigFromF64;
+        if (from && is_unsigned_int(from)) fn = RtFn::BigFromU64;
         Inst in;
         in.op = IrOp::CallRt;
         in.imm = static_cast<int64_t>(fn);
@@ -452,6 +453,7 @@ VReg Lowerer::lower_joined(JoinedStr& j) {
                     case TyKind::U16:
                     case TyKind::U32: piece = fmt_call(RtFn::FmtI64); break;
                     case TyKind::U64: piece = fmt_call(RtFn::FmtU64); break;
+                    case TyKind::Big: piece = fmt_call(RtFn::BigFmt); break;
                     case TyKind::Float: piece = fmt_call(RtFn::FmtF64); break;
                     case TyKind::Str: piece = fmt_call(RtFn::FmtStr); break;
                     case TyKind::Complex: piece = fmt_call(RtFn::FmtComplex); break;

@@ -1139,17 +1139,13 @@ private:
     void gen_index_store_unchecked(const Inst& in);
 
     // ── 对象 ────────────────────────────────────────────────────
-
     // 对象布局：+0 是 vtable 指针，字段从 +8 开始，每个 8 字节。
     // 属性访问因此是一条固定偏移的 movq，没有查表、没有哈希。
     void gen_obj_new(const Inst& in);
     void gen_struct_new(const Inst& in);
     void gen_struct_copy(const Inst& in);
-
         void gen_field_load(const Inst& in);
-
         void gen_field_store(const Inst& in);
-
     // 虚调用：self 固定占第一个整数参数（%rdi），其余实参照常分类。
     // 函数地址在装参数之前取到 %r11 —— %r11 不在参数序列里，
     // 装参数的过程不会碰它。
@@ -1157,31 +1153,21 @@ private:
     bool gen_guarded_vcall(const Inst& in, bool keep_int_result = false);
     bool gen_guarded_vcall_direct(const Inst& in, bool keep_int_result, int base, size_t slot);
     bool try_fuse_guarded_vcall_add(const Block& b, size_t pos);
-
     void gen_vcall_static(const Inst& in);
-
     void gen_super_vcall(const Inst& in);
-
     void gen_call_direct(const Inst& in);
     void gen_call_ptr(const Inst& in);
-
         void gen_branch(const Inst& in);
-
         void gen_return(const Inst& in);
-
     // ── 调用 ────────────────────────────────────────────────────
     void gen_call(const Inst& in);
-
     void gen_call_extern(const Inst& in);
     void gen_load_extern(const Inst& in);
     void gen_store_extern(const Inst& in);
     void gen_ptr_load(const Inst& in);
     void gen_ptr_store(const Inst& in);
-
         void gen_setjmp(const Inst& in);
-
         void gen_call_rt(const Inst& in);
-
         // 运行期调用的实参装填：按实参形态分组，实现在 codegen_call_rt.cpp。
         void gen_rt_args(const Inst& in, RtFn fn);
         void gen_rt_none(const Inst& in);

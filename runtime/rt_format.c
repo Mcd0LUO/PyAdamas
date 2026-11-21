@@ -289,6 +289,9 @@ PyAdamasStr* pa_big_fmt(PyAdamasBig* v, PyAdamasStr* spec) {
         pa_raise_c("ValueError", "Invalid format specifier for int");
     if (f.prec >= 0)
         pa_raise_c("ValueError", "Precision not allowed in integer format specifier");
+    bool radix = f.type == 'b' || f.type == 'o' || f.type == 'x' || f.type == 'X';
+    if (f.grouping && (f.type == 'n' || (radix && f.group_char == ',')))
+        pa_raise_c("ValueError", "Invalid grouping for integer format specifier");
     char sign = 0;
     if (v->nd < 0) sign = '-';
     else if (f.sign == '+') sign = '+';
@@ -313,23 +316,10 @@ PyAdamasStr* pa_big_fmt(PyAdamasBig* v, PyAdamasStr* spec) {
     if (f.type == 'X')
         for (char* p = body0; *p; ++p)
             if (*p >= 'a' && *p <= 'f') *p = (char)(*p - 'a' + 'A');
-    /* 分组后的新缓冲单独挂守卫：body0 与 grp 各自作用域释放，
-       报错路径（longjmp）也不漏。 */
-    char* body = body0;
-    char* grp = NULL;
+    // Validate before allocation: pa_raise_c uses longjmp, not C cleanup.
+    char* grp = f.grouping ? big_group_alloc(body0, f.group_char, base == 10 ? 3 : 4) : NULL;
     PA_FREE_SCOPE(grp);
-    if (f.grouping) {
-        if (base == 10) {
-            grp = big_group_alloc(body, f.group_char, 3);
-            body = grp;
-        } else if (f.group_char == '_') {
-            grp = big_group_alloc(body, '_', 4);
-            body = grp;
-        } else {
-            pa_raise_c("ValueError",
-                       "Cannot specify ',' with 'x', 'X', 'o' or 'b'.");
-        }
-    }
+    const char* body = grp ? grp : body0;
     const char* prefix = NULL;
     if (f.alternate) {
         if (f.type == 'b') prefix = "0b";
@@ -712,6 +702,7 @@ int64_t pa_truth_unknown(int64_t v) {
         case PYADAMAS_RC_STR: return ((PyAdamasStr*)(uintptr_t)v)->len > 0 ? 1 : 0;
         case PYADAMAS_RC_LIST: return ((PyAdamasList*)(uintptr_t)v)->len > 0 ? 1 : 0;
         case PYADAMAS_RC_DICT: return ((PyAdamasDict*)(uintptr_t)v)->len > 0 ? 1 : 0;
+        case PYADAMAS_RC_BIGINT: return pa_big_truth((PyAdamasBig*)(uintptr_t)v);
         case PYADAMAS_RC_CPYFLOAT: {
             double d;
             memcpy(&d, (void*)(uintptr_t)v, sizeof d);
@@ -730,6 +721,10 @@ void pa_print_any_repr(int64_t v) {
             PyAdamasStr* r = pa_repr_str((PyAdamasStr*)(uintptr_t)v);
             pa_print_str(r);
             pa_rc_dec(r);
+            return;
+        }
+        if (h->kind == PYADAMAS_RC_BIGINT) {
+            pa_print_any(v);
             return;
         }
         if (h->kind == PYADAMAS_RC_CPYFLOAT || h->kind == PYADAMAS_RC_LIST ||

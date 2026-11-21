@@ -76,6 +76,7 @@ enum PaTypeCode : int64_t {
     kTypeObject = 10,
     kTypeClass = 11,
     kTypeOther = 12,
+    kTypeBig = 13,
 };
 
 }  // namespace pyadamas

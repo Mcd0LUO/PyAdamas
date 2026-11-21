@@ -129,6 +129,7 @@ src/opt_intloop.cpp
   src/codegen_simd_nbody_pair.cpp
 src/codegen_vect.cpp
   src/codegen_call_rt.cpp
+  src/codegen_inline_containers.cpp
   src/mach_emit.cpp
   src/ir.cpp
   src/desugar.cpp

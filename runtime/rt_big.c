@@ -362,63 +362,58 @@ static void mag_muladd_small(uint32_t* acc, int64_t* n, int64_t cap,
     }
 }
 
-PyAdamasBig* pa_big_from_cstr(const char* s, int64_t base) {
+static bool big_parse_space(char c) {
+    return c == ' ' || c == '\t' || c == '\n' || c == '\r' || c == '\f' || c == '\v';
+}
+
+static PyAdamasBig* big_from_text(const char* s, size_t len, int64_t base) {
     if (base != 0 && (base < 2 || base > 36))
         pa_raise_c("ValueError", "int() base must be >= 2 and <= 36, or 0");
-    while (*s == ' ' || *s == '\t' || *s == '\n' || *s == '\r') ++s;
+    const char* end = s + len;
+    while (s != end && big_parse_space(*s)) ++s;
+    while (s != end && big_parse_space(end[-1])) --end;
     int sign = 1;
-    if (*s == '+' || *s == '-') { if (*s == '-') sign = -1; ++s; }
-    if (base == 0) {
-        if (s[0] == '0' && (s[1] == 'x' || s[1] == 'X')) { base = 16; s += 2; }
-        else if (s[0] == '0' && (s[1] == 'o' || s[1] == 'O')) { base = 8; s += 2; }
-        else if (s[0] == '0' && (s[1] == 'b' || s[1] == 'B')) { base = 2; s += 2; }
-        else base = 10;
-    } else if (s[0] == '0') {
-        if ((base == 16 && (s[1] == 'x' || s[1] == 'X')) ||
-            (base == 8 && (s[1] == 'o' || s[1] == 'O')) ||
-            (base == 2 && (s[1] == 'b' || s[1] == 'B'))) s += 2;
+    if (s != end && (*s == '+' || *s == '-')) { if (*s == '-') sign = -1; ++s; }
+    bool leading_zero = base == 0 && s != end && *s == '0';
+    if (end - s >= 2 && s[0] == '0') {
+        int prefix = (s[1] == 'x' || s[1] == 'X') ? 16 :
+                     (s[1] == 'o' || s[1] == 'O') ? 8 :
+                     (s[1] == 'b' || s[1] == 'B') ? 2 : 0;
+        if (prefix && (base == 0 || base == prefix)) {
+            base = prefix;
+            leading_zero = false;
+            s += 2;
+            if (s != end && *s == '_') ++s;
+        }
     }
-    /* 容量上界：每 digit 最多 log2(base) bit。 */
-    int64_t len = (int64_t)strlen(s);
-    int64_t cap = len * 6 / 32 + 2;   /* 粗上界：base<=36 每字符 < 6 bit */
-    if (cap < 2) cap = 2;
+    if (base == 0) base = 10;
+    // Validate before allocating: pa_raise_c can bypass C scope cleanup.
+    bool digit = false;
+    for (const char* p = s; p != end; ++p) {
+        int dv = digit_val(*p);
+        if (*p == '_' && digit) digit = false;
+        else if (dv >= 0 && dv < base && (!leading_zero || dv == 0)) digit = true;
+        else pa_raise_c("ValueError", "invalid literal for big()");
+    }
+    if (!digit) pa_raise_c("ValueError", "invalid literal for big()");
+    int64_t cap = (int64_t)(end - s) * 6 / 32 + 2;
     uint32_t* acc = limbs_alloc(cap);
     PA_FREE_SCOPE(acc);
     int64_t n = 0;
-    int any = 0;
-    for (const char* p = s; *p; ++p) {
-        if (*p == ' ' || *p == '\t' || *p == '\n' || *p == '\r') {
-            for (const char* t = p; *t; ++t)
-                if (*t != ' ' && *t != '\t' && *t != '\n' && *t != '\r')
-                    pa_raise_c("ValueError", "invalid literal for big()");
-            break;   /* 尾部空白 CPython 允许 */
-        }
-        if (*p == '_') {
-            if (!any || p[1] == '_' || p[1] == 0)
-                pa_raise_c("ValueError", "invalid literal for big()");
-            continue;
-        }
-        int dv = digit_val(*p);
-        if (dv < 0 || dv >= base)
-            pa_raise_c("ValueError", "invalid literal for big() with given base");
-        any = 1;
-        mag_muladd_small(acc, &n, cap, (uint32_t)base, (uint32_t)dv);
-    }
-    if (!any) pa_raise_c("ValueError", "invalid literal for big()");
+    for (const char* p = s; p != end; ++p)
+        if (*p != '_') mag_muladd_small(acc, &n, cap, (uint32_t)base, (uint32_t)digit_val(*p));
     PyAdamasBig* r = big_alloc(n);
     memcpy(r->d, acc, (size_t)n * 4);
     big_set_sign(r, n, sign);
     return r;
 }
 
+PyAdamasBig* pa_big_from_cstr(const char* s, int64_t base) {
+    return big_from_text(s, strlen(s), base);
+}
+
 PyAdamasBig* pa_big_from_str(PyAdamasStr* s, int64_t base) {
-    /* str 内部是 UTF-8；数字字面量必为 ASCII，非法字节按非法 digit 报错。 */
-    char* buf = (char*)malloc((size_t)s->len + 1);
-    if (!buf) panic_c("out of memory");
-    PA_FREE_SCOPE(buf);
-    memcpy(buf, s->data, (size_t)s->len);
-    buf[s->len] = 0;
-    return pa_big_from_cstr(buf, base);
+    return big_from_text(s->data, (size_t)s->len, base);
 }
 
 /* ── 加减乘 ─────────────────────────────────────────────────────── */
@@ -498,7 +493,9 @@ PyAdamasBig* pa_big_floordiv(PyAdamasBig* a, PyAdamasBig* b) {
     big_divmod_raw(a, b, &q, &r);
     int sa = big_sign(a), sb = big_sign(b);
     int sign = sa * sb;
-    if (big_n(r) != 0 && sign < 0) {
+    bool adjust = big_n(r) != 0 && sign < 0;
+    pa_rc_dec(r);  /* r is not rooted during the allocations for adjustment. */
+    if (adjust) {
         /* 向下取整：异号且有余数 → q = -(q+1) */
         pa_gc_pin(q);
         PyAdamasBig* one = pa_big_from_i64(1);
@@ -512,7 +509,6 @@ PyAdamasBig* pa_big_floordiv(PyAdamasBig* a, PyAdamasBig* b) {
         sign = -1;
     }
     q->nd = big_n(q) == 0 ? 0 : (sign < 0 ? -big_n(q) : big_n(q));
-    pa_rc_dec(r);
     return q;
 }
 
@@ -622,6 +618,7 @@ PyAdamasBig* pa_big_not(PyAdamasBig* a) {
  * 返回 -1/0/1；NaN 返回 -2（调用方：除 != 外全 false）。 */
 int64_t pa_big_cmp_f64(PyAdamasBig* a, double d) {
     if (isnan(d)) return -2;
+    if (isinf(d)) return d > 0.0 ? -1 : 1;
     int sa = big_sign(a);
     int sd = d > 0 ? 1 : (d < 0 ? -1 : 0);
     if (sa == 0 && sd == 0) return 0;
@@ -703,12 +700,14 @@ double pa_big_truediv(PyAdamasBig* a, PyAdamasBig* b) {
     int sign = big_sign(a) * big_sign(b);
     if (na == 0) return big_sign(b) < 0 ? -0.0 : 0.0;   /* CPython：0/-x 是 -0.0 */
     int64_t abl = big_bitlen(a), bbl = big_bitlen(b);
+    if (abl - bbl < -1075) return sign < 0 ? -0.0 : 0.0;
+    if (abl - bbl > 1024)
+        pa_raise_c("OverflowError", "integer division result too large for a float");
     /* 亚正规结果（|商| < 2^-1021）：ldexp 会二次舍入，sticky 技巧失效。
      * 直接算 round(|a/b| * 2^1074)（最近偶数），再精确缩放到亚正规网格。 */
     if (abl - bbl < -1021) {
-        int64_t sh = 1074 - (abl - bbl);
         int64_t asn2 = 0;
-        uint32_t* as2 = mag_lshift_buf(a->d, na, sh, &asn2);
+        uint32_t* as2 = mag_lshift_buf(a->d, na, 1074, &asn2);
         PA_FREE_SCOPE(as2);
         int64_t nb0 = big_n(b);
         uint32_t* q2 = limbs_alloc(asn2 > 0 ? asn2 : 1);
@@ -786,8 +785,12 @@ double pa_big_truediv(PyAdamasBig* a, PyAdamasBig* b) {
     if (qn > 1) top |= (uint64_t)q[1] << 32;
     top |= (uint64_t)sticky;
     double mag = ldexp((double)top, (int)e);
-    if (isinf(mag))
+    if (isinf(mag)) {
+        free(as);
+        free(q);
+        free(r);
         pa_raise_c("OverflowError", "integer division result too large for a float");
+    }
     return sign < 0 ? -mag : mag;
 }
 

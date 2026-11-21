@@ -36,6 +36,7 @@ static int64_t any_desc(const TypePtr& t) {
     switch (t->kind) {
         case TyKind::Float: return 'f';
         case TyKind::Str: return 's';
+        case TyKind::Big: return 'b';
         case TyKind::Int:
         case TyKind::Bool:
         case TyKind::None: return 'i';
@@ -303,36 +304,8 @@ VReg Lowerer::lower_binop(BinOp& b) {
     // ── P3 big：任意精度算术（与 Complex 同形态，降级期发 CallRt）──
     // 两侧先转换到 big（int/bool 加宽、float 按 int(float) 截断——pa 格
     // 口径，文档化边界），运算全在 rt_big.c（CPython 黄金标准）。
-    if (ty && ty->kind == TyKind::Big) {
-        auto as_big = [&](VReg v, TypePtr from) {
-            return (from && from->kind == TyKind::Big) ? v : convert_to(v, from, t_big());
-        };
-        l = as_big(l, lt);
-        r = as_big(r, rt);
-        RtFn fn = RtFn::BigAdd;
-        switch (b.op) {
-            case Tok::PLUS: fn = RtFn::BigAdd; break;
-            case Tok::MINUS: fn = RtFn::BigSub; break;
-            case Tok::STAR: fn = RtFn::BigMul; break;
-            case Tok::DOUBLESLASH: fn = RtFn::BigFloorDiv; break;
-            case Tok::PERCENT: fn = RtFn::BigMod; break;
-            case Tok::DOUBLESTAR: fn = RtFn::BigPow; break;
-            case Tok::AMPER: fn = RtFn::BigAnd; break;
-            case Tok::VBAR: fn = RtFn::BigOr; break;
-            case Tok::CIRCUMFLEX: fn = RtFn::BigXor; break;
-            case Tok::LSHIFT: fn = RtFn::BigLShift; break;
-            case Tok::RSHIFT: fn = RtFn::BigRShift; break;
-            default:
-                err(b.line, b.col,
-                    std::format("operator '{}' on big is not supported", tok_name(b.op)));
-                return const_none();
-        }
-        Inst in;
-        in.op = IrOp::CallRt;
-        in.imm = static_cast<int64_t>(fn);
-        in.args = {l, r};
-        return def_heap(ty, std::move(in));
-    }
+    if (ty && ty->kind == TyKind::Big)
+        return lower_big_binary(l, lt, r, rt, b.op, b.line, b.col);
     // big 的真除：结果是 float，但必须按**精确整数商**正确舍入
     // （pa_big_truediv），不能先转 double 再除（大数会丢精度）。
     if (ty && ty->kind == TyKind::Float &&
@@ -385,6 +358,38 @@ VReg Lowerer::lower_binop(BinOp& b) {
     in.a = l;
     in.b = r;
     return def_heap(ty, std::move(in));
+}
+
+VReg Lowerer::lower_big_binary(VReg l, TypePtr lt, VReg r, TypePtr rt, Tok op,
+                               int line, int col) {
+    auto as_big = [&](VReg v, TypePtr from) {
+        return (from && from->kind == TyKind::Big) ? v : convert_to(v, from, t_big());
+    };
+    l = as_big(l, lt);
+    r = as_big(r, rt);
+    RtFn fn = RtFn::BigAdd;
+    switch (op) {
+        case Tok::PLUS: fn = RtFn::BigAdd; break;
+        case Tok::MINUS: fn = RtFn::BigSub; break;
+        case Tok::STAR: fn = RtFn::BigMul; break;
+        case Tok::DOUBLESLASH: fn = RtFn::BigFloorDiv; break;
+        case Tok::PERCENT: fn = RtFn::BigMod; break;
+        case Tok::DOUBLESTAR: fn = RtFn::BigPow; break;
+        case Tok::AMPER: fn = RtFn::BigAnd; break;
+        case Tok::VBAR: fn = RtFn::BigOr; break;
+        case Tok::CIRCUMFLEX: fn = RtFn::BigXor; break;
+        case Tok::LSHIFT: fn = RtFn::BigLShift; break;
+        case Tok::RSHIFT: fn = RtFn::BigRShift; break;
+        default:
+            err(line, col,
+                std::format("operator '{}' on big is not supported", tok_name(op)));
+            return const_none();
+    }
+    Inst in;
+    in.op = IrOp::CallRt;
+    in.imm = static_cast<int64_t>(fn);
+    in.args = {l, r};
+    return def_heap(t_big(), std::move(in));
 }
 
 VReg Lowerer::lower_unary(UnaryOp& u) {
@@ -470,6 +475,34 @@ VReg Lowerer::lower_boolop(BoolOp& b) {
 
     bool is_and = b.op == Tok::KW_AND;
     int end = new_block(is_and ? "and.end" : "or.end");
+
+    bool has_big = std::any_of(b.values.begin(), b.values.end(), [&](const auto& v) {
+        return tc_.type_of(v.get())->kind == TyKind::Big;
+    });
+    if (has_big) {
+        for (size_t i = 0; i < b.values.size(); ++i) {
+            TypePtr vt = tc_.type_of(b.values[i].get());
+            VReg v = expr(*b.values[i]);
+            store_borrow_slot(tmp, coerce(v, vt, ty));
+            if (i + 1 == b.values.size()) {
+                Inst j;
+                j.op = IrOp::Jump;
+                j.target = end;
+                emit(std::move(j));
+            } else {
+                int rhs = new_block(is_and ? "and.rhs" : "or.rhs");
+                Inst br;
+                br.op = IrOp::Branch;
+                br.a = truth_bool(v, vt);
+                br.target = is_and ? rhs : end;
+                br.target2 = is_and ? end : rhs;
+                emit(std::move(br));
+                switch_to(rhs);
+            }
+        }
+        switch_to(end);
+        return load_slot(tmp, ty);
+    }
 
     VReg acc = expr(*b.values[0]);
     store_borrow_slot(tmp, acc);
@@ -791,7 +824,7 @@ VReg Lowerer::lower_cmp_single(VReg l, TypePtr lt, VReg r, TypePtr rt, CmpOp op,
             bool lb = lt && lt->kind == TyKind::Big;
             bool rb = rt && rt->kind == TyKind::Big;
             if ((lb || rb) && !is_unknown(lt) && !is_unknown(rt) &&
-                is_num(lt) && is_num(rt)) {
+                is_num(lt) && is_num(rt) && op != CmpOp::Is && op != CmpOp::IsNot) {
                 auto as_big = [&](VReg v, TypePtr from) {
                     return (from && from->kind == TyKind::Big) ? v
                                                                : convert_to(v, from, t_big());
@@ -811,7 +844,17 @@ VReg Lowerer::lower_cmp_single(VReg l, TypePtr lt, VReg r, TypePtr rt, CmpOp op,
                     }
                     Inst in;
                     in.op = IrOp::Cmp;
-                    in.cop = map_cmp(op);
+                    CmpOp ord_op = op;
+                    if (!lb) {
+                        switch (op) {
+                            case CmpOp::Lt: ord_op = CmpOp::Gt; break;
+                            case CmpOp::Le: ord_op = CmpOp::Ge; break;
+                            case CmpOp::Gt: ord_op = CmpOp::Lt; break;
+                            case CmpOp::Ge: ord_op = CmpOp::Le; break;
+                            default: break;
+                        }
+                    }
+                    in.cop = map_cmp(ord_op);
                     in.a = cv;
                     in.b = const_int(0);
                     VReg ord = def(t_bool(), std::move(in));
@@ -925,21 +968,36 @@ VReg Lowerer::lower_compare(Compare& c) {
     // 链式比较：需要短路，用槽保存中间值。
     // P3：每个比较数按**自己的静态类型**落借用槽（big/str 等必须按值
     // 比；统一按 unknown 装载会退化成机器字比），每步走 lower_cmp_single。
-    int res = new_temp_slot(t_bool());
-    store_slot(res, const_bool(true));
     TypePtr prev_ty = tc_.type_of(c.left.get());
-    int prev_slot = new_borrow_slot(prev_ty);
+    const auto is_big = [](const TypePtr& t) { return t && t->kind == TyKind::Big; };
+    bool has_big = is_big(prev_ty) ||
+        std::any_of(c.comparators.begin(), c.comparators.end(),
+                    [&](const auto& v) { return is_big(tc_.type_of(v.get())); });
+    int res = new_temp_slot(t_bool());
+    int prev_slot = has_big ? -1 : new_borrow_slot(prev_ty);
+    store_slot(res, const_bool(true));
+    if (has_big) prev_slot = new_borrow_slot(prev_ty);
     store_borrow_slot(prev_slot, expr(*c.left));
 
     int fail = new_block("cmp.fail");
     int done = new_block("cmp.end");
 
     for (size_t i = 0; i < c.ops.size(); ++i) {
-        VReg l = load_slot(prev_slot, prev_ty);
+        VReg l = load_slot(prev_slot, has_big ? prev_ty : t_unknown());
         TypePtr rty = tc_.type_of(c.comparators[i].get());
         VReg r = expr(*c.comparators[i]);
         int cont = new_block("cmp.next");
-        VReg cr = lower_cmp_single(l, prev_ty, r, rty, c.ops[i], c.line, c.col);
+        VReg cr;
+        if (has_big) {
+            cr = lower_cmp_single(l, prev_ty, r, rty, c.ops[i], c.line, c.col);
+        } else {
+            Inst cmp;
+            cmp.op = IrOp::Cmp;
+            cmp.cop = map_cmp(c.ops[i]);
+            cmp.a = l;
+            cmp.b = r;
+            cr = def(t_bool(), std::move(cmp));
+        }
         Inst br;
         br.op = IrOp::Branch;
         br.a = cr;
@@ -948,7 +1006,7 @@ VReg Lowerer::lower_compare(Compare& c) {
         emit(std::move(br));
 
         switch_to(cont);
-        prev_slot = new_borrow_slot(rty);
+        if (has_big) prev_slot = new_borrow_slot(rty);
         store_borrow_slot(prev_slot, r);
         prev_ty = rty;
         if (i + 1 == c.ops.size()) {

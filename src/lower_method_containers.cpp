@@ -268,6 +268,11 @@ VReg Lowerer::lower_method_set(Attribute& at, Call& c, VReg recv, TypePtr recv_t
 
 VReg Lowerer::lower_method_seq(Attribute& at, Call& c, VReg recv, TypePtr recv_ty) {
     TypePtr et = recv_ty->sub.empty() ? t_unknown() : recv_ty->sub[0];
+    if (has_big_value(recv_ty) && (at.attr == "sort" || at.attr == "index" ||
+                                    at.attr == "count" || at.attr == "remove")) {
+        err(c.line, c.col, "container comparisons involving big are not supported");
+        return const_none();
+    }
     int ek = key_kind(et);        // in/index/count 的比较种类
     int lk = list_kind(recv_ty);  // 容器元素的堆种类
     bool is_list = recv_ty->kind == TyKind::List;

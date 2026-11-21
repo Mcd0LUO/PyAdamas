@@ -518,7 +518,7 @@ VReg Lowerer::lower_call(Call& c) {
                 "join", "sleep", "make_chan",
                 // 定宽整数显式转换（P1）：cast_i8 … cast_u64
                 "cast_i8", "cast_i16", "cast_i32", "cast_i64", "cast_int",
-                "cast_u8", "cast_u16", "cast_u32", "cast_u64",
+                "cast_u8", "cast_u16", "cast_u32", "cast_u64", "cast_big",
             };
             if (kBuiltins.count(n.id)) return lower_builtin_call(n.id, c);
             // 名字能解析但语义没实现的内置：以前会退化成调用空指针直接

@@ -50,7 +50,9 @@ TypePtr TypeChecker::builtin_call(const std::string& n, Call& c) {
                 return to;
             }
             TypePtr from = a.empty() ? t_unknown() : a[0];
-            if (from && !is_unknown(from) && !is_num(from)) {
+            if (to->kind == TyKind::Big) consume_u64_literal(to, c.args[0].get());
+            if (from && !is_unknown(from) && !is_num(from) &&
+                !(to->kind == TyKind::Big && from->kind == TyKind::Str)) {
                 // v1：只支持数值域之间的显式转换。str → 整数请先 int()。
                 err(c.args[0]->line, c.args[0]->col,
                     std::format("cannot cast '{}' to '{}'", type_name(from), type_name(to)));
@@ -171,6 +173,8 @@ TypePtr TypeChecker::builtin_call(const std::string& n, Call& c) {
         }
         if (n == "min" || n == "max") {
             if (a.empty()) return t_unknown();
+            if (std::any_of(a.begin(), a.end(), has_big_value))
+                err(c.line, c.col, "min()/max() with big are not supported");
             if (a.size() == 1) return iter_elem(a[0], c.line, c.col);
             TypePtr acc = a[0];
             for (size_t i = 1; i < a.size(); ++i) acc = join(acc, a[i]);
@@ -179,6 +183,8 @@ TypePtr TypeChecker::builtin_call(const std::string& n, Call& c) {
         if (n == "sum") {
             if (!a.empty()) {
                 auto e = iter_elem(a[0], c.line, c.col);
+                if (has_big_value(e) || (a.size() > 1 && has_big_value(a[1])))
+                    err(c.line, c.col, "sum() with big is not supported");
                 if (!is_unknown(e) && !is_num(e))
                     err(c.line, c.col,
                         std::format("sum() over non-numeric '{}'", type_name(e)));
@@ -237,6 +243,7 @@ TypePtr TypeChecker::builtin_call(const std::string& n, Call& c) {
                 err(c.line, c.col,
                     std::format("int() can't convert non-string with explicit base: '{}'",
                                 type_name(a[0])));
+            if (a.size() == 1 && a[0] && a[0]->kind == TyKind::Big) return t_big();
             return t_int();
         }
         if (n == "float") return t_float();
@@ -496,18 +503,26 @@ TypePtr TypeChecker::builtin_call(const std::string& n, Call& c) {
         if (n == "any" || n == "all") return t_bool();
         if (n == "round") {
             if (a.empty()) return t_unknown();
+            if (a.size() > 1 && has_big_value(a[0]))
+                err(c.line, c.col, "round(big, ndigits) is not supported");
             if (a[0] && a[0]->kind == TyKind::Float)
                 return a.size() >= 2 ? t_float() : t_int();
             return a[0];
         }
         if (n == "divmod") {
+            if (std::any_of(a.begin(), a.end(), has_big_value))
+                err(c.line, c.col, "divmod() with big is not supported");
             if (a.size() >= 2 && is_num(a[0]) && is_num(a[1])) {
                 auto q = promote(a[0], a[1]);
                 return mk_tuple({q, q});
             }
             return mk_tuple({t_unknown(), t_unknown()});
         }
-        if (n == "pow") return a.size() >= 2 ? promote(a[0], a[1]) : t_unknown();
+        if (n == "pow") {
+            if (a.size() == 3 && std::any_of(a.begin(), a.end(), has_big_value))
+                err(c.line, c.col, "three-argument pow() with big is not supported");
+            return a.size() >= 2 ? promote(a[0], a[1]) : t_unknown();
+        }
         if (n == "input") return t_str();
         if (n == "type") return t_unknown();
         if (n == "next") {
@@ -597,7 +612,7 @@ TypePtr TypeChecker::builtin_call(const std::string& n, Call& c) {
             return t_file();
         }
         if (n == "format") {
-            if (a.size() != 2)
+            if (a.size() != 2 && !(a.size() == 1 && a[0] && a[0]->kind == TyKind::Big))
                 err(c.line, c.col, "format() takes exactly two arguments");
             return t_str();
         }

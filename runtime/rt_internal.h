@@ -584,6 +584,7 @@ int64_t pa_any_cmp(int64_t op, int64_t a, int64_t b, int64_t da, int64_t db);
    PaAnyPair 按 SysV {i64,i64} 返回：%rax=payload，%rdx=tag。 */
 typedef struct { int64_t v; int64_t tag; } PaAnyPair;
 int64_t pa_any_load_tag(int64_t v);
+PyAdamasBig* pa_any_to_big(int64_t v);
 PaAnyPair pa_any_arith_t(int64_t op, int64_t a, int64_t tag_a,
                          int64_t b, int64_t tag_b, int64_t reuse_ok);
 PaAnyPair pa_any_neg_t(int64_t v, int64_t tag, int64_t reuse_ok);
