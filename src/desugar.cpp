@@ -25,6 +25,87 @@
 #include <vector>
 
 namespace pyadamas {
+
+// ── `x: big = <常量整数表达式>` 的精确折叠 ─────────────────────────────
+//
+// 默认 int 是 i64，`2 ** 70` 在 int 域里回绕成 0（docs/compatibility.md 的规则）。
+// 但目标是 `big` 时把回绕后的值塞进去毫无意义：
+//
+//     a: big = 2 ** 70      # 以前静默得 0；CPython 是 1180591620717411303424
+//
+// 全常量表达式在编译期能精确求值，直接折成 CK::Big 字面量 —— 与「写超 u64 的
+// 十进制字面量」走同一条路径。范围用 __int128 兜住（到 2**126），再大就交给
+// 原来"表达式太大"的处理（不在这里静默回绕）。
+static bool ann_is_big(const ExprPtr& ann) {
+    auto* n = dynamic_cast<const Name*>(ann.get());
+    return n && n->id == "big";
+}
+
+static bool fold_int_const(const Expr* e, __int128& out) {
+    if (!e) return false;
+    if (auto* c = dynamic_cast<const Constant*>(e)) {
+        if (c->ck != Constant::CK::Int) return false;
+        out = static_cast<__int128>(c->i);
+        return true;
+    }
+    if (auto* u = dynamic_cast<const UnaryOp*>(e)) {
+        __int128 v;
+        if (!fold_int_const(u->operand.get(), v)) return false;
+        if (u->op == Tok::MINUS) { out = -v; return true; }
+        if (u->op == Tok::PLUS) { out = v; return true; }
+        return false;
+    }
+    auto* b = dynamic_cast<const BinOp*>(e);
+    if (!b) return false;
+    __int128 l = 0, r = 0;
+    if (!fold_int_const(b->left.get(), l) || !fold_int_const(b->right.get(), r)) return false;
+    // 用 __int128 的溢出内建判定，别自己设「差不多够大」的上限：
+    // 第一版把上限设成 2**126，于是 `2 ** 126 - 1` 在算 2**126 那步就被
+    // 判成超范围、退回 int 回绕 —— 用户看到的是 `d > 0` 为假。
+    switch (b->op) {
+        case Tok::PLUS: return !__builtin_add_overflow(l, r, &out);
+        case Tok::MINUS: return !__builtin_sub_overflow(l, r, &out);
+        case Tok::STAR: return !__builtin_mul_overflow(l, r, &out);
+        case Tok::DOUBLESLASH: if (r == 0) return false; out = l / r; return true;
+        case Tok::PERCENT: if (r == 0) return false; out = l % r; return true;
+        case Tok::DOUBLESTAR: {
+            if (r < 0 || r > 200) return false;
+            __int128 acc = 1;
+            for (__int128 i = 0; i < r; ++i)
+                if (__builtin_mul_overflow(acc, l, &acc)) return false;
+            out = acc;
+            return true;
+        }
+        case Tok::LSHIFT:
+            if (r < 0 || r > 127) return false;
+            out = l << static_cast<int>(r);
+            if (l != 0 && (out >> static_cast<int>(r)) != l) return false;
+            return true;
+        case Tok::RSHIFT:
+            if (r < 0 || r > 127) return false;
+            out = l >> static_cast<int>(r);
+            return true;
+        case Tok::AMPER: out = l & r; return true;
+        case Tok::VBAR: out = l | r; return true;
+        case Tok::CIRCUMFLEX: out = l ^ r; return true;
+        default: return false;   // 真除等：结果未必是整数，交回原路径
+    }
+}
+
+static std::string i128_to_dec(__int128 v) {
+    if (v == 0) return "0";
+    bool neg = v < 0;
+    unsigned __int128 m = neg ? static_cast<unsigned __int128>(-v)
+                               : static_cast<unsigned __int128>(v);
+    std::string s;
+    while (m > 0) {
+        s.push_back(static_cast<char>('0' + static_cast<int>(m % 10)));
+        m /= 10;
+    }
+    if (neg) s.push_back('-');
+    std::reverse(s.begin(), s.end());
+    return s;
+}
 namespace {
 
 // map/filter 改写前先确认这两个名字没有被用户绑定过。绑定过就保留普通
@@ -912,7 +993,24 @@ private:
             }
             case StmtKind::AnnAssign: {
                 auto& a = static_cast<AnnAssign&>(s);
-                if (!class_body && a.value) desugar_expr(a.value, pre);
+                if (!class_body && a.value) {
+                    // `x: big = <全常量整数表达式>`：在 int 域里算会回绕，
+                    // 这里按精确值折成 CK::Big 字面量（见上面的说明）。
+                    if (ann_is_big(a.annotation)) {
+                        __int128 v = 0;
+                        if (fold_int_const(a.value.get(), v) &&
+                            (v < static_cast<__int128>(INT64_MIN) ||
+                             v > static_cast<__int128>(INT64_MAX))) {
+                            auto c = std::make_unique<Constant>();
+                            c->line = a.value->line;
+                            c->col = a.value->col;
+                            c->ck = Constant::CK::Big;
+                            c->s = i128_to_dec(v);
+                            a.value = std::move(c);
+                        }
+                    }
+                    desugar_expr(a.value, pre);
+                }
                 break;
             }
             case StmtKind::Return: {
