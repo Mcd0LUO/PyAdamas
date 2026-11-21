@@ -4,6 +4,81 @@
 
 早期阶段没有逐条留痕，按阶段归纳；0.4 之后逐条记录。
 
+## [0.358] - 2026-11-21
+
+> 三条并行线：**修编译器「早返回漏 dec」**（0.356 留着负面的那座山）、
+> **Fraction 升级到 big + 新增 decimal**、**一次性短脚本构建固定成本取证**
+> （结论：无可取微优化，记账为负面）。
+>
+> ### 1. 早返回出口按最终槽属性补齐释放（修 unknown 槽引用泄漏）
+>
+> 降级是单遍源码序：一条 return 在某个槽的首次堆/owned 写入**之前**被
+> 降级时，release_slots() 看到的 slot_owned 还是 false，整类跳过 unknown
+> 槽；而循环次轮起槽里已是上一轮 store_slot retain 过的堆值，于是每次早
+> 返回都漏一份引用。0.356 只在 stdlib 里用 return→break 绕行，本体没修
+> （docs/strfix-rc-early-return.md 的负面结论）。
+>
+> 修法：emit_return 调 release_slots 时记下出口块与该刻的 slot_owned
+> 快照；函数体（含模块体）降级结束后 fixup_early_releases 用**最终**槽
+> 属性，给这些出口补上「最终 owned、但发射那一刻还没 owned」的 unknown 槽
+> 的 load.slot + pa_rc_dec_unknown。borrow 槽与始终借用的 unknown 槽一律
+> 不动，因此不会多减。
+>
+> **asm 影响（相对 0.357，全语料 471 份 asm -O2 逐字节比对）**：462 份全同，
+> 9 份变化，全部在 tests/run，bench/realistic 与 bench/compare 无一变化。
+> 6 份是纯新增 load+dec（如 204 的 pa_rc_dec_unknown 10→12 次）；3 份
+> （206/258/340）因为函数体多了两条指令、栈帧与静态内联预算随之变化，出现
+> 偏移/标签重编号与内联边界移动，逐份核对过**没有任何与 dec 无关的语义改动**。
+> 这条「允许的 asm 差异」是本轮唯一的例外，其余轮次仍是逐字节不变。
+>
+> 回归 tests/run/402_early_return_rc.py：同一用例在 0.357 上 ASan+LSan 报
+> 104 bytes（exit 1），修复后 exit 0、stderr 空、输出与 CPython 一致；覆盖
+> 零次迭代、正常结束、早返回、异常四种出口。
+>
+> ### 2. Fraction 改用 big；新增 decimal
+>
+> stdlib/fractions.py 的 numerator/denominator 从 int 改成 big，自带 big 上的
+> Euclid 约分（math.gcd 只吃 int），四则与比较全走 big 交叉乘积 —— **修掉
+> 「中间乘积超 int64 静默回绕」**。公开 API 与字符串形式不变；跨 i64 用例
+> 例如 3037000500/1 + 1/3037000500 的分子 9223372037000250001 > 2^63-1。
+>
+> 新增 stdlib/decimal.py（纯 pa，big 精确整数内核）：定点表示
+> (-1)^sign * coefficient * 10^exponent（尾随零保留）、默认上下文 prec=28 +
+> ROUND_HALF_EVEN，实现 + - * /、quantize、四个舍入模式
+> （HALF_EVEN/HALF_UP/DOWN/UP）、as_tuple/adjusted/compare 与比较、
+> str/repr 的 CPython 规则。**明确不做**：无 localcontext/traps/signals、
+> 无 NaN/Infinity、构造只接受 str、不与 int/float 混合运算、无 ** // %、
+> 无 __format__；边界写在模块 docstring 里。
+>
+> 对拍 CPython 3.14.4：回归 403–405 共 87 行 + Fraction 随机 fuzz 360 行 +
+> Decimal fuzz 380/550 行，合计 **1377 行逐字节全同**。fuzz 还抓到一个真 bug：
+> 29 位整数 /1 时精确商剥零后仍按旧位数定位舍入，结果掉一个数量级（已修，
+> 用例进 403）。
+>
+> ### 3. 一次性短脚本的构建固定成本（负面结论，未提交代码）
+>
+> 绑核实测：hello-world（313 行汇编）冷构建 52ms、热构建 38ms，而它自身编译
+> 只要 2ms —— **固定成本占 70~80%**。拆开：as 8ms、ld --gc-sections 9ms、
+> 编译器自身 10~15ms，其余散在两次 sh -c（实测各约 1ms）、缓存清单与临时
+> 文件收尾。
+>
+> 因此本轮**不提交微优化**：把 std::system 换 fork/exec、把汇编喂给 as 的
+> 标准输入，单项 1~2ms（约 2~5%），低于 A/A 噪声，还要动链接回退路径，风险
+> 不成比例。量级改动只有内嵌汇编器/链接器或整程序产物缓存——后者对首次运行
+> 无效，与「一次性脚本」场景不符。结论记在 docs/iteration-roadmap.md。
+>
+> ### 已知问题（本轮发现，未修）
+>
+> **元组字面量元素不按标注类型转换**（**预存 bug，0.357 同样复现**）：
+> def f() -> tuple[float, float]: return 1, 2 打印 (5e-324, 1e-323)（int 位
+> 模式被当 double）；def f() -> tuple[int, big, int]: return 0, 0, 0 取第二个
+> 元素即段错误。根因是元组字面量按**推断**类型构造，tuple[int,int] →
+> tuple[float,float] 的边界转换没有逐元素重建。stdlib 侧已用「先赋给标注
+> 变量再返回」绕开。
+>
+> 闸门（合并后主线 build/lead 复验）：difftest **358/0**；普通与 ASan 套件各
+> **379 ran ok**、exit 0；ASan+LSan 钉子 17/17 stderr 空；check_size 通过。
+
 ## [0.357] - 2026-11-21
 
 > **P3 任意精度整数（big BigInt）落地**：显式 `big` 类型、超 u64 十进制字面量、
