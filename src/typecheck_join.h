@@ -81,12 +81,26 @@ inline TypePtr join_into(const TypePtr& a, const TypePtr& b) {
         // 改成整数提升：那会改变既有程序的分支合并结果与生成代码。
         // P3：big 顶层（big 与任何数值合并 → big）。
         if (a->kind == TyKind::Big || b->kind == TyKind::Big) return t_big();
-        if (is_fixed_int(a) || is_fixed_int(b)) {
+        // Bool 也走整数提升：bool 是 int 的子类型，join(int, bool) 应该是
+        // int。原来只有定宽整数才进这里，bool 落到下面的 t_float()：
+        //     x = 1 if c else True    -> float（打印 1.0，CPython 是 int 1）
+        //     [1, True]              -> list[float]
+        // 更糟的是 return 7 if c else True 在 -> int 的函数里会直接报
+        // 「declared to return 'int', got 'float'」，合法程序编译不过。
+        if (is_fixed_int(a) || is_fixed_int(b) || a->kind == TyKind::Bool ||
+            b->kind == TyKind::Bool) {
             if (a->kind == TyKind::Float || b->kind == TyKind::Float) return t_float();
             return int_promote(a, b);
         }
         return t_float();
     }
+    // 数值塔：int/float/bool/big 与 complex 合并 → complex（CPython 的
+    // int + complex、float + complex 都是 complex）。原来直接落到末尾的
+    // t_unknown()：三元表达式/if 赋值把复数值塞进 8 字节的 unknown 槽，
+    // 打印时按整数读复数的堆指针，输出 9xxxxx 这种地址（CPython 是 1j）。
+    if ((a->kind == TyKind::Complex && is_num(b)) ||
+        (b->kind == TyKind::Complex && is_num(a)))
+        return t_complex();
     if (a->kind == TyKind::List && b->kind == TyKind::List)
         return mk_list(join(a->sub[0], b->sub[0]));
     if (a->kind == TyKind::Range && b->kind == TyKind::Range)

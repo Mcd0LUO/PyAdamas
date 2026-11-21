@@ -538,19 +538,31 @@ VReg Lowerer::lower_boolop(BoolOp& b) {
     }
 
     VReg acc = expr(*b.values[0]);
-    store_borrow_slot(tmp, acc);
-    // 真值必须按操作数自己的类型判断：结果槽的类型是 join 出来的，
-    // 拿它去查 __bool__/__len__ 会漏掉类实例。
+    // 结果槽的类型是各分支 join 出来的（int|float → float）。操作数要先
+    // 转成结果类型再落槽：直接存原始机器字，槽里就是 int 的位模式，按
+    // float 读回来是 4.4e-323 这种垃圾；-O2 的常量折叠还会把 int 立即数
+    // 直接塞进 xmm 寄存器（movq $9, %xmm8），汇编器直接失败。
+    // 只对 float 结果做（big 路径在下面单独处理；unknown 结果不能在这里
+    // 装箱，否则真值判断会被 CPYFLOAT 指针带偏）。
     TypePtr acc_ty = tc_.type_of(b.values[0].get());
+    if (ty && ty->kind == TyKind::Float)
+        store_borrow_slot(tmp, coerce(acc, acc_ty, ty));
+    else
+        store_borrow_slot(tmp, acc);
 
     for (size_t i = 1; i < b.values.size(); ++i) {
-        VReg cur_v = load_slot(tmp, ty);
+        // 从槽里重载时按**操作数自己的类型**判真：结果槽的 join 类型常常是
+        // unknown，而 gen_branch 对 unknown 只做 cmpq $0 —— 空的 str/list/
+        // dict 是**非零**的堆指针，会被当成真（"" or 5 返回 ""）。float
+        // 结果槽里存的是转换后的 double，按 float 读。
+        TypePtr load_ty = (ty && ty->kind == TyKind::Float) ? ty : acc_ty;
+        VReg cur_v = load_slot(tmp, load_ty);
         int rhs = new_block(is_and ? "and.rhs" : "or.rhs");
         int next = (i + 1 < b.values.size()) ? new_block(is_and ? "and.next" : "or.next") : end;
 
         Inst br;
         br.op = IrOp::Branch;
-        br.a = truth_bool(cur_v, acc_ty);
+        br.a = truth_bool(cur_v, load_ty);
         // and: 真才继续算右边；or: 假才继续算右边
         br.target = is_and ? rhs : next;
         br.target2 = is_and ? next : rhs;
@@ -558,8 +570,12 @@ VReg Lowerer::lower_boolop(BoolOp& b) {
 
         switch_to(rhs);
         VReg v = expr(*b.values[i]);
-        store_borrow_slot(tmp, v);
-        acc_ty = tc_.type_of(b.values[i].get());
+        TypePtr vt = tc_.type_of(b.values[i].get());
+        if (ty && ty->kind == TyKind::Float)
+            store_borrow_slot(tmp, coerce(v, vt, ty));
+        else
+            store_borrow_slot(tmp, v);
+        acc_ty = vt;
         Inst j;
         j.op = IrOp::Jump;
         j.target = next;
@@ -769,6 +785,46 @@ VReg Lowerer::lower_cmp_single(VReg l, TypePtr lt, VReg r, TypePtr rt, CmpOp op,
                     return def(t_bool(), std::move(un));
                 }
                 return ceq;
+            }
+            // ── str/bytes 与其它类型的 == / != ─────────────────────────
+            // 生成器按**左操作数**的静态类型选比较指令：左边是 str/bytes
+            // 时会把右操作数当字符串对象解引用（读 len 走 +8）。typecheck
+            // 对 ==/!= 不限制类型对，于是 "a" == 1 把 1 当地址读、段错误
+            // （ASan: SEGV on 0x8）。
+            //
+            // CPython 的口径：str.__eq__(非字符串) 返回 NotImplemented，
+            // 对方也没有兼容的 __eq__ 时落到同一性比较，恒 False。所以
+            // 一边确定是 str/bytes、另一边确定不可能是 str/bytes 时给常量；
+            // 另一边是 Optional[str] 时走 pa_str_eq_unknown（它本身对
+            // NULL / 非字符串安全），否则 "a" == None 会读地址 8。
+            auto str_like = [](const TypePtr& t) {
+                return t && (t->kind == TyKind::Str || t->kind == TyKind::Bytes);
+            };
+            auto opt_str = [](const TypePtr& t) {
+                return t && t->kind == TyKind::Optional && !t->sub.empty() &&
+                       t->sub[0] &&
+                       (t->sub[0]->kind == TyKind::Str ||
+                        t->sub[0]->kind == TyKind::Bytes);
+            };
+            auto maybe_str = [&](const TypePtr& t) {
+                return !t || str_like(t) || opt_str(t) ||
+                       t->kind == TyKind::Unknown;
+            };
+            VReg seq = kNoReg;
+            if (str_like(lt) && opt_str(rt))
+                seq = call_runtime(RtFn::StrEqUnknown, t_bool(), {r, l});
+            else if (opt_str(lt) && str_like(rt))
+                seq = call_runtime(RtFn::StrEqUnknown, t_bool(), {l, r});
+            else if ((str_like(lt) && !maybe_str(rt)) ||
+                     (str_like(rt) && !maybe_str(lt)))
+                return const_bool(op == CmpOp::Ne);
+            if (seq != kNoReg) {
+                if (op == CmpOp::Eq) return seq;
+                Inst un;
+                un.op = IrOp::Un;
+                un.uop = UnKind::Not;
+                un.a = seq;
+                return def(t_bool(), std::move(un));
             }
         }
         // 大小比较：__lt__/__le__/__gt__/__ge__（含右操作数的镜像版）。
