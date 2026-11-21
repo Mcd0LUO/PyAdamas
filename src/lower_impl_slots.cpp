@@ -143,6 +143,14 @@ VReg Lowerer::load_global(int gi, TypePtr ty) {
     return def(ty ? ty : t_unknown(), std::move(in));}
 
 void Lowerer::release_slots() {
+    // 出口释放可能发生在槽还没被标记 owned 之前（见 lower_impl_rc.h 的
+    // EarlyReleaseSite）。这里只记账，补齐在函数体降级结束后做。
+    if (releasing_at_return_) {
+        EarlyReleaseSite site;
+        site.blk = st_->blk;
+        site.owned = st_->fn->slot_owned;
+        early_release_sites_.push_back(std::move(site));
+    }
     VReg zero = kNoReg;
     for (size_t s = 0; s < st_->fn->slot_ty.size(); ++s) {
         if (st_->borrow_slots.count(static_cast<int>(s))) continue;
@@ -171,6 +179,56 @@ void Lowerer::release_slots() {
         if (zero == kNoReg) zero = const_int(0);
         store_slot_raw(static_cast<int>(s), zero);
     }}
+
+void Lowerer::fixup_early_releases() {
+    if (early_release_sites_.empty()) return;
+    IRFunction& fn = *st_->fn;
+    for (auto& site : early_release_sites_) {
+        if (site.blk < 0 || static_cast<size_t>(site.blk) >= fn.blocks.size()) continue;
+        auto& insts = fn.blocks[static_cast<size_t>(site.blk)].insts;
+        // 出口块一定以 Return 收尾：补的 dec 必须排在它前面。
+        if (insts.empty() || insts.back().op != IrOp::Return) continue;
+        const int line = insts.back().line;
+        std::vector<Inst> extra;
+        for (size_t s = 0; s < fn.slot_ty.size(); ++s) {
+            // borrow 槽是借来的，任何出口都不释放。
+            if (st_->borrow_slots.count(static_cast<int>(s))) continue;
+            TypePtr ty = fn.slot_ty[s];
+            // 只有 unknown 槽会漏：堆槽的出口释放不查 slot_owned。
+            if (ty && ty->kind != TyKind::Unknown) continue;
+            // 最终也没被任何写入点标成 owned：始终是借用（如 DictTryGet
+            // 的值出口槽），不能释放。
+            if (!fn.slot_owned[s]) continue;
+            // 这个出口发射时它已经 owned，当时就释放过了，不能再补一次。
+            if (s < site.owned.size() && site.owned[s]) continue;
+            VReg v = alloc(ty);
+            if (static_cast<size_t>(v) >= fn.vreg_nonneg.size())
+                fn.vreg_nonneg.resize(static_cast<size_t>(v) + 1, 0);
+            fn.vreg_nonneg[static_cast<size_t>(v)] = 0;
+            Inst ld;
+            ld.op = IrOp::LoadSlot;
+            ld.idx = Operand::slot(static_cast<int>(s));
+            ld.ty = ty;
+            ld.dst = v;
+            ld.line = line;
+            fn.ensure_inst_id(ld);
+            extra.push_back(std::move(ld));
+            Inst dc;
+            dc.op = IrOp::CallRt;
+            dc.imm = static_cast<int64_t>(RtFn::RcDecUnknown);
+            dc.args = {v};
+            dc.line = line;
+            fn.ensure_inst_id(dc);
+            extra.push_back(std::move(dc));
+        }
+        if (extra.empty()) continue;
+        Inst ret = std::move(insts.back());
+        insts.pop_back();
+        for (auto& x : extra) insts.push_back(std::move(x));
+        insts.push_back(std::move(ret));
+    }
+    early_release_sites_.clear();
+}
 
 void Lowerer::release_globals() {
     for (size_t gi = 0; gi < mod_.globals.size(); ++gi) {
@@ -206,7 +264,9 @@ void Lowerer::emit_return(VReg v, TypePtr vty, bool already_owned) {
     if (already_owned) {
         // 调用方已在清理之前接管了返回值，这里只做出口的槽/全局释放。
         if (st_->fn_mark != kNoReg && st_->rc_pushes > 0) rc_cleanup(st_->fn_mark);
+        releasing_at_return_ = true;
         release_slots();
+        releasing_at_return_ = false;
         if (st_->is_entry) {
             call_void(RtFn::VtShutdown, {});
             release_globals();
@@ -256,7 +316,9 @@ void Lowerer::emit_return(VReg v, TypePtr vty, bool already_owned) {
             call_void(RtFn::RcIncUnknown, {v});
     }
     if (st_->fn_mark != kNoReg && st_->rc_pushes > 0) rc_cleanup(st_->fn_mark);
+    releasing_at_return_ = true;
     release_slots();
+    releasing_at_return_ = false;
     if (st_->is_entry) {
         // vthread 先验：退出前 drain 剩余 vthread、打印未 join 异常、
         // 放弃永久阻塞者（docs/vthread-design.md §退出语义）。

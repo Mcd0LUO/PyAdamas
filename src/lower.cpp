@@ -374,6 +374,7 @@ void Lowerer::run(Module& ast) {
         emit_return(opts_.is_entry ? const_int(0) : const_none(),
                     opts_.is_entry ? t_int() : t_none());
     finalize_borrow_slots();
+    fixup_early_releases();
     if (st_->rc_pushes == 0)
         erase_mark(st_->fn_mark_block, st_->fn_mark_pos, st_->fn_mark);
 
@@ -513,6 +514,8 @@ int Lowerer::compile_function_body(FunctionDef& f, FuncInfoPtr info, const std::
     if (!terminated()) emit_return(kNoReg, nullptr);
     finalize_param_borrows();
     finalize_borrow_slots();
+    // 早返回出口按**最终**槽属性补齐释放（单遍降级看不到后来的 owned 标记）。
+    fixup_early_releases();
     if (st_->rc_pushes == 0)
         erase_mark(st_->fn_mark_block, st_->fn_mark_pos, st_->fn_mark);
 

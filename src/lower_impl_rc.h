@@ -263,6 +263,23 @@
     // 悬空指针会让下一次赋值的「load 旧值 + dec」二次释放。
     void release_slots();
 
+    // 早返回漏 dec（0.358）：降级是单遍源码序，早返回可能在槽首次堆/owned
+    // 写入**之前**就发射 release_slots —— 那一刻 slot_owned 还没置位，整类
+    // unknown 槽被跳过；而循环次轮起槽里已是上一轮 retain 过的堆值，于是
+    // 永久漏一份引用（0.356 只做了 stdlib 绕行，取证见
+    // docs/strfix-rc-early-return.md）。修法：函数体降级完成后，用**最终**
+    // 槽属性给这些出口补齐缺失的释放。只补「最终 owned、但该出口发射时还
+    // 没 owned」的 unknown 槽；borrow 槽与始终借用的 unknown 槽一律不动，
+    // 所以不会多减。
+    struct EarlyReleaseSite {
+        int blk = -1;
+        std::vector<bool> owned;  // 该出口发射那一刻的 slot_owned 快照
+    };
+    std::vector<EarlyReleaseSite> early_release_sites_;
+    bool releasing_at_return_ = false;
+    void fixup_early_releases();
+
+
     // 只读形参不需要「入口 retain + 出口 release」：实参在调用期间由
     // 调用方持有，函数体既没覆盖形参槽、也没把它存进别处时，这对 RC
     // 纯属多余。方法调用的 self 绝大多数是这种形态，省掉的是每次
