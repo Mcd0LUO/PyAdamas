@@ -4,6 +4,41 @@
 
 早期阶段没有逐条留痕，按阶段归纳；0.4 之后逐条记录。
 
+## [0.356] - 2026-11-21
+
+> **修复 configparser 插值路径字符串 refcount 泄漏**（0.355 取证留下的独立
+> 预存 bug，非异常）。**纯 stdlib 改动**（stdlib/configparser.py 一行 return
+> → break + 注释），src/runtime/codegen 零改动，门控关程序生成 asm 逐字节
+> 不变（38 热基准天然全同）。
+>
+> 机理（ASan + gdb 取证，详见 docs/strfix-rc-early-return.md）：最小复现
+> ConfigParser 读 `"[a]\nslash = %(third)s/%%plit\nthird = end"` 后
+> items("a")，detect_leaks=1 报 208B/2 对象（各 104B = 64B RC 头 + 40B SSO
+> 串）。gdb 遍历索引叶子位图确认退出时仅存两个非永生串：`third`（len5，
+> optionxform 的 lower 结果，_interp_some:696 `var = self.optionxform(var)`）
+> 与 `end`（len3，_read:530 提交的字典值）。LSan 栈指向 _read 是字符串池
+> 复用假象。根因是**编译器 lowering 通用 bug**：`_interp_some` 的
+> `if p < 0: accum.append(rest); return` 早返回在 var/v 首次堆写入之前
+> 降级，单遍 `release_slots` 当时看不到这两个 unknown 槽的 slot_owned
+> 标记而漏 dec；循环自然结束出口在循环体之后降级则全释放。循环次轮起早返回
+> 时槽里已是上一轮 retain 过的堆值 → var 直接泄漏、v（字典借用）多持一份
+> 退出时泄漏。
+>
+> 修复：把该早返回 `return` 改成 `break`，经循环自然结束出口（全槽释放）
+> 退出。循环后无语句，break 与 return 语义完全相同，插值输出/字符串内容
+> 不变。
+>
+> **编译器通用 bug 留负面**：已实现并验证 lowering 后置遍
+> fixup_early_return_releases（用最终槽属性补齐早返回漏 dec），复现 leak→0，
+> 但 38 热基准 asm 对拍 37 同 1 异——bench/daily/a2_config_parse.py 的
+> coerce() 自身两个早返回同样漏 dec，通用修给它补 dec 改了 asm，违反
+> 「flag-off 38 基准 asm 逐字节不变」硬闸门。正确修法在 lowering（出口释放
+> 需用最终槽属性），须独立任务连同基准 asm 基线处理；本轮按硬闸门走纯
+> stdlib 修。
+>
+> 闸门：最小复现与 253/254/390-394 detect_leaks=1 由漏转 0；全套件 normal
+> 与 ASan（JOBS=1）EXIT=0；38 热基准 asm 逐字节全同；CPython 3.14 对拍
+> 253/254/390-394 零差异；语料差分零差异；check_size 无新增超限。
 ## [0.355] - 2026-11-21
 
 > **修复异常跨函数 raise/catch 的捕获异常泄漏**（预存运行期 bug，tarfile/
