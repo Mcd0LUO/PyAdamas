@@ -4,6 +4,69 @@
 
 早期阶段没有逐条留痕，按阶段归纳；0.4 之后逐条记录。
 
+## [0.359] - 2026-11-21
+
+> 两条线：**元组元素按目标类型逐元素转换**（修 0.358 记账的预存 bug）、
+> **Decimal 补上五种构造来源与 __format__ 全谱**。
+>
+> ### 1. 元组元素类型转换（预存 bug，0.357/0.358 都复现）
+>
+> 元组字面量按**推断**类型构造（(1, 2) 是 tuple[int, int]），边界上只在
+> Assign/Return 处做一次 type_eq 判断，tuple[int,int] → tuple[float,float]
+> 被当成机器字直通。后果：
+>
+>     def f() -> tuple[float, float]: return 1, 2
+>     print(f())        # (5e-324, 1e-323)，int 位模式被当 double
+>
+>     def g() -> tuple[int, big, int]: return 0, 7, 0
+>     a, b, c = g(); print(b + 1)   # 段错误（0 被当 big 指针）
+>
+> 修法：convert_to 增加元组重建分支——元数相同、元素类型有差异时，逐元素
+> seq_elem_at 取值、coerce 到目标元素类型、再 build_seq_vregs 重新构造。新
+> 元组自己持有元素引用，源值不动（仍由临时栈/槽释放），没有多减。coerce 与
+> bad_elem 相应放行「同元数定长元组」走重建；变长元组（tuple[T, ...]）与元数
+> 不同的情形保持原状——第一版放得太宽，曾让 230_tuple_sort 与 322_calendar
+> 在排序描述符上段错误，收窄后才回到 0 差异。
+>
+> 回归 tests/run/406_tuple_element_convert.py，覆盖返回、实参、嵌套元组、标注
+> 字面量、变量赋值五种位置，输出与 CPython 逐字节一致（浮点只比数值，避开
+> 文档化的 1.0 vs 1 打印差异）。
+>
+> **asm：全语料 476 份逐字节全同**——现有语料里没有任何程序触发过这条转换
+> （正因为它是坏的，没人写出依赖它的代码）。
+>
+> ### 2. Decimal 构造与格式化
+>
+> 构造来源补到五种：Decimal() / str / int / **big**（任意精度，无 i64 截断）/
+> float / Decimal，外加两参 Decimal(value, context)（context 接受后忽略，
+> 尚不做上下文舍入）。float 走 **repr 的最短十进制**再解析，而不是 CPython
+> 的二进制精确展开——这是本模块的口径，已写进模块头；NaN/Infinity 三路
+> 输入统一抛 ValueError，不静默。
+>
+> __format__ 按 CPython 3.14 的 _pydecimal 逐条移植：空说明（= G）、
+> e E f F g G %、.N、符号 +/空格、宽度/对齐 </>/^/=/任意 fill/零填充、
+> 千分位 , _ 与小数位分组、#、z，舍入跟随 getcontext().rounding。明确拒绝
+> d s x X o b c 与 n（locale），非法说明一律 ValueError。
+>
+> CPython 对拍：8 个 seed × 1466 行 = **11728 行输出逐字节相同、0 差异**，
+> 另做极端指数量级与说明符合法性抽查。回归 412–416。
+>
+> **asm**：除 403–405 三个 import decimal 的用例外全部逐字节相同；那三个的
+> 差异是「两参构造必然多一个形参」带来的 frame 728→744 与 movq $0, %rsi，
+> src/ 零改动。
+>
+> ### 本轮发现的编译器缺陷（未修，已绕开）
+>
+> - **f-string 对类实例二次套用格式**（lower_expr_dunder 调用 __format__ 之后
+>   又用同一 spec 走 FmtStr）：f"{d:.0f}" 报 ValueError、f"{d:<10}" 重复补白；
+>   纯宽度/填充/对齐因为结果已够宽而幂等，所以看起来正常。带精度的请先用
+>   format(d, spec)。
+> - **块内同名变量换类型**：先 c: str = ... 后 c: big = ...（顶层重声明会报错，
+>   块内不报），后续 c == 0 恒假而 str(c) 仍对。stdlib 已避免多类型同名。
+>
+> 闸门（合并后主线 build/lead 复验）：difftest **364/0**；普通与 ASan 套件各
+> **385 ran ok**、exit 0；ASan+LSan 钉子 9/9 stderr 空；check_size 通过。
+
 ## [0.358] - 2026-11-21
 
 > 三条并行线：**修编译器「早返回漏 dec」**（0.356 留着负面的那座山）、
