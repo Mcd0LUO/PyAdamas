@@ -143,6 +143,55 @@ VReg Lowerer::lower_subscript(Subscript& s) {
     return r;
 }
 
+// 按静态类型从序列里取第 idx 个元素（元数静态已知时免边界检查）。
+// 返回的是容器内部的**借用**引用，调用方负责 retain（如果要存起来）。
+VReg Lowerer::seq_elem_at(VReg seq, TypePtr seq_ty, int64_t idx) {
+    TypePtr et = (seq_ty && idx >= 0 && static_cast<size_t>(idx) < seq_ty->sub.size())
+                     ? seq_ty->sub[static_cast<size_t>(idx)]
+                     : t_unknown();
+    Inst in;
+    in.op = IrOp::IndexLoadUnchecked;
+    in.a = seq;
+    in.b = const_int(idx);
+    return def(et, std::move(in));
+}
+
+// 用已经降级好的 vreg 构造 tuple/list（lower_list_like 的 vreg 版本）。
+// 元素所有权类别与字面量构造完全一致：kind != 0 时先 retain，构造成功后
+// 再 take 走临时栈那份。
+VReg Lowerer::build_seq_vregs(std::vector<VReg> vals, std::vector<TypePtr> tys,
+                              TypePtr ty, bool is_tuple) {
+    int kind = list_kind(ty);
+    if (kind == 3 && !vals.empty()) kind = 2;
+    std::vector<VReg> args;
+    std::vector<VReg> fresh_args;
+    args.reserve(vals.size());
+    for (size_t i = 0; i < vals.size(); ++i) {
+        TypePtr want;
+        if (ty && !is_tuple && !ty->sub.empty())
+            want = ty->sub[0];
+        else if (ty && is_tuple && !ty->variadic && !ty->sub.empty() && i < ty->sub.size())
+            want = ty->sub[i];
+        else if (ty && is_tuple && ty->variadic && !ty->sub.empty())
+            want = ty->sub[0];
+        VReg v = coerce(vals[i], i < tys.size() ? tys[i] : nullptr, want);
+        if (kind != 0 && st_->fresh_vregs.count(v)) {
+            st_->fresh_vregs.erase(v);
+            fresh_args.push_back(v);
+        } else {
+            retain_elem(v, kind);
+        }
+        args.push_back(v);
+    }
+    Inst in;
+    in.op = is_tuple ? IrOp::MakeTuple : IrOp::MakeList;
+    in.imm = kind;
+    in.args = std::move(args);
+    VReg out = def_heap(ty, std::move(in));
+    for (VReg v : fresh_args) rc_temp_take(v);
+    return out;
+}
+
 VReg Lowerer::lower_list_like(std::vector<ExprPtr>& elts, TypePtr ty, bool is_tuple) {
     std::vector<VReg> args;
     args.reserve(elts.size());

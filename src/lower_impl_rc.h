@@ -155,6 +155,16 @@
     // kind 1/2 且源类型已知是堆，写入前 retain。kind 2 只 retain 不 release
     //（类型看不见，销毁时不敢按元素 dec），代价是泄漏。源类型是 unknown
     // 时不能直接 rc_inc（可能是整数），走注册表保守判断。
+    // 元组/列表的元素级重建（0.359）：`tuple[A,B]` → `tuple[X,Y]` 这类
+    // 「同元数、元素类型不同」的转换不能按机器字直通 —— 之前它就是这么
+    // 直通的，于是 `def f() -> tuple[float, float]: return 1, 2` 打印
+    // (5e-324, 1e-323)（int 位模式冒充 double），`tuple[int, big, int]`
+    // 返回 0,0,0 取元素即段错误。下面两个原语负责逐元素取值 + 按目标类型
+    // 重新构造。
+    VReg seq_elem_at(VReg seq, TypePtr seq_ty, int64_t idx);
+    VReg build_seq_vregs(std::vector<VReg> vals, std::vector<TypePtr> tys,
+                         TypePtr ty, bool is_tuple);
+
     void retain_elem(VReg v, int kind) {
         if (kind == 0) return;
         TypePtr vt = vreg_ty(v);
