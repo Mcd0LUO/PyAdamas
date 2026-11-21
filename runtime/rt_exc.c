@@ -690,7 +690,17 @@ PyAdamasStr* pa_exc_message(void) {
     return str_new(m, (int64_t)strlen(m));
 }
 
+void pa_exc_drop_save(void);
+
 void pa_raise(PyAdamasStr* type, PyAdamasStr* msg) {
+    /* except 体里 raise 新异常会 longjmp 跳过 ExcDone：被 accept_value 接管成
+       current_exc 的那个捕获异常没人释放（含 phys/phys_extra 帧链），多站点时
+       早先的异常被埋进 save 链 prev、退出清扫后不可达 → LeakSanitizer 报泄漏。
+       与零开销路径 pa_eh_raise_value_from 同口径：还 save 节点 + 释放 current_exc。
+       捕获异常的 traceback 已克隆进 except as e 的 ExcValue，这里释放不丢内容。 */
+    pa_exc_drop_save();
+    exc_free(current_exc);
+    current_exc = NULL;
     char tn[128];
     int64_t tn_len = type->len;
     if (tn_len < 0 || tn_len >= (int64_t)sizeof(tn)) panic_c("exception type name too long");
@@ -715,8 +725,6 @@ void pa_raise(PyAdamasStr* type, PyAdamasStr* msg) {
     pa_trace_capture(e, PA_CAP_NEW);
     exc_longjmp();
 }
-
-void pa_exc_drop_save(void);
 
 void pa_reraise(void) {
     /* 裸 `raise` 会直接 longjmp，跳过 except 块的正常收尾（pa_exc_done）。
@@ -872,6 +880,10 @@ static char* join_args_cstr(PyAdamasList* args) {
 /* 抛多参异常：args 为字符串化实参列表。 */
 _Noreturn void pa_raise_args(PyAdamasStr* type, PyAdamasList* args) {
     exc_gc_roots_ensure();
+    /* 同 pa_raise：except 体里 raise 多参异常跳过 ExcDone，补上下文收尾。 */
+    pa_exc_drop_save();
+    exc_free(current_exc);
+    current_exc = NULL;
     char tn[128];
     int64_t tn_len = type->len;
     if (tn_len < 0 || tn_len >= (int64_t)sizeof(tn)) panic_c("exception type name too long");
@@ -981,6 +993,11 @@ PyAdamasException* pa_exc_from_value(PyAdamasExcValue* v) {
 }
 
 void pa_raise_value_from(PyAdamasExcValue* v, PyAdamasExcValue* cause) {
+    /* 与 pa_eh_raise_value_from 逐句对齐：except 体里 raise 值跳过 ExcDone，
+       先还 save 节点再释放被接管的 current_exc，否则捕获异常泄漏。 */
+    pa_exc_drop_save();
+    exc_free(current_exc);
+    current_exc = NULL;
     exc_free(pending_exc);
     pending_exc = pa_exc_from_value(v);
     if (cause) {
