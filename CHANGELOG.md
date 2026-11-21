@@ -4,6 +4,51 @@
 
 早期阶段没有逐条留痕，按阶段归纳；0.4 之后逐条记录。
 
+## [0.363] - 2026-11-21
+
+> 0.362 之后把「已确认未修」里的两条自己修掉。
+>
+> ### 1. dict/set 迭代中改大小：改为可捕获的 RuntimeError
+>
+> 旧行为有两种错法：
+>
+>     for k in d: del d[k]     # 删空之后被下标上界悄悄结束，不报错
+>     for k in d: d[99] = 9    # 走到越界读时 panic_c，进程直接退出、except 接不住
+>
+> CPython 在**下一次取元素之前**就检查容器大小并抛 RuntimeError。修法：在
+> dict/set 的循环**条件块**里逐轮比较 `len(seq)` 与进入循环时记下的长度
+>（这个槽本来就有，原先只用来比下标上界），不等则抛 RuntimeError，文案与
+> CPython 一致（dict 是 `dictionary changed size during iteration`，set 是
+> `Set changed size during iteration`）。
+>
+> 放在条件而不是循环体是关键：放在体里的话，删空之后下标上界先失效、循环
+> 直接结束，永远走不到检查。顺带覆盖「删一个再加一个」这种大小不变的改写。
+> 覆盖 `for k in d` 与 `for i, k in enumerate(d)`；`zip` 里的 dict 迭代未覆盖。
+>
+> ### 2. `-> complex` 注解不再静默退化
+>
+> `parse_annotation` 的标量分支唯独缺 complex，`def f() -> complex` 被解析成
+> unknown，调用方按整数打印堆地址（`94718388971600`）。补一行即可。
+>
+> 顺带暴露的真实边界（不是本次引入）：complex 上还不支持 `.real`/`.imag`，
+> 以前类型是 unknown 所以没被检查，现在会明确报错。
+>
+> ### 仍然未修（下一轮）
+>
+> - **`async with` 的 `__aexit__` 异常路径泄漏 224B**：已复现并定位到
+>   `src/lower_stmt_with.cpp:44-51` —— 异常路径用 `ExcTypeName`/`ExcMessage` 造了
+>   两个字符串并 `push_temp`，同步 with 由本帧临时栈回收，但异步路径要把
+>   `__aexit__` 包成 awaitable 再挂起，挂起时这两个临时串就丢了。要动 async
+>   挂起/恢复的临时栈快照，需单独一轮。
+> - **`except` 体内 `raise` 仍跳过同一 try 的 `finally`**：return/break/continue
+>   已修，raise 走 setjmp 长跳不经清理项，要给 handler 体单独保护区。
+> - `zip` 中迭代 dict 时改大小仍不报错。
+> - 0.362 里记的「模块级 except 捕获运行时异常泄漏 152B」**已无法复现**：
+>   `try: int("x") except ValueError` 在模块级与函数内 ASan+LSan 都干净，
+>   应是被 0.362 的内联槽释放修复顺带解决。
+>
+> 闸门：difftest **384/0**；普通与 ASan 套件各 **405 ran ok**、exit 0；check_size 通过。
+
 ## [0.362] - 2026-11-21
 
 > **三个独立代理全项目扫描 + 各自修复**（前端 / 运行时 / 代码生成）。共修 18 个缺陷，
