@@ -386,6 +386,9 @@ enum {
        float 装进 8 字节 payload（double 位模式）的无出边对象。
        print/探针按 kind 识别。见 runtime/rt_cpy.c。 */
     PYADAMAS_RC_CPYFLOAT = 8,
+    /* P3 big：任意精度整数。limb 内联在 RC 块尾部（柔性数组），无堆出边、
+       不可变；tracked 分配让 unknown 探针认识它。见 runtime/rt_big.c。 */
+    PYADAMAS_RC_BIGINT = 9,
 };
 
 typedef struct PyAdamasRc {
@@ -513,6 +516,44 @@ typedef struct {
     double re;
     double im;
 } PyAdamasComplex;
+
+/* ── P3 big：任意精度整数（runtime/rt_big.c）─────────────────────
+ * 布局：RC 头 + { nd（带符号 limb 数，基 2^32 小端，无最高位零 limb）; d[] }。
+ * 不可变值语义：运算产生新对象（rc=1），操作数是借用。BIG tag=12（堆）。 */
+typedef struct {
+    int64_t nd;      /* 0 = 零；>0 正；<0 负；|nd| = limb 个数 */
+    uint32_t d[];    /* 基 2^32 小端 limb，内联在同一 malloc 块 */
+} PyAdamasBig;
+
+PyAdamasBig* pa_big_from_i64(int64_t v);
+PyAdamasBig* pa_big_from_u64(uint64_t v);
+PyAdamasBig* pa_big_from_f64(double d);          /* int(float)：向零截断 */
+PyAdamasBig* pa_big_from_cstr(const char* s, int64_t base);
+PyAdamasBig* pa_big_from_str(PyAdamasStr* s, int64_t base);
+int64_t pa_big_to_i64(PyAdamasBig* a);           /* cast 语义：低 64 位回绕 */
+double pa_big_to_f64(PyAdamasBig* a);            /* 正确舍入；过大 OverflowError */
+PyAdamasBig* pa_big_add(PyAdamasBig* a, PyAdamasBig* b);
+PyAdamasBig* pa_big_sub(PyAdamasBig* a, PyAdamasBig* b);
+PyAdamasBig* pa_big_mul(PyAdamasBig* a, PyAdamasBig* b);
+PyAdamasBig* pa_big_floordiv(PyAdamasBig* a, PyAdamasBig* b);
+PyAdamasBig* pa_big_mod(PyAdamasBig* a, PyAdamasBig* b);
+PyAdamasBig* pa_big_pow(PyAdamasBig* a, PyAdamasBig* b);
+int64_t pa_big_cmp(PyAdamasBig* a, PyAdamasBig* b);   /* -1/0/1 */
+int64_t pa_big_cmp_f64(PyAdamasBig* a, double d);     /* 精确混比；NaN=-2 */
+int64_t pa_big_eq(PyAdamasBig* a, PyAdamasBig* b);
+int64_t pa_big_truth(PyAdamasBig* a);
+PyAdamasBig* pa_big_neg(PyAdamasBig* a);
+PyAdamasBig* pa_big_abs(PyAdamasBig* a);
+PyAdamasBig* pa_big_not(PyAdamasBig* a);          /* ~a = -a-1 */
+double pa_big_truediv(PyAdamasBig* a, PyAdamasBig* b);  /* 正确舍入 double */
+PyAdamasBig* pa_big_and(PyAdamasBig* a, PyAdamasBig* b);
+PyAdamasBig* pa_big_or(PyAdamasBig* a, PyAdamasBig* b);
+PyAdamasBig* pa_big_xor(PyAdamasBig* a, PyAdamasBig* b);
+PyAdamasBig* pa_big_lshift(PyAdamasBig* a, PyAdamasBig* cnt);
+PyAdamasBig* pa_big_rshift(PyAdamasBig* a, PyAdamasBig* cnt);
+PyAdamasStr* pa_big_str(PyAdamasBig* a);         /* 十进制（repr 同形） */
+PyAdamasStr* pa_big_to_base(PyAdamasBig* a, int64_t base);  /* 2/8/10/16 */
+PyAdamasStr* pa_big_fmt(PyAdamasBig* a, PyAdamasStr* spec); /* format()（rt_format.c） */
 
 PyAdamasComplex* pa_complex_new(double re, double im);
 PyAdamasComplex* pa_complex_add(PyAdamasComplex* a, PyAdamasComplex* b);
