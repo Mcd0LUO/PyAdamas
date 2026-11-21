@@ -577,6 +577,10 @@ void AsmGen::assign_slot_regs() {
         // 原来这里直接 getenv：切换开关后模块缓存键不变，仍命中旧产物 ——
         // 实测连续几轮 A/B 测试拿到完全相同的二进制。现在由 Program::rc_split
         // 统一管理，并写进 manifest 的 rcsplit 行。
+        // split 分配器已废弃：main.cpp 在解析 PYADAMAS_RA_SPLIT 时直接报错
+        // 退出，所以 rc_split 恒 false、这里不可达。代码先留着 —— 它和下面
+        // codegen_block 的槽位置发射（块入口 reload / 融合存储双写 / fp 别名
+        // 掩码）是一套，删除要重排默认路径的发射代码，另开一轮再做。
         static const bool use_split = rc_split_;
         if (use_split) {
             // **split 独占整型分配，不能先跑线性扫描。**

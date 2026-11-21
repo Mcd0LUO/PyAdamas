@@ -311,8 +311,28 @@ int main(int argc, char** argv) {
             pyadamas::set_asan_runtime(sanitize == "address");
         }
         prog.rebuild = rebuild;
-        // live range splitting 开关（实验特性）：读一次环境变量，写进缓存清单。
-        prog.rc_split = std::getenv("PYADAMAS_RA_SPLIT") != nullptr;
+        // live range splitting（PYADAMAS_RA_SPLIT）已废弃：分配器在 -O0 下
+        // 会让循环计数错乱（死循环）、-O2 下算错值（冒泡排序输出未排序）。
+        // docs/regalloc.md §已否决的方案 已判「默认关、不要重试」，ra-opt-design
+        // 里也记了它在生成器+except 上 SIGSEGV。它和 codegen_block 的槽位置
+        // 发射代码（块入口 reload、融合存储双写、fp 别名掩码）缠在一起，删
+        // 干净要动默认路径的发射逻辑，风险大于收益 —— 所以这里直接拒绝入口，
+        // 让这条路径再也产不出错误代码；rc_split 恒 false，dispatch 不可达。
+        prog.rc_split = false;
+        if (const char* sp = std::getenv("PYADAMAS_RA_SPLIT");
+            sp != nullptr && std::string_view(sp) != "0" && sp[0] != '\0') {
+            std::fprintf(stderr,
+                         "error: PYADAMAS_RA_SPLIT 已废弃（split 分配器会死循环/算错"
+                         "值，见 docs/regalloc.md）\n");
+            return 2;
+        }
+        if (const char* sc = std::getenv("PYADAMAS_SPLIT_MAXREG");
+            sc != nullptr && sc[0] != '\0') {
+            std::fprintf(stderr,
+                         "error: PYADAMAS_SPLIT_MAXREG 已废弃（只对已废弃的 split "
+                         "分配器有效）\n");
+            return 2;
+        }
         // 图着色分配器（PYADAMAS_RA_GRAPH）已整段删除：它在 -O2 下会把
         // 浮点累加器跨调用的活跃性算错（0.314 修过的 N19a 形态），静默算
         // 错值；而它本来就是默认关的实验路径（docs/regalloc.md 已判放弃）。
