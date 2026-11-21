@@ -4,6 +4,14 @@
 
 早期阶段没有逐条留痕，按阶段归纳；0.4 之后逐条记录。
 
+## [0.353] - 2026-11-21
+
+> **修复编译器自身求值顺序 UB 堆越界**（预存 bug，stdlib6 轮 ASan 编译器构建 118_suspend_expr 暴露）：
+> `lower_impl.h def()` 的 `vreg_nonneg[r] = nonneg_of(in)` 左值 vector 引用与右值求值顺序
+> 隐患——改为先算右值临时量 `nn`、显式守 `vreg_nonneg.size()` 再赋值，杜绝悬空引用/越界。
+> 生成 asm 逐字节不变（16 基准 cmp）、全套件 360 ok、ASan 编译器构建运行 118 exit 0 无 UB。
+> 纯正确性修复。继 0.345 vreg_str UAF 后第二处 ASan 编译器构建暴露的预存内存安全 bug。
+
 ## [0.352] - 2026-11-21
 
 > **标准库自举第六批**（stdlib6 分支，基线 master f70d7e8 / 0.351）。纯

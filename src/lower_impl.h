@@ -396,7 +396,13 @@ private:
 
     VReg def(TypePtr ty, Inst in) {
         VReg r = alloc(ty);
-        st_->fn->vreg_nonneg[static_cast<size_t>(r)] = nonneg_of(in);
+        // 先算右值再取左值引用：nonneg_of 虽当前只读，但把 RHS 独立成临时量
+        // 杜绝「LHS vector 引用先于 RHS 求值、RHS 若 realloc 则悬空」的求值顺序 UB
+        // （ASan 编译器构建 118_suspend_expr 暴露）；并显式守 size 防越界。
+        const uint8_t nn = nonneg_of(in);
+        auto& vn = st_->fn->vreg_nonneg;
+        if (static_cast<size_t>(r) >= vn.size()) vn.resize(static_cast<size_t>(r) + 1, 0);
+        vn[static_cast<size_t>(r)] = nn;
         in.dst = r;
         in.ty = ty;
         if (in.line == 0) in.line = cur_line_;
