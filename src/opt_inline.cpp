@@ -133,6 +133,86 @@ InlineFacts analyze_callee(const IRFunction& callee) {
     return f;
 }
 
+// 内联体带进调用方帧的新槽：异常被**本帧**接住（或提前 return/break）时
+// 不会走 callee 的出口释放序列 —— 调用方的 release_slots 是降级期（内联
+// 之前）按当时的槽表生成的，看不到这些后加的槽；异常被本帧接住也不会触发
+// 帧展开（当前帧的槽本来就留给函数自己退出时释放）。于是槽里最后一个值
+// 没人 dec。
+//
+// 对 str/bytes 这类索引叶子（不进 GC 堆链、退出清扫收不到、只由 RC 释放）
+// 这表现为进程退出时 LSan 报 Direct leak（局部 s = "x" + "y" 后 raise，被
+// 内联进 __pa_main）。容器因退出清扫能兜住，所以只有叶子类型露出来。
+//
+// 修法：内联结束后给调用方的**每个** Return 补一段「按槽释放再清零」，口径
+// 与 release_slots 一致（owned + 堆/unknown 槽；unknown 走注册表）。正常
+// 路径下 callee 的出口已经 dec 并把槽清零，这里 dec(0) 是空操作；异常/早退
+// 路径则靠这段收尾。清零是必须的：帧记录的 GC 扫描按槽地址读值，留着指向
+// 已释放对象的旧指针会被误标。
+static void release_inlined_slots_at_returns(IRFunction& fn,
+                                             const std::vector<int>& slots) {
+    if (slots.empty()) return;
+    for (auto& b : fn.blocks) {
+        if (b.insts.empty() || b.insts.back().op != IrOp::Return) continue;
+        std::vector<Inst> extra;
+        for (int s : slots) {
+            if (s < 0 || static_cast<size_t>(s) >= fn.slot_ty.size()) continue;
+            TypePtr ty = fn.slot_ty[static_cast<size_t>(s)];
+            const bool unk_ty = !ty || ty->kind == TyKind::Unknown;
+            const bool owned = static_cast<size_t>(s) < fn.slot_owned.size() &&
+                               fn.slot_owned[static_cast<size_t>(s)];
+            const bool unk = static_cast<size_t>(s) < fn.slot_unknown.size() &&
+                             fn.slot_unknown[static_cast<size_t>(s)];
+            if (!owned || !(ir_is_heap(ty) || unk_ty)) continue;
+            VReg ld = static_cast<VReg>(fn.vreg_ty.size());
+            fn.vreg_ty.push_back(ty ? ty : t_unknown());
+            Inst l;
+            l.op = IrOp::LoadSlot;
+            l.idx = s;
+            l.dst = ld;
+            l.ty = ty;
+            extra.push_back(std::move(l));
+            Inst d;
+            d.op = IrOp::CallRt;
+            d.imm = static_cast<int64_t>((unk || unk_ty) ? RtFn::RcDecUnknown : RtFn::RcDec);
+            d.args = {ld};
+            extra.push_back(std::move(d));
+            VReg z = static_cast<VReg>(fn.vreg_ty.size());
+            fn.vreg_ty.push_back(t_int());
+            Inst c;
+            c.op = IrOp::ConstInt;
+            c.imm = 0;
+            c.dst = z;
+            c.ty = t_int();
+            extra.push_back(std::move(c));
+            Inst st;
+            st.op = IrOp::StoreSlot;
+            st.idx = s;
+            st.a = z;
+            extra.push_back(std::move(st));
+        }
+        if (extra.empty()) continue;
+        // **插入点不能是 Return 之前**：entry 函数的 emit_return 在 Return 前
+        // 依次发 VtShutdown / release_globals / GcShutdown / RcShutdown，而
+        // pa_gc_shutdown 会把链上剩余对象**不管 rc** 直接 free。把 dec 放在
+        // Return 前会读到已被清扫的对象（ASan: heap-use-after-free in
+        // pa_rc_dec_slow，调用点 __pa_main 的 Return；-O2 下段错误）。
+        // 所以插在收尾序列的第一个 shutdown 调用之前。
+        size_t at = b.insts.size() - 1;  // 默认：Return 之前
+        for (size_t i = b.insts.size() - 1; i > 0; --i) {
+            const Inst& in = b.insts[i];
+            if (in.op != IrOp::CallRt) continue;
+            RtFn callee_fn = static_cast<RtFn>(in.imm);
+            if (callee_fn == RtFn::VtShutdown || callee_fn == RtFn::GcShutdown ||
+                callee_fn == RtFn::RcShutdown)
+                at = i;
+            else if (callee_fn != RtFn::RcDec && callee_fn != RtFn::RcDecUnknown)
+                break;
+        }
+        b.insts.insert(b.insts.begin() + static_cast<std::ptrdiff_t>(at), extra.begin(),
+                       extra.end());
+    }
+}
+
 // 在 bi 块的 ii 位置内联 callee。克隆块紧挨着调用块插入、cont 紧挨着
 // 克隆块，入口指令并进调用块本身——这样 O2 的跳转消除能把入口跳转、
 // 单返回块到 cont 的跳转全部折成顺序下落。
@@ -147,6 +227,7 @@ void inline_at(IRFunction& fn, size_t bi, size_t ii, const IRFunction& callee,
     const bool direct_ret = facts.n_returns == 1 && call.dst != kNoReg;
 
     std::vector<int> slot_map(static_cast<size_t>(ns), -1);
+    std::vector<int> new_owned_slots;
     for (int s = 0; s < ns; ++s) {
         if (facts.subst[static_cast<size_t>(s)] >= 0) continue;
         slot_map[static_cast<size_t>(s)] = static_cast<int>(fn.slot_ty.size());
@@ -158,6 +239,11 @@ void inline_at(IRFunction& fn, size_t bi, size_t ii, const IRFunction& callee,
         bool unk = static_cast<size_t>(s) < callee.slot_unknown.size() &&
                    callee.slot_unknown[static_cast<size_t>(s)];
         fn.slot_unknown.push_back(unk);
+        TypePtr sty = fn.slot_ty[slot_map[static_cast<size_t>(s)] < 0
+                                     ? static_cast<size_t>(s)
+                                     : static_cast<size_t>(slot_map[static_cast<size_t>(s)])];
+        if (owned && (ir_is_heap(sty) || !sty || sty->kind == TyKind::Unknown))
+            new_owned_slots.push_back(slot_map[static_cast<size_t>(s)]);
     }
     int ret_slot = -1;
     if (!direct_ret && call.dst != kNoReg) {
@@ -363,6 +449,7 @@ void inline_at(IRFunction& fn, size_t bi, size_t ii, const IRFunction& callee,
             clone_into(out, src, -1);
         }
         for (auto& in : suffix) out.push_back(std::move(in));
+        release_inlined_slots_at_returns(fn, new_owned_slots);
         return;
     }
 
@@ -441,6 +528,7 @@ void inline_at(IRFunction& fn, size_t bi, size_t ii, const IRFunction& callee,
         fresh.push_back(std::move(b));
     }
     fn.blocks = std::move(fresh);
+    release_inlined_slots_at_returns(fn, new_owned_slots);
 }
 
 }  // namespace
