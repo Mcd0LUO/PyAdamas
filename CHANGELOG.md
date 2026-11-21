@@ -4,6 +4,47 @@
 
 早期阶段没有逐条留痕，按阶段归纳；0.4 之后逐条记录。
 
+## [0.361] - 2026-11-21
+
+> **块内标注声明也遵守「一个名字一种类型」**。这是语言规则收紧，不碰代码生成。
+>
+> Python 的名字是函数作用域：`if flag: c: str = "x"` 与后面函数级的
+> `c: big = 7` 指的是同一个槽。但类型检查只按**当前**作用域查 vars，而块
+> 作用域是临时的、块结束就没了，于是这种形态完全绕过检查：
+>
+>     def f(flag: bool) -> int:
+>         if flag:
+>             c: str = "x"
+>         c: big = 7
+>         return 1 if c == 0 else 0   # c 按 str 解释，恒假，静默错型
+>
+> 修法：在函数作用域上累积「标注过的名字 → (类型, 首次声明行)」，任何块内
+> 的标注声明都先按它检查；同类型（assignable）照旧放行，冲突报与重复赋值
+> 同一条错误并指出首次声明位置：
+>
+>     error: cannot assign 'big' to 'str' variable 'c' (annotated at line 4)
+>
+> **为什么不是「禁止换类型」**：本轮先实测了现行规则——有标注变量本来就
+> 一个名字一种类型，同族加宽（i8→i32、int→float、int→big、unknown→big）
+> 自动插转换，同族收窄（i32→i8、float→int、big→int）要求显式 cast_*；
+> 无标注变量按 Python 习惯允许换类型、退化成 unknown。也就是说「只支持同类型
+> 的缩减和提升」其实已经实现了，缺的只是块内声明这个洞。收紧成「禁止换类型」
+> 会连加宽一起禁掉，并大面积误杀 `x = None` 占位、`x = []` 后定型这类模式。
+>
+> 不受影响（都有回归）：同名同类型的块内声明、嵌套函数（各自函数作用域）、
+> 类体（独立命名空间）、模块级变量被函数内同名标注遮蔽、for 循环变量、
+> try/except 绑定。
+>
+> **asm：全语料 484 份 `asm -O2` 与 0.360 逐字节全同**——纯类型检查改动。
+> 收紧紧前后全量套件均无新增失败（387→388 是新增了 419）。
+>
+> 回归：tests/fail/block_redecl_type.py、tests/fail/block_redecl_branches.py
+>（两种冲突形态），tests/run/419_block_annotation_scope.py（五种不受影响的
+> 形态，与 CPython 逐字节一致）。
+>
+> 闸门（合并后主线 build/lead 复验）：difftest **367/0**；普通与 ASan 套件各
+> **388 ran ok**、exit 0；ASan+LSan 钉子 9/9 stderr 空；check_size 通过。
+
 ## [0.360] - 2026-11-21
 
 > 两条线：**f-string 不再对 __format__ 的结果二次套用格式说明符**、
