@@ -118,7 +118,8 @@
 | stdlib6 | statistics（mean/median 家族/mode/离散度/geometric/harmonic/quantiles/covariance/correlation/linear_regression） | 0.352 | ✅ 纯 pa 无 src 改动；380-385 CPython 对拍（3 条浮点精度边界钉住，pa 无 big 精确分数中间量）；NormalDist/weights 保守跳过。集成 |
 | UB修2 | lower_impl.h def 非负提示先算右值再取左值引用+守 size | 0.353 | ✅ 修预存求值顺序 UB 堆越界（ASan 编译器 118_suspend_expr 暴露）；asm 不变；继 0.345 后第二处编译器内存安全 bug。集成 |
 | stdlib7 | configparser（INI 解析/类型化取值/BasicInterpolation/修改/write/SectionProxy/错误族） | 0.354 | ✅ 纯 pa 853 行无 src 改动；253/254/390-394 CPython 7/7 字节同；ExtendedInterpolation/converters 保守跳过。集成 |
-| 异常leak修 | except 体 raise 新异常补上下文收尾（4 漏斗对齐 pa_eh_raise_value_from：drop_save+exc_free current_exc） | 0.355 | ✅ 取证修正「RC 环」误判——实为捕获异常 current_exc+帧链未释放（longjmp 跳过 ExcDone）；最小复现/363/390/391 leak→0；异常钉子 92/93/94/119/153 全 0；纯 runtime +23/−2 asm 不变。**392 残留经取证为独立插值字符串 refcount leak（非异常），留负面待修**。集成 |
+| 异常leak修 | except 体 raise 新异常补上下文收尾（4 漏斗对齐 pa_eh_raise_value_from：drop_save+exc_free current_exc） | 0.355 | ✅ 取证修正「RC 环」误判——实为捕获异常 current_exc+帧链未释放（longjmp 跳过 ExcDone）；最小复现/363/390/391 leak→0；异常钉子 92/93/94/119/153 全 0；纯 runtime +23/−2 asm 不变。集成 |
+| 插值leak修 | configparser _interp_some 早返回 return→break（纯 stdlib） | 0.356 | ✅ ASan/gdb 取证 2 串（optionxform 名+提交值）漏 dec；根因编译器 release_slots 早返回用单遍部分槽标记（var/v 堆写入前 slot_owned 未置）；纯 stdlib break 修避漏 dec 出口，复现/392/253 leak→0 asm 不变。**编译器通用修（fixup_early_return_releases）会改 a2_config_parse 基准 asm（其 coerce 自身潜伏 leak）违闸门→回退留独立任务**（strfix-rc-early-return.md）。集成 |
 
 ### 夜间小结
 - **17 版集成推送（0.333-0.349）**，单槽位顺序（收回 4 代理并行减少早夭混乱）；harness 间歇早夭频繁，send_message 恢复套路管用。
