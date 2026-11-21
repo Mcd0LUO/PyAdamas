@@ -81,7 +81,14 @@ inline TypePtr join_into(const TypePtr& a, const TypePtr& b) {
         // 改成整数提升：那会改变既有程序的分支合并结果与生成代码。
         // P3：big 顶层（big 与任何数值合并 → big）。
         if (a->kind == TyKind::Big || b->kind == TyKind::Big) return t_big();
-        if (is_fixed_int(a) || is_fixed_int(b)) {
+        // Bool 也走整数提升：bool 是 int 的子类型，join(int, bool) 应该是
+        // int。原来只有定宽整数才进这里，bool 落到下面的 t_float()：
+        //     x = 1 if c else True    -> float（打印 1.0，CPython 是 int 1）
+        //     [1, True]              -> list[float]
+        // 更糟的是 return 7 if c else True 在 -> int 的函数里会直接报
+        // 「declared to return 'int', got 'float'」，合法程序编译不过。
+        if (is_fixed_int(a) || is_fixed_int(b) || a->kind == TyKind::Bool ||
+            b->kind == TyKind::Bool) {
             if (a->kind == TyKind::Float || b->kind == TyKind::Float) return t_float();
             return int_promote(a, b);
         }
