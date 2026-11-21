@@ -673,7 +673,12 @@ class RawConfigParser:
             p: int = rest.find("%")
             if p < 0:
                 accum.append(rest)
-                return
+                # break（而非 return）：经循环自然结束出口退出，该出口释放
+                # 全部局部槽。早返回出口在 var/v 首次堆写入之前降级，编译器
+                # 单遍 release_slots 看不到所有权标记会漏 dec（字符串 RC
+                # 泄漏，见 docs/strfix-rc-early-return.md）。循环后无语句，
+                # break 与 return 语义相同。
+                break
             if p > 0:
                 accum.append(rest[:p])
             rest = rest[p:]
