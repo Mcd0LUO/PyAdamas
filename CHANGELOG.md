@@ -4,6 +4,87 @@
 
 早期阶段没有逐条留痕，按阶段归纳；0.4 之后逐条记录。
 
+## [0.375] - 2026-11-21
+
+> 只剩一条：协程取消时的引用计数。本轮把它**缩小到可复现的最小形态**，
+> 并顺带修掉了一个同源的二次释放隐患。
+>
+> ### 已修：`async with` rethrow 路径的槽清理
+>
+> 异常路径原来是（`Raise` 是 noreturn，后两行永远到不了）：
+>
+> ```cpp
+> call RaiseOwn(load ts, load msgs)
+> store ts, 0
+> store msgs, 0
+> ```
+>
+> `RaiseOwn` 自己 dec 这两个串，但槽里留着已 free 的指针，异常 longjmp 到
+> `coro_step` 的 setjmp 兜底后 `pa_gen_release_slots` 会再 dec 一次。改成先
+> load 到 vreg、`store_slot_raw`（只写不清）清零、再 RaiseOwn。
+>
+> ### 未修：协程取消 → 引用计数二次释放
+>
+> **最小复现**（不需要 `async with`）：
+>
+> ```python
+> class CM:
+>     async def __aenter__(self) -> int: return 1
+>     async def __aexit__(self, a, b, c) -> bool: return False
+>
+> async def worker() -> str:
+>     cm = CM()
+>     v: int = await cm.__aenter__()      # ① 先有一个正常完成的挂起
+>     try:
+>         await asyncio.sleep(10)          # ② 在这里被 cancel
+>     finally:
+>         await cm.__aexit__(None, None, None)   # ③ finally 里再挂起
+>     return "done"
+> ```
+>
+> 隔离矩阵（都实测过）：
+>
+> | 形态 | 结果 |
+> |---|---|
+> | 单 await + cancel | 正常 |
+> | 嵌套协程 + cancel | 正常 |
+> | try/finally 里 await + cancel | 正常 |
+> | 方法协程（`await cm.close()`）+ cancel | 正常 |
+> | ①②③ 齐备（先有正常完成的挂起） | **崩** |
+> | `async with` + cancel | **崩** |
+>
+> 所以触发条件是「同一协程里**两个以上挂起点**、后面的挂起被取消、期间有堆
+> 局部变量存活」，不是 `async with` 特有。
+>
+> ASan（`--asan`）给的证据：
+>
+> ```
+> heap-use-after-free, READ of size 8
+>   pa_rc_dec                          rt_core.c:2976
+>   pa_gen_slot_release                rt_core.c:2274   ← 帧的 gcrel 在放槽
+>   pa_gen_release_slots               rt_gen.c:100
+>   coro_step                          rt_async.c:780
+> freed by: pa_rc_dec_slow ← pyadamas_fn_1CM___aenter___1_resume
+> 区域 72 字节 = 协程帧对象
+> ```
+>
+> 槽追踪（临时加了 `PA_SLOT_TRACE`，已回退）得到：
+>
+> ```
+> [relslots] g=0x…ec540   [slotrel] slot=g+0x58 v=<X> own=1   ← 成功
+> [relslots] g=0x…ebef0   [slotrel] slot=g+0x58 v=<X> own=1   ← 崩（同一个 X）
+> ```
+>
+> 即**两个帧的同一下标槽（+0x58，第 11 号）持有同一个对象，且都标成 owned**，
+> 第一次释放把它 free 掉，第二次就撞车。对象是协程帧（72 字节），不是
+> `CM` 实例 —— 给实例额外加一份引用后仍然崩。
+>
+> 下一步：查清这两个帧各是谁（worker 与 `__aexit__`？），以及为什么同一份引用
+> 会被登记两次。怀疑点：挂起时把 awaitable 交给事件循环（`rc_inc`）同时，
+> 溢出/续跑路径又把同一个 vreg 记进了 owned 槽。
+>
+> 闸门：difftest **400/0**；全套件 **421 ran ok**、exit 0。
+
 ## [0.374] - 2026-11-21
 
 > 第二轮扫描的最后两条非协程问题。
