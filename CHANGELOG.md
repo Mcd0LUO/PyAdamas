@@ -4,6 +4,55 @@
 
 早期阶段没有逐条留痕，按阶段归纳；0.4 之后逐条记录。
 
+## [0.360] - 2026-11-21
+
+> 两条线：**f-string 不再对 __format__ 的结果二次套用格式说明符**、
+> **Decimal 补上上下文（localcontext/setcontext/create_decimal）**。
+>
+> ### 1. f-string 二次格式化（预存 bug）
+>
+> f-string 降级的类实例路径走完 __format__ 之后把静态类型改成 str，却仍用
+> 同一个 format spec 再调一次 FmtStr，等于拿数值型说明符去格式化一个字符串：
+>
+>     f"{d:.0f}"   → ValueError: Invalid format specifier for str
+>     f"{d:<10}"   → 重复补白（width 幂等，平时看不出来）
+>
+> 修法：__format__ 成功时记 already_formatted，直接把它的结果当片段拼进
+> 输出，不再经过 FmtStr；没有 __format__ 的类仍走 __str__ + FmtStr 的老路。
+>
+> asm（相对 0.359，480 份语料）：只有 2 份变化——132_dunder_edges（类实例带
+> 格式说明的 f-string，pa_fmt_str 2→0）与 416_decimal_fstring（这条修复的
+> 回归本身）。其余 478 份逐字节全同。
+>
+> 回归 tests/run/418_fstring_format_once.py：空说明符、精度、符号、分组、
+> 宽度/居中、Decimal 的 .1f 与对齐，以及普通 int/str 变量的 f-string 不变。
+>
+> ### 2. Decimal 上下文
+>
+> - setcontext(ctx) 替换当前上下文；getcontext() 返回当前对象（改字段即生效）。
+> - localcontext(ctx=None)：无参时**复制**当前上下文（必须在 with 里改字段而
+>   不漏回外层）；显式传入 Context 时沿用该对象——CPython 会复制，这里记录了
+>   差异：with 内改字段会改到调用方的对象。异常路径同样还原。
+> - Context.copy()、Context.create_decimal(value)：只有 create_decimal 会按
+>   本上下文的 prec/rounding 舍入。
+> - Decimal(value, context) 维持「接受但不舍入」：CPython 3.14 实测对
+>   str/int/big/Decimal 都不舍入，连 Decimal(float, ctx) 也不按 prec 舍。
+>
+> 实现约束（记在注释里）：形参静态类型是 unknown，而 unknown 上既不能调用户
+> 方法也不能读属性，所以显式 Context 无法复制、只能沿用。
+>
+> 回归 tests/run/417_decimal_context.py，与 CPython 3.14 逐字节一致。
+>
+> ### 仍未修
+>
+> **块内同名变量换类型不诊断**：同一函数里先 `c: str = ...`（在 if/for 体内）
+> 再 `c: big = ...` 不报错，后续按旧类型解释（`c == 0` 恒假）。顶层重声明会拦，
+> 块内不拦。修它会动类型检查的作用域规则，需要单独评估对 stdlib 既有模式的
+> 影响，本轮不做。
+>
+> 闸门（合并后主线 build/lead 复验）：difftest **366/0**；普通与 ASan 套件各
+> **387 ran ok**、exit 0；check_size 通过。
+
 ## [0.359] - 2026-11-21
 
 > 两条线：**元组元素按目标类型逐元素转换**（修 0.358 记账的预存 bug）、
