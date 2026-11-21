@@ -220,6 +220,10 @@ enum class RtFn : uint16_t {
     RaiseInstance, // (inst*, str* type) -> void noreturn  抛富异常实例
       // (str* child, str* parent) -> void  自定义异常类注册
     Raise,        // (str* type, str* msg) -> void  noreturn
+    // 同 Raise，但接管两个串的所有权：拷贝进异常对象后立刻 dec 它们。
+    // 给「字符串存在临时槽里、抛出去之后没人能释放」的路径用（异步 __aexit__
+    // 的异常分支：longjmp 之后槽既不会被清、临时栈也随挂起丢了）。
+    RaiseOwn,     // (str* type, str* msg) -> void  noreturn
     RaiseArgs,    // (str* type, list* args) -> void  noreturn
     RaiseValue,   // (excval*) -> void noreturn
     RaiseValueFrom, // (excval*, excval*|0) -> void noreturn

@@ -401,12 +401,25 @@ void Lowerer::lower_async_with_item(With& w, size_t idx) {
         cb.target2 = rethrow;
         emit(std::move(cb));
         switch_to(suppress);
+        // 异常被 __aexit__ 压住：两个串还得在这里释放，否则 suppress 路径
+        // 一样漏（ASan 实测 224 字节）。
+        VReg d1 = load_slot(ts, t_str());
+        rc_dec(d1);
+        store_slot(ts, const_int(0));
+        VReg d2 = load_slot(msgs, t_str());
+        rc_dec(d2);
+        store_slot(msgs, const_int(0));
         Inst j;
         j.op = IrOp::Jump;
         j.target = end;
         emit(std::move(j));
         switch_to(rethrow);
-        call_void(RtFn::Raise, {load_slot(ts, t_str()), load_slot(msgs, t_str())});
+        // 用 RaiseOwn：这两个串存在临时槽里，Raise 是 noreturn，longjmp 之后
+        // 槽永远走不到释放点（挂起前 push 的临时栈也随挂起丢了）→ 每次泄漏
+        // type+message 两个串。RaiseOwn 拷进异常对象后自己 dec 掉它们。
+        call_void(RtFn::RaiseOwn, {load_slot(ts, t_str()), load_slot(msgs, t_str())});
+        store_slot(ts, const_int(0));
+        store_slot(msgs, const_int(0));
         end_unreachable();
     }
     switch_to(end);

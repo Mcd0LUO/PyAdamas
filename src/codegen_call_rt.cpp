@@ -678,6 +678,7 @@ void AsmGen::gen_rt_args(const Inst& in, RtFn fn) {
         case RtFn::RegexExpand:
         case RtFn::RegexFindIter:
         case RtFn::Raise:
+        case RtFn::RaiseOwn:
         case RtFn::RaiseArgs:
         case RtFn::ExcEnter:
         case RtFn::AsyncioWaitFd:

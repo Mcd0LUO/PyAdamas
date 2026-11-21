@@ -257,6 +257,7 @@ inline const char* rt_name(RtFn f) {
         case RtFn::ExcRegister: return "pa_exc_register";
         case RtFn::RaiseInstance: return "pa_raise_instance";
         case RtFn::Raise: return "pa_raise";
+        case RtFn::RaiseOwn: return "pa_raise_own";
         case RtFn::RaiseArgs: return "pa_raise_args";
         case RtFn::RaiseValue: return "pa_raise_value";
         case RtFn::RaiseValueFrom: return "pa_raise_value_from";

@@ -1051,6 +1051,8 @@ void pa_exc_clear(void);
 PyAdamasStr* pa_exc_type_name(void);
 PyAdamasStr* pa_exc_message(void);
 void pa_raise(PyAdamasStr* type, PyAdamasStr* msg);
+/* 同 pa_raise，但接管 type/msg 的所有权（拷进异常对象后 dec 它们）。 */
+void pa_raise_own(PyAdamasStr* type, PyAdamasStr* msg);
 _Noreturn void pa_raise_args(PyAdamasStr* type, PyAdamasList* args);
 PyAdamasExcValue* pa_exc_value_new_args(PyAdamasStr* type, PyAdamasList* args);
 void pa_reraise(void);

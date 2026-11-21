@@ -212,7 +212,8 @@ RtClass classify_rt(RtFn f, int& recv) {
         case RtFn::ExcMessage: case RtFn::ExcValueArgs: case RtFn::ExcValueStr:
         case RtFn::ExcValueCause: case RtFn::ExcValueNew: case RtFn::ExcValueNewArgs:
         case RtFn::ExcRegister:
-        case RtFn::RaiseInstance: case RtFn::Raise: case RtFn::RaiseArgs: case RtFn::RaiseValue:
+        case RtFn::RaiseInstance: case RtFn::Raise: case RtFn::RaiseOwn: case RtFn::RaiseArgs:
+        case RtFn::RaiseValue:
         case RtFn::RaiseValueFrom: case RtFn::Reraise:
         case RtFn::EhRaise: case RtFn::EhRaiseValueFrom: case RtFn::EhReraise: case RtFn::EhRethrow:
         case RtFn::EhLand: case RtFn::EhEnter: case RtFn::EhLeave:

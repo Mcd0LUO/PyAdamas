@@ -726,6 +726,41 @@ void pa_raise(PyAdamasStr* type, PyAdamasStr* msg) {
     exc_longjmp();
 }
 
+/* 接管所有权的抛出：把 type/msg 拷进异常对象之后立刻释放这两个串，
+   再 longjmp。给「两个串存在临时槽里、抛出去以后没人能释放」的路径用 ——
+   异步 __aexit__ 的异常分支就是：挂起前 push 的临时栈随挂起丢失，槽里的
+   副本又因为 longjmp 永远走不到释放点，ASan 稳定报 224 字节（type+message）。 */
+void pa_raise_own(PyAdamasStr* ts, PyAdamasStr* ms) {
+    pa_exc_drop_save();
+    exc_free(current_exc);
+    current_exc = NULL;
+    char tn[128];
+    int64_t tn_len = ts ? ts->len : 0;
+    if (tn_len < 0 || tn_len >= (int64_t)sizeof(tn)) panic_c("exception type name too long");
+    if (tn_len) memcpy(tn, ts->data, (size_t)tn_len);
+    tn[tn_len] = '\0';
+    exc_free(pending_exc);
+    PyAdamasException* e = (PyAdamasException*)malloc(sizeof(PyAdamasException));
+    if (!e) panic_c("out of memory");
+    e->type = (char*)malloc((size_t)tn_len + 1);
+    e->message = (char*)malloc((size_t)(ms ? ms->len : 0) + 1);
+    if (!e->type || !e->message) panic_c("out of memory");
+    memcpy(e->type, tn, (size_t)tn_len + 1);
+    if (ms && ms->len) memcpy(e->message, ms->data, (size_t)ms->len);
+    e->message[ms ? ms->len : 0] = '\0';
+    e->cause = NULL;
+    e->trace = NULL;
+    e->phys = NULL;
+    e->phys_extra = NULL;
+    e->handler_cfa = 0;
+    pa_exc_trace_alloc(e);
+    pending_exc = e;
+    pa_trace_capture(e, PA_CAP_NEW);
+    /* 内容已经拷走，两个串的所有权在这里结束。 */
+    if (ts) pa_rc_dec(ts);
+    if (ms) pa_rc_dec(ms);
+    exc_longjmp();
+}
 void pa_reraise(void) {
     /* 裸 `raise` 会直接 longjmp，跳过 except 块的正常收尾（pa_exc_done）。
      * pa_exc_accept_value 在进 except 体时压了一个 PyAdamasExcSave，必须
