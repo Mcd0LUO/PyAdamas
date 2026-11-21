@@ -1012,7 +1012,18 @@ void Lowerer::lower_try_zero_cost(Try& t) {
         }
         // 槽已经 retain 过；释放创建时的那一个引用（与 lower_try_core 同）。
         rc_dec(ev);
+        // except 体里 return/break/continue 也要先跑 finally（CPython：finally
+        // 在 return 之前执行）。注册一个只内联 finalbody 的清理项：此时已经
+        // 在外层 landing pad 里 EhLeave 过，不能再动 pa_eh_depth 与临时水位
+        // （那正是原来 ZeroCostEh 清理项在 handler 里导致双重释放的原因）。
+        if (has_fin) {
+            FuncCtx::Cleanup fb;
+            fb.kind = FuncCtx::Cleanup::Kind::FinallyBody;
+            fb.body = &t.finalbody;
+            st_->cleanups.push_back(fb);
+        }
         stmts(hb.h->body);
+        if (has_fin) st_->cleanups.pop_back();
         if (shadow >= 0) comp_slots_.pop_back();
         if (terminated()) {
             // except 体里 return/break/continue 是合法的：异常已经被这个 handler
@@ -1038,7 +1049,15 @@ void Lowerer::lower_try_zero_cost(Try& t) {
     // 跑完 else 体再进 fin/end。
     if (else_block >= 0) {
         switch_to(else_block);
+        // else 体里的 return/break/continue 同样要先跑最后一段 finalbody。
+        if (has_fin) {
+            FuncCtx::Cleanup fb;
+            fb.kind = FuncCtx::Cleanup::Kind::FinallyBody;
+            fb.body = &t.finalbody;
+            st_->cleanups.push_back(fb);
+        }
         stmts(t.orelse);
+        if (has_fin) st_->cleanups.pop_back();
         Inst je2;
         je2.op = IrOp::Jump;
         je2.target = has_fin ? fin_block : end;

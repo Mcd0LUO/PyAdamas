@@ -150,6 +150,18 @@ void Lowerer::emit_cleanup_exits(size_t down_to) {
                 }
                 break;
             }
+            case FuncCtx::Cleanup::Kind::FinallyBody: {
+                // 零开销 try 里 except 体自己的 finally 动作：此时已经在外层
+                // landing pad 里 EhLeave 过，不能再碰 pa_eh_depth / 水位，
+                // 只内联 finalbody（return/break/continue 前先跑它）。
+                if (c.body) {
+                    auto saved = st_->cleanups;
+                    st_->cleanups.resize(i - 1);
+                    stmts(*c.body);
+                    st_->cleanups = std::move(saved);
+                }
+                break;
+            }
             case FuncCtx::Cleanup::Kind::SemRelease:
                 call_void(RtFn::HandlerDiscard, {load_slot(c.handler_slot, t_int())});
                 call_void(RtFn::SemRelease, {load_slot(c.mgr_slot, t_unknown())});
