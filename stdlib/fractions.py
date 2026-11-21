@@ -1,28 +1,54 @@
 """fractions 模块的 pyadamas 子集（纯 pyadamas 源码，随编译器分发）。
 
-Fraction 用两个 int 字段保存规范化后的分子/分母（math.gcd 归一化，
-分母恒正、零分子分母为 1），支持加减乘除、比较、取反（`0 - x`）与 str/repr。
+Fraction 用两个 **big**（任意精度整数）字段保存规范化后的分子/分母，
+分母恒正、零分子分母为 1。数值语义与 CPython fractions.Fraction 的
+精确有理数一致；规范化由本模块自带的 Euclid 最大公约数完成。
 
-语义边界：构造只接受 int（不支持 float/str/Decimal 构造，也不支持
-Fraction 作实参）；**不定义一元负号 `__neg__`**——PyAdamas 目前对用户类
-的一元负号会段错误（与 dunder 无关的编译器 bug，已单独记录），要取反请写
-`Fraction(0, 1) - x`；abs()/float()/math.floor() 也不支持。
+为什么不用 math.gcd：math.gcd 只接受 i64（int），在 big 上会窄化/拒收；
+而约分本身必须作用在两个 big 上。因此这里用 big 的 `%`/`//`（向下取整、
+余数同号）实现 Euclid，先把 a 取绝对值。
+
+语义边界（与 CPython 的差异，均为有意）：
+- 构造只接受 big/int（int 会提升成 big）；不支持 float/str/Decimal
+  构造，也不接受 Fraction 作实参。
+- **不定义一元负号 `__neg__`**：本轮保持公开 API 原样（0.357 的编译器
+  已支持用户类一元 dunder，这是刻意的 API 边界，不是绕 bug）。要取反
+  请写 `Fraction(0, 1) - x`；对 Fraction 直接写 `-x` 是编译期错误
+  （bad operand type for unary -）。
+- abs()/float()/math.floor() 不支持；哈希值是本模块自己的折叠
+  （`cast_i64(n * 31 + d)`），与 CPython 的数值不同，但满足
+  「相等对象哈希相等」的契约。
+- 公开字符串形式不变：str 为 `n` 或 `n/d`，repr 为
+  `Fraction(n, d)`，属性名仍为 numerator/denominator。
 """
 
-import math
+
+def _gcd_big(a: big, b: big) -> big:
+    """big 上的 Euclid 最大公约数（结果非负；gcd(0,0)=0）。"""
+    x: big = a
+    y: big = b
+    if x < 0:
+        x = -x
+    if y < 0:
+        y = -y
+    while y != 0:
+        t: big = x % y
+        x = y
+        y = t
+    return x
 
 
 class Fraction:
-    numerator: int
-    denominator: int
+    numerator: big
+    denominator: big
 
-    def __init__(self, numerator: int = 0, denominator: int = 1) -> None:
+    def __init__(self, numerator: big = 0, denominator: big = 1) -> None:
         if denominator == 0:
             raise ZeroDivisionError("Fraction(1, 0)")
         if denominator < 0:
             numerator = -numerator
             denominator = -denominator
-        g = math.gcd(abs(numerator), denominator)
+        g: big = _gcd_big(numerator, denominator)
         if g > 1:
             numerator = numerator // g
             denominator = denominator // g
@@ -61,7 +87,7 @@ class Fraction:
         return self.numerator * o.denominator >= o.numerator * self.denominator
 
     def __hash__(self) -> int:
-        return self.numerator * 31 + self.denominator
+        return cast_i64(self.numerator * 31 + self.denominator)
 
     def __str__(self) -> str:
         if self.denominator == 1:
