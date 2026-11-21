@@ -334,6 +334,9 @@ TypePtr TypeChecker::parse_annotation_impl(Expr* e, int line, int depth) {
             if (id == "float") return t_float();
             // P3：big 任意精度整数（docs/numeric-types-design.md §1/§4）。
             if (id == "big") return t_big();
+            // complex 有独立的 TyKind（P3 tagged union 里的 complex 子类），
+            // 漏了它注解会静默退化成 unknown，调用方按整数打印指针。
+            if (id == "complex") return t_complex();
             if (id == "str") return t_str();
             if (id == "bytes") return t_bytes();
             if (id == "file") return t_file();
