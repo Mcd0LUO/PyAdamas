@@ -634,6 +634,7 @@ void Lowerer::append_elem_chain(TypePtr container, std::string& chain) {
             case 0: chain += 'i'; break;
             case 1: chain += 's'; break;
             case 2: chain += 'f'; break;
+            case 4: chain += 'b'; break;   // big：运行时 pa_big_cmp
             default: chain += 'x'; break;
         }
     }
@@ -666,6 +667,9 @@ bool Lowerer::append_sort_desc(TypePtr t, std::string& d, int depth) {
             return true;
         case TyKind::Str:
             d += 's';
+            return true;
+        case TyKind::Big:
+            d += 'b';   // 运行时 sort_desc_cmp 用 pa_big_cmp 按值比
             return true;
         case TyKind::List: {
             d += 'l';

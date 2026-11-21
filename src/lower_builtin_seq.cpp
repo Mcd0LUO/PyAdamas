@@ -201,10 +201,7 @@ VReg Lowerer::lower_builtin_seq(const std::string& name, Call& c) {
         for (auto& kw : c.keywords)
             if (kw.arg == "key") key_expr = kw.value.get();
 
-        if (name == "sorted" && !key_expr && has_big_value(se)) {
-            err(c.line, c.col, "sorting big values is not supported");
-            return const_none();
-        }
+        // big 元素已支持：排序描述符里用 'b'，运行时 pa_big_cmp 按值比。
         VReg l;
         if (key_expr) {
             TypePtr kt0 = tc_.type_of(key_expr);

@@ -123,6 +123,10 @@ int Lowerer::key_kind(const TypePtr& t) {
             return 1;
         case TyKind::Float:
             return 2;
+        // 4 = big：按值比较（运行时 pa_big_cmp）。不能复用 3「其它/未知」，
+        // 那是按机器字比指针的语义。
+        case TyKind::Big:
+            return 4;
         default:
             return 3;
     }}

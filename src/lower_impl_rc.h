@@ -193,6 +193,10 @@
     // Hashed keys alone opt in to BigInt value semantics; sequence comparisons
     // still use the old key_kind and are outside this change.
     int hash_key_kind(const TypePtr& t) const {
+        // 9 = raw-or-big：静态 big 键与动态 unknown 键共用同一套运行时分派
+        // （按值哈希 + pa_big_eq）。直接把 big 的 key_kind 4 传给 dict 会被
+        // pa_dict_new 拒掉（它只认 0..3 与 9）。
+        if (t && t->kind == TyKind::Big) return 9;
         return opts_.needs_dynamic_big && is_unknown(t) ? 9 : key_kind(t);
     }
 
@@ -214,6 +218,8 @@
         if (is_int_like(t)) return 0;  // 其余定宽整数与 int 同一排序域
         if (t->kind == TyKind::Float) return 1;
         if (t->kind == TyKind::Str) return 2;
+        // big 也走描述符路径（desc 里是 'b'，运行时 pa_big_cmp 按值比）。
+        if (t->kind == TyKind::Big) return 4;
         if (t->kind == TyKind::Tuple || t->kind == TyKind::List) return 4;
         return 3;
     }

@@ -162,7 +162,7 @@ TypePtr TypeChecker::expr(Expr& e) {
                 TypePtr acc;
                 for (auto& el : s.elts) {
                     TypePtr et = expr(*el);
-                    if (has_big_value(et)) err(el->line, el->col, "big dictionary/set keys are not supported");
+                    // big 键已支持：哈希键种类 9（raw-or-big，按值哈希+比较）。
                     acc = acc ? join(acc, et) : et;
                 }
                 return mk_set(acc);
@@ -174,8 +174,7 @@ TypePtr TypeChecker::expr(Expr& e) {
                 for (size_t i = 0; i < d.keys.size(); ++i) {
                     if (d.keys[i]) {
                         auto k = expr(*d.keys[i]);
-                        if (has_big_value(k)) err(d.keys[i]->line, d.keys[i]->col,
-                                                  "big dictionary/set keys are not supported");
+                        // big 键已支持（哈希键种类 9）。
                         kt = kt ? join(kt, k) : k;
                     }
                     auto v = expr(*d.values[i]);
@@ -881,9 +880,28 @@ void TypeChecker::compare_type(CmpOp op, TypePtr l, TypePtr r, int line, int col
             return t && (t->kind == TyKind::List || t->kind == TyKind::Tuple ||
                          t->kind == TyKind::Dict || t->kind == TyKind::Set);
         };
+        // big 元素的比较已经支持（list/tuple 走按值比较，运行时 kind 4 / 链 'b'）。
+        // 仍然不支持的两类：
+        //   - dict/set 参与比较或作为 in 的右操作数：键哈希还没按值做；
+        //   - 有序比较（< <= > >=）的容器：元素级序比较还没实现。
+        auto big_ok_container = [](const TypePtr& t) {
+            return t && (t->kind == TyKind::List || t->kind == TyKind::Tuple);
+        };
+        auto bad_for_big = [&](const TypePtr& t) {
+            if (!container(t) || !has_big_value(t)) return false;
+            // dict/set：只支持「作为 in 的右操作数」（键走 kind 9 按值哈希）；
+            // 两个容器之间的相等比较还没有按值实现。
+            if (t->kind == TyKind::Dict || t->kind == TyKind::Set)
+                return op != CmpOp::In && op != CmpOp::NotIn;
+            if (!big_ok_container(t)) return true;
+            return op != CmpOp::Eq && op != CmpOp::Ne && op != CmpOp::In &&
+                   op != CmpOp::NotIn;                          // 有序比较
+        };
         if (op != CmpOp::Is && op != CmpOp::IsNot &&
-            ((container(l) && has_big_value(l)) || (container(r) && has_big_value(r)) ||
-             ((op == CmpOp::In || op == CmpOp::NotIn) && container(r) && has_big_value(l)))) {
+            (bad_for_big(l) || bad_for_big(r) ||
+             ((op == CmpOp::In || op == CmpOp::NotIn) && container(r) &&
+              has_big_value(l) && !big_ok_container(r) && r->kind != TyKind::Dict &&
+              r->kind != TyKind::Set))) {
             err(line, col, "container comparisons involving big are not supported");
             return;
         }
@@ -963,8 +981,7 @@ TypePtr TypeChecker::subscript_type(TypePtr obj, TypePtr idx, int line, int col)
                 // 长度不定的元组，下标拿到的就是元素类型
                 return obj->variadic && !obj->sub.empty() ? obj->sub[0] : t_unknown();
             case TyKind::Dict:
-                if (has_big_value(obj->sub[0]) || has_big_value(idx))
-                    err(line, col, "big dictionary/set keys are not supported");
+                // big 键已支持（哈希键种类 9，按值哈希 + pa_big_eq）。
                 if (!assignable(obj->sub[0], idx))
                     err(line, col,
                         std::format("dict key type is '{}', got '{}'", type_name(obj->sub[0]),

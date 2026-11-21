@@ -793,6 +793,10 @@ static int sort_desc_cmp(int64_t a, int64_t b, const uint8_t** pp, int depth) {
         int64_t r = pa_str_cmp((PyAdamasStr*)(uintptr_t)a, (PyAdamasStr*)(uintptr_t)b);
         return r < 0 ? -1 : r > 0 ? 1 : 0;
     }
+    if (c == 'b') {   /* big：按值比（pa_big_cmp 返回 -1/0/1） */
+        int64_t r = pa_big_cmp((PyAdamasBig*)(uintptr_t)a, (PyAdamasBig*)(uintptr_t)b);
+        return r < 0 ? -1 : r > 0 ? 1 : 0;
+    }
     if (c != 'l' && c != 't') return sort_word_cmp(a, b);  /* i / x / 防御 */
     int n = -1;                  /* t：arity；l：-1 */
     const uint8_t* child = *pp;  /* l：子描述符起点，逐元素复用 */
@@ -1122,6 +1126,8 @@ int64_t pa_list_max_i64(PyAdamasList* l) {
 
 int list_value_eq(int64_t kind, int64_t a, int64_t b) {
     if (kind == 1) return pa_str_eq((PyAdamasStr*)a, (PyAdamasStr*)b) != 0;
+    /* kind 4 = big：按值比较（指针不同但数值相等的两个 big 必须算相等）。 */
+    if (kind == 4) return pa_big_cmp((PyAdamasBig*)a, (PyAdamasBig*)b) == 0;
     if (kind == 2) {
         double x, y;
         memcpy(&x, &a, sizeof x);
@@ -1146,6 +1152,7 @@ int64_t pa_list_contains(PyAdamasList* l, int64_t v, int64_t kind) {
 int chain_elem_eq(int kind, int64_t x, int64_t y, const uint8_t* chain, int64_t len,
                   int64_t level) {
     if (kind == 's') return pa_str_eq((PyAdamasStr*)x, (PyAdamasStr*)y) != 0;
+    if (kind == 'b') return pa_big_cmp((PyAdamasBig*)x, (PyAdamasBig*)y) == 0;
     if (kind == 'f') {
         double a, b;
         memcpy(&a, &x, sizeof a);
