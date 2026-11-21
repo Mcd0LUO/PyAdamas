@@ -13,6 +13,11 @@ bool Lowerer::bad_elem(const TypePtr& from, const TypePtr& to) {
             return false;
         return (a->kind == TyKind::Float) != (b->kind == TyKind::Float);
     };
+    // 元组：元素类型不一致时由 convert_to 的重建分支逐元素转换（0.359）。
+    // 走下面的 promote_container 拷贝循环会把 int 位模式原样搬进 float/big
+    // 槽里（`def f() -> tuple[float, float]: return 1, 2` 曾打印
+    // (5e-324, 1e-323)）。
+    if (from->kind == TyKind::Tuple && !to->variadic) return false;
     if (from->kind == TyKind::List || from->kind == TyKind::Tuple) {
         if (from->sub.empty() || to->sub.empty()) return false;
         return diff(from->sub[0], to->sub[0]);

@@ -266,6 +266,34 @@ VReg Lowerer::convert_to(VReg v, TypePtr from, TypePtr to) {
     // ── P3 big 的转换（docs/numeric-types-design.md §1）─────────────
     // 进 big：int/定宽/bool 加宽（pa_big_from_i64）、float 按 int(float)
     // 截断（pa 格口径）、str 按十进制解析、unknown 运行期分派。
+    // ── 元组元素级转换（0.359）───────────────────────────────────
+    // 元组字面量按**推断**类型构造（`(1, 2)` 是 tuple[int, int]），边界上
+    // 目标类型元素不同时必须逐元素重建。之前这里是机器字直通：
+    //   def f() -> tuple[float, float]: return 1, 2   → (5e-324, 1e-323)
+    //   def f() -> tuple[int, big, int]: return 0,0,0 → 取 b 即段错误
+    // 重建的新元组自己持有元素引用；源值不动（它是调用方的，照旧由临时栈
+    // 或槽释放），所以没有多减/漏减。
+    if (from && to->kind == TyKind::Tuple && from->kind == TyKind::Tuple &&
+        !from->variadic && !to->variadic && !from->sub.empty() &&
+        from->sub.size() == to->sub.size()) {
+        bool differs = false;
+        for (size_t i = 0; i < from->sub.size(); ++i)
+            if (!type_eq(from->sub[i], to->sub[i])) {
+                differs = true;
+                break;
+            }
+        if (differs) {
+            std::vector<VReg> vals;
+            std::vector<TypePtr> tys;
+            vals.reserve(from->sub.size());
+            tys.reserve(from->sub.size());
+            for (size_t i = 0; i < from->sub.size(); ++i) {
+                vals.push_back(seq_elem_at(v, from, static_cast<int64_t>(i)));
+                tys.push_back(from->sub[i]);
+            }
+            return build_seq_vregs(std::move(vals), std::move(tys), to, true);
+        }
+    }
     if (to->kind == TyKind::Big) {
         if (from && from->kind == TyKind::Big) return v;
         if (from && from->kind == TyKind::Unknown) {
@@ -360,6 +388,10 @@ VReg Lowerer::coerce(VReg v, TypePtr from, TypePtr to) {
         if (from->kind == TyKind::Big && to->kind == TyKind::Unknown) return v;
         return convert_to(v, from, to);
     }
+    // 元组/列表的元素类型转换不是机器字直通（见 convert_to 的重建分支）。
+    if (from->kind == TyKind::Tuple && to->kind == TyKind::Tuple &&
+        !to->variadic && !from->variadic && from->sub.size() == to->sub.size())
+        return convert_to(v, from, to);
     auto num = [](TyKind k) {
         return is_int_kind(k) || k == TyKind::Bool || k == TyKind::Float;
     };
