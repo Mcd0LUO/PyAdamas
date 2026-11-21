@@ -23,6 +23,7 @@ print(statistics.pstdev([1.5, 2.5, 2.5, 2.75, 3.25, 4.75]))
 
 # 大数抵消 / 小数
 print(statistics.variance([1e50, 1.0, -1e50]))
+# 精度边界：CPython 6.666666666666667e+99，本模块均值先舍入差 1 ulp
 print(statistics.pvariance([1e50, 1.0, -1e50]))
 print(statistics.variance([0.1, 0.2, 0.3]))
 print(statistics.pvariance([0.1, 0.2, 0.3]))

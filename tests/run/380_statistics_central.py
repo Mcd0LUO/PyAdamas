@@ -14,6 +14,7 @@ print(statistics.fmean(xs))
 print(statistics.mean([-1.0, 2.5, 3.25, 5.75]))
 print(statistics.mean([1e50, 1.0, -1e50]))
 print(statistics.mean([1.0]))
+# 精度边界：CPython 精确有理数得 0.2，本模块 fsum 后除得 0.19999999999999998
 print(statistics.mean([0.1, 0.2, 0.3]))
 print(statistics.fmean([1e50, 1.0, -1e50]))
 print(statistics.fmean([1.0]))

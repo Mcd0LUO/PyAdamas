@@ -64,7 +64,7 @@
 | hashlib | Python 源 | md5/sha1/sha256 | 通过 |
 | hmac | Python 源 | new/update/digest/hexdigest | 通过 |
 | logging | Python 源 | 等级/Logger/basicConfig；缺 FileHandler/Formatter/handler | 通过 |
-| statistics | Python 源 | **阶段二补 `quantiles`**；仍缺 multimode/linear_regression | 通过 |
+| statistics | Python 源 | 0.352：mean/fmean/median 家族/median_grouped/mode/multimode/pvariance/variance/pstdev/stdev/geometric_mean/harmonic_mean/quantiles/covariance/correlation/linear_regression；mode 多峰返回首现、multimode 首现序；float 近似（无 BigInt，精度边界见模块头） | 通过 |
 | textwrap | Python 源 | **阶段二补 `TextWrapper` 类**；仍不做 exceed/break 语义 | 通过 |
 | csv | Python 源 | **阶段二补 `DictReader`（函数式）/`DictWriter`**；仍无 dialect | 通过 |
 | **typing** | **Python 源（桩）** | 阶段二补齐：注解 + cast/TYPE_CHECKING/TypeVar/overload 等；Generic[T]/NamedTuple/TypedDict/Protocol 不参与检查 | 阶段二通过 |
