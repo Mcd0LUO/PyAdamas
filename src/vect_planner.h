@@ -204,6 +204,7 @@ public:
         bool has_convert = false;               // int→float Convert → cvtdq2pd 折算
         bool has_intdiv = false;                // int // 2^m → 算术右移合成
         bool has_j_operand = false;             // 归纳变量 j 参与整数算术
+        bool has_cmp = false;                   // 整数 Eq/Ne 比较 -> pcmpeqd 序列需 SEQ1
         std::unordered_set<VReg> visiting;      // classify 递归环检测
         std::vector<MReg> xmm_pool{kXmm0, kXmm1, kXmm2, kXmm3,
                                    kXmm4, kXmm5, kXmm6, kXmm7};

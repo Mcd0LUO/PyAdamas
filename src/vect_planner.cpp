@@ -744,6 +744,23 @@ VectPlanner::Loop::VK VectPlanner::Loop::classify(VReg v) {
             else c.kind = VK::Fail;
             break;
         }
+        case IrOp::Cmp: {
+            // 整数等值比较（Eq/Ne）-> 0/1 的 VecI lane（与标量 setcc 一致）。
+            // 有序比较在 SSE2 2-lane 下要合成 64 位有符号比较，成本高于收益 -> Fail。
+            if (d->cop != CmpKind::Eq && d->cop != CmpKind::Ne) { c.kind = VK::Fail; break; }
+            auto int_like = [](const TypePtr& t) {
+                return t && (t->kind == TyKind::Int || t->kind == TyKind::Bool);
+            };
+            if (!int_like(gen_.ty_of(d->a)) || !int_like(gen_.ty_of(d->b))) { c.kind = VK::Fail; break; }
+            VK ca = classify(d->a);
+            VK cb = classify(d->b);
+            if (!vect::int_operand_ok(ca) || !vect::int_operand_ok(cb)) { c.kind = VK::Fail; break; }
+            if (ca == VK::InvI) inv_ints.push_back(d->a);
+            if (cb == VK::InvI) inv_ints.push_back(d->b);
+            c.kind = VK::VecI;
+            has_cmp = true;
+            break;
+        }
         case IrOp::Bin: {
             // P5：// 与 % 的除数是编译期正的 2 的幂常量时，它们和 Add/Sub/
             // Mul 一样是**通用的**逐元素整数操作（标量那边早就降成一条
@@ -761,8 +778,12 @@ VectPlanner::Loop::VK VectPlanner::Loop::classify(VReg v) {
             // 归纳变量 J 算 VecI：发射期物化成 [j, j+1]，见 codegen_vect_jvec.cpp。
             using vect::float_operand_ok;
             using vect::int_operand_ok;
-            bool ia = gen_.ty_of(d->a) && gen_.ty_of(d->a)->kind == TyKind::Int;
-            bool ib = gen_.ty_of(d->b) && gen_.ty_of(d->b)->kind == TyKind::Int;
+            // bool 在机器上就是 i64 的 0/1：允许它参与整数 Add/Sub（count += cond 归约）。
+            auto int_operand_ty = [](const TypePtr& t) {
+                return t && (t->kind == TyKind::Int || t->kind == TyKind::Bool);
+            };
+            bool ia = int_operand_ty(gen_.ty_of(d->a));
+            bool ib = int_operand_ty(gen_.ty_of(d->b));
             if (fa && fb && float_operand_ok(ka) && float_operand_ok(kb)) {
                 switch (d->bop) {
                     case BinKind::Add: case BinKind::Sub:

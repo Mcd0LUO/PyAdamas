@@ -103,6 +103,8 @@ constexpr NamedOp kOpNames[] = {
     {"subpd", MOp::kSubpd},
     {"divpd", MOp::kDivpd},
     {"paddq", MOp::kPaddq},
+    {"pcmpeqd", MOp::kPcmpeqd},
+    {"pand", MOp::kPand},
     {"psubq", MOp::kPsubq},
     {"pmuludq", MOp::kPmuludq},
     {"psrlq", MOp::kPsrlq},

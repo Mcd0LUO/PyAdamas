@@ -279,7 +279,7 @@ bool VectPlanner::try_loop(const Block& b) {
                 L.role[i] = (k == vect::VK::VecF || k == vect::VK::VecI) ? Role::Load : Role::Fail;
                 break;
             }
-            case IrOp::Bin: {
+            case IrOp::Cmp: {                vect::VK k = L.classify(in.dst);                L.role[i] = (k == vect::VK::VecI) ? Role::Bin : Role::Fail;                break;            }            case IrOp::Bin: {
                 if (L.is_red_add(in.dst)) { L.role[i] = Role::Skip; break; }  // reduction add 折叠进 RedStore
                 // 仿射下标计算（j+c / coef*j+inv+off）折叠进寻址位移/基址，不发射。
                 // 两个前提：coef>0（真的含 j；coef==0 的仿射式是不变量，可能被
@@ -627,7 +627,7 @@ bool VectPlanner::try_loop(const Block& b) {
     // 单条 Bin 发射内原子完成，跨指令不 live（两序列可共用），先占使不变量/
     // acc/临时值线性扫描不会占用。放不下保守跳过。
     // 归纳变量物化（P5b）也要 SEQ1 当第二条 lane 的临时落点。
-    if (L.has_int_mul || L.has_convert || L.has_intdiv || L.has_j_operand) {
+    if (L.has_int_mul || L.has_convert || L.has_intdiv || L.has_j_operand || L.has_cmp) {
         L.SEQ1 = L.take(kMRegNone);
         if (L.SEQ1 == kMRegNone) return false;
         // 只有乘/Convert 要第二条（两序列在同一条 Bin 里成对使用）。
@@ -855,6 +855,8 @@ bool VectPlanner::try_loop(const Block& b) {
     for (const Access& a : L.accesses) if (a.coef == 0) L.avx_int = false;
     // 重复地址累加写只有 SSE2 序列（4-lane 发射器不认这个角色）→ 也留给 SSE2。
     for (Role r : L.role) if (r == Role::AccStore) L.avx_int = false;
+    // 4-lane 发射器没有 Cmp 序列 -> SSE2 2-lane。
+    if (L.has_cmp) L.avx_int = false;
     // 跨组地址区间不相交守卫只有 SSE2 序列（4-lane 发射器不认）→ 留给 SSE2。
     if (!L.dj_guards.empty()) L.avx_int = false;
     L.avx.body = &L.BI; L.avx.role = &L.role; L.avx.acc = &L.accesses; L.avx.acc_at = &L.acc_at;
@@ -890,7 +892,25 @@ bool VectPlanner::try_loop(const Block& b) {
                 // [j, j+1]（序列与 Convert 的 j_src 分支同一份）。
                 if (L.JVEC != kMRegNone && static_cast<int>(i) == L.j_first)
                     vect_jvec2(L.JREG, 0, L.JVEC, L.SEQ1);
-                if (in.op == IrOp::Convert) {
+                if (in.op == IrOp::Cmp) {
+                    // 整数 Eq/Ne -> 0/1 的 64 位 lane（与标量 sete/setne 一致）：
+                    //   t = pcmpeqd(a,b); SEQ1 = swap_adjacent_dwords(t)（B1）;
+                    //   t &= SEQ1（64 位 lane 全 1 <=> 两半都相等）；Ne 取反；t >>= 63。
+                    MReg ra = L.xmm_of(in.a);
+                    MReg rb = L.xmm_of(in.b);
+                    if (ra == kMRegNone || rb == kMRegNone || L.SEQ1 == kMRegNone) return false;
+                    if (rd != ra) gen_.emit2(MOp::kMovapd, ra, rd);
+                    gen_.emit2(MOp::kPcmpeqd, rb, rd);
+                    gen_.emit2(MOp::kMovapd, rd, L.SEQ1);
+                    L.pshufd(0xB1, L.SEQ1);
+                    gen_.emit2(MOp::kPand, L.SEQ1, rd);
+                    if (in.cop == CmpKind::Ne) {
+                        gen_.emit2(MOp::kPcmpeqd, L.SEQ1, L.SEQ1);
+                        gen_.emit2(MOp::kPxor, L.SEQ1, rd);
+                    }
+                    gen_.emit_imm(MOp::kPsrlq, 63, rd);
+                    break;
+                }                if (in.op == IrOp::Convert) {
                     // i64→f64 折算（与标量 cvtsi2sdq 逐位一致，任意 i64）：
                     //   x = hi_s*2^32 + lo_u（hi_s 算术高32 ∈ [-2^31,2^31)，
                     //   lo_u 无符号低32 ∈ [0,2^32)）。hi_f=cvtdq2pd(hi_s) 精确

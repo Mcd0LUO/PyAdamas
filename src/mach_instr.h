@@ -52,7 +52,7 @@ enum class MOp : uint8_t {
     // ── packed SIMD（SSE2，0.333 向量化原型；门控 PYADAMAS_SIMD，默认关）──
     // 只登记助记符，现有发射点不引用 → flag-off 逐字节不变。
     kMovupd, kMulpd, kAddpd, kSubpd, kDivpd,
-    kPaddq, kPsubq, kPmuludq, kPsrlq, kPsllq, kPshufd,
+    kPaddq, kPsubq, kPmuludq, kPsrlq, kPsllq, kPshufd, kPcmpeqd, kPand,
     kCvtdq2pd, kMovlhps, kMovhlps, kUnpcklpd,
     // 0.334 nbody pairwise：标量 sqrt 内联（与既有 sqrtsd fast path 同指令）。
     kSqrtsd,

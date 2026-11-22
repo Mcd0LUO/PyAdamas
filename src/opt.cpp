@@ -273,6 +273,12 @@ void optimize_ir(IRModule& m, int opt_level, int loop_opt, bool inline_opt) {
     // 循环出口写回。实测全局访问比局部慢 8.7 倍。
     for (auto& fptr : m.funcs) promote_globals_in_loops(*fptr, m.globals);
 
+    // 全局提升把模块级累加器变成了槽 —— 之前因「累加器是全局」而被 if-conversion
+    // 拒掉的简单菱形，此刻才满足「槽累加器 +-1」判据。再跑一遍（判据/变换完全
+    // 相同，纯结构），让 while i<N: if flags[i]==1: count+=1; i+=1 的循环体变单块，
+    // 向量化器的「单块直线体」要求才可能满足。
+    for (auto& fptr : m.funcs) if_convert_accumulators(*fptr);
+
     // 循环内不变量的检查型下标：入口检一次边界，通过则走无检查的循环副本。
     for (auto& fptr : m.funcs) version_bounds_function(*fptr);
 
