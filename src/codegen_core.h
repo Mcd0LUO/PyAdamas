@@ -49,7 +49,7 @@
 
     // ── 输出辅助（结构化 Machine 层）──────────────────────────────
     //
-    // out_ 曾经是 std::string，逐段拼接 AT&T 文本；现在是 MachFunc：每条
+    // emit_.out 曾经是 std::string，逐段拼接 AT&T 文本；现在是 MachFunc：每条
     // 发射落成 MItem（Label/Directive/Instr/Comment/Raw）。指令结构化之后，
     // 后续的寄存器分配 / 指令选择 pass 可以直接改写 MInstr 的操作数，而
     // 不必只在发射前的字符串上做映射。
@@ -59,7 +59,7 @@
     // 新写的发射点应优先用 instr()/directive()/label() 直接构造。
 
     // 兜底：原样文本进 Raw（与上一条 Raw 合并）。全部迁移完后应无调用点。
-    void emit_raw(std::string_view s) { out_.append_raw(s); }
+    void emit_raw(std::string_view s) { emit_.out.append_raw(s); }
 
     // 一行汇编：指令 / 指示符 / 标签 / 注释都走这里。
     // 含换行的多行文本直接进 Raw，保证字节不变。
@@ -71,10 +71,10 @@
             return;
         }
         // 旧实现是 "\t" + s + "\n"；这里复用缓冲区补上前导 tab，避免每行一次分配。
-        line_buf_.clear();
-        line_buf_ += '\t';
-        line_buf_.append(s);
-        out_.push_line(line_buf_);
+        emit_.line_buf.clear();
+        emit_.line_buf += '\t';
+        emit_.line_buf.append(s);
+        emit_.out.push_line(emit_.line_buf);
     }
 
     // 静态字面量行（line("movq %rax, %rbx") 这类）：进程内只解析一次，
@@ -102,11 +102,11 @@
             if (sv.find('\n') != std::string_view::npos) {
                 e.item = make_raw("\t" + std::string(sv) + "\n");
             } else {
-                line_buf_.clear();
-                line_buf_ += '\t';
-                line_buf_.append(sv);
+                emit_.line_buf.clear();
+                emit_.line_buf += '\t';
+                emit_.line_buf.append(sv);
                 MachFunc tmp;
-                parse_line_into(line_buf_, tmp);
+                parse_line_into(emit_.line_buf, tmp);
                 e.item = std::move(tmp.items[0]);
                 if (e.item.kind == MItem::Instr) {
                     e.inst = static_cast<int32_t>(cache.insts.size());
@@ -118,21 +118,21 @@
         }
         const Entry& e = it->second;
         if (e.inst >= 0)
-            out_.push_cached(e.item, cache.insts[static_cast<size_t>(e.inst)]);
+            emit_.out.push_cached(e.item, cache.insts[static_cast<size_t>(e.inst)]);
         else
-            out_.push(e.item);
+            emit_.out.push(e.item);
     }
 
     // 列 0 的标签（函数标签、数据段符号）。
-    void label(const std::string& s) { out_.push_label(s, false); }
+    void label(const std::string& s) { emit_.out.push_label(s, false); }
     // 带前导 tab 的块内局部标签（"\t1:" 这种）。
-    void label_block(const std::string& s) { out_.push_label(s, true); }
+    void label_block(const std::string& s) { emit_.out.push_label(s, true); }
     // "\t# s" / 指令注释 / 列 0 注释行（"# ..."）。实现见 codegen_comment.cpp。
     void comment(std::string_view s); void comment_inst(const Inst& in); void comment0(std::string_view s);
     // "\t" + body + "\n"：.align/.quad/.section 这类汇编指示符。
-    void directive(std::string_view body) { out_.push_directive(body); }
+    void directive(std::string_view body) { emit_.out.push_directive(body); }
     // 空行。
-    void blank_line() { out_.push(make_raw("\n")); }
+    void blank_line() { emit_.out.push(make_raw("\n")); }
 
     // 结构化指令发射：操作码 + 操作数。
     void instr(MOp op, std::initializer_list<MOperand> ops);
@@ -159,7 +159,7 @@
 
     void cfi(const std::string& s);
     // CFI 数字行直拼（to_chars）：序言/尾声每函数十几条，免 std::format。
-    // 走 directive() 直发，不复用 line()（避免 line_buf_ 自引用）。
+    // 走 directive() 直发，不复用 line()（避免 emit_.line_buf 自引用）。
     void cfi_cfa_offset();
     void cfi_restore(const char* reg);
     void cfi_offset(const char* reg, int off);
@@ -180,7 +180,7 @@
         s += tag;
         s += '_';
         char buf[24];
-        auto r = std::to_chars(buf, buf + sizeof buf, label_id_++);
+        auto r = std::to_chars(buf, buf + sizeof buf, emit_.label_id++);
         s.append(buf, r.ptr);
         return s;
     }

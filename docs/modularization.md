@@ -27,7 +27,7 @@
       实际达成的是「改被搬走的函数体 = 1 个 TU」（54.3 s → 7.9 s）。
 - [~] **第 2 步 · AsmGen 拆组合对象**（进行中，1/5）
       ✅ `Frame`（帧布局 + 帧记录）—— 2026-11-22 完成，见 §6
-      ⬜ `Emitter`（输出辅助 / 目标指示符 / 位置状态）—— 下一步，耦合最低
+      ✅ `Emitter`（输出缓冲 / 标签号 / 行缓冲）—— 2026-11-22 完成，见 §6.4
       ⬜ `RegAlloc`（全局分配 / 扫描 / live range splitting）
       ⬜ `TagLower`（shadow tag / 直调 tag ABI / 零开销异常）
       ⬜ `VectPlanner`（codegen_vect* / codegen_simd*，约 2500 行）
@@ -179,3 +179,21 @@ AsmGen 侧只留两个一行转发（`vreg_slot_off` / `layout_frame`），**52 
 | check_size | 通过 |
 | 12 基准输出 | 全一致 |
 | 12 基准指令数 | 除 `binary_trees` −0.27%（4.7M 指令的小程序固有噪声）外全部 ±0.000% |
+### 6.4 已完成：`Emitter`（输出侧状态）
+
+新文件 `src/emitter.h`：`class Emitter` 持有三样输出侧状态 ——
+
+| 成员 | 说明 |
+|---|---|
+| `out`（MachFunc） | 结构化 Machine 层缓冲 |
+| `label_id` | `.Lxxx` 的编号，每次 emit_function 归零 |
+| `line_buf` | `line()` 的前导 tab 缓冲（复用容量避免每行一次分配） |
+
+**≈391 处**用法改成 `emit_.x`，横跨 10 个文件，调用点写法不变。`pos_` 特意**没搬**：
+它在别的类里也有 29 处同名使用，且语义是「当前指令在块内的下标」，不属于发射缓冲。
+
+验证：构建绿 / 369 ran ok / difftest 348/0 / ASan 369 ran ok 0 报告 / check_size 通过；
+12 基准输出全一致，指令数除 `binary_trees` +0.20%（同前，小程序的链接布局噪声）外全部 ±0.000%。
+
+发射方法（`emit0/1/2`、`line`、`directive`、`op_*` 工厂）仍留在 AsmGen 读 `emit_.*`。
+等下次把它们整体搬过来，`Emitter` 才名副其实地成为「发射器」。

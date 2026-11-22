@@ -298,7 +298,7 @@ bool AsmGen::try_simd_reduction(const Block& b) {
         ins.ops.push_back(op_imm(8));
         ins.ops.push_back(op_reg(kXmm0));
         ins.ops.push_back(op_reg(kXmm0));
-        out_.push_instr(std::move(ins));                  // 挤低 dword：[d0_lo,d1_lo]
+        emit_.out.push_instr(std::move(ins));                  // 挤低 dword：[d0_lo,d1_lo]
     }
     emit2(MOp::kCvtdq2pd, kXmm0, kXmm0);                  // df = [d0,d1]（int32→double）
     emit2(MOp::kMovapd, kXmm3, kXmm1);

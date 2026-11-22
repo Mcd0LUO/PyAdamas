@@ -43,6 +43,7 @@
 #include "target_abi.h"
 #include "module.h"
 #include "tag_defs.h"
+#include "emitter.h"
 #include "frame.h"
 #include "vect_rules.h"
 
@@ -233,12 +234,10 @@ private:
     // 否则 2000 行的函数会生成 100KB 的栈帧（递归几层就爆）。
     std::vector<int> vreg_slot_;
     int pos_ = 0;
-    int label_id_ = 0;
-    MachFunc out_;
+    // 输出侧状态（缓冲 / 标签号 / 行缓冲）已拆到 Emitter（src/emitter.h）。
+    Emitter emit_;
     double alloc_ns_ = 0;
     double emit_ns_ = 0;
-    // line() 的前导 tab 缓冲：复用容量，避免每行一次分配。
-    std::string line_buf_;
 
     // ── 类体按职责拆成 4 个片段（都是类体片段，只能在这里 #include）──
     #include "codegen_core.h"      // 位置状态 / 输出辅助 / 指示符 / 函数·块·指令·对象·调用

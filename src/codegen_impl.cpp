@@ -29,7 +29,7 @@ void AsmGen::instr(MOp op, std::initializer_list<MOperand> ops) {
     MInstr ins;
     ins.op = op;
     ins.ops.assign(ops);
-    out_.push_instr(std::move(ins));
+    emit_.out.push_instr(std::move(ins));
 }
 
 void AsmGen::cfi(const std::string& s) {
@@ -38,29 +38,29 @@ void AsmGen::cfi(const std::string& s) {
 
 void AsmGen::cfi_cfa_offset() {
     if (!target_abi().gnu_cfi) return;
-    line_buf_ = ".cfi_def_cfa_offset ";
+    emit_.line_buf = ".cfi_def_cfa_offset ";
     char buf[24];
     auto r = std::to_chars(buf, buf + sizeof buf, frame_.cfa_off);
-    line_buf_.append(buf, r.ptr);
-    directive(line_buf_);
+    emit_.line_buf.append(buf, r.ptr);
+    directive(emit_.line_buf);
 }
 
 void AsmGen::cfi_restore(const char* reg) {
     if (!target_abi().gnu_cfi) return;
-    line_buf_ = ".cfi_restore ";
-    line_buf_ += reg;
-    directive(line_buf_);
+    emit_.line_buf = ".cfi_restore ";
+    emit_.line_buf += reg;
+    directive(emit_.line_buf);
 }
 
 void AsmGen::cfi_offset(const char* reg, int off) {
     if (!target_abi().gnu_cfi) return;
-    line_buf_ = ".cfi_offset ";
-    line_buf_ += reg;
-    line_buf_ += ", -";
+    emit_.line_buf = ".cfi_offset ";
+    emit_.line_buf += reg;
+    emit_.line_buf += ", -";
     char buf[24];
     auto r = std::to_chars(buf, buf + sizeof buf, off);
-    line_buf_.append(buf, r.ptr);
-    directive(line_buf_);
+    emit_.line_buf.append(buf, r.ptr);
+    directive(emit_.line_buf);
 }
 
 void AsmGen::section_relro() {

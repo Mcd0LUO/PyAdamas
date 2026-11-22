@@ -112,7 +112,7 @@ void AsmGen::vect_intdiv2(MReg rd, MReg tmp, bool is_mod, int sh) {
         ins.ops.push_back(op_imm(0xF5));
         ins.ops.push_back(op_reg(tmp));
         ins.ops.push_back(op_reg(tmp));
-        out_.push_instr(std::move(ins));
+        emit_.out.push_instr(std::move(ins));
     }
     emit_imm(MOp::kPsllq, 64 - sh, tmp);     // 0 / 高 m 位全 1
     emit_imm(MOp::kPsrlq, sh, rd);           // x >>u m（x 还在 rd 里）

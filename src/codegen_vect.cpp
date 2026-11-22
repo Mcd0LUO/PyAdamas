@@ -997,7 +997,7 @@ bool AsmGen::try_vect_loop(const Block& b) {
         ins.ops.push_back(op_imm(imm));
         ins.ops.push_back(op_reg(r));
         ins.ops.push_back(op_reg(r));
-        out_.push_instr(std::move(ins));
+        emit_.out.push_instr(std::move(ins));
     };
     // 向量循环体。
     label(vec);

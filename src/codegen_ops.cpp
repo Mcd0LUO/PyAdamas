@@ -25,13 +25,13 @@ void AsmGen::set_loc(int line) {
     auto r = std::to_chars(buf, buf + sizeof buf, dbg_seq_++);
     std::string lab = ".Ldbg";
     lab.append(buf, r.ptr);
-    out_ += lab;
-    out_ += ":\n";
-    line_buf_ = "\t.loc 1 ";
+    emit_.out += lab;
+    emit_.out += ":\n";
+    emit_.line_buf = "\t.loc 1 ";
     auto r2 = std::to_chars(buf, buf + sizeof buf, line);
-    line_buf_.append(buf, r2.ptr);
-    line_buf_ += '\n';
-    emit_raw(line_buf_);
+    emit_.line_buf.append(buf, r2.ptr);
+    emit_.line_buf += '\n';
+    emit_raw(emit_.line_buf);
     dbg_entries_.push_back({lab, fi_, line});
 }
 

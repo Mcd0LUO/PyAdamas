@@ -177,7 +177,7 @@
             ins.op = op;
             ins.ops.push_back(std::move(oa));
             ins.ops.push_back(std::move(ob));
-            out_.push_instr(std::move(ins));
+            emit_.out.push_instr(std::move(ins));
             return;
         }
         std::string text = mn;
@@ -185,7 +185,7 @@
         text += a;
         text += ", ";
         text += b;
-        out_.push_line(text);
+        emit_.out.push_line(text);
     }
 
     void emit_imm_op(const char* mn, int64_t v, const std::string& b) {
@@ -196,7 +196,7 @@
             ins.op = op;
             ins.ops.push_back(op_imm(v));
             ins.ops.push_back(std::move(ob));
-            out_.push_instr(std::move(ins));
+            emit_.out.push_instr(std::move(ins));
             return;
         }
         char buf[32];
@@ -206,7 +206,7 @@
         text.append(buf, r.ptr);
         text += ", ";
         text += b;
-        out_.push_line(text);
+        emit_.out.push_line(text);
     }
 
     void emit_jmp(const char* mn, const std::string& target) {
@@ -216,13 +216,13 @@
             MInstr ins;
             ins.op = op;
             ins.ops.push_back(std::move(ot));
-            out_.push_instr(std::move(ins));
+            emit_.out.push_instr(std::move(ins));
             return;
         }
         std::string text = mn;
         text += ' ';
         text += target;
-        out_.push_line(text);
+        emit_.out.push_line(text);
     }
 
     void emit_imm_mem(const std::string& mem, int64_t v) { emit_imm_op("movq", v, mem); }
@@ -245,14 +245,14 @@
             text += a.text;
             text += ", ";
             text += b.text;
-            out_.push_line(text);
+            emit_.out.push_line(text);
             return;
         }
         MInstr ins;
         ins.op = op;
         ins.ops.push_back(a);
         ins.ops.push_back(b);
-        out_.push_instr(std::move(ins));
+        emit_.out.push_instr(std::move(ins));
     }
     void emit2(MOp op, MReg a, const MOperand& b) { emit2(op, mreg_operand(a), b); }
     void emit2(MOp op, const MOperand& a, MReg b) { emit2(op, a, mreg_operand(b)); }
@@ -262,19 +262,19 @@
             std::string text = mop_name(op);
             text += ' ';
             text += a.text;
-            out_.push_line(text);
+            emit_.out.push_line(text);
             return;
         }
         MInstr ins;
         ins.op = op;
         ins.ops.push_back(a);
-        out_.push_instr(std::move(ins));
+        emit_.out.push_instr(std::move(ins));
     }
     void emit1(MOp op, MReg a) { emit1(op, mreg_operand(a)); }
     void emit0(MOp op) {
         MInstr ins;
         ins.op = op;
-        out_.push_instr(std::move(ins));
+        emit_.out.push_instr(std::move(ins));
     }
     void emit_imm(MOp op, int64_t v, const MOperand& b) {
         if (b.kind == MOperandKind::Raw) {
@@ -285,14 +285,14 @@
             text.append(buf, r.ptr);
             text += ", ";
             text += b.text;
-            out_.push_line(text);
+            emit_.out.push_line(text);
             return;
         }
         MInstr ins;
         ins.op = op;
         ins.ops.push_back(op_imm(v));
         ins.ops.push_back(b);
-        out_.push_instr(std::move(ins));
+        emit_.out.push_instr(std::move(ins));
     }
     void emit_imm(MOp op, int64_t v, MReg b) { emit_imm(op, v, mreg_operand(b)); }
     void emit_imm_hex(MOp op, uint64_t bits, const MOperand& b) {
@@ -300,7 +300,7 @@
         ins.op = op;
         ins.ops.push_back(op_imm_hex(bits));
         ins.ops.push_back(b);
-        out_.push_instr(std::move(ins));
+        emit_.out.push_instr(std::move(ins));
     }
     void emit_imm_hex(MOp op, uint64_t bits, MReg b) { emit_imm_hex(op, bits, mreg_operand(b)); }
     // 跳转/调用目标直建：目标是标签/符号字符串时免 parse_operand 文法扫描。

@@ -317,24 +317,24 @@ void AsmGen::emit_function(const IRFunction& f, int fi) {
         {
             size_t ninst = 0;
             for (const auto& b : f.blocks) ninst += b.insts.size();
-            out_.reserve(out_.size() + ninst * 20 + 256);
+            emit_.out.reserve(emit_.out.size() + ninst * 20 + 256);
         }
 
-        out_ += std::format("\n# ---- {} ({}) ----\n", f.name, type_name(f.ret));
+        emit_.out += std::format("\n# ---- {} ({}) ----\n", f.name, type_name(f.ret));
         label(func_label(fi));
         if (dbg_on_) {
             // 函数起点也登记一项：生成器/协程帧只保存 resume 代码地址，
             // 回溯时用它找回函数名。
             std::string start = num_label(".LdbgStart", fi);
-            out_ += start + ":\n";
+            emit_.out += start + ":\n";
             dbg_entries_.push_back({start, fi, 0});
         }
         // 可读的函数别名，供 addr2line / nm / gdb 定位；.LfN 仍是内部跳转名。
         // （fname 在 prepare_eh_plan 之前就算好了，见上面的注释。）
-        out_ += "\t.p2align 5\n";
+        emit_.out += "\t.p2align 5\n";
         if (inline_opt_) label(func_label(fi) + "e");  // P0 对齐入口别名（docs/inline-devirt-design.md §2）
         emit_type_func(fname);
-        out_ += fname + ":\n";
+        emit_.out += fname + ":\n";
         // CFI（.eh_frame 里的栈展开规则）：从「rsp 指向返回地址」到「帧指针
         // 就位」的每一步都写下来。gdb 的 DWARF 展开器和 libgcc 的
         // _Unwind_Backtrace 都不解析 prologue，只认这张表——缺了它们就
@@ -548,18 +548,18 @@ void AsmGen::emit_function(const IRFunction& f, int fi) {
         }
         if (dbg_on_) {
             std::string end = num_label(".LdbgEnd", fi);
-            out_ += end + ":\n";
+            emit_.out += end + ":\n";
             dbg_entries_.push_back({end, -1, 0});
         }
         cfi(".cfi_endproc");
         emit_size_func(fname);
         if (!frame_.scan_mask.empty()) {
             // 临时区位图：只读静态数据，运行时按位决定扫哪些字。
-            out_ += "\t.pushsection .rodata\n\t.align 8\n";
-            out_ += std::format(".Lscanmask{}:\n", fi);
+            emit_.out += "\t.pushsection .rodata\n\t.align 8\n";
+            emit_.out += std::format(".Lscanmask{}:\n", fi);
             for (uint64_t w : frame_.scan_mask)
-                out_ += std::format("\t.quad 0x{:016x}\n", w);
-            out_ += "\t.popsection\n";
+                emit_.out += std::format("\t.quad 0x{:016x}\n", w);
+            emit_.out += "\t.popsection\n";
         }
         emit_ns_ += std::chrono::duration<double, std::nano>(
                         std::chrono::steady_clock::now() - t_emit)
