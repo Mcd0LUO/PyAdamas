@@ -21,6 +21,12 @@
     // 函数级前提（与 simd_func_ok 同口径，但用 vect_enabled_ 门控）。
     bool vect_func_ok() const;
 
+    // xmm8-15 里**没有**被本函数「浮点槽 / 跨块 vreg 提升」占用的寄存器。
+    // 向量循环可以把它们当临时值：循环体内没有任何调用，循环外的标量代码也
+    // 不读写这些寄存器（RA 整个函数都没把它们分配给活跃值）。判据只看当前
+    // 函数的提升状态，与基准无关。见 vect_planner_loop.cpp 的池扩展。
+    bool xmm_high_free(MReg r) const;
+
     // ── P1 仿射下标（docs/vectorization-generalization.md §P1）──────────
     // 下标模型从「j + 常量」扩到 coef*j + inv + off：coef>0 编译期常量、
     // inv 循环不变 int 值（可为 kNoReg）、off>=0 常量。实现见

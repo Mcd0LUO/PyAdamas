@@ -30,6 +30,20 @@ bool VectPlanner::try_loop(const Block& b) {
     if (!gen_.vect_func_ok()) return false;
     // 阶段 A4 第 1/2 步：本次调用的全部局部状态收进 VectPlanner::Loop。
     Loop L(*this, gen_, b.insts);
+    // 寄存器池扩展：xmm0-7 之外，再借本函数**没有**用于「浮点槽 / 跨块 vreg 提升」
+    // 的 xmm8-15。追加在池尾：池前段没被用尽的循环分配顺序不变（产物逐字节
+    // 相同）；用尽前段的循环会按 FIFO 复用追加寄存器（寄存器编号可能重排，
+    // 指令数 ±1 以内，语义不变 —— nbody energy 就是这种）。只有原来「差一两个
+    // xmm」而被保守拒绝的循环才真正新吃到向量化（spectral_norm 的 mul_a 内层）。
+    // 安全性：循环体内没有任何调用（sqrt 内联成 sqrtsd），循环外的标量代码也
+    // 不读写这些未提升寄存器；调用方在自己的调用点按既有 spill/reload 保护
+    // xmm8-15（SysV caller-saved），所以借给临时值不会破坏任何活跃值。
+    {
+        const MReg hi[8] = {kXmm8, kXmm9, kXmm10, kXmm11,
+                            kXmm12, kXmm13, kXmm14, kXmm15};
+        for (MReg r : hi)
+            if (gen_.xmm_high_free(r)) L.xmm_pool.push_back(r);
+    }
     L.body_bi = gen_.cur_block_;
     if (L.body_bi < 0 || L.body_bi >= static_cast<int>(gen_.f_->blocks.size())) return false;
     if (L.BI.size() < 4 || L.BI.size() > 64) return false;    // 体块规模上限（保守）

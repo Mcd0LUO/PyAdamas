@@ -51,6 +51,20 @@ bool AsmGen::vect_func_ok() const {
     return true;
 }
 
+bool AsmGen::xmm_high_free(MReg r) const {
+    if (r < kXmm8 || r > kXmm15) return false;
+    // 浮点槽提升（slot_reg）与跨块 vreg 提升（fp_promoted_vregs）是 xmm8-15 的
+    // 两种使用者；只要某个寄存器出现在其中任一处，就说明整函数都有活跃值。
+    for (const MOperand& loc : ra_.slot_reg)
+        if (loc.kind == MOperandKind::Reg && loc.reg == r) return false;
+    for (int v : ra_.fp_promoted_vregs) {
+        if (v < 0 || static_cast<size_t>(v) >= vreg_reg_.size()) continue;
+        const MOperand& loc = vreg_reg_[static_cast<size_t>(v)];
+        if (loc.kind == MOperandKind::Reg && loc.reg == r) return false;
+    }
+    return true;
+}
+
 bool AsmGen::try_vect_loop(const Block& b) {
     // 阶段 A4 第 3 步：函数体已整体搬进 VectPlanner::try_loop。
     return vect_.try_loop(b);
