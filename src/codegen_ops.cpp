@@ -515,15 +515,24 @@ void AsmGen::gen_bin_fp(const Inst& in) {
         if (opt_ >= 1 && simple && d.kind == MOperandKind::Reg &&
             d.reg >= kXmm0 && d.reg <= kXmm15) {
             const MOperand& sa = src_mop(in.a);
-            if (sa.text != d.text) move_fp(d, sa);
-            switch (in.bop) {
-                case BinKind::Add: emit2(MOp::kAddsd, src_mop(in.b), d); break;
-                case BinKind::Sub: emit2(MOp::kSubsd, src_mop(in.b), d); break;
-                case BinKind::Mul: emit2(MOp::kMulsd, src_mop(in.b), d); break;
-                case BinKind::Div: emit2(MOp::kDivsd, src_mop(in.b), d); break;
-                default: break;
+            const MOperand& sb = src_mop(in.b);
+            // 就地算的前提：装左操作数不能覆盖右操作数的**当前值**。
+            // 右操作数恰好是提升在 d 里的槽值时（`s = a[j] - s`：累加器槽 s
+            // 提升到 dst，a[j] 在栈上），先 movsd a -> d 会毁掉旧 s，随后
+            // `subsd d, d` 恒为 0（旧误编译）。这种形状退回下面的 kXmm0 通用
+            // 路径：先装 xmm0，算完再落到 d，与 -O0 结果一致。
+            // 左操作数就是 d 时无覆盖问题（`s = s - a[j]` 仍是单条 subsd）。
+            if (sb.text != d.text || sa.text == d.text) {
+                if (sa.text != d.text) move_fp(d, sa);
+                switch (in.bop) {
+                    case BinKind::Add: emit2(MOp::kAddsd, sb, d); break;
+                    case BinKind::Sub: emit2(MOp::kSubsd, sb, d); break;
+                    case BinKind::Mul: emit2(MOp::kMulsd, sb, d); break;
+                    case BinKind::Div: emit2(MOp::kDivsd, sb, d); break;
+                    default: break;
+                }
+                return;
             }
-            return;
         }
         move_fp(mreg_operand(kXmm0), src_mop(in.a));
         switch (in.bop) {
