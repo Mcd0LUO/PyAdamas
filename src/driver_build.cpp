@@ -121,6 +121,14 @@ bool parse_unit(ModuleUnit& u) {
     return false;
 }
 
+// AVX2 4-lane 的编译期开关（PYADAMAS_AVX2=0 只发 SSE2）。它直接改代码生成
+// 结果但不在 Program 里，所以必须进清单 —— 否则「切了开关仍命中旧产物」，
+// A/B 两条路径拿到同一个 mod.s（与 rc_split 那条注释同一类坑，实测踩到）。
+int avx2_emit_tag() {
+    const char* v = std::getenv("PYADAMAS_AVX2");
+    return (v != nullptr && v[0] == '0' && v[1] == '\0') ? 0 : 1;
+}
+
 // 编译器/运行时的构建指纹。源码没变但换了编译器时不能复用旧对象：
 // 代码生成和运行时的行为不进源码哈希，旧清单必须失效。
 std::string toolchain_id() {
@@ -176,6 +184,9 @@ struct Manifest {
     int simd = -1;
     // 通用循环向量化开关。-1 = 旧清单没有这一行（缓存必然失效一次）。
     int vect = -1;
+    // AVX2 4-lane 开关（PYADAMAS_AVX2）。-1 = 旧清单没有这一行：缓存必然
+    // 失效一次（否则切换开关会命中另一条路径的 mod.s）。
+    int avx2 = -1;
     // 整数循环优化位掩码。-1 = 旧清单没有这一行（缓存必然失效一次）。
     int loop_opt = -1;
     // 内联/devirt 深化开关。-1 = 旧清单没有这一行（缓存必然失效一次）。
@@ -265,6 +276,12 @@ std::optional<Manifest> read_manifest(const ModuleUnit& u) {
             auto o = parse_u64(v);
             if (!o) return std::nullopt;
             m.vect = static_cast<int>(*o);
+        } else if (tag == "avx2") {
+            std::string v;
+            ss >> v;
+            auto o = parse_u64(v);
+            if (!o) return std::nullopt;
+            m.avx2 = static_cast<int>(*o);
         } else if (tag == "loopopt") {
             std::string v;
             ss >> v;
@@ -334,6 +351,7 @@ void write_manifest(const Program& p, const ModuleUnit& u) {
     out << "raopt " << (p.ra_opt ? 1 : 0) << "\n";
     out << "simd " << (p.simd ? 1 : 0) << "\n";
     out << "vect " << (p.vect ? 1 : 0) << "\n";
+    out << "avx2 " << avx2_emit_tag() << "\n";
     out << "loopopt " << p.loop_opt << "\n";
     out << "inlineopt " << (p.inline_opt ? 1 : 0) << "\n";
     out << "borrowopt " << (p.borrow_opt ? 1 : 0) << "\n";
@@ -554,6 +572,7 @@ bool try_cache(Program& p, ModuleUnit& u) {
     if (m->ra_opt != (p.ra_opt ? 1 : 0)) return false;
     if (m->simd != (p.simd ? 1 : 0)) return false;
     if (m->vect != (p.vect ? 1 : 0)) return false;
+    if (m->avx2 != avx2_emit_tag()) return false;
     if (m->loop_opt != p.loop_opt) return false;
     if (m->inline_opt != (p.inline_opt ? 1 : 0)) return false;
     if (m->borrow_opt != (p.borrow_opt ? 1 : 0)) return false;

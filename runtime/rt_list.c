@@ -1006,6 +1006,20 @@ static int pa_has_avx2(void) {
 #endif
 }
 
+/* 生成代码的运行时派发点：codegen_vect_avx2.cpp 在 4-lane 向量前奏里读这个
+   字节（cmpl $0, pa_cpu_avx2(%rip)），非 0 才走 AVX2 4-lane，否则走原来的
+   SSE2 2-lane 回退。构造函数在 main 之前写好；初值 0 是**保守值** —— 构造
+   函数没跑过（或 CPU 没有 AVX2）就绝不会执行任何 VEX 指令，不存在 SIGILL。
+
+   PYADAMAS_AVX2=0 在**运行期**也生效（与编译器读的同名开关同义）：默认构建
+   出来的二进制可以用它强制走回退路径，用来对拍两条路径的输出一致性。 */
+int pa_cpu_avx2 = 0;
+static void __attribute__((constructor)) pa_cpu_avx2_init(void) {
+    const char* e = getenv("PYADAMAS_AVX2");
+    if (e != NULL && e[0] == '0' && e[1] == '\0') return;
+    pa_cpu_avx2 = pa_has_avx2();
+}
+
 #if defined(__x86_64__) && defined(__GNUC__)
 __attribute__((target("avx2")))
 static uint64_t list_sum_u64_avx2(const int64_t* d, int64_t n) {

@@ -60,17 +60,8 @@ struct VClass {
     bool j_src = false;       // Convert 输入是归纳变量 j（或 j+常量）
 };
 
-// 一条下标访问的仿射描述（P1）：coef*j + inv + off。
-// coef==1、inv==kNoReg 时就是原来的 j+off 形态（旧行为逐字节不变）。
-struct Access {
-    VReg list = kNoReg;
-    int64_t off = 0;
-    int64_t coef = 1;
-    VReg inv = kNoReg;
-    bool write = false;
-    int pos = 0;              // 体块内指令序号（读在写前判定）
-    int bidx = -1;            // 基址键下标（AffBase）
-};
+// 一条下标访问的仿射描述（P1）：coef*j + inv + off。结构定义在
+// codegen_vect.h（VAccess）：AVX2 4-lane 发射器要读同一份访问描述。
 
 uint64_t f64_bits(double x) {
     uint64_t u;
@@ -206,16 +197,8 @@ bool AsmGen::try_vect_loop(const Block& b) {
     // （终值要维护）。各累加器独立向量寄存器，出口各自写回（float 保序提取，
     // int paddq 模 2^64 + 水平求和）。expr 含另一 acc 的读 → loads!=1 或
     // classify Acc → 保守拒绝（跨累加器依赖不证）。
-    struct Red {
-        int slot = -1;
-        VReg acc = kNoReg, expr = kNoReg, add = kNoReg;
-        int store_pos = -1;
-        bool is_float = false;
-        MOperand loc{};                 // 槽位置
-        bool acc_stack = false;         // float acc 在栈（scratch+每轮写回）
-        MReg XT = kMRegNone;            // float acc 寄存器
-        MReg IACC = kMRegNone;          // int acc 寄存器
-    };
+    using Red = VRed;                   // 定义在 codegen_vect.h（4-lane 也要读）
+    using Access = VAccess;             // 同上：下标访问描述只有一份
     std::vector<Red> reds;
     for (auto& [slot, info] : si) {
         if (slot_is_jalias(slot) || slot == sJ) continue;
@@ -528,7 +511,8 @@ bool AsmGen::try_vect_loop(const Block& b) {
     };
 
     // 体块指令角色判定 + 分类。任何非结构指令必须可向量化或可跳过。
-    enum class Role : uint8_t { Skip, Load, Bin, MapStore, RedStore, Fail };
+    // 角色定义在 codegen_vect.h：AVX2 4-lane 发射器按同一张表逐条重放。
+    using Role = VRole;
     std::vector<Role> role(BI.size(), Role::Skip);
     for (size_t i = 0; i < BI.size(); ++i) {
         const Inst& in = BI[i];
@@ -863,7 +847,8 @@ bool AsmGen::try_vect_loop(const Block& b) {
         }
     }
     std::unordered_map<VReg, MReg> tmp_reg;
-    auto xmm_of = [&](VReg v) -> MReg {
+    // std::function：4-lane 发射器（codegen_vect_avx2.cpp）要用同一套解析。
+    std::function<MReg(VReg)> xmm_of = [&](VReg v) -> MReg {
         VReg r = resolve_src(v);
         auto it = cls.find(r);
         if (it == cls.end()) return kMRegNone;
@@ -968,6 +953,25 @@ bool AsmGen::try_vect_loop(const Block& b) {
     }
     // 跨步计数器初始化：K = coef*8*j（j 已从栈提到 JREG）。
     for (int64_t c : kcoefs) vect_affine_kinit(kreg[c], JREG, c);
+
+    // ── AVX2 4-lane（整数路径，运行时派发）──────────────────────────────
+    // 体块里只要出现浮点值（VecF/InvF）或浮点累加器，就整段留给 SSE2 2-lane：
+    // 浮点 reduction 必须保序（逐位一致），4-lane 拿不到收益（文档 §P3）。
+    // 判据只有 IR 结构（分类结果），没有任何基准名/基准字面量。
+    bool avx_int = true;
+    for (auto& [v, cc] : cls)
+        if (cc.kind == VK::VecF || cc.kind == VK::InvF) avx_int = false;
+    for (const Red& r : reds) if (r.is_float) avx_int = false;
+    VAvx2Ctx avx;
+    avx.body = &BI; avx.role = &role; avx.acc = &accesses; avx.acc_at = &acc_at;
+    avx.bases = &bases; avx.reds = &reds; avx.xmm_of = &xmm_of;
+    avx.uniq_inv = &uniq_inv; avx.inv_reg = &inv_reg;
+    avx.kcoefs = &kcoefs; avx.kreg = &kreg;
+    avx.jreg = JREG; avx.j_stack = j_stack; avx.jloc = jloc; avx.n_op = n_op;
+    avx.gscr = GSCR; avx.seq1 = SEQ1; avx.seq2 = SEQ2; avx.hscr = HSCR;
+    avx.vec = &vec; avx.int_ok = avx_int;
+    std::string vexit;                        // 两条循环的公共出口标签
+    const bool avx2 = vect_avx2_emit(avx, &vexit);
 
     // pshufd 三操作数形式（本 GAS 不接受两操作数写法，同 codegen_simd.cpp）。
     auto pshufd = [&](int64_t imm, MReg r) {
@@ -1124,6 +1128,7 @@ bool AsmGen::try_vect_loop(const Block& b) {
     emit2(MOp::kLeaq, op_mem(JREG, 1), kRax);
     emit2(MOp::kCmpq, n_op, kRax);
     emit_jmp(MOp::kJl, vec);
+    if (avx2) label(vexit);            // AVX2 段与 SSE2 段在此汇合
     // 出口：各 int reduction 水平求和写回槽（标量尾/cond/end 读最新）。
     // HSCR 先占且不与任何 IACC 冲突；逐个求和写回，相互独立。
     for (const Red& r : reds) {
