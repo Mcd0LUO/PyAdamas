@@ -258,3 +258,69 @@ public:
 
 **阶段 3 是唯一剩下的大块**，且它不需要再改设计 —— 接口已经钉死，`override` 保证
 签名漂移会编译失败。谁接手都可以直接照 §4 阶段 3 的步骤做。
+## 12. 阶段 3 盘点：`try_vect_loop` 的局部状态（2026-11-22）
+
+`codegen_vect.cpp`（1,178 行）里有 **21 个局部 lambda**，它们捕获的是**每次调用的**
+局部状态（`cond_bi`/`body_bi`/`incr_bi`/`vec`/`avx`/`si`/`jalias`…）。这是搬迁的真正
+难点：方法可以搬，捕获状态不能。
+
+### 12.1 哪些 lambda 被辅助文件引用（决定谁必须变成成员）
+
+| lambda | 主文件 | 辅助文件 | 处理 |
+|---|---|---|---|
+| `xmm_of` | 8 | **7** | 必须跨文件 → 进 `Loop` |
+| `cls` | 17 | **11** | 必须跨文件 → 进 `Loop` |
+| `take` | 10 | **3** | 必须跨文件 → 进 `Loop` |
+| `list_base_mop` | 14 | 1 | 进 `Loop` |
+| `slot_is_jalias` / `slot_is_temp` / `slot_is_red` | 6/3/3 | 0 | 主文件内，可留 `Loop` |
+| `index_off` / `in_loop` / `is_jalias_load` / `red_of_slot` / `is_red_add` | — | 0 | 同上 |
+| `cross_block` / `list_key` / `list_base_ok` / `list_elem_float` / `inv_int_ok` / `classify` / `resolve_src` / `pshufd` / `temp_store_val` | — | 0 | 同上 |
+
+### 12.2 设计决定：`VectPlanner::Loop`
+
+不把 21 个 lambda 变成 `VectPlanner` 的成员（它们依赖每次调用的局部状态），而是引入
+**每次调用一个的上下文对象**：
+
+```cpp
+class VectPlanner {
+    struct Loop {                     // 一次 try_vect_loop 调用的全部状态
+        int cond_bi, body_bi, incr_bi;
+        const Block* b;
+        std::vector<VAccess> accesses;
+        std::vector<VRed> reds;
+        std::unordered_map<int, SlotInfo> si;
+        std::vector<int> jalias;
+        // …以及那些 lambda 需要的其它局部量
+
+        // 原来捕获 [&] 的 lambda 变成 Loop 的方法（隐式 this）。
+        bool slot_is_jalias(int s) const;
+        MReg xmm_of(VReg v) const;
+        MOperand list_base_mop(VReg lv) const;
+        VK cls(VReg v) const;
+        MReg take(MReg prefer);
+    };
+
+public:
+    bool try_loop(const Block& b);
+    // 辅助文件的入口也带 Loop&（它们本来就在这次调用的上下文里）。
+    void vect_avx2_emit(Loop& L);
+    bool vect_affine_plan(Loop& L, ...);
+};
+```
+
+要点：`Loop` 的方法需要 `emit_`/`val_`/`slot_` 时，通过 `VectPlanner` 的引用传下去
+（`Loop` 持有 `VectPlanner& owner`，或方法接受 `VectPlanner&`）。**推荐前者**：
+`Loop` 是 `VectPlanner` 的嵌套类型，天然能访问外层的三个接口引用。
+
+### 12.3 迁移顺序（改自 §4 阶段 3）
+
+1. **建 `Loop` 骨架**：先把 `try_vect_loop` 里声明的局部量原样搬进 `struct Loop`，
+   `try_vect_loop` 改成 `Loop L; …` 加 `L.xxx` 前缀。**这一步不改任何逻辑**，
+   只做「局部变量 → 结构体字段」的机械转换，产物必须逐字节等价。
+2. **lambda → Loop 方法**：21 个 `auto x = [&](…)` 改成 `Loop::x(…)`，`[&]` 捕获变成
+   隐式 `this`。逐个改、逐个编译。
+3. **方法搬家**：`try_vect_loop` 主体搬进 `VectPlanner::try_loop`，辅助文件跟着搬。
+4. **删转发 + 量重编译**。
+
+第 1 步是**纯机械且可验证**的（产物等价），也是整个阶段 3 里最安全的一步。
+建议下一轮只做第 1 步，做完再决定要不要继续。
