@@ -29,6 +29,7 @@
       ✅ `Frame`（帧布局 + 帧记录）—— 2026-11-22 完成，见 §6
       ✅ `Emitter`（输出缓冲 / 标签号 / 行缓冲）—— 2026-11-22 完成，见 §6.4
       ✅ `TagLower`（tag 影子类型 + 零开销异常状态）—— 2026-11-22 完成，见 §6.5
+      ✅ `RegAlloc`（槽/跨块 vreg 提升状态）—— 2026-11-22 完成，见 §6.7
       ⬜ `RegAlloc`（全局分配 / 扫描 / live range splitting）
       ⬜ `TagLower`（shadow tag / 直调 tag ABI / 零开销异常）
       ⬜ `VectPlanner`（codegen_vect* / codegen_simd*，约 2500 行）
@@ -219,3 +220,30 @@ AsmGen 侧只留两个一行转发（`vreg_slot_off` / `layout_frame`），**52 
   互相纠缠，且 `slot_reg_` 在**每条指令的操作数取值路径**上 —— 拆它需要一轮完整预算。
 - **`VectPlanner`**（约 2500 行）：每个发射点都是 `AsmGen` 成员，先要定「反向引用还是
   `EmitSink` 接口」这个设计决定，做错会让 2500 行白搬。
+### 6.7 已完成：`RegAlloc`（槽提升状态）
+
+新文件 `src/reg_alloc.h`：12 个字段 ——
+
+| 类别 | 成员 |
+|---|---|
+| 槽提升（6） | `slot_reg` `fp_promoted_slots` `fp_promoted_vregs` `slot_fpidx` `fp_live_in` `fp_live_out` |
+| 候选与掩码（6） | `slot_reg_cand` `slot_cand_is_fp` `slot_reg_cand_idx` `fp_spill_mask` `fp_mask_valid` `fp_live_off` |
+
+约 174 处用法改成 `ra_.x`。**这块和前几块的区别**：`slot_reg` 在每条指令的操作数
+取值路径上（`slot_mop` 每次查一次），所以除了产物等价还专门看指令数 —— 全部 ±0.000%，
+证明多一层成员间接没有引入可见成本。
+
+改名时踩到一个真坑：`ra_opt.cpp` 名字不带 `codegen` 前缀，第一轮脚本没覆盖，
+编译报错才发现。机械改名必须用「全 src 扫描 + 编译验证」，不能靠命名前缀猜。
+
+### 6.8 剩余：`VectPlanner`（约 2500 行）
+
+它和前面四块**不是一类东西**：前四块搬的是「状态」，方法留在 AsmGen；向量化器要搬的
+是「方法」，而每个方法体里都是 `emit2(...)` / `src_mop(...)` / `xmm_of(...)` 这样的
+AsmGen 成员调用。所以动手前必须先定一件事：
+
+- **反向引用**（`VectPlanner` 持有 `AsmGen&`，friend 权限）—— 简单，但只是把耦合换个方向；
+- **`EmitSink` 接口**（抽取 `emit*` / 操作数查询成纯虚接口）—— 干净，但要动 2500 行里
+  每个发射点，且虚调用会影响热路径。
+
+这个决定错了会让 2500 行白搬。建议下一轮**先写设计再动手**。

@@ -284,7 +284,7 @@ void AsmGen::assign_block_temp_regs() {
  * xmm8–15（取代原来 assign_slot_regs 先占满、assign_global_vreg_regs 捡剩
  * 的两趟分配）。**失败**，两个原因：
  *
- * 1. `slot_reg_[s]` 是「整函数在寄存器」的布尔标记，代码生成器（slot_op）
+ * 1. `ra_.slot_reg[s]` 是「整函数在寄存器」的布尔标记，代码生成器（slot_op）
  *    在任意指令处看到非空就直接用寄存器，**不做区间判断、不在边界插 move**。
  *    所以给「只活跃一小段」的槽分配寄存器是错的：区间外的读写会拿到过期
  *    寄存器值。实测 mandelbrot 的 s6 只活跃 7 个位置，分到 %xmm12 后
@@ -302,12 +302,12 @@ void AsmGen::assign_block_temp_regs() {
 void AsmGen::assign_global_vreg_regs() {
         // **每个函数都要清空**：这些是 AsmGen 的成员，跨函数累积。
         //
-        // 原来只清 fp_promoted_slots_（在 assign_slot_regs 里），漏了
-        // fp_promoted_vregs_ —— 于是上一个函数提升的 vreg 编号会带到下一个
+        // 原来只清 ra_.fp_promoted_slots（在 assign_slot_regs 里），漏了
+        // ra_.fp_promoted_vregs —— 于是上一个函数提升的 vreg 编号会带到下一个
         // 函数，而 vreg 编号是函数内局部的：同一个编号在下一个函数里可能
         // 是整型，spill 就生成 `movsd %r9, 80(%rsp)`（%r9 不是 xmm）。
         // 实测 spectral_norm 的 mul_ata_2 把 v=39（int）当浮点写回。
-        fp_promoted_vregs_.clear();
+        ra_.fp_promoted_vregs.clear();
         const size_t nv = f_->vreg_ty.size();
         vreg_reg_.assign(nv, std::string());
 
@@ -416,7 +416,7 @@ void AsmGen::assign_global_vreg_regs() {
         // **split 模式下 vreg 不得使用 kSlotRegs() 池。**
         //
         // split 已经把这些寄存器独占分配给变量槽（slot_loc_），而且
-        // slot_reg_ 是空的（split 独占整型分配）—— 所以下面这段
+        // ra_.slot_reg 是空的（split 独占整型分配）—— 所以下面这段
         // 「从 n_saved_regs_ 继续往 kSlotRegs() 分配」会把同一个物理
         // 寄存器同时分给「槽」和「跨块 vreg」，两边互相覆盖。
         //
@@ -472,7 +472,7 @@ void AsmGen::assign_global_vreg_regs() {
         // 跨块浮点 vreg 提升：只在「无调用」函数里做。
         //
         // SysV 下 xmm8–15 是 caller-saved，有调用的函数需要每个调用点",
-        // spill/reload。这套机制存在（fp_promoted_vregs_），但实测收益为
+        // spill/reload。这套机制存在（ra_.fp_promoted_vregs），但实测收益为
         // 负：nbody 的 advance 有 7 个浮点变量 + 4 个跨块临时值竞争 8 个
         // xmm，变量优先的分配已经是最优；把临时值也塞进来反而挤掉变量。
         //
@@ -484,7 +484,7 @@ void AsmGen::assign_global_vreg_regs() {
             if (!call_free_fp) break;
         }
         if (call_free_fp) {
-            size_t fp_base = fp_promoted_slots_.size();
+            size_t fp_base = ra_.fp_promoted_slots.size();
             if (fp_base < static_cast<size_t>(kMaxFpSlotRegs())) {
                 std::vector<Cand> fcands;
                 for (size_t v = 0; v < nv; ++v) {
@@ -501,7 +501,7 @@ void AsmGen::assign_global_vreg_regs() {
                 for (const auto& cd : fcands) {
                     if (fp_base + used_fp >= static_cast<size_t>(kMaxFpSlotRegs())) break;
                     vreg_reg_[static_cast<size_t>(cd.v)] = kFpSlotRegs()[fp_base + used_fp];
-                    fp_promoted_vregs_.push_back(cd.v);
+                    ra_.fp_promoted_vregs.push_back(cd.v);
                     ++used_fp;
                 }
             }

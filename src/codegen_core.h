@@ -15,31 +15,12 @@
 
     // ── 位置状态（每次 emit_function 重建）──────────────────────
     //
-    // slot_reg_[s] 非空表示变量 s 常驻在这个寄存器里，栈槽作废。
+    // ra_.slot_reg[s] 非空表示变量 s 常驻在这个寄存器里，栈槽作废。
     // 分配是函数级的、固定的：不做活跃性分析，一个变量要么整函数
     // 在寄存器里，要么整函数在栈上，规则简单到不会出隐蔽 bug。
-    std::vector<MOperand> slot_reg_;   // 结构化单元：empty()=未提升，text=寄存器名
+    // 槽/跨块 vreg 的寄存器提升状态已拆到 RegAlloc（src/reg_alloc.h）。
+    RegAlloc ra_;
     int n_saved_regs_ = 0;  // 实际 push 了几个 callee-saved
-    // 提升到 xmm8–15 的浮点槽。call 会破坏 caller-saved xmm，调用前后
-    // 只把「调用后仍存活」的槽写回/读出（块级活跃性在 build_fp_liveness
-    // 里算好，按指令取 live-after 掩码）。
-    std::vector<int> fp_promoted_slots_;
-    // 提升到 xmm 的**跨块 vreg**（临时值，不是命名槽）。
-    //
-    // 与 fp_promoted_slots_ 平行：槽用 smem(slot) 做栈副本，vreg 用
-    // vreg_mem_[v]（即 vreg_off(v)）。两者在调用点都要 spill/reload ——
-    // SysV 下 xmm8–15 是 caller-saved，call 会破坏它们。
-    std::vector<int> fp_promoted_vregs_;
-    std::vector<int> slot_fpidx_;      // slot → fp_promoted_slots_ 下标
-    // 块级活跃掩码：**每个提升槽一个字节**（不是位图）。
-    //
-    // 原来这里是 uint8_t 位图，隐含「提升槽 ≤ 8 个」的假设 —— 那是
-    // 「整函数提升 + 寄存器不复用」时代的口径。R4 的线性扫描会按活跃
-    // 区间复用寄存器（13 个浮点槽跑在 8 个 xmm 上是常态），提升槽数
-    // 可以超过 8；位图第 8 位之后静默丢失，调用点不 spill 被调方要踩
-    // 的槽（0.322 的 N19b 余半：amortize 的 pay 读成 0）。
-    std::vector<std::vector<uint8_t>> fp_live_in_;   // [块][提升槽]
-    std::vector<std::vector<uint8_t>> fp_live_out_;
 
     // 当前块内的位置索引，gen_block 开头重建。
     std::unordered_map<int, std::vector<int>> block_stores_;
@@ -264,7 +245,7 @@
         if (gen_) return gen_smem_mop(slot);
         // **split 模式：按当前块查表。**
         //
-        // 放在 slot_reg_ 之前：split 模式下 slot_reg_ 不用（整函数固定位置
+        // 放在 ra_.slot_reg 之前：split 模式下 ra_.slot_reg 不用（整函数固定位置
         // 与按块分裂互斥）。`slot_loc_` 为空时（默认模式）整段跳过，
         // 行为与原来完全一致。
         if (!slot_loc_.empty() && split_block_ >= 0 &&
@@ -277,8 +258,8 @@
             // **本块没有 split 位置时，回落到默认分配的整函数寄存器。**
             //
             // 安全性来自一个不变量：assign_slot_regs_split 只处理「不在
-            // slot_reg_ 里」的槽（if (!slot_reg_[s].empty()) continue;），
-            // 所以 slot_loc_ 与 slot_reg_ 的槽集合**天然互斥**。
+            // ra_.slot_reg 里」的槽（if (!ra_.slot_reg[s].empty()) continue;），
+            // 所以 slot_loc_ 与 ra_.slot_reg 的槽集合**天然互斥**。
             //
             // 回落只对「默认分配已整函数提升」的槽生效 —— 那些槽不走 split
             // 的 reload/spill 编排，整函数一个位置，本来就自洽。
@@ -286,12 +267,12 @@
             // （曾经错误地让 split 模式一律走栈：结果默认提升的浮点槽也被
             // 拉回栈，而 spill_fp_slots 仍把从未写过的寄存器写回栈，覆盖了
             // 真实值 —— matmul 浮点值被冲掉、生成程序死循环 OOM。）
-            if (slot < static_cast<int>(slot_reg_.size()) && !slot_reg_[slot].empty())
-                return slot_reg_[slot];
+            if (slot < static_cast<int>(ra_.slot_reg.size()) && !ra_.slot_reg[slot].empty())
+                return ra_.slot_reg[slot];
             return smem_mop(slot);
         }
-        if (slot >= 0 && slot < static_cast<int>(slot_reg_.size()) && !slot_reg_[slot].empty())
-            return slot_reg_[slot];
+        if (slot >= 0 && slot < static_cast<int>(ra_.slot_reg.size()) && !ra_.slot_reg[slot].empty())
+            return ra_.slot_reg[slot];
         return smem_mop(slot);
     }
     const std::string& slot_op(int slot) const { return slot_mop(slot).text; }

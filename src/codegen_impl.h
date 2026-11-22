@@ -45,6 +45,7 @@
 #include "tag_defs.h"
 #include "emitter.h"
 #include "frame.h"
+#include "reg_alloc.h"
 #include "tag_lower.h"
 #include "vect_rules.h"
 

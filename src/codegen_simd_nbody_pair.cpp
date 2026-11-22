@@ -32,7 +32,7 @@
 //   * 向量循环零调用（sqrt 内联 sqrtsd，负数冷路径跳标量尾才调用）。
 //
 // 寄存器：11 个 xmm = 5 不变量（INV_XY/ZI/MIXY/ACCXY/ACCZ）+ 6 scratch
-// （DXY/DZ/MJ/T/T2/TZ）。不变量优先占**空闲** xmm8-15（扫描 slot_reg_/
+// （DXY/DZ/MJ/T/T2/TZ）。不变量优先占**空闲** xmm8-15（扫描 ra_.slot_reg/
 // vreg_reg_ 排除提升占用），不够补 xmm7 往下；绝不碰提升寄存器。
 // GPR：JREG（j 提升 GPR 或 %rsi+写回）、rdi=j7、rdx=data、rcx=i7（setup
 // 后常驻，退出写回用）、rax scratch。
@@ -269,7 +269,7 @@ bool AsmGen::try_simd_nbody_pair(const Block& b) {
     std::vector<MReg> pool;
     for (int r = kXmm8; r <= kXmm15; ++r) {
         bool used = false;
-        for (const auto& op : slot_reg_)
+        for (const auto& op : ra_.slot_reg)
             if (op.kind == MOperandKind::Reg && op.reg == r) used = true;
         for (const auto& op : vreg_reg_)
             if (op.kind == MOperandKind::Reg && op.reg == r) used = true;

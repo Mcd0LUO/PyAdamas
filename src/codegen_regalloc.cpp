@@ -366,11 +366,11 @@ void AsmGen::assign_vreg_slots() {
 // 参数和临时），在每次会正常返回的 call 前后统一写回/读出栈槽。
 void AsmGen::spill_fp_slots() {
         // 整型 caller 池的槽也要在调用点写回（它们同样被 call 破坏）。
-        for (size_t j = 0; j < fp_promoted_slots_.size(); ++j) {
-            if (fp_mask_valid_ && j < fp_spill_mask_.size() && !fp_spill_mask_[j])
+        for (size_t j = 0; j < ra_.fp_promoted_slots.size(); ++j) {
+            if (ra_.fp_mask_valid && j < ra_.fp_spill_mask.size() && !ra_.fp_spill_mask[j])
                 continue;
-            int slot = fp_promoted_slots_[j];
-            emit2(MOp::kMovsd, slot_reg_[slot], smem_mop(slot));
+            int slot = ra_.fp_promoted_slots[j];
+            emit2(MOp::kMovsd, ra_.slot_reg[slot], smem_mop(slot));
         }
         // 跨块 vreg 同样要写回：SysV 下 xmm8–15 是 caller-saved。
         // 它们没有块级掩码（活跃性按整个函数算），一律写回。
@@ -378,7 +378,7 @@ void AsmGen::spill_fp_slots() {
         // 栈副本必须用 `vreg_off(v)` 直接算，不能用 `mem(v)` —— 后者在
         // vreg 已被提升到寄存器时返回寄存器本身，`movsd %xmm8, %xmm8`
         // 是非法操作数组合（实测 spectral_norm 汇编失败）。
-        for (int v : fp_promoted_vregs_) {
+        for (int v : ra_.fp_promoted_vregs) {
             const MOperand& rg = vreg_reg_[static_cast<size_t>(v)];
             if (rg.empty()) continue;
             emit2(MOp::kMovsd, rg, op_mem("%rsp", vreg_off(static_cast<VReg>(v))));
@@ -386,13 +386,13 @@ void AsmGen::spill_fp_slots() {
     }
 
 void AsmGen::reload_fp_slots() {
-        for (size_t j = 0; j < fp_promoted_slots_.size(); ++j) {
-            if (fp_mask_valid_ && j < fp_spill_mask_.size() && !fp_spill_mask_[j])
+        for (size_t j = 0; j < ra_.fp_promoted_slots.size(); ++j) {
+            if (ra_.fp_mask_valid && j < ra_.fp_spill_mask.size() && !ra_.fp_spill_mask[j])
                 continue;
-            int slot = fp_promoted_slots_[j];
-            emit2(MOp::kMovsd, smem_mop(slot), slot_reg_[slot]);
+            int slot = ra_.fp_promoted_slots[j];
+            emit2(MOp::kMovsd, smem_mop(slot), ra_.slot_reg[slot]);
         }
-        for (int v : fp_promoted_vregs_) {
+        for (int v : ra_.fp_promoted_vregs) {
             const MOperand& rg = vreg_reg_[static_cast<size_t>(v)];
             if (rg.empty()) continue;
             emit2(MOp::kMovsd, op_mem("%rsp", vreg_off(static_cast<VReg>(v))), rg);
@@ -402,11 +402,11 @@ void AsmGen::reload_fp_slots() {
 // 浮点槽在调用点是否还需要：块级 live-in/live-out（只跟踪提升过的槽）。
 void AsmGen::build_fp_liveness() {
         const int nb = static_cast<int>(f_->blocks.size());
-        const size_t kf = fp_promoted_slots_.size();
-        fp_live_in_.assign(static_cast<size_t>(nb), std::vector<uint8_t>(kf, 0));
-        fp_live_out_.assign(static_cast<size_t>(nb), std::vector<uint8_t>(kf, 0));
-        fp_live_off_ = std::getenv("PYADAMAS_NO_FPLIVE") != nullptr;
-        if (kf == 0 || nb == 0 || fp_live_off_) return;
+        const size_t kf = ra_.fp_promoted_slots.size();
+        ra_.fp_live_in.assign(static_cast<size_t>(nb), std::vector<uint8_t>(kf, 0));
+        ra_.fp_live_out.assign(static_cast<size_t>(nb), std::vector<uint8_t>(kf, 0));
+        ra_.fp_live_off = std::getenv("PYADAMAS_NO_FPLIVE") != nullptr;
+        if (kf == 0 || nb == 0 || ra_.fp_live_off) return;
 
         std::vector<std::vector<uint8_t>> use(static_cast<size_t>(nb),
                                               std::vector<uint8_t>(kf, 0));
@@ -418,8 +418,8 @@ void AsmGen::build_fp_liveness() {
             std::vector<uint8_t>& defined = def[static_cast<size_t>(b)];
             std::vector<uint8_t>& used = use[static_cast<size_t>(b)];
             for (const auto& in : f_->blocks[static_cast<size_t>(b)].insts) {
-                if (in.idx < 0 || in.idx >= static_cast<int>(slot_fpidx_.size())) continue;
-                int fi = slot_fpidx_[static_cast<size_t>(in.idx)];
+                if (in.idx < 0 || in.idx >= static_cast<int>(ra_.slot_fpidx.size())) continue;
+                int fi = ra_.slot_fpidx[static_cast<size_t>(in.idx)];
                 if (fi < 0 || static_cast<size_t>(fi) >= kf) continue;
                 if (in.op == IrOp::LoadSlot) {
                     if (!defined[static_cast<size_t>(fi)]) used[static_cast<size_t>(fi)] = 1;
@@ -461,7 +461,7 @@ void AsmGen::build_fp_liveness() {
             for (int b = nb - 1; b >= 0; --b) {
                 std::vector<uint8_t> out(kf, 0);
                 for (int s : succ[static_cast<size_t>(b)]) {
-                    const auto& li = fp_live_in_[static_cast<size_t>(s)];
+                    const auto& li = ra_.fp_live_in[static_cast<size_t>(s)];
                     for (size_t j = 0; j < kf; ++j) out[j] = out[j] | li[j];
                 }
                 std::vector<uint8_t> in(kf, 0);
@@ -469,10 +469,10 @@ void AsmGen::build_fp_liveness() {
                 const auto& db = def[static_cast<size_t>(b)];
                 for (size_t j = 0; j < kf; ++j)
                     in[j] = ub[j] | (out[j] & static_cast<uint8_t>(~db[j]));
-                if (out != fp_live_out_[static_cast<size_t>(b)] ||
-                    in != fp_live_in_[static_cast<size_t>(b)]) {
-                    fp_live_out_[static_cast<size_t>(b)] = out;
-                    fp_live_in_[static_cast<size_t>(b)] = in;
+                if (out != ra_.fp_live_out[static_cast<size_t>(b)] ||
+                    in != ra_.fp_live_in[static_cast<size_t>(b)]) {
+                    ra_.fp_live_out[static_cast<size_t>(b)] = out;
+                    ra_.fp_live_in[static_cast<size_t>(b)] = in;
                     chg = true;
                 }
             }
@@ -494,9 +494,9 @@ void AsmGen::build_slot_liveness() {
         const int ns = static_cast<int>(f_->slot_ty.size());
         slot_live_in_.assign(static_cast<size_t>(nb), {});
         slot_live_out_.assign(static_cast<size_t>(nb), {});
-        slot_reg_cand_.clear();
-        slot_cand_is_fp_.clear();
-        slot_reg_cand_idx_.assign(static_cast<size_t>(ns), -1);
+        ra_.slot_reg_cand.clear();
+        ra_.slot_cand_is_fp.clear();
+        ra_.slot_reg_cand_idx.assign(static_cast<size_t>(ns), -1);
         if (nb == 0 || ns == 0) return;
 
         // 1) 排除：堆槽 / 取过地址 / handler hazard / 运行时直写槽。
@@ -563,12 +563,12 @@ void AsmGen::build_slot_liveness() {
             if (hazard[static_cast<size_t>(s2)]) continue;
             bool isfp = ir_is_float(s2ty);
             if (isfp && opt_ < 1) continue;
-            slot_reg_cand_idx_[static_cast<size_t>(s2)] =
-                static_cast<int>(slot_reg_cand_.size());
-            slot_reg_cand_.push_back(s2);
-            slot_cand_is_fp_.push_back(isfp ? 1 : 0);
+            ra_.slot_reg_cand_idx[static_cast<size_t>(s2)] =
+                static_cast<int>(ra_.slot_reg_cand.size());
+            ra_.slot_reg_cand.push_back(s2);
+            ra_.slot_cand_is_fp.push_back(isfp ? 1 : 0);
         }
-        const int nc = static_cast<int>(slot_reg_cand_.size());
+        const int nc = static_cast<int>(ra_.slot_reg_cand.size());
         if (nc == 0) return;
         const int words = (nc + 63) / 64;
         for (int b = 0; b < nb; ++b) {
@@ -584,7 +584,7 @@ void AsmGen::build_slot_liveness() {
             def[static_cast<size_t>(b)].assign(static_cast<size_t>(words), 0);
             for (const auto& in : f_->blocks[static_cast<size_t>(b)].insts) {
                 if (in.idx < 0 || in.idx >= ns) continue;
-                int ci = slot_reg_cand_idx_[static_cast<size_t>(in.idx)];
+                int ci = ra_.slot_reg_cand_idx[static_cast<size_t>(in.idx)];
                 if (ci < 0) continue;
                 uint64_t bit = 1ULL << (ci & 63);
                 size_t w = static_cast<size_t>(ci >> 6);
@@ -658,12 +658,12 @@ void AsmGen::build_slot_liveness() {
                 for (int ci = 0; ci < nc; ++ci)
                     if (slot_live_in_[static_cast<size_t>(b)]
                             [static_cast<size_t>(ci >> 6)] >> (ci & 63) & 1)
-                        std::fprintf(stderr, " s%d", slot_reg_cand_[static_cast<size_t>(ci)]);
+                        std::fprintf(stderr, " s%d", ra_.slot_reg_cand[static_cast<size_t>(ci)]);
                 std::fprintf(stderr, "  out:");
                 for (int ci = 0; ci < nc; ++ci)
                     if (slot_live_out_[static_cast<size_t>(b)]
                             [static_cast<size_t>(ci >> 6)] >> (ci & 63) & 1)
-                        std::fprintf(stderr, " s%d", slot_reg_cand_[static_cast<size_t>(ci)]);
+                        std::fprintf(stderr, " s%d", ra_.slot_reg_cand[static_cast<size_t>(ci)]);
                 std::fprintf(stderr, "\n");
             }
         }
@@ -719,7 +719,7 @@ bool AsmGen::slot_range_has_call(int64_t beg, int64_t end) const {
 // 输入：候选槽号列表、寄存器池、池大小。输出：slot -> 寄存器名（空 = 落栈）。
 //
 // 与 assign_slot_regs_linear 的区别：那个函数把「区间计算 + 扫描 + 写回
-// slot_reg_」揉在一起，只服务整型。这里抽出纯扫描部分，让浮点也能复用 ——
+// ra_.slot_reg」揉在一起，只服务整型。这里抽出纯扫描部分，让浮点也能复用 ——
 // 浮点原本是「按频次挑前 N 个整函数常驻」，在 nbody 这种同时活跃临时值
 // 超过 8 个的函数里浪费严重（实测 79 次 movsd 写栈 + 70 次读栈）。
 // ── 精确区间诊断（PYADAMAS_LI_STATS）────────────────────────────
@@ -784,8 +784,8 @@ void AsmGen::linear_scan_pool(const std::vector<int>& cands, const char* const* 
         if (nc == 0 || nreg <= 0) return;
 
         // 0) 建立「全局候选下标 -> 本函数局部下标」的映射。
-        //    cands 可能是 slot_reg_cand_ 的子集（整型 / 浮点分开扫），
-        //    而 slot_reg_cand_idx_ 存的是**全局**下标 —— 直接用会把区间
+        //    cands 可能是 ra_.slot_reg_cand 的子集（整型 / 浮点分开扫），
+        //    而 ra_.slot_reg_cand_idx 存的是**全局**下标 —— 直接用会把区间
         //    算到别的槽上（实测：nbody 输出完全错乱）。
         std::vector<int> local_of(f_->slot_ty.size(), -1);
         for (int ci = 0; ci < nc; ++ci)
@@ -815,10 +815,10 @@ void AsmGen::linear_scan_pool(const std::vector<int>& cands, const char* const* 
                 ++pos;
             }
             if (b < static_cast<int>(slot_live_in_.size())) {
-                // live 位图是按**全局**候选下标（slot_reg_cand_ 的位置）编码的，
-                // 这里要通过 slot_reg_cand_idx_ 反查后再映射到局部下标。
+                // live 位图是按**全局**候选下标（ra_.slot_reg_cand 的位置）编码的，
+                // 这里要通过 ra_.slot_reg_cand_idx 反查后再映射到局部下标。
                 for (int ci = 0; ci < nc; ++ci) {
-                    int gi = slot_reg_cand_idx_[static_cast<size_t>(cands[static_cast<size_t>(ci)])];
+                    int gi = ra_.slot_reg_cand_idx[static_cast<size_t>(cands[static_cast<size_t>(ci)])];
                     if (gi < 0) continue;
                     size_t w = static_cast<size_t>(gi >> 6);
                     uint64_t bit = 1ULL << (gi & 63);

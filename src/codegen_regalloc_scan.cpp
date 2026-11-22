@@ -12,7 +12,7 @@ namespace pyadamas {
 
 /* ── live range splitting：按块分配变量槽的寄存器 ──────────────
  *
- * **问题**：`slot_reg_[s]` 是「整函数在寄存器」的布尔标记，代码生成器
+ * **问题**：`ra_.slot_reg[s]` 是「整函数在寄存器」的布尔标记，代码生成器
  * 在任意指令处看到非空就用寄存器，不做区间判断。所以只活跃一部分的
  * 变量只能二选一：整函数占寄存器（区间外读到过期值）或整函数在栈上
  * （热段落也走内存）。
@@ -35,10 +35,10 @@ namespace pyadamas {
  *
  *   GPR（%rbx/%r12-%r15/%rbp）是 callee-saved，跨函数调用天然安全。
  *   而 xmm8-15 是 caller-saved —— 浮点槽放进 xmm 后，每个调用点都要
- *   spill/reload，还得维护 fp_promoted_slots_ / fp_spill_mask_。
+ *   spill/reload，还得维护 ra_.fp_promoted_slots / ra_.fp_spill_mask。
  *
  *   上一轮集成失败就是这个：让 split 也处理浮点槽，但没重建
- *   fp_promoted_slots_，调用点不保存 -> 值被 call 破坏 ->
+ *   ra_.fp_promoted_slots，调用点不保存 -> 值被 call 破坏 ->
  *   matmul 输出从 43198080 变 0、fannkuch 直接崩溃。
  *
  *   浮点池有 8 个 xmm，默认的整函数提升已经够用（实测 9 个基准全提升），
@@ -92,7 +92,7 @@ void AsmGen::assign_slot_regs_split() {
 
         // 逐槽求解。**只做整型槽**（见上面的设计说明）。
         for (int s = 0; s < ns; ++s) {
-            if (!slot_reg_[static_cast<size_t>(s)].empty()) continue;
+            if (!ra_.slot_reg[static_cast<size_t>(s)].empty()) continue;
             TypePtr t = f_->slot_ty[static_cast<size_t>(s)];
             if (!t || t->kind == TyKind::Unknown) continue;
             if (ir_is_heap(t)) continue;
@@ -230,7 +230,7 @@ void AsmGen::assign_slot_regs_split() {
         //
         // 更重要的是：块入口 reload 只对 slot_loc_ 非空的槽做。bb8 没有
         // slot_loc_[bb8][s5]，于是它不 reload —— 但它内部的 slot_op(s5)
-        // 又因为「本块无位置」回落到 slot_reg_ 或 smem，与 bb4 的 %rbx
+        // 又因为「本块无位置」回落到 ra_.slot_reg 或 smem，与 bb4 的 %rbx
         // 分裂成两个副本。
         //
         // 实测 nqueens 抛 IndexError。
@@ -389,7 +389,7 @@ void AsmGen::assign_slot_regs_split() {
             }
             // **必须直接赋值，不能取 max。**
             //
-            // split 独占整型分配后，slot_reg_ 里的整型槽是空的，
+            // split 独占整型分配后，ra_.slot_reg 里的整型槽是空的，
             // n_saved_regs_ 在进入 split 前可能是线性扫描留下的残值。
             // 取 max 会让「残值小于实际用量」的情况漏压栈 ——
             // 实测 nqueens 用到 %rbp（第 6 个）却只压了 3 个，
@@ -416,19 +416,19 @@ void AsmGen::assign_slot_regs_split() {
 void AsmGen::assign_slot_regs_linear() {
         // 只把**整型**候选交给通用扫描：浮点由调用方用独立的池扫（R4）。
         std::vector<int> int_cands;
-        for (size_t ci = 0; ci < slot_reg_cand_.size(); ++ci)
-            if (!slot_cand_is_fp_[ci]) int_cands.push_back(slot_reg_cand_[ci]);
+        for (size_t ci = 0; ci < ra_.slot_reg_cand.size(); ++ci)
+            if (!ra_.slot_cand_is_fp[ci]) int_cands.push_back(ra_.slot_reg_cand[ci]);
         if (int_cands.empty()) return;
         std::vector<std::string> out(f_->slot_ty.size());
         linear_scan_pool(int_cands, kSlotRegs(), kMaxSlotRegs(), out);
         int n_used = 0;
         for (size_t i2 = 0; i2 < out.size(); ++i2) {
             if (out[i2].empty()) continue;
-            slot_reg_[i2] = out[i2];
+            ra_.slot_reg[i2] = out[i2];
         }
         for (int r = 0; r < kMaxSlotRegs(); ++r) {
             bool any = false;
-            for (const auto& sr : slot_reg_)
+            for (const auto& sr : ra_.slot_reg)
                 if (sr == kSlotRegs()[r]) {
                     any = true;
                     break;
@@ -437,17 +437,17 @@ void AsmGen::assign_slot_regs_linear() {
         }
         n_saved_regs_ = n_used;
         // 只统计**整型**槽。浮点槽在调用方（assign_slot_regs）随后才分配，
-        // 此刻 slot_reg_ 里的浮点项还是空的。
+        // 此刻 ra_.slot_reg 里的浮点项还是空的。
         //
-        // 这个统计以前写的是「slot_reg_ 里非空的个数」，把浮点算进去却
+        // 这个统计以前写的是「ra_.slot_reg 里非空的个数」，把浮点算进去却
         // 又没分配，于是长期输出「7/14 promoted」这种误导数字 —— 实际
         // 浮点是 6/6 全提升，整型才是 7/14。排查时被它带偏过好几轮。
         if (std::getenv("PYADAMAS_RA_DEBUG")) {
             int int_assigned = 0, int_total = 0;
-            for (size_t ci = 0; ci < slot_reg_cand_.size(); ++ci) {
-                if (slot_cand_is_fp_[ci]) continue;
+            for (size_t ci = 0; ci < ra_.slot_reg_cand.size(); ++ci) {
+                if (ra_.slot_cand_is_fp[ci]) continue;
                 ++int_total;
-                if (!slot_reg_[static_cast<size_t>(slot_reg_cand_[ci])].empty())
+                if (!ra_.slot_reg[static_cast<size_t>(ra_.slot_reg_cand[ci])].empty())
                     ++int_assigned;
             }
             std::fprintf(stderr, "[ra] %s: int %d/%d promoted, %d regs\n",
@@ -458,11 +458,11 @@ void AsmGen::assign_slot_regs_linear() {
 void AsmGen::assign_slot_regs() {
         report_interval_precision();
         int ns = static_cast<int>(f_->slot_ty.size());
-        slot_reg_.assign(ns, std::string());
+        ra_.slot_reg.assign(ns, std::string());
         // R1：先把整型槽的块级活跃性算出来（R2 的线性扫描要用）。
         build_slot_liveness();
-        slot_fpidx_.assign(ns, -1);
-        fp_promoted_slots_.clear();
+        ra_.slot_fpidx.assign(ns, -1);
+        ra_.fp_promoted_slots.clear();
         n_saved_regs_ = 0;
         if (ns == 0) return;
         // 含 setjmp 的函数：longjmp 会把 callee-saved 寄存器恢复到 setjmp
@@ -585,19 +585,19 @@ void AsmGen::assign_slot_regs() {
         if (use_split) {
             // **split 独占整型分配，不能先跑线性扫描。**
             //
-            // 曾经的做法是「先 linear 填 slot_reg_，再让 split 覆盖」。
-            // 那会抢寄存器：linear 用掉全部 6 个 GPR 给 slot_reg_ 的槽
+            // 曾经的做法是「先 linear 填 ra_.slot_reg，再让 split 覆盖」。
+            // 那会抢寄存器：linear 用掉全部 6 个 GPR 给 ra_.slot_reg 的槽
             // （实测 matmul.run_2 是 9/16 提升、6 regs），而 split 只处理
-            // **不在 slot_reg_ 里**的槽，却又去用 kSlotRegs()[0..] ——
+            // **不在 ra_.slot_reg 里**的槽，却又去用 kSlotRegs()[0..] ——
             // 同一个 %rbx 被两个分配器同时分给不同的槽，读写互相覆盖。
             //
             // 实测后果：matmul 输出 43198080 -> 0、fannkuch 抛 IndexError、
             // 有的用例直接死循环 OOM。
             //
             // 正确做法：split 模式下整型槽**全部**由 split 决定，
-            // slot_reg_ 里的整型槽留空，n_saved_regs_ 由 split 实际用的
+            // ra_.slot_reg 里的整型槽留空，n_saved_regs_ 由 split 实际用的
             // 寄存器数决定。浮点槽仍走线性扫描（xmm 池不与 GPR 冲突，
-            // 且需要 fp_promoted_slots_ 维护调用点 spill）。
+            // 且需要 ra_.fp_promoted_slots 维护调用点 spill）。
             // **先给参数槽做整函数提升，再让 split 处理其余槽。**
             //
             // 参数槽是整函数活跃的（函数体内随时可能用到），本来就该
@@ -610,7 +610,7 @@ void AsmGen::assign_slot_regs() {
             {
                 std::vector<int> param_cands;
                 for (const auto& p : f_->params) {
-                    if (p.slot < 0 || p.slot >= static_cast<int>(slot_reg_.size())) continue;
+                    if (p.slot < 0 || p.slot >= static_cast<int>(ra_.slot_reg.size())) continue;
                     TypePtr pt = f_->slot_ty[static_cast<size_t>(p.slot)];
                     if (!pt || pt->kind == TyKind::Unknown || ir_is_heap(pt)) continue;
                     if (ir_is_float(pt)) continue;   // 浮点由下面的 fp 分支处理
@@ -622,7 +622,7 @@ void AsmGen::assign_slot_regs() {
                     linear_scan_pool(param_cands, kSlotRegs(), kMaxSlotRegs(), pout);
                     for (size_t i = 0; i < pout.size(); ++i) {
                         if (pout[i].empty()) continue;
-                        slot_reg_[i] = pout[i];
+                        ra_.slot_reg[i] = pout[i];
                     }
                     // **n_saved_regs_ 必须按「用到的最大寄存器序号 + 1」设置。**
                     //                    // 不能简单数「有几个槽提升了」：linear_scan_pool 可能给                    // 不同槽分配 kSlotRegs()[0]、kSlotRegs()[2]，只提升 2 个                    // 却用到 3 号寄存器。按数量算会漏压栈。
@@ -640,25 +640,25 @@ void AsmGen::assign_slot_regs() {
                 }
             }
             assign_slot_regs_split();
-            // 浮点：线性扫描 + 重建 fp_promoted_slots_。
+            // 浮点：线性扫描 + 重建 ra_.fp_promoted_slots。
             std::vector<int> fp_cands;
-            for (size_t ci = 0; ci < slot_reg_cand_.size(); ++ci)
-                if (slot_cand_is_fp_[ci]) fp_cands.push_back(slot_reg_cand_[ci]);
+            for (size_t ci = 0; ci < ra_.slot_reg_cand.size(); ++ci)
+                if (ra_.slot_cand_is_fp[ci]) fp_cands.push_back(ra_.slot_reg_cand[ci]);
             if (!fp_cands.empty()) {
                 std::vector<std::string> fp_out(f_->slot_ty.size());
                 linear_scan_pool(fp_cands, kFpSlotRegs(), kMaxFpSlotRegs(), fp_out);
                 for (size_t i = 0; i < fp_out.size(); ++i) {
                     if (fp_out[i].empty()) continue;
-                    slot_reg_[i] = fp_out[i];
+                    ra_.slot_reg[i] = fp_out[i];
                 }
-                fp_promoted_slots_.clear();
-                for (int i = 0; i < static_cast<int>(slot_fpidx_.size()); ++i)
-                    slot_fpidx_[static_cast<size_t>(i)] = -1;
+                ra_.fp_promoted_slots.clear();
+                for (int i = 0; i < static_cast<int>(ra_.slot_fpidx.size()); ++i)
+                    ra_.slot_fpidx[static_cast<size_t>(i)] = -1;
                 for (int i = 0; i < static_cast<int>(fp_out.size()); ++i) {
                     if (fp_out[static_cast<size_t>(i)].empty()) continue;
-                    slot_fpidx_[static_cast<size_t>(i)] =
-                        static_cast<int>(fp_promoted_slots_.size());
-                    fp_promoted_slots_.push_back(i);
+                    ra_.slot_fpidx[static_cast<size_t>(i)] =
+                        static_cast<int>(ra_.fp_promoted_slots.size());
+                    ra_.fp_promoted_slots.push_back(i);
                 }
             }
             return;
@@ -670,7 +670,7 @@ void AsmGen::assign_slot_regs() {
             // 两套池不相交（GPR vs xmm），互不干扰。
             //
             // **试过改成「槽与跨块 vreg 统一按 spill cost 竞争」，失败**：
-            // `slot_reg_[s]` 是「整函数在寄存器」的布尔标记，代码生成器
+            // `ra_.slot_reg[s]` 是「整函数在寄存器」的布尔标记，代码生成器
             // 不做区间判断。统一分配器让短区间槽（如 mandelbrot 的 s6，
             // 只活跃 7 个位置）也拿到寄存器，区间外读到过期值 → 输出错。
             // 而加「只收整函数活跃的槽」的限制后，覆盖的槽太少，
@@ -679,36 +679,36 @@ void AsmGen::assign_slot_regs() {
             // 要真正统一，必须先让代码生成器支持「区间边界插 move」，
             // 即 live range splitting —— 那是独立的一轮工作。
             std::vector<int> fp_cands;
-            for (size_t ci = 0; ci < slot_reg_cand_.size(); ++ci)
-                if (slot_cand_is_fp_[ci]) fp_cands.push_back(slot_reg_cand_[ci]);
+            for (size_t ci = 0; ci < ra_.slot_reg_cand.size(); ++ci)
+                if (ra_.slot_cand_is_fp[ci]) fp_cands.push_back(ra_.slot_reg_cand[ci]);
             if (!fp_cands.empty()) {
                 std::vector<std::string> fp_out(f_->slot_ty.size());
                 linear_scan_pool(fp_cands, kFpSlotRegs(), kMaxFpSlotRegs(), fp_out);
                 for (size_t i = 0; i < fp_out.size(); ++i) {
                     if (fp_out[i].empty()) continue;
-                    slot_reg_[i] = fp_out[i];
+                    ra_.slot_reg[i] = fp_out[i];
                 }
-                // 重建 fp_promoted_slots_ / slot_fpidx_（调用点 spill 依赖它们）。
-                fp_promoted_slots_.clear();
+                // 重建 ra_.fp_promoted_slots / ra_.slot_fpidx（调用点 spill 依赖它们）。
+                ra_.fp_promoted_slots.clear();
                 for (int i = 0; i < static_cast<int>(fp_out.size()); ++i) {
                     if (fp_out[static_cast<size_t>(i)].empty()) continue;
-                    slot_fpidx_[static_cast<size_t>(i)] =
-                        static_cast<int>(fp_promoted_slots_.size());
-                    fp_promoted_slots_.push_back(i);
+                    ra_.slot_fpidx[static_cast<size_t>(i)] =
+                        static_cast<int>(ra_.fp_promoted_slots.size());
+                    ra_.fp_promoted_slots.push_back(i);
                 }
             }
             return;
         }
 
         int k = std::min<int>(kMaxSlotRegs(), static_cast<int>(hot_int.size()));
-        for (int i = 0; i < k; ++i) slot_reg_[hot_int[i].second] = kSlotRegs()[i];
+        for (int i = 0; i < k; ++i) ra_.slot_reg[hot_int[i].second] = kSlotRegs()[i];
         n_saved_regs_ = k;
 
         int kf = std::min<int>(kMaxFpSlotRegs(), static_cast<int>(hot_fp.size()));
         for (int i = 0; i < kf; ++i) {
-            slot_reg_[hot_fp[i].second] = kFpSlotRegs()[i];
-            slot_fpidx_[hot_fp[i].second] = i;
-            fp_promoted_slots_.push_back(hot_fp[i].second);
+            ra_.slot_reg[hot_fp[i].second] = kFpSlotRegs()[i];
+            ra_.slot_fpidx[hot_fp[i].second] = i;
+            ra_.fp_promoted_slots.push_back(hot_fp[i].second);
         }
     }
 

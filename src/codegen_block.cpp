@@ -205,11 +205,11 @@ void AsmGen::emit_function(const IRFunction& f, int fi) {
                     tag_.vreg_tag[static_cast<VReg>(v)] = tag_.n_tag_words++;
         }
         if (gen_) {
-            slot_reg_.assign(f.slot_ty.size(), std::string());
+            ra_.slot_reg.assign(f.slot_ty.size(), std::string());
             // 生成器帧不提升槽位，但必须清掉上一个函数留下的浮点提升状态，
             // 否则调用点的 spill/reload 会去读写一个空寄存器。
-            slot_fpidx_.assign(f.slot_ty.size(), -1);
-            fp_promoted_slots_.clear();
+            ra_.slot_fpidx.assign(f.slot_ty.size(), -1);
+            ra_.fp_promoted_slots.clear();
             n_saved_regs_ = 1;  // %r15 帧指针
         } else {
             // **先算「哪些槽必须留在内存」，再分配寄存器。**
@@ -217,7 +217,7 @@ void AsmGen::emit_function(const IRFunction& f, int fi) {
             // 顺序不能反：GC 要靠帧记录里的栈槽地址找根，所以「会被 GC
             // 扫描的槽」绝不能提升。而一个槽是否被扫描取决于它的静态类型
             // （堆槽 / unknown 槽）和是否被取地址 —— 全是分配前就能确定的
-            // 信息，不需要看 slot_reg_。
+            // 信息，不需要看 ra_.slot_reg。
             //
             // 之前的写法是「先分配寄存器，再把没提升的槽登记给 GC」，于是
             // unknown 槽被提升后既不在栈槽里、也不在扫描清单里，GC 读到
@@ -267,7 +267,7 @@ void AsmGen::emit_function(const IRFunction& f, int fi) {
                 // 出口释放），所以「持有引用」的清单不再只限堆槽。异常
                 // 展开时这些槽要按注册表 dec，和堆槽一样登记。
                 if (f.slot_owned[s] && (ir_is_heap(ty) || unk_ty) &&
-                    slot_reg_[s].empty()) {
+                    ra_.slot_reg[s].empty()) {
                     if (s < gc_scan_slot_.size()) gc_scan_slot_[s] = 1;
                     frame_.owned.push_back(static_cast<int>(s));
                     frame_.owned_unknown.push_back(
@@ -282,7 +282,7 @@ void AsmGen::emit_function(const IRFunction& f, int fi) {
                 bool unk = s < f.slot_unknown.size() && f.slot_unknown[s];
                 bool unk_ty = !ty || ty->kind == TyKind::Unknown;
                 bool owned = f.slot_owned[s] && (ir_is_heap(ty) || unk_ty);
-                if (!owned && (unk || unk_ty) && slot_reg_[s].empty()) {
+                if (!owned && (unk || unk_ty) && ra_.slot_reg[s].empty()) {
                     frame_.scan.push_back(static_cast<int>(s));
                     if (s < gc_scan_slot_.size()) gc_scan_slot_[s] = 1;
                 }
@@ -590,9 +590,9 @@ bool AsmGen::can_fuse(const Inst& in, const Inst& nx) const {
         if (nx.idx >= 0 && nx.idx < static_cast<int>(gc_scan_slot_.size()) &&
             gc_scan_slot_[static_cast<size_t>(nx.idx)])
             return false;
-        if (nx.idx < 0 || nx.idx >= static_cast<int>(slot_reg_.size())) return false;
+        if (nx.idx < 0 || nx.idx >= static_cast<int>(ra_.slot_reg.size())) return false;
         // O0 只融合到提升过的寄存器；O1 起允许直接写变量栈槽。
-        if (opt_ < 1 && slot_reg_[nx.idx].empty()) return false;
+        if (opt_ < 1 && ra_.slot_reg[nx.idx].empty()) return false;
         if (in.dst >= use_count_.size()) return false;
         // 只有「定义后在本块里正好被用一次」才能就地写变量槽。
         // 用两次就不行了：第二次读到的会是新值。
@@ -854,18 +854,18 @@ void AsmGen::gen_block(const Block& b) {
         // 位在「使用点之前、最近一次 store 之后」整段置位（store 仍清位，
         // 因为 store 会重写寄存器）。块内没有别名的 load 不置位。
         std::vector<uint8_t> fp_after;
-        if (!fp_promoted_slots_.empty() && !fp_live_off_ &&
-            cur_block_ >= 0 && static_cast<size_t>(cur_block_) < fp_live_out_.size()) {
-            const size_t kf = fp_promoted_slots_.size();
+        if (!ra_.fp_promoted_slots.empty() && !ra_.fp_live_off &&
+            cur_block_ >= 0 && static_cast<size_t>(cur_block_) < ra_.fp_live_out.size()) {
+            const size_t kf = ra_.fp_promoted_slots.size();
             fp_after.assign(b.insts.size() * kf, 0);
             std::vector<uint8_t> fp_alias_use(b.insts.size() * kf, 0);
             if (slot_loc_.empty()) {
                 for (int k = 0; k < static_cast<int>(b.insts.size()); ++k) {
                     const Inst& x = b.insts[static_cast<size_t>(k)];
                     if (x.op != IrOp::LoadSlot || x.dst == kNoReg) continue;
-                    if (x.idx < 0 || x.idx >= static_cast<int>(slot_fpidx_.size()))
+                    if (x.idx < 0 || x.idx >= static_cast<int>(ra_.slot_fpidx.size()))
                         continue;
-                    const int fi = slot_fpidx_[static_cast<size_t>(x.idx)];
+                    const int fi = ra_.slot_fpidx[static_cast<size_t>(x.idx)];
                     if (fi < 0 || static_cast<size_t>(fi) >= kf) continue;
                     // 别名只发生在单次使用上；跨块值/多次使用的值，load
                     // 会真的写寄存器或内存，寄存器此后无人读。
@@ -886,15 +886,15 @@ void AsmGen::gen_block(const Block& b) {
                                  static_cast<size_t>(fi)] = 1;
                 }
             }
-            std::vector<uint8_t> cur = fp_live_out_[static_cast<size_t>(cur_block_)];
+            std::vector<uint8_t> cur = ra_.fp_live_out[static_cast<size_t>(cur_block_)];
             for (int k = static_cast<int>(b.insts.size()) - 1; k >= 0; --k) {
                 const size_t row = static_cast<size_t>(k) * kf;
                 std::memcpy(&fp_after[row], cur.data(), kf);
                 for (size_t j = 0; j < kf; ++j)
                     if (fp_alias_use[row + j]) cur[j] = 1;
                 const Inst& x = b.insts[static_cast<size_t>(k)];
-                if (x.idx >= 0 && x.idx < static_cast<int>(slot_fpidx_.size())) {
-                    int fi = slot_fpidx_[static_cast<size_t>(x.idx)];
+                if (x.idx >= 0 && x.idx < static_cast<int>(ra_.slot_fpidx.size())) {
+                    int fi = ra_.slot_fpidx[static_cast<size_t>(x.idx)];
                     if (fi >= 0 && static_cast<size_t>(fi) < kf) {
                         if (x.op == IrOp::StoreSlot)
                             cur[static_cast<size_t>(fi)] = 0;
@@ -946,8 +946,8 @@ void AsmGen::gen_block(const Block& b) {
                 fused_slot = b.insts[i + 1].idx;
                 // 提升到寄存器的槽直接写寄存器；没提升的槽也可以把
                 // 结果直接落到变量内存，省掉「临时 vreg 槽 → 变量槽」。
-                dst_loc_ = slot_reg_[fused_slot].empty() ? slot_mop(fused_slot)
-                                                         : slot_reg_[fused_slot];
+                dst_loc_ = ra_.slot_reg[fused_slot].empty() ? slot_mop(fused_slot)
+                                                         : ra_.slot_reg[fused_slot];
             } else if (!dst_coalesced && i + 2 < b.insts.size() &&
                        can_fuse_fp_temp(in, b.insts[i + 1]) &&
                        !can_fuse_fp_temp(b.insts[i + 1], b.insts[i + 2])) {
@@ -969,11 +969,11 @@ void AsmGen::gen_block(const Block& b) {
             }
 
             if (!fp_after.empty()) {
-                fp_spill_mask_.assign(fp_promoted_slots_.size(), 0);
-                const size_t row = i * fp_promoted_slots_.size();
-                for (size_t j = 0; j < fp_spill_mask_.size(); ++j)
-                    fp_spill_mask_[j] = static_cast<char>(fp_after[row + j]);
-                fp_mask_valid_ = true;
+                ra_.fp_spill_mask.assign(ra_.fp_promoted_slots.size(), 0);
+                const size_t row = i * ra_.fp_promoted_slots.size();
+                for (size_t j = 0; j < ra_.fp_spill_mask.size(); ++j)
+                    ra_.fp_spill_mask[j] = static_cast<char>(fp_after[row + j]);
+                ra_.fp_mask_valid = true;
             }
             // **split 模式的块出口 spill（必须插在终止指令之前）。**
             //
@@ -1008,7 +1008,7 @@ void AsmGen::gen_block(const Block& b) {
                 alias_.erase(b.insts[forwarded_load].dst);
                 forward_to_receiver = false;
             }
-            fp_mask_valid_ = false;
+            ra_.fp_mask_valid = false;
             dst_loc_.clear();
             if (fused_vcall_add) {
                 i += 3;
@@ -1062,8 +1062,8 @@ bool AsmGen::is_deferable_const(const Inst& in) const {
     }
 
 void AsmGen::invalidate_slot(int slot) {
-        if (slot < 0 || slot >= static_cast<int>(slot_reg_.size())) return;
-        const MOperand& r = slot_reg_[slot];
+        if (slot < 0 || slot >= static_cast<int>(ra_.slot_reg.size())) return;
+        const MOperand& r = ra_.slot_reg[slot];
         if (r.empty()) return;
         for (auto it = alias_.begin(); it != alias_.end();)
             it = (it->second.text == r.text) ? alias_.erase(it) : std::next(it);

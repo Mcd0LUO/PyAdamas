@@ -18,14 +18,12 @@
     // 的排除条件保持一致，否则会分到一个永远不能用的寄存器。
     std::vector<std::vector<uint64_t>> slot_live_in_;
     std::vector<std::vector<uint64_t>> slot_live_out_;
-    std::vector<int> slot_reg_cand_;   // 参与分配的槽号（升序）
-    std::vector<char> slot_cand_is_fp_; // 与 slot_reg_cand_ 对齐：是否浮点槽
-    std::vector<int> slot_reg_cand_idx_;  // 槽号 -> slot_reg_cand_ 下标，-1 = 不参与
+    // 分配候选（slot_reg_cand / slot_cand_is_fp / slot_reg_cand_idx）在 RegAlloc 里。
     void build_slot_liveness();
-    std::vector<char> fp_spill_mask_;  // 当前指令需要保存的槽
+    // fp_spill_mask / fp_mask_valid / fp_live_off 在 RegAlloc 里。
 
-    bool fp_mask_valid_ = false;
-    bool fp_live_off_ = false;  // PYADAMAS_NO_FPLIVE：退回全量 spill（A/B 用）
+
+
     void build_fp_liveness();
     void spill_fp_slots();
     void reload_fp_slots();
@@ -86,10 +84,10 @@
     // ── live range splitting ───────────────────────────────────
     //
     // `slot_loc_[b][s]` 非空表示「槽 s 在块 b 里住在那个寄存器」。
-    // 与 `slot_reg_[s]`（整函数固定位置）互斥：split 模式用这张表，
-    // 默认模式用 slot_reg_。两者都为空时走栈（smem）。
+    // 与 `ra_.slot_reg[s]`（整函数固定位置）互斥：split 模式用这张表，
+    // 默认模式用 ra_.slot_reg。两者都为空时走栈（smem）。
     //
-    // slot_op 里加了一个分支：slot_loc_ 非空时按块查表，否则走 slot_reg_
+    // slot_op 里加了一个分支：slot_loc_ 非空时按块查表，否则走 ra_.slot_reg
     // （默认路径行为完全不变）。split 模式只在 PYADAMAS_RA_SPLIT=1 时启用。
     std::vector<std::vector<MOperand>> slot_loc_;
     // 块 b 入口需要从栈装进寄存器的槽（前驱可能在栈上）。

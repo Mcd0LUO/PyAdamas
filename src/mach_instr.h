@@ -121,7 +121,7 @@ struct MOperand {
     std::string text;
 
     // ── 缓存单元兼容接口 ─────────────────────────────────────────
-    // 操作数缓存（vreg_mem_/slot_reg_/alias_ 等）从字符串换成 MOperand
+    // 操作数缓存（vreg_mem_/ra_.slot_reg/alias_ 等）从字符串换成 MOperand
     // 单元：定义点赋值时解析一次成结构化，使用点直发免回解析。历史字符
     // 串调用点经 implicit const string& 转换零改动读 canonical text。
     MOperand() = default;

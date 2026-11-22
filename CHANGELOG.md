@@ -4,6 +4,25 @@
 
 早期阶段没有逐条留痕，按阶段归纳；0.4 之后逐条记录。
 
+## [0.397] - 2026-11-22
+
+> 模块重组第 2 步（4/5）：槽/跨块 vreg 的寄存器提升状态拆成 `RegAlloc`。
+>
+> 新文件 `src/reg_alloc.h`：12 个字段 ——
+>
+> | 类别 | 成员 |
+> |---|---|
+> | 槽提升（6） | `slot_reg` `fp_promoted_slots` `fp_promoted_vregs` `slot_fpidx` `fp_live_in` `fp_live_out` |
+> | 候选与掩码（6） | `slot_reg_cand` `slot_cand_is_fp` `slot_reg_cand_idx` `fp_spill_mask` `fp_mask_valid` `fp_live_off` |
+>
+> 约 174 处用法改成 `ra_.x`。`slot_reg` **在每条指令的操作数取值路径上**
+> （`slot_mop` 每次查一次），所以这次格外看指令数 —— 结果全部 ±0.000%。
+>
+> 验证：构建绿 / 369 ran ok / difftest 348/0 / check_size 通过；12 基准输出全一致，
+> 指令数最大偏差 −0.004%（`binary_trees`）。
+>
+> 剩余 `VectPlanner`（约 2500 行）需先定 EmitSink 接口，见 `docs/modularization.md` §6.7。
+
 ## [0.396] - 2026-11-22
 
 > 模块重组第 2 步（3/5）：tag 与零开销异常状态拆成 `TagLower`。
