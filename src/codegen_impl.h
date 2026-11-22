@@ -657,6 +657,8 @@ private:
         s.append(buf, r.ptr);
         return s;
     }
+    // 写槽（提升到 xmm 的槽 + 立即数需要特殊编码，见 codegen_store.cpp）。
+    void store_slot_checked(const Inst& in);
     std::string entry_ref(int i) const { return inline_opt_ ? func_label(i) + "e" : func_label(i); }
     // 统一调用约定的 shim 入口标签（见 ir_types.h 的 closure_needs_shim）。
     static std::string shim_label(int i) {
@@ -877,6 +879,7 @@ private:
     static bool is_mem_operand(const std::string& s) {
         return !s.empty() && s[0] != '%' && s[0] != '$';
     }
+
 
     void move_to(const std::string& dst, const std::string& src) {
         if (dst == src) return;

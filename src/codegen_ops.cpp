@@ -155,10 +155,25 @@ void AsmGen::gen_inst(const Inst& in) {
                 move_to(dst_mop(in.dst), mreg_operand(kRax));
                 break;
             }
-            case IrOp::FuncCode:
-                emit2(MOp::kLeaq, op_mem_sym(entry_ref(static_cast<int>(in.imm)), "%rip"), kRax);
+            case IrOp::FuncCode: {
+                // **堆闭包的 +0 也必须是 shim，不能是函数本体。**
+                //
+                // 间接调用一律按统一约定装填实参、从 %rax 取返回值（见
+                // ir_types.h 的 closure_needs_shim）；函数本体用的是真实
+                // SysV ABI（浮点返回值在 %xmm0）。静态闭包表（codegen.cpp）
+                // 早就按 closure_needs_shim 填 shim 了，这里漏了 —— 于是有
+                // 捕获的嵌套函数（走 ClosureNew 堆闭包）被间接调用时，浮点
+                // 返回值从 %rax 读到垃圾：0.383 的 A（`total += f(...)` 只剩
+                // 最后一项、`print(g(4))` 打出 5e-323）。
+                const int fi = static_cast<int>(in.imm);
+                const bool need_shim =
+                    m_ && fi >= 0 && static_cast<size_t>(fi) < m_->funcs.size() &&
+                    closure_needs_shim(*m_->funcs[static_cast<size_t>(fi)]);
+                emit2(MOp::kLeaq,
+                      op_mem_sym(need_shim ? shim_label(fi) : entry_ref(fi), "%rip"), kRax);
                 move_to(dst_mop(in.dst), mreg_operand(kRax));
                 break;
+            }
             case IrOp::Mov:
                 move_to(dst_mop(in.dst), src_mop(in.a));
                 // P3：unknown dst 的搬运同时搬 tag（tag 跟值走，设计 §3.3）。
@@ -182,8 +197,7 @@ void AsmGen::gen_inst(const Inst& in) {
                 // 1006ms（+76%），所以回退了。但那次是所有槽都双写；
                 // 这里只对**本块确实用 split 寄存器**的槽双写 —— 那些槽
                 // 本来就已经有 reload 开销，多一条 mov 换正确性是划算的。
-                const MOperand& loc = slot_mop(in.idx);
-                move_to(loc, src_mop(in.a));
+                store_slot_checked(in);
                 // P3：unknown 槽写入同时写 tag 字。
                 if (slot_tagged(in.idx)) move_to(slot_tag_mop(in.idx), MOperand(tag_src(in.a)));
                 invalidate_slot(in.idx);

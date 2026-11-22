@@ -60,7 +60,7 @@ rm -rf build/dev                   # 连 CMake 中间产物一起清
 | `tests/run/*.py` | 必须编译运行成功，输出与末尾 `# --- expect ---` 逐行一致 | `NN_主题.py` |
 | `tests/unsupported/*.py` | `check -v` 必须打标记，`build` 必须拒绝 | `主题.py` |
 
-当前规模：正例 12 / 反例 91 / 运行 346 / 未建模 1 / 严格 7 / 模块 18。`ctest` 另含 `pyadamas_cache_race`：两进程并发 `--rebuild` 编译 hashlib/hmac，守模块缓存原子写；`cfi:unwind`（`tests/cfi/`）用 libgcc 的 `_Unwind_Backtrace` 数帧，守生成代码的 CFI。
+当前规模：正例 12 / 反例 91 / 运行 337 / 未建模 1 / 严格 7 / 模块 18。`ctest` 另含 `pyadamas_cache_race`：两进程并发 `--rebuild` 编译 hashlib/hmac，守模块缓存原子写；`cfi:unwind`（`tests/cfi/`）用 libgcc 的 `_Unwind_Backtrace` 数帧，守生成代码的 CFI。
 
 跑单个文件：
 
@@ -94,10 +94,12 @@ print("hi")
 
 三条禁令（都是踩过的）：
 
-1. **函数包裹现在是可行的**（0.382 修了嵌套 `def` 的形参回填），但要满足：
+1. **函数包裹现在是可行的**（0.382 修了嵌套 `def` 的形参回填，0.383 修了函数内
+   from-import 的类型绑定），但要满足：
    - 段内不能有 `cimport`（只允许模块层，报 "only allowed at module level"）；
-   - 段内不要 `from X import Class` 再读实例属性（函数内的 from-import 绑定会退化成
-     unknown，`tarfile.TarInfo(...).name` 就报 "attribute access is only supported"）；
+   - 段内不要在三层以上的函数里读模块常量再赋给实例字段
+     （`lk.type = tarfile.GNUTYPE_LONGLINK` 在 函数→函数→字段赋值 里仍报
+     "attribute access is only supported"）；
    - 带 `# pyadamas: <flag>` 的用例只能和同 flag 的合并，且合并文件要把标记写回前 8 行。
 2. **注意同名变量的类型冲突**：`x = 1` 一段、`x = "s"` 一段拼在一起会撞上
    「未标注变量不能换类型」（0.375 的限制）。同名类不同布局也一样
