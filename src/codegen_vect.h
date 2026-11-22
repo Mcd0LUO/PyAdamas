@@ -77,7 +77,9 @@
     // InvF/InvI 是循环不变量（setup 广播）；J 是归纳变量；Affine 是 j+常量
     //（只用于下标位移）；VecF/VecI 是逐 lane 计算的 2-lane 值；Acc 是
     // reduction 累加器旧值；Fail 不可向量化。
-    enum class VK : uint8_t { Fail, InvF, InvI, InvPtr, J, Affine, VecF, VecI, Acc };
+    // 分类枚举与判据的唯一出处在 vect_rules.h（具名 + 编译期真值表）。
+    // 这里只做别名，类体内的 VK::X 写法保持不变。
+    using VK = vect::VK;
     struct VClass {
         VK kind = VK::Fail;
         int64_t off = 0;          // Affine：j+off；Convert j_src：[j+off, j+off+1]

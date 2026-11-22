@@ -435,23 +435,20 @@ bool AsmGen::try_vect_loop(const Block& b) {
                 VK ka = classify(d->a);
                 VK kb = intdiv2 ? VK::InvI : classify(d->b);
                 bool fa = ir_is_float(ty_of(d->a)), fb = ir_is_float(ty_of(d->b));
-                auto float_ok = [](VK k) { return k == VK::InvF || k == VK::VecF; };
-                // P5b：归纳变量 J 按 VecI 参与整数算术（发射期物化 [j, j+1]）。
-                // 它的值域是任意 i64，逐 lane 加/减/乘与标量逐位一致，不需要
-                // 守卫；只有 j 这个**结构身份**，没有形状/程序特判。
-                auto int_ok = [](VK k) {
-                    return k == VK::InvI || k == VK::VecI || k == VK::J;
-                };
+                // 判据的唯一出处在 vect_rules.h（具名、带注释、带编译期真值表）。
+                // 归纳变量 J 算 VecI：发射期物化成 [j, j+1]，见 codegen_vect_jvec.cpp。
+                using vect::float_operand_ok;
+                using vect::int_operand_ok;
                 bool ia = ty_of(d->a) && ty_of(d->a)->kind == TyKind::Int;
                 bool ib = ty_of(d->b) && ty_of(d->b)->kind == TyKind::Int;
-                if (fa && fb && float_ok(ka) && float_ok(kb)) {
+                if (fa && fb && float_operand_ok(ka) && float_operand_ok(kb)) {
                     switch (d->bop) {
                         case BinKind::Add: case BinKind::Sub:
                         case BinKind::Mul: case BinKind::Div:
                             c.kind = VK::VecF; break;
                         default: c.kind = VK::Fail;
                     }
-                } else if (ia && ib && int_ok(ka) && int_ok(kb) &&
+                } else if (ia && ib && int_operand_ok(ka) && int_operand_ok(kb) &&
                            (d->bop == BinKind::Add || d->bop == BinKind::Sub ||
                             d->bop == BinKind::Mul || intdiv2)) {
                     // int 逐元素加/减：paddq/psubq 模 2^64 与标量 addq/subq 逐位一致。

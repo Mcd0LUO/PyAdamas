@@ -25,6 +25,7 @@
 #include "target_abi.h"
 #include "module.h"
 #include "tag_defs.h"
+#include "vect_rules.h"
 
 namespace pyadamas {
 

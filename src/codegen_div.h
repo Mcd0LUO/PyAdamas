@@ -6,6 +6,9 @@
 // 避免「同一语义两份常量」漂移。
 #pragma once
 
+#include <climits>
+
+#include "intmath.h"
 #include "target_abi.h"
 
 namespace pyadamas {
@@ -66,11 +69,14 @@ inline bool operand_const_imm(const std::string& s, int64_t* out) {
 // INT64_MIN/INT64_MAX，小除数上再密集跑满 [0, 2^18)。
 
 // d >= 2，返回 L 使 d == 2^L；不是 2 的幂返回 -1。
+//
+// 算法本体在 intmath.h（向量化判据也用同一份）。这里的域是 uint64 且**排除 1**
+// （除法强度削减不处理除数为 1 —— 那条路径直接消掉除法，不经过这里），所以要
+// 单独把 d < 2 与 2^63 两个边界按本函数的约定处理。
 inline int pow2_log2(uint64_t d) {
-    if (d < 2 || (d & (d - 1)) != 0) return -1;
-    int L = 0;
-    while ((d >> L) != 1) ++L;
-    return L;
+    if (d == (uint64_t{1} << 63)) return 63;
+    if (d < 2 || d > static_cast<uint64_t>(INT64_MAX)) return -1;
+    return pyadamas::pow2_log2(static_cast<int64_t>(d));
 }
 
 // d > 1 且非 2 的幂。返回 m' 与 L 使 (mulhu(x,m') + x) >> L == x / d。

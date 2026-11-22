@@ -4,6 +4,47 @@
 
 早期阶段没有逐条留痕，按阶段归纳；0.4 之后逐条记录。
 
+## [0.392] - 2026-11-22
+
+> 模块重组第 0 步：把向量化判据从匿名 lambda 提成具名、带注释、带编译期测试的
+> 纯函数。**行为中性**（12 个基准输出与 CPython 全一致，指令数变化 +48 条）。
+>
+> ### 起因
+>
+> `try_vect_loop` 里曾经是：
+>
+> ```cpp
+> auto int_ok = [](VK k) { return k == VK::InvI || k == VK::VecI; };
+> ```
+>
+> 没有名字、没有注释、没有测试，而且**漏了 `VK::J`**。后果是「j 参与算术」的循环
+> 整段判 Fail，多个版本无人发现 —— 0.391 排查 `spectral_norm` 才挖出来。
+>
+> ### 改动
+>
+> | 文件 | 内容 |
+> |---|---|
+> | `src/intmath.h` | 新。`is_pow2` / `pow2_log2`，标量除法强度削减与向量化判据共用 |
+> | `src/vect_rules.h` | 新。`VK` 枚举 + 四条具名判据，每条写明「为什么」 |
+> | `src/vect_rules_test.cpp` | 新。40 条 `static_assert`，每次构建都验证 |
+> | `codegen_vect.h/.cpp` | 枚举改别名、lambda 改具名调用 |
+> | `codegen_div.h` | `pow2_log2` 复用 `intmath.h`（保留 uint64 域与 2^63 边界） |
+>
+> ### 验证
+>
+> **反向验证**：故意把 `VK::J` 从判据里删掉 → 构建立刻 `static assertion failed`；
+> 恢复后通过。这条规则从此不可能再被静默改坏。
+>
+> 行为中性：12 基准输出与 CPython 全一致；matmul 指令数 10,605,901 → 10,605,949
+> （+48，链接/对齐噪声）；触发数不变（matmul 4、spectral_norm 2、470=44、472=41）。
+>
+> 同时记下重编译基线：改 `codegen_impl.h` 一行 = **33 个 TU / 53.7 秒**，改单个
+> `.cpp` = 1 个 TU / 8.2 秒（关 ccache 实测）。这是第 1 步要优化的目标。
+>
+> 路线图见 `docs/modularization.md`。
+>
+> 闸门：369 ran ok、difftest 348/0、check_size 通过。
+
 ## [0.391] - 2026-11-22
 
 > P5：向量域支持整数 floor 除法与「归纳变量参与算术」，`spectral_norm` 内层
