@@ -106,14 +106,18 @@ bool TypeChecker::reserve_imported_method_slots(const ClassInfo* cls, int line, 
 void TypeChecker::funcdef_impl(FunctionDef& f, const ClassInfoPtr& owner) {
         if (!func_owners_.count(&f)) {
             func_owners_[&f] = owner;
-            // 只登记模块级函数和方法：嵌套函数（含 lambda 脱糖产物）的
-            // 词法父作用域在重查时要重新挂接，收益不值这个复杂度。
-            // 生成器表达式的合成函数例外：它的形参就是最外层 iterable，
-            // 拿不到实参类型就没法在降级层选迭代路径。
+            // 模块级函数与方法直接进重查表。
+            //
+            // **嵌套函数也要进**（0.382）：它们的未标注形参同样靠调用点回填，
+            // 以前不登记，于是「函数里定义的 def 拿到实参类型」这条路径完全
+            // 不存在 —— 形参停在 unknown，降级层看到 unknown 就报
+            // 「method 'x' is not supported」。
+            //
+            // 重查时词法父作用域靠 `nested_recheck_parent_` 重新挂接（工作队列
+            // 里已经这么做了），作用域对象由 pool_ 持有，重查期间仍然有效。
             if (cur_ == module_ || owner) {
                 func_defs_.push_back(&f);
-            } else if (f.name.rfind("__pyadamas$gen_", 0) == 0 ||
-                       f.name.rfind("__pyadamas$lambda_", 0) == 0) {
+            } else {
                 nested_recheck_parent_[&f] = cur_;
                 func_defs_.push_back(&f);
             }

@@ -4,6 +4,69 @@
 
 早期阶段没有逐条留痕，按阶段归纳；0.4 之后逐条记录。
 
+## [0.382] - 2026-11-22
+
+> 修掉「函数体内定义的 def 拿不到形参类型」，并据此再合并 31 个测试文件。
+>
+> ### 1. 嵌套 def 的形参现在也从调用点回填
+>
+> `typecheck_func.cpp` 里登记重查表时写着：
+>
+> ```cpp
+> // 只登记模块级函数和方法：嵌套函数（含 lambda 脱糖产物）的
+> // 词法父作用域在重查时要重新挂接，收益不值这个复杂度。
+> ```
+>
+> 于是函数体里的 `def` 从不进定点迭代，未标注形参永远停在 unknown：
+>
+> ```python
+> def outer() -> None:
+>     def shout(s) -> str:
+>         return s.upper()      # 以前：method 'upper' is not supported
+>     word: str = "abc"
+>     print(shout(word))        # 现在：ABC
+> ```
+>
+> 挂接词法父作用域那套机制其实已经有了（`nested_recheck_parent_`，生成器表达式
+> 和 lambda 一直在用），把嵌套 def 一并登记即可。回归
+> `tests/run/452_nested_def_infer.py`：字符串方法、类实例字段+方法、容器下标、
+> 三层嵌套四种形态。
+>
+> ### 2. 测试再合并 31 个文件
+>
+> 有了上面的修复，「把每段包进 `def _case_N()` 再调用」终于能用，于是上一轮
+> 卡住的组也能合了：
+>
+> | 合并后 | 原文件数 | 主题 |
+> |---|---|---|
+> | `220_vthread.py` | 9 | go/join、通道、pingpong、睡眠顺序、GC 挂起、churn |
+> | `176_codepoint.py` | 4 | 非 ASCII 码点 |
+> | `438_big_const.py` | 4 | big 常量折叠 |
+> | `439_big_builtins.py` | 4 | big 与 sum/min-max/容器/% |
+> | `332_fixed_int.py` | 3 | 定宽整数 |
+> | `155_exc_value.py` | 3 | 异常值 |
+> | `83_collections.py` | 3 | collections |
+> | `135_hetero_tuple.py` | 4 | 异构元组与 unknown 宽化 |
+> | `344_vect.py` | 5 | 通用 VECT 向量化 |
+> | `433_iter_mutation.py` | 3 | 迭代中改容器三条守卫 |
+>
+> `tests/run` 377 → 346（本轮开始前是 402）。两轮合计 402 → 346，净减 56。
+>
+> 合并前仍然逐个验证「合并后的 stdout 逐字节等于各原文件之和」。
+>
+> ### 3. 还剩三条合并禁令（写进 docs/development.md）
+>
+> - `cimport` 只允许模块层；
+> - 函数内的 `from X import Class` 会退化成 unknown，读实例属性报
+>   「attribute access is only supported」（tarfile 组就卡在这）；
+> - 带 `# pyadamas: <flag>` 的用例只能和同 flag 的合并，且标记要写回前 8 行。
+>
+> 另外两条不属于合并：`228_vthread_drain` 的期望依赖进程退出时机（未 join 的
+> 死亡 vthread 在退出时打印），单独保留；`simd` 组的输出在包裹后不同，未合。
+>
+> 闸门：difftest **345/0**；普通与 ASan 套件各 **366 ran ok**、0 ASan 报告；
+> check_size 通过。
+
 ## [0.381] - 2026-11-22
 
 > 测试套件瘦身：同主题小用例合并。**没有删掉任何断言**，输出逐字节不变。
