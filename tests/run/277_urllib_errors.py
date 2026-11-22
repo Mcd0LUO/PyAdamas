@@ -1,6 +1,7 @@
 # 277 urllib.request 错误面（libcurl 原生）：HTTPError（404/500，带响应面）、
 # 传输阶段超时 TimeoutError、非法 URL ValueError/URLError、连接拒绝 URLError、
 # 307 GET 跟随。本地 http.server 子进程，端口 18327。对拍 CPython。
+import os
 import subprocess
 import time
 import tempfile
@@ -10,6 +11,7 @@ from urllib.error import URLError, HTTPError
 
 SRV = '''
 import http.server
+import sys
 import time
 
 class H(http.server.BaseHTTPRequestHandler):
@@ -41,16 +43,19 @@ class H(http.server.BaseHTTPRequestHandler):
         else:
             self._send(404, b"nope")
 
-http.server.HTTPServer(("127.0.0.1", 18327), H).serve_forever()
+http.server.HTTPServer(("127.0.0.1", int(sys.argv[1])), H).serve_forever()
 '''
 
-BASE = "http://127.0.0.1:18327"
+# 端口按进程号散列：并发跑 difftest 时不会互相抢固定端口（原本硬编码 18327，
+# 两个 difftest 并行会有一个起不来，退出码不同 → 假失败）。
+PORT = 18000 + (os.getpid() % 2000)
+BASE = "http://127.0.0.1:" + str(PORT)
 d = tempfile.mkdtemp(prefix="pa277_")
 srvpath = d + "/srv.py"
 fs = open(srvpath, "w")
 fs.write(SRV)
 fs.close()
-srv = subprocess.Popen(["python3", srvpath], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+srv = subprocess.Popen(["python3", srvpath, str(PORT)], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 try:
     ready = False
     i = 0
