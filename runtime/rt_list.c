@@ -1138,6 +1138,22 @@ int64_t pa_list_max_i64(PyAdamasList* l) {
     return m;
 }
 
+/* 未知/其它种类元素（静态类型推断不出，如混合容器 list[unknown]）的相等判定：
+   运行时认出堆对象后按内容比 —— 与 0.422 的 dict key_kind=3 修复同一思路。
+   只覆盖 str（按字节）与 big（按数值）；容器/类实例仍按同一性（与项目既有容器
+   比较口径一致，也避免把 list == tuple 的跨类型语义误判成相等）。 */
+static int unknown_kind_value_eq(int64_t a, int64_t b) {
+    if (a == b) return 1;
+    if (!pa_unknown_is_heap(a) || !pa_unknown_is_heap(b)) return 0;
+    PyAdamasRc* ha = (PyAdamasRc*)(uintptr_t)((uint64_t)a - (uint64_t)PYADAMAS_RC_HDR);
+    PyAdamasRc* hb = (PyAdamasRc*)(uintptr_t)((uint64_t)b - (uint64_t)PYADAMAS_RC_HDR);
+    if (ha->kind == PYADAMAS_RC_STR && hb->kind == PYADAMAS_RC_STR)
+        return pa_str_eq((PyAdamasStr*)a, (PyAdamasStr*)b) != 0;
+    if (ha->kind == PYADAMAS_RC_BIGINT && hb->kind == PYADAMAS_RC_BIGINT)
+        return pa_big_cmp((PyAdamasBig*)a, (PyAdamasBig*)b) == 0;
+    return 0;
+}
+
 int list_value_eq(int64_t kind, int64_t a, int64_t b) {
     if (kind == 1) return pa_str_eq((PyAdamasStr*)a, (PyAdamasStr*)b) != 0;
     /* kind 4 = big：按值比较（指针不同但数值相等的两个 big 必须算相等）。 */
@@ -1148,6 +1164,8 @@ int list_value_eq(int64_t kind, int64_t a, int64_t b) {
         memcpy(&y, &b, sizeof y);
         return x == y;
     }
+    /* kind 3 = 其它/未知（静态类型推断不出）：堆对象按内容比。 */
+    if (kind == 3) return unknown_kind_value_eq(a, b);
     return a == b;
 }
 
@@ -1185,7 +1203,8 @@ int chain_elem_eq(int kind, int64_t x, int64_t y, const uint8_t* chain, int64_t 
         if (level + 1 >= len) return x == y;
         return chain_set_eq((PyAdamasDict*)x, (PyAdamasDict*)y, chain, len, level + 1);
     }
-    return x == y;  /* i / x：按机器字比 */
+    if (kind == 0x78) return unknown_kind_value_eq(x, y);  /* x = 未知：堆对象按内容比 */
+    return x == y;  /* i：按机器字比 */
 }
 
 int64_t chain_list_eq(PyAdamasList* a, PyAdamasList* b, const uint8_t* chain, int64_t len,

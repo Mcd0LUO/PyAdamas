@@ -406,6 +406,32 @@ int64_t pa_any_neg(int64_t v, int64_t dv) {
 /* 动态比较：op 见 PA_ANY_EQ..GE。数值按 double 提升比较（int/float 混比
    与 CPython 一致），str 用字节序 cmp，其它堆对象只支持 ==/!=（按同一性，
    与项目既有的容器比较口径一致）。返回 0/1。 */
+/* 未知域（desc != 具体种类）的相等判定：运行时认出堆对象后按内容比。
+   覆盖 str（字节）、big（数值）、list/tuple（长度 + 逐元素递归，未知元素递归用本函数）；
+   dict/set/类实例保持同一性（与既有容器比较口径一致）。
+   注意：运行时无法区分 list 与 tuple（头 kind 都是 LIST），未知域下 [..] == (..)
+   的跨类型语义会按内容判等 —— 已知保守性缺口，静态类型已知时由 lowerer 提前定。 */
+static int any_unknown_eq(int64_t a, int64_t b, int depth) {
+    if (a == b) return 1;
+    if (depth > 32) return 0;  /* 自引用容器防御 */
+    if (!pa_unknown_is_heap(a) || !pa_unknown_is_heap(b)) return 0;
+    PyAdamasRc* ha = (PyAdamasRc*)(uintptr_t)((uint64_t)a - (uint64_t)PYADAMAS_RC_HDR);
+    PyAdamasRc* hb = (PyAdamasRc*)(uintptr_t)((uint64_t)b - (uint64_t)PYADAMAS_RC_HDR);
+    if (ha->kind == PYADAMAS_RC_STR && hb->kind == PYADAMAS_RC_STR)
+        return pa_str_eq((PyAdamasStr*)a, (PyAdamasStr*)b) != 0;
+    if (ha->kind == PYADAMAS_RC_BIGINT && hb->kind == PYADAMAS_RC_BIGINT)
+        return pa_big_cmp((PyAdamasBig*)a, (PyAdamasBig*)b) == 0;
+    if (ha->kind == PYADAMAS_RC_LIST && hb->kind == PYADAMAS_RC_LIST) {
+        PyAdamasList* la = (PyAdamasList*)a;
+        PyAdamasList* lb = (PyAdamasList*)b;
+        if (la->len != lb->len) return 0;
+        for (int64_t i = 0; i < la->len; ++i)
+            if (!any_unknown_eq(la->data[i], lb->data[i], depth + 1)) return 0;
+        return 1;
+    }
+    return 0;
+}
+
 int64_t pa_any_cmp(int64_t op, int64_t a, int64_t b, int64_t desc_a, int64_t desc_b) {
     AnyVal x, y;
     any_decode_typed(a, desc_a, &x);
@@ -433,7 +459,7 @@ int64_t pa_any_cmp(int64_t op, int64_t a, int64_t b, int64_t desc_a, int64_t des
     } else {
         if (op != PA_ANY_EQ && op != PA_ANY_NE)
             pa_raise_c("TypeError", "unsupported comparison between different types");
-        eq = (a == b);
+        eq = any_unknown_eq(a, b, 0);
     }
     switch (op) {
         case PA_ANY_EQ: return eq;
@@ -757,7 +783,7 @@ int64_t pa_any_cmp_t(int64_t op, int64_t a, int64_t tag_a,
     } else {
         if (op != PA_ANY_EQ && op != PA_ANY_NE)
             pa_raise_c("TypeError", "unsupported comparison between different types");
-        eq = (a == b);
+        eq = any_unknown_eq(a, b, 0);
     }
     switch (op) {
         case PA_ANY_EQ: return eq;
