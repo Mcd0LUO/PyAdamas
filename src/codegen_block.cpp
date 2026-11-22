@@ -130,8 +130,8 @@ static std::string debug_func_symbol(int fi, const std::string& name) {
 // 位图是超集，宁多勿少：少扫一个真正含指针的字 = 提前释放 = UAF，比多留
 // 一个垃圾严重得多。收窄不到一半时直接不发位图，让运行时按整段扫。
 void AsmGen::build_frame_scan_info(const IRFunction& f) {
-        frame_scan_words_ = 0;
-        frame_scan_mask_.clear();
+        frame_.scan_words = 0;
+        frame_.scan_mask.clear();
         if (gen_ || n_vreg_slots_ <= 0 || vreg_slot_.empty()) return;
         const size_t nwords = static_cast<size_t>(n_vreg_slots_);
         std::vector<uint64_t> mask((nwords + 63) / 64, 0);
@@ -168,10 +168,10 @@ void AsmGen::build_frame_scan_info(const IRFunction& f) {
             }
         }
         if (nbits == 0) return;  // 这一帧的临时区零扫描
-        frame_scan_words_ = n_vreg_slots_;
+        frame_.scan_words = n_vreg_slots_;
         // 收窄不到一半就不发位图：整段扫的每字成本更低。
         if (nbits * 2 > static_cast<int64_t>(nwords)) return;
-        frame_scan_mask_ = std::move(mask);
+        frame_.scan_mask = std::move(mask);
 }
 
 void AsmGen::emit_function(const IRFunction& f, int fi) {
@@ -180,11 +180,11 @@ void AsmGen::emit_function(const IRFunction& f, int fi) {
         gen_ = f.is_generator;
         n_slots_ = static_cast<int>(f.slot_ty.size());
         frame_rec_ = false;
-        frame_owned_.clear();
-        frame_owned_unknown_.clear();
-        frame_scan_.clear();
-        frame_scan_words_ = 0;
-        frame_scan_mask_.clear();
+        frame_.owned.clear();
+        frame_.owned_unknown.clear();
+        frame_.scan.clear();
+        frame_.scan_words = 0;
+        frame_.scan_mask.clear();
         cur_loc_line_ = 0;
         auto t_alloc = std::chrono::steady_clock::now();
         assign_vreg_slots();
@@ -259,7 +259,7 @@ void AsmGen::emit_function(const IRFunction& f, int fi) {
             // u 被回收，之后 `index.get` 从已释放的列表取元素得到 -26，
             // 传给 pa_rc_temp 当场 SEGV。
             //
-            // 提升槽由 gc_scan_registers 兜底（见下面 frame_scan_ 的注释）。
+            // 提升槽由 gc_scan_registers 兜底（见下面 frame_.scan 的注释）。
             for (size_t s = 0; s < n_owned; ++s) {
                 TypePtr ty = f.slot_ty[s];
                 bool unk_ty = !ty || ty->kind == TyKind::Unknown;
@@ -269,8 +269,8 @@ void AsmGen::emit_function(const IRFunction& f, int fi) {
                 if (f.slot_owned[s] && (ir_is_heap(ty) || unk_ty) &&
                     slot_reg_[s].empty()) {
                     if (s < gc_scan_slot_.size()) gc_scan_slot_[s] = 1;
-                    frame_owned_.push_back(static_cast<int>(s));
-                    frame_owned_unknown_.push_back(
+                    frame_.owned.push_back(static_cast<int>(s));
+                    frame_.owned_unknown.push_back(
                         unk_ty || (s < f.slot_unknown.size() && f.slot_unknown[s]));
                 }
             }
@@ -283,7 +283,7 @@ void AsmGen::emit_function(const IRFunction& f, int fi) {
                 bool unk_ty = !ty || ty->kind == TyKind::Unknown;
                 bool owned = f.slot_owned[s] && (ir_is_heap(ty) || unk_ty);
                 if (!owned && (unk || unk_ty) && slot_reg_[s].empty()) {
-                    frame_scan_.push_back(static_cast<int>(s));
+                    frame_.scan.push_back(static_cast<int>(s));
                     if (s < gc_scan_slot_.size()) gc_scan_slot_[s] = 1;
                 }
             }
@@ -292,18 +292,18 @@ void AsmGen::emit_function(const IRFunction& f, int fi) {
             build_frame_scan_info(f);
         }
         const int rec_entries =
-            static_cast<int>(frame_owned_.size() + frame_scan_.size());
+            static_cast<int>(frame_.owned.size() + frame_.scan.size());
         // 记录头 6 个字：prev、n、临时区起点、临时区字数、临时区位图、本帧 CFA。
         const int rec_words =
-            (rec_entries == 0 && frame_scan_words_ == 0) ? 0 : 6 + rec_entries;
+            (rec_entries == 0 && frame_.scan_words == 0) ? 0 : 6 + rec_entries;
         assign_global_vreg_regs();
         assign_block_temp_regs();
         build_fp_liveness();
         // 槽位操作数是缓存好的字符串，偏移依赖帧布局，所以先定型再建缓存。
-        out_bytes_ = outgoing_bytes(f);
+        frame_.out_bytes = outgoing_bytes(f);
         if (std::getenv("PYADAMAS_FRAME_DBG"))
             std::fprintf(stderr, "[frame] %-32s gen=%d n_saved=%d out=%d slots=%d\n",
-                         f.name.c_str(), static_cast<int>(gen_), n_saved_regs_, out_bytes_,
+                         f.name.c_str(), static_cast<int>(gen_), n_saved_regs_, frame_.out_bytes,
                          n_slots_ + n_vreg_slots_ + rec_words);
         layout_frame(n_slots_ + n_vreg_slots_ + n_tag_words_ + rec_words);
         build_operand_caches();
@@ -363,10 +363,10 @@ void AsmGen::emit_function(const IRFunction& f, int fi) {
         // 帧里没有帧指针：CFA 全程由 rsp 定义。prologue 每动一次 sp 就把
         // 偏移记下来，gdb / _Unwind_Backtrace 才能从任意 PC 还原上一层帧。
         // 被保存的寄存器相对 CFA 的偏移不随 push 变化（CFA 也跟着涨）。
-        cfa_off_ = 8;
+        frame_.cfa_off = 8;
         if (gen_) {
             emit1(MOp::kPushq, kR15);
-            cfa_off_ += 8;
+            frame_.cfa_off += 8;
             cfi_cfa_offset();
             cfi(".cfi_offset %r15, -16");
             // 生成器/协程 resume 的第一个实参是生成器对象，按 ABI 位置取。
@@ -374,9 +374,9 @@ void AsmGen::emit_function(const IRFunction& f, int fi) {
         } else {
             for (int i = 0; i < n_saved_regs_; ++i) {
                 emit1(MOp::kPushq, mreg_from_name(kSlotRegs()[i]));
-                cfa_off_ += 8;
+                frame_.cfa_off += 8;
                 cfi_cfa_offset();
-                cfi_offset(kSlotRegs()[i], cfa_off_);
+                cfi_offset(kSlotRegs()[i], frame_.cfa_off);
             }
         }
         frame_alloc();
@@ -428,7 +428,7 @@ void AsmGen::emit_function(const IRFunction& f, int fi) {
                 const auto& l = locs[i];
                 if (l.stack_off >= 0) {
                     // 栈上实参在返回地址上面：rsp + 帧长 + 8 + 偏移。
-                    emit2(MOp::kMovq, op_mem(kRsp, frame_bytes_ + 8 + l.stack_off), kRax);
+                    emit2(MOp::kMovq, op_mem(kRsp, frame_.bytes + 8 + l.stack_off), kRax);
                     move_to(slot_mop(p.slot), mreg_operand(kRax));
                 } else if (l.fp) {
                     emit2(MOp::kMovsd, static_cast<MReg>(kXmm0 + l.reg), slot_mop(p.slot));
@@ -447,15 +447,15 @@ void AsmGen::emit_function(const IRFunction& f, int fi) {
                 line("movq pa_frame_top(%rip), %rax");
                 emit2(MOp::kMovq, kRax, rec_mem(0));
                 emit_imm(MOp::kMovq, static_cast<int64_t>(rec_entries), rec_mem(1));
-                if (frame_scan_words_ > 0) {
+                if (frame_.scan_words > 0) {
                     // 临时区从第一个 vreg 槽开始，往高地址扫 scan_words 个字。
                     emit2(MOp::kLeaq, op_mem(kRsp, vreg_slot_off(0)), kRax);
                     emit2(MOp::kMovq, kRax, rec_mem(2));
                 } else {
                     emit_imm(MOp::kMovq, static_cast<int64_t>(0), rec_mem(2));
                 }
-                emit_imm(MOp::kMovq, static_cast<int64_t>(frame_scan_words_), rec_mem(3));
-                if (!frame_scan_mask_.empty()) {
+                emit_imm(MOp::kMovq, static_cast<int64_t>(frame_.scan_words), rec_mem(3));
+                if (!frame_.scan_mask.empty()) {
                     // 位图是静态只读数据，地址编译期就能定。
                     emit2(MOp::kLeaq, op_mem_sym(num_label(".Lscanmask", fi), "%rip"), kRax);
                     emit2(MOp::kMovq, kRax, rec_mem(4));
@@ -463,22 +463,22 @@ void AsmGen::emit_function(const IRFunction& f, int fi) {
                     emit_imm(MOp::kMovq, static_cast<int64_t>(0), rec_mem(4));
                 }
                 int ri = 6;
-                for (size_t i = 0; i < frame_owned_.size(); ++i, ++ri) {
-                    emit2(MOp::kLeaq, smem_mop(frame_owned_[i]), kRax);
+                for (size_t i = 0; i < frame_.owned.size(); ++i, ++ri) {
+                    emit2(MOp::kLeaq, smem_mop(frame_.owned[i]), kRax);
                     // 低位标记：该槽可能装着非堆值，展开时走注册表释放。
-                    if (frame_owned_unknown_[i]) line("orq $1, %rax");
+                    if (frame_.owned_unknown[i]) line("orq $1, %rax");
                     emit2(MOp::kMovq, kRax, rec_mem(ri));
                 }
-                for (int s : frame_scan_) {
+                for (int s : frame_.scan) {
                     emit2(MOp::kLeaq, smem_mop(s), kRax);
                     // bit1：只给 GC 扫描，异常展开不释放。
                     line("orq $2, %rax");
                     emit2(MOp::kMovq, kRax, rec_mem(ri++));
                 }
-                // 本帧 CFA（= rsp + frame_bytes_ + 8，与 .cfi_def_cfa 同一口径）：
+                // 本帧 CFA（= rsp + frame_.bytes + 8，与 .cfi_def_cfa 同一口径）：
                 // 表驱动展开在 phase 2 的 handler 帧人格调用里按它批量释放更深
                 // 帧的记录，所以必须在进链之前写好。
-                emit2(MOp::kLeaq, op_mem(kRsp, frame_bytes_ + 8), kRax);
+                emit2(MOp::kLeaq, op_mem(kRsp, frame_.bytes + 8), kRax);
                 emit2(MOp::kMovq, kRax, rec_mem(5));
                 emit2(MOp::kLeaq, rec_mem(0), kRax);
                 line("movq %rax, pa_frame_top(%rip)");
@@ -553,11 +553,11 @@ void AsmGen::emit_function(const IRFunction& f, int fi) {
         }
         cfi(".cfi_endproc");
         emit_size_func(fname);
-        if (!frame_scan_mask_.empty()) {
+        if (!frame_.scan_mask.empty()) {
             // 临时区位图：只读静态数据，运行时按位决定扫哪些字。
             out_ += "\t.pushsection .rodata\n\t.align 8\n";
             out_ += std::format(".Lscanmask{}:\n", fi);
-            for (uint64_t w : frame_scan_mask_)
+            for (uint64_t w : frame_.scan_mask)
                 out_ += std::format("\t.quad 0x{:016x}\n", w);
             out_ += "\t.popsection\n";
         }

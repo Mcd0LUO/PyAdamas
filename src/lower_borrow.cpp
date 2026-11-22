@@ -67,7 +67,7 @@
 // 改写：删 store 形状的 inc/old-load/dec 与出口 load/dec（**保留清零 store**，
 // 内联重映射后槽有落点，清零无害且避免陈旧指针），置 slot_owned[s]=false。
 // 协同：
-//  - 帧释放清单（codegen_block frame_owned_）按 slot_owned 构建 → 异常展开
+//  - 帧释放清单（codegen_block frame_.owned）按 slot_owned 构建 → 异常展开
 //    （setjmp longjmp / 零开销 _Unwind）不再 dec 借用槽；容器才是 owner。
 //  - GC：借元素经容器根可达（形参根由调用方帧持有；本地根 owned 进帧记录/
 //    寄存器扫描；全局根进根表），借用槽本身不被扫描也不影响可达性。

@@ -25,8 +25,12 @@
       ⚠ 原定验收「改 regalloc 头后重编译 TU ≤ 8」**没有达成，也达不成** ——
       见 §5.1 的更正：单个类的声明拆成几个头不改变重编译代价，那条要等第 2 步。
       实际达成的是「改被搬走的函数体 = 1 个 TU」（54.3 s → 7.9 s）。
-- [ ] **第 2 步 · AsmGen 拆组合对象**：按耦合从低到高提取 `Emitter`、`Frame`、
-      `RegAlloc`、`TagLower`、`VectPlanner`；每步让 AsmGen 留一行转发，调用点改完再删。
+- [~] **第 2 步 · AsmGen 拆组合对象**（进行中，1/5）
+      ✅ `Frame`（帧布局 + 帧记录）—— 2026-11-22 完成，见 §6
+      ⬜ `Emitter`（输出辅助 / 目标指示符 / 位置状态）—— 下一步，耦合最低
+      ⬜ `RegAlloc`（全局分配 / 扫描 / live range splitting）
+      ⬜ `TagLower`（shadow tag / 直调 tag ABI / 零开销异常）
+      ⬜ `VectPlanner`（codegen_vect* / codegen_simd*，约 2500 行）
       验收：单类方法数 ≤ 60、字段数 ≤ 40。
 - [ ] **第 3 步 · 目录按阶段分**：`src/{driver,front,ir,low,opt,gen}/`（纯移动）。
 - [ ] **第 4 步 · Lowerer 拆分**（优先级低于 AsmGen：它职责更单一）。
@@ -139,3 +143,39 @@ awk "/^class AsmGen/,0" src/codegen_impl.h | grep -cE "^\s+[A-Za-z_:<>,\* &]+ [a
 - `codegen_impl.h` 里 13 个**文件级** `inline` 自由函数（`reg32`/`reg8` 各 26 行等）
   不在「类成员」口径内，未动 —— 后续可选收益。
 - 声明层面的重编译代价没变（30 个 TU），这不是第 1 步的目标，是第 2 步的。
+## 6. 第 2 步（进行中）：AsmGen 拆协作对象
+
+### 6.1 已完成：`Frame`（帧布局 + 帧记录）
+
+新文件 `src/frame.h`（60 行）：`class Frame` 持有原来散在 AsmGen 里的帧状态 ——
+
+| 类别 | 成员 |
+|---|---|
+| 布局量（5） | `out_bytes` `locals` `pad` `bytes` `cfa_off` |
+| 帧记录（6） | `owned` `owned_unknown` `scan` `scan_words` `scan_mask` |
+| 方法（2） | `vreg_slot_off(slot, n_slots)`、`layout(total_slots, n_saved_regs)` |
+
+**为什么只拆到「数据 + 纯计算」**：`frame_alloc` / `emit_epilogue` / `outgoing_bytes` /
+`build_frame_scan_info` 会发指令、读 `target_abi()`、`call_ptag_words()`，硬搬进去
+会变成一堆反向依赖。它们留在 AsmGen，改为读 `frame_.*`。这条边界是刻意的。
+
+AsmGen 侧只留两个一行转发（`vreg_slot_off` / `layout_frame`），**52 处字段用法**
+改成 `frame_.x`，调用点写法不变。
+
+### 6.2 模式（后面四个照抄）
+
+1. 只搬**状态 + 不依赖发射器**的计算；需要发指令的留在 AsmGen 读 `collab_.x`；
+2. AsmGen 留一行转发，避免改动大量调用点；
+3. 验证用**产物等价**（12 基准输出 + 指令数），不是靠"看着没改逻辑"。
+
+### 6.3 验证
+
+| 项 | 结果 |
+|---|---|
+| 构建 | 绿 |
+| 普通套件 | 369 ran ok |
+| difftest | 348/0 |
+| ASan | 369 ran ok、0 报告 |
+| check_size | 通过 |
+| 12 基准输出 | 全一致 |
+| 12 基准指令数 | 除 `binary_trees` −0.27%（4.7M 指令的小程序固有噪声）外全部 ±0.000% |

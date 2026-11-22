@@ -201,12 +201,12 @@
     std::string block_label(int bi) const { return block_labels_[static_cast<size_t>(bi)]; }
 
     // 槽位一律相对 rsp：帧的布局是
-    //   [出参区 out_bytes_][槽位区 slot0…][帧记录][push 的 callee-saved][返回地址]
+    //   [出参区 frame_.out_bytes][槽位区 slot0…][帧记录][push 的 callee-saved][返回地址]
     // rsp 在函数体里从头到尾不动（出参区一次性预留，调用点不再 subq，
     // setjmp/longjmp 也只会回到同一个 rsp），所以偏移是常量。
     // 槽号小的（形参、最常用的局部）排在**低地址**，偏移能落在 disp8 里；
     // 帧记录这种每函数只碰一两次的放到最上面。
-    int slot_off(int slot) const { return out_bytes_ + 8 * slot; }
+    int slot_off(int slot) const { return frame_.out_bytes + 8 * slot; }
 
     int vreg_off(VReg r) const;
 

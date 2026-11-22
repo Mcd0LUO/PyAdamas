@@ -43,6 +43,7 @@
 #include "target_abi.h"
 #include "module.h"
 #include "tag_defs.h"
+#include "frame.h"
 #include "vect_rules.h"
 
 namespace pyadamas {

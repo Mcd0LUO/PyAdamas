@@ -22,7 +22,7 @@
     std::vector<int> slot_tag_;           // 命名槽 -> tag 字号（-1 无）
     std::vector<MOperand> vreg_tag_mem_;
     std::vector<MOperand> slot_tag_mem_;
-    // tag 区在 vreg 栈槽区之上、帧记录之下（rec_off 按 locals_ 自动让位）。
+    // tag 区在 vreg 栈槽区之上、帧记录之下（rec_off 按 frame_.locals 自动让位）。
     int tag_off(int w) const;
     static bool is_unk_ty(const TypePtr& t);
     bool unk_vreg(VReg r) const;

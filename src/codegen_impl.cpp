@@ -40,7 +40,7 @@ void AsmGen::cfi_cfa_offset() {
     if (!target_abi().gnu_cfi) return;
     line_buf_ = ".cfi_def_cfa_offset ";
     char buf[24];
-    auto r = std::to_chars(buf, buf + sizeof buf, cfa_off_);
+    auto r = std::to_chars(buf, buf + sizeof buf, frame_.cfa_off);
     line_buf_.append(buf, r.ptr);
     directive(line_buf_);
 }
@@ -102,12 +102,12 @@ std::string AsmGen::shim_label(int i) {
 
 int AsmGen::vreg_off(VReg r) const {
     int s = (r < vreg_slot_.size()) ? vreg_slot_[r] : 0;
-    return out_bytes_ + 8 * (n_slots_ + s);
+    return frame_.out_bytes + 8 * (n_slots_ + s);
 }
 
 int AsmGen::rec_off(int i) const {
-    int words = 6 + static_cast<int>(frame_owned_.size() + frame_scan_.size());
-    return out_bytes_ + locals_ - 8 * (words - i);
+    int words = 6 + static_cast<int>(frame_.owned.size() + frame_.scan.size());
+    return frame_.out_bytes + frame_.locals - 8 * (words - i);
 }
 
 std::string AsmGen::dbg_name_label(int fi) const {
@@ -194,7 +194,7 @@ TypePtr AsmGen::ty_of(VReg r) const {
 }
 
 int AsmGen::tag_off(int w) const {
-    return out_bytes_ + 8 * (n_slots_ + n_vreg_slots_ + w);
+    return frame_.out_bytes + 8 * (n_slots_ + n_vreg_slots_ + w);
 }
 
 bool AsmGen::is_unk_ty(const TypePtr& t) {

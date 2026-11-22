@@ -13,19 +13,11 @@ namespace pyadamas {
     // 这样 rsp 在函数体里恒定，槽位和帧记录都能相对 rsp 寻址，帧里不需要
     // 帧指针。SysV 要求 call 时 rsp 是 16 的倍数：入口 rsp ≡ 8 (mod 16)，
     // 所以「push 的字节数 + subq 的字节数」要 ≡ 8 (mod 16)。
-void AsmGen::layout_frame(int total_slots) {
-        int fixed = 8 * n_saved_regs_ + out_bytes_;
-        int pad = 8 * total_slots;
-        while (((fixed + pad) & 15) != 8) pad += 8;
-        locals_ = pad;
-        frame_pad_ = out_bytes_ + locals_;
-        // frame_bytes_ 是 rsp 到返回地址的距离：push 的 + 下面这一整块。
-        frame_bytes_ = 8 * n_saved_regs_ + frame_pad_;
-    }
+void AsmGen::layout_frame(int total_slots) { frame_.layout(total_slots, n_saved_regs_); }
 
 void AsmGen::frame_alloc() {
-        if (frame_pad_ > 0) emit_imm(MOp::kSubq, frame_pad_, kRsp);
-        cfa_off_ = frame_bytes_ + 8;
+        if (frame_.pad > 0) emit_imm(MOp::kSubq, frame_.pad, kRsp);
+        frame_.cfa_off = frame_.bytes + 8;
         cfi_cfa_offset();
     }
 
@@ -35,27 +27,27 @@ void AsmGen::emit_epilogue() {
         // 把每一步都描述出来，ret 之后再还原——后面的块（异常落地、
         // 另一条 return）继续按函数体状态展开。
         cfi(".cfi_remember_state");
-        const int body_cfa = cfa_off_;
+        const int body_cfa = frame_.cfa_off;
         // 先弹帧记录再退栈：记录本身在局部区底部，%rcx 此时是自由的。
         if (frame_rec_) {
             emit2(MOp::kMovq, rec_mem(0), kRcx);
             line("movq %rcx, pa_frame_top(%rip)");
         }
-        if (frame_pad_ > 0) {
-            emit_imm(MOp::kAddq, frame_pad_, kRsp);
-            cfa_off_ -= frame_pad_;
+        if (frame_.pad > 0) {
+            emit_imm(MOp::kAddq, frame_.pad, kRsp);
+            frame_.cfa_off -= frame_.pad;
             cfi_cfa_offset();
         }
         for (int i = n_saved_regs_ - 1; i >= 0; --i) {
             const char* reg = gen_ ? "%r15" : kSlotRegs()[i];
             emit1(MOp::kPopq, mreg_from_name(reg));
             cfi_restore(reg);
-            cfa_off_ -= 8;
+            frame_.cfa_off -= 8;
             cfi_cfa_offset();
         }
         emit0(MOp::kRet);
         cfi(".cfi_restore_state");
-        cfa_off_ = body_cfa;
+        frame_.cfa_off = body_cfa;
     }
 
 // ── 栈槽分配 ────────────────────────────────────────────────

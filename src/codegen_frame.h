@@ -10,38 +10,21 @@
 // build_frame_scan_info）。它们原本夹在其它分组之间，一并收在本文件。
 // 实现见 codegen_regalloc.cpp（assign_vreg_slots）与 codegen_block.cpp。
 
+    // 帧状态已拆到 Frame（src/frame.h）：布局量与帧记录都在那边的对象里，
+    // 这里只留转发，所有调用点写法不变。
+    Frame frame_;
     // vreg 槽区里第 slot 个槽的偏移（vreg 槽紧挨着命名槽往上排）。
-    int vreg_slot_off(int slot) const { return out_bytes_ + 8 * (n_slots_ + slot); }
-    // 帧记录里的槽：持有堆引用的非借用槽，异常展开时按地址 dec。
-    std::vector<int> frame_owned_;
-    // 与 frame_owned_ 一一对应：槽里可能是非堆值，展开时走注册表释放。
-    // 记录里用地址最低位置 1 标记（槽地址 8 字节对齐）。
-    std::vector<bool> frame_owned_unknown_;
-    // 借来的 unknown 槽：只登记给 GC 扫描，异常展开不释放。
-    std::vector<int> frame_scan_;
+    int vreg_slot_off(int slot) const { return frame_.vreg_slot_off(slot, n_slots_); }
     // 按槽号索引的「这个槽要给 GC 扫描」布尔表。
     // 融合/别名优化据此判断能否绕过栈槽 —— 被扫描的槽必须让 smem(s)
     // 保持权威副本，否则 GC 从帧记录读到旧值/0。
     std::vector<char> gc_scan_slot_;
-    // 需要保守扫描的临时区字数（0 表示这个帧的临时区一个字节都不扫）。
-    int frame_scan_words_ = 0;
-    // 临时区位图：bit i = 1 表示第 i 个字可能需 GC 保守扫描。空表示没有
-    // 位图（运行时按整段扫）。位图必须是超集，宁多勿少。
-    std::vector<uint64_t> frame_scan_mask_;
     // 按 vreg 静态类型算出临时区的保守扫描范围 / 位图（见 codegen_block.cpp）。
     void build_frame_scan_info(const IRFunction& f);
-    // 帧布局 = [出参区 out_bytes_][局部区 locals_][push 的 callee-saved][返回地址]。
-    // rsp 在函数体里全程不动，槽位因此可以相对 rsp 寻址，帧里不需要 rbp。
-    // SysV 要求 call 时 rsp 是 16 的倍数，布局阶段把 padding 补到最小。
-    int out_bytes_ = 0;    // 出参区：整函数最大的那个调用点用量
-    int locals_ = 0;       // 局部区（含对齐 padding）
-    int frame_pad_ = 0;    // subq 的字节数 = out_bytes_ + locals_
-    int frame_bytes_ = 0;  // 返回地址到 rsp 的距离 = frame_pad_ + 8 * n_saved_regs_
-    int cfa_off_ = 0;      // 当前 .cfi_def_cfa_offset（CFA = rsp + cfa_off_）
     // 扫描全部调用点，算出整函数要预留多少出参区。
     int outgoing_bytes(const IRFunction& f) const;
-    // 计算 out_bytes_ 之外的几个布局量；必须在 build_operand_caches 之前
-    // 调用——槽位操作数是在那时格式化好的。
+    // 计算布局量；必须在 build_operand_caches 之前调用——槽位操作数是在那时
+    // 格式化好的。
     void layout_frame(int total_slots);
     // 发 subq 并把 CFA 偏移推到函数体状态。
     void frame_alloc();

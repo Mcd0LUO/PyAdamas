@@ -4,6 +4,38 @@
 
 早期阶段没有逐条留痕，按阶段归纳；0.4 之后逐条记录。
 
+## [0.394] - 2026-11-22
+
+> 模块重组第 2 步（1/5）：把帧状态从 `AsmGen` 拆成独立协作对象 `Frame`。
+>
+> ### 改动
+>
+> 新文件 `src/frame.h`（60 行）：`class Frame` 持有原来散在 AsmGen 里的帧状态 ——
+>
+> | 类别 | 成员 |
+> |---|---|
+> | 布局量（5） | `out_bytes` `locals` `pad` `bytes` `cfa_off` |
+> | 帧记录（6） | `owned` `owned_unknown` `scan` `scan_words` `scan_mask` |
+> | 方法（2） | `vreg_slot_off(slot, n_slots)`、`layout(total_slots, n_saved_regs)` |
+>
+> AsmGen 侧留两个一行转发，**52 处字段用法**改成 `frame_.x`，调用点写法不变。
+>
+> ### 边界为什么这么画
+>
+> `frame_alloc` / `emit_epilogue` / `outgoing_bytes` / `build_frame_scan_info`
+> 会发指令、读 `target_abi()` / `call_ptag_words()`，硬搬进 Frame 会变成一堆反向
+> 依赖。所以只搬**状态 + 不依赖发射器的计算**，需要发指令的留在 AsmGen 读
+> `frame_.*`。这条边界是刻意的，也定下了后面四个协作对象的拆法。
+>
+> ### 验证（产物等价，不靠「看着没改逻辑」）
+>
+> 构建绿；369 ran ok；difftest 348/0；ASan 369 ran ok、0 报告；check_size 通过；
+> 12 个基准输出与 CPython 全一致；指令数除 `binary_trees` −0.27%（4.7M 指令的
+> 小程序固有噪声，此前在 ±0.3% 内来回浮动）外全部 ±0.000%。
+>
+> 后续四个（Emitter / RegAlloc / TagLower / VectPlanner）见
+> `docs/modularization.md` §6.2 的拆法。
+
 ## [0.393] - 2026-11-22
 
 > 模块重组第 1 步：`codegen_impl.h` 1192 → 249 行，拆成 5 个文件，41 处内联体
