@@ -88,13 +88,21 @@
 
 - **nbody 性能没有实质提升**：触发数 0 → 1 只换来 **−551 条指令 / −0.0003%**（可忽略）——
   `energy` 只调用 1 次、内层 10 个组合；`nbody` 仍由 `advance` 主导。
+  > 后续（0.414）：`advance` 内层向量化后 nbody **−45.19%**（见 vectorization-generalization.md §2）。
 - **`advance` 仍未向量化**：内层/位置更新是 `coef=7` 的 scatter 写 + 同数组读写偏移不同
   （big feature：需要 packed scatter 或逐 lane 写 + 别名证明）；外层是嵌套循环形状。
+  > 后续（0.414）：已向量化（重复地址 RMW + 散射写 + 跨 coef 运行期区间守卫），不再阻塞。
+  > 外层嵌套形状仍在（见 vectorization-coverage.md 的阻塞模式表）。
 - **覆盖面仍是 7 个循环 / 3 个基准**（matmul 4、spectral_norm 2、nbody 1），其余 9 个
   基准为 0 —— 其中 `fib`/`nqueens`/`binary_trees` 递归为主、`sieve` 运行期步长、
   `collatz`/`mandelbrot` 数据相关 while，按设计本来就不适合 SIMD；`fasta`/`wordfreq`
   是伪随机状态推进/字典操作。
+  > 后续（0.413/0.414）：**10 个循环 / 3 个基准**（matmul 4、spectral_norm 4、nbody 2）。
+  > 9 个 0 触发基准的逐条阻塞点见 [vectorization-coverage.md](vectorization-coverage.md)
+  > （0.418 诊断归档：9/9 都止步于前置门，不是判据太保守）。
 - **原计划 B2（删特化优先级）/ B3（spectral_norm 剩余热点）未做**。
+  > 后续：B2 在 0.416 用「按体块类型分流」处理（保留模板，整数让通用先试、浮点仍特化先试）；
+  > B3 的 spectral_norm 剩余热点由 0.417 的 32 位守卫快路径拿到（−48.24%，通用/特化差距 2.22×→1.15×）。
 
 ### 下一步建议
 
@@ -102,4 +110,6 @@
    能不能覆盖，不能就明确记为不可行（像 `sieve` 步长那样）；
 2. 不变下标装载目前是**循环体内每次广播**（`movsd+movlhps`），可评估上提到 preheader 的
    常驻广播寄存器（收益 = 每轮省 1 条 load，但要多占 xmm，energy 已经贴边）；
+   > 0.417 后实测（2026-11-23）：nbody advance 外提 1 个就分配失败（xmm 池 7 / 峰值 7），
+   > 只有 energy（池 9）装得下且收益≈0 —— 详见 optimization-roadmap.md「通用浮点路径的长期方向」。
 3. 浮点归约/广播类路径若继续做，注意 AVX2 4-lane 没有广播装载，只能留在 SSE2。

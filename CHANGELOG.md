@@ -4,6 +4,44 @@
 
 早期阶段没有逐条留痕，按阶段归纳；0.4 之后逐条记录。
 
+## [0.418] - 2026-11-23
+
+> 覆盖率诊断归档（文档轮，**无代码改动**）：12 个基准里 9 个 0 触发，逐条定位到
+> 「第一道拒绝的门」—— 9/9 全部止步于**前置门**（体块规模 / 终止符 / 循环形状 / loop_ops），
+> 角色分类、别名、寄存器分配这些中后端判据一次都没走到。
+>
+> ### 结论（9 个 0 触发基准）
+>
+> | 基准 | 第一道门 | 根因 |
+> |---|---|---|
+> | mandelbrot | 循环形状（`vect_planner_loop.cpp:77`） | 内层 `while` 的条件含**数据依赖提前退出**（`and` 短路块插在 cond→body 之间）；外层是嵌套循环 |
+> | sieve | 循环形状（跨步清零）/ 体块终止符（计数） | 归纳变量与数组是**模块级全局**（不走槽）；计数循环体内 if 拆块。另：全局类型 unknown、步长 `p`≠1、`store.global` 被 loop_ops 拒 |
+> | nqueens | 体块终止符（`vect_planner_loop.cpp:53`） | `for c` 体内 `if … and …` 多块 + 递归调用 |
+> | collatz | 体块终止符 | `while n != 1` 数据依赖（trip count 不可知）+ if/else 多块 |
+> | fannkuch / fasta / wordfreq | 形状/终止符 + loop_ops | trip count ≤8（2-lane 不划算）；RNG/字符串/dict 调用就是 work 本身 |
+> | binary_trees / fib | 无 | **0 个循环块**（纯递归），永远不会有触发 |
+>
+> ### 为什么没有便宜的通用缺口
+>
+> 分类器（`classify`）、别名方案、寄存器分配都没被走到 —— 不存在「缺个 case」的修补。
+> 每个阻塞点对应一项结构性能力：masked/early-exit、全局变量当归纳变量、if-conversion、
+> 嵌套循环、调用屏障。优先级：① 全局变量当归纳变量+数组（中-大）② if-conversion（大）
+> ③ masked/early-exit（大）④ 嵌套循环（大）；fannkuch 不做，binary_trees/fib 不再花时间。
+>
+> ### 产出（纯文档）
+>
+> - 新建 `docs/vectorization-coverage.md`：9 个基准的阻塞点清单（IR 证据 + 判据位置 + 复现方法）；
+> - `docs/vectorization-generalization.md`：§2 覆盖率与收益更新（spectral_norm 合计 −61.00%，
+>   其中 0.417 贡献 −48.24%；通用/特化差距 sn 1.15×、nbody 2.00×）、§2.1 补 32 位守卫快路径、
+>   §3 逐基准现状表更新、§4 P4 改为「0.416 演进为按体块类型分流」；
+> - `docs/optimization-roadmap.md`：新增「通用浮点路径的长期方向」（nbody lane 映射差异、
+>   标量尾占内层 50%、LICM 外提被寄存器压力挡住（池 7/峰值 7）的实测、后续方向）。
+>
+> ### 验证
+>
+> 无代码改动：工作区仅 docs/CHANGELOG；12 基准行为不变（HEAD `91de532` 状态，
+> run_tests 379/0、difftest 358/0、ASan 379/0、check_size 通过）。
+
 ## [0.417] - 2026-11-23
 
 > 32 位守卫快路径：int64 索引算术在「可证 < 2^31」时降到 32 位序列。
