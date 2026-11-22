@@ -163,5 +163,7 @@
         MReg jvec = kMRegNone;                          // 归纳变量物化寄存器
         int j_first = -1;
         int j_last = -1;
+        // 重复地址原地累加写：load/expr 的临时寄存器必须活到 store 位置。
+        const std::vector<VAccStore>* acc_stores = nullptr;
     };
     bool vect_alloc_temps(VTempPlan* p);

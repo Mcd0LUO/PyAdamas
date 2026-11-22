@@ -46,7 +46,10 @@ bool VectPlanner::try_loop(const Block& b) {
     }
     L.body_bi = gen_.cur_block_;
     if (L.body_bi < 0 || L.body_bi >= static_cast<int>(gen_.f_->blocks.size())) return false;
-    if (L.BI.size() < 4 || L.BI.size() > 64) return false;    // 体块规模上限（保守）
+    // 体块规模上限（保守）：128 条 IR 指令。原 64 条把「访问多但形状规整」的
+    // 循环挡在门外（nbody advance 的内层 j 循环 113 条），而规模本身不是正确性
+    // 问题 —— 后面的角色/别名/守卫/寄存器分析才是。放宽只会多尝试，失败仍拒绝。
+    if (L.BI.size() < 4 || L.BI.size() > 128) return false;
     if (L.BI.back().op != IrOp::Jump) return false;
 
     // ── 循环结构 ────────────────────────────────────────────────────
@@ -229,6 +232,14 @@ bool VectPlanner::try_loop(const Block& b) {
     // 角色定义在 codegen_vect.h：AVX2 4-lane 发射器按同一张表逐条重放。
     using Role = VRole;
     L.role.assign(L.BI.size(), Role::Skip);
+    // 使用次数：识别「重复地址原地累加写」的形态（load 的 dst 只被这条
+    // Add/Sub 使用、Add/Sub 的 dst 只被这条 store 使用）。按原始 vreg 计数。
+    std::unordered_map<VReg, int> use_cnt;
+    for (const Inst& in : L.BI) {
+        const VReg ops[3] = {in.a, in.b, in.c};
+        for (VReg op : ops) if (op != kNoReg) ++use_cnt[op];
+        for (VReg op : in.args) if (op != kNoReg) ++use_cnt[op];
+    }
     bool saw_map_store = false;   // sqrt 之前不允许有 map 写（见 CallRt 分支）
     for (size_t i = 0; i < L.BI.size(); ++i) {
         const Inst& in = L.BI[i];
@@ -293,9 +304,72 @@ bool VectPlanner::try_loop(const Block& b) {
                 int ek = L.list_elem_float(in.a);
                 AffIdx af = vect_affine_index(in.b, L.jalias, L.inv_int_pred());
                 vect::VK kc = L.classify(in.c);
-                // 写出仍只支持 coef==1：两 lane 相邻才能 movupd 整存，跨步写
-                // 是 scatter（SSE2 没有，且没有收益）→ 保守跳过整段。
-                bool ok = ek >= 0 && af.ok && af.coef == 1 &&
+                // ── 重复地址原地累加写（coef==0）────────────────────────────
+                // 形如 `acc[k] += e` / `acc[k] -= e`（k 不随 j 变）：两个 lane 写
+                // **同一个地址**，不能按 map 存储（lane1 会覆盖 lane0，丢一次累加）。
+                // 识别 `store(addr0, Add/Sub(load(addr0), e))`：
+                //   * load 是同一个 coef==0 下标读、dst 只被这条 Add/Sub 使用；
+                //   * Add/Sub 的 dst 只被这条 store 使用（累加值不外流）；
+                //   * 累加器在左侧（a-e / a+e；e-a 的顺序不同，不收）；
+                //   * e 是 VecF/InvF（逐 lane 各自算好）。
+                // 通过后角色改 AccStore，发射有序合并（t ±= lane0(e); t ±= lane1(e)），
+                // 与标量逐位一致；被折叠的 Add/Sub 改 Skip。
+                if (ek == 0 && af.ok && af.coef == 0 && af.off >= 0 &&
+                    af.off <= kAffMaxOff) {
+                    const Inst* sd = gen_.simd_def(in.c);
+                    if (sd != nullptr && sd->op == IrOp::Bin && sd->a != kNoReg &&
+                        (sd->bop == BinKind::Add || sd->bop == BinKind::Sub)) {
+                        const Inst* ld = gen_.simd_def(sd->a);
+                        const bool load_ok =
+                            ld != nullptr &&
+                            (ld->op == IrOp::IndexLoad || ld->op == IrOp::IndexLoadUnchecked) &&
+                            ld->dst != kNoReg && use_cnt[ld->dst] == 1 &&
+                            use_cnt[sd->dst] == 1 &&
+                            gen_.ty_of(sd->dst) != nullptr && ir_is_float(gen_.ty_of(sd->dst));
+                        AffIdx laf;
+                        if (load_ok) laf = vect_affine_index(ld->b, L.jalias, L.inv_int_pred());
+                        if (load_ok && laf.ok && laf.coef == 0 && laf.off == af.off &&
+                            laf.inv == af.inv && L.list_key(ld->a) == L.list_key(in.a) &&
+                            L.classify(ld->dst) == vect::VK::VecF &&
+                            (L.classify(sd->b) == vect::VK::VecF ||
+                             L.classify(sd->b) == vect::VK::InvF)) {
+                            int bin_pos = -1, load_pos = -1;
+                            for (size_t k = 0; k < i; ++k) {
+                                if (L.BI[k].dst == sd->dst) bin_pos = static_cast<int>(k);
+                                if (L.BI[k].dst == ld->dst) load_pos = static_cast<int>(k);
+                            }
+                            if (bin_pos >= 0 && load_pos >= 0 &&
+                                L.role[static_cast<size_t>(bin_pos)] == Role::Bin &&
+                                L.role[static_cast<size_t>(load_pos)] == Role::Load) {
+                                L.role[i] = Role::AccStore;
+                                Access ac;
+                                ac.list = in.a; ac.off = af.off; ac.coef = 0;
+                                ac.inv = af.inv; ac.write = true;
+                                ac.pos = static_cast<int>(i);
+                                L.acc_at[i] = static_cast<int>(L.accesses.size());
+                                L.accesses.push_back(ac);
+                                VAccStore as;
+                                as.store_pos = static_cast<int>(i);
+                                as.load_pos = load_pos;
+                                as.bin_pos = bin_pos;
+                                as.load = ld->dst;
+                                as.expr = sd->b;
+                                as.is_sub = (sd->bop == BinKind::Sub);
+                                L.acc_store_at[i] = static_cast<int>(L.acc_stores.size());
+                                L.acc_stores.push_back(as);
+                                L.role[static_cast<size_t>(bin_pos)] = Role::Skip;
+                                saw_map_store = true;
+                                break;
+                            }
+                        }
+                    }
+                }
+                // 其余写出：coef==1 用 movupd 整存两 lane；coef>1 是 scatter（x86
+                // 没有 packed scatter）→ 逐 lane 发两条 movsd（低 lane 直接存、
+                // 高 lane 先 movhlps 抽到 scratch 再存）。计算与装载仍然被向量化，
+                // 写退化成 2 条标量 —— 这是通用做法，不是基准特化。
+                // coef==0 的写出只有上面的「重复地址累加」一种安全形态（其余拒绝）。
+                bool ok = ek >= 0 && af.ok && (af.coef == 1 || af.coef > 1) &&
                           af.off >= 0 && af.off <= kAffMaxOff &&
                           ((ek == 0 && (kc == vect::VK::VecF || kc == vect::VK::InvF)) ||
                            (ek == 1 && (kc == vect::VK::VecI || kc == vect::VK::InvI)));
@@ -305,7 +379,7 @@ bool VectPlanner::try_loop(const Block& b) {
                 if (ek == 1 && (!gen_.ty_of(in.c) || gen_.ty_of(in.c)->kind != TyKind::Int)) { L.role[i] = Role::Fail; break; }
                 L.role[i] = Role::MapStore;
                 Access ac;
-                ac.list = in.a; ac.off = af.off; ac.coef = 1; ac.inv = af.inv;
+                ac.list = in.a; ac.off = af.off; ac.coef = af.coef; ac.inv = af.inv;
                 ac.write = true; ac.pos = static_cast<int>(i);
                 L.acc_at[i] = static_cast<int>(L.accesses.size());
                 L.accesses.push_back(ac);
@@ -332,6 +406,19 @@ bool VectPlanner::try_loop(const Block& b) {
         if (L.role[i] == Role::MapStore) saw_map_store = true;
     }
     if (L.failed) return false;
+    // 重复地址累加写：地址 X 在体内必须只有「配对 load + 累加 store」两次访问。
+    // 若还有别的 load（后续读会读到已合并的值，而标量 lane1 只应看到 lane0 的
+    // 更新）或别的写（与合并写交错），语义就不等价 → 保守拒绝整段。
+    for (const VAccStore& as : L.acc_stores) {
+        const Access& aw = L.accesses[static_cast<size_t>(L.acc_at[as.store_pos])];
+        const std::string lk = L.list_key(aw.list);
+        int cnt = 0;
+        for (const Access& a : L.accesses)
+            if (a.coef == aw.coef && a.inv == aw.inv && a.off == aw.off &&
+                L.list_key(a.list) == lk)
+                ++cnt;
+        if (cnt != 2) return false;
+    }
     // 每个 reduction expr 必须可向量化且不含 acc（Acc 分类不在允许集 →
     // 跨累加器依赖保守拒绝）。
     for (const Red& r : L.reds) {
@@ -341,7 +428,7 @@ bool VectPlanner::try_loop(const Block& b) {
         if (!ok) return false;
     }
     // 至少要有一个 map 存储或 reduction（否则循环没有可向量化副作用）。
-    bool has_side = !L.reds.empty();
+    bool has_side = !L.reds.empty() || !L.acc_stores.empty();
     for (Role r : L.role) if (r == Role::MapStore) has_side = true;
     if (!has_side) return false;
     // ── 死值消除（只对含广播装载的新路径生效）─────────────────────────────
@@ -377,6 +464,11 @@ bool VectPlanner::try_loop(const Block& b) {
             }
             for (const Red& r : L.reds)
                 if (r.expr != kNoReg) needed.insert(L.resolve_src(r.expr));
+            // 被折叠成 AccStore 的 Add/Sub 是 Skip，但它的两个操作数仍需发射。
+            for (const VAccStore& as : L.acc_stores) {
+                needed.insert(L.resolve_src(as.load));
+                needed.insert(L.resolve_src(as.expr));
+            }
         };
         collect_needed();
         bool changed = true;
@@ -444,45 +536,11 @@ bool VectPlanner::try_loop(const Block& b) {
         L.list_rep[k] = L.accesses[ai].list;
     }
     for (auto& [lv, accs] : L.by_list) L.lists.push_back(lv);
-    for (const std::string& lk : L.lists) {
-        const std::vector<int>& ix = L.by_list[lk];
-        bool has_r = false, has_w = false;
-        int64_t maxoff = 0; int min_read_pos = 1 << 30, max_write_pos = -1;
-        for (int ai : ix) {
-            const Access& a = L.accesses[static_cast<size_t>(ai)];
-            maxoff = std::max(maxoff, a.off);
-            if (a.write) { has_w = true; max_write_pos = std::max(max_write_pos, a.pos); }
-            else { has_r = true; min_read_pos = std::min(min_read_pos, a.pos); }
-        }
-        if (has_w && maxoff != 0) {
-            // 写偏移非 0：跨迭代依赖距离 = 写偏移 - 读偏移，保守只允许纯写且
-            // 偏移 0（本轮）。纯写非 0 偏移（如 out[j+1]=...）跨迭代写写不相交
-            // 但读侧复杂 → 保守跳过。
-            return false;
-        }
-        if (!has_r || !has_w) continue;
-        const Access& a0 = L.accesses[static_cast<size_t>(ix[0])];
-        VReg rep = a0.inv;
-        for (int ai : ix) {
-            Access& a = L.accesses[static_cast<size_t>(ai)];
-            if (a.coef != a0.coef || a.off != a0.off) return false;
-            if (a.inv != rep) {
-                bool seen = false;
-                for (const AffEq& pr : L.inv_eq)
-                    if ((pr.x == rep && pr.y == a.inv) ||
-                        (pr.x == a.inv && pr.y == rep)) seen = true;
-                if (!seen) {
-                    AffEq eq;
-                    eq.x = rep; eq.y = a.inv;
-                    if (rep != kNoReg) eq.xm = L.list_base_mop(rep);
-                    if (a.inv != kNoReg) eq.ym = L.list_base_mop(a.inv);
-                    L.inv_eq.push_back(eq);
-                }
-                a.inv = rep;                              // 守卫后等价 → 归一到代表
-            }
-        }
-        if (min_read_pos > max_write_pos) return false;   // 读必须在写前
-    }
+    // ── 别名 / 跨 lane 依赖分析（阶段 B5 阶段 4）：实现在
+    // vect_planner.cpp 的 Loop::vect_alias_plan（按 (list, coef) 分组
+    // 证明跨 lane 无依赖：同组偏移差判定 + 异组运行期区间不相交守卫）。
+    if (!L.vect_alias_plan()) return false;
+
     // 基址键 = (逻辑数组, inv)：一个 GPR 存 data + inv*8；coef>1 的访问共用
     // 一个按 coef 去重的运行期跨步计数器 K。
     for (Access& a : L.accesses) {
@@ -535,6 +593,16 @@ bool VectPlanner::try_loop(const Block& b) {
     for (const AffEq& eq : L.inv_eq) {
         if (eq.x != kNoReg && !AsmGen::simd_scratch_safe(eq.xm)) return false;
         if (eq.y != kNoReg && !AsmGen::simd_scratch_safe(eq.ym)) return false;
+    }
+    // 跨组不相交守卫的运行期前提：inv 来源可安全读、系数/偏移在可发射范围。
+    for (const VDisjointGuard& dg : L.dj_guards) {
+        for (const AffBase* g : {&dg.w, &dg.r}) {
+            if (g->coef < 0 || g->coef > kAffMaxCoef) return false;
+            if (g->coef * 16 > INT32_MAX) return false;
+            if (g->inv != kNoReg && !AsmGen::simd_scratch_safe(g->inv_src)) return false;
+        }
+        for (int64_t o : {dg.wmin, dg.wmax, dg.rmin, dg.rmax})
+            if (o < INT32_MIN || o > INT32_MAX) return false;
     }
 
     // 各 reduction acc 位置：float 提升 xmm8-15 原地累加，否则 scratch+每轮
@@ -640,6 +708,16 @@ bool VectPlanner::try_loop(const Block& b) {
         int pos = (lu == L.last_use.end()) ? r.store_pos : std::max(lu->second, r.store_pos);
         L.last_use[er] = pos;
     }
+    // 重复地址累加写：load/expr 的临时寄存器要活到 store 位置（发射在 store
+    // 处才取用它们），否则线性扫描会提前还池、被别的临时值覆盖。
+    for (const VAccStore& as : L.acc_stores) {
+        for (VReg v : {as.load, as.expr}) {
+            VReg r = L.resolve_src(v);
+            auto lu = L.last_use.find(r);
+            if (lu == L.last_use.end() || lu->second < as.store_pos)
+                L.last_use[r] = as.store_pos;
+        }
+    }
     // 归纳变量物化寄存器（P5b）：生命周期只由算术使用点决定（纯下标用的 j
     // 不需要它）。分配/释放见 vect_alloc_temps。
     gen_.vect_j_span(L.BI, L.role, L.cls, &L.j_first, &L.j_last);
@@ -654,12 +732,27 @@ bool VectPlanner::try_loop(const Block& b) {
             break;
         }
     }
+    // 累加写 / 散射写的高 lane 抽取 scratch（阶段 B5 阶段 2/3）：两者从不同时
+    // 使用，共用一个；且优先借用「单条指令内原子使用、跨指令不 live」的序列
+    // scratch（与 sqrt 的借用同一思路）—— nbody advance 内层就是这样才够寄存器。
+    bool has_scatter = false;
+    for (const Access& a : L.accesses)
+        if (a.write && a.coef > 1) has_scatter = true;
+    if (!L.acc_stores.empty() || has_scatter) {
+        if (L.GSCR != kMRegNone && !L.acc_stores.empty()) L.ACCTMP = L.GSCR;
+        else if (L.GSCR != kMRegNone) L.ACCTMP = L.GSCR;
+        else if (L.SEQ1 != kMRegNone) L.ACCTMP = L.SEQ1;
+        else L.ACCTMP = L.take(kMRegNone);
+        if (L.ACCTMP == kMRegNone) return false;
+        L.SCATMP = L.ACCTMP;
+    }
     // 临时值线性扫描（含归纳变量物化寄存器的分配/释放），见 vect_alloc_temps。
     {
         AsmGen::VTempPlan plan;
         plan.body = &L.BI; plan.role = &L.role; plan.last_use = &L.last_use; plan.cls = &L.cls;
         plan.pool = &L.xmm_pool; plan.tmp_reg = &L.tmp_reg;
         plan.jvec = L.JVEC; plan.j_first = L.j_first; plan.j_last = L.j_last;
+        plan.acc_stores = &L.acc_stores;
         if (!gen_.vect_alloc_temps(&plan)) return false;
         L.JVEC = plan.jvec;
     }
@@ -691,6 +784,10 @@ bool VectPlanner::try_loop(const Block& b) {
         if (!vect_affine_guard(L.list_base_mop(L.list_rep[bb.key]), bb, L.n_op, L.tail)) return false;
     // 同对象读写的 inv 判等守卫（循环版本化：证不出相等就走标量）。
     for (const AffEq& eq : L.inv_eq) vect_affine_inv_eq(eq, L.tail);
+    // 跨组地址区间不相交守卫（阶段 B5 阶段 4）：证不出无跨 lane 依赖 → 标量。
+    for (const VDisjointGuard& dg : L.dj_guards)
+        if (!vect_affine_disjoint(dg.w, dg.wmin, dg.wmax, dg.r, dg.rmin, dg.rmax,
+                                  L.JREG, L.n_op, L.tail)) return false;
     // 基址常驻寄存器：base = data + inv*8。
     for (const AffBase& bb : L.bases)
         vect_affine_base(L.list_base_mop(L.list_rep[bb.key]), bb, bb.reg);
@@ -750,6 +847,10 @@ bool VectPlanner::try_loop(const Block& b) {
     // coef==0 的不变量下标元素装载只在 SSE2 2-lane 里做了广播；4-lane 发射器
     // 没有这条路径 → 含这类访问的循环整段留给 SSE2。
     for (const Access& a : L.accesses) if (a.coef == 0) L.avx_int = false;
+    // 重复地址累加写只有 SSE2 序列（4-lane 发射器不认这个角色）→ 也留给 SSE2。
+    for (Role r : L.role) if (r == Role::AccStore) L.avx_int = false;
+    // 跨组地址区间不相交守卫只有 SSE2 序列（4-lane 发射器不认）→ 留给 SSE2。
+    if (!L.dj_guards.empty()) L.avx_int = false;
     L.avx.body = &L.BI; L.avx.role = &L.role; L.avx.acc = &L.accesses; L.avx.acc_at = &L.acc_at;
     L.avx.bases = &L.bases; L.avx.reds = &L.reds; L.avx.xmm_of = &L.xmm_of_fn;
     L.avx.uniq_inv = &L.uniq_inv; L.avx.inv_reg = &L.inv_reg;
@@ -901,7 +1002,41 @@ bool VectPlanner::try_loop(const Block& b) {
                 const Access& a = L.accesses[static_cast<size_t>(L.acc_at[i])];
                 MReg rc = L.xmm_of(in.c);
                 if (rc == kMRegNone) return false;
-                vect_affine_store(L.bases[static_cast<size_t>(a.bidx)].reg, L.JREG, a.off, rc);
+                MReg bs = L.bases[static_cast<size_t>(a.bidx)].reg;
+                if (a.coef == 1) {
+                    vect_affine_store(bs, L.JREG, a.off, rc);
+                } else {
+                    // 散射写：lane0 → base + K + off*8（K 已按 coef*16 跨步），
+                    // lane1 → 再 + coef*8。x86 没有 packed scatter，两条 movsd。
+                    if (L.SCATMP == kMRegNone) return false;      // 不应发生
+                    MReg kb = L.kreg[a.coef];
+                    gen_.emit2(MOp::kMovsd, rc, AsmGen::op_mem(bs, kb, 1, a.off * 8));
+                    gen_.emit2(MOp::kMovhlps, rc, L.SCATMP);      // SCATMP.lo = rc.hi
+                    gen_.emit2(MOp::kMovsd, L.SCATMP,
+                               AsmGen::op_mem(bs, kb, 1, (a.off + a.coef) * 8));
+                }
+                break;
+            }
+            case Role::AccStore: {
+                // 重复地址原地累加写：两个 lane 写同一地址 → 有序合并成一次写。
+                //   tt = 配对的广播装载寄存器 [t, t]
+                //   ACCTMP.lo = et.hi（lane1 的增量）
+                //   tt.lo = (t ± e0) ± e1      ← 两条单精度标量运算，顺序/舍入与
+                //                                标量逐位一致（保序）
+                //   store tt.lo → addr
+                const Access& a = L.accesses[static_cast<size_t>(L.acc_at[i])];
+                auto asi = L.acc_store_at.find(static_cast<int>(i));
+                if (asi == L.acc_store_at.end() || L.ACCTMP == kMRegNone) return false;
+                const VAccStore& as = L.acc_stores[static_cast<size_t>(asi->second)];
+                MReg tt = L.xmm_of(as.load);
+                MReg et = L.xmm_of(as.expr);
+                if (tt == kMRegNone || et == kMRegNone) return false;
+                gen_.emit2(MOp::kMovhlps, et, L.ACCTMP);       // ACCTMP.lo = et.hi
+                const MOp fop = as.is_sub ? MOp::kSubsd : MOp::kAddsd;
+                gen_.emit2(fop, et, tt);                        // tt.lo = t ± e0
+                gen_.emit2(fop, L.ACCTMP, tt);                  // tt.lo = (t ± e0) ± e1
+                gen_.emit2(MOp::kMovsd, tt,
+                           AsmGen::op_mem(L.bases[static_cast<size_t>(a.bidx)].reg, a.off * 8));
                 break;
             }
             case Role::RedStore: {

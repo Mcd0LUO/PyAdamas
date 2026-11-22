@@ -45,6 +45,14 @@ struct AffEq {
     MOperand xm;
     MOperand ym;
 };
+// 跨组（不同 coef）地址区间不相交守卫的请求：写组 w 的偏移 {wmin..wmax}、
+// 读组 r 的偏移 {rmin..rmax}。发射期算运行期区间
+//   [inv + coef*j + off_min, inv + coef*(n-1) + off_max]
+// 两区间不相交（足够条件：所有 lane 的地址互不相同）才允许向量化。
+struct VDisjointGuard {
+    AffBase w, r;
+    int64_t wmin = 0, wmax = 0, rmin = 0, rmax = 0;
+};
 
 // 向量值分类（try_vect_loop 的分析结果）。原为 AsmGen 的内嵌类型，阶段 3
 // 第 6 步随常量归并方法搬到 VectPlanner：codegen_vect_jvec.cpp 的寄存器规划
@@ -77,7 +85,22 @@ struct SlotInfo {
 
 // 体块一条指令在向量循环里的角色（阶段 A4 第 1 步从 AsmGen 类体搬来：
 // Loop 要按它发射，codegen_vect.h 里留别名，类内写法不变）。
-enum class VRole : uint8_t { Skip, Load, Bin, MapStore, RedStore, Fail };
+enum class VRole : uint8_t { Skip, Load, Bin, MapStore, RedStore, AccStore, Fail };
+
+// 重复地址的原地累加写（coef==0 的 `acc[k] += e` / `acc[k] -= e`）：两个 lane
+// 的地址相同，不能按 map 存储（后一 lane 覆盖前一 lane，丢一次累加）。识别
+// `store(addr, Add/Sub(load(addr), e))`（e 的 dst 无其它使用者、load 的 dst 只被
+// 这条 Add/Sub 使用）后折叠成有序合并：
+//   t = load addr; t ±= lane0(e); t ±= lane1(e); store t
+// 每条都是单条标量 FP 运算、顺序与标量逐位一致（保序）。
+struct VAccStore {
+    int store_pos = -1;   // 体块内 store 指令位置
+    int load_pos = -1;    // 配对的 IndexLoad 指令位置
+    int bin_pos = -1;     // 被折叠的 Add/Sub 位置（角色改 Skip，不发射）
+    VReg load = kNoReg;   // 配对的 IndexLoad 结果（广播寄存器 [t, t]）
+    VReg expr = kNoReg;   // 逐 lane 的增量 e
+    bool is_sub = false;  // 累减还是累加
+};
 
 // 一条下标访问的仿射描述（coef*j + inv + off）。
 struct VAccess {
@@ -192,10 +215,13 @@ public:
         // ── 分析结果（角色 / 逻辑数组 / 守卫 / 基址）──
         std::unordered_map<VReg, char> nonindex_use;   // 非下标使用点（P5b）
         std::vector<VRole> role;                       // 体块指令角色
+        std::vector<VAccStore> acc_stores;             // 重复地址原地累加写
+        std::unordered_map<int, int> acc_store_at;     // store 位置 → acc_stores 下标
         std::unordered_map<std::string, std::vector<int>> by_list;  // 数组键 → 访问下标
         std::unordered_map<std::string, VReg> list_rep;             // 数组键 → 代表 vreg
         std::vector<std::string> lists;                // 数组键（确定性顺序）
         std::vector<AffEq> inv_eq;                     // 入口 inv 判等守卫
+        std::vector<VDisjointGuard> dj_guards;         // 跨组地址区间不相交守卫
         std::vector<AffBase> bases;                    // 基址键
         std::vector<int64_t> kcoefs;                   // coef>1 的跨步计数器系数
 
@@ -214,6 +240,8 @@ public:
         int j_first = -1, j_last = -1;                 // 归纳变量算术使用区间
         MReg FSCR = kMRegNone;
         MReg HSCR = kMRegNone;
+        MReg ACCTMP = kMRegNone;      // 累加写合并的 lane1 抽取 scratch
+        MReg SCATMP = kMRegNone;      // 散射写的高 lane 抽取 scratch
         // math.sqrt（CallRt MathSqrt）的 2-lane 发射：SQRZ = 循环前清零的 0.0
         // （负数守卫比较用），SQRTMP = 打包高 lane 的临时。has_sqrt 由 classify 置位。
         bool has_sqrt = false;
@@ -236,6 +264,7 @@ public:
         bool is_red_add(VReg v) const;
         bool slot_is_temp(int slot) const;
         VReg temp_store_val(int slot) const;
+        bool vect_alias_plan();   // 别名 / 跨 lane 依赖分析（阶段 B5，实现在 vect_planner.cpp）
         MReg take(MReg prefer);
         VReg resolve_src(VReg v) const;
 
@@ -303,6 +332,11 @@ public:
     void vect_merge_const_invs(std::unordered_map<VReg, VClass>* cls);
 
     // ── 仿射守卫与基址（阶段 3 第 5 步）──
+    // 跨组地址区间不相交守卫：lo_W > hi_R 或 hi_W < lo_R 时安全，否则跳
+    // tail（保守标量）。参数越界/来源不可安全读 → 返回 false（拒绝整段）。
+    bool vect_affine_disjoint(const AffBase& w, int64_t wmin, int64_t wmax,
+                              const AffBase& r, int64_t rmin, int64_t rmax,
+                              MReg jreg, const MOperand& n_op, const std::string& tail);
     bool vect_affine_guard(const MOperand& list_obj, const AffBase& b,
                            const MOperand& n_op, const std::string& tail);
     void vect_affine_base(const MOperand& list_obj, const AffBase& b, MReg reg);

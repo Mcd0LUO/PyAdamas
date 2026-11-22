@@ -176,6 +176,18 @@ bool AsmGen::vect_alloc_temps(VTempPlan* p) {
                 if (tr != p->tmp_reg->end() && tr->second != dst_reg) give(tr->second);
             }
         }
+        // 重复地址累加写：load/expr 的临时寄存器活到 store 位置，用完还池。
+        if (p->acc_stores != nullptr && role[i] == VRole::AccStore) {
+            for (const VAccStore& as : *p->acc_stores) {
+                if (as.store_pos != static_cast<int>(i)) continue;
+                for (VReg v : {as.load, as.expr}) {
+                    VReg r = resolve(v);
+                    auto tr = p->tmp_reg->find(r);
+                    if (tr != p->tmp_reg->end() && tr->second != dst_reg)
+                        give(tr->second);
+                }
+            }
+        }
         if (p->jvec != kMRegNone && static_cast<int>(i) == p->j_last) give(p->jvec);
     }
     return true;

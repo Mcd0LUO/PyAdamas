@@ -105,6 +105,206 @@ void VectPlanner::vect_affine_load(MReg base, MReg j, MReg k, int64_t coef, int6
     emit_.emit2(MOp::kUnpcklpd, mreg_operand(scratch), mreg_operand(dst));
 }
 
+
+// 别名 / 跨 lane 依赖分析（阶段 B5 阶段 4）：2-lane 向量循环把相邻两轮迭代
+// （lane0 = j、lane1 = j+1）合进一次迭代，每条指令对两个 lane 同时执行。
+// 与标量语义的差别只可能来自「同一地址被不同 lane 访问」，所以按
+// (list, coef) 分组证明跨 lane 无依赖；证明不了就返回 false（整段标量）。
+// 判据全是 IR 结构（coef/偏移/指令位置），没有基准特化。细节见逐条注释。
+bool VectPlanner::Loop::vect_alias_plan() {
+    // ── 别名 / 跨 lane 依赖分析（阶段 B5 阶段 4）──────────────────────────
+    // 2-lane 向量循环把相邻两轮迭代（lane0 = j、lane1 = j+1）合进一次迭代，
+    // 每条指令对两个 lane 同时执行。与标量语义的差别只可能来自「同一地址被
+    // 不同 lane 访问」，因此按 (list, coef) 分组证明跨 lane 无依赖：
+    //   同组（coef 相同）：偏移集合直接判：
+    //     * off_w == off_r + coef（lane0 写 = lane1 读）→ 只有「写指令在读
+    //       指令之后」才安全（否则 lane1 读到新值、标量读到旧值）→ 拒绝；
+    //     * off_w + coef == off_r（lane1 写 = lane0 读）→ 只有「写指令在读
+    //       指令之前」才安全 → 否则拒绝；
+    //   异组（coef 不同）：入口发一次运行期「地址区间不相交」守卫
+    //     [inv + coef*j + off_min, inv + coef*(n-1) + off_max]，失败跳标量尾。
+    //     区间不相交 ⇒ 所有 lane 的地址都不同 ⇒ 上面两种碰撞都不存在。
+    // 纯写 list（无任何读）没有跨 lane 依赖；写写只在 coef==0 时可能同址，
+    // 而 coef==0 的写只允许「重复地址累加」形态（已在角色阶段单独校验）。
+    // 累加写的配对 (load, store) 是刻意保留的同址读写（有序合并），跳过位置检查。
+    for (const std::string& lk : lists) {
+        const std::vector<int>& ix = by_list[lk];
+        struct Grp {
+            int64_t coef = 0;
+            VReg inv = kNoReg;
+            std::vector<int64_t> wo, ro;
+            std::vector<int> wpos, rpos;
+        };
+        std::vector<Grp> gs;
+        for (int ai : ix) {
+            const Access& a = accesses[static_cast<size_t>(ai)];
+            Grp* g = nullptr;
+            for (Grp& x : gs)
+                if (x.coef == a.coef && x.inv == a.inv) { g = &x; break; }
+            if (g == nullptr) {
+                gs.push_back(Grp{a.coef, a.inv, {}, {}, {}, {}});
+                g = &gs.back();
+            }
+            if (a.write) { g->wo.push_back(a.off); g->wpos.push_back(a.pos); }
+            else { g->ro.push_back(a.off); g->rpos.push_back(a.pos); }
+        }
+        bool has_r = false, has_w = false;
+        for (const Grp& g : gs) {
+            if (!g.ro.empty()) has_r = true;
+            if (!g.wo.empty()) has_w = true;
+        }
+        if (!has_r) {
+            // 纯写 list：多个跨步时写与写也可能跨 lane 撞车，证起来不值当 → 拒绝。
+            if (gs.size() > 1) return false;
+            continue;
+        }
+        if (!has_w) continue;
+        // 同一 coef 内不同 inv：按旧规则用入口判等守卫归一到代表（证不出相等
+        // 则整段标量 —— 守卫失败跳标量尾）。这一步与旧实现逐字对应，保证已能
+        // 向量化的循环（如 matmul 的 c[i*N+j] += ...）产物不变。
+        {
+            std::vector<Grp> merged;
+            for (Grp& g : gs) {
+                Grp* hit = nullptr;
+                for (Grp& m : merged)
+                    if (m.coef == g.coef) { hit = &m; break; }
+                if (hit == nullptr) { merged.push_back(g); continue; }
+                if (g.inv != hit->inv) {
+                    VReg rep = hit->inv;
+                    bool seen = false;
+                    for (const AffEq& pr : inv_eq)
+                        if ((pr.x == rep && pr.y == g.inv) ||
+                            (pr.x == g.inv && pr.y == rep)) seen = true;
+                    if (!seen) {
+                        AffEq eq;
+                        eq.x = rep; eq.y = g.inv;
+                        if (rep != kNoReg) eq.xm = list_base_mop(rep);
+                        if (g.inv != kNoReg) eq.ym = list_base_mop(g.inv);
+                        inv_eq.push_back(eq);
+                    }
+                    for (int ai : by_list[lk]) {
+                        Access& a = accesses[static_cast<size_t>(ai)];
+                        if (a.coef == g.coef && a.inv == g.inv) a.inv = rep;
+                    }
+                }
+                hit->wo.insert(hit->wo.end(), g.wo.begin(), g.wo.end());
+                hit->wpos.insert(hit->wpos.end(), g.wpos.begin(), g.wpos.end());
+                hit->ro.insert(hit->ro.end(), g.ro.begin(), g.ro.end());
+                hit->rpos.insert(hit->rpos.end(), g.rpos.begin(), g.rpos.end());
+            }
+            gs = std::move(merged);
+        }
+        auto is_acc_pair = [&](int rpos, int wpos) {
+            for (const VAccStore& as : acc_stores)
+                if (as.store_pos == wpos && as.load_pos == rpos) return true;
+            return false;
+        };
+        for (const Grp& g : gs) {
+            for (size_t wi = 0; wi < g.wo.size(); ++wi) {
+                for (size_t ri = 0; ri < g.ro.size(); ++ri) {
+                    const int64_t w = g.wo[wi], r = g.ro[ri];
+                    const int p = g.wpos[wi], q = g.rpos[ri];
+                    if (is_acc_pair(q, p)) continue;
+                    if (w == r + g.coef && p > q) return false;
+                    if (w + g.coef == r && p < q) return false;
+                }
+            }
+        }
+        if (gs.size() == 1) continue;
+        for (const Grp& gw : gs) {
+            for (const Grp& gr : gs) {
+                if (gw.coef == gr.coef) continue;
+                if (gw.wo.empty() || gr.ro.empty()) continue;
+                VDisjointGuard dg;
+                dg.w.key = lk; dg.w.inv = gw.inv; dg.w.coef = gw.coef;
+                if (gw.inv != kNoReg) dg.w.inv_src = list_base_mop(gw.inv);
+                dg.r.key = lk; dg.r.inv = gr.inv; dg.r.coef = gr.coef;
+                if (gr.inv != kNoReg) dg.r.inv_src = list_base_mop(gr.inv);
+                dg.wmin = *std::min_element(gw.wo.begin(), gw.wo.end());
+                dg.wmax = *std::max_element(gw.wo.begin(), gw.wo.end());
+                dg.rmin = *std::min_element(gr.ro.begin(), gr.ro.end());
+                dg.rmax = *std::max_element(gr.ro.begin(), gr.ro.end());
+                dj_guards.push_back(dg);
+            }
+        }
+    }
+    return true;
+}
+// 跨组（不同 coef）地址区间不相交守卫（阶段 B5 阶段 4）。
+// 2-lane 向量循环里两个 lane 的地址分别是 inv + coef*j + off 与
+// inv + coef*(j+1) + off。只要「写组的地址区间」与「读组的地址区间」不相交，
+// 所有 lane 的写地址与读地址就互不相同，跨 lane 依赖不可能存在。区间用
+// 整段循环范围（j 取入口值 JREG，上界取 n-1），偏保守但只需一次入口检查。
+// 返回 false = 参数不可安全发射（应保守拒绝整段）。
+bool VectPlanner::vect_affine_disjoint(const AffBase& w, int64_t wmin, int64_t wmax,
+                                       const AffBase& r, int64_t rmin, int64_t rmax,
+                                       MReg jreg, const MOperand& n_op,
+                                       const std::string& tail) {
+    // lo(g, off) = inv + coef*j + off → kRax
+    auto lo_of = [&](const AffBase& b, int64_t off) -> bool {
+        if (b.inv != kNoReg) {
+            if (!AsmGen::simd_scratch_safe(b.inv_src)) return false;
+            emit_.emit2(MOp::kMovq, b.inv_src, kRax);
+        } else {
+            emit_.emit_imm(MOp::kMovq, 0, kRax);
+        }
+        if (b.coef != 0) {
+            emit_.emit2(MOp::kMovq, mreg_operand(jreg), kRdx);
+            if (b.coef != 1) {
+                emit_.emit_imm(MOp::kImulq, b.coef, kRdx);
+                emit_.emit_jmp("jo", tail);
+            }
+            emit_.emit2(MOp::kAddq, kRdx, kRax);
+            emit_.emit_jmp("jo", tail);
+        }
+        if (off != 0) {
+            emit_.emit_imm(MOp::kAddq, off, kRax);
+            emit_.emit_jmp("jo", tail);
+        }
+        return true;
+    };
+    // hi(g, off) = inv + coef*(n-1) + off → kRcx
+    auto hi_of = [&](const AffBase& b, int64_t off) -> bool {
+        if (b.inv != kNoReg) {
+            if (!AsmGen::simd_scratch_safe(b.inv_src)) return false;
+            emit_.emit2(MOp::kMovq, b.inv_src, kRcx);
+        } else {
+            emit_.emit_imm(MOp::kMovq, 0, kRcx);
+        }
+        if (b.coef != 0) {
+            emit_.emit2(MOp::kMovq, n_op, kRdx);
+            if (b.coef != 1) {
+                emit_.emit_imm(MOp::kImulq, b.coef, kRdx);
+                emit_.emit_jmp("jo", tail);
+            }
+            const int64_t d = off - b.coef;
+            if (d != 0) {
+                emit_.emit_imm(MOp::kAddq, d, kRdx);
+                emit_.emit_jmp("jo", tail);
+            }
+            emit_.emit2(MOp::kAddq, kRdx, kRcx);
+            emit_.emit_jmp("jo", tail);
+        } else if (off != 0) {
+            emit_.emit_imm(MOp::kAddq, off, kRcx);
+            emit_.emit_jmp("jo", tail);
+        }
+        return true;
+    };
+    const std::string ok = emit_.fresh_label("vectdj");
+    // 条件 1：lo_W > hi_R（写组整体在读组上方）
+    if (!lo_of(w, wmin)) return false;
+    if (!hi_of(r, rmax)) return false;
+    emit_.emit2(MOp::kCmpq, kRcx, kRax);   // flags = lo_W - hi_R
+    emit_.emit_jmp("jg", ok);
+    // 条件 2：hi_W < lo_R（写组整体在读组下方）
+    if (!hi_of(w, wmax)) return false;
+    if (!lo_of(r, rmin)) return false;
+    emit_.emit2(MOp::kCmpq, kRcx, kRax);   // flags = lo_R - hi_W
+    emit_.emit_jmp("jg", ok);
+    emit_.emit_jmp(MOp::kJmp, tail);       // 两方向都有交集 → 保守标量
+    emit_.label(ok);
+    return true;
+}
 void VectPlanner::vect_affine_store(MReg base, MReg j, int64_t off, MReg src) {
     emit_.emit2(MOp::kMovupd, mreg_operand(src), AsmGen::op_mem(base, j, 8, off * 8));
 }
