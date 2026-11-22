@@ -45,66 +45,23 @@
     // （所以不会 SIGILL）；能力字节初值 0 是保守值。编译期 PYADAMAS_AVX2=0
     // 只发 SSE2 路径，便于对拍两条路径的一致性。
     //
-    // 角色/访问/累加器描述定义在类体里（而不是 try_vect_loop 的局部结构），
-    // 让 codegen_vect_avx2.cpp 读**同一份**分析结果：4-lane 不重新分类、
-    // 不猜，判据只有一处。
-    enum class VRole : uint8_t { Skip, Load, Bin, MapStore, RedStore, Fail };
+    // 角色/访问/累加器描述已随阶段 A4 第 1 步移到 VectPlanner::Loop
+    // （src/vect_planner.h），这里只留别名；让 codegen_vect_avx2.cpp 读
+    // **同一份**分析结果：4-lane 不重新分类、不猜，判据只有一处。
+    using VRole = ::pyadamas::VRole;
     // 向量值分类（try_vect_loop 的分析结果）。原本内嵌在类体里，阶段 3
     // 第 6 步随同值常量归并方法移到 VectPlanner（src/vect_planner.h）；
     // 这里只留别名，类体内的 VClass / VK::X 写法保持不变。
     // 分类枚举与判据的唯一出处在 vect_rules.h（具名 + 编译期真值表）。
     using VK = vect::VK;
     using VClass = ::pyadamas::VClass;
-    // 一条下标访问的仿射描述（coef*j + inv + off）。
-    struct VAccess {
-        VReg list = kNoReg;
-        int64_t off = 0;
-        int64_t coef = 1;
-        VReg inv = kNoReg;
-        bool write = false;
-        int pos = 0;              // 体块内指令序号（读在写前判定）
-        int bidx = -1;            // 基址键下标（AffBase）
-    };
-    // 一个 reduction 累加器（int 走 4-lane 时 IACC 当 ymm 用）。
-    struct VRed {
-        int slot = -1;
-        VReg acc = kNoReg, expr = kNoReg, add = kNoReg;
-        int store_pos = -1;
-        bool is_float = false;
-        MOperand loc{};                 // 槽位置
-        bool acc_stack = false;         // float acc 在栈（scratch+每轮写回）
-        MReg XT = kMRegNone;            // float acc 寄存器
-        MReg IACC = kMRegNone;          // int acc 寄存器
-    };
+    // 一条下标访问的仿射描述（coef*j + inv + off）。定义见 vect_planner.h。
+    using VAccess = ::pyadamas::VAccess;
+    // 一个 reduction 累加器（int 走 4-lane 时 IACC 当 ymm 用）。定义见 vect_planner.h。
+    using VRed = ::pyadamas::VRed;
     // 4-lane 发射上下文：全部是 try_vect_loop 已定死的分析/分配结果（只读）。
-    struct VAvx2Ctx {
-        const std::vector<Inst>* body = nullptr;
-        const std::vector<VRole>* role = nullptr;
-        const std::vector<VAccess>* acc = nullptr;
-        const std::vector<int>* acc_at = nullptr;
-        const std::vector<AffBase>* bases = nullptr;
-        const std::vector<VRed>* reds = nullptr;
-        const std::function<MReg(VReg)>* xmm_of = nullptr;
-        const std::vector<VReg>* uniq_inv = nullptr;
-        const std::unordered_map<VReg, MReg>* inv_reg = nullptr;
-        const std::vector<int64_t>* kcoefs = nullptr;
-        const std::unordered_map<int64_t, MReg>* kreg = nullptr;
-        MReg jreg = kMRegNone;
-        bool j_stack = false;
-        MOperand jloc;
-        MOperand n_op;
-        MReg gscr = kMRegNone;    // coef>1 装载的打包 scratch（VPINSRQ 用）
-        MReg seq1 = kMRegNone;    // int 乘 pmuludq 重建 scratch
-        MReg seq2 = kMRegNone;
-        MReg hscr = kMRegNone;    // int reduction 水平求和 scratch（折叠也用）
-        // 归纳变量物化寄存器（P5b，2-lane 侧由 vect_jvec2 物化 [j, j+1]）：
-        // 4-lane 循环自己把它扩成 [j, j+1, j+2, j+3]（低 128 位 + vpinsrq
-        // 拼高 128 位）。jvec == kMRegNone → 体块里没有 j 参与算术。
-        MReg jvec = kMRegNone;
-        bool has_j = false;
-        const std::string* vec = nullptr;   // SSE2 2-lane 循环标签（回退目标）
-        bool int_ok = false;      // 体块全是 int 值（无任何 VecF/InvF/float acc）
-    };
+    // 定义见 vect_planner.h。
+    using VAvx2Ctx = ::pyadamas::VAvx2Ctx;
     // 发「运行时派发 + 4-lane 循环 + 折回 2 lane」。不满足 4-lane 前提时
     // 返回 false 且**一个字节都不发**（SSE2 路径照旧）。成功时 *vexit 收回
     // 两条循环的公共出口标签（由调用方在 SSE2 循环之后 label 出来）。
