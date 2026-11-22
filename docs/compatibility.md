@@ -95,6 +95,33 @@ PyAdamas 不追求兼容 CPython：语义是按静态类型的需要重新定的
 
 设计见 [str-codepoints.md](str-codepoints.md)。
 
+### 待定：float 除零不抛异常（0.414 发现，之前未记录）
+
+| 写法 | PyAdamas | CPython |
+|---|---|---|
+| `1.0 / 0.0` | `inf` | `ZeroDivisionError` |
+| `-1.0 / 0.0` | `-inf` | `ZeroDivisionError` |
+| `0.0 / 0.0` | `nan` | `ZeroDivisionError` |
+| `1 / 0`（int，`/` 的结果类型是 float） | `inf` | `ZeroDivisionError` |
+| `1.0 // 0.0` / `1.0 % 0.0` | `inf` / `nan` | `ZeroDivisionError` |
+| `1 // 0` / `1 % 0`（整型路径） | `ZeroDivisionError` | `ZeroDivisionError` |
+
+float 除法直接发 `divsd`，没有除零检查，于是按 IEEE 754 得到 `inf` / `nan`；
+整型 `//`、`%` 仍抛 `ZeroDivisionError`（见上表「运行时错误」一行）。
+
+**影响面**：
+
+1. 依赖「除零抛异常」做输入校验/防御的数值代码会**静默**得到 `inf` / `nan` 并向下
+   传播；打印出来是 `inf` / `nan`（与 CPython 输出不同）。
+2. 与 CPython 对拍时测试数据必须避开除零；本轮为 0.414 写向量化用例（481）时
+   就踩到：CPython 在 `0/0` 处先抛 `ZeroDivisionError`，PyAdamas 继续算到越界。
+3. `nbody` / `spectral_norm` 等基准的除数恒为正，未受影响。
+
+**是否已知/有意**：此前没有记录（本轮发现），看起来**不是刻意行为** —— 上表
+「运行时错误」只承诺 `ZeroDivisionError` 可捕获，并没有说 float 除法不抛。
+要消除差异有两条路：每次 float 除法加一条 `comisd` + 分支（热路径有代价），或只对
+「除数是字面量 0 / 静态可证为 0」在编译期报错（覆盖常见笔误）。当前**未修**，待定。
+
 ## 二、尚未实现的构造
 
 这些在 CPython 里合法，在 PyAdamas 里分两种情况：

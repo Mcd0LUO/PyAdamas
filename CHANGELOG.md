@@ -4,6 +4,89 @@
 
 早期阶段没有逐条留痕，按阶段归纳；0.4 之后逐条记录。
 
+## [0.414] - 2026-11-23
+
+> `nbody` 的 `advance` 大轮（阶段 B5）：体块上限 64→128、重复地址 RMW、散射写、
+> 跨 coef 别名 + 运行期区间守卫。目标循环是 `advance` 的
+> `for i in range(5): for j in range(i+1,5)` 内层（50000 步 × 10 对，113 条 IR 指令）。
+>
+> ### 四层改动（判据全部只看 IR 结构）
+>
+> | 层 | 做法 |
+> |---|---|
+> | 体块上限 | `L.BI.size()` **64 → 128**（纯阈值；被挡在门外的规整循环现在能进后续分析，放宽只会多尝试、失败仍拒绝） |
+> | 重复地址 RMW | `coef==0` 的 `acc[k] ±= e`：两个 lane 写**同一地址**，不是 scatter。识别 `store(addr0, Add/Sub(load(addr0), e))`（load 的 dst 只被该 Add/Sub 使用、Add/Sub 的 dst 只被该 store 使用、累加器在左、e 为 VecF/InvF）后折叠成有序合并 `t = load; t ±= lane0(e); t ±= lane1(e); store`（两条单精度标量运算，顺序/舍入与标量逐位一致）；新增 `VRole::AccStore` + `VAccStore`，配套 DCE / last_use / 临时寄存器规划 |
+> | 散射写 | `coef>1` 的 **float** 写：`movsd` 低 lane + `movhlps` 抽高 lane + 2 条 `movsd` 到 `base+K+off*8` / `+(coef+off)*8`（x86 没有 packed scatter；计算与装载仍被向量化，只有写退化成 2 条标量） |
+> | 别名 / 跨 lane 依赖 | 按 `(list, coef)` 分组：**同组**按偏移差判定（`off_w == off_r+coef` 只有写指令在读之后才安全；`off_w+coef == off_r` 只有写指令在读之前才安全；累加写配对除外）；**异组**入口发一次运行期「地址区间不相交」守卫（`lo_W > hi_R` 或 `hi_W < lo_R`，区间 `[inv+coef*j+off_min, inv+coef*(n-1)+off_max]`），失败跳标量尾；纯写 list 无读 → 无跨 lane 依赖；保留旧「同 coef 不同 inv → 入口判等守卫归一」 |
+>
+> 安全边界：同一地址在体内只允许「配对 load + 累加 store」两次访问（否则后续
+> load 会读到合并值，标量语义不同）；`e` 不得依赖被累加值（`use_cnt` 保证）；
+> 越界 `IndexError` 由入口守卫 + 标量尾保持原时机。
+>
+> ### 结果
+>
+> - `nbody` 向量化触发数 **1 → 2**（`advance` 内层 `bb10` + `energy` 内层 `bb6`）。
+> - `nbody` -O2 指令数 **199,390,637 → 109,290,105（−45.18%）**；三档输出
+>   `-O0/-O1/-O2` 全部 `-928502048`，与 CPython 一致（`int(energy*1e6)` 相同）。
+> - 12 基准输出全部与 CPython 一致；**11/12 生成二进制与改前逐字节相同（只有 nbody 变化）**；
+>   其余基准指令数 ±0.000%（`binary_trees` 同二进制噪声除外）；matmul md5 不变。
+> - 新增 `tests/run/479_vect_dup_addr_acc.py`（重复地址累加：顺序敏感 1e16 相消、
+>   n 边界、第三次访问必须保守拒绝）、`480_vect_stride_write.py`（coef 2/3 散射写、
+>   越界 IndexError）、`481_vect_mixed_coef_alias.py`（nbody advance 同形状：coef0
+>   累加 + coef7 散射混合、运行期区间守卫、越界）。
+>
+> ### 局限（诚实记录）
+>
+> - 运行期区间守卫偏保守（区间相交但实际地址不交的循环仍拒绝）；nbody 内层每次
+>   入口约 20 条守卫指令 × 250k 次入口 ≈ 5M，相对 90M 的收益可接受。
+> - int 的 Sub 归约、`coef>1` 的 **int** 写、AVX2 散射/广播装载仍不支持。
+> - `advance` 的 steps/i 外层仍是嵌套循环形状，没有向量化。
+>
+> 验证：构建绿 / **377 ran ok** / **difftest 356/0** / check_size 通过 / ASan 377 ran ok、0 报告。
+
+## [0.413] - 2026-11-23
+
+> 向量循环借用本函数 RA **未占用**的 xmm8-15：`spectral_norm` 的第二份内层循环
+> 从「差一个 xmm」到能向量化。
+>
+> 诊断：`spectral_norm` 的 `__pa_main` 里两份内联内层循环只有一份向量化；另一份
+> （`mul_a` 的 `(j+i)*(j+i+1)//2 + j + 1`）所有判据都过，却在 dry-run 临时寄存器
+> 分配失败（池前段只剩 2 个，需要 3 个）—— 归纳变量 j 有两个使用点（JVEC 要跨
+> 整段存活），再加 3 个不变量广播与 int 乘/floor 除的序列 scratch。
+>
+> ### 改动
+>
+> 新增 `AsmGen::xmm_high_free(MReg)`：本函数 RA 的浮点槽提升（`ra_.slot_reg`）与
+> 跨块 vreg 提升（`ra_.fp_promoted_vregs`）都没占用的 xmm8-15 可以借给向量循环；
+> `try_loop` 把它们**追加在池尾**（池前段没用尽的循环分配顺序不变、产物逐字节
+> 相同；用尽前段的循环按 FIFO 复用它们，寄存器编号可能重排、指令数 ±1，语义不变）。
+> 安全性：循环体内没有调用（sqrt 内联成 `sqrtsd`），循环外标量代码不读写这些
+> 未提升寄存器；调用方在自己的调用点按既有 spill/reload 保护 xmm8-15（SysV
+> caller-saved）。
+>
+> **踩坑（重要）**：第一版直接把 xmm8-15 全部加进池 → `spectral_norm` 输出错
+> （`928131` vs CPython `811972`），因为该函数的浮点槽恰好提升在 xmm8-15 上。
+> 判据必须是「RA 未占用」，不能按「xmm0-7 之外都可借」。
+>
+> ### 结果
+>
+> - `spectral_norm` 触发数 **2 → 4**（两份内联副本；其中 2 个在未被调用的
+>   `mul_ata_2` / `mul_a_3` 死代码副本里，运行时只有 2 个）。
+> - `spectral_norm` -O2 指令数 **247,401,494 → 186,399,503（−24.66%）**，输出
+>   `811972` 与 CPython 一致。
+> - 其余 11 个基准生成二进制逐字节相同；matmul md5 不变；无基准指令数回退。
+>
+> 验证：构建绿 / **374 ran ok** / **difftest 353/0** / check_size 通过 / ASan 374 ran ok、0 报告。
+
+## [0.412] - 2026-11-23
+
+> 夜间迭代文档收尾：`CHANGELOG` 0.402–0.411、`docs/vectorization-generalization.md`
+> 的覆盖率与能力边界、`docs/modularization.md` 第 2 步（VectPlanner 完成 + A5 实测
+> 1 TU/7.76 s vs 31 TU/55.16 s）、`docs/nightly-roadmap.md` 的「实际结果 vs 计划」、
+> `docs/vect-planner-design.md` 阶段状态。
+>
+> 纯文档，无代码改动。
+
 ## [0.411] - 2026-11-23
 
 > 通用向量化能力 4/4：`coef==0` 的循环内不变下标元素装载改成**广播装载**（阶段 B4）。
