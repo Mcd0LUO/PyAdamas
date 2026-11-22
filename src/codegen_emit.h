@@ -228,7 +228,7 @@
     void emit_imm_mem(const std::string& mem, int64_t v) { emit_imm_op("movq", v, mem); }
 
     // 全局 rip 相对操作数（模块级缓存，见 global_mops_）。
-    const MOperand& global_mop(int i) const { return global_mops_[static_cast<size_t>(i)]; }
+    const MOperand& global_mop(int i) const override { return global_mops_[static_cast<size_t>(i)]; }
     const MOperand& global_tag_mop(int i) const { return global_tag_mops_[static_cast<size_t>(i)]; }
 
     // ── 结构化直发（块B2：免「拼字符串→parse_operand 回解析」往返）──
@@ -295,7 +295,7 @@
         emit_.out.push_instr(std::move(ins));
     }
     void emit_imm(MOp op, int64_t v, MReg b) { emit_imm(op, v, mreg_operand(b)); }
-    void emit_imm_hex(MOp op, uint64_t bits, const MOperand& b) {
+    void emit_imm_hex(MOp op, uint64_t bits, const MOperand& b) override {
         MInstr ins;
         ins.op = op;
         ins.ops.push_back(op_imm_hex(bits));

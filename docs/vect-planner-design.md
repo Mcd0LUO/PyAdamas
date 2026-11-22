@@ -203,3 +203,19 @@ public:
 
 **这个结论本身就是阶段 2 的价值**：如果直接进阶段 3，会在搬到一半时发现接口缺 8 个
 成员，那时改接口要连带动已经搬好的几百行。现在改只需动 3 个头文件。
+### 阶段 2 修正版：已完成（2026-11-22）
+
+三个接口全部落地，`AsmGen` 多重继承并全部加 `override`：
+
+| 接口 | 成员 | 状态 |
+|---|---|---|
+| `EmitSink` | `emit2` `emit_imm` `emit_imm_hex` `emit_jmp`×2 `line` `label` `fresh_label` `src_mop` | 8/8 |
+| `ValueQuery` | `ty_of` `global_mop` | 2/2 已确认 |
+| `SlotQuery` | `slot_mop` | 1/1 已确认 |
+
+**待补**（签名需逐个确认，其中可能有局部 lambda 而非成员）：
+`list_base_mop`（15 次）、`slot_is_jalias`/`slot_is_temp`/`slot_is_red`（6/3/3）、
+`slot_ty`（8 次，是字段不是方法，需要一个访问器）、`slot_loc_`（字段）。
+
+教训：接口命名要避开业务代码里的局部类型名 —— `SlotInfo` 与 `try_vect_loop` 里的
+局部 `struct SlotInfo` 冲突，`-Werror=shadow` 才发现。

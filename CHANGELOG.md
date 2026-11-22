@@ -4,6 +4,33 @@
 
 早期阶段没有逐条留痕，按阶段归纳；0.4 之后逐条记录。
 
+## [0.399] - 2026-11-22
+
+> 模块重组第 2 步（5/5，阶段 2）：把单一 `EmitSink` 修正成**三个小接口**。
+>
+> 阶段 2 先验证了「接口够不够用」，答案是**不够**：实测 `EmitSink` 只覆盖向量化器
+> 依赖面的约 60%。缺的成员（`ty_of` 25 次、`list_base_mop` 15 次、`slot_ty` 8 次、
+> `slot_mop` 3 次…）分属三类职责，硬塞进一个接口会让它变成「胖接口」。
+>
+> 修正后的三接口：
+>
+> | 接口 | 成员 |
+> |---|---|
+> | `EmitSink` | `emit2` `emit_imm` `emit_imm_hex` `emit_jmp`(×2) `line` `label` `fresh_label` `src_mop` |
+> | `ValueQuery` | `ty_of` `global_mop` |
+> | `SlotQuery` | `slot_mop` |
+>
+> `class AsmGen : public EmitSink, public ValueQuery, public SlotQuery`，全部实现加
+> `override` —— 接口签名与实现不一致会变成**编译期错误**。
+>
+> 命名踩到一处：接口原本叫 `SlotInfo`，与 `try_vect_loop` 里的局部 `struct SlotInfo`
+> 撞名，`-Werror=shadow` 直接报错。改成 `SlotQuery`（也顺带避免以后再有同类冲突）。
+>
+> **仍未搬任何向量化代码。** 剩下 `list_base_mop` / `slot_is_*` / `slot_ty` 等成员
+> 待逐个确认签名（其中可能有局部 lambda 而非成员），补齐后再进阶段 3。
+>
+> 验证：构建绿 / 369 ran ok / difftest 348/0 / check_size 通过；12 基准输出全一致。
+
 ## [0.398] - 2026-11-22
 
 > 模块重组第 2 步（5/5，阶段 1）：抽出 `EmitSink` 接口，`AsmGen` 实现它。

@@ -44,6 +44,8 @@
 #include "module.h"
 #include "tag_defs.h"
 #include "emit_sink.h"
+#include "slot_query.h"
+#include "value_query.h"
 #include "emitter.h"
 #include "frame.h"
 #include "reg_alloc.h"
@@ -196,7 +198,7 @@ inline std::string asm_escape(const std::string& s) {
     return out;
 }
 
-class AsmGen : public EmitSink {
+class AsmGen : public EmitSink, public ValueQuery, public SlotQuery {
 public:
         std::string gen(const IRModule& m);
         // 整程序没有任何 unknown 值、也不涉及 asyncio/生成器运行时：入口

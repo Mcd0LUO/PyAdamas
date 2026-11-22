@@ -28,6 +28,8 @@ public:
     virtual void emit2(MOp op, const MOperand& a, const MOperand& b) = 0;
     // 立即数操作。
     virtual void emit_imm(MOp op, int64_t v, const MOperand& b) = 0;
+    // 按位模式发立即数（浮点常量、tag 常量等）。
+    virtual void emit_imm_hex(MOp op, uint64_t bits, const MOperand& b) = 0;
     // 条件跳转：op 是 Jcc，target 是标签名。
     virtual void emit_jmp(MOp op, std::string_view target) = 0;
     // 溢出跳转等用助记符直接写（向量化器的 jo 系列）。

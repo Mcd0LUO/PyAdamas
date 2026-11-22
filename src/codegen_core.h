@@ -241,7 +241,7 @@
     const std::string& gen_smem(int slot) const { return gen_smem_mop(slot).text; }
 
     // 变量的现在位置：寄存器（提升过）或栈槽。结构化版本。
-    const MOperand& slot_mop(int slot) const {
+    const MOperand& slot_mop(int slot) const override {
         if (gen_) return gen_smem_mop(slot);
         // **split 模式：按当前块查表。**
         //
@@ -319,7 +319,7 @@
     // 于是和 s[i] 的结果是同一个指针（见 gen_inst 的 ConstStr 分支）。
     int char_tab_literal(int idx) const;
 
-    TypePtr ty_of(VReg r) const;
+    TypePtr ty_of(VReg r) const override;
 
     bool is_fp(VReg r) const { return ir_is_float(ty_of(r)); }
     // ── 函数 ────────────────────────────────────────────────────
