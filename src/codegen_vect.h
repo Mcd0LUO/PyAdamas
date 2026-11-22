@@ -157,13 +157,15 @@
     // inv 判等守卫：同对象读写只在两个下标序列完全相同时才能就地向量化。
     void vect_affine_inv_eq(const AffEq& eq, const std::string& tail);
     // coef>1 的运行期跨步计数器：K = coef*8*j，每轮 += coef*16。
-    void vect_affine_kinit(MReg k, MReg jreg, int64_t coef);
-    void vect_affine_step(MReg k, int64_t coef);
+    void vect_affine_kinit(MReg k, MReg jreg, int64_t coef) { vect_.vect_affine_kinit(k, jreg, coef); }
+    void vect_affine_step(MReg k, int64_t coef) { vect_.vect_affine_step(k, coef); }
     // 2-lane 装载：coef==1 用 movupd；coef>1 两次 movsd + unpcklpd（无 gather）。
     void vect_affine_load(MReg base, MReg j, MReg k, int64_t coef, int64_t off,
-                          MReg dst, MReg scratch);
+                          MReg dst, MReg scratch) {
+        vect_.vect_affine_load(base, j, k, coef, off, dst, scratch);
+    }
     // 2-lane 存储：只支持 coef==1（不做 scatter）。
-    void vect_affine_store(MReg base, MReg j, int64_t off, MReg src);
+    void vect_affine_store(MReg base, MReg j, int64_t off, MReg src) { vect_.vect_affine_store(base, j, off, src); }
 
     // ── P5 · 整数 // 与 % 的 2 的幂除数（实现见 codegen_vect_intdiv.cpp）──
     // 政策：**通用操作支持**（LLVM InstCombine 把 sdiv x, 2^k 降成移位 + 修正，

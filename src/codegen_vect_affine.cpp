@@ -197,34 +197,4 @@ void AsmGen::vect_affine_inv_eq(const AffEq& eq, const std::string& tail) {
     emit_jmp(MOp::kJne, tail);
 }
 
-// K = coef*8*j：进入向量循环前算一次，循环里每轮 += coef*16（2 个 lane，
-// 每个 lane 跨 coef 个元素）。coef*8 用 imulq 立即数（已校验 <= imm32）。
-void AsmGen::vect_affine_kinit(MReg k, MReg jreg, int64_t coef) {
-    emit2(MOp::kMovq, jreg, k);
-    emit_imm(MOp::kImulq, coef * 8, k);
-}
-
-void AsmGen::vect_affine_step(MReg k, int64_t coef) { emit_imm(MOp::kAddq, coef * 16, k); }
-
-// coef==1：两 lane 相邻 → movupd 一次装 2 个元素（与原路径同字节）。
-// coef>1：SSE2 没有 gather，逐 lane movsd（第二个落 scratch）再 unpcklpd
-// 把低 64 位打包成 [lane0, lane1]。movsd 从内存装载会把高 lane 清 0，
-// 所以对 int 元素（64 位 lane）同样成立。
-void AsmGen::vect_affine_load(MReg base, MReg j, MReg k, int64_t coef, int64_t off,
-                              MReg dst, MReg scratch) {
-    if (coef == 1) {
-        emit2(MOp::kMovupd, op_mem(base, j, 8, off * 8), dst);
-        return;
-    }
-    emit2(MOp::kMovsd, op_mem(base, k, 1, off * 8), dst);
-    emit2(MOp::kMovsd, op_mem(base, k, 1, (off + coef) * 8), scratch);
-    emit2(MOp::kUnpcklpd, scratch, dst);
-}
-
-// 写出只支持 coef==1：两个 lane 相邻，movupd 整存。coef>1 是 scatter，
-// 没有 packed 指令可用（也不会带来收益），在角色判定处就拒绝。
-void AsmGen::vect_affine_store(MReg base, MReg j, int64_t off, MReg src) {
-    emit2(MOp::kMovupd, src, op_mem(base, j, 8, off * 8));
-}
-
 }  // namespace pyadamas

@@ -20,6 +20,16 @@ public:
     // // 与 %（除数为 2 的幂常量）的 2-lane packed 发射：rd 已持有被除数，原地写回。
     void vect_intdiv2(MReg rd, MReg tmp, bool is_mod, int sh);
 
+    // ── 仿射下标的发射（阶段 3 第 3 步：纯发射，无捕获状态）──────────
+    // K = coef*8*j：进循环前算一次，循环里每轮 += coef*16。
+    void vect_affine_kinit(MReg k, MReg jreg, int64_t coef);
+    void vect_affine_step(MReg k, int64_t coef);
+    // coef==1 用 movupd 整装；coef>1 逐 lane movsd + unpcklpd（SSE2 无 gather）。
+    void vect_affine_load(MReg base, MReg j, MReg k, int64_t coef, int64_t off,
+                          MReg dst, MReg scratch);
+    // 写出只支持 coef==1（scatter 在角色判定处就拒绝）。
+    void vect_affine_store(MReg base, MReg j, int64_t off, MReg src);
+
 private:
     EmitSink& emit_;
     ValueQuery& val_;

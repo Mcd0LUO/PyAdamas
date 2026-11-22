@@ -63,4 +63,28 @@ void VectPlanner::vect_intdiv2(MReg rd, MReg tmp, bool is_mod, int sh) {
     emit_.line("por " + std::string(mreg_name(tmp)) + ", " + std::string(mreg_name(rd)));
 }
 
+void VectPlanner::vect_affine_kinit(MReg k, MReg jreg, int64_t coef) {
+    emit_.emit2(MOp::kMovq, mreg_operand(jreg), mreg_operand(k));
+    emit_.emit_imm(MOp::kImulq, coef * 8, mreg_operand(k));
+}
+
+void VectPlanner::vect_affine_step(MReg k, int64_t coef) {
+    emit_.emit_imm(MOp::kAddq, coef * 16, mreg_operand(k));
+}
+
+void VectPlanner::vect_affine_load(MReg base, MReg j, MReg k, int64_t coef, int64_t off,
+                                   MReg dst, MReg scratch) {
+    if (coef == 1) {
+        emit_.emit2(MOp::kMovupd, AsmGen::op_mem(base, j, 8, off * 8), mreg_operand(dst));
+        return;
+    }
+    emit_.emit2(MOp::kMovsd, AsmGen::op_mem(base, k, 1, off * 8), mreg_operand(dst));
+    emit_.emit2(MOp::kMovsd, AsmGen::op_mem(base, k, 1, (off + coef) * 8), mreg_operand(scratch));
+    emit_.emit2(MOp::kUnpcklpd, mreg_operand(scratch), mreg_operand(dst));
+}
+
+void VectPlanner::vect_affine_store(MReg base, MReg j, int64_t off, MReg src) {
+    emit_.emit2(MOp::kMovupd, mreg_operand(src), AsmGen::op_mem(base, j, 8, off * 8));
+}
+
 }  // namespace pyadamas
