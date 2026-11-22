@@ -39,6 +39,8 @@ public:
     virtual void line(std::string_view s) = 0;
     // 标签定义。
     virtual void label(const std::string& s) = 0;
+    // 直接塞一条已构造好的结构化指令（少见编码形态用它，如 pshufd 三操作数）。
+    virtual void emit_instr(MInstr&& ins) = 0;
 
     // ── 查询 ──────────────────────────────────────────────────────
     // vreg 的来源操作数（寄存器或栈槽）。返回引用：调用点直发，不做拷贝。

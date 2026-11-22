@@ -1,6 +1,8 @@
 // vect_planner.cpp —— 见 docs/vect-planner-design.md
 #include "vect_planner.h"
 
+#include "codegen_impl.h"   // 只为 AsmGen::op_imm / op_reg / mreg_operand 这些静态工厂
+
 namespace pyadamas {
 namespace {
 
@@ -30,6 +32,35 @@ bool VectPlanner::vect_div_pow2(VReg b, int* sh) const {
     if (m < 0 || m > 62) return false;
     *sh = m;
     return true;
+}
+
+void VectPlanner::vect_intdiv2(MReg rd, MReg tmp, bool is_mod, int sh) {
+    if (sh <= 0) {
+        // m == 0：x // 1 == x（rd 已经是 x，什么都不发）；x % 1 == 0。
+        if (is_mod) emit_.emit2(MOp::kPxor, mreg_operand(rd), mreg_operand(rd));
+        return;
+    }
+    if (is_mod) {
+        // x % 2^m = x & (2^m - 1)：左移把高 m 位推出去，再逻辑右移回来。
+        emit_.emit_imm(MOp::kPsllq, 64 - sh, mreg_operand(rd));
+        emit_.emit_imm(MOp::kPsrlq, 64 - sh, mreg_operand(rd));
+        return;
+    }
+    // floor：sign = (x >> 31 每 dword 取符号) → pshufd 复制到 64 位 lane →
+    // 左移 (64-m) 得到「高 m 位全 1 或 0」→ 与 (x 逻辑右移 m) 相或。
+    emit_.emit2(MOp::kMovapd, mreg_operand(rd), mreg_operand(tmp));
+    emit_.emit_imm(MOp::kPsrad, 31, mreg_operand(tmp));
+    {
+        MInstr ins;                          // pshufd 本 GAS 只认三操作数写法
+        ins.op = MOp::kPshufd;
+        ins.ops.push_back(AsmGen::op_imm(0xF5));
+        ins.ops.push_back(AsmGen::op_reg(tmp));
+        ins.ops.push_back(AsmGen::op_reg(tmp));
+        emit_.emit_instr(std::move(ins));
+    }
+    emit_.emit_imm(MOp::kPsllq, 64 - sh, mreg_operand(tmp));
+    emit_.emit_imm(MOp::kPsrlq, sh, mreg_operand(rd));
+    emit_.line("por " + std::string(mreg_name(tmp)) + ", " + std::string(mreg_name(rd)));
 }
 
 }  // namespace pyadamas

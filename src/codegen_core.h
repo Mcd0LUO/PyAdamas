@@ -106,6 +106,8 @@
 
     // 列 0 的标签（函数标签、数据段符号）。
     void label(const std::string& s) override { emit_.out.push_label(s, false); }
+    // 直接塞一条已构造好的结构化指令。
+    void emit_instr(MInstr&& ins) override { emit_.out.push_instr(std::move(ins)); }
     // 带前导 tab 的块内局部标签（"\t1:" 这种）。
     void label_block(const std::string& s) { emit_.out.push_label(s, true); }
     // "\t# s" / 指令注释 / 列 0 注释行（"# ..."）。实现见 codegen_comment.cpp。

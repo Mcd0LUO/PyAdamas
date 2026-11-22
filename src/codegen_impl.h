@@ -200,6 +200,10 @@ inline std::string asm_escape(const std::string& s) {
 }
 
 class AsmGen : public EmitSink, public ValueQuery, public SlotQuery {
+    // 过渡期：VectPlanner 需要 op_imm / op_reg 这两个纯操作数工厂（它们是
+    // AsmGen 的私有 static）。阶段 3 完成后应把这两个工厂挪到 mach_instr.h
+    // 成为自由函数，届时删掉这行 friend。
+    friend class VectPlanner;
 public:
         std::string gen(const IRModule& m);
         // 整程序没有任何 unknown 值、也不涉及 asyncio/生成器运行时：入口

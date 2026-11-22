@@ -181,7 +181,9 @@
     VectPlanner vect_{*this, *this, *this};
     // 2-lane 发射：rd 已持有被除数 x（2 lane i64），结果原地写回 rd。tmp 是
     // scratch（seq 寄存器）。% 不用 scratch；// 的 m>0 用 4 条 packed 合成。
-    void vect_intdiv2(MReg rd, MReg tmp, bool is_mod, int sh);
+    void vect_intdiv2(MReg rd, MReg tmp, bool is_mod, int sh) {
+        vect_.vect_intdiv2(rd, tmp, is_mod, sh);
+    }
 
     // ── P5b · 归纳变量 j 作为整数算术操作数（实现见 codegen_vect_jvec.cpp）──
     // 判据只有一条结构性质：操作数是 j-alias 槽的装载（归纳变量本身或其
