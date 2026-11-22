@@ -193,7 +193,9 @@
     // 每轮迭代在首个使用点物化一次 [j, j+1]（4-lane 由 AVX2 段物化
     // [j..j+3]）。序列与 Convert 的 j_src 分支同一份，逐 lane 模 2^64 与
     // 标量 addq/subq/imulq 逐位一致，任意 i64 无需值域守卫。
-    void vect_jvec2(MReg jreg, int64_t off, MReg dst, MReg scr);
+    void vect_jvec2(MReg jreg, int64_t off, MReg dst, MReg scr) {
+        vect_.vect_jvec2(jreg, off, dst, scr);
+    }
     // 使用点分类：除 IndexLoad/IndexStore 的下标操作数外，任何用途都记进
     // out。折叠进寻址的仿射式必须**只**当下标用 —— j 参与算术后，同一个值
     // 可能既当下标又当算术语，折叠会让发射期取不到寄存器（半截 asm）。

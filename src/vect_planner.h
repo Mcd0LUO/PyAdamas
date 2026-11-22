@@ -30,6 +30,10 @@ public:
     // 写出只支持 coef==1（scatter 在角色判定处就拒绝）。
     void vect_affine_store(MReg base, MReg j, int64_t off, MReg src);
 
+    // ── 归纳变量物化（阶段 3 第 4 步）──
+    // dst = [j+off, j+off+1]：与 Convert 的 j_src 分支逐字节同一序列。
+    void vect_jvec2(MReg jreg, int64_t off, MReg dst, MReg scr);
+
 private:
     EmitSink& emit_;
     ValueQuery& val_;

@@ -54,14 +54,6 @@ uint64_t jvec_f64_bits(double x) {
 // 2-lane（SSE2）：dst = [j+off, j+off+1]。scr 是 scratch（SEQ1），不得与 dst
 // 相同。与 Convert 的 j_src 分支逐字节同一序列（那里 rd = 目标，SEQ1 =
 // scratch，off = 仿射偏移）。
-void AsmGen::vect_jvec2(MReg jreg, int64_t off, MReg dst, MReg scr) {
-    emit2(MOp::kLeaq, op_mem(jreg, off), kRax);
-    emit2(MOp::kMovq, kRax, dst);
-    emit2(MOp::kLeaq, op_mem(jreg, off + 1), kRax);
-    emit2(MOp::kMovq, kRax, scr);
-    emit2(MOp::kMovlhps, scr, dst);              // dst.hi = scr.lo = j+off+1
-}
-
 // 使用点分类：把「不是下标操作数」的用途记进 out（值本身无所谓，只看有没
 // 有）。IndexLoad/IndexStore 的 in.b 是下标，其余操作数（含 list 基址、存储
 // 值、Bin 操作数、Convert 源、Mov 源、槽写值）都算非下标用途。

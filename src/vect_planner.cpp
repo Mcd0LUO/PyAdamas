@@ -87,4 +87,12 @@ void VectPlanner::vect_affine_store(MReg base, MReg j, int64_t off, MReg src) {
     emit_.emit2(MOp::kMovupd, mreg_operand(src), AsmGen::op_mem(base, j, 8, off * 8));
 }
 
+void VectPlanner::vect_jvec2(MReg jreg, int64_t off, MReg dst, MReg scr) {
+    emit_.emit2(MOp::kLeaq, AsmGen::op_mem(jreg, off), mreg_operand(kRax));
+    emit_.emit2(MOp::kMovq, mreg_operand(kRax), mreg_operand(dst));
+    emit_.emit2(MOp::kLeaq, AsmGen::op_mem(jreg, off + 1), mreg_operand(kRax));
+    emit_.emit2(MOp::kMovq, mreg_operand(kRax), mreg_operand(scr));
+    emit_.emit2(MOp::kMovlhps, mreg_operand(scr), mreg_operand(dst));  // dst.hi = j+off+1
+}
+
 }  // namespace pyadamas
