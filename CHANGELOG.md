@@ -4,6 +4,28 @@
 
 早期阶段没有逐条留痕，按阶段归纳；0.4 之后逐条记录。
 
+## [0.400] - 2026-11-22
+
+> 模块重组收尾：核对 VectPlanner 抽取的剩余接口成员 —— 上一轮列的「待补 6 个」
+> 里多数**不是 `AsmGen` 成员**，接口其实已经够用。本轮**无代码改动**，只修正记录。
+>
+> | 名称 | 真实身份 |
+> |---|---|
+> | `slot_is_jalias` / `slot_is_temp` / `slot_is_red` | `try_vect_loop` 里的局部 lambda |
+> | `list_base_mop` | 同上，局部 lambda |
+> | `slot_ty` | `IRFunction` 的字段，不是 `AsmGen` 成员 |
+> | `op_mem` / `op_reg` / `op_imm` | `static` 工厂，不需要虚化 |
+>
+> **方法错误**：上一轮那张「待补成员」表是字符串扫描得出的，只看了名字出现次数，
+> 没区分「成员 / 局部变量 / 别的类的字段」。正确做法是逐个看声明位置。
+>
+> 结论：三接口（`EmitSink` 8 个 / `ValueQuery` 2 个 / `SlotQuery` 1 个）对阶段 3
+> 已经够用。阶段 3 剩的是纯搬迁：`try_vect_loop` 及其辅助方法整段搬进
+> `VectPlanner`，`AsmGen::try_vect_loop` 留一行转发。
+>
+> 模块重组各步当前状态见 `docs/modularization.md`；VectPlanner 的四阶段见
+> `docs/vect-planner-design.md` §11。
+
 ## [0.399] - 2026-11-22
 
 > 模块重组第 2 步（5/5，阶段 2）：把单一 `EmitSink` 修正成**三个小接口**。

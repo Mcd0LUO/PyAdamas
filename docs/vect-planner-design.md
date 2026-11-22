@@ -219,3 +219,42 @@ public:
 
 教训：接口命名要避开业务代码里的局部类型名 —— `SlotInfo` 与 `try_vect_loop` 里的
 局部 `struct SlotInfo` 冲突，`-Werror=shadow` 才发现。
+## 10. 阶段 2b 结论：接口**基本已够**，上一轮的「待补 6 个成员」是我看错了
+
+逐个核对签名之后发现：那 6 个「待补成员」里，多数根本**不是 `AsmGen` 的成员**。
+
+| 名称 | 真实身份 | 处理 |
+|---|---|---|
+| `slot_is_jalias` / `slot_is_temp` / `slot_is_red` | `try_vect_loop` 里的**局部 lambda**（捕获局部状态） | 阶段 3 随代码一起搬，变成 `VectPlanner` 的私有助手 |
+| `list_base_mop` | 同上，**局部 lambda** | 同上 |
+| `slot_ty` | `IRFunction::slot_ty`（IR 函数的字段），不是 `AsmGen` 成员 | 不需要访问器，向量化器直接读 `f_->slot_ty` |
+| `op_mem` / `op_reg` / `op_imm` | `static` 操作数工厂 | 不需要虚化 |
+
+**这是我的方法错误**：阶段 2 的表是「字符串扫描」得出的，只看了名字出现次数，没有
+区分「成员 / 局部变量 / 别的类的字段」。正确的做法是逐个看声明位置。
+
+### 结论
+
+三个接口对阶段 3 而言**已经够用**：
+
+| 接口 | 成员 |
+|---|---|
+| `EmitSink` | `emit2` `emit_imm` `emit_imm_hex` `emit_jmp`×2 `line` `label` `fresh_label` `src_mop` |
+| `ValueQuery` | `ty_of` `global_mop` |
+| `SlotQuery` | `slot_mop` |
+
+阶段 3 剩下的工作就是**纯搬迁**：把 `try_vect_loop` 及其辅助方法（含那些局部 lambda）
+整段搬进 `VectPlanner`，`AsmGen::try_vect_loop` 留一行转发。不需要再动接口。
+
+## 11. 收尾状态（2026-11-22）
+
+| 阶段 | 内容 | 状态 |
+|---|---|---|
+| 1 | `EmitSink` 落地 + `override` | ✅ 0.398 |
+| 2 | 修正成三接口 | ✅ 0.399 |
+| 2b | 核对剩余成员（多数是局部 lambda） | ✅ 0.400，无需改代码 |
+| 3 | 搬 3,414 行（`try_vect_loop` + 4 个辅助文件） | ⬜ **未开始** |
+| 4 | 删转发 + 量重编译 TU | ⬜ 未开始 |
+
+**阶段 3 是唯一剩下的大块**，且它不需要再改设计 —— 接口已经钉死，`override` 保证
+签名漂移会编译失败。谁接手都可以直接照 §4 阶段 3 的步骤做。
