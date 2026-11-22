@@ -43,6 +43,7 @@
 #include "target_abi.h"
 #include "module.h"
 #include "tag_defs.h"
+#include "emit_sink.h"
 #include "emitter.h"
 #include "frame.h"
 #include "reg_alloc.h"
@@ -195,7 +196,7 @@ inline std::string asm_escape(const std::string& s) {
     return out;
 }
 
-class AsmGen {
+class AsmGen : public EmitSink {
 public:
         std::string gen(const IRModule& m);
         // 整程序没有任何 unknown 值、也不涉及 asyncio/生成器运行时：入口

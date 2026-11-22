@@ -44,7 +44,7 @@
 
     // 一行汇编：指令 / 指示符 / 标签 / 注释都走这里。
     // 含换行的多行文本直接进 Raw，保证字节不变。
-    void line(std::string_view s) {
+    void line(std::string_view s) override {
         if (s.find('\n') != std::string_view::npos) {
             emit_raw("\t");
             emit_raw(s);
@@ -105,7 +105,7 @@
     }
 
     // 列 0 的标签（函数标签、数据段符号）。
-    void label(const std::string& s) { emit_.out.push_label(s, false); }
+    void label(const std::string& s) override { emit_.out.push_label(s, false); }
     // 带前导 tab 的块内局部标签（"\t1:" 这种）。
     void label_block(const std::string& s) { emit_.out.push_label(s, true); }
     // "\t# s" / 指令注释 / 列 0 注释行（"# ..."）。实现见 codegen_comment.cpp。
@@ -156,7 +156,7 @@
 
     // 标签工厂：to_chars 直拼，免 std::format（RC 序列每条 2-3 个标签，
     // 是 vformat 热点的大头）。
-    std::string fresh_label(const char* tag) {
+    std::string fresh_label(const char* tag) override {
         std::string s = ".L";
         s += tag;
         s += '_';
@@ -278,7 +278,7 @@
     const std::string& slot_op(int slot) const { return slot_mop(slot).text; }
     // 读一个 vreg 的操作数。块内别名优先（别名指向的就是它的当前值），
     // 其次是可以直接当立即数用的常量，最后退回它自己的栈槽。
-    const MOperand& src_mop(VReg r) const {
+    const MOperand& src_mop(VReg r) const override {
         static const MOperand kZero = op_imm(0);
         if (r == kNoReg) return kZero;
         auto it = alias_.find(r);

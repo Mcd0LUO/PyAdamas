@@ -4,6 +4,27 @@
 
 早期阶段没有逐条留痕，按阶段归纳；0.4 之后逐条记录。
 
+## [0.398] - 2026-11-22
+
+> 模块重组第 2 步（5/5，阶段 1）：抽出 `EmitSink` 接口，`AsmGen` 实现它。
+>
+> 新增 `src/emit_sink.h`：7 个纯虚原语 —— `emit2` / `emit_imm` / `emit_jmp`(×2) /
+> `line` / `label` / `src_mop` / `fresh_label`。这 7 个就是实测向量化器 3414 行里
+> 真正用到的发射/查询面。
+>
+> `class AsmGen : public EmitSink`，8 处实现加 `override`。**没有改任何调用点，
+> 没有新增 `VectPlanner`。**
+>
+> 为什么先只做这一步：`override` 让「接口签名与实现不一致」变成编译期错误。以后
+> 谁改了 `emit2` 的签名而忘了同步接口，构建立刻失败 —— 与第 0 步「判据具名化 +
+> 编译期真值表」是同一思路。
+>
+> 验证：构建绿 / 369 ran ok / difftest 348/0 / check_size 通过；12 基准输出全一致，
+> 指令数全部 ±0.000%（`binary_trees` −0.07%，噪声）。
+>
+> 阶段 2–4（确认接口够用 → 搬 VectPlanner → 删转发并量重编译）见
+> `docs/vect-planner-design.md` §4。
+
 ## [0.397] - 2026-11-22
 
 > 模块重组第 2 步（4/5）：槽/跨块 vreg 的寄存器提升状态拆成 `RegAlloc`。

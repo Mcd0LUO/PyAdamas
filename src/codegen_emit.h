@@ -209,7 +209,7 @@
         emit_.out.push_line(text);
     }
 
-    void emit_jmp(const char* mn, const std::string& target) {
+    void emit_jmp(const char* mn, const std::string& target) override {
         MOp op = mop_from_name(mn);
         MOperand ot;
         if (op != MOp::kRaw && parse_operand(target, mop_is_branch(op), &ot)) {
@@ -238,7 +238,7 @@
     // Raw 操作数（set_text 解析失败的兜底单元）复刻历史文本路径：
     // push_line 无 tab → 列 0 Raw。mangled 符号含 '$'（pyadamas$...）
     // 会触发 parse_operand 符号位移扫描拒绝，历史发射就是列 0。
-    void emit2(MOp op, const MOperand& a, const MOperand& b) {
+    void emit2(MOp op, const MOperand& a, const MOperand& b) override {
         if (a.kind == MOperandKind::Raw || b.kind == MOperandKind::Raw) {
             std::string text = mop_name(op);
             text += ' ';
@@ -276,7 +276,7 @@
         ins.op = op;
         emit_.out.push_instr(std::move(ins));
     }
-    void emit_imm(MOp op, int64_t v, const MOperand& b) {
+    void emit_imm(MOp op, int64_t v, const MOperand& b) override {
         if (b.kind == MOperandKind::Raw) {
             char buf[32];
             auto r = std::to_chars(buf, buf + sizeof buf, v);
@@ -305,7 +305,7 @@
     void emit_imm_hex(MOp op, uint64_t bits, MReg b) { emit_imm_hex(op, bits, mreg_operand(b)); }
     // 跳转/调用目标直建：目标是标签/符号字符串时免 parse_operand 文法扫描。
     // 含特殊字符（间接 '*'、内存 '(' 等）的目标退回解析路径，字节不变。
-    void emit_jmp(MOp op, std::string_view target) {
+    void emit_jmp(MOp op, std::string_view target) override {
         // 裸符号/标签直建。'$' 允许出现在符号名里（.Lf6$pt 这类 mangled
         // 标签）：历史路径经 line() 落 Raw，渲染同样是 tab+助记符+目标。
         bool bare = !target.empty();
