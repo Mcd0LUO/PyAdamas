@@ -1,3 +1,66 @@
+# 整数循环优化综合：边界消除、边界推导、去重
+# 0.381 合并自 3 个文件：293_intloop_bce.py, 294_intloop_bce_bounds.py, 296_intloop_dedup.py
+
+# ── 原 293_intloop_bce.py ──────────────────────────────────────
+
+# 整数循环 BCE 回归（0.335，PYADAMAS_LOOP_OPT）：仿射 IV 下标克隆循环。
+# matmul 形态（idx = 不变偏移 + IV）+ 纯 IV 下标 + 副本槽链；多种 N（含奇数、1、0）。
+# 守卫通过走 unchecked 克隆；输出对拍 CPython。
+def mm(a: list[int], b: list[int], c: list[int], n: int) -> None:
+    for i in range(n):
+        for k in range(n):
+            aik = a[i * n + k]
+            if aik != 0:
+                for j in range(n):
+                    c[i * n + j] += aik * b[k * n + j]
+
+def mk(n: int, seed: int) -> list[int]:
+    out = []
+    for i in range(n * n):
+        out.append((i * seed + 3) % 11)
+    return out
+
+def total(c: list[int]) -> int:
+    t = 0
+    for v in c:
+        t += v
+    return t
+
+for n in (7, 4, 1, 0, 3):
+    a = mk(n, 7)
+    b = mk(n, 5)
+    c = []
+    for _ in range(n * n):
+        c.append(0)
+    mm(a, b, c, n)
+    print(n, total(c))
+
+# 纯 IV 下标 + 副本槽：s[i] = s[i] * 2 + i（存储与读取同址）
+def dbl(s: list[int], n: int) -> None:
+    for i in range(n):
+        s[i] = s[i] * 2 + i
+
+s = []
+for i in range(9):
+    s.append(i)
+dbl(s, 9)
+print(s)
+
+# 偏移是运行时不变量（非常量）：base = off + j
+def shift(a: list[int], off: int, n: int) -> int:
+    t = 0
+    for j in range(n):
+        t += a[off + j]
+    return t
+
+a = []
+for i in range(20):
+    a.append(i * i)
+print(shift(a, 5, 10))
+print(shift(a, 0, 20))
+
+# ── 原 294_intloop_bce_bounds.py ──────────────────────────────────────
+
 # BCE 正确性命门（0.335）：守卫失败必须回退检查循环，IndexError 语义/时机不变。
 # 覆盖：len 不足（中途越界，副作用已发生）、负偏移（Python 回绕）、零次循环、
 # 首轮即越界、偏移溢出（max 回绕检测）、bound 为运行时变量。
@@ -105,7 +168,53 @@ def const_bound(a: list[int]) -> str:
 print(const_bound([1, 2, 3, 4, 5]))
 print(const_bound([1, 2, 3, 4, 5, 6, 7, 8, 9, 10]))
 
+# ── 原 296_intloop_dedup.py ──────────────────────────────────────
+
+# 同块 load 去重回归（0.335，PYADAMAS_LOOP_OPT bit2）：LICM 提升出的重复
+# load.slot / load.global 合并后语义不变（nqueens row 形态 + 全局读）。
+G = 7
+
+def f(row: int, n: int) -> int:
+    t = 0
+    for c in range(n):
+        t += row + c
+        t += row - c
+        t += row * 2
+    return t + G
+
+print(f(5, 4))
+print(f(0, 0))
+print(f(-3, 6))
+
+# 全局在循环里多次读（无调用循环 → LICM 提升 + 去重）
+def h(n: int) -> int:
+    t = 0
+    for i in range(n):
+        t += G
+        t += G * i
+    return t
+print(h(5))
+
+# 槽在循环里被写：去重不得跨写合并
+def w(n: int) -> int:
+    x = 1
+    t = 0
+    for i in range(n):
+        t += x
+        x = x + 1
+        t += x
+    return t
+print(w(5))
+
 # --- expect ---
+# 7 8694
+# 4 1584
+# 1 9
+# 0 0
+# 3 681
+# [0, 3, 6, 9, 12, 15, 18, 21, 24]
+# 985
+# 2470
 # IE after 3
 # IE after 0
 # ok 0
@@ -124,3 +233,8 @@ print(const_bound([1, 2, 3, 4, 5, 6, 7, 8, 9, 10]))
 # IE 0
 # IE 30
 # ok 110
+# 87
+# 7
+# -65
+# 105
+# 35

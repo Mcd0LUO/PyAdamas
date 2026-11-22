@@ -60,7 +60,7 @@ rm -rf build/dev                   # 连 CMake 中间产物一起清
 | `tests/run/*.py` | 必须编译运行成功，输出与末尾 `# --- expect ---` 逐行一致 | `NN_主题.py` |
 | `tests/unsupported/*.py` | `check -v` 必须打标记，`build` 必须拒绝 | `主题.py` |
 
-当前规模：正例 12 / 反例 64 / 运行 205 / 未建模 1 / 严格 6 / 模块 15。`ctest` 另含 `pyadamas_cache_race`：两进程并发 `--rebuild` 编译 hashlib/hmac，守模块缓存原子写；`cfi:unwind`（`tests/cfi/`）用 libgcc 的 `_Unwind_Backtrace` 数帧，守生成代码的 CFI。
+当前规模：正例 12 / 反例 91 / 运行 377 / 未建模 1 / 严格 7 / 模块 18。`ctest` 另含 `pyadamas_cache_race`：两进程并发 `--rebuild` 编译 hashlib/hmac，守模块缓存原子写；`cfi:unwind`（`tests/cfi/`）用 libgcc 的 `_Unwind_Backtrace` 数帧，守生成代码的 CFI。
 
 跑单个文件：
 
@@ -84,6 +84,29 @@ print("hi")
 ```
 
 `# --- expect ---` 之后每一行去掉 `# ` 就是期望输出，必须逐字节一致（包括空行）。
+
+### 用例合并政策
+
+同主题的小用例合并成一个文件（0.381 起）：把各文件正文按顺序拼起来，
+`# --- expect ---` 块也按同样顺序拼接，每个原文件的位置留一行
+`# ── 原 xxx.py ──` 注释便于追溯。合并前**必须验证输出逐字节等于各原文件
+输出之和**，否则宁可不合并。
+
+三条禁令（都是踩过的）：
+
+1. **不要用函数包裹各段**（`def _case_N(): ...` 再调用）。静态类型是模块级
+   中心的，包进函数会改变推断：
+   - 嵌套 `def` 的未标注参数无法从调用点推断（`ch.send` 直接报不支持）；
+   - `cimport` 只允许在模块层（包进函数报 "only allowed at module level"）；
+   - 部分对象的方法解析依赖静态类型（`Decimal.as_tuple`、`tarfile.X` 会变成 unknown）。
+2. **注意同名变量的类型冲突**：`x = 1` 一段、`x = "s"` 一段拼在一起会撞上
+   「未标注变量不能换类型」（0.375 的限制）。同名类不同布局也一样
+   （`cannot assign 'Meter' to 'Meter' variable`）。
+3. **依赖静态路径的调用**（`open(d + "/x")`）在拼接后可能失去常量性，
+   报 "must be a statically known path"。
+
+能合的都合了；剩下的大文件（vthread、decimal、tarfile、codepoint、statistics）
+就是被上面三条卡住的，别再试包裹式合并。
 
 ### 差分测试
 
