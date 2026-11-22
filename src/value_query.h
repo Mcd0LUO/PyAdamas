@@ -20,6 +20,9 @@ public:
     virtual TypePtr ty_of(VReg r) const = 0;
     // 全局 #i 的操作数。
     virtual const MOperand& global_mop(int i) const = 0;
+    // vreg 的定义指令（按定义块口径）。向量化器用它判断一个值来自哪条指令
+    // （仿射下标解析、j 物化、归约识别都依赖它），实测用量 14 次。
+    virtual const Inst* simd_def(VReg v) const = 0;
 };
 
 }  // namespace pyadamas

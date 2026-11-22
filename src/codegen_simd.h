@@ -30,7 +30,7 @@
     // 函数级前提：门控开 + opt>=2 + 非生成器 + 默认分配 + SysV + 无 handler。
     bool simd_func_ok() const;
     // vreg 的定义指令（def_block_ 口径，与定义位置无关）。
-    const Inst* simd_def(VReg v) const;
+    const Inst* simd_def(VReg v) const override;
     bool simd_const_int(VReg v, int64_t want) const;
     // 体块过滤常量定义后恰为 core_n 条核心指令（总数 <= max_total），末尾 Jump。
     bool simd_core_body(const Block& b, size_t core_n, size_t max_total,

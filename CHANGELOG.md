@@ -4,6 +4,19 @@
 
 早期阶段没有逐条留痕，按阶段归纳；0.4 之后逐条记录。
 
+## [0.401] - 2026-11-22
+
+> 模块重组收尾（补）：`simd_def` 进 `ValueQuery` 接口。
+>
+> 这是阶段 3 搬迁前最后一个**确定的**接口缺口：向量化器有 14 处调用 `simd_def`
+>（仿射下标解析、j 物化、归约识别都依赖它），而它此前不在任何接口里。
+>
+> `virtual const Inst* simd_def(VReg v) const = 0;` + `AsmGen` 实现加 `override`。
+>
+> 验证：构建绿 / 369 ran ok / difftest 348/0 / check_size 通过。
+>
+> **阶段 3（搬 3,414 行）仍未开始**，见 `docs/vect-planner-design.md` §11。
+
 ## [0.400] - 2026-11-22
 
 > 模块重组收尾：核对 VectPlanner 抽取的剩余接口成员 —— 上一轮列的「待补 6 个」
