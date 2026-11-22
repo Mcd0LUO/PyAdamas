@@ -843,12 +843,90 @@ static int cmp_desc_lt(int64_t a, int64_t b) {
 #define LESS_CMP(a, b) cmp_desc_lt(a, b)
 PYADAMAS_TIMSORT(cmp, LESS_CMP)
 
+/* kind 3（元素类型推断不出）的排序：CPython 口径 —— 元素必须能相互比较。
+   以前一律按机器字（堆指针）比：混合容器会静默排出一串乱序，而不是像
+   CPython 那样抛 TypeError（sorted(["a0", 1])）。现在先按元素族分类：
+   全数值（int/bool/float/big）按数值比、全 str 按字节比、其它保持机器字；
+   族混杂（str vs 数值、None vs 数值等）→ TypeError。 */
+enum { PA_UK_NUM = 1, PA_UK_STR = 2, PA_UK_OTHER = 4 };
+
+static int pa_unknown_sort_family(int64_t v) {
+    if (v == 0) return PA_UK_OTHER;  /* None：与数值/str 都不可比 */
+    if (!pa_unknown_is_heap(v)) return PA_UK_NUM;
+    switch (((PyAdamasRc*)((uintptr_t)v - (uintptr_t)PYADAMAS_RC_HDR))->kind) {
+        case PYADAMAS_RC_STR: return PA_UK_STR;
+        case PYADAMAS_RC_CPYFLOAT:
+        case PYADAMAS_RC_BIGINT: return PA_UK_NUM;
+        default: return PA_UK_OTHER;
+    }
+}
+
+static const char* pa_uk_family_name(int fam) {
+    if (fam == PA_UK_NUM) return "int";
+    if (fam == PA_UK_STR) return "str";
+    return "object";
+}
+
+/* 全数值族的精确混比：int/bool 走机器字，float 盒读 double，big 按值。
+   与 pa_any_cmp 的数值口径一致（big 与标量混比走 double 提升）。 */
+static int pa_uk_num_cmp(int64_t a, int64_t b) {
+    int ah = pa_unknown_is_heap(a), bh = pa_unknown_is_heap(b);
+    if (!ah && !bh) return (a > b) - (a < b);
+    PyAdamasRc* ha = ah ? (PyAdamasRc*)((uintptr_t)a - (uintptr_t)PYADAMAS_RC_HDR) : NULL;
+    PyAdamasRc* hb = bh ? (PyAdamasRc*)((uintptr_t)b - (uintptr_t)PYADAMAS_RC_HDR) : NULL;
+    int ak = ha ? (int)ha->kind : -1, bk = hb ? (int)hb->kind : -1;
+    if (ak == PYADAMAS_RC_BIGINT && bk == PYADAMAS_RC_BIGINT)
+        return (int)pa_big_cmp((PyAdamasBig*)(uintptr_t)a, (PyAdamasBig*)(uintptr_t)b);
+    if (ak == PYADAMAS_RC_BIGINT) {
+        double d;
+        if (bk == PYADAMAS_RC_CPYFLOAT) memcpy(&d, (void*)(uintptr_t)b, sizeof d);
+        else d = (double)b;
+        int c = (int)pa_big_cmp_f64((PyAdamasBig*)(uintptr_t)a, d);
+        return c < 0 ? -1 : c > 0 ? 1 : 0;
+    }
+    if (bk == PYADAMAS_RC_BIGINT) {
+        double d;
+        if (ak == PYADAMAS_RC_CPYFLOAT) memcpy(&d, (void*)(uintptr_t)a, sizeof d);
+        else d = (double)a;
+        int c = (int)pa_big_cmp_f64((PyAdamasBig*)(uintptr_t)b, d);
+        return c < 0 ? 1 : c > 0 ? -1 : 0;
+    }
+    double x, y;
+    if (ak == PYADAMAS_RC_CPYFLOAT) memcpy(&x, (void*)(uintptr_t)a, sizeof x);
+    else x = (double)a;
+    if (bk == PYADAMAS_RC_CPYFLOAT) memcpy(&y, (void*)(uintptr_t)b, sizeof y);
+    else y = (double)b;
+    return (x > y) - (x < y);
+}
+#define LESS_UK_NUM(a, b) (pa_uk_num_cmp((a), (b)) < 0)
+PYADAMAS_TIMSORT(uknum, LESS_UK_NUM)
+
 // kind：0 int/bool、1 float、2 str、4 容器元素（desc 字典序）、5 u64（无符号）、
 // 其它机器字。desc：编译期描述符串常量，仅 kind 4 读取；标量种类传空串，不读。
 void pa_list_sort(PyAdamasList* l, int64_t kind, PyAdamasStr* desc) {
     if (l->len < 2) return;
     /* 0.303：排序重排元素，kind2 位图无法跟随，保守丢弃。 */
     if (l->elem_kind == 2) pa_list_drop_bits(l);
+    if (kind == 3) {
+        /* 未知元素种类：按族决定比较器；族混杂按 CPython 抛 TypeError。 */
+        int fam = 0;
+        for (int64_t i = 0; i < l->len; ++i) fam |= pa_unknown_sort_family(l->data[i]);
+        if ((fam & (fam - 1)) != 0) {
+            const char* n1 = pa_uk_family_name(fam & PA_UK_NUM ? PA_UK_NUM
+                                          : fam & PA_UK_STR ? PA_UK_STR : PA_UK_OTHER);
+            const char* n2 = pa_uk_family_name(fam & PA_UK_OTHER ? PA_UK_OTHER
+                                          : fam & PA_UK_STR ? PA_UK_STR : PA_UK_NUM);
+            char msg[160];
+            snprintf(msg, sizeof msg,
+                     "'<' not supported between instances of '%s' and '%s'", n1, n2);
+            pa_raise_c("TypeError", msg);
+            return;
+        }
+        if (fam == PA_UK_STR) sort_str(l->data, l->len);
+        else if (fam == PA_UK_NUM) sort_uknum(l->data, l->len);
+        else sort_i64(l->data, l->len);
+        return;
+    }
     if (kind == 2) sort_str(l->data, l->len);
     else if (kind == 1) sort_f64(l->data, l->len);
     else if (kind == 5) sort_u64(l->data, l->len);
