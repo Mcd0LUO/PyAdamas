@@ -825,7 +825,15 @@ void AsmGen::gen_block(const Block& b) {
         // SIMD 向量化前奏（PYADAMAS_SIMD 门控，默认关）：匹配到热点循环体
         // （reduction/int map/nbody map/pair）则发「守卫 + SSE2 向量循环 +
         // 跳标量尾」，随后照常发射原标量指令作尾循环/fallback。不匹配零字节。
-        if (!try_simd_vectorize(b)) try_vect_loop(b);
+        // P4 顺序分流（0.416）：两条路径都开时，**全整数**体块让通用先试 ——
+        // 通用整数路径有 AVX2 4-lane（实测 matmul 比特化 2-lane 模板快约 28%）；
+        // 含浮点或判不准的体块仍「特化先试」（float 上特化快约 2 倍，保持现状）。
+        // 判据见 codegen_vect.cpp::block_int_only（纯 IR 类型，保守）。
+        if (simd_enabled_ && vect_enabled_ && block_int_only(b)) {
+            if (!try_vect_loop(b)) try_simd_vectorize(b);
+        } else if (!try_simd_vectorize(b)) {
+            try_vect_loop(b);
+        }
 
         // 预扫描：每个变量槽在本块内被 store 的位置，以及每个 vreg
         // 第一次被读的位置。LoadSlot 的别名只在「读之后、第一次赋值之前」

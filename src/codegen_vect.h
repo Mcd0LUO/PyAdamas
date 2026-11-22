@@ -18,6 +18,12 @@
     // 向量循环 + jmp cond（标量尾由原机器照常发射）」，返回 true。不匹配返回
     // false，一个字节不发。门控关时第一个判断就返回。
     bool try_vect_loop(const Block& b);
+
+    // 体块是否「全整数」（P4 顺序分流用，实现见 codegen_vect.cpp）：只看 IR
+    // 类型（int/bool/定宽整数、以及元素为整数的 list），不出现任何浮点值。
+    // 保守口径：类型缺失或任何拿不准的值都按「含浮点」返回 false —— 宁可让
+    // 浮点体块走特化优先（现状），也不误改浮点路径。
+    bool block_int_only(const Block& b) const;
     // 函数级前提（与 simd_func_ok 同口径，但用 vect_enabled_ 门控）。
     bool vect_func_ok() const;
 
