@@ -4,6 +4,81 @@
 
 早期阶段没有逐条留痕，按阶段归纳；0.4 之后逐条记录。
 
+## [0.383] - 2026-11-22
+
+> 修掉「函数内的 `from X import Class` 丢类型」，并记下两个新发现的 O2 后端 bug。
+>
+> ### 1. 函数内的 from-import 不再退化成 unknown
+>
+> ```python
+> def outer() -> None:
+>     from tarfile import TarInfo
+>     t = TarInfo("a.txt")
+>     print(t.name)        # 以前：attribute access is only supported as a method call
+> ```
+>
+> 病根在 `name_is_class()`：它走到第一个绑定该名字的作用域就返回，而返回条件写的是
+> `s->is_module && class_obj_names_.count(name)` —— 于是**只有模块作用域**里的
+> 类绑定才被认成类对象。函数内的 `from m import Class` 绑在同名作用域里，被判成
+> 实例，`TarInfo(...)` 的返回类型退化成 unknown。
+>
+> 判据改成看**绑定的静态类型是不是类对象**（`TyKind::Class` + `class_obj_names_`），
+> 与「名字绑在哪一层」无关。
+>
+> 顺带的影响：`tests/run` 的 decimal 组（9 个文件）现在能合并了，已合为
+> `403_decimal.py`；`tests/run` 346 → 338。
+>
+> ### 2. 新发现的两个后端 bug（**未修**）
+>
+> 都是 O2 才出现、`-O0` 正常，且都已确认**不是**本轮改动引入（回退改动仍复现）。
+> 共同点是「浮点提升槽 + 循环里的间接调用」。
+>
+> **A. 循环累加只剩最后一项（静默算错）**
+>
+> ```python
+> def outer() -> None:
+>     def f(i: int, j: int) -> float:
+>         return 1.0 / (i + j + 1)
+>     def g(n: int) -> float:
+>         total = 0.0
+>         for j in range(n):
+>             total += f(0, j)      # 调的是**闭包环境表里取出来的**函数
+>         return total
+>     print(g(4))                   # 期望 2.0833…，实测 0.25（只剩 f(0,3)）
+> ```
+>
+> `-O0` 正确。把 `f` 提到模块级再让优化器内联掉调用 → 也正确；换成方法调用
+> （`k.m(x)`）同样正确。所以触发点是「调用目标来自 `index.get %env[0]`」。
+>
+> IR 里累加器是 `s3: float`，每轮 `load.slot s3 → add → store.slot s3`。调用点在
+> 循环体内，而 `s3` 的值要跨过调用活到下一轮（循环携带依赖）。
+> `codegen_block.cpp:843-855` 的注释已经记过一次同类事故（0.314 N19a），
+> 那里的修法是把「别名 load 的使用点」补进调用点掩码；这轮的情形是**循环携带**，
+> 块级 `fp_live_out_` 看不到回边，掩码仍是 0 → 调用前不写回，xmm 被调用者踩掉。
+>
+> **B. 汇编失败（`operand type mismatch for movq`）**
+>
+> ```python
+> def outer() -> None:
+>     def f(j: int) -> float:
+>         return 1.0 / (j + 1)
+>     for j in range(3):
+>         total = 0.0            # 累加器在循环**体内**初始化
+>         total += f(j)
+>     print(total)
+> ```
+>
+> `-O2` 下 `as` 报 `operand type mismatch for movq`（生成代码非法，编译失败）。
+> `-O0` 正常。猜测同一个掩码/写回路径把「槽 → 寄存器」当成了通用 `movq`，
+> 而两边都是 xmm 寄存器（`movsd` 才对）—— `spill_fp_slots` 里那句注释
+> 「`movsd %xmm8, %xmm8` 是非法操作数组合（实测 spectral_norm 汇编失败）」
+> 说明同一类问题出现过一次，这里又漏了一处。
+>
+> 两个都没修：它们都在槽位寄存器提升 + 调用点写回这条路径上，需要单独一轮
+> 用 IR 断言 + 汇编 diff 定位，盲改会换一个更隐蔽的错。
+>
+> 闸门：difftest **337/0**；普通与 ASan 套件各 **358 ran ok**、0 ASan 报告；check_size 通过。
+
 ## [0.382] - 2026-11-22
 
 > 修掉「函数体内定义的 def 拿不到形参类型」，并据此再合并 31 个测试文件。

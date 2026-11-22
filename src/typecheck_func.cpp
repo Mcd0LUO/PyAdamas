@@ -409,7 +409,15 @@ bool TypeChecker::name_is_class(const Name& n) {
         if (it == s->vars.end()) continue;
         // class 语句绑定的名字（含函数内定义的类）。
         if (it->second.is_class_name) return true;
-        return s->is_module && class_obj_names_.count(n.id) > 0;
+        // `from m import Class` 也是类对象绑定 —— **不管绑在哪一层作用域**。
+        // 原来这里写 `s->is_module && ...`，于是函数内的 from-import 被当成
+        // 实例：`TarInfo("a.txt")` 返回 unknown，读属性直接报
+        // 「attribute access is only supported」。判据改成看静态类型是不是
+        // 类对象，比「变量在哪一层」准。
+        if (it->second.ty && it->second.ty->kind == TyKind::Class &&
+            class_obj_names_.count(n.id) > 0)
+            return true;
+        return false;
     }
     return false;
 }
