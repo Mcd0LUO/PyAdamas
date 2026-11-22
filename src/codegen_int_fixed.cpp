@@ -49,6 +49,12 @@ void AsmGen::gen_bin_int_fixed(const Inst& in) {
         // 宽度 < 64 的无符号值在槽里恒非负（零扩展不变量），
         // 所以除 u64 之外的运算都能直接复用有符号指令。
         emit2(MOp::kMovq, sa, kRax);
+        // 定宽整数槽内的值一律非负（正常化保证；u64 是无符号域）→ 正 2 的
+        // 幂除数的 // 与 % 各自退化成一条 shrq / andq。走通用 idivq/divq 要
+        // 十几条指令加一次除法，这里是一条。
+        int64_t cdiv = 0;
+        const bool pow2_const = operand_const_imm(src_op(in.b), &cdiv) && cdiv > 1 &&
+                                (cdiv & (cdiv - 1)) == 0;
         switch (in.bop) {
             case BinKind::Add: emit2(MOp::kAddq, sb, kRax); break;
             case BinKind::Sub: emit2(MOp::kSubq, sb, kRax); break;
@@ -66,6 +72,10 @@ void AsmGen::gen_bin_int_fixed(const Inst& in) {
                 emit2(u64 ? MOp::kShrq : MOp::kSarq, kCl, kRax);
                 break;
             case BinKind::Div:
+                if (pow2_const) {
+                    emit_imm(MOp::kShrq, pow2_log2(static_cast<uint64_t>(cdiv)), kRax);
+                    break;
+                }
                 if (u64) {
                     gen_udiv64(in);
                     break;
@@ -80,6 +90,10 @@ void AsmGen::gen_bin_int_fixed(const Inst& in) {
                 emit1(MOp::kIdivq, kRcx);
                 break;
             case BinKind::Mod:
+                if (pow2_const) {
+                    emit_imm(MOp::kAndq, cdiv - 1, kRax);
+                    break;
+                }
                 if (u64) {
                     gen_udiv64(in);
                     emit2(MOp::kMovq, kRdx, kRax);
@@ -88,6 +102,10 @@ void AsmGen::gen_bin_int_fixed(const Inst& in) {
                 gen_mod(in);
                 break;
             case BinKind::FloorDiv:
+                if (pow2_const) {
+                    emit_imm(MOp::kShrq, pow2_log2(static_cast<uint64_t>(cdiv)), kRax);
+                    break;
+                }
                 if (u64) {
                     gen_udiv64(in);
                     break;  // 商在 %rax
