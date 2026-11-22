@@ -332,7 +332,7 @@ void AsmGen::assign_global_vreg_regs() {
         for (size_t v = 0; v < nv; ++v) {
             if (!is_const[v]) continue;
             // P3：unknown dst 的常量不折叠（跳过 tag 写入）。
-            if (tags_enabled_ && v < f_->vreg_ty.size() &&
+            if (tag_.tags_enabled && v < f_->vreg_ty.size() &&
                 is_unk_ty(f_->vreg_ty[v]))
                 continue;
             global_imm_[static_cast<VReg>(v)] =
@@ -529,14 +529,14 @@ void AsmGen::build_operand_caches() {
                 std::format("{}(%r15)", 8 * (kGenHeader + static_cast<int>(s)));
         // P3：平行 tag 区操作数缓存（设计 §3.2）。必须在 tag 字分配
         // （emit_function 开头）与 layout_frame 之后构建。
-        vreg_tag_mem_.assign(f_->vreg_ty.size(), std::string());
-        slot_tag_mem_.assign(f_->slot_ty.size(), std::string());
-        for (size_t v = 0; v < vreg_tag_.size(); ++v)
-            if (vreg_tag_[v] >= 0)
-                vreg_tag_mem_[v] = std::format("{}(%rsp)", tag_off(vreg_tag_[v]));
-        for (size_t s = 0; s < slot_tag_.size(); ++s)
-            if (slot_tag_[s] >= 0)
-                slot_tag_mem_[s] = std::format("{}(%rsp)", tag_off(slot_tag_[s]));
+        tag_.vreg_tag_mem.assign(f_->vreg_ty.size(), std::string());
+        tag_.slot_tag_mem.assign(f_->slot_ty.size(), std::string());
+        for (size_t v = 0; v < tag_.vreg_tag.size(); ++v)
+            if (tag_.vreg_tag[v] >= 0)
+                tag_.vreg_tag_mem[v] = std::format("{}(%rsp)", tag_off(tag_.vreg_tag[v]));
+        for (size_t s = 0; s < tag_.slot_tag.size(); ++s)
+            if (tag_.slot_tag[s] >= 0)
+                tag_.slot_tag_mem[s] = std::format("{}(%rsp)", tag_off(tag_.slot_tag[s]));
     }
 
 // ── 函数 ────────────────────────────────────────────────────

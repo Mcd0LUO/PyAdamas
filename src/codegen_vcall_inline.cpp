@@ -80,7 +80,7 @@ void AsmGen::gen_vcall(const Inst& in, bool keep_int_result, int direct_fn) {
     }
     line("xorl %r10d, %r10d");
     // P2：虚调用点没有可信的静态签名 → 侧信道写 0（被调回退 UNK）。
-    if (type_tags_) {
+    if (tag_.type_tags) {
         line("movq $0, pa_ptag_in(%rip)");
         line("movq $0, pa_ptag_len(%rip)");
     }

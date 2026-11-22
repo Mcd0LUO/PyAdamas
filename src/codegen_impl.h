@@ -45,6 +45,7 @@
 #include "tag_defs.h"
 #include "emitter.h"
 #include "frame.h"
+#include "tag_lower.h"
 #include "vect_rules.h"
 
 namespace pyadamas {
@@ -212,7 +213,7 @@ public:
         // 运行期类型标签（PYADAMAS_TYPE_TAGS，默认关，docs/numeric-types-design.md §2）：
         // 在 P3 shadow tag 之上追加 NONE/BOOL 与精确堆子类 tag，解锁
         // isinstance/repr/pprint。关闭时 tag 编号/判定逐字沿用 P3（asm 不变）。
-        void set_type_tags(bool v) { type_tags_ = v; }
+        void set_type_tags(bool v) { tag_.type_tags = v; }
 
 private:
     const std::string& global_label(int i) const {

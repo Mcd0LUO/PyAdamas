@@ -4,6 +4,27 @@
 
 早期阶段没有逐条留痕，按阶段归纳；0.4 之后逐条记录。
 
+## [0.396] - 2026-11-22
+
+> 模块重组第 2 步（3/5）：tag 与零开销异常状态拆成 `TagLower`。
+>
+> 新文件 `src/tag_lower.h`：14 个字段 ——
+>
+> | 类别 | 成员 |
+> |---|---|
+> | tag（7） | `tags_enabled` `type_tags` `n_tag_words` `vreg_tag` `slot_tag` `vreg_tag_mem` `slot_tag_mem` |
+> | EH（7） | `eh_plans`（含 `EhPlanRec`）+ 三个标签表 + 三个取用序号 |
+>
+> 约 149 处用法改成 `tag_.x`，横跨 15 个文件；`EhPlanRec` 成为 TagLower 的内嵌类型，
+> 外部引用改成 `TagLower::EhPlanRec`。
+>
+> 验证：构建绿 / 369 ran ok / difftest 348/0 / ASan 369 ran ok、0 报告 / check_size 通过；
+> 12 基准输出全一致，指令数全部 ±0.000%。
+>
+> 剩余 `RegAlloc`（约 20 个纠缠字段，`slot_reg_` 在每条指令的操作数路径上）与
+> `VectPlanner`（约 2500 行，需先定 EmitSink 接口）各需独立一轮，见
+> `docs/modularization.md` §6.6。
+
 ## [0.395] - 2026-11-22
 
 > 模块重组第 2 步（2/5）：把**输出侧状态**从 `AsmGen` 拆成 `Emitter`。

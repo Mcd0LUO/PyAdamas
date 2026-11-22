@@ -33,7 +33,7 @@ static int idx_store_heap_kind(TypePtr ct) {
 void AsmGen::gen_index_store(const Inst& in) {
     const int hk = idx_store_heap_kind(ty_of(in.c));
     // P3：unknown 新值带 tag → 堆标志从 tag 导出交运行时（位图精确维护）。
-    if (tags_enabled_ && hk == 2 && vreg_tagged(in.c)) {
+    if (tag_.tags_enabled && hk == 2 && vreg_tagged(in.c)) {
         gen_index_store_tagged(in, false);
         return;
     }
@@ -173,7 +173,7 @@ void AsmGen::gen_index_store_unchecked(const Inst& in) {
     // 种类/位图维护与 gen_index_store 完全一致（0.303）。
     const int hk = idx_store_heap_kind(ty_of(in.c));
     // P3：同 gen_index_store 的 tag 路由。
-    if (tags_enabled_ && hk == 2 && vreg_tagged(in.c)) {
+    if (tag_.tags_enabled && hk == 2 && vreg_tagged(in.c)) {
         gen_index_store_tagged(in, true);
         return;
     }

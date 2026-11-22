@@ -87,7 +87,7 @@ void AsmGen::gen_vcall_static(const Inst& in) {
                 emit2(MOp::kMovq, src_mop(in.args[i]), arg_reg_i(l.reg));
         }
         line("xorl %r10d, %r10d");
-        if (type_tags_) {
+        if (tag_.type_tags) {
             line("movq $0, pa_ptag_in(%rip)");
             line("movq $0, pa_ptag_len(%rip)");
         }
@@ -135,7 +135,7 @@ void AsmGen::gen_super_vcall(const Inst& in) {
                 emit2(MOp::kMovq, src_mop(in.args[i]), arg_reg_i(l.reg));
         }
         line("xorl %r10d, %r10d");
-        if (type_tags_) {
+        if (tag_.type_tags) {
             line("movq $0, pa_ptag_in(%rip)");
             line("movq $0, pa_ptag_len(%rip)");
         }
@@ -174,7 +174,7 @@ void AsmGen::gen_call_ptr(const Inst& in) {
                 emit2(MOp::kMovq, src_mop(in.args[i]), arg_reg_i(l.reg));
         }
         line("xorl %r10d, %r10d");
-        if (type_tags_) {
+        if (tag_.type_tags) {
             line("movq $0, pa_ptag_in(%rip)");
             line("movq $0, pa_ptag_len(%rip)");
         }

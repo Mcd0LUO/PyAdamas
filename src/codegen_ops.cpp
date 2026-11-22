@@ -66,10 +66,10 @@ void AsmGen::gen_inst(const Inst& in) {
                 break;
             case IrOp::ConstNone:
                 move_to(dst_op(in.dst), "$0");
-                // None 在 unknown 域仍是裸 0（0.324 边界）。P2（type_tags_）
+                // None 在 unknown 域仍是裸 0（0.324 边界）。P2（tag_.type_tags）
                 // 给它专 tag，使 isinstance(x, type(None))/repr 能区分；
                 // 门控关时沿用 INT（与 0 不可分，旧行为）。
-                emit_tag_imm(in.dst, type_tags_ ? kTagNone : kTagInt);
+                emit_tag_imm(in.dst, tag_.type_tags ? kTagNone : kTagInt);
                 break;
             case IrOp::FuncAddr: {
                 char b[24];
@@ -145,7 +145,7 @@ void AsmGen::gen_inst(const Inst& in) {
                 emit2(MOp::kMovq, src_mop(in.a), kRax);
                 emit2(MOp::kMovq, kRax, global_mop(in.idx));
                 // P3：unknown 全局写入同时写 tag 字（仅 eligible 全局）。
-                if (tags_enabled_ && in.idx >= 0 &&
+                if (tag_.tags_enabled && in.idx >= 0 &&
                     in.idx < static_cast<int>(m_->globals.size()) &&
                     is_unk_ty(m_->globals[static_cast<size_t>(in.idx)].ty) &&
                     global_tag_eligible(in.idx)) {
@@ -352,7 +352,7 @@ void AsmGen::gen_const_int(const Inst& in) {
         const MOperand& d = dst_mop(in.dst);
         // P2：bool 常量（True/False 降级成 const.int ty=bool）发 BOOL tag。
         TypePtr ct = ty_of(in.dst);
-        emit_tag_imm(in.dst, (type_tags_ && ct && ct->kind == TyKind::Bool)
+        emit_tag_imm(in.dst, (tag_.type_tags && ct && ct->kind == TyKind::Bool)
                                  ? kTagBool : kTagInt);
         if (in.imm >= INT32_MIN && in.imm <= INT32_MAX) {
             emit_imm(MOp::kMovq, in.imm, d);
@@ -976,25 +976,25 @@ void AsmGen::gen_eh_begin() {
     // 同时标记「进入表驱动展开区」：C 运行时抛的异常（IndexError /
     // ZeroDivisionError 等）走的是 exc_longjmp，它据此改走 _Unwind，
     // 否则 setjmp 路径的 handler 栈抓不到这些异常。
-    if (eh_begin_seq_ < eh_begin_labels_.size())
-        label(eh_begin_labels_[eh_begin_seq_++]);
+    if (tag_.eh_begin_seq < tag_.eh_begin_labels.size())
+        label(tag_.eh_begin_labels[tag_.eh_begin_seq++]);
     line("call pa_eh_enter");
 }
 
 void AsmGen::gen_eh_end() {
     // 保护区终点。先退标记再落标签：标签之后的代码已不在保护区里。
     line("call pa_eh_leave");
-    if (eh_end_seq_ < eh_end_labels_.size())
-        label(eh_end_labels_[eh_end_seq_++]);
+    if (tag_.eh_end_seq < tag_.eh_end_labels.size())
+        label(tag_.eh_end_labels[tag_.eh_end_seq++]);
 }
 
 void AsmGen::gen_eh_landing_pad() {
     // landing pad 入口：%rax 是展开包装指针（personality 的 GR0）；紧随其后的
     // CallRt EhLand 会把它作为第一个实参传给 pa_eh_land。
-    if (eh_lp_seq_ < eh_lp_labels_.size()) label(eh_lp_labels_[eh_lp_seq_++]);
+    if (tag_.eh_lp_seq < tag_.eh_lp_labels.size()) label(tag_.eh_lp_labels[tag_.eh_lp_seq++]);
     // P2（type_tags）：异常展开落点清 tag 侧信道 —— 抛异常的调用可能没被
     // 被调读走（被调无 tag 形参），stale 值不能被之后的回调误读。
-    if (type_tags_) {
+    if (tag_.type_tags) {
         line("movq $0, pa_ptag_in(%rip)");
         line("movq $0, pa_ptag_len(%rip)");
     }

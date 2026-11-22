@@ -82,7 +82,7 @@ void AsmGen::gen_rc_dec(const Inst& in, const std::string& src,
 bool AsmGen::gen_rc_inline(const Inst& in, RtFn fn) {
     // P3：unknown RC 三入口的 tag 判别（设计 §3.3）。tag>=3 直接
     // inc/dec/temp（免探针）；INT/FRAW 跳过；UNK 回退旧探针调用。
-    if (tags_enabled_ &&
+    if (tag_.tags_enabled &&
         (fn == RtFn::RcIncUnknown || fn == RtFn::RcDecUnknown ||
          fn == RtFn::RcTempUnknown) &&
         in.args.size() == 1 && vreg_tagged(in.args[0])) {

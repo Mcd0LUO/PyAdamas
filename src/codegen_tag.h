@@ -11,17 +11,12 @@
     //
     // unknown 值仍是 8B i64（float 仍装箱），平行 tag 字跟值走：tag 是
     // RC/分派快路径的判据，UNK(0) 一律回退探针 —— 正确性不依赖传播完备。
-    // 门控 tags_enabled_ = 模块含 AnyArithT/AnyCmpT/AnyNegT（封闭活跃域）；
+    // 门控 tag_.tags_enabled = 模块含 AnyArithT/AnyCmpT/AnyNegT（封闭活跃域）；
     // 门控关的模块（含 26 个热基准）不进任何 tag 分支，asm 逐字节不变。
     // tag 编码与静态类型映射见 tag_defs.h（含 P2 的 NONE/BOOL/堆子类扩展，
     // 以及堆 ⇔ 3..5 或 >=8 的判定口径）。
-    bool tags_enabled_ = false;
-    bool type_tags_ = false;              // PYADAMAS_TYPE_TAGS（默认关）
-    int n_tag_words_ = 0;                 // 帧内平行 tag 区字数
-    std::vector<int> vreg_tag_;           // vreg -> tag 字号（-1 无）
-    std::vector<int> slot_tag_;           // 命名槽 -> tag 字号（-1 无）
-    std::vector<MOperand> vreg_tag_mem_;
-    std::vector<MOperand> slot_tag_mem_;
+    // tag 与零开销异常状态已拆到 TagLower（src/tag_lower.h）。
+    TagLower tag_;
     // tag 区在 vreg 栈槽区之上、帧记录之下（rec_off 按 frame_.locals 自动让位）。
     int tag_off(int w) const;
     static bool is_unk_ty(const TypePtr& t);
@@ -32,7 +27,7 @@
     // 对方不维护本模块 tag）一律 UNK 回退。入口模块 __entry__ 不可被 import。
     bool global_tag_eligible(int gi) const;
     std::string global_tag_label(int gi) const;
-    // 静态类型导出的 tag（定义在 tag_defs.h；type_tags_ 决定 P2 扩展）。
+    // 静态类型导出的 tag（定义在 tag_defs.h；tag_.type_tags 决定 P2 扩展）。
     int64_t static_tag_of(const TypePtr& t) const;
     bool vreg_tagged(VReg r) const;
     bool slot_tagged(int s) const;
@@ -64,7 +59,7 @@
     // 形参 tag 全 UNK 回退探针。unknown 返回经 %rdx 带 tag（旧调用方
     // 忽略 rdx，无兼容问题）。门控关/生成器一律不进。
     static std::string ptag_label(int i);
-    // 形参是否在 tag 数组里占一个字（type_tags_ 时按声明类型，否则按槽类型）。
+    // 形参是否在 tag 数组里占一个字（tag_.type_tags 时按声明类型，否则按槽类型）。
     bool ptag_param(const IRFunction& f, const IRParam& p) const;
     // 本函数 unknown 形参个数（>0 才发双入口；生成器/门控关恒 0）。
     int func_ptag_words() const;
@@ -96,24 +91,7 @@
     // 一个函数的所有保护区合成一份 LSDA（多条 call-site 记录）。
     // 嵌套 try 时每个 region 各占一条记录，共用同一个 landing pad 分发入口
     // （分发链按 handler 顺序逐个匹配，与老路径一致）。
-    struct EhPlanRec {
-        std::string func_label;  // FDE 起点（= .cfi_startproc 地址，不是 .LfN）
-        struct Range {
-            std::string begin;   // 保护区起点标签
-            std::string end;     // 保护区终点标签（开区间）
-            std::string lp;      // 该区间的 landing pad 标签
-        };
-        std::vector<Range> ranges;
-        int lsda_index = 0;
-    };
-    std::vector<EhPlanRec> eh_plans_;
-    // 当前函数预扫描出来的标签（发射标记指令时按顺序取用）。
-    std::vector<std::string> eh_begin_labels_;
-    std::vector<std::string> eh_end_labels_;
-    std::vector<std::string> eh_lp_labels_;
-    size_t eh_begin_seq_ = 0;
-    size_t eh_end_seq_ = 0;
-    size_t eh_lp_seq_ = 0;
+    // EH 计划（EhPlanRec / 标签 / 取用序号）在 TagLower 里，见 src/tag_lower.h。
     bool eh_plan_active_ = false;
     // 总开关（--zero-cost-exc）：关闭时 prepare_eh_plan 直接返回，老路径 asm 不变。
     bool zero_cost_exc_ = true;

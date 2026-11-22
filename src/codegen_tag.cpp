@@ -2,7 +2,7 @@
 //
 // 从 codegen_call_rt.cpp 拆出（文件规模硬限制 1200 行）：tag 版动态算子
 // 装填/双字返回落盘、复用匹配、unknown RC tag 内联、堆标志导出、下标
-// 装载/写入的 tag 路由。门控 tags_enabled_ 关时这些函数不被调用。
+// 装载/写入的 tag 路由。门控 tag_.tags_enabled 关时这些函数不被调用。
 #include "codegen_impl.h"
 
 namespace pyadamas {
@@ -48,7 +48,7 @@ void AsmGen::emit_tag_probe(const std::string& payload_op,
 // 无对 S 的其它写入 → 该实参就是「即将被覆盖的槽值」，可作复用提示。
 // 运行时再验 tag==FBOX && rc==1（唯一所有权）才原位改写。
 int64_t AsmGen::any_reuse_ok(const Inst& in) {
-    if (!tags_enabled_ || opt_ < 1 || cur_block_ < 0 ||
+    if (!tag_.tags_enabled || opt_ < 1 || cur_block_ < 0 ||
         cur_block_ >= static_cast<int>(f_->blocks.size()))
         return 0;
     const Block& b = f_->blocks[static_cast<size_t>(cur_block_)];
@@ -157,16 +157,16 @@ void AsmGen::gen_any_tagged(const Inst& in, RtFn fn) {
 //   tag==0(UNK) → 旧 pa_rc_*_unknown（探针，逐字旧语义）
 //   tag 1/2     → 非堆标量，空操作
 //   tag>=3      → 堆指针，直接 pa_rc_inc/dec/temp（免探针）
-// P2（type_tags_）：堆判定改成 3..5 或 >=8；6/7（NONE/BOOL）非堆跳过。
+// P2（tag_.type_tags）：堆判定改成 3..5 或 >=8；6/7（NONE/BOOL）非堆跳过。
 void AsmGen::gen_rc_unknown_tagged(const Inst& in, RtFn fn) {
     VReg v = in.args[0];
     const std::string fb = fresh_label("rcut_fb");
     const std::string done = fresh_label("rcut_done");
-    const std::string heap = type_tags_ ? fresh_label("rcut_heap") : std::string();
+    const std::string heap = tag_.type_tags ? fresh_label("rcut_heap") : std::string();
     emit2("movq", tag_mem(v), "%rax");
     line("testq %rax, %rax");
     emit_jmp("je", fb);
-    if (type_tags_) {
+    if (tag_.type_tags) {
         line("cmpq $3, %rax");
         emit_jmp("jl", done);          // 0..2：非堆标量/裸位模式，跳过
         line("cmpq $6, %rax");
@@ -199,7 +199,7 @@ void AsmGen::gen_rc_unknown_tagged(const Inst& in, RtFn fn) {
 // index_store 用它在门控内导出精确堆性：append 传 0/1 保住 kind2 位图
 // （设计 §1.5），元素侧装载就能从位图直接得 tag，免探针。
 void AsmGen::emit_heap_from_tag(VReg v, const std::string& dst) {
-    if (type_tags_) {
+    if (tag_.type_tags) {
         // 堆 ⇔ 3..5 或 >=8；6/7（NONE/BOOL）与非 0 标量都导出 0。
         const std::string l0 = fresh_label("hft_l0");
         const std::string h1 = fresh_label("hft_h1");
@@ -353,7 +353,7 @@ void AsmGen::gen_index_load_tag(const Inst& in, bool have_regs) {
 //
 // 0.328 的 P3-1b 按槽类型（slot_ty）算，因为 tag 字按 slot_ty 分配。但
 // **目录 ABI 必须在被调定义之外也能推出来**：跨模块/间接调用的调用方只
-// 看得到函数签名（p.ty），看不到被调内部槽升级。所以 P2（type_tags_）
+// 看得到函数签名（p.ty），看不到被调内部槽升级。所以 P2（tag_.type_tags）
 // 把 tag 数组布局统一改成「声明为 unknown 的形参各占一字」：
 //   - 被调序言读到 tag 后，只在**该槽确实有 tag 字**（slot_tagged）时写入，
 //     槽升级成静态类型的形参直接丢弃 tag（它内部已按静态类型处理）；
@@ -363,7 +363,7 @@ void AsmGen::gen_index_load_tag(const Inst& in, bool have_regs) {
 bool AsmGen::ptag_param(const IRFunction& f, const IRParam& p) const {
     if (p.slot < 0) return false;
     // 门控关：逐字沿用 0.328 的槽类型口径（asm 不变）。
-    if (!type_tags_)
+    if (!tag_.type_tags)
         return p.slot < static_cast<int>(f.slot_ty.size()) &&
                is_unknown(f.slot_ty[static_cast<size_t>(p.slot)]);
     // P2：声明类型口径（跨模块可推导，见上方注释）。
@@ -371,8 +371,8 @@ bool AsmGen::ptag_param(const IRFunction& f, const IRParam& p) const {
 }
 
 int AsmGen::func_ptag_words() const {
-    if (!tags_enabled_ || gen_) return 0;
-    if (type_tags_) {
+    if (!tag_.tags_enabled || gen_) return 0;
+    if (tag_.type_tags) {
         // P2：tag 数组按「第 i 个形参 = 第 i 个字」排布，长度 = 形参个数；
         // 序言只要有一个形参带 tag 字就需要读（槽升级的形参读出来丢弃）。
         for (const auto& p : f_->params)
@@ -386,20 +386,20 @@ int AsmGen::func_ptag_words() const {
 }
 
 int AsmGen::call_ptag_words(const Inst& in) const {
-    if (!tags_enabled_) return 0;
+    if (!tag_.tags_enabled) return 0;
     if (in.op == IrOp::CallDirect) {
         if (in.idx < 0 || in.idx >= static_cast<int>(m_->funcs.size())) return 0;
         const IRFunction& c = *m_->funcs[static_cast<size_t>(in.idx)];
         if (c.is_generator) return 0;
         // 实参/形参个数不一致（可变参数等）：tag 数组对不上号，回退旧约定。
         if (in.args.size() != c.params.size()) return 0;
-        if (type_tags_) return static_cast<int>(c.params.size());
+        if (tag_.type_tags) return static_cast<int>(c.params.size());
         int n = 0;
         for (const auto& p : c.params)
             if (ptag_param(c, p)) ++n;
         return n;
     }
-    if (in.op == IrOp::Call && type_tags_) {
+    if (in.op == IrOp::Call && tag_.type_tags) {
         // P2：间接调用（跨模块导入的函数、函数值、闭包）按**静态函数签名**
         // 推导 tag 数组布局 —— 被调同一次构建里也按声明类型排布（ptag_param）。
         // 含浮点形参时走 closure shim 重排，tag 布局不保证 → 不传（0 回退）。
@@ -412,7 +412,7 @@ int AsmGen::call_ptag_words(const Inst& in) const {
         int n = 0;
         for (const auto& p : fi->pos) {
             if (ir_is_float(p.ty)) return 0;
-            if (type_tags_) ++n;      // P2：每形参一字（含静态形参的占位）
+            if (tag_.type_tags) ++n;      // P2：每形参一字（含静态形参的占位）
             else if (is_unk_ty(p.ty)) ++n;
         }
         return n;
@@ -421,7 +421,7 @@ int AsmGen::call_ptag_words(const Inst& in) const {
 }
 
 bool AsmGen::func_ret_tag(const IRFunction& f) const {
-    return tags_enabled_ && !f.is_generator && is_unk_ty(f.ret);
+    return tag_.tags_enabled && !f.is_generator && is_unk_ty(f.ret);
 }
 
 void AsmGen::emit_ptag_entry(int fi) {
@@ -443,7 +443,7 @@ void AsmGen::emit_ret_tag(const Inst& in) {
 
 void AsmGen::emit_ptag_param_load() {
     const std::string skip = fresh_label("ptp_skip");
-    if (type_tags_) {
+    if (tag_.type_tags) {
         // P2：从侧信道读 tag 数组并立刻清零。长度校验（= 本函数形参个数）
         // 不匹配就整体忽略 —— 错位 tag 会让 RC 按错误堆性 inc/dec。
         line("movq pa_ptag_in(%rip), %r11");
@@ -457,7 +457,7 @@ void AsmGen::emit_ptag_param_load() {
     emit_jmp("je", skip);
     int k = 0;
     for (const auto& p : f_->params) {
-        if (type_tags_) {
+        if (tag_.type_tags) {
             // P2：第 i 个形参 = 第 i 个字；槽升级的形参读出来直接丢弃。
             if (slot_tagged(p.slot)) {
                 line(std::format("movq {}(%r11), %rax", 8 * k));
@@ -483,7 +483,7 @@ int AsmGen::emit_ptag_array(const Inst& in, const std::vector<ArgLoc>& locs) {
     const IRFunction& c = *m_->funcs[static_cast<size_t>(in.idx)];
     int k = 0;
     for (size_t i = 0; i < c.params.size(); ++i) {
-        if (type_tags_) {
+        if (tag_.type_tags) {
             // P2：每个形参一个字（静态形参也写，被调按需忽略）—— 位置
             // 与形参序号一一对应，跨模块/间接调用不会因为形参类型推断
             // 差异而错位。

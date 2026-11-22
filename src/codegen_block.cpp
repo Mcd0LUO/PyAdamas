@@ -192,17 +192,17 @@ void AsmGen::emit_function(const IRFunction& f, int fi) {
         // 槽一个专属字（不复用，避免陈旧 tag）。生成器堆帧里的命名槽不加 tag
         // （装载得 UNK 回退探针）；vreg 在常规帧，生成器也分配（P3-1b：
         // 清零挪到 g.entry 块头，每次 resume 都走；GenSent 写 UNK）。
-        vreg_tag_.assign(f_->vreg_ty.size(), -1);
-        slot_tag_.assign(f_->slot_ty.size(), -1);
-        n_tag_words_ = 0;
-        if (tags_enabled_) {
+        tag_.vreg_tag.assign(f_->vreg_ty.size(), -1);
+        tag_.slot_tag.assign(f_->slot_ty.size(), -1);
+        tag_.n_tag_words = 0;
+        if (tag_.tags_enabled) {
             if (!gen_)
                 for (size_t s = 0; s < f_->slot_ty.size(); ++s)
                     if (is_unk_ty(f_->slot_ty[s]))
-                        slot_tag_[s] = n_tag_words_++;
+                        tag_.slot_tag[s] = tag_.n_tag_words++;
             for (size_t v = 0; v < f_->vreg_ty.size(); ++v)
                 if (is_unk_ty(f_->vreg_ty[v]))
-                    vreg_tag_[static_cast<VReg>(v)] = n_tag_words_++;
+                    tag_.vreg_tag[static_cast<VReg>(v)] = tag_.n_tag_words++;
         }
         if (gen_) {
             slot_reg_.assign(f.slot_ty.size(), std::string());
@@ -305,7 +305,7 @@ void AsmGen::emit_function(const IRFunction& f, int fi) {
             std::fprintf(stderr, "[frame] %-32s gen=%d n_saved=%d out=%d slots=%d\n",
                          f.name.c_str(), static_cast<int>(gen_), n_saved_regs_, frame_.out_bytes,
                          n_slots_ + n_vreg_slots_ + rec_words);
-        layout_frame(n_slots_ + n_vreg_slots_ + n_tag_words_ + rec_words);
+        layout_frame(n_slots_ + n_vreg_slots_ + tag_.n_tag_words + rec_words);
         build_operand_caches();
         // 零开销异常（Z2-b2）：预扫本函数的 EH 标记、分配标签。fname 在这里
         // 就要算出来——LSDA 的偏移基准是 FDE 起点（.cfi_startproc 的地址），
@@ -383,7 +383,7 @@ void AsmGen::emit_function(const IRFunction& f, int fi) {
         // P3：tag 区清零（UNK=0 探针回退）。非生成器在常规序言；生成器
         // 这里就是 g.entry 块头——每次 resume 都经过，垃圾 tag 不会跨
         // resume 残留（P3-1b，118/124/128/133 回归钉住）。
-        for (int w = 0; w < n_tag_words_; ++w)
+        for (int w = 0; w < tag_.n_tag_words; ++w)
             emit_imm(MOp::kMovq, 0, op_mem(kRsp, tag_off(w)));
 
         if (!gen_) {
@@ -412,7 +412,7 @@ void AsmGen::emit_function(const IRFunction& f, int fi) {
             // 被调若不读（无 tag 形参），调用点的 stale 值可能被之后的
             // 运行时回调（vthread/生成器 resume）误读；每次进入生成代码
             // 函数都归零，异常展开另在 landing pad / setjmp 返回点清理。
-            if (type_tags_ && func_ptag_words() == 0) {
+            if (tag_.type_tags && func_ptag_words() == 0) {
                 line("movq $0, pa_ptag_in(%rip)");
                 line("movq $0, pa_ptag_len(%rip)");
             }
@@ -575,7 +575,7 @@ bool AsmGen::can_fuse(const Inst& in, const Inst& nx) const {
         if (in.op == IrOp::StoreSlot || in.op == IrOp::StoreGlobal) return false;
         if (nx.op != IrOp::StoreSlot || nx.a != in.dst) return false;
         // P3：unknown 结果不融合 —— 融合绕过 StoreSlot 的 tag 搬运。
-        if (tags_enabled_ && is_unk_ty(ty_of(in.dst))) return false;
+        if (tag_.tags_enabled && is_unk_ty(ty_of(in.dst))) return false;
         // **GC 要扫描的槽不能融合。**
         //
         // 融合会把 `store.slot s` 的目标替换成 dst_loc_（某个 vreg 寄存器或
@@ -624,7 +624,7 @@ bool AsmGen::can_fuse_global(const Inst& in, const Inst& nx) const {
         }
         if (nx.op != IrOp::StoreGlobal || nx.a != in.dst) return false;
         // P3：unknown 全局不融合 —— 融合绕过 StoreGlobal 的 tag 搬运。
-        if (tags_enabled_ && nx.idx >= 0 &&
+        if (tag_.tags_enabled && nx.idx >= 0 &&
             nx.idx < static_cast<int>(m_->globals.size()) &&
             is_unk_ty(m_->globals[static_cast<size_t>(nx.idx)].ty))
             return false;
@@ -1055,7 +1055,7 @@ bool AsmGen::single_use_in_block(VReg v) const {
 bool AsmGen::is_deferable_const(const Inst& in) const {
         if (in.dst == kNoReg) return false;
         // P3：unknown dst 的常量不折叠 —— 折叠会跳过 tag 字写入。
-        if (tags_enabled_ && is_unk_ty(ty_of(in.dst))) return false;
+        if (tag_.tags_enabled && is_unk_ty(ty_of(in.dst))) return false;
         if (in.op == IrOp::ConstNone) return true;
         if (in.op != IrOp::ConstInt) return false;
         return in.imm >= INT32_MIN && in.imm <= INT32_MAX;

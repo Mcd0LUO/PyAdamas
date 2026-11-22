@@ -222,30 +222,30 @@ std::string AsmGen::global_tag_label(int gi) const {
 }
 
 int64_t AsmGen::static_tag_of(const TypePtr& t) const {
-    return pyadamas::static_tag_of(t, type_tags_);
+    return pyadamas::static_tag_of(t, tag_.type_tags);
 }
 
 bool AsmGen::vreg_tagged(VReg r) const {
-    return tags_enabled_ && r != kNoReg &&
-           r < vreg_tag_.size() && vreg_tag_[r] >= 0;
+    return tag_.tags_enabled && r != kNoReg &&
+           r < tag_.vreg_tag.size() && tag_.vreg_tag[r] >= 0;
 }
 
 bool AsmGen::slot_tagged(int s) const {
-    return tags_enabled_ && s >= 0 &&
-           s < static_cast<int>(slot_tag_.size()) && slot_tag_[s] >= 0;
+    return tag_.tags_enabled && s >= 0 &&
+           s < static_cast<int>(tag_.slot_tag.size()) && tag_.slot_tag[s] >= 0;
 }
 
 const MOperand& AsmGen::tag_mop(VReg r) const {
-    if (r < vreg_tag_mem_.size() && !vreg_tag_mem_[r].empty())
-        return vreg_tag_mem_[r];
+    if (r < tag_.vreg_tag_mem.size() && !tag_.vreg_tag_mem[r].empty())
+        return tag_.vreg_tag_mem[r];
     static const MOperand kZero = op_imm(0);
     return kZero;
 }
 
 const MOperand& AsmGen::slot_tag_mop(int s) const {
-    if (s >= 0 && s < static_cast<int>(slot_tag_mem_.size()) &&
-        !slot_tag_mem_[static_cast<size_t>(s)].empty())
-        return slot_tag_mem_[static_cast<size_t>(s)];
+    if (s >= 0 && s < static_cast<int>(tag_.slot_tag_mem.size()) &&
+        !tag_.slot_tag_mem[static_cast<size_t>(s)].empty())
+        return tag_.slot_tag_mem[static_cast<size_t>(s)];
     static const MOperand kZero = op_imm(0);
     return kZero;
 }

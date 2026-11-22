@@ -59,7 +59,7 @@ uint64_t f64_bits(double x) {
 }  // namespace
 
 bool AsmGen::vect_func_ok() const {
-    if (!vect_enabled_ || opt_ < 2 || gen_ || tags_enabled_) return false;
+    if (!vect_enabled_ || opt_ < 2 || gen_ || tag_.tags_enabled) return false;
     if (!slot_loc_.empty()) return false;                 // 只做默认寄存器分配
     if (std::string_view(target_abi().name) != "x86_64-sysv") return false;
     if (f_->has_handlers) return false;

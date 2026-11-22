@@ -83,7 +83,7 @@ void AsmGen::gen_make_list(const Inst& in) {
             emit2(MOp::kMovq, dst_mop(in.dst), arg_reg_i(0));
             emit2(MOp::kMovq, src_mop(a), arg_reg_i(1));
             // P3：unknown 元素带 tag 时堆标志从 tag 导出（保住位图）。
-            if (tags_enabled_ && hk == 2 && vreg_tagged(a))
+            if (tag_.tags_enabled && hk == 2 && vreg_tagged(a))
                 emit_heap_from_tag(a, arg_reg_i(2));
             else
                 emit_imm(MOp::kMovq, hk, arg_reg_i(2));
@@ -317,16 +317,16 @@ void AsmGen::gen_call_direct(const Inst& in) {
         // P2（type_tags）：tag 数组走 pa_ptag_in 侧信道（被调序言读走并清零），
         // 不再占用 %r11 —— 与跨模块/间接调用共用同一套机制。门控关时仍是
         // 0.328 的 %r11 + $pt 入口，逐字旧路径。
-        if (type_tags_ && ptag_words > 0) {
+        if (tag_.type_tags && ptag_words > 0) {
             emit2(MOp::kLeaq, op_mem(kRsp, ptag_base), kR10);
             line("movq %r10, pa_ptag_in(%rip)");
             emit_imm(MOp::kMovq, ptag_words, "pa_ptag_len(%rip)");
-        } else if (type_tags_) {
+        } else if (tag_.type_tags) {
             line("movq $0, pa_ptag_in(%rip)");
             line("movq $0, pa_ptag_len(%rip)");
         }
         spill_fp_slots();
-        if (type_tags_) {
+        if (tag_.type_tags) {
             emit_jmp(MOp::kCall, entry_ref(in.idx));
             reload_fp_slots();
             line("movq $0, pa_ptag_in(%rip)");
@@ -443,7 +443,7 @@ void AsmGen::gen_call(const Inst& in) {
                       op_mem(kRsp, out_base() + static_cast<int>(i - kMaxIntArgs()) * 8));
             }
         }
-        if (type_tags_) {
+        if (tag_.type_tags) {
             // P2：间接调用（跨模块导入的函数 / 函数值 / 闭包）的 tag 数组
             // 走 pa_ptag_in 侧信道（%r11 仍是闭包指针，ABI 逐字不变）。
             // 布局按静态函数签名算；无 tag 或签名不可推导时写 0（回退 UNK）。
@@ -481,7 +481,7 @@ void AsmGen::gen_call(const Inst& in) {
         spill_fp_slots();
         line("call *(%r11)");
         reload_fp_slots();
-        if (type_tags_) {
+        if (tag_.type_tags) {
             line("movq $0, pa_ptag_in(%rip)");
             line("movq $0, pa_ptag_len(%rip)");
         }
@@ -498,7 +498,7 @@ void AsmGen::gen_call(const Inst& in) {
             // 所有非生成器函数都发）。间接调用点没有 IRFunction 可查，
             // 用**静态签名**判断：签名不含浮点（闭包 +0 直指函数本体，
             // 不走重排 shim）且返回 unknown 才读 —— shim 的重排会碰 %rdx。
-            if (type_tags_ && vreg_tagged(in.dst) && is_unk_ty(in.ty)) {
+            if (tag_.type_tags && vreg_tagged(in.dst) && is_unk_ty(in.ty)) {
                 TypePtr ft = ty_of(in.a);
                 const FuncInfo* fi = (ft && ft->kind == TyKind::Func) ? ft->fn.get() : nullptr;
                 bool fp = false;
@@ -524,7 +524,7 @@ void AsmGen::gen_setjmp(const Inst& in) {
         line("movslq %eax, %rax");
         emit2("movq", "%rax", dst_op(in.dst));
         // P2（type_tags）：longjmp 回到这里时清 tag 侧信道（理由同 landing pad）。
-        if (type_tags_) {
+        if (tag_.type_tags) {
             line("movq $0, pa_ptag_in(%rip)");
             line("movq $0, pa_ptag_len(%rip)");
         }
@@ -586,19 +586,19 @@ void AsmGen::gen_call_rt(const Inst& in) {
         // ── P3：门控内拦截旧 Any 算术/比较/一元负，改发 tag 版 ────────
         // tag 从平行 tag 区/静态类型装填；双字返回 {rax=payload,rdx=tag}。
         // 门控关（含 26 个热基准）不进这里，逐字旧路径。
-        if (tags_enabled_ &&
+        if (tag_.tags_enabled &&
             (fn == RtFn::AnyArith || fn == RtFn::AnyCmp || fn == RtFn::AnyNeg)) {
             gen_any_tagged(in, fn);
             return;
         }
         // Win64 C ABI does not return a two-word struct in rax/rdx.
-        if (tags_enabled_ && gnu_cfi() &&
+        if (tag_.tags_enabled && gnu_cfi() &&
             (fn == RtFn::AnyBigBinary || fn == RtFn::AnyInvert)) {
             gen_any_tagged(in, fn);
             return;
         }
         // P3：单操作数 Any 入口同样改 tag 版（免探针解码）。
-        if (tags_enabled_ && in.args.size() == 1 && vreg_tagged(in.args[0]) &&
+        if (tag_.tags_enabled && in.args.size() == 1 && vreg_tagged(in.args[0]) &&
             (fn == RtFn::AnyIsFloat || fn == RtFn::AnyToF64 || fn == RtFn::AnyToI64)) {
             gen_any_tagged(in, fn);
             return;
@@ -607,7 +607,7 @@ void AsmGen::gen_call_rt(const Inst& in) {
         // repr/print_repr/isinstance 的 unknown 分支：tag 从平行 tag 区装填，
         // 运行期按类型码分派（免探针，且 None/bool/bytes/tuple/set 可区分）。
         // 门控关时 lowering 不发这些新入口、旧入口逐字旧路径。
-        if (type_tags_ && (fn == RtFn::ReprAny || fn == RtFn::PrintAnyRepr) &&
+        if (tag_.type_tags && (fn == RtFn::ReprAny || fn == RtFn::PrintAnyRepr) &&
             in.args.size() == 1 && vreg_tagged(in.args[0])) {
             emit_arg(0, false, 0, src_mop(in.args[0]));
             emit_arg(1, false, 1, tag_src(in.args[0]));
@@ -619,7 +619,7 @@ void AsmGen::gen_call_rt(const Inst& in) {
                 emit2("movq", "%rax", dst_op(in.dst));
             return;
         }
-        if (type_tags_ && fn == RtFn::AnyIterList && in.args.size() == 1 &&
+        if (tag_.type_tags && fn == RtFn::AnyIterList && in.args.size() == 1 &&
             vreg_tagged(in.args[0])) {
             // P2：unknown 迭代物化带 tag（标量元组未进 RC 索引，探针会漏）。
             emit_arg(0, false, 0, src_mop(in.args[0]));
@@ -630,7 +630,7 @@ void AsmGen::gen_call_rt(const Inst& in) {
             if (!dst_unused(in)) emit2("movq", "%rax", dst_op(in.dst));
             return;
         }
-        if (type_tags_ && fn == RtFn::AnyDictItems && in.args.size() == 2 &&
+        if (tag_.type_tags && fn == RtFn::AnyDictItems && in.args.size() == 2 &&
             vreg_tagged(in.args[0])) {
             // P2：unknown dict 的 (key,value) 对物化（pprint 取键值用）。
             // 门控关时 IR 的第二个实参是常量 0（UNK），走旧探针路径。
@@ -642,7 +642,7 @@ void AsmGen::gen_call_rt(const Inst& in) {
             if (!dst_unused(in)) emit2("movq", "%rax", dst_op(in.dst));
             return;
         }
-        if (type_tags_ && fn == RtFn::AnyTypeIs && in.args.size() == 2 &&
+        if (tag_.type_tags && fn == RtFn::AnyTypeIs && in.args.size() == 2 &&
             vreg_tagged(in.args[0])) {
             emit_arg(0, false, 0, src_mop(in.args[0]));
             emit_arg(1, false, 1, tag_src(in.args[0]));
@@ -658,7 +658,7 @@ void AsmGen::gen_call_rt(const Inst& in) {
         // call/ret + 装填 + 运行时检查比活本身还贵（str_build 14.6%）。
         if (fn == RtFn::ListAppend && opt_ >= 1 && in.args.size() == 3) {
             // P3：unknown 值带 tag 时堆标志从 tag 导出（保住 kind2 位图）。
-            if (tags_enabled_ && vreg_tagged(in.args[1])) {
+            if (tag_.tags_enabled && vreg_tagged(in.args[1])) {
                 gen_append_tagged(in);
                 return;
             }

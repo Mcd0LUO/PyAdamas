@@ -28,6 +28,7 @@
 - [~] **第 2 步 · AsmGen 拆组合对象**（进行中，1/5）
       ✅ `Frame`（帧布局 + 帧记录）—— 2026-11-22 完成，见 §6
       ✅ `Emitter`（输出缓冲 / 标签号 / 行缓冲）—— 2026-11-22 完成，见 §6.4
+      ✅ `TagLower`（tag 影子类型 + 零开销异常状态）—— 2026-11-22 完成，见 §6.5
       ⬜ `RegAlloc`（全局分配 / 扫描 / live range splitting）
       ⬜ `TagLower`（shadow tag / 直调 tag ABI / 零开销异常）
       ⬜ `VectPlanner`（codegen_vect* / codegen_simd*，约 2500 行）
@@ -197,3 +198,24 @@ AsmGen 侧只留两个一行转发（`vreg_slot_off` / `layout_frame`），**52 
 
 发射方法（`emit0/1/2`、`line`、`directive`、`op_*` 工厂）仍留在 AsmGen 读 `emit_.*`。
 等下次把它们整体搬过来，`Emitter` 才名副其实地成为「发射器」。
+### 6.5 已完成：`TagLower`（tag + 零开销异常状态）
+
+新文件 `src/tag_lower.h`：14 个字段搬进去 ——
+
+| 类别 | 成员 |
+|---|---|
+| tag（7） | `tags_enabled` `type_tags` `n_tag_words` `vreg_tag` `slot_tag` `vreg_tag_mem` `slot_tag_mem` |
+| EH（7） | `eh_plans`（含 `EhPlanRec` 结构）+ 三个标签表 + 三个取用序号 |
+
+**约 149 处**用法改成 `tag_.x`，横跨 15 个文件。`EhPlanRec` 是 TagLower 内嵌类型，
+外部引用改写成 `TagLower::EhPlanRec`（只有 `codegen.cpp` 一处）。
+
+验证：构建绿 / 369 ran ok / difftest 348/0 / ASan 369 ran ok 0 报告 / check_size 通过；
+12 基准输出全一致，指令数全部 ±0.000%（`binary_trees` +0.03%，在噪声内）。
+
+### 6.6 剩余两块（未做）
+
+- **`RegAlloc`**：约 20 个字段，`slot_reg_` / `fp_promoted_*` / `fp_live_*` / `slot_reg_cand_`
+  互相纠缠，且 `slot_reg_` 在**每条指令的操作数取值路径**上 —— 拆它需要一轮完整预算。
+- **`VectPlanner`**（约 2500 行）：每个发射点都是 `AsmGen` 成员，先要定「反向引用还是
+  `EmitSink` 接口」这个设计决定，做错会让 2500 行白搬。

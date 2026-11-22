@@ -106,7 +106,7 @@ std::string AsmGen::gen(const IRModule& m) {
         m_ = &m;
         opt_ = m.opt_level;
         emit_.out.clear();
-        eh_plans_.clear();
+        tag_.eh_plans.clear();
         eh_plan_active_ = false;
         dbg_on_ = !m.source_path.empty();
         dbg_entries_.clear();
@@ -127,7 +127,7 @@ std::string AsmGen::gen(const IRModule& m) {
         // tag。26 个热基准全部不含 pa_any_* → 门控关 → 不进任何 tag 分支。
         // 降级器仍发旧 AnyArith/AnyCmp/AnyNeg，gen_call_rt 在门控内拦截
         // 改发 tag 版（pa_any_*_t）；门控关时逐字旧路径。
-        tags_enabled_ = false;
+        tag_.tags_enabled = false;
         for (const auto& fp : m.funcs)
             for (const auto& b : fp->blocks)
                 for (const auto& in : b.insts)
@@ -137,12 +137,12 @@ std::string AsmGen::gen(const IRModule& m) {
                          in.imm == static_cast<int64_t>(RtFn::AnyNeg) ||
                          (gnu_cfi() && (in.imm == static_cast<int64_t>(RtFn::AnyBigBinary) ||
                                         in.imm == static_cast<int64_t>(RtFn::AnyInvert)))))
-                        tags_enabled_ = true;
+                        tag_.tags_enabled = true;
         // P2（0.340，PYADAMAS_TYPE_TAGS）：运行期类型标签需要 tag 区与传播
         // 在所有模块都生效（pprint/isinstance 靠它跨调用边界带类型），
-        // 所以门控直接并上 type_tags_。type_tags_ 关时这一行是纯或 0，
+        // 所以门控直接并上 tag_.type_tags。tag_.type_tags 关时这一行是纯或 0，
         // 既有 P3 门控与 asm 逐字节不变。
-        if (type_tags_) tags_enabled_ = true;
+        if (tag_.type_tags) tag_.tags_enabled = true;
 
         if (!m.strings.empty()) {
             // 字符串对象里有一个指向自身字符区的绝对地址。放在 .rodata
@@ -227,7 +227,7 @@ std::string AsmGen::gen(const IRModule& m) {
                 emit_.out += emit_.line_buf;
                 // P3：unknown 全局的平行 tag 字（仅门控内、且别的模块写不到
                 // 的全局，见 global_tag_eligible）。初值 0 = UNK 探针回退。
-                if (tags_enabled_ && global_tag_eligible(static_cast<int>(i))) {
+                if (tag_.tags_enabled && global_tag_eligible(static_cast<int>(i))) {
                     if (!m.globals[i].symbol.empty())
                         emit_.out += "\t.globl " + global_tag_label(static_cast<int>(i)) + "\n";
                     emit_.line_buf = global_tag_label(static_cast<int>(i));
@@ -718,39 +718,39 @@ std::string AsmGen::gen(const IRModule& m) {
 // ── 零开销异常（Z2-b2，--zero-cost-exc）────────────────────────────────
 
 void AsmGen::prepare_eh_plan(const IRFunction& f, const std::string& fname) {
-    eh_begin_labels_.clear();
-    eh_end_labels_.clear();
-    eh_lp_labels_.clear();
-    eh_begin_seq_ = eh_end_seq_ = eh_lp_seq_ = 0;
+    tag_.eh_begin_labels.clear();
+    tag_.eh_end_labels.clear();
+    tag_.eh_lp_labels.clear();
+    tag_.eh_begin_seq = tag_.eh_end_seq = tag_.eh_lp_seq = 0;
     eh_plan_active_ = false;
     if (!zero_cost_exc_ || f.eh_regions.empty() || !gnu_cfi()) return;
     // 预扫描顺序 = 块发射顺序 × 块内指令顺序；发射标记指令时按同样的顺序
     // 取标签，一一对应。
     for (const auto& b : f.blocks)
         for (const auto& in : b.insts) {
-            if (in.op == IrOp::EhBegin) eh_begin_labels_.push_back(fresh_label("ehB"));
-            else if (in.op == IrOp::EhEnd) eh_end_labels_.push_back(fresh_label("ehE"));
+            if (in.op == IrOp::EhBegin) tag_.eh_begin_labels.push_back(fresh_label("ehB"));
+            else if (in.op == IrOp::EhEnd) tag_.eh_end_labels.push_back(fresh_label("ehE"));
             else if (in.op == IrOp::EhLandingPad)
-                eh_lp_labels_.push_back(fresh_label("ehLP"));
+                tag_.eh_lp_labels.push_back(fresh_label("ehLP"));
         }
     // 每个 EhBegin/EhEnd/EhLandingPad 三元组构成一条保护区（嵌套 try 有多条）。
     // 它们共用同一份 LSDA（多条 call-site 记录）与同一个 landing pad 分发入口。
-    const size_t n_regions = eh_begin_labels_.size();
-    if (n_regions == 0 || eh_end_labels_.size() != n_regions ||
-        eh_lp_labels_.size() != n_regions)
+    const size_t n_regions = tag_.eh_begin_labels.size();
+    if (n_regions == 0 || tag_.eh_end_labels.size() != n_regions ||
+        tag_.eh_lp_labels.size() != n_regions)
         throw std::logic_error("zero-cost EH: begin/end/landing-pad 标记数量不匹配");
-    EhPlanRec rec;
+    TagLower::EhPlanRec rec;
     rec.func_label = fname;
     for (size_t k = 0; k < n_regions; ++k)
-        rec.ranges.push_back({eh_begin_labels_[k], eh_end_labels_[k], eh_lp_labels_[k]});
-    rec.lsda_index = static_cast<int>(eh_plans_.size());
-    eh_plans_.push_back(std::move(rec));
+        rec.ranges.push_back({tag_.eh_begin_labels[k], tag_.eh_end_labels[k], tag_.eh_lp_labels[k]});
+    rec.lsda_index = static_cast<int>(tag_.eh_plans.size());
+    tag_.eh_plans.push_back(std::move(rec));
     eh_plan_active_ = true;
 }
 
 void AsmGen::emit_eh_directives_for_current() {
-    if (!eh_plan_active_ || eh_plans_.empty()) return;
-    const EhPlanRec& rec = eh_plans_.back();
+    if (!eh_plan_active_ || tag_.eh_plans.empty()) return;
+    const TagLower::EhPlanRec& rec = tag_.eh_plans.back();
     EhFuncPlan plan;
     plan.lsda_index = rec.lsda_index;
     plan.func_label = rec.func_label.c_str();
@@ -768,9 +768,9 @@ void AsmGen::emit_eh_directives_for_current() {
 }
 
 void AsmGen::emit_eh_tables() {
-    if (eh_plans_.empty()) return;
+    if (tag_.eh_plans.empty()) return;
     std::string text;
-    for (const auto& rec : eh_plans_) {
+    for (const auto& rec : tag_.eh_plans) {
         EhFuncPlan plan;
         plan.lsda_index = rec.lsda_index;
         plan.func_label = rec.func_label.c_str();
