@@ -4,6 +4,38 @@
 
 早期阶段没有逐条留痕，按阶段归纳；0.4 之后逐条记录。
 
+## [0.415] - 2026-11-23
+
+> 修复 `try` 体内首次赋值的 float 被装箱后未解盒（**静默错值**）。
+>
+> 最小复现：
+>
+> ```python
+> def f() -> None:
+>     try:
+>         x = 2.0 + 3.0
+>         print("add", x)      # PyAdamas: add 5.26e-310   CPython: add 5.0
+>     except ZeroDivisionError:
+>         print("caught")
+> ```
+>
+> 根因：类型检查器在 `stmt_try` 里对 snapshot 做 `sym.ty = join(sym.ty, snapshot.ty)`；
+> 变量首次赋值在 try 体内时它已被 hoisting 预登记为 `unknown`，于是 `join(float, unknown) = unknown`。
+> 降级期按 unknown 装箱（`pa_any_from_f64`），但使用点的 AST 类型仍是 float → 把装箱字当
+> double 打印。
+>
+> 修复：`load_typed` 在「存储类型 unknown / 使用点具体类型」时补 coercion（float 走 `AnyToF64`），
+> 覆盖局部槽 / `LoadGlobal` / 闭包 cell / env 四条读取路径。类型检查器与槽表示不变。
+>
+> 回归 `tests/run/482_try_float_slot.py`（15 组：最小形状、算术/比较/f-string、体内多次赋值、
+> try/except/finally、嵌套 try、int/str/list 对照、异常真的抛出、try 内 return、闭包、模块级 global）。
+>
+> 三档输出与 CPython 一致；12 个基准二进制与修复前**逐字节相同**；matmul md5 不变。
+>
+> 闸门：378 ran ok、difftest 357/0、ASan 378 ran ok 0 报告、check_size 通过。
+>
+> 夜间总结见 `docs/nightly-summary.md`。
+
 ## [0.414] - 2026-11-23
 
 > `nbody` 的 `advance` 大轮（阶段 B5）：体块上限 64→128、重复地址 RMW、散射写、

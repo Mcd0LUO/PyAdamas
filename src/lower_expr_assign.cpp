@@ -336,6 +336,20 @@ VReg Lowerer::expr(Expr& e) {
         case ExprKind::Constant: return lower_constant(static_cast<Constant&>(e));
         case ExprKind::Name: {
             auto& n = static_cast<Name&>(e);
+            // 存储类型与 use-site 类型可能不一致：`try` 里首次赋值的变量，
+            // except 分支可能看到「未赋值/旧值」，类型检查器把它的静态类型
+            // 并成 unknown（见 TypeChecker::stmt_try）。于是槽/闭包按 unknown
+            // 存（float 要装箱成 CPYFLOAT），而 try 体内的使用点仍按具体类型
+            // （如 float）降级。读出来必须按存储类型解盒，否则装箱字被当成
+            // double 直接参与运算/打印（静默错值：打印出 5e-310 的垃圾）。
+            TypePtr ty = name_ty(n.id);
+            auto load_typed = [&](VReg v) {
+                TypePtr use_ty = tc_.type_of(&e);
+                if (ty && ty->kind == TyKind::Unknown && use_ty &&
+                    use_ty->kind != TyKind::Unknown && !type_eq(ty, use_ty))
+                    v = coerce(v, ty, use_ty);
+                return v;
+            };
             // @classmethod 的 cls：编译期就绑定成所属类。运行时不需要真值
             // （调用点传的类 id 只是占位），直接给常量再改标类型——这样既
             // 不会按堆类型做 rc，也避开了被内层闭包捕获时的 cell 问题。
@@ -365,8 +379,8 @@ VReg Lowerer::expr(Expr& e) {
                 fa.imm = st_->self_idx;
                 return def(st_->self_type, std::move(fa));
             }
-            if (is_cell(n.id)) return read_cell(n.id);
-            if (is_env(n.id)) return read_env(n.id);
+            if (is_cell(n.id)) return load_typed(read_cell(n.id));
+            if (is_env(n.id)) return load_typed(read_env(n.id));
             if (auto it = imported_classes_.find(n.id); it != imported_classes_.end())
                 return imported_class_object(it->second);
             if (native_aliases_.count(n.id)) {
@@ -406,15 +420,14 @@ VReg Lowerer::expr(Expr& e) {
                     return obj;
                 }
             }
-            TypePtr ty = name_ty(n.id);
             if (st_->globals_decl.count(n.id) || !is_local(n.id)) {
                 Inst in;
                 in.op = IrOp::LoadGlobal;
                 in.idx = Operand::global(global_idx(n.id));
                 in.ty = ty;
-                return def(ty, std::move(in));
+                return load_typed(def(ty, std::move(in)));
             }
-            return load_slot(st_->slots[n.id], ty);
+            return load_typed(load_slot(st_->slots[n.id], ty));
         }
         case ExprKind::BinOp: return lower_binop(static_cast<BinOp&>(e));
         case ExprKind::UnaryOp: return lower_unary(static_cast<UnaryOp&>(e));
