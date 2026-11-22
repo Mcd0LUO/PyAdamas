@@ -28,6 +28,9 @@
 // 前提（调用方 codegen_vect.cpp 在发射前证完）：循环内无调用、无
 // store.global；同对象读写必须同 (coef, off) 且 inv 运行期相等（不等 →
 // 入口守卫跳标量）、读在写前；data/len/kind 在循环期间不变。
+//
+// 阶段 3 第 6 步：本文件的实现已全部搬进 VectPlanner（src/vect_planner.cpp），
+// 这里只留设计说明（AsmGen 侧的转发声明在 codegen_vect.h）。
 #include "codegen_impl.h"
 
 #include <climits>
@@ -37,93 +40,7 @@ namespace pyadamas {
 // ── 1) 分析 ────────────────────────────────────────────────────────────
 // 解析结果用「coef*j + inv + off」三元组表示，其中最多一个运行期项 inv。
 // 常量解析成 {0, 无, c}：这样 Add 规则自然把常量折进 off，不用特判。
-AsmGen::AffIdx AsmGen::vect_affine_index(VReg v, const std::vector<int>& jalias,
-                                         const std::function<bool(VReg)>& inv_ok,
-                                         int depth) const {
-    AffIdx bad;
-    if (v == kNoReg || depth > 24) return bad;
-    const Inst* d = simd_def(v);
-    auto is_jalias = [&](int s) {
-        for (int x : jalias) if (x == s) return true;
-        return false;
-    };
-    // 归纳变量（j 本身或 j 的副本槽）：仿射的基准项。
-    if (d && d->op == IrOp::LoadSlot && is_jalias(d->idx)) {
-        AffIdx r; r.ok = true; r.coef = 1; r.inv = kNoReg; r.off = 0;
-        return r;
-    }
-    // 常量：{0, 无, c}。单独出现时 coef==0 → 调用方拒绝（不是逐 lane 访问）。
-    // 常量允许暂时为负（后续 Add 可能抵消），最终 off>=0 由调用方校验。
-    if (d && d->op == IrOp::ConstInt) {
-        if (d->imm < -kAffMaxOff || d->imm > kAffMaxOff) return bad;
-        AffIdx r; r.ok = true; r.coef = 0; r.off = d->imm;
-        return r;
-    }
-    // 跨块 Mov 当不变量用**它自己**的 home：源 vreg 的活跃区间可能已在循环外
-    // 结束（栈槽被复用），入口读源槽会取到别的值。体块内的 Mov 还没发射，
-    // 只能往下解析。
-    if (d && d->op == IrOp::Mov) {
-        if (inv_ok(v)) {
-            AffIdx r; r.ok = true; r.coef = 0; r.inv = v; r.off = 0;
-            return r;
-        }
-        return vect_affine_index(d->a, jalias, inv_ok, depth + 1);
-    }
-    if (d && d->op == IrOp::Bin && d->bop == BinKind::Add) {
-        AffIdx a = vect_affine_index(d->a, jalias, inv_ok, depth + 1);
-        AffIdx b = vect_affine_index(d->b, jalias, inv_ok, depth + 1);
-        // 两个运行期项相加不是仿射（那是运行期加法，不能折进寻址位移）。
-        if (a.ok && b.ok && (a.inv == kNoReg || b.inv == kNoReg)) {
-            int64_t coef = 0, off = 0;
-            if (!__builtin_add_overflow(a.coef, b.coef, &coef) &&
-                !__builtin_add_overflow(a.off, b.off, &off)) {
-                AffIdx r;
-                r.ok = true; r.coef = coef; r.off = off;
-                r.inv = a.inv != kNoReg ? a.inv : b.inv;
-                return r;
-            }
-        }
-    }
-    if (d && d->op == IrOp::Bin && d->bop == BinKind::Mul) {
-        AffIdx a = vect_affine_index(d->a, jalias, inv_ok, depth + 1);
-        AffIdx b = vect_affine_index(d->b, jalias, inv_ok, depth + 1);
-        // 常量侧 = 纯常量（coef 0、无 inv）；被放大侧必须是纯仿射。
-        const bool ac = a.ok && a.coef == 0 && a.inv == kNoReg;
-        const bool bc = b.ok && b.coef == 0 && b.inv == kNoReg;
-        const AffIdx& k = ac ? a : b;          // 常量
-        const AffIdx& x = ac ? b : a;          // 被放大
-        if ((ac || bc) && k.off >= 0 && k.off <= kAffMaxCoef && x.ok && x.inv == kNoReg) {
-            int64_t coef = 0, off = 0;
-            if (!__builtin_mul_overflow(x.coef, k.off, &coef) &&
-                !__builtin_mul_overflow(x.off, k.off, &off) &&
-                coef <= kAffMaxCoef && off <= kAffMaxOff) {
-                AffIdx r; r.ok = true; r.coef = coef; r.off = off;
-                return r;
-            }
-        }
-    }
-    // 兜底：循环不变 int 值（跨块计算 / 体内不写槽的装载）→ {0, v, 0}。
-    // 它不依赖 j，整体折进基址；这里不要求是常量（那是 i*N 这类外层次计算）。
-    if (inv_ok(v)) {
-        AffIdx r; r.ok = true; r.coef = 0; r.inv = v; r.off = 0;
-        return r;
-    }
-    return bad;
-}
-
-// 规划期校验（发射前，失败则一个字节不发）：所有基址键的 coef/off 都必须
-// 小到能用 imulq 立即数与 disp32 表示。解析期已经卡过上界，这里再兜一次。
-bool AsmGen::vect_affine_plan_ok(const std::vector<AffBase>& bases) const {
-    for (const AffBase& b : bases) {
-        if (b.coef < 1 || b.coef > kAffMaxCoef) return false;
-        if (b.off_max < 0 || b.off_max > kAffMaxOff) return false;
-        if (b.off_min < 0 || b.off_min > kAffMaxOff) return false;
-        // coef>1 的装载需要两次标量 movsd + unpcklpd 的打包 scratch；同 coef
-        // 的访问共用一个跨步计数器，理论上界由调用方按寄存器池另行检查。
-        if (b.coef * 16 > INT32_MAX || b.coef * 8 > INT32_MAX) return false;
-    }
-    return true;
-}
+// （vect_affine_index / vect_affine_plan_ok 的实现已搬到 VectPlanner。）
 
 // ── 2) 守卫 ────────────────────────────────────────────────────────────
 // 末 lane 下标 = coef*(n-1) + inv + off，必须 >= 0 且 < len。

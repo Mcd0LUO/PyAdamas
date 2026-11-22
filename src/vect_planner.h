@@ -2,13 +2,17 @@
 #pragma once
 
 #include <cstdint>
+#include <functional>
 #include <string>
+#include <unordered_map>
+#include <vector>
 
 #include "emit_sink.h"
 #include "ir.h"
 #include "mach_instr.h"
 #include "slot_query.h"
 #include "value_query.h"
+#include "vect_rules.h"
 
 namespace pyadamas {
 
@@ -36,6 +40,23 @@ struct AffEq {
     MOperand ym;
 };
 
+// 向量值分类（try_vect_loop 的分析结果）。原为 AsmGen 的内嵌类型，阶段 3
+// 第 6 步随常量归并方法搬到 VectPlanner：codegen_vect_jvec.cpp 的寄存器规划
+// （同值常量归并 / 归纳变量生命周期 / 临时值线性扫描）要读同一份分类，判据
+// 只有一处。codegen_vect.h 里留别名，类内 VClass 写法不变。
+// InvF/InvI 是循环不变量（setup 广播）；J 是归纳变量；Affine 是 j+常量
+//（只用于下标位移）；VecF/VecI 是逐 lane 计算的 2-lane 值；Acc 是
+// reduction 累加器旧值；Fail 不可向量化。
+// 分类枚举与判据的唯一出处在 vect_rules.h（具名 + 编译期真值表）。
+struct VClass {
+    vect::VK kind = vect::VK::Fail;
+    int64_t off = 0;          // Affine：j+off；Convert j_src：[j+off, j+off+1]
+    VReg list = kNoReg;       // VecF/VecI 来自 IndexLoad 时的 list vreg
+    bool is_load = false;     // VecF/VecI 是内存装载（vs 算术）
+    VReg mov_src = kNoReg;    // Mov 透明别名 / 同值常量归并的规范 vreg
+    bool j_src = false;       // Convert 输入是归纳变量 j（或 j+常量）
+};
+
 class VectPlanner {
 public:
     VectPlanner(EmitSink& e, ValueQuery& v, SlotQuery& s) : emit_(e), val_(v), slot_(s) {}
@@ -58,6 +79,19 @@ public:
     // ── 归纳变量物化（阶段 3 第 4 步）──
     // dst = [j+off, j+off+1]：与 Convert 的 j_src 分支逐字节同一序列。
     void vect_jvec2(MReg jreg, int64_t off, MReg dst, MReg scr);
+
+    // ── 仿射下标解析（阶段 3 第 6 步：纯分析，无捕获状态）──
+    // 递归解析下标表达式；depth 仅防病态深链。成功 = 可折进寻址的仿射式。
+    AffIdx vect_affine_index(VReg v, const std::vector<int>& jalias,
+                             const std::function<bool(VReg)>& inv_ok,
+                             int depth = 0) const;
+    // 规划期校验（发射前）：常量编不进 imm32/disp32 → 整段保守跳过。
+    bool vect_affine_plan_ok(const std::vector<AffBase>& bases) const;
+
+    // ── 同值常量归并（阶段 3 第 6 步）──
+    // 按值把重复的 InvI/InvF 常量 vreg 接到首个 vreg 的 mov_src 上（广播
+    // 寄存器只占一个）。语义等价，只为省寄存器。
+    void vect_merge_const_invs(std::unordered_map<VReg, VClass>* cls);
 
     // ── 仿射守卫与基址（阶段 3 第 5 步）──
     bool vect_affine_guard(const MOperand& list_obj, const AffBase& b,

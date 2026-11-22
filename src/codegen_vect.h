@@ -49,23 +49,12 @@
     // 让 codegen_vect_avx2.cpp 读**同一份**分析结果：4-lane 不重新分类、
     // 不猜，判据只有一处。
     enum class VRole : uint8_t { Skip, Load, Bin, MapStore, RedStore, Fail };
-    // 向量值分类（try_vect_loop 的分析结果）。放在类体里而不是 .cpp 的匿名
-    // 命名空间：codegen_vect_jvec.cpp 的寄存器规划（同值常量归并 / 归纳变量
-    // 生命周期 / 临时值线性扫描）要读同一份分类，判据只有一处。
-    // InvF/InvI 是循环不变量（setup 广播）；J 是归纳变量；Affine 是 j+常量
-    //（只用于下标位移）；VecF/VecI 是逐 lane 计算的 2-lane 值；Acc 是
-    // reduction 累加器旧值；Fail 不可向量化。
+    // 向量值分类（try_vect_loop 的分析结果）。原本内嵌在类体里，阶段 3
+    // 第 6 步随同值常量归并方法移到 VectPlanner（src/vect_planner.h）；
+    // 这里只留别名，类体内的 VClass / VK::X 写法保持不变。
     // 分类枚举与判据的唯一出处在 vect_rules.h（具名 + 编译期真值表）。
-    // 这里只做别名，类体内的 VK::X 写法保持不变。
     using VK = vect::VK;
-    struct VClass {
-        VK kind = VK::Fail;
-        int64_t off = 0;          // Affine：j+off；Convert j_src：[j+off, j+off+1]
-        VReg list = kNoReg;       // VecF/VecI 来自 IndexLoad 时的 list vreg
-        bool is_load = false;     // VecF/VecI 是内存装载（vs 算术）
-        VReg mov_src = kNoReg;    // Mov 透明别名 / 同值常量归并的规范 vreg
-        bool j_src = false;       // Convert 输入是归纳变量 j（或 j+常量）
-    };
+    using VClass = ::pyadamas::VClass;
     // 一条下标访问的仿射描述（coef*j + inv + off）。
     struct VAccess {
         VReg list = kNoReg;
@@ -124,9 +113,13 @@
     // 仿射下标解析（递归；depth 仅防病态深链）。成功 = 可折进寻址的仿射式。
     AffIdx vect_affine_index(VReg v, const std::vector<int>& jalias,
                              const std::function<bool(VReg)>& inv_ok,
-                             int depth = 0) const;
+                             int depth = 0) const {
+        return vect_.vect_affine_index(v, jalias, inv_ok, depth);
+    }
     // 规划期校验（发射前）：常量编不进 imm32/disp32 → 整段保守跳过。
-    bool vect_affine_plan_ok(const std::vector<AffBase>& bases) const;
+    bool vect_affine_plan_ok(const std::vector<AffBase>& bases) const {
+        return vect_.vect_affine_plan_ok(bases);
+    }
     // 边界守卫：0 <= coef*(n-1)+inv+off < len；每步算术 jo 溢出 → 跳 tail。
     bool vect_affine_guard(const MOperand& list_obj, const AffBase& b,
                           const MOperand& n_op, const std::string& tail) {
@@ -186,7 +179,9 @@
     void vect_mark_nonindex_uses(std::unordered_map<VReg, char>* out) const;
     // 同值常量归并：按值把重复的 InvI/InvF 常量 vreg 接到首个 vreg 的
     // mov_src 上（广播寄存器只占一个）。语义等价，只为省寄存器。
-    void vect_merge_const_invs(std::unordered_map<VReg, VClass>* cls);
+    void vect_merge_const_invs(std::unordered_map<VReg, VClass>* cls) {
+        vect_.vect_merge_const_invs(cls);
+    }
     // 归纳变量的算术使用点区间：role==Bin 且操作数分类是 J 的首/末条。
     // 没有这样的使用点 → *first == -1。
     void vect_j_span(const std::vector<Inst>& body, const std::vector<VRole>& role,

@@ -36,20 +36,11 @@
 //   * vect_merge_const_invs / vect_j_span / vect_alloc_temps：寄存器分配。
 //     常量按值归并（同一个 1 只占一个广播寄存器）、归纳变量按算术使用区间
 //     占一个寄存器、临时值线性扫描允许目标接管左操作数的寄存器。
+//     其中 vect_merge_const_invs 在阶段 3 第 6 步已搬进 VectPlanner
+//     （src/vect_planner.cpp），这里只留说明；其余两个仍在 AsmGen。
 #include "codegen_impl.h"
 
 namespace pyadamas {
-
-namespace {
-
-// double 的位模式（与 codegen_vect.cpp 的同名 helper 同口径）。
-uint64_t jvec_f64_bits(double x) {
-    uint64_t u;
-    std::memcpy(&u, &x, 8);
-    return u;
-}
-
-}  // namespace
 
 // 2-lane（SSE2）：dst = [j+off, j+off+1]。scr 是 scratch（SEQ1），不得与 dst
 // 相同。与 Convert 的 j_src 分支逐字节同一序列（那里 rd = 目标，SEQ1 =
@@ -80,31 +71,7 @@ void AsmGen::vect_mark_nonindex_uses(std::unordered_map<VReg, char>* out) const 
 // 两个广播寄存器。按值归并到首个 vreg（ConstInt 同 imm、ConstFloat 同位模式，
 // 且结果类型相同），语义完全等价；给 j 算术腾出寄存器。顺序按 vreg 号，生成
 // 代码确定。
-void AsmGen::vect_merge_const_invs(std::unordered_map<VReg, VClass>* cls) {
-    if (cls == nullptr) return;
-    std::vector<VReg> vs;
-    for (auto& [v, c] : *cls)
-        if ((c.kind == VK::InvI || c.kind == VK::InvF) && c.mov_src == kNoReg)
-            vs.push_back(v);
-    std::sort(vs.begin(), vs.end());
-    std::unordered_map<int64_t, VReg> ci;
-    std::unordered_map<uint64_t, VReg> cf;
-    for (VReg v : vs) {
-        const Inst* d = simd_def(v);
-        if (d == nullptr) continue;
-        auto same_ty = [&](VReg u) {
-            TypePtr tu = ty_of(u), tv = ty_of(v);
-            return tu && tv && tu->kind == tv->kind;
-        };
-        if (d->op == IrOp::ConstInt) {
-            auto [it, fresh] = ci.emplace(d->imm, v);
-            if (!fresh && same_ty(it->second)) (*cls)[v].mov_src = it->second;
-        } else if (d->op == IrOp::ConstFloat) {
-            auto [it, fresh] = cf.emplace(jvec_f64_bits(d->fimm), v);
-            if (!fresh && same_ty(it->second)) (*cls)[v].mov_src = it->second;
-        }
-    }
-}
+// （阶段 3 第 6 步：实现已搬到 VectPlanner，见 src/vect_planner.cpp。）
 
 // 归纳变量的算术使用区间：role==Bin 且某个操作数分类为 J 的首/末条指令。
 // 只算**算术**使用点 —— 纯下标用的 j 不需要物化寄存器（生命周期越短，
