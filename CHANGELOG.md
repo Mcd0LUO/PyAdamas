@@ -4,6 +4,269 @@
 
 早期阶段没有逐条留痕，按阶段归纳；0.4 之后逐条记录。
 
+## [0.411] - 2026-11-23
+
+> 通用向量化能力 4/4：`coef==0` 的循环内不变下标元素装载改成**广播装载**（阶段 B4）。
+>
+> 此前这类下标（`b[i*7+1]`：仿射 `coef==0`）在 `classify` 的 IndexLoad 分支就被
+> 拒绝，于是 `nbody` 的 `energy` 内层循环卡在 role 判定 —— 这是阶段 B2/B3 之后
+> 最后一道阻塞。
+>
+> ### 改动
+>
+> | 位置 | 做法 |
+> |---|---|
+> | 分类 | `classify` 允许 `coef==0`（仍要求 `off∈[0,kAffMaxOff]`）；值按 2-lane 广播参与算式 |
+> | 发射 | `movsd (base,off*8), rd` + `movlhps rd,rd` → 两 lane 读同一个元素 |
+> | 守卫 | **一次性**区间检查 `0 <= inv+off < len`（不随 j、不用 n）；越界/负 inv → 跳标量尾 |
+> | 计数器 | `kcoefs` 排除 0；含此类访问的循环关闭 AVX2 4-lane（4-lane 没有广播装载） |
+>
+> 守卫失败跳标量尾，`IndexError` 的抛出时机与标量一致；运行期负下标（Python 从
+> 尾部索引）语义不同 → 一律交给标量。
+>
+> 为让 `energy` 内层真正塞进 xmm 池，另做了两处**通用**的寄存器减负（只在含广播
+> 装载的循环上生效，老路径一字节不动）：
+>
+> 1. `sqrt` 的 0.0/高 lane 临时改成借用 `SEQ1`/`SEQ2`/`GSCR`（都是"单条指令内
+>    原子使用、跨指令不 live"），0.0 改为每次 sqrt 前 `xorpd` 现清；
+> 2. 死值消除：删掉无副作用且不抛异常的 Bin（Add/Sub/Mul/位运算）/Mov/Convert 死值，
+>    并重算 `has_int_mul` / `has_convert` / `has_intdiv` / `has_j_operand`。
+>    `energy` 里 `j*7` 被保守标记成非下标用途、发射成向量整数运算，白占
+>    JVEC/SEQ1/SEQ2 三个 xmm。
+>
+> ### 结果与局限（诚实记录）
+>
+> - `nbody` 向量化触发数 **0 → 1**：`energy_2` 内层 `for j in range(i+1,5)`
+>   （含 `e -= sqrt(...)` 与 `b[i*7+c]` 不变下标读）现在走 2-lane。
+> - `nbody` -O2 指令数 **199,390,662 → 199,390,111（−551，−0.0003%）**：方向对，
+>   但量级**可忽略** —— `energy` 只调用 1 次、内层总共 10 个 (i,j) 组合，
+>   `nbody` 时间仍由 50000 步的 `advance` 主导。**没有实质性能提升。**
+> - `advance` 仍未向量化：内层/位置更新循环是 `coef=7` 的 scatter 写 + 同数组读写
+>   偏移不同（big feature，本轮不做）；`advance` 的 steps/i 外层与 `energy` 外层
+>   是嵌套循环。
+> - 新增 `tests/run/478_vect_inv_index_load.py`（117 行）：`b[j]=a[i*7+1]+v[j]`、
+>   常数下标、两个不变元素、sqrt 组合、int、n=0/1/2/3/5、越界 IndexError 时机、
+>   负下标/负越界。触发数 0 → **7**；-O0/-O1/-O2 输出与 CPython 逐字节一致。
+>
+> ### 验证
+>
+> 构建绿 / **374 ran ok** / **difftest 353/0** / check_size 通过；12 基准输出与
+> CPython 逐字节一致，**11/12 生成二进制与改前逐字节相同（只有 nbody 变化）**，
+> 指令数最大波动 0.0304%（`binary_trees` 同二进制噪声）；matmul/spectral_norm
+> 汇编 md5 不变（`6eee8414…` / `58be63a7…`）。
+
+## [0.410] - 2026-11-23
+
+> 修复：`-O1/-O2` 下「就地累加器作右操作数」的 float 算式被误编译。
+>
+> 现象：函数内 `s = a[j] - s` / `s = a[j] + s` 在 `-O1/-O2` 结果错、`-O0` 正确；
+> 跨模块调用（IR 里是 `call.direct`、未内联）同样错。`PYADAMAS_VECT=0` 也错 →
+> 不是向量化器。
+>
+> ### 根因
+>
+> `gen_bin_fp` 的就地快路径（`opt_ >= 1` 且 dst 是提升后的 xmm 寄存器）先
+> `movsd a -> d` 再 `subsd b, d`。当**右操作数的值恰好就住在 d 里**（`s = a[j] - s`：
+> 累加器槽 `s` 提升到 dst，`a[j]` 在栈上）时，先装载就把旧 `s` 覆盖了，随后
+> `subsd d, d` 恒为 0。实拍（-O1）：
+>
+> ```asm
+> movsd 80(%rsp), %xmm8    # a[j] → 覆盖了旧 s
+> subsd %xmm8, %xmm8       # a[j]-a[j] = 0
+> ```
+>
+> `s = s - a[j]` 不触发（左操作数就是 d，不 move）；整数路径不触发
+> （`gen_bin_int` 的快路径要求左操作数在 dst）。
+>
+> ### 修法
+>
+> 就地算的前提加一条：装左操作数不能覆盖右操作数当前值 ——
+> `sb.text != d.text || sa.text == d.text` 才走快路径，否则落回 `kXmm0` 通用路径
+> （+17/−8，只影响原先就误编译的形状）。
+>
+> ### 验证
+>
+> 最小复现 `-O0/-O1/-O2` 三档结果一致且与 CPython 逐字节一致；新增
+> `tests/run/477_float_bin_rhs_acc.py`（109 行：float 的 `+ - * /` rhs、混合
+> `a[j]*2+s`、int、while、n=0/1/2/3，以及对照 `s = s - a[j]`）；修复前该用例
+> -O2 必现失败、修复后全绿。构建绿 / **373 ran ok** / **difftest 352/0** /
+> check_size 通过；12 基准输出一致、**12/12 生成二进制逐字节相同**、指令数无回退；
+> 两条 md5 不变。
+
+## [0.409] - 2026-11-23
+
+> 通用向量化能力 3/4：float **Sub 归约**（`s -= x`）支持（阶段 B3）。
+>
+> 归约识别此前只认 `BinKind::Add`。现在额外放行 `BinKind::Sub`，条件是累加器在
+> 左侧（`s = s - expr`；`expr - s` 不是归约）且槽类型为 float。发射期按 lane 顺序
+> 发 `subsd`（先 lane0 再 lane1）→ 与标量**逐位一致**。**int 的 Sub 仍保守走标量**
+> （`paddq` 那条线只覆盖加，取负要额外 scratch）。
+>
+> ### 结果与局限
+>
+> - 新增 `tests/run/476_vect_sub_reduce.py`（87 行）：`s -= a[j]`、
+>   `e -= sqrt(a[j]*a[j])`、负数、共享表达式（FSCR 副本提取）、混合量级（舍入顺序）、
+>   int 保守对照、n=0/1/2/3/5/7。触发数 0 → **5**；输出与 CPython 逐字节一致。
+> - `nbody` 触发数仍是 **0**：本轮把卡点从"Sub 归约"推进到 **`coef==0` 不变下标
+>   装载**（`energy` 内层 role 判 Fail：`%85 = index.get %81[%84]`，`%84 = i*7`
+>   是循环不变量）。
+>
+> ### 验证
+>
+> 构建绿 / **372 ran ok** / **difftest 351/0** / check_size 通过；12 基准输出一致、
+> 指令数在噪声内；两条 md5 不变。
+
+## [0.408] - 2026-11-23
+
+> 通用向量化能力 2/4：`math.sqrt` 支持（阶段 B2）。
+>
+> 此前通用向量化器的 op 白名单显式 `allow_sqrt=false`，且 role/分类/发射里完全
+> 没有 `CallRt` 的 sqrt 分支 —— 任何含 sqrt 的循环整段标量。
+>
+> ### 改动
+>
+> | 位置 | 做法 |
+> |---|---|
+> | 白名单 | `simd_loop_ops_ok(..., allow_sqrt=true, ...)` |
+> | 分类 | `IrOp::CallRt` 只认 `RtFn::MathSqrt`、1 实参、float→float；实参 VecF/InvF → VecF |
+> | 角色 | CallRt → `Role::Bin`，且**必须早于所有 map 写与 reduction 写** |
+> | 发射 | 2-lane：低/高 lane 分别 `sqrtsd` + `movlhps` 拼回；负数/NaN 守卫 `comisd`+`jb` 跳标量尾 |
+> | 使用点 | `vect_mark_nonindex_uses` / `last_use` / `vect_alloc_temps` 把 `Inst::args` 也当使用点 |
+>
+> 位置约束是必须的：负数守卫会跳标量尾重放本轮 —— 本轮若已有 map 写，向量循环已经把
+> 相邻 lane（j+1）写了，标量重放可能在 j 抛 `ValueError`，那一 lane 的写就泄漏了
+> （开发期实测：`out[3]=10` vs CPython `0`；退化成保守标量后修正）。
+>
+> ### 结果与局限
+>
+> - 新增 `tests/run/475_vect_sqrt.py`（98 行）：sqrt map / `sqrt(a²+b²)` /
+>   `s += sqrt(...)` / 负数 ValueError / sqrt 前有 map 写（钉保守标量）/
+>   reduction 写后 sqrt（钉保守标量）。触发数 0 → **4**。
+> - `nbody` 仍是 **0**：sqrt 放行后 energy 内层继续卡在 float Sub 归约（见 0.409）。
+>
+> ### 验证
+>
+> 构建绿 / **371 ran ok** / **difftest 350/0** / check_size 通过；12 基准输出一致、
+> 指令数在噪声内；两条 md5 不变。
+
+## [0.407] - 2026-11-23
+
+> 修复：`Convert` 的 `j_src` 快速路径缺 disp32 上界，大常量 + `j` 会**汇编失败**。
+>
+> `float(1099511627776 + j)` 这类表达式：`j_src` 快速路径直接把它折成寻址位移，
+> 常量超过 2^31 后 GAS 报 `0x10000000000 out of range of signed 32bit displacement`，
+> 整份程序编译失败（不是慢、是构建不过）。
+>
+> 修法：`j_src` 快速路径加 `off <= kAffMaxOff` 上界，超出的常量落回已有的通用
+> `VecI` 折算路径（不变量广播 + `paddq` + `cvtdq2pd`），语义不变。
+>
+> 顺带核对出一条**文档过时**：`docs/vectorization-generalization.md` 当时还写着
+> "Convert 仍只认 j+常量" —— 其实通用 `VecI` 路径从 b316646 起就在，只是快速路径
+> 没有上界门槛。本轮一并改掉文档。
+>
+> 新增 `tests/run/474_vect_convert_inv.py`（100 行，8 个用例：参数/外层/全局不变量 +
+> j、2^40 与 3e9 常量不变量、负不变量、float 归约、同一 VecI 被两个 Convert 使用），
+> 触发数 9，输出与 CPython 逐字节一致；修复前构建 rc=1（汇编失败），修复后通过。
+>
+> 验证：构建绿 / **370 ran ok** / **difftest 349/0** / check_size 通过；12 基准输出
+> 一致、指令数在噪声内；两条 md5 不变。
+
+## [0.406] - 2026-11-23
+
+> VectPlanner 抽取（阶段 A4 第 3 步 + A5 量测）：`try_vect_loop` 函数体整体搬进
+> `VectPlanner::try_loop`。
+>
+> `codegen_vect.cpp` 从 **1,178 行降到 59 行**（只剩设计注释 + `vect_func_ok` +
+> 一行转发），新增 `src/vect_planner_loop.cpp`（**800 行**）；`CMakeLists.txt`
+> 加一个 TU。`AsmGen::try_vect_loop` 留一行转发，调用点不变。5 个文件合计
+> +817/−789 行。
+>
+> **A5 量测（ccache 关闭、`-j4`）** —— 这是第 2 步拆 `AsmGen` 的兑现：
+>
+> | 改动 | 重编译 TU | 耗时 |
+> |---|---|---|
+> | `src/vect_planner_loop.cpp` 改一行 | **1 个** | **7.76 s** |
+> | `src/codegen_core.h` 改一行 | **31 个** | **55.16 s** |
+>
+> **1 : 7 的重编译收益**（改向量化器主体 vs 改类体头文件）。此前改向量化器一行
+> 同样要 30 个 TU / 约 55 s。
+>
+> 验证：构建绿 / **369 ran ok** / **difftest 348/0** / check_size 通过；12 基准输出与
+> CPython 逐字节一致，指令数在噪声内（`binary_trees` 小程序链接布局噪声除外）；
+> matmul/spectral_norm 汇编 md5 不变。
+
+## [0.405] - 2026-11-23
+
+> VectPlanner 抽取（阶段 A4 第 2 步）：20 个捕获 lambda 全部变成
+> `VectPlanner::Loop` 的方法，另有 22 个局部量一并收进 `Loop` 字段。
+>
+> 这一步是 A4 的硬骨头：方法可以搬，**捕获状态不能**。`xmm_of` / `cls` / `take`
+> 被 3 个辅助文件引用（7/11/3 处），必须跨文件可见 → 全部进 `Loop`，辅助文件入口
+> 改成带 `Loop&`。4 个文件合计 +572/−470 行（`codegen_vect.cpp` 是净减的大头，
+> `vect_planner.h` +93、`vect_planner.cpp` +325）。
+>
+> 改动是机械转换：判据、阈值、发射顺序一字未改。
+>
+> 验证：构建绿 / **369 ran ok** / **difftest 348/0** / check_size 通过；12 基准输出
+> 一致、指令数噪声内；两条 md5 不变。
+
+## [0.404] - 2026-11-23
+
+> VectPlanner 抽取（阶段 A4 第 1 步）：`try_vect_loop` 的局部状态（36 个局部量：
+> cond/body/incr 块号、`si`/`jalias`/`accesses`/`reds`/`cls`/`xmm_pool` 等）
+> 原样收进 `VectPlanner::Loop`。
+>
+> 纯机械转换：`Loop L; ` + `L.xxx` 前缀，不改任何逻辑、不搬任何方法；目的是让
+> 后两步（lambda 方法化、主体搬迁）有落点。3 个文件合计 +300/−258 行
+> （`vect_planner.h` +105 行是 `Loop` 结构体）。
+>
+> 验证：构建绿 / **369 ran ok** / **difftest 348/0** / check_size 通过；12 基准输出
+> 逐字节一致、指令数噪声内；两条 md5 不变。
+
+## [0.403] - 2026-11-23
+
+> VectPlanner 抽取（阶段 A2+A3）：`vect_affine_index` / `vect_affine_plan_ok` /
+> `vect_merge_const_invs` 三个方法搬进 `VectPlanner`。
+>
+> 三者共同点：只依赖 `ValueQuery::simd_def` 与 `ty_of`，不发射指令。搬完
+> `codegen_vect_affine.cpp` 从 141 行缩成 58 行（−87/+4，只剩设计注释），
+> `codegen_vect_jvec.cpp` 同步删转发；`VectPlanner` 侧 +170 行
+> （`vect_planner.cpp` +136、`vect_planner.h` +34）。
+>
+> 同批前置的两步也在这一段完成：`vect_jvec2` 与仿射类型/守卫/基址/判等三个方法
+> 搬进 `VectPlanner`（`b181743` / `afa6c73`）—— 它们属于同一批"纯查询/纯计算"
+> 搬迁，不再单独记版本。
+>
+> 验证：构建绿 / **369 ran ok** / **difftest 348/0** / check_size 通过；12 基准输出
+> 一致、指令数噪声内；两条 md5 不变。
+
+## [0.412] - 2026-11-23
+
+> 文档收尾：补齐 0.402–0.411 的十条条目，并修正四份文档里与实测矛盾的旧结论。
+>
+> - `vectorization-generalization.md`：覆盖率 1/12 → **7 个循环 / 3 个基准**；
+>   新增「当前能力边界」（支持 sqrt / Sub 归约 / coef==0 广播装载；不支持 scatter 写、
+>   同数组混合偏移、嵌套循环形状、非 2 的幂除数、AVX2 广播装载）；修掉「Convert 只认
+>   j+常量」「仍是 2-lane SSE2」等与 b316646 / 0.389 矛盾的过时说法。
+> - `modularization.md`：VectPlanner 抽取标记完成，补 A5 实测（1 TU / 7.76 s vs
+>   31 TU / 55.16 s）；原「剩余 VectPlanner」一节改写为已完成。
+> - `vect-planner-design.md`：状态从「阶段 1 已实施」改为「阶段 1–4 已全部实施」。
+> - `nightly-roadmap.md`：按实际执行重写，补「实际结果 vs 计划」。
+>
+> 未做的事（如实记录）：A4 第 4 步「辅助文件跟着搬 + 删转发」未做（`vect_affine_*` 等
+> 仍是 AsmGen 方法经转发调用，属刻意保留的边界）；ASan 未在本轮跑（随后单独验证）。
+
+## [0.402] - 2026-11-23
+
+> 新增 `docs/nightly-roadmap.md`：夜间迭代路线图（00:15–08:00）。
+>
+> 记录本轮纪律：一个代理槽位、产物等价为第一验收口径、闸门（`tests/run_tests.sh` /
+> `tools/difftest.sh` / `tests/check_size.sh` / ASan）、difftest 必须独占、不许针对
+> 基准特化；阶段 A（VectPlanner 拆分）、阶段 B（通用优化，按性价比排序）、
+> 阶段 C（收尾）。
+>
+> 纯文档，无代码改动。
+
 ## [0.401] - 2026-11-22
 
 > 模块重组收尾（补）：`simd_def` 进 `ValueQuery` 接口。

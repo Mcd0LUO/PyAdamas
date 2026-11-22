@@ -1,6 +1,6 @@
 # VectPlanner 抽取设计（模块重组第 2 步 · 5/5）
 
-状态：**阶段 1 已实施**（2026-11-22，接口已落地，尚未搬代码）。
+状态：**阶段 1–4 已全部实施**（0.398–0.406，2026-11-23 完成阶段 3/4 并量到重编译收益）。
 
 ## 1. 目标与非目标
 
@@ -253,11 +253,19 @@ public:
 | 1 | `EmitSink` 落地 + `override` | ✅ 0.398 |
 | 2 | 修正成三接口 | ✅ 0.399 |
 | 2b | 核对剩余成员（多数是局部 lambda） | ✅ 0.400，无需改代码 |
-| 3 | 搬 3,414 行（`try_vect_loop` + 4 个辅助文件） | ⬜ **未开始** |
-| 4 | 删转发 + 量重编译 TU | ⬜ 未开始 |
+| 3 | 搬 `try_vect_loop` + `Loop` 状态/方法（`vect_planner*` 合计 1,945 行） | ✅ 0.403–0.406；`codegen_vect.cpp` 1,178 → 59 行 |
+| 4 | 删转发 + 量重编译 TU | ✅ 只剩一行转发（`AsmGen::try_vect_loop`）；改 `vect_planner_loop.cpp` = **1 TU / 7.76 s**，改 `codegen_core.h` = **31 TU / 55.16 s** |
 
-**阶段 3 是唯一剩下的大块**，且它不需要再改设计 —— 接口已经钉死，`override` 保证
-签名漂移会编译失败。谁接手都可以直接照 §4 阶段 3 的步骤做。
+**阶段 3/4 已实施完毕，重编译收益也量到了**：向量化器主体（`try_loop` 约 800 行）
+搬进 `src/vect_planner_loop.cpp`，每次调用状态与 20 个捕获 lambda 收进
+`VectPlanner::Loop`（`vect_planner.h` 319 行 / `vect_planner.cpp` 677 行 /
+`vect_planner_loop.cpp` 949 行）。**边界**：`vect_affine_*` / `vect_jvec2` /
+`vect_avx2_emit` / `vect_alloc_temps` 仍留在 `AsmGen`（它们直接发指令、且被发射路径
+调用，按「三接口 + 反向引用」的边界留在原处更简单），阶段 3 只搬了 `try_vect_loop`
+主体 —— 原定的「辅助文件跟着搬」这条经实践证明不必要。
+
+**1:7** 是这块拆分的最终兑现：改向量化器一行只要 1 个 TU / 7.76 s，而改类体头文件
+（`codegen_core.h`）一行仍是 31 个 TU / 55.16 s（ccache 关、`-j4`）。
 ## 12. 阶段 3 盘点：`try_vect_loop` 的局部状态（2026-11-22）
 
 `codegen_vect.cpp`（1,178 行）里有 **21 个局部 lambda**，它们捕获的是**每次调用的**

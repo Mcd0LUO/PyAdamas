@@ -25,15 +25,21 @@
       ⚠ 原定验收「改 regalloc 头后重编译 TU ≤ 8」**没有达成，也达不成** ——
       见 §5.1 的更正：单个类的声明拆成几个头不改变重编译代价，那条要等第 2 步。
       实际达成的是「改被搬走的函数体 = 1 个 TU」（54.3 s → 7.9 s）。
-- [~] **第 2 步 · AsmGen 拆组合对象**（进行中，1/5）
+- [~] **第 2 步 · AsmGen 拆组合对象**（进行中，5/7）
       ✅ `Frame`（帧布局 + 帧记录）—— 2026-11-22 完成，见 §6
       ✅ `Emitter`（输出缓冲 / 标签号 / 行缓冲）—— 2026-11-22 完成，见 §6.4
       ✅ `TagLower`（tag 影子类型 + 零开销异常状态）—— 2026-11-22 完成，见 §6.5
       ✅ `RegAlloc`（槽/跨块 vreg 提升状态）—— 2026-11-22 完成，见 §6.7
+      ✅ `VectPlanner`（codegen_vect* 主体，约 2500 行）—— 2026-11-23 完成，见 §6.8
       ⬜ `RegAlloc`（全局分配 / 扫描 / live range splitting）
       ⬜ `TagLower`（shadow tag / 直调 tag ABI / 零开销异常）
-      ⬜ `VectPlanner`（codegen_vect* / codegen_simd*，约 2500 行）
       验收：单类方法数 ≤ 60、字段数 ≤ 40。
+
+      **A5 实测（VectPlanner 抽完后，ccache 关、`-j4`）**：改
+      `src/vect_planner_loop.cpp` 一行 = **1 个 TU / 7.76 s**；改
+      `src/codegen_core.h` 一行 = **31 个 TU / 55.16 s**。这就是「方法搬进
+      独立协作对象」相对「方法挂在类体头文件里」的兑现：向量化器主体从
+      「改一行 30 个 TU」变成「改一行 1 个 TU」，约 **1:7**。
 - [ ] **第 3 步 · 目录按阶段分**：`src/{driver,front,ir,low,opt,gen}/`（纯移动）。
 - [ ] **第 4 步 · Lowerer 拆分**（优先级低于 AsmGen：它职责更单一）。
 - [ ] **第 5 步 · 换闸门**：1200 行限制保留，新增「单类方法数 ≤ 60 / 字段数 ≤ 40 /
@@ -214,12 +220,12 @@ AsmGen 侧只留两个一行转发（`vreg_slot_off` / `layout_frame`），**52 
 验证：构建绿 / 369 ran ok / difftest 348/0 / ASan 369 ran ok 0 报告 / check_size 通过；
 12 基准输出全一致，指令数全部 ±0.000%（`binary_trees` +0.03%，在噪声内）。
 
-### 6.6 剩余两块（未做）
+### 6.6 剩余（未做）
 
-- **`RegAlloc`**：约 20 个字段，`slot_reg_` / `fp_promoted_*` / `fp_live_*` / `slot_reg_cand_`
-  互相纠缠，且 `slot_reg_` 在**每条指令的操作数取值路径**上 —— 拆它需要一轮完整预算。
-- **`VectPlanner`**（约 2500 行）：每个发射点都是 `AsmGen` 成员，先要定「反向引用还是
-  `EmitSink` 接口」这个设计决定，做错会让 2500 行白搬。
+- **`RegAlloc`**（全局分配 / 扫描 / live range splitting）：约 20 个字段，
+  `slot_reg_` / `fp_promoted_*` / `fp_live_*` / `slot_reg_cand_` 互相纠缠，且
+  `slot_reg_` 在**每条指令的操作数取值路径**上 —— 拆它需要一轮完整预算。
+- **`VectPlanner`**：原列在这里，已在阶段 A（0.402–0.406）完成，见 §6.8。
 ### 6.7 已完成：`RegAlloc`（槽提升状态）
 
 新文件 `src/reg_alloc.h`：12 个字段 ——
@@ -236,14 +242,37 @@ AsmGen 侧只留两个一行转发（`vreg_slot_off` / `layout_frame`），**52 
 改名时踩到一个真坑：`ra_opt.cpp` 名字不带 `codegen` 前缀，第一轮脚本没覆盖，
 编译报错才发现。机械改名必须用「全 src 扫描 + 编译验证」，不能靠命名前缀猜。
 
-### 6.8 剩余：`VectPlanner`（约 2500 行）
+### 6.8 已完成：`VectPlanner`（阶段 A，2026-11-23）
 
-它和前面四块**不是一类东西**：前四块搬的是「状态」，方法留在 AsmGen；向量化器要搬的
+它和前面四块**不是一类东西**：前四块搬的是「状态」，方法留在 AsmGen；向量化器搬的
 是「方法」，而每个方法体里都是 `emit2(...)` / `src_mop(...)` / `xmm_of(...)` 这样的
-AsmGen 成员调用。所以动手前必须先定一件事：
+AsmGen 成员调用。设计决定（`docs/vect-planner-design.md`）：
 
-- **反向引用**（`VectPlanner` 持有 `AsmGen&`，friend 权限）—— 简单，但只是把耦合换个方向；
-- **`EmitSink` 接口**（抽取 `emit*` / 操作数查询成纯虚接口）—— 干净，但要动 2500 行里
-  每个发射点，且虚调用会影响热路径。
+- **三接口 + 反向引用**：`VectPlanner` 持有 `EmitSink&` / `ValueQuery&` / `SlotQuery&`
+  三个纯虚接口（0.398/0.399），**外加** `AsmGen&` 用于少数非接口成员；`try_vect_loop`
+  的每次调用状态收进嵌套的 `VectPlanner::Loop`（它持有 owner 引用）。
+- 纯虚只落在**发射/查询**边界（每条指令几次），不在逐 lane 循环体里，所以没有可见成本。
 
-这个决定错了会让 2500 行白搬。建议下一轮**先写设计再动手**。
+**结果（阶段 A2–A4，0.403–0.406）**：
+
+| 文件 | 行数 | 内容 |
+|---|---|---|
+| `src/vect_planner.h` | 319 | `VectPlanner` + 嵌套 `Loop`（状态 + 方法声明）+ `VAffBase`/`VAccess`/`VRed` 等类型 |
+| `src/vect_planner.cpp` | 677 | `Loop` 方法（classify / xmm_of / take / list_* / 仿射分析 / 归约识别…） |
+| `src/vect_planner_loop.cpp` | 949 | `VectPlanner::try_loop` 主体（原 `try_vect_loop`，约 800 行） |
+| `src/codegen_vect.cpp` | 1178 → **59** | 只剩设计注释 + `vect_func_ok` + 一行转发 |
+| `src/codegen_vect_affine.cpp` | 141 → 58 | 分析/守卫/基址/装载全部搬走，只剩设计说明 |
+| `src/codegen_vect_jvec.cpp` / `_avx2.cpp` | 184 / 380 | 仍是 `AsmGen` 方法（`vect_jvec2` / `vect_avx2_emit` / `vect_alloc_temps` / `vect_mark_nonindex_uses`） |
+
+**边界（诚实记录）**：阶段 A4 第 ④ 步「辅助文件跟着搬 + 删转发」**没有做**。那四个
+文件的方法直接发指令、且被 `AsmGen` 的发射路径调用，按当前「三接口 + 反向引用」
+的边界留在 `AsmGen` 更简单（`codegen_vect.h` 里一行转发暴露给 `VectPlanner`）。
+主体（`try_loop` + `Loop` 状态/方法）已全部搬完，这不算遗留缺口。
+
+**A5 实测**：改 `vect_planner_loop.cpp` 一行 = **1 个 TU / 7.76 s**；改
+`codegen_core.h` 一行 = **31 个 TU / 55.16 s**（ccache 关、`-j4`）→ **1:7**。
+
+**验证**：每个阶段都按产物等价验收 —— 12 基准输出与 CPython 逐字节一致、
+matmul/spectral_norm 汇编 md5 不变（`6eee8414…` / `58be63a7…`）、指令数在噪声内；
+闸门 369 ran ok / difftest 348/0 / check_size 通过（后续轮次随新增用例涨到
+374 ran ok / 353 用例）。
