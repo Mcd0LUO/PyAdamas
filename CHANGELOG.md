@@ -4,6 +4,70 @@
 
 早期阶段没有逐条留痕，按阶段归纳；0.4 之后逐条记录。
 
+## [0.380] - 2026-11-22
+
+> 学 LLVM 的 `verifyFunction` / `-verify-each`，给 IR 加一层**不变量校验**。
+> 这是上一轮「LLVM 对照」里排第一的建议落地。
+>
+> ### 是什么
+>
+> ```bash
+> PYADAMAS_VERIFY_IR=1 pyadamas run app.py    # 报告违规，继续编译
+> PYADAMAS_VERIFY_IR=2 pyadamas run app.py    # 报告并中止（退出码 70）
+> PYADAMAS_TEST_VERIFY=1 bash tests/run_tests.sh ...   # 全套件开着校验跑
+> ```
+>
+> 检查点在 `src/lower.cpp` 的 `pre-opt` / `post-opt` 两处，所以报告能直接指出
+> 是哪个阶段把 IR 改坏的。默认关闭，关闭时开销只有一次 `getenv`。
+>
+> ### 查八条不变量
+>
+> | # | 不变量 |
+> |---|---|
+> | 1 | `slot_owned` ⇒ 槽类型是堆 / unknown（否则出口会把整数当指针 dec） |
+> | 2 | 非生成器函数里 vreg 只能定义一次 |
+> | 3 | 读到的 vreg 在同一函数里有定义 |
+> | 4 | 恢复侧 `gen.*` 指令只出现在生成器函数里 |
+> | 5 | 块以终止指令结尾；结构性终止不出现在块中间 |
+> | 6 | 跳转目标在范围内；`branch` 必须有 else 目标 |
+> | 7 | 槽号 < `slot_ty.size()` |
+> | 8 | 全局 / 字符串 / 函数 / 类 / 外部符号 / 外部变量下标在表内 |
+>
+> ### 三条「不能查」的规则（全量跑出来的）
+>
+> 写校验器最容易犯的错是把合法形态判成错误。这三条是拿 402 个用例跑出来的：
+>
+> 1. 生成器/协程**允许** vreg 重复定义 —— 跨挂起点的槽位溢出会在每个续跑块
+>    开头把值重新装回同一个 vreg（`lower_gen_spill.cpp`）；
+> 2. `call.rt pa_raise(...)` 出现在块中间是合法的（`raise` 降级成的 noreturn
+>    调用后面可能还跟着不可达的清理指令）；
+> 3. 空块是合法的（`unreachable` 占位块按 fallthrough 处理）。
+>
+> 另外：下标归属按 **op** 判定，不按 `Operand::kind` —— `opt_global_promote` 把
+> `load.global` 改成 `load.slot` 时不同步 kind，拿 kind 当权威会全量误报；
+> `CallExtern` 查 `externs`、`LoadExtern`/`StoreExtern` 查 `extern_vars`。
+>
+> ### 自检：它真的会报
+>
+> 临时把第一个函数所有 jump 目标改成 999，实测输出：
+>
+> ```
+> [verify-ir] post-opt：12 条违规
+> [verify-ir] __pa_main: 块 print.sep 的 jump 目标 999 越界（块数 25）
+> ```
+>
+> ### 基线
+>
+> `tests/run/` 全部 402 个用例在 `PYADAMAS_VERIFY_IR=1` 下**零违规**。
+> 从这版起，任何新增违规都是真回归。
+>
+> 顺带把 `Block::terminated()` 的判断抽成 `is_terminator(const Inst&)`，让校验器
+> 和 lowering 共用同一份口径，避免两套判断打架。
+>
+> 文档：[docs/ir-verify.md](docs/ir-verify.md)。
+>
+> 闸门：difftest **401/0**；全套件 **422 ran ok**、exit 0；check_size 通过。
+
 ## [0.379] - 2026-11-21
 
 > **两轮扫描发现的问题全部关闭。** 本轮修掉最后一条崩溃。

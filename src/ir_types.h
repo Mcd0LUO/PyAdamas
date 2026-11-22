@@ -129,6 +129,46 @@ struct Inst {
     void text_into(std::string& buf) const;
 };
 
+// 单条指令是否是终止指令（块必须以它结尾，且只能有一条）。
+//
+// 与 Block::terminated() 共用同一份口径 —— 校验器不能有第二套判断，
+// 否则「lowering 认为是终止、校验器认为不是」会互相打架。
+inline bool is_terminator(const Inst& in) {
+    const IrOp op = in.op;
+    if (op == IrOp::Jump || op == IrOp::Branch || op == IrOp::Return ||
+        op == IrOp::GenYield || op == IrOp::GenAwait ||
+        op == IrOp::GenRethrow || op == IrOp::GenDone)
+        return true;
+    // **不返回的运行时调用也算终止。**
+    //
+    // 漏掉这一类会让后续的收尾逻辑往它们后面追加指令 —— 那些指令永远
+    // 执行不到，但**会被当成活代码保留下来**，其中的清理动作（比如
+    // ExcDone）就静默丢失了。
+    //
+    // 实测 32_exception_value：`except ...: raise` 的裸 raise 生成
+    // pa_reraise（_Noreturn），但 terminated() 不认识它，于是 lower_try
+    // 又在后面补了 pa_exc_done + jump。ExcDone 永远执行不到，
+    // pa_exc_accept_value 压的 PyAdamasExcSave 泄漏 16 字节。
+    if (op == IrOp::CallRt) {
+        switch (static_cast<RtFn>(in.imm)) {
+            case RtFn::ExcReraise:
+            case RtFn::Raise:
+            case RtFn::RaiseValue:
+            case RtFn::RaiseValueFrom:
+            case RtFn::RaiseInstance:
+            case RtFn::Reraise:
+            case RtFn::EhRaise:
+            case RtFn::EhRaiseValueFrom:
+            case RtFn::EhReraise:
+            case RtFn::EhRethrow:
+                return true;
+            default:
+                return false;
+        }
+    }
+    return false;
+}
+
 struct Block {
     // 稳定标识：与 Inst::id 同思路 —— 块在 vector 里的下标会因
     // insert/erase 改变，跨 pass 保存的引用必须用 id。
@@ -138,40 +178,7 @@ struct Block {
     std::vector<Inst> insts;
 
     bool terminated() const {
-        if (insts.empty()) return false;
-        const IrOp op = insts.back().op;
-        if (op == IrOp::Jump || op == IrOp::Branch || op == IrOp::Return ||
-            op == IrOp::GenYield || op == IrOp::GenAwait ||
-            op == IrOp::GenRethrow || op == IrOp::GenDone)
-            return true;
-        // **不返回的运行时调用也算终止。**
-        //
-        // 漏掉这一类会让后续的收尾逻辑往它们后面追加指令 —— 那些指令永远
-        // 执行不到，但**会被当成活代码保留下来**，其中的清理动作（比如
-        // ExcDone）就静默丢失了。
-        //
-        // 实测 32_exception_value：`except ...: raise` 的裸 raise 生成
-        // pa_reraise（_Noreturn），但 terminated() 不认识它，于是 lower_try
-        // 又在后面补了 pa_exc_done + jump。ExcDone 永远执行不到，
-        // pa_exc_accept_value 压的 PyAdamasExcSave 泄漏 16 字节。
-        if (op == IrOp::CallRt) {
-            switch (static_cast<RtFn>(insts.back().imm)) {
-                case RtFn::ExcReraise:
-                case RtFn::Raise:
-                case RtFn::RaiseValue:
-                case RtFn::RaiseValueFrom:
-                case RtFn::RaiseInstance:
-                case RtFn::Reraise:
-                case RtFn::EhRaise:
-                case RtFn::EhRaiseValueFrom:
-                case RtFn::EhReraise:
-                case RtFn::EhRethrow:
-                    return true;
-                default:
-                    return false;
-            }
-        }
-        return false;
+        return !insts.empty() && is_terminator(insts.back());
     }
 };
 

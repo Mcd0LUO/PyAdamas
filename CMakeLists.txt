@@ -98,6 +98,7 @@ set(PYADAMAS_SOURCES
   src/opt.cpp
   src/opt_forward.cpp
   src/opt_cse.cpp
+  src/ir_verify.cpp
   src/opt_rc.cpp
     src/opt_dict_bump.cpp
     src/opt_dict_fuse.cpp

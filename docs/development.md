@@ -208,6 +208,8 @@ print(p.returncode, resource.getrusage(resource.RUSAGE_CHILDREN).ru_maxrss)'   #
 | 查看栈展开规则（CFI） | `readelf --debug-dump=frames x` |
 | 回溯穿过生成帧和 libc | `gdb -batch -ex 'set backtrace past-main on' -ex run -ex bt ./x` |
 | 未捕获异常回溯 | `pyadamas run bad.py`（stderr 打印 `Traceback`） |
+| IR 不变量校验 | `PYADAMAS_VERIFY_IR=1 pyadamas run x.py`（见 [ir-verify.md](ir-verify.md)） |
+| 优化遍回归（零违规基线） | `PYADAMAS_TEST_VERIFY=1 bash tests/run_tests.sh build/dev build/dev/pyadamas` |
 汇编里每条指令前都有对应的 IR 注释，对照 `pyadamas ir` 的输出能定位到是哪条 IR 生成错了。
 
 ### 内存 / UB 检查

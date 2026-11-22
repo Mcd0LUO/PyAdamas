@@ -1,6 +1,7 @@
 // lower.cpp —— 降级驱动：预扫描、函数编译与模块入口
 #include "lower_impl.h"
 
+#include "ir_verify.h"
 #include "opt.h"
 #include "target_abi.h"
 
@@ -684,7 +685,12 @@ LowerResult lower_module(Module& ast, TypeChecker& tc, const std::string& file,
         // 沿用基线。性能代价只落在门控开的程序上。
         if (options.lang_gaps)
             for (auto& f : res.mod.funcs) f->can_inline = false;
+        // 调试开关：PYADAMAS_VERIFY_IR=1 报告、=2 直接中止。默认零开销
+        // （只有一次 getenv）。放在优化前后各一次，能直接指出是哪个阶段
+        // 把 IR 改坏的。
+        verify_module_or_die(res.mod, "pre-opt");
         optimize_ir(res.mod, options.opt_level, options.loop_opt, options.inline_opt);
+        verify_module_or_die(res.mod, "post-opt");
     }
     return res;
 }

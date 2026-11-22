@@ -21,7 +21,12 @@ cd "$ROOT" || exit 1
 
 JOBS=${PYADAMAS_TEST_JOBS:-$(nproc 2>/dev/null || echo 4)}
 FILTER=${PYADAMAS_TEST_FILTER:-}
+VERIFY_ENV=""
 ASAN=${PYADAMAS_TEST_ASAN:-0}
+# IR 校验模式：每个用例编译时打开 PYADAMAS_VERIFY_IR，任何不变量违规都会
+# 出现在 stderr 里（编译仍会成功）。用来在改 pass 之后确认没有把 IR 改坏。
+# 基线是零违规，所以这里一旦有输出就是回归。
+VERIFY=${PYADAMAS_TEST_VERIFY:-0}
 # sanitizer 模式下的额外 build 参数与运行环境。
 if [ "$ASAN" = 1 ]; then
     BUILD_FLAGS="--asan"
@@ -31,6 +36,9 @@ if [ "$ASAN" = 1 ]; then
 else
     BUILD_FLAGS=""
     RUN_ENV=""
+fi
+if [ "$VERIFY" = 1 ]; then
+    VERIFY_ENV="PYADAMAS_VERIFY_IR=1"
 fi
 match() {
     [ -z "$FILTER" ] && return 0
@@ -136,7 +144,7 @@ run_test() {
     # 截断后 diff 必然不等，用例照样报 OUTPUT DIFF，不影响判定。
     # run 子命令会 fork 出编译产物再执行；sanitizer 选项要靠环境变量传给
     # 那个子进程，所以套一层 env。
-    if ! env $RUN_ENV $extra "$PYADAMAS" $BUILD_FLAGS run --rebuild -o "$p" "$f" 2>&1 | head -c 1048576 > "$o"; then
+    if ! env $RUN_ENV $extra $VERIFY_ENV "$PYADAMAS" $BUILD_FLAGS run --rebuild -o "$p" "$f" 2>&1 | head -c 1048576 > "$o"; then
         { echo FAILED; sed -n '1,6p' "$o"; } > "$res"
         return
     fi
