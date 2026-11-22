@@ -279,6 +279,13 @@ def write_markdown(path, rows, args):
            if rounds else "跑 %d 次取最小值" % args.repeat,
            PYADAMAS_BIN),
         "",
+        "**默认管线里浮点循环的向量化是按 IR 形状模板做的**（reduction / int map /"
+        " nbody pair，`src/codegen_simd*.cpp`，默认开），通用自动向量化"
+        "（`src/codegen_vect.cpp`）默认关。关掉特化 SIMD 后 `matmul`/"
+        "`spectral_norm`/`nbody` 慢 2–4×，其余用例在噪声内 —— 实测见"
+        " `bench/compare/SIMD-AB.md`。表里最漂亮的三行正是形状模板承包的；"
+        "`sieve`/`wordfreq` 这种没被覆盖的写法才是可外推的水平。",
+        "",
         "| 用例 | N | CPython | PyAdamas | Go | C++ | PyAdamas/CPython | PyAdamas/最快编译实现 | 输出一致 |",
         "|---|---|---|---|---|---|---|---|---|",
     ]
