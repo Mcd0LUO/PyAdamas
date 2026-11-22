@@ -15,6 +15,7 @@
 #include <string>
 #include <string_view>
 
+#include "ir.h"
 #include "mach_instr.h"
 
 namespace pyadamas {

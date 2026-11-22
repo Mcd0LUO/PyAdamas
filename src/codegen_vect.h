@@ -176,7 +176,9 @@
     //   x %  2^m → 低 m 位（andq $(2^m-1) 的 packed 版）
     // 除数 vreg → 移位量 m（0 <= m <= 62；m == 0 是恒等/清零）；不是 2 的幂
     // 常量返回 false。
-    bool vect_div_pow2(VReg b, int* sh) const;
+    bool vect_div_pow2(VReg b, int* sh) const { return vect_.vect_div_pow2(b, sh); }
+    // 向量化器协作对象（阶段 3 起逐方法搬入）。
+    VectPlanner vect_{*this, *this, *this};
     // 2-lane 发射：rd 已持有被除数 x（2 lane i64），结果原地写回 rd。tmp 是
     // scratch（seq 寄存器）。% 不用 scratch；// 的 m>0 用 4 条 packed 合成。
     void vect_intdiv2(MReg rd, MReg tmp, bool is_mod, int sh);

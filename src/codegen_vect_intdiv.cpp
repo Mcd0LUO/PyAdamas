@@ -51,38 +51,12 @@ namespace {
 // 正 2 的幂 → m（除数 == 2^m，0 <= m <= 62）；其余（<= 0、非幂、负数）→ -1。
 // 负数除数（-2^m）不走这条：标量那边 floor/ceil 的符号换算另有一套式子，
 // 它的结果不是简单的 sarq，不能照搬 —— 保守维持 Fail。
-int pow2_shift_i64(int64_t d) {
-    if (d < 1) return -1;
-    if ((d & (d - 1)) != 0) return -1;          // 含 d == 0 的溢出保护（d>=1）
-    int m = 0;
-    while ((d >> m) != 1) ++m;                  // d == 1 << m
-    return m;                                   // d > 0 且 ≤ 2^63-1 → m ≤ 62
-}
-
 }  // namespace
 
 // 除数 vreg → 移位量 m。只认**编译期常量**（ConstInt，或穿过 Mov 链的
 // ConstInt）；运行期才定的除数（含循环不变量槽、参数、全局）一律不认 ——
 // 那要么需要真正的除法器，要么需要运行期守卫，都不属于「通用操作」。
 // 判据里没有任何形状/程序信息，只有「这个值是 2 的幂常量吗」。
-bool AsmGen::vect_div_pow2(VReg b, int* sh) const {
-    if (b == kNoReg || sh == nullptr) return false;
-    const Inst* def = nullptr;
-    // Mov 链最多跟 8 跳（内联/临时槽别名解析会插 Mov；正常形态 0-2 跳）。
-    for (int hop = 0; hop < 8 && b != kNoReg; ++hop) {
-        def = simd_def(b);
-        if (def == nullptr) return false;
-        if (def->op == IrOp::ConstInt) break;
-        if (def->op != IrOp::Mov) return false;
-        b = def->a;
-    }
-    if (def == nullptr || def->op != IrOp::ConstInt) return false;
-    const int m = pow2_shift_i64(def->imm);
-    if (m < 0 || m > 62) return false;
-    *sh = m;
-    return true;
-}
-
 // 2-lane（SSE2）发射：rd 已持有被除数 x（2 lane i64），结果原地写回 rd。
 // tmp 是 scratch（seq 寄存器，与 rd 不同）。语义与标量 sarq / andq 逐位一致。
 void AsmGen::vect_intdiv2(MReg rd, MReg tmp, bool is_mod, int sh) {

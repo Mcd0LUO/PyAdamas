@@ -46,6 +46,7 @@
 #include "emit_sink.h"
 #include "slot_query.h"
 #include "value_query.h"
+#include "vect_planner.h"
 #include "emitter.h"
 #include "frame.h"
 #include "reg_alloc.h"
