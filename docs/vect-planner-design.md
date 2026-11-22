@@ -160,3 +160,46 @@ public:
 
 确认接口够用：把 `op_mem`（4 个 static 重载，不需要虚化）与其余查询从向量化器
 的调用面里过一遍，补齐还缺的成员，然后再进阶段 3 搬代码。
+## 9. 阶段 2 结论：接口**不够用**（2026-11-22 实测）
+
+按计划过了一遍向量化器的完整调用面。结果：`EmitSink` 的 7 个原语**只覆盖约 60%**。
+
+实测（`codegen_vect*.cpp` 五个文件去重计数）：
+
+| 成员 | 次数 | 是否已在 EmitSink |
+|---|---|---|
+| `emit2` | 85 | ✅ |
+| `ty_of` | 25 | ❌ |
+| `op_mem` | 19 | ➖ static，无需虚化 |
+| `emit_imm` | 19 | ✅ |
+| `emit_jmp` | 17 | ✅ |
+| `list_base_mop` | 15 | ❌ |
+| `slot_ty`（字段） | 8 | ❌ |
+| `src_mop` | 6 | ✅ |
+| `slot_is_jalias` / `slot_is_temp` / `slot_is_red` | 6/3/3 | ❌ |
+| `op_reg` / `op_imm` | 4/2 | ➖ static |
+| `fresh_label` | 4 | ✅ |
+| `slot_mop` | 3 | ❌ |
+| `emit_imm_hex` | 2 | ❌ |
+| `global_mop` / `slot_loc_` | 1/1 | ❌ |
+
+**这说明「一个 EmitSink 打天下」是错的设计方向。** 缺的成员分三类，
+它们的归属本来就不该相同：
+
+| 组 | 成员 | 应该属于 |
+|---|---|---|
+| 发射 | `emit2` `emit_imm` `emit_imm_hex` `emit_jmp` `line` `label` `fresh_label` | `EmitSink`（已有，补 1 个） |
+| 值的类型/来源 | `ty_of` `src_mop` `list_base_mop` `global_mop` `slot_ty` | 新的 `ValueInfo` |
+| 槽的属性 | `slot_mop` `slot_is_jalias` `slot_is_temp` `slot_is_red` `slot_loc_` | 新的 `SlotInfo` |
+
+所以 `VectPlanner` 应该持有**三个小接口**（或一个聚合 `VectContext` 里放三个引用），
+而不是一个胖接口。每个接口 5–7 个成员，语义单一。
+
+### 下一步（阶段 2 修正版）
+
+1. 先补 `EmitSink` 缺的 `emit_imm_hex`（1 个成员）；
+2. 新增 `ValueInfo`（5 个成员）与 `SlotInfo`（5 个成员），同样用 `override` 保证一致；
+3. 三个接口都落地、编译通过、产物等价之后，才进阶段 3 搬 3,414 行。
+
+**这个结论本身就是阶段 2 的价值**：如果直接进阶段 3，会在搬到一半时发现接口缺 8 个
+成员，那时改接口要连带动已经搬好的几百行。现在改只需动 3 个头文件。
