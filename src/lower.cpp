@@ -678,6 +678,16 @@ LowerResult lower_module(Module& ast, TypeChecker& tc, const std::string& file,
     Lowerer lw(res.mod, tc, file, options);
     lw.run(ast);
     res.errors = std::move(lw.errors());
+    if (res.errors.empty()) {
+        // 间接调用去虚拟化（opt_devirt.cpp）。判据只看 IR 结构 —— 全局/槽
+        // 只被写一次、值是某个已知函数的 func.addr、实参/返回类型与被调
+        // 逐项一致 —— 与优化等级无关，所以**无条件**生效：-O0/-O1 没有别的
+        // 优化遍，这条改写是它们唯一能省掉「统一约定 + closure shim」的地方；
+        // -O2 上它先于内联/向量化发生，后面看到的是 call.direct。
+        // 放在 pre-opt 校验之前：校验看到的就是 devirt 之后的 IR（devirt 只
+        // 改 op 与函数下标，不动 CFG/槽表/实参）。
+        devirt_module(res.mod);
+    }
     if (res.errors.empty() && options.opt_level >= 2) {
         // P4 块3（lang_gaps）：O2 小函数内联会把被内联帧并进调用者（调试表
         // 按调用者的函数索引归因），traceback 帧链与 CPython 对不上。门控开
