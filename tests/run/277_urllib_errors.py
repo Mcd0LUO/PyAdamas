@@ -59,7 +59,9 @@ srv = subprocess.Popen(["python3", srvpath, str(PORT)], stdout=subprocess.DEVNUL
 try:
     ready = False
     i = 0
-    while i < 100:
+    # 400 × 50ms = 20s 窗口：并行跑 difftest 时机器有负载，python3 子进程启动
+    # 可能要几百毫秒，原来的 5s 窗口会偶发 ready: False（与代码无关的假失败）。
+    while i < 400:
         try:
             r = urlopen(BASE + "/hello")
             r.read()
