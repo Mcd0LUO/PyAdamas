@@ -222,6 +222,13 @@ public:
         std::vector<std::string> lists;                // 数组键（确定性顺序）
         std::vector<AffEq> inv_eq;                     // 入口 inv 判等守卫
         std::vector<VDisjointGuard> dj_guards;         // 跨组地址区间不相交守卫
+        // 32 位守卫快路径（0.418，实现在 vect_planner_intfast.cpp）：int64 索引
+        // 算术在运行期守卫（n<=K、inv>=0、inv+n<=K）下 < 2^31 时，用 pmuludq
+        // 单条乘 + psrlq 除 2^m + pshufd/cvtdq2pd 单条折算；守卫失败跳标量尾。
+        bool intfast = false;
+        int64_t intfast_k = 0;
+        std::vector<VReg> intfast_invs;
+        std::unordered_set<VReg> intfast_mul, intfast_div, intfast_conv;
         std::vector<AffBase> bases;                    // 基址键
         std::vector<int64_t> kcoefs;                   // coef>1 的跨步计数器系数
 
@@ -265,6 +272,12 @@ public:
         bool slot_is_temp(int slot) const;
         VReg temp_store_val(int slot) const;
         bool vect_alias_plan();   // 别名 / 跨 lane 依赖分析（阶段 B5，实现在 vect_planner.cpp）
+        // 32 位守卫快路径（0.418）：分析与守卫发射见 vect_planner_intfast.cpp。
+        bool int_fast_plan();
+        bool int_fast_bound(VReg v, int64_t K, int64_t* ub,
+                            std::unordered_set<VReg>* invs, bool* has_mul);
+        void int_fast_mark(VReg v, std::unordered_set<VReg>& invs);
+        void emit_int_fast_guards();
         MReg take(MReg prefer);
         VReg resolve_src(VReg v) const;
 

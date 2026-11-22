@@ -139,6 +139,7 @@ src/opt_intloop.cpp
   src/codegen_vect_jvec.cpp
   src/vect_planner.cpp
   src/vect_planner_loop.cpp
+  src/vect_planner_intfast.cpp
   src/vect_rules_test.cpp
   src/codegen_call_rt.cpp
   src/codegen_inline_containers.cpp

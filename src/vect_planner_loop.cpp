@@ -721,6 +721,10 @@ bool VectPlanner::try_loop(const Block& b) {
     // 归纳变量物化寄存器（P5b）：生命周期只由算术使用点决定（纯下标用的 j
     // 不需要它）。分配/释放见 vect_alloc_temps。
     gen_.vect_j_span(L.BI, L.role, L.cls, &L.j_first, &L.j_last);
+    // 32 位守卫快路径分析（可选，失败不影响向量化）：索引算术里的 i64 乘 /
+    // 除 2^m / 转 double 在运行期守卫下可缩成单指令序列，见
+    // vect_planner_intfast.cpp。
+    L.int_fast_plan();
     // float 保序提取会 movhlps 破坏 expr 寄存器：expr 末次使用晚于本 RedStore
     //（被另一 reduction/map 存储共享）时必须用 scratch 副本提取。先占 FSCR。
     for (const Red& r : L.reds) {
@@ -788,6 +792,8 @@ bool VectPlanner::try_loop(const Block& b) {
     for (const VDisjointGuard& dg : L.dj_guards)
         if (!vect_affine_disjoint(dg.w, dg.wmin, dg.wmax, dg.r, dg.rmin, dg.rmax,
                                   L.JREG, L.n_op, L.tail)) return false;
+    // 32 位守卫快路径（0.418）：证明索引算术的 i64 值 < 2^31；失败回标量尾。
+    L.emit_int_fast_guards();
     // 基址常驻寄存器：base = data + inv*8。
     for (const AffBase& bb : L.bases)
         vect_affine_base(L.list_base_mop(L.list_rep[bb.key]), bb, bb.reg);
@@ -895,6 +901,17 @@ bool VectPlanner::try_loop(const Block& b) {
                     //   单次 RN 舍入 = cvtsi2sdq(x)（任何 MXCSR 舍入模式同理，
                     //   中间量全精确）。INT64_MIN：hi_s=-2^31, lo_u=0 → -2^63 精确。
                     const VClass& cc = L.cls[r];
+                    if (L.intfast_conv.count(r) != 0) {
+                        // 32 位守卫快路径（0.418）：守卫保证值在 [0, 2^31)。
+                        // 取两个 lane 的低 32 位（dword 0/2）后一条 cvtdq2pd
+                        // 精确折算，代替拆高低 32 位的 13 条通用序列。
+                        MReg ra = L.xmm_of(in.a);
+                        if (ra == kMRegNone) return false;
+                        if (rd != ra) gen_.emit2(MOp::kMovapd, ra, rd);
+                        L.pshufd(0x88, rd);              // [lo0, lo1, lo0, lo1]
+                        gen_.emit2(MOp::kCvtdq2pd, rd, rd);
+                        break;
+                    }
                     if (cc.j_src) {
                         // 构造 [j+off, j+off+1]（j 任意 i64，折算无需范围守卫）。
                         vect_jvec2(L.JREG, cc.off, rd, L.SEQ1);
@@ -955,6 +972,12 @@ bool VectPlanner::try_loop(const Block& b) {
                     L.SEQ1 == kMRegNone) return false;                     // 不应发生
                 if (rd != ra) gen_.emit2(MOp::kMovapd, ra, rd);
                 if (intdiv2) {
+                    if (in.bop == BinKind::FloorDiv && L.intfast_div.count(r) != 0) {
+                        // 32 位守卫快路径：被除数非负 → 逻辑右移就是 floor 除
+                        // 2^m（标量 sarq 对非负值同结果），省掉符号修正合成。
+                        if (dsh > 0) gen_.emit_imm(MOp::kPsrlq, dsh, rd);
+                        break;
+                    }
                     vect_intdiv2(rd, L.SEQ1, in.bop == BinKind::Mod, dsh);
                     break;
                 }
@@ -962,6 +985,13 @@ bool VectPlanner::try_loop(const Block& b) {
                 MOp op = MOp::kAddpd;
                 if (is_int) {
                     if (in.bop == BinKind::Mul) {
+                        if (L.intfast_mul.count(r) != 0) {
+                            // 32 位守卫快路径：两操作数非负且 < 2^32，pmuludq
+                            // 逐 lane 取低 32 位无符号乘 = 精确 64 位积，无需
+                            // 交叉项拼装与符号修正（10 条 → 1 条）。
+                            gen_.emit2(MOp::kPmuludq, rb, rd);
+                            break;
+                        }
                         // 全 i64 乘重建（rd=A 已装好，rb=B 保持不动）：
                         //   a*b mod 2^64 = a_lo*b_lo + ((a_lo*b_hi + a_hi*b_lo) mod 2^32)<<32
                         // a_lo/a_hi 是 64 位 lane 的低/高 32 位（无符号拆半，对负数
