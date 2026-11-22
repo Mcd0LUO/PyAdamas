@@ -63,7 +63,10 @@ def build_all(case_dir, name):
     errors = {}
 
     pa = WORK / (name + ".pa")
-    p = sh([PYADAMAS_BIN, "build", "-o", str(pa), str(case_dir / (name + ".py"))])
+    # --rebuild：modcache 的键不含编译器版本，命中旧产物会量出和上次完全
+    # 相同的二进制（rebench.py 的头注释记过这个坑）。基准必须每次真编译。
+    p = sh([PYADAMAS_BIN, "build", "--rebuild", "-o", str(pa),
+            str(case_dir / (name + ".py"))])
     if p.returncode != 0:
         errors["pyadamas"] = (p.stdout + p.stderr).strip()
     else:
@@ -109,7 +112,12 @@ def main():
     ap.add_argument("--repeat", type=int, default=3, help="每种语言跑几次取最小值")
     ap.add_argument("--json", default="", help="结果写到 JSON")
     ap.add_argument("--md", default="", help="结果表写成 Markdown")
+    ap.add_argument("--merge", nargs="*", default=None,
+                    help="不测量，只把多个 JSON 结果按用例逐语言取最小值后出表")
     args = ap.parse_args()
+
+    if args.merge is not None:
+        return merge_json(args)
 
     cases = sorted(p.stem for p in ROOT.glob("*.py") if p.stem != "run_compare")
     if args.cases:
@@ -198,7 +206,57 @@ def main():
     return 0
 
 
+def merge_json(args):
+    """多轮 JSON 按用例、按语言逐个取最小值再出表。
+
+    单次运行受多租户干扰（同一用例跨轮能差 2 倍）。每轮本身已经是「N 次取
+    最小」，再在轮与轮之间取最小，等价于「所有采样的最小值」——这是这台
+    机器上唯一稳的口径。
+    """
+    paths = [Path(f) for f in args.merge]
+    merged = {}
+    reps = 0
+    for f in paths:
+        data = json.loads(f.read_text(encoding="utf-8"))
+        reps = max(reps, int(data.get("repeat") or 0))
+        for r in data.get("rows", []):
+            if "times" not in r:
+                continue
+            cur = merged.get(r["name"])
+            if cur is None:
+                merged[r["name"]] = {"name": r["name"], "n": r["n"],
+                                     "times": dict(r["times"]),
+                                     "output_same": r.get("output_same", True)}
+            else:
+                for lang in r["times"]:
+                    cur["times"][lang] = min(cur["times"][lang], r["times"][lang])
+                cur["output_same"] = bool(cur["output_same"] and r.get("output_same"))
+    rows = []
+    for name in sorted(merged):
+        r = merged[name]
+        r["speedup"] = {l: r["times"]["cpython"] / max(r["times"][l], 1e-9) for l in LANGS}
+        rows.append(r)
+    args.repeat = reps
+    args.rounds = len(paths)
+    print("%-16s %8s %11s %11s %11s %11s" % ("用例", "N", "CPython", "PyAdamas", "Go", "C++"))
+    for r in rows:
+        t = r["times"]
+        print("%-16s %8d %8.1f ms %8.1f ms %8.1f ms %8.1f ms"
+              % (r["name"], r["n"], t["cpython"] * 1e3, t["pyadamas"] * 1e3,
+                 t["go"] * 1e3, t["cpp"] * 1e3))
+    if args.json:
+        Path(args.json).write_text(
+            json.dumps({"rows": rows, "rounds": len(paths)}, ensure_ascii=False, indent=2),
+            encoding="utf-8")
+    if args.md:
+        write_markdown(Path(args.md), rows, args)
+        print("Markdown: %s" % args.md)
+    return 0
+
+
 def write_markdown(path, rows, args):
+    rounds = getattr(args, "rounds", 0)
+    reps = getattr(args, "repeat", 0) or getattr(args, "rounds", 1)
     try:
         cpy_ver = sh([PYTHON_BIN, "-V"]).stdout.strip()
     except OSError:
@@ -214,13 +272,15 @@ def write_markdown(path, rows, args):
             platform.platform(), platform.processor() or "CPU 未识别",
             cpy_ver, go_ver, cxx_ver),
         "",
-        "每种实现跑 %d 次取最小值；PyAdamas 用 %s 编译，"
-        "Go 用默认优化，C++ 用 `g++ -O2`。编译时间不计入。"
-        % (args.repeat, "release preset（`-O2`）" if "release" in str(PYADAMAS_BIN)
-           else "dev preset（`-O0`）"),
+        "每种实现 %s；PyAdamas 用 `%s` 编译（生成码 `-O2`，每次 `--rebuild`"
+        " 强制真编译），Go 用默认优化，C++ 用 `g++ -O2`。编译时间不计入；"
+        "多租户机器上单轮绝对值能差 2 倍，所以这里按轮取最小值再合并。"
+        % ("%d 轮 × 每轮 %d 次，取所有采样的最小值" % (rounds, reps)
+           if rounds else "跑 %d 次取最小值" % args.repeat,
+           PYADAMAS_BIN),
         "",
-        "| 用例 | N | CPython | PyAdamas | Go | C++ | PyAdamas/CPython | 输出一致 |",
-        "|---|---|---|---|---|---|---|---|",
+        "| 用例 | N | CPython | PyAdamas | Go | C++ | PyAdamas/CPython | PyAdamas/最快编译实现 | 输出一致 |",
+        "|---|---|---|---|---|---|---|---|---|",
     ]
     for r in rows:
         if "times" not in r:
@@ -230,17 +290,37 @@ def write_markdown(path, rows, args):
             continue
         t = r["times"]
         lines.append(
-            "| `%s` | %d | %.1f ms | %.1f ms | %.1f ms | %.1f ms | %.2f× | %s |"
+            "| `%s` | %d | %.1f ms | %.1f ms | %.1f ms | %.1f ms | %.2f× | %.2f× | %s |"
             % (r["name"], r["n"], t["cpython"] * 1e3, t["pyadamas"] * 1e3,
                t["go"] * 1e3, t["cpp"] * 1e3, r["speedup"]["pyadamas"],
+               min(t["go"], t["cpp"]) / max(t["pyadamas"], 1e-9),
                "是" if r.get("output_same") else "**否**")
         )
+    timed = [r for r in rows if "times" in r]
+    if timed:
+        # 比值 <0.95 判明显更快、>1.05 判明显更慢，中间算噪声（单轮本就能差 20%）
+        fast, slow = [], []
+        for r in timed:
+            q = r["times"]["pyadamas"] / min(r["times"]["go"], r["times"]["cpp"])
+            if q < 0.95:
+                fast.append(r["name"])
+            elif q > 1.05:
+                slow.append(r["name"])
+        lines.append("")
+        lines.append("共 %d 个用例。对比 CPython：全部更快；对比 Go/C++ 中的"
+                     "较快者：%d 个明显更快、%d 个明显更慢、%d 个落在 ±5%% 噪声内。"
+                     % (len(timed), len(fast), len(slow),
+                        len(timed) - len(fast) - len(slow)))
+        if slow:
+            lines.append("")
+            lines.append("明显偏慢：" + "、".join("`%s`" % n for n in slow))
     lines.append("")
     lines.append("用例：nbody（5 体积分）、spectral_norm（谱范数迭代）、"
                  "matmul（整数矩阵乘）、nqueens（N 皇后回溯）、"
                  "mandelbrot（迭代计数）、fib（朴素递归）、"
                  "fannkuch（全排列翻转）、binary_trees（二叉树分配）、"
-                 "fasta（伪随机序列生成）。")
+                 "fasta（伪随机序列生成）、collatz（Collatz 步数统计）、"
+                 "sieve（埃氏筛计数）、wordfreq（LCG 造词 + dict 计数）。")
     lines.append("")
     path.write_text("\n".join(lines), encoding="utf-8")
 

@@ -58,3 +58,29 @@ cd /w && python3 bench/run_bench.py --from-json bench/report.json --md bench/RES
 - CPU 频率调节、容器负载都会影响结果，量级看就好。
 - 用例里的 `N` 是**按 CPython 的实测时间校准**出来的，所以同一个用例在不同
   机器上 `N` 不一样，比的是倍数不是绝对时间。
+
+## 四语言经典基准（`bench/compare/`）
+
+同一份算法用 **Python / Go / C++** 各写一遍（Python 那份同时喂 CPython 和
+PyAdamas），比墙钟时间并核对输出。
+
+```bash
+# 全量，每种实现每轮 9 次，3 轮后按轮取最小值合并（多租户机器的唯一稳口径）
+PYADAMAS_BIN=$PWD/build/lead/pyadamas python3 bench/compare/run_compare.py \
+    --repeat 9 --json /tmp/r1.json
+PYADAMAS_BIN=$PWD/build/lead/pyadamas python3 bench/compare/run_compare.py \
+    --merge /tmp/r1.json /tmp/r2.json /tmp/r3.json \
+    --md bench/compare/RESULTS.md --json bench/compare/report.json
+```
+
+加一个用例：在同目录写 `<名字>.py` / `.go` / `.cpp` 三份，**三份的 `N` 必须相同**
+（驱动读 `N = <int>` / `const N = <int>` / `static const int N = <int>;`），
+输出必须逐字节一致 —— 不一致的行会在表里标 **否**。
+
+两条口径：
+
+- PyAdamas 每次 `--rebuild` 强制真编译。modcache 的键不含编译器版本，命中旧
+  产物会量出和上次一模一样的二进制；
+- 单轮绝对值能差 2 倍，所以结果一律「多轮取最小再合并」；表里同时给
+  「相比 CPython」与「相比 Go/C++ 中的较快者」两列，后者才是真实水平。
+
