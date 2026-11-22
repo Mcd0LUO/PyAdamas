@@ -264,6 +264,11 @@ void optimize_ir(IRModule& m, int opt_level, int loop_opt, bool inline_opt) {
     // 放在内联之后（形态可能来自内联体）、bump 之后（互不重叠）。
     for (auto& fptr : m.funcs) fuse_dict_tryget(*fptr);
 
+    // 简单菱形 if-conversion：`if cond: acc += 1` 压成单块（向量化器要求单块循环体；
+    // 实测 sieve 计数循环等 5 个基准的第一道门就是「体块以 Branch 结尾」）。放在全局
+    // 寄存器化之前：先简化 CFG，再让提升/promote 看到单块体。
+    for (auto& fptr : m.funcs) if_convert_accumulators(*fptr);
+
     // 循环内全局变量寄存器化：无调用的循环里把全局缓存到局部槽，
     // 循环出口写回。实测全局访问比局部慢 8.7 倍。
     for (auto& fptr : m.funcs) promote_globals_in_loops(*fptr, m.globals);

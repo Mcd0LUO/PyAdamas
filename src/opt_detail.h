@@ -42,6 +42,9 @@ bool rc_redundant_pairs(IRFunction& fn);
 void forward_slot_loads(IRFunction& fn);
 // `d[k] = d.get(k, def) + delta` 融合成一次 pa_dict_bump（省一次哈希+探测）。
 bool fuse_dict_bump(IRFunction& fn);
+// 简单菱形 if-conversion：`if cond: acc ±= 1`（then 块只有累加、else 空）压成单块，
+// 让循环体满足向量化器的「单块直线」要求。见 opt_ifconv.cpp。
+bool if_convert_accumulators(IRFunction& fn);
 bool fuse_dict_tryget(IRFunction& fn);
 void forward_global_loads(IRFunction& fn);
 // 循环内全局变量寄存器化：无调用的循环里把全局缓存到局部槽。

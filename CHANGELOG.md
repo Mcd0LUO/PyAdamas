@@ -4,6 +4,54 @@
 
 早期阶段没有逐条留痕，按阶段归纳；0.4 之后逐条记录。
 
+## [0.419] - 2026-11-23
+
+> if-conversion pass + 尾块合并；基准普遍受益（matmul −4.52%、spectral_norm −1.91%）。
+>
+> ### 新增 `src/opt_ifconv.cpp`（253 行）
+>
+> **A. 简单菱形 if-conversion**：`cond 块 Branch → then 块（唯一前驱）→ Jump merge`，then 块只含
+> 「确定性安全」指令（常量 / Mov / Load* / Cmp / 整数 Add/Sub/Mul/And/Or/Xor / Convert；
+> **拒绝**调用、IndexLoad（可能 IndexError）、FieldLoad/PtrLoad/Len、第二个 store），
+> 且恰好一个 store、其值是 `同址 acc 的 load ± 常量 k∈{±1}` 时，把 `acc ± k` 改成 `acc ± cond`
+> （`cond=0` 时写回原值，语义逐位一致）。
+>
+> **B. 尾块合并**：`C` 以 `Jump M`、`M` 前驱只有 C、且是**前向边**（`mb > ci`）时把 M 接进 C。
+> 只并前向边是关键：第一版把循环头也并了（`pred_count(header)==1` 同样成立）→ 循环变 do-while，
+> `N=0` 会多跑一轮。
+>
+> 减法的符号判定也踩过：`acc -= 1` 第一版被转成 `acc += cond`（`(bop==Add) ? Add : Sub` 是错的），
+> 新用例的 `acc_if_minus` 立刻抓到（134 vs 66）；正确判据是 `(bop==Add) == (k==1)`，
+> 且 Sub 只有 load 在左操作数时才可交换合并。
+>
+> ### 结果（默认配置，3 轮交替取最小）
+>
+> | 基准 | 改前 | 改后 | Δ |
+> |---|---|---|---|
+> | **matmul** | 10,605,876 | **10,126,744** | **−4.52%** |
+> | **spectral_norm** | 96,483,489 | **94,644,030** | **−1.91%** |
+> | mandelbrot | 69,678,229 | 69,310,362 | −0.53% |
+> | nqueens | 350,734,325 | 349,892,349 | −0.24% |
+> | fannkuch / nbody / collatz | — | — | −0.23% / −0.23% / −0.06% |
+> | 其余 | — | — | ±0.00% |
+>
+> 无任何回退 >1%。收益**全部来自尾块合并**——12 个基准的热循环里没有可转换的菱形
+> （matmul/nbody/sn 无 if；sieve 的累加器是全局；collatz/nqueens/fasta/wordfreq 的 then 块
+> 含调用/下标 store/else，按安全判据拒绝）。
+>
+> ### 顺带发现的两个真问题
+>
+> 1. **`promote_globals_in_loops` 对所有 `while` 循环都不生效**：它的判据要求「循环体 → exit 恰有
+>    一条边」，而 `while` 的出口边只在 header 上（body 无 exit 边）→ `exits != 1`，永不提升。
+>    这是 sieve 真正的第一道门（`i/count/flags` 都是全局）。
+> 2. **全局累加器分支化是净亏**：sieve 计数循环 +2.2%（每轮 2 次全局内存访问变成无条件执行），
+>    所以最终版只处理槽累加器，等全局变量寄存器化修好再放开。
+>
+> 新用例 `tests/run/484_ifconv_accum.py`（8 组：`s += 1` 转换、`s -= 1` 转换、条件赋值/有 else/
+> 嵌套/含 IndexLoad 的 then 不转换、then 纯净但条件含 IndexLoad 转换、全局累加器门控）。
+>
+> 闸门：380 ran ok / difftest 359-0 / ASan 380 ran ok 0 报告 / check_size 通过 / 36-36 基准输出一致。
+
 ## [0.418] - 2026-11-23
 
 > 覆盖率诊断归档（文档轮，**无代码改动**）：12 个基准里 9 个 0 触发，逐条定位到

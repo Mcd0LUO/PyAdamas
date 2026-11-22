@@ -108,6 +108,7 @@ set(PYADAMAS_SOURCES
     src/live_interval.cpp
     src/live_interval_build.cpp
   src/opt_fold.cpp
+  src/opt_ifconv.cpp
   src/opt_inline.cpp
   src/opt_loop.cpp
 src/opt_intloop.cpp
