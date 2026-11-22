@@ -212,6 +212,11 @@ public:
         int j_first = -1, j_last = -1;                 // 归纳变量算术使用区间
         MReg FSCR = kMRegNone;
         MReg HSCR = kMRegNone;
+        // math.sqrt（CallRt MathSqrt）的 2-lane 发射：SQRZ = 循环前清零的 0.0
+        // （负数守卫比较用），SQRTMP = 打包高 lane 的临时。has_sqrt 由 classify 置位。
+        bool has_sqrt = false;
+        MReg SQRZ = kMRegNone;
+        MReg SQRTMP = kMRegNone;
 
         // ── 发射 ──
         std::string tail;             // 标量尾标签

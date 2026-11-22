@@ -63,6 +63,8 @@ void AsmGen::vect_mark_nonindex_uses(std::unordered_map<VReg, char>* out) const 
                 if (index_op && k == 1) continue;     // 下标操作数：可折叠
                 (*out)[ops[k]] = 1;
             }
+            // CallRt/MakeList 等的实参（如 sqrt 的源）同样是「非下标用途」。
+            for (VReg op : in.args) if (op != kNoReg) (*out)[op] = 1;
         }
     }
 }
@@ -156,6 +158,16 @@ bool AsmGen::vect_alloc_temps(VTempPlan* p) {
         // 释放本指令操作数中末次使用的临时值（刚被目标接管的那个不再还池）。
         const VReg ops[3] = {in.a, in.b, in.c};
         for (VReg op : ops) {
+            if (op == kNoReg) continue;
+            VReg r = resolve(op);
+            auto lu = p->last_use->find(r);
+            if (lu != p->last_use->end() && lu->second == static_cast<int>(i)) {
+                auto tr = p->tmp_reg->find(r);
+                if (tr != p->tmp_reg->end() && tr->second != dst_reg) give(tr->second);
+            }
+        }
+        // CallRt 等指令的实参（如 sqrt 的源）也要在末次使用后还池。
+        for (VReg op : in.args) {
             if (op == kNoReg) continue;
             VReg r = resolve(op);
             auto lu = p->last_use->find(r);

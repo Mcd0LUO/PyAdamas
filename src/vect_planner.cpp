@@ -601,6 +601,21 @@ VectPlanner::Loop::VK VectPlanner::Loop::classify(VReg v) {
             }
             break;
         }
+        case IrOp::CallRt: {
+            // 只支持 math.sqrt(x)（1 参 float→float）：标量侧是 sqrtsd 内联
+            // fast path（x<0 抛 ValueError）；向量侧发 2-lane sqrtsd + 负数/NaN
+            // 守卫跳标量尾，异常语义与时机不变。其余运行时调用可能碰容器/GC
+            // → 一律拒绝。
+            if (static_cast<RtFn>(d->imm) != RtFn::MathSqrt || d->args.size() != 1 ||
+                !ir_is_float(d->ty)) {
+                c.kind = VK::Fail; break;
+            }
+            VK ka = classify(d->args[0]);
+            if (ka != VK::VecF && ka != VK::InvF) { c.kind = VK::Fail; break; }
+            c.kind = VK::VecF;
+            has_sqrt = true;
+            break;
+        }
         default:
             c.kind = VK::Fail;
     }

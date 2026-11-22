@@ -64,8 +64,9 @@ bool VectPlanner::try_loop(const Block& b) {
     { TypePtr tj = gen_.f_->slot_ty[static_cast<size_t>(L.sJ)];
       if (!tj || tj->kind != TyKind::Int) return false; }
     if (!gen_.simd_slot_unaddressed(L.sJ)) return false;
-    // 循环三块 op 白名单：无调用/全局写/取地址（下标读写放行，位置另判）。
-    if (!gen_.simd_loop_ops_ok(L.cond_bi, L.body_bi, L.incr_bi, false, true)) return false;
+    // 循环三块 op 白名单：除 math.sqrt 外无调用/全局写/取地址（下标读写放行，
+    // 位置另判）。sqrt 的发射序列见下面 CallRt 分支（负数守卫跳标量尾）。
+    if (!gen_.simd_loop_ops_ok(L.cond_bi, L.body_bi, L.incr_bi, true, true)) return false;
 
     L.n_op = gen_.src_mop(L.n);
     if (!AsmGen::simd_scratch_safe(L.n_op)) return false;
@@ -205,6 +206,7 @@ bool VectPlanner::try_loop(const Block& b) {
     // 角色定义在 codegen_vect.h：AVX2 4-lane 发射器按同一张表逐条重放。
     using Role = VRole;
     L.role.assign(L.BI.size(), Role::Skip);
+    bool saw_map_store = false;   // sqrt 之前不允许有 map 写（见 CallRt 分支）
     for (size_t i = 0; i < L.BI.size(); ++i) {
         const Inst& in = L.BI[i];
         // while 形状：体块尾部三条是归纳变量的增量，由向量循环自己维护 j，
@@ -286,10 +288,25 @@ bool VectPlanner::try_loop(const Block& b) {
                 L.accesses.push_back(ac);
                 break;
             }
+            case IrOp::CallRt: {
+                // math.sqrt：只允许出现在所有 reduction 写与所有 map 写之前。
+                // 负数守卫会跳标量尾重放本轮：本轮若已有 RedStore 会重复累加
+                //（int reduction 的历史值还在向量累加器里、未写回槽，退出会丢）；
+                // 本轮若已有 map 写，向量循环已把相邻 lane（j+1）也写了，而标量
+                // 重放可能在本轮抛 ValueError → 那一 lane 的写泄漏（语义不同）。
+                // 临时槽/ja-alias 槽的写在标量重放时幂等且不可观测，不受限。
+                bool pos_ok = !saw_map_store;
+                for (const Red& rr : L.reds)
+                    if (!rr.is_float || rr.store_pos <= static_cast<int>(i)) pos_ok = false;
+                vect::VK k = L.classify(in.dst);
+                L.role[i] = (pos_ok && k == vect::VK::VecF) ? Role::Bin : Role::Fail;
+                break;
+            }
             default:
                 L.role[i] = Role::Fail;
         }
         if (L.role[i] == Role::Fail) { L.failed = true; break; }
+        if (L.role[i] == Role::MapStore) saw_map_store = true;
     }
     if (L.failed) return false;
     // 每个 reduction expr 必须可向量化且不含 acc（Acc 分类不在允许集 →
@@ -459,6 +476,14 @@ bool VectPlanner::try_loop(const Block& b) {
         L.GSCR = L.take(kMRegNone);
         if (L.GSCR == kMRegNone) return false;
     }
+    // math.sqrt：高 lane 打包临时 + 负数守卫的 0.0（循环前清零，跨指令不 live
+    // 的部分只有单条 sqrt 内部的打包序列；放不下保守跳过）。
+    if (L.has_sqrt) {
+        L.SQRTMP = L.take(kMRegNone);
+        if (L.SQRTMP == kMRegNone) return false;
+        L.SQRZ = L.take(kMRegNone);
+        if (L.SQRZ == kMRegNone) return false;
+    }
     // 去重不变量 float（Mov/临时槽别名解析到同一生产者）。
     // 同值常量归并（实现见 codegen_vect_jvec.cpp）：广播寄存器只占一个。
     vect_merge_const_invs(&L.cls);
@@ -496,6 +521,8 @@ bool VectPlanner::try_loop(const Block& b) {
         const Inst& in = L.BI[i];
         VReg ops[3] = {in.a, in.b, in.c};
         for (VReg op : ops) if (op != kNoReg) L.last_use[L.resolve_src(op)] = static_cast<int>(i);
+        // CallRt（sqrt）的实参也是使用点：不记录会让源寄存器提前还池。
+        for (VReg op : in.args) if (op != kNoReg) L.last_use[L.resolve_src(op)] = static_cast<int>(i);
     }
     // reduction expr 的末次使用在 RedStore（add 已折叠，不算独立使用点）；
     // 多 reduction 共享同一 expr 时取最晚的 store 位置。
@@ -589,6 +616,7 @@ bool VectPlanner::try_loop(const Block& b) {
         gen_.emit2(MOp::kMovq, kRax, L.TWO32);
         gen_.emit2(MOp::kMovlhps, L.TWO32, L.TWO32);
     }
+    if (L.has_sqrt) gen_.emit2(MOp::kXorpd, L.SQRZ, L.SQRZ);   // 0.0：负数守卫比较
     for (const Red& r : L.reds) {
         if (r.is_float) {
             if (r.acc_stack) gen_.emit2(MOp::kMovsd, r.loc, r.XT);
@@ -678,6 +706,25 @@ bool VectPlanner::try_loop(const Block& b) {
                     gen_.emit2(MOp::kCvtdq2pd, rd, rd);         // lo_s_f（signed i32）
                     gen_.emit2(MOp::kSubpd, L.SEQ2, rd);          // lo_u_f 精确
                     gen_.emit2(MOp::kAddpd, L.SEQ1, rd);          // 单次舍入 = cvtsi2sdq
+                    break;
+                }
+                if (in.op == IrOp::CallRt) {
+                    // math.sqrt 的 2-lane 序列（与标量 sqrtsd fast path 逐位一致）：
+                    // 低/高 lane 分别 sqrtsd，movlhps 拼回。任一 lane 为负（或
+                    // NaN → 走标量只是慢一点，结果同 NaN）跳标量尾；x<0 的
+                    // ValueError 由标量路径按原时机抛出。
+                    MReg ra = L.xmm_of(in.args[0]);
+                    if (ra == kMRegNone) return false;   // 不应发生（dry-run 完备）
+                    if (rd != ra) gen_.emit2(MOp::kMovapd, ra, rd);
+                    gen_.emit2(MOp::kComisd, L.SQRZ, rd);          // rd ? 0
+                    gen_.emit_jmp(MOp::kJb, L.tail);               // rd<0 或 NaN → 标量尾
+                    gen_.emit2(MOp::kMovapd, rd, L.SQRTMP);
+                    gen_.emit2(MOp::kMovhlps, L.SQRTMP, L.SQRTMP); // 高 lane 复制到低
+                    gen_.emit2(MOp::kComisd, L.SQRZ, L.SQRTMP);
+                    gen_.emit_jmp(MOp::kJb, L.tail);
+                    gen_.emit2(MOp::kSqrtsd, rd, rd);              // 低 lane sqrt
+                    gen_.emit2(MOp::kSqrtsd, L.SQRTMP, L.SQRTMP);  // 高 lane sqrt
+                    gen_.emit2(MOp::kMovlhps, L.SQRTMP, rd);       // rd.hi = sqrt(hi)
                     break;
                 }
                 // int // 与 %（除数为 2 的幂常量）：只读被除数，除数只用
