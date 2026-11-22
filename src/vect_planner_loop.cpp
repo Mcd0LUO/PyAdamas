@@ -9,6 +9,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <unordered_set>
 
 #include "codegen_impl.h"   // AsmGen 完整定义（gen_ 的成员访问）
 
@@ -329,12 +330,90 @@ bool VectPlanner::try_loop(const Block& b) {
     bool has_side = !L.reds.empty();
     for (Role r : L.role) if (r == Role::MapStore) has_side = true;
     if (!has_side) return false;
+    // ── 死值消除（只对含广播装载的新路径生效）─────────────────────────────
+    // 含 coef==0（循环内不变下标）装载的循环里，常见「下标中间量被保守标记为
+    // 非下标用途 → 发射成向量整数运算」的死值（如 `j*7` 只被折叠的仿射下标
+    // 使用，却要 JVEC/SEQ1/SEQ2 三个 xmm）。它们会把 dry-run 的临时寄存器池
+    // 挤爆，让整个循环退回标量。这里按 IR 使用关系做一次纯值消除：
+    //   * 只删无副作用且不会抛异常的 Bin/Mov/Convert；除法/取模/幂可能抛
+    //     ZeroDivisionError、sqrt 有 ValueError 语义 → 一律保留；
+    //   * 删完重算 has_int_mul/has_convert/has_intdiv/has_j_operand，让序列
+    //     scratch/JVEC 的分配跟着缩；
+    //   * 不含 coef==0 访问的循环完全不走这段 → 现有产物 asm 逐字节不变。
+    bool has_bcast = false;
+    for (const Access& a : L.accesses) if (a.coef == 0) has_bcast = true;
+    std::unordered_set<VReg> needed;
+    if (has_bcast) {
+        auto collect_needed = [&]() {
+            needed.clear();
+            for (size_t i = 0; i < L.BI.size(); ++i) {
+                if (L.role[i] == Role::Skip) continue;
+                const Inst& in = L.BI[i];
+                const bool index_op = in.op == IrOp::IndexLoad ||
+                                      in.op == IrOp::IndexLoadUnchecked ||
+                                      in.op == IrOp::IndexStore ||
+                                      in.op == IrOp::IndexStoreUnchecked;
+                const VReg ops[3] = {in.a, in.b, in.c};
+                for (int k = 0; k < 3; ++k) {
+                    if (ops[k] == kNoReg) continue;
+                    if (index_op && k == 1) continue;   // 下标操作数折进寻址，不占寄存器
+                    needed.insert(L.resolve_src(ops[k]));
+                }
+                for (VReg op : in.args) if (op != kNoReg) needed.insert(L.resolve_src(op));
+            }
+            for (const Red& r : L.reds)
+                if (r.expr != kNoReg) needed.insert(L.resolve_src(r.expr));
+        };
+        collect_needed();
+        bool changed = true;
+        while (changed) {
+            changed = false;
+            for (size_t i = 0; i < L.BI.size(); ++i) {
+                if (L.role[i] != Role::Bin) continue;
+                const Inst& in = L.BI[i];
+                if (in.dst == kNoReg) continue;
+                if (in.op == IrOp::Bin) {
+                    // 只删无副作用、不会抛异常的算符；除法/取模/幂/移位可能抛
+                    // 异常或语义敏感（Python 负移位/负除数值语义），一律保留。
+                    switch (in.bop) {
+                        case BinKind::Add: case BinKind::Sub: case BinKind::Mul:
+                        case BinKind::BitAnd: case BinKind::BitOr: case BinKind::BitXor:
+                            break;
+                        default: continue;
+                    }
+                } else if (in.op != IrOp::Mov && in.op != IrOp::Convert) {
+                    continue;                                  // 其余（含 CallRt/sqrt）不动
+                }
+                if (needed.count(L.resolve_src(in.dst))) continue;
+                L.role[i] = Role::Skip;
+                collect_needed();
+                changed = true;
+            }
+        }
+        // 序列 scratch / JVEC 的分配 flag 按存活指令重算（死值不再占寄存器）。
+        L.has_int_mul = L.has_convert = L.has_intdiv = false;
+        L.has_j_operand = false;
+        for (size_t i = 0; i < L.BI.size(); ++i) {
+            if (L.role[i] != Role::Bin) continue;
+            const Inst& in = L.BI[i];
+            if (in.op == IrOp::Convert) { L.has_convert = true; continue; }
+            if (in.op != IrOp::Bin) continue;
+            TypePtr t = gen_.ty_of(in.dst);
+            if (!t || t->kind != TyKind::Int) continue;
+            if (in.bop == BinKind::Mul) L.has_int_mul = true;
+            if (in.bop == BinKind::FloorDiv || in.bop == BinKind::Mod) L.has_intdiv = true;
+            if (L.classify(in.a) == vect::VK::J || L.classify(in.b) == vect::VK::J)
+                L.has_j_operand = true;
+        }
+    }
     // 不变量广播清单补全：classify 只在 float 常量/float 槽/int Bin 操作数处
     // 收集，但 ConstInt 还可直接出现在 map 存储值（c[i]=1）或 reduction expr
     // （s+=1）——这些 InvI 同样要广播。漏收 → 发射期 xmm_of 查无寄存器 →
     // 前奏已发却 return false → 悬空 tail 标签（链接失败）。统一扫 cls 补全，
     // uniq_inv 去重；发射期寄存器查询从此不可能失败（dry-run 完备）。
     for (auto& [v, c] : L.cls) {
+        // 死值不占广播寄存器（只有含广播装载的循环会做上面的死值消除）。
+        if (has_bcast && !needed.count(L.resolve_src(v))) continue;
         if (c.kind == vect::VK::InvF) L.inv_floats.push_back(v);
         else if (c.kind == vect::VK::InvI) L.inv_ints.push_back(v);
     }
@@ -412,7 +491,9 @@ bool VectPlanner::try_loop(const Block& b) {
         a.bidx = bi;
     }
     for (const Access& a : L.accesses)
-        if (a.coef != 1 && std::find(L.kcoefs.begin(), L.kcoefs.end(), a.coef) == L.kcoefs.end())
+        // coef==0 是循环内不变下标（广播装载），没有跨步，不占 K 计数器。
+        if (a.coef != 1 && a.coef != 0 &&
+            std::find(L.kcoefs.begin(), L.kcoefs.end(), a.coef) == L.kcoefs.end())
             L.kcoefs.push_back(a.coef);
     std::sort(L.kcoefs.begin(), L.kcoefs.end());
     if (!vect_affine_plan_ok(L.bases)) return false;
@@ -487,10 +568,15 @@ bool VectPlanner::try_loop(const Block& b) {
     // math.sqrt：高 lane 打包临时 + 负数守卫的 0.0（循环前清零，跨指令不 live
     // 的部分只有单条 sqrt 内部的打包序列；放不下保守跳过）。
     if (L.has_sqrt) {
-        L.SQRTMP = L.take(kMRegNone);
+        // 高 lane 打包临时 + 0.0 比较量都只在**单条指令**的 sqrt 序列里原子使用，
+        // 可以借用其它序列 scratch（SEQ1/SEQ2/GSCR 同样"单条指令内原子使用、
+        // 跨指令不 live"）：这样 sqrt 不再占专用寄存器（nbody energy 内层原来
+        // 正好差这 1~2 个 xmm）。借不到才从池里独占分配。
+        L.SQRTMP = L.SEQ1 != kMRegNone ? L.SEQ1 : L.take(kMRegNone);
         if (L.SQRTMP == kMRegNone) return false;
-        L.SQRZ = L.take(kMRegNone);
-        if (L.SQRZ == kMRegNone) return false;
+        if (L.SEQ2 != kMRegNone && L.SEQ2 != L.SQRTMP) L.SQRZ = L.SEQ2;
+        else if (L.GSCR != kMRegNone && L.GSCR != L.SQRTMP) L.SQRZ = L.GSCR;
+        else if (L.SQRZ = L.take(kMRegNone), L.SQRZ == kMRegNone) return false;
     }
     // 去重不变量 float（Mov/临时槽别名解析到同一生产者）。
     // 同值常量归并（实现见 codegen_vect_jvec.cpp）：广播寄存器只占一个。
@@ -624,7 +710,8 @@ bool VectPlanner::try_loop(const Block& b) {
         gen_.emit2(MOp::kMovq, kRax, L.TWO32);
         gen_.emit2(MOp::kMovlhps, L.TWO32, L.TWO32);
     }
-    if (L.has_sqrt) gen_.emit2(MOp::kXorpd, L.SQRZ, L.SQRZ);   // 0.0：负数守卫比较
+    // sqrt 的 0.0 比较量在每次 sqrt 序列里现清（借用其它 scratch，不能假设
+    // 循环期间保持不变），见发射处的 CallRt 分支。
     for (const Red& r : L.reds) {
         if (r.is_float) {
             if (r.acc_stack) gen_.emit2(MOp::kMovsd, r.loc, r.XT);
@@ -646,6 +733,9 @@ bool VectPlanner::try_loop(const Block& b) {
     for (auto& [v, cc] : L.cls)
         if (cc.kind == vect::VK::VecF || cc.kind == vect::VK::InvF) L.avx_int = false;
     for (const Red& r : L.reds) if (r.is_float) L.avx_int = false;
+    // coef==0 的不变量下标元素装载只在 SSE2 2-lane 里做了广播；4-lane 发射器
+    // 没有这条路径 → 含这类访问的循环整段留给 SSE2。
+    for (const Access& a : L.accesses) if (a.coef == 0) L.avx_int = false;
     L.avx.body = &L.BI; L.avx.role = &L.role; L.avx.acc = &L.accesses; L.avx.acc_at = &L.acc_at;
     L.avx.bases = &L.bases; L.avx.reds = &L.reds; L.avx.xmm_of = &L.xmm_of_fn;
     L.avx.uniq_inv = &L.uniq_inv; L.avx.inv_reg = &L.inv_reg;
@@ -666,7 +756,8 @@ bool VectPlanner::try_loop(const Block& b) {
                 VReg r = L.resolve_src(in.dst);
                 MReg rd = L.tmp_reg[r];
                 const Access& a = L.accesses[static_cast<size_t>(L.acc_at[i])];
-                MReg kb = a.coef == 1 ? kMRegNone : L.kreg[a.coef];
+                // coef==0（循环内不变下标）不需要跨步计数器，发射侧走广播装载。
+                MReg kb = (a.coef == 1 || a.coef == 0) ? kMRegNone : L.kreg[a.coef];
                 vect_affine_load(L.bases[static_cast<size_t>(a.bidx)].reg, L.JREG, kb,
                                  a.coef, a.off, rd, L.GSCR);
                 break;
@@ -724,6 +815,7 @@ bool VectPlanner::try_loop(const Block& b) {
                     MReg ra = L.xmm_of(in.args[0]);
                     if (ra == kMRegNone) return false;   // 不应发生（dry-run 完备）
                     if (rd != ra) gen_.emit2(MOp::kMovapd, ra, rd);
+                    gen_.emit2(MOp::kXorpd, L.SQRZ, L.SQRZ);       // 0.0（借用 scratch，现清）
                     gen_.emit2(MOp::kComisd, L.SQRZ, rd);          // rd ? 0
                     gen_.emit_jmp(MOp::kJb, L.tail);               // rd<0 或 NaN → 标量尾
                     gen_.emit2(MOp::kMovapd, rd, L.SQRTMP);

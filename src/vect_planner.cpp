@@ -89,6 +89,13 @@ void VectPlanner::vect_affine_step(MReg k, int64_t coef) {
 
 void VectPlanner::vect_affine_load(MReg base, MReg j, MReg k, int64_t coef, int64_t off,
                                    MReg dst, MReg scratch) {
+    if (coef == 0) {
+        // 循环内不变的下标元素（b[i*7+1] / b[3]）：每个 lane 读同一个元素 →
+        // 一次 movsd 装载、movlhps 把低 lane 复制到高 lane 变成 [v, v]。
+        emit_.emit2(MOp::kMovsd, AsmGen::op_mem(base, off * 8), mreg_operand(dst));
+        emit_.emit2(MOp::kMovlhps, mreg_operand(dst), mreg_operand(dst));
+        return;
+    }
     if (coef == 1) {
         emit_.emit2(MOp::kMovupd, AsmGen::op_mem(base, j, 8, off * 8), mreg_operand(dst));
         return;
@@ -114,8 +121,34 @@ bool VectPlanner::vect_affine_guard(const MOperand& list_obj, const AffBase& b,
                                const MOperand& n_op, const std::string& tail) {
     const int64_t coef = b.coef;
     const int64_t off = b.off_max;
-    if (coef < 1 || coef > kAffMaxCoef || off < 0 || off > kAffMaxOff) return false;
+    if (coef < 0 || coef > kAffMaxCoef || off < 0 || off > kAffMaxOff) return false;
     if (off - coef < INT32_MIN || off - coef > INT32_MAX) return false;
+    if (coef == 0) {
+        // 循环内不变的下标（b[i*7+1] / b[3]）：只做**一次性**区间检查
+        //   0 <= inv + off  且  inv + off < len
+        // 不随 j 变化，所以既不用 n、也不用 j 守卫。任一不成立 → 跳标量尾：
+        // 越界 IndexError 由标量按原时机抛出；负下标（Python 从尾部索引）
+        // 语义不同，一律交给标量。
+        const MOperand& iv = b.inv_src;
+        if (b.inv != kNoReg) {
+            if (!AsmGen::simd_scratch_safe(iv)) return false;
+            emit_.emit2(MOp::kMovq, iv, kRax);
+            emit_.emit2(MOp::kTestq, kRax, kRax);
+            emit_.emit_jmp(MOp::kJs, tail);              // inv < 0 → 标量
+            emit_.emit2(MOp::kMovq, iv, kRcx);
+            if (off != 0) {
+                emit_.emit_imm(MOp::kAddq, off, kRcx);   // rcx = inv + off_max
+                emit_.emit_jmp("jo", tail);              // 溢出 → 标量
+            }
+        } else {
+            emit_.emit_imm(MOp::kMovq, off, kRcx);       // 常量下标
+        }
+        emit_.emit2(MOp::kMovq, list_obj, kRax);
+        emit_.emit2(MOp::kMovq, AsmGen::op_mem(kRax, 0), kRdx);   // len
+        emit_.emit2(MOp::kCmpq, kRcx, kRdx);
+        emit_.emit_jmp(MOp::kJle, tail);                 // len <= idx → 标量
+        return true;
+    }
     // inv 的入口可读来源由调用方用 list_base_mop 解析好（跨块值取 vreg home
     // 的冻结值、体内装载取槽现值）—— 直接 src_mop(v) 会在 vreg 的 home 还没
     // 写出来的情况下读到垃圾。
@@ -253,7 +286,9 @@ AffIdx VectPlanner::vect_affine_index(VReg v, const std::vector<int>& jalias,
 // 小到能用 imulq 立即数与 disp32 表示。解析期已经卡过上界，这里再兜一次。
 bool VectPlanner::vect_affine_plan_ok(const std::vector<AffBase>& bases) const {
     for (const AffBase& b : bases) {
-        if (b.coef < 1 || b.coef > kAffMaxCoef) return false;
+        // coef==0：整条基址键只有循环内不变的下标访问（一次装载 + 广播），
+        // 守卫换成一次性区间检查（见 vect_affine_guard），不参与跨步计数器。
+        if (b.coef < 0 || b.coef > kAffMaxCoef) return false;
         if (b.off_max < 0 || b.off_max > kAffMaxOff) return false;
         if (b.off_min < 0 || b.off_min > kAffMaxOff) return false;
         // coef>1 的装载需要两次标量 movsd + unpcklpd 的打包 scratch；同 coef
@@ -557,9 +592,12 @@ VectPlanner::Loop::VK VectPlanner::Loop::classify(VReg v) {
             break;
         }
         case IrOp::IndexLoad: case IrOp::IndexLoadUnchecked: {
+            // coef == 0 是**循环内不变的下标**元素装载（b[i*7+1] / b[3]）：
+            // 每个 lane 读同一个元素 → 发射时一次装载 + 广播成 [v, v]
+            // （见 vect_affine_load / vect_affine_guard 的 coef==0 分支）。
             int ek = list_elem_float(d->a);
             AffIdx af = owner_.vect_affine_index(d->b, jalias, inv_int_pred());
-            if (ek < 0 || !af.ok || af.coef < 1 || af.coef > kAffMaxCoef ||
+            if (ek < 0 || !af.ok || af.coef < 0 || af.coef > kAffMaxCoef ||
                 af.off < 0 || af.off > kAffMaxOff) { c.kind = VK::Fail; break; }
             if (!ir_is_float(gen_.ty_of(v)) && ek == 0) { c.kind = VK::Fail; break; }
             c.kind = ek == 0 ? VK::VecF : VK::VecI;
