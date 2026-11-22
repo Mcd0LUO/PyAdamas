@@ -6,6 +6,7 @@
 #include <functional>
 #include <string>
 #include <unordered_map>
+#include <unordered_set>
 #include <vector>
 
 #include "emit_sink.h"
@@ -16,6 +17,10 @@
 #include "vect_rules.h"
 
 namespace pyadamas {
+
+// AsmGen 只在这里前向声明：Loop 持有它的引用，方法体定义在 vect_planner.cpp
+// （那里已 include codegen_impl.h，AsmGen 完整）。
+class AsmGen;
 
 struct AffIdx {
     bool ok = false;
@@ -56,6 +61,18 @@ struct VClass {
     bool is_load = false;     // VecF/VecI 是内存装载（vs 算术）
     VReg mov_src = kNoReg;    // Mov 透明别名 / 同值常量归并的规范 vreg
     bool j_src = false;       // Convert 输入是归纳变量 j（或 j+常量）
+};
+
+// 槽的循环内写/读统计（原 try_vect_loop 的局部 struct，阶段 A4 第 2 步搬到
+// 这里：Loop::si 字段要被多个 Loop 方法读）。
+struct SlotInfo {
+    int writers = 0;
+    int store_pos = -1;
+    VReg store_val = kNoReg;
+    bool read_before_store = false;
+    int loads = 0;
+    bool outside_read = false;
+    int min_load_pos = 1 << 30;
 };
 
 // 体块一条指令在向量循环里的角色（阶段 A4 第 1 步从 AsmGen 类体搬来：
@@ -117,17 +134,58 @@ struct VAvx2Ctx {
 
 class VectPlanner {
 public:
-    // 一次 try_vect_loop 调用的「非 lambda 捕获」局部状态（阶段 A4 第 1 步）。
-    // 来源：src/codegen_vect.cpp 的 try_vect_loop。被 [&] lambda 捕获的局部量
-    // 本轮仍留在函数里（不改 lambda），所以不在这里；其余状态逐字段搬来。
+    // 一次 try_vect_loop 调用的全部局部状态 + 原 21 个捕获 lambda 变成的
+    // 成员方法（阶段 A4 第 1/2 步）。来源：src/codegen_vect.cpp 的
+    // try_vect_loop；方法体在 vect_planner.cpp。
     struct Loop {
+        // 一次调用的上下文：owner_ 提供 VectPlanner 的接口，gen_ 提供 AsmGen
+        // 的私有分析/发射辅助（AsmGen 里 friend struct VectPlanner::Loop），BI
+        // 是体块指令表。构造于 try_vect_loop 入口。
+        Loop(VectPlanner& owner, AsmGen& gen, const std::vector<Inst>& insts)
+            : owner_(owner), gen_(gen), BI(insts) {
+            // 4-lane 发射器（codegen_vect_avx2.cpp）经 VAvx2Ctx 的
+            // std::function 回调查寄存器；xmm_of 现在是方法，这里存绑定 this
+            // 的适配器（跨文件接口 VAvx2Ctx 保持不变）。
+            xmm_of_fn = [this](VReg v) { return xmm_of(v); };
+        }
+        // 方法体里沿用的类型别名（与 codegen_vect.cpp 的局部别名同义）。
+        using Red = VRed;
+        using Access = VAccess;
+        using Role = VRole;
+        using VK = vect::VK;
+
         // ── 循环结构 ──
+        int body_bi = -1;         // 体块块号（cur_block_）
+        int incr_bi = -1;         // 增量块块号
+        int cond_bi = -1;         // 条件块块号
         int sJ = -1;              // 归纳变量槽
         int end_bi = -1;          // cond 分支目标块（simd_incr_cond_ok 出参）
         int jupd_pos = -1;        // while 形状：体块尾部增量的起始指令位置
         VReg n = kNoReg;          // 循环上界 vreg
         MOperand n_op;            // 上界的入口可读操作数
         bool failed = false;      // 角色判定失败标志
+
+        // ── 槽 / 表达式 / 访问 / 归约（原被多个 lambda 共享，A4 第 2 步搬来）──
+        std::unordered_map<int, SlotInfo> si;   // 槽 → 循环内读写统计
+        std::vector<int> jalias;                // j-alias 槽
+        std::vector<VRed> reds;                 // reduction 累加器
+        std::vector<int> temp_slots;            // 体局部临时槽
+        std::unordered_map<VReg, VClass> cls;   // 表达式 DAG 分类
+        std::vector<VAccess> accesses;          // 下标访问描述
+        std::vector<int> acc_at;                // 体块位置 → accesses 下标
+        std::vector<VReg> inv_floats;           // 需要广播的不变量 float
+        std::vector<VReg> inv_ints;             // 需要广播的不变量 int
+        bool has_int_mul = false;               // int 乘 → pmuludq 重建需序列 scratch
+        bool has_convert = false;               // int→float Convert → cvtdq2pd 折算
+        bool has_intdiv = false;                // int // 2^m → 算术右移合成
+        bool has_j_operand = false;             // 归纳变量 j 参与整数算术
+        std::unordered_set<VReg> visiting;      // classify 递归环检测
+        std::vector<MReg> xmm_pool{kXmm0, kXmm1, kXmm2, kXmm3,
+                                   kXmm4, kXmm5, kXmm6, kXmm7};
+        std::unordered_map<VReg, MReg> inv_reg; // 不变量广播 → xmm
+        MReg JVEC = kMRegNone;                  // 归纳变量物化寄存器
+        std::unordered_map<VReg, MReg> tmp_reg; // 临时值 → xmm
+        std::function<MReg(VReg)> xmm_of_fn;    // xmm_of 的跨文件适配器（见构造）
 
         // ── 分析结果（角色 / 逻辑数组 / 守卫 / 基址）──
         std::unordered_map<VReg, char> nonindex_use;   // 非下标使用点（P5b）
@@ -162,6 +220,38 @@ public:
         VAvx2Ctx avx;                 // AVX2 发射上下文
         std::string vexit;            // 两条循环的公共出口标签
         bool avx2 = false;            // 是否发了 AVX2 段
+
+        // ── 方法（阶段 A4 第 2 步：原捕获 lambda）──
+        bool in_loop(int bi) const;
+        bool slot_is_jalias(int slot) const;
+        bool slot_is_red(int slot) const;
+        Red* red_of_slot(int slot);
+        bool is_red_add(VReg v) const;
+        bool slot_is_temp(int slot) const;
+        VReg temp_store_val(int slot) const;
+        MReg take(MReg prefer);
+        VReg resolve_src(VReg v) const;
+
+        bool is_jalias_load(VReg v) const;
+        int64_t index_off(VReg v) const;
+        bool cross_block(VReg v) const;
+        void pshufd(int64_t imm, MReg r) const;
+        std::string list_key(VReg lv) const;
+        MOperand list_base_mop(VReg lv) const;
+        bool list_base_ok(VReg lv);
+        bool inv_int_ok(VReg v);
+        // inv_int_ok 作为 std::function 回调传给 vect_affine_index 的适配器。
+        std::function<bool(VReg)> inv_int_pred();
+        int list_elem_float(VReg lv);
+
+        VK classify(VReg v);
+        // vreg → 发射期 xmm（不变量广播 / 归纳变量物化 / 临时值）。
+        MReg xmm_of(VReg v) const;
+
+        // ── 上下文引用（构造参数；声明在最后，初始化顺序与构造列表一致）──
+        VectPlanner& owner_;
+        AsmGen& gen_;
+        const std::vector<Inst>& BI;
     };
 
     VectPlanner(EmitSink& e, ValueQuery& v, SlotQuery& s) : emit_(e), val_(v), slot_(s) {}

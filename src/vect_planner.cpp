@@ -293,4 +293,329 @@ void VectPlanner::vect_merge_const_invs(std::unordered_map<VReg, VClass>* cls) {
     }
 }
 
+
+    // ── 方法：槽 / 归约 / 临时值 / 寄存器分配（阶段 A4 第 2 步，原捕获 lambda）──
+bool VectPlanner::Loop::in_loop(int bi) const {
+    return bi == cond_bi || bi == body_bi || bi == incr_bi;
+}
+
+bool VectPlanner::Loop::slot_is_jalias(int slot) const {
+    for (int s : jalias) if (s == slot) return true;
+    return false;
+}
+
+bool VectPlanner::Loop::slot_is_red(int slot) const {
+    for (const Red& r : reds) if (r.slot == slot) return true;
+    return false;
+}
+
+VectPlanner::Loop::Red* VectPlanner::Loop::red_of_slot(int slot) {
+    for (Red& r : reds) if (r.slot == slot) return &r;
+    return nullptr;
+}
+
+bool VectPlanner::Loop::is_red_add(VReg v) const {
+    for (const Red& r : reds) if (r.add == v) return true;
+    return false;
+}
+
+bool VectPlanner::Loop::slot_is_temp(int slot) const {
+    for (int s : temp_slots) if (s == slot) return true;
+    return false;
+}
+
+VReg VectPlanner::Loop::temp_store_val(int slot) const {
+    for (const Inst& in : BI)
+        if (in.op == IrOp::StoreSlot && in.idx == slot) return in.a;
+    return kNoReg;
+}
+
+MReg VectPlanner::Loop::take(MReg prefer) {
+    for (size_t i = 0; i < xmm_pool.size(); ++i)
+        if (xmm_pool[i] == prefer) { MReg r = xmm_pool[i]; xmm_pool.erase(xmm_pool.begin() + static_cast<long>(i)); return r; }
+    if (xmm_pool.empty()) return kMRegNone;
+    MReg r = xmm_pool.front(); xmm_pool.erase(xmm_pool.begin()); return r;
+}
+
+VReg VectPlanner::Loop::resolve_src(VReg v) const {
+    while (true) {
+        auto it = cls.find(v);
+        if (it == cls.end() || it->second.mov_src == kNoReg) return v;
+        v = it->second.mov_src;
+    }
+}
+
+
+    // ── 方法：仿射下标解析 / 逻辑数组身份 / 基址 / 4-lane 上下文（阶段 A4 第 2 步）──
+bool VectPlanner::Loop::is_jalias_load(VReg v) const {
+    const Inst* d = gen_.simd_def(v);
+    if (!d || d->op != IrOp::LoadSlot) return false;
+    for (int s : jalias) if (d->idx == s) return true;
+    return false;
+}
+
+int64_t VectPlanner::Loop::index_off(VReg v) const {
+    if (v == kNoReg) return -1;
+    const Inst* d = gen_.simd_def(v);
+    if (!d) return -1;
+    if (d->op == IrOp::LoadSlot && slot_is_jalias(d->idx)) return 0;
+    if (d->op == IrOp::Bin && d->bop == BinKind::Add) {
+        const Inst* ca = gen_.simd_def(d->a);
+        const Inst* cb = gen_.simd_def(d->b);
+        int64_t oa = index_off(d->a), ob = index_off(d->b);
+        if (oa >= 0 && cb && cb->op == IrOp::ConstInt && cb->imm >= 0) return oa + cb->imm;
+        if (ob >= 0 && ca && ca->op == IrOp::ConstInt && ca->imm >= 0) return ob + ca->imm;
+    }
+    return -1;
+}
+
+bool VectPlanner::Loop::cross_block(VReg v) const {
+    return gen_.simd_outside(v, cond_bi, body_bi, incr_bi);
+}
+
+MOperand VectPlanner::Loop::list_base_mop(VReg lv) const {
+    const Inst* d = gen_.simd_def(lv);
+    if (d && d->op == IrOp::LoadSlot)
+        return cross_block(lv) ? gen_.src_mop(lv) : gen_.slot_mop(d->idx);
+    if (d && d->op == IrOp::LoadGlobal)
+        return cross_block(lv) ? gen_.src_mop(lv) : gen_.global_mop(d->idx);
+    // 跨块 Mov 取**自己的** home：源 vreg 的活跃区间可能已经在循环外
+    // 结束（内联 RC move-from 清槽后，分配器会把那个栈槽复用给别的值），
+    // 取源槽会在入口读到垃圾——本文件头注释里的同一类陷阱。跨块 Mov 的
+    // home 由循环外的发射写定，入口读它才是冻结值。
+    if (d && d->op == IrOp::Mov)
+        return cross_block(lv) ? gen_.src_mop(lv) : list_base_mop(d->a);
+    return gen_.src_mop(lv);
+}
+
+std::string VectPlanner::Loop::list_key(VReg lv) const {
+    const Inst* d = gen_.simd_def(lv);
+    if (d && d->op == IrOp::LoadSlot)
+        return cross_block(lv) ? "v" + std::to_string(lv) : "s" + std::to_string(d->idx);
+    if (d && d->op == IrOp::LoadGlobal)
+        return cross_block(lv) ? "v" + std::to_string(lv) : "g" + std::to_string(d->idx);
+    if (d && d->op == IrOp::Mov) return list_key(d->a);
+    return "v" + std::to_string(lv);
+}
+
+bool VectPlanner::Loop::list_base_ok(VReg lv) {
+    const Inst* d = gen_.simd_def(lv);
+    if (!d) return false;
+    if (d->op == IrOp::LoadSlot) {
+        if (cross_block(lv)) return true;           // home 持冻结值，与槽现值无关
+        return si[d->idx].writers == 0 && gen_.simd_slot_unaddressed(d->idx);
+    }
+    if (d->op == IrOp::LoadGlobal) return true;
+    if (d->op == IrOp::Mov) return list_base_ok(d->a);
+    return gen_.simd_outside(lv, cond_bi, body_bi, incr_bi);
+}
+
+int VectPlanner::Loop::list_elem_float(VReg lv) {
+    // 返回 0=float 1=int -1=其它。list vreg 必须是不变量（跨块/稳定槽）。
+    TypePtr ty = gen_.ty_of(lv);
+    if (!ty || ty->kind != TyKind::List || ty->sub.empty()) return -1;
+    if (!list_base_ok(lv)) return -1;
+    if (!AsmGen::simd_scratch_safe(list_base_mop(lv))) return -1;
+    TypePtr et = ty->sub[0];
+    if (!et) return -1;
+    if (et->kind == TyKind::Float) return 0;
+    if (et->kind == TyKind::Int) return 1;
+    return -1;
+}
+
+bool VectPlanner::Loop::inv_int_ok(VReg v) {
+    TypePtr ty = gen_.ty_of(v);
+    if (!ty || ty->kind != TyKind::Int) return false;
+    const Inst* d = gen_.simd_def(v);
+    if (!d) return false;
+    if (d->op != IrOp::LoadSlot) return cross_block(v);
+    if (cross_block(v)) return true;
+    auto it = si.find(d->idx);
+    return (it == si.end() || it->second.writers == 0) && gen_.simd_slot_unaddressed(d->idx);
+}
+
+std::function<bool(VReg)> VectPlanner::Loop::inv_int_pred() {
+    return [this](VReg v) { return inv_int_ok(v); };
+}
+
+void VectPlanner::Loop::pshufd(int64_t imm, MReg r) const {
+    MInstr ins; ins.op = MOp::kPshufd;
+    ins.ops.push_back(AsmGen::op_imm(imm));
+    ins.ops.push_back(AsmGen::op_reg(r));
+    ins.ops.push_back(AsmGen::op_reg(r));
+    gen_.emit_.out.push_instr(std::move(ins));
+}
+
+
+    // ── 方法：表达式 DAG 分类（阶段 A4 第 2 步）──
+VectPlanner::Loop::VK VectPlanner::Loop::classify(VReg v) {
+    if (v == kNoReg) return VK::Fail;
+    auto it = cls.find(v);
+    if (it != cls.end()) return it->second.kind;
+    if (!visiting.insert(v).second) return VK::Fail;  // 环 → 保守失败（防栈溢出）
+    VClass c;
+    const Inst* d = gen_.simd_def(v);
+    if (!d) { cls[v] = c; return VK::Fail; }
+    // 跨块值（LICM 外提的 Convert/Bin 等）按类型统一归不变量，不做逐 lane
+    // 结构分类：外提值不在体块发射，若误判 VecF/VecI 则无临时寄存器分配
+    // → 发射期查无寄存器（悬空 tail）。跨块值不依赖 j（循环携带值经槽
+    // LoadSlot 进来，另路处理），按不变量广播是完备且保守的。
+    if (gen_.simd_outside(v, cond_bi, body_bi, incr_bi)) {
+        TypePtr ty = gen_.ty_of(v);
+        if (ir_is_float(ty)) { c.kind = VK::InvF; inv_floats.push_back(v); }
+        else if (ty && ty->kind == TyKind::Int) c.kind = VK::InvI;
+        else if (ty && ty->kind == TyKind::List) c.kind = VK::InvPtr;
+        else c.kind = VK::Fail;
+        cls[v] = c;
+        return c.kind;
+    }
+    switch (d->op) {
+        case IrOp::ConstFloat:
+            c.kind = VK::InvF;
+            inv_floats.push_back(v);
+            break;
+        case IrOp::ConstInt:
+            c.kind = VK::InvI;
+            break;
+        case IrOp::Mov:
+            c.kind = classify(d->a);
+            c.mov_src = d->a;
+            break;
+        case IrOp::LoadSlot: {
+            if (slot_is_jalias(d->idx)) { c.kind = VK::J; break; }
+            { bool is_acc = false;
+              for (const Red& r : reds) if (d->idx == r.slot && v == r.acc) is_acc = true;
+              if (is_acc) { c.kind = VK::Acc; break; } }
+            if (slot_is_temp(d->idx)) {
+                VReg sv = temp_store_val(d->idx);
+                c.kind = classify(sv);
+                c.mov_src = sv;
+                break;
+            }
+            // 不变量槽：循环内无写、不取地址。
+            if (si[d->idx].writers != 0 || !gen_.simd_slot_unaddressed(d->idx)) { c.kind = VK::Fail; break; }
+            TypePtr ty = gen_.ty_of(v);
+            if (ir_is_float(ty)) { c.kind = VK::InvF; inv_floats.push_back(v); }
+            else if (ty && ty->kind == TyKind::Int) c.kind = VK::InvI;
+            else if (ty && ty->kind == TyKind::List) c.kind = VK::InvPtr;  // 透明不变量基址
+            else c.kind = VK::Fail;
+            break;
+        }
+        case IrOp::LoadGlobal: {
+            TypePtr ty = gen_.ty_of(v);
+            if (ir_is_float(ty)) { c.kind = VK::InvF; inv_floats.push_back(v); }
+            else if (ty && ty->kind == TyKind::Int) c.kind = VK::InvI;
+            else if (ty && ty->kind == TyKind::List) c.kind = VK::InvPtr;  // 透明不变量基址
+            else c.kind = VK::Fail;
+            break;
+        }
+        case IrOp::Bin: {
+            // P5：// 与 % 的除数是编译期正的 2 的幂常量时，它们和 Add/Sub/
+            // Mul 一样是**通用的**逐元素整数操作（标量那边早就降成一条
+            // sarq / andq；LLVM InstCombine、GCC tree-vect 同口径）。判据
+            // 只有「除数是不是 2 的幂常量」，没有任何形状/程序特判。
+            // 除数 vreg 不参与分类（不用广播它的值），只取移位量。
+            int dsh = -1;
+            const bool intdiv2 =
+                (d->bop == BinKind::FloorDiv || d->bop == BinKind::Mod) &&
+                owner_.vect_div_pow2(d->b, &dsh);
+            VK ka = classify(d->a);
+            VK kb = intdiv2 ? VK::InvI : classify(d->b);
+            bool fa = ir_is_float(gen_.ty_of(d->a)), fb = ir_is_float(gen_.ty_of(d->b));
+            // 判据的唯一出处在 vect_rules.h（具名、带注释、带编译期真值表）。
+            // 归纳变量 J 算 VecI：发射期物化成 [j, j+1]，见 codegen_vect_jvec.cpp。
+            using vect::float_operand_ok;
+            using vect::int_operand_ok;
+            bool ia = gen_.ty_of(d->a) && gen_.ty_of(d->a)->kind == TyKind::Int;
+            bool ib = gen_.ty_of(d->b) && gen_.ty_of(d->b)->kind == TyKind::Int;
+            if (fa && fb && float_operand_ok(ka) && float_operand_ok(kb)) {
+                switch (d->bop) {
+                    case BinKind::Add: case BinKind::Sub:
+                    case BinKind::Mul: case BinKind::Div:
+                        c.kind = VK::VecF; break;
+                    default: c.kind = VK::Fail;
+                }
+            } else if (ia && ib && int_operand_ok(ka) && int_operand_ok(kb) &&
+                       (d->bop == BinKind::Add || d->bop == BinKind::Sub ||
+                        d->bop == BinKind::Mul || intdiv2)) {
+                // int 逐元素加/减：paddq/psubq 模 2^64 与标量 addq/subq 逐位一致。
+                // int 乘：pmuludq 奇偶 lane 组合全 i64 重建（无需值域守卫，
+                // 任意 i64 逐位等于 imulq 低 64 位，推导见发射处注释）。
+                // int // 与 %（除数为 2 的幂常量）：移位合成 / 取低位，见
+                // codegen_vect_intdiv.cpp（floor 的 packed 合成要 SEQ1）。
+                // 其余 int 除/位运算 → 保守跳过。
+                c.kind = VK::VecI;
+                if (d->bop == BinKind::Mul) has_int_mul = true;
+                if (ka == VK::J || kb == VK::J) has_j_operand = true;
+                // 除数常量不进不变量广播：发射期只用编译期移位量。
+                if (intdiv2 && d->bop == BinKind::FloorDiv && dsh > 0) has_intdiv = true;
+                if (ka == VK::InvI) inv_ints.push_back(d->a);
+                if (!intdiv2 && kb == VK::InvI) inv_ints.push_back(d->b);
+            } else {
+                c.kind = VK::Fail;
+            }
+            break;
+        }
+        case IrOp::IndexLoad: case IrOp::IndexLoadUnchecked: {
+            int ek = list_elem_float(d->a);
+            AffIdx af = owner_.vect_affine_index(d->b, jalias, inv_int_pred());
+            if (ek < 0 || !af.ok || af.coef < 1 || af.coef > kAffMaxCoef ||
+                af.off < 0 || af.off > kAffMaxOff) { c.kind = VK::Fail; break; }
+            if (!ir_is_float(gen_.ty_of(v)) && ek == 0) { c.kind = VK::Fail; break; }
+            c.kind = ek == 0 ? VK::VecF : VK::VecI;
+            c.list = d->a; c.off = af.off; c.is_load = true;
+            Access ac;
+            ac.list = d->a; ac.off = af.off; ac.coef = af.coef; ac.inv = af.inv;
+            ac.write = false; ac.pos = static_cast<int>(d - BI.data());
+            acc_at[static_cast<size_t>(ac.pos)] = static_cast<int>(accesses.size());
+            accesses.push_back(ac);
+            break;
+        }
+        case IrOp::Convert: {
+            // 只支持 plain i64 → float（标量发 cvtsi2sdq）。定宽/unsigned
+            // 源走不同标量路径（norm/u64 绕道），float→int 需截断+溢出语义
+            // → 一律保守跳过。
+            TypePtr from = gen_.ty_of(d->a), to = d->ty;
+            if (!to || to->kind != TyKind::Float || !from || from->kind != TyKind::Int) {
+                c.kind = VK::Fail; break;
+            }
+            // 输入是 j / j+常量：先按仿射下标解析（避免 classify 把下标
+            // 常量误收进不变量广播），发射期构造 [j+off, j+off+1] 向量。
+            int64_t io = index_off(d->a);
+            if (io >= 0) {
+                c.kind = VK::VecF; c.j_src = true; c.off = io;
+                has_convert = true; break;
+            }
+            VK ka = classify(d->a);
+            if (ka == VK::J) {
+                c.kind = VK::VecF; c.j_src = true; c.off = 0;
+                has_convert = true;
+            } else if (ka == VK::VecI || ka == VK::InvI) {
+                c.kind = VK::VecF;                    // 向量/不变量 i64 折算
+                has_convert = true;
+            } else {
+                c.kind = VK::Fail;
+            }
+            break;
+        }
+        default:
+            c.kind = VK::Fail;
+    }
+    cls[v] = c;
+    return c.kind;
+}
+
+MReg VectPlanner::Loop::xmm_of(VReg v) const {
+    VReg r = resolve_src(v);
+    auto it = cls.find(r);
+    if (it == cls.end()) return kMRegNone;
+    if (it->second.kind == VK::InvF || it->second.kind == VK::InvI) {
+        auto ir = inv_reg.find(r);
+        return ir == inv_reg.end() ? kMRegNone : ir->second;
+    }
+    if (it->second.kind == VK::J) return JVEC;      // 归纳变量物化值
+    auto tr = tmp_reg.find(r);
+    return tr == tmp_reg.end() ? kMRegNone : tr->second;
+}
+
 }  // namespace pyadamas

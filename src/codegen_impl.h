@@ -204,6 +204,10 @@ class AsmGen : public EmitSink, public ValueQuery, public SlotQuery {
     // AsmGen 的私有 static）。阶段 3 完成后应把这两个工厂挪到 mach_instr.h
     // 成为自由函数，届时删掉这行 friend。
     friend class VectPlanner;
+    // 阶段 A4 第 2 步：Loop 的方法体（vect_planner.cpp）要调 AsmGen 的私有
+    // 分析/发射辅助（simd_outside / simd_slot_unaddressed / simd_scratch_safe /
+    // op_imm / op_reg / emit_ 等）。同样应在阶段 3 完成后收掉。
+    friend struct VectPlanner::Loop;
 public:
         std::string gen(const IRModule& m);
         // 整程序没有任何 unknown 值、也不涉及 asyncio/生成器运行时：入口
