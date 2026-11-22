@@ -56,17 +56,28 @@ bool is_rt(const Inst& in, RtFn f) {
 }
 
 // 两个 vreg 是否指向同一个槽（或直接相等）。
+// 两个 vreg 是否指向同一个来源：同槽（LoadSlot）/ 同全局（LoadGlobal）/ 同字符串
+// 常量（ConstStr）。模块级代码（__pa_main）里 dict 与 key 通常是全局/常量，
+// 只认 LoadSlot 会让模块级计数器永远匹配不上。
 bool same_slot(const IRFunction& fn, VReg x, VReg y) {
     if (x == y) return true;
-    auto slot_of = [&](VReg v) -> int {
+    auto origin_of = [&](VReg v) -> int64_t {
         if (v == kNoReg) return -1;
         for (const auto& b : fn.blocks)
             for (const auto& in : b.insts)
-                if (in.dst == v && in.op == IrOp::LoadSlot) return static_cast<int>(in.idx);
+                if (in.dst == v) {
+                    if (in.op == IrOp::LoadSlot)
+                        return (int64_t{1} << 40) | static_cast<int64_t>(in.idx);
+                    if (in.op == IrOp::LoadGlobal)
+                        return (int64_t{2} << 40) | static_cast<int64_t>(in.idx);
+                    if (in.op == IrOp::ConstStr)
+                        return (int64_t{3} << 40) | static_cast<int64_t>(in.idx);
+                    return -1;
+                }
         return -1;
     };
-    const int a = slot_of(x);
-    const int c = slot_of(y);
+    const int64_t a = origin_of(x);
+    const int64_t c = origin_of(y);
     return a >= 0 && a == c;
 }
 
@@ -76,23 +87,70 @@ bool fuse_dict_bump(IRFunction& fn) {
     bool changed = false;
     for (auto& b : fn.blocks) {
         auto& ins = b.insts;
-        for (size_t i = 0; i + 5 < ins.size();) {
+        for (size_t i = 0; i + 4 < ins.size();) {
             Inst& get = ins[i];
-            Inst& add = ins[i + 1];
-            Inst& ld1 = ins[i + 2];
-            Inst& ld2 = ins[i + 3];
-            Inst& inck = ins[i + 4];
-            // 「值的 retain」是可选的：值类型是 unknown 时是 RcIncUnknown，
-            // 是 int 时根本没有 retain（int 不持有引用），dict.get 缺省值
-            // 推断后计数器的值类型就是 int —— 两种形态都要能融合。
+            if (!is_rt(get, RtFn::DictGetOr) || get.args.size() != 3) {
+                ++i;
+                continue;
+            }
+            // get 与 add 之间允许夹一条纯常量/搬运/装载（`+ 1` 的常量常在 get
+            // 之后才 materialize）。
+            size_t mid_i = SIZE_MAX;
+            size_t add_i = i + 1;
+            {
+                const Inst& cand = ins[add_i];
+                const bool bin_add = cand.op == IrOp::Bin && cand.bop == BinKind::Add;
+                const bool pure_prefix =
+                    cand.op == IrOp::ConstInt || cand.op == IrOp::ConstFloat ||
+                    cand.op == IrOp::ConstStr || cand.op == IrOp::Mov ||
+                    cand.op == IrOp::LoadSlot || cand.op == IrOp::LoadGlobal;
+                if (!bin_add && pure_prefix && add_i + 1 < ins.size()) {
+                    mid_i = add_i;
+                    add_i = add_i + 1;
+                }
+            }
+            if (add_i + 2 >= ins.size()) {
+                ++i;
+                continue;
+            }
+            Inst& add = ins[add_i];
+            if (add.op != IrOp::Bin || add.bop != BinKind::Add || add.a != get.dst) {
+                ++i;
+                continue;
+            }
+            // add 之后：dict 装载（bump 需要它的 vreg），然后 key 装载**可选**
+            // （LICM 常把循环不变的 key 装载外提到 preheader，此时 get/set/rc_inc
+            // 用的是同一个 vreg，body 里没有 key 装载），再 rc_inc(key)，再 set。
+            Inst& ld1 = ins[add_i + 1];
+            if (!(ld1.op == IrOp::LoadSlot || ld1.op == IrOp::LoadGlobal)) {
+                ++i;
+                continue;
+            }
+            size_t ld2_i = SIZE_MAX;
+            size_t inck_i = add_i + 2;
+            {
+                const Inst& cand = ins[inck_i];
+                const bool key_load =
+                    cand.op == IrOp::LoadSlot || cand.op == IrOp::LoadGlobal ||
+                    cand.op == IrOp::ConstStr;
+                if (key_load && inck_i + 1 < ins.size()) {
+                    ld2_i = inck_i;
+                    inck_i = inck_i + 1;
+                }
+            }
+            if (inck_i + 1 >= ins.size()) {
+                ++i;
+                continue;
+            }
+            Inst& inck = ins[inck_i];
             size_t incv_i = SIZE_MAX;
-            size_t set_i = i + 5;
-            if (i + 6 < ins.size()) {
-                Inst& cand = ins[i + 5];
+            size_t set_i = inck_i + 1;
+            if (set_i < ins.size()) {
+                Inst& cand = ins[set_i];
                 if ((is_rt(cand, RtFn::RcIncUnknown) || is_rt(cand, RtFn::RcInc)) &&
                     cand.args.size() == 1 && cand.args[0] == add.dst) {
-                    incv_i = i + 5;
-                    set_i = i + 6;
+                    incv_i = set_i;
+                    set_i = set_i + 1;
                 }
             }
             if (set_i >= ins.size()) {
@@ -100,12 +158,8 @@ bool fuse_dict_bump(IRFunction& fn) {
                 continue;
             }
             Inst& set = ins[set_i];
-
             const bool match =
-                is_rt(get, RtFn::DictGetOr) && get.args.size() == 3 &&
-                add.op == IrOp::Bin && add.bop == BinKind::Add && add.a == get.dst &&
                 is_int_or_unknown(add.ty) &&
-                ld1.op == IrOp::LoadSlot && ld2.op == IrOp::LoadSlot &&
                 is_rt(inck, RtFn::RcInc) && inck.args.size() == 1 &&
                 is_rt(set, RtFn::DictSet) && set.args.size() == 3 &&
                 set.args[2] == add.dst &&
@@ -118,38 +172,37 @@ bool fuse_dict_bump(IRFunction& fn) {
             }
 
             const bool has_incv = incv_i != SIZE_MAX;
-            const Inst* allowed[7] = {&get, &add, &ld1, &ld2, &inck, &set, nullptr};
-            int nallowed = 6;
-            if (has_incv) {
-                allowed[5] = &ins[incv_i];
-                allowed[6] = &set;
-                nallowed = 7;
-            }
-            if (!only_used_by(fn, get.dst, allowed, nallowed) ||
-                !only_used_by(fn, add.dst, allowed, nallowed)) {
+            std::vector<const Inst*> allowed;
+            allowed.push_back(&get);
+            allowed.push_back(&add);
+            allowed.push_back(&ld1);
+            allowed.push_back(&inck);
+            allowed.push_back(&set);
+            if (ld2_i != SIZE_MAX) allowed.push_back(&ins[ld2_i]);
+            if (has_incv) allowed.push_back(&ins[incv_i]);
+            if (mid_i != SIZE_MAX) allowed.push_back(&ins[mid_i]);
+            if (!only_used_by(fn, get.dst, allowed.data(), static_cast<int>(allowed.size())) ||
+                !only_used_by(fn, add.dst, allowed.data(), static_cast<int>(allowed.size()))) {
                 ++i;
                 continue;
             }
 
-            // **保留 ld1/ld2**：它们定义了 bump 要用的 dict/key vreg。
-            // 第一版把它们一起删了，bump.args 引用未定义 vreg -> SIGSEGV。
+            // bump 直接用 get 的 key vreg（可能来自 preheader），不再依赖 body 内
+            // 的 key 装载；dict vreg 用 ld1（bump 需要它已定义）。
             Inst bump;
             bump.op = IrOp::CallRt;
             bump.imm = static_cast<int64_t>(RtFn::DictBump);
-            bump.args = {ld1.dst, ld2.dst, get.args[2], add.b};
+            bump.args = {ld1.dst, get.args[1], get.args[2], add.b};
             bump.ty = nullptr;
-            // 原地改：i 位置换成 ld1，i+1 换成 ld2，i+2 换成 bump
-            // 这样不用 erase/insert，索引稳定。
-            Inst keep1 = std::move(ld1);
-            Inst keep2 = std::move(ld2);
-            ins[i] = std::move(keep1);
-            ins[i + 1] = std::move(keep2);
-            ins[i + 2] = std::move(bump);
-            const size_t erase_end = has_incv ? i + 7 : i + 6;
-            ins.erase(ins.begin() + static_cast<std::ptrdiff_t>(i + 3),
-                      ins.begin() + static_cast<std::ptrdiff_t>(erase_end));
+            std::vector<Inst> keep;
+            if (mid_i != SIZE_MAX) keep.push_back(ins[mid_i]);
+            keep.push_back(ld1);
+            keep.push_back(bump);
+            ins.erase(ins.begin() + static_cast<std::ptrdiff_t>(i),
+                      ins.begin() + static_cast<std::ptrdiff_t>(set_i + 1));
+            ins.insert(ins.begin() + static_cast<std::ptrdiff_t>(i), keep.begin(), keep.end());
             changed = true;
-            i += 3;
+            i += keep.size();
         }
     }
     return changed;
