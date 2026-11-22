@@ -28,28 +28,17 @@ bool is_rt(const Inst& in, RtFn f) {
     return in.op == IrOp::CallRt && in.imm == static_cast<int64_t>(f);
 }
 
-// 两个 vreg 是否指向同一个来源：同槽（LoadSlot）/ 同全局（LoadGlobal）/ 同字符串
-// 常量（ConstStr）。模块级代码（__pa_main）里 dict 与 key 通常是全局/常量，
-// 只认 LoadSlot 会让模块级计数器永远匹配不上。
 bool same_slot(const IRFunction& fn, VReg x, VReg y) {
     if (x == y) return true;
-    auto origin_of = [&](VReg v) -> int64_t {
+    auto slot_of = [&](VReg v) -> int {
         if (v == kNoReg) return -1;
         for (const auto& b : fn.blocks)
             for (const auto& in : b.insts)
-                if (in.dst == v) {
-                    if (in.op == IrOp::LoadSlot)
-                        return (int64_t{1} << 40) | static_cast<int64_t>(in.idx);
-                    if (in.op == IrOp::LoadGlobal)
-                        return (int64_t{2} << 40) | static_cast<int64_t>(in.idx);
-                    if (in.op == IrOp::ConstStr)
-                        return (int64_t{3} << 40) | static_cast<int64_t>(in.idx);
-                    return -1;
-                }
+                if (in.dst == v && in.op == IrOp::LoadSlot) return static_cast<int>(in.idx);
         return -1;
     };
-    const int64_t a = origin_of(x);
-    const int64_t c = origin_of(y);
+    const int a = slot_of(x);
+    const int c = slot_of(y);
     return a >= 0 && a == c;
 }
 
@@ -60,7 +49,6 @@ bool pure_op(const Inst& in) {
         case IrOp::ConstFloat:
         case IrOp::ConstStr:
         case IrOp::ConstNone:
-        case IrOp::ConstBig:
         case IrOp::Mov:
         case IrOp::Bin:
         case IrOp::Un:
