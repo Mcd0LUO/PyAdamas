@@ -14,6 +14,7 @@
 | [codegen.md](codegen.md) | 汇编怎么生成？栈帧和调用约定怎么定的？ | `codegen*.cpp` |
 | [stack-alignment.md](stack-alignment.md) | 栈对齐违规查到了哪两处 ABI 根因？`-mstackrealign` 为什么能撤掉？ | `src/codegen_block.cpp` `src/codegen.cpp` |
 | [runtime.md](runtime.md) | 编译产物运行时依赖什么？对象在内存里怎么摆？ | `runtime/rt_*.c` |
+| [unknown-semantics-audit.md](unknown-semantics-audit.md) | 「类型/种类未知」时运行时为什么容易退化成指针语义？今天修了哪 4 个 bug、还剩哪些缺口？ | `runtime/rt_dict.c` `runtime/rt_list.c` `runtime/rt_any.c` |
 | [compatibility.md](compatibility.md) | 和 CPython 的差异清单，以及正确性是怎么验证的 | `tests/` |
 | [development.md](development.md) | 怎么构建、怎么测、怎么调试、加功能要动哪几处 | `CMakeLists.txt` `tests/` |
 | [roadmap.md](roadmap.md) | 现在做到哪、下一步做什么、为什么是这个顺序 | — |

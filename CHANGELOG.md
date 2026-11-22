@@ -4,6 +4,82 @@
 
 早期阶段没有逐条留痕，按阶段归纳；0.4 之后逐条记录。
 
+## [0.425] - 2026-11-23
+
+> fix(rt)：混合容器（`list[unknown]`）排序静默乱序 → 与 CPython 一致抛 `TypeError`。
+>
+> ### 问题（`runtime/rt_list.c:848` `pa_list_sort` 的 kind=3）
+>
+> `sort_kind` 对推断不出元素类型的容器返回 `3`，原实现落到 `sort_i64` —— **按机器字（堆指针）比较**。
+> 元素族混杂时 CPython 抛 `TypeError`，我们却静默排出一串乱序（-O0/-O1/-O2 均错，非优化器引入）：
+>
+> ```python
+> xs = ["a" + str(0), 1]     # list[unknown]
+> print(sorted(xs))          # CPython: TypeError('<' not supported between ...)
+>                            # 修复前: [1, 'a0']
+> ```
+>
+> ### 修法（`runtime/rt_list.c` +78）
+>
+> kind=3 时先扫一遍元素**族**（`PA_UK_NUM`：int/bool/float 盒/big；`PA_UK_STR`；`PA_UK_OTHER`）：
+>
+> 1. 族混杂（str×数值、None×数值…）→ `pa_raise_c("TypeError", "'<' not supported between instances of 'int' and 'str'")`
+>    （用 `snprintf` 拼消息；与 CPython 文案一致）；
+> 2. 全 str → 既有 `sort_str`（按字节）；
+> 3. 全数值 → 新增 `sort_uknum` / `pa_uk_num_cmp`（int/bool 机器字、float 盒读 double、big 走
+>    `pa_big_cmp` / `pa_big_cmp_f64`，与 `pa_any_cmp` 数值口径一致）；
+> 4. 全 other（容器/类实例）→ 保持机器字（CPython 会按内容/`__lt__`，属已知保守口径）。
+>
+> ### 结果
+>
+> | 项 | 修前 | 修后 |
+> |---|---|---|
+> | `sorted(["a"+str(0), 1])` | `[1, 'a0']` | **TypeError**（-O0/-O1/-O2 与 CPython 一致） |
+> | `xs.sort()` 同一形状 | 静默乱序 | TypeError |
+> | 12 基准 × 3 档输出 | — | 36/36 一致；指令数 ±0.47%（无 >1% 回退） |
+> | `PYADAMAS_SIMD=1` | — | matmul 10,126,808 / sn 94,637,429（10.1M / 94.6M 量级保持） |
+>
+> 新用例 `tests/run/490_unknown_kind_sort.py`（含 expect）：混合 `list[unknown]` 的 `sorted`/`list.sort`
+> 必须 TypeError、已知类型 int/str/float/bool 排序与 min/max 回归、deque `index`/`count`、类实例 typed 域 `__eq__`。
+> 闸门：386 ran ok / difftest 365-0 / ASan 386 ran ok 0 报告 / check_size 通过。
+
+## [0.424] - 2026-11-23
+
+> fix(rt)：混合容器（元素 kind=unknown）的 `in` / `.index` / `==` 按指针身份比较。
+>
+> ### 问题（3 个分派点，同一模式）
+>
+> 1. `runtime/rt_list.c` `list_value_eq(kind=3)`：`in`、`.index`、`remove` 的元素比较 `return a == b`
+>    → 等值的新 str 对象查不到（`p in ["a"+str(0), 1]` 为 False，CPython True；`.index` 抛 ValueError）；
+> 2. `runtime/rt_list.c` `chain_elem_eq(kind='x')`：list/tuple/dict/set 的 `==` 元素级比较同样按机器字；
+> 3. `runtime/rt_any.c` `pa_any_cmp` / **`pa_any_cmp_t`** 的 other 分支：`eq = (a == b)` —— unknown 域
+>    `list == list` 为 False（函数内 `eq(xs, ys)`，xs/ys 是 `list[unknown]`；CPython True）。
+>
+> 注意：本构建 type_tags 默认开，实际执行的是 `_t` 版（`src/codegen_tag.cpp:117`），**两个符号必须一起修**。
+>
+> ### 修法（`runtime/rt_list.c` +21、`runtime/rt_any.c` +30）
+>
+> - `unknown_kind_value_eq(a, b)`：RC 探针认出堆 str → `pa_str_eq`（内容）、big → `pa_big_cmp`（数值）；
+>   容器/类实例仍按同一性；接到 `list_value_eq(kind==3)` 与 `chain_elem_eq(kind=='x')`；
+> - `any_unknown_eq(a, b, depth)`：str/big/**list 递归**（长度 + 逐元素，深度上限 32 防自引用）；
+>   接到 `pa_any_cmp` 与 `pa_any_cmp_t` 的 other 分支。
+>
+> ### 结果
+>
+> | 用例 | CPython | 修前 | 修后 |
+> |---|---|---|---|
+> | `p in ["a"+str(0), 1]` | True | **False** | True |
+> | `xs.index(p)` | 0 | **ValueError** | 0 |
+> | 函数内 `eq(list[unknown], list[unknown])` | True | **False** | True |
+> | `list == tuple`（静态类型已知） | False | False | False（未回归） |
+>
+> 新用例 `tests/run/489_unknown_kind_eq.py`（含 expect）：混合 `in`/`.index`/`==`/`!=`、big 元素、
+> 已知 `list[str]` 对照、`list == tuple`、int/0/负数边界、嵌套容器已知类型对照。
+> 闸门：385 ran ok / difftest 364-0 / ASan 385 ran ok 0 报告 / check_size 通过。
+>
+> 已知缺口（见 `docs/unknown-semantics-audit.md`）：类实例 `__eq__` 在 unknown 域需要「类注册
+> dunder 名→槽」新机制（未修）；deque 的 `in` 是 lowering 缺口；嵌套容器 chain 深度不足。
+
 ## [0.423] - 2026-11-23
 
 > perf(vect)：sieve 计数循环向量化 —— **触发数 0 → 1、指令数 −4.78%**（100,223,185 → 95,431,674）。
