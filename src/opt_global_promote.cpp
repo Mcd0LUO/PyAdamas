@@ -61,7 +61,43 @@ bool is_call_op(IrOp op) {
     }
 }
 
-std::vector<std::vector<int>> build_succ(const IRFunction& fn) {
+// 从入口块 0 做可达性：降级/if-conversion 会留下**不可达的空块**占位，
+// codegen 会把它们裁掉；空块只在可达时才按 fallthrough（b+1）算边。
+std::vector<char> reachable_blocks(const IRFunction& fn) {
+    const int nb = static_cast<int>(fn.blocks.size());
+    std::vector<char> reach(static_cast<size_t>(nb), 0);
+    std::vector<int> work{0};
+    while (!work.empty()) {
+        const int b = work.back();
+        work.pop_back();
+        if (b < 0 || b >= nb || reach[static_cast<size_t>(b)]) continue;
+        reach[static_cast<size_t>(b)] = 1;
+        const auto& insts = fn.blocks[static_cast<size_t>(b)].insts;
+        if (insts.empty()) {
+            work.push_back(b + 1);
+            continue;
+        }
+        const Inst& last = insts.back();
+        switch (last.op) {
+            case IrOp::Jump: work.push_back(last.target); break;
+            case IrOp::Branch:
+                work.push_back(last.target);
+                work.push_back(last.target2);
+                break;
+            case IrOp::Return:
+            case IrOp::GenYield:
+            case IrOp::GenAwait:
+            case IrOp::GenRethrow:
+            case IrOp::GenDone:
+                break;
+            default: work.push_back(b + 1); break;
+        }
+    }
+    return reach;
+}
+
+std::vector<std::vector<int>> build_succ(const IRFunction& fn,
+                                        const std::vector<char>& reach) {
     const int nb = static_cast<int>(fn.blocks.size());
     std::vector<std::vector<int>> succ(static_cast<size_t>(nb));
     auto add = [&](int b, int t) {
@@ -70,7 +106,8 @@ std::vector<std::vector<int>> build_succ(const IRFunction& fn) {
     for (int b = 0; b < nb; ++b) {
         const auto& insts = fn.blocks[static_cast<size_t>(b)].insts;
         if (insts.empty()) {
-            add(b, b + 1);
+            // 不可达空块没有后继（codegen 裁剪）；可达空块才是 fallthrough。
+            if (reach[static_cast<size_t>(b)]) add(b, b + 1);
             continue;
         }
         const Inst& last = insts.back();
@@ -92,10 +129,49 @@ std::vector<std::vector<int>> build_succ(const IRFunction& fn) {
     return succ;
 }
 
+// 可能抛异常的指令。提升把「每轮写全局」推迟成「循环出口写回」：若循环中途
+// 抛异常并展开，全局会停在进入循环前的值。是否可观察取决于函数：
+//   * 入口函数（__pa_main）里未捕获异常 = 进程终止，之后没有代码读全局 → 可观察不到；
+//   * 其它函数可能被调用方 catch 后读全局 → 必须要求循环内没有可能抛异常的指令。
+bool is_raising_op(const Inst& in) {
+    switch (in.op) {
+        case IrOp::IndexLoad:
+        case IrOp::IndexStore:
+        case IrOp::Setjmp:
+        case IrOp::Call:
+        case IrOp::CallRt:
+        case IrOp::CallExtern:
+        case IrOp::CallPtr:
+        case IrOp::CallDirect:
+        case IrOp::VCall:
+        case IrOp::VCallStatic:
+        case IrOp::SuperVCall:
+            return true;
+        case IrOp::Bin:
+            return in.bop == BinKind::Div || in.bop == BinKind::Mod ||
+                   in.bop == BinKind::FloorDiv;
+        default:
+            return false;
+    }
+}
+
+// 零开销异常：函数里出现 EH 标记就整函数跳过（展开会跳过循环出口的写回）。
+bool has_eh_markers(const IRFunction& fn) {
+    for (const auto& b : fn.blocks)
+        for (const auto& in : b.insts)
+            if (in.op == IrOp::EhBegin || in.op == IrOp::EhEnd ||
+                in.op == IrOp::EhLandingPad)
+                return true;
+    return false;
+}
+
 }  // namespace
 
 bool promote_globals_in_loops(IRFunction& fn, const std::vector<IRGlobal>& globals) {
     if (fn.has_handlers || fn.is_generator) return false;
+    if (has_eh_markers(fn)) return false;
+    // 入口函数：未捕获异常等于进程终止，推迟写回不产生可观察差异（见 is_raising_op）。
+    const bool is_entry = fn.name == "__pa_main";
     const size_t n_globals = globals.size();
     const int nb0 = static_cast<int>(fn.blocks.size());
     bool changed = false;
@@ -110,7 +186,8 @@ bool promote_globals_in_loops(IRFunction& fn, const std::vector<IRGlobal>& globa
         const int exit = hb.insts.back().target2;
         if (body < 0 || exit < 0 || body >= nb0 || exit >= nb0) continue;
 
-        auto succ = build_succ(fn);
+        const std::vector<char> reach = reachable_blocks(fn);
+        auto succ = build_succ(fn, reach);
         // 循环体：从 body 出发、不经过 header 也不经过 exit 的可达集。
         std::unordered_set<int> body_set;
         std::vector<int> work{body};
@@ -122,6 +199,8 @@ bool promote_globals_in_loops(IRFunction& fn, const std::vector<IRGlobal>& globa
             for (int s : succ[static_cast<size_t>(x)]) work.push_back(s);
         }
         if (body_set.empty()) continue;
+        // 空体块（可达时是 fallthrough）没法安全推理，直接跳过。
+        if (fn.blocks[static_cast<size_t>(body)].insts.empty()) continue;
 
         // 单一回边 + 单一出口：循环体内只有一处跳回 header，且 header
         // 只有 body 这一个循环内前驱。
@@ -130,24 +209,72 @@ bool promote_globals_in_loops(IRFunction& fn, const std::vector<IRGlobal>& globa
             for (int s : succ[static_cast<size_t>(b)])
                 if (s == h) ++back_edges;
         if (back_edges != 1) continue;
+        // 单一出口：header 与 loop body 到 exit 的边合计恰好 1 条。
+        // 原判据只数 body→exit，而 while/for 的出口边都在 header 上（body 只
+        // 回边到 header）→ 所有 while 循环都被误拒（这也是 sieve 等模块级循环
+        // 永远吃不到全局提升的原因）。
         int exits = 0;
+        for (int s : succ[static_cast<size_t>(h)])
+            if (s == exit) ++exits;
         for (int b : body_set)
             for (int s : succ[static_cast<size_t>(b)])
                 if (s == exit) ++exits;
         if (exits != 1) continue;
+        // exit 只能从循环内进入：写回指令插在 exit 开头，外部路径执行到它
+        // 会把槽里的旧值写回全局（静默错值）。
+        {
+            bool ok = true;
+            for (int b = 0; b < nb0 && ok; ++b) {
+                bool to_exit = false;
+                for (int s : succ[static_cast<size_t>(b)])
+                    if (s == exit) { to_exit = true; break; }
+                if (!to_exit) continue;
+                if (b != h && body_set.count(b) == 0) ok = false;
+            }
+            if (!ok) continue;
+        }
+        // body 块也不能被循环外的路径直接进入（否则外部执行到体内会读写槽）。
+        {
+            bool ok = true;
+            for (int b : body_set) {
+                for (int p = 0; p < nb0 && ok; ++p) {
+                    bool to_b = false;
+                    for (int s : succ[static_cast<size_t>(p)])
+                        if (s == b) { to_b = true; break; }
+                    if (!to_b) continue;
+                    if (p != h && body_set.count(p) == 0) ok = false;
+                }
+                if (!ok) break;
+            }
+            if (!ok) continue;
+        }
+        // 循环集合 = header + body。
+        std::unordered_set<int> loop_set = body_set;
+        loop_set.insert(h);
 
-        // 循环体内不能有任何函数调用（能观察到全局中间值）。
+        // 循环体内不能有任何函数调用（调用能观察到全局中间值/改全局）。
         bool has_call = false;
-        for (int b : body_set) {
+        for (int b : loop_set) {
             for (const auto& in : fn.blocks[static_cast<size_t>(b)].insts)
                 if (is_call_op(in.op)) { has_call = true; break; }
             if (has_call) break;
         }
         if (has_call) continue;
+        // 非入口函数：循环内不能有可抛异常指令（否则中途展开会跳过出口写回，
+        // 调用方 catch 后读到旧全局值）。入口函数例外：未捕获异常直接终止进程。
+        if (!is_entry) {
+            bool has_raise = false;
+            for (int b : loop_set) {
+                for (const auto& in : fn.blocks[static_cast<size_t>(b)].insts)
+                    if (is_raising_op(in)) { has_raise = true; break; }
+                if (has_raise) break;
+            }
+            if (has_raise) continue;
+        }
 
         // 统计循环体内读写的标量全局。
         std::vector<int> touched;
-        for (int b : body_set) {
+        for (int b : loop_set) {
             for (const auto& in : fn.blocks[static_cast<size_t>(b)].insts) {
                 if (in.op != IrOp::LoadGlobal && in.op != IrOp::StoreGlobal) continue;
                 if (in.idx < 0 || in.idx >= static_cast<int>(n_globals)) continue;
@@ -160,10 +287,14 @@ bool promote_globals_in_loops(IRFunction& fn, const std::vector<IRGlobal>& globa
         }
         if (touched.empty()) continue;
 
+        // 槽类型必须是全局的真实类型：float 全局必须走 xmm 槽，不能当 int 槽
+        // （否则 load/store 选错寄存器，静默错值）。
         std::vector<std::pair<int, int>> g2s;
         for (int g : touched) {
+            TypePtr gt = globals[static_cast<size_t>(g)].ty;
+            if (!gt) gt = t_int();
             const int slot = static_cast<int>(fn.slot_ty.size());
-            fn.slot_ty.push_back(t_int());
+            fn.slot_ty.push_back(gt);
             fn.slot_owned.push_back(false);
             fn.slot_unknown.push_back(false);
             g2s.emplace_back(g, slot);
@@ -177,8 +308,9 @@ bool promote_globals_in_loops(IRFunction& fn, const std::vector<IRGlobal>& globa
                 ld.op = IrOp::LoadGlobal;
                 ld.idx = pr.first;
                 ld.dst = static_cast<VReg>(fn.vreg_ty.size());
-                fn.vreg_ty.push_back(t_int());
-                ld.ty = t_int();
+                TypePtr gt = fn.slot_ty[static_cast<size_t>(pr.second)];
+                fn.vreg_ty.push_back(gt ? gt : t_int());
+                ld.ty = gt;
                 pro.push_back(std::move(ld));
                 Inst st;
                 st.op = IrOp::StoreSlot;
@@ -208,8 +340,9 @@ bool promote_globals_in_loops(IRFunction& fn, const std::vector<IRGlobal>& globa
             }
         }
 
-        // 体内改写。
-        for (int b : body_set) {
+        // 循环内改写（含 header：header 的循环条件也可能读被提升的全局，
+        // 不改成槽会读到循环期间的旧全局值）。
+        for (int b : loop_set) {
             for (auto& in : fn.blocks[static_cast<size_t>(b)].insts) {
                 if (in.op != IrOp::LoadGlobal && in.op != IrOp::StoreGlobal) continue;
                 int slot = -1;
@@ -229,8 +362,9 @@ bool promote_globals_in_loops(IRFunction& fn, const std::vector<IRGlobal>& globa
                 ld.op = IrOp::LoadSlot;
                 ld.idx = pr.second;
                 ld.dst = static_cast<VReg>(fn.vreg_ty.size());
-                fn.vreg_ty.push_back(t_int());
-                ld.ty = t_int();
+                TypePtr gt = fn.slot_ty[static_cast<size_t>(pr.second)];
+                fn.vreg_ty.push_back(gt ? gt : t_int());
+                ld.ty = gt;
                 epi.push_back(std::move(ld));
                 Inst st;
                 st.op = IrOp::StoreGlobal;
