@@ -40,9 +40,12 @@ namespace {
 // 4-lane 体的一条步骤。分析期把寄存器/偏移全部定死，发射期只做文本展开，
 // 不再有任何判断 —— dry-run 完备：不可能「发到一半 return false」。
 struct Avx2Step {
-    enum Kind : uint8_t { Load, Add, Sub, Mul, Store, Red } kind = Load;
-    MReg dst = kMRegNone;     // Load / Add / Sub / Mul 的目标
-    MReg a = kMRegNone;       // Add / Sub / Mul 左操作数
+    // Div / Mod：整数 // 与 %（除数是 2 的幂常量，判据与 2-lane 同源，见
+    // codegen_vect_intdiv.cpp）。除数不占寄存器，只用编译期移位量 sh。
+    enum Kind : uint8_t { Load, Add, Sub, Mul, Div, Mod, Store, Red } kind = Load;
+    int sh = 0;               // Div / Mod 的移位量 m（除数 == 2^m）
+    MReg dst = kMRegNone;     // Load / Add / Sub / Mul / Div / Mod 的目标
+    MReg a = kMRegNone;       // Add / Sub / Mul / Div / Mod 左操作数
     MReg b = kMRegNone;       // Add / Sub / Mul 右操作数
     MReg base = kMRegNone;    // Load / Store 的基址（data + inv*8）
     MReg src = kMRegNone;     // Store 的值 / Red 的累加器
@@ -96,6 +99,8 @@ bool AsmGen::vect_avx2_emit(const VAvx2Ctx& c, std::string* vexit) {
     std::vector<Avx2Step> steps;
     std::vector<MReg> iaccs;                    // int reduction 的 4-lane 累加器
     bool need_mul = false;
+    bool need_div = false;                      // // 2^m 的符号修正要 1 个 scratch
+    bool need_j = false;                        // 归纳变量 4-lane 物化要 1 个 scratch
     for (size_t i = 0; i < c.body->size(); ++i) {
         const Inst& in = (*c.body)[i];
         const int at = (*c.acc_at)[i];
@@ -133,16 +138,34 @@ bool AsmGen::vect_avx2_emit(const VAvx2Ctx& c, std::string* vexit) {
                 if (!td || td->kind != TyKind::Int || !ta || ta->kind != TyKind::Int ||
                     !tb || tb->kind != TyKind::Int)
                     return false;
+                // P5：// 与 % 的除数是 2 的幂常量 → 4-lane 也能做（判据与
+                // 2-lane 同源：只看除数是不是编译期正的 2 的幂）。除数不进
+                // 寄存器、不参与广播，只用编译期移位量。
+                int dsh = -1;
+                const bool intdiv2 =
+                    (in.bop == BinKind::FloorDiv || in.bop == BinKind::Mod) &&
+                    vect_div_pow2(in.b, &dsh);
                 switch (in.bop) {
                     case BinKind::Add: s.kind = Avx2Step::Add; break;
                     case BinKind::Sub: s.kind = Avx2Step::Sub; break;
                     case BinKind::Mul: s.kind = Avx2Step::Mul; need_mul = true; break;
+                    case BinKind::FloorDiv:
+                    case BinKind::Mod:
+                        if (!intdiv2) return false;       // 非 2 的幂除数：留给标量
+                        s.kind = (in.bop == BinKind::Mod) ? Avx2Step::Mod : Avx2Step::Div;
+                        s.sh = dsh;
+                        if (s.kind == Avx2Step::Div && dsh > 0) need_div = true;
+                        break;
                     default: return false;
                 }
                 s.dst = (*c.xmm_of)(in.dst);
                 s.a = (*c.xmm_of)(in.a);
-                s.b = (*c.xmm_of)(in.b);
-                if (!in_xmm_pool(s.dst) || !in_xmm_pool(s.a) || !in_xmm_pool(s.b)) return false;
+                if (!in_xmm_pool(s.dst) || !in_xmm_pool(s.a)) return false;
+                s.b = (s.kind == Avx2Step::Div || s.kind == Avx2Step::Mod)
+                          ? kMRegNone : (*c.xmm_of)(in.b);   // // 与 % 不读除数
+                if (s.b != kMRegNone && !in_xmm_pool(s.b)) return false;
+                // P5b：归纳变量当算术操作数 → 4-lane 循环顶部要物化 [j..j+3]。
+                if (c.has_j && (s.a == c.jvec || s.b == c.jvec)) need_j = true;
                 break;
             }
             case VRole::MapStore: {
@@ -181,6 +204,16 @@ bool AsmGen::vect_avx2_emit(const VAvx2Ctx& c, std::string* vexit) {
     }
     if (steps.empty()) return false;
     if (need_mul && (!in_xmm_pool(c.seq1) || !in_xmm_pool(c.seq2))) return false;
+    if (need_div && !in_xmm_pool(c.seq1)) return false;
+    // 归纳变量 4-lane 物化：借用任一序列/gather/水平求和 scratch 拼高 128 位
+    //（物化在循环体最前面原子完成，之后 scratch 才被各自的步骤复用）。
+    MReg jscr = kMRegNone;
+    if (need_j) {
+        if (!c.has_j || !in_xmm_pool(c.jvec)) return false;
+        for (MReg cand : {c.seq1, c.gscr, c.hscr})
+            if (cand != c.jvec && in_xmm_pool(cand)) { jscr = cand; break; }
+        if (jscr == kMRegNone) return false;      // 没有 scratch → 交给 2-lane
+    }
     // 累加器折回 2 lane 要一个 xmm scratch（SSE2 出口的水平求和 scratch，
     // 分配在 IACC 之后，保证互不冲突）。
     if (!iaccs.empty() && !in_xmm_pool(c.hscr)) return false;
@@ -225,7 +258,25 @@ bool AsmGen::vect_avx2_emit(const VAvx2Ctx& c, std::string* vexit) {
             line("vinserti128 $1, " + xr(c.hscr) + ", " + yr(r) + ", " + yr(r));
     }
     label(v4);
+    bool j_built = false;
     for (const Avx2Step& s : steps) {
+        // P5b：归纳变量物化 —— 首个使用点（每轮迭代一次）拼 [j, j+1, j+2, j+3]。
+        // 低 128 位用 vmovq/vpinsrq 从 JREG 直接拼进 xmm(jvec)，高 128 位拼到
+        // jscr 再 vinserti128 插入。j 是任意 i64（含负数），与 2-lane 路径
+        // 逐 lane 同值；这里没有任何值域假设。
+        if (need_j && !j_built &&
+            (s.a == c.jvec || s.b == c.jvec || s.src == c.jvec || s.expr == c.jvec)) {
+            emit2(MOp::kLeaq, op_mem(c.jreg, 0), kRax);
+            line("vmovq %rax, " + xr(c.jvec));
+            emit2(MOp::kLeaq, op_mem(c.jreg, 1), kRax);
+            line("vpinsrq $1, %rax, " + xr(c.jvec) + ", " + xr(c.jvec));
+            emit2(MOp::kLeaq, op_mem(c.jreg, 2), kRax);
+            line("vmovq %rax, " + xr(jscr));
+            emit2(MOp::kLeaq, op_mem(c.jreg, 3), kRax);
+            line("vpinsrq $1, %rax, " + xr(jscr) + ", " + xr(jscr));
+            line("vinserti128 $1, " + xr(jscr) + ", " + yr(c.jvec) + ", " + yr(c.jvec));
+            j_built = true;
+        }
         switch (s.kind) {
             case Avx2Step::Load:
                 if (s.coef == 1) {
@@ -267,6 +318,37 @@ bool AsmGen::vect_avx2_emit(const VAvx2Ctx& c, std::string* vexit) {
                 line("vpaddq " + yr(c.seq1) + ", " + yr(s.dst) + ", " + yr(s.dst));
                 break;
             }
+            case Avx2Step::Div: {
+                // floor(x / 2^m)：AVX2 同样没有 64 位 lane 的算术右移（vpsraq
+                // 要 AVX-512），按 2 的补码恒等式合成（推导见 codegen_vect_intdiv.cpp）：
+                //   x >>a m == (x >>u m) | (mask & ~((1<<(64-m)) - 1))
+                //   mask    = 每 lane 符号掩码（x >= 0 时 0，x < 0 时全 1）
+                // 四/五条都是逐 64 位 lane 的运算，任意 i64（含 INT64_MIN）成立。
+                if (s.sh == 0) {                         // x // 1 == x
+                    line("vmovdqa " + yr(s.a) + ", " + yr(s.dst));
+                    break;
+                }
+                // 符号掩码：vpsrad $31（每 dword 符号）→ vpshufd 0xF5（每 64 位
+                // lane 取高 dword 掩码，复制满整 lane）。不能用「psrlq $63 再
+                // psllq」，那只置 1 位而不是高 m 位。
+                line("vpsrad $31, " + yr(s.a) + ", " + yr(c.seq1));
+                line("vpshufd $245, " + yr(c.seq1) + ", " + yr(c.seq1));
+                line("vpsllq $" + std::to_string(64 - s.sh) + ", " + yr(c.seq1) + ", " +
+                     yr(c.seq1));
+                line("vpsrlq $" + std::to_string(s.sh) + ", " + yr(s.a) + ", " + yr(s.dst));
+                line("vpor " + yr(c.seq1) + ", " + yr(s.dst) + ", " + yr(s.dst));
+                break;
+            }
+            case Avx2Step::Mod:
+                // x % 2^m == x & (2^m-1)：左移丢高位、再逻辑右移回来（低 m 位
+                // 就是补码余数，负数同样成立）；x % 1 == 0。
+                if (s.sh == 0) {
+                    line("vpxor " + yr(s.dst) + ", " + yr(s.dst) + ", " + yr(s.dst));
+                    break;
+                }
+                line("vpsllq $" + std::to_string(64 - s.sh) + ", " + yr(s.a) + ", " + yr(s.dst));
+                line("vpsrlq $" + std::to_string(64 - s.sh) + ", " + yr(s.dst) + ", " + yr(s.dst));
+                break;
             case Avx2Step::Store:
                 line("vmovupd " + yr(s.src) + ", " + mem_op(s.off * 8, s.base, c.jreg, 8));
                 break;

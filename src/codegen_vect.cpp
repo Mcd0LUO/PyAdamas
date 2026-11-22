@@ -46,22 +46,9 @@ namespace pyadamas {
 
 namespace {
 
-// 向量值分类。InvF/InvI 是循环不变量（setup 广播）；J 是归纳变量；Affine 是
-// j+常量（只用于下标位移）；VecF/VecI 是逐 lane 计算的 2-lane 值；Acc 是
-// reduction 累加器旧值；Fail 不可向量化。
-enum class VK : uint8_t { Fail, InvF, InvI, InvPtr, J, Affine, VecF, VecI, Acc };
-
-struct VClass {
-    VK kind = VK::Fail;
-    int64_t off = 0;          // Affine：j+off；Convert j_src：[j+off, j+off+1]
-    VReg list = kNoReg;       // VecF/VecI 来自 IndexLoad 时的 list vreg
-    bool is_load = false;     // VecF/VecI 是内存装载（vs 算术）
-    VReg mov_src = kNoReg;    // Mov 透明别名
-    bool j_src = false;       // Convert 输入是归纳变量 j（或 j+常量）
-};
-
-// 一条下标访问的仿射描述（P1）：coef*j + inv + off。结构定义在
-// codegen_vect.h（VAccess）：AVX2 4-lane 发射器要读同一份访问描述。
+// 向量值分类 VK / VClass 定义在 codegen_vect.h：codegen_vect_jvec.cpp 的
+// 寄存器规划要读同一份分类。一条下标访问的仿射描述（P1）：coef*j + inv + off，
+// 结构定义同在 codegen_vect.h（VAccess）：AVX2 4-lane 发射器要读同一份描述。
 
 uint64_t f64_bits(double x) {
     uint64_t u;
@@ -283,6 +270,10 @@ bool AsmGen::try_vect_loop(const Block& b) {
     bool failed = false;
     bool has_int_mul = false;                            // int 乘 → pmuludq 重建需序列 scratch
     bool has_convert = false;                            // int→float Convert → cvtdq2pd 折算序列
+    // int // 2^m → 算术右移合成需 1 个序列 scratch（% 不用，见 intdiv 文件）。
+    bool has_intdiv = false;
+    // 归纳变量 j 参与整数算术（P5b）：要物化 [j, j+1] 到临时 xmm。
+    bool has_j_operand = false;
 
     // 下标仿射偏移：j → 0；j+c（c>=0 常量）→ c；否则 -1。
     std::function<int64_t(VReg)> index_off = [&](VReg v) -> int64_t {
@@ -432,10 +423,25 @@ bool AsmGen::try_vect_loop(const Block& b) {
                 break;
             }
             case IrOp::Bin: {
-                VK ka = classify(d->a), kb = classify(d->b);
+                // P5：// 与 % 的除数是编译期正的 2 的幂常量时，它们和 Add/Sub/
+                // Mul 一样是**通用的**逐元素整数操作（标量那边早就降成一条
+                // sarq / andq；LLVM InstCombine、GCC tree-vect 同口径）。判据
+                // 只有「除数是不是 2 的幂常量」，没有任何形状/程序特判。
+                // 除数 vreg 不参与分类（不用广播它的值），只取移位量。
+                int dsh = -1;
+                const bool intdiv2 =
+                    (d->bop == BinKind::FloorDiv || d->bop == BinKind::Mod) &&
+                    vect_div_pow2(d->b, &dsh);
+                VK ka = classify(d->a);
+                VK kb = intdiv2 ? VK::InvI : classify(d->b);
                 bool fa = ir_is_float(ty_of(d->a)), fb = ir_is_float(ty_of(d->b));
                 auto float_ok = [](VK k) { return k == VK::InvF || k == VK::VecF; };
-                auto int_ok = [](VK k) { return k == VK::InvI || k == VK::VecI; };
+                // P5b：归纳变量 J 按 VecI 参与整数算术（发射期物化 [j, j+1]）。
+                // 它的值域是任意 i64，逐 lane 加/减/乘与标量逐位一致，不需要
+                // 守卫；只有 j 这个**结构身份**，没有形状/程序特判。
+                auto int_ok = [](VK k) {
+                    return k == VK::InvI || k == VK::VecI || k == VK::J;
+                };
                 bool ia = ty_of(d->a) && ty_of(d->a)->kind == TyKind::Int;
                 bool ib = ty_of(d->b) && ty_of(d->b)->kind == TyKind::Int;
                 if (fa && fb && float_ok(ka) && float_ok(kb)) {
@@ -447,15 +453,20 @@ bool AsmGen::try_vect_loop(const Block& b) {
                     }
                 } else if (ia && ib && int_ok(ka) && int_ok(kb) &&
                            (d->bop == BinKind::Add || d->bop == BinKind::Sub ||
-                            d->bop == BinKind::Mul)) {
+                            d->bop == BinKind::Mul || intdiv2)) {
                     // int 逐元素加/减：paddq/psubq 模 2^64 与标量 addq/subq 逐位一致。
                     // int 乘：pmuludq 奇偶 lane 组合全 i64 重建（无需值域守卫，
                     // 任意 i64 逐位等于 imulq 低 64 位，推导见发射处注释）。
-                    // int 除/位运算等不支持 → 保守跳过。
+                    // int // 与 %（除数为 2 的幂常量）：移位合成 / 取低位，见
+                    // codegen_vect_intdiv.cpp（floor 的 packed 合成要 SEQ1）。
+                    // 其余 int 除/位运算 → 保守跳过。
                     c.kind = VK::VecI;
                     if (d->bop == BinKind::Mul) has_int_mul = true;
+                    if (ka == VK::J || kb == VK::J) has_j_operand = true;
+                    // 除数常量不进不变量广播：发射期只用编译期移位量。
+                    if (intdiv2 && d->bop == BinKind::FloorDiv && dsh > 0) has_intdiv = true;
                     if (ka == VK::InvI) inv_ints.push_back(d->a);
-                    if (kb == VK::InvI) inv_ints.push_back(d->b);
+                    if (!intdiv2 && kb == VK::InvI) inv_ints.push_back(d->b);
                 } else {
                     c.kind = VK::Fail;
                 }
@@ -510,6 +521,9 @@ bool AsmGen::try_vect_loop(const Block& b) {
         return c.kind;
     };
 
+    // 使用点分类（P5b）：仿射式折叠进寻址的前提是「只当下标用」。
+    std::unordered_map<VReg, char> nonindex_use;
+    vect_mark_nonindex_uses(&nonindex_use);
     // 体块指令角色判定 + 分类。任何非结构指令必须可向量化或可跳过。
     // 角色定义在 codegen_vect.h：AVX2 4-lane 发射器按同一张表逐条重放。
     using Role = VRole;
@@ -555,12 +569,15 @@ bool AsmGen::try_vect_loop(const Block& b) {
             case IrOp::Bin: {
                 if (is_red_add(in.dst)) { role[i] = Role::Skip; break; }  // reduction add 折叠进 RedStore
                 // 仿射下标计算（j+c / coef*j+inv+off）折叠进寻址位移/基址，不发射。
-                // 只有 coef>0（真的含 j）才折叠：coef==0 的仿射式是不变量，
-                // 它可能被别的算式使用，必须照常走 classify/发射。
-                // 若含 j 的下标值还有别的用途，那个用途的分类会 Fail（J 不在
-                // Bin 的操作数允许集里）→ 整段保守跳过，不会漏算。
+                // 两个前提：coef>0（真的含 j；coef==0 的仿射式是不变量，可能被
+                // 别的算式使用，必须照常 classify/发射），且**全部使用点都是
+                // 下标**（P5b：j 参与算术后，i+j 这类值可能既当下标又当算术语；
+                // 折叠掉却仍被算术引用 → 发射期查不到寄存器 → 半截 asm）。
                 { AffIdx af = vect_affine_index(in.dst, jalias, inv_int_ok);
-                  if (af.ok && af.coef > 0) { role[i] = Role::Skip; break; } }
+                  if (af.ok && af.coef > 0 &&
+                      nonindex_use.find(in.dst) == nonindex_use.end()) {
+                      role[i] = Role::Skip; break;
+                  } }
                 VK k = classify(in.dst);
                 role[i] = (k == VK::VecF || k == VK::VecI) ? Role::Bin : Role::Fail;
                 break;
@@ -762,9 +779,15 @@ bool AsmGen::try_vect_loop(const Block& b) {
     // 单条 Bin 发射内原子完成，跨指令不 live（两序列可共用），先占使不变量/
     // acc/临时值线性扫描不会占用。放不下保守跳过。
     MReg SEQ1 = kMRegNone, SEQ2 = kMRegNone;
-    if (has_int_mul || has_convert) {
-        SEQ1 = take(kMRegNone); SEQ2 = take(kMRegNone);
-        if (SEQ1 == kMRegNone || SEQ2 == kMRegNone) return false;
+    // 归纳变量物化（P5b）也要 SEQ1 当第二条 lane 的临时落点。
+    if (has_int_mul || has_convert || has_intdiv || has_j_operand) {
+        SEQ1 = take(kMRegNone);
+        if (SEQ1 == kMRegNone) return false;
+        // 只有乘/Convert 要第二条（两序列在同一条 Bin 里成对使用）。
+        if (has_int_mul || has_convert) {
+            SEQ2 = take(kMRegNone);
+            if (SEQ2 == kMRegNone) return false;
+        }
     }
     // Convert 折算常量 2^32（double 广播，见发射处推导）。
     MReg TWO32 = kMRegNone;
@@ -787,6 +810,8 @@ bool AsmGen::try_vect_loop(const Block& b) {
             v = it->second.mov_src;
         }
     };
+    // 同值常量归并（实现见 codegen_vect_jvec.cpp）：广播寄存器只占一个。
+    vect_merge_const_invs(&cls);
     std::vector<VReg> uniq_inv;
     for (VReg v : inv_floats) {
         VReg r = resolve_src(v);
@@ -834,6 +859,11 @@ bool AsmGen::try_vect_loop(const Block& b) {
         int pos = (lu == last_use.end()) ? r.store_pos : std::max(lu->second, r.store_pos);
         last_use[er] = pos;
     }
+    // 归纳变量物化寄存器（P5b）：生命周期只由算术使用点决定（纯下标用的 j
+    // 不需要它）。分配/释放见 vect_alloc_temps。
+    MReg JVEC = kMRegNone;
+    int j_first = -1, j_last = -1;
+    vect_j_span(BI, role, cls, &j_first, &j_last);
     // float 保序提取会 movhlps 破坏 expr 寄存器：expr 末次使用晚于本 RedStore
     //（被另一 reduction/map 存储共享）时必须用 scratch 副本提取。先占 FSCR。
     MReg FSCR = kMRegNone;
@@ -856,28 +886,18 @@ bool AsmGen::try_vect_loop(const Block& b) {
             auto ir = inv_reg.find(r);
             return ir == inv_reg.end() ? kMRegNone : ir->second;
         }
+        if (it->second.kind == VK::J) return JVEC;      // 归纳变量物化值
         auto tr = tmp_reg.find(r);
         return tr == tmp_reg.end() ? kMRegNone : tr->second;
     };
-    for (size_t i = 0; i < BI.size(); ++i) {
-        const Inst& in = BI[i];
-        if (role[i] == Role::Load || role[i] == Role::Bin) {
-            VReg r = resolve_src(in.dst);
-            MReg rd = take(kMRegNone);
-            if (rd == kMRegNone) return false;
-            tmp_reg[r] = rd;
-        }
-        // 释放本指令操作数中末次使用的临时值。
-        VReg ops[3] = {in.a, in.b, in.c};
-        for (VReg op : ops) {
-            if (op == kNoReg) continue;
-            VReg r = resolve_src(op);
-            auto lu = last_use.find(r);
-            if (lu != last_use.end() && lu->second == static_cast<int>(i)) {
-                auto tr = tmp_reg.find(r);
-                if (tr != tmp_reg.end()) xmm_pool.push_back(tr->second);  // tmp_reg 永久保留供发射
-            }
-        }
+    // 临时值线性扫描（含归纳变量物化寄存器的分配/释放），见 vect_alloc_temps。
+    {
+        VTempPlan plan;
+        plan.body = &BI; plan.role = &role; plan.last_use = &last_use; plan.cls = &cls;
+        plan.pool = &xmm_pool; plan.tmp_reg = &tmp_reg;
+        plan.jvec = JVEC; plan.j_first = j_first; plan.j_last = j_last;
+        if (!vect_alloc_temps(&plan)) return false;
+        JVEC = plan.jvec;
     }
 
     // ── 全部分析通过 → 发射向量前奏 ──────────────────────────────────────
@@ -969,6 +989,7 @@ bool AsmGen::try_vect_loop(const Block& b) {
     avx.kcoefs = &kcoefs; avx.kreg = &kreg;
     avx.jreg = JREG; avx.j_stack = j_stack; avx.jloc = jloc; avx.n_op = n_op;
     avx.gscr = GSCR; avx.seq1 = SEQ1; avx.seq2 = SEQ2; avx.hscr = HSCR;
+    avx.jvec = JVEC; avx.has_j = (JVEC != kMRegNone);
     avx.vec = &vec; avx.int_ok = avx_int;
     std::string vexit;                        // 两条循环的公共出口标签
     const bool avx2 = vect_avx2_emit(avx, &vexit);
@@ -998,6 +1019,10 @@ bool AsmGen::try_vect_loop(const Block& b) {
             case Role::Bin: {
                 VReg r = resolve_src(in.dst);
                 MReg rd = tmp_reg[r];
+                // P5b：归纳变量当整数算术操作数 —— 本轮首个使用点物化一次
+                // [j, j+1]（序列与 Convert 的 j_src 分支同一份）。
+                if (JVEC != kMRegNone && static_cast<int>(i) == j_first)
+                    vect_jvec2(JREG, 0, JVEC, SEQ1);
                 if (in.op == IrOp::Convert) {
                     // i64→f64 折算（与标量 cvtsi2sdq 逐位一致，任意 i64）：
                     //   x = hi_s*2^32 + lo_u（hi_s 算术高32 ∈ [-2^31,2^31)，
@@ -1011,11 +1036,7 @@ bool AsmGen::try_vect_loop(const Block& b) {
                     const VClass& cc = cls[r];
                     if (cc.j_src) {
                         // 构造 [j+off, j+off+1]（j 任意 i64，折算无需范围守卫）。
-                        emit2(MOp::kLeaq, op_mem(JREG, cc.off), kRax);
-                        emit2(MOp::kMovq, kRax, rd);
-                        emit2(MOp::kLeaq, op_mem(JREG, cc.off + 1), kRax);
-                        emit2(MOp::kMovq, kRax, SEQ1);
-                        emit2(MOp::kMovlhps, SEQ1, rd);
+                        vect_jvec2(JREG, cc.off, rd, SEQ1);
                     } else {
                         MReg ra = xmm_of(in.a);
                         if (ra == kMRegNone) return false;  // 不应发生（dry-run 完备）
@@ -1040,9 +1061,22 @@ bool AsmGen::try_vect_loop(const Block& b) {
                     emit2(MOp::kAddpd, SEQ1, rd);          // 单次舍入 = cvtsi2sdq
                     break;
                 }
-                MReg ra = xmm_of(in.a), rb = xmm_of(in.b);
-                if (ra == kMRegNone || rb == kMRegNone) return false;  // 不应发生
+                // int // 与 %（除数为 2 的幂常量）：只读被除数，除数只用
+                // 编译期移位量（不占寄存器、不参与广播）。
+                int dsh = -1;
+                const bool intdiv2 =
+                    (in.bop == BinKind::FloorDiv || in.bop == BinKind::Mod) &&
+                    vect_div_pow2(in.b, &dsh);
+                MReg ra = xmm_of(in.a);
+                MReg rb = intdiv2 ? kMRegNone : xmm_of(in.b);
+                if (ra == kMRegNone || (!intdiv2 && rb == kMRegNone)) return false;  // 不应发生
+                if (intdiv2 && in.bop == BinKind::FloorDiv && dsh > 0 &&
+                    SEQ1 == kMRegNone) return false;                     // 不应发生
                 if (rd != ra) emit2(MOp::kMovapd, ra, rd);
+                if (intdiv2) {
+                    vect_intdiv2(rd, SEQ1, in.bop == BinKind::Mod, dsh);
+                    break;
+                }
                 const bool is_int = ty_of(in.dst) && ty_of(in.dst)->kind == TyKind::Int;
                 MOp op = MOp::kAddpd;
                 if (is_int) {
