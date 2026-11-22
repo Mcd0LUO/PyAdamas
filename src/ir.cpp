@@ -706,6 +706,16 @@ bool ir_module_needs_unknown_index(const IRModule& m) {
                     // RcIncUnknown / RcDecUnknown：只在**操作数是裸 unknown**
                     // 时才需要索引。若该 vreg 的静态类型是具体容器（元素由
                     // 位图覆盖），这些调用是容器内部的元素计数，不反查。
+                    // 未显式类型的 `{}`：pa_dict_new 的 key_kind 可能是 3（未知）
+                    // 或 9（raw-or-big）。运行时要按内容哈希/比较 str 键，必须用
+                    // 精确堆索引探针（索引关闭只剩堆链回退），这里强制保留。
+                    if (fn == RtFn::DictNew && !in.args.empty()) {
+                        int64_t kk = -1;
+                        for (const auto& cb : f.blocks)
+                            for (const auto& ci : cb.insts)
+                                if (ci.op == IrOp::ConstInt && ci.dst == in.args[0]) kk = ci.imm;
+                        if (kk == 3 || kk == 9) return true;
+                    }
                     if (fn == RtFn::RcIncUnknown || fn == RtFn::RcDecUnknown) {
                         // 同上：裸 unknown 操作数保留索引。
                         TypePtr at = !in.args.empty() && in.args[0] < f.vreg_ty.size()

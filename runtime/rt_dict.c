@@ -54,31 +54,36 @@ static uint64_t dict_big_hash(const PyAdamasBig* b) {
     return mix64(h);
 }
 
+
+// 字符串键哈希（含 chash 缓存）。kind==1（静态 str 键）与「运行时才认出
+// 是堆字符串的 unknown 键」共用这一份。
+static int64_t dict_str_hash(PyAdamasStr* s) {
+    if (s->chash != 0) return s->chash;
+    uint64_t h = 1469598103934665603ull;
+    for (int64_t i = 0; i < s->len; ++i) {
+        h ^= (unsigned char)s->data[i];
+        h *= 1099511628211ull;
+    }
+    h = mix64(h);
+    int64_t hv = (int64_t)(h ? h : 1);
+    s->chash = hv;
+    return hv;
+}
+
+// unknown 键（key_kind 3「未知/其它」，以及 9 的 raw 分支）在运行时认出
+// 是堆字符串时必须按**内容**哈希/比较。`{}` 字面量在没有类型上下文时建出
+// key_kind=3 的 dict（按机器字比指针）；之后用动态构造/列表元素/函数参数
+// 传来的 str 当键，等值的新对象会查不到（KeyError）。判据只看运行时值。
+static int dict_key_is_heap_str(int64_t v) {
+    if (!pa_unknown_is_heap(v)) return 0;
+    PyAdamasRc* h = (PyAdamasRc*)(uintptr_t)((uint64_t)v - PYADAMAS_RC_HDR);
+    return h->kind == PYADAMAS_RC_STR;
+}
+
 int64_t dict_hash_value(int64_t kind, int64_t v) {
     uint64_t h;
     if (kind == 1) {
-        PyAdamasStr* s = (PyAdamasStr*)v;
-        /* **哈希缓存：所有长度都走 chash。**
-         *
-         * 原来只有 len > 7 能用 hash 字段缓存 —— 短串走 SSO，字符内联在
-         * hash 字段里，没有位置存。而词频统计这类场景恰恰全是短键
-         * （alpha/beta/gamma…），每次查找都要重跑 FNV。
-         *
-         * 实测同样的 16 个键、同样内容，只把长度从 7 改成 8（触发缓存）：
-         *   174.3ms -> 116.6ms（-33%）。
-         *
-         * 现在 chash 是独立字段（偏移 32），SSO 和堆串都能用。
-         * 0 = 未算；非 0 = 已算。字面量在编译期填好。 */
-        if (s->chash != 0) return s->chash;
-        h = 1469598103934665603ull;
-        for (int64_t i = 0; i < s->len; ++i) {
-            h ^= (unsigned char)s->data[i];
-            h *= 1099511628211ull;
-        }
-        h = mix64(h);
-        int64_t hv = (int64_t)(h ? h : 1);
-        s->chash = hv;
-        return hv;
+        return dict_str_hash((PyAdamasStr*)v);
     } else if (kind == 2) {
         double d;
         memcpy(&d, &v, sizeof d);
@@ -89,15 +94,19 @@ int64_t dict_hash_value(int64_t kind, int64_t v) {
         int64_t bv = 0;
         /* 放得进 int64 的 big 用**和 raw 键相同的哈希**，否则 `d[5]` 找不到
            `d[big(5)]` 写的那个槽（值相等、哈希不同）。 */
-        if (!b) h = mix64((uint64_t)v);
+        if (!b)
+            h = dict_key_is_heap_str(v) ? (uint64_t)dict_str_hash((PyAdamasStr*)v)
+                                       : mix64((uint64_t)v);
         else if (dict_big_fits_i64(b, &bv)) h = mix64((uint64_t)bv);
         else h = dict_big_hash(b);
+    } else if (kind == 3 && dict_key_is_heap_str(v)) {
+        /* 未知键域：运行时认出堆字符串 → 按内容哈希。否则 `{}` 在没有类型
+           上下文时建出的 key_kind=3 dict 对 str 键退化按指针身份比较。 */
+        return dict_str_hash((PyAdamasStr*)v);
     } else {
         h = mix64((uint64_t)v);
     }
-    // 0.281：单次 mix64 已是全雪崩双射，第二次纯浪费 —— int/float 键
-    // 双重 mix 占 rec_memo 运行时 17.6%。字符串路径在上面提前返回，
-    // 与编译期字面量哈希（FNV + 单次 mix64）本来就一致。
+    // 0.281：单次 mix64 已是全雪崩双射，第二次纯浪费。
     return (int64_t)(h ? h : 1);
 }
 
@@ -119,7 +128,16 @@ int dict_key_eq(int64_t kind, int64_t a, int64_t b) {
         return x == y;
     }
     if (a == b) return 1;
+    if (kind == 3) {
+        /* 未知键域：两边都是堆字符串时按内容比（与 dict_hash_value 的
+           kind==3 分派配套）。 */
+        if (dict_key_is_heap_str(a) && dict_key_is_heap_str(b))
+            return pa_str_eq((PyAdamasStr*)a, (PyAdamasStr*)b) != 0;
+        return 0;
+    }
     if (kind == DICT_KEY_RAW_OR_BIG) {
+        if (dict_key_is_heap_str(a) && dict_key_is_heap_str(b))
+            return pa_str_eq((PyAdamasStr*)a, (PyAdamasStr*)b) != 0;
         PyAdamasBig* x = dict_big_key(a);
         PyAdamasBig* y = dict_big_key(b);
         if (x && y) return pa_big_eq(x, y);
