@@ -30,37 +30,40 @@
 
 ## 2. 通用向量化现在到底覆盖了什么
 
-拿 `PYADAMAS_VECT_DBG=1` 跑 12 个基准，统计实际触发次数（0.417 之后、默认管线）：
+拿 `PYADAMAS_VECT_DBG=1` 跑 12 个基准，统计实际触发次数（**0.423 之后**、默认管线）：
 
 | 用例 | 触发的循环数 | 覆盖原因 |
 |---|---|---|
 | `matmul` | **4** | P1 仿射下标（coef>1 gather）+ P3 AVX2 4-lane 整数路径 |
 | `spectral_norm` | **4** | P5：整数 floor 除法（2 的幂除数）+ 归纳变量参与算术；0.413 借用 xmm8-15 后第二份内联内层也触发（其中 2 个在**未被调用**的死代码副本里，运行时 2 个） |
 | `nbody` | **2** | 0.411：`energy` 内层（sqrt + float Sub 归约 + coef==0 广播装载）；0.414：`advance` 内层（重复地址 RMW + 散射写 + 跨 coef 区间守卫） |
-| 其余 9 个 | **0** | 见 [vectorization-coverage.md](vectorization-coverage.md) |
+| `sieve` | **1** | 0.423：计数循环 `while i < N: if flags[i] == 1: count += 1; i += 1` —— 0.420 全局提升把 `i/count` 变成槽，0.423 补第二遍 if-conversion（pass 顺序）+ `Cmp(Eq/Ne)→VecI(0/1)` + bool 参与归约；SSE2 2-lane。初始化 append 循环与跨步清零循环仍 0（调用/步长非 1） |
+| 其余 8 个 | **0** | 见 [vectorization-coverage.md](vectorization-coverage.md) |
 
 > matmul 的 4 条是**日志行数**（2 个循环 × `vectorize` + `avx2 4-lane` 各一行），
-> 按循环计是 2 个。合计 **10 条触发记录 / 8 个循环 / 3 个基准** —— 此前文档里
-> 沿用的「10 个循环」是日志行数口径，按循环计是 8 个。
+> 按循环计是 2 个；sieve 的 1 条是 1 个循环。合计 **4 个基准 / 11 条触发记录**
+> （matmul 4、spectral_norm 4、nbody 2、sieve 1；按循环计 9 个）。
 
-合计 **10 条触发记录 / 8 个循环 / 3 个基准**（0.417 收尾时实测）。0.384 关特化时这个数字是
-**1/12**（只有 matmul 内层）；P1/P3/P5 之后 6 个，0.411 的 coef==0 广播装载补上
-nbody `energy`，0.413 借用 RA 未占用的 xmm8-15 补上 spectral_norm 第二份内层，
-0.414 的大轮补上 nbody `advance`。**其余 9 个的逐条阻塞点见
-[vectorization-coverage.md](vectorization-coverage.md)**（9/9 都止步于前置门，
-不是判据太保守）。
+0.384 关特化时这个数字是 **1/12**（只有 matmul 内层）；P1/P3/P5 之后 6 个，0.411 的 coef==0
+广播装载补上 nbody `energy`，0.413 借用 RA 未占用的 xmm8-15 补上 spectral_norm 第二份内层，
+0.414 的大轮补上 nbody `advance`，**0.423 补上 sieve 计数循环**（`Cmp(Eq/Ne)→VecI` + bool 归约
++ pass 顺序修正）。**其余 8 个的逐条阻塞点见 [vectorization-coverage.md](vectorization-coverage.md)**。
 
 **当前 -O2 指令数收益（`perf stat`，3 次取最小）**：
 `spectral_norm` **247,401,494 → 96,483,489（−61.00%）** —— 其中 0.414 收尾时是
 186,399,503（−24.66%），0.417 的 32 位守卫快路径再贡献 **186,399,455 → 96,483,489
 （−48.24%）**；
 `nbody` **199,390,637 → 109,290,105（−45.19%）**；
-`matmul` 10,605,949 → 10,605,926（持平 —— P3 时已经拿到 AVX2 4-lane 的收益）。
-其余 9 个基准指令数无真实变化（`binary_trees` 为同二进制测量噪声 +0.33%，见收尾矩阵）。
+`matmul` 10,605,949 → 10,605,926（持平 —— P3 时已经拿到 AVX2 4-lane 的收益）；
+**`sieve` 104,389,540 → 95,431,674（−8.58%）** —— 其中 0.420 全局提升（标量路径）贡献
+104,389,540 → 100,223,136（−3.99%），0.423 计数循环向量化再贡献 100,223,185 → 95,431,674
+（−4.78%；触发 1 次，SSE2 2-lane）。
+其余 8 个基准指令数无真实变化（`binary_trees` 为测量噪声 ±0.5%；`wordfreq` +0.078% 是 0.422
+的 runtime 索引保留代价）。
 
 **0.417 之后通用路径与特化的差距**：spectral_norm **1.15×**（96.48M vs 83.92M，
 原 2.22×）、nbody **2.00×**（109.29M vs 54.49M）、matmul **通用快 1.39×**
-（10.61M vs 14.74M）；其余 9 个特化 0 命中、完全相同。
+（10.61M vs 14.74M）；其余基准特化 0 命中、完全相同（sieve 的特化模板也是 0 命中，其计数循环由通用路径覆盖，见 §2）。
 
 特化模板之所以当年能赢 4.5×，正是因为它把那 11 个里的 3 个用「精确形状」硬编码了；
 通用路径现在的目标不是覆盖全部，而是把「可覆盖但被保守判据挡住」的补上 ——
@@ -84,10 +87,15 @@ nbody `energy`，0.413 借用 RA 未占用的 xmm8-15 补上 spectral_norm 第�
 | 跨 coef 运行期别名守卫 | 0.414（B5） | 同组按偏移差判定；异组发「地址区间不相交」入口守卫，失败跳标量尾 |
 | 借用 RA 未占用的 xmm8-15 | 0.413 | 追加在寄存器池尾；只影响原本「差一两个 xmm」被拒的循环 |
 | **32 位守卫快路径**（int64 索引算术） | 0.417 | `Convert(i64→f64)` 的表达式子树含 int64 乘时，入口守卫证明「`n <= K` 且每个参与的不变量 `0 <= inv < K`」（K 由区间上界二分得出，sn 得 32768），此后：乘 → 单条 `pmuludq`、`//2^m` → 单条 `psrlq`、i64→f64 → `pshufd+cvtdq2pd` 两条；守卫失败跳标量尾。实测 sn 内层 51 → 26 条/迭代。判据仍是纯 IR 结构，无基准特判（11/12 基准 0 命中，不付守卫成本） |
+| **`Cmp(Eq/Ne) → 0/1 整数向量** | 0.423 | 整数 `Eq`/`Ne`（操作数 int/bool）分类成 `VecI`，发射 `pcmpeqd + pshufd $0xB1 + pand`（64 位 lane 全 1 掩码）再 `psrlq $63` 得 0/1（Ne 取反），与标量 `sete/setne` 逐位一致、任意 i64 无需值域守卫 |
+| **`bool` 作为 int 0/1 参与算术与归约** | 0.423 | `Bin` 的整数判据允许 `Bool` 操作数，归约识别接住 `count += cond`（`paddq` 模 2^64 + 出口水平求和）。注意：**含 `Cmp` 的循环强制走 SSE2 2-lane**（AVX2 4-lane 发射器没有 Cmp 序列） |
 
 **已知不支持**（一律保守跳过，不会生成错代码）：
 
 - **int 的 Sub 归约**（float 的 `s -= x` 已支持，0.409）；
+- **有序比较 Lt/Le/Gt/Ge 与 float 比较的向量化**：SSE2 2-lane 下 64 位有符号比较要 32 位拆半 + 符号
+  修正（约 6~8 条），成本高于收益 → 分类器保持 `Fail`（标量 fallback，输出正确）；0.423 只做
+  `Eq`/`Ne` 的 0/1 向量（`sieve` 的 `cmp.eq` 就是它）；
 - **`coef>1` 的 int 写**（float 散射写已支持，0.414；int 写仍要求 `coef==1`）；
 - **嵌套循环形状**：只认 cond/body/incr 三块直线体，外层循环的 body 跳的是内层
   preheader 而不是 incr，直接跳过（nbody `advance` 的 steps/i 外层、`energy` 外层）；
@@ -113,7 +121,7 @@ nbody `energy`，0.413 借用 RA 未占用的 xmm8-15 补上 spectral_norm 第�
 | `matmul` | ✅ 已覆盖（2 个循环 / 4 条日志） | P1 仿射下标（`coef>1` gather）+ P3 AVX2 4-lane 整数路径 |
 | `spectral_norm` | ✅ 已覆盖（4 个循环，运行时 2 个） | P5：`eval_a` 里的 `//`（2 的幂除数）+ `(i+j)*(i+j+1)` 的归纳变量算术；0.417 又用 32 位守卫快路径把内层压到 26 条/迭代。另 2 个触发在未被调用的 `mul_ata_2`/`mul_a_3` 死代码副本里 |
 | `nbody` | ✅ 运行时覆盖（2 个循环） | `energy` 内层（sqrt + Sub 归约 + coef==0 广播装载）+ `advance` 内层（重复地址 RMW + 散射写 + 跨 coef 区间守卫）；`advance` 的 steps/i 外层仍是嵌套形状 |
-| `sieve` | ❌ 0 触发（**全局变量**） | 两个热循环：跨步清零的归纳变量/数组是模块级全局（且步长 `p`≠1）；计数的体块以 `branch` 结尾（体内 if）。见覆盖率文档 §3.2 |
+| `sieve` | ✅ 已覆盖（**1 个循环**，0.423） | 计数循环 `while i < N: if flags[i] == 1: count += 1; i += 1`：0.420 全局提升把全局变槽 + 0.423 补第二遍 if-conversion（pass 顺序，不是放宽判据）+ `Cmp(Eq/Ne)→VecI` + bool 归约；sieve 100,223,185 → **95,431,674（−4.78%）**。另两个热循环（初始化 append、跨步清零）仍 0：调用 / 步长非 1。详见 [vectorization-coverage.md](vectorization-coverage.md) §3.2 |
 | `collatz` / `mandelbrot` | ❌ 0 触发（**数据依赖 while**） | collatz `while n != 1` 的 trip count 不可知 + if/else 多块；mandelbrot 内层 `while i < maxiter and …` 的数据依赖提前退出 + `and` 短路块、外层嵌套。见 §3.1/§3.4 |
 | `nqueens` | ❌ 0 触发 | `place` 的 `for c` 体块以 `branch` 结尾（and 链拆块）+ 递归调用；初始化循环是 append 调用。见 §3.3 |
 | `fasta` / `wordfreq` | ❌ 0 触发 | 热循环体是 RNG/字符串拼接/dict 操作（调用）+ 体块以 `branch` 结尾，module-level 循环用全局；调用就是 work 本身，本来就不适合 SIMD |
@@ -213,13 +221,15 @@ n=0/1/2/3/5、负值、以及「体里有调用 → 保守 fallback」）。
 
 1. **步长是运行期值**（`p` 是循环不变量但不是编译期常量），而 x86 寻址的
    scale 只有 1/2/4/8 —— 超过 8 必须每条 lane 单独算地址，向量化收益归零；
-2. `sieve` 的变量还是**模块级全局**（`load.global` / `store.global` + RC 调用），
-   向量化器明确拒绝 `store.global`；
+2. `sieve` 的变量在 0.418 时还是**模块级全局**（`load.global` / `store.global` + RC 调用），
+   向量化器明确拒绝 `store.global`；**0.420 全局提升后它们已变成槽**，这一条不再是阻塞，
+   但剩下的两条（步长 `p`≠1、体内 `pa_rc_dec_unknown` 调用被 loop_ops 拒）仍然成立；
 3. 就算把代码挪进函数，触发数**仍然是 0**（实测），因为那条循环是「跨步写常量」，
    本来就没有 packed store 可用。
 
 结论：这条从路线图里划掉。`sieve` 那类循环该靠别的手段（例如 stdlib 层的
 `list.__setitem__` 批量接口），不是向量化。
+（0.423 的进展不在这条：向量化的是**计数循环**（步长 1、`cmp.eq` 归约），见 §2。）
 
 ### P3 · 4-lane（AVX2）
 

@@ -98,6 +98,9 @@
   `collatz`/`mandelbrot` 数据相关 while，按设计本来就不适合 SIMD；`fasta`/`wordfreq`
   是伪随机状态推进/字典操作。
   > 后续（0.413/0.414）：**10 个循环 / 3 个基准**（matmul 4、spectral_norm 4、nbody 2）。
+  > 后续（0.420/0.423）：sieve 的**计数循环**向量化（触发 1 次，sieve 指令数 vs 0.418 基线
+  > −8.58%）；当前覆盖 **4 个基准 / 11 条触发记录**（matmul 4、spectral_norm 4、nbody 2、sieve 1），
+  > 其余 8 个基准 0 触发。
   > 9 个 0 触发基准的逐条阻塞点见 [vectorization-coverage.md](vectorization-coverage.md)
   > （0.418 诊断归档：9/9 都止步于前置门，不是判据太保守）。
 - **原计划 B2（删特化优先级）/ B3（spectral_norm 剩余热点）未做**。

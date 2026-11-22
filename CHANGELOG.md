@@ -4,6 +4,104 @@
 
 早期阶段没有逐条留痕，按阶段归纳；0.4 之后逐条记录。
 
+## [0.423] - 2026-11-23
+
+> perf(vect)：sieve 计数循环向量化 —— **触发数 0 → 1、指令数 −4.78%**（100,223,185 → 95,431,674）。
+>
+> ### 第 1 步：先钉死门序（10 分钟）
+>
+> 在 `simd_incr_cond_ok` / `simd_while_shape_ok` 的每个 `return false` 前加 stage 打印，并在进入时 dump
+> 两个块的指令。sieve 计数循环的候选体块（`body=14`）dump 出来仍以 **`Branch`** 结尾
+> （`if flags[i]==1` 的三块菱形还在），在 `try_loop` 的**终止符门**（`vect_planner_loop.cpp:53`）就被拒，
+> 根本没走到 while 形状检查；`rot.latch` 本身正常（3 条 `LoadSlot/Cmp Lt/Branch`）。
+>
+> **真凶是 pass 顺序**：`if_convert_accumulators` 在 `promote_globals_in_loops` **之前**跑 —— 那时 `count`
+> 还是全局，被 0.419 的「槽累加器 ±1」保守门拒绝；promote 之后没有第二遍 if-conversion。
+> 上一轮报告「还差 Cmp/bool」的判断是错的（那是第二道门）。
+>
+> ### 修法
+>
+> 1. `src/opt.cpp`：在 `promote_globals_in_loops` 之后**再跑一遍 `if_convert_accumulators`**（判据/变换不变，
+>    纯调度；让「全局已提升成槽」的菱形重新有机会匹配）。**不放宽判据**、无基准特判。
+> 2. `classify` 新增 `IrOp::Cmp`：整数 **Eq/Ne** → `VK::VecI`（0/1 lane）；有序比较（Lt/Le/Gt/Ge）与
+>    float 比较保持 `Fail`（SSE2 2-lane 下需合成 64 位有符号比较，成本 > 收益）。
+> 3. `Bin` 的 int 操作数判据允许 `Bool`（bool ≡ i64 0/1），`count += cond` 归约被 `RedStore` 接住。
+> 4. 角色：`Cmp` → `Role::Bin`；`Loop.has_cmp`；scratch 计入（借 `SEQ1`）；**含 Cmp 的循环强制 SSE2 2-lane**
+>    （4-lane 发射器没有 Cmp 序列）。
+> 5. 发射序列（0/1 i64 lane，任意 i64 无需值域守卫）：
+>    `movapd a,rd; pcmpeqd b,rd; movapd rd,SEQ1; pshufd $0xB1,SEQ1; pand SEQ1,rd`
+>    （Ne 再 `pcmpeqd SEQ1,SEQ1; pxor SEQ1,rd`）；最后 `psrlq $63,rd` → 0/1。
+>    新增 `MOp::kPcmpeqd` / `kPand`（只登记助记符）。
+>
+> ### 结果
+>
+> | 项 | 改前 | 改后 |
+> |---|---|---|
+> | sieve 输出 | 41538 | 41538（与 CPython 一致） |
+> | sieve 指令数 | 100,223,185 | **95,431,674（−4.781%）** |
+> | 触发数 | 0 | **1**（`[vect] vectorize loop body bb14 (sJ=1 reds=1 lists=1 inv=1)`） |
+>
+> （指令数本地 3 轮最小 95,431,674；lead 独立验证 95,431,641，差 33 条 = 测量噪声。）
+>
+> 12 基准 36/36 输出一致、无回退 >1%（wordfreq +0.078% 是 0.422 的既有代价，本轮未变）；
+> `PYADAMAS_SIMD=1`：matmul 10,126,808 / spectral_norm 94,637,430（10.1M / 94.6M 量级保持）。
+> 新用例 `tests/run/488_cmp_bool_vec.py`（135 行）：Eq/Ne 参与累加与算术、有序比较、float 比较、
+> 边界（相等/不等/0/负数/2^31/2^63 级）、bool 存列表/相加；三档与 CPython 一致。
+> 闸门：384 ran ok / difftest 363-0 / ASan 384 ran ok 0 报告 / check_size 通过。
+
+## [0.422] - 2026-11-23
+
+> fix(rt)：无类型上下文 `{}` 的动态 str 键按指针身份比较（KeyError / 静默查不到）。
+>
+> ### 最小复现
+>
+> 无类型 `{}` + 动态构造的 str 键（如 append 建的 list 元素、`"k" + str(i)`）：
+> 修复前 -O0/-O1/-O2 全部 `KeyError: key not found`；修复后三档 `2 2`。
+> 缩维结论：字面量 list / `list[str]` 参数 / int 键 / 用**同一个**对象查表 都正常 —— 只与
+> 「key 静态是 unknown + dict 无类型上下文」有关；与 append 无关（append 只是动态 str 的来源）。
+>
+> ### 根因（IR 证据）
+>
+> `d = {}` 在无类型上下文下是 `dict[unknown, unknown]` → `pa_dict_new(key_kind=3, key_own=2, val_own=2)`；
+> `key_kind` 定义（`src/lower_impl_util.cpp:131`）：`default: return 3; // 其它/未知，按机器字比指针的语义`。
+> 运行期 `dict_hash_value(kind=3) = mix64(指针)`、`dict_key_eq(kind=3) = a == b` → 动态 str 键按**指针身份**
+> 比较，等值的新对象查不到；typed 上下文（`list[str]` / `dict[str,int]`）给 `key_kind=1`（内容哈希）→ 正常。
+> **这是长期存在的 bug**：-O0 就错（优化器未参与），不是最近任何一轮引入。
+>
+> ### 修法（`runtime/rt_dict.c` +70/−26、`src/ir.cpp` +10）
+>
+> 1. 抽出 `dict_str_hash()`（chash 缓存），kind==1 与「运行时认出的 str 键」共用；
+> 2. 新增 `dict_key_is_heap_str()` = `pa_unknown_is_heap` + RC kind==STR；
+> 3. `dict_hash_value`：kind==3 与 kind==9 的 raw 分支认出堆 str → 内容哈希；
+> 4. `dict_key_eq`：kind==3/9 的 raw 分支两边都是堆 str → `pa_str_eq`；其余（int/float/None/类键/big）
+>    原路径不动；
+> 5. `ir_module_needs_unknown_index`：`pa_dict_new` 的 key_kind 是 3/9 时强制保留精确堆索引（探针依赖）。
+>
+> ### 代价
+>
+> wordfreq **+0.078%**（+200,003 条：它有 untyped `{}` dict → 保留索引），远低于 1% 回退阈值；其余基准 ±0.00%。
+> 回归 `tests/run/487_append_list_rc.py`（148 行，8 组）。
+> 闸门：383 ran ok / difftest 362-0 / ASan 383 ran ok 0 报告 / check_size 通过。
+
+## [0.421] - 2026-11-23
+
+> revert：撤销 `e8faa8b`（`fuse_dict_bump` 放宽判据导致 -O2 SIGSEGV）。
+>
+> 0.419 的审计修复放宽了融合判据（允许 LICM 外提 key、允许常量夹在 get/add 之间、允许全局/常量 key），
+> 但把 `bump` 的 key 参数改成 `get.args[1]`（可能是 `index.get` 产生的**临时 vreg**）并删掉了
+> `rc_inc(key)` 的所有权转移。在「循环内 key 来自列表取值」的形状上
+> （`k = keys[i % 4]; d[k] = d.get(k, 0) + 1`）**-O2 SIGSEGV**（gdb：`dict_hash_key ← pa_dict_bump`，
+> key 指针失效）；-O0/-O1 正常。
+>
+> 处置：`src/opt_dict_bump.cpp` / `src/opt_dict_fuse.cpp` 回退到 `fdeea25`（严格判据：用 body 内重新
+> `LoadSlot` 的 key `ld2.dst`），崩溃消失；`tests/run/486_dict_bump.py` 保留并三档通过（strict 判据下
+> 仍有 3 处 `pa_dict_bump` 命中）。
+>
+> **教训**：放宽「所有权转移类」融合判据必须同时审查 RC 生命周期；微基准只覆盖常量 key 形状是不够的
+> —— 必须覆盖「临时 key / 列表取值 key / 函数参数 key」。后续若重做：key 必须是 preheader/同块的简单
+> `LoadSlot | LoadGlobal | ConstStr`，且与 `inck`/`set` 操作数是**同一个 vreg**，不做跨来源 `same_slot`
+> 匹配；临时 key 必须保留 `rc_inc`。
+
 ## [0.420] - 2026-11-23
 
 > 修 `promote_globals_in_loops` 的判据 bug——该 pass **自写入以来从未生效过**；sieve −3.99%。
