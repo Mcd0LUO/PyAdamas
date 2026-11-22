@@ -281,8 +281,8 @@ def write_markdown(path, rows, args):
         "",
         "**这里的 PyAdamas 是默认管线**：通用自动向量化（`src/codegen_vect.cpp`）"
         "默认开；照着基准循环形状写的特化 SIMD（`src/codegen_simd*.cpp`）自 0.384"
-        "起**移出默认管线**，只有 `PYADAMAS_SIMD=1` 才开。特化整套关掉后"
-        "`matmul`/`spectral_norm`/`nbody` 各慢 4.5× 左右，其余用例在噪声内 ——"
+        " 起**移出默认管线**，只有 `PYADAMAS_SIMD=1` 才开。特化整套关掉后 "
+        "`matmul`/`spectral_norm`/`nbody` 各慢 4.5× 左右，其余用例在噪声内；"
         "量化与泛化计划见 `docs/vectorization-generalization.md`。换句话说：这张表"
         "没有用靶子上的特化，`sieve`/`wordfreq` 这类写法与它们在同一口径下比较。",
         "",

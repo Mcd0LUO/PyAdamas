@@ -1,12 +1,12 @@
 # 四语言经典基准对比
 
-生成时间：2026-11-22 13:56
+生成时间：2026-11-22 13:59
 
 环境：Linux-7.0.0-38-generic-x86_64-with-glibc2.43，CPU 未识别；Python 3.14.4；go version go1.26.10 linux/amd64；g++ (Ubuntu 15.2.0-16ubuntu1) 15.2.0。
 
 每种实现 2 轮 × 每轮 9 次，取所有采样的最小值；PyAdamas 用 `/src/luo-proj/pyadamas/build/lead/pyadamas` 编译（生成码 `-O2`，每次 `--rebuild` 强制真编译），Go 用默认优化，C++ 用 `g++ -O2`。编译时间不计入；多租户机器上单轮绝对值能差 2 倍，所以这里按轮取最小值再合并。
 
-**这里的 PyAdamas 是默认管线**：通用自动向量化（`src/codegen_vect.cpp`）默认开；照着基准循环形状写的特化 SIMD（`src/codegen_simd*.cpp`）自 0.384起**移出默认管线**，只有 `PYADAMAS_SIMD=1` 才开。特化整套关掉后`matmul`/`spectral_norm`/`nbody` 各慢 4.5× 左右，其余用例在噪声内 ——量化与泛化计划见 `docs/vectorization-generalization.md`。换句话说：这张表没有用靶子上的特化，`sieve`/`wordfreq` 这类写法与它们在同一口径下比较。
+**这里的 PyAdamas 是默认管线**：通用自动向量化（`src/codegen_vect.cpp`）默认开；照着基准循环形状写的特化 SIMD（`src/codegen_simd*.cpp`）自 0.384 起**移出默认管线**，只有 `PYADAMAS_SIMD=1` 才开。特化整套关掉后 `matmul`/`spectral_norm`/`nbody` 各慢 4.5× 左右，其余用例在噪声内；量化与泛化计划见 `docs/vectorization-generalization.md`。换句话说：这张表没有用靶子上的特化，`sieve`/`wordfreq` 这类写法与它们在同一口径下比较。
 
 | 用例 | N | CPython | PyAdamas | Go | C++ | PyAdamas/CPython | PyAdamas/最快编译实现 | 输出一致 |
 |---|---|---|---|---|---|---|---|---|
