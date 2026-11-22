@@ -348,14 +348,18 @@ int main(int argc, char** argv) {
         // callee-saved 提升增强（默认关）：PYADAMAS_RA_OPT=1 开启，参与缓存失效。
         prog.ra_opt = std::getenv("PYADAMAS_RA_OPT") != nullptr &&
                       std::string_view(std::getenv("PYADAMAS_RA_OPT")) != "0";
-        // 浮点循环 SIMD 向量化（0.336 后默认开）：PYADAMAS_SIMD=0 显式关，参与缓存失效。
-        // 仅 opt>=2 非生成器非 tags 模块生效（codegen_simd 守卫），fallback 安全。
+        // 特化 SIMD（**默认关**，0.384）：codegen_simd*.cpp 是照着
+        // bench/compare 里那几个程序的循环体写出来的固定 IR 模板，属于对基准
+        // 的特化优化 —— 只有形状完全一致的代码才吃得到，等于把「测出来的性能」
+        // 当成「通用性能」。它继续留着只作对照，PYADAMAS_SIMD=1 显式开。
+        // 默认路径改走下面的通用向量化。
         const char* simd_env = std::getenv("PYADAMAS_SIMD");
-        prog.simd = !simd_env || std::string_view(simd_env) != "0";
-        // 通用循环自动向量化（默认关）：PYADAMAS_VECT=1 开启，参与缓存失效。
-        // 与特化 SIMD 互补：认任意可数循环 map/reduction（codegen_vect.cpp）。
+        prog.simd = simd_env && std::string_view(simd_env) != "0";
+        // 通用循环自动向量化（**默认开**，0.384）：认任意可数循环的
+        // map/reduction（codegen_vect.cpp），不依赖具体程序的形状。
+        // PYADAMAS_VECT=0 显式关。参与缓存失效。
         const char* vect_env = std::getenv("PYADAMAS_VECT");
-        prog.vect = vect_env && std::string_view(vect_env) != "0";
+        prog.vect = !vect_env || std::string_view(vect_env) != "0";
         // 整数循环优化（默认关）：PYADAMAS_LOOP_OPT=1 开推荐子集（掩码 3 =
         // 跳转线程化 + 仿射 BCE）。bit2 同块 load 去重实测负收益（matmul
         // BCE 收益被吃掉一半，见 docs/intloop-design.md §3），不进默认，

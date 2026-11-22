@@ -1,3 +1,4 @@
+# pyadamas: simd
 # SIMD reduction/map 综合：reduction 与标量 fallback、int map 与标量 fallback
 # 0.383 合并自 4 个文件：283_simd_reduction.py, 284_simd_reduction_scalar.py, 285_simd_int_map.py, 286_simd_int_map_scalar.py
 # 每段包在独立函数里，避免同名变量跨段冲突。

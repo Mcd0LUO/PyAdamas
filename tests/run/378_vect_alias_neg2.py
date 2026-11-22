@@ -1,3 +1,4 @@
+# pyadamas: vect
 # 通用向量化深化负例（PYADAMAS_VECT，0.351 块4）：int 乘 / Convert / 多
 # reduction 新路径的别名/依赖证不出 → 保守标量 fallback，输出仍须 ==CPython。
 # 覆盖：跨迭代依赖、运行时同对象别名、写后读、写偏移非0、循环变量外读、

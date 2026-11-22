@@ -1,3 +1,4 @@
+# pyadamas: vect
 # 通用向量化边界（PYADAMAS_VECT）：n=0/1/2、len<n 的 IndexError 时机、
 # kind 升级（混入非浮点）fallback。守卫不满足整段标量，异常语义不变。
 def scale(a: list[float], out: list[float], n: int) -> None:

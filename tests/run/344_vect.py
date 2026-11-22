@@ -1,3 +1,4 @@
+# pyadamas: vect
 # SIMD 向量化（通用 VECT）：map、reduce、int map、int mul、convert
 # 0.382 合并自 5 个文件：344_vect_map.py, 345_vect_reduce.py, 349_vect_int_map.py, 375_vect_int_mul.py, 376_vect_convert.py
 # 每段包在独立函数里，避免同名变量/类跨段冲突。

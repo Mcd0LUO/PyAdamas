@@ -1,3 +1,4 @@
+# pyadamas: vect
 # 通用向量化回归（PYADAMAS_VECT）：多 reduction 并行累加器（0.351 块3）。
 # 双 float / 双 int / 混合 / 共享 expr（CSE）/ mul+add / 三累加器 / 前值非0 /
 # map+reduction；跨累加器依赖（s2+=s1）负例必须保守跳过且输出正确。

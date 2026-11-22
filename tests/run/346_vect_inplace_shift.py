@@ -1,3 +1,4 @@
+# pyadamas: vect
 # 通用循环向量化回归（PYADAMAS_VECT）：原地 map（读在写前同偏移）+ 偏移下标 map。
 # inplace a[i]=a[i]*2+1；shifted out[i]=a[i+1]-a[i]（仿射下标 j+1）。
 def inplace(a: list[float], n: int) -> None:

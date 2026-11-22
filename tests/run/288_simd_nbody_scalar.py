@@ -1,3 +1,4 @@
+# pyadamas: simd
 # SIMD nbody 标量 fallback / 边界回归（0.334）：守卫不满足整段走标量，异常时机不变。
 # 期望输出 flag-on==off==O0==O1。d2=0 case  pyadamas 浮点除零得 inf/nan（divsd 语义），
 # CPython 抛 ZeroDivisionError —— 设计口径差异（docs §10），不与 CPython 对拍该 case。

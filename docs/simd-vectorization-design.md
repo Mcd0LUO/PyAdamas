@@ -1,6 +1,11 @@
 # 浮点循环 SIMD 向量化设计（0.333 原型）
 
 > 状态：**设计 + spectral_norm 最小原型**。门控 `PYADAMAS_SIMD=0/1`，**默认 0**。
+>
+> 默认值（0.384）：**默认关**。这套 matcher 是照着 `bench/compare` 的循环形状
+> 写的固定 IR 模板，放进默认管线等于拿靶子上的性能冒充通用性能。默认路径改走
+> 通用向量化（`codegen_vect.cpp`，默认开）；差距量化与泛化计划见
+> `docs/vectorization-generalization.md`。
 > 本轮只证明一个循环模式（eval_A 的 `1/(i+j)` 除法 + 乘加累加 reduction）的收益，
 > 不做通用自动向量化器。通用化分阶段（§9）。正确性优先：宁可保守跳过，不可误向量化。
 

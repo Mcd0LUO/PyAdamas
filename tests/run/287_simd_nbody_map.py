@@ -1,3 +1,4 @@
+# pyadamas: simd
 # SIMD nbody 向量化回归（0.334，PYADAMAS_SIMD）：pairwise 力循环（分量轴 [x,y]+z，
 # 保序 d2 水平求和 + sqrtsd/divsd）+ 位置更新 stride-7 map。5 体 25 步钉住输出，
 # 3 体/2 体小 trip-count 变体；逐位一致 → 对拍 CPython。

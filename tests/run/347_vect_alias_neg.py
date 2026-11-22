@@ -1,3 +1,4 @@
+# pyadamas: vect
 # 通用向量化别名/依赖负例（PYADAMAS_VECT）：证不出安全 → 保守标量 fallback，
 # 输出仍须正确（==CPython）。覆盖：同对象别名、跨迭代依赖、写后读、循环变量外读。
 def alias(a: list[float], out: list[float], n: int) -> None:

@@ -93,6 +93,16 @@ test_extra_env() {
     if sed -n '1,8p' "$1" | grep -q '^# pyadamas: loop-opt'; then
         extra="$extra PYADAMAS_LOOP_OPT=1"
     fi
+    # 特化 SIMD（0.384 起默认关，只作对照）：守向量化路径的用例必须显式开，
+    # 否则测的是标量 fallback，路径里的错代码一次都跑不到。
+    if sed -n '1,8p' "$1" | grep -q '^# pyadamas: simd'; then
+        extra="$extra PYADAMAS_SIMD=1"
+    fi
+    # 通用向量化（0.384 起默认开）：负例/边界用例显式开，别让默认值变化把
+    # 它们悄悄降级成标量测试。
+    if sed -n '1,8p' "$1" | grep -q '^# pyadamas: vect'; then
+        extra="$extra PYADAMAS_VECT=1"
+    fi
     printf '%s' "$extra"
 }
 
