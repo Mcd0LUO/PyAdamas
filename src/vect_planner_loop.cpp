@@ -124,10 +124,10 @@ bool VectPlanner::try_loop(const Block& b) {
     }
 
     // reduction 槽（可多个并行）：float/int，体块内恰一写一读，写值 = 读值 +
-    // expr（或 expr + 读值），读在写前（SSA 必然），无其它循环内读；外部读允许
-    // （终值要维护）。各累加器独立向量寄存器，出口各自写回（float 保序提取，
-    // int paddq 模 2^64 + 水平求和）。expr 含另一 acc 的读 → loads!=1 或
-    // classify Acc → 保守拒绝（跨累加器依赖不证）。
+    // expr（或 expr + 读值）或读值 - expr（float 减号归约），读在写前（SSA 必然），
+    // 无其它循环内读；外部读允许（终值要维护）。各累加器独立向量寄存器，出口
+    // 各自写回（float 保序提取，int paddq 模 2^64 + 水平求和）。expr 含另一 acc
+    // 的读 → loads!=1 或 classify Acc → 保守拒绝（跨累加器依赖不证）。
     using Red = VRed;                   // 定义在 vect_planner.h（4-lane 也要读）
     using Access = VAccess;             // 同上：下标访问描述只有一份
     for (auto& [slot, info] : L.si) {
@@ -147,10 +147,17 @@ bool VectPlanner::try_loop(const Block& b) {
             if (in.op == IrOp::StoreSlot && in.idx == slot) st = &in;
         }
         if (acc == kNoReg || !st) continue;
+        // 归约算符：s += expr（expr 在任一侧）或 s -= expr（只支持 float，
+        // 且必须是「acc - expr」方向；发射期按 lane 顺序 subsd，与标量逐位一致）。
+        // int 的 Sub 不做：paddq 那条线只覆盖加，neg 还要额外 scratch，保守留给标量。
         const Inst* add = gen_.simd_def(st->a);
-        if (!add || add->op != IrOp::Bin || add->bop != BinKind::Add) continue;
+        if (!add || add->op != IrOp::Bin) continue;
+        const bool is_sub =
+            add->bop == BinKind::Sub && ty->kind == TyKind::Float && add->a == acc;
+        if (!is_sub && add->bop != BinKind::Add) continue;
         VReg expr = kNoReg;
-        if (add->a == acc) expr = add->b;
+        if (is_sub) expr = add->b;
+        else if (add->a == acc) expr = add->b;
         else if (add->b == acc) expr = add->a;
         else continue;
         if (expr == kNoReg || expr == acc) continue;
@@ -158,6 +165,7 @@ bool VectPlanner::try_loop(const Block& b) {
         rd.slot = slot; rd.acc = acc; rd.expr = expr; rd.add = st->a;
         rd.store_pos = static_cast<int>(st - L.BI.data());
         rd.is_float = ty->kind == TyKind::Float;
+        rd.is_sub = is_sub;
         L.reds.push_back(rd);
     }
     // 确定性顺序（unordered_map 遍历序不影响正确性，但稳定 asm 便于比对）。
@@ -796,7 +804,8 @@ bool VectPlanner::try_loop(const Block& b) {
                 MReg re = L.xmm_of(rp->expr);
                 if (re == kMRegNone) return false;
                 if (rp->is_float) {
-                    // 保序提取累加：acc += e0; acc += e1（与标量逐位一致）。
+                    // 保序提取累加：acc += e0; acc += e1（或 acc -= e0; acc -= e1，
+                    // 减号归约按同一 lane 顺序 subsd → 与标量逐位一致）。
                     // expr 被共享（末次使用晚于本 store）→ scratch 副本提取，
                     // 不破坏后续使用者。
                     MReg ex = re;
@@ -806,9 +815,10 @@ bool VectPlanner::try_loop(const Block& b) {
                         gen_.emit2(MOp::kMovapd, re, L.FSCR);
                         ex = L.FSCR;
                     }
-                    gen_.emit2(MOp::kAddsd, ex, rp->XT);
+                    const MOp fop = rp->is_sub ? MOp::kSubsd : MOp::kAddsd;
+                    gen_.emit2(fop, ex, rp->XT);
                     gen_.emit2(MOp::kMovhlps, ex, ex);
-                    gen_.emit2(MOp::kAddsd, ex, rp->XT);
+                    gen_.emit2(fop, ex, rp->XT);
                     if (rp->acc_stack) gen_.emit2(MOp::kMovsd, rp->XT, rp->loc);
                 } else {
                     // int：paddq 2-lane 累加（模 2^64 精确），出口水平求和。

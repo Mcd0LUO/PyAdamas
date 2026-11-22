@@ -96,6 +96,8 @@ struct VRed {
     VReg acc = kNoReg, expr = kNoReg, add = kNoReg;
     int store_pos = -1;
     bool is_float = false;
+    // float 归约的减号形态（s = s - expr）：发射期按 lane 顺序 subsd，保序。
+    bool is_sub = false;
     MOperand loc{};                 // 槽位置
     bool acc_stack = false;         // float acc 在栈（scratch+每轮写回）
     MReg XT = kMRegNone;            // float acc 寄存器
