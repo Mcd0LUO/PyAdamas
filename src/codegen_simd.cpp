@@ -382,6 +382,37 @@ bool AsmGen::simd_incr_cond_ok(int incr_bi, int body_bi, int sJ,
     return end_bi >= 0 && end_bi != body_bi && end_bi != cond_bi && end_bi != incr_bi;
 }
 
+// while 形状：body 直接跳回 cond（没有独立的 incr 块），增量是体块尾部三条
+// （load sJ / add 1 / store sJ）后面跟一条回边 jump。手写循环最常见的写法，
+// 以前整段被跳过 —— for 形状才能向量化。
+bool AsmGen::simd_while_shape_ok(int cond_bi, int body_bi, int& sJ,
+                                 int& end_bi, VReg& n, int& jupd_pos) const {
+    if (cond_bi < 0 || cond_bi >= static_cast<int>(f_->blocks.size()) || cond_bi == body_bi)
+        return false;
+    const auto& C = f_->blocks[static_cast<size_t>(cond_bi)].insts;
+    if (C.size() != 3 || C[0].op != IrOp::LoadSlot || C[1].op != IrOp::Cmp ||
+        C[1].cop != CmpKind::Lt || C[1].a != C[0].dst || C[2].op != IrOp::Branch ||
+        C[2].a != C[1].dst || C[2].target != body_bi)
+        return false;
+    const auto& B = f_->blocks[static_cast<size_t>(body_bi)].insts;
+    if (B.size() < 7) return false;                      // 体 + 增量三条 + jump
+    const size_t k = B.size() - 4;
+    if (B[k].op != IrOp::LoadSlot || B[k].idx != C[0].idx) return false;
+    if (B[k + 1].op != IrOp::Bin || B[k + 1].bop != BinKind::Add ||
+        B[k + 1].a != B[k].dst)
+        return false;
+    if (!simd_const_int(B[k + 1].b, 1)) return false;    // 步长必须 1
+    if (B[k + 2].op != IrOp::StoreSlot || B[k + 2].idx != C[0].idx ||
+        B[k + 2].a != B[k + 1].dst)
+        return false;
+    if (B[k + 3].op != IrOp::Jump || B[k + 3].target != cond_bi) return false;
+    sJ = C[0].idx;
+    n = C[1].b;
+    end_bi = C[2].target2;
+    jupd_pos = static_cast<int>(k);
+    return end_bi >= 0 && end_bi != body_bi && end_bi != cond_bi;
+}
+
 bool AsmGen::simd_loop_ops_ok(int cond_bi, int body_bi, int incr_bi,
                               bool allow_sqrt, bool allow_idxset) const {
     for (int bi : {cond_bi, body_bi, incr_bi})

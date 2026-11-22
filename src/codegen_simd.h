@@ -38,6 +38,10 @@
     // incr/cond 块形状（步长 1 的可数 for）；返回 cond/end 块号与上界 n。
     bool simd_incr_cond_ok(int incr_bi, int body_bi, int sJ,
                            int& cond_bi, int& end_bi, VReg& n) const;
+    // while 形状（cond/body 两块，体块尾部是增量）：手写的
+    // `while i < n: ...; i += 1` 降成这样，补一条与 for 等价的路径。
+    bool simd_while_shape_ok(int cond_bi, int body_bi, int& sJ,
+                             int& end_bi, VReg& n, int& jupd_pos) const;
     // 循环三块 op 白名单（无调用/全局写；allow_sqrt 放行 CallRt，
     // allow_idxset 放行 IndexStore——具体位置/个数由体块形状匹配钉死）。
     bool simd_loop_ops_ok(int cond_bi, int body_bi, int incr_bi,

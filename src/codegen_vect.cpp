@@ -90,17 +90,33 @@ bool AsmGen::try_vect_loop(const Block& b) {
     const auto& BI = b.insts;
     if (BI.size() < 4 || BI.size() > 64) return false;    // 体块规模上限（保守）
     if (BI.back().op != IrOp::Jump) return false;
-    const int incr_bi = BI.back().target;
 
-    // ── 循环结构：从 incr 块反推 sJ，再校验 cond/incr 形状（步长 1）──────
+    // ── 循环结构 ────────────────────────────────────────────────────
+    // 两种形状（0.387 起都认）：
+    //   for  ：cond / body / incr 三块，体块跳 incr、incr 跳 cond；
+    //   while：cond / body 两块，体块直接跳回 cond，增量在体块尾部三条
+    //          （load sJ / add 1 / store sJ）。手写的 `while i < n: …; i += 1`
+    //          降成后者，以前整段被跳过 —— 而它是最常见的手写形式。
+    int incr_bi = BI.back().target;
     if (incr_bi < 0 || incr_bi >= static_cast<int>(f_->blocks.size()) || incr_bi == body_bi)
         return false;
-    const auto& INC = f_->blocks[static_cast<size_t>(incr_bi)].insts;
-    if (INC.empty() || INC[0].op != IrOp::LoadSlot) return false;
-    const int sJ = INC[0].idx;
-    int cond_bi = -1, end_bi = -1;
+    int sJ = -1, cond_bi = -1, end_bi = -1, jupd_pos = -1;
     VReg n = kNoReg;
-    if (!simd_incr_cond_ok(incr_bi, body_bi, sJ, cond_bi, end_bi, n)) return false;
+    {
+        const auto& INC = f_->blocks[static_cast<size_t>(incr_bi)].insts;
+        bool shaped = false;
+        if (!INC.empty() && INC[0].op == IrOp::LoadSlot) {
+            sJ = INC[0].idx;
+            shaped = simd_incr_cond_ok(incr_bi, body_bi, sJ, cond_bi, end_bi, n);
+        }
+        if (!shaped && simd_while_shape_ok(incr_bi, body_bi, sJ, end_bi, n, jupd_pos)) {
+            // while：增量在体块里，后续「循环三块」检查用体块顶上（重复访问无害）。
+            cond_bi = incr_bi;
+            incr_bi = body_bi;
+            shaped = true;
+        }
+        if (!shaped) return false;
+    }
     if (!simd_outside(n, cond_bi, body_bi, incr_bi) ||
         !simd_slot_stable(n, cond_bi, body_bi, incr_bi)) return false;
     if (sJ < 0 || sJ >= static_cast<int>(f_->slot_ty.size())) return false;
@@ -486,6 +502,13 @@ bool AsmGen::try_vect_loop(const Block& b) {
     std::vector<Role> role(BI.size(), Role::Skip);
     for (size_t i = 0; i < BI.size(); ++i) {
         const Inst& in = BI[i];
+        // while 形状：体块尾部三条是归纳变量的增量，由向量循环自己维护 j，
+        // 不参与逐元素计算（不跳过的话 `add` 会落进 classify 的 Fail）。
+        if (jupd_pos >= 0 && i >= static_cast<size_t>(jupd_pos) &&
+            i < static_cast<size_t>(jupd_pos) + 3) {
+            role[i] = Role::Skip;
+            continue;
+        }
         switch (in.op) {
             case IrOp::ConstInt: case IrOp::ConstFloat: case IrOp::Jump:
                 role[i] = Role::Skip; break;
