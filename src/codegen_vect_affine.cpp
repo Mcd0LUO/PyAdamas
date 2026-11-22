@@ -130,71 +130,12 @@ bool AsmGen::vect_affine_plan_ok(const std::vector<AffBase>& bases) const {
 // 循环入口已保证 j >= 0 且 j+1 < n（n >= 2），coef > 0 → 下标随 j 单调增，
 // 所以「最小下标 = inv + off_min（j=0 处取得下界）」与「最大下标 =
 // coef*(n-1) + inv + off_max」就是全部需要守的东西。
-bool AsmGen::vect_affine_guard(const MOperand& list_obj, const AffBase& b,
-                               const MOperand& n_op, const std::string& tail) {
-    const int64_t coef = b.coef;
-    const int64_t off = b.off_max;
-    if (coef < 1 || coef > kAffMaxCoef || off < 0 || off > kAffMaxOff) return false;
-    if (off - coef < INT32_MIN || off - coef > INT32_MAX) return false;
-    // inv 的入口可读来源由调用方用 list_base_mop 解析好（跨块值取 vreg home
-    // 的冻结值、体内装载取槽现值）—— 直接 src_mop(v) 会在 vreg 的 home 还没
-    // 写出来的情况下读到垃圾。
-    const MOperand& iv = b.inv_src;
-    if (b.inv != kNoReg && !simd_scratch_safe(iv)) return false;
-    // 非负守卫：inv + off_min >= 0。inv 可能为负（i*N 在 i 为负时不保证），
-    // 负下标会变成 Python 的从尾部索引 → 语义不同，必须走标量。
-    if (b.inv != kNoReg) {
-        emit2(MOp::kMovq, iv, kRax);
-        if (b.off_min != 0) emit_imm(MOp::kAddq, b.off_min, kRax);
-        emit2(MOp::kTestq, kRax, kRax);
-        emit_jmp(MOp::kJs, tail);
-    }
-    // 上界守卫：value = coef*(n-1) + inv + off_max，要求 value < len。
-    // 逐步 jo：任一溢出都说明下标算不准 → 直接标量（不猜）。
-    emit2(MOp::kMovq, n_op, kRcx);
-    if (coef != 1) {
-        emit_imm(MOp::kImulq, coef, kRcx);                 // rcx = coef*n
-        emit_jmp("jo", tail);                              // jo 不在 MOp 表：文本兜底
-    }
-    if (b.inv != kNoReg) {
-        emit2(MOp::kAddq, iv, kRcx);                       // + inv
-        emit_jmp("jo", tail);
-    }
-    if (off != coef) {
-        emit_imm(MOp::kAddq, off - coef, kRcx);            // - coef + off
-        emit_jmp("jo", tail);
-    }
-    emit2(MOp::kMovq, list_obj, kRax);
-    emit2(MOp::kMovq, op_mem(kRax, 0), kRdx);              // len
-    emit2(MOp::kCmpq, kRcx, kRdx);
-    emit_jmp(MOp::kJle, tail);                             // len <= value → 标量
-    return true;
-}
 
 // ── 3) 基址 / 跨步计数器 / 装载 / 存储 ────────────────────────────────
 // base = data + inv*8。inv 折进基址后，coef==1 的访问就是原来的
 // (base, JREG, 8, off*8)，coef>1 的访问则只差一个跨步计数器。
-void AsmGen::vect_affine_base(const MOperand& list_obj, const AffBase& b, MReg reg) {
-    emit2(MOp::kMovq, list_obj, kRax);
-    emit2(MOp::kMovq, op_mem(kRax, 16), reg);              // data 指针常驻
-    if (b.inv == kNoReg) return;
-    emit2(MOp::kMovq, b.inv_src, kRax);                    // 入口可读的 inv 来源
-    emit2(MOp::kLeaq, op_mem(reg, kRax, 8), reg);          // reg = data + inv*8
-}
 
 // 同对象读写的 inv 判等守卫：只有两个下标序列完全相同（inv 运行期相等）
 // 时才是逐元素原地 map；不等 → 标量（跨迭代依赖证不出来）。
-void AsmGen::vect_affine_inv_eq(const AffEq& eq, const std::string& tail) {
-    if (eq.x == kNoReg && eq.y == kNoReg) return;
-    if (eq.x == kNoReg || eq.y == kNoReg) {                // 与「无 inv」比较 = 比 0
-        emit2(MOp::kMovq, eq.x == kNoReg ? eq.ym : eq.xm, kRax);
-        emit2(MOp::kTestq, kRax, kRax);
-        emit_jmp(MOp::kJne, tail);
-        return;
-    }
-    emit2(MOp::kMovq, eq.xm, kRax);
-    emit2(MOp::kCmpq, eq.ym, kRax);
-    emit_jmp(MOp::kJne, tail);
-}
 
 }  // namespace pyadamas

@@ -254,9 +254,9 @@
         ins.ops.push_back(b);
         emit_.out.push_instr(std::move(ins));
     }
-    void emit2(MOp op, MReg a, const MOperand& b) { emit2(op, mreg_operand(a), b); }
-    void emit2(MOp op, const MOperand& a, MReg b) { emit2(op, a, mreg_operand(b)); }
-    void emit2(MOp op, MReg a, MReg b) { emit2(op, mreg_operand(a), mreg_operand(b)); }
+    void emit2(MOp op, MReg a, const MOperand& b) override { emit2(op, mreg_operand(a), b); }
+    void emit2(MOp op, const MOperand& a, MReg b) override { emit2(op, a, mreg_operand(b)); }
+    void emit2(MOp op, MReg a, MReg b) override { emit2(op, mreg_operand(a), mreg_operand(b)); }
     void emit1(MOp op, const MOperand& a) {
         if (a.kind == MOperandKind::Raw) {
             std::string text = mop_name(op);
@@ -294,7 +294,7 @@
         ins.ops.push_back(b);
         emit_.out.push_instr(std::move(ins));
     }
-    void emit_imm(MOp op, int64_t v, MReg b) { emit_imm(op, v, mreg_operand(b)); }
+    void emit_imm(MOp op, int64_t v, MReg b) override { emit_imm(op, v, mreg_operand(b)); }
     void emit_imm_hex(MOp op, uint64_t bits, const MOperand& b) override {
         MInstr ins;
         ins.op = op;

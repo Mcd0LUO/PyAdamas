@@ -26,35 +26,13 @@
     // inv 循环不变 int 值（可为 kNoReg）、off>=0 常量。实现见
     // codegen_vect_affine.cpp。判据只看 IR 结构（j-alias 槽 / Add / Mul 常量），
     // 不含任何基准名或字面量 —— 0.384 的硬政策：不许针对基准特化。
-    struct AffIdx {
-        bool ok = false;
-        int64_t coef = 1;      // j 的系数（> 0）
-        VReg inv = kNoReg;     // 循环不变 int 值（折进基址）
-        int64_t off = 0;       // 常量偏移（>= 0）
-    };
-    // coef/off 的编译期上界：保证 imulq/addq 立即数与 disp32 编码安全。
-    static constexpr int64_t kAffMaxCoef = int64_t{1} << 24;
-    static constexpr int64_t kAffMaxOff = int64_t{1} << 24;
-
-    // 一个数组基址键：同一逻辑数组 + 同一 inv 的访问共用一条「data + inv*8」
-    // 基址寄存器；coef>1 的访问另需运行期跨步计数器（按 coef 去重）。
-    struct AffBase {
-        std::string key;          // 逻辑数组身份（list_key）
-        VReg inv = kNoReg;        // kNoReg → 基址就是 data
-        MOperand inv_src;         // inv 在循环入口的可读来源（list_base_mop 口径）
-        MReg reg = kMRegNone;     // 基址寄存器
-        int64_t coef = 1;         // 该键下访问的最大 coef
-        int64_t off_max = 0;
-        int64_t off_min = 0;
-    };
-    // 同对象读写的 inv 判等守卫：x/y 是 inv 在入口的可读来源；kNoReg 侧
-    // 等价于「与 0 比较」（无 inv 的下标就是 j+off）。
-    struct AffEq {
-        VReg x = kNoReg;
-        VReg y = kNoReg;
-        MOperand xm;
-        MOperand ym;
-    };
+    // 仿射下标相关的类型已移到 VectPlanner（src/vect_planner.h），
+    // 这里只留别名，类内写法不变。
+    using AffIdx = ::pyadamas::AffIdx;
+    using AffBase = ::pyadamas::AffBase;
+    using AffEq = ::pyadamas::AffEq;
+    static constexpr int64_t kAffMaxCoef = ::pyadamas::kAffMaxCoef;
+    static constexpr int64_t kAffMaxOff = ::pyadamas::kAffMaxOff;
 
     // ── P3 · AVX2 4-lane（docs/vectorization-generalization.md §P3）────────
     // 只做**整数**路径：int map（out[j]=a[j]*2+1）与 int reduction
@@ -151,11 +129,17 @@
     bool vect_affine_plan_ok(const std::vector<AffBase>& bases) const;
     // 边界守卫：0 <= coef*(n-1)+inv+off < len；每步算术 jo 溢出 → 跳 tail。
     bool vect_affine_guard(const MOperand& list_obj, const AffBase& b,
-                           const MOperand& n_op, const std::string& tail);
+                          const MOperand& n_op, const std::string& tail) {
+        return vect_.vect_affine_guard(list_obj, b, n_op, tail);
+    }
     // base = data(list_obj)（+ inv*8，若 inv != kNoReg）。
-    void vect_affine_base(const MOperand& list_obj, const AffBase& b, MReg reg);
+    void vect_affine_base(const MOperand& list_obj, const AffBase& b, MReg reg) {
+        vect_.vect_affine_base(list_obj, b, reg);
+    }
     // inv 判等守卫：同对象读写只在两个下标序列完全相同时才能就地向量化。
-    void vect_affine_inv_eq(const AffEq& eq, const std::string& tail);
+    void vect_affine_inv_eq(const AffEq& eq, const std::string& tail) {
+        vect_.vect_affine_inv_eq(eq, tail);
+    }
     // coef>1 的运行期跨步计数器：K = coef*8*j，每轮 += coef*16。
     void vect_affine_kinit(MReg k, MReg jreg, int64_t coef) { vect_.vect_affine_kinit(k, jreg, coef); }
     void vect_affine_step(MReg k, int64_t coef) { vect_.vect_affine_step(k, coef); }

@@ -95,4 +95,66 @@ void VectPlanner::vect_jvec2(MReg jreg, int64_t off, MReg dst, MReg scr) {
     emit_.emit2(MOp::kMovlhps, mreg_operand(scr), mreg_operand(dst));  // dst.hi = j+off+1
 }
 
+bool VectPlanner::vect_affine_guard(const MOperand& list_obj, const AffBase& b,
+                               const MOperand& n_op, const std::string& tail) {
+    const int64_t coef = b.coef;
+    const int64_t off = b.off_max;
+    if (coef < 1 || coef > kAffMaxCoef || off < 0 || off > kAffMaxOff) return false;
+    if (off - coef < INT32_MIN || off - coef > INT32_MAX) return false;
+    // inv 的入口可读来源由调用方用 list_base_mop 解析好（跨块值取 vreg home
+    // 的冻结值、体内装载取槽现值）—— 直接 src_mop(v) 会在 vreg 的 home 还没
+    // 写出来的情况下读到垃圾。
+    const MOperand& iv = b.inv_src;
+    if (b.inv != kNoReg && !AsmGen::simd_scratch_safe(iv)) return false;
+    // 非负守卫：inv + off_min >= 0。inv 可能为负（i*N 在 i 为负时不保证），
+    // 负下标会变成 Python 的从尾部索引 → 语义不同，必须走标量。
+    if (b.inv != kNoReg) {
+        emit_.emit2(MOp::kMovq, iv, kRax);
+        if (b.off_min != 0) emit_.emit_imm(MOp::kAddq, b.off_min, kRax);
+        emit_.emit2(MOp::kTestq, kRax, kRax);
+        emit_.emit_jmp(MOp::kJs, tail);
+    }
+    // 上界守卫：value = coef*(n-1) + inv + off_max，要求 value < len。
+    // 逐步 jo：任一溢出都说明下标算不准 → 直接标量（不猜）。
+    emit_.emit2(MOp::kMovq, n_op, kRcx);
+    if (coef != 1) {
+        emit_.emit_imm(MOp::kImulq, coef, kRcx);                 // rcx = coef*n
+        emit_.emit_jmp("jo", tail);                              // jo 不在 MOp 表：文本兜底
+    }
+    if (b.inv != kNoReg) {
+        emit_.emit2(MOp::kAddq, iv, kRcx);                       // + inv
+        emit_.emit_jmp("jo", tail);
+    }
+    if (off != coef) {
+        emit_.emit_imm(MOp::kAddq, off - coef, kRcx);            // - coef + off
+        emit_.emit_jmp("jo", tail);
+    }
+    emit_.emit2(MOp::kMovq, list_obj, kRax);
+    emit_.emit2(MOp::kMovq, AsmGen::op_mem(kRax, 0), kRdx);              // len
+    emit_.emit2(MOp::kCmpq, kRcx, kRdx);
+    emit_.emit_jmp(MOp::kJle, tail);                             // len <= value → 标量
+    return true;
+}
+
+void VectPlanner::vect_affine_base(const MOperand& list_obj, const AffBase& b, MReg reg) {
+    emit_.emit2(MOp::kMovq, list_obj, kRax);
+    emit_.emit2(MOp::kMovq, AsmGen::op_mem(kRax, 16), reg);              // data 指针常驻
+    if (b.inv == kNoReg) return;
+    emit_.emit2(MOp::kMovq, b.inv_src, kRax);                    // 入口可读的 inv 来源
+    emit_.emit2(MOp::kLeaq, AsmGen::op_mem(reg, kRax, 8), reg);          // reg = data + inv*8
+}
+
+void VectPlanner::vect_affine_inv_eq(const AffEq& eq, const std::string& tail) {
+    if (eq.x == kNoReg && eq.y == kNoReg) return;
+    if (eq.x == kNoReg || eq.y == kNoReg) {                // 与「无 inv」比较 = 比 0
+        emit_.emit2(MOp::kMovq, eq.x == kNoReg ? eq.ym : eq.xm, kRax);
+        emit_.emit2(MOp::kTestq, kRax, kRax);
+        emit_.emit_jmp(MOp::kJne, tail);
+        return;
+    }
+    emit_.emit2(MOp::kMovq, eq.xm, kRax);
+    emit_.emit2(MOp::kCmpq, eq.ym, kRax);
+    emit_.emit_jmp(MOp::kJne, tail);
+}
+
 }  // namespace pyadamas

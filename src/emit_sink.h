@@ -27,8 +27,12 @@ public:
     // ── 发射 ──────────────────────────────────────────────────────
     // 一条结构化指令（两个操作数版本；MReg 版本由 AsmGen 的普通重载承担）。
     virtual void emit2(MOp op, const MOperand& a, const MOperand& b) = 0;
+    virtual void emit2(MOp op, MReg a, const MOperand& b) = 0;
+    virtual void emit2(MOp op, const MOperand& a, MReg b) = 0;
+    virtual void emit2(MOp op, MReg a, MReg b) = 0;
     // 立即数操作。
     virtual void emit_imm(MOp op, int64_t v, const MOperand& b) = 0;
+    virtual void emit_imm(MOp op, int64_t v, MReg b) = 0;
     // 按位模式发立即数（浮点常量、tag 常量等）。
     virtual void emit_imm_hex(MOp op, uint64_t bits, const MOperand& b) = 0;
     // 条件跳转：op 是 Jcc，target 是标签名。

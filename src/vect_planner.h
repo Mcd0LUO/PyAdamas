@@ -2,6 +2,7 @@
 #pragma once
 
 #include <cstdint>
+#include <string>
 
 #include "emit_sink.h"
 #include "ir.h"
@@ -10,6 +11,30 @@
 #include "value_query.h"
 
 namespace pyadamas {
+
+struct AffIdx {
+    bool ok = false;
+    int64_t coef = 1;
+    VReg inv = kNoReg;
+    int64_t off = 0;
+};
+constexpr int64_t kAffMaxCoef = int64_t{1} << 24;
+constexpr int64_t kAffMaxOff = int64_t{1} << 24;
+struct AffBase {
+    std::string key;
+    VReg inv = kNoReg;
+    MOperand inv_src;
+    MReg reg = kMRegNone;
+    int64_t coef = 1;
+    int64_t off_max = 0;
+    int64_t off_min = 0;
+};
+struct AffEq {
+    VReg x = kNoReg;
+    VReg y = kNoReg;
+    MOperand xm;
+    MOperand ym;
+};
 
 class VectPlanner {
 public:
@@ -33,6 +58,12 @@ public:
     // ── 归纳变量物化（阶段 3 第 4 步）──
     // dst = [j+off, j+off+1]：与 Convert 的 j_src 分支逐字节同一序列。
     void vect_jvec2(MReg jreg, int64_t off, MReg dst, MReg scr);
+
+    // ── 仿射守卫与基址（阶段 3 第 5 步）──
+    bool vect_affine_guard(const MOperand& list_obj, const AffBase& b,
+                           const MOperand& n_op, const std::string& tail);
+    void vect_affine_base(const MOperand& list_obj, const AffBase& b, MReg reg);
+    void vect_affine_inv_eq(const AffEq& eq, const std::string& tail);
 
 private:
     EmitSink& emit_;
