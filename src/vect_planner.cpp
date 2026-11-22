@@ -581,8 +581,11 @@ VectPlanner::Loop::VK VectPlanner::Loop::classify(VReg v) {
             }
             // 输入是 j / j+常量：先按仿射下标解析（避免 classify 把下标
             // 常量误收进不变量广播），发射期构造 [j+off, j+off+1] 向量。
+            // 只有 off 能编进 leaq 的 disp32 才走这条快速路径（vect_jvec2 直接
+            // 发 leaq off(j) / off+1(j)）；更大的常量交给下面的通用 VecI 折算
+            // （不变量广播 + paddq + cvtdq2pd），否则会生成超范围位移、汇编失败。
             int64_t io = index_off(d->a);
-            if (io >= 0) {
+            if (io >= 0 && io <= kAffMaxOff) {
                 c.kind = VK::VecF; c.j_src = true; c.off = io;
                 has_convert = true; break;
             }
