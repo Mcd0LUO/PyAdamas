@@ -254,7 +254,14 @@ public:
         const std::vector<Inst>& BI;
     };
 
-    VectPlanner(EmitSink& e, ValueQuery& v, SlotQuery& s) : emit_(e), val_(v), slot_(s) {}
+    VectPlanner(EmitSink& e, ValueQuery& v, SlotQuery& s, AsmGen& g)
+        : emit_(e), val_(v), slot_(s), gen_(g) {}
+
+    // ── 通用循环向量化入口（阶段 A4 第 3 步：从 AsmGen::try_vect_loop 搬来）──
+    // 识别可数 for + 逐元素 map/reduction，匹配成功发「守卫 + SSE2 向量循环 +
+    // jmp cond」，返回 true；不匹配返回 false，一个字节不发。实现见
+    // vect_planner_loop.cpp（AsmGen::try_vect_loop 留一行转发）。
+    bool try_loop(const Block& b);
 
     // 除数是不是正的 2 的幂常量；是则写回移位量 sh。
     bool vect_div_pow2(VReg b, int* sh) const;
@@ -298,6 +305,8 @@ private:
     EmitSink& emit_;
     ValueQuery& val_;
     SlotQuery& slot_;
+    // try_loop 里原样保留的 AsmGen 私有辅助/成员访问走这个引用（friend）。
+    AsmGen& gen_;
 };
 
 }  // namespace pyadamas
