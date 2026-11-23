@@ -382,6 +382,71 @@ void Lowerer::run(Module& ast) {
     pop_frame();
 }
 
+namespace {
+
+// 把早退路径内联的 finally 体所在块移到函数末尾 —— 这些块里的 raise 必须
+// 物理上不在本函数任何 EH 区间内（LSDA 覆盖是代码位置，不是逻辑状态；
+// 详见 emit_cleanup_exits 的 ZeroCostEh 分支注释）。
+//
+// IR 块一律以显式终结符（Jump/Branch/Return/…）结尾，块顺序只影响代码
+// 发射顺序，因此移动语义安全；但跳转目标存的是块下标，必须整体重映射。
+// 唯一例外是死代码占位块（end_unreachable 建的无终结符块）：按原来的
+// fallthrough 目标补一条显式 Jump，保证移动前后语义一致。
+void relocate_early_fin_blocks(IRFunction& fn, FuncCtx& st) {
+    auto& moves = st.early_fin_blocks;
+    if (moves.empty()) return;
+    const int n = static_cast<int>(fn.blocks.size());
+    std::vector<char> moved(static_cast<size_t>(n), 0);
+    for (int b : moves)
+        if (b >= 0 && b < n) moved[static_cast<size_t>(b)] = 1;
+    std::vector<int> order;
+    order.reserve(static_cast<size_t>(n));
+    for (int i = 0; i < n; ++i)
+        if (!moved[static_cast<size_t>(i)]) order.push_back(i);
+    for (int b : moves)
+        if (b >= 0 && b < n) order.push_back(b);
+    if (static_cast<int>(order.size()) != n || order.empty() || order[0] != 0) {
+        moves.clear();
+        return;
+    }
+    std::vector<int> to_new(static_cast<size_t>(n), -1);
+    for (int k = 0; k < n; ++k) to_new[static_cast<size_t>(order[static_cast<size_t>(k)])] = k;
+    auto remap = [&](int t) {
+        return (t >= 0 && t < n) ? to_new[static_cast<size_t>(t)] : t;
+    };
+    // 先按新顺序搬块（保留 Block.id，稳定 id 不随下标变化）。
+    std::vector<Block> nb;
+    nb.reserve(static_cast<size_t>(n));
+    for (int k = 0; k < n; ++k) nb.push_back(std::move(fn.blocks[static_cast<size_t>(order[static_cast<size_t>(k)])]));
+    fn.blocks = std::move(nb);
+    for (int k = 0; k < n; ++k) {
+        Block& b = fn.blocks[static_cast<size_t>(k)];
+        for (auto& in : b.insts) {
+            in.target = remap(in.target);
+            in.target2 = remap(in.target2);
+        }
+        if (!b.terminated()) {
+            // 原块下标 old 的下一个块是 old+1 —— 移动后若不再是新块的下一个，
+            // 补显式 Jump 保持原 fallthrough 语义（只可能是死代码占位块）。
+            const int old = order[static_cast<size_t>(k)];
+            const int old_next = old + 1;
+            if (old_next < n) {
+                const int want = to_new[static_cast<size_t>(old_next)];
+                if (want != k + 1) {
+                    Inst j;
+                    j.op = IrOp::Jump;
+                    j.target = want;
+                    b.insts.push_back(std::move(j));
+                }
+            }
+        }
+    }
+    fn.rebuild_use_def();
+    moves.clear();
+}
+
+}  // namespace
+
 int Lowerer::compile_function_body(FunctionDef& f, FuncInfoPtr info, const std::string& label,
                                    const ClassInfo* owner) {
     if (f.is_async) {
@@ -519,6 +584,9 @@ int Lowerer::compile_function_body(FunctionDef& f, FuncInfoPtr info, const std::
     fixup_early_releases();
     if (st_->rc_pushes == 0)
         erase_mark(st_->fn_mark_block, st_->fn_mark_pos, st_->fn_mark);
+
+    // 早退路径的 finally 体块移到函数末尾（EH 区间之外，见 helper 注释）。
+    relocate_early_fin_blocks(*irf, *st_);
 
     pop_frame();
     auto cmit = closure_meta_.find(&f);

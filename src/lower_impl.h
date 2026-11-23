@@ -220,6 +220,10 @@ struct FuncCtx {
         size_t loop_depth = 0;
     };
     std::vector<Cleanup> cleanups;
+    // 早退路径（return/break/continue 穿过零开销 try）内联的 finally 体所在块。
+    // 这些块的 raise 必须物理上不在本函数 EH 区间内（LSDA 覆盖是代码位置），
+    // 所以不原地发射，而是先跳到独立块、函数降级结束后统一移到函数末尾。
+    std::vector<int> early_fin_blocks;
     // 函数内 import 的模块别名；模块顶层的别名在 Lowerer::module_aliases_。
     std::unordered_map<std::string, ModuleInfoPtr> modules;
     bool is_module_top = false;

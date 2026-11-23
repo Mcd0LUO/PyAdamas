@@ -143,9 +143,34 @@ void Lowerer::emit_cleanup_exits(size_t down_to) {
                     // finalbody 里可能有 return/break/continue 跳出：
                     // 与老路径 Finally 分支同样处理 —— 临时清空 cleanups，
                     // 避免重入。
+                    //
+                    // zc_raise_depth 清零：早退路径已经 EhLeave 过，finalbody
+                    // 里的 raise 不再处于表驱动保护区。
+                    //
+                    // **不能原地内联**：raise 的指令位置若仍落在本函数
+                    // [eh.begin, eh.end) 的 LSDA 区间内，展开器会先命中本函数
+                    // 自己的 cleanup landing pad（LSDA 覆盖是代码位置，不是
+                    // 逻辑状态），于是 depth 被多减一次、调用方的 except 收不到
+                    // 新异常。这里改成跳到独立块 fin.early 发射 finalbody，
+                    // 函数降级结束后由 relocate_early_fin_blocks 把这些块移到
+                    // 函数末尾（所有 EH 区间之外），raise 就能正确展开给调用方。
                     auto saved = st_->cleanups;
                     st_->cleanups.resize(i - 1);
-                    stmts(*c.body);
+                    int saved_raise_depth = st_->zc_raise_depth;
+                    st_->zc_raise_depth = 0;
+                    if (!terminated()) {
+                        int fin = new_block("fin.early");
+                        st_->early_fin_blocks.push_back(fin);
+                        Inst j;
+                        j.op = IrOp::Jump;
+                        j.target = fin;
+                        emit(std::move(j));
+                        switch_to(fin);
+                        stmts(*c.body);
+                    } else {
+                        stmts(*c.body);
+                    }
+                    st_->zc_raise_depth = saved_raise_depth;
                     st_->cleanups = std::move(saved);
                 }
                 break;
