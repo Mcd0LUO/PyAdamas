@@ -279,6 +279,26 @@ void TypeChecker::funcdef_impl(FunctionDef& f, const ClassInfoPtr& owner) {
         if (owner_is_cmethod && !info->pos.empty()) cur_cls_name_ = info->pos[0].name;
         // 嵌套函数不改它：闭包捕获的 self 还是外层那个名字
         stmts(f.body);
+        if (type_stats_on_) {
+            std::set<std::string> pnames;
+            auto note_param = [&](const Param& p) {
+                pnames.insert(p.name);
+                if (p.inferred && is_unknown(p.ty))
+                    type_stat("param_unannotated", f.name + "." + p.name);
+            };
+            for (auto& p : info->pos) note_param(p);
+            for (auto& p : info->kwonly) note_param(p);
+            if (!info->vararg_name.empty()) pnames.insert(info->vararg_name);
+            if (!info->kwarg_name.empty()) pnames.insert(info->kwarg_name);
+            if (info->ret && is_unknown(info->ret)) type_stat("return_unknown", f.name);
+            for (auto& [n, sym] : cur_->vars) {
+                if (pnames.count(n)) continue;
+                if (is_unknown(sym.ty) && !sym.annotated)
+                    type_stat("local_unknown", f.name + "." + n);
+                else if (type_contains_unknown_elem(sym.ty))
+                    type_stat("container_elem", f.name + "." + n);
+            }
+        }
         // **用函数体的实际用法回填参数标注里的类型洞。**
         //
         // 裸 `list` / `set` / `dict` / `tuple` 标注解析成带 fresh_hole 的类型。

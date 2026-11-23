@@ -22,6 +22,8 @@ void TypeChecker::check_once(Module& m) {
         mod->is_module = true;
         module_ = mod.get();
         cur_ = module_;
+        const char* ts = std::getenv("PYADAMAS_TYPE_STATS");
+        type_stats_on_ = ts && std::string_view(ts) != "0";
         pool_.push_back(std::move(mod));
 
         collect_toplevel(m.body);
@@ -153,6 +155,48 @@ void TypeChecker::check_once(Module& m) {
         check_dunder_returns();
         // u64 大字面量收尾：没被 u64 上下文消费的照旧报 too large for int64。
         check_u64_literals();
+        // 模块级作用域里没填上的洞归一化成全局 unknown 单例（见 helper 注释）。
+        for (auto& [n, sym] : module_->vars) normalize_type_holes(sym.ty, 0);
+        if (type_stats_on_) {
+            // import 别名（from x import y）单独归一类。
+            std::set<std::string> import_aliases;
+            for (auto& s : m.body) {
+                if (s->kind == StmtKind::Import) {
+                    for (auto& al : static_cast<Import&>(*s).names) {
+                        std::string bind = al.asname.empty() ? al.name : al.asname;
+                        if (auto pos = bind.find('.'); pos != std::string::npos)
+                            bind = bind.substr(0, pos);
+                        if (bind != "*") import_aliases.insert(bind);
+                    }
+                    continue;
+                }
+                if (s->kind != StmtKind::ImportFrom) continue;
+                auto& imf = static_cast<ImportFrom&>(*s);
+                for (auto& al : imf.names) {
+                    std::string bind = al.asname.empty() ? al.name : al.asname;
+                    if (auto pos = bind.find('.'); pos != std::string::npos) bind = bind.substr(0, pos);
+                    if (bind != "*") import_aliases.insert(bind);
+                }
+            }
+            for (auto& [n, sym] : module_->vars) {
+                if (sym.ty && (sym.ty->kind == TyKind::Func || sym.ty->kind == TyKind::Class)) continue;
+                if (is_unknown(sym.ty) && !sym.annotated) {
+                    if (import_aliases.count(n))
+                        type_stat("import_alias", n);
+                    else
+                        type_stat("global_unknown", n);
+                } else if (type_contains_unknown_elem(sym.ty)) {
+                    type_stat("container_elem", n);
+                }
+            }
+            for (auto& [cat, cnt] : type_stats_) {
+                fprintf(stderr, "[type-stats] cat=%s count=%ld examples=", cat.c_str(), cnt);
+                auto& ex = type_stats_examples_[cat];
+                for (size_t i = 0; i < ex.size(); ++i)
+                    fprintf(stderr, "%s%s", i ? "," : "", ex[i].c_str());
+                fprintf(stderr, "\n");
+            }
+        }
     }
 
 void TypeChecker::recheck_synth_gen(const FuncInfoPtr& fn) {
@@ -561,6 +605,48 @@ void TypeChecker::collect_toplevel(std::vector<StmtPtr>& body) {
 // 函数体里写 `global x` 就是在模块作用域造名字（turtledemo/colormixer.py
 // 的 screen 就是 main() 里 global 出来的）。函数体按文本顺序检查，
 // 早于该函数定义的其他函数读 x 时必须已经能查到，所以先整体扫一遍。
+// 归一化未填的「类型洞」：函数/模块类型检查完成后，作用域里仍是 fresh_hole
+// 的符号类型要变回全局 unknown 单例。
+//
+// 洞只是**推断期**的待填占位；剩下没填上的洞如果留到 lowering，会被当成
+// 「已知的 Unknown 类型」——codegen 的 unknown 动态分派只认 t_unknown() 单例
+// （stdlib/hmac.py 的 `h = hashlib.md5(...)` 两分支各赋值一次，merge 后停在
+// 洞上，`h.digest()` 就报「method not supported」）。
+void TypeChecker::type_stat(const std::string& cat, const std::string& example) {
+    if (!type_stats_on_) return;
+    type_stats_[cat] += 1;
+    auto& v = type_stats_examples_[cat];
+    if (v.size() < 6) v.push_back(example);
+}
+
+bool type_contains_unknown_elem(const TypePtr& t) {
+    if (!t || t->kind == TyKind::Unknown) return false;
+    switch (t->kind) {
+        case TyKind::List:
+        case TyKind::Set:
+        case TyKind::Tuple:
+        case TyKind::Generator:
+        case TyKind::Coroutine:
+        case TyKind::AsyncGenerator:
+        case TyKind::Dict:
+            break;
+        default:
+            return false;
+    }
+    for (auto& sub : t->sub)
+        if (is_unknown(sub) || type_contains_unknown_elem(sub)) return true;
+    return false;
+}
+
+void normalize_type_holes(TypePtr& t, int depth) {
+    if (!t || depth > 6) return;
+    if (t->kind == TyKind::Unknown) {
+        if (t.get() != t_unknown().get()) t = t_unknown();
+        return;
+    }
+    for (auto& sub : t->sub) normalize_type_holes(sub, depth + 1);
+}
+
 void TypeChecker::hoist_global_decls(std::vector<StmtPtr>& body) {
         for (auto& s : body) {
             switch (s->kind) {
@@ -615,7 +701,14 @@ void TypeChecker::bind_target(Expr& target, Scope* sc) {
         switch (target.kind) {
             case ExprKind::Name: {
                 auto& n = static_cast<Name&>(target);
-                sc->vars.try_emplace(n.id, Symbol{t_unknown(), n.line, false, false});
+                // 分级占位：只有**模块级**名字用 fresh_hole（可被后续赋值/分支合并
+                // 填成已知类型：sieve 的 q = p*p 只出现在 if 分支里，占位是
+                // t_unknown() 时 join 永远停在 unknown，循环里每轮多一次 RC
+                // 调用。函数局部名保持 t_unknown()：局部类型推断依赖「重复赋值
+                // 就换类型」的旧语义（stdlib/hmac.py 的 h = md5(...) / h = sha1(...)
+                // 多分支各赋值一次，洞会让旧路径退化成 unknown 报 method 不支持）。
+                sc->vars.try_emplace(n.id, Symbol{sc->is_module ? fresh_hole() : t_unknown(),
+                                                  n.line, false, false});
                 return;
             }
             case ExprKind::Tuple: {

@@ -222,6 +222,11 @@ public:
     static bool is_exception_type(const std::string& n);
     std::vector<std::string> unsupported;
     size_t n_stmt = 0, n_expr = 0, n_func = 0;
+    // PYADAMAS_TYPE_STATS=1：统计仍为 unknown 的类型与来源（默认关，零成本）。
+    bool type_stats_on_ = false;
+    std::unordered_map<std::string, long> type_stats_;
+    std::unordered_map<std::string, std::vector<std::string>> type_stats_examples_;
+    void type_stat(const std::string& cat, const std::string& example);
 
 private:
     std::string file_;
@@ -607,5 +612,10 @@ private:
                         bool self_recv = false);
 };
 
+
+// 未填的类型洞归一化为全局 unknown 单例（定义见 typecheck.cpp）。
+void normalize_type_holes(TypePtr& t, int depth);
+// 容器/元组/生成器类型里是否含 unknown 元素（类型统计用）。
+bool type_contains_unknown_elem(const TypePtr& t);
 
 }  // namespace pyadamas

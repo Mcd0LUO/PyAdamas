@@ -277,8 +277,17 @@ TypePtr TypeChecker::expr(Expr& e) {
                 }
                 return t_bool();
             }
-            case ExprKind::Call:
-                return call(static_cast<Call&>(e));
+            case ExprKind::Call: {
+                TypePtr cty = call(static_cast<Call&>(e));
+                if (type_stats_on_ && is_unknown(cty)) {
+                    auto& cc = static_cast<Call&>(e);
+                    std::string nm = "<expr>";
+                    if (auto* n = dynamic_cast<Name*>(cc.func.get())) nm = n->id;
+                    else if (auto* a = dynamic_cast<Attribute*>(cc.func.get())) nm = a->attr;
+                    type_stat("call_return", nm);
+                }
+                return cty;
+            }
             case ExprKind::Subscript: {
                 auto& s = static_cast<Subscript&>(e);
                 // list[int] / dict[str, int]：PEP 585 的泛型别名，是类型对象不是值

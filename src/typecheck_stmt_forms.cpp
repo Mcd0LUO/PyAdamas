@@ -437,7 +437,13 @@ void TypeChecker::stmt_if(If& f) {
             for (auto& [n, sym] : cur_->vars) {
                 auto it = merged.find(n);
                 if (it == merged.end()) merged.emplace(n, sym.ty);
-                else if (!type_eq(it->second, sym.ty)) it->second = join(it->second, sym.ty);
+                else if (!type_eq(it->second, sym.ty)) {
+                    TypePtr j = join(it->second, sym.ty);
+                    if (type_stats_on_ && !is_unknown(it->second) && !is_unknown(sym.ty) &&
+                        is_unknown(j))
+                        type_stat("branch_merge", n);
+                    it->second = j;
+                }
             }
         };
         for (auto& b : f.branches) {
