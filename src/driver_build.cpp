@@ -424,6 +424,25 @@ bool visit_unit(Program& p, ModuleUnit& u, std::vector<ModuleUnit*>& stack) {
 
     for (size_t qi = 0; qi < queue.size(); ++qi) {
         ImportReq req = queue[qi];
+        // `from . import mod`（包 __init__.py 里）：相对解析后 req.name 等于
+        // 当前单元自身。只要所有 from_names 都能解析成子模块，这是「导入子模块」
+        // 而不是循环导入 —— 跳过自身依赖、只把子模块排进队列（否则标准包写法
+        // `from . import mod` 在 __init__.py 里必然报 circular import）。
+        if (req.name == u.name && !req.from_names.empty()) {
+            bool all_sub = true;
+            for (auto& n : req.from_names)
+                if (!resolve_module_path(u.path, req.name + "." + n, p.include_dirs)) {
+                    all_sub = false;
+                    break;
+                }
+            if (all_sub) {
+                for (auto& n : req.from_names) {
+                    std::string child = req.name + "." + n;
+                    if (!p.units.count(child)) queue.push_back({child, req.line, req.col, {}});
+                }
+                continue;
+            }
+        }
         bool dotted = req.name.find('.') != std::string::npos;
         bool name_ok = dotted ? [&] {
             size_t s = 0;
