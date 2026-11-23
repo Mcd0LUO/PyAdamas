@@ -542,52 +542,10 @@ pyadamas::ModuleInfoPtr builtin_module(const std::string& name) {
               2, pyadamas::mk_list(pyadamas::t_str()));
         re_fn("escape", {{"pattern", pyadamas::t_str()}}, 0, pyadamas::t_str());
     } else if (name == "random") {
-        // 模块级函数已迁到 stdlib/sigs/random.pysig（按名字 merge）。
-        // seed/Random 的 INT64_MIN 哨兵默认值编译期算不出字面量，
-        // 且 Random 是构造器（无 class 声明语法），保留在硬编码。
+        // 模块级函数（含 seed 与 ret_known=false 的 choice/sample/choices）已全部
+        // 迁到 stdlib/sigs/random.pysig（按名字 merge）。这里只剩 Random 构造器：
+        // 它是类（没有 class 声明语法），返回 t_random()。
         const int64_t kNoSeed = -9223372036854775807LL - 1;
-        // sample/choices：ret_known=false（返回类型按实参特化），pysig 固定
-        // ret_known=true 无法表达，保留在硬编码。
-        for (auto& n : {"sample", "choices"}) {
-            auto f = std::make_shared<pyadamas::FuncInfo>();
-            f->name = std::string("random.") + n;
-            pyadamas::Param p;
-            p.name = "seq";
-            p.ty = pyadamas::t_unknown();
-            f->pos.push_back(std::move(p));
-            pyadamas::Param q;
-            q.name = "k";
-            q.ty = pyadamas::t_int();
-            f->pos.push_back(std::move(q));
-            f->ret = pyadamas::t_unknown();
-            f->ret_known = false;
-            func_with(n, f);
-        }
-        // choice：同上，ret_known=false。
-        {
-            auto f = std::make_shared<pyadamas::FuncInfo>();
-            f->name = "random.choice";
-            pyadamas::Param p;
-            p.name = "seq";
-            p.ty = pyadamas::t_unknown();
-            f->pos.push_back(std::move(p));
-            f->ret = pyadamas::t_unknown();
-            f->ret_known = false;
-            func_with("choice", f);
-        }
-        {
-            auto f = std::make_shared<pyadamas::FuncInfo>();
-            f->name = "seed";
-            pyadamas::Param p;
-            p.name = "a";
-            p.ty = pyadamas::t_int();
-            p.has_default = true;
-            p.default_lit = lv_int(kNoSeed);
-            f->pos.push_back(std::move(p));
-            f->ret = pyadamas::t_none();
-            f->ret_known = true;
-            func_with("seed", f);
-        }
         {
             auto f = std::make_shared<pyadamas::FuncInfo>();
             f->name = "Random";

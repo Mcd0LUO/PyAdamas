@@ -1,13 +1,15 @@
 # stdlib/sigs/random.pysig —— random 模块的声明式签名（P0 第 5 批）
 #
-# 只声明模块级函数。Random 类及其 r.* 方法（pa_random_* 一族）无 class
-# 语法，保留在 C++；choice/sample/choices 的返回类型特化在 random_call，
-# 参数装配在 lower_import_native.cpp（§6.4），签名声明不影响那些分支。
-"""random 模块的 native 签名（14 个模块级函数）。"""
+# 只声明模块级函数。Random 类及其 r.* 方法（pa_random_* 一族）没有 class
+# 声明语法，保留在 C++；choice/sample/choices 的参数装配在
+# lower_import_native.cpp 的 lower_random_extra（§6.4），签名不影响那些分支。
+#
+# 两处曾经「声明不了」的能力现在都有通道：
+#   * choice/sample/choices 的返回类型按实参特化 → @ret_specialized（ret_known=false）；
+#   * seed 的 INT64_MIN 哨兵默认值 → 一元负号 + u64 字面量折叠成 INT64_MIN。
+"""random 模块的 native 签名（17 个模块级函数）。"""
 
 # 全局 PRNG 的函数走 pa_random_g* 入口（装饰器覆盖约定符号）。
-# seed/Random 的 INT64_MIN 哨兵默认值编译期算不出字面量；choice/sample/choices
-# 的 ret_known=false（返回类型按实参特化）pysig 无法表达（加载器固定 ret_known=true），保留在 C++。
 @native("pa_random_gnext")
 def random() -> float: pass
 @native("pa_random_grandint")
@@ -16,6 +18,22 @@ def randint(a: int, b: int) -> int: pass
 def uniform(a: float, b: float) -> float: pass
 @native("pa_random_gshuffle")
 def shuffle(x: list[object]) -> None: pass
+
+# 返回类型由调用点按实参特化：@ret_specialized 让加载器产出 FuncInfo
+# {ret=unknown, ret_known=false}，与硬编码路径逐字段一致，调用点代码生成不变。
+@native("pa_random_gchoice")
+@ret_specialized
+def choice(seq: object) -> object: pass
+@native("pa_random_sample")
+@ret_specialized
+def sample(seq: object, k: int) -> object: pass
+@native("pa_random_choices")
+@ret_specialized
+def choices(seq: object, k: int) -> object: pass
+
+# seed 的默认值是 INT64_MIN 哨兵（-2^63）。
+@native("pa_random_gseed")
+def seed(a: int = -9223372036854775808) -> None: pass
 
 # 其余走约定符号 pa_random_<name>。
 def randrange(*args: int) -> int: pass

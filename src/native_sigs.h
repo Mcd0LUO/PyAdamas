@@ -84,6 +84,9 @@ struct SigFunc {
     std::string kwarg_name;
     TypePtr kwarg_ty;
     TypePtr ret;
+    // @ret_specialized：返回类型由调用点按实参特化（FuncInfo::ret_known=false），
+    // 与硬编码里 random.choice/sample/choices 的行为一致。
+    bool ret_specialized = false;
     int line = 0;  // 声明所在行（诊断用）
 };
 
@@ -267,10 +270,20 @@ class DeclParser {
         for (auto& d : fd.decorators) {
             if (!d) continue;
             const auto dec = pydecl::decorator_of(*d, fd.name);
+            if (dec.name == "ret_specialized") {
+                // 返回类型由调用点决定（ret_known=false）：random.choice 这类
+                // 「返回序列元素类型」的函数用，声明里写 -> object 占位。
+                if (dec.has_string_arg)
+                    pydecl::fail(dec.line, "@ret_specialized takes no arguments");
+                if (f.ret_specialized)
+                    pydecl::fail(dec.line, "duplicate @ret_specialized on '" + fd.name + "'");
+                f.ret_specialized = true;
+                continue;
+            }
             if (dec.name != "native")
                 pydecl::fail(dec.line, "unknown decorator on '" + fd.name +
-                                           "' (only @native(\"pa_symbol\") is allowed in a "
-                                           "signature file)");
+                                           "' (only @native(\"pa_symbol\") and "
+                                           "@ret_specialized are allowed in a signature file)");
             if (!dec.has_string_arg)
                 pydecl::fail(dec.line, "@native needs a runtime symbol: @native(\"pa_xxx\")");
             if (!f.rt_symbol.empty())
@@ -495,7 +508,11 @@ inline ModuleInfoPtr module_info(const std::string& module) {
     info->builtin = true;
     for (auto& f : ms->funcs) {
         auto fi = std::make_shared<FuncInfo>();
-        fi->name = f.name;
+        // 名字按硬编码惯例带模块前缀（"random.choice"）：typecheck 的
+        // check_args 对 random./itertools./operator./collections./json. 前缀的
+        // 函数有「返回类型随实参特化」的专用分派（如 random.choice 的元素类型），
+        // 不带前缀就会退化成 unknown，改变调用点代码生成。
+        fi->name = module + "." + f.name;
         auto add = [&](const SigParam& p, bool kwonly) {
             Param pp;
             pp.name = p.name;
@@ -513,8 +530,10 @@ inline ModuleInfoPtr module_info(const std::string& module) {
         fi->kwargs = f.kwargs;
         fi->kwarg_name = f.kwarg_name;
         fi->kwarg_ty = f.kwarg_ty;
-        fi->ret = f.ret;
-        fi->ret_known = true;
+        // @ret_specialized：ret 固定 unknown、ret_known=false，与硬编码路径逐字段一致。
+        fi->ret = f.ret_specialized ? new_ty(TyKind::Unknown) : f.ret;
+        fi->ret_known = !f.ret_specialized;
+
         auto t = new_ty(TyKind::Func);
         t->fn = std::move(fi);
         info->globals[f.name] = std::move(t);

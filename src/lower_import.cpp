@@ -166,13 +166,9 @@ std::optional<RtFn> Lowerer::native_fn(const std::string& module, const std::str
     if (module == "sys" && member == "exc_info") {
         return RtFn::ExcInfo;
     } else if (module == "random") {
-        // 其余模块级函数已迁到 stdlib/sigs/random.pysig；seed/Random 与
-        // ret_known=false 的 choice/sample/choices 保留。
-        if (member == "seed") return RtFn::RandGSeed;
+        // 全部模块级函数（含 seed / ret_known=false 的 choice/sample/choices）
+        // 已迁到 stdlib/sigs/random.pysig；这里只剩 Random 构造器（类，无声明语法）。
         if (member == "Random") return RtFn::RandNew;
-        if (member == "choice") return RtFn::RandGChoice;
-        if (member == "sample") return RtFn::RandSample;
-        if (member == "choices") return RtFn::RandChoices;
     } else if (module == "os") {
         // 其余 os 成员已迁到 stdlib/sigs/os.pysig；walk 仍在硬编码。
         if (member == "walk") return RtFn::OsWalk;
@@ -227,13 +223,6 @@ std::optional<RtFn> Lowerer::native_fn(const std::string& module, const std::str
 
 bool Lowerer::builtin_value(const std::string& module, const std::string& member, VReg& out,
                             TypePtr& ty) {
-    // math.nan 无法用 .pysig 字面量表达（pydecl::Literal 没有 NaN 形态），
-    // 在声明式 hook 之前特判，pysig 里的 nan 声明只为 typecheck 提供类型。
-    if (module == "math" && member == "nan") {
-        out = const_float(std::numeric_limits<double>::quiet_NaN());
-        ty = t_float();
-        return true;
-    }
     // 声明式常量（P0）：stdlib/sigs/<module>.pysig 的 const，按字面量直接产出。
     if (const auto* dc = pyadamas::nativesig::find_const(module, member)) {
         switch (dc->val.kind) {

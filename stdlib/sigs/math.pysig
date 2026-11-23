@@ -5,14 +5,15 @@
 # 格式规格与操作手册见 docs/native-stdlib-cookbook.md。
 """math 模块的 native 签名（57 个函数 + 3 个可声明常量）。"""
 
-# ── 常量（inf / nan 无法用字面量表达，留在 builtin_value 的 C++ 分支）──
+# ── 常量 ──
+# inf/nan 没有 Python 字面量写法：用 float("inf") / float("nan") 这种合法
+# 调用形式作常量初值（pydecl 只认这一小组白名单）。这样声明与实际值一致，
+# 不必再在 builtin_value 里特判。
 pi: float = 3.14159265358979323846
 e: float = 2.71828182845904523536
 tau: float = 6.28318530717958647692
-# inf/nan 无法用 Python 字面量表达 NaN；inf 用 1e400（strtod 溢出得 +inf），
-# nan 在 builtin_value 里特判覆盖（声明只为 typecheck 提供类型）。
-inf: float = 1e400
-nan: float = 1e400
+inf: float = float("inf")
+nan: float = float("nan")
 
 # ── 单参数 float → float ──
 def sqrt(x: float) -> float: pass

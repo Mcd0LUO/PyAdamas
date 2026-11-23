@@ -14,7 +14,9 @@
 //     .cpya 走自己的 CKind 映射）。
 #pragma once
 
+#include <cmath>
 #include <cstdint>
+#include <limits>
 #include <cstdio>
 #include <cstdlib>
 #include <fstream>
@@ -196,7 +198,17 @@ inline std::optional<Literal> literal_of(const Expr* e) {
         if (u.op == Tok::PLUS) return inner;
         switch (inner->kind) {
             case Literal::Kind::Int:
-                if (inner->u64) return std::nullopt;
+                if (inner->u64) {
+                    // 无符号范围字面量取负：只有 -2^63 能落回 int64（INT64_MIN）。
+                    // 正数字面量 9223372036854775808 解析成 u64 位模式，取负前
+                    // 不能直接当 int64 用——先按无符号幅度判断，再折叠成 INT64_MIN。
+                    const uint64_t mag = static_cast<uint64_t>(inner->i);
+                    if (mag > static_cast<uint64_t>(INT64_MAX) + 1) return std::nullopt;
+                    inner->i = static_cast<int64_t>(uint64_t{0} - mag);
+                    inner->u64 = false;
+                    return inner;
+                }
+                if (inner->i == INT64_MIN) return std::nullopt;  // 防溢出
                 inner->i = -inner->i;
                 return inner;
             case Literal::Kind::Float:
@@ -204,6 +216,31 @@ inline std::optional<Literal> literal_of(const Expr* e) {
                 return inner;
             default: return std::nullopt;
         }
+    }
+    // 特殊浮点常量用合法 Python 调用形式表达：float("nan") / float("inf") /
+    // float("-inf")。1e400 这类写法溢出得 +inf，但 NaN 没有字面量写法。
+    if (e->kind == ExprKind::Call) {
+        const auto& call = static_cast<const Call&>(*e);
+        const auto* fn = dynamic_cast<const Name*>(call.func.get());
+        if (!fn || fn->id != "float" || call.args.size() != 1 || !call.keywords.empty())
+            return std::nullopt;
+        const auto* c = dynamic_cast<const Constant*>(call.args[0].get());
+        if (!c || c->ck != Constant::CK::Str) return std::nullopt;
+        double fval = 0.0;
+        if (c->s == "nan" || c->s == "+nan")
+            fval = std::numeric_limits<double>::quiet_NaN();
+        else if (c->s == "inf" || c->s == "+inf" || c->s == "infinity" ||
+                 c->s == "+infinity")
+            fval = std::numeric_limits<double>::infinity();
+        else if (c->s == "-inf" || c->s == "-infinity")
+            fval = -std::numeric_limits<double>::infinity();
+        else
+            return std::nullopt;
+        Literal fv;
+        fv.kind = Literal::Kind::Float;
+        fv.f = fval;
+        fv.line = e->line;
+        return fv;
     }
     if (e->kind != ExprKind::Constant) return std::nullopt;
     const auto& c = static_cast<const Constant&>(*e);

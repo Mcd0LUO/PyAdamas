@@ -120,6 +120,8 @@ def now() -> float: pass
 |---|---|
 | `x: float` | 普通位置参数 |
 | `x: float = -1e300` | 带默认值（必须是字面量；调用点省略时降级阶段填它） |
+| `x: int = -9223372036854775808` | INT64_MIN：字面量先按 u64 解析、再折叠一元负号，可取到 -2^63 |
+| `x: float = float("nan")` | NaN / inf：用 `float("nan")`、`float("inf")`、`float("-inf")` 调用形式（Python 没有 NaN 字面量） |
 | `*, x: int` | keyword-only |
 | `*args: unknown` | 可变位置参数（类型是**元素**类型） |
 | `**kwargs: unknown` | 可变关键字参数 |
@@ -143,6 +145,40 @@ native 签名不写类型等于让调用点放弃 coerce，运行期会按错的
 拼错的名字、Protocol（`Sequence` 等）、未登记的类都会报
 「`'Foo' is not a supported native signature type`」——否则声明静默退化成 unknown，
 调用点不再 coerce，运行期按错的 ABI 传参。
+
+---
+
+### 4.3 返回类型特化：`@ret_specialized`
+
+有些函数的返回类型**由实参决定**（`random.choice(seq)` 返回 `seq` 的元素类型、
+`random.sample/choices` 返回 `list[元素]`）。硬编码里它们是
+`FuncInfo{ret=unknown, ret_known=false}`，由 `typecheck_call_modules.cpp` 的
+`random_call()` 在**调用点**按实参推导。
+
+声明侧用装饰器表达同样语义（仍是 Python 语法，不加新关键字）：
+
+```python
+@native("pa_random_gchoice")
+@ret_specialized
+def choice(seq: object) -> object: pass
+```
+
+语义：加载器产出 `FuncInfo{ret=unknown, ret_known=false}`；返回类型注解只作占位
+（写 `-> object`）。**代码生成与硬编码路径逐字节相同**（`tests/run/532` 覆盖，
+`random.choice` 调用方栈帧与迁移前一致）。
+
+注意：调用点的**推导逻辑**仍在 C++（`check_args` 对 `random.`/`itertools.`/
+`operator.`/`collections.`/`json.` 前缀函数的分派）；`@ret_specialized` 只表达
+「返回类型 unknown 且未定」这个**签名侧事实**。
+
+装饰器约束（都有 `文件:行` 诊断）：
+
+| 误用 | 报错 |
+|---|---|
+| `@ret_specialized("x")` | `@ret_specialized takes no arguments` |
+| 重复写两次 | `duplicate @ret_specialized on 'choice'` |
+| 用在常量/class 上 | `expected 'def' or 'class' after decorator` / 顶层语句白名单报错 |
+| 未知装饰器 | `unknown decorator on 'z' (only @native("pa_symbol") and @ret_specialized are allowed …)` |
 
 ---
 
@@ -295,7 +331,7 @@ if (const auto* c = nativesig::find_const(module, member)) {
 | 新的运行期函数 | `runtime/*.c` 要实现；声明只是名字 |
 | 新的 `pa_*` 入口 + RtFn 编号 | 要加 `ir_rtfn.h`（枚举）+ `ir_rtfn_names.h`（符号名）——但这是**运行期边界**，一次性的 |
 | codegen 参数分组 | `codegen_call_rt.cpp::gen_rt_args` 按 RtFn 决定实参进 i0/f1/str* 等哪个类；新增 RtFn 时**必须**在这里加 case（漏了会生成错调用） |
-| 参数装配不规则 | 可选参数需要「不传时填什么」以外的逻辑（`strftime` 的 9 元组、`subprocess.run` 的关键字、`re.findall` 的返回类型随捕获组数变）→ `call_native` 里的手工分支 |
+| 参数装配不规则 | 可选参数需要「不传时填什么」以外的逻辑（`strftime` 的 9 元组、`subprocess.run` 的关键字、`re.findall` 的返回类型随捕获组数变）→ `call_native` 里的手工分支。注意：**签名侧**的「返回类型随实参特化」现在能声明了（`@ret_specialized`，§4.3），调用点推导逻辑仍在 C++ |
 | 构造器（`collections.Counter`、`pathlib.Path` …） | 需要类/对象语义，声明格式暂不表达（`module_ctor`） |
 | 属性读降级 | `builtin_value`：常量已支持（§5.2 C），其它（如 `os.environ` 是调用不是读）走各自 hook |
 
@@ -364,10 +400,11 @@ if (const auto* c = nativesig::find_const(module, member)) {
 |---|---|---|
 | `time` | ✅ 已迁移（`stdlib/sigs/time.pysig`，Python 语法） | 8 个函数 + 2 个常量；`strftime` 的参数装配仍在 `lower_import_native.cpp`（签名已声明） |
 | `os.path` | ✅ 已迁移（`stdlib/sigs/os/path.pysig`，Python 语法） | 16 个函数（路径即模块名）；常量 `sep/altsep/curdir/pardir` 属于 `os` 模块，不在本文件 |
-| `math` | ✅ 已迁移（`stdlib/sigs/math.pysig`，Python 语法） | 57 个函数 + 5 个常量；`inf` 用 `1e400` 字面量，`nan` 在 `builtin_value` 开头特判（无 NaN 字面量）；asm 等价 13/13 |\n| `sys` | ✅ 已迁移（`stdlib/sigs/sys.pysig`） | `maxsize` + `exit` 走声明；`argv`/`executable`/`stdin`/`stdout`/`stderr`/`exc_info` 是运行期调用或含 ClassObj 返回类型，保留 C++（在 `builtin_sigs.cpp` 的 sys merge 分支补类型）；asm 等价 13/13 |
+| `math` | ✅ 已迁移（`stdlib/sigs/math.pysig`，Python 语法） | 57 个函数 + 5 个常量；`inf`/`nan` 用 `float("inf")`/`float("nan")` 调用形式声明，**不再有 C++ 特判**；asm 等价 |
+| `sys` | ✅ 已迁移（`stdlib/sigs/sys.pysig`） | `maxsize` + `exit` 走声明；`argv`/`executable`/`stdin`/`stdout`/`stderr`/`exc_info` 是运行期调用或含 ClassObj 返回类型，保留 C++（在 `builtin_sigs.cpp` 的 sys merge 分支补类型）；asm 等价 13/13 |
 | `operator` | ⛔ **不可迁移** | 31 个函数全部走 `operator_call()` 类型推导 + `lower_operator()` 专门降级，无 `pa_operator_*` RtFn 入口；pysig 的符号反查会硬失败。判据：**只有存在 `pa_<模块>_<名字>` RtFn 的函数才能声明**。 |
 | `os` | ✅ 已迁移模块级函数（`stdlib/sigs/os.pysig`） | 16 函数 + 6 标量常量；`unlink` 用 `@native("pa_os_remove")`；保留 C++：`environ`（运行期 dict）、`walk`（返回 list[tuple]）、`os.path.*`（独立模块已迁）。asm 等价 13/13 |
-| `random` | ✅ 已迁移模块级函数（`stdlib/sigs/random.pysig`） | 9 函数（random/randint/uniform/shuffle/randrange/getrandbits/gauss/expovariate/triangular）；6 个 `@native` 覆盖 g* 符号。保留 C++：seed/Random（INT64_MIN 哨兵）、choice/sample/choices（ret_known=false，pysig 固定 true）、Random 类方法。asm 等价 13/13 |
+| `random` | ✅ 已迁移**全部模块级函数**（`stdlib/sigs/random.pysig`） | 17 函数：14 个普通 + `seed`（`INT64_MIN` 哨兵默认值）+ `choice`/`sample`/`choices`（`@ret_specialized`，返回类型按实参特化）；6 个 `@native` 覆盖 g* 符号。保留 C++：只有 `Random` 构造器与 `r.*` 方法（类语义）。asm 与迁移前逐字节相同 |
 | `collections` `json` `re` | ⬜ 未迁移 | 硬编码仍在；加载器已就绪，可按 §6.2 逐个搬 |
 | `pathlib` `operator` `asyncio` | ⬜ 未迁移（优先级低） | 构造器/类语义多，声明格式表达不了的部分留 C++ |
 | `datetime` `subprocess` | ⬜ 未迁移（优先级低） | 参数装配/返回类型随实参变的分支多 |
