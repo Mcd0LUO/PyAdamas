@@ -57,6 +57,22 @@ static uint64_t dict_big_hash(const PyAdamasBig* b) {
 
 // 字符串键哈希（含 chash 缓存）。kind==1（静态 str 键）与「运行时才认出
 // 是堆字符串的 unknown 键」共用这一份。
+
+static int dict_key_is_instance(int64_t v) {
+    if (!pa_unknown_is_heap(v)) return 0;
+    PyAdamasRc* h = (PyAdamasRc*)(uintptr_t)((uint64_t)v - (uint64_t)PYADAMAS_RC_HDR);
+    return h->kind == PYADAMAS_RC_INSTANCE;
+}
+
+/* unknown 域实例相等：先 stored key 的 __eq__，再 probe 的（CPython 口径）。 */
+static int dict_instance_eq(int64_t a, int64_t b) {
+    void* fa = pa_instance_dunder_fn((void*)(uintptr_t)a, 0);
+    if (fa) return ((int64_t (*)(int64_t, int64_t))fa)(a, b) != 0;
+    void* fb = pa_instance_dunder_fn((void*)(uintptr_t)b, 0);
+    if (fb) return ((int64_t (*)(int64_t, int64_t))fb)(b, a) != 0;
+    return 0;
+}
+
 static int64_t dict_str_hash(PyAdamasStr* s) {
     if (s->chash != 0) return s->chash;
     uint64_t h = 1469598103934665603ull;
@@ -80,6 +96,18 @@ static int dict_key_is_heap_str(int64_t v) {
     return h->kind == PYADAMAS_RC_STR;
 }
 
+/* unknown 键域（kind=3）的实例分派：有 __hash__ 槽 → 调它；只有 __eq__
+   没有 __hash__ 的类按 CPython 抛 TypeError（不可哈希）；两者都没有退回机器字
+   （身份语义，与 typed 域「只定义 __eq__ 的类在 dict 里按身份处理」的既有口径
+   不同：unknown 域跟随 CPython 的 unhashable 判定）。 */
+static int64_t dict_instance_hash(int64_t v) {
+    void* fn = pa_instance_dunder_fn((void*)(uintptr_t)v, 2);
+    if (fn) return ((int64_t (*)(int64_t))fn)(v);
+    if (pa_instance_dunder_fn((void*)(uintptr_t)v, 0))
+        pa_raise_c("TypeError", "unhashable type: 'object'");
+    return 0;
+}
+
 int64_t dict_hash_value(int64_t kind, int64_t v) {
     uint64_t h;
     if (kind == 1) {
@@ -99,10 +127,32 @@ int64_t dict_hash_value(int64_t kind, int64_t v) {
                                        : mix64((uint64_t)v);
         else if (dict_big_fits_i64(b, &bv)) h = mix64((uint64_t)bv);
         else h = dict_big_hash(b);
-    } else if (kind == 3 && dict_key_is_heap_str(v)) {
-        /* 未知键域：运行时认出堆字符串 → 按内容哈希。否则 `{}` 在没有类型
-           上下文时建出的 key_kind=3 dict 对 str 键退化按指针身份比较。 */
-        return dict_str_hash((PyAdamasStr*)v);
+    } else if (kind == 3) {
+        /* 未知键域：运行时认出堆字符串 → 按内容哈希（0.422）；用户类实例 →
+           按 __hash__ 槽哈希（0.435）；其它仍按机器字。 */
+        if (dict_key_is_heap_str(v)) return dict_str_hash((PyAdamasStr*)v);
+        if (dict_key_is_instance(v)) {
+            int64_t hv = dict_instance_hash(v);
+            return hv ? hv : 1;
+        }
+        h = mix64((uint64_t)v);
+    } else if (kind == -1) {
+        /* hash() 内置的 unknown 值：按运行期种类分派，保证同值同哈希。 */
+        if (dict_key_is_heap_str(v)) return dict_str_hash((PyAdamasStr*)v);
+        if (dict_key_is_instance(v)) {
+            int64_t hv = dict_instance_hash(v);
+            return hv ? hv : 1;
+        }
+        PyAdamasBig* b = dict_big_key(v);
+        if (b) {
+            int64_t bv = 0;
+            if (dict_big_fits_i64(b, &bv)) {
+                int64_t hb = (int64_t)mix64((uint64_t)bv);
+                return hb ? hb : 1;
+            }
+            return dict_big_hash(b);
+        }
+        h = mix64((uint64_t)v);
     } else {
         h = mix64((uint64_t)v);
     }
@@ -130,9 +180,11 @@ int dict_key_eq(int64_t kind, int64_t a, int64_t b) {
     if (a == b) return 1;
     if (kind == 3) {
         /* 未知键域：两边都是堆字符串时按内容比（与 dict_hash_value 的
-           kind==3 分派配套）。 */
+           kind==3 分派配套）；两个用户类实例按 __eq__ 槽分派（0.435）。 */
         if (dict_key_is_heap_str(a) && dict_key_is_heap_str(b))
             return pa_str_eq((PyAdamasStr*)a, (PyAdamasStr*)b) != 0;
+        if (dict_key_is_instance(a) && dict_key_is_instance(b))
+            return dict_instance_eq(a, b);
         return 0;
     }
     if (kind == DICT_KEY_RAW_OR_BIG) {

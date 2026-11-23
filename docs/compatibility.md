@@ -166,9 +166,11 @@ float 除法直接发 `divsd`，没有除零检查，于是按 IEEE 754 得到 `
   typed 与 unknown 域一致），**没有 `__lt__` 的类仍抛**
   `TypeError: '<' not supported between instances of 'object' and 'object'`
   （文案用 `object` 而非具体类名：运行时拿不到「实例 → 类名」映射，只按槽分派）。
-  同类分派也覆盖 `==`/`!=`/`<`（unknown 域）与 typed `list[P]` 的 `in`/`index`/`remove`；
-  `__hash__` 的 unknown 域分派（实例作无类型 dict/set 键）仍未做，见
-  [unknown-semantics-audit.md](unknown-semantics-audit.md) §4。
+  同类分派也覆盖 `==`/`!=`/`<`（unknown 域）与 typed `list[P]` 的 `in`/`index`/`remove`。
+  0.435 起 **`__hash__` 在 unknown 域也按槽表分派**：无类型 dict/set 的实例键用 `__hash__`
+  哈希、`__eq__` 比较（等值不同对象命中同一个键）；**只有 `__eq__` 没有 `__hash__` 的类在
+  unknown 域抛 `TypeError: unhashable type`（CPython 口径）；typed 域保持既有文档化口径
+  （只定义 `__eq__` 的类作 typed dict 键仍按身份处理，`hash()` 编译期报错）。
 
 ## 二、尚未实现的构造
 

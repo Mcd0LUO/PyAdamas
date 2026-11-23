@@ -301,6 +301,10 @@ VReg Lowerer::lower_builtin_reflect(const std::string& name, Call& c) {
             }
             return call_runtime(RtFn::HashValue, t_int(), {const_int(3), v});
         }
+        if (!t || t->kind == TyKind::Unknown) {
+            // unknown 值：运行期按种类分派（str 内容 / 实例 __hash__ / big / 机器字）。
+            return call_runtime(RtFn::HashValue, t_int(), {const_int(-1), v});
+        }
         err(c.args[0]->line, c.args[0]->col,
             std::format("hash() of '{}' is not supported yet (int/bool/str/float)",
                         type_name(t)));
