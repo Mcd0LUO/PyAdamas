@@ -578,6 +578,19 @@ void TypeChecker::stmt_try(Try& t) {
                 pool_.push_back(std::move(sc));
                 cur_->vars[h.name] = Symbol{et, t.line, false, false};
                 stmts(h.body);
+                // Python 是**函数级作用域**：handler 体里绑定的名字（除 as e 外）
+                // 属于函数作用域，必须回写到父作用域。只建临时作用域放 e 会让
+                // `x = str(e)` 在子作用域里造一个同名新符号，外层 x 保持旧类型；
+                // 降级按名字写同一个槽，print 却按旧类型解释新值（实测：int 槽
+                // 存 str 指针，打印出一串数字而不是异常消息）。
+                for (auto& [nm, sym] : cur_->vars) {
+                    if (nm == h.name) continue;
+                    auto pit = cur_->parent->vars.find(nm);
+                    if (pit == cur_->parent->vars.end())
+                        cur_->parent->vars[nm] = sym;
+                    else
+                        pit->second = sym;
+                }
                 cur_ = cur_->parent;
             } else {
                 stmts(h.body);

@@ -903,9 +903,21 @@
 > 夜间迭代文档收尾：`CHANGELOG` 0.402–0.411、`docs/vectorization-generalization.md`
 > 的覆盖率与能力边界、`docs/modularization.md` 第 2 步（VectPlanner 完成 + A5 实测
 > 1 TU/7.76 s vs 31 TU/55.16 s）、`docs/nightly-roadmap.md` 的「实际结果 vs 计划」、
-> `docs/vect-planner-design.md` 阶段状态。
+> `docs/vect-planner-design.md` 阶段状态。纯文档，无代码改动。
 >
-> 纯文档，无代码改动。
+> 明细（合并同轮的另一份记录）：
+>
+> - `vectorization-generalization.md`：覆盖率 1/12 → **7 个循环 / 3 个基准**；
+>   新增「当前能力边界」（支持 sqrt / Sub 归约 / coef==0 广播装载；不支持 scatter 写、
+>   同数组混合偏移、嵌套循环形状、非 2 的幂除数、AVX2 广播装载）；修掉「Convert 只认
+>   j+常量」「仍是 2-lane SSE2」等与 b316646 / 0.389 矛盾的过时说法。
+> - `modularization.md`：VectPlanner 抽取标记完成，补 A5 实测（1 TU / 7.76 s vs
+>   31 TU / 55.16 s）；原「剩余 VectPlanner」一节改写为已完成。
+> - `vect-planner-design.md`：状态从「阶段 1 已实施」改为「阶段 1–4 已全部实施」。
+> - `nightly-roadmap.md`：按实际执行重写，补「实际结果 vs 计划」。
+>
+> 未做的事（如实记录）：A4 第 4 步「辅助文件跟着搬 + 删转发」未做（`vect_affine_*` 等
+> 仍是 AsmGen 方法经转发调用，属刻意保留的边界）；ASan 未在本轮跑（随后单独验证）。
 
 ## [0.411] - 2026-11-23
 
@@ -1142,22 +1154,6 @@
 >
 > 验证：构建绿 / **369 ran ok** / **difftest 348/0** / check_size 通过；12 基准输出
 > 一致、指令数噪声内；两条 md5 不变。
-
-## [0.412] - 2026-11-23
-
-> 文档收尾：补齐 0.402–0.411 的十条条目，并修正四份文档里与实测矛盾的旧结论。
->
-> - `vectorization-generalization.md`：覆盖率 1/12 → **7 个循环 / 3 个基准**；
->   新增「当前能力边界」（支持 sqrt / Sub 归约 / coef==0 广播装载；不支持 scatter 写、
->   同数组混合偏移、嵌套循环形状、非 2 的幂除数、AVX2 广播装载）；修掉「Convert 只认
->   j+常量」「仍是 2-lane SSE2」等与 b316646 / 0.389 矛盾的过时说法。
-> - `modularization.md`：VectPlanner 抽取标记完成，补 A5 实测（1 TU / 7.76 s vs
->   31 TU / 55.16 s）；原「剩余 VectPlanner」一节改写为已完成。
-> - `vect-planner-design.md`：状态从「阶段 1 已实施」改为「阶段 1–4 已全部实施」。
-> - `nightly-roadmap.md`：按实际执行重写，补「实际结果 vs 计划」。
->
-> 未做的事（如实记录）：A4 第 4 步「辅助文件跟着搬 + 删转发」未做（`vect_affine_*` 等
-> 仍是 AsmGen 方法经转发调用，属刻意保留的边界）；ASan 未在本轮跑（随后单独验证）。
 
 ## [0.402] - 2026-11-23
 
@@ -6823,12 +6819,6 @@ try-else 新增保护区外 else 块，四路与老路径、CPython 一致。wit
 
 闭包 +0 指向 shim（非函数本体），所有间接调用走统一约定（实参进整型寄存器、返回值 `%rax`），修浮点经 unknown 函数值传递的静默算错。全量 202 ran ok；四套异常夹具无回退。
 
-## [0.186] - 2026-11-16
-
-### 字符串码点语义 S1+S2
-
-[str-codepoints.md](docs/str-codepoints.md) 的 S1+S2：`PyAdamasStr` 24 → 32 字节，`pub`（str 码点数 / bytes 字节数）放偏移 0，`len` 与真值判断指令一行未改；字面量编译期算好 pub；下标/切片/迭代/方法按码点，bytes 保持字节；顺序迭代游标 + 全 ASCII 快路径；新增 `len_bytes(s)`；cimport 取 data 偏移 16 → 24。性能对比 0.184 在 0.87–1.05×，迭代线性。全量 201 ran ok。S3 未做。
-
 ## [0.187] - 2026-11-16
 
 ### 修 `functools.reduce` 传浮点回调时的静默算错
@@ -6857,6 +6847,12 @@ try-else 新增保护区外 else 块，四路与老路径、CPython 一致。wit
 - `unknown` 形参的函数（`def f(a, b): return a+b`）本身按整数 ABI 编译，被浮点实参调用时仍算错；
 - 元素类型为 `unknown` 的裸 list 被按 double 读时，int 元素会读错（`fold([1,2])` 得到 `1.5e-323`）。
   这两个都需要「元素域上的运行期信息」才能修，与 0.187 的选择问题不同源。
+## [0.186] - 2026-11-16
+
+### 字符串码点语义 S1+S2
+
+[str-codepoints.md](docs/str-codepoints.md) 的 S1+S2：`PyAdamasStr` 24 → 32 字节，`pub`（str 码点数 / bytes 字节数）放偏移 0，`len` 与真值判断指令一行未改；字面量编译期算好 pub；下标/切片/迭代/方法按码点，bytes 保持字节；顺序迭代游标 + 全 ASCII 快路径；新增 `len_bytes(s)`；cimport 取 data 偏移 16 → 24。性能对比 0.184 在 0.87–1.05×，迭代线性。全量 201 ran ok。S3 未做。
+
 ## [0.185] - 2026-11-16
 
 ### 修用户类一元运算符的 SIGSEGV（`__neg__` 等）
