@@ -197,7 +197,10 @@ int64_t pa_math_isclose(double a, double b) {
 static void math_tuple_push_f64(PyAdamasList* l, double v) {
     int64_t bits;
     memcpy(&bits, &v, sizeof bits);
-    pa_list_append(l, bits, 2);
+    /* elem_kind=0：裸值（float 位模式 / 整数），**不能**按 unknown 追加。
+       传 2 会走 pa_unknown_is_heap(bit_pattern)：把 double 的位模式当指针
+       查堆索引 → 越界读 → 段错误（实测 math.frexp/modf 一调用就崩）。 */
+    pa_list_append(l, bits, 0);
 }
 
 PyAdamasList* pa_math_frexp(double x) {
@@ -205,7 +208,7 @@ PyAdamasList* pa_math_frexp(double x) {
     double m = frexp(x, &e);
     PyAdamasList* l = pa_list_new(2, 0);
     math_tuple_push_f64(l, m);
-    pa_list_append(l, (int64_t)e, 2);
+    pa_list_append(l, (int64_t)e, 0);
     return l;
 }
 
