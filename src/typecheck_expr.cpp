@@ -234,6 +234,10 @@ TypePtr TypeChecker::expr(Expr& e) {
                             err(u.line, u.col, "bad operand type for '~': expected int");
                             return t_unknown();
                         }
+                        // bool 是 Python 的 int 子类：+True / -True 的结果类型是 int
+                        // （CPython 打印 1 / -1）。以前这里返回操作数自身的 Bool 类型：
+                        // 值算对了（-1/1），但按 bool 打印成 True/False，类型也错。
+                        if (t && t->kind == TyKind::Bool) return t_int();
                         // 绑定方法可能重载了一元运算符（@property 返回的数值最
                         // 常见），静态上看不见
                         if (is_unknown(t) || is_num(t) || t->kind == TyKind::Complex ||
