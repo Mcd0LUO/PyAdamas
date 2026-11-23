@@ -189,6 +189,12 @@ public:
         VReg n = kNoReg;          // 循环上界 vreg
         MOperand n_op;            // 上界的入口可读操作数
         bool failed = false;      // 角色判定失败标志
+        // 不变量步长模式（q = q + p，p 是循环不变 int 槽）：两 lane 为 q / q+p。
+        bool has_stride = false;
+        int stride_slot = -1;
+        int step_slot_hint = -1;  // 形状识别出的步长槽（stride_loop_check 消费）
+        MReg J1REG = kMRegNone;   // q + p（第二 lane 的下标）
+        MReg S2REG = kMRegNone;   // 2p（每轮两个 lane 的推进量）
 
         // ── 槽 / 表达式 / 访问 / 归约（原被多个 lambda 共享，A4 第 2 步搬来）──
         std::unordered_map<int, SlotInfo> si;   // 槽 → 循环内读写统计
@@ -312,6 +318,10 @@ public:
     // jmp cond」，返回 true；不匹配返回 false，一个字节不发。实现见
     // vect_planner_loop.cpp（AsmGen::try_vect_loop 留一行转发）。
     bool try_loop(const Block& b);
+    // 不变量步长（q += p）的形状校验 / 入口守卫与推进量发射，见
+    // vect_planner_stride.cpp。
+    bool stride_loop_check(Loop& L);
+    void stride_loop_prologue(Loop& L);
 
     // 除数是不是正的 2 的幂常量；是则写回移位量 sh。
     bool vect_div_pow2(VReg b, int* sh) const;

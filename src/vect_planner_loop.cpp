@@ -61,6 +61,7 @@ bool VectPlanner::try_loop(const Block& b) {
     L.incr_bi = L.BI.back().target;
     if (L.incr_bi < 0 || L.incr_bi >= static_cast<int>(gen_.f_->blocks.size()) || L.incr_bi == L.body_bi)
         return false;
+    int step_slot = -1;
     {
         const auto& INC = gen_.f_->blocks[static_cast<size_t>(L.incr_bi)].insts;
         bool shaped = false;
@@ -68,7 +69,8 @@ bool VectPlanner::try_loop(const Block& b) {
             L.sJ = INC[0].idx;
             shaped = gen_.simd_incr_cond_ok(L.incr_bi, L.body_bi, L.sJ, L.cond_bi, L.end_bi, L.n);
         }
-        if (!shaped && gen_.simd_while_shape_ok(L.incr_bi, L.body_bi, L.sJ, L.end_bi, L.n, L.jupd_pos)) {
+        if (!shaped && gen_.simd_while_shape_ok(L.incr_bi, L.body_bi, L.sJ, L.end_bi, L.n,
+                                               L.jupd_pos, step_slot)) {
             // while：增量在体块里，后续「循环三块」检查用体块顶上（重复访问无害）。
             L.cond_bi = L.incr_bi;
             L.incr_bi = L.body_bi;
@@ -78,6 +80,9 @@ bool VectPlanner::try_loop(const Block& b) {
     }
     if (!gen_.simd_outside(L.n, L.cond_bi, L.body_bi, L.incr_bi) ||
         !gen_.simd_slot_stable(L.n, L.cond_bi, L.body_bi, L.incr_bi)) return false;
+    L.has_stride = step_slot >= 0;
+    L.step_slot_hint = step_slot;
+    if (L.has_stride && !stride_loop_check(L)) return false;
     if (L.sJ < 0 || L.sJ >= static_cast<int>(gen_.f_->slot_ty.size())) return false;
     { TypePtr tj = gen_.f_->slot_ty[static_cast<size_t>(L.sJ)];
       if (!tj || tj->kind != TyKind::Int) return false; }
@@ -580,9 +585,14 @@ bool VectPlanner::try_loop(const Block& b) {
     // 跨步计数器都从这里取；放不下 → 保守跳过（不溢出到 r8-r15：那些可能
     // 是跨块 vreg 的 home）。
     if (!L.j_stack) L.gpr_pool.push_back(kRsi);
-    if (L.bases.size() + L.kcoefs.size() > L.gpr_pool.size()) return false;
+    if (L.bases.size() + L.kcoefs.size() + (L.has_stride ? 2 : 0) >
+        L.gpr_pool.size()) return false;
     for (AffBase& bb : L.bases) bb.reg = L.gpr_pool[L.gpr_used++];
     for (int64_t c : L.kcoefs) L.kreg[c] = L.gpr_pool[L.gpr_used++];
+    if (L.has_stride) {
+        L.J1REG = L.gpr_pool[L.gpr_used++];
+        L.S2REG = L.gpr_pool[L.gpr_used++];
+    }
     // inv 的运行期来源必须能在入口被安全读取：不能落在我们要覆写的池寄存器
     // 或 rax 上（simd_scratch_safe 恰好排掉 rax/rcx/rdx/rsi/rdi + xmm0-7）。
     for (const AffBase& bb : L.bases) {
@@ -739,7 +749,7 @@ bool VectPlanner::try_loop(const Block& b) {
     // 累加写 / 散射写的高 lane 抽取 scratch（阶段 B5 阶段 2/3）：两者从不同时
     // 使用，共用一个；且优先借用「单条指令内原子使用、跨指令不 live」的序列
     // scratch（与 sqrt 的借用同一思路）—— nbody advance 内层就是这样才够寄存器。
-    bool has_scatter = false;
+    bool has_scatter = L.has_stride;
     for (const Access& a : L.accesses)
         if (a.write && a.coef > 1) has_scatter = true;
     if (!L.acc_stores.empty() || has_scatter) {
@@ -776,6 +786,7 @@ bool VectPlanner::try_loop(const Block& b) {
     gen_.emit_jmp(MOp::kJge, L.tail);
     gen_.emit2(MOp::kTestq, L.JREG, L.JREG);
     gen_.emit_jmp(MOp::kJs, L.tail);
+
     // 每 list：kind==0（守护 IndexError/类型升级语义：向量路径不做逐元素检查，
     // 所以元素类型/kind 必须在入口一次证完）。
     for (const std::string& lk : L.lists) {
@@ -859,6 +870,8 @@ bool VectPlanner::try_loop(const Block& b) {
     if (L.has_cmp) L.avx_int = false;
     // 跨组地址区间不相交守卫只有 SSE2 序列（4-lane 发射器不认）→ 留给 SSE2。
     if (!L.dj_guards.empty()) L.avx_int = false;
+    // 不变量步长（两 lane 是 q / q+p 的散射访问）只有 SSE2 序列。
+    if (L.has_stride) L.avx_int = false;
     L.avx.body = &L.BI; L.avx.role = &L.role; L.avx.acc = &L.accesses; L.avx.acc_at = &L.acc_at;
     L.avx.bases = &L.bases; L.avx.reds = &L.reds; L.avx.xmm_of = &L.xmm_of_fn;
     L.avx.uniq_inv = &L.uniq_inv; L.avx.inv_reg = &L.inv_reg;
@@ -868,6 +881,10 @@ bool VectPlanner::try_loop(const Block& b) {
     L.avx.jvec = L.JVEC; L.avx.has_j = (L.JVEC != kMRegNone);
     L.avx.vec = &L.vec; L.avx.int_ok = L.avx_int;
     L.avx2 = gen_.vect_avx2_emit(L.avx, &L.vexit);
+
+    // 不变步长（两 lane = q / q+p）的入口守卫与推进量：放在所有入口守卫/基址
+    // 装载**之后**发射，避免 S2REG/J1REG 被守卫代码当 scratch（rcx/rdx）覆写。
+    if (L.has_stride) stride_loop_prologue(L);
 
     // pshufd 三操作数形式（本 GAS 不接受两操作数写法，同 codegen_simd.cpp）。
     // 向量循环体。
@@ -1053,7 +1070,15 @@ bool VectPlanner::try_loop(const Block& b) {
                 MReg rc = L.xmm_of(in.c);
                 if (rc == kMRegNone) return false;
                 MReg bs = L.bases[static_cast<size_t>(a.bidx)].reg;
-                if (a.coef == 1) {
+                if (L.has_stride && a.coef == 1) {
+                    // 不变量步长散射写：lane0 → base + q*8 + off*8；
+                    // lane1 → base + (q+p)*8 + off*8（高 lane 抽出后 movsd）。
+                    if (L.SCATMP == kMRegNone) return false;
+                    gen_.emit2(MOp::kMovsd, rc, AsmGen::op_mem(bs, L.JREG, 8, a.off * 8));
+                    gen_.emit2(MOp::kMovhlps, rc, L.SCATMP);
+                    gen_.emit2(MOp::kMovsd, L.SCATMP,
+                               AsmGen::op_mem(bs, L.J1REG, 8, a.off * 8));
+                } else if (a.coef == 1) {
                     vect_affine_store(bs, L.JREG, a.off, rc);
                 } else {
                     // 散射写：lane0 → base + K + off*8（K 已按 coef*16 跨步），
@@ -1122,6 +1147,14 @@ bool VectPlanner::try_loop(const Block& b) {
     }
     // 跨步计数器推进：一条向量迭代消费 2 个 lane，各跨 coef 个元素。
     for (int64_t c : L.kcoefs) vect_affine_step(L.kreg[c], c);
+    if (L.has_stride) {
+        // 不变步长：q += 2p，J1 = q + p 同步推进；下一对 lane 有效 ⇔ J1 < n。
+        gen_.emit2(MOp::kAddq, L.S2REG, L.JREG);
+        gen_.emit2(MOp::kAddq, L.S2REG, L.J1REG);
+        if (L.j_stack) gen_.emit2(MOp::kMovq, L.JREG, jloc);
+        gen_.emit2(MOp::kCmpq, L.n_op, L.J1REG);
+        gen_.emit_jmp(MOp::kJl, L.vec);
+    } else {
     // j += 2（+ 写回栈）。
     gen_.emit_imm(MOp::kAddq, 2, L.JREG);
     if (L.j_stack) gen_.emit2(MOp::kMovq, L.JREG, jloc);
@@ -1129,6 +1162,7 @@ bool VectPlanner::try_loop(const Block& b) {
     gen_.emit2(MOp::kLeaq, AsmGen::op_mem(L.JREG, 1), kRax);
     gen_.emit2(MOp::kCmpq, L.n_op, kRax);
     gen_.emit_jmp(MOp::kJl, L.vec);
+    }
     if (L.avx2) gen_.label(L.vexit);            // AVX2 段与 SSE2 段在此汇合
     // 出口：各 int reduction 水平求和写回槽（标量尾/cond/end 读最新）。
     // HSCR 先占且不与任何 IACC 冲突；逐个求和写回，相互独立。

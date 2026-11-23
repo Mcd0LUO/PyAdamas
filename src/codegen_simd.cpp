@@ -385,8 +385,11 @@ bool AsmGen::simd_incr_cond_ok(int incr_bi, int body_bi, int sJ,
 // while 形状：body 直接跳回 cond（没有独立的 incr 块），增量是体块尾部三条
 // （load sJ / add 1 / store sJ）后面跟一条回边 jump。手写循环最常见的写法，
 // 以前整段被跳过 —— for 形状才能向量化。
+// step_slot = -1：步长是常量 1（原路径）；否则是「循环不变量」步长槽
+// （q = q + p，p 是循环内不写的 int 槽；两 lane 是 q / q+p）。
 bool AsmGen::simd_while_shape_ok(int cond_bi, int body_bi, int& sJ,
-                                 int& end_bi, VReg& n, int& jupd_pos) const {
+                                 int& end_bi, VReg& n, int& jupd_pos,
+                                 int& step_slot) const {
     if (cond_bi < 0 || cond_bi >= static_cast<int>(f_->blocks.size()) || cond_bi == body_bi)
         return false;
     const auto& C = f_->blocks[static_cast<size_t>(cond_bi)].insts;
@@ -395,13 +398,23 @@ bool AsmGen::simd_while_shape_ok(int cond_bi, int body_bi, int& sJ,
         C[2].a != C[1].dst || C[2].target != body_bi)
         return false;
     const auto& B = f_->blocks[static_cast<size_t>(body_bi)].insts;
-    if (B.size() < 7) return false;                      // 体 + 增量三条 + jump
+    if (B.size() < 6) return false;                      // 体 + 增量三条 + jump（不变量步长少一条常量）
     const size_t k = B.size() - 4;
     if (B[k].op != IrOp::LoadSlot || B[k].idx != C[0].idx) return false;
     if (B[k + 1].op != IrOp::Bin || B[k + 1].bop != BinKind::Add ||
         B[k + 1].a != B[k].dst)
         return false;
-    if (!simd_const_int(B[k + 1].b, 1)) return false;    // 步长必须 1
+    step_slot = -1;
+    if (!simd_const_int(B[k + 1].b, 1)) {
+        // 不变量步长：b 来自一条 LoadSlot（非归纳变量自身的槽）。步长的装载
+        // 通常在循环前（提升后的 p 只读一次），所以扫函数全部块找定义。
+        int cand = -1;
+        for (const auto& blk : f_->blocks)
+            for (const Inst& li : blk.insts)
+                if (li.op == IrOp::LoadSlot && li.dst == B[k + 1].b) { cand = li.idx; break; }
+        if (cand < 0 || cand == C[0].idx) return false;
+        step_slot = cand;
+    }
     if (B[k + 2].op != IrOp::StoreSlot || B[k + 2].idx != C[0].idx ||
         B[k + 2].a != B[k + 1].dst)
         return false;
