@@ -129,23 +129,67 @@ int avx2_emit_tag() {
     return (v != nullptr && v[0] == '0' && v[1] == '\0') ? 0 : 1;
 }
 
+// 文件内容摘要：流式 FNV-1a 64。用来识别「编译器/运行时换了」，
+// 不用 mtime —— 拷贝、解包、checkout 之后 mtime 都会变（不可信），
+// 而且跨机器无法比较。
+uint64_t file_digest(const char* path) {
+    std::ifstream in(path, std::ios::binary);
+    if (!in) return 0;
+    uint64_t h = 1469598103934665603ull;
+    char buf[1 << 16];
+    while (in) {
+        in.read(buf, static_cast<std::streamsize>(sizeof buf));
+        const std::streamsize n = in.gcount();
+        if (n <= 0) break;
+        for (std::streamsize i = 0; i < n; ++i) {
+            h ^= static_cast<unsigned char>(buf[i]);
+            h *= 1099511628211ull;
+        }
+    }
+    return h;
+}
+
 // 编译器/运行时的构建指纹。源码没变但换了编译器时不能复用旧对象：
 // 代码生成和运行时的行为不进源码哈希，旧清单必须失效。
+//
+// 旧实现用 exe/rt.o 的 size+mtime：拷贝/解包后 mtime 不可信，且**跨机器
+// 无法比较** → 共享缓存在不同机器上要么永远 miss，要么在「拷来一份旧
+// mtime」时误命中（用别的编译器编出的 mod.o）。改成**内容摘要**：只依赖
+// 二进制内容 + 接口格式/ABI 版本。
+// 覆盖口：PYADAMAS_TOOLCHAIN_ID（CI/自制工具链标识；设了就整体替换）。
 std::string toolchain_id() {
-    auto one = [](const char* path) {
-        struct stat st {};
-        if (::stat(path, &st) != 0) return std::string("na");
-        return std::format("{}:{}:{}", static_cast<long long>(st.st_size),
-                           static_cast<long long>(st.st_mtim.tv_sec),
-                           static_cast<long long>(st.st_mtim.tv_nsec));
-    };
-    static const std::string id = one("/proc/self/exe") + "|" + one(PYADAMAS_RT_OBJ);
+    if (const char* over = std::getenv("PYADAMAS_TOOLCHAIN_ID"); over && over[0] != '\0')
+        return std::format("env:{}", over);
+    static const std::string id = [] {
+        return std::format("exe:{:016x}|rt:{:016x}|fmt:{}|abi:{}",
+                           static_cast<unsigned long long>(file_digest("/proc/self/exe")),
+                           static_cast<unsigned long long>(file_digest(PYADAMAS_RT_OBJ)),
+                           pyadamas::kModuleFormatVersion, pyadamas::kModuleAbiVersion);
+    }();
     return id;
 }
 
+// 缓存根目录：默认仍是配置期写死的路径（不破坏既有行为），
+// 可用 PYADAMAS_CACHE_DIR 覆盖（跨项目共享 store / CI 隔离 / 测试）。
+std::string cache_root() {
+    if (const char* d = std::getenv("PYADAMAS_CACHE_DIR"); d && d[0] != '\0')
+        return d;
+    return PYADAMAS_MODCACHE_DIR;
+}
+
 void set_cache_paths(ModuleUnit& u) {
-    std::string key = sanitize_symbol(u.name) + "-" + pyadamas::hex64(pyadamas::fnv1a64(u.path));
-    u.cache_dir = std::string(PYADAMAS_MODCACHE_DIR) + "/" + key;
+    // 键 = 逻辑名 + **源码内容**哈希。
+    //
+    // 旧键是「名字 + 绝对路径哈希」（u.path）：项目一搬家/换机器就全 miss，
+    // 缓存无法共享；而路径本身不携带任何编译输入信息，换个目录不改变产物。
+    // 内容哈希让同一份源码在不同目录命中同一份产物；内容一变键就变，旧目录
+    // 留给后续 GC/手动清理（正确性由 manifest 的 source_hash/deps 校验兜底）。
+    //
+    // 注意：缓存目录里不含路径，所以两个同内容同名的模块共用一个目录；
+    // 原子写 + manifest 逐字段校验保证不会读到别人的产物。
+    std::string key = sanitize_symbol(u.name) + "-" +
+                      pyadamas::hex64(pyadamas::fnv1a64(u.source));
+    u.cache_dir = cache_root() + "/" + key;
     u.asm_path = u.cache_dir + "/mod.s";
     u.obj_path = u.cache_dir + "/mod.o";
     u.iface_path = u.cache_dir + "/mod.pya";
@@ -204,6 +248,10 @@ struct Manifest {
     // 保守按「用到」处理（链接期关 --gc-sections，绝不冒误剥风险）。
     bool c_sym_default = true;
     std::string toolchain;
+    // 目标 ABI（target_abi().name）。它决定调用约定/影子空间，直接改代码
+    // 生成结果，必须进清单：否则「同一模块先按 SysV 编、再 --target=win64 编」
+    // 会命中前者的 mod.o，链接出一个 ABI 错误的二进制（静默错代码）。
+    std::string target;
     std::map<std::string, std::string> deps;
 };
 
@@ -211,7 +259,8 @@ std::optional<Manifest> read_manifest(const ModuleUnit& u) {
     std::ifstream in(u.manifest_path, std::ios::binary);
     if (!in) return std::nullopt;
     std::string line;
-    if (!std::getline(in, line) || line != "pyadamasmanifest 1") return std::nullopt;
+    // 2：加入 target（目标 ABI）字段。1 版清单没有目标 ABI → 一律判失效。
+    if (!std::getline(in, line) || line != "pyadamasmanifest 2") return std::nullopt;
     Manifest m;
     bool abi_ok = false;
     while (std::getline(in, line)) {
@@ -323,6 +372,8 @@ std::optional<Manifest> read_manifest(const ModuleUnit& u) {
             auto o = parse_u64(v);
             if (!o) return std::nullopt;
             m.c_sym_default = *o != 0;
+        } else if (tag == "target") {
+            ss >> m.target;
         } else if (tag == "toolchain") {
             ss >> m.toolchain;
         } else if (tag == "dep") {
@@ -333,6 +384,8 @@ std::optional<Manifest> read_manifest(const ModuleUnit& u) {
         }
     }
     if (!abi_ok) return std::nullopt;
+    // 缺 target 的清单（旧格式/写了一半）保守判失效：宁可重编，不可误命中。
+    if (m.target.empty()) return std::nullopt;
     return m;
 }
 
@@ -340,7 +393,7 @@ void write_manifest(const Program& p, const ModuleUnit& u) {
     std::error_code ec;
     std::filesystem::create_directories(u.cache_dir, ec);
     std::ostringstream out;
-    out << "pyadamasmanifest 1\n";
+    out << "pyadamasmanifest 2\n";
     out << "abi " << pyadamas::kModuleAbiVersion << "\n";
     out << "source " << pyadamas::fnv1a64(u.source) << "\n";
     out << "opt " << p.opt << "\n";
@@ -359,6 +412,7 @@ void write_manifest(const Program& p, const ModuleUnit& u) {
     out << "dynamicbig " << (p.needs_dynamic_big ? 1 : 0) << "\n";
     out << "langgaps " << (p.lang_gaps ? 1 : 0) << "\n";
     out << "csymdefault " << (u.uses_c_sym_default ? 1 : 0) << "\n";
+    out << "target " << target_abi().name << "\n";
     out << "toolchain " << toolchain_id() << "\n";
     for (auto& d : u.deps) {
         auto it = p.units.find(d);
@@ -583,6 +637,7 @@ bool try_cache(Program& p, ModuleUnit& u) {
     auto m = read_manifest(u);
     if (!m) return false;
     if (m->source_hash != pyadamas::fnv1a64(u.source)) return false;
+    if (m->target != std::string(target_abi().name)) return false;  // 换了目标 ABI
     if (m->toolchain != toolchain_id()) return false;  // 换了编译器/运行时
     if (m->opt != p.opt) return false;
     if (m->fast_math != (p.fast_math ? 1 : 0)) return false;

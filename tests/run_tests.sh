@@ -296,6 +296,91 @@ for d in tests/modules/*/; do
     fi
 done
 
+# ── 缓存键正确性（全是「静默错误结果」类回归）──────────────────
+#
+# 守四件事：
+#   * 切 --target 必须重编（否则拿另一个 ABI 的 mod.o 链接）；
+#   * 老格式清单必须判失效（不能把 v1 当 v2 读，字段缺失 → 误命中）；
+#   * toolchain 指纹失效必须生效（换编译器不能复用旧产物），且可覆盖/可命中；
+#   * 接口哈希与缓存键都不许依赖绝对路径（换目录 = 同内容 = 同产物），
+#     同源码拷到另一目录必须命中缓存、mod.pya 必须逐字节相同。
+if match "cache:key"; then
+    ck="$BUILD/cachekey"
+    rm -rf "$ck"
+    mkdir -p "$ck"
+    cp -R tests/modules/chain "$ck/proj"
+    cstore="$ck/store"
+    ck_fail=0
+    ck_run() { env PYADAMAS_CACHE_DIR="$cstore" "$PYADAMAS" "$@"; }
+    printf '  %-28s ' "cache:key"
+    # 1) 基线：首次构建成功，第二次必须命中缓存。
+    if ! ck_run build -o "$ck/p1" "$ck/proj/main.py" > "$ck/b1.log" 2>&1; then
+        echo "FAILED (first build)"; sed -n '1,6p' "$ck/b1.log"; ck_fail=1
+    elif ! ck_run build -v -o "$ck/p1" "$ck/proj/main.py" 2> "$ck/b2.err"; then
+        echo "FAILED (second build)"; sed -n '1,6p' "$ck/b2.err"; ck_fail=1
+    elif ! grep -q 'cached module' "$ck/b2.err"; then
+        echo "FAILED (second build did not hit cache)"; ck_fail=1
+    fi
+    # 2) 切目标 ABI 必须重编。win64 在本机只做交叉汇编验证，最终汇编/链接
+    #    可能失败 —— 这里只看「有没有重新编译」，不看退出码。
+    if [ "$ck_fail" = 0 ]; then
+        ck_run build -v --target=x86_64-win64 -o "$ck/p2" "$ck/proj/main.py" 2> "$ck/b3.err" || true
+        if ! grep -q 'building module' "$ck/b3.err"; then
+            echo "FAILED (--target switch reused another ABI's cache)"; ck_fail=1
+        fi
+    fi
+    # 3) 老格式清单（pyadamasmanifest 1）必须判失效。
+    if [ "$ck_fail" = 0 ]; then
+        ck_run build -o "$ck/p1" "$ck/proj/main.py" > /dev/null 2>&1 || true
+        oldm=$(find "$cstore" -name manifest | head -1)
+        if [ -n "$oldm" ]; then
+            sed -i 's/^pyadamasmanifest 2$/pyadamasmanifest 1/' "$oldm"
+            ck_run build -v -o "$ck/p1" "$ck/proj/main.py" 2> "$ck/b4.err" || true
+            if ! grep -q 'building module' "$ck/b4.err"; then
+                echo "FAILED (old manifest format accepted as new)"; ck_fail=1
+            fi
+        else
+            echo "FAILED (no manifest written)"; ck_fail=1
+        fi
+    fi
+    # 4) toolchain 覆盖口：换 id 必须失效；同 id 必须命中。
+    if [ "$ck_fail" = 0 ]; then
+        env PYADAMAS_CACHE_DIR="$cstore" PYADAMAS_TOOLCHAIN_ID=alt \
+            "$PYADAMAS" build -v -o "$ck/p1" "$ck/proj/main.py" 2> "$ck/b5.err" || true
+        if ! grep -q 'building module' "$ck/b5.err"; then
+            echo "FAILED (toolchain change reused cache)"; ck_fail=1
+        fi
+    fi
+    if [ "$ck_fail" = 0 ]; then
+        env PYADAMAS_CACHE_DIR="$cstore" PYADAMAS_TOOLCHAIN_ID=alt \
+            "$PYADAMAS" build -v -o "$ck/p1" "$ck/proj/main.py" 2> "$ck/b6.err" || true
+        if ! grep -q 'cached module' "$ck/b6.err"; then
+            echo "FAILED (same toolchain id did not hit cache)"; ck_fail=1
+        fi
+    fi
+    # 5) 缓存键/接口哈希与绝对路径无关：同一份源码拷到另一目录，
+    #    必须命中缓存（键含内容不含路径），且 mod.pya 逐字节相同。
+    if [ "$ck_fail" = 0 ]; then
+        # 步骤 4 把清单刷成了 alt 指纹；先恢复一次正常指纹的清单再比路径无关性。
+        ck_run build -o "$ck/p1" "$ck/proj/main.py" > /dev/null 2>&1 || ck_fail=1
+        find "$cstore" -name mod.pya -exec md5sum {} + 2>/dev/null | awk '{print $1}' | sort > "$ck/pya1"
+        cp -R "$ck/proj" "$ck/proj2"
+        ck_run build -v -o "$ck/p3" "$ck/proj2/main.py" 2> "$ck/b7.err" || ck_fail=1
+        if [ "$ck_fail" = 0 ] && ! grep -q 'cached module' "$ck/b7.err"; then
+            echo "FAILED (copy to another dir missed cache -> key depends on path)"; ck_fail=1
+        fi
+        if [ "$ck_fail" = 0 ]; then
+            ck_run build --rebuild -o "$ck/p3" "$ck/proj2/main.py" > /dev/null 2>&1 || ck_fail=1
+            find "$cstore" -name mod.pya -exec md5sum {} + 2>/dev/null | awk '{print $1}' | sort > "$ck/pya2"
+            if ! diff -q "$ck/pya1" "$ck/pya2" > /dev/null 2>&1; then
+                echo "FAILED (interface hash depends on absolute path)"; ck_fail=1
+            fi
+        fi
+    fi
+    rm -rf "$ck"
+    [ "$ck_fail" = 0 ] && echo "ran ok" || fail=1
+fi
+
 # ── cdecl：头文件 → .cpya ──────────────────────────────────────
 if match "cdecl"; then
     cdir="$BUILD/cdecl"

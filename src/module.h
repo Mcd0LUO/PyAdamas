@@ -51,7 +51,10 @@ struct ModuleInfo {
 // 12：类记录追加 needs_dict（动态属性槽是否开启）；签名形参追加
 // ann_unknown（显式 object/Any 标注）。导入方据此放行 args.x 直读/
 // 直写/getattr，并保持 object 形参的 unknown 域（float 实参装箱）。
-inline constexpr uint16_t kModuleFormatVersion = 12;
+// 13：接口不再编码绝对 source_path（只影响诊断的字段不该进 interface_hash，
+//     否则换目录/换机器即哈希变化、可复现性不成立）。旧 .pya 在新编译器下
+//     会因 fmt 不匹配判失效并重编。
+inline constexpr uint16_t kModuleFormatVersion = 13;
 inline constexpr uint16_t kModuleAbiVersion = 1;
 
 std::expected<std::string, std::string> encode_module_interface(const ModuleInfo& info);

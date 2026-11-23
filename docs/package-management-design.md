@@ -1,6 +1,8 @@
 # 包管理设计先验（PyAdamas）
 
 > 状态：**设计研究**，不含实现、不改 `src/`。所有「候选设计」是待拍板的提案，不是承诺。
+> **2026-11-23 修订**：文中列出的 5 个「现状硬缺口」已修复，正文表格里的「现状/证据」保留为**修复前快照**；
+> 修了什么、验证在哪，见文末「附录 D 修订记录」。
 > 不确定的外部事实标 **（待核实）**；每条外部结论都给了 URL（见附录 A）。
 > 现状事实都给了 `文件:行`（见附录 B），可以逐条复核。
 
@@ -1160,3 +1162,19 @@ error: lock is out of date
 | [roadmap.md](roadmap.md) | 包管理是已登记缺口；本文给的是「怎么做」的先验，不含排期承诺 |
 | [development.md](development.md) | P0 落地时要补的构建/测试说明写那里，不写本文 |
 | [compatibility.md](compatibility.md) | 包管理不影响 CPython 兼容性口径；但解析规则变化要注明「只对清单项目生效」 |
+## 附录 D 修订记录（2026-11-23：五个现状缺口已修）
+
+本文 §1.4 / §2 / §5.4.3 / 附录 B 记的是**修复前**的现状。以下五个缺口当天已修，表格保留原样作对照。
+
+| 缺口 | 修法 | 验证（回归测试） | 残留 |
+|---|---|---|---|
+| **1. `--target` 不在缓存清单** | manifest 升 `pyadamasmanifest 2`，新增 `target <abi>` 行动态写入/比对；缺 target 的旧清单保守判失效 | `tests/run_tests.sh` 的 `cache:key`：切 `--target=x86_64-win64` 必须出现 `building module`（修复前该用例报 FAILED） | 交叉汇编仍需配置交叉工具链；本机 win64 只能验证到「重新生成汇编」 |
+| **2. 接口编码含绝对 `source_path`** | 编码不再写路径（诊断信息不进哈希），解码用调用方路径兜底；`kModuleFormatVersion` 12 → 13 | `cache:key`：同一源码拷到另一目录，`mod.pya` 逐字节相同（修复前 md5 不同） | 无 |
+| **3. `toolchain_id` 用 size+mtime** | 改为 exe/rt.o 的**内容摘要**（流式 FNV-1a）+ 接口 fmt/abi 版本；新增 `PYADAMAS_TOOLCHAIN_ID` 覆盖口 | `cache:key`：换 `PYADAMAS_TOOLCHAIN_ID` 必须失效、同 id 必须命中 | 摘要用 FNV-1a 64（本地失效足够；信任根仍应是 SHA-256，见 §5.8） |
+| **4. `sanitize_symbol` 有损** | 符号/目录片段改为**单射转义**（`_`→`_1`、`.`→`_2`、`-`→`_3`、其他→`_4xx`），`sanitize_symbol` 与 `module_symbol_prefix` 共用一份实现 | 新模块用例 `tests/modules/mangle_dot_underscore`：`import a_b` 与 `import a.b` 同时存在必须能链接运行（修复前 ld 报 `multiple definition of pyadamas$a_b$g$f`） | `-` 目前无法通过 import 语法触达，编码已预留（包名将允许 `-`） |
+| **5. 缓存目录编译期常量 + 键含路径** | 根目录支持 `PYADAMAS_CACHE_DIR`（默认仍是原常量）；键改为「逻辑名 + **源码内容**哈希」 | `cache:key`：项目/空目录复制后必须**命中**缓存（证明键与路径无关） | 内容键会在改源码后留下旧目录（**GC 未做**）；同一内容用不同 `-O`/开关构建时共用目录，manifest 互相失效 → 会反复重编（正确性不受影响，属性能债） |
+
+**缓存格式兼容性（重要）**：manifest v1 与 `.pya` fmt 12 一律判失效（实测把新编译器指向旧 `build/pre/modcache` 时 3 个模块全部 `building module`）；由于 `toolchain_id` 里也含 fmt/abi 版本，即使清单格式没变，换编译器也会失效。
+
+**验证口径**（本轮全量闸门，build 目录 `build/pkgfix`）：套件 412 ran ok / 0 失败；ASan 套件 412 ran ok / 0 报告；difftest 387 例 0 不一致；`check_size.sh` 通过；`tests/cache_race.sh` 通过；12 基准 × 3 档输出与 CPython 全一致，且**归一化后的生成汇编逐字节相同**、**用户态指令数逐项相等**（证明没有代码生成变化，性能不可能回退）；`PYADAMAS_SIMD=1` 下用户态指令数 matmul 10,126,834 / spectral_norm 94,637,476（与既有口径一致）。
+

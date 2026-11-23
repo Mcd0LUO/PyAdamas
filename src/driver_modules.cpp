@@ -12,13 +12,10 @@
 
 namespace pyadamas {
 
-std::string sanitize_symbol(const std::string& s) {
-    std::string out;
-    for (char c : s)
-        out.push_back((std::isalnum(static_cast<unsigned char>(c)) || c == '_') ? c : '_');
-    if (out.empty() || std::isdigit(static_cast<unsigned char>(out[0]))) out = "_" + out;
-    return out;
-}
+// 模块名 → 文件名/目录名片段。与符号 mangling 共用同一份**单射**编码
+// （module.cpp 的 module_symbol_prefix）：旧的「非字母数字→下划线」是有损的，
+// "a.b" 与 "a_b" 会映射到同一个缓存目录（缓存互相覆盖）和同一个符号前缀。
+std::string sanitize_symbol(const std::string& s) { return module_symbol_prefix(s); }
 
 bool valid_module_name(const std::string& s) {
     if (s.empty() || std::isdigit(static_cast<unsigned char>(s[0]))) return false;

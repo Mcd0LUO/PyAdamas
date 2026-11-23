@@ -455,10 +455,42 @@ uint64_t fnv1a64(const void* data, size_t n) {
 
 std::string hex64(uint64_t v) { return std::format("{}", v); }
 
+// 模块名 → 符号片段：**必须单射**（不同模块名绝不映射到同一片段）。
+//
+// 旧实现把非字母数字一律换成 '_'，于是 "a.b" 与 "a_b" 撞成同一个符号。
+// 这两者可以同时出现在一个程序里（`import a.b` 与 `import a_b`），
+// 结果是两个 .o 定义同名符号：链接期 duplicate symbol，或者（符号不冲突时）
+// 更糟的静默串线。包名将来还会带 '-'，冲突面更大。
+//
+// 编码规则（字面 '_' 一律被转义，所以输出里每个 '_' 都开始一个定长转义码，
+// 解码唯一）：
+//   '_' → "_1"、'.' → "_2"、'-' → "_3"；
+//   其它非字母数字字节 → "_4" + 两位十六进制；
+//   空名 → "_0"（真实编码不会产生 "_0"，仅作占位）。
+// 字母数字原样保留（ASCII 判定，不依赖 locale）。
 std::string module_symbol_prefix(const std::string& module) {
+    if (module.empty()) return "_0";
+    auto is_ascii_alnum = [](unsigned char c) {
+        return (c >= '0' && c <= '9') || (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z');
+    };
     std::string out;
-    for (char c : module)
-        out.push_back((std::isalnum(static_cast<unsigned char>(c)) || c == '_') ? c : '_');
+    out.reserve(module.size() + 8);
+    for (unsigned char c : module) {
+        if (is_ascii_alnum(c)) {
+            out.push_back(static_cast<char>(c));
+            continue;
+        }
+        switch (c) {
+            case '_': out += "_1"; break;
+            case '.': out += "_2"; break;
+            case '-': out += "_3"; break;
+            default:
+                out += "_4";
+                out.push_back("0123456789abcdef"[c >> 4]);
+                out.push_back("0123456789abcdef"[c & 0xF]);
+                break;
+        }
+    }
     return out;
 }
 
@@ -495,7 +527,11 @@ std::expected<std::string, std::string> encode_module_interface(const ModuleInfo
         e.u16(kModuleFormatVersion);
         e.u16(kModuleAbiVersion);
         e.str(info.name);
-        e.str(info.source_path);
+        // 路径**不进**接口：它只是诊断信息，不影响语义；写进编码会让
+        // interface_hash 依赖绝对路径（换目录/换机器即变），
+        // 破坏「同内容同哈希」的可复现性。解码端用调用方给的路径兜底
+        // （decode_module_interface 的 source_path 参数）。
+        e.str(std::string());
         e.u32(static_cast<uint32_t>(info.globals.size()));
         for (auto& [name, ty] : info.globals) {
             e.str(name);
