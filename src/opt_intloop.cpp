@@ -255,6 +255,72 @@ bool dedup_block_loads(IRFunction& fn) {
 //   - 允许 IndexStore（只改元素不改 len；不外提就没有读旧值问题）；
 //   - 只版本化最内层循环（避免嵌套克隆爆炸）。
 
+// 容器形状不变分析（IR 结构判据）：一个函数若不含任何会改变列表长度或元素
+// 种类的操作，也不调用会改变的函数，则它执行前后所有列表的 len/elem_kind
+// 保持不变。递归按最小不动点处理（自递归边不算违例）。循环版本化据此允许
+// 循环体内调用这类函数：入口守卫证明的 len/kind 在整个循环中始终成立。
+std::vector<char> shape_inert_functions(const IRModule& m) {
+    const size_t nf = m.funcs.size();
+    std::vector<char> inert(nf, 1);
+    auto list_mutating_rt = [](RtFn f) {
+        switch (f) {
+            case RtFn::ListAppend: case RtFn::ListSet: case RtFn::ListSetLen:
+            case RtFn::ListPrep: case RtFn::ListInsert: case RtFn::ListDelIndex:
+            case RtFn::ListSliceAssign: case RtFn::ListSliceDel:
+            case RtFn::ListExtend: case RtFn::ListInplaceRepeat:
+            case RtFn::ListReverse: case RtFn::ListSort:
+            case RtFn::DictSet: case RtFn::DictRemove: case RtFn::DictClear:
+            case RtFn::DictUpdate: case RtFn::DictBump:
+            case RtFn::DictSetDefaultFactory: case RtFn::DictPop:
+            case RtFn::DictPopItem: case RtFn::DictPopLast:
+            case RtFn::SetIntersectUpdate: case RtFn::SetDifferenceUpdate:
+            case RtFn::SetSymdiffUpdate:
+                return true;
+            default:
+                return false;
+        }
+    };
+    bool changed = true;
+    while (changed) {
+        changed = false;
+        for (size_t fi = 0; fi < nf; ++fi) {
+            if (!inert[fi]) continue;
+            const IRFunction& fn = *m.funcs[fi];
+            for (const auto& b : fn.blocks) {
+                for (const auto& in : b.insts) {
+                    bool bad = false;
+                    switch (in.op) {
+                        case IrOp::CallRt:
+                            bad = list_mutating_rt(static_cast<RtFn>(in.imm));
+                            break;
+                        case IrOp::CallDirect: case IrOp::CallPtr: case IrOp::VCall:
+                        case IrOp::VCallStatic: case IrOp::SuperVCall:
+                        case IrOp::CallExtern:
+                            bad = !(in.op == IrOp::CallDirect && in.idx >= 0 &&
+                                    static_cast<size_t>(in.idx) < nf &&
+                                    inert[static_cast<size_t>(in.idx)]);
+                            break;
+                        case IrOp::StoreGlobal: case IrOp::Setjmp:
+                            bad = true;
+                            break;
+                        case IrOp::IndexStore: case IrOp::IndexStoreUnchecked: {
+                            TypePtr ct = in.c < fn.vreg_ty.size()
+                                             ? fn.vreg_ty[in.c] : nullptr;
+                            bad = (!ct || ct->kind == TyKind::Unknown || ir_is_heap(ct));
+                            break;
+                        }
+                        default:
+                            break;
+                    }
+                    if (bad) { inert[fi] = 0; changed = true; break; }
+                }
+                if (!inert[fi]) break;
+            }
+        }
+    }
+    return inert;
+}
+
 namespace {
 
 struct IlCfg {
@@ -363,8 +429,8 @@ bool il_rtfn_pure_scalar(RtFn f) {
     }
 }
 
-// 循环体指令白名单：任何可能改容器长度/逃逸槽地址/跑用户代码的 op 都拒绝。
-bool il_loop_op_safe(const Inst& in) {
+// 循环体指令白名单：可能改容器长度/跑用户代码的 op 必须额外证明形状不变。
+bool il_loop_op_safe(const Inst& in, const std::vector<char>* shape_inert) {
     switch (in.op) {
         case IrOp::ConstInt: case IrOp::ConstFloat: case IrOp::ConstStr:
         case IrOp::ConstNone: case IrOp::ConstBig: case IrOp::FuncAddr:
@@ -375,6 +441,11 @@ bool il_loop_op_safe(const Inst& in) {
         case IrOp::IndexStore: case IrOp::IndexStoreUnchecked:
         case IrOp::Jump: case IrOp::Branch:
             return true;
+        case IrOp::CallDirect:
+            // 只接受形状不变的直接调用：入口守卫证明的 len/kind 全程成立。
+            return shape_inert && in.idx >= 0 &&
+                   static_cast<size_t>(in.idx) < shape_inert->size() &&
+                   (*shape_inert)[static_cast<size_t>(in.idx)];
         case IrOp::Bin: case IrOp::Un: case IrOp::Cmp: case IrOp::Convert:
             return in.ty && (in.ty->kind == TyKind::Int ||
                              in.ty->kind == TyKind::Float ||
@@ -394,15 +465,36 @@ struct IlDef {
 
 struct IlAffine {
     bool ok = false;
-    int coeff = 0;       // 0 = 不变下标，1 = IV + off
+    int coeff = 0;       // -1/0/1: idx = off + off2 + coeff*IV
     VReg off = kNoReg;   // kNoReg = 0
+    VReg off2 = kNoReg;  // 第二个不变偏移（守卫里求和）
 };
 
 bool version_bounds_affine_loop(IRFunction& fn, int h, const std::vector<char>& body,
                                 const std::vector<std::vector<char>>& dom,
-                                const std::vector<char>& is_header) {
+                                const std::vector<char>& is_header,
+                                const std::vector<char>* shape_inert) {
     const int nb = static_cast<int>(fn.blocks.size());
     const auto in_loop = [&](int b) { return body[static_cast<size_t>(b)] != 0; };
+
+    // 只版本化含「形状不变直接调用」的循环：纯算术循环（matmul 等）版本化会
+    // 因克隆拉长活跃区间而丢寄存器（历史实测 +400%）；含调用的循环本来就有
+    // 调用边界 forcing spill，克隆不再新增寄存器压力，且原先因调用被整段拒绝。
+    bool has_shape_inert_call = false;
+    if (shape_inert) {
+        for (int b = 0; b < nb && !has_shape_inert_call; ++b) {
+            if (!in_loop(b)) continue;
+            for (const auto& in : fn.blocks[static_cast<size_t>(b)].insts) {
+                if (in.op == IrOp::CallDirect && in.idx >= 0 &&
+                    static_cast<size_t>(in.idx) < shape_inert->size() &&
+                    (*shape_inert)[static_cast<size_t>(in.idx)]) {
+                    has_shape_inert_call = true;
+                    break;
+                }
+            }
+        }
+    }
+    if (!has_shape_inert_call) return false;
 
     // 只版本化最内层循环：体内含别的循环头就跳过（防嵌套克隆爆炸）。
     for (int b = 0; b < nb; ++b)
@@ -528,7 +620,7 @@ bool version_bounds_affine_loop(IRFunction& fn, int h, const std::vector<char>& 
     for (int b = 0; b < nb; ++b) {
         if (!in_loop(b)) continue;
         for (const auto& in : fn.blocks[static_cast<size_t>(b)].insts) {
-            if (!il_loop_op_safe(in)) return false;
+            if (!il_loop_op_safe(in, shape_inert)) return false;
             // 克隆按 dst 重映射 vreg：多定义会让映射互相覆盖，拒绝。
             if (in.dst != kNoReg && in.dst < nv && ndefs[in.dst] != 1) return false;
         }
@@ -593,15 +685,28 @@ bool version_bounds_affine_loop(IRFunction& fn, int h, const std::vector<char>& 
             is_iv_copy[static_cast<size_t>(d.in->idx)])
             return IlAffine{true, 1, kNoReg};
         if (d.in->op == IrOp::Mov) return affine(d.in->a, depth + 1);
-        if (d.in->op == IrOp::Bin && d.in->bop == BinKind::Add) {
+        if (d.in->op == IrOp::Bin && (d.in->bop == BinKind::Add || d.in->bop == BinKind::Sub)) {
             IlAffine x = affine(d.in->a, depth + 1);
             IlAffine y = affine(d.in->b, depth + 1);
             if (!x.ok || !y.ok) return fail;
-            if (x.coeff + y.coeff > 1) return fail;
-            if (x.off != kNoReg && y.off != kNoReg) return fail;  // 双 off 不折
-            VReg off = x.off != kNoReg ? x.off : y.off;
-            if (!off_ok(off)) return fail;
-            return IlAffine{true, x.coeff + y.coeff, off};
+            const bool sub = d.in->bop == BinKind::Sub;
+            if (sub && y.coeff != 0) {
+                // 只认 (不变 - IV) 形态：a 不含 IV，b 是 IV + 零偏移。
+                if (x.coeff != 0 || y.off != kNoReg || y.off2 != kNoReg) return fail;
+                return IlAffine{true, -1, x.off, x.off2};
+            }
+            int nc = x.coeff + (sub ? -y.coeff : y.coeff);
+            if (nc < -1 || nc > 1) return fail;
+            VReg o1 = x.off, o2 = x.off2;
+            auto add_off = [&](VReg o) {
+                if (o == kNoReg) return;
+                if (o1 == kNoReg) o1 = o;
+                else if (o2 == kNoReg) o2 = o;
+            };
+            add_off(y.off); add_off(y.off2);
+            if (o1 != kNoReg && o1 == o2) return fail;  // 2*同一偏移：保守拒绝
+            if (!off_ok(o1) || !off_ok(o2)) return fail;
+            return IlAffine{true, nc, o1, o2};
         }
         return fail;
     };
@@ -612,6 +717,7 @@ bool version_bounds_affine_loop(IRFunction& fn, int h, const std::vector<char>& 
         int base_slot;
         int coeff;
         VReg off;
+        VReg off2;
         bool is_store;
     };
     // 存储值静态所有权种类（与 codegen idx_store_heap_kind 同口径）。
@@ -703,7 +809,7 @@ bool version_bounds_affine_loop(IRFunction& fn, int h, const std::vector<char>& 
                 };
                 if (!dom_check(ivv, 0)) continue;
             }
-            cands.push_back(Cand{b, k, static_cast<int>(bs), af.coeff, af.off,
+            cands.push_back(Cand{b, k, static_cast<int>(bs), af.coeff, af.off, af.off2,
                                  in.op == IrOp::IndexStore});
         }
     }
@@ -806,11 +912,24 @@ bool version_bounds_affine_loop(IRFunction& fn, int h, const std::vector<char>& 
         in.ty = t_int();
         emitc(in);
     }
+    // 守卫里所有仿射下标都要 bound-1（coeff=±1 的 max/min 计算），
+    // 在 gcompute 里只算一次，复用给全部检查——避免每个候选重复一条 sub。
+    VReg gbound_m1 = alloc_v(t_int(), 0);
+    {
+        Inst in;
+        in.op = IrOp::Bin;
+        in.bop = BinKind::Sub;
+        in.a = gbound;
+        in.b = one;
+        in.dst = gbound_m1;
+        in.ty = t_int();
+        emitc(in);
+    }
     struct Check { VReg a; VReg b; CmpKind cop; };
     std::vector<Check> checks;
-    std::set<std::tuple<int, int, VReg>> guard_done;
+    std::set<std::tuple<int, int, VReg, VReg>> guard_done;
     for (const auto& c : cands) {
-        auto gk = std::make_tuple(c.base_slot, c.coeff, c.off);
+        auto gk = std::make_tuple(c.base_slot, c.coeff, c.off, c.off2);
         if (!guard_done.insert(gk).second) continue;
         VReg base = alloc_v(fn.slot_ty[static_cast<size_t>(c.base_slot)], 0);
         {
@@ -832,19 +951,21 @@ bool version_bounds_affine_loop(IRFunction& fn, int h, const std::vector<char>& 
         }
         VReg off = c.off;
         if (off == kNoReg) off = zero;
+        if (c.off2 != kNoReg) {
+            VReg sum = alloc_v(t_int(), 0);
+            Inst in;
+            in.op = IrOp::Bin;
+            in.bop = BinKind::Add;
+            in.a = off;
+            in.b = c.off2;
+            in.dst = sum;
+            in.ty = t_int();
+            emitc(in);
+            off = sum;
+        }
         VReg max = off;
         if (c.coeff == 1) {
-            VReg bm1 = alloc_v(t_int(), 0);
-            {
-                Inst in;
-                in.op = IrOp::Bin;
-                in.bop = BinKind::Sub;
-                in.a = gbound;
-                in.b = one;
-                in.dst = bm1;
-                in.ty = t_int();
-                emitc(in);
-            }
+            VReg bm1 = gbound_m1;
             max = alloc_v(t_int(), 0);
             Inst in;
             in.op = IrOp::Bin;
@@ -855,9 +976,22 @@ bool version_bounds_affine_loop(IRFunction& fn, int h, const std::vector<char>& 
             in.ty = t_int();
             emitc(in);
         }
-        checks.push_back(Check{off, zero, CmpKind::Ge});   // off >= 0
-        checks.push_back(Check{max, off, CmpKind::Ge});    // 回绕检测
-        checks.push_back(Check{max, len, CmpKind::Lt});    // max < len
+        if (c.coeff == -1) {
+            // idx = off - IV, IV in [0, bound-1]: max=off (IV=0), min=off-(bound-1)。
+            VReg bm1 = gbound_m1;
+            VReg minv = alloc_v(t_int(), 0);
+            {
+                Inst in; in.op = IrOp::Bin; in.bop = BinKind::Sub;
+                in.a = off; in.b = bm1; in.dst = minv; in.ty = t_int();
+                emitc(in);
+            }
+            checks.push_back(Check{minv, zero, CmpKind::Ge});  // min >= 0
+            checks.push_back(Check{off, len, CmpKind::Lt});    // max < len
+        } else {
+            checks.push_back(Check{off, zero, CmpKind::Ge});   // off >= 0
+            checks.push_back(Check{max, off, CmpKind::Ge});    // 回绕检测
+            checks.push_back(Check{max, len, CmpKind::Lt});    // max < len
+        }
     }
     // kind==0 守卫：存储基址的 elem_kind（偏移 24）。入口 kind0 + 循环内
     // 全是 hk0 标量存储 ⇒ kind 恒 0 ⇒ 克隆存储免 kind 检查（imm=1 快路径）。
@@ -1015,7 +1149,7 @@ bool version_bounds_affine_loop(IRFunction& fn, int h, const std::vector<char>& 
 
 }  // namespace
 
-bool version_bounds_affine_function(IRFunction& fn) {
+bool version_bounds_affine_function(IRFunction& fn, const std::vector<char>* shape_inert) {
     if (fn.has_handlers || fn.is_generator || !fn.eh_regions.empty()) return false;
     bool any = false;
     std::unordered_set<int> done;
@@ -1055,7 +1189,7 @@ bool version_bounds_affine_function(IRFunction& fn) {
             if (bodies[static_cast<size_t>(h)].empty() || done.contains(h)) continue;
             done.insert(h);
             if (version_bounds_affine_loop(fn, h, bodies[static_cast<size_t>(h)], dom,
-                                           is_header)) {
+                                           is_header, shape_inert)) {
                 changed = true;
                 any = true;
                 break;  // 块表变了，重建 CFG 再来

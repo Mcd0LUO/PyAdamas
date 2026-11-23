@@ -53,7 +53,11 @@ bool version_bounds_function(IRFunction& fn);
 // 整数循环优化（PYADAMAS_LOOP_OPT 门控，默认关）：见 opt_intloop.cpp。
 bool thread_jump_blocks(IRFunction& fn);
 bool dedup_block_loads(IRFunction& fn);
-bool version_bounds_affine_function(IRFunction& fn);
+// 返回每个函数下标是否「容器形状不变」：不改写任何入参/全局列表的长度或
+// 元素种类（不 append/setlen/非标量 index.set，不调非形状不变函数）。
+std::vector<char> shape_inert_functions(const IRModule& m);
+bool version_bounds_affine_function(IRFunction& fn,
+                                    const std::vector<char>* shape_inert = nullptr);
 // 循环旋转：把条件计算复制到循环体之后，回边直接走 latch，消掉每次
 // 迭代的无条件跳转（代码生成会把「跳到下一块」的 jmp 省掉）。
 bool rotate_loops_function(IRFunction& fn);

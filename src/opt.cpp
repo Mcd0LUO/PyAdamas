@@ -345,8 +345,13 @@ void optimize_ir(IRModule& m, int opt_level, int loop_opt, bool inline_opt) {
             opt_stats_run("thread_jump_blocks", *fptr, [&] { thread_jump_blocks(*fptr); });
     }
     if (loop_opt & 2) {
+        // 形状不变分析：循环体里调用的函数必须保证列表 len/elem_kind 不变，
+        // 否则入口守卫的边界/种类证明在后续迭代失效。
+        std::vector<char> shape_inert = shape_inert_functions(m);
         for (auto& fptr : m.funcs)
-            opt_stats_run("version_bounds_affine", *fptr, [&] { version_bounds_affine_function(*fptr); });
+            opt_stats_run("version_bounds_affine", *fptr, [&] {
+                version_bounds_affine_function(*fptr, &shape_inert);
+            });
     }
 
     // RC 冗余消除：降低器为异常安全发射的 temp/temp_take 有些会互相抵消。
