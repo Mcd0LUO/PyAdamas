@@ -1,12 +1,12 @@
 """tempfile 模块的 pyadamas 子集（纯 pyadamas 源码 + 独占创建 C 胶水）。
 
-覆盖：mkstemp / mkdtemp / NamedTemporaryFile / TemporaryDirectory /
+覆盖：mkstemp / mkdtemp / mktemp / NamedTemporaryFile / TemporaryDirectory /
 gettempdir / gettempprefix / tempdir 全局；TMP_MAX。
 mkstemp 走 C 胶水 open(O_CREAT|O_EXCL|O_RDWR, 0600)（同 CPython 语义），
 随机名 8 字符 [a-z0-9_]（同 CPython 字符集）；mkdtemp 用 os.mkdir 的
 FileExistsError 重试（errno 映射是 stdlib2 使能）。
 
-语义边界（轻量标尺，见 docs/stdlib-batch2.md）：
+语义边界（轻量标尺，见 docs/stdlib-batch2.md 与 docs/stdlib-gaps.md 第 8 节）：
 - mkstemp 返回 (fd, 绝对路径)；fd 用 open(fd, mode) 包装（os.fdopen 的
   替代，closefd 默认 True），裸 fd 用 os.close(fd)（stdlib2 新增）。
 - NamedTemporaryFile 的 newline 只支持 None（open 降级的字面量限制）；
@@ -16,6 +16,8 @@ FileExistsError 重试（errno 映射是 stdlib2 使能）。
 - TemporaryFile / SpooledTemporaryFile 不做（O_TMPFILE/卷 spill），桥接。
 - tempdir 全局默认空串（CPython 是 None；None/0 同形边界），设值后
   gettempdir 优先用它。
+- mktemp 用 mkstemp 创建后立即 close+unlink 再返回名字（同 CPython 的
+  「不占用文件」语义，但同样有 TOCTOU 竞态；CPython 已标记 deprecated）。
 - 随机名不与 CPython 逐字一致（随机源不同）；差分只钉前缀/后缀/存在性/
   权限/内容等功能属性。
 """
@@ -135,6 +137,18 @@ def mkstemp(suffix: object = None, prefix: object = None, dir: object = None) ->
         _raise_os("mkstemp", fd, name)
     raise FileExistsError("No usable temporary file name found")
     return (-1, "")
+
+
+def mktemp(suffix: object = None, prefix: object = None, dir: object = None) -> str:
+    """返回一个临时文件路径但不创建文件（CPython deprecated 的同名 API）。
+
+    实现：mkstemp 独占创建 → os.close(fd) → os.unlink(path) → 返回 path。
+    与 CPython 一样存在 TOCTOU 竞态，不用于安全场景。
+    """
+    fd, path = mkstemp(suffix, prefix, dir)
+    os.close(fd)
+    os.unlink(path)
+    return path
 
 
 class _TemporaryFileWrapper:

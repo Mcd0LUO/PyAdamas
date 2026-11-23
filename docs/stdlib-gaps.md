@@ -59,8 +59,8 @@
 | string | Python 源 | 常量 + capwords | 通过 |
 | base64 | Python 源 | b64/urlsafe/b16/b32/encodebytes；缺 `validate=`/`altchars=` | 通过 |
 | binascii | Python 源 | hexlify/unhexlify | 通过 |
-| heapq | Python 源 | push/pop/heapify/nlargest/nsmallest | 通过 |
-| bisect | Python 源 | 只支持 `list[int]` | 通过 |
+| heapq | Python 源 | push/pop/heapify/heappushpop/heapreplace/nlargest/nsmallest（含 `key=`）/merge（返回 list） | 通过（第 8 节对拍） |
+| bisect | Python 源 | 只支持 `list[int]`；float 扩展尝试失败（类型系统限制，见第 8 节） | 通过（第 8 节对拍） |
 | hashlib | Python 源 | md5/sha1/sha256 | 通过 |
 | hmac | Python 源 | new/update/digest/hexdigest | 通过 |
 | logging | Python 源 | 等级/Logger/basicConfig；缺 FileHandler/Formatter/handler | 通过 |
@@ -76,7 +76,7 @@
 | **fractions** | **Python 源（部分）** | 阶段二补齐：Fraction 四则/比较/str；无一元负号（见第六节 bug）、无 float/str 构造 | 阶段二通过 |
 | **dataclasses** | **缺失** | `@dataclass` 名字被识别但 codegen 未实现（单个 `@dataclass` 报 `too many positional arguments`，`@dataclass(...)` 报 `builtin dataclass is not supported by the code generator yet`）。纯 shim 会让 P(1,2) 静默丢参（实测得到 0,0） | 编译失败 |
 | **contextlib** | **缺失** | `contextmanager` 做不了：包装器要把 `*args/**kwargs` 转发给 unknown 函数值，实测 build 报 `keyword arguments require a known function signature` | 编译失败 |
-| **io** | Python 源 | StringIO/BytesIO 实现 file 协议面；csv.writer/reader 经 lang-gaps 门控直接收 StringIO | 通过（P4 块2） |
+| **io** | Python 源 | StringIO/BytesIO 实现 file 协议面；csv.writer/reader 经 lang-gaps 门控直接收 StringIO；BytesIO 全套读写对拍 0 diff | 通过（P4 块2 + 第 8 节） |
 | **queue** | Python 源 | 单线程版（heapq + time）；没线程，语义价值低 | 通过（0.446 实测可用） |
 | **pprint** | **缺失** | unknown 容器无法内省元素，做不出有意义的 pformat | 编译失败 |
 | **argparse** | **Python 源（0.326 交付）** | 跨模块动态属性使能后自举；CLI 面覆盖见 docs/stdlib-batch1.md | 通过（250–252） |
@@ -84,8 +84,8 @@
 | **gzip** | **Python 源 + C 胶水（0.326 交付）** | 系统 zlib（cimport）；compress 字节级同 CPython；GzipFile 整读整写 | 通过（255–256） |
 | **zlib** | **Python 源 + C 胶水（0.326 交付）** | compress/decompress/crc32/adler32；wbits 固定 15 | 通过（255） |
 | **struct** | Python 源（0.446 实测可用） | pack/unpack/calcsize/unpack_from/iter_unpack；支持 `b/B/h/H/i/I/l/L/q/Q/f/d/c/s/p/?/x` 与 `< > ! = @`；纯 Python IEEE754 位编解码；`s` 解包返回 str（bytes/str 共用表示），Q 高位按 int64 回绕 | 通过（515 对拍） |
-| **shutil** | Python 源（0.446 实测可用） | copy/copy2/copymove/move/rmtree 等常用面；受文件协议限制，二进制细节有差异 | 通过（已登记模块表） |
-| **tempfile** | Python 源（0.446 实测可用） | NamedTemporaryFile/TemporaryDirectory 等常用面；需 os.mkdir + random 兜底 | 通过（已登记模块表） |
+| **shutil** | Python 源（0.446 实测可用） | copy/copy2/copyfile/copytree/rmtree/move/which/disk_usage；disk_usage 用 `df -k`（无 statvfs 原语）；which 返回 `None` 打印成 `0`（PA None/0 同形），`is None` 判定正常 | 通过（第 8 节对拍：内容+`ls -R` 0 diff） |
+| **tempfile** | Python 源（0.446 实测可用） | NamedTemporaryFile/TemporaryDirectory/mkdtemp/gettempdir/mkstemp/mktemp；with 退出后目录消失 | 通过（第 8 节对拍 0 diff） |
 | **errno** | Python 源（stdlib-a 新增） | 20 个 POSIX 错误码常量 + errorcode 子集（dict[int,str]）；值同 CPython Linux | 通过（515 对拍） |
 | **stat** | Python 源（stdlib-a 新增） | 类型/权限位常量 + S_ISDIR/S_ISREG/S_ISLNK/S_ISFIFO/S_ISSOCK；S_IFMT 是掩码常量（CPython 是函数） | 通过（515 对拍） |
 | **shlex** | Python 源（stdlib-a 新增） | split/quote/join（posix 模式）；无 shlex 类 / posix=False / punctuation_chars | 通过（515 对拍 0 diff） |
@@ -216,3 +216,112 @@ $ PYADAMAS_TEST_JOBS=4 bash tests/run_tests.sh build/std build/std/pyadamas
 {"stat", ModuleKind::Python, "stat.py", ""},
 ```
 
+
+## 八、stdlib-b 批次交付（第 2 批标准库常用 API，2026-11-23）
+
+本批次由 stdlib-b 代理完成，只改 stdlib/*.py、docs/stdlib-gaps.md 与
+tests/run/518_stdlib_b.py。对拍方式：同形脚本分别在 CPython 3.14 与
+PyAdamas 跑，逐行 diff；文件系统操作在独立 /tmp 子目录做，比较文件
+内容与 `ls -R` 结构。
+
+### 8.1 shutil（copy/copy2/copyfile/copytree/rmtree/move/which/disk_usage）
+
+已有 API 全部验证通过：copy/copy2/copyfile/copytree/rmtree/move/which
+在临时目录树上对拍，文件内容与 `ls -R` 目录结构 **0 diff**。
+
+新增 `disk_usage(path)`：PA 的 os 没有 statvfs，C 胶水文件不在允许
+修改范围，改用 `subprocess.run(['df','-k',path])` 解析第 2 行字段，
+返回 `DiskUsage` 类实例（total/used/free 属性 + 下标 0/1/2 + len=3）。
+CPython 对拍：total 精确一致（12884901888），used/free 因两次运行间
+磁盘写入而自然漂移几 MB，但 used+free<=total 恒成立。
+
+已知差异：`shutil.which('不存在')` 在 PA 打印为 `0` 而非 `None`
+（PA 里 None 与 0 是同一运行时单例）；`is None` 判定与 CPython 一致，
+测试文件用 `is None` 规避打印差异。
+
+### 8.2 tempfile（NamedTemporaryFile/TemporaryDirectory/mkdtemp/gettempdir/mktemp）
+
+已有 API 全部验证通过：mkdtemp（前缀/后缀/isdir）、mkstemp（前缀/
+后缀/fd 关闭/删除）、NamedTemporaryFile（写入/存在性/close 后删除）、
+TemporaryDirectory（with 退出后目录消失）——CPython 对拍 **0 diff**。
+
+新增 `mktemp(suffix,prefix,dir)`：mkstemp 创建后立即 close+unlink
+再返回名字（同 CPython 的「不占用文件」语义，TOCTOU 竞态同样存在，
+CPython 已 deprecated）。对拍前缀/后缀/不存在性 **0 diff**。
+
+### 8.3 heapq（heapreplace/heappushpop/merge/nlargest-nsmallest key=）
+
+heapreplace / heappushpop 原本已有，验证通过（先从合法堆 heapify
+开始，pop 序列与 CPython **0 diff**）。
+
+新增：
+- `merge(*iterables)` 返回 list（CPython 返回生成器）；输出排序结果
+  与 `list(heapq.merge(...))` **0 diff**，含空列表与重复元素。
+- `nlargest(n, xs, key=f)` / `nsmallest(n, xs, key=f)` 的 key= 参数：
+  函数值作 object 形参传入并调用，按 key 值排序后返回原元素；对拍
+  `['aaa','b','cccc','dd','ee']` + `key=len` **0 diff**。
+
+边界：列表元素用裸 `list`（fresh_hole），同一个程序里先传 int 列表
+再传 float 列表会被首个调用点定型，float 元素读出乱码（PA 类型系统
+限制，见 8.5）。int 列表单独用、float 列表单独用均正常。
+
+注意：不先 heapify 就 heappush 再 pop，PA 与 CPython 的内部堆布局
+不同，pop 序列会不同（两者都是合法但未排序的输入）；测试从 heapify
+开始，符合"只对比 pop 序列"的要求。
+
+### 8.4 bisect（int 全边界 + float 扩展尝试）
+
+已有 bisect_left / bisect_right / bisect / insort_left / insort_right /
+insort 全部验证通过：空表、单元素、全相等、越界、lo/hi 子区间、
+插入稳定性——CPython 对拍 **0 diff**。
+
+**float 扩展尝试结论：做不到。** 试过三种标注：
+1. `list[int]` + `int`：拒绝 float 实参（编译期类型错）。
+2. `list[unknown]` + `unknown`：float 列表比较读出乱码
+   （如 `[1.0,2.0,3.0]` 上 bisect_left 返回 0 而非 1），insort 写入
+   也产生乱码元素。
+3. 裸 `list`（fresh_hole，调用点回填）：单个调用点用 float 正常，
+   但共享模块函数被首个调用点定型（先 int 后 float 时 float 读出
+   乱码）。
+
+根因：PA 的 `unknown` 元素槽用 int-like 表示，float 进出容器时不能
+保真；fresh_hole 是函数级单例，不能按调用点多态实例化。要同时支持
+int/float 需要编译期泛型（改 src/，本次禁止）。保持原 `list[int]`
+签名不动，不破坏已有 API。
+
+### 8.5 io.BytesIO 语义对拍
+
+全部操作与 CPython **0 diff**：write/read/read(size)/readline/
+readline(size)/readlines/seek(0,1)/seek(0,2)/tell/getvalue/truncate/
+overwrite（seek 后写入覆盖）/closed 属性/close 后 read/write/getvalue
+抛 ValueError/with 协议。
+
+已知差异：`BytesIO.write(str)` 在 PA 是**编译期错误**（expected bytes,
+got str），CPython 是运行期 TypeError——两者都不接受，只是报错时机
+不同（原模块 docstring 说"不抛 TypeError"已更正）。
+
+### 8.6 difflib（unified_diff/ndiff/SequenceMatcher.ratio）
+
+`unified_diff` / `ndiff` 原本已有（unified_diff）/ 新增（ndiff）。
+unified_diff 修复一个真实 bug：两序列完全相同时 CPython 返回空列表
+（无 hunk），原实现返回仅含文件头的两行；改为先算 grouped opcodes，
+为空则直接返回 []，对拍 **0 diff**。
+
+新增 `ndiff(a,b)` 最小子集：按 SequenceMatcher opcodes 输出
+`'  '`（相同）/ `'- '`（删除）/ `'+ '`（插入）前缀行，返回 list
+（CPython 返回生成器）；不做 `'? '` 行内字符级提示（IS_CHARACTER_JUNK /
+_qformat）。对拍 `['a','b','c']` vs `['a','x','c','d']` **0 diff**。
+
+`SequenceMatcher.ratio` 验证通过：`'hello world'` vs `'hello there'`
+与 CPython 同为 0.6363636363636364。
+
+### 8.7 验收
+
+- CPython 对拍：每个模块同形脚本两边跑，值逐行一致（差异项如上如实
+  记录），文件系统操作额外比对 `ls -R` 输出。
+- 测试：`tests/run/518_stdlib_b.py`，覆盖全部新增/已验证 API，带
+  expect 注释，PA 实际输出与 expect **0 diff**。
+- 全量套件：`PYADAMAS_TEST_JOBS=16 bash tests/run_tests.sh build/gfix-stdlib-b build/lead/pyadamas`
+  —— **421 ran ok，0 FAILED/DIFF，RC=0**。
+- `bash tests/check_size.sh`：通过。
+- 未 commit / push；未碰 src/、runtime/、stdlib/json.py、CMakeLists.txt。

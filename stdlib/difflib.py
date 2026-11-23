@@ -3,7 +3,7 @@
 覆盖 SequenceMatcher（find_longest_match / get_matching_blocks /
 get_opcodes / get_grouped_opcodes / ratio / quick_ratio /
 real_quick_ratio / set_seqs / set_seq1 / set_seq2）、get_close_matches、
-unified_diff 与 Match。
+unified_diff / ndiff 与 Match。
 
 语义边界（轻量标尺，见 docs/stdlib-batch3.md）：
 - SequenceMatcher 的 a/b 先转成统一序列（str 按码点拆、list 原样）；
@@ -13,7 +13,9 @@ unified_diff 与 Match。
   unified_diff 的内容行只加前缀、不补 lineterm（同 CPython），lineterm 仅用于
   文件头与 @@ 行；
 - get_close_matches 收 list[str]，内部用 SequenceMatcher 比值；
-- 不建模 IS_LINE_JUNK / IS_CHARACTER_JUNK 与 ndiff / context_diff。
+- ndiff 是最小子集：按 SequenceMatcher opcodes 输出 '- '/' + '/'  ' 前缀行，
+  不做 CPython 的 '? ' 行内字符级提示（IS_CHARACTER_JUNK / _qformat）；
+  context_diff 与 IS_LINE_JUNK 不做。
 """
 
 
@@ -426,10 +428,13 @@ def unified_diff(a: list[str], b: list[str], fromfile: str = "",
                  lineterm: str = "\n") -> list[str]:
     """两个行序列的 unified diff（返回行列表）。"""
     out: list[str] = []
+    sm = SequenceMatcher(None, a, b)
+    groups = sm.get_grouped_opcodes(n)
+    if len(groups) == 0:
+        return out
     out.append("--- " + fromfile + _date_suffix(fromfiledate) + lineterm)
     out.append("+++ " + tofile + _date_suffix(tofiledate) + lineterm)
-    sm = SequenceMatcher(None, a, b)
-    for group in sm.get_grouped_opcodes(n):
+    for group in groups:
         first = group[0]
         last = group[len(group) - 1]
         r1 = _format_range_unified(first[1], last[2])
@@ -465,3 +470,37 @@ def _date_suffix(date: str) -> str:
     if date == "":
         return ""
     return "\t" + date
+
+
+def ndiff(a: list[str], b: list[str], lineterm: str = "\n") -> list[str]:
+    """逐行 ndiff（最小子集：不做 '? ' 行内字符级提示）。
+
+    返回行列表（CPython 返回生成器）。每行前缀 '  '（相同）/ '- '（删除）/
+    '+ '（插入）。lineterm 只作用于 '? ' 提示行，本子集不生成提示行，
+    因此 lineterm 参数只保留接口兼容。
+    """
+    out: list[str] = []
+    sm = SequenceMatcher(None, a, b)
+    for code in sm.get_opcodes():
+        tag = code[0]
+        i1 = code[1]
+        i2 = code[2]
+        j1 = code[3]
+        j2 = code[4]
+        if tag == "equal":
+            i = i1
+            while i < i2:
+                out.append("  " + a[i])
+                i += 1
+        else:
+            # replace / delete：先输出 '- ' 行
+            i = i1
+            while i < i2:
+                out.append("- " + a[i])
+                i += 1
+            # replace / insert：再输出 '+ ' 行
+            j = j1
+            while j < j2:
+                out.append("+ " + b[j])
+                j += 1
+    return out

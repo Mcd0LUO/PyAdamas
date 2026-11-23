@@ -1,7 +1,8 @@
 """shutil 模块的 pyadamas 子集（纯 pyadamas 源码 + stat/utime/symlink C 胶水）。
 
 覆盖：copyfile / copymode / copystat / copy / copy2 / move / rmtree /
-copytree / ignore_patterns / which；Error / SameFileError / SpecialFileError。
+copytree / ignore_patterns / which / disk_usage；Error / SameFileError /
+SpecialFileError / DiskUsage。
 二进制 IO 走一批验证过的字节直通口径（open rb/wb + str 承载原始字节）。
 
 语义边界（轻量标尺，见 docs/stdlib-batch2.md）：
@@ -16,12 +17,17 @@ copytree / ignore_patterns / which；Error / SameFileError / SpecialFileError。
   列表 repr）；ignore 收可调用（ignore_patterns 或自定义 (path, names) 函数）。
 - which 只查 PATH（os.getenv），不查 PATHEXT（POSIX 口径）；mode 默认
   F_OK|X_OK（=1，字面量默认值限制）。
-- disk_usage / get_terminal_size / make_archive / unpack_archive 不做，
-  长尾用 from python import shutil 桥接。
+- disk_usage 用 subprocess 调 `df -k` 解析（PA 的 os 没有 statvfs，
+  也没有 C 胶水权限加原语）；返回 DiskUsage 类实例（有 total/used/free
+  属性 + 下标 0/1/2 + 3 元组解包等价）。数值是 1024 字节块换算，与
+  CPython os.statvfs 口径一致但由于 df 报的是挂载点级统计，对小路径
+  （tmpfs 子目录）结果应与 CPython 相同。get_terminal_size /
+  make_archive / unpack_archive 不做，长尾用 from python import shutil 桥接。
 - 错误消息合理即可，不逐字对齐 CPython。
 """
 
 import os
+import subprocess
 import os.path as _osp
 import fnmatch as _fnmatch
 cimport _shutilc as _c
@@ -291,3 +297,51 @@ def which(cmd: str, mode: int = 1, path: object = None) -> object:
         if _osp.isfile(full) and os.access(full, mode):
             return full
     return None
+
+
+class DiskUsage:
+    """disk_usage 的返回值：total/used/free 属性 + 下标访问（同 namedtuple 口径）。"""
+    total: int
+    used: int
+    free: int
+
+    def __init__(self, total: int, used: int, free: int) -> None:
+        self.total = total
+        self.used = used
+        self.free = free
+
+    def __len__(self) -> int:
+        return 3
+
+    def __getitem__(self, i: int) -> int:
+        if i == 0:
+            return self.total
+        if i == 1:
+            return self.used
+        if i == 2:
+            return self.free
+        raise IndexError("tuple index out of range")
+
+    def __repr__(self) -> str:
+        return "usage(total=" + str(self.total) + ", used=" + str(self.used) + ", free=" + str(self.free) + ")"
+
+
+def disk_usage(path: str) -> DiskUsage:
+    """返回路径所在文件系统的磁盘用量（total/used/free，单位字节）。
+
+    用 `df -k <path>` 解析（POSIX 口径）：第 2 行是数据，字段 1/2/3 是
+    1K-blocks/Used/Available。CPython 用 os.statvfs，结果应与 df 一致。
+    """
+    r = subprocess.run(["df", "-k", path], capture_output=True, text=True)
+    if r.returncode != 0:
+        raise OSError("disk_usage failed for " + repr(path))
+    lines = r.stdout.split("\n")
+    if len(lines) < 2:
+        raise OSError("disk_usage: no data for " + repr(path))
+    data = lines[1].split()
+    if len(data) < 4:
+        raise OSError("disk_usage: bad df output for " + repr(path))
+    total = int(data[1]) * 1024
+    used = int(data[2]) * 1024
+    free = int(data[3]) * 1024
+    return DiskUsage(total, used, free)

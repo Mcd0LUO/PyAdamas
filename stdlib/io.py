@@ -9,8 +9,9 @@ pa_filelike_* 分派直接收 StringIO/BytesIO。
 语义边界（轻量标尺）：
 - pa 的 str/bytes 是不可变码点序列：write 用切片拼接重建缓冲，
   O(n) 每次写入（CPython 是摊销 O(1)）；功能口径一致。
-- bytes 与 str 共用运行期表示：BytesIO.write(str) 不抛 TypeError
-  （CPython 会），同类型输入结果一致。
+- bytes 与 str 共用运行期表示，但类型检查器会拦：BytesIO.write(str)
+  在 PA 是编译期错误（expected bytes, got str），CPython 是运行期
+  TypeError；两者都不接受，只是报错时机不同。
 - 不支持 detach/getbuffer/readinto（pa 没有可写缓冲原语）。
 - truncate(size) 显式负参按默认处理（用当前 pos）：pa 的 int 默认参
   只能是字面量，None 默认与显式 0 在 int 槽里不可分（既有 pa 限制），
