@@ -462,10 +462,23 @@ if (const auto* c = nativesig::find_const(module, member)) {
 | `random` | ✅ 已迁移**全部模块级函数 + `Random` 类**（`stdlib/sigs/random.pysig`） | 17 函数 + `class Random`（构造器 + 6 个实例方法，`@native` 覆盖 `pa_random_*`；`choice` 用 `@ret_specialized`）。保留 C++：方法的参数装配（`lower_method_misc.cpp`，§6.4）、类型身份映射 `declared_class_type`。asm 与迁移前逐字节相同 |
 | `re` | ✅ 已迁移 `Pattern`/`Match` 方法表（`stdlib/sigs/re.pysig`） | 2 个原生类共 15 个方法（`@native` 覆盖 `pa_re_*`）；模块级函数/flag 常量保留硬编码（`-> Regex`/`Optional[Match]` 等类型 pysig 无法表达，迁了会破坏 `re.compile` 的返回类型）；`lower_method_regex/match` 参数装配不动；asm 38/38 逐字节相同 |
 | `datetime` | ✅ 已迁移 3 个原生类（`stdlib/sigs/datetime.pysig`） | `date`/`datetime`/`timedelta` 构造器（默认值表达重载）+ 6 实例方法；模块函数 today/now 保留 C++（返回 TyKind::DateTime 无法声明）；属性读/运算符/参数装配不动；asm 38/38 逐字节相同 |
-| `collections` `json` | ⬜ 未迁移 | 硬编码仍在；加载器已就绪，可按 §6.2 逐个搬 |
+| `collections` | ✅ 已迁移 deque 方法表（`stdlib/sigs/collections.pysig`） | 10 个实例方法声明化；构造器保留 C++（默认值 `[]` 非 pysig 字面量、`list[unknown]` 静态类型影响 asm）；pop/popleft/copy 的接收者元素类型返回保留 typecheck 口径；asm 38/38 逐字节相同 |
+| `json` | ⬜ 未迁移 | 硬编码仍在；加载器已就绪，可按 §6.2 逐个搬 |
 | `pathlib` `operator` `asyncio` | ⬜ 未迁移（优先级低） | 构造器/类语义多，声明格式表达不了的部分留 C++ |
 | `datetime` `subprocess` | ⬜ 未迁移（优先级低） | 参数装配/返回类型随实参变的分支多 |
 | `python`（CPython 桥）、`c` / `dylib` | ⛔ 不适合声明式 | 名字集合是开集（`from c import <任意符号>`），签名在调用点推断 |
+
+### 4.3 补充：@ret_specialized 与「接收者元素类型」
+
+`@ret_specialized`（无参数）表示「返回类型按第一实参特化」（random.choice）。
+deque 的 pop/popleft/copy 需要的是「接收者元素类型」（`recv->sub[0]`），
+现有形态表达不了。**本轮取舍**：这三个方法的返回类型口径保留在
+`typecheck_call_method.cpp` 按方法名硬编码（与 datetime.replace 同模式），
+pysig 里只声明方法存在性 + argc/arg 类型（返回写 `object` 占位）。
+这样不需要给 `@ret_specialized` 加新形态（那要改 pydecl.h 的装饰器解析，超出本轮边界），
+asm 也逐字节相同。若要全声明化，可加 `@ret_specialized("element")`
+字符串参数形态（decorator_of 已支持字符串实参），在 SigFunc 加 kind 字段并
+在 typecheck 里按 kind 分派——但这是机制扩展，不是签名迁移。
 
 ### 后续迁移评估：deque / Path（datetime 批次附带盘点）
 

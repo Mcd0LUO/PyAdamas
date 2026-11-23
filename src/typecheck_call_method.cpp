@@ -88,6 +88,8 @@ bool TypeChecker::has_method(const TypePtr& t, const std::string& m) {
                        nativesig::class_has_method("datetime", "datetime", m);
             case TyKind::TimeDelta:
                 return nativesig::class_has_method("datetime", "timedelta", m);
+            case TyKind::Deque:
+                return nativesig::class_has_method("collections", "deque", m);
             // 数值类型没有真正的「方法表」，但这些名字确实存在；
             // 缺了就是标准库里的假错误（statistics 用 int.bit_length）。
             case TyKind::Int:
@@ -732,41 +734,33 @@ TypePtr TypeChecker::method_call(TypePtr recv, const std::string& name, Call& c,
             if (!c.keywords.empty())
                 err(c.line, c.col,
                     std::format("collections.deque.{}() does not take keyword arguments", name));
-            if (name == "append" || name == "appendleft" || name == "extend" ||
-                name == "extendleft") {
-                argc(1, 1);
-                return t_none();
+            const auto* info = nativesig::class_info("collections", "deque");
+            if (!info) return t_unknown();
+            auto it = info->methods.find(name);
+            if (it == info->methods.end()) {
+                err(c.line, c.col,
+                    std::format("class 'deque' has no attribute '{}'", name));
+                return t_unknown();
             }
-            if (name == "pop" || name == "popleft") {
-                argc(0, 0);
-                return elem();
+            const FuncInfoPtr& fn = it->second;
+            if (!fn->varargs) {
+                size_t ndef = 0;
+                for (auto& pp : fn->pos) if (pp.has_default) ++ndef;
+                argc(fn->pos.size() - ndef, fn->pos.size());
             }
-            if (name == "rotate") {
-                argc(1, 1);
-                return t_none();
+            for (size_t i = 0; i < a.size() && i < fn->pos.size(); ++i) {
+                TypePtr want = fn->pos[i].ty;
+                TypePtr got = a[i];
+                if (!want || !got || is_unknown(want) || is_unknown(got)) continue;
+                if (assignable(want, got)) continue;
+                err(c.args[i]->line, c.args[i]->col,
+                    std::format("argument '{}' of 'collections.deque.{}' expects '{}', got '{}'",
+                                fn->pos[i].name, name, type_name(want), type_name(got)));
             }
-            if (name == "clear" || name == "reverse") {
-                argc(0, 0);
-                return t_none();
-            }
-            if (name == "remove") {
-                argc(1, 1);
-                return t_none();
-            }
-            if (name == "count" || name == "index") {
-                argc(1, 1);
-                return t_int();
-            }
-            if (name == "insert") {
-                argc(2, 2);
-                return t_none();
-            }
-            if (name == "copy") {
-                argc(0, 0);
-                return mk_deque(elem());
-            }
-            err(c.line, c.col, std::format("collections.deque has no method '{}'", name));
-            return t_unknown();
+            // pop/popleft/copy 返回接收者的元素类型（pysig 用 object 占位）。
+            if (name == "pop" || name == "popleft") return elem();
+            if (name == "copy") return mk_deque(elem());
+            return fn->ret_known ? fn->ret : t_unknown();
         }
         if (recv->kind == TyKind::Popen) {
             if (name == "wait") {

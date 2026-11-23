@@ -1,0 +1,39 @@
+# stdlib/sigs/collections.pysig —— collections 模块的声明式签名
+#
+# 只声明 deque 原生类的 10 个实例方法。构造器保留在 builtin_sigs.cpp
+# （iterable 默认值 [] 不是 pysig 合法字面量，且 list[unknown] 的静态类型
+# 影响降级：改成 unknown 会多出 pa_disable_unknown_index 调用，asm 不等价）。其余 collections 成员
+# （Counter/OrderedDict/defaultdict 等）仍是原生构造器，保留在 C++。
+"""collections 模块的 native 签名（deque 类）。"""
+
+class deque:
+    # 返回接收者元素类型（recv->sub[0]），pysig 无法表达，method_call 里保留。
+    @native("pa_deque_pop")
+    def pop(self) -> object: pass
+    @native("pa_deque_popleft")
+    def popleft(self) -> object: pass
+    @native("pa_deque_copy")
+    def copy(self) -> object: pass
+
+    @native("pa_deque_append")
+    def append(self, x: object) -> None: pass
+    @native("pa_deque_appendleft")
+    def appendleft(self, x: object) -> None: pass
+    @native("pa_deque_extend")
+    def extend(self, xs: object) -> None: pass
+    @native("pa_deque_extendleft")
+    def extendleft(self, xs: object) -> None: pass
+    @native("pa_deque_rotate")
+    def rotate(self, n: int = 0) -> None: pass
+    @native("pa_deque_clear")
+    def clear(self) -> None: pass
+    @native("pa_deque_reverse")
+    def reverse(self) -> None: pass
+    @native("pa_deque_remove")
+    def remove(self, x: object) -> None: pass
+    @native("pa_deque_count")
+    def count(self, x: object) -> int: pass
+    @native("pa_deque_index")
+    def index(self, x: object) -> int: pass
+    @native("pa_deque_insert")
+    def insert(self, i: int, x: object) -> None: pass
