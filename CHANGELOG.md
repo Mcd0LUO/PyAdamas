@@ -4,6 +4,112 @@
 
 早期阶段没有逐条留痕，按阶段归纳；0.4 之后逐条记录。
 
+## [0.428] - 2026-11-23
+
+> fix(rt)：负区间切片赋值插入点错（静默错值）+ `del` 扩展切片无法工作 + 扩展切片长度文案对齐 CPython。
+>
+> ### 问题 1：负区间切片赋值静默错值（`runtime/rt_slice.c`）
+>
+> `a[-3:-8] = [90]`：CPython 得 `[0,1,2,3,90,4,5,6]`，pyadamas 得
+> `[0,0,1,2,90,4,5,6]`（前缀被右移、多一个元素）。根因：步长 1 分支用 `hi`
+> （被 clamp 到 0）做 `memmove` 插入点，而 CPython 空切片的插入点是 `start`。
+> 修法 1 行：`if (st > 0 && lo > hi) hi = lo;`。
+>
+> 发现手段：穷举对拍（start/stop ∈ {-100,-8…8,100} × 同 × 赋值长度 0…3，共 484 组变量切片），
+> **修复前 99 行与 CPython 不同**，全部是 `start > stop` 的负区间/空区间形状；修复后全 MATCH。
+>
+> ### 问题 2：`del a[::2]` / `del a[::-2]` 无法工作
+>
+> `del` 切片原来被降级实现成「赋值空序列」，扩展步长会撞上「长度必须相等」检查：
+> `ValueError: cannot assign sequence of different size to extended slice`。
+> 修法：新增独立运行时入口 `RtFn::ListSliceDel` / `pa_list_slice_del(dst, start, stop, step)`
+> （按 `slice_bounds` 归一化后选出被删下标，原地压缩保留元素，维护 RC 与 `elem_kind==2` 位图），
+> `lower_exc.cpp` 的 `del` 切片改调它。`del a[1:3]`/`del a[:]`/`del a[5:2]` 回归正常。
+>
+> ### 顺手：扩展切片长度文案
+>
+> `cannot assign sequence of different size to extended slice`
+> → `attempt to assign sequence of size 2 to extended slice of size 4`（带两侧尺寸，与 CPython 一致）。
+>
+> ### 结果
+>
+> | 项 | 修前 | 修后 |
+> |---|---|---|
+> | 负区间切片赋值穷举（484 组） | 99 行差异 | 全 MATCH |
+> | `del a[::2]` / `del a[::-2]` | ValueError | 与 CPython 一致 |
+> | 864 组切片读穷举 | 已一致 | 一致（未回归） |
+>
+> 新用例 `tests/run/493_slice_semantics.py`（含 expect，三档一致）。
+> 12 基准 36/36 输出一致、指令数无回退；SIMD matmul 10,126,809 / sn 94,637,469。
+> 闸门：389 ran ok / difftest 368-0 / ASan 389 ran ok 0 报告 / check_size 通过。
+>
+> ### 已知未修（文案/静态设计）
+>
+> `KeyError` 文案仍是 `key not found`（CPython 是 key 的 repr，如 `'z'`）；
+> float/str 下标、str/tuple 赋值在 PyAdamas 是**编译期拒绝**（静态类型设计的直接结果，不是 bug）。
+
+## [0.427] - 2026-11-23
+
+> fix：`int(inf)` / `int(nan)` 静默得到 `-2^63`（`cvttsd2siq` 哨兵值被当结果）。
+>
+> ### 问题
+>
+> `cvttsd2siq` 对 NaN / 超出 int64 的值返回哨兵 `INT64_MIN`，codegen 直接把它当结果用：
+> `int(float("inf"))` / `int(float("nan"))` 都得到 `-9223372036854775808`；
+> CPython 分别抛 `OverflowError` / `ValueError`。同类的 `math.floor/ceil/trunc` 也静默出错。
+>
+> ### 修法（`src/codegen_ops.cpp` +20、`runtime/rt_math.c` +25、`rt_internal.h` +1）
+>
+> - **快路径 3 条**（每个 `int(float)` 转换都付）：`movabsq` 哨兵 → `cmpq` → `jne ok`；
+> - **慢路径**（仅撞哨兵）：`ucomisd` 输入与 `(double)INT64_MIN` ——
+>   **`jp` 必须先于 `je`**（无序时 ZF=1，先判 `je` 会把 NaN 当成「等于 -2^63」直接返回哨兵，第一版实测仍错），
+>   `je ok` 表示输入正好是 `-2^63`（合法 MIN，不能误抛），否则
+>   `call pa_int_from_f64_check`：NaN → `ValueError("cannot convert float NaN to integer")`、
+>   ±inf → `OverflowError("cannot convert float infinity to integer")`、有限越界 → `OverflowError`（文案与 CPython 一致）；
+> - `math.floor/ceil/trunc` 用 `math_f2i_checked` 同规则。
+>
+> ### 找全转换点
+>
+> `grep cvtt` 全仓库：只有 `codegen_ops.cpp` 两处（`TyKind::Int` 目标**已修**；
+> `is_fixed_int` 目标来自显式 `cast_*`，C 语义、文档化回绕，**有意不改**）；
+> 运行期 C 强转另有两组用户可见点：`pa_math_floor/ceil/trunc`（**已修**）、
+> `round()`（本来就正确）。`kCvttsd2sil` 只有助记符注册、无发射点。
+>
+> ### 既有测试的 UB 期望
+>
+> `tests/run/288_simd_nbody_scalar.py` 的 expect 把 `int(NaN)` 的 UB 垃圾值
+> （`-9223372036854775808` 等）钉死了；修复后该处按语义抛 `ValueError`，测试反而失败。
+> 处理：加 `i9(x)` helper 把「NaN/inf → int」统一记为 `-1`（不依赖 UB），expect 同步更新；
+> `-O0/-O1/-O2` 与 `PYADAMAS_SIMD=1` 四组合输出一致。
+>
+> ### 结果
+>
+> 12 基准 36/36 输出一致、指令数无回退 >0.5%（最大 +0.19%）；SIMD matmul 10,126,807 / sn 94,637,468。
+> 新用例 `tests/run/492_int_float_overflow.py`（含 expect，三档一致）：inf/-inf/nan、
+> `int(float(MIN))` 必须是 MIN 不能误抛、正常截断、`math.floor/ceil/trunc` 同类检查。
+> 闸门：388 ran ok / difftest 367-0 / ASan 388 ran ok 0 报告 / check_size 通过。
+>
+> 已知偏差（int64 设计）：`int(float(2**63))` / `int(1e300)` 抛 `OverflowError`，
+> CPython 得任意精度整数；已写进 `docs/compatibility.md`。
+
+## [0.426] - 2026-11-23
+
+> fix(tc)：一元 `+`/`-` 作用于 bool 时结果类型应为 int。
+>
+> `print(+True, -True)`：CPython 打印 `1 -1`，PyAdamas 打印 `True True` ——
+> 值其实是 ±1（bool 就是 i64 0/1），但类型检查把结果标成 `Bool`，打印走 bool 分支；
+> 类型也错（`-True + 1` 之类后续运算/重载解析会看到 bool）。
+>
+> 修法（`src/typecheck_expr.cpp` +4）：一元 `MINUS/PLUS` 分支里，操作数是
+> `TyKind::Bool` 时结果类型返回 `t_int()`（`~True` 走 TILDE 分支本来就返回 int）。
+>
+> 新用例 `tests/run/491_bool_unary_arith.py`（含 expect）：一元 +/-、bool 参与算术/索引、
+> 负数 floor 除模恒等式、float→int 截断、2^53 精度、NaN/inf 比较、算术右移、整数除零。
+> 闸门：387 ran ok / difftest 366-0 / ASan 387 ran ok 0 报告 / check_size 通过；12 基准指令数无变化。
+>
+> 审计附带确认（只报告不修，均为文档化设计取舍）：int64 回绕、`2**-1 → 0`、
+> float 除零得 inf/nan、移位按 64 取模；新发现未修项见 0.427。
+
 ## [0.425] - 2026-11-23
 
 > fix(rt)：混合容器（`list[unknown]`）排序静默乱序 → 与 CPython 一致抛 `TypeError`。
