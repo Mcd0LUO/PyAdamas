@@ -29,6 +29,10 @@ print("name_value", Color.RED.name, Color.RED.value)
 print("lookup", Color(2).name, Color(3).value)
 print("identity", Color.RED == Color(1), Color.RED is Color(1))
 print("neq", Color.RED == Color.GREEN)
+print("len", len(list(Color)))
+for c in Color:
+    print("iter", c.name, c.value)
+print("names", [c.name for c in Color])
 
 s = Square(3)
 print("abc", s.area(), isinstance(s, Shape))
@@ -38,4 +42,9 @@ print("abc", s.area(), isinstance(s, Shape))
 # lookup GREEN 3
 # identity True True
 # neq False
+# len 3
+# iter RED 1
+# iter GREEN 2
+# iter BLUE 3
+# names ['RED', 'GREEN', 'BLUE']
 # abc 9 True

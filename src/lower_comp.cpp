@@ -293,6 +293,13 @@ VReg Lowerer::lower_comp(Expr& e) {
             seq = xs;
             sty = mk_list(t_unknown());
         }
+        // enum 类对象（[c.name for c in Color]）：物化成员表后按 list 迭代。
+        if (sty && sty->kind == TyKind::ClassObj && !sty->sub.empty() && sty->sub[0] &&
+            sty->sub[0]->cls && sty->sub[0]->cls->is_enum) {
+            const ClassInfo* ec = sty->sub[0]->cls;
+            seq = enum_member_list(ec);
+            sty = mk_list(mk_class(const_cast<ClassInfo*>(ec)));
+        }
         bool ok = sty && (sty->kind == TyKind::List || sty->kind == TyKind::Tuple ||
                           sty->kind == TyKind::Str || sty->kind == TyKind::Dict ||
                           sty->kind == TyKind::Set || sty->kind == TyKind::Range);

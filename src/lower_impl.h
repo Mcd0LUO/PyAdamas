@@ -948,6 +948,8 @@ private:
     ClassAttrStorage class_attr_storage(const ClassInfo* recv, const ClassAttrInfo* ca);
     int class_attr_slot(const ClassInfo* recv, const ClassAttrInfo* ca);
     VReg class_attr_load(const ClassInfo* recv, const ClassAttrInfo* ca);
+    // enum 成员表物化成 list（list(Color) / for c in Color）。
+    VReg enum_member_list(const ClassInfo* cls);
     VReg class_attr_load_dyn(VReg obj, const ClassInfo* stat, const ClassAttrInfo* ca);
     void class_attr_store(const ClassInfo* recv, const ClassAttrInfo* ca, VReg v, TypePtr vty);
     // 接收者是类本身（`C.x` / @classmethod 的 `cls.x`）而不是实例

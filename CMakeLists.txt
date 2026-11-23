@@ -53,6 +53,7 @@ set(PYADAMAS_SOURCES
   src/typecheck_builtin.cpp
   src/typecheck_func.cpp
   src/typecheck_dataclass.cpp
+  src/typecheck_enum.cpp
   src/lower.cpp
   src/lower_class.cpp
   src/lower_impl_util.cpp

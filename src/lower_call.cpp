@@ -317,6 +317,62 @@ std::vector<VReg> Lowerer::bind_args(Call& c, const FuncInfoPtr& info, FunctionD
 
 VReg Lowerer::lower_construct(Call& c, const ClassInfoPtr& cls) {
     auto cid_it = class_ids_.find(cls.get());
+    if (cls->is_enum) {
+        // Color(1)：按值线性反查成员（CPython EnumMeta.__call__）。
+        if (c.args.size() != 1 || !c.keywords.empty()) {
+            err(c.line, c.col, std::format("enum '{}' takes exactly one value argument",
+                                           cls->name));
+            return const_none();
+        }
+        const FieldInfo* vfl = cls->field("value");
+        if (!vfl || !vfl->ty || vfl->ty->kind != TyKind::Int) {
+            err(c.line, c.col,
+                "enum construction of str-valued enums is not supported yet");
+            return const_none();
+        }
+        VReg arg = expr(*c.args[0]);
+        arg = coerce(arg, tc_.type_of(c.args[0].get()), t_int());
+        TypePtr inst_ty = mk_class(cls.get());
+        int tmp = new_borrow_slot(inst_ty);
+        int end = new_block("enum.end");
+        int off = static_cast<int>(8 * (1 + cls->field_index("value")));
+        for (auto& em : cls->enum_members) {
+            const ClassAttrInfo* ca = cls->class_attr(em.name);
+            if (!ca) continue;
+            VReg mobj = class_attr_load(cls.get(), ca);
+            VReg mv = field_load(mobj, off, t_int());
+            Inst cmp;
+            cmp.op = IrOp::Cmp;
+            cmp.cop = CmpKind::Eq;
+            cmp.a = arg;
+            cmp.b = mv;
+            VReg eq = def(t_bool(), std::move(cmp));
+            int hit = new_block("enum.hit");
+            int next = new_block("enum.next");
+            Inst br;
+            br.op = IrOp::Branch;
+            br.a = eq;
+            br.target = hit;
+            br.target2 = next;
+            emit(std::move(br));
+            switch_to(hit);
+            store_borrow_slot(tmp, mobj);
+            Inst j;
+            j.op = IrOp::Jump;
+            j.target = end;
+            emit(std::move(j));
+            switch_to(next);
+        }
+        call_void(RtFn::Raise,
+                  {const_str("ValueError"), const_str("enum value is not a valid member")});
+        Inst jd;
+        jd.op = IrOp::Jump;
+        jd.target = end;
+        emit(std::move(jd));
+        switch_to(end);
+        return load_slot(tmp, inst_ty);
+    }
+
     if (cid_it == class_ids_.end()) {
         err(c.line, c.col,
             std::format("class '{}' is not available here (nested classes are not supported yet)",

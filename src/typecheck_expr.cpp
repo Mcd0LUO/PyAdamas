@@ -1059,6 +1059,10 @@ TypePtr TypeChecker::subscript_type(TypePtr obj, TypePtr idx, int line, int col)
 
 TypePtr TypeChecker::iter_elem(TypePtr it, int line, int col) {
         if (is_unknown(it) || it->kind == TyKind::Optional) return t_unknown();
+        // enum 类对象：迭代产出成员对象（for c in Color / list(Color)）。
+        if (it->kind == TyKind::ClassObj && !it->sub.empty() && it->sub[0] &&
+            it->sub[0]->cls && it->sub[0]->cls->is_enum)
+            return mk_class(it->sub[0]->cls);
         switch (it->kind) {
             case TyKind::List:
             case TyKind::Set:

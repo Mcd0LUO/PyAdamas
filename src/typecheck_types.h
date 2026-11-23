@@ -342,6 +342,9 @@ struct MethodInfo {
     std::vector<int> aliases;
     // 自定义装饰器：类创建时把装饰器链的结果存成类属性，调用点按
     // decorated_ty 查参，降级时通过类属性做间接调用。
+    // @abstractmethod（abc）：声明为抽象方法。含未实现抽象方法的类
+    // 不能实例化（typecheck 在构造点报错）。
+    bool is_abstract = false;
     bool decorated = false;
     TypePtr decorated_ty;     // 装饰器链的返回类型（含 self 位置）
     bool is_accessor() const {
@@ -378,6 +381,14 @@ struct ClassAncestor {
     std::string qualname;
 };
 
+
+// enum 成员（class Color(Enum): RED = 1）：名字 + 字面量值。编译期登记，
+// 降级阶段在类创建时生成成员对象（含 value/name 两个字段槽）。
+struct EnumMember {
+    std::string name;
+    LiteralValue val;
+    int line = 0;
+};
 struct ClassInfo {
     std::string name;
     // 所有权契约（调试期可检测）：ClassInfo 由 TypeChecker::all_classes_ 拥有，
@@ -432,6 +443,9 @@ struct ClassInfo {
     // 带 @dataclass 装饰器：由装饰器在运行期合成 __init__，静态看不到。
     // 实例化时不能按「没有 __init__、不许带实参」判死。
     bool is_dataclass = false;
+    // enum.Enum 子类：类体赋值是枚举成员（成员对象有 value/name 字段）。
+    bool is_enum = false;
+    std::vector<EnumMember> enum_members;
     bool has_field_defaults = false;  // 整条继承链上是否有字段初值
     // 实例需要动态属性槽（反射访问了静态字段没有的名字，或 setattr 过一个
     // 非类字面量名字）。降级时给实例末尾留一个 dict 指针槽。
@@ -586,6 +600,29 @@ struct ClassInfo {
         return false;
     }
 };
+// 抽象方法检查：按「自身 → 基类」顺序找每个抽象方法最先定义它的那一层，
+// 若那一层是 @abstractmethod 就是未实现。看不全的类（open：外部导入的基类
+// 成员表缺失）不判，避免误杀 unittest.TestCase 这类。
+inline std::string unimplemented_abstract(const ClassInfo* cls) {
+    if (!cls) return {};
+    std::vector<const ClassInfo*> chain;
+    for (const ClassInfo* p = cls; p; p = p->base) {
+        chain.push_back(p);
+        for (const ClassInfo* e : p->extra_bases) chain.push_back(e);
+    }
+    for (const ClassInfo* p : chain)
+        if (p->open) return {};
+    std::unordered_set<std::string> seen;
+    for (const ClassInfo* p : chain) {
+        for (auto& m : p->methods) {
+            if (m.is_accessor()) continue;
+            if (!seen.insert(m.name).second) continue;  // 更派生的层已定义
+            if (m.is_abstract) return m.name;
+        }
+    }
+    return {};
+}
+
 
 // ── 工厂 ──────────────────────────────────────────────────────────
 

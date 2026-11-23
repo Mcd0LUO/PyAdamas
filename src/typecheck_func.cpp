@@ -568,6 +568,9 @@ void TypeChecker::classdef(ClassDef& c) {
             if (nm && *nm == "dataclass") cls->is_dataclass = true;
         }
         cls->base = base;
+        // enum.Enum 子类（stdlib/enum.py 的 Enum）：类体赋值变成枚举成员。
+        cls->is_enum = base != nullptr && base->name == "Enum" && base->imported() &&
+                       base->origin_module == "enum";
         cls->open = open;
         cls->is_exception_class = is_exc_class;
         cls->exc_parent = exc_parent;
@@ -800,6 +803,8 @@ void TypeChecker::classdef(ClassDef& c) {
             MethodInfo m;
             m.name = f.name;
             m.kind = kind;
+            // abc：@abstractmethod 标记抽象方法（编译期事实）。
+            mark_abstract_methods(f, m);
             // 没认出来的方法装饰器：装饰器链的结果存成类属性，调用走它。
             m.decorated = !decor_ok;
             m.sig = build_sig(f);
@@ -1061,6 +1066,11 @@ void TypeChecker::classdef(ClassDef& c) {
                             stmt(*s);
                             break;
                         }
+                        if (cls->is_enum) {
+                            enum_member_assign(cls.get(), nm.id, as.value.get(), nm.line,
+                                               nm.col);
+                            break;
+                        }
                         TypePtr ty = expr(*as.value);
                         ClassAttrInfo ai;
                         ai.name = nm.id;
@@ -1109,6 +1119,8 @@ void TypeChecker::classdef(ClassDef& c) {
             if (!cls->fields.empty()) cls->is_rich_exception = true;
             if (!cls->methods.empty()) cls->is_rich_exception = true;
         }
+        // enum 成员收集完：加 value/name 字段并检查冲突。
+        if (cls->is_enum) finalize_enum(c, cls.get());
         cls->complete = true;
 
 

@@ -1,13 +1,15 @@
 """enum 模块的 pyadamas 子集（纯 pyadamas 源码，随编译器分发）。
 
-支持 `Color.RED` 这种**类属性常量**用法：Enum / IntEnum / Flag / IntFlag /
-StrEnum 都是空基类，枚举成员就是子类的类属性（int 或 str）。
+编译期支持 Enum 子类的真正枚举语义（class 语句被编译器拦截，成员变成成员对象）：
+- `class Color(Enum): RED = 1`：成员对象有 `.name` / `.value`；
+- `Color.RED`、`Color(1)` 按值反查、`for c in Color` / `list(Color)`、
+  `==` / `is`（成员是单例，`Color.RED is Color(1)` 为 True）；
+- `IntEnum` / `IntFlag` / `StrEnum` 仍是 int/str 子类（成员就是 int，与 CPython 一致）；
+- `Flag` 保持旧的类属性常量语义。
 
-语义边界（CPython 的元类语义做不到，见 docs/stdlib-gaps.md）：
-- 成员没有 `.name` / `.value`；`Color(1)` 值查找、迭代、`__members__`、
-  `auto()` 都不支持（`auto` 故意不导出，宁可在 import 时就报错）；
-- `@unique` / `@verify` 只透传，不校验重复值；
-- `IntEnum` 的 `==` 与整数比较是真比较（成员本身就是 int）。
+限制（CPython 的元类语义里暂不支持的部分）：别名（重复值）、`auto()`、
+混合 int/str 成员值、`Color.__members__`、自定义 `__init__`/`__new__`、
+按名字拼接的枚举（functional API）。
 """
 
 
@@ -40,7 +42,7 @@ class EnumType:
 
 
 def unique(cls):
-    """重复值校验占位：直接返回类。"""
+    """重复值校验占位：类体成员在编译期已校验，直接返回类。"""
     return cls
 
 

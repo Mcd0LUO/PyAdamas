@@ -495,6 +495,25 @@ TypePtr TypeChecker::call_value(Call& c) {
             for (auto& kw : c.keywords) expr(*kw.value);
             return mk_class(cls);
         }
+        // abc：含未实现抽象方法的类不能实例化（CPython 在构造点抛 TypeError）。
+        if (auto abs = unimplemented_abstract(cls); !abs.empty()) {
+            err(c.line, c.col,
+                std::format("cannot instantiate abstract class '{}' (abstract method '{}' "
+                            "is not implemented)",
+                            cls->name, abs));
+            for (auto& arg : c.args) expr(*arg);
+            for (auto& kw : c.keywords) expr(*kw.value);
+            return mk_class(cls);
+        }
+        // enum 构造：Color(1) 是按值反查成员（CPython EnumMeta.__call__）。
+        if (cls->is_enum) {
+            for (auto& arg : c.args) expr(*arg);
+            for (auto& kw : c.keywords) expr(*kw.value);
+            if (c.args.size() != 1 || !c.keywords.empty())
+                err(c.line, c.col,
+                    std::format("enum '{}' takes exactly one value argument", cls->name));
+            return mk_class(cls);
+        }
         if (cls->has_init) {
             if (auto* im = cls->method("__init__"); im && im->call_sig)
                 check_args(im->call_sig, c);

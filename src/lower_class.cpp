@@ -488,6 +488,33 @@ void Lowerer::lower_classdef(ClassDef& c) {
                 auto& nm = static_cast<Name&>(*as.targets[0]);
                 const ClassAttrInfo* ca = ci->class_attr(nm.id);
                 if (ca && ca->owner == ci.get()) {
+                    if (ci->is_enum) {
+                        // 枚举成员 = 实例对象（value/name 两个字段槽），类创建时构造。
+                        const EnumMember* em = nullptr;
+                        for (auto& m : ci->enum_members)
+                            if (m.name == nm.id) em = &m;
+                        if (em) {
+                            Inst on;
+                            on.op = IrOp::ObjNew;
+                            on.imm = cid;
+                            VReg mobj = def_heap(mk_class(ci.get()), std::move(on));
+                            const FieldInfo* vfl = ci->field("value");
+                            const FieldInfo* nfl = ci->field("name");
+                            if (vfl && nfl) {
+                                VReg v = const_literal(em->val);
+                                v = coerce(v, vreg_ty(v), vfl->ty);
+                                store_field(vfl->ty, mobj,
+                                            static_cast<int>(8 * (1 + ci->field_index("value"))),
+                                            v);
+                                VReg n = const_str(em->name);
+                                store_field(nfl->ty, mobj,
+                                            static_cast<int>(8 * (1 + ci->field_index("name"))),
+                                            n);
+                            }
+                            class_attr_store(ci.get(), ca, mobj, mk_class(ci.get()));
+                            continue;
+                        }
+                    }
                     st_->class_body_attrs[nm.id] = class_attr_slot(ci.get(), ca);
                     class_attr_store(ci.get(), ca, expr(*as.value),
                                      tc_.type_of(as.value.get()));
@@ -551,6 +578,25 @@ void Lowerer::lower_classdef(ClassDef& c) {
     }
 }
 
+
+// enum 类对象的成员表（`list(Color)` / `for c in Color`）：类创建时每个成员
+// 对象已作为类属性存在，这里物化成 list。
+VReg Lowerer::enum_member_list(const ClassInfo* cls) {
+    TypePtr elem_ty = mk_class(const_cast<ClassInfo*>(cls));
+    TypePtr lt = mk_list(elem_ty);
+    VReg l = call_runtime(RtFn::ListNew, lt,
+                          {const_int(static_cast<int64_t>(cls->enum_members.size())),
+                           const_int(list_kind_filled(lt))});
+    push_temp(l);
+    for (auto& em : cls->enum_members) {
+        const ClassAttrInfo* ca = cls->class_attr(em.name);
+        if (!ca) continue;
+        VReg mobj = class_attr_load(cls, ca);
+        retain_elem(mobj, 1);
+        call_void(RtFn::ListAppend, {l, mobj, const_int(1)});
+    }
+    return l;
+}
 int Lowerer::compile_ctor_wrapper(ClassDef& clsdef, const ClassInfoPtr& ci, int cid) {
     (void)clsdef;
     const MethodInfo* init = ci->method("__init__");

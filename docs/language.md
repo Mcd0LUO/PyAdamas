@@ -324,6 +324,43 @@ print(f(), f(), g())    # 1 2 1
 与目标一致的固定形参（不能靠 `*args` 转发）。类装饰器在类定义点拿到
 运行期类对象，返回值继续作为该类名的类对象；返回替换类时构造仍走原类。
 
+### enum / abc：编译期类语义
+
+`enum` 与 `abc` 的标准库子集由**编译器在 class 语句上拦截**实现（不是运行期元类）：
+
+| 写法 | 语义 |
+|---|---|
+| `class Color(Enum): RED = 1` | 成员对象：`Color.RED.name` / `.value`；`Color(1)` 按值反查；`for c in Color` / `list(Color)`；成员是单例（`Color.RED is Color(1)`） |
+| `@abstractmethod` 方法 | 编译期标记抽象方法；含未实现抽象方法的类**实例化时报错**（`cannot instantiate abstract class ...`），子类实现后可用 |
+
+```python
+from abc import ABC, abstractmethod
+from enum import Enum
+
+class Color(Enum):
+    RED = 1
+    GREEN = 2
+
+class Shape(ABC):
+    @abstractmethod
+    def area(self) -> int:
+        return 0
+
+class Square(Shape):
+    def area(self) -> int:
+        return 1
+
+print(Color.RED.name, Color.RED.value)   # RED 1
+print(Color(2).name)                     # GREEN
+print(len(list(Color)))                  # 2
+Square()                                 # OK
+```
+
+限制：`class Color(Enum)` 的别名（重复值）、`auto()`、混合 int/str 成员值、
+`__members__`、自定义 `__init__`/`__new__`、`metaclass=` 都不支持；
+`IntEnum`/`IntFlag`/`StrEnum` 保持 int/str 子类语义，`Flag` 保持类属性常量语义；
+`abc` 的 `ABCMeta` 不能当 metaclass 用。
+
 相互递归的嵌套闭包会形成 cell 环；这类环不是引用计数能处理的，由下面的
 循环收集器回收。
 

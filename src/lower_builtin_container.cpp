@@ -29,6 +29,10 @@ VReg Lowerer::lower_builtin_container(const std::string& name, Call& c) {
             return const_none();
         }
         TypePtr xt = tc_.type_of(c.args[0].get());
+        // list(Color)：enum 类对象物化成成员表。
+        if (xt && xt->kind == TyKind::ClassObj && !xt->sub.empty() && xt->sub[0] &&
+            xt->sub[0]->cls && xt->sub[0]->cls->is_enum)
+            return enum_member_list(xt->sub[0]->cls);
         if (xt && xt->kind == TyKind::Deque) {
             VReg d = expr(*c.args[0]);
             VReg xs = call_runtime(RtFn::DequeToList, mk_list(t_int()), {d});

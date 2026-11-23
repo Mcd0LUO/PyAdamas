@@ -1,4 +1,4 @@
-"""stdlib/enum.py：类属性常量 + IntEnum/Flag 的 int 语义。"""
+"""stdlib/enum.py：Enum 成员对象（.name/.value/值反查）+ IntEnum/Flag 的 int 语义。"""
 from enum import Enum, Flag, IntEnum, unique
 
 
@@ -18,21 +18,22 @@ class Perm(Flag):
     WRITE = 2
 
 
-def describe(c: int) -> str:
-    if c == Color.RED:
+def describe(c: Color) -> str:
+    if c is Color.RED:
         return "red"
-    if c == Color.GREEN:
+    if c is Color.GREEN:
         return "green"
     return "?"
 
-
 print(describe(Color.RED), describe(Color.GREEN))
-print(Color.RED, Color.GREEN)
+print(Color.RED.name, Color.RED.value, Color.GREEN.name, Color.GREEN.value)
+print(Color(2).name, Color(1).value)
 print(Code.OK, Code.OK == 200, Code.ERR > 400)
 print(Perm.READ, Perm.READ | Perm.WRITE)
 
 # --- expect ---
 # red green
-# 1 2
+# RED 1 GREEN 2
+# GREEN 1
 # 200 True True
 # 4 6
