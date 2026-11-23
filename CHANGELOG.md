@@ -4,6 +4,163 @@
 
 早期阶段没有逐条留痕，按阶段归纳；0.4 之后逐条记录。
 
+## [0.456] - 2026-11-23
+
+> lang：**`enum` / `abc` 编译期类语义**——`enum` 成员变成真正的成员对象（有 `.name`/`.value`），`abc` 阻止抽象类实例化。（commit d8d6c47）
+>
+> 机制：两个「语义特判 + 共享实现」，**没有**做通用 class-creation hook——pyadamas 的类是编译期静态布局，运行期 hook 改不了已生成的槽位，通用化需要元类语义，代价远大于收益。`abc` 只要一个编译期事实位，`enum` 只要类体赋值拦截，两者都落在 typecheck 层（`dataclasses` 已验证这条路）。
+>
+> 新增 `src/typecheck_enum.cpp`（95 行）；`ClassInfo::is_enum`/`MethodInfo::is_abstract`；`lower_class.cpp` 为每个成员构造实例（ObjNew + value/name 槽）；`Color(1)` 值反查；三个迭代入口（`for`/`list()`/推导式）。
+>
+> 对拍 CPython：`Color.RED.name/value`、`Color(2).name`、`Color.RED == Color(1)` True / `== 1` False、`len(list(Color))`、`[c.name for c in Color]`、抽象类子类实例化全部一致；抽象类实例化编译期报错带行号。
+>
+> 边界：enum 别名（重复值）选择**明确报错**而非静默合并；`auto()`/`IntFlag` 位运算/`__members__`/functional API 未支持；`ABCMeta` 当 metaclass、`abc.register()` 未支持；**P3 通用化未做**，`dataclasses` 仍是按名字特判。
+>
+> 验证：12 基准 × O0/O1/O2 **36/36 逐字节相同**；类/OOP 用例 × O0/O2 **44/44 相同**（普通类语义未变）；闸门 **458 ran ok / difftest 430-0 / bench 36/36 / perf warn=0 fail=0**。
+
+## [0.455] - 2026-11-23
+
+> test/stdlib：**未测模块与浅覆盖模块的 CPython 对拍验收**（22 个模块）。（commits 7cfd563、523752a）
+>
+> 背景：48 个纯 `.py` 模块里 7 个零测试、20 个只有 1 个测试；`decimal` 有 956 行却零测试。
+>
+> 修到的真 bug：`decimal.to_integral_value` 缺失（4 行薄包装）；**`copy.copy()` 直接 `return x`（浅拷贝根本不复制，别名共享）**、`copy.deepcopy()` 缺失；`calendar` 缺 `MONDAY..SUNDAY` 常量。
+>
+> `dataclasses` 经复核**能用**（此前判「坏」是没开 lang-gaps 门控的误判）。
+>
+> 编译器缺口结论（成为 0.456 的派单依据）：`enum` 需要类体赋值拦截 + 元类语义（判据 `lower_class.cpp:491`、`typecheck_func.cpp:488`）；`abc` 需要抽象方法标记 + 实例化检查（`typecheck_call.cpp:442`）。
+>
+> 限制如实记录：`codecs` 的 `errors=` 被忽略（运行时 ABI）、`decimal` NaN/Infinity 不支持、`contextlib.suppress` 需 lang-gaps 门控。
+>
+> 验证：22 个新用例（534~555）各自 ran ok；闸门 **458 ran ok**。
+
+## [0.454] - 2026-11-23
+
+> feat(sigs)：**`.pysig` 支持原生类声明**，`random.Random` 全量迁移。（commit 0f2771c）
+>
+> ```python
+> class Random:
+>     @native("pa_random_new")
+>     def __init__(self, x: int = 0) -> None: pass
+>     @native("pa_random_gnext")
+>     def random(self) -> float: pass
+> ```
+>
+> `TyKind::Random` 的 ~58 行硬编码方法表 → 声明查表；删 `builtin_sigs.cpp` −18、`lower_import.cpp` −5。方法降级（参数装配）保持 C++ 不动——这是 asm 能逐字节相同的原因。
+>
+> **CPython 同种子逐位对拍**（MT19937）：`Random(42).random()` = `0.6394267984578837`、`randint`/`uniform`/`choice`/`seed(5)` 全部一致。
+>
+> 唯一留在 C++ 的一层：`declared_class_type()` 把 `(module, class)` 映射到内建类型种类——声明格式表达不了「对象类型种类」，与 `t_int()`/`t_list()` 同属内建事实。
+>
+> 踩坑（两条都是静默算错型）：`resolve_rt_symbols()` 只扫模块函数，**类方法的 `@native` 符号没被反查** → 构造器被降级成 `pa_list_new`；`FuncInfo` 缺 `ret_specialized` 承载位。
+>
+> 验证：12 基准 × 3 档 **36/36 相同**、类示例 **14/14 相同**；闸门 **435 ran ok / difftest 407-0**。
+
+## [0.453] - 2026-11-23
+
+> feat(sigs)：**`@ret_specialized` + `INT64_MIN`/`NaN` 字面量**；`random.choice/sample/choices/seed` 与 `math.nan` 全部声明化。（commit d3aebfe）
+>
+> **真正的坑不是 `ret_known`**：硬编码里这三个函数用**模块限定名** `"random.choice"`，而 `check_args()` 靠 `fn->name` 前缀分派到 `random_call()`；pysig 写裸名 → 分派不触发 → 调用点退化 unknown → GC 扫描 mask 出现 → **栈帧 144→192**。修法：声明函数的 `FuncInfo::name` 统一写成 `module + "." + name`。
+>
+> 通用教训：**签名表不只含类型，还含「名字」所携带的分派语义。**
+>
+> `INT64_MIN`：`9223372036854775808` 被词法解析成 **u64 位模式**，旧代码直接拒绝；改为按 `uint64_t` 重新解释幅度再折叠负号。
+>
+> `NaN`：`literal_of` 识别合法 Python 调用形式 `float("nan")`/`float("inf")`；`math.pysig` 改 `nan: float = float("nan")`，**删掉 `builtin_value` 那 8 行 C++ 特判**——此前 `nan = 1e400`（实为 +inf）是「声明说谎」。
+>
+> 验证：12 基准 × 3 档 **36/36 相同**；`choice` 调用点 `-O0` 栈帧 **144 == 144**；闸门 **434 ran ok / difftest 406-0**。
+
+## [0.452] - 2026-11-23
+
+> feat(lsp)：**LSP 服务器补齐主线能力**——completion / definition / semanticTokens / 诊断 debounce。`tools/lsp/main.py` 649 → 1219 行。（commit 07e1826）
+>
+> 冒烟断言 **58 → 119**（+61）。semanticTokens 按 **UTF-16 code unit** 编码（deltaStart 与 length 都是），用「中文 + 😀（BMP 外）」逐 token 校验；三引号跨行 docstring 用状态机。
+>
+> minijson 换 `json.parse`：**543 → 204 行**（手写 Parser/stringify 整段删除），保留旧宽容语义所以 `main.py` 调用点一行没改；切换前后各跑一次 smoke（PASS 58 → PASS 58）。
+>
+> stdin 保留**二进制无缓冲** `open(0, "rb", 0)`：LSP 帧是字节语义，且 debounce 依赖「fd 可读 == 还有待处理帧」，有 FILE 缓冲时 poll 会误判。
+>
+> 已知天花板：`pyadamas check` 不校验模块属性（`json.nonexistent_attr` check 放行、build 才报）。
+
+## [0.451] - 2026-11-23
+
+> refactor(native)：**`os` / `random` 模块级函数迁到声明式签名**。（commits 02b5b07、14aa9b0）
+>
+> `os`：16 函数 + 6 常量（`getcwd/cpu_count/getpid/mkdir/rmdir/remove/unlink/chdir/listdir/getenv/rename/chmod/access/makedirs/system/close`），净删 ~88 行 C++；`unlink` 无独立 RtFn，用 `@native("pa_os_remove")` 指到 `OsRemove`。
+>
+> `random`：9 个模块级函数（`random/randint/uniform/shuffle` 用 `@native` 覆盖到 `pa_random_g*`），净删 ~53 行；保留 `seed`（当时 INT64_MIN 字面量表达不了）、`Random` 类、`choice/sample/choices`（当时 `ret_known` 无法声明）。
+>
+> `operator` **跳过**：31 个函数全走 `operator_call()` 类型推导 + `lower_operator()` 专门降级，**无 `pa_operator_*` RtFn 入口**，pysig 的符号反查硬失败。判据写进 cookbook：**只有存在 `pa_<模块>_<名字>` RtFn 的函数才能声明**。
+>
+> 验证：12 基准 × 3 档 **36/36 相同**；闸门 **432→433 ran ok / difftest 404-405-0**。
+
+## [0.450] - 2026-11-23
+
+> refactor(native)：**`sys` 部分签名声明化 + `.pysig` 默认按名字合并**。（commits e4022e4、5386ba8）
+>
+> `sys` 有 6 个成员无法用声明表达（`argv: list[str]`、`executable: str`、`stdin/stdout/stderr: file`、`exc_info()` 返回含 ClassObj），
+> 而 `module_info()` 原是**整模块替换** → 这些成员变成 `module has no attribute`，大量用例会崩。
+>
+> 修法：pysig hook 改为在 `builtin_module()` 末尾**逐名合并**（声明优先覆盖，未声明的保留硬编码）。
+>
+> **这是高杠杆修复**：否则 `operator`/`os`/`random` 每个「半能声明」的模块都要加一个 C++ 专用桥接分支，「零 C++ 迁移」就退化成「每模块 30 行 C++」。
+>
+> merge 直接证据：临时只声明 `sys.maxsize` → `sys.argv`/`stdout`/`exc_info`/`exit` 全部继续可用。
+>
+> 验证：12 基准 × 3 档 **36/36 相同**；闸门 **431 ran ok / difftest 403-0**。
+
+## [0.449] - 2026-11-23
+
+> refactor(native)：**`math` 57 函数 + 5 常量迁到声明式**（净删 118 行 C++）；feat(cpya)：**union + 定长数组 + `@packed`**。（commits 3e64f91、5204189）
+>
+> `math`：`builtin_sigs.cpp` −43、`lower_import.cpp` −86。踩坑：`module_info()` 优先返回声明驱动的 ModuleInfo，硬编码的 `inf`/`nan` 在 typecheck 阶段**不可见**——常量也必须声明进 `.pysig`。
+>
+> `.cpya` union/数组：此前 struct 字段只允许「定宽标量 + 指针」，union/数组全降级 opaque ⇒ **只能描述 POD+指针的 C 接口，写不了系统调用层**。
+>
+> ```python
+> @union
+> class epoll_data: ptr: ptr; fd: int32; u64: uint64
+> @packed
+> class epoll_event: events: uint32; data: epoll_data
+> class sockaddr_un: sun_family: uint16; sun_path: char[108]
+> ```
+>
+> `@packed` 是规格外但**必须**的：`epoll_event` 在 x86_64 是 packed（sizeof 12 而非 16）。
+>
+> 验收用**真实系统结构体三方对拍**（C 辅助函数 / PyAdamas / ctypes）：`sizeof(epoll_event)`=12、`offsetof(data)`=4、`sizeof(epoll_data)`=8、`sizeof(sockaddr_un)`=110、**真实 epoll 往返**返回 1。
+>
+> 验证：12 基准 × 3 档 **36/36 相同**；闸门 **430 ran ok / difftest 402-0**。
+
+## [0.448] - 2026-11-23
+
+> refactor：**`.pysig` 与 `.cpya` 改用 Python 语法，抽出共用声明前端 `pydecl.h`**。（commits a8d483c、2db2308）
+>
+> 问题不是审美：`.pysig` 自带一份 lexer + 类型名映射表（`list[T]/tuple[T,...]/optional[T]`），与 `parse_annotation_impl` 是**两套并行的类型语法**——每加一个类型（`bytes`/`file`/`dylib`）都要同步改两处。
+>
+> 改后：`def sleep(secs: float) -> None: pass`、`CLOCK_MONOTONIC: int = 1`；符号按 `pa_<模块>_<名字>` 推导，例外用 `@native("pa_xxx")`。
+>
+> `.cpya` 同构：`cmodule("x")`（可省略）/ `link("z")` / `class FILE: pass`（不透明）/ `class pair:` + 字段 / `def f(...) -> T: pass` / `@extern("c_name")` 改名 / `Callable[[...], R]` 回调 / `*args` 变参。
+>
+> 新增 `src/pydecl.h`（222 行）**被两个加载器共用**（`native_sigs.h` 36 处、`cimport.cpp` 64 处引用）；`native_sigs.h` 670 → 557 行；`.cpya` 解析器重写 +498/−493；`cdecl` 生成器同步输出新语法。
+>
+> 规格偏差（已批准，更贴近 Python）：`@extern_var("stdout")` + 注解赋值不合法（Python 只允许装饰 def/class）→ 改为「无值注解 = extern var」+ `optind: int32 = extern_var("optind")` 改名。
+>
+> 验证：18 个 `.cpya` 全量迁移；既有 cimport 示例 asm **12/12 逐字节相同**；12 基准 **36/36 相同**；闸门 **426→427 ran ok / difftest 398-399-0**。
+
+## [0.447] - 2026-11-23
+
+> feat(native)+feat(stdlib)：**原生模块批（os/time）+ 声明式签名 P0（`time`/`os.path` 迁出 C++）**；标准库第 3 批纯 py API。（commits 0aed281、61c2c57）
+>
+> 原生批：`os.environ`（只读快照，**赋值编译期报错**）、`os.walk`（立即求值返回 list）、`os.system`；
+> `time.localtime/gmtime/strftime/mktime`（9 元 int 元组，wday 周一=0、yday 1-based 与 CPython 一致，修正 glibc tm 差一）。
+>
+> 声明式签名 P0：`stdlib/sigs/<模块>.pysig` + 加载器 `src/native_sigs.h`；接线 3 处（`builtin_sigs.cpp` 声明优先、`lower_import.cpp` native_fn 反查、`driver_modules.cpp` `.pysig` 存在即自动登记模块）；
+> **删掉 `time` 40+12 行、`os.path` 21+20 行硬编码**。9 类错误路径全部带 `文件:行号`。
+>
+> 标准库第 3 批：`itertools.starmap/tee/chain_iterables`、`functools.cmp_to_key`、`logging` 三个 handler、`codecs`。
+> `cmp_to_key` 的实现绕开了 `sorted(key=用户类)` 不调用 `__lt__` 的问题（用可变 list[int] + 增量排名）。
+>
+> 验证：迁移模块自身示例 asm 与硬编码**逐字节相同**；12 基准 **36/36 相同**；编译耗时增量 <5ms；闸门 **425 ran ok / difftest 397-0**。
 ## [0.446] - 2026-11-23
 
 > test/docs：**stdlib 审计续集用例**（`tests/run/511_stdlib2.py`）+ 补 3 处行为差异到 `docs/compatibility.md`。（commit ad6c3ba）
