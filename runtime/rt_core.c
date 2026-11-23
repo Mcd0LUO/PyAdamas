@@ -2849,6 +2849,12 @@ void pa_gc_collect(void) { gc_collect(1); }
 
 // 程序退出：所有还活着的堆对象（包括环）一次性还给系统。
 void pa_gc_shutdown(void) {
+    // 增量标记进行到一半就退出时（gc_incr_state != 0），先收尾：完成晋升/
+    // 清扫并把 gc_pend 按正常 RC 还掉。否则 shutdown 的「整堆皆垃圾」扫描
+    // 会看到半成品状态，pend 里混着链上对象 → 先 free 再 dec 读已释放头
+    // （ASan heap-use-after-free），或 dec 到已释放对象（refcount decrement
+    // on a freed object）。实测 PYADAMAS_GC_INCR_MARK=1 下两个探针都触发。
+    if (gc_incr_state != 0) gc_incr_finish();
     // 先放掉全局根：sys.argv 的字符串在 exact-RC 模式下不在 GC 堆链上，
     // 只能靠 RC 释放（见 pa_sys_argv_shutdown 的注释）。
     pa_sys_argv_shutdown();
@@ -2874,14 +2880,20 @@ void pa_gc_shutdown(void) {
     }
     gc_phase = GC_PHASE_NONE;
     gc_mark_sweep = 0;
-    while (heap_head) gc_free_body(heap_head);
-    // 清扫期攒下的「集合外」引用：此时 gc_phase 已复位，按正常 RC 释放
-    // （可能级联释放更多叶子）。
+    // **先还清扫期攒下的「集合外」引用，再 free 整条堆链。**
+    //
+    // 增量标记打开时（PYADAMAS_GC_INCR_MARK=1）gc_pend 里可能混进「链上、
+    // 但仍属集合内」的对象（gc_phase_dec 的 INCR_MARK 分支不区分新老对象）。
+    // 原来顺序是先 `while (heap_head) gc_free_body()` 再 dec pend：链上对象
+    // 已被 free，pend 里还指着它们 → ASan heap-use-after-free（读已释放的
+    // rc 头）。先 dec 会让这些对象的引用归零、顺手从链上摘掉，后续 free 循环
+    // 只剩真正没人引用的对象；集合外叶子也照旧在此处级联释放。
     {
         size_t pn = gc_pend_len;
         gc_pend_len = 0;
         for (size_t i = 0; i < pn; ++i) pa_rc_dec(gc_pend[i]);
     }
+    while (heap_head) gc_free_body(heap_head);
     gc_sweeping = 0;
     alloc_since_gc = 0;
     alloc_since_major = 0;
