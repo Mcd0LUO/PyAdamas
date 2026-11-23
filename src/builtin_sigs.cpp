@@ -92,49 +92,6 @@ pyadamas::ModuleInfoPtr builtin_module(const std::string& name) {
     } else if (name == "dylib") {
         func("load", {pyadamas::t_str()}, pyadamas::t_dylib());
         func("close", {pyadamas::t_dylib()}, pyadamas::t_int());
-    } else if (name == "math") {
-        info->globals["pi"] = pyadamas::t_float();
-        info->globals["e"] = pyadamas::t_float();
-        info->globals["tau"] = pyadamas::t_float();
-        info->globals["inf"] = pyadamas::t_float();
-        info->globals["nan"] = pyadamas::t_float();
-        for (auto& n : {"sqrt", "fabs", "sin", "cos", "tan", "log", "log2", "log10", "exp"})
-            func(n, {pyadamas::t_float()}, pyadamas::t_float());
-        func("floor", {pyadamas::t_float()}, pyadamas::t_int());
-        func("ceil", {pyadamas::t_float()}, pyadamas::t_int());
-        func("pow", {pyadamas::t_float(), pyadamas::t_float()}, pyadamas::t_float());
-        func("fmod", {pyadamas::t_float(), pyadamas::t_float()}, pyadamas::t_float());
-        for (auto& n : {"atan2", "hypot", "copysign"})
-            func(n, {pyadamas::t_float(), pyadamas::t_float()}, pyadamas::t_float());
-        for (auto& n : {"degrees", "radians"})
-            func(n, {pyadamas::t_float()}, pyadamas::t_float());
-        func("trunc", {pyadamas::t_float()}, pyadamas::t_int());
-        for (auto& n : {"isnan", "isinf", "isfinite"})
-            func(n, {pyadamas::t_float()}, pyadamas::t_bool());
-        func("factorial", {pyadamas::t_int()}, pyadamas::t_int());
-        func("gcd", {pyadamas::t_int(), pyadamas::t_int()}, pyadamas::t_int());
-        func("lcm", {pyadamas::t_int(), pyadamas::t_int()}, pyadamas::t_int());
-        func("fsum", {pyadamas::mk_list(pyadamas::t_float())}, pyadamas::t_float());
-        for (auto& n : {"acos", "asin", "atan", "acosh", "asinh", "atanh", "cbrt",
-                        "cosh", "sinh", "tanh", "exp2", "expm1", "log1p", "erf",
-                        "erfc", "gamma", "lgamma", "ulp"})
-            func(n, {pyadamas::t_float()}, pyadamas::t_float());
-        for (auto& n : {"nextafter", "remainder"})
-            func(n, {pyadamas::t_float(), pyadamas::t_float()}, pyadamas::t_float());
-        func("ldexp", {pyadamas::t_float(), pyadamas::t_int()}, pyadamas::t_float());
-        func("fma", {pyadamas::t_float(), pyadamas::t_float(), pyadamas::t_float()},
-             pyadamas::t_float());
-        func("isclose", {pyadamas::t_float(), pyadamas::t_float()}, pyadamas::t_bool());
-        func("frexp", {pyadamas::t_float()}, pyadamas::mk_tuple({pyadamas::t_float(), pyadamas::t_int()}));
-        func("modf", {pyadamas::t_float()}, pyadamas::mk_tuple({pyadamas::t_float(), pyadamas::t_float()}));
-        func("isqrt", {pyadamas::t_int()}, pyadamas::t_int());
-        func("comb", {pyadamas::t_int(), pyadamas::t_int()}, pyadamas::t_int());
-        func("perm", {pyadamas::t_int(), pyadamas::t_int()}, pyadamas::t_int());
-        func("prod", {pyadamas::mk_list(pyadamas::t_int())}, pyadamas::t_int());
-        func("sumprod", {pyadamas::mk_list(pyadamas::t_int()), pyadamas::mk_list(pyadamas::t_int())},
-             pyadamas::t_int());
-        func("dist", {pyadamas::mk_list(pyadamas::t_float()), pyadamas::mk_list(pyadamas::t_float())},
-             pyadamas::t_float());
     } else if (name == "sys") {
         info->globals["argv"] = pyadamas::mk_list(pyadamas::t_str());
         info->globals["executable"] = pyadamas::t_str();

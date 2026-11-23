@@ -159,65 +159,7 @@ std::optional<RtFn> Lowerer::native_fn(const std::string& module, const std::str
             return RtFn::AsyncioWaitFd;
         return std::nullopt;
     }
-    if (module == "math") {
-        if (member == "sqrt") return RtFn::MathSqrt;
-        if (member == "floor") return RtFn::MathFloor;
-        if (member == "ceil") return RtFn::MathCeil;
-        if (member == "fabs") return RtFn::MathFabs;
-        if (member == "sin") return RtFn::MathSin;
-        if (member == "cos") return RtFn::MathCos;
-        if (member == "tan") return RtFn::MathTan;
-        if (member == "log") return RtFn::MathLog;
-        if (member == "log2") return RtFn::MathLog2;
-        if (member == "log10") return RtFn::MathLog10;
-        if (member == "exp") return RtFn::MathExp;
-        if (member == "pow") return RtFn::MathPow;
-        if (member == "fmod") return RtFn::MathFmod;
-        if (member == "atan2") return RtFn::MathAtan2;
-        if (member == "hypot") return RtFn::MathHypot;
-        if (member == "degrees") return RtFn::MathDegrees;
-        if (member == "radians") return RtFn::MathRadians;
-        if (member == "trunc") return RtFn::MathTrunc;
-        if (member == "copysign") return RtFn::MathCopysign;
-        if (member == "isnan") return RtFn::MathIsnan;
-        if (member == "isinf") return RtFn::MathIsinf;
-        if (member == "isfinite") return RtFn::MathIsfinite;
-        if (member == "factorial") return RtFn::MathFactorial;
-        if (member == "gcd") return RtFn::MathGcd;
-        if (member == "lcm") return RtFn::MathLcm;
-        if (member == "fsum") return RtFn::MathFsum;
-        if (member == "acos") return RtFn::MathAcos;
-        if (member == "asin") return RtFn::MathAsin;
-        if (member == "atan") return RtFn::MathAtan;
-        if (member == "acosh") return RtFn::MathAcosh;
-        if (member == "asinh") return RtFn::MathAsinh;
-        if (member == "atanh") return RtFn::MathAtanh;
-        if (member == "cbrt") return RtFn::MathCbrt;
-        if (member == "cosh") return RtFn::MathCosh;
-        if (member == "sinh") return RtFn::MathSinh;
-        if (member == "tanh") return RtFn::MathTanh;
-        if (member == "exp2") return RtFn::MathExp2;
-        if (member == "expm1") return RtFn::MathExpm1;
-        if (member == "log1p") return RtFn::MathLog1p;
-        if (member == "erf") return RtFn::MathErf;
-        if (member == "erfc") return RtFn::MathErfc;
-        if (member == "gamma") return RtFn::MathGamma;
-        if (member == "lgamma") return RtFn::MathLgamma;
-        if (member == "ulp") return RtFn::MathUlp;
-        if (member == "nextafter") return RtFn::MathNextafter;
-        if (member == "remainder") return RtFn::MathRemainder;
-        if (member == "ldexp") return RtFn::MathLdexp;
-        if (member == "fma") return RtFn::MathFma;
-        if (member == "isclose") return RtFn::MathIsclose;
-        if (member == "frexp") return RtFn::MathFrexp;
-        if (member == "modf") return RtFn::MathModf;
-        if (member == "isqrt") return RtFn::MathIsqrt;
-        if (member == "comb") return RtFn::MathComb;
-        if (member == "perm") return RtFn::MathPerm;
-        if (member == "prod") return RtFn::MathProd;
-        if (member == "sumprod") return RtFn::MathSumprod;
-        if (member == "dist") return RtFn::MathDist;
-    } else if (module == "sys" && member == "exit") {
+    if (module == "sys" && member == "exit") {
         return RtFn::SysExit;
     } else if (module == "sys" && member == "exc_info") {
         return RtFn::ExcInfo;
@@ -305,6 +247,13 @@ std::optional<RtFn> Lowerer::native_fn(const std::string& module, const std::str
 
 bool Lowerer::builtin_value(const std::string& module, const std::string& member, VReg& out,
                             TypePtr& ty) {
+    // math.nan 无法用 .pysig 字面量表达（pydecl::Literal 没有 NaN 形态），
+    // 在声明式 hook 之前特判，pysig 里的 nan 声明只为 typecheck 提供类型。
+    if (module == "math" && member == "nan") {
+        out = const_float(std::numeric_limits<double>::quiet_NaN());
+        ty = t_float();
+        return true;
+    }
     // 声明式常量（P0）：stdlib/sigs/<module>.pysig 的 const，按字面量直接产出。
     if (const auto* dc = pyadamas::nativesig::find_const(module, member)) {
         switch (dc->val.kind) {
@@ -396,33 +345,9 @@ bool Lowerer::builtin_value(const std::string& module, const std::string& member
             return true;
         }
     }
-    if (module == "math") {
-        if (member == "pi") {
-            out = const_float(3.14159265358979323846);
-            ty = t_float();
-            return true;
-        }
-        if (member == "e") {
-            out = const_float(2.71828182845904523536);
-            ty = t_float();
-            return true;
-        }
-        if (member == "tau") {
-            out = const_float(6.28318530717958647692);
-            ty = t_float();
-            return true;
-        }
-        if (member == "inf") {
-            out = const_float(std::numeric_limits<double>::infinity());
-            ty = t_float();
-            return true;
-        }
-        if (member == "nan") {
-            out = const_float(std::numeric_limits<double>::quiet_NaN());
-            ty = t_float();
-            return true;
-        }
-    } else if (module == "sys") {
+    // math 的全部常量已迁到 stdlib/sigs/math.pysig（nan 的特判在
+    // builtin_value 开头，见上文）。
+    if (module == "sys") {
         if (member == "maxsize") {
             out = const_int(std::numeric_limits<int64_t>::max());
             ty = t_int();
