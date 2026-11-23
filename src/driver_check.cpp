@@ -172,6 +172,16 @@ pyadamas::ModuleInfoPtr check_load_file(CheckCtx& ctx, const std::string& name,
         auto info = check_build_info(*tc, name);
         info->name = name;
         info->source_path = path;
+        // 与 build 端同口径：接口做一次 encode→decode 归一。检查模式此前直接
+        // 用 TypeChecker 里的指针，annotation 解析（classes 表）与函数签名里的
+        // ClassInfo* 是不同对象；assignable 用 is_subclass_of 的指针比较，于是
+        // 跨模块 `p: a.Point = a.make(...)` 在 check --imports 下误报
+        // 「annotated as Point but assigned Point」。解码后类表/签名统一到
+        // 同一批 ClassInfo，与 build 行为一致。
+        if (auto bytes = pyadamas::encode_module_interface(*info)) {
+            if (auto dec = pyadamas::decode_module_interface(*bytes, path))
+                info = *dec;
+        }
         ctx.loading.erase(name);
         return info;
     } catch (...) {

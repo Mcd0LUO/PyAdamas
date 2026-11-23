@@ -536,10 +536,19 @@ TypePtr TypeChecker::parse_annotation_impl(Expr* e, int line, int depth) {
         }
         if (auto* at = dynamic_cast<Attribute*>(e)) {
             if (auto* vn = dynamic_cast<Name*>(at->value.get())) {
-                if (auto mod = lookup_module_alias(vn->id); mod && mod->builtin) {
-                    if (mod->name == "random" && at->attr == "Random") return t_random();
-                    if (mod->name == "subprocess" && at->attr == "CompletedProcess")
-                        return t_completed();
+                if (auto mod = lookup_module_alias(vn->id); mod) {
+                    if (mod->builtin) {
+                        if (mod->name == "random" && at->attr == "Random") return t_random();
+                        if (mod->name == "subprocess" && at->attr == "CompletedProcess")
+                            return t_completed();
+                    } else {
+                        // 跨模块类标注 `p: a.Point`：接口里带完整字段/方法表，
+                        // 解析成同一个 ClassInfo*（lowering 走 imported class 路径）。
+                        if (auto ci = mod->classes.find(at->attr); ci != mod->classes.end())
+                            return mk_class(ci->second.cls.get());
+                        if (auto it = mod->globals.find(at->attr); it != mod->globals.end())
+                            return it->second;
+                    }
                 }
             }
         }
