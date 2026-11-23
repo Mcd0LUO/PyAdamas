@@ -1,0 +1,43 @@
+# stdlib/sigs/os.pysig —— os 模块的声明式签名（P0 第 5 批）
+#
+# 只声明「模块级函数 + 标量常量」。保留在 C++ 的：
+# - environ（builtin_value 返回 dict，pysig 不支持容器常量）
+# - walk（返回 list[tuple]，shape 复杂）
+# - os.path.*（已迁到 stdlib/sigs/os/path.pysig，属于另一个模块）
+# makedirs 的 exist_ok 手工装配在 lower_import_native.cpp（§6.4），签名仍在此声明。
+"""os 模块的 native 签名（17 函数 + 6 标量常量）。"""
+
+# 标量常量（POSIX 口径）。
+F_OK: int = 0
+X_OK: int = 1
+W_OK: int = 2
+R_OK: int = 4
+sep: str = "/"
+linesep: str = "\n"
+
+# 无参函数。
+def getcwd() -> str: pass
+def cpu_count() -> int: pass
+def getpid() -> int: pass
+
+# 单参 str -> None。
+def mkdir(path: str) -> None: pass
+def rmdir(path: str) -> None: pass
+def remove(path: str) -> None: pass
+# unlink 的运行期入口与 remove 共用 pa_os_remove。
+@native("pa_os_remove")
+def unlink(path: str) -> None: pass
+def chdir(path: str) -> None: pass
+def listdir(path: str) -> list[str]: pass
+# getenv(name, default="")：CPython 缺失返回 None，PA 用空串默认值。
+def getenv(name: str, default: str = "") -> str: pass
+
+# 双参函数。
+def rename(src: str, dst: str) -> None: pass
+def chmod(path: str, mode: int) -> None: pass
+def access(path: str, mode: int) -> bool: pass
+def makedirs(name: str, exist_ok: bool = False) -> None: pass
+def system(command: str) -> int: pass
+
+# close(fd) —— 运行期符号 pa_os_close。
+def close(fd: int) -> None: pass

@@ -648,69 +648,15 @@ pyadamas::ModuleInfoPtr builtin_module(const std::string& name) {
             func_with("Random", f);
         }
     } else if (name == "os") {
-        info->globals["sep"] = pyadamas::t_str();
+        // 其余 os 成员已迁到 stdlib/sigs/os.pysig（按名字 merge）。
+        // environ/walk 无法用字面量/标量签名表达，保留在硬编码。
         // os.environ：只读快照 dict[str,str]（写入在降级阶段显式报错）
         info->globals["environ"] = pyadamas::mk_dict(pyadamas::t_str(), pyadamas::t_str());
-        info->globals["linesep"] = pyadamas::t_str();
-        for (auto& n : {"F_OK", "R_OK", "W_OK", "X_OK"}) info->globals[n] = pyadamas::t_int();
-        func("mkdir", {pyadamas::t_str()}, pyadamas::t_none());
-        func("rmdir", {pyadamas::t_str()}, pyadamas::t_none());
-        func("remove", {pyadamas::t_str()}, pyadamas::t_none());
-        func("unlink", {pyadamas::t_str()}, pyadamas::t_none());
-        func("close", {pyadamas::t_int()}, pyadamas::t_none());
-        func("rename", {pyadamas::t_str(), pyadamas::t_str()}, pyadamas::t_none());
-        func("getcwd", {}, pyadamas::t_str());
-        func("cpu_count", {}, pyadamas::t_int());
-        func("listdir", {pyadamas::t_str()}, pyadamas::mk_list(pyadamas::t_str()));
-        {
-            // getenv(name, default="")：CPython 缺失返回 None，pyadamas 用空串默认值。
-            auto f = std::make_shared<pyadamas::FuncInfo>();
-            f->name = "getenv";
-            pyadamas::Param p;
-            p.name = "name";
-            p.ty = pyadamas::t_str();
-            f->pos.push_back(std::move(p));
-            pyadamas::Param d;
-            d.name = "default";
-            d.ty = pyadamas::t_str();
-            d.has_default = true;
-            pyadamas::LiteralValue lv;
-            lv.kind = pyadamas::LiteralValue::Kind::Str;
-            lv.s = "";
-            d.default_lit = lv;
-            f->pos.push_back(std::move(d));
-            f->ret = pyadamas::t_str();
-            f->ret_known = true;
-            func_with("getenv", f);
-        }
-        func("getpid", {}, pyadamas::t_int());
-        func("chdir", {pyadamas::t_str()}, pyadamas::t_none());
-        func("chmod", {pyadamas::t_str(), pyadamas::t_int()}, pyadamas::t_none());
-        func("access", {pyadamas::t_str(), pyadamas::t_int()}, pyadamas::t_bool());
         // walk：立即求值（非生成器），返回 list[tuple[str, list[str], list[str]]]
         func("walk", {pyadamas::t_str()},
              pyadamas::mk_list(
                  pyadamas::mk_tuple({pyadamas::t_str(), pyadamas::mk_list(pyadamas::t_str()),
                                      pyadamas::mk_list(pyadamas::t_str())})));
-        func("system", {pyadamas::t_str()}, pyadamas::t_int());
-        {
-            // makedirs(name, exist_ok=False)：exist_ok 的参数在降级阶段
-            // 手工装配（默认值没有 AST 节点可用）。
-            auto f = std::make_shared<pyadamas::FuncInfo>();
-            f->name = "os.makedirs";
-            pyadamas::Param p;
-            p.name = "name";
-            p.ty = pyadamas::t_str();
-            f->pos.push_back(std::move(p));
-            pyadamas::Param q;
-            q.name = "exist_ok";
-            q.ty = pyadamas::t_bool();
-            q.has_default = true;
-            f->pos.push_back(std::move(q));
-            f->ret = pyadamas::t_none();
-            f->ret_known = true;
-            func_with("makedirs", f);
-        }
     } else if (name == "subprocess") {
         auto f = std::make_shared<pyadamas::FuncInfo>();
         f->name = "run";

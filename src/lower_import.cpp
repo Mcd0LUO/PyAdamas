@@ -181,23 +181,8 @@ std::optional<RtFn> Lowerer::native_fn(const std::string& module, const std::str
         if (member == "sample") return RtFn::RandSample;
         if (member == "choices") return RtFn::RandChoices;
     } else if (module == "os") {
-        if (member == "mkdir") return RtFn::OsMkdir;
-        if (member == "rmdir") return RtFn::OsRmdir;
-        if (member == "remove") return RtFn::OsRemove;
-        if (member == "unlink") return RtFn::OsRemove;
-        if (member == "close") return RtFn::OsClose;
-        if (member == "rename") return RtFn::OsRename;
-        if (member == "getcwd") return RtFn::OsGetcwd;
-        if (member == "cpu_count") return RtFn::OsCpuCount;
-        if (member == "listdir") return RtFn::OsListdir;
-        if (member == "getenv") return RtFn::OsGetenv;
-        if (member == "getpid") return RtFn::OsGetpid;
-        if (member == "chdir") return RtFn::OsChdir;
-        if (member == "chmod") return RtFn::OsChmod;
-        if (member == "access") return RtFn::OsAccess;
-        if (member == "makedirs") return RtFn::OsMakedirs;
+        // 其余 os 成员已迁到 stdlib/sigs/os.pysig；walk 仍在硬编码。
         if (member == "walk") return RtFn::OsWalk;
-        if (member == "system") return RtFn::OsSystem;
     } else if (module == "subprocess") {
         if (member == "run") return RtFn::SubprocessRun;
         // 只为 from-import 登记别名；真正降级走 lower_popen。
@@ -308,42 +293,13 @@ bool Lowerer::builtin_value(const std::string& module, const std::string& member
             return true;
         }
     }
+    // os 的标量常量已迁到 stdlib/sigs/os.pysig；environ 是运行期 dict，
+    // 无法声明，保留在此。
     if (module == "os") {
         if (member == "environ") {
             ty = mk_dict(t_str(), t_str());
             out = call_runtime(RtFn::OsEnviron, ty, {});
             push_temp(out);
-            return true;
-        }
-        if (member == "sep") {
-            out = const_str("/");
-            ty = t_str();
-            return true;
-        }
-        if (member == "linesep") {
-            out = const_str("\n");
-            ty = t_str();
-            return true;
-        }
-        // access() 的模式位（POSIX 取值）
-        if (member == "F_OK") {
-            out = const_int(0);
-            ty = t_int();
-            return true;
-        }
-        if (member == "X_OK") {
-            out = const_int(1);
-            ty = t_int();
-            return true;
-        }
-        if (member == "W_OK") {
-            out = const_int(2);
-            ty = t_int();
-            return true;
-        }
-        if (member == "R_OK") {
-            out = const_int(4);
-            ty = t_int();
             return true;
         }
     }
