@@ -3,6 +3,7 @@
 // 折叠/DCE 见 opt_fold.cpp，内联与直接调用见 opt_inline.cpp，
 // LICM 与下标版本化见 opt_loop.cpp；这里只按顺序调度。
 #include "opt_detail.h"
+#include "opt_stats.h"
 
 namespace pyadamas {
 
@@ -224,92 +225,130 @@ void optimize_ir(IRModule& m, int opt_level, int loop_opt, bool inline_opt) {
     }
     };
 
-    fold_all();
+    // 统计：pass 前后按函数取 IR 指纹（仅 PYADAMAS_OPT_STATS 开启时）。
+    auto fold_stats = [&]() {
+        if (!opt_stats_on()) {
+            fold_all();
+            return;
+        }
+        std::vector<uint64_t> before;
+        before.reserve(m.funcs.size());
+        for (auto& fptr : m.funcs) before.push_back(opt_fp(*fptr));
+        fold_all();
+        for (size_t i = 0; i < m.funcs.size(); ++i)
+            opt_stats_observe("fold_dce", opt_fp(*m.funcs[i]) != before[i]);
+    };
+
+    fold_stats();
 
     // 再内联静态小函数，然后把剩余静态调用改成直接调用。
     auto gfunc = collect_static_func_globals(m);
     auto recursive = recursive_functions(m, gfunc);
     for (size_t i = 0; i < m.funcs.size(); ++i)
-        inline_calls_in_function(m, *m.funcs[i], static_cast<int>(i), gfunc, recursive,
-                                 inline_opt);
-    for (auto& fptr : m.funcs) rewrite_direct_calls(m, *fptr, gfunc);
+        opt_stats_run("inline#1", *m.funcs[i], [&] {
+            inline_calls_in_function(m, *m.funcs[i], static_cast<int>(i), gfunc, recursive,
+                                     inline_opt);
+        });
+    for (auto& fptr : m.funcs)
+        opt_stats_run("rewrite_direct_calls", *fptr, [&] { rewrite_direct_calls(m, *fptr, gfunc); });
     // 直接化新产生的 call.direct 再给一轮内联机会：静态可解析的闭包调用
     // 现在也是直接下标了。调用图没变（只是边的种类变了），复用 recursive。
     for (size_t i = 0; i < m.funcs.size(); ++i)
-        inline_calls_in_function(m, *m.funcs[i], static_cast<int>(i), gfunc, recursive,
-                                 inline_opt);
+        opt_stats_run("inline#2", *m.funcs[i], [&] {
+            inline_calls_in_function(m, *m.funcs[i], static_cast<int>(i), gfunc, recursive,
+                                     inline_opt);
+        });
 
     // INLINE_OPT P3：纯标量自递归单层展开（fib 形态）。放在两轮常规内联
     // 之后、LICM 之前：展开只此一遍，克隆体里的自调用保留为 call，不会再
     // 次命中（常规内联对递归 callee 本就跳过）。
     if (inline_opt) {
         for (size_t i = 0; i < m.funcs.size(); ++i)
-            self_unroll_function(m, *m.funcs[i], static_cast<int>(i));
+            opt_stats_run("self_unroll", *m.funcs[i], [&] {
+                self_unroll_function(m, *m.funcs[i], static_cast<int>(i));
+            });
     }
 
     // 内联/直接化后的 CFG 再做循环不变量外提。
-    for (auto& fptr : m.funcs) licm_function(*fptr, m.globals.size());
+    for (auto& fptr : m.funcs)
+        opt_stats_run("licm", *fptr, [&] { licm_function(*fptr, m.globals.size()); });
 
     // 短路布尔值经临时槽往返的形态：转发 + 分支线程化，让 cmp+branch 融合。
-    for (auto& fptr : m.funcs) forward_slot_loads(*fptr);
+    for (auto& fptr : m.funcs)
+        opt_stats_run("forward_slot_loads#1", *fptr, [&] { forward_slot_loads(*fptr); });
 
     // 全局赋值后立即读回（模块级循环变量当 self 等）：转发掉 load.global。
-    for (auto& fptr : m.funcs) forward_global_loads(*fptr);
+    for (auto& fptr : m.funcs)
+        opt_stats_run("forward_global_loads", *fptr, [&] { forward_global_loads(*fptr); });
 
     // 字典计数器模式融合：`d[k] = d.get(k, def) + delta` 一次搞定。
     // 放在内联之后（内联可能带进新形态）、CSE 之前。
-    for (auto& fptr : m.funcs) fuse_dict_bump(*fptr);
+    for (auto& fptr : m.funcs)
+        opt_stats_run("fuse_dict_bump", *fptr, [&] { fuse_dict_bump(*fptr); });
 
     // contains+get 双查找融合：一次查找，found 进寄存器、值经帧槽。
     // 放在内联之后（形态可能来自内联体）、bump 之后（互不重叠）。
-    for (auto& fptr : m.funcs) fuse_dict_tryget(*fptr);
+    for (auto& fptr : m.funcs)
+        opt_stats_run("fuse_dict_tryget", *fptr, [&] { fuse_dict_tryget(*fptr); });
 
     // 简单菱形 if-conversion：`if cond: acc += 1` 压成单块（向量化器要求单块循环体；
     // 实测 sieve 计数循环等 5 个基准的第一道门就是「体块以 Branch 结尾」）。放在全局
     // 寄存器化之前：先简化 CFG，再让提升/promote 看到单块体。
-    for (auto& fptr : m.funcs) if_convert_accumulators(*fptr);
+    for (auto& fptr : m.funcs)
+        opt_stats_run("if_convert_accumulators#1", *fptr, [&] { if_convert_accumulators(*fptr); });
 
     // 循环内全局变量寄存器化：无调用的循环里把全局缓存到局部槽，
     // 循环出口写回。实测全局访问比局部慢 8.7 倍。
-    for (auto& fptr : m.funcs) promote_globals_in_loops(*fptr, m.globals);
+    for (auto& fptr : m.funcs)
+        opt_stats_run("promote_globals_in_loops", *fptr, [&] { promote_globals_in_loops(*fptr, m.globals); });
 
     // 全局提升把模块级累加器变成了槽 —— 之前因「累加器是全局」而被 if-conversion
     // 拒掉的简单菱形，此刻才满足「槽累加器 +-1」判据。再跑一遍（判据/变换完全
     // 相同，纯结构），让 while i<N: if flags[i]==1: count+=1; i+=1 的循环体变单块，
     // 向量化器的「单块直线体」要求才可能满足。
-    for (auto& fptr : m.funcs) if_convert_accumulators(*fptr);
+    for (auto& fptr : m.funcs)
+        opt_stats_run("if_convert_accumulators#2", *fptr, [&] { if_convert_accumulators(*fptr); });
 
     // 循环内不变量的检查型下标：入口检一次边界，通过则走无检查的循环副本。
-    for (auto& fptr : m.funcs) version_bounds_function(*fptr);
+    for (auto& fptr : m.funcs)
+        opt_stats_run("version_bounds_function", *fptr, [&] { version_bounds_function(*fptr); });
 
     // 最后做循环旋转：体块回边改走条件 latch，消掉每轮的无条件跳转。
-    for (auto& fptr : m.funcs) rotate_loops_function(*fptr);
+    for (auto& fptr : m.funcs)
+        opt_stats_run("rotate_loops_function", *fptr, [&] { rotate_loops_function(*fptr); });
 
     // 旋转后 CFG 变了，再跑一次槽位转发，收掉新的 load+branch 形态。
-    for (auto& fptr : m.funcs) forward_slot_loads(*fptr);
+    for (auto& fptr : m.funcs)
+        opt_stats_run("forward_slot_loads#2", *fptr, [&] { forward_slot_loads(*fptr); });
 
     // 跨块 CSE：条件块算过的纯表达式（如循环条件里的 zr*zr）在体块里复用。
-    for (auto& fptr : m.funcs) cse_function(*fptr);
+    for (auto& fptr : m.funcs)
+        opt_stats_run("cse#1", *fptr, [&] { cse_function(*fptr); });
 
     // 整数循环优化（PYADAMAS_LOOP_OPT 门控，默认 0 全关，flag-off 不进入）。
     // 顺序：去重 → CSE 收合并后暴露的公共表达式 → 线程化 → 仿射 BCE。
     if (loop_opt & 4) {
-        for (auto& fptr : m.funcs) dedup_block_loads(*fptr);
-        for (auto& fptr : m.funcs) cse_function(*fptr);
+        for (auto& fptr : m.funcs)
+            opt_stats_run("dedup_block_loads", *fptr, [&] { dedup_block_loads(*fptr); });
+        for (auto& fptr : m.funcs)
+            opt_stats_run("cse#2", *fptr, [&] { cse_function(*fptr); });
     }
     if (loop_opt & 1) {
-        for (auto& fptr : m.funcs) thread_jump_blocks(*fptr);
+        for (auto& fptr : m.funcs)
+            opt_stats_run("thread_jump_blocks", *fptr, [&] { thread_jump_blocks(*fptr); });
     }
     if (loop_opt & 2) {
-        for (auto& fptr : m.funcs) version_bounds_affine_function(*fptr);
+        for (auto& fptr : m.funcs)
+            opt_stats_run("version_bounds_affine", *fptr, [&] { version_bounds_affine_function(*fptr); });
     }
 
     // RC 冗余消除：降低器为异常安全发射的 temp/temp_take 有些会互相抵消。
     // 放在所有 CFG 变换之后 —— 前面的内联/旋转会产生新的相邻形态。
-    for (auto& fptr : m.funcs) rc_redundant_pairs(*fptr);
+    for (auto& fptr : m.funcs)
+        opt_stats_run("rc_redundant_pairs", *fptr, [&] { rc_redundant_pairs(*fptr); });
 
     // 内联带进来的实参常量继续折；顺带清掉失效的 load.global / func.addr。
-    fold_all();
+    fold_stats();
 }
 
 }  // namespace pyadamas

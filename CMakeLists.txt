@@ -113,6 +113,7 @@ set(PYADAMAS_SOURCES
   src/opt_loop.cpp
 src/opt_intloop.cpp
   src/opt_devirt.cpp
+  src/opt_stats.cpp
   src/codegen.cpp
   src/codegen_regalloc.cpp
   src/codegen_regalloc_scan.cpp

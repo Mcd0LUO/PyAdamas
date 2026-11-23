@@ -151,3 +151,43 @@ code generator yet` / 参数个数不符），于是拿不到其它方法的结�
 4. 同类历史：0.423 的 Cmp/bool 加进向量化分类要同步 `has_cmp` 强制 SSE2；0.431 的 EH
    语义要同步检查「LSDA 覆盖是代码位置」这类隐式假设（见 exc-semantics.md §2.1.1）。
 
+## 11. pass 有效性验证（tools/opt_stats.sh，0.433）
+
+优化 pass「写了但从未生效」是隐蔽故障：0.420 的 `promote_globals_in_loops` 判据只数
+`body→exit` 边，对标准循环恒不成立（pass 自写入以来从未跑过）；0.419 的 `fuse_dict_bump`
+判据过窄也靠同一手法发现。这个能力已固化成工具：
+
+```bash
+# 12 个基准 + tests/run/ 全量；两次编译（默认配置 / 全部门控打开）
+bash tools/opt_stats.sh
+# 只跑 12 个基准（快）
+bash tools/opt_stats.sh --quick
+```
+
+开关：`PYADAMAS_OPT_STATS=1`（默认关，关闭时驱动里只多一次静态 bool 分支，零成本）；
+输出（stderr，退出时汇总）：
+
+```
+pass=<name> changed=<n> funcs=<n>
+zero_hit=<name1>,<name2>
+```
+
+`changed` 是「pass 前后函数 IR 指纹变化」的函数次数；`funcs` 是 pass 被调用的函数次数。
+指纹覆盖块序列 + 每条指令的操作码/操作数/立即数/跳转目标/实参/类型，所以改 CFG、改操作数、
+改立即数都会算命中；**pass 只在驱动里包一层**（`src/opt.cpp` 的 `opt_stats_run`），不污染 pass 本身。
+
+**同名 pass 调用两次要分别计数**（`forward_slot_loads#1` / `#2`、`if_convert_accumulators#1` / `#2`、
+`inline#1` / `#2`、`cse#1` / `#2`）—— 历史上「第二次调用 0 命中」是插桩命名伪影，工具通过调用点后缀
+避免重名合并。
+
+**门控白名单**：`self_unroll` / `dedup_block_loads` / `cse#2` / `thread_jump_blocks` /
+`version_bounds_affine` 默认关是既定策略。脚本跑两阶段（默认 / `PYADAMAS_LOOP_OPT=7`
+`+ PYADAMAS_INLINE_OPT=1`），据此区分「门控关 → 未调用」与「判据坏 → 0 命中」；
+**0 命中且不在白名单里的 pass 高亮为 SUSPICIOUS，脚本退出码 1**。
+
+判读经验：
+
+1. 新加 pass 后先 `--quick` 看它是否在基准上有命中，再跑全量核对 tests 覆盖；
+2. 0 命中先查**调用点是否真的被走到**（门控/env 传参），再怀疑判据；
+3. 指纹命中 ≠ 语义正确：工具只回答「有没有变」，正确性仍靠 run_tests / difftest / ASan。
+
