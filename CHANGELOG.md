@@ -4,6 +4,60 @@
 
 早期阶段没有逐条留痕，按阶段归纳；0.4 之后逐条记录。
 
+## [0.436] - 2026-11-23
+
+> fix(tc)：**`except ... as e` 处理器里对外层变量赋值创建影子符号**（静默错值）；同时归档生成器审计结论
+> 与 CHANGELOG 版本号修复。
+>
+> ### 问题
+>
+> 最小复现：
+>
+> ```python
+> def boom():
+>     yield 1
+>     raise ValueError("gen-boom")
+>
+>
+> x = 0
+> try:
+>     for v in boom():
+>         pass
+> except ValueError as e:
+>     x = str(e)      # x 原本推断为 int
+> print(x)
+> # CPython: gen-boom
+> # 修复前 pyadamas: 101810657558720（int 槽里存 str 指针，按 int 打印）
+> ```
+>
+> 根因：`src/typecheck_stmt_forms.cpp` 的 `stmt_try` 为 `except ... as e` 建了临时子作用域放 `e`，
+> 但 handler 体里对**已有外层变量**的赋值在子作用域里新建了同名符号（外层符号保持旧类型 int）；
+> 降级按名字写同一个函数槽 → 槽里是 str 指针、类型仍是 int，`print` 按 int 解释。
+> 不是生成器专属：普通函数抛异常 + `except ... as e` 里改外层变量类型同样触发。
+>
+> ### 修法（`src/typecheck_stmt_forms.cpp` +13）
+>
+> handler 体结束后，把临时作用域里的绑定（除 `as e` 那个名字）**回写到父作用域**，恢复 Python 的
+> 「函数级作用域」语义；顺带让 handler 内对 `annotated` 变量的类型检查重新生效（以前被影子符号绕过，
+> `x: int` 变量在 handler 里赋 str 不会报错）。
+>
+> ### 验证
+>
+> - 复现从「打印一串数字」变为 `gen-boom`，普通函数变体同样修复；
+> - 新用例 `tests/run/501_generator_semantics.py`（含 expect，三档一致）：生成器基础/`yield from` 返回值/
+>   `send`/`throw`/`close`/finally（耗尽、break、del、close）/异常传播与内部捕获/与 for/sum/list/zip 组合/
+>   交替消费/late binding/生命周期，并钉住本修复；
+> - 闸门：**398 ran ok / difftest 376-0 / ASan 398 ran ok 0 报告 / check_size 通过**；
+>   12 基准 36/36 输出一致、指令数 ±0.03%（无回退）；SIMD matmul 10,126,808 / sn 94,637,470。
+>
+> ### 同批归档
+>
+> - **生成器/协程语义审计（不含 async）**：yield / yield from（含返回值透传）/ 生成器表达式 / send / throw /
+>   close / 异常传播 / finally（耗尽、break、del、close）/ for/sum/list/zip 组合 / 交替消费 / late binding /
+>   生命周期全部与 CPython 一致；已知偏差只有 print 逐段写出的顺序（文档化）。
+> - **CHANGELOG 重复版本号修复**：两条 `## [0.412]` 合并（错位的那条并入正确位置），并修正 0.186/0.187
+>   历史顺序倒置；全文件 **332 条版本号，唯一且严格单调递减**（首 0.435…、尾 …0.100）。
+
 ## [0.435] - 2026-11-23
 
 > feat(rt)：**unknown 域实例作 dict/set 键**——`__hash__` 分派打通；`hash()` 内置的 unknown 分支改为运行期分派。

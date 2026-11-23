@@ -821,8 +821,14 @@ VReg Lowerer::lower_asyncio(const std::string& member, Call& c) {
         in.imm = static_cast<int64_t>(RtFn::AsyncioRun);
         in.args = {coro};
         // 结果是协程的返回值，运行时按机器字返回（浮点也是位模式）。
-        VReg v = def(t_unknown(), std::move(in));
-        if (ir_is_heap(rt)) push_temp(v);
+        // 用 typecheck 推出的返回类型落 vreg：以前一律 t_unknown()，`None` 返回值
+        // 会被 print 当成 int 0（实测 `print(asyncio.run(noop()))` 输出 0 而非 None）。
+        // float 保持 unknown：运行期给的是 double 位模式，直接标 float 会按数值解释错。
+        TypePtr rty = rt;
+        if (!rty || rty->kind == TyKind::Unknown || rty->kind == TyKind::Float)
+            rty = t_unknown();
+        VReg v = def(rty, std::move(in));
+        if (ir_is_heap(rty)) push_temp(v);
         return v;
     }
 
