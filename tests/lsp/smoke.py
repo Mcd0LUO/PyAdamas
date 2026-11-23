@@ -8,6 +8,10 @@
   * didChange 全量替换 -> 诊断清空；didChange 增量 range 替换 -> 诊断重现/再清空
   * documentSymbol（class=5 / def=12 / 赋值=13）
   * hover（函数签名 / 形参 / 未知位置 null）
+  * completion（文档符号 / import 成员 / 关键字；前缀过滤）
+  * definition（跳到 def/class/赋值定义；未知符号 null）
+  * semanticTokens/full（非 ASCII 文档的 UTF-16 行列/长度编码）
+  * didChange debounce（连发两次只发布最终版本的诊断）
   * 非 ASCII 文档（Content-Length 按字节、精确读取）
   * 字符串 id 原样回显、坏 JSON 不崩
   * shutdown + exit 干净退出（rc=0）；未 shutdown 直接 exit（rc=1）
@@ -222,12 +226,22 @@ def test_initialize(c, uri_a):
         expect_eq(sync, 1, "textDocumentSync == 1")
     expect_eq(caps.get("hoverProvider"), True, "hoverProvider")
     expect_eq(caps.get("documentSymbolProvider"), True, "documentSymbolProvider")
+    expect_eq(caps.get("definitionProvider"), True, "definitionProvider")
+    comp = caps.get("completionProvider") or {}
+    expect(isinstance(comp, dict), "completionProvider is an object")
+    expect_eq(comp.get("triggerCharacters"), ["."], "completion triggerCharacters")
+    sem = caps.get("semanticTokensProvider") or {}
+    expect_eq(sem.get("full"), True, "semanticTokensProvider.full")
+    legend = sem.get("legend") or {}
+    expect_eq(legend.get("tokenTypes"),
+              ["class", "function", "variable", "keyword", "string", "number",
+               "comment", "parameter"], "semanticTokens legend tokenTypes")
     expect_eq((result.get("serverInfo") or {}).get("name"), "pya-lsp", "serverInfo.name")
 
 
 def test_initialized_and_unknown(c):
     c.notify("initialized", {})
-    c.send({"jsonrpc": "2.0", "id": 2, "method": "textDocument/definition", "params": {}})
+    c.send({"jsonrpc": "2.0", "id": 2, "method": "textDocument/rename", "params": {}})
     # initialized 是通知，不能有回包：下一条消息必须就是 id=2 的响应
     msg = c.recv()
     expect_eq(msg.get("id"), 2, "first frame after initialized is response id=2")
@@ -340,6 +354,259 @@ def test_hover(c, uri):
     expect_eq(res.get("id"), "str-id", "string id echoed")
 
 
+
+TEXT_FEATURES = (
+    "import math\n"
+    "\n"
+    "\n"
+    "def helper(n: int) -> int:\n"
+    "    return n\n"
+    "\n"
+    "\n"
+    "class Widget:\n"
+    "    pass\n"
+    "\n"
+    "\n"
+    "VALUE: int = 0\n"
+    "\n"
+    "\n"
+    "def use() -> int:\n"
+    "    return helper(VALUE)\n"
+    "    sq\n"
+)
+
+TEXT_TOKENS = (
+    "# 注释：中文 😀\n"
+    "class Point:\n"
+    "    pass\n"
+    "\n"
+    "name: str = \"中文 😀 ünïcode\"\n"
+    "count: int = 42\n"
+    "\n"
+    "def greet(who: str) -> str:\n"
+    "    return \"hi \" + who + str(Point)\n"
+    "def documented() -> None:\n"
+    '    """第一行\n'
+    "    中文 😀 第二行\n"
+    '    """\n'
+    "    pass\n"
+    "\n"
+    "hexval: int = 0xFF\n"
+)
+
+def utf16_len(s):
+    total = 0
+    for ch in s:
+        total += 2 if ord(ch) > 0xFFFF else 1
+    return total
+
+def decode_semantic_tokens(data):
+    # 标准 5 元组 -> [(line, start, length, type), ...]
+    out = []
+    line = 0
+    start = 0
+    i = 0
+    while i + 4 < len(data):
+        dl = data[i]
+        ds = data[i + 1]
+        ln = data[i + 2]
+        tt = data[i + 3]
+        if dl == 0:
+            start = start + ds
+        else:
+            line = line + dl
+            start = ds
+        out.append((line, start, ln, tt))
+        i += 5
+    return out
+
+def completion_labels(res):
+    result = res.get("result")
+    if isinstance(result, dict):
+        items = result.get("items") or []
+    else:
+        items = result or []
+    labels = []
+    for item in items:
+        labels.append(item.get("label"))
+    return labels, items
+
+def test_completion(c, uri):
+    c.notify("textDocument/didOpen", {"textDocument": {
+        "uri": uri, "languageId": "python", "version": 1, "text": TEXT_FEATURES}})
+    diag_params(c.notification("textDocument/publishDiagnostics"), uri)
+    # 前缀过滤：光标在 "helper" 中间 -> 只剩以 helper 开头的候选
+    t0 = time.monotonic()
+    res = c.request(300, "textDocument/completion", {
+        "textDocument": {"uri": uri}, "position": {"line": 15, "character": 17}})
+    elapsed = time.monotonic() - t0
+    print("    completion round-trip: %.3fs" % elapsed)
+    expect(elapsed < 1.0, "completion round-trip < 1s (got %.3fs)" % elapsed)
+    labels, items = completion_labels(res)
+    expect("helper" in labels, "completion includes document function (got %r)" % labels[:10])
+    expect(len(labels) > 0 and all(l.startswith("helper") for l in labels),
+           "completion prefix filter (got %r)" % labels[:10])
+    # import 成员 + 关键字：空前缀时三类都在
+    res2 = c.request(301, "textDocument/completion", {
+        "textDocument": {"uri": uri}, "position": {"line": 15, "character": 4}})
+    labels2, _ = completion_labels(res2)
+    expect("helper" in labels2, "completion empty prefix includes function")
+    expect("Widget" in labels2, "completion empty prefix includes class")
+    expect("VALUE" in labels2, "completion empty prefix includes variable")
+    expect("math" in labels2, "completion empty prefix includes imported module")
+    expect("sqrt" in labels2, "completion empty prefix includes module member")
+    expect("def" in labels2, "completion empty prefix includes keyword")
+    expect(len(labels2) <= 100, "completion limited to <=100 items (got %d)" % len(labels2))
+    # 前缀 "sq" -> sqrt，且不含 helper
+    res3 = c.request(302, "textDocument/completion", {
+        "textDocument": {"uri": uri}, "position": {"line": 16, "character": 6}})
+    labels3, _ = completion_labels(res3)
+    expect("sqrt" in labels3, "completion prefix 'sq' finds sqrt (got %r)" % labels3)
+    expect("helper" not in labels3, "completion prefix filters out non-matching")
+    # 候选带 kind/detail 字段
+    if items:
+        first = items[0]
+        expect("kind" in first, "completion item has kind")
+        expect("detail" in first, "completion item has detail")
+
+def def_location(res):
+    result = res.get("result")
+    if not isinstance(result, dict):
+        return None
+    rng = result.get("range") or {}
+    start = rng.get("start") or {}
+    return (result.get("uri"), start.get("line"), start.get("character"))
+
+def test_definition(c, uri):
+    # helper 调用点 -> def helper 行（0-based 3，character 4）
+    t0 = time.monotonic()
+    res = c.request(310, "textDocument/definition", {
+        "textDocument": {"uri": uri}, "position": {"line": 15, "character": 13}})
+    elapsed = time.monotonic() - t0
+    print("    definition round-trip: %.3fs" % elapsed)
+    expect(elapsed < 1.0, "definition round-trip < 1s (got %.3fs)" % elapsed)
+    loc = def_location(res)
+    expect(loc is not None, "definition on helper returns a Location")
+    if loc is not None:
+        expect_eq(loc[0], uri, "definition location uri")
+        expect_eq(loc[1], 3, "definition jumps to def helper line")
+        expect_eq(loc[2], 4, "definition column is name start")
+    # 形参 n -> 所在函数定义
+    res2 = c.request(311, "textDocument/definition", {
+        "textDocument": {"uri": uri}, "position": {"line": 4, "character": 11}})
+    loc2 = def_location(res2)
+    expect(loc2 is not None and loc2[1] == 3,
+           "definition on parameter jumps to enclosing def (got %r)" % (loc2,))
+    # 顶层赋值 VALUE 自身 -> 定义行
+    res3 = c.request(312, "textDocument/definition", {
+        "textDocument": {"uri": uri}, "position": {"line": 15, "character": 20}})
+    loc3 = def_location(res3)
+    expect(loc3 is not None and loc3[1] == 11, "definition on assignment (got %r)" % (loc3,))
+    # 找不到 -> null（合法的 LSP 结果）
+    res4 = c.request(313, "textDocument/definition", {
+        "textDocument": {"uri": uri}, "position": {"line": 0, "character": 2}})
+    expect_eq(res4.get("result"), None, "definition on unknown word is null")
+
+def test_semantic_tokens(c, uri):
+    c.notify("textDocument/didOpen", {"textDocument": {
+        "uri": uri, "languageId": "python", "version": 1, "text": TEXT_TOKENS}})
+    diag_params(c.notification("textDocument/publishDiagnostics"), uri)
+    t0 = time.monotonic()
+    res = c.request(320, "textDocument/semanticTokens/full", {
+        "textDocument": {"uri": uri}})
+    elapsed = time.monotonic() - t0
+    print("    semanticTokens round-trip: %.3fs" % elapsed)
+    expect(elapsed < 1.0, "semanticTokens round-trip < 1s (got %.3fs)" % elapsed)
+    result = res.get("result") or {}
+    data = result.get("data") or []
+    expect(len(data) > 0, "semanticTokens data non-empty")
+    expect(len(data) % 5 == 0, "semanticTokens 5-tuple encoding")
+    tokens = decode_semantic_tokens(data)
+    lines = TEXT_TOKENS.split("\n")
+
+    # 非 ASCII 关键断言：注释与字符串 token 的 UTF-16 长度（😀 占 2 个 unit）
+    expect((0, 0, utf16_len(lines[0]), 6) in tokens,
+           "comment token covers full unicode comment line (want len %d)" % utf16_len(lines[0]))
+    want_str_start = lines[4].index("\"")
+    want_str_len = utf16_len(lines[4][want_str_start:])
+    expect((4, want_str_start, want_str_len, 4) in tokens,
+           "string token UTF-16 length on non-ASCII line (want start %d len %d)"
+           % (want_str_start, want_str_len))
+    num_start = lines[5].index("42")
+    expect((5, num_start, 2, 5) in tokens, "number token")
+    expect((1, 0, 5, 3) in tokens, "class keyword token")
+    expect((1, len("class "), len("Point"), 0) in tokens, "class name token")
+    expect((7, 0, 3, 3) in tokens, "def keyword token")
+    expect((7, 4, len("greet"), 1) in tokens, "function name token")
+    expect((8, 4, 6, 3) in tokens, "return keyword token")
+    # 三引号跨行字符串：docstring 每行都是 string token
+    expect((9, 0, 3, 3) in tokens, "def keyword before docstring")
+    expect((9, 4, len("documented"), 1) in tokens, "documented function name token")
+    expect((10, 4, utf16_len(lines[10]) - 4, 4) in tokens,
+           "docstring first line string token (unicode)")
+    expect((11, 0, utf16_len(lines[11]), 4) in tokens,
+           "docstring middle line whole-line string token (unicode)")
+    expect((12, 4, 3, 4) in tokens, "docstring closing quotes token")
+    hex_start = lines[15].index("0xFF")
+    expect((15, hex_start, 4, 5) in tokens, "hex number token")
+    # 所有 token 都在 UTF-16 行范围内
+    ok_bounds = True
+    for (ln, st, length, tt) in tokens:
+        if ln < 0 or ln >= len(lines) or st < 0 or st + length > utf16_len(lines[ln]):
+            ok_bounds = False
+    expect(ok_bounds, "all semantic tokens fit inside their line (UTF-16)")
+
+def test_debounce(c, uri):
+    # 连发两次 didChange（中间不读回包）：服务器应合并，只发布最终版本的诊断。
+    c.notify("textDocument/didOpen", {"textDocument": {
+        "uri": uri, "languageId": "python", "version": 1, "text": TEXT_BAD}})
+    diag_params(c.notification("textDocument/publishDiagnostics"), uri)
+    t0 = time.monotonic()
+    c.notify("textDocument/didChange", {
+        "textDocument": {"uri": uri, "version": 2},
+        "contentChanges": [{"text": TEXT_FIXED}]})
+    c.notify("textDocument/didChange", {
+        "textDocument": {"uri": uri, "version": 3},
+        "contentChanges": [{"text": TEXT_BAD}]})
+    params = diag_params(c.notification("textDocument/publishDiagnostics"), uri)
+    elapsed = time.monotonic() - t0
+    print("    debounced publish after %.3fs" % elapsed)
+    expect_eq(params.get("version"), 3, "debounce publishes only final version")
+    expect(len(params.get("diagnostics") or []) >= 1,
+           "debounce final diagnostics reflect last change")
+    expect(elapsed < 1.5, "debounce window does not stall (<1.5s, got %.3fs)" % elapsed)
+    # 确认没有为 version 2 单独发布过（否则客户端会看到中间态闪一下）
+    stale = [m for m in c.pending
+             if m.get("method") == "textDocument/publishDiagnostics"
+             and (m.get("params") or {}).get("version") == 2]
+    expect(len(stale) == 0, "no intermediate diagnostics for version 2")
+    # 一次 didChange 仍按最终内容发布（v4 改回合法 -> 诊断清空）
+    c.notify("textDocument/didChange", {
+        "textDocument": {"uri": uri, "version": 4},
+        "contentChanges": [{"text": TEXT_FIXED}]})
+    params2 = diag_params(c.notification("textDocument/publishDiagnostics"), uri)
+    expect_eq(params2.get("version"), 4, "single didChange still publishes")
+    expect_eq(params2.get("diagnostics"), [], "single didChange clears diagnostics")
+    # debounce 窗口内到达的请求不能被窗口拖住：先发 didChange 再立刻发 hover，
+    # hover 必须在 <1s 内回包（诊断通知会被 Client 缓冲到 pending）。
+    c.notify("textDocument/didChange", {
+        "textDocument": {"uri": uri, "version": 5},
+        "contentChanges": [{"text": TEXT_FIXED + "\n"}]})
+    t1 = time.monotonic()
+    res_hover = c.request(770, "textDocument/hover", {
+        "textDocument": {"uri": uri}, "position": {"line": 0, "character": 5}})
+    hover_elapsed = time.monotonic() - t1
+    print("    request during debounce window answered in %.3fs" % hover_elapsed)
+    expect(res_hover.get("id") == 770, "request during debounce answered")
+    expect(hover_elapsed < 1.0,
+           "request not stalled by debounce window (got %.3fs)" % hover_elapsed)
+    # 队列里的请求处理完后，debounce 的诊断通知才到（版本 5）；消费掉它，
+    # 免得污染后续文档的通知断言。
+    diag5 = diag_params(c.notification("textDocument/publishDiagnostics"), uri)
+    expect_eq(diag5.get("version"), 5, "debounce publishes after queued request")
+    c.notify("textDocument/didClose", {"textDocument": {"uri": uri}})
+    diag_params(c.notification("textDocument/publishDiagnostics"), uri)
+
 def test_unicode(c, uri):
     c.notify("textDocument/didOpen", {"textDocument": {
         "uri": uri, "languageId": "python", "version": 1, "text": TEXT_UNICODE}})
@@ -414,6 +681,9 @@ def main():
     uri_a = "file:///tmp/pya-lsp-smoke-bad.py"
     uri_b = "file:///tmp/pya-lsp-smoke-symbols.py"
     uri_c = "file:///tmp/pya-lsp-smoke-unicode.py"
+    uri_d = "file:///tmp/pya-lsp-smoke-features.py"
+    uri_e = "file:///tmp/pya-lsp-smoke-tokens.py"
+    uri_f = "file:///tmp/pya-lsp-smoke-debounce.py"
 
     c = make_client(server, compiler)
     try:
@@ -436,6 +706,14 @@ def main():
         test_hover(c, uri_b)
         print("[7b] interactive latency (<1s per frame)")
         test_interactive_latency(c, uri_b)
+        print("[7c] completion (document symbols / import members / keywords)")
+        test_completion(c, uri_d)
+        print("[7d] definition (def/class/assignment, null when unknown)")
+        test_definition(c, uri_d)
+        print("[7e] semanticTokens/full (non-ASCII UTF-16 encoding)")
+        test_semantic_tokens(c, uri_e)
+        print("[7f] didChange debounce")
+        test_debounce(c, uri_f)
         print("[8] unicode framing")
         test_unicode(c, uri_c)
         print("[9] malformed JSON resilience")

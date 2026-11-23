@@ -1,11 +1,11 @@
 # 写 pya-lsp 时撞到的语言 / 运行时缺口（最小复现）
 
-环境：PyAdamas 仓库，编译器 build/lead/pyadamas（2026-11-23 15:28 构建，下文称「当前编译器」）。
-所有复现均在本机实测。标 **[仍存在]** 的是 15:28 版本仍然复现的，标 **[已修复]** 的仅供验收参考。
+环境：PyAdamas 仓库，编译器 build/lead/pyadamas（2026-11-23 19:xx 构建）。
+所有复现均在本机实测；**[已修复]** 标注修复的大致版本，**[仍存在]/[部分修复]** 是当前仍能复现的。
 
 ---
 
-## 1. [仍存在] 文本模式 sys.stdin 在管道上阻塞到 EOF，交互式 stdio 协议无法使用
+## 1. [已修复] 文本模式 sys.stdin 在管道上阻塞到 EOF
 
 ~~~python
 # repro_stdin.py
@@ -22,29 +22,26 @@ print("read(5) elapsed=%.3f data=%r" % (time.time() - t0, data))
 
 ~~~bash
 { printf 'Content-Length: 5\r\n'; sleep 2; } | ./repro_stdin
-# 期望：立即打印 elapsed≈0
-# 实际：readline elapsed≈2.0（sleep 结束 / EOF 才返回）；read(5) 同样阻塞
+# 旧：readline elapsed≈2.0（等 EOF）；新：elapsed≈0.00007
 ~~~
 
-根因（只读排查，未改代码）：runtime/rt_file.c 的 file_fill 用
-fread(raw + rn, 1, sizeof raw, fp)，sizeof raw = 8192。glibc 的 fread 会循环 read()
-直到凑满 8192 字节或 EOF；所以写端不关时，文本模式 read / readline / for line in
-全部卡住。文件输入或写端关闭时「碰巧」正常。
+**已修复**（0.447）：非普通文件的 file_fill 改成一次 read(2)，不再用 fread 凑 8192 字节；
+管道上「有多少拿多少」，EOF 才返回 0。实测 `(printf 'hello\n'; sleep 2) | prog` 从 2.0s 降到 0.00007s。
 
-影响：任何 LSP / JSON-RPC / 交互式 REPL 式的 stdio 协议都会死锁（客户端写完一帧等回包，
-服务器在等 8KB）。文档里写的 for line in sys.stdin: 在管道交互场景实际不可用。
+pya-lsp 仍然用 `open(0, "rb", 0)`（二进制、无缓冲）而不是文本模式 sys.stdin：
 
-修复建议：file_fill 改成一次 read(fileno(fp), raw, sizeof raw)（EINTR 重试），
-不要用 fread 的大块读；或给 stdin 提供 sys.stdin.buffer / 二进制读接口。
-注：二进制分支（open("/dev/stdin", "rb")）走 fread(chunk, 1, n)，n 字节到齐即返回，
-readline 走 fgetc（underflow 一次 read(2)）——这两条路径是好的，也是 pya-lsp 现在的 workaround。
+- LSP 帧是字节语义（Content-Length 是 UTF-8 字节数），二进制读不经过换行翻译；
+- 无缓冲读让 fd 可读性 == 是否有待处理字节，didChange debounce 的 fd 轮询才可靠
+  （有缓冲时下一帧可能已在 FILE 缓冲里，fd 却不可读）。
+
+所以「切回 sys.stdin」现在**可行但没必要**：文本模式能用，但二进制更稳、且是 debounce 的前提。
 
 ---
 
-## 2. [仍存在] 跨模块 class 的字段读 / 方法调用不可用
+## 2. [已修复] 跨模块 class 的字段读 / 方法调用
 
 ~~~python
-# a.py
+# xmod_a.py
 class Point:
     x: int
     y: int
@@ -56,32 +53,29 @@ class Point:
     def norm(self) -> int:
         return self.x * self.x + self.y * self.y
 
-
 def make(x: int, y: int) -> Point:
     return Point(x, y)
-~~~
 
-~~~python
-# b.py
-import a
+# xmod_b.py
+import xmod_a
 
 def main() -> None:
-    p: a.Point = a.make(3, 4)   # 跨模块构造 OK
-    print(p.x)                  # error: attribute access is only supported as a method call
-    print(p.norm())             # error: method 'norm' is not supported by the code generator yet
+    p: xmod_a.Point = xmod_a.make(3, 4)
+    print(p.x)
+    print(p.norm())
 
 main()
 ~~~
 
 ~~~bash
-pyadamas build b.py -o b
-# b.py:6:12: error: attribute access is only supported as a method call
-# b.py:7:17: error: method 'norm' is not supported by the code generator yet
-# 2 errors in code generation
+pyadamas run --rebuild -o xmod_b xmod_b.py && ./xmod_b
+# 3
+# 25
 ~~~
 
-workaround（pya-lsp 采用）：把跨模块 class 值当**不透明句柄**，只通过定义模块的函数访问
-（kind(v) / get(v, key) / at(v, i)），字段访问全部留在定义模块内。实测函数式 API 完全可用。
+**已修复**：跨模块 class 的字段读/写与方法调用都可用（本机实测输出 3 / 25）。
+pya-lsp 现在也直接用跨模块 class 做文档表/符号表（`Symbol` 等），不再需要「不透明句柄」workaround；
+minijson 的 JVal 包装层也已删除，值统一是动态 JSON。
 
 ---
 
@@ -114,7 +108,7 @@ self.inner.value 在方法内也正常。**当前不需要 workaround**。
 ## 4. [仍存在] 二进制模式 file.read(n) 返回 str 而不是 bytes（语义含糊）
 
 ~~~python
-f = open("/dev/stdin", "rb")
+f = open(0, "rb", 0)     # pya-lsp 现在的写法：fd 0 + 二进制 + 无缓冲
 chunk = f.read(5)       # 运行期拿到的是「按字节读的 str」，类型系统里也是 str
 # chunk: bytes = f.read(5)  -> error: annotated as 'bytes' but assigned 'str'
 ~~~
@@ -124,25 +118,31 @@ chunk = f.read(5)       # 运行期拿到的是「按字节读的 str」，类�
 
 ---
 
-## 5. [仍存在] json.parse 尚未落地，且 pyadamas check 不会报「模块没有这个属性」
+## 5. [部分修复] json.parse 已落地；但 pyadamas check 仍不校验模块属性
+
+动态 JSON 已落地（0.447）：`json.parse(text) -> unknown`、`json.stringify(v) -> str`，
+外加 get/get_or/has/type/as_dict/as_list/as_str/as_int/as_bool/len/keys。pya-lsp 的
+minijson.py 已改成这层的薄封装（543 行 -> 约 210 行），手写 parser/stringifier 删除。
+
+仍存在的坑：**check 不报「模块没有这个属性」，build 才报**：
 
 ~~~python
 import json
 
 def main() -> None:
-    v = json.parse('{"a": 1}')
-    print(v["a"])
+    x: int = json.nonexistent_attr(1)
+    print(x)
 
 main()
 ~~~
 
 ~~~bash
-pyadamas check t.py     # ok: t.py (... 3 statements ...)   <-- check 放行
-pyadamas build t.py     # t.py:4:19: error: module 'json' has no attribute 'parse'
+pyadamas check modattr.py   # ok: ... 3 statements ...     <-- check 放行
+pyadamas build modattr.py   # error: module 'json' has no attribute 'nonexistent_attr'
 ~~~
 
-踩坑：不能用 check 判断模块 API 是否存在，要 build/run。pya-lsp 因此先用手写
-tools/lsp/minijson.py；等 json.parse 落地后只需替换 minijson.parse 的实现（其余函数式访问层不变）。
+踩坑：不能用 check 判断模块 API 是否存在，要 build/run。pya-lsp 的诊断因此只能反映
+check 能发现的那类错误（类型/语法），模块成员错误要等到真正 build 才暴露。
 
 ---
 
@@ -160,3 +160,40 @@ $ echo $?
 15:28 的 build/lead 构建同一份源码正常。tools/lsp/build.sh 因此对每个候选编译器做
 「构建 + 空 stdin 自检」，自检失败就换下一个候选，避免把坏产物交给冒烟测试。
 （这条更像旧构建/运行时的 bug，不是语言特性缺口，但对「用编译器自己写工具」影响很直接。）
+
+## 7. [可用但有坑] asyncio.wait_readable 做 fd 轮询：没有 asyncio.TimeoutError
+
+pya-lsp 的 didChange debounce 需要「等下一帧，但最多 N 毫秒」，语言里没有 select/poll，
+但 asyncio 提供 `wait_readable(fd)`（协程）和 `wait_for(aw, timeout)`，可以在同步代码里用
+`asyncio.run(...)` 包一层当带超时的 poll 用：
+
+~~~python
+import asyncio
+
+async def _wait_readable_for(ms: int) -> bool:
+    try:
+        await asyncio.wait_for(asyncio.wait_readable(0), float(ms) / 1000.0)
+        return True
+    except TimeoutError:          # 注意：不是 asyncio.TimeoutError！
+        return False
+~~~
+
+坑：`asyncio.TimeoutError` 不存在（编译期报 module 'asyncio' has no attribute 'TimeoutError'），
+超时抛的是内置 `TimeoutError`（rt_async.c 的 timeout 注入）。
+另外每次 asyncio.run 会建/销毁一个事件循环，只能在低频路径（didChange）用。
+
+---
+
+## 8. [可用] 动态 JSON 与 unknown 注解的几个实用点
+
+- 函数参数/返回值可以直接标 `unknown`（typecheck_builtin 认 unknown/Any），
+  动态值在模块内传递不用包装类；跨模块也可以（minijson 的访问器就是 `-> unknown`）。
+- `dict[str, list[str]]` 这类「容器套容器」的模块级全局可以用（MODULE_MEMBERS 静态表）。
+- `json.get_or(d, key, json.null())` 是「取不到给默认值」的正规写法；`json.get` 缺失键抛异常，
+  做宽容访问器时要先 `json.type(v) == "dict"` 或改用 get_or。
+- `json.stringify` 对 str 参数直接给出带引号转义的 JSON 字面量（等价于旧手写 quote），
+  对 dict/list 给出紧凑 JSON；非 ASCII 默认 \\uXXXX，正好满足 LSP 回包纯 ASCII 的要求。
+- `open(0, "rb", 0)`：fd 0 + 二进制 + 无缓冲，pya 接受 buffering=0；
+  `len_bytes(s)` 是 O(1) 的 UTF-8 字节数（Content-Length 用）。
+
+---

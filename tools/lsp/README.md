@@ -7,12 +7,12 @@ pya-lsp 完全由 .pya 实现、由 pyadamas build 编译成原生可执行文�
 
 | 文件 | 说明 |
 |---|---|
-| main.py | LSP 服务器主体：stdio 传输、生命周期、文档同步、诊断、documentSymbol、hover |
-| minijson.py | 手写 JSON 解析/序列化（对象/数组/字符串/整数/浮点/bool/null + \uXXXX） |
+| main.py | LSP 服务器主体：stdio 传输、生命周期、文档同步、诊断、documentSymbol、hover、completion、definition、semanticTokens |
+| minijson.py | 动态 JSON 的**函数式访问薄层**：parse/stringify 走 runtime 的 json.parse / json.stringify，其余保留旧的宽容访问器语义（取不到返回 null、""、0、[]） |
 | build.sh | 构建脚本，输出 pya-lsp |
-| ../../tests/lsp/smoke.py | python3 冒烟测试（被测对象是编译出的 .pya 二进制） |
+| ../../tests/lsp/smoke.py | python3 冒烟测试（被测对象是编译出的 .pya 二进制），当前 **119 条断言** |
 | ../../tests/lsp/smoke.sh | 冒烟测试入口（缺二进制时先构建） |
-| LANGUAGE_GAPS.md | 写这个服务器撞到的语言/运行时缺口（含最小复现） |
+| LANGUAGE_GAPS.md | 写这个服务器撞到的语言/运行时缺口（含最小复现、现状） |
 
 ## 构建 / 运行
 
@@ -29,42 +29,108 @@ refcount increment on a freed object），第一个自检通过的胜出。
 - PYADAMAS：构建与诊断（pyadamas check）用的编译器路径；运行时若未设，用 argv[1]
   （不以 - 开头时）或 PATH 里的 pyadamas。
 - PYA_LSP_DEBUG=1：把调试日志打到 stderr。
+- PYA_LSP_DIAG_DEBOUNCE_MS：didChange 诊断合并窗口（毫秒，默认 300；0 = 关闭合并）。
 - PYA_LSP_SKIP_BUILD=1：tests/lsp/smoke.sh 跳过构建。
 
 ## 传输层
 
 - 读：Content-Length: N 头（其余头忽略）→ 空行 → 精确读 N 字节。
-  关键点：必须用二进制模式打开 stdin（open("/dev/stdin", "rb")）。
-  sys.stdin 是文本模式，runtime 的 file_fill 用 fread(..., 8192, ...)，
-  glibc 的 fread 会阻塞到填满 8192 字节或 EOF —— 管道上 LSP 客户端写完一帧等回包就死锁。
-  二进制分支是 fread(chunk, 1, n)，n 字节到齐即返回；readline 走 fgetc 也只在行尾返回。
+  **open(0, "rb", 0)**（二进制、无缓冲）；保底 /dev/stdin → sys.stdin。
+  - 为什么仍是二进制：LSP 帧是字节语义（Content-Length 是 UTF-8 字节数），二进制读
+    不经过换行翻译，也不依赖 stdin 的文本缓冲行为，跨平台/跨客户端更稳。
+    0.447 之后文本模式 stdin 的流式语义已修（read(n)/readline 不再等 8KB/EOF），
+    理论上 sys.stdin 也能用；保留二进制是为了**可靠性**，见 LANGUAGE_GAPS 第 1 条。
+  - 为什么无缓冲（buffering=0）：fd 层的可读性 == 是否还有待处理字节，
+    didChange debounce 用 asyncio.wait_readable 轮询 fd 判断「是否有下一帧」才可靠
+    （有缓冲时下一帧可能已躺在 FILE 缓冲里，fd 却不可读）。每帧只有几百字节，
+    逐字节 read(2) 的开销可忽略。
 - 写：同样的 Content-Length 帧，sys.stdout.write + flush()。
-  所有输出 JSON 都是纯 ASCII（非 ASCII 走 \uXXXX），长度用 UTF-8 字节数计算。
+  所有输出 JSON 都是纯 ASCII（非 ASCII 走 \\uXXXX），长度用 UTF-8 字节数计算（len_bytes）。
+- 帧读取是同步阻塞的；debounce 的「等下一帧」用带超时的 fd poll（asyncio.wait_readable +
+  wait_for），不消费数据、不额外线程。
+
+## JSON 层（minijson.py）
+
+0.447 起 runtime 有动态 JSON（json.parse / json.stringify / json.get / get_or / has /
+type / as_dict / as_list / as_str / as_int / as_bool / len / keys），minijson.py 原来
+543 行的手写 parser/stringifier 已删除，改成**约 210 行的薄封装**：
+
+- parse / stringify 直接调 json.*；
+- 访问器保留旧 JVal 版本的**宽容语义**（get 缺失键返回 null、as_str 非串返回 ""、
+  size 非容器返回 0、at 越界返回 null……），LSP 主程序调用点因此一行没改；
+- obj_set / arr_add 用于构造测试数据（原地改 dict/list）。
 
 ## 已实现的方法
 
 | 方法 | 说明 |
 |---|---|
-| initialize | 返回 capabilities（full sync / hover / documentSymbol）、serverInfo |
+| initialize | capabilities：full sync / hover / documentSymbol / completion(. 触发) / definition / semanticTokens(full) + legend |
 | initialized / exit | 通知，不回包；shutdown 后的 exit 退出码 0，否则 1 |
 | shutdown | 回 result: null，之后请求回 -32600 |
-| textDocument/didOpen / didChange / didClose | 内存文档表；didChange 支持全量与增量（range）替换 |
-| textDocument/publishDiagnostics | 通知：临时文件 + pyadamas check，解析 file:line:col: severity: msg，转 0-based |
+| textDocument/didOpen / didChange / didClose | 内存文档表；didChange 支持全量与增量（range）替换；**didChange 有 debounce**（见下） |
+| textDocument/publishDiagnostics | 通知：临时文件 + pyadamas check，解析 file:line:col: severity: msg，转 0-based；同一次突发输入只发布最终版本 |
 | textDocument/documentSymbol | 顶层 def/class/赋值（缩进敏感），SymbolKind 12/5/13 |
 | textDocument/hover | 标识符 -> 定义处签名/类型（函数、形参、class、标注变量），拿不到返回 null |
+| textDocument/completion | 三类候选：当前文档顶层符号、import 过的模块成员（静态表 + 模块名）、Python 关键字；光标前缀过滤，上限 100 条，返回 label/kind/detail |
+| textDocument/definition | 光标标识符 -> 定义位置：任意缩进的 def/async def/class、顶层赋值、形参（跳所在函数）；找不到返回 null |
+| textDocument/semanticTokens/full | 关键字/字符串/数字/注释/类名/函数名/变量；标准 5 元组 delta 编码，长度与列按 **UTF-16 code unit** |
 | 其他 | 请求回 -32601 MethodNotFound；通知静默忽略 |
+
+## completion 实现要点
+
+- 光标前缀：取当前行光标前的标识符片段（UTF-16 列 -> 码点下标），label.startswith(prefix)。
+- 候选来源与顺序：文档顶层符号（scan_symbols，函数/类/变量）→ import 过的模块
+  （模块名本身 + 静态成员表 MODULE_MEMBERS，覆盖 math/sys/os/json/re/collections/
+  itertools/functools/datetime/pathlib/time/subprocess/random/asyncio/base64/hashlib/logging/string
+  的常用成员）→ Python 关键字。同名候选去重，先到先得（文档符号优先）。
+- 不是作用域分析：局部变量/函数体成员/self. 后的类成员不会补；模块成员是静态表，
+  新模块需要往 MODULE_MEMBERS 里加。对编辑器体验够用，但不是语义精确的补全。
+
+## definition 实现要点
+
+- 只做**文档内**跳转：光标词 -> 扫全文件所有 def/async def/class（含方法）与顶层赋值；
+  形参命中时跳到所在函数定义（hover 用的是同一套参数解析）。
+- 没有 workspace 索引：跨文件符号（import 的名字）不跳转，返回 null（合法 LSP 行为）。
+
+## semanticTokens 实现要点
+
+- legend：["class","function","variable","keyword","string","number","comment","parameter"]
+  （tokenModifiers 为空）；类型索引必须与 initialize 里回给客户端的 legend 顺序一致。
+- **UTF-16 编码**：deltaStart 和 length 都按 UTF-16 code unit 计（BMP 外字符如 😀 占 2），
+  与 LSP 规范一致；冒烟测试用含「中文 + 😀（BMP 外，占 2 个 unit）」的字面量/注释/docstring 逐 token 校验长度与列。
+- token 化：# 到行尾是注释；普通引号字符串（含反斜杠转义）；三引号跨行字符串按行
+  继续（docstring 每行都是 string token，闭合行只覆盖引号本身）；数字（十进制/小数/
+  指数/0x 0b 0o 前缀）；标识符 -> 关键字/类名/函数名/变量。
+
+## didChange debounce（增量合并）
+
+LSP 是单线程读循环，没有 timer 线程。实现方式：
+
+1. didChange 到来后先把 contentChanges 全部应用到文档表；
+2. 在最多 PYA_LSP_DIAG_DEBOUNCE_MS（默认 300ms）的窗口里，用 asyncio.wait_readable(0)
+   带超时地轮询 stdin：如果紧接着还有 didChange，就一并吃掉（每来一帧重置窗口），
+   最终只为最后状态跑一次 pyadamas check 并发布一次 publishDiagnostics；
+3. 窗口内如果先到了**别的消息**（hover/请求等），把它放进 pending_bodies 队列，
+   立刻发布诊断、回到主循环处理该消息——请求不会被 debounce 窗口拖住；
+4. 客户端本来就把多次编辑合并成一帧 didChange 时，这里只是多等一个窗口就发布，无额外开销；
+   PYA_LSP_DIAG_DEBOUNCE_MS=0 可关闭合并（每帧立即诊断）。
+
+冒烟测试覆盖：连发两次 didChange（中间不读回包）只收到一次 publishDiagnostics，
+且版本/内容都是最后一次（没有中间态闪屏）。
 
 ## 已知限制
 
-- **依赖 /dev/stdin（Linux）**：传输层用 open("/dev/stdin", "rb") 绕开文本模式 stdin 的
-  阻塞 bug（见 LANGUAGE_GAPS.md 第 1 条）。将来 runtime 修好文本模式 stdin / 提供
-  sys.stdin.buffer 后，只需要改 main.py 的 open_stdin() 一处即可切回 sys.stdin。
-  非 Linux 平台没有 /dev/stdin 时会回退到 sys.stdin，但交互式管道场景会退化（等 8KB/EOF）。
-- **二进制 f.read(n) 返回 str 而不是 bytes**：类型系统里 f.read(n) 恒为 str，二进制模式只是
-  「按字节计数地读」；帧体是 UTF-8 所以能工作，但这是语义含糊点（LANGUAGE_GAPS.md 第 4 条）。
-- 诊断走临时文件（$TMPDIR 或 /tmp），不按真实文件目录解析相对 import。
-- 编译器诊断列号按码点处理；LSP 默认 UTF-16，非 BMP 字符在同行错误列上会有偏差。
-- documentSymbol 只扫顶层（class/def 的 range 覆盖整个块），不展开成员。
-- JSON 目前用手写 minijson.py（json.parse 尚未落地）。等它落地后只需替换
-  minijson.parse 的实现，kind/get/at 这层函数式 API 不变。
+- **补全不是作用域感知**：只补顶层符号 + import 模块成员 + 关键字；局部变量、类成员、
+  字典 key 不补。模块成员来自静态表，新增内置模块要维护 MODULE_MEMBERS。
+- **definition 只看文档内**：跨文件 import 的名字不跳转；没有 workspace/symbol 索引。
+- **semanticTokens 仍非完整解析器**：支持三引号跨行字符串，但 f-string 里的表达式不细分
+  成多个 token；变量一律 variable（形参暂未细分 parameter）；# 注释从行内任意位置到行尾。
+- **诊断仍走全量 pyadamas check**：只是把突发 didChange 合并成一次；增量编译/只查改动
+  区域还没做。诊断参数按码点计列（LSP 默认 UTF-16），非 BMP 字符同行错误列会有偏差。
+- **传输层依赖无缓冲 fd 0 的 poll**：非 POSIX 平台上 asyncio.wait_readable 不可用时，
+  stdin_ready() 会吞异常返回 False（退化成「不合并、每帧立即诊断」，仍然能用）。
+- **只支持全量文档同步**（change=1）：增量 range 在服务器端应用，但客户端配置仍是 Full。
+- 没有实现（留给下一轮）：textDocument/references、rename、formatting、codeAction、
+  completionItem/resolve、signatureHelp、workspace/symbol、workspace 级诊断、
+  semanticTokens/range 和 delta。
 - 冒烟测试含时序护栏：每帧往返必须 < 1s（防止 stdin 读语义回退成「等 EOF」）。

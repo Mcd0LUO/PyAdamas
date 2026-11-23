@@ -10,6 +10,7 @@
 
 import sys
 import os
+import asyncio
 import time
 import subprocess
 import minijson
@@ -135,16 +136,25 @@ def strip_trailing_colon(s: str) -> str:
 # ---------------- JSON-RPC 帧 ----------------
 
 def open_stdin() -> file:
-    # 关键：必须用「二进制模式」的独立 FILE* 读 stdin。
-    # sys.stdin 是文本模式，其 file_fill 用 fread(..., 8192, ...)：glibc 的 fread
-    # 会阻塞到填满 8192 字节或 EOF，管道上就死锁了（LSP 客户端写完一帧就等回包）。
-    # 二进制分支的 pa_file_read 是 fread(chunk, 1, n)，n 字节到齐就返回；
-    # readline 走 fgetc，也只等到行尾。实测可交互。
+    # 二进制帧读取：Content-Length 是字节数，帧体是 UTF-8，必须按字节读。
+    # 0.447 修好了流式语义（非普通文件上一次 read(2)，不凑满 8192）：
+    #   * 文本模式 sys.stdin 现在也能「有多少拿多少」，read(n) 按 UTF-8 字节
+    #     计（实测 "hélloXX" read(6) 得到 6 字节）；
+    #   * 但 LSP 帧是二进制语义，保留 open(0, "rb") 更稳（不依赖 stdin 的
+    #     文本缓冲/换行翻译），也避免某些客户端发 CRLF 边界时被翻译。
+    # buffering=0（无缓冲）：fd 层可读性 == 是否有待处理数据，为后续
+    # didChange 合并（poll 一秒内是否有下一帧）留出可靠依据；每帧只有
+    # 几百字节，逐字节 read(2) 的开销可以忽略。
+    # 保底：/dev/stdin（部分平台 fd 0 不可 open）→ sys.stdin（最后手段）。
     try:
-        return open("/dev/stdin", "rb")
+        return open(0, "rb", 0)
     except OSError:
-        log("cannot open /dev/stdin in binary mode, falling back to sys.stdin")
-        return sys.stdin
+        log("open(0, 'rb') failed, trying /dev/stdin")
+        try:
+            return open("/dev/stdin", "rb")
+        except OSError:
+            log("cannot open binary stdin, falling back to sys.stdin")
+            return sys.stdin
 
 def read_frame(inp: file) -> str:
     length: int = -1
@@ -249,13 +259,13 @@ def offset_at(text: str, line: int, character: int) -> int:
         i = i + 1
     return i
 
-def apply_change(text: str, change: minijson.JVal) -> str:
+def apply_change(text: str, change: unknown) -> str:
     new_text: str = minijson.get_str(change, "text")
     if not minijson.has(change, "range"):
         return new_text
-    rng: minijson.JVal = minijson.get_obj(change, "range")
-    st: minijson.JVal = minijson.get_obj(rng, "start")
-    en: minijson.JVal = minijson.get_obj(rng, "end")
+    rng: unknown = minijson.get_obj(change, "range")
+    st: unknown = minijson.get_obj(rng, "start")
+    en: unknown = minijson.get_obj(rng, "end")
     a: int = offset_at(text, minijson.get_int(st, "line"), minijson.get_int(st, "character"))
     b: int = offset_at(text, minijson.get_int(en, "line"), minijson.get_int(en, "character"))
     if b < a:
@@ -507,21 +517,483 @@ def find_def_line(text: str, word: str) -> str:
         i = i + 1
     return ""
 
+
+# ---------------- 自动补全：文档符号 + import 成员 + Python 关键字 ----------------
+
+# CompletionItemKind（LSP 规范）：1 Text / 2 Method / 3 Function / 5 Field /
+# 6 Variable / 7 Class / 9 Module / 14 Keyword。
+comp_kind_function: int = 3
+comp_kind_class: int = 7
+comp_kind_variable: int = 6
+comp_kind_module: int = 9
+comp_kind_keyword: int = 14
+
+PY_KEYWORDS: list[str] = [
+    "False", "None", "True", "and", "as", "assert", "async", "await", "break",
+    "class", "continue", "def", "del", "elif", "else", "except", "finally",
+    "for", "from", "global", "if", "import", "in", "is", "lambda", "nonlocal",
+    "not", "or", "pass", "raise", "return", "try", "while", "with", "yield",
+]
+
+# 内置模块的常用成员（补全候选用）。只列容易记错的常用面，不求全：
+# 未知模块/成员可以照常手写，补全只是辅助。
+MODULE_MEMBERS: dict[str, list[str]] = {
+    "math": ["sqrt", "floor", "ceil", "fabs", "sin", "cos", "tan", "asin", "acos",
+             "atan", "atan2", "log", "log2", "log10", "exp", "pow", "isnan",
+             "isinf", "isfinite", "gcd", "lcm", "factorial", "isqrt", "hypot",
+             "pi", "e", "tau", "inf", "nan", "fsum", "prod"],
+    "sys": ["argv", "exit", "maxsize", "stdin", "stdout", "stderr", "executable"],
+    "os": ["getcwd", "mkdir", "makedirs", "remove", "rename", "rmdir", "getenv",
+           "cpu_count", "path", "environ"],
+    "os.path": ["join", "basename", "dirname", "splitext", "exists", "isdir",
+                "isfile", "abspath"],
+    "json": ["parse", "stringify", "dumps", "loads", "get", "get_or", "has",
+             "path", "len", "keys", "type", "is_null", "as_str", "as_int",
+             "as_float", "as_bool", "as_dict", "as_list", "null", "bool"],
+    "re": ["compile", "search", "match", "fullmatch", "findall", "finditer",
+           "sub", "split", "escape", "I", "IGNORECASE", "M", "MULTILINE",
+           "S", "DOTALL"],
+    "collections": ["deque", "Counter", "OrderedDict", "defaultdict"],
+    "itertools": ["chain", "islice", "product", "permutations", "combinations",
+                  "repeat", "zip_longest", "accumulate"],
+    "functools": ["reduce", "wraps", "partial", "lru_cache"],
+    "datetime": ["datetime", "date", "timedelta"],
+    "pathlib": ["Path"],
+    "time": ["time", "monotonic", "perf_counter", "sleep"],
+    "subprocess": ["run", "Popen", "PIPE", "DEVNULL", "STDOUT"],
+    "random": ["random", "seed", "randint", "uniform", "choice", "shuffle",
+               "randrange", "getrandbits", "gauss"],
+    "asyncio": ["run", "sleep", "gather", "create_task", "wait_for",
+                "wait_readable", "Future", "Event", "Lock", "Queue"],
+    "base64": ["b64encode", "b64decode", "urlsafe_b64encode",
+               "urlsafe_b64decode"],
+    "hashlib": ["sha256", "md5", "new"],
+    "logging": ["getLogger", "basicConfig", "DEBUG", "INFO", "WARNING",
+                "ERROR", "CRITICAL"],
+    "string": ["ascii_letters", "ascii_lowercase", "ascii_uppercase", "digits",
+               "punctuation"],
+}
+
+def list_has(xs: list[str], s: str) -> bool:
+    i: int = 0
+    while i < len(xs):
+        if xs[i] == s:
+            return True
+        i = i + 1
+    return False
+
+def is_py_keyword(w: str) -> bool:
+    return list_has(PY_KEYWORDS, w)
+
+def add_candidate(labels: list[str], kinds: list[int], details: list[str],
+                  label: str, kind: int, detail: str) -> None:
+    if label == "" or list_has(labels, label):
+        return
+    labels.append(label)
+    kinds.append(kind)
+    details.append(detail)
+
+def symbol_detail(lines: list[str], s: Symbol) -> str:
+    if s.line < 0 or s.line >= len(lines):
+        return ""
+    raw: str = lines[s.line].strip()
+    if s.kind == 12 or s.kind == 5:
+        return truncate(strip_trailing_colon(raw), 120)
+    return truncate(raw, 120)
+
+
+def collect_completions(text: str, line: int, character: int) -> str:
+    lines: list[str] = text.split("\n")
+    prefix: str = ""
+    if line >= 0 and line < len(lines):
+        raw_line: str = lines[line]
+        idx: int = cp_index_at(raw_line, character)
+        start: int = idx
+        while start > 0 and is_ident_char(raw_line[start - 1]):
+            start = start - 1
+        prefix = raw_line[start:idx]
+    labels: list[str] = []
+    kinds: list[int] = []
+    details: list[str] = []
+    # 1) 当前文档的顶层符号
+    syms: list[Symbol] = scan_symbols(text)
+    i: int = 0
+    while i < len(syms):
+        s: Symbol = syms[i]
+        if s.kind == 12:
+            add_candidate(labels, kinds, details, s.name, comp_kind_function,
+                          symbol_detail(lines, s))
+        elif s.kind == 5:
+            add_candidate(labels, kinds, details, s.name, comp_kind_class,
+                          symbol_detail(lines, s))
+        else:
+            add_candidate(labels, kinds, details, s.name, comp_kind_variable,
+                          symbol_detail(lines, s))
+        i = i + 1
+    # 2) import 过的模块成员 / from-import 的名字
+    i = 0
+    while i < len(lines):
+        stripped: str = lines[i].strip()
+        if stripped.startswith("import "):
+            rest: str = stripped[len("import "):].strip()
+            mods: list[str] = rest.split(",")
+            k: int = 0
+            while k < len(mods):
+                mod: str = mods[k].strip()
+                aspos: int = mod.find(" as ")
+                if aspos >= 0:
+                    mod = mod[:aspos].strip()
+                if mod != "":
+                    # 模块名本身也是候选（写 \`math.\` 之前先补模块名）
+                    add_candidate(labels, kinds, details, mod, comp_kind_module,
+                                  "module")
+                if mod in MODULE_MEMBERS:
+                    members: list[str] = MODULE_MEMBERS[mod]
+                    m: int = 0
+                    while m < len(members):
+                        add_candidate(labels, kinds, details, members[m],
+                                      comp_kind_module, "import " + mod)
+                        m = m + 1
+                k = k + 1
+        elif stripped.startswith("from "):
+            rest2: str = stripped[len("from "):].strip()
+            ipos: int = rest2.find(" import ")
+            if ipos >= 0:
+                mod2: str = rest2[:ipos].strip()
+                names: str = rest2[ipos + len(" import "):].strip()
+                parts: list[str] = names.split(",")
+                k2: int = 0
+                while k2 < len(parts):
+                    nm: str = parts[k2].strip()
+                    aspos2: int = nm.find(" as ")
+                    if aspos2 >= 0:
+                        nm = nm[:aspos2].strip()
+                    if nm != "*" and nm != "" and not nm.startswith("("):
+                        add_candidate(labels, kinds, details, nm,
+                                      comp_kind_module,
+                                      "from " + mod2 + " import")
+                    k2 = k2 + 1
+                if mod2 in MODULE_MEMBERS:
+                    # 允许「from math import <tab>」直接给模块成员
+                    members2: list[str] = MODULE_MEMBERS[mod2]
+                    m2: int = 0
+                    while m2 < len(members2):
+                        add_candidate(labels, kinds, details, members2[m2],
+                                      comp_kind_module, "from " + mod2)
+                        m2 = m2 + 1
+        i = i + 1
+    # 3) Python 关键字
+    i = 0
+    while i < len(PY_KEYWORDS):
+        add_candidate(labels, kinds, details, PY_KEYWORDS[i], comp_kind_keyword,
+                      "keyword")
+        i = i + 1
+    # 4) 前缀过滤 + 上限 100
+    items: list[str] = []
+    i = 0
+    while i < len(labels) and len(items) < 100:
+        if labels[i].startswith(prefix):
+            item: str = ('{"label":' + minijson.quote(labels[i]) +
+                         ',"kind":' + str(kinds[i]) +
+                         ',"detail":' + minijson.quote(details[i]) + '}')
+            items.append(item)
+        i = i + 1
+    log("completion prefix=" + prefix + " items=" + str(len(items)))
+    return "[" + ",".join(items) + "]"
+
+def handle_completion(id_text: str, params: unknown) -> None:
+    uri: str = uri_of(params)
+    pos: unknown = minijson.get_obj(params, "position")
+    line: int = minijson.get_int(pos, "line")
+    character: int = minijson.get_int(pos, "character")
+    idx: int = doc_index(uri)
+    if idx < 0:
+        send_frame(rpc_result(id_text, "[]"))
+        return
+    send_frame(rpc_result(id_text,
+                          collect_completions(doc_texts[idx], line, character)))
+
+# ---------------- 跳转定义：标识符 -> 定义位置 ----------------
+
+def leading_ws(raw: str) -> int:
+    i: int = 0
+    while i < len(raw) and (raw[i] == " " or raw[i] == "\t"):
+        i = i + 1
+    return i
+
+def find_def_location(text: str, word: str) -> list[int]:
+    # 返回 [line, character]（UTF-16 列，标识符都是 ASCII 所以等于码点数），
+    # 找不到返回 []。覆盖：任意缩进的 def/async def/class/方法、顶层赋值、
+    # 以及「光标在形参上 -> 跳到所在函数定义」。
+    lines: list[str] = text.split("\n")
+    i: int = 0
+    while i < len(lines):
+        raw: str = lines[i]
+        indent: int = leading_ws(raw)
+        stripped: str = raw[indent:]
+        # 形参命中：先匹配函数名，再匹配形参名（跳函数定义）
+        if stripped.startswith("async def ") or stripped.startswith("def "):
+            off: int = len("async def ")
+            if not stripped.startswith("async def "):
+                off = len("def ")
+            fname: str = read_ident(stripped, off)
+            sig: str = strip_trailing_colon(stripped)
+            if fname == word:
+                return [i, indent + off]
+            if is_param(params_text(sig), word) and fname != "":
+                return [i, indent + off]
+        elif stripped.startswith("class "):
+            cname: str = read_ident(stripped, len("class "))
+            if cname == word:
+                return [i, indent + len("class ")]
+        elif indent == 0:
+            nm: str = read_ident(stripped, 0)
+            if nm == word:
+                pos: int = first_non_space(stripped, len(nm))
+                if pos < len(stripped) and (stripped[pos] == ":" or stripped[pos] == "="):
+                    return [i, 0]
+        i = i + 1
+    return []
+
+def location_json(uri: str, line: int, character: int, length: int) -> str:
+    return ('{"uri":' + minijson.quote(uri) + ',"range":' +
+            range_json(line, character, line, character + length) + '}')
+
+def handle_definition(id_text: str, params: unknown) -> None:
+    uri: str = uri_of(params)
+    pos: unknown = minijson.get_obj(params, "position")
+    line: int = minijson.get_int(pos, "line")
+    character: int = minijson.get_int(pos, "character")
+    idx: int = doc_index(uri)
+    if idx < 0:
+        send_frame(rpc_result(id_text, "null"))
+        return
+    text: str = doc_texts[idx]
+    word: str = word_at(text, line, character)
+    if word == "":
+        send_frame(rpc_result(id_text, "null"))
+        return
+    loc: list[int] = find_def_location(text, word)
+    if len(loc) < 2:
+        send_frame(rpc_result(id_text, "null"))
+        return
+    send_frame(rpc_result(id_text, location_json(uri, loc[0], loc[1], len(word))))
+
+# ---------------- 语义高亮：semanticTokens/full ----------------
+#
+# legend 顺序决定 tokenType 索引（initialize 里回给客户端同一份）。
+# 只做单行 token：注释到行尾、普通引号字符串（含转义）、数字、关键字、
+# 类名/函数名/其它标识符。三引号跨行字符串按行内字符串近似（README 说明）。
+TOKEN_CLASS: int = 0
+TOKEN_FUNCTION: int = 1
+TOKEN_VARIABLE: int = 2
+TOKEN_KEYWORD: int = 3
+TOKEN_STRING: int = 4
+TOKEN_NUMBER: int = 5
+TOKEN_COMMENT: int = 6
+TOKEN_PARAMETER: int = 7
+
+TOKEN_TYPES: list[str] = ["class", "function", "variable", "keyword", "string",
+                          "number", "comment", "parameter"]
+
+def u16_prefix_len(s: str, idx: int) -> int:
+    # 码点下标 -> UTF-16 code unit 数（LSP position 的口径）。
+    units: int = 0
+    i: int = 0
+    while i < idx and i < len(s):
+        units = units + utf16_units(s[i])
+        i = i + 1
+    return units
+
+def is_digit_char(c: str) -> bool:
+    return c >= "0" and c <= "9"
+
+class TokenEmitter:
+    data: list[str]
+    prev_line: int
+    prev_start: int
+
+    def __init__(self) -> None:
+        self.data = []
+        self.prev_line = 0
+        self.prev_start = 0
+
+    def emit(self, line: int, raw: str, start: int, end: int, ttype: int) -> None:
+        if end <= start or start < 0 or end > len(raw):
+            return
+        start_u16: int = u16_prefix_len(raw, start)
+        end_u16: int = u16_prefix_len(raw, end)
+        length: int = end_u16 - start_u16
+        if length <= 0:
+            return
+        delta_line: int = line - self.prev_line
+        if delta_line == 0:
+            delta_start: int = start_u16 - self.prev_start
+        else:
+            delta_start = start_u16
+        self.data.append(str(delta_line) + "," + str(delta_start) + "," +
+                         str(length) + "," + str(ttype) + ",0")
+        self.prev_line = line
+        self.prev_start = start_u16
+
+def class_name_set(text: str) -> list[str]:
+    names: list[str] = []
+    syms: list[Symbol] = scan_symbols(text)
+    i: int = 0
+    while i < len(syms):
+        if syms[i].kind == 5:
+            names.append(syms[i].name)
+        i = i + 1
+    return names
+
+def func_name_set(text: str) -> list[str]:
+    names: list[str] = []
+    syms: list[Symbol] = scan_symbols(text)
+    i: int = 0
+    while i < len(syms):
+        if syms[i].kind == 12:
+            names.append(syms[i].name)
+        i = i + 1
+    return names
+
+def scan_ident_end(s: str, start: int) -> int:
+    i: int = start
+    while i < len(s) and is_ident_char(s[i]):
+        i = i + 1
+    return i
+
+def semantic_tokens(text: str) -> str:
+    lines: list[str] = text.split("\n")
+    classes: list[str] = class_name_set(text)
+    funcs: list[str] = func_name_set(text)
+    emitter: TokenEmitter = TokenEmitter()
+    line_no: int = 0
+    triple: str = ""   # 跨行三引号字符串的状态（"\"\"\"" / "'''"）
+    while line_no < len(lines):
+        raw: str = lines[line_no]
+        i: int = 0
+        if triple != "":
+            # 上一行还没闭合的三引号字符串：找本行内的闭合位置
+            close: int = raw.find(triple)
+            if close < 0:
+                emitter.emit(line_no, raw, 0, len(raw), TOKEN_STRING)
+                line_no = line_no + 1
+                continue
+            emitter.emit(line_no, raw, close, close + 3, TOKEN_STRING)
+            i = close + 3
+            triple = ""
+        while i < len(raw):
+            c: str = raw[i]
+            if c == "#":
+                emitter.emit(line_no, raw, i, len(raw), TOKEN_COMMENT)
+                break
+            if raw[i:i + 3] == '"""' or raw[i:i + 3] == "'''":
+                q3: str = raw[i:i + 3]
+                close2: int = raw.find(q3, i + 3)
+                if close2 < 0:
+                    emitter.emit(line_no, raw, i, len(raw), TOKEN_STRING)
+                    triple = q3
+                    break
+                emitter.emit(line_no, raw, i, close2 + 3, TOKEN_STRING)
+                i = close2 + 3
+                continue
+            if c == '"' or c == "'":
+                q: str = c
+                j: int = i + 1
+                closed: bool = False
+                while j < len(raw):
+                    if raw[j] == "\\":
+                        j = j + 2
+                        continue
+                    if raw[j] == q:
+                        j = j + 1
+                        closed = True
+                        break
+                    j = j + 1
+                if j > len(raw):
+                    j = len(raw)
+                emitter.emit(line_no, raw, i, j, TOKEN_STRING)
+                i = j
+                continue
+            if is_digit_char(c) and (i == 0 or not is_ident_char(raw[i - 1])):
+                j2: int = i
+                two: str = raw[i:i + 2]
+                if two == "0x" or two == "0X" or two == "0b" or two == "0B" or two == "0o" or two == "0O":
+                    # 进制前缀：吞掉前缀与后续字母数字/下划线
+                    j2 = i + 2
+                    while j2 < len(raw) and (is_ident_char(raw[j2]) or raw[j2] == "_"):
+                        j2 = j2 + 1
+                else:
+                    while j2 < len(raw) and (is_digit_char(raw[j2]) or raw[j2] == "_"):
+                        j2 = j2 + 1
+                    if j2 < len(raw) and raw[j2] == ".":
+                        j2 = j2 + 1
+                        while j2 < len(raw) and is_digit_char(raw[j2]):
+                            j2 = j2 + 1
+                    if j2 < len(raw) and (raw[j2] == "e" or raw[j2] == "E"):
+                        k: int = j2 + 1
+                        if k < len(raw) and (raw[k] == "+" or raw[k] == "-"):
+                            k = k + 1
+                        if k < len(raw) and is_digit_char(raw[k]):
+                            j2 = k + 1
+                            while j2 < len(raw) and is_digit_char(raw[j2]):
+                                j2 = j2 + 1
+                emitter.emit(line_no, raw, i, j2, TOKEN_NUMBER)
+                i = j2
+                continue
+            if is_ident_char(c) and (i == 0 or not is_ident_char(raw[i - 1])):
+                j3: int = scan_ident_end(raw, i)
+                word: str = raw[i:j3]
+                ttype: int = TOKEN_VARIABLE
+                if is_py_keyword(word):
+                    ttype = TOKEN_KEYWORD
+                elif list_has(classes, word):
+                    ttype = TOKEN_CLASS
+                elif list_has(funcs, word):
+                    ttype = TOKEN_FUNCTION
+                emitter.emit(line_no, raw, i, j3, ttype)
+                i = j3
+                continue
+            i = i + 1
+        line_no = line_no + 1
+    return "{" + '"data":[' + ",".join(emitter.data) + "]}"
+
+def handle_semantic_tokens(id_text: str, params: unknown) -> None:
+    uri: str = uri_of(params)
+    idx: int = doc_index(uri)
+    if idx < 0:
+        send_frame(rpc_result(id_text, "{\"data\":[]}"))
+        return
+    send_frame(rpc_result(id_text, semantic_tokens(doc_texts[idx])))
+
 # ---------------- 各方法处理 ----------------
 
 def init_result() -> str:
-    caps: str = '{"textDocumentSync":{"openClose":true,"change":1},"hoverProvider":true,"documentSymbolProvider":true}'
-    return '{"capabilities":' + caps + ',"serverInfo":{"name":"pya-lsp","version":"0.1.0"}}'
+    # 能力表：文档同步 + hover + documentSymbol + completion + definition +
+    # semanticTokens。semanticTokens 的 legend 顺序必须和 semantic_tokens()
+    # 里 TOKEN_* 常量一致（客户端按索引解释）。
+    types_json: list[str] = []
+    i: int = 0
+    while i < len(TOKEN_TYPES):
+        types_json.append(minijson.quote(TOKEN_TYPES[i]))
+        i = i + 1
+    caps: str = ('{"textDocumentSync":{"openClose":true,"change":1},'
+                 '"hoverProvider":true,"documentSymbolProvider":true,'
+                 '"completionProvider":{"triggerCharacters":["."]},'
+                 '"definitionProvider":true,'
+                 '"semanticTokensProvider":{"legend":{"tokenTypes":[' +
+                 ",".join(types_json) + '],"tokenModifiers":[]},"full":true}}')
+    return '{"capabilities":' + caps + ',"serverInfo":{"name":"pya-lsp","version":"0.2.0"}}'
 
-def params_of(msg: minijson.JVal) -> minijson.JVal:
+def params_of(msg: unknown) -> unknown:
     return minijson.get_obj(msg, "params")
 
-def uri_of(params: minijson.JVal) -> str:
-    td: minijson.JVal = minijson.get_obj(params, "textDocument")
+def uri_of(params: unknown) -> str:
+    td: unknown = minijson.get_obj(params, "textDocument")
     return minijson.get_str(td, "uri")
 
-def handle_did_open(params: minijson.JVal) -> None:
-    td: minijson.JVal = minijson.get_obj(params, "textDocument")
+def handle_did_open(params: unknown) -> None:
+    td: unknown = minijson.get_obj(params, "textDocument")
     uri: str = minijson.get_str(td, "uri")
     text: str = minijson.get_str(td, "text")
     version: int = minijson.get_int(td, "version")
@@ -530,26 +1002,34 @@ def handle_did_open(params: minijson.JVal) -> None:
     doc_put(uri, text, version)
     publish_diagnostics(uri, text, version)
 
-def handle_did_change(params: minijson.JVal) -> None:
-    td: minijson.JVal = minijson.get_obj(params, "textDocument")
+def apply_did_change(params: unknown) -> str:
+    # 把一帧 didChange 的全部 contentChanges 合并进文档表，返回 uri。
+    td: unknown = minijson.get_obj(params, "textDocument")
     uri: str = minijson.get_str(td, "uri")
     version: int = minijson.get_int(td, "version")
     if uri == "":
-        return
+        return ""
     idx: int = doc_index(uri)
     text: str = ""
     if idx >= 0:
         text = doc_texts[idx]
-    changes: minijson.JVal = minijson.get_arr(params, "contentChanges")
+    changes: unknown = minijson.get_arr(params, "contentChanges")
     count: int = minijson.size(changes)
     k: int = 0
     while k < count:
         text = apply_change(text, minijson.at(changes, k))
         k = k + 1
     doc_put(uri, text, version)
-    publish_diagnostics(uri, text, version)
+    return uri
 
-def handle_did_close(params: minijson.JVal) -> None:
+def handle_did_change(params: unknown, inp: file) -> None:
+    uri: str = apply_did_change(params)
+    if uri == "":
+        return
+    # debounce：把紧接着到达的 didChange 合并，只跑最后一次诊断。
+    drain_did_changes(inp, uri)
+
+def handle_did_close(params: unknown) -> None:
     uri: str = uri_of(params)
     if uri == "":
         return
@@ -557,7 +1037,7 @@ def handle_did_close(params: minijson.JVal) -> None:
     clear: str = '{"uri":' + minijson.quote(uri) + ',"diagnostics":[]}'
     send_frame(rpc_notification("textDocument/publishDiagnostics", clear))
 
-def handle_document_symbol(id_text: str, params: minijson.JVal) -> None:
+def handle_document_symbol(id_text: str, params: unknown) -> None:
     uri: str = uri_of(params)
     idx: int = doc_index(uri)
     if idx < 0:
@@ -566,9 +1046,9 @@ def handle_document_symbol(id_text: str, params: minijson.JVal) -> None:
     syms: list[Symbol] = scan_symbols(doc_texts[idx])
     send_frame(rpc_result(id_text, symbols_json(syms)))
 
-def handle_hover(id_text: str, params: minijson.JVal) -> None:
+def handle_hover(id_text: str, params: unknown) -> None:
     uri: str = uri_of(params)
-    pos: minijson.JVal = minijson.get_obj(params, "position")
+    pos: unknown = minijson.get_obj(params, "position")
     line: int = minijson.get_int(pos, "line")
     character: int = minijson.get_int(pos, "character")
     idx: int = doc_index(uri)
@@ -587,22 +1067,106 @@ def handle_hover(id_text: str, params: minijson.JVal) -> None:
     hover: str = '{"contents":{"kind":"plaintext","value":' + minijson.quote(sig) + '}}'
     send_frame(rpc_result(id_text, hover))
 
+
+# ---------------- didChange 合并（debounce）+ 待处理消息队列 ----------------
+#
+# LSP 是单线程读循环，没有 timer 线程。这里用「读下一帧之前先等一小段」
+# 实现去抖：didChange 到达后，最多等 debounce 毫秒，看 stdin 上是否紧跟
+# 下一个帧；紧跟的 didChange 全部合并（只跑最后一次诊断），遇到请求则把
+# 它排进队列、立刻发布诊断再继续主循环（不让窗口拖慢请求）。
+# stdin 用 open(0, "rb", 0) 无缓冲读，fd 可读性 == 是否有待处理字节；
+# 用 asyncio.wait_readable + wait_for 做带超时的 poll（不消费数据）。
+pending_bodies: list[str] = []
+
+def debounce_ms() -> int:
+    v: str = env_str("PYA_LSP_DIAG_DEBOUNCE_MS")
+    if not is_digit_str(v):
+        return 300
+    return int(v)
+
+async def _wait_readable_for(ms: int) -> bool:
+    try:
+        await asyncio.wait_for(asyncio.wait_readable(0), float(ms) / 1000.0)
+        return True
+    except TimeoutError:
+        return False
+
+def stdin_ready(ms: int) -> bool:
+    if ms < 1:
+        return False
+    try:
+        return asyncio.run(_wait_readable_for(ms))
+    except Exception:
+        return False
+
+def next_body(inp: file) -> str:
+    if len(pending_bodies) > 0:
+        b: str = pending_bodies[0]
+        pending_bodies.pop(0)
+        return b
+    return read_frame(inp)
+
+def parse_body(body: str) -> unknown:
+    try:
+        return minijson.parse(body)
+    except ValueError:
+        log("malformed JSON, ignored")
+        return minijson.new_null()
+
+def drain_did_changes(inp: file, uri: str) -> None:
+    dirty: list[str] = [uri]
+    window: int = debounce_ms()
+    if window <= 0:
+        idx0: int = doc_index(uri)
+        if idx0 >= 0:
+            publish_diagnostics(uri, doc_texts[idx0], doc_versions[idx0])
+        return
+    deadline: int = int(time.time() * 1000.0) + window
+    while True:
+        now: int = int(time.time() * 1000.0)
+        remain: int = deadline - now
+        if remain <= 0:
+            break
+        if not stdin_ready(remain):
+            break
+        body: str = read_frame(inp)
+        if body == "":
+            pending_bodies.append("")
+            break
+        msg: unknown = parse_body(body)
+        method: str = minijson.get_str(msg, "method")
+        if method == "textDocument/didChange":
+            p2: unknown = params_of(msg)
+            apply_did_change(p2)
+            u2: str = uri_of(p2)
+            if not list_has(dirty, u2):
+                dirty.append(u2)
+            # 每来一帧重置窗口：连续输入只保留最后一次诊断。
+            deadline = int(time.time() * 1000.0) + window
+        else:
+            pending_bodies.append(body)
+            break
+    i: int = 0
+    while i < len(dirty):
+        u3: str = dirty[i]
+        idx: int = doc_index(u3)
+        if idx >= 0:
+            publish_diagnostics(u3, doc_texts[idx], doc_versions[idx])
+        i = i + 1
+
 # ---------------- 主循环 ----------------
 
 def run() -> int:
     shutdown_requested: bool = False
     inp: file = open_stdin()
     while True:
-        body: str = read_frame(inp)
+        body: str = next_body(inp)
         if body == "":
             log("stdin closed, exiting")
             return 0
         log("recv body bytes=" + str(len(body)))
-        msg: minijson.JVal = minijson.new_null()
-        try:
-            msg = minijson.parse(body)
-        except ValueError:
-            log("malformed JSON, ignored")
+        msg: unknown = parse_body(body)
+        if minijson.is_null(msg):
             continue
         method: str = minijson.get_str(msg, "method")
         if method == "":
@@ -612,7 +1176,7 @@ def run() -> int:
         id_text: str = "null"
         if has_id:
             id_text = minijson.stringify(minijson.get(msg, "id"))
-        params: minijson.JVal = params_of(msg)
+        params: unknown = params_of(msg)
         log("method=" + method + " id=" + id_text)
         if method == "initialize":
             send_frame(rpc_result(id_text, init_result()))
@@ -632,13 +1196,19 @@ def run() -> int:
         elif method == "textDocument/didOpen":
             handle_did_open(params)
         elif method == "textDocument/didChange":
-            handle_did_change(params)
+            handle_did_change(params, inp)
         elif method == "textDocument/didClose":
             handle_did_close(params)
         elif method == "textDocument/documentSymbol":
             handle_document_symbol(id_text, params)
         elif method == "textDocument/hover":
             handle_hover(id_text, params)
+        elif method == "textDocument/completion":
+            handle_completion(id_text, params)
+        elif method == "textDocument/definition":
+            handle_definition(id_text, params)
+        elif method == "textDocument/semanticTokens/full":
+            handle_semantic_tokens(id_text, params)
         else:
             if has_id:
                 send_frame(rpc_error(id_text, -32601, "method not found: " + method))
