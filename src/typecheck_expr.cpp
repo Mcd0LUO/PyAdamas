@@ -282,9 +282,40 @@ TypePtr TypeChecker::expr(Expr& e) {
                 if (type_stats_on_ && is_unknown(cty)) {
                     auto& cc = static_cast<Call&>(e);
                     std::string nm = "<expr>";
-                    if (auto* n = dynamic_cast<Name*>(cc.func.get())) nm = n->id;
-                    else if (auto* a = dynamic_cast<Attribute*>(cc.func.get())) nm = a->attr;
-                    type_stat("call_return", nm);
+                    std::string kind = "other";
+                    if (auto* n = dynamic_cast<Name*>(cc.func.get())) {
+                        nm = n->id;
+                        if (auto* sym = lookup(n->id); sym && sym->ty &&
+                            sym->ty->kind == TyKind::Func) {
+                            kind = (nm.find("__pyadamas$lambda") != std::string::npos ||
+                                    nm.find("lambda") != std::string::npos)
+                                       ? "lambda" : "user";
+                        } else {
+                            kind = "other";
+                        }
+                    } else if (auto* a = dynamic_cast<Attribute*>(cc.func.get())) {
+                        nm = a->attr;
+                        TypePtr bt = type_of(a->value.get());
+                        if (bt && bt->kind == TyKind::Class) kind = "method";
+                        else if (auto* bn = dynamic_cast<Name*>(a->value.get());
+                                 bn && lookup_module_alias(bn->id)) {
+                            kind = "module";
+                            nm = bn->id + "." + a->attr;
+                        } else if (bt && bt->kind == TyKind::DYLIB) {
+                            kind = "dylib";
+                        } else if (bt && is_unknown(bt)) {
+                            kind = "unknown_recv";
+                        }
+                    }
+                    type_stat("call_return_" + kind, nm);
+                    std::string ckey = nm;
+                    for (char& ch : ckey)
+                        if (!std::isalnum(static_cast<unsigned char>(ch))) ch = '_';
+                    type_stat("callname_" + kind + "_" + ckey, "");
+                    type_stat("call_callee", nm);
+                    char loc[96];
+                    snprintf(loc, sizeof(loc), "%s:%d", nm.c_str(), cc.line);
+                    type_stat("call_site_" + kind, loc);
                 }
                 return cty;
             }
