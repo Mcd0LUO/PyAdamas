@@ -70,6 +70,42 @@ void Lowerer::spill_across_suspends() {
         }
     }
 
+    // 支配集：spill 只处理「定义块支配挂起点」的 vreg（见下面 live 过滤的注释）。
+    std::vector<std::vector<int>> pred(nb);
+    for (int b = 0; b < nb; ++b)
+        for (int s : succ[static_cast<size_t>(b)])
+            pred[static_cast<size_t>(s)].push_back(b);
+    std::vector<std::vector<uint8_t>> dom(nb, std::vector<uint8_t>(nb, 0));
+    for (int b = 0; b < nb; ++b)
+        for (int d = 0; d < nb; ++d) dom[static_cast<size_t>(b)][static_cast<size_t>(d)] = (b == 0) ? 1 : 1;
+    // 初始化：入口只支配自己；其它块先全 1，再迭代收缩。
+    for (int b = 0; b < nb; ++b) {
+        if (b == 0) {
+            for (int d = 0; d < nb; ++d) dom[static_cast<size_t>(b)][static_cast<size_t>(d)] = (d == 0);
+        } else {
+            for (int d = 0; d < nb; ++d) dom[static_cast<size_t>(b)][static_cast<size_t>(d)] = 1;
+        }
+    }
+    bool dom_changed = true;
+    while (dom_changed) {
+        dom_changed = false;
+        for (int b = 1; b < nb; ++b) {
+            std::vector<uint8_t> nd(static_cast<size_t>(nb), 0);
+            if (!pred[static_cast<size_t>(b)].empty()) {
+                for (int d = 0; d < nb; ++d) nd[static_cast<size_t>(d)] = 1;
+                for (int p : pred[static_cast<size_t>(b)])
+                    for (int d = 0; d < nb; ++d)
+                        if (!dom[static_cast<size_t>(p)][static_cast<size_t>(d)])
+                            nd[static_cast<size_t>(d)] = 0;
+            }
+            nd[static_cast<size_t>(b)] = 1;
+            if (nd != dom[static_cast<size_t>(b)]) {
+                dom[static_cast<size_t>(b)] = std::move(nd);
+                dom_changed = true;
+            }
+        }
+    }
+
     std::vector<std::vector<uint8_t>> live_in(nb, std::vector<uint8_t>(nv, 0));
     std::vector<std::vector<uint8_t>> live_out(nb, std::vector<uint8_t>(nv, 0));
     bool changed = true;
@@ -118,9 +154,29 @@ void Lowerer::spill_across_suspends() {
         if (c < 0 || c >= nb) continue;
 
         std::vector<VReg> live;
-        for (int v = 0; v < nv; ++v)
-            if (live_in[static_cast<size_t>(c)][static_cast<size_t>(v)])
-                live.push_back(static_cast<VReg>(v));
+        for (int v = 0; v < nv; ++v) {
+            if (!live_in[static_cast<size_t>(c)][static_cast<size_t>(v)]) continue;
+            // 只溢出「在挂起点之前一定已经定义」的 vreg。
+            //
+            // 缺陷（0.437 定位）：活性分析只看 vreg 编号，而降低期 vreg 编号
+            // 不是 SSA、也没有 phi —— 不同块里的不同值可能共用编号（本例里
+            // %47..%52 在 g.close 等后置块里被定义，却被判成「挂起前 live」）。
+            // 挂起前对从未定义过的编号做 rc_inc 会读到栈上垃圾（实测
+            // `await 已取消的 task` 崩溃：refcount increment on a freed object）。
+            // 判据：存在某个定义块 d（in.dst == v）支配挂起块 b；否则跳过。
+            bool defined_before = false;
+            for (int d = 0; d < nb && !defined_before; ++d) {
+                if (!dom[static_cast<size_t>(b)][static_cast<size_t>(d)]) continue;
+                for (const Inst& din : fn->blocks[static_cast<size_t>(d)].insts) {
+                    if (din.dst == static_cast<VReg>(v)) {
+                        defined_before = true;
+                        break;
+                    }
+                }
+            }
+            if (!defined_before) continue;
+            live.push_back(static_cast<VReg>(v));
+        }
 
         // 挂起后的续跑块：先把值从堆帧槽装回 vreg，所有权转给临时栈。
         if (!live.empty()) {
