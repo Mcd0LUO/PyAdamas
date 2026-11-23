@@ -186,6 +186,42 @@ float 除法直接发 `divsd`，没有除零检查，于是按 IEEE 754 得到 `
 的文档化口径冲突；unknown 域本来就要运行期按种类分派（0.422/0.424/0.435 的 str/big/实例分支），
 跟随 CPython 的 unhashable 判定不会引入新的性能代价。两条路径都不静默错值，差异只体现在「何时/是否报错」。
 
+
+### `list[unknown]` / `dict[str, unknown]` 元素里的 float（0.450 记录，待做系统性修复）
+
+**现象（静默错值）**：
+
+```python
+def f(xs: list[unknown]) -> unknown:
+    return xs[0]
+
+print(f([2.5]))   # 期望 2.5，实际打印 4612811918334230528（2.5 的 double 位模式）
+```
+
+**根因**：unknown 域里 float 的唯一正确表示是 `CPYFLOAT` 盒（8 字节 payload 存
+double 位模式，靠堆探针/RC kind 识别）；而 `list[float]` 的元素是**裸 double 位模式**。
+含 float 的静态容器被交给 `list[unknown]` / `dict[str, unknown]` 参数、unknown 容器变量、
+或容器 → `unknown` 时，容器边界只做机器字直通，没有把裸 double 重建成 CPYFLOAT 盒；
+之后按 unknown 读元素就把它当 int 解释。
+
+**影响面**：只在「含 float 的容器被交给 unknown 容器 / unknown 参数」时触发（传参、赋值、
+嵌套 `list[list[float]]`、`dict[str, float]` → `dict[str, unknown]`、容器进 `unknown` 变量）。
+以下都正常：`list[float]`（静态元素）、裸 `list` 形参（元素类型按调用点回填）、`json.parse`
+返回的 `dict[str, unknown]` / `list[unknown]`（运行时构造时已装箱）、`xs.append(2.5)` 到
+`list[unknown]`（写入点逐元素装箱）。
+
+**规避**：
+
+- 需要 float 元素时用 `list[float]`（必要时显式标注），不要落到 `list[unknown]`；
+- 形参写裸 `list` / `list[float]`（元素类型由调用点回填），实测正确；
+- 走 json 动态路径（`json.parse` 返回值）或先装箱再放进 unknown 容器；
+- 不要在 `list[unknown]` 里混放 int/float 后再依赖打印：`bool`/`None` 在 unknown 域也是
+  裸机器字，打印为 `1`/`0`（既有表示层限制，与本条同源）。
+
+**状态：待做系统性修复**。需要先定义「unknown 值在不同容器里的统一编码契约」
+（哪些容器元素必须装箱、边界由谁负责重建），再统一实现；两次局部尝试（通用路径 / 窄入口）
+都因为改到 tag 传播的既有语义而无法在单个窗口内收敛，详见 docs/semantics-audit-playbook.md §14。
+
 ## 二、尚未实现的构造
 
 这些在 CPython 里合法，在 PyAdamas 里分两种情况：

@@ -67,6 +67,9 @@ PyAdamas 借 Python 的语法外壳，但**不是 CPython 的实现**：语义�
 ### 标注规则
 
 - **函数签名必须标注**（参数与返回值），否则 `def` 里的参数类型是 `unknown`，调用处也不做检查。`unknown` 值按整数表示传递：`n * 1.1`、`n / 2` 这类与 `float` 混合的算术结果仍按 `float` 计算（未知一侧补 `int`→`double` 转换），但把浮点实参传给未标注参数仍然不支持。
+- `unknown` 容器里的 `float` 元素有已知表示限制（含 `float` 的静态容器传给 `list[unknown]` /
+  `dict[str, unknown]` / `unknown` 时会打印成 double 位模式整数）；现象、根因与规避见
+  docs/compatibility.md §一「`list[unknown]` / `dict[str, unknown]` 元素里的 float」。
 - 局部变量和模块变量**可选标注**。
 - 标注是**约束**：`x: int = "s"` 直接报错；`x: int = 1` 之后再 `x = "s"` 也报错（有标注的变量类型固定，这是后端按槽选 i64/f64 的前提）。
 - 给有标注的变量赋 `None` 视为「清空」，不报错、也不把类型收窄成 `None`。

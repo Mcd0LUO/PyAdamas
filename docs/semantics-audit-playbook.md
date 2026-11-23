@@ -249,3 +249,10 @@ PYADAMAS_TEST_FILTER='51[67]*' PYADAMAS_TEST_ASAN=1 PYADAMAS_TEST_JOBS=16 \
 3. 计时参考（48 核，`instructions:u` 3 轮取最小）：run_tests JOBS=4 46s / JOBS=16 33s；
    difftest JOBS=1 172s / JOBS=16 19s。**并行度就是最大的提速手段。**
 
+## 14. unknown 表示层：不要改通用判定（0.450 教训）
+
+改 unknown 的表示层（float 在 unknown 域必须是 CPYFLOAT 盒、在 `list[float]` 里是裸
+double）时，**不要碰 `bad_elem` / `coerce` / `convert_to` 的通用判定**：240+ 用例里有 24 个
+依赖既有 tag 传播 / 列表类型表示语义，通用路径一改就集体回退；只改调用点/赋值的窄入口
+也需要新的 promote 分支（含嵌套容器与 dict 值），属独立项目 —— 应先定「unknown 值在容器里的
+统一编码契约」再动手。
