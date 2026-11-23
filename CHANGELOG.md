@@ -4,6 +4,130 @@
 
 早期阶段没有逐条留痕，按阶段归纳；0.4 之后逐条记录。
 
+## [0.431] - 2026-11-23
+
+> fix(eh)：**finally 里 raise 在早退路径上逃出调用方的 except**（异常未被声明捕获 → 程序 terminate）。
+>
+> ### 问题
+>
+> ```python
+> def b() -> int:
+>     try:
+>         return 1
+>     finally:
+>         raise ValueError("b-finally")
+>
+> try:
+>     b()
+> except ValueError as e:
+>     print("caught", str(e))     # CPython: caught b-finally
+> ```
+> 修复前：ValueError 未捕获，直接 traceback + exit(1)。变体「try 体抛异常 + finally 再 raise」同样逃逸；
+> 对照「try 体正常结束 + finally raise」一直是对的，所以问题只在**早退路径**。
+>
+> ### 根因：LSDA 覆盖是**代码位置**，不是逻辑状态
+>
+> 早退路径（return/break/continue 穿过零价 try）由 `emit_cleanup_exits` 的 `ZeroCostEh` 分支处理：
+> `EhLeave` → `RcCleanup` → **原地内联 finalbody**。这个内联位置仍在
+> `[eh.begin, eh.end)` 的保护区里（指令是顺序发射的），于是 finalbody 里的 raise 指令
+> 物理上落在本函数 LSDA 区间内：
+>
+> 1. raise → `exc_longjmp` 看到 `pa_eh_depth > 0` → 走 `_Unwind`；
+> 2. 展开器按 PC 查 LSDA，命中**本函数自己的 cleanup landing pad**（而不是调用方 handler）；
+> 3. LP 先 `pa_eh_land` 再 `pa_eh_leave` —— 但早退路径前面已经 `pa_eh_leave` 过一次，
+>    `pa_eh_depth` 被多减一次（把调用方还在用的计数减到 0）；
+> 4. LP 里再执行一遍 finalbody 的 raise（异常路径那份副本），此时 depth==0 → 走 longjmp 路径；
+>    调用方是零开销 try（没有 handler 记录）→ `handler_top == NULL` → 未捕获退出。
+>
+> ### 修法（方案 A：新块 + 函数末尾块重排）
+>
+> 原则：**早退路径内联的 finalbody 必须物理上位于本函数所有 EH 区间之后**，与正常路径
+> （`eh.end` 之后的 `try.finally` 块）一致。
+>
+> 1. `src/lower_impl.h`：`FuncCtx` 新增 `std::vector<int> early_fin_blocks`；
+> 2. `src/lower_stmt_with.cpp`（`emit_cleanup_exits` 的 `ZeroCostEh`）：
+>    `EhLeave` + `RcCleanup` 后**不原地内联**，而是新建 `fin.early` 块、
+>    发 `Jump` 过去、`switch_to` 后把 finalbody 与调用方收尾发射进该块
+>    （`zc_raise_depth` 临时清零）；当前块已终止（raise 等）时保持原内联行为，避免造不可达块；
+> 3. `src/lower.cpp`：新增 `relocate_early_fin_blocks`，在 `compile_function_body`
+>    末尾（`pop_frame` 之前、fixup 之后）把登记的块按原顺序搬到**函数末尾**。块下标是跳转目标，
+>    搬完逐条重映射 `Inst::target/target2`；`Block.id` 稳定、EH region 存的是 id 不用改；
+>    无终结符死块（`end_unreachable` 占位）原来靠 fallthrough，搬移后若后继变了补显式 `Jump`；
+>    最后 `rebuild_use_def()` 刷新 `block_by_id`；入口块必须仍是 0 号，否则放弃搬移。
+>
+> **为什么不能简单插 `EhEnd`**：`prepare_eh_plan`（`src/codegen.cpp:726-746`）强制
+> begin/end/landing-pad 标签数量一一对应，多插一个 end 会破坏整个 LSDA 配对；块重排不动标签计数，
+> 是唯一安全做法。
+>
+> ### 结果
+>
+> | 项 | 修前 | 修后 |
+> |---|---|---|
+> | y1（return + finally raise） | 未捕获 exit(1) | 被调用方 except 捕获（-O0/-O1/-O2） |
+> | y2（正常/return/异常三种路径） | return 与异常路径失败 | 三种全部与 CPython 一致 |
+> | 129_finally_jump 及全量 EH 用例 | — | 全过（392 用例） |
+>
+> 新用例 `tests/run/496_finally_raise.py`（含 expect，三档一致）：正常结束/return/break/continue/
+> try 体抛异常 + finally raise、自定义异常、嵌套 finally、`with` 的 `__exit__` 在早退路径抛异常、
+> 以及修复后同一函数后续 raise 仍被外层捕获（`pa_eh_depth` 没被多减）。
+> `PYADAMAS_VERIFY_IR=2` 对 496 与 129 均 0 报告；
+> 闸门：392 ran ok / difftest 371-0 / ASan 392 ran ok 0 报告 / check_size 通过；
+> 12 基准 36/36 输出一致、指令数 ±0.07%（无回退）；SIMD matmul 10,126,808 / sn 94,637,472。
+
+## [0.430] - 2026-11-23
+
+> fix(opt)：**-O2 DCE 吞掉会抛异常的 `int(float)`**（0.427 的回归）。
+>
+> ### 问题
+>
+> 0.427 让 float→int 转换在 NaN/±inf/越界时抛 `ValueError`/`OverflowError`，但
+> `src/opt_fold.cpp` 的 `inst_is_pure(IrOp::Convert)` 仍把目标为 `int` 的转换当纯指令：
+> `dce_function` 会把「结果没人使用」的转换整条删掉 → 异常静默消失：
+>
+> ```python
+> try:
+>     int(float("inf"))      # 语句形态，结果没人用
+> except OverflowError:
+>     print("inf_overflow")
+> print("after")
+> ```
+> -O0/-O1 输出 `inf_overflow / after`；**-O2 只输出 after**。对照：`1 // 0`、`[][0]` 这类语句
+> 形态仍正常抛（有 guard/异常边），只有纯转换被误删。
+>
+> ### 修法（`src/opt_fold.cpp` +4/−2）
+>
+> `Convert` 只在目标为 `Bool`/`Float` 时算纯指令；目标为 `Int` 的转换**永不 DCE**（注释写明原因）。
+> 教训：**给指令加「可能抛异常/有副作用」的语义，必须同步审计优化器对它的纯指令假设**。
+>
+> ### 结果
+>
+> 三档恢复一致；495 用例第 7 节钉住该回归。闸门：391 ran ok / difftest 370-0 / ASan 391 ran ok 0 报告 /
+> check_size 通过；12 基准 36/36 输出一致、指令数 ±0.19%（无回退）；SIMD matmul 10,126,808 / sn 94,637,468。
+
+## [0.429] - 2026-11-23
+
+> fix(rt)：`str`/`bytes` 的 `replace(..., count=0)` 会替换一次（CPython 是一次都不替换）。
+>
+> ### 问题
+>
+> `"abcabcabc".replace("abc", "X", 0)` → CPython `abcabcabc`；修复前 PyAdamas `Xabcabc`。
+> 根因（`runtime/rt_str.c` 的 `pa_str_method` 与 `pa_bytes_method` 各一份 case 11）：
+> 计数循环是「先 `++hits` 再 `if (count >= 0 && hits >= count) break`」，`count==0` 时
+> 第一次命中就 hits=1 且 1>=0 立即 break → 替换一次。空 old 分支的写法不同（`hits > count`），本来就对。
+>
+> ### 修法（`runtime/rt_str.c` +8 行，两处）
+>
+> 计数循环前加 `else if (count == 0) { hits = 0; }`（CPython 语义：count==0 不替换、负数全部替换）。
+>
+> ### 结果与教训
+>
+> 穷举 `count ∈ {0,1,2,-1,-5}` 才抓到；**同一个 bug 在 bytes 实现里复制了一份**
+> （playbook §6「找全同类点位」：`grep "case 11"` 后确认两处都改）。
+> 新用例 `tests/run/494_string_semantics.py`（含 expect，三档一致）：count 全组合 + 空 old +
+> 无匹配 + bytes 同形状，另覆盖 split/join/find/count/strip/大小写/f-string/%/运算/不可变性。
+> 闸门：390 ran ok / difftest 369-0 / ASan 390 ran ok 0 报告 / check_size 通过；
+> 12 基准 36/36 输出一致、指令数 ±0.33%（无回退）；SIMD matmul 10,126,809 / sn 94,637,471。
+
 ## [0.428] - 2026-11-23
 
 > fix(rt)：负区间切片赋值插入点错（静默错值）+ `del` 扩展切片无法工作 + 扩展切片长度文案对齐 CPython。

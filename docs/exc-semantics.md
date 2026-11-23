@@ -86,10 +86,45 @@
 | `finally`（正常路径） | `HandlerLeave` → 内联 finalbody → 跳 end（非可挂起函数，src/lower_exc.cpp:381-388） | 正常路径直接 fall-through 到 finalbody，不经过 landing；finalbody 只编译一份（可挂起函数强制一份，`:407-462`） | 正常路径也走 landing → 误把 pending 异常取出来重抛 |
 | `finally`（异常路径） | landing `HandlerLeave` → `ExcTakeValue` 把 pending 转成 `excval` 存 `pend_slot` → 内联 finalbody → 非空则 `ExcReraiseValueIf`（src/lower_exc.cpp:390-403；rt_exc.c:684-698） | 非可挂起函数可直接用 unwinder 的异常对象 + `_Unwind_Resume`；可挂起函数仍需要“把待重抛异常搬进帧槽”的等价物，因为 finalbody 里可能 setjmp/挂起 | 把 pending 留在全局而没有帧槽 → finalbody 里一个 `await`/`yield` 后异常上下文被调用方冲掉，原异常丢失 |
 | `finally` 里再抛 | finalbody 里 `raise` 覆盖 `pending_exc`（src/lower_exc.cpp 的 finalbody 是普通 `stmts`；rt_exc.c:456 先 `exc_free(pending_exc)`） | 语义：新异常取代原异常继续展开（CPython 另设 `__context__`，见第 4 节）；表驱动里同样要用新异常替换 unwinder 正在处理的异常，或先清理旧对象 | 两个异常对象同时活着 → 双释放/泄漏；或者新异常被旧异常的 `_Unwind_Resume` 覆盖 |
-| `finally` 里 `return` | finalbody 是普通语句，`return` 走 `emit_cleanup_exits(0)` 后 `emit_return`（src/lower_stmt.cpp:183-189）；此时本层 Finally 已从 cleanup 栈弹出（src/lower_exc.cpp:378-383、440-442、456-457），不再跑自己 | 早退路径与现状一样内联发射；异常路径 finalbody 终止控制流时 **不得再 resume**，需要“放弃当前展开”的等价动作（现 `terminated()` 判断跳过 `ExcReraiseValueIf`，`:400-403`） | 异常路径 finalbody 里 return 后仍 `_Unwind_Resume` → 已返回的帧继续展开，栈/对象状态错乱（实测 `tests/run/129_finally_jump.py` 的 swallow/after_swallow 依赖“吞掉异常”） |
+| `finally` 里 `return` | finalbody 是普通语句，`return` 走 `emit_cleanup_exits(0)` 后 `emit_return`（src/lower_stmt.cpp:183-189）；早退路径的 finalbody 发射在 `fin.early` 块（§2.1.1）；此时本层 Finally 已从 cleanup 栈弹出（src/lower_exc.cpp:378-383、440-442、456-457），不再跑自己 | 早退路径与现状一样内联发射；异常路径 finalbody 终止控制流时 **不得再 resume**，需要“放弃当前展开”的等价动作（现 `terminated()` 判断跳过 `ExcReraiseValueIf`，`:400-403`） | 异常路径 finalbody 里 return 后仍 `_Unwind_Resume` → 已返回的帧继续展开，栈/对象状态错乱（实测 `tests/run/129_finally_jump.py` 的 swallow/after_swallow 依赖“吞掉异常”） |
 | `finally` 里 `break`/`continue` | 同上，`emit_cleanup_exits(loop_cleanup_depth)` 只清到循环口的层数（src/lower_stmt.cpp:191-213）；finally 内 break/continue 目标块由当前 `st_->loops` 决定 | 早退内联逻辑原样保留；异常路径 finalbody 里 break/continue 同样要能“吞掉异常”并跳转 | 早退只 `handler_discard` 不跑 finalbody → 清理漏跑；异常路径跳转后 landing 状态残留 |
 | try 体 `return` 穿过 finally | 编译期 `emit_cleanup_exits(0)` 依次发射：`HandlerDiscard`（不清理临时值）→ 内联 finalbody（src/lower_stmt_with.cpp:97-110；src/lower_stmt.cpp:187） | 不需要 landing pad；只有“异常穿过”才需要表驱动。当前 finally 内联两份（非可挂起）的语义等于 cleanup landing+fallthrough | 把早退也改成展开器驱动 → return 路径变慢，且返回值临时值的 RC 生命周期被 `rc_cleanup(mark)` 提前释放（`:308-315` 注释就是为这个） |
 | try 体 `break`/`continue` 穿过 finally | 同上，`emit_cleanup_exits(st_->loop_cleanup_depth.back())`（src/lower_stmt.cpp:196-213）；Finally cleanup 条目自身也内联 finalbody（src/lower_stmt_with.cpp:97-110） | 同上 | 同上 |
+
+#### 2.1.1 早退路径 finalbody 的落点规则（0.431）
+
+**规则**：`return` / `break` / `continue` 穿过零开销 `try` 时，`emit_cleanup_exits` 内联的
+finalbody 必须**物理上位于本函数所有 EH 区间（`[ehB, ehE)`）之后**。实现方式：
+新建 `fin.early` 块 → `Jump` 过去 → finalbody 与调用方收尾发射进该块 → 函数降级结束后由
+`relocate_early_fin_blocks`（`src/lower.cpp`）把登记的块按原顺序搬到函数末尾。
+
+**为什么**（0.431 修复的 bug）：LSDA 的覆盖是**代码位置**，不是逻辑状态。早退路径先
+`pa_eh_leave()` 只是把 `pa_eh_depth` 减一，指令本身仍在保护区的 LSDA 区间里，于是 finalbody
+里的 `raise` 会被展开器判给**本函数自己的 cleanup landing pad**（而不是调用方 handler）：
+LP 再 `pa_eh_land` + `pa_eh_leave`（depth 被多减一次，把调用方还在用的计数减到 0）→
+重抛 finalbody 的异常时走 longjmp 路径 → 调用方是零开销 try、没有 handler 记录 →
+未捕获退出（修复前实测：`try: return 1 finally: raise ValueError(...)` 的异常逃出调用方 `except`）。
+正常路径没有这个问题，因为它的 finalbody 在 `eh.end` 标签之后发射。
+
+**为什么不能简单插 `EhEnd`**：`prepare_eh_plan`（`src/codegen.cpp:726-746`）强制
+begin/end/landing-pad 标签数量一一对应，多插一个 end 会破坏整个 LSDA 配对；
+块重排不动标签计数，是唯一安全做法。
+
+**`relocate_early_fin_blocks` 的不变量**（改这里必须逐条保持）：
+
+1. **块下标是跳转目标**：搬移后逐条重映射 `Inst::target` / `Inst::target2`；
+2. **`Block.id` 是稳定标识**：搬移保留 id，`eh_regions` 的 begin/end/lp 存的是 id，不用改；
+   但 `block_by_id`（id→下标）必须用 `rebuild_use_def()` 刷新；
+3. **无终结符死块靠 fallthrough**（`end_unreachable` 占位块）：搬移后若它的下一块变了，
+   必须补一条显式 `Jump` 到原后继，否则死块路径语义漂移；
+4. **入口块必须仍是 0 号**：否则放弃搬移（保守，不动 IR）；
+5. 搬移只在函数降级末尾（fixup 之后、`pop_frame` 之前）做一次，此时没有其它代码再引用旧下标；
+6. 早退块要放在**所有** EH 区间之后（函数末尾），不能只放到「本 region 之后」——嵌套 try 时
+   内层早退块若落在外层保护区里，同样会被外层 cleanup LP 命中。
+
+验证：`tests/run/496_finally_raise.py`（正常/return/break/continue/异常 + finally raise、
+自定义异常、嵌套 finally、`with` 的 `__exit__` 早退抛异常、depth 不多减）、
+`tests/run/129_finally_jump.py`，以及 `PYADAMAS_VERIFY_IR=2` 无报告。
 
 ### 2.2 with / async with
 
