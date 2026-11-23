@@ -86,9 +86,10 @@
 
 ### 没做到
 
-- **nbody 性能没有实质提升**：触发数 0 → 1 只换来 **−551 条指令 / −0.0003%**（可忽略）——
-  `energy` 只调用 1 次、内层 10 个组合；`nbody` 仍由 `advance` 主导。
-  > 后续（0.414）：`advance` 内层向量化后 nbody **−45.19%**（见 vectorization-generalization.md §2）。
+- **nbody 性能当时没有实质提升**（0.414 之前）：`energy` 触发 0 → 1 只换来 −551 条指令 / −0.0003%，
+  因为 `energy` 只调用 1 次、内层 10 个组合；`nbody` 由 `advance` 主导。
+  > 后续（0.414–0.430）：`advance` 内层向量化后 nbody **−45.19%**，收尾到 **−45.31%**（109,040,119 条，
+  > 见 [nightly-summary.md](nightly-summary.md) §2.3）。
 - **`advance` 仍未向量化**：内层/位置更新是 `coef=7` 的 scatter 写 + 同数组读写偏移不同
   （big feature：需要 packed scatter 或逐 lane 写 + 别名证明）；外层是嵌套循环形状。
   > 后续（0.414）：已向量化（重复地址 RMW + 散射写 + 跨 coef 运行期区间守卫），不再阻塞。

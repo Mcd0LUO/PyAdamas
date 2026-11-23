@@ -255,7 +255,7 @@
 1. **GC 的根只扫登记区，且 stop-the-world**：分代已落地（minor trial-deletion + major 标记-清扫）；GC 不再扫整段真实栈，只扫帧记录登记的 unknown 槽和 callee-saved 寄存器；0.175 起临时区按 vreg 静态类型发射位图、只扫「可能含指针」的字（纯标量帧整段不扫），保守保留实测从 92 个 / 8144 B 降到 0；0.181/0.183 修掉一整类「构造期对象不在 GC 根上」的 UAF（54 个函数 / 70 个 pin 点）；0.216 修掉「unknown 槽被提升到寄存器 → 帧记录登记的栈槽恒为 0 → GC 漏标记」这一类（unknown 槽禁止提升、`gc_scan_slot_` 改在分配之前算、被扫描的槽禁止融合）；仍没有增量/并发 GC，也没有完整栈映射（位图按字收，不按时刻收）
 2. **unknown 引用的计数不精确**：容器 kind 2 元素、unknown 字段与全局已用 RC 索引精确释放（`pa_rc_dec_unknown`）；裸 `list` 的空容器已在第一次写入时定型；0.215 补上 unknown 返回值与「unknown → unknown」存储的引用所有权；0.233 让 `rc_index_off`（exact-RC）时的混合容器元素也能精确释放（16 字节对齐 + `marked == UNTRACKED` + 堆链成员三条硬约束）。**仍剩 `release_slots` 跳过 unknown 槽**：直接补齐会让 12 个用例 over-release，因为 unknown 槽里的值未必被 retain 过（装饰器回填、borrow_slots、帧槽别名都会让它持有借来的值）。根治需要槽级「是否 owned」标记
 3. **Optional 的收窄能力不足**：`x: Optional[str]` 在 `if x is None: ...` 之后、跨语句块或跨函数调用时仍按 Optional 处理；修它需要正经的数据流分析
-4. **优化遍仍不完整**：有常量折叠、DCE、小函数内联、静态调用直接化、LICM、下标版本化/免检查、循环旋转、跨块 CSE 与后端拷贝合并；强度削减（IVSR）已评估并放弃（nbody 反而 +15.7%，负结论见 [ivsr-negative-result.md](ivsr-negative-result.md)）；暂无通用向量化和全局寄存器分配
+4. **优化遍仍不完整**：有常量折叠、DCE、小函数内联、静态调用直接化、LICM、下标版本化/免检查、循环旋转、跨块 CSE 与后端拷贝合并；强度削减（IVSR）已评估并放弃（nbody 反而 +15.7%，负结论见 [ivsr-negative-result.md](ivsr-negative-result.md)）；**已有通用向量化**（4 基准/9 循环，覆盖与缺口见 [vectorization-coverage.md](vectorization-coverage.md)，性能见 [nightly-summary.md](nightly-summary.md)）、仍无全局寄存器分配（负结论见 [regalloc.md](regalloc.md)）
 5. **`tuple` 与 `list` 表示相同**：tuple 也是可变的动态数组，语义上不严谨
 6. **诊断不带列区间**：只指向起点，长表达式不好定位
 7. **没有增量重编 Python 源码**：每次 `build` 都是全量编译，只有 import 模块有缓存

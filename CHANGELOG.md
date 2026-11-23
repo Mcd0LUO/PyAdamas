@@ -4,6 +4,52 @@
 
 早期阶段没有逐条留痕，按阶段归纳；0.4 之后逐条记录。
 
+## [0.432] - 2026-11-23
+
+> fix(rt)：`sorted(类实例列表)` 从**静默返回未排序**改成**显式抛 `TypeError`**；并把
+> `del obj.attr` 的重置语义与类实例排序缺口补进兼容性文档。
+>
+> ### 问题
+>
+> `sort_kind` 对「推断不出元素类型」的列表返回 3（`pa_list_sort` 的 kind=3）。0.425 已实现
+> 元素族分类（全数值按数值、全 str 按字节、族混杂抛 `TypeError`），但**全 OTHER 族**仍落到
+> `sort_i64` ——按机器字（堆指针）比较：
+>
+> ```python
+> class P:
+>     def __init__(self, v: int) -> None: self.v = v
+>     def __lt__(self, other: "P") -> bool: return self.v < other.v
+>
+> ps = [P(3), P(1), P(2)]
+> print([p.v for p in sorted(ps)])
+> # CPython: [1, 2, 3]
+> # 修复前 pyadamas: [3, 1, 2]（静默乱序，-O0/-O2 一致）
+> ```
+> CPython 对带 `__lt__` 的类会成功排序；PyAdamas 运行时没有「类名 → 方法槽」映射，
+> 排不了用户类实例（known gap，见 `docs/unknown-semantics-audit.md` §4）。
+>
+> ### 修法（`runtime/rt_list.c` +19）
+>
+> 在「全 OTHER 族」分支里扫一遍元素：若存在 `PYADAMAS_RC_INSTANCE`（用户类实例）→ 抛
+> `TypeError: '<' not supported between instances of 'object' and 'object'`；
+> 元组/列表/None 等其它 OTHER 元素保持原机器字口径（静态类型已知的容器走 kind=4 按内容比较，
+> unknown 容器排序文档未承诺）。文案用 `object` 而非具体类名，同样因为拿不到「实例 → 类名」映射。
+>
+> ### 结果
+>
+> - `sorted(ps)` 在 -O0/-O2 都抛 `TypeError`（不再静默错值）；`sorted([3,1,2])`、
+>   `sorted(["b","a"])` 等正常路径不受影响。
+> - **没有既有用例依赖类实例排序**：393 ran ok / difftest 372-0 / ASan 393 ran ok 0 报告，无需改 expect。
+> - 12 基准 36/36 输出一致、指令数 ±0.35%（无回退）；SIMD matmul 10,126,808 / sn 94,637,468。
+> - 未加新用例：CPython 对带 `__lt__` 的类能成功排序，与「显式报错」无法写成 CPython 对拍；
+>   按 `docs/semantics-audit-playbook.md` §3「静态设计差异不是 bug」记录进兼容性文档。
+>
+> ### 文档
+>
+> `docs/compatibility.md` 新增「`del obj.attr` 与类实例排序」小节（del 是重置为默认值
+> 而非移除属性，store_field(..., const_none())，tests/run/41_decorators.py 的 expect 已钉住 0）；
+> `docs/unknown-semantics-audit.md` §4 同步更新该缺口行。
+
 ## [0.431] - 2026-11-23
 
 > fix(eh)：**finally 里 raise 在早退路径上逃出调用方的 except**（异常未被声明捕获 → 程序 terminate）。

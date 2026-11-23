@@ -29,6 +29,8 @@
 | [ivsr-negative-result.md](ivsr-negative-result.md) | 归纳变量强度削减（IVSR）为什么在 nbody 上运行时间退步 15.7%？ | `src/opt_loop.cpp` |
 | [str-codepoints.md](str-codepoints.md) | 字符串码点语义 S1/S2 做了什么、S3 还剩什么？ | `runtime/rt_str.c` `src/lower_builtin.cpp` |
 | [stdlib-gaps.md](stdlib-gaps.md) | 51 个常用 CPython 模块哪些可用、哪些卡在编译器能力上？ | `stdlib/*.py` `src/driver_build.cpp` |
+| [nightly-summary.md](nightly-summary.md) | 2026-11-22/23 夜间迭代 + 白天语义审计的总账：模块化、性能两张表、向量化覆盖、bug 清单、剩余工作 | — |
+| [vectorization-coverage.md](vectorization-coverage.md) | 向量化覆盖率：哪些基准/循环触发、8 个 0 触发基准各自的第一道拒绝门（IR 证据） | `src/vect_planner_loop.cpp` `src/codegen_vect.cpp` |
 | [archive/README.md](archive/README.md) | 已轮转出去的旧文档索引 | — |
 
 其中 [regalloc-architecture.md](regalloc-architecture.md) 的 §8、[bounds-elimination-attempt.md](bounds-elimination-attempt.md)、
