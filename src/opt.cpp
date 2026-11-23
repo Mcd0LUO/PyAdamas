@@ -297,10 +297,17 @@ void optimize_ir(IRModule& m, int opt_level, int loop_opt, bool inline_opt) {
     for (auto& fptr : m.funcs)
         opt_stats_run("if_convert_accumulators#1", *fptr, [&] { if_convert_accumulators(*fptr); });
 
-    // 循环内全局变量寄存器化：无调用的循环里把全局缓存到局部槽，
-    // 循环出口写回。实测全局访问比局部慢 8.7 倍。
+    // 循环内全局变量寄存器化：入口函数里允许 call.rt（RtFn 没有全局
+    // 索引参数，C 运行时无法触碰被提升的全局变量槽），其它函数仍要求
+    // 无调用。全局缓存到局部槽，循环出口写回。实测全局访问比局部慢 8.7 倍。
     for (auto& fptr : m.funcs)
         opt_stats_run("promote_globals_in_loops", *fptr, [&] { promote_globals_in_loops(*fptr, m.globals); });
+
+    // 全局提升把 global 变成 slot 后，contains+get 融合的 same_slot 判据
+    // 才可能满足（之前 key/容器都是 load.global，融合器只认 load.slot）。
+    // 再跑一次纯结构融合，不依赖源码特征。
+    for (auto& fptr : m.funcs)
+        opt_stats_run("fuse_dict_tryget#2", *fptr, [&] { fuse_dict_tryget(*fptr); });
 
     // 全局提升把模块级累加器变成了槽 —— 之前因「累加器是全局」而被 if-conversion
     // 拒掉的简单菱形，此刻才满足「槽累加器 +-1」判据。再跑一遍（判据/变换完全
