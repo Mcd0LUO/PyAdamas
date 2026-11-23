@@ -594,6 +594,8 @@ inline const ModuleSig* load(const std::string& module) {
 // 在这里登记；声明负责方法表与构造签名。新增原生类时在这里加一行。
 inline TypePtr declared_class_type(const std::string& module, const std::string& cls) {
     if (module == "random" && cls == "Random") return t_random();
+    if (module == "re" && cls == "Pattern") return t_regex();
+    if (module == "re" && cls == "Match") return t_match();
     return t_unknown();
 }
 

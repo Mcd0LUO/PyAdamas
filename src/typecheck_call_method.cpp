@@ -76,18 +76,12 @@ bool TypeChecker::has_method(const TypePtr& t, const std::string& m) {
             case TyKind::Random:
                 // 方法表来自 .pysig 的 class Random（不再硬编码）。
                 return nativesig::class_has_method("random", "Random", m);
-            case TyKind::Regex: {
-                static const std::unordered_set<std::string> ms = {
-                    "search", "match", "fullmatch", "findall", "sub", "split",
-                };
-                return ms.count(m) > 0;
-            }
-            case TyKind::Match: {
-                static const std::unordered_set<std::string> ms = {
-                    "group", "groups", "start", "end", "span",
-                };
-                return ms.count(m) > 0;
-            }
+            case TyKind::Regex:
+                // 方法表来自 .pysig 的 class Pattern（不再硬编码）。
+                return nativesig::class_has_method("re", "Pattern", m);
+            case TyKind::Match:
+                // 方法表来自 .pysig 的 class Match（不再硬编码）。
+                return nativesig::class_has_method("re", "Match", m);
             // 数值类型没有真正的「方法表」，但这些名字确实存在；
             // 缺了就是标准库里的假错误（statistics 用 int.bit_length）。
             case TyKind::Int:
@@ -809,85 +803,69 @@ TypePtr TypeChecker::method_call(TypePtr recv, const std::string& name, Call& c,
             err(c.line, c.col, std::format("Popen has no method '{}'", name));
             return t_unknown();
         }
-        if (recv->kind == TyKind::Regex) {
+        if (recv->kind == TyKind::Regex || recv->kind == TyKind::Match) {
+            const bool is_pattern = recv->kind == TyKind::Regex;
+            const char* mod = "re";
+            const char* cls = is_pattern ? "Pattern" : "Match";
             if (!c.keywords.empty())
                 err(c.line, c.col,
-                    std::format("re.Pattern.{}() does not take keyword arguments", name));
-            if (name == "search" || name == "match" || name == "fullmatch") {
-                argc(1, 1);
-                if (!a.empty() && a[0] && !is_unknown(a[0]) && a[0]->kind != TyKind::Str)
-                    err(c.line, c.col, "re.Pattern method expects a str");
-                return mk_optional(t_match());
+                    std::format("re.{}.{}() does not take keyword arguments", cls, name));
+            const auto* info = nativesig::class_info(mod, cls);
+            if (!info) return t_unknown();
+            auto it = info->methods.find(name);
+            if (it == info->methods.end()) {
+                err(c.line, c.col,
+                    std::format("class '{}' has no attribute '{}'", cls, name));
+                return t_unknown();
             }
-            if (name == "findall") {
-                argc(1, 1);
-                return mk_list(t_str());
+            const FuncInfoPtr& fn = it->second;
+            // argc 按声明的位置参数/默认值个数检查（可变参方法用 varargs）。
+            if (!fn->varargs) {
+                size_t ndef = 0;
+                for (auto& pp : fn->pos) if (pp.has_default) ++ndef;
+                argc(fn->pos.size() - ndef, fn->pos.size());
             }
-            if (name == "finditer") {
-                argc(1, 1);
-                if (!a.empty() && a[0] && !is_unknown(a[0]) && a[0]->kind != TyKind::Str)
-                    err(c.line, c.col, "re.Pattern.finditer() expects a str");
-                return mk_list(t_match());
+            for (size_t i = 0; i < a.size() && i < fn->pos.size(); ++i) {
+                TypePtr want = fn->pos[i].ty;
+                TypePtr got = a[i];
+                if (!want || !got || is_unknown(got)) continue;
+                if (assignable(want, got)) continue;
+                err(c.args[i]->line, c.args[i]->col,
+                    std::format("argument '{}' of 're.{}.{}' expects '{}', got '{}'",
+                                fn->pos[i].name, cls, name, type_name(want), type_name(got)));
             }
-            if (name == "sub") {
-                argc(2, 3);
-                if (a.size() >= 2 && a[0] && !is_unknown(a[0]) && a[0]->kind != TyKind::Str &&
-                    a[0]->kind != TyKind::Func)
-                    err(c.line, c.col, "sub() replacement must be a str or a function");
-                if (a.size() >= 2 && a[1] && !is_unknown(a[1]) && a[1]->kind != TyKind::Str)
-                    err(c.line, c.col, "sub() text must be a str");
-                // 回调形参的类型由这里定：re.sub 的 repl 一定吃一个 Match。
-                if (a.size() >= 2 && a[0] && a[0]->kind == TyKind::Func && a[0]->fn &&
-                    a[0]->fn->pos.size() == 1) {
-                    Param& cp = a[0]->fn->pos[0];
-                    if (!cp.ty || cp.ty->kind == TyKind::Unknown) {
-                        cp.ty = t_match();
-                        cp.inferred = true;
-                        a[0]->fn->sig_dirty = true;
-                    }
+            // sub 的 repl 回调形参：re.sub 的 repl 一定吃一个 Match。
+            if (is_pattern && name == "sub" && a.size() >= 1 && a[0] &&
+                a[0]->kind == TyKind::Func && a[0]->fn && a[0]->fn->pos.size() == 1) {
+                Param& cp = a[0]->fn->pos[0];
+                if (!cp.ty || cp.ty->kind == TyKind::Unknown) {
+                    cp.ty = t_match();
+                    cp.inferred = true;
+                    a[0]->fn->sig_dirty = true;
                 }
-                return t_str();
             }
-            if (name == "split") {
-                argc(1, 2);
-                return mk_list(t_str());
+            // 返回类型：pysig 无法表达 Optional[Match] / 变长 group 的元组返回，
+            // 这些保留专门口径（与硬编码时代逐字一致）。
+            if (is_pattern) {
+                if (name == "search" || name == "match" || name == "fullmatch")
+                    return mk_optional(t_match());
+                if (name == "findall") return mk_list(t_str());
+                if (name == "finditer") return mk_list(t_match());
+                if (name == "sub") return t_str();
+                if (name == "split") return mk_list(t_str());
+            } else {
+                if (name == "group") {
+                    if (c.args.size() > 1) return mk_tuple_rest(t_str());
+                    return t_str();
+                }
+                if (name == "groups") return mk_list(t_str());
+                if (name == "groupdict") return mk_dict(t_str(), t_str());
+                if (name == "start" || name == "end") return t_int();
+                if (name == "span") return mk_tuple({t_int(), t_int()});
+                if (name == "expand") return t_str();
             }
-            err(c.line, c.col, std::format("re.Pattern has no method '{}'", name));
-            return t_unknown();
+            return fn->ret_known ? fn->ret : t_unknown();
         }
-
-        if (recv->kind == TyKind::Match) {
-            if (!c.keywords.empty())
-                err(c.line, c.col,
-                    std::format("re.Match.{}() does not take keyword arguments", name));
-            if (name == "group") {
-                if (c.args.size() > 1) return mk_tuple_rest(t_str());
-                return t_str();
-            }
-            if (name == "groups") {
-                argc(0, 0);
-                return mk_list(t_str());
-            }
-            if (name == "groupdict") {
-                argc(0, 0);
-                return mk_dict(t_str(), t_str());
-            }
-            if (name == "start" || name == "end") {
-                argc(0, 1);
-                return t_int();
-            }
-            if (name == "span") {
-                argc(0, 1);
-                return mk_tuple({t_int(), t_int()});
-            }
-            if (name == "expand") {
-                argc(1, 1);
-                return t_str();
-            }
-            err(c.line, c.col, std::format("re.Match has no method '{}'", name));
-            return t_unknown();
-        }
-
         if (recv->kind == TyKind::File) {
             if (name == "read" || name == "readline") {
                 argc(0, 1);

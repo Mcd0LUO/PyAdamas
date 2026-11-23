@@ -460,7 +460,8 @@ if (const auto* c = nativesig::find_const(module, member)) {
 | `operator` | ⛔ **不可迁移** | 31 个函数全部走 `operator_call()` 类型推导 + `lower_operator()` 专门降级，无 `pa_operator_*` RtFn 入口；pysig 的符号反查会硬失败。判据：**只有存在 `pa_<模块>_<名字>` RtFn 的函数才能声明**。 |
 | `os` | ✅ 已迁移模块级函数（`stdlib/sigs/os.pysig`） | 16 函数 + 6 标量常量；`unlink` 用 `@native("pa_os_remove")`；保留 C++：`environ`（运行期 dict）、`walk`（返回 list[tuple]）、`os.path.*`（独立模块已迁）。asm 等价 13/13 |
 | `random` | ✅ 已迁移**全部模块级函数 + `Random` 类**（`stdlib/sigs/random.pysig`） | 17 函数 + `class Random`（构造器 + 6 个实例方法，`@native` 覆盖 `pa_random_*`；`choice` 用 `@ret_specialized`）。保留 C++：方法的参数装配（`lower_method_misc.cpp`，§6.4）、类型身份映射 `declared_class_type`。asm 与迁移前逐字节相同 |
-| `collections` `json` `re` | ⬜ 未迁移 | 硬编码仍在；加载器已就绪，可按 §6.2 逐个搬 |
+| `re` | ✅ 已迁移 `Pattern`/`Match` 方法表（`stdlib/sigs/re.pysig`） | 2 个原生类共 15 个方法（`@native` 覆盖 `pa_re_*`）；模块级函数/flag 常量保留硬编码（`-> Regex`/`Optional[Match]` 等类型 pysig 无法表达，迁了会破坏 `re.compile` 的返回类型）；`lower_method_regex/match` 参数装配不动；asm 38/38 逐字节相同 |
+| `collections` `json` | ⬜ 未迁移 | 硬编码仍在；加载器已就绪，可按 §6.2 逐个搬 |
 | `pathlib` `operator` `asyncio` | ⬜ 未迁移（优先级低） | 构造器/类语义多，声明格式表达不了的部分留 C++ |
 | `datetime` `subprocess` | ⬜ 未迁移（优先级低） | 参数装配/返回类型随实参变的分支多 |
 | `python`（CPython 桥）、`c` / `dylib` | ⛔ 不适合声明式 | 名字集合是开集（`from c import <任意符号>`），签名在调用点推断 |

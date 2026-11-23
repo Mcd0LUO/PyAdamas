@@ -1,0 +1,35 @@
+# stdlib/sigs/re.pysig —— re 模块的声明式签名（P0 原生类批次）
+#
+# re.Pattern（无构造器：re.compile 是模块函数）。
+class Pattern:
+    @native("pa_re_search")
+    def search(self, text: str) -> object: pass
+    @native("pa_re_search")
+    def match(self, text: str) -> object: pass
+    @native("pa_re_search")
+    def fullmatch(self, text: str) -> object: pass
+    @native("pa_re_findall")
+    def findall(self, text: str) -> list[str]: pass
+    @native("pa_re_finditer")
+    def finditer(self, text: str) -> list[object]: pass
+    @native("pa_re_sub")
+    def sub(self, repl: object, text: str, count: int = 0) -> str: pass
+    @native("pa_re_split")
+    def split(self, text: str, maxsplit: int = 0) -> list[str]: pass
+
+# re.Match。
+class Match:
+    @native("pa_re_group")
+    def group(self, *groups: object) -> object: pass
+    @native("pa_re_groups")
+    def groups(self) -> list[str]: pass
+    @native("pa_re_groupdict")
+    def groupdict(self) -> dict[str, str]: pass
+    @native("pa_re_start")
+    def start(self, group: int = 0) -> int: pass
+    @native("pa_re_end")
+    def end(self, group: int = 0) -> int: pass
+    @native("pa_re_span")
+    def span(self, group: int = 0) -> tuple[int, int]: pass
+    @native("pa_re_expand")
+    def expand(self, template: str) -> str: pass
