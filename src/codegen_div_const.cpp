@@ -151,15 +151,18 @@ bool AsmGen::gen_div_const(const Inst& in, int mode) {
         if (d == 0 || d == -1 || d == INT64_MIN) return false;
         if (d < INT32_MIN || d > INT32_MAX) return false;
         if (mode == kDivModeMod && d == 1) { line("xorq %rax, %rax"); return true; }
-        if (d == 1) { emit2(MOp::kMovq, src_mop(in.a), kRax); return true; }
+        // 被除数已由调用方（gen_bin_int / gen_bin_int_fixed）装入 %rax，
+        // 这里不要重复 emit mov src,%rax —— 每条常数除/取模的快路径都会
+        // 因此多出一条冗余 mov（Collatz 内层循环每轮两次，占 12% 指令数）。
+        if (d == 1) return true;
 
-        // **正 2 的幂：直接从源操作数算，不经过 %r9 暂存。**
+        // **正 2 的幂：直接复用 %rax 里的被除数，不经过 %r9 暂存。**
         // gen_div_const_emit 的通用路径为了还原余数要先 `movq src,%r9`，
         // 再用时又 `movq %r9,%rax` —— 这两条在幂情形纯属浪费（不需要余数）。
         if (d > 0 && (d & (d - 1)) == 0) {
             const int pl = pow2_log2(static_cast<uint64_t>(d));
             const int64_t mask = d - 1;
-            emit2(MOp::kMovq, src_mop(in.a), kRax);
+            // %rax 已经在调用方装好 src，直接用。
             if (mode == kDivModeMod) {
                 emit_imm(MOp::kAndq, mask, kRax);
             } else if (mode == kDivModeFloor) {
