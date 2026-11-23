@@ -1,21 +1,21 @@
-# 夜间迭代与语义审计总结（2026-11-22 22:00 → 2026-11-23 10:50，0.408–0.435）
+# 夜间迭代与语义审计总结（2026-11-22 22:00 → 2026-11-23 13:30，0.408–0.446）
 
 ## 目标（用户授权）
 
 1. 完成模块化拆分；2. 继续做通用优化；3. 先写路线图再按图执行；4. 每次一个代理槽位；
-5. 08:00 前结束夜间段，白天继续语义审计与收尾（0.416–0.435）。
+5. 08:00 前结束夜间段，白天继续语义审计与收尾（0.416–0.446）。
 
 ## 结果总览
 
 | 项 | 结果 |
 |---|---|
-| 版本条目 | 夜间 0.408–0.415 + 白天 0.416–0.435（共 28 条，CHANGELOG） |
-| 测试规模 | 369 → **397** 用例；difftest 348 → **375** |
-| 最终闸门 | **397 ran ok / difftest 375-0 / ASan 397-0 报告 / check_size 通过** |
+| 版本条目 | 夜间 0.408–0.415 + 白天 0.416–0.446（共 **39 条**，CHANGELOG） |
+| 测试规模 | 369 → **409** 用例；difftest 348 → **386** |
+| 最终闸门 | **409 ran ok / difftest 386-0 / ASan 409-0 报告 / check_size 通过** |
 | 模块化 | ✅ 完成（VectPlanner 拆分，codegen_vect.cpp 1178 → 59 行） |
 | 通用优化 | ✅ 向量化从 3 基准/8 循环 → **4 基准/9 循环**；nbody −45.31%、spectral_norm −61.75% |
-| 修的 bug | **16 个**（多数是静默错值/错误输出；含 1 个异常控制流错误、1 个 pass 从未生效、3 个 unknown 域 dunder 身份语义；另 0.421 是我引入的崩溃，已回退） |
-| 语义审计 | unknown 语义 / 算术与转换 / 切片 / 字符串 / 异常 / 迭代协议 / OOP 七轮，迭代协议与 OOP 未发现 bug |
+| 修的 bug | **30 个**（多数是静默错值/崩溃；含 1 个异常控制流错误、1 个 pass 从未生效、3 个 unknown 域 dunder 身份语义、7 个 0.437–0.445 修复；另 0.421 是我引入的崩溃，已回退。计 30 时含 4 个「文档承诺/语义缺口」记录项：未初始化变量读 0、装饰后 `__iter__`、`asyncio.run`(None) 打印 0、`min/max` 混合类型） |
+| 语义审计 | unknown 语义 / 算术与转换 / 切片 / 字符串 / 异常 / 迭代协议 / OOP / 容器方法 / 推导式与作用域 / 模块与导入 / 文件 I/O / 数字格式化 / 装饰器与属性 / RC·GC / stdlib 两轮，共 22 轮；迭代协议、OOP、stdlib 续集未发现代码 bug |
 
 ## 一、模块化（阶段 A）
 
@@ -114,6 +114,14 @@ sieve 的计数循环在 0.423 向量化（`while i < N: if flags[i] == 1: count
 
 | 版本 | 类别 | 问题 | 修复 |
 |---|---|---|---|
+| **0.445** | **stdlib·math** | `math.frexp` / `math.modf` 一调用就段错误（文档承诺返回二元组，实际完全不可用） | 位模式不能按 unknown 追加：`pa_list_append` 第三参数 2→0（裸值），frexp 指数同理 |
+| **0.444** | **GC·生命周期** | `PYADAMAS_GC_INCR_MARK=1` 下退出时 `pa_gc_shutdown` UAF / `refcount decrement on a freed object`（增量标记在途 + pend 先 free 后 dec） | shutdown 先 `gc_incr_finish()` 收尾在途增量收集；`gc_pend` drain 移到 free 堆链之前 |
+| **0.442** | **格式化** | `%#x`/`%#o` 忽略进制前缀（`ff` vs `0xff`）；`%10s` 不补宽且默认对齐错（format 的 str 默认左对齐） | 新增 `alt` 标志 + `pct_alt_join`（前缀计入宽度/zero 落在前缀后）；`%s`/`%r` 默认补 `>` |
+| **0.441** | **文件编码** | strict 解码丢弃文件尾残缺多字节序列（不抛 `UnicodeDecodeError`）；`errors="replace"` 编码按字节补 `?`（`caf??` vs `caf?`） | EOF 检查 `rawleft` 按 errors 策略处理；编码/解码 EILSEQ 按完整字符（最大非法子部件）跳 |
+| **0.440** | **模块导入** | 包 `__init__.py` 的 `from . import mod` 被误判循环导入（标准包写法编译失败） | `driver_build.cpp`：req.name == 当前单元且 from_names 都是子模块时只排队子模块 |
+| **0.438** | **容器比较** | 容器大小比较未实现却按指针静默比（`[2] < [1,9]` True、`set([1]) <= a` False、混合类型不抛 TypeError） | 静态类型任一侧为 list/tuple/dict/set 时编译期拒绝（`==`/`!=` 不受影响） |
+| **0.437** | **生成器·async** | 跨挂起 spill 的活性分析按 vreg 编号误判（vreg 非 SSA），对从未定义的 vreg 做 `rc_inc` 读到栈垃圾 → async「await 已取消的 task」panic | `lower_gen_spill.cpp` 加支配集过滤：只溢出「定义块支配挂起点」的 vreg |
+| **0.436** | **类型检查·异常** | `except ... as e` 处理器里对外层变量赋值创建影子符号（静默错值：int 槽存 str 指针按 int 打印） | handler 体结束后把绑定回写父作用域（函数级作用域），顺带恢复 annotated 检查 |
 | **0.435** | **unknown 域哈希** | 无类型 dict/set 的实例键按机器字哈希 + 身份比较：等值不同对象查不到、set 不去重；`hash(unknown)` 编译期报错 | `rt_dict.c` 的 kind=3 增 `__hash__`/`__eq__` 槽分派；只有 `__eq__` 无 `__hash__` → unhashable TypeError；`hash()` 用 `kind=-1` 运行期探针 |
 | **0.434** | **unknown 域比较** | 实例 `==`/`<` 在 unknown 域按身份；`sorted(实例)` 只是抛 TypeError；typed `list[P]` 的 `in`/`index` 按身份 | 元数据第 7 字改为槽表指针 `[eq,lt,hash,-1]` + `pa_instance_dunder_fn`；`__lt__` 打通、`sort_objlt` 稳定排序；typed list 元素比较走槽分派 |
 | **0.433** | **unknown 域相等** | 实例从混合容器取出后 `==` 按同一性（CPython 调 `__eq__`） | vtable 元数据 6→7 字加 eq_slot，`any_unknown_eq` 按「实例→vtable→槽」调用 `__eq__` |
@@ -136,7 +144,7 @@ sieve 的计数循环在 0.423 向量化（`while i < N: if flags[i] == 1: count
 
 ### 3.2 审计区域与方法
 
-七轮语义审计（每轮：审计表 + 最小复现 → 修 1–2 个最严重 → 新用例 + 全量闸门）：
+22 轮语义审计（每轮：审计表 + 最小复现 → 修 1–2 个最严重 → 新用例 + 全量闸门；后 15 轮在 0.436–0.446）：
 
 | 轮次 | 区域 | 结果 |
 |---|---|---|
@@ -147,8 +155,16 @@ sieve 的计数循环在 0.423 向量化（`while i < N: if flags[i] == 1: count
 | 0.430–0.431 | 优化交互（DCE）与异常（finally 早退 raise） | 2 个 bug |
 | 迭代协议（for/enumerate/zip/reversed/range/sorted/genexpr/break-else/闭包捕获） | 诊断 | **未发现 bug**（未实现项：enumerate(start=)、zip 3+、lambda 默认值非字面量） |
 | OOP（类/继承/super/isinstance/魔术方法/属性边界/生命周期） | 诊断 | **未发现 bug**；两个待决项后续处理：`del obj.attr` 语义写进 compatibility.md（0.432），类实例排序先显式报错（0.432）后随槽表打通改回按 `__lt__` 排序（0.434）；unknown 域 dunder（`==`/`<`/`hash`）在 0.433–0.435 补齐（后续轮次，非 OOP 审计发现的 bug） |
+| 容器方法（list/dict/set/tuple 方法、浅拷贝、集合运算、相等） | 诊断+修复 | **1 个 bug**（容器大小比较静默按指针比，0.438 改编译期拒绝）；`dict.keys()` 返回 list 等文档化差异 |
+| 推导式与作用域（多 for/过滤/嵌套、作用域隔离、闭包捕获、global/nonlocal、默认参数） | 诊断 | **未发现 bug**；记录缺口：未初始化变量读取返回 0（应 UnboundLocalError/NameError） |
+| 模块与导入（import/from/别名、共享状态、快照绑定、包相对导入、循环导入） | 诊断+修复 | **1 个 bug**（包 `__init__` 的 `from . import mod` 误报循环导入，0.440）；循环导入是设计上显式拒绝 |
+| 文件 I/O 与上下文管理器（读写/追加/seek/with 自动关闭/自定义 `__enter__`/编码） | 诊断+修复 | **2 个 bug**（strict 解码丢尾部残缺序列、replace 按字节替换，0.441）；with/异常路径全对 |
+| 数字格式化与转换（进制/int·float 解析/最短 repr/f-string/format/%/round/divmod） | 诊断+修复 | **2 个 bug**（`%#x` 前缀、`%s` 宽度与默认对齐，0.442）；`min/max` 混合类型返回 float 属类型系统差异 |
+| 装饰器与属性协议（函数/方法/类装饰器、property/setter/deleter、staticmethod/classmethod、方法绑定） | 诊断 | **未发现代码 bug**；文档承诺缺口：装饰后的 `__iter__` 不可用；`__name__`/类装饰器加属性/`super().<property>` 显式未实现 |
+| RC·GC 生命周期（深嵌套/大容器/环/临时对象/10 万实例/闭包；环境矩阵 × ASan） | 压力+修复 | **2 个 bug**（spill 活性误判 0.437、GC 增量标记 shutdown UAF 0.444）；环形引用由分代 GC 回收（实测 `freed=11928/live_objs=10`）；无环形 RC 泄漏 |
+| stdlib 文档承诺（math/json/random/os·sys/datetime 第一轮；re/collections/itertools/functools/statistics/pathlib/hashlib 续集） | 诊断+修复 | 第一轮 **1 个 bug**（math.frexp/modf 段错误，0.445）；续集 **未发现代码 bug**，补 3 处 compatibility 差异；random 序列与 CPython 逐值一致 |
 
-方法论沉淀在 [semantics-audit-playbook.md](semantics-audit-playbook.md)（10 节）：穷举对拍 > 手写用例、先查文档、
+方法论沉淀在 [semantics-audit-playbook.md](semantics-audit-playbook.md)（12 节；§11 pass 有效性验证、§12 环境矩阵 × ASan）：穷举对拍 > 手写用例、先查文档、
 静态设计差异不是 bug、测试可能钉住 UB（0.427 修 `int(NaN)` 时 288 用例的 UB 期望要改）、
 修复在语义层不在现象层、**找全同类点位**（0.429 的 str/bytes 两份实现）、探针按方法组拆分、
 **改语义 → 必须审计优化器假设**（0.427 → 0.430 的连锁）。
@@ -157,12 +173,12 @@ sieve 的计数循环在 0.423 向量化（`while i < N: if flags[i] == 1: count
 
 | 项 | 夜间基线 | 现在 |
 |---|---|---|
-| `tests/run_tests.sh` 用例 | 369 | **397 ran ok**（夜间段 369 → 378，白天段 378 → 397） |
-| `tools/difftest.sh` 用例 | 348 | **375-0 不一致**（夜间段 348 → 357，白天段 357 → 375） |
-| ASan 全量 | 369 ran ok | **397 ran ok，0 sanitizer 报告** |
+| `tests/run_tests.sh` 用例 | 369 | **409 ran ok**（夜间段 369 → 378，白天段 378 → 409） |
+| `tools/difftest.sh` 用例 | 348 | **386-0 不一致**（夜间段 348 → 357，白天段 357 → 386） |
+| ASan 全量 | 369 ran ok | **409 ran ok，0 sanitizer 报告** |
 | check_size | 通过 | 通过 |
 
-新增用例集中在 474–500 段（0.416–0.435 期间加 482–500 等，含 477/482 的 bug 回归、487/489/490/492/493/494/495/496/497/498/499/500 的语义用例，以及 `tests/modules/dunder_cross/` 跨模块 dunder 用例）。
+新增用例集中在 474–511 段（0.416–0.435 期间 482–500，含 477/482 bug 回归与 487/489/490/492/493/494/495/496/497/498/499/500 语义用例、`tests/modules/dunder_cross/` 跨模块 dunder；0.436–0.446 期间 501–511：生成器、async 取消、容器方法、推导式与作用域、文件 I/O、数字格式化、装饰器与属性、RC 生命周期、stdlib 两轮，以及 `tests/modules/import_basic/` 包导入用例）。
 
 ## 五、没做到 / 下一轮
 
@@ -174,6 +190,10 @@ sieve 的计数循环在 0.423 向量化（`while i < N: if flags[i] == 1: count
 | P4 删特化（`codegen_simd*`） | 未做：spectral_norm 仍约 **1.13×**（0.417 记录 1.15×）依赖特化 |
 | AVX2 的散射/广播装载 | 未做：含这些访问的循环强制走 SSE2 |
 | `1.0/0.0` 返回 `inf`（CPython 抛 ZeroDivisionError） | 既有语义差异，已记录进 [compatibility.md](compatibility.md)，未修 |
+| 装饰后的 `__iter__` | 未修：文档承诺可装饰 dunder 含 `__iter__`，但 `for`/`list()` 的内建迭代路径不查类属性包装函数（0.443 记录） |
+| 未初始化变量读取 | 未修：读到 0 而不是 `UnboundLocalError`/`NameError`（0.439 记录；需运行期哨兵或数据流分析） |
+| `min`/`max` 混合 int/float | 未修：返回 float（`1.0`）而非 CPython 的原对象（`1`），属静态类型统一限制（0.442 记录） |
+| 装饰器 `__name__` / 类装饰器加属性 / `super().<property>` | 未修：均显式未实现（编译期拒绝，0.443 记录） |
 
 ## 六、方法上的经验
 

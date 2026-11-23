@@ -90,22 +90,22 @@
 
 ## 当前状态
 
-当前状态（对应 CHANGELOG **0.432**）：流水线 `源码 → 词法 → AST → lambda 脱糖 → 类型检查 → IR → x86-64 汇编 → 可执行文件` 已打通。语言面支持标量、字符串、`bytes`、列表/元组/字典/集合、切片读写、闭包/lambda/`*args`/`**kwargs`/装饰器、推导式、生成器表达式（惰性）、`with`、异常值、类（字段/方法/C3 多继承/`super()`/各类装饰器/类名当值）、`match/case`、`del`、复数、f-string 格式说明、dunder 协议、`Generator[Y, S, R]` 标注、`async for` 自定义 `__aiter__`、`open`/`input`/`sys.stdin`、`struct` 值类型与 `cimport`/`cdecl` C 互操作；标准库内置 28+ 模块及封装 OpenBLAS 的 `linalg`。
+当前状态（对应 CHANGELOG **0.446**）：流水线 `源码 → 词法 → AST → lambda 脱糖 → 类型检查 → IR → x86-64 汇编 → 可执行文件` 已打通。语言面支持标量、字符串、`bytes`、列表/元组/字典/集合、切片读写、闭包/lambda/`*args`/`**kwargs`/装饰器、推导式、生成器表达式（惰性）、`with`、异常值、类（字段/方法/C3 多继承/`super()`/各类装饰器/类名当值）、`match/case`、`del`、复数、f-string 格式说明、dunder 协议、`Generator[Y, S, R]` 标注、`async for` 自定义 `__aiter__`、`open`/`input`/`sys.stdin`、`struct` 值类型与 `cimport`/`cdecl` C 互操作；标准库内置 28+ 模块及封装 OpenBLAS 的 `linalg`。
 
 验证现状（每条命令都能直接复现）：
 
 | 门 | 命令 | 现状 |
 |---|---|---|
-| 运行用例 | `PYADAMAS_TEST_JOBS=4 bash tests/run_tests.sh build/gfix build/lead/pyadamas` | **393 ran ok，0 失败** |
-| 差分对拍 | `PYADAMAS_TEST_JOBS=1 bash tools/difftest.sh build/lead/pyadamas` | **372 个用例，0 个不一致** |
-| 内存 | `PYADAMAS_TEST_ASAN=1 PYADAMAS_TEST_JOBS=1 bash tests/run_tests.sh build/gfixa build/lead/pyadamas` | **393 ran ok，0 sanitizer 报告** |
+| 运行用例 | `PYADAMAS_TEST_JOBS=4 bash tests/run_tests.sh build/gfix build/lead/pyadamas` | **409 ran ok，0 失败** |
+| 差分对拍 | `PYADAMAS_TEST_JOBS=1 bash tools/difftest.sh build/lead/pyadamas` | **386 个用例，0 个不一致** |
+| 内存 | `PYADAMAS_TEST_ASAN=1 PYADAMAS_TEST_JOBS=1 bash tests/run_tests.sh build/gfixa build/lead/pyadamas` | **409 ran ok，0 sanitizer 报告** |
 | 体积 | `bash tests/check_size.sh` | 通过 |
 
 性能与能力的当前口径见 [nightly-summary.md](nightly-summary.md)：12 个经典基准 × -O0/-O1/-O2 输出 **36/36** 与 CPython 一致
 （nbody 109,040,119 条 ≈ −45.31%、spectral_norm 94,637,438 ≈ −61.75%、sieve −8.58%、matmul −4.52%，相对夜间/0.418 基线），
 向量化覆盖 **4 个基准 / 9 个循环**（matmul、spectral_norm、nbody、sieve），其余 8 个基准的阻塞点见 [vectorization-coverage.md](vectorization-coverage.md)。
 
-剩余主要缺口：8 个基准的向量化（masked 向量化 / 嵌套循环 / 调用屏障）、类实例 dunder 在 unknown 域（需类注册名→槽）、
+剩余主要缺口：8 个基准的向量化（masked 向量化 / 嵌套循环 / 调用屏障）、装饰后的 `__iter__`（内建迭代路径不查类属性包装函数）、未初始化变量读取返回 0（需哨兵/数据流分析）、
 P4 删特化（spectral_norm 仍约 1.13× 依赖特化）、asyncio 边角、异常对象 traceback/列号/`.debug_info`、字符串码点语义 S3、
 依赖动态属性的 stdlib（`argparse`/`dataclasses`/`contextlib`，见 [stdlib-gaps.md](stdlib-gaps.md)）；以及回归纪律：
 `docs/index.md` 的文档维护规则仍然适用。

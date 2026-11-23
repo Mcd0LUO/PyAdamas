@@ -4,6 +4,214 @@
 
 早期阶段没有逐条留痕，按阶段归纳；0.4 之后逐条记录。
 
+## [0.446] - 2026-11-23
+
+> test/docs：**stdlib 审计续集用例**（`tests/run/511_stdlib2.py`）+ 补 3 处行为差异到 `docs/compatibility.md`。（commit ad6c3ba）
+>
+> ### 审计结论（re / collections / itertools / functools / statistics / pathlib / hashlib）
+>
+> 文档承诺逐条对拍：re 的 findall 组规则/sub(count)/split 捕获/escape/标志/量词全部一致；deque 全套操作、
+> Counter 已有键与 most_common、OrderedDict、defaultdict 一致；itertools 8 个函数结果一致；partial/reduce
+> （int/str/float）/lru_cache 装饰器缓存一致；statistics 9 函数、pathlib 成分、hashlib md5/sha1/sha256 摘要一致。
+> 本轮未发现新的代码 bug。
+>
+> ### 文档补账（compatibility.md）
+>
+> 1. `itertools`：Optional 元素在容器 repr 里按裸值打印（`[(1, 'a'), (2, None)]` 显示为 `[(1, a), (2, None)]`）；
+> 2. `collections`：未指定 `maxlen` 时 `.maxlen` 返回 -1（不是 None）；
+> 3. `re`：`Match.groups()` 返回 `list[str]`（CPython 是 tuple）。
+>
+> ### 验证
+>
+> 闸门 **409 ran ok / difftest 386-0 / ASan 409-0 报告 / check_size 通过**；12 基准 36/36；
+> SIMD matmul 10,126,760 / sn 94,637,421。
+
+## [0.445] - 2026-11-23
+
+> fix(rt)：**`math.frexp` / `math.modf` 一调用就段错误**（文档承诺返回二元组，实际完全不可用）。（commit e9148ec）
+>
+> ### 问题
+>
+> `x = math.frexp(8.0)` 即 rc=139 段错误（取值/解包/打印都崩）。根因：`pa_math_frexp`/`pa_math_modf` 用
+> `pa_list_append(l, bits, 2)` 追加 float 位模式和整数——第三个参数是**所有权类别**（0=裸值/1=引用/2=unknown），
+> 传 2 会对 double 位模式调用 `pa_unknown_is_heap(bits)`，把位模式当指针查堆索引 → 越界读。
+>
+> ### 修法（`runtime/rt_math.c` +8/−2）
+>
+> `math_tuple_push_f64` 与 frexp 的指数追加改为 kind=0（裸值），注释说明位模式不能按 unknown 追加。
+>
+> ### 验证
+>
+> `frexp(8.0)→(0.5, 4)`、`modf(2.5)→(0.5, 2.0)` 三档与 CPython 一致；整份 math 探针（含全部文档函数与边界）
+> 逐字节相同；新增 `tests/run/510_stdlib.py`；闸门 **408 ran ok / difftest 385-0 / ASan 408-0 报告 / check_size 通过**；
+> 12 基准 36/36；SIMD matmul 10,126,759 / sn 94,637,422。
+
+## [0.444] - 2026-11-23
+
+> fix(gc)：**增量标记在途时 `pa_gc_shutdown` 的 UAF/崩溃**（`PYADAMAS_GC_INCR_MARK=1`，默认关）。（commit a7dbf43）
+>
+> ### 问题
+>
+> 带环/大量对象丢弃的程序在 `PYADAMAS_GC_INCR_MARK=1` 下退出时：ASan `heap-use-after-free` 于
+> `pa_rc_dec ← pa_gc_shutdown`，非 ASan 构建报 `refcount decrement on a freed object`。
+> 根因两处叠加：(1) 退出时增量收集进行到一半（`gc_incr_state != 0`），shutdown 的整堆扫描看到半成品状态，
+> `gc_pend` 里混有链上对象；(2) 原顺序先 free 整条堆链、再 dec `gc_pend` → 读已释放的 rc 头。
+>
+> ### 修法（`runtime/rt_core.c` +15/−3）
+>
+> shutdown 开头先 `gc_incr_finish()` 收尾在途增量收集；把 `gc_pend` 的 drain 移到 free 堆链之前。
+>
+> ### 验证
+>
+> 2 个 GC 探针 × {INCR_MARK, INCR_MARK+CONSERVATIVE, CONSERVATIVE, 默认} 全部 rc=0、
+> `detect_leaks=1` 下 0 报告；环全部回收（`[gcstats] minor set=11931 freed=11928 live_objs=10`）；
+> 4 个压力形状 × 3 组 GC 环境 ASan+LSan 全绿；新增 `tests/run/509_rc_lifecycle.py`；
+> 闸门 **407 ran ok / difftest 384-0 / ASan 407-0 报告 / check_size 通过**；12 基准 36/36；SIMD 10,126,759 / 94,637,423。
+
+## [0.443] - 2026-11-23
+
+> test：**装饰器与属性协议审计用例**（`tests/run/508_decorators_property.py`），并记录一个文档承诺未兑现的缺口。（commit 107de82）
+>
+> ### 审计结论（全部与 CPython 一致）
+>
+> 函数装饰器/叠加顺序/带参装饰器、方法装饰器（实例与未绑定调用）、装饰 `__init__`/`__len__`/`__call__`、
+> property getter/setter/deleter/继承重写/抛异常、staticmethod/classmethod（类与实例调用、`cls()`）、
+> 方法值绑定与传参。
+>
+> ### 记录缺口（未修）
+>
+> **装饰后的 `__iter__` 不可用**：文档写「走 dunder_call 的那批 dunder 都可以装饰（含 `__iter__`）」，实际
+> `for x in It()` / `list(It())` 编译期报 `list() cannot iterate over 'It'`——容器/迭代的内建路径没有查类属性包装函数。
+> 另：函数 `__name__` 读取、类装饰器新增属性、`super().<property>` 均显式未实现。
+>
+> ### 验证
+>
+> 闸门 **406 ran ok / difftest 383-0 / ASan 406-0 报告 / check_size 通过**；12 基准 36/36。
+
+## [0.442] - 2026-11-23
+
+> fix(rt)：**`%` 格式化两处静默错值**（`#` 进制前缀被忽略、`%s` 宽度/默认对齐错误）。（commit c30bc93）
+>
+> ### 问题
+>
+> `"%#x" % 255` 得 `ff`（CPython `0xff`）、`"%#o" % 8` 得 `10`、`"[%10s]" % "hi"` 不补宽（CPython 右对齐补到 10）。
+> 根因：flags 解析里 `'#'` 是空分支；`%s` 的 spec 只加显式 `-`，没有默认右对齐（format 的 str 默认是左对齐）。
+>
+> ### 修法（`runtime/rt_format.c` +约 60 行）
+>
+> 新增 `alt` 标志与 `pct_alt_join`：插入 `0x/0X/0o` 前缀并保持总宽度语义（前缀计入宽度、zero 填充的 0 落在前缀后、
+> 左对齐/负号/零值）；`%s`/`%r` 默认对齐补 `>`。
+>
+> ### 验证
+>
+> `%#10x`→`      0xff`、`%#010x`→`0x000000ff`、`%#-10x`→`0xff      `、`[%10s]` 右对齐；
+> 新增 `tests/run/507_numeric_format.py`；闸门 **405 ran ok / difftest 382-0 / ASan 405-0 报告 / check_size 通过**；
+> 12 基准 36/36；SIMD matmul 10,126,755 / sn 94,637,421。
+
+## [0.441] - 2026-11-23
+
+> fix(rt)：**文件编码两处静默错值**（strict 解码丢弃文件尾残缺序列、`errors="replace"` 编码按字节替换）。（commit 535222e）
+>
+> ### 问题
+>
+> 1. latin-1 写出的 `café`（末尾字节 `0xE9`）用 UTF-8 读：CPython 抛 `UnicodeDecodeError("unexpected end of data")`，
+>    pyadamas 静默返回 `caf`（EOF 时 `rawleft` 里的残缺序列被丢弃）。
+> 2. ascii + `errors="replace"` 写 `café`：CPython 落盘 `caf?`（每字符一个 `?`），pyadamas 得 `caf??`（每字节一个）。
+>
+> ### 修法（`runtime/rt_file.c` +约 40 行）
+>
+> EOF 分支：`rawleft_len > 0` 时 strict 抛 `UnicodeDecodeError`、ignore/replace 丢弃；编码侧 `EILSEQ` 按 UTF-8
+> 字符跳（前导字节 + 续字节）只出一个替换符，解码侧按「最大非法子部件」跳。
+>
+> ### 验证
+>
+> 新增 `tests/run/506_file_io.py`（临时文件 + os.remove 清理）；闸门 **404 ran ok / difftest 381-0 /
+> ASan 404-0 报告 / check_size 通过**；12 基准 36/36；SIMD matmul 10,126,758 / sn 94,637,421。
+> 已知偏差：解码 `replace` 在 EOF 暂不补 U+FFFD（丢弃），二进制读回是 str。
+
+## [0.440] - 2026-11-23
+
+> fix(driver)：**包 `__init__.py` 里的 `from . import mod` 误报循环导入**（标准包写法直接编译失败）。（commit 9fab3fa）
+>
+> ### 问题
+>
+> `pkg/__init__.py: from . import mod` + main `from pkg import mod` → `error: circular import: __entry__ -> pkg -> pkg`。
+> 根因：相对解析后 ImportReq 的 name 等于当前单元自身，被当成自导入。
+>
+> ### 修法（`src/driver_build.cpp` +18）
+>
+> 若 req.name == 当前单元且所有 from_names 都能解析成子模块，则视为「导入子模块」：跳过自身依赖、只排队子模块。
+>
+> ### 验证
+>
+> 新增 `tests/modules/import_basic/`（共享状态 / 快照绑定 / 跨包 from-import / `__name__ == "__main__"`）；
+> 闸门 **403 ran ok / difftest 380-0 / ASan 403-0 报告 / check_size 通过**；12 基准 36/36。
+> 遗留差异：子模块经包属性再导出（`from pkg import mod` 的别名绑定）仍不支持，已记录。
+
+## [0.439] - 2026-11-23
+
+> test：**推导式与作用域审计用例**（`tests/run/505_comprehensions_scope.py`），并记录一个语义缺口。（commit 83e42eb）
+>
+> ### 审计结论（全部与 CPython 一致）
+>
+> 多 for / 多条件过滤 / 嵌套推导式 / 生成器表达式、推导式作用域不泄漏、同名外层遮蔽、闭包按引用捕获、
+> for/while 循环晚绑定（`[2,2,2]` / `[3,3,3]`）、3 层嵌套、global/nonlocal、默认参数。
+>
+> ### 记录缺口（未修）
+>
+> **未初始化变量读取返回 0**，而不是 `UnboundLocalError`/`NameError`：
+> `def outer(): v=1; def g(): v = v+1`（CPython 抛 UnboundLocalError，pyadamas 返回 1）；
+> 模块级 `print(zzz)` 先于 `zzz=5`（CPython NameError，pyadamas 打印 0）。完全未定义的名字仍编译期报错。
+> 修法需运行期哨兵或数据流分析，未做。
+>
+> ### 验证
+>
+> 闸门 **402 ran ok / difftest 380-0 / ASan 402-0 报告 / check_size 通过**；12 基准 36/36。
+
+## [0.438] - 2026-11-23
+
+> fix(lower)：**容器大小比较未实现却静默按机器字/指针比**（list 字典序、set 子集判断给出随机布尔值）。（commit d303c24）
+>
+> ### 问题
+>
+> `[2] < [1, 9]` 得 True（CPython False）、`set([1]) <= set([1,2,3])` 得 False（CPython True）、
+> `[1] < ["a"]` 不抛 TypeError。根因：大小比较落到通用 `Cmp` 指令，按堆指针比。
+>
+> ### 修法（`src/lower_expr_ops.cpp` +21）
+>
+> 容器排序语义未实现（list 字典序 / set 子集 / dict/tuple 该抛 TypeError），按「宁可报错，不可静默算错」：
+> 静态类型能确定任一侧是 list/tuple/dict/set（含 Optional 包裹）时**编译期拒绝**；`==`/`!=` 不受影响。
+>
+> ### 验证
+>
+> 新增 `tests/run/504_container_methods.py`；闸门 **401 ran ok / difftest 379-0 / ASan 401-0 报告 / check_size 通过**；
+> 12 基准 36/36；SIMD matmul 10,126,808 / sn 94,637,471。
+
+## [0.437] - 2026-11-23
+
+> fix(gen)：**跨挂起 spill 的活性分析按 vreg 编号误判**（对从未定义的 vreg 做 `rc_inc` 读到栈垃圾 → panic）；（commit b7198a1）
+> 这是 async「`await` 已取消的 task」崩溃的真根因（task 所有权本身没问题）。
+>
+> ### 问题
+>
+> 最小复现（async 取消）：`t.cancel(); await t` 时进程 panic `refcount increment on a freed object`。gdb 栈是
+> `pa_rc_inc_slow ← pyadamas_fn_*_resume ← coro_step`，但反汇编显示指令是**挂起前的 spill prelude**：`RcInc(%48)`。
+> IR 里 `%48` 只在 `g.close` 等后置块定义，从未在该路径执行 → 读到上一个栈帧残留的 loader 地址。
+>
+> 根因：`lower_gen_spill.cpp` 的活性分析只按 **vreg 编号**，而降低期 vreg 不是 SSA（不同块的不同值共用编号）；
+> `bb1` 的 47..52 与 `g.close` 块的 47..52 被当成同一变量，判成 live-in。
+>
+> ### 修法（`src/lower_gen_spill.cpp` +59/−3）
+>
+> 计算支配集：只溢出「存在定义块 d 支配挂起块 b」的 vreg，否则跳过（该路径上它还没有值）。pre-save 与
+> cont-preload 用同一份过滤列表，避免半套状态。
+>
+> ### 验证
+>
+> 崩溃脚本从 exit 1 → `cancel_ret,fin,caught,done` 三档与 CPython 一致；新增 `tests/run/503_async_cancel.py`；
+> 闸门 **400 ran ok / difftest 378-0 / ASan 400-0 报告 / check_size 通过**；12 基准 36/36 输出一致、指令数 ±0.03%；
+> SIMD matmul 10,126,808 / sn 94,637,470。
+
 ## [0.436] - 2026-11-23
 
 > fix(tc)：**`except ... as e` 处理器里对外层变量赋值创建影子符号**（静默错值）；同时归档生成器审计结论

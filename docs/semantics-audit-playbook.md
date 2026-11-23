@@ -191,3 +191,29 @@ zero_hit=<name1>,<name2>
 2. 0 命中先查**调用点是否真的被走到**（门控/env 传参），再怀疑判据；
 3. 指纹命中 ≠ 语义正确：工具只回答「有没有变」，正确性仍靠 run_tests / difftest / ASan。
 
+## 12. 环境矩阵 × ASan（0.444 教训）
+
+常规 ASan 闸门只跑**默认开关**；真正的内存 bug 可能藏在非默认的实验开关里。0.444 的 GC UAF 就是实例：
+`PYADAMAS_GC_INCR_MARK=1`（默认关的增量标记）下退出时 `pa_gc_shutdown` 先 free 堆链、再 dec `gc_pend`，
+读已释放的 rc 头；默认构建与常规 ASan 全量 409 用例全绿，只有「开关矩阵 × ASan/LSan」才暴露。
+
+做法：对每个有环境开关的子系统（GC：`PYADAMAS_GC_INCR_MARK` / `PYADAMAS_GC_CONSERVATIVE` /
+`PYADAMAS_GC_SECTIONS`；优化：`PYADAMAS_RA_OPT` / `PYADAMAS_SIMD` / `PYADAMAS_LOOP_OPT`）按矩阵跑压力脚本：
+
+```bash
+# ASan 编译（--asan 是编译器 flag；build/gfixa 只是测试工作目录）
+build/lead/pyadamas build --asan --rebuild -O2 -o /tmp/x.bin /tmp/stress.py
+for envs in "PYADAMAS_GC_INCR_MARK=1" "PYADAMAS_GC_CONSERVATIVE=1" "NONE"; do
+  if [ "$envs" = "NONE" ]; then E=""; else E="$envs"; fi
+  ASAN_OPTIONS=detect_leaks=1:halt_on_error=1 env $E /tmp/x.bin > out.log 2> err.log
+  rc=$?; grep -cE "AddressSanitizer|LeakSanitizer|runtime error" err.log
+done
+```
+
+判读经验：
+
+1. **先看 rc**：段错误/panic 会让 stdout 为空，MISMATCH 先看退出码和 `stdbuf -oL` 的部分输出，别急着判「函数没实现」；
+2. **shutdown/退出路径是重灾区**：收集器、flush、静态表释放都在 exit 里，压力脚本要跑到自然退出（而不是提前 return）；
+3. **LeakSanitizer 要先有 baseline**：GC 程序退出时本来就有留到进程结束的对象，先跑 hello-world 记基线，再比差值；
+4. 修复顺序建议「先收尾在途状态、再释放资源」（0.444 的 `gc_incr_finish()` 先于 free 堆链）；
+5. 环境矩阵跑通后，把对应的开关组合写进报告与 CHANGELOG，避免下次审计重新发现同一个坑。
