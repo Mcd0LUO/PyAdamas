@@ -417,6 +417,22 @@ static int any_unknown_eq(int64_t a, int64_t b, int depth) {
     if (!pa_unknown_is_heap(a) || !pa_unknown_is_heap(b)) return 0;
     PyAdamasRc* ha = (PyAdamasRc*)(uintptr_t)((uint64_t)a - (uint64_t)PYADAMAS_RC_HDR);
     PyAdamasRc* hb = (PyAdamasRc*)(uintptr_t)((uint64_t)b - (uint64_t)PYADAMAS_RC_HDR);
+    /* 用户类实例：按 vtable 元数据第 7 个字的 __eq__ 槽号调用。
+       typed 域在编译期就拿到槽号（VCall），这里补的是 unknown 域：
+       实例从混合容器取出/两个 unknown 值比较时也走 __eq__，不再退化成指针相等。
+       __ne__ 暂不单独分派（没有 __ne__ 时用 __eq__ 取反，与 typed 域同口径）。 */
+    if (ha->kind == PYADAMAS_RC_INSTANCE && hb->kind == PYADAMAS_RC_INSTANCE) {
+        const int64_t* vt = *(const int64_t**)a;
+        if (vt) {
+            int64_t slot = (vt - 7)[6];
+            if (slot >= 0) {
+                int64_t (*fn)(int64_t, int64_t) =
+                    (int64_t (*)(int64_t, int64_t))(uintptr_t)vt[slot];
+                if (fn) return fn(a, b) ? 1 : 0;
+            }
+        }
+        return 0;
+    }
     if (ha->kind == PYADAMAS_RC_STR && hb->kind == PYADAMAS_RC_STR)
         return pa_str_eq((PyAdamasStr*)a, (PyAdamasStr*)b) != 0;
     if (ha->kind == PYADAMAS_RC_BIGINT && hb->kind == PYADAMAS_RC_BIGINT)

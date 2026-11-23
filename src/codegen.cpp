@@ -262,8 +262,9 @@ std::string AsmGen::gen(const IRModule& m) {
 
         // 每个类一张静态 vtable：槽里是方法代码地址。对象头第一个
         // 字段指向它，虚调用就是「取表、取槽、间接跳转」。
-        // vtable 前固定 6 个字的元数据：MRO 元数据指针表、类编号、
-        // vtable 自身、本类声明的槽表、模块限定类名、动态属性槽偏移。
+        // vtable 前固定 7 个字的元数据：MRO 元数据指针表、类编号、
+        // vtable 自身、本类声明的槽表、模块限定类名、动态属性槽偏移、
+        // __eq__ 槽号（-1 = 无实现；unknown 域相等用，见 rt_any.c）。
         if (!m.classes.empty()) {
             section_relro();
             // 同名类重定义时接口导出的是最后一次绑定，符号也只导出最后一份。
@@ -283,6 +284,7 @@ std::string AsmGen::gen(const IRModule& m) {
                     quad_sym(emit_.out, emit_.line_buf, e.own_slots_symbol);
                     quad_sym2(emit_.out, emit_.line_buf, ".Lcnameext", static_cast<int64_t>(i), static_cast<int64_t>(j));
                     emit_.out += "\t.quad 0\n";  // 导入类没有动态属性槽
+                    emit_.out += "\t.quad -1\n";  // 导入类没有 __eq__ 槽号（实例 metadata 走定义模块那份）
                     raw_label2(emit_.out, emit_.line_buf, ".Lcnameext", static_cast<int64_t>(i), static_cast<int64_t>(j));
                     emit_.line_buf = "\t.asciz \"";
                     emit_.line_buf += asm_escape(e.qualname);
@@ -296,8 +298,9 @@ std::string AsmGen::gen(const IRModule& m) {
                 quad_sym(emit_.out, emit_.line_buf, num_label(".Lvt", static_cast<int64_t>(i)));
                 quad_sym(emit_.out, emit_.line_buf, num_label(".Lvtown", static_cast<int64_t>(i)));
                 quad_sym(emit_.out, emit_.line_buf, num_label(".Lcname", static_cast<int64_t>(i)));
-                // 第 6 个字：动态属性槽偏移（0 = 没有）。
+                // 第 6 个字：动态属性槽偏移（0 = 没有）；第 7 个字：__eq__ 槽号。
                 quad_dec(emit_.out, emit_.line_buf, c.dict_off);
+                quad_dec(emit_.out, emit_.line_buf, c.eq_slot);
                 bool export_cls = !m.is_entry && !m.module_symbol.empty() &&
                                   !c.name.empty() && last_cls[c.name] == i;
                 raw_label(emit_.out, emit_.line_buf, num_label(".Lvt", static_cast<int64_t>(i)));

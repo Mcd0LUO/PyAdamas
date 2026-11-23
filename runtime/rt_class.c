@@ -28,7 +28,8 @@ void* pa_struct_copy(void* src, int64_t size) {
 
 /* 类模式的运行期类型检查。只认用户类实例；原始整数、str、list 等
    都不是类实例。查注册表保证对任意 unknown 机器字都安全。
-   vtable 前 5 个字：MRO 元数据指针表、类编号、vtable、自身槽表、类名。 */
+   vtable 前 7 个字：MRO 元数据指针表、类编号、vtable、自身槽表、类名、
+   动态属性槽偏移、__eq__ 槽号（unknown 域相等用，见 rt_any.c）。 */
 static const int64_t* inst_vtable(void* obj) {
     if (!obj) return NULL;
     PyAdamasRc* h = (PyAdamasRc*)obj - 1;
@@ -40,7 +41,7 @@ static const int64_t* inst_vtable(void* obj) {
 int64_t pa_isinstance(void* obj, int64_t class_id) {
     const int64_t* vt = inst_vtable(obj);
     if (!vt) return 0;
-    const int64_t* meta = vt - 6;
+    const int64_t* meta = vt - 7;
     const int64_t* mro = (const int64_t*)(uintptr_t)meta[0];
     if (!mro) return 0;
     int64_t n = mro[0];
@@ -56,7 +57,7 @@ int64_t pa_isinstance(void* obj, int64_t class_id) {
 int64_t pa_obj_class_id(void* obj) {
     const int64_t* vt = inst_vtable(obj);
     if (!vt) return -1;
-    return (vt - 6)[1];   /* 元数据第 1 个字是类编号 */
+    return (vt - 7)[1];   /* 元数据第 1 个字是类编号 */
 }
 
 /* 跨模块类模式：类编号只在模块内唯一，用「模块名.类名」比较。 */
@@ -64,7 +65,7 @@ int64_t pa_is_named_class(void* obj, PyAdamasStr* qualname) {
     if (!qualname) return 0;
     const int64_t* vt = inst_vtable(obj);
     if (!vt) return 0;
-    const int64_t* meta = vt - 6;
+    const int64_t* meta = vt - 7;
     const int64_t* mro = (const int64_t*)(uintptr_t)meta[0];
     if (!mro) return 0;
     int64_t n = mro[0];
@@ -199,7 +200,7 @@ void* pa_super_lookup(void* obj, PyAdamasStr* after_qualname, int64_t slot,
         pa_raise_c("AttributeError", "'super' object has no attribute");
         return NULL;
     }
-    const int64_t* meta = vt - 6;
+    const int64_t* meta = vt - 7;
     const int64_t* mro = (const int64_t*)(uintptr_t)meta[0];
     int64_t n = mro ? mro[0] : 0;
     int found = 0;
@@ -244,7 +245,7 @@ int64_t pa_is_exc(void* obj, PyAdamasStr* type) {
     if (h->kind == PYADAMAS_RC_INSTANCE) {
         const int64_t* vt = *(const int64_t**)obj;
         if (!vt) return 0;
-        const int64_t* meta = vt - 6;
+        const int64_t* meta = vt - 7;
         const int64_t* mro = (const int64_t*)(uintptr_t)meta[0];
         if (!mro || mro[0] < 1) return 0;
         const int64_t* m = (const int64_t*)(uintptr_t)mro[1];
@@ -317,7 +318,7 @@ int64_t pa_is_str(void* obj) {
 static void** attr_slot(void* obj) {
     const int64_t* vt = inst_vtable(obj);
     if (!vt) return NULL;
-    int64_t off = vt[-1];
+    int64_t off = vt[-2];  // 元数据第 6 字（dict_off）：7 字元数据块 = vt[-7..-1]，偏移取 vt[-2]
     if (off <= 0) return NULL;
     return (void**)((char*)obj + off);
 }

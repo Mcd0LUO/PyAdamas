@@ -345,6 +345,19 @@ void Lowerer::lower_classdef(ClassDef& c) {
         }
     }
 
+    // unknown 域相等（pa_any_cmp → any_unknown_eq）需要「实例 → vtable → __eq__ 槽」：
+    // 把 MRO 上 __eq__ 的槽号记进 vtable 元数据第 7 个字（-1 = 没有实现）。
+    // 槽来自导入基类时 vtable 里是外部符号地址，同样可用；纯本地继承已被上面的
+    // plans 填进 cv，所以这里只判「槽有实现」。
+    if (const MethodInfo* eqm = ci->method("__eq__")) {
+        int s = eqm->slot;
+        auto& vt = mod_.classes[cid].vtable;
+        auto& ve = mod_.classes[cid].vtable_ext;
+        bool has = s >= 0 && s < static_cast<int>(vt.size()) && vt[s] >= 0;
+        if (!has && s >= 0 && s < static_cast<int>(ve.size()) && !ve[s].empty()) has = true;
+        if (has) mod_.classes[cid].eq_slot = s;
+    }
+
     // P4（lang_gaps）：把本类声明的普通方法按「限定名.方法名→槽」登记进
     // 运行期动态分派表（rt_lang.c）。closing 的 .close() / file 协议泛化
     // 靠它在 unknown 实例上按 MRO 找实现。门控关时一条都不发射。

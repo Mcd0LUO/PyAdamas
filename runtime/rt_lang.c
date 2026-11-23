@@ -190,7 +190,7 @@ static const MethodReg* lang_method_lookup(const char* qual, const char* meth) {
 }
 
 /* 沿实例 MRO 找方法实现（与 pa_super_lookup 同一套元数据布局：
-   meta=vt-6，m[2]=vtable / m[3]=own_slots / m[4]=限定名）。命中且槽在
+   meta=vt-7，m[2]=vtable / m[3]=own_slots / m[4]=限定名）。命中且槽在
    该类 own_slots 里（尊重覆盖）才返回该类 vtable 的实现。找不到报
    AttributeError。返回的函数指针按调用方口径 cast（零参/带参）。 */
 static void* lang_method_fn(void* obj, const char* meth) {
@@ -199,7 +199,7 @@ static void* lang_method_fn(void* obj, const char* meth) {
         if (h->kind == PYADAMAS_RC_INSTANCE) {
             const int64_t* vt = *(const int64_t**)obj;
             if (vt) {
-                const int64_t* meta = vt - 6;
+                const int64_t* meta = vt - 7;
                 const int64_t* mro = (const int64_t*)(uintptr_t)meta[0];
                 int64_t n = mro ? mro[0] : 0;
                 for (int64_t i = 1; i <= n; ++i) {
