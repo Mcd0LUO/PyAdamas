@@ -15,7 +15,7 @@ namespace pyadamas {
 // 模块名 → 文件名/目录名片段。与符号 mangling 共用同一份**单射**编码
 // （module.cpp 的 module_symbol_prefix）：旧的「非字母数字→下划线」是有损的，
 // "a.b" 与 "a_b" 会映射到同一个缓存目录（缓存互相覆盖）和同一个符号前缀。
-std::string sanitize_symbol(const std::string& s) { return module_symbol_prefix(s); }
+std::string sanitize_symbol(const std::string& s) { return mangle_component(s); }
 
 bool valid_module_name(const std::string& s) {
     if (s.empty() || std::isdigit(static_cast<unsigned char>(s[0]))) return false;
@@ -133,10 +133,12 @@ inline constexpr ModuleEntry kModuleTable[] = {
     {"decimal", ModuleKind::Python, "decimal.py", ""},
     {"fnmatch", ModuleKind::Python, "fnmatch.py", "re"},
     {"enum", ModuleKind::Python, "enum.py", ""},
+    {"errno", ModuleKind::Python, "errno.py", ""},
     {"fractions", ModuleKind::Python, "fractions.py", ""},
     {"glob", ModuleKind::Python, "glob.py", "os,os.path"},
     {"gzip", ModuleKind::Python, "gzip.py", "zlib,_gzipio"},
     {"_gzipio", ModuleKind::Python, "_gzipio.py", ""},
+    {"getpass", ModuleKind::Python, "getpass.py", "os"},
     {"hashlib", ModuleKind::Python, "hashlib.py", ""},
     {"heapq", ModuleKind::Python, "heapq.py", ""},
     {"hmac", ModuleKind::Python, "hmac.py", "hashlib"},
@@ -144,8 +146,11 @@ inline constexpr ModuleEntry kModuleTable[] = {
     {"logging", ModuleKind::Python, "logging.py", "sys"},
     {"queue", ModuleKind::Python, "queue.py", "heapq,time"},
     {"shutil", ModuleKind::Python, "shutil.py", "os,os.path,fnmatch"},
+    {"platform", ModuleKind::Python, "platform.py", "os"},
     {"pprint", ModuleKind::Python, "pprint.py", ""},
     {"secrets", ModuleKind::Python, "secrets.py", "random,base64"},
+    {"shlex", ModuleKind::Python, "shlex.py", ""},
+    {"stat", ModuleKind::Python, "stat.py", ""},
     {"statistics", ModuleKind::Python, "statistics.py", "math"},
     {"struct", ModuleKind::Python, "struct.py", "math"},
     {"string", ModuleKind::Python, "string.py", ""},
@@ -177,6 +182,14 @@ bool is_native_module(const ModuleEntry* e) { return e && e->kind == ModuleKind:
 std::string module_source_path(const ModuleEntry& e) {
     return canonical_path(
         (std::filesystem::path(PYADAMAS_STDLIB_DIR) / std::string(e.source)).string());
+}
+
+std::string stdlib_relative_path(const std::string& path) {
+    const std::string root = canonical_path(PYADAMAS_STDLIB_DIR);
+    if (path.size() > root.size() + 1 && path.compare(0, root.size(), root) == 0 &&
+        path[root.size()] == '/')
+        return path.substr(root.size() + 1);
+    return std::filesystem::path(path).filename().string();
 }
 
 bool path_under_stdlib(const std::string& path) {

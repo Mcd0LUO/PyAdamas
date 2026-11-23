@@ -329,12 +329,13 @@ if match "cache:key"; then
             echo "FAILED (--target switch reused another ABI's cache)"; ck_fail=1
         fi
     fi
-    # 3) 老格式清单（pyadamasmanifest 1）必须判失效。
+    # 3) 老格式清单（上一代 pyadamasmanifest 2）必须判失效。
+    #    清单代数随格式改动递增：v2 = 上一版（target 有、modulever 无）。
     if [ "$ck_fail" = 0 ]; then
         ck_run build -o "$ck/p1" "$ck/proj/main.py" > /dev/null 2>&1 || true
         oldm=$(find "$cstore" -name manifest | head -1)
         if [ -n "$oldm" ]; then
-            sed -i 's/^pyadamasmanifest 2$/pyadamasmanifest 1/' "$oldm"
+            sed -i 's/^pyadamasmanifest 3$/pyadamasmanifest 2/' "$oldm"
             ck_run build -v -o "$ck/p1" "$ck/proj/main.py" 2> "$ck/b4.err" || true
             if ! grep -q 'building module' "$ck/b4.err"; then
                 echo "FAILED (old manifest format accepted as new)"; ck_fail=1
@@ -379,6 +380,137 @@ if match "cache:key"; then
     fi
     rm -rf "$ck"
     [ "$ck_fail" = 0 ] && echo "ran ok" || fail=1
+fi
+
+# ── 数据平面：deps --json 模块图（构建系统/PM/IDE 的稳定接口）──────
+#
+# 守：确定性（两次逐字节相同）、无绝对路径/时间戳、关键字段齐全、
+#     mangling 带版本段（P0 版本进符号的编码路径）。
+if match "deps:json"; then
+    dj="$BUILD/depsjson"
+    rm -rf "$dj"
+    mkdir -p "$dj"
+    cp -R tests/modules/chain "$dj/proj"
+    dstore="$dj/cache"
+    dj_fail=0
+    dj_run() { env PYADAMAS_CACHE_DIR="$dstore" "$PYADAMAS" deps --json "$@"; }
+    printf '  %-28s ' "deps:json"
+    if ! dj_run "$dj/proj/main.py" > "$dj/a.json" 2> "$dj/a.err"; then
+        echo "FAILED (deps exit)"; sed -n '1,6p' "$dj/a.err"; dj_fail=1
+    fi
+    if [ "$dj_fail" = 0 ]; then
+        dj_run "$dj/proj/main.py" > "$dj/b.json" 2>/dev/null || dj_fail=1
+        cmp -s "$dj/a.json" "$dj/b.json" || { echo "FAILED (not deterministic)"; dj_fail=1; }
+    fi
+    if [ "$dj_fail" = 0 ]; then
+        for pat in '"kind": "pyadamas-deps"' '"module_format":' '"module_version":' '"mangled":' \
+                   '"interface_hash":' '"deps":' '"entry": true' '"version": "0"'; do
+            if ! grep -qF "$pat" "$dj/a.json"; then
+                echo "FAILED (missing $pat)"; dj_fail=1; break
+            fi
+        done
+    fi
+    if [ "$dj_fail" = 0 ] && grep -qE '"(path|root)": "/' "$dj/a.json"; then
+        echo "FAILED (absolute path in JSON)"; dj_fail=1
+    fi
+    if [ "$dj_fail" = 0 ] && grep -qE '20[0-9]{2}-[0-9]{2}-[0-9]{2}' "$dj/a.json"; then
+        echo "FAILED (timestamp in JSON)"; dj_fail=1
+    fi
+    # 版本段进 mangling：默认 $v$0；覆盖版本后必须变成 $v$7。
+    if [ "$dj_fail" = 0 ] && ! grep -qF '$v$0' "$dj/a.json"; then
+        echo "FAILED (default version segment missing in mangled)"; dj_fail=1
+    fi
+    if [ "$dj_fail" = 0 ]; then
+        if env PYADAMAS_CACHE_DIR="$dstore" PYADAMAS_MODULE_VERSION=7 \
+               "$PYADAMAS" deps --json "$dj/proj/main.py" > "$dj/v7.json" 2>/dev/null; then
+            grep -qF '$v$7' "$dj/v7.json" || { echo "FAILED (version not in mangled)"; dj_fail=1; }
+        else
+            echo "FAILED (version overridden deps)"; dj_fail=1
+        fi
+    fi
+    # --out= 与 stdout 必须等价
+    if [ "$dj_fail" = 0 ]; then
+        if dj_run --out="$dj/out.json" "$dj/proj/main.py" > /dev/null 2>&1; then
+            cmp -s "$dj/out.json" "$dj/a.json" || { echo "FAILED (--out differs)"; dj_fail=1; }
+        else
+            echo "FAILED (--out)"; dj_fail=1
+        fi
+    fi
+    rm -rf "$dj"
+    [ "$dj_fail" = 0 ] && echo "ran ok" || fail=1
+fi
+
+# ── 数据平面：build --module-map（显式模块映射）────────────────────
+#
+# 守：deps 产物能直接喂回 build（往返一致）、改映射路径必须改变解析结果、
+#     映射指向不存在的文件必须明确报错、旧 manifest 格式必须判失效。
+if match "modulemap"; then
+    mm="$BUILD/modulemap"
+    rm -rf "$mm"
+    mkdir -p "$mm/proj"
+    mstore="$mm/cache"
+    mm_fail=0
+    mm_run() { env PYADAMAS_CACHE_DIR="$mstore" "$PYADAMAS" "$@"; }
+    printf '  %-28s ' "modulemap"
+    printf 'def f() -> int:\n    return 100\n' > "$mm/proj/a.py"
+    printf 'def f() -> int:\n    return 200\n' > "$mm/proj/a2.py"
+    printf 'import a\n\nprint(a.f())\n' > "$mm/proj/main.py"
+    mmap="$mm/proj/pyadamas.map"
+    # 1) 往返：deps --out 生成 map，build 用它复原同一构建
+    if ! mm_run deps --json --out="$mmap" "$mm/proj/main.py" > "$mm/deps.log" 2>&1; then
+        echo "FAILED (deps --out)"; sed -n '1,5p' "$mm/deps.log"; mm_fail=1
+    elif ! mm_run build --module-map="$mmap" -o "$mm/p1" "$mm/proj/main.py" > "$mm/b1.log" 2>&1; then
+        echo "FAILED (build with map)"; sed -n '1,6p' "$mm/b1.log"; mm_fail=1
+    elif [ "$("$mm/p1")" != "100" ]; then
+        echo "FAILED (round-trip output)"; mm_fail=1
+    fi
+    # 2) 改映射里的路径必须改变解析结果
+    if [ "$mm_fail" = 0 ]; then
+        sed -i 's/"a.py"/"a2.py"/' "$mmap"
+        if ! mm_run build --module-map="$mmap" -o "$mm/p2" "$mm/proj/main.py" > "$mm/b2.log" 2>&1; then
+            echo "FAILED (build with edited map)"; sed -n '1,6p' "$mm/b2.log"; mm_fail=1
+        elif [ "$("$mm/p2")" != "200" ]; then
+            echo "FAILED (map did not change resolution)"; mm_fail=1
+        fi
+    fi
+    # 3) 映射指向不存在的文件 → 非零退出 + 明确报错
+    if [ "$mm_fail" = 0 ]; then
+        sed -i 's/"a2.py"/"nope.py"/' "$mmap"
+        if mm_run build --module-map="$mmap" -o "$mm/p3" "$mm/proj/main.py" > "$mm/b3.log" 2>&1; then
+            echo "FAILED (missing mapped file accepted)"; mm_fail=1
+        elif ! grep -q "points to missing file" "$mm/b3.log"; then
+            echo "FAILED (unclear missing-file error)"; mm_fail=1
+        fi
+        sed -i 's/"nope.py"/"a.py"/' "$mmap"
+    fi
+    # 4) 缓存键含版本段：换 PYADAMAS_MODULE_VERSION 必须重编
+    if [ "$mm_fail" = 0 ]; then
+        if ! env PYADAMAS_CACHE_DIR="$mstore" PYADAMAS_MODULE_VERSION=7 \
+                "$PYADAMAS" build -v -o "$mm/p4" "$mm/proj/main.py" 2> "$mm/b4.err"; then
+            echo "FAILED (version-override build)"; mm_fail=1
+        elif ! grep -q 'building module' "$mm/b4.err"; then
+            echo "FAILED (version change reused cache)"; mm_fail=1
+        fi
+    fi
+    # 5) 旧清单（pyadamasmanifest 2）必须判失效
+    if [ "$mm_fail" = 0 ]; then
+        # 步骤 4 用版本 7 写过另一批缓存目录（键含版本）；先清掉，否则
+        # find 可能挑到那批不参与本次构建的 manifest，测了个寂寞。
+        rm -rf "$mstore"/*-v7-*
+        # --rebuild 让本次构建用到的 manifest 全是新写的；再挑**最新**那份，
+        # 避免挑到另一份同名模块（步骤 2 用过 a2.py）的旧缓存目录。
+        mm_run build --rebuild -o "$mm/p1" "$mm/proj/main.py" > /dev/null 2>&1 || mm_fail=1
+        mf=$(find "$mstore" -name manifest -printf '%T@ %p\n' 2>/dev/null | sort -n | tail -1 | cut -d' ' -f2-)
+        if [ -n "$mf" ]; then
+            sed -i 's/^pyadamasmanifest 3$/pyadamasmanifest 2/' "$mf"
+            mm_run build -v -o "$mm/p1" "$mm/proj/main.py" 2> "$mm/b5.err" || mm_fail=1
+            grep -q 'building module' "$mm/b5.err" || { echo "FAILED (old manifest accepted)"; sed -n '1,5p' "$mm/b5.err"; mm_fail=1; }
+        else
+            echo "FAILED (no manifest)"; mm_fail=1
+        fi
+    fi
+    rm -rf "$mm"
+    [ "$mm_fail" = 0 ] && echo "ran ok" || fail=1
 fi
 
 # ── cdecl：头文件 → .cpya ──────────────────────────────────────

@@ -187,7 +187,10 @@ void set_cache_paths(ModuleUnit& u) {
     //
     // 注意：缓存目录里不含路径，所以两个同内容同名的模块共用一个目录；
     // 原子写 + manifest 逐字段校验保证不会读到别人的产物。
-    std::string key = sanitize_symbol(u.name) + "-" +
+    // 键里带版本段：版本进 mangling，同源码不同版本编出的符号不同，
+    // 不能共用产物（P0 版本恒为 "0"，但键的形状现在定死）。
+    std::string key = sanitize_symbol(u.name) + "-v" +
+                      sanitize_symbol(pyadamas::module_version()) + "-" +
                       pyadamas::hex64(pyadamas::fnv1a64(u.source));
     u.cache_dir = cache_root() + "/" + key;
     u.asm_path = u.cache_dir + "/mod.s";
@@ -248,6 +251,9 @@ struct Manifest {
     // 保守按「用到」处理（链接期关 --gc-sections，绝不冒误剥风险）。
     bool c_sym_default = true;
     std::string toolchain;
+    // 模块版本坐标（编码后）。版本进 mangling，缓存/清单必须跟着校验：
+    // 同源码换版本 → 符号不同，旧产物不能复用。
+    std::string module_version;
     // 目标 ABI（target_abi().name）。它决定调用约定/影子空间，直接改代码
     // 生成结果，必须进清单：否则「同一模块先按 SysV 编、再 --target=win64 编」
     // 会命中前者的 mod.o，链接出一个 ABI 错误的二进制（静默错代码）。
@@ -259,8 +265,9 @@ std::optional<Manifest> read_manifest(const ModuleUnit& u) {
     std::ifstream in(u.manifest_path, std::ios::binary);
     if (!in) return std::nullopt;
     std::string line;
-    // 2：加入 target（目标 ABI）字段。1 版清单没有目标 ABI → 一律判失效。
-    if (!std::getline(in, line) || line != "pyadamasmanifest 2") return std::nullopt;
+    // 2：加入 target（目标 ABI）字段；3：加入 modulever（模块版本坐标）。
+    // 旧版清单一律判失效（字段缺失 → 保守重编，绝不误命中）。
+    if (!std::getline(in, line) || line != "pyadamasmanifest 3") return std::nullopt;
     Manifest m;
     bool abi_ok = false;
     while (std::getline(in, line)) {
@@ -372,6 +379,8 @@ std::optional<Manifest> read_manifest(const ModuleUnit& u) {
             auto o = parse_u64(v);
             if (!o) return std::nullopt;
             m.c_sym_default = *o != 0;
+        } else if (tag == "modulever") {
+            ss >> m.module_version;
         } else if (tag == "target") {
             ss >> m.target;
         } else if (tag == "toolchain") {
@@ -384,8 +393,9 @@ std::optional<Manifest> read_manifest(const ModuleUnit& u) {
         }
     }
     if (!abi_ok) return std::nullopt;
-    // 缺 target 的清单（旧格式/写了一半）保守判失效：宁可重编，不可误命中。
-    if (m.target.empty()) return std::nullopt;
+    // 缺 target/modulever 的清单（旧格式/写了一半）保守判失效：宁可重编，
+    // 不可误命中。
+    if (m.target.empty() || m.module_version.empty()) return std::nullopt;
     return m;
 }
 
@@ -393,7 +403,7 @@ void write_manifest(const Program& p, const ModuleUnit& u) {
     std::error_code ec;
     std::filesystem::create_directories(u.cache_dir, ec);
     std::ostringstream out;
-    out << "pyadamasmanifest 2\n";
+    out << "pyadamasmanifest 3\n";
     out << "abi " << pyadamas::kModuleAbiVersion << "\n";
     out << "source " << pyadamas::fnv1a64(u.source) << "\n";
     out << "opt " << p.opt << "\n";
@@ -413,6 +423,7 @@ void write_manifest(const Program& p, const ModuleUnit& u) {
     out << "langgaps " << (p.lang_gaps ? 1 : 0) << "\n";
     out << "csymdefault " << (u.uses_c_sym_default ? 1 : 0) << "\n";
     out << "target " << target_abi().name << "\n";
+    out << "modulever " << sanitize_symbol(pyadamas::module_version()) << "\n";
     out << "toolchain " << toolchain_id() << "\n";
     for (auto& d : u.deps) {
         auto it = p.units.find(d);
@@ -422,6 +433,23 @@ void write_manifest(const Program& p, const ModuleUnit& u) {
         out << "dep " << d << " " << hash << "\n";
     }
     write_atomic(u.manifest_path, out.str());
+}
+
+// 解析一个 import：显式模块映射优先，未命中回落现有路径搜索。
+//
+// 原生（builtin）模块在调用点就被短路了，映射不能覆盖它们 —— 它们没有源
+// 文件，语义由 builtin_sigs 决定。
+static std::optional<ResolvedModule> resolve_import(Program& p, const std::string& importer,
+                                                    const std::string& full_name) {
+    if (p.module_map) {
+        auto it = p.module_map->paths.find(full_name);
+        if (it != p.module_map->paths.end()) {
+            const std::string& path = it->second;
+            const bool is_pkg = path.ends_with("/__init__.py") || path.ends_with("\\__init__.py");
+            return ResolvedModule{path, is_pkg};
+        }
+    }
+    return resolve_import_source(importer, full_name, p.include_dirs);
 }
 
 bool visit_unit(Program& p, ModuleUnit& u, std::vector<ModuleUnit*>& stack) {
@@ -485,7 +513,7 @@ bool visit_unit(Program& p, ModuleUnit& u, std::vector<ModuleUnit*>& stack) {
         if (req.name == u.name && !req.from_names.empty()) {
             bool all_sub = true;
             for (auto& n : req.from_names)
-                if (!resolve_module_path(u.path, req.name + "." + n, p.include_dirs)) {
+                if (!resolve_import(p, u.path, req.name + "." + n)) {
                     all_sub = false;
                     break;
                 }
@@ -524,7 +552,7 @@ bool visit_unit(Program& p, ModuleUnit& u, std::vector<ModuleUnit*>& stack) {
         // 扩展源的模块（functools）仍要按普通模块编译扩展源。
         const ModuleEntry* entry = find_module_entry(req.name);
         if (is_native_module(entry)) continue;
-        auto found = resolve_import_source(u.path, req.name, p.include_dirs);
+        auto found = resolve_import(p, u.path, req.name);
         if (!found) {
             report(u.path, u.source, req.line, req.col,
                    std::format("cannot find module '{}'", req.name));
@@ -573,7 +601,7 @@ bool visit_unit(Program& p, ModuleUnit& u, std::vector<ModuleUnit*>& stack) {
         for (auto& n : req.from_names) {
             std::string child = req.name + "." + n;
             if (p.units.count(child)) continue;
-            if (resolve_module_path(u.path, child, p.include_dirs))
+            if (resolve_import(p, u.path, child))
                 queue.push_back({child, req.line, req.col, {}});
         }
     }
@@ -638,6 +666,8 @@ bool try_cache(Program& p, ModuleUnit& u) {
     if (!m) return false;
     if (m->source_hash != pyadamas::fnv1a64(u.source)) return false;
     if (m->target != std::string(target_abi().name)) return false;  // 换了目标 ABI
+    if (m->module_version != sanitize_symbol(pyadamas::module_version()))
+        return false;  // 换了模块版本坐标（符号会变）
     if (m->toolchain != toolchain_id()) return false;  // 换了编译器/运行时
     if (m->opt != p.opt) return false;
     if (m->fast_math != (p.fast_math ? 1 : 0)) return false;
@@ -729,6 +759,7 @@ bool build_unit(Program& p, ModuleUnit& u, bool emit_object, bool entry_ir) {
 
     auto info = std::make_shared<pyadamas::ModuleInfo>();
     info->name = u.name;
+    info->version = pyadamas::module_version();
     info->source_path = u.path;
     // 导出类的完整祖先链：本地类按 C3 MRO 拍平，导入类直接沿用接口里
     // 已展开的链。mirror 元数据靠 module/name/qualname 生成。

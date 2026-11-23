@@ -55,6 +55,8 @@ const ModuleEntry* find_module_entry(std::string_view name);
 bool is_native_module(const ModuleEntry* e);
 std::string module_source_path(const ModuleEntry& e);
 bool path_under_stdlib(const std::string& path);
+// stdlib 模块的相对路径（相对 PYADAMAS_STDLIB_DIR）；调用方保证 path_under_stdlib。
+std::string stdlib_relative_path(const std::string& path);
 std::optional<ResolvedModule> resolve_import_source(const std::string& importer,
                                                     const std::string& name,
                                                     const std::vector<std::string>& include_dirs);

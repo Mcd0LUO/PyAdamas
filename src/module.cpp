@@ -1,5 +1,6 @@
 #include "module.h"
 #include <cctype>
+#include <cstdlib>
 
 #include <cstdio>
 #include <cstring>
@@ -455,20 +456,20 @@ uint64_t fnv1a64(const void* data, size_t n) {
 
 std::string hex64(uint64_t v) { return std::format("{}", v); }
 
-// 模块名 → 符号片段：**必须单射**（不同模块名绝不映射到同一片段）。
+// 模块名/版本号 → 符号片段：**必须单射**（不同输入绝不映射到同一片段）。
 //
 // 旧实现把非字母数字一律换成 '_'，于是 "a.b" 与 "a_b" 撞成同一个符号。
 // 这两者可以同时出现在一个程序里（`import a.b` 与 `import a_b`），
 // 结果是两个 .o 定义同名符号：链接期 duplicate symbol，或者（符号不冲突时）
-// 更糟的静默串线。包名将来还会带 '-'，冲突面更大。
+// 更糟的静默串线。包名将来还会带 '-' 和 '@<版本>'，冲突面更大。
 //
 // 编码规则（字面 '_' 一律被转义，所以输出里每个 '_' 都开始一个定长转义码，
 // 解码唯一）：
-//   '_' → "_1"、'.' → "_2"、'-' → "_3"；
+//   '_' → "_1"、'.' → "_2"、'-' → "_3"、'@' → "_5"；
 //   其它非字母数字字节 → "_4" + 两位十六进制；
 //   空名 → "_0"（真实编码不会产生 "_0"，仅作占位）。
 // 字母数字原样保留（ASCII 判定，不依赖 locale）。
-std::string module_symbol_prefix(const std::string& module) {
+std::string mangle_component(const std::string& module) {
     if (module.empty()) return "_0";
     auto is_ascii_alnum = [](unsigned char c) {
         return (c >= '0' && c <= '9') || (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z');
@@ -484,6 +485,7 @@ std::string module_symbol_prefix(const std::string& module) {
             case '_': out += "_1"; break;
             case '.': out += "_2"; break;
             case '-': out += "_3"; break;
+            case '@': out += "_5"; break;
             default:
                 out += "_4";
                 out.push_back("0123456789abcdef"[c >> 4]);
@@ -494,30 +496,56 @@ std::string module_symbol_prefix(const std::string& module) {
     return out;
 }
 
+// 当前模块版本坐标。P0：全局常量（默认为 "0"）。
+//
+// 为什么先做「全局版本」而不是每包版本：版本进 mangling 是 P3 缓存与 P4
+// 多版本共存的前置。先把**编码路径**（符号带版本段、缓存键含版本、接口
+// 记录版本）定死，等 P2 有包坐标再把 module_version() 换成逐模块值即可，
+// 不必再动符号规范。PYADAMAS_MODULE_VERSION 覆盖口只用于 CI/单测。
+std::string module_version() {
+    static const std::string v = [] {
+        const char* e = std::getenv("PYADAMAS_MODULE_VERSION");
+        if (e != nullptr && e[0] != '\0') return std::string(e);
+        return std::string("0");
+    }();
+    return v;
+}
+
+// 符号前缀 = pyadamas$<enc(module)>$v$<enc(version)>。
+// "$v$" 是版本段标记：'$' 是既有分隔符，模块名/版本的单射编码永远不含
+// '$'，所以新前缀不可能和旧的 pyadamas$<enc(mod)>$g$... 互相误认。
+std::string module_symbol_prefix(const std::string& module) {
+    std::string out = "pyadamas$";
+    out += mangle_component(module);
+    out += "$v$";
+    out += mangle_component(module_version());
+    return out;
+}
+
 std::string module_global_symbol(const std::string& module, const std::string& name) {
-    return std::format("pyadamas${}$g${}", module_symbol_prefix(module), name);
+    return std::format("{}$g${}", module_symbol_prefix(module), name);
 }
 std::string module_ready_symbol(const std::string& module) {
-    return std::format("pyadamas${}$ready", module_symbol_prefix(module));
+    return std::format("{}$ready", module_symbol_prefix(module));
 }
 std::string module_init_symbol(const std::string& module) {
-    return std::format("pyadamas${}$init", module_symbol_prefix(module));
+    return std::format("{}$init", module_symbol_prefix(module));
 }
 std::string module_roots_symbol(const std::string& module) {
-    return std::format("pyadamas${}$roots", module_symbol_prefix(module));
+    return std::format("{}$roots", module_symbol_prefix(module));
 }
 std::string module_class_new_symbol(const std::string& module, const std::string& cls) {
-    return std::format("pyadamas${}$n${}", module_symbol_prefix(module), cls);
+    return std::format("{}$n${}", module_symbol_prefix(module), cls);
 }
 std::string module_class_vtable_symbol(const std::string& module, const std::string& cls) {
-    return std::format("pyadamas${}$vt${}", module_symbol_prefix(module), cls);
+    return std::format("{}$vt${}", module_symbol_prefix(module), cls);
 }
 std::string module_class_own_slots_symbol(const std::string& module, const std::string& cls) {
-    return std::format("pyadamas${}$os${}", module_symbol_prefix(module), cls);
+    return std::format("{}$os${}", module_symbol_prefix(module), cls);
 }
 std::string module_class_method_symbol(const std::string& module, const std::string& cls,
                                        int slot) {
-    return std::format("pyadamas${}$ms${}${}", module_symbol_prefix(module), cls, slot);
+    return std::format("{}$ms${}${}", module_symbol_prefix(module), cls, slot);
 }
 
 std::expected<std::string, std::string> encode_module_interface(const ModuleInfo& info) {

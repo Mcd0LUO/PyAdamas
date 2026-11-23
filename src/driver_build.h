@@ -10,6 +10,7 @@
 
 #include "ir.h"
 #include "module.h"
+#include "module_map.h"
 #include "typecheck.h"
 
 namespace pyadamas {
@@ -52,6 +53,9 @@ struct Program {
     std::vector<std::string> include_dirs;
     // cimport .cpya 里 link 声明的链接参数（已归一化并去重）。
     std::vector<std::string> link_args;
+    // 外部模块映射（--module-map）：非空时，「逻辑名 → 源文件」优先查它，
+    // 未命中再回落路径搜索（保持向后兼容）。
+    std::shared_ptr<ModuleMap> module_map;
     bool rebuild = false;
     bool verbose = false;
     int opt = 2;

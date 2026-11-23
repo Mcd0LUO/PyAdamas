@@ -800,6 +800,32 @@ module http.client -> mangled=acme_http_2_0_1$http$client …
 | 跨机共享**缓存**是安全的 | 键相同 → 产物内容相同（在编译器/目标/rt 完全一致时）；这与「发布不可信二进制」是两件事 |
 | 不生成 .a/.so | 没有外部消费者；包 = 一组模块，不是链接单元 |
 | 全程序优化（LTO）需要改键 | 见 §7-Q4；在键里加依赖实现哈希，或把可内联体放进接口（类似 C 的 static inline） |
+#### 5.6.7 数据平面接口（已落地）：`deps --json` 与 `--module-map`
+
+设计文档里的「ModuleMap 作为编译输入」在 C++ 侧先落成一对**可互相喂**的命令：
+
+```
+pyadamas deps --json [--out=FILE] <entry.py>      # 输出模块图（确定性 JSON）
+pyadamas build|run --module-map=FILE <entry.py>   # 按显式映射解析 import
+```
+
+**`deps --json` 的 schema（format 1）**：
+
+| 字段 | 含义 |
+|---|---|
+| `kind` / `format` | `"pyadamas-deps"` / 1（消费方先看这两个） |
+| `compiler` | `version`（CMake 从 CHANGELOG 首条推导）、`module_format`、`module_abi`、`module_version`、`target` |
+| `root` | 项目根（入口文件所在目录）**相对当前工作目录**的路径；不出现绝对路径 |
+| `entry` | 入口模块名，固定 `__main__` |
+| `order` | 拓扑序（依赖在前、入口在后） |
+| `modules[]` | 每项：`name` / `path`（相对项目根；stdlib 模块为 `stdlib/<rel>`）/ `source`（project、stdlib、external）/ `version` / `mangled`（符号前缀，含 `$v$<版本>` 段）/ `interface_hash`（入口为 null）/ `entry` / `deps`（直接依赖的逻辑名，排序去重） |
+
+**确定性约定**：模块按名字排序、依赖去重排序、无时间戳、无绝对路径、无环境相关值；同样输入两次输出逐字节相同（`tests/run_tests.sh` 的 `deps:json` 关卡直接跑两次 diff）。
+
+**`--module-map` 语义**：显式映射优先，未命中回落路径搜索（向后兼容）；相对路径按 map 文件目录解析，找不到再按「map 目录 + JSON 的 root 字段」解析（于是 `deps --out=项目根/xxx.map` 的产物可以直接喂回去）。任何条目的文件不存在 → 报错退出（不静默回落）。stdlib 模块与入口不在映射里（前者由编译器提供，后者不被 import）。原生（builtin）模块不受映射影响。
+
+**与设计的关系**：这就是 §5.6.1 的 ModuleMap 在 P0 的最小形态 —— 还不会做版本求解，但「解析结果是数据、编译器按表编译」这条结构性决定已经生效；后续 P2 的注册表/锁只需把这张表从 JSON 换成 lock 派生即可。
+
 
 ### 5.7 离线与审计
 
@@ -1177,4 +1203,16 @@ error: lock is out of date
 **缓存格式兼容性（重要）**：manifest v1 与 `.pya` fmt 12 一律判失效（实测把新编译器指向旧 `build/pre/modcache` 时 3 个模块全部 `building module`）；由于 `toolchain_id` 里也含 fmt/abi 版本，即使清单格式没变，换编译器也会失效。
 
 **验证口径**（本轮全量闸门，build 目录 `build/pkgfix`）：套件 412 ran ok / 0 失败；ASan 套件 412 ran ok / 0 报告；difftest 387 例 0 不一致；`check_size.sh` 通过；`tests/cache_race.sh` 通过；12 基准 × 3 档输出与 CPython 全一致，且**归一化后的生成汇编逐字节相同**、**用户态指令数逐项相等**（证明没有代码生成变化，性能不可能回退）；`PYADAMAS_SIMD=1` 下用户态指令数 matmul 10,126,834 / spectral_norm 94,637,476（与既有口径一致）。
+
+### P0-C++ 地基（2026-11-23，第二轮）
+
+| 项 | 内容 | 验证 |
+|---|---|---|
+| **版本进 mangling** | 符号前缀改为 `pyadamas$<enc(module)>$v$<enc(version)>`；版本由 `module_version()` 给出（P0 全局常量 "0"，`PYADAMAS_MODULE_VERSION` 可覆盖，供 CI/单测）。接口 fmt 14 记录版本并在解码时校验；缓存键加版本段；manifest v3 加 `modulever` 行 | `deps:json` 关卡：默认 `mangled` 含 `$v$0`，覆盖版本后含 `$v$7`；`modulemap` 关卡：换版本必须重编；旧 manifest（v2）判失效 |
+| **`deps --json`** | 见 §5.6.7：确定性、无绝对路径、含 interface_hash / 拓扑序 / mangled / 版本信息 | 两次输出 `cmp` 相同；`grep '"(path\|root)": "/'` 为空；字段齐全 |
+| **`build --module-map`** | JSON 映射（与 deps 输出同构）：显式优先、未命中回落路径搜索；相对路径先按 map 目录、再按 map 目录+root 解析；缺失文件明确报错 | 往返一致（100）；改映射路径 → 输出变 200；缺失文件 → 非零退出 + `points to missing file` |
+
+**缓存格式兼容**：manifest v2 → v3、接口 fmt 13 → 14，旧缓存一律判失效（守则：改格式必须先确认旧缓存不会被当新格式读）。
+
+**残留（P2 前）**：版本仍是全局常量（`PYADAMAS_MODULE_VERSION`），真正的每包坐标要等包坐标/锁（P2）；`deps` 对入口模块给 `interface_hash: null`（入口不被 import，接口哈希对构建系统无意义）。
 

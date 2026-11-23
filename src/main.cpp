@@ -53,7 +53,9 @@
 #define PYADAMAS_MODCACHE_DIR "build/dev/modcache"
 #endif
 
+#include "deps_json.h"
 #include "driver_build.h"
+#include "driver_modules.h"
 #include "target_abi.h"
 #include "driver_util.h"
 
@@ -129,9 +131,10 @@ int main(int argc, char** argv) {
         std::fprintf(stderr,
                      "pyadamas —— Python 语法外壳的编译器\n"
                      "\n"
-                     "usage: %s [tokens|ast|types|check|ir|asm|build|run|cdecl] [-O0|-O1|-O2] "
-                     "[--fast-math] [--no-zero-cost-exc] [--syntax] [--asan|--ubsan] "
-                     "[-o out] <file.py>\n",
+                     "usage: %s [tokens|ast|types|check|ir|asm|build|run|deps|cdecl] "
+                     "[-O0|-O1|-O2] [--fast-math] [--no-zero-cost-exc] [--syntax] "
+                     "[--asan|--ubsan] [-o out|--out out] [--json] "
+                     "[--module-map file] <file.py>\n",
                      argv[0]);
         return 2;
     }
@@ -152,6 +155,10 @@ int main(int argc, char** argv) {
     // 永久降级。`--no-zero-cost-exc` 是回退开关（出问题时能一键退回旧路径）。
     bool zero_cost_exc = true;
     bool resolve_imports = false;
+    // deps：JSON 输出（默认就是 JSON；--json 显式写出来便于脚本自解释）。
+    bool json_out = false;
+    // --module-map：外部模块映射文件（deps --json 的产物，可互相喂）。
+    std::string module_map_path;
     // 生成程序的内存检查器。空 = 不启用。
     //
     // RC/GC 这类「堆被写坏」的 bug 在 IR 层面完全看不出问题 —— 只有内存
@@ -162,11 +169,16 @@ int main(int argc, char** argv) {
 
     static const std::vector<std::string> kModes = {"tokens", "ast",     "check", "types",
                                                     "ir",     "asm",     "build", "run",
-                                                    "cdecl"};
+                                                    "deps",   "cdecl"};
     for (int i = 1; i < argc; ++i) {
         std::string a = argv[i];
         if (a == "--syntax") syntax_only = true;
         else if (a == "--imports") resolve_imports = true;
+        else if (a == "--json") json_out = true;
+        else if (a.starts_with("--out=")) output = a.substr(6);
+        else if (a == "--out" && i + 1 < argc) output = argv[++i];
+        else if (a.starts_with("--module-map=")) module_map_path = a.substr(13);
+        else if (a == "--module-map" && i + 1 < argc) module_map_path = argv[++i];
         else if (a == "-v" || a == "--verbose") verbose = true;
         else if (a == "--rebuild") rebuild = true;
         else if (a == "--fast-math") fast_math = true;
@@ -296,6 +308,45 @@ int main(int argc, char** argv) {
             return 0;
         }
 
+        // deps：只建模块图与接口（不降级、不汇编），输出确定性 JSON。
+        if (mode == "deps") {
+            (void)json_out;  // deps 只有 JSON 一种输出；--json 是显式别名
+            Program prog;
+            prog.verbose = verbose;
+            prog.rebuild = true;
+            if (!module_map_path.empty()) {
+                std::string err;
+                auto map = pyadamas::load_module_map(module_map_path, err);
+                if (!map) {
+                    std::fprintf(stderr, "error: %s\n", err.c_str());
+                    return 1;
+                }
+                prog.module_map = std::make_shared<pyadamas::ModuleMap>(std::move(*map));
+            }
+            if (!load_program(path, include_dirs, prog)) return 1;
+            if (!prepare_program(prog, false, false)) return 1;
+            std::error_code root_ec;
+            const std::string root_abs = std::filesystem::weakly_canonical(
+                std::filesystem::path(path).parent_path(), root_ec).string();
+            const std::string cwd = std::filesystem::current_path().string();
+            const std::string json = pyadamas::module_graph_json(prog, root_abs, cwd);
+            if (output.empty()) {
+                std::fwrite(json.data(), 1, json.size(), stdout);
+            } else {
+                std::ofstream out(output, std::ios::binary);
+                if (!out) {
+                    std::fprintf(stderr, "error: cannot write '%s'\n", output.c_str());
+                    return 1;
+                }
+                out << json;
+                if (!out) {
+                    std::fprintf(stderr, "error: cannot write '%s'\n", output.c_str());
+                    return 1;
+                }
+            }
+            return 0;
+        }
+
         Program prog;
         // 把 sanitizer 折成 cc 的编译/链接选项，通过 PYADAMAS_CC_FLAGS 传给
         // driver_build（那里编译和链接共用同一套 flag）。
@@ -403,6 +454,15 @@ int main(int argc, char** argv) {
         prog.opt = opt_level;
         prog.fast_math = fast_math;
         prog.zero_cost_exc = zero_cost_exc;
+        if (!module_map_path.empty()) {
+            std::string err;
+            auto map = pyadamas::load_module_map(module_map_path, err);
+            if (!map) {
+                std::fprintf(stderr, "error: %s\n", err.c_str());
+                return 1;
+            }
+            prog.module_map = std::make_shared<pyadamas::ModuleMap>(std::move(*map));
+        }
         if (!load_program(path, include_dirs, prog)) return 1;
 
         if (mode == "ir" || mode == "asm") {
