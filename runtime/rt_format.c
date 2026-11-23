@@ -565,6 +565,53 @@ static PyAdamasStr* pct_big_int(int64_t raw, const char* spec, int si, char conv
     return r;
 }
 
+/* %#x / %#X / %#o：在数字前插入进制前缀，并保持总宽度语义（前缀计入宽度；
+   zero 填充的 0 落在前缀之后）。piece 是已经按 width/sign/zero 排好的串。 */
+static PyAdamasStr* pct_alt_join(const char* pre, int64_t plen, PyAdamasStr* piece, int width,
+                                 int zero, int left) {
+    int64_t i = 0;
+    char sign = 0;
+    if (i < piece->len &&
+        (piece->data[i] == '-' || piece->data[i] == '+' || piece->data[i] == ' '))
+        sign = piece->data[i++];
+    while (i < piece->len && piece->data[i] == ' ') ++i;
+    int64_t dstart = i;
+    while (zero && dstart < piece->len - 1 && piece->data[dstart] == '0') ++dstart;
+    /* 左对齐时 piece 已带尾部空格填充：先去掉，再统一按宽度重排。 */
+    int64_t dend = piece->len;
+    while (!zero && dend > dstart && piece->data[dend - 1] == ' ') --dend;
+    int64_t dlen = dend - dstart;
+    if (dlen < 0) dlen = 0;
+    int64_t total = (sign ? 1 : 0) + plen + dlen;
+    int64_t pad = width > total ? width - total : 0;
+    int64_t outlen = total + pad;
+    char* buf = (char*)malloc((size_t)outlen);
+    if (!buf) panic_c("out of memory");
+    int64_t o = 0;
+    if (zero) {
+        if (sign) buf[o++] = sign;
+        for (int64_t k = 0; k < plen; ++k) buf[o++] = pre[k];
+        for (int64_t k = 0; k < pad; ++k) buf[o++] = '0';
+        memcpy(buf + o, piece->data + dstart, (size_t)dlen);
+        o += dlen;
+    } else if (left) {
+        if (sign) buf[o++] = sign;
+        for (int64_t k = 0; k < plen; ++k) buf[o++] = pre[k];
+        memcpy(buf + o, piece->data + dstart, (size_t)dlen);
+        o += dlen;
+        for (int64_t k = 0; k < pad; ++k) buf[o++] = ' ';
+    } else {
+        for (int64_t k = 0; k < pad; ++k) buf[o++] = ' ';
+        if (sign) buf[o++] = sign;
+        for (int64_t k = 0; k < plen; ++k) buf[o++] = pre[k];
+        memcpy(buf + o, piece->data + dstart, (size_t)dlen);
+        o += dlen;
+    }
+    PyAdamasStr* out = str_new(buf, outlen);
+    free(buf);
+    return out;
+}
+
 PyAdamasStr* pa_percent_format(PyAdamasStr* pat, PyAdamasList* args, PyAdamasStr* desc, int64_t is_bytes) {
     (void)is_bytes;
     if (!pat) return str_new("", 0);
@@ -584,14 +631,14 @@ PyAdamasStr* pa_percent_format(PyAdamasStr* pat, PyAdamasList* args, PyAdamasStr
             pb_append(&out, "%", 1);
             continue;
         }
-        int left = 0, zero = 0, plus = 0, space = 0;
+        int left = 0, zero = 0, plus = 0, space = 0, alt = 0;
         for (; i < n; ++i) {
             char c = p[i];
             if (c == '-') left = 1;
             else if (c == '0') zero = 1;
             else if (c == '+') plus = 1;
             else if (c == ' ') space = 1;
-            else if (c == '#') { /* 前缀 # 暂不支持 */ }
+            else if (c == '#') alt = 1;
             else break;
         }
         int width = 0;
@@ -621,6 +668,8 @@ PyAdamasStr* pa_percent_format(PyAdamasStr* pat, PyAdamasList* args, PyAdamasStr
         char spec[64];
         int si = 0;
         if (left) spec[si++] = '<';
+        /* %s/%r 的默认对齐是右（format 的 str 默认左），显式宽度时补 '>'。 */
+        else if ((conv == 's' || conv == 'r') && width > 0) spec[si++] = '>';
         if (plus) spec[si++] = '+';
         else if (space) spec[si++] = ' ';
         int numeric = conv != 's' && conv != 'r' && conv != 'c';
@@ -784,6 +833,12 @@ PyAdamasStr* pa_percent_format(PyAdamasStr* pat, PyAdamasList* args, PyAdamasStr
                 pa_raise_c("ValueError", "unsupported format character");
         }
         if (!piece) pa_raise_c("ValueError", "format failed");
+        if (alt && (conv == 'x' || conv == 'X' || conv == 'o')) {
+            const char* pre = conv == 'x' ? "0x" : (conv == 'X' ? "0X" : "0o");
+            PyAdamasStr* joined = pct_alt_join(pre, 2, piece, width, zero, left);
+            pa_rc_dec(piece);
+            piece = joined;
+        }
         pb_append(&out, piece->data, piece->len);
         pa_rc_dec(piece);
         if (tmp_owned && tmp && tmp != piece) pa_rc_dec(tmp);
