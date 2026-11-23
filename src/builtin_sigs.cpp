@@ -45,31 +45,6 @@ pyadamas::ModuleInfoPtr builtin_module(const std::string& name) {
         return info;
     }
 
-    // 声明式签名优先（P0）：stdlib/sigs/<module>.pysig 存在时，整个模块的
-    // 签名表由数据文件提供（见 docs/native-stdlib-cookbook.md）。没有声明
-    // 文件的模块继续走下面的硬编码分支，行为不变。
-    if (auto declared = pyadamas::nativesig::module_info(name)) {
-        if (name == "sys") {
-            // sys 的运行期成员（argv/executable/标准流/exc_info）无法用
-            // .pysig 字面量表达：它们由 builtin_value 生成 call_runtime，
-            // 这里补回其静态类型，保持 typecheck 行为不变（cookbook §6.4）。
-            declared->globals["argv"] = pyadamas::mk_list(pyadamas::t_str());
-            declared->globals["executable"] = pyadamas::t_str();
-            declared->globals["stdin"] = pyadamas::t_file();
-            declared->globals["stdout"] = pyadamas::t_file();
-            declared->globals["stderr"] = pyadamas::t_file();
-            auto ei = std::make_shared<pyadamas::FuncInfo>();
-            ei->name = "exc_info";
-            ei->ret = pyadamas::mk_tuple({pyadamas::mk_class_obj(pyadamas::mk_exception("Exception")),
-                                          pyadamas::t_unknown(), pyadamas::t_unknown()});
-            ei->ret_known = true;
-            auto eit = pyadamas::new_ty(pyadamas::TyKind::Func);
-            eit->fn = ei;
-            declared->globals["exc_info"] = eit;
-        }
-        cache[name] = declared;
-        return declared;
-    }
     auto func = [&](const std::string& n, std::vector<pyadamas::TypePtr> args, pyadamas::TypePtr ret) {
         auto t = pyadamas::new_ty(pyadamas::TyKind::Func);
         t->fn = builtin_fn(n, args, ret);
@@ -110,6 +85,23 @@ pyadamas::ModuleInfoPtr builtin_module(const std::string& name) {
     } else if (name == "dylib") {
         func("load", {pyadamas::t_str()}, pyadamas::t_dylib());
         func("close", {pyadamas::t_dylib()}, pyadamas::t_int());
+    } else if (name == "sys") {
+        // sys 里**无法用 .pysig 声明**的 6 个运行期成员（其余如 maxsize/exit
+        // 已迁到 stdlib/sigs/sys.pysig，靠末尾的默认 merge 合并进来）：
+        //   argv/executable/标准流：运行期由 builtin_value 生成 call_runtime，
+        //     静态类型必须是 list[str]/str/file，声明成 object 会让方法调用失效；
+        //   exc_info()：返回类型含 ClassObj，.pysig 注解语法表达不了。
+        info->globals["argv"] = pyadamas::mk_list(pyadamas::t_str());
+        info->globals["executable"] = pyadamas::t_str();
+        info->globals["stdin"] = pyadamas::t_file();
+        info->globals["stdout"] = pyadamas::t_file();
+        info->globals["stderr"] = pyadamas::t_file();
+        func("exc_info", {},
+             pyadamas::mk_tuple({pyadamas::mk_class_obj(pyadamas::mk_exception("Exception")),
+                                 pyadamas::t_unknown(), pyadamas::t_unknown()}));
+        // exit 的正常来源是 .pysig 的声明；这里保留硬编码 fallback，半声明
+        // 状态（临时 pysig 只写一部分）下它仍然可用——merge 语义的直接体现。
+        func("exit", {pyadamas::t_int()}, pyadamas::t_none());
     } else if (name == "asyncio") {
         // run/create_task 的结果类型按实参在 typecheck 里特判；这里的签名
         // 只用于 from-import 的缺省检查和错误提示。
@@ -768,6 +760,15 @@ pyadamas::ModuleInfoPtr builtin_module(const std::string& name) {
         info->globals["PIPE"] = pyadamas::t_int();
         info->globals["STDOUT"] = pyadamas::t_int();
         info->globals["DEVNULL"] = pyadamas::t_int();
+    }
+    // 声明式签名与硬编码**按名字合并**（P0 merge 语义）：stdlib/sigs/<module>.pysig
+    // 里的 func/const 优先（同名覆盖硬编码），硬编码独有的成员原样保留。
+    // 例如 sys：maxsize/exit 等在 .pysig 里声明（覆盖），而 argv/stdout/
+    // exc_info 这类只能由 builtin_value 生成运行期值的成员留在硬编码里。
+    // 因此任何模块都不需要 C++ 侧的专用 merge 分支：能声明的声明，不能声明
+    // 的继续用硬编码，两者共存。
+    if (auto declared = pyadamas::nativesig::module_info(name)) {
+        for (auto& [gname, gty] : declared->globals) info->globals[gname] = gty;
     }
     cache[name] = info;
     return info;

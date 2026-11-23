@@ -169,10 +169,11 @@ namespace pyadamas::nativesig {
 **A. 签名表（`src/builtin_sigs.cpp`，`builtin_module()` 开头，`cpy_proxy` 分支之后）：**
 
 ```c++
-// 声明式签名优先：stdlib/sigs/<module>.pysig 存在时整模块由它驱动。
-if (auto m = nativesig::module_info(name)) {
-    cache[name] = m;
-    return m;
+// 声明式签名与硬编码**按名字合并**：.pysig 里的 func/const 覆盖同名硬编码，
+// 硬编码独有的成员（如 sys.argv / sys.exc_info 这类只能由 builtin_value
+// 生成运行期值的成员）保留。放在 builtin_module() 的末尾。
+if (auto declared = pyadamas::nativesig::module_info(name)) {
+    for (auto& [gname, gty] : declared->globals) info->globals[gname] = gty;
 }
 ```
 
@@ -225,6 +226,11 @@ if (const auto* c = nativesig::find_const(module, member)) {
 | **没有** `.pysig` | 返回 `nullptr`，调用方继续走硬编码（增量迁移的基石） |
 | **import 命中 `stdlib/sigs/`** | 硬失败并说明「声明目录不是实现」（§6.3 的防护） |
 
+**合并语义（P0 第二轮）**：声明模块与硬编码**按名字合并**，不是整模块替换——
+声明里的 `func`/`const` 优先（同名覆盖），声明里没有的成员保留硬编码的签名与降级映射。
+因此任何模块都不需要 C++ 侧的专用 merge 分支，迁移可以一个 API 一个 API 地做，
+甚至永久保持「声明一部分 + 硬编码一部分」的混合状态。
+
 **为什么不静默跳过**：静默跳过会表现成「模块没有这个属性」或「实参类型不对」，
 和声明文件的内容毫无关系，排查成本极高。数据是随编译器分发的，坏了就该立刻停。
 
@@ -261,7 +267,10 @@ if (const auto* c = nativesig::find_const(module, member)) {
    `RtFn::X` 的 `pa_*` 符号从 `src/ir_rtfn_names.h` 查。
 2. **写 `stdlib/sigs/<模块>.pysig`**（§3）。
 3. **接线**（§5.2 A/B/C，若还没接）。
-4. **删硬编码**：`builtin_sigs.cpp` 的分支整段删、`lower_import.cpp` 里该模块的
+4. **删硬编码（可选）**：hook 是**按名字合并**，迁移可以分步做——只声明一部分成员时，其余成员
+   继续由硬编码提供（`sys` 就是半迁移状态：`maxsize/exit` 在 .pysig，
+   `argv/stdout/exc_info` 等 6 个无法声明的运行期成员留在硬编码）。整个模块都能用声明
+   表达后，再删硬编码：`builtin_sigs.cpp` 的分支整段删、`lower_import.cpp` 里该模块的
    `if (member == ...)` 行全删（注意 `lower_import_native.cpp` 的**手工装配分支要留着**，
    它不是签名，是参数装配）。
 5. **重建 + 三档等价性**（§7）。

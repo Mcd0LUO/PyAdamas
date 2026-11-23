@@ -162,6 +162,7 @@ std::optional<RtFn> Lowerer::native_fn(const std::string& module, const std::str
     // sys.exit 已迁到 stdlib/sigs/sys.pysig（pa_sys_exit 由约定推导）。
     // sys.exc_info 的返回类型含 ClassObj，签名保留在 builtin_sigs.cpp 的
     // sys merge 分支，member→RtFn 映射也留在这里。
+    if (module == "sys" && member == "exit") return RtFn::SysExit;
     if (module == "sys" && member == "exc_info") {
         return RtFn::ExcInfo;
     } else if (module == "random") {
