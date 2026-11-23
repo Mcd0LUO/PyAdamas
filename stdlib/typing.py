@@ -107,6 +107,8 @@ def NewType(name: str, tp):
 
 
 def overload(f):
+    # CPython 返回一个 _overload_dummy 函数；PA 的 @overload 由编译器在
+    # 类型检查阶段消费并剥离，这里恒等返回即可（不建模运行期 dummy）。
     return f
 
 

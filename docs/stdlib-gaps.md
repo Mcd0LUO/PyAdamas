@@ -541,3 +541,47 @@ EnumMeta/ABCMeta 复用它；这比两个模块各自打补丁更划算。
 - 全量套件：`PYADAMAS_TEST_JOBS=16 bash tests/run_tests.sh build/gfix-sb6 build/gfix-sb6/pyadamas`
   —— **439 ran ok，0 FAILED/DIFF，RC=0**（基线 435 + 4 新用例）。
 - 未 commit / push；未碰 src/runtime/CMakeLists/tools/checkall/sigs 等禁区。
+
+### 10.5 第二批：浅覆盖模块（18 个，538~555）
+
+本批覆盖测试很少的 18 个常用模块。方法同 §10.1：`python3 -P` 拿期望，PA 跑同形脚本逐字节 diff。
+18 个模块全部对拍 **0 diff**（在各自支持范围内）。
+
+| 测试 | 模块 | 覆盖内容 | 处理/备注 |
+|---|---|---|---|
+| 538 | copy | copy/deepcopy（list/dict） | **修复 bug**：`copy()` 原来直接 `return x`（同一对象），改为 isinstance 分派；补 `deepcopy()` 薄包装 |
+| 539 | fnmatch | fnmatch/fnmatchcase/filter | 无修改 |
+| 540 | glob | glob(空目录)/escape | 无修改 |
+| 541 | heapq | heapify/heappop/nlargest/nsmallest | 无修改 |
+| 542 | bisect | bisect_left/right/insort | 无修改（仅 int） |
+| 543 | pprint | pformat/pprint | 无修改 |
+| 544 | typing | cast/TYPE_CHECKING/TypeVar/overload | 无修改；`@overload` 运行期恒等 vs CPython dummy，加文档注释 |
+| 545 | logging | 等级常量/Logger 基础 | 无修改 |
+| 546 | stat | 文件类型/权限位常量与判定 | 无修改（PA 的 os.stat 不可用，故只测常量） |
+| 547 | difflib | SequenceMatcher.ratio/unified_diff | 无修改；PA 返回 list，用 `list()` 对齐 CPython 生成器 |
+| 548 | io | StringIO/BytesIO write/getvalue/seek/read | 无修改 |
+| 549 | shlex | split/quote/join | 无修改 |
+| 550 | queue | Queue put/get/empty/qsize | 无修改 |
+| 551 | secrets | token_hex/choice/randbelow | 无修改（随机值用范围判定） |
+| 552 | calendar | isleap/monthrange/weekday 常量 | **补 7 个 weekday 常量**（MONDAY..SUNDAY，CPython 有 PA 原来没有） |
+| 553 | traceback | format_exc | 无修改 |
+| 554 | uuid | uuid4/NAMESPACE_DNS | 无修改；`.version` 属性缺失（已知） |
+| 555 | hmac | new/hexdigest/update | 无修改；仅 str digestmod（函数对象不支持，见 hmac.py） |
+
+**本批修复/补充的 stdlib 改动**：
+- `copy.py`：
+  - `copy.copy()` 原来 `return x`（同一对象，与 CPython 浅拷贝语义不符）→ 改为 isinstance 分派到 copy_list/copy_dict/copy_set；
+  - 补 `deepcopy(x)` 薄包装（转调已有的 `deepcopy_any`）。
+- `calendar.py`：补 MONDAY..SUNDAY 整数常量（0~6，周一=0）。
+- `typing.py`：给 `overload` 加注释说明 PA 恒等 vs CPython dummy 的差异。
+
+**已知限制（如实记录）**：
+- `calendar.monthrange` 返回 `(3,29)` 而 CPython 打印 `(calendar.THURSDAY,29)`；值相同（THURSDAY==3），只是具名常量无 repr，测试用 `== calendar.THURSDAY` 对齐。
+- `typing.overload` 在 PA 恒等返回，CPython 返回 `_overload_dummy`；编译器在类型检查阶段消费 `@overload`，运行期 dummy 无意义。
+- `uuid.UUID.version` 缺失；`hmac.new` 的 digestmod 只收字符串名，函数对象（如 `hashlib.sha256`）不支持。
+- `stat` 模块只测常量与判定函数：PA 没有 `os.stat`，无法构造真实 mode 值。
+- `difflib.unified_diff` 返回 list 而非生成器（已知，用 `list()` 对齐）。
+
+**验收**：
+- 新用例 `tests/run/538_*.py` ~ `555_*.py`，均带 expect，单独跑与全量跑均 `ran ok`。
+- 全量套件 `build/gfix-sb7` JOBS=16：**457 ran ok，0 FAILED/DIFF，RC=0**（基线 439 + 18）。

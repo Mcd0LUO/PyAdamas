@@ -57,8 +57,20 @@ def deepcopy_any(x):
 
 
 def copy(x):
-    """按静态类型分派的浅拷贝入口。
+    """浅拷贝入口：按运行期类型分派（list / dict / set）。
 
-    调用点实参类型已知时（list / dict / set）会选对分支；unknown 实参原值返回。
+    与 CPython copy.copy 对齐：容器返回新对象（共享元素引用），
+    标量/未知类型原值返回。
     """
+    if isinstance(x, list):
+        return copy_list(x)
+    if isinstance(x, dict):
+        return copy_dict(x)
+    if isinstance(x, set):
+        return copy_set(x)
     return x
+
+
+def deepcopy(x):
+    """深拷贝入口：按运行期类型递归复制（list/dict/set）。"""
+    return deepcopy_any(x)

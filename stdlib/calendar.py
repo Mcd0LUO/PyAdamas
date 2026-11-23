@@ -30,6 +30,15 @@ month_abbr: list[str] = ["", "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul",
 
 error = ValueError
 
+# 星期常量（CPython calendar.MONDAY..SUNDAY，周一=0）。
+MONDAY: int = 0
+TUESDAY: int = 1
+WEDNESDAY: int = 2
+THURSDAY: int = 3
+FRIDAY: int = 4
+SATURDAY: int = 5
+SUNDAY: int = 6
+
 _MINYEAR = 1
 _MAXYEAR = 9999
 
