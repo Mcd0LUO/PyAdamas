@@ -48,7 +48,7 @@ void AsmGen::gen_bin_int_fixed(const Inst& in) {
         const bool u64 = !ii->is_signed && ii->width == 64;
         // 宽度 < 64 的无符号值在槽里恒非负（零扩展不变量），
         // 所以除 u64 之外的运算都能直接复用有符号指令。
-        emit2(MOp::kMovq, sa, kRax);
+        if (sa.text != mreg_operand(kRax).text) emit2(MOp::kMovq, sa, kRax);
         // 定宽整数槽内的值一律非负（正常化保证；u64 是无符号域）→ 正 2 的
         // 幂除数的 // 与 % 各自退化成一条 shrq / andq。走通用 idivq/divq 要
         // 十几条指令加一次除法，这里是一条。

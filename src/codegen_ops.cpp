@@ -430,7 +430,9 @@ void AsmGen::gen_bin_int(const Inst& in) {
             }
         }
 
-        emit2(MOp::kMovq, sa, kRax);
+        // 左操作数已经在 %rax（前一条指令的结果通过 alias 传进来）时
+        // 不要发 movq %rax,%rax —— 纯冗余指令，在整数循环里每轮一条。
+        if (sa.text != mreg_operand(kRax).text) emit2(MOp::kMovq, sa, kRax);
         switch (in.bop) {
             case BinKind::Add: emit2(MOp::kAddq, sb, kRax); break;
             case BinKind::Sub: emit2(MOp::kSubq, sb, kRax); break;

@@ -347,6 +347,15 @@
 
         bool can_fuse_branch(const Inst& in, const Inst& nx) const;
 
+    // 整数 Bin 结果只被紧随的 Cmp 使用、且该 Cmp 与 Branch 融合时，让 Bin
+    // 把结果留在 %rax，并把别名传播给 Cmp —— 省掉「Bin 结果 → 临时槽 →
+    // cmpq $0,槽」的存储与内存读。判据纯 IR 结构（相邻三指令 + 单次使用）。
+    bool can_fuse_bin_cmp_branch(const Inst& a, const Inst& b, const Inst& c) const;
+
+    // 整数 Bin 结果只被紧邻的下一条整数 Bin 使用时，先留在 %rax（或复用
+    // 目标寄存器），省掉「结果 → 临时槽 → 再读回」的 store/load。
+    bool can_fuse_int_bin_temp(const Inst& in, const Inst& nx) const;
+
     // 比较结果只用来做分支时，直接发条件跳转：`setl` + `movzbq` +
     // 一次内存往返 + `cmpq $0` 全部省掉。循环条件走的就是这条路。
     void gen_cmp_branch(const Inst& in, const Inst& br);

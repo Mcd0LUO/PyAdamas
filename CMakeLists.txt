@@ -121,6 +121,7 @@ src/opt_intloop.cpp
   src/codegen_regalloc_temp.cpp
   src/ra_opt.cpp
   src/codegen_block.cpp
+  src/codegen_fuse.cpp
   src/codegen_comment.cpp
   src/codegen_ops.cpp
   src/codegen_store.cpp
