@@ -38,6 +38,7 @@ bool self_unroll_function(IRModule& m, IRFunction& fn, int fi);
 bool licm_function(IRFunction& fn, size_t n_globals);
 // RC 冗余消除：删掉互相抵消的 temp/temp_take 对。
 bool rc_redundant_pairs(IRFunction& fn);
+bool rc_unknown_specialize(IRFunction& fn);
 // 槽位转发与分支线程化：短路布尔值不再经临时槽往返，直接按比较结果分支。
 void forward_slot_loads(IRFunction& fn);
 // `d[k] = d.get(k, def) + delta` 融合成一次 pa_dict_bump（省一次哈希+探测）。

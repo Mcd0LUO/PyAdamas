@@ -53,5 +53,34 @@ bool rc_redundant_pairs(IRFunction& fn) {
     return changed;
 }
 
+
+/* 把 pa_rc_dec_unknown(v) 特化为 pa_rc_dec(v)：当 v 的静态类型是已知
+ * 堆类型（list/str/dict/tuple/class/...）时，unknown 版多做的小整数
+ * 排除 + 堆注册表查询全是冗余 —— 静态类型已经保证 v 是堆指针（或 0，
+ * pa_rc_dec 对 NULL 安全）。
+ *
+ * 判据是 IR 结构：CallRt RtFn::RcDecUnknown 且唯一实参 vreg 的静态类型
+ * ir_is_heap() 为真。适用于所有「槽从 unknown 升级成堆类型后残留
+ * dec_unknown」的形态，不限具体变量/函数。
+ *
+ * 与 opt_inline.cpp 里同类重写一致（那边按 unk_ty 判定，这里按 vreg 类型）。
+ */
+bool rc_unknown_specialize(IRFunction& fn) {
+    bool changed = false;
+    const size_t nv = fn.vreg_ty.size();
+    for (auto& b : fn.blocks) {
+        for (auto& in : b.insts) {
+            if (in.op != IrOp::CallRt || in.imm != static_cast<int64_t>(RtFn::RcDecUnknown)) continue;
+            if (in.args.size() != 1) continue;
+            VReg v = in.args[0];
+            if (v == kNoReg || static_cast<size_t>(v) >= nv) continue;
+            if (!ir_is_heap(fn.vreg_ty[static_cast<size_t>(v)])) continue;
+            in.imm = static_cast<int64_t>(RtFn::RcDec);
+            changed = true;
+        }
+    }
+    return changed;
+}
+
 }  // namespace optdetail
 }  // namespace pyadamas

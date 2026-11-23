@@ -121,9 +121,11 @@ void AsmGen::gen_index_store(const Inst& in) {
         emit_imm(MOp::kCmpq, 2, kr);
         emit_jmp(MOp::kJae, k23);
     }
-    // kind 与新值一致（或 hk2 的 kind2 无位图）：读旧值、写新值。
+    // kind 与新值一致（或 hk2 的 kind2 无位图）：写新值。
+    // hk==0（非堆标量）时旧值必是标量、Consumer 不用它做 dec ——
+    // 不读旧值，省一条 load（热路径纪律：非堆标量不读旧值）。
     emit2(MOp::kMovq, op_mem(r0, 16), sp);
-    emit2(MOp::kMovq, op_mem(sp, r1, 8), sv);
+    if (hk != 0) emit2(MOp::kMovq, op_mem(sp, r1, 8), sv);
     emit2(MOp::kMovq, src_mop(in.c), nv);
     emit2(MOp::kMovq, nv, op_mem(sp, r1, 8));
     if (hk == 2) emit_jmp(MOp::kJmp, decunk);

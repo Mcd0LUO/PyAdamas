@@ -359,6 +359,11 @@ void optimize_ir(IRModule& m, int opt_level, int loop_opt, bool inline_opt) {
     for (auto& fptr : m.funcs)
         opt_stats_run("rc_redundant_pairs", *fptr, [&] { rc_redundant_pairs(*fptr); });
 
+    // 静态类型已知的堆值不用走 unknown 注册表查询（槽从 unknown 升级后
+    // 残留的 dec_unknown）。IR 结构判据：vreg 类型 ir_is_heap。
+    for (auto& fptr : m.funcs)
+        opt_stats_run("rc_unknown_specialize", *fptr, [&] { rc_unknown_specialize(*fptr); });
+
     // 内联带进来的实参常量继续折；顺带清掉失效的 load.global / func.addr。
     fold_stats();
 }
