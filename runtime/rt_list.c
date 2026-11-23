@@ -922,6 +922,25 @@ void pa_list_sort(PyAdamasList* l, int64_t kind, PyAdamasStr* desc) {
             pa_raise_c("TypeError", msg);
             return;
         }
+        if (fam == PA_UK_OTHER) {
+            /* 全 OTHER 族：用户类实例在 CPython 里按 __lt__ 比较；PyAdamas 运行时
+               没有「名字 → 方法槽」映射，排不了（已知缺口，见
+               docs/unknown-semantics-audit.md）。以前退化成按机器字（堆指针）排
+               —— 元素顺序静默错乱；现在显式抛 TypeError，不再静默给错结果。
+               元组/列表/None 等其它 OTHER 元素保持机器字口径（文档未承诺容器
+               元素排序，静态类型已知时走 kind=4 的按内容比较）。 */
+            for (int64_t i = 0; i < l->len; ++i) {
+                int64_t v = l->data[i];
+                if (v == 0 || !pa_unknown_is_heap(v)) continue;
+                if (((PyAdamasRc*)((uintptr_t)v - (uintptr_t)PYADAMAS_RC_HDR))->kind ==
+                    PYADAMAS_RC_INSTANCE) {
+                    pa_raise_c("TypeError",
+                               "'<' not supported between instances of "
+                               "'object' and 'object'");
+                    return;
+                }
+            }
+        }
         if (fam == PA_UK_STR) sort_str(l->data, l->len);
         else if (fam == PA_UK_NUM) sort_uknum(l->data, l->len);
         else sort_i64(l->data, l->len);

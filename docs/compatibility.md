@@ -155,6 +155,20 @@ float 除法直接发 `divsd`，没有除零检查，于是按 IEEE 754 得到 `
 | float / str 下标（`a[1.5]`、`a["x"]`） | **编译期**拒绝 | 运行期 `TypeError` | 静态类型设计的直接结果，不是 bug |
 | str 切片赋值 / tuple 元素赋值 | **编译期**拒绝 | 运行期 `TypeError` | 同上 |
 
+### `del obj.attr` 与类实例排序（0.432 记录）
+
+- **`del obj.attr` 是「重置为默认值」，不是移除属性**：删掉字段后对象布局不变，字段被写回
+  None/0；之后 `p.x` 读得到 `0`/`None`，而不是 CPython 的 `AttributeError`。这是字段布局
+  编译期定死的直接结果（src/lower_exc.cpp 的 store_field(..., const_none())），
+  tests/run/41_decorators.py 的 expect 已按 `0` 钉住；语义是设计取舍，不改。
+- **类实例列表的 `sorted()` / `list.sort()` 显式抛 `TypeError`**：PyAdamas 运行时没有
+  「类名 → `__lt__` 方法槽」的映射，排不了用户类实例；以前会退化成机器字（堆指针）比较、
+  **静默返回乱序**，0.432 起改为抛
+  `TypeError: '<' not supported between instances of 'object' and 'object'`
+  （文案用 `object` 而非具体类名，同样因为拿不到「实例 → 类名」映射）。CPython 对带
+  `__lt__` 的类能成功排序——这是已知缺口，不是待修的小文案差异；静态类型已知的
+  int/float/str/容器元素排序不受影响。
+
 ## 二、尚未实现的构造
 
 这些在 CPython 里合法，在 PyAdamas 里分两种情况：

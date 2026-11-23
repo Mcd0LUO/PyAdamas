@@ -107,7 +107,7 @@ print(p in xs)                  # 修前 False，CPython True
 | **类实例 dunder 在 unknown 域** | 静态类型已知时 `__eq__` 正常（`lower_dunder_eq` 用编译期 dunder 槽）；实例从混合容器取出后 `==` 走 `pa_any_cmp` other 分支 → 按同一性，**不调用 `__eq__`**（CPython 会调）。`hash`/`sorted` 同类。 | 运行时没有「类方法名→vtable 槽」映射：`pa_attr_get` 只查动态属性 dict，vtable 槽是编号（dict 的类 key 由编译器传 `eq_slot`）。要修需新增「类注册 dunder 名→槽」机制（类元数据 + 生成代码注册），是新功能而非小修。 |
 | **deque 的 `in`** | `dq.index`/`count`/`remove` 有 runtime 实现且安全；但 `p in dq` **编译期报错**（`argument of type 'collections.deque' is not iterable`）。 | 这是 lowering 缺口（没有 deque 的 `in` 降级路径），不是 runtime 分派 bug；实现需要新的容器迭代/包含降级，排在语言 gap 里。 |
 | **嵌套容器 chain 深度不足** | `list[list[int]]` 的相等描述符链只覆盖有限深度，深层落回 `'x'` → 同一性比较；如 unknown 域 `[[1,2]] == [[1,2]]` 可能为 False（CPython True）。 | 0.424 的 `chain_elem_eq` 只对 `'x'` 做了 str/big 内容比较（保守），容器递归需要类型描述符深度信息；属于 chain 生成侧的既有口径，未在 audit 范围内改动。 |
-| **`sorted` 的「全 other 族」** | kind=3 族分类后：全数值按数值、全 str 按字节；但全容器/类实例族仍按机器字（CPython 会按内容/`__lt__`）。 | 与「类 dunder unknown 域」同源；容器内容比较需要知道元素描述符（静态类型未知时没有），保持机器字是保守选择。 |
+| **`sorted` 的「全 other 族」** | kind=3 族分类后：全数值按数值、全 str 按字节；**用户类实例**族从 0.432 起显式抛 `TypeError`（文案 `'<' not supported between instances of 'object' and 'object'`，不再静默按机器字返回乱序）；全容器/None 族仍按机器字（CPython 会按内容）。 | 类实例与「类 dunder unknown 域」同源：运行时没有「类名→`__lt__` 槽」映射，要修需新增类注册机制（新功能）。容器内容比较需要元素描述符（静态类型未知时没有）；改抛错需要区分容器与实例（按 RC kind），已在 `pa_list_sort` 里实现。 |
 
 ## 5. 修复一览（代码与测试）
 
