@@ -1,37 +1,52 @@
 # P1 收尾：cimport 窄/无符号 C 类型 → 定宽 TyKind（char=i8、short=i16、
 # uchar=u8、ushort=u16、uint64/ulong=u64）。边界按宽度符号/零扩展。
-cmodule cfixedint
-link "tests/run/cfixedint.c"
+cmodule("cfixedint")
+link("tests/run/cfixedint.c")
 
-const CMAX: char = 127
-const UMAX: uchar = 255
-const U64MAX: uint64 = 18446744073709551615
+CMAX: char = 127
+UMAX: uchar = 255
+U64MAX: uint64 = 18446744073709551615
 
-extern def "fi_char_id" as char_id(x: char) -> char
-extern def "fi_char_neg" as char_neg() -> char
-extern def "fi_short_id" as short_id(x: short) -> short
-extern def "fi_short_min" as short_min() -> short
-extern def "fi_uchar_id" as uchar_id(x: uchar) -> uchar
-extern def "fi_uchar_max" as uchar_max() -> uchar
-extern def "fi_ushort_id" as ushort_id(x: ushort) -> ushort
-extern def "fi_ushort_max" as ushort_max() -> ushort
-extern def "fi_u64_id" as u64_id(x: uint64) -> uint64
-extern def "fi_u64_max" as u64_max() -> uint64
-extern def "fi_u64_add" as u64_add(a: uint64, b: uint64) -> uint64
+@extern("fi_char_id")
+def char_id(x: char) -> char: pass
+@extern("fi_char_neg")
+def char_neg() -> char: pass
+@extern("fi_short_id")
+def short_id(x: short) -> short: pass
+@extern("fi_short_min")
+def short_min() -> short: pass
+@extern("fi_uchar_id")
+def uchar_id(x: uchar) -> uchar: pass
+@extern("fi_uchar_max")
+def uchar_max() -> uchar: pass
+@extern("fi_ushort_id")
+def ushort_id(x: ushort) -> ushort: pass
+@extern("fi_ushort_max")
+def ushort_max() -> ushort: pass
+@extern("fi_u64_id")
+def u64_id(x: uint64) -> uint64: pass
+@extern("fi_u64_max")
+def u64_max() -> uint64: pass
+@extern("fi_u64_add")
+def u64_add(a: uint64, b: uint64) -> uint64: pass
 
-extern var "fi_char_global" as char_global: char
-extern var "fi_ushort_global" as ushort_global: ushort
-extern var "fi_u64_global" as u64_global: uint64
+char_global: char = extern_var("fi_char_global")
+ushort_global: ushort = extern_var("fi_ushort_global")
+u64_global: uint64 = extern_var("fi_u64_global")
 
-extern def "fi_char_arr_ptr" as char_arr() -> ptr[char]
-extern def "fi_u64_arr_ptr" as u64_arr() -> ptr[uint64]
+@extern("fi_char_arr_ptr")
+def char_arr() -> ptr[char]: pass
+@extern("fi_u64_arr_ptr")
+def u64_arr() -> ptr[uint64]: pass
 
-struct FiMixed:
+class FiMixed:
     c: char
     s: short
     uc: uchar
     us: ushort
     u64: uint64
 
-extern def "fi_struct_make" as struct_make(c: char, s: short, uc: uchar, us: ushort, u64: uint64) -> FiMixed
-extern def "fi_cb_call" as cb_call(cb: fn(char, short, uchar, ushort, uint64) -> uint64) -> uint64
+@extern("fi_struct_make")
+def struct_make(c: char, s: short, uc: uchar, us: ushort, u64: uint64) -> FiMixed: pass
+@extern("fi_cb_call")
+def cb_call(cb: Callable[[char, short, uchar, ushort, uint64], uint64]) -> uint64: pass

@@ -1274,27 +1274,48 @@ cimport mylib as ml, other.lib
 print(m.sqrt(2.0))
 ```
 
-`a.b` 对应声明文件 `a/b.cpya`（相对源文件目录或 `-I` 路径查找）。没有 `as` 时绑定名取最后一段（`cimport a.b` 之后用 `b.fn`）；`.cpya` 是手写文本，每行一条，`#` 起注释：
+`a.b` 对应声明文件 `a/b.cpya`（相对源文件目录或 `-I` 路径查找）。没有 `as` 时绑定名取最后一段（`cimport a.b` 之后用 `b.fn`）。
 
-```
-cmodule m                       # 必须是第一条非注释行，且等于 cimport 的名字
-link m                          # -> -lm；引号内则原样传给链接器
-link "/usr/lib/libfoo.a"
-const PI: float = 3.141592653589793
-struct FILE                     # 不透明结构体，只能以 ptr[FILE] 使用
-extern var "stdout" as stdout: ptr[FILE]   # C 全局变量，可读也可写回
-extern def "sqrt" as sqrt(x: float) -> float
-extern def strlen(s: str) -> int
-extern def free(p: ptr) -> None
+**`.cpya` 是 Python 语法的 stub**：没有实现，函数体只有 `pass`；编译器把它当「C 声明」读。
+格式与 `stdlib/sigs/*.pysig` 一致（同一套 Lexer/Parser/注解），只是注解词汇是 C 边界类型：
+
+```python
+# tests/run/clib.cpya
+cmodule("clib")                 # 可省略：默认从 cimport 的名字推导
+link("m")                       # -> -lm；给路径（含 / 或 .c/.a/.so 结尾）或 "-" 开头则原样
+PI: float = 3.141592653589793   # 常量：带注解的赋值，编译期内联
+
+class FILE: pass                # 不透明句柄：class 体只有 pass
+class pair:                     # 带字段的 C struct：注解无值赋值 = 字段（按 C 规则布局）
+    a: float
+    b: float
+
+def sqrt(x: float) -> float: pass                  # C 符号 = Python 名
+@extern("strlen")                                   # 改名时才要装饰器
+def slen(s: str) -> int: pass
+@extern("qsort")
+def qsort(base: ptr, n: int, size: int, cmp: Callable[[ptr[int], ptr[int]], int]) -> None: pass
+
+stdout: ptr[FILE]                                  # 无值 = extern var（C 名 = py 名）
+optind: int32 = extern_var("optind")               # 改名：extern_var("c_name")
 ```
 
-`extern def` 单行书写；参数名必填；返回值省略等价于 `None`；`"c_name" as py_name` 用于改名。常量在编译期内联。
+规则：
+
+- 顶层只允许：模块 docstring、`cmodule("名")`、`link("参数")`、带注解的常量、`class`、`def`、注解无值的 extern var。其它语句报错并给行号。
+- `cmodule(...)` 可省略；写了就必须等于 `cimport` 的名字（写错是硬错误）。
+- `link(...)` 参数去重后追加到链接命令；`link("z")` → `-lz`，`link("tests/run/x.c")` 原样。
+- `def` 的参数与返回值**必须有注解**；`*args` 表示 C 变参（如 `printf`）；`None` 表示无返回值。
+- 默认 C 符号 = Python 名；改名用 `@extern("c_name")`。`def` 体只能是 `pass`（可带 docstring）。
+- `class NAME: pass` = 不透明句柄（只能 `ptr[NAME]`）；`class NAME:` + 注解无值赋值 = 带字段的 C struct（按 C 规则布局，`ptr[NAME]` 可读写字段，也可按值传参/返回）。
+- extern var：`NAME: T`（无值，C 名 = py 名）或 `NAME: T = extern_var("c_name")`（改名）。
+- 旧的行式语法（`cmodule m` / `extern def "x" as y(...)` / `struct NAME` …）**已删除**，不兼容。
 
 `extern var` 读取 C 全局变量，赋值时按同一宽度写回：
 
-```
-extern var "optind" as optind: int32
-extern var "program_invocation_name" as prog: str
+```python
+optind: int32
+program_invocation_name: str = extern_var("program_invocation_name")
 ```
 
 ```python
@@ -1309,16 +1330,19 @@ c.optind = 0      # 写回 C 全局变量
 |---|---|---|
 | `int` | `long` | 64 位 |
 | `int32` / `uint32` | `int` / `unsigned` | 返回值分别符号/零扩展 |
+| `char`/`int8`、`short`/`int16`、`uchar`/`uint8`、`ushort`/`uint16`、`uint64`/`ulong` | 对应 C 窄/无符号整数 | 边界按宽度符号/零扩展 |
 | `float` | `double` | |
+| `float32` | `float` | 边界做 double↔float 转换 |
 | `bool` | `_Bool` | 返回值统一为 0/1 |
 | `str` | `char*` | 传入 `data`；返回时复制成 `str` |
 | `ptr` / `ptr[T]` | `void*` / `T*` | 类型系统中是 `Optional[int]`，0 表示 NULL |
 | `ptr[Struct]` | `Struct*` | 结构体有字段声明时是 `Optional[ptr[Struct]]`，可读写字段；否则同 `Optional[int]` |
 | `Struct` | `struct Struct` | 带字段的结构体按值传参/返回，见「结构体按值传递」 |
+| `Callable[[P...], R]` | 函数指针 `R (*)(P...)` | C 回调形参；只允许标量/指针，且不转发栈参数（整数 ≤6、浮点 ≤8） |
 | `None` | `void` | |
 | `Optional[str]` | 可空 `char*` | NULL 返回 `None` |
 
-不支持：在 `cimport` 时直接解析 C 头文件（可先用 `pyadamas cdecl` 离线生成 `.cpya`）。`struct NAME` 不带冒号时只声明不透明指针类型；带冒号和缩进字段时按 C 规则布局，`ptr[NAME]` 可直接读写字段。`link` 参数去重后追加到最终链接命令；`.cpya` 不参与 `.pya` 模块缓存。
+不支持：在 `cimport` 时直接解析 C 头文件（可先用 `pyadamas cdecl` 离线生成 `.cpya`）。`.cpya` 不参与 `.pya` 模块缓存。
 
 `str` 参数要求非空，不能把 `Optional[str]` 直接传给它（会有 NULL）；需要接受 NULL 时声明为 `Optional[str]`。`ptr` 是不透明地址，0 表示 `NULL`，不能解引用或做数组访问。
 

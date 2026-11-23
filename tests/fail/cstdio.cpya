@@ -1,5 +1,5 @@
-cmodule cstdio
+cmodule("cstdio")
 
-struct FILE
+class FILE: pass
 
-extern def "fputs" as fputs(s: str, f: ptr[FILE]) -> int32
+def fputs(s: str, f: ptr[FILE]) -> int32: pass

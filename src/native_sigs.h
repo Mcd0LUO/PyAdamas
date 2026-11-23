@@ -49,9 +49,8 @@
 #include <vector>
 
 #include "ir_ops.h"     // RtFn + rt_name()
-#include "lexer.h"      // Lexer
 #include "module.h"     // ModuleInfo / TypePtr / FuncInfo / LiteralValue
-#include "parser.h"     // Parser / ParseError
+#include "pydecl.h"     // 共用声明文件前端（Lexer/Parser/AST 白名单/装饰器/字面量）
 #include "typecheck.h"  // TypeChecker::parse_annotation_for_decl
 
 // 独立自测（单独编译本头文件）时没有 CMake 的宏。
@@ -122,17 +121,6 @@ namespace detail {
     std::exit(1);
 }
 
-inline std::string read_file_or_fatal(const std::string& path) {
-    std::FILE* f = std::fopen(path.c_str(), "rb");
-    if (!f) fatal(path, 0, "cannot open declaration file");
-    std::string out;
-    char buf[8192];
-    size_t n;
-    while ((n = std::fread(buf, 1, sizeof buf, f)) > 0) out.append(buf, n);
-    std::fclose(f);
-    return out;
-}
-
 // ── 模块名 ↔ 路径 ────────────────────────────────────────────────────
 // 模块名 = 相对 stdlib/sigs/ 的路径：os.path → sigs/os/path.pysig。
 // 每一段必须是合法标识符，禁止空段 / .. / 绝对路径（路径穿越防护）。
@@ -172,80 +160,25 @@ inline std::string sig_path(const std::string& module) {
     return (sigs_dir() / std::filesystem::path(sig_rel_path(module))).string();
 }
 
-// ── AST 白名单解析 ────────────────────────────────────────────────────
-// 只认四种顶层语句：模块 docstring、def（body 只有 pass / docstring+pass）、
-// 带注解的常量（NAME: T = <字面量>）。其它一律报错并给行号。
-struct DeclError {
-    int line = 0;
-    std::string msg;
-};
-
-[[noreturn]] inline void fail(int line, const std::string& msg) { throw DeclError{line, msg}; }
-
-inline bool is_docstring(const Stmt& s) {
-    if (s.kind != StmtKind::Expr) return false;
-    const auto& e = static_cast<const ExprStmt&>(s);
-    const auto* c = dynamic_cast<const Constant*>(e.value.get());
-    return c && c->ck == Constant::CK::Str;
-}
-
-inline const char* stmt_kind_name(StmtKind k) {
-    switch (k) {
-        case StmtKind::Expr: return "expression statement";
-        case StmtKind::Assign: return "assignment";
-        case StmtKind::AugAssign: return "augmented assignment";
-        case StmtKind::AnnAssign: return "annotated assignment";
-        case StmtKind::Return: return "return";
-        case StmtKind::Break: return "break";
-        case StmtKind::Continue: return "continue";
-        case StmtKind::Pass: return "pass";
-        case StmtKind::If: return "if";
-        case StmtKind::While: return "while";
-        case StmtKind::For: return "for";
-        case StmtKind::FunctionDef: return "def";
-        case StmtKind::ClassDef: return "class";
-        case StmtKind::Try: return "try";
-        case StmtKind::With: return "with";
-        case StmtKind::Raise: return "raise";
-        case StmtKind::Assert: return "assert";
-        case StmtKind::Import: return "import";
-        case StmtKind::ImportFrom: return "from-import";
-        case StmtKind::Global: return "global";
-        case StmtKind::Nonlocal: return "nonlocal";
-        case StmtKind::Delete: return "del";
-        case StmtKind::Match: return "match";
-        case StmtKind::CImport: return "cimport";
-        case StmtKind::StructDef: return "struct";
-    }
-    return "statement";
-}
-
-// 注解表达式的「类型名」：用于判断 unknown 是显式写的还是解析失败退化的。
-inline std::string annotation_base_name(const Expr* e) {
-    if (!e) return {};
-    if (const auto* n = dynamic_cast<const Name*>(e)) return n->id;
-    if (const auto* a = dynamic_cast<const Attribute*>(e)) return a->attr;
-    if (const auto* s = dynamic_cast<const Subscript*>(e)) return annotation_base_name(s->value.get());
-    if (const auto* c = dynamic_cast<const Constant*>(e))
-        return c->ck == Constant::CK::Str ? "string-annotation" : "constant";
-    return {};
-}
+// ── AST 白名单解析（前端复用 src/pydecl.h，与 .cpya 加载器同一份）───────
+// 顶层只认四种语句：模块 docstring、def（body 只有 pass / docstring+pass）、
+// 带注解的常量（NAME: T = 字面量）。其它一律报错并给行号。
 
 // 注解 → 类型。复用 typecheck 的 parse_annotation（经 public 薄封装），
 // 所以类型语法与函数标注/变量标注完全同一份实现。
 inline TypePtr resolve_type(TypeChecker& tc, Expr* e, int line, const std::string& what) {
-    if (!e) fail(line, what + " needs a type annotation");
+    if (!e) pydecl::fail(line, what + " needs a type annotation");
     TypePtr t = tc.parse_annotation_for_decl(e, line);
-    if (!t) fail(line, what + ": cannot parse the type annotation");
+    if (!t) pydecl::fail(line, what + ": cannot parse the type annotation");
     if (t->kind == TyKind::Unknown) {
         // 只有显式写 unknown/Any/object 才允许留在 unknown 域。其它名字
         // （拼错、Protocol、未登记的类）一律报错：native 签名静默退化成
         // unknown 会让调用点不再 coerce，运行期按错的 ABI 传参。
-        const std::string base = annotation_base_name(e);
+        const std::string base = pydecl::annotation_base_name(e);
         if (base != "unknown" && base != "Any" && base != "object")
-            fail(line, what + ": '" + base +
-                           "' is not a supported native signature type "
-                           "(write `unknown` explicitly if that is intended)");
+            pydecl::fail(line, what + ": '" + base +
+                                   "' is not a supported native signature type "
+                                   "(write 'unknown' explicitly if that is intended)");
     }
     return t;
 }
@@ -259,43 +192,21 @@ inline std::string default_symbol(const std::string& module, const std::string& 
     return s;
 }
 
-// @native("pa_xxx")：唯一允许的装饰器；参数必须是一个非空字符串字面量。
-inline std::string native_decorator_symbol(const Expr& d, const FunctionDef& fd) {
-    const auto* call = dynamic_cast<const Call*>(&d);
-    if (!call) {
-        const auto* n = dynamic_cast<const Name*>(&d);
-        if (n && n->id == "native")
-            fail(d.line, "@native needs a runtime symbol: @native(\"pa_xxx\")");
-        fail(d.line, "unknown decorator on '" + fd.name +
-                         "' (only @native(\"pa_symbol\") is allowed in a signature file)");
+// pydecl::Literal → 接口里的 LiteralValue（.pysig 默认值/常量字面量）。
+inline LiteralValue to_literal_value(const pydecl::Literal& l) {
+    LiteralValue v;
+    switch (l.kind) {
+        case pydecl::Literal::Kind::Bool: v.kind = LiteralValue::Kind::Bool; v.b = l.b; break;
+        case pydecl::Literal::Kind::Int:
+            v.kind = LiteralValue::Kind::Int;
+            v.i = l.i;
+            v.u64 = l.u64;
+            break;
+        case pydecl::Literal::Kind::Float: v.kind = LiteralValue::Kind::Float; v.f = l.f; break;
+        case pydecl::Literal::Kind::Str: v.kind = LiteralValue::Kind::Str; v.s = l.s; break;
+        case pydecl::Literal::Kind::None: v.kind = LiteralValue::Kind::None; break;
     }
-    const auto* n = dynamic_cast<const Name*>(call->func.get());
-    if (!n || n->id != "native")
-        fail(d.line, "unknown decorator on '" + fd.name +
-                         "' (only @native(\"pa_symbol\") is allowed in a signature file)");
-    if (call->args.size() != 1 || !call->keywords.empty())
-        fail(d.line, "@native expects exactly one string literal argument, e.g. "
-                     "@native(\"pa_time_time\")");
-    const auto* c = dynamic_cast<const Constant*>(call->args[0].get());
-    if (!c || c->ck != Constant::CK::Str || c->s.empty())
-        fail(d.line, "@native argument must be a non-empty string literal (runtime symbol name)");
-    return c->s;
-}
-
-// def 的函数体：只允许 pass（可带前置 docstring）。
-inline void check_body(const FunctionDef& fd) {
-    size_t i = 0;
-    if (i < fd.body.size() && is_docstring(*fd.body[i])) ++i;
-    if (i >= fd.body.size())
-        fail(fd.line, "function '" + fd.name + "' has no body (signature bodies must be `pass`)");
-    const Stmt& s = *fd.body[i];
-    if (s.kind != StmtKind::Pass)
-        fail(s.line, "function '" + fd.name + "' body must be `pass` (optionally preceded by a "
-                     "docstring); found " + std::string(stmt_kind_name(s.kind)));
-    if (i + 1 != fd.body.size())
-        fail(fd.body[i + 1]->line, "function '" + fd.name +
-                                       "' body must contain only `pass`; found an extra " +
-                                       stmt_kind_name(fd.body[i + 1]->kind));
+    return v;
 }
 
 // 声明文件 → ModuleSig。
@@ -308,7 +219,7 @@ class DeclParser {
         ms.module = module;
         ms.path = path_;
         for (auto& st : mod.body) {
-            if (is_docstring(*st)) continue;  // 模块 docstring：允许
+            if (pydecl::is_docstring(*st)) continue;  // 模块 docstring：允许
             switch (st->kind) {
                 case StmtKind::FunctionDef: {
                     auto& fd = static_cast<FunctionDef&>(*st);
@@ -324,24 +235,25 @@ class DeclParser {
                     if (!as.targets.empty())
                         if (const auto* n = dynamic_cast<const Name*>(as.targets[0].get()))
                             name = n->id;
-                    fail(as.line, "constant '" + name + "' needs a type annotation (write '" + name +
-                                      ": T = <literal>')");
+                    pydecl::fail(as.line, "constant '" + name +
+                                              "' needs a type annotation (write '" + name +
+                                              ": T = <literal>')");
                 }
                 default:
-                    fail(st->line, std::string("only 'def f(...) -> T: pass' and "
-                                               "'NAME: T = <literal>' are allowed in a signature "
-                                               "file; found ") +
-                                       stmt_kind_name(st->kind));
+                    pydecl::fail(st->line, std::string("only 'def f(...) -> T: pass' and "
+                                                       "'NAME: T = <literal>' are allowed in a "
+                                                       "signature file; found ") +
+                                               pydecl::stmt_kind_name(st->kind));
             }
         }
         // 重名检查：函数与常量共用模块命名空间。
         std::set<std::string> seen;
         for (auto& f : ms.funcs)
             if (!seen.insert(f.name).second)
-                fail(f.line, "duplicate declaration '" + f.name + "'");
+                pydecl::fail(f.line, "duplicate declaration '" + f.name + "'");
         for (auto& c : ms.consts)
             if (!seen.insert(c.name).second)
-                fail(c.line, "duplicate declaration '" + c.name + "'");
+                pydecl::fail(c.line, "duplicate declaration '" + c.name + "'");
         return ms;
     }
 
@@ -350,15 +262,23 @@ class DeclParser {
         SigFunc f;
         f.line = fd.line;
         f.name = fd.name;
-        if (fd.is_async) fail(fd.line, "async def is not allowed in a signature file");
+        if (fd.is_async) pydecl::fail(fd.line, "async def is not allowed in a signature file");
         // 装饰器：@native("pa_xxx") 覆盖约定推导的运行期符号。
         for (auto& d : fd.decorators) {
             if (!d) continue;
-            if (!f.rt_symbol.empty()) fail(d->line, "duplicate decorator on '" + fd.name + "'");
-            f.rt_symbol = native_decorator_symbol(*d, fd);
+            const auto dec = pydecl::decorator_of(*d, fd.name);
+            if (dec.name != "native")
+                pydecl::fail(dec.line, "unknown decorator on '" + fd.name +
+                                           "' (only @native(\"pa_symbol\") is allowed in a "
+                                           "signature file)");
+            if (!dec.has_string_arg)
+                pydecl::fail(dec.line, "@native needs a runtime symbol: @native(\"pa_xxx\")");
+            if (!f.rt_symbol.empty())
+                pydecl::fail(dec.line, "duplicate decorator on '" + fd.name + "'");
+            f.rt_symbol = dec.arg;
         }
         if (f.rt_symbol.empty()) f.rt_symbol = default_symbol(module, fd.name);
-        check_body(fd);
+        pydecl::check_pass_body(fd);
 
         // 位置参数 + 默认值（Python 的 defaults 对齐到最后 ndef 个位置参数）。
         std::vector<Arg*> ordered;
@@ -366,7 +286,7 @@ class DeclParser {
         for (auto& a : fd.args.args) ordered.push_back(&a);
         const size_t ndef = fd.args.defaults.size();
         if (ndef > ordered.size())
-            fail(fd.line, "function '" + fd.name + "': default value without a parameter");
+            pydecl::fail(fd.line, "function '" + fd.name + "': default value without a parameter");
         const size_t first_def = ordered.size() - ndef;
         for (size_t i = 0; i < ordered.size(); ++i) {
             Arg& a = *ordered[i];
@@ -376,13 +296,13 @@ class DeclParser {
             p.ty = resolve_type(tc_, a.annotation.get(), fd.line, what);
             if (i >= first_def) {
                 const Expr* dv = fd.args.defaults[i - first_def].get();
-                auto lit = literal_of_expr(dv);
+                auto lit = pydecl::literal_of(dv);
                 if (!lit)
-                    fail(dv ? dv->line : fd.line,
-                         "default value of parameter '" + a.name +
-                             "' must be a literal (int / float / str / bool / None)");
+                    pydecl::fail(dv ? dv->line : fd.line,
+                                 "default value of parameter '" + a.name +
+                                     "' must be a literal (int / float / str / bool / None)");
                 p.has_default = true;
-                p.def = *lit;
+                p.def = to_literal_value(*lit);
             }
             f.pos.push_back(std::move(p));
         }
@@ -402,12 +322,12 @@ class DeclParser {
                                 "parameter '" + a.name + "' of '" + fd.name + "'");
             if (i < fd.args.kw_defaults.size() && fd.args.kw_defaults[i]) {
                 const Expr* dv = fd.args.kw_defaults[i].get();
-                auto lit = literal_of_expr(dv);
+                auto lit = pydecl::literal_of(dv);
                 if (!lit)
-                    fail(dv ? dv->line : fd.line,
-                         "default value of parameter '" + a.name + "' must be a literal");
+                    pydecl::fail(dv ? dv->line : fd.line,
+                                 "default value of parameter '" + a.name + "' must be a literal");
                 p.has_default = true;
-                p.def = *lit;
+                p.def = to_literal_value(*lit);
             }
             f.kwonly.push_back(std::move(p));
         }
@@ -426,16 +346,18 @@ class DeclParser {
         SigConst c;
         c.line = aa.line;
         const auto* n = dynamic_cast<const Name*>(aa.target.get());
-        if (!n) fail(aa.line, "constant target must be a simple name");
+        if (!n) pydecl::fail(aa.line, "constant target must be a simple name");
         c.name = n->id;
-        if (!aa.annotation) fail(aa.line, "constant '" + c.name + "' needs a type annotation");
+        if (!aa.annotation)
+            pydecl::fail(aa.line, "constant '" + c.name + "' needs a type annotation");
         c.ty = resolve_type(tc_, aa.annotation.get(), aa.line, "constant '" + c.name + "'");
-        if (!aa.value) fail(aa.line, "constant '" + c.name + "' needs a value");
-        auto lit = literal_of_expr(aa.value.get());
+        if (!aa.value) pydecl::fail(aa.line, "constant '" + c.name + "' needs a value");
+        auto lit = pydecl::literal_of(aa.value.get());
         if (!lit)
-            fail(aa.value->line, "constant '" + c.name +
-                                     "' initializer must be a literal (int / float / str / bool / None)");
-        c.val = *lit;
+            pydecl::fail(aa.value->line, "constant '" + c.name +
+                                             "' initializer must be a literal "
+                                             "(int / float / str / bool / None)");
+        c.val = to_literal_value(*lit);
         // 字面量种类与声明类型必须一致（否则运行期按错宽度取值）。
         const TyKind want = c.ty ? c.ty->kind : TyKind::Unknown;
         bool ok = true;
@@ -451,7 +373,8 @@ class DeclParser {
             default: ok = false; break;
         }
         if (!ok)
-            fail(c.line, "constant '" + c.name + "': initializer does not match the declared type");
+            pydecl::fail(c.line,
+                         "constant '" + c.name + "': initializer does not match the declared type");
         return c;
     }
 
@@ -542,23 +465,14 @@ inline const ModuleSig* load(const std::string& module) {
             detail::fatal(path, 0, "declaration file resolves outside stdlib/sigs/ (module '" +
                                        module + "')");
     }
-    const std::string src = detail::read_file_or_fatal(path);
     std::unique_ptr<Module> ast;
-    try {
-        std::vector<Token> toks = Lexer(src).run();
-        Parser parser(std::move(toks));
-        ast = parser.parse();
-    } catch (const LexError& e) {
-        detail::fatal(path, e.line, e.what());
-    } catch (const ParseError& e) {
-        detail::fatal(path, e.line, e.what());
-    }
     ModuleSig ms;
     try {
+        ast = pydecl::parse_file(path);
         TypeChecker tc(path);  // 只用来解析注解，不跑 check
         detail::DeclParser dp(path, tc);
         ms = dp.parse(*ast, module);
-    } catch (const detail::DeclError& e) {
+    } catch (const pydecl::Error& e) {
         detail::fatal(path, e.line, e.msg);
     }
     detail::resolve_rt_symbols(ms);

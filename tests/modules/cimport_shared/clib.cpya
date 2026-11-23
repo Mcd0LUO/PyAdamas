@@ -1,4 +1,3 @@
-cmodule clib
-link m
-const PI: float = 3.141592653589793
-extern def "sqrt" as sqrt(x: float) -> float
+link("m")
+PI: float = 3.141592653589793
+def sqrt(x: float) -> float: pass

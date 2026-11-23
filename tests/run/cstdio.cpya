@@ -1,11 +1,10 @@
-cmodule cstdio
 
-struct FILE
+class FILE: pass
 
-extern def "tmpfile" as tmpfile() -> ptr[FILE]
-extern def "fopen" as fopen(path: str, mode: str) -> ptr[FILE]
-extern def "fputs" as fputs(s: str, f: ptr[FILE]) -> int32
-extern def "fclose" as fclose(f: ptr[FILE]) -> int32
+def tmpfile() -> ptr[FILE]: pass
+def fopen(path: str, mode: str) -> ptr[FILE]: pass
+def fputs(s: str, f: ptr[FILE]) -> int32: pass
+def fclose(f: ptr[FILE]) -> int32: pass
 
 # C 全局变量：stdout 是 FILE*，读取后可直接交给 fputs。
-extern var "stdout" as stdout: ptr[FILE]
+stdout: ptr[FILE]

@@ -1,3 +1,4 @@
 # 反例用的最小声明（check 模式不需要 link）。
-cmodule cfixrange
-extern def "fi_char_id" as char_id(x: char) -> char
+cmodule("cfixrange")
+@extern("fi_char_id")
+def char_id(x: char) -> char: pass

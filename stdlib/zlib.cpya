@@ -1,23 +1,26 @@
 # zlib C 绑定：gzip/zlib 模块的压缩热路径。
 # link z 动态链接系统 zlib；gzip_glue.c 把 z_stream 封装在 C 侧，
 # Python 侧只传缓冲区（bytes/list[int]），不碰 z_stream ABI。
-cmodule zlib
-link z
-link "gzip_glue.c"
+cmodule("zlib")
+link("z")
+link("gzip_glue.c")
 
-const Z_OK: int = 0
-const Z_STREAM_END: int = 1
-const Z_ERRNO: int = -1
-const Z_STREAM_ERROR: int = -2
-const Z_DATA_ERROR: int = -3
-const Z_MEM_ERROR: int = -4
-const Z_BUF_ERROR: int = -5
-const Z_VERSION_ERROR: int = -6
+Z_OK: int = 0
+Z_STREAM_END: int = 1
+Z_ERRNO: int = -1
+Z_STREAM_ERROR: int = -2
+Z_DATA_ERROR: int = -3
+Z_MEM_ERROR: int = -4
+Z_BUF_ERROR: int = -5
+Z_VERSION_ERROR: int = -6
 
-extern def "crc32" as crc32(crc: int, buf: ptr, len: int) -> int
-extern def "adler32" as adler32(adler: int, buf: ptr, len: int) -> int
-extern def "compress2" as compress2(dest: ptr, destLen: ptr[int], source: ptr, sourceLen: int, level: int) -> int32
-extern def "uncompress" as uncompress(dest: ptr, destLen: ptr[int], source: ptr, sourceLen: int) -> int32
-extern def "pa_gzip_deflate_raw" as deflate_raw(src: ptr, src_len: int, dst: ptr, dst_cap: int, level: int, out_len: ptr[int]) -> int
-extern def "pa_gzip_inflate_raw" as inflate_raw(src: ptr, src_len: int, dst: ptr, dst_cap: int, out_len: ptr[int], in_used: ptr[int]) -> int
-extern def "pa_zlib_inflate" as zlib_inflate(src: ptr, src_len: int, dst: ptr, dst_cap: int, out_len: ptr[int], in_used: ptr[int]) -> int
+def crc32(crc: int, buf: ptr, len: int) -> int: pass
+def adler32(adler: int, buf: ptr, len: int) -> int: pass
+def compress2(dest: ptr, destLen: ptr[int], source: ptr, sourceLen: int, level: int) -> int32: pass
+def uncompress(dest: ptr, destLen: ptr[int], source: ptr, sourceLen: int) -> int32: pass
+@extern("pa_gzip_deflate_raw")
+def deflate_raw(src: ptr, src_len: int, dst: ptr, dst_cap: int, level: int, out_len: ptr[int]) -> int: pass
+@extern("pa_gzip_inflate_raw")
+def inflate_raw(src: ptr, src_len: int, dst: ptr, dst_cap: int, out_len: ptr[int], in_used: ptr[int]) -> int: pass
+@extern("pa_zlib_inflate")
+def zlib_inflate(src: ptr, src_len: int, dst: ptr, dst_cap: int, out_len: ptr[int], in_used: ptr[int]) -> int: pass

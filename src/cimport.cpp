@@ -1,111 +1,51 @@
-// cimport.cpp —— .cpya 声明文件解析
+// cimport.cpp —— .cpya 声明文件解析（Python 语法 stub）
+//
+// 声明文件统一是 Python 语法（见 src/pydecl.h），例如：
+//
+//   # stdlib/zlib.cpya
+//   cmodule("zlib")            # 可省略：默认从 cimport 名字推导
+//   link("z")                  # -> -lz；给路径/以 '-' 开头则原样传给链接器
+//
+//   Z_OK: int = 0              # 常量：带注解的赋值，编译期内联
+//
+//   class FILE: pass           # 不透明句柄：class 体只有 pass
+//   class pair:                # 带字段的 C struct：注解无值赋值 = 字段
+//       a: float
+//       b: float
+//
+//   @extern("strlen")          # 改名时才要装饰器
+//   def slen(s: str) -> int: pass
+//   def f32_mul(x: float32, y: float32) -> float32: pass   # C 符号 = Python 名
+//
+//   stdout: ptr[FILE]                        # 无值 = extern var（C 名 = py 名）
+//   optind: int32 = extern_var("optind")     # 有值且是 extern_var(...) 调用 = 改名
+//
+// 解析复用编译器自己的 Lexer + Parser（src/pydecl.h），旧的行式语法已删除
+// （pre-1.0，不留兼容）。类型注解是本文件特有的 C 边界类型：int/int32/uint32/
+// float/float32/bool/str/char/int8/short/.../uint64/ptr/ptr[T]/Optional[str]/
+// Callable[[...], R] 以及本文件声明的 struct 名。
 #include "cimport.h"
 
 #include <algorithm>
 #include <cctype>
 #include <filesystem>
 #include <format>
-#include <fstream>
-#include <sstream>
+#include <optional>
+#include <string>
 #include <unordered_map>
 #include <unordered_set>
+#include <vector>
+
+#include "ast.h"
+#include "pydecl.h"
 
 namespace pyadamas {
 
-namespace {
-
-std::string trim(const std::string& s) {
-    size_t b = 0, e = s.size();
-    while (b < e && std::isspace(static_cast<unsigned char>(s[b]))) ++b;
-    while (e > b && std::isspace(static_cast<unsigned char>(s[e - 1]))) --e;
-    return s.substr(b, e - b);
-}
-
-// 去掉 # 注释，但引号内的 # 保留。
-std::string strip_comment(const std::string& s) {
-    bool in_str = false;
-    bool esc = false;
-    for (size_t i = 0; i < s.size(); ++i) {
-        char c = s[i];
-        if (in_str) {
-            if (esc) esc = false;
-            else if (c == '\\') esc = true;
-            else if (c == '"') in_str = false;
-            continue;
-        }
-        if (c == '"') in_str = true;
-        else if (c == '#') return s.substr(0, i);
-    }
-    return s;
-}
-
-bool is_ident(const std::string& s) {
-    if (s.empty()) return false;
-    unsigned char c0 = static_cast<unsigned char>(s[0]);
-    if (!(std::isalpha(c0) || c0 == '_')) return false;
-    for (char c : s)
-        if (!(std::isalnum(static_cast<unsigned char>(c)) || c == '_')) return false;
-    return true;
-}
-
-std::string unquote(const std::string& s) {
-    if (s.size() < 2 || s.front() != '"' || s.back() != '"') return s;
-    std::string out;
-    for (size_t i = 1; i + 1 < s.size(); ++i) {
-        char c = s[i];
-        if (c == '\\' && i + 2 < s.size()) {
-            char n = s[++i];
-            switch (n) {
-                case 'n': out.push_back('\n'); break;
-                case 't': out.push_back('\t'); break;
-                case 'r': out.push_back('\r'); break;
-                case '\\': out.push_back('\\'); break;
-                case '"': out.push_back('"'); break;
-                default: out.push_back(n); break;
-            }
-        } else {
-            out.push_back(c);
-        }
-    }
-    return out;
-}
-
-// 按顶层逗号切分（类型里的 [] 不产生逗号，这里仍做括号保护）。
-std::vector<std::string> split_commas(const std::string& s) {
-    std::vector<std::string> out;
-    int depth = 0;
-    bool in_str = false;
-    std::string cur;
-    for (char c : s) {
-        if (in_str) {
-            cur.push_back(c);
-            if (c == '"') in_str = false;
-            continue;
-        }
-        if (c == '"') { in_str = true; cur.push_back(c); continue; }
-        if (c == '[' || c == '(' || c == '{') ++depth;
-        else if (c == ']' || c == ')' || c == '}') --depth;
-        if (c == ',' && depth == 0) {
-            out.push_back(trim(cur));
-            cur.clear();
-        } else {
-            cur.push_back(c);
-        }
-    }
-    if (!trim(cur).empty()) out.push_back(trim(cur));
-    return out;
-}
-
-std::string normalize_link(const std::string& raw) {
-    std::string v = trim(raw);
-    if (v.size() >= 2 && v.front() == '"' && v.back() == '"') return unquote(v);
-    return "-l" + v;
-}
-
-}  // namespace
-
 std::optional<CKind> parse_ckind(const std::string& text) {
-    std::string t = trim(text);
+    std::string t = text;
+    // 去掉两端空白（注解名来自标识符，正常没有空白；防御一下）
+    while (!t.empty() && std::isspace(static_cast<unsigned char>(t.front()))) t.erase(t.begin());
+    while (!t.empty() && std::isspace(static_cast<unsigned char>(t.back()))) t.pop_back();
     if (t == "None") return CKind::None;
     if (t == "int") return CKind::Int;
     if (t == "int32") return CKind::Int32;
@@ -121,27 +61,29 @@ std::optional<CKind> parse_ckind(const std::string& text) {
     if (t == "bool") return CKind::Bool;
     if (t == "str") return CKind::Str;
     if (t == "ptr") return CKind::Ptr;
-    if (t == "Optional[str]") return CKind::OptStr;
-    if (t.starts_with("ptr[") && t.back() == ']') {
-        std::string inner = trim(t.substr(4, t.size() - 5));
-        if (!inner.empty() && parse_ckind(inner)) return CKind::Ptr;
-    }
     return std::nullopt;
 }
 
 namespace {
 
+// 注解解析后的 C 边界类型。
 struct CTypeRef {
-    CTypeRef() = default;
-    CTypeRef(CKind k, CKind e, std::string s, bool o)
-        : kind(k), elem(e), stname(std::move(s)), opaque(o) {}
     CKind kind = CKind::None;
-    CKind elem = CKind::None;   // ptr[T] 的 T（标量时）
-    std::string stname;         // ptr[Struct] 的结构体名
-    bool opaque = false;        // ptr[Struct]：声明里没有字段
-    // kind == Callback：fn(...) -> ret 的签名。
-    std::vector<CKind> cb_params;
-    CKind cb_ret = CKind::None;
+    CKind elem = CKind::None;      // ptr[T] 的 T（标量时）
+    std::string stname;            // ptr[Struct] / 按值 Struct 的结构体名
+    bool opaque = false;           // 指向的结构体是不是不透明句柄
+    std::vector<CKind> cb_params;  // kind == Callback：回调形参种类
+    CKind cb_ret = CKind::None;    // kind == Callback：回调返回种类
+
+    CTypeRef() = default;
+    explicit CTypeRef(CKind k, CKind e = CKind::None, std::string s = {}, bool o = false,
+                      std::vector<CKind> cbp = {}, CKind cbr = CKind::None)
+        : kind(k),
+          elem(e),
+          stname(std::move(s)),
+          opaque(o),
+          cb_params(std::move(cbp)),
+          cb_ret(cbr) {}
 };
 
 // 回调签名只允许能在 C 与 PyAdamas 之间按机器字直接传递的类型。
@@ -160,60 +102,6 @@ bool callback_kind_ok(CKind k) {
         case CKind::Ptr: return true;
         default: return false;
     }
-}
-
-// 解析类型，允许 ptr[Struct] 和按值的 Struct 引用本文件声明的 struct。
-std::optional<CTypeRef> parse_ctype(
-    const std::string& text, const std::unordered_map<std::string, const CStruct*>& structs) {
-    std::string t = trim(text);
-    // fn(T1, T2, ...) -> R：C 回调参数。
-    if (t.starts_with("fn(")) {
-        size_t rp = t.find(')');
-        if (rp == std::string::npos) return std::nullopt;
-        CTypeRef r;
-        r.kind = CKind::Callback;
-        std::string inside = trim(t.substr(3, rp - 3));
-        std::string tail = trim(t.substr(rp + 1));
-        if (!tail.empty()) {
-            if (!tail.starts_with("->")) return std::nullopt;
-            auto rk = parse_ckind(trim(tail.substr(2)));
-            if (!rk || !callback_kind_ok(*rk)) return std::nullopt;
-            r.cb_ret = *rk;
-        }
-        if (!inside.empty()) {
-            for (auto& part : split_commas(inside)) {
-                // 回调参数允许标量和 ptr[T]；ptr[T] 在调用边界仍按地址传。
-                auto ck = parse_ctype(part, structs);
-                if (!ck || ck->kind == CKind::Callback) return std::nullopt;
-                if (ck->kind == CKind::Ptr) {
-                    r.cb_params.push_back(CKind::Ptr);
-                    continue;
-                }
-                if (!callback_kind_ok(ck->kind)) return std::nullopt;
-                r.cb_params.push_back(ck->kind);
-            }
-        }
-        int ni = 0, nf = 0;
-        for (CKind k : r.cb_params) {
-            if (k == CKind::Float) ++nf;
-            else ++ni;
-        }
-        if (ni > 6 || nf > 8) return std::nullopt;  // 回调参数不转发栈参数
-        return r;
-    }
-    if (t.starts_with("ptr[") && t.back() == ']') {
-        std::string inner = trim(t.substr(4, t.size() - 5));
-        if (inner.empty()) return std::nullopt;
-        if (auto it = structs.find(inner); it != structs.end())
-            return CTypeRef{CKind::Ptr, CKind::None, inner, it->second->fields.empty()};
-        if (auto k = parse_ckind(inner)) return CTypeRef{CKind::Ptr, *k, {}, false};
-        return std::nullopt;
-    }
-    // 裸结构体名：只有带字段的 struct 能按值传递。
-    if (auto it = structs.find(t); it != structs.end())
-        return CTypeRef{CKind::Struct, CKind::None, t, it->second->fields.empty()};
-    if (auto k = parse_ckind(t)) return CTypeRef{*k, CKind::None, {}, false};
-    return std::nullopt;
 }
 
 // C 结构体字段的机器宽度。布局规则与 C 一致：offset 按字段对齐向上取整，
@@ -237,7 +125,134 @@ bool cfield_layout(CKind k, int64_t& size, int64_t& align) {
 
 int64_t round_up(int64_t v, int64_t a) { return (v + a - 1) / a * a; }
 
+// 本文件声明的 struct：名字 → 布局（字段布局用，opaque 判定用）。
+using StructMap = std::unordered_map<std::string, const CStruct*>;
+
+// 注解表达式 → C 边界类型。只认 .cpya 的词汇：
+//   int/int32/uint32/float/float32/bool/str/char/int8/short/int16/uchar/
+//   uint8/ushort/uint16/ulong/uint64/None/ptr/ptr[T]/Optional[str]/
+//   Callable[[P...], R]/<本文件 struct 名>
+std::optional<CTypeRef> ctype_from_ast(const Expr* e, const StructMap& structs,
+                                       std::string& why) {
+    if (!e) {
+        why = "missing type annotation";
+        return std::nullopt;
+    }
+    if (const auto* c = dynamic_cast<const Constant*>(e)) {
+        // -> None：无返回值（Python 里 None 是常量表达式，不是 Name）。
+        if (c->ck == Constant::CK::None) return CTypeRef{CKind::None};
+        why = "unsupported type annotation";
+        return std::nullopt;
+    }
+    if (const auto* n = dynamic_cast<const Name*>(e)) {
+        if (auto it = structs.find(n->id); it != structs.end())
+            return CTypeRef{CKind::Struct, CKind::None, n->id,
+                            it->second->fields.empty()};
+        if (auto k = parse_ckind(n->id)) return CTypeRef{*k, CKind::None, {}, false, {}, CKind::None};
+        why = "unknown type '" + n->id + "'";
+        return std::nullopt;
+    }
+    const auto* s = dynamic_cast<const Subscript*>(e);
+    if (!s) {
+        why = "unsupported type annotation";
+        return std::nullopt;
+    }
+    const std::string base = pydecl::annotation_base_name(s->value.get());
+    if (base == "ptr") {
+        const auto* in = dynamic_cast<const Name*>(s->slice.get());
+        if (!in) {
+            why = "ptr[...] needs a plain type name as the element type";
+            return std::nullopt;
+        }
+        if (auto it = structs.find(in->id); it != structs.end())
+            return CTypeRef{CKind::Ptr, CKind::None, in->id, it->second->fields.empty(),
+                            {}, CKind::None};
+        if (auto k = parse_ckind(in->id))
+            return CTypeRef{CKind::Ptr, *k, {}, false, {}, CKind::None};
+        why = "unknown pointer element type '" + in->id + "'";
+        return std::nullopt;
+    }
+    if (base == "Optional") {
+        const auto* in = dynamic_cast<const Name*>(s->slice.get());
+        if (in && in->id == "str") return CTypeRef{CKind::OptStr, CKind::None, {}, false, {}, CKind::None};
+        why = "Optional[...] only supports Optional[str] in .cpya";
+        return std::nullopt;
+    }
+    if (base == "Callable") {
+        // Callable[[P1, P2, ...], R] —— C 回调参数（C fn(P1, P2) -> R）。
+        const auto* tup = dynamic_cast<const TupleExpr*>(s->slice.get());
+        if (!tup || tup->elts.size() != 2) {
+            why = "Callable needs the form Callable[[param, ...], ret]";
+            return std::nullopt;
+        }
+        CTypeRef r;
+        r.kind = CKind::Callback;
+        if (const auto* plist = dynamic_cast<const ListExpr*>(tup->elts[0].get())) {
+            for (auto& pe : plist->elts) {
+                auto pk = ctype_from_ast(pe.get(), structs, why);
+                if (!pk || pk->kind == CKind::Callback) {
+                    if (why.empty()) why = "callback parameters must be scalars or ptr";
+                    return std::nullopt;
+                }
+                // 回调里的指针一律按地址传（ptr[T] 的 T 不参与 ABI）。
+                const CKind k = pk->kind == CKind::Ptr ? CKind::Ptr : pk->kind;
+                if (!callback_kind_ok(k)) {
+                    why = "callback parameter type is not supported";
+                    return std::nullopt;
+                }
+                r.cb_params.push_back(k);
+            }
+        } else if (!dynamic_cast<const TupleExpr*>(tup->elts[0].get())) {
+            why = "Callable parameter list must be a list";
+            return std::nullopt;
+        }
+        auto rk = ctype_from_ast(tup->elts[1].get(), structs, why);
+        if (!rk || !callback_kind_ok(rk->kind == CKind::Ptr ? CKind::Ptr : rk->kind)) {
+            why = "callback return type is not supported";
+            return std::nullopt;
+        }
+        r.cb_ret = rk->kind == CKind::Ptr ? CKind::Ptr : rk->kind;
+        int ni = 0, nf = 0;
+        for (CKind k : r.cb_params) {
+            if (k == CKind::Float) ++nf;
+            else ++ni;
+        }
+        if (ni > 6 || nf > 8) {
+            why = "callback has too many parameters (no stack-passed callback args)";
+            return std::nullopt;
+        }
+        return r;
+    }
+    why = "unknown type '" + base + "'";
+    return std::nullopt;
+}
+
+// link 参数：字符串字面量。以 '-' 开头或像路径（含 '/' 或 .c/.a/.so 结尾）
+// 原样传给链接器，其余按 -l<名字>。
+std::string normalize_link_arg(std::string v) {
+    while (!v.empty() && std::isspace(static_cast<unsigned char>(v.front()))) v.erase(v.begin());
+    while (!v.empty() && std::isspace(static_cast<unsigned char>(v.back()))) v.pop_back();
+    if (v.empty()) return v;
+    if (v.front() == '-') return v;
+    if (v.find('/') != std::string::npos) return v;
+    if (v.ends_with(".c") || v.ends_with(".a") || v.ends_with(".so") ||
+        v.ends_with(".o") || v.ends_with(".dylib"))
+        return v;
+    return "-l" + v;
+}
+
+bool is_ident(const std::string& s) {
+    if (s.empty()) return false;
+    const unsigned char c0 = static_cast<unsigned char>(s[0]);
+    if (!(std::isalpha(c0) || c0 == '_')) return false;
+    for (char c : s)
+        if (!(std::isalnum(static_cast<unsigned char>(c)) || c == '_')) return false;
+    return true;
+}
+
 }  // namespace
+
+// ── .cpya 加载 ────────────────────────────────────────────────────────
 
 std::optional<CImportDecl> load_cpya(const std::string& name, const std::string& source_dir,
                                     const std::vector<std::string>& include_dirs,
@@ -264,364 +279,354 @@ std::optional<CImportDecl> load_cpya(const std::string& name, const std::string&
         return std::nullopt;
     }
 
-    std::ifstream in(found);
-    if (!in) {
-        err = std::format("cannot open C declaration file '{}'", found.string());
+    std::unique_ptr<Module> ast;
+    try {
+        ast = pydecl::parse_file(found.string());
+    } catch (const pydecl::Error& e) {
+        err = std::format("{}:{}: {}", found.string(), e.line, e.msg);
         return std::nullopt;
     }
 
     CImportDecl decl;
     decl.name = name;
     bool saw_cmodule = false;
-    bool saw_any = false;
     std::unordered_set<std::string> seen_py;
     std::unordered_set<std::string> seen_links;
 
-    auto fail = [&](int line, const std::string& msg) -> std::optional<CImportDecl> {
-        err = std::format("{}:{}: {}", found.string(), line, msg);
-        return std::nullopt;
-    };
-
-    // 先收集所有 struct 名，允许 ptr[Struct] 出现在声明之前。
-    std::vector<std::string> lines;
-    {
-        std::string line;
-        while (std::getline(in, line)) {
-            if (!line.empty() && line.back() == '\r') line.pop_back();
-            lines.push_back(std::move(line));
-        }
-    }
-    // 预扫描 struct：`struct NAME` 是不透明句柄，`struct NAME:` 后面跟缩进
-    // 的字段声明，按 C 规则算好布局。字段行在正式解析时跳过。
-    std::unordered_map<std::string, const CStruct*> structs;
-    std::unordered_map<std::string, size_t> struct_pos;
-    std::unordered_set<size_t> field_lines;
-    for (size_t i = 0; i < lines.size(); ++i) {
-        std::string text = trim(strip_comment(lines[i]));
-        if (!text.starts_with("struct ")) continue;
-        std::string sname = trim(text.substr(7));
-        bool has_fields = !sname.empty() && sname.back() == ':';
-        if (has_fields) sname.pop_back();
-        sname = trim(sname);
-        if (!is_ident(sname))
-            return fail(static_cast<int>(i) + 1, std::format("invalid struct name '{}'", sname));
-        if (structs.count(sname))
-            return fail(static_cast<int>(i) + 1, std::format("duplicate struct '{}'", sname));
-
-        CStruct cs;
-        cs.name = sname;
-        if (has_fields) {
-            size_t j = i + 1;
-            std::unordered_set<std::string> seen_fields;
-            while (j < lines.size()) {
-                std::string raw = strip_comment(lines[j]);
-                std::string ft = trim(raw);
-                if (ft.empty()) {
-                    ++j;
-                    continue;
-                }
-                bool indented = raw[0] == ' ' || raw[0] == '\t';
-                if (!indented) break;
-                size_t colon = ft.find(':');
-                if (colon == std::string::npos)
-                    return fail(static_cast<int>(j) + 1,
-                                std::format("expected 'field: type' in struct '{}'", sname));
-                std::string fname = trim(ft.substr(0, colon));
-                std::string ftype = trim(ft.substr(colon + 1));
-                if (!is_ident(fname))
-                    return fail(static_cast<int>(j) + 1,
-                                std::format("invalid field name '{}'", fname));
-                if (!seen_fields.insert(fname).second)
-                    return fail(static_cast<int>(j) + 1,
-                                std::format("duplicate field '{}' in struct '{}'", fname, sname));
-                auto fk = parse_ckind(ftype);
+    try {
+        // ── Pass 1：class 声明 = C struct ──────────────────────────────
+        // 先收集所有 struct 名，允许 ptr[Struct] 出现在声明之前；字段本身
+        // 只允许定宽标量/指针（不引用 struct），所以布局可以在这一趟算完。
+        for (auto& st : ast->body) {
+            if (pydecl::is_docstring(*st)) continue;
+            if (st->kind != StmtKind::ClassDef) continue;
+            auto& cd = static_cast<ClassDef&>(*st);
+            if (!is_ident(cd.name))
+                pydecl::fail(cd.line, std::format("invalid struct name '{}'", cd.name));
+            for (auto& d : cd.decorators)
+                if (d)
+                    pydecl::fail(d->line,
+                                 std::format("decorators are not allowed on struct '{}'", cd.name));
+            for (auto& s : decl.structs)
+                if (s.name == cd.name)
+                    pydecl::fail(cd.line, std::format("duplicate struct '{}'", cd.name));
+            CStruct cs;
+            cs.name = cd.name;
+            for (auto& bs : cd.body) {
+                if (pydecl::is_docstring(*bs)) continue;
+                if (bs->kind == StmtKind::Pass) continue;  // 不透明句柄
+                if (bs->kind != StmtKind::AnnAssign)
+                    pydecl::fail(bs->line,
+                                 std::format("struct '{}' body may only contain field "
+                                             "annotations (name: type) or pass; found {}",
+                                             cd.name, pydecl::stmt_kind_name(bs->kind)));
+                auto& aa = static_cast<AnnAssign&>(*bs);
+                if (aa.value)
+                    pydecl::fail(aa.line, std::format("struct field in '{}' must be an "
+                                                      "annotation without a value", cd.name));
+                const auto* fn = dynamic_cast<const Name*>(aa.target.get());
+                if (!fn)
+                    pydecl::fail(aa.line, std::format("struct field name in '{}' must be a "
+                                                      "plain name", cd.name));
+                for (auto& f : cs.fields)
+                    if (f.name == fn->id)
+                        pydecl::fail(aa.line, std::format("duplicate field '{}' in struct '{}'",
+                                                          fn->id, cd.name));
+                StructMap empty;  // 字段不能用 struct 名
+                std::string why;
+                auto ct = ctype_from_ast(aa.annotation.get(), empty, why);
                 int64_t fsize = 0, falign = 1;
-                if (!fk || !cfield_layout(*fk, fsize, falign))
-                    return fail(static_cast<int>(j) + 1,
-                                std::format("unsupported struct field type '{}' (use int, "
-                                            "int32, uint32, float, bool or ptr)", ftype));
+                if (!ct || !cfield_layout(ct->kind, fsize, falign)) {
+                    const std::string fname = pydecl::annotation_base_name(aa.annotation.get());
+                    pydecl::fail(aa.line,
+                                 std::format("unsupported struct field type '{}' (use int, "
+                                             "int32, uint32, float, bool or ptr)",
+                                             fname.empty() ? (why.empty() ? "?" : why) : fname));
+                }
                 CStructField cf;
-                cf.name = fname;
-                cf.kind = *fk;
+                cf.name = fn->id;
+                cf.kind = ct->kind;
                 cf.size = fsize;
                 cf.align = falign;
                 cs.fields.push_back(std::move(cf));
-                field_lines.insert(j);
-                ++j;
             }
-            if (cs.fields.empty())
-                return fail(static_cast<int>(i) + 1,
-                            std::format("struct '{}' needs at least one field", sname));
-            int64_t off = 0, align = 1;
-            for (auto& f : cs.fields) {
-                off = round_up(off, f.align);
-                f.offset = off;
-                off += f.size;
-                if (f.align > align) align = f.align;
-            }
-            cs.align = align;
-            cs.size = round_up(off, align);
-        }
-        decl.structs.push_back(std::move(cs));
-        struct_pos[sname] = decl.structs.size() - 1;
-    }
-    // decl.structs 可能扩容，上面的裸指针在 push_back 后失效，重新绑定。
-    structs.clear();
-    for (auto& kv : struct_pos) structs[kv.first] = &decl.structs[kv.second];
-
-    for (size_t li = 0; li < lines.size(); ++li) {
-        if (field_lines.count(li)) continue;  // struct 的字段行
-        int lineno = static_cast<int>(li) + 1;
-        std::string text = trim(strip_comment(lines[li]));
-        if (text.empty()) continue;
-
-        if (!saw_any) {
-            saw_any = true;
-            if (!text.starts_with("cmodule")) {
-                return fail(lineno, "the first declaration must be 'cmodule <name>'");
-            }
-        }
-
-        if (text.starts_with("cmodule")) {
-            std::string rest = trim(text.substr(7));
-            if (saw_cmodule) return fail(lineno, "duplicate 'cmodule'");
-            if (rest != name)
-                return fail(lineno, std::format("cmodule '{}' does not match cimport '{}'", rest,
-                                                name));
-            saw_cmodule = true;
-            continue;
-        }
-        if (!saw_cmodule) return fail(lineno, "'cmodule' must appear before other declarations");
-
-        if (text.starts_with("struct ")) continue;  // 预扫描已校验
-
-        if (text.starts_with("link")) {
-            std::string rest = trim(text.substr(4));
-            if (rest.empty()) return fail(lineno, "'link' requires an argument");
-            std::string arg = normalize_link(rest);
-            // 引号给的 .c 源文件（link "glue.c"） historically 按 cwd 解析；
-            // stdlib 分发的 .cpya 不能依赖用户 cwd：cwd 下找不到时回退到
-            // .cpya 所在目录（转绝对路径），两种口径都保住。
-            if (!arg.empty() && arg[0] != '-' && arg.ends_with(".c")) {
-                std::error_code ec;
-                if (!fs::exists(arg, ec)) {
-                    fs::path cand = found.parent_path() / arg;
-                    if (fs::exists(cand, ec)) arg = fs::absolute(cand).string();
+            if (!cs.fields.empty()) {
+                int64_t off = 0, align = 1;
+                for (auto& f : cs.fields) {
+                    off = round_up(off, f.align);
+                    f.offset = off;
+                    off += f.size;
+                    if (f.align > align) align = f.align;
                 }
+                cs.align = align;
+                cs.size = round_up(off, align);
             }
-            if (seen_links.insert(arg).second) decl.links.push_back(arg);
-            continue;
+            decl.structs.push_back(std::move(cs));
         }
+        // decl.structs 已定型（Pass 2 不再 push），指针稳定。
+        StructMap structs;
+        for (auto& s : decl.structs) structs[s.name] = &s;
 
-        if (text.starts_with("const")) {
-            std::string rest = trim(text.substr(5));
-            size_t colon = rest.find(':');
-            if (colon == std::string::npos)
-                return fail(lineno, "expected 'const NAME: type = value'");
-            std::string cname = trim(rest.substr(0, colon));
-            if (!is_ident(cname)) return fail(lineno, "invalid const name");
-            std::string tail = trim(rest.substr(colon + 1));
-            size_t eq = tail.find('=');
-            if (eq == std::string::npos)
-                return fail(lineno, "expected '=' in const declaration");
-            std::string ty_text = trim(tail.substr(0, eq));
-            std::string val_text = trim(tail.substr(eq + 1));
-            auto kind = parse_ckind(ty_text);
-            if (!kind) return fail(lineno, std::format("unknown type '{}'", ty_text));
-            CConst c;
-            c.name = cname;
-            c.kind = *kind;
-            switch (*kind) {
-                case CKind::Int:
-                case CKind::Int32:
-                case CKind::UInt32:
-                case CKind::Int8:
-                case CKind::Int16:
-                case CKind::UInt8:
-                case CKind::UInt16: {
-                    try {
-                        size_t used = 0;
-                        c.i = std::stoll(val_text, &used, 0);
-                        if (used != val_text.size()) throw std::invalid_argument("trailing");
-                    } catch (...) {
-                        return fail(lineno, std::format("invalid integer literal '{}'", val_text));
+        // ── Pass 2：cmodule / link / def / 常量 / extern var ──────────
+        for (auto& st : ast->body) {
+            if (pydecl::is_docstring(*st)) continue;
+            switch (st->kind) {
+                case StmtKind::ClassDef: continue;  // Pass 1 已处理
+                case StmtKind::FunctionDef: {
+                    auto& fd = static_cast<FunctionDef&>(*st);
+                    if (fd.is_async)
+                        pydecl::fail(fd.line, std::format("async def is not allowed in .cpya "
+                                                          "(function '{}')", fd.name));
+                    if (!is_ident(fd.name))
+                        pydecl::fail(fd.line, std::format("invalid name '{}'", fd.name));
+                    CExtern ex;
+                    ex.py_name = fd.name;
+                    ex.symbol = fd.name;  // 默认 C 符号 = Python 名
+                    bool saw_extern = false;
+                    for (auto& d : fd.decorators) {
+                        if (!d) continue;
+                        const auto dec = pydecl::decorator_of(*d, fd.name);
+                        if (dec.name != "extern")
+                            pydecl::fail(dec.line,
+                                         std::format("unknown decorator '@{}' on '{}' (only "
+                                                     "@extern(\"c_symbol\") is allowed)",
+                                                     dec.name, fd.name));
+                        if (!dec.has_string_arg)
+                            pydecl::fail(dec.line, std::format("@extern on '{}' needs the C "
+                                                               "symbol: @extern(\"c_name\")",
+                                                               fd.name));
+                        if (saw_extern)
+                            pydecl::fail(dec.line, std::format("duplicate decorator on '{}'",
+                                                               fd.name));
+                        saw_extern = true;
+                        ex.symbol = dec.arg;
                     }
+                    pydecl::check_pass_body(fd);
+                    if (!fd.args.kwonly.empty() || fd.args.kwarg)
+                        pydecl::fail(fd.line, std::format("function '{}': keyword-only / **kwargs "
+                                                          "parameters are not supported in .cpya",
+                                                          fd.name));
+                    auto add_param = [&](const Arg& a) {
+                        if (!a.annotation)
+                            pydecl::fail(fd.line, std::format("parameter '{}' of '{}' needs a type "
+                                                              "annotation", a.name, fd.name));
+                        std::string why;
+                        auto ct = ctype_from_ast(a.annotation.get(), structs, why);
+                        if (!ct)
+                            pydecl::fail(fd.line, std::format("parameter '{}' of '{}': {}", a.name,
+                                                              fd.name, why));
+                        CParam cp;
+                        cp.name = a.name;
+                        cp.kind = ct->kind;
+                        cp.ptr_elem = ct->elem;
+                        cp.ptr_struct = ct->stname;
+                        cp.opaque = ct->opaque;
+                        cp.cb_params = ct->cb_params;
+                        cp.cb_ret = ct->cb_ret;
+                        if (cp.kind == CKind::Struct && cp.opaque)
+                            pydecl::fail(fd.line,
+                                         std::format("struct '{}' is opaque and cannot be passed "
+                                                     "by value", cp.ptr_struct));
+                        ex.params.push_back(std::move(cp));
+                    };
+                    for (auto& a : fd.args.posonly) add_param(a);
+                    for (auto& a : fd.args.args) add_param(a);
+                    if (fd.args.vararg) ex.varargs = true;  // C 变参：*args 位置占位
+                    std::string why;
+                    auto rk = ctype_from_ast(fd.returns.get(), structs, why);
+                    if (!rk)
+                        pydecl::fail(fd.line, std::format("return type of '{}': {} (use -> None "
+                                                          "for no return value)",
+                                                          fd.name, why));
+                    if (rk->kind == CKind::Callback)
+                        pydecl::fail(fd.line, "returning a C function pointer is not supported");
+                    if (rk->kind == CKind::Struct && rk->opaque)
+                        pydecl::fail(fd.line,
+                                     std::format("struct '{}' is opaque and cannot be returned "
+                                                 "by value", rk->stname));
+                    ex.ret = rk->kind;
+                    ex.ret_struct = rk->stname;
+                    ex.ret_elem = rk->elem;
+                    if (!seen_py.insert(ex.py_name).second)
+                        pydecl::fail(fd.line, std::format("duplicate name '{}'", ex.py_name));
+                    decl.externs.push_back(std::move(ex));
                     break;
                 }
-                case CKind::UInt64: {
-                    // u64 常量按无符号解析（>INT64_MAX 存位模式；C 口径
-                    // 允许 -1 这类负写法，strtoull 自动回绕）。
-                    try {
-                        size_t used = 0;
-                        unsigned long long uv = std::stoull(val_text, &used, 0);
-                        if (used != val_text.size()) throw std::invalid_argument("trailing");
-                        c.i = static_cast<int64_t>(uv);
-                    } catch (...) {
-                        return fail(lineno, std::format("invalid integer literal '{}'", val_text));
+                case StmtKind::AnnAssign: {
+                    auto& aa = static_cast<AnnAssign&>(*st);
+                    const auto* nm = dynamic_cast<const Name*>(aa.target.get());
+                    if (!nm)
+                        pydecl::fail(aa.line, "declaration target must be a plain name");
+                    const std::string pyname = nm->id;
+                    if (!is_ident(pyname))
+                        pydecl::fail(aa.line, std::format("invalid name '{}'", pyname));
+                    if (!aa.annotation)
+                        pydecl::fail(aa.line, std::format("'{}' needs a type annotation", pyname));
+                    std::string why;
+                    auto ct = ctype_from_ast(aa.annotation.get(), structs, why);
+                    if (!ct) pydecl::fail(aa.line, std::format("'{}': {}", pyname, why));
+                    // extern var：无值，或值是一个 extern_var("c_name") 调用。
+                    std::string var_symbol = pyname;
+                    bool is_var = !aa.value;
+                    if (aa.value) {
+                        if (const auto* call = dynamic_cast<const Call*>(aa.value.get())) {
+                            const auto* cn = dynamic_cast<const Name*>(call->func.get());
+                            if (cn && cn->id == "extern_var") {
+                                if (call->args.size() != 1 || !call->keywords.empty())
+                                    pydecl::fail(aa.value->line,
+                                                 "extern_var(...) expects exactly one string "
+                                                 "literal argument");
+                                const auto* c =
+                                    dynamic_cast<const Constant*>(call->args[0].get());
+                                if (!c || c->ck != Constant::CK::Str || c->s.empty())
+                                    pydecl::fail(aa.value->line,
+                                                 "extern_var(...) expects a non-empty string "
+                                                 "literal (C symbol name)");
+                                is_var = true;
+                                var_symbol = c->s;
+                            }
+                        }
                     }
-                    break;
-                }
-                case CKind::Float: {
-                    try {
-                        size_t used = 0;
-                        c.f = std::stod(val_text, &used);
-                        if (used != val_text.size()) throw std::invalid_argument("trailing");
-                    } catch (...) {
-                        return fail(lineno, std::format("invalid float literal '{}'", val_text));
+                    if (is_var) {
+                        if (ct->kind == CKind::Callback)
+                            pydecl::fail(aa.line, "callback type is not supported for extern var");
+                        if (ct->kind == CKind::Struct)
+                            pydecl::fail(aa.line,
+                                         std::format("struct variable '{}' must be declared with "
+                                                     "ptr[{}]", pyname, ct->stname));
+                        if (!seen_py.insert(pyname).second)
+                            pydecl::fail(aa.line, std::format("duplicate name '{}'", pyname));
+                        CVar cv;
+                        cv.symbol = var_symbol;
+                        cv.py_name = pyname;
+                        cv.kind = ct->kind;
+                        cv.struct_name = ct->stname;
+                        cv.elem = ct->elem;
+                        decl.vars.push_back(std::move(cv));
+                        break;
                     }
+                    // 常量：值必须是字面量，且种类与声明类型一致。
+                    auto lit = pydecl::literal_of(aa.value.get());
+                    if (!lit)
+                        pydecl::fail(aa.value->line,
+                                     std::format("constant '{}' initializer must be a literal "
+                                                 "(int / float / str / bool / None)", pyname));
+                    CConst c;
+                    c.name = pyname;
+                    c.kind = ct->kind;
+                    switch (ct->kind) {
+                        case CKind::Int:
+                        case CKind::Int32:
+                        case CKind::UInt32:
+                        case CKind::Int8:
+                        case CKind::Int16:
+                        case CKind::UInt8:
+                        case CKind::UInt16:
+                        case CKind::UInt64:
+                            if (lit->kind != pydecl::Literal::Kind::Int)
+                                pydecl::fail(aa.value->line,
+                                             std::format("constant '{}' needs an integer literal",
+                                                         pyname));
+                            c.i = lit->i;
+                            break;
+                        case CKind::Float:
+                            if (lit->kind == pydecl::Literal::Kind::Float) c.f = lit->f;
+                            else if (lit->kind == pydecl::Literal::Kind::Int)
+                                c.f = static_cast<double>(lit->i);
+                            else
+                                pydecl::fail(aa.value->line,
+                                             std::format("constant '{}' needs a float literal",
+                                                         pyname));
+                            break;
+                        case CKind::Bool:
+                            if (lit->kind != pydecl::Literal::Kind::Bool)
+                                pydecl::fail(aa.value->line,
+                                             std::format("constant '{}' needs True or False",
+                                                         pyname));
+                            c.b = lit->b;
+                            break;
+                        case CKind::Str:
+                            if (lit->kind != pydecl::Literal::Kind::Str)
+                                pydecl::fail(aa.value->line,
+                                             std::format("constant '{}' needs a string literal",
+                                                         pyname));
+                            c.s = lit->s;
+                            break;
+                        default:
+                            pydecl::fail(aa.line,
+                                         "const only supports int/int32/uint32/uint64/char/"
+                                         "short/uchar/ushort/float/bool/str");
+                    }
+                    if (!seen_py.insert(pyname).second)
+                        pydecl::fail(aa.line, std::format("duplicate name '{}'", pyname));
+                    decl.consts.push_back(std::move(c));
                     break;
                 }
-                case CKind::Bool:
-                    if (val_text == "True") c.b = true;
-                    else if (val_text == "False") c.b = false;
-                    else return fail(lineno, "bool literal must be True or False");
-                    break;
-                case CKind::Str:
-                    if (val_text.size() < 2 || val_text.front() != '"' || val_text.back() != '"')
-                        return fail(lineno, "str literal must be quoted");
-                    c.s = unquote(val_text);
-                    break;
+                case StmtKind::Expr: {
+                    auto& es = static_cast<ExprStmt&>(*st);
+                    const auto* call = dynamic_cast<const Call*>(es.value.get());
+                    const auto* fn =
+                        call ? dynamic_cast<const Name*>(call->func.get()) : nullptr;
+                    if (!call || !fn) {
+                        // 旧行式语法的残留（struct X / extern def ... / cmodule x）：
+                        // 给一条明确的迁移提示，别只报「表达式语句」。
+                        std::string what;
+                        if (const auto* n = dynamic_cast<const Name*>(es.value.get()))
+                            what = n->id;
+                        pydecl::fail(es.line,
+                                     "statement '" + what +
+                                         "' is not valid: the .cpya format is Python syntax "
+                                         "now (use cmodule(\"name\"), link(\"lib\"), "
+                                         "class NAME: pass, def f(...) -> T: pass, "
+                                         "NAME: T = <literal>, NAME: T)");
+                    }
+                    if (fn->id == "cmodule") {
+                        if (call->args.size() != 1 || !call->keywords.empty())
+                            pydecl::fail(es.line, "cmodule(...) expects exactly one string "
+                                                  "literal");
+                        const auto* c = dynamic_cast<const Constant*>(call->args[0].get());
+                        if (!c || c->ck != Constant::CK::Str || c->s.empty())
+                            pydecl::fail(es.line, "cmodule(...) expects a module name string");
+                        if (saw_cmodule) pydecl::fail(es.line, "duplicate cmodule(...)");
+                        if (c->s != name)
+                            pydecl::fail(es.line,
+                                         std::format("cmodule '{}' does not match cimport '{}'",
+                                                     c->s, name));
+                        saw_cmodule = true;
+                        break;
+                    }
+                    if (fn->id == "link") {
+                        if (call->args.size() != 1 || !call->keywords.empty())
+                            pydecl::fail(es.line, "link(...) expects exactly one string literal");
+                        const auto* c = dynamic_cast<const Constant*>(call->args[0].get());
+                        if (!c || c->ck != Constant::CK::Str || c->s.empty())
+                            pydecl::fail(es.line, "link(...) expects a non-empty string literal");
+                        std::string arg = normalize_link_arg(c->s);
+                        // 引号给的 .c 源文件按 cwd 解析；stdlib 分发的 .cpya 不能
+                        // 依赖用户 cwd：cwd 下找不到时回退到 .cpya 所在目录。
+                        if (!arg.empty() && arg[0] != '-' && arg.ends_with(".c")) {
+                            std::error_code ec;
+                            if (!fs::exists(arg, ec)) {
+                                fs::path cand = found.parent_path() / arg;
+                                if (fs::exists(cand, ec)) arg = fs::absolute(cand).string();
+                            }
+                        }
+                        if (seen_links.insert(arg).second) decl.links.push_back(arg);
+                        break;
+                    }
+                    pydecl::fail(es.line, std::format("unknown call statement '{}()' (expected "
+                                                      "cmodule(...) or link(...))", fn->id));
+                }
                 default:
-                    return fail(lineno, "const only supports int/int32/uint32/float/bool/str");
+                    pydecl::fail(st->line,
+                                 std::format("unknown statement in .cpya: {} (expected "
+                                             "cmodule(...), link(...), def, class, annotated "
+                                             "const or extern var)",
+                                             pydecl::stmt_kind_name(st->kind)));
             }
-            if (seen_py.count(cname)) return fail(lineno, std::format("duplicate name '{}'", cname));
-            seen_py.insert(cname);
-            decl.consts.push_back(std::move(c));
-            continue;
         }
-
-        if (text.starts_with("extern")) {
-            std::string rest = trim(text.substr(6));
-            // extern var NAME: type —— 读取 C 全局变量。
-            if (rest.starts_with("var ")) {
-                std::string dtext = trim(rest.substr(4));
-                size_t colon = dtext.find(':');
-                if (colon == std::string::npos)
-                    return fail(lineno, "expected 'extern var NAME: type'");
-                std::string head = trim(dtext.substr(0, colon));
-                std::string ty_text = trim(dtext.substr(colon + 1));
-                std::string symbol_part = head;
-                std::string py_part;
-                size_t aspos = head.rfind(" as ");
-                if (aspos != std::string::npos) {
-                    symbol_part = trim(head.substr(0, aspos));
-                    py_part = trim(head.substr(aspos + 4));
-                }
-                std::string symbol = unquote(symbol_part);
-                std::string py_name = py_part.empty() ? symbol : py_part;
-                if (symbol.empty()) return fail(lineno, "missing C symbol name");
-                if (!is_ident(py_name))
-                    return fail(lineno, std::format("invalid name '{}'", py_name));
-                auto ct = parse_ctype(ty_text, structs);
-                if (!ct) return fail(lineno, std::format("unknown variable type '{}'", ty_text));
-                if (ct->kind == CKind::Callback)
-                    return fail(lineno, "callback type is not supported for extern var");
-                if (ct->kind == CKind::Struct)
-                    return fail(lineno,
-                                std::format("struct variable '{}' must be declared with ptr[{}]",
-                                            py_name, ct->stname));
-                if (seen_py.count(py_name))
-                    return fail(lineno, std::format("duplicate name '{}'", py_name));
-                seen_py.insert(py_name);
-                CVar cv;
-                cv.symbol = symbol;
-                cv.py_name = py_name;
-                cv.kind = ct->kind;
-                cv.struct_name = ct->stname;
-                cv.elem = ct->elem;
-                decl.vars.push_back(std::move(cv));
-                continue;
-            }
-            if (!rest.starts_with("def "))
-                return fail(lineno,
-                            "expected 'extern def <symbol>(...)' or 'extern var NAME: type'");
-            rest = trim(rest.substr(4));
-            size_t lp = rest.find('(');
-            size_t rp = rest.rfind(')');
-            if (lp == std::string::npos || rp == std::string::npos || rp < lp)
-                return fail(lineno, "expected '(' and ')' in extern declaration");
-            std::string head = trim(rest.substr(0, lp));
-            std::string params_text = rest.substr(lp + 1, rp - lp - 1);
-            std::string ret_text = trim(rest.substr(rp + 1));
-            if (ret_text.starts_with("->")) ret_text = trim(ret_text.substr(2));
-            else if (!ret_text.empty()) return fail(lineno, "expected '->' before return type");
-            if (ret_text.empty()) ret_text = "None";
-
-            std::string symbol_part = head;
-            std::string py_part;
-            size_t aspos = head.rfind(" as ");
-            if (aspos != std::string::npos) {
-                symbol_part = trim(head.substr(0, aspos));
-                py_part = trim(head.substr(aspos + 4));
-            }
-            std::string symbol = unquote(symbol_part);
-            std::string py_name = py_part.empty() ? symbol : py_part;
-            if (symbol.empty()) return fail(lineno, "missing C symbol name");
-            if (!is_ident(py_name)) return fail(lineno, std::format("invalid name '{}'", py_name));
-
-            CExtern ex;
-            ex.symbol = symbol;
-            ex.py_name = py_name;
-            auto param_parts = split_commas(params_text);
-            if (!param_parts.empty() && param_parts.back() == "...") {
-                ex.varargs = true;
-                param_parts.pop_back();
-            }
-            for (auto& p : param_parts) {
-                size_t colon = p.find(':');
-                if (colon == std::string::npos)
-                    return fail(lineno, std::format("parameter '{}' needs a type", p));
-                std::string pname = trim(p.substr(0, colon));
-                std::string ptype = trim(p.substr(colon + 1));
-                if (!is_ident(pname))
-                    return fail(lineno, std::format("invalid parameter name '{}'", pname));
-                CParam cp;
-                cp.name = pname;
-                auto ct = parse_ctype(ptype, structs);
-                if (!ct) {
-                    if (ptype.starts_with("ptr[") && ptype.back() == ']') {
-                        std::string inner = trim(ptype.substr(4, ptype.size() - 5));
-                        return fail(lineno,
-                                    std::format("unknown pointer element type '{}'", inner));
-                    }
-                    return fail(lineno, std::format("unknown parameter type '{}'", ptype));
-                }
-                cp.kind = ct->kind;
-                cp.ptr_elem = ct->elem;
-                cp.ptr_struct = ct->stname;
-                cp.opaque = ct->opaque;
-                cp.cb_params = ct->cb_params;
-                cp.cb_ret = ct->cb_ret;
-                if (cp.kind == CKind::Struct && cp.opaque)
-                    return fail(lineno,
-                                std::format("struct '{}' is opaque and cannot be passed by value",
-                                            cp.ptr_struct));
-                ex.params.push_back(std::move(cp));
-            }
-            auto rk = parse_ctype(ret_text, structs);
-            if (!rk) return fail(lineno, std::format("unknown return type '{}'", ret_text));
-            if (rk->kind == CKind::Callback)
-                return fail(lineno, "returning a C function pointer is not supported");
-            if (rk->kind == CKind::Struct && rk->opaque)
-                return fail(lineno,
-                            std::format("struct '{}' is opaque and cannot be returned by value",
-                                        rk->stname));
-            ex.ret = rk->kind;
-            ex.ret_struct = rk->stname;
-            ex.ret_elem = rk->elem;
-
-            if (seen_py.count(py_name))
-                return fail(lineno, std::format("duplicate name '{}'", py_name));
-            seen_py.insert(py_name);
-            decl.externs.push_back(std::move(ex));
-            continue;
-        }
-
-        return fail(lineno, std::format("unknown declaration '{}'", text));
-    }
-
-    if (!saw_cmodule) {
-        err = std::format("{}: missing 'cmodule {}'", found.string(), name);
+    } catch (const pydecl::Error& e) {
+        err = std::format("{}:{}: {}", found.string(), e.line, e.msg);
         return std::nullopt;
     }
     return decl;

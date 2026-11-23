@@ -1,6 +1,7 @@
 # demo 用的 cimport 声明：把越界写能力交给 Python 层。
-cmodule memdbg
-link "tests/memdebug/oob.c"
+cmodule("memdbg")
+link("tests/memdebug/oob.c")
 
 # p 是 str 的字符区（与 strlen 同一条编组路径）；off/n 是字节偏移/长度。
-extern def "pa_memdbg_stomp" as stomp(p: str, off: int, n: int) -> None
+@extern("pa_memdbg_stomp")
+def stomp(p: str, off: int, n: int) -> None: pass

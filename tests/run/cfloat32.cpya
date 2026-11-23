@@ -1,9 +1,8 @@
 # C float 编组：float32 参数/返回/全局变量/ptr[float32] 解引用。
-cmodule cfloat32
-link "tests/run/cfloat32.c"
+link("tests/run/cfloat32.c")
 
-extern def f32_mul(a: float32, b: float32) -> float32
-extern def f32_of_int(n: int32) -> float32
-extern def f32_roundtrip(x: float) -> float
-extern def f32_arr_ptr() -> ptr[float32]
-extern var f32_global: float32
+def f32_mul(a: float32, b: float32) -> float32: pass
+def f32_of_int(n: int32) -> float32: pass
+def f32_roundtrip(x: float) -> float: pass
+def f32_arr_ptr() -> ptr[float32]: pass
+f32_global: float32

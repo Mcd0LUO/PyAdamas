@@ -1,7 +1,7 @@
-cmodule clib
-link m
-extern def "sqrt" as sqrt(x: float) -> float
-extern def "strlen" as strlen(s: str) -> int
-extern def "getenv" as getenv(name: str) -> Optional[str]
-extern def "modf" as modf(x: float, iptr: ptr[float]) -> float
-extern def "qsort" as qsort(base: ptr, n: int, size: int, cmp: fn(ptr[int], ptr[int]) -> int) -> None
+cmodule("clib")
+link("m")
+def sqrt(x: float) -> float: pass
+def strlen(s: str) -> int: pass
+def getenv(name: str) -> Optional[str]: pass
+def modf(x: float, iptr: ptr[float]) -> float: pass
+def qsort(base: ptr, n: int, size: int, cmp: Callable[[ptr[int], ptr[int]], int]) -> None: pass
