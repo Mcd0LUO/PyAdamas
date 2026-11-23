@@ -418,7 +418,7 @@ int main(int argc, char** argv) {
         // 默认开 bit0（跳转线程化）：纯 CFG 等价变换，实测 nqueens -2.9%、
         // 其它标量基准中性；含「单块直线循环体」的函数由 pass 内部跳过，
         // 避免破坏通用向量化（matmul 会从 10.1M 劣化到 54.8M）。
-        prog.loop_opt = 1;
+        prog.loop_opt = 3;
         if (const char* lo = std::getenv("PYADAMAS_LOOP_OPT")) {
             std::string_view sv(lo);
             if (sv == "1") prog.loop_opt = 3;
