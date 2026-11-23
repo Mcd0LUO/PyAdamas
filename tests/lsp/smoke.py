@@ -11,6 +11,9 @@
   * completion（文档符号 / import 成员 / 关键字；前缀过滤）
   * definition（跳到 def/class/赋值定义；未知符号 null）
   * semanticTokens/full（非 ASCII 文档的 UTF-16 行列/长度编码）
+  * signatureHelp（activeParameter 数逗号 / 无参函数 / 字符串里的逗号 / UTF-16 列）
+  * documentHighlight（同名出现 / 注释与字符串里的同名不算 / UTF-16 列）
+  * foldingRange（def/class 块、连续注释块、跨行三引号字符串块）
   * didChange debounce（连发两次只发布最终版本的诊断）
   * 非 ASCII 文档（Content-Length 按字节、精确读取）
   * 字符串 id 原样回显、坏 JSON 不崩
@@ -666,6 +669,336 @@ def test_exit_without_shutdown(server, compiler):
     expect_eq(rc, 1, "exit without shutdown -> rc 1")
 
 
+# ---------------- 新增：signatureHelp / documentHighlight / foldingRange ----------------
+
+TEXT_SIGHELP = (
+    "def add(a: int, b: int) -> int:\n"
+    "    return a + b\n"
+    "\n"
+    "\n"
+    "def noargs() -> int:\n"
+    "    return 1\n"
+    "\n"
+    "\n"
+    "def call_noargs() -> int:\n"
+    "    return noargs()\n"
+    "\n"
+    "\n"
+    "def use() -> int:\n"
+    "    return add(1, 2)\n"
+    "\n"
+    "\n"
+    "def use_str() -> int:\n"
+    '    return add("x,y", 2)\n'
+    "\n"
+    "\n"
+    "def uni() -> int:\n"
+    '    return add("中文😀", 2)\n'
+    "\n"
+    "\n"
+    "class Widget:\n"
+    "    def norm(self, k: int) -> int:\n"
+    "        return k\n"
+    "\n"
+    "\n"
+    "def call_method(w: Widget) -> int:\n"
+    "    return w.norm(1, 2)\n"
+    "\n"
+    "\n"
+    "def multi() -> int:\n"
+    "    return add(\n"
+    "        1,\n"
+    "        2)\n"
+)
+
+
+def find_pos(text, needle, offset=0):
+    # needle 首次出现处 -> (行号, 该行内 UTF-16 列)；offset 是 needle 内的码点偏移。
+    lines = text.split("\n")
+    for i, ln in enumerate(lines):
+        j = ln.find(needle)
+        if j >= 0:
+            return (i, utf16_len(ln[:j + offset]))
+    raise AssertionError("needle not found: %r" % needle)
+
+
+def signature_help_result(res):
+    result = res.get("result")
+    if not isinstance(result, dict):
+        return None
+    return result
+
+
+def signature_active(res):
+    sh = signature_help_result(res)
+    if sh is None:
+        return None
+    return sh.get("activeParameter")
+
+
+def test_signature_help(c, uri):
+    c.notify("textDocument/didOpen", {"textDocument": {
+        "uri": uri, "languageId": "python", "version": 1, "text": TEXT_SIGHELP}})
+    diag_params(c.notification("textDocument/publishDiagnostics"), uri)
+    # f(1, |2) 光标在第二参 -> activeParameter=1
+    line, ch = find_pos(TEXT_SIGHELP, "add(1, 2)", len("add(1, "))
+    t0 = time.monotonic()
+    res = c.request(400, "textDocument/signatureHelp", {
+        "textDocument": {"uri": uri}, "position": {"line": line, "character": ch}})
+    elapsed = time.monotonic() - t0
+    print("    signatureHelp round-trip: %.3fs" % elapsed)
+    expect(elapsed < 1.0, "signatureHelp round-trip < 1s (got %.3fs)" % elapsed)
+    sh = signature_help_result(res)
+    expect(sh is not None, "signatureHelp in call parens returns SignatureHelp")
+    if sh is not None:
+        sigs = sh.get("signatures") or []
+        expect_eq(len(sigs), 1, "signatureHelp has one signature")
+        if sigs:
+            sig = sigs[0]
+            label = sig.get("label") or ""
+            expect("add" in label, "signature label names the callee (got %r)" % label)
+            expect_in("a: int", label, "signature label contains parameter text")
+            ps = sig.get("parameters") or []
+            expect_eq(len(ps), 2, "signatureHelp parameters count")
+            if len(ps) >= 2:
+                expect_eq(ps[1].get("label"), "b: int", "second parameter label")
+            expect_eq(sig.get("activeParameter"), 1, "signature activeParameter = 1")
+        expect_eq(sh.get("activeParameter"), 1, "top-level activeParameter = 1")
+    # 光标在第一参 -> 0
+    line0, ch0 = find_pos(TEXT_SIGHELP, "add(1, 2)", len("add("))
+    res0 = c.request(401, "textDocument/signatureHelp", {
+        "textDocument": {"uri": uri}, "position": {"line": line0, "character": ch0}})
+    expect_eq(signature_active(res0), 0, "signatureHelp first parameter activeParameter=0")
+    # 无参函数 -> parameters 为空
+    ln1, ch1 = find_pos(TEXT_SIGHELP, "return noargs()", len("return noargs("))
+    res1 = c.request(402, "textDocument/signatureHelp", {
+        "textDocument": {"uri": uri}, "position": {"line": ln1, "character": ch1}})
+    sh1 = signature_help_result(res1)
+    expect(sh1 is not None, "signatureHelp for no-arg call returns SignatureHelp")
+    if sh1 is not None:
+        sigs1 = sh1.get("signatures") or []
+        expect(len(sigs1) == 1 and (sigs1[0].get("parameters") or []) == [],
+               "no-arg function has empty parameters[]")
+    # 字符串里的逗号不参与 activeParameter
+    ln2, ch2 = find_pos(TEXT_SIGHELP, 'add("x,y", 2)', len('add("x,y", '))
+    res2 = c.request(403, "textDocument/signatureHelp", {
+        "textDocument": {"uri": uri}, "position": {"line": ln2, "character": ch2}})
+    expect_eq(signature_active(res2), 1, "comma inside string is not counted")
+    # 非 ASCII 同行（emoji 在光标前，UTF-16 列换算）：add("中文😀", |2)
+    ln3, ch3 = find_pos(TEXT_SIGHELP, 'add("中文😀", 2)', len('add("中文😀", '))
+    res3 = c.request(404, "textDocument/signatureHelp", {
+        "textDocument": {"uri": uri}, "position": {"line": ln3, "character": ch3}})
+    expect_eq(signature_active(res3), 1,
+              "signatureHelp handles non-ASCII before cursor (UTF-16 column)")
+    # 跨行调用：光标落在第二个实参行 -> 仍能识别 add 的括号并数逗号
+    ln5, ch5 = find_pos(TEXT_SIGHELP, "        2)", len("        "))
+    res5 = c.request(406, "textDocument/signatureHelp", {
+        "textDocument": {"uri": uri}, "position": {"line": ln5, "character": ch5}})
+    expect_eq(signature_active(res5), 1, "signatureHelp works on multi-line call")
+    # 方法调用：w.norm(1, |2) -> self,k 里 k 是第二参
+    ln6, ch6 = find_pos(TEXT_SIGHELP, "w.norm(1, 2)", len("w.norm(1, "))
+    res6 = c.request(407, "textDocument/signatureHelp", {
+        "textDocument": {"uri": uri}, "position": {"line": ln6, "character": ch6}})
+    sh6 = signature_help_result(res6)
+    expect(sh6 is not None and "norm" in ((sh6.get("signatures") or [{}])[0].get("label") or ""),
+           "signatureHelp resolves method-call callee")
+    expect_eq(signature_active(res6), 1, "method call activeParameter counts commas")
+    # 光标不在调用括号内 -> null
+    ln4, ch4 = find_pos(TEXT_SIGHELP, "return a + b", len("return a"))
+    res4 = c.request(405, "textDocument/signatureHelp", {
+        "textDocument": {"uri": uri}, "position": {"line": ln4, "character": ch4}})
+    expect_eq(res4.get("result"), None, "signatureHelp outside call parens is null")
+
+
+TEXT_HIGHLIGHT = (
+    "x: int = 1\n"
+    "\n"
+    "def show() -> int:\n"
+    "    y: int = x + 1\n"
+    "    return x + y\n"
+)
+
+TEXT_HIGHLIGHT_LEX = (
+    "x: int = 1\n"
+    "# x in comment\n"
+    's: str = "x in string"\n'
+    "print(x)\n"
+)
+
+TEXT_HIGHLIGHT_UNI = (
+    "# 中文 😀\n"
+    "x: int = 1\n"
+    'label: str = "中文😀" + str(x)\n'
+)
+
+
+def highlight_list(res):
+    result = res.get("result")
+    if not isinstance(result, list):
+        return None
+    return result
+
+
+def highlight_starts(res):
+    ranges = highlight_list(res) or []
+    out = []
+    for r in ranges:
+        start = (r.get("range") or {}).get("start") or {}
+        out.append(start.get("line", -1))
+    return out
+
+
+def test_document_highlight(c, uri):
+    c.notify("textDocument/didOpen", {"textDocument": {
+        "uri": uri, "languageId": "python", "version": 1, "text": TEXT_HIGHLIGHT}})
+    diag_params(c.notification("textDocument/publishDiagnostics"), uri)
+    t0 = time.monotonic()
+    res = c.request(410, "textDocument/documentHighlight", {
+        "textDocument": {"uri": uri}, "position": {"line": 0, "character": 0}})
+    elapsed = time.monotonic() - t0
+    print("    documentHighlight round-trip: %.3fs" % elapsed)
+    expect(elapsed < 1.0, "documentHighlight round-trip < 1s (got %.3fs)" % elapsed)
+    ranges = highlight_list(res)
+    expect(ranges is not None and len(ranges) == 3,
+           "highlight finds all 3 occurrences of x (got %r)" % (ranges,))
+    if ranges and len(ranges) == 3:
+        starts = [(r.get("range") or {}).get("start") or {} for r in ranges]
+        expect_eq([s.get("line") for s in starts], [0, 3, 4], "highlight occurrence lines")
+        lines = TEXT_HIGHLIGHT.split("\n")
+        expect_eq(starts[1].get("character"), lines[3].index("x"),
+                  "highlight second occurrence column")
+        expect_eq(starts[2].get("character"), lines[4].index("x"),
+                  "highlight third occurrence column")
+        expect_eq(ranges[0].get("kind"), 3, "assignment target highlighted as Write(3)")
+        expect_eq(ranges[1].get("kind"), 1, "plain read highlighted as Text(1)")
+    # 注释 / 字符串里的同名 token 不算出现
+    uri2 = uri + ".lex"
+    c.notify("textDocument/didOpen", {"textDocument": {
+        "uri": uri2, "languageId": "python", "version": 1, "text": TEXT_HIGHLIGHT_LEX}})
+    diag_params(c.notification("textDocument/publishDiagnostics"), uri2)
+    res2 = c.request(411, "textDocument/documentHighlight", {
+        "textDocument": {"uri": uri2}, "position": {"line": 0, "character": 0}})
+    expect_eq(highlight_starts(res2), [0, 3],
+              "highlight ignores occurrences inside comment/string")
+    # 非 ASCII 行：行号不受影响，列按 UTF-16 code unit
+    uri3 = uri + ".uni"
+    c.notify("textDocument/didOpen", {"textDocument": {
+        "uri": uri3, "languageId": "python", "version": 1, "text": TEXT_HIGHLIGHT_UNI}})
+    diag_params(c.notification("textDocument/publishDiagnostics"), uri3)
+    res3 = c.request(412, "textDocument/documentHighlight", {
+        "textDocument": {"uri": uri3}, "position": {"line": 1, "character": 0}})
+    starts3 = highlight_starts(res3)
+    expect_eq(starts3, [1, 2], "highlight lines on non-ASCII document")
+    ranges3 = highlight_list(res3) or []
+    if len(ranges3) >= 2:
+        line2 = TEXT_HIGHLIGHT_UNI.split("\n")[2]
+        cp_start = line2.index("x")
+        want_u16 = utf16_len(line2[:cp_start])
+        got_u16 = ((ranges3[1].get("range") or {}).get("start") or {}).get("character")
+        expect_eq(got_u16, want_u16, "highlight UTF-16 column on non-ASCII line")
+        expect(want_u16 > cp_start,
+               "non-ASCII line really shifts UTF-16 column (emoji before x)")
+
+
+TEXT_FOLD = (
+    "# 第一行注释\n"
+    "# 第二行注释\n"
+    "\n"
+    "def foo(n: int) -> int:\n"
+    "    a: int = n\n"
+    "    b: int = a + 1\n"
+    "    return b\n"
+    "\n"
+    "class Bar:\n"
+    "    x: int\n"
+    "    y: int\n"
+    "\n"
+    "def q() -> None:\n"
+    '    """doc line1\n'
+    "    doc line2 中文😀\n"
+    '    """\n'
+    "    pass\n"
+    "\n"
+    "def one() -> int:\n"
+    "    return 1\n"
+)
+
+
+def folding_tuples(res):
+    result = res.get("result")
+    if not isinstance(result, list):
+        return None
+    out = []
+    for r in result:
+        out.append((r.get("startLine"), r.get("endLine"), r.get("kind")))
+    return out
+
+
+def test_folding_range(c, uri):
+    c.notify("textDocument/didOpen", {"textDocument": {
+        "uri": uri, "languageId": "python", "version": 1, "text": TEXT_FOLD}})
+    diag_params(c.notification("textDocument/publishDiagnostics"), uri)
+    t0 = time.monotonic()
+    res = c.request(420, "textDocument/foldingRange", {"textDocument": {"uri": uri}})
+    elapsed = time.monotonic() - t0
+    print("    foldingRange round-trip: %.3fs" % elapsed)
+    expect(elapsed < 1.0, "foldingRange round-trip < 1s (got %.3fs)" % elapsed)
+    folds = folding_tuples(res)
+    expect(folds is not None and len(folds) >= 4,
+           "foldingRange returns regions (got %r)" % (folds,))
+    folds = folds or []
+    expect((0, 1, "comment") in folds, "consecutive comment block folds")
+    # 验收点：3 行函数体 -> 覆盖 def 行(3) 到最后一行(6) 的 1 个 region
+    expect((3, 6, "region") in folds, "3-line function body folds def..last line")
+    expect_eq(len([f for f in folds if f[0] == 3]), 1, "exactly one fold starts at def line")
+    expect((8, 10, "region") in folds, "class block folds")
+    expect((12, 16, "region") in folds, "function with docstring folds")
+    expect((13, 15, "region") in folds, "triple-quoted string block folds")
+    expect((18, 19, "region") in folds, "minimal 2-line function folds")
+    ok_order = True
+    ok_bounds = True
+    prev = -1
+    for (sl, el, kind) in folds:
+        if not isinstance(sl, int) or not isinstance(el, int) or el <= sl:
+            ok_bounds = False
+        if sl < prev:
+            ok_order = False
+        prev = sl
+    expect(ok_bounds, "every folding range has startLine < endLine")
+    expect(ok_order, "folding ranges sorted by startLine")
+    # 空文档 -> []
+    uri2 = uri + ".empty"
+    c.notify("textDocument/didOpen", {"textDocument": {
+        "uri": uri2, "languageId": "python", "version": 1, "text": ""}})
+    diag_params(c.notification("textDocument/publishDiagnostics"), uri2)
+    res2 = c.request(421, "textDocument/foldingRange", {"textDocument": {"uri": uri2}})
+    expect_eq(res2.get("result"), [], "foldingRange on empty document is []")
+
+
+def test_new_capabilities(server, compiler):
+    # 新方法必须在 initialize 的 capabilities 里声明（独立起一个客户端，不动主会话）。
+    c = make_client(server, compiler)
+    try:
+        res = c.request(430, "initialize", {
+            "processId": None, "rootUri": None, "capabilities": {}})
+        caps = (res.get("result") or {}).get("capabilities") or {}
+        sh = caps.get("signatureHelpProvider")
+        expect(isinstance(sh, dict) and "(" in (sh.get("triggerCharacters") or []),
+               "capabilities advertise signatureHelpProvider with trigger chars")
+        expect_eq(caps.get("documentHighlightProvider"), True,
+                  "capabilities advertise documentHighlightProvider")
+        expect_eq(caps.get("foldingRangeProvider"), True,
+                  "capabilities advertise foldingRangeProvider")
+        res2 = c.request(431, "shutdown", None)
+        expect_eq(res2.get("result"), None, "capability probe shutdown ok")
+        c.notify("exit", None)
+        rc = c.wait_exit()
+        expect_eq(rc, 0, "capability probe client exits cleanly")
+    finally:
+        if c.proc.poll() is None:
+            c.proc.kill()
+
+
 def main():
     server = locate_server()
     compiler = locate_compiler()
@@ -684,6 +1017,9 @@ def main():
     uri_d = "file:///tmp/pya-lsp-smoke-features.py"
     uri_e = "file:///tmp/pya-lsp-smoke-tokens.py"
     uri_f = "file:///tmp/pya-lsp-smoke-debounce.py"
+    uri_g = "file:///tmp/pya-lsp-smoke-sighelp.py"
+    uri_h = "file:///tmp/pya-lsp-smoke-highlight.py"
+    uri_i = "file:///tmp/pya-lsp-smoke-fold.py"
 
     c = make_client(server, compiler)
     try:
@@ -714,6 +1050,14 @@ def main():
         test_semantic_tokens(c, uri_e)
         print("[7f] didChange debounce")
         test_debounce(c, uri_f)
+        print("[7g] signatureHelp (activeParameter / no-arg / strings / UTF-16)")
+        test_signature_help(c, uri_g)
+        print("[7h] documentHighlight (same-name / comment+string / UTF-16)")
+        test_document_highlight(c, uri_h)
+        print("[7i] foldingRange (def/class/comment/triple-string)")
+        test_folding_range(c, uri_i)
+        print("[7j] new capabilities advertised in initialize")
+        test_new_capabilities(server, compiler)
         print("[8] unicode framing")
         test_unicode(c, uri_c)
         print("[9] malformed JSON resilience")
