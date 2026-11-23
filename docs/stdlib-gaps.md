@@ -456,3 +456,88 @@ argument, got 2`）。因此 **joinpath 变长参数 + with_name 本轮未补**�
 - `bash tests/check_size.sh`：通过。
 - 未 commit / push；未碰 `src/`、`runtime/`、`CMakeLists.txt`、`tools/`、
   `docs/testing.md`、`docs/memory-debug.md`。
+
+## 十、未测标准库验收轮（第 5 批，2026-11-23）
+
+本轮由 stdlib-c 代理完成，只改 `stdlib/decimal.py`（加一个缺失方法）、
+新增 4 个测试 `tests/run/534_~537_`、更新本文档。**未碰 src/runtime/等禁区**。
+
+### 10.1 逐模块状态表
+
+| 模块 | 行数 | 验收前现状 | 对拍结果 | 处理 |
+|---|---|---|---|---|
+| fractions | 102 | 有测试但覆盖窄 | **0 diff**（9 行输出） | 新增 534 |
+| decimal | 956 | 零测试 | 初测发现 `to_integral_value` 缺失；NaN/Infinity 明确不支持 | 补 `to_integral_value`（quantize 包装），对拍 0 diff，新增 535 |
+| contextlib | 144 | 零测试 | `suppress` 默认门控下报错；开 `PYADAMAS_LANG_GAPS=1` 后 **0 diff** | 新增 536（带 `# pyadamas: lang-gaps` 指令），未改实现 |
+| codecs | 20 | 可 import 未对拍 | utf-8/ascii encode/decode **0 diff**；`errors=` 参数被忽略 | 新增 537；errors 限制如实记录 |
+| enum | 49 | 坏的 | 成员是 int，无 `.value`/`.name` | 只调查，见 §10.3 |
+| dataclasses | 22 | 报坏 | 开 lang-gaps 后 `__init__`/`repr`/`eq` **全部 0 diff** | 无需修改；「坏」是未开门控 |
+| abc | 26 | 存疑 | 可 import/继承/调用；不阻止抽象类实例化（已知边界） | 只调查，见 §10.3 |
+
+### 10.2 已修 bug 与对拍证据
+
+**decimal.to_integral_value 缺失**：
+- 现象：`Decimal("3.9").to_integral_value()` 编译报错 `'Decimal' object has no method`。
+- 根因：956 行实现里有 `quantize` 但没有 `to_integral_value`（CPython 常用 API）。
+- 修法：`stdlib/decimal.py` 加 4 行薄包装 `return self.quantize(_from_parts(0,1,0), rounding)`。
+- 对拍：`Decimal("3.9").to_integral_value()` → 4，`Decimal("-2.5")` → -2，与 CPython 逐字节一致。
+
+**四模块 CPython 对拍**（同形脚本 `python3 -P` vs `build/gfix-sb6/pyadamas`，逐字节 `diff`）：
+- fractions: `init 1/3 1/2 -1/2 5 / add 1/2 / ...` —— 9 行输出 0 diff
+- decimal: `init ... / quant 3.14 / toint 4 -2 / prec 5 0.33333` —— 10 行 0 diff
+- contextlib: `suppress 1 / null 42 / closed True / enter / cm 7 / exit` —— 6 行 0 diff（需 lang-gaps）
+- codecs: `u8 b'hello' / u8dec hello / asc b'hello' / ...` —— 5 行 0 diff
+
+**不能修的**（如实记录）：
+- `codecs.encode(s, "ascii", errors="replace")`：PA 的 `str.encode` 忽略 errors 参数，
+  对非 ASCII 字符仍返回 UTF-8 字节（CPython 返回 `b'caf?'`）。这是运行时 str.encode 的
+  ABI 限制，`codecs.py` 薄包装层无法修复；动运行时超出本轮边界。
+- `decimal` 的 NaN/Infinity：stdlib/decimal.py 显式拒绝（`ValueError`），
+  `is_nan`/`is_infinite` 方法因此不存在。要支持需要扩展 Decimal 的内部表示
+  （加 special 字段），属大规模重写，按 lead 指示不做。
+- `fractions` 的 from str / from float / `limit_denominator`：模块 docstring 明确
+  不支持；不属 bug，本轮不改。
+
+### 10.3 enum / dataclasses / abc 的编译器缺口清单（只调查不实现）
+
+**enum**：成员是 int 类属性（`Color.RED` → `1`），无 `.value`/`.name`/`Color(1)` 反查/`__members__`/迭代/`auto()`。
+- 缺口：需要 **类体赋值拦截 + 元类/描述符语义**。CPython 的 EnumMeta.__new__ 在类创建时把
+  `RED = 1` 转成 EnumMember 对象；PA 的类体赋值 `x = 1` 在 `lower_class.cpp:491` 直接存 int 槽，
+  没有可拦截的 hook；`metaclass=` 类关键字在 `typecheck_func.cpp:488` 明确「语义没建模」。
+- 判据：现有 __setattr__/__getattr__ 只在实例访问时触发，类属性读取走静态类表
+  （`typecheck_expr_attr.cpp`），没有运行期类对象可挂描述符。
+- 工作量（粗估）：**大**（2~3 周）。需要 typecheck 层识别 Enum 基类并标记类、lower 层在类构造后
+  插入成员包装调用、运行期加 EnumMember 类型 + `__members__` dict + 反查表，
+  还要处理 IntEnum/Flag/StrEnum 的继承语义。建议排到 lang-gaps v2。
+- 改哪层：typecheck（类标记）+ lower（类体成员转换）+ runtime（新对象类型）。
+
+**dataclasses**：**已能工作**（`PYADAMAS_LANG_GAPS=1`）。`@dataclass` 的 `__init__`/`__repr__`/`__eq__`
+由 `src/typecheck_dataclass.cpp` 在编译期合成（`expand_dataclass`），运行期装饰器恒等。
+- 「坏」的误判原因：默认门控关时 `@dataclass` 只是恒等装饰器，带参构造自然失败。
+  测试文件头加 `# pyadamas: lang-gaps` 即通过。
+- 剩余缺口：继承 dataclass / `field()` / frozen / order / kw_only / slots / unsafe_hash
+  在 `typecheck_dataclass.cpp` 里明确报错（lang-gaps v1 范围外）。
+  要支持需要扩展编译期字段收集与代码合成（仍是 typecheck 层，非运行期类修改）。
+- 工作量（粗估）：**中**（每个特性 2~5 天）；基础用法已交付，无紧急缺口。
+
+**abc**：`ABC`/`@abstractmethod` 只是空基类/恒等装饰器；抽象类可被实例化（CPython 抛 TypeError）。
+- 缺口：需要 **元类或等价的实例化拦截**。CPython 用 ABCMeta.__call__ 检查 `__abstractmethods__`
+  并抛错；PA 没有元类，`metaclass=` 未建模（同 enum 的根因）。
+- 判据：`abstractmethod` 在 `typecheck_call.cpp:442` 只是「名字放行」，没有给函数打
+  `__isabstractmethod__` 标记（实测 `getattr(A.f, "__isabstractmethod__", 0)` → 0）。
+- 工作量（粗估）：**中大**（1~2 周）。最小可行方案：typecheck 层识别 `@abstractmethod`
+  并给 ClassInfo 加 abstract 方法集合，在 `typecheck_call_forms.cpp` 的实例化检查里拒绝
+  （纯编译期，无需运行期元类）；完整 `ABC.register`/虚拟子类需要运行期注册表。
+- 改哪层：typecheck（标记 + 实例化检查），可选 runtime（注册表）。
+
+**共同根因**：enum 与 abc 都卡在「没有元类 / 类创建 hook」。若下一轮要一次性解决，
+建议在 typecheck + lower 层加通用的「类装饰/类构造拦截」能力，再让 stdlib 的
+EnumMeta/ABCMeta 复用它；这比两个模块各自打补丁更划算。
+
+### 10.4 验收
+
+- 新用例：`tests/run/534_fractions_accept.py` ~ `537_codecs_accept.py`，均带 expect，
+  单独跑与全量跑均 `ran ok`。
+- 全量套件：`PYADAMAS_TEST_JOBS=16 bash tests/run_tests.sh build/gfix-sb6 build/gfix-sb6/pyadamas`
+  —— **439 ran ok，0 FAILED/DIFF，RC=0**（基线 435 + 4 新用例）。
+- 未 commit / push；未碰 src/runtime/CMakeLists/tools/checkall/sigs 等禁区。

@@ -937,6 +937,10 @@ class Decimal:
         ds: tuple[int, ...] = tuple(lst)
         return (self._sign, ds, self._exp)
 
+    def to_integral_value(self, rounding: str = "") -> Decimal:
+        """四舍五入到整数（CPython Decimal.to_integral_value 口径）。"""
+        return self.quantize(_from_parts(0, 1, 0), rounding)
+
     def quantize(self, exp: Decimal, rounding: str = "") -> Decimal:
         mode: str = rounding
         if mode == "":
