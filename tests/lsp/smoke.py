@@ -241,7 +241,7 @@ def test_initialize(c, uri_a):
 
 def test_initialized_and_unknown(c):
     c.notify("initialized", {})
-    c.send({"jsonrpc": "2.0", "id": 2, "method": "textDocument/rename", "params": {}})
+    c.send({"jsonrpc": "2.0", "id": 2, "method": "textDocument/formatting", "params": {}})
     # initialized 是通知，不能有回包：下一条消息必须就是 id=2 的响应
     msg = c.recv()
     expect_eq(msg.get("id"), 2, "first frame after initialized is response id=2")
@@ -666,6 +666,219 @@ def test_exit_without_shutdown(server, compiler):
     expect_eq(rc, 1, "exit without shutdown -> rc 1")
 
 
+
+# ---------------- references / rename（追加：文档内符号查找与重命名） ----------------
+
+TEXT_REFS = (
+    "def clamp(x: int, lo: int) -> int:\n"
+    "    if x < lo:\n"
+    "        return lo\n"
+    "    if x > lo:\n"
+    "        return lo + x\n"
+    "    return x\n"
+    "\n"
+    "limit: int = 10\n"
+    "\n"
+    "def other() -> int:\n"
+    "    x: int = 3\n"
+    "    if x > limit:\n"
+    "        return clamp(x, x)\n"
+    "    return x\n"
+    "\n"
+    "print(\"\U0001F600\", limit)\n"
+    "\n"
+    "# 注释里也有 x、clamp 和 limit，不应算引用\n"
+    "note: str = \"字符串里的 x 也不算\"\n"
+)
+
+
+def nth_index(text, line, word, nth):
+    raw = text.split("\n")[line]
+    start = 0
+    idx = -1
+    for _ in range(nth + 1):
+        idx = raw.find(word, start)
+        start = idx + 1
+    return idx
+
+
+def refs_pos(text, line, word, nth=0):
+    return {"line": line, "character": nth_index(text, line, word, nth)}
+
+
+def utf16_to_cp_index(s, units):
+    total = 0
+    i = 0
+    while i < len(s) and total < units:
+        total += 2 if ord(s[i]) > 0xFFFF else 1
+        i += 1
+    return i
+
+
+def loc_tuples(result):
+    out = []
+    for loc in (result or []):
+        rng = loc.get("range") or {}
+        start = rng.get("start") or {}
+        end = rng.get("end") or {}
+        out.append((start.get("line"), start.get("character"),
+                    end.get("character")))
+    return out
+
+
+def test_references_and_rename(c, uri):
+    c.notify("textDocument/didOpen", {"textDocument": {
+        "uri": uri, "languageId": "python", "version": 1, "text": TEXT_REFS}})
+    diag_params(c.notification("textDocument/publishDiagnostics"), uri)
+
+    # ---- references：函数形参 x 只匹配 clamp 函数体内的 4 处使用 ----
+    t0 = time.monotonic()
+    res = c.request(400, "textDocument/references", {
+        "textDocument": {"uri": uri},
+        "position": refs_pos(TEXT_REFS, 1, "x"),
+        "context": {"includeDeclaration": False}})
+    elapsed = time.monotonic() - t0
+    print("    references round-trip: %.3fs" % elapsed)
+    expect(elapsed < 1.0, "references round-trip < 1s (got %.3fs)" % elapsed)
+    locs = loc_tuples(res.get("result"))
+    expect_eq(len(locs), 4, "references: 4 uses of parameter x (got %r)" % (locs,))
+    expect_eq([l[0] for l in locs], [1, 3, 4, 5], "references lines for parameter x")
+    expect(all(l[1] >= 0 and l[2] == l[1] + 1 for l in locs),
+           "references ranges cover exactly 'x'")
+    # 同名局部变量在 other 里，不应混进来；注释/字符串里的 x 也不算
+    expect(not any(l[0] >= 15 for l in locs), "references exclude comment/string lines")
+
+    # includeDeclaration=True：定义（形参）也计入
+    res = c.request(401, "textDocument/references", {
+        "textDocument": {"uri": uri},
+        "position": refs_pos(TEXT_REFS, 1, "x"),
+        "context": {"includeDeclaration": True}})
+    locs2 = loc_tuples(res.get("result"))
+    expect_eq(len(locs2), 5, "references with declaration includes param (got %r)" % (locs2,))
+    expect((0, 10, 11) in locs2, "references declaration position is the parameter")
+
+    # ---- references：另一个函数里的同名局部变量只匹配自己的作用域 ----
+    res = c.request(402, "textDocument/references", {
+        "textDocument": {"uri": uri},
+        "position": refs_pos(TEXT_REFS, 10, "x"),
+        "context": {"includeDeclaration": False}})
+    locs3 = loc_tuples(res.get("result"))
+    expect_eq(len(locs3), 4, "references: local x in other has 4 uses (got %r)" % (locs3,))
+    expect_eq([l[0] for l in locs3], [11, 12, 12, 13],
+              "references local x stays inside other()")
+
+    # ---- references：全局变量 limit（含 UTF-16 列：😀 占 2 units） ----
+    res = c.request(403, "textDocument/references", {
+        "textDocument": {"uri": uri},
+        "position": refs_pos(TEXT_REFS, 7, "limit"),
+        "context": {"includeDeclaration": False}})
+    locs4 = loc_tuples(res.get("result"))
+    expect_eq(len(locs4), 2, "references: limit has 2 uses (got %r)" % (locs4,))
+    expect_eq(locs4, [(11, 11, 16), (15, 12, 17)],
+              "references: limit positions incl UTF-16 column after emoji")
+
+    # ---- references：函数名 clamp ----
+    res = c.request(404, "textDocument/references", {
+        "textDocument": {"uri": uri},
+        "position": refs_pos(TEXT_REFS, 0, "clamp"),
+        "context": {"includeDeclaration": False}})
+    expect_eq(loc_tuples(res.get("result")), [(12, 15, 20)],
+              "references: clamp call site")
+
+    # ---- references：无法解析的普通词 -> [] ----
+    res = c.request(405, "textDocument/references", {
+        "textDocument": {"uri": uri},
+        "position": {"line": 15, "character": 3},
+        "context": {"includeDeclaration": True}})
+    expect_eq(res.get("result"), [], "references on unknown word is empty")
+
+    # ---- rename：改函数名 -> WorkspaceEdit 覆盖定义+调用，range 文本是原名 ----
+    t0 = time.monotonic()
+    res = c.request(410, "textDocument/rename", {
+        "textDocument": {"uri": uri},
+        "position": refs_pos(TEXT_REFS, 0, "clamp"),
+        "newName": "bound"})
+    elapsed = time.monotonic() - t0
+    print("    rename round-trip: %.3fs" % elapsed)
+    expect(elapsed < 1.0, "rename round-trip < 1s (got %.3fs)" % elapsed)
+    result = res.get("result") or {}
+    changes = result.get("changes") or {}
+    edits = changes.get(uri) or []
+    expect(uri in changes, "rename returns changes keyed by uri")
+    expect_eq(len(edits), 2, "rename function: definition + call (got %d)" % len(edits))
+    lines = TEXT_REFS.split("\n")
+    ok_text = True
+    ok_new = True
+    for e in edits:
+        rng = e.get("range") or {}
+        st = rng.get("start") or {}
+        en = rng.get("end") or {}
+        line_txt = lines[st.get("line")]
+        a = utf16_to_cp_index(line_txt, st.get("character"))
+        b = utf16_to_cp_index(line_txt, en.get("character"))
+        if line_txt[a:b] != "clamp":
+            ok_text = False
+        if e.get("newText") != "bound":
+            ok_new = False
+    expect(ok_text, "rename ranges cover exactly the old name")
+    expect(ok_new, "rename newText is newName")
+    expect_eq(sorted(e.get("range", {}).get("start", {}).get("line") for e in edits),
+              [0, 12], "rename function edits lines")
+
+    # ---- rename：局部变量只改自己作用域 ----
+    res = c.request(411, "textDocument/rename", {
+        "textDocument": {"uri": uri},
+        "position": refs_pos(TEXT_REFS, 10, "x"),
+        "newName": "tmp"})
+    edits2 = ((res.get("result") or {}).get("changes") or {}).get(uri) or []
+    expect_eq(len(edits2), 5, "rename local x: decl + 4 uses (got %d)" % len(edits2))
+    expect_eq(sorted(e.get("range", {}).get("start", {}).get("line") for e in edits2),
+              [10, 11, 12, 12, 13], "rename local x stays inside other()")
+
+    # ---- rename：全局变量 limit（含 😀 同行的 UTF-16 列） ----
+    res = c.request(412, "textDocument/rename", {
+        "textDocument": {"uri": uri},
+        "position": refs_pos(TEXT_REFS, 7, "limit"),
+        "newName": "maxv"})
+    edits3 = ((res.get("result") or {}).get("changes") or {}).get(uri) or []
+    expect_eq(len(edits3), 3, "rename limit: decl + 2 uses (got %d)" % len(edits3))
+    chars = sorted(e.get("range", {}).get("start", {}).get("character") for e in edits3)
+    expect_eq(chars, [0, 11, 12], "rename limit UTF-16 starts")
+
+    # ---- rename：非法 newName -> InvalidParams(-32602) ----
+    res = c.request(413, "textDocument/rename", {
+        "textDocument": {"uri": uri},
+        "position": refs_pos(TEXT_REFS, 0, "clamp"),
+        "newName": "a-b"})
+    err = res.get("error") or {}
+    expect_eq(err.get("code"), -32602, "rename invalid identifier -> InvalidParams")
+
+    # ---- rename：关键字 / 内置类型 / 未声明词 -> null ----
+    res = c.request(414, "textDocument/rename", {
+        "textDocument": {"uri": uri},
+        "position": refs_pos(TEXT_REFS, 1, "return"),
+        "newName": "ret"})
+    expect_eq(res.get("result"), None, "rename keyword -> null")
+    res = c.request(415, "textDocument/rename", {
+        "textDocument": {"uri": uri},
+        "position": refs_pos(TEXT_REFS, 18, "str"),
+        "newName": "text"})
+    expect_eq(res.get("result"), None, "rename builtin type -> null")
+    res = c.request(416, "textDocument/rename", {
+        "textDocument": {"uri": uri},
+        "position": refs_pos(TEXT_REFS, 15, "print"),
+        "newName": "emit"})
+    expect_eq(res.get("result"), None, "rename builtin function -> null")
+    # 关键字不是符号：references 返回 []
+    res = c.request(406, "textDocument/references", {
+        "textDocument": {"uri": uri},
+        "position": refs_pos(TEXT_REFS, 1, "return"),
+        "context": {"includeDeclaration": True}})
+    expect_eq(res.get("result"), [], "references on keyword is empty")
+
+    c.notify("textDocument/didClose", {"textDocument": {"uri": uri}})
+    diag_params(c.notification("textDocument/publishDiagnostics"), uri)
+
 def main():
     server = locate_server()
     compiler = locate_compiler()
@@ -684,6 +897,7 @@ def main():
     uri_d = "file:///tmp/pya-lsp-smoke-features.py"
     uri_e = "file:///tmp/pya-lsp-smoke-tokens.py"
     uri_f = "file:///tmp/pya-lsp-smoke-debounce.py"
+    uri_g = "file:///tmp/pya-lsp-smoke-refs.py"
 
     c = make_client(server, compiler)
     try:
@@ -718,6 +932,8 @@ def main():
         test_unicode(c, uri_c)
         print("[9] malformed JSON resilience")
         test_malformed_json(c, uri_b)
+        print("[7g] references / rename")
+        test_references_and_rename(c, uri_g)
         print("[10] shutdown / exit")
         test_shutdown(c)
     finally:
