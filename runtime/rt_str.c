@@ -1102,6 +1102,10 @@ int64_t pa_str_method(PyAdamasStr* s, int64_t op, int64_t a0, int64_t a1, int64_
             if (old->len == 0) {
                 hits = s->pub + 1;
                 if (count >= 0 && hits > count) hits = count;
+            } else if (count == 0) {
+                /* CPython 语义：count == 0 表示一次都不替换（负数是全部）。
+                   以前这里先 ++hits 再比 count，count==0 会替换一次（静默错值）。 */
+                hits = 0;
             } else {
                 int64_t i = 0;
                 while (i + old->len <= s->len) {
@@ -1496,6 +1500,10 @@ int64_t pa_bytes_method(PyAdamasStr* s, int64_t op, int64_t a0, int64_t a1, int6
             if (old->len == 0) {
                 hits = s->len + 1;
                 if (count >= 0 && hits > count) hits = count;
+            } else if (count == 0) {
+                /* CPython 语义：count == 0 表示一次都不替换（负数是全部）。
+                   以前这里先 ++hits 再比 count，count==0 会替换一次（静默错值）。 */
+                hits = 0;
             } else {
                 int64_t i = 0;
                 while (i + old->len <= s->len) {
