@@ -836,6 +836,27 @@ VReg Lowerer::lower_cmp_single(VReg l, TypePtr lt, VReg r, TypePtr rt, CmpOp op,
         if (op == CmpOp::Lt || op == CmpOp::Le || op == CmpOp::Gt || op == CmpOp::Ge) {
             VReg cmpres = lower_dunder_cmp(l, lt, r, rt, op);
             if (cmpres != kNoReg) return cmpres;
+            // 容器的大小比较没有实现：list 是字典序、set 是子集关系、dict/tuple
+            // 按 CPython 规则还要抛 TypeError。以前这里落到通用的机器字 Cmp，
+            // 等于按堆指针比大小 —— 静默随机结果（实测 [2] < [1, 9] 得到 True、
+            // set([1]) <= set([1,2,3]) 得到 False）。按项目口径「宁可报错，不可
+            // 静默算错」：静态类型能确定任一侧是容器时，编译期直接拒绝。
+            auto strip_opt = [](TypePtr t) -> TypePtr {
+                return (t && t->kind == TyKind::Optional && !t->sub.empty()) ? t->sub[0] : t;
+            };
+            TypePtr cl = strip_opt(lt);
+            TypePtr cr = strip_opt(rt);
+            auto container = [](const TypePtr& t) {
+                return t && (t->kind == TyKind::List || t->kind == TyKind::Tuple ||
+                             t->kind == TyKind::Dict || t->kind == TyKind::Set);
+            };
+            if (container(cl) || container(cr)) {
+                const TypePtr& bad = container(cl) ? cl : cr;
+                err(line, col,
+                    std::format("ordering comparison on {} is not supported by the code generator yet",
+                                type_name(bad)));
+                return const_bool(false);
+            }
         }
         if (op == CmpOp::In || op == CmpOp::NotIn) {
             VReg flag;
