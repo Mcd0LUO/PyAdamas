@@ -37,14 +37,27 @@ bool same_slot(const IRFunction& fn, VReg x, VReg y) {
                 if (in.dst == v && in.op == IrOp::LoadSlot) return static_cast<int>(in.idx);
         return -1;
     };
+    auto global_of = [&](VReg v) -> int {
+        if (v == kNoReg) return -1;
+        for (const auto& b : fn.blocks)
+            for (const auto& in : b.insts)
+                if (in.dst == v && in.op == IrOp::LoadGlobal) return static_cast<int>(in.idx);
+        return -1;
+    };
     const int a = slot_of(x);
     const int c = slot_of(y);
-    return a >= 0 && a == c;
+    if (a >= 0 && a == c) return true;
+    // 同理：两次 load.global 同一索引，且中间没有 store.global 该索引
+    // （融合守卫里 contains→分支→T 入口→get 全是纯指令，不含 StoreGlobal）。
+    const int ga = global_of(x);
+    const int gc = global_of(y);
+    return ga >= 0 && ga == gc;
 }
 
 bool pure_op(const Inst& in) {
     switch (in.op) {
         case IrOp::LoadSlot:
+        case IrOp::LoadGlobal:
         case IrOp::ConstInt:
         case IrOp::ConstFloat:
         case IrOp::ConstStr:

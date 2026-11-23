@@ -252,11 +252,26 @@ bool promote_globals_in_loops(IRFunction& fn, const std::vector<IRGlobal>& globa
         std::unordered_set<int> loop_set = body_set;
         loop_set.insert(h);
 
-        // 循环体内不能有任何函数调用（调用能观察到全局中间值/改全局）。
+        // 循环体内不能有能观察到全局中间值/写全局的调用。
+        //
+        // 判据是 IR 结构（不是源码特征）：
+        //   * 用户级调用（Call/CallDirect/VCall/CallPtr/CallExtern/Setjmp）一律拒绝
+        //     —— 它们可能经用户代码读写模块全局。
+        //   * call.rt 是编译期固定的 C 运行时函数：模块全局在 IR 里只能通过
+        //     LoadGlobal/StoreGlobal 访问，RtFn 没有全局索引参数，C 侧无法
+        //     观察到被提升的全局变量槽；调用收到的都是值参数（其中全局的当前值
+        //     已从提升后的槽读出）。因此对 call.rt 提升是安全的。
+        //   * 非入口函数里 call.rt 可能抛异常展开，跳过出口写回后被上层 catch
+        //     读到旧全局 —— 交给下面的 is_raising_op 判据统一拒绝；
+        //     入口函数未捕获异常直接终止，不产生可观察差异。
         bool has_call = false;
         for (int b : loop_set) {
-            for (const auto& in : fn.blocks[static_cast<size_t>(b)].insts)
-                if (is_call_op(in.op)) { has_call = true; break; }
+            for (const auto& in : fn.blocks[static_cast<size_t>(b)].insts) {
+                if (!is_call_op(in.op)) continue;
+                if (is_entry && in.op == IrOp::CallRt) continue;
+                has_call = true;
+                break;
+            }
             if (has_call) break;
         }
         if (has_call) continue;
