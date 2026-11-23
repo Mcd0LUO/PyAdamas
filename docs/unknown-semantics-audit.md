@@ -100,19 +100,26 @@ print(p in xs)                  # 修前 False，CPython True
 - `tests/run/490_unknown_kind_sort.py`（排序族分类，0.425）；
 - 三档 `-O0/-O1/-O2` 对 CPython、`difftest`、ASan。
 
-## 4. 已知缺口与后续（未修，如实记录）
+## 4. 已知缺口与后续（如实记录，含已关闭项）
 
 | 缺口 | 现状 | 为什么没修 / 后续方向 |
 |---|---|---|
-| **类实例 dunder 在 unknown 域** | 静态类型已知时 `__eq__` 正常（`lower_dunder_eq` 用编译期 dunder 槽）；实例从混合容器取出后 `==` 走 `pa_any_cmp` other 分支 → 按同一性，**不调用 `__eq__`**（CPython 会调）。`hash`/`sorted` 同类。 | **0.433/0.434：`__eq__`、`__lt__` 已打通**——vtable 元数据第 7 字指向 dunder 槽表 `[__eq__, __lt__, __hash__, -1]`（`IRClass::eq_slot/lt_slot/hash_slot`，`lower_class.cpp` 填），`rt_any.c`/`rt_list.c` 按「实例→vtable→槽表→槽」分派：unknown 域 `==`/`!=`/`<`、typed `list[P]` 的 `in`/`index`/`remove`、`sorted(类实例)`（有 `__lt__` 时排序，否则 TypeError）。剩余：**`__hash__` 未分派**——无类型 dict/set 的实例键仍按机器字哈希（需 dict 的 `key_kind=3` 增加「实例 → hash 槽」分支并保证同键等价关系一致，方案见报告）；0.435 起 `__hash__` 也打通：unknown 域实例键按 `__hash__`/`__eq__` 槽表分派（`dict_hash_value`/`dict_key_eq` 的 kind=3 实例分支），只有 `__eq__` 无 `__hash__` 的类抛 `TypeError: unhashable type`，`hash()` 的 unknown 分支按运行期种类分派（`dict_hash_value(-1, v)`）。 |
+| **类实例 dunder 在 unknown 域** | ~~静态类型已知时 `__eq__` 正常，实例从混合容器取出后按同一性~~ | **✅ 已关闭（0.433 / 0.434 / 0.435）**：vtable 元数据第 7 字指向 dunder 槽表 `[__eq__, __lt__, __hash__, -1]`（`IRClass::eq_slot/lt_slot/hash_slot` 由 `lower_class.cpp` 填），`pa_instance_dunder_fn` 统一按「实例 → vtable → 槽表 → 槽」分派：0.433 打通 unknown 域 `==`/`!=`；0.434 打通 `<` 与 `sorted(实例)`、修复 typed `list[P]` 的 `in`/`index`/`remove`（槽表指针化）；0.435 打通实例作 dict/set 键（`kind=3` 的 `__hash__`/`__eq__` 分派）与 `hash()` 的 unknown 分支。剩余文案项：unknown 域 `unhashable type` 文案用 `object`（运行时拿不到类名），见下表。 |
 | **deque 的 `in`** | `dq.index`/`count`/`remove` 有 runtime 实现且安全；但 `p in dq` **编译期报错**（`argument of type 'collections.deque' is not iterable`）。 | 这是 lowering 缺口（没有 deque 的 `in` 降级路径），不是 runtime 分派 bug；实现需要新的容器迭代/包含降级，排在语言 gap 里。 |
 | **嵌套容器 chain 深度不足** | `list[list[int]]` 的相等描述符链只覆盖有限深度，深层落回 `'x'` → 同一性比较；如 unknown 域 `[[1,2]] == [[1,2]]` 可能为 False（CPython True）。 | 0.424 的 `chain_elem_eq` 只对 `'x'` 做了 str/big 内容比较（保守），容器递归需要类型描述符深度信息；属于 chain 生成侧的既有口径，未在 audit 范围内改动。 |
-| **`sorted` 的「全 other 族」** | kind=3 族分类后：全数值按数值、全 str 按字节；**用户类实例**族从 0.432 起显式抛 `TypeError`（文案 `'<' not supported between instances of 'object' and 'object'`，不再静默按机器字返回乱序）；全容器/None 族仍按机器字（CPython 会按内容）。 | 类实例与「类 dunder unknown 域」同源：运行时没有「类名→`__lt__` 槽」映射，要修需新增类注册机制（新功能）。容器内容比较需要元素描述符（静态类型未知时没有）；改抛错需要区分容器与实例（按 RC kind），已在 `pa_list_sort` 里实现。 |
+| **`sorted` 的「全 other 族」** | kind=3 族分类后：全数值按数值、全 str 按字节；**用户类实例**族从 0.432 起不再静默按机器字排序，**0.434 起有 `__lt__` 槽就按它稳定排序**（`sort_objlt`），没有 `__lt__` 仍抛 `TypeError`（文案 `'<' not supported between instances of 'object' and 'object'`）；全容器/None 族仍按机器字（CPython 会按内容，文档未承诺）。 | **✅ 已关闭（0.434）**：`pa_list_sort` 的 `PA_UK_OTHER` 分支改为「全实例且都有 `__lt__` 槽 → 调槽排序，否则 TypeError」。容器内容比较仍缺元素描述符（静态类型未知时没有），属另一项未关闭缺口（见上「嵌套容器 chain 深度」）。 |
+
+| **typed `list[P]` 的 `in` / `index` / `remove`** | ~~`list_value_eq(kind=3)` 对类实例按身份~~ | **✅ 已关闭（0.434）**：`unknown_kind_value_eq` 两个 `RC_INSTANCE` 时按 `__eq__` 槽分派；元素比较链 `chain_elem_eq('x')` 与 any_unknown_eq 复用同一分派。 |
+| **`__le__` / `__ge__` 的静态设计差异** | 只定义 `__lt__` 的类：CPython 运行期 `p <= q` 抛 TypeError（`__le__` 缺失），PyAdamas **编译期**报 `not orderable`；unknown 域用「lt + eq」组合近似 `<=`/`>=`（没有单独槽位）。 | **未关闭（文档化设计差异）**：typed 域跟随编译期 dunder 判据；unknown 域若要精确对齐需要额外槽位（`__le__`/`__ge__`）或在 `pa_any_cmp` 里区分「有无 `__le__`」——留待需要时再加一个槽。 |
+| **unknown 域 unhashable 文案** | 只有 `__eq__` 没有 `__hash__` 的类在 unknown 域抛 `TypeError: unhashable type: 'object'`；CPython 文案带具体类名（`unhashable type: 'E'`）。 | **未关闭（文案级）**：运行时只有 vtable 指针，没有「实例 → 类名」映射；要精确文案需在元数据再加类名（类似 `meta[4]` 的限定名，但实例的类不一定在 MRO 头部）。 |
 
 ## 5. 修复一览（代码与测试）
 
 | 版本 | 修复 | 代码 | 测试 / 验证 |
 |---|---|---|---|
+| 0.433 | unknown 域实例 `==` 调用 `__eq__`（元数据 6→7 字加 eq_slot） | `src/ir_types.h`/`lower_class.cpp`/`codegen.cpp`、`runtime/rt_class.c`+`rt_any.c` | 498 用例；394 ran ok；difftest 373-0；12 基准 ±0.02% |
+| 0.434 | 槽表指针 `[eq,lt,hash,-1]`、`__lt__` 打通、typed `list[P]` 的 in/index、sorted 实例按 `__lt__` | `src/codegen.cpp`/`lower_class.cpp`、`runtime/rt_class.c`+`rt_any.c`+`rt_list.c` | 499 用例 + tests/modules/dunder_cross；396 ran ok；difftest 374-0；12 基准 ±0.03% |
+| 0.435 | unknown 域实例作 dict/set 键（kind=3 的 `__hash__`/`__eq__` 分派 + `hash()` 的 kind=-1 哨兵） | `runtime/rt_dict.c` +62/−9、`src/lower_builtin_reflect.cpp` +4 | 500 用例；397 ran ok；difftest 375-0；wordfreq −2.47%（布局副作用） |
 | 0.422 | dict `key_kind=3/9` 的 str 键按内容哈希/比较 + 保留精确堆索引 | `runtime/rt_dict.c` +70/−26、`src/ir.cpp` +10 | 487 用例；383 ran ok；difftest 362-0；wordfreq +0.078% |
 | 0.424 | `list_value_eq(kind=3)` / `chain_elem_eq('x')` 的 str/big 内容比较；`pa_any_cmp(_t)` other 分支的 `any_unknown_eq`（str/big/list 递归） | `runtime/rt_list.c` +21、`runtime/rt_any.c` +30 | 489 用例；385 ran ok；difftest 364-0；12 基准 ±0.05% |
 | 0.425 | `pa_list_sort` kind=3 的元素族分类（NUM/STR/OTHER）+ `sort_uknum`（int/float/big 混比）+ 族混杂抛 TypeError | `runtime/rt_list.c` +78 | 490 用例；386 ran ok；difftest 365-0；12 基准 ±0.47%（无 >1%） |

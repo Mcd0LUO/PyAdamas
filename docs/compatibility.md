@@ -37,7 +37,7 @@ PyAdamas 不追求兼容 CPython：语义是按静态类型的需要重新定的
 | 方法值 `obj.m` / `C.m` | 合成闭包捕获接收者：普通方法 `vcall`（子类覆盖生效）、静态/类方法 `vcall_static`、类接收者的静态/类方法 `call_direct`；默认参数与关键字参数可用 | 同 Python（descriptor 绑定） | 类接收者上取普通方法的值不支持；跨模块 / 动态 classmethod 的方法值暂不支持 |
 | 类的属性 | 声明过的字段，或 `self.x = ...` 就地长出来的字段 | 可随时给实例挂任意属性 | 偏移是编译期常量，没有运行时 `__dict__` |
 | `print(obj)` | 有 `__str__`（或 `__repr__`）就调，否则 `<Point object>` | 同 Python（默认文本带模块名和地址） | 默认文本没有模块名和地址 |
-| 协议 dunder | `__str__`/`__repr__`/`__eq__`/`__ne__`/`__len__`/`__hash__`/`__contains__`/`__iter__`/算术与比较类 dunder 走 vtable；`in` 需要 `__contains__`，`<` 等需要比较 dunder，算术需要对应 dunder，否则编译报错 | 完整数据模型 | `__format__`/`__bool__`/`__reversed__` 已建模（`format()`/f-string 格式说明、真值、`reversed()`）；`__eq__` 的 other 限 unknown 或类类型；只定义 `__eq__` 没定义 `__hash__` 的类在 dict/set 里按身份处理 |
+| 协议 dunder | `__str__`/`__repr__`/`__eq__`/`__ne__`/`__len__`/`__hash__`/`__contains__`/`__iter__`/算术与比较类 dunder 走 vtable；`in` 需要 `__contains__`，`<` 等需要比较 dunder，算术需要对应 dunder，否则编译报错 | 完整数据模型 | `__format__`/`__bool__`/`__reversed__` 已建模（`format()`/f-string 格式说明、真值、`reversed()`）；`__eq__` 的 other 限 unknown 或类类型；只定义 `__eq__` 没定义 `__hash__` 的类在 **typed** dict/set 里按身份处理（unknown 域抛 unhashable，见 §一末尾 0.435 记录） |
 | `random` | MT19937 与 CPython 同种子同序列；`random`/`seed`/`randint`/`uniform`/`choice`/`shuffle`/`randrange`/`getrandbits`/`gauss`/`expovariate`/`triangular`/`sample`/`choices`，以及 `Random` 实例方法 | 完整 random（`bytes`/`betavariate`/`gammavariate`/`choices` 的 `weights` 未实现） | `gauss`/`expovariate` 的算法与 CPython 不同，序列不保证一致；`choices` 的 `k` 是关键字参数（同 CPython）；省略种子时时间 + pid 播种 |
 | `os` / `os.path` | `listdir`/`getenv`/`mkdir`/`rmdir`/`remove`/`rename`/`getcwd`/`cpu_count`/`getpid`/`chdir`/`chmod`/`access`/`makedirs`；`join`/`exists`/`isdir`/`isfile`/`basename`/`dirname`/`normpath`/`abspath`/`expanduser`/`splitext`/`realpath`/`getsize`/`getmtime`/`split`/`samefile`；常量 `sep`/`linesep`/`F_OK`/`R_OK`/`W_OK`/`X_OK` | 完整 os | `getenv` 缺失返回空串（CPython 返回 None）；没有 `walk`/`environ`/`stat`/`system`；`os.path` 是独立模块别名：`import os.path as p` 或 `from os.path import ...`，`import os` 后 `os.path.x` 暂不支持 |
 | `subprocess` | `run` 支持 `capture_output`/`text`/`timeout`/`check`/`shell`/`cwd`，`args` 可以是 `list[str]` 或字符串；`Popen` 支持 `shell`/`cwd`/`stdin`/`stdout`/`stderr`（`PIPE`/`DEVNULL`/`STDOUT`），方法 `wait`/`communicate`/`kill`/`terminate`/`send_signal`，属性 `pid`/`returncode`/`stdout`/`stderr`/`stdin`；`TimeoutExpired`/`CalledProcessError` 按内置异常名捕获 | 完整 subprocess | 不返回 bytes：`text=False` 也返回 str；`input`/`env`/`preexec_fn` 未实现；exec 失败按退出码 127；**没有 `poll()`**（PyAdamas 里 None 和 0 同形，`poll() is None` 会把正常退出误判成还在跑，要轮询用 `wait(timeout=…)`）；`communicate()` 对没开管道的流返回空串而不是 `None`；`Popen` 句柄被回收时会 SIGKILL 子进程（CPython 不会）；`from subprocess import TimeoutExpired` 不支持 |
@@ -171,6 +171,20 @@ float 除法直接发 `divsd`，没有除零检查，于是按 IEEE 754 得到 `
   哈希、`__eq__` 比较（等值不同对象命中同一个键）；**只有 `__eq__` 没有 `__hash__` 的类在
   unknown 域抛 `TypeError: unhashable type`（CPython 口径）；typed 域保持既有文档化口径
   （只定义 `__eq__` 的类作 typed dict 键仍按身份处理，`hash()` 编译期报错）。
+
+### 只定义 `__eq__` 的类作 dict 键：typed 域 vs unknown 域（0.435 记录）
+
+同一个类在两条路径上的行为**有意不同**：
+
+| 路径 | 判定方式 | 只定义 `__eq__`、没定义 `__hash__` 的类 |
+|---|---|---|
+| typed（`dict[K, int]` 等编译器能确定 key 类型） | 编译器在 dict 创建点传入 `hash_slot`/`eq_slot`（`pa_dict_new` 的后两个参数），运行时只按槽号分派 | **按身份（指针）哈希/比较**——编译期没有「不可哈希」概念，`hash()` 在编译期报错；0.425 起这是文档化口径 |
+| unknown（`{}` + 裸 `dict` 注解 / `dict(bare_list)` → `key_kind=3`） | 运行时按「实例 → vtable → dunder 槽表」探测：有 `__hash__` 槽就用它，有 `__eq__` 槽就调它 | **抛 `TypeError: unhashable type`**（CPython 口径）；文案用 `object` 而不是具体类名（运行时只有 vtable 指针，没有「实例 → 类名」映射） |
+
+为什么不做统一：typed 域的 `key_kind` 是编译期常量，一次分派不带运行期探测（热路径零额外开销），
+而「不可哈希」在 typed 域会让所有只定义 `__eq__` 的类作键的既有程序编译失败或运行期报错——与 0.425 起
+的文档化口径冲突；unknown 域本来就要运行期按种类分派（0.422/0.424/0.435 的 str/big/实例分支），
+跟随 CPython 的 unhashable 判定不会引入新的性能代价。两条路径都不静默错值，差异只体现在「何时/是否报错」。
 
 ## 二、尚未实现的构造
 

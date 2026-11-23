@@ -4,6 +4,121 @@
 
 早期阶段没有逐条留痕，按阶段归纳；0.4 之后逐条记录。
 
+## [0.435] - 2026-11-23
+
+> feat(rt)：**unknown 域实例作 dict/set 键**——`__hash__` 分派打通；`hash()` 内置的 unknown 分支改为运行期分派。
+>
+> ### 问题
+>
+> 无类型 dict（`{}` + 裸 `dict` 注解/`dict(bare_list)` 建出的 `key_kind=3`）的实例键仍按机器字哈希 +
+> 身份比较：等值不同对象查不到（CPython 能查到）、set 不去重；`hash(unknown)` 在编译期直接报错。
+>
+> 复现（关键是让类型推断保持 `dict[unknown, unknown]`，否则会细化成 typed `dict[K,int]`）：
+>
+> ```python
+> def mk_dict() -> dict:
+>     return {}
+>
+>
+> def put(d: dict, k, v) -> None:
+>     d[k] = v
+>
+>
+> d: dict = mk_dict()
+> put(d, k1, 7)
+> print(d[k2])      # k1/k2 等值不同对象；CPython 7，修复前 KeyError
+> ```
+> IR 证据：`pa_dict_new(3, 2, 2, -1, -1)`（key_kind=3），修复前 CPython `7` / PyAdamas `KeyError`。
+>
+> ### 修法（`runtime/rt_dict.c` +62/−9、`src/lower_builtin_reflect.cpp` +4）
+>
+> - 新增 `dict_key_is_instance` / `dict_instance_eq` / `dict_instance_hash`（`rt_dict.c`）：
+>   `dict_instance_hash` 有 `__hash__` 槽 → 调它；只有 `__eq__` 没有 `__hash__` →
+>   `TypeError: unhashable type: 'object'`（CPython 口径）；两者都没有退回机器字；
+> - `dict_hash_value(kind==3)`：堆 str 内容哈希（0.422 原逻辑**保留**）→ 实例 `__hash__` → 其它机器字；
+> - `dict_key_eq(kind==3)`：堆 str 内容比较（保留）→ 两个实例按 `__eq__` 槽（先 stored 后 probe）；
+> - 新增哨兵 `kind == -1`：`hash()` 内置的 unknown 值按运行期种类分派（str 内容 / 实例 __hash__ /
+>   big / 机器字），lowering 的 `hash()` unknown 分支不再编译期报错。
+>
+> ### 结果
+>
+> - 等值不同实例的 dict 命中/覆盖、set 去重、`hash()` 一致性、unhashable TypeError 全部与 CPython 一致
+>   （`tests/run/500_unknown_instance_hash.py`，三档一致）；typed 域回归不变。
+> - 闸门：**397 ran ok / difftest 375-0 / ASan 397 ran ok 0 报告 / check_size 通过**；
+>   12 基准 36/36 输出一致。**wordfreq 257,707,474 → 251,337,491（−2.47%，5 次重采样稳定）是同一 TU
+>   内新增函数改变热路径内联/代码布局的副作用，不作为优化承诺**；其余 11 个基准 ±0.03%；
+>   SIMD matmul 10,126,807 / sn 94,637,469。
+>
+> 文档：`docs/compatibility.md`（typed vs unknown 的 unhashable 有意差异）、
+> `docs/unknown-semantics-audit.md` §4（该缺口关闭）。
+
+## [0.434] - 2026-11-23
+
+> feat(rt)：**dunder 分派补完**——元数据第 7 字改成槽表指针、`__lt__` 打通、typed `list[P]` 的
+> `in`/`index` 修好、`sorted(类实例)` 从 0.432 的 TypeError 改回按 `__lt__` 排序。
+>
+> ### 布局变更（`src/ir_types.h` / `src/lower_class.cpp` / `src/codegen.cpp`）
+>
+> - `IRClass` 新增 `eq_slot/lt_slot/hash_slot`（MRO 上找到实现才算，-1 = 没有；导入基类的 ext 槽也算）；
+> - codegen 发射常量表 `.Lvtdun<N>: [__eq__, __lt__, __hash__, -1]`，vtable 元数据第 7 字由「单个 eq_slot」
+>   改为**指向该表的指针**；`.Lvtmetaext` 第 7 字写 0；
+> - 运行时新增 `pa_instance_dunder_fn(obj, which)`（`runtime/rt_class.c`+`rt_internal.h`）：
+>   `vt = inst_vtable(obj)` → `tab = (vt-7)[6]` → `slot = tab[which]` → 返回 `vt[slot]`；
+> - **负偏移检查**：`vt - 6` 全部改 `vt - 7`（`rt_class.c` 5 处 + `rt_lang.c` 1 处）；
+>   负下标只有 `attr_slot()` 的 `vt[-2]`（dict_off，布局不变）与元数据 `(vt-7)[i]`。
+>
+> ### 分派点
+>
+> | 位置 | 改动 |
+> |---|---|
+> | unknown `==`/`!=`（`rt_any.c` `any_unknown_eq`） | 两个 `RC_INSTANCE` → 调 `__eq__` 槽，无实现回退身份 |
+> | unknown `<`（`rt_any.c` 的 `pa_any_cmp` **与** `pa_any_cmp_t` 两个入口） | 取两侧 `__lt__` 槽（左侧优先，左侧无则右侧反向）；lt+eq 组合出 `<`/`<=`/`>`/`>=`；都没槽维持 TypeError |
+> | typed/unknown `list[P]` 的 `in`/`index`/`remove`（`rt_list.c` `unknown_kind_value_eq`） | 两个实例 → 调 `__eq__` |
+> | `sorted(类实例)`（`rt_list.c` `pa_list_sort` kind=3 的 `PA_UK_OTHER`） | 全是带 `__lt__` 槽的实例 → 新 `PYADAMAS_TIMSORT(objlt, …)` 稳定排序；否则维持 0.432 的 TypeError |
+> | typed 域 | 不变（仍走编译期槽号 VCall） |
+>
+> ### 测试与结果
+>
+> - `tests/run/499_dunder_dispatch.py`：typed/unknown `==`/`!=`/`<`、`sorted`、`in`/`index`/`remove`、
+>   无 `__lt__` 的 TypeError、`__eq__` 里 raise 被外层捕获（异常安全）；
+> - `tests/modules/dunder_cross/`：导入基类 `__eq__`/`__lt__` + 子类重写 `__eq__` 的跨模块路径（上轮标注未实测）；
+> - 闸门：**396 ran ok / difftest 374-0 / ASan 396 ran ok 0 报告 / check_size 通过**；
+>   12 基准 36/36 输出一致、指令数 ±0.03%；SIMD matmul 10,126,807 / sn 94,637,467。
+
+## [0.433] - 2026-11-23
+
+> feat(rt)：**unknown 域实例 `==` 调用 `__eq__`**——vtable 元数据 6 → 7 字，方案 b（固定元数据槽）
+> 而非全局「名字 → 函数指针」注册表。
+>
+> ### 背景与方案
+>
+> typed 域 `__eq__` 走编译期槽号的 VCall；unknown 域（实例从混合容器取出）走 `pa_any_cmp` →
+> `any_unknown_eq`，实例只按指针身份比较。运行时没有「类名 → vtable 槽」映射（`pa_attr_get` 只查动态属性；
+> dict 的类 key 是编译器传 `eq_slot`）。对比两方案：
+>
+> - **(a) 类创建时注册「dunder 名字 → 函数指针」到全局表**：通用但要字符串哈希/查表、类创建点插注册、
+>   跨模块/导入类都要处理；
+> - **(b) vtable 元数据固定槽位**（选此）：编译器知道 MRO 上 `__eq__` 的槽号，运行时 O(1) 读取；
+>   与 typed 路径共用同一 vtable，导入基类的 ext 槽在 vtable 里已是真实地址。
+>
+> ### 改动（7 文件，+50/−13）
+>
+> `IRClass` 加 `eq_slot` → `lower_class.cpp` 类布局末尾填 → `codegen.cpp` 元数据第 7 字发射 `eq_slot`
+> （`.Lvtmetaext` 补一字）→ `runtime/rt_class.c` 的 `vt - 6` 改 `vt - 7`（5 处）+ **`attr_slot()` 的
+> `vt[-1]` 改 `vt[-2]`**（dict_off 偏移）→ `rt_lang.c` 同类修正 → `rt_any.c` 的 `any_unknown_eq`
+> 两个 `RC_INSTANCE` 时按「实例 → vtable → 槽」调用 `__eq__`（`__ne__` 按 `!eq`，与 typed 域同口径）。
+>
+> ### 结果
+>
+> - `def eq(a, b): return a == b` 的 unknown 域实例比较与 CPython 一致；无 `__eq__` 的类仍按身份；
+>   `[P(1)] == [P(1)]` 递归到元素也走新分派；
+> - `tests/run/498_unknown_dunder_eq.py`（三档一致）；**394 ran ok / difftest 373-0 / ASan 394 ran ok
+>   0 报告 / check_size 通过**；12 基准 36/36、指令数 ±0.02%；SIMD matmul 10,126,809 / sn 94,637,463；
+> - 坑：`vt[-1]` 这类负下标假设 grep 不到 `vt - 6`，布局变更导致 `156_dynamic_attr`/`argparse` 三例
+>   在 run_tests 里失败，改 `vt[-2]` 后恢复（教训已写进审计清单）。
+>
+> 文档：`docs/unknown-semantics-audit.md` §4 缺口行更新。
+
 ## [0.432] - 2026-11-23
 
 > fix(rt)：`sorted(类实例列表)` 从**静默返回未排序**改成**显式抛 `TypeError`**；并把

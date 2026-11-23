@@ -1,20 +1,20 @@
-# 夜间迭代与语义审计总结（2026-11-22 22:00 → 2026-11-23 09:40）
+# 夜间迭代与语义审计总结（2026-11-22 22:00 → 2026-11-23 10:50，0.408–0.435）
 
 ## 目标（用户授权）
 
 1. 完成模块化拆分；2. 继续做通用优化；3. 先写路线图再按图执行；4. 每次一个代理槽位；
-5. 08:00 前结束夜间段，白天继续语义审计与收尾（0.416–0.432）。
+5. 08:00 前结束夜间段，白天继续语义审计与收尾（0.416–0.435）。
 
 ## 结果总览
 
 | 项 | 结果 |
 |---|---|
-| 版本条目 | 夜间 0.408–0.415 + 白天 0.416–0.432（共 25 条，CHANGELOG） |
-| 测试规模 | 369 → **393** 用例；difftest 348 → **372** |
-| 最终闸门 | **393 ran ok / difftest 372-0 / ASan 393-0 报告 / check_size 通过** |
+| 版本条目 | 夜间 0.408–0.415 + 白天 0.416–0.435（共 28 条，CHANGELOG） |
+| 测试规模 | 369 → **397** 用例；difftest 348 → **375** |
+| 最终闸门 | **397 ran ok / difftest 375-0 / ASan 397-0 报告 / check_size 通过** |
 | 模块化 | ✅ 完成（VectPlanner 拆分，codegen_vect.cpp 1178 → 59 行） |
 | 通用优化 | ✅ 向量化从 3 基准/8 循环 → **4 基准/9 循环**；nbody −45.31%、spectral_norm −61.75% |
-| 修的 bug | **13 个**（多数是静默错值/错误输出；含 1 个异常控制流错误、1 个 pass 从未生效；另 0.421 是我引入的崩溃，已回退） |
+| 修的 bug | **16 个**（多数是静默错值/错误输出；含 1 个异常控制流错误、1 个 pass 从未生效、3 个 unknown 域 dunder 身份语义；另 0.421 是我引入的崩溃，已回退） |
 | 语义审计 | unknown 语义 / 算术与转换 / 切片 / 字符串 / 异常 / 迭代协议 / OOP 七轮，迭代协议与 OOP 未发现 bug |
 
 ## 一、模块化（阶段 A）
@@ -100,6 +100,10 @@ sieve 的计数循环在 0.423 向量化（`while i < N: if flags[i] == 1: count
 `PYADAMAS_SIMD=1` 下 matmul：14,742,616 → **10,126,743（−31.3%）**——0.416 把整数循环分流到通用 AVX2 4-lane
 （特化模板是 2-lane）；spectral_norm 的通用/特化差距 2.22× → 1.15×（0.417），但仍依赖特化（见 §五）。
 
+0.435 的 `rt_dict.c` 改动把 wordfreq 指令数从 257,707,474 降到 **251,337,491（−2.47%，5 次重采样稳定）**：
+这是同一 TU 内新增函数改变了 `pa_dict_get/set` 热路径的内联/代码布局的副作用，**不作为优化承诺**
+（wordfreq 的 dict 是 typed `dict[str,int]`，kind=3 分支不会执行）；其余 11 个基准在 ±0.03% 内。
+
 12 个基准 × -O0/-O1/-O2 输出 **36/36** 与 CPython 逐字节一致；
 夜间 0.416 默认配置曾验证「12 个基准二进制与夜间基线逐字节相同」，之后 0.417/0.419/0.420/0.423
 按预期只改变 sieve / spectral_norm / matmul，无任何基准指令数回退 >1%。
@@ -110,6 +114,9 @@ sieve 的计数循环在 0.423 向量化（`while i < N: if flags[i] == 1: count
 
 | 版本 | 类别 | 问题 | 修复 |
 |---|---|---|---|
+| **0.435** | **unknown 域哈希** | 无类型 dict/set 的实例键按机器字哈希 + 身份比较：等值不同对象查不到、set 不去重；`hash(unknown)` 编译期报错 | `rt_dict.c` 的 kind=3 增 `__hash__`/`__eq__` 槽分派；只有 `__eq__` 无 `__hash__` → unhashable TypeError；`hash()` 用 `kind=-1` 运行期探针 |
+| **0.434** | **unknown 域比较** | 实例 `==`/`<` 在 unknown 域按身份；`sorted(实例)` 只是抛 TypeError；typed `list[P]` 的 `in`/`index` 按身份 | 元数据第 7 字改为槽表指针 `[eq,lt,hash,-1]` + `pa_instance_dunder_fn`；`__lt__` 打通、`sort_objlt` 稳定排序；typed list 元素比较走槽分派 |
+| **0.433** | **unknown 域相等** | 实例从混合容器取出后 `==` 按同一性（CPython 调 `__eq__`） | vtable 元数据 6→7 字加 eq_slot，`any_unknown_eq` 按「实例→vtable→槽」调用 `__eq__` |
 | **0.431** | **EH 控制流** | finally 里 raise 在早退路径（return/break/continue/异常）上逃出调用方 except，未捕获 exit(1) | 根因「LSDA 覆盖是代码位置不是逻辑状态」；方案 A：`fin.early` 新块 + 函数末尾块重排（逐条重映射跳转目标） |
 | **0.430** | **DCE** | -O2 把会抛异常的 `int(float)` 语句整条删掉，异常静默消失（0.427 的回归） | `inst_is_pure(Convert)` 只对 Bool/Float 目标算纯 |
 | 0.422 | 无类型 dict | 动态 str 键按指针比较（KeyError / 静默查不到） | 键比较走内容 |
@@ -139,7 +146,7 @@ sieve 的计数循环在 0.423 向量化（`while i < N: if flags[i] == 1: count
 | 0.429 | 字符串（replace count=0，str/bytes 两份实现） | 1 个 bug |
 | 0.430–0.431 | 优化交互（DCE）与异常（finally 早退 raise） | 2 个 bug |
 | 迭代协议（for/enumerate/zip/reversed/range/sorted/genexpr/break-else/闭包捕获） | 诊断 | **未发现 bug**（未实现项：enumerate(start=)、zip 3+、lambda 默认值非字面量） |
-| OOP（类/继承/super/isinstance/魔术方法/属性边界/生命周期） | 诊断 | **未发现 bug**；两个待决项已处理（0.432 排序显式报错；`del obj.attr` 语义写进 compatibility.md） |
+| OOP（类/继承/super/isinstance/魔术方法/属性边界/生命周期） | 诊断 | **未发现 bug**；两个待决项后续处理：`del obj.attr` 语义写进 compatibility.md（0.432），类实例排序先显式报错（0.432）后随槽表打通改回按 `__lt__` 排序（0.434）；unknown 域 dunder（`==`/`<`/`hash`）在 0.433–0.435 补齐（后续轮次，非 OOP 审计发现的 bug） |
 
 方法论沉淀在 [semantics-audit-playbook.md](semantics-audit-playbook.md)（10 节）：穷举对拍 > 手写用例、先查文档、
 静态设计差异不是 bug、测试可能钉住 UB（0.427 修 `int(NaN)` 时 288 用例的 UB 期望要改）、
@@ -150,12 +157,12 @@ sieve 的计数循环在 0.423 向量化（`while i < N: if flags[i] == 1: count
 
 | 项 | 夜间基线 | 现在 |
 |---|---|---|
-| `tests/run_tests.sh` 用例 | 369 | **393 ran ok**（夜间段 369 → 378，白天段 378 → 393） |
-| `tools/difftest.sh` 用例 | 348 | **372-0 不一致**（夜间段 348 → 357，白天段 357 → 372） |
-| ASan 全量 | 369 ran ok | **393 ran ok，0 sanitizer 报告** |
+| `tests/run_tests.sh` 用例 | 369 | **397 ran ok**（夜间段 369 → 378，白天段 378 → 397） |
+| `tools/difftest.sh` 用例 | 348 | **375-0 不一致**（夜间段 348 → 357，白天段 357 → 375） |
+| ASan 全量 | 369 ran ok | **397 ran ok，0 sanitizer 报告** |
 | check_size | 通过 | 通过 |
 
-新增用例集中在 474–497 段（0.416–0.432 期间加 482–497 等，含 477/482 的 bug 回归与 487/489/490/492/493/494/495/496/497 的语义用例）。
+新增用例集中在 474–500 段（0.416–0.435 期间加 482–500 等，含 477/482 的 bug 回归、487/489/490/492/493/494/495/496/497/498/499/500 的语义用例，以及 `tests/modules/dunder_cross/` 跨模块 dunder 用例）。
 
 ## 五、没做到 / 下一轮
 
@@ -163,7 +170,7 @@ sieve 的计数循环在 0.423 向量化（`while i < N: if flags[i] == 1: count
 |---|---|
 | 8 个基准的向量化 | 未做：分别缺 masked 向量化（mandelbrot 数据依赖退出）、嵌套循环形状（nbody 位置更新/外层）、调用屏障（wordfreq 体内 dict 调用）；逐条见 [vectorization-coverage.md](vectorization-coverage.md) |
 | nbody lane 映射 | 未做：通用路径与特化仍有 **2×** 差距（nbody 是 2-lane 特化 vs 4-lane 通用之外的结构差异） |
-| 类实例 dunder 在 unknown 域 | 未做：`pa_any_cmp` other 分支按同一性、不调 `__eq__`；要修需「类注册名 → vtable 槽」机制（新功能） |
+| 类实例 dunder 在 unknown 域 | ✅ **已关闭（0.433–0.435）**：`__eq__`/`__lt__`/`__hash__` 按 vtable dunder 槽表分派；剩余文案项：unknown 域 unhashable 文案无具体类名，`__le__`/`__ge__` 仍按 typed 静态判据（见 [unknown-semantics-audit.md](unknown-semantics-audit.md) §4） |
 | P4 删特化（`codegen_simd*`） | 未做：spectral_norm 仍约 **1.13×**（0.417 记录 1.15×）依赖特化 |
 | AVX2 的散射/广播装载 | 未做：含这些访问的循环强制走 SSE2 |
 | `1.0/0.0` 返回 `inf`（CPython 抛 ZeroDivisionError） | 既有语义差异，已记录进 [compatibility.md](compatibility.md)，未修 |
