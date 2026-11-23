@@ -14,7 +14,7 @@
 | 新模块 | 改 `driver_modules.cpp` 的 `kModuleTable` | 新建 `stdlib/sigs/<模块>.pysig`（模块表自动登记，见 §6.3） |
 | 加一个新**运行期实现** | 必须 C（`runtime/rt_*.c`）+ RtFn 编号 + codegen 参数分组 | **仍然要**，这是运行期边界，不是签名问题（§6.4） |
 
-已迁移：`time`（试点）、`os.path`（第二个证据）、`math`（57 函数）、`sys`（maxsize + exit）、`os` 模块级（16 函数 + 6 常量）。不可迁移：`operator`（无 RtFn 入口）。未迁移：`random/subprocess/datetime/collections/json/re/pathlib/asyncio/python/c/dylib`。
+已迁移：`time`（试点）、`os.path`、`math`（57 函数）、`sys`（maxsize + exit）、`os` 模块级（16 函数 + 6 常量）、`random` 模块级（9 函数）。不可迁移：`operator`（无 RtFn 入口）。未迁移：`subprocess/datetime/collections/json/re/pathlib/asyncio/python/c/dylib`。
 
 ---
 
@@ -367,7 +367,8 @@ if (const auto* c = nativesig::find_const(module, member)) {
 | `math` | ✅ 已迁移（`stdlib/sigs/math.pysig`，Python 语法） | 57 个函数 + 5 个常量；`inf` 用 `1e400` 字面量，`nan` 在 `builtin_value` 开头特判（无 NaN 字面量）；asm 等价 13/13 |\n| `sys` | ✅ 已迁移（`stdlib/sigs/sys.pysig`） | `maxsize` + `exit` 走声明；`argv`/`executable`/`stdin`/`stdout`/`stderr`/`exc_info` 是运行期调用或含 ClassObj 返回类型，保留 C++（在 `builtin_sigs.cpp` 的 sys merge 分支补类型）；asm 等价 13/13 |
 | `operator` | ⛔ **不可迁移** | 31 个函数全部走 `operator_call()` 类型推导 + `lower_operator()` 专门降级，无 `pa_operator_*` RtFn 入口；pysig 的符号反查会硬失败。判据：**只有存在 `pa_<模块>_<名字>` RtFn 的函数才能声明**。 |
 | `os` | ✅ 已迁移模块级函数（`stdlib/sigs/os.pysig`） | 16 函数 + 6 标量常量；`unlink` 用 `@native("pa_os_remove")`；保留 C++：`environ`（运行期 dict）、`walk`（返回 list[tuple]）、`os.path.*`（独立模块已迁）。asm 等价 13/13 |
-| `random` `collections` `json` `re` | ⬜ 未迁移 | 硬编码仍在；加载器已就绪，可按 §6.2 逐个搬 |
+| `random` | ✅ 已迁移模块级函数（`stdlib/sigs/random.pysig`） | 9 函数（random/randint/uniform/shuffle/randrange/getrandbits/gauss/expovariate/triangular）；6 个 `@native` 覆盖 g* 符号。保留 C++：seed/Random（INT64_MIN 哨兵）、choice/sample/choices（ret_known=false，pysig 固定 true）、Random 类方法。asm 等价 13/13 |
+| `collections` `json` `re` | ⬜ 未迁移 | 硬编码仍在；加载器已就绪，可按 §6.2 逐个搬 |
 | `pathlib` `operator` `asyncio` | ⬜ 未迁移（优先级低） | 构造器/类语义多，声明格式表达不了的部分留 C++ |
 | `datetime` `subprocess` | ⬜ 未迁移（优先级低） | 参数装配/返回类型随实参变的分支多 |
 | `python`（CPython 桥）、`c` / `dylib` | ⛔ 不适合声明式 | 名字集合是开集（`from c import <任意符号>`），签名在调用点推断 |

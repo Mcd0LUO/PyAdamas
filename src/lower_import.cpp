@@ -166,18 +166,11 @@ std::optional<RtFn> Lowerer::native_fn(const std::string& module, const std::str
     if (module == "sys" && member == "exc_info") {
         return RtFn::ExcInfo;
     } else if (module == "random") {
-        if (member == "random") return RtFn::RandGNext;
+        // 其余模块级函数已迁到 stdlib/sigs/random.pysig；seed/Random 与
+        // ret_known=false 的 choice/sample/choices 保留。
         if (member == "seed") return RtFn::RandGSeed;
-        if (member == "randint") return RtFn::RandGRandint;
-        if (member == "uniform") return RtFn::RandGUniform;
-        if (member == "choice") return RtFn::RandGChoice;
-        if (member == "shuffle") return RtFn::RandGShuffle;
         if (member == "Random") return RtFn::RandNew;
-        if (member == "randrange") return RtFn::RandRange;
-        if (member == "getrandbits") return RtFn::RandGetrandbits;
-        if (member == "gauss") return RtFn::RandGauss;
-        if (member == "expovariate") return RtFn::RandExpovariate;
-        if (member == "triangular") return RtFn::RandTriangular;
+        if (member == "choice") return RtFn::RandGChoice;
         if (member == "sample") return RtFn::RandSample;
         if (member == "choices") return RtFn::RandChoices;
     } else if (module == "os") {

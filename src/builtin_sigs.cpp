@@ -542,46 +542,12 @@ pyadamas::ModuleInfoPtr builtin_module(const std::string& name) {
               2, pyadamas::mk_list(pyadamas::t_str()));
         re_fn("escape", {{"pattern", pyadamas::t_str()}}, 0, pyadamas::t_str());
     } else if (name == "random") {
-        // 不传种子时绑定哨兵 INT64_MIN，运行时用时间 + pid 播种。
+        // 模块级函数已迁到 stdlib/sigs/random.pysig（按名字 merge）。
+        // seed/Random 的 INT64_MIN 哨兵默认值编译期算不出字面量，
+        // 且 Random 是构造器（无 class 声明语法），保留在硬编码。
         const int64_t kNoSeed = -9223372036854775807LL - 1;
-        func("random", {}, pyadamas::t_float());
-        func("randint", {pyadamas::t_int(), pyadamas::t_int()}, pyadamas::t_int());
-        func("uniform", {pyadamas::t_float(), pyadamas::t_float()}, pyadamas::t_float());
-        func("getrandbits", {pyadamas::t_int()}, pyadamas::t_int());
-        func("gauss", {pyadamas::t_float(), pyadamas::t_float()}, pyadamas::t_float());
-        func("expovariate", {pyadamas::t_float()}, pyadamas::t_float());
-        // triangular：CPython 里三个参数都有默认值，这里只把后两个标成可选，
-        // 实际取值由降级阶段按实参个数决定（mode 缺省取中点）。
-        {
-            auto f = std::make_shared<pyadamas::FuncInfo>();
-            f->name = "random.triangular";
-            const char* names[] = {"low", "high", "mode"};
-            for (int i = 0; i < 3; ++i) {
-                pyadamas::Param p;
-                p.name = names[i];
-                p.ty = pyadamas::t_float();
-                if (i > 0) {
-                    p.has_default = true;
-                    p.default_lit = lv_float(0.0);
-                }
-                f->pos.push_back(std::move(p));
-            }
-            f->ret = pyadamas::t_float();
-            f->ret_known = true;
-            func_with("triangular", f);
-        }
-        // randrange：1~3 个位置参数，个数和方向在降级阶段检查
-        {
-            auto f = std::make_shared<pyadamas::FuncInfo>();
-            f->name = "random.randrange";
-            f->varargs = true;
-            f->vararg_name = "args";
-            f->vararg_ty = pyadamas::t_int();
-            f->ret = pyadamas::t_int();
-            f->ret_known = true;
-            func_with("randrange", f);
-        }
-        // sample / choices：返回 list[元素类型]，类型在 typecheck 里特化
+        // sample/choices：ret_known=false（返回类型按实参特化），pysig 固定
+        // ret_known=true 无法表达，保留在硬编码。
         for (auto& n : {"sample", "choices"}) {
             auto f = std::make_shared<pyadamas::FuncInfo>();
             f->name = std::string("random.") + n;
@@ -597,8 +563,7 @@ pyadamas::ModuleInfoPtr builtin_module(const std::string& name) {
             f->ret_known = false;
             func_with(n, f);
         }
-        // choice/shuffle 的返回类型按实参在 typecheck 里特判（random_call）；
-        // 这两个 FuncInfo 用带模块前缀的名字，from-import 调用也能识别。
+        // choice：同上，ret_known=false。
         {
             auto f = std::make_shared<pyadamas::FuncInfo>();
             f->name = "random.choice";
@@ -609,17 +574,6 @@ pyadamas::ModuleInfoPtr builtin_module(const std::string& name) {
             f->ret = pyadamas::t_unknown();
             f->ret_known = false;
             func_with("choice", f);
-        }
-        {
-            auto f = std::make_shared<pyadamas::FuncInfo>();
-            f->name = "random.shuffle";
-            pyadamas::Param p;
-            p.name = "x";
-            p.ty = pyadamas::mk_list(pyadamas::t_unknown());
-            f->pos.push_back(std::move(p));
-            f->ret = pyadamas::t_none();
-            f->ret_known = true;
-            func_with("shuffle", f);
         }
         {
             auto f = std::make_shared<pyadamas::FuncInfo>();

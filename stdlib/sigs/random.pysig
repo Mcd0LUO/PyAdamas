@@ -1,0 +1,25 @@
+# stdlib/sigs/random.pysig —— random 模块的声明式签名（P0 第 5 批）
+#
+# 只声明模块级函数。Random 类及其 r.* 方法（pa_random_* 一族）无 class
+# 语法，保留在 C++；choice/sample/choices 的返回类型特化在 random_call，
+# 参数装配在 lower_import_native.cpp（§6.4），签名声明不影响那些分支。
+"""random 模块的 native 签名（14 个模块级函数）。"""
+
+# 全局 PRNG 的函数走 pa_random_g* 入口（装饰器覆盖约定符号）。
+# seed/Random 的 INT64_MIN 哨兵默认值编译期算不出字面量；choice/sample/choices
+# 的 ret_known=false（返回类型按实参特化）pysig 无法表达（加载器固定 ret_known=true），保留在 C++。
+@native("pa_random_gnext")
+def random() -> float: pass
+@native("pa_random_grandint")
+def randint(a: int, b: int) -> int: pass
+@native("pa_random_guniform")
+def uniform(a: float, b: float) -> float: pass
+@native("pa_random_gshuffle")
+def shuffle(x: list[object]) -> None: pass
+
+# 其余走约定符号 pa_random_<name>。
+def randrange(*args: int) -> int: pass
+def getrandbits(k: int) -> int: pass
+def gauss(mu: float, sigma: float) -> float: pass
+def expovariate(lambd: float) -> float: pass
+def triangular(low: float, high: float = 0.0, mode: float = 0.0) -> float: pass
