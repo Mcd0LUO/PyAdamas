@@ -95,7 +95,8 @@ RtClass classify_rt(RtFn f, int& recv) {
         case RtFn::ListAppend: case RtFn::ListSet: case RtFn::ListSetLen:
         case RtFn::ListPrep: case RtFn::ListInsert: case RtFn::ListReverse:
         case RtFn::ListSort: case RtFn::ListExtend: case RtFn::ListInplaceRepeat:
-        case RtFn::ListSliceAssign: case RtFn::ListDelIndex: case RtFn::ListCopyRange:
+        case RtFn::ListSliceAssign: case RtFn::ListSliceDel: case RtFn::ListDelIndex:
+        case RtFn::ListCopyRange:
             return RtClass::ListMut;
         case RtFn::RandShuffle: case RtFn::RandGShuffle:
             recv = 1; return RtClass::ListMut;

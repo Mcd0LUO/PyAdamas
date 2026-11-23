@@ -1463,6 +1463,7 @@ int64_t slice_total(int64_t start, int64_t stop, int64_t step);
 PyAdamasList* pa_list_slice(PyAdamasList* src, int64_t start, int64_t stop, int64_t step);
 PyAdamasStr* pa_str_slice(PyAdamasStr* src, int64_t start, int64_t stop, int64_t step);
 void pa_list_slice_assign(PyAdamasList* dst, int64_t start, int64_t stop, int64_t step, PyAdamasList* src);
+void pa_list_slice_del(PyAdamasList* dst, int64_t start, int64_t stop, int64_t step);
 PyAdamasList* pa_str_to_list(PyAdamasStr* s);
 PyAdamasStr* pa_str_capwords(PyAdamasStr* s);
 /* 静态驻留字符串：256 个单字节串以及 "True"/"False"/"None"，均为永生对象。 */

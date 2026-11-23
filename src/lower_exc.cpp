@@ -723,11 +723,9 @@ void Lowerer::delete_target(Expr& target) {
                 VReg start = bound(sl.lower);
                 VReg stop = bound(sl.upper);
                 VReg step = bound(sl.step);
-                Inst mk;
-                mk.op = IrOp::MakeList;
-                mk.imm = 2;
-                VReg empty = def_heap(mk_list(t_unknown()), std::move(mk));
-                call_void(RtFn::ListSliceAssign, {obj, start, stop, step, empty});
+                // 独立运行时入口：扩展步长（del a[::2]）不能用「赋空序列」实现，
+                // 那会撞上「扩展切片长度必须相等」检查而抛 ValueError。
+                call_void(RtFn::ListSliceDel, {obj, start, stop, step});
                 return;
             }
             VReg idx = expr(*s.slice);

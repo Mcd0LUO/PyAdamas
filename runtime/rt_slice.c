@@ -166,6 +166,10 @@ void pa_list_slice_assign(PyAdamasList* dst, int64_t start, int64_t stop, int64_
                             PyAdamasList* src) {
     int64_t lo, hi, st;
     slice_bounds(dst->len, start, stop, step, &lo, &hi, &st);
+    /* 步长 1 且 start > stop 时切片为空，插入点是 start（CPython 口径）。
+       以前直接用 hi（可能被 clamp 到 0）做插入点：l[-3:-8] = [90] 会把整个
+       前缀右移、再写到 lo，结果列表多出一个元素（静默错值）。 */
+    if (st > 0 && lo > hi) hi = lo;
     int64_t n = slice_total(lo, hi, st);
     int64_t* snap = NULL;
     const int64_t* sv = src->data;
@@ -194,7 +198,13 @@ void pa_list_slice_assign(PyAdamasList* dst, int64_t start, int64_t stop, int64_
     }
     int kind = (int)dst->elem_kind;
     if (st != 1) {
-        if (slen != n) pa_raise_c("ValueError", "cannot assign sequence of different size to extended slice");
+        if (slen != n) {
+            char msg[128];
+            snprintf(msg, sizeof msg,
+                     "attempt to assign sequence of size %lld to extended slice of size %lld",
+                     (long long)slen, (long long)n);
+            pa_raise_c("ValueError", msg);
+        }
         for (int64_t i = 0; i < n; ++i) {
             int64_t idx = lo + i * st;
             int64_t v = sv[i];
@@ -235,6 +245,29 @@ void pa_list_slice_assign(PyAdamasList* dst, int64_t start, int64_t stop, int64_
         if (kind != 0 && (delta <= 0 || lo + i < hi)) pa_own_dec(kind, old);
     }
     free(snap);
+}
+
+/* del 切片（del a[start:stop:step]）。以前 del 走"赋空序列"的路径：
+   扩展步长会撞上长度不匹配检查，直接抛 ValueError（del a[::2] 无法工作）。
+   这里按 CPython 语义先选出被删下标，再原地压缩保留元素。 */
+void pa_list_slice_del(PyAdamasList* dst, int64_t start, int64_t stop, int64_t step) {
+    int64_t lo, hi, st;
+    slice_bounds(dst->len, start, stop, step, &lo, &hi, &st);
+    if (st > 0 ? lo >= hi : lo <= hi) return;  /* 空区间 */
+    int kind = (int)dst->elem_kind;
+    int64_t w = 0;
+    for (int64_t i = 0; i < dst->len; ++i) {
+        int hit = st > 0 ? (i >= lo && i < hi && (i - lo) % st == 0)
+                         : (i <= lo && i > hi && (lo - i) % (-st) == 0);
+        if (hit) {
+            if (kind != 0) pa_own_dec(kind, dst->data[i]);
+            continue;
+        }
+        if (w != i) dst->data[w] = dst->data[i];
+        ++w;
+    }
+    dst->len = w;
+    if (kind == 2) pa_list_drop_bits(dst);  /* 移动元素后位图不可信 */
 }
 
 /* str -> list[str]：按码点拆。内部走单遍字节游标（O(n)），不要逐个

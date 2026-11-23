@@ -128,6 +128,7 @@ enum class RtFn : uint16_t {
     DictRemove,   // (dict*, i64 key, i64 missing_ok) -> void
     DictClear,    // (dict*) -> void
     ListSliceAssign, // (list*, i64 start, i64 stop, i64 step, list*) -> void
+    ListSliceDel, // (list*, i64 start, i64 stop, i64 step) -> void  del list[a:b:c]
     ListDelIndex, // (list*, i64 index) -> void  del list[i]
     StrToList,    // (str*) -> list*
     StrLenBytes,  // (str*) -> i64 字节长度（O(1)，读 +8）

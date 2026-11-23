@@ -167,6 +167,7 @@ inline const char* rt_name(RtFn f) {
         case RtFn::DictRemove: return "pa_dict_remove";
         case RtFn::DictClear: return "pa_dict_clear";
         case RtFn::ListSliceAssign: return "pa_list_slice_assign";
+        case RtFn::ListSliceDel: return "pa_list_slice_del";
         case RtFn::ListDelIndex: return "pa_list_del_index";
         case RtFn::StrToList: return "pa_str_to_list";
         case RtFn::StrLenBytes: return "pa_len_bytes";

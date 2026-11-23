@@ -891,6 +891,7 @@ void AsmGen::gen_rt_args(const Inst& in, RtFn fn) {
         case RtFn::RegexSubFn:
         case RtFn::RegexSplitStr:
         case RtFn::ListSlice:
+        case RtFn::ListSliceDel:
         case RtFn::StrSlice:
         case RtFn::BytesSlice:
         case RtFn::RandRange:
