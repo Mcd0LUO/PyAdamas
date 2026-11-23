@@ -1,8 +1,8 @@
 # tools/lsp/main.py
 # PyAdamas 写的 Language Server —— 入口：stdio 读循环、生命周期、文档同步、诊断调度。
 #
-# 模块划分（0.467 从单文件纯搬移）：
-#   lsp_text.py        文本/位置换算/顶层符号扫描（无 lsp_* 依赖）
+# 模块划分（0.467 起从单文件拆出）：
+#   lsp_text.py        文本/位置换算/定义查找（无 lsp_* 依赖）
 #   lsp_protocol.py    JSON-RPC 帧、响应构造、环境/日志
 #   lsp_state.py       文档表、增量编辑、workspace 根/文件遍历
 #   lsp_diagnostics.py 临时文件 + pyadamas check + publishDiagnostics
@@ -19,10 +19,10 @@
 import sys
 import asyncio
 import time
-import minijson
+import json
 
 from lsp_text import is_digit_str, list_has
-from lsp_protocol import env_str, log, open_stdin, params_of, read_frame, rpc_error, rpc_notification, rpc_result, send_frame, uri_of
+from lsp_protocol import env_str, log, open_stdin, params_of, read_frame, rpc_error, rpc_notification, rpc_result, send_frame, uri_of, j_arr, j_at, j_has, j_int, j_obj, j_size, j_str
 from lsp_state import apply_change, capture_workspace, doc_index, doc_put, doc_remove
 import lsp_state
 from lsp_diagnostics import publish_diagnostics
@@ -39,7 +39,7 @@ def init_result() -> str:
     types_json: list[str] = []
     i: int = 0
     while i < len(TOKEN_TYPES):
-        types_json.append(minijson.quote(TOKEN_TYPES[i]))
+        types_json.append(json.stringify(TOKEN_TYPES[i]))
         i = i + 1
     caps: str = ('{"textDocumentSync":{"openClose":true,"change":1},'
                  '"hoverProvider":true,"documentSymbolProvider":true,'
@@ -54,10 +54,10 @@ def init_result() -> str:
     return '{"capabilities":' + caps + ',"serverInfo":{"name":"pya-lsp","version":"0.2.0"}}'
 
 def handle_did_open(params: unknown) -> None:
-    td: unknown = minijson.get_obj(params, "textDocument")
-    uri: str = minijson.get_str(td, "uri")
-    text: str = minijson.get_str(td, "text")
-    version: int = minijson.get_int(td, "version")
+    td: unknown = j_obj(params, "textDocument")
+    uri: str = j_str(td, "uri")
+    text: str = j_str(td, "text")
+    version: int = j_int(td, "version")
     if uri == "":
         return
     doc_put(uri, text, version)
@@ -65,20 +65,20 @@ def handle_did_open(params: unknown) -> None:
 
 def apply_did_change(params: unknown) -> str:
     # 把一帧 didChange 的全部 contentChanges 合并进文档表，返回 uri。
-    td: unknown = minijson.get_obj(params, "textDocument")
-    uri: str = minijson.get_str(td, "uri")
-    version: int = minijson.get_int(td, "version")
+    td: unknown = j_obj(params, "textDocument")
+    uri: str = j_str(td, "uri")
+    version: int = j_int(td, "version")
     if uri == "":
         return ""
     idx: int = doc_index(uri)
     text: str = ""
     if idx >= 0:
         text = lsp_state.doc_texts[idx]
-    changes: unknown = minijson.get_arr(params, "contentChanges")
-    count: int = minijson.size(changes)
+    changes: unknown = j_arr(params, "contentChanges")
+    count: int = j_size(changes)
     k: int = 0
     while k < count:
-        text = apply_change(text, minijson.at(changes, k))
+        text = apply_change(text, j_at(changes, k))
         k = k + 1
     doc_put(uri, text, version)
     return uri
@@ -95,7 +95,7 @@ def handle_did_close(params: unknown) -> None:
     if uri == "":
         return
     doc_remove(uri)
-    clear: str = '{"uri":' + minijson.quote(uri) + ',"diagnostics":[]}'
+    clear: str = '{"uri":' + json.stringify(uri) + ',"diagnostics":[]}'
     send_frame(rpc_notification("textDocument/publishDiagnostics", clear))
 
 # ---------------- didChange 合并（debounce）+ 待处理消息队列 ----------------
@@ -138,10 +138,10 @@ def next_body(inp: file) -> str:
 
 def parse_body(body: str) -> unknown:
     try:
-        return minijson.parse(body)
+        return json.parse(body)
     except ValueError:
         log("malformed JSON, ignored")
-        return minijson.new_null()
+        return json.null()
 
 def drain_did_changes(inp: file, uri: str) -> None:
     dirty: list[str] = [uri]
@@ -164,7 +164,7 @@ def drain_did_changes(inp: file, uri: str) -> None:
             pending_bodies.append("")
             break
         msg: unknown = parse_body(body)
-        method: str = minijson.get_str(msg, "method")
+        method: str = j_str(msg, "method")
         if method == "textDocument/didChange":
             p2: unknown = params_of(msg)
             apply_did_change(p2)
@@ -196,16 +196,16 @@ def run() -> int:
             return 0
         log("recv body bytes=" + str(len(body)))
         msg: unknown = parse_body(body)
-        if minijson.is_null(msg):
+        if json.is_null(msg):
             continue
-        method: str = minijson.get_str(msg, "method")
+        method: str = j_str(msg, "method")
         if method == "":
             # 客户端对服务端请求的响应：本服务器不发请求，忽略
             continue
-        has_id: bool = minijson.has(msg, "id")
+        has_id: bool = j_has(msg, "id")
         id_text: str = "null"
         if has_id:
-            id_text = minijson.stringify(minijson.get(msg, "id"))
+            id_text = json.stringify(json.get(msg, "id"))
         params: unknown = params_of(msg)
         log("method=" + method + " id=" + id_text)
         if method == "initialize":

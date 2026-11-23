@@ -15,7 +15,6 @@ pya-lsp 完全由 .pya 实现、由 pyadamas build 编译成原生可执行文�
 | lsp_intel.py | definition / hover / semanticTokens / signatureHelp / documentHighlight |
 | lsp_doc.py | Symbol 扫描、补全候选、documentSymbol / foldingRange / formatting / workspace symbol（`Symbol` 的字段读写必须和类定义同模块） |
 | lsp_refs.py | references / rename（词法扫描 + 粗粒度作用域） |
-| minijson.py | 动态 JSON 的**函数式访问薄层**：parse/stringify 走 runtime 的 json.parse / json.stringify，其余保留旧的宽容访问器语义（取不到返回 null、""、0、[]） |
 | build.sh | 构建脚本，输出 pya-lsp |
 | ../../tests/lsp/smoke.py | python3 冒烟测试（被测对象是编译出的 .pya 二进制），当前 **228 条断言** |
 | ../../tests/lsp/smoke.sh | 冒烟测试入口（缺二进制时先构建） |
@@ -56,16 +55,17 @@ refcount increment on a freed object），第一个自检通过的胜出。
 - 帧读取是同步阻塞的；debounce 的「等下一帧」用带超时的 fd poll（asyncio.wait_readable +
   wait_for），不消费数据、不额外线程。
 
-## JSON 层（minijson.py）
+## JSON 层（runtime json）
 
-0.447 起 runtime 有动态 JSON（json.parse / json.stringify / json.get / get_or / has /
-type / as_dict / as_list / as_str / as_int / as_bool / len / keys），minijson.py 原来
-543 行的手写 parser/stringifier 已删除，改成**约 210 行的薄封装**：
+0.468 起不再有 minijson.py：LSP 直接使用 runtime 的动态 JSON
+（json.parse / stringify / get_or / has / type / as_str / as_int / as_float / as_bool /
+len / keys / null / is_null），Content-Length 用 `len_bytes`。
 
-- parse / stringify 直接调 json.*；
-- 访问器保留旧 JVal 版本的**宽容语义**（get 缺失键返回 null、as_str 非串返回 ""、
-  size 非容器返回 0、at 越界返回 null……），LSP 主程序调用点因此一行没改；
-- obj_set / arr_add 用于构造测试数据（原地改 dict/list）。
+- 出包：`json.stringify` 负责字符串转义/紧凑 JSON，非 ASCII 走 `\uXXXX`（回包保持纯 ASCII）。
+- 入包：runtime `json.*` 是严格口径（`as_*` 类型不符抛 TypeError、`get` 缺失抛
+  KeyError），而 LSP 入参经常省略字段或显式给 null。`lsp_protocol.py` 里只保留 9 个很小的
+  宽容取值 `j_has/j_get/j_str/j_int/j_bool/j_obj/j_arr/j_at/j_size`：缺失/类型不符返回
+  null、""、0、False、0 长度，语义与旧 minijson 访问器一致。
 
 ## 已实现的方法
 

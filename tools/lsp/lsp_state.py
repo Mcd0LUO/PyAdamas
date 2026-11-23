@@ -5,9 +5,9 @@
 # pyadamas 的 from-import 是快照绑定，模块级变量重新赋值后快照不会更新。
 import os
 from os.path import isdir
-import minijson
 
 from lsp_text import offset_at
+from lsp_protocol import j_arr, j_at, j_has, j_int, j_obj, j_size, j_str
 
 # ---------------- 文档表（URI -> 文本/版本） ----------------
 
@@ -42,14 +42,14 @@ def doc_remove(uri: str) -> None:
     doc_versions.pop(i)
 
 def apply_change(text: str, change: unknown) -> str:
-    new_text: str = minijson.get_str(change, "text")
-    if not minijson.has(change, "range"):
+    new_text: str = j_str(change, "text")
+    if not j_has(change, "range"):
         return new_text
-    rng: unknown = minijson.get_obj(change, "range")
-    st: unknown = minijson.get_obj(rng, "start")
-    en: unknown = minijson.get_obj(rng, "end")
-    a: int = offset_at(text, minijson.get_int(st, "line"), minijson.get_int(st, "character"))
-    b: int = offset_at(text, minijson.get_int(en, "line"), minijson.get_int(en, "character"))
+    rng: unknown = j_obj(change, "range")
+    st: unknown = j_obj(rng, "start")
+    en: unknown = j_obj(rng, "end")
+    a: int = offset_at(text, j_int(st, "line"), j_int(st, "character"))
+    b: int = offset_at(text, j_int(en, "line"), j_int(en, "character"))
     if b < a:
         b = a
     return text[:a] + new_text + text[b:]
@@ -125,13 +125,13 @@ def path_to_file_uri(p: str) -> str:
 def capture_workspace(params: unknown) -> None:
     global workspace_root
     global workspace_uri
-    ru: str = minijson.get_str(params, "rootUri")
+    ru: str = j_str(params, "rootUri")
     if ru == "":
-        folders: unknown = minijson.get_arr(params, "workspaceFolders")
-        if minijson.size(folders) > 0:
-            ru = minijson.get_str(minijson.at(folders, 0), "uri")
+        folders: unknown = j_arr(params, "workspaceFolders")
+        if j_size(folders) > 0:
+            ru = j_str(j_at(folders, 0), "uri")
     if ru == "":
-        rp: str = minijson.get_str(params, "rootPath")
+        rp: str = j_str(params, "rootPath")
         if rp != "":
             workspace_root = rp
             workspace_uri = path_to_file_uri(rp)

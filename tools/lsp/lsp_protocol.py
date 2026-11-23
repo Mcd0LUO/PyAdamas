@@ -3,7 +3,7 @@
 # 帧：Content-Length 头 + 空行 + 恰好 N 字节；回包同样帧并 flush。
 import sys
 import os
-import minijson
+import json
 
 from lsp_text import is_digit_str
 
@@ -78,9 +78,9 @@ def read_frame(inp: file) -> str:
     return body
 
 def send_frame(body: str) -> None:
-    # 所有响应体都是纯 ASCII（minijson.quote 把非 ASCII 转成 \uXXXX），
-    # 用 byte_len 而不是字符数，保证多字节场景也符合 Content-Length 语义。
-    frame: str = "Content-Length: " + str(minijson.byte_len(body)) + "\r\n\r\n" + body
+    # 所有响应体都是纯 ASCII（json.stringify 把非 ASCII 转成 \uXXXX），
+    # 用 len_bytes 而不是字符数，保证多字节场景也符合 Content-Length 语义。
+    frame: str = "Content-Length: " + str(len_bytes(body)) + "\r\n\r\n" + body
     sys.stdout.write(frame)
     sys.stdout.flush()
 
@@ -88,10 +88,10 @@ def rpc_result(id_text: str, result_text: str) -> str:
     return '{"jsonrpc":"2.0","id":' + id_text + ',"result":' + result_text + '}'
 
 def rpc_error(id_text: str, code: int, message: str) -> str:
-    return '{"jsonrpc":"2.0","id":' + id_text + ',"error":{"code":' + str(code) + ',"message":' + minijson.quote(message) + '}}'
+    return '{"jsonrpc":"2.0","id":' + id_text + ',"error":{"code":' + str(code) + ',"message":' + json.stringify(message) + '}}'
 
 def rpc_notification(method: str, params_text: str) -> str:
-    return '{"jsonrpc":"2.0","method":' + minijson.quote(method) + ',"params":' + params_text + '}'
+    return '{"jsonrpc":"2.0","method":' + json.stringify(method) + ',"params":' + params_text + '}'
 
 def pos_json(line: int, character: int) -> str:
     return '{"line":' + str(line) + ',"character":' + str(character) + '}'
@@ -100,12 +100,73 @@ def range_json(sl: int, sc: int, el: int, ec: int) -> str:
     return '{"start":' + pos_json(sl, sc) + ',"end":' + pos_json(el, ec) + '}'
 
 def location_json(uri: str, line: int, character: int, length: int) -> str:
-    return ('{"uri":' + minijson.quote(uri) + ',"range":' +
+    return ('{"uri":' + json.stringify(uri) + ',"range":' +
             range_json(line, character, line, character + length) + '}')
 
 def params_of(msg: unknown) -> unknown:
-    return minijson.get_obj(msg, "params")
+    return j_obj(msg, "params")
 
 def uri_of(params: unknown) -> str:
-    td: unknown = minijson.get_obj(params, "textDocument")
-    return minijson.get_str(td, "uri")
+    td: unknown = j_obj(params, "textDocument")
+    return j_str(td, "uri")
+
+# ---------------- JSON 宽容取值 ----------------
+#
+# runtime 的 json.* 是严格口径（as_* 类型不符抛 TypeError，get 缺失抛 KeyError），
+# 而 LSP 入参经常省略字段或显式给 null。这里只保留 LSP 真正用到的宽容取值：
+# 缺失/类型不符 -> null、""、0、False；容器/字符串长度非容器 -> 0。
+
+def j_has(v: unknown, key: str) -> bool:
+    if json.type(v) != "dict":
+        return False
+    return json.has(v, key)
+
+def j_get(v: unknown, key: str) -> unknown:
+    if json.type(v) != "dict":
+        return json.null()
+    return json.get_or(v, key, json.null())
+
+def j_str(v: unknown, key: str) -> str:
+    x: unknown = j_get(v, key)
+    if json.type(x) != "str":
+        return ""
+    return json.as_str(x)
+
+def j_int(v: unknown, key: str) -> int:
+    x: unknown = j_get(v, key)
+    t: str = json.type(x)
+    if t == "int":
+        return json.as_int(x)
+    if t == "float":
+        return int(json.as_float(x))
+    if t == "bool":
+        if json.as_bool(x):
+            return 1
+        return 0
+    return 0
+
+def j_bool(v: unknown, key: str) -> bool:
+    x: unknown = j_get(v, key)
+    if json.type(x) != "bool":
+        return False
+    return json.as_bool(x)
+
+def j_obj(v: unknown, key: str) -> unknown:
+    return j_get(v, key)
+
+def j_arr(v: unknown, key: str) -> unknown:
+    return j_get(v, key)
+
+def j_at(v: unknown, i: int) -> unknown:
+    if json.type(v) != "list":
+        return json.null()
+    n: int = json.len(v)
+    if i < 0 or i >= n:
+        return json.null()
+    return json.get(v, i)
+
+def j_size(v: unknown) -> int:
+    t: str = json.type(v)
+    if t == "list" or t == "dict" or t == "str":
+        return json.len(v)
+    return 0

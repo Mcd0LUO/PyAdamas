@@ -4,6 +4,25 @@
 
 早期阶段没有逐条留痕，按阶段归纳；0.4 之后逐条记录。
 
+## [0.468] - 2026-11-24
+
+> refactor(lsp)：**删除 minijson.py 薄封装，LSP 直接用 runtime 动态 JSON**。
+>
+> 出包用 `json.stringify`（字符串转义/紧凑 JSON/非 ASCII → \uXXXX），Content-Length 用
+> `len_bytes`；入包不再经过 204 行的同名转发层。runtime `json.*` 是严格口径（`as_*`
+> 类型不符抛 TypeError、`get` 缺失抛 KeyError），而 LSP 入参常省略字段或给 null，
+> 所以 `lsp_protocol.py` 保留 9 个宽容取值 helper
+> （`j_has/j_get/j_str/j_int/j_bool/j_obj/j_arr/j_at/j_size`），语义与旧 minijson
+> 访问器一致：缺失/类型不符 → null、""、0、False、0 长度。
+>
+> 顺带修正 LANGUAGE_GAPS 第 2 条：跨模块 class 只在「入口模块的局部变量/返回值」上
+> 可用；用作**函数形参类型**时，函数体里读字段仍退化成 unknown 并报
+> `attribute access is only supported as a method call`（build/lead 与 3 个近期构建
+> 实测）。因此 `Symbol` 与所有字段读写留在 lsp_doc.py。
+>
+> 验证：build.sh 成功；LSP 冒烟 228 checks；全闸门 **463 ran ok / difftest 435-0 /
+> bench 36/36 / LSP 228 / perf warn=0 fail=0**。
+
 ## [0.467] - 2026-11-24
 
 > refactor(lsp)：**把 2438 行的 `tools/lsp/main.py` 拆成 7 个模块**（纯搬移，行为不变）。

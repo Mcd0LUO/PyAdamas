@@ -3,7 +3,7 @@
 import os
 import time
 import subprocess
-import minijson
+import json
 
 from lsp_text import is_digit_str
 from lsp_protocol import compiler_path, env_str, log, range_json, rpc_notification, send_frame
@@ -80,7 +80,7 @@ def parse_compiler_diagnostics(stderr_text: str, tmp_path: str) -> list[str]:
             line0 = 0
         if col0 < 0:
             col0 = 0
-        out.append('{"range":' + range_json(line0, col0, line0, col0 + 1) + ',"severity":' + str(severity) + ',"source":"pyadamas","message":' + minijson.quote(msg) + '}')
+        out.append('{"range":' + range_json(line0, col0, line0, col0 + 1) + ',"severity":' + str(severity) + ',"source":"pyadamas","message":' + json.stringify(msg) + '}')
     return out
 
 def compute_diagnostics(text: str) -> list[str]:
@@ -101,6 +101,6 @@ def compute_diagnostics(text: str) -> list[str]:
 
 def publish_diagnostics(uri: str, text: str, version: int) -> None:
     diags: list[str] = compute_diagnostics(text)
-    params: str = '{"uri":' + minijson.quote(uri) + ',"version":' + str(version) + ',"diagnostics":[' + ",".join(diags) + ']}'
+    params: str = '{"uri":' + json.stringify(uri) + ',"version":' + str(version) + ',"diagnostics":[' + ",".join(diags) + ']}'
     send_frame(rpc_notification("textDocument/publishDiagnostics", params))
     log("published " + str(len(diags)) + " diagnostic(s) for " + uri)

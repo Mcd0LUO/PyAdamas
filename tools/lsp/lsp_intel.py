@@ -1,9 +1,9 @@
 # tools/lsp/lsp_intel.py
 # 代码理解类请求：definition / hover / semanticTokens / signatureHelp / documentHighlight。
-import minijson
+import json
 
 from lsp_text import find_def_line, find_def_location, is_digit_char, is_ident_char, is_param, is_py_keyword, list_has, offset_at, params_text, read_ident, scan_ident_end, strip_trailing_colon, u16_prefix_len, word_at
-from lsp_protocol import location_json, range_json, rpc_result, send_frame, uri_of
+from lsp_protocol import location_json, range_json, rpc_result, send_frame, uri_of, j_int, j_obj
 from lsp_state import doc_index
 import lsp_state
 from lsp_doc import class_name_set, func_name_set
@@ -12,9 +12,9 @@ from lsp_doc import class_name_set, func_name_set
 
 def handle_definition(id_text: str, params: unknown) -> None:
     uri: str = uri_of(params)
-    pos: unknown = minijson.get_obj(params, "position")
-    line: int = minijson.get_int(pos, "line")
-    character: int = minijson.get_int(pos, "character")
+    pos: unknown = j_obj(params, "position")
+    line: int = j_int(pos, "line")
+    character: int = j_int(pos, "character")
     idx: int = doc_index(uri)
     if idx < 0:
         send_frame(rpc_result(id_text, "null"))
@@ -325,9 +325,9 @@ def signature_label(sig: str) -> str:
 
 def handle_signature_help(id_text: str, params: unknown) -> None:
     uri: str = uri_of(params)
-    pos: unknown = minijson.get_obj(params, "position")
-    line: int = minijson.get_int(pos, "line")
-    character: int = minijson.get_int(pos, "character")
+    pos: unknown = j_obj(params, "position")
+    line: int = j_int(pos, "line")
+    character: int = j_int(pos, "character")
     idx: int = doc_index(uri)
     if idx < 0:
         send_frame(rpc_result(id_text, "null"))
@@ -358,9 +358,9 @@ def handle_signature_help(id_text: str, params: unknown) -> None:
     params_js: list[str] = []
     i: int = 0
     while i < len(labels):
-        params_js.append('{"label":' + minijson.quote(labels[i]) + '}')
+        params_js.append('{"label":' + json.stringify(labels[i]) + '}')
         i = i + 1
-    body: str = ('{"signatures":[{"label":' + minijson.quote(signature_label(sig)) +
+    body: str = ('{"signatures":[{"label":' + json.stringify(signature_label(sig)) +
                  ',"parameters":[' + ",".join(params_js) +
                  '],"activeParameter":' + str(active) + '}],' +
                  '"activeSignature":0,"activeParameter":' + str(active) + '}')
@@ -457,9 +457,9 @@ def highlight_ranges(text: str, word: str) -> str:
 
 def handle_document_highlight(id_text: str, params: unknown) -> None:
     uri: str = uri_of(params)
-    pos: unknown = minijson.get_obj(params, "position")
-    line: int = minijson.get_int(pos, "line")
-    character: int = minijson.get_int(pos, "character")
+    pos: unknown = j_obj(params, "position")
+    line: int = j_int(pos, "line")
+    character: int = j_int(pos, "character")
     idx: int = doc_index(uri)
     if idx < 0:
         send_frame(rpc_result(id_text, "null"))
@@ -473,9 +473,9 @@ def handle_document_highlight(id_text: str, params: unknown) -> None:
 
 def handle_hover(id_text: str, params: unknown) -> None:
     uri: str = uri_of(params)
-    pos: unknown = minijson.get_obj(params, "position")
-    line: int = minijson.get_int(pos, "line")
-    character: int = minijson.get_int(pos, "character")
+    pos: unknown = j_obj(params, "position")
+    line: int = j_int(pos, "line")
+    character: int = j_int(pos, "character")
     idx: int = doc_index(uri)
     if idx < 0:
         send_frame(rpc_result(id_text, "null"))
@@ -489,5 +489,5 @@ def handle_hover(id_text: str, params: unknown) -> None:
     if sig == "":
         send_frame(rpc_result(id_text, "null"))
         return
-    hover: str = '{"contents":{"kind":"plaintext","value":' + minijson.quote(sig) + '}}'
+    hover: str = '{"contents":{"kind":"plaintext","value":' + json.stringify(sig) + '}}'
     send_frame(rpc_result(id_text, hover))

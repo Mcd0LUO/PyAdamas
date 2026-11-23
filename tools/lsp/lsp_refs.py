@@ -1,9 +1,9 @@
 # tools/lsp/lsp_refs.py
 # references / rename：文档内符号查找与重命名（词法扫描 + 粗粒度作用域分区）。
-import minijson
+import json
 
 from lsp_text import cp_index_at, is_ident_char, is_py_keyword, leading_ws, list_has, params_text, read_ident, scan_ident_end, strip_trailing_colon, u16_prefix_len
-from lsp_protocol import location_json, log, range_json, rpc_error, rpc_result, send_frame, uri_of
+from lsp_protocol import location_json, log, range_json, rpc_error, rpc_result, send_frame, uri_of, j_bool, j_int, j_obj, j_str
 from lsp_state import doc_index
 import lsp_state
 
@@ -416,11 +416,11 @@ def tok_utf16_len(lines: list[str], tok: WordTok) -> int:
 
 def handle_references(id_text: str, params: unknown) -> None:
     uri: str = uri_of(params)
-    pos: unknown = minijson.get_obj(params, "position")
-    line: int = minijson.get_int(pos, "line")
-    character: int = minijson.get_int(pos, "character")
-    ctx: unknown = minijson.get_obj(params, "context")
-    include_decl: bool = minijson.get_bool(ctx, "includeDeclaration")
+    pos: unknown = j_obj(params, "position")
+    line: int = j_int(pos, "line")
+    character: int = j_int(pos, "character")
+    ctx: unknown = j_obj(params, "context")
+    include_decl: bool = j_bool(ctx, "includeDeclaration")
     idx: int = doc_index(uri)
     if idx < 0:
         send_frame(rpc_result(id_text, "[]"))
@@ -454,10 +454,10 @@ def valid_ident_name(s: str) -> bool:
 
 def handle_rename(id_text: str, params: unknown) -> None:
     uri: str = uri_of(params)
-    pos: unknown = minijson.get_obj(params, "position")
-    line: int = minijson.get_int(pos, "line")
-    character: int = minijson.get_int(pos, "character")
-    new_name: str = minijson.get_str(params, "newName")
+    pos: unknown = j_obj(params, "position")
+    line: int = j_int(pos, "line")
+    character: int = j_int(pos, "character")
+    new_name: str = j_str(params, "newName")
     idx: int = doc_index(uri)
     if idx < 0:
         send_frame(rpc_result(id_text, "null"))
@@ -479,9 +479,9 @@ def handle_rename(id_text: str, params: unknown) -> None:
         st: int = line_utf16_start(lines, t)
         ln: int = tok_utf16_len(lines, t)
         edit: str = ('{"range":' + range_json(t.line, st, t.line, st + ln) +
-                     ',"newText":' + minijson.quote(new_name) + '}')
+                     ',"newText":' + json.stringify(new_name) + '}')
         edits.append(edit)
         i = i + 1
-    body: str = '{"changes":{' + minijson.quote(uri) + ':[' + ",".join(edits) + ']}}'
+    body: str = '{"changes":{' + json.stringify(uri) + ':[' + ",".join(edits) + ']}}'
     log("rename -> " + str(len(edits)) + " edit(s)")
     send_frame(rpc_result(id_text, body))

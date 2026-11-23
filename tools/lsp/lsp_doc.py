@@ -3,11 +3,11 @@
 # workspace/symbol / formatting。
 #
 # 注意：Symbol 类与它的所有字段读写必须在同一个模块里——当前编译器不支持
-# 跨模块 class 的字段读/方法调用（见 tools/lsp/LANGUAGE_GAPS.md）。
-import minijson
+# 「跨模块 class 当函数形参」后读字段/调方法（见 tools/lsp/LANGUAGE_GAPS.md 第 2 条）。
+import json
 
 from lsp_text import PY_KEYWORDS, cp_index_at, first_non_space, indent_width, is_ident_char, leading_ws, list_has, read_ident, strip_trailing_colon, truncate, u16_prefix_len
-from lsp_protocol import log, range_json, rpc_result, send_frame, uri_of
+from lsp_protocol import log, range_json, rpc_result, send_frame, uri_of, j_int, j_obj, j_str
 from lsp_state import collect_py_files, doc_index, path_to_file_uri, read_text_file
 import lsp_state
 
@@ -107,7 +107,7 @@ def symbols_json(syms: list[Symbol]) -> str:
     i: int = 0
     while i < len(syms):
         s: Symbol = syms[i]
-        parts.append('{"name":' + minijson.quote(s.name) + ',"kind":' + str(s.kind) + ',"range":' + range_json(s.line, s.col, s.end_line, s.end_col) + ',"selectionRange":' + range_json(s.line, s.col, s.line, s.col + len(s.name)) + '}')
+        parts.append('{"name":' + json.stringify(s.name) + ',"kind":' + str(s.kind) + ',"range":' + range_json(s.line, s.col, s.end_line, s.end_col) + ',"selectionRange":' + range_json(s.line, s.col, s.line, s.col + len(s.name)) + '}')
         i = i + 1
     return "[" + ",".join(parts) + "]"
 
@@ -268,9 +268,9 @@ def collect_completions(text: str, line: int, character: int) -> str:
     i = 0
     while i < len(labels) and len(items) < 100:
         if labels[i].startswith(prefix):
-            item: str = ('{"label":' + minijson.quote(labels[i]) +
+            item: str = ('{"label":' + json.stringify(labels[i]) +
                          ',"kind":' + str(kinds[i]) +
-                         ',"detail":' + minijson.quote(details[i]) + '}')
+                         ',"detail":' + json.stringify(details[i]) + '}')
             items.append(item)
         i = i + 1
     log("completion prefix=" + prefix + " items=" + str(len(items)))
@@ -278,9 +278,9 @@ def collect_completions(text: str, line: int, character: int) -> str:
 
 def handle_completion(id_text: str, params: unknown) -> None:
     uri: str = uri_of(params)
-    pos: unknown = minijson.get_obj(params, "position")
-    line: int = minijson.get_int(pos, "line")
-    character: int = minijson.get_int(pos, "character")
+    pos: unknown = j_obj(params, "position")
+    line: int = j_int(pos, "line")
+    character: int = j_int(pos, "character")
     idx: int = doc_index(uri)
     if idx < 0:
         send_frame(rpc_result(id_text, "[]"))
@@ -409,7 +409,7 @@ def folding_ranges_json(text: str) -> str:
     while i3 < len(order):
         k3: int = order[i3]
         parts.append('{"startLine":' + str(starts[k3]) + ',"endLine":' + str(ends[k3]) +
-                     ',"kind":' + minijson.quote(kinds[k3]) + '}')
+                     ',"kind":' + json.stringify(kinds[k3]) + '}')
         i3 = i3 + 1
     return "[" + ",".join(parts) + "]"
 
@@ -437,9 +437,9 @@ def workspace_symbols_json(query: str) -> str:
         while si < len(syms):
             s: Symbol = syms[si]
             if query == "" or s.name.find(query) >= 0:
-                parts.append('{"name":' + minijson.quote(s.name) +
+                parts.append('{"name":' + json.stringify(s.name) +
                              ',"kind":' + str(s.kind) +
-                             ',"location":{"uri":' + minijson.quote(uri) +
+                             ',"location":{"uri":' + json.stringify(uri) +
                              ',"range":' + range_json(s.line, s.col, s.line,
                                                       s.col + len(s.name)) + '}}')
             si = si + 1
@@ -449,7 +449,7 @@ def workspace_symbols_json(query: str) -> str:
     return "[" + ",".join(parts) + "]"
 
 def handle_workspace_symbol(id_text: str, params: unknown) -> None:
-    query: str = minijson.get_str(params, "query")
+    query: str = j_str(params, "query")
     send_frame(rpc_result(id_text, workspace_symbols_json(query)))
 
 # ---------------- formatting：保守缩进归一 + 行尾空白 ----------------
@@ -538,7 +538,7 @@ def is_dedent_keyword(s: str) -> bool:
 def line_edit_json(line_no: int, old: str, new: str) -> str:
     end: int = u16_prefix_len(old, len(old))
     return ('{"range":' + range_json(line_no, 0, line_no, end) +
-            ',"newText":' + minijson.quote(new) + '}')
+            ',"newText":' + json.stringify(new) + '}')
 
 def compute_format_edits(text: str) -> list[str]:
     lines: list[str] = text.split("\n")

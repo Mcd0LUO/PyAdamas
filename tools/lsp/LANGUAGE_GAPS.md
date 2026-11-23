@@ -38,7 +38,7 @@ pya-lsp 仍然用 `open(0, "rb", 0)`（二进制、无缓冲）而不是文本�
 
 ---
 
-## 2. [已修复] 跨模块 class 的字段读 / 方法调用
+## 2. [部分可用] 跨模块 class：入口模块可用，跨模块函数参数不可用
 
 ~~~python
 # xmod_a.py
@@ -75,7 +75,24 @@ pyadamas run --rebuild -o xmod_b xmod_b.py && ./xmod_b
 
 **已修复**：跨模块 class 的字段读/写与方法调用都可用（本机实测输出 3 / 25）。
 pya-lsp 现在也直接用跨模块 class 做文档表/符号表（`Symbol` 等），不再需要「不透明句柄」workaround；
-minijson 的 JVal 包装层也已删除，值统一是动态 JSON。
+minijson 薄层也已删除（0.468），值统一是动态 JSON，宽容取值收在 `lsp_protocol.j_*`。
+
+**2026-11-24 复测（build/lead，及 gfix-dt / gfix-deque / gfix-sb7）**：上面这种
+「入口模块里用局部变量 / 返回类型标注」可以；但把导入的类用作**函数形参类型**时，
+形参退化成 unknown，函数体里读字段仍报
+`attribute access is only supported as a method call`：
+
+~~~python
+# b.py
+import a
+
+def read(p: a.C) -> int:
+    return p.x        # error: attribute access is only supported as a method call
+~~~
+
+未标注形参（`def read(p) -> int`）同样失败。返回类型标注、局部变量标注都正常。
+因此 pya-lsp 把 `Symbol` 类与**所有字段读写**留在同一个模块（`lsp_doc.py`），
+`symbols_json(syms: list[Symbol])` 这类函数不能拆到别的模块。
 
 ---
 
@@ -121,8 +138,8 @@ chunk = f.read(5)       # 运行期拿到的是「按字节读的 str」，类�
 ## 5. [部分修复] json.parse 已落地；但 pyadamas check 仍不校验模块属性
 
 动态 JSON 已落地（0.447）：`json.parse(text) -> unknown`、`json.stringify(v) -> str`，
-外加 get/get_or/has/type/as_dict/as_list/as_str/as_int/as_bool/len/keys。pya-lsp 的
-minijson.py 已改成这层的薄封装（543 行 -> 约 210 行），手写 parser/stringifier 删除。
+外加 get/get_or/has/type/as_dict/as_list/as_str/as_int/as_bool/len/keys。pya-lsp 在 0.468
+删掉了 minijson 薄封装，直接用这层（宽容取值只剩 `lsp_protocol.j_*` 9 个函数）。
 
 仍存在的坑：**check 不报「模块没有这个属性」，build 才报**：
 
@@ -187,7 +204,7 @@ async def _wait_readable_for(ms: int) -> bool:
 ## 8. [可用] 动态 JSON 与 unknown 注解的几个实用点
 
 - 函数参数/返回值可以直接标 `unknown`（typecheck_builtin 认 unknown/Any），
-  动态值在模块内传递不用包装类；跨模块也可以（minijson 的访问器就是 `-> unknown`）。
+  动态值在模块内传递不用包装类；跨模块也可以（lsp_protocol 的 `j_*` 访问器就是 `-> unknown`）。
 - `dict[str, list[str]]` 这类「容器套容器」的模块级全局可以用（MODULE_MEMBERS 静态表）。
 - `json.get_or(d, key, json.null())` 是「取不到给默认值」的正规写法；`json.get` 缺失键抛异常，
   做宽容访问器时要先 `json.type(v) == "dict"` 或改用 get_or。
