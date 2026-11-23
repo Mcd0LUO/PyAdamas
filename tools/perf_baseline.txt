@@ -1,16 +1,16 @@
 # PyAdamas -O2 instructions:u 性能基线（perf stat，3 轮最小，绑核 + MALLOC_ARENA_MAX=1）
-# 写入时间: 2026-11-23T16:37:12+08:00  HEAD: 18cd374
-# instructions:u 是确定性的（重复跑差几条，±0.001%）；阈值 +2% 警告 / +5% 失败；负数（变好）不算失败。
+# 写入时间: 2026-11-23T21:59:48+08:00  HEAD: af2acf4
+# 同一二进制跑两次也可能差 ±0.3%；阈值 +2% 警告 / +5% 失败；负数（变好）不算失败。
 # 只在编译器/代码生成/运行时发生有意变更、并人工确认后运行 --write-baseline。
-binary_trees 4748393
-collatz 81504584
-fannkuch 34927066
-fasta 5956391
+binary_trees 4719775
+collatz 81504577
+fannkuch 34927064
+fasta 5396405
 fib 130640135
-mandelbrot 44080444
+mandelbrot 44080443
 matmul 10127395
-nbody 109040726
-nqueens 339789107
-sieve 19631913
-spectral_norm 94638050
-wordfreq 251337123
+nbody 109040698
+nqueens 339789109
+sieve 15631914
+spectral_norm 94637461
+wordfreq 221067124
