@@ -46,7 +46,7 @@ ASAN=0
 usage() {
     cat <<'EOF'
 用法: bash tools/checkall.sh [--full|--quick|--perf] [--jobs N] [--no-build] [--write-baseline] [--asan]
-  --full        （默认）1构建 2套件 3difftest 4check_size 5基准12x3 6指令数 7SIMD 8LSP 9git状态
+  --full        （默认）1构建 2套件 3difftest 4check_size 5基准12x3 6SIMD 7git状态 8perf
   --quick       1-4（日常快速回归）
   --perf        6：指令数采集 + 基线比对（20 轮取最小，instructions:u）
   --jobs N      并行度（默认 16，上限 16）
@@ -351,20 +351,10 @@ gate_bench_modes() {
     return 0
 }
 
-gate_lsp() {
-    local t0 rc
-    t0=$(timer_start)
-    echo "──── [6] LSP 冒烟（PYADAMAS=$BIN）────"
-    PYADAMAS="$BIN" bash "$ROOT/tests/lsp/smoke.sh"
-    rc=$?
-    record "lsp-smoke" "$(timer_end "$t0")" "$rc" "" "PYADAMAS=$BIN bash tests/lsp/smoke.sh"
-    return 0
-}
-
 gate_simd() {
     local t0 rc=0 n bin val
     t0=$(timer_start)
-    echo "──── [7] SIMD 变体指令数（PYADAMAS_SIMD=1，仅打印）────"
+    echo "──── [6] SIMD 变体指令数（PYADAMAS_SIMD=1，仅打印）────"
     for n in matmul spectral_norm; do
         bin="$PERF_TMP/simd-$n"
         if ! PYADAMAS_SIMD=1 "$BIN" build --rebuild -O2 -o "$bin" "$ROOT/bench/compare/$n.py" >/dev/null 2>&1; then
@@ -383,11 +373,11 @@ gate_simd() {
     return 0
 }
 
-# ── 闸门 9：工作区干净检查 ──────────────────────────────────────
+# ── 闸门 7：工作区干净检查 ──────────────────────────────────────
 gate_git() {
     local t0 rc=0 out n=0
     t0=$(timer_start)
-    echo "──── [9] 工作区干净检查（git status --short）────"
+    echo "──── [7] 工作区干净检查（git status --short）────"
     out=$(git -C "$ROOT" status --short)
     if [ -n "$out" ]; then
         n=$(printf '%s\n' "$out" | wc -l)
@@ -436,7 +426,6 @@ case "$MODE" in
         gate_difftest
         gate_size
         gate_bench_modes
-        gate_lsp
         gate_simd
         gate_git
         compare_perf

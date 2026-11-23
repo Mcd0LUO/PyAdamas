@@ -66,7 +66,7 @@ bash tools/checkall.sh --full     # 约 3 分钟；必须整套跑
 - **语言**：enum/abc 编译期语义（0.456）；`.pysig` 类声明、`@ret_specialized`。
 - **标准库**：第 3 批纯 py（itertools/functools/logging/codecs）；22 个模块 CPython 对拍
   验收（修 copy.copy/deepcopy、calendar 常量、decimal.to_integral_value 等）。
-- **LSP**（tools/lsp，纯 .pya，2116 行）：completion / definition / semanticTokens /
+- **LSP**（独立仓库 pya-lsp，纯 .pya）：completion / definition / semanticTokens /
   references / rename / signatureHelp / documentHighlight / foldingRange / 诊断 debounce；
   冒烟 119 → 201。
 - **性能三条线**：rc_dec_unknown 特化（fannkuch −4.56%）、整数 Bin 留 %rax 融合

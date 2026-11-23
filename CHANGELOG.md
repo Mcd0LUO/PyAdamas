@@ -4,6 +4,17 @@
 
 早期阶段没有逐条留痕，按阶段归纳；0.4 之后逐条记录。
 
+## [0.469] - 2026-11-24
+
+> refactor：**LSP 拆成独立仓库 pya-lsp**，编译器回归「只是编译器」。
+>
+> `tools/lsp/` + `tests/lsp/` 迁出本仓库；新仓库用 `git subtree split` 保留原有提交历史，
+> 布局扁平化（源码在根目录，冒烟在 `tests/`），编译器改为外部依赖：只认 `$PYADAMAS`
+> 或 PATH 里的 `pyadamas`，不再推断 `build/*/pyadamas`。
+>
+> 本仓库相应移除 `lsp-smoke` 闸门（checkall 少一项，其余闸门编号顺延）；LSP 功能与行为
+> 不变，迁出时点冒烟 **228 checks** 全过。后续 LSP 回归在 pya-lsp 仓库里跑。
+
 ## [0.468] - 2026-11-24
 
 > refactor(lsp)：**删除 minijson.py 薄封装，LSP 直接用 runtime 动态 JSON**。
