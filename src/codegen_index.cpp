@@ -59,6 +59,7 @@ void AsmGen::gen_index_store(const Inst& in) {
     std::string done = fresh_label("idxsdone");
     std::string slow = fresh_label("idxsslow");
     std::string k23 = fresh_label("idxsk23");
+    std::string k0cold = fresh_label("idxsk0c");
     std::string decunk = fresh_label("idxsdu");
     std::string decheap = fresh_label("idxsdh");
     emit2(MOp::kMovq, src_mop(in.a), r0);
@@ -105,21 +106,28 @@ void AsmGen::gen_index_store(const Inst& in) {
         label(done);
         return;
     }
-    emit2(MOp::kMovq, op_mem(r0, 24), kr);
-    if (hk == 2) {
-        // 静态 unknown 新值：只有 kind2 且无位图能留在内联（kind 恒 2，
-        // 销毁走注册表，没有位要维护，不必探针）；其余交运行时探针。
-        emit_imm(MOp::kCmpq, 2, kr);
-        emit_jmp(MOp::kJne, slow);
-        emit_imm(MOp::kCmpq, 0, op_mem(r0, 32));
-        emit_jmp(MOp::kJne, slow);
+    if (hk == 0) {
+        // kind0 热路径：一次比较判 kind。1/2/3 全走冷分发（冷路径重读 kind），
+        // 比「mov kind + cmp1 + je + cmp2 + jae」少 3 条指令。
+        emit_imm(MOp::kCmpq, 0, op_mem(r0, 24));
+        emit_jmp(MOp::kJne, k0cold);
     } else {
-        // 静态已知标量/堆：冲突种类（kind1+标量 / kind0+堆）交运行时升级；
-        // kind3 防御性交运行时（kind3 只应是空表，不变量破坏时按 2 处理）。
-        emit_imm(MOp::kCmpq, hk == 0 ? 1 : 0, kr);
-        emit_jmp(MOp::kJe, slow);
-        emit_imm(MOp::kCmpq, 2, kr);
-        emit_jmp(MOp::kJae, k23);
+        emit2(MOp::kMovq, op_mem(r0, 24), kr);
+        if (hk == 2) {
+            // 静态 unknown 新值：只有 kind2 且无位图能留在内联（kind 恒 2，
+            // 销毁走注册表，没有位要维护，不必探针）；其余交运行时探针。
+            emit_imm(MOp::kCmpq, 2, kr);
+            emit_jmp(MOp::kJne, slow);
+            emit_imm(MOp::kCmpq, 0, op_mem(r0, 32));
+            emit_jmp(MOp::kJne, slow);
+        } else {
+            // 静态已知堆值：冲突种类（kind0+堆）交运行时升级；
+            // kind3 防御性交运行时（kind3 只应是空表，不变量破坏时按 2 处理）。
+            emit_imm(MOp::kCmpq, 0, kr);
+            emit_jmp(MOp::kJe, slow);
+            emit_imm(MOp::kCmpq, 2, kr);
+            emit_jmp(MOp::kJae, k23);
+        }
     }
     // kind 与新值一致（或 hk2 的 kind2 无位图）：写新值。
     // hk==0（非堆标量）时旧值必是标量、Consumer 不用它做 dec ——
@@ -131,6 +139,14 @@ void AsmGen::gen_index_store(const Inst& in) {
     if (hk == 2) emit_jmp(MOp::kJmp, decunk);
     else if (hk == 1) emit_jmp(MOp::kJmp, decheap);
     else emit_jmp(MOp::kJmp, done);
+    if (hk == 0) {
+        // kind0 冷分发：1 -> 运行时（升级/释放），>=2 -> kind2/3 路径。
+        label(k0cold);
+        emit2(MOp::kMovq, op_mem(r0, 24), kr);
+        emit_imm(MOp::kCmpq, 1, kr);
+        emit_jmp(MOp::kJe, slow);
+        emit_jmp(MOp::kJmp, k23);
+    }
     if (hk != 2) {
         // kind2：读旧值、写新值、按新值堆性更新位图（有位图时）。
         label(k23);

@@ -14,7 +14,7 @@
 | 新模块 | 改 `driver_modules.cpp` 的 `kModuleTable` | 新建 `stdlib/sigs/<模块>.pysig`（模块表自动登记，见 §6.3） |
 | 加一个新**运行期实现** | 必须 C（`runtime/rt_*.c`）+ RtFn 编号 + codegen 参数分组 | **仍然要**，这是运行期边界，不是签名问题（§6.4） |
 
-已迁移：`time`（试点）、`os.path`、`math`（57 函数）、`sys`（maxsize + exit）、`os` 模块级（16 函数 + 6 常量）、`random` 模块级（9 函数）。不可迁移：`operator`（无 RtFn 入口）。未迁移：`subprocess/datetime/collections/json/re/pathlib/asyncio/python/c/dylib`。
+已迁移：`time`（试点）、`os.path`、`math`（57 函数）、`sys`（maxsize + exit）、`os` 模块级（16 函数 + 6 常量）、`random`（模块级 + `Random` 类）、`re.Pattern`/`Match`、`datetime` 三类、`collections.deque`、`pathlib.Path`。不可迁移：`operator`（无 RtFn 入口）。未迁移：`subprocess`、`json`、`asyncio`、`python`/`c`/`dylib`（以及 collections 其余构造器）。
 
 ---
 
@@ -464,8 +464,9 @@ if (const auto* c = nativesig::find_const(module, member)) {
 | `datetime` | ✅ 已迁移 3 个原生类（`stdlib/sigs/datetime.pysig`） | `date`/`datetime`/`timedelta` 构造器（默认值表达重载）+ 6 实例方法；模块函数 today/now 保留 C++（返回 TyKind::DateTime 无法声明）；属性读/运算符/参数装配不动；asm 38/38 逐字节相同 |
 | `collections` | ✅ 已迁移 deque 方法表（`stdlib/sigs/collections.pysig`） | 10 个实例方法声明化；构造器保留 C++（默认值 `[]` 非 pysig 字面量、`list[unknown]` 静态类型影响 asm）；pop/popleft/copy 的接收者元素类型返回保留 typecheck 口径；asm 38/38 逐字节相同 |
 | `json` | ⬜ 未迁移 | 硬编码仍在；加载器已就绪，可按 §6.2 逐个搬 |
-| `pathlib` `operator` `asyncio` | ⬜ 未迁移（优先级低） | 构造器/类语义多，声明格式表达不了的部分留 C++ |
-| `datetime` `subprocess` | ⬜ 未迁移（优先级低） | 参数装配/返回类型随实参变的分支多 |
+| `pathlib` | ✅ 已迁移 `Path` 方法表（`stdlib/sigs/pathlib.pysig`） | 构造器 + 18 方法；`/` 运算符、构造器降级、`mkdir` 关键字白名单、参数装配保留 C++；`unlink`/`rmdir` 无 `pa_path_*` 入口保留 method_call；asm 36/36 逐字节相同 |
+| `operator` `asyncio` | ⬜ 未迁移（优先级低） | `operator` 无 RtFn 入口；`asyncio` 返回类型/装配多在 C++ |
+| `subprocess` | ⬜ 未迁移（优先级低） | 参数装配/返回类型随实参变的分支多 |
 | `python`（CPython 桥）、`c` / `dylib` | ⛔ 不适合声明式 | 名字集合是开集（`from c import <任意符号>`），签名在调用点推断 |
 
 ### 4.3 补充：@ret_specialized 与「接收者元素类型」

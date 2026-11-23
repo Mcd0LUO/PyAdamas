@@ -338,9 +338,6 @@ pyadamas::ModuleInfoPtr builtin_module(const std::string& name) {
             f->ret_known = true;
             func_with("attrgetter", f);
         }
-    } else if (name == "pathlib") {
-        auto p = pyadamas::new_ty(pyadamas::TyKind::Path);
-        func("Path", {pyadamas::t_str()}, p);
     } else if (name == "functools") {
         // reduce 的返回类型按实参在调用点特化，签名只负责参数个数检查。
         {

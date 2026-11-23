@@ -600,6 +600,7 @@ inline TypePtr declared_class_type(const std::string& module, const std::string&
     if (module == "datetime" && (cls == "date" || cls == "datetime")) return new_ty(TyKind::DateTime);
     if (module == "datetime" && cls == "timedelta") return new_ty(TyKind::TimeDelta);
     if (module == "collections" && cls == "deque") return new_ty(TyKind::Deque);
+    if (module == "pathlib" && cls == "Path") return new_ty(TyKind::Path);
     return t_unknown();
 }
 

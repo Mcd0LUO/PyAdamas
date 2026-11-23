@@ -4,6 +4,150 @@
 
 早期阶段没有逐条留痕，按阶段归纳；0.4 之后逐条记录。
 
+## [0.466] - 2026-11-24
+
+> perf(codegen)：**kind0 列表写入的 elem_kind 检查合并为一次比较**（fannkuch −5.61%，
+> 相对 rc_dec 之前的累计约 −10%）。（未提交）
+>
+> `gen_index_store` 的 hk==0 热路径原先每次写都要 `mov elem_kind + cmp1/je + cmp2/jae`
+> （5 条），现在用 `cmp $0, 24(list)` + `jne cold`（2 条）；kind1/2/3 全走冷分发
+> （冷路径重读 kind），语义与 `pa_list_set` 的升级/位图/旧值释放一致。判据只看
+> 「新值静态非堆」，不匹配基准/文件名。
+>
+> 负面结果（已回退并记录）：**LoadSlot 块内 CSE**（合并重复 `load.slot`）实测
+> fannkuch **+6.4%**（33.29M → 35.41M）——省掉的 L1 装载被更长的活跃区间与额外
+> spill 抵消；按纪律回退，不保留代码。
+>
+> 验证：fannkuch **33,292,318 → 31,424,592（−5.61%）**；12 基准无回退（nqueens
+> +0.28% 为布局噪声，<1%）；输出逐字节相同；闸门 **463 ran ok / difftest 435-0 /
+> bench 36/36 / LSP 228 checks / perf warn=0 fail=0**。
+
+## [0.465] - 2026-11-24
+
+> feat(lsp)：**`textDocument/formatting`（保守版）+ `workspace/symbol`**。（未提交）
+>
+> formatting 只做两件事：行首缩进按块层级归一到 4 空格（tab 按 4 计）+ 行尾空白清理；
+> 括号续行与三引号字符串内部原样保留，不重排表达式、不合并/拆分代码行；
+> `else/elif/except/finally` 先退一层再对齐。逐行整行替换的 TextEdit，幂等。
+> workspace/symbol 用 initialize 的 `rootUri`（退 `workspaceFolders[0].uri`/`rootPath`）
+> 递归扫 `.py`/`.pyi`，上限 2000 文件，跳过隐藏目录/`__pycache__`/`build`/`node_modules`，
+> 复用 `scan_symbols` 输出 `SymbolInformation`；query 按子串过滤。
+>
+> 验证：LSP 冒烟 **201 → 228 checks**（formatting 归一/幂等、workspace 跨文件/子目录/
+> 查询过滤/file URI/range）；编译器与运行时未改，既有闸门 **463 ran ok / difftest 435-0**
+> 不受影响。README 方法表与限制同步。
+
+## [0.464] - 2026-11-24
+
+> refactor(native)：**`pathlib.Path` 方法表迁到声明式签名**——最后一个原生类的方法表。（未提交）
+>
+> 新增 `stdlib/sigs/pathlib.pysig`（`class Path` + 构造器 + 18 个方法）；
+> `declared_class_type()` 登记 `pathlib.Path → TyKind::Path`；`typecheck_call_method.cpp`
+> 的 76 行硬编码方法表换成声明查表（参数个数/类型检查、未知方法报错统一）。
+> `/` 运算符、构造器降级（`lower_import_misc.cpp`）、`mkdir` 关键字白名单与全部参数装配
+> （`lower_method_native.cpp`）保留 C++；`unlink`/`rmdir` 没有 `pa_path_*` 运行期入口
+> （降级是 PathStr + OsRemove/OsRmdir），仍留在 method_call。
+>
+> 记账（如实）：C++ **−22 行**（builtin_sigs −3、native_sigs +1、typecheck −20），
+> 新增 pysig **49 行**，源码合计净 **+27 行**；价值在方法清单集中与未知方法自动报错，
+> 不是行数减少。`write_text`/`write_bytes` 返回 0 而非 CPython 的写入长度是**预存差异**
+> （`pa_path_write_text` 原本就 `return 0`），本轮未改。
+>
+> 验证：12 基准 × O0/O1/O2 **36/36 汇编逐字节相同**；Path 全方法示例与 CPython
+> **19 行 0 diff**；闸门 **463 ran ok / difftest 435-0 / check_size 通过**；
+> 新增 `tests/run/560_pathlib_pysig.py`。
+
+## [0.463] - 2026-11-23
+
+> fix(runtime)：**`sorted(key=返回用户类实例)` 不再静默不排序**——`pa_list_sorted_by`
+> 过去按机器字（堆地址）比键，对象顺序≈分配顺序，看起来像 no-op；现在 kind-3 键
+> 复用 `pa_list_sort` 的族分类与 `__lt__` 路径。
+>
+> 做法：把 kind-3 的族分类/可比较性校验抽成 `uk_sort_family`（`pa_list_sort` 与
+> `pa_list_sorted_by` 共用），OTHER 族在比较器里按**左操作数实例**的 `__lt__` 槽
+> 逐对分派（CPython 口径，不再假定全表同一类）；NUM 族改走 `pa_uk_num_cmp`
+> （unknown 的 float/big 键不再按位模式/指针比），STR 族走字节序；qsort 相等键
+> 用原下标钉稳定性。校验前置到拷贝/分配之前，用户 `__lt__` 执行期间把结果列表
+> pin 成 GC 根。
+>
+> 边界：unknown 返回类型的**元组/列表键**仍明确 TypeError（与 `list.sort()` 同口径，
+> 标注返回类型即可走描述符路径）；没有 `__lt__` 的类仍抛 `object`/`object` TypeError。
+>
+> 用例：`tests/run/559_sorted_key_class.py`（类实例键 / 未标注返回类型 / 每键新建实例 /
+> 稳定性 / reverse / unknown float 与 str 键 / TypeError / 大表 / 原地 sort）。
+>
+> 验证：全闸门 **462 ran ok / difftest 434-0 / 12 基准 × 3 档 36/36 / check_size 通过 /
+> LSP 冒烟 / SIMD 变体 / perf warn=0 fail=0**。
+
+## [0.462] - 2026-11-23
+
+> feat(lsp)：**`signatureHelp` + `documentHighlight` + `foldingRange`**，与 references/rename 合并（冒烟 **201**）。（commits 6b55e9d、668449f）
+>
+> signatureHelp：括号栈定位最内层调用 `(`，复用 hover 的签名提取；`activeParameter` 按深度 0
+> 逗号数（跳过字符串/注释/嵌套括号），支持跨行调用；无参函数返回 `parameters=[]`。
+> documentHighlight：整词扫描，写入/赋值目标/形参标 Write(3)，其余 Text(1)。
+> foldingRange：def/class 块、≥2 行连续注释、跨行三引号字符串，kind 为 region/comment。
+> initialize 能力表补三个 provider；合并只冲突 dispatch/capabilities/smoke URI，两套 elif 全保留。
+>
+> 验证：冒烟 **PASS 201**（119 原有全绿；lsp-b 单分支 171）；闸门 **461 ran ok / difftest 433-0 /
+> bench 36/36 / perf warn=0 fail=0**。
+
+## [0.461] - 2026-11-23
+
+> feat(lsp)：**`textDocument/references` + `rename`**（冒烟 119 → 149）。（commit ffcb29d）
+>
+> references：光标符号做整词扫描（跳过注释与普通/三引号字符串），返回文档内全部 Location；
+> rename：同一扫描生成 WorkspaceEdit（单文件 changes），新名字按整词替换。
+>
+> 边界：只搜当前文档（无 workspace 索引）；不支持 `prepareRename` 与 `documentChanges`。
+> 验证：`tests/lsp/smoke.py` **PASS 149**（原 119 全绿），往返 <1s 护栏保留。
+
+## [0.460] - 2026-11-23
+
+> perf(opt)：**循环版本化 + 仿射边界检查消除**（nqueens −11.35%）。（commits 9a2cd85、8b8f52e、b1ed64f）
+>
+> 对仿射下标的循环做版本化：入口守卫成立时走免边界检查副本，否则回退原循环；
+> 顺带把 `opt_intloop.cpp` 拆出 `opt_intloop_bce.cpp`（1204 → 248 行，过 check_size 硬限）。
+> 拆分是纯搬移（nqueens 差 22 条指令 = TU 顺序布局噪声）。
+>
+> 验证：nqueens **−11.35%**；12 基准合计 **−8.54%**（现值见 `tools/perf_baseline.txt`）；
+> 闸门 **461 ran ok / difftest 433-0 / bench 36/36 / perf warn=0 fail=0**。
+
+## [0.459] - 2026-11-23
+
+> perf(codegen)：**整数 Bin 结果留 `%rax` 的相邻 Cmp/Bin 融合**（collatz −20.5%、matmul −1.1%）。（commits 4f37d9c、739824e）
+>
+> 整数 Bin 的结果不再立即落临时槽：下一条 Cmp 或 Bin 直接消费 `%rax`，省掉一对 store/load。
+> 融合在发射层按指令相邻性与寄存器类判定，不改 IR 语义。
+>
+> 验证：collatz **−20.5%**、matmul **−1.1%**（基线 8c77367）；12 基准无回退；
+> 闸门 **461 ran ok / difftest 433-0 / bench 36/36 / perf warn=0 fail=0**。
+
+## [0.458] - 2026-11-23
+
+> perf(opt)：**`rc_dec_unknown` 按静态堆类型特化 + 非堆槽写入不读旧值**（fannkuch −4.56%）。（commits f023c1b、898f5c8）
+>
+> unknown 释放按编译期已知的堆种类分派到特化 dec，省掉逐值探针；静态非堆的槽写入不再先读旧值。
+> 判据只看 IR 静态类型，不匹配基准/文件名。
+>
+> 验证：fannkuch **−4.56%**（基线 b3812d7），12 基准无回退；
+> 闸门 **461 ran ok / difftest 433-0 / bench 36/36 / perf warn=0 fail=0**。
+
+## [0.457] - 2026-11-23
+
+> refactor(native)：**`collections.deque` 方法表迁到声明式签名**（10 个实例方法）。（commit 0b76046）
+>
+> `stdlib/sigs/collections.pysig` 新建 `class deque:`，10 个方法全部 `@native("pa_deque_*")`；
+> `declared_class_type()` 登记 `collections.deque → TyKind::Deque`，`typecheck_call_method.cpp`
+> 的 Deque 方法表换成声明查表。构造器、`pop/popleft/copy` 的「接收者元素类型」返回、参数装配、
+> 序列协议与 `maxlen` 属性保留 C++（pysig 表达不了）。
+>
+> 验证：12 基准 × O2 与迁移前**逐字节相同**；deque 10 方法示例指令数 **237,934 完全相同**；
+> CPython 对拍一致；闸门 **461 ran ok / difftest 433-0 / bench 36/36 / perf warn=0 fail=0**；
+> 新增 `tests/run/558_deque_pysig.py`。
+>
+> 已知差异（预存）：`repr(deque)` 是 `<deque object>`；未指定 `maxlen` 时返回 `-1`（CPython 是 `None`）。
+
 ## [0.456] - 2026-11-23
 
 > lang：**`enum` / `abc` 编译期类语义**——`enum` 成员变成真正的成员对象（有 `.name`/`.value`），`abc` 阻止抽象类实例化。（commit d8d6c47）

@@ -909,6 +909,52 @@ static int64_t (*g_obj_lt)(int64_t, int64_t);
 #define LESS_OBJ(a, b) (g_obj_lt((a), (b)) != 0)
 PYADAMAS_TIMSORT(objlt, LESS_OBJ)
 
+/* kind 3（元素/键的静态类型推不出来）的族分类与可比较性校验。
+   返回 PA_UK_NUM/PA_UK_STR/PA_UK_OTHER；族混杂，或 OTHER 族里不全是
+   「带 __lt__ 槽的类实例」时，按 CPython 抛 TypeError 并返回 0（调用方
+   直接返回）。*lt_out（可为 NULL）给出 OTHER 族的第一个 __lt__ 槽——保留
+   pa_list_sort 的旧口径；sorted(key=) 走逐对左侧分派，不用它。 */
+static int uk_sort_family(PyAdamasList* l, int64_t (**lt_out)(int64_t, int64_t)) {
+    int fam = 0;
+    for (int64_t i = 0; i < l->len; ++i) fam |= pa_unknown_sort_family(l->data[i]);
+    if ((fam & (fam - 1)) != 0) {
+        const char* n1 = pa_uk_family_name(fam & PA_UK_NUM ? PA_UK_NUM
+                                      : fam & PA_UK_STR ? PA_UK_STR : PA_UK_OTHER);
+        const char* n2 = pa_uk_family_name(fam & PA_UK_OTHER ? PA_UK_OTHER
+                                      : fam & PA_UK_STR ? PA_UK_STR : PA_UK_NUM);
+        char msg[160];
+        snprintf(msg, sizeof msg,
+                 "'<' not supported between instances of '%s' and '%s'", n1, n2);
+        pa_raise_c("TypeError", msg);
+        return 0;
+    }
+    if (lt_out) *lt_out = NULL;
+    if (fam == PA_UK_OTHER) {
+        /* 全 OTHER 族（0.434）：元素全是「有 __lt__ 槽的类实例」时才可排
+           （CPython 口径）；否则维持 0.432 的 TypeError——不再静默按机器字排。
+           元组/列表/None 等其它 OTHER 元素仍不支持排序（文档未承诺）。 */
+        int64_t(*lt)(int64_t, int64_t) = NULL;
+        int all_inst = 1;
+        for (int64_t i = 0; i < l->len; ++i) {
+            int64_t v = l->data[i];
+            if (v == 0 || !pa_unknown_is_heap(v)) { all_inst = 0; break; }
+            if (((PyAdamasRc*)((uintptr_t)v - (uintptr_t)PYADAMAS_RC_HDR))->kind !=
+                PYADAMAS_RC_INSTANCE) { all_inst = 0; break; }
+            void* f = pa_instance_dunder_fn((void*)(uintptr_t)v, 1);
+            if (!f) { all_inst = 0; break; }
+            if (!lt) lt = (int64_t(*)(int64_t, int64_t))f;
+        }
+        if (!all_inst || !lt) {
+            pa_raise_c("TypeError",
+                       "'<' not supported between instances of "
+                       "'object' and 'object'");
+            return 0;
+        }
+        if (lt_out) *lt_out = lt;
+    }
+    return fam;
+}
+
 // kind：0 int/bool、1 float、2 str、4 容器元素（desc 字典序）、5 u64（无符号）、
 // 其它机器字。desc：编译期描述符串常量，仅 kind 4 读取；标量种类传空串，不读。
 void pa_list_sort(PyAdamasList* l, int64_t kind, PyAdamasStr* desc) {
@@ -917,43 +963,13 @@ void pa_list_sort(PyAdamasList* l, int64_t kind, PyAdamasStr* desc) {
     if (l->elem_kind == 2) pa_list_drop_bits(l);
     if (kind == 3) {
         /* 未知元素种类：按族决定比较器；族混杂按 CPython 抛 TypeError。 */
-        int fam = 0;
-        for (int64_t i = 0; i < l->len; ++i) fam |= pa_unknown_sort_family(l->data[i]);
-        if ((fam & (fam - 1)) != 0) {
-            const char* n1 = pa_uk_family_name(fam & PA_UK_NUM ? PA_UK_NUM
-                                          : fam & PA_UK_STR ? PA_UK_STR : PA_UK_OTHER);
-            const char* n2 = pa_uk_family_name(fam & PA_UK_OTHER ? PA_UK_OTHER
-                                          : fam & PA_UK_STR ? PA_UK_STR : PA_UK_NUM);
-            char msg[160];
-            snprintf(msg, sizeof msg,
-                     "'<' not supported between instances of '%s' and '%s'", n1, n2);
-            pa_raise_c("TypeError", msg);
-            return;
-        }
+        int64_t(*lt)(int64_t, int64_t) = NULL;
+        int fam = uk_sort_family(l, &lt);
+        if (!fam) return;
         if (fam == PA_UK_OTHER) {
-            /* 全 OTHER 族（0.434）：元素全是「有 __lt__ 槽的类实例」时按 __lt__ 稳定排序
-               （CPython 口径）；否则维持 0.432 的 TypeError——不再静默按机器字排。
-               元组/列表/None 等其它 OTHER 元素仍不支持排序（文档未承诺）。 */
-            int64_t(*lt)(int64_t, int64_t) = NULL;
-            int all_inst = 1;
-            for (int64_t i = 0; i < l->len; ++i) {
-                int64_t v = l->data[i];
-                if (v == 0 || !pa_unknown_is_heap(v)) { all_inst = 0; break; }
-                if (((PyAdamasRc*)((uintptr_t)v - (uintptr_t)PYADAMAS_RC_HDR))->kind !=
-                    PYADAMAS_RC_INSTANCE) { all_inst = 0; break; }
-                void* f = pa_instance_dunder_fn((void*)(uintptr_t)v, 1);
-                if (!f) { all_inst = 0; break; }
-                if (!lt) lt = (int64_t(*)(int64_t, int64_t))f;
-            }
-            if (all_inst && lt) {
-                g_obj_lt = lt;
-                sort_objlt(l->data, l->len);
-                g_obj_lt = NULL;
-                return;
-            }
-            pa_raise_c("TypeError",
-                       "'<' not supported between instances of "
-                       "'object' and 'object'");
+            g_obj_lt = lt;
+            sort_objlt(l->data, l->len);
+            g_obj_lt = NULL;
             return;
         }
         if (fam == PA_UK_STR) sort_str(l->data, l->len);
@@ -984,14 +1000,18 @@ PyAdamasList* pa_sorted_list(PyAdamasList* src, int64_t kind, PyAdamasStr* desc)
    的，不会并发踩。 */
 static const int64_t* g_sort_keys = 0;
 static int64_t g_sort_kind = 0;
+static int g_sort_family = 0;   /* kind 3：uk_sort_family 的结果 */
 static const uint8_t* g_sort_desc = 0;  /* 0.312：key 是容器（kind 4）时的描述符 */
 
-/* 键的种类未知时（函数的返回类型推不出来），退到机器字比较。这里再加一条
-   启发式：两边看起来都是字符串对象就按字符串比——键是 str 时顺序才对。 */
-static int key_is_str(int64_t v) {
-    if (v <= 4096) return 0;
-    PyAdamasRc* h = (PyAdamasRc*)((uintptr_t)v - (uintptr_t)PYADAMAS_RC_HDR);
-    return rc_index_has(h) && h->kind == PYADAMAS_RC_STR;
+/* kind 3 的 OTHER 键比较：按左操作数实例的 __lt__ 槽（CPython 口径），
+   左侧没有槽时用右侧的 __lt__ 反向比。调用前 uk_sort_family 已保证每个
+   键都是带槽的类实例。 */
+static int cmp_obj_lt_keys(int64_t a, int64_t b) {
+    void* fa = pa_instance_dunder_fn((void*)(uintptr_t)a, 1);
+    if (fa && ((int64_t(*)(int64_t, int64_t))fa)(a, b)) return -1;
+    void* fb = pa_instance_dunder_fn((void*)(uintptr_t)b, 1);
+    if (fb && ((int64_t(*)(int64_t, int64_t))fb)(b, a)) return 1;
+    return 0;
 }
 
 static int cmp_sort_by_idx(const void* pa, const void* pb) {
@@ -1005,35 +1025,58 @@ static int cmp_sort_by_idx(const void* pa, const void* pb) {
     }
     if (g_sort_kind == 2) {
         int64_t c = pa_str_cmp((PyAdamasStr*)x, (PyAdamasStr*)y);
-        return c < 0 ? -1 : c > 0 ? 1 : 0;
+        return c ? (c < 0 ? -1 : 1) : sort_word_cmp(ia, ib);
     }
     if (g_sort_kind == 1) {
         double a, b;
         memcpy(&a, &x, sizeof a);
         memcpy(&b, &y, sizeof b);
-        return a < b ? -1 : a > b ? 1 : 0;
+        return a < b ? -1 : a > b ? 1 : sort_word_cmp(ia, ib);
     }
     if (g_sort_kind == 5) {  /* u64 键：无符号比较 */
         uint64_t a = (uint64_t)x, b = (uint64_t)y;
-        return a < b ? -1 : a > b ? 1 : 0;
+        return a < b ? -1 : a > b ? 1 : sort_word_cmp(ia, ib);
     }
-    if (g_sort_kind == 3 && key_is_str(x) && key_is_str(y)) {
-        int64_t c = pa_str_cmp((PyAdamasStr*)x, (PyAdamasStr*)y);
-        return c < 0 ? -1 : c > 0 ? 1 : 0;
+    if (g_sort_kind == 3) {
+        /* 键的静态类型推不出来：与 pa_list_sort 的 kind 3 同口径按族比较。
+           以前这里直接按机器字（堆地址）比，sorted(key=返回用户类实例)
+           会静默不排序；float/big 键的位模式/指针也会排错。 */
+        if (g_sort_family == PA_UK_NUM) {
+            int c = pa_uk_num_cmp(x, y);
+            return c ? c : sort_word_cmp(ia, ib);
+        }
+        if (g_sort_family == PA_UK_STR) {
+            int64_t c = pa_str_cmp((PyAdamasStr*)x, (PyAdamasStr*)y);
+            return c ? (c < 0 ? -1 : 1) : sort_word_cmp(ia, ib);
+        }
+        int c = cmp_obj_lt_keys(x, y);
+        return c ? c : sort_word_cmp(ia, ib);
     }
-    return x < y ? -1 : x > y ? 1 : 0;
+    int c = sort_word_cmp(x, y);
+    return c ? c : sort_word_cmp(ia, ib);
 }
 
 PyAdamasList* pa_list_sorted_by(PyAdamasList* src, PyAdamasList* keys, int64_t kind,
                                 PyAdamasStr* desc) {
-    PyAdamasList* l = pa_list_copy(src);
-    int64_t n = l->len;
-    if (n < 2) return l;
+    int64_t n = src->len;
     /* 键对不上（不该发生）就退回普通排序，别给错结果 */
-    if (!keys || keys->len != n) {
+    if (n >= 2 && (!keys || keys->len != n)) {
+        PyAdamasList* l = pa_list_copy(src);
         pa_list_sort(l, kind, desc);
         return l;
     }
+    /* kind 3：排序前先做族分类/可比较性校验（含 OTHER 族的 __lt__ 槽检查）。
+       校验失败会 longjmp，放在拷贝/分配之前，避免留下半成品。 */
+    int fam = 0;
+    if (n >= 2 && kind == 3) {
+        fam = uk_sort_family(keys, NULL);
+        if (!fam) return NULL;  /* pa_raise_c 不返回 */
+    }
+    PyAdamasList* l = pa_list_copy(src);
+    if (n < 2) return l;
+    /* kind 3 的 OTHER 族要执行用户 __lt__：可能分配并触发主收集，而 l 只在
+       C 局部变量里（不在任何根上），先 pin；异常路径由临时栈统一清理。 */
+    PA_PIN_SCOPE(l);
     int64_t* idx = (int64_t*)malloc(sizeof(int64_t) * (size_t)n);
     if (!idx) {
         pa_list_sort(l, kind, desc);
@@ -1042,9 +1085,11 @@ PyAdamasList* pa_list_sorted_by(PyAdamasList* src, PyAdamasList* keys, int64_t k
     for (int64_t i = 0; i < n; ++i) idx[i] = i;
     g_sort_keys = keys->data;
     g_sort_kind = kind;
+    g_sort_family = fam;
     g_sort_desc = (kind == 4 && desc && desc->len > 0) ? (const uint8_t*)desc->data : 0;
     qsort(idx, (size_t)n, sizeof(int64_t), cmp_sort_by_idx);
     g_sort_keys = 0;
+    g_sort_family = 0;
     g_sort_desc = 0;
     int64_t* tmp = (int64_t*)malloc(sizeof(int64_t) * (size_t)n);
     if (tmp) {

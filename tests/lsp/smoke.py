@@ -201,6 +201,46 @@ TEXT_UNICODE = (
     "count: int = label\n"
 )
 
+TEXT_FMT = (
+    "def f(x: int) -> int:\n"
+    "   y: int = x + 1   \n"
+    "   if y > 0:\n"
+    "      return y\n"
+    "   else:\n"
+    "      return 0\n"
+    "\n"
+    "    \n"
+    "def t():\n"
+    "\ts: str = \"x\"\t\n"
+    "\treturn s\n"
+    "\n"
+    "def g():\n"
+    "    s: str = \"\"\"line1  \n"
+    "  line2  \n"
+    "  \"\"\"\n"
+    "    return s\n"
+)
+
+TEXT_FMT_EXPECTED = (
+    "def f(x: int) -> int:\n"
+    "    y: int = x + 1\n"
+    "    if y > 0:\n"
+    "        return y\n"
+    "    else:\n"
+    "        return 0\n"
+    "\n"
+    "\n"
+    "def t():\n"
+    "    s: str = \"x\"\n"
+    "    return s\n"
+    "\n"
+    "def g():\n"
+    "    s: str = \"\"\"line1  \n"
+    "  line2  \n"
+    "  \"\"\"\n"
+    "    return s\n"
+)
+
 
 def diag_params(msg, uri):
     params = msg.get("params") or {}
@@ -230,6 +270,8 @@ def test_initialize(c, uri_a):
     expect_eq(caps.get("hoverProvider"), True, "hoverProvider")
     expect_eq(caps.get("documentSymbolProvider"), True, "documentSymbolProvider")
     expect_eq(caps.get("definitionProvider"), True, "definitionProvider")
+    expect_eq(caps.get("documentFormattingProvider"), True, "documentFormattingProvider")
+    expect_eq(caps.get("workspaceSymbolProvider"), True, "workspaceSymbolProvider")
     comp = caps.get("completionProvider") or {}
     expect(isinstance(comp, dict), "completionProvider is an object")
     expect_eq(comp.get("triggerCharacters"), ["."], "completion triggerCharacters")
@@ -244,7 +286,7 @@ def test_initialize(c, uri_a):
 
 def test_initialized_and_unknown(c):
     c.notify("initialized", {})
-    c.send({"jsonrpc": "2.0", "id": 2, "method": "textDocument/formatting", "params": {}})
+    c.send({"jsonrpc": "2.0", "id": 2, "method": "textDocument/codeAction", "params": {}})
     # initialized 是通知，不能有回包：下一条消息必须就是 id=2 的响应
     msg = c.recv()
     expect_eq(msg.get("id"), 2, "first frame after initialized is response id=2")
@@ -1201,11 +1243,111 @@ def test_new_capabilities(server, compiler):
                   "capabilities advertise documentHighlightProvider")
         expect_eq(caps.get("foldingRangeProvider"), True,
                   "capabilities advertise foldingRangeProvider")
+        expect_eq(caps.get("documentFormattingProvider"), True,
+                  "capabilities advertise documentFormattingProvider")
+        expect_eq(caps.get("workspaceSymbolProvider"), True,
+                  "capabilities advertise workspaceSymbolProvider")
         res2 = c.request(431, "shutdown", None)
         expect_eq(res2.get("result"), None, "capability probe shutdown ok")
         c.notify("exit", None)
         rc = c.wait_exit()
         expect_eq(rc, 0, "capability probe client exits cleanly")
+    finally:
+        if c.proc.poll() is None:
+            c.proc.kill()
+
+
+def apply_edits(text, edits):
+    lines = text.split("\n")
+    for e in edits:
+        ln = (e.get("range") or {}).get("start", {}).get("line", 0)
+        if 0 <= ln < len(lines):
+            lines[ln] = e.get("newText", lines[ln])
+    return "\n".join(lines)
+
+
+def test_formatting_and_workspace_symbol(server, compiler):
+    import tempfile
+    import pathlib
+
+    ws = tempfile.mkdtemp(prefix="pya-lsp-ws-")
+    os.makedirs(os.path.join(ws, "pkg"))
+    with open(os.path.join(ws, "a.py"), "w") as f:
+        f.write("def foo():\n    pass\n\nclass Bar:\n    pass\n\nX: int = 1\n")
+    with open(os.path.join(ws, "pkg", "b.pyi"), "w") as f:
+        f.write("def foo_extra():\n    pass\n")
+
+    c = make_client(server, compiler)
+    try:
+        root_uri = pathlib.Path(ws).as_uri()
+        res = c.request(440, "initialize", {
+            "processId": None, "rootUri": root_uri, "capabilities": {}})
+        caps = (res.get("result") or {}).get("capabilities") or {}
+        expect_eq(caps.get("documentFormattingProvider"), True,
+                  "workspace client: formatting capability")
+        expect_eq(caps.get("workspaceSymbolProvider"), True,
+                  "workspace client: workspaceSymbol capability")
+        c.notify("initialized", {})
+
+        uri = root_uri + "/fmt.py"
+        c.notify("textDocument/didOpen", {"textDocument": {
+            "uri": uri, "languageId": "python", "version": 1, "text": TEXT_FMT}})
+        diag_params(c.notification("textDocument/publishDiagnostics"), uri)
+        t0 = time.monotonic()
+        res = c.request(441, "textDocument/formatting", {
+            "textDocument": {"uri": uri},
+            "options": {"tabSize": 4, "insertSpaces": True}})
+        elapsed = time.monotonic() - t0
+        print("    formatting round-trip: %.3fs" % elapsed)
+        expect(elapsed < 1.0, "formatting round-trip < 1s (got %.3fs)" % elapsed)
+        edits = res.get("result") or []
+        expect(isinstance(edits, list) and len(edits) > 0,
+               "formatting returns edits")
+        got = apply_edits(TEXT_FMT, edits)
+        expect_eq(got, TEXT_FMT_EXPECTED, "formatting normalizes indent/trailing ws")
+        for e in edits:
+            r = e.get("range") or {}
+            st = r.get("start") or {}
+            expect_eq(st.get("character"), 0, "format edit starts at column 0")
+        # 幂等：格式化后的文本再格式化不应产生编辑
+        c.notify("textDocument/didChange", {
+            "textDocument": {"uri": uri, "version": 2},
+            "contentChanges": [{"text": got}]})
+        diag_params(c.notification("textDocument/publishDiagnostics"), uri)
+        res2 = c.request(442, "textDocument/formatting", {
+            "textDocument": {"uri": uri},
+            "options": {"tabSize": 4, "insertSpaces": True}})
+        expect_eq(res2.get("result"), [], "formatting is idempotent")
+
+        # workspace/symbol：跨文件、子目录、查询过滤
+        res = c.request(443, "workspace/symbol", {"query": "foo"})
+        syms = res.get("result") or []
+        names = sorted([s.get("name") for s in syms])
+        expect_eq(names, ["foo", "foo_extra"], "workspace/symbol query 'foo'")
+        ok_uri = True
+        ok_range = True
+        for s in syms:
+            loc = s.get("location") or {}
+            if not str(loc.get("uri", "")).startswith("file://"):
+                ok_uri = False
+            r = loc.get("range") or {}
+            st = r.get("start") or {}
+            if st.get("line") != 0:
+                ok_range = False
+        expect(ok_uri, "workspace/symbol locations use file:// URIs")
+        expect(ok_range, "workspace/symbol ranges point at definition lines")
+        res = c.request(444, "workspace/symbol", {"query": ""})
+        all_names = sorted([s.get("name") for s in (res.get("result") or [])])
+        expect("Bar" in all_names and "X" in all_names and "foo_extra" in all_names,
+               "workspace/symbol empty query returns all top-level symbols")
+        res = c.request(445, "workspace/symbol", {"query": "no_such_symbol_xyz"})
+        expect_eq(res.get("result"), [], "workspace/symbol no match -> []")
+
+        res = c.request(446, "shutdown", None)
+        expect_eq(res.get("result"), None, "workspace client shutdown ok")
+        c.notify("exit", None)
+        rc = c.wait_exit()
+        expect_eq(rc, 0, "workspace client exits cleanly")
     finally:
         if c.proc.poll() is None:
             c.proc.kill()
@@ -1271,6 +1413,8 @@ def main():
         test_folding_range(c, uri_fold)
         print("[7j] new capabilities advertised in initialize")
         test_new_capabilities(server, compiler)
+        print("[7k] formatting / workspace symbol")
+        test_formatting_and_workspace_symbol(server, compiler)
         print("[8] unicode framing")
         test_unicode(c, uri_c)
         print("[9] malformed JSON resilience")

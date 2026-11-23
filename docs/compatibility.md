@@ -171,6 +171,11 @@ float 除法直接发 `divsd`，没有除零检查，于是按 IEEE 754 得到 `
   哈希、`__eq__` 比较（等值不同对象命中同一个键）；**只有 `__eq__` 没有 `__hash__` 的类在
   unknown 域抛 `TypeError: unhashable type`（CPython 口径）；typed 域保持既有文档化口径
   （只定义 `__eq__` 的类作 typed dict 键仍按身份处理，`hash()` 编译期报错）。
+- **`sorted(xs, key=f)` 的键比较（0.463）**：`f` 的返回类型推不出来时按运行期键族
+  比较，与 `list.sort()` 的 kind-3 同口径——全数值按数值、全 str 按字节、类实例键按
+  `__lt__` 逐对分派；没有 `__lt__` 的实例仍是上面的 `object`/`object` TypeError。
+  unknown 的**元组/列表键**明确报错（不静默按堆地址）；给 `f` 标注返回类型可走
+  字典序描述符路径。
 
 ### 只定义 `__eq__` 的类作 dict 键：typed 域 vs unknown 域（0.435 记录）
 

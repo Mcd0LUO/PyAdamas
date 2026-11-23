@@ -7,10 +7,10 @@ pya-lsp 完全由 .pya 实现、由 pyadamas build 编译成原生可执行文�
 
 | 文件 | 说明 |
 |---|---|
-| main.py | LSP 服务器主体：stdio 传输、生命周期、文档同步、诊断、documentSymbol、hover、completion、definition、semanticTokens |
+| main.py | LSP 服务器主体：stdio 传输、生命周期、文档同步、诊断、documentSymbol、hover、completion、definition、semanticTokens、references/rename、signatureHelp、documentHighlight、foldingRange、formatting、workspace/symbol |
 | minijson.py | 动态 JSON 的**函数式访问薄层**：parse/stringify 走 runtime 的 json.parse / json.stringify，其余保留旧的宽容访问器语义（取不到返回 null、""、0、[]） |
 | build.sh | 构建脚本，输出 pya-lsp |
-| ../../tests/lsp/smoke.py | python3 冒烟测试（被测对象是编译出的 .pya 二进制），当前 **119 条断言** |
+| ../../tests/lsp/smoke.py | python3 冒烟测试（被测对象是编译出的 .pya 二进制），当前 **228 条断言** |
 | ../../tests/lsp/smoke.sh | 冒烟测试入口（缺二进制时先构建） |
 | LANGUAGE_GAPS.md | 写这个服务器撞到的语言/运行时缺口（含最小复现、现状） |
 
@@ -64,7 +64,7 @@ type / as_dict / as_list / as_str / as_int / as_bool / len / keys），minijson.
 
 | 方法 | 说明 |
 |---|---|
-| initialize | capabilities：full sync / hover / documentSymbol / completion(. 触发) / definition / semanticTokens(full) + legend |
+| initialize | capabilities：full sync / hover / documentSymbol / completion(. 触发) / definition / semanticTokens(full) / references / rename / signatureHelp / documentHighlight / foldingRange / formatting / workspaceSymbol + legend |
 | initialized / exit | 通知，不回包；shutdown 后的 exit 退出码 0，否则 1 |
 | shutdown | 回 result: null，之后请求回 -32600 |
 | textDocument/didOpen / didChange / didClose | 内存文档表；didChange 支持全量与增量（range）替换；**didChange 有 debounce**（见下） |
@@ -74,6 +74,13 @@ type / as_dict / as_list / as_str / as_int / as_bool / len / keys），minijson.
 | textDocument/completion | 三类候选：当前文档顶层符号、import 过的模块成员（静态表 + 模块名）、Python 关键字；光标前缀过滤，上限 100 条，返回 label/kind/detail |
 | textDocument/definition | 光标标识符 -> 定义位置：任意缩进的 def/async def/class、顶层赋值、形参（跳所在函数）；找不到返回 null |
 | textDocument/semanticTokens/full | 关键字/字符串/数字/注释/类名/函数名/变量；标准 5 元组 delta 编码，长度与列按 **UTF-16 code unit** |
+| textDocument/references | 光标符号 -> 文档内所有整词出现位置（跳过注释与普通/三引号字符串），返回 Location[] |
+| textDocument/rename | 文档内整词重命名，返回 WorkspaceEdit（单文件 changes）；不支持 prepareRename/documentChanges |
+| textDocument/signatureHelp | 最内层调用括号 -> 文档内 def 的签名；activeParameter 按深度 0 逗号数（跳过字符串/注释/嵌套括号），支持跨行调用 |
+| textDocument/documentHighlight | 整词扫描：写入/赋值目标/形参 Write(3)，其余 Text(1)；range 按 UTF-16 列 |
+| textDocument/foldingRange | def/class 块（到块最后一行）、≥2 行连续注释、跨行三引号字符串；kind=region/comment，按 startLine 排序 |
+| textDocument/formatting | 保守版：行首缩进按块层级归一到 4 空格 + 行尾空白清理；不重排表达式、不合并/拆分代码行；返回全文 TextEdit[] |
+| workspace/symbol | 用 initialize 的 rootUri 递归扫 `.py`/`.pyi`（上限 2000 文件），复用 scan_symbols 返回 SymbolInformation[]；query 按子串过滤 |
 | 其他 | 请求回 -32601 MethodNotFound；通知静默忽略 |
 
 ## completion 实现要点
@@ -101,6 +108,38 @@ type / as_dict / as_list / as_str / as_int / as_bool / len / keys），minijson.
 - token 化：# 到行尾是注释；普通引号字符串（含反斜杠转义）；三引号跨行字符串按行
   继续（docstring 每行都是 string token，闭合行只覆盖引号本身）；数字（十进制/小数/
   指数/0x 0b 0o 前缀）；标识符 -> 关键字/类名/函数名/变量。
+
+## references / rename 实现要点
+
+- 两者共用一份「整词扫描」：跳过 `#` 注释与普通/三引号字符串，其余按标识符边界匹配，
+  range 列按 UTF-16 code unit 计。
+- references 只返回**当前文档**内的出现位置（没有 workspace 索引；跨文件符号返回空）。
+- rename 生成单文件 `WorkspaceEdit.changes`，把命中的整词替换为新名字；
+  不实现 `textDocument/prepareRename`，也不返回 `documentChanges` / 版本化编辑。
+
+## signatureHelp / documentHighlight / foldingRange 实现要点
+
+- signatureHelp：从文件头正向扫描并用括号栈找「包含光标的最内层 `(`」，取 `(` 前的标识符，
+  复用 hover 的 `find_def_line` 提签名；`activeParameter` = 该 `(` 到光标间括号深度 0 的
+  逗号数（跳过字符串/注释/嵌套括号）。支持跨行调用与无参函数（`parameters=[]`）；
+  光标不在调用括号内返回 null。签名只认**当前文档**里的 def，跨文件/内建模块不识别。
+- documentHighlight：整词扫描（跳过注释/字符串），命中定义、赋值目标、形参标 Write(3)，
+  其余标 Text(1)。它是文本级扫描，不是作用域分析——同名但不同作用域的标识符会一起高亮。
+- foldingRange：折叠 def/class 块（startLine 到块最后一行）、≥2 行连续注释、跨行三引号
+  字符串；kind 用 region/comment，按 startLine 排序，空文档返回 []。
+
+## formatting / workspace/symbol 实现要点
+
+- formatting 只改两件事：**行首缩进**（按块层级归一到 4 空格，tab 按 4 计）与
+  **行尾空白**。括号续行（上一行有未闭合的 `(`/`[`/`{`）与三引号字符串内部原样保留；
+  不重排表达式、不合并/拆分代码行。`else/elif/except/finally` 先退一层再对齐。
+  输出是逐行整行替换的 TextEdit（start.character 恒为 0），格式化已规范的文本返回 []（幂等）。
+- workspace/symbol 用 initialize 的 `rootUri`（缺失时 `workspaceFolders[0].uri`，再退
+  `rootPath`）；递归遍历时跳过隐藏目录、`__pycache__`、`build`、`node_modules`，最多 2000 个
+  `.py`/`.pyi`；只索引顶层 def/async def/class/赋值（与 documentSymbol 同口径），返回
+  `SymbolInformation`（location.uri 为 `file://` URI，range 指向定义行）。
+- 已知限制：不实现 `formatting` 的 range 格式化（忽略 options.range）；不做表达式换行/
+  对齐；workspace/symbol 没有 workspace 级缓存，每次请求重新扫盘；多根工作区只用第一个。
 
 ## didChange debounce（增量合并）
 
@@ -130,7 +169,10 @@ LSP 是单线程读循环，没有 timer 线程。实现方式：
 - **传输层依赖无缓冲 fd 0 的 poll**：非 POSIX 平台上 asyncio.wait_readable 不可用时，
   stdin_ready() 会吞异常返回 False（退化成「不合并、每帧立即诊断」，仍然能用）。
 - **只支持全量文档同步**（change=1）：增量 range 在服务器端应用，但客户端配置仍是 Full。
-- 没有实现（留给下一轮）：textDocument/references、rename、formatting、codeAction、
-  completionItem/resolve、signatureHelp、workspace/symbol、workspace 级诊断、
+- **references / rename / signatureHelp 只认当前文档**：跨文件 import 的符号不参与；
+  rename 不含 `prepareRename` 与 `documentChanges`。
+- **formatting 是保守版**：只归一缩进与行尾空白，不重排/换行表达式；workspace/symbol 只索引
+  顶层符号、每次重新扫盘。
+- 没有实现（留给下一轮）：codeAction、completionItem/resolve、workspace 级诊断、
   semanticTokens/range 和 delta。
 - 冒烟测试含时序护栏：每帧往返必须 < 1s（防止 stdin 读语义回退成「等 EOF」）。

@@ -675,60 +675,40 @@ TypePtr TypeChecker::method_call(TypePtr recv, const std::string& name, Call& c,
             if (!c.keywords.empty())
                 err(c.line, c.col,
                     std::format("pathlib.Path.{}() does not take keyword arguments", name));
-            if (name == "exists" || name == "is_file" || name == "is_dir") {
-                argc(0, 0);
-                return t_bool();
-            }
-            if (name == "read_text") {
-                argc(0, 0);
-                return t_str();
-            }
-            if (name == "write_text") {
-                argc(1, 1);
-                return t_int();
-            }
-            if (name == "iterdir") {
-                argc(0, 0);
-                return mk_list(new_ty(TyKind::Path));
-            }
-            if (name == "glob") {
-                argc(1, 1);
-                return mk_list(new_ty(TyKind::Path));
-            }
-            if (name == "unlink" || name == "rmdir" || name == "touch") {
+            // unlink/rmdir 没有 pa_path_* 运行期入口（降级是 PathStr + OsRemove/
+            // OsRmdir），声明文件表达不了，保留在这里。
+            if (name == "unlink" || name == "rmdir") {
                 argc(0, 0);
                 return t_none();
             }
-            if (name == "with_suffix") {
-                argc(1, 1);
+            const auto* info = nativesig::class_info("pathlib", "Path");
+            if (!info) return t_unknown();
+            auto it = info->methods.find(name);
+            if (it == info->methods.end()) {
+                err(c.line, c.col, std::format("pathlib.Path has no method '{}'", name));
+                return t_unknown();
+            }
+            const FuncInfoPtr& fn = it->second;
+            if (!fn->varargs) {
+                size_t ndef = 0;
+                for (auto& pp : fn->pos) if (pp.has_default) ++ndef;
+                argc(fn->pos.size() - ndef, fn->pos.size());
+            }
+            for (size_t i = 0; i < a.size() && i < fn->pos.size(); ++i) {
+                TypePtr want = fn->pos[i].ty;
+                TypePtr got = a[i];
+                if (!want || !got || is_unknown(want) || is_unknown(got)) continue;
+                if (assignable(want, got)) continue;
+                err(c.args[i]->line, c.args[i]->col,
+                    std::format("argument '{}' of 'pathlib.Path.{}' expects '{}', got '{}'",
+                                fn->pos[i].name, name, type_name(want), type_name(got)));
+            }
+            // 返回类型按接收者特化（pysig 用 object 占位）。
+            if (name == "iterdir" || name == "glob") return mk_list(new_ty(TyKind::Path));
+            if (name == "with_suffix" || name == "joinpath" || name == "relative_to" ||
+                name == "resolve" || name == "absolute")
                 return new_ty(TyKind::Path);
-            }
-            if (name == "read_bytes") {
-                argc(0, 0);
-                return t_bytes();
-            }
-            if (name == "write_bytes") {
-                argc(1, 1);
-                if (a.size() == 1 && a[0] && !is_unknown(a[0]) &&
-                    a[0]->kind != TyKind::Bytes)
-                    err(c.args[0]->line, c.args[0]->col,
-                        std::format("write_bytes() expects bytes, got '{}'", type_name(a[0])));
-                return t_int();
-            }
-            if (name == "is_absolute") {
-                argc(0, 0);
-                return t_bool();
-            }
-            if (name == "joinpath" || name == "relative_to") {
-                argc(1, 1);
-                return new_ty(TyKind::Path);
-            }
-            if (name == "resolve" || name == "absolute") {
-                argc(0, 0);
-                return new_ty(TyKind::Path);
-            }
-            err(c.line, c.col, std::format("pathlib.Path has no method '{}'", name));
-            return t_unknown();
+            return fn->ret_known ? fn->ret : t_unknown();
         }
         if (recv->kind == TyKind::Deque) {
             if (!c.keywords.empty())

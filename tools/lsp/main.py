@@ -10,6 +10,7 @@
 
 import sys
 import os
+from os.path import isdir
 import asyncio
 import time
 import subprocess
@@ -1370,6 +1371,321 @@ def handle_folding_range(id_text: str, params: unknown) -> None:
     send_frame(rpc_result(id_text, folding_ranges_json(doc_texts[idx])))
 
 
+# ---------------- workspace：根目录 / 文件遍历 / URI ----------------
+
+workspace_root: str = ""
+workspace_uri: str = ""
+
+def hex_val(c: str) -> int:
+    o: int = ord(c)
+    if o >= 48 and o <= 57:
+        return o - 48
+    if o >= 97 and o <= 102:
+        return o - 87
+    if o >= 65 and o <= 70:
+        return o - 55
+    return -1
+
+def uri_decode(s: str) -> str:
+    out: str = ""
+    i: int = 0
+    while i < len(s):
+        if s[i] == "%" and i + 2 < len(s):
+            hi: int = hex_val(s[i + 1])
+            lo: int = hex_val(s[i + 2])
+            if hi >= 0 and lo >= 0:
+                out = out + chr(hi * 16 + lo)
+                i = i + 3
+                continue
+        out = out + s[i]
+        i = i + 1
+    return out
+
+def file_uri_to_path(uri: str) -> str:
+    if not uri.startswith("file://"):
+        return ""
+    rest: str = uri[len("file://"):]
+    if not rest.startswith("/"):
+        slash: int = rest.find("/")
+        if slash < 0:
+            return ""
+        rest = rest[slash:]
+    path: str = uri_decode(rest)
+    # Windows：file:///C:/x -> C:/x
+    if len(path) >= 3 and path[0] == "/" and path[2] == ":":
+        path = path[1:]
+    return path
+
+def uri_escape_path(p: str) -> str:
+    out: str = ""
+    i: int = 0
+    while i < len(p):
+        c: str = p[i]
+        if c == " ":
+            out = out + "%20"
+        elif c == "%":
+            out = out + "%25"
+        elif c == "#":
+            out = out + "%23"
+        elif c == "?":
+            out = out + "%3F"
+        else:
+            out = out + c
+        i = i + 1
+    return out
+
+def path_to_file_uri(p: str) -> str:
+    if p.startswith("/"):
+        return "file://" + uri_escape_path(p)
+    return "file:///" + uri_escape_path(p)
+
+def capture_workspace(params: unknown) -> None:
+    global workspace_root
+    global workspace_uri
+    ru: str = minijson.get_str(params, "rootUri")
+    if ru == "":
+        folders: unknown = minijson.get_arr(params, "workspaceFolders")
+        if minijson.size(folders) > 0:
+            ru = minijson.get_str(minijson.at(folders, 0), "uri")
+    if ru == "":
+        rp: str = minijson.get_str(params, "rootPath")
+        if rp != "":
+            workspace_root = rp
+            workspace_uri = path_to_file_uri(rp)
+        return
+    workspace_uri = ru
+    workspace_root = file_uri_to_path(ru)
+
+def collect_py_files(root: str, depth: int, out: list[str]) -> None:
+    if depth > 12 or len(out) >= 2000:
+        return
+    try:
+        names: list[str] = os.listdir(root)
+    except OSError:
+        return
+    i: int = 0
+    while i < len(names) and len(out) < 2000:
+        nm: str = names[i]
+        full: str = root + "/" + nm
+        if nm.startswith("."):
+            i = i + 1
+            continue
+        is_dir: bool = False
+        try:
+            is_dir = isdir(full)
+        except OSError:
+            is_dir = False
+        if is_dir:
+            if nm != "__pycache__" and nm != "build" and nm != "node_modules":
+                collect_py_files(full, depth + 1, out)
+        elif nm.endswith(".py") or nm.endswith(".pyi"):
+            out.append(full)
+        i = i + 1
+
+def read_text_file(path: str) -> str:
+    try:
+        f = open(path, "r")
+        text: str = f.read()
+        f.close()
+        return text
+    except OSError:
+        return ""
+
+def workspace_symbols_json(query: str) -> str:
+    if workspace_root == "":
+        return "[]"
+    files: list[str] = []
+    collect_py_files(workspace_root, 0, files)
+    parts: list[str] = []
+    fi: int = 0
+    while fi < len(files):
+        path: str = files[fi]
+        text: str = read_text_file(path)
+        uri: str = path_to_file_uri(path)
+        syms: list[Symbol] = scan_symbols(text)
+        si: int = 0
+        while si < len(syms):
+            s: Symbol = syms[si]
+            if query == "" or s.name.find(query) >= 0:
+                parts.append('{"name":' + minijson.quote(s.name) +
+                             ',"kind":' + str(s.kind) +
+                             ',"location":{"uri":' + minijson.quote(uri) +
+                             ',"range":' + range_json(s.line, s.col, s.line,
+                                                      s.col + len(s.name)) + '}}')
+            si = si + 1
+        fi = fi + 1
+    log("workspace/symbol -> " + str(len(parts)) + " symbol(s) from " +
+        str(len(files)) + " file(s)")
+    return "[" + ",".join(parts) + "]"
+
+def handle_workspace_symbol(id_text: str, params: unknown) -> None:
+    query: str = minijson.get_str(params, "query")
+    send_frame(rpc_result(id_text, workspace_symbols_json(query)))
+
+# ---------------- formatting：保守缩进归一 + 行尾空白 ----------------
+#
+# 只改两件事：行首缩进（按块层级归一到 4 空格）与行尾空白。
+# 绝不重排表达式、合并/拆分代码行；括号续行与三引号字符串内部原样保留。
+
+class LineScan:
+    delta: int
+    opens: bool
+    triple: str
+    code_end: int
+
+    def __init__(self) -> None:
+        self.delta = 0
+        self.opens = False
+        self.triple = ""
+        self.code_end = -1
+
+def scan_code_line(raw: str) -> LineScan:
+    st: LineScan = LineScan()
+    i: int = 0
+    quote: str = ""
+    while i < len(raw):
+        c: str = raw[i]
+        if quote != "":
+            if c == "\\":
+                i = i + 2
+                continue
+            if c == quote:
+                quote = ""
+                st.code_end = i
+            i = i + 1
+            continue
+        if c == "#":
+            break
+        if c == '"' or c == "'":
+            if raw[i:i + 3] == c + c + c:
+                j: int = raw.find(c + c + c, i + 3)
+                if j < 0:
+                    st.triple = c + c + c
+                    st.code_end = i + 2
+                    break
+                st.code_end = j + 2
+                i = j + 3
+                continue
+            quote = c
+            st.code_end = i
+            i = i + 1
+            continue
+        if c == "(" or c == "[" or c == "{":
+            st.delta = st.delta + 1
+        elif c == ")" or c == "]" or c == "}":
+            st.delta = st.delta - 1
+        if c != " " and c != "\t":
+            st.code_end = i
+        i = i + 1
+    st.opens = st.code_end >= 0 and raw[st.code_end] == ":"
+    return st
+
+def fmt_indent_width(raw: str) -> int:
+    w: int = 0
+    i: int = 0
+    while i < len(raw):
+        c: str = raw[i]
+        if c == " ":
+            w = w + 1
+        elif c == "\t":
+            w = w + 4
+        else:
+            break
+        i = i + 1
+    return w
+
+def is_dedent_keyword(s: str) -> bool:
+    if s == "else:" or s.startswith("else: "):
+        return True
+    if s.startswith("elif "):
+        return True
+    if s == "except:" or s.startswith("except ") or s.startswith("except("):
+        return True
+    if s == "finally:" or s.startswith("finally: "):
+        return True
+    return False
+
+def line_edit_json(line_no: int, old: str, new: str) -> str:
+    end: int = u16_prefix_len(old, len(old))
+    return ('{"range":' + range_json(line_no, 0, line_no, end) +
+            ',"newText":' + minijson.quote(new) + '}')
+
+def compute_format_edits(text: str) -> list[str]:
+    lines: list[str] = text.split("\n")
+    edits: list[str] = []
+    widths: list[int] = [0]
+    levels: list[int] = [0]
+    bracket: int = 0
+    prev_opens: bool = False
+    triple: str = ""
+    ln: int = 0
+    while ln < len(lines):
+        raw: str = lines[ln]
+        if triple != "":
+            if raw.find(triple) >= 0:
+                triple = ""
+            ln = ln + 1
+            continue
+        st: LineScan = scan_code_line(raw)
+        if st.triple != "":
+            triple = st.triple
+        content: str = raw[leading_ws(raw):]
+        if content.strip() == "":
+            if raw != "" and raw != "\r":
+                blank: str = ""
+                if raw.endswith("\r"):
+                    blank = "\r"
+                edits.append(line_edit_json(ln, raw, blank))
+            ln = ln + 1
+            continue
+        cur_w: int = fmt_indent_width(raw)
+        continuation: bool = bracket > 0
+        if not continuation:
+            if is_dedent_keyword(content.strip()) and len(widths) > 1:
+                widths.pop()
+                levels.pop()
+            while len(widths) > 1 and cur_w < widths[len(widths) - 1]:
+                widths.pop()
+                levels.pop()
+            if cur_w > widths[len(widths) - 1]:
+                if prev_opens:
+                    widths.append(cur_w)
+                    levels.append(levels[len(levels) - 1] + 1)
+                else:
+                    continuation = True
+        if continuation:
+            bracket = bracket + st.delta
+            prev_opens = st.opens
+            ln = ln + 1
+            continue
+        lvl: int = levels[len(levels) - 1]
+        desired: str = " " * (4 * lvl)
+        if st.triple != "":
+            new_line: str = desired + content
+        else:
+            cr: str = ""
+            body: str = content
+            if body.endswith("\r"):
+                cr = "\r"
+                body = body[:len(body) - 1]
+            new_line = desired + body.rstrip() + cr
+        if new_line != raw:
+            edits.append(line_edit_json(ln, raw, new_line))
+        bracket = bracket + st.delta
+        prev_opens = st.opens
+        ln = ln + 1
+    return edits
+
+def handle_formatting(id_text: str, params: unknown) -> None:
+    uri: str = uri_of(params)
+    idx: int = doc_index(uri)
+    if idx < 0:
+        send_frame(rpc_result(id_text, "[]"))
+        return
+    edits: list[str] = compute_format_edits(doc_texts[idx])
+    log("formatting -> " + str(len(edits)) + " edit(s)")
+    send_frame(rpc_result(id_text, "[" + ",".join(edits) + "]"))
+
 # ---------------- 各方法处理 ----------------
 
 def init_result() -> str:
@@ -1386,6 +1702,7 @@ def init_result() -> str:
                  '"completionProvider":{"triggerCharacters":["."]},'
                  '"definitionProvider":true,'
                  '"referencesProvider":true,"renameProvider":true,'
+                 '"documentFormattingProvider":true,"workspaceSymbolProvider":true,'
                  '"semanticTokensProvider":{"legend":{"tokenTypes":[' +
                  ",".join(types_json) + '],"tokenModifiers":[]},"full":true},'
                  '"signatureHelpProvider":{"triggerCharacters":["(",","]},'
@@ -1586,6 +1903,7 @@ def run() -> int:
         params: unknown = params_of(msg)
         log("method=" + method + " id=" + id_text)
         if method == "initialize":
+            capture_workspace(params)
             send_frame(rpc_result(id_text, init_result()))
         elif method == "initialized":
             pass
@@ -1626,6 +1944,10 @@ def run() -> int:
             handle_document_highlight(id_text, params)
         elif method == "textDocument/foldingRange":
             handle_folding_range(id_text, params)
+        elif method == "textDocument/formatting":
+            handle_formatting(id_text, params)
+        elif method == "workspace/symbol":
+            handle_workspace_symbol(id_text, params)
         else:
             if has_id:
                 send_frame(rpc_error(id_text, -32601, "method not found: " + method))

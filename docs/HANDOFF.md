@@ -1,64 +1,118 @@
-# 接续 Handoff（额度耗尽暂停点）
+# 接续 Handoff —— 0.462（HEAD 668449f）
 
-> 写于 2026-11-21 上午。用户额度耗尽叫停。本文档供下一会话无缝接续。
-> **当前 master = origin/master = `8e8873e`（0.356），已同步。夜间自主集成 24 版（0.333-0.356）。**
+> 2026-11-23 23:10 快照。仓库 `/src/luo-proj/pyadamas`，master = origin/master = `668449f`。
+> 工作区另有**未提交**的 0.463–0.466（见 §4）：sorted 类实例键修复、Path 迁移、
+> LSP formatting/workspace symbol、fannkuch kind0 写路径。
+> 本文档覆盖状态、闸门、已交付、剩余任务与纪律；下次交接直接覆盖。
 
-## 0. 立即接续：P3 big BigInt（用户点名要做，未完成）
+## 0. 会话形态与推送
 
-**活跃 worktree `/tmp/wt-big2`，分支 big2，HEAD `0e70907`**（基线 master 8e8873e/0.356）。代理名 big-int2（qwen4-max-preview，已停，可 send_message 恢复或派新代理）。
+- 直接在服务器仓库根运行；日常用户是 **celestea**（uid 1003），构建/测试/基准都在本地跑。
+- **不要用 root 跑构建/测试**：root 会在 `build/lead/modcache`、`/tmp` 留下 root 属主文件，
+  celestea 之后会撞 `fs.protected_regular`（现象：`Permission denied` / `cannot write mod.s`），
+  看起来像测试失败。确需 root 操作后，把 `build/lead`、`build/gfix` chown 回 celestea，
+  并清掉测试临时文件。
+- push 走 root（GitHub 密钥在 /root/.ssh）：
 
-### 已完成 commit
-| commit | 块 | 内容 | 验证状态 |
-|---|---|---|---|
-| b6005d8 | A 运行时 | rt_big.c（985 行，从 big1 拷贝适配）+ rt_internal.h PYADAMAS_RC_BIGINT=9 + PyAdamasBig + 30 个 pa_big_* 声明 + rt_format.c pa_big_fmt + CMake RT_PARTS 加 big（rt.o/rt_asan.o 合并）+ tools/bigfuzz | ✅ **bigfuzz CPython 对拍 normal 98324 + ASan/GC 36926 例零差异，ASan leak/UAF 全 0** |
-| 32cc212 | B 类型+字面量 | TyKind::Big/CK::Big/t_big()/`a:big` 标注/int_promote·join·assignable big 顶层/BIG tag=12(static_tag_of)/ir_is_heap·ref/超 u64 十进制字面量→big（u64 路径逐字不动）/±big 折叠/u64_lit big 上下文消费/跨模块 type=24·default tag=9/IrOp::ConstBig 永生静态字面量（编译期 Horner 转 limb，.Lbig 数据段+strtab）/codegen_big.cpp | ✅ 构建+冒烟，365 u64 回归过，limb 编码 CPython 逐位一致 |
-| 0e70907 | C 降级 WIP | RtFn 28 个 big 入口+装填分类/lower_binop big 分支(add·sub·mul·floordiv·mod·pow·and·or·xor·shift)/big 真除 pa_big_truediv 精确舍入/一元 neg·not/**比较重构 lower_cmp_single**(big/big·big/int 转 big 比·big/float 精确混比含 NaN·链式比较按静态类型落槽)/convert_to·coerce 进出 big/truth_bool/print(big) | ⚠️ **仅构建过(-Werror)，未跑任何运行回归** |
+  ```bash
+  ssh -i /home/celestea/.ssh/id_ed25519_root_mc -o BatchMode=yes \
+    -o UserKnownHostsFile=/home/celestea/.ssh/known_hosts -o ConnectTimeout=8 root@127.0.0.1 \
+    'cd /src/luo-proj/pyadamas && git push origin master'
+  ```
 
-### 剩余工作（按优先级，big-int2 接手清单）
-1. **块C 运行验证**：写最小 big 程序 `build/pyadamas run -o build/p build/smoke_big.py` 冒烟（print/算术/比较/真除/链式比较已接好），修运行期问题。
-2. **块D unknown 链路**（关键缺符号）：`pa_any_to_big` 运行时函数**还没写**（RtFn/声明已占位，big 程序走 unknown→big 会缺符号链接失败）。rt_any.c：探针 BIGINT→inc 返回/int→from_i64/float 盒→from_f64；load_tag/ANY_BIG 算术·比较；rt_str.c repr/print_any/str_any BIGINT kind 分派；pa_any_type BIG→类型码。
-3. **块E builtins**：str/repr/hex/bin/oct/abs/pow/format/int(big)/float(big)/f-string Big 分派（lower_builtin_text/misc 位置已勘明未改）；typecheck int(big)→big 恒等。
-4. **补拦截**：int<<big 计数（typecheck 放行但降级会错，需拦）。
-5. 回归 tests/run/395+（big 算术/大数 2^100·阶乘/转换 i64↔big/repr/位运算/幂/除零/unknown 进出/builtins，**CPython 逐字节对拍**）。
-6. **全闸门**（块B/C asm 不变性目前只有设计论证无实测）：现有 int 程序 asm 逐字节不变(38 基准 cmp)+difftest 0+全套件 normal/ASan(JOBS=1)+CPython big 零差异+语料零差异+ASan leak 13/174 钉子+big 用例+check_size 无新增超限。
-7. docs/big-landing.md + CHANGELOG 0.357 + 集成 master（merge --no-ff，重建 build/lead 复验，SSH 推送，清理 big2 worktree）。
+- git 需 `-c safe.directory=/src/luo-proj/pyadamas`（celestea 全局已配）。
 
-### BigInt 已定死边界（负面，文档化）
-- big+float→big（float 侧 int(float) 截断，pa 格口径，任务点名）。
-- big**负指数→ValueError（CPython 返 float）。
-- big→int 是 cast 截断。
-- list[big] 相等/排序/dict 键哈希仍机器字口径（未接）。
-- 语义黄金标准 CPython：//向下取整/%与除数同号/负移位算术右移/位运算无限补码/除零 ZeroDivisionError 可捕获。
+## 1. 环境与构建目录
 
-### 运行时设计要点（rt_big.c）
-RC 头+{int64_t nd; uint32_t d[]}，nd 带符号 limb 数(CPython ob_size 口径)，基 2^32 小端规范化无最高位零 limb，柔性数组内联同一 malloc 块，**immutable**（运算产新对象，free(h) 即可无 dtor）。kind=PYADAMAS_RC_BIGINT tracked rc_alloc，无堆出边不成环，unknown 探针认识。永生静态字面量 pa_register_literals。入口操作数借用、返回 rc=1，中间量裸 malloc/free(PA_FREE_SCOPE)或 pa_gc_pin，别裸露半成品 RC 跨分配点。
+| 项 | 值 |
+|---|---|
+| 版本 | 0.462（HEAD `668449f`）；工作区未提交 0.463 |
+| 服务器 | Debian 13，Xeon Gold 6252，容器 cpuset 48 核 |
+| 工具链 | gcc 15.2、cmake 3.31、ninja、python 3.13、go |
+| build/lead | 工作构建（编译器 + rt.o/rt_asan.o/rt_debug.o） |
+| build/release | 0.271 语料 oracle，**绝不重建** |
+| build/gfix | 套件/difftest 构建目录（checkall 默认） |
+| build/asan、build/gXXX | 历史实验目录，忽略 |
 
-## 1. 其它 worktree
-- `/tmp/wt-big1`（big1，06106e5）：**旧** P3 partial（基线 0.341，重构前），rt_big.c 原始 985 行 + 未提交 Big TyKind/codegen WIP。big2 已拷贝其 rt_big.c，big1 可清理（git worktree remove --force /tmp/wt-big1 && git branch -D big1）。
+构建：`cmake --build build/lead -j32`。
 
-## 2. 夜间已交付（0.333-0.356，24 版，全推送）
-详见 docs/optimization-roadmap.md 迭代日志。摘要：
-- 性能：SIMD 数值核(特化胜 Go/C++)/整数 BCE(matmul −25%)/regalloc/递归展开(fib −29%)/borrow(dict_wordfreq −4.5% 通用)/**编译速度 −46.8%(≈1.88×)**/**SIMD 通用化(非基准 1.93×)**/SIMD 深化(int 乘 2.36×·Convert 2.34×·多 reduction 1.38×，复活死代码 reduction 修 5 潜伏 bug)。
-- 语言：P1 定宽整数全(i8-i64/u8-u64/char/short+收尾)/P2 unknown 类型标签(pprint 解锁)/P4 全 4 块(异常类当值·suppress·file-io.StringIO·traceback·dataclass)。
-- stdlib 纯 pa：7 模块/tarfile/textwrap·string·pprint/statistics/configparser。
-- 重构：拆 5 超限文件(check_size 清零)。内存安全：ir.cpp vreg_str UAF/lower_impl.h 求值顺序 UB/异常捕获 leak(RC 环误判修正)/插值字符串 leak。
+## 2. 闸门与基线
 
-## 3. 其它 backlog（待用户定）
-- **编译器早返回漏 dec 通用修**：lowering release_slots 早返回用单遍部分槽标记漏 dec（var/v 堆写入前 slot_owned 未置）；通用修 fixup_early_return_releases 会改 a2_config_parse 基准 asm（其 coerce 自身潜伏 leak）违闸门→需连同基准 asm 基线独立处理。详见 docs/strfix-rc-early-return.md。
-- float32（F32 TyKind，P3 可选部分）。
-- SIMD AVX2（cpuid+xgetbv+ymm 池）/改序 float reduction（输出风险）。
-- stdlib 扩展（fractions/decimal 需 big；logging/unittest 复杂）。
+```bash
+bash tools/checkall.sh --full     # 约 3 分钟；必须整套跑
+```
 
-## 4. 纪律 / 环境（接续必读）
-- cwd /src/luo-proj/pyadamas。build/lead=当前 Release 对照（0.356）；**build/release=0.271 oracle 绝不重建**。
-- git 需 `-c safe.directory=<path>`。SSH 推送：`ssh -i /home/celestea/.ssh/id_ed25519_root_mc -o BatchMode=yes -o UserKnownHostsFile=/home/celestea/.ssh/known_hosts -o ConnectTimeout=8 root@127.0.0.1 'cd /src/luo-proj/pyadamas && git -c safe.directory=/src/luo-proj/pyadamas push origin master'`。
-- 集成套路：branch merge master 解冲突→独立复核闸门→master merge --no-ff→CHANGELOG 定版→重建 build/lead 复验→SSH 推→worktree remove --force + branch -d。CHANGELOG 最新在前，选择性 git add。
-- 每轮闸门：`bash tools/checkall.sh --full`（套件 JOBS=16 + difftest flock 独占 + check_size + 12 基准三档 + SIMD 量级，约 1 分钟）+ 相关 asm 逐字节不变 + 性能 abbench 交替绑核中位。
-  **ASan 不在默认闸门里**：仅当改动触及 `runtime/` 内存路径或 lowering 所有权时定点跑（过滤器 + `JOBS=16`），见 docs/semantics-audit-playbook.md §13。
-- 门控默认关 flag-off asm 逐字节不变是最高不变量。默认开：gc-sections(PYADAMAS_GC_SECTIONS=0 关)/VECT(PYADAMAS_VECT=0 关，0.384 起)。默认关 opt-in：SIMD(PYADAMAS_SIMD=1 开，0.384 起 —— 照着 bench 循环形状写的模板，不进默认管线)/LOOP_OPT/RA_OPT/INLINE_OPT/BORROW_OPT/TYPE_TAGS/LANG_GAPS/GC_INCR_MARK。
-- 模型：provider celestea（qwen4-max-preview 性能/运行时，deepseek-v4.1-flash stdlib）。harness 间歇早夭频繁→send_message 恢复（保留 WIP+上下文）。单槽位顺序（用户收回多代理并行）。
-- run_code timeoutMs≤600000+run_in_background 长任务；TS 模板 literals 含 C++ 反引号/${} 会 parse fail→用双引号 JS 串+\n 或 lines.join。bash cwd 每次重置（用 cd 或 git -C）。
-- 用户在线驱动， terse 指令，重通用性（反基准特化）/完整性/诚实负面结论。
+| 门 | 668449f 基线 | 加 0.463 用例后 |
+|---|---|---|
+| suite | 461 ran ok / 0 失败 | 462 ran ok / 0 失败 |
+| difftest | 433 / 0 不一致 | 434 / 0 |
+| bench 12×3 | 36/36 逐字节 | 36/36 |
+| 12 基准合计 | −8.54%（见 tools/perf_baseline.txt） | 同 |
+| LSP 冒烟 | 201 checks | 228 checks |
 
-## 5. 测试规模
-tests/run 至 394（395+ 待 big 写）；difftest 346/0；套件 365 ok；check_size 通过（0 超限）。
+- 性能口径：`instructions:u` 确定性；perf_baseline 阈值 +2% 警告 / +5% 失败。
+- ASan **不在默认闸门**；仅动 runtime/RC/GC/lowering 所有权时用过滤器定点跑，见
+  `docs/semantics-audit-playbook.md §13`。
+- difftest 必须独占（`tools/checkall.sh` 内置 `flock /tmp/pyadamas-difftest.lock`）；
+  lock 文件属主是 celestea，别 chown 成 root。
+
+## 3. 已交付（0.447 → 0.462）
+
+- **声明式签名**（.pysig）：time、os.path、math（57 函数）、sys、os、random 模块级、
+  random.Random、re.Pattern/Match（15 方法）、datetime 三类、collections.deque（10 方法）。
+  `src/native_sigs.h` + `stdlib/sigs/*.pysig`；新增原生 API 不再改 C++。
+- **声明语法统一**：`.pysig`/`.cpya` 都改成 Python 语法，共用 `src/pydecl.h`；
+  `.cpya` 支持 union/定长数组/`@packed`。
+- **语言**：enum/abc 编译期语义（0.456）；`.pysig` 类声明、`@ret_specialized`。
+- **标准库**：第 3 批纯 py（itertools/functools/logging/codecs）；22 个模块 CPython 对拍
+  验收（修 copy.copy/deepcopy、calendar 常量、decimal.to_integral_value 等）。
+- **LSP**（tools/lsp，纯 .pya，2116 行）：completion / definition / semanticTokens /
+  references / rename / signatureHelp / documentHighlight / foldingRange / 诊断 debounce；
+  冒烟 119 → 201。
+- **性能三条线**：rc_dec_unknown 特化（fannkuch −4.56%）、整数 Bin 留 %rax 融合
+  （collatz −20.5%、matmul −1.1%）、循环版本化+仿射 BCE（nqueens −11.35%）；
+  12 基准合计 −8.54%。
+- **P2（未提交）**：Path 声明化（0.464）、LSP formatting/workspace/symbol（0.465）、
+  fannkuch kind0 写路径（0.466，再 −5.61%）。
+
+## 4. 未提交改动（0.463–0.466）
+
+- **0.463 sorted 类实例键**：`runtime/rt_list.c` 的 `pa_list_sorted_by` 复用 kind-3
+  族分类/`__lt__` 分派（抽 `uk_sort_family`）；unknown float/big 键按数值比；相等键按
+  原下标稳定。`tests/run/559_sorted_key_class.py`。
+- **0.464 pathlib.Path 迁移**：`stdlib/sigs/pathlib.pysig`（构造器 + 18 方法）、
+  `declared_class_type`、method_call 声明查表；`/` 运算符、构造器降级、`mkdir` 关键字
+  白名单、参数装配保留 C++；`unlink`/`rmdir` 无 pa_path_* 入口保留 method_call。
+  C++ −22 行 / pysig +49 行；`tests/run/560_pathlib_pysig.py`。
+- **0.465 LSP formatting + workspace/symbol**：formatting 只归一缩进（4 空格）与行尾空白，
+  括号续行/三引号内部原样，幂等；workspace/symbol 扫 rootUri 下 `.py`/`.pyi`（≤2000），
+  复用 scan_symbols。冒烟 **201 → 228**。
+- **0.466 kind0 列表写路径**：`src/codegen_index.cpp` 的 hk==0 热路径 elem_kind 检查
+  合并为一次比较；fannkuch **33,292,318 → 31,424,592（−5.61%，累计约 −10%）**；
+  nqueens +0.28%（布局噪声）；`tools/perf_baseline.txt` 已更新 fannkuch。
+  **LoadSlot 块内 CSE 负收益已回退**（fannkuch +6.4%）。
+- 全闸门已过：**463 ran ok / difftest 435-0 / bench 36/36 / LSP 228 / perf warn=0 fail=0**。
+- `CHANGELOG.md` 0.463–0.466 + `docs/language.md`/`compatibility.md`/`native-stdlib-cookbook.md`
+  已同步。
+
+## 5. 分支与 worktree
+
+- 已清理：base-check、lsp-a/lsp-b、perf/a-d（7 个，均已合并）。
+- 保留：`/src/luo-proj/.wt/scan2-{cg,fe,rt}`（同一 commit `cdcbf3c`，scan2 后续用）。
+- 其余旧分支：backup_before_w5w9/w6/w7、fix/win_*（未合并，历史留档）、rc1、regalloc。
+
+## 6. 下一步（来自 /tmp/pyadamas-todo.md）
+
+- P2 已完成（0.464 Path / 0.465 LSP / 0.466 fannkuch），当前工作区未提交。
+- P3-T8 `check` 校验模块属性；T9 enum 剩余语义；T10 os.stat/datetime.strptime；
+  T11 内存调试覆盖二级缓冲。P3 先写方案再动手。
+- **账目缺口**：`35089ac`（re.Pattern/Match）、`56ab9f8`（datetime 三类）、`af2acf4`
+  （全局提升 + dict contains/get 融合）还没有 CHANGELOG 条目；若要补，另起 0.464+。
+
+## 7. 纪律（沿用）
+
+- 每轮：增量构建 → `checkall --full` → CHANGELOG + 选择性 `git add` → push。
+- 性能改动只许泛化（IR 结构判据），禁止基准/文件名特化；abbench 交替绑核，
+  profile 只找候选、abbench 定生死；布局敏感先 objdump。
+- 改语言语义/运行时行为必须同步 `language.md` / `compatibility.md` / `runtime.md`。
+- `docs/index.md` 的文档维护规则仍适用；CHANGELOG 数字必须是实测。
