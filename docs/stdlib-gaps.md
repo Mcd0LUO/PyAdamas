@@ -45,7 +45,7 @@
 | os | 原生 | 缺 `walk`、`environ`、`stat`、`system`；**`os.path.x` 不可用**（要单独 `import os.path`） | 通过 |
 | os.path | 原生 | join/basename/splitext/isdir/exists 可用 | 通过 |
 | re | 原生 | findall/sub/search 可用；条件组/Unicode 属性类不支持 | 通过 |
-| json | 原生 | **`loads` 必须给 sample**；缺 `ensure_ascii`/`default` | 通过（带 sample） |
+| json | 原生 | 静态 `loads` 仍必须给 sample；**动态 `parse`/`stringify` 已补**（0.390，无需 sample，null/bool 盒保真往返）+ 访问辅助 get/path/as_*/type/keys 等；缺 `ensure_ascii` 之外的自定义 `default`/object_hook | 通过（静态带 sample / 动态不带） |
 | collections | 原生 | **缺 `namedtuple`**；Counter/OrderedDict/defaultdict/deque 可用 | 通过 |
 | itertools | 原生 | 有 chain/islice/product/permutations/combinations/zip_longest/accumulate/repeat；**缺 `takewhile`/`dropwhile`/`groupby`/`starmap`/`count`/`cycle`/`tee`/`filterfalse`** | 通过 |
 | functools | 原生 | reduce/wraps/partial/lru_cache 可用；**缺 `cached_property`/`total_ordering`/`singledispatch`/`cmp_to_key`/`cache`** | 通过 |
@@ -76,22 +76,27 @@
 | **fractions** | **Python 源（部分）** | 阶段二补齐：Fraction 四则/比较/str；无一元负号（见第六节 bug）、无 float/str 构造 | 阶段二通过 |
 | **dataclasses** | **缺失** | `@dataclass` 名字被识别但 codegen 未实现（单个 `@dataclass` 报 `too many positional arguments`，`@dataclass(...)` 报 `builtin dataclass is not supported by the code generator yet`）。纯 shim 会让 P(1,2) 静默丢参（实测得到 0,0） | 编译失败 |
 | **contextlib** | **缺失** | `contextmanager` 做不了：包装器要把 `*args/**kwargs` 转发给 unknown 函数值，实测 build 报 `keyword arguments require a known function signature` | 编译失败 |
-| **io** | **缺失** | StringIO 可写纯类，但 `open` 写只收 str、二进制 IO 不支持，与 csv 等不互通 | 编译失败 |
-| **queue** | **缺失** | 单线程版可写；没线程，语义价值低 | 编译失败 |
+| **io** | Python 源 | StringIO/BytesIO 实现 file 协议面；csv.writer/reader 经 lang-gaps 门控直接收 StringIO | 通过（P4 块2） |
+| **queue** | Python 源 | 单线程版（heapq + time）；没线程，语义价值低 | 通过（0.446 实测可用） |
 | **pprint** | **缺失** | unknown 容器无法内省元素，做不出有意义的 pformat | 编译失败 |
 | **argparse** | **Python 源（0.326 交付）** | 跨模块动态属性使能后自举；CLI 面覆盖见 docs/stdlib-batch1.md | 通过（250–252） |
 | **configparser** | **Python 源（0.326 交付）** | INI 解析/插值/错误消息逐字对齐；SectionProxy 下标等长尾不做 | 通过（253–254） |
 | **gzip** | **Python 源 + C 胶水（0.326 交付）** | 系统 zlib（cimport）；compress 字节级同 CPython；GzipFile 整读整写 | 通过（255–256） |
 | **zlib** | **Python 源 + C 胶水（0.326 交付）** | compress/decompress/crc32/adler32；wbits 固定 15 | 通过（255） |
-| **struct** | **缺失** | 需要原生 pack/unpack；且 File 写只收 str，bytes 二进制 IO 不可用 | 编译失败 |
-| **shutil** | **缺失** | 二进制 IO 不支持、rmtree 缺 walk，性价比低 | 编译失败 |
-| **tempfile** | **缺失** | 需要 mkstemp/mkdtemp 原生原语（os 没有） | 编译失败 |
+| **struct** | Python 源（0.446 实测可用） | pack/unpack/calcsize/unpack_from/iter_unpack；支持 `b/B/h/H/i/I/l/L/q/Q/f/d/c/s/p/?/x` 与 `< > ! = @`；纯 Python IEEE754 位编解码；`s` 解包返回 str（bytes/str 共用表示），Q 高位按 int64 回绕 | 通过（515 对拍） |
+| **shutil** | Python 源（0.446 实测可用） | copy/copy2/copymove/move/rmtree 等常用面；受文件协议限制，二进制细节有差异 | 通过（已登记模块表） |
+| **tempfile** | Python 源（0.446 实测可用） | NamedTemporaryFile/TemporaryDirectory 等常用面；需 os.mkdir + random 兜底 | 通过（已登记模块表） |
+| **errno** | Python 源（stdlib-a 新增） | 20 个 POSIX 错误码常量 + errorcode 子集（dict[int,str]）；值同 CPython Linux | 通过（515 对拍） |
+| **stat** | Python 源（stdlib-a 新增） | 类型/权限位常量 + S_ISDIR/S_ISREG/S_ISLNK/S_ISFIFO/S_ISSOCK；S_IFMT 是掩码常量（CPython 是函数） | 通过（515 对拍） |
+| **shlex** | Python 源（stdlib-a 新增） | split/quote/join（posix 模式）；无 shlex 类 / posix=False / punctuation_chars | 通过（515 对拍 0 diff） |
+| **getpass** | Python 源（stdlib-a 新增） | getuser() 读 USER/LOGNAME/USERNAME，缺失返回 "unknown"；无 getpass()（无 TTY 原语） | 通过（515 对拍） |
+| **platform** | Python 源（stdlib-a 新增） | system()/machine()/release()/python_version()；无 os.uname，system/machine 为固定值，release 读环境变量 PYADAMAS_OS_RELEASE 兜底，python_version 是 PyAdamas 兼容版本号 | 通过（515） |
 | **decimal** | **受限** | 整数没有任意精度（溢出回绕 int64），Decimal 无法正确实现 | 编译失败 |
 | **unicodedata** | **受限** | 字符串是字节串，没有 Unicode 码点/字符表 | 编译失败 |
 | **threading** | **受限** | 运行时无线程/锁原语 | 编译失败 |
 | **weakref** | **受限** | 无弱引用（README：无 `__del__`/弱引用） | 编译失败 |
 | **inspect** | **受限** | 无运行期反射（无 `__code__`/`__dict__`） | 编译失败 |
-| **traceback** | **受限** | 无 traceback 对象（异常值只有消息） | 编译失败 |
+| **traceback** | Python 源（0.446 实测可用） | 格式化 sys.exc_info + __pa_tb_frames；无完整 traceback 对象语义 | 通过（已登记模块表） |
 | **pickle** | **受限** | 无反序列化/类型内省能力 | 编译失败 |
 | **copy** | **受限** | copy.copy 需要运行期类型分派，unknown 值上做不了 | 编译失败 |
 
@@ -118,15 +123,17 @@
 | 6 | uuid | 中 | 纯 Python 源 | getrandbits(128) + %032x | 已交付 |
 | 7 | fractions | 低-中 | 纯 Python 源 | gcd 归一化 + dunder 算术 | 已交付 |
 | 8 | textwrap/statistics/csv 补全 | 中 | 纯 Python 源 | TextWrapper / quantiles / DictReader+DictWriter | 已交付 |
-| 9 | io / queue | 低-中 | 纯 Python 源 | StringIO / 单线程队列 | 可做，价值有限 |
+| 9 | io / queue | 低-中 | 纯 Python 源 | StringIO / 单线程队列 | 已交付（0.446 实测可用） |
 | — | dataclasses | 高 | **需语言特性**（codegen 合成 `__init__`） | 纯 shim 静默丢实参，宁可先不做 | 需 lead 决策 |
 | — | contextlib | 中 | **需语言特性**（unknown 函数值 `*args` 转发） | 只能做 nullcontext 之类无用子集 | 需 lead 决策 |
 | — | functools/itertools/collections 补全 | 中-高 | **需改 src**（内建名单硬编码） | 同时动 builtin_sigs + typecheck + lower | 需 lead 决策 |
 | 10 | argparse | 中 | 纯 Python 源 + 前端使能（跨模块动态属性/object 形参/类型值） | 0.326 交付，见 docs/stdlib-batch1.md | 已交付 |
 | 11 | configparser | 中 | 纯 Python 源 | 0.326 交付 | 已交付 |
 | 12 | gzip/zlib | 中 | Python 源 + cimport zlib + C 胶水 | 0.326 交付 | 已交付 |
-| — | struct/tempfile/shutil | 中-低 | **需原生原语** | rt_os/rt_file 加二进制 IO、mkstemp、stat | 暂缓 |
-| — | decimal/unicodedata/threading/weakref/inspect/traceback/pickle/copy/pprint | 低 | **需运行时能力** | 见矩阵 | 暂缓 |
+| — | struct/tempfile/shutil | 中-低 | 纯 Python 源（0.446 实测可用） | 已登记模块表 | 已交付 |
+| — | decimal/unicodedata/threading/weakref/inspect/pickle/copy/pprint | 低 | **需运行时能力** | 见矩阵 | 暂缓 |
+| 13 | errno/stat/shlex/getpass/platform | 中-高 | 纯 Python 源 | 常量 + 简单函数；stdlib-a 批次已交付 | 已交付（需登记模块表） |
+| 14 | csv 补全（DictReader(text)/DictWriterText） | 中 | 纯 Python 源 | 内存版 DictWriter + text 分派 | 已交付 |
 
 ## 五、阶段二交付（已实现，全部走 stdlib/*.py）
 
@@ -182,4 +189,30 @@ $ PYADAMAS_TEST_JOBS=4 bash tests/run_tests.sh build/std build/std/pyadamas
   ```
   影响：fractions 因此不定义 `__neg__`；任何自定义数值类的取反都会炸。
 - `list(obj)` 不能消费只有 `__iter__` 的用户类（`csv.DictReader` 因此做成返回 list 的函数）；`for x in obj` 可以。
+
+## 七、stdlib-a 批次交付（待模块表注册）
+
+新增 5 个纯 PyAdamas 源模块（`stdlib/*.py`），补全 1 个现有模块，对拍 1 个已有模块：
+
+| 文件 | 内容 | CPython 对拍结果 |
+|---|---|---|
+| `errno.py` | 20 个 POSIX 错误码常量 + `errorcode` 子集（dict[int,str]） | 20 个值 + EWOULDBLOCK==EAGAIN 全部一致 |
+| `stat.py` | 文件类型/权限位常量 + S_IS* 判定函数 | 15 个常量 + 5 个判定函数全部一致（S_IFMT 作为掩码常量，CPython 是函数） |
+| `shlex.py` | split/quote/join（posix 模式） | 15 组 split + 7 组 quote + join round-trip 全部 0 diff |
+| `getpass.py` | getuser() 读 USER/LOGNAME/USERNAME | 与 CPython 输出一致（本机 celestea） |
+| `platform.py` | system()/machine()/release()/python_version() | system/machine 固定 Linux/x86_64；release 读 `PYADAMAS_OS_RELEASE` 环境变量（无 os.uname 兜底）；python_version 是 PyAdamas 兼容版本号 |
+| `csv.py`（补全） | DictReader(f) 支持 str 文本；新增 DictWriterText(fieldnames) 内存版（writeheader/writerow/writerows/getvalue） | DWT 输出与 CPython csv.DictWriter + StringIO 逐字节一致 |
+| `struct.py`（对拍） | 验证现有 b/B/h/H/i/I/q/Q/f/d/s 与 < > ! 端序 | 12 组 pack hex 与 CPython 逐字节一致；s 解包返回 str（bytes/str 共用表示） |
+
+配套测试：`tests/run/515_stdlib_a.py`，28 行 expect 与实际输出逐行一致（用本地模块副本 build 验证）。模块表注册后即可跑全量闸门。
+
+需要 lead 在 `src/driver_modules.cpp` 的 `kModuleTable` 里加 5 条（按字母序插入）：
+
+```cpp
+{"errno", ModuleKind::Python, "errno.py", ""},
+{"getpass", ModuleKind::Python, "getpass.py", "os"},
+{"platform", ModuleKind::Python, "platform.py", "os"},
+{"shlex", ModuleKind::Python, "shlex.py", ""},
+{"stat", ModuleKind::Python, "stat.py", ""},
+```
 

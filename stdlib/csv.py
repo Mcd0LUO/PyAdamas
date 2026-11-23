@@ -8,6 +8,11 @@ DictReader 是**函数**而不是类：返回 list[dict[str, str]]，因此
 `for row in csv.DictReader(f)` 和 `rows = list(csv.DictReader(f))` 都能用；
 但拿不到 .fieldnames 属性，也不支持显式 fieldnames（默认参数不能是 list）。
 DictWriter 是类，需要显式 fieldnames。
+
+本次新增（保持旧 API 不破坏）：
+- DictReader(f) 的 f 除 file 对象外也接受纯 str 文本（运行期 isinstance 分派）；
+- DictWriterText(fieldnames) 内存版 DictWriter，writeheader/writerow/writerows/
+  getvalue，getvalue() 返回拼接好的 CSV 文本（行终止符默认 "\r\n"）。
 """
 
 QUOTE_MINIMAL = 0
@@ -162,10 +167,17 @@ class DictWriter:
             self.writerow(row)
 
 
-def DictReader(f: file, delimiter: str = ",",
+def DictReader(f: unknown, delimiter: str = ",",
                quotechar: str = '"') -> list[dict[str, str]]:
-    """把首行当表头，返回 list[dict[str, str]]（eager）。"""
-    table = reader(f, delimiter, quotechar)
+    """把首行当表头，返回 list[dict[str, str]]（eager）。
+
+    保持原有「传 file 对象」调用方式；同时接受纯 str 文本（本次新增），
+    用 isinstance 在运行期分派。两种形式输出逐字一致。
+    """
+    if isinstance(f, str):
+        table = _parse(f, delimiter, quotechar)
+    else:
+        table = reader(f, delimiter, quotechar)
     rows: list[dict[str, str]] = []
     if len(table) == 0:
         return rows
@@ -185,3 +197,72 @@ def DictReader(f: file, delimiter: str = ",",
         rows.append(d)
         i += 1
     return rows
+
+
+class DictWriterText:
+    """内存版 DictWriter：只收 fieldnames，用 getvalue() 取拼接文本。
+
+    与现有 DictWriter(f, fieldnames) 并存，不破坏旧 API。writeheader /
+    writerow / writerows 语义与 DictWriter 一致；getvalue() 返回已写入
+    的全部文本（行终止符默认为 CPython csv 的 "\r\n"）。
+    内部用 list[str] 累积（list 默认值在 pa 编译不过，故在 __init__ 里建）。
+    """
+
+    fieldnames: list[str]
+    delimiter: str
+    quotechar: str
+    quoting: int
+    lineterminator: str
+    _rows: list[str]
+
+    def __init__(self, fieldnames: list[str], delimiter: str = ",",
+                 quotechar: str = '"', quoting: int = 0,
+                 lineterminator: str = "\r\n") -> None:
+        self.fieldnames = fieldnames
+        self.delimiter = delimiter
+        self.quotechar = quotechar
+        self.quoting = quoting
+        self.lineterminator = lineterminator
+        self._rows = []
+
+    def _format(self, vals: list[str]) -> str:
+        parts: list[str] = []
+        i: int = 0
+        while i < len(vals):
+            field: str = vals[i]
+            need: bool = self.quoting == QUOTE_ALL or self.quoting == QUOTE_NONNUMERIC
+            if not need:
+                if self.delimiter in field or self.quotechar in field:
+                    need = True
+                elif "\r" in field or "\n" in field:
+                    need = True
+            if need:
+                if self.quoting == QUOTE_NONE:
+                    raise Error("need to escape delimiter or quotechar, "
+                                "but quoting is QUOTE_NONE")
+                body: str = field.replace(self.quotechar,
+                                          self.quotechar + self.quotechar)
+                parts.append(self.quotechar + body + self.quotechar)
+            else:
+                parts.append(field)
+            i += 1
+        return self.delimiter.join(parts) + self.lineterminator
+
+    def writeheader(self) -> None:
+        self._rows.append(self._format(self.fieldnames))
+
+    def writerow(self, row: dict[str, str]) -> None:
+        vals: list[str] = []
+        for k in self.fieldnames:
+            if k in row:
+                vals.append(row[k])
+            else:
+                vals.append("")
+        self._rows.append(self._format(vals))
+
+    def writerows(self, rows: list[dict[str, str]]) -> None:
+        for row in rows:
+            self.writerow(row)
+
+    def getvalue(self) -> str:
+        return "".join(self._rows)
