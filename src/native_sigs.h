@@ -596,6 +596,9 @@ inline TypePtr declared_class_type(const std::string& module, const std::string&
     if (module == "random" && cls == "Random") return t_random();
     if (module == "re" && cls == "Pattern") return t_regex();
     if (module == "re" && cls == "Match") return t_match();
+    // datetime.date / datetime.datetime 共用 TyKind::DateTime（见 TyKind 枚举注释）。
+    if (module == "datetime" && (cls == "date" || cls == "datetime")) return new_ty(TyKind::DateTime);
+    if (module == "datetime" && cls == "timedelta") return new_ty(TyKind::TimeDelta);
     return t_unknown();
 }
 

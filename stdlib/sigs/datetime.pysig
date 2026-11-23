@@ -1,0 +1,39 @@
+# stdlib/sigs/datetime.pysig —— datetime 模块的声明式签名（P0 原生类批次）
+#
+# 三个原生类：date / datetime / timedelta。构造器实参个数检查与字段读/运算符
+# 保留在 C++；方法参数装配在 lower_method_native.cpp（§6.4），声明只管签名。
+"""datetime 模块的 native 签名（3 个类，构造器 + 方法）。"""
+
+# date(y, m, d)：TyKind::Date 与 datetime 共用 TyKind::DateTime。
+class date:
+    @native("pa_date_new")
+    def __init__(self, year: int, month: int, day: int) -> None: pass
+    @native("pa_datetime_isoformat")
+    def isoformat(self) -> str: pass
+    @native("pa_datetime_strftime")
+    def strftime(self, fmt: str) -> str: pass
+    @native("pa_datetime_field")
+    def weekday(self) -> int: pass
+
+# datetime(y, m, d[, h, mi, s])：降级阶段检查 3 或 6 参。
+class datetime:
+    @native("pa_datetime_new")
+    def __init__(self, year: int, month: int, day: int, hour: int = 0,
+                 minute: int = 0, second: int = 0) -> None: pass
+    @native("pa_datetime_isoformat")
+    def isoformat(self) -> str: pass
+    @native("pa_datetime_strftime")
+    def strftime(self, fmt: str) -> str: pass
+    @native("pa_datetime_field")
+    def weekday(self) -> int: pass
+    @native("pa_datetime_replace")
+    def replace(self) -> object: pass
+
+# timedelta(days=0, seconds=0, ...)：全部可选 int。
+class timedelta:
+    @native("pa_timedelta_new")
+    def __init__(self, days: int = 0, seconds: int = 0, microseconds: int = 0,
+                 milliseconds: int = 0, minutes: int = 0, hours: int = 0,
+                 weeks: int = 0) -> None: pass
+    @native("pa_timedelta_total_seconds")
+    def total_seconds(self) -> float: pass

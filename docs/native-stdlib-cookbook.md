@@ -461,10 +461,33 @@ if (const auto* c = nativesig::find_const(module, member)) {
 | `os` | ✅ 已迁移模块级函数（`stdlib/sigs/os.pysig`） | 16 函数 + 6 标量常量；`unlink` 用 `@native("pa_os_remove")`；保留 C++：`environ`（运行期 dict）、`walk`（返回 list[tuple]）、`os.path.*`（独立模块已迁）。asm 等价 13/13 |
 | `random` | ✅ 已迁移**全部模块级函数 + `Random` 类**（`stdlib/sigs/random.pysig`） | 17 函数 + `class Random`（构造器 + 6 个实例方法，`@native` 覆盖 `pa_random_*`；`choice` 用 `@ret_specialized`）。保留 C++：方法的参数装配（`lower_method_misc.cpp`，§6.4）、类型身份映射 `declared_class_type`。asm 与迁移前逐字节相同 |
 | `re` | ✅ 已迁移 `Pattern`/`Match` 方法表（`stdlib/sigs/re.pysig`） | 2 个原生类共 15 个方法（`@native` 覆盖 `pa_re_*`）；模块级函数/flag 常量保留硬编码（`-> Regex`/`Optional[Match]` 等类型 pysig 无法表达，迁了会破坏 `re.compile` 的返回类型）；`lower_method_regex/match` 参数装配不动；asm 38/38 逐字节相同 |
+| `datetime` | ✅ 已迁移 3 个原生类（`stdlib/sigs/datetime.pysig`） | `date`/`datetime`/`timedelta` 构造器（默认值表达重载）+ 6 实例方法；模块函数 today/now 保留 C++（返回 TyKind::DateTime 无法声明）；属性读/运算符/参数装配不动；asm 38/38 逐字节相同 |
 | `collections` `json` | ⬜ 未迁移 | 硬编码仍在；加载器已就绪，可按 §6.2 逐个搬 |
 | `pathlib` `operator` `asyncio` | ⬜ 未迁移（优先级低） | 构造器/类语义多，声明格式表达不了的部分留 C++ |
 | `datetime` `subprocess` | ⬜ 未迁移（优先级低） | 参数装配/返回类型随实参变的分支多 |
 | `python`（CPython 桥）、`c` / `dylib` | ⛔ 不适合声明式 | 名字集合是开集（`from c import <任意符号>`），签名在调用点推断 |
+
+### 后续迁移评估：deque / Path（datetime 批次附带盘点）
+
+**collections.deque**（中等，1~2 天）：方法表共 10 个（append/appendleft/extend/extendleft/pop/popleft/rotate/clear/reverse/remove/count/index/insert/copy），
+全部走通用 native_fn（RtFn::Deque*），与 Random 同构。额外难点：
+- `pop()`/`popleft()` 返回 `elem()` = `recv->sub[0]`（元素类型随接收者变）→ 需要 `@ret_specialized` 扩展支持「接收者元素类型」而不仅是「第一实参类型」；
+- `copy()` 返回 `mk_deque(elem())` 同理；
+- 构造器 `deque(iterable, maxlen=0)` 的 maxlen 语义在降级阶段检查（保留 C++）。
+**改哪层**：native_sigs.h 的 declared_class_type 加一行（deque → TyKind::Deque）+ typecheck_call_method.cpp 声明查表 + stdlib/sigs/collections.pysig 新建。
+**判断依据**：类型身份映射仍要 C++（同 Random/re/datetime），但方法表本身可声明。
+
+**pathlib.Path**（高，3~5 天）：方法表共 ~17 个（mkdir/exists/is_file/is_dir/read_text/write_text/iterdir/glob/unlink/rmdir/touch/with_suffix/read_bytes/write_bytes/is_absolute/joinpath/relative_to/resolve/absolute），
+其中 5 个返回 `new_ty(TyKind::Path)`（iterdir/glob 返回 list[Path]、with_suffix/joinpath/relative_to/resolve/absolute 返回 Path）。
+额外难点：
+- `mkdir` 只收关键字（mode/parents/exist_ok）→ pysig 的 `def mkdir(self, *, mode: int = 0, parents: bool = False, exist_ok: bool = False)` 需验证关键字-only 形参在原生类方法上的装配（`lower_method_native.cpp:9` 的 kw_ok 白名单按方法名硬编码，不能直接改）；
+- `Path` 的 `/` 运算符（`p / "sub"`）在 typecheck_expr.cpp 里特判，不属方法表，保留 C++；
+- `declared_class_type` 加一行（pathlib.Path → TyKind::Path），并在 module_info 里把 Path 构造器注册（当前 `func("Path", {t_str()}, p)` 在 builtin_sigs.cpp）。
+**改哪层**：与 deque 相同，外加运算符与 kw_ok 白名单保持 C++ 不动。
+
+**共同结论**：两个类都能用现有原生类机制迁移（与 Random/re/datetime 同构），
+剩余成本集中在「返回类型随接收者变」（deque.pop/copy）和「关键字-only + 运算符」（Path），
+都不是新机制，只是声明格式需要覆盖更多形态。
 
 ### 后续迁移建议（按性价比）
 

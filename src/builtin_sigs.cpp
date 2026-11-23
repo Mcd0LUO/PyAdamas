@@ -285,40 +285,13 @@ pyadamas::ModuleInfoPtr builtin_module(const std::string& name) {
             func_with("deque", f);
         }
     } else if (name == "datetime") {
+        // date/datetime/timedelta 构造器与实例方法已迁到
+        // stdlib/sigs/datetime.pysig（按名字 merge）；实参个数检查与
+        // 降级装配保留在 lower_import_misc.cpp / lower_method_native.cpp。
+        // today()/now() 返回 TyKind::DateTime，pysig 注解无法表达，保留在此。
         auto dt = pyadamas::new_ty(pyadamas::TyKind::DateTime);
-        // date(y, m, d) / today()
-        func("date", {pyadamas::t_int(), pyadamas::t_int(), pyadamas::t_int()}, dt);
         func("today", {}, dt);
-        // now()：带时分秒的当前时间
         func("now", {}, dt);
-        // datetime(...)：3 或 6 个位置参数，个数在降级阶段检查
-        {
-            auto f = std::make_shared<pyadamas::FuncInfo>();
-            f->name = "datetime.datetime";
-            f->varargs = true;
-            f->vararg_name = "args";
-            f->vararg_ty = pyadamas::t_int();
-            f->ret = dt;
-            f->ret_known = true;
-            func_with("datetime", f);
-        }
-        // timedelta(days=0, seconds=0, microseconds=0, milliseconds=0,
-        //           minutes=0, hours=0, weeks=0)：全部是可选的 int 参数。
-        {
-            auto f = std::make_shared<pyadamas::FuncInfo>();
-            f->name = "datetime.timedelta";
-            for (const char* pn : {"days", "seconds", "microseconds", "milliseconds",
-                                   "minutes", "hours", "weeks"}) {
-                pyadamas::Param p;
-                p.name = pn;
-                p.ty = pyadamas::t_int();
-                p.has_default = true;
-                f->pos.push_back(std::move(p));
-            }
-            f->ret = pyadamas::new_ty(pyadamas::TyKind::TimeDelta);
-            f->ret_known = true;
-            func_with("timedelta", f);
-        }
     } else if (name == "operator") {
         // 包装函数按调用点特化：签名只用于名字解析与 from-import 标记。
         auto simple = [&](const std::string& n, size_t nargs, pyadamas::TypePtr ret) {
