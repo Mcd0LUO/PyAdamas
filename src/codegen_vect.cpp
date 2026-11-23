@@ -104,6 +104,8 @@ bool AsmGen::xmm_high_free(MReg r) const {
 }
 
 bool AsmGen::try_vect_loop(const Block& b) {
+    // masked divergence（外层独立迭代 + 内层数据依赖早退）：先试，失败零字节。
+    if (try_masked_outer_loop(b)) return true;
     // 阶段 A4 第 3 步：函数体已整体搬进 VectPlanner::try_loop。
     return vect_.try_loop(b);
 }

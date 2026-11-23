@@ -18,6 +18,8 @@
     // 向量循环 + jmp cond（标量尾由原机器照常发射）」，返回 true。不匹配返回
     // false，一个字节不发。门控关时第一个判断就返回。
     bool try_vect_loop(const Block& b);
+    // masked divergence（外层独立迭代 + 内层数据依赖早退），见 codegen_masked.cpp。
+    bool try_masked_outer_loop(const Block& b);
 
     // 体块是否「全整数」（P4 顺序分流用，实现见 codegen_vect.cpp）：只看 IR
     // 类型（int/bool/定宽整数、以及元素为整数的 list），不出现任何浮点值。

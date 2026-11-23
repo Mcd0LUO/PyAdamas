@@ -141,6 +141,7 @@ src/opt_intloop.cpp
   src/codegen_vect_jvec.cpp
   src/vect_planner.cpp
   src/vect_planner_loop.cpp
+  src/codegen_masked.cpp
   src/vect_planner_stride.cpp
   src/vect_planner_intfast.cpp
   src/vect_rules_test.cpp
@@ -150,6 +151,8 @@ src/opt_intloop.cpp
   src/ir.cpp
   src/desugar.cpp
   src/module.cpp
+  src/module_map.cpp
+  src/deps_json.cpp
   src/cimport.cpp
   src/cdecl.cpp
   src/cdecl_parse.cpp
@@ -273,10 +276,23 @@ target_compile_definitions(pyadamas PRIVATE
   PYADAMAS_RT_ASAN_OBJ="${PYADAMAS_RT_ASAN_OBJ}")
 target_include_directories(pyadamas PRIVATE src)
 target_compile_options(pyadamas PRIVATE -Wall -Wextra)
+
+# 编译器版本：从 CHANGELOG 首条 "## [x.y]" 推导，避免手抄版本号漂移。
+# deps --json 的 compiler.version 直接用它（消费方据此判断兼容性）。
+file(STRINGS "${CMAKE_CURRENT_SOURCE_DIR}/CHANGELOG.md" _pa_ver_line
+     REGEX "^## \\[[0-9]+\\.[0-9]+" LIMIT_COUNT 1)
+if(_pa_ver_line)
+  string(REGEX MATCH "[0-9]+\\.[0-9]+" PYADAMAS_VERSION "${_pa_ver_line}")
+else()
+  set(PYADAMAS_VERSION "dev")
+endif()
+message(STATUS "pyadamas version: ${PYADAMAS_VERSION}")
+
 target_compile_definitions(pyadamas PRIVATE
   PYADAMAS_RT_OBJ="${PYADAMAS_RT_OBJ}"
   PYADAMAS_MODCACHE_DIR="${PYADAMAS_MODCACHE_DIR}"
   PYADAMAS_STDLIB_DIR="${CMAKE_SOURCE_DIR}/stdlib"
+  PYADAMAS_VERSION="${PYADAMAS_VERSION}"
 )
 add_dependencies(pyadamas pyadamas_rt)
 
