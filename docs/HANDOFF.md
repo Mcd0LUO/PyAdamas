@@ -53,7 +53,8 @@ RC 头+{int64_t nd; uint32_t d[]}，nd 带符号 limb 数(CPython ob_size 口径
 - cwd /src/luo-proj/pyadamas。build/lead=当前 Release 对照（0.356）；**build/release=0.271 oracle 绝不重建**。
 - git 需 `-c safe.directory=<path>`。SSH 推送：`ssh -i /home/celestea/.ssh/id_ed25519_root_mc -o BatchMode=yes -o UserKnownHostsFile=/home/celestea/.ssh/known_hosts -o ConnectTimeout=8 root@127.0.0.1 'cd /src/luo-proj/pyadamas && git -c safe.directory=/src/luo-proj/pyadamas push origin master'`。
 - 集成套路：branch merge master 解冲突→独立复核闸门→master merge --no-ff→CHANGELOG 定版→重建 build/lead 复验→SSH 推→worktree remove --force + branch -d。CHANGELOG 最新在前，选择性 git add。
-- 每轮闸门：difftest 0+套件 normal(JOBS=8)/ASan(JOBS=1，避免 env flake)+CPython 对拍+语料零差异+ASan detect_leaks=1 钉子(13/174/88/192/92/93/94/119/153)+相关 asm 逐字节不变+check_size 无新增超限+性能 abbench 交替绑核中位。
+- 每轮闸门：`bash tools/checkall.sh --full`（套件 JOBS=16 + difftest flock 独占 + check_size + 12 基准三档 + SIMD 量级，约 1 分钟）+ 相关 asm 逐字节不变 + 性能 abbench 交替绑核中位。
+  **ASan 不在默认闸门里**：仅当改动触及 `runtime/` 内存路径或 lowering 所有权时定点跑（过滤器 + `JOBS=16`），见 docs/semantics-audit-playbook.md §13。
 - 门控默认关 flag-off asm 逐字节不变是最高不变量。默认开：gc-sections(PYADAMAS_GC_SECTIONS=0 关)/VECT(PYADAMAS_VECT=0 关，0.384 起)。默认关 opt-in：SIMD(PYADAMAS_SIMD=1 开，0.384 起 —— 照着 bench 循环形状写的模板，不进默认管线)/LOOP_OPT/RA_OPT/INLINE_OPT/BORROW_OPT/TYPE_TAGS/LANG_GAPS/GC_INCR_MARK。
 - 模型：provider celestea（qwen4-max-preview 性能/运行时，deepseek-v4.1-flash stdlib）。harness 间歇早夭频繁→send_message 恢复（保留 WIP+上下文）。单槽位顺序（用户收回多代理并行）。
 - run_code timeoutMs≤600000+run_in_background 长任务；TS 模板 literals 含 C++ 反引号/${} 会 parse fail→用双引号 JS 串+\n 或 lines.join。bash cwd 每次重置（用 cd 或 git -C）。

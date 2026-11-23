@@ -96,10 +96,11 @@
 
 | 门 | 命令 | 现状 |
 |---|---|---|
-| 运行用例 | `PYADAMAS_TEST_JOBS=4 bash tests/run_tests.sh build/gfix build/lead/pyadamas` | **409 ran ok，0 失败** |
-| 差分对拍 | `PYADAMAS_TEST_JOBS=1 bash tools/difftest.sh build/lead/pyadamas` | **386 个用例，0 个不一致** |
-| 内存 | `PYADAMAS_TEST_ASAN=1 PYADAMAS_TEST_JOBS=1 bash tests/run_tests.sh build/gfixa build/lead/pyadamas` | **409 ran ok，0 sanitizer 报告** |
+| **一键闸门** | `bash tools/checkall.sh --full` | **全部 PASS（约 1 分钟）** |
+| 运行用例 | `PYADAMAS_TEST_JOBS=16 bash tests/run_tests.sh build/gfix build/lead/pyadamas` | **420 ran ok，0 失败（33s）** |
+| 差分对拍 | `flock /tmp/pyadamas-difftest.lock env PYADAMAS_TEST_JOBS=16 bash tools/difftest.sh build/lead/pyadamas` | **392 个用例，0 个不一致（19s）** |
 | 体积 | `bash tests/check_size.sh` | 通过 |
+| 内存（**默认不跑**） | 见 [semantics-audit-playbook.md §13](semantics-audit-playbook.md) | 仅当改动触及 `runtime/` 内存路径或 lowering 所有权时**定点**跑，且用过滤器 + `JOBS=16` |
 
 性能与能力的当前口径见 [nightly-summary.md](nightly-summary.md)：12 个经典基准 × -O0/-O1/-O2 输出 **36/36** 与 CPython 一致
 （nbody 109,040,119 条 ≈ −45.31%、spectral_norm 94,637,438 ≈ −61.75%、sieve −8.58%、matmul −4.52%，相对夜间/0.418 基线），

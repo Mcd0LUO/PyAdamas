@@ -33,7 +33,7 @@
 - 靶：RC 密集容器循环（binary_trees/fasta/dict_wordfreq/queue_sim + 日常语料）。
 - 内容：循环级 inc/dec 对消除（迭代内抵消）+ 循环不变 RC 外提（LICM 式）；borrow 分析已是地基。
 - 参照：Swift ARC retain/release 优化。RC 语言补「赋值零成本」的关键。
-- 闸门：RC 正确性命门（ASan leak/UAF + 13/174 + 语料零差异），不可误删 retain。
+- 闸门：RC 正确性命门（**RC/GC 改动属于「必须定点跑 ASan」的一类**：leak/UAF + 13/174 + 语料零差异），不可误删 retain。
 
 ### R3 — 整数循环优化（0.335）
 - 靶：matmul（2.4×）/nqueens（1.6×）整数循环。
@@ -64,7 +64,8 @@
 ## 自主决策框架
 
 1. **单代理槽位**：当前代理完成前不派下一个。simd 运行中→等。
-2. **每轮完成**：lead 独立复核闸门（difftest/套件 normal+ASan/CPython 对拍/语料/leak/26 asm/abbench）→
+2. **每轮完成**：lead 独立复核闸门（`tools/checkall.sh --full`：套件/difftest/check_size/12 基准三档/SIMD 量级；
+   ASan **不在默认闸门**，只有动 runtime 内存路径时定点跑，见 semantics-audit-playbook §13）→
    通过则集成（merge --no-ff + CHANGELOG 定版 + 重建 master 复验 + 推送 + 清理 worktree）。
 3. **评估收益**：abbench/四语言基准前后对照，量化本轮收益；更新 roadmap 优先级。
 4. **派下一轮**：按 ROI 选下一个（默认 R2→R3→...，据实测收益动态调整）；代理早夭→send_message 恢复。
@@ -75,7 +76,9 @@
 
 - 独立 worktree /tmp/wt-<name>，分支从最新 master，基线对照用主树 build/lead。
 - 门控默认关（env/编译期），非优化路径 asm 逐字节不变（26+ 语料 cmp）。
-- 闸门：difftest 0 + 套件 normal/ASan EXIT=0（JOBS=8）+ CPython 对拍 + 语料零差异 + ASan leak 钉子 + abbench 无回归 + check_size 无新增超限。
+- 闸门：`tools/checkall.sh --full`（套件 JOBS=16 + difftest flock 独占 + check_size + 12 基准三档 + SIMD 量级，约 1 分钟）+ abbench 无回归。
+- **ASan 默认不跑**（全量要十几分钟：每测试重链接插桩运行时 + 插桩后慢 2-5 倍）：只有动 `runtime/` 内存路径或
+  lowering 所有权时才用过滤器定点跑，且 `JOBS=16`，见 docs/semantics-audit-playbook.md §13。
 - RC/GC 改动额外：13/174 flag-on + leak 干净。
 - CHANGELOG 版本递增（0.333 起），集成时定版；选择性 git add；推送走 SSH root@127.0.0.1。
 - build/release 是 0.271 oracle，**绝不重建**；主树 build/lead 是当前 release 对照。

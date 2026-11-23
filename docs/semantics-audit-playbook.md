@@ -105,8 +105,9 @@ lowering 调用点」五处（0.428 的 `ListSliceDel` 就改了 5 个文件，b
 4. **穷举补刀**：对「规则组合多」的语义写变量循环对拍（§1）；
 5. **实现前先找全同类点位（§6）**，实现时优先语义层规则（§5）；
 6. **检查既有测试是否钉住 UB（§4）**；
-7. **新用例**（`tests/run/NNN_*.py`，带 expect，三档一致）+ 全量闸门（run_tests / difftest / ASan / check_size /
-   12 基准输出与指令数 / SIMD 量级）；
+7. **新用例**（`tests/run/NNN_*.py`，带 expect，三档一致）+ 默认闸门（`bash tools/checkall.sh --full`：
+   run_tests / difftest / check_size / 12 基准输出与指令数 / SIMD 量级）；
+   **ASan 不在默认闸门里**——只有改动触及 `runtime/` 内存路径或 lowering 所有权时才定点跑（见 §13）；
 8. **补文档**：新的设计取舍写进 compatibility.md（§2）；方法本身有新教训写回本文。
 
 ## 8. 效果（各轮实测）
@@ -193,7 +194,9 @@ zero_hit=<name1>,<name2>
 
 ## 12. 环境矩阵 × ASan（0.444 教训）
 
-常规 ASan 闸门只跑**默认开关**；真正的内存 bug 可能藏在非默认的实验开关里。0.444 的 GC UAF 就是实例：
+> 注意：本节讲的是**定点排查打法**，不是每轮闸门。日常闸门见 §13（ASan 默认不跑）。
+
+常规 ASan 只跑**默认开关**；真正的内存 bug 可能藏在非默认的实验开关里。0.444 的 GC UAF 就是实例：
 `PYADAMAS_GC_INCR_MARK=1`（默认关的增量标记）下退出时 `pa_gc_shutdown` 先 free 堆链、再 dec `gc_pend`，
 读已释放的 rc 头；默认构建与常规 ASan 全量 409 用例全绿，只有「开关矩阵 × ASan/LSan」才暴露。
 
@@ -217,3 +220,32 @@ done
 3. **LeakSanitizer 要先有 baseline**：GC 程序退出时本来就有留到进程结束的对象，先跑 hello-world 记基线，再比差值；
 4. 修复顺序建议「先收尾在途状态、再释放资源」（0.444 的 `gc_incr_finish()` 先于 free 堆链）；
 5. 环境矩阵跑通后，把对应的开关组合写进报告与 CHANGELOG，避免下次审计重新发现同一个坑。
+
+## 13. ASan 什么时候跑（默认不跑）
+
+**结论：ASan 不是每轮闸门。** 全量 ASan 套件要十几分钟（每个测试都要重链接一份全量插桩的 `rt_asan.o`，
+插桩后运行时又慢 2–5 倍；若再用 `PYADAMAS_TEST_JOBS=1` 更是雪上加霜）。
+
+| 改动性质 | 要不要 ASan |
+|---|---|
+| `runtime/` 下的 RC/GC/EH/容器/字符串/文件内存路径 | **要**，但只跑**相关用例** |
+| lowering 的所有权/RC 插入/cleanup/异常展开 | **要**，只跑相关用例 |
+| 生成器/协程挂起帧、spill、GC 根扫描 | **要**，只跑相关用例 |
+| 类型检查 / 类型推断 | 不要 |
+| 代码生成 / 向量化判据与发射 | 不要（**生成的汇编本来就没插桩，目标侧 ASan 抓不到 codegen 越界**） |
+| 文档 / 脚本 / 测试 / 标准库 `.py` | 不要 |
+
+需要时的正确姿势（**用过滤器缩小范围 + JOBS=16**）：
+```bash
+PYADAMAS_TEST_FILTER='51[67]*' PYADAMAS_TEST_ASAN=1 PYADAMAS_TEST_JOBS=16 \
+  bash tests/run_tests.sh build/gfixa build/lead/pyadamas
+```
+需要查泄漏时再显式 `ASAN_OPTIONS=detect_leaks=1`（套件默认 `detect_leaks=0`）。
+
+补充：
+1. **目标侧 ASan 有盲区**：`--asan` 只把 `runtime/*.c` 重编插桩，生成的汇编没有插桩 → codegen 越界抓不到。
+   补法是运行时的 `PYADAMAS_CANARY=1`（尾部 canary，释放时校验）与 `PYADAMAS_GUARD=1`（guard page，越界立刻 SIGSEGV）。
+2. **编译器自身**的 ASan 是另一条轴：`build-asan` preset（`address,undefined -Og`），适合定期跑而不是每轮跑。
+3. 计时参考（48 核，`instructions:u` 3 轮取最小）：run_tests JOBS=4 46s / JOBS=16 33s；
+   difftest JOBS=1 172s / JOBS=16 19s。**并行度就是最大的提速手段。**
+
