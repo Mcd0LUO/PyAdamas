@@ -857,6 +857,9 @@ static int pa_unknown_sort_family(int64_t v) {
         case PYADAMAS_RC_STR: return PA_UK_STR;
         case PYADAMAS_RC_CPYFLOAT:
         case PYADAMAS_RC_BIGINT: return PA_UK_NUM;
+        /* 动态 JSON：bool 盒是数值族，null 盒和 None 一样不可比。 */
+        case PYADAMAS_RC_JSONBOOL: return PA_UK_NUM;
+        case PYADAMAS_RC_JSONNULL: return PA_UK_OTHER;
         default: return PA_UK_OTHER;
     }
 }

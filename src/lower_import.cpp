@@ -294,6 +294,17 @@ std::optional<RtFn> Lowerer::native_fn(const std::string& module, const std::str
     } else if (module == "json") {
         if (member == "dumps") return RtFn::JsonDumps;
         if (member == "loads") return RtFn::JsonLoads;
+        // 动态 JSON（0.447）：只为 from-import 登记别名；真正降级走
+        // lower_json（parse/stringify 的运行时入口在那边按类型选）。
+        if (member == "parse") return RtFn::JsonParse;
+        if (member == "stringify") return RtFn::JsonDumps;
+        if (member == "get" || member == "get_or" || member == "has" ||
+            member == "len" || member == "keys" || member == "type" ||
+            member == "is_null" || member == "as_str" || member == "as_int" ||
+            member == "as_float" || member == "as_bool" || member == "as_dict" ||
+            member == "as_list" || member == "null" || member == "bool" ||
+            member == "path")
+            return RtFn::JsonOp;
     } else if (module == "re") {
         if (member == "compile") return RtFn::RegexCompile;
         if (member == "search" || member == "match" || member == "fullmatch")

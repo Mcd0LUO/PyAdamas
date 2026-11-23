@@ -849,7 +849,37 @@ bool TypeChecker::is_lru_cache_expr(const Expr* e) {
 }
 
 std::optional<TypePtr> TypeChecker::json_call(const std::string& member, Call& c) {
-        if (member != "dumps" && member != "loads") return std::nullopt;
+        // 动态 JSON（0.447）的成员集合。这些名字在 builtin_sigs 里也登记了
+        // 签名（from-import / 属性查找要用），但**调用检查必须在这里截住**：
+        // 走通用签名路径会把 unknown 形参当用户函数做调用点类型推断，
+        // json.stringify 同时收 float/bool/None 就会报「used with both
+        // float and non-float values」。这里直接给返回类型、只做必要校验。
+        static const std::unordered_map<std::string, std::pair<size_t, int>> kDyn = {
+            // name → {参数个数, 返回类型编码}
+            // 0 unknown / 1 str / 2 int / 3 float / 4 bool / 5 list[str] /
+            // 6 dict[str,unknown] / 7 list[unknown]
+            {"parse", {1, 0}},
+            {"stringify", {1, 1}},
+            {"get", {2, 0}},
+            {"get_or", {3, 0}},
+            {"has", {2, 4}},
+            {"path", {2, 0}},
+            {"len", {1, 2}},
+            {"keys", {1, 5}},
+            {"type", {1, 1}},
+            {"is_null", {1, 4}},
+            {"as_str", {1, 1}},
+            {"as_int", {1, 2}},
+            {"as_float", {1, 3}},
+            {"as_bool", {1, 4}},
+            {"as_dict", {1, 6}},
+            {"as_list", {1, 7}},
+            {"null", {0, 0}},
+            {"bool", {1, 0}},
+        };
+        auto dyn_it = kDyn.find(member);
+        if (member != "dumps" && member != "loads" && dyn_it == kDyn.end())
+            return std::nullopt;
         // dumps 收 indent= / sort_keys= / ensure_ascii= / separators= /
         // allow_nan= 关键字，其它不收。
         for (auto& kw : c.keywords) {
@@ -874,23 +904,60 @@ std::optional<TypePtr> TypeChecker::json_call(const std::string& member, Call& c
             }
             return t_str();
         }
-        // loads(text, sample)：样例值只提供静态类型，运行时不求值。
-        if (a.size() != 2) {
+        if (member == "loads") {
+            // loads(text, sample)：样例值只提供静态类型，运行时不求值。
+            if (a.size() != 2) {
+                err(c.line, c.col,
+                    std::format("json.loads() expects 2 arguments (text, sample), got {}",
+                                a.size()));
+                return t_unknown();
+            }
+            if (a[0] && !is_unknown(a[0]) && a[0]->kind != TyKind::Str)
+                err(c.args[0]->line, c.args[0]->col,
+                    std::format("json.loads() expects a str, got '{}'", type_name(a[0])));
+            TypePtr sample = a[1];
+            if (!sample || sample->kind == TyKind::Unknown) {
+                err(c.args[1]->line, c.args[1]->col,
+                    "json.loads() needs a sample value with a static type");
+                return t_unknown();
+            }
+            return sample;
+        }
+        // ── 动态 JSON 成员 ─────────────────────────────────────────
+        const auto& [nargs, rc] = dyn_it->second;
+        if (a.size() != nargs) {
             err(c.line, c.col,
-                std::format("json.loads() expects 2 arguments (text, sample), got {}",
-                            a.size()));
+                std::format("json.{}() expects {} argument{}, got {}", member, nargs,
+                            nargs == 1 ? "" : "s", a.size()));
             return t_unknown();
         }
-        if (a[0] && !is_unknown(a[0]) && a[0]->kind != TyKind::Str)
+        // 少量静态校验：参数类别明显不对时早点报，运行期还能再兜一层。
+        if (member == "parse" && a[0] && !is_unknown(a[0]) && a[0]->kind != TyKind::Str)
             err(c.args[0]->line, c.args[0]->col,
-                std::format("json.loads() expects a str, got '{}'", type_name(a[0])));
-        TypePtr sample = a[1];
-        if (!sample || sample->kind == TyKind::Unknown) {
+                std::format("json.parse() expects a str, got '{}'", type_name(a[0])));
+        if ((member == "get" || member == "get_or" || member == "has") && a[1] &&
+            !is_unknown(a[1]) && a[1]->kind != TyKind::Str && a[1]->kind != TyKind::Int)
             err(c.args[1]->line, c.args[1]->col,
-                "json.loads() needs a sample value with a static type");
-            return t_unknown();
+                std::format("json.{}() key must be a str or int, got '{}'", member,
+                            type_name(a[1])));
+        if (member == "path" && a[1] && !is_unknown(a[1]) &&
+            !(a[1]->kind == TyKind::List && !a[1]->sub.empty() && a[1]->sub[0] &&
+              a[1]->sub[0]->kind == TyKind::Str))
+            err(c.args[1]->line, c.args[1]->col,
+                "json.path() expects a list[str]");
+        if (member == "bool" && a[0] && !is_unknown(a[0]) && a[0]->kind != TyKind::Bool)
+            err(c.args[0]->line, c.args[0]->col,
+                std::format("json.bool() expects a bool, got '{}'", type_name(a[0])));
+        switch (rc) {
+            case 1: return t_str();
+            case 2: return t_int();
+            case 3: return t_float();
+            case 4: return t_bool();
+            case 5: return mk_list(t_str());
+            case 6: return mk_dict(t_str(), t_unknown());
+            case 7: return mk_list(t_unknown());
+            default: return t_unknown();
         }
-        return sample;
 }
 
 

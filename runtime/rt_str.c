@@ -146,6 +146,15 @@ static void repr_any_into(AnyReprBuf* b, int64_t v) {
             ar_cstr(b, tmp);
             return;
         }
+        /* 动态 JSON 的 null/bool 盒：repr 按 Python 值语义印（None/True/False），
+           和裸 unknown 域里 None/bool 退化成 int 的旧边界不同 —— 它们有盒，
+           能精确还原。 */
+        case PYADAMAS_RC_JSONNULL:
+            ar_cstr(b, "None");
+            return;
+        case PYADAMAS_RC_JSONBOOL:
+            ar_cstr(b, *(int64_t*)(uintptr_t)v ? "True" : "False");
+            return;
         default: {
             /* P4（lang_gaps）：类对象（异常类当值）→ <class '...'>。
                门控关时类对象值不存在，探针不会命中魔数。 */

@@ -119,6 +119,8 @@ static const char* diag_kind_name(int32_t k) {
         case PYADAMAS_RC_DICT: return "dict";
         case PYADAMAS_RC_OBJ: return "obj";
         case PYADAMAS_RC_STRUCT: return "struct";
+        case PYADAMAS_RC_JSONNULL: return "jsonnull";
+        case PYADAMAS_RC_JSONBOOL: return "jsonbool";
         default: return "other";
     }
 }

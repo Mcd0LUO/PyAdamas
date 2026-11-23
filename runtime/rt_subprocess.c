@@ -1210,10 +1210,16 @@ int64_t pa_popen_pid(PyAdamasPopen* p) { return p->pid; }
 int64_t pa_popen_returncode(PyAdamasPopen* p) { return p->rc; }
 
 static PyAdamasFile* popen_wrap(int64_t* fd, const char* mode) {
-    PyAdamasStr* m = str_new(mode, (int64_t)strlen(mode));
+    /* 和 Windows 分支同口径：管道句柄走**二进制**模式。POSIX 这边原来
+       传 mode="r"（文本）+ buffering=0，pa_file_open 会以「can't have
+       unbuffered text I/O」直接拒绝 —— p.stdout 属性在 Linux 上从来没
+       成功打开过（只走 communicate 的 fd 路径掩盖了）。CPython 里
+       Popen.stdout 本来就是二进制缓冲流，这里对齐。 */
+    const char* wmode = mode[0] == 'r' ? "rb" : "wb";
+    PyAdamasStr* m = str_new(wmode, (int64_t)strlen(wmode));
     /* pa_file_open 内部还要分配多个对象；m 只在本帧 C 局部变量里。 */
     pa_gc_pin(m);
-    PyAdamasFile* f = pa_file_open(NULL, *fd, m, 0, 0, 1);
+    PyAdamasFile* f = pa_file_open(NULL, *fd, m, -1, 0, 1);
     pa_gc_unpin(m);
     pa_rc_dec(m);
     *fd = -1; /* 所有权转给文件对象 */

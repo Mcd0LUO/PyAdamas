@@ -13,6 +13,9 @@ typedef void* iconv_t;
 #include <iconv.h>
 #endif
 #include <unistd.h>
+#if !defined(_WIN32)
+#include <sys/stat.h>
+#endif
 
 /* ── 文件对象 ─────────────────────────────────────────────────── */
 
@@ -48,7 +51,29 @@ struct PyAdamasFile {
     int64_t eof;
     int64_t text_off;  /* 文本模式的逻辑位置（解码后的 UTF-8 字节数） */
     int64_t raw_base;  /* 当前解码块对应的原始文件偏移 */
+    /* 流式 fd（管道/tty/socket，非普通文件）。文本模式的预读缓冲用
+       stdio 的 fread 填充，而 glibc 的 fread 会**循环 read(2) 直到凑满
+       请求量或 EOF** —— 写端不关就永远等。交互式协议（LSP/REPL/管道工具）
+       的 readline()/read(n) 只需要「当前可读的那点字节」，所以流式 fd
+       改走一次 read(2)：有多少拿多少，readline 外层循环继续要、read(n)
+       也继续要，语义不变而不会等到 EOF。
+       普通文件保持 fread（一次拿一大块，快且没有阻塞问题）。 */
+    int64_t streaming;
 };
+
+/* fd 是不是「流式」：非普通文件。fstat 失败时按普通文件处理（保守）。
+   Windows 不走这条路（CRT 没有和 glibc 同款的 fread 凑满行为差异，
+   且本移植不在先验范围）。 */
+static int64_t file_fd_streaming(int64_t fd) {
+#if defined(_WIN32)
+    (void)fd;
+    return 0;
+#else
+    struct stat st;
+    if (fd < 0 || fstat((int)fd, &st) != 0) return 0;
+    return !S_ISREG(st.st_mode);
+#endif
+}
 
 static void file_destroy(void* p) {
     PyAdamasFile* f = (PyAdamasFile*)p;
@@ -183,6 +208,7 @@ PyAdamasFile* pa_file_open(PyAdamasStr* path, int64_t fd, PyAdamasStr* mode, int
     f->fd = fdnum;
     f->closefd = closefd;
     f->binary = bin;
+    f->streaming = file_fd_streaming(fdnum);
     f->readable = base == 'r' || plus;
     f->writable = base != 'r' || plus;
     f->newline = bin ? PYADAMAS_NL_NONE : (newline < 0 || newline > 4 ? 0 : newline);
@@ -349,7 +375,18 @@ static int file_fill(PyAdamasFile* f) {
         f->rawleft_len = 0;
     }
     size_t want = sizeof raw - (size_t)rn;
-    size_t got = fread(raw + rn, 1, want, f->fp);
+    size_t got;
+    if (f->streaming) {
+        /* 见 PyAdamasFile::streaming 的注释：流式 fd 只做一次 read(2)，
+           有数据就返回（不凑满 want）。这样 readline()/read(n) 不会因为
+           写端还开着而卡到 EOF。stdio 缓冲在这条路径上从不被填充
+           （文本模式的读全部经 file_fill），所以直接 read(2) 不会与
+           stdio 缓冲抢数据。 */
+        ssize_t r = read((int)f->fd, raw + rn, want);
+        got = r > 0 ? (size_t)r : 0;
+    } else {
+        got = fread(raw + rn, 1, want, f->fp);
+    }
     int64_t total = rn + (int64_t)got;
     f->raw_base = (int64_t)ftell(f->fp) - total;
     if (total == 0) {
@@ -410,7 +447,10 @@ static int file_fill(PyAdamasFile* f) {
             break;
         }
     }
-    if (got < want) {
+    /* 普通文件：短读即 EOF。流式 fd：一次 read(2) 的短读只表示「当前
+       没有更多可读」，EOF 只在 read 返回 0 时成立 —— 写端还开着时后面
+       可能继续有数据。 */
+    if (f->streaming ? got == 0 : got < want) {
         f->eof = 1;
         /* 文件尾留下不完整的多字节序列（如 UTF-8 的孤 0xE9）：iconv 报
            EINVAL 时暂存在 rawleft 等下一块，但 EOF 后不会再有下一块。
@@ -901,30 +941,23 @@ PyAdamasStr* pa_input(PyAdamasStr* prompt) {
         fwrite(prompt->data, 1, (size_t)prompt->len, stdout);
         fflush(stdout);
     }
-    char* buf = NULL;
-    int64_t len = 0, cap = 0;
-    int c;
-    int got_any = 0;
-    while ((c = fgetc(stdin)) != EOF) {
-        got_any = 1;
-        if (c == '\n') break;
-        if (len + 1 > cap) {
-            int64_t ncap = cap ? cap * 2 : 128;
-            char* nb = (char*)realloc(buf, (size_t)ncap);
-            if (!nb) panic_c("out of memory");
-            buf = nb;
-            cap = ncap;
-        }
-        buf[len++] = (char)c;
-    }
-    if (!got_any) {
-        free(buf);
+    /* 走 sys.stdin 文件对象（文本模式、通用换行）而不是 stdio 的 fgetc：
+       流式 fd（管道/tty）的读路径已统一由 file_fill 的一次 read(2) 承担，
+       两套缓冲混用会丢数据 —— fgetc 会把一整块读进 stdio 自己的缓冲，
+       之后 sys.stdin.readline() 的 read(2) 就看不到那部分字节了。 */
+    PyAdamasFile* f = pa_sys_stream(0);
+    PyAdamasStr* line = pa_file_readline(f, -1);
+    if (line->len == 0 && f->eof) {
+        pa_rc_dec(line);
         pa_raise_c("EOFError", "EOF when reading a line");
     }
-    if (len > 0 && buf[len - 1] == '\r') --len;
-    PyAdamasStr* s = str_new(buf ? buf : "", len);
-    free(buf);
-    return s;
+    /* CPython input() 去掉行尾换行（通用换行已折成 \n）。 */
+    if (line->len > 0 && line->data[line->len - 1] == '\n') {
+        PyAdamasStr* out = str_new(line->data, line->len - 1);
+        pa_rc_dec(line);
+        return out;
+    }
+    return line;
 }
 
 /* sys.stdin / sys.stdout / sys.stderr：直接包住 C 标准流（不 dup），
@@ -947,6 +980,7 @@ PyAdamasFile* pa_sys_stream(int64_t which) {
     f->closed = 0;
     f->closefd = 1;
     f->binary = 0;
+    f->streaming = file_fd_streaming((int64_t)which);
     f->readable = which == 0;
     f->writable = which != 0;
     f->newline = PYADAMAS_NL_UNIVERSAL;

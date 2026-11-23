@@ -714,6 +714,7 @@ void AsmGen::gen_call_rt(const Inst& in) {
             // O0/O2 同病，只是残留值不同。DictTryGet 融合路径不受影响：
             // 值由运行时 movq 直写帧槽，load.slot 按位读回。
             bool raw_ret = fn == RtFn::DictKeyAt || fn == RtFn::JsonLoads ||
+                           fn == RtFn::JsonOp ||
                            fn == RtFn::DictGet || fn == RtFn::DictGetOr ||
                            fn == RtFn::DictGetOpt || fn == RtFn::DictPop ||
                            fn == RtFn::DictPopLast;

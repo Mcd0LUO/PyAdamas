@@ -913,6 +913,12 @@ void AsmGen::gen_rt_args(const Inst& in, RtFn fn) {
         case RtFn::PopenNew:
             gen_rt_i6(in);
             break;
+        case RtFn::JsonParse:  // (text) -> unknown
+            gen_rt_i1(in);
+            break;
+        case RtFn::JsonOp:  // (op, a, b, c) -> i64
+            gen_rt_i4(in);
+            break;
         case RtFn::FileOpen:
             // (path, fd, mode, buffering, newline, closefd) —— 六个实参。
             // 原来误放在 i4 组：newline/closefd 没进寄存器，运行时读到的是

@@ -395,6 +395,8 @@ enum class RtFn : uint16_t {
     CollMostCommon,        // (dict*, i64 n) -> list*
     JsonDumps,             // (i64 value, str* desc, i64 indent, i64 flags, list* seps) -> str*
     JsonLoads,             // (str* text, str* desc) -> i64
+    JsonParse,             // (str* text) -> i64 unknown  动态构造（json.parse）
+    JsonOp,                // (op, a, b, c) -> i64        json.* 辅助统一入口
     // CPython 桥：(str* module, str* attr, list* args, str* descs) -> i64 unknown
     // 懒拉起 python3 worker 子进程，JSON 帧 IPC；见 runtime/rt_cpy.c。
     CpyCall,

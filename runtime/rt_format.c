@@ -867,6 +867,9 @@ int64_t pa_truth_unknown(int64_t v) {
             memcpy(&d, (void*)(uintptr_t)v, sizeof d);
             return d != 0.0 ? 1 : 0;
         }
+        /* 动态 JSON 的 null/bool 盒：None 假、bool 按 payload。 */
+        case PYADAMAS_RC_JSONNULL: return 0;
+        case PYADAMAS_RC_JSONBOOL: return *(int64_t*)(uintptr_t)v != 0;
         default: return 1;
     }
 }

@@ -493,6 +493,38 @@ pyadamas::ModuleInfoPtr builtin_module(const std::string& name) {
             f->ret_known = false;
             func_with("loads", f);
         }
+        // ── 动态 JSON（0.447）────────────────────────────────────────
+        // 签名只给类型检查/from-import 用；具体语义在 lower_json/json_call。
+        // parse 的返回是 unknown：JSON 形状由对端决定，静态类型拿不到。
+        func("parse", {pyadamas::t_str()}, pyadamas::t_unknown());
+        func("stringify", {pyadamas::t_unknown()}, pyadamas::t_str());
+        // 访问辅助：get/get_or/has 的 key 是 str（对象）或 int（数组下标），
+        // 静态上收成 unknown 让两种实参都过（运行期按容器种类选）。
+        func("get", {pyadamas::t_unknown(), pyadamas::t_unknown()},
+             pyadamas::t_unknown());
+        func("get_or",
+             {pyadamas::t_unknown(), pyadamas::t_unknown(), pyadamas::t_unknown()},
+             pyadamas::t_unknown());
+        func("has", {pyadamas::t_unknown(), pyadamas::t_unknown()},
+             pyadamas::t_bool());
+        func("path", {pyadamas::t_unknown(), pyadamas::mk_list(pyadamas::t_str())},
+             pyadamas::t_unknown());
+        func("len", {pyadamas::t_unknown()}, pyadamas::t_int());
+        func("keys", {pyadamas::t_unknown()}, pyadamas::mk_list(pyadamas::t_str()));
+        func("type", {pyadamas::t_unknown()}, pyadamas::t_str());
+        func("is_null", {pyadamas::t_unknown()}, pyadamas::t_bool());
+        func("as_str", {pyadamas::t_unknown()}, pyadamas::t_str());
+        func("as_int", {pyadamas::t_unknown()}, pyadamas::t_int());
+        func("as_float", {pyadamas::t_unknown()}, pyadamas::t_float());
+        func("as_bool", {pyadamas::t_unknown()}, pyadamas::t_bool());
+        func("as_dict", {pyadamas::t_unknown()},
+             pyadamas::mk_dict(pyadamas::t_str(), pyadamas::t_unknown()));
+        func("as_list", {pyadamas::t_unknown()},
+             pyadamas::mk_list(pyadamas::t_unknown()));
+        // 构造辅助：unknown 位置上的 JSON null/true/false 要显式拿盒，
+        // 否则语言既有的 None/bool→unknown 表示是裸 0/1，stringify 会写成 0/1。
+        func("null", {}, pyadamas::t_unknown());
+        func("bool", {pyadamas::t_bool()}, pyadamas::t_unknown());
     } else if (name == "re") {
         info->globals["I"] = pyadamas::t_int();
         info->globals["IGNORECASE"] = pyadamas::t_int();

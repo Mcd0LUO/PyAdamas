@@ -652,6 +652,11 @@ bool ir_module_needs_unknown_index(const IRModule& m) {
             case RtFn::AnyLoadTag:
             case RtFn::AnyTypeIs:   // P2：UNK tag 回退探针，依赖索引
             case RtFn::AnyDictItems:
+            // 动态 JSON：值在 unknown 域里靠「探针 + 头 kind」判型
+            // （null/bool 盒、CPYFLOAT 盒、str/list/dict 全是 indexed 堆
+            // 对象），stringify 的动态描述符 'u' 分支同样依赖索引。
+            case RtFn::JsonParse:
+            case RtFn::JsonOp:
                 return true;
             default:
                 return false;

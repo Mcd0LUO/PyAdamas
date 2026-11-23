@@ -342,8 +342,18 @@ static void jb_key_scalar(JBuf* b, int64_t kv, char kk) {
     pa_raise_c("ValueError", "json: bad type descriptor");
 }
 
+/* 动态（描述符 'u'）值的运行期判型序列化，定义在文件末尾「动态 JSON」段。
+   前向声明：jb_value 的 'u' 分支要用它。 */
+static void jb_any_value(JBuf* b, int64_t v, int64_t depth);
+
 static void jb_value(JBuf* b, int64_t v, const char* d, size_t n, int64_t depth) {
     char t = d[0];
+    /* 'u'：静态类型是 unknown —— 运行期按值的实际种类判型。
+       json.stringify() 走这条；dumps 的静态描述符永远不产生 'u'。 */
+    if (t == 'u') {
+        jb_any_value(b, v, depth);
+        return;
+    }
     if (t == '(') {
         char k = d[1];
         if (k == 'l') {
@@ -1109,3 +1119,591 @@ int64_t pa_json_loads(PyAdamasStr* text, PyAdamasStr* desc) {
     if (s.p != s.end) jp_fail_at(&s, s.p, "Extra data");
     return v;
 }
+
+/* ══════════════════════════════════════════════════════════════════
+   动态 JSON（0.447）：json.parse / json.stringify + json.* 辅助函数
+   ══════════════════════════════════════════════════════════════════
+
+   静态描述符（pa_json_loads/pa_json_dumps）要求调用点给出 sample 的完整
+   静态类型；LSP 这类「消息形状由对端决定」的协议拿不到 sample。这里让
+   解析器按 JSON 文本自身构造值，值统一落在 unknown 机器字里：
+
+     null           → PYADAMAS_RC_JSONNULL 盒    （payload 无用）
+     true / false   → PYADAMAS_RC_JSONBOOL 盒    （payload 0/1）
+     JSON 整数      → 裸 int64（非堆，不装盒）
+     JSON 小数/指数 → CPYFLOAT 盒（pa_any_from_f64，和 unknown 域 float 同形）
+     JSON 字符串    → PyAdamasStr*
+     JSON 数组      → PyAdamasList（elem_kind=2，元素是 unknown）
+     JSON 对象      → PyAdamasDict（key_kind=1 str / key_own=1 / val_own=2）
+
+   为什么 null/bool 要装盒：unknown 值域里 None/bool/int 全是机器字，容器
+   元素又没有逐字 tag（P2 边界，见 docs/type-tags-landing.md §5.1）。若不
+   装盒，json.parse("null") 再 stringify 会输出 0、true 会输出 1 —— 动态
+   JSON 的往返（本功能的核心承诺）就没了。两个盒都和 CPYFLOAT 一样是
+   「无堆出边、tracked 分配」的小对象，探针 + 头 kind 即可判型。
+
+   判型统一走 json_classify()：非堆 → int；堆 → 头 kind。不带 tag 的
+   unknown 值（从容器取出的嵌套值）也能正确判型，这是 helper 与
+   stringify 都依赖的口径。
+
+   已知边界（文档同步）：
+     - 用户代码在 unknown 位置手写的 True/False/None 仍是裸 0/1（语言既有
+       语义），json.stringify 会把它们序列化成 1/0。要构造 JSON 的
+       true/false/null，用 json.bool()/json.null() 显式拿盒。
+     - int64 放不下的 JSON 整数抛 ValueError（语言 int 是 i64；CPython 是
+       任意精度 bigint）。
+     - 嵌套深度上限 512（避免解析/序列化递归爆 C 栈），超限抛 ValueError。
+*/
+
+enum {
+    /* 与 src/lower_import_misc.cpp 的 JSONOP_* 逐项一致。 */
+    JSONOP_GET = 1,
+    JSONOP_GET_OR = 2,
+    JSONOP_HAS = 3,
+    JSONOP_LEN = 4,
+    JSONOP_KEYS = 5,
+    JSONOP_TYPE = 6,
+    JSONOP_IS_NULL = 7,
+    JSONOP_AS_STR = 8,
+    JSONOP_AS_INT = 9,
+    JSONOP_AS_FLOAT = 10,
+    JSONOP_AS_BOOL = 11,
+    JSONOP_NULL = 12,
+    JSONOP_BOOL = 13,
+    JSONOP_AS_DICT = 14,
+    JSONOP_AS_LIST = 15,
+    JSONOP_PATH = 16,
+};
+
+#define JSON_DYN_MAX_DEPTH 512
+
+/* 值的运行期种类。JC_NONHEAP 是「裸机器字」：动态 JSON 里只可能是整数
+   （float 已装盒）；用户手写的 None/bool 也落在这里，和 CPython 的
+   None==0 / True==1 口径一致。 */
+enum {
+    JC_NONHEAP = 0,
+    JC_NULL,
+    JC_BOOL,
+    JC_STR,
+    JC_FLOAT,
+    JC_LIST,
+    JC_DICT,
+    JC_BIG,
+    JC_OTHER,
+};
+
+static int json_classify(int64_t v) {
+    if (!pa_unknown_is_heap(v)) return JC_NONHEAP;
+    PyAdamasRc* h = (PyAdamasRc*)(uintptr_t)((uint64_t)v - (uint64_t)PYADAMAS_RC_HDR);
+    switch (h->kind) {
+        case PYADAMAS_RC_JSONNULL: return JC_NULL;
+        case PYADAMAS_RC_JSONBOOL: return JC_BOOL;
+        case PYADAMAS_RC_STR: return JC_STR;
+        case PYADAMAS_RC_CPYFLOAT: return JC_FLOAT;
+        case PYADAMAS_RC_LIST: return JC_LIST;
+        case PYADAMAS_RC_DICT: return JC_DICT;
+        case PYADAMAS_RC_BIGINT: return JC_BIG;
+        default: return JC_OTHER;
+    }
+}
+
+/* 8 字节无出边盒（同 CPYFLOAT 的分配方式：tracked 分配，unknown 探针靠
+   RC 索引认得出它）。 */
+static int64_t json_box_new(int64_t kind, int64_t payload) {
+    int64_t* p = (int64_t*)rc_alloc((int64_t)sizeof(int64_t), NULL, NULL, kind);
+    *p = payload;
+    return (int64_t)(uintptr_t)p;
+}
+
+static int64_t json_null_new(void) { return json_box_new(PYADAMAS_RC_JSONNULL, 0); }
+
+static int64_t json_bool_new(int64_t v) {
+    return json_box_new(PYADAMAS_RC_JSONBOOL, v ? 1 : 0);
+}
+
+static int64_t json_bool_payload(int64_t v) { return *(int64_t*)(uintptr_t)v; }
+
+/* ── 解析：按文本自身构造动态值 ─────────────────────────────── */
+
+static int64_t jp_dyn_value(JP* s, int64_t depth);
+
+static int64_t jp_dyn_object(JP* s, int64_t depth) {
+    PyAdamasDict* out = pa_dict_new(1, 1, 2, -1, -1);
+    pa_rc_temp(out);
+    PA_PIN_SCOPE(out);
+    jp_open(s, '{', "expected dict");
+    jp_ws(s);
+    if (s->p < s->end && *s->p == '}') {
+        s->p++;
+        PA_PIN_RELEASE(out);
+        pa_rc_temp_take(out);
+        return (int64_t)out;
+    }
+    for (;;) {
+        PyAdamasStr* key = jp_string(s, 1);
+        PA_PIN_SCOPE(key);
+        /* 键可能在本轮后续（缺 ':'、value 语法错）抛错时还没交给 dict：
+           rc=1 的字符串只被 C 局部变量引用，异常展开时没人 dec → 泄漏
+           （ASan 实测每次错误解析漏一个键）。挂进临时栈：正常路径转移
+           所有权时 take 掉，异常路径由调用方 landing pad 的 cleanup 释放。 */
+        pa_rc_temp(key);
+        jp_ws(s);
+        if (s->p >= s->end || *s->p != ':')
+            jp_fail_at(s, s->p, "Expecting ':' delimiter");
+        s->p++;
+        int64_t v = jp_dyn_value(s, depth + 1);
+        /* 插入路径不 retain：所有权从本帧转给 dict（与 jp_value 静态版
+           本同口径）。重复键时 dict 内部会 dec 掉这份新键、保留旧键。 */
+        pa_dict_set(out, (int64_t)key, v);
+        pa_rc_temp_take(key);
+        jp_ws(s);
+        if (s->p < s->end && *s->p == ',') {
+            const char* comma = s->p;
+            s->p++;
+            jp_ws(s);
+            if (s->p < s->end && *s->p == '}')
+                jp_fail_at(s, comma, "Illegal trailing comma before end of object");
+            continue;
+        }
+        break;
+    }
+    if (s->p >= s->end || *s->p != '}')
+        jp_fail_at(s, s->p, "Expecting ',' delimiter");
+    s->p++;
+    PA_PIN_RELEASE(out);
+    pa_rc_temp_take(out);
+    return (int64_t)out;
+}
+
+static int64_t jp_dyn_array(JP* s, int64_t depth) {
+    PyAdamasList* out = pa_list_new(0, 2);
+    pa_rc_temp(out);
+    PA_PIN_SCOPE(out);
+    jp_open(s, '[', "expected list");
+    jp_ws(s);
+    if (s->p < s->end && *s->p == ']') {
+        s->p++;
+        PA_PIN_RELEASE(out);
+        pa_rc_temp_take(out);
+        return (int64_t)out;
+    }
+    for (;;) {
+        int64_t v = jp_dyn_value(s, depth + 1);
+        /* append 不 retain：所有权转给列表。elem_kind=2 让销毁按未知
+           种类逐元素 dec（heap_bits 整体回退）。 */
+        pa_list_append(out, v, 2);
+        jp_ws(s);
+        if (s->p < s->end && *s->p == ',') {
+            const char* comma = s->p;
+            s->p++;
+            jp_ws(s);
+            if (s->p < s->end && *s->p == ']')
+                jp_fail_at(s, comma, "Illegal trailing comma before end of array");
+            continue;
+        }
+        break;
+    }
+    if (s->p >= s->end || *s->p != ']')
+        jp_fail_at(s, s->p, "Expecting ',' delimiter");
+    s->p++;
+    PA_PIN_RELEASE(out);
+    pa_rc_temp_take(out);
+    return (int64_t)out;
+}
+
+/* 严格 JSON 数字：有小数/指数部分是 float（CPython json 口径），否则整数。
+   整数溢出 int64 直接抛 ValueError（同 json.loads 静态版本）。 */
+static int64_t jp_dyn_number(JP* s) {
+    const char* start = s->p;
+    int isfloat = 0;
+    size_t n = jp_num_scan(s, &isfloat);
+    if (n == 0) jp_fail_at(s, s->p, "Expecting value");
+    if (!isfloat) {
+        int neg = start[0] == '-';
+        size_t digits = n - (neg ? 1u : 0u);
+        if (digits > 19) jp_fail_type(s, "integer out of int64 range");
+        uint64_t u = 0;
+        for (size_t i = neg ? 1u : 0u; i < n; ++i)
+            u = u * 10 + (uint64_t)(start[i] - '0');
+        uint64_t limit = neg ? 9223372036854775808ULL : 9223372036854775807ULL;
+        if (u > limit) jp_fail_type(s, "integer out of int64 range");
+        s->p = start + n;
+        return neg ? -(int64_t)(u - 1) - 1 : (int64_t)u;
+    }
+    char buf[64];
+    char* big = NULL;
+    char* tok = buf;
+    if (n >= sizeof buf) {
+        big = (char*)malloc(n + 1);
+        if (!big) panic_c("out of memory");
+        tok = big;
+    }
+    memcpy(tok, start, n);
+    tok[n] = '\0';
+    double d = strtod(tok, NULL);
+    free(big);
+    s->p = start + n;
+    return pa_any_from_f64(d);
+}
+
+/* 字面量：true/false/null。按最长已知词匹配后交给外层判 Extra data
+   （与 CPython 的 "Expecting value" 位置口径一致即可）。 */
+static int64_t jp_dyn_literal(JP* s) {
+    if (s->end - s->p >= 4 && strncmp(s->p, "true", 4) == 0) {
+        s->p += 4;
+        return json_bool_new(1);
+    }
+    if (s->end - s->p >= 5 && strncmp(s->p, "false", 5) == 0) {
+        s->p += 5;
+        return json_bool_new(0);
+    }
+    if (s->end - s->p >= 4 && strncmp(s->p, "null", 4) == 0) {
+        s->p += 4;
+        return json_null_new();
+    }
+    jp_fail_at(s, s->p, "Expecting value");
+}
+
+static int64_t jp_dyn_value(JP* s, int64_t depth) {
+    if (depth > JSON_DYN_MAX_DEPTH) {
+        char msg[96];
+        snprintf(msg, sizeof msg, "maximum nesting depth exceeded (%d)",
+                 (int)JSON_DYN_MAX_DEPTH);
+        pa_raise_c("ValueError", msg);
+    }
+    jp_ws(s);
+    if (s->p >= s->end) jp_fail_at(s, s->p, "Expecting value");
+    char c = *s->p;
+    if (c == '{') return jp_dyn_object(s, depth);
+    if (c == '[') return jp_dyn_array(s, depth);
+    if (c == '"') return (int64_t)jp_string(s, 0);
+    if (c == 't' || c == 'f' || c == 'n') return jp_dyn_literal(s);
+    /* NaN/Infinity 扩展：和静态 loads 的 float 样例、CPython json.loads
+       默认口径一致（parse_constant）。标准 JSON 不会有，但往返要保真。 */
+    if (c == 'N' || c == 'I' || (c == '-' && s->end - s->p >= 9 &&
+                                 strncmp(s->p, "-Infinity", 9) == 0))
+        return pa_any_from_f64(jp_float(s));
+    if (c == '-' || (c >= '0' && c <= '9')) return jp_dyn_number(s);
+    jp_fail_at(s, s->p, "Expecting value");
+}
+
+int64_t pa_json_parse(PyAdamasStr* text) {
+    JP s = {text->data, text->data + text->len, text->data};
+    int64_t v = jp_dyn_value(&s, 0);
+    jp_ws(&s);
+    if (s.p != s.end) jp_fail_at(&s, s.p, "Extra data");
+    return v;
+}
+
+/* ── 序列化：unknown 值按运行期种类判型 ─────────────────────── */
+
+static void jb_any_string(JBuf* b, PyAdamasStr* s) { jb_str(b, s); }
+
+static void jb_any_value(JBuf* b, int64_t v, int64_t depth) {
+    if (depth > JSON_DYN_MAX_DEPTH) {
+        char msg[96];
+        snprintf(msg, sizeof msg, "maximum nesting depth exceeded (%d)",
+                 (int)JSON_DYN_MAX_DEPTH);
+        pa_raise_c("ValueError", msg);
+    }
+    int jc = json_classify(v);
+    switch (jc) {
+        case JC_NONHEAP:
+            jb_i64(b, v);
+            return;
+        case JC_NULL:
+            jb_cstr(b, "null");
+            return;
+        case JC_BOOL:
+            jb_cstr(b, json_bool_payload(v) ? "true" : "false");
+            return;
+        case JC_STR:
+            jb_any_string(b, (PyAdamasStr*)(uintptr_t)v);
+            return;
+        case JC_FLOAT: {
+            double d;
+            memcpy(&d, (void*)(uintptr_t)v, sizeof d);
+            jb_f64(b, d);
+            return;
+        }
+        case JC_BIG: {
+            PyAdamasStr* t = pa_big_str((PyAdamasBig*)(uintptr_t)v);
+            jb_raw(b, t->data, (size_t)t->len);
+            pa_rc_dec(t);
+            return;
+        }
+        case JC_LIST: {
+            PyAdamasList* l = (PyAdamasList*)(uintptr_t)v;
+            jb_ch(b, '[');
+            for (int64_t i = 0; i < l->len; ++i) {
+                if (i) jb_raw(b, b->item_sep, b->item_sep_len);
+                jb_nl(b, depth + 1);
+                jb_any_value(b, l->data[i], depth + 1);
+            }
+            if (l->len) jb_nl(b, depth);
+            jb_ch(b, ']');
+            return;
+        }
+        case JC_DICT: {
+            PyAdamasDict* m = (PyAdamasDict*)(uintptr_t)v;
+            jb_ch(b, '{');
+            for (int64_t i = 0; i < m->len; ++i) {
+                if (i) jb_raw(b, b->item_sep, b->item_sep_len);
+                jb_nl(b, depth + 1);
+                int64_t kv = pa_dict_key_at(m, i);
+                /* 动态对象来自 json.parse 时键恒为 str；用户传进来的
+                   dict 键按 CPython json 的强制转字符串规则处理。 */
+                if (m->key_kind == 1 ||
+                    (m->key_kind == 3 && pa_unknown_is_heap(kv) &&
+                     json_classify(kv) == JC_STR)) {
+                    jb_str(b, (PyAdamasStr*)(uintptr_t)kv);
+                } else if (m->key_kind == 2) {
+                    double kd;
+                    memcpy(&kd, &kv, sizeof kd);
+                    jb_ch(b, '"');
+                    jb_f64(b, kd);
+                    jb_ch(b, '"');
+                } else {
+                    jb_ch(b, '"');
+                    jb_i64(b, kv);
+                    jb_ch(b, '"');
+                }
+                jb_raw(b, b->key_sep, b->key_sep_len);
+                jb_any_value(b, pa_dict_val_at(m, i), depth + 1);
+            }
+            if (m->len) jb_nl(b, depth);
+            jb_ch(b, '}');
+            return;
+        }
+        default:
+            pa_raise_c("TypeError", "json.stringify: object is not JSON serializable");
+    }
+}
+
+/* ── json.* 辅助（全部经 pa_json_op 一个入口）────────────────── */
+
+static _Noreturn void json_type_error(const char* fname, const char* what) {
+    char msg[160];
+    snprintf(msg, sizeof msg, "json.%s(): %s", fname, what);
+    pa_raise_c("TypeError", msg);
+}
+
+/* 取元素：dict（str/int 键）或 list（int 下标）。*found 为 0 时返回 0，
+   由调用方决定抛 KeyError/IndexError 还是给默认值；命中值按 +1 交回。 */
+static int64_t json_get_value(int64_t v, int64_t key, int* found, int has_def,
+                              int64_t def) {
+    (void)def; /* 默认值只在 json_get_op 的未命中路径用，这里只回传 found */
+    int jc = json_classify(v);
+    if (jc == JC_DICT) {
+        PyAdamasDict* d = (PyAdamasDict*)(uintptr_t)v;
+        int kh = (int)d->key_kind;
+        if (kh == 1) {
+            if (json_classify(key) != JC_STR) {
+                if (has_def) { *found = 0; return 0; }
+                json_type_error("get", "object keys are strings");
+            }
+        } else if (kh == 0 || kh == 2) {
+            if (pa_unknown_is_heap(key)) {
+                if (has_def) { *found = 0; return 0; }
+                json_type_error("get", "object keys are ints");
+            }
+        }
+        int64_t out = 0;
+        if (pa_dict_try_get(d, key, &out)) {
+            *found = 1;
+            pa_rc_inc_unknown(out);
+            return out;
+        }
+        *found = 0;
+        return 0;
+    }
+    if (jc == JC_LIST) {
+        if (pa_unknown_is_heap(key)) {
+            if (has_def) { *found = 0; return 0; }
+            json_type_error("get", "array index must be an int");
+        }
+        PyAdamasList* l = (PyAdamasList*)(uintptr_t)v;
+        int64_t i = key;
+        if (i < 0) i += l->len;
+        if (i < 0 || i >= l->len) { *found = 0; return 0; }
+        *found = 1;
+        int64_t out = pa_list_get(l, i);
+        pa_rc_inc_unknown(out);
+        return out;
+    }
+    if (jc == JC_STR) {
+        if (pa_unknown_is_heap(key)) {
+            if (has_def) { *found = 0; return 0; }
+            json_type_error("get", "string index must be an int");
+        }
+        PyAdamasStr* s = (PyAdamasStr*)(uintptr_t)v;
+        if (key < -s->pub || key >= s->pub) { *found = 0; return 0; }
+        *found = 1;
+        return (int64_t)pa_str_char_at(s, key);
+    }
+    if (has_def) { *found = 0; return 0; }
+    json_type_error("get", "value is not an object or array");
+}
+
+static int64_t json_get_op(int64_t v, int64_t key, int has_def, int64_t def,
+                           int fname_kind) {
+    int found = 0;
+    int64_t r = json_get_value(v, key, &found, has_def, def);
+    if (found) return r;
+    if (has_def) {
+        pa_rc_inc_unknown(def);
+        return def;
+    }
+    if (fname_kind == 1) {
+        /* has()：缺失返回 0，不抛。 */
+        return 0;
+    }
+    if (json_classify(v) == JC_LIST) {
+        pa_raise_c("IndexError", "json.get(): array index out of range");
+    }
+    if (json_classify(v) == JC_DICT) {
+        pa_raise_c("KeyError", "json.get(): key not found");
+    }
+    json_type_error("get", "value is not an object or array");
+}
+
+static int64_t json_as_int(int64_t v) {
+    int jc = json_classify(v);
+    if (jc == JC_NONHEAP) return v;
+    if (jc == JC_BOOL) return json_bool_payload(v);
+    json_type_error("as_int", "value is not an int");
+}
+
+static double json_as_double(int64_t v) {
+    int jc = json_classify(v);
+    if (jc == JC_NONHEAP) return (double)v;
+    if (jc == JC_BOOL) return (double)json_bool_payload(v);
+    if (jc == JC_FLOAT) {
+        double d;
+        memcpy(&d, (void*)(uintptr_t)v, sizeof d);
+        return d;
+    }
+    json_type_error("as_float", "value is not a number");
+}
+
+static int64_t json_truthy(int64_t v) {
+    int jc = json_classify(v);
+    switch (jc) {
+        case JC_NONHEAP: return v != 0;
+        case JC_NULL: return 0;
+        case JC_BOOL: return json_bool_payload(v) != 0;
+        case JC_STR: return ((PyAdamasStr*)(uintptr_t)v)->len != 0;
+        case JC_LIST: return ((PyAdamasList*)(uintptr_t)v)->len != 0;
+        case JC_DICT: return ((PyAdamasDict*)(uintptr_t)v)->len != 0;
+        case JC_FLOAT: {
+            double d;
+            memcpy(&d, (void*)(uintptr_t)v, sizeof d);
+            return d != 0.0;
+        }
+        case JC_BIG: return pa_big_truth((PyAdamasBig*)(uintptr_t)v);
+        default: return 1;
+    }
+}
+
+static int64_t json_type_name(int64_t v) {
+    const char* name = "unknown";
+    switch (json_classify(v)) {
+        case JC_NONHEAP: name = "int"; break;
+        case JC_NULL: name = "null"; break;
+        case JC_BOOL: name = "bool"; break;
+        case JC_STR: name = "str"; break;
+        case JC_FLOAT: name = "float"; break;
+        case JC_LIST: name = "list"; break;
+        case JC_DICT: name = "dict"; break;
+        case JC_BIG: name = "int"; break;
+        default: name = "unknown"; break;
+    }
+    return (int64_t)str_new_ascii(name, (int64_t)strlen(name));
+}
+
+static int64_t json_len_op(int64_t v) {
+    switch (json_classify(v)) {
+        case JC_STR: return ((PyAdamasStr*)(uintptr_t)v)->pub;
+        case JC_LIST: return ((PyAdamasList*)(uintptr_t)v)->len;
+        case JC_DICT: return ((PyAdamasDict*)(uintptr_t)v)->len;
+        case JC_BIG: return 1; /* 数字没有长度；兜底成 1 不静默给 0 */
+        default: json_type_error("len", "value has no len()");
+    }
+}
+
+int64_t pa_json_op(int64_t op, int64_t a, int64_t b, int64_t c) {
+    switch (op) {
+        case JSONOP_GET:
+            return json_get_op(a, b, 0, 0, 0);
+        case JSONOP_GET_OR:
+            return json_get_op(a, b, 1, c, 0);
+        case JSONOP_HAS:
+            return json_get_op(a, b, 0, 0, 1);
+        case JSONOP_LEN:
+            return json_len_op(a);
+        case JSONOP_KEYS:
+            if (json_classify(a) != JC_DICT)
+                json_type_error("keys", "value is not an object");
+            return (int64_t)pa_dict_keys((PyAdamasDict*)(uintptr_t)a);
+        case JSONOP_TYPE:
+            return json_type_name(a);
+        case JSONOP_IS_NULL:
+            return json_classify(a) == JC_NULL;
+        case JSONOP_AS_STR:
+            if (json_classify(a) != JC_STR)
+                json_type_error("as_str", "value is not a string");
+            pa_rc_inc((void*)(uintptr_t)a);
+            return a;
+        case JSONOP_AS_INT:
+            return json_as_int(a);
+        case JSONOP_AS_FLOAT: {
+            double d = json_as_double(a);
+            int64_t out;
+            memcpy(&out, &d, sizeof out);
+            return out;
+        }
+        case JSONOP_AS_BOOL:
+            return json_truthy(a);
+        case JSONOP_NULL:
+            return json_null_new();
+        case JSONOP_BOOL:
+            return json_bool_new(a != 0);
+        case JSONOP_AS_DICT:
+            if (json_classify(a) != JC_DICT)
+                json_type_error("as_dict", "value is not an object");
+            pa_rc_inc((void*)(uintptr_t)a);
+            return a;
+        case JSONOP_AS_LIST:
+            if (json_classify(a) != JC_LIST)
+                json_type_error("as_list", "value is not an array");
+            pa_rc_inc((void*)(uintptr_t)a);
+            return a;
+        case JSONOP_PATH: {
+            /* a=根值（借用），b=list[str] 键路径。逐层 get；每层结果持有
+               一份，最后一层交回。 */
+            if (!b) json_type_error("path", "path must be a list of str");
+            PyAdamasList* keys = (PyAdamasList*)(uintptr_t)b;
+            int64_t cur = a;
+            int owned = 0;
+            for (int64_t i = 0; i < keys->len; ++i) {
+                int64_t key = keys->data[i];
+                if (json_classify(key) != JC_STR)
+                    json_type_error("path", "path must be a list of str");
+                int found = 0;
+                int64_t next = json_get_value(cur, key, &found, 0, 0);
+                if (!found) {
+                    if (owned) pa_rc_dec_unknown(cur);
+                    pa_raise_c("KeyError", "json.path(): key not found");
+                }
+                if (owned) pa_rc_dec_unknown(cur);
+                cur = next;
+                owned = 1;
+            }
+            if (!owned) pa_rc_inc_unknown(cur);
+            return cur;
+        }
+        default:
+            pa_raise_c("ValueError", "json: bad helper opcode");
+    }
+}
+

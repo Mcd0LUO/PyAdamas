@@ -831,6 +831,9 @@ private:
     // 把静态类型编码成 json 运行时描述符；不支持的类型就地报错。
     bool json_desc(const TypePtr& t, std::string& out, int line, int col,
                    bool for_loads = false);
+    // json.stringify 用：静态类型编码成描述符，unknown（以及运行期才能定型的
+    // 位置）编码成 'u'，运行时按值的实际种类判型。永不失败。
+    bool json_desc_dyn(const TypePtr& t, std::string& out, int line, int col);
     // CPython 桥（from python import）：参数类型描述符 + 调用降级。
     bool cpy_desc(const TypePtr& t, std::string& out, int line, int col);
     VReg lower_cpy_call(const std::string& proxy_name, const std::string& attr, Call& c);

@@ -813,6 +813,24 @@ CPython 一致。
 `sys.stdin` / `sys.stdout` / `sys.stderr` 是文件对象（直接包住 C 标准流，
 和 `print` 共用缓冲，对象永生）；支持 `sys.stdout.write(...)`、
 `print(..., file=sys.stderr)`、`for line in sys.stdin:` 等写法。
+
+**流式读取（管道 / tty，0.447）**：非普通文件（管道、终端、socket）上的
+文本预读改成一次 `read(2)`「有多少拿多少」，不再像 glibc 的 `fread` 那样
+为凑满 8KB 请求量一直等到 EOF：
+
+- `sys.stdin.readline()` / `for line in sys.stdin:` 在写端还开着时就返回
+  已到达的整行（写端不关不再阻塞）；EOF 时 `readline()` 返回空串；
+- `read(n)` 精确读 n 个**字节**（UTF-8 按字节计，和 `Content-Length` 一致），
+  数据分块到达时继续等，凑满 n 或 EOF 才返回；`read()` 一直读到 EOF；
+- 普通文件重定向（`prog < file`）行为不变（`fread` 大块读）；
+- `input()` 也走同一条 `sys.stdin` 路径（不再单独用 stdio 的 `fgetc`），
+  EOF 抛 `EOFError`。
+
+LSP / REPL 这类「一问一答」的协议在 `sys.stdout` 上写完一帧后要
+`sys.stdout.flush()`（`write` 本身不自动 flush）。需要逐字节读二进制帧时用
+`open(0, "rb")`（返回二进制 `file`，`read(n)` 精确按字节、`readline()` 保留
+`\r\n`），再交给 `json.parse` 解析帧体；`subprocess.Popen` 的 `.stdout` /
+`.stderr` 也是这种二进制 `file` 对象。
 打开失败抛 `OSError`，关闭后读写抛 `ValueError`。
 
 `file` 也可以作为形参/字段标注；跨模块接口里它按 unknown 编码（调用点不再
@@ -945,6 +963,32 @@ CPython 一致。
 - 内置 `json`：`dumps(obj)` 按静态类型生成 JSON；`loads(text, sample)`
   用 sample 的静态类型决定结果结构，覆盖 int/bool/float/str/None/list/
   dict/定长 tuple；默认分隔符 `", "` / `": "`。
+- 内置 `json` 的动态路径（0.447，LSP/对端决定形状的协议用）：
+  `json.parse(text)` 不要 sample，返回 **unknown**——运行期是
+  `dict[str, unknown]` / `list[unknown]` / int / float / str，其中 JSON 的
+  `null`/`true`/`false` 用无出边小盒表示（所以 `parse`→`stringify` 往返
+  不丢 true/false/null）；整数超出 int64 抛 `ValueError`，嵌套深度上限 512；
+  和 `json.loads` 的 float 样例、CPython 默认口径一致，也接受 `NaN` /
+  `Infinity` / `-Infinity`（stringify 原样写回）。
+  `json.stringify(v)` 接受任意静态类型：静态已知的部分按类型精确输出，
+  unknown 位置在运行期按值的实际种类判型（盒 / CPYFLOAT / str / list /
+  dict），默认分隔符与 `dumps` 相同。访问辅助（取值后都是 unknown，除非
+  注明）：
+  `get(v, key)`（对象按 str 键 / 数组按 int 下标，缺失抛 KeyError/IndexError）、
+  `get_or(v, key, default)`、`has(v, key)`、`path(v, list[str])`、
+  `len(v)`、`keys(v) -> list[str]`、`type(v) -> str`（`"null"`/`"bool"`/
+  `"int"`/`"float"`/`"str"`/`"list"`/`"dict"`）、`is_null(v)`、
+  `as_str` / `as_int` / `as_float` / `as_bool`（类型不符抛 TypeError）、
+  `as_dict(v) -> dict[str, unknown]`、`as_list(v) -> list[unknown]`；
+  构造用 `json.bool(b)` / `json.null()` 拿盒（float 转 unknown 本来就自动
+  装盒，不需要额外 helper）。
+  从 `as_dict`/`as_list` 拿到的容器可以直接 `v["k"]` / `v[i]` / `len` /
+  `for` 迭代（静态容器类型已知）。
+  **边界**：语言里 `None`/bool 在 unknown 域就是裸 0/1、容器元素没有逐字
+  类型标签，所以「异构容器里的裸 True/None」和「静态 `list[float]` 塞进
+  未知位置」在动态 stringify 时会退化成 0/1 或位模式；要精确构造 JSON
+  的 true/false/null 用 `json.bool()`/`json.null()`（解析得到的值逐元素
+  已装盒，不受影响）。
 - 内置 `csv`（`stdlib/csv.py` 随编译器分发）：`reader(f, delimiter=",",
   quotechar='"')` 一次读完文件并返回 `list[list[str]]`；
   `writer(f, delimiter=",", quotechar='"', quoting=0, lineterminator="\r\n")`

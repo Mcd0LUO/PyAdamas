@@ -378,6 +378,13 @@ PyAdamasList* pa_any_iter_list(int64_t v) {
             return pa_str_to_list((PyAdamasStr*)(uintptr_t)v);
         case PYADAMAS_RC_DICT:
             return pa_dict_keys((PyAdamasDict*)(uintptr_t)v);
+        /* 动态 JSON 的 null/bool 盒：消息和 CPython 的不可迭代类型一致。 */
+        case PYADAMAS_RC_JSONNULL:
+            pa_raise_c("TypeError", "'NoneType' object is not iterable");
+            return NULL;
+        case PYADAMAS_RC_JSONBOOL:
+            pa_raise_c("TypeError", "'bool' object is not iterable");
+            return NULL;
         default:
             pa_raise_c("TypeError", "object is not iterable");
             return NULL;

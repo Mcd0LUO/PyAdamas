@@ -480,6 +480,8 @@ inline const char* rt_name(RtFn f) {
         case RtFn::CollMostCommon: return "pa_collections_most_common";
         case RtFn::JsonDumps: return "pa_json_dumps";
         case RtFn::JsonLoads: return "pa_json_loads";
+        case RtFn::JsonParse: return "pa_json_parse";
+        case RtFn::JsonOp: return "pa_json_op";
         case RtFn::CpyCall: return "pa_cpy_call";
         case RtFn::RegexCompile: return "pa_re_compile";
         case RtFn::RegexSearchStr: return "pa_re_search_str";

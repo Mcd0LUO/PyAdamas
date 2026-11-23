@@ -45,7 +45,7 @@
 | os | 原生 | 缺 `walk`、`environ`、`stat`、`system`；**`os.path.x` 不可用**（要单独 `import os.path`） | 通过 |
 | os.path | 原生 | join/basename/splitext/isdir/exists 可用 | 通过 |
 | re | 原生 | findall/sub/search 可用；条件组/Unicode 属性类不支持 | 通过 |
-| json | 原生 | 静态 `loads` 仍必须给 sample；**动态 `parse`/`stringify` 已补**（0.390，无需 sample，null/bool 盒保真往返）+ 访问辅助 get/path/as_*/type/keys 等；缺 `ensure_ascii` 之外的自定义 `default`/object_hook | 通过（静态带 sample / 动态不带） |
+| json | 原生 | 静态 `loads` 仍必须给 sample；**动态 `parse`/`stringify` 已补**（0.447，无需 sample，null/bool 盒保真往返）+ 访问辅助 get/path/as_*/type/keys 等；缺 `ensure_ascii` 之外的自定义 `default`/object_hook | 通过（静态带 sample / 动态不带） |
 | collections | 原生 | **缺 `namedtuple`**；Counter/OrderedDict/defaultdict/deque 可用 | 通过 |
 | itertools | 原生 | 有 chain/islice/product/permutations/combinations/zip_longest/accumulate/repeat；**缺 `takewhile`/`dropwhile`/`groupby`/`starmap`/`count`/`cycle`/`tee`/`filterfalse`** | 通过 |
 | functools | 原生 | reduce/wraps/partial/lru_cache 可用；**缺 `cached_property`/`total_ordering`/`singledispatch`/`cmp_to_key`/`cache`** | 通过 |

@@ -911,6 +911,10 @@ static int64_t any_type_from_heap(int64_t v) {
         case PYADAMAS_RC_CPYFLOAT: return PA_TYPE_FLOAT;
         case PYADAMAS_RC_BIGINT: return PA_TYPE_BIG;
         case PYADAMAS_RC_INSTANCE: return PA_TYPE_OBJECT;
+        /* 动态 JSON 的 null/bool 盒：isinstance(v, type(None)) / isinstance(v, bool)
+           能精确判出来（P2 类型码口径）。 */
+        case PYADAMAS_RC_JSONNULL: return PA_TYPE_NONE;
+        case PYADAMAS_RC_JSONBOOL: return PA_TYPE_BOOL;
         case PYADAMAS_RC_OBJ: {
             /* 类对象藏在 OBJ 里（头有 magic/cid/ctor/vtable）；异常值等
                其它 OBJ 负载不是类对象，按 OBJECT（异常类的 isinstance

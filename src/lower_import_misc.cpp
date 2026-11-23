@@ -86,6 +86,85 @@ bool Lowerer::json_desc(const TypePtr& t, std::string& out, int line, int col,
     }
 }
 
+
+// json.stringify 用的描述符编码：和 json_desc 的区别只有「不报错」——
+// unknown 以及运行期才能定型的位置编码成 'u'（runtime/rt_json.c 的
+// jb_value 对 'u' 调 jb_any_value，按值的实际种类判型）。数组/元组/字典
+// 尽量保留静态结构（静态已知的 bool/float 等叶子仍然精确输出）。
+bool Lowerer::json_desc_dyn(const TypePtr& t, std::string& out, int line, int col) {
+    (void)line;
+    (void)col;
+    if (!t || t->kind == TyKind::Unknown) {
+        out += 'u';
+        return true;
+    }
+    switch (t->kind) {
+        case TyKind::None: out += 'n'; return true;
+        case TyKind::Bool: out += 'b'; return true;
+        case TyKind::Int: out += 'i'; return true;
+        case TyKind::Float: out += 'f'; return true;
+        case TyKind::Str: out += 's'; return true;
+        case TyKind::List: {
+            if (t->sub.empty()) {
+                out += 'u';
+                return true;
+            }
+            std::string inner;
+            json_desc_dyn(t->sub[0], inner, line, col);
+            out += "(l";
+            out += inner;
+            out += ")";
+            return true;
+        }
+        case TyKind::Tuple: {
+            if (t->variadic) {
+                out += 'u';
+                return true;
+            }
+            std::string s = "(t";
+            for (auto& sub : t->sub) {
+                std::string inner;
+                json_desc_dyn(sub, inner, line, col);
+                s += inner;
+            }
+            s += ")";
+            out = std::move(s);
+            return true;
+        }
+        case TyKind::Dict: {
+            char kc = 0;
+            if (t->sub.size() >= 2 && t->sub[0]) {
+                switch (t->sub[0]->kind) {
+                    case TyKind::Str: kc = 's'; break;
+                    case TyKind::Int: kc = 'i'; break;
+                    case TyKind::Float: kc = 'f'; break;
+                    case TyKind::Bool: kc = 'b'; break;
+                    case TyKind::None: kc = 'n'; break;
+                    default: break;
+                }
+            }
+            if (!kc) {
+                // 键类型未知/运行期才能定：整棵子树交给动态序列化器
+                // （它按 dict 的 key_kind 处理 str/int/float 键）。
+                out += 'u';
+                return true;
+            }
+            std::string inner;
+            json_desc_dyn(t->sub.size() >= 2 ? t->sub[1] : nullptr, inner, line, col);
+            out += "(d";
+            out += kc;
+            out += inner;
+            out += ")";
+            return true;
+        }
+        default:
+            // big/complex/class/...：交给运行期判型（不可序列化的会在
+            // stringify 时抛 TypeError）。
+            out += 'u';
+            return true;
+    }
+}
+
 // 原始形参下标（pos 在前，kwonly 从 pos.size() 起）→ 类型。
 static TypePtr fn_param_ty(const FuncInfoPtr& fn, int idx) {
     int n = static_cast<int>(fn->pos.size());
@@ -741,6 +820,96 @@ VReg Lowerer::lower_json(const std::string& member, Call& c) {
         VReg v = call_runtime(RtFn::JsonLoads, sample, {text, const_str(desc)});
         if (ir_is_heap(sample)) push_temp(v);
         return v;
+    }
+
+    // ── 动态 JSON（0.447）────────────────────────────────────────
+    // json.parse(text)：解析器按文本自身构造值，静态类型统一 unknown。
+    if (member == "parse") {
+        if (c.args.size() != 1) {
+            err(c.line, c.col,
+                std::format("json.parse() expects 1 argument, got {}", c.args.size()));
+            return const_none();
+        }
+        VReg text = expr(*c.args[0]);
+        text = coerce(text, tc_.type_of(c.args[0].get()), t_str());
+        VReg v = call_runtime(RtFn::JsonParse, t_unknown(), {text});
+        push_temp_unknown(v);
+        return v;
+    }
+    // json.stringify(v)：静态描述符里 unknown 记为 'u'，运行期按值判型
+    // （null/bool 盒、CPYFLOAT 盒、str/list/dict 都能精确还原）。
+    if (member == "stringify") {
+        if (c.args.size() != 1) {
+            err(c.line, c.col,
+                std::format("json.stringify() expects 1 argument, got {}",
+                            c.args.size()));
+            return const_none();
+        }
+        TypePtr vt = tc_.type_of(c.args[0].get());
+        std::string desc;
+        json_desc_dyn(vt, desc, c.args[0]->line, c.args[0]->col);
+        VReg v = expr(*c.args[0]);
+        // indent=INT64_MIN（紧凑：", " / ": "）、flags=0b110（ensure_ascii +
+        // allow_nan）、seps=NULL —— 与 json.dumps 的默认口径一致。
+        VReg s = call_runtime(RtFn::JsonDumps, t_str(),
+                              {v, const_str(desc), const_int(INT64_MIN),
+                               const_int(0b110), const_int(0)});
+        push_temp(s);
+        return s;
+    }
+    // 访问辅助：全部走 RtFn::JsonOp 一个入口，op 编码与 runtime/rt_json.c
+    // 的 JSONOP_* 逐项对齐（新增 helper 时两边一起改）。
+    {
+        struct JsonOpInfo {
+            const char* name;
+            int64_t op;
+            size_t nargs;
+        };
+        static const JsonOpInfo kJsonOps[] = {
+            {"get", 1, 2},       {"get_or", 2, 3},  {"has", 3, 2},
+            {"len", 4, 1},       {"keys", 5, 1},    {"type", 6, 1},
+            {"is_null", 7, 1},   {"as_str", 8, 1},  {"as_int", 9, 1},
+            {"as_float", 10, 1}, {"as_bool", 11, 1}, {"null", 12, 0},
+            {"bool", 13, 1},     {"as_dict", 14, 1}, {"as_list", 15, 1},
+            {"path", 16, 2},
+        };
+        for (const auto& info : kJsonOps) {
+            std::string name = info.name;
+            if (member != name) continue;
+            if (c.args.size() != info.nargs) {
+                err(c.line, c.col,
+                    std::format("json.{}() expects {} argument{}, got {}", name,
+                                info.nargs, info.nargs == 1 ? "" : "s",
+                                c.args.size()));
+                return const_none();
+            }
+            std::vector<VReg> vals;
+            vals.reserve(3);
+            for (auto& arg : c.args) vals.push_back(expr(*arg));
+            if (name == "bool")
+                vals[0] = coerce(vals[0], tc_.type_of(c.args[0].get()), t_bool());
+            while (vals.size() < 3) vals.push_back(const_int(0));
+            TypePtr rt = t_unknown();
+            if (name == "has" || name == "is_null" || name == "as_bool")
+                rt = t_bool();
+            else if (name == "len" || name == "as_int")
+                rt = t_int();
+            else if (name == "type" || name == "as_str")
+                rt = t_str();
+            else if (name == "as_float")
+                rt = t_float();
+            else if (name == "keys")
+                rt = mk_list(t_str());
+            else if (name == "as_dict")
+                rt = mk_dict(t_str(), t_unknown());
+            else if (name == "as_list")
+                rt = mk_list(t_unknown());
+            VReg r = call_runtime(RtFn::JsonOp, rt,
+                                  {const_int(info.op), vals[0], vals[1], vals[2]});
+            if (rt->kind == TyKind::Unknown) push_temp_unknown(r);
+            else if (ir_is_heap(rt)) push_temp(r);
+            return r;
+        }
     }
     err(c.line, c.col, std::format("json.{} is not supported", member));
     return const_none();

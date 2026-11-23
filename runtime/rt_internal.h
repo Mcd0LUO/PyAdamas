@@ -393,6 +393,13 @@ enum {
     /* P3 big：任意精度整数。limb 内联在 RC 块尾部（柔性数组），无堆出边、
        不可变；tracked 分配让 unknown 探针认识它。见 runtime/rt_big.c。 */
     PYADAMAS_RC_BIGINT = 9,
+    /* 动态 JSON（json.parse）里的 null / true/false。为什么不复用裸 0/1：
+       unknown 值域里 None/bool/int 都是机器字且容器元素不带逐字 tag，
+       0/1 与 int 0/1 分不开 —— json.parse("null") 再 stringify 会变 0、
+       true 会变 1。给它们各自一个 8 字节无出边盒子，判型与 CPYFLOAT 盒
+       同一套路（探针 + 头 kind）。payload：JSONNULL 不用；JSONBOOL 存 0/1。 */
+    PYADAMAS_RC_JSONNULL = 10,
+    PYADAMAS_RC_JSONBOOL = 11,
 };
 
 typedef struct PyAdamasRc {
@@ -1755,6 +1762,15 @@ PyAdamasList* pa_collections_most_common(PyAdamasDict* d, int64_t n);
 PyAdamasStr* pa_json_dumps(int64_t value, PyAdamasStr* desc, int64_t indent,
                            int64_t flags, PyAdamasList* seps);
 int64_t pa_json_loads(PyAdamasStr* text, PyAdamasStr* desc);
+
+/* 动态 JSON（0.447）：不受静态 sample 约束，值在运行期按 JSON 文本自身构造。
+   表示见 rt_json.c 顶部注释；null/bool 用 PYADAMAS_RC_JSONNULL/JSONBOOL 盒。
+
+   json.parse(text) -> unknown；json.stringify(v) 复用 pa_json_dumps（描述符
+   里 'u' 表示「运行期按值判型」）。json.* 辅助全部走 pa_json_op 一个入口
+   （op 编码见 rt_json.c 的 JSONOP_*，与 src/lower_import_misc.cpp 手工对齐）。 */
+int64_t pa_json_parse(PyAdamasStr* text);
+int64_t pa_json_op(int64_t op, int64_t a, int64_t b, int64_t c);
 
 /* ── re：回溯 VM 与 Pattern/Match ──────────────────────────────── */
 typedef struct PyAdamasRegex PyAdamasRegex;

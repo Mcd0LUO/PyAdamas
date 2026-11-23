@@ -1330,6 +1330,15 @@ void pa_print_any(int64_t v) {
             pa_print_cpy_value(v);
             return;
         }
+        /* 动态 JSON 的 null/bool 盒：print 按 Python 值语义印。 */
+        if (h->kind == PYADAMAS_RC_JSONNULL) {
+            fputs("None", stdout);
+            return;
+        }
+        if (h->kind == PYADAMAS_RC_JSONBOOL) {
+            fputs(*(int64_t*)(uintptr_t)v ? "True" : "False", stdout);
+            return;
+        }
         /* P4（lang_gaps）：print(类对象) 按 <class '...'> 印（CPython 口径）。 */
         if (pa_is_class_obj((void*)(uintptr_t)v)) {
             PyAdamasStr* s = pa_class_repr((void*)(uintptr_t)v);
