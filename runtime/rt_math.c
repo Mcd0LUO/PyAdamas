@@ -7,8 +7,17 @@ double pa_math_sqrt(double x) {
     if (x < 0) pa_raise_c("ValueError", "math domain error");
     return sqrt(x);
 }
-int64_t pa_math_floor(double x) { return (int64_t)floor(x); }
-int64_t pa_math_ceil(double x) { return (int64_t)ceil(x); }
+/* 浮点→int64 的 C 转换对 NaN/越界是 UB（实测 PC 上得 INT64_MIN）。
+   math.floor/ceil/trunc 在 CPython 里返回 int 且对 NaN/inf 抛异常，
+   这里统一检查；正常值直接截断（-2^63 本身合法，不能误抛）。 */
+static int64_t math_f2i_checked(double v) {
+    if (v != v) pa_raise_c("ValueError", "cannot convert float NaN to integer");
+    if (v >= 9223372036854775808.0 || v < -9223372036854775808.0)
+        pa_raise_c("OverflowError", "cannot convert float infinity to integer");
+    return (int64_t)v;
+}
+int64_t pa_math_floor(double x) { return math_f2i_checked(floor(x)); }
+int64_t pa_math_ceil(double x) { return math_f2i_checked(ceil(x)); }
 double pa_math_fabs(double x) { return fabs(x); }
 double pa_math_sin(double x) { return sin(x); }
 double pa_math_cos(double x) { return cos(x); }
@@ -35,7 +44,7 @@ double pa_math_atan2(double y, double x) { return atan2(y, x); }
 double pa_math_hypot(double x, double y) { return hypot(x, y); }
 double pa_math_degrees(double x) { return x * (180.0 / M_PI); }
 double pa_math_radians(double x) { return x * (M_PI / 180.0); }
-int64_t pa_math_trunc(double x) { return (int64_t)trunc(x); }
+int64_t pa_math_trunc(double x) { return math_f2i_checked(trunc(x)); }
 double pa_math_copysign(double x, double y) { return copysign(x, y); }
 int64_t pa_math_isnan(double x) { return isnan(x) ? 1 : 0; }
 int64_t pa_math_isinf(double x) { return isinf(x) ? 1 : 0; }
@@ -403,6 +412,16 @@ void pa_panic_overflow(void) {
 }
 
 /* ── 数学 ─────────────────────────────────────────────────────── */
+
+/* int(float) 的域检查：cvttsd2siq 对 NaN / 超出 int64 的值返回 INT64_MIN 哨兵，
+   codegen 的快路径只比一次哨兵（3 条），撞上才调这里。慢路径已用 ucomisd 排除
+   了「输入恰好是 -2^63（合法 MIN）」的情况，所以到这里必是 NaN / ±inf / 有限越界。
+   异常类型与 CPython 一致：NaN -> ValueError，±inf -> OverflowError。 */
+void pa_int_from_f64_check(double v) {
+    if (isnan(v)) pa_raise_c("ValueError", "cannot convert float NaN to integer");
+    if (isinf(v)) pa_raise_c("OverflowError", "cannot convert float infinity to integer");
+    pa_raise_c("OverflowError", "integer conversion overflow: value out of int64 range");
+}
 
 int64_t pa_pow_i64(int64_t base, int64_t exp) {
     if (exp < 0) return 0;

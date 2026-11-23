@@ -1582,6 +1582,7 @@ void pa_panic(PyAdamasStr* msg);
 void pa_panic_div0(void);
 void pa_panic_overflow(void);
 int64_t pa_pow_i64(int64_t base, int64_t exp);
+void pa_int_from_f64_check(double v);
 
 /* ── random：CPython 兼容的 MT19937 ─────────────────────────────── */
 typedef struct PyAdamasRandom PyAdamasRandom;

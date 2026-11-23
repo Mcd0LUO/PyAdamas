@@ -935,6 +935,26 @@ void AsmGen::gen_convert(const Inst& in) {
         if (to->kind == TyKind::Int) {
             if (ir_is_float(from)) {
                 emit2(MOp::kCvttsd2siq, src_mop(in.a), kRax);
+                // cvttsd2siq 对 NaN / 超出 int64 的值返回哨兵 INT64_MIN；但 -2^63
+                // 本身是合法结果（int(-9223372036854775808.0) == MIN），所以：
+                //   快路径 3 条：比哨兵，不等于就走；
+                //   慢路径（撞哨兵才走）：确认输入是否真的等于 -2^63，不是则抛
+                //   ValueError（NaN）/ OverflowError（±inf / 有限越界）。
+                std::string ok = fresh_label("f2iok");
+                line("movabsq $0x8000000000000000, %rcx");
+                line("cmpq %rcx, %rax");
+                emit_jmp("jne", ok);
+                move_fp(mreg_operand(kXmm0), src_mop(in.a));
+                line("cvtsi2sdq %rcx, %xmm1");
+                emit2(MOp::kUcomisd, kXmm1, kXmm0);
+                std::string nanp = fresh_label("f2inan");
+                emit_jmp("jp", nanp);            // 无序 = NaN（jp 必须先于 je：
+                emit_jmp("je", ok);              // 无序时 ZF=1，je 会误判成相等）
+                label(nanp);
+                spill_fp_slots();
+                line("call pa_int_from_f64_check");
+                reload_fp_slots();               // 不会返回（raise 走 longjmp），配对而已
+                label(ok);
                 emit2(MOp::kMovq, kRax, dst_mop(in.dst));
             } else {
                 emit2(MOp::kMovq, src_mop(in.a), kRax);
