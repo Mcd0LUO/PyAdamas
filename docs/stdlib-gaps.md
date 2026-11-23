@@ -42,17 +42,18 @@
 |---|---|---|---|
 | math | 原生 | 常用面基本齐（sqrt/floor/gcd/pi/isclose/fsum/comb…） | 通过 |
 | sys | 原生 | 缺 `version`、`path`、`platform` | 通过 |
-| os | 原生 | 缺 `walk`、`environ`、`stat`、`system`；**`os.path.x` 不可用**（要单独 `import os.path`） | 通过 |
+| os | 原生 | 缺 `stat`；`os.path.x` 不可用（要单独 `import os.path`）；`walk` **立即求值返回 list**（非生成器）、`environ` 是**只读快照**（写 `os.environ[k]=v` 编译期显式报错），`system` 返回 wait status | 通过 |
 | os.path | 原生 | join/basename/splitext/isdir/exists 可用 | 通过 |
 | re | 原生 | findall/sub/search 可用；条件组/Unicode 属性类不支持 | 通过 |
 | json | 原生 | 静态 `loads` 仍必须给 sample；**动态 `parse`/`stringify` 已补**（0.447，无需 sample，null/bool 盒保真往返）+ 访问辅助 get/path/as_*/type/keys 等；缺 `ensure_ascii` 之外的自定义 `default`/object_hook | 通过（静态带 sample / 动态不带） |
 | collections | 原生 | **缺 `namedtuple`**；Counter/OrderedDict/defaultdict/deque 可用 | 通过 |
-| itertools | 原生 | 有 chain/islice/product/permutations/combinations/zip_longest/accumulate/repeat；**缺 `takewhile`/`dropwhile`/`groupby`/`starmap`/`count`/`cycle`/`tee`/`filterfalse`** | 通过 |
-| functools | 原生 | reduce/wraps/partial/lru_cache 可用；**缺 `cached_property`/`total_ordering`/`singledispatch`/`cmp_to_key`/`cache`** | 通过 |
+| itertools | 原生 + Python 扩展 | 有 chain/islice/product/permutations/combinations/zip_longest/accumulate/repeat + takewhile/dropwhile/groupby/filterfalse/pairwise/compress + **starmap(arity 1~4)/tee(返回 list 副本)/chain_iterables(chain.from_iterable 的顶层函数替代)**；仍缺 count/cycle（第 9.1 节） | 通过（521 对拍） |
+| functools | 原生 + Python 扩展 | reduce/wraps/partial/lru_cache + WRAPPER_*/update_wrapper/cache + **cmp_to_key（可变 key + 增量排名，第 9.2 节）**；仍缺 cached_property/total_ordering/singledispatch | 通过（521 对拍） |
 | datetime | 原生 | 构造/isoformat/字段可用；**缺 `strptime`；`datetime.datetime.now()` 链式类方法不可用** | 通过 |
-| pathlib | 原生 | Path、/、name/suffix/parent、exists/read_text/write_text/iterdir/glob 可用 | 通过 |
+| pathlib | 原生 | Path、/、name/suffix/parent、exists/read_text/write_text/read_bytes/write_bytes/iterdir/glob 可用；**joinpath 只收 1 参数、with_name 缺失（需改 src/，第 9.5 节）** | 通过（bytes/iterdir 已实测） |
+| codecs | 待登记 | `stdlib/codecs.py` 已实现 encode/decode 薄包装；模块表尚无条目，import 报 not registered（第 9.4 节） | 待登记 |
 | random | 原生 | random/seed/randint/uniform/choice/shuffle/randrange/getrandbits/gauss 可用 | 通过 |
-| time | 原生 | time/monotonic/perf_counter/sleep 可用；**缺 `strftime`/`localtime`/`gmtime`/`mktime`** | 通过 |
+| time | 原生 | time/monotonic/perf_counter/sleep/`strftime`/`localtime`/`gmtime`/`mktime` 可用；struct_time 用 **9 元 int 元组**表示（与 CPython 下标语义一致：wday 周一=0、yday 1-based），**不支持 `t.tm_year` 字段名**（用 `t[0]`） | 通过 |
 | subprocess | 原生 | run/Popen 可用；**`from subprocess import TimeoutExpired` 失败** | 通过 |
 | asyncio | 原生 | run/sleep/gather/create_task/Future/异步生成器 | 通过 |
 | operator | 原生 | 算术/比较/itemgetter；attrgetter 有明确不支持报错 | 通过 |
@@ -63,7 +64,7 @@
 | bisect | Python 源 | 只支持 `list[int]`；float 扩展尝试失败（类型系统限制，见第 8 节） | 通过（第 8 节对拍） |
 | hashlib | Python 源 | md5/sha1/sha256 | 通过 |
 | hmac | Python 源 | new/update/digest/hexdigest | 通过 |
-| logging | Python 源 | 等级/Logger/basicConfig；缺 FileHandler/Formatter/handler | 通过 |
+| logging | Python 源 | 等级/Logger/basicConfig + **FileHandler/StreamHandler/Formatter/addHandler/setFormatter/setLevel（第 9.3 节）**；无 Filter/propagate/层级 logger | 通过（521 对拍） |
 | statistics | Python 源 | 0.352：mean/fmean/median 家族/median_grouped/mode/multimode/pvariance/variance/pstdev/stdev/geometric_mean/harmonic_mean/quantiles/covariance/correlation/linear_regression；mode 多峰返回首现、multimode 首现序；float 近似（无 BigInt，精度边界见模块头） | 通过 |
 | textwrap | Python 源 | **阶段二补 `TextWrapper` 类**；仍不做 exceed/break 语义 | 通过 |
 | csv | Python 源 | **阶段二补 `DictReader`（函数式）/`DictWriter`**；仍无 dialect | 通过 |
@@ -325,3 +326,133 @@ _qformat）。对拍 `['a','b','c']` vs `['a','x','c','d']` **0 diff**。
   —— **421 ran ok，0 FAILED/DIFF，RC=0**。
 - `bash tests/check_size.sh`：通过。
 - 未 commit / push；未碰 src/、runtime/、stdlib/json.py、CMakeLists.txt。
+
+## 九、stdlib-c 批次交付（第 3 批纯 .py 部分，2026-11-23）
+
+本批次由 stdlib-c 代理完成，只改 `stdlib/itertools.py`、`stdlib/functools.py`、
+`stdlib/logging.py`、新建 `stdlib/codecs.py`，以及测试 `tests/run/521_stdlib_c.py`
+和本文档。**未碰 `src/`、`runtime/`、`CMakeLists.txt` 等禁区**。
+
+### 9.1 itertools（starmap / tee / chain_iterables）
+
+新增三个接口：
+
+- `starmap(f, pairs)`：按子行 len 做 arity 分派（1~4 实参），返回 list。
+  CPython 对拍：`starmap(lambda a,b:a+b, [(1,2),(3,4)])` → `[3, 7]`，
+  `starmap(lambda a,b,c:a*b+c, [[1,2,3],[4,5,6]])` → `[5, 26]` —— **0 diff**。
+  差异：不能对 unknown 可调用对象做 `f(*row)`（codegen 报 `'*args' is not
+  supported by the code generator yet`），所以只支持 1~4 实参；超过 4
+  个实参的行抛 ValueError。返回 list 而非惰性迭代器。
+- `tee(it, n=2)`：返回 n 个独立 list 副本（CPython 返回惰性 `_tee` 迭代器）。
+  对拍 `[list(x) for x in tee([1,2,3],2)]` → `[[1,2,3],[1,2,3]]` —— **0 diff**。
+  语义差异：立即求值、占内存更多、每份是独立对象（CPython 共享缓存）。
+- `chain_iterables(lists)`：`itertools.chain.from_iterable(...)` 的函数对象属性
+  写法在 PA 编译期直接报错（`'func' object has no method 'from_iterable'`），
+  因此提供顶层函数代替。对拍 `chain_iterables([[1],[2,3],[4]])` → `[1,2,3,4]`，
+  与 CPython `list(chain.from_iterable(...))` **0 diff**。
+
+### 9.2 functools（cmp_to_key）
+
+新增 `cmp_to_key(cmp)`。验收式
+`sorted([3,1,2], key=functools.cmp_to_key(lambda a,b: a-b)) == [1,2,3]` **通过**。
+CPython 对拍（升序/降序/字符串长度/含重复）四组逐行 **0 diff**：
+
+```
+asc    [1, 2, 3]      == CPython
+desc   [3, 2, 1]      == CPython
+strlen ['a','cc','bbb'] == CPython
+dup    [1, 2, 2, 5, 5]  == CPython
+```
+
+实现与语言限制：CPython 的 `cmp_to_key` 返回带 `__lt__` 的包装对象，靠
+`sorted()` 调 `__lt__` 比大小。PA 的 `sorted(xs, key=f)` 是「先算完所有 key，
+再按 key 的机器字/静态类型比较」（`pa_list_sorted_by`），**完全不走 key 对象的
+`__lt__`（实测 key 返回带 `__lt__` 的用户类时，`__lt__` 一次都没被调用，
+顺序与堆地址一致）。因此改用「可变 key + 增量排名」：key 函数每次把新值加入
+模块级 seen 列表，用 cmp 对 seen 做插入排序，再把每个已发出的 key list 的
+第 0 项更新为其名次；key 是 `list[int]`，PA 按字典序比较，得到正确次序。
+
+代价（docstring 已记）：
+1. 每次调用 `cmp_to_key` 重置全局状态，同一时刻只支持一个活跃 key；
+2. key 阶段每次调用都做 O(N) 插入，总 O(N^2)（CPython 是 O(N log N) 次 cmp）；
+3. key 返回 `list[int]` 而非 CPython 的 K 实例，不做类型/复用保证。
+
+### 9.3 logging（FileHandler / StreamHandler / Formatter）
+
+新增：
+
+- `Formatter(fmt)` —— 支持 `%(levelname)s` / `%(name)s` / `%(message)s`，
+  用 `str.replace` 链实现；`format(levelname, name, message)` 返回 str。
+- `Handler` 基类（`level` / `formatter` / `setLevel` / `setFormatter` / `emit`）；
+  `StreamHandler()` 写 `sys.stderr`，`FileHandler(filename)` 以 `"w"` 打开文件。
+- `Logger.addHandler(h)` / `Logger.setFormatter(fmt)` / `Logger.setLevel(level)`；
+  已有 `log/debug/info/warning/error/critical` 改为把记录分发给所有 handler
+  （无 handler 时维持旧的 stderr 输出）。
+
+与 CPython 对拍：把日志写进 `/tmp` 文件，逐字节 `diff` 文件内容：
+
+```
+# PA /tmp/.../pa_final.log 与 CPython /tmp/.../cpy_final.log
+DEBUG|mylog|a debug
+INFO|mylog|an info
+WARNING|mylog|a warn
+--- diff: 0 ---
+```
+
+同形脚本的 stdout 输出也与 CPython 一致（`[INFO] streamC: to stderr` 等走 stderr，
+不进 stdout expect）。
+
+语义差异与踩坑：
+
+- CPython 的 `Formatter.format(record)` 收 LogRecord 对象；这里收三个 str 形参。
+- CPython `FileHandler` 默认 append 模式，这里用 `"w"`（PA 的 file 协议对
+  append 支持不稳）；测试统一用独立 /tmp 文件并 `os.remove` 清理。
+- PA 的文件对象必须标注成 `file` 类型才能调 `write/flush/close`；标注 `object`
+  时 codegen 报 `method 'write' is not supported by the code generator yet`。
+- PA 的 `Formatter` 不能标注成 `object` 再调 `format`（同样报 codegen 错），
+  所以 Handler 的 `formatter` 字段标注为 `Formatter` 具体类型；多态仅靠
+  handler 子类继承实现（实测 OK）。
+- `Logger.setFormatter` 是 PA 特有的对称 API（CPython Logger 没有），
+  实现为「设到最后一个 handler」。
+- 没有 Filter / propagate / 层级 logger / `%` 参数展开。
+
+### 9.4 codecs（已实现 .py，待模块表登记）
+
+新建 `stdlib/codecs.py`：薄包装 `encode(s, encoding="utf-8")` / `decode(b,
+encoding="utf-8")`，直接调用 `str.encode` / `bytes.decode`。
+
+CPython 对拍：`codecs.encode("hello")` → `b'hello'`，
+`codecs.decode(b'hello')` → `'hello'`；ascii 显式编码也一致 —— **0 diff**。
+
+**阻塞**：`src/driver_modules.cpp` 的 `kModuleTable` 还没有 `codecs` 条目，
+直接 `import codecs` 报 `stdlib module 'codecs' is not registered in the builtin
+module table`。已报告 lead，由 lead 在 src/ 加 `{"codecs", ModuleKind::Python,
+"codecs.py", ""},`（或等价登记）。**测试文件本轮不含 codecs 用例，待登记后补。**
+
+### 9.5 pathlib（本轮跳过，需 src/ 改动）
+
+`{"pathlib", ModuleKind::Native, "", ""}` 是原生模块，没有 .py 扩展源，
+本地 `stdlib/pathlib.py` 挡不住原生实现（实测仍报 `Path.joinpath expects 1
+argument, got 2`）。因此 **joinpath 变长参数 + with_name 本轮未补**。
+
+已实测可用（无需改动）：`read_bytes` / `write_bytes` / `iterdir` /
+`read_text` / `write_text` / `exists` / `is_file` / `is_dir` / `name` /
+`suffix` / `parent`，与 CPython 语义一致。
+
+需 lead 决策（见第一节架构事实 2）：把 pathlib 改成 `NativePython` +
+`stdlib/pathlib.py` 扩展源，或改 `src/builtin_sigs.cpp` 的 joinpath 变长签名。
+本轮按 lead 指示不碰 src/，记为待办。
+
+### 9.6 验收
+
+- CPython 对拍：三个已实现模块（itertools / functools / logging）同形脚本
+  两边跑，stdout 逐行一致；logging 额外逐字节比对文件内容 —— 差异项均如上
+  如实记录，无「差不多」项。
+- 测试：`tests/run/521_stdlib_c.py`，覆盖 itertools/functools/logging 全部
+  新增 API，带 `# --- expect ---`，PA 实际输出与 expect **0 diff**。
+- 全量套件：`PYADAMAS_TEST_JOBS=16 bash tests/run_tests.sh build/gfix-sb3
+  build/gfix-sb3/pyadamas` —— **425 ran ok，0 FAILED/DIFF，RC=0**
+  （含其他代理新增的 520/522/523 用例；本代理的 521 单独跑亦 ran ok）。
+- `bash tests/check_size.sh`：通过。
+- 未 commit / push；未碰 `src/`、`runtime/`、`CMakeLists.txt`、`tools/`、
+  `docs/testing.md`、`docs/memory-debug.md`。

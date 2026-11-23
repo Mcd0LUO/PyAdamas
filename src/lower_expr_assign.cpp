@@ -107,6 +107,20 @@ void Lowerer::assign_to(Expr& target, VReg v, TypePtr vty) {
         }
         case ExprKind::Subscript: {
             auto& s = static_cast<Subscript&>(target);
+            // os.environ["K"] = "v"：environ 是只读快照（每次访问重建），
+            // 写 dict 不会 setenv —— CPython 语义做不到就显式报错，不静默失效。
+            if (auto* at = dynamic_cast<Attribute*>(s.value.get())) {
+                if (auto* mn = dynamic_cast<Name*>(at->value.get());
+                    mn && at->attr == "environ") {
+                    if (auto mod = resolve_module_alias(mn->id);
+                        mod && mod->builtin && mod->name == "os") {
+                        err(target.line, target.col,
+                            "os.environ is a read-only snapshot; setting environment "
+                            "variables is not supported by the code generator yet");
+                        break;
+                    }
+                }
+            }
             if (s.slice->kind == ExprKind::Slice) {
                 ++side_effect_seq_;  // 切片赋值可能改变列表长度
                 auto& sl = static_cast<SliceExpr&>(*s.slice);

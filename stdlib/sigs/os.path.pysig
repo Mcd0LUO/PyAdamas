@@ -1,0 +1,25 @@
+# stdlib/sigs/os.path.pysig —— os.path 模块的声明式签名（P0 第二个迁移模块）
+#
+# 17 个函数全部在这里；builtin_sigs.cpp 的 os.path 分支与
+# lower_import.cpp native_fn 的 os.path 映射已删除。
+# 常量（sep/altsep/curdir/pardir）属于 os 模块（os.sep 等），不在这里。
+
+module os.path
+
+# Python 名    运行期符号                  形参                 返回
+func join        pa_os_path_join           (*parts: str)       -> str
+func exists      pa_os_path_exists         (path: str)         -> bool
+func isdir       pa_os_path_isdir          (path: str)         -> bool
+func isfile      pa_os_path_isfile         (path: str)         -> bool
+func islink      pa_os_path_islink         (path: str)         -> bool
+func basename    pa_os_path_basename       (path: str)         -> str
+func dirname     pa_os_path_dirname        (path: str)         -> str
+func normpath    pa_os_path_normpath       (path: str)         -> str
+func abspath     pa_os_path_abspath        (path: str)         -> str
+func expanduser  pa_os_path_expanduser     (path: str)         -> str
+func realpath    pa_os_path_realpath       (path: str)         -> str
+func splitext    pa_os_path_splitext       (path: str)         -> tuple[str, str]
+func split       pa_os_path_split          (path: str)         -> tuple[str, str]
+func samefile    pa_os_path_samefile       (a: str, b: str)    -> bool
+func getsize     pa_os_path_getsize        (path: str)         -> int
+func getmtime    pa_os_path_getmtime       (path: str)         -> float

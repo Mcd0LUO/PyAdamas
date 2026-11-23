@@ -373,6 +373,10 @@ enum class RtFn : uint16_t {
     TimeMonotonic,         // () -> f64
     TimePerfCounter,       // () -> f64
     TimeSleep,             // (f64 secs) -> void
+    TimeLocaltime,         // (f64 secs；-1e300=now) -> list*[9]
+    TimeGmtime,            // (f64 secs) -> list*[9]
+    TimeStrftime,          // (str* fmt, list* tm|0) -> str*
+    TimeMktime,            // (list* tm) -> f64
     OsListdir,             // (str* path) -> list*
     OsGetenv,              // (str* name, str* default) -> str*
     OsPathBasename,        // (str*) -> str*
@@ -488,6 +492,9 @@ enum class RtFn : uint16_t {
     OsChmod,               // (str*, i64) -> void
     OsAccess,              // (str*, i64) -> i64
     OsMakedirs,            // (str*, i64 exist_ok) -> void
+    OsEnviron,             // () -> dict*  os.environ 只读快照（dict[str,str]）
+    OsWalk,                // (str* top) -> list*  立即求值的 [(root,dirs,files)...]
+    OsSystem,              // (str* cmd) -> i64  C system() 的 wait status
     DYLIBLoad,             // (str* path) -> i64 dlopen 句柄
     DYLIBClose,            // (i64 handle) -> i64 dlclose 结果
     OsPathRealpath,        // (str*) -> str*

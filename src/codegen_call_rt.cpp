@@ -402,6 +402,7 @@ void AsmGen::gen_rt_args(const Inst& in, RtFn fn) {
         case RtFn::TimeMonotonic:
         case RtFn::TimePerfCounter:
         case RtFn::OsGetpid:
+        case RtFn::OsEnviron:
         case RtFn::VtShutdown:
             gen_rt_none(in);
             break;
@@ -644,6 +645,9 @@ void AsmGen::gen_rt_args(const Inst& in, RtFn fn) {
         case RtFn::AnyToI64T:
         case RtFn::AnyIsFloatT:
         case RtFn::AnyLoadTag:
+        case RtFn::OsWalk:
+        case RtFn::OsSystem:
+        case RtFn::TimeMktime:
         case RtFn::AnyNegT:
             gen_rt_i1(in);
             break;
@@ -764,6 +768,7 @@ void AsmGen::gen_rt_args(const Inst& in, RtFn fn) {
         case RtFn::ExcSubclass:        // P4：(cls_a, cls_b)
         case RtFn::ExcClassValueNew:   // P4：(cls, msg|0)
         case RtFn::ExcClassValueNewArgs: // P4：(cls, args)
+        case RtFn::TimeStrftime:
         case RtFn::MethodCall0:        // P4：(obj, method)
             gen_rt_i2(in);
             break;
@@ -969,6 +974,8 @@ void AsmGen::gen_rt_args(const Inst& in, RtFn fn) {
         case RtFn::MathModf:
         case RtFn::HashF64:
         case RtFn::TimeSleep:
+        case RtFn::TimeLocaltime:
+        case RtFn::TimeGmtime:
         case RtFn::AsyncTimeoutNew:
             gen_rt_f1(in);
             break;

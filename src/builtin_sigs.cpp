@@ -4,6 +4,8 @@
 // 调用，类型检查直接复用同一份签名。
 #include "driver_build.h"
 
+#include "native_sigs.h"  // 声明式原生模块签名（P0）
+
 #include <format>
 
 namespace pyadamas {
@@ -41,6 +43,14 @@ pyadamas::ModuleInfoPtr builtin_module(const std::string& name) {
         info->cpy_proxy = true;
         cache[name] = info;
         return info;
+    }
+
+    // 声明式签名优先（P0）：stdlib/sigs/<module>.pysig 存在时，整个模块的
+    // 签名表由数据文件提供（见 docs/native-stdlib-cookbook.md）。没有声明
+    // 文件的模块继续走下面的硬编码分支，行为不变。
+    if (auto declared = pyadamas::nativesig::module_info(name)) {
+        cache[name] = declared;
+        return declared;
     }
     auto func = [&](const std::string& n, std::vector<pyadamas::TypePtr> args, pyadamas::TypePtr ret) {
         auto t = pyadamas::new_ty(pyadamas::TyKind::Func);
@@ -202,11 +212,6 @@ pyadamas::ModuleInfoPtr builtin_module(const std::string& name) {
         auto gt = pyadamas::new_ty(pyadamas::TyKind::Func);
         gt->fn = gather;
         info->globals["gather"] = gt;
-    } else if (name == "time") {
-        func("time", {}, pyadamas::t_float());
-        func("monotonic", {}, pyadamas::t_float());
-        func("perf_counter", {}, pyadamas::t_float());
-        func("sleep", {pyadamas::t_float()}, pyadamas::t_none());
     } else if (name == "itertools") {
         // 没有泛型：签名只用于 from-import 的可调用标记，返回类型在
         // 调用点由 itertools_call 按实参特化。
@@ -692,6 +697,8 @@ pyadamas::ModuleInfoPtr builtin_module(const std::string& name) {
         }
     } else if (name == "os") {
         info->globals["sep"] = pyadamas::t_str();
+        // os.environ：只读快照 dict[str,str]（写入在降级阶段显式报错）
+        info->globals["environ"] = pyadamas::mk_dict(pyadamas::t_str(), pyadamas::t_str());
         info->globals["linesep"] = pyadamas::t_str();
         for (auto& n : {"F_OK", "R_OK", "W_OK", "X_OK"}) info->globals[n] = pyadamas::t_int();
         func("mkdir", {pyadamas::t_str()}, pyadamas::t_none());
@@ -728,6 +735,12 @@ pyadamas::ModuleInfoPtr builtin_module(const std::string& name) {
         func("chdir", {pyadamas::t_str()}, pyadamas::t_none());
         func("chmod", {pyadamas::t_str(), pyadamas::t_int()}, pyadamas::t_none());
         func("access", {pyadamas::t_str(), pyadamas::t_int()}, pyadamas::t_bool());
+        // walk：立即求值（非生成器），返回 list[tuple[str, list[str], list[str]]]
+        func("walk", {pyadamas::t_str()},
+             pyadamas::mk_list(
+                 pyadamas::mk_tuple({pyadamas::t_str(), pyadamas::mk_list(pyadamas::t_str()),
+                                     pyadamas::mk_list(pyadamas::t_str())})));
+        func("system", {pyadamas::t_str()}, pyadamas::t_int());
         {
             // makedirs(name, exist_ok=False)：exist_ok 的参数在降级阶段
             // 手工装配（默认值没有 AST 节点可用）。
@@ -746,27 +759,6 @@ pyadamas::ModuleInfoPtr builtin_module(const std::string& name) {
             f->ret_known = true;
             func_with("makedirs", f);
         }
-    } else if (name == "os.path") {
-        auto f = std::make_shared<pyadamas::FuncInfo>();
-        f->name = "join";
-        f->varargs = true;
-        f->vararg_name = "parts";
-        f->vararg_ty = pyadamas::t_str();
-        f->ret = pyadamas::t_str();
-        f->ret_known = true;
-        func_with("join", f);
-        func("exists", {pyadamas::t_str()}, pyadamas::t_bool());
-        func("isdir", {pyadamas::t_str()}, pyadamas::t_bool());
-        func("isfile", {pyadamas::t_str()}, pyadamas::t_bool());
-        func("islink", {pyadamas::t_str()}, pyadamas::t_bool());
-        for (auto& n : {"basename", "dirname", "normpath", "abspath", "expanduser"})
-            func(n, {pyadamas::t_str()}, pyadamas::t_str());
-        func("splitext", {pyadamas::t_str()}, pyadamas::mk_tuple({pyadamas::t_str(), pyadamas::t_str()}));
-        func("realpath", {pyadamas::t_str()}, pyadamas::t_str());
-        func("getsize", {pyadamas::t_str()}, pyadamas::t_int());
-        func("getmtime", {pyadamas::t_str()}, pyadamas::t_float());
-        func("split", {pyadamas::t_str()}, pyadamas::mk_tuple({pyadamas::t_str(), pyadamas::t_str()}));
-        func("samefile", {pyadamas::t_str(), pyadamas::t_str()}, pyadamas::t_bool());
     } else if (name == "subprocess") {
         auto f = std::make_shared<pyadamas::FuncInfo>();
         f->name = "run";

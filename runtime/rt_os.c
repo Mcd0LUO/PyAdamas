@@ -2,6 +2,9 @@
 #include "rt_internal.h"
 
 #include <dirent.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
 #include <errno.h>
 #include <sys/stat.h>
 #include <sys/types.h>
@@ -389,4 +392,72 @@ int64_t pa_os_path_samefile(PyAdamasStr* a, PyAdamasStr* b) {
     struct stat sa, sb;
     if (stat(a->data, &sa) != 0 || stat(b->data, &sb) != 0) return 0;
     return sa.st_dev == sb.st_dev && sa.st_ino == sb.st_ino;
+}
+
+
+/* ── os.environ：只读快照 dict[str,str] ─────────────────────────────
+   每次访问重新从进程环境构造一份（环境很小，代价可接受）。写
+   os.environ["K"] = "v" 在降级阶段显式报「只读快照」错误，不会静默不生效。 */
+PyAdamasDict* pa_os_environ(void) {
+    extern char** environ;
+    PyAdamasDict* out = pa_dict_new(1, 1, 1, -1, -1);
+    for (char** e = environ; e && *e; ++e) {
+        const char* eq = strchr(*e, '=');
+        if (!eq) continue;
+        PyAdamasStr* k = str_new(*e, (int64_t)(eq - *e));
+        PyAdamasStr* v = str_new(eq + 1, (int64_t)strlen(eq + 1));
+        pa_dict_set(out, (int64_t)k, (int64_t)v);
+    }
+    return out;
+}
+
+/* ── os.walk：立即求值（非生成器）的 [(root, dirs, files), ...] ──────
+   顺序 = 目录 readdir 顺序（不排序，与 CPython 一致）；followlinks=False，
+   符号链接目录按 lstat 判定为目录时也不进入（与 CPython 默认语义一致：
+   os.walk 用 scandir 的 is_dir(follow_symlinks=False) 过滤，不跟随链接）。 */
+static void walk_recurse(PyAdamasList* out, const char* dir) {
+    DIR* dp = opendir(dir);
+    if (!dp) {
+        os_raise("walk", errno);
+        return;
+    }
+    PyAdamasList* dirs = pa_list_new(0, 1);
+    PyAdamasList* files = pa_list_new(0, 1);
+    struct dirent* de;
+    while ((de = readdir(dp)) != NULL) {
+        if (strcmp(de->d_name, ".") == 0 || strcmp(de->d_name, "..") == 0) continue;
+        char path[4096];
+        snprintf(path, sizeof path, "%s/%s", dir, de->d_name);
+        struct stat st;
+        int isdir = 0;
+        if (lstat(path, &st) == 0) isdir = S_ISDIR(st.st_mode) ? 1 : 0;
+        PyAdamasStr* nm = str_new(de->d_name, (int64_t)strlen(de->d_name));
+        if (isdir) pa_list_append(dirs, (int64_t)nm, 1);
+        else pa_list_append(files, (int64_t)nm, 1);
+    }
+    closedir(dp);
+    PyAdamasList* tup = pa_list_new(0, 1);
+    PyAdamasStr* root = str_new(dir, (int64_t)strlen(dir));
+    pa_list_append(tup, (int64_t)root, 1);
+    pa_list_append(tup, (int64_t)dirs, 1);
+    pa_list_append(tup, (int64_t)files, 1);
+    pa_list_append(out, (int64_t)tup, 1);
+    /* 先产出本层，再按 readdir 顺序下钻；dirs 由 tup 持引用，元素存活。 */
+    for (int64_t i = 0; i < dirs->len; ++i) {
+        PyAdamasStr* nm = (PyAdamasStr*)dirs->data[i];
+        char path[4096];
+        snprintf(path, sizeof path, "%s/%s", dir, nm->data);
+        walk_recurse(out, path);
+    }
+}
+
+PyAdamasList* pa_os_walk(PyAdamasStr* top) {
+    PyAdamasList* out = pa_list_new(0, 1);
+    walk_recurse(out, top->data);
+    return out;
+}
+
+/* ── os.system：返回 C system() 的 wait status（CPython/Unix 口径）── */
+int64_t pa_os_system(PyAdamasStr* cmd) {
+    return (int64_t)system(cmd->data);
 }

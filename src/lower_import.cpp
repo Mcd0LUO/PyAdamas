@@ -1,6 +1,8 @@
 // lower_import.cpp —— import / 模块别名、外部符号与 import 语句
 #include "lower_impl.h"
 
+#include "native_sigs.h"  // 声明式原生模块签名（P0）
+
 namespace pyadamas {
 
 
@@ -131,6 +133,9 @@ static bool module_ctor(const std::string& module, const std::string& name) {
 }
 
 std::optional<RtFn> Lowerer::native_fn(const std::string& module, const std::string& member) {
+    // 声明式签名优先（P0）：成员 → RtFn 由 stdlib/sigs/<module>.pysig 提供；
+    // 没有声明的模块继续走下面的硬编码映射。
+    if (auto declared = pyadamas::nativesig::func_rtfn(module, member)) return *declared;
     if (module == "dylib") {
         if (member == "load") return RtFn::DYLIBLoad;
         if (member == "close") return RtFn::DYLIBClose;
@@ -247,32 +252,12 @@ std::optional<RtFn> Lowerer::native_fn(const std::string& module, const std::str
         if (member == "chmod") return RtFn::OsChmod;
         if (member == "access") return RtFn::OsAccess;
         if (member == "makedirs") return RtFn::OsMakedirs;
-    } else if (module == "os.path") {
-        if (member == "join") return RtFn::OsPathJoin;
-        if (member == "exists") return RtFn::OsPathExists;
-        if (member == "isdir") return RtFn::OsPathIsdir;
-        if (member == "isfile") return RtFn::OsPathIsfile;
-        if (member == "basename") return RtFn::OsPathBasename;
-        if (member == "dirname") return RtFn::OsPathDirname;
-        if (member == "splitext") return RtFn::OsPathSplitext;
-        if (member == "normpath") return RtFn::OsPathNormpath;
-        if (member == "abspath") return RtFn::OsPathAbspath;
-        if (member == "expanduser") return RtFn::OsPathExpanduser;
-        if (member == "realpath") return RtFn::OsPathRealpath;
-        if (member == "getsize") return RtFn::OsPathGetsize;
-        if (member == "getmtime") return RtFn::OsPathGetmtime;
-        if (member == "split") return RtFn::OsPathSplit;
-        if (member == "samefile") return RtFn::OsPathSamefile;
-        if (member == "islink") return RtFn::OsPathIslink;
+        if (member == "walk") return RtFn::OsWalk;
+        if (member == "system") return RtFn::OsSystem;
     } else if (module == "subprocess") {
         if (member == "run") return RtFn::SubprocessRun;
         // 只为 from-import 登记别名；真正降级走 lower_popen。
         if (member == "Popen") return RtFn::PopenNew;
-    } else if (module == "time") {
-        if (member == "time") return RtFn::TimeTime;
-        if (member == "monotonic") return RtFn::TimeMonotonic;
-        if (member == "perf_counter") return RtFn::TimePerfCounter;
-        if (member == "sleep") return RtFn::TimeSleep;
     } else if (module == "itertools") {
         // 只为 from-import 登记别名；真正降级走 lower_itertools。
         if (member == "chain") return RtFn::IterChain;
@@ -320,6 +305,18 @@ std::optional<RtFn> Lowerer::native_fn(const std::string& module, const std::str
 
 bool Lowerer::builtin_value(const std::string& module, const std::string& member, VReg& out,
                             TypePtr& ty) {
+    // 声明式常量（P0）：stdlib/sigs/<module>.pysig 的 const，按字面量直接产出。
+    if (const auto* dc = pyadamas::nativesig::find_const(module, member)) {
+        switch (dc->val.kind) {
+            case LiteralValue::Kind::Int: out = const_int(dc->val.i); break;
+            case LiteralValue::Kind::Float: out = const_float(dc->val.f); break;
+            case LiteralValue::Kind::Bool: out = const_bool(dc->val.b); break;
+            case LiteralValue::Kind::Str: out = const_str(dc->val.s); break;
+            default: out = const_none(); break;
+        }
+        ty = dc->ty;
+        return true;
+    }
     if (module == "re") {
         if (member == "I" || member == "IGNORECASE") {
             out = const_int(2);
@@ -361,6 +358,12 @@ bool Lowerer::builtin_value(const std::string& module, const std::string& member
         }
     }
     if (module == "os") {
+        if (member == "environ") {
+            ty = mk_dict(t_str(), t_str());
+            out = call_runtime(RtFn::OsEnviron, ty, {});
+            push_temp(out);
+            return true;
+        }
         if (member == "sep") {
             out = const_str("/");
             ty = t_str();

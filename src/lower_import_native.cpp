@@ -270,6 +270,29 @@ VReg Lowerer::call_native(const std::string& module, const std::string& member, 
             return lower_random_extra(member, c);
         }
     }
+    // time.strftime(fmt[, t])：t 可选（9 元组/9 元列表），参数在这里手工装配。
+    if (module == "time" && member == "strftime") {
+        if (c.args.empty() || c.args.size() > 2) {
+            err(c.line, c.col,
+                std::format("time.strftime() takes 1 or 2 arguments, got {}", c.args.size()));
+            return const_none();
+        }
+        VReg f = coerce(expr(*c.args[0]), tc_.type_of(c.args[0].get()), t_str());
+        VReg tm = const_int(0);
+        if (c.args.size() == 2) {
+            TypePtr at = tc_.type_of(c.args[1].get());
+            if (at && at->kind != TyKind::Tuple && at->kind != TyKind::List &&
+                at->kind != TyKind::Unknown) {
+                err(c.line, c.col,
+                    "time.strftime() second argument must be a struct_time tuple");
+                return const_none();
+            }
+            tm = expr(*c.args[1]);
+        }
+        VReg s = call_runtime(RtFn::TimeStrftime, t_str(), {f, tm});
+        push_temp(s);
+        return s;
+    }
     // os.makedirs(name, exist_ok=False)：exist_ok 可选，参数在这里手工装配。
     if (module == "os" && member == "makedirs") {
         if (c.args.empty() || c.args.size() > 2) {

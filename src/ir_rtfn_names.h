@@ -458,6 +458,10 @@ inline const char* rt_name(RtFn f) {
         case RtFn::TimeMonotonic: return "pa_time_monotonic";
         case RtFn::TimePerfCounter: return "pa_time_perf_counter";
         case RtFn::TimeSleep: return "pa_time_sleep";
+        case RtFn::TimeLocaltime: return "pa_time_localtime";
+        case RtFn::TimeGmtime: return "pa_time_gmtime";
+        case RtFn::TimeStrftime: return "pa_time_strftime";
+        case RtFn::TimeMktime: return "pa_time_mktime";
         case RtFn::OsListdir: return "pa_os_listdir";
         case RtFn::OsGetenv: return "pa_os_getenv";
         case RtFn::OsPathBasename: return "pa_os_path_basename";
@@ -569,6 +573,9 @@ inline const char* rt_name(RtFn f) {
         case RtFn::OsChmod: return "pa_os_chmod";
         case RtFn::OsAccess: return "pa_os_access";
         case RtFn::OsMakedirs: return "pa_os_makedirs";
+        case RtFn::OsEnviron: return "pa_os_environ";
+        case RtFn::OsWalk: return "pa_os_walk";
+        case RtFn::OsSystem: return "pa_os_system";
         case RtFn::DYLIBLoad: return "pa_dylib_load";
         case RtFn::DYLIBClose: return "pa_dylib_close";
         case RtFn::OsPathRealpath: return "pa_os_path_realpath";

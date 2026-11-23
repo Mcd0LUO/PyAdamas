@@ -1,0 +1,33 @@
+# stdlib/sigs/time.pysig —— time 模块的声明式签名（P0 试点）
+#
+# 格式：module / func / const（见 docs/native-stdlib-cookbook.md）。
+# 改这个文件 + 重建即可新增/修改 time 的 API，**不需要改任何 C++**：
+#   func <Python 名> <运行期符号> (<形参列表>) -> <返回类型>
+#
+# 运行期符号来自 src/ir_rtfn_names.h 的 rt_name() 表（pa_* 前缀的 C 入口）；
+# 写错会在编译期直接报 "runtime symbol '...' is not in the RtFn table"。
+
+module time
+
+# Python 名     运行期符号               形参                     返回
+func time         pa_time_time            ()                     -> float
+func monotonic    pa_time_monotonic       ()                     -> float
+func perf_counter pa_time_perf_counter    ()                     -> float
+func sleep        pa_time_sleep           (secs: float)          -> None
+
+# 下面 4 条是 a2a3 的原生标准库批（原硬编码在 builtin_sigs.cpp 的 time 分支）。
+# localtime/gmtime 的可选参数用 -1e300 当「取当前时间」的哨兵（CPython 无此
+# 约定，见 runtime/rt_time.c 的注释）。
+func localtime    pa_time_localtime       (secs: float = -1e300) -> tuple[int, ...]
+func gmtime       pa_time_gmtime          (secs: float = -1e300) -> tuple[int, ...]
+# strftime 的第二个实参可以是 9 元组/9 元列表，参数装配在
+# lower_import_native.cpp 里手工做（声明只负责类型检查放行）。
+func strftime     pa_time_strftime        (*args: unknown)       -> str
+# mktime 接受 9 元组或 9 元列表，所以形参是 unknown。
+func mktime       pa_time_mktime          (t: unknown)           -> float
+
+# 常量表（CPython 下同名的 int 常量）。这两个值是 Linux 的 <time.h> 口径，
+# 与 CPython 的 time.CLOCK_MONOTONIC / time.CLOCK_REALTIME 一致。
+# 纯数据新增：加这两行之前 time 模块没有它们，加完立刻可用，零 C++。
+const CLOCK_REALTIME  int = 0
+const CLOCK_MONOTONIC int = 1

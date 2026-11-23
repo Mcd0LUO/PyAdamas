@@ -8,7 +8,11 @@
 #include <cctype>
 #include <cstdio>
 #include <filesystem>
+#include <map>
 #include <memory>
+#include <set>
+
+#include "native_sigs.h"  // 声明式原生模块（P0）：stdlib/sigs/<name>.pysig 自动登记
 
 namespace pyadamas {
 
@@ -121,6 +125,7 @@ inline constexpr ModuleEntry kModuleTable[] = {
     {"binascii", ModuleKind::Python, "binascii.py", ""},
     {"bisect", ModuleKind::Python, "bisect.py", ""},
     {"collections.abc", ModuleKind::Python, "collections/abc.py", ""},
+    {"codecs", ModuleKind::Python, "codecs.py", ""},
     {"calendar", ModuleKind::Python, "calendar.py", ""},
     {"configparser", ModuleKind::Python, "configparser.py", "os.path"},
     {"difflib", ModuleKind::Python, "difflib.py", ""},
@@ -170,10 +175,67 @@ inline constexpr ModuleEntry kModuleTable[] = {
 };
 }  // namespace
 
+namespace {
+
+// ── 声明式原生模块的自动登记（P0）────────────────────────────────────
+// 不在 kModuleTable 里、但存在 stdlib/sigs/<name>.pysig 的模块，直接当作
+// Native 模块。于是「新增一个原生模块」= 新建一个 .pysig 文件 + 重建，
+// 这张表一行都不用改（签名由 native_sigs.h 提供）。
+//
+// 生命周期：ModuleEntry 的 name/source/deps 是 string_view，必须指向长期
+// 存储。std::set 的节点地址稳定，所以名字存 set 里、view 指过去；entries
+// 用 unique_ptr 保证指针稳定。
+bool valid_declared_module_name(std::string_view s) {
+    if (s.empty() || s.size() > 128) return false;
+    bool part_start = true;
+    for (char c : s) {
+        const unsigned char u = static_cast<unsigned char>(c);
+        if (c == '.') {
+            if (part_start) return false;
+            part_start = true;
+            continue;
+        }
+        if (part_start) {
+            if (!std::isalpha(u) && c != '_') return false;
+            part_start = false;
+        } else if (!std::isalnum(u) && c != '_') {
+            return false;
+        }
+    }
+    return !part_start;
+}
+
+const ModuleEntry* declared_module_entry(std::string_view name) {
+    struct Store {
+        std::set<std::string> names;   // 节点稳定：string_view 指向它
+        std::map<std::string, std::unique_ptr<ModuleEntry>> entries;
+        std::set<std::string> missing;
+    };
+    static Store store;
+    const std::string key(name);
+    if (auto it = store.entries.find(key); it != store.entries.end()) return it->second.get();
+    if (store.missing.count(key)) return nullptr;
+    if (!valid_declared_module_name(key) || !nativesig::is_declared(key)) {
+        store.missing.insert(key);
+        return nullptr;
+    }
+    const std::string& stored = *store.names.insert(key).first;
+    auto e = std::make_unique<ModuleEntry>();
+    e->name = stored;
+    e->kind = ModuleKind::Native;
+    e->source = std::string_view();
+    e->deps = std::string_view();
+    const ModuleEntry* raw = e.get();
+    store.entries.emplace(key, std::move(e));
+    return raw;
+}
+
+}  // namespace
+
 const ModuleEntry* find_module_entry(std::string_view name) {
     for (const auto& e : kModuleTable)
         if (e.name == name) return &e;
-    return nullptr;
+    return declared_module_entry(name);
 }
 
 bool is_native_module(const ModuleEntry* e) { return e && e->kind == ModuleKind::Native; }
