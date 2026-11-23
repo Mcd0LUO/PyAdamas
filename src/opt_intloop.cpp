@@ -42,8 +42,54 @@ bool il_has_eh(const IRFunction& fn) {
 // （B-1 无终止指令）仍会顺流进 B：这种 B 保留原 jump（仍可达）。
 // 无 fallthrough 的 B 清空指令但**保留块位**——块号是 regalloc 线性
 // 扫描的区间坐标，重编号会扰动槽分配（实测 matmul +9.7% 假回归）。
+// 向量化器候选形态：header（CondBranch）→ body 单块直线 → Jump 回 header。
+//
+// thread_jump_blocks 改写 CFG 后，这种循环会失去通用向量化（实测 matmul 内层
+// j 循环：10.1M → 54.8M 指令，向量化整段失效）。判据只看 IR 结构，不针对程序：
+// 函数里只要存在这种「单块直线循环体」，就整体跳过线程化（保守；这类函数通常
+// 正是向量化器要接管的热函数）。
+static bool il_is_term(IrOp op) {
+    switch (op) {
+        case IrOp::Jump:
+        case IrOp::Branch:
+        case IrOp::Return:
+        case IrOp::GenYield:
+        case IrOp::GenAwait:
+        case IrOp::GenRethrow:
+        case IrOp::GenDone:
+            return true;
+        default:
+            return false;
+    }
+}
+
+bool has_straight_line_loop(const IRFunction& fn) {
+    const int nb = static_cast<int>(fn.blocks.size());
+    for (int h = 0; h < nb; ++h) {
+        const auto& hb = fn.blocks[static_cast<size_t>(h)].insts;
+        if (hb.empty() || hb.back().op != IrOp::Branch) continue;
+        const int cand[2] = {hb.back().target, hb.back().target2};
+        for (int ci = 0; ci < 2; ++ci) {
+            const int b = cand[ci];
+            if (b < 0 || b >= nb || b == h) continue;
+            const auto& bi = fn.blocks[static_cast<size_t>(b)].insts;
+            if (bi.empty() || bi.back().op != IrOp::Jump || bi.back().target != h) continue;
+            bool straight = true;
+            for (size_t k = 0; k + 1 < bi.size(); ++k) {
+                if (il_is_term(bi[k].op)) {
+                    straight = false;
+                    break;
+                }
+            }
+            if (straight) return true;
+        }
+    }
+    return false;
+}
+
 bool thread_jump_blocks(IRFunction& fn) {
     if (il_has_eh(fn)) return false;
+    if (has_straight_line_loop(fn)) return false;
     const int nb = static_cast<int>(fn.blocks.size());
     auto single_jump = [&](int b) -> int {
         if (b < 0 || b >= nb) return -1;

@@ -364,6 +364,10 @@ int main(int argc, char** argv) {
         // 跳转线程化 + 仿射 BCE）。bit2 同块 load 去重实测负收益（matmul
         // BCE 收益被吃掉一半，见 docs/intloop-design.md §3），不进默认，
         // 仅显式掩码（4/5/6/7）开发期 A/B 用。参与缓存失效。
+        // 默认开 bit0（跳转线程化）：纯 CFG 等价变换，实测 nqueens -2.9%、
+        // 其它标量基准中性；含「单块直线循环体」的函数由 pass 内部跳过，
+        // 避免破坏通用向量化（matmul 会从 10.1M 劣化到 54.8M）。
+        prog.loop_opt = 1;
         if (const char* lo = std::getenv("PYADAMAS_LOOP_OPT")) {
             std::string_view sv(lo);
             if (sv == "1") prog.loop_opt = 3;
