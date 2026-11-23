@@ -387,14 +387,43 @@ static int file_fill(PyAdamasFile* f) {
                     pa_raise_c("UnicodeDecodeError", "invalid byte sequence");
                 if (file_str_is(f->errors, "replace"))
                     file_dbuf_append(f, "\xEF\xBF\xBD", 3, translate);
-                ++in;
-                --inleft;
+                /* 一个非法「最大子部件」只出一个替换符：跳过前导字节 + 后续
+                   续字节（0b10xxxxxx），否则 2/3 字节的非法字符会出多个 U+FFFD
+                   或（strict ignore 下）拆出后续字节。 */
+                {
+                    unsigned char c0 = (unsigned char)*in;
+                    int64_t skip = 1;
+                    if (c0 >= 0xF0) skip = 4;
+                    else if (c0 >= 0xE0) skip = 3;
+                    else if (c0 >= 0xC0) skip = 2;
+                    ++in;
+                    --inleft;
+                    while (skip > 1 && inleft > 0 &&
+                           ((unsigned char)*in & 0xC0) == 0x80) {
+                        ++in;
+                        --inleft;
+                        --skip;
+                    }
+                }
                 continue;
             }
             break;
         }
     }
-    if (got < want) f->eof = 1;
+    if (got < want) {
+        f->eof = 1;
+        /* 文件尾留下不完整的多字节序列（如 UTF-8 的孤 0xE9）：iconv 报
+           EINVAL 时暂存在 rawleft 等下一块，但 EOF 后不会再有下一块。
+           以前直接丢弃 —— strict 下应抛 UnicodeDecodeError("unexpected end
+           of data")，replace 下补一个替换符，ignore 下丢弃。 */
+        if (f->rawleft_len > 0) {
+            if (file_str_is(f->errors, "strict"))
+                pa_raise_c("UnicodeDecodeError", "unexpected end of data");
+            /* replace/ignore：丢弃残留字节（replace 的补 U+FFFD 在解码缓冲
+               路径上与 str 的码点/字节计数不一致，保守先丢弃；见报告偏差） */
+            f->rawleft_len = 0;
+        }
+    }
     return f->dlen > 0;
 }
 
@@ -593,8 +622,22 @@ static void file_write_bytes(PyAdamasFile* f, const char* p, int64_t n) {
                 pa_raise_c("UnicodeEncodeError",
                              "character cannot be encoded in the target encoding");
             if (file_str_is(f->errors, "replace")) fwrite("?", 1, 1, f->fp);
-            ++in;
-            --inleft;
+            /* 一个非法 UTF-8「字符」出一个 '?'：跳过前导字节 + 续字节，
+               否则 "café" 用 ascii 编码会得到 "caf??"（CPython 是 "caf?"）。 */
+            {
+                unsigned char c0 = (unsigned char)*in;
+                int64_t skip = 1;
+                if (c0 >= 0xF0) skip = 4;
+                else if (c0 >= 0xE0) skip = 3;
+                else if (c0 >= 0xC0) skip = 2;
+                ++in;
+                --inleft;
+                while (skip > 1 && inleft > 0 && ((unsigned char)*in & 0xC0) == 0x80) {
+                    ++in;
+                    --inleft;
+                    --skip;
+                }
+            }
             continue;
         }
         break;
