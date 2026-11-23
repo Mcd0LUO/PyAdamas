@@ -182,6 +182,61 @@ def choice(seq: object) -> object: pass
 
 ---
 
+### 4.4 原生类声明：`class`（`Random` 起）
+
+.pysig 里的 `class` 是**原生类**：body **只允许方法（`def`）**，不允许字段
+（字段是 `.cpya` 的 struct 语义，两者上下文不同不会混）。`__init__` 是构造器，
+其余是实例方法；方法首参固定为**未标注的 `self`**（接收者不进签名）。
+
+```python
+class Random:
+    @native("pa_random_new")
+    def __init__(self, a: int = -9223372036854775808) -> None: pass
+
+    @native("pa_random_next")
+    def random(self) -> float: pass
+
+    @native("pa_random_choice")
+    @ret_specialized
+    def choice(self, seq: object) -> object: pass
+```
+
+规则与语义：
+
+| 项 | 语义 |
+|---|---|
+| 类名 | 进模块命名空间 = 构造器函数（`random.Random(42)`），`from random import Random` 也能用 |
+| `__init__` | 构造器；`@native("pa_random_new")` 提供构造 RtFn；返回类型注解写 `-> None`，**对象类型由编译器按类名映射**（`random.Random` → `TyKind::Random`） |
+| 方法 | 需 `@native` 覆盖符号才与运行期对上（`Random` 的方法是 `pa_random_*`，不符合 `pa_<模块>_<方法>` 约定）；省略时按约定推导 |
+| `@ret_specialized` | 方法也可用（`choice` 返回序列元素类型，`ret_known=false`），调用点按实参推导 |
+| `FuncInfo::name` | 模块限定：构造器 `random.Random`、方法 `random.Random.<method>`（`check_args` 的 `random.` 前缀分派依赖它，裸名会让调用点类型退化 → 栈帧/GC mask 变化） |
+| 继承 / 类装饰器 / 类关键字 | 一律拒绝（声明类没有基类语义） |
+
+**类型身份是唯一留在 C++ 的一层**：`native_sigs.h` 的 `declared_class_type()`
+把 `(module, class)` 映射到编译器的内建类型种类（目前只有 `random.Random` →
+`TyKind::Random`）。声明负责方法表与构造签名，类型种类属于编译器；新增原生类时
+在这里登记一行（下一批若做 `deque`/`Counter`/`date`/`Path` 等，建议先加一个通用的
+native-object 类型种类把这层也声明化）。
+
+**方法的降级（参数装配）仍在 C++**：与原生的模块级函数一致，`lower_method_misc.cpp`
+的 `lower_method_random()` 按方法名装配实参并 `call_runtime`（§6.4）。本轮只把
+**签名表**（typecheck 的硬编码方法表，~58 行）与构造器签名迁进声明；方法调用
+的汇编与迁移前逐字节相同。
+
+错误路径（都有 `文件:行`）：
+
+| 误用 | 报错 |
+|---|---|
+| 类里放字段 | `native class 'Random' body may only contain methods (def); found annotated assignment (fields are .cpya struct semantics; ...)` |
+| 重复方法 / 重复类 | `duplicate method 'seed' in native class 'Random'` / `duplicate declaration 'Random'` |
+| 未知装饰器 | `unknown decorator on 'random' (only @native("pa_symbol") and @ret_specialized are allowed ...)` |
+| 方法体非 pass | `function 'random' body must be pass (optionally preceded by a docstring); found return` |
+| `@native` 指向不存在的符号 | `runtime symbol 'pa_no_such_symbol' is not in the RtFn table ...` |
+| 类继承 / 类装饰器 | `native class 'Random' cannot inherit: declared native classes have no bases` |
+| 调用未声明的方法 | `class 'Random' has no attribute 'random'`（改 `.pysig` 方法名即可复现，证明硬编码表真删了） |
+
+---
+
 ## 5. 加载器与接线
 
 ### 5.1 `src/native_sigs.h` 对外接口
@@ -404,7 +459,7 @@ if (const auto* c = nativesig::find_const(module, member)) {
 | `sys` | ✅ 已迁移（`stdlib/sigs/sys.pysig`） | `maxsize` + `exit` 走声明；`argv`/`executable`/`stdin`/`stdout`/`stderr`/`exc_info` 是运行期调用或含 ClassObj 返回类型，保留 C++（在 `builtin_sigs.cpp` 的 sys merge 分支补类型）；asm 等价 13/13 |
 | `operator` | ⛔ **不可迁移** | 31 个函数全部走 `operator_call()` 类型推导 + `lower_operator()` 专门降级，无 `pa_operator_*` RtFn 入口；pysig 的符号反查会硬失败。判据：**只有存在 `pa_<模块>_<名字>` RtFn 的函数才能声明**。 |
 | `os` | ✅ 已迁移模块级函数（`stdlib/sigs/os.pysig`） | 16 函数 + 6 标量常量；`unlink` 用 `@native("pa_os_remove")`；保留 C++：`environ`（运行期 dict）、`walk`（返回 list[tuple]）、`os.path.*`（独立模块已迁）。asm 等价 13/13 |
-| `random` | ✅ 已迁移**全部模块级函数**（`stdlib/sigs/random.pysig`） | 17 函数：14 个普通 + `seed`（`INT64_MIN` 哨兵默认值）+ `choice`/`sample`/`choices`（`@ret_specialized`，返回类型按实参特化）；6 个 `@native` 覆盖 g* 符号。保留 C++：只有 `Random` 构造器与 `r.*` 方法（类语义）。asm 与迁移前逐字节相同 |
+| `random` | ✅ 已迁移**全部模块级函数 + `Random` 类**（`stdlib/sigs/random.pysig`） | 17 函数 + `class Random`（构造器 + 6 个实例方法，`@native` 覆盖 `pa_random_*`；`choice` 用 `@ret_specialized`）。保留 C++：方法的参数装配（`lower_method_misc.cpp`，§6.4）、类型身份映射 `declared_class_type`。asm 与迁移前逐字节相同 |
 | `collections` `json` `re` | ⬜ 未迁移 | 硬编码仍在；加载器已就绪，可按 §6.2 逐个搬 |
 | `pathlib` `operator` `asyncio` | ⬜ 未迁移（优先级低） | 构造器/类语义多，声明格式表达不了的部分留 C++ |
 | `datetime` `subprocess` | ⬜ 未迁移（优先级低） | 参数装配/返回类型随实参变的分支多 |

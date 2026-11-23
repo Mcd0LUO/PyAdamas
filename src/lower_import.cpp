@@ -128,7 +128,6 @@ static bool module_ctor(const std::string& module, const std::string& name) {
             if (name == op) return true;
         return false;
     }
-    if (module == "random") return name == "Random";
     return false;
 }
 
@@ -165,10 +164,6 @@ std::optional<RtFn> Lowerer::native_fn(const std::string& module, const std::str
     if (module == "sys" && member == "exit") return RtFn::SysExit;
     if (module == "sys" && member == "exc_info") {
         return RtFn::ExcInfo;
-    } else if (module == "random") {
-        // 全部模块级函数（含 seed / ret_known=false 的 choice/sample/choices）
-        // 已迁到 stdlib/sigs/random.pysig；这里只剩 Random 构造器（类，无声明语法）。
-        if (member == "Random") return RtFn::RandNew;
     } else if (module == "os") {
         // 其余 os 成员已迁到 stdlib/sigs/os.pysig；walk 仍在硬编码。
         if (member == "walk") return RtFn::OsWalk;

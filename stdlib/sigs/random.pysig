@@ -41,3 +41,29 @@ def getrandbits(k: int) -> int: pass
 def gauss(mu: float, sigma: float) -> float: pass
 def expovariate(lambd: float) -> float: pass
 def triangular(low: float, high: float = 0.0, mode: float = 0.0) -> float: pass
+
+# ── 原生类：class = 原生类（body 只有方法；__init__ 是构造器）────────────
+# 方法首参 self 不参与签名；@native 覆盖运行期符号（实例方法用 pa_random_*
+# 而非模块级 pa_random_g*）；@ret_specialized 表示返回类型按调用点特化。
+class Random:
+    @native("pa_random_new")
+    def __init__(self, a: int = -9223372036854775808) -> None: pass
+
+    @native("pa_random_next")
+    def random(self) -> float: pass
+
+    @native("pa_random_seed")
+    def seed(self, a: int = -9223372036854775808) -> None: pass
+
+    @native("pa_random_randint")
+    def randint(self, a: int, b: int) -> int: pass
+
+    @native("pa_random_uniform")
+    def uniform(self, a: float, b: float) -> float: pass
+
+    @native("pa_random_choice")
+    @ret_specialized
+    def choice(self, seq: object) -> object: pass
+
+    @native("pa_random_shuffle")
+    def shuffle(self, x: list[object]) -> None: pass

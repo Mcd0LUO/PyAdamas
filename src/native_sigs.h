@@ -97,11 +97,29 @@ struct SigConst {
     int line = 0;
 };
 
+
+// 原生类声明（.pysig 的 class）：body 只有方法（def），没有字段。
+// __init__ 是构造器（映射到构造 RtFn），其余是实例方法；方法首参固定 self
+// （不参与签名）。方法可带 @native("pa_xxx") 覆盖符号、@ret_specialized
+// 表示返回类型按调用点特化。
+struct SigClass {
+    std::string name;
+    bool has_init = false;
+    SigFunc init;
+    std::vector<SigFunc> methods;
+    int line = 0;
+    const SigFunc* find_method(std::string_view n) const {
+        for (auto& m : methods)
+            if (m.name == n) return &m;
+        return nullptr;
+    }
+};
 struct ModuleSig {
     std::string module;
     std::string path;
     std::vector<SigFunc> funcs;
     std::vector<SigConst> consts;
+    std::vector<SigClass> classes;
 
     const SigFunc* find_func(std::string_view n) const {
         for (auto& f : funcs)
@@ -110,6 +128,11 @@ struct ModuleSig {
     }
     const SigConst* find_const(std::string_view n) const {
         for (auto& c : consts)
+            if (c.name == n) return &c;
+        return nullptr;
+    }
+    const SigClass* find_class(std::string_view n) const {
+        for (auto& c : classes)
             if (c.name == n) return &c;
         return nullptr;
     }
@@ -229,6 +252,9 @@ class DeclParser {
                     ms.funcs.push_back(parse_func(fd, module));
                     break;
                 }
+                case StmtKind::ClassDef:
+                    ms.classes.push_back(parse_class(static_cast<ClassDef&>(*st), module));
+                    break;
                 case StmtKind::AnnAssign:
                     ms.consts.push_back(parse_const(static_cast<AnnAssign&>(*st)));
                     break;
@@ -257,22 +283,24 @@ class DeclParser {
         for (auto& c : ms.consts)
             if (!seen.insert(c.name).second)
                 pydecl::fail(c.line, "duplicate declaration '" + c.name + "'");
+        for (auto& c : ms.classes)
+            if (!seen.insert(c.name).second)
+                pydecl::fail(c.line, "duplicate declaration '" + c.name + "'");
         return ms;
     }
 
   private:
-    SigFunc parse_func(FunctionDef& fd, const std::string& module) {
-        SigFunc f;
+    // 函数/方法的公共部分：装饰器、形参（含默认值）、返回类型。
+    // is_method = true 时要求首参是未标注的 self 并从签名里去掉（接收者单独传）。
+    void parse_sig_common(FunctionDef& fd, const std::string& module, SigFunc& f,
+                          bool is_method) {
         f.line = fd.line;
         f.name = fd.name;
         if (fd.is_async) pydecl::fail(fd.line, "async def is not allowed in a signature file");
-        // 装饰器：@native("pa_xxx") 覆盖约定推导的运行期符号。
         for (auto& d : fd.decorators) {
             if (!d) continue;
             const auto dec = pydecl::decorator_of(*d, fd.name);
             if (dec.name == "ret_specialized") {
-                // 返回类型由调用点决定（ret_known=false）：random.choice 这类
-                // 「返回序列元素类型」的函数用，声明里写 -> object 占位。
                 if (dec.has_string_arg)
                     pydecl::fail(dec.line, "@ret_specialized takes no arguments");
                 if (f.ret_specialized)
@@ -301,8 +329,17 @@ class DeclParser {
         if (ndef > ordered.size())
             pydecl::fail(fd.line, "function '" + fd.name + "': default value without a parameter");
         const size_t first_def = ordered.size() - ndef;
+        if (is_method) {
+            if (ordered.empty() || ordered[0]->name != "self" || ordered[0]->annotation)
+                pydecl::fail(fd.line, "method '" + fd.name +
+                                          "' of a native class must start with an unannotated "
+                                          "'self' parameter");
+            if (first_def == 0)
+                pydecl::fail(fd.line, "method '" + fd.name + "': 'self' cannot have a default");
+        }
         for (size_t i = 0; i < ordered.size(); ++i) {
             Arg& a = *ordered[i];
+            if (is_method && i == 0) continue;  // self：接收者，不进签名
             SigParam p;
             p.name = a.name;
             const std::string what = "parameter '" + a.name + "' of '" + fd.name + "'";
@@ -325,7 +362,6 @@ class DeclParser {
             f.vararg_ty = resolve_type(tc_, fd.args.vararg->annotation.get(), fd.line,
                                        "*" + fd.args.vararg->name + " of '" + fd.name + "'");
         }
-        // keyword-only 参数（'*' 之后）。
         for (size_t i = 0; i < fd.args.kwonly.size(); ++i) {
             Arg& a = fd.args.kwonly[i];
             SigParam p;
@@ -352,7 +388,56 @@ class DeclParser {
         }
         // 返回类型：必须写（native 签名不写返回值等于让调用点猜）。
         f.ret = resolve_type(tc_, fd.returns.get(), fd.line, "return type of '" + fd.name + "'");
+    }
+
+    SigFunc parse_func(FunctionDef& fd, const std::string& module) {
+        SigFunc f;
+        parse_sig_common(fd, module, f, false);
         return f;
+    }
+
+    SigClass parse_class(ClassDef& cd, const std::string& module) {
+        SigClass c;
+        c.line = cd.line;
+        c.name = cd.name;
+        if (!cd.bases.empty())
+            pydecl::fail(cd.line, "native class '" + cd.name +
+                                      "' cannot inherit: declared native classes have no bases");
+        if (!cd.keywords.empty())
+            pydecl::fail(cd.line, "native class '" + cd.name +
+                                      "' cannot take class keywords (e.g. metaclass)");
+        for (auto& d : cd.decorators)
+            if (d)
+                pydecl::fail(d->line,
+                             "native class '" + cd.name + "' cannot have decorators");
+        for (auto& st : cd.body) {
+            if (pydecl::is_docstring(*st)) continue;
+            if (st->kind != StmtKind::FunctionDef) {
+                std::string extra;
+                if (st->kind == StmtKind::AnnAssign)
+                    extra = " (fields are .cpya struct semantics; a native class only has "
+                            "methods)";
+                pydecl::fail(st->line, "native class '" + cd.name +
+                                           "' body may only contain methods (def); found " +
+                                           pydecl::stmt_kind_name(st->kind) + extra);
+            }
+            auto& fd = static_cast<FunctionDef&>(*st);
+            if (fd.name == "__init__") {
+                if (c.has_init)
+                    pydecl::fail(fd.line, "duplicate method '__init__' in native class '" +
+                                              cd.name + "'");
+                parse_sig_common(fd, module, c.init, true);
+                c.has_init = true;
+                continue;
+            }
+            if (c.find_method(fd.name))
+                pydecl::fail(fd.line, "duplicate method '" + fd.name +
+                                          "' in native class '" + cd.name + "'");
+            SigFunc m;
+            parse_sig_common(fd, module, m, true);
+            c.methods.push_back(std::move(m));
+        }
+        return c;
     }
 
     SigConst parse_const(AnnAssign& aa) {
@@ -418,8 +503,16 @@ inline const std::map<std::string, RtFn>& rtfn_by_symbol() {
 // 前半段，扫到即停，实测 ~2us）；扫完仍有没找到的就硬失败并报声明行号。
 // 全表扫描（637 个入口）只在「写错符号名」这条错误路径上发生。
 inline void resolve_rt_symbols(ModuleSig& ms) {
+    // 模块函数 + 原生类的构造器/方法都要做符号反查（同一个 RtFn 表）。
+    std::vector<SigFunc*> all;
+    all.reserve(ms.funcs.size());
+    for (auto& f : ms.funcs) all.push_back(&f);
+    for (auto& c : ms.classes) {
+        if (c.has_init) all.push_back(&c.init);
+        for (auto& m : c.methods) all.push_back(&m);
+    }
     std::unordered_map<std::string, std::vector<size_t>> want;
-    for (size_t i = 0; i < ms.funcs.size(); ++i) want[ms.funcs[i].rt_symbol].push_back(i);
+    for (size_t i = 0; i < all.size(); ++i) want[all[i]->rt_symbol].push_back(i);
     if (want.empty()) return;
     size_t remaining = want.size();
     for (uint32_t i = 0; i <= 0xFFFFu && remaining; ++i) {
@@ -427,7 +520,7 @@ inline void resolve_rt_symbols(ModuleSig& ms) {
         if (!n || n[0] == '?' || n[0] == 0) continue;
         auto it = want.find(n);
         if (it == want.end()) continue;
-        for (size_t k : it->second) ms.funcs[k].fn = static_cast<RtFn>(i);
+        for (size_t k : it->second) all[k]->fn = static_cast<RtFn>(i);
         want.erase(it);
         --remaining;
     }
@@ -435,13 +528,12 @@ inline void resolve_rt_symbols(ModuleSig& ms) {
     // 报第一个没解析成功的声明（把「文件:行 + 符号名」都带上）。
     for (auto& [sym, idxs] : want) {
         if (idxs.empty()) continue;
-        fatal(ms.path, ms.funcs[idxs[0]].line,
+        fatal(ms.path, all[idxs[0]]->line,
               "runtime symbol '" + sym +
                   "' is not in the RtFn table (add the runtime entry + src/ir_rtfn*.h first, "
-                  "or fix @native(\"...\"))");
+                  "or fix @native(\\\"...\\\"))");
     }
 }
-
 }  // namespace detail
 
 // ── 对外接口 ──────────────────────────────────────────────────────────
@@ -495,6 +587,83 @@ inline const ModuleSig* load(const std::string& module) {
     return raw;
 }
 
+// ── 原生类：声明 → 编译器类型 / FuncInfo 表 ───────────────────────────
+//
+// 声明类没法表达「对象类型种类」：random.Random 的对象在编译器里是
+// TyKind::Random（和 t_int/t_list 一样是内建类型）。这一层映射属于编译器，
+// 在这里登记；声明负责方法表与构造签名。新增原生类时在这里加一行。
+inline TypePtr declared_class_type(const std::string& module, const std::string& cls) {
+    if (module == "random" && cls == "Random") return t_random();
+    return t_unknown();
+}
+
+// 已解析的原生类：构造器 + 方法（每个都是 FuncInfo），供 typecheck 的方法
+// 分派/绑定与 import 绑定使用。懒构建 + 缓存（与 ModuleSig / ModuleInfo 同口径）。
+struct NativeClass {
+    std::string module;
+    std::string name;
+    FuncInfoPtr init;  // nullptr = 没有 __init__
+    std::map<std::string, FuncInfoPtr> methods;
+};
+
+// .pysig 的一条声明 → FuncInfo（函数/方法/构造器共用）。
+inline FuncInfoPtr make_func_info(const SigFunc& f, const std::string& qname) {
+    auto fi = std::make_shared<FuncInfo>();
+    fi->name = qname;
+    auto add = [&](const SigParam& p, bool kwonly) {
+        Param pp;
+        pp.name = p.name;
+        pp.ty = p.ty;
+        pp.has_default = p.has_default;
+        if (p.has_default) pp.default_lit = p.def;
+        pp.kwonly = kwonly;
+        return pp;
+    };
+    for (auto& p : f.pos) fi->pos.push_back(add(p, false));
+    for (auto& p : f.kwonly) fi->kwonly.push_back(add(p, true));
+    fi->varargs = f.varargs;
+    fi->vararg_name = f.vararg_name;
+    fi->vararg_ty = f.vararg_ty;
+    fi->kwargs = f.kwargs;
+    fi->kwarg_name = f.kwarg_name;
+    fi->kwarg_ty = f.kwarg_ty;
+    // @ret_specialized：ret 固定 unknown、ret_known=false（与硬编码路径逐字段一致）。
+    fi->ret = f.ret_specialized ? new_ty(TyKind::Unknown) : f.ret;
+    fi->ret_known = !f.ret_specialized;
+    fi->ret_specialized = f.ret_specialized;
+    return fi;
+}
+
+// 声明类的完整信息（构造器 + 方法表）。没有该类的声明返回 nullptr。
+inline const NativeClass* class_info(const std::string& module, const std::string& cls) {
+    static std::map<std::string, std::unique_ptr<NativeClass>> cache;
+    const std::string key = module + "." + cls;
+    if (auto it = cache.find(key); it != cache.end()) return it->second.get();
+    const ModuleSig* ms = load(module);
+    if (!ms) return nullptr;
+    const SigClass* sc = nullptr;
+    for (auto& c : ms->classes)
+        if (c.name == cls) {
+            sc = &c;
+            break;
+        }
+    if (!sc) return nullptr;
+    auto out = std::make_unique<NativeClass>();
+    out->module = module;
+    out->name = cls;
+    if (sc->has_init) out->init = make_func_info(sc->init, key);
+    for (auto& m : sc->methods) out->methods[m.name] = make_func_info(m, key + "." + m.name);
+    auto* raw = out.get();
+    cache[key] = std::move(out);
+    return raw;
+}
+
+inline bool class_has_method(const std::string& module, const std::string& cls,
+                             const std::string& method) {
+    const NativeClass* c = class_info(module, cls);
+    return c && c->methods.count(method) > 0;
+}
+
 // 声明 → ModuleInfo（签名表）。没有声明文件返回 nullptr，调用方退回硬编码。
 // 返回的对象被缓存，与 builtin_module 的旧缓存语义一致（同一 ModuleInfoPtr）。
 inline ModuleInfoPtr module_info(const std::string& module) {
@@ -507,49 +676,43 @@ inline ModuleInfoPtr module_info(const std::string& module) {
     info->name = ms->module;
     info->builtin = true;
     for (auto& f : ms->funcs) {
-        auto fi = std::make_shared<FuncInfo>();
         // 名字按硬编码惯例带模块前缀（"random.choice"）：typecheck 的
         // check_args 对 random./itertools./operator./collections./json. 前缀的
-        // 函数有「返回类型随实参特化」的专用分派（如 random.choice 的元素类型），
-        // 不带前缀就会退化成 unknown，改变调用点代码生成。
-        fi->name = module + "." + f.name;
-        auto add = [&](const SigParam& p, bool kwonly) {
-            Param pp;
-            pp.name = p.name;
-            pp.ty = p.ty;
-            pp.has_default = p.has_default;
-            if (p.has_default) pp.default_lit = p.def;
-            pp.kwonly = kwonly;
-            return pp;
-        };
-        for (auto& p : f.pos) fi->pos.push_back(add(p, false));
-        for (auto& p : f.kwonly) fi->kwonly.push_back(add(p, true));
-        fi->varargs = f.varargs;
-        fi->vararg_name = f.vararg_name;
-        fi->vararg_ty = f.vararg_ty;
-        fi->kwargs = f.kwargs;
-        fi->kwarg_name = f.kwarg_name;
-        fi->kwarg_ty = f.kwarg_ty;
-        // @ret_specialized：ret 固定 unknown、ret_known=false，与硬编码路径逐字段一致。
-        fi->ret = f.ret_specialized ? new_ty(TyKind::Unknown) : f.ret;
-        fi->ret_known = !f.ret_specialized;
-
+        // 函数有「返回类型随实参特化」的专用分派；不带前缀会退化成 unknown。
+        auto fi = make_func_info(f, module + "." + f.name);
         auto t = new_ty(TyKind::Func);
         t->fn = std::move(fi);
         info->globals[f.name] = std::move(t);
     }
     for (auto& c : ms->consts) info->globals[c.name] = c.ty;
+    // 原生类：类名作为构造器函数进 globals（random.Random(42)），
+    // 返回类型由编译器按类名映射（declared_class_type）；方法表由
+    // class_info() 提供，供 typecheck 的方法分派使用。
+    for (auto& c : ms->classes) {
+        FuncInfoPtr ctor;
+        if (c.has_init) {
+            ctor = make_func_info(c.init, module + "." + c.name);
+        } else {
+            ctor = std::make_shared<FuncInfo>();
+            ctor->name = module + "." + c.name;
+        }
+        ctor->ret = declared_class_type(module, c.name);
+        ctor->ret_known = true;
+        auto t = new_ty(TyKind::Func);
+        t->fn = std::move(ctor);
+        info->globals[c.name] = std::move(t);
+    }
     cache[module] = info;
     return info;
 }
-
 // 模块成员 → RtFn。没有声明 / 没有这个成员返回 nullopt（调用方继续走硬编码）。
+// 类名也算成员：取它的构造器符号（random.Random → pa_random_new）。
 inline std::optional<RtFn> func_rtfn(const std::string& module, const std::string& member) {
     const ModuleSig* ms = load(module);
     if (!ms) return std::nullopt;
-    const SigFunc* f = ms->find_func(member);
-    if (!f) return std::nullopt;
-    return f->fn;
+    if (const SigFunc* f = ms->find_func(member)) return f->fn;
+    if (const SigClass* c = ms->find_class(member); c && c->has_init) return c->init.fn;
+    return std::nullopt;
 }
 
 // 声明的模块常量（值 + 类型）。没有则 nullptr。

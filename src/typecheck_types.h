@@ -218,6 +218,9 @@ struct FuncInfo {
     // 「先调用、后定义」的函数（互递归、typing.py 的辅助函数）返回 None，
     // 进而产生一堆 "None is not iterable" 的假错误。
     bool ret_known = false;
+    // 返回类型由调用点按实参特化（.pysig 的 @ret_specialized）：ret 只是占位，
+    // 类型检查在调用点按实参推导（random.choice / Random.choice 这类）。
+    bool ret_specialized = false;
     bool unchecked = false;   // 内置函数：参数规则在 builtin_call 里按名字分派
     bool is_extern = false;   // cimport 外部函数：参数/返回值按 C ABI 编组
     // 免写直调（from c import X / dylib 句柄属性调用）：没有 .cpya 声明，

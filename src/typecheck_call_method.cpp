@@ -3,6 +3,8 @@
 
 #include "module.h"
 
+#include "native_sigs.h"
+
 namespace pyadamas {
 
 bool TypeChecker::has_method(const TypePtr& t, const std::string& m) {
@@ -71,12 +73,9 @@ bool TypeChecker::has_method(const TypePtr& t, const std::string& m) {
                 };
                 return ms.count(m) > 0;
             }
-            case TyKind::Random: {
-                static const std::unordered_set<std::string> ms = {
-                    "random", "seed", "randint", "uniform", "choice", "shuffle",
-                };
-                return ms.count(m) > 0;
-            }
+            case TyKind::Random:
+                // 方法表来自 .pysig 的 class Random（不再硬编码）。
+                return nativesig::class_has_method("random", "Random", m);
             case TyKind::Regex: {
                 static const std::unordered_set<std::string> ms = {
                     "search", "match", "fullmatch", "findall", "sub", "split",
@@ -175,32 +174,34 @@ TypePtr TypeChecker::method_call(TypePtr recv, const std::string& name, Call& c,
             if (!c.keywords.empty())
                 err(c.line, c.col,
                     std::format("random.Random.{}() does not take keyword arguments", name));
-            if (name == "random") {
-                argc(0, 0);
-                return t_float();
+            // 方法表来自 .pysig 的 `class Random`（nativesig::class_info），不再硬编码。
+            const auto* cls = nativesig::class_info("random", "Random");
+            if (!cls) return t_unknown();
+            auto it = cls->methods.find(name);
+            if (it == cls->methods.end()) {
+                err(c.line, c.col,
+                    std::format("class 'Random' has no attribute '{}'", name));
+                return t_unknown();
             }
-            if (name == "seed") {
-                argc(0, 1);
-                if (!a.empty() && a[0] && !is_unknown(a[0]) && a[0]->kind != TyKind::Int)
-                    err(c.line, c.col, "seed() expects an int");
-                return t_none();
+            const FuncInfoPtr& fn = it->second;
+            const size_t npos = fn->pos.size();
+            size_t ndef = 0;
+            for (auto& p : fn->pos)
+                if (p.has_default) ++ndef;
+            argc(npos - ndef, npos);
+            for (size_t i = 0; i < a.size() && i < npos; ++i) {
+                TypePtr want = fn->pos[i].ty;
+                TypePtr got = a[i];
+                if (!want || !got || is_unknown(got)) continue;
+                // 数值参数放宽（int 实参进 float 形参是 Python 常规用法）。
+                if (want->kind == TyKind::Float && is_num(got)) continue;
+                if (assignable(want, got)) continue;
+                err(c.args[i]->line, c.args[i]->col,
+                    std::format("argument '{}' of 'random.Random.{}' expects '{}', got '{}'",
+                                fn->pos[i].name, name, type_name(want), type_name(got)));
             }
-            if (name == "randint") {
-                argc(2, 2);
-                for (auto& t : a)
-                    if (t && !is_unknown(t) && t->kind != TyKind::Int)
-                        err(c.line, c.col, "randint() expects int arguments");
-                return t_int();
-            }
-            if (name == "uniform") {
-                argc(2, 2);
-                for (auto& t : a)
-                    if (t && !is_unknown(t) && !is_num(t))
-                        err(c.line, c.col, "uniform() expects number arguments");
-                return t_float();
-            }
-            if (name == "choice") {
-                argc(1, 1);
+            if (fn->ret_specialized) {
+                // @ret_specialized：与硬编码 choice 同口径——序列的元素类型。
                 TypePtr st = a.empty() ? nullptr : a[0];
                 if (st && st->kind == TyKind::List)
                     return st->sub.empty() ? t_unknown() : st->sub[0];
@@ -211,19 +212,10 @@ TypePtr TypeChecker::method_call(TypePtr recv, const std::string& name, Call& c,
                     return acc;
                 }
                 if (st && st->kind == TyKind::Str) return t_str();
-                if (st && !is_unknown(st))
-                    err(c.line, c.col, "choice() expects a sequence");
                 return t_unknown();
             }
-            if (name == "shuffle") {
-                argc(1, 1);
-                if (!a.empty() && a[0] && !is_unknown(a[0]) && a[0]->kind != TyKind::List)
-                    err(c.line, c.col, "shuffle() expects a list");
-                return t_none();
-            }
-            return t_unknown();
+            return fn->ret_known ? fn->ret : t_unknown();
         }
-
         if (recv->kind == TyKind::Generator) {
             if (name == "send") {
                 argc(1, 1);

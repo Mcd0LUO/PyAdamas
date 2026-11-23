@@ -541,24 +541,6 @@ pyadamas::ModuleInfoPtr builtin_module(const std::string& name) {
                {"flags", pyadamas::t_int()}},
               2, pyadamas::mk_list(pyadamas::t_str()));
         re_fn("escape", {{"pattern", pyadamas::t_str()}}, 0, pyadamas::t_str());
-    } else if (name == "random") {
-        // 模块级函数（含 seed 与 ret_known=false 的 choice/sample/choices）已全部
-        // 迁到 stdlib/sigs/random.pysig（按名字 merge）。这里只剩 Random 构造器：
-        // 它是类（没有 class 声明语法），返回 t_random()。
-        const int64_t kNoSeed = -9223372036854775807LL - 1;
-        {
-            auto f = std::make_shared<pyadamas::FuncInfo>();
-            f->name = "Random";
-            pyadamas::Param p;
-            p.name = "a";
-            p.ty = pyadamas::t_int();
-            p.has_default = true;
-            p.default_lit = lv_int(kNoSeed);
-            f->pos.push_back(std::move(p));
-            f->ret = pyadamas::t_random();
-            f->ret_known = true;
-            func_with("Random", f);
-        }
     } else if (name == "os") {
         // 其余 os 成员已迁到 stdlib/sigs/os.pysig（按名字 merge）。
         // environ/walk 无法用字面量/标量签名表达，保留在硬编码。
