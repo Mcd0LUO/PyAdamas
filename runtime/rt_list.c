@@ -901,6 +901,11 @@ static int pa_uk_num_cmp(int64_t a, int64_t b) {
 #define LESS_UK_NUM(a, b) (pa_uk_num_cmp((a), (b)) < 0)
 PYADAMAS_TIMSORT(uknum, LESS_UK_NUM)
 
+/* 类实例排序：__lt__ 槽地址在调用点填入（unknown 域 kind=3 的 OTHER 族）。 */
+static int64_t (*g_obj_lt)(int64_t, int64_t);
+#define LESS_OBJ(a, b) (g_obj_lt((a), (b)) != 0)
+PYADAMAS_TIMSORT(objlt, LESS_OBJ)
+
 // kind：0 int/bool、1 float、2 str、4 容器元素（desc 字典序）、5 u64（无符号）、
 // 其它机器字。desc：编译期描述符串常量，仅 kind 4 读取；标量种类传空串，不读。
 void pa_list_sort(PyAdamasList* l, int64_t kind, PyAdamasStr* desc) {
@@ -923,23 +928,30 @@ void pa_list_sort(PyAdamasList* l, int64_t kind, PyAdamasStr* desc) {
             return;
         }
         if (fam == PA_UK_OTHER) {
-            /* 全 OTHER 族：用户类实例在 CPython 里按 __lt__ 比较；PyAdamas 运行时
-               没有「名字 → 方法槽」映射，排不了（已知缺口，见
-               docs/unknown-semantics-audit.md）。以前退化成按机器字（堆指针）排
-               —— 元素顺序静默错乱；现在显式抛 TypeError，不再静默给错结果。
-               元组/列表/None 等其它 OTHER 元素保持机器字口径（文档未承诺容器
-               元素排序，静态类型已知时走 kind=4 的按内容比较）。 */
+            /* 全 OTHER 族（0.434）：元素全是「有 __lt__ 槽的类实例」时按 __lt__ 稳定排序
+               （CPython 口径）；否则维持 0.432 的 TypeError——不再静默按机器字排。
+               元组/列表/None 等其它 OTHER 元素仍不支持排序（文档未承诺）。 */
+            int64_t(*lt)(int64_t, int64_t) = NULL;
+            int all_inst = 1;
             for (int64_t i = 0; i < l->len; ++i) {
                 int64_t v = l->data[i];
-                if (v == 0 || !pa_unknown_is_heap(v)) continue;
-                if (((PyAdamasRc*)((uintptr_t)v - (uintptr_t)PYADAMAS_RC_HDR))->kind ==
-                    PYADAMAS_RC_INSTANCE) {
-                    pa_raise_c("TypeError",
-                               "'<' not supported between instances of "
-                               "'object' and 'object'");
-                    return;
-                }
+                if (v == 0 || !pa_unknown_is_heap(v)) { all_inst = 0; break; }
+                if (((PyAdamasRc*)((uintptr_t)v - (uintptr_t)PYADAMAS_RC_HDR))->kind !=
+                    PYADAMAS_RC_INSTANCE) { all_inst = 0; break; }
+                void* f = pa_instance_dunder_fn((void*)(uintptr_t)v, 1);
+                if (!f) { all_inst = 0; break; }
+                if (!lt) lt = (int64_t(*)(int64_t, int64_t))f;
             }
+            if (all_inst && lt) {
+                g_obj_lt = lt;
+                sort_objlt(l->data, l->len);
+                g_obj_lt = NULL;
+                return;
+            }
+            pa_raise_c("TypeError",
+                       "'<' not supported between instances of "
+                       "'object' and 'object'");
+            return;
         }
         if (fam == PA_UK_STR) sort_str(l->data, l->len);
         else if (fam == PA_UK_NUM) sort_uknum(l->data, l->len);
@@ -1244,6 +1256,11 @@ static int unknown_kind_value_eq(int64_t a, int64_t b) {
     if (!pa_unknown_is_heap(a) || !pa_unknown_is_heap(b)) return 0;
     PyAdamasRc* ha = (PyAdamasRc*)(uintptr_t)((uint64_t)a - (uint64_t)PYADAMAS_RC_HDR);
     PyAdamasRc* hb = (PyAdamasRc*)(uintptr_t)((uint64_t)b - (uint64_t)PYADAMAS_RC_HDR);
+    if (ha->kind == PYADAMAS_RC_INSTANCE && hb->kind == PYADAMAS_RC_INSTANCE) {
+        void* fn = pa_instance_dunder_fn((void*)(uintptr_t)a, 0);
+        if (fn) return ((int64_t (*)(int64_t, int64_t))fn)(a, b) ? 1 : 0;
+        return 0;
+    }
     if (ha->kind == PYADAMAS_RC_STR && hb->kind == PYADAMAS_RC_STR)
         return pa_str_eq((PyAdamasStr*)a, (PyAdamasStr*)b) != 0;
     if (ha->kind == PYADAMAS_RC_BIGINT && hb->kind == PYADAMAS_RC_BIGINT)

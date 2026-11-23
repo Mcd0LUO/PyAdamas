@@ -284,7 +284,7 @@ std::string AsmGen::gen(const IRModule& m) {
                     quad_sym(emit_.out, emit_.line_buf, e.own_slots_symbol);
                     quad_sym2(emit_.out, emit_.line_buf, ".Lcnameext", static_cast<int64_t>(i), static_cast<int64_t>(j));
                     emit_.out += "\t.quad 0\n";  // 导入类没有动态属性槽
-                    emit_.out += "\t.quad -1\n";  // 导入类没有 __eq__ 槽号（实例 metadata 走定义模块那份）
+                    emit_.out += "\t.quad 0\n";  // 导入类没有 dunder 槽表（实例 metadata 走定义模块那份）
                     raw_label2(emit_.out, emit_.line_buf, ".Lcnameext", static_cast<int64_t>(i), static_cast<int64_t>(j));
                     emit_.line_buf = "\t.asciz \"";
                     emit_.line_buf += asm_escape(e.qualname);
@@ -298,9 +298,9 @@ std::string AsmGen::gen(const IRModule& m) {
                 quad_sym(emit_.out, emit_.line_buf, num_label(".Lvt", static_cast<int64_t>(i)));
                 quad_sym(emit_.out, emit_.line_buf, num_label(".Lvtown", static_cast<int64_t>(i)));
                 quad_sym(emit_.out, emit_.line_buf, num_label(".Lcname", static_cast<int64_t>(i)));
-                // 第 6 个字：动态属性槽偏移（0 = 没有）；第 7 个字：__eq__ 槽号。
+                // 第 6 个字：动态属性槽偏移（0 = 没有）；第 7 个字：dunder 槽表指针。
                 quad_dec(emit_.out, emit_.line_buf, c.dict_off);
-                quad_dec(emit_.out, emit_.line_buf, c.eq_slot);
+                quad_sym(emit_.out, emit_.line_buf, num_label(".Lvtdun", static_cast<int64_t>(i)));
                 bool export_cls = !m.is_entry && !m.module_symbol.empty() &&
                                   !c.name.empty() && last_cls[c.name] == i;
                 raw_label(emit_.out, emit_.line_buf, num_label(".Lvt", static_cast<int64_t>(i)));
@@ -355,6 +355,12 @@ std::string AsmGen::gen(const IRModule& m) {
                 quad_dec(emit_.out, emit_.line_buf, static_cast<int64_t>(c.own_slots.size()));
                 for (int s : c.own_slots)
                     quad_dec(emit_.out, emit_.line_buf, s);
+                // dunder 槽表：[__eq__, __lt__, __hash__, -1]；unknown 域据此分派。
+                raw_label(emit_.out, emit_.line_buf, num_label(".Lvtdun", static_cast<int64_t>(i)));
+                quad_dec(emit_.out, emit_.line_buf, c.eq_slot);
+                quad_dec(emit_.out, emit_.line_buf, c.lt_slot);
+                quad_dec(emit_.out, emit_.line_buf, c.hash_slot);
+                quad_dec(emit_.out, emit_.line_buf, -1);
                 raw_label(emit_.out, emit_.line_buf, num_label(".Lcname", static_cast<int64_t>(i)));
                 emit_.line_buf = "\t.asciz \"";
                 emit_.line_buf += asm_escape(c.qualname);

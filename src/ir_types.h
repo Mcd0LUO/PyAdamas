@@ -330,10 +330,13 @@ struct IRClass {
     // 槽放在字段之后，实例大小 = 8 * (1 + n_fields) + (dict_off ? 8 : 0)。
     // 运行时通过 vtable 元数据的第 6 个字拿到它，所以派生类的偏移可以不同。
     int64_t dict_off = 0;
-    // __eq__ 的 vtable 槽号（MRO 上找到实现才算，-1 = 没有）。运行时写进
-    // vtable 元数据第 7 个字，供 unknown 域 `==` 按「实例 → vtable → 槽」
-    // 调用 __eq__（typed 域仍走编译期槽号的直接 VCall，不受影响）。
+    // dunder 槽号（MRO 上找到实现才算，-1 = 没有）。codegen 把它们写进一张
+    // 常量表，vtable 元数据第 7 个字指向该表（[eq, lt, hash, -1]）；unknown
+    // 域据此按「实例 → vtable → 槽」分派 __eq__/__lt__/__hash__
+    // （typed 域仍走编译期槽号的直接 VCall，不受影响）。
     int eq_slot = -1;
+    int lt_slot = -1;
+    int hash_slot = -1;
 };
 
 // 一个生成器的运行时形态。帧负载布局与运行时 rt.c 一致：

@@ -52,6 +52,20 @@ int64_t pa_isinstance(void* obj, int64_t class_id) {
     return 0;
 }
 
+
+/* unknown 域 dunder 分派：元数据第 7 个字 -> [__eq__, __lt__, __hash__, -1]。
+   which 越界/不是实例/没有实现都返回 NULL；调用方按签名 cast 后直接调用。
+   调用点是 C 运行时 → 编译方法，方法内的 raise 走展开器（ASan 全量覆盖）。 */
+void* pa_instance_dunder_fn(void* obj, int64_t which) {
+    const int64_t* vt = inst_vtable(obj);
+    if (!vt || which < 0 || which > 2) return NULL;
+    const int64_t* tab = (const int64_t*)(uintptr_t)(vt - 7)[6];
+    if (!tab) return NULL;
+    int64_t slot = tab[which];
+    if (slot < 0) return NULL;
+    return (void*)(uintptr_t)vt[slot];
+}
+
 /* 实例的运行期类编号；不是类实例返回 -1。读类属性时用它按实际类型
    选择存储槽——静态类型可能是基类，值却是子类。 */
 int64_t pa_obj_class_id(void* obj) {

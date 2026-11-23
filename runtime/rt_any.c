@@ -417,20 +417,11 @@ static int any_unknown_eq(int64_t a, int64_t b, int depth) {
     if (!pa_unknown_is_heap(a) || !pa_unknown_is_heap(b)) return 0;
     PyAdamasRc* ha = (PyAdamasRc*)(uintptr_t)((uint64_t)a - (uint64_t)PYADAMAS_RC_HDR);
     PyAdamasRc* hb = (PyAdamasRc*)(uintptr_t)((uint64_t)b - (uint64_t)PYADAMAS_RC_HDR);
-    /* 用户类实例：按 vtable 元数据第 7 个字的 __eq__ 槽号调用。
-       typed 域在编译期就拿到槽号（VCall），这里补的是 unknown 域：
-       实例从混合容器取出/两个 unknown 值比较时也走 __eq__，不再退化成指针相等。
-       __ne__ 暂不单独分派（没有 __ne__ 时用 __eq__ 取反，与 typed 域同口径）。 */
+    /* 用户类实例：按 vtable 元数据第 7 字的 dunder 槽表调 __eq__。
+       typed 域在编译期就拿到槽号（VCall），这里补的是 unknown 域。 */
     if (ha->kind == PYADAMAS_RC_INSTANCE && hb->kind == PYADAMAS_RC_INSTANCE) {
-        const int64_t* vt = *(const int64_t**)a;
-        if (vt) {
-            int64_t slot = (vt - 7)[6];
-            if (slot >= 0) {
-                int64_t (*fn)(int64_t, int64_t) =
-                    (int64_t (*)(int64_t, int64_t))(uintptr_t)vt[slot];
-                if (fn) return fn(a, b) ? 1 : 0;
-            }
-        }
+        void* fn = pa_instance_dunder_fn((void*)(uintptr_t)a, 0);
+        if (fn) return ((int64_t (*)(int64_t, int64_t))fn)(a, b) ? 1 : 0;
         return 0;
     }
     if (ha->kind == PYADAMAS_RC_STR && hb->kind == PYADAMAS_RC_STR)
@@ -472,10 +463,22 @@ int64_t pa_any_cmp(int64_t op, int64_t a, int64_t b, int64_t desc_a, int64_t des
         eq = c == 0;
         lt = c < 0;
         gt = c > 0;
-    } else {
-        if (op != PA_ANY_EQ && op != PA_ANY_NE)
-            pa_raise_c("TypeError", "unsupported comparison between different types");
+    } else if (op == PA_ANY_EQ || op == PA_ANY_NE) {
         eq = any_unknown_eq(a, b, 0);
+    } else {
+        /* 类实例的 < <= > >=：unknown 域按 dunder 槽表调 __lt__（0.434）。
+           有槽的一侧优先（左侧没有时用右侧的 __lt__ 反过来比）；两侧都没有槽
+           维持原来的 TypeError。__le__/__ge__ 用 lt+eq 组合（没有单独槽位）。 */
+        int64_t(*fa)(int64_t, int64_t) =
+            (int64_t(*)(int64_t, int64_t))pa_instance_dunder_fn((void*)(uintptr_t)a, 1);
+        int64_t(*fb)(int64_t, int64_t) =
+            (int64_t(*)(int64_t, int64_t))pa_instance_dunder_fn((void*)(uintptr_t)b, 1);
+        if (!fa && !fb)
+            pa_raise_c("TypeError", "unsupported comparison between different types");
+        if (fa && fa(a, b)) lt = 1;
+        else if (fb && fb(b, a)) gt = 1;
+        else if (any_unknown_eq(a, b, 0)) eq = 1;
+        else gt = 1;
     }
     switch (op) {
         case PA_ANY_EQ: return eq;
@@ -796,10 +799,20 @@ int64_t pa_any_cmp_t(int64_t op, int64_t a, int64_t tag_a,
         eq = c == 0;
         lt = c < 0;
         gt = c > 0;
-    } else {
-        if (op != PA_ANY_EQ && op != PA_ANY_NE)
-            pa_raise_c("TypeError", "unsupported comparison between different types");
+    } else if (op == PA_ANY_EQ || op == PA_ANY_NE) {
         eq = any_unknown_eq(a, b, 0);
+    } else {
+        /* tag 版与 pa_any_cmp 同口径：类实例按 dunder 槽表调 __lt__（0.434）。 */
+        int64_t(*fa)(int64_t, int64_t) =
+            (int64_t(*)(int64_t, int64_t))pa_instance_dunder_fn((void*)(uintptr_t)a, 1);
+        int64_t(*fb)(int64_t, int64_t) =
+            (int64_t(*)(int64_t, int64_t))pa_instance_dunder_fn((void*)(uintptr_t)b, 1);
+        if (!fa && !fb)
+            pa_raise_c("TypeError", "unsupported comparison between different types");
+        if (fa && fa(a, b)) lt = 1;
+        else if (fb && fb(b, a)) gt = 1;
+        else if (any_unknown_eq(a, b, 0)) eq = 1;
+        else gt = 1;
     }
     switch (op) {
         case PA_ANY_EQ: return eq;

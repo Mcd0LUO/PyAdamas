@@ -161,13 +161,14 @@ float 除法直接发 `divsd`，没有除零检查，于是按 IEEE 754 得到 `
   None/0；之后 `p.x` 读得到 `0`/`None`，而不是 CPython 的 `AttributeError`。这是字段布局
   编译期定死的直接结果（src/lower_exc.cpp 的 store_field(..., const_none())），
   tests/run/41_decorators.py 的 expect 已按 `0` 钉住；语义是设计取舍，不改。
-- **类实例列表的 `sorted()` / `list.sort()` 显式抛 `TypeError`**：PyAdamas 运行时没有
-  「类名 → `__lt__` 方法槽」的映射，排不了用户类实例；以前会退化成机器字（堆指针）比较、
-  **静默返回乱序**，0.432 起改为抛
+- **类实例列表的 `sorted()` / `list.sort()`**：0.432 起不再静默按机器字（堆指针）排；
+  0.434 起 dunder 槽表打通后，**有 `__lt__` 槽的类实例按 `__lt__` 稳定排序**（CPython 口径，
+  typed 与 unknown 域一致），**没有 `__lt__` 的类仍抛**
   `TypeError: '<' not supported between instances of 'object' and 'object'`
-  （文案用 `object` 而非具体类名，同样因为拿不到「实例 → 类名」映射）。CPython 对带
-  `__lt__` 的类能成功排序——这是已知缺口，不是待修的小文案差异；静态类型已知的
-  int/float/str/容器元素排序不受影响。
+  （文案用 `object` 而非具体类名：运行时拿不到「实例 → 类名」映射，只按槽分派）。
+  同类分派也覆盖 `==`/`!=`/`<`（unknown 域）与 typed `list[P]` 的 `in`/`index`/`remove`；
+  `__hash__` 的 unknown 域分派（实例作无类型 dict/set 键）仍未做，见
+  [unknown-semantics-audit.md](unknown-semantics-audit.md) §4。
 
 ## 二、尚未实现的构造
 
