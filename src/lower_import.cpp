@@ -159,9 +159,10 @@ std::optional<RtFn> Lowerer::native_fn(const std::string& module, const std::str
             return RtFn::AsyncioWaitFd;
         return std::nullopt;
     }
-    if (module == "sys" && member == "exit") {
-        return RtFn::SysExit;
-    } else if (module == "sys" && member == "exc_info") {
+    // sys.exit 已迁到 stdlib/sigs/sys.pysig（pa_sys_exit 由约定推导）。
+    // sys.exc_info 的返回类型含 ClassObj，签名保留在 builtin_sigs.cpp 的
+    // sys merge 分支，member→RtFn 映射也留在这里。
+    if (module == "sys" && member == "exc_info") {
         return RtFn::ExcInfo;
     } else if (module == "random") {
         if (member == "random") return RtFn::RandGNext;
@@ -347,12 +348,9 @@ bool Lowerer::builtin_value(const std::string& module, const std::string& member
     }
     // math 的全部常量已迁到 stdlib/sigs/math.pysig（nan 的特判在
     // builtin_value 开头，见上文）。
+    // sys.maxsize 已迁到 stdlib/sigs/sys.pysig；下面是运行期调用生成的
+    // 成员（argv/executable/标准流），pysig 无法表达，保留在 C++。
     if (module == "sys") {
-        if (member == "maxsize") {
-            out = const_int(std::numeric_limits<int64_t>::max());
-            ty = t_int();
-            return true;
-        }
         if (member == "argv") {
             ty = mk_list(t_str());
             out = call_runtime(RtFn::SysArgv, ty, {});

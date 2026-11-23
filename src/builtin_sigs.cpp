@@ -49,6 +49,24 @@ pyadamas::ModuleInfoPtr builtin_module(const std::string& name) {
     // 签名表由数据文件提供（见 docs/native-stdlib-cookbook.md）。没有声明
     // 文件的模块继续走下面的硬编码分支，行为不变。
     if (auto declared = pyadamas::nativesig::module_info(name)) {
+        if (name == "sys") {
+            // sys 的运行期成员（argv/executable/标准流/exc_info）无法用
+            // .pysig 字面量表达：它们由 builtin_value 生成 call_runtime，
+            // 这里补回其静态类型，保持 typecheck 行为不变（cookbook §6.4）。
+            declared->globals["argv"] = pyadamas::mk_list(pyadamas::t_str());
+            declared->globals["executable"] = pyadamas::t_str();
+            declared->globals["stdin"] = pyadamas::t_file();
+            declared->globals["stdout"] = pyadamas::t_file();
+            declared->globals["stderr"] = pyadamas::t_file();
+            auto ei = std::make_shared<pyadamas::FuncInfo>();
+            ei->name = "exc_info";
+            ei->ret = pyadamas::mk_tuple({pyadamas::mk_class_obj(pyadamas::mk_exception("Exception")),
+                                          pyadamas::t_unknown(), pyadamas::t_unknown()});
+            ei->ret_known = true;
+            auto eit = pyadamas::new_ty(pyadamas::TyKind::Func);
+            eit->fn = ei;
+            declared->globals["exc_info"] = eit;
+        }
         cache[name] = declared;
         return declared;
     }
@@ -92,21 +110,6 @@ pyadamas::ModuleInfoPtr builtin_module(const std::string& name) {
     } else if (name == "dylib") {
         func("load", {pyadamas::t_str()}, pyadamas::t_dylib());
         func("close", {pyadamas::t_dylib()}, pyadamas::t_int());
-    } else if (name == "sys") {
-        info->globals["argv"] = pyadamas::mk_list(pyadamas::t_str());
-        info->globals["executable"] = pyadamas::t_str();
-        info->globals["maxsize"] = pyadamas::t_int();
-        info->globals["stdin"] = pyadamas::t_file();
-        info->globals["stdout"] = pyadamas::t_file();
-        info->globals["stderr"] = pyadamas::t_file();
-        func("exit", {pyadamas::t_int()}, pyadamas::t_none());
-        // P4 块3（lang_gaps）：sys.exc_info() → (类值, 异常值, tb)。
-        // 类值位静态给 ClassObj（__name__ 可读，运行期是任意异常类单例）；
-        // 异常值/tb 位 unknown（outside except 是 None，unknown 才能按
-        // None 打印/判同一）。运行期三元组元素与静态类型只是提示关系。
-        func("exc_info", {},
-             pyadamas::mk_tuple({pyadamas::mk_class_obj(pyadamas::mk_exception("Exception")),
-                                 pyadamas::t_unknown(), pyadamas::t_unknown()}));
     } else if (name == "asyncio") {
         // run/create_task 的结果类型按实参在 typecheck 里特判；这里的签名
         // 只用于 from-import 的缺省检查和错误提示。
