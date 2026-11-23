@@ -43,6 +43,9 @@
 #ifndef PYADAMAS_RT_OBJ
 #define PYADAMAS_RT_OBJ "build/dev/rt.o"
 #endif
+#ifndef PYADAMAS_RT_DEBUG_OBJ
+#define PYADAMAS_RT_DEBUG_OBJ "build/dev/rt_allocdbg.o"
+#endif
 #ifndef PYADAMAS_MODCACHE_DIR
 #define PYADAMAS_MODCACHE_DIR "build/dev/modcache"
 #endif
@@ -66,6 +69,23 @@ namespace pyadamas {
 // 由 main.cpp 在解析 --asan 时置位。
 static bool g_use_asan_runtime = false;
 void set_asan_runtime(bool on) { g_use_asan_runtime = on; }
+
+// PYADAMAS_CANARY / PYADAMAS_GUARD：链接分配器调试版运行时（canary /
+// guard page），用来抓生成代码的堆越界（ASan 只插桩运行时不覆盖生成代码）。
+// 默认 rt.o 里这些钩子展开成裸 malloc/free，**零开销**；这里显式选择时
+// 才换 rt_allocdbg.o。走链接期选对象而不是运行期 if，是为了让开关关掉时
+// 生成程序的 instructions:u 逐项与基线相同（见 docs/memory-debug.md）。
+// 环境变量在进程内只读一次（同一进程内所有链接共用同一个选择）。
+static bool debug_alloc_runtime_enabled() {
+    static const bool on = [] {
+        const char* c = std::getenv("PYADAMAS_CANARY");
+        if (c && c[0] != '\0' && std::string_view(c) != "0") return true;
+        const char* g = std::getenv("PYADAMAS_GUARD");
+        if (g && g[0] != '\0' && std::string_view(g) != "0") return true;
+        return false;
+    }();
+    return on;
+}
 
 static std::string cc_extra_flags() {
     const char* f = std::getenv("PYADAMAS_CC_FLAGS");
@@ -161,10 +181,17 @@ std::string toolchain_id() {
     if (const char* over = std::getenv("PYADAMAS_TOOLCHAIN_ID"); over && over[0] != '\0')
         return std::format("env:{}", over);
     static const std::string id = [] {
-        return std::format("exe:{:016x}|rt:{:016x}|fmt:{}|abi:{}",
+        // 运行时换了分配器调试版（PYADAMAS_CANARY/GUARD）时，同一份源码
+        // 会链接出不同行为的目标程序；模块对象本身与运行时变体无关，但
+        // 把调试版摘要也并进工具链指纹更保守（换回默认时命中缓存也安全）。
+        unsigned long long dbg = 0;
+        if (debug_alloc_runtime_enabled())
+            dbg = static_cast<unsigned long long>(file_digest(PYADAMAS_RT_DEBUG_OBJ));
+        return std::format("exe:{:016x}|rt:{:016x}|dbg:{:016x}|fmt:{}|abi:{}",
                            static_cast<unsigned long long>(file_digest("/proc/self/exe")),
                            static_cast<unsigned long long>(file_digest(PYADAMAS_RT_OBJ)),
-                           pyadamas::kModuleFormatVersion, pyadamas::kModuleAbiVersion);
+                           dbg, pyadamas::kModuleFormatVersion,
+                           pyadamas::kModuleAbiVersion);
     }();
     return id;
 }
@@ -1074,9 +1101,26 @@ bool link_program(Program& p, const std::string& output) {
     // 到 cc。两条路生成的二进制逐字节相同（--build-id 由输入决定）。
     std::string objs;
     for (auto* u : p.order) objs += " " + shell_quote(u->obj_path);
-    // --asan：链接插桩版运行时，让 RC/GC 内部的越界/UAF 也能被检查到。
-    // 两个 rt 都带同样的符号，链接期只取一个。
-    objs += " " + shell_quote(g_use_asan_runtime ? PYADAMAS_RT_ASAN_OBJ : PYADAMAS_RT_OBJ);
+    // 运行时变体三选一（符号集合相同，链接期只取一个）：
+    //   --asan            → rt_asan.o（运行时代码插桩）
+    //   PYADAMAS_CANARY/GUARD → rt_allocdbg.o（分配器 canary / guard page）
+    //   默认              → rt.o（零开销；钩子宏是裸 malloc/free）
+    // 注意 --asan 与 canary/guard 同时给时 asan 优先（两者分配器改造
+    // 互斥，文档里写清）。
+    bool dbg_rt = false;
+    if (!g_use_asan_runtime && debug_alloc_runtime_enabled()) {
+        if (file_digest(PYADAMAS_RT_DEBUG_OBJ) == 0) {
+            std::fprintf(stderr,
+                         "error: PYADAMAS_CANARY/PYADAMAS_GUARD 需要分配器调试版运行时\n"
+                         "       （%s 不存在；先重新构建，或取消该环境变量）\n",
+                         PYADAMAS_RT_DEBUG_OBJ);
+            return false;
+        }
+        dbg_rt = true;
+    }
+    objs += " " + shell_quote(g_use_asan_runtime ? PYADAMAS_RT_ASAN_OBJ
+                                                 : (dbg_rt ? PYADAMAS_RT_DEBUG_OBJ
+                                                           : PYADAMAS_RT_OBJ));
     // -ldl：rt_cffi 的 dlopen/dlsym（glibc 2.34+ 已并入 libc，-ldl 是空壳，
     // 旧 glibc 仍需要）。Win64 目前只做交叉汇编验证，不走这条链接路径。
     objs += " -lm -ldl";

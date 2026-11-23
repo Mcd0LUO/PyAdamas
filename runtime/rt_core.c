@@ -2,6 +2,180 @@
 #define PA_RC_NO_INLINE   /* 本文件提供 pa_rc_inc/dec 的外部符号 */
 #include "rt_internal.h"
 
+/* ══════════════════════════════════════════════════════════════════
+   分配器调试模式：尾部 canary / guard page（PYADAMAS_CANARY / PYADAMAS_GUARD）
+
+   **零开销的达成方式**：这些钩子只有在「另编一遍 runtime」的 rt_allocdbg.o
+   里才展开成真正的分配器（CMake 用 -DPYADAMAS_ALLOC_DEBUG=1 重编
+   runtime 目录下的每个 rt_*.c 得到它）。默认 rt.o 里 PA_DBG_MALLOC/PA_DBG_FREE 逐字
+   展开成改动前的 malloc/free —— 生成程序链接的运行时对象不变，12 个
+   基准的 instructions:u 逐项相同。为什么不用运行期 if：一个分支也是
+   指令，验收要求关的时候指令数完全不变。
+   Python 驱动在 PYADAMAS_CANARY / PYADAMAS_GUARD 非空时改链 rt_allocdbg.o。
+
+   模式（运行期从环境变量解析一次，只在 rt_allocdbg.o 里读）：
+     PYADAMAS_CANARY=1   尾部 32 字节区：前 16 字节固定 0xC5；释放时校验。
+     PYADAMAS_CANARY=2   同上 + 校验头字（size/kind 与分配时记录的一致、
+                         rc 在合理范围内）。
+     PYADAMAS_GUARD=1    每个对象单独 mmap：数据页尾部对齐 + 紧跟一页
+                         PROT_NONE；越界写立刻 SIGSEGV；释放时 munmap。
+
+   覆盖范围：所有走 rc_alloc/rc_alloc_ex/rc_alloc_untracked(_ex) 的对象
+   （str/list/dict/实例/闭包/生成器帧/异常/range/class/big/JSON 盒…）。
+   **不覆盖**：容器内部的二级 malloc 缓冲（list->data、dict->entries、
+   big 的 limb 在块内所以覆盖）、生成代码的栈/帧内联槽、静态字面量。
+   ================================================================ */
+#ifdef PYADAMAS_ALLOC_DEBUG
+#if !defined(_WIN32)
+#include <sys/mman.h>
+#include <unistd.h>
+#endif
+/* 调试版不用池取块（rc_alloc_core 里绕开），5 个 pool_get 变成未使用。 */
+#define PA_DBG_UNUSED __attribute__((unused))
+
+#define PA_DBG_CANARY 16
+#define PA_DBG_CANARY_TOTAL 32 /* 16 字节 canary + 16 字节头字期望值 */
+#define PA_DBG_FILL 0xC5
+
+enum {
+    PA_DBG_MODE_OFF = 0,
+    PA_DBG_MODE_CANARY = 1,
+    PA_DBG_MODE_CANARY_HEAD = 2,
+    PA_DBG_MODE_GUARD = 3,
+};
+
+static int pa_dbg_mode_cache = -1;
+
+static int pa_dbg_mode(void) {
+    int m = pa_dbg_mode_cache;
+    if (__builtin_expect(m >= 0, 1)) return m;
+#if defined(_WIN32)
+    m = PA_DBG_MODE_CANARY; /* Windows 只支持 canary（无 mmap guard page） */
+#else
+    const char* g = getenv("PYADAMAS_GUARD");
+    if (g && g[0] != '\0' && strcmp(g, "0") != 0) {
+        m = PA_DBG_MODE_GUARD;
+    } else {
+        const char* c = getenv("PYADAMAS_CANARY");
+        if (!c || c[0] == '\0' || strcmp(c, "0") == 0) m = PA_DBG_MODE_OFF;
+        else m = (strcmp(c, "2") == 0) ? PA_DBG_MODE_CANARY_HEAD : PA_DBG_MODE_CANARY;
+    }
+#endif
+    pa_dbg_mode_cache = m;
+    return m;
+}
+
+#if !defined(_WIN32)
+static size_t pa_dbg_page(void) {
+    static size_t p;
+    if (!p) p = (size_t)sysconf(_SC_PAGESIZE);
+    if (!p) p = 4096;
+    return p;
+}
+#endif
+
+static void pa_dbg_panic_canary(PyAdamasRc* h, int i, unsigned char want,
+                               unsigned char got) {
+    char msg[320];
+    snprintf(msg, sizeof msg,
+             "canary 被踩：对象 kind=%lld size=%lld 偏移=%d 期望=0x%02x 实际=0x%02x",
+             (long long)h->kind, (long long)h->size, i, (unsigned)want, (unsigned)got);
+    panic_c(msg);
+}
+
+/* 分配：返回 RC 头指针（payload = h + sizeof(PyAdamasRc)）。 */
+static PyAdamasRc* pa_dbg_alloc(int64_t alloc_size) {
+    int mode = pa_dbg_mode();
+    if (mode == PA_DBG_MODE_GUARD) {
+#if defined(_WIN32)
+        panic_c("PYADAMAS_GUARD 只支持 POSIX（Windows 用 PYADAMAS_CANARY）");
+#else
+        size_t page = pa_dbg_page();
+        size_t total = (size_t)PYADAMAS_RC_HDR + (size_t)alloc_size;
+        /* payload 起点保持 16 字节对齐（与普通 malloc 版一致）；尾部会有
+           最多 15 字节尾隙，超出对象末尾的写仍会撞 guard 页。 */
+        total = (total + 15) & ~(size_t)15;
+        size_t data_pages = (total + page - 1) / page;
+        if (data_pages == 0) data_pages = 1;
+        size_t maplen = (data_pages + 1) * page;
+        char* base = (char*)mmap(NULL, maplen, PROT_READ | PROT_WRITE,
+                                 MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+        if (base == MAP_FAILED) panic_c("out of memory (guard mmap)");
+        char* data_end = base + data_pages * page;
+        if (mprotect(data_end, page, PROT_NONE) != 0)
+            panic_c("guard: mprotect(PROT_NONE) failed");
+        return (PyAdamasRc*)(data_end - total);
+#endif
+    }
+    size_t total = (size_t)PYADAMAS_RC_HDR + (size_t)alloc_size + PA_DBG_CANARY_TOTAL;
+    PyAdamasRc* h = (PyAdamasRc*)malloc(total);
+    if (!h) panic_c("out of memory");
+    memset((char*)h + PYADAMAS_RC_HDR + alloc_size, PA_DBG_FILL,
+           PA_DBG_CANARY_TOTAL);
+    return h;
+}
+
+/* 头字都填好之后调用（size/kind 已就位）：mode 2 把期望值存进 canary
+   区尾部，释放时对照。 */
+static void pa_dbg_head_init(PyAdamasRc* h) {
+    if (pa_dbg_mode() != PA_DBG_MODE_CANARY_HEAD) return;
+    char* c = (char*)h + PYADAMAS_RC_HDR + (size_t)h->size + PA_DBG_CANARY;
+    memcpy(c, &h->size, sizeof h->size);
+    memcpy(c + sizeof h->size, &h->kind, sizeof h->kind);
+}
+
+static void pa_dbg_free(PyAdamasRc* h) {
+    int mode = pa_dbg_mode();
+    if (mode == PA_DBG_MODE_GUARD) {
+#if !defined(_WIN32)
+        size_t page = pa_dbg_page();
+        size_t total = (size_t)PYADAMAS_RC_HDR + (size_t)h->size;
+        total = (total + 15) & ~(size_t)15;
+        char* data_end = (char*)h + total;
+        if (((uintptr_t)data_end & (page - 1)) != 0) {
+            char msg[192];
+            snprintf(msg, sizeof msg,
+                     "guard: 对象尾部未对齐到页边界（头字被踩？kind=%lld size=%lld）",
+                     (long long)h->kind, (long long)h->size);
+            panic_c(msg);
+        }
+        size_t data_pages = (total + page - 1) / page;
+        char* base = data_end - data_pages * page;
+        if (munmap(base, (data_pages + 1) * page) != 0)
+            panic_c("guard: munmap failed");
+        return;
+#endif
+    }
+    unsigned char* c = (unsigned char*)h + PYADAMAS_RC_HDR + (size_t)h->size;
+    for (int i = 0; i < PA_DBG_CANARY; ++i)
+        if (c[i] != PA_DBG_FILL) pa_dbg_panic_canary(h, i, PA_DBG_FILL, c[i]);
+    if (mode == PA_DBG_MODE_CANARY_HEAD) {
+        int64_t exp_size = 0, exp_kind = 0;
+        memcpy(&exp_size, c + PA_DBG_CANARY, sizeof exp_size);
+        memcpy(&exp_kind, c + PA_DBG_CANARY + sizeof exp_size, sizeof exp_kind);
+        if (exp_size != h->size || exp_kind != h->kind || h->rc < 0 ||
+            h->rc > (int64_t)1 << 40) {
+            char msg[320];
+            snprintf(msg, sizeof msg,
+                     "canary: 头字被踩：kind=%lld/%lld size=%lld/%lld rc=%lld",
+                     (long long)h->kind, (long long)exp_kind, (long long)h->size,
+                     (long long)exp_size, (long long)h->rc);
+            panic_c(msg);
+        }
+    }
+    free(h);
+}
+
+#define PA_DBG_MALLOC(alloc_size) pa_dbg_alloc(alloc_size)
+#define PA_DBG_FREE(h) pa_dbg_free(h)
+#define PA_DBG_HEAD_INIT(h) pa_dbg_head_init(h)
+#else  /* !PYADAMAS_ALLOC_DEBUG：默认运行时，逐字展开成改动前的调用 */
+#define PA_DBG_UNUSED
+#define PA_DBG_MALLOC(alloc_size) malloc(sizeof(PyAdamasRc) + (size_t)(alloc_size))
+#define PA_DBG_FREE(h) free(h)
+#define PA_DBG_HEAD_INIT(h) ((void)0)
+#endif
+
 /* ── 引用计数 ─────────────────────────────────────────────────── */
 
 /* 隐藏头放在负载前面，负载指针（字符串的 len、对象的 vtable）保持原样。
@@ -214,7 +388,7 @@ static void gc_phase_dec(PyAdamasRc* h, void* p) {
         return;
     }
     if (h->marked & PYADAMAS_RC_UNTRACKED) {
-        if (h->rc > 0 && --h->rc == 0) free(h);
+        if (h->rc > 0 && --h->rc == 0) PA_DBG_FREE(h);
         return;
     }
     // 索引叶子：不在本轮集合里，trial/restore 不会碰它（marked 没有
@@ -451,7 +625,7 @@ static int str_pool_class(int64_t size) {
     return (int)((size + 7) / 8) - 1;
 }
 
-static PyAdamasRc* str_pool_get(int64_t size) {
+static PA_DBG_UNUSED PyAdamasRc* str_pool_get(int64_t size) {
     int c = str_pool_class(size);
     if (c < 0 || !str_pool[c]) return NULL;
     PyAdamasRc* h = str_pool[c];
@@ -461,6 +635,11 @@ static PyAdamasRc* str_pool_get(int64_t size) {
 }
 
 static void str_pool_put(PyAdamasRc* h) {
+    /* 调试版（canary/guard）不缓存：直接释放（canary 在这里校验）。 */
+#ifdef PYADAMAS_ALLOC_DEBUG
+    PA_DBG_FREE(h);
+    return;
+#endif
     int c = str_pool_class(h->size);
     int64_t cap = ((c + 1) * 8 <= STR_POOL_SMALL_LIMIT) ? STR_POOL_MAX_SMALL
                                                        : STR_POOL_MAX_PER_CLASS;
@@ -510,7 +689,7 @@ static DictPoolNode dict_pool[DICT_POOL_MAX];
 static int dict_pool_count;
 static DictPoolNode dict_last_got;
 
-static PyAdamasRc* dict_pool_get(void) {
+static PA_DBG_UNUSED PyAdamasRc* dict_pool_get(void) {
     if (!dict_pool_count) return NULL;
     DictPoolNode n = dict_pool[--dict_pool_count];
     dict_last_got = n;
@@ -518,6 +697,16 @@ static PyAdamasRc* dict_pool_get(void) {
 }
 
 static void dict_pool_put(PyAdamasRc* h) {
+#ifdef PYADAMAS_ALLOC_DEBUG
+    /* 调试版不缓存 dict 缓冲：dtor（dict_destroy）不解二级缓冲，这里
+       由 put 负责还掉，再释放头块（canary 在这里校验）。 */
+    PyAdamasDict* dd = (PyAdamasDict*)(h + 1);
+    free(dd->entries);
+    free(dd->order);
+    free(dd->index);
+    PA_DBG_FREE(h);
+    return;
+#endif
     PyAdamasDict* d = (PyAdamasDict*)(h + 1);
     DictPoolNode n;
     n.h = h;
@@ -547,7 +736,7 @@ static void dict_pool_put(PyAdamasRc* h) {
     dict_pool[dict_pool_count++] = n;
 }
 
-static PyAdamasRc* list_pool_get(void) {
+static PA_DBG_UNUSED PyAdamasRc* list_pool_get(void) {
     PyAdamasRc* h = list_pool;
     if (h) {
         list_pool = h->next;
@@ -563,7 +752,7 @@ static PyAdamasRc* list_pool_get(void) {
 static PyAdamasRc* float_box_pool;
 static int float_box_pool_count;
 
-static PyAdamasRc* float_box_pool_get(void) {
+static PA_DBG_UNUSED PyAdamasRc* float_box_pool_get(void) {
     PyAdamasRc* h = float_box_pool;
     if (h) {
         float_box_pool = h->next;
@@ -573,6 +762,10 @@ static PyAdamasRc* float_box_pool_get(void) {
 }
 
 static void float_box_pool_put(PyAdamasRc* h) {
+#ifdef PYADAMAS_ALLOC_DEBUG
+    PA_DBG_FREE(h);
+    return;
+#endif
     if (float_box_pool_count >= FLOAT_BOX_POOL_MAX) {
         free(h);
         return;
@@ -584,6 +777,10 @@ static void float_box_pool_put(PyAdamasRc* h) {
 }
 
 static void list_pool_put(PyAdamasRc* h) {
+#ifdef PYADAMAS_ALLOC_DEBUG
+    PA_DBG_FREE(h);
+    return;
+#endif
     if (list_pool_count >= LIST_POOL_MAX) {
         free(h);
         return;
@@ -610,7 +807,7 @@ static void list_pool_put(PyAdamasRc* h) {
 PyAdamasRc* pa_list_inline_pool;
 int pa_list_inline_pool_count;
 
-static PyAdamasRc* list_inline_pool_get(void) {
+static PA_DBG_UNUSED PyAdamasRc* list_inline_pool_get(void) {
     PyAdamasRc* h = pa_list_inline_pool;
     if (h) {
         pa_list_inline_pool = h->next;
@@ -620,6 +817,10 @@ static PyAdamasRc* list_inline_pool_get(void) {
 }
 
 static void list_inline_pool_put(PyAdamasRc* h) {
+#ifdef PYADAMAS_ALLOC_DEBUG
+    PA_DBG_FREE(h);
+    return;
+#endif
     if (pa_list_inline_pool_count >= LIST_INLINE_POOL_MAX) {
         free(h);
         return;
@@ -640,7 +841,7 @@ static void rc_leaf_free(PyAdamasRc* h, void* p) {
     if (h->dtor) h->dtor(p);
     if (h->kind == PYADAMAS_RC_STR) str_pool_put(h);
     else if (h->kind == PYADAMAS_RC_CPYFLOAT) float_box_pool_put(h);
-    else free(h);
+    else PA_DBG_FREE(h);
 }
 
 /* exact-RC 模式下可以完全绕开 GC 的对象：没有任何堆字段（没有出边），
@@ -1211,6 +1412,9 @@ static void* rc_alloc_core(int64_t size, void (*dtor)(void*), void (*release)(vo
     if (kind == PYADAMAS_RC_STR && size > 0 && size <= STR_POOL_MAX_SIZE)
         alloc_size = (size + 7) & ~(int64_t)7;
     PyAdamasRc* h = NULL;
+#ifndef PYADAMAS_ALLOC_DEBUG
+    /* 调试版（canary/guard）不复用池块：guard 的块是 mmap 的、不能进
+       freelist；canary 版统一走 malloc 路径让每个块的 canary 位置一致。 */
     if (kind == PYADAMAS_RC_STR) h = str_pool_get(alloc_size);
     else if (kind == PYADAMAS_RC_CPYFLOAT && size == (int64_t)sizeof(int64_t))
         h = float_box_pool_get();
@@ -1218,14 +1422,18 @@ static void* rc_alloc_core(int64_t size, void (*dtor)(void*), void (*release)(vo
         h = extra == PYADAMAS_LIST_INLINE_BYTES ? list_inline_pool_get() : list_pool_get();
     else if (kind == PYADAMAS_RC_DICT && size == (int64_t)sizeof(PyAdamasDict))
         h = dict_pool_get();
+#endif
     const int pooled = h != NULL;
     if (!h) {
-        h = (PyAdamasRc*)malloc(sizeof(PyAdamasRc) + (size_t)alloc_size);
+        h = (PyAdamasRc*)PA_DBG_MALLOC(alloc_size);
         if (!h) panic_c("out of memory");
         h->size = alloc_size;
         h->dtor = dtor;
         h->release = release;
         h->kind = kind;
+        /* 调试版：mode 2 在 canary 区尾部记录 size/kind 期望值。
+           默认 rt.o 里这个宏展开成空操作。 */
+        PA_DBG_HEAD_INIT(h);
     }
     // **池命中不重写 dtor/release/kind/size**：每个池按 kind 路由
     // （dec_slow / gc_free_body），同池块的这四个字段恒定 ——
@@ -1420,7 +1628,7 @@ void pa_rc_dec_slow(void* p) {
             list_inline_pool_put(h);
         else if (h->kind == PYADAMAS_RC_DICT && h->size == (int64_t)sizeof(PyAdamasDict))
             dict_pool_put(h);
-        else free(h);
+        else PA_DBG_FREE(h);
     }
 }
 
@@ -2506,7 +2714,7 @@ static void gc_free_body(PyAdamasRc* h) {
         free(d->order);
         free(d->index);
     }
-    free(h);
+    PA_DBG_FREE(h);
 }
 
 /* ── 增量标记（照抄 Go 的并发标记结构，本地化为 RC+GC 混合）─────

@@ -254,6 +254,43 @@ add_custom_command(
 )
 add_custom_target(pyadamas_rt_asan ALL DEPENDS "${PYADAMAS_RT_ASAN_OBJ}")
 
+# 分配器调试版运行时：canary / guard page（PYADAMAS_CANARY / PYADAMAS_GUARD）。
+#
+# 和 rt.o 用同一批源文件，多一个 -DPYADAMAS_ALLOC_DEBUG=1：
+#   * 所有 rc_alloc* / 释放路径换成尾部 canary 或「尾对齐 + PROT_NONE
+#     guard page」的分配器；
+#   * 默认 rt.o 完全不含这些代码（钩子宏展开成裸 malloc/free），
+#     所以两个开关关掉时生成程序的指令数与改动前逐项相同。
+# 编译器只在环境变量非空时链接它而不是 rt.o（见 driver_build.cpp）；
+# 典型用法：PYADAMAS_CANARY=1 bash tests/run_tests.sh ...
+set(PYADAMAS_RT_DEBUG_OBJ "${CMAKE_BINARY_DIR}/rt_allocdbg.o")
+set(PYADAMAS_RT_DEBUG_OBJS "")
+foreach(part ${PYADAMAS_RT_PARTS})
+  set(rt_obj "${CMAKE_BINARY_DIR}/rt_debug_${part}.o")
+  add_custom_command(
+    OUTPUT "${rt_obj}"
+    COMMAND ${PYADAMAS_RT_LAUNCHER} ${CMAKE_C_COMPILER} -O2 -g -DPYADAMAS_ALLOC_DEBUG=1
+            -ffunction-sections -fdata-sections
+            -Wall -Wextra ${PYADAMAS_RT_WERROR}
+            -I "${CMAKE_SOURCE_DIR}/runtime"
+            -c "${CMAKE_SOURCE_DIR}/runtime/rt_${part}.c" -o "${rt_obj}"
+    DEPENDS "${CMAKE_SOURCE_DIR}/runtime/rt_${part}.c"
+            "${CMAKE_SOURCE_DIR}/runtime/rt_internal.h"
+    COMMENT "Building pyadamas runtime rt_debug_${part}.o"
+    VERBATIM
+  )
+  list(APPEND PYADAMAS_RT_DEBUG_OBJS "${rt_obj}")
+endforeach()
+add_custom_command(
+  OUTPUT "${PYADAMAS_RT_DEBUG_OBJ}"
+  COMMAND ${CMAKE_LINKER} -r -o "${PYADAMAS_RT_DEBUG_OBJ}" ${PYADAMAS_RT_DEBUG_OBJS}
+  DEPENDS ${PYADAMAS_RT_DEBUG_OBJS}
+  COMMENT "Combining pyadamas runtime rt_allocdbg.o"
+  VERBATIM
+)
+add_custom_target(pyadamas_rt_debug ALL DEPENDS "${PYADAMAS_RT_DEBUG_OBJ}")
+
+
 
 option(PYADAMAS_PCH "预编译公共标准库头（每个配置独立 PCH，flags 自动匹配）" OFF)
 option(PYADAMAS_MODULE_SCAN "C++23 模块扫描（项目未用 C++ modules；默认关：省 89 遍 -E 扫描、去掉 -fmodules-ts 注入、兼容 ccache）" OFF)
@@ -273,7 +310,8 @@ if(NOT PYADAMAS_MODULE_SCAN)
 endif()
 # 把插桩运行时的路径编进编译器，`--asan` 时链接它而不是 rt.o。
 target_compile_definitions(pyadamas PRIVATE
-  PYADAMAS_RT_ASAN_OBJ="${PYADAMAS_RT_ASAN_OBJ}")
+  PYADAMAS_RT_ASAN_OBJ="${PYADAMAS_RT_ASAN_OBJ}"
+  PYADAMAS_RT_DEBUG_OBJ="${PYADAMAS_RT_DEBUG_OBJ}")
 target_include_directories(pyadamas PRIVATE src)
 target_compile_options(pyadamas PRIVATE -Wall -Wextra)
 
@@ -294,7 +332,7 @@ target_compile_definitions(pyadamas PRIVATE
   PYADAMAS_STDLIB_DIR="${CMAKE_SOURCE_DIR}/stdlib"
   PYADAMAS_VERSION="${PYADAMAS_VERSION}"
 )
-add_dependencies(pyadamas pyadamas_rt)
+add_dependencies(pyadamas pyadamas_rt pyadamas_rt_debug)
 
 # ── 直接调用 ld 链接（吞吐）────────────────────────────────────────
 #
