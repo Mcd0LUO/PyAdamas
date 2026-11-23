@@ -7,7 +7,14 @@ pya-lsp 完全由 .pya 实现、由 pyadamas build 编译成原生可执行文�
 
 | 文件 | 说明 |
 |---|---|
-| main.py | LSP 服务器主体：stdio 传输、生命周期、文档同步、诊断、documentSymbol、hover、completion、definition、semanticTokens、references/rename、signatureHelp、documentHighlight、foldingRange、formatting、workspace/symbol |
+| main.py | 入口：stdio 读循环、生命周期、文档同步、didChange debounce、方法 dispatch |
+| lsp_text.py | 文本小工具、UTF-16 位置换算、定义行查找（不依赖其他 lsp_* 模块） |
+| lsp_protocol.py | JSON-RPC 帧、响应构造、环境变量与日志 |
+| lsp_state.py | 内存文档表、增量编辑、workspace 根与文件遍历 |
+| lsp_diagnostics.py | 临时文件 + `pyadamas check` + publishDiagnostics |
+| lsp_intel.py | definition / hover / semanticTokens / signatureHelp / documentHighlight |
+| lsp_doc.py | Symbol 扫描、补全候选、documentSymbol / foldingRange / formatting / workspace symbol（`Symbol` 的字段读写必须和类定义同模块） |
+| lsp_refs.py | references / rename（词法扫描 + 粗粒度作用域） |
 | minijson.py | 动态 JSON 的**函数式访问薄层**：parse/stringify 走 runtime 的 json.parse / json.stringify，其余保留旧的宽容访问器语义（取不到返回 null、""、0、[]） |
 | build.sh | 构建脚本，输出 pya-lsp |
 | ../../tests/lsp/smoke.py | python3 冒烟测试（被测对象是编译出的 .pya 二进制），当前 **228 条断言** |

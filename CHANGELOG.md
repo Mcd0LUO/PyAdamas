@@ -4,6 +4,25 @@
 
 早期阶段没有逐条留痕，按阶段归纳；0.4 之后逐条记录。
 
+## [0.467] - 2026-11-24
+
+> refactor(lsp)：**把 2438 行的 `tools/lsp/main.py` 拆成 7 个模块**（纯搬移，行为不变）。
+>
+> `lsp_text`（文本/UTF-16 位置/定义查找）、`lsp_protocol`（帧/响应/环境/日志）、
+> `lsp_state`（文档表/增量编辑/workspace）、`lsp_diagnostics`（临时文件 + check +
+> publish）、`lsp_intel`（definition/hover/semanticTokens/signatureHelp/
+> documentHighlight）、`lsp_doc`（Symbol 扫描/补全候选/documentSymbol/foldingRange/
+> formatting/workspace symbol）、`lsp_refs`（references/rename）；`main.py` 只留
+> stdio 读循环、生命周期、didChange debounce 与 dispatch（2438 → 264 行）。
+>
+> `Symbol` 与它的字段读写留在同一模块（lsp_doc）：当前编译器不支持跨模块 class 的
+> 字段读/方法调用（`attribute access is only supported as a method call`），
+> 拆到别的模块会编译失败。跨模块读文档表/workspace 根用 `lsp_state.xxx` 模块属性
+> （`from ... import` 是快照绑定，模块级变量重新赋值后不会更新）。
+>
+> 验证：`build.sh` 成功；LSP 冒烟 **228 checks 全过**（与拆分前一致）；编译器/运行时
+> 未改。
+
 ## [0.466] - 2026-11-24
 
 > perf(codegen)：**kind0 列表写入的 elem_kind 检查合并为一次比较**（fannkuch −5.61%，
