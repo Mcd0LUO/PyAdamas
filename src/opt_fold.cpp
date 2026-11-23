@@ -65,8 +65,10 @@ bool inst_is_pure(const Inst& in) {
             return bin_is_safe_int(in.bop);
         }
         case IrOp::Convert:
-            return in.ty && (in.ty->kind == TyKind::Bool || in.ty->kind == TyKind::Int ||
-                             in.ty->kind == TyKind::Float);
+            // float→int 从 0.427 起会抛 OverflowError/ValueError（NaN/±inf/越界），
+            // 因此目标为 int 的转换不再是纯指令：否则 `int(float("inf"))` 这种
+            // 结果没人用的语句会被 DCE 整条删掉、异常静默消失（-O2 实测）。
+            return in.ty && (in.ty->kind == TyKind::Bool || in.ty->kind == TyKind::Float);
         default:
             return false;
     }
