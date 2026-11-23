@@ -113,6 +113,7 @@ set(PYADAMAS_SOURCES
   src/opt_inline.cpp
   src/opt_loop.cpp
 src/opt_intloop.cpp
+    src/opt_intloop_bce.cpp
   src/opt_devirt.cpp
   src/opt_stats.cpp
   src/codegen.cpp
