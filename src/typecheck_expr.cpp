@@ -368,6 +368,21 @@ TypePtr TypeChecker::expr(Expr& e) {
                             return ot->sub[static_cast<size_t>(i)];
                     }
                 }
+                // .cpya 定长数组的地址视图（多维 / struct 元素）：
+                // 中间层下标得到下一层地址，最后一层得到元素地址（struct 元素）。
+                if (ot && ot->kind == TyKind::Optional && !ot->cdims.empty() &&
+                    ot->sub.size() == 1 && ot->sub[0]->kind == TyKind::Int) {
+                    if (!is_unknown(it) && !is_int_like(it))
+                        err(s.line, s.col, "pointer index must be an integer");
+                    if (ot->cdims.size() > 1) {
+                        TypePtr nt = mk_optional(t_int());
+                        nt->cdims.assign(ot->cdims.begin() + 1, ot->cdims.end());
+                        nt->st = ot->st;
+                        nt->celem = ot->celem;
+                        return nt;
+                    }
+                    if (ot->st) return mk_optional(mk_struct_ptr(ot->st));
+                }
                 // ptr[T] 解引用：Optional[int] 上带元素种类时支持 p[i]。
                 if (ot && ot->kind == TyKind::Optional && ot->celem != CKind::None &&
                     !ot->sub.empty() && ot->sub[0]->kind == TyKind::Int) {

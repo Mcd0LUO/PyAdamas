@@ -69,17 +69,29 @@ struct CExtern {
     CKind ret_elem = CKind::None;
 };
 
-// .cpya 里带字段的 struct：字段按 C 规则布局，ptr[Struct] 可直接读写字段。
+// .cpya 里带字段的 struct / union：字段按 C 规则布局，ptr[Struct] 可直接读写字段。
+//
+// 定长数组字段（a: char[108] / rows: pair[3] / grid: int32[2][4]）：
+// kind/ptr_elem/ptr_struct 描述**元素**类型，dims 非空表示数组（行优先，
+// dims[0] 是最外层），size = 元素大小 × prod(dims)，align = 元素对齐。
 struct CStructField {
     std::string name;
     CKind kind = CKind::Int;
+    CKind ptr_elem = CKind::None;
+    // 元素是 .cpya 声明的 struct / union 时记名字。
+    std::string ptr_struct;
     int64_t offset = 0;
     int64_t size = 0;
     int64_t align = 1;
+    std::vector<int64_t> dims;  // 空 = 非数组
+    bool is_array() const { return !dims.empty(); }
 };
 
 struct CStruct {
     std::string name;
+    // @union 声明的联合体：所有成员偏移 0，size = max(member size)，
+    // align = max(member align)。
+    bool is_union = false;
     std::vector<CStructField> fields;
     int64_t size = 0;
     int64_t align = 1;

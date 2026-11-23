@@ -274,6 +274,12 @@ void Lowerer::assign_to(Expr& target, VReg v, TypePtr vty) {
                 VReg obj = expr(*at.value);
                 if (opt) obj = guard_not_none(obj, std::format("field '{}'", at.attr));
                 v = coerce(v, src_ty, f->ty);
+                if (f->is_array()) {
+                    err(at.line, at.col,
+                        std::format("cannot assign to array field '{}' as a whole; assign its "
+                                    "elements instead", at.attr));
+                    break;
+                }
                 field_store(obj, static_cast<int>(f->offset), v,
                             static_cast<uint8_t>(f->size), f->c_unsigned);
                 break;
@@ -584,6 +590,14 @@ VReg Lowerer::expr(Expr& e) {
                 }
                 VReg obj = expr(*a.value);
                 if (opt) obj = guard_not_none(obj, std::format("attribute '{}'", a.attr));
+                // .cpya 定长数组字段：读属性得到元素地址（不读元素值），
+                // 后续 p.buf[i] / p.grid[i][j] / 把 p.buf 当 ptr 传给 C 都从
+                // 这个地址出发。
+                if (f->is_array()) return retype(field_addr(obj, f->offset), c_array_view_type(*f));
+                // 按值嵌套的 struct/union 字段：返回字段地址（不读 8 字节当指针）。
+                if (f->ty && f->ty->kind == TyKind::Struct && f->ty->st)
+                    return retype(field_addr(obj, f->offset),
+                                  mk_optional(mk_struct_ptr(f->ty->st)));
                 return field_load(obj, static_cast<int>(f->offset), f->ty,
                                   static_cast<uint8_t>(f->size), f->c_unsigned);
             }

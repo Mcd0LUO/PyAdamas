@@ -1,0 +1,40 @@
+@union
+class epoll_data:
+    ptr: ptr
+    fd: int32
+    u32: uint32
+    u64: uint64
+
+@packed
+class epoll_event:
+    events: uint32
+    data: epoll_data
+
+class timeval:
+    tv_sec: int
+    tv_usec: int
+
+class sockaddr_un:
+    sun_family: uint16
+    sun_path: char[108]
+
+link("tests/run/unionarr.c")
+
+def ee_size() -> int: pass
+def ee_off_data() -> int: pass
+def tv_size() -> int: pass
+def su_size() -> int: pass
+def su_off_path() -> int: pass
+def epoll_roundtrip() -> int: pass
+def tv_set(tv: ptr[timeval], s: int, us: int) -> None: pass
+def tv_get(tv: ptr[timeval]) -> int: pass
+def su_fill(su: ptr[sockaddr_un], path: str) -> None: pass
+def su_path0(su: ptr[sockaddr_un]) -> int: pass
+def su_path_sum(su: ptr[sockaddr_un], n: int) -> int: pass
+def make_tv() -> ptr[timeval]: pass
+def make_su() -> ptr[sockaddr_un]: pass
+def ee_make() -> ptr[epoll_event]: pass
+def ee_get_u32(e: ptr[epoll_event]) -> uint32: pass
+def ee_get_fd(e: ptr[epoll_event]) -> int32: pass
+def ee_set_u64(e: ptr[epoll_event], v: uint64) -> None: pass
+

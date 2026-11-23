@@ -135,6 +135,11 @@ struct Type {
     // kind == Optional 且内层是 int 的 C 指针（ptr[T]）：T 的机器种类。
     // 用于 `p[i]` 解引用；None 表示不透明指针（ptr / void*）。
     CKind celem = CKind::None;
+    // .cpya 定长数组字段的「地址视图」：非空表示这个地址还要再走
+    // cdims.size() 层下标（每步 elem_size * prod(cdims[1:]) 字节）。
+    // 1 维数组不设置（直接按 ptr[T] 语义处理 p[i]）；只有多维数组的
+    // 中间层需要它区分「取地址」还是「读元素」。
+    std::vector<int64_t> cdims;
 };
 
 // 判断 needle 是否出现在 hay 的子树里。容器元素类型可能指向容器自身
@@ -268,6 +273,12 @@ struct StructFieldInfo {
     int64_t align = 1;
     // C 结构体的 uint32 字段：读取时零扩展而不是符号扩展。
     bool c_unsigned = false;
+    // .cpya 定长数组字段：非空 = 数组（行优先，dims[0] 最外层）。
+    // ty 是元素类型（标量 / Optional[int] 指针 / StructPtr），size 是数组总字节数。
+    std::vector<int64_t> dims;
+    // 数组元素是标量/ptr 时的 C 机器种类（用于地址视图与解引用宽度）。
+    CKind c_elem = CKind::None;
+    bool is_array() const { return !dims.empty(); }
 };
 
 // 值类型 struct 的布局。v1 只允许 int / float / bool 字段：
@@ -281,6 +292,9 @@ struct StructInfo {
     int64_t align = 1;
     // .cpya 声明的 C 结构体：指针只是整数地址，没有 RC 头，不能当引用计数对象。
     bool c_struct = false;
+    // @union 声明的联合体（所有字段偏移 0）。按值传给 C 的 ABI 分类不做，
+    // 声明侧会拒绝；这里用于诊断与字段访问。
+    bool c_union = false;
     const StructFieldInfo* field(const std::string& n) const {
         for (auto& f : fields)
             if (f.name == n) return &f;
@@ -806,6 +820,22 @@ inline TypePtr cptr_elem_type(CKind k) {
         case CKind::UInt64: return t_u64();
         default: return t_int();
     }
+}
+
+// .cpya 定长数组字段的「地址视图」类型：Optional[int] 地址 + 元素信息。
+//  - 1 维标量/指针数组：celem 有值，按既有 ptr[T] 语义处理 p[i]（读元素/写回）；
+//    整个数组当 ptr 传给 C 也走同一条路。
+//  - struct/union 元素数组：st 有值，下标先得到元素地址（StructPtr）。
+//  - 多维数组：cdims 记录剩余维数，中间层下标返回「地址视图」而不是读元素。
+inline TypePtr c_array_view_type(const StructFieldInfo& f) {
+    if (!f.is_array()) return f.ty;
+    TypePtr v = mk_optional(t_int());
+    v->cdims = f.dims;
+    if (f.ty && (f.ty->kind == TyKind::Struct || f.ty->kind == TyKind::StructPtr))
+        v->st = f.ty->st;
+    else
+        v->celem = f.c_elem;
+    return v;
 }
 
 inline TypePtr mk_bound(TypePtr recv, std::string method) {

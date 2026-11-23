@@ -2,6 +2,7 @@
 #define SAMPLE_H
 
 #include <stddef.h>
+#include <stdint.h>
 
 #define MAGIC 42
 #define RATIO 1.5
@@ -42,3 +43,10 @@ void free(void *p);
 static inline int twice(int x) { return x * 2; }
 
 #endif
+
+/* union + 定长数组字段（.cpya 新语法：@union / T[N] / @packed） */
+typedef union { int32_t i; double d; char bytes[8]; } sample_value;
+typedef struct { uint32_t events; sample_value data; } sample_packed;
+typedef struct { char name[16]; int32_t grid[2][3]; sample_value u; } sample_arrays;
+sample_arrays *sample_make(void);
+size_t sample_size(void);

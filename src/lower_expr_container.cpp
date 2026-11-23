@@ -41,6 +41,37 @@ VReg Lowerer::lower_subscript(Subscript& s) {
     }
 
     VReg idx = expr(*s.slice);
+    // .cpya 定长数组的地址视图：中间层下标得到「下一层地址」，最后一层的
+    // struct 元素也是地址（交给 StructPtr 字段访问）；1 维标量数组落到下面
+    // 的 ptr[T] 路径直接读元素。
+    if (ot && ot->kind == TyKind::Optional && !ot->cdims.empty() && ot->sub.size() == 1 &&
+        ot->sub[0]->kind == TyKind::Int) {
+        const bool yields_address = ot->cdims.size() > 1 || ot->st != nullptr;
+        if (yields_address) {
+            VReg base = guard_not_none(obj, "pointer to dereference");
+            idx = coerce(idx, tc_.type_of(s.slice.get()), t_int());
+            // 步长 = 元素字节数 × 剩余维数之积（行优先）。
+            int64_t elem = ot->st ? ot->st->size
+                                  : (ot->celem != CKind::None
+                                         ? ckind_width(ot->celem)
+                                         : 8);
+            int64_t stride = elem;
+            for (size_t k = 1; k < ot->cdims.size(); ++k) stride *= ot->cdims[k];
+            Inst mul;
+            mul.op = IrOp::Bin;
+            mul.bop = BinKind::Mul;
+            mul.a = idx;
+            mul.b = const_int(stride);
+            VReg off = def(t_int(), std::move(mul));
+            Inst add;
+            add.op = IrOp::Bin;
+            add.bop = BinKind::Add;
+            add.a = base;
+            add.b = off;
+            VReg addr = def(t_int(), std::move(add));
+            return retype(addr, ty);
+        }
+    }
     // ptr[T] 解引用：Optional[int] 上带元素种类时读 *(p + i)。
     if (ot && ot->kind == TyKind::Optional && ot->celem != CKind::None && !ot->sub.empty() &&
         ot->sub[0]->kind == TyKind::Int) {

@@ -1339,6 +1339,10 @@ c.optind = 0      # 写回 C 全局变量
 | `ptr[Struct]` | `Struct*` | 结构体有字段声明时是 `Optional[ptr[Struct]]`，可读写字段；否则同 `Optional[int]` |
 | `Struct` | `struct Struct` | 带字段的结构体按值传参/返回，见「结构体按值传递」 |
 | `Callable[[P...], R]` | 函数指针 `R (*)(P...)` | C 回调形参；只允许标量/指针，且不转发栈参数（整数 ≤6、浮点 ≤8） |
+
+| `Struct` / `union` 数组字段 | `T[N]` / `T[A][B]` | 定长数组（行优先）；元素可以是标量/ptr/struct/union。`p.buf[i]` 读写下标，`p.buf` 本身可以当 `ptr` 传给 C |
+| `union`（类装饰器） | `union U { ... }` | `@union` + `class U:`，所有成员偏移 0，size = max、align = max |
+| `@packed` | `__attribute__((packed))` | 无填充布局（epoll_event 这类），不能与按值 ABI 混用 |
 | `None` | `void` | |
 | `Optional[str]` | 可空 `char*` | NULL 返回 `None` |
 
@@ -1518,6 +1522,36 @@ c.free(p)
 字段类型只允许定宽标量：`int`（8 字节）、`int32` / `uint32`（4 字节）、`float`（8 字节 double）、`bool`（1 字节）、`ptr`（8 字节）。布局算法与 C 相同：字段按声明顺序，offset 按字段对齐向上取整，整体大小按最大对齐补齐。`int32` 读取符号扩展，`uint32` 零扩展；字段读写都是编译期固定偏移。`ptr` 字段在类型系统里是 `Optional[int]`，可以判空。
 
 这类结构体也能在 py23 里按字段构造，并作为值类型按值传给 C 或从 C 返回；字段访问会做空指针检查。结构体在 C 侧的实际布局仍以头文件为准，声明写错会读到错误数据。
+
+
+### union、定长数组与 packed 结构体
+
+```python
+@union
+class epoll_data:          # 所有成员偏移 0，size = max(成员)
+    ptr: ptr
+    fd: int32
+    u32: uint32
+    u64: uint64
+
+@packed                    # 无填充（C 的 __attribute__((packed))），epoll_event 用
+class epoll_event:
+    events: uint32
+    data: epoll_data
+
+class sockaddr_un:
+    sun_family: uint16
+    sun_path: char[108]    # C 的 char sun_path[108]
+
+class matrix:
+    grid: int32[2][3]      # C 的 int32_t grid[2][3]（行优先）
+```
+
+数组字段的访问：`p.sun_path[i]` 读写下标（`char` 元素是 `i8`，写入要 `cast_i8(...)`），
+`p.sun_path` 本身就是元素起始地址，可以直接当 `ptr` 传给 C；多维数组 `p.grid[i][j]`
+逐层取地址、最后一层读元素；struct/union 元素数组 `p.rows[k].a` 先取元素地址再读写字段。
+union 字段各按自己的偏移（0）与宽度读写：写 `u.u64` 后读 `u.u32` 得到低 32 位，与 C 一致。
+`@packed` 只影响布局；含 `union`/数组的 struct 按值传给 C 的 ABI 分类暂不支持（见 docs/cffi-design.md）。
 
 ### 结构体按值传递
 

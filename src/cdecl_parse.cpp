@@ -250,12 +250,23 @@ std::optional<std::string> cpya_type(const CType& t, bool param, std::string& wh
 std::optional<std::string> cpya_field_type(const CType& t, std::string& why) {
     switch (t.k) {
         case CType::Bool: return std::string("bool");
+        case CType::I8: return std::string("char");
+        case CType::I16: return std::string("short");
+        case CType::U8: return std::string("uchar");
+        case CType::U16: return std::string("ushort");
         case CType::I32: return std::string(kInt32);
         case CType::U32: return std::string(kUInt32);
         case CType::I64:
         case CType::U64: return std::string("int");
         case CType::Double: return std::string("float");
         case CType::Ptr: return std::string("ptr");
+        // .cpya 现在支持 struct/union 按值字段与数组（布局按 C 规则算），
+        // 生成器只要把类型名写出来即可。
+        case CType::Struct:
+        case CType::Union:
+            if (!t.name.empty()) return t.name;
+            why = "anonymous struct/union field";
+            return std::nullopt;
         default:
             why = "field type is not a fixed-width scalar/pointer";
             return std::nullopt;
@@ -420,9 +431,17 @@ std::optional<int64_t> eval_const(const std::vector<Tok>& t, size_t b, size_t e,
 }
 
 // ── 结构体 / 枚举定义 ──────────────────────────────────────────
+struct StructFieldDef {
+    std::string name;
+    CType type;
+    std::vector<int64_t> dims;  // 非空 = 定长数组（行优先）
+};
+
 struct StructDef {
     std::string name;
-    std::vector<std::pair<std::string, CType>> fields;
+    std::vector<StructFieldDef> fields;
+    bool is_union = false;
+    bool packed = false;
     bool ok = true;
     std::string why;
     int line = 0;
@@ -464,12 +483,12 @@ void parse_struct_body(const std::vector<Tok>& v, size_t b, size_t e,
                        const std::map<std::string, CType>& alias, StructDef& sd) {
     for (auto [db, de] : split_top(v, b, e, ";")) {
         if (db >= de) continue;
-        // 位域、数组、函数指针、匿名成员：布局不可表示，整体降级为不透明。
+        // 位域布局不可移植（依赖编译器），整体降级为不透明；数组字段支持。
         for (size_t i = db; i < de; ++i) {
             if (v[i].k != Tok::Punc) continue;
-            if (v[i].s == ":" || v[i].s == "[") {
+            if (v[i].s == ":") {
                 sd.ok = false;
-                sd.why = "bitfield/array field";
+                sd.why = "bitfield field";
                 return;
             }
         }
@@ -492,11 +511,43 @@ void parse_struct_body(const std::vector<Tok>& v, size_t b, size_t e,
             }
             // 字段名是最后一个标识符；括号说明是函数指针/嵌套声明。
             std::string fname;
+            std::vector<int64_t> dims;
             for (size_t q = j; q < ce; ++q) {
                 if (v[q].k == Tok::Punc && (v[q].s == "(" || v[q].s == ")")) {
                     sd.ok = false;
                     sd.why = "function pointer field";
                     return;
+                }
+                if (v[q].k == Tok::Punc && v[q].s == "[") {
+                    // 定长数组字段：只接受整数字面量（宏已在预处理阶段展开）。
+                    size_t close = q + 1;
+                    int64_t n = 0;
+                    bool neg = false, got = false;
+                    for (; close < ce && !(v[close].k == Tok::Punc && v[close].s == "]");
+                         ++close) {
+                        if (v[close].k == Tok::Num) {
+                            try {
+                                size_t used = 0;
+                                n = std::stoll(v[close].s, &used, 0);
+                                got = used == v[close].s.size();
+                            } catch (...) {
+                                got = false;
+                            }
+                        } else if (v[close].k == Tok::Punc && v[close].s == "-") {
+                            neg = true;
+                        } else {
+                            got = false;
+                            break;
+                        }
+                    }
+                    if (!got || close >= ce || neg || n <= 0) {
+                        sd.ok = false;
+                        sd.why = "array field with a non-literal length";
+                        return;
+                    }
+                    dims.push_back(n);
+                    q = close;
+                    continue;
                 }
                 if (v[q].k == Tok::Id) fname = v[q].s;
             }
@@ -511,7 +562,7 @@ void parse_struct_body(const std::vector<Tok>& v, size_t b, size_t e,
                 sd.why = why;
                 return;
             }
-            sd.fields.emplace_back(fname, ft);
+            sd.fields.push_back(StructFieldDef{fname, ft, std::move(dims)});
         }
     }
 }
@@ -543,11 +594,26 @@ struct Cdecl {
             structs.push_back(std::format("# {} (opaque: {})\nclass {}: pass\n", name, sd.why, name));
             return;
         }
-        std::string block = std::format("class {}:\n", name);
-        for (auto& [fname, ft] : sd.fields) {
+        std::string block;
+        if (sd.packed && !sd.is_union)
+            block += std::format("# packed {} (no padding; layout matches C __attribute__((packed)))\n", name);
+        else if (sd.is_union)
+            block += std::format("# union {} (all members at offset 0)\n", name);
+        if (sd.is_union) block += "@union\n";
+        if (sd.packed) block += "@packed\n";
+        block += std::format("class {}:\n", name);
+        for (auto& f : sd.fields) {
             std::string why;
-            auto s = cpya_field_type(ft, why);
-            block += std::format("    {}: {}\n", fname, *s);
+            auto s = cpya_field_type(f.type, why);
+            if (!s) {
+                // 字段类型不支持（如 C float 字段）：整体降级为不透明。
+                structs.push_back(
+                    std::format("# {} (opaque: {})\nclass {}: pass\n", name, why, name));
+                return;
+            }
+            std::string dims;
+            for (int64_t d : f.dims) dims += std::format("[{}]", d);
+            block += std::format("    {}: {}{}\n", f.name, *s, dims);
         }
         structs.push_back(std::move(block));
     }
@@ -603,8 +669,23 @@ struct Cdecl {
                     return;
                 }
                 std::string alias_name;
-                for (size_t q = close + 1; q < d.size(); ++q)
+                bool attr_packed = false;
+                for (size_t q = close + 1; q < d.size(); ++q) {
+                    // __attribute__((packed))：跳过属性 token，不能当别名。
+                    if (d[q].k == Tok::Id && d[q].s == "__attribute__") {
+                        int depth = 0;
+                        for (++q; q < d.size(); ++q) {
+                            if (d[q].k == Tok::Punc && d[q].s == "(") ++depth;
+                            else if (d[q].k == Tok::Punc && d[q].s == ")") {
+                                if (--depth == 0) break;
+                            } else if (d[q].k == Tok::Id && d[q].s == "packed") {
+                                attr_packed = true;
+                            }
+                        }
+                        continue;
+                    }
                     if (d[q].k == Tok::Id) alias_name = d[q].s;
+                }
                 std::string name = alias_name.empty() ? tag : alias_name;
                 if (is_enum) {
                     parse_enum_body(d, j + 1, close, d[i]);
@@ -613,20 +694,15 @@ struct Cdecl {
                     if (!alias_name.empty()) alias[alias_name] = t;
                     return;
                 }
-                if (is_union) {
-                    warn(d[i], "union is emitted as opaque struct");
-                    ++skipped;
-                    if (!name.empty()) emit_struct(StructDef{name, {}, false, "union", d[i].line},
-                                                   name);
-                    return;
-                }
                 StructDef sd;
                 sd.name = name;
                 sd.line = d[i].line;
+                sd.is_union = is_union;
+                sd.packed = attr_packed;
                 parse_struct_body(d, j + 1, close, alias, sd);
                 emit_struct(sd, name);
                 CType t;
-                t.k = CType::Struct;
+                t.k = is_union ? CType::Union : CType::Struct;
                 t.name = name;
                 if (!alias_name.empty()) alias[alias_name] = t;
                 if (!tag.empty()) {
@@ -688,15 +764,10 @@ struct Cdecl {
             ++skipped;
             return;
         }
-        if (is_union) {
-            warn(d[0], std::format("union '{}' is emitted as opaque struct", tag));
-            ++skipped;
-            emit_struct(StructDef{tag, {}, false, "union", d[0].line}, tag);
-            return;
-        }
         StructDef sd;
         sd.name = tag;
         sd.line = d[0].line;
+        sd.is_union = is_union;
         parse_struct_body(d, j + 1, close, alias, sd);
         emit_struct(sd, tag);
         CType t;

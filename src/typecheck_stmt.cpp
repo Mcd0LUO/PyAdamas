@@ -40,7 +40,13 @@ void TypeChecker::build_struct(StructDef& s) {
             const int64_t sz = ft->kind == TyKind::Bool ? 1 : 8;
             const int64_t al = sz;
             off = (off + al - 1) / al * al;
-            info->fields.push_back(StructFieldInfo{f.name, ft, off, sz, al});
+            StructFieldInfo sfi;
+            sfi.name = f.name;
+            sfi.ty = ft;
+            sfi.offset = off;
+            sfi.size = sz;
+            sfi.align = al;
+            info->fields.push_back(std::move(sfi));
             off += sz;
             if (al > max_align) max_align = al;
         }
@@ -58,9 +64,26 @@ StructInfo* TypeChecker::build_cstruct(const CStruct& cs) {
         info->size = cs.size;
         info->align = cs.align;
         info->c_struct = true;
+        info->c_union = cs.is_union;
         for (auto& f : cs.fields) {
             TypePtr ft = t_int();
             bool unsig = false;
+            if (!f.ptr_struct.empty()) {
+                // 元素/字段是 .cpya 里声明的 struct/union（按值或 ptr[...]）。
+                StructInfo* est = struct_info(f.ptr_struct);
+                if (!est) continue;  // 依赖序保证不会发生
+                ft = f.kind == CKind::Ptr ? mk_optional(mk_struct_ptr(est)) : mk_struct(est);
+                StructFieldInfo sfi;
+                sfi.name = f.name;
+                sfi.ty = ft;
+                sfi.offset = f.offset;
+                sfi.size = f.size;
+                sfi.align = f.align;
+                sfi.dims = f.dims;
+                sfi.c_elem = CKind::Struct;
+                info->fields.push_back(std::move(sfi));
+                continue;
+            }
             switch (f.kind) {
                 case CKind::Int:
                 case CKind::Int32: ft = t_int(); break;
@@ -75,7 +98,17 @@ StructInfo* TypeChecker::build_cstruct(const CStruct& cs) {
                 case CKind::Ptr: ft = mk_optional(t_int()); break;
                 default: break;
             }
-            info->fields.push_back(StructFieldInfo{f.name, ft, f.offset, f.size, f.align, unsig});
+            StructFieldInfo sfi;
+            sfi.name = f.name;
+            sfi.ty = ft;
+            sfi.offset = f.offset;
+            sfi.size = f.size;
+            sfi.align = f.align;
+            sfi.c_unsigned = unsig;
+            sfi.dims = f.dims;
+            sfi.c_elem = f.dims.empty() ? CKind::None : f.kind;
+            if (f.kind == CKind::Ptr && f.ptr_elem != CKind::None) sfi.c_elem = f.ptr_elem;
+            info->fields.push_back(std::move(sfi));
         }
         StructInfo* raw = info.get();
         all_structs_.push_back(std::move(info));
@@ -507,6 +540,12 @@ void TypeChecker::assign(Expr& target, TypePtr value, int line, int col) {
                 if (!f) {
                     err(line, col, std::format("struct '{}' has no field '{}'", ot->st->name,
                                                at->attr));
+                    return;
+                }
+                if (f->is_array()) {
+                    err(line, col,
+                        std::format("cannot assign to array field '{}' as a whole; assign its "
+                                    "elements instead", at->attr));
                     return;
                 }
                 if (!assignable(f->ty, value))

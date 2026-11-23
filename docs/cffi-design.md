@@ -54,7 +54,8 @@ cimport clib as c          parser_stmt.cpp: parse_cimport
 | --- | --- |
 | cdecl 不展开函数式宏/条件编译 | 记录，不做（深坑：需真预处理器，考虑 libclang） |
 | C float 参数/返回整体跳过 | **本轮修复**：新增 CKind::Float32（§5.1） |
-| union 按值 / 定长数组字段 | 记录：降级不透明 struct / 跳过，语义正确但能力缺 |
+| 位域 / 匿名 struct 字段 | 记录：降级 opaque / 跳过（布局依赖编译器，不做） |
+| union 按值、定长数组字段 | **已支持**（P1/P2）：`@union` / `T[N]` 字段、`@packed`；按值 ABI 仍只覆盖纯标量/指针字段的 struct |
 | 回调槽不可重入（每签名一个全局槽） | 记录，不做（需 TLS 或逐调用点槽 + 生命周期） |
 | 回调不转发栈参（>6 int / >8 fp 拒绝） | 记录 |
 | 函数指针变量 / 函数指针 typedef | cdecl 跳过并警告 |

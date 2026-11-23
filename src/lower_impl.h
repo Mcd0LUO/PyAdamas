@@ -870,6 +870,16 @@ private:
         return t;
     }
 
+    // C 结构体字段的地址（数组字段、取元素地址时用）：obj + off 的整数地址。
+    VReg field_addr(VReg obj, int64_t off) {
+        Inst in;
+        in.op = IrOp::Bin;
+        in.bop = BinKind::Add;
+        in.a = obj;
+        in.b = const_int(off);
+        return def(t_int(), std::move(in));
+    }
+
     void field_store(VReg obj, int off, VReg v, uint8_t width = 8, bool unsig = false) {
         Inst in;
         in.op = IrOp::FieldStore;

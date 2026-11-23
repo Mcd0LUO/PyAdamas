@@ -30,6 +30,7 @@
 #include <cctype>
 #include <filesystem>
 #include <format>
+#include <functional>
 #include <optional>
 #include <string>
 #include <unordered_map>
@@ -74,6 +75,7 @@ struct CTypeRef {
     bool opaque = false;           // 指向的结构体是不是不透明句柄
     std::vector<CKind> cb_params;  // kind == Callback：回调形参种类
     CKind cb_ret = CKind::None;    // kind == Callback：回调返回种类
+    std::vector<int64_t> dims;     // 非空 = 定长数组（行优先，dims[0] 最外层）
 
     CTypeRef() = default;
     explicit CTypeRef(CKind k, CKind e = CKind::None, std::string s = {}, bool o = false,
@@ -132,11 +134,34 @@ using StructMap = std::unordered_map<std::string, const CStruct*>;
 //   int/int32/uint32/float/float32/bool/str/char/int8/short/int16/uchar/
 //   uint8/ushort/uint16/ulong/uint64/None/ptr/ptr[T]/Optional[str]/
 //   Callable[[P...], R]/<本文件 struct 名>
-std::optional<CTypeRef> ctype_from_ast(const Expr* e, const StructMap& structs,
-                                       std::string& why) {
+// 注解解析上下文：Pass 1（原始名字，允许前向引用）或 Pass 2（已定型的 struct 表）。
+struct TypeCtx {
+    const StructMap* structs = nullptr;
+    const std::unordered_map<std::string, size_t>* raw = nullptr;
+};
+
+std::optional<CTypeRef> ctype_from_ast(const Expr* e, const TypeCtx& ctx, std::string& why) {
     if (!e) {
         why = "missing type annotation";
         return std::nullopt;
+    }
+    // 定长数组：T[N] / T[N][M]（下标必须是正整数字面量）。
+    if (const auto* sub = dynamic_cast<const Subscript*>(e)) {
+        if (const auto* c = dynamic_cast<const Constant*>(sub->slice.get());
+            c && c->ck == Constant::CK::Int) {
+            auto inner = ctype_from_ast(sub->value.get(), ctx, why);
+            if (!inner) return std::nullopt;
+            if (c->u64_lit || c->i <= 0) {
+                why = "array length must be a positive integer";
+                return std::nullopt;
+            }
+            if (inner->dims.size() >= 8) {
+                why = "too many array dimensions (max 8)";
+                return std::nullopt;
+            }
+            inner->dims.push_back(c->i);
+            return inner;
+        }
     }
     if (const auto* c = dynamic_cast<const Constant*>(e)) {
         // -> None：无返回值（Python 里 None 是常量表达式，不是 Name）。
@@ -145,10 +170,15 @@ std::optional<CTypeRef> ctype_from_ast(const Expr* e, const StructMap& structs,
         return std::nullopt;
     }
     if (const auto* n = dynamic_cast<const Name*>(e)) {
-        if (auto it = structs.find(n->id); it != structs.end())
-            return CTypeRef{CKind::Struct, CKind::None, n->id,
-                            it->second->fields.empty()};
-        if (auto k = parse_ckind(n->id)) return CTypeRef{*k, CKind::None, {}, false, {}, CKind::None};
+        if (ctx.structs) {
+            if (auto it = ctx.structs->find(n->id); it != ctx.structs->end())
+                return CTypeRef{CKind::Struct, CKind::None, n->id,
+                                it->second->fields.empty()};
+        }
+        if (ctx.raw && ctx.raw->count(n->id))
+            return CTypeRef{CKind::Struct, CKind::None, n->id, false};
+        if (auto k = parse_ckind(n->id))
+            return CTypeRef{*k, CKind::None, {}, false, {}, CKind::None};
         why = "unknown type '" + n->id + "'";
         return std::nullopt;
     }
@@ -164,9 +194,13 @@ std::optional<CTypeRef> ctype_from_ast(const Expr* e, const StructMap& structs,
             why = "ptr[...] needs a plain type name as the element type";
             return std::nullopt;
         }
-        if (auto it = structs.find(in->id); it != structs.end())
-            return CTypeRef{CKind::Ptr, CKind::None, in->id, it->second->fields.empty(),
-                            {}, CKind::None};
+        if (ctx.structs) {
+            if (auto it = ctx.structs->find(in->id); it != ctx.structs->end())
+                return CTypeRef{CKind::Ptr, CKind::None, in->id,
+                                it->second->fields.empty(), {}, CKind::None};
+        }
+        if (ctx.raw && ctx.raw->count(in->id))
+            return CTypeRef{CKind::Ptr, CKind::None, in->id, false};
         if (auto k = parse_ckind(in->id))
             return CTypeRef{CKind::Ptr, *k, {}, false, {}, CKind::None};
         why = "unknown pointer element type '" + in->id + "'";
@@ -189,7 +223,7 @@ std::optional<CTypeRef> ctype_from_ast(const Expr* e, const StructMap& structs,
         r.kind = CKind::Callback;
         if (const auto* plist = dynamic_cast<const ListExpr*>(tup->elts[0].get())) {
             for (auto& pe : plist->elts) {
-                auto pk = ctype_from_ast(pe.get(), structs, why);
+                auto pk = ctype_from_ast(pe.get(), ctx, why);
                 if (!pk || pk->kind == CKind::Callback) {
                     if (why.empty()) why = "callback parameters must be scalars or ptr";
                     return std::nullopt;
@@ -206,7 +240,7 @@ std::optional<CTypeRef> ctype_from_ast(const Expr* e, const StructMap& structs,
             why = "Callable parameter list must be a list";
             return std::nullopt;
         }
-        auto rk = ctype_from_ast(tup->elts[1].get(), structs, why);
+        auto rk = ctype_from_ast(tup->elts[1].get(), ctx, why);
         if (!rk || !callback_kind_ok(rk->kind == CKind::Ptr ? CKind::Ptr : rk->kind)) {
             why = "callback return type is not supported";
             return std::nullopt;
@@ -239,6 +273,20 @@ std::string normalize_link_arg(std::string v) {
         v.ends_with(".o") || v.ends_with(".dylib"))
         return v;
     return "-l" + v;
+}
+
+// 按值 ABI 只覆盖纯标量/指针字段：含数组、union、嵌套结构体的 struct 拒绝按值传。
+bool struct_has_aggregate(const CStruct& cs, const StructMap& structs) {
+    if (cs.is_union) return true;
+    for (auto& f : cs.fields) {
+        if (f.is_array()) return true;
+        if (!f.ptr_struct.empty()) {
+            auto it = structs.find(f.ptr_struct);
+            if (it == structs.end()) return true;
+            if (struct_has_aggregate(*it->second, structs)) return true;
+        }
+    }
+    return false;
 }
 
 bool is_ident(const std::string& s) {
@@ -294,24 +342,57 @@ std::optional<CImportDecl> load_cpya(const std::string& name, const std::string&
     std::unordered_set<std::string> seen_links;
 
     try {
-        // ── Pass 1：class 声明 = C struct ──────────────────────────────
-        // 先收集所有 struct 名，允许 ptr[Struct] 出现在声明之前；字段本身
-        // 只允许定宽标量/指针（不引用 struct），所以布局可以在这一趟算完。
+        // ── Pass 1：class 声明 = C struct / union ──────────────────────
+        // 先收集原始字段（类型可能引用本文件里稍后声明的 struct/union），
+        // 再按依赖序递归算布局。按值环（struct 里放自己）在 C 里也非法。
+        struct RawField {
+            std::string name;
+            CTypeRef type;
+            int line = 0;
+        };
+        struct RawDecl {
+            std::string name;
+            bool is_union = false;
+            bool packed = false;
+            int line = 0;
+            std::vector<RawField> fields;
+            std::vector<CStructField> out;  // layout 后的字段（含 offset/size）
+            int64_t size = 0, align = 1;
+            int state = 0;  // 0=未算 1=算中 2=算完
+        };
+        std::vector<RawDecl> raws;
+        std::unordered_map<std::string, size_t> raw_index;
+        std::vector<size_t> order;  // 布局完成序：元素 struct 先于使用它的 struct
+
         for (auto& st : ast->body) {
             if (pydecl::is_docstring(*st)) continue;
             if (st->kind != StmtKind::ClassDef) continue;
             auto& cd = static_cast<ClassDef&>(*st);
             if (!is_ident(cd.name))
                 pydecl::fail(cd.line, std::format("invalid struct name '{}'", cd.name));
-            for (auto& d : cd.decorators)
-                if (d)
-                    pydecl::fail(d->line,
-                                 std::format("decorators are not allowed on struct '{}'", cd.name));
-            for (auto& s : decl.structs)
-                if (s.name == cd.name)
-                    pydecl::fail(cd.line, std::format("duplicate struct '{}'", cd.name));
-            CStruct cs;
-            cs.name = cd.name;
+            if (raw_index.count(cd.name))
+                pydecl::fail(cd.line, std::format("duplicate struct '{}'", cd.name));
+            RawDecl rd;
+            rd.name = cd.name;
+            rd.line = cd.line;
+            for (auto& d : cd.decorators) {
+                if (!d) continue;
+                const auto dec = pydecl::decorator_of(*d, cd.name);
+                if (dec.name == "union") {
+                    if (dec.has_string_arg) pydecl::fail(dec.line, "@union takes no arguments");
+                    if (rd.is_union) pydecl::fail(dec.line, "duplicate @union");
+                    rd.is_union = true;
+                } else if (dec.name == "packed") {
+                    if (dec.has_string_arg) pydecl::fail(dec.line, "@packed takes no arguments");
+                    if (rd.packed) pydecl::fail(dec.line, "duplicate @packed");
+                    rd.packed = true;
+                } else {
+                    pydecl::fail(dec.line,
+                                 std::format("unknown decorator '@{}' on class '{}' (only "
+                                             "@union / @packed are allowed)", dec.name, cd.name));
+                }
+            }
+            std::unordered_set<std::string> seen_fields;
             for (auto& bs : cd.body) {
                 if (pydecl::is_docstring(*bs)) continue;
                 if (bs->kind == StmtKind::Pass) continue;  // 不透明句柄
@@ -328,39 +409,113 @@ std::optional<CImportDecl> load_cpya(const std::string& name, const std::string&
                 if (!fn)
                     pydecl::fail(aa.line, std::format("struct field name in '{}' must be a "
                                                       "plain name", cd.name));
-                for (auto& f : cs.fields)
-                    if (f.name == fn->id)
-                        pydecl::fail(aa.line, std::format("duplicate field '{}' in struct '{}'",
-                                                          fn->id, cd.name));
-                StructMap empty;  // 字段不能用 struct 名
+                if (!seen_fields.insert(fn->id).second)
+                    pydecl::fail(aa.line, std::format("duplicate field '{}' in struct '{}'",
+                                                      fn->id, cd.name));
                 std::string why;
-                auto ct = ctype_from_ast(aa.annotation.get(), empty, why);
-                int64_t fsize = 0, falign = 1;
-                if (!ct || !cfield_layout(ct->kind, fsize, falign)) {
-                    const std::string fname = pydecl::annotation_base_name(aa.annotation.get());
+                auto ct = ctype_from_ast(aa.annotation.get(), TypeCtx{nullptr, &raw_index}, why);
+                if (!ct)
                     pydecl::fail(aa.line,
-                                 std::format("unsupported struct field type '{}' (use int, "
-                                             "int32, uint32, float, bool or ptr)",
-                                             fname.empty() ? (why.empty() ? "?" : why) : fname));
+                                 std::format("unsupported field type in '{}': {}", cd.name, why));
+                if (ct->kind == CKind::Callback || ct->kind == CKind::Str ||
+                    ct->kind == CKind::OptStr || ct->kind == CKind::None)
+                    pydecl::fail(aa.line,
+                                 std::format("unsupported struct field type '{}' in '{}' (use "
+                                             "int, int32, uint32, float, bool, ptr or a struct "
+                                             "name; arrays via T[N])",
+                                             pydecl::annotation_base_name(aa.annotation.get()),
+                                             cd.name));
+                RawField rf;
+                rf.name = fn->id;
+                rf.line = aa.line;
+                rf.type = std::move(*ct);
+                rd.fields.push_back(std::move(rf));
+            }
+            raw_index[rd.name] = raws.size();
+            raws.push_back(std::move(rd));
+        }
+
+        std::function<void(size_t)> layout = [&](size_t idx) {
+            RawDecl& rd = raws[idx];
+            if (rd.state == 2) return;
+            if (rd.state == 1)
+                pydecl::fail(rd.line, std::format("recursive struct '{}' by value", rd.name));
+            rd.state = 1;
+            int64_t off = 0, align = 1, usize = 0;
+            for (auto& rf : rd.fields) {
+                const CTypeRef& t = rf.type;
+                int64_t esize = 0, ealign = 1;
+                if (!t.stname.empty()) {
+                    auto it = raw_index.find(t.stname);
+                    if (it == raw_index.end())
+                        pydecl::fail(rf.line, std::format("unknown struct '{}'", t.stname));
+                    layout(it->second);
+                    esize = raws[it->second].size;
+                    ealign = raws[it->second].align;
+                    if (esize == 0)
+                        pydecl::fail(rf.line, std::format("struct '{}' is opaque and cannot be "
+                                                          "used by value", t.stname));
+                } else if (!cfield_layout(t.kind, esize, ealign)) {
+                    pydecl::fail(rf.line,
+                                 std::format("unsupported struct field type in '{}'", rd.name));
+                }
+                int64_t total = esize;
+                for (int64_t d : t.dims) {
+                    if (total > INT64_MAX / d)
+                        pydecl::fail(rf.line, std::format("array '{}' is too large", rf.name));
+                    total *= d;
                 }
                 CStructField cf;
-                cf.name = fn->id;
-                cf.kind = ct->kind;
-                cf.size = fsize;
-                cf.align = falign;
-                cs.fields.push_back(std::move(cf));
-            }
-            if (!cs.fields.empty()) {
-                int64_t off = 0, align = 1;
-                for (auto& f : cs.fields) {
-                    off = round_up(off, f.align);
-                    f.offset = off;
-                    off += f.size;
-                    if (f.align > align) align = f.align;
+                cf.name = rf.name;
+                cf.kind = t.kind;
+                cf.ptr_elem = t.elem;
+                cf.ptr_struct = t.stname;
+                cf.dims = t.dims;
+                cf.align = ealign;
+                cf.size = total;
+                if (rd.packed) cf.align = 1;
+                if (rd.is_union) {
+                    cf.offset = 0;
+                    if (cf.size > usize) usize = cf.size;
+                } else {
+                    if (!rd.packed) off = round_up(off, cf.align);
+                    cf.offset = off;
+                    off += cf.size;
                 }
-                cs.align = align;
-                cs.size = round_up(off, align);
+                if (cf.align > align) align = cf.align;
+                rd.out.push_back(std::move(cf));
             }
+            if (rd.packed) {
+                align = 1;
+                rd.size = rd.is_union ? usize : off;
+            } else {
+                rd.size = round_up(rd.is_union ? usize : off, align);
+            }
+            rd.align = align;
+            rd.state = 2;
+            order.push_back(idx);
+        };
+        for (size_t i = 0; i < raws.size(); ++i) layout(i);
+
+        // typecheck 侧按 decl.structs 的顺序逐个 build_cstruct 并靠 struct_info(名字)
+        // 解析 ptr[Struct] / 数组元素 struct：先放不透明句柄（无依赖），再按
+        // 布局完成序（元素 struct 一定先于使用它的 struct）。
+        for (size_t i = 0; i < raws.size(); ++i) {
+            if (!raws[i].fields.empty()) continue;
+            CStruct cs;
+            cs.name = raws[i].name;
+            cs.is_union = raws[i].is_union;
+            decl.structs.push_back(std::move(cs));
+        }
+        for (size_t idx : order) {
+            RawDecl& rd = raws[idx];
+            if (rd.fields.empty()) continue;
+            CStruct cs;
+            cs.name = rd.name;
+            cs.is_union = rd.is_union;
+            cs.size = rd.size;
+            cs.align = rd.align;
+            cs.fields = std::move(rd.out);
             decl.structs.push_back(std::move(cs));
         }
         // decl.structs 已定型（Pass 2 不再 push），指针稳定。
@@ -411,7 +566,7 @@ std::optional<CImportDecl> load_cpya(const std::string& name, const std::string&
                             pydecl::fail(fd.line, std::format("parameter '{}' of '{}' needs a type "
                                                               "annotation", a.name, fd.name));
                         std::string why;
-                        auto ct = ctype_from_ast(a.annotation.get(), structs, why);
+                        auto ct = ctype_from_ast(a.annotation.get(), TypeCtx{&structs, nullptr}, why);
                         if (!ct)
                             pydecl::fail(fd.line, std::format("parameter '{}' of '{}': {}", a.name,
                                                               fd.name, why));
@@ -423,27 +578,58 @@ std::optional<CImportDecl> load_cpya(const std::string& name, const std::string&
                         cp.opaque = ct->opaque;
                         cp.cb_params = ct->cb_params;
                         cp.cb_ret = ct->cb_ret;
-                        if (cp.kind == CKind::Struct && cp.opaque)
-                            pydecl::fail(fd.line,
-                                         std::format("struct '{}' is opaque and cannot be passed "
-                                                     "by value", cp.ptr_struct));
+                        if (cp.kind == CKind::Struct) {
+                            if (cp.opaque)
+                                pydecl::fail(fd.line,
+                                             std::format("struct '{}' is opaque and cannot be "
+                                                         "passed by value", cp.ptr_struct));
+                            const CStruct* cs = structs.count(cp.ptr_struct)
+                                                    ? structs.at(cp.ptr_struct)
+                                                    : nullptr;
+                            if (cs && cs->is_union)
+                                pydecl::fail(fd.line,
+                                             std::format("union '{}' cannot be passed by value "
+                                                         "(C ABI classification is not "
+                                                         "implemented); pass ptr[{}] instead",
+                                                         cp.ptr_struct, cp.ptr_struct));
+                            if (cs && struct_has_aggregate(*cs, structs))
+                                pydecl::fail(fd.line,
+                                             std::format("struct '{}' contains union/array/"
+                                                         "nested-struct fields and cannot be "
+                                                         "passed by value; pass ptr[{}] instead",
+                                                         cp.ptr_struct, cp.ptr_struct));
+                        }
                         ex.params.push_back(std::move(cp));
                     };
                     for (auto& a : fd.args.posonly) add_param(a);
                     for (auto& a : fd.args.args) add_param(a);
                     if (fd.args.vararg) ex.varargs = true;  // C 变参：*args 位置占位
                     std::string why;
-                    auto rk = ctype_from_ast(fd.returns.get(), structs, why);
+                    auto rk = ctype_from_ast(fd.returns.get(), TypeCtx{&structs, nullptr}, why);
                     if (!rk)
                         pydecl::fail(fd.line, std::format("return type of '{}': {} (use -> None "
                                                           "for no return value)",
                                                           fd.name, why));
                     if (rk->kind == CKind::Callback)
                         pydecl::fail(fd.line, "returning a C function pointer is not supported");
-                    if (rk->kind == CKind::Struct && rk->opaque)
-                        pydecl::fail(fd.line,
-                                     std::format("struct '{}' is opaque and cannot be returned "
-                                                 "by value", rk->stname));
+                    if (rk->kind == CKind::Struct) {
+                        if (rk->opaque)
+                            pydecl::fail(fd.line,
+                                         std::format("struct '{}' is opaque and cannot be "
+                                                     "returned by value", rk->stname));
+                        const CStruct* cs =
+                            structs.count(rk->stname) ? structs.at(rk->stname) : nullptr;
+                        if (cs && cs->is_union)
+                            pydecl::fail(fd.line,
+                                         std::format("union '{}' cannot be returned by value "
+                                                     "(C ABI classification is not implemented)",
+                                                     rk->stname));
+                        if (cs && struct_has_aggregate(*cs, structs))
+                            pydecl::fail(fd.line,
+                                         std::format("struct '{}' contains union/array/"
+                                                     "nested-struct fields and cannot be returned "
+                                                     "by value", rk->stname));
+                    }
                     ex.ret = rk->kind;
                     ex.ret_struct = rk->stname;
                     ex.ret_elem = rk->elem;
@@ -463,7 +649,7 @@ std::optional<CImportDecl> load_cpya(const std::string& name, const std::string&
                     if (!aa.annotation)
                         pydecl::fail(aa.line, std::format("'{}' needs a type annotation", pyname));
                     std::string why;
-                    auto ct = ctype_from_ast(aa.annotation.get(), structs, why);
+                    auto ct = ctype_from_ast(aa.annotation.get(), TypeCtx{&structs, nullptr}, why);
                     if (!ct) pydecl::fail(aa.line, std::format("'{}': {}", pyname, why));
                     // extern var：无值，或值是一个 extern_var("c_name") 调用。
                     std::string var_symbol = pyname;
@@ -490,10 +676,15 @@ std::optional<CImportDecl> load_cpya(const std::string& name, const std::string&
                     if (is_var) {
                         if (ct->kind == CKind::Callback)
                             pydecl::fail(aa.line, "callback type is not supported for extern var");
+                        if (!ct->dims.empty())
+                            pydecl::fail(aa.line,
+                                         std::format("array-typed extern var '{}' is not "
+                                                     "supported (use ptr[{}] and index it)",
+                                                     pyname, pydecl::annotation_base_name(aa.annotation.get())));
                         if (ct->kind == CKind::Struct)
                             pydecl::fail(aa.line,
-                                         std::format("struct variable '{}' must be declared with "
-                                                     "ptr[{}]", pyname, ct->stname));
+                                         std::format("struct/union variable '{}' must be declared "
+                                                     "with ptr[{}]", pyname, ct->stname));
                         if (!seen_py.insert(pyname).second)
                             pydecl::fail(aa.line, std::format("duplicate name '{}'", pyname));
                         CVar cv;

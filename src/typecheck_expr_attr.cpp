@@ -79,7 +79,15 @@ TypePtr TypeChecker::expr_attribute(Attribute& a) {
     if (ot->kind == TyKind::Struct || ot->kind == TyKind::StructPtr) {
         const StructInfo* s = ot->st;
         if (!s) return t_unknown();
-        if (const auto* f = s->field(a.attr)) return f->ty;
+        if (const auto* f = s->field(a.attr)) {
+            // .cpya 定长数组字段：属性读取得的是「元素地址视图」，不是元素值。
+            if (f->is_array()) return c_array_view_type(*f);
+            // 按值嵌套的 struct/union 字段：C 侧是内联布局，但 PyAdamas 侧
+            // 一律按地址访问（返回字段地址，交给 StructPtr 路径读写字段）。
+            if (f->ty && f->ty->kind == TyKind::Struct && f->ty->st)
+                return mk_optional(mk_struct_ptr(f->ty->st));
+            return f->ty;
+        }
         err(a.line, a.col,
             std::format("struct '{}' has no field '{}'", s->name, a.attr));
         return t_unknown();
