@@ -1,0 +1,25 @@
+# stdlib/sigs/os/path.pysig —— os.path 模块的声明式签名（P0）
+#
+# 模块名 = 相对 stdlib/sigs/ 的路径：os/path.pysig → 模块 os.path。
+# 运行期符号按约定推导：os.path.join → pa_os_path_join。
+# 常量（sep/altsep/curdir/pardir）属于 os 模块，不在这里。
+
+"""os.path 的 native 签名。"""
+
+
+def join(*parts: str) -> str: pass
+def exists(path: str) -> bool: pass
+def isdir(path: str) -> bool: pass
+def isfile(path: str) -> bool: pass
+def islink(path: str) -> bool: pass
+def basename(path: str) -> str: pass
+def dirname(path: str) -> str: pass
+def normpath(path: str) -> str: pass
+def abspath(path: str) -> str: pass
+def expanduser(path: str) -> str: pass
+def realpath(path: str) -> str: pass
+def splitext(path: str) -> tuple[str, str]: pass
+def split(path: str) -> tuple[str, str]: pass
+def samefile(a: str, b: str) -> bool: pass
+def getsize(path: str) -> int: pass
+def getmtime(path: str) -> float: pass

@@ -228,6 +228,11 @@ public:
     std::unordered_map<std::string, std::vector<std::string>> type_stats_examples_;
     void type_stat(const std::string& cat, const std::string& example);
 
+    // 声明式原生签名文件（stdlib/sigs/*.pysig）用的注解入口：只转发到
+    // parse_annotation，语义与 typecheck 内部完全一致（类型语法只有一份）。
+    // 见 docs/native-stdlib-cookbook.md。
+    TypePtr parse_annotation_for_decl(Expr* e, int line) { return parse_annotation(e, line); }
+
 private:
     std::string file_;
     ModuleLookup module_lookup_;

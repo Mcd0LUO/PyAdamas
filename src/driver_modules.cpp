@@ -35,6 +35,30 @@ std::string canonical_path(const std::string& p) {
 }
 
 
+namespace {
+
+// import 防护（P0 声明式签名）：stdlib/sigs/ 里全是「只有 pass」的声明文件，
+// 不是实现。一旦 import 解析命中这个目录，用户会拿到一个看似正常、实际什么
+// 都不做的假模块（静默错误）。这里一律硬失败并说清楚原因。
+bool path_under_sigs_dir(const std::string& p) {
+    static const std::string root =
+        canonical_path((std::filesystem::path(PYADAMAS_STDLIB_DIR) / "sigs").string());
+    return p.size() > root.size() && p.compare(0, root.size(), root) == 0 &&
+           p[root.size()] == '/';
+}
+
+[[noreturn]] void refuse_sigs_import(const std::string& name, const std::string& path) {
+    std::fprintf(stderr,
+                 "error: import '%s' resolves into the signature directory: %s\n"
+                 "       stdlib/sigs/ holds declaration stubs (their bodies are just pass),\n"
+                 "       not implementations. Import the real module; a signature file is\n"
+                 "       only read by the compiler for the module it declares.\n",
+                 name.c_str(), path.c_str());
+    std::exit(1);
+}
+
+}  // namespace
+
 std::optional<ResolvedModule> resolve_module_path(const std::string& importer,
                                                   const std::string& full_name,
                                                   const std::vector<std::string>& include_dirs) {
@@ -70,11 +94,17 @@ std::optional<ResolvedModule> resolve_module_path(const std::string& importer,
         }
         if (!ok) continue;
         auto file = dir / (parts.back() + ".py");
-        if (std::filesystem::is_regular_file(file, ec))
-            return ResolvedModule{canonical_path(file.string()), false};
+        if (std::filesystem::is_regular_file(file, ec)) {
+            std::string cp = canonical_path(file.string());
+            if (path_under_sigs_dir(cp)) refuse_sigs_import(full_name, cp);
+            return ResolvedModule{std::move(cp), false};
+        }
         auto pkg = dir / parts.back() / "__init__.py";
-        if (std::filesystem::is_regular_file(pkg, ec))
-            return ResolvedModule{canonical_path(pkg.string()), true};
+        if (std::filesystem::is_regular_file(pkg, ec)) {
+            std::string cp = canonical_path(pkg.string());
+            if (path_under_sigs_dir(cp)) refuse_sigs_import(full_name, cp);
+            return ResolvedModule{std::move(cp), true};
+        }
     }
     return std::nullopt;
 }

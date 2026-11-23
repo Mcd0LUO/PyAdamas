@@ -9,8 +9,8 @@
 
 | 你想做的事 | 以前（硬编码） | 现在（声明式，模块已迁移） |
 |---|---|---|
-| 给 `time` 加一个新函数 | 改 `builtin_sigs.cpp` + `lower_import.cpp`（2~3 处） | 在 `stdlib/sigs/time.pysig` 加一行 `func` |
-| 接通一个已有运行期入口（`pa_*`） | 还要 `ir_rtfn*` / codegen 分组 | 同上，**一行**（符号名指向现成的 `pa_*`） |
+| 给 `time` 加一个新函数 | 改 `builtin_sigs.cpp` + `lower_import.cpp`（2~3 处） | 在 `stdlib/sigs/time.pysig` 加一行 `def f(...) -> T: pass` |
+| 接通一个已有运行期入口（`pa_*`） | 还要 `ir_rtfn*` / codegen 分组 | 同上，**一行**（符号名按 `pa_<模块>_<名字>` 约定推导） |
 | 新模块 | 改 `driver_modules.cpp` 的 `kModuleTable` | 新建 `stdlib/sigs/<模块>.pysig`（模块表自动登记，见 §6.3） |
 | 加一个新**运行期实现** | 必须 C（`runtime/rt_*.c`）+ RtFn 编号 + codegen 参数分组 | **仍然要**，这是运行期边界，不是签名问题（§6.4） |
 
@@ -63,73 +63,86 @@ P0 只把纯数据部分搬进声明文件，其余保持原样。
 
 ---
 
-## 3. 格式：`stdlib/sigs/<模块>.pysig`
+## 3. 格式：`stdlib/sigs/<模块路径>.pysig`（Python 语法）
 
-行式语法，`#` 到行尾是注释。**三条语句**：
-
-### 3.1 `module`
-
-```
-module time
-```
-
-必须出现且只出现一次，且必须与文件名一致（`os.path` → `stdlib/sigs/os.path.pysig`）。
-这条检查的用处：防止 `cp time.pysig foo.pysig` 后得到一个内容与名字不符、静默生效的声明。
-
-### 3.2 `func`
+声明文件就是 **Python 语法的 stub**：函数体只有 `pass`（可带 docstring），没有实现。
+扩展名保持 `.pysig` 标明「声明不是实现」；**模块名 = 相对 `stdlib/sigs/` 的路径**
+（`os/path.pysig` → 模块 `os.path`）。
 
 ```
-func <Python 名> <运行期符号> (<形参列表>) -> <返回类型>
+# stdlib/sigs/time.pysig
+def time() -> float: pass
+def sleep(secs: float) -> None: pass
+def localtime(secs: float = -1e300) -> tuple[int, ...]: pass
+def strftime(*args: unknown) -> str: pass
+
+CLOCK_MONOTONIC: int = 1        # 常量：带注解的赋值，编译期内联
+
+@native("pa_time_time")         # 仅在「约定推导的符号」不适用时写
+def now() -> float: pass
 ```
 
-| 字段 | 含义 | 例子 |
-|---|---|---|
-| Python 名 | 模块内属性名（`import time; time.sleep` 里的 `sleep`；也是 `from time import sleep` 的名字） | `sleep` |
-| 运行期符号 | C 侧入口，必须是 `src/ir_rtfn_names.h` 里 `rt_name()` 表里的现有符号 | `pa_time_sleep` |
-| 形参列表 | 见 §4 | `(secs: float)` |
-| 返回类型 | 返回类型；无返回值写 `None` | `-> None` |
+### 3.1 顶层只允许四类语句
 
-### 3.3 `const`
+| 语句 | 含义 |
+|---|---|
+| 模块 docstring（可选，只能一条） | 说明性文字，忽略 |
+| `def f(...) -> T: pass` | 声明一个 native 函数（body 只能是 `pass`，可带 docstring） |
+| `NAME: T = <字面量>` | 声明一个模块常量（编译期内联） |
+| `@native("pa_xxx")` | 装饰在 def 上，覆盖运行期符号 |
 
-```
-const <名字> <类型> = <字面量>
-const CLOCKS_PER_SEC int = 1000000
-const sep str = "/"
-```
+其它任何语句（`class` / `import` / `x = 1` / `if` / `async def` …）一律报错并给行号。
 
-字面量种类必须与类型匹配（`int/float/str/bool/None`），否则加载期硬失败。
-常量进 `ModuleInfo::globals`（类型检查可见），降级由 `builtin_value` 的通用 hook
-按字面量直接产出（`const_int` / `const_str` ……）。
+### 3.2 运行期符号：约定优先，装饰器覆盖
+
+- 约定：`pa_<模块名，点变下划线>_<函数名>`
+  —— `time.sleep` → `pa_time_sleep`；`os.path.join` → `pa_os_path_join`。
+- 例外：`@native("pa_xxx")` 覆盖（参数必须是一个非空字符串字面量）。
+- 符号必须能反查到 `rt_name()` 表里的现有入口，否则硬失败（防「凭空造编号」）。
+
+### 3.3 为什么没有 `module` 语句
+
+路径即身份。没有声明语句，就不存在「声明名与文件名不一致」，也不会出现
+「复制一个声明文件改内容」这种静默事故。`import` 解析被禁止落进 `stdlib/sigs/`
+（见 §5.3），杜绝「把 stub 当实现 import」。
 
 ---
 
-## 4. 形参与类型
+## 4. 形参与类型（复用编译器的注解解析）
 
-### 4.1 形参
+函数签名与普通 Python 函数标注**完全同一套语义**：`TypeChecker::parse_annotation_for_decl()`
+= `parse_annotation()`（3 行转发的 public 薄封装）。**类型语法只有一份**，
+新增/修改类型（比如新加 `bytes`/`file`/`dylib`）不需要动声明格式。
+
+### 4.1 形参（就是 Python 的形参）
 
 | 写法 | 含义 |
 |---|---|
 | `x: float` | 普通位置参数 |
-| `x: float = -1e300` | 带默认值（调用点不传时降级阶段填字面量） |
-| `*, x: int` | `*` 之后是 keyword-only |
+| `x: float = -1e300` | 带默认值（必须是字面量；调用点省略时降级阶段填它） |
+| `*, x: int` | keyword-only |
 | `*args: unknown` | 可变位置参数（类型是**元素**类型） |
 | `**kwargs: unknown` | 可变关键字参数 |
 
+每个形参**都必须有注解**，返回类型也**必须写**（`-> None` 表示无返回值）：
+native 签名不写类型等于让调用点放弃 coerce，运行期会按错的 ABI 传参。
+
 ### 4.2 类型
 
-| 语法 | 对应 `pyadamas::Type` |
+直接写编译器认识的类型名（与函数标注一致），常用的：
+
+| 类型 | 说明 |
 |---|---|
 | `int` `float` `bool` `str` `bytes` | 标量 |
-| `None` / `none` | `TyKind::None` |
-| `unknown` / `Any` / `object` | `TyKind::Unknown`（放行任意实参，不做 coerce） |
-| `file` `dylib` `regex` `match` `popen` | 对应不透明句柄类型 |
-| `list[T]` `set[T]` `deque[T]` `range[T]` | 容器 |
-| `dict[K, V]` | 字典 |
-| `tuple[A, B]` | 定长元组 |
-| `tuple[T, ...]` | 可变长元组（`mk_tuple_rest`） |
-| `optional[T]` | `mk_optional`（T 或 None） |
+| `None` | 无返回值 |
+| `unknown`（或 `Any` / `object`） | 放行任意实参、不做 coerce |
+| `list[T]` `set[T]` `dict[K, V]` `tuple[A, B]` `tuple[T, ...]` `Optional[T]` | 容器 |
+| `file` `dylib` `regex` `match` `popen` | 不透明句柄 |
 
-不在表里的类型名 → 加载期报错并给出行号（**不会**退化成 unknown）。
+**解析成 `unknown` 的注解会被拒绝**（除了显式写 `unknown`/`Any`/`object`）：
+拼错的名字、Protocol（`Sequence` 等）、未登记的类都会报
+「`'Foo' is not a supported native signature type`」——否则声明静默退化成 unknown，
+调用点不再 coerce，运行期按错的 ABI 传参。
 
 ---
 
@@ -199,12 +212,18 @@ if (const auto* c = nativesig::find_const(module, member)) {
 
 | 情况 | 行为 |
 |---|---|
-| `.pysig` 语法错 / 未知语句 / 未知类型 | `error: <file>:<line>: <msg>` + `exit(1)` |
-| `module` 名与文件名不一致 | 同上，报第 1 行 |
-| 运行期符号不在 `rt_name()` 表里 | 同上，报该 `func` 行 + 符号名 |
-| 常量字面量与声明类型不符 | 同上 |
+| Python 语法错 | `error: <file>:<line>: <msg>` + `exit(1)` |
+| 顶层出现非白名单语句（`class` / `import` / `x = 1` / `if` …） | 同上，报该语句行 |
+| 函数体不是 `pass`（或 `pass` 之外还有语句） | 同上，报违规语句行 |
+| 未知/不支持的类型（含拼错、Protocol、未登记类） | 同上，报参数/返回所在行 |
+| 形参或返回**缺注解** | 同上 |
+| 模块名非法（路径穿越、空段、非法字符） | 同上，`stdlib/sigs` + 说明 |
+| 运行期符号不在 `rt_name()` 表里 | 同上，报该 `def` 行 + 符号名 |
 | 重名声明 | 同上 |
+| 常量字面量与声明类型不符 / 缺注解 | 同上 |
+| 装饰器不是 `@native("pa_xxx")` | 同上 |
 | **没有** `.pysig` | 返回 `nullptr`，调用方继续走硬编码（增量迁移的基石） |
+| **import 命中 `stdlib/sigs/`** | 硬失败并说明「声明目录不是实现」（§6.3 的防护） |
 
 **为什么不静默跳过**：静默跳过会表现成「模块没有这个属性」或「实参类型不对」，
 和声明文件的内容毫无关系，排查成本极高。数据是随编译器分发的，坏了就该立刻停。
@@ -217,9 +236,9 @@ if (const auto* c = nativesig::find_const(module, member)) {
 
 前提：需要的运行期入口 `pa_*` 已经存在（在 `src/ir_rtfn_names.h` 里能查到）。
 
-1. 在 `stdlib/sigs/<模块>.pysig` 加一行：
+1. 在 `stdlib/sigs/<模块路径>.pysig` 加一行 Python stub：
    ```
-   func uptime pa_time_monotonic () -> float
+   def uptime() -> float: pass
    ```
 2. 重建：`cmake --build build/lead -j16`（只有数据变了，**不会**重编任何 `src/*.cpp`）。
 3. 用：
@@ -251,10 +270,14 @@ if (const auto* c = nativesig::find_const(module, member)) {
 ### 6.3 新模块（零 C++，可选能力）
 
 `driver_modules.cpp` 的 `find_module_entry()` 在查表失败后会再看
-`stdlib/sigs/<name>.pysig` 是否存在：存在则合成一条 `ModuleKind::Native` 的条目
+`stdlib/sigs/<模块路径>.pysig` 是否存在：存在则合成一条 `ModuleKind::Native` 的条目
 （名字字符串的生命周期由函数内 `static` 容器持有）。于是：
 **新模块 = 新建一个 `.pysig` 文件 + 重建**，`kModuleTable` 一行都不用加。
 （这条是「原生模块定义也是数据」的最后一厘米；启用后 §6.2 第 6 步才有意义。）
+
+> 该目录同时被 import 防护：`resolve_module_path()` 命中 `stdlib/sigs/` 时直接报错
+> （`import sigs` / `from sigs import demo` / `import sigs.demo as d` 三种形态实测都拒绝），
+> 普通 stdlib 模块不受影响。
 
 ### 6.4 什么**不能**只靠声明（仍然要 C++）
 
@@ -300,20 +323,29 @@ if (const auto* c = nativesig::find_const(module, member)) {
 
 ## 9. 踩坑记录
 
-1. **`typecheck_types.h` 不能单独 include**：它用了 `CKind`（定义在 `cimport.h`），
-   单独 include 会报一堆 `CKind does not name a type`。加载器要 include `module.h`（它带全依赖链）。
-2. **`RtFn` 没有 `Count` 哨兵**，`rt_name()` 对未定义编号返回 `?`。
+1. **`TypeChecker::parse_annotation*` 原本是 private**：复用编译器注解解析前，先在
+   `typecheck.h` 的 public 段加了一个 3 行薄封装 `parse_annotation_for_decl()`
+   （转发到 `parse_annotation`，语义零变化）。**不要**在加载器里复制一份类型解析——
+   那正是这次换语法的起因（两套类型语法必然漂移）。
+2. **`parse_annotation` 对不认识的名字返回 `unknown` 而不是报错**（用户代码里
+   前向引用/自造类型要放行）。声明文件必须自己判：注解解析成 unknown 且源表达式不是
+   显式 `unknown/Any/object` → 报错。否则拼错类型名不会有人发现。
+3. **默认值要走 `literal_of_expr()`**（`typecheck_types.h` 的自由函数）：它已经处理了
+   `-1e300` 这种「一元负号包数字常量」的折叠，不要自己写。
+4. **Python 的默认值对齐规则**：`args.defaults.size()` 作用于**最后** N 个位置参数
+   （posonly + args 拼起来之后），不是从头对齐。
+5. **`Arg` 没有行号**：形参相关的错误只能用函数行号（`fd.line`）；body/装饰器/
+   常量有各自的行号。
+6. **`RtFn` 没有 `Count` 哨兵**，`rt_name()` 对未定义编号返回 ``?`。
    反查表只能扫整个值域；好在 `RtFn` 底层是 `uint16_t`（固定底层类型 → 整值域合法转换），
-   而且可以「找齐即停」，正常路径只扫表的前一小段。
-3. **形参名不要照抄** `builtin_fn()` 的 `x0/x1`。硬编码表用自动名，声明用真名（`secs`）是
-   **超集**（`time.sleep(secs=0.01)` 从「关键字参数不支持」变成可用），不影响位置调用生成的指令。
-4. **`FuncInfo::ret_known` 必须置 `true`**，否则调用点会把返回值当「还没推断出来」处理。
-5. **`ModuleInfo::builtin = true` 必须置位**：`merge_extension_module`、`from M import` 的
-   可调用性判断、check 模式都靠它区分「原生」和「有源码的模块」。
-6. 声明文件里的 `module` 名可以带点（`os.path`），文件名也跟着带点（`os.path.pysig`）；
-   但类型名不允许带点。
-7. **`*` / `...` 的歧义**：`*` 出现在形参位置要根据后面是不是 `name :` 区分
-   「`*args: T`」与「keyword-only 分界」；`...` 只在 `tuple[T, ...]` 里有意义。
+   而且可以「找齐即停」，正常路径只扫表的前一小段（~2µs）。
+7. **`FuncInfo::ret_known` 必须置 `true`**、**`ModuleInfo::builtin` 必须置位**：
+   前者决定调用点是否把返回值当「未知」，后者是 `from M import` 可调用性/check 模式的分界。
+8. **import 防护是必须的**：`stdlib/sigs/` 是声明目录，若 import 解析命中它，用户会拿到
+   「全是 pass 的假模块」（静默错误）。`resolve_module_path()` 在 canonical 化之后检查路径
+   前缀，命中即硬失败并说明原因（见 §5.3）。
+9. **解析成本**：`Lexer + Parser + TypeChecker` 解析一个 30 行的 stub 约 0.1–0.4ms，
+   只对**被 import 且存在声明文件**的模块发生一次（进程内缓存）。改声明文件不需要重编编译器。
 
 ---
 
@@ -321,8 +353,8 @@ if (const auto* c = nativesig::find_const(module, member)) {
 
 | 模块 | 状态 | 备注 |
 |---|---|---|
-| `time` | ✅ 已迁移（`stdlib/sigs/time.pysig`） | 8 个函数 + 2 个常量；`strftime` 的参数装配仍在 `lower_import_native.cpp`（签名已声明） |
-| `os.path` | ✅ 已迁移（`stdlib/sigs/os.path.pysig`） | 16 个函数；常量 `sep/altsep/curdir/pardir` 属于 `os` 模块，不在本文件 |
+| `time` | ✅ 已迁移（`stdlib/sigs/time.pysig`，Python 语法） | 8 个函数 + 2 个常量；`strftime` 的参数装配仍在 `lower_import_native.cpp`（签名已声明） |
+| `os.path` | ✅ 已迁移（`stdlib/sigs/os/path.pysig`，Python 语法） | 16 个函数（路径即模块名）；常量 `sep/altsep/curdir/pardir` 属于 `os` 模块，不在本文件 |
 | `math` `sys` `os` `random` `collections` `json` `re` | ⬜ 未迁移 | 硬编码仍在；加载器已就绪，可按 §6.2 逐个搬 |
 | `pathlib` `operator` `asyncio` | ⬜ 未迁移（优先级低） | 构造器/类语义多，声明格式表达不了的部分留 C++ |
 | `datetime` `subprocess` | ⬜ 未迁移（优先级低） | 参数装配/返回类型随实参变的分支多 |
@@ -373,16 +405,22 @@ if (const auto* c = nativesig::find_const(module, member)) {
 
 ### 11.3 「零 C++」演示（两例，`git status -- src/` 的 diff 指纹不变）
 
-1. **给已迁移模块加 API**：往 `stdlib/sigs/time.pysig` 追加
+1. **给已迁移模块加 API**：往 `stdlib/sigs/time.pysig` 追加两行 Python stub
    ```
-   const CLOCK_REALTIME  int = 0
-   const CLOCK_MONOTONIC int = 1
+   CLOCK_REALTIME: int = 0
+   CLOCK_MONOTONIC: int = 1
    ```
    → `cmake --build` 输出 `ninja: no work to do`（数据不进二进制）→
    `import time; print(time.CLOCK_MONOTONIC)` 输出 `1`，与 CPython 一致。
 2. **加一个全新原生模块**：只新建 `stdlib/sigs/clock.pysig`
-   （`module clock` / `func now pa_time_time () -> float` / `const TICKS_PER_SEC int = 100`），
-   不碰 `kModuleTable`、不碰任何 `src/` →
+   ```
+   @native("pa_time_time")
+   def now() -> float: pass
+
+   TICKS_PER_SEC: int = 100
+   ```
+   不碰 `kModuleTable`、不碰任何 `src/`（注意：`now` 不在约定符号
+   `pa_clock_now` 上，所以用 `native` 装饰器指到已有的 `pa_time_time`）→
    `import clock; print(clock.now() > 0); print(clock.TICKS_PER_SEC)` 输出 `True` / `100`。
    验证后删除该演示文件。
 
@@ -394,3 +432,23 @@ if (const auto* c = nativesig::find_const(module, member)) {
   它们不是签名问题，是「参数装配/返回类型随实参变」的问题（§6.4）。
 - `driver_modules.cpp` 的自动登记只覆盖 `stdlib/sigs/*.pysig`；纯 `.py` 新模块（`codecs` 这类）仍然要登记 `kModuleTable`，
   两件事不要混。
+
+### 11.5 第二轮：`.pysig` 换成 Python 语法（本机实测）
+
+动机：自定义 lexer + 类型名映射表 = 第二套类型语法，和 `parse_annotation_impl` 并行维护会漂移。
+换成 Python 语法后，声明文件用编译器自己的 `Lexer` + `Parser` 解析，注解走
+`TypeChecker::parse_annotation_for_decl()`（转发到 `parse_annotation`，语义同一份）。
+
+| 项 | 结果 |
+|---|---|
+| 加载器代码量 | `src/native_sigs.h` 670 行 → **642 行**：删掉自写 lexer（~190 行）+ 类型名映射表（~90 行），换成 AST 白名单 + 注解复用（新增 ~120 行校验/诊断） |
+| 前置验证（3 段语法） | `def f(*args: unknown) -> str: pass` / `def g(secs: float = -1e300) -> tuple[int, ...]: pass` / `@native("pa_time_time")` + `def h() -> float: pass` —— **全部一次通过，parser 零改动** |
+| 声明文件 | `stdlib/sigs/time.pysig`（8 func + 2 const）、`stdlib/sigs/os/path.pysig`（16 func，路径即模块名 `os.path`） |
+| 12 基准 × 3 档 asm vs HEAD `61c2c57` | **36/36 `cmp` 逐字节相同** |
+| 迁移模块自身 asm（time 8 函数 + 常量、os.path 16 函数，O0/O2） | **4/4 逐字节相同** |
+| 全量套件 | **426 ran ok / 0 失败**（425 + 新增 524） |
+| `tools/checkall.sh --full` | 全绿：suite 426/0、difftest 398/0、bench 36/36、check_size、lsp-smoke、simd、**perf warn=0 fail=0（指令数变化 ≤0.06%）** |
+| 9 类错误路径 | 全部带 `文件:行号` 实测（语法错 / 未知语句 / body 非 pass / 未知类型 / 缺标注 / 非法模块名 / 符号不在 RtFn 表 / 重名 / 常量类型不符），另含 `@native` 参数非法、未知装饰器、`async def` |
+| import 防护 | `import sigs` / `from sigs import demo` / `import sigs.demo as d` 三种形态都命中并给出清晰报错；普通 stdlib 模块不受影响 |
+| 编译耗时 | 与 HEAD 同法测量：差异在噪声内（机制净成本 < 0.4ms，远低于 5ms） |
+

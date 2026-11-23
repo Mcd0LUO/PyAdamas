@@ -1,40 +1,38 @@
-// native_sigs.h —— 声明式原生模块签名加载器（P0：签名从 C++ 挪进数据）
+// native_sigs.h —— 声明式原生模块签名（P0：签名从 C++ 挪进数据）
 //
-// 背景：原生模块（math/os/time/...）过去在 builtin_sigs.cpp 里手写签名表、
-// 在 lower_import*.cpp 里手写「成员名 → RtFn」映射。于是「加一个原生 API」
-// 要改 3~5 处 C++。这里把这两件事变成**数据**：stdlib/sigs/<module>.pysig
-// 声明「Python 名 / 形参 / 返回类型 / 运行期符号」，编译期读取。
+// 声明文件就是 **Python 语法**的 stub（stdlib/sigs/<模块路径>.pysig）：
 //
-// 选型（运行期读取，而不是 CMake 代码生成）：签名本来就是「编译一次、启动
-// 时加载」的数据，和 stdlib/*.py 的加载方式一致；header-only 实现，不需要
-// 在 CMakeLists 里登记新 TU（那里有别人在改），也不引入构建期两步依赖。
-// 代价：每次编译多一次文件 stat + 解析（只读被 import 的模块，实测 < 0.1ms，
-// 见 docs/native-stdlib-cookbook.md 的「性能」一节）。
+//   # stdlib/sigs/time.pysig
+//   def time() -> float: pass
+//   def sleep(secs: float) -> None: pass
+//   def localtime(secs: float = -1e300) -> tuple[int, ...]: pass
+//   def strftime(*args: unknown) -> str: pass
+//   CLOCK_MONOTONIC: int = 1
 //
-// 失败路径（刻意做成硬失败）：声明文件语法错 / 运行期符号对不上 rt_name()
-// 表 → 打印 <file>:<line>: <msg> 并退出。绝不静默跳过——静默跳过会表现成
-// 「模块没有这个属性」，极难查。
+//   # 约定推导出的符号不适用时用装饰器覆盖
+//   @native("pa_time_time")
+//   def now() -> float: pass
 //
-// 用法（接线只有两处，见 docs/native-stdlib-cookbook.md）：
-//   // builtin_sigs.cpp：声明优先
-//   if (auto m = nativesig::module_info(name)) { cache[name] = m; return m; }
-//   // lower_import.cpp 的 native_fn()：反查 RtFn
-//   if (auto f = nativesig::func_rtfn(module, member)) return *f;
+// 三个关键设计（见 docs/native-stdlib-cookbook.md）：
+//   1. **复用前端**：Lexer + Parser 是编译器自己的，注解走
+//      TypeChecker::parse_annotation_for_decl（转发到 parse_annotation）。
+//      这样「类型语法」全项目只有一份，新增类型不用同步第二张表。
+//   2. **native 是兜底语义**：声明里的函数没有实现，天然就是 native；
+//      运行期符号按 `pa_<module>_<name>` 约定推导（模块名的点变下划线），
+//      例外用 `@native("pa_xxx")` 覆盖。
+//   3. **路径即身份**：模块名 = 相对 stdlib/sigs/ 的路径，os/path.pysig →
+//      模块 os.path。没有任何 module 声明语句，也就没有「声明名与文件名
+//      不一致」的可能；同时 import 解析被禁止落进 sigs/ 目录
+//      （driver_modules.cpp），杜绝「把 stub 当实现」。
 //
-// 格式：
-//   module <名字>                       —— 必须与文件名一致（os.path → os.path.pysig）
-//   func <py名> <运行期符号> (<形参>) -> <类型>
-//   const <名字> <类型> = <字面量>
-// 形参：name: type | name: type = <字面量> | *args: type | **kwargs: type
-//       '*' 单独出现表示其后是 keyword-only 形参。
-// 类型：int float bool str bytes none unknown file dylib regex match popen
-//       list[T] set[T] deque[T] range[T] dict[K,V] tuple[A,B] tuple[T,...]
-//       optional[T]
+// 失败路径一律硬失败并打印 `<文件>:<行号>: <msg>`：签名静默缺失/静默变
+// unknown 会表现成「模块没有这个属性」或「按错的 ABI 传参」，极难查。
 //
-// 本文件只依赖 ir_ops.h（RtFn + rt_name）与 typecheck_types.h（类型工厂），
-// 任何 TU 都能 include；所有函数 inline，无运行期初始化顺序问题。
+// 下游（RtFn 反查、ModuleInfo、builtin_sigs/lower_import 的接线）与上一版
+// 完全一致，本文件只换「读文件 → 签名结构」这一段前端。
 #pragma once
 
+#include <cctype>
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
@@ -50,8 +48,11 @@
 #include <utility>
 #include <vector>
 
-#include "ir_ops.h"  // RtFn + rt_name()
-#include "module.h"   // ModuleInfo / TypePtr / FuncInfo / LiteralValue / 类型工厂
+#include "ir_ops.h"     // RtFn + rt_name()
+#include "lexer.h"      // Lexer
+#include "module.h"     // ModuleInfo / TypePtr / FuncInfo / LiteralValue
+#include "parser.h"     // Parser / ParseError
+#include "typecheck.h"  // TypeChecker::parse_annotation_for_decl
 
 // 独立自测（单独编译本头文件）时没有 CMake 的宏。
 #ifndef PYADAMAS_STDLIB_DIR
@@ -61,7 +62,7 @@
 namespace pyadamas {
 namespace nativesig {
 
-// ── 数据模型 ──────────────────────────────────────────────────────────
+// ── 数据模型（与自定义语法版本逐字相同：下游一行没动）──────────────
 
 struct SigParam {
     std::string name;
@@ -114,283 +115,328 @@ struct ModuleSig {
 
 namespace detail {
 
-// ── 词法 ──────────────────────────────────────────────────────────────
-struct Tok {
-    enum class Kind : uint8_t { Ident, Int, Float, Str, Punct, End } kind = Kind::End;
-    std::string s;   // Ident / Str 的内容，或 Punct 的拼写
-    long long i = 0;
-    double f = 0.0;
-    int line = 0;
-};
+// ── 诊断与文件 ────────────────────────────────────────────────────────
 
-struct ParseError {
+[[noreturn]] inline void fatal(const std::string& path, int line, const std::string& msg) {
+    std::fprintf(stderr, "error: %s:%d: %s\n", path.c_str(), line, msg.c_str());
+    std::exit(1);
+}
+
+inline std::string read_file_or_fatal(const std::string& path) {
+    std::FILE* f = std::fopen(path.c_str(), "rb");
+    if (!f) fatal(path, 0, "cannot open declaration file");
+    std::string out;
+    char buf[8192];
+    size_t n;
+    while ((n = std::fread(buf, 1, sizeof buf, f)) > 0) out.append(buf, n);
+    std::fclose(f);
+    return out;
+}
+
+// ── 模块名 ↔ 路径 ────────────────────────────────────────────────────
+// 模块名 = 相对 stdlib/sigs/ 的路径：os.path → sigs/os/path.pysig。
+// 每一段必须是合法标识符，禁止空段 / .. / 绝对路径（路径穿越防护）。
+inline bool valid_module_name(std::string_view name) {
+    if (name.empty() || name.size() > 128) return false;
+    bool start = true;
+    for (char c : name) {
+        if (c == '.') {
+            if (start) return false;
+            start = true;
+            continue;
+        }
+        const unsigned char u = static_cast<unsigned char>(c);
+        if (start) {
+            if (!std::isalpha(u) && c != '_') return false;
+            start = false;
+        } else if (!std::isalnum(u) && c != '_') {
+            return false;
+        }
+    }
+    return !start;
+}
+
+inline std::filesystem::path sigs_dir() {
+    return std::filesystem::path(PYADAMAS_STDLIB_DIR) / "sigs";
+}
+
+// 相对 sigs/ 的路径（os.path → os/path.pysig）。
+inline std::string sig_rel_path(const std::string& module) {
+    std::string rel;
+    for (char c : module) rel.push_back(c == '.' ? '/' : c);
+    rel += ".pysig";
+    return rel;
+}
+
+inline std::string sig_path(const std::string& module) {
+    return (sigs_dir() / std::filesystem::path(sig_rel_path(module))).string();
+}
+
+// ── AST 白名单解析 ────────────────────────────────────────────────────
+// 只认四种顶层语句：模块 docstring、def（body 只有 pass / docstring+pass）、
+// 带注解的常量（NAME: T = <字面量>）。其它一律报错并给行号。
+struct DeclError {
     int line = 0;
     std::string msg;
 };
 
-inline bool ident_start(char ch) {
-    return (ch >= 'a' && ch <= 'z') || (ch >= 'A' && ch <= 'Z') || ch == '_';
-}
-inline bool digit_ch(char ch) { return ch >= '0' && ch <= '9'; }
+[[noreturn]] inline void fail(int line, const std::string& msg) { throw DeclError{line, msg}; }
 
-// 词法：整个文件切成 token（保留行号），再按语句解析。
-// 注释 '#' 到行尾；标识符允许点号（module 语句要写 os.path）。
-inline std::vector<Tok> lex(std::string_view src) {
-    std::vector<Tok> out;
-    int line = 1;
-    size_t i = 0;
-    auto push = [&](Tok t) { out.push_back(std::move(t)); };
-    while (i < src.size()) {
-        char c = src[i];
-        if (c == '\n') { ++line; ++i; continue; }
-        if (c == ' ' || c == '\t' || c == '\r') { ++i; continue; }
-        if (c == '#') {
-            while (i < src.size() && src[i] != '\n') ++i;
-            continue;
-        }
-        if (ident_start(c)) {
-            size_t b = i;
-            while (i < src.size() &&
-                   (ident_start(src[i]) || digit_ch(src[i]) || src[i] == '.'))
-                ++i;
-            Tok t;
-            t.kind = Tok::Kind::Ident;
-            t.s = std::string(src.substr(b, i - b));
-            t.line = line;
-            push(std::move(t));
-            continue;
-        }
-        // 数字：可带符号（本语法里 '-' 只出现在负数字面量与 '->' 中）
-        if (digit_ch(c) || ((c == '-' || c == '+') && i + 1 < src.size() && digit_ch(src[i + 1]))) {
-            size_t b = i;
-            if (c == '-' || c == '+') ++i;
-            bool is_float = false;
-            while (i < src.size() && digit_ch(src[i])) ++i;
-            if (i < src.size() && src[i] == '.') {
-                is_float = true;
-                ++i;
-                while (i < src.size() && digit_ch(src[i])) ++i;
-            }
-            if (i < src.size() && (src[i] == 'e' || src[i] == 'E')) {
-                size_t save = i;
-                size_t j = i + 1;
-                if (j < src.size() && (src[j] == '-' || src[j] == '+')) ++j;
-                if (j < src.size() && digit_ch(src[j])) {
-                    is_float = true;
-                    i = j;
-                    while (i < src.size() && digit_ch(src[i])) ++i;
-                } else {
-                    i = save;
-                }
-            }
-            Tok t;
-            t.line = line;
-            std::string text(src.substr(b, i - b));
-            if (is_float) {
-                t.kind = Tok::Kind::Float;
-                t.f = std::strtod(text.c_str(), nullptr);
-            } else {
-                t.kind = Tok::Kind::Int;
-                t.i = std::strtoll(text.c_str(), nullptr, 10);
-            }
-            t.s = std::move(text);
-            push(std::move(t));
-            continue;
-        }
-        if (c == '"' || c == '\'') {
-            char q = c;
-            ++i;
-            std::string s;
-            bool closed = false;
-            while (i < src.size()) {
-                char ch = src[i];
-                if (ch == '\\' && i + 1 < src.size()) {
-                    char e = src[i + 1];
-                    if (e == 'n') s.push_back('\n');
-                    else if (e == 't') s.push_back('\t');
-                    else if (e == '\\') s.push_back('\\');
-                    else if (e == '"' || e == '\'') s.push_back(e);
-                    else { s.push_back('\\'); s.push_back(e); }
-                    i += 2;
-                    continue;
-                }
-                if (ch == q) { ++i; closed = true; break; }
-                if (ch == '\n') break;  // 未闭合：交给调用点报错
-                s.push_back(ch);
-                ++i;
-            }
-            if (!closed) throw ParseError{line, "unterminated string literal"};
-            Tok t;
-            t.kind = Tok::Kind::Str;
-            t.s = std::move(s);
-            t.line = line;
-            push(std::move(t));
-            continue;
-        }
-        // '->' 与 '...' 是多字符记号，其余标点是单字符。
-        if (c == '-' && i + 1 < src.size() && src[i + 1] == '>') {
-            Tok t;
-            t.kind = Tok::Kind::Punct;
-            t.s = "->";
-            t.line = line;
-            push(std::move(t));
-            i += 2;
-            continue;
-        }
-        if (c == '.') {
-            size_t b = i;
-            while (i < src.size() && src[i] == '.') ++i;
-            Tok t;
-            t.kind = Tok::Kind::Punct;
-            t.s = std::string(src.substr(b, i - b));
-            t.line = line;
-            push(std::move(t));
-            continue;
-        }
-        static constexpr std::string_view kPunct = "()[],:=*";
-        if (kPunct.find(c) != std::string_view::npos) {
-            Tok t;
-            t.kind = Tok::Kind::Punct;
-            t.s = std::string(1, c);
-            t.line = line;
-            push(std::move(t));
-            ++i;
-            continue;
-        }
-        throw ParseError{line, std::string("unexpected character '") + c + "'"};
+inline bool is_docstring(const Stmt& s) {
+    if (s.kind != StmtKind::Expr) return false;
+    const auto& e = static_cast<const ExprStmt&>(s);
+    const auto* c = dynamic_cast<const Constant*>(e.value.get());
+    return c && c->ck == Constant::CK::Str;
+}
+
+inline const char* stmt_kind_name(StmtKind k) {
+    switch (k) {
+        case StmtKind::Expr: return "expression statement";
+        case StmtKind::Assign: return "assignment";
+        case StmtKind::AugAssign: return "augmented assignment";
+        case StmtKind::AnnAssign: return "annotated assignment";
+        case StmtKind::Return: return "return";
+        case StmtKind::Break: return "break";
+        case StmtKind::Continue: return "continue";
+        case StmtKind::Pass: return "pass";
+        case StmtKind::If: return "if";
+        case StmtKind::While: return "while";
+        case StmtKind::For: return "for";
+        case StmtKind::FunctionDef: return "def";
+        case StmtKind::ClassDef: return "class";
+        case StmtKind::Try: return "try";
+        case StmtKind::With: return "with";
+        case StmtKind::Raise: return "raise";
+        case StmtKind::Assert: return "assert";
+        case StmtKind::Import: return "import";
+        case StmtKind::ImportFrom: return "from-import";
+        case StmtKind::Global: return "global";
+        case StmtKind::Nonlocal: return "nonlocal";
+        case StmtKind::Delete: return "del";
+        case StmtKind::Match: return "match";
+        case StmtKind::CImport: return "cimport";
+        case StmtKind::StructDef: return "struct";
     }
-    Tok end;
-    end.kind = Tok::Kind::End;
-    end.line = line;
-    out.push_back(std::move(end));
-    return out;
+    return "statement";
 }
 
-// ── 语法（递归下降；出错抛 ParseError，由 load() 统一转成文件:行 诊断）──
-class Parser {
-  public:
-    Parser(std::string_view path, std::vector<Tok> toks) : path_(path), t_(std::move(toks)) {}
+// 注解表达式的「类型名」：用于判断 unknown 是显式写的还是解析失败退化的。
+inline std::string annotation_base_name(const Expr* e) {
+    if (!e) return {};
+    if (const auto* n = dynamic_cast<const Name*>(e)) return n->id;
+    if (const auto* a = dynamic_cast<const Attribute*>(e)) return a->attr;
+    if (const auto* s = dynamic_cast<const Subscript*>(e)) return annotation_base_name(s->value.get());
+    if (const auto* c = dynamic_cast<const Constant*>(e))
+        return c->ck == Constant::CK::Str ? "string-annotation" : "constant";
+    return {};
+}
 
-    ModuleSig parse_module(const std::string& expect_module) {
+// 注解 → 类型。复用 typecheck 的 parse_annotation（经 public 薄封装），
+// 所以类型语法与函数标注/变量标注完全同一份实现。
+inline TypePtr resolve_type(TypeChecker& tc, Expr* e, int line, const std::string& what) {
+    if (!e) fail(line, what + " needs a type annotation");
+    TypePtr t = tc.parse_annotation_for_decl(e, line);
+    if (!t) fail(line, what + ": cannot parse the type annotation");
+    if (t->kind == TyKind::Unknown) {
+        // 只有显式写 unknown/Any/object 才允许留在 unknown 域。其它名字
+        // （拼错、Protocol、未登记的类）一律报错：native 签名静默退化成
+        // unknown 会让调用点不再 coerce，运行期按错的 ABI 传参。
+        const std::string base = annotation_base_name(e);
+        if (base != "unknown" && base != "Any" && base != "object")
+            fail(line, what + ": '" + base +
+                           "' is not a supported native signature type "
+                           "(write `unknown` explicitly if that is intended)");
+    }
+    return t;
+}
+
+// 约定：pa_<模块名，点变下划线>_<函数名>。os.path.join → pa_os_path_join。
+inline std::string default_symbol(const std::string& module, const std::string& name) {
+    std::string s = "pa_";
+    for (char c : module) s.push_back(c == '.' ? '_' : c);
+    s.push_back('_');
+    s += name;
+    return s;
+}
+
+// @native("pa_xxx")：唯一允许的装饰器；参数必须是一个非空字符串字面量。
+inline std::string native_decorator_symbol(const Expr& d, const FunctionDef& fd) {
+    const auto* call = dynamic_cast<const Call*>(&d);
+    if (!call) {
+        const auto* n = dynamic_cast<const Name*>(&d);
+        if (n && n->id == "native")
+            fail(d.line, "@native needs a runtime symbol: @native(\"pa_xxx\")");
+        fail(d.line, "unknown decorator on '" + fd.name +
+                         "' (only @native(\"pa_symbol\") is allowed in a signature file)");
+    }
+    const auto* n = dynamic_cast<const Name*>(call->func.get());
+    if (!n || n->id != "native")
+        fail(d.line, "unknown decorator on '" + fd.name +
+                         "' (only @native(\"pa_symbol\") is allowed in a signature file)");
+    if (call->args.size() != 1 || !call->keywords.empty())
+        fail(d.line, "@native expects exactly one string literal argument, e.g. "
+                     "@native(\"pa_time_time\")");
+    const auto* c = dynamic_cast<const Constant*>(call->args[0].get());
+    if (!c || c->ck != Constant::CK::Str || c->s.empty())
+        fail(d.line, "@native argument must be a non-empty string literal (runtime symbol name)");
+    return c->s;
+}
+
+// def 的函数体：只允许 pass（可带前置 docstring）。
+inline void check_body(const FunctionDef& fd) {
+    size_t i = 0;
+    if (i < fd.body.size() && is_docstring(*fd.body[i])) ++i;
+    if (i >= fd.body.size())
+        fail(fd.line, "function '" + fd.name + "' has no body (signature bodies must be `pass`)");
+    const Stmt& s = *fd.body[i];
+    if (s.kind != StmtKind::Pass)
+        fail(s.line, "function '" + fd.name + "' body must be `pass` (optionally preceded by a "
+                     "docstring); found " + std::string(stmt_kind_name(s.kind)));
+    if (i + 1 != fd.body.size())
+        fail(fd.body[i + 1]->line, "function '" + fd.name +
+                                       "' body must contain only `pass`; found an extra " +
+                                       stmt_kind_name(fd.body[i + 1]->kind));
+}
+
+// 声明文件 → ModuleSig。
+class DeclParser {
+  public:
+    DeclParser(std::string path, TypeChecker& tc) : path_(std::move(path)), tc_(tc) {}
+
+    ModuleSig parse(Module& mod, const std::string& module) {
         ModuleSig ms;
-        bool saw_module = false;
-        while (cur().kind != Tok::Kind::End) {
-            if (cur().kind != Tok::Kind::Ident)
-                fail(cur(), std::string("expected a statement keyword, got '") + cur().s + "'");
-            const std::string kw = cur().s;
-            if (kw == "module") {
-                if (saw_module) fail(cur(), "duplicate 'module' statement");
-                next();
-                if (cur().kind != Tok::Kind::Ident) fail(cur(), "expected module name");
-                ms.module = cur().s;
-                ms.path = std::string(path_);
-                if (ms.module != expect_module)
-                    fail(cur(), "'module " + ms.module + "' does not match file name (expects '" +
-                                    expect_module + "')");
-                next();
-                saw_module = true;
-            } else if (kw == "func") {
-                ms.funcs.push_back(parse_func());
-            } else if (kw == "const") {
-                ms.consts.push_back(parse_const());
-            } else {
-                fail(cur(), "unknown statement '" + kw + "' (expected module/func/const)");
+        ms.module = module;
+        ms.path = path_;
+        for (auto& st : mod.body) {
+            if (is_docstring(*st)) continue;  // 模块 docstring：允许
+            switch (st->kind) {
+                case StmtKind::FunctionDef: {
+                    auto& fd = static_cast<FunctionDef&>(*st);
+                    ms.funcs.push_back(parse_func(fd, module));
+                    break;
+                }
+                case StmtKind::AnnAssign:
+                    ms.consts.push_back(parse_const(static_cast<AnnAssign&>(*st)));
+                    break;
+                case StmtKind::Assign: {
+                    auto& as = static_cast<Assign&>(*st);
+                    std::string name;
+                    if (!as.targets.empty())
+                        if (const auto* n = dynamic_cast<const Name*>(as.targets[0].get()))
+                            name = n->id;
+                    fail(as.line, "constant '" + name + "' needs a type annotation (write '" + name +
+                                      ": T = <literal>')");
+                }
+                default:
+                    fail(st->line, std::string("only 'def f(...) -> T: pass' and "
+                                               "'NAME: T = <literal>' are allowed in a signature "
+                                               "file; found ") +
+                                       stmt_kind_name(st->kind));
             }
         }
-        if (!saw_module) fail(cur(), "missing 'module <name>' statement");
-        // 重名检查：同一模块里 Python 名必须唯一（否则后一条静默覆盖前一条）。
+        // 重名检查：函数与常量共用模块命名空间。
         std::set<std::string> seen;
         for (auto& f : ms.funcs)
-            if (!seen.insert(f.name).second) fail_line(f.line, "duplicate declaration '" + f.name + "'");
+            if (!seen.insert(f.name).second)
+                fail(f.line, "duplicate declaration '" + f.name + "'");
         for (auto& c : ms.consts)
-            if (!seen.insert(c.name).second) fail_line(c.line, "duplicate declaration '" + c.name + "'");
+            if (!seen.insert(c.name).second)
+                fail(c.line, "duplicate declaration '" + c.name + "'");
         return ms;
     }
 
   private:
-    const Tok& cur() const { return t_[i_]; }
-    const Tok& next() { return t_[i_ < t_.size() - 1 ? ++i_ : i_]; }
-    [[noreturn]] void fail(const Tok& t, const std::string& msg) const {
-        throw ParseError{t.line, msg};
-    }
-    [[noreturn]] void fail_line(int line, const std::string& msg) const { throw ParseError{line, msg}; }
-
-    bool is_punct(std::string_view p) const {
-        return cur().kind == Tok::Kind::Punct && cur().s == p;
-    }
-    bool punct_at(size_t k, std::string_view p) const {
-        return k < t_.size() && t_[k].kind == Tok::Kind::Punct && t_[k].s == p;
-    }
-    void expect_punct(std::string_view p) {
-        if (!is_punct(p))
-            fail(cur(), "expected '" + std::string(p) + "', got '" + cur().s + "'");
-        next();
-    }
-    std::string expect_ident(const char* what) {
-        if (cur().kind != Tok::Kind::Ident) fail(cur(), std::string("expected ") + what);
-        std::string s = cur().s;
-        next();
-        return s;
-    }
-
-    SigFunc parse_func() {
+    SigFunc parse_func(FunctionDef& fd, const std::string& module) {
         SigFunc f;
-        f.line = cur().line;
-        next();  // func
-        f.name = expect_ident("function name");
-        f.rt_symbol = expect_ident("runtime symbol name (e.g. pa_time_sleep)");
-        expect_punct("(");
-        bool kwonly_mode = false;
-        bool first = true;
-        while (!is_punct(")")) {
-            if (!first) expect_punct(",");
-            first = false;
-            if (is_punct(")")) break;  // 允许尾逗号
-            if (is_punct("*")) {
-                const int star_line = cur().line;
-                next();
-                if (cur().kind == Tok::Kind::Ident && punct_at(i_ + 1, ":")) {
-                    // *args: 类型
-                    f.varargs = true;
-                    f.vararg_name = cur().s;
-                    next();
-                    expect_punct(":");
-                    f.vararg_ty = parse_type();
-                } else {
-                    // 单独的 '*'：其后是 keyword-only
-                    if (kwonly_mode) fail_line(star_line, "duplicate '*' in parameter list");
-                    kwonly_mode = true;
-                }
-                continue;
-            }
-            SigParam p;
-            p.kwonly = kwonly_mode;
-            p.name = expect_ident("parameter name");
-            expect_punct(":");
-            p.ty = parse_type();
-            if (is_punct("=")) {
-                next();
-                p.has_default = true;
-                p.def = parse_literal();
-            }
-            if (p.kwonly) f.kwonly.push_back(std::move(p));
-            else f.pos.push_back(std::move(p));
+        f.line = fd.line;
+        f.name = fd.name;
+        if (fd.is_async) fail(fd.line, "async def is not allowed in a signature file");
+        // 装饰器：@native("pa_xxx") 覆盖约定推导的运行期符号。
+        for (auto& d : fd.decorators) {
+            if (!d) continue;
+            if (!f.rt_symbol.empty()) fail(d->line, "duplicate decorator on '" + fd.name + "'");
+            f.rt_symbol = native_decorator_symbol(*d, fd);
         }
-        expect_punct(")");
-        expect_punct("->");
-        f.ret = parse_type();
-        return f;  // 运行期符号在整文件解析完后统一反查（见 resolve_rt_symbols）
+        if (f.rt_symbol.empty()) f.rt_symbol = default_symbol(module, fd.name);
+        check_body(fd);
+
+        // 位置参数 + 默认值（Python 的 defaults 对齐到最后 ndef 个位置参数）。
+        std::vector<Arg*> ordered;
+        for (auto& a : fd.args.posonly) ordered.push_back(&a);
+        for (auto& a : fd.args.args) ordered.push_back(&a);
+        const size_t ndef = fd.args.defaults.size();
+        if (ndef > ordered.size())
+            fail(fd.line, "function '" + fd.name + "': default value without a parameter");
+        const size_t first_def = ordered.size() - ndef;
+        for (size_t i = 0; i < ordered.size(); ++i) {
+            Arg& a = *ordered[i];
+            SigParam p;
+            p.name = a.name;
+            const std::string what = "parameter '" + a.name + "' of '" + fd.name + "'";
+            p.ty = resolve_type(tc_, a.annotation.get(), fd.line, what);
+            if (i >= first_def) {
+                const Expr* dv = fd.args.defaults[i - first_def].get();
+                auto lit = literal_of_expr(dv);
+                if (!lit)
+                    fail(dv ? dv->line : fd.line,
+                         "default value of parameter '" + a.name +
+                             "' must be a literal (int / float / str / bool / None)");
+                p.has_default = true;
+                p.def = *lit;
+            }
+            f.pos.push_back(std::move(p));
+        }
+        if (fd.args.vararg) {
+            f.varargs = true;
+            f.vararg_name = fd.args.vararg->name;
+            f.vararg_ty = resolve_type(tc_, fd.args.vararg->annotation.get(), fd.line,
+                                       "*" + fd.args.vararg->name + " of '" + fd.name + "'");
+        }
+        // keyword-only 参数（'*' 之后）。
+        for (size_t i = 0; i < fd.args.kwonly.size(); ++i) {
+            Arg& a = fd.args.kwonly[i];
+            SigParam p;
+            p.kwonly = true;
+            p.name = a.name;
+            p.ty = resolve_type(tc_, a.annotation.get(), fd.line,
+                                "parameter '" + a.name + "' of '" + fd.name + "'");
+            if (i < fd.args.kw_defaults.size() && fd.args.kw_defaults[i]) {
+                const Expr* dv = fd.args.kw_defaults[i].get();
+                auto lit = literal_of_expr(dv);
+                if (!lit)
+                    fail(dv ? dv->line : fd.line,
+                         "default value of parameter '" + a.name + "' must be a literal");
+                p.has_default = true;
+                p.def = *lit;
+            }
+            f.kwonly.push_back(std::move(p));
+        }
+        if (fd.args.kwarg) {
+            f.kwargs = true;
+            f.kwarg_name = fd.args.kwarg->name;
+            f.kwarg_ty = resolve_type(tc_, fd.args.kwarg->annotation.get(), fd.line,
+                                      "**" + fd.args.kwarg->name + " of '" + fd.name + "'");
+        }
+        // 返回类型：必须写（native 签名不写返回值等于让调用点猜）。
+        f.ret = resolve_type(tc_, fd.returns.get(), fd.line, "return type of '" + fd.name + "'");
+        return f;
     }
 
-    SigConst parse_const() {
+    SigConst parse_const(AnnAssign& aa) {
         SigConst c;
-        c.line = cur().line;
-        next();  // const
-        c.name = expect_ident("constant name");
-        c.ty = parse_type();
-        expect_punct("=");
-        c.val = parse_literal();
-        // 字面量种类与声明类型必须一致（否则运行期会按错宽度取值）。
+        c.line = aa.line;
+        const auto* n = dynamic_cast<const Name*>(aa.target.get());
+        if (!n) fail(aa.line, "constant target must be a simple name");
+        c.name = n->id;
+        if (!aa.annotation) fail(aa.line, "constant '" + c.name + "' needs a type annotation");
+        c.ty = resolve_type(tc_, aa.annotation.get(), aa.line, "constant '" + c.name + "'");
+        if (!aa.value) fail(aa.line, "constant '" + c.name + "' needs a value");
+        auto lit = literal_of_expr(aa.value.get());
+        if (!lit)
+            fail(aa.value->line, "constant '" + c.name +
+                                     "' initializer must be a literal (int / float / str / bool / None)");
+        c.val = *lit;
+        // 字面量种类与声明类型必须一致（否则运行期按错宽度取值）。
         const TyKind want = c.ty ? c.ty->kind : TyKind::Unknown;
         bool ok = true;
         switch (c.val.kind) {
@@ -404,93 +450,13 @@ class Parser {
             case LiteralValue::Kind::None: ok = want == TyKind::Unknown || want == TyKind::None; break;
             default: ok = false; break;
         }
-        if (!ok) fail_line(c.line, "constant '" + c.name + "' initializer does not match its type");
+        if (!ok)
+            fail(c.line, "constant '" + c.name + "': initializer does not match the declared type");
         return c;
     }
 
-    // ── 类型 ──
-    TypePtr parse_type() {
-        std::string base = expect_ident("type name");
-        std::vector<TypePtr> args;
-        bool variadic = false;
-        if (is_punct("[")) {
-            next();
-            bool first = true;
-            while (!is_punct("]")) {
-                if (!first) expect_punct(",");
-                first = false;
-                if (is_punct("]")) break;  // 尾逗号
-                if (is_punct("...")) { variadic = true; next(); continue; }
-                args.push_back(parse_type());
-            }
-            expect_punct("]");
-        }
-        return make_type(base, args, variadic);
-    }
-
-    [[noreturn]] void bad_type(const std::string& base, size_t nargs,
-                               const std::string& why) const {
-        fail_line(cur().line, "type '" + base + "'" + (nargs ? " with type arguments" : "") +
-                                  ": " + why);
-    }
-
-    TypePtr make_type(const std::string& base, const std::vector<TypePtr>& args, bool variadic) {
-        const size_t n = args.size();
-        if (variadic && n != 1) bad_type(base, n, "'...' is only valid as tuple[T, ...]");
-        auto scalar = [&](const TypePtr& t) {
-            if (n) bad_type(base, n, "takes no type arguments");
-            return t;
-        };
-        if (base == "int") return scalar(t_int());
-        if (base == "float") return scalar(t_float());
-        if (base == "bool") return scalar(t_bool());
-        if (base == "str") return scalar(t_str());
-        if (base == "bytes") return scalar(t_bytes());
-        if (base == "none" || base == "None") return scalar(t_none());
-        if (base == "unknown" || base == "any" || base == "Any" || base == "object")
-            return scalar(t_unknown());
-        if (base == "file" || base == "File") return scalar(t_file());
-        if (base == "dylib") return scalar(t_dylib());
-        if (base == "regex" || base == "Regex") return scalar(t_regex());
-        if (base == "match" || base == "Match") return scalar(t_match());
-        if (base == "popen" || base == "Popen") return scalar(t_popen());
-        if (base == "list") { if (n != 1) bad_type(base, n, "expects list[T]"); return mk_list(args[0]); }
-        if (base == "set") { if (n != 1) bad_type(base, n, "expects set[T]"); return mk_set(args[0]); }
-        if (base == "deque") { if (n != 1) bad_type(base, n, "expects deque[T]"); return mk_deque(args[0]); }
-        if (base == "range") { if (n != 1) bad_type(base, n, "expects range[T]"); return mk_range(args[0]); }
-        if (base == "optional" || base == "Optional") {
-            if (n != 1) bad_type(base, n, "expects optional[T]");
-            return mk_optional(args[0]);
-        }
-        if (base == "dict") {
-            if (n != 2) bad_type(base, n, "expects dict[K, V]");
-            return mk_dict(args[0], args[1]);
-        }
-        if (base == "tuple") {
-            if (variadic) return mk_tuple_rest(args[0]);
-            if (n == 0) return mk_tuple({});
-            return mk_tuple(args);
-        }
-        bad_type(base, n, "unknown type name");
-    }
-
-    LiteralValue parse_literal() {
-        LiteralValue v;
-        const Tok& t = cur();
-        if (t.kind == Tok::Kind::Int) { v.kind = LiteralValue::Kind::Int; v.i = t.i; next(); return v; }
-        if (t.kind == Tok::Kind::Float) { v.kind = LiteralValue::Kind::Float; v.f = t.f; next(); return v; }
-        if (t.kind == Tok::Kind::Str) { v.kind = LiteralValue::Kind::Str; v.s = t.s; next(); return v; }
-        if (t.kind == Tok::Kind::Ident) {
-            if (t.s == "true" || t.s == "True") { v.kind = LiteralValue::Kind::Bool; v.b = true; next(); return v; }
-            if (t.s == "false" || t.s == "False") { v.kind = LiteralValue::Kind::Bool; v.b = false; next(); return v; }
-            if (t.s == "none" || t.s == "None") { v.kind = LiteralValue::Kind::None; next(); return v; }
-        }
-        fail(t, "expected a literal (int / float / string / true / false / None)");
-    }
-
-    std::string_view path_;
-    std::vector<Tok> t_;
-    size_t i_ = 0;
+    std::string path_;
+    TypeChecker& tc_;
 };
 
 // ── 运行期符号 → RtFn 反查表 ─────────────────────────────────────────
@@ -509,14 +475,12 @@ inline const std::map<std::string, RtFn>& rtfn_by_symbol() {
     return table;
 }
 
-[[noreturn]] inline void fatal(const std::string& path, int line, const std::string& msg);
-
 // 运行期符号 → RtFn：只允许反查到**已经存在**的运行期入口，所以声明文件
 // 不可能凭空造出一个后端不会生成调用的编号。
 //
 // 一次扫描只为「这个文件需要的符号」找编号（time 的 8 个符号都在 RtFn 表
 // 前半段，扫到即停，实测 ~2us）；扫完仍有没找到的就硬失败并报声明行号。
-// 走全表扫描（637 个入口）只在「写错符号名」这条错误路径上发生。
+// 全表扫描（637 个入口）只在「写错符号名」这条错误路径上发生。
 inline void resolve_rt_symbols(ModuleSig& ms) {
     std::unordered_map<std::string, std::vector<size_t>> want;
     for (size_t i = 0; i < ms.funcs.size(); ++i) want[ms.funcs[i].rt_symbol].push_back(i);
@@ -537,36 +501,18 @@ inline void resolve_rt_symbols(ModuleSig& ms) {
         if (idxs.empty()) continue;
         fatal(ms.path, ms.funcs[idxs[0]].line,
               "runtime symbol '" + sym +
-                  "' is not in the RtFn table (add the runtime entry + src/ir_rtfn*.h first)");
+                  "' is not in the RtFn table (add the runtime entry + src/ir_rtfn*.h first, "
+                  "or fix @native(\"...\"))");
     }
-}
-
-inline std::string sig_path(const std::string& module) {
-    return (std::filesystem::path(PYADAMAS_STDLIB_DIR) / "sigs" / (module + ".pysig")).string();
-}
-
-[[noreturn]] inline void fatal(const std::string& path, int line, const std::string& msg) {
-    std::fprintf(stderr, "error: %s:%d: %s\n", path.c_str(), line, msg.c_str());
-    std::exit(1);
-}
-
-inline std::string read_file_or_fatal(const std::string& path) {
-    std::FILE* f = std::fopen(path.c_str(), "rb");
-    if (!f) fatal(path, 0, "cannot open declaration file");
-    std::string out;
-    char buf[8192];
-    size_t n;
-    while ((n = std::fread(buf, 1, sizeof buf, f)) > 0) out.append(buf, n);
-    std::fclose(f);
-    return out;
 }
 
 }  // namespace detail
 
 // ── 对外接口 ──────────────────────────────────────────────────────────
 
-// 读并解析 <stdlib>/sigs/<module>.pysig。没有声明文件返回 nullptr。
-// 有文件但语法错/符号错 → 打印 <file>:<line>: <msg> 后退出（不静默）。
+// 读并解析 <stdlib>/sigs/<模块路径>.pysig（Python 语法）。没有声明文件返回
+// nullptr（调用方退回硬编码）。有文件但内容不合法 → 打印 <文件>:<行>: <msg>
+// 后退出（绝不静默跳过）。
 inline const ModuleSig* load(const std::string& module) {
     struct Cache {
         std::map<std::string, std::unique_ptr<ModuleSig>> hit;
@@ -575,23 +521,50 @@ inline const ModuleSig* load(const std::string& module) {
     static Cache cache;
     if (auto it = cache.hit.find(module); it != cache.hit.end()) return it->second.get();
     if (cache.miss.count(module)) return nullptr;
+    // 模块名即路径：非法名字（空段 / .. / 绝对路径 / 非法字符）直接报错。
+    if (!detail::valid_module_name(module))
+        detail::fatal(detail::sigs_dir().string(), 0,
+                      "invalid module name '" + module +
+                          "' (a signature module's name is its path under stdlib/sigs/, "
+                          "e.g. os.path → os/path.pysig)");
     const std::string path = detail::sig_path(module);
     std::error_code ec;
     if (!std::filesystem::is_regular_file(path, ec)) {
         cache.miss.insert(module);
         return nullptr;
     }
+    // 路径防护（纵深防御）：解析出的真实路径必须仍在 stdlib/sigs/ 下，
+    // 防止符号链接把声明目录指到别处（名字校验已经挡了 .. 穿越）。
+    {
+        auto root = std::filesystem::weakly_canonical(detail::sigs_dir(), ec);
+        auto real = std::filesystem::weakly_canonical(path, ec);
+        if (ec || root.empty() || real.string().rfind(root.string() + "/", 0) != 0)
+            detail::fatal(path, 0, "declaration file resolves outside stdlib/sigs/ (module '" +
+                                       module + "')");
+    }
     const std::string src = detail::read_file_or_fatal(path);
-    auto ms = std::make_unique<ModuleSig>();
+    std::unique_ptr<Module> ast;
     try {
-        detail::Parser p(path, detail::lex(src));
-        *ms = p.parse_module(module);
-        detail::resolve_rt_symbols(*ms);
-    } catch (const detail::ParseError& e) {
+        std::vector<Token> toks = Lexer(src).run();
+        Parser parser(std::move(toks));
+        ast = parser.parse();
+    } catch (const LexError& e) {
+        detail::fatal(path, e.line, e.what());
+    } catch (const ParseError& e) {
+        detail::fatal(path, e.line, e.what());
+    }
+    ModuleSig ms;
+    try {
+        TypeChecker tc(path);  // 只用来解析注解，不跑 check
+        detail::DeclParser dp(path, tc);
+        ms = dp.parse(*ast, module);
+    } catch (const detail::DeclError& e) {
         detail::fatal(path, e.line, e.msg);
     }
-    auto* raw = ms.get();
-    cache.hit[module] = std::move(ms);
+    detail::resolve_rt_symbols(ms);
+    auto out = std::make_unique<ModuleSig>(std::move(ms));
+    auto* raw = out.get();
+    cache.hit[module] = std::move(out);
     return raw;
 }
 
@@ -660,7 +633,7 @@ inline bool is_declared(const std::string& module) { return load(module) != null
 inline std::string describe(const ModuleSig& ms) {
     std::string out = "module " + ms.module + " (" + ms.path + ")\n";
     for (auto& f : ms.funcs)
-        out += "  func " + f.name + " " + f.rt_symbol + " (" + std::to_string(f.pos.size()) +
+        out += "  def " + f.name + " -> " + f.rt_symbol + " (" + std::to_string(f.pos.size()) +
                " pos) -> ret\n";
     for (auto& c : ms.consts) out += "  const " + c.name + "\n";
     return out;
