@@ -285,6 +285,19 @@ bool Lowerer::builtin_value(const std::string& module, const std::string& member
     // sys.maxsize 已迁到 stdlib/sigs/sys.pysig；下面是运行期调用生成的
     // 成员（argv/executable/标准流），pysig 无法表达，保留在 C++。
     if (module == "sys") {
+        if (member == "version_info") {
+            // (3, 14, 4, "final", 0)：与 stdlib/sigs/sys.pysig 的 hexversion /
+            // version 同一口径（项目对标的 CPython 3.14.4）。元组是新分配的
+            // 堆对象，进临时栈。
+            ty = mk_tuple({t_int(), t_int(), t_int(), t_str(), t_int()});
+            Inst mt;
+            mt.op = IrOp::MakeTuple;
+            mt.imm = list_kind_filled(ty);
+            mt.args = {const_int(3), const_int(14), const_int(4), const_str("final"),
+                       const_int(0)};
+            out = def_heap(ty, std::move(mt));  // def_heap 已把堆结果登进临时栈
+            return true;
+        }
         if (member == "argv") {
             ty = mk_list(t_str());
             out = call_runtime(RtFn::SysArgv, ty, {});

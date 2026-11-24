@@ -632,21 +632,40 @@ void TypeChecker::stmt_try(Try& t) {
             if (!h.name.empty()) {
                 // as e 绑定异常值对象。富异常类（有字段/方法）绑定成真实例，
                 // 字段/方法走普通类访问；pass-only 或内置异常仍是 Exception 值。
+                //
+                // except (A, B) as e：逐个解析分支，**全部解析成同一个类型**时
+                // 用它（`except (MyErr, MyErr)` 这类实际是同一个类的写法），
+                // 否则退到 Exception 基类 —— 多类型的方法面是交集，静态上不
+                // 硬造 union（见 docs/frontend-gaps.md）。
+                auto resolve_exc = [&](Expr* e) -> TypePtr {
+                    if (!e || e->kind != ExprKind::Name) return nullptr;
+                    auto& hn = static_cast<Name&>(*e);
+                    if (is_exception_name(hn.id)) return mk_exception(hn.id);
+                    if (auto* sym = lookup(hn.id);
+                        sym && sym->ty && sym->ty->kind == TyKind::Class && sym->ty->cls &&
+                        sym->ty->cls->is_exception_class)
+                        return sym->ty->cls->is_rich_exception ? mk_class(sym->ty->cls)
+                                                               : mk_exception(sym->ty->cls->name);
+                    return nullptr;
+                };
                 TypePtr et = mk_exception("Exception");
-                if (h.type && h.type->kind == ExprKind::Name) {
-                    auto& hn = static_cast<Name&>(*h.type);
-                    if (is_exception_name(hn.id)) {
-                        et = mk_exception(hn.id);
-                    } else if (auto* sym = lookup(hn.id);
-                               sym && sym->ty && sym->ty->kind == TyKind::Class &&
-                               sym->ty->cls && sym->ty->cls->is_exception_class &&
-                               sym->ty->cls->is_rich_exception) {
-                        et = mk_class(sym->ty->cls);
-                    } else if (auto* sym2 = lookup(hn.id);
-                               sym2 && sym2->ty && sym2->ty->kind == TyKind::Class &&
-                               sym2->ty->cls && sym2->ty->cls->is_exception_class) {
-                        et = mk_exception(sym2->ty->cls->name);
+                if (h.type && h.type->kind == ExprKind::Tuple) {
+                    TypePtr acc = nullptr;
+                    bool same = true;
+                    for (auto& el : static_cast<TupleExpr&>(*h.type).elts) {
+                        TypePtr one = resolve_exc(el.get());
+                        if (!one) {
+                            same = false;
+                            break;
+                        }
+                        if (!acc)
+                            acc = one;
+                        else if (!type_eq(acc, one))
+                            same = false;
                     }
+                    if (acc && same) et = acc;
+                } else if (auto one = resolve_exc(h.type.get())) {
+                    et = one;
                 }
                 auto sc = std::make_unique<Scope>();
                 sc->parent = cur_;

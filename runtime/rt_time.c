@@ -16,6 +16,35 @@ double pa_time_time(void) {
     return ts_to_double(&ts);
 }
 
+static int64_t ts_to_ns(const struct timespec* ts) {
+    return (int64_t)ts->tv_sec * 1000000000LL + (int64_t)ts->tv_nsec;
+}
+
+int64_t pa_time_time_ns(void) {
+    struct timespec ts;
+    clock_gettime(CLOCK_REALTIME, &ts);
+    return ts_to_ns(&ts);
+}
+
+int64_t pa_time_monotonic_ns(void) {
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return ts_to_ns(&ts);
+}
+
+/* perf_counter 与 monotonic 同源（CPython 在 Linux 上也用 CLOCK_MONOTONIC）。 */
+int64_t pa_time_perf_counter_ns(void) {
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return ts_to_ns(&ts);
+}
+
+double pa_time_process_time(void) {
+    struct timespec ts;
+    clock_gettime(CLOCK_PROCESS_CPUTIME_ID, &ts);
+    return ts_to_double(&ts);
+}
+
 double pa_time_monotonic(void) {
     struct timespec ts;
     clock_gettime(CLOCK_MONOTONIC, &ts);

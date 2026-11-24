@@ -93,6 +93,12 @@ pyadamas::ModuleInfoPtr builtin_module(const std::string& name) {
         //   exc_info()：返回类型含 ClassObj，.pysig 注解语法表达不了。
         info->globals["argv"] = pyadamas::mk_list(pyadamas::t_str());
         info->globals["executable"] = pyadamas::t_str();
+        // version_info：pysig 的常量语法只收标量，五元组（major, minor,
+        // micro, releaselevel, serial）只能在这里声明，值在降级层按同一个
+        // 口径构造（lower/import.cpp 的 builtin_value）。
+        info->globals["version_info"] =
+            pyadamas::mk_tuple({pyadamas::t_int(), pyadamas::t_int(), pyadamas::t_int(),
+                                pyadamas::t_str(), pyadamas::t_int()});
         info->globals["stdin"] = pyadamas::t_file();
         info->globals["stdout"] = pyadamas::t_file();
         info->globals["stderr"] = pyadamas::t_file();

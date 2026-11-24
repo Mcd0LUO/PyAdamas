@@ -1924,3 +1924,11 @@ int64_t pa_bytes_method(PyAdamasStr* s, int64_t op, int64_t a0, int64_t a1, int6
     }
     return 0;
 }
+
+/* sys.intern(s)：返回同一份字符串（+1）。pa 没有驻留表：语义上 interning
+   是优化，相等性不变；唯一差异是「动态构造的相等串」不保证同一对象
+   （CPython 会返回同一份）。见 docs/frontend-gaps.md。 */
+PyAdamasStr* pa_sys_intern(PyAdamasStr* s) {
+    pa_rc_inc(s);
+    return s;
+}

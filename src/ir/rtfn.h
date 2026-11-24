@@ -264,6 +264,7 @@ enum class RtFn : uint16_t {
     MathIsnan, MathIsinf, MathIsfinite, MathFactorial, MathGcd, MathLcm, MathFsum,
     HashValue, HashF64, MathAcos, MathAsin, MathAtan, MathAcosh, MathAsinh, MathAtanh, MathCbrt, MathCosh, MathSinh, MathTanh, MathExp2, MathExpm1, MathLog1p, MathErf, MathErfc, MathGamma, MathLgamma, MathUlp, MathNextafter, MathRemainder, MathLdexp, MathFma, MathIsclose, MathFrexp, MathModf, MathIsqrt, MathComb, MathPerm, MathProd, MathSumprod, MathDist,
     SysArgv,      // () -> list*
+    SysIntern,    // (str*) -> str*  sys.intern：驻留表命中返回同一份（+1）
     SysExit,      // (i64 code) -> noreturn
     GenNext,      // (gen*) -> i64  取下一个值；结束抛 StopIteration
     GenNextOpt,   // (gen*, i64* ok) -> i64  结束时不抛，写 ok=0
@@ -370,6 +371,10 @@ enum class RtFn : uint16_t {
     PopenSendSignal,       // (popen*, i64 sig) -> void
     PopenCommunicate,      // (popen*, str* input) -> tuple[str, str]
     TimeTime,              // () -> f64
+    TimeTimeNs,            // () -> i64  CLOCK_REALTIME 纳秒
+    TimeMonotonicNs,       // () -> i64  CLOCK_MONOTONIC 纳秒
+    TimePerfCounterNs,     // () -> i64  CLOCK_MONOTONIC 纳秒（perf_counter 同源）
+    TimeProcessTime,       // () -> f64  CLOCK_PROCESS_CPUTIME_ID
     TimeMonotonic,         // () -> f64
     TimePerfCounter,       // () -> f64
     TimeSleep,             // (f64 secs) -> void
@@ -416,6 +421,7 @@ enum class RtFn : uint16_t {
     RegexSplitStr,         // (str* pat, str* text, i64 maxsplit, i64 flags) -> list*
     RegexSplit,            // (regex*, str* text, i64 maxsplit) -> list*
     RegexEscape,           // (str*) -> str*
+    RegexPurge,            // () -> void  清正则缓存（pa 没有编译缓存，no-op）
     RegexPatternGroups,    // (regex*) -> i64
     RegexPatternFlags,     // (regex*) -> i64
     RegexPatternStr,       // (regex*) -> str*
@@ -482,12 +488,18 @@ enum class RtFn : uint16_t {
     PathTouch,             // (path*) -> i64
     RandRange,             // (rng*, a, b, step) -> i64
     RandGetrandbits,       // (rng*, k) -> i64
+    RandBytes,             // (i64 n) -> str*  全局 rng 产生 n 字节（bytes）
     RandGauss,             // (rng*, mu, sigma) -> f64
     RandExpovariate,       // (rng*, lambd) -> f64
     RandTriangular,        // (rng*, low, high, mode) -> f64
     RandSample,            // (rng*, list*, k) -> list*
     RandChoices,           // (rng*, list*, k) -> list*
     OsGetpid,              // () -> i64
+    OsGetuid,              // () -> i64  getuid(2)
+    OsGeteuid,             // () -> i64  geteuid(2)
+    OsGetppid,             // () -> i64  getppid(2)
+    OsUrandom,             // (i64 n) -> str*  n 个随机字节（bytes，读 /dev/urandom）
+    OsStrerror,            // (i64 errnum) -> str*  strerror(3)
     OsChdir,               // (str*) -> void
     OsChmod,               // (str*, i64) -> void
     OsAccess,              // (str*, i64) -> i64

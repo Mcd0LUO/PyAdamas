@@ -2,6 +2,7 @@
 #include "rt_internal.h"
 
 #include <dirent.h>
+#include <fcntl.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -303,6 +304,40 @@ PyAdamasStr* pa_os_path_expanduser(PyAdamasStr* s) {
 /* ── 补充的常用项 ───────────────────────────────────────────── */
 
 int64_t pa_os_getpid(void) { return (int64_t)getpid(); }
+
+int64_t pa_os_getuid(void) { return (int64_t)getuid(); }
+int64_t pa_os_geteuid(void) { return (int64_t)geteuid(); }
+int64_t pa_os_getppid(void) { return (int64_t)getppid(); }
+
+/* os.urandom(n)：读 /dev/urandom。返回 bytes（pub == len，与 str 同形）。 */
+PyAdamasStr* pa_os_urandom(int64_t n) {
+    if (n < 0) pa_raise_c("ValueError", "negative argument not allowed");
+    PyAdamasStr* s = str_alloc_raw(n);
+    char* p = (char*)s->data;
+    if (n > 0) {
+        int fd = open("/dev/urandom", O_RDONLY);
+        if (fd < 0) os_raise("urandom", errno);
+        int64_t got = 0;
+        while (got < n) {
+            ssize_t r = read(fd, p + got, (size_t)(n - got));
+            if (r <= 0) {
+                int err = errno ? errno : EIO;
+                close(fd);
+                os_raise("urandom", err);
+            }
+            got += (int64_t)r;
+        }
+        close(fd);
+    }
+    return str_seal_n(s, n);
+}
+
+/* os.strerror(code)：strerror(3) 的文本。 */
+PyAdamasStr* pa_os_strerror(int64_t code) {
+    const char* m = strerror((int)code);
+    if (!m) m = "Unknown error";
+    return str_new(m, (int64_t)strlen(m));
+}
 
 void pa_os_chdir(PyAdamasStr* path) {
     if (chdir(path->data) != 0) os_raise("chdir", errno);

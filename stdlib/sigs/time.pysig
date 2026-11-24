@@ -32,3 +32,8 @@ CLOCK_MONOTONIC: int = 1
 
 # 演示：纯数据新增一个 CPython 真常量（Linux <time.h> 口径 = 2）
 CLOCK_PROCESS_CPUTIME_ID: int = 2
+# 纳秒时钟（整数）与进程 CPU 时间。perf_counter 与 monotonic 同源。
+def time_ns() -> int: pass
+def monotonic_ns() -> int: pass
+def perf_counter_ns() -> int: pass
+def process_time() -> float: pass

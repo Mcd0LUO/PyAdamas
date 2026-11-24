@@ -2451,3 +2451,7 @@ int64_t pa_re_escape(PyAdamasStr* s) {
     free(b.p);
     return (int64_t)out;
 }
+
+/* re.purge()：清正则编译缓存。pa 的 re 每次调用直接编译（没有缓存），
+   所以这里是 no-op —— 语义上等价。 */
+void pa_re_purge(void) {}
