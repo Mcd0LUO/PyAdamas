@@ -4,6 +4,32 @@
 
 早期阶段没有逐条留痕，按阶段归纳；0.4 之后逐条记录。
 
+## [0.498] - 2026-11-25
+
+> fix(frontend) + fix(runtime)：**类体里的方法别名**、**`unknown` 下标按运行期种类分派**；「局部变量丢类方法面」复核后**判负**。
+>
+> **一、类体方法别名**（`__str__ = shortDescription` 这类，CPython stdlib 很常见）：根因两层——类体遍历只处理带装饰器的 `def`
+> （普通 `def` 直接 break，名字没进类体命名空间），且方法不是一等值。修法：把已执行的 `def` 记进类体命名空间，
+> `NAME = 前面的方法名` 建成「共享实现的两个方法槽」（含 `property`/`classmethod`/`staticmethod` 别名），降级层跳过该赋值。
+> **628 文件基线默认口径：480/623 → 500/623（80.3%）**；`undefined name` 触发文件 45 → 18。
+> 上限说明：本机 lenient 实测 504/623（默认口径可达上限），差 4 个来自模块级条件导入 / `globals().update()`；
+> 另有 6 个文件是「方法默认参数引用类体名字」（`__marker`/`LOG_USER` 等），要动「def 点求值默认值」这一新机制 → 判负并记录。
+> 回归：`tests/run/class_body_alias.py`、`tests/fail/class_body_alias_forward.py`（顺序语义：别名只看得到前面的 `def`）。
+>
+> **二、「局部变量丢类方法面」判负**：12 组形状在两个构建（0.495 / 9ca49e5）上都不复现；唯一产生那句错误消息的是**静态类型确实为 unknown 的接收者**，
+> 链式与局部变量**一样**报错——所以「只对链式走类方法面」是误诊，真问题属于 `unknown` 语义（要动降级层运行期方法表或 P2 标签）。
+> 留 `tests/run/local_var_method.py`（三条路一致）与 `tests/strict/unknown_receiver_method.py`（unknown 接收者仍明确拒绝）钉住。
+>
+> **三、`unknown` 上的下标不再静默按机器语义解码**：全仓 **195 处（193 读 / 2 写，36 个文件）**，其中 5 个是核心 stdlib 模块（contextlib/itertools/pprint/string/tarfile），
+> 所以「编译期禁掉」判负（它们会编不过）。改为运行期分派 `pa_any_index`：先用 `pa_unknown_is_heap` 探针判堆，再按头上 kind 分派 list/tuple/dict/str；
+> 其它堆对象与 JSON null/bool 抛 `TypeError`；探针看不见的**标量元组**沿用机器语义（小整数和 `None` 抛 `TypeError`）。
+> 实测修复：unknown dict 的「假象 IndexError」→ `7`、unknown str **段错误** → `b`、小整数**段错误** → `TypeError: 'int' object is not subscriptable`，与 CPython 一致。
+> 诊断开关 `PYADAMAS_DIAG_UNKNOWN_INDEX=1` 留在降级层（静态缓存，零热路径成本；注意**统计必须带 `--rebuild`**，否则产物缓存会让数字假小）。
+> **剩余缺口**（已记录）：大整数仍段错误（`1<<40`）、bytes 无运行期标签（按 str 口径）、unknown 实例的 `__getitem__`、下标写 2 处——都要 P2 标签默认开或让标量元组进 RC 索引。
+>
+> `typecheck/func.cpp` 触到 1200 行硬限，拆出 `typecheck/class_alias.cpp`（76 行）。
+>
+> 闸门：套件 **491** / difftest **461** / check_size **PASS** / ctest 8/8 / ASan 491 无报告。
 ## [0.497] - 2026-11-25
 
 > perf(rc)：**存活堆索引从哈希表换成统一页位图**——干掉 unknown 密集代码里「探测税」的访存。
