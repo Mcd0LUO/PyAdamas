@@ -502,6 +502,16 @@ add_test(
   COMMAND "${BASH_EXECUTABLE}" "${CMAKE_SOURCE_DIR}/tests/check_imports.sh"
           "${CMAKE_BINARY_DIR}" "$<TARGET_FILE:pyadamas>"
 )
+add_test(
+  NAME pyadamas_gc_conservative
+  COMMAND "${BASH_EXECUTABLE}" "${CMAKE_SOURCE_DIR}/tests/gc_conservative.sh"
+          "${CMAKE_BINARY_DIR}" "$<TARGET_FILE:pyadamas>"
+)
+set_tests_properties(pyadamas_gc_conservative PROPERTIES
+  WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}"
+  TIMEOUT 300
+)
+
 set_tests_properties(pyadamas_check_imports PROPERTIES
   WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}"
   TIMEOUT 300
