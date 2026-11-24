@@ -602,6 +602,8 @@ enum class RtFn : uint16_t {
     BigFloorDiv,           // (big*, big*) -> big*  向下取整；除零 ZeroDivisionError
     BigMod,                // (big*, big*) -> big*  余数与除数同号
     BigPow,                // (big*, big*) -> big*  负指数 ValueError（文档化边界）
+    BigRound,              // (big*, int) -> big*  半程到偶数（ndigits < 0 时按 10^k）
+    BigPowMod,             // (big*, big*, big*) -> big*  模幂；m==0 抛 ValueError
     BigTrueDiv,            // (big*, big*) -> f64  正确舍入
     BigCmp,                // (big*, big*) -> i64  -1/0/1
     BigCmpF64,             // (big*, f64) -> i64  精确混比；NaN=-2

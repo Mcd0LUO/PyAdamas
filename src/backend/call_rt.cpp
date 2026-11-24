@@ -833,6 +833,7 @@ void AsmGen::gen_rt_args(const Inst& in, RtFn fn) {
         case RtFn::TimeDeltaNew:
         case RtFn::DateTimeAddDelta:
         case RtFn::DateNew:
+        case RtFn::BigPowMod:    /* (big*, big*, big*) */
         case RtFn::ListAppend:   /* (list*, v, heap) */
         case RtFn::ListSort:     /* 0.312：(list*, kind, desc) */
         case RtFn::SortedList:   /* 0.312：(list*, kind, desc) */
@@ -1045,6 +1046,7 @@ void AsmGen::gen_rt_args(const Inst& in, RtFn fn) {
         case RtFn::BigFloorDiv:
         case RtFn::BigMod:
         case RtFn::BigPow:
+        case RtFn::BigRound:   // (big*, int64)
         case RtFn::BigTrueDiv:
         case RtFn::BigCmp:
         case RtFn::BigEq:

@@ -4,6 +4,23 @@
 
 早期阶段没有逐条留痕，按阶段归纳；0.4 之后逐条记录。
 
+## [0.495] - 2026-11-25
+
+> feat(big)：**`round(big, ndigits)` 与三参 `pow(b, e, m)` 落地**，并修掉 int 三参 pow 的溢出。
+>
+> - `pa_big_round`：`ndigits >= 0` 原样返回；`< 0` 按 10^k 做**半程到偶数**取整（与 CPython 的
+>   10 进制口径一致：round(15,-1)=20、round(25,-1)=20、round(35,-1)=40、round(-25,-1)=-20）。
+>   ndigits 上限 1e6（防病态分配）。
+> - `pa_big_pow_mod`：平方乘 + 逐步取模。`m == 0` 抛 `ValueError`（CPython 同文案）；`m` 为负
+>   时结果取负一侧（pow(2,3,-5) = -2）；`m == 1` 给 0。**负指数仍拒绝**（CPython 3.8+ 走模逆，
+>   要 big 的扩展欧几里得；消息里写明差异）。
+> - **顺带修 int 三参 pow 的溢出**：旧实现先 i64 算幂再取模，`pow(2, 100, 1000000007)` 回绕成 0
+>   （CPython 976371285）。现在 int 也走 big 模幂再回程 `BigToI64`（模数在 i64 内 ⇒ 结果无损）。
+>
+> 对拍：`tests/run/big_round_powmod.py`（16 行，含超 i64 的 big 底数/指数/模数、负数、m=1、
+> `pow(2,100,m)` 溢出回归）与 CPython 3.14.4 **逐字节相同**。
+>
+> 闸门：suite / difftest / check_size / perf / **ASan**（动了 runtime）。
 ## [0.494] - 2026-11-24
 
 > fix(runtime)：**未捕获异常的 traceback 行号**（以前一律 `line 0`）。

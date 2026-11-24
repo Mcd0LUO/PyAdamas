@@ -553,6 +553,8 @@ PyAdamasBig* pa_big_mul(PyAdamasBig* a, PyAdamasBig* b);
 PyAdamasBig* pa_big_floordiv(PyAdamasBig* a, PyAdamasBig* b);
 PyAdamasBig* pa_big_mod(PyAdamasBig* a, PyAdamasBig* b);
 PyAdamasBig* pa_big_pow(PyAdamasBig* a, PyAdamasBig* b);
+PyAdamasBig* pa_big_round(PyAdamasBig* a, int64_t ndigits);
+PyAdamasBig* pa_big_pow_mod(PyAdamasBig* base, PyAdamasBig* exp, PyAdamasBig* mod);
 int64_t pa_big_cmp(PyAdamasBig* a, PyAdamasBig* b);   /* -1/0/1 */
 int64_t pa_big_cmp_f64(PyAdamasBig* a, double d);     /* 精确混比；NaN=-2 */
 int64_t pa_big_eq(PyAdamasBig* a, PyAdamasBig* b);

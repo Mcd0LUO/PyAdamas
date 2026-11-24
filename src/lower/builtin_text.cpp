@@ -259,6 +259,16 @@ VReg Lowerer::lower_builtin_text(const std::string& name, Call& c) {
             if (c.args.size() == 1) return convert_to(r, t_float(), t_int());
             return r;
         }
+        // big 输入（0.495）：单参返回自身；带 ndigits 走运行时 pa_big_round
+        // （ndigits >= 0 原样返回，< 0 按 10^k 半程到偶数）。
+        if (at && at->kind == TyKind::Big) {
+            VReg nd = c.args.size() == 2
+                           ? coerce(expr(*c.args[1]), tc_.type_of(c.args[1].get()), t_int())
+                           : const_int(0);
+            VReg r = call_runtime(RtFn::BigRound, t_big(), {v, nd});
+            push_temp(r);
+            return r;
+        }
         // 整数输入：单参就是它自己；带负 ndigits 要按 10 的幂取整。
         if (c.args.size() == 2 && at &&
             (at->kind == TyKind::Int || at->kind == TyKind::Bool)) {

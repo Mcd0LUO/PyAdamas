@@ -621,6 +621,8 @@ inline const char* rt_name(RtFn f) {
         case RtFn::BigFloorDiv: return "pa_big_floordiv";
         case RtFn::BigMod: return "pa_big_mod";
         case RtFn::BigPow: return "pa_big_pow";
+        case RtFn::BigRound: return "pa_big_round";
+        case RtFn::BigPowMod: return "pa_big_pow_mod";
         case RtFn::BigTrueDiv: return "pa_big_truediv";
         case RtFn::BigCmp: return "pa_big_cmp";
         case RtFn::BigCmpF64: return "pa_big_cmp_f64";

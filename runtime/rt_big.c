@@ -572,6 +572,154 @@ PyAdamasBig* pa_big_pow(PyAdamasBig* a, PyAdamasBig* b) {
     return acc;
 }
 
+
+/* ── round(big, ndigits) 与三参 pow（0.495）───────────────────────
+ *
+ * round：ndigits >= 0 直接返回自身（big 已是整数）；ndigits < 0 按 10^k
+ *   （k = -ndigits）做**半程到偶数**取整，与 CPython 的 10 进制 digits 口径
+ *   一致：round(15, -1) = 20、round(25, -1) = 20、round(-25, -1) = -20。
+ *
+ * pow(b, e, m)：平方乘 + 逐步取模。m == 0 抛 ValueError（CPython 同）；
+ *   负指数在 CPython 3.8+ 走模逆，这里显式拒绝（要扩就得先写 big 的扩展欧几里得）。
+ *   m 为负时结果与 CPython 同：r = b^e mod |m|，再取 r - |m|（负数一侧）。 */
+
+static PyAdamasBig* big_pow10(int64_t k) {
+    PyAdamasBig* acc = pa_big_from_i64(1);
+    pa_gc_pin(acc);
+    PyAdamasBig* base = pa_big_from_i64(10);
+    pa_gc_pin(base);
+    int64_t e = k;
+    while (e > 0) {
+        if (e & 1) {
+            PyAdamasBig* t = pa_big_mul(acc, base);
+            pa_gc_unpin(acc);
+            pa_rc_dec(acc);
+            acc = t;
+            pa_gc_pin(acc);
+        }
+        e >>= 1;
+        if (e > 0) {
+            PyAdamasBig* t = pa_big_mul(base, base);
+            pa_gc_unpin(base);
+            pa_rc_dec(base);
+            base = t;
+            pa_gc_pin(base);
+        }
+    }
+    pa_gc_unpin(base);
+    pa_rc_dec(base);
+    pa_gc_unpin(acc);
+    return acc;
+}
+
+static PyAdamasBig* big_copy(PyAdamasBig* a) {
+    int64_t n = big_n(a);
+    PyAdamasBig* r = big_alloc(n);
+    if (n > 0) memcpy(r->d, a->d, (size_t)n * 4);
+    r->nd = a->nd;
+    return r;
+}
+
+PyAdamasBig* pa_big_round(PyAdamasBig* a, int64_t nd) {
+    if (!a) return pa_big_from_i64(0);
+    if (nd >= 0) return big_copy(a);
+    if (nd == INT64_MIN) pa_raise_c("ValueError", "round() ndigits too large");
+    int64_t k = -nd;
+    /* 10^k 的 limb 数约 0.415*k；1e6 位已经 415KB，够用且防病态。 */
+    if (k > 1000000) pa_raise_c("ValueError", "round() ndigits too large");
+    PyAdamasBig* d = big_pow10(k);
+    pa_gc_pin(d);
+    PyAdamasBig* q = pa_big_floordiv(a, d);  /* 向下取整 */
+    pa_gc_pin(q);
+    PyAdamasBig* r = pa_big_mod(a, d);       /* 0 <= r < d */
+    pa_gc_pin(r);
+    PyAdamasBig* twice = pa_big_add(r, r);
+    pa_gc_pin(twice);
+    const int c = (int)pa_big_cmp(twice, d);
+    int bump = (c > 0);
+    if (c == 0) bump = (big_n(q) != 0) && ((q->d[0] & 1u) != 0);  /* 半程到偶数 */
+    pa_gc_unpin(twice);
+    pa_rc_dec(twice);
+    if (bump) {
+        PyAdamasBig* one = pa_big_from_i64(1);
+        pa_gc_pin(one);
+        PyAdamasBig* q1 = pa_big_add(q, one);
+        pa_gc_unpin(one);
+        pa_rc_dec(one);
+        pa_gc_unpin(q);
+        pa_rc_dec(q);
+        q = q1;
+        pa_gc_pin(q);
+    }
+    PyAdamasBig* out = pa_big_mul(q, d);
+    pa_gc_unpin(q);
+    pa_rc_dec(q);
+    pa_gc_unpin(r);
+    pa_rc_dec(r);
+    pa_gc_unpin(d);
+    pa_rc_dec(d);
+    return out;
+}
+
+PyAdamasBig* pa_big_pow_mod(PyAdamasBig* base, PyAdamasBig* exp, PyAdamasBig* mod) {
+    if (big_n(mod) == 0) pa_raise_c("ValueError", "pow() 3rd argument cannot be 0");
+    if (big_sign(exp) < 0)
+        pa_raise_c("ValueError",
+                   "pow() with negative exponent and modulus is not supported "
+                   "(CPython 3.8+ computes the modular inverse)");
+    PyAdamasBig* m = big_copy(mod);
+    m->nd = big_n(mod);  /* |mod| */
+    pa_gc_pin(m);
+    PyAdamasBig* b = pa_big_mod(base, m);   /* [0, m) */
+    pa_gc_pin(b);
+    PyAdamasBig* one = pa_big_from_i64(1);
+    pa_gc_pin(one);
+    PyAdamasBig* acc = pa_big_mod(one, m);  /* m == 1 时是 0（CPython 同） */
+    pa_gc_pin(acc);
+    int64_t bits = 0;
+    if (big_n(exp) > 0) {
+        bits = big_bitlen(exp);
+    }
+    for (int64_t i = bits - 1; i >= 0; --i) {
+        PyAdamasBig* sq = pa_big_mul(acc, acc);
+        pa_gc_pin(sq);
+        PyAdamasBig* red = pa_big_mod(sq, m);
+        pa_gc_unpin(sq);
+        pa_rc_dec(sq);
+        pa_gc_unpin(acc);
+        pa_rc_dec(acc);
+        acc = red;
+        pa_gc_pin(acc);
+        const uint32_t bit = (exp->d[i >> 5] >> (i & 31)) & 1u;
+        if (bit) {
+            PyAdamasBig* mul = pa_big_mul(acc, b);
+            pa_gc_pin(mul);
+            PyAdamasBig* red2 = pa_big_mod(mul, m);
+            pa_gc_unpin(mul);
+            pa_rc_dec(mul);
+            pa_gc_unpin(acc);
+            pa_rc_dec(acc);
+            acc = red2;
+            pa_gc_pin(acc);
+        }
+    }
+    /* 结果符号跟 m：m < 0 且结果非零 → acc - |m|。 */
+    if (big_sign(mod) < 0 && big_n(acc) != 0) {
+        PyAdamasBig* neg = pa_big_sub(acc, m);
+        pa_gc_unpin(acc);
+        pa_rc_dec(acc);
+        acc = neg;
+        pa_gc_pin(acc);
+    }
+    pa_gc_unpin(b);
+    pa_rc_dec(b);
+    pa_gc_unpin(one);
+    pa_rc_dec(one);
+    pa_gc_unpin(m);
+    pa_rc_dec(m);
+    pa_gc_unpin(acc);
+    return acc;
+}
 /* ── 比较 / 真值 / 一元 ─────────────────────────────────────────── */
 
 int64_t pa_big_cmp(PyAdamasBig* a, PyAdamasBig* b) {

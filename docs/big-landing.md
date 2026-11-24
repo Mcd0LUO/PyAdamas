@@ -25,11 +25,13 @@
   - **已支持**（本轮逐条实测，CPython 3.14.4 对拍）：`dict[big, int]` 与 `set[big]` 的静态
     可判定键、`list[big].sort()`、`sum/min/max(list[big])`、big 的 `%`/`//`/比较、
     **`divmod(big, big|int)`（0.488 本轮落地，正负号/向下取整/除零与 CPython 一致）**。
-  - **仍拒绝**：`round(big, ndigits)`（需要运行时 `pa_big_round`：按 10^k 取整 + 半程到偶数，
-    单参 `round(big)` 本来就返回自身）；三参数 `pow(big, big, mod)`（需要运行时
-    `pa_big_pow_mod`：右到左二进制幂 + limb 级取模；当前只有非模 `pa_big_pow`，且指数 >2^31
-    已按 ValueError 拒绝）；`big + float` 提升（结果类型变化）；格式化 mini-language；
-    动态域的 `int(v)`。
+  - **0.495 补上**：`round(big, ndigits)` 走新的运行时 `pa_big_round`（10^k + 半程到偶数，
+    与 CPython 逐字节对拍：round(15,-1)=20、round(25,-1)=20、round(-25,-1)=-20、超 i64 的 big 都一致）；
+    三参 `pow(b, e, m)` 走 `pa_big_pow_mod`（平方乘 + 逐步取模；m 为负按 CPython 取负一侧，m==1 给 0）。
+    另外顺带修了 **int 的三参 pow 溢出**：旧实现先 i64 算幂再取模，`pow(2, 100, 1000000007)` 回绕成 0
+    （CPython 976371285），现在 int 也走 big 模幂再回程 `BigToI64`（模数在 i64 内 ⇒ 结果无损）。
+  - **仍拒绝**：三参 pow 的**负指数**（CPython 3.8+ 用模逆，需要 big 的扩展欧几里得；本轮显式
+    `ValueError`，消息里写明差异）；`round(big, ndigits)` 的 ndigits 上限 1e6（防病态分配）。
   - 修复时的坑：`divmod` 原来发 `Bin{FloorDiv,Mod}`，而 Bin 的 codegen 对 big 会**静默出
     `idivq`**（i64 路径）——big 必须走 `CallRt(pa_big_floordiv/pa_big_mod)`。手工构造 Bin 的
     降级点都要注意这条。

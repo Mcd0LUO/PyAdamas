@@ -183,27 +183,33 @@ VReg Lowerer::lower_builtin_misc(const std::string& name, Call& c) {
         TypePtr ty = tc_.type_of(&c);
         if (!ty || ty->kind == TyKind::Unknown) ty = t_int();
         if (c.args.size() == 3) {
-            for (auto& arg : c.args) {
-                if (tc_.type_of(arg.get())->kind == TyKind::Big) {
-                    err(c.line, c.col, "three-argument pow() with big is not supported");
-                    return const_none();
-                }
+            bool any_big = false;
+            for (auto& arg : c.args)
+                if (tc_.type_of(arg.get())->kind == TyKind::Big) any_big = true;
+            if (any_big) {
+                // 0.495：big 的模幂走运行时（平方乘 + 逐步取模）。
+                VReg b = coerce(expr(*c.args[0]), tc_.type_of(c.args[0].get()), t_big());
+                VReg e = coerce(expr(*c.args[1]), tc_.type_of(c.args[1].get()), t_big());
+                VReg m = coerce(expr(*c.args[2]), tc_.type_of(c.args[2].get()), t_big());
+                VReg r = call_runtime(RtFn::BigPowMod, t_big(), {b, e, m});
+                push_temp(r);
+                return r;
             }
             VReg a = coerce(expr(*c.args[0]), tc_.type_of(c.args[0].get()), t_int());
             VReg b = coerce(expr(*c.args[1]), tc_.type_of(c.args[1].get()), t_int());
             VReg m = coerce(expr(*c.args[2]), tc_.type_of(c.args[2].get()), t_int());
-            Inst pw;
-            pw.op = IrOp::Bin;
-            pw.bop = BinKind::Pow;
-            pw.a = a;
-            pw.b = b;
-            VReg p = def(t_int(), std::move(pw));
-            Inst md;
-            md.op = IrOp::Bin;
-            md.bop = BinKind::Mod;
-            md.a = p;
-            md.b = m;
-            return def(t_int(), std::move(md));
+            // 0.495：int 的三参 pow 也走 big 的模幂 —— 旧的 Pow+Mod 在 i64 上
+            // 先算幂再取模，2 ** 100 直接回绕成 0（CPython 是 976371285）。
+            // 模数在 i64 内 ⇒ 结果必然在 i64 内，回程 BigToI64 无损。
+            VReg ab = call_runtime(RtFn::BigFromI64, t_big(), {a});
+            push_temp(ab);
+            VReg bb = call_runtime(RtFn::BigFromI64, t_big(), {b});
+            push_temp(bb);
+            VReg mb = call_runtime(RtFn::BigFromI64, t_big(), {m});
+            push_temp(mb);
+            VReg pm = call_runtime(RtFn::BigPowMod, t_big(), {ab, bb, mb});
+            push_temp(pm);
+            return call_runtime(RtFn::BigToI64, t_int(), {pm});
         }
         VReg a = coerce(expr(*c.args[0]), tc_.type_of(c.args[0].get()), ty);
         VReg b = coerce(expr(*c.args[1]), tc_.type_of(c.args[1].get()), ty);

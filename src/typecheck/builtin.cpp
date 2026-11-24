@@ -512,8 +512,7 @@ TypePtr TypeChecker::builtin_call(const std::string& n, Call& c) {
         if (n == "any" || n == "all") return t_bool();
         if (n == "round") {
             if (a.empty()) return t_unknown();
-            if (a.size() > 1 && has_big_value(a[0]))
-                err(c.line, c.col, "round(big, ndigits) is not supported");
+            // 0.495: big 的 round 已落地（运行时 pa_big_round，半程到偶数）。
             if (a[0] && a[0]->kind == TyKind::Float)
                 return a.size() >= 2 ? t_float() : t_int();
             return a[0];
@@ -530,8 +529,7 @@ TypePtr TypeChecker::builtin_call(const std::string& n, Call& c) {
             return mk_tuple({t_unknown(), t_unknown()});
         }
         if (n == "pow") {
-            if (a.size() == 3 && std::any_of(a.begin(), a.end(), has_big_value))
-                err(c.line, c.col, "three-argument pow() with big is not supported");
+            // 0.495: big 的三参 pow 已落地（运行时 pa_big_pow_mod）。
             return a.size() >= 2 ? promote(a[0], a[1]) : t_unknown();
         }
         if (n == "input") return t_str();
