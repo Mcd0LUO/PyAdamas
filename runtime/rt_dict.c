@@ -463,9 +463,19 @@ PyAdamasDict* pa_dict_new(int64_t key_kind, int64_t key_own, int64_t val_own,
         panic_c("invalid dict key kind");
     if (key_own < 0 || key_own > 2 || val_own < 0 || val_own > 2)
         panic_c("invalid dict ownership kind");
-    PyAdamasDict* d =
-        (PyAdamasDict*)rc_alloc((int64_t)sizeof(PyAdamasDict), dict_destroy, dict_gc_release,
-                            PYADAMAS_RC_DICT);
+    PyAdamasDict* d;
+    /* 可证不成环的 dict[str, 标量]（含 set[str]）：str 键是叶子、值是标量，
+       任何环都回不到本表。按 LEAF 分配 —— 不进 GC 堆链/新生代，省掉
+       rc_link/rc_unlink 的链操作，但保留 rc_index（unknown 探针要识别）。
+       形状一旦变化（pa_dict_update 升级 own / 设 default_factory）由
+       pa_rc_track 重新入链。gc_leaf_mode=0（保守 GC）时退回 tracked。 */
+    if (key_kind == 1 && key_own <= 1 && val_own == 0) {
+        d = (PyAdamasDict*)rc_alloc_leaf((int64_t)sizeof(PyAdamasDict), dict_destroy,
+                                         dict_gc_release, PYADAMAS_RC_DICT);
+    } else {
+        d = (PyAdamasDict*)rc_alloc((int64_t)sizeof(PyAdamasDict), dict_destroy,
+                                    dict_gc_release, PYADAMAS_RC_DICT);
+    }
     if (d->entries) {
         // 池命中且缓冲保留（0.281）：cap/icap 是上一世高水位，零 malloc、
         // 零增长。状态重置 + index 清零即可复用；entries 陈旧内容只会被
@@ -595,6 +605,8 @@ static int64_t dict_make_default(PyAdamasDict* d) {
 
 void pa_dict_set_default_factory(PyAdamasDict* d, int64_t factory) {
     d->default_factory = factory;
+    /* 工厂可能往表里塞堆值（list/dict/set/tuple），表不再保证叶子形状。 */
+    if (factory) pa_rc_track(d);
 }
 
 int64_t pa_dict_try_get(PyAdamasDict* d, int64_t key, int64_t* out) {
@@ -771,6 +783,8 @@ void pa_dict_update(PyAdamasDict* dst, PyAdamasDict* src) {
     int ok = dst->key_own, ov = dst->val_own;
     if (src->key_own != dst->key_own) dst->key_own = 2;
     if (src->val_own != dst->val_own) dst->val_own = 2;
+    /* own 升级到 2 后可能收堆值：叶子 dict 必须重新入 GC 堆链。 */
+    if (dst->key_own != ok || dst->val_own != ov) pa_rc_track(dst);
     if (dst->len && ((dst->key_own == 2 && ok == 1) || (dst->val_own == 2 && ov == 1)))
         dst->saw_heap = 1;
     int kr = dst->key_own;

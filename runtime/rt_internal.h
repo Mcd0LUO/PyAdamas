@@ -818,6 +818,10 @@ void rc_unlink(PyAdamasRc* h);
    已 tracked 的对象是空操作。不做 retain —— 只改 GC 可见性。 */
 void pa_rc_track(void* p);
 void* rc_alloc(int64_t size, void (*dtor)(void*), void (*release)(void*), int64_t kind);
+/* 叶子形状（出边全是叶子/标量）但需要 unknown 探针识别的对象：
+   不进 GC 堆链/新生代，保留 rc_index 成员资格。
+   目前用于 dict[str, 标量]（见 rt_dict.c pa_dict_new）。 */
+void* rc_alloc_leaf(int64_t size, void (*dtor)(void*), void (*release)(void*), int64_t kind);
 void* rc_alloc_untracked(int64_t size, void (*dtor)(void*), void (*release)(void*), int64_t kind);
 /* extra：payload 尾部额外内联的字节数（目前只用于小列表的 data 缓冲）。
    h->size = size + extra，释放时按 size 路由回对应的池。 */

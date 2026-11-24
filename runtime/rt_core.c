@@ -1288,11 +1288,18 @@ void panic_c(const char* msg) {
  * 链插摘、索引 put/del（各一次哈希探测）、young add/del 的往返。
  * 旧实现每个元组出生还在索引里留一个墓碑，现在连墓碑都没有。 */
 static void* rc_alloc_core(int64_t size, void (*dtor)(void*), void (*release)(void*),
-                           int64_t kind, int64_t extra, int untracked);
+                           int64_t kind, int64_t extra, int untracked, int leaf);
 
 void* rc_alloc_untracked_ex(int64_t size, void (*dtor)(void*), void (*release)(void*),
                             int64_t kind, int64_t extra) {
-    return rc_alloc_core(size, dtor, release, kind, extra, 1);
+    return rc_alloc_core(size, dtor, release, kind, extra, 1, 0);
+}
+
+/* 叶子形状但需要 unknown 探针识别的对象（dict[str, 标量]）：不进 GC
+   堆链/新生代，但保留 rc_index 成员资格。见 rc_alloc_core 的 leaf 分支。 */
+void* rc_alloc_leaf(int64_t size, void (*dtor)(void*), void (*release)(void*),
+                    int64_t kind) {
+    return rc_alloc_core(size, dtor, release, kind, 0, 0, 1);
 }
 
 void* rc_alloc_untracked(int64_t size, void (*dtor)(void*), void (*release)(void*),
@@ -1367,6 +1374,14 @@ void rc_unlink(PyAdamasRc* h) {
    同一安全性论证，见 gc_alloc_black 注释）。已 tracked 时空操作。 */
 void pa_rc_track(void* p) {
     PyAdamasRc* h = (PyAdamasRc*)p - 1;
+    if (h->marked & PYADAMAS_RC_LEAF) {
+        // 叶子形状的 dict 被写进堆值 / own 升级：先从索引里摘掉，再按
+        // tracked 重新入链（rc_link 会重新 rc_index_put）。
+        rc_index_del(h);
+        h->marked = 0;
+        rc_link(h);
+        return;
+    }
     if (!(h->marked & PYADAMAS_RC_UNTRACKED)) return;
     h->marked = 0;
     rc_link(h);
@@ -1374,16 +1389,16 @@ void pa_rc_track(void* p) {
 
 void* rc_alloc(int64_t size, void (*dtor)(void*), void (*release)(void*),
                       int64_t kind) {
-    return rc_alloc_core(size, dtor, release, kind, 0, 0);
+    return rc_alloc_core(size, dtor, release, kind, 0, 0, 0);
 }
 
 void* rc_alloc_ex(int64_t size, void (*dtor)(void*), void (*release)(void*),
                       int64_t kind, int64_t extra) {
-    return rc_alloc_core(size, dtor, release, kind, extra, 0);
+    return rc_alloc_core(size, dtor, release, kind, extra, 0, 0);
 }
 
 static void* rc_alloc_core(int64_t size, void (*dtor)(void*), void (*release)(void*),
-                           int64_t kind, int64_t extra, int untracked) {
+                           int64_t kind, int64_t extra, int untracked, int leaf) {
     if (size < 0) panic_c("negative allocation size");
     // **热路径优化：把 GC 相关判断合并成一个全局标志。**
     //
@@ -1473,6 +1488,16 @@ static void* rc_alloc_core(int64_t size, void (*dtor)(void*), void (*release)(vo
         h->prev = NULL;
         h->next = NULL;
         h->marked = PYADAMAS_RC_UNTRACKED;
+    } else if (leaf && gc_leaf_mode) {
+        // 调用方保证出边全是叶子/标量（dict[str, 标量]）：不可能成环，
+        // 不进堆链/新生代；但要留在 rc_index 里，unknown 域的探针靠它
+        // 识别「这是堆对象」。rc_alloc_leaf 的调用方负责在形状变化
+        // （own 升级 / 装堆值）时用 pa_rc_track 重新入链。
+        h->prev = NULL;
+        h->next = NULL;
+        h->marked = PYADAMAS_RC_LEAF;
+        if (__builtin_expect(rc_index_off == 0 && rc_index_readonly == 0, 1))
+            rc_index_put(h);
     } else {
         h->marked = 0;
         rc_link(h);
