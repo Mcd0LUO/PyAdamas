@@ -428,9 +428,7 @@ void pa_handler_discard(void* p) {
 /* 当前正在 resume 的生成器对象（gen_run / pa_gen_close / pa_gen_finalize
    在调用 resume 前后设置）。suspend 用它给记录打上归属，销毁时按归属
    找回并归还 freelist。 */
-static void* gen_owner;
-
-void pa_gen_set_handler_owner(void* g) { gen_owner = g; }
+void* pa_gen_owner;
 
 /* 生成器销毁时调用：把它名下所有挂起中的 handler 记录归还 freelist。
  *
@@ -477,7 +475,7 @@ void pa_handler_suspend(void* p) {
      *
      * owner 为 NULL 时挂在一个全局「孤儿」owner 上，由 pa_exc_shutdown
      * 兜底清理；生成器销毁时按自己的 owner 找，不会误删孤儿记录。 */
-    h->suspend_owner = gen_owner ? gen_owner : (void*)&handler_top;
+    h->suspend_owner = pa_gen_owner ? pa_gen_owner : (void*)&handler_top;
     {
         SuspendedNode* n = suspended_pool;
         if (n)
@@ -580,19 +578,20 @@ typedef struct PyAdamasExcNode {
 } PyAdamasExcNode;
 
 static PyAdamasExcNode* exc_node_top;
-static int64_t exc_node_depth;
+/* 非 static：gen_run 每次 resume 直接读它判断是否需要 unwound（rt_gen.c）。 */
+int64_t pa_exc_node_depth;
 
-int64_t pa_exc_depth(void) { return exc_node_depth; }
+int64_t pa_exc_depth(void) { return pa_exc_node_depth; }
 
 /* vthread 切换用：异常上下文节点链也是栈水位全局（节点 malloc，链全局）。
    挂起 vthread 的 except 上下文必须随切换保存/恢复（rt_vthread.c）。 */
 void pa_exc_ctx_save(void** top, int64_t* depth) {
     *top = (void*)exc_node_top;
-    *depth = exc_node_depth;
+    *depth = pa_exc_node_depth;
 }
 void pa_exc_ctx_load(void* top, int64_t depth) {
     exc_node_top = (PyAdamasExcNode*)top;
-    exc_node_depth = depth;
+    pa_exc_node_depth = depth;
 }
 
 int64_t pa_exc_enter(int64_t* cur, int64_t* top) {
@@ -610,13 +609,13 @@ int64_t pa_exc_enter(int64_t* cur, int64_t* top) {
         n->top = exc_save_top;
         n->prev = exc_node_top;
         exc_node_top = n;
-        ++exc_node_depth;
+        ++pa_exc_node_depth;
     }
     current_exc = gc;
     exc_save_top = gt;
     *cur = 0;
     *top = 0;
-    return exc_node_depth;
+    return pa_exc_node_depth;
 }
 
 /* 释放一条 PyAdamasExcSave 链。
@@ -638,11 +637,11 @@ void pa_exc_leave(int64_t* cur, int64_t* top, int64_t token) {
     if (current_exc) pa_exc_trace_move(current_exc, "leave", (void*)cur);
     *cur = (int64_t)(uintptr_t)current_exc;
     *top = (int64_t)(uintptr_t)exc_save_top;
-    int64_t before = exc_node_depth;
-    while (exc_node_depth > token && exc_node_top) {
+    int64_t before = pa_exc_node_depth;
+    while (pa_exc_node_depth > token && exc_node_top) {
         PyAdamasExcNode* n = exc_node_top;
         exc_node_top = n->prev;
-        --exc_node_depth;
+        --pa_exc_node_depth;
         // 恢复前把「当前链」还掉：它和 n->top 是两条独立的链，直接覆盖
         // exc_save_top 会让当前那条永久丢失。
         if (exc_save_top && exc_save_top != n->top) pa_exc_free_save_chain(exc_save_top);
@@ -659,10 +658,10 @@ void pa_exc_leave(int64_t* cur, int64_t* top, int64_t token) {
 }
 
 void pa_exc_unwind(int64_t depth) {
-    while (exc_node_depth > depth && exc_node_top) {
+    while (pa_exc_node_depth > depth && exc_node_top) {
         PyAdamasExcNode* n = exc_node_top;
         exc_node_top = n->prev;
-        --exc_node_depth;
+        --pa_exc_node_depth;
         if (exc_save_top && exc_save_top != n->top) pa_exc_free_save_chain(exc_save_top);
         exc_free(current_exc);
         current_exc = n->cur;
@@ -1222,5 +1221,5 @@ void pa_exc_shutdown(void) {
         exc_save_top = s->up;
         free(s);
     }
-    exc_node_depth = 0;
+    pa_exc_node_depth = 0;
 }

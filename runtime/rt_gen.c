@@ -32,7 +32,6 @@ void pa_exc_pep479(PyAdamasException* e, const char* msg) {
 
 void pa_gen_finalize(void* g);
 void pa_handler_discard_record(void* p);
-void pa_gen_set_handler_owner(void* g);
 void pa_gen_release_handlers(void* g);
 
 /* 把 handler_top 退回到 stop，沿途的记录逐个归还 freelist。
@@ -118,7 +117,7 @@ int64_t gen_run(void* g, int64_t sent, int* done) {
     h.suspend_owner = NULL;
     h.heap_alloc = 0;  /* 栈记录：不能进 freelist */
     handler_top = &h;
-    int64_t exc_depth0 = pa_exc_depth();
+    int64_t exc_depth0 = pa_exc_node_depth;
     /* 生成器体**永远**走 setjmp 路径（它有 C 级兜底，抓不到 _Unwind）。
        如果调用方正在零开销 try 的保护区里（pa_eh_depth > 0），生成器内部
        抛出的异常会被 exc_longjmp 误判成「走 _Unwind」，从而穿过这层 setjmp
@@ -159,8 +158,9 @@ int64_t gen_run(void* g, int64_t sent, int* done) {
     pa_gen_set_handler_owner(NULL);
     handler_top = h.prev;
     pa_eh_depth = saved_eh_depth;
-    pa_exc_unwind(exc_depth0);
-    pa_rc_cleanup(h.mark);
+    /* 快路径：resume 没改变异常上下文/临时值栈时不必跨 TU 调用清理函数。 */
+    if (pa_exc_node_depth != exc_depth0) pa_exc_unwind(exc_depth0);
+    if (temp_len != h.mark) pa_rc_cleanup(h.mark);
     if (p[1]) {
         pa_eh_depth = saved_eh_depth;
         *done = 1;
@@ -284,7 +284,7 @@ void pa_gen_close(void* g) {
     h.suspend_owner = NULL;
     h.heap_alloc = 0;  /* 栈记录：不能进 freelist */
     handler_top = &h;
-    int64_t exc_depth0 = pa_exc_depth();
+    int64_t exc_depth0 = pa_exc_node_depth;
     /* close() 重放 finally 时同样走 setjmp：调用方若在零开销保护区里，
        必须临时摘掉 pa_eh_depth，否则 finally 里抛的异常会绕过这层 setjmp。 */
     int saved_eh_depth = pa_eh_depth;
@@ -308,9 +308,9 @@ void pa_gen_close(void* g) {
     ((void (*)(void*, int64_t))(uintptr_t)p[4])(g, 0);
     pa_gen_set_handler_owner(NULL);
     handler_top = h.prev;
-    pa_exc_unwind(exc_depth0);
+    if (pa_exc_node_depth != exc_depth0) pa_exc_unwind(exc_depth0);
     pa_eh_depth = saved_eh_depth;
-    pa_rc_cleanup(h.mark);
+    if (temp_len != h.mark) pa_rc_cleanup(h.mark);
     pa_gen_release_slots(g);
     p[1] = 1;
     p[5] = 0;
@@ -329,7 +329,7 @@ void pa_gen_finalize(void* g) {
     h.suspend_owner = NULL;
     h.heap_alloc = 0;  /* 栈记录：不能进 freelist */
     handler_top = &h;
-    int64_t exc_depth0 = pa_exc_depth();
+    int64_t exc_depth0 = pa_exc_node_depth;
     if (PA_SETJMP(h.env) == 0) {
         p[5] = 1;
         pa_gen_set_handler_owner(g);
@@ -338,9 +338,9 @@ void pa_gen_finalize(void* g) {
     } else {
         pa_exc_clear();
     }
-    pa_exc_unwind(exc_depth0);
+    if (pa_exc_node_depth != exc_depth0) pa_exc_unwind(exc_depth0);
     unwind_handlers_to(h.prev);
-    pa_rc_cleanup(h.mark);
+    if (temp_len != h.mark) pa_rc_cleanup(h.mark);
     /* 正常跑完时槽已释放（空操作）；清理中途抛异常则在这里补一次。 */
     pa_gen_release_slots(g);
     p[1] = 1;

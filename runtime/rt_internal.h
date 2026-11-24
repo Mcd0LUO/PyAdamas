@@ -670,6 +670,11 @@ extern void** temp_stack;
 extern int64_t temp_len;
 extern int64_t temp_cap;
 extern PyAdamasHandler* handler_top;
+/* gen_run 每次 resume 都要设/清 handler 归属，做成内联写全局，避免跨 TU 调用。 */
+extern void* pa_gen_owner;
+static inline void pa_gen_set_handler_owner(void* g) { pa_gen_owner = g; }
+/* 异常上下文节点深度：resume 快路径直接读全局，只有变化时才调 pa_exc_unwind。 */
+extern int64_t pa_exc_node_depth;
 
 /* 运行时诊断（rt_diag.c）。不设环境变量时全部是空操作。 */
 extern int pa_diag_rc_on;   /* -1=未初始化, 0=关闭, 1=开启 */
