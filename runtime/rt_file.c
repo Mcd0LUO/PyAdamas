@@ -32,7 +32,7 @@ struct PyAdamasFile {
     int64_t readable;
     int64_t writable;
     int64_t newline;
-    char* vbuf;       /* buffering > 1 时自己分配的全缓冲 */
+    char* vbuf;       /* 自己分配的全缓冲（buffering > 1 自定义，或普通文件默认 4KB） */
     PyAdamasStr* name;    /* 拥有 */
     PyAdamasStr* mode;    /* 拥有，规范化后的 Python 风格 mode */
     PyAdamasStr* encoding; /* 拥有，规范化后的编码名 */
@@ -208,7 +208,18 @@ PyAdamasFile* pa_file_open(PyAdamasStr* path, int64_t fd, PyAdamasStr* mode, int
     f->fd = fdnum;
     f->closefd = closefd;
     f->binary = bin;
-    f->streaming = file_fd_streaming(fdnum);
+    /* 整个 open 只做一次 fstat：既判定 streaming（非普通文件），又给下面的
+       默认缓冲提供 S_ISREG 依据。glibc 用自己的缓冲时会在首次 I/O 时再
+       fstat(2) 一次探 st_blksize；预置用户缓冲后那次就省掉了。 */
+    int have_stat = 0;
+#if !defined(_WIN32)
+    struct stat stbuf;
+    have_stat = (fdnum >= 0 && fstat((int)fdnum, &stbuf) == 0);
+    f->streaming = have_stat ? !S_ISREG(stbuf.st_mode) : 0;
+#else
+    (void)fdnum;
+    f->streaming = 0;
+#endif
     f->readable = base == 'r' || plus;
     f->writable = base != 'r' || plus;
     f->newline = bin ? PYADAMAS_NL_NONE : (newline < 0 || newline > 4 ? 0 : newline);
@@ -233,6 +244,15 @@ PyAdamasFile* pa_file_open(PyAdamasStr* path, int64_t fd, PyAdamasStr* mode, int
         f->vbuf = (char*)malloc((size_t)buffering);
         if (!f->vbuf) panic_c("out of memory");
         setvbuf(fp, f->vbuf, _IOFBF, (size_t)buffering);
+#if !defined(_WIN32)
+    } else if (have_stat && S_ISREG(stbuf.st_mode)) {
+        /* 普通文件默认缓冲：自己给 stdio 一块 4KB 全缓冲，避免 glibc
+           首次 I/O 时为 st_blksize 再发一次 fstat(2)（47_open 每 open
+           一次）。非普通文件（管道/tty）保持 stdio 默认语义（行缓冲）。 */
+        f->vbuf = (char*)malloc(4096);
+        if (!f->vbuf) panic_c("out of memory");
+        setvbuf(fp, f->vbuf, _IOFBF, 4096);
+#endif
     }
     return f;
 }
