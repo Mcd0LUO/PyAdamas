@@ -23,6 +23,8 @@
 | [exc-semantics.md](exc-semantics.md) | 现行 try/except/finally/with 语义到底是什么？改成表驱动会丢什么？ | `runtime/rt_exc.c` `src/lower/exc.cpp` |
 | [exc-frame-cleanup.md](exc-frame-cleanup.md) | 展开 / longjmp 时被跳过帧的局部引用怎么回收？ | `runtime/rt_exc.c` `runtime/rt_core.c` |
 | [regalloc.md](regalloc.md) | 寄存器分配为什么没带来性能收益？第三层 / 块级分裂为什么被判负？全局提升为何最终以「入口私有标量全局」落地？ | `src/backend/regalloc.cpp` |
+| [experiment-switches.md](experiment-switches.md) | **实验开关结账表**：每个开关的默认值、结论（默认开/保持 opt-in/删代码）、证据与触发条件；A/B 工具 `tools/flagbench.sh` 的用法 | `src/main.cpp`、`runtime/rt_core.c` |
+| [vectorization-coverage.md](vectorization-coverage.md) | 向量化覆盖率：当前 5/12 命中（含 masked）、剩余 7 个的逐条判负与前置清单 | `backend/vect*.cpp`、`backend/masked.cpp` |
 | [regalloc-architecture.md](regalloc-architecture.md) | 精确 LiveInterval / SpillPlacement / SplitKit 三层怎么设计？池容量实验后为什么第三层正式放弃？ | `src/backend/regalloc.cpp` |
 | [bounds-elimination-attempt.md](bounds-elimination-attempt.md) | 边界检查消除（ranged loop versioning）做到哪一步、克隆阶段为什么回退？上界收益是多少？ | `src/opt/loop.cpp` |
 | [heap-slot-promotion.md](heap-slot-promotion.md) | 堆槽进寄存器的 GC 障碍假设为什么是错的？放行后为什么反而慢 5.5%？ | `src/lower/impl_slots.cpp` `runtime/rt_core.c` |
