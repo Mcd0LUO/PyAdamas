@@ -877,6 +877,80 @@ static int rc_leaf_untracked(const PyAdamasRc* h) {
 
 void panic_c(const char* msg);
 
+/* ── 索引取证统计（PYADAMAS_RC_INDEX_STATS=1，仅诊断用）─────────────
+ * 回答三件事：命中率、哈希平均探测长度、结构规模（峰值容量 / 页数 /
+ * 地址跨度）。关闭时每个统计点只多读一个全局 int（可预测分支），与
+ * PYADAMAS_RC_STATS 同一套路；数字本身不进任何决策路径。 */
+static int rc_istats_on;
+static int64_t ist_has, ist_hash_hit, ist_leaf_hit, ist_miss;
+static int64_t ist_has_al16, ist_has_unal16, ist_has_leafmode;
+static int64_t ist_page_hit, ist_page_peak, ist_page_cap_peak;
+/* 页位图的验收计数：put 进来的**非对齐**对象只能是静态字面量（rc=IMMORTAL，
+   payload-1 是奇数地址）。非对齐的**真堆对象**会让位图漏判（假阴性 -> 漏
+   回收），所以 unaligned_heap 必须在全套件 + ASan 下恒为 0。 */
+static int64_t ist_put_page, ist_put_lit, ist_put_unaligned_heap;
+static int64_t ist_miss_al, ist_miss_unal;
+static int64_t ist_probes;          /* 主表槽位读取次数（含终止空槽） */
+static int64_t ist_probes_hit, ist_probes_miss;
+static int64_t ist_probe_hist[9];   /* 1..8+ 步 */
+static int64_t ist_put, ist_del;
+static int64_t ist_peak_cap, ist_peak_live, ist_peak_fill;
+static int64_t ist_leaf_pages, ist_leaf_pages_peak;
+static uintptr_t ist_min_page = (uintptr_t)-1, ist_max_page;
+
+static void rc_istats_dump(void) {
+    fprintf(stderr,
+            "[rcidx] has=%lld al16=%lld unal16=%lld hash_hit=%lld "
+            "leaf_queries=%lld leaf_hit=%lld miss=%lld\n",
+            (long long)ist_has, (long long)ist_has_al16,
+            (long long)ist_has_unal16, (long long)ist_hash_hit,
+            (long long)ist_has_leafmode, (long long)ist_leaf_hit,
+            (long long)ist_miss);
+    double avg = ist_has ? (double)ist_probes / (double)ist_has : 0.0;
+    fprintf(stderr, "[rcidx] main probes=%lld avg=%.3f hist=",
+            (long long)ist_probes, avg);
+    for (int i = 0; i < 8; ++i)
+        fprintf(stderr, "%s%d:%lld", i ? " " : "", i + 1,
+                (long long)ist_probe_hist[i]);
+    fprintf(stderr, " 9+:%lld\n", (long long)ist_probe_hist[8]);
+    fprintf(stderr,
+            "[rcidx] hash: hit=%lld (%lld probes)  hash_miss_probes=%lld "
+            "page_hit=%lld  leaf_hit=%lld  miss al/unal=%lld/%lld\n",
+            (long long)ist_hash_hit, (long long)ist_probes_hit,
+            (long long)ist_probes_miss, (long long)ist_page_hit,
+            (long long)ist_leaf_hit, (long long)ist_miss_al,
+            (long long)ist_miss_unal);
+    fprintf(stderr,
+            "[rcidx] put=%lld del=%lld peak cap=%lld live=%lld fill=%lld "
+            "(load=%s)\n",
+            (long long)ist_put, (long long)ist_del, (long long)ist_peak_cap,
+            (long long)ist_peak_live, (long long)ist_peak_fill,
+            ist_peak_cap ? "" : "-");
+    if (ist_peak_cap)
+        fprintf(stderr, "[rcidx] peak fill/cap=%.1f%%  live/cap=%.1f%%\n",
+                100.0 * (double)ist_peak_fill / (double)ist_peak_cap,
+                100.0 * (double)ist_peak_live / (double)ist_peak_cap);
+    fprintf(stderr, "[rcidx] page_map: peak_live_pages=%lld peak_cap=%lld "
+            "put(page/literal)=%lld/%lld unaligned_heap_put=%lld\n",
+            (long long)ist_page_peak, (long long)ist_page_cap_peak,
+            (long long)ist_put_page, (long long)ist_put_lit,
+            (long long)ist_put_unaligned_heap);
+    fprintf(stderr, "[rcidx] leaf pages live=%lld peak=%lld  "
+            "page_span=%llu pages (min=%llu max=%llu)\n",
+            (long long)ist_leaf_pages, (long long)ist_leaf_pages_peak,
+            (unsigned long long)(ist_min_page == (uintptr_t)-1
+                                     ? 0
+                                     : ist_max_page - ist_min_page + 1),
+            (unsigned long long)(ist_min_page == (uintptr_t)-1 ? 0 : ist_min_page),
+            (unsigned long long)ist_max_page);
+}
+
+static void __attribute__((constructor(102))) rc_istats_init(void) {
+    if (!getenv("PYADAMAS_RC_INDEX_STATS")) return;
+    rc_istats_on = 1;
+    atexit(rc_istats_dump);
+}
+
 /* ── 索引叶子的分页登记表（0.321）─────────────────────────────
  *
  * 字符串是索引叶子（PYADAMAS_RC_LEAF）：不进 GC 记账，但必须留在「这个
@@ -970,6 +1044,8 @@ static void leaf_index_put(PyAdamasRc* h) {
         memset(pg->bits, 0, sizeof pg->bits);
         pg->next = leaf_page_tab[b];
         leaf_page_tab[b] = pg;
+        if (rc_istats_on && ++ist_leaf_pages > ist_leaf_pages_peak)
+            ist_leaf_pages_peak = ist_leaf_pages;
     }
     size_t slot = (a & LEAF_PAGE_MASK) >> 4;
     uint64_t bit = (uint64_t)1 << (slot & 63);
@@ -997,6 +1073,7 @@ static void leaf_index_del(PyAdamasRc* h) {
     if (--pg->live == 0) {
         *pp = pg->next;
         leaf_page_release(pg);
+        if (rc_istats_on) ist_leaf_pages--;
     }
 }
 
@@ -1029,6 +1106,260 @@ static void leaf_index_shutdown(void) {
         free(p);
     }
     leaf_page_cache_count = 0;
+}
+
+/* ── 统一页位图索引（PYADAMAS_RC_INDEX=bitmap，默认实现）───────────
+ *
+ * **为什么换掉主哈希表**：perf 取证（pprint 基准）显示 rc_index_has 是最大
+ * 热点，但代价不在哈希计算，而在**失败的线性探测**：字符串/浮点盒不在
+ * 主表里（它们在叶子位图），每次查询却先探一遍主表 —— 表装载 67%、
+ * 又因容器 churn 积满墓碑，失败探测平均 10.1 个槽（= 10 次随机 cache
+ * line 读）。6.76M 次查询共 57M 次槽位读。
+ *
+ * **结构**：堆对象头一律来自 malloc（x86-64 保证 16 字节对齐），所以
+ * 「是不是对象起点」可以按 16 字节槽位精确表示：4KB 页 = 256 槽 = 4 个
+ * 64 位字。页表项 {base, live, bits[4]} 共 48 字节，**正好一条 cache line**，
+ * 定位页表项用开放寻址（装载 <= 50%，无链、无 per-page malloc）：
+ *
+ *     has(h):  i = hash(h >> 12) & mask;  查表项 -> base 相等 -> 测一位
+ *
+ * 命中 1 次访存（旧实现：哈希 1 次 + 线性探测 2..10 次 + 位图 2 次）。
+ * 表本身也小得多：每 16 字节 1 位（= 每 8 字节 1 位）+ 50% 空槽，
+ * 相比「每对象 8 字节 + 43% 余量」，64 字节对象省 10 倍。
+ *
+ * **精确性**（与主索引逐元素相同，不是概率结构）：
+ *   - 位标记「这个 16 字节槽位上恰好有一个活对象头」，清位在释放路径上；
+ *   - 两个活堆块不可能落在同一 16 字节槽（malloc 16 字节对齐 + 块不重叠），
+ *     所以位与对象一一对应，无假阳性；
+ *   - put/del/has 三处用**同一个判据**（地址 & 15）路由，所以查询命中当且仅当
+ *     对象在集合里，无假阴性；
+ *   - 8 字节对齐的静态字面量（pa_register_literals 注册的 payload-1，奇数地址）
+ *     进主哈希表 —— 那是哈希表**唯一**的居民，通常为空（cap==0 直接返回）。
+ *
+ * **生命周期置位/清位点**：rc_index_put 在 rc_link（对象首次可见）与
+ * rc_alloc_leaf 分支调用；rc_index_del 在 rc_unlink / pa_rc_track 调用 ——
+ * 与旧索引完全同一批调用点，没有新增钩子。
+ *
+ * 回退：PYADAMAS_RC_INDEX=hash 走旧实现（主哈希 + 字符串叶子位图），
+ * 逐字节等价于改动前；两者集合相同，只有代价不同。 */
+
+#define RC_PAGE_EMPTY ((uintptr_t)0)   /* 空槽（页基址不可能为 0） */
+#define RC_PAGE_TOMB ((uintptr_t)1)    /* 墓碑：本页已无活对象 */
+
+typedef struct {
+    uintptr_t base;                  /* 页基址；0 空 / 1 墓碑 */
+    int32_t live;                    /* 本页存活对象数 */
+    uint32_t pad_;
+    uint64_t bits[LEAF_PAGE_WORDS];  /* 16 字节槽位图（256 位） */
+} RcPageEnt;
+
+static RcPageEnt* rc_page_tab;
+static size_t rc_page_cap;   /* 2 的幂 */
+static size_t rc_page_fill;  /* 非空槽（活 + 墓碑） */
+static size_t rc_page_live;  /* 活页数 */
+
+static inline size_t rc_page_slot(uintptr_t base) {
+    uint64_t x = (uint64_t)(base >> LEAF_PAGE_SHIFT);
+    x *= 0x9e3779b97f4a7c15ull;
+    x ^= x >> 32;
+    return (size_t)x & (rc_page_cap - 1);
+}
+
+static void rc_page_rehash(size_t ncap) {
+    RcPageEnt* old = rc_page_tab;
+    size_t ocap = rc_page_cap;
+    RcPageEnt* nt = (RcPageEnt*)calloc(ncap, sizeof(RcPageEnt));
+    if (!nt) panic_c("out of memory");
+    rc_page_tab = nt;
+    rc_page_cap = ncap;
+    rc_page_fill = 0;
+    if (rc_istats_on && (size_t)ist_page_cap_peak < ncap)
+        ist_page_cap_peak = (int64_t)ncap;
+    for (size_t i = 0; i < ocap; ++i) {
+        if (old[i].base == RC_PAGE_EMPTY || old[i].base == RC_PAGE_TOMB) continue;
+        size_t s = rc_page_slot(old[i].base);
+        while (rc_page_tab[s].base != RC_PAGE_EMPTY)
+            s = (s + 1) & (ncap - 1);
+        rc_page_tab[s] = old[i];
+        rc_page_fill++;
+    }
+    free(old);
+}
+
+/* 取/建一个页表项；返回 NULL 表示只查不建（has 用）。 */
+static inline RcPageEnt* rc_page_find(uintptr_t base) {
+    size_t s = rc_page_slot(base);
+    for (;;) {
+        RcPageEnt* e = &rc_page_tab[s];
+        if (e->base == base) return e;
+        if (e->base == RC_PAGE_EMPTY) return NULL;
+        s = (s + 1) & (rc_page_cap - 1);
+    }
+}
+
+static inline RcPageEnt* rc_page_obtain(uintptr_t base) {
+    size_t s = rc_page_slot(base);
+    size_t tomb = (size_t)-1;
+    for (;;) {
+        RcPageEnt* e = &rc_page_tab[s];
+        if (e->base == base) return e;
+        if (e->base == RC_PAGE_EMPTY) break;
+        if (e->base == RC_PAGE_TOMB && tomb == (size_t)-1) tomb = s;
+        s = (s + 1) & (rc_page_cap - 1);
+    }
+    if (tomb != (size_t)-1) s = tomb;   /* 复用墓碑，不增加 fill */
+    else rc_page_fill++;
+    RcPageEnt* e = &rc_page_tab[s];
+    e->base = base;
+    e->live = 0;
+    memset(e->bits, 0, sizeof e->bits);
+    rc_page_live++;
+    return e;
+}
+
+static void rc_page_put(PyAdamasRc* h) {
+    uintptr_t a = (uintptr_t)h;
+    uintptr_t base = a & ~LEAF_PAGE_MASK;
+    if (rc_page_cap == 0) {
+        rc_page_rehash(64);
+    } else if ((rc_page_fill + 1) * 2 >= rc_page_cap) {
+        // 活页少、墓碑多时原地压缩，否则翻倍（与主哈希同策略）。
+        size_t ncap = (rc_page_live + 1) * 4 >= rc_page_cap ? rc_page_cap * 2
+                                                           : rc_page_cap;
+        rc_page_rehash(ncap);
+    }
+    RcPageEnt* e = rc_page_obtain(base);
+    size_t slot = (a & LEAF_PAGE_MASK) >> 4;
+    uint64_t bit = (uint64_t)1 << (slot & 63);
+    if (!(e->bits[slot >> 6] & bit)) {
+        e->bits[slot >> 6] |= bit;
+        e->live++;
+    }
+    if (rc_istats_on && (size_t)ist_page_peak < rc_page_live)
+        ist_page_peak = (int64_t)rc_page_live;
+}
+
+static void rc_page_del(PyAdamasRc* h) {
+    if (rc_page_cap == 0) return;
+    uintptr_t a = (uintptr_t)h;
+    RcPageEnt* e = rc_page_find(a & ~LEAF_PAGE_MASK);
+    if (!e) return;
+    size_t slot = (a & LEAF_PAGE_MASK) >> 4;
+    uint64_t bit = (uint64_t)1 << (slot & 63);
+    if (!(e->bits[slot >> 6] & bit)) return;
+    e->bits[slot >> 6] &= ~bit;
+    if (--e->live == 0) {
+        /* 页空了：位图清零、页表项转墓碑（从查找路径摘除）。清零是防御性
+           的 —— 墓碑永远不会被 rc_page_find 返回，但地址复用后旧位留在
+           表里是最难查的一类假阳性，干脆不留。 */
+        memset(e->bits, 0, sizeof e->bits);
+        e->base = RC_PAGE_TOMB;
+        rc_page_live--;
+    }
+}
+
+/* 注意：h 可能是任意整数减过头的地址，**不能解引用**。 */
+static inline int rc_page_has(const PyAdamasRc* h) {
+    if (rc_page_cap == 0) return 0;
+    uintptr_t a = (uintptr_t)h;
+    const RcPageEnt* e = rc_page_find(a & ~LEAF_PAGE_MASK);
+    if (!e) return 0;
+    size_t slot = (a & LEAF_PAGE_MASK) >> 4;
+    return (int)((e->bits[slot >> 6] >> (slot & 63)) & 1);
+}
+
+/* 进程退出时还掉页表（atexit：必须晚于 pa_rc_shutdown —— 它可能还会
+   释放临时栈上的对象，触发 rc_index_del）。 */
+static void rc_page_shutdown(void) {
+    free(rc_page_tab);
+    rc_page_tab = NULL;
+    rc_page_cap = rc_page_fill = rc_page_live = 0;
+}
+
+/* 索引实现选择：默认页位图，PYADAMAS_RC_INDEX=hash 回退旧实现。
+   构造函数里读一次（早于 main 里的字面量注册）；静态初值就是默认值，
+   所以即使构造函数没跑也自洽（put/has 看到同一个值）。 */
+static int rc_index_bitmap = 1;
+
+static void __attribute__((constructor(101))) rc_index_mode_init(void) {
+    const char* m = getenv("PYADAMAS_RC_INDEX");
+    if (m && m[0] && (m[0] == 'h' || m[0] == '0')) rc_index_bitmap = 0;
+    /* 页表必须活到 pa_rc_shutdown 之后（它还会释放临时栈上的对象，
+       触发 rc_index_del），所以用 atexit 而不是 shutdown 钩子。 */
+    if (rc_index_bitmap) atexit(rc_page_shutdown);
+}
+
+/* ── 索引自检（PYADAMAS_RC_INDEX_SELFTEST=1）────────────────────
+ * 入口 pa_gc_init 里跑一次，验收三条最容易埋雷的不变量：
+ *   1. 批量登记后每个地址精确命中（无假阴性）；
+ *   2. 全部撤销后**每个地址都不再命中**（地址复用不留假阳性），
+ *      活页数与存活对象数回到测试前；
+ *   3. 上述两条在**真实对象**（rc_alloc -> rc_link -> rc_unlink -> free）
+ *      的完整链路上同样成立。
+ * 失败直接 panic（CI 里跑套件就会红），成功打一行 PASS。 */
+static void rc_selftest_dtor(void* p) { (void)p; }
+
+static size_t rc_page_live_entries(void) {
+    size_t n = 0;
+    for (size_t i = 0; i < rc_page_cap; ++i) {
+        uintptr_t b = rc_page_tab[i].base;
+        if (b != RC_PAGE_EMPTY && b != RC_PAGE_TOMB) n++;
+    }
+    return n;
+}
+
+/* verbose = 0：静默（只 panic），1：打印一行 PASS 摘要（=2 时开启，
+   因为套件会逐字比对程序 stderr，静默模式才能全量跑）。 */
+static void rc_index_selftest(int verbose) {
+    if (rc_index_off || rc_index_readonly) {
+        if (verbose) fprintf(stderr, "[rcidx-selftest] skipped (index off)\n");
+        return;
+    }
+    const size_t pages0 = rc_page_live;
+    const size_t objs0 = rc_index_live;
+    /* 1) 合成地址：16 页 × 128 槽。只当地址用，不 deref。仅位图模式 ——
+       哈希模式的 put/del 要读 kind 做叶子路由，假地址会直接崩。 */
+    enum { NSYNTH = 2048 };
+    uintptr_t synth = (uintptr_t)0x6a6a00000000ull;
+    int miss = 0, stale = 0;
+    if (rc_index_bitmap) {
+        for (int i = 0; i < NSYNTH; ++i)
+            rc_index_put((PyAdamasRc*)(synth + (uintptr_t)i * 16));
+        for (int i = 0; i < NSYNTH; ++i)
+            if (!rc_index_has((PyAdamasRc*)(synth + (uintptr_t)i * 16))) miss++;
+        for (int i = 0; i < NSYNTH; ++i)
+            rc_index_del((PyAdamasRc*)(synth + (uintptr_t)i * 16));
+        for (int i = 0; i < NSYNTH; ++i)
+            if (rc_index_has((PyAdamasRc*)(synth + (uintptr_t)i * 16))) stale++;
+    }
+    /* 2) 真实对象：整条 RC 链（link/unlink + 分配器）。 */
+    enum { NREAL = 512 };
+    PyAdamasRc* objs[NREAL];
+    for (int i = 0; i < NREAL; ++i)
+        objs[i] = (PyAdamasRc*)rc_alloc(8, rc_selftest_dtor, NULL,
+                                        PYADAMAS_RC_OBJ) - 1;
+    int rmiss = 0;
+    for (int i = 0; i < NREAL; ++i)
+        if (!rc_index_has(objs[i])) rmiss++;
+    for (int i = 0; i < NREAL; ++i)
+        pa_rc_dec((char*)objs[i] + PYADAMAS_RC_HDR);
+    int rstale = 0;
+    for (int i = 0; i < NREAL; ++i)
+        if (rc_index_has(objs[i])) rstale++;
+    /* 3) 计数归零：页表项与存活对象都回到测试前。 */
+    const size_t pages1 = rc_page_live;
+    const size_t objs1 = rc_index_live;
+    const int ok = (miss == 0 && stale == 0 && rmiss == 0 && rstale == 0 &&
+                    pages1 == pages0 && objs1 == objs0);
+    if (verbose >= 1)
+    fprintf(stderr,
+            "[rcidx-selftest] %s mode=%s synth(%d) miss=%d stale=%d  real(%d) "
+            "miss=%d stale=%d  live_pages %zu->%zu  live_objs %zu->%zu  "
+            "entries=%zu\n",
+            ok ? "PASS" : "FAIL", rc_index_bitmap ? "bitmap" : "hash", NSYNTH,
+            miss, stale, NREAL, rmiss, rstale, pages0, pages1, objs0, objs1,
+            rc_page_live_entries());
+    if (!ok) panic_c("rc_index self-test failed");
 }
 
 /* 存活堆对象索引：unknown 值的静态类型看不见，不能直接 rc_inc（可能
@@ -1075,12 +1406,7 @@ static inline int rc_index_is_leaf_obj(const PyAdamasRc* h) {
            leaf_slot_ok((uintptr_t)h);
 }
 
-void rc_index_put(PyAdamasRc* h) {
-    if (rc_index_off || rc_index_readonly) return;
-    if (rc_index_is_leaf_obj(h)) {
-        leaf_index_put(h);
-        return;
-    }
+static void rc_hash_put(PyAdamasRc* h) {
     if (rc_index_cap == 0) {
         rc_index_rehash(64);
     } else if ((rc_index_fill + 1) * 10 >= rc_index_cap * 7) {
@@ -1103,13 +1429,53 @@ void rc_index_put(PyAdamasRc* h) {
         rc_index_fill++;
     }
     rc_index_live++;
+    if (rc_istats_on) {
+        if (rc_index_cap > (size_t)ist_peak_cap) ist_peak_cap = rc_index_cap;
+        if (rc_index_live > (size_t)ist_peak_live) ist_peak_live = rc_index_live;
+        if (rc_index_fill > (size_t)ist_peak_fill) ist_peak_fill = rc_index_fill;
+    }
 }
 
-void rc_index_del(PyAdamasRc* h) {    if (rc_index_off || rc_index_readonly) return;
-    if (rc_index_is_leaf_obj(h)) {
-        leaf_index_del(h);
+void rc_index_put(PyAdamasRc* h) {
+    if (rc_index_off || rc_index_readonly) return;
+    if (rc_istats_on) {
+        ist_put++;
+        uintptr_t pg = (uintptr_t)h >> 12;
+        if (pg < ist_min_page) ist_min_page = pg;
+        if (pg > ist_max_page) ist_max_page = pg;
+    }
+    /* **对齐路由**（新实现）：16 字节对齐的对象一律进页位图（见上面的
+       结构说明）—— 那是对齐对象的全集，所以 put/del/has 三处可以只看
+       对齐就决定去哪个结构。非对齐的只剩静态字面量（payload-1），进哈希。 */
+    if (rc_index_bitmap) {
+        if (((uintptr_t)h & 15) == 0) {
+            if (rc_istats_on) ist_put_page++;
+            rc_page_put(h);
+        } else {
+            /* 对齐保证见 rc_page_* 的说明：malloc 16B 对齐 + 64B 头，
+               所以真堆对象的头一定 16 对齐。这里把「非对齐却非字面量」
+               的登记记下来 —— 那是位图会漏判的唯一入口。 */
+            if (rc_istats_on && h->rc == PYADAMAS_RC_IMMORTAL) ist_put_lit++;
+            /* **硬断言**：非对齐的只能是永生静态串（BSS 表 / 字面量表）。
+               真堆对象一旦走到这里，页位图就会漏判（假阴性 -> 漏回收），
+               所以当场 panic 而不是静默记一笔。这条分支只对字面量执行。 */
+            if (h->rc != PYADAMAS_RC_IMMORTAL) {
+                if (rc_istats_on) ist_put_unaligned_heap++;
+                panic_c("rc_index: 非 16 字节对齐的堆对象进入页位图索引");
+            }
+            rc_hash_put(h);
+        }
         return;
     }
+    /* 旧实现：索引叶子（str/float 盒）进分页位图，其余进主哈希。 */
+    if (rc_index_is_leaf_obj(h)) {
+        leaf_index_put(h);
+        return;
+    }
+    rc_hash_put(h);
+}
+
+static void rc_hash_del(PyAdamasRc* h) {
     if (rc_index_cap == 0) return;
     size_t s = rc_index_slot(h);
     while (rc_index[s]) {
@@ -1122,21 +1488,78 @@ void rc_index_del(PyAdamasRc* h) {    if (rc_index_off || rc_index_readonly) ret
     }
 }
 
+void rc_index_del(PyAdamasRc* h) {
+    if (rc_index_off || rc_index_readonly) return;
+    if (rc_istats_on) ist_del++;
+    if (rc_index_bitmap) {
+        if (((uintptr_t)h & 15) == 0) rc_page_del(h);
+        else rc_hash_del(h);
+        return;
+    }
+    if (rc_index_is_leaf_obj(h)) {
+        leaf_index_del(h);
+        return;
+    }
+    rc_hash_del(h);
+}
+
+/* 主哈希探测（bitmap 模式下只剩静态字面量会走到这里）。 */
+static int rc_hash_has(PyAdamasRc* h) {
+    if (rc_index_cap == 0) return 0;
+    size_t s = rc_index_slot(h);
+    size_t n = 0;
+    while (rc_index[s]) {
+        n++;
+        if (rc_index[s] == h) {
+            if (rc_istats_on) {
+                ist_hash_hit++;
+                ist_probes += n;
+                ist_probes_hit += n;
+                ist_probe_hist[n < 9 ? n - 1 : 8]++;
+            }
+            return 1;
+        }
+        s = (s + 1) & (rc_index_cap - 1);
+    }
+    if (rc_istats_on) {
+        ist_probes += n + 1;
+        ist_probes_miss += n + 1;
+        ist_probe_hist[n < 8 ? n : 8]++;
+    }
+    return 0;
+}
+
 int rc_index_has(PyAdamasRc* h) {
     if (rc_index_off) return 0;
     // RC_TOMB 是墓碑哨兵（(PyAdamasRc*)-1）。unknown 值 v 减去 64 字节头后
     // 可能正好等于它（v == 63），探测时不能把墓碑当成命中。
     if (h == RC_TOMB) return 0;
-    if (rc_index_cap) {
-        size_t s = rc_index_slot(h);
-        while (rc_index[s]) {
-            if (rc_index[s] == h) return 1;
-            s = (s + 1) & (rc_index_cap - 1);
+    const int al16 = ((uintptr_t)h & 15) == 0;
+    if (rc_istats_on) {
+        ist_has++;
+        if (al16) ist_has_al16++;
+        else ist_has_unal16++;
+    }
+    int r;
+    if (rc_index_bitmap) {
+        /* 对齐路由与 put/del 逐字一致：对齐对象在页位图里，非对齐在哈希。 */
+        r = al16 ? rc_page_has(h) : rc_hash_has(h);
+        if (rc_istats_on && r && al16) ist_page_hit++;
+    } else {
+        r = rc_hash_has(h);
+        // 索引叶子（字符串）不在主索引里，位图是精确的第二半。
+        if (!r && gc_leaf_mode) {
+            if (rc_istats_on) ist_has_leafmode++;
+            r = leaf_index_has(h);
+            if (rc_istats_on && r) ist_leaf_hit++;
         }
     }
-    // 索引叶子（字符串）不在主索引里，位图是精确的第二半。
-    if (gc_leaf_mode) return leaf_index_has(h);
-    return 0;
+    if (rc_istats_on && !r) {
+        ist_miss++;
+        if (al16) ist_miss_al++;
+        else ist_miss_unal++;
+    }
+    return r;
 }
 
 /* 代码生成把静态字符串字面量指针列表放在 .Lstrtab，模块入口在跑用户
@@ -2521,6 +2944,10 @@ void pa_gc_init(void** roots, int64_t n_roots, void* stack_top) {
     // 索引叶子模式：保守回退关掉（字符串回到旧的全跟踪口径）。
     gc_leaf_mode = !gc_conservative;
     if (gc_leaf_mode) atexit(leaf_index_shutdown);
+    /* 索引自检：PYADAMAS_RC_INDEX_SELFTEST=1 静默跑（失败 panic），
+       =2 额外打印一行 PASS 摘要。放在建根之前，此时堆是空的。 */
+    { const char* stenv = getenv("PYADAMAS_RC_INDEX_SELFTEST");
+      if (stenv) rc_index_selftest(stenv[0] == '2'); }
     gc_globals = NULL;
     gc_n_globals = 0;
     gc_globals_cap = 0;
