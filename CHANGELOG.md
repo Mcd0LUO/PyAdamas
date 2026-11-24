@@ -4,6 +4,31 @@
 
 早期阶段没有逐条留痕，按阶段归纳；0.4 之后逐条记录。
 
+## [0.473] - 2026-11-24
+
+> feat(pkg)：包管理 **P0-a** 落地——清单 + 锁 + `resolve` + `--locked` + 锁派生 ModuleMap。
+> 设计见 [docs/package-management-design.md](docs/package-management-design.md) §6.1；**实现留在本仓库**，不单开项目。
+>
+> 交付：
+> - `pyadamas.toml` 最小 TOML 子集：`[package]` / `[dependencies]`（**只支持 path 依赖**）/
+>   `[modules]`（逻辑名 →（包, 模块））；registry / 版本范围 / git 依赖与 `[aliases]` 明确报「P2 才支持」；
+> - `pyadamas.lock`：行式、排序、可 diff；坐标 + 相对路径 + **SHA-256 源码树哈希** + 逻辑名→包内模块 + 依赖边，
+>   无时间戳/主机名/绝对路径；SHA-256 自实现，无新增链接依赖；
+> - `pyadamas resolve` 写锁；`build/run --locked` 在锁与清单不一致（含锁缺失）时失败并打印**逐行 diff**；
+>   非 `--locked` 是宽松模式（note + diff + 按清单重解析，绝不让漂移静默发生）；
+> - 锁派生与 `deps --json` **同 schema** 的 ModuleMap，交给现有 `--module-map` 加载器，不新增第二套映射格式。
+>
+> 验收（`tests/pkg/run.sh` 56 项，已接进 ctest）：无清单项目 0 回归；path 依赖跨目录编译运行；
+> 手改清单/改依赖源码后 `--locked` 失败并给 diff；两次 `resolve` 字节相同；整目录搬家锁不变；
+> 锁内无绝对路径（注入绝对路径被拒）；循环依赖/缺文件/未知键报错指到行列。
+>
+> 闸门：套件 469/0、difftest 440/0（合并后复跑仍 0）、check_size 无新增、ctest 2/2；
+> 5 个基准的生成汇编归一化后与合并前逐字节相同（P0 只动驱动层，不改代码生成）。
+>
+> 已知缺口（P0-b / P1 / P2）：版本尚未进 mangling 与接口坐标（需一次 ABI bump，会改符号与汇编，
+> 与「P0 不改生成代码」冲突，单独立项）；`check --imports` 未接包映射；`[modules]` 只有
+> 消费方绑定一种语义；本地模块与包同名不报冲突（映射优先）；树哈希不覆盖权限/空目录，符号链接明确报错。
+
 ## [0.472] - 2026-11-24
 
 > 取证版（**无代码改动**）：路线图 2.2「浮点槽提升作用域放宽」前提不成立，**判负**；
