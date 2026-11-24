@@ -326,6 +326,14 @@ private:
     // 类体命名空间：class 体里先定义的类属性对后面的语句可见（`y = x + 1`），
     // 但方法体里看不见（那里必须写 self.x / C.x）。只在检查类体语句时非空。
     std::unordered_map<std::string, TypePtr> class_body_attrs_;
+    // 类体里**已经执行过**的 def：名字 → cls->methods 里的下标。CPython 的
+    // 类体是顺序求值，def 当场绑定，所以 `__str__ = short` 这种「方法别名」
+    // 只看得到前面的定义。别名在降级层映射成同一实现的两个方法槽。
+    std::unordered_map<std::string, int> class_body_methods_;
+    // 类体的顺序求值（定义在 typecheck/class_alias.cpp）：def 绑定名字、
+    // `NAME = 前面的方法名` 建成方法别名。
+    void class_body_register_def(const ClassInfoPtr& cls, FunctionDef& f);
+    bool class_body_method_alias(const ClassInfoPtr& cls, Stmt& s);
     // 方法槽按「名字」在模块内全局分配：多继承的两个无关基类可能给同名
     // 方法分配过不同槽，全局唯一后 vtable 才能同时满足两边的调用点。
     std::unordered_map<std::string, int> method_slots_;

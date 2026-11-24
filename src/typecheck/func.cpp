@@ -960,12 +960,17 @@ void TypeChecker::classdef(ClassDef& c) {
         // 仍然没法建模，把类标记成 open 后按模块全局处理。
         auto saved_body_attrs = std::move(class_body_attrs_);
         class_body_attrs_.clear();
+        auto saved_body_methods = std::move(class_body_methods_);
+        class_body_methods_.clear();
         for (auto& s : c.body) {
             switch (s->kind) {
                 case StmtKind::FunctionDef: {
                     // 自定义方法装饰器：在类定义点求值装饰器，把链的结果
                     // 注册成类属性；方法体仍按自己的签名检查。
                     auto& f = static_cast<FunctionDef&>(*s);
+                    // 类体顺序求值：def 当场把名字绑进类命名空间
+                    // （`__str__ = short` 这类别名只看得到前面的 def）。
+                    class_body_register_def(cls, f);
                     if (f.decorators.empty()) break;
                     MethodInfo* m = nullptr;
                     for (auto& cand : cls->methods)
@@ -1059,6 +1064,8 @@ void TypeChecker::classdef(ClassDef& c) {
                     break;
                 case StmtKind::Assign: {
                     auto& as = static_cast<Assign&>(*s);
+                    // 方法别名（`__str__ = short`）：建成共享实现的两个方法槽。
+                    if (class_body_method_alias(cls, *s)) break;
                     if (as.targets.size() == 1 &&
                         as.targets[0]->kind == ExprKind::Name) {
                         auto& nm = static_cast<Name&>(*as.targets[0]);
@@ -1108,11 +1115,21 @@ void TypeChecker::classdef(ClassDef& c) {
             }
         }
         class_body_attrs_ = std::move(saved_body_attrs);
+        class_body_methods_ = std::move(saved_body_methods);
 
         // 方法体最后检查：签名、字段、self 类型都已就位。
         ClassInfo* saved_cls = cur_class_;
         cur_class_ = cls.get();
-        for (auto& m : cls->methods) funcdef_impl(*m.def, cls);
+        // 别名条目和原方法共用同一个 FunctionDef：同一个函数体只检查一次，
+        // 否则一条错误会报两遍。
+        {
+            std::unordered_set<const FunctionDef*> done;
+            for (auto& m : cls->methods) {
+                if (!m.def) continue;
+                if (!done.insert(m.def).second) continue;
+                funcdef_impl(*m.def, cls);
+            }
+        }
         cur_class_ = saved_cls;
         // 无标注方法的返回类型是检查完才推断出来的，调用签名要重新切一份
         for (auto& m : cls->methods) rebuild_call_sig(m);

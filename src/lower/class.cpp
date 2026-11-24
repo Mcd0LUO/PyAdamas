@@ -401,6 +401,9 @@ void Lowerer::lower_classdef(ClassDef& c) {
     // 全局（方法体里读到的也是这一份）；其余语句仍然按模块全局处理。
     st_->class_body_attrs.clear();
     for (auto& s : c.body) {
+        // 方法别名（`__str__ = short`）：类型检查阶段已经建成「共享实现的
+        // 两个方法槽」，这里不能再按普通赋值执行（右边的方法不是一等值）。
+        if (ci->alias_assign_stmts.count(s.get())) continue;
         if (s->kind == StmtKind::FunctionDef) {
             auto& f = static_cast<FunctionDef&>(*s);
             auto dit = decorated_methods.find(f.name);

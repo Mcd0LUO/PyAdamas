@@ -606,6 +606,7 @@ inline const char* rt_name(RtFn f) {
         case RtFn::DequeCopy: return "pa_deque_copy";
         case RtFn::AttrDict: return "pa_attr_dict_view";
         case RtFn::AnyIterList: return "pa_any_iter_list";
+        case RtFn::AnyIndex: return "pa_any_index";
         case RtFn::ReprAny: return "pa_repr_any";
         case RtFn::OsClose: return "pa_os_close";
         case RtFn::OsPathIslink: return "pa_os_path_islink";

@@ -142,6 +142,33 @@ VReg Lowerer::lower_subscript(Subscript& s) {
                 }
         }
     }
+    // **unknown 上的下标：不许静默按机器语义解码。**
+    //
+    // 静态推不出容器种类时（典型：原生函数/容器元素返回 unknown），以前的
+    // 代码直接发 IndexLoad，把 8 字节值当 PyAdamasList 指针解引用 —— 运行期
+    // 可能是段错误，也可能是「看起来正常」的垃圾值（docs/stdlib-round2.md §7.3）。
+    // 现在走运行期分派 pa_any_index：探针确认是堆对象时按头上 kind 取元素
+    // （list/tuple/dict/str），非容器抛 TypeError；探针看不见的标量元组沿用
+    // 机器语义（详见 runtime/rt_class.c 的说明）。返回值是**拥有引用**，所以
+    // 进临时栈。
+    //
+    // 为什么不做成编译期报错：全仓实测 195 处（tests 143 / bench 22 / stdlib 30，
+    // 36 个文件，含 contextlib/itertools/pprint/string/tarfile 五个模块）都是
+    // 「运行期确实是容器、静态就是 unknown」的正当用法，禁掉等于让核心标准库
+    // 编不过。取证与取舍见 docs/frontend-fixes.md。
+    if (!ot || ot->kind == TyKind::Unknown) {
+        static const bool diag_unknown_index =
+            std::getenv("PYADAMAS_DIAG_UNKNOWN_INDEX") != nullptr;
+        if (diag_unknown_index)
+            std::fprintf(stderr, "DIAG unknown-index-load %s:%d\n", file_.c_str(), s.line);
+        // 下标原样传：dict 的键可能是字符串（"k"），强转 int 会把它算错。
+        // 只有静态已知是整数时才做一次 int 归一（定宽/无符号）。
+        TypePtr it = tc_.type_of(s.slice.get());
+        if (it && is_int_like(it)) idx = coerce(idx, it, t_int());
+        VReg v = call_runtime(RtFn::AnyIndex, t_unknown(), {obj, idx});
+        push_temp_unknown(v);  // 结果可能是 int（list[int] 的元素），必须走保守 dec
+        return v;
+    }
     Inst in;
     // **固定元数的 tuple + 常量下标：静态可证在界内，免边界检查。**
     //

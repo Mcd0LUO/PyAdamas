@@ -392,6 +392,56 @@ PyAdamasList* pa_any_iter_list(int64_t v) {
 }
 
 
+/* unknown 值上的下标（读）：静态类型推不出容器种类时，**不能**按机器
+   语义把 8 字节当容器指针解引用（int 被当成列表指针 → 段错误或垃圾）。
+   探针确认是堆对象时按头上 kind 分派：list/tuple 取元素、dict 取值、str 取
+   码点；堆上的非容器（实例、range…）抛 TypeError。探针说不是堆时按下面的
+   注释处理（小整数/None 抛 TypeError，标量元组沿用机器语义）。
+   返回值是**拥有引用**（元素先 inc，str 返回新串），与降级层「unknown 结果
+   进临时栈」的约定一致。bytes 与 str 同形（无运行期标签），按 str 口径取
+   码点——与 pa_any_iter_list 的文档化边界同一口径。 */
+int64_t pa_any_index(int64_t v, int64_t i) {
+    if (pa_unknown_is_heap(v)) {
+        PyAdamasRc* h = (PyAdamasRc*)(uintptr_t)((uint64_t)v - (uint64_t)PYADAMAS_RC_HDR);
+        switch (h->kind) {
+            case PYADAMAS_RC_LIST: {
+                int64_t e = pa_list_get((PyAdamasList*)(uintptr_t)v, i);
+                pa_rc_inc_unknown(e);
+                return e;
+            }
+            case PYADAMAS_RC_DICT: {
+                int64_t e = pa_dict_get((PyAdamasDict*)(uintptr_t)v, i);
+                pa_rc_inc_unknown(e);
+                return e;
+            }
+            case PYADAMAS_RC_STR:
+                return (int64_t)(uintptr_t)pa_str_char_at((PyAdamasStr*)(uintptr_t)v, i);
+            case PYADAMAS_RC_JSONNULL:
+                pa_raise_c("TypeError", "'NoneType' object is not subscriptable");
+                return 0;
+            case PYADAMAS_RC_JSONBOOL:
+                pa_raise_c("TypeError", "'bool' object is not subscriptable");
+                return 0;
+            default:
+                pa_raise_c("TypeError", "object is not subscriptable");
+                return 0;
+        }
+    }
+    /* 探针说不是堆对象：可能是 int/None/bool，也可能是**没进 RC 索引的
+       标量元组**（kind-0 元组 rc_alloc_untracked：不进索引/堆链，探针看不见
+       它 —— pa_any_iter_list 有同一个文档化边界）。两者在运行期分不开，所以
+       下面沿用改动前的机器语义（按 PyAdamasList 布局取元素）：标量元组因此
+       保持正确。唯一能安全排除的是**小整数**：malloc 不会返回 64KB 以下的
+       地址（与 pa_unknown_is_heap 同一口径），所以 v < 65536 一定是 None/
+       int/bool，直接抛 TypeError。大整数上的下标仍是已知缺口（要彻底修需要
+       P2 类型标签，见 docs/frontend-fixes.md）。 */
+    if (v == 0) pa_raise_c("TypeError", "'NoneType' object is not subscriptable");
+    if (v < 65536) pa_raise_c("TypeError", "'int' object is not subscriptable");
+    int64_t e = pa_list_get((PyAdamasList*)(uintptr_t)v, i);
+    pa_rc_inc_unknown(e);
+    return e;
+}
+
 /* P2（0.340，PYADAMAS_TYPE_TAGS）：带 tag 的迭代物化。tag 有精确信息时
    免探针（关键收益：**未被 RC 索引跟踪的标量元组**也能迭代 —— 旧的
    pa_any_iter_list 靠探针判堆，标量元组探针落空后报 'int' not iterable）。

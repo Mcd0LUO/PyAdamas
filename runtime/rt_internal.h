@@ -1426,6 +1426,9 @@ void pa_attr_set(void* obj, PyAdamasStr* name, int64_t value);
 int64_t pa_attr_has(void* obj, PyAdamasStr* name);
 PyAdamasDict* pa_attr_dict_view(void* obj);
 PyAdamasList* pa_any_iter_list(int64_t v);
+/* unknown 上的下标（读）：按运行期种类分派，非内建可下标容器抛 TypeError。
+   返回**拥有引用**（元素已 inc / str 是新串）。 */
+int64_t pa_any_index(int64_t v, int64_t i);
 /* P2（0.340）：tag 版迭代物化 + unknown dict 的 (key,value) 对（rt_class.c）。 */
 PyAdamasList* pa_any_iter_list_t(int64_t v, int64_t tag);
 PyAdamasList* pa_any_dict_items(int64_t v, int64_t tag);
