@@ -296,7 +296,7 @@ re.compile("abc$").search("abc\n") # pa 0..3 / CPython 0..3（$ 正常）
 re.compile("^a.c").search("xabc")   # pa None / CPython None    ← ^ 正常
 ```
 
-`^` 与 `$` 工作，`\A` / `\Z` / `\z` 不工作，且 `match()` 不复刻「从 0 开始」。影响面：所有
+**细化（lead 复核）**：只有**含元字符**的模式会退化成 search —— 纯字面量模式（`"abc"`）的 `match` 是对的（走字面量快速路径）。上面 1/2/3 三条都能复现，第 6 条 `\Aabc` 实际是把 `\A` 当字面量 A（所以搜不到）。影响面：所有
 用 `re.match` 做「整串/前缀」判定的 stdlib 代码（fnmatch 已绕开，其余模块没有用）。
 建议在 `re` 的 `Pattern.match` 里显式加起点锚，并把 `\A`/`\Z` 映射到首/尾。
 
@@ -315,8 +315,13 @@ f.read()                              # error: method 'read' is not supported by
 
 ```python
 v = pq.get_nowait()      # 返回 unknown
-total += v[0]            # 编译通过；运行期把 8B 值当指针 → SIGSEGV
+total += v[0]            # 编译通过；元素是元组时按机器语义解码
 ```
+
+**状态：未稳定复现（lead 复核）。** 本轮写 `bench_queue` 时看到过一次 SIGSEGV，但最小化后
+`PriorityQueue` 存 `(2, "b")`/`(1, "a")` 再 `get_nowait()[0]` 在 0.492 构建上**正常**（打印 1、rc=0）。
+所以真实现象更可能是「旧 `heapq` 收成 `list[int]` + `queue` 传 `list[unknown]`」的组合在比较路径上
+按 int 解释元组指针 —— 需要独立复现后再定性，**不要**把这条当成已验证结论引用。
 
 本轮在写 `bench_queue` 时踩到：`queue.PriorityQueue` 里放元组、再取出来 `t[0]` →
 段错误。这条与 7.1 叠加后还有一个隐患：`heapq` 第一轮把形参收成 `list[int]`，但
