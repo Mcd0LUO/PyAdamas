@@ -493,6 +493,19 @@ set_tests_properties(pyadamas_progcache PROPERTIES
   TIMEOUT 300
 )
 
+# check --imports 的口径（0.486）：模块属性检查必须保持 opt-in（默认打开会因 stdlib
+# 签名不全误杀真实代码：实测 20 个 CPython 标准库文件 12/20 → 5/20），同时
+# --imports 下「模块没有这个属性」与 os.path 子模块链两条行为都要钉住。
+add_test(
+  NAME pyadamas_check_imports
+  COMMAND "${BASH_EXECUTABLE}" "${CMAKE_SOURCE_DIR}/tests/check_imports.sh"
+          "${CMAKE_BINARY_DIR}" "$<TARGET_FILE:pyadamas>"
+)
+set_tests_properties(pyadamas_check_imports PROPERTIES
+  WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}"
+  TIMEOUT 300
+)
+
 add_custom_target(clean-modcache
   COMMAND ${CMAKE_COMMAND} -E remove_directory "${PYADAMAS_MODCACHE_DIR}"
   COMMENT "Removing pyadamas module cache"

@@ -283,8 +283,9 @@ int main(int argc, char** argv) {
     // setjmp —— 它们有 5 处 C 级 setjmp 兜底，抓不到 _Unwind，这是设计上的
     // 永久降级。`--no-zero-cost-exc` 是回退开关（出问题时能一键退回旧路径）。
     bool zero_cost_exc = true;
-    bool no_imports = false;      // check：不加载 import 图（旧的宽松口径）
-    bool lenient_names = false;   // check：不报模块级未定义名字（逃生口）
+    bool resolve_imports = false;  // check：加载 import 图（模块属性检查，opt-in）
+    bool no_imports = false;       // check：显式关掉 import 图（默认就是关，保留兼容）
+    bool lenient_names = false;    // check：不报模块级未定义名字（逃生口）
     // deps：JSON 输出（默认就是 JSON；--json 显式写出来便于脚本自解释）。
     bool json_out = false;
     // --module-map：外部模块映射文件（deps --json 的产物，可互相喂）。
@@ -306,7 +307,7 @@ int main(int argc, char** argv) {
     for (int i = 1; i < argc; ++i) {
         std::string a = argv[i];
         if (a == "--syntax") syntax_only = true;
-        else if (a == "--imports") { /* 0.484 起是默认行为，保留兼容 */ }
+        else if (a == "--imports") resolve_imports = true;
         else if (a == "--no-imports") no_imports = true;
         else if (a == "--lenient-names") lenient_names = true;
         else if (a == "--json") json_out = true;
@@ -450,12 +451,13 @@ int main(int argc, char** argv) {
         }
 
         if (mode == "check" || mode == "types") {
-            // check/types 默认加载依赖模块接口（0.484 起；之前只有 --imports 才加载）：
-            // pya-lsp 的诊断完全依赖 check，而「模块没有这个属性」只有拿到模块
-            // 表才能报。--no-imports 回退到「不解析 import 图」的宽松口径。
-            // 模块级未定义名字同样在 check 阶段报（--lenient-names 逃生口）。
+            // check/types 默认**不**加载 import 图（0.486 回退：0.484 曾默认加载，
+            // 在真实代码上把通过率打到 5/20 —— 我们的 stdlib 签名表不全，
+            // subprocess.check_output / sys.version_info 这类未建模成员会被误杀，
+            // 违背「前端宽、后端严」）。--imports 显式开启模块属性检查。
+            // 模块级未定义名字默认就报（真正的拼写错误，误报面小；--lenient-names 逃生口）。
             pyadamas::ModuleLookup lookup = nullptr;
-            if (!no_imports) {
+            if (resolve_imports && !no_imports) {
                 std::vector<std::string> missing;
                 lookup = pyadamas::load_check_lookup(path, include_dirs, missing);
             }

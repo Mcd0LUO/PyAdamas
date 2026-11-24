@@ -4,6 +4,51 @@
 
 早期阶段没有逐条留痕，按阶段归纳；0.4 之后逐条记录。
 
+## [0.486] - 2026-11-24
+
+> fix(frontend)：**`--imports` 回退为 opt-in**（0.484 的默认值把 `check` 在真实代码上的
+> 通过率打掉了，lead 复核发现）。`strict_module_names` 保持默认开。
+>
+> **证据**（lead 在 20 个 CPython 3.14 stdlib 文件上量的四种口径，本机复现一致）：
+>
+> | 口径 | 通过 |
+> |---|---|
+> | `--no-imports --lenient-names`（0.171 旧口径） | 12/20 |
+> | `--lenient-names`（只开 import 图） | **5/20** |
+> | `--no-imports`（只开 strict names） | 12/20（本仓库 628 文件全量：480/623，见下） |
+> | 默认（两个都开，0.484 的行为） | **5/20** |
+>
+> 掉分全部来自「默认加载 import 图」。根因不是用户代码错，而是**我们自己的 stdlib 签名表
+> 不全**：`module 'subprocess' has no attribute 'check_output'`、`module 'sys' has no
+> attribute 'version_info'/'base_prefix'/'implementation'/'platform'`、
+> `module 're' has no attribute 'Pattern'`、`cannot assign to module attribute 'sys.stdout'`
+> 全是误杀。默认打开等于让一切用到未建模成员的真实代码被判错，直接违背「前端宽、后端严；
+> 宁可漏报不可误杀」。
+>
+> **改了什么**：
+> 1. `check`/`types` 默认**不**加载 import 图（等价 0.483 行为），`--imports` 显式开启；
+>    `--no-imports` 保留（显式关，优先级高于 `--imports`）。
+> 2. `strict_module_names` 仍默认开（`print(VALU)` 这类真拼写错误必须报；628 文件全量上
+>    它多报 25 个文件，**全部是 `build` 同样拒绝的**类体同层引用，如
+>    `class A: def f(self): ...; __sub__ = f` —— check 与 build 一致，不算误杀）。
+> 3. `tests/fail/f80_module_attr.py` 删除（fail harness 只支持环境变量，不支持 CLI 参数），
+>    改为 `tests/check_imports.sh` 并接进 ctest（`pyadamas_check_imports`，3 条断言）：
+>    默认 check 放行 `json.nonexistent_attr`（不误杀）、`--imports` 下报出
+>    `module 'json' has no attribute 'nonexistent_attr'`、`--imports` 下 `os.path.join`
+>    仍能解析（0.484 的子模块链能力不回退）。
+>
+> **0.484 那两条结论的更正**（原文保留，就地标注）：
+> - 「check 默认加载 import 图」→ 现为 opt-in；
+> - 「550 文件语料对照旧口径零回归」→ 只覆盖了**本仓库自己的** `.py`（tests/bench/stdlib，
+>   接口成员表齐全），没覆盖「stdlib 签名表不全」这条路径。
+>
+> **628 文件全量（本机 CPython 3.14.4）**：语法通过 623/628（99.2%）；`check` 默认
+> **480/623 = 77.0%**（0.171 旧口径 505/623 = 81.1%，差的 25 个见上条）；`check --imports`
+> 155/623 = 24.9%（更严口径，只给需要模块属性检查的工具用）。
+>
+> 附带说明：**pya-lsp 要用模块属性检查就自己传 `--imports`**（那是另一个仓库，本轮不改）。
+>
+
 ## [0.485] - 2026-11-24
 
 > 取证（§3.4）：**前端鲁棒性基线在 0.484 上重测**（CPython **3.14.4**，机器上的版本；
@@ -38,9 +83,11 @@
 
 > feat(frontend)：**pya-lsp 反馈的四条编译器缺口**（3.3）。三条落地、一条判负。
 
-> 1. **`check` 不校验模块属性**（缺口 2，**落地**）：check 现在默认加载 import 图
->    （`load_check_lookup`，之前只有 `--imports` 才加载），`json.nonexistent_attr`
->    在 check 阶段就报 `module 'json' has no attribute ...`；`--no-imports` 保留旧口径。
+> 1. **`check` 不校验模块属性**（缺口 2，**落地**）：`check --imports` 会加载依赖模块接口
+>    （`load_check_lookup`），`json.nonexistent_attr` 在 check 阶段就报
+>    `module 'json' has no attribute ...`。**（0.486 更正）本条原先写的是「check 默认加载
+>    import 图」，那是错的：默认打开把真实代码通过率从 12/20 打到 5/20（stdlib 签名表不全 →
+>    `subprocess.check_output`/`sys.version_info` 被误杀），0.486 已改回 opt-in。**
 >    连带三处修正：
 >    - **子模块属性链端到端可用**：`os.path.join(...)` 之前 check/build 都报
 >      `module 'os' has no attribute 'path'`（只能 `from os.path import ...`）。现在
@@ -59,6 +106,10 @@
 > 3. **`check` 不报顶层未定义名字**（缺口 4，**落地**）：check 默认 `strict_module_names`，
 >    `print(VALU)` 在 check 阶段报 `undefined name 'VALU'`；`--lenient-names` 是逃生口。
 >    全语料 550 个 `.py` 对照旧口径**零回归**（新增 4 个「旧失败新通过」，均为接口变准）。
+>    **（0.486 更正）**这个「零回归」只覆盖了**本仓库自己的** `.py`（tests/bench/stdlib，
+>    这些模块的接口是我们自己写的、成员表齐全），没有覆盖「stdlib 签名表不全」这条路径——
+>    在 CPython 标准库这类真实代码上，默认加载 import 图会把 12/20 打到 5/20。现在
+>    `--imports` 是 opt-in，并由 `tests/check_imports.sh`（ctest：`pyadamas_check_imports`）钉住三条口径。
 >    新增 `tests/fail/f81_undefined_top.py`。
 > 4. **二进制 `file.read(n)` 返回 str**（缺口 1，**判负**）：`open(..., "rb")` 的值类型
 >    是 str（byte-transparent，长度按字节）。改成 bytes 是正确方向，但要三件事同时做：
