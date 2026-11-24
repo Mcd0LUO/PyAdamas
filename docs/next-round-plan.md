@@ -42,7 +42,7 @@
 
 | 顺序 | 任务 | 杠杆 | 验收 / 风险 |
 |---|---|---|---|
-| 2.1 | **RC 借用扩展到「入口全局根 + append-only 根」**（obj_dispatch） | ~8–15% | 所有权分析 fail-closed；ASan 全量 + `tests/run` 语料对拍 + CPython 对拍；abbench 15 轮中位数优于基线 >3.5%（A/A 噪声）。**红线**：全局槽是 GC 根，不允许留悬垂借用；先降级成帧槽再借用 |
+| 2.1 | **RC 借用扩展到「入口全局根 + append-only 根」**（obj_dispatch）——**落地（0.473，opt-in）** | ~8–15% → 实测 **-32.7%** | 所有权分析 fail-closed；ASan 全量 + `tests/run` 语料对拍 + CPython 对拍；abbench 15 轮中位数优于基线 >3.5%（A/A 噪声）。**红线**：全局槽是 GC 根，不允许留悬垂借用；先降级成帧槽再借用。**0.473 结果**：未降级成帧槽，改用「入口私有全局候选 + PrivateGlobal 根 + 出口零化」；obj_dispatch 300.59→202.24 ms（-32.7%）、dict_wordfreq -6.5%、sort_struct -2.6%、其余 15 例 asm 逐字节不变；普通/ASan 套件 470/0、difftest 441/0、CPython 18/18；新增 566。细节见 [borrow-loop-design.md](borrow-loop-design.md) §9。门控仍默认关 |
 | 2.2 | ~~浮点槽提升的作用域放宽~~ **判负（0.472）** | 无（前提不成立） | **已判负**：浮点**槽**从 0.279 起就没有「整函数无调用」门禁——跨调用代价由 `build_fp_liveness` + 每指令 `fp_spill_mask` 只 spill「调用后还要读」的槽承担，即「活跃区间不跨调用」判据早已实现。`__pa_main` 的 `bb12` 在 **IR** 里有 `load.slot s5`，但 asm/objdump 里 `total` 在 `%xmm8`（`addsd %xmm7,%xmm8`，循环内零槽访存；-O1、VECT=0 同）。唯一的无调用门禁管的是**跨块浮点 vreg**（nbody 上已实测负收益）。nbody 的 dx/dy/dz/d2/mag 跨 `math.sqrt`，必须 spill；要消掉得内联 `sqrtsd`，另立一项 |
 | 2.3 | **入口私有全局提升的红利回收（复测即可，不立项）**——**复测完成（0.472）** | 已基本兑现，剩余可能 ≈0 | **已测**：spectral_norm 的 `__pa_main` 内层循环 `bb12` 里没有任何 `load.global`——`u`/`v`/`N` 已被外提成 vreg（`%59`/`%60`/`%61`），剩下的 `load.global g4/g5` 只在 10 次的外层循环里。fannkuch/fasta 的 `load.global` 也从 0.300 口径的 13/19 降到 9/15。**结论：A 的完整形态（分配器候选集扩到标量 global）对这三个基准没有剩余空间，不需要再做；瓶颈已转移到浮点槽与循环体本身** |
 | 2.4 | **`PYADAMAS_RA_OPT` 默认化决策** | obj_dispatch ~2%，历史 mandelbrot/fasta +3~4% | 全量 abbench 15 轮 × 3 次；两窗同号才默认开，否则保持 opt-in 并写清理由 |
@@ -145,4 +145,14 @@ PYADAMAS_TEST_ASAN=1 PYADAMAS_TEST_JOBS=8 bash tests/run_tests.sh build/lead bui
 - `tools/checkall.sh --full` 全绿；perf 基线是「人工确认后写入」，不是为过闸门改数；
 - 文档里每个性能数字都能用页内命令复现；负结论进 CHANGELOG；
 - 没有死代码/空壳 `switch`（CONTRIBUTING 第 6 条）。
+
+### 8.3 编译器侧候选（由标准库轮提出，先取证再立项）
+
+标准库轮（`stdlib-opt` 分支）用两个真实模块把「编译器缺什么」量出来了。这两条**不是** P0–P3 的待办，
+而是最后一轮编译器优化的候选，立项门槛写在最后一列。
+
+| # | 候选 | 证据（同窗 A/B） | 立项门槛 |
+|---|---|---|---|
+| a | **泛型函数体按推断的元素类型自动特化**：推出 `list[int]` 后，函数体里的元素比较/算术走静态特化，而不是 `pa_any_cmp_t` 通用标签比较（`runtime/rt_any.c`） | `heapq` 把形参从裸 `list` 改成 `list[int]` 后，`pa_any_cmp_t` 占比 29% → 0，bench_heapq **63.6 → 18.5 ms**（对 CPython 1.20× → 4.06×） | 在 ≥2 个真实 stdlib 模块上各拿到 ≥20%；O0/O1 产物不变；unknown 语义不动 |
+| b | **循环内字符串构造（str builder）**：`out = out + c` 每次 `pa_str_concat` 都分配新对象，O(n²) 字节拷贝 | `textwrap` 的逐字符拼接是 memmove/str_alloc 主因（perf ~20%）；改 list+join 后 **968.7 → 547.2 ms**（0.85× → 1.50×） | 只对能证明「累加器无别名、循环内不读中间值」的循环生效，fail-closed；与 RC 所有权不冲突；输出与 CPython 逐字节一致 |
 
