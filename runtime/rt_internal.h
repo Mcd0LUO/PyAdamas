@@ -320,21 +320,30 @@ typedef struct {
 } PyAdamasDictEntry;
 
 typedef struct {
-    int64_t len;
-    int64_t cap;       /* entries / order 容量 */
+    /* ── 热区：前 64 字节刚好一条缓存行，插入/查找/删除只碰这里 ── */
+    int64_t len;       /* 偏移 0：codegen 的 len()/真值判断直接读它 */
     PyAdamasDictEntry* entries;
+    int32_t* index;    /* 开放寻址索引槽：bit0..23 = entry 下标 + 1（0 为空槽），
+                          bit24..31 = hash 标签；0xFFFFFFFF = 墓碑。
+                          标签让探测不必读 32B 的 entry 就能排除冲突。 */
     int32_t* order;    /* order[i] = 第 i 个存活项的 entry 下标（懒重建） */
-    int32_t* index;    /* 开放寻址索引：entry 下标 + 1，0 为空，-1 墓碑 */
-    int64_t icap;      /* 索引表容量（2 的幂） */
-    int64_t ord_len;   /* order 有效长度；!= len 表示需要重建 */
-    int64_t nent;      /* entries 高水位（含墓碑） */
-    int64_t itomb;     /* 索引表里的墓碑数 */
-    int64_t free_head; /* 墓碑 entry 空闲链，-1 结束，next 复用 entry.key */
+    int32_t cap;       /* entries / order 容量 */
+    int32_t icap;      /* 索引表容量（2 的幂） */
+    int32_t nent;      /* entries 高水位（含墓碑） */
+    int32_t itomb;     /* 索引表里的墓碑数 */
+    int32_t free_head; /* 墓碑 entry 空闲链，-1 结束，next 复用 entry.key */
+    int32_t ord_len;   /* order 有效长度；!= len 表示需要重建 */
     int32_t head;      /* 插入顺序链表头/尾（entry 下标，-1 为空） */
     int32_t tail;
-    int64_t key_kind;  /* 0 int/bool, 1 str, 2 float, 3 raw, 9 raw or BigInt */
-    int64_t key_own;   /* 0 非堆, 1 堆, 2 unknown */
-    int64_t val_own;   /* 0 非堆, 1 堆, 2 unknown */
+    /* ── 温区（第二条缓存行）：类型/所有权/版本等，写入路径各读一次 ── */
+    int32_t key_kind;  /* 0 int/bool, 1 str, 2 float, 3 raw, 9 raw or BigInt */
+    int32_t key_own;   /* 0 非堆, 1 堆, 2 unknown */
+    int32_t val_own;   /* 0 非堆, 1 堆, 2 unknown */
+    /* 0.302：sticky 堆标志。own==2 的 entry 写入路径探测到键/值是堆指针
+       就置 1（只置不清；clear/new 归零）。key_own==val_own==2 且它为 0 时
+       全部 entry 都是标量，destroy/gc_release/clear 跳过链游。
+       0.4xx：与 own 字段同放温区，插入路径不再为它多碰一条缓存行。 */
+    int32_t saw_heap;
     /* 类 key 的 __hash__ / __eq__ vtable 槽号；-1 表示按机器字哈希/比较。 */
     int64_t hash_slot;
     int64_t eq_slot;
@@ -345,11 +354,6 @@ typedef struct {
     /* collections.defaultdict 的内置工厂；0 表示普通 dict。
        只记录工厂种类，缺省下标读取时才创建值，不影响 get()/in。 */
     int64_t default_factory;
-    /* 0.302：sticky 堆标志。own==2 的 entry 写入路径探测到键/值是堆指针
-       就置 1（只置不清；clear/new 归零）。key_own==val_own==2 且它为 0 时
-       全部 entry 都是标量，destroy/gc_release/clear 跳过链游。追加在结构体
-       尾部，既有字段偏移不动（codegen 只按偏移 0 读 len，无硬编码尺寸）。 */
-    int64_t saw_heap;
 } PyAdamasDict;
 
 

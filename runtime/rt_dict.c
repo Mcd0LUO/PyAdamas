@@ -261,15 +261,40 @@ int dict_key_matches(PyAdamasDict* d, int64_t a, int64_t b) {
     return dict_key_eq(d->key_kind, a, b);
 }
 
-/* 索引表里找到 key 的 entry 下标；找不到返回 -1。墓碑槽（-1）跳过。 */
+/* ── 索引槽编码（32 位）────────────────────────────────────────────
+   bit 0..23：entry 下标 + 1（0 = 空槽）
+   bit 24..31：hash 标签（hash >> 56）
+   0xFFFFFFFF：删除留下的墓碑（不会与合法槽冲突：下标上限 2^24-2）
+
+   标签让探测在**不读 entry** 的情况下排除绝大多数冲突：entries 是
+   32B/项、跨多条缓存行，而一次索引探测只有 4B。插入路径上探测到的
+   每个非空槽都是冲突（新键不可能命中），标签误命中率只有 1/256，
+   省掉的 entry 载入就是这条路径的主要收益。索引槽仍是 4B，内存不变。 */
+#define DICT_IDX_MASK 0xFFFFFFu
+#define DICT_IDX_TOMB ((int32_t)-1)
+
+static inline int32_t dict_idx_hash_tag(int64_t hash) {
+    return (int32_t)((uint64_t)hash >> 56);
+}
+static inline int32_t dict_idx_make(int64_t hash, int64_t e) {
+    return (int32_t)(((uint32_t)dict_idx_hash_tag(hash) << 24) | (uint32_t)(e + 1));
+}
+static inline int64_t dict_idx_entry(int32_t slot) {
+    return (int64_t)((uint32_t)slot & DICT_IDX_MASK) - 1;
+}
+static inline int dict_idx_tag_eq(int32_t slot, int64_t hash) {
+    return ((uint32_t)slot >> 24) == (uint32_t)dict_idx_hash_tag(hash);
+}
+
+/* 索引表里找到 key 的 entry 下标；找不到返回 -1。墓碑槽跳过。 */
 static int64_t dict_lookup(PyAdamasDict* d, int64_t key, int64_t hash) {
     int64_t mask = d->icap - 1;
     int64_t i = (int64_t)((uint64_t)hash & (uint64_t)mask);
     for (;;) {
         int32_t slot = d->index[i];
         if (!slot) return -1;
-        if (slot > 0) {
-            int64_t e = (int64_t)slot - 1;
+        if (slot != DICT_IDX_TOMB && dict_idx_tag_eq(slot, hash)) {
+            int64_t e = dict_idx_entry(slot);
             if (d->entries[e].hash == hash && dict_key_matches(d, d->entries[e].key, key))
                 return e;
         }
@@ -294,11 +319,11 @@ static int64_t dict_lookup_place(PyAdamasDict* d, int64_t key, int64_t hash,
             *place = tomb >= 0 ? tomb : i;
             return -1;
         }
-        if (slot > 0) {
-            int64_t e = (int64_t)slot - 1;
+        if (slot != DICT_IDX_TOMB && dict_idx_tag_eq(slot, hash)) {
+            int64_t e = dict_idx_entry(slot);
             if (d->entries[e].hash == hash && dict_key_matches(d, d->entries[e].key, key))
                 return e;
-        } else if (tomb < 0) {
+        } else if (slot == DICT_IDX_TOMB && tomb < 0) {
             tomb = i;
         }
         i = (i + 1) & mask;
@@ -314,7 +339,7 @@ static int64_t dict_place_slot(PyAdamasDict* d, int64_t hash) {
     for (;;) {
         int32_t slot = d->index[i];
         if (!slot) return tomb >= 0 ? tomb : i;
-        if (slot < 0 && tomb < 0) tomb = i;
+        if (slot == DICT_IDX_TOMB && tomb < 0) tomb = i;
         i = (i + 1) & mask;
     }
 }
@@ -333,9 +358,10 @@ static void dict_reindex(PyAdamasDict* d, int64_t nicap) {
     d->itomb = 0;
     int64_t mask = d->icap - 1;
     for (int32_t e = d->head; e >= 0; e = d->entries[e].next) {
-        int64_t s = (int64_t)((uint64_t)d->entries[e].hash & (uint64_t)mask);
+        int64_t h = d->entries[e].hash;
+        int64_t s = (int64_t)((uint64_t)h & (uint64_t)mask);
         while (d->index[s]) s = (s + 1) & mask;
-        d->index[s] = (int32_t)(e + 1);
+        d->index[s] = dict_idx_make(h, e);
     }
 }
 
@@ -348,6 +374,9 @@ static void dict_reserve(PyAdamasDict* d, int64_t n) {
     if (n > d->cap) {
         int64_t ncap = d->cap > 0 ? d->cap : 8;
         while (ncap < n) ncap *= 2;
+        /* 索引槽只留 24 位存 entry 下标（见 DICT_IDX_MASK）；
+           idx+1 最大 0xFFFFFF 会与 tag=0xFF 的墓碑编码撞车，故留一格。 */
+        if (ncap > (int64_t)DICT_IDX_MASK - 1) panic_c("dict too large");
         PyAdamasDictEntry* ne =
             (PyAdamasDictEntry*)realloc(d->entries, sizeof(PyAdamasDictEntry) * (size_t)ncap);
         int32_t* no = (int32_t*)realloc(d->order, sizeof(int32_t) * (size_t)ncap);
@@ -383,11 +412,11 @@ static void dict_erase(PyAdamasDict* d, int64_t e) {
     int64_t mask = d->icap - 1;
     int64_t s = (int64_t)((uint64_t)d->entries[e].hash & (uint64_t)mask);
     int64_t steps = 0;
-    while (d->index[s] != (int32_t)(e + 1)) {
+    while (d->index[s] == DICT_IDX_TOMB || dict_idx_entry(d->index[s]) != e) {
         if (++steps > d->icap) panic_c("dict index corrupted");
         s = (s + 1) & mask;
     }
-    d->index[s] = -1;
+    d->index[s] = DICT_IDX_TOMB;
     ++d->itomb;
     --d->len;
     d->ord_len = -1;
@@ -524,7 +553,8 @@ void pa_dict_set(PyAdamasDict* d, int64_t key, int64_t val) {
     // 可能是堆；键对象沿用插入时已探针的原 key）。
     dict_note_heap(d, key, val);
     int64_t h = dict_hash_key_inline(d, key);
-    int64_t place;
+    /* 初值只为满足 -Wmaybe-uninitialized：dict_lookup_place 未命中时必写。 */
+    int64_t place = 0;
     int64_t e = dict_lookup_place(d, key, h, &place);
     if (e >= 0) {
         pa_own_dec(d->key_own, key);
@@ -552,6 +582,7 @@ void pa_dict_set(PyAdamasDict* d, int64_t key, int64_t val) {
     } else {
         if (d->nent == d->cap) {
             int64_t ncap = d->cap ? d->cap * 2 : 8;
+            if (ncap > (int64_t)DICT_IDX_MASK - 1) panic_c("dict too large");
             PyAdamasDictEntry* ne =
                 (PyAdamasDictEntry*)realloc(d->entries, sizeof(PyAdamasDictEntry) * (size_t)ncap);
             int32_t* no = (int32_t*)realloc(d->order, sizeof(int32_t) * (size_t)ncap);
@@ -576,8 +607,8 @@ void pa_dict_set(PyAdamasDict* d, int64_t key, int64_t val) {
         d->order[d->ord_len++] = (int32_t)idx;
     }
     ++d->len;
-    if (d->index[place] < 0) --d->itomb;
-    d->index[place] = (int32_t)(idx + 1);
+    if (d->index[place] == DICT_IDX_TOMB) --d->itomb;
+    d->index[place] = dict_idx_make(h, idx);
 }
 
 /* default_factory 的编码与 lower_collections 保持一致。这里只实现内置
