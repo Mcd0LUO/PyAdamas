@@ -34,6 +34,9 @@ set(PYADAMAS_SOURCES
   src/driver/build.cpp
   src/driver/modules.cpp
   src/driver/check.cpp
+  src/driver/sha256.cpp
+  src/driver/manifest.cpp
+  src/driver/lock.cpp
   src/typecheck/builtin_sigs.cpp
   src/syntax/parser.cpp
   src/syntax/stmt.cpp
