@@ -51,6 +51,7 @@
 
 ### 其余设计与落地记录（按主题，避免主表过长）
 
+- **夜间轮汇总（0.499–0.514）**：[nightly-2026-11-25.md](nightly-2026-11-25.md)（这一夜做了什么、判负清单、还剩什么）
 - **多继承布局**：[mi-layout.md](mi-layout.md)（非主基类方法的字段偏移静默错值：实测、根因、两条修法与验收）
 - **类型窄化**：[type-narrowing.md](type-narrowing.md)（`T \| None` 窄化支持的模式、6 个已知假阳性与边界）
 - **前端缺口与 unknown**：[frontend-gaps.md](frontend-gaps.md)（628 文件基线、失败簇、unknown 来源与修法总账）
