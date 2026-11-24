@@ -216,8 +216,7 @@ public:
         void set_index_readonly(bool v) { index_readonly_ = v; }
         // 零开销异常总开关（默认开启；--no-zero-cost-exc 可回退）。
         void set_zero_cost_exc(bool v) { zero_cost_exc_ = v; }
-        // 分配器实验开关（驱动传入，参与缓存失效）：RA_SPLIT / RA_OPT（默认关）。
-        void set_rc_split(bool v) { rc_split_ = v; }
+        // 分配器实验开关（驱动传入，参与缓存失效）：RA_OPT（默认关）。
         void set_ra_opt(bool v) { ra_opt_ = v; }
         // 浮点循环 SIMD 向量化开关（PYADAMAS_SIMD，默认关）：参与缓存失效。
 

@@ -321,14 +321,11 @@ void AsmGen::gen_load_slot(const Inst& in) {
                 emit_tag_imm(in.dst, kTagUnk);
             return;
         }
-        // split 模式下位置按块查表；默认模式保持原行为。
         const MOperand& sop = slot_mop(in.idx);
         // 融合目标非空时**必须**真的写过去，不能走别名——别名只是
         // 让 %v 指向变量的位置，而 `store.slot s, %v` 已经被吞掉，
         // 变量的位置不会有任何变化，值就悄悄丢了。
-        // split 模式下禁用别名优化：别名让 vreg 直接指向槽的位置，
-        // 而 split 的位置是**按块**的，跨块或块内 store 之后会失效。
-        if (slot_loc_.empty() && dst_loc_.empty() && in.dst != kNoReg &&
+        if (dst_loc_.empty() && in.dst != kNoReg &&
             in.dst < use_count_.size() &&
             use_count_[in.dst] == 1 && !cross_block_[in.dst] &&
             (opt_ >= 1 || sop.kind == MOperandKind::Reg)) {

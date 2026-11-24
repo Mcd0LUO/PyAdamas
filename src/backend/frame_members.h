@@ -53,8 +53,6 @@
     // 精确区间诊断（PYADAMAS_LI_STATS）：对比精确区间 vs 粗近似。
     void report_interval_precision();
     void assign_slot_regs_linear();
-    // live range splitting：按块给变量槽分配寄存器。
-    void assign_slot_regs_split();
     // 单个池的着色：cands 是槽号列表（同属一个池），结果写进 out[槽号]。
     void color_slot_pool(const std::vector<int>& cands, const char* const* regs,
                          int nreg, std::vector<std::string>& out);

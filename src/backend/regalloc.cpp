@@ -3,7 +3,6 @@
 
 #include "common/block_bitset.h"
 #include "backend/live_interval.h"
-#include "backend/spill_placement.h"
 
 namespace pyadamas {
 

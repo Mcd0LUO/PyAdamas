@@ -248,34 +248,6 @@
     // 变量的现在位置：寄存器（提升过）或栈槽。结构化版本。
     const MOperand& slot_mop(int slot) const override {
         if (gen_) return gen_smem_mop(slot);
-        // **split 模式：按当前块查表。**
-        //
-        // 放在 ra_.slot_reg 之前：split 模式下 ra_.slot_reg 不用（整函数固定位置
-        // 与按块分裂互斥）。`slot_loc_` 为空时（默认模式）整段跳过，
-        // 行为与原来完全一致。
-        if (!slot_loc_.empty() && split_block_ >= 0 &&
-            split_block_ < static_cast<int>(slot_loc_.size()) &&
-            slot >= 0 &&
-            slot < static_cast<int>(slot_loc_[static_cast<size_t>(split_block_)].size())) {
-            const MOperand& r =
-                slot_loc_[static_cast<size_t>(split_block_)][static_cast<size_t>(slot)];
-            if (!r.empty()) return r;
-            // **本块没有 split 位置时，回落到默认分配的整函数寄存器。**
-            //
-            // 安全性来自一个不变量：assign_slot_regs_split 只处理「不在
-            // ra_.slot_reg 里」的槽（if (!ra_.slot_reg[s].empty()) continue;），
-            // 所以 slot_loc_ 与 ra_.slot_reg 的槽集合**天然互斥**。
-            //
-            // 回落只对「默认分配已整函数提升」的槽生效 —— 那些槽不走 split
-            // 的 reload/spill 编排，整函数一个位置，本来就自洽。
-            //
-            // （曾经错误地让 split 模式一律走栈：结果默认提升的浮点槽也被
-            // 拉回栈，而 spill_fp_slots 仍把从未写过的寄存器写回栈，覆盖了
-            // 真实值 —— matmul 浮点值被冲掉、生成程序死循环 OOM。）
-            if (slot < static_cast<int>(ra_.slot_reg.size()) && !ra_.slot_reg[slot].empty())
-                return ra_.slot_reg[slot];
-            return smem_mop(slot);
-        }
         if (slot >= 0 && slot < static_cast<int>(ra_.slot_reg.size()) && !ra_.slot_reg[slot].empty())
             return ra_.slot_reg[slot];
         return smem_mop(slot);

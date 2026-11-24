@@ -530,26 +530,26 @@ int main(int argc, char** argv) {
             pyadamas::set_asan_runtime(sanitize == "address");
         }
         prog.rebuild = rebuild;
-        // live range splitting（PYADAMAS_RA_SPLIT）已废弃：分配器在 -O0 下
-        // 会让循环计数错乱（死循环）、-O2 下算错值（冒泡排序输出未排序）。
-        // docs/regalloc.md §已否决的方案 已判「默认关、不要重试」，ra-opt-design
-        // 里也记了它在生成器+except 上 SIGSEGV。它和 codegen_block 的槽位置
-        // 发射代码（块入口 reload、融合存储双写、fp 别名掩码）缠在一起，删
-        // 干净要动默认路径的发射逻辑，风险大于收益 —— 所以这里直接拒绝入口，
-        // 让这条路径再也产不出错误代码；rc_split 恒 false，dispatch 不可达。
-        prog.rc_split = false;
+        // live range splitting（PYADAMAS_RA_SPLIT）的代码**已整段删除**：
+        // 分配器在 -O0 下会让循环计数错乱（死循环）、-O2 下算错值（冒泡排序
+        // 输出未排序），三轮实现均 +27~28%，docs/regalloc.md §已否决的方案
+        // 已判「不要重试」。删掉的是 assign_slot_regs_split、slot_loc_ 系列
+        // 按块位置表、spill_placement.{cpp,h} 与 manifest 的 rcsplit 行。
+        //
+        // 保留显式报错（rc=2）而不是静默忽略：A/B 脚本设了这个变量就以为
+        // 自己在跑另一条分配路径，静默跑默认路径会拿到假数据。
         if (const char* sp = std::getenv("PYADAMAS_RA_SPLIT");
             sp != nullptr && std::string_view(sp) != "0" && sp[0] != '\0') {
             std::fprintf(stderr,
-                         "error: PYADAMAS_RA_SPLIT 已废弃（split 分配器会死循环/算错"
-                         "值，见 docs/regalloc.md）\n");
+                         "error: PYADAMAS_RA_SPLIT 已删除（split 分配器会死循环/"
+                         "算错值），见 docs/regalloc.md\n");
             return 2;
         }
         if (const char* sc = std::getenv("PYADAMAS_SPLIT_MAXREG");
             sc != nullptr && sc[0] != '\0') {
             std::fprintf(stderr,
-                         "error: PYADAMAS_SPLIT_MAXREG 已废弃（只对已废弃的 split "
-                         "分配器有效）\n");
+                         "error: PYADAMAS_SPLIT_MAXREG 已删除（只对已删除的 split "
+                         "分配器有效），见 docs/regalloc.md\n");
             return 2;
         }
         // 图着色分配器（PYADAMAS_RA_GRAPH）已整段删除：它在 -O2 下会把
@@ -640,7 +640,7 @@ int main(int argc, char** argv) {
                 auto a = std::chrono::steady_clock::now();
                 std::string asm_text = pyadamas::generate_asm(
                     *prog.entry->ir, !prog.needs_unknown_index, prog.zero_cost_exc,
-                    false, prog.rc_split, prog.ra_opt,
+                    false, prog.ra_opt,
                     prog.inline_opt, prog.type_tags, prog.vect, prog.needs_dynamic_big);
                 auto b = std::chrono::steady_clock::now();
                 if (std::getenv("PYADAMAS_TIMING"))

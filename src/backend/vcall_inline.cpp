@@ -123,8 +123,6 @@ bool AsmGen::try_fuse_guarded_vcall_add(const Block& b, size_t pos) {
     } else {
         // 与 Bin+StoreSlot 融合同一套判据（GC 根槽 / tag / 寄存器类 / 单使用）。
         if (!can_fuse(add, store)) return false;
-        // split 模式的槽位置按块查表，融合会绕过块出口写回，保守跳过。
-        if (!slot_loc_.empty()) return false;
         if (store.idx < 0 || store.idx >= static_cast<int>(ra_.slot_reg.size()))
             return false;
     }

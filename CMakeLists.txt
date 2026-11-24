@@ -110,7 +110,6 @@ set(PYADAMAS_SOURCES
     src/opt/dict_bump.cpp
     src/opt/dict_fuse.cpp
     src/opt/global_promote.cpp
-    src/backend/spill_placement.cpp
     src/backend/live_interval.cpp
     src/backend/live_interval_build.cpp
   src/opt/fold.cpp
