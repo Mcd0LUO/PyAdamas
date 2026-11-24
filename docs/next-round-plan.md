@@ -61,7 +61,7 @@
 | 3.4 | **前端基线重测** | 最后一次完整口径是 0.171（501/596），之后过了 300 个版本，标准库通过与失败分布都变了 | 当前 HEAD 重跑 Debian CPython 3.13.5 口径，刷新 [compatibility.md](compatibility.md) 的数字；按失败簇修 top-3（不要只刷数字） |
 | 3.5 | **三项已知语义缺口**，按用户可见度排 | 装饰后的 `__iter__`（内建迭代路径不查类属性）、未初始化变量读 0（需哨兵/数据流）、异常对象 traceback/列号 | 每项要么修，要么在 compatibility.md 写成明确限制并附最小复现；不允许「文档承诺但不可用」 |
 | 3.6 | ~~**包管理 P0 切片**~~ **P0-a 已完成（0.473）** | `pyadamas.toml`（最小 TOML 子集）/ `pyadamas.lock`（SHA-256 树哈希）/ `resolve` / `--locked` / 锁派生 ModuleMap 全部落地，`tests/pkg` 56 项 + ctest | 六条验收全过（见 [package-management-design.md](package-management-design.md) 附录「落地记录（P0-a）」）。**P0-b 剩余**：版本进 mangling 与接口坐标（需一次 ABI bump，会改符号/汇编，单独一版）、`check --imports` 接包映射、本地模块与包同名报冲突、provider 侧 `modules` 声明 |
-| 3.7 | **修 `from pkg import sub` 后调用子模块函数的 SIGSEGV**（pre-existing，P0-a 复核时发现） | 最小复现：`pkg/__init__.py` + `pkg/sub.py`（`def hi() -> int: return 7`），`from pkg import sub; print(sub.hi())` → **rc=139**；而 `import pkg.sub as s; s.hi()`、`from pkg.sub import hi; hi()`、`from pkg import sub`（不调用）都正常。0.473 之前的基线同样崩 | 先加 `tests/run` 回归（当前会崩，先写成 fail 用例或等修复后加），ASan 下定位 `src/lower/import.cpp` 的绑定/降级路径；修复后套件与 difftest 全绿 |
+| 3.7 | ~~**修 `from pkg import sub` 后调用子模块函数的 SIGSEGV**~~ **已修（0.477）**：根因是子模块别名登记时漏发 `import.module`，init 未跑 → 函数全局为 0 → `call 0`；修法是登记前 `ensure_module_init(child)`。回归 `tests/modules/from_pkg_sub/` | 最小复现：`pkg/__init__.py` + `pkg/sub.py`（`def hi() -> int: return 7`），`from pkg import sub; print(sub.hi())` → **rc=139**；而 `import pkg.sub as s; s.hi()`、`from pkg.sub import hi; hi()`、`from pkg import sub`（不调用）都正常。0.473 之前的基线同样崩 | 先加 `tests/run` 回归（当前会崩，先写成 fail 用例或等修复后加），ASan 下定位 `src/lower/import.cpp` 的绑定/降级路径；修复后套件与 difftest 全绿 |
 
 ## 4. P3 —— 工程债（穿插做，不单独占版本）
 

@@ -438,6 +438,10 @@ void Lowerer::lower_import_from(ImportFrom& im) {
         auto it = mod->globals.find(al.name);
         if (it == mod->globals.end()) {
             if (auto child = opts_.module_lookup(im.module + "." + al.name)) {
+                // 子模块也是独立编译单元：绑定别名前必须确保它自己的 init 跑过，
+                // 否则它的函数全局还是 0，后面 sub.f() 就是 call 0（SIGSEGV）。
+                // 父模块的 init 不保证会 import 子模块（__init__.py 可能什么都不写）。
+                if (!child->builtin || child->source_init) ensure_module_init(child);
                 if (st_->is_module_top) module_aliases_[bind] = child;
                 else st_->modules[bind] = child;
                 continue;

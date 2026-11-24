@@ -4,6 +4,21 @@
 
 早期阶段没有逐条留痕，按阶段归纳；0.4 之后逐条记录。
 
+## [0.477] - 2026-11-24
+
+> fix(lower)：`from pkg import sub` 之后调用子模块函数会 **SIGSEGV（call 0）**。
+>
+> 根因：`lower_import_from` 在 `pkg` 的 globals 里找不到 `sub` 时会把它当子模块别名登记，
+> 但只对父模块 `pkg` 发了 `import.module`，**没对 `pkg.sub` 发**。父包 `__init__.py` 不 import
+> 子模块时，`pkg.sub` 的 init 从未运行，它的函数全局还是 0，`sub.f()` 就成了 `call 0`。
+> 修法：登记子模块别名前先 `ensure_module_init(child)`（与 `import pkg.sub as x` 同口径）。
+>
+> 该 bug 在 0.473 之前的基线就存在（用 0.476 的二进制实测 rc=139）。`from pkg import sub`
+> 本身是 README 承诺支持的写法，只是「只 import 不调用」不会触发，所以一直没被测到。
+>
+> 回归：新增 `tests/modules/from_pkg_sub/`（空 `lib/__init__.py` + `lib/sub.py`，覆盖
+> `from lib import sub`、`from lib import sub as s`、`sub.VALUE`）。验证：CPython 与 PyAdamas
+> 输出逐字节一致、ASan 干净；套件 **477 ran ok / 0 失败**、difftest **447 / 0**、check_size 无新增。
 ## [0.476] - 2026-11-24
 
 > perf(stdlib)：标准库（纯 PyAdamas 实现）一轮「扣性能 + 抠细节」，5 个模块 + 6 个对拍用例。
