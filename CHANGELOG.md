@@ -4,6 +4,33 @@
 
 早期阶段没有逐条留痕，按阶段归纳；0.4 之后逐条记录。
 
+## [0.501] - 2026-11-25
+
+> feat(typecheck)：**窄化的三类假阳性修掉**（walrus / `isinstance` / 模块全局条件 None）；`if xs:` 空容器的 -O0 崩溃**三档都不可复现**（判负）。
+>
+> **一、三类假阳性**（0.499 引入的 6 个文件里修掉 5 个）：
+>
+> | 类 | 根因 | 修法 | 语料 |
+> |---|---|---|---|
+> | walrus | `narrow_on` 只认 `Name`，`if (n := d.get(k)) is not None:` 的对象是 `NamedExpr` | 新增 `narrow_name_of()`：Compare 两侧/裸真值/`isinstance` 第一参都取 walrus 的 target；提前返回模式随之窄化 | graphlib.py 转绿 |
+> | `isinstance` | 没有 refinement，`if isinstance(x, C)` 之后仍是联合 | 新增 `narrow_isinstance()`：真值分支收窄成被检查类（联合里必须至少一个兼容成员），假值分支去掉「该类或其子类」的成员；只认用户类 + Name/walrus 目标，内置类型与属性目标保守不动 | pyclbr.py 转绿 |
+> | 模块全局「先定义后初始化」 | `_P = None if cond else 92` 把未标注全局并成 `T \| None` | `declare()`：模块级**未标注**名字已有确定类型时，后续条件赋值的 `T \| None` 不再并回 None（与既有「None 占位 → unknown」同口径）；只对纯 Python Optional 生效，cimport 的指针/struct Optional 保留 | 2 个文件间接受益 |
+>
+> **628 文件基线默认口径：495/623 → 499/623**；本仓库 **896 个 `.py`：778 → 779，零新拒绝**。
+> 剩下 4 个文件根因不同（不是这三类）：`base64.py` 的 `[None]*256` 占位靠 `except TypeError` 兜底、`xml/dom/pulldom.py` 的字段版同类占位、
+> `modulefinder.py` 的 `determine_parent()` 静态上确实是 Optional、`multiprocessing/util.py` 的条件定义——要流分析或外部不变量，已记录。
+>
+> **试过并回退的两条**（避免下轮重试）：① 在 `stmt_if` 分支合并处也去掉 None → 分支合并结果同时决定降级表示，`print(d.get(k))` 把 `None` 打成 `0`（`70_dict_get.py` 抓到）；
+> ② 放开排序比较的 Optional 诊断 → 对那 6 个文件一个都没修好。
+>
+> **二、3.12 判负**：`if xs:` 对空 list 在 **-O0/-O1/-O2 三档都不复现**（0.498 构建同样不崩），扩展 20+ 形状（list/dict/set/str/tuple、字段、形参、全局、walrus、`and` 链、`while`、生成器、`try`、`not`/`bool()`/`len()`、空字面量、`list \| None`）全绿。
+> 补了全族回归 `tests/run/empty_container_truth.py` 并接进 `tests/opt_levels.sh`（ctest 的 `pyadamas_opt_levels` 会跑 -O0/-O1/-O2 三档）。
+>
+> **三、顺带发现一个真实崩溃（既有，0.498/0.500 同样复现）**：`check --imports` 在**循环 import** 上栈溢出（`encode_module_interface → enc_sig → enc_sig …` 无深度保护），
+> `sched.py`/`random.py`/`threading.py` 等 20+ 文件 rc=139；`build` 不受影响（同一文件 rc=1 正常报错）。
+> 影响：**`--imports` 的 155/623 基线不可信**（被崩溃压低），已记为路线图 **3.13**（visited 集合 / 深度上限），修好后要重测。
+>
+> 闸门：套件 **496** / difftest **466** / check_size **PASS** / ctest 8/8（含 opt_levels 三档）。
 ## [0.500] - 2026-11-25
 
 > feat(frontend) + 判负：**补原生/标准库接口表**（33 个成员 + 12 个运行期函数）、**`except (A, B) as e` 类型解析**；

@@ -67,6 +67,7 @@
 | 3.10 | **`PYADAMAS_GC_CONSERVATIVE=1` 下 `161_gc_conservative_equiv` 段错误**（既有，rc=139）：在 d6937be 的纯净构建上同样复现，与 0.497 的索引改造无关 | 复现：`PYADAMAS_GC_CONSERVATIVE=1 build/lead/pyadamas run tests/run/161_gc_conservative_equiv.py` | 先定位是保守模式漏标导致提前回收，还是索引/堆链在该模式下的不一致；保守模式是「回退路径」，但段错误意味着它现在不可用，要么修好要么明确标注不可用并下线开关 |
 | 3.11 | **窄化的三类假阳性**：① walrus、② `isinstance` —— **已修**（`narrow_name_of` / `narrow_isinstance`，628 默认口径 495 → 500）；③ 模块级「先定义后初始化」—— 模块级未标注名字不再因分支里的 None 并回 Optional（另有 3 个文件转绿；`multiprocessing/util.py` 的条件定义仍是 `int \| None`）。剩余 4 个文件的根因不同（容器占位元素 / 推断返回 None），逐条记在 [type-narrowing.md](type-narrowing.md#已修的三类假阳性0501分支-fe3) | 回归：`tests/run/narrow_walrus_isinstance.py`（并进 opt_levels -O0/-O1/-O2） | 已落地 |
 | 3.12 | **`if xs:` 对空 list 在 `-O0` 下崩溃** —— **不可复现**：-O0/-O1/-O2 × list/dict/set/str/tuple × 20+ 形状全绿，0.498 构建同样不崩。回归 `tests/run/empty_container_truth.py` 进 `tests/opt_levels.sh`（ctest 覆盖三档） | 顺带发现**真实**既有崩溃：`check --imports` 在循环 import 上栈溢出（`enc_sig` 无递归保护），记在 type-narrowing.md | 判负（不可复现） |
+| 3.13 | **`check --imports` 在循环 import 上栈溢出**（既有，rc=139）：`encode_module_interface → enc_sig → enc_sig …` 无深度保护；`sched.py`/`random.py`/`threading.py` 等 20+ 文件命中，`build` 同一文件只报正常错误（rc=1） | 复现：`build/lead/pyadamas check --imports /usr/lib/python3.14/sched.py`（rc=139） | 修法：接口编码加 visited 集合或深度上限（循环依赖本身合法，不能拒绝）。修好前 `--imports` 的 155/623 基线只是下界，必须在修复后重测；`pya-lsp` 若用 `--imports` 也会被这个崩溃影響 |
 
 **3.x 结账（0.484–0.490）**：
 

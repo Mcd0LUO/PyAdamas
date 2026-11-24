@@ -485,7 +485,7 @@ unknown 容器。RSS 压力程序负责「长循环里内存不随迭代数增�
 > |---|---|---|
 > | `check --no-imports --lenient-names`（0.171 旧范式） | 505/623 = 81.1% | 只做语法 + 类型，不报模块级未定义名 |
 > | **`check`（默认，0.486 起）** | **480/623 = 77.0%** | 多报「模块级未定义名字」；缺的 25 个文件 `build` 同样拒绝（如类体里 `__sub__ = difference` 的同类同层引用） |
-> | `check --imports`（更严，opt-in） | 155/623 = 24.9% | 再加载 import 图做**模块属性**检查；**会因 stdlib 签名表不全误杀**，别用于通用 lint |
+> | `check --imports`（更严，opt-in） | 155/623 = 24.9%（**下界**：循环 import 会栈溢出，见路线图 3.13） | 再加载 import 图做**模块属性**检查；**会因 stdlib 签名表不全误杀**，别用于通用 lint |
 >
 > `--imports` 为什么不能默认：0.484 曾默认打开，实测 20 个 stdlib 文件通过率 12/20 → 5/20，
 > 误杀样例 `module 'subprocess' has no attribute 'check_output'`、`module 'sys' has no attribute
