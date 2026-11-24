@@ -850,6 +850,7 @@ void AsmGen::gen_rt_args(const Inst& in, RtFn fn) {
         case RtFn::ClassNew:
         case RtFn::ListPrep:
         case RtFn::ListGet:
+        case RtFn::AnyIndex:
         case RtFn::ListSetLen:
         case RtFn::StrConcat:
         case RtFn::StrCharAt:

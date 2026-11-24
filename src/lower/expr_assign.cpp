@@ -201,6 +201,16 @@ void Lowerer::assign_to(Expr& target, VReg v, TypePtr vty) {
                                     type_name(ot)));
                 break;
             }
+            // 下标**写**在 unknown 接收者上仍按机器语义（IndexStore）：本轮
+            // 只堵了读（见 lower_subscript）。取证：全仓 2 处、stdlib 0 处，
+            // 写在 docs/frontend-fixes.md 记为剩余缺口。
+            {
+                static const bool diag_unknown_index =
+                    std::getenv("PYADAMAS_DIAG_UNKNOWN_INDEX") != nullptr;
+                if (diag_unknown_index && (!ot || ot->kind == TyKind::Unknown))
+                    std::fprintf(stderr, "DIAG unknown-index-store %s:%d\n", file_.c_str(),
+                                 target.line);
+            }
             // 列表有元素类型，存进去的值要跟着转
             if (ot && ot->kind == TyKind::List && !ot->sub.empty())
                 v = coerce(v, src_ty, ot->sub[0]);

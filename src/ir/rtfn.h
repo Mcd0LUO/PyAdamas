@@ -546,6 +546,8 @@ enum class RtFn : uint16_t {
     // 动态属性 dict 视图（vars() 合并用，stdlib1）——追加在末尾，不改既有编号。
     AttrDict,              // (obj*) -> dict*  实例动态属性表（可能 NULL，借用）
     AnyIterList,           // (i64) -> list*  unknown 物化成可迭代列表（+1）
+    AnyIndex,              // (i64 容器, i64 下标) -> i64  unknown 上的下标，按运行期
+                           // 类型分派；非内建可下标容器抛 TypeError（+1）
     ReprAny,               // (i64) -> str*  repr(unknown)（pa_repr_any，+1）
     // P3 第一阶段（0.327）：shadow tag 版（docs/p3-tagged-union-design.md）。
     // tag 由 codegen 从平行 tag 区/静态类型装填；UNK(0) 回退探针。
