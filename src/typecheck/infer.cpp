@@ -63,6 +63,13 @@ void TypeChecker::check(Module& m) {
         next.set_lang_gaps(lang_gaps_);
         next.result_hints_ = std::move(result_hints_);
         next.check_once(m);
+        // 旧一代 ClassInfo 延迟释放（3.13）：这一轮重建了类世界，上一代的
+        // ClassInfo 可能仍被 Type 的裸 cls 指针引用（跨轮缓存/接口快照）。
+        // 直接 move 赋值会释放它们，随后 enc_type 读 cls->name 就是
+        // heap-use-after-free（check --imports 在 sched/random/threading 上
+        // 段错误）。转移到 next 的 retired 列表，随本 checker 一起析构。
+        for (auto& kv : classes_) next.retired_classes_.push_back(kv.second);
+        for (auto& c2 : all_classes_) next.retired_classes_.push_back(c2);
         *this = std::move(next);
     }
 }
