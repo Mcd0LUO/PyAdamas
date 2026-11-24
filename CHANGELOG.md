@@ -4,6 +4,35 @@
 
 早期阶段没有逐条留痕，按阶段归纳；0.4 之后逐条记录。
 
+## [0.476] - 2026-11-24
+
+> perf(stdlib)：标准库（纯 PyAdamas 实现）一轮「扣性能 + 抠细节」，5 个模块 + 6 个对拍用例。
+> 只动 `stdlib/*.py` 与新增 `tests/run/`，不动 `src/`/`runtime/`，不改生成代码。
+>
+> | 模块 | 改动 | 同窗实测 |
+> |---|---|---|
+> | `textwrap` | `_expand_tabs`/`_replace_ws` 的逐字符 `out = out + c` 改 list+join；内联 ASCII 空白判定 | bench_string_textwrap **969 → 540 ms**（0.85× → 1.5× vs CPython）；perf 里 memmove+str_alloc+concat ≈20%、`_is_space` 12% |
+> | `heapq` | 核心堆操作形参 `list` → `list[int]`，元素比较从 `pa_any_cmp_t` 通用标签路径变内联整数比较 | bench_heapq **63 → 18 ms**（1.0× → 3.4×） |
+> | `statistics` | `_rank` 从 O(n²) 逐对比改 O(n log n) 二分计数 | ranked correlation n=4000 ×30：**3.12 s → 0.05 s**（60×） |
+> | `string` | `Template._substitute` 缓冲化 + `__pa_any_items(mapping)` 提到函数入口 | 2000 占位符模板 **0.03 → 0.01 s** |
+> | `base64` | `b16decode` 错误口径对齐 CPython（奇数长度也报 `Non-base16 digit found`，实测 CPython 3.13 行为） | — |
+>
+> **语义收紧**：`heapq` 的堆元素现在只接受 `list[int]`。此前 `list[float]` 能编译，但
+> `heappop` 返回的是 8B 位模式整数（type-tags 缺口下的静默算错）；现在编译期拒绝并给明确
+> 消息。`docs/compatibility.md` 同步。
+>
+> 判负：`bisect`（42% self 是已最优的整数折半，23% 是 builtin `list.insert` 的 memmove）、
+> `difflib._sort_matches`（插入排序 O(n²)，但 PA 的 `list.sort` 不支持 `key=`，改并行 key 列表
+> 收益不抵复杂度）；`base64` 的 `b64decode`/`b32decode` 对非法/缺填充输入过于宽松，试修后
+> CPython 对拍失败已回退，记为负结论。
+>
+> 闸门：套件 **475 ran ok / 0 失败**、difftest **446 / 0**、check_size 无新增（仍只有既有两个
+> src 文件）、每个改过的 stdlib 文件 `check` 通过；用例 470–475 的 expect 均来自 CPython 实跑。
+>
+> 两条编译器侧线索（只记录，见 [next-round-plan.md](docs/next-round-plan.md) §8.3）：
+> ①裸 `list` 形参在推断出 `list[int]` 后元素比较仍走 `pa_any_cmp_t`（触发条件是「跨模块 import
+> 的裸 list 形参 + fresh_hole」，本地复刻 `_siftup` 不触发）；②循环内 `s = s + c` 每次
+> `pa_str_concat` 都分配新对象，n=1k/10k/50k/100k → 0.00/0.00/0.03/0.19 s 的二次曲线。
 ## [0.475] - 2026-11-24
 
 > 决策：`PYADAMAS_RA_OPT` **保持 opt-in（默认关）**，不默认打开。
