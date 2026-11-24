@@ -51,6 +51,7 @@
 
 ### 其余设计与落地记录（按主题，避免主表过长）
 
+- **类型窄化**：[type-narrowing.md](type-narrowing.md)（`T \| None` 窄化支持的模式、6 个已知假阳性与边界）
 - **前端缺口与 unknown**：[frontend-gaps.md](frontend-gaps.md)（628 文件基线、失败簇、unknown 来源与修法总账）
 - **数值与表示**：[numeric-types-design.md](numeric-types-design.md)（定宽整数 / 类型标签的设计）、
   [numeric-types-landing.md](numeric-types-landing.md)（P1 定宽整数落地）、
