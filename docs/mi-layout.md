@@ -201,3 +201,53 @@ cb.get() = 2    # CPython 是 1；本步不修 thunk，预期如此
    在 299 行），按实现指针去重的分组逻辑在 208 行附近：thunk 是另一个入口，要么按 (class, base)
    分组，要么守卫里比较 thunk 指针；
 4. `super()` 协作路径按目标实现所在基类加 delta。
+
+## 10. vtable thunk 的实现配方（给实现者，0.508 起）
+
+> 目标：让 `f(a: A)` 传 `C(B, A)` 实例时 `a.get()` 也正确（现在是 2，CPython 1）。
+> 直调路径（0.507）已修好，缺的是虚调用：vtable 槽里还是基类实现，`self` 没加偏移。
+
+**合成 thunk 的骨架**（照 `src/lower/class.cpp:603` 的 `compile_ctor_wrapper`）：
+
+```cpp
+IRFunction* wf = mod_.add_func(label);      // 先拷 callee->params/ret，再 add_func
+wf->ret = callee_ret;
+push_frame(wf, nullptr);
+int entry = new_block("entry"); switch_to(entry);
+st_->fn_mark = rc_mark_at(st_->fn_mark_block, st_->fn_mark_pos);
+for (auto& p : params) { int s = wf->new_slot(p.ty); wf->params.push_back(IRParam{p.name, p.ty, s});
+                         args.push_back(load_slot(s, p.ty)); }
+inc_params();
+Inst ad; ad.op = IrOp::Bin; ad.bop = BinKind::Add; ad.a = args[0]; ad.b = const_int(8 * off);
+args[0] = def(ptr_ty, std::move(ad));      // 现有 Bin(Add)，不新增 IR op
+Inst cd; cd.op = IrOp::CallDirect; cd.idx = Operand::func(target_fidx); cd.args = std::move(args);
+VReg r = def_heap(callee_ret, std::move(cd));
+emit_return(r, callee_ret);
+finalize_param_borrows(); finalize_borrow_slots();
+if (st_->rc_pushes == 0) erase_mark(st_->fn_mark_block, st_->fn_mark_pos, st_->fn_mark);
+pop_frame();
+return mod_.funcs.size() - 1;              // 新 fidx
+```
+
+**安装点**（`src/lower/class.cpp`）：vtable 的「继承来的 winner」填充在 **272–283 行**（`for (auto& [key, p] : plans)` 里的 `cv[slot] = p.fidx`）。
+在那段**之后**、`compile_ctor_wrapper`（398 行）**之前**：
+
+```cpp
+for (auto& [base, off] : ci->base_field_offsets) {
+    if (off <= 0) continue;
+    const auto& bvt = mod_.classes[base_cid].vtable;
+    for (size_t slot = 0; slot < bvt.size(); ++slot) {
+        int fidx = bvt[slot];
+        if (fidx < 0) continue;
+        if (cv[slot] != fidx) continue;              // 被更靠前的类覆盖过 → 不动
+        const IRFunction* callee = mod_.funcs[fidx].get();
+        if (!callee || callee->env_slot >= 0) continue;   // 跳过闭包
+        cv[slot] = build_mi_thunk(callee, fidx, 8 * off);
+    }
+}
+```
+
+**守卫**（`src/backend/vcall_inline.cpp` `gen_guarded_vcall`）：thunk 是新入口，按实现指针分组的候选会**自然不匹配**、退回通用路径——
+**语义仍正确**，只是少合并收益。所以守卫分组是独立的性能轮次（配 `obj_dispatch` 的合并计数对比），不阻塞正确性。
+
+**验收**：`cb.x, cb.get()` → `1 1`；`f(cb)` → `1`；12 基准 asm 不变；628 口径不降。
