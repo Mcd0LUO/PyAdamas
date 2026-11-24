@@ -235,3 +235,115 @@ fasta/fib）flag-on/off 产物 **cmp 逐字节相同**，R1 却量出 binary_tre
 - **净结论**：通用杠杆成立（真实日常语料 b1/b3 受益，非基准特化），
   主目标 -4.5% 稳健可测；代价是 d6 短案 +1~2% 疑似布局回归（噪声带内）。
   门控默认关，集成后按语料净收益决定默认值。
+
+## 9. 0.474：入口全局根 + append-only 根（obj_dispatch）
+
+### 9.1 动机与卡点
+
+obj_dispatch 的内层循环是模块顶层写法：
+
+```python
+shapes = []
+for i in range(100):
+    shapes.append(...)
+total = 0
+for r in range(N):
+    for s in shapes:
+        total += s.area()
+```
+
+每轮 4 条可省的记账：`rc_inc(元素)`、`load.global s`（旧值）、`store.global s`、
+`rc_dec(旧值)`——动态 640000×100 轮。0.472 之前六道门逐条挡住：
+
+| # | 卡点 | 0.474 的处理 |
+|---|---|---|
+| 1 | 候选必须是**帧槽**，而循环变量 `s` 是模块全局 | 新增「全局候选」：候选形状对 `LoadGlobal/StoreGlobal` 同口径匹配 |
+| 2 | GLOBAL 根要求「本函数内从不写」，但容器 `shapes` 在入口里被赋值/append | 新增根类别 **PrivateGlobal**：入口私有 + 唯一实写来自新分配 + 只增不删 |
+| 3 | `class_free` 整函数否决（任何 Class 类型值） | 只在「容器不可达」的根（FreshLocal/PrivateGlobal）上放行 Class |
+| 4 | `has_hard_bad` 否决含 `ObjNew`/`ClassAddr` 的函数；`ClassNew` 落 Bad | ObjNew/ClassAddr 移出硬拒清单；`ClassNew` 归 Pure |
+| 5 | 根的 `LoadGlobal` 被迭代源持有（`rc_inc`+`rc_temp`）与 `append` 接收者消费 → use 检查拒 | 根的消费白名单加：迭代源持有四件（RcInc/RcTemp/RcTempTake/RcTempUnknown）、append/extend 接收者 |
+| 6 | 全局没有 `release_slots` 的清零 store | 出口释放形状 `[load.global g; rc_dec]` **原地**换成 `[const.int 0; store.global g, 0]` |
+
+### 9.2 全局候选（`analyze_candidate(true, g)`，仅入口函数）
+
+- 仅 `__pa_main`、且 `!fn.has_handlers`（含 handler 的函数不借，红线）；
+- 全局是**已知**堆类型（非 unknown）、且是入口私有（`entry_private_globals`：
+  除入口外没有函数 Load/StoreGlobal 它，全模块无 `GlobalAddr`）；
+- 每一条 `StoreGlobal(g)` 都精确匹配
+  `[r=IndexLoad/…; inc(r); old=LoadGlobal g; StoreGlobal g,r; dec(old)]`，
+  `old` 单用（多定义/其它来源一律跳过，fail-closed）；
+- 每条 `LoadGlobal(g)`：store 旧值装载（豁免）/ 出口释放（改写）/ 普通读（use 分析）；
+- 出口释放必须落在**含 `GcShutdown`/`RcShutdown` 的块**里（`release_globals` 与
+  它们同块发射），不靠「只被 dec 消费」这种可伪造的形状。
+
+### 9.3 PrivateGlobal 根
+
+容器全局满足：容器类型（list/tuple）、入口私有、**唯一实写**且值 `trace` 到新分配
+（`MakeList/MakeTuple/StructNew/ListNew/…`，且该分配值只流进 RC 临时栈记账与该 store）、
+容器的每条 `LoadGlobal` 只被 `Len` / `IndexLoad` 容器 / `append/extend` 接收者 /
+迭代源持有 / store 旧值 / 出口释放消费。
+
+**存活论证**：私有 ⇒ 除本函数外没人能命名它，被调用户代码也读不到；唯一实写是新分配
+⇒ 容器对象在函数内自始唯一、不会被替换或释放；只允许 append/extend ⇒ 既有元素那份
+容器引用一直有效。于是「借用元素的存活期覆盖整个函数」，与 §2 的计数守恒完全同构；
+出口的 `release_globals` 照旧释放容器（全局根表），候选全局在**同一位置**被清零，
+所以 `GcShutdown` 看到的根表里不会留下借来的指针。
+
+**对外语义**：入口全局被清零发生在函数出口（return 前），不在循环出口——所以
+`for s in xs: ...` 之后读 `s` 仍拿到最后一个元素（CPython 语义），新增用例 566 第 2 条
+钉死。异常路径不执行 `release_globals`（入口无 handler，未捕获异常即进程终止），
+不会多 dec。
+
+### 9.4 四个放宽的安全边界
+
+1. **Class 值**（原整函数否决）：只在 FreshLocal/PrivateGlobal 根上放行。容器不可达，
+   被调用户代码拿不到容器 → 无法让元素的计数在借用窗口内归零 → `__del__` 触发时机与
+   基线逐点相同（借用只删掉本槽那份 +1）。
+2. **ObjNew / ClassAddr** 移出硬拒清单：前者只分配**新**对象（不可能与既有容器别名），
+   后者只取类对象地址、不写内存。`CallExtern/LoadExtern/StoreExtern/PtrLoad/PtrStore`
+   与 `Gen*` 仍在清单里（任意外部写 / 挂起）。
+3. **ClassNew → Pure**：`rt_class.c pa_class_new` 只分配类对象，不跑用户代码、不碰容器。
+   （落 Bad 会把整个 `__pa_main` 挡掉——入口模块建类对象太常见。）
+4. **根值的 RcInc/RcTemp 消费**：迭代源持有 `rc_inc`+`push_temp` 只增加引用，不会改/释放
+   容器；容器仍由根槽（owned）或全局根持有到函数结束。`RcDec/RcTempTake/RcCleanup` 仍拒。
+
+### 9.5 实测（abbench 式交替 A/B 绑核，flag-on vs flag-off）
+
+方法：同一编译器、同一份源码，两侧独立 `PYADAMAS_CACHE_DIR` + `--rebuild`，每轮打乱
+用例顺序、奇偶轮交换 A/B 先后、BURST=3 连跑取平均，15 轮中位数/p25。
+
+| 用例 | off | on | 中位 | p25 | 产物 |
+|---|---|---|---|---|---|
+| obj_dispatch | 300.59 ms | 202.24 ms | **-32.7%** | -32.7% | 指令数 3.110e9 → 1.766e9（-43.2%） |
+| dict_wordfreq | 232.56 ms | 217.55 ms | -6.5% | -6.8% | asm 变 |
+| sort_struct | 298.70 ms | 290.79 ms | -2.6% | -3.0% | asm 变 |
+| queue_sim / rec_memo / str_build | — | — | -0.2 / +0.1 / -0.2% | 噪声 | asm 逐字节同 |
+| realistic 合计 | 1331.99 ms | 1210.39 ms | **-9.1%** | — | |
+
+classic 窗 13 例合计 311.07 → 309.87 ms（-0.4%），无一例 >2% 的真实回退：
+fasta +2.9%（p25 +15.8%）、fannkuch -5.9%、matmul +1.6%、binary_trees +1.3% 四例的
+flag-on/off asm **逐字节相同**，是短用例机器噪声（docs/testing.md 的 ±3% 口径）。
+
+内层循环（bb15）从 45 条指令降到 25 条：`index.get` 后直接 `store.global s` +
+`vcall`，无 inc/dec、无旧值装载；`load.global s` 被后端 store→load 转发吃掉。
+
+### 9.6 闸门
+
+- 普通套件 **470 ran ok / 0 失败**、ASan 套件 **470 ran ok / 0 失败**（均 flag-on，8 作业）；
+- difftest（O0 vs O2）flag-on **441 / 0 不一致**；
+- 18 个基准用例 flag-on 输出与 CPython 逐字节一致；
+- 新增回归 `tests/run/566_entry_global_borrow.py`（expect 来自 CPython 实跑）：命中形态、
+  循环后读循环变量、append-only 根、循环体内 pop **必须拒绝**、容器被别的函数写过
+  **必须拒绝**；
+- flag-off 未跑本遍 → 12 个基准 + 6 个 realistic 的 asm 与改前逐字节相同（只 3 个案变）。
+
+### 9.7 风险与遗留
+
+- **门控仍默认关**（`PYADAMAS_BORROW_OPT=1` 才开）。默认化需要全量日常语料 A/B
+  （0.338 的 d6_rec_memo +1~2% 布局效应尚未解释），按 2.4 的同口径另开一项。
+- 已知未覆盖：`del s`、循环变量先被赋值再被 for 覆盖、容器来自 `ListSlice/StrToList`
+  等运行时新容器、dict/set 根、生成器/协程。
+- 未做支配性分析：私有全局根的唯一实写不检查「是否支配所有借用点」。靠的是
+  「唯一写者 + 新分配值非空」——容器为 0 时 `len()` 先崩，走不到借用点；
+  与 FreshLocal 根的既有口径一致。
+

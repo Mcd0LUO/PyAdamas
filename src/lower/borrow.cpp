@@ -180,6 +180,10 @@ RtClass classify_rt(RtFn f, int& recv) {
         case RtFn::IsInstance: case RtFn::IsInstanceClass: case RtFn::IsNamedClass:
         case RtFn::IsException: case RtFn::IsSeq: case RtFn::IsDict: case RtFn::IsStr:
         case RtFn::IsComplex: case RtFn::ObjClassId: case RtFn::ClassName: case RtFn::ClassRepr:
+        // ClassNew：只分配一个类对象（rt_class.c pa_class_new），不跑用户
+        // 代码、不碰容器。0.474 起算 Pure —— 入口模块建类对象很常见，
+        // 落 Bad 会把整个 __pa_main 的借用分析挡掉（obj_dispatch 就是）。
+        case RtFn::ClassNew:
         case RtFn::ClassCtor: case RtFn::ClassMethod: case RtFn::SuperLookup:
         case RtFn::AttrGet: case RtFn::AttrHas: case RtFn::AttrDict: case RtFn::AttrSet:
         case RtFn::ComplexNew: case RtFn::ComplexAdd: case RtFn::ComplexSub: case RtFn::ComplexMul:
@@ -320,14 +324,44 @@ bool contains_class(const TypePtr& t) {
 }
 
 struct Root {
-    enum Kind { Bad, Param, Global, FreshLocal } kind = Bad;
+    // PrivateGlobal（0.474，路线图 2.1）：入口模块私有、本函数内唯一实写来自
+    // 新分配、且只被 append/extend 改动的全局容器。与 Global 的区别是它
+    // 「逃不出去」：除入口函数外没有函数读写它（entry_private_globals），
+    // 全模块没取过地址，所以被调用户代码无法命名它 → 循环体里的用户调用
+    // 不再构成拒绝理由（与 FreshLocal 同理）。
+    enum Kind { Bad, Param, Global, FreshLocal, PrivateGlobal } kind = Bad;
     int idx = -1;
-    const Inst* alloc = nullptr;  // FreshLocal：新分配定义指令
+    const Inst* alloc = nullptr;  // FreshLocal/PrivateGlobal：新分配定义指令
 };
+
+// 入口模块私有全局：除 __pa_main 外没有任何函数 Load/StoreGlobal，且全模块
+// 没有 GlobalAddr。与 opt/global_promote.cpp 的 entry_private_globals 同口径。
+std::vector<char> entry_private_globals_of(const IRModule& m) {
+    std::vector<char> priv(m.globals.size(), 1);
+    for (const auto& fptr : m.funcs) {
+        const IRFunction& f = *fptr;
+        const bool entry = f.name == "__pa_main";
+        for (const auto& b : f.blocks) {
+            for (const auto& in : b.insts) {
+                if (in.idx < 0 || static_cast<size_t>(in.idx) >= priv.size()) continue;
+                if (in.op == IrOp::GlobalAddr) {
+                    priv[static_cast<size_t>(in.idx)] = 0;
+                    continue;
+                }
+                if (!entry && (in.op == IrOp::LoadGlobal || in.op == IrOp::StoreGlobal))
+                    priv[static_cast<size_t>(in.idx)] = 0;
+            }
+        }
+    }
+    return priv;
+}
 
 struct BorrowPass {
     IRFunction& fn;
     const std::vector<IRGlobal>& globals;
+    const IRModule& mod;
+    const bool is_entry;
+    std::vector<char> private_g;   // 入口模块私有全局（仅入口函数非空）
     std::unordered_map<VReg, const Inst*> def;
     std::unordered_map<VReg, int> nuses;
     std::unordered_set<VReg> multidef;
@@ -339,12 +373,23 @@ struct BorrowPass {
     bool has_susp_rt = false;
     bool has_dispatch_rt = false;
     bool class_free = true;
-    std::vector<VReg> mut_recv;
+    // 修改类操作的接收者。append_only：ListAppend/ListExtend（只增不删）。
+    // 对「入口私有、未逃逸」的容器根，append 之后容器与既有元素都还活着，
+    // 借用成立（路线图 2.1 的 append-only 根）；其余修改一律按别名风险拒绝。
+    struct MutOp {
+        VReg recv;
+        bool append_only;
+    };
+    std::vector<MutOp> mut_recv;
     std::unordered_map<long long, Root> root_cache;
 
-    BorrowPass(IRFunction& f, const std::vector<IRGlobal>& g) : fn(f), globals(g) {}
+    BorrowPass(IRFunction& f, const IRModule& m)
+        : fn(f), globals(m.globals), mod(m), is_entry(f.name == "__pa_main") {}
 
     void build() {
+        // 入口函数的全局根只可能来自本模块；私有性必须按**全模块**判定
+        // （除 __pa_main 外无人引用 + 全模块未取址）。
+        if (is_entry) private_g = entry_private_globals_of(mod);
         for (auto& p : fn.params)
             if (p.slot >= 0) param_slots.insert(p.slot);
         for (auto& bb : fn.blocks) {
@@ -365,8 +410,12 @@ struct BorrowPass {
                     case IrOp::VCallStatic: case IrOp::SuperVCall: case IrOp::CallPtr:
                     case IrOp::ImportModule:
                         has_user_call = true; break;
+                    // ObjNew / ClassAddr 不进硬拒清单（0.474）：前者只是分配
+                    // 一个**新**对象（不可能与既有容器别名），后者只取类对象
+                    // 地址、不写内存。真正危险的是任意外部写（extern/ptr）与
+                    // 挂起（Gen*），它们继续整函数拒绝。
                     case IrOp::CallExtern: case IrOp::LoadExtern: case IrOp::StoreExtern:
-                    case IrOp::PtrLoad: case IrOp::PtrStore: case IrOp::ObjNew: case IrOp::ClassAddr:
+                    case IrOp::PtrLoad: case IrOp::PtrStore:
                     case IrOp::GenNew: case IrOp::GenSetSlot: case IrOp::GenGetState:
                     case IrOp::GenClosing: case IrOp::GenSent: case IrOp::GenYield:
                     case IrOp::GenAwait: case IrOp::GenGetExc: case IrOp::GenTakeExc:
@@ -374,17 +423,25 @@ struct BorrowPass {
                         has_hard_bad = true; break;
                     case IrOp::IndexStore: case IrOp::IndexStoreUnchecked:
                     case IrOp::FieldStore:
-                        mut_recv.push_back(in.a); break;
+                        mut_recv.push_back({in.a, false}); break;
                     case IrOp::CallRt: {
                         int recv = 0;
                         RtClass c = classify_rt(static_cast<RtFn>(in.imm), recv);
                         if (c == RtClass::Susp) has_susp_rt = true;
-                        else if (c == RtClass::Bad) has_hard_bad = true;
+                        else if (c == RtClass::Bad) {
+                            if (std::getenv("PYADAMAS_BORROW_DBG"))
+                                std::fprintf(stderr, "[borrow-dbg] bad rt in %s: %d\n",
+                                             fn.name.c_str(), static_cast<int>(in.imm));
+                            has_hard_bad = true;
+                        }
                         else if (c == RtClass::Dispatch) has_dispatch_rt = true;
                         else if (c == RtClass::ListMut) {
-                            if (recv < static_cast<int>(in.args.size()))
-                                mut_recv.push_back(in.args[static_cast<size_t>(recv)]);
-                            else has_hard_bad = true;
+                            if (recv < static_cast<int>(in.args.size())) {
+                                RtFn f = static_cast<RtFn>(in.imm);
+                                bool app = f == RtFn::ListAppend || f == RtFn::ListExtend;
+                                mut_recv.push_back(
+                                    {in.args[static_cast<size_t>(recv)], app});
+                            } else has_hard_bad = true;
                         }
                         break;
                     }
@@ -533,6 +590,29 @@ struct BorrowPass {
         return r;
     }
 
+    // 出口释放块：release_globals 与 GcShutdown/RcShutdown 同块发射
+    // （lower/impl_slots.cpp emit_return）。用来把「load.global g; rc_dec」
+    // 的出口释放和普通读区分开 —— 不靠「只被 dec 消费」这种可伪造的形状。
+    bool in_shutdown_block(int b) const {
+        for (const auto& in : fn.blocks[static_cast<size_t>(b)].insts)
+            if (in.op == IrOp::CallRt &&
+                (static_cast<RtFn>(in.imm) == RtFn::GcShutdown ||
+                 static_cast<RtFn>(in.imm) == RtFn::RcShutdown))
+                return true;
+        return false;
+    }
+
+    bool is_global_exit_load(const std::vector<Inst>& ins, size_t i, int g, int b) const {
+        if (i + 1 >= ins.size()) return false;
+        if (ins[i].op != IrOp::LoadGlobal || ins[i].idx != g || ins[i].dst == kNoReg)
+            return false;
+        const Inst& d = ins[i + 1];
+        if (d.op != IrOp::CallRt || static_cast<RtFn>(d.imm) != RtFn::RcDec ||
+            d.args.size() != 1 || d.args[0] != ins[i].dst)
+            return false;
+        return in_shutdown_block(b);
+    }
+
     Root validate_global_root(int g) {
         long long key = (static_cast<long long>(g) << 1) | 1;
         auto it = root_cache.find(key);
@@ -542,23 +622,99 @@ struct BorrowPass {
         if (g < 0 || g >= static_cast<int>(globals.size())) return r;
         if (!is_container_ty(globals[static_cast<size_t>(g)].ty)) return r;
         if (has_global_addr) return r;
+        // ── 旧口径：本函数内从不写（模块顶层赋值在入口函数里，因此入口的
+        //    稳定全局根本命中不了 —— 0.474 之前就是这样）──
+        int nstores = 0;
+        for (auto& bb : fn.blocks) {
+            for (auto& in : bb.insts) {
+                if (in.op == IrOp::GlobalAddr && in.idx == g) return r;
+                if (in.op == IrOp::StoreGlobal && in.idx == g) ++nstores;
+            }
+        }
+        if (nstores == 0) {
+            r.kind = Root::Global;
+            root_cache[key] = r;
+            return r;
+        }
+        // ── 新口径（0.474）：入口私有 + 唯一实写来自新分配 + 只增不删 ──
+        //
+        // 存活论证：私有 ⇒ 除本函数外无人能命名它（被调函数也读不到）；
+        // 唯一实写是新分配 ⇒ 容器对象在函数内自始唯一、不会被替换/释放；
+        // 只允许 append/extend 修改 ⇒ 既有元素的那份容器引用一直有效。
+        // 因此借用元素的存活期覆盖整个函数，出口释放（release_globals）不变。
+        if (!is_entry) return r;
+        if (private_g.size() != globals.size() || !private_g[static_cast<size_t>(g)])
+            return r;
+        if (nstores != 1) return r;
+        const Inst* alloc = nullptr;
         for (auto& bb : fn.blocks)
             for (auto& in : bb.insts)
-                if ((in.op == IrOp::StoreGlobal || in.op == IrOp::GlobalAddr) && in.idx == g)
+                if (in.op == IrOp::StoreGlobal && in.idx == g) alloc = trace(in.a);
+        if (!alloc || !is_fresh_alloc(alloc)) return r;
+        // 新分配值不逃逸：只允许 RC 临时栈记账 / 存回该全局。
+        if (!walk_uses(alloc->dst, [&](const Inst& in, VReg x) {
+                if (in.op == IrOp::StoreGlobal && in.idx == g && in.a == x) return true;
+                if (in.op == IrOp::CallRt && in.args.size() == 1 && in.args[0] == x) {
+                    RtFn f = static_cast<RtFn>(in.imm);
+                    return f == RtFn::RcTemp || f == RtFn::RcTempTake ||
+                           f == RtFn::RcTempUnknown;
+                }
+                return false;
+            }))
+            return r;
+        // 容器值的每条消费都必须是「不逃逸的只读用法」：Len / IndexLoad 容器 /
+        // append 接收者 / store 旧值装载 / 出口释放。传参、存别处、返回、
+        // 任何其它调用 → 拒绝。
+        for (size_t b = 0; b < fn.blocks.size(); ++b) {
+            auto& ins = fn.blocks[b].insts;
+            for (size_t i = 0; i < ins.size(); ++i) {
+                if (ins[i].op != IrOp::LoadGlobal || ins[i].idx != g ||
+                    ins[i].dst == kNoReg)
+                    continue;
+                if (i + 1 < ins.size() && ins[i + 1].op == IrOp::StoreGlobal &&
+                    ins[i + 1].idx == g)
+                    continue;  // store 旧值装载
+                if (is_global_exit_load(ins, i, g, static_cast<int>(b))) continue;
+                if (!walk_uses(ins[i].dst, [&](const Inst& in, VReg x) {
+                        if (in.op == IrOp::Len && in.a == x) return true;
+                        if ((in.op == IrOp::IndexLoad || in.op == IrOp::IndexLoadUnchecked) &&
+                            in.a == x)
+                            return true;
+                        if (in.op == IrOp::CallRt && !in.args.empty() && in.args[0] == x) {
+                            RtFn f = static_cast<RtFn>(in.imm);
+                            if (f == RtFn::ListAppend || f == RtFn::ListExtend) return true;
+                            // 迭代源持有：for x in g 会 rc_inc + push_temp 容器
+                            // （lower_for_seq）。两者都只增加引用，不会让它被改/
+                            // 被释放；容器本身由全局根（或根槽）持有到函数结束。
+                            if (f == RtFn::RcInc || f == RtFn::RcTemp ||
+                                f == RtFn::RcTempTake || f == RtFn::RcTempUnknown)
+                                return true;
+                        }
+                        return false;
+                    }))
                     return r;
-        r.kind = Root::Global;
+            }
+        }
+        r.kind = Root::PrivateGlobal;
+        r.alloc = alloc;
         root_cache[key] = r;
         return r;
     }
 
-    // 修改类操作的接收者不得与根别名。
-    bool receiver_ok(VReg recv, const Root& root) const {
+    // 修改类操作的接收者不得与根别名（append_only 只对私有全局/新分配的
+    // 根有意义：append/extend 只增不删，既有元素的那份引用一直有效）。
+    bool receiver_ok(VReg recv, const Root& root, bool append_only) const {
         const Inst* src = trace(recv);
         if (!src) return false;
         if (root.kind == Root::FreshLocal) {
-            if (src->op == IrOp::LoadSlot && src->idx == root.idx) return false;
-            if (src == root.alloc) return false;
+            if (src->op == IrOp::LoadSlot && src->idx == root.idx) return append_only;
+            if (src == root.alloc) return append_only;
             return true;  // 根不逃逸：其余来源不可能持有根对象
+        }
+        if (root.kind == Root::PrivateGlobal) {
+            if (src->op == IrOp::LoadGlobal && src->idx == root.idx) return append_only;
+            if (src == root.alloc) return append_only;
+            return true;  // 同上：私有且未逃逸，其余来源够不着根
         }
         if (is_fresh_alloc(src)) return true;
         if (src->op == IrOp::LoadSlot && src->idx >= 0 &&
@@ -607,24 +763,63 @@ struct BorrowPass {
                 int recv = 0;
                 RtClass c = classify_rt(f, recv);
                 if (c == RtClass::Pure || c == RtClass::ListMut) return true;
-                if (c == RtClass::Dispatch) return root.kind == Root::FreshLocal;
+                // 私有全局根与 FRESHLOCAL 同理：容器不可达，用户代码改不了它。
+                if (c == RtClass::Dispatch)
+                    return root.kind == Root::FreshLocal ||
+                           root.kind == Root::PrivateGlobal;
                 return false;
             }
             case IrOp::Call: case IrOp::CallDirect: case IrOp::VCall:
             case IrOp::VCallStatic: case IrOp::SuperVCall: case IrOp::CallPtr:
-                return root.kind == Root::FreshLocal;
+                return root.kind == Root::FreshLocal ||
+                       root.kind == Root::PrivateGlobal;
             default:
                 return false;
         }
     }
 
-    bool analyze_slot(int s, std::vector<std::pair<int, size_t>>& dels) {
-        if (s < 0 || s >= static_cast<int>(fn.slot_ty.size())) return false;
-        TypePtr ty = fn.slot_ty[static_cast<size_t>(s)];
-        if (!ir_is_heap(ty) || ty->kind == TyKind::Unknown) return false;
-        if (s < static_cast<int>(fn.slot_unknown.size()) && fn.slot_unknown[static_cast<size_t>(s)])
-            return false;
-        if (param_slots.count(s) || addr_taken.count(s)) return false;
+    // 改写动作：Del = 删指令；ConstZero / StoreZero = 原地改写成
+    // 「const.int 0 / store.global g, 0」（全局候选的出口释放替换成清零，
+    // 避免全局根表在 GcShutdown 时还指着一个借来的指针）。
+    struct Edit {
+        int blk;
+        size_t pos;
+        enum Kind { Del, ConstZero, StoreZero } kind;
+        int g;
+    };
+
+    void dbg(const char* why, int idx) const {
+        if (std::getenv("PYADAMAS_BORROW_DBG"))
+            std::fprintf(stderr, "[borrow-dbg] %s: %s idx=%d\n", fn.name.c_str(), why, idx);
+    }
+
+    bool analyze_candidate(bool is_g, int idx, std::vector<Edit>& edits) {
+        if (is_g) {
+            // 入口私有全局候选：红线条数比槽候选更多。
+            if (!is_entry || fn.has_handlers) return false;
+            if (idx < 0 || idx >= static_cast<int>(globals.size())) return false;
+            const IRGlobal& G = globals[static_cast<size_t>(idx)];
+            if (!ir_is_heap(G.ty) || G.ty->kind == TyKind::Unknown) return false;
+            if (private_g.size() != globals.size() ||
+                !private_g[static_cast<size_t>(idx)])
+                return false;
+        } else {
+            if (idx < 0 || idx >= static_cast<int>(fn.slot_ty.size())) return false;
+            TypePtr ty = fn.slot_ty[static_cast<size_t>(idx)];
+            if (!ir_is_heap(ty) || ty->kind == TyKind::Unknown) return false;
+            if (idx < static_cast<int>(fn.slot_unknown.size()) &&
+                fn.slot_unknown[static_cast<size_t>(idx)])
+                return false;
+            if (param_slots.count(idx) || addr_taken.count(idx)) return false;
+        }
+        auto is_store = [&](const Inst& in) {
+            return is_g ? (in.op == IrOp::StoreGlobal && in.idx == idx)
+                        : (in.op == IrOp::StoreSlot && in.idx == idx);
+        };
+        auto is_load = [&](const Inst& in) {
+            return is_g ? (in.op == IrOp::LoadGlobal && in.idx == idx)
+                        : (in.op == IrOp::LoadSlot && in.idx == idx);
+        };
 
         Root root;
         bool root_set = false;
@@ -633,9 +828,9 @@ struct BorrowPass {
         for (size_t b = 0; b < fn.blocks.size(); ++b) {
             auto& ins = fn.blocks[b].insts;
             for (size_t i = 0; i < ins.size(); ++i) {
-                if (ins[i].op != IrOp::StoreSlot || ins[i].idx != s) continue;
+                if (!is_store(ins[i])) continue;
                 // 出口清零（release_slots 出口形状的 store）豁免。
-                if (is_exit_zero_store(ins, i, s)) continue;
+                if (!is_g && is_exit_zero_store(ins, i, idx)) continue;
                 any_store = true;
                 if (i < 2 || i + 1 >= ins.size()) return false;
                 const Inst& inc = ins[i - 2];
@@ -644,7 +839,7 @@ struct BorrowPass {
                 VReg v = ins[i].a;
                 if (inc.op != IrOp::CallRt || static_cast<RtFn>(inc.imm) != RtFn::RcInc ||
                     inc.args.size() != 1 || inc.args[0] != v) return false;
-                if (ld.op != IrOp::LoadSlot || ld.idx != s || ld.dst == kNoReg) return false;
+                if (!is_load(ld) || ld.dst == kNoReg) return false;
                 auto nu = nuses.find(ld.dst);
                 if (nu == nuses.end() || nu->second != 1) return false;
                 if (dec.op != IrOp::CallRt || static_cast<RtFn>(dec.imm) != RtFn::RcDec ||
@@ -657,7 +852,7 @@ struct BorrowPass {
                 if (!csrc) return false;
                 Root rr;
                 if (csrc->op == IrOp::LoadSlot && csrc->idx >= 0)
-                    rr = validate_slot_root(static_cast<int>(csrc->idx), s);
+                    rr = validate_slot_root(static_cast<int>(csrc->idx), idx);
                 else if (csrc->op == IrOp::LoadGlobal && csrc->idx >= 0)
                     rr = validate_global_root(static_cast<int>(csrc->idx));
                 else return false;
@@ -667,79 +862,163 @@ struct BorrowPass {
                 store_pos.insert((static_cast<long long>(b) << 32) | static_cast<long long>(i));
             }
         }
-        if (!any_store || !root_set) return false;
-        if (root.kind != Root::FreshLocal && (has_user_call || has_dispatch_rt)) return false;
-        for (VReg recv : mut_recv)
-            if (!receiver_ok(recv, root)) return false;
+        if (is_g) dbg("stores-done", idx);
+        if (!any_store || !root_set) { dbg("no-store-or-root", idx); return false; }
+        if (is_g) dbg(root.kind == Root::PrivateGlobal ? "root=privglobal" :
+                      root.kind == Root::FreshLocal ? "root=freshlocal" :
+                      root.kind == Root::Global ? "root=global" : "root=other", idx);
+        // 容器不可达（新分配 / 入口私有）→ 循环体里的用户调用不构成拒绝理由。
+        const bool contained = root.kind == Root::FreshLocal ||
+                               root.kind == Root::PrivateGlobal;
+        if (!contained && (has_user_call || has_dispatch_rt)) return false;
+        // Class 值（析构/__str__ 时机不可控）只在「容器不可达」的根上放行：
+        // 被调用户代码拿不到容器，无法在借用区间内让元素的计数归零，
+        // __del__ 的触发时机与基线逐点相同（借用只删掉本槽那份 +1）。
+        if (!class_free && !contained) { dbg("class-values", idx); return false; }
+        for (const MutOp& m : mut_recv)
+            if (!receiver_ok(m.recv, root, m.append_only)) {
+                dbg("mut-receiver", idx);
+                return false;
+            }
 
-        // 装载点分类：store 旧值（豁免）/ 出口释放（删 load+dec）/ 普通读（use 分析）。
+        // 装载点分类：store 旧值（豁免）/ 出口释放（删或替换）/ 普通读（use 分析）。
         for (size_t b = 0; b < fn.blocks.size(); ++b) {
             auto& ins = fn.blocks[b].insts;
             for (size_t i = 0; i < ins.size(); ++i) {
-                if (ins[i].op != IrOp::LoadSlot || ins[i].idx != s || ins[i].dst == kNoReg) continue;
+                if (!is_load(ins[i]) || ins[i].dst == kNoReg) continue;
                 if (i + 1 < ins.size() &&
                     store_pos.count((static_cast<long long>(b) << 32) | static_cast<long long>(i + 1)))
                     continue;  // 已验证 borrow store 的旧值装载
-                if (is_exit_load(ins, i, s)) {
-                    auto nu = nuses.find(ins[i].dst);
-                    if (nu == nuses.end() || nu->second != 1) return false;
-                    dels.push_back({static_cast<int>(b), i});
-                    dels.push_back({static_cast<int>(b), i + 1});
+                auto nu = nuses.find(ins[i].dst);
+                if (is_g ? is_global_exit_load(ins, i, idx, static_cast<int>(b))
+                         : is_exit_load(ins, i, idx)) {
+                    if (nu == nuses.end() || nu->second != 1) {
+                        dbg("exit-release-multiuse", idx);
+                        return false;
+                    }
+                    if (is_g) {
+                        // 全局没有 release_slots 的清零 store：把 [load; dec]
+                        // 原地换成 [const 0; store.global g, 0]。
+                        edits.push_back({static_cast<int>(b), i, Edit::ConstZero, idx});
+                        edits.push_back({static_cast<int>(b), i + 1, Edit::StoreZero, idx});
+                    } else {
+                        edits.push_back({static_cast<int>(b), i, Edit::Del, -1});
+                        edits.push_back({static_cast<int>(b), i + 1, Edit::Del, -1});
+                    }
                     continue;
                 }
                 if (!walk_uses(ins[i].dst, [&](const Inst& in, VReg x) {
-                        return use_ok(in, x, s, root);
-                    }))
+                        return use_ok(in, x, idx, root);
+                    })) {
+                    dbg("use-not-ok", idx);
                     return false;
+                }
             }
         }
         // 记录 store 形状的 inc/old-load/dec 删除点。
         for (long long pos : store_pos) {
             int b = static_cast<int>(pos >> 32);
             size_t i = static_cast<size_t>(pos & 0xFFFFFFFFll);
-            dels.push_back({b, i - 2});
-            dels.push_back({b, i - 1});
-            dels.push_back({b, i + 1});
+            edits.push_back({b, i - 2, Edit::Del, -1});
+            edits.push_back({b, i - 1, Edit::Del, -1});
+            edits.push_back({b, i + 1, Edit::Del, -1});
         }
         return true;
     }
 };
 
-void borrow_readonly_slots(IRFunction& fn, const std::vector<IRGlobal>& globals) {
+void borrow_readonly_slots(IRFunction& fn, const IRModule& mod) {
     if (fn.is_generator || fn.blocks.empty()) return;
-    BorrowPass pass(fn, globals);
+    BorrowPass pass(fn, mod);
     pass.build();
-    if (pass.has_susp_rt || pass.has_hard_bad || !pass.class_free) return;
-    std::vector<std::pair<int, size_t>> dels;
+    if (std::getenv("PYADAMAS_BORROW_DBG"))
+        std::fprintf(stderr,
+                     "[borrow-dbg] enter %s entry=%d susp=%d bad=%d classfree=%d "
+                     "globals=%zu priv=%zu user_call=%d\n",
+                     fn.name.c_str(), static_cast<int>(pass.is_entry),
+                     static_cast<int>(pass.has_susp_rt), static_cast<int>(pass.has_hard_bad),
+                     static_cast<int>(pass.class_free), mod.globals.size(),
+                     pass.private_g.size(), static_cast<int>(pass.has_user_call));
+    if (pass.has_susp_rt || pass.has_hard_bad) return;
+    std::vector<BorrowPass::Edit> edits;
     std::vector<int> borrowed;
+    // 槽候选（0.338 起的口径，行为不变）。
     for (size_t s = 0; s < fn.slot_ty.size(); ++s) {
-        std::vector<std::pair<int, size_t>> local;
-        if (pass.analyze_slot(static_cast<int>(s), local)) {
-            dels.insert(dels.end(), local.begin(), local.end());
+        std::vector<BorrowPass::Edit> local;
+        if (pass.analyze_candidate(false, static_cast<int>(s), local)) {
+            edits.insert(edits.end(), local.begin(), local.end());
             borrowed.push_back(static_cast<int>(s));
         }
     }
-    if (borrowed.empty()) return;
+    // 入口私有全局候选（0.474，路线图 2.1）。只有入口函数有意义：
+    // 其它模块的全局对 import 方可见，私有性证明不成立。
+    int borrowed_globals = 0;
+    if (pass.is_entry) {
+        for (size_t g = 0; g < mod.globals.size(); ++g) {
+            std::vector<BorrowPass::Edit> local;
+            if (pass.analyze_candidate(true, static_cast<int>(g), local)) {
+                edits.insert(edits.end(), local.begin(), local.end());
+                ++borrowed_globals;
+            }
+        }
+    }
+    if (borrowed.empty() && borrowed_globals == 0) return;
     for (int s : borrowed)
         if (static_cast<size_t>(s) < fn.slot_owned.size()) fn.slot_owned[static_cast<size_t>(s)] = false;
-    std::sort(dels.begin(), dels.end(), [](const auto& a, const auto& b) {
-        return a.first != b.first ? a.first > b.first : a.second > b.second;
+    // 位置从大到小应用：删除会左移，改写（原地）不移动。同一位置可能同时
+    // 出现 Del 与改写（不同候选互不相交，实际不会），Del 排在前面。
+    std::sort(edits.begin(), edits.end(), [](const auto& a, const auto& b) {
+        if (a.blk != b.blk) return a.blk > b.blk;
+        if (a.pos != b.pos) return a.pos > b.pos;
+        return static_cast<int>(a.kind) > static_cast<int>(b.kind);
     });
-    dels.erase(std::unique(dels.begin(), dels.end()), dels.end());
-    for (auto& [b, i] : dels) {
-        auto& ins = fn.blocks[static_cast<size_t>(b)].insts;
-        if (i < ins.size()) ins.erase(ins.begin() + static_cast<std::ptrdiff_t>(i));
+    edits.erase(std::unique(edits.begin(), edits.end(), [](const auto& a, const auto& b) {
+                    return a.blk == b.blk && a.pos == b.pos && a.kind == b.kind &&
+                           a.g == b.g;
+                }),
+                edits.end());
+    for (auto& e : edits) {
+        auto& ins = fn.blocks[static_cast<size_t>(e.blk)].insts;
+        if (e.pos >= ins.size()) continue;
+        Inst& in = ins[e.pos];
+        if (e.kind == BorrowPass::Edit::Del) {
+            ins.erase(ins.begin() + static_cast<std::ptrdiff_t>(e.pos));
+            continue;
+        }
+        if (e.kind == BorrowPass::Edit::ConstZero) {
+            in.op = IrOp::ConstInt;
+            in.imm = 0;
+            in.idx = 0;
+            in.a = in.b = in.c = kNoReg;
+            in.args.clear();
+            if (in.dst != kNoReg && static_cast<size_t>(in.dst) < fn.vreg_ty.size())
+                fn.vreg_ty[static_cast<size_t>(in.dst)] = t_int();
+            in.ty = t_int();
+            continue;
+        }
+        // StoreZero：把出口释放的 rc_dec 改成「store.global g, 0」，用的
+        // 就是刚被改成常量的那个 vreg（原 dec 的唯一实参）。
+        VReg z = in.args.size() == 1 ? in.args[0] : kNoReg;
+        in.op = IrOp::StoreGlobal;
+        in.idx = e.g;
+        in.a = z;
+        in.b = in.c = kNoReg;
+        in.dst = kNoReg;
+        in.args.clear();
+        TypePtr gt = mod.globals[static_cast<size_t>(e.g)].ty;
+        in.ty = gt ? gt : t_int();
     }
     if (std::getenv("PYADAMAS_BORROW_OPT_STATS"))
-        std::fprintf(stderr, "[borrowopt] %s: %zu slots borrowed, %zu insts removed\n",
-                     fn.name.c_str(), borrowed.size(), dels.size());
+        std::fprintf(stderr,
+                     "[borrowopt] %s: %zu slots borrowed, %d globals borrowed, %zu edits\n",
+                     fn.name.c_str(), borrowed.size(), borrowed_globals, edits.size());
 }
 
 }  // namespace
 
 void Lowerer::finalize_borrow_slots() {
     if (!opts_.borrow_opt) return;
-    borrow_readonly_slots(*st_->fn, mod_.globals);
+    borrow_readonly_slots(*st_->fn, mod_);
 }
 
 }  // namespace pyadamas

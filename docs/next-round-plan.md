@@ -42,11 +42,11 @@
 
 | 顺序 | 任务 | 杠杆 | 验收 / 风险 |
 |---|---|---|---|
-| 2.1 | **RC 借用扩展到「入口全局根 + append-only 根」**（obj_dispatch）——**落地（0.473，opt-in）** | ~8–15% → 实测 **-32.7%** | 所有权分析 fail-closed；ASan 全量 + `tests/run` 语料对拍 + CPython 对拍；abbench 15 轮中位数优于基线 >3.5%（A/A 噪声）。**红线**：全局槽是 GC 根，不允许留悬垂借用；先降级成帧槽再借用。**0.473 结果**：未降级成帧槽，改用「入口私有全局候选 + PrivateGlobal 根 + 出口零化」；obj_dispatch 300.59→202.24 ms（-32.7%）、dict_wordfreq -6.5%、sort_struct -2.6%、其余 15 例 asm 逐字节不变；普通/ASan 套件 470/0、difftest 441/0、CPython 18/18；新增 566。细节见 [borrow-loop-design.md](borrow-loop-design.md) §9。门控仍默认关 |
+| 2.1 | **RC 借用扩展到「入口全局根 + append-only 根」**（obj_dispatch）——**落地（0.474，opt-in）** | ~8–15% → 实测 **-32.7%** | 所有权分析 fail-closed；ASan 全量 + `tests/run` 语料对拍 + CPython 对拍；abbench 15 轮中位数优于基线 >3.5%（A/A 噪声）。**红线**：全局槽是 GC 根，不允许留悬垂借用；先降级成帧槽再借用。**0.474 结果**：未降级成帧槽，改用「入口私有全局候选 + PrivateGlobal 根 + 出口零化」；obj_dispatch 300.59→202.24 ms（-32.7%）、dict_wordfreq -6.5%、sort_struct -2.6%、其余 15 例 asm 逐字节不变；普通/ASan 套件 470/0、difftest 441/0、CPython 18/18；新增 566。细节见 [borrow-loop-design.md](borrow-loop-design.md) §9。门控仍默认关 |
 | 2.2 | ~~浮点槽提升的作用域放宽~~ **判负（0.472）** | 无（前提不成立） | **已判负**：浮点**槽**从 0.279 起就没有「整函数无调用」门禁——跨调用代价由 `build_fp_liveness` + 每指令 `fp_spill_mask` 只 spill「调用后还要读」的槽承担，即「活跃区间不跨调用」判据早已实现。`__pa_main` 的 `bb12` 在 **IR** 里有 `load.slot s5`，但 asm/objdump 里 `total` 在 `%xmm8`（`addsd %xmm7,%xmm8`，循环内零槽访存；-O1、VECT=0 同）。唯一的无调用门禁管的是**跨块浮点 vreg**（nbody 上已实测负收益）。nbody 的 dx/dy/dz/d2/mag 跨 `math.sqrt`，必须 spill；要消掉得内联 `sqrtsd`，另立一项 |
 | 2.3 | **入口私有全局提升的红利回收（复测即可，不立项）**——**复测完成（0.472）** | 已基本兑现，剩余可能 ≈0 | **已测**：spectral_norm 的 `__pa_main` 内层循环 `bb12` 里没有任何 `load.global`——`u`/`v`/`N` 已被外提成 vreg（`%59`/`%60`/`%61`），剩下的 `load.global g4/g5` 只在 10 次的外层循环里。fannkuch/fasta 的 `load.global` 也从 0.300 口径的 13/19 降到 9/15。**结论：A 的完整形态（分配器候选集扩到标量 global）对这三个基准没有剩余空间，不需要再做；瓶颈已转移到浮点槽与循环体本身** |
-| 2.4 | **`PYADAMAS_RA_OPT` 默认化决策** | obj_dispatch ~2%，历史 mandelbrot/fasta +3~4% | 全量 abbench 15 轮 × 3 次；两窗同号才默认开，否则保持 opt-in 并写清理由 |
-| 2.5 | **虚调用守卫（函数指针比较）** | ~5–10%，但仅当 2.1 后仍有空间 | 只在 2.1 落地后做；必须用 `objdump` 确认内层循环指令数下降且 DSB 未被挤出（`idq.dsb_uops`） |
+| 2.4 | **`PYADAMAS_RA_OPT` 默认化决策**——**已决（0.474）：保持 opt-in** | 实测 12 基准上已无收益 | 15 轮 × 两窗实测：realistic -0.2%、classic +1.8%（反号），asm 真变化的 3 例里 nqueens +8.5% 是回退；判据不成立 → 默认关。理由与数据见 [ra-opt-design.md](ra-opt-design.md) §6 |
+| 2.5 | **虚调用守卫（函数指针比较）**——**未做（前置条件复核）** | ~5–10%，但仅当 2.1 后仍有空间 | 只在 2.1 落地后做；必须用 `objdump` 确认内层循环指令数下降且 DSB 未被挤出（`idq.dsb_uops`） |
 
 > 纪律：profile 只用来找候选，abbench 定生死；任何「改操作数形态」的 pass 都要回头
 > 检查消费该形态的后端融合（0.470 的 7% 回退就是这么来的）。

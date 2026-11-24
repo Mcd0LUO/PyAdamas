@@ -4,6 +4,58 @@
 
 早期阶段没有逐条留痕，按阶段归纳；0.4 之后逐条记录。
 
+## [0.474] - 2026-11-24
+
+> perf(lower)：**RC 借用扩展到「入口私有全局根 + append-only 根」**。
+> obj_dispatch 内层循环 300.59 → 202.24 ms（**-32.7%**，15 轮中位/p25 同向），
+> 指令数 3.110e9 → 1.766e9（-43.2%）；`PYADAMAS_BORROW_OPT=1` 门控（保持 opt-in）。
+>
+> 形态（bench/realistic/obj_dispatch.py）：模块顶层 `for s in shapes: total += s.area()`，
+> 循环变量与容器都是入口私有堆全局。0.472 之前每轮 `rc_inc(元素)` + `load.global s`
+> （旧值）+ `store.global s` + `rc_dec(旧值)` 全是可省的记账（640000×100 轮）。
+>
+> 六道门与其解锁方式（细节见 [docs/borrow-loop-design.md](docs/borrow-loop-design.md) §9）：
+>
+> 1. 候选只能是帧槽 → 新增**全局候选**（候选形状对 LoadGlobal/StoreGlobal 同口径匹配）；
+> 2. GLOBAL 根要求「本函数内从不写」 → 新增根类别 **PrivateGlobal**：入口私有 +
+>    唯一实写来自新分配 + 只增不删（append/extend）；
+> 3. `class_free` 整函数否决 Class 值 → 只在「容器不可达」的根（FreshLocal/PrivateGlobal）
+>    上放行：容器逃不出去，被调用户代码无法在借用窗口内让元素计数归零，`__del__` 时机不变；
+> 4. `has_hard_bad` 否决含 `ObjNew`/`ClassAddr` 的函数、`ClassNew` 落 Bad → 前两者移出
+>    硬拒清单（新对象不可能与既有容器别名 / 不写内存），`ClassNew`（rt_class.c 纯分配）归 Pure；
+>    `CallExtern/PtrStore/Gen*` 仍在清单里；
+> 5. 根值被迭代源持有（`rc_inc`+`rc_temp`）与 append 接收者消费 → 根的消费白名单放行这两类；
+> 6. 全局没有清零 store → 出口 `[load.global g; rc_dec]` **原地**换成
+>    `[const.int 0; store.global g, 0]`，`GcShutdown` 的根表里不留借来的指针。
+>
+> 红线保持：含 handler 的函数不借；生成器/协程整类跳过；跨调用仍必须持有引用；
+> 容器被删/被替换/被别的函数写过/循环体内 pop 一律拒绝（新增用例 566 逐条钉死）。
+> O0/O1 产物不变（本遍只受 `PYADAMAS_BORROW_OPT` 门控，flag-off 不跑）。
+>
+> 实测（同一编译器、两侧独立 modcache + `--rebuild`、打乱顺序 + 奇偶轮交换、BURST=3、
+> 15 轮中位/p25、绑核）：
+>
+> | 用例 | off | on | 中位 | p25 |
+> |---|---|---|---|---|
+> | obj_dispatch | 300.59 ms | 202.24 ms | **-32.7%** | -32.7% |
+> | dict_wordfreq | 232.56 ms | 217.55 ms | -6.5% | -6.8% |
+> | sort_struct | 298.70 ms | 290.79 ms | -2.6% | -3.0% |
+> | queue_sim / rec_memo / str_build | — | — | -0.2 / +0.1 / -0.2% | 噪声 |
+> | realistic 合计 | 1331.99 ms | 1210.39 ms | **-9.1%** | — |
+> | classic 13 例合计 | 311.07 ms | 309.87 ms | -0.4% | — |
+>
+> classic 窗无真实回退：fasta +2.9%（p25 +15.8%）、fannkuch −5.9%、matmul +1.6%、
+> binary_trees +1.3% 四例的 flag-on/off **asm 逐字节相同**，是短用例噪声（±3% 口径，
+> 见 docs/testing.md）。全 18 个基准里只有 3 个（obj_dispatch/dict_wordfreq/sort_struct）
+> 产物发生变化，其余 15 个 asm 逐字节不变。
+>
+> 闸门：普通套件 **470 ran ok / 0 失败**、ASan 套件 **470 ran ok / 0 失败**（均 flag-on，
+> 8 作业）；difftest（O0 vs O2）flag-on **441 / 0**；18 个基准输出与 CPython 逐字节一致；
+> check_size 无新增超限（borrow.cpp 745 → 1024 行，仍 < 1200；既有两处 1227/1271 不变）。
+> 新增回归 `tests/run/566_entry_global_borrow.py`（expect 来自 CPython 实跑）。
+>
+> 未做/遗留：门控仍默认关（默认化需要全量日常语料 A/B）；`del s`、先赋值再被 for 覆盖、
+> 运行时新容器来源（ListSlice/StrToList）、dict/set 根、生成器/协程仍未覆盖。
 ## [0.473] - 2026-11-24
 
 > feat(pkg)：包管理 **P0-a** 落地——清单 + 锁 + `resolve` + `--locked` + 锁派生 ModuleMap。
