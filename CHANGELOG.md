@@ -4,6 +4,60 @@
 
 早期阶段没有逐条留痕，按阶段归纳；0.4 之后逐条记录。
 
+## [0.472] - 2026-11-24
+
+> 取证版（**无代码改动**）：路线图 2.2「浮点槽提升作用域放宽」前提不成立，**判负**；
+> 2.3「入口私有全局红利」复测确认已兑现，不再立项。
+
+### 2.2 判负：浮点槽提升从 0.279 起就没有「整函数无调用」门禁
+
+路线图的依据是 `ir` 里 `__pa_main` 的内层块 `bb12` 有 `load.slot s5` / `store.slot s5`。
+那是**IR 层**现象，汇编层早已没有：
+
+| 取证 | 结果 |
+|---|---|
+| `asm -O2 bench/compare/spectral_norm.py`（bb12） | `addsd %xmm7, %xmm8`，s5 在 `%xmm8`；循环内对 s5 零访存 |
+| `asm -O1` 同函数 | `addsd %xmm1, %xmm6`，同样常驻 |
+| `PYADAMAS_VECT=0 asm -O2` | 同上（不是向量化带来的巧合） |
+| `objdump -d` 实际二进制 | `50eb: addsd %xmm7,%xmm8`、`5147: movsd %xmm8,%xmm0` |
+| `perf stat -e instructions:u` 3 轮 | 94916055 / 94916063 / 94916052（稳定，改动前=改动后） |
+
+机制：`assign_slot_regs` 对浮点槽走 `linear_scan_pool(fp_cands, kFpSlotRegs(), …)`，
+**没有调用门禁**；跨调用的代价由 `build_fp_liveness` + 每指令 `fp_spill_mask` 承担 ——
+只 spill「调用之后还要读」的槽（0.279 起，spectral_norm 正是靠它）。也就是说路线图设想的
+判据「**该值的活跃区间不跨调用**」在 0.279 就已经实现了，不存在可放宽的整函数门禁。
+
+唯一的整函数「无调用」门禁是 `assign_global_vreg_regs` 的 `call_free_fp`，它管的是
+**跨块浮点 vreg**（与槽不是同一机制）；该放宽在 nbody 上已实测负收益（7 个浮点变量 +
+4 个跨块临时值抢 8 个 xmm），源码注释有记录，不再重试。
+
+「热循环体内无调用」这条替代判据对唯一还有代价的用例（nbody）无效：`dx/dy/dz/d2/mag`
+的活跃区间**跨 `math.sqrt` 调用**，按 ABI 必须 spill/reload。要消掉它得把 `math.sqrt`
+内联成 `sqrtsd`（还要处理负数参数抛 ValueError 的语义），是另一项，不在 2.2 范围。
+
+**结论**：不改代码。spectral_norm 内层循环剩下的唯一内存往返是 `index.get` 结果经临时槽
+（`movsd %xmm0,0x1c0(%rsp)` / `mulsd 0x1c0(%rsp),%xmm7`），属「索引装载直出寄存器」
+另一类问题。
+
+### 2.3 复测（不立项，与路线图一致）
+
+`build/lead/pyadamas ir <case>` + `docs/roadmap.md` §0 的 awk 口径，当前 HEAD 的
+`__pa_main` 六项计数：
+
+| 用例 | blocks | call.rt | call.direct | load.global | store.global | load.slot | store.slot |
+|---|---|---|---|---|---|---|---|
+| spectral_norm | 28 | 30 | 0 | 38 | 16 | 43 | 34 |
+| fannkuch | 5 | 23 | 1 | **9** | 6 | 2 | 4 |
+| fasta | 9 | 31 | 1 | **15** | 10 | 12 | 9 |
+| nbody | 7 | 21 | 2 | 50 | 7 | 6 | 6 |
+| matmul | 3 | 18 | 1 | 8 | 5 | 1 | 2 |
+| obj_dispatch | 27 | 44 | 2 | 22 | 15 | 12 | 11 |
+
+- `bb12`（内层循环）里**没有任何 `load.global`**：`u`/`v`/`N` 已外提成 vreg
+  （`%59`/`%60`/`%61`），剩下的 `load.global g4/g5` 只在 10 次的外层循环里。
+- fannkuch / fasta 的 `load.global` 从 0.300 口径的 13 / 19 降到 **9 / 15**，与路线图一致。
+- 结论：A 的完整形态（分配器候选集扩到标量 global）对这三个基准没有剩余空间，不立项。
+
 ## [0.471] - 2026-11-24
 
 > tooling：`tools/difftest.sh` 的两类假判（假绿 / 假红）一次收口。

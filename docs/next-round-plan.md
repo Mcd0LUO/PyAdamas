@@ -43,8 +43,8 @@
 | 顺序 | 任务 | 杠杆 | 验收 / 风险 |
 |---|---|---|---|
 | 2.1 | **RC 借用扩展到「入口全局根 + append-only 根」**（obj_dispatch） | ~8–15% | 所有权分析 fail-closed；ASan 全量 + `tests/run` 语料对拍 + CPython 对拍；abbench 15 轮中位数优于基线 >3.5%（A/A 噪声）。**红线**：全局槽是 GC 根，不允许留悬垂借用；先降级成帧槽再借用 |
-| 2.2 | **浮点槽提升的作用域放宽**：把「整函数无调用」改成「热循环体内无调用」 | 中等：spectral_norm 内层循环的 `total`（float）仍在内存槽 | 实测证据：`ir` 的 `__pa_main` 内层块 `bb12` 每轮 `load.slot s5` / `store.slot s5` 搬浮点累加器；该函数有 `call.rt`（print/append）所以浮点槽整体不提升。改成按循环判「无调用」后，spectral_norm/nbody 的浮点内层循环应出现 xmm 常驻。验收：`objdump` 内层循环去掉槽访存 + abbench 两窗同向；含 handler 的函数仍排除 |
-| 2.3 | **入口私有全局提升的红利回收（复测即可，不立项）** | 已基本兑现，剩余可能 ≈0 | **已测**：spectral_norm 的 `__pa_main` 内层循环 `bb12` 里没有任何 `load.global`——`u`/`v`/`N` 已被外提成 vreg（`%59`/`%60`/`%61`），剩下的 `load.global g4/g5` 只在 10 次的外层循环里。fannkuch/fasta 的 `load.global` 也从 0.300 口径的 13/19 降到 9/15。**结论：A 的完整形态（分配器候选集扩到标量 global）对这三个基准没有剩余空间，不需要再做；瓶颈已转移到浮点槽与循环体本身** |
+| 2.2 | ~~浮点槽提升的作用域放宽~~ **判负（0.472）** | 无（前提不成立） | **已判负**：浮点**槽**从 0.279 起就没有「整函数无调用」门禁——跨调用代价由 `build_fp_liveness` + 每指令 `fp_spill_mask` 只 spill「调用后还要读」的槽承担，即「活跃区间不跨调用」判据早已实现。`__pa_main` 的 `bb12` 在 **IR** 里有 `load.slot s5`，但 asm/objdump 里 `total` 在 `%xmm8`（`addsd %xmm7,%xmm8`，循环内零槽访存；-O1、VECT=0 同）。唯一的无调用门禁管的是**跨块浮点 vreg**（nbody 上已实测负收益）。nbody 的 dx/dy/dz/d2/mag 跨 `math.sqrt`，必须 spill；要消掉得内联 `sqrtsd`，另立一项 |
+| 2.3 | **入口私有全局提升的红利回收（复测即可，不立项）**——**复测完成（0.472）** | 已基本兑现，剩余可能 ≈0 | **已测**：spectral_norm 的 `__pa_main` 内层循环 `bb12` 里没有任何 `load.global`——`u`/`v`/`N` 已被外提成 vreg（`%59`/`%60`/`%61`），剩下的 `load.global g4/g5` 只在 10 次的外层循环里。fannkuch/fasta 的 `load.global` 也从 0.300 口径的 13/19 降到 9/15。**结论：A 的完整形态（分配器候选集扩到标量 global）对这三个基准没有剩余空间，不需要再做；瓶颈已转移到浮点槽与循环体本身** |
 | 2.4 | **`PYADAMAS_RA_OPT` 默认化决策** | obj_dispatch ~2%，历史 mandelbrot/fasta +3~4% | 全量 abbench 15 轮 × 3 次；两窗同号才默认开，否则保持 opt-in 并写清理由 |
 | 2.5 | **虚调用守卫（函数指针比较）** | ~5–10%，但仅当 2.1 后仍有空间 | 只在 2.1 落地后做；必须用 `objdump` 确认内层循环指令数下降且 DSB 未被挤出（`idq.dsb_uops`） |
 
