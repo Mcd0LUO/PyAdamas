@@ -1,6 +1,8 @@
 // lower/method.cpp —— 方法与 super 调用降级
 #include "lower/impl.h"
 
+#include "cimport/native_sigs.h"  // 子模块属性链（os.path.*）的声明式签名
+
 namespace pyadamas {
 
 VReg Lowerer::lower_super_call(Attribute& at, Call& c) {
@@ -136,6 +138,32 @@ VReg Lowerer::lower_method_call(Attribute& at, Call& c) {
                 for (auto it = chain.rbegin(); it != chain.rend(); ++it)
                     name += "." + *it;
                 return lower_cpy_call(name, at.attr, c);
+            }
+        }
+    }
+    // 子模块属性链（0.484，pya-lsp 缺口 2）：os.path.join(...) 里的 os.path 是
+    // 独立原生模块。把链展开成完整模块名，命中就按 from os.path import join 同
+    // 口径降级（native_fn 里已有声明式签名的 (module, member) 映射）。
+    {
+        Expr* base = at.value.get();
+        std::vector<std::string> chain;
+        while (auto* ba = dynamic_cast<Attribute*>(base)) {
+            chain.push_back(ba->attr);
+            base = ba->value.get();
+        }
+        auto* bn = dynamic_cast<Name*>(base);
+        if (bn && !chain.empty()) {
+            if (auto mod = resolve_module_alias(bn->id); mod && !mod->cpy_proxy) {
+                std::string full = mod->name;
+                for (auto rit = chain.rbegin(); rit != chain.rend(); ++rit)
+                    full += "." + *rit;
+                auto sub = pyadamas::nativesig::module_info(full);
+                if (sub) {
+                    auto it = sub->globals.find(at.attr);
+                    if (it != sub->globals.end() && it->second &&
+                        it->second->kind == TyKind::Func)
+                        return call_native(full, at.attr, c, it->second->fn);
+                }
             }
         }
     }

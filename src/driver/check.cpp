@@ -69,6 +69,11 @@ pyadamas::ModuleInfoPtr check_build_info(pyadamas::TypeChecker& tc,
             flat->is_exception_class = cls->is_exception_class;
             flat->is_rich_exception = cls->is_rich_exception;
             flat->exc_parent = cls->exc_parent;
+            // 动态属性槽（setattr/vars 开出来的运行期 dict）：接口必须一起带过去，
+            // 否则 check 会比 build 更严 —— argparse.Namespace 这类「成员在运行期
+            // 才存在」的类会误报 "'Namespace' object has no attribute 'input'"
+            // （0.484 pya-lsp 缺口 2 的误杀，3 个 tests/run 用例回归）。
+            flat->needs_dict = cls->needs_dict;
             for (auto it = chain.rbegin(); it != chain.rend(); ++it)
                 for (auto& f : (*it)->fields) flat->fields.push_back(f);
             if (const auto* ma = cls->match_args_of()) flat->match_args = *ma;

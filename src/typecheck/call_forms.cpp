@@ -104,6 +104,42 @@ TypePtr TypeChecker::call_name(Name& n, Call& c) {
     }
 
 TypePtr TypeChecker::call_attr(Attribute& a, Call& c) {
+        // 0.484（pya-lsp 缺口 2）：子模块属性链。os.path.join(...) 里的 os.path 是
+        // 独立模块（ModuleKind::Native "os.path"），不是 os 的成员；把链展开成完整
+        // 模块名，命中就按 from os.path import join 同口径检查（1 个簇，不是特例）。
+        {
+            Expr* base = a.value.get();
+            std::vector<std::string> chain;
+            while (auto* ba = dynamic_cast<Attribute*>(base)) {
+                chain.push_back(ba->attr);
+                base = ba->value.get();
+            }
+            auto* bn = dynamic_cast<Name*>(base);
+            if (bn && !chain.empty()) {
+                if (auto mod = lookup_module_alias(bn->id); mod && !mod->cpy_proxy) {
+                    std::string full = mod->name;
+                    for (auto rit = chain.rbegin(); rit != chain.rend(); ++rit)
+                        full += "." + *rit;
+                    auto sub = lookup_module_alias(full);
+                    if (!sub && module_lookup_) sub = module_lookup_(full);
+                    if (sub) {
+                        auto sit = sub->globals.find(a.attr);
+                        if (sit != sub->globals.end()) {
+                            auto st = sit->second;
+                            if (st && st->kind == TyKind::Func)
+                                return check_args(st->fn, c);
+                            TypePtr rt = st ? st : t_unknown();
+                            for (auto& arg : c.args) expr(*arg);
+                            for (auto& kw : c.keywords) expr(*kw.value);
+                            return rt;
+                        }
+                        err(c.line, c.col,
+                            std::format("module '{}' has no attribute '{}'", full, a.attr));
+                        return t_unknown();
+                    }
+                }
+            }
+        }
         if (auto* vn = dynamic_cast<Name*>(a.value.get())) {
             if (const CImportDecl* cd = cmodule(vn->id)) {
                 for (auto& x : cd->externs) {

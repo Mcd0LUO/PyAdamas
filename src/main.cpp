@@ -99,8 +99,8 @@ struct Frontend {
 
 // 解析 + 类型检查。有错误时打印并返回 nullopt。
 std::optional<Frontend> run_frontend(const std::string& path, const std::string& source,
-                                     bool syntax_only,
-                                     pyadamas::ModuleLookup module_lookup = nullptr) {
+                                     bool syntax_only, pyadamas::ModuleLookup module_lookup = nullptr,
+                                     bool strict_names = false) {
     pyadamas::Lexer lexer(source);
     auto tokens = lexer.run();
 
@@ -115,6 +115,13 @@ std::optional<Frontend> run_frontend(const std::string& path, const std::string&
 
     if (module_lookup) fe.tc.set_lenient_imports(true);
     if (module_lookup) fe.tc.set_module_lookup(std::move(module_lookup));
+    // 0.484（pya-lsp 缺口 4）：check 也要报模块级未定义名字。build/run 一直
+    // 是严格的（初值 0 的全局会静默算错），check 之前宽松是因为 0.171 的标准库
+    // 基线里「条件导入/C 扩展常量」会误报；现在按「名字在模块内任何作用域出现过
+    // /被 import 过/是内建」判定，条件定义与后续定义都不误杀（见 expr.cpp 的
+    // star_import_/dynamic_globals_ 放行），标准库基线复测通过后才默认打开。
+    // --lenient-names 保留为逃生口（诊断口径回归时用）。
+    fe.tc.set_strict_module_names(strict_names);
     fe.tc.set_lang_gaps(std::getenv("PYADAMAS_LANG_GAPS") != nullptr &&
                         std::string_view(std::getenv("PYADAMAS_LANG_GAPS")) != "0");
     fe.tc.check(*fe.mod);
@@ -276,7 +283,8 @@ int main(int argc, char** argv) {
     // setjmp —— 它们有 5 处 C 级 setjmp 兜底，抓不到 _Unwind，这是设计上的
     // 永久降级。`--no-zero-cost-exc` 是回退开关（出问题时能一键退回旧路径）。
     bool zero_cost_exc = true;
-    bool resolve_imports = false;
+    bool no_imports = false;      // check：不加载 import 图（旧的宽松口径）
+    bool lenient_names = false;   // check：不报模块级未定义名字（逃生口）
     // deps：JSON 输出（默认就是 JSON；--json 显式写出来便于脚本自解释）。
     bool json_out = false;
     // --module-map：外部模块映射文件（deps --json 的产物，可互相喂）。
@@ -298,7 +306,9 @@ int main(int argc, char** argv) {
     for (int i = 1; i < argc; ++i) {
         std::string a = argv[i];
         if (a == "--syntax") syntax_only = true;
-        else if (a == "--imports") resolve_imports = true;
+        else if (a == "--imports") { /* 0.484 起是默认行为，保留兼容 */ }
+        else if (a == "--no-imports") no_imports = true;
+        else if (a == "--lenient-names") lenient_names = true;
         else if (a == "--json") json_out = true;
         else if (a.starts_with("--out=")) output = a.substr(6);
         else if (a == "--out" && i + 1 < argc) output = argv[++i];
@@ -440,14 +450,16 @@ int main(int argc, char** argv) {
         }
 
         if (mode == "check" || mode == "types") {
-            // check/types 默认走通用前端（不解析 import 图，宽松）；
-            // --imports 时加载依赖模块接口，让跨模块类型/成员可见（更严格）。
+            // check/types 默认加载依赖模块接口（0.484 起；之前只有 --imports 才加载）：
+            // pya-lsp 的诊断完全依赖 check，而「模块没有这个属性」只有拿到模块
+            // 表才能报。--no-imports 回退到「不解析 import 图」的宽松口径。
+            // 模块级未定义名字同样在 check 阶段报（--lenient-names 逃生口）。
             pyadamas::ModuleLookup lookup = nullptr;
-            if (resolve_imports) {
+            if (!no_imports) {
                 std::vector<std::string> missing;
                 lookup = pyadamas::load_check_lookup(path, include_dirs, missing);
             }
-            auto fe = run_frontend(path, *src, false, lookup);
+            auto fe = run_frontend(path, *src, false, lookup, !lenient_names);
             if (!fe) return 1;
             if (mode == "types") {
                 for (auto& [name, ty] : fe->tc.top_symbols())

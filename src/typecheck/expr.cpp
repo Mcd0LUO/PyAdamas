@@ -83,8 +83,13 @@ TypePtr TypeChecker::expr(Expr& e) {
                     return sym->ty;
                 }
                 if (lookup_module_alias(n.id)) {
-                    err(n.line, n.col,
-                        std::format("module '{}' cannot be used as a value", n.id));
+                    // 0.484（pya-lsp 缺口 2 的配套）：**模块名当值用不再报错**。
+                    // 反射语义（hasattr(os, "fork") / getattr(os, name, d)）是第一
+                    // 等用例，静态能证明的只有「它是个模块」；具体成员是否存在由
+                    // build 的反射路径决定。check 比 build 严格会造成误杀
+                    // （tests/11_reflect.py），这里按「宁可漏报不可误杀」降级成
+                    // unknown 并记为未建模构造。
+                    unsupported.push_back("module value '" + n.id + "'");
                     return t_unknown();
                 }
                 if (cmodules_.count(n.id)) {

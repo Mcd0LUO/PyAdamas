@@ -132,6 +132,12 @@ pyadamas::ModuleInfoPtr builtin_module(const std::string& name) {
         }
         func("wait_for", {pyadamas::t_unknown(), pyadamas::t_float()},
              pyadamas::mk_coroutine(pyadamas::t_unknown()));
+        // 0.484（pya-lsp 缺口 3）：asyncio.TimeoutError / CancelledError 是内置
+        // 异常名的别名（pyadamas 的 wait_for 超时抛的就是内置 TimeoutError，见
+        // runtime/rt_async.c）。挂进模块表后 except asyncio.TimeoutError 与
+        // except TimeoutError 落到同一个异常类型，不再等到 build 才报 no attribute。
+        info->globals["TimeoutError"] = pyadamas::mk_exception("TimeoutError");
+        info->globals["CancelledError"] = pyadamas::mk_exception("CancelledError");
         func("timeout", {pyadamas::t_float()}, pyadamas::mk_async_timeout());
         func("TaskGroup", {}, pyadamas::mk_async_taskgroup());
         {

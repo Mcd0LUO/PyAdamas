@@ -12,8 +12,14 @@ field() / frozen / order / kw_only / slots / unsafe_hash → 门控开时编译�
 """
 
 
-def dataclass(cls: unknown) -> unknown:
-    """恒等装饰器：真实展开在编译期完成。"""
+def dataclass(cls: unknown = None, **kwargs: object) -> unknown:
+    """恒等装饰器：真实展开在编译期完成。
+
+    0.484：签名要接受 CPython 的那套关键字参数（frozen/order/kw_only/...），
+    否则 check 一加载模块接口就会先报 "unexpected keyword argument 'frozen'"，
+    把 lang-gaps 展开路径里更准确的 "decorator option 'frozen' is not supported"
+    盖掉（tests/fail/352..354）。选项的合法性由 typecheck/dataclass.cpp 判。
+    """
     return cls
 
 

@@ -109,11 +109,22 @@ bool Lowerer::exc_type_name(Expr& e, std::string& out) {
         if (auto* vn = dynamic_cast<Name*>(a.value.get())) {
             if (auto mod = resolve_module_alias(vn->id)) {
                 auto it = mod->classes.find(a.attr);
-                if (it == mod->classes.end() || !it->second.cls ||
-                    !it->second.cls->is_exception_class)
-                    return false;
-                out = it->second.cls->external_name();
-                return true;
+                if (it != mod->classes.end() && it->second.cls &&
+                    it->second.cls->is_exception_class) {
+                    out = it->second.cls->external_name();
+                    return true;
+                }
+                // 0.484（pya-lsp 缺口 3）：模块表里的**内置异常别名**
+                // （asyncio.TimeoutError / CancelledError 是内置异常的同义词，
+                // 类型是 Exception 而不是本地类）。按它的类型名匹配即可 ——
+                // 运行期抛的也是同名内置异常。
+                auto gi = mod->globals.find(a.attr);
+                if (gi != mod->globals.end() && gi->second &&
+                    gi->second->kind == TyKind::Exception) {
+                    out = gi->second->name.empty() ? a.attr : gi->second->name;
+                    return true;
+                }
+                return false;
             }
         }
         return false;

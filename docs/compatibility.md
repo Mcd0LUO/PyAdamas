@@ -95,6 +95,30 @@ PyAdamas 不追求兼容 CPython：语义是按静态类型的需要重新定的
 
 设计见 [str-codepoints.md](str-codepoints.md)。
 
+### 二进制模式 file 的 read/write 语义（0.484 定口径，pya-lsp 缺口 1）
+
+`open(path, "rb")` 返回的 file 在**运行期按字节读写**，但值类型是 **str**：
+
+- `f.read(n)` / `f.readline(size)` 返回「按字节计数的 str」（byte-transparent）：长度是
+  字节数，内容是原始字节，不做换行翻译；`f.readlines()` 同理返回 `list[str]`。
+- `f.write(s)` 只接受 str，写入的是它的原始字节；**`f.write(b"...")` 编译期报
+  `write() expects a string argument`**。
+- 因此 `f = open(p, "rb"); x: bytes = f.read(5)` 会报 `annotated as 'bytes' but assigned 'str'`。
+
+**为什么还不改成 bytes**（0.484 的判负结论）：CPython 的 `open(..., "rb").read()` 返回
+`bytes`，改成 bytes 是正确方向，但需要三件事同时做，任何一件单独做都是不安全的半成品：
+
+1. **运行时**：`pa_file_read/readline/readlines` 在 `f->binary` 分支返回 `PyAdamasBytes*`
+   （现在是 `str_new_bytes`）；`pa_file_write` 接受 bytes；`rt_file.c` 的这四条路径全族一致；
+2. **类型与降级**：`Type` 上给 File 加 `binary` 标记（`open(..., "rb")` 的字面量模式推出），
+   read/readline/readlines 返回 bytes、write 收 bytes —— 否则「类型 bytes、值是 str」
+   会让 str 操作把 bytes 对象当字符串读（内存破坏级错误）；
+3. **消费方**：`pya-lsp` 的 `lsp_protocol.py` 现在写的是 `body: str = inp.read(length)`，
+   改 bytes 后那行必须先改成 `bytes` + `.decode()`，否则 LSP 自己编不过。
+
+在 3 做完之前，PyAdamas 保持「二进制模式 = 按字节计数的 str」并在本页写明；
+最小复现：`f = open(0, "rb", 0); chunk2: bytes = f.read(5)`（check/build 都报类型错，
+运行期拿到的是 str）。改口径时本页要一起改。
 ### 待定：float 除零不抛异常（0.414 发现，之前未记录）
 
 | 写法 | PyAdamas | CPython |

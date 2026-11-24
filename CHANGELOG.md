@@ -4,6 +4,43 @@
 
 早期阶段没有逐条留痕，按阶段归纳；0.4 之后逐条记录。
 
+## [0.484] - 2026-11-24
+
+> feat(frontend)：**pya-lsp 反馈的四条编译器缺口**（3.3）。三条落地、一条判负。
+
+> 1. **`check` 不校验模块属性**（缺口 2，**落地**）：check 现在默认加载 import 图
+>    （`load_check_lookup`，之前只有 `--imports` 才加载），`json.nonexistent_attr`
+>    在 check 阶段就报 `module 'json' has no attribute ...`；`--no-imports` 保留旧口径。
+>    连带三处修正：
+>    - **子模块属性链端到端可用**：`os.path.join(...)` 之前 check/build 都报
+>      `module 'os' has no attribute 'path'`（只能 `from os.path import ...`）。现在
+>      typecheck 与降级都把链展开成完整模块名（`os.path`）按声明式签名解析，
+>      与 from-import 同口径。新增 `tests/run/567_os_path_chain.py`。
+>    - **接口必须带 `needs_dict`**：`check_build_info` 漏拷这个标记，导致
+>      `argparse.Namespace` 这类「成员运行期才存在」的类在 check 下误报
+>      （3 个 tests/run 用例回归）。
+>    - **模块名当值不再报错**：`hasattr(os, "fork")` 是标准库最常见的动态探测，
+>      check 比 build 严会误杀（`tests/11_reflect.py`）→ 降级成 unknown 并记未建模。
+> 2. **缺 `asyncio.TimeoutError`**（缺口 3，**落地**）：asyncio 模块表补
+>    `TimeoutError` / `CancelledError` 两个**内置异常别名**；`except` 的类型名解析
+>    认「模块表里的 Exception 类型」（之前只认模块里的本地异常类）。`wait_for`
+>    超时抛的内置 `TimeoutError` 与 `asyncio.TimeoutError` 现在落到同一类型上，
+>    与 CPython 3.11+ 一致。新增 `tests/run/568_asyncio_timeout_error.py`。
+> 3. **`check` 不报顶层未定义名字**（缺口 4，**落地**）：check 默认 `strict_module_names`，
+>    `print(VALU)` 在 check 阶段报 `undefined name 'VALU'`；`--lenient-names` 是逃生口。
+>    全语料 550 个 `.py` 对照旧口径**零回归**（新增 4 个「旧失败新通过」，均为接口变准）。
+>    新增 `tests/fail/f81_undefined_top.py`。
+> 4. **二进制 `file.read(n)` 返回 str**（缺口 1，**判负**）：`open(..., "rb")` 的值类型
+>    是 str（byte-transparent，长度按字节）。改成 bytes 是正确方向，但要三件事同时做：
+>    运行时 `pa_file_read/readline/readlines/write` 全族改 bytes、`Type` 给 File 加
+>    `binary` 标记（否则「类型 bytes、值是 str」会让 str 操作按 bytes 布局读内存）、
+>    以及 **pya-lsp 自己那行 `body: str = inp.read(length)`** 改成 bytes+decode（不改
+>    它 LSP 就编不过）。本轮按「不改 pya-lsp」的硬约束判负，口径写进
+>    [docs/compatibility.md](docs/compatibility.md)「二进制模式 file 的 read/write 语义」，
+>    并给了最小复现与三步改法。
+>
+> 验收：普通套件（见下）/ difftest / check_size；`tests/fail/f80_module_attr.py`、
+> `f81_undefined_top.py`、`tests/run/567/568` 为新增回归。
 ## [0.483] - 2026-11-24
 
 > chore(P3)：工程债结账——拆掉最后两个超限文件、CHANGELOG 轮转、文档地图扩容。
