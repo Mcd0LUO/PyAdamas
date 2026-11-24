@@ -57,6 +57,7 @@ set(PYADAMAS_SOURCES
   src/typecheck/call_method.cpp
   src/typecheck/builtin.cpp
   src/typecheck/func.cpp
+  src/typecheck/class_alias.cpp
   src/typecheck/dataclass.cpp
   src/typecheck/enum.cpp
   src/lower/lower.cpp

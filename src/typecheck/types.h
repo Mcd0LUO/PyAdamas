@@ -420,6 +420,9 @@ struct ClassInfo {
     std::unordered_set<std::string> cowed_attrs;
     // class 体里的 `__match_args__ = ("x", "y")`，只服务类模式的位置子模式。
     std::vector<std::string> match_args;
+    // 类体里的「方法别名」赋值语句（`__str__ = short`）：编译期已经把它变成
+    // methods 里共享实现的别名条目，降级层不再按普通赋值执行这条语句。
+    std::unordered_set<const Stmt*> alias_assign_stmts;
     // C3 线性化，self 在首位。跨模块导入的类没有运行期 MRO 表，留空。
     std::vector<ClassInfo*> mro;
     // 跨模块导入的类的来源：定义模块、定义模块发出的限定名、完整祖先链
