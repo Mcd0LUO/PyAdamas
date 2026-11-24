@@ -152,6 +152,37 @@ collections/pathlib/datetime/subprocess/functools/operator/itertools/asyncio）�
 `from os import path as osp; x = osp.join; x.nope()` → `'func(...) -> str' object has
 no method 'nope'`。
 
+### 8.3 装饰器保留原签名 —— 判负
+
+试过的两个版本（都在 `typecheck/func.cpp` 的装饰器链里）：
+
+1. **宽版本**：装饰器是未知 callable、或返回未标注包装函数时，沿用被装饰函数自己的
+   签名（参数 + 返回类型）；能静态看出具体返回类型时仍按它替换。
+2. **窄版本**：只对未知 callable 保留。
+
+两个版本在 **628 文件语料上都 500 → 496**，回归文件与根因：
+
+| 文件 | 报错 | 根因 |
+|---|---|---|
+| `asyncio/tasks.py` | `'generator[None]' object is not awaitable`（`await __sleep0()`） | `@types.coroutine` 把生成器函数变成 awaitable |
+| `importlib/resources/_common.py` | `'func(...) -> unknown' object has no method 'register'` | `@singledispatch` 的装饰结果带 `.register`，不是原函数 |
+| `pkgutil.py` | 同上（`iter_importer_modules.register`） | 同上 |
+| `test/support/import_helper.py` | `'generator' object has no method '__enter__'` | `@contextmanager` 把生成器函数变成上下文管理器 |
+
+结论：**「装饰器不改变签名」这个前提在本项目的语料里不成立**。标准库/用户代码里
+`contextmanager`、`types.coroutine`、`singledispatch`、`functools.cached_property`
+一类装饰器**确实**改变签名或返回类型；保留原签名 = 把「全部放行（unknown）」变成
+「按一个不成立的前提检查」，必然新增拒绝，触红线。
+
+**要做什么才能安全落地**：给每个已知装饰器建模返回类型（`contextmanager` 的返回
+是 `_GeneratorContextManager`，`singledispatch` 返回带 `register` 的包装对象，
+`types.coroutine` 返回 awaitable…），即 §6 清单第 1 项（补表）在装饰器上的延伸；
+未知装饰器只能继续 unknown。代价：每个装饰器一条规则 + 类型系统里要有对应的
+class/可调用模型；收益是「被装饰函数仍有类型」，但不是零误杀，需要逐条语料验证。
+
+现状（master 行为）保留：装饰后的符号是 unknown；`@lru_cache` 仍是恒等。
+
+
 ### 8.5 仍然缺的（没有运行期实现，补类型会变成静默 0/None，所以不补）
 
 remaining 97 个成员按性质分类（都不在本轮）：
