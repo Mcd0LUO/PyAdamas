@@ -4,6 +4,27 @@
 
 早期阶段没有逐条留痕，按阶段归纳；0.4 之后逐条记录。
 
+## [0.516] - 2026-11-25
+
+> feat(runtime)：**`operator.setitem(obj, key, value)` / `operator.delitem(obj, key)`**——照 `pa_any_index` 的结构做运行期分派。
+>
+> - `pa_any_setindex` / `pa_any_delindex`（`rt_class.c`）：同一个 `pa_unknown_is_heap` 探针 + 头上 kind 分派；
+> - list：负下标折算、越界 `IndexError: list assignment index out of range`（**`del` 的越界消息也是这句**，实测确认）；
+> - dict：`pa_dict_set` / `pa_dict_remove`；缺键先用 `pa_dict_contains` 判、再按 CPython 抛 `KeyError: '<键 repr>'`
+>  （运行期内部的 `pa_dict_remove` 只说 `key not found`，不能直接用）；
+> - str/None/bool 与其它堆对象 → 对应 TypeError；探针说不是堆时按 NoneType / int / 标量元组抛。
+>
+> **一个必须说明的设计选择**：**tuple 与 list 在运行期同形**（都是 `RC_LIST`，没有不可变标记），运行期分不开。
+> 所以 tuple/str/标量的 TypeError 由**调用点按静态类型**发射（`lower/import_stdlib.cpp`），只有 unknown 才走运行期兜底。
+> 顺带发现 CPython 自己的删除消息不统一：tuple/str 是 `doesn't support item deletion`，标量是 `does not support item deletion`，按实测分开写。
+>
+> 对拍 16 行全同：list 正/负下标写删（含返回 None 与内容）、dict 插入/覆盖/删除、越界 `IndexError`、缺键 `KeyError: 'zz'`、
+> tuple/str/标量的写删 TypeError（消息逐字）。
+>
+> 判负：自定义类的 `__setitem__`/`__delitem__`（要按对象 vtable 找 dunder，运行期没有这条路）。
+>
+> ASan 套件 **505 ran ok / 0 失败**；628 默认口径 **501/623 不降**；本仓库 **906 个 `.py`：788 通过**；
+>12 基准 asm 与 master 逐字节相同。闸门：套件 **505** / difftest **475** / check_size **PASS** / ctest 9/9。
 ## [0.515] - 2026-11-25
 
 > feat(runtime)：**`random` 的六个分布函数，与 CPython 3.14.4 逐字节一致**（120/120）。
