@@ -29,6 +29,15 @@ bool AsmGen::can_fuse(const Inst& in, const Inst& nx) const {
             gc_scan_slot_[static_cast<size_t>(nx.idx)])
             return false;
         if (nx.idx < 0 || nx.idx >= static_cast<int>(ra_.slot_reg.size())) return false;
+        // 值与目标槽的寄存器类不同（典型：入口把 const.int 0 写进提升到
+        // xmm 的 float 槽）时不能融合：融合会绕过 store_slot_checked 对
+        // 「xmm 槽 + 立即数」的 %rax 中转，直接发出非法的
+        // `movq $imm, %xmmN`（实测 `def f(): for y in [1.5, 2.5]: pass`
+        // 的入口零初始化，as 报 operand type mismatch）。留给普通
+        // StoreSlot 走 store_slot_checked。
+        if (f_ && nx.idx < static_cast<int>(f_->slot_ty.size()) &&
+            ir_is_float(ty_of(in.dst)) != ir_is_float(f_->slot_ty[static_cast<size_t>(nx.idx)]))
+            return false;
         // O0 只融合到提升过的寄存器；O1 起允许直接写变量栈槽。
         if (opt_ < 1 && ra_.slot_reg[nx.idx].empty()) return false;
         if (in.dst >= use_count_.size()) return false;

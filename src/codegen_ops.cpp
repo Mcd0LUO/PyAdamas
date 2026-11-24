@@ -355,7 +355,15 @@ void AsmGen::gen_const_int(const Inst& in) {
         emit_tag_imm(in.dst, (tag_.type_tags && ct && ct->kind == TyKind::Bool)
                                  ? kTagBool : kTagInt);
         if (in.imm >= INT32_MIN && in.imm <= INT32_MAX) {
-            emit_imm(MOp::kMovq, in.imm, d);
+            // 目的被分到 xmm（float 槽/临时值）时不能直接发「立即数→xmm」：
+            // x86 没有这个编码（as 报 operand type mismatch）。过一下 %rax，
+            // 与 store_slot_checked 对「xmm 槽 + 立即数」的处理一致。
+            if (d.kind == MOperandKind::Reg && d.reg >= kXmm0 && d.reg <= kXmm15) {
+                emit_imm(MOp::kMovq, in.imm, kRax);
+                emit2(MOp::kMovq, kRax, d);
+            } else {
+                emit_imm(MOp::kMovq, in.imm, d);
+            }
         } else {
             emit_imm_hex(MOp::kMovabsq, static_cast<uint64_t>(in.imm), kRax);
             emit2(MOp::kMovq, kRax, d);
