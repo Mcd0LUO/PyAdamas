@@ -200,44 +200,48 @@ def _placeholder_end(text: str, i: int) -> int:
 def _substitute(tpl: Template, mapping: object, strict: bool) -> str:
     text: str = tpl.template
     n: int = len(text)
-    out: str = ""
+    # 字符 list + 一次 join，避免逐字符 out=out+c 的 O(n^2) 拷贝。
+    parts: list[str] = []
     i: int = 0
+    # mapping 的 items 只取一次，不在每个占位符处重复构造。
+    pairs: list[object] = []
+    if mapping is not None:
+        pairs = __pa_any_items(mapping)
     while i < n:
         c: str = text[i]
         if c != "$":
-            out = out + c
+            parts.append(c)
             i = i + 1
             continue
         if i + 1 < n and text[i + 1] == "$":
-            out = out + "$"
+            parts.append("$")
             i = i + 2
             continue
         name: str = _placeholder_name(text, i)
         if name == "":
             if strict:
                 tpl._invalid_at(i + 1)
-            out = out + "$"
+            parts.append("$")
             i = i + 1
             continue
         stop: int = _placeholder_end(text, i)
         value: object = None
         found: bool = False
         if mapping is not None:
-            pairs: list[object] = __pa_any_items(mapping)
             for p in pairs:
                 if p[0] == name:
                     value = p[1]
                     found = True
                     break
         if found:
-            out = out + str(value)
+            parts.append(str(value))
             i = stop
             continue
         if strict:
             raise KeyError(name)
-        out = out + text[i:stop]
+        parts.append(text[i:stop])
         i = stop
-    return out
+    return "".join(parts)
 
 
 def capwords(s: str, sep: str = None) -> str:
