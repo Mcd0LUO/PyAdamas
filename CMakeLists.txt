@@ -63,6 +63,7 @@ set(PYADAMAS_SOURCES
   src/typecheck/enum.cpp
   src/lower/lower.cpp
   src/lower/class.cpp
+  src/lower/mi_thunk.cpp
   src/lower/impl_util.cpp
   src/lower/impl_slots.cpp
   src/lower/borrow.cpp

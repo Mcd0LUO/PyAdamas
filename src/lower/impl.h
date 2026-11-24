@@ -737,6 +737,10 @@ private:
                        TypePtr& ty);
     static std::optional<RtFn> native_fn(const std::string& module, const std::string& member);
     int compile_ctor_wrapper(ClassDef& clsdef, const ClassInfoPtr& ci, int cid);
+    // 多继承 adjustor thunk（0.509）：self += delta 后直调真实实现，拿自己的
+    // fidx 填进子类 vtable 对应槽（定义在 lower/mi_thunk.cpp）。
+    int build_mi_thunk(int target_fidx, int delta_bytes);
+    void install_mi_thunks(const ClassInfoPtr& ci, int cid);
 
     // ── 类 ──────────────────────────────────────────────────────
 
