@@ -351,6 +351,8 @@ enum class RtFn : uint16_t {
     RandGLognormvariate, // (f64 mu, f64 sigma) -> f64
     RandGParetovariate,  // (f64 alpha) -> f64
     RandGWeibullvariate, // (f64 alpha, f64 beta) -> f64
+    AnySetIndex,         // (obj, key, value) -> i64   operator.setitem 的 unknown 兜底
+    AnyDelIndex,         // (obj, key) -> i64          operator.delitem 的 unknown 兜底
     RandGShuffle,      // (list*) -> void
     OsMkdir,           // (str* path) -> void
     OsRmdir,           // (str* path) -> void

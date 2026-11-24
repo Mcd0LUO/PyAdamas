@@ -865,6 +865,7 @@ void AsmGen::gen_rt_args(const Inst& in, RtFn fn) {
         case RtFn::ListPrep:
         case RtFn::ListGet:
         case RtFn::AnyIndex:
+        case RtFn::AnyDelIndex:
         case RtFn::ListSetLen:
         case RtFn::StrConcat:
         case RtFn::StrCharAt:
@@ -1079,6 +1080,9 @@ void AsmGen::gen_rt_args(const Inst& in, RtFn fn) {
         case RtFn::BigLShift:
         case RtFn::BigRShift:
         case RtFn::BigToBase:
+        case RtFn::AnySetIndex:
+            gen_rt_i3(in);
+            break;
         case RtFn::BigFmt:
             gen_rt_i2(in);
             break;
