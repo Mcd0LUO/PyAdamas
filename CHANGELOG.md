@@ -4,6 +4,35 @@
 
 早期阶段没有逐条留痕，按阶段归纳；0.4 之后逐条记录。
 
+## [0.500] - 2026-11-25
+
+> feat(frontend) + 判负：**补原生/标准库接口表**（33 个成员 + 12 个运行期函数）、**`except (A, B) as e` 类型解析**；
+> **「装饰器保留原签名」判负**。
+>
+> **一、接口表（0.498 那条「json.dumps 返回 unknown」的真正原因不是缺签名）**：
+> 审计前先发现一个**口径问题**——默认 `check` 单文件根本不解析模块成员（`module_lookup_` 为空时 `import` 只声明 unknown），
+> 所以在 `check --imports` 下实测：`json.dumps(...)` 本来就是 **str**、`sys.argv[0]` 本来就是 **str**。
+> 用正确口径重新审计 16 个原生模块 358 个成员：**missing 130 → 94、unknown 27 → 28**（那 1 个是 `os.altsep` 为 `None`）。
+> 补的 36 项只挑「类型确定**且运行期有实现**」的（只补类型 = 静默 0/None）：
+> - 22 个常量进 `stdlib/sigs/*.pysig`（`sys.platform`/`version`/`byteorder`/`maxunicode`/`hexversion`/`api_version`、
+>   `os.name`/`curdir`/`pardir`/`altsep`/`pathsep`/`extsep`/`devnull`、`re.A`/`ASCII`/`U`/`UNICODE`/`NOFLAG`、`datetime.MINYEAR`/`MAXYEAR`），值用 CPython 3.14.4 在目标平台核对；
+>   `sys.version_info` 走 `builtin_value` 的 `MakeTuple`（`(3,14,4,"final",0)`）。
+> - 12 个新运行期函数 + 1 个别名：`os.getuid/geteuid/getppid/urandom/strerror/replace`(=rename)、
+>   `time.time_ns/monotonic_ns/perf_counter_ns/process_time`、`random.randbytes`（**与 CPython 同种子逐字节一致**）、`sys.intern`、`re.purge`（无缓存，no-op）；`itertools.batched`（eager list）。
+> - 剩余 94 项**分类判负**（缺 fd/stat/uname/解释器身份/惰性对象/类工厂/子进程面），清单在 [frontend-gaps.md](frontend-gaps.md) §8.5。
+>
+> **二、「装饰器保留原签名」判负**：宽/窄两版都试了，**628 语料默认口径 500 → 496**，四个文件：
+> `asyncio/tasks.py`（`@types.coroutine` → awaitable）、`importlib/resources/_common.py` 与 `pkgutil.py`（`@singledispatch` → 带 `.register` 的包装）、
+> `test/support/import_helper.py`（`@contextmanager` → 上下文管理器）。「装饰器不改变签名」在本项目语料里**不成立**，
+> 保留签名等于把「全放行」换成「按不成立的前提检查」，必然新增拒绝 → 触红线。代码保持 master 语义，理由写进 `func.cpp` 注释防下一轮重试。
+> 安全落地需要给每个已知装饰器建模返回类型（`contextmanager`→`_GeneratorContextManager` 等），记在 [frontend-gaps.md](frontend-gaps.md) §8.3。
+>
+> **三、`except (A, B) as e`**：逐分支解析，全部分支同类型时用该类型（含富异常类），否则退 `Exception`（多类型方法面是交集，不硬造 union）。
+> 另复核：「`except E as e` 是 unknown」**也是误判**——它本来就是 `Exception[E]`（`need_int(e)` 会报 `got 'ValueError'`），
+> 之前看到的「放行」来自 `call_method.cpp` 对 `TyKind::Exception` 一律允许成员访问。**不收紧**内置异常成员访问（CPython 允许 `e.user_id = 1`）。
+>
+> 语料：628 文件 **500/623 → 500/623（零回归、零新增通过）**；本仓库 889 个 `.py` **775 → 775**。
+> 闸门：套件 **493** / difftest **463** / check_size **PASS** / ctest 8/8。
 ## [0.499] - 2026-11-25
 
 > feat(typecheck)：**`T | None` 真窄化** + 未判空使用的编译期诊断。
