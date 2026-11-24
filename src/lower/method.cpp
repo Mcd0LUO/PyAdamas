@@ -5,6 +5,17 @@
 
 namespace pyadamas {
 
+// 多继承（0.510）：target 的字段块在 cls 的布局里从哪个下标开始？
+// 子类（单继承 layout base）没有自己的 block 表，但它的布局前缀就是 layout base
+// 的布局 → 沿 layout_base 链往下找，偏移对子类同样成立。
+static int mi_block_offset(const ClassInfo* cls, const ClassInfo* target) {
+    for (const ClassInfo* k = cls; k; k = k->layout_base) {
+        auto it = k->base_field_offsets.find(target);
+        if (it != k->base_field_offsets.end() && it->second > 0) return it->second;
+    }
+    return -1;
+}
+
 VReg Lowerer::lower_super_call(Attribute& at, Call& c) {
     auto fit = fn_owner_class_.find(st_->fn);
     const ClassInfo* owner = fit == fn_owner_class_.end() ? nullptr : fit->second;
@@ -84,6 +95,11 @@ VReg Lowerer::lower_super_call(Attribute& at, Call& c) {
     std::vector<VReg> args = bind_args(c, m->call_sig, m->def);
     const IRParam& selfp = st_->fn->params.front();
     VReg self = load_slot(selfp.slot, selfp.ty);
+    // 多继承（0.510）：super() 的 delta **不在调用点加** —— SuperVCall 的运行期
+    // 分派用这个 self 指针去查对象所属类（pa_super_lookup 读 vtable），挪了指针
+    // 就查不到（实测 `'super' object has no attribute`）。正确做法是给运行期
+    // 分派带一个 adjust 参数，或者让 super 走 vtable（槽里已经是 thunk）。
+    // 本轮的结论与证据见 docs/mi-layout.md；这里保持未调整。
     Inst sv;
     sv.op = IrOp::SuperVCall;
     sv.a = self;
@@ -481,15 +497,15 @@ VReg Lowerer::lower_method_call(Attribute& at, Call& c) {
                         if (m->kind == MethodKind::Normal) {
                             VReg self = recv;
                             if (m->owner && m->owner != recv_ty->cls && !callee->mi_thunk) {
-                                auto bo = recv_ty->cls->base_field_offsets.find(m->owner);
-                                if (bo != recv_ty->cls->base_field_offsets.end() && bo->second > 0) {
+                                int block = mi_block_offset(recv_ty->cls, m->owner);
+                                if (block > 0) {
                                     Inst ad;
                                     ad.op = IrOp::Bin;
                                     ad.bop = BinKind::Add;
                                     ad.a = recv;
                                     // 位移 = 8 * 块起始下标（字段下标到字节偏移的
                                     // 换算是「下标差」，不是绝对偏移）。
-                                    ad.b = const_int(8 * bo->second);
+                                    ad.b = const_int(8 * block);
                                     self = def(t_int(), std::move(ad));
                                 }
                             }
