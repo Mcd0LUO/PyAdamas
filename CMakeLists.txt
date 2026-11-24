@@ -34,6 +34,9 @@ set(PYADAMAS_SOURCES
   src/driver/build.cpp
   src/driver/modules.cpp
   src/driver/check.cpp
+  src/driver/sha256.cpp
+  src/driver/manifest.cpp
+  src/driver/lock.cpp
   src/typecheck/builtin_sigs.cpp
   src/syntax/parser.cpp
   src/syntax/stmt.cpp
@@ -453,6 +456,23 @@ add_test(
 set_tests_properties(pyadamas_cache_race PROPERTIES
   WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}"
   RUN_SERIAL TRUE
+  TIMEOUT 300
+)
+
+# SHA-256 的已知答案测试：锁的树哈希是信任根，算法错了「两次输出相同」查不出来。
+add_executable(pyadamas_sha256_test tests/pkg/sha256_test.cpp src/driver/sha256.cpp)
+target_include_directories(pyadamas_sha256_test PRIVATE src)
+add_test(NAME pyadamas_pkg_sha256 COMMAND pyadamas_sha256_test)
+
+# 包管理 P0（清单/锁/resolve/--locked/锁派生模块图）。失败时先看 tests/pkg/run.sh 的
+# 检查名与命令回显；脚本自带临时工作区，不依赖仓库里的文件。
+add_test(
+  NAME pyadamas_pkg
+  COMMAND "${BASH_EXECUTABLE}" "${CMAKE_SOURCE_DIR}/tests/pkg/run.sh"
+          "${CMAKE_BINARY_DIR}" "$<TARGET_FILE:pyadamas>"
+)
+set_tests_properties(pyadamas_pkg PROPERTIES
+  WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}"
   TIMEOUT 300
 )
 

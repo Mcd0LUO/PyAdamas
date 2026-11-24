@@ -11,6 +11,7 @@
 //   pyadamas build  <file.py> [-o out]   编译并链接成可执行文件
 //   pyadamas run    <file.py>   编译、链接并运行
 //   pyadamas cdecl  <h.h> -o <out.cpya>   从头文件子集生成 .cpya 声明
+//   pyadamas resolve <file.py|dir>  读 pyadamas.toml，解析 path 依赖闭包并写锁
 //   pyadamas        <file.py>   等价于 ast
 #include <algorithm>
 #include <cctype>
@@ -55,6 +56,8 @@
 
 #include "ir/deps_json.h"
 #include "driver/build.h"
+#include "driver/lock.h"
+#include "driver/manifest.h"
 #include "driver/modules.h"
 #include "backend/target_abi.h"
 #include "driver/util.h"
@@ -124,6 +127,125 @@ std::optional<Frontend> run_frontend(const std::string& path, const std::string&
     return fe;
 }
 
+// 包管理（P0）：清单/锁 → ModuleMap（Q1 + §5.6.1 的落地）。
+//
+// 三条不变量：
+//   1) 没有 pyadamas.toml 的项目完全走老路（--module-map / 路径搜索），行为不变；
+//   2) 有清单时包模块**只能**从锁派生的映射进来（幽灵依赖不可能）；
+//   3) --locked 时锁必须与「现在重新解析会得到的结果」语义一致，否则失败并打印 diff。
+// 返回 false 表示应当终止（诊断已打印）。
+bool attach_module_input(pyadamas::Program& prog, const std::string& entry_path,
+                         const std::string& module_map_path, const std::string& manifest_flag,
+                         bool locked) {
+    if (!module_map_path.empty()) {
+        if (locked) {
+            std::fprintf(stderr,
+                         "error: --locked cannot be combined with --module-map: with a manifest "
+                         "the lock is the map\n");
+            return false;
+        }
+        // 显式 --module-map 是 legacy 逃生口：它优先于清单。但清单项目里
+        // 静默绕过锁会让 --locked 形同虚设，所以至少要把「被忽略」说出来。
+        const std::string seen_manifest =
+            !manifest_flag.empty() ? manifest_flag
+                                   : pyadamas::find_manifest(entry_path).value_or("");
+        if (!seen_manifest.empty())
+            std::fprintf(stderr,
+                         "note: --module-map was given; ignoring '%s' and its lock for this "
+                         "build\n",
+                         seen_manifest.c_str());
+        std::string err;
+        auto map = pyadamas::load_module_map(module_map_path, err);
+        if (!map) {
+            std::fprintf(stderr, "error: %s\n", err.c_str());
+            return false;
+        }
+        prog.module_map = std::make_shared<pyadamas::ModuleMap>(std::move(*map));
+        return true;
+    }
+
+    std::string manifest_path = manifest_flag;
+    if (manifest_path.empty()) manifest_path = pyadamas::find_manifest(entry_path).value_or("");
+    if (manifest_path.empty()) {
+        if (locked) {
+            std::fprintf(stderr,
+                         "error: --locked needs a pyadamas.toml (none found from '%s' upward); "
+                         "drop --locked for a manifest-less project\n",
+                         entry_path.c_str());
+            return false;
+        }
+        return true;  // 无清单：保持现有行为
+    }
+
+    auto manifest = pyadamas::load_manifest(manifest_path);
+    if (!manifest) return false;
+    auto want = pyadamas::resolve_lock(*manifest);
+    if (!want) return false;
+
+    const std::filesystem::path manifest_dir =
+        std::filesystem::path(manifest_path).parent_path();
+    const std::string lock_file = (manifest_dir / "pyadamas.lock").string();
+    std::error_code ec;
+    const bool lock_exists = std::filesystem::is_regular_file(lock_file, ec);
+
+    pyadamas::Lock chosen;
+    bool have_lock = false;
+    if (locked) {
+        if (!lock_exists) {
+            // 「锁缺失」也是一种不一致：把「将会写出的锁」全部按新增打出来。
+            const std::string diff = pyadamas::diff_locks(*want, pyadamas::Lock{});
+            std::fprintf(stderr,
+                         "error: pyadamas.lock is missing (--locked); run 'pyadamas resolve' to "
+                         "create it\n%s",
+                         diff.c_str());
+            return false;
+        }
+        auto got = pyadamas::read_lock(lock_file);
+        if (!got) return false;
+        const std::string diff = pyadamas::diff_locks(*want, *got);
+        if (!diff.empty()) {
+            std::fprintf(stderr,
+                         "error: pyadamas.lock is out of date: the manifest or a dependency "
+                         "source changed\n%s"
+                         "  run 'pyadamas resolve' to update the lock, or revert the change\n",
+                         diff.c_str());
+            return false;
+        }
+        chosen = std::move(*got);
+        have_lock = true;
+    } else if (lock_exists) {
+        // 非 --locked 是「宽松模式」（Cargo 式）：锁过期/损坏就按清单重解析，
+        // 但必须把差异打出来，绝不让漂移静默发生。
+        auto got = pyadamas::read_lock(lock_file);
+        if (got) {
+            const std::string diff = pyadamas::diff_locks(*want, *got);
+            if (diff.empty()) {
+                chosen = std::move(*got);
+                have_lock = true;
+            } else {
+                std::fprintf(stderr,
+                             "note: pyadamas.lock is out of date; building from pyadamas.toml "
+                             "(run 'pyadamas resolve' to update the lock)\n%s",
+                             diff.c_str());
+            }
+        } else {
+            std::fprintf(stderr,
+                         "note: pyadamas.lock cannot be read; building from pyadamas.toml "
+                         "(run 'pyadamas resolve' to rewrite it)\n");
+        }
+    } else {
+        std::fprintf(stderr,
+                     "note: no pyadamas.lock yet; building from pyadamas.toml "
+                     "(run 'pyadamas resolve' to pin it)\n");
+    }
+    if (!have_lock) chosen = std::move(*want);
+
+    auto map = pyadamas::module_map_from_lock(chosen, manifest_dir.string());
+    if (!map) return false;
+    prog.module_map = std::make_shared<pyadamas::ModuleMap>(std::move(*map));
+    return true;
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
@@ -131,10 +253,10 @@ int main(int argc, char** argv) {
         std::fprintf(stderr,
                      "pyadamas —— Python 语法外壳的编译器\n"
                      "\n"
-                     "usage: %s [tokens|ast|types|check|ir|asm|build|run|deps|cdecl] "
+                     "usage: %s [tokens|ast|types|check|ir|asm|build|run|deps|cdecl|resolve] "
                      "[-O0|-O1|-O2] [--fast-math] [--no-zero-cost-exc] [--syntax] "
-                     "[--asan|--ubsan] [-o out|--out out] [--json] "
-                     "[--module-map file] <file.py>\n",
+                     "[--asan|--ubsan] [-o out|--out out] [--json] [--locked] "
+                     "[--manifest file] [--module-map file] <file.py>\n",
                      argv[0]);
         return 2;
     }
@@ -159,6 +281,9 @@ int main(int argc, char** argv) {
     bool json_out = false;
     // --module-map：外部模块映射文件（deps --json 的产物，可互相喂）。
     std::string module_map_path;
+    // 包管理（P0）：--manifest 显式指定清单；--locked 要求锁与清单一致。
+    std::string manifest_flag;
+    bool locked = false;
     // 生成程序的内存检查器。空 = 不启用。
     //
     // RC/GC 这类「堆被写坏」的 bug 在 IR 层面完全看不出问题 —— 只有内存
@@ -167,9 +292,9 @@ int main(int argc, char** argv) {
     // 单看代码无从下手。
     std::string sanitize;
 
-    static const std::vector<std::string> kModes = {"tokens", "ast",     "check", "types",
-                                                    "ir",     "asm",     "build", "run",
-                                                    "deps",   "cdecl"};
+    static const std::vector<std::string> kModes = {"tokens", "ast",  "check", "types", "ir",
+                                                    "asm",    "build", "run",  "deps",  "cdecl",
+                                                    "resolve"};
     for (int i = 1; i < argc; ++i) {
         std::string a = argv[i];
         if (a == "--syntax") syntax_only = true;
@@ -179,6 +304,9 @@ int main(int argc, char** argv) {
         else if (a == "--out" && i + 1 < argc) output = argv[++i];
         else if (a.starts_with("--module-map=")) module_map_path = a.substr(13);
         else if (a == "--module-map" && i + 1 < argc) module_map_path = argv[++i];
+        else if (a == "--locked") locked = true;
+        else if (a.starts_with("--manifest=")) manifest_flag = a.substr(11);
+        else if (a == "--manifest" && i + 1 < argc) manifest_flag = argv[++i];
         else if (a == "-v" || a == "--verbose") verbose = true;
         else if (a == "--rebuild") rebuild = true;
         else if (a == "--fast-math") fast_math = true;
@@ -228,8 +356,17 @@ int main(int argc, char** argv) {
         else path = a;
     }
     if (mode.empty()) mode = "ast";
-    if (path.empty()) {
+    // resolve 可以只给项目目录（甚至什么都不给：用 cwd），不需要入口文件。
+    if (path.empty() && mode != "resolve") {
         std::fprintf(stderr, "error: no input file\n");
+        return 2;
+    }
+    const bool package_mode = mode == "resolve" || mode == "deps" || mode == "asm" ||
+                              mode == "ir" || mode == "build" || mode == "run";
+    if (!package_mode && (locked || !manifest_flag.empty())) {
+        std::fprintf(stderr,
+                     "error: --locked/--manifest are only supported by "
+                     "resolve/build/run/asm/ir/deps\n");
         return 2;
     }
 
@@ -251,6 +388,30 @@ int main(int argc, char** argv) {
             return 1;
         }
         out << text;
+        return 0;
+    }
+
+    // resolve：清单 → path 依赖闭包 → 写锁。不读入口文件（可以只给项目目录）。
+    if (mode == "resolve") {
+        std::string manifest_path = manifest_flag;
+        if (manifest_path.empty()) manifest_path = pyadamas::find_manifest(path).value_or("");
+        if (manifest_path.empty()) {
+            std::fprintf(stderr,
+                         "error: no pyadamas.toml found from '%s' upward; run resolve inside a "
+                         "package project or pass --manifest <file>\n",
+                         path.empty() ? "." : path.c_str());
+            return 1;
+        }
+        auto manifest = pyadamas::load_manifest(manifest_path);
+        if (!manifest) return 1;
+        auto lock = pyadamas::resolve_lock(*manifest);
+        if (!lock) return 1;
+        const std::string lock_file =
+            (std::filesystem::path(manifest_path).parent_path() / "pyadamas.lock").string();
+        if (!pyadamas::write_lock_file(lock_file, lock->render())) return 1;
+        std::printf("wrote %s (%zu package%s, %zu module%s)\n", lock_file.c_str(),
+                    lock->packages.size(), lock->packages.size() == 1 ? "" : "s",
+                    lock->modules.size(), lock->modules.size() == 1 ? "" : "s");
         return 0;
     }
 
@@ -314,15 +475,8 @@ int main(int argc, char** argv) {
             Program prog;
             prog.verbose = verbose;
             prog.rebuild = true;
-            if (!module_map_path.empty()) {
-                std::string err;
-                auto map = pyadamas::load_module_map(module_map_path, err);
-                if (!map) {
-                    std::fprintf(stderr, "error: %s\n", err.c_str());
-                    return 1;
-                }
-                prog.module_map = std::make_shared<pyadamas::ModuleMap>(std::move(*map));
-            }
+            if (!attach_module_input(prog, path, module_map_path, manifest_flag, locked))
+                return 1;
             if (!load_program(path, include_dirs, prog)) return 1;
             if (!prepare_program(prog, false, false)) return 1;
             std::error_code root_ec;
@@ -454,15 +608,7 @@ int main(int argc, char** argv) {
         prog.opt = opt_level;
         prog.fast_math = fast_math;
         prog.zero_cost_exc = zero_cost_exc;
-        if (!module_map_path.empty()) {
-            std::string err;
-            auto map = pyadamas::load_module_map(module_map_path, err);
-            if (!map) {
-                std::fprintf(stderr, "error: %s\n", err.c_str());
-                return 1;
-            }
-            prog.module_map = std::make_shared<pyadamas::ModuleMap>(std::move(*map));
-        }
+        if (!attach_module_input(prog, path, module_map_path, manifest_flag, locked)) return 1;
         if (!load_program(path, include_dirs, prog)) return 1;
 
         if (mode == "ir" || mode == "asm") {
