@@ -629,12 +629,15 @@ std::expected<std::string, std::string> encode_module_interface(const ModuleInfo
             }
             // 字段按布局顺序（根类在前）导出：导入方的字段下标与运行期偏移一致，
             // 模式匹配也能读到继承来的字段。
+            // 顺序必须是**运行期布局**顺序（根 → layout base → 本类）：导入方
+            // 的 field_index 就是这里的下标，顺序错了跨模块读字段会错位。
             std::vector<const FieldInfo*> layout;
             {
                 std::vector<const ClassInfo*> chain;
-                for (const ClassInfo* k = &c; k; k = k->base) chain.push_back(k);
+                for (const ClassInfo* k = c.layout_base; k; k = k->base) chain.push_back(k);
                 for (auto it = chain.rbegin(); it != chain.rend(); ++it)
                     for (auto& f : (*it)->fields) layout.push_back(&f);
+                for (auto& f : c.fields) layout.push_back(&f);
             }
             e.u32(static_cast<uint32_t>(layout.size()));
             for (auto* f : layout) {

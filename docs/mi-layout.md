@@ -1,6 +1,6 @@
 # 多继承的字段布局与「非主基类方法」问题（3.9）
 
-> 状态：**A（精确护栏）已落地（0.503）**；B（adjustor thunk）未做。记录实测、根因与两条修法。
+> 状态：**A（精确护栏，0.503）+ 布局前缀选择（0.505）已落地**；B（adjustor thunk）仅剩「两个状态基类」需要。记录实测、根因与两条修法。
 > 相关：[language.md](language.md)（继承与 MRO 的契约）、路线图 3.9。
 
 ## 1. 契约与实现的错位
@@ -104,3 +104,34 @@ error: base 'A' of 'C' is not the primary base and its methods access instance f
 前缀 —— 这样 `ThreadingUDPServer(ThreadingMixIn, UDPServer)` 这类「mixin 在前、状态在后」
 的常见写法会变正确且被允许，上面 5 例里至少 3 例会自己消失。真正的 adjustor thunk 仍按
 §3 B 的另一半做（非主基类字段与主基类字段交错时）。
+## 7. 布局前缀选择（layout base）已落地（0.505，分支 mi-prefix）
+
+**规则**：`layout_base` = MRO 顺序里第一个**有字段**的基类（`[主基类] + extra_bases` 的
+先后就是 C3 保序的基类先后）；`base_fields = layout_base->n_fields()`，所有字段偏移相对它
+计算。没有带字段的基类 → 无前缀（与 0.503 相同）。
+
+于是 `ThreadingUDPServer(ThreadingMixIn, UDPServer)` 这类「mixin 在前、状态在后」的写法
+**不用改**就正确：UDPServer 成为 layout base，它的字段前缀保持原偏移，`TCPServer.server_bind`
+等按声明类布局读 `self.socket` 就是对的（实测 `s.sock, s.bind()` = `9 9`，CPython 一致）。
+
+**跨模块（模块接口）**：字段**偏移不进接口**（`encode_module_interface` 只写名字/类型/默认值，
+没有下标），导入方的 `field_index` 就是编码列表里的位置。所以这个改动**不需要 bump 格式版本**，
+但要求「导出顺序 = 运行期布局顺序」：编码端改成从 `layout_base` 链走（根 → layout base → 本类），
+解码端本来就按收到的顺序压平（`base_fields` 留 0），两边一致。
+
+**护栏同步放宽**：`mi_guard.cpp` 改成「只有**非 layout base** 的字段方法在布局里挪了位置才拒绝」
+（判据是 `C.field_index(f) != eb.field_index(f)`）。`class C(B, A)`（B 有字段、A 也有字段）仍然拒 ——
+那就是真正的字段交错，需要 adjustor thunk 才能支持。
+
+**语料**：628 文件默认口径 **496 → 496**（没有净增，原因见下），本仓库 898 个 `.py` **780 → 780**
+（0 新拒绝）。5 个上一轮被护栏拒的文件：
+
+| 文件 | 结果 |
+|---|---|
+| `socketserver.py` | 护栏不再触发；改为报**既有**的 `super() has no method 'server_close' after class 'ForkingMixIn'`（0.500 master 同样报，与本改动无关） |
+| `_pyio.py` | 护栏不再触发；改为报既有的 `nreadahead` 标注赋值问题 |
+| `xmlrpc/server.py` | 仍拒：`SimpleXMLRPCServer` 与 `XMLRPCDocGenerator` **都**带字段（`self.server_name` 等），布局只能容纳一个前缀 |
+| `urllib/request.py` | 仍拒：`BaseHandler` 与 `AbstractDigestAuthHandler` 都带字段（`self.passwd` 等） |
+| `xml/dom/expatbuilder.py` | 仍拒：`Namespaces` 与 `ExpatBuilder` 都带字段（`self._parser` 等） |
+
+即：前缀选择解决了「mixin 在前、状态在后」这一类，**不能**解决「两个状态基类」——那确实要 thunk。
