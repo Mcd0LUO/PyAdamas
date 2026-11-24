@@ -225,5 +225,35 @@ freed by:
 下一步建议：在 `gc_free_body` 里打印被释放对象的 kind/地址，与 `pa_any_from_f64` 里那个指针比对，确认是不是「同一个对象的 RC 头被当成 float 盒」；
 再把 `gc_collect` 的触发点从 `rc_alloc_core` 内部挪到「分配完成、对象已挂链之后」，看崩溃是否消失（这是最小可疑点）。
 
-现状：**模式是 opt-in，默认关闭**；在修好前不要用它做等价性验证（`161_gc_conservative_equiv` 现在是已知红）。
+现状：**已修（0.504）**，见 §9.1。模式仍是 opt-in（默认关闭），但现在两种模式输出一致。
 
+### 9.1 根因与修法（0.504，分支 gc-fix）
+
+**根因**：`runtime/rt_any.c` 的常量 float 盒缓存（`any_fcache[256]`）是一个
+**静态全局持有的引用**，但它没进 GC 根表。默认模式按 RC 清扫，`rc >= 1` 的盒子不会被动；
+`PYADAMAS_GC_CONSERVATIVE=1` 做**全量可达性**（不看 RC），只被这个静态数组持有的盒子
+从根集合不可达 → 被 `gc_collect` 清扫 → 下一次命中同一槽时 `pa_rc_inc` 打在已释放块上。
+这解释了「为什么只有保守模式」。
+
+ASan 两侧都指向它：释放点 `gc_free_body ← gc_collect ← rc_alloc_core ← pa_list_new`；
+**分配点 `any_float_box ← pa_any_from_f64`**（`previously allocated by` 那一段）。
+
+**修法**：照 `rt_exc.c` 的 `exc_root_slots` 同一套做法，把 256 个槽的**地址**登记成根：
+
+```c
+static void* any_fcache_roots[ANY_FLOAT_CACHE_SLOTS];
+static void any_fcache_roots_ensure(void) { ... pa_gc_add_roots(any_fcache_roots, N); }
+```
+
+登记放在 `any_float_box()` 里（只在**首次装箱**时执行一次）：命中路径是热路径，不付任何代价；
+而命中之前必然先有一次装箱，根一定已经登记好。
+
+**验证**：
+- `PYADAMAS_GC_CONSERVATIVE=1` + `--asan` 跑 161：rc=0，输出与默认模式逐字节相同（`900060`）；
+- 新增 ctest `pyadamas_gc_conservative`（`tests/gc_conservative.sh`）：默认 / 保守两跑，
+  输出必须与 expect 一致且互相一致，防止再悄悄红；
+- 默认模式零影响：生成代码的 asm（-O2）三个基准与 master 逐字节相同；套件 497 全绿；
+  difftest 467/0；check_size 通过；ctest 9/9。
+
+> 教训：运行期里任何「静态数组/全局缓存持有堆对象」的地方都必须 `pa_gc_add_roots`。
+> 已登记的有 `exc_root_slots`（rt_exc.c）与本轮新增的 `any_fcache_roots`；新增缓存时照抄。

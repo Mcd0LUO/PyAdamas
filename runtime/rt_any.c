@@ -126,7 +126,11 @@ static void any_decode(int64_t v, AnyVal* o) {
 /* float -> unknown：分配一个 CPYFLOAT 盒（8 字节 payload 存 double 位模式）。
    与 rt_cpy.c 的 cpy_float_box 同款：必须 tracked 分配，unknown 探针靠
    RC 索引识别堆指针。 */
+static void any_fcache_roots_ensure(void);  /* 定义在下面的缓存段 */
 static int64_t any_float_box(double d) {
+    // 只在「首次装箱」时登记根（热路径的缓存命中不付代价；命中之前必然
+    // 先有一次装箱 → 根一定已经登记）。
+    any_fcache_roots_ensure();
     int64_t* p = (int64_t*)rc_alloc((int64_t)sizeof(int64_t), NULL, NULL,
                                     PYADAMAS_RC_CPYFLOAT);
     memcpy(p, &d, sizeof d);
@@ -146,6 +150,24 @@ static int64_t any_float_box(double d) {
 #define ANY_FLOAT_CACHE_SLOTS 256
 static int64_t any_fcache[ANY_FLOAT_CACHE_SLOTS];
 static uint64_t any_fcache_bits[ANY_FLOAT_CACHE_SLOTS];
+
+/* 缓存持有盒子的引用（rc>=1），但「缓存」是静态数组，不在临时值栈、不在帧
+   记录、也不在寄存器里 —— major GC 的根集合只认识 pa_gc_add_roots 登记过的
+   槽。默认模式按 RC 清扫，rc>0 的盒子不会被动；**保守模式做全量可达性
+   （不看 RC）**，只被缓存持有的盒子就被当垃圾清扫，下一次命中再做
+   pa_rc_inc 就打在已释放的块上（161_gc_conservative_equiv 的 SIGSEGV，
+   ASan: any_float_box 分配 → gc_collect 释放 → pa_any_from_f64 里 UAF）。
+   与 rt_exc.c 的 exc_root_slots 是同一个坑，修法相同：把槽地址登记成根。
+   （lazy 注册：pa_gc_init 会重置根表，第一次装箱发生在初始化之后。） */
+static void* any_fcache_roots[ANY_FLOAT_CACHE_SLOTS];
+static int any_fcache_roots_ready;
+static void any_fcache_roots_ensure(void) {
+    if (any_fcache_roots_ready) return;
+    any_fcache_roots_ready = 1;
+    for (size_t i = 0; i < ANY_FLOAT_CACHE_SLOTS; ++i)
+        any_fcache_roots[i] = (void*)&any_fcache[i];
+    pa_gc_add_roots(any_fcache_roots, (int64_t)ANY_FLOAT_CACHE_SLOTS);
+}
 
 int64_t pa_any_from_f64(double v) {
     uint64_t bits;
