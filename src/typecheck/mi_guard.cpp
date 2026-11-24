@@ -75,7 +75,13 @@ void TypeChecker::check_mi_layout(const ClassDef& c, const ClassInfo* self, Clas
                 }
             }
         }
-        if (!moved) continue;
+        // 0.510：thunk（虚调用）+ 调用点 delta（直调）+ super() delta 覆盖之后，
+        // 只要该基类的字段块确实进了子类布局（base_field_offsets 里有且 > 0），
+        // 方法体的 self.<字段> 会被修正 → **放行**。没有 block 的（静态判不准、
+        // 或字段根本没进布局）继续拒绝。菱形那种「字段已在前缀里」的 moved==false。
+        auto bo = cls->base_field_offsets.find(eb);
+        bool covered = bo != cls->base_field_offsets.end() && bo->second > 0;
+        if (covered || !moved) continue;
         err(c.line, c.col,
             std::format("base '{}' of '{}' is not the primary base and its methods "
                         "access instance fields; put {} first or make it a stateless "
