@@ -107,6 +107,11 @@ PyAdamas 不追求兼容 CPython：语义是按静态类型的需要重新定的
 这条路走不通：未装箱的 double 与 int 都是裸字，误判会把 double 位模式当 BigInt 指针读
 （0.487 的 `Fraction + 0.5` 就是这样每次输出不同的数）。要支持 `Fraction + int` 这类混合，
 必须做类型检查层的数值提升或给联合加运行期标签，不能在库代码里用 isinstance 兜。
+
+**跨模块**：函数签名里的联合**不跨模块序列化**（`enc_type` 对带成员表的 Unknown 仍走 unknown 码），
+所以 `from lib import take; take(1.5)` 目前仍会放行。方向是「check 比 build 宽」，
+符合「宁可漏报不可误杀」，但要知道这条边界：跨模块校验收紧要等接口序列化带上成员表。
+
 ### 二进制模式 file 的 read/write 语义（0.484 定口径，pya-lsp 缺口 1）
 
 `open(path, "rb")` 返回的 file 在**运行期按字节读写**，但值类型是 **str**：
@@ -272,6 +277,73 @@ double 位模式，靠堆探针/RC kind 识别）；而 `list[float]` 的元素�
 **能解析、能过类型检查，但 `build` 报错**：通过 unknown 函数值的 `*` / `**` 展开、`*` 位于固定形参之前且不是定长 tuple、非异常类名当异常用、unknown 值上的数值/list/dict/tuple/set 内置类型模式、类体字段默认值里的 lambda，以及嵌在其它表达式里的异步推导式。跨模块继承（0.139/0.140）、函数内定义类与类体 lambda（0.135）、导入类字段子模式（0.135）、异步生成器表达式（0.135）都已支持，不再属于这一层。
 
 清楚这个分层很重要：`pyadamas check` 尽量当通用 Python 语法/类型检查器用，检查器放宽的边界都记在 [CHANGELOG 0.6.1](archive/changelog-0.40.md)；`pyadamas build` 才是「能不能编译」的判据。
+
+**0.490 取证：三项已知语义缺口的当前口径**（都在这一层：能过 check，`build` 或运行期行为不符 CPython）。
+
+**① `for` + `__iter__` 是对的；缺的是内置构造函数。** `for x in obj` 对**装饰与未装饰**的
+`__iter__` 都能跑（`lower/stmt_for.cpp` 走 `dunder_call(recv, ty, "__iter__")`，装饰器只影响方法表里的
+签名记录，不影响这条路径）：
+
+```python
+class Box:
+    def __iter__(self):
+        yield 1
+for v in Box(): print(v)    # ok（装饰后也一样）
+```
+
+真正的缺口是 `list(obj)` / `tuple(obj)` / `set(obj)` / `sorted(obj)` / `sum(obj)`：
+
+```python
+print(list(Box()))          # error: list() cannot iterate over 'Box'（未装饰也一样）
+print(sorted(Box()))        # error: sorted() cannot iterate over 'Box'
+```
+
+根因：`lower/builtin_container.cpp` 的迭代分支只认内建容器种类（list/tuple/str/bytes/dict/set/
+file/range/generator），用户类不在其中。实测 `RtFn::AnyIterList`（动态物化入口）**只能吃内建容器**，
+喂 `__iter__` 返回的生成器会 `TypeError: object is not iterable`，所以不能简单改成
+「调 `__iter__` + AnyIterList」。正确修法：复用 `stmt_for` 的迭代器构造（`dunder_call` + 生成器循环），
+把「任意迭代器物化成列表」做成一个新的降级形状，再接到这五个构造函数入口。工程量 = 一个新降级
+形状 + 五处入口 + 回归，**判负（本轮不做）**。
+
+**② 未初始化变量读成 0**（CPython 是 `UnboundLocalError`）：
+
+```python
+def f(c: bool) -> int:
+    if c:
+        x: int = 1
+    return x
+print(f(False))            # 打印 0；CPython: UnboundLocalError
+```
+
+根因：局部变量就是栈帧槽位，一律零初始化，没有「是否已赋值」位。两条路：① 每槽加 init 位 →
+每次 load 都要判（热路径每读多一条 test/branch）；② 降级期做确定性赋值分析（CFG 已有，但要
+保守处理 try/except、循环提前 return，且 unknown/容器元素的「已赋值」没有静态定义）。
+**判负**：收益只是一条错误信息，代价是热路径或一遍数据流。
+
+**③ 异常对象 traceback / 列号**：
+
+```python
+try:
+    boom()
+except ValueError as e:
+    print(e.__traceback__)  # error: exception attribute '__traceback__' is not implemented yet
+```
+
+未捕获异常的回溯（`def inner(): raise ValueError("boom")` ← `def outer(): inner()` ← `outer()`）：
+
+```text
+Traceback (most recent call last):
+  File "x.py", line 0, in inner      <- 只有一帧、行号是 0
+pyadamas: uncaught ValueError: boom
+```
+
+- **可修、本轮未做（下一步）**：行号。codegen 已有「行变化处放 `.Ldbg` 标签 + `.loc 1 <line>`」的
+  机制（`backend/ops.cpp::set_loc`，只在 `in.line > 0` 时登记），但异常边/清理路径上的**合成指令
+  没带行号**，回溯只能命中函数起点项（line 0），调用者帧也因此查不到。下一步：给异常边/raise 点
+  的合成指令补 `in.line = cur_line_`，再加一条「未捕获异常打印 2 帧且行号正确」的回归。
+- **本轮不修**：列号（`.loc` 只写行号，要扩成 `.loc file line column` 并给出 DWARF 语句程序）；
+  `__traceback__`（要把 `PyAdamasTraceFrame` 链暴露成 Python 对象；维持显式「未实现」错误，
+  比静默返回 None 好）。
 
 ## 三、验证手段
 
