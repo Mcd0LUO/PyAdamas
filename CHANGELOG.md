@@ -4,6 +4,29 @@
 
 早期阶段没有逐条留痕，按阶段归纳；0.4 之后逐条记录。
 
+## [0.504] - 2026-11-25
+
+> fix(runtime)：**修掉保守 GC 模式的 heap-use-after-free**（3.10）。根因不是「收集触发点」，也不是「没扫寄存器」，
+> 而是**运行期有一处静态缓存持有堆对象却没登记为 GC 根**。
+>
+> `runtime/rt_any.c` 的常量 float 盒缓存 `any_fcache[256]` 是静态全局数组，直接持有 256 个堆对象：
+> - **默认模式按 RC 清扫**：盒子由缓存持有一份引用（`rc>=1`），永远不会被回收；
+> - **`PYADAMAS_GC_CONSERVATIVE=1` 做全量可达性**（不看 RC）：盒子只被这个静态数组指着，从 `gc_globals`/临时值栈/帧记录/寄存器都不可达
+>   → 被 `gc_collect` 当垃圾清扫 → 下一次命中同一槽时 `pa_rc_inc` 打在已释放块上（ASan 栈：`pa_rc_inc_fast ← pa_any_from_f64`，
+>   free 侧 `gc_free_body ← gc_collect ← rc_alloc_core`）。
+>
+> **修法**：照 `rt_exc.c` 的 `exc_root_slots` 同一套既有做法，把 256 个槽的**地址**用 `pa_gc_add_roots` 登记成根；
+> 登记放在 `any_float_box()` 里**首次装箱时执行一次**——命中路径（一次哈希 + `rc_inc`）零代价，且必然先有一次装箱，根一定已登记。
+>
+> **验证**：`161_gc_conservative_equiv` 保守模式 rc=0、输出 `900060` 与默认模式**逐字节相同**（加/不加 `--asan` 都对）；
+> 新增 ctest **`pyadamas_gc_conservative`**（`tests/gc_conservative.sh`：默认与保守两跑都必须等于 expect 且互相一致），ctest 8 → **9** 项。
+> 默认模式零影响：生成代码 asm（`04_containers`/`09_class`/`19_comprehension`）与 master 逐字节相同，改动只在运行期 `.c`；
+> 套件 497、difftest 467、check_size PASS、ASan 编译器的全套件 497 全绿无报告。
+>
+> **教训**（写进 [memory-debug.md](memory-debug.md) §9.1）：运行期里任何「静态数组/全局缓存持有堆对象」的地方都**必须** `pa_gc_add_roots`；
+> 已登记的有 `exc_root_slots` 与 `any_fcache_roots`，新增缓存时照抄。
+>
+> 闸门：套件 **497** / difftest **467** / check_size **PASS** / ctest **9/9**。
 ## [0.503] - 2026-11-25
 
 > fix(typecheck)：**多继承「非主基类方法读错字段」从静默错值变成明确报错**（3.9）。
