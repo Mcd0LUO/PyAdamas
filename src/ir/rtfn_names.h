@@ -431,6 +431,12 @@ inline const char* rt_name(RtFn f) {
         case RtFn::RandGRandint: return "pa_random_grandint";
         case RtFn::RandGChoice: return "pa_random_gchoice";
         case RtFn::RandGUniform: return "pa_random_guniform";
+        case RtFn::RandGNormalvariate: return "pa_random_gnormalvariate";
+        case RtFn::RandGGammavariate: return "pa_random_ggammavariate";
+        case RtFn::RandGBetavariate: return "pa_random_gbetavariate";
+        case RtFn::RandGLognormvariate: return "pa_random_glognormvariate";
+        case RtFn::RandGParetovariate: return "pa_random_gparetovariate";
+        case RtFn::RandGWeibullvariate: return "pa_random_gweibullvariate";
         case RtFn::RandGShuffle: return "pa_random_gshuffle";
         case RtFn::OsMkdir: return "pa_os_mkdir";
         case RtFn::OsRmdir: return "pa_os_rmdir";

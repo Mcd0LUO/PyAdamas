@@ -39,6 +39,21 @@ def seed(a: int = -9223372036854775808) -> None: pass
 def randrange(*args: int) -> int: pass
 def getrandbits(k: int) -> int: pass
 def gauss(mu: float, sigma: float) -> float: pass
+
+# 分布函数（0.515）：逐行照抄 CPython 3.14 Lib/random.py 的公式，与 CPython
+# 同种子逐字节一致（random() 序列本身已逐位相同）。
+@native("pa_random_gnormalvariate")
+def normalvariate(mu: float = 0.0, sigma: float = 1.0) -> float: pass
+@native("pa_random_ggammavariate")
+def gammavariate(alpha: float, beta: float) -> float: pass
+@native("pa_random_gbetavariate")
+def betavariate(alpha: float, beta: float) -> float: pass
+@native("pa_random_glognormvariate")
+def lognormvariate(mu: float, sigma: float) -> float: pass
+@native("pa_random_gparetovariate")
+def paretovariate(alpha: float) -> float: pass
+@native("pa_random_gweibullvariate")
+def weibullvariate(alpha: float, beta: float) -> float: pass
 def expovariate(lambd: float) -> float: pass
 def triangular(low: float, high: float = 0.0, mode: float = 0.0) -> float: pass
 

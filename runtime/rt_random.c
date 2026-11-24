@@ -272,6 +272,88 @@ int64_t pa_random_getrandbits(PyAdamasRandom* r, int64_t k) {
     return (int64_t)(bits & 0x7fffffffffffffffULL);
 }
 
+
+/* ── 分布函数（0.515）：逐行照抄 CPython 3.14 Lib/random.py 的公式 ────────
+   目标是与 CPython 同种子**逐字节**一致。CPython 的 random() 与我们的
+   mt_next_double 已经逐位相同（randbytes/random() 实测），所以只要公式的
+   运算顺序、常数取值一致，结果就一致。常数是 CPython 在 import 期算出的
+   double 字面值（这里写成同样的十进制字面量，解析出的位模式相同）。 */
+#define NV_MAGICCONST 1.7155277699214135 /* 4*exp(-0.5)/sqrt(2.0) */
+#define SG_MAGICCONST 2.504077396776274  /* 1.0 + log(4.5) */
+#define LOG4_CONST 1.3862943611198906    /* log(4.0) */
+#define E_CONST 2.718281828459045        /* exp(1.0) */
+
+/* Kinderman-Monahan 比值法。注意 zz = z*z/4.0（新版 CPython 带 /4.0）。 */
+double pa_random_gnormalvariate(double mu, double sigma) {
+    for (;;) {
+        double u1 = pa_random_gnext();
+        double u2 = 1.0 - pa_random_gnext();
+        double z = NV_MAGICCONST * (u1 - 0.5) / u2;
+        double zz = z * z / 4.0;
+        if (zz <= -log(u2)) return mu + z * sigma;
+    }
+}
+
+double pa_random_ggammavariate(double alpha, double beta) {
+    if (alpha <= 0.0 || beta <= 0.0)
+        pa_raise_c("ValueError", "gammavariate: alpha and beta must be > 0.0");
+    if (alpha > 1.0) {
+        /* R.C.H. Cheng, non-integral shape parameters. */
+        double ainv = sqrt(2.0 * alpha - 1.0);
+        double bbb = alpha - LOG4_CONST;
+        double ccc = alpha + ainv;
+        for (;;) {
+            double u1 = pa_random_gnext();
+            if (!(u1 > 1e-7 && u1 < 0.9999999)) continue;
+            double u2 = 1.0 - pa_random_gnext();
+            double v = log(u1 / (1.0 - u1)) / ainv;
+            double x = alpha * exp(v);
+            double z = u1 * u1 * u2;
+            double r = bbb + ccc * v - x;
+            if (r + SG_MAGICCONST - 4.5 * z >= 0.0 || r >= log(z)) return x * beta;
+        }
+    } else if (alpha == 1.0) {
+        return -log(1.0 - pa_random_gnext()) * beta;
+    } else {
+        /* ALGORITHM GS of Statistical Computing - Kennedy & Gentle */
+        for (;;) {
+            double u = pa_random_gnext();
+            double b = (E_CONST + alpha) / E_CONST;
+            double p = b * u;
+            double x;
+            if (p <= 1.0)
+                x = pow(p, 1.0 / alpha);
+            else
+                x = -log((b - p) / alpha);
+            double u1 = pa_random_gnext();
+            if (p > 1.0) {
+                if (u1 <= pow(x, alpha - 1.0)) return x * beta;
+            } else if (u1 <= exp(-x)) {
+                return x * beta;
+            }
+        }
+    }
+}
+
+double pa_random_gbetavariate(double alpha, double beta) {
+    double y = pa_random_ggammavariate(alpha, 1.0);
+    if (y) return y / (y + pa_random_ggammavariate(beta, 1.0));
+    return 0.0;
+}
+
+double pa_random_glognormvariate(double mu, double sigma) {
+    return exp(pa_random_gnormalvariate(mu, sigma));
+}
+
+double pa_random_gparetovariate(double alpha) {
+    double u = 1.0 - pa_random_gnext();
+    return pow(u, -1.0 / alpha);
+}
+
+double pa_random_gweibullvariate(double alpha, double beta) {
+    double u = 1.0 - pa_random_gnext();
+    return alpha * pow(-log(u), 1.0 / beta);
+}
 double pa_random_gauss(PyAdamasRandom* r, double mu, double sigma) {
     PyAdamasRandom* g = rng_of(r);
     double u1 = mt_next_double(g);
