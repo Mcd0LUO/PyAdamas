@@ -330,6 +330,16 @@ void TypeChecker::declare(const std::string& name, TypePtr ty, int line, int col
             // 真当成类型错误会大面积误杀；保持原类型，不收窄也不报错。
             // 空容器字面量重赋值（cur = {}）：洞按已有标注填。
             if (ty && ty_contains_hole(ty, 0)) fill_holes_recursive(ty, sym.ty, 0);
+            // 0.498（窄化配套）：给 `T | None` 标注的变量赋一个确定值，槽里
+            // 从此就是那个确定类型 —— 否则 `if x is None: x = 0` 之后分支合并
+            // 把 Optional 又并回来，下一步 `x + 1` 误报 may be None。
+            // 只对 Optional 生效：float 等其它标注的槽语义（裸 double vs 整数）
+            // 不能因为这个改动漂移。
+            if (!assigning_none && ty && sym.ty && sym.ty->kind == TyKind::Optional &&
+                assignable(sym.ty, ty)) {
+                sym.ty = ty;
+                return;
+            }
             if (!assigning_none && !assignable(sym.ty, ty))
                 err(line, col,
                     std::format("cannot assign '{}' to '{}' variable '{}'", type_name(ty),

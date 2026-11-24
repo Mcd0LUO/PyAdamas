@@ -95,6 +95,17 @@ PyAdamas 不追求兼容 CPython：语义是按静态类型的需要重新定的
 
 设计见 [str-codepoints.md](str-codepoints.md)。
 
+### `T | None` 的窄化与「可能为 None」诊断（0.498）
+
+- `T | None`（含 `typing.Optional[T]`）在判空之后会**窄化**：`if x is not None:`、
+  `if x is None: ... else:`、`if x is None: return`（提前返回）、`if xs:`、`assert x is not None`、
+  `a and b` 的短路、`while x is not None:` 循环体、`if self.x is not None:` 之后的属性访问。
+  设计细节与实现要点见 [type-narrowing.md](type-narrowing.md)。
+- 没判空就**使用**（算术/排序比较/属性/下标）会报编译期错误：
+  `error: 'x' may be None here; check it first (if x is not None:) or use assert`。
+  函数实参不在此列（`assignable` 对 `Optional[T]` 仍反向放宽）。
+- 窄化只改静态类型，运行期表示不变（仍是 8 字节字）。跨模块的联合/Optional 退化成 unknown
+  （接口不序列化成员表），是已知边界。
 ### 联合类型与 unknown 域（0.489 定口径）
 
 `A | B` 标注：数值塔内部（`int | float`、`int | big`）仍按 `join` 提升（前者 float、后者 big）；

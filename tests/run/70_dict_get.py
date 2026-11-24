@@ -4,6 +4,7 @@ print(d.get("a"))
 print(d.get("zz"))
 print(d.get("zz", 42))
 v = d.get("a")
+assert v is not None   # 0.498：T | None 使用前必须先判空
 print(v + 1)
 w = d.get("zz")
 print(w)

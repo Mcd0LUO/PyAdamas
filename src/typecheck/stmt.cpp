@@ -149,8 +149,10 @@ void TypeChecker::stmts(std::vector<StmtPtr>& body) {
             // 后面的代码只可能在条件为假时到达
             if (f.orelse.empty() && f.branches.size() == 1 &&
                 block_exits(f.branches[0].body)) {
-                auto n = narrow_on(*f.branches[0].cond, false);
-                if (n.sym) active.push_back(n);
+                // 提前退出后按「条件为假」窄化；`A or B` 为假即两者都假，
+                // 所以这里要收全部（narrow_all），只用第一条会漏掉剩下的。
+                for (auto& n : narrow_all(*f.branches[0].cond, false))
+                    if (n.sym || !n.akey.empty()) active.push_back(n);
             }
             continue;
         }
@@ -292,6 +294,39 @@ Tok TypeChecker::aug_to_bin(Tok t) {
         }
     }
 
+
+bool TypeChecker::maybe_none(const Expr* e, const TypePtr& t, int line, int col) {
+    if (!t || t->kind != TyKind::Optional) return false;
+    if (auto* n = e ? dynamic_cast<const Name*>(e) : nullptr)
+        err(line, col, std::format("'{}' may be None here; check it first "
+                                   "(if {} is not None:) or use assert",
+                                   n->id, n->id));
+    else
+        err(line, col, "this value may be None here; check it first "
+                        "(if x is not None:) or use assert");
+    return true;
+}
+
+std::vector<TypeChecker::Narrowing> TypeChecker::narrow_all(Expr& cond, bool truthy) {
+    std::vector<Narrowing> out;
+    // `A and B` 为真 ⇒ A、B 都为真（短路窄化要叠加）；`A or B` 为假 ⇒ 两者都假。
+    if (cond.kind == ExprKind::BoolOp) {
+        auto& b = static_cast<BoolOp&>(cond);
+        const bool conj = b.op == Tok::KW_AND;
+        if (conj == truthy) {
+            for (auto& v : b.values) {
+                auto sub = narrow_all(*v, truthy);
+                for (auto& n : sub) out.push_back(n);
+            }
+            return out;
+        }
+        return out;  // 混合极性（and 为假 / or 为真）不窄化，保守
+    }
+    auto one = narrow_on(cond, truthy);
+    if (one.sym) out.push_back(one);
+    return out;
+}
+
 TypeChecker::Narrowing TypeChecker::narrow_on(Expr& cond, bool truthy) {
         auto non_none = [](const TypePtr& t) -> TypePtr {
             if (!t) return t;
@@ -316,6 +351,26 @@ TypeChecker::Narrowing TypeChecker::narrow_on(Expr& cond, bool truthy) {
                 bool none_right = is_none_const(c.comparators[0].get());
                 if (!name && is_none_const(c.left.get()))
                     name = dynamic_cast<Name*>(c.comparators[0].get());
+                if (!name) {
+                    // 属性收窄：`if self.x is not None:` → 之后 `self.x.foo()`。
+                    // 只认单层「名字.属性」，键 action 存 attr_refine_。
+                    Expr* oe = none_right ? c.left.get() : c.comparators[0].get();
+                    auto* at = dynamic_cast<Attribute*>(oe);
+                    auto* bn = at ? dynamic_cast<Name*>(at->value.get()) : nullptr;
+                    if (at && bn) {
+                        bool is_not2 = c.ops[0] == CmpOp::IsNot;
+                        if (is_not2 != truthy) return {};
+                        TypePtr cur = expr(*at);
+                        Narrowing n;
+                        n.akey = bn->id + "." + at->attr;
+                        auto it2 = attr_refine_.find(n.akey);
+                        n.had_old = it2 != attr_refine_.end();
+                        n.old = n.had_old ? it2->second : nullptr;
+                        n.now = non_none(cur);
+                        attr_refine_[n.akey] = n.now;
+                        return n;
+                    }
+                }
                 if (name && (none_right || is_none_const(c.left.get()))) {
                     // 只做 "is not None" 方向的收窄。
                     // "is None" 分支里若把变量改成 None，`if x is None: x = {}`
@@ -324,7 +379,10 @@ TypeChecker::Narrowing TypeChecker::narrow_on(Expr& cond, bool truthy) {
                     if (is_not != truthy) return {};
                     Symbol* sym = lookup(name->id);
                     if (!sym) return {};
-                    Narrowing n{sym, sym->ty, nullptr};
+                    Narrowing n{};
+                    n.sym = sym;
+                    n.old = sym->ty;
+                    n.now = nullptr;
                     sym->ty = non_none(sym->ty);
                     n.now = sym->ty;
                     return n;
@@ -334,7 +392,10 @@ TypeChecker::Narrowing TypeChecker::narrow_on(Expr& cond, bool truthy) {
         if (cond.kind == ExprKind::Name && truthy) {
             auto& n = static_cast<Name&>(cond);
             if (Symbol* sym = lookup(n.id)) {
-                Narrowing r{sym, sym->ty, nullptr};
+                Narrowing r{};
+                r.sym = sym;
+                r.old = sym->ty;
+                r.now = nullptr;
                 sym->ty = non_none(sym->ty);
                 r.now = sym->ty;
                 return r;
@@ -344,6 +405,11 @@ TypeChecker::Narrowing TypeChecker::narrow_on(Expr& cond, bool truthy) {
     }
 
     void TypeChecker::restore_narrowing(const Narrowing& n) {
+        if (!n.akey.empty()) {
+            if (n.had_old) attr_refine_[n.akey] = n.old;
+            else attr_refine_.erase(n.akey);
+            return;
+        }
         // 块内可能已经重新赋值（类型变了），这时不该把类型恢复成收窄前的
         if (!n.sym || n.sym->ty != n.now) return;
         n.sym->ty = n.old;
