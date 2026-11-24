@@ -459,6 +459,43 @@ pyadamas::ModuleInfoPtr builtin_module(const std::string& name) {
             func_with(n, f);
         }
     } else if (name == "json") {
+        // 文件流版（0.517）：dump 写 fp、返回 None；load 读全文、返回 unknown
+        // （CPython 里返回类型是动态的，没有 sample 参数无法静态定）。
+        {
+            auto f = std::make_shared<pyadamas::FuncInfo>();
+            f->name = "json.dump";
+            pyadamas::Param p;
+            p.name = "obj";
+            p.ty = pyadamas::t_unknown();
+            p.ann_unknown = true;
+            f->pos.push_back(std::move(p));
+            pyadamas::Param fp;
+            fp.name = "fp";
+            fp.ty = pyadamas::t_unknown();
+            fp.ann_unknown = true;
+            f->pos.push_back(std::move(fp));
+            pyadamas::Param q;
+            q.name = "indent";
+            q.ty = pyadamas::t_int();
+            q.has_default = true;
+            q.default_lit = lv_int(0);
+            f->pos.push_back(std::move(q));
+            f->ret = pyadamas::t_none();
+            f->ret_known = true;
+            func_with("dump", f);
+        }
+        {
+            auto f = std::make_shared<pyadamas::FuncInfo>();
+            f->name = "json.load";
+            pyadamas::Param p;
+            p.name = "fp";
+            p.ty = pyadamas::t_unknown();
+            p.ann_unknown = true;
+            f->pos.push_back(std::move(p));
+            f->ret = pyadamas::t_unknown();
+            f->ret_known = true;
+            func_with("load", f);
+        }
         // 类型由调用点的静态类型决定；签名只用于 from-import 的可调用标记。
         {
             auto f = std::make_shared<pyadamas::FuncInfo>();

@@ -928,7 +928,11 @@ void AsmGen::gen_rt_args(const Inst& in, RtFn fn) {
         case RtFn::BytesMethod:
         case RtFn::ListCopyRange:
         case RtFn::JsonDumps:
+        case RtFn::JsonDump:
             gen_rt_i5(in);
+            break;
+        case RtFn::JsonLoad:
+            gen_rt_i1(in);
             break;
         case RtFn::JsonLoads:
         case RtFn::RegexSubStr:

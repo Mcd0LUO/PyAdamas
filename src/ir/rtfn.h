@@ -412,7 +412,9 @@ enum class RtFn : uint16_t {
     FuncReduceF,           // (fn*, list* xs, f64 init, i64 has_init) -> f64
     CollCounter,           // (list* items, i64 key_kind, i64 key_own) -> dict*
     CollMostCommon,        // (dict*, i64 n) -> list*
-    JsonDumps,             // (i64 value, str* desc, i64 indent, i64 flags, list* seps) -> str*
+    JsonDumps,
+    JsonDump,  // (value, desc, file*, indent, flags) -> i64  json.dump：dumps 后写文件
+    JsonLoad,  // (file*) -> i64  json.load：读全文后动态解析（返回 unknown）             // (i64 value, str* desc, i64 indent, i64 flags, list* seps) -> str*
     JsonLoads,             // (str* text, str* desc) -> i64
     JsonParse,             // (str* text) -> i64 unknown  动态构造（json.parse）
     JsonOp,                // (op, a, b, c) -> i64        json.* 辅助统一入口

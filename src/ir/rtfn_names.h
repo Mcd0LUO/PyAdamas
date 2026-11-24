@@ -496,6 +496,8 @@ inline const char* rt_name(RtFn f) {
         case RtFn::CollCounter: return "pa_collections_counter";
         case RtFn::CollMostCommon: return "pa_collections_most_common";
         case RtFn::JsonDumps: return "pa_json_dumps";
+        case RtFn::JsonDump: return "pa_json_dump";
+        case RtFn::JsonLoad: return "pa_json_load";
         case RtFn::JsonLoads: return "pa_json_loads";
         case RtFn::JsonParse: return "pa_json_parse";
         case RtFn::JsonOp: return "pa_json_op";
