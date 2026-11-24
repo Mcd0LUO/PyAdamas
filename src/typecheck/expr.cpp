@@ -153,6 +153,12 @@ TypePtr TypeChecker::expr(Expr& e) {
                 // dec → 段错误（206_list_store_kind 实测）。混合内容本来
                 // 就不该被单态化。
                 if (is_unknown(acc)) return mk_list(t_unknown());
+                // 全 None 的列表字面量是「占位容器」惯用法（`[None] * 256` 之后在
+                // import 期填满、`[None, None]` 之后再赋值）。按 list[None] 推断会
+                // 让每个元素读取都变成「可能为 None」，而真实数据从别处写进来。
+                // 这类字面量按 list[unknown] 处理：读出来是 unknown（不误报），
+                // 标注成 list[int] 等的**不影响**（那是标注路径，不走这里）。
+                if (acc && acc->kind == TyKind::None) return mk_list(t_unknown());
                 return mk_list(acc);
             }
             case ExprKind::Tuple: {
