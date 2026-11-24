@@ -4,6 +4,36 @@
 
 早期阶段没有逐条留痕，按阶段归纳；0.4 之后逐条记录。
 
+## [0.510] - 2026-11-25
+
+> feat(lower)：**`super()` 进入非 layout 基类时的 self 调整**——多继承的四条路径（属性 / 直调 / 虚调用 / `super()`）现在全部正确。
+>
+> **方案 2（lowering 侧 delta + CallDirect，不动运行期 ABI）**，理由三条（都是实测）：
+> 1. `lower_super_call` 本来就把目标实现类（`declaring` = MRO 里 owner 之后第一个定义该方法的类）静态解出来了；
+> 2. 方案 1（给 `pa_super_lookup` 加 adjust 参数）要改运行期签名 + `RtFn` + IR 发射 + 后端四处，回归面大；
+> 3. vtable thunk 在 super 调用点拿不到——**方法体在类 vtable 装配之前编译**，此刻子类槽里还是基类的真实实现
+>    （debug 实测 `slot val=1 mi_thunk=0`），所以不能「走槽跳 thunk」。
+>
+> 落点：`lower_super_call` 在已有 `SuperVCall` 之前加分支——`declaring != owner && mi_block_offset(owner, declaring) > 0` 时
+> 给 `self` 加 delta、`CallDirect` 到 `declaring` 的真实实现；`declaring` 是导入类/解析不到时**退回 `SuperVCall`**（语义不变）。
+> `mi_block_offset` 沿 layout_base 链找块，所以子类（`D(C)`）也能拿到 A 的块偏移。
+> 顺带：`install_mi_thunks` 改为沿 layout_base 链**复用祖先已装的 thunk**（子类 vtable 的继承槽不再依赖复制顺序）。
+>
+> 实测（默认配置，五条与 CPython 逐字节一致）：
+>
+> ```
+> cb.x, cb.get()  → 1 1
+> f(cb)           → 1
+> cb.y            → 2
+> d.get2()        → 1      （CPython 1；改前 102）✓
+> d.get()         → 1
+> ```
+>
+> 语料：628 默认口径 **499/623 不降**；本仓库 899 个 `.py` **782 通过**、零新拒绝；
+> 12 基准 asm 与 master 逐字节相同。
+> 遗留（非阻塞）：`super()` 目标在导入类/动态 MRO 时仍走运行期 `SuperVCall`（不做 delta，保持原语义）；守卫按 (class,base) 分组是纯性能项。
+>
+> 闸门：套件 **499** / difftest **469** / check_size **PASS** / ctest 9/9。
 ## [0.509] - 2026-11-25
 
 > feat(typecheck)：**默认放宽多继承护栏**——两个状态基类的形态现在**默认就能编译且正确**（不再需要 `PYADAMAS_MI_UNSAFE`）。
