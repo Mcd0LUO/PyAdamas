@@ -100,26 +100,55 @@ void AsmGen::gen_vcall(const Inst& in, bool keep_int_result, int direct_fn) {
     }
 }
 
-// 只融合已存在的整数全局累加形态。LHS 是调用前的快照，不能
-// 在慢调用之后读全局（方法可能已经更改它）。EH 和调用 ABI 照旧。
+// 只融合已存在的整数累加形态。LHS 是调用前的快照，不能在慢调用之后
+// 再读全局/槽（方法可能已经改了它）。EH 和调用 ABI 照旧。
+// 目标既可以是全局，也可以是帧槽：入口模块私有标量全局提升会把
+// `total = total + s.area()` 从 store.global 改写成 store.slot，
+// 这里走与 Bin+StoreSlot 融合相同的判据，保住「结果留在 %rax」。
 bool AsmGen::try_fuse_guarded_vcall_add(const Block& b, size_t pos) {
     if (opt_ < 2 || pos + 3 >= b.insts.size()) return false;
     const auto& call = b.insts[pos];
     const auto& add = b.insts[pos + 1];
     const auto& store = b.insts[pos + 2];
+    const bool to_global = store.op == IrOp::StoreGlobal;
+    const bool to_slot = store.op == IrOp::StoreSlot;
+    if (!to_global && !to_slot) return false;
     if (call.op != IrOp::VCall || !call.args.empty() || !is_int(call.ty) ||
         !single_use_in_block(call.dst) || add.op != IrOp::Bin ||
         add.bop != BinKind::Add || !is_int(add.ty) || add.b != call.dst ||
-        !is_int(ty_of(add.a)) || alias_.contains(add.a) || !can_fuse_global(add, store))
+        !is_int(ty_of(add.a)))
         return false;
+    if (to_global) {
+        if (!can_fuse_global(add, store)) return false;
+    } else {
+        // 与 Bin+StoreSlot 融合同一套判据（GC 根槽 / tag / 寄存器类 / 单使用）。
+        if (!can_fuse(add, store)) return false;
+        // split 模式的槽位置按块查表，融合会绕过块出口写回，保守跳过。
+        if (!slot_loc_.empty()) return false;
+        if (store.idx < 0 || store.idx >= static_cast<int>(ra_.slot_reg.size()))
+            return false;
+    }
     const std::string lhs = src_op(add.a);
-    if (lhs.find("%rax") != std::string::npos) return false;
+    // LHS 是调用前的快照，调用之后必须还能读：只接受 callee-saved 寄存器
+    // 或栈槽。槽提升后的 `load.slot total` 会别名到 callee-saved 槽寄存器
+    // （%rbx/%rbp/%r12-%r15），安全；caller-saved 会被调用破坏。
+    {
+        static const char* kCaller[] = {"%rax", "%rcx", "%rdx", "%rsi", "%rdi",
+                                        "%r8", "%r9", "%r10", "%r11"};
+        for (const char* r : kCaller)
+            if (lhs.find(r) != std::string::npos) return false;
+    }
     set_loc(call.line);
     if (!gen_guarded_vcall(call, true)) return false;
     set_loc(add.line);
     comment(add.text() + " -> " + store.text());
     emit2("addq", lhs, "%rax");
-    emit2("movq", "%rax", global_label(store.idx) + "(%rip)");
+    if (to_global) {
+        emit2("movq", "%rax", global_label(store.idx) + "(%rip)");
+    } else {
+        emit2("movq", "%rax", slot_op(store.idx));
+        invalidate_slot(store.idx);
+    }
     return true;
 }
 

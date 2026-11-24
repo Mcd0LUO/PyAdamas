@@ -235,8 +235,13 @@ bool AsmGen::try_forward_global_across_rc(const Block& b, size_t at, size_t& loa
         return false;
     const auto& next = b.insts[at + 1];
     // 不能跨越 EH 标记、其他释放、写入或可能重入的操作。
-    const bool across_scalar = next.op == IrOp::LoadGlobal && next.idx != store.idx &&
-                               next.ty && next.ty->kind == TyKind::Int;
+    // 中间可以夹一条标量读：全局（别的全局）或帧槽（入口模块私有标量
+    // 全局提升后，同一累加形态里的定值是 load.slot）。两者都是纯读，
+    // 读不到也改不了 store 的全局。
+    const bool across_scalar =
+        (next.op == IrOp::LoadGlobal && next.idx != store.idx &&
+         next.ty && next.ty->kind == TyKind::Int) ||
+        (next.op == IrOp::LoadSlot && next.ty && next.ty->kind == TyKind::Int);
     const size_t pos = at + 1 + across_scalar;
     if (pos + 1 >= b.insts.size()) return false; // 原块末的 spill 不能跳过。
     const auto& load = b.insts[pos];

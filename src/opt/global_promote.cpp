@@ -10,15 +10,18 @@
 //
 // 而真实程序几乎都写成模块级变量，于是这个开销摊在每一个热循环上。
 //
-// **做法**：对**循环体内没有任何函数调用**的循环，把被读写的标量全局
-// 缓存到一个新分配的局部槽里：
+// **做法**：把循环里读写的标量全局缓存到一个新分配的局部槽里：
 //   - 循环前置块：`slot = load.global g`
 //   - 循环体内：`load.global g` -> `load.slot slot`，`store.global` -> `store.slot`
 //   - 循环出口块：`store.global g, slot`
 //
 // **安全性前提**（缺一不可）：
-//   1. 循环体（按 CFG 可达性算，不是块号区间）内没有 `call.*` —— 没有
-//      任何东西能观察到全局的中间值，也没有别名写入。
+//   1. 循环体（按 CFG 可达性算，不是块号区间）内没有能观察全局中间值/写
+//      全局的调用。入口模块（__pa_main）里例外：被提升的全局若「模块私有」
+//      （除入口外没有函数引用、全模块未取址），任何被调函数都读不到它；
+//      入口里未捕获异常等于进程终止，中途展开也没有观察者。
+//      非入口模块可以被别的模块 import，全局对导入方可见 —— 仍要求循环
+//      体无 `call.*` 且无可抛异常指令。
 //   2. 循环只有单一回边、单一出口。
 //   3. 全局是标量类型（int/float/bool）；堆类型要处理 RC 与 GC 根。
 //
@@ -165,13 +168,52 @@ bool has_eh_markers(const IRFunction& fn) {
     return false;
 }
 
+// 入口模块里「私有」的全局：除 __pa_main 外没有任何函数引用，且全模块
+// 没有对它取址。
+//
+// 依据：入口模块的符号前缀固定是 __entry__（driver/build.cpp），
+// `import __entry__` 被驱动显式拒绝 —— 别的编译单元拿不到这些变量。
+// 模块内除入口函数外无人引用，则任何被调函数（用户方法、闭包、生成器、
+// 导入模块的代码）都观察不到它的中间值；动态全局访问
+// （globals/eval/exec）在代码生成阶段直接报错，不构成通路。
+//
+// GlobalAddr 一律取消资格：地址可能逃逸给 C 或用户代码，别名写入无法
+// 追踪。非入口模块不适用（它们可以被别的模块 import）。
+std::vector<char> entry_private_globals(const IRModule& m) {
+    const size_t ng = m.globals.size();
+    std::vector<char> priv(ng, 1);
+    for (const auto& fptr : m.funcs) {
+        const IRFunction& f = *fptr;
+        const bool entry = f.name == "__pa_main";
+        for (const auto& b : f.blocks) {
+            for (const auto& in : b.insts) {
+                if (in.idx < 0 || static_cast<size_t>(in.idx) >= ng) continue;
+                if (in.op == IrOp::GlobalAddr) {
+                    priv[static_cast<size_t>(in.idx)] = 0;
+                    continue;
+                }
+                if (!entry &&
+                    (in.op == IrOp::LoadGlobal || in.op == IrOp::StoreGlobal))
+                    priv[static_cast<size_t>(in.idx)] = 0;
+            }
+        }
+    }
+    return priv;
+}
+
 }  // namespace
 
-bool promote_globals_in_loops(IRFunction& fn, const std::vector<IRGlobal>& globals) {
+bool promote_globals_in_loops(IRFunction& fn, const IRModule& m) {
     if (fn.has_handlers || fn.is_generator) return false;
     if (has_eh_markers(fn)) return false;
     // 入口函数：未捕获异常等于进程终止，推迟写回不产生可观察差异（见 is_raising_op）。
     const bool is_entry = fn.name == "__pa_main";
+    const std::vector<IRGlobal>& globals = m.globals;
+    // 入口模块的全局可能是「模块私有」的：除 __pa_main 外无人引用。这样
+    // 循环体里的用户调用也观察不到被提升的全局中间值。非入口模块可以被
+    // import，全局对导入方可见，不做这个假设。
+    const std::vector<char> private_g =
+        is_entry ? entry_private_globals(m) : std::vector<char>();
     const size_t n_globals = globals.size();
     const int nb0 = static_cast<int>(fn.blocks.size());
     bool changed = false;
@@ -252,32 +294,44 @@ bool promote_globals_in_loops(IRFunction& fn, const std::vector<IRGlobal>& globa
         std::unordered_set<int> loop_set = body_set;
         loop_set.insert(h);
 
-        // 循环体内不能有能观察到全局中间值/写全局的调用。
-        //
-        // 判据是 IR 结构（不是源码特征）：
-        //   * 用户级调用（Call/CallDirect/VCall/CallPtr/CallExtern/Setjmp）一律拒绝
-        //     —— 它们可能经用户代码读写模块全局。
-        //   * call.rt 是编译期固定的 C 运行时函数：模块全局在 IR 里只能通过
-        //     LoadGlobal/StoreGlobal 访问，RtFn 没有全局索引参数，C 侧无法
-        //     观察到被提升的全局变量槽；调用收到的都是值参数（其中全局的当前值
-        //     已从提升后的槽读出）。因此对 call.rt 提升是安全的。
-        //   * 非入口函数里 call.rt 可能抛异常展开，跳过出口写回后被上层 catch
-        //     读到旧全局 —— 交给下面的 is_raising_op 判据统一拒绝；
-        //     入口函数未捕获异常直接终止，不产生可观察差异。
-        bool has_call = false;
+        // 统计循环体内读写的标量全局；入口函数只保留「模块私有」的那些。
+        // 先算 touched 再判调用：可提升的集合已经过私有性过滤，调用门禁
+        // 才能按集合下结论。
+        std::vector<int> touched;
         for (int b : loop_set) {
             for (const auto& in : fn.blocks[static_cast<size_t>(b)].insts) {
-                if (!is_call_op(in.op)) continue;
-                if (is_entry && in.op == IrOp::CallRt) continue;
-                has_call = true;
-                break;
+                if (in.op != IrOp::LoadGlobal && in.op != IrOp::StoreGlobal) continue;
+                if (in.idx < 0 || in.idx >= static_cast<int>(n_globals)) continue;
+                if (!scalar_ty(globals[static_cast<size_t>(in.idx)].ty)) continue;
+                if (is_entry &&
+                    (private_g.empty() || !private_g[static_cast<size_t>(in.idx)]))
+                    continue;
+                if (std::find(touched.begin(), touched.end(), static_cast<int>(in.idx)) !=
+                    touched.end())
+                    continue;
+                touched.push_back(static_cast<int>(in.idx));
             }
-            if (has_call) break;
         }
-        if (has_call) continue;
-        // 非入口函数：循环内不能有可抛异常指令（否则中途展开会跳过出口写回，
-        // 调用方 catch 后读到旧全局值）。入口函数例外：未捕获异常直接终止进程。
+        if (touched.empty()) continue;
+
+        // 调用门禁（touched 已过滤成可提升的全局）。
+        //
+        // 入口函数：待提升的全局都满足「除 __pa_main 外无人引用、未取址」，
+        // 因此循环体里的任何用户调用（Call/VCall/闭包/生成器回调）都读不到
+        // 也写不到它们；call.rt 另有「RtFn 没有全局索引参数」的保证。未捕获
+        // 异常在入口函数里等于进程终止，推迟写回不产生可观察差异。
+        //
+        // 非入口函数：模块可被 import，全局对导入方可见 —— 保持原判据：
+        // 循环体有调用就拒绝；且不能有可抛异常指令（中途展开会跳过出口
+        // 写回，调用方 catch 后读到旧全局值）。
         if (!is_entry) {
+            bool has_call = false;
+            for (int b : loop_set) {
+                for (const auto& in : fn.blocks[static_cast<size_t>(b)].insts)
+                    if (is_call_op(in.op)) { has_call = true; break; }
+                if (has_call) break;
+            }
+            if (has_call) continue;
             bool has_raise = false;
             for (int b : loop_set) {
                 for (const auto& in : fn.blocks[static_cast<size_t>(b)].insts)
@@ -286,21 +340,6 @@ bool promote_globals_in_loops(IRFunction& fn, const std::vector<IRGlobal>& globa
             }
             if (has_raise) continue;
         }
-
-        // 统计循环体内读写的标量全局。
-        std::vector<int> touched;
-        for (int b : loop_set) {
-            for (const auto& in : fn.blocks[static_cast<size_t>(b)].insts) {
-                if (in.op != IrOp::LoadGlobal && in.op != IrOp::StoreGlobal) continue;
-                if (in.idx < 0 || in.idx >= static_cast<int>(n_globals)) continue;
-                if (!scalar_ty(globals[static_cast<size_t>(in.idx)].ty)) continue;
-                if (std::find(touched.begin(), touched.end(), static_cast<int>(in.idx)) !=
-                    touched.end())
-                    continue;
-                touched.push_back(static_cast<int>(in.idx));
-            }
-        }
-        if (touched.empty()) continue;
 
         // 槽类型必须是全局的真实类型：float 全局必须走 xmm 槽，不能当 int 槽
         // （否则 load/store 选错寄存器，静默错值）。

@@ -48,8 +48,9 @@ bool fuse_dict_bump(IRFunction& fn);
 bool if_convert_accumulators(IRFunction& fn);
 bool fuse_dict_tryget(IRFunction& fn);
 void forward_global_loads(IRFunction& fn);
-// 循环内全局变量寄存器化：无调用的循环里把全局缓存到局部槽。
-bool promote_globals_in_loops(IRFunction& fn, const std::vector<IRGlobal>& globals);
+// 循环内全局变量寄存器化：把全局缓存到局部槽、出口写回。入口模块里
+// 模块私有的标量全局允许循环体有调用（其它函数/模块仍要求无调用）。
+bool promote_globals_in_loops(IRFunction& fn, const IRModule& m);
 bool version_bounds_function(IRFunction& fn);
 // 整数循环优化（PYADAMAS_LOOP_OPT 门控，默认关）：见 opt/intloop.cpp。
 bool thread_jump_blocks(IRFunction& fn);
