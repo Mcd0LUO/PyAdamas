@@ -56,6 +56,48 @@ VReg Lowerer::lower_operator(const std::string& member, Call& c) {
                    const_str(std::format("'{}' object cannot be interpreted as an integer", what))});
         return const_int(0);
     }
+    // setitem(obj, key, value) / delitem(obj, key)：静态类型能定的按类型直接
+    // 发射（tuple/str/标量的 TypeError 消息才能与 CPython 逐字一致 —— tuple 与
+    // list 在运行期同形，运行期分不开）；unknown 走 pa_any_setindex/delindex。
+    if (member == "setitem" || member == "delitem") {
+        bool is_set = member == "setitem";
+        size_t want = is_set ? 3 : 2;
+        if (c.args.size() != want) {
+            eval_all();
+            err(c.line, c.col, std::format("operator.{}() expects {} arguments", member, want));
+            return const_none();
+        }
+        VReg o = expr(*c.args[0]);
+        VReg k = expr(*c.args[1]);
+        VReg v = is_set ? expr(*c.args[2]) : kNoReg;
+        TypePtr t = strip_optional(argty(0));
+        auto tk = t ? t->kind : TyKind::Unknown;
+        const char* name = tk == TyKind::Tuple  ? "tuple"
+                           : tk == TyKind::Str  ? "str"
+                           : tk == TyKind::Bytes ? "str"
+                           : tk == TyKind::Int  ? "int"
+                           : tk == TyKind::Float ? "float"
+                           : tk == TyKind::Bool ? "bool"
+                           : tk == TyKind::None ? "NoneType"
+                                                 : nullptr;
+        if (name) {
+            // CPython 的删消息不统一：tuple/str 是 "doesn't support item deletion"，
+            // 标量（int/float/bool/None）走通用路径是 "does not support item deletion"。
+            bool str_like = tk == TyKind::Tuple || tk == TyKind::Str || tk == TyKind::Bytes;
+            std::string msg = is_set
+                ? std::format("'{}' object does not support item assignment", name)
+                : (str_like
+                       ? std::format("'{}' object doesn't support item deletion", name)
+                       : std::format("'{}' object does not support item deletion", name));
+            call_void(raise_rt(RtFn::Raise), {const_str("TypeError"), const_str(msg)});
+            return const_none();
+        }
+        if (is_set)
+            call_void(RtFn::AnySetIndex, {o, k, v});
+        else
+            call_void(RtFn::AnyDelIndex, {o, k});
+        return const_none();
+    }
     // length_hint(x, default=0)：有 len 的容器取 len；没有 len 时给 default 就返回它，
     // 否则抛 TypeError（消息与 CPython 一致：object of type 'X' has no len()）。
     if (member == "length_hint") {

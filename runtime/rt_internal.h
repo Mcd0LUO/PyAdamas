@@ -1429,6 +1429,9 @@ PyAdamasList* pa_any_iter_list(int64_t v);
 /* unknown 上的下标（读）：按运行期种类分派，非内建可下标容器抛 TypeError。
    返回**拥有引用**（元素已 inc / str 是新串）。 */
 int64_t pa_any_index(int64_t v, int64_t i);
+/* 下标写/删（0.516）：与 pa_any_index 同一探针 + kind 分派。 */
+int64_t pa_any_setindex(int64_t v, int64_t k, int64_t val);
+int64_t pa_any_delindex(int64_t v, int64_t k);
 /* P2（0.340）：tag 版迭代物化 + unknown dict 的 (key,value) 对（rt_class.c）。 */
 PyAdamasList* pa_any_iter_list_t(int64_t v, int64_t tag);
 PyAdamasList* pa_any_dict_items(int64_t v, int64_t tag);

@@ -344,6 +344,36 @@ pyadamas::ModuleInfoPtr builtin_module(const std::string& name) {
             f->ret_known = true;
             func_with("index", f);
         }
+        // setitem/delitem：全部参数 ann_unknown（同一函数被各种静态类型调用是合法的，
+        // 越界/类型错误在运行期或按静态类型发射）。
+        {
+            auto f = std::make_shared<pyadamas::FuncInfo>();
+            f->name = "operator.setitem";
+            for (const char* pn : {"obj", "key", "value"}) {
+                pyadamas::Param p;
+                p.name = pn;
+                p.ty = pyadamas::t_unknown();
+                p.ann_unknown = true;
+                f->pos.push_back(std::move(p));
+            }
+            f->ret = pyadamas::t_none();
+            f->ret_known = true;
+            func_with("setitem", f);
+        }
+        {
+            auto f = std::make_shared<pyadamas::FuncInfo>();
+            f->name = "operator.delitem";
+            for (const char* pn : {"obj", "key"}) {
+                pyadamas::Param p;
+                p.name = pn;
+                p.ty = pyadamas::t_unknown();
+                p.ann_unknown = true;
+                f->pos.push_back(std::move(p));
+            }
+            f->ret = pyadamas::t_none();
+            f->ret_known = true;
+            func_with("delitem", f);
+        }
         // length_hint(x, default=0) -> int：有 len 的容器走 IrOp::Len，
         // 没有 len 时返回 default，连 default 都没有就抛 TypeError。
         {

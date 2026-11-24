@@ -442,6 +442,91 @@ int64_t pa_any_index(int64_t v, int64_t i) {
     return e;
 }
 
+
+/* unknown 值上的下标写/删（0.516）：与 pa_any_index 同一分派结构 —— 先探针
+   判堆，再按头上 kind 分派 list/dict，其它堆对象抛 TypeError。tuple 与 list
+   在运行期同形（都是 RC_LIST），所以 tuple 的 TypeError 由**调用点按静态类型**
+   发射（lower/import_stdlib.cpp），这里只兜 unknown 的底。 */
+int64_t pa_any_setindex(int64_t v, int64_t k, int64_t val) {
+    if (pa_unknown_is_heap(v)) {
+        PyAdamasRc* h = (PyAdamasRc*)(uintptr_t)((uint64_t)v - (uint64_t)PYADAMAS_RC_HDR);
+        switch (h->kind) {
+            case PYADAMAS_RC_LIST: {
+                PyAdamasList* l = (PyAdamasList*)(uintptr_t)v;
+                int64_t i = k;
+                if (i < 0) i += l->len;
+                if (i < 0 || i >= l->len)
+                    pa_raise_c("IndexError", "list assignment index out of range");
+                pa_list_set(l, i, val, pa_unknown_is_heap(val));
+                return 0;
+            }
+            case PYADAMAS_RC_DICT:
+                pa_dict_set((PyAdamasDict*)(uintptr_t)v, k, val);
+                return 0;
+            case PYADAMAS_RC_STR:
+                pa_raise_c("TypeError", "'str' object does not support item assignment");
+                return 0;
+            case PYADAMAS_RC_JSONNULL:
+                pa_raise_c("TypeError", "'NoneType' object does not support item assignment");
+                return 0;
+            case PYADAMAS_RC_JSONBOOL:
+                pa_raise_c("TypeError", "'bool' object does not support item assignment");
+                return 0;
+            default:
+                pa_raise_c("TypeError", "object does not support item assignment");
+                return 0;
+        }
+    }
+    if (v == 0)
+        pa_raise_c("TypeError", "'NoneType' object does not support item assignment");
+    if (v < 65536) pa_raise_c("TypeError", "'int' object does not support item assignment");
+    /* 探针看不见的标量元组（kind-0 untracked）：按 tuple 口径抛。 */
+    pa_raise_c("TypeError", "'tuple' object does not support item assignment");
+    return 0;
+}
+
+int64_t pa_any_delindex(int64_t v, int64_t k) {
+    if (pa_unknown_is_heap(v)) {
+        PyAdamasRc* h = (PyAdamasRc*)(uintptr_t)((uint64_t)v - (uint64_t)PYADAMAS_RC_HDR);
+        switch (h->kind) {
+            case PYADAMAS_RC_LIST: {
+                PyAdamasList* l = (PyAdamasList*)(uintptr_t)v;
+                int64_t i = k;
+                if (i < 0) i += l->len;
+                if (i < 0 || i >= l->len)
+                    pa_raise_c("IndexError", "list assignment index out of range");
+                pa_list_del_index(l, i);
+                return 0;
+            }
+            case PYADAMAS_RC_DICT: {
+                PyAdamasDict* d = (PyAdamasDict*)(uintptr_t)v;
+                if (!pa_dict_contains(d, k)) {
+                    /* CPython 的 KeyError 消息是键的 repr（`KeyError: 'zz'`）。 */
+                    PyAdamasStr* rs = pa_repr_any(k);
+                    pa_raise_c("KeyError", rs ? rs->data : "key not found");
+                }
+                pa_dict_remove(d, k, 0);
+                return 0;
+            }
+            case PYADAMAS_RC_STR:
+                pa_raise_c("TypeError", "'str' object doesn't support item deletion");
+                return 0;
+            case PYADAMAS_RC_JSONNULL:
+                pa_raise_c("TypeError", "'NoneType' object doesn't support item deletion");
+                return 0;
+            case PYADAMAS_RC_JSONBOOL:
+                pa_raise_c("TypeError", "'bool' object doesn't support item deletion");
+                return 0;
+            default:
+                pa_raise_c("TypeError", "object doesn't support item deletion");
+                return 0;
+        }
+    }
+    if (v == 0) pa_raise_c("TypeError", "'NoneType' object doesn't support item deletion");
+    if (v < 65536) pa_raise_c("TypeError", "'int' object doesn't support item deletion");
+    pa_raise_c("TypeError", "'tuple' object doesn't support item deletion");
+    return 0;
+}
 /* P2（0.340，PYADAMAS_TYPE_TAGS）：带 tag 的迭代物化。tag 有精确信息时
    免探针（关键收益：**未被 RC 索引跟踪的标量元组**也能迭代 —— 旧的
    pa_any_iter_list 靠探针判堆，标量元组探针落空后报 'int' not iterable）。
