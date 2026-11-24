@@ -42,6 +42,44 @@ _HEXDIG = "0123456789ABCDEFabcdef"
 _HEX = "0123456789ABCDEF"
 
 
+def _ascii_table(chars: str) -> list[int]:
+    """把一组 ASCII 字符做成长度 128 的 0/1 查表（成员判断从 O(len) 变 O(1)）。"""
+    tab: list[int] = []
+    i: int = 0
+    while i < 128:
+        tab.append(0)
+        i += 1
+    for c in chars:
+        tab[ord(c)] = 1
+    return tab
+
+
+def _hexval_table() -> list[int]:
+    """ASCII 十六进制字符 → 0..15，非十六进制为 -1。"""
+    tab: list[int] = []
+    i: int = 0
+    while i < 128:
+        tab.append(-1)
+        i += 1
+    i = 0
+    while i < 10:
+        tab[48 + i] = i
+        i += 1
+    i = 0
+    while i < 6:
+        tab[65 + i] = 10 + i
+        tab[97 + i] = 10 + i
+        i += 1
+    return tab
+
+
+# 热路径查表：原先 _is_scheme / _quote_text 每字符都要在几十字符的常量串里
+# 线性扫一遍（O(n·m)），换成 128 项查表后是 O(1)。
+_SCHEME_TAB: list[int] = _ascii_table(_SCHEME_CHARS)
+_SAFE_TAB: list[int] = _ascii_table(_ALWAYS_SAFE)
+_HVAL_TAB: list[int] = _hexval_table()
+
+
 # ── 结果对象 ────────────────────────────────────────────────────
 
 
@@ -206,6 +244,10 @@ def _strip_c0(text: str) -> str:
 
 
 def _clean(text: str) -> str:
+    # 三个 replace 各自会整串扫描 + 可能重建字符串；绝大多数 URL 不含控制
+    # 字符，先用一次 find 短路，命中才做替换（含任一控制字符时仍是三次）。
+    if "\t" not in text and "\r" not in text and "\n" not in text:
+        return text
     for ch in ("\t", "\r", "\n"):
         text = text.replace(ch, "")
     return text
@@ -238,7 +280,8 @@ def _is_scheme(cand: str) -> bool:
     if not (ord(cand[0]) < 128 and cand[0].isalpha()):
         return False
     for ch in cand:
-        if ch not in _SCHEME_CHARS:
+        o: int = ord(ch)
+        if o >= 128 or _SCHEME_TAB[o] == 0:
             return False
     return True
 
@@ -423,7 +466,8 @@ def urldefrag(url: str) -> DefragResult:
 def _quote_text(string: str, safe: str, encoding: str, errors: str) -> str:
     out: list[str] = []
     for ch in string:
-        if ch in _ALWAYS_SAFE or ch in safe:
+        o: int = ord(ch)
+        if (o < 128 and _SAFE_TAB[o] != 0) or ch in safe:
             out.append(ch)
         else:
             for b in ch.encode(encoding, errors):
@@ -444,19 +488,29 @@ def quote_plus(string: str, safe: str = "", encoding: str = "utf-8",
 
 
 def quote_from_bytes(data: bytes, safe: str = "/") -> str:
-    """把 bytes 编码成 %XX 转义。"""
+    """把 bytes 编码成 %XX 转义。
+
+    ASCII 安全字节（< 128 且在 _ALWAYS_SAFE 里）直接进位，不再走
+    bytes([b]).decode("latin-1") 的一次分配 + 一次解码。
+    """
     out: list[str] = []
     for b in data:
-        ch = bytes([b]).decode("latin-1")
-        if ch in _ALWAYS_SAFE or ch in safe:
-            out.append(ch)
+        if b < 128 and _SAFE_TAB[b] != 0:
+            out.append(chr(b))
         else:
-            out.append("%" + _HEX[b >> 4] + _HEX[b & 15])
+            ch = chr(b) if b < 128 else bytes([b]).decode("latin-1")
+            if ch in safe:
+                out.append(ch)
+            else:
+                out.append("%" + _HEX[b >> 4] + _HEX[b & 15])
     return "".join(out)
 
 
 def _is_hex(ch: str) -> bool:
-    return ch in _HEXDIG
+    o: int = ord(ch)
+    if o < 128:
+        return _HVAL_TAB[o] >= 0
+    return False
 
 
 def unquote_to_bytes(string: str) -> bytes:
@@ -466,8 +520,13 @@ def unquote_to_bytes(string: str) -> bytes:
     n = len(string)
     while i < n:
         ch = string[i]
-        if ch == "%" and i + 2 < n and _is_hex(string[i + 1]) and _is_hex(string[i + 2]):
-            out.append(int(string[i + 1:i + 3], 16))
+        if (ch == "%" and i + 2 < n and ord(string[i + 1]) < 128
+                and _HVAL_TAB[ord(string[i + 1])] >= 0
+                and ord(string[i + 2]) < 128
+                and _HVAL_TAB[ord(string[i + 2])] >= 0):
+            # 直接查表拼字节，不再切两字符子串 + int(..., 16) 解析
+            out.append((_HVAL_TAB[ord(string[i + 1])] << 4)
+                       | _HVAL_TAB[ord(string[i + 2])])
             i += 3
         else:
             for b in ch.encode("utf-8"):

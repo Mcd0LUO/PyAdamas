@@ -70,10 +70,11 @@ class HMAC:
     def hexdigest(self) -> str:
         d = self.digest()
         chars = "0123456789abcdef"
-        out = ""
+        parts: list[str] = []
         for b in d:
-            out = out + chars[b >> 4] + chars[b & 15]
-        return out
+            parts.append(chars[b >> 4])
+            parts.append(chars[b & 15])
+        return "".join(parts)
 
 
 def new(key: bytes, msg: bytes = b"", digestmod: str = "sha256") -> HMAC:

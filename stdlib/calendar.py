@@ -258,12 +258,13 @@ def formatmonth(year: int, month: int, w: int = 0, l: int = 0) -> str:
     if lines < 1:
         lines = 1
     head = formatmonthname(year, month, 7 * (width + 1) - 1, True).rstrip()
-    out = head + "\n" * lines
-    out = out + formatweekheader(width).rstrip() + "\n" * lines
+    # 缓冲用 list[str] + join（逐行 `out = out + ...` 是二次曲线）
+    parts: list[str] = [head + "\n" * lines]
+    parts.append(formatweekheader(width).rstrip() + "\n" * lines)
     rows = monthcalendar(year, month)
     for row in rows:
-        out = out + formatweek(row, width).rstrip() + "\n" * lines
-    return out
+        parts.append(formatweek(row, width).rstrip() + "\n" * lines)
+    return "".join(parts)
 
 
 def month(year: int, month: int, w: int = 0, l: int = 0) -> str:

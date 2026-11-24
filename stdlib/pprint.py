@@ -37,13 +37,10 @@ _SORT: bool = True
 
 
 def _spaces(n: int) -> str:
-    """n 个空格的缩进串。"""
-    s: str = ""
-    i: int = 0
-    while i < n:
-        s = s + " "
-        i = i + 1
-    return s
+    """n 个空格的缩进串（str * int 一次分配，不用逐字符拼接）。"""
+    if n <= 0:
+        return ""
+    return " " * n
 
 
 def _is_space(c: str) -> bool:
@@ -172,57 +169,63 @@ def _safe_repr(obj: object, level: int) -> str:
             return "{...}"
         if _SORT and len(pairs) > 1:
             pairs = _sorted_by_key(pairs)
-        out: str = "{"
+        parts: list[str] = ["{"]
         i: int = 0
         for p in pairs:
             if i > 0:
-                out = out + ", "
-            out = out + _safe_repr(p[0], level + 1) + ": " + _safe_repr(p[1], level + 1)
+                parts.append(", ")
+            parts.append(_safe_repr(p[0], level + 1))
+            parts.append(": ")
+            parts.append(_safe_repr(p[1], level + 1))
             i = i + 1
-        return out + "}"
+        parts.append("}")
+        return "".join(parts)
     if isinstance(obj, list):
         items: list[object] = _items_of(obj)
         if len(items) == 0:
             return "[]"
         if _DEPTH > 0 and level >= _DEPTH:
             return "[...]"
-        out = "["
+        lparts: list[str] = ["["]
         i = 0
         for x in items:
             if i > 0:
-                out = out + ", "
-            out = out + _safe_repr(x, level + 1)
+                lparts.append(", ")
+            lparts.append(_safe_repr(x, level + 1))
             i = i + 1
-        return out + "]"
+        lparts.append("]")
+        return "".join(lparts)
     if isinstance(obj, tuple):
         items = _items_of(obj)
         if len(items) == 0:
             return "()"
         if _DEPTH > 0 and level >= _DEPTH:
             return "(...)"
-        out = "("
+        tparts: list[str] = ["("]
         i = 0
         for x in items:
             if i > 0:
-                out = out + ", "
-            out = out + _safe_repr(x, level + 1)
+                tparts.append(", ")
+            tparts.append(_safe_repr(x, level + 1))
             i = i + 1
         if len(items) == 1:
-            out = out + ","
-        return out + ")"
+            tparts.append(",")
+        tparts.append(")")
+        return "".join(tparts)
     if isinstance(obj, set):
         items = _items_of(obj)
         if len(items) == 0:
             return "set()"
         items = _sorted_items(items)
-        out = "{"
+        sparts: list[str] = ["{"]
         i = 0
         for x in items:
             if i > 0:
-                out = out + ", "
-            out = out + _safe_repr(x, level)
+                sparts.append(", ")
+            sparts.append(_safe_repr(x, level))
             i = i + 1
-        return out + "}"
+        sparts.append("}")
+        return "".join(sparts)
     return repr(obj)
 
 
@@ -276,35 +279,37 @@ def _format(obj: object, indent: int, allowance: int, level: int) -> str:
 
 def _dict_text(obj: object, indent: int, allowance: int, level: int) -> str:
     """dict 的断行排版：每行一个 key: value，续行缩进 indent+IPL。"""
-    out: str = "{"
+    parts: list[str] = ["{"]
     if _IPL > 1:
-        out = out + _spaces(_IPL - 1)
+        parts.append(_spaces(_IPL - 1))
     pairs: list[object] = _pairs_of(obj)
     if len(pairs) > 1 and _SORT:
         pairs = _sorted_by_key(pairs)
     if len(pairs) > 0:
-        out = out + _dict_items_text(pairs, indent, allowance + 1, level)
-    return out + "}"
+        parts.append(_dict_items_text(pairs, indent, allowance + 1, level))
+    parts.append("}")
+    return "".join(parts)
 
 
 def _dict_items_text(pairs: list[object], indent: int, allowance: int,
                      level: int) -> str:
     indent2: int = indent + _IPL
     delimnl: str = ",\n" + _spaces(indent2)
-    out: str = ""
+    parts: list[str] = []
     last_index: int = len(pairs) - 1
     i: int = 0
     while i <= last_index:
         p: object = pairs[i]
         last: bool = i == last_index
         krepr: str = _safe_repr(p[0], level)
-        out = out + krepr + ": "
-        out = out + _format(p[1], indent2 + len(krepr) + 2,
-                            allowance if last else 1, level)
+        parts.append(krepr)
+        parts.append(": ")
+        parts.append(_format(p[1], indent2 + len(krepr) + 2,
+                             allowance if last else 1, level))
         if not last:
-            out = out + delimnl
+            parts.append(delimnl)
         i = i + 1
-    return out
+    return "".join(parts)
 
 
 def _set_text(obj: object, indent: int, allowance: int, level: int) -> str:
@@ -323,9 +328,9 @@ def _seq_text(obj: object, opener: str, closer: str, indent: int,
 
 def _seq_items_text(items: list[object], opener: str, closer: str, indent: int,
                     allowance: int, level: int) -> str:
-    out: str = opener
+    parts: list[str] = [opener]
     if _IPL > 1:
-        out = out + _spaces(_IPL - 1)
+        parts.append(_spaces(_IPL - 1))
     indent2: int = indent + _IPL
     delimnl: str = ",\n" + _spaces(indent2)
     delim: str = ""
@@ -333,7 +338,8 @@ def _seq_items_text(items: list[object], opener: str, closer: str, indent: int,
     if n == 0:
         # CPython 的 _format_items 先写 (indent_per_level-1) 个空格，再发现
         # 没有元素就返回——空容器被派发时是 "[" + 空格 + "]"（indent>1 才有空格）。
-        return out + closer
+        parts.append(closer)
+        return "".join(parts)
     width: int = _W - indent2 + 1
     max_width: int = width
     i: int = 0
@@ -354,14 +360,15 @@ def _seq_items_text(items: list[object], opener: str, closer: str, indent: int,
                     delim = delimnl
             if width >= w:
                 width = width - w
-                out = out + delim
+                parts.append(delim)
                 delim = ", "
-                out = out + rep
+                parts.append(rep)
                 continue
-        out = out + delim
+        parts.append(delim)
         delim = delimnl
-        out = out + _format(ent, indent2, allowance if last else 1, level)
-    return out + closer
+        parts.append(_format(ent, indent2, allowance if last else 1, level))
+    parts.append(closer)
+    return "".join(parts)
 
 
 def _parts(line: str) -> list[str]:
@@ -425,18 +432,11 @@ def _str_text(s: str, indent: int, allowance: int, level: int) -> str:
         i = i + 1
     if len(chunks) == 1:
         return rep
-    out: str = ""
+    sep: str = "\n" + _spaces(indent)
+    body: str = sep.join(chunks)
     if level == 1:
-        out = "("
-    i = 0
-    while i < len(chunks):
-        if i > 0:
-            out = out + "\n" + _spaces(indent)
-        out = out + chunks[i]
-        i = i + 1
-    if level == 1:
-        out = out + ")"
-    return out
+        return "(" + body + ")"
+    return body
 
 
 def _setup(indent: int, width: int, depth: int, compact: bool,

@@ -82,12 +82,12 @@ def _norm_prefix(prefix: object) -> str:
 
 
 def _random_name() -> str:
-    out = ""
+    parts: list[str] = []
     i = 0
     while i < 8:
-        out = out + _chars[_random.getrandbits(8) % 37]
+        parts.append(_chars[_random.getrandbits(8) % 37])
         i += 1
-    return out
+    return "".join(parts)
 
 
 def _raise_os(what: str, rc: int, path: str) -> None:

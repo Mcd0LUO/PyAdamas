@@ -549,9 +549,8 @@ class ZipFile:
         eocd = b"PK\x05\x06" + _p16(0) + _p16(0) + _p16(n) + _p16(n)
         eocd = eocd + _p32(cd_size) + _p32(cd_start) + _p16(len_bytes(self.comment)) + self.comment
         parts.append(eocd)
-        out = b""
-        for p in parts:
-            out = out + p
+        # b"".join 一次分配；此前逐段 `out = out + p` 是 O(段数 × 已拼长度)
+        out: bytes = b"".join(parts)
         _gzipio.write_bin(self.filename, out)
 
     def open(self, name: object, mode: str = "r", pwd: object = None,

@@ -14,7 +14,8 @@ from os.path import exists, isdir, join
 
 def _has_magic(pat: str) -> bool:
     i = 0
-    while i < len(pat):
+    n = len(pat)
+    while i < n:
         c = pat[i]
         if c == "*" or c == "?" or c == "[":
             return True
@@ -38,26 +39,32 @@ def _in_class(c: str, pat: str, begin: int, end: int) -> bool:
 
 
 def _match(name: str, pat: str) -> bool:
-    """单段通配匹配（等价于 fnmatch.fnmatchcase）。"""
+    """单段通配匹配（等价于 fnmatch.fnmatchcase）。
+
+    len(name) / len(pat) 在循环外取一次：原先每轮回溯分支都重新调 len，
+    一个不匹配的模式会在每个字符上做 4 次长度查询。
+    """
     ni = 0
     pi = 0
     star = -1
     mark = 0
-    while ni < len(name):
-        if pi < len(pat) and (pat[pi] == name[ni] or pat[pi] == "?"):
+    nn = len(name)
+    pn = len(pat)
+    while ni < nn:
+        if pi < pn and (pat[pi] == name[ni] or pat[pi] == "?"):
             pi += 1
             ni += 1
-        elif pi < len(pat) and pat[pi] == "*":
+        elif pi < pn and pat[pi] == "*":
             star = pi
             mark = ni
             pi += 1
-        elif pi < len(pat) and pat[pi] == "[":
+        elif pi < pn and pat[pi] == "[":
             close = pi + 1
-            if close < len(pat) and (pat[close] == "!" or pat[close] == "^"):
+            if close < pn and (pat[close] == "!" or pat[close] == "^"):
                 close += 1
-            while close < len(pat) and pat[close] != "]":
+            while close < pn and pat[close] != "]":
                 close += 1
-            if close >= len(pat):
+            if close >= pn:
                 # 未闭合的 [：退化成字面字符
                 if name[ni] == "[":
                     pi += 1
@@ -89,9 +96,9 @@ def _match(name: str, pat: str) -> bool:
             ni = mark
         else:
             return False
-    while pi < len(pat) and pat[pi] == "*":
+    while pi < pn and pat[pi] == "*":
         pi += 1
-    return pi == len(pat)
+    return pi == pn
 
 
 def _split(pattern: str) -> list[str]:
@@ -187,14 +194,18 @@ def iglob(pattern: str, recursive: bool = False) -> list[str]:
 
 
 def escape(pathname: str) -> str:
-    """把 * ? [ 转义成字符类，让它们按字面匹配。"""
-    out = ""
+    """把 * ? [ 转义成字符类，让它们按字面匹配。
+
+    缓冲用 list[str] + join（逐字符 `out = out + c` 是二次曲线）。
+    """
+    out: list[str] = []
     i = 0
-    while i < len(pathname):
+    n = len(pathname)
+    while i < n:
         c = pathname[i]
         if c == "*" or c == "?" or c == "[":
-            out = out + "[" + c + "]"
+            out.append("[" + c + "]")
         else:
-            out = out + c
+            out.append(c)
         i += 1
-    return out
+    return "".join(out)

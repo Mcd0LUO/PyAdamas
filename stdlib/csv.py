@@ -110,26 +110,32 @@ class writer:
         # 0.322 之前签名是 list[str]，收 list[unknown] 的混合行时按 str
         # 指针读 int 元素，直接段错误。
         parts: list[str] = []
+        # 引号判定只依赖实例字段：提到循环外，避免每字段重复取属性 + 重算
+        quoting: int = self.quoting
+        delim: str = self.delimiter
+        qc: str = self.quotechar
+        need_all: bool = quoting == QUOTE_ALL or quoting == QUOTE_NONNUMERIC
+        qc2: str = qc + qc
+        n: int = len(row)
         i: int = 0
-        while i < len(row):
+        while i < n:
             field: str = str(row[i])
-            need: bool = self.quoting == QUOTE_ALL or self.quoting == QUOTE_NONNUMERIC
+            need: bool = need_all
             if not need:
-                if self.delimiter in field or self.quotechar in field:
+                if delim in field or qc in field:
                     need = True
                 elif "\r" in field or "\n" in field:
                     need = True
             if need:
-                if self.quoting == QUOTE_NONE:
+                if quoting == QUOTE_NONE:
                     raise Error("need to escape delimiter or quotechar, "
                                 "but quoting is QUOTE_NONE")
-                body: str = field.replace(self.quotechar,
-                                          self.quotechar + self.quotechar)
-                parts.append(self.quotechar + body + self.quotechar)
+                body: str = field.replace(qc, qc2)
+                parts.append(qc + body + qc)
             else:
                 parts.append(field)
             i += 1
-        self.f.write(self.delimiter.join(parts) + self.lineterminator)
+        self.f.write(delim.join(parts) + self.lineterminator)
 
     def writerows(self, rows: list[list[object]]) -> None:
         i: int = 0
@@ -183,11 +189,13 @@ def DictReader(f: unknown, delimiter: str = ",",
         return rows
     header = table[0]
     i = 1
-    while i < len(table):
+    nrow: int = len(table)
+    nh: int = len(header)
+    while i < nrow:
         src = table[i]
         d: dict[str, str] = {}
         j = 0
-        while j < len(header):
+        while j < nh:
             key = header[j]
             if j < len(src):
                 d[key] = src[j]
@@ -227,26 +235,31 @@ class DictWriterText:
 
     def _format(self, vals: list[str]) -> str:
         parts: list[str] = []
+        quoting: int = self.quoting
+        delim: str = self.delimiter
+        qc: str = self.quotechar
+        need_all: bool = quoting == QUOTE_ALL or quoting == QUOTE_NONNUMERIC
+        qc2: str = qc + qc
+        n: int = len(vals)
         i: int = 0
-        while i < len(vals):
+        while i < n:
             field: str = vals[i]
-            need: bool = self.quoting == QUOTE_ALL or self.quoting == QUOTE_NONNUMERIC
+            need: bool = need_all
             if not need:
-                if self.delimiter in field or self.quotechar in field:
+                if delim in field or qc in field:
                     need = True
                 elif "\r" in field or "\n" in field:
                     need = True
             if need:
-                if self.quoting == QUOTE_NONE:
+                if quoting == QUOTE_NONE:
                     raise Error("need to escape delimiter or quotechar, "
                                 "but quoting is QUOTE_NONE")
-                body: str = field.replace(self.quotechar,
-                                          self.quotechar + self.quotechar)
-                parts.append(self.quotechar + body + self.quotechar)
+                body: str = field.replace(qc, qc2)
+                parts.append(qc + body + qc)
             else:
                 parts.append(field)
             i += 1
-        return self.delimiter.join(parts) + self.lineterminator
+        return delim.join(parts) + self.lineterminator
 
     def writeheader(self) -> None:
         self._rows.append(self._format(self.fieldnames))
