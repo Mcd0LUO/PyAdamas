@@ -762,6 +762,21 @@ inline const TypePtr& t_dylib() {
 // 可变的类型洞：容器元素类型未知时用它占位，后续插入时原地填上
 inline TypePtr fresh_hole() { return new_ty(TyKind::Unknown); }
 
+// ── 联合类型（0.488 修 Bug A）────────────────────────────────────
+// `int | str` 这类「成员互不可赋值」的联合，以前在 parse_annotation 里落到
+// join() 的兜底 t_unknown() 单例，于是**任何值都能赋进去**（`x: int | str = 1.5`
+// 静默通过，float 的 double 位模式一路流到运行期）。
+//
+// 表示法：TyKind::Unknown + 非空 sub（成员表）。刻意复用 Unknown：
+//   * 运行期表示、降级、coercion 全部沿用 unknown 的 8 字节字，零代码生成改动；
+//   * 所有 `kind == Unknown` 的宽松路径照旧（不引入新的误杀面）。
+// 只有两处要认它：assignable（目标侧按成员逐个判）与 type_name（打印）。
+// 洞（fresh_hole）与联合的区别就是 sub 是否为空。
+inline bool is_union_ty(const TypePtr& t) {
+    return t && t->kind == TyKind::Unknown && !t->sub.empty() && t.get() != t_unknown().get();
+}
+
+
 inline TypePtr mk_list(TypePtr e) {
     auto t = new_ty(TyKind::List);
     t->sub.push_back(std::move(e));

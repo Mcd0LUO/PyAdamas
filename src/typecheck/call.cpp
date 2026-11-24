@@ -209,7 +209,9 @@ TypePtr TypeChecker::check_args(const FuncInfoPtr& fn, Call& c) {
             // 类型填进实参的洞，空字面量才按正确的键/值种类建表。
             if (ty && p.ty && ty_contains_hole(ty, 0) && !ty_contains_hole(p.ty, 0))
                 fill_holes_recursive(ty, p.ty, 0);
-            if (!p.ty || p.ty->kind == TyKind::Unknown) {
+            // 联合形参（kind 仍是 Unknown，带成员表）不能走下面这条「未知形参
+            // → 回填并放行」的捷径，否则 float 能进 int | str（0.488 Bug A）。
+            if (!p.ty || (p.ty->kind == TyKind::Unknown && !is_union_ty(p.ty))) {
                 // 实参是 None 时不回填：None 是「没传 / 清空」的哨兵，不是
                 // 「这个形参就是 NoneType」。回填了会把 copy._reconstruct(x,
                 // None, *rv) 这种调用点的 memo 钉成 None，随后 memo[k]=v

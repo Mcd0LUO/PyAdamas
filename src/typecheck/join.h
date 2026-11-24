@@ -8,6 +8,31 @@
 
 namespace pyadamas {
 
+// 联合类型的构造（0.488 修 Bug A）：放在 query.h/type_eq 之后可用。
+inline void union_flatten(const TypePtr& t, std::vector<TypePtr>& out) {
+    if (!t) return;
+    if (is_union_ty(t)) {
+        for (auto& m : t->sub) union_flatten(m, out);
+        return;
+    }
+    if (is_unknown(t)) return;  // unknown 成员 = 整个联合退化成 unknown
+    for (auto& m : out)
+        if (type_eq(m, t)) return;
+    out.push_back(t);
+}
+
+inline TypePtr mk_union(const TypePtr& a, const TypePtr& b) {
+    if (is_unknown(a) || is_unknown(b)) return t_unknown();
+    std::vector<TypePtr> ms;
+    union_flatten(a, ms);
+    union_flatten(b, ms);
+    if (ms.empty()) return t_unknown();
+    if (ms.size() == 1) return ms[0];
+    auto t = new_ty(TyKind::Unknown);
+    t->sub = std::move(ms);
+    return t;
+}
+
 // ── 类型合并 ──────────────────────────────────────────────────────
 // 两个分支的类型不同时取公共上界；同一数值域内做提升，其余情况
 // 只要有一边是 Unknown 就取另一边，实在合不了就退化成 Unknown。
@@ -16,6 +41,7 @@ inline TypePtr join(const TypePtr& a, const TypePtr& b);
 
 inline void fill_hole(const TypePtr& hole, const TypePtr& with) {
     if (!hole || hole->kind != TyKind::Unknown) return;
+    if (is_union_ty(hole)) return;  // 联合不是「待填的洞」（0.488）
     if (!with || with->kind == TyKind::Unknown) return;
     // t_unknown() 是全程序共享的单例，不是「洞」。原地写它会把所有
     // unknown 一起改掉（曾把全程序的 unknown 变成某个函数类型）。
@@ -69,8 +95,12 @@ inline TypePtr join_into(const TypePtr& a, const TypePtr& b) {
     //
     // 判据：洞是「独占的、非单例的 Unknown」。单例 Unknown 仍是「信息已丢」，
     // 遇到就退化成 unknown（原逻辑保留）。
-    const bool a_hole = a->kind == TyKind::Unknown && a.get() != t_unknown().get();
-    const bool b_hole = b->kind == TyKind::Unknown && b.get() != t_unknown().get();
+    // 联合类型也是「非单例 Unknown」，但它不是待填的洞（0.488）：把它当洞会
+    // 让 Decimal | int | big 在第二次 join 时被 big 顶掉（实测报 expects big）。
+    const bool a_hole =
+        a->kind == TyKind::Unknown && a.get() != t_unknown().get() && a->sub.empty();
+    const bool b_hole =
+        b->kind == TyKind::Unknown && b.get() != t_unknown().get() && b->sub.empty();
     if (a_hole && !b_hole) return b;
     if (b_hole && !a_hole) return a;
     if (is_unknown(a) || is_unknown(b)) return t_unknown();
@@ -202,6 +232,16 @@ inline bool& lang_gaps_enabled() { static bool v = false; return v; }
 
 // 赋值的兼容性：允许 int -> float 的隐式提升，Unknown 与任何类型兼容
 inline bool assignable(const TypePtr& dst, const TypePtr& src) {
+    // 联合目标（0.488 修 Bug A）：任一成员能接住就行，**不能**走下面的
+    // is_unknown 捷径 —— 否则 float 能赋进 int | str（x: int | str = 1.5
+    // 静默通过，double 位模式一路漏到运行期）。隐式转换方向仍按成员各自
+    // 规则：int→float 可以，float→int/big 不行。
+    if (is_union_ty(dst)) {
+        if (is_unknown(src)) return true;  // unknown 源仍然放行（推断失败，不判死）
+        for (auto& m : dst->sub)
+            if (assignable(m, src)) return true;
+        return false;
+    }
     if (is_unknown(dst) || is_unknown(src)) return true;
     if (type_eq(dst, src)) return true;
     if (dst->kind == TyKind::Float &&

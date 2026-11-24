@@ -554,17 +554,6 @@ def _fmt_body(neg: int, intpart: str, fracpart: str, exp: int, ftype: str,
                       width)
 
 
-def _to_decimal(o: Decimal | int | big) -> Decimal:
-    """把 int / big / Decimal 归一成 Decimal（0.486 / §3.1）。
-
-    形参用联合而不是 unknown：四则/比较要静态证明 o 有 _sign/_coeff/_exp。
-    int/big 走 Decimal(value)（内部按 str() 精确解析）；float 不在这三个分支里，
-    编译期拒绝（CPython 里 Decimal + float 本来就抛 TypeError）。
-    """
-    if isinstance(o, Decimal):
-        return o
-    return Decimal(o)
-
 class Decimal:
     """定点十进制数（见模块 docstring 的表示与边界）。"""
 
@@ -663,49 +652,31 @@ class Decimal:
 
     # ── 四则 ──────────────────────────────────────────────────
 
-    def __add__(self, o: Decimal | int | big) -> Decimal:
-        q: Decimal = _to_decimal(o)
+    def __add__(self, o: Decimal) -> Decimal:
         sign, coeff, exp = _addsub_parts(self._sign, self._coeff, self._exp,
-                                         q._sign, q._coeff, q._exp, False,
+                                         o._sign, o._coeff, o._exp, False,
                                          _context.prec, _context.rounding)
         return _from_parts(sign, coeff, exp)
 
-    def __radd__(self, o: Decimal | int | big) -> Decimal:
-        return self.__add__(o)
-
-    def __sub__(self, o: Decimal | int | big) -> Decimal:
-        q: Decimal = _to_decimal(o)
+    def __sub__(self, o: Decimal) -> Decimal:
         sign, coeff, exp = _addsub_parts(self._sign, self._coeff, self._exp,
-                                         q._sign, q._coeff, q._exp, True,
+                                         o._sign, o._coeff, o._exp, True,
                                          _context.prec, _context.rounding)
         return _from_parts(sign, coeff, exp)
 
-    def __rsub__(self, o: Decimal | int | big) -> Decimal:
-        q: Decimal = _to_decimal(o)
-        return q.__sub__(self)
-
-    def __mul__(self, o: Decimal | int | big) -> Decimal:
-        q: Decimal = _to_decimal(o)
-        sign: int = self._sign ^ q._sign
-        coeff: big = self._coeff * q._coeff
-        exp: int = self._exp + q._exp
+    def __mul__(self, o: Decimal) -> Decimal:
+        sign: int = self._sign ^ o._sign
+        coeff: big = self._coeff * o._coeff
+        exp: int = self._exp + o._exp
         sign, coeff, exp = _round_parts(sign, coeff, exp, _context.prec,
                                         _context.rounding)
         return _from_parts(sign, coeff, exp)
 
-    def __rmul__(self, o: Decimal | int | big) -> Decimal:
-        return self.__mul__(o)
-
-    def __truediv__(self, o: Decimal | int | big) -> Decimal:
-        q: Decimal = _to_decimal(o)
+    def __truediv__(self, o: Decimal) -> Decimal:
         sign, coeff, exp = _div_parts(self._sign, self._coeff, self._exp,
-                                      q._sign, q._coeff, q._exp,
+                                      o._sign, o._coeff, o._exp,
                                       _context.prec, _context.rounding)
         return _from_parts(sign, coeff, exp)
-
-    def __rtruediv__(self, o: Decimal | int | big) -> Decimal:
-        q: Decimal = _to_decimal(o)
-        return q.__truediv__(self)
 
     # ── 一元运算（不做 __pos__：CPython 的 +x 也要上下文舍入）────
 
@@ -725,35 +696,29 @@ class Decimal:
 
     # ── 比较 / 哈希 ───────────────────────────────────────────
 
-    def __eq__(self, o: Decimal | int | big) -> bool:
-        q: Decimal = _to_decimal(o)
+    def __eq__(self, o: Decimal) -> bool:
         return _cmp_parts(self._sign, self._coeff, self._exp,
-                          q._sign, q._coeff, q._exp) == 0
+                          o._sign, o._coeff, o._exp) == 0
 
-    def __ne__(self, o: Decimal | int | big) -> bool:
-        q: Decimal = _to_decimal(o)
+    def __ne__(self, o: Decimal) -> bool:
         return _cmp_parts(self._sign, self._coeff, self._exp,
-                          q._sign, q._coeff, q._exp) != 0
+                          o._sign, o._coeff, o._exp) != 0
 
-    def __lt__(self, o: Decimal | int | big) -> bool:
-        q: Decimal = _to_decimal(o)
+    def __lt__(self, o: Decimal) -> bool:
         return _cmp_parts(self._sign, self._coeff, self._exp,
-                          q._sign, q._coeff, q._exp) < 0
+                          o._sign, o._coeff, o._exp) < 0
 
-    def __le__(self, o: Decimal | int | big) -> bool:
-        q: Decimal = _to_decimal(o)
+    def __le__(self, o: Decimal) -> bool:
         return _cmp_parts(self._sign, self._coeff, self._exp,
-                          q._sign, q._coeff, q._exp) <= 0
+                          o._sign, o._coeff, o._exp) <= 0
 
-    def __gt__(self, o: Decimal | int | big) -> bool:
-        q: Decimal = _to_decimal(o)
+    def __gt__(self, o: Decimal) -> bool:
         return _cmp_parts(self._sign, self._coeff, self._exp,
-                          q._sign, q._coeff, q._exp) > 0
+                          o._sign, o._coeff, o._exp) > 0
 
-    def __ge__(self, o: Decimal | int | big) -> bool:
-        q: Decimal = _to_decimal(o)
+    def __ge__(self, o: Decimal) -> bool:
         return _cmp_parts(self._sign, self._coeff, self._exp,
-                          q._sign, q._coeff, q._exp) >= 0
+                          o._sign, o._coeff, o._exp) >= 0
 
     def compare(self, o: Decimal) -> int:
         return _cmp_parts(self._sign, self._coeff, self._exp,

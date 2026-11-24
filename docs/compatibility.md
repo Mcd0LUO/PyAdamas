@@ -95,6 +95,18 @@ PyAdamas 不追求兼容 CPython：语义是按静态类型的需要重新定的
 
 设计见 [str-codepoints.md](str-codepoints.md)。
 
+### 联合类型与 unknown 域（0.489 定口径）
+
+`A | B` 标注：数值塔内部（`int | float`、`int | big`）仍按 `join` 提升（前者 float、后者 big）；
+成员互不可赋值的组合（`int | str`、`Fraction | int`）保留成**联合类型**，赋值/传参按成员
+逐个判 —— **隐式转换只有 int→float、int/big→big 两条，float 永远进不了 int/big 成员**。
+
+限制（与 0.487 判负的 Fraction 混合运算同源）：**联合在运行期没有标签**。
+`isinstance(x, int)` 对 unknown/联合里的整数返回 **False**（装箱的 float 反而能被
+`isinstance(x, float)` 认出）。因此「在 stdlib 里用 isinstance 把 int/big/float 分开」
+这条路走不通：未装箱的 double 与 int 都是裸字，误判会把 double 位模式当 BigInt 指针读
+（0.487 的 `Fraction + 0.5` 就是这样每次输出不同的数）。要支持 `Fraction + int` 这类混合，
+必须做类型检查层的数值提升或给联合加运行期标签，不能在库代码里用 isinstance 兜。
 ### 二进制模式 file 的 read/write 语义（0.484 定口径，pya-lsp 缺口 1）
 
 `open(path, "rb")` 返回的 file 在**运行期按字节读写**，但值类型是 **str**：

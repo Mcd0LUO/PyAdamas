@@ -900,7 +900,10 @@ void TypeChecker::classdef(ClassDef& c) {
                         if (m.sig->pos.size() != 2) {
                             bad("takes 'self' and one other parameter");
                         } else if (bool_ret && !is_unknown(m.sig->pos[1].ty) &&
-                                   m.sig->pos[1].ty->kind != TyKind::Class) {
+                                   m.sig->pos[1].ty->kind != TyKind::Class &&
+                                   // 联合形参（0.488）：比较 dunder 收 int/同类，
+                                   // 用来表达「与 int/big 混比」，不该判死。
+                                   !is_union_ty(m.sig->pos[1].ty)) {
                             bad("second parameter must be unannotated or a class type");
                         }
                     } else if (m.sig->pos.size() != 1) {

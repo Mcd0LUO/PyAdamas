@@ -948,7 +948,10 @@ FuncInfoPtr TypeChecker::build_sig(FunctionDef& f) {
             Param p;
             p.name = arg.name;
             p.ty = parse_annotation(arg.annotation.get(), f.line);
-            p.ann_unknown = arg.annotation && p.ty && p.ty->kind == TyKind::Unknown;
+            // 联合类型（kind 仍是 Unknown，带成员表）**不是**「显式 unknown」：
+            // 它要按成员逐个检查实参，不能被 ann_unknown 的早退放行（0.488 Bug A）。
+            p.ann_unknown = arg.annotation && p.ty && p.ty->kind == TyKind::Unknown &&
+                            !is_union_ty(p.ty);
             size_t idx = info->pos.size();
             p.has_default = idx + ndef >= total_pos;
             p.kwonly = false;
@@ -969,7 +972,8 @@ FuncInfoPtr TypeChecker::build_sig(FunctionDef& f) {
             Param p;
             p.name = a.kwonly[i].name;
             p.ty = parse_annotation(a.kwonly[i].annotation.get(), f.line);
-            p.ann_unknown = a.kwonly[i].annotation && p.ty && p.ty->kind == TyKind::Unknown;
+            p.ann_unknown = a.kwonly[i].annotation && p.ty &&
+                            p.ty->kind == TyKind::Unknown && !is_union_ty(p.ty);
             p.has_default = i < a.kw_defaults.size() && a.kw_defaults[i] != nullptr;
             p.kwonly = true;
             if (i < a.kw_defaults.size()) {

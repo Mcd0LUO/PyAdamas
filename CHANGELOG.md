@@ -4,6 +4,71 @@
 
 早期阶段没有逐条留痕，按阶段归纳；0.4 之后逐条记录。
 
+## [0.489] - 2026-11-24
+
+> fix(typecheck)：**联合类型不再接受 float**（Bug A）；**回退 0.487 的 dunder 放宽**
+> （Bug B：静默算错）。3.1 的 int/big 混合运算**判负**，根因写清。
+>
+> **Bug A（既有缺陷，被 0.487 的 union 签名暴露）**：`x: int | str = 1.5` 与
+> `def g(o: int | str); g(1.5)` 都放行。根因：`parse_annotation` 里 `A | B` 走 `join()`，
+> join 合不了就塌成 **`t_unknown()` 单例**，于是目标侧 `is_unknown` 早退、任何值都能进。
+> 修法：用 `TyKind::Unknown + 非空 sub` 表示联合（**运行期表示与降级零改动**，仍是 8 字节字），
+> 只在五处认它 —— `assignable`（目标侧按成员逐个判，且在 `is_unknown` 捷径**之前**）、
+> `check_args` 的「未知形参→回填并放行」捷径、`ann_unknown`（只有显式 unknown/object 才早退）、
+> `join_into` 的洞判定（联合不是待填的洞，否则 `Decimal | int | big` 会被 big 顶掉）、
+> 比较 dunder 的第二参数校验。数值塔内部仍走 join（`int | float` → float，`int | big` → big）。
+> 附带修好 `annotated as ...` 把联合拼成 `cast_int | str(x)` 的四不像消息。
+> 回归：`tests/fail/f82_union_float.py`（赋值）、`f83_union_arg_float.py`（调用点）、
+> `tests/run/571_union_types.py`（正向：int 成员收 int、`int | float` 收 int、本地类联合）。
+>
+> **Bug B（0.487 引入，静默算错）**：`Fraction(1,3) + 0.5` 输出每次不同的垃圾
+> （`285998712124225/3` 之类），`Decimal + 0.5` 同样。
+>
+> 根因**比「漏了一个 raise」深一层**：0.487 把 dunder 形参放宽成 `Fraction | int | big`，
+> 而 pyadamas 的**联合在运行期没有标签** —— 实测 `isinstance(unknown_int, int)` 为 **False**
+> （只有装箱的 float 能被 `isinstance(o, float)` 认出来，未装箱的 double 与 int 都是裸字）。
+> 于是 `_coerce` 里 int / big / float 三者不可区分，落到 `Fraction(o)` 时那个字被当成
+> BigInt **指针**读 → 越界读 → 每次不同的数。加 `isinstance(o, float)` 也拦不住未装箱的路径。
+>
+> **处理：回退 0.487 的 dunder 放宽**（`stdlib/fractions.py` / `stdlib/decimal.py` 与 0.485
+> 逐字节相同，`git diff 8c915c8 -- stdlib/` 为空），`Fraction(1,3) * 3` 回到编译期
+> `unsupported operand type(s)`。**3.1 判负**：正确的做法是二选一 ——
+> ① 类型检查层的数值提升（在 BinOp/比较/反射每个点插入 `Fraction(int)` 构造，影响所有
+> 定义了算术 dunder 的类）；② 给联合加运行期标签（改 unknown 表示与 codegen）。
+> 两者都是独立一层，**不能**在 stdlib 里用 `isinstance` 糊出来 —— 那正是这次静默算错的来源。
+>
+> **0.487 的结论更正**：当时写的「float 仍然被拒绝」不成立 —— `Fraction | int` 里的导入类
+> 标注在没有 import 图时会塌成 unknown，`f + 0.5` 照样通过 check。现在 union 修好了，
+> 但 `Fraction` 本身仍要在 `--imports` 下才解析得到，所以 `f + 0.5` 目前是**编译期放行、
+> 运行期按未知域处理**；由于 dunder 已回退成 `o: Fraction`，float 走不到那些算式里
+> （会先报 `unsupported operand type(s)`），不再有静默算错。
+>
+> **审计**：stdlib 里除这两处没有别的「union 形参 + 构造函数 fallback」；`Decimal.__init__`
+> 的 `value: unknown` 是 CPython 兼容入口（`Decimal(0.5)` 本来就合法），保留。
+>
+> 验收：`tests/fail/f82`/`f83`、`tests/run/571_union_types.py`；Fraction 热路径与 0.485
+> 逐字节相同（回退后无任何改动，无需重测性能）。
+## [0.488] - 2026-11-24
+
+> feat(big)：**divmod(big, …) 落地**，并把 big 缺口清单按 0.488 实测重写（§3.2）。
+>
+> 复测 `docs/big-landing.md`「有意差异与尚未完成」里的拒绝项（CPython 3.14.4 对拍）：
+> **旧的「明确拒绝」清单五项里四项早已可用** —— `dict[big, int]` / `set[big]` 键、
+> `list[big].sort()`、`sum`/`min`/`max(list[big])`、big 的 `%`/`//`/比较全部通过；
+> 真正缺的只有 `divmod(big, …)`、`round(big, ndigits)`、三参 `pow`。
+>
+> **本轮补 `divmod`**：`typecheck` 不再拦 big；降级不能发 `Bin{FloorDiv,Mod}`（那条路径的
+> codegen 对 big 会**静默出 `idivq`**，实测段错误），改为 `CallRt(pa_big_floordiv/pa_big_mod)`，
+> 结果按「产生者引用」交给 `tuple.new` 偷走（与字面量元组同口径）。
+> 新用例 `tests/run/570_big_divmod.py` 与 CPython **逐字节相同**：正/负被除数与除数、
+> `divmod(7, big)`、`divmod(big, big)`、`q*5+r == a`、除零抛 `ZeroDivisionError`。
+>
+> **仍拒绝（负结论，写进 big-landing.md）**：`round(big, ndigits)` 需要运行时
+> `pa_big_round`（按 10^k 取整 + 半程到偶数；单参 `round(big)` 本来就返回自身）；
+> 三参 `pow(big, big, mod)` 需要 `pa_big_pow_mod`（右到左二进制幂 + limb 级取模，现有
+> `pa_big_pow` 只做非模幂且指数 >2^31 直接 ValueError）。两者都是新增运行时函数 + RtFn +
+> 降级 + 对拍用例的完整一轮，本轮不做；`big + float` 提升（结果类型变化）与格式化
+> mini-language 维持原状。
 ## [0.487] - 2026-11-24
 
 > feat(stdlib)：**Fraction / Decimal 与 int / big 的混合运算**（§3.1）。

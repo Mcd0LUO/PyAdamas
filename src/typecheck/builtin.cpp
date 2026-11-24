@@ -519,8 +519,10 @@ TypePtr TypeChecker::builtin_call(const std::string& n, Call& c) {
             return a[0];
         }
         if (n == "divmod") {
-            if (std::any_of(a.begin(), a.end(), has_big_value))
-                err(c.line, c.col, "divmod() with big is not supported");
+            // 0.488（§3.2）：big 的 divmod 落地。降级路径本来就按元素类型发
+            // FloorDiv/Mod（Bin 的 big 分支是 pa_big_floordiv/pa_big_mod），
+            // 所以这里只要不再拦，返回 tuple[promote(a,b), promote(a,b)] 即可；
+            // CPython 的 divmod(a, b) 与 (a // b, a % b) 对整数恒等。
             if (a.size() >= 2 && is_num(a[0]) && is_num(a[1])) {
                 auto q = promote(a[0], a[1]);
                 return mk_tuple({q, q});

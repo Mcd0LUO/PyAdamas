@@ -278,18 +278,29 @@ VReg Lowerer::lower_builtin_text(const std::string& name, Call& c) {
         if (ty && ty->kind == TyKind::Tuple && !ty->sub.empty()) et = ty->sub[0];
         VReg a = coerce(expr(*c.args[0]), tc_.type_of(c.args[0].get()), et);
         VReg b = coerce(expr(*c.args[1]), tc_.type_of(c.args[1].get()), et);
-        Inst q;
-        q.op = IrOp::Bin;
-        q.bop = BinKind::FloorDiv;
-        q.a = a;
-        q.b = b;
-        VReg qv = def(et, std::move(q));
-        Inst m;
-        m.op = IrOp::Bin;
-        m.bop = BinKind::Mod;
-        m.a = a;
-        m.b = b;
-        VReg mv = def(et, std::move(m));
+        VReg qv;
+        VReg mv;
+        if (et && et->kind == TyKind::Big) {
+            // 0.488（§3.2）：big 的 divmod。不能发 Bin（FloorDiv/Mod）——那条
+            // 路径在 codegen 里直接出 idivq，只对 i64 成立；big 必须走运行时。
+            // 结果按「产生者引用」交给 tuple.new 偷走（不进临时栈，等价于
+            // 未登记的 fresh 值，容器 take 语义与字面量元组一致）。
+            qv = call_runtime(RtFn::BigFloorDiv, t_big(), {a, b});
+            mv = call_runtime(RtFn::BigMod, t_big(), {a, b});
+        } else {
+            Inst q;
+            q.op = IrOp::Bin;
+            q.bop = BinKind::FloorDiv;
+            q.a = a;
+            q.b = b;
+            qv = def(et, std::move(q));
+            Inst m;
+            m.op = IrOp::Bin;
+            m.bop = BinKind::Mod;
+            m.a = a;
+            m.b = b;
+            mv = def(et, std::move(m));
+        }
         Inst mt;
         mt.op = IrOp::MakeTuple;
         mt.imm = !et ? 2 : et->kind == TyKind::Unknown ? 2 : (ir_is_heap(et) ? 1 : 0);

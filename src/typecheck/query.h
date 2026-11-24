@@ -46,7 +46,15 @@ inline std::string type_name_impl(const TypePtr& t, int depth) {
     if (!t) return "unknown";
     if (depth > 12) return "...";
     switch (t->kind) {
-        case TyKind::Unknown: return "unknown";
+        case TyKind::Unknown: {
+            if (!is_union_ty(t)) return "unknown";
+            std::string out;
+            for (auto& m : t->sub) {
+                if (!out.empty()) out += " | ";
+                out += type_name_impl(m, depth + 1);
+            }
+            return out;
+        }
         case TyKind::None: return "None";
         case TyKind::Bool: return "bool";
         case TyKind::Int: return "int";

@@ -349,11 +349,21 @@ void TypeChecker::stmt_ann_assign(AnnAssign& a) {
             } else if (ann && coerce_container_literal(ann, a.value.get())) {
                 // 定宽元素容器标注 + 字面量容器：逐元素 coerce（同口径）。
                 vt = ann;
-            } else if (ann && !assignable(ann, vt))
-                err(a.line, a.col,
-                    std::format("annotated as '{}' but assigned '{}' (fixed-width needs an "
-                                "explicit cast, e.g. cast_{}(x))",
-                                type_name(ann), type_name(vt), type_name(ann)));
+            } else if (ann && !assignable(ann, vt)) {
+                // 定宽/big 标注才给「显式 cast」提示；联合别拼接成
+                // 「cast_int | str(x)」这种四不像（0.488 修 Bug A 时发现）。
+                const bool cast_hint = !is_union_ty(ann) &&
+                                       (is_fixed_int(ann) || ann->kind == TyKind::Big);
+                if (cast_hint)
+                    err(a.line, a.col,
+                        std::format("annotated as '{}' but assigned '{}' (fixed-width needs "
+                                    "an explicit cast, e.g. cast_{}(x))",
+                                    type_name(ann), type_name(vt), type_name(ann)));
+                else
+                    err(a.line, a.col,
+                        std::format("annotated as '{}' but assigned '{}'", type_name(ann),
+                                    type_name(vt)));
+            }
         }
         if (auto* n = dynamic_cast<Name*>(a.target.get())) {
             declare(n->id, ann ? ann : t_unknown(), a.line, a.col, true);

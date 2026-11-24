@@ -207,7 +207,16 @@ TypePtr TypeChecker::parse_annotation_impl(Expr* e, int line, int depth) {
             if (r && r->kind == TyKind::None) return mk_optional(l);
             if (l && l->kind == TyKind::Optional) return mk_optional(join(l->sub[0], r));
             if (r && r->kind == TyKind::Optional) return mk_optional(join(l, r->sub[0]));
-            return join(l, r);
+            // 0.488（修 Bug A）：数值塔内部照旧走 join（int | float → float、
+            // int | big → big，隐式提升语义不变）；join 合不了的成员组合以前
+            // 会塌成 unknown（于是 float 也能赋进来），现在保留成联合类型。
+            // 任一侧已经是联合：直接按成员表合并（不能走 join —— join 会把
+            // 非单例 Unknown 当洞/信息丢失处理，成员会被顶掉）。
+            if (is_union_ty(l) || is_union_ty(r)) return mk_union(l, r);
+            auto j = join(l, r);
+            if (is_unknown(j) && l && r && !is_unknown(l) && !is_unknown(r))
+                return mk_union(l, r);
+            return j;
         }
         return t_unknown();
     }

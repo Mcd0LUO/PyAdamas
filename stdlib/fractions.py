@@ -9,11 +9,8 @@ Fraction 用两个 **big**（任意精度整数）字段保存规范化后的分
 余数同号）实现 Euclid，先把 a 取绝对值。
 
 语义边界（与 CPython 的差异，均为有意）：
-- 构造只接受 big/int（int 会提升成 big）；不接受 Fraction 作实参，
-  也不支持 float/str/Decimal 构造。
-- 四则与比较的形参是 `Fraction | int | big`（0.486 / §3.1）：int/big 走
-  `_coerce` 提升成 Fraction，**float 不在签名里**（CPython 的
-  `Fraction + 0.5` 返回 float，那是结果类型变化，本模块不覆盖，编译期拒绝）。
+- 构造只接受 big/int（int 会提升成 big）；不支持 float/str/Decimal
+  构造，也不接受 Fraction 作实参。
 - **不定义一元负号 `__neg__`**：本轮保持公开 API 原样（0.357 的编译器
   已支持用户类一元 dunder，这是刻意的 API 边界，不是绕 bug）。要取反
   请写 `Fraction(0, 1) - x`；对 Fraction 直接写 `-x` 是编译期错误
@@ -41,18 +38,6 @@ def _gcd_big(a: big, b: big) -> big:
     return x
 
 
-def _coerce(o: Fraction | int | big) -> Fraction:
-    """把 int / big / Fraction 归一成 Fraction（0.486 / §3.1）。
-
-    为什么形参是「联合」而不是 unknown：四则/比较的静态签名必须能证明 `o` 有
-    numerator/denominator，收 unknown 会丢掉全部检查。联合类型在运行期带标签，
-    isinstance 能可靠分派；float / str / bytes 不在这三个分支里，编译期就拒绝
-    （CPython 里 `Fraction + 0.5` 返回 float，那是结果类型变化，本模块不覆盖）。
-    """
-    if isinstance(o, Fraction):
-        return o
-    return Fraction(o)
-
 class Fraction:
     numerator: big
     denominator: big
@@ -70,59 +55,36 @@ class Fraction:
         self.numerator = numerator
         self.denominator = denominator
 
-    def __add__(self, o: Fraction | int | big) -> Fraction:
-        q: Fraction = _coerce(o)
-        return Fraction(self.numerator * q.denominator + q.numerator * self.denominator,
-                        self.denominator * q.denominator)
+    def __add__(self, o: Fraction) -> Fraction:
+        return Fraction(self.numerator * o.denominator + o.numerator * self.denominator,
+                        self.denominator * o.denominator)
 
-    def __radd__(self, o: Fraction | int | big) -> Fraction:
-        return self.__add__(o)
+    def __sub__(self, o: Fraction) -> Fraction:
+        return Fraction(self.numerator * o.denominator - o.numerator * self.denominator,
+                        self.denominator * o.denominator)
 
-    def __sub__(self, o: Fraction | int | big) -> Fraction:
-        q: Fraction = _coerce(o)
-        return Fraction(self.numerator * q.denominator - q.numerator * self.denominator,
-                        self.denominator * q.denominator)
+    def __mul__(self, o: Fraction) -> Fraction:
+        return Fraction(self.numerator * o.numerator,
+                        self.denominator * o.denominator)
 
-    def __rsub__(self, o: Fraction | int | big) -> Fraction:
-        q: Fraction = _coerce(o)
-        return q.__sub__(self)
+    def __truediv__(self, o: Fraction) -> Fraction:
+        return Fraction(self.numerator * o.denominator,
+                        self.denominator * o.numerator)
 
-    def __mul__(self, o: Fraction | int | big) -> Fraction:
-        q: Fraction = _coerce(o)
-        return Fraction(self.numerator * q.numerator,
-                        self.denominator * q.denominator)
+    def __eq__(self, o: Fraction) -> bool:
+        return self.numerator == o.numerator and self.denominator == o.denominator
 
-    def __rmul__(self, o: Fraction | int | big) -> Fraction:
-        return self.__mul__(o)
+    def __lt__(self, o: Fraction) -> bool:
+        return self.numerator * o.denominator < o.numerator * self.denominator
 
-    def __truediv__(self, o: Fraction | int | big) -> Fraction:
-        q: Fraction = _coerce(o)
-        return Fraction(self.numerator * q.denominator,
-                        self.denominator * q.numerator)
+    def __le__(self, o: Fraction) -> bool:
+        return self.numerator * o.denominator <= o.numerator * self.denominator
 
-    def __rtruediv__(self, o: Fraction | int | big) -> Fraction:
-        q: Fraction = _coerce(o)
-        return q.__truediv__(self)
+    def __gt__(self, o: Fraction) -> bool:
+        return self.numerator * o.denominator > o.numerator * self.denominator
 
-    def __eq__(self, o: Fraction | int | big) -> bool:
-        q: Fraction = _coerce(o)
-        return self.numerator == q.numerator and self.denominator == q.denominator
-
-    def __lt__(self, o: Fraction | int | big) -> bool:
-        q: Fraction = _coerce(o)
-        return self.numerator * q.denominator < q.numerator * self.denominator
-
-    def __le__(self, o: Fraction | int | big) -> bool:
-        q: Fraction = _coerce(o)
-        return self.numerator * q.denominator <= q.numerator * self.denominator
-
-    def __gt__(self, o: Fraction | int | big) -> bool:
-        q: Fraction = _coerce(o)
-        return self.numerator * q.denominator > q.numerator * self.denominator
-
-    def __ge__(self, o: Fraction | int | big) -> bool:
-        q: Fraction = _coerce(o)
-        return self.numerator * q.denominator >= q.numerator * self.denominator
+    def __ge__(self, o: Fraction) -> bool:
+        return self.numerator * o.denominator >= o.numerator * self.denominator
 
     def __hash__(self) -> int:
         return cast_i64(self.numerator * 31 + self.denominator)

@@ -2,6 +2,12 @@
 
 分支从 0.356（8e8873e）分出，接续块 A–C 的 b6005d8、32cc212、0e70907。此文记录候选及未完成项，不代表已经合入或发布。
 
+> **状态（0.488 复测）**：本文写于 0.357 候选期。0.488 逐条复测了「有意差异与尚未完成」
+> 里列出的拒绝项：**big 的 `dict` 键 / `set` / `list.sort()` / `sum`/`min`/`max` / `%`/`//`/
+> 比较全部已可用**（文中旧的「明确拒绝」已过时），`divmod(big, …)` 本轮补上；仍拒绝的是
+> `round(big, ndigits)`、三参数 `pow`、`big+float` 提升、格式化 mini-language 与动态域 `int(v)`。
+> 详见下面「有意差异与尚未完成」第一条。
+
 ## 已实现
 
 - `big` 标注、超 u64 的十进制字面量、永生静态字面量；有明确 big 上下文的 u64 大字面量保留无符号幅值（包括跨模块默认参数）。旧的裸 `int` 仍是 i64；`2 ** 100` 不会凭结果自动升级，先给底数 `big` 类型。
@@ -14,7 +20,21 @@
 
 - 混合 `big + float` 等提升到 big，float 向零截断；静态含 big 的 `/` 结果为 float，但先将同表达式中的 float 操作数截成 big。负指数按 big 静态返回类型约束抛 ValueError（零底数仍为 ZeroDivisionError）；正指数及可分配 limb 有运行时上限。定宽左值配静态 big 移位计数会诊断，先显式改左域。
 - 格式化首版支持整数说明符（d/b/o/x/X/n）、符号/宽度/分组，未覆盖完整 CPython mini-language（如浮点显示型和带分组的零填充组合）。`cast_big(str)` 是 ASCII 十进制入口，未接 Unicode 数字及 Python 的十进制转换位数限制。
-- 静态可知的 big 键、big 容器比较/排序和 big 的 sum/min/max/divmod、三参数 pow、双参数 round 明确拒绝相关未接路径。Big 可作为容器值储存、传递、索引；这不是一般容器值语义已落地。CPython bridge/JSON/原生模块的整型 API、f32 未列入本批。
+- **0.488 复测后的真实缺口**（本条原写「big 键 / 容器比较排序 / sum/min/max/divmod / 三参 pow /
+  双参 round 全部拒绝」，其中前五项早已可用）：
+  - **已支持**（本轮逐条实测，CPython 3.14.4 对拍）：`dict[big, int]` 与 `set[big]` 的静态
+    可判定键、`list[big].sort()`、`sum/min/max(list[big])`、big 的 `%`/`//`/比较、
+    **`divmod(big, big|int)`（0.488 本轮落地，正负号/向下取整/除零与 CPython 一致）**。
+  - **仍拒绝**：`round(big, ndigits)`（需要运行时 `pa_big_round`：按 10^k 取整 + 半程到偶数，
+    单参 `round(big)` 本来就返回自身）；三参数 `pow(big, big, mod)`（需要运行时
+    `pa_big_pow_mod`：右到左二进制幂 + limb 级取模；当前只有非模 `pa_big_pow`，且指数 >2^31
+    已按 ValueError 拒绝）；`big + float` 提升（结果类型变化）；格式化 mini-language；
+    动态域的 `int(v)`。
+  - 修复时的坑：`divmod` 原来发 `Bin{FloorDiv,Mod}`，而 Bin 的 codegen 对 big 会**静默出
+    `idivq`**（i64 路径）——big 必须走 `CallRt(pa_big_floordiv/pa_big_mod)`。手工构造 Bin 的
+    降级点都要注意这条。
+- Big 可作为容器值储存、传递、索引；这不是一般容器值语义已落地。CPython bridge/JSON/原生模块的
+  整型 API、f32 未列入本批。
 - 纯动态域（把 big 擦成 `object` 之后）已按「全图模式」补齐：见下节。仍未接的只有 `int(v)`（unknown 返回 i64 截断，不等于静态 `int(big)`）、混合「静态 float + unknown」的旧浮点快路径（不做 big 提升）、以及纯动态真除（仍走 float 路径而非 exact big 除法）。
 
 ## 动态域隔离（needs_dynamic_big）
