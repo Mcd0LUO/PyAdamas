@@ -220,6 +220,13 @@ void AsmGen::gen_obj_new(const Inst& in) {
 
 void AsmGen::gen_field_load(const Inst& in) {
         emit2(MOp::kMovq, src_mop(in.a), kRax);
+        if (ir_is_float(in.ty) && in.fwidth == 4) {
+            // C float 字段：单精度装载后提升成 double（与 ptr[float32] 同口径）。
+            line(std::format("movss {}(%rax), %xmm0", in.imm));
+            line("cvtss2sd %xmm0, %xmm0");
+            emit2("movsd", "%xmm0", dst_op(in.dst));
+            return;
+        }
         if (in.fwidth == 1) {
             // signed char 字段符号扩展；Bool/无符号仍零扩展（旧行为）。
             if (in.ty && in.ty->kind == TyKind::I8)
@@ -248,6 +255,13 @@ void AsmGen::gen_field_store(const Inst& in) {
         // Win64 是 %r10 —— %rcx 在 Win64 是第 1 个实参，不能当暂存）。
         const TargetABI& abi = target_abi();
         emit2(MOp::kMovq, src_mop(in.a), kRax);
+        if (ir_is_float(in.ty) && in.fwidth == 4) {
+            // C float 字段：double 先降成单精度再按 4 字节写回。
+            emit2("movsd", src_op(in.b), "%xmm0");
+            line("cvtsd2ss %xmm0, %xmm0");
+            line(std::format("movss %xmm0, {}(%rax)", in.imm));
+            return;
+        }
         emit2(MOp::kMovq, src_mop(in.b), abi.scratch_field);
         const MReg v = mreg_from_name(abi.scratch_field);
         if (in.fwidth == 1)

@@ -32,6 +32,20 @@ Point make_point(int x, int y) {
     return p;
 }
 
+FPoint fpoint_make(float x, float y) {
+    FPoint p = {x, y};
+    return p;
+}
+
+FPoint fpoint_add(FPoint a, FPoint b) {
+    FPoint p = {a.x + b.x, a.y + b.y};
+    return p;
+}
+
+static FPoint fpoint_g = {7.25f, 0.5f};
+
+FPoint *fpoint_ref(void) { return &fpoint_g; }
+
 int apply2(int a, int b, int (*fn)(int, int)) { return fn(a, b); }
 
 int log_fmt(const char *fmt, ...) { return (int)strlen(fmt); }

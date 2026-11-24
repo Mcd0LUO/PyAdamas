@@ -20,6 +20,16 @@ print(c.name_of(1))
 p = c.make_point(3, 4)
 print(p.x, p.y)
 
+# float32 字段结构体：按值返回、按值传参、指针字段读写
+fp = c.fpoint_make(1.5, -2.25)
+print(fp.x, fp.y)
+fp2 = c.fpoint_add(fp, c.fpoint_make(0.25, 2.5))
+print(fp2.x, fp2.y)
+fr = c.fpoint_ref()
+print(fr.x, fr.y)
+fr.x = 4.5
+print(fr.x, c.fpoint_ref().x)
+
 buf = c.alloc_ints(3)
 c.fill_buffer(buf, 3, 5)
 print(buf[0], buf[1], buf[2])
@@ -30,6 +40,20 @@ c.global_counter = 9
 print(c.global_counter)
 print(c.global_ratio)
 print(c.global_ratiof)
+
+# 真实头文件形态：导出宏 + __attribute__ + 跨头文件 #include
+print(c.extra_twice(21))
+
+
+def cb(x, s):
+    return x + 1
+
+
+print(c.extra_call(cb, 41))
+h = c.extra_open()
+print(h != 0)
+np = c.extra_make_pair(3, 9)
+print(np.a, np.b)
 
 # --- expect ---
 # 42
@@ -44,8 +68,16 @@ print(c.global_ratiof)
 # zero
 # other
 # 3 4
+# 1.5 -2.25
+# 1.75 0.25
+# 7.25 0.5
+# 4.5 4.5
 # 5 6 7
 # 7
 # 9
 # 2.5
 # 1.25
+# 42
+# 42
+# True
+# 3 9

@@ -1,6 +1,8 @@
 // cdecl.cpp —— C 头文件子集 → .cpya（驱动与词法）
 #include "cdecl.h"
 
+#include <sys/wait.h>
+
 #include <cctype>
 #include <cstdint>
 #include <cstdio>
@@ -25,6 +27,114 @@ bool is_ident_start(char c) {
 }
 bool is_ident_char(char c) {
     return std::isalnum(static_cast<unsigned char>(c)) || c == '_';
+}
+
+// shell 单引号转义：头文件路径/宏里出现引号也不会破坏命令行。
+std::string sh_quote(const std::string& s) {
+    std::string q = "'";
+    for (char c : s) {
+        if (c == '\'') q += "'\\''";
+        else q += c;
+    }
+    q += "'";
+    return q;
+}
+
+bool run_capture(const std::string& cmd, std::string& out) {
+    FILE* p = popen(cmd.c_str(), "r");
+    if (!p) return false;
+    char buf[8192];
+    size_t n;
+    while ((n = fread(buf, 1, sizeof buf, p)) > 0) out.append(buf, n);
+    int st = pclose(p);
+    return st != -1 && WIFEXITED(st) && WEXITSTATUS(st) == 0;
+}
+
+// 用系统 C 预处理器展开 #include 与函数式宏。真实头文件（zlib.h、sqlite3.h）
+// 的导出宏/条件编译只有预处理器能正确展开；失败（没有 cc）时返回 false，
+// 调用方回退到内置的极简预处理。
+bool cpp_expand(const std::string& header_path, const std::vector<std::string>& inc,
+                std::string& out) {
+    const char* env = std::getenv("PYADAMAS_CDECL_CPP");
+    std::string cc = (env && *env) ? env : "cc";
+    std::string cmd = sh_quote(cc) + " -E -P -x c";
+    for (const auto& d : inc) cmd += " -I" + sh_quote(d);
+    cmd += " " + sh_quote(header_path) + " 2>/dev/null";
+    return run_capture(cmd, out);
+}
+
+// -P 只去掉行标记，#pragma 仍在。它们没被剥离时，词法会把
+// `#pragma ... typedef unsigned z_crc_t;` 当成一条语句，typedef 就丢了。
+void strip_directive_lines(std::string& s) {
+    std::string out;
+    out.reserve(s.size());
+    size_t i = 0;
+    while (i < s.size()) {
+        size_t e = s.find('\n', i);
+        if (e == std::string::npos) e = s.size();
+        size_t b = i;
+        while (b < e && (s[b] == ' ' || s[b] == '\t')) ++b;
+        if (b < e && s[b] == '#') out.push_back('\n');
+        else {
+            out.append(s, i, e - i);
+            out.push_back('\n');
+        }
+        i = e + 1;
+    }
+    s = std::move(out);
+}
+
+// 删掉 GCC 扩展：__attribute__((...))、__extension__、__asm__(...) 等。
+// 真实头文件里到处都有；不删的话属性里的 '(' 会被当成函数参数表。
+void strip_gcc_extensions(std::string& s) {
+    auto skip_balanced = [&s](size_t p, char open, char close) {
+        int d = 0;
+        for (; p < s.size(); ++p) {
+            if (s[p] == open) ++d;
+            else if (s[p] == close && --d == 0) return p + 1;
+        }
+        return s.size();
+    };
+    std::string out;
+    out.reserve(s.size());
+    size_t i = 0;
+    while (i < s.size()) {
+        if (s.compare(i, 13, "__attribute__") == 0) {
+            size_t p = i + 13;
+            while (p < s.size() && (s[p] == ' ' || s[p] == '\t')) ++p;
+            if (p < s.size() && s[p] == '(') i = skip_balanced(p, '(', ')');
+            else i = p;
+            out.push_back(' ');
+            continue;
+        }
+        if (s.compare(i, 13, "__extension__") == 0) {
+            i += 13;
+            out.push_back(' ');
+            continue;
+        }
+        // asm 标签：`extern int x __asm__("name");`。只匹配独立标识符。
+        size_t asm_len = 0;
+        if (s.compare(i, 7, "__asm__") == 0) asm_len = 7;
+        else if (s.compare(i, 5, "__asm") == 0) asm_len = 5;
+        else if (s.compare(i, 3, "asm") == 0) asm_len = 3;
+        if (asm_len) {
+            auto ident = [](char c) {
+                return std::isalnum(static_cast<unsigned char>(c)) || c == '_';
+            };
+            size_t after = i + asm_len;
+            bool left_ok = i == 0 || !ident(s[i - 1]);
+            bool right_ok = after >= s.size() || !ident(s[after]);
+            size_t p = after;
+            while (right_ok && p < s.size() && (s[p] == ' ' || s[p] == '\t')) ++p;
+            if (left_ok && right_ok && p < s.size() && s[p] == '(') {
+                i = skip_balanced(p, '(', ')');
+                out.push_back(' ');
+                continue;
+            }
+        }
+        out.push_back(s[i++]);
+    }
+    s = std::move(out);
 }
 
 }  // namespace
@@ -200,7 +310,8 @@ std::vector<Tok> cdecl_lex(const std::string& code) {
 }
 
 std::string cdecl_generate(const std::string& header_path, const std::string& module,
-                           const std::vector<std::string>& links, std::string& err) {
+                           const std::vector<std::string>& links,
+                           const std::vector<std::string>& include_dirs, std::string& err) {
     std::ifstream in(header_path);
     if (!in) {
         err = std::format("cannot open header '{}'", header_path);
@@ -210,8 +321,17 @@ std::string cdecl_generate(const std::string& header_path, const std::string& mo
     ss << in.rdbuf();
     std::string src = ss.str();
 
+    // 内置预处理只负责收集对象式宏常量（#define X 42）；代码本体优先交给
+    // 系统预处理器，才能展开 #include 和 ZEXTERN/SQLITE_API 这类导出宏。
     std::vector<MacroDef> defs;
-    std::string code = cdecl_preprocess(src, defs);
+    std::string internal = cdecl_preprocess(src, defs);
+    std::string code;
+    if (!cpp_expand(header_path, include_dirs, code) || code.empty()) {
+        code = std::move(internal);
+    } else {
+        strip_directive_lines(code);
+        strip_gcc_extensions(code);
+    }
     std::vector<Tok> toks = cdecl_lex(code);
     return cdecl_process(toks, defs, header_path, module, links, err);
 }

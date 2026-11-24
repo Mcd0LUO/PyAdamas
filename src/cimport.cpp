@@ -89,6 +89,7 @@ struct CTypeRef {
 };
 
 // 回调签名只允许能在 C 与 PyAdamas 之间按机器字直接传递的类型。
+// None 只用于返回（C 的 void）；跳板把 rax 原样返回，C 侧不会读它。
 bool callback_kind_ok(CKind k) {
     switch (k) {
         case CKind::Int:
@@ -101,7 +102,8 @@ bool callback_kind_ok(CKind k) {
         case CKind::UInt64:
         case CKind::Float:
         case CKind::Bool:
-        case CKind::Ptr: return true;
+        case CKind::Ptr:
+        case CKind::None: return true;
         default: return false;
     }
 }
@@ -119,6 +121,7 @@ bool cfield_layout(CKind k, int64_t& size, int64_t& align) {
         case CKind::Int32: size = 4; align = 4; return true;    // int
         case CKind::UInt32: size = 4; align = 4; return true;   // unsigned
         case CKind::Float: size = 8; align = 8; return true;    // double
+        case CKind::Float32: size = 4; align = 4; return true;  // C float
         case CKind::Bool: size = 1; align = 1; return true;     // _Bool
         case CKind::Ptr: size = 8; align = 8; return true;      // void* / T*
         default: return false;
@@ -421,8 +424,8 @@ std::optional<CImportDecl> load_cpya(const std::string& name, const std::string&
                     ct->kind == CKind::OptStr || ct->kind == CKind::None)
                     pydecl::fail(aa.line,
                                  std::format("unsupported struct field type '{}' in '{}' (use "
-                                             "int, int32, uint32, float, bool, ptr or a struct "
-                                             "name; arrays via T[N])",
+                                             "int, int32, uint32, float, float32, bool, ptr or a "
+                                             "struct name; arrays via T[N])",
                                              pydecl::annotation_base_name(aa.annotation.get()),
                                              cd.name));
                 RawField rf;

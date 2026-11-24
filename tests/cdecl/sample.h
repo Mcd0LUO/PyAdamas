@@ -4,6 +4,8 @@
 #include <stddef.h>
 #include <stdint.h>
 
+#include "sample_extra.h"
+
 #define MAGIC 42
 #define RATIO 1.5
 #define GREETING "hello"
@@ -21,6 +23,12 @@ typedef struct Node {
     struct Node *next;
 } Node;
 
+/* 纯 float32 字段的结构体：单个 SSE chunk，可按值传递/返回 */
+typedef struct FPoint {
+    float x;
+    float y;
+} FPoint;
+
 enum Color { RED, GREEN = 5, BLUE };
 
 extern int global_counter;
@@ -35,6 +43,9 @@ float scalef(float x, float k);
 const char *name_of(int id);
 void fill_buffer(int *buf, int n, int v);
 Point make_point(int x, int y);
+FPoint fpoint_make(float x, float y);
+FPoint fpoint_add(FPoint a, FPoint b);
+FPoint *fpoint_ref(void);
 int apply2(int a, int b, int (*fn)(int, int));
 int log_fmt(const char *fmt, ...);
 int *alloc_ints(int n);

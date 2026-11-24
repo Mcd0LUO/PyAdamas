@@ -535,10 +535,24 @@ IRStructABI struct_abi(const StructInfo* st) {
     size_t n = static_cast<size_t>((st->size + 7) / 8);
     abi.chunk_fp.assign(n, 0);
     for (auto& f : st->fields) {
-        if (!f.ty || f.ty->kind != TyKind::Float) continue;
+        bool fp = f.ty && f.ty->kind == TyKind::Float;
+        if (!fp) continue;
         size_t b = static_cast<size_t>(f.offset / 8);
         size_t e = static_cast<size_t>((f.offset + f.size - 1) / 8);
         for (size_t c = b; c <= e && c < n; ++c) abi.chunk_fp[c] = 1;
+    }
+    // float32 只有 4 字节，可能与整数字段共用同一个 chunk；double 天然 8 字节
+    // 对齐不会共享。共用时 SysV 会把这个 chunk 拆到两个寄存器类，这里标记出来。
+    for (auto& f : st->fields) {
+        if (!f.ty || f.ty->kind != TyKind::Float || f.size != 4) continue;
+        size_t chunk = static_cast<size_t>(f.offset / 8);
+        if (chunk >= n) continue;
+        for (auto& g : st->fields) {
+            if (g.name == f.name) continue;
+            if (g.offset / 8 != static_cast<int64_t>(chunk)) continue;
+            if (g.ty && g.ty->kind == TyKind::Float) continue;
+            abi.mixed = 1;
+        }
     }
     return abi;
 }
@@ -645,6 +659,16 @@ VReg Lowerer::lower_cimport_call(Attribute& at, Call& c) {
         }
         // 按值结构体已经是等布局的 payload 指针，不需要转换。
         if (k == CKind::Struct) {
+            if (StructInfo* st = tc_.struct_info(ex->params[i].ptr_struct)) {
+                if (struct_abi(st).mixed) {
+                    err(srcs[i]->line, srcs[i]->col,
+                        std::format("struct '{}' 的同一个 8 字节块里混有 float32 与整数字段，"
+                                    "SysV 按值传递要拆成两个寄存器类，暂不支持；"
+                                    "改用它指针形态 ptr[{}]",
+                                    st->name, st->name));
+                    return const_none();
+                }
+            }
             cargs.push_back(static_cast<uint8_t>(k));
             args.push_back(v);
             continue;
@@ -715,7 +739,16 @@ VReg Lowerer::lower_cimport_call(Attribute& at, Call& c) {
     in.cargs = std::move(cargs);
     TypePtr rty = ckind_type(ex->ret);
     if (ex->ret == CKind::Struct) {
-        if (StructInfo* st = tc_.struct_info(ex->ret_struct)) rty = mk_struct(st);
+        if (StructInfo* st = tc_.struct_info(ex->ret_struct)) {
+            if (struct_abi(st).mixed) {
+                err(c.line, c.col,
+                    std::format("struct '{}' 的同一个 8 字节块里混有 float32 与整数字段，"
+                                "按值返回的 ABI 尚未支持；请改用 ptr[{}] 返回",
+                                st->name, st->name));
+                return const_none();
+            }
+            rty = mk_struct(st);
+        }
     }
     // **先把类型取出来再 move in。** 同一实参列表里 in.ty 与 std::move(in)
     // 的求值顺序未指定；GCC 会先构造 by-value 的 Inst 参数（移走 in.ty），

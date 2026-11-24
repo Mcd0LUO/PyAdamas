@@ -1,4 +1,4 @@
-# C float 编组：float32 参数/返回/全局变量/ptr[float32] 解引用。
+# C float 编组：float32 参数/返回/全局变量/ptr[float32] 解引用/结构体字段。
 link("tests/run/cfloat32.c")
 
 def f32_mul(a: float32, b: float32) -> float32: pass
@@ -6,3 +6,13 @@ def f32_of_int(n: int32) -> float32: pass
 def f32_roundtrip(x: float) -> float: pass
 def f32_arr_ptr() -> ptr[float32]: pass
 f32_global: float32
+
+# C float 字段：布局 4 字节/4 对齐；两个 float 共用一个 8 字节 SSE 块。
+class fpair:
+    x: float32
+    y: float32
+
+def fpair_make(x: float32, y: float32) -> fpair: pass
+def fpair_add(p: fpair) -> float32: pass
+def fpair_ptr() -> ptr[fpair]: pass
+def fpair_ptr_add(p: ptr[fpair]) -> float32: pass

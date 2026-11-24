@@ -886,6 +886,7 @@ private:
         in.a = obj;
         in.imm = off;
         in.b = v;
+        in.ty = vreg_ty(v);  // 宽度 4 的 float32 字段要靠值类型决定 cvtsd2ss
         in.fwidth = width;
         in.funsigned = unsig;
         emit(std::move(in));

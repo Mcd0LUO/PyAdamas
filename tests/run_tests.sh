@@ -520,7 +520,8 @@ if match "cdecl"; then
     mkdir -p "$cdir"
     printf '  %-28s ' "cdecl:sample"
     if ! "$PYADAMAS" cdecl tests/cdecl/sample.h -o "$cdir/sample.cpya" \
-            --link "tests/cdecl/sample.c" > "$cdir/gen.out" 2>&1; then
+            --link "tests/cdecl/sample.c" \
+            --link "tests/cdecl/sample_extra.c" > "$cdir/gen.out" 2>&1; then
         printf 'GENERATE FAILED\n'
         sed -n '1,6p' "$cdir/gen.out"
         fail=1

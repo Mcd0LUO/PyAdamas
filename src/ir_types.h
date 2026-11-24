@@ -355,6 +355,9 @@ struct IRGenerator {
 struct IRStructABI {
     int64_t size = 0;
     std::vector<uint8_t> chunk_fp;
+    // 同一个 8 字节 chunk 里既有浮点又有整数字段：SysV 要求拆成一个 SSE
+    // 寄存器 + 一个整数寄存器，当前按 chunk 的分类表达不了，按值传递时报错。
+    uint8_t mixed = 0;
 };
 
 // C 回调参数的签名；codegen 为每个签名生成一个跳板 + 一个闭包槽。

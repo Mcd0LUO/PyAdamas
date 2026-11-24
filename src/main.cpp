@@ -240,7 +240,7 @@ int main(int argc, char** argv) {
         }
         std::string module = std::filesystem::path(output).stem().string();
         std::string err;
-        std::string text = pyadamas::cdecl_generate(path, module, cdecl_links, err);
+        std::string text = pyadamas::cdecl_generate(path, module, cdecl_links, include_dirs, err);
         if (text.empty()) {
             std::fprintf(stderr, "error: %s\n", err.c_str());
             return 1;

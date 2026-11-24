@@ -43,8 +43,9 @@ CType make_ptr(CType inner) {
 
 bool is_qualifier(const std::string& s) {
     return s == "const" || s == "volatile" || s == "restrict" || s == "__restrict" ||
-           s == "static" || s == "extern" || s == "register" || s == "inline" ||
-           s == "__inline" || s == "__inline__" || s == "_Noreturn";
+           s == "__restrict__" || s == "__const__" || s == "__volatile__" ||
+           s == "__extension__" || s == "static" || s == "extern" || s == "register" ||
+           s == "inline" || s == "__inline" || s == "__inline__" || s == "_Noreturn";
 }
 
 bool is_builtin_type_name(const std::string& s) {
@@ -142,13 +143,19 @@ size_t parse_base_type(const std::vector<Tok>& v, size_t i, const std::map<std::
 }
 
 // 把紧随其后的 '*' 逐个包成指针；const 修饰符跳过。
+// 限定符也可能出现在 base 与 '*' 之间（`void const *`），所以循环开头先跳。
 size_t consume_stars(const std::vector<Tok>& v, size_t i, CType& t) {
-    while (i < v.size() && v[i].k == Tok::Punc && v[i].s == "*") {
-        t = make_ptr(t);
-        ++i;
+    for (;;) {
         while (i < v.size() && v[i].k == Tok::Id &&
-               (v[i].s == "const" || v[i].s == "volatile" || v[i].s == "restrict"))
+               (v[i].s == "const" || v[i].s == "volatile" || v[i].s == "restrict" ||
+                v[i].s == "__restrict"))
             ++i;
+        if (i < v.size() && v[i].k == Tok::Punc && v[i].s == "*") {
+            t = make_ptr(t);
+            ++i;
+            continue;
+        }
+        break;
     }
     return i;
 }
@@ -219,7 +226,9 @@ std::optional<std::string> cpya_type(const CType& t, bool param, std::string& wh
                     return std::nullopt;
                 }
                 if (i) s += ", ";
-                s += *p;
+                // cimport 的回调参数只接受标量或 ptr；`const char*` 生成 str
+                // 会让整个 .cpya 解析失败，这里退化成 ptr。
+                s += (*p == "str") ? "ptr" : *p;
             }
             if (t.varargs) {
                 why = "varargs callback";
@@ -259,6 +268,7 @@ std::optional<std::string> cpya_field_type(const CType& t, std::string& why) {
         case CType::I64:
         case CType::U64: return std::string("int");
         case CType::Double: return std::string("float");
+        case CType::Float: return std::string("float32");
         case CType::Ptr: return std::string("ptr");
         // .cpya 现在支持 struct/union 按值字段与数组（布局按 C 规则算），
         // 生成器只要把类型名写出来即可。
@@ -574,7 +584,11 @@ struct Cdecl {
     std::vector<std::string> vars;
     std::vector<std::string> structs;      // 定义好的 struct 块
     std::set<std::string> defined_structs;
+    // 只有 class X: pass 的（没有布局）不能按值用；引用它们的地方必须跳过。
+    std::set<std::string> opaque_structs;
     std::set<std::string> referenced_structs;
+    // 函数/全局变量同名去重（系统头文件里常见重复声明）。
+    std::set<std::string> emitted_externs;
     std::set<std::string> emitted_names;
     std::map<std::string, CType> alias;
     std::map<std::string, int64_t> enum_env;
@@ -587,10 +601,46 @@ struct Cdecl {
         std::fprintf(stderr, "cdecl: warning: line %d: %s\n", at.line, msg.c_str());
     }
 
+    bool layout_known(const std::string& name) const {
+        return !name.empty() && defined_structs.count(name) && !opaque_structs.count(name);
+    }
+    // 按值使用 struct/union 时必须有完整布局。
+    bool by_value_known(const CType& t) const {
+        if (t.k == CType::Struct || t.k == CType::Union) return layout_known(t.name);
+        return true;
+    }
+    // 返回函数指针（含指针链）在 .cpya 里无法表达，只能跳过。
+    static bool is_func_ptr(const CType& t) {
+        const CType* p = &t;
+        while (p->k == CType::Ptr && p->inner) p = p->inner.get();
+        return p->k == CType::Func;
+    }
+    // 与 cimport 的回调寄存器上限保持一致（整数 ≤6、浮点 ≤8），超了就跳过。
+    static bool cb_too_many(const CType& f) {
+        int ni = 0, nf = 0;
+        for (const auto& p : f.ps) {
+            if (p.k == CType::Float) ++nf;
+            else ++ni;
+        }
+        return ni > 6 || nf > 8;
+    }
+
+    // 指针/回调里嵌套引用的 struct 也要补一个不透明 class，否则
+    // `ptr[X]` 在 .cpya 里找不到元素类型。
+    void note_refs(const CType& t) {
+        if (t.k == CType::Struct || t.k == CType::Union) referenced_structs.insert(t.name);
+        if (t.k == CType::Ptr && t.inner) note_refs(*t.inner);
+        if (t.k == CType::Func) {
+            if (t.ret) note_refs(*t.ret);
+            for (auto& p : t.ps) note_refs(p);
+        }
+    }
+
     void emit_struct(const StructDef& sd, const std::string& name) {
         if (name.empty() || defined_structs.count(name)) return;
         defined_structs.insert(name);
         if (!sd.ok) {
+            opaque_structs.insert(name);
             structs.push_back(std::format("# {} (opaque: {})\nclass {}: pass\n", name, sd.why, name));
             return;
         }
@@ -603,10 +653,18 @@ struct Cdecl {
         if (sd.packed) block += "@packed\n";
         block += std::format("class {}:\n", name);
         for (auto& f : sd.fields) {
+            if (!by_value_known(f.type)) {
+                opaque_structs.insert(name);
+                structs.push_back(std::format(
+                    "# {} (opaque: field '{}' has struct type '{}' with no layout)\nclass {}: pass\n",
+                    name, f.name, f.type.name, name));
+                return;
+            }
             std::string why;
             auto s = cpya_field_type(f.type, why);
             if (!s) {
                 // 字段类型不支持（如 C float 字段）：整体降级为不透明。
+                opaque_structs.insert(name);
                 structs.push_back(
                     std::format("# {} (opaque: {})\nclass {}: pass\n", name, why, name));
                 return;
@@ -703,25 +761,77 @@ struct Cdecl {
                 emit_struct(sd, name);
                 CType t;
                 t.k = is_union ? CType::Union : CType::Struct;
+                // 类体只有一个名字（alias 优先）；tag 也指向同一个类，否则
+                // `typedef struct z_stream_s {...} z_stream;` 之后的
+                // `struct z_stream_s *` 会指向不存在的类。
                 t.name = name;
-                if (!alias_name.empty()) alias[alias_name] = t;
-                if (!tag.empty()) {
-                    CType tg = t;
-                    tg.name = tag;
-                    alias[tag] = tg;
-                }
+                // `} *Alias;`（typedef 到指针）要把 '*' 也算进去。
+                CType ta = t;
+                for (size_t q = close + 1; q < d.size(); ++q)
+                    if (d[q].k == Tok::Punc && d[q].s == "*") ta = make_ptr(ta);
+                if (!alias_name.empty()) alias[alias_name] = ta;
+                if (!tag.empty()) alias[tag] = t;
                 return;
             }
-            // typedef struct Tag Alias;
+            // typedef struct Tag Alias;  /  typedef struct Tag *Alias;
             std::string alias_name;
             for (size_t q = j; q < d.size(); ++q)
                 if (d[q].k == Tok::Id) alias_name = d[q].s;
             CType t;
             t.k = is_enum ? CType::I32 : (is_union ? CType::Union : CType::Struct);
             t.name = tag;
-            if (!alias_name.empty() && alias_name != tag) alias[alias_name] = t;
-            if (!tag.empty()) referenced_structs.insert(tag);
+            // `typedef struct sqlite3_stmt sqlite3_stmt;`（别名与 tag 同名）必须
+            // 把 tag 自身也注册成类型，否则后续 `sqlite3_stmt*` 参数全是 unknown。
+            CType ta = t;
+            for (size_t q = j; q < d.size(); ++q)
+                if (d[q].k == Tok::Punc && d[q].s == "*") ta = make_ptr(ta);
+            if (!alias_name.empty()) alias[alias_name] = ta;
+            if (!tag.empty()) {
+                if (alias_name != tag) alias[tag] = t;
+                referenced_structs.insert(tag);
+            }
             return;
+        }
+        // typedef RET (*NAME)(params);
+        {
+            size_t lp = d.size();
+            for (size_t q = 1; q < d.size(); ++q) {
+                if (d[q].k == Tok::Punc && d[q].s == "(" && q + 1 < d.size() &&
+                    d[q + 1].k == Tok::Punc && d[q + 1].s == "*") {
+                    lp = q;
+                    break;
+                }
+            }
+            if (lp < d.size()) {
+                size_t rp = lp + 1;
+                int depth = 0;
+                for (size_t q = lp; q < d.size(); ++q) {
+                    if (d[q].k != Tok::Punc) continue;
+                    if (d[q].s == "(") ++depth;
+                    else if (d[q].s == ")" && --depth == 0) {
+                        rp = q;
+                        break;
+                    }
+                }
+                std::string name;
+                for (size_t q = lp + 2; q < rp; ++q)
+                    if (d[q].k == Tok::Id) name = d[q].s;
+                if (!name.empty() && rp + 1 < d.size() && d[rp + 1].k == Tok::Punc &&
+                    d[rp + 1].s == "(") {
+                    size_t close = find_matching(d, rp + 1, "(", ")");
+                    if (close < d.size()) {
+                        CType cb;
+                        cb.k = CType::Func;
+                        CType ret;
+                        parse_base_type(d, 1, alias, ret);
+                        cb.ret = std::make_shared<CType>(ret);
+                        if (parse_params(d, rp + 2, close, cb, d[0])) {
+                            alias[name] = std::move(cb);
+                            return;
+                        }
+                    }
+                }
+            }
         }
         // typedef <type> Alias;
         CType base;
@@ -867,6 +977,8 @@ struct Cdecl {
         for (size_t q = 0; q < lp; ++q)
             if (d[q].k == Tok::Id && (d[q].s == "static" || d[q].s == "inline")) is_static = true;
         if (is_static) return;  // 头文件里的 inline/static 函数不可链接
+        // 系统头文件可能被多次包含（不同条件分支），同一名字只保留第一份。
+        if (!emitted_externs.insert(name).second) return;
         CType fn;
         fn.k = CType::Func;
         CType ret;
@@ -878,6 +990,16 @@ struct Cdecl {
             ++skipped;
             return;
         }
+        if (!by_value_known(ret)) {
+            warn(d[0], std::format("skipped '{}': return struct '{}' has no layout", name, ret.name));
+            ++skipped;
+            return;
+        }
+        if (is_func_ptr(ret)) {
+            warn(d[0], std::format("skipped '{}': function pointer return", name));
+            ++skipped;
+            return;
+        }
         std::string why;
         auto rt = cpya_type(ret, false, why);
         if (!rt) {
@@ -885,10 +1007,21 @@ struct Cdecl {
             ++skipped;
             return;
         }
-        // 结构体按值：记录引用，稍后补不透明声明
-        if (ret.k == CType::Struct) referenced_structs.insert(ret.name);
+        // 结构体按值/指针：记录引用，稍后补不透明声明
+        note_refs(ret);
         std::string params;
         for (size_t i = 0; i < fn.ps.size(); ++i) {
+            if (!by_value_known(fn.ps[i])) {
+                warn(d[0], std::format("skipped '{}': parameter struct '{}' has no layout", name,
+                                       fn.ps[i].name));
+                ++skipped;
+                return;
+            }
+            if (fn.ps[i].k == CType::Func && cb_too_many(fn.ps[i])) {
+                warn(d[0], std::format("skipped '{}': callback has too many parameters", name));
+                ++skipped;
+                return;
+            }
             std::string pw;
             auto ps = cpya_type(fn.ps[i], true, pw);
             if (!ps) {
@@ -896,7 +1029,7 @@ struct Cdecl {
                 ++skipped;
                 return;
             }
-            if (fn.ps[i].k == CType::Struct) referenced_structs.insert(fn.ps[i].name);
+            note_refs(fn.ps[i]);
             if (i) params += ", ";
             params += std::format("p{}: {}", i, *ps);
         }
@@ -932,8 +1065,19 @@ struct Cdecl {
                 if (d[q].k == Tok::Id) name = d[q].s;
             }
             if (name.empty()) continue;
+            if (!emitted_externs.insert(name).second) continue;
+            if (is_func_ptr(t)) {
+                warn(d[0], std::format("skipped function pointer variable '{}'", name));
+                ++skipped;
+                continue;
+            }
             if (array) {
                 warn(d[0], std::format("skipped array variable '{}'", name));
+                ++skipped;
+                continue;
+            }
+            if (!by_value_known(t)) {
+                warn(d[0], std::format("skipped variable '{}': struct type has no layout", name));
                 ++skipped;
                 continue;
             }
@@ -944,7 +1088,7 @@ struct Cdecl {
                 ++skipped;
                 continue;
             }
-            if (t.k == CType::Struct) referenced_structs.insert(t.name);
+            if (t.k == CType::Struct) note_refs(t);
             vars.push_back(std::format("{}: {}", name, *ct));
         }
     }

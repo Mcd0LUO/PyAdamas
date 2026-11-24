@@ -26,6 +26,12 @@ void TypeChecker::check_once(Module& m) {
         type_stats_on_ = ts && std::string_view(ts) != "0";
         pool_.push_back(std::move(mod));
 
+        // 签名在 collect_toplevel 里一次建好，早于 import 语句的正式执行；
+        // 形参/返回注解里的 `mod.Cls`、`from mod import Cls` 因此只能解析
+        // 成 unknown，一路带到降级层报「attribute access is only supported
+        // as a method call」。先把顶层导入的绑定登记进模块作用域，签名构建
+        // 期就能看到这些类。正式 stmt_import 稍后照常执行（重复登记幂等）。
+        hoist_import_bindings(m.body);
         collect_toplevel(m.body);
         hoist_module_bindings(m.body);
         hoist_global_decls(m.body);
@@ -738,6 +744,59 @@ void TypeChecker::bind_target(Expr& target, Scope* sc) {
 
     void TypeChecker::hoist_module_bindings(std::vector<StmtPtr>& body) {
         hoist_scope_bindings(body, module_);
+    }
+
+    // 顶层 import / from ... import 的绑定预登记：签名构建（collect_toplevel）
+    // 早于正式导入执行，注解里的模块名/导入类必须在那之前就能解析。
+    // 只登记「确实可见」的模块与名字，诊断与 unsupported 记录仍由正式的
+    // stmt_import 负责；cimport 有加载 .cpya 的副作用，不在这里预跑。
+    void TypeChecker::hoist_import_bindings(std::vector<StmtPtr>& body) {
+        if (!module_lookup_) return;
+        for (auto& s : body) {
+            if (auto* im = dynamic_cast<Import*>(s.get())) {
+                for (auto& al : im->names) {
+                    if (al.name.find('.') != std::string::npos && al.asname.empty()) continue;
+                    std::string bind = al.asname.empty() ? al.name : al.asname;
+                    if (auto pos = bind.find('.'); pos != std::string::npos)
+                        bind = bind.substr(0, pos);
+                    if (auto info = module_lookup_(al.name))
+                        module_->modules[bind] = std::move(info);
+                }
+                continue;
+            }
+            if (auto* im = dynamic_cast<ImportFrom*>(s.get())) {
+                if (im->level != 0 || im->module.empty()) continue;
+                auto info = module_lookup_(im->module);
+                if (!info || info->cpy_proxy) continue;
+                if (im->names.size() == 1 && im->names[0].name == "*") {
+                    for (auto& [n, ty] : info->globals)
+                        if (!n.empty() && n[0] != '_')
+                            module_->vars.try_emplace(n, Symbol{ty, im->line, false, false});
+                    for (auto& [n, ic] : info->classes) {
+                        if (n.empty() || n[0] == '_') continue;
+                        module_->vars[n] =
+                            Symbol{mk_class(ic.cls.get()), im->line, false, false};
+                        class_obj_names_.insert(n);
+                    }
+                    continue;
+                }
+                for (auto& al : im->names) {
+                    std::string bind = al.asname.empty() ? al.name : al.asname;
+                    if (auto ci = info->classes.find(al.name); ci != info->classes.end()) {
+                        module_->vars[bind] =
+                            Symbol{mk_class(ci->second.cls.get()), im->line, false, false};
+                        class_obj_names_.insert(bind);
+                        continue;
+                    }
+                    if (auto it = info->globals.find(al.name); it != info->globals.end()) {
+                        module_->vars[bind] = Symbol{it->second, im->line, false, false};
+                        continue;
+                    }
+                    if (auto child = module_lookup_(im->module + "." + al.name))
+                        module_->modules[bind] = std::move(child);
+                }
+            }
+        }
     }
 
     void TypeChecker::hoist_scope_bindings(std::vector<StmtPtr>& body, Scope* sc) {
