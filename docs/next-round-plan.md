@@ -57,15 +57,16 @@
 |---|---|---|---|
 | 3.1 | **精确算术的用户可用性**：`Fraction`/`Decimal` 与 `int`/`float` 混合运算 | 实测 `Fraction(1,3) * 3`、`f + 1`、`Decimal("1.1") * 3` 均编译期报 `unsupported operand type(s)`——`__mul__(self, o: Fraction)` 的静态签名不接受 int | 构造/四则/比较/格式化与 CPython 对拍（含中间乘积超 i64）；小整数旧用例不退；先给设计取舍（改 stdlib 签名走 unknown 动态分派，还是在类型检查里做数值提升） |
 | 3.2 | **big 剩余缺口按当前版本重测** | `big-landing.md` 写于 0.357 候选期，已过时：实测 `dict[big,int]` 键、`list[big].sort()`、`%`/`//`/比较都可用 | 重跑 big-landing 的「尚未完成」清单，逐项标 已支持/仍拒绝；只补真实缺口（sum/min/max、divmod、三参 pow、两参 round、容器键/排序的静态可判定 case） |
-| 3.3 | **pya-lsp 反馈的编译器缺口** | `PYA-LSP/LANGUAGE_GAPS.md`：二进制 `file.read(n)` 返回 str、`check` 不校验模块属性、无 `asyncio.TimeoutError` | 每条缺口给最小复现 + 修复 + 回归用例；优先 `file.read` 的语义含糊（返回类型与 `open("rb")` 矛盾） |
+| 3.3 | **pya-lsp 反馈的编译器缺口** | pya-lsp（独立仓库）的 `LANGUAGE_GAPS.md`：二进制 `file.read(n)` 返回 str、`check` 不校验模块属性、无 `asyncio.TimeoutError` | 每条缺口给最小复现 + 修复 + 回归用例；优先 `file.read` 的语义含糊（返回类型与 `open("rb")` 矛盾） |
 | 3.4 | **前端基线重测** | 最后一次完整口径是 0.171（501/596），之后过了 300 个版本，标准库通过与失败分布都变了 | 当前 HEAD 重跑 Debian CPython 3.13.5 口径，刷新 [compatibility.md](compatibility.md) 的数字；按失败簇修 top-3（不要只刷数字） |
 | 3.5 | **三项已知语义缺口**，按用户可见度排 | 装饰后的 `__iter__`（内建迭代路径不查类属性）、未初始化变量读 0（需哨兵/数据流）、异常对象 traceback/列号 | 每项要么修，要么在 compatibility.md 写成明确限制并附最小复现；不允许「文档承诺但不可用」 |
+| 3.6 | **包管理 P0 切片**：锁 + 路径依赖 + ModuleMap（**留在本仓库，不单开项目**） | 设计先验已完成（[package-management-design.md](package-management-design.md)，1218 行）；地基已落：`deps --json`、`build --module-map`、版本化 mangling（`$v$0`）、接口 fmt 14 / manifest 3；但无清单、无锁、无 store、无解析器 | 验收按该文档 §6.1 六条：无清单项目 0 回归、path 依赖跨目录可编、手改清单后 `--locked` 失败并打印 diff、连续两次 `resolve` 字节相同、移动目录 lock 不变、锁内无绝对路径。前置：先拍 Q1/Q3/Q5；P0 阶段不改生成代码（汇编与指令数须逐字节/逐项不变） |
 
 ## 4. P3 —— 工程债（穿插做，不单独占版本）
 
 1. **拆两个超限文件**：`typecheck/typecheck.cpp`（1227）、`cimport/cdecl_parse.cpp`（1271）。规矩是清单只能删不能加。
 2. **CHANGELOG 轮转**：0.100–0.199 归档到 `docs/archive/`，同步 index 与交叉链接。
-3. **文档地图扩容**：`docs/` 下已有 60+ 篇，地图只挂了约 30 篇；`big-landing.md`、`testing.md`、`numeric-types-landing.md`、`type-tags-landing.md`、`package-management-design.md` 等未挂。
+3. **文档地图扩容**：`docs/` 下已有 60+ 篇，地图只挂了约 30 篇；`numeric-types-landing.md`、`type-tags-landing.md`、`borrow-loop-design.md`、`compile-speed.md` 等仍未挂（`big-landing`/`testing`/`package-management-design` 已补）。
 4. **`tools/checkall.sh` 的 git 闸门**：多代理会话默认只提示（`CHECKALL_STRICT_GIT=0`），提交前应显式跑一次 `CHECKALL_STRICT_GIT=1`。
 
 ## 5. 明确不做

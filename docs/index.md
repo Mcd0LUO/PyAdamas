@@ -34,6 +34,7 @@
 | [big-landing.md](big-landing.md) | 定宽大整数 `big` 怎么落地？静态/动态接入与剩余缺口 | `src/typecheck/` `runtime/rt_big.c` |
 | [testing.md](testing.md) | 全闸门怎么跑：checkall 三种模式、并行度、性能基线与并发安全 | `tools/checkall.sh` `tests/` |
 | [next-round-plan.md](next-round-plan.md) | 下一阶段（0.471 起）路线图：P0/P1/P2 的验收标准与每轮闸门 | — |
+| [package-management-design.md](package-management-design.md) | 包管理要解决什么、先行者机制对照、候选设计与六阶段路线；**实现留在本仓库，不单开项目** | `src/driver/` `src/main.cpp` |
 | [archive/README.md](archive/README.md) | 已轮转出去的旧文档索引 | — |
 
 其中 [regalloc-architecture.md](regalloc-architecture.md) 的 §8、[bounds-elimination-attempt.md](bounds-elimination-attempt.md)、
