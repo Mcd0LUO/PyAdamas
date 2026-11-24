@@ -64,6 +64,14 @@
 | 3.7 | ~~**修 `from pkg import sub` 后调用子模块函数的 SIGSEGV**~~ **已修（0.477）**：根因是子模块别名登记时漏发 `import.module`，init 未跑 → 函数全局为 0 → `call 0`；修法是登记前 `ensure_module_init(child)`。回归 `tests/modules/from_pkg_sub/` | 最小复现：`pkg/__init__.py` + `pkg/sub.py`（`def hi() -> int: return 7`），`from pkg import sub; print(sub.hi())` → **rc=139**；而 `import pkg.sub as s; s.hi()`、`from pkg.sub import hi; hi()`、`from pkg import sub`（不调用）都正常。0.473 之前的基线同样崩 | 先加 `tests/run` 回归（当前会崩，先写成 fail 用例或等修复后加），ASan 下定位 `src/lower/import.cpp` 的绑定/降级路径；修复后套件与 difftest 全绿 |
 | 3.8 | **类体里的「方法别名」写法**：`class A: def f(self) ...; __str__ = f`（CPython stdlib 里非常常见，如 `_weakrefset.py` 的 `__sub__ = difference`、`doctest.py` 的 `__str__ = shortDescription`）。0.486 的 strict names 把 25 个 stdlib 文件暴露成 check 红——**这些文件 build 同样拒绝**（不是 check 独有的误杀，但与 CPython 不符） | 最小复现 3 行，`check`/`build` 都报 `undefined name 'f'`；`--lenient-names` 放行。根因待定位：typecheck 的类体符号登记时机（`def` 是否在语句结束时才进类作用域，导致后续 `__x__ = f` 看不到） | 修好后这 25 个文件的 check 通过率应回到 81.1% 一档；修不了就判负并写清「类体求值顺序 vs 静态登记」的取舍 |
 
+**3.x 结账（0.484–0.490）**：
+
+- **3.1 判负（0.489）**：`Fraction`/`Decimal` 与 `int`/`big` 的混合运算**不再支持**。0.487 试过「stdlib 里 union 形参 + `isinstance` 分派」，但 `isinstance` 无法区分未装箱 double 与 int/big（同为裸字），运行期必落到构造函数、把位模式当 BigInt 指针读（静默算错、每次结果不同）→ 回退。正解二选一：①类型检查层数值提升（每个运算符点插 `Fraction(int)`）；②联合类型加运行期标签。两者都是独立一层，不是 stdlib 能修的。
+- **3.2 部分落地（0.488）**：重测确认 `dict[big]`/`set`/`sort`/`sum`/`min`/`max`/`%`/`//`/比较**早已可用**；`divmod` 落地（与 CPython 逐字节一致，含负数与除零；顺带修掉 big 的 `Bin{FloorDiv,Mod}` 静默发 `idivq` 的段错误，改走 `pa_big_floordiv/pa_big_mod`）；`round(x, 2)` 与 `pow(x, y, m)` 判负（要新增 `pa_big_round` / `pa_big_pow_mod`）。
+- **3.3 三条落地 + 一条判负（0.484/0.486）**：模块属性检查（`--imports` opt-in）、`asyncio.TimeoutError`、`check` 报模块级未定义名（默认开，`--lenient-names` 逃生口）；二进制 `file.read(n)` 仍返回 str，判负并给三步改法。
+- **3.4 完成（0.485）**：CPython 3.14.4 标准库 628 文件，语法 623/628（99.2%）、旧口径类型 505/623（81.1%）、默认口径 480/623（77.0%）、`--imports` 155/623；失败簇 top-10 与 top-3 判负已归档。
+- **3.5 三项全负（0.490）**：`for` 对装饰/未装饰 `__iter__` 都能跑（**路线图原前提有误**），真正缺口是 `list(obj)`/`sorted(obj)` 等内置构造函数只认内建容器；未初始化变量读 0（槽位零初始化，要 init 位或确定性赋值分析）；异常 traceback 只有单帧、无列号、无 `__traceback__`（行号可修，其余判负）。
+
 ## 4. P3 —— 工程债（0.483 结账）
 
 1. ~~拆两个超限文件~~ **已完成（0.483）**：`typecheck/typecheck.cpp` 1227 → 1017（注解解析拆到 `typecheck/annotation.cpp`）、`cimport/cdecl_parse.cpp` 1271 → 1116（常量表达式求值拆到 `cimport/cdecl_eval.cpp`）。**`tests/check_size.sh` 首次全绿**（全仓库 0 超限，`ALLOW_FILES` 仍为空）。12 基准 `instructions:u` 与 0.482 逐项 ±0.00%，证明拆 TU 不改代码生成。
