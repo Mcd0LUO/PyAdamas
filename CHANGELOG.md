@@ -4,6 +4,31 @@
 
 早期阶段没有逐条留痕，按阶段归纳；0.4 之后逐条记录。
 
+## [0.490] - 2026-11-24
+
+> 取证（§3.5）：**三项已知语义缺口的结论都是负的**，逐条给最小复现、根因、要动的层。
+>
+> 1. **装饰后的 `__iter__`** —— 前提要修正：`for x in obj` **两种写法都能跑**
+>    （`stmt_for.cpp` 走 `dunder_call(recv, ty, "__iter__")`，装饰与否都能拿到）。真正缺的是
+>    **内置构造函数**：`list(obj)` / `tuple` / `set` / `sorted` / `sum` 对用户类直接报
+>    `list() cannot iterate over 'Box'`（`lower/builtin_container.cpp` 只认内建容器种类；
+>    实测**未装饰**也一样，不止装饰后）。修法要「把任意迭代器物化成列表」= 一段 for 循环形状的
+>    降级（`__iter__` 的结果接 append 循环）；`RtFn::AnyIterList` 只能吃内建容器，喂生成器报
+>    `object is not iterable`（本轮试过、已回退，证据记在这里）。要动的层：`lower/builtin_container.cpp`
+>    + 复用 `stmt_for` 的迭代器构造。**判负**（工程量 = 一个新降级形状，不是补丁）。
+> 2. **未初始化变量读 0** —— 复现：`def f(c): if c: x = 1; return x` 调 `f(False)` 打印 **0**
+>    （CPython `UnboundLocalError`）。根因是槽位一律零初始化（`slot` 是栈帧里的裸字，没有
+>    「已初始化」位）。两条路：① 每个槽加 init 位 → 每次 load 都要判，热路径摊成本；
+>    ② 降级期做**确定性赋值分析**（CFG 已有，但要保守处理 try/循环/提前 return，且 `unknown`
+>    与容器元素的「已赋值」没有静态定义）。**判负**（收益是错误信息，代价是每次读取或一遍数据流）。
+> 3. **异常对象的 traceback / 列号** —— 三条实测：`e.__traceback__` 降级期就报
+>    `exception attribute '__traceback__' is not implemented yet`；未捕获异常的 traceback 打印
+>    `line 0, in inner`（只有抛出的那一帧，**没有调用者链**，且行号是 0）；DWARF 的 `.loc` 是
+>    `.loc 1 <line>`，**只有行号没有列号**。**部分判负**：行号可修（`.loc` 已有，缺的是函数入口/
+>    raise 点的 `.loc` 覆盖），列号与调用者链要改运行时 traceback 结构与 codegen 的每指令定位，
+>    本轮不做；`__traceback__` 维持显式「未实现」错误（比返回 None 好）。
+>
+> 结论已写进 [docs/compatibility.md](docs/compatibility.md)「尚未实现的构造」相邻段落。
 ## [0.489] - 2026-11-24
 
 > fix(typecheck)：**联合类型不再接受 float**（Bug A）；**回退 0.487 的 dunder 放宽**
