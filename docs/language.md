@@ -923,9 +923,11 @@ LSP / REPL 这类「一问一答」的协议在 `sys.stdout` 上写完一帧后�
   `choice` 接受 list/tuple/str 并返回元素类型，`shuffle` 只接受 list。
 - 内置 `os`：`mkdir` / `rmdir` / `remove` / `rename` / `getcwd` /
   `cpu_count`。内置 `os.path`：`join`（变长参数，posix 语义）、
-  `exists` / `isdir` / `isfile`。子模块用 `import os.path as osp` 或
-  `from os.path import join, exists` 引入；`import os` 之后
-  `os.path.join` 这种属性链暂不支持（`os.path` 是独立模块别名）。
+  `exists` / `isdir` / `isfile`。子模块三种写法都可以：`import os.path as osp`、
+  `from os.path import join, exists`、以及 0.484 起的 `import os` 后直接
+  `os.path.join(...)`（属性链会展开成完整模块名，按**内置子模块**的声明式签名降级）。
+  注意这只覆盖内置子模块；用户包的子模块链（`import pkg` 之后的 `pkg.sub.f()`）仍不支持，
+  要写 `import pkg.sub as s` 或 `from pkg.sub import f`。
 - 内置 `subprocess`：`run(args, capture_output=False, text=False,
   timeout=-1.0, check=False, shell=False, cwd="")` 返回 `CompletedProcess`
   对象，属性 `.returncode` / `.stdout` / `.stderr`。`args` 可以是
