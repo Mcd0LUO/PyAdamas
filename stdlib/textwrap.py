@@ -91,14 +91,21 @@ def _split_hyph(text: str) -> list[str]:
     chunk 要么是空白段，要么是「词」段；连字符断点把连字符留在前一段末尾，
     em-dash（词间 -- 以上）自成一段。
     """
+    # 热路径：_is_space 每行调用 1~2 次，profile 里占 12%；直接内联比较，
+    # 省掉函数调用和它的字符串字面量比较链。
     chunks: list[str] = []
     n: int = len(text)
     i: int = 0
     while i < n:
         c: str = text[i]
-        if _is_space(c):
+        if (c == " " or c == "\t" or c == "\n" or c == "\x0b"
+                or c == "\x0c" or c == "\r"):
             j: int = i + 1
-            while j < n and _is_space(text[j]):
+            while j < n:
+                d: str = text[j]
+                if not (d == " " or d == "\t" or d == "\n" or d == "\x0b"
+                        or d == "\x0c" or d == "\r"):
+                    break
                 j = j + 1
             chunks.append(text[i:j])
             i = j
@@ -118,7 +125,8 @@ def _split_hyph(text: str) -> list[str]:
             if ch == "-" and _hyph_behind(text, j) and _hyph_ahead(text, j + 1):
                 end = j + 1
                 break
-            if _is_space(ch):
+            if (ch == " " or ch == "\t" or ch == "\n" or ch == "\x0b"
+                    or ch == "\x0c" or ch == "\r"):
                 end = j
                 break
             if ch == "-" and _is_wp(text[j - 1]) and _emdash_at(text, j):
@@ -137,11 +145,21 @@ def _split_simple(text: str) -> list[str]:
     i: int = 0
     while i < n:
         j: int = i + 1
-        if _is_space(text[i]):
-            while j < n and _is_space(text[j]):
+        first: str = text[i]
+        if (first == " " or first == "\t" or first == "\n"
+                or first == "\x0b" or first == "\x0c" or first == "\r"):
+            while j < n:
+                d: str = text[j]
+                if not (d == " " or d == "\t" or d == "\n" or d == "\x0b"
+                        or d == "\x0c" or d == "\r"):
+                    break
                 j = j + 1
         else:
-            while j < n and not _is_space(text[j]):
+            while j < n:
+                d = text[j]
+                if (d == " " or d == "\t" or d == "\n" or d == "\x0b"
+                        or d == "\x0c" or d == "\r"):
+                    break
                 j = j + 1
         chunks.append(text[i:j])
         i = j
@@ -154,7 +172,9 @@ def _expand_tabs(text: str, tabsize: int) -> str:
     tabsize <= 0 时删掉 tab（与 CPython 一致）；\\n / \\r 把列号归零，
     其它字符（含 \\v / \\f）各占一列。
     """
-    out: str = ""
+    # 逐字符 out = out + c 会分配 O(n) 个中间串（profile 里 memmove/str_alloc
+    # 占近 20%）；改成字符 list + 一次 join，分配次数降到 O(块数)。
+    out: list[str] = []
     col: int = 0
     n: int = len(text)
     i: int = 0
@@ -165,33 +185,34 @@ def _expand_tabs(text: str, tabsize: int) -> str:
                 k: int = tabsize - (col % tabsize)
                 j: int = 0
                 while j < k:
-                    out = out + " "
+                    out.append(" ")
                     j = j + 1
                 col = col + k
         elif c == "\n" or c == "\r":
-            out = out + c
+            out.append(c)
             col = 0
         else:
-            out = out + c
+            out.append(c)
             col = col + 1
         i = i + 1
-    return out
+    return "".join(out)
 
 
 def _replace_ws(text: str) -> str:
     """把 \\t \\n \\v \\f \\r 逐字符换成空格（CPython unicode_whitespace_trans）。"""
-    out: str = ""
+    # 同 _expand_tabs：用 list 缓冲避免逐字符串拼接。
+    out: list[str] = []
     n: int = len(text)
     i: int = 0
     while i < n:
         c: str = text[i]
         if (c == "\t" or c == "\n" or c == "\x0b" or c == "\x0c"
                 or c == "\r"):
-            out = out + " "
+            out.append(" ")
         else:
-            out = out + c
+            out.append(c)
         i = i + 1
-    return out
+    return "".join(out)
 
 
 def _total_len(items: list[str]) -> int:
