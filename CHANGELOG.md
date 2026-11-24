@@ -4,6 +4,36 @@
 
 早期阶段没有逐条留痕，按阶段归纳；0.4 之后逐条记录。
 
+## [0.508] - 2026-11-25
+
+> feat(lower)：**vtable thunk 落地**——多继承的虚调用也正确了（`f(a: A)` 传 `C(B, A)` 实例现在返回 1）。
+>
+> 0.507 只修了直调路径；虚调用在运行期不知道真实类，必须在 vtable 槽里放 thunk。本版：
+>
+> - 新增 `src/lower/mi_thunk.cpp`：`build_mi_thunk(target_fidx, delta)` 用**正常 IRFunction 合成流程**
+>  （`mod_.add_func` → `push_frame` → entry → `rc_mark_at` → 逐参数 `new_slot`+`load_slot` → `inc_params` →
+>  `args[0] = Bin(Add, args[0], const_int(delta))` → `CallDirect Operand::func(target)` → `emit_return` → `pop_frame`）
+>  拿自己的 fidx，走正常的链接与函数槽分配；
+> - 安装点：`class.cpp` 的「继承来的 winner 填充」之后、`compile_ctor_wrapper` 之前；
+>  只替换**没被更靠前类覆盖**的槽（`vtable[slot] == bvt[slot]`），跳过 static/classmethod/装饰方法/闭包（`env_slot >= 0`）；
+> - **返回值用 `def` 不用 `def_heap`**：callee 返回的是 owned 引用，thunk 只转发；用 `def_heap` 会把结果也挂进临时栈、多 dec 一次
+>   —— 实测报 `refcount increment on a freed object`，改成 `def` 后正常；
+> - **`IRFunction::mi_thunk` 标记**：直调路径遇到 thunk 不再加 delta，否则会**双重偏移**（`cb.get()` 第一次就 RC 报错）。
+>
+> 验收（`PYADAMAS_MI_UNSAFE=1`，护栏未动、默认仍拒绝）：
+>
+> ```
+> cb.x, cb.get()  →  1 1     （CPython 1 1）
+> f(cb)           →  1       （CPython 1；改前 2）✓ 走 vtable thunk
+> ```
+>
+> 语料：628 默认口径 **496/623 不降**；本仓库 **899 个 `.py`：781 通过**、零新拒绝；
+> 12 基准 asm 与 master 逐字节相同（没有多继承的代码不生成 thunk）。
+>
+> 未做（下一轮）：`super()` 的 delta、守卫按 (class, base) 分组（**性能**，不影响正确性——thunk 是新指针，
+> 按实现指针分组的候选自然不匹配、退回通用路径）、护栏默认放宽。
+>
+> 闸门：套件 **498** / difftest **468** / check_size **PASS** / ctest 9/9。
 ## [0.507] - 2026-11-25
 
 > feat(lower)：**给 `MethodInfo` 补「声明类」，并把直调路径的 self 偏移修掉**——adjustor thunk 的原子第一步。
