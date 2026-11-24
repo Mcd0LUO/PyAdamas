@@ -4,6 +4,35 @@
 
 早期阶段没有逐条留痕，按阶段归纳；0.4 之后逐条记录。
 
+## [0.482] - 2026-11-24
+
+> 收尾（§8.2-4）：**基线刷新**（当前 HEAD 全量重测，全部可用页内命令复现）。
+>
+> 1. **12 基准 `instructions:u`**：`tools/perf_baseline.txt` 重写（`checkall.sh --perf` 确认
+>    `warn=0 fail=0` 后人工跑 `--write-baseline`，不是为过闸门改数）。相对旧基线的变化：
+>    **wordfreq −7.38%**（旧基线写于 HEAD `668449f`，0.47x 的优化之后没再刷新——这就是上次
+>    那个 −7.38% 的来源）、nqueens +0.28%、fannkuch +0.59%、binary_trees +1.16%（后三者都在
+>    ±2% 警告带内，且 0.480 的产物与 0.479 逐字节相同，与本版无关）。其余 8 例变化 ≤0.03%。
+> 2. **四语言对比**（`PYADAMAS_BIN=build/lead/pyadamas run_compare.py --repeat 5`）：
+>    `bench/compare/RESULTS-0.480.md`。12 例全部快于 CPython（4.63× ~ 57.11×）；
+>    **spectral_norm 26.0 ms**（Go 16.1 / C++ 14.0 → 1.61× Go、1.86× C++，对 CPython 57.11×）、
+>    matmul 4.3 ms（比 C++ 还快 0.88×）、mandelbrot 15.5 ms（比 Go/C++ 快）；
+>    obj_dispatch 291.9 ms 是唯一显著落后项（Codon 113.6 ms = 2.57×）。
+> 3. **Codon 九例**：**7 例可比**（脚本收编为 `tools/codon_cmp.py`，/tmp 清掉后仍可复现；JSON 落到
+>    `.ref_proj/benchmarks/`，属本地实验产物、不入库），绑核交替 5 轮取最小：几何平均 **PA/Codon = 0.960**；
+>    `binary_trees` / `fannkuch` 用 Codon 0.20.7 编不过（本仓源码的泛型标注不兼容），
+>    文档里已注明不可比。逐例：mandelbrot 0.570 / matmul 0.509 / nqueens 0.861 /
+>    spectral_norm 0.840 / nbody 1.030 / fib 1.352 / obj_dispatch **2.570**。
+> 4. **文档表格同步**：`README` 验证表（`tests/run` 441→448、difftest 440→447，均按 `ls`/闸门实测）、
+>    `docs/compatibility.md` §四「当前性能」加 0.480 复核段（保留 0.7 时代 `-O0` 历史口径）、
+>    `docs/nightly-summary.md` §五 两行（向量化 8→7 结账、P4 删特化改为已删）、
+>    `bench/compare/run_compare.py` 的输出前言（不再声称「特化留着作对照」）、
+>    `docs/next-round-plan.md` §8.2 四条交付全部标结账。
+>
+> 口径：`-O2` 生成码、每例 `--rebuild`（0.478 起整程序产物缓存会命中，A/B 必须 `--rebuild` 或
+> `PYADAMAS_NO_PROGCACHE=1`）、多租户机器按轮取最小/中位。
+>
+> 顺带：`tools/flagbench.sh` 的 p25 列在 `REPS=1` 时除零（只在试跑时出现），已修。
 ## [0.481] - 2026-11-24
 
 > 收尾（§8.2-3）：**实验开关结账**。8 个开关逐个定论，登记在新增的

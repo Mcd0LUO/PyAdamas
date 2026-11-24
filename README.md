@@ -158,12 +158,12 @@ tools/                    工具脚本（差分 / 基准 / 同步 / IR dump）
 |---|---|---|
 | `tests/*.py` | 12（`ls tests/*.py \| wc -l`） | 前端正例，覆盖语法与类型规则（按 AST 节点计：43 个函数 / 458 条语句 / 1714 个表达式，为旧口径未在当前 HEAD 复测） |
 | `tests/fail/*.py` | 91（`ls tests/fail/*.py \| wc -l`） | 反例，必须报出首行 `# expect:` 指定的错 |
-| `tests/run/*.py` | 441（`ls tests/run/*.py \| wc -l`） | 编译 + 运行，输出与文件末尾的 `# --- expect ---` 逐行比对 |
+| `tests/run/*.py` | 448（`ls tests/run/*.py \| wc -l`） | 编译 + 运行，输出与文件末尾的 `# --- expect ---` 逐行比对 |
 | `tests/unsupported/*.py` | 1（`ls tests/unsupported/*.py \| wc -l`） | `check` 必须打「没建模」标记，且 `build` 必须拒绝 |
 | `tests/strict/*.py` | 7（`ls tests/strict/*.py \| wc -l`） | 错误只在降级/构建期出现（`check` 看不到），必须 `build` 拒绝并给出指定消息 |
 | Windows 目标 | 146（0.4xx 口径，未在当前 HEAD 复测） | `--target=win64` 产物在 Windows 上有 138 个用例输出与 POSIX 逐字节一致 |
 | `tests/diff/` | 7 个生成器（0.4xx 口径，未在当前 HEAD 复测） | 随机程序与 CPython 比 stdout，默认 3 种子 840 个程序 |
-| `tools/difftest.sh` | 440 个用例（0.470 闸门记录，8 路并行） | `tests/run` 的 -O0/-O2 输出自差分，并行（`PYADAMAS_TEST_JOBS` 调并行度），自动跳过 `*_perf`，0 不一致 |
+| `tools/difftest.sh` | 447 个用例（0.480 闸门记录，8 路并行） | `tests/run` 的 -O0/-O2 输出自差分，并行（`PYADAMAS_TEST_JOBS` 调并行度），自动跳过 `*_perf`，0 不一致 |
 | `tests/modules/` | 23 个目录（`find tests/modules -mindepth 1 -maxdepth 1 -type d \| wc -l`） | 多模块编译 + 运行 + 二次构建缓存命中 |
 | `tests/bench/` | 用例集 | 标准库与 RC/GC 基准：同一用例分别用 PyAdamas 与 CPython 跑，`python3 tests/bench/run_bench.py` |
 | 零开销异常 | 4 套夹具 | `tests/exc/`：`z1_rt` 116 项、`z2_rt` 134 项、`z2_codegen` 209 项；`tools/lsda_ref` 100+ 条字节断言。默认路径下非可挂起函数的 try 全程无 `_setjmp`（`--no-zero-cost-exc` 可回退） |

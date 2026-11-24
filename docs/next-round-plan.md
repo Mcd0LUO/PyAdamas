@@ -138,11 +138,11 @@ PYADAMAS_TEST_ASAN=1 PYADAMAS_TEST_JOBS=8 bash tests/run_tests.sh build/lead bui
 
 **目标**：把性能这条线**结账**——该拿的拿完、该判负的判负、死路删掉、文档数字统一到可复现口径。
 
-**交付**：
-1. **向量化缺口定论**：8 个基准的 0 触发（masked 向量化 / 嵌套循环 / 调用屏障，逐条 IR 证据见 [vectorization-coverage.md](vectorization-coverage.md)）——要么实现其中收益最大的一个，要么写负结论并归档，不再挂着当待办。
-2. **P4 删特化**：spectral_norm 仍约 1.13× 依赖特化路径。决定是删特化收敛到通用路径（减维护面），还是保留并写清理由。
-3. **实验开关结账**：`PYADAMAS_RA_OPT` / `RA_SPLIT` / `RA_GRAPH` / `LOOP_OPT` / `BORROW_OPT` / `VECT` / `TYPE_TAGS` / `GC_INCR_MARK` 逐个给结论：默认开、保持 opt-in（写明理由）、或删代码。
-4. **基线刷新**：12 基准 `instructions:u`、四语言对比、Codon 九例，全部在当前 HEAD 重测，更新 `tools/perf_baseline.txt` 与文档表格。
+**交付（2026-11-24 全部结账）**：
+1. ~~向量化缺口定论~~ **已结账（0.479，判负）**：先修正事实——当前 **5/12 命中**（mandelbrot 已被 masked 覆盖，−36.3%），仍 0 的 **7 个**逐条判负并归档：[vectorization-coverage.md](vectorization-coverage.md) §10。三条候选里 masked 已落地、嵌套无增量、调用屏障对剩余 4 个是零收益。
+2. ~~P4 删特化~~ **已删（0.480）**：模板对当前 IR 全部失配（12 基准 asm 零 `SIMD` 标记、指令数与关掉向量化逐位相同），1304 → 149 行；默认产物逐字节不变，`PYADAMAS_SIMD=1` 改为显式报错。
+3. ~~实验开关结账~~ **已完成（0.481）**：8 个开关逐个给结论，登记在 [experiment-switches.md](experiment-switches.md)（含证据、触发条件、回退方式与删除清单）。
+4. ~~基线刷新~~ **已完成（0.482）**：`tools/perf_baseline.txt` 在 HEAD 重测并人工确认后重写；四语言表 [bench/compare/RESULTS-0.480.md](../bench/compare/RESULTS-0.480.md)；Codon 九例（7 例可比）几何 0.960。
 
 **验收**：
 - `tools/checkall.sh --full` 全绿；perf 基线是「人工确认后写入」，不是为过闸门改数；

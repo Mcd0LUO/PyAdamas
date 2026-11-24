@@ -565,6 +565,17 @@ bytes 之后，旧清单（bytes 2038 / complex 620 / int64 138 / match 91）已
 
 ## 四、当前性能
 
+> **0.480 复核（默认 `-O2` 管线）**：12 个经典基准与 CPython / Go / C++ 的同机对比表在
+> [bench/compare/RESULTS-0.480.md](../bench/compare/RESULTS-0.480.md)（每例 `--rebuild`、
+> 跑 5 次取最小、绑核）。要点：12 例全部快于 CPython（4.6× ~ 57.1×）；**spectral_norm 26.0 ms**
+> （Go 16.1 / C++ 14.0，即 1.61× Go、1.86× C++）；obj_dispatch 291.9 ms 是唯一显著落后项
+> （Codon 113.6 ms，2.57×；开 `PYADAMAS_BORROW_OPT=1` 后 202.2 ms / 1.78×，该开关按
+> [experiment-switches.md](experiment-switches.md) 保持 opt-in）。
+> 生成码的用户态指令数基线在 [tools/perf_baseline.txt](../tools/perf_baseline.txt)（0.480 刷新）。
+> 向量化覆盖：12 例中 5 例命中（[vectorization-coverage.md](vectorization-coverage.md)）。
+>
+> 下面 `-O0` 一节是历史口径（0.7 时代），保留作对照。
+
 `-O0` 构建的 PyAdamas 生成 `-O0` 风格的代码，对手是同机容器内的 CPython 3.13.5：
 
 | 程序 | 相对 CPython 3.13 |

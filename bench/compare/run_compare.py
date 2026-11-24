@@ -279,12 +279,12 @@ def write_markdown(path, rows, args):
            if rounds else "跑 %d 次取最小值" % args.repeat,
            PYADAMAS_BIN),
         "",
-        "**这里的 PyAdamas 是默认管线**：通用自动向量化（`src/backend/vect.cpp`）"
-        "默认开；照着基准循环形状写的特化 SIMD（`src/codegen_simd*.cpp`）自 0.384"
-        " 起**移出默认管线**，只有 `PYADAMAS_SIMD=1` 才开。特化整套关掉后 "
-        "`matmul`/`spectral_norm`/`nbody` 各慢 4.5× 左右，其余用例在噪声内；"
-        "量化与泛化计划见 `docs/vectorization-generalization.md`。换句话说：这张表"
-        "没有用靶子上的特化，`sieve`/`wordfreq` 这类写法与它们在同一口径下比较。",
+        "**这里的 PyAdamas 是默认管线**：通用自动向量化（`src/backend/vect.cpp` +"
+        " `backend/masked.cpp`）默认开，5/12 个基准命中（matmul −86.5%、spectral_norm"
+        " −59.6%、sieve −51.9%、nbody −45.2%、mandelbrot −36.3%，口径见"
+        " `docs/vectorization-coverage.md`）。照着基准循环形状写死的特化 SIMD 模板"
+        "（`PYADAMAS_SIMD`）已在 0.480 **整段删除**——它们对当前 IR 一次都没再匹配上，"
+        "留着只会把「靶子上的性能」当成通用性能。换句话说：这张表没有用靶子上的特化。",
         "",
         "| 用例 | N | CPython | PyAdamas | Go | C++ | PyAdamas/CPython | PyAdamas/最快编译实现 | 输出一致 |",
         "|---|---|---|---|---|---|---|---|---|",

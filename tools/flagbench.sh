@@ -64,8 +64,8 @@ done
 printf '%-22s %10s %10s %9s %9s\n' "case" "off" "on" "delta" "p25"
 tot_a=0; tot_b=0
 for name in $(printf '%s\n' "${!A_BIN[@]}" | sort); do
-    read -r amed ap25 < <(sort -n "$OUT/ta_$name" | awk '{a[NR]=$1} END{print a[int((NR+1)/2)], a[int((NR+1)/4)]}')
-    read -r bmed bp25 < <(sort -n "$OUT/tb_$name" | awk '{a[NR]=$1} END{print a[int((NR+1)/2)], a[int((NR+1)/4)]}')
+    read -r amed ap25 < <(sort -n "$OUT/ta_$name" | awk '{a[NR]=$1} END{i=int((NR+1)/4); if(i<1)i=1; print a[int((NR+1)/2)], a[i]}')
+    read -r bmed bp25 < <(sort -n "$OUT/tb_$name" | awk '{a[NR]=$1} END{i=int((NR+1)/4); if(i<1)i=1; print a[int((NR+1)/2)], a[i]}')
     [ -z "$amed" ] && continue
     tot_a=$((tot_a + amed)); tot_b=$((tot_b + bmed))
     pct=$(awk -v a="$amed" -v b="$bmed" 'BEGIN{printf "%+.1f%%", (b-a)*100/a}')

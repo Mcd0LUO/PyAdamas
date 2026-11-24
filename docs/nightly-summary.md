@@ -184,10 +184,10 @@ sieve 的计数循环在 0.423 向量化（`while i < N: if flags[i] == 1: count
 
 | 项 | 状态 |
 |---|---|
-| 8 个基准的向量化 | 未做：分别缺 masked 向量化（mandelbrot 数据依赖退出）、嵌套循环形状（nbody 位置更新/外层）、调用屏障（wordfreq 体内 dict 调用）；逐条见 [vectorization-coverage.md](vectorization-coverage.md) |
+| 8 个基准的向量化 | **已结账（0.479）**：masked 已落地并覆盖 mandelbrot（−36.3%），当前 **5/12 命中、7/12 仍 0**；剩余 7 个逐条判负归档（嵌套/调用屏障/递归/trip≤8），见 [vectorization-coverage.md](vectorization-coverage.md) §10 |
 | nbody lane 映射 | 未做：通用路径与特化仍有 **2×** 差距（nbody 是 2-lane 特化 vs 4-lane 通用之外的结构差异） |
 | 类实例 dunder 在 unknown 域 | ✅ **已关闭（0.433–0.435）**：`__eq__`/`__lt__`/`__hash__` 按 vtable dunder 槽表分派；剩余文案项：unknown 域 unhashable 文案无具体类名，`__le__`/`__ge__` 仍按 typed 静态判据（见 [unknown-semantics-audit.md](unknown-semantics-audit.md) §4） |
-| P4 删特化（`codegen_simd*`） | 未做：spectral_norm 仍约 **1.13×**（0.417 记录 1.15×）依赖特化 |
+| P4 删特化（`codegen_simd*`） | **已删（0.480）**：模板对当前 IR 全部失配（12 基准 asm 零标记、指令数与关掉向量化逐位相同），1304→149 行；「spectral_norm 1.13× 依赖特化」是 0.417 口径，今天通用路径给 −59.6% |
 | AVX2 的散射/广播装载 | 未做：含这些访问的循环强制走 SSE2 |
 | `1.0/0.0` 返回 `inf`（CPython 抛 ZeroDivisionError） | 既有语义差异，已记录进 [compatibility.md](compatibility.md)，未修 |
 | 装饰后的 `__iter__` | 未修：文档承诺可装饰 dunder 含 `__iter__`，但 `for`/`list()` 的内建迭代路径不查类属性包装函数（0.443 记录） |
