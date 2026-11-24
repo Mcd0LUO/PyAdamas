@@ -79,6 +79,7 @@
 | 图着色分配 / LiveInterval 第三层 / 块级分裂 | [regalloc.md](regalloc.md)、[regalloc-architecture.md](regalloc-architecture.md) |
 | 堆槽提升、IVSR、批量 dec 永生范围检查、dict 末次查找缓存 | [heap-slot-promotion.md](heap-slot-promotion.md)、[ivsr-negative-result.md](ivsr-negative-result.md) |
 | 范围版本化边界消除（克隆阶段回退） | [bounds-elimination-attempt.md](bounds-elimination-attempt.md) |
+| cpybridge 产品化（协议完备 / IPC 性能 / 关键字参数） | 只作**逃生口**：`from python import …` 仅用于迫不得已的场景，不投产品化；限制写进 [cpybridge-design.md](cpybridge-design.md)（2026-11-24 定） |
 
 ## 6. 每轮闸门（缺一不可）
 
@@ -91,12 +92,57 @@ PYADAMAS_TEST_ASAN=1 PYADAMAS_TEST_JOBS=8 bash tests/run_tests.sh build/lead bui
 - 所有权/RC/GC 改动：ASan 全量 + 语料对拍 + CPython 对拍，三者缺一不可（ASan 抓不到自定义池的 UAF，0.470 已吃一次）。
 - 负结论也写 CHANGELOG；撤回机制代码但保留回归测试与诊断。
 
-## 7. 并行分工（0.471）
+## 7. 并行分工（0.471 进行中）
 
 | 通道 | 归属 | 边界 |
 |---|---|---|
-| 文档漂移 | 子代理 hy4flash-free | 只改 `docs/*.md`、`README.md`；不碰 `HANDOFF.md`、不改代码、不提交，由 lead 复核后统一提交 |
-| pya-lsp | 子代理（独立仓库） | 只改 `/src/luo-proj/pya-lsp`；不碰编译器仓库；本地提交不 push |
-| 主线 | lead | P1 性能取证；`build/lead` 与 `build/release`（0.271 oracle）分开 |
+| P1 性能（2.3/2.2/2.1/2.4） | 子代理 `p1-perf`（主仓库） | 只动 `src/` 的性能相关部分；`build/lead` 由它独占；CHANGELOG 版本号由 lead 合并时分配 |
+| 包管理 P0-a | 子代理 `pkg-p0`（worktree `.wt/pkg-p0`，分支 `pkg-p0`） | 只动驱动层 + `tests/pkg/`；**不改生成代码**（asm 逐字节不变）；不动 CHANGELOG/HANDOFF |
+| 标准库性能与细节 | 子代理 `stdlib-opt`（worktree `.wt/stdlib-opt`，分支 `stdlib-opt`） | 只动 `stdlib/**/*.py` + 新增 `tests/run/` 用例；不动 `src/`、`runtime/`、CHANGELOG |
+| 已完成 | 文档漂移（`c7a8dbe`）、difftest 假绿/假红（0.471）、pya-lsp 0.3.x/0.4.0（`f2a5f68`/`bdc9741`）、包管理归属（`ff59eb8`） | — |
+| 主线 | lead | 文档、闸门、复核 diff、独立重跑闸门、按合并顺序分配版本号 |
 
-合并顺序：文档 → lsp → 主线性能。三条线互不修改对方的工作区。
+合并顺序：**包管理 P0-a → 标准库 → P1 性能**（前两条不改生成代码，先合风险低；性能线最后，避免把 asm 口径搅在一起）。
+三条线互不修改对方的工作区；每个 worktree 自带构建目录（`.wt/*/build/...`）。
+
+## 8. 收尾之后（0.48x）：增量重编 → 性能收尾
+
+> **2026-11-24 定调**：cpybridge（`from python import …`）**只作逃生口**——迫不得已才用，
+> 不做产品化（协议完备性、IPC 性能都不投）。因此「借 CPython/pip 生态」不构成「不必自己做包管理」
+> 的理由，registry 仍是包管理主线（P2）。下面两件事排在当前 P0–P3 收尾之后，顺序即优先级。
+
+### 8.1 增量重编（先做）
+
+**目标**：把「改一行 → 重新出二进制」的固定成本压下来，且不引入任何正确性风险。
+
+**现状**（口径见 [iteration-roadmap.md](iteration-roadmap.md#一次性短脚本的固定成本实测构建路径)）：hello-world 冷构建 52ms、热构建 38ms，其中 `as`≈8ms、`ld`≈9ms、编译器自身 10–15ms、两次 `sh -c` 各约 1ms。模块级缓存已经存在（manifest v3 逐字段校验，入口模块也走缓存），**真正的固定成本在汇编、链接与进程启动**，不在前端。
+
+**交付**：
+1. **整程序产物缓存**：源码 + 全部开关 + 工具链 + 依赖接口哈希都没变、且输出文件仍是上次产物 → 直接复用，不再跑 `as`/`ld`。键必须含 target、module_version、lang_gaps、dynamic_big、simd/vect/avx2——**漏一项就是静默错误**。
+2. **`run` 的重复执行**：同源同选项第二次 `run` 不重新编译链接（临时产物按内容键复用）。
+3. **缓存键确定性**：把 CHANGELOG 纳入 CMake 的 `CMAKE_CONFIGURE_DEPENDS`，消灭「版本号改了但二进制仍报旧版本」（现在 `deps --json` 报 0.469，而 CHANGELOG 是 0.471）。
+4. **不做**内嵌汇编器/链接器：那是另一个量级的工程，先让产物缓存把收益上限量出来。
+
+**验收**：
+- hello-world 第二次 `build` 从 38ms 量级降到 <10ms（同窗 A/B、5 次取最小、绑核）；
+- 改动任一输入（源码 / 任一开关 / 编译器 / target / 依赖接口）必须 miss，并且做一次**「故意漏项」反向实验**：从键里删掉一个开关，应观察到「切换开关仍命中」的错误行为，然后修复并留下回归；
+- 复用产物后程序输出逐字节一致；两进程并发 0 损坏（复用 `tests/cache_race.sh` 的思路）；
+- 全量闸门绿（套件 469 / difftest 440 / check_size 不新增超限）。
+
+**风险**：缓存键漏项 = 静默错误（比慢更糟）；产物文件被外部改写要能检出。
+
+### 8.2 性能收尾
+
+**目标**：把性能这条线**结账**——该拿的拿完、该判负的判负、死路删掉、文档数字统一到可复现口径。
+
+**交付**：
+1. **向量化缺口定论**：8 个基准的 0 触发（masked 向量化 / 嵌套循环 / 调用屏障，逐条 IR 证据见 [vectorization-coverage.md](vectorization-coverage.md)）——要么实现其中收益最大的一个，要么写负结论并归档，不再挂着当待办。
+2. **P4 删特化**：spectral_norm 仍约 1.13× 依赖特化路径。决定是删特化收敛到通用路径（减维护面），还是保留并写清理由。
+3. **实验开关结账**：`PYADAMAS_RA_OPT` / `RA_SPLIT` / `RA_GRAPH` / `LOOP_OPT` / `BORROW_OPT` / `VECT` / `TYPE_TAGS` / `GC_INCR_MARK` 逐个给结论：默认开、保持 opt-in（写明理由）、或删代码。
+4. **基线刷新**：12 基准 `instructions:u`、四语言对比、Codon 九例，全部在当前 HEAD 重测，更新 `tools/perf_baseline.txt` 与文档表格。
+
+**验收**：
+- `tools/checkall.sh --full` 全绿；perf 基线是「人工确认后写入」，不是为过闸门改数；
+- 文档里每个性能数字都能用页内命令复现；负结论进 CHANGELOG；
+- 没有死代码/空壳 `switch`（CONTRIBUTING 第 6 条）。
+

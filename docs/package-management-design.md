@@ -17,6 +17,11 @@
 >
 > 落地位置：清单/锁解析放 `src/driver/`，`resolve` / `--locked` 作为 `src/main.cpp` 的子命令，
 > 回归放 `tests/`；不改生成代码（P0 阶段的验收要求汇编与指令数逐字节/逐项不变）。
+>
+> **与 cpybridge 的关系（2026-11-24 决定）**：`from python import …` **只作逃生口**（迫不得已才用，
+> 不产品化，见 [cpybridge-design.md](cpybridge-design.md)），不承担生态互操作的主线职责。
+> 所以「借 CPython/pip 生态」不构成「不必自己做包管理」的理由——registry 仍是主线（P2），
+> P0 的锁与 P1 的 store 照常推进。
 
 一句话：**PyAdamas 的包管理不是「把东西装进运行环境」，而是「把依赖图钉死，然后让编译器把整张图编成一个二进制」**。
 
