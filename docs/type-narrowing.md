@@ -56,3 +56,36 @@ def f(x: int | None) -> int:
   `isinstance` 分支。
 - C 结构体/联合指针的 `T | None`（cimport 返回值）**不报**「may be None」：那是裸指针的
   可空性，不是 Python None 语义（否则 104_cstruct/215_c_float32/527_union_array 会被误杀）。
+## 已修的三类假阳性（0.501，分支 fe3）
+
+0.499 的真窄化在 628 文件语料上多拒了 6 个文件。本轮修了两类、外加一条模块级
+规则，默认口径 **495 → 500/623**：
+
+| 类 | 根因 | 修法 | 语料里被修的文件 |
+|---|---|---|---|
+| walrus | `if (n := d.get(k)) is not None:` 的判断对象是 `NamedExpr`，`narrow_on` 只认 `Name`，被赋名的 n 没被窄化 | `narrow_name_of()`：条件里取名字时同时认 `NamedExpr` 的 target（`is`/`is not None`、裸真值、`isinstance` 第一参都走它） | `graphlib.py`（`(nodeinfo := n2i.get(node)) is None` 提前返回之后） |
+| `isinstance` | 没有 refinement，`if isinstance(x, C)` 之后 `x` 仍是联合 | `narrow_isinstance()`：真值分支收窄成 C（联合里必须有一个与之兼容的类成员，否则不动）；假值分支去掉「C 或其子类」的成员（去空了就不动）。只认用户类对象 + `Name`/walrus 目标，内置类型/元组形式/属性目标一律保守 | `pyclbr.py`（`isinstance(parent, Class)` 之后 `parent.methods[...]`） |
+| 模块级「先定义后初始化」 | 模块级未标注名字的条件赋值（`_P = None if cond else 92`）会把类型并成 `T \| None`，之后 `a < _P` 报「可能为 None」 | 模块级未标注名字不因分支里的 None 并回 Optional（与既有「模块级 None 占位 → unknown」同一条口径）；`declare()` 与 `stmt_if` 的分支合并两处都做 | 语料里另有 3 个文件转绿（`multiprocessing/util.py` 的 `_SUN_PATH_MAX` 仍受下一节限制） |
+
+回归：`tests/run/narrow_walrus_isinstance.py`（walrus 两种极性 + isinstance 两分支 + Optional 组合，正反输出对齐 CPython），并加进 `tests/opt_levels.sh`（-O0/-O1/-O2 都跑）。
+
+### 仍剩下的假阳性（不同根因，本轮不做）
+
+| 文件 | 现象 | 根因 | 要做的事 |
+|---|---|---|---|
+| `base64.py:482` | `acc * 85 + _b85dec[c]` 报可能为 None | `[None] * 256` + 逐个写 int → 元素类型 `int \| None`；代码**故意**在 None 时靠 `except TypeError` 兜底 | 要么承认「try/except TypeError 里的 Optional 算术」是合法模式，要么让容器占位元素（`[None]*n`）单独跟踪「已填充」区间 —— 后者是新的流分析层 |
+| `xml/dom/pulldom.py:110` | `self.lastEvent[1]` 报容器可能为 None | 字段先赋 `[None, None]`、再把 `lastEvent[1]`（元素类型 None）赋回字段 → 字段变成 `list \| None` | 同上的容器占位问题（字段版） |
+| `modulefinder.py:442` | `parent.__name__` 报可能为 None | `determine_parent()` 未标注、有 `return None` 分支，推断成 `Module \| None`；调用点靠外部不变量（level != 0） | 需要跨函数的「不变量/契约」信息，静态上判不出来 —— 这是真 Optional，不是窄化缺陷 |
+| `multiprocessing/util.py:182` | `sun_path_len < _SUN_PATH_MAX` | `_SUN_PATH_MAX` 走 if/elif/else（108 / 104 / `None if os.name=='nt' else 92`），模块级合并后仍是 `int \| None` | 同上（条件定义 + 平台常量） |
+
+### 3.12：`if xs:` 对空 list 在 -O0 崩溃 —— 不可复现
+
+按 `xs: list[int] = []` + `if xs:` 在 -O0/-O1/-O2 三个档位实测，**都不崩**（输出正确）；
+扩展覆盖 list/dict/set/str/tuple、字段、参数、全局、walrus、`and` 链、`while`、
+生成器内、`try` 内、`not`/`bool()`/`len()` 共 20+ 形状全绿；0.498 构建（cb217e0）
+同样不崩。回归 `tests/run/empty_container_truth.py` 已进 `tests/opt_levels.sh`
+（ctest 的 `pyadamas_opt_levels` 会跑 -O0/-O1/-O2）。
+
+顺带记一个**真实存在**的既有崩溃（与本条无关）：`check --imports` 在循环 import 的
+文件上栈溢出（`encode_module_interface → enc_sig → enc_sig …`），0.498/0.500 都崩
+（sched.py、random.py、threading.py 等 20+ 文件），需要给签名编码加递归保护。

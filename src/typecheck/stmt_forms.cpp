@@ -479,6 +479,10 @@ void TypeChecker::stmt_if(If& f) {
         merge_in();
         for (auto it = ns.rbegin(); it != ns.rend(); ++it) restore_narrowing(*it);
         // 写回：类型取各分支上界，分支里新出现的名字保留
+        // 注意：这里**不能**顺手把模块级 Optional 的 None 去掉 —— 分支合并
+        // 的结果同时决定降级层的表示（在模块级 print(d.get(k)) 会因为类型从
+        // Optional 变 int 而把 None 打成 0）。模块级的 None 处理只在
+        // declare() 里对「已有确定类型又来了一个 Optional」这一种情形做。
         for (auto& [name, ty] : merged) {
             auto it = cur_->vars.find(name);
             if (it == cur_->vars.end())
