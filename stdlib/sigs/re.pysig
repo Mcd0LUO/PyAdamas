@@ -33,3 +33,13 @@ class Match:
     def span(self, group: int = 0) -> tuple[int, int]: pass
     @native("pa_re_expand")
     def expand(self, template: str) -> str: pass
+
+# 标志位常量（与 CPython 3.14 数值一致；A/ASCII、U/UNICODE 是同一组）。
+# 其余标志（I/M/S/X 等）在 typecheck/builtin_sigs.cpp 里硬编码，pysig 按名字覆盖。
+A: int = 256
+ASCII: int = 256
+U: int = 32
+UNICODE: int = 32
+NOFLAG: int = 0
+# 清正则缓存：pa 的 re 没有编译缓存，no-op（语义等价）。
+def purge() -> None: pass

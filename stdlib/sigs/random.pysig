@@ -67,3 +67,5 @@ class Random:
 
     @native("pa_random_shuffle")
     def shuffle(self, x: list[object]) -> None: pass
+# randbytes(n) -> bytes：与 CPython 同一字消耗（同一个种子逐字节一致）。
+def randbytes(n: int) -> bytes: pass

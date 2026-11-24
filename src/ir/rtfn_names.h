@@ -350,6 +350,7 @@ inline const char* rt_name(RtFn f) {
         case RtFn::MathSumprod: return "pa_math_sumprod";
         case RtFn::MathDist: return "pa_math_dist";
         case RtFn::SysArgv: return "pa_sys_argv";
+        case RtFn::SysIntern: return "pa_sys_intern";
         case RtFn::SysExit: return "pa_sys_exit";
         case RtFn::GenNext: return "pa_gen_next";
         case RtFn::GenNextOpt: return "pa_gen_next_opt";
@@ -455,6 +456,10 @@ inline const char* rt_name(RtFn f) {
         case RtFn::PopenSendSignal: return "pa_popen_send_signal";
         case RtFn::PopenCommunicate: return "pa_popen_communicate";
         case RtFn::TimeTime: return "pa_time_time";
+        case RtFn::TimeTimeNs: return "pa_time_time_ns";
+        case RtFn::TimeMonotonicNs: return "pa_time_monotonic_ns";
+        case RtFn::TimePerfCounterNs: return "pa_time_perf_counter_ns";
+        case RtFn::TimeProcessTime: return "pa_time_process_time";
         case RtFn::TimeMonotonic: return "pa_time_monotonic";
         case RtFn::TimePerfCounter: return "pa_time_perf_counter";
         case RtFn::TimeSleep: return "pa_time_sleep";
@@ -499,6 +504,7 @@ inline const char* rt_name(RtFn f) {
         case RtFn::RegexSplitStr: return "pa_re_split_str";
         case RtFn::RegexSplit: return "pa_re_split";
         case RtFn::RegexEscape: return "pa_re_escape";
+        case RtFn::RegexPurge: return "pa_re_purge";
         case RtFn::RegexPatternGroups: return "pa_re_pattern_groups";
         case RtFn::RegexPatternFlags: return "pa_re_pattern_flags";
         case RtFn::RegexPatternStr: return "pa_re_pattern_str";
@@ -563,12 +569,18 @@ inline const char* rt_name(RtFn f) {
         case RtFn::PathTouch: return "pa_path_touch";
         case RtFn::RandRange: return "pa_random_randrange";
         case RtFn::RandGetrandbits: return "pa_random_getrandbits";
+        case RtFn::RandBytes: return "pa_random_randbytes";
         case RtFn::RandGauss: return "pa_random_gauss";
         case RtFn::RandExpovariate: return "pa_random_expovariate";
         case RtFn::RandTriangular: return "pa_random_triangular";
         case RtFn::RandSample: return "pa_random_sample";
         case RtFn::RandChoices: return "pa_random_choices";
         case RtFn::OsGetpid: return "pa_os_getpid";
+        case RtFn::OsGetuid: return "pa_os_getuid";
+        case RtFn::OsGeteuid: return "pa_os_geteuid";
+        case RtFn::OsGetppid: return "pa_os_getppid";
+        case RtFn::OsUrandom: return "pa_os_urandom";
+        case RtFn::OsStrerror: return "pa_os_strerror";
         case RtFn::OsChdir: return "pa_os_chdir";
         case RtFn::OsChmod: return "pa_os_chmod";
         case RtFn::OsAccess: return "pa_os_access";

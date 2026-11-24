@@ -104,3 +104,82 @@
 - 0.498 那一轮的完整记录与判负证据：[frontend-fixes.md](frontend-fixes.md)
 - `unknown` 在运行时的类型分派：[stdlib-round2.md](stdlib-round2.md) §7
 - 路线图条目：3.8（类体别名，已修）、3.9（多继承字段偏移）、3.10（保守 GC 段错误）
+## 8. 本轮落地：补表 / 装饰器签名 / except 绑定（分支 fe2）
+
+### 8.1 取证方法与一个口径修正
+
+探针：对每个成员生成 `import M; x = M.member; x.nope()`，跑 `check --imports`。
+命中 `'T' object has no method 'nope'` = 类型已知；`module 'M' has no attribute`
+= 表里没有；无报错 = unknown。**必须在 `--imports` 模式下量**：默认 `check` 单文件
+不加载模块接口（`stmt_import` 里 `module_lookup_ == nullptr` 时直接 declare unknown），
+此时**所有**模块成员都是 unknown —— 0.499 的 §3 表格把这一点混进了「接口表缺失」，
+例如 `json.dumps` / `sys.argv[0]` 在 `--imports` 下本来就是 `str`，本轮实测确认：
+
+| 表达式 | 0.499 记录 | 本轮实测（`--imports`） |
+|---|---|---|
+| `json.dumps({...})` | unknown | **str**（已建模） |
+| `json.loads(s, sample)` | unknown | 动态：按 sample 的类型（保留，见 §8.4） |
+| `sys.argv[0]` | unknown | **str**（已建模） |
+| `@deco def g()->int` 的 `g()` | unknown | unknown（本轮**判负**：保留签名在 628 语料上 500→496，见 §8.3） |
+| `except ValueError as e` 的 `e` | unknown | **ValueError**（本来就有类型；「unknown」是**成员访问宽松**造成的观感，见 §8.5） |
+
+审计范围：16 个原生模块 358 个成员（sys/os/os.path/time/json/math/random/re/
+collections/pathlib/datetime/subprocess/functools/operator/itertools/asyncio）。
+改前 **missing 130 / unknown 27**（`os.path` 的 24 个是探针写法的假阳性：
+`import os.path` 后取 `os.path.join` 不算模块成员；正确写法见 §8.2 末尾）。
+
+### 8.2 补表：33 个成员 + 13 个运行期函数
+
+只补能确定类型、且**运行期真的有值/实现**的成员（补类型但不实现 = 静默 0/None，
+禁止）：
+
+- **常量（编译期字面量，`stdlib/sigs/*.pysig`）**：
+  sys `platform`/`version`/`byteorder`/`maxunicode`/`hexversion`/`api_version`/
+  `dont_write_bytecode`；os `name`/`curdir`/`pardir`/`altsep`/`pathsep`/`extsep`/
+  `devnull`；re `A`/`ASCII`/`U`/`UNICODE`/`NOFLAG`；datetime `MINYEAR`/`MAXYEAR`。
+  值按目标平台（Linux x86-64）与项目对标的 CPython 3.14.4 固定（`python3` 实测核对）。
+  `sys.version_info` 是五元组，pysig 常量语法只收标量，走 `builtin_value` 里
+  的 `MakeTuple`（(3, 14, 4, "final", 0)）。
+- **运行期函数（新 RtFn + C 实现 + pysig）**：os `getuid`/`geteuid`/`getppid`/
+  `urandom`/`strerror`/`replace`（复用 rename 符号）；time `time_ns`/`monotonic_ns`/
+  `perf_counter_ns`/`process_time`；random `randbytes`（与 CPython 同一字消耗，
+  同种子逐字节一致）；sys `intern`；re `purge`（no-op，语义等价）。
+- **stdlib 源**：`itertools.batched`（eager list 版本，元素按 CPython 口径是 tuple），
+  与其它 itertools 扩展函数同一模型。
+
+改后：**missing 130 → 97，unknown 27 → 28**（`os.altsep` 是 None，探针对 None 接收者
+天然放行 —— 不是 unknown）。`os.path` 用正确写法复核全部已知：
+`from os import path as osp; x = osp.join; x.nope()` → `'func(...) -> str' object has
+no method 'nope'`。
+
+### 8.5 仍然缺的（没有运行期实现，补类型会变成静默 0/None，所以不补）
+
+remaining 97 个成员按性质分类（都不在本轮）：
+
+| 类 | 例子 | 要动什么 |
+|---|---|---|
+| 文件描述符/系统调用 | os `open`/`read`/`write`/`close`/`dup`/`waitpid`/`kill`/`times`/`getloadavg`/`popen`/`scandir` | 新运行期面（fd 抽象） |
+| 结构性返回值 | os `stat`/`lstat`/`uname`；time `struct_time`/`strptime` | 新 struct/namedtuple 模型 |
+| 解释器身份 | sys `prefix`/`path`/`implementaion`/`flags`/`float_info`/`modules`/`getsizeof`/`getrecursionlimit` | 运行期需要「解释器」概念 |
+| 惰性对象 | itertools `count`/`cycle`；`chain.from_iterable` | 本项目 itertools 是 eager list 模型 |
+| 类/异常对象 | collections `namedtuple`/`ChainMap`/`UserDict`；pathlib `PurePath`；datetime `time`/`timezone`/`UTC`；re `error`；asyncio `Timeout` | 运行期类工厂 |
+| 子进程面 | subprocess `call`/`check_call`/`check_output`/`getoutput`/异常类 | 运行期子进程协议 |
+| 其它 | json `dump`/`load`；re `subn`；operator `methodcaller`/`setitem`/`delitem`/`index`/`length_hint`；functools `total_ordering`/`singledispatch`；random `normalvariate`/`betavariate`；sys trace 钩子 | 各自的小实现，收益低 |
+
+`json.dumps` 已经是 `str`；`json.loads` 故意保持「按 sample 推断」（`json.loads(text,
+sample)` 的 sample 决定返回类型，`json.load`/`dump` 涉及文件流，未建模）。
+`os.environ` 是只读快照 dict[str,str]，写入在降级层显式报错（既有行为）。
+
+### 8.6 语料实测（改前 / 改后）
+
+| 语料 | 口径 | 改前 | 改后 | 回归 |
+|---|---|---|---|---|
+| CPython 3.14.4 标准库 628 文件 | `check --syntax` | 623 | 623 | — |
+| 同上 | `check`（默认） | 500/623 | **500/623** | 0（逐文件相同） |
+| 本仓库 889 个 `.py`（不含 build/） | `check`（默认） | 775 | **775** | 0 |
+
+改前/改后用**同一份文件清单**、同一台机器分别跑 master（ec4918b 独立构建）与
+本分支的二进制，`comm` 逐文件比对：两边通过集合完全相同（没有新增拒绝，也没有
+新通过——本轮的补表只影响 `--imports`/build 模式，默认 `check` 不解析模块成员）。
+
+装饰器保留签名的两次尝试**都**会让标准库 500 → 496（4 个文件），证据见 §8.3。

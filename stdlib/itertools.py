@@ -147,6 +147,26 @@ def tee(it: list, n: int = 2) -> list:
     return out
 
 
+def batched(xs: list, n: int) -> list:
+    """按 n 个一组切块，返回 list[tuple]（CPython 3.12+ 的 batched 是惰性
+    迭代器；pa 没有通用迭代协议，这里立即求值，元素按 CPython 口径是 tuple，
+    长度不足 n 的尾块保留原样）。"""
+    if n < 1:
+        raise ValueError("n must be at least one")
+    out: list = []
+    i: int = 0
+    total: int = len(xs)
+    while i < total:
+        chunk: list = []
+        j: int = 0
+        while j < n and i + j < total:
+            chunk.append(xs[i + j])
+            j += 1
+        out.append(tuple(chunk))
+        i += n
+    return out
+
+
 def chain_iterables(lists: list) -> list:
     """展平一层：等价于 CPython 的 itertools.chain.from_iterable(lists)。
 

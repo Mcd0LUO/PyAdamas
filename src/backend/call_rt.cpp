@@ -402,6 +402,14 @@ void AsmGen::gen_rt_args(const Inst& in, RtFn fn) {
         case RtFn::TimeMonotonic:
         case RtFn::TimePerfCounter:
         case RtFn::OsGetpid:
+        case RtFn::OsGetuid:
+        case RtFn::OsGeteuid:
+        case RtFn::OsGetppid:
+        case RtFn::TimeTimeNs:
+        case RtFn::TimeMonotonicNs:
+        case RtFn::TimePerfCounterNs:
+        case RtFn::TimeProcessTime:
+        case RtFn::RegexPurge:
         case RtFn::OsEnviron:
         case RtFn::VtShutdown:
             gen_rt_none(in);
@@ -414,6 +422,10 @@ void AsmGen::gen_rt_args(const Inst& in, RtFn fn) {
         case RtFn::RegexPatternFlags:
         case RtFn::RegexPatternStr:
         case RtFn::RegexEscape:
+        case RtFn::OsUrandom:
+        case RtFn::OsStrerror:
+        case RtFn::RandBytes:
+        case RtFn::SysIntern:
         case RtFn::StrFromI64:
         case RtFn::StrFromU64:  // P1 u64：同样只发第 0 个字，零扩展值
         case RtFn::StrAny:

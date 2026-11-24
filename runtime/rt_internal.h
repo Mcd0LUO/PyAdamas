@@ -1590,6 +1590,8 @@ int64_t pa_math_sumprod(PyAdamasList* a, PyAdamasList* b);
 double pa_math_dist(PyAdamasList* a, PyAdamasList* b);
 void pa_sys_set_args(int64_t argc, char** argv);
 PyAdamasList* pa_sys_argv(void);
+/* sys.intern(s)：命中驻留表返回同一份（+1）；未命中先登记再返回（+1）。 */
+PyAdamasStr* pa_sys_intern(PyAdamasStr* s);
 PyAdamasStr* pa_sys_executable(void);
 void pa_sys_exit(int64_t code);
 void pa_print_i64(int64_t v);
@@ -1711,6 +1713,9 @@ void pa_random_gshuffle(PyAdamasList* seq);
 /* 补充的分布与采样：r 为 NULL 表示走全局 rng。 */
 int64_t pa_random_randrange(PyAdamasRandom* r, int64_t a, int64_t b, int64_t step);
 int64_t pa_random_getrandbits(PyAdamasRandom* r, int64_t k);
+/* random.randbytes(n)：与 CPython 同一字序/同一消耗（getrandbits(8n) 的
+   小端字节），返回 bytes（+1）。 */
+PyAdamasStr* pa_random_randbytes(int64_t n);
 double pa_random_gauss(PyAdamasRandom* r, double mu, double sigma);
 double pa_random_expovariate(PyAdamasRandom* r, double lambd);
 double pa_random_triangular(PyAdamasRandom* r, double low, double high, double mode);
@@ -1739,6 +1744,13 @@ PyAdamasStr* pa_os_path_normpath(PyAdamasStr* path);
 PyAdamasStr* pa_os_path_abspath(PyAdamasStr* path);
 PyAdamasStr* pa_os_path_expanduser(PyAdamasStr* path);
 int64_t pa_os_getpid(void);
+int64_t pa_os_getuid(void);
+int64_t pa_os_geteuid(void);
+int64_t pa_os_getppid(void);
+/* os.urandom(n)：n 个随机字节，返回 bytes（+1）。 */
+PyAdamasStr* pa_os_urandom(int64_t n);
+/* os.strerror(code)：strerror(3) 的文本（+1）。 */
+PyAdamasStr* pa_os_strerror(int64_t code);
 void pa_os_chdir(PyAdamasStr* path);
 void pa_os_chmod(PyAdamasStr* path, int64_t mode);
 int64_t pa_os_access(PyAdamasStr* path, int64_t mode);
@@ -1757,6 +1769,10 @@ int64_t pa_c_sym_handle(int64_t handle, const char* name);
 
 /* ── time ───────────────────────────────────────────────────────── */
 double pa_time_time(void);
+int64_t pa_time_time_ns(void);
+int64_t pa_time_monotonic_ns(void);
+int64_t pa_time_perf_counter_ns(void);
+double pa_time_process_time(void);
 double pa_time_monotonic(void);
 double pa_time_perf_counter(void);
 void pa_time_sleep(double seconds);
@@ -1817,6 +1833,8 @@ int64_t pa_re_sub(PyAdamasRegex* re, PyAdamasStr* repl, PyAdamasStr* text, int64
 int64_t pa_re_split_str(PyAdamasStr* pat, PyAdamasStr* text, int64_t maxsplit, int64_t flags);
 int64_t pa_re_split(PyAdamasRegex* re, PyAdamasStr* text, int64_t maxsplit);
 int64_t pa_re_escape(PyAdamasStr* s);
+/* re.purge()：清正则缓存。pa 的 re 没有编译缓存，no-op。 */
+void pa_re_purge(void);
 int64_t pa_re_pattern_groups(PyAdamasRegex* re);
 int64_t pa_re_pattern_flags(PyAdamasRegex* re);
 int64_t pa_re_pattern_str(PyAdamasRegex* re);

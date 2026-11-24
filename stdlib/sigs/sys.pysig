@@ -9,5 +9,24 @@
 # maxsize = INT64_MAX，与 CPython 3.14 Linux 一致。
 maxsize: int = 9223372036854775807
 
+# 平台与版本常量。值按**目标平台**（Linux x86-64）与项目对标的 CPython 3.14.4
+# 固定：pyadamas 没有运行期解释器身份，这些值只能是编译期常量。version 的
+# 后缀（build 日期/编译器串）不复制，写成 "3.14.4 (pyadamas)"；hexversion 与
+# version_info 同口径（(3<<24)|(14<<16)|(4<<8)|0xF0）。
+# 注意：stdlib/platform.py 的 python_version() 仍是旧值 "3.12.0"（既有不一致，
+# 本轮不动，见 docs/frontend-gaps.md）。
+platform: str = "linux"
+# api_version：CPython 3.14 的 C API 版本号（3.14.4 实测 1013）。
+api_version: int = 1013
+# pyadamas 从不写 .pyc（编译产物是 IR），与 CPython 默认值 False 一致。
+dont_write_bytecode: bool = False
+version: str = "3.14.4 (pyadamas)"
+byteorder: str = "little"
+maxunicode: int = 1114111
+hexversion: int = 51250416
+
 # sys.exit(code) → None；运行期符号 pa_sys_exit 由约定推导。
 def exit(code: int) -> None: pass
+
+# sys.intern(s)：返回驻留后的字符串（pa 没有驻留表，返回同一份）。
+def intern(s: str) -> str: pass

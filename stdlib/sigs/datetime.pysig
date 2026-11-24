@@ -37,3 +37,7 @@ class timedelta:
                  weeks: int = 0) -> None: pass
     @native("pa_timedelta_total_seconds")
     def total_seconds(self) -> float: pass
+
+# 年份范围（CPython 口径）。
+MINYEAR: int = 1
+MAXYEAR: int = 9999

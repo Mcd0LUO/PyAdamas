@@ -238,6 +238,30 @@ int64_t pa_random_randrange(PyAdamasRandom* r, int64_t a, int64_t b, int64_t ste
     return a + step * k;
 }
 
+/* random.randbytes(n)：CPython 的口径是 getrandbits(8n).to_bytes(n, "little")。
+   这里逐字复刻它的字消耗（最后一字右移掉高位），所以同一个种子产生的字节
+   序列与 CPython 完全一致。 */
+PyAdamasStr* pa_random_randbytes(int64_t n) {
+    if (n < 0) pa_raise_c("ValueError", "negative argument not allowed");
+    PyAdamasStr* s = str_alloc_raw(n);
+    char* p = (char*)s->data;
+    if (n > 0) {
+        PyAdamasRandom* g = rng_of(NULL);
+        const int64_t k = n * 8;
+        const int64_t words = (k - 1) / 32 + 1;
+        for (int64_t i = 0; i < words; ++i) {
+            uint32_t rv = mt_next32(g);
+            if (i == words - 1) rv >>= (uint32_t)(32 * words - k);
+            for (int b = 0; b < 4; ++b) {
+                int64_t idx = i * 4 + b;
+                if (idx >= n) break;
+                p[idx] = (char)((rv >> (8 * b)) & 0xFFu);
+            }
+        }
+    }
+    return str_seal_n(s, n);
+}
+
 int64_t pa_random_getrandbits(PyAdamasRandom* r, int64_t k) {
     if (k <= 0) pa_raise_c("ValueError", "number of bits must be greater than zero");
     /* 与 CPython 同一算法、同一消耗：抽取的字数逐字对齐，所以后续序列

@@ -14,11 +14,23 @@ W_OK: int = 2
 R_OK: int = 4
 sep: str = "/"
 linesep: str = "\n"
+# POSIX 口径的路径常量。altsep 在 POSIX 上就是 None（CPython 同口径），
+# 声明成 None 才精确：拿它当 str 用会立刻报错，而不是静默拿到空串。
+name: str = "posix"
+curdir: str = "."
+pardir: str = ".."
+altsep: None = None
+pathsep: str = ":"
+extsep: str = "."
+devnull: str = "/dev/null"
 
 # 无参函数。
 def getcwd() -> str: pass
 def cpu_count() -> int: pass
 def getpid() -> int: pass
+def getuid() -> int: pass
+def geteuid() -> int: pass
+def getppid() -> int: pass
 
 # 单参 str -> None。
 def mkdir(path: str) -> None: pass
@@ -41,3 +53,11 @@ def system(command: str) -> int: pass
 
 # close(fd) —— 运行期符号 pa_os_close。
 def close(fd: int) -> None: pass
+
+# 随机字节（bytes，不是 str）：读 /dev/urandom。
+def urandom(n: int) -> bytes: pass
+# strerror(code)：errno → 文本。
+def strerror(code: int) -> str: pass
+# replace 与 rename 同语义（POSIX 下 rename(2) 本来就会静默覆盖）。
+@native("pa_os_rename")
+def replace(src: str, dst: str) -> None: pass
