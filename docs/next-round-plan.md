@@ -74,6 +74,8 @@
 - **3.4 完成（0.485）**：CPython 3.14.4 标准库 628 文件，语法 623/628（99.2%）、旧口径类型 505/623（81.1%）、默认口径 480/623（77.0%）、`--imports` 155/623；失败簇 top-10 与 top-3 判负已归档。
 - **3.5 三项全负（0.490）**：`for` 对装饰/未装饰 `__iter__` 都能跑（**路线图原前提有误**），真正缺口是 `list(obj)`/`sorted(obj)` 等内置构造函数只认内建容器；未初始化变量读 0（槽位零初始化，要 init 位或确定性赋值分析）；异常 traceback 只有单帧、无列号、无 `__traceback__`（行号可修，其余判负）。
 
+> 前端缺口与 unknown 来源的总账见 [frontend-gaps.md](frontend-gaps.md)（基线数字、失败簇、修法清单与状态）。
+
 ## 4. P3 —— 工程债（0.483 结账）
 
 1. ~~拆两个超限文件~~ **已完成（0.483）**：`typecheck/typecheck.cpp` 1227 → 1017（注解解析拆到 `typecheck/annotation.cpp`）、`cimport/cdecl_parse.cpp` 1271 → 1116（常量表达式求值拆到 `cimport/cdecl_eval.cpp`）。**`tests/check_size.sh` 首次全绿**（全仓库 0 超限，`ALLOW_FILES` 仍为空）。12 基准 `instructions:u` 与 0.482 逐项 ±0.00%，证明拆 TU 不改代码生成。
