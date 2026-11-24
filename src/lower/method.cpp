@@ -475,8 +475,26 @@ VReg Lowerer::lower_method_call(Attribute& at, Call& c) {
                         Inst cd;
                         cd.op = IrOp::CallDirect;
                         cd.idx = Operand::func(fidx);
-                        // 只有普通方法传 self；静态方法和类方法都不占这个位置
-                        if (m->kind == MethodKind::Normal) cd.args.push_back(recv);
+                        // 只有普通方法传 self；静态方法和类方法都不占这个位置。
+                        // 多继承（0.508）：目标方法声明类不是接收者静态类时，self 要
+                        // 先挪到那个基类的字段块起点（调用点 delta，thunk 的直调形态）。
+                        if (m->kind == MethodKind::Normal) {
+                            VReg self = recv;
+                            if (m->owner && m->owner != recv_ty->cls) {
+                                auto bo = recv_ty->cls->base_field_offsets.find(m->owner);
+                                if (bo != recv_ty->cls->base_field_offsets.end() && bo->second > 0) {
+                                    Inst ad;
+                                    ad.op = IrOp::Bin;
+                                    ad.bop = BinKind::Add;
+                                    ad.a = recv;
+                                    // 位移 = 8 * 块起始下标（字段下标到字节偏移的
+                                    // 换算是「下标差」，不是绝对偏移）。
+                                    ad.b = const_int(8 * bo->second);
+                                    self = def(t_int(), std::move(ad));
+                                }
+                            }
+                            cd.args.push_back(self);
+                        }
                         for (VReg a : args) cd.args.push_back(a);
                         TypePtr rt = m->call_sig->ret ? m->call_sig->ret : t_none();
                         return def_heap(rt, std::move(cd));

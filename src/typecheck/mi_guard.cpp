@@ -49,6 +49,9 @@ void TypeChecker::check_mi_layout(const ClassDef& c, const ClassInfo* self, Clas
     if (std::getenv("PYADAMAS_MI_DEBUG"))
         std::fprintf(stderr, "MI check %s base=%s extra=%zu open=%d\n", self ? self->name.c_str() : "?",
                      base ? base->name.c_str() : "?", extra_bases.size(), open ? 1 : 0);
+    // 临时验证开关（0.508）：thunk 落地前不要用 —— 只有直调路径做了 delta，
+    // 虚调用/基类转型仍会读错字段。仅用于本轮的阶段验收与下次调试。
+    if (std::getenv("PYADAMAS_MI_UNSAFE")) return;
     if (open || !base || !self) return;
     const ClassInfo* cls = self;
     for (ClassInfo* eb : extra_bases) {
@@ -97,6 +100,8 @@ void TypeChecker::materialize_base_fields(ClassInfo& cls, ClassInfo* base,
         std::vector<const ClassInfo*> chain;
         for (const ClassInfo* k = b; k; k = k->base) chain.push_back(k);
         int start = cls.n_fields();
+        int appended = 0;  // 实际追加的字段数：菱形共享祖先时可能一个都不追加，
+                           // 这时不能记偏移（否则 delta 会把 self 挪到错误位置）。
         for (auto it = chain.rbegin(); it != chain.rend(); ++it) {
             for (const FieldInfo& f : (*it)->fields) {
                 // 同名遮蔽：子类已声明 / 已追加过的名字不再追加（Python 里
@@ -107,9 +112,12 @@ void TypeChecker::materialize_base_fields(ClassInfo& cls, ClassInfo* base,
                 copy.ty = f.ty;
                 copy.implicit = true;
                 cls.fields.push_back(std::move(copy));
+                ++appended;
             }
         }
-        cls.base_field_offsets[b] = start;
+        // 只有真的追加了字段才记偏移：菱形（共享祖先）时字段已在前缀里，
+        // 偏移差为 0，不能把 self 挪走。
+        if (appended > 0) cls.base_field_offsets[b] = start;
     }
 }
 
